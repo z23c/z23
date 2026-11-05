@@ -622,21 +622,6 @@ static void fuzz_pof(const uint8_t *w, size_t n)
 
 /* ── mesh_game ───────────────────────────────────────────────────────── */
 
-/* The roster decoder reads `reachable` as `byte != 0` and the composer
- * writes 1, so a canonical wire carries 0 or 1 there. Normalise the copy we
- * compare against; the leniency itself is reported, not asserted. */
-static void game_normalise_roster(uint8_t *wire, size_t n)
-{
-    if (n < 35u || wire[0] != MESH_GAME_KIND_ROSTER)
-        return;
-    size_t stride = 33u + wire[33];
-    for (size_t i = 0; i < wire[34]; i++) {
-        size_t at = 35u + i * stride + 32u;
-        if (at < n)
-            wire[at] = wire[at] ? 1u : 0u;
-    }
-}
-
 static void game_check_bounds(const struct mesh_game_frame *f)
 {
     switch (f->kind) {
@@ -660,26 +645,35 @@ static void game_check_bounds(const struct mesh_game_frame *f)
     }
 }
 
+/* The header says only MESH_GAME_OK leaves `out` filled: after a refusal the
+ * output is either untouched or fully zeroed, never half written. */
+static void game_require_clean(const void *out, size_t len)
+{
+    const uint8_t *p = out;
+    bool zero = true, fill = true;
+    for (size_t i = 0; i < len; i++) {
+        zero = zero && p[i] == 0;
+        fill = fill && p[i] == OUT_FILL;
+    }
+    require(zero || fill);
+}
+
 static void game_parse_check(const uint8_t *w, size_t n)
 {
     GUARDED(struct mesh_game_frame) g;
     GUARD_ARM(g);
     enum mesh_game_refusal e = mesh_game_parse(w, n, &g.v);
     GUARD_CHECK(g);
-    if (e != MESH_GAME_OK)
+    if (e != MESH_GAME_OK) {
+        game_require_clean(&g.v, sizeof(g.v));
         return;
+    }
     game_check_bounds(&g.v);
     uint8_t *out = exact_alloc(n);
     size_t got = mesh_game_compose(&g.v, out, n);
-    uint8_t *want = exact_alloc(n);
-    memcpy(want, w, n);
-    game_normalise_roster(want, n);
-    require(got == n && memcmp(out, want, n) == 0);
-    free(want);
+    require(got == n && memcmp(out, w, n) == 0);
     free(out);
 }
-
-static void game_fill_roster(struct mesh_game_roster *x, struct rd *r)
 {
     rd_bytes(r, x->zid, 32);
     x->asset_count = rd8(r) % 6u;
@@ -920,9 +914,7 @@ static void mvap_require_same_request(const struct mvap_request *a,
 }
 
 /* On a refusal `out` is untouched (the header: fills `out` only when every
- * check passes). A decoded param is a C string that stops at its first NUL,
- * so a record carrying bytes after a NUL is accepted and re-encodes
- * shorter; hold it to idempotence there and to the exact bytes otherwise. */
+ * check passes), and an accepted record re-encodes to its own bytes. */
 static void fuzz_mvap_request(const uint8_t *w, size_t n)
 {
     GUARDED(struct mvap_request) g;
@@ -947,9 +939,8 @@ static void fuzz_mvap_request(const uint8_t *w, size_t n)
     require(mvap_request_decode(buf + MVAP_FRAME_PREFIX, m - MVAP_FRAME_PREFIX,
                                 &again));
     mvap_require_same_request(&g.v, &again);
-    if (n == MVAP_REQ_FIXED + strlen(g.v.param))
-        require(m - MVAP_FRAME_PREFIX == n &&
-                memcmp(buf + MVAP_FRAME_PREFIX, w, n) == 0);
+    require(m - MVAP_FRAME_PREFIX == n &&
+            memcmp(buf + MVAP_FRAME_PREFIX, w, n) == 0);
 }
 
 static void fuzz_mvap_response(const uint8_t *w, size_t n)
@@ -975,9 +966,8 @@ static void fuzz_mvap_response(const uint8_t *w, size_t n)
     require(again.verb == g.v.verb && again.status == g.v.status);
     require(again.request_id == g.v.request_id && again.version == g.v.version);
     require(strcmp(again.body, g.v.body) == 0);
-    if (n == MVAP_RESP_FIXED + strlen(g.v.body))
-        require(m - MVAP_FRAME_PREFIX == n &&
-                memcmp(buf + MVAP_FRAME_PREFIX, w, n) == 0);
+    require(m - MVAP_FRAME_PREFIX == n &&
+            memcmp(buf + MVAP_FRAME_PREFIX, w, n) == 0);
 }
 
 static void fuzz_mvap_prefix(const uint8_t *w, size_t n)
