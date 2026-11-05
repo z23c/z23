@@ -580,6 +580,197 @@ static int anchor_dump_reports_provisional_vs_final(void)
     return failures;
 }
 
+static int anchor_report(const char *name, bool ok)
+{
+    printf("%s... ", name);
+    if (ok) { printf("OK\n"); return 0; }
+    printf("FAIL\n");
+    return 1;
+}
+
+/* UNKNOWN keeps zeroed depth and countdown; a record AT the tip is shallow, not above it. */
+static int anchor_unknown_zeroed_and_tip_edge(void)
+{
+    struct anchor_finality a, b, c;
+    anchor_finality_evaluate(100, -1, &a);
+    anchor_finality_evaluate(-7, 1000, &b);
+    anchor_finality_evaluate(1000, 1000, &c);
+    bool ok = a.depth == 0 && a.blocks_until_final == 0 &&
+              b.depth == 0 && b.blocks_until_final == 0 &&
+              c.state == ANCHOR_FINALITY_PROVISIONAL && c.depth == 0 &&
+              c.blocks_until_final == ZCL_FINALITY_DEPTH &&
+              strcmp(c.reason, "provisional_shallow") == 0 &&
+              strcmp(anchor_finality_state_name(ANCHOR_FINALITY_UNKNOWN),
+                     "unknown") == 0 &&
+              strcmp(anchor_finality_state_name(ANCHOR_FINALITY_PROVISIONAL),
+                     "provisional") == 0;
+    return anchor_report("anchor_finality: unknown is zeroed; record at tip is shallow", ok);
+}
+
+/* A fresh set has no tip, accepts height 0, and reports it as having no tip. */
+static int anchor_init_tip_and_zero_height(void)
+{
+    struct anchor_influence_set set;
+    uint8_t k[ANCHOR_FINALITY_KEY_LEN];
+    mk_key(k, 9);
+    anchor_influence_set_init(&set);
+    bool ok = set.tip_height == -1 && set.count == 0;
+    ok = ok && anchor_influence_set_upsert(&set, k, 0, 2.0);
+    struct anchor_finality f;
+    double m = 0;
+    ok = ok && anchor_influence_lookup(&set, k, &f, &m) &&
+         f.state == ANCHOR_FINALITY_UNKNOWN &&
+         strcmp(f.reason, "no_tip") == 0 && m == 1.0;
+    return anchor_report("anchor_influence: init has no tip; height 0 is accepted", ok);
+}
+
+/* apply_tip: null set clears the out-count, tip 0 evicts, a record at the tip stays. */
+static int anchor_apply_tip_edges(void)
+{
+    struct anchor_influence_set set;
+    uint8_t k[ANCHOR_FINALITY_KEY_LEN], k2[ANCHOR_FINALITY_KEY_LEN];
+    mk_key(k, 11); mk_key(k2, 12);
+    size_t w = 77;
+    bool ok = anchor_influence_set_apply_tip(NULL, 5, &w) == 0 && w == 0;
+
+    anchor_influence_set_init(&set);
+    anchor_influence_set_upsert(&set, k, 5, 4.0);
+    w = 77;
+    ok = ok && anchor_influence_set_apply_tip(&set, 0, &w) == 0 && w == 0;
+    struct anchor_influence_record zero;
+    memset(&zero, 0, sizeof(zero));
+    ok = ok && set.count == 0 && memcmp(&set.records[0], &zero, sizeof(zero)) == 0;
+
+    anchor_influence_set_upsert(&set, k2, 100, 4.0);
+    anchor_influence_set_apply_tip(&set, 100, NULL);
+    struct anchor_finality f;
+    ok = ok && set.count == 1 && anchor_influence_lookup(&set, k2, &f, NULL) &&
+         f.state == ANCHOR_FINALITY_PROVISIONAL && f.depth == 0;
+    return anchor_report("anchor_influence: apply_tip edges (null, tip 0, record at tip)", ok);
+}
+
+/* remove clears the whole slot (no stale used flag) and frees it for reuse. */
+static int anchor_remove_clears_slot(void)
+{
+    struct anchor_influence_set set;
+    uint8_t k[ANCHOR_FINALITY_KEY_LEN];
+    mk_key(k, 13);
+    anchor_influence_set_init(&set);
+    anchor_influence_set_upsert(&set, k, 50, 3.0);
+    bool ok = anchor_influence_set_remove(&set, k);
+    struct anchor_influence_record zero;
+    memset(&zero, 0, sizeof(zero));
+    ok = ok && memcmp(&set.records[0], &zero, sizeof(zero)) == 0 &&
+         set.records[0].used == false;
+    return anchor_report("anchor_influence: remove zeroes the slot", ok);
+}
+
+/* A full set must not read a record past its last slot when the key is absent. */
+static int anchor_full_set_lookup_stops_at_capacity(void)
+{
+    struct {
+        struct anchor_influence_set set;
+        struct anchor_influence_record beyond; /* the byte range after records[255] */
+    } w;
+    memset(&w, 0, sizeof(w));
+    anchor_influence_set_init(&w.set);
+    uint8_t k[ANCHOR_FINALITY_KEY_LEN], other[ANCHOR_FINALITY_KEY_LEN];
+    bool ok = true;
+    for (int i = 0; i < ANCHOR_INFLUENCE_MAX_RECORDS; i++) {
+        mk_key(other, (uint8_t)i);
+        ok = ok && anchor_influence_set_upsert(&w.set, other, 1, 2.0);
+    }
+    memset(k, 0xEE, sizeof(k));
+    w.beyond.used = true;
+    memcpy(w.beyond.key, k, sizeof(k));
+    w.beyond.effective_mult = 3.0;
+    ok = ok && anchor_influence_weight_for(&w.set, k) == 1.0 &&
+         !anchor_influence_lookup(&w.set, k, NULL, NULL) &&
+         !anchor_influence_set_remove(&w.set, k) &&
+         !anchor_influence_set_upsert(&w.set, k, 1, 2.0);
+    mk_key(other, 7);
+    ok = ok && anchor_influence_set_remove(&w.set, other) &&
+         anchor_influence_set_upsert(&w.set, k, 1, 2.0);
+    return anchor_report("anchor_influence: full-set lookup stops at capacity", ok);
+}
+
+static bool anchor_dump_int_is(const struct json_value *o, const char *k, int64_t want)
+{
+    const struct json_value *v = json_get(o, k);
+    return v && json_get_int(v) == want;
+}
+
+static bool anchor_dump_real_is(const struct json_value *o, const char *k, double want)
+{
+    const struct json_value *v = json_get(o, k);
+    return v && json_get_real(v) == want;
+}
+
+static bool anchor_dump_row_is(const struct json_value *row, const char *hex,
+                               int height, int depth, int until, bool conf,
+                               double mult)
+{
+    const struct json_value *key = json_get(row, "key");
+    const struct json_value *cf = json_get(row, "confers_influence");
+    return key && json_get_str(key) && strcmp(json_get_str(key), hex) == 0 &&
+           anchor_dump_int_is(row, "height", height) &&
+           anchor_dump_int_is(row, "depth", depth) &&
+           anchor_dump_int_is(row, "blocks_until_final", until) &&
+           cf && json_get_bool(cf) == conf &&
+           anchor_dump_real_is(row, "effective_mult", mult);
+}
+
+static void anchor_key_hex(const uint8_t key[ANCHOR_FINALITY_KEY_LEN], char *out)
+{
+    static const char digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < ANCHOR_FINALITY_KEY_LEN; i++) {
+        out[2 * i] = digits[key[i] >> 4];
+        out[2 * i + 1] = digits[key[i] & 15];
+    }
+    out[2 * ANCHOR_FINALITY_KEY_LEN] = '\0';
+}
+
+/* Every dump header field and every per-record field carries its real value. */
+static int anchor_dump_every_field(void)
+{
+    struct anchor_influence_set set;
+    uint8_t prov[ANCHOR_FINALITY_KEY_LEN], fin[ANCHOR_FINALITY_KEY_LEN];
+    char hp[ANCHOR_FINALITY_KEY_LEN * 2 + 1], hf[ANCHOR_FINALITY_KEY_LEN * 2 + 1];
+    mk_key(prov, 40); mk_key(fin, 50);
+    anchor_key_hex(prov, hp); anchor_key_hex(fin, hf);
+    anchor_influence_set_init(&set);
+    anchor_influence_set_upsert(&set, prov, 998, 4.0);
+    anchor_influence_set_upsert(&set, fin, 900, 3.0);
+    anchor_influence_set_apply_tip(&set, 1000, NULL);
+
+    struct json_value out;
+    json_init(&out);
+    bool ok = anchor_influence_set_dump_json(&set, &out);
+    const struct json_value *dm = json_get(&out, "depth_meaning");
+    ok = ok && anchor_dump_int_is(&out, "tip_height", 1000) &&
+         anchor_dump_int_is(&out, "finality_depth", ZCL_FINALITY_DEPTH) &&
+         anchor_dump_int_is(&out, "immutable_height", 1000 - ZCL_FINALITY_DEPTH) &&
+         anchor_dump_int_is(&out, "record_count", 2) &&
+         anchor_dump_int_is(&out, "capacity", ANCHOR_INFLUENCE_MAX_RECORDS) &&
+         anchor_dump_int_is(&out, "influencing_count", 1) &&
+         anchor_dump_real_is(&out, "mult_min", 1.0) &&
+         anchor_dump_real_is(&out, "mult_max", 4.0) &&
+         dm && json_get_str(dm) &&
+         strcmp(json_get_str(dm), "anti-flapping, not a trust threshold") == 0;
+    const struct json_value *rows = json_get(&out, "records");
+    ok = ok && rows && json_size(rows) == 2 &&
+         anchor_dump_row_is(json_at(rows, 0), hp, 998, 2, ZCL_FINALITY_DEPTH - 2,
+                            false, 1.0) &&
+         anchor_dump_row_is(json_at(rows, 1), hf, 900, 100, 0, true, 3.0);
+    json_free(&out);
+
+    struct anchor_finality f;
+    double m = 0;
+    ok = ok && anchor_influence_lookup(&set, fin, &f, &m) &&
+         f.state == ANCHOR_FINALITY_FINAL && m == 3.0;
+    return anchor_report("anchor_influence: dump carries every field", ok);
+}
+
 int test_anchor_finality(void)
 {
     int failures = 0;
@@ -603,5 +794,11 @@ int test_anchor_finality(void)
     failures += anchor_negative_and_null_refused();
     failures += anchor_weight_never_below_floor();
     failures += anchor_dump_reports_provisional_vs_final();
+    failures += anchor_unknown_zeroed_and_tip_edge();
+    failures += anchor_init_tip_and_zero_height();
+    failures += anchor_apply_tip_edges();
+    failures += anchor_remove_clears_slot();
+    failures += anchor_full_set_lookup_stops_at_capacity();
+    failures += anchor_dump_every_field();
     return failures;
 }
