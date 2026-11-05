@@ -79,7 +79,7 @@ struct zcl_dev_proof_remote_placement {
  * Git bundle into an EXISTING owned clean Git workspace,
  * then nonforce checkout detached, without overwriting ignored files.
  * Refuses redirected Git environments and requires PATH=/usr/bin:/bin.
- * Private input snapshots are retained under the owned checkout's .cache,
+ * Private input snapshots are retained under the checkout's .cache/zcl-dev-proof,
  * in evidence_dir on success/failure, independently of admitted-job TMPDIR.
  * Caller retires them after final receipt/diagnostic handoff. No worktrees,
  * branches, queues, resets, cleaning, hooks or services are created. Native
@@ -94,9 +94,13 @@ bool zcl_dev_proof_remote_prepare(
  * DEVBUILD_ACTIVE=z23 is checked as an operational precondition, NOT as an
  * authority credential. Revalidates placement and LOCAL mutation observation
  * under the execution guard, then releases it before native step acquires its
- * own guard and rechecks/seals source. Return 1 means settled, NOT PASS; inspect the
+ * own guard and rechecks/seals source. Before returning PASSED, reacquires the
+ * guard and rechecks destination identity and mutation; drift withholds remote
+ * acceptance while preserving the native generation receipt. This is an
+ * observation at settlement, not a lease against subsequent workspace changes.
+ * Return 1 means settled, NOT PASS; inspect the
  * native status and separately verify the returned receipt/pinned roots.
- * 0 is busy; -1 is invalid/unavailable or a named pre-execution NO_VERDICT. */
+ * 0 is busy; -1 is invalid/unavailable or a named execution/settlement NO_VERDICT. */
 int zcl_dev_proof_remote_execute(
     const struct zcl_dev_proof_remote_assignment *assignment,
     const struct zcl_dev_proof_remote_placement *observed,

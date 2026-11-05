@@ -430,6 +430,37 @@ static bool remote_execution_recheck(
         return remote_refuse(why, size, "remote_local_mutation_changed");
     return true;
 }
+
+static int remote_settlement_recheck(
+    const struct zcl_dev_proof_remote_assignment *assignment,
+    const struct zcl_dev_proof_remote_placement *observed,
+    zcl_dev_proof_remote_owner_check owner_check, void *owner_ctx,
+    struct zcl_dev_proof_status *out, int result)
+{
+    if (out->state != ZCL_DEV_PROOF_STATE_PASSED) return result;
+    /* The native receipt proves its generation, not the current destination.
+     * Preserve that evidence while withholding remote PASS until recaptured. */
+    out->state = ZCL_DEV_PROOF_STATE_NO_VERDICT;
+    if (result <= 0) return result;
+    int guard = -1;
+    int acquired = zcl_dev_proof_execution_acquire(observed->canonical_root, &guard,
+        out->detail, sizeof(out->detail));
+    if (acquired != 1) {
+        if (acquired == 0)
+            (void)remote_refuse(out->detail, sizeof(out->detail), "remote_settlement_busy");
+        return acquired == 0 ? 0 : -1;
+    }
+    struct zcl_dev_proof_remote_placement current = {0};
+    bool checked = remote_git_environment(out->detail, sizeof(out->detail)) &&
+        remote_workspace(assignment, owner_check, owner_ctx, &current,
+            out->detail, sizeof(out->detail)) &&
+        remote_execution_recheck(assignment, observed, &current,
+            out->detail, sizeof(out->detail));
+    zcl_dev_proof_execution_release(guard);
+    if (!checked) return -1;
+    out->state = ZCL_DEV_PROOF_STATE_PASSED;
+    return result;
+}
 #endif
 
 int zcl_dev_proof_remote_execute(
@@ -471,8 +502,10 @@ int zcl_dev_proof_remote_execute(
      * Never nest the guard or treat this observation as future authority. */
     zcl_dev_proof_execution_release(guard);
     if (!checked) return -1;
-    return zcl_dev_proof_step(current.canonical_root,
+    int result = zcl_dev_proof_step(current.canonical_root,
         assignment->expected.local_commit, assignment->expected.remote_base, out);
+    return remote_settlement_recheck(assignment, observed, owner_check, owner_ctx,
+        out, result);
 #endif
 }
 
