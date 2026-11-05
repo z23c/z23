@@ -176,7 +176,10 @@ void boot_fleet_board_register_rpc(struct rpc_table *table);
  * this box refuses for a reason that can clear (a role not granted yet, a
  * clock behind the author's, a quota or a full store) is offered again by
  * a sweep that alternates with forward pulls, so it is neither lost nor
- * able to hold back the rest of the board.
+ * able to hold back the rest of the board. The cursor file is synced but
+ * the row store may lose its last rows to a power cut, so each start sweeps
+ * every peer's rows up to its saved cursor; a full cursor table evicts the
+ * peer idle longest for a new one.
  *
  * Carriage with no pairing row: the "board.roster" service. A pairing needs a
  * held ZID delegation, whose anchoring costs coins; the fleet roster is sealed

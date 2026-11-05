@@ -131,3 +131,48 @@ size_t board_cursor_read(const char *path, struct board_cursor *out,
     return n;
 }
 
+
+/* The seen stamp that makes a row the newest: one past the largest held. */
+static void board_cursor_touch(struct board_cursor *rows, size_t n,
+                               struct board_cursor *c)
+{
+    uint64_t top = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (rows[i].seen > top)
+            top = rows[i].seen;
+    }
+    c->seen = top + 1u;
+}
+
+struct board_cursor *board_cursor_find(struct board_cursor *rows, size_t n,
+                                       const uint8_t box_id[32], bool create)
+{
+    struct board_cursor *pick = NULL;
+    for (size_t i = 0; i < n; i++) {
+        if (rows[i].used && memcmp(rows[i].peer_box_id, box_id, 32) == 0) {
+            board_cursor_touch(rows, n, &rows[i]);
+            return &rows[i];
+        }
+        /* A free slot beats any used one; among used, the idlest. */
+        if (!pick || (pick->used && (!rows[i].used || rows[i].seen < pick->seen)))
+            pick = &rows[i];
+    }
+    if (!create || !pick)
+        return NULL;
+    memset(pick, 0, sizeof *pick);
+    pick->used = true;
+    memcpy(pick->peer_box_id, box_id, 32);
+    board_cursor_touch(rows, n, pick);
+    return pick;
+}
+
+void board_cursor_arm_sweeps(struct board_cursor *rows, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (!rows[i].used || rows[i].next <= 0)
+            continue;
+        rows[i].sweep_active = true;
+        rows[i].sweep_pos = 0;
+        rows[i].sweep_end = rows[i].next;
+    }
+}

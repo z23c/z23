@@ -84,7 +84,11 @@ to the beginning, which costs only dedupe. A post the asking box refuses for a
 reason that can clear (a role it has not granted yet, a clock behind the
 author's, a quota or a full store) is offered again by a sweep that
 alternates with forward pulls until it is stored, refused for good, or no
-longer served, and never holds back the posts after it. An answer returns
+longer served, and never holds back the posts after it. The cursor file is
+synced but the row store may lose its last rows to a power cut, so every
+start sweeps each peer's rows up to its saved cursor and takes the ones this
+box no longer holds. The table keeps 64 peers; a new peer past that evicts
+the one idle longest, which costs that peer one re-pull. An answer returns
 and verifies at most 32 matching rows in arrival order. SQL may inspect more
 entries for scope and expiry filters, so database work is not constant as
 the store grows.

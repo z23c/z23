@@ -659,25 +659,13 @@ bool boot_fleet_board_fleet_register_service(void)
 
 /* ── per-peer cursors ────────────────────────────────────────────────── */
 
-/* Lane lock held. NULL when the table is full: that peer is then always
- * asked from the beginning, which dedupe by id keeps correct. */
+/* Lane lock held. A full table gives up its idlest peer for a new one, so a
+ * new peer always has a cursor and always moves forward. */
 static struct board_cursor *board_cursor_slot(const uint8_t box_id[32],
                                               bool create)
 {
-    struct board_cursor *free_slot = NULL;
-    for (size_t i = 0; i < FLEET_BOARD_FLEET_PEERS_MAX; i++) {
-        if (g_cursors[i].used &&
-            memcmp(g_cursors[i].peer_box_id, box_id, 32) == 0)
-            return &g_cursors[i];
-        if (!g_cursors[i].used && !free_slot)
-            free_slot = &g_cursors[i];
-    }
-    if (!create || !free_slot)
-        return NULL;
-    memset(free_slot, 0, sizeof *free_slot);
-    free_slot->used = true;
-    memcpy(free_slot->peer_box_id, box_id, 32);
-    return free_slot;
+    return board_cursor_find(g_cursors, FLEET_BOARD_FLEET_PEERS_MAX, box_id,
+                             create);
 }
 
 static bool board_cursor_file(char *out, size_t cap)
@@ -718,6 +706,9 @@ static void board_cursors_load(void)
     if (!g_cursors_loaded) {
         for (size_t i = 0; i < n && i < FLEET_BOARD_FLEET_PEERS_MAX; i++)
             g_cursors[i] = snap[i];
+        /* The file was synced; the row store, at synchronous=NORMAL, may
+         * have lost rows a power cut after it. Offer them all again. */
+        board_cursor_arm_sweeps(g_cursors, FLEET_BOARD_FLEET_PEERS_MAX);
         g_cursors_loaded = true;
     }
     board_unlock();
@@ -752,17 +743,13 @@ static void board_plan_pull(struct board_ask *ask)
 #endif
 }
 
-/* Copy one peer's cursor out, so the store is written with no lock held.
- * False when the table has no room for this peer. */
-static bool board_cursor_load(const uint8_t box_id[32],
+/* Copy one peer's cursor out, so the store is written with no lock held. */
+static void board_cursor_load(const uint8_t box_id[32],
                               struct board_cursor *out)
 {
     board_lock();
-    const struct board_cursor *c = board_cursor_slot(box_id, true);
-    if (c)
-        *out = *c;
+    *out = *board_cursor_slot(box_id, true);
     board_unlock();
-    return c != NULL;
 }
 
 /* Only the lane tick touches a cursor — planning a pull and draining an
@@ -774,8 +761,11 @@ static void board_cursor_store(const struct board_cursor *in)
     size_t n = 0;
     board_lock();
     struct board_cursor *c = board_cursor_slot(in->peer_box_id, false);
-    if (c)
+    if (c) {
+        uint64_t seen = c->seen;
         *c = *in;
+        c->seen = seen; /* the copy's epoch reset zeroed its own */
+    }
     for (size_t i = 0; i < FLEET_BOARD_FLEET_PEERS_MAX; i++) {
         if (g_cursors[i].used)
             snap[n++] = g_cursors[i];
@@ -1048,12 +1038,7 @@ static size_t board_drain_slot(struct node_db *ndb,
         return 0;
     }
     struct board_cursor c;
-    if (!board_cursor_load(slot->ask.peer_box_id, &c)) {
-        /* No room to remember this peer: take what arrived, remember
-         * nothing, and ask from the beginning again next time. */
-        return slot->ask.sweep ? 0 : board_offer_all(ndb, slot, post, now,
-                                                     NULL);
-    }
+    board_cursor_load(slot->ask.peer_box_id, &c);
     size_t stored = 0;
     if (board_cursor_epoch(&c, &h, &slot->ask) &&
         board_answer_current(&c, &slot->ask)) {

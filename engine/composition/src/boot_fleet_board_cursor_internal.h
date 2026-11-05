@@ -37,10 +37,20 @@ struct board_cursor { // hardening-ok: one peer's sync position; it parses no by
     int64_t carry_min;
     int64_t sweep_pos;
     int64_t sweep_end;
+    /* Memory only, never written: when this slot was last asked about, so a
+     * full table gives up the idlest peer (0: loaded and not seen yet). */
+    uint64_t seen;
 };
 
 void board_cursor_write(const char *path, const struct board_cursor *rows,
                         size_t n);
+/* The slot for a peer, made if `create`: when all `n` are taken the idlest is
+ * evicted, which costs that peer one re-pull, never a lost row. */
+struct board_cursor *board_cursor_find(struct board_cursor *rows, size_t n,
+                                       const uint8_t box_id[32], bool create);
+/* After a load: re-offer every row up to each `next` this box does not hold,
+ * since the cursor file is synced and the row store may not have been. */
+void board_cursor_arm_sweeps(struct board_cursor *rows, size_t n);
 size_t board_cursor_read(const char *path, struct board_cursor *out,
                          size_t cap);
 
