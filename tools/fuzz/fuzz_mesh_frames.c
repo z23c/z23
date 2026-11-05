@@ -503,10 +503,12 @@ static void cap_signed(const uint8_t *w, size_t n)
 
 static void fuzz_capability(const uint8_t *w, size_t n)
 {
-    if (n && (w[0] & 1u))
-        (void)cap_decode_check(w + 1, n - 1);
+    if (!n)
+        return;
+    if ((w[0] & 3u) == 0)
+        cap_signed(w + 1, n - 1);
     else
-        cap_signed(w, n);
+        (void)cap_decode_check(w + 1, n - 1);
 }
 
 /* ── mesh_private_object_frame ───────────────────────────────────────── */
@@ -581,10 +583,12 @@ static void pof_big_chunk(const uint8_t *w, size_t n)
 
 static void fuzz_pof(const uint8_t *w, size_t n)
 {
-    if (n && (w[0] & 1u))
-        pof_check(w + 1, n - 1);
+    if (!n)
+        return;
+    if ((w[0] & 7u) == 0)
+        pof_big_chunk(w + 1, n - 1);
     else
-        pof_big_chunk(w, n);
+        pof_check(w + 1, n - 1);
 }
 
 /* ── mesh_game ───────────────────────────────────────────────────────── */
@@ -701,11 +705,19 @@ static void game_compose_check(const uint8_t *w, size_t n)
     require(got <= cap);
     if (got) {
         struct mesh_game_frame back;
-        require(mesh_game_parse(out, got, &back) == MESH_GAME_OK);
-        uint8_t *again = exact_alloc(got);
-        require(mesh_game_compose(&back, again, got) == got);
-        require(memcmp(out, again, got) == 0);
-        free(again);
+        /* The composer accepts any asset_count up to the wire bound; the
+         * parser admits only this build's vocabulary. That one refusal is
+         * the asymmetry; anything else must parse. */
+        enum mesh_game_refusal pr = mesh_game_parse(out, got, &back);
+        if (pr != MESH_GAME_OK) {
+            require(f.kind == MESH_GAME_KIND_ROSTER &&
+                    pr == MESH_GAME_ASSET_VOCABULARY);
+        } else {
+            uint8_t *again = exact_alloc(got);
+            require(mesh_game_compose(&back, again, got) == got);
+            require(memcmp(out, again, got) == 0);
+            free(again);
+        }
     }
     free(out);
 }
@@ -826,10 +838,12 @@ static void board_signed(const uint8_t *w, size_t n)
 
 static void fuzz_board_post(const uint8_t *w, size_t n)
 {
-    if (n && (w[0] & 1u))
-        (void)board_decode_check(w + 1, n - 1);
+    if (!n)
+        return;
+    if ((w[0] & 3u) == 0)
+        board_signed(w + 1, n - 1);
     else
-        board_signed(w, n);
+        (void)board_decode_check(w + 1, n - 1);
 }
 
 static void fuzz_board_frame(const uint8_t *w, size_t n)
@@ -1069,7 +1083,7 @@ static void stream_feed_one(struct rd *r)
     uint8_t idsel = rd8(r);
     size_t room = r->n - r->i;
     size_t body = rd16(r) % (room + 1u);
-    bool large = (idsel & 0x80u) != 0;
+    bool large = (idsel & 0xF0u) == 0xF0u;
     if (large)
         body = MESH_STREAM_PAYLOAD_MAX + rd8(r) % 5u;
     size_t head = MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u;
