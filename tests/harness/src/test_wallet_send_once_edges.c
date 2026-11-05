@@ -1610,6 +1610,88 @@ static void case_no_txid_holds_key(void)
     json_free(&res);
 }
 
+/* ── Parameters beyond the recipients and fee ─────────────────────────── */
+
+/* z_sendmany reads a depth floor at 2, and z_shieldaddress binds its plan to
+ * an input count at 5 and a total at 6. Both change what a send does or whether
+ * it runs, so a request that differs only there is not the request on record. */
+static bool xgo(const char *minconf, const char *tail, const char *key,
+                struct json_value *res)
+{
+    char buf[512];
+    struct json_value p;
+    (void)snprintf(buf, sizeof(buf), "[%s,%s,%s,null,\"%s\"%s]", E_FROM,
+                   E_RECIPS, minconf, key, tail);
+    json_init(&p);
+    if (!json_read(&p, buf, strlen(buf)))
+        return false;
+    json_init(res);
+    bool rc = wallet_send_once_dispatch(&p, false, plain_hook_ok, res);
+    json_free(&p);
+    return rc;
+}
+
+static void xexpect(const char *what, const char *minconf, const char *tail,
+                    const char *key, const char *state, int runs)
+{
+    struct json_value res;
+    bool rc = xgo(minconf, tail, key, &res);
+    edge_chk(what, rc && state_is(&res, state) && atomic_load(&g_runs) == runs);
+    json_free(&res);
+}
+
+static void case_extra_params(void)
+{
+    struct json_value res;
+    reset_runs();
+    bool rc = xgo("1", ",3,1000", "edge-extra", &res);
+    edge_chk("a first send with plan bindings commits",
+             is_fresh_commit(rc, &res, 0xB1));
+    json_free(&res);
+    xexpect("another input count is a different request", "1", ",4,1000",
+            "edge-extra", "key_conflict", 1);
+    xexpect("another total is a different request", "1", ",3,1001",
+            "edge-extra", "key_conflict", 1);
+    xexpect("another depth floor is a different request", "5", ",3,1000",
+            "edge-extra", "key_conflict", 1);
+    xexpect("bindings where there were none are a different request", "1", "",
+            "edge-extra", "key_conflict", 1);
+    xexpect("the identical repeat is a committed replay", "1", ",3,1000",
+            "edge-extra", "committed", 1);
+}
+
+/* A row an earlier build wrote holds the digest of the first three fields only.
+ * Its own retry, and a retry that differs in a field that build never read,
+ * both answer outcome_unknown: no second send, no claim it was another one. */
+static void case_extra_params_old_row(void)
+{
+    struct json_value p;
+    struct wallet_send_once_row row;
+    char buf[256];
+    memset(&row, 0, sizeof(row));
+    reset_runs();
+    (void)snprintf(buf, sizeof(buf), "[%s,%s,5,null,\"edge-xold\",3,1000]",
+                   E_FROM, E_RECIPS);
+    json_init(&p);
+    bool ok = json_read(&p, buf, strlen(buf));
+    edge_chk("an old row's request reads", ok);
+    if (!ok)
+        return;
+    kat_ids(&p, "edge-xold", row.key_hash, row.digest);
+    json_free(&p);
+    row.state = WALLET_SEND_ONCE_BUILT;
+    row.has_txid = true;
+    memset(row.txid, 0xC7, 32);
+    row.created_at = row.updated_at = GetTime();
+    edge_chk("an old row is seeded", db_wallet_send_once_insert(&g_fx.ndb, &row));
+    xexpect("its own retry is outcome_unknown", "5", ",3,1000", "edge-xold",
+            "outcome_unknown", 0);
+    xexpect("a retry with another total is outcome_unknown", "5", ",3,1001",
+            "edge-xold", "outcome_unknown", 0);
+    xexpect("a retry with another depth floor is outcome_unknown", "7",
+            ",3,1000", "edge-xold", "outcome_unknown", 0);
+}
+
 int wallet_send_once_edge_tests(void);
 int wallet_send_once_edge_tests(void)
 {
@@ -1630,6 +1712,7 @@ int wallet_send_once_edge_tests(void)
         case_digest_pin_largest, case_lossy_amounts, case_lossy_position,
         case_lossy_after_whole, case_lossy_old_row, case_lossy_fee,
         case_digest_pin_reals, case_digest_no_memory, case_no_txid_holds_key,
+        case_extra_params, case_extra_params_old_row,
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         if (!fx_up("case")) {
