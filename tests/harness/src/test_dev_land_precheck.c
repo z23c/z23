@@ -579,10 +579,56 @@ _test_next:;
     return failures;
 }
 
+/* A gate whose lane file is absent would fail falsely: with `want` absent it
+ * is unproven and submit queues; with the file present it runs and its red
+ * still refuses. `gate` is marked failing in the fake lint either way. */
+static bool dlx_pc_need_case(const char *tag, const char *gate, const char *want,
+                             bool present)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char path[1400], known[128];
+    (void)snprintf(known, sizeof(known), "%s\n", gate);
+    if (!dlx_pc_rig(&rig, tag, true, known) ||
+        !dlx_pc_file(&rig, "precheck-fail", gate))
+        return false;
+    if (present) {
+        if (!dlx_write_dep(rig.clone, want, "x"))
+            return false;
+        (void)snprintf(path, sizeof(path), "%s/%s", rig.clone, want);
+        if (chmod(path, 0755) != 0)
+            return false;
+    }
+    dlx_pc_submit(&c, &rig, NULL, "n");
+    bool ok = dlx_run(&c);
+    if (present)
+        ok = ok && !dlx_ok(&c) && dlx_queue_empty() &&
+             strcmp(dlx_err_code(&c), "PRECHECK_FAILED") == 0;
+    else
+        ok = ok && dlx_ok(&c) && dlx_queue_has_one() &&
+             dlx_pc_has(dlx_arr(&c, "precheck_skipped"), gate) &&
+             strstr(dlx_str(&c, "precheck_unproven"), want) != NULL &&
+             !dlx_pc_ran(&rig, gate);
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
 int dlx_case_precheck(void)
 {
     int failures = dlx_case_history_precheck() + dlx_pc_mode_cases() +
                    dlx_pc_ratchet_cases();
+    TEST("land: a gate whose lane prerequisite is absent is unproven, not refused") {
+        ASSERT(dlx_pc_need_case("need_cookbook_absent", "check-cookbook",
+                                "build/bin/z23-dev", false));
+        ASSERT(dlx_pc_need_case("need_cookbook_present", "check-cookbook",
+                                "build/bin/z23-dev", true));
+        ASSERT(dlx_pc_need_case("need_wcs_absent", "check-windows-cross-syntax",
+                                "build/gen/guest_kernel_data.c", false));
+        ASSERT(dlx_pc_need_case("need_wcs_present", "check-windows-cross-syntax",
+                                "build/gen/guest_kernel_data.c", true));
+        PASS();
+    }
     TEST("land: submit refuses a lane whose precheck gate fails and queues nothing") {
         ASSERT(dlx_pc_failing_gate_refused());
         PASS();

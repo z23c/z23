@@ -17,6 +17,10 @@
  * describe budget, hardening ratchet). check-file-size-ceiling, which is a
  * make target and not a z23-lint gate, runs the lane's build/bin/file_size_policy
  * when `z23-lint --list` does not name it; a missing binary is unproven.
+ * A gate whose lane file is absent (check-cookbook needs build/bin/z23-dev,
+ * check-windows-cross-syntax the generated guest-kernel TU) would report a
+ * false red in a lane gated on a host, so it is unproven as well. A gate that
+ * runs past the budget still refuses PRECHECK_TIMEOUT: a wedged gate must fail.
  * Learned check-ship-remote-transaction uses its fixed three-command adapter,
  * even without a native lint entry. Missing prerequisites are unproven;
  * any nonzero executed script verdict, including exit 2, refuses submission.

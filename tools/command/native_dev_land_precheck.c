@@ -669,6 +669,43 @@ static int pc_gate_exec(struct pc_run *r, const char *gate, bool ship,
     return pc_run(r->wt, r->bin, gate, r->deadline, r->out, PC_OUT_CAP);
 }
 
+/* Lane files a gate reads that a lane gated on a host (zgate builds in a
+ * scratch directory, so the lane itself has no build/) never holds. Without
+ * one the gate reports a false red, so it is unproven, never refused:
+ * check-cookbook runs its recipes through build/bin/z23-dev; the windows
+ * sweep compiles the generated guest-kernel TU (its make rule builds it
+ * first, the precheck does not). */
+static const struct {
+    const char *gate, *file;
+    int mode;
+} k_pc_needs[] = {
+    {"check-cookbook", "build/bin/z23-dev", X_OK},
+    {"check-windows-cross-syntax", "build/gen/guest_kernel_data.c", R_OK},
+};
+
+/* The first lane file `gate` needs that is absent (named in r->out), or NULL. */
+static const char *pc_missing_need(struct pc_run *r, const char *gate)
+{
+#if defined(_WIN32)
+    (void)r;
+    (void)gate;
+    return NULL;
+#else
+    char path[4096 + 80];
+    for (size_t i = 0; i < sizeof(k_pc_needs) / sizeof(k_pc_needs[0]); i++) {
+        if (strcmp(k_pc_needs[i].gate, gate) != 0)
+            continue;
+        if (snprintf(path, sizeof(path), "%s/%s", r->wt, k_pc_needs[i].file) <
+                (int)sizeof(path) && pc_ship_file(path, k_pc_needs[i].mode))
+            return NULL;
+        (void)snprintf(r->out, PC_OUT_CAP, "prerequisite unavailable: %s",
+                       k_pc_needs[i].file);
+        return k_pc_needs[i].file;
+    }
+    return NULL;
+#endif
+}
+
 enum pc_gate_state { PC_GATE_RAN, PC_GATE_SKIPPED, PC_GATE_REFUSED };
 
 /* One gate: skipped (unknown or unproven), refused, or ran clean. */
@@ -687,8 +724,12 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
         r->skipped[r->nskipped++] = gate;
         return PC_GATE_SKIPPED;
     }
+    if (pc_missing_need(r, gate)) {
+        pc_note_unproven(r, gate);
+        return PC_GATE_SKIPPED;
+    }
     rc = pc_gate_exec(r, gate, ship, size);
-    if (rc == -2 && strcmp(gate, "check-file-purpose") == 0) {
+    if (rc == -2&& strcmp(gate, "check-file-purpose") == 0) {
         pc_fail(reply, r->leaf, "PRECHECK_UNAVAILABLE",
                 "canonical file-purpose command could not be resolved safely",
                 r->out);
