@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Bytes written into each fixture half; the sweep never reads contents. */
@@ -379,6 +380,497 @@ static int test_orphan_sweep_horizon_flag(void)
     return failures;
 }
 
+/* ── Mutation-gap tests (survivor sweep 1105) ───────────────────────── */
+
+static bool os_age_path_to(const char *path, time_t t)
+{
+    struct timespec ts[2];
+    ts[0].tv_sec = t;
+    ts[0].tv_nsec = 0;
+    ts[1] = ts[0];
+    return utimensat(AT_FDCWD, path, ts, 0) == 0;
+}
+
+/* Lengthen `base` to exactly `total` characters with "/." components (and one
+ * trailing '/'): the kernel resolves the same directory, the string is as
+ * long as the case needs. */
+static void os_padded(const char *base, size_t total, char *out, size_t cap)
+{
+    size_t n = (size_t)snprintf(out, cap, "%s", base);
+    while (n + 2 <= total && n + 3 < cap) {
+        out[n++] = '/';
+        out[n++] = '.';
+    }
+    while (n < total && n + 1 < cap)
+        out[n++] = '/';
+    out[n] = '\0';
+}
+
+static uint32_t os_entry_count(const char *dir)
+{
+    uint32_t n = 0;
+    DIR *d = opendir(dir);
+    if (!d)
+        return 0;
+    while (readdir(d) != NULL)
+        n++;
+    closedir(d);
+    return n;
+}
+
+/* Open descriptors of this process, or -1 when /proc is not there. */
+static int os_fd_count(void)
+{
+    DIR *d = opendir("/proc/self/fd");
+    if (!d)
+        return -1;
+    int n = 0;
+    while (readdir(d) != NULL)
+        n++;
+    closedir(d);
+    return n;
+}
+
+static bool os_mk_bundles(const char *tag, char *dd_out, char *bundles_out)
+{
+    char *dd = test_mkdtemp(dd_out, PATH_MAX, tag);
+    if (!dd)
+        return false;
+    snprintf(bundles_out, PATH_MAX, "%s/%s", dd, ROM_SEED_BUNDLES_SUBDIR);
+    return mkdir(bundles_out, 0700) == 0;
+}
+
+/* The horizon variable: a one-character value, the smallest and largest
+ * accepted values, and a value one past the largest. */
+static int test_orphan_sweep_horizon_edges(void)
+{
+    int failures = 0;
+    TEST("rom_fetch_orphan_sweep: horizon value 1 and 4294967295 are taken "
+         "as written, 4294967296 and an empty value fall back") {
+        const char *k = "ZCL_ROM_FETCH_ORPHAN_HORIZON_SEC";
+        ASSERT(setenv(k, "7", 1) == 0);
+        ASSERT_EQ(rom_fetch_orphan_sweep_horizon_sec(), 7u);
+        ASSERT(setenv(k, "1", 1) == 0);
+        ASSERT_EQ(rom_fetch_orphan_sweep_horizon_sec(), 1u);
+        ASSERT(setenv(k, "4294967295", 1) == 0);
+        ASSERT_EQ(rom_fetch_orphan_sweep_horizon_sec(), 4294967295u);
+        ASSERT(setenv(k, "4294967296", 1) == 0);
+        ASSERT_EQ(rom_fetch_orphan_sweep_horizon_sec(),
+                  (uint32_t)ROM_FETCH_ORPHAN_HORIZON_SEC_DEFAULT);
+        ASSERT(setenv(k, "", 1) == 0);
+        ASSERT_EQ(rom_fetch_orphan_sweep_horizon_sec(),
+                  (uint32_t)ROM_FETCH_ORPHAN_HORIZON_SEC_DEFAULT);
+        (void)unsetenv(k);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A datadir whose `<datadir>/bundles` is exactly PATH_MAX, or longer, cannot
+ * be named: the sweep refuses instead of walking a truncated path. */
+static int test_orphan_sweep_overlong_datadir(void)
+{
+    int failures = 0;
+    TEST("rom_fetch_orphan_sweep: a datadir whose bundles path fills or "
+         "overflows PATH_MAX is refused; one byte shorter is a clean no-op") {
+        char droot[PATH_MAX];
+        char *dd = test_mkdtemp(droot, sizeof(droot), "zcl_romsweep_ld");
+        ASSERT(dd != NULL);
+        size_t sub = strlen(ROM_SEED_BUNDLES_SUBDIR);
+        char padded[PATH_MAX + 64];
+        struct rom_fetch_orphan_sweep_result r;
+
+        os_padded(dd, PATH_MAX - 1 - sub, padded, sizeof(padded));
+        ASSERT(!rom_fetch_orphan_sweep_run(padded, 3600u, &r));
+        os_padded(dd, PATH_MAX + 10, padded, sizeof(padded));
+        ASSERT(!rom_fetch_orphan_sweep_run(padded, 3600u, &r));
+        os_padded(dd, PATH_MAX - 2 - sub, padded, sizeof(padded));
+        ASSERT(rom_fetch_orphan_sweep_run(padded, 3600u, &r));
+        ASSERT_EQ(r.pairs_seen, 0u);
+
+        test_cleanup_tmpdir(dd);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A journal path that would be exactly PATH_MAX is not a journal: the file
+ * one character short of it must not be mistaken for one. */
+static int test_orphan_sweep_overlong_journal(void)
+{
+    int failures = 0;
+    TEST("rom_fetch_orphan_sweep: a .part whose journal path would fill "
+         "PATH_MAX is not a pair, and a look-alike truncated journal name "
+         "is not taken for its journal") {
+        rom_seed_reset();
+        char droot[PATH_MAX];
+        char *dd = test_mkdtemp(droot, sizeof(droot), "zcl_romsweep_lj");
+        ASSERT(dd != NULL);
+        char real_bundles[PATH_MAX];
+        snprintf(real_bundles, sizeof(real_bundles), "%s/%s", dd,
+                 ROM_SEED_BUNDLES_SUBDIR);
+        ASSERT(mkdir(real_bundles, 0700) == 0);
+
+        static const char name[] = "consensus-state-bundle-800.sqlite.part";
+        /* journal path = padded + "/bundles/" + name + ".journal" */
+        size_t padlen = PATH_MAX - (1 + strlen(ROM_SEED_BUNDLES_SUBDIR) + 1 +
+                                    (sizeof(name) - 1) + 8);
+        char padded[PATH_MAX + 64];
+        os_padded(dd, padlen, padded, sizeof(padded));
+        char part[PATH_MAX];
+        char lookalike[PATH_MAX];
+        snprintf(part, sizeof(part), "%s/%s/%s", padded,
+                 ROM_SEED_BUNDLES_SUBDIR, name);
+        snprintf(lookalike, sizeof(lookalike), "%s/%s/%s.journa", padded,
+                 ROM_SEED_BUNDLES_SUBDIR, name);
+        ASSERT(strlen(lookalike) == PATH_MAX - 1);
+        ASSERT(os_write_bytes(part, OS_PART_BYTES, 0xA1));
+        ASSERT(os_write_bytes(lookalike, OS_JOURNAL_BYTES, 0xB2));
+        ASSERT(os_age_path_to(part, OS_ANCIENT_UNIX));
+        ASSERT(os_age_path_to(lookalike, OS_ANCIENT_UNIX));
+
+        struct rom_fetch_orphan_sweep_result r;
+        ASSERT(rom_fetch_orphan_sweep_run(padded, 3600u, &r));
+        ASSERT_EQ(r.pairs_seen, 0u);
+        ASSERT_EQ(r.pairs_removed, 0u);
+        ASSERT_EQ(r.pairs_failed, 0u);
+        ASSERT(os_size_is(real_bundles, name, OS_PART_BYTES));
+        ASSERT(os_exists(real_bundles, "consensus-state-bundle-800.sqlite."
+                                       "part.journa"));
+
+        test_cleanup_tmpdir(real_bundles);
+        test_cleanup_tmpdir(dd);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Things that look like a pair but are not: a directory or a dangling link
+ * where the staging file should be, a directory where the journal should be,
+ * and a bare ".part" with a ".part.journal". All idle, none unregistered
+ * targets — they must be left exactly as found. */
+static int test_orphan_sweep_not_a_pair(void)
+{
+    int failures = 0;
+    TEST("rom_fetch_orphan_sweep: a non-regular .part or journal, and a "
+         "name that is only the suffix, are never swept") {
+        rom_seed_reset();
+        char dd[PATH_MAX];
+        char bundles[PATH_MAX];
+        ASSERT(os_mk_bundles("zcl_romsweep_np", dd, bundles));
+        char p[PATH_MAX];
+
+        /* staging file is a directory; journal is a regular file */
+        snprintf(p, sizeof(p), "%s/consensus-state-bundle-810.sqlite.part",
+                 bundles);
+        ASSERT(mkdir(p, 0700) == 0);
+        snprintf(p, sizeof(p), "%s/%s", bundles,
+                 "consensus-state-bundle-810.sqlite.part.journal");
+        ASSERT(os_write_bytes(p, OS_JOURNAL_BYTES, 0xB2));
+        ASSERT(os_age_path_to(p, OS_ANCIENT_UNIX));
+        /* staging file is a dangling symlink */
+        snprintf(p, sizeof(p), "%s/consensus-state-bundle-820.sqlite.part",
+                 bundles);
+        ASSERT(symlink("no-such-target", p) == 0);
+        snprintf(p, sizeof(p), "%s/%s", bundles,
+                 "consensus-state-bundle-820.sqlite.part.journal");
+        ASSERT(os_write_bytes(p, OS_JOURNAL_BYTES, 0xB2));
+        ASSERT(os_age_path_to(p, OS_ANCIENT_UNIX));
+        /* journal is a directory; staging file is regular and idle */
+        ASSERT(os_make_pair(bundles, "consensus-state-bundle-830.sqlite",
+                            true));
+        snprintf(p, sizeof(p), "%s/%s", bundles,
+                 "consensus-state-bundle-830.sqlite.part.journal");
+        ASSERT(unlink(p) == 0);
+        ASSERT(mkdir(p, 0700) == 0);
+        /* nothing but the suffix */
+        snprintf(p, sizeof(p), "%s/.part", bundles);
+        ASSERT(os_write_bytes(p, OS_PART_BYTES, 0xA1));
+        ASSERT(os_age_path_to(p, OS_ANCIENT_UNIX));
+        snprintf(p, sizeof(p), "%s/.part.journal", bundles);
+        ASSERT(os_write_bytes(p, OS_JOURNAL_BYTES, 0xB2));
+        ASSERT(os_age_path_to(p, OS_ANCIENT_UNIX));
+
+        struct rom_fetch_orphan_sweep_result r;
+        ASSERT(rom_fetch_orphan_sweep_run(dd, 3600u, &r));
+        ASSERT_EQ(r.pairs_seen, 0u);
+        ASSERT_EQ(r.pairs_removed, 0u);
+        ASSERT_EQ(r.pairs_failed, 0u);
+        ASSERT_EQ(r.bytes_reclaimed, 0ull);
+        ASSERT(os_size_is(bundles, "consensus-state-bundle-810.sqlite.part."
+                                   "journal", OS_JOURNAL_BYTES));
+        ASSERT(os_size_is(bundles, "consensus-state-bundle-820.sqlite.part."
+                                   "journal", OS_JOURNAL_BYTES));
+        ASSERT(os_size_is(bundles, "consensus-state-bundle-830.sqlite.part",
+                          OS_PART_BYTES));
+        ASSERT(os_size_is(bundles, ".part", OS_PART_BYTES));
+        ASSERT(os_size_is(bundles, ".part.journal", OS_JOURNAL_BYTES));
+
+        test_cleanup_tmpdir(bundles);
+        test_cleanup_tmpdir(dd);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* `bundles` that is not a directory is "nothing to sweep", not a failure. */
+static int test_orphan_sweep_bundles_is_a_file(void)
+{
+    int failures = 0;
+    TEST("rom_fetch_orphan_sweep: a regular file named bundles is a clean "
+         "no-op") {
+        char droot[PATH_MAX];
+        char *dd = test_mkdtemp(droot, sizeof(droot), "zcl_romsweep_bf");
+        ASSERT(dd != NULL);
+        char p[PATH_MAX];
+        snprintf(p, sizeof(p), "%s/%s", dd, ROM_SEED_BUNDLES_SUBDIR);
+        ASSERT(os_write_bytes(p, 16, 0x5A));
+        struct rom_fetch_orphan_sweep_result r;
+        ASSERT(rom_fetch_orphan_sweep_run(dd, 3600u, &r));
+        ASSERT_EQ(r.pairs_seen, 0u);
+        ASSERT_EQ(r.pairs_failed, 0u);
+        test_cleanup_tmpdir(dd);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The scan walks exactly ROM_SEED_SCAN_ENTRY_CAP directory entries: that many
+ * is a complete walk, one more is capped. */
+static int test_orphan_sweep_scan_cap(void)
+{
+    int failures = 0;
+    TEST("rom_fetch_orphan_sweep: a directory of exactly the scan cap is "
+         "walked whole; one more entry sets capped") {
+        char dd[PATH_MAX];
+        char bundles[PATH_MAX];
+        ASSERT(os_mk_bundles("zcl_romsweep_sc", dd, bundles));
+        uint32_t made = 0;
+        while (os_entry_count(bundles) < ROM_SEED_SCAN_ENTRY_CAP) {
+            char p[PATH_MAX];
+            snprintf(p, sizeof(p), "%s/junk-%05u", bundles, (unsigned)made++);
+            ASSERT(os_write_bytes(p, 1, 0x11));
+        }
+        ASSERT_EQ(os_entry_count(bundles), (uint32_t)ROM_SEED_SCAN_ENTRY_CAP);
+        struct rom_fetch_orphan_sweep_result r;
+        ASSERT(rom_fetch_orphan_sweep_run(dd, 3600u, &r));
+        ASSERT(!r.capped);
+
+        char extra[PATH_MAX];
+        snprintf(extra, sizeof(extra), "%s/junk-extra", bundles);
+        ASSERT(os_write_bytes(extra, 1, 0x11));
+        ASSERT(rom_fetch_orphan_sweep_run(dd, 3600u, &r));
+        ASSERT(r.capped);
+
+        test_cleanup_tmpdir(bundles);
+        test_cleanup_tmpdir(dd);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* More pairs than the sweep may hold: it stops at the bound and says so. */
+static int test_orphan_sweep_pair_cap(void)
+{
+    int failures = 0;
+    TEST("rom_fetch_orphan_sweep: one pair past ROM_FETCH_ORPHAN_SWEEP_MAX_"
+         "PAIRS is left for the next pass and sets capped") {
+        rom_seed_reset();
+        char dd[PATH_MAX];
+        char bundles[PATH_MAX];
+        ASSERT(os_mk_bundles("zcl_romsweep_pc", dd, bundles));
+        for (uint32_t i = 0; i < ROM_FETCH_ORPHAN_SWEEP_MAX_PAIRS + 1u; i++) {
+            char target[64];
+            snprintf(target, sizeof(target), "consensus-state-bundle-%u.sqlite",
+                     (unsigned)(900 + i));
+            ASSERT(os_make_pair(bundles, target, true));
+        }
+        struct rom_fetch_orphan_sweep_result r;
+        ASSERT(rom_fetch_orphan_sweep_run(dd, 3600u, &r));
+        ASSERT(r.capped);
+        ASSERT_EQ(r.pairs_seen, (uint32_t)ROM_FETCH_ORPHAN_SWEEP_MAX_PAIRS);
+        ASSERT_EQ(r.pairs_removed, (uint32_t)ROM_FETCH_ORPHAN_SWEEP_MAX_PAIRS);
+        uint32_t files = 0;
+        uint64_t bytes = 0;
+        os_part_census(bundles, &files, &bytes);
+        ASSERT_EQ(files, 2u);
+
+        ASSERT(rom_fetch_orphan_sweep_run(dd, 3600u, &r));
+        ASSERT(!r.capped);
+        ASSERT_EQ(r.pairs_removed, 1u);
+        os_part_census(bundles, &files, &bytes);
+        ASSERT_EQ(files, 0u);
+
+        test_cleanup_tmpdir(bundles);
+        test_cleanup_tmpdir(dd);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Age boundary: a pair idle for exactly the horizon is stale; one 600
+ * seconds inside it is not. Idle time is only ever >= the stamp offset (the
+ * sweep reads the wall clock after the stamp), so the first case holds on a
+ * busy host too. */
+static int test_orphan_sweep_age_boundary(void)
+{
+    int failures = 0;
+    TEST("rom_fetch_orphan_sweep: idle for the full horizon is removed, "
+         "600 s short of it is kept") {
+        rom_seed_reset();
+        char dd[PATH_MAX];
+        char bundles[PATH_MAX];
+        ASSERT(os_mk_bundles("zcl_romsweep_ab", dd, bundles));
+        ASSERT(os_make_pair(bundles, "consensus-state-bundle-950.sqlite",
+                            false));
+        ASSERT(os_make_pair(bundles, "consensus-state-bundle-951.sqlite",
+                            false));
+        time_t now = time(NULL);
+        const char *halves[] = {
+            "consensus-state-bundle-950.sqlite.part",
+            "consensus-state-bundle-950.sqlite.part.journal"};
+        const char *near[] = {
+            "consensus-state-bundle-951.sqlite.part",
+            "consensus-state-bundle-951.sqlite.part.journal"};
+        for (int i = 0; i < 2; i++) {
+            char p[PATH_MAX];
+            snprintf(p, sizeof(p), "%s/%s", bundles, halves[i]);
+            ASSERT(os_age_path_to(p, now - 3600));
+            snprintf(p, sizeof(p), "%s/%s", bundles, near[i]);
+            ASSERT(os_age_path_to(p, now - 3000));
+        }
+        struct rom_fetch_orphan_sweep_result r;
+        ASSERT(rom_fetch_orphan_sweep_run(dd, 3600u, &r));
+        ASSERT_EQ(r.pairs_seen, 2u);
+        ASSERT_EQ(r.pairs_removed, 1u);
+        ASSERT_EQ(r.pairs_kept, 1u);
+        ASSERT(!os_exists(bundles, halves[0]));
+        ASSERT(!os_exists(bundles, halves[1]));
+        ASSERT(os_exists(bundles, near[0]));
+        ASSERT(os_exists(bundles, near[1]));
+        test_cleanup_tmpdir(bundles);
+        test_cleanup_tmpdir(dd);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A directory that cannot be read or written: the sweep reports failure and
+ * removes nothing. Skipped where the process can ignore permissions. */
+static int test_orphan_sweep_unreadable_dir(void)
+{
+    int failures = 0;
+    TEST("rom_fetch_orphan_sweep: an unreadable bundles/ fails the pass, "
+         "touching nothing") {
+        rom_seed_reset();
+        char dd[PATH_MAX];
+        char bundles[PATH_MAX];
+        ASSERT(os_mk_bundles("zcl_romsweep_ur", dd, bundles));
+        ASSERT(os_make_pair(bundles, "consensus-state-bundle-960.sqlite",
+                            true));
+        ASSERT(chmod(bundles, 0) == 0);
+        DIR *probe = opendir(bundles);
+        bool can_ignore = probe != NULL;
+        if (probe)
+            closedir(probe);
+        struct rom_fetch_orphan_sweep_result r;
+        bool ok = rom_fetch_orphan_sweep_run(dd, 3600u, &r);
+        ASSERT(chmod(bundles, 0700) == 0);
+        if (!can_ignore) {
+            ASSERT(!ok);
+            ASSERT_EQ(r.pairs_seen, 0u);
+        }
+        ASSERT(os_exists(bundles, "consensus-state-bundle-960.sqlite.part"));
+        test_cleanup_tmpdir(bundles);
+        test_cleanup_tmpdir(dd);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_orphan_sweep_unwritable_dir(void)
+{
+    int failures = 0;
+    TEST("rom_fetch_orphan_sweep: when a pair's journal cannot be unlinked "
+         "it is counted failed, nothing is claimed reclaimed, the pass "
+         "reports failure") {
+        rom_seed_reset();
+        char dd[PATH_MAX];
+        char bundles[PATH_MAX];
+        ASSERT(os_mk_bundles("zcl_romsweep_uw", dd, bundles));
+        ASSERT(os_make_pair(bundles, "consensus-state-bundle-970.sqlite",
+                            true));
+        ASSERT(chmod(bundles, 0500) == 0);
+        bool can_ignore = access(bundles, W_OK) == 0;
+        struct rom_fetch_orphan_sweep_result r;
+        bool ok = rom_fetch_orphan_sweep_run(dd, 3600u, &r);
+        ASSERT(chmod(bundles, 0700) == 0);
+        if (!can_ignore) {
+            ASSERT(!ok);
+            ASSERT_EQ(r.pairs_seen, 1u);
+            ASSERT_EQ(r.pairs_failed, 1u);
+            ASSERT_EQ(r.pairs_removed, 0u);
+            ASSERT_EQ(r.bytes_reclaimed, 0ull);
+        }
+        ASSERT(os_size_is(bundles, "consensus-state-bundle-970.sqlite.part",
+                          OS_PART_BYTES));
+        ASSERT(os_size_is(bundles,
+                          "consensus-state-bundle-970.sqlite.part.journal",
+                          OS_JOURNAL_BYTES));
+        test_cleanup_tmpdir(bundles);
+        test_cleanup_tmpdir(dd);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The directory handle is closed on every pass. */
+static int test_orphan_sweep_no_fd_leak(void)
+{
+    int failures = 0;
+    TEST("rom_fetch_orphan_sweep: a pass leaves the process's descriptor "
+         "count where it found it") {
+        rom_seed_reset();
+        char dd[PATH_MAX];
+        char bundles[PATH_MAX];
+        ASSERT(os_mk_bundles("zcl_romsweep_fd", dd, bundles));
+        ASSERT(os_make_pair(bundles, "consensus-state-bundle-980.sqlite",
+                            true));
+        struct rom_fetch_orphan_sweep_result r;
+        /* Warm-up pass: anything the first pass opens once and keeps (a log
+         * sink, say) must not be counted as a leak. */
+        ASSERT(rom_fetch_orphan_sweep_run(dd, 3600u, &r));
+        ASSERT_EQ(r.pairs_removed, 1u);
+        ASSERT(os_make_pair(bundles, "consensus-state-bundle-981.sqlite",
+                            true));
+        int before = os_fd_count();
+        ASSERT(rom_fetch_orphan_sweep_run(dd, 3600u, &r));
+        ASSERT_EQ(r.pairs_removed, 1u);
+        ASSERT_EQ(os_fd_count(), before);
+        test_cleanup_tmpdir(bundles);
+        test_cleanup_tmpdir(dd);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int rom_fetch_orphan_sweep_gap_tests(void)
+{
+    int failures = 0;
+    failures += test_orphan_sweep_horizon_edges();
+    failures += test_orphan_sweep_overlong_datadir();
+    failures += test_orphan_sweep_overlong_journal();
+    failures += test_orphan_sweep_not_a_pair();
+    failures += test_orphan_sweep_bundles_is_a_file();
+    failures += test_orphan_sweep_scan_cap();
+    failures += test_orphan_sweep_pair_cap();
+    failures += test_orphan_sweep_age_boundary();
+    failures += test_orphan_sweep_unreadable_dir();
+    failures += test_orphan_sweep_unwritable_dir();
+    failures += test_orphan_sweep_no_fd_leak();
+    return failures;
+}
+
 int test_rom_fetch_orphan_sweep(void)
 {
     int failures = 0;
@@ -386,5 +878,6 @@ int test_rom_fetch_orphan_sweep(void)
     failures += test_orphan_sweep_horizon_protects();
     failures += test_orphan_sweep_empty_datadir();
     failures += test_orphan_sweep_horizon_flag();
+    failures += rom_fetch_orphan_sweep_gap_tests();
     return failures;
 }
