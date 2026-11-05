@@ -406,6 +406,8 @@ PROBE_MAKE
             echo 'tor_archives_ready: selftest FAILED — non-building readiness probe' >&2
             exit 1
         }
+        # Consumer fallback (and Mac's subsequent donor probe) has no Makefile.
+        rm -f -- "$fake_primary/$TOR_TREE/Makefile"
         (
             ROOT="$fake_wt"
             cd "$fake_wt"
