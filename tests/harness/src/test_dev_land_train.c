@@ -575,6 +575,59 @@ _test_next:;
     return failures;
 }
 
+static int test_dev_land_train_split_then_land(void)
+{
+    int failures = 0;
+    TEST("land: successful split halves each land under an exact proof") {
+        struct dlx_rig rig;
+        struct dlx_tr_watch w;
+        char b[64], c[64], states[256];
+        int proofs = 0, landed = 0;
+        dlx_isolate("train_split_land");
+        ASSERT(dlx_tr_rig(&rig, "train_split_land_rig", "fail", "b.txt", b, c));
+        ASSERT(dlx_tr_watch_start(&w, &rig));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        dlx_tr_watch_beat(&w);
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        dlx_tr_watch_beat(&w);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        ASSERT(dlx_tr_drain(12, &w, &proofs, &landed, states, sizeof(states)));
+        ASSERT_EQ(proofs, 2);
+        ASSERT_EQ(landed, 3);
+        ASSERT_EQ(w.unproven, 0);
+        ASSERT(dlx_tr_all_landed(&rig, false));
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_train_split_excludes_unrelated(void)
+{
+    int failures = 0;
+    TEST("land: a split half never absorbs an unrelated queued row") {
+        struct dlx_rig rig;
+        char b[64], c[64], extra[64];
+        dlx_isolate("train_split_unrelated");
+        ASSERT(dlx_tr_rig(&rig, "train_split_unrelated_rig", "fail", "b.txt", b, c));
+        ASSERT(dlx_qp_branch(&rig, "extra", "extra.txt", "extra\n", NULL, NULL, extra));
+        ASSERT(dlx_qp_submit(&rig, extra, 4));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        ASSERT(dlx_tr_beat("started", 1, 1));
+        int64_t members[8];
+        ASSERT_EQ((int64_t)dlx_tr_members(members), 1);
+        ASSERT_EQ(members[0], 2);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_train_red_then_singles_land(void)
 {
     int failures = 0;
@@ -1034,6 +1087,8 @@ int test_dev_land_train_cases(void)
     failures += test_dev_land_train_split_eight();
     failures += test_dev_land_train_split_crash();
     failures += test_dev_land_train_split_old_writer();
+    failures += test_dev_land_train_split_then_land();
+    failures += test_dev_land_train_split_excludes_unrelated();
     failures += test_dev_land_train_red_then_singles_land();
     failures += test_dev_land_train_held_row_skipped();
     failures += test_dev_land_train_cancelled_row_skipped();
