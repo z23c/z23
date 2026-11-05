@@ -2466,70 +2466,6 @@ static int test_priority_bound_history_dispatch(void)
     return failures;
 }
 
-/* Explicit read-only host diagnostic, never armed by normal test runs.
- * The caller supplies an immutable commit's newline-separated changed set;
- * use the full catalog as a clearly labelled universal-selection scenario. */
-static bool tgs_priority_audit_paths(char *text, const char **paths, size_t *count)
-{
-    char *save = NULL;
-    for (char *p = strtok_r(text, "\n", &save); p; p = strtok_r(NULL, "\n", &save)) {
-        if (*count == 64) return false;
-        paths[(*count)++] = p;
-    }
-    return *count != 0;
-}
-
-static bool tgs_priority_audit_groups(char *groups, size_t cap)
-{
-    size_t used = 0;
-    for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
-        int n = snprintf(groups + used, cap - used, "%s%s", used ? "," : "",
-                         zcl_test_group_catalog_at(i));
-        if (n < 0 || (size_t)n >= cap - used) return false;
-        used += (size_t)n;
-    }
-    return used != 0;
-}
-
-static bool tgs_priority_audit_call(const char *root, const char *scratch,
-    const char *groups, const char *const *changed, size_t count,
-    char *out, size_t out_cap, char *report, size_t report_cap)
-{
-    char saved[256] = "";
-    const char *prior = getenv("ZCL_DEVLOOP_TEST_PROCESS");
-    bool had = prior != NULL;
-    if (had && strlen(prior) >= sizeof(saved)) return false;
-    if (had) snprintf(saved, sizeof(saved), "%s", prior);
-    if (setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0) return false;
-    bool ok = zcl_dev_proof_test_failure_priority_report(root, scratch, groups,
-        changed, count, out, out_cap, report, report_cap);
-    int restored = had ? setenv("ZCL_DEVLOOP_TEST_PROCESS", saved, 1)
-                       : unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
-    return ok && restored == 0;
-}
-
-static int tgs_priority_host_audit(void)
-{
-    const char *root = getenv("ZCL_TEST_PRIORITY_AUDIT_ROOT");
-    const char *paths = getenv("ZCL_TEST_PRIORITY_AUDIT_CHANGED");
-    if (!root || !*root || !paths || !*paths) return 0;
-    char changed_copy[8192], root_real[PATH_MAX], temp[PATH_MAX], scratch[PATH_MAX + 32];
-    static char groups[150000], out[150000];
-    char report[256] = "unavailable";
-    const char *changed[64]; size_t count = 0;
-    if (!realpath(root, root_real) || strlen(paths) >= sizeof(changed_copy)) return 1;
-    snprintf(changed_copy, sizeof(changed_copy), "%s", paths);
-    if (!tgs_priority_audit_paths(changed_copy, changed, &count) ||
-        !tgs_priority_audit_groups(groups, sizeof(groups))) return 1;
-    test_make_tmpdir(temp, sizeof(temp), "tgs_priority", "host_audit");
-    snprintf(scratch, sizeof(scratch), "%s/diff", temp);
-    bool ok = tgs_priority_audit_call(root_real, scratch, groups, changed, count,
-                                       out, sizeof(out), report, sizeof(report));
-    printf("priority host audit (universal selection, %zu changed paths): %s hints=%s\n",
-           count, report, out);
-    (void)test_rm_rf_recursive(temp);
-    return ok ? 0 : 1;
-}
 #endif
 
 static int test_runner_dispatches_longest_first(void)
@@ -3916,7 +3852,6 @@ int test_test_group_selector(void)
     failures += test_failure_priority_history();
 #if !defined(_WIN32)
     failures += test_priority_bound_history_dispatch();
-    failures += tgs_priority_host_audit();
 #endif
     failures += test_dispatch_weights_read();
     failures += test_dispatch_weights_framing();
