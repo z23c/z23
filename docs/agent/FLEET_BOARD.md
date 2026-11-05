@@ -147,9 +147,63 @@ rest counted. A root that was never anchored is tolerated, so a fleet that
 has not spent an anchor fee keeps working; anchoring it
 (`core.identity.anchor`) makes the chain's verdict binding. Public and
 pre-scope posts never meet the gate. The roster holds at most 64 members and
-refuses a line over the 2048-character note bound. Not yet: revoking a single
-member (changing the fleet root is the only removal today), `member_seq`,
-onion binding and encrypted fleet rows.
+refuses a line over the 2048-character note bound. Not yet: `member_seq`, onion
+binding and encrypted fleet rows.
+
+**Revoking one member reaches the fleet as a head row.** `fleet roster revoke`,
+run once on the owner's box, seals the next roster head and stores it there.
+That box's node, started with `-fleetrostergate`, then writes the head's exact
+line onto the board within about 30 seconds, as a fleet-scope note whose agent
+is `fleet-head`. The row costs no coin and adds no trust root: the owner's seal
+on the head is the only authority it carries, so any box may relay it. A box
+that takes the row runs it through the same `fleet_head_import` a paste uses, so
+it keeps one head and one sequence rule. Only a head sealed by this box's fleet
+root at a higher sequence changes anything. A lower sequence, two heads at one
+sequence, another root's head and a corrupt line are refused, the row is not
+kept and the held head does not move. A box with no root or with
+`-fleetrostergate=0` takes no head row. A root the chain refuses, or this box's
+own head state being unreadable, defers the row. A box takes a head row only from
+carriage or its own node; the public P2P path drops it.
+
+A box's gate acts on a new head at once, so the revoked key is out of its roster:
+the machine gets no fleet row from that box, and rows it writes afterward are
+refused there, whoever carries them. Rows it wrote before stay readable, and so
+does its roster row. A box takes every head row in an answer before anything else
+in it, so a row in the same answer that would arm it, or a post by the revoked
+key, is judged under the new head. A roster answer also leads with the answering
+box's newest head row while the pull has not reached it (arrival number 0, which
+moves no cursor), so a box walking a long board from the start has the head before
+the page that arms it. The owner's box writes the row again every 10 days. A note
+lives 30 days, so a late joiner finds a live copy while that node runs and for 20
+days after. That is one row per new sequence plus one per 10 days, under the
+per-key quota of 60 rows per 10 minutes and 1000 stored. A head row holds about 44
+revoked keys (`fleet roster revoke` adds a box and each of its signer keys, so
+about 22 machines). Past that the owner's node logs `fleet_head_too_large` and the
+reply says `board_carries` is false: the head still works where it is pasted, up to
+the 4096-character `fleet import` bound, and goes no further by itself.
+
+*What this does not stop.* Carriage cannot force a box to hear something, so
+**a hostile answerer can still withhold the head row**. A box with no armed roster
+accepts any valid proof, since it holds nothing to check the key against, and takes
+only sealed rows from that answer. A revoked machine, or one that never saw the
+head, can arm such a box with old sealed rows that list the revoked key, and leave
+out both the head and other members' rows. An armed box that has not had a head
+row yet keeps admitting the revoked key in the same way. Nothing here shortens that
+except reaching an honest box:
+
+- The next honest answer overrides it within one pull. The head leads that answer,
+  the key leaves the roster, and the revoked machine's next answer is dropped whole.
+- A box armed only with the revoked machine's selection of rows may refuse a
+  genuine member it cannot find on its roster, so that answer may never come. Paste
+  the head into `fleet import` on such a box, or on any box you cannot wait for. Do
+  it before the first start of a box joining after a revocation: the import needs
+  no carriage and no peer.
+
+A box with no fleet root or a switched-off gate never took the row, so after it
+joins it reads the head first on the roster lane, or at the next republish on the
+pairing lane. Running a new answering box against a node from before head rows
+voids that answer on the older asker (arrival number 0 is out of its numbering), so
+upgrade members before revoking when you can; nothing is taken wrongly either way.
 
 **Roster machines need no pairing.** A pairing needs a held ZID delegation,
 and anchoring one costs coins. Once a roster is armed, a machine on it pulls

@@ -274,8 +274,19 @@ with the member count, when the roster arms.
    fleet-scope posts until it is re-admitted. That is the point of the
    gate, and it is also why it is not on by default.
 5. If the fleet root is rotated or revoked on chain, no fleet-scope post moves
-   until you re-establish a root and re-admit the machines. To remove one
-   machine today, change the fleet root.
+   until you re-establish a root and re-admit the machines.
+
+To remove one machine, run `fleet roster revoke <box_pubkey> --confirm_revoke=yes`
+once on the manager. With the manager's node running with `-fleetrostergate`, the
+head reaches every roster machine over carriage, with no paste and no coin. A
+member logs `a newer roster head arrived` under `fleet.roster` and its wallet
+fleet status counts one machine fewer in `machines_total`. Two cases still need a
+paste of the printed head into `fleet import`: the reply says
+`board_carries` is false (the head is over about 44 keys), or a box has no honest
+machine to pull from, since a revoked machine can withhold the head from a box it
+answers. A box about to join after a revocation should import the head before its
+first start. [FLEET_BOARD.md](FLEET_BOARD.md) has the full behaviour and the risk
+that remains.
 
 The escape hatch is the same flag set to zero on the box that needs it:
 `-fleetrostergate=0` makes that box stop enforcing the roster (it logs that at
