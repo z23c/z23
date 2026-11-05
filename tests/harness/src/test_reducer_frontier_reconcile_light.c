@@ -24,6 +24,7 @@
 #include "storage/anchor_kv.h"
 #include "storage/disk_block_io.h"
 #include "storage/progress_store.h"
+#include "storage/repair_marker.h"
 #include "util/safe_alloc.h"
 #include "util/util.h"
 #include "validation/chainstate.h"
@@ -51,6 +52,7 @@ void reducer_frontier_test_set_compiled_anchor(int32_t height);
 /* src-private ZCL_TESTING hooks mirrored from
  * reducer_frontier_reconcile_light.c (the test_reducer_reconcile_witness.c
  * pattern — not in the public header). */
+bool reducer_frontier_reconcile_light_test_progressing(void);
 int reducer_frontier_reconcile_light_test_bypass_warns(void);
 int reducer_frontier_reconcile_light_test_gate_suppress_warns(void);
 bool stage_reducer_frontier_purge_noncanonical(
@@ -2902,6 +2904,86 @@ static int rfrl_check_lock_order_progress_held(void)
     return failures;
 }
 
+/* progressing() is a REFRESH-only signal over high-water baselines: a
+ * backfill record refreshes the budget only when it reaches a strictly NEW
+ * height, and a rewound-low value never lowers the baseline. */
+static bool rfrl_put_coin_scan(sqlite3 *db, int next)
+{
+    uint8_t v[4] = { (uint8_t)next, (uint8_t)(next >> 8),
+                     (uint8_t)(next >> 16), (uint8_t)(next >> 24) };
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR REPLACE INTO progress_meta(key,value) VALUES(?,?)",
+            -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(st, 1, "coin_backfill.scan.test", -1, SQLITE_STATIC);
+    sqlite3_bind_blob(st, 2, v, sizeof(v), SQLITE_STATIC);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+static bool rfrl_put_tipfin_progress(sqlite3 *db, int progress, size_t len)
+{
+    static const uint8_t zero_hash[32] = {0};
+    uint8_t v[8] = { (uint8_t)progress, (uint8_t)(progress >> 8),
+                     (uint8_t)(progress >> 16), (uint8_t)(progress >> 24) };
+    return repair_marker_note(db, REPAIR_MARKER_KIND_TIPFIN_PROGRESS,
+                              REPAIR_MARKER_TIPFIN_HEIGHT, zero_hash, v, len);
+}
+
+static int rfrl_check_progressing_hwm(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("progressing: setup fixture",
+               setup_fixture(&fx, "progressing_hwm"));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("progressing: marker table", repair_marker_table_ensure(db));
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+
+    (void)reducer_frontier_reconcile_light_test_progressing(); /* H* baseline */
+    RFRL_CHECK("progressing: quiescent frontier is not progress",
+               !reducer_frontier_reconcile_light_test_progressing());
+
+    RFRL_CHECK("progressing: seed coin scan 50", rfrl_put_coin_scan(db, 50));
+    RFRL_CHECK("progressing: new coin scan height refreshes",
+               reducer_frontier_reconcile_light_test_progressing());
+    RFRL_CHECK("progressing: same coin scan height does not",
+               !reducer_frontier_reconcile_light_test_progressing());
+    RFRL_CHECK("progressing: coin scan 51", rfrl_put_coin_scan(db, 51));
+    RFRL_CHECK("progressing: coin scan 51 is a new height",
+               reducer_frontier_reconcile_light_test_progressing());
+    RFRL_CHECK("progressing: coin scan rewound to 50", rfrl_put_coin_scan(db, 50));
+    RFRL_CHECK("progressing: a rewound coin scan never refreshes",
+               !reducer_frontier_reconcile_light_test_progressing());
+    RFRL_CHECK("progressing: coin scan back to 51", rfrl_put_coin_scan(db, 51));
+    RFRL_CHECK("progressing: regaining the mark is not new",
+               !reducer_frontier_reconcile_light_test_progressing());
+
+    RFRL_CHECK("progressing: short tipfin record",
+               rfrl_put_tipfin_progress(db, 70, 4));
+    RFRL_CHECK("progressing: malformed tipfin record is absent",
+               !reducer_frontier_reconcile_light_test_progressing());
+    RFRL_CHECK("progressing: tipfin 70", rfrl_put_tipfin_progress(db, 70, 8));
+    RFRL_CHECK("progressing: new tipfin height refreshes",
+               reducer_frontier_reconcile_light_test_progressing());
+    RFRL_CHECK("progressing: same tipfin height does not",
+               !reducer_frontier_reconcile_light_test_progressing());
+    RFRL_CHECK("progressing: tipfin 71", rfrl_put_tipfin_progress(db, 71, 8));
+    RFRL_CHECK("progressing: tipfin 71 is a new height",
+               reducer_frontier_reconcile_light_test_progressing());
+    RFRL_CHECK("progressing: tipfin rewound", rfrl_put_tipfin_progress(db, 70, 8));
+    RFRL_CHECK("progressing: a rewound tipfin record never refreshes",
+               !reducer_frontier_reconcile_light_test_progressing());
+
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    teardown_fixture(&fx);
+    return failures;
+}
+
 int test_reducer_frontier_reconcile_light(void);
 int test_reducer_frontier_reconcile_light(void)
 {
@@ -3018,6 +3100,8 @@ int test_reducer_frontier_reconcile_light(void)
 
     /* ABBA regression: the reconcile must not own progress_store_tx_lock
      * while it waits for cs_main (see rfrl_order_probe above). */
+    failures += rfrl_check_progressing_hwm();
+
     failures += rfrl_check_lock_order_flags();
 
     /* ABBA regression, other direction: a reducer drain owns the progress
