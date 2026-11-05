@@ -10,6 +10,7 @@
 
 #include "test/test_dev_land_common.h"
 #include "command/native_dev_land_internal.h"
+#include "zutf8/zutf8.h"
 
 #if !defined(_WIN32)
 
@@ -266,9 +267,10 @@ static int dlx_lint_failure_detail(void)
         ASSERT(zcl_dev_land_lint_test(empty, log, detail, sizeof(detail)) == 3);
         ASSERT(strstr(detail, "FAIL check-empty") != NULL);
         const char *long_body[] = {"/bin/sh", "-c",
-            "printf '%s\\n' '──── FAIL log: check-long ────────────────────────────'; head -c 705 /dev/zero | tr '\\000' x; printf '\\n'; exit 4", NULL};
+            "printf '%s\\n' '──── FAIL log: check-long ────────────────────────────'; head -c 698 /dev/zero | tr '\\000' x; printf '€x\\n'; exit 4", NULL};
         ASSERT(zcl_dev_land_lint_test(long_body, log, detail, sizeof(detail)) == 4);
         ASSERT(strstr(detail, "[detail truncated]") != NULL);
+        ASSERT(zutf8_validate(detail));
         PASS();
     } _test_next:;
     return failures;

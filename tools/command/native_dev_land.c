@@ -5677,8 +5677,28 @@ static bool dl_lint_frame(const char *line, char *gate, size_t cap)
     const char *p = name + n + 1;
     for (int i = 0; i < 28; i++, p += sizeof(rule) - 1)
         if (strncmp(p, rule, sizeof(rule) - 1) != 0) return false;
-    if (*p != '\n' && *p != '\r' && *p != '\0') return false;
+    if (!(*p == '\0' || (*p == '\n' && p[1] == '\0') ||
+          (*p == '\r' && p[1] == '\n' && p[2] == '\0'))) return false;
     (void)snprintf(gate, cap, "%.*s", (int)n, name);
+    return true;
+}
+
+/* Escape arbitrary child bytes to ASCII, so neither byte limits nor bad
+ * child output can put an incomplete UTF-8 sequence in a JSON detail. */
+static bool dl_lint_append_body(char *body, size_t cap, size_t *used, const char *line)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    for (const unsigned char *p = (const unsigned char *)line; *p; p++) {
+        unsigned char c = *p;
+        size_t n = c >= 0x7f ? 4u : 1u;
+        if (n > cap - 1 - *used) return false;
+        if (n == 1) body[(*used)++] = c < 0x20 ? ' ' : (char)c;
+        else {
+            body[(*used)++] = '\\'; body[(*used)++] = 'x';
+            body[(*used)++] = hex[c >> 4]; body[(*used)++] = hex[c & 15];
+        }
+    }
+    body[*used] = '\0';
     return true;
 }
 
@@ -5694,12 +5714,8 @@ static bool dl_lint_body(FILE *f, char *detail, size_t cap)
         }
         if (!line_clipped && dl_lint_frame(line, next, sizeof(next))) break;
         if (line[strspn(line, " \t\r\n")] == '\0') continue;
-        char clean[768];
-        dl_sanitize_copy(line, clean, sizeof(clean));
-        size_t n = strlen(clean);
-        clipped |= line_clipped || strlen(line) >= sizeof(clean);
-        if (n > sizeof(body) - 1 - used) { n = sizeof(body) - 1 - used; clipped = true; }
-        memcpy(body + used, clean, n); used += n; body[used] = '\0';
+        clipped |= line_clipped;
+        if (!dl_lint_append_body(body, sizeof(body), &used, line)) clipped = true;
         if (clipped || used == sizeof(body) - 1) { clipped = true; break; }
     }
     if (!found || !used) return false;
@@ -7617,7 +7633,11 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
     if (strcmp(row->dimension, "lint") == 0) {
         char lint[sizeof(first) - 6] = "";
         dl_retained_lint(d->wt, row->local, row->base, &identity, lint, sizeof(lint));
-        if (lint[0]) (void)snprintf(first, sizeof(first), "lint %s", lint);
+        if (strncmp(lint, "lint log unavailable", 20) == 0) {
+            char original[sizeof(first)];
+            (void)snprintf(original, sizeof(original), "%s", first);
+            (void)snprintf(first, sizeof(first), "%.180s; %.60s", original, lint);
+        } else if (lint[0]) (void)snprintf(first, sizeof(first), "lint %s", lint);
     }
     size_t tlen = strlen(token) < 96 ? strlen(token) : 96;
     char where[1100] = "";

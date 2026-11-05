@@ -9,6 +9,7 @@
 #endif
 
 #include "test/test_dev_land_common.h"
+#include "zutf8/zutf8.h"
 
 #if !defined(_WIN32)
 
@@ -1121,7 +1122,30 @@ static bool dlx_lint_bad_file(bool fifo)
     ok = ok && dlx_run(&c) && dlx_ok(&c) &&
          strcmp(dlx_str(&c, "state"), "failed") == 0 &&
          strstr(dlx_str(&c, "detail"), "wrong attempt body") == NULL &&
+         strstr(dlx_str(&c, "detail"), "check-red") != NULL &&
          strstr(dlx_str(&c, "detail"), "unavailable") != NULL;
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_lint_utf8_boundary(void)
+{
+    const struct dlx_evidence_case k = {
+        .tag = "evidence_lint_utf8", .dimension = ZCL_DEV_PROOF_LINT,
+        .script = "printf '%s\\n' 'FAIL check-red' '──── FAIL log: check-red ────────────────────────────'\n"
+                  "head -c 230 /dev/zero | tr '\\000' x; printf '€x\\n'; exit 1\n",
+        .token = "child_proof_failed_exit_1",
+    };
+    char wt[PATH_MAX], local[64], base[64];
+    dlx_isolate(k.tag);
+    bool ok = dlx_evidence_settle(&k, wt, local, base);
+    setenv("ZCL_LAND_PROOF_STUB", "status", 1);
+    struct dlx_call c;
+    dlx_begin(&c, "step");
+    ok = ok && dlx_run(&c) && dlx_ok(&c) &&
+         strstr(dlx_str(&c, "detail"), "[detail truncated]") != NULL &&
+         zutf8_validate(dlx_str(&c, "detail"));
     dlx_end(&c);
     dlx_restore();
     return ok;
@@ -1152,6 +1176,7 @@ static int dlx_evidence_lint_body(void)
         dlx_restore();
         ASSERT(dlx_lint_bad_file(false));
         ASSERT(dlx_lint_bad_file(true));
+        ASSERT(dlx_lint_utf8_boundary());
         PASS();
     } _test_next:;
     return failures;
