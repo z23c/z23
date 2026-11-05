@@ -5660,10 +5660,18 @@ int dl_lint_candidate(const struct dl_dirs *d, struct dl_row *row)
  * the verdict summary precede it and are not the gate's diagnosis. */
 static bool dl_lint_line(FILE *f, char *line, size_t cap, bool *clipped)
 {
-    if (!fgets(line, (int)cap, f)) return false;
-    *clipped = strchr(line, '\n') == NULL && !feof(f);
-    if (*clipped) { int c; while ((c = fgetc(f)) != '\n' && c != EOF) {} }
-    return true;
+    size_t used = 0;
+    bool any = false;
+    int c;
+    *clipped = false;
+    while ((c = fgetc(f)) != EOF) {
+        any = true;
+        if (c == 0 || used + 1 >= cap) *clipped = true;
+        else line[used++] = (char)c;
+        if (c == '\n') break;
+    }
+    line[used] = '\0';
+    return any;
 }
 
 static bool dl_lint_frame(const char *line, char *gate, size_t cap)
@@ -5691,7 +5699,7 @@ static bool dl_lint_append_body(char *body, size_t cap, size_t *used, const char
     for (const unsigned char *p = (const unsigned char *)line; *p; p++) {
         unsigned char c = *p;
         size_t n = c >= 0x7f ? 4u : 1u;
-        if (n > cap - 1 - *used) return false;
+        if (n > cap - 1 - *used) { body[*used] = '\0'; return false; }
         if (n == 1) body[(*used)++] = c < 0x20 ? ' ' : (char)c;
         else {
             body[(*used)++] = '\\'; body[(*used)++] = 'x';
@@ -7634,9 +7642,11 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
         char lint[sizeof(first) - 6] = "";
         dl_retained_lint(d->wt, row->local, row->base, &identity, lint, sizeof(lint));
         if (strncmp(lint, "lint log unavailable", 20) == 0) {
-            char original[sizeof(first)];
-            (void)snprintf(original, sizeof(original), "%s", first);
-            (void)snprintf(first, sizeof(first), "%.180s; %.60s", original, lint);
+            char original[160] = "";
+            size_t used = 0;
+            bool complete = dl_lint_append_body(original, sizeof(original), &used, first);
+            (void)snprintf(first, sizeof(first), "%s%s; %.60s", original,
+                           complete ? "" : " [detail truncated]", lint);
         } else if (lint[0]) (void)snprintf(first, sizeof(first), "lint %s", lint);
     }
     size_t tlen = strlen(token) < 96 ? strlen(token) : 96;

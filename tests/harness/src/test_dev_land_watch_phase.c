@@ -1103,7 +1103,7 @@ static bool dlx_lint_bad_file(bool fifo)
     const struct dlx_evidence_case k = {
         .tag = fifo ? "evidence_lint_fifo" : "evidence_lint_link",
         .dimension = ZCL_DEV_PROOF_LINT,
-        .script = "printf '%s\\n' 'FAIL check-red'; exit 1\n",
+        .script = "printf 'FAIL check-red '; head -c 150 /dev/zero | tr '\\000' x; printf '€\\n'; exit 1\n",
         .token = "child_proof_failed_exit_1",
     };
     char wt[PATH_MAX], local[64], base[64], path[PATH_MAX + 512], decoy[PATH_MAX + 64];
@@ -1123,7 +1123,9 @@ static bool dlx_lint_bad_file(bool fifo)
          strcmp(dlx_str(&c, "state"), "failed") == 0 &&
          strstr(dlx_str(&c, "detail"), "wrong attempt body") == NULL &&
          strstr(dlx_str(&c, "detail"), "check-red") != NULL &&
-         strstr(dlx_str(&c, "detail"), "unavailable") != NULL;
+         strstr(dlx_str(&c, "detail"), "unavailable") != NULL &&
+         strstr(dlx_str(&c, "detail"), "[detail truncated]") != NULL &&
+         zutf8_validate(dlx_str(&c, "detail"));
     dlx_end(&c);
     dlx_restore();
     return ok;

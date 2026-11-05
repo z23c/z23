@@ -252,10 +252,12 @@ static int dlx_lint_failure_detail(void)
         const char *argv[] = {"/bin/sh", "-c",
             "head -c 2100000 /dev/zero | tr '\\000' x; printf '──── FAIL log: check-continuation ────────────────────────────\\n'; "
             "printf 'PASS check-pass ──── FAIL log: check-fake ────────────────────────────\\nignored passing diagnostic\\nFAIL check-red\\n'; "
+            "printf '%s\\000suffix\\n%s\\n' '──── FAIL log: check-binary ────────────────────────────' 'binary header fake body'; "
             "printf '%s\\n' '──── FAIL log: check-red ────────────────────────────' 'gate heading' 'actual diagnostic body' >&2; exit 7", NULL};
         ASSERT(zcl_dev_land_lint_test(argv, log, detail, sizeof(detail)) == 7);
         ASSERT(strstr(detail, "actual diagnostic body") != NULL);
         ASSERT(strstr(detail, "ignored passing diagnostic") == NULL);
+        ASSERT(strstr(detail, "binary header fake body") == NULL);
         FILE *f = fopen(log, "r");
         ASSERT(f != NULL);
         bool found = false;
