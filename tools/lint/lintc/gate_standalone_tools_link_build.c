@@ -22,7 +22,7 @@
 #include "gate_standalone_tools_link_priv.h"
 #include "gate_standalone_tools_link_x11_suite.h"
 
-enum { STL_ROW = 160, STL_FAILED = 4, STL_JOBS_MIN = 4, STL_JOBS_MAX = 16 };
+enum { STL_ROW = 160, STL_FAILED = 4, STL_JOBS_DEFAULT = 4, STL_JOBS_MAX = 16 };
 
 static const char k_x11_suite_files[] =
     "tools/lint/lintc/gate_standalone_tools_link_x11_suite.c"
@@ -257,35 +257,43 @@ static void stl_x11_start(struct stl_bs *bs)
         stl_fail_add(bs, "X11 runtime qualification selftest");
 }
 
-static long stl_env_num(const char *v)
+/* The platform helper is the existing positive-decimal uint32 parser/cap
+ * contract. Four is the single native default, preserving the previously
+ * effective composed width. Direct absent-override half-grant sizing is
+ * deliberately replaced; explicit values still stay exact, never clamped. */
+int stl_select_jobs(const char *override, const char *cap, int *out)
 {
-    return (v && v[0]) ? strtol(v, NULL, 10) : -1;
-}
-
-/* Half the grant (ZCL_HOST_JOBS, else the CPU mask), clamped 4..16; the
- * override is ZCL_TOOLS_LINK_JOBS=<n>. */
-static int stl_jobs(void)
-{
-    long n = stl_env_num(getenv("ZCL_TOOLS_LINK_JOBS"));
-    if (n < 0) {
-        long grant = stl_env_num(getenv("ZCL_HOST_JOBS"));
-        if (grant < 0)
-            grant = (long)platform_available_cpu_count();
-        n = grant / 2;
+    uint32_t jobs;
+    if (override) {
+        jobs = platform_build_job_cap(UINT32_MAX, override);
+        if (!jobs || jobs > STL_JOBS_MAX) {
+            fprintf(stderr, "%s: FATAL — ZCL_TOOLS_LINK_JOBS must be decimal 1..16 (got '%.80s')\n", k_stl_gate, override);
+            return 2;
+        }
+    } else {
+        jobs = STL_JOBS_DEFAULT;
     }
-    if (n < STL_JOBS_MIN)
-        n = STL_JOBS_MIN;
-    if (n > STL_JOBS_MAX)
-        n = STL_JOBS_MAX;
-    return (int)n;
+    uint32_t bounded = platform_build_job_cap(jobs, cap);
+    if (!bounded) {
+        fprintf(stderr, "%s: FATAL — ZCL_BUILD_MAX_JOBS must be a positive decimal uint32 (got '%.80s')\n", k_stl_gate, cap ? cap : "");
+        return 2;
+    }
+    if (override && bounded != jobs) {
+        fprintf(stderr, "%s: FATAL — ZCL_TOOLS_LINK_JOBS request %.80s exceeds ZCL_BUILD_MAX_JOBS cap %.80s\n", k_stl_gate, override, cap);
+        return 2;
+    }
+    *out = (int)bounded;
+    return 0;
 }
 
 /* One -k batch keeps the original failure context in a single log. */
-static int stl_run_make(const struct stl_bs *bs, char (*targets)[STL_TGT], int nt)
+static int stl_run_make(const char *log, char (*targets)[STL_TGT], int nt, int jobs)
 {
+    if (jobs < 1 || jobs > STL_JOBS_MAX || nt < 1 || nt > STL_MAX)
+        return -1;
     static char *av[STL_MAX + 8];
     char jarg[24];
-    snprintf(jarg, sizeof jarg, "-j%d", stl_jobs());
+    snprintf(jarg, sizeof jarg, "-j%d", jobs);
     int ac = 0;
     av[ac++] = (char *)"make";
     av[ac++] = (char *)"-k";
@@ -298,7 +306,7 @@ static int stl_run_make(const struct stl_bs *bs, char (*targets)[STL_TGT], int n
     if (pid < 0)
         return -1;
     if (pid == 0) {
-        int fd = open(bs->blog, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd < 0 || dup2(fd, 1) < 0 || dup2(fd, 2) < 0)
             _exit(127);
         execvp("make", av);
@@ -376,12 +384,12 @@ static int stl_verdict(const struct stl_bs *bs, const char *mode)
 }
 
 static int stl_phase(struct stl_bs *bs, char (*targets)[STL_TGT], int nt,
-                     int build_only, const char *mode, int host_linux)
+                     int build_only, const char *mode, int host_linux, int jobs)
 {
     stl_helper_selftest(bs, build_only);
     if (!build_only && host_linux)
         stl_x11_start(bs);
-    if (stl_run_make(bs, targets, nt) != 0) {
+    if (stl_run_make(bs->blog, targets, nt, jobs) != 0) {
         if (stl_log_has(bs->blog, "exact source capture failed")) {
             stl_dump(stderr, bs->blog);
             fputs("[check_standalone_tools_link] source-identity capture refused, so make could"
@@ -400,6 +408,10 @@ static int stl_phase(struct stl_bs *bs, char (*targets)[STL_TGT], int nt,
 int stl_build_phase(char (*targets)[STL_TGT], int nt, int build_only,
                     const char *mode, int host_linux)
 {
+    int jobs = 0;
+    int selected = stl_select_jobs(getenv("ZCL_TOOLS_LINK_JOBS"),
+        getenv("ZCL_BUILD_MAX_JOBS"), &jobs);
+    if (selected != 0) return selected;
     g_nested = stl_nested_state();
     if (g_nested == 2)
         return 2;
@@ -407,7 +419,7 @@ int stl_build_phase(char (*targets)[STL_TGT], int nt, int build_only,
         stl_cleanup(&g_bs);
         return 2;
     }
-    int rc = stl_phase(&g_bs, targets, nt, build_only, mode, host_linux);
+    int rc = stl_phase(&g_bs, targets, nt, build_only, mode, host_linux, jobs);
     stl_cleanup(&g_bs);
     return rc;
 }

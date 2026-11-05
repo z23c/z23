@@ -12,11 +12,196 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "lintc.h"
 #include "gate_standalone_tools_link_priv.h"
 #include "gate_standalone_tools_link_x11_suite.h"
 
 int check_standalone_tools_link_run(int argc, char **argv);
+static int stl_st_put(const char *dir, const char *name, const char *text);
+static int stl_st_path(const char *dir, const char *name, char *out, size_t cap);
+static int stl_st_expect(const char *what, int got, int want);
+
+static void stl_st_jobs_child(int fd, const char *marker, const char *value,
+                               const char *cap, int build_only, const char *mode)
+{
+    if (dup2(fd, STDOUT_FILENO) < 0 || dup2(fd, STDERR_FILENO) < 0) _exit(99);
+    close(fd);
+    if (setenv("TMPDIR", marker, 1)) _exit(99);
+    if (value ? setenv("ZCL_TOOLS_LINK_JOBS", value, 1) : unsetenv("ZCL_TOOLS_LINK_JOBS")) _exit(99);
+    if (cap ? setenv("ZCL_BUILD_MAX_JOBS", cap, 1) : unsetenv("ZCL_BUILD_MAX_JOBS")) _exit(99);
+    unsetenv(k_stl_x11_nested);
+    int rc = stl_build_phase(NULL, 0, build_only, mode, 0);
+    fflush(stdout);
+    fflush(stderr);
+    _exit(rc);
+}
+
+/* A regular file as TMPDIR prevents any accidental baseline build. The
+ * selected refusal must name the input, before scratch or helper work. */
+static int stl_st_invalid_jobs_one(const char *dir, int build_only, const char *mode,
+                                    const char *value, const char *cap, const char *needle)
+{
+    char marker[STL_PATH], log[STL_PATH];
+    if (ovf(snprintf(marker, sizeof marker, "%s/jobs-not-dir", dir), sizeof marker) ||
+        ovf(snprintf(log, sizeof log, "%s/jobs-refusal.log", dir), sizeof log)) return 1;
+    if (csr_write(marker, "retained") != 0) return 1;
+    int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return 1;
+    pid_t pid = fork();
+    if (pid == 0) stl_st_jobs_child(fd, marker, value, cap, build_only, mode);
+    close(fd);
+    if (pid < 0) return 1;
+    int rc = stl_wait(pid);
+    FILE *f = fopen(log, "r");
+    if (!f) return 1;
+    char text[STL_TEXT];
+    size_t n = fread(text, 1, sizeof text - 1u, f);
+    bool ok = !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    text[n] = '\0';
+    if (rc == 2 && ok && strstr(text, needle)) return 0;
+    fprintf(stderr, "check-standalone-tools-link selftest: invalid workers must refuse2 before scratch/helpers (build_only=%d mode=%s got=%d): %s\n",
+            build_only, mode, rc, text);
+    return 1;
+}
+
+static int stl_st_invalid_jobs(const char *dir)
+{
+    static const struct { const char *value, *cap, *needle; } cases[] = {
+        {"+1", NULL, "ZCL_TOOLS_LINK_JOBS"},
+        {"", NULL, "ZCL_TOOLS_LINK_JOBS"},
+        {"9999999999999999999999999", NULL, "ZCL_TOOLS_LINK_JOBS"},
+        {"2", "1", "request 2 exceeds ZCL_BUILD_MAX_JOBS cap 1"},
+        {NULL, "bad", "ZCL_BUILD_MAX_JOBS"}
+    };
+    int bad = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        bad |= stl_st_invalid_jobs_one(dir, 0, "FAIL", cases[i].value, cases[i].cap, cases[i].needle);
+        bad |= stl_st_invalid_jobs_one(dir, 0, "WARN", cases[i].value, cases[i].cap, cases[i].needle);
+        bad |= stl_st_invalid_jobs_one(dir, 1, "WARN", cases[i].value, cases[i].cap, cases[i].needle);
+    }
+    return bad;
+}
+
+static int stl_st_job_selection(void)
+{
+    static const struct {
+        const char *value, *cap;
+        int rc, jobs;
+    } cases[] = {
+        {NULL, NULL, 0, 4}, {NULL, "1", 0, 1}, {NULL, "2", 0, 2},
+        {NULL, "4", 0, 4}, {NULL, "16", 0, 4}, {NULL, "4294967295", 0, 4},
+        {"1", NULL, 0, 1}, {"2", NULL, 0, 2}, {"4", NULL, 0, 4},
+        {"8", NULL, 0, 8}, {"16", NULL, 0, 16}, {"01", NULL, 0, 1},
+        {"1", "1", 0, 1}, {"1", "2", 0, 1}, {"2", "2", 0, 2},
+        {"3", "2", 2, -73}, {"16", "1", 2, -73}, {"", NULL, 2, -73},
+        {"0", NULL, 2, -73}, {"-1", NULL, 2, -73}, {"+1", NULL, 2, -73},
+        {" 1", NULL, 2, -73}, {"1 ", NULL, 2, -73}, {"1\n", NULL, 2, -73},
+        {"1junk", NULL, 2, -73}, {"0x1", NULL, 2, -73}, {"17", NULL, 2, -73},
+        {"4294967295", NULL, 2, -73}, {"4294967296", NULL, 2, -73},
+        {"99999999999999999999999", NULL, 2, -73},
+        {NULL, "", 2, -73}, {NULL, "0", 2, -73}, {NULL, "-1", 2, -73},
+        {NULL, "+2", 2, -73}, {NULL, "2x", 2, -73}, {NULL, "4294967296", 2, -73}
+    };
+    int bad = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        int jobs = -73;
+        int rc = stl_select_jobs(cases[i].value, cases[i].cap, &jobs);
+        bad |= stl_st_expect("worker selector status", rc, cases[i].rc);
+        bad |= stl_st_expect("worker selector exact count / unchanged error output", jobs, cases[i].jobs);
+    }
+    return bad;
+}
+
+static int stl_st_dispatch_log(const char *path, int jobs, int failure)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 1;
+    unsigned seen = 0;
+    int bad = 0, count = 0;
+    char line[128], expected[128];
+    static const char *const names[] = {"first", "bad", "last"};
+    while (fgets(line, sizeof line, f)) {
+        int found = -1;
+        for (int i = 0; i < 3; i++) {
+            snprintf(expected, sizeof expected, "%s:-j%d\n", names[i], jobs);
+            if (strcmp(line, expected) == 0) found = i;
+        }
+        if (found < 0) { bad = 1; continue; }
+        unsigned bit = 1u << (unsigned)found;
+        if (seen & bit) bad = 1;
+        seen |= bit;
+        if (jobs == 1 && found != count && failure) bad = 1;
+        count++;
+    }
+    if (ferror(f)) bad = 1;
+    if (fclose(f) != 0) bad = 1;
+    unsigned want = failure ? 7u : 5u;
+    return bad || seen != want;
+}
+
+/* Real GNU Make, not a fake launcher: independent goals expose the exact
+ * forwarded worker flag, and -k must still finish the final goal after bad. */
+static void stl_st_make_child(int fd, const char *absolute, const char *value,
+                               const char *cap, int failure)
+{
+    if (chdir(absolute) != 0 || dup2(fd, STDOUT_FILENO) < 0 || dup2(fd, STDERR_FILENO) < 0) _exit(99);
+    close(fd);
+    if (setenv("TMPDIR", absolute, 1)) _exit(99);
+    if (value ? setenv("ZCL_TOOLS_LINK_JOBS", value, 1) : unsetenv("ZCL_TOOLS_LINK_JOBS")) _exit(99);
+    if (cap ? setenv("ZCL_BUILD_MAX_JOBS", cap, 1) : unsetenv("ZCL_BUILD_MAX_JOBS")) _exit(99);
+    unsetenv(k_stl_x11_nested);
+    char targets[3][STL_TGT] = {"first", "bad", "last"};
+    if (!failure) snprintf(targets[1], sizeof targets[1], "last");
+    int rc = stl_build_phase(targets, failure ? 3 : 2, 1, "FAIL", 0);
+    fflush(stdout);
+    fflush(stderr);
+    _exit(rc);
+}
+
+static int stl_st_make_case(const char *dir, const char *value, const char *cap,
+                            int jobs, int failure)
+{
+    char cwd[STL_PATH], absolute[STL_PATH], log[STL_PATH], dispatch[STL_PATH];
+    if (!getcwd(cwd, sizeof cwd)) return 1;
+    int n = dir[0] == '/' ? snprintf(absolute, sizeof absolute, "%s", dir)
+                          : snprintf(absolute, sizeof absolute, "%s/%s", cwd, dir);
+    if (ovf(n, sizeof absolute) || stl_st_path(absolute, "batch.log", log, sizeof log) ||
+        stl_st_path(absolute, "dispatch.log", dispatch, sizeof dispatch)) return 1;
+    if (csr_write(dispatch, "") != 0) return 1;
+    int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return 1;
+    pid_t pid = fork();
+    if (pid == 0) stl_st_make_child(fd, absolute, value, cap, failure);
+    close(fd);
+    if (pid < 0) return 1;
+    int bad = stl_st_expect("real make failure remains gate violation", stl_wait(pid), failure ? 1 : 0);
+    bad |= stl_st_expect("real make exact worker flag, fanout and keep-going", stl_st_dispatch_log(dispatch, jobs, failure), 0);
+    return bad;
+}
+
+static int stl_st_make_jobs(const char *dir)
+{
+    int bad = stl_st_put(dir, "Makefile",
+        ".PHONY: first bad last\n"
+        "first last:\n"
+        "\t@printf '%s:%s\\n' '$@' '$(filter -j%,$(MAKEFLAGS))' >>dispatch.log\n"
+        "bad:\n"
+        "\t@printf '%s:%s\\n' '$@' '$(filter -j%,$(MAKEFLAGS))' >>dispatch.log\n"
+        "\t@false\n");
+    if (bad) return bad;
+    static const struct { const char *value, *cap; int jobs; } cases[] = {
+        {"1", NULL, 1}, {"2", NULL, 2}, {NULL, NULL, 4},
+        {NULL, "1", 1}, {NULL, "2", 2}
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        bad |= stl_st_make_case(dir, cases[i].value, cases[i].cap, cases[i].jobs, 0);
+        bad |= stl_st_make_case(dir, cases[i].value, cases[i].cap, cases[i].jobs, 1);
+    }
+    return bad;
+}
 
 static int stl_st_put(const char *dir, const char *name, const char *text)
 {
@@ -218,7 +403,10 @@ int check_standalone_tools_link_selftest(void)
     char *bogus[] = { (char *)"--bogus" };
     if (stl_mkdtemp(dir, sizeof dir, "z23-lint-stl-selftest") != 0)
         return st_ok(1, "check_standalone_tools_link selftest: no scratch directory\n");
-    int bad = stl_st_scan(dir);
+    int bad = stl_st_invalid_jobs(dir);
+    bad |= stl_st_job_selection();
+    bad |= stl_st_make_jobs(dir);
+    bad |= stl_st_scan(dir);
     bad |= stl_st_fuzz(dir);
     bad |= stl_st_catalog(dir);
     bad |= stl_st_link_log(dir);

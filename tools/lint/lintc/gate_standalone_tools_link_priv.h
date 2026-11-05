@@ -30,6 +30,12 @@ int stl_windows_covers(const char *catalog, const char *row, const char *src);
 int stl_wait(pid_t pid);
 int stl_mkdtemp(char *dir, size_t cap, const char *tag);
 int stl_nonempty(const char *path);
+/* Pure worker selection except diagnostics: 0 selected, 2 invalid input.
+ * NULL override uses the single native default4 (old composed effective
+ * width; replaces direct-call half-grant4..16). Explicit1..16 is exact.
+ * The documented platform cap may lower automatic jobs, never an explicit
+ * request: an explicit over-cap request refuses. out is unchanged on error. */
+int stl_select_jobs(const char *override, const char *cap, int *out);
 void stl_copy_to(FILE *out, const char *path);
 int stl_x11_linkable(void);
 int stl_x11_link_check(const char *dir);

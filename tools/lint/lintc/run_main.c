@@ -84,8 +84,8 @@ static int clamp(int v, int lo, int hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
-/* The driver already spends the host across gates; nested sweeps get a
- * bounded share (3/8 and 5/8 of the host), everything else one worker. */
+/* Nested sweeps get a bounded share (3/8 and 5/8 of the host). Standalone
+ * linking owns its capped native default; the driver never injects one. */
 static void setup_env(char *const *gates, int n, const char *bin_dir)
 {
     long host = sysconf(_SC_NPROCESSORS_ONLN);
@@ -100,7 +100,6 @@ static void setup_env(char *const *gates, int n, const char *bin_dir)
     } else {
         env_default("ZCL_CC_JOBS", "1");
     }
-    env_default("ZCL_TOOLS_LINK_JOBS", "1");
     env_default("ZCL_FUZZ_REPLAY_JOBS", "1");
     (void)setenv("ZCL_LINT_PRODUCTION_SCAN", "1", 1);
     (void)setenv("ZCL_LINT_BIN_DIR", bin_dir, 1);
