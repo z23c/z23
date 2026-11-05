@@ -519,6 +519,38 @@ static bool fe_admit_checks(struct zcl_command_reply *reply,
     return true;
 }
 
+/* A row for a key the head revokes would append and answer success while the
+ * gate kept refusing the machine. Refused here so the reply tells the truth,
+ * and a head this box cannot trust refuses, as it does at import. */
+static bool fe_admit_not_revoked(struct zcl_command_reply *reply,
+                                 const struct fleet_receipt *receipt,
+                                 const uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES])
+{
+    struct fleet_head *head = zcl_malloc(sizeof(*head), "fleet-admit-head");
+    const char *why = NULL;
+    enum fleet_head_state state = head ? fleet_head_load(pubkey, head, &why)
+                                       : FLEET_HEAD_BAD;
+    bool revoked = state == FLEET_HEAD_OK &&
+                   (fleet_head_revokes(head, receipt->box_pubkey) ||
+                    fleet_head_revokes(head, receipt->signer_pubkey));
+    free(head);
+    if (state == FLEET_HEAD_BAD) {
+        fe_fail(reply, "FLEET_HEAD_UNREADABLE", "resolve",
+                "this box holds a roster head it cannot trust, so it cannot "
+                "tell whether this machine was revoked and will not admit it. "
+                "Import the newest good head with `fleet import` first.",
+                why ? why : FLEET_ENROL_WHY_HEAD_UNREADABLE);
+        return false;
+    }
+    if (revoked)
+        fe_fail(reply, "FLEET_BOX_REVOKED", "authorize",
+                "the roster head on this box revokes this machine. To let it "
+                "back, mint a higher head without it with `fleet roster head`, "
+                "import that here with `fleet import`, then admit again.",
+                FLEET_ENROL_WHY_BOX_REVOKED);
+    return !revoked;
+}
+
 static void fe_admit_bridge(struct zcl_command_reply *reply,
                             const struct fleet_receipt *receipt, uint16_t port,
                             bool wanted)
@@ -645,7 +677,8 @@ static void fe_admit(const struct zcl_command_request *request,
     }
     if (!fe_anchor_gate(request, reply, pubkey, &anchor))
         return;
-    if (!fe_admit_checks(reply, &receipt, pubkey, &scan, &port))
+    if (!fe_admit_not_revoked(reply, &receipt, pubkey) ||
+        !fe_admit_checks(reply, &receipt, pubkey, &scan, &port))
         return;
     if (!fleet_machine_mint(receipt_wire, receipt_len, now, port, seed, pubkey,
                             sealed, sizeof(sealed), &why) ||
