@@ -282,6 +282,7 @@ ZCL_MODULE_CAPABILITY("engine/models/src/database_migrate.c", CAP_FS_READ|CAP_CL
 ZCL_MODULE_CAPABILITY("engine/models/src/database_migrate_features.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/database_migrate_features_v67_up.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/database_modes.c", CAP_CLOCK|CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/models/src/database_progress.c", CAP_NONE, "registers callbacks on a SQLite connection through the harmless progress-handler call; no file, clock or process access")
 ZCL_MODULE_CAPABILITY("engine/models/src/database_owner_lease.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/database_runtime_ops.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/database_schema_preflight.c", CAP_FS_READ|CAP_CLOCK|CAP_FS_WRITE, "")

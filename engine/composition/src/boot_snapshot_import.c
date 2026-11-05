@@ -19,6 +19,7 @@
 #include "chain/checkpoints.h"
 #include "coins/utxo_commitment.h"
 #include "models/database.h"
+#include "models/database_progress.h"
 #include "platform/directory_transaction.h"
 #include "services/reindex_epilogue.h"
 #include "services/chain_restore_boot_snapshot.h"
@@ -861,7 +862,7 @@ static bool snapshot_import_settle_txn(struct node_db *ndb, bool ok,
     if (!committed)
         sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL);
     sqlite3_exec(ndb->db, "DETACH DATABASE snapsrc", NULL, NULL, NULL);
-    sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
+    db_progress_remove(ndb->db, snapshot_import_progress, NULL);
     return committed;
 }
 
@@ -1012,8 +1013,8 @@ bool boot_import_snapshot_db(struct node_db *ndb,
     /* Report only measured SQLite VM progress while the bulk copy and
      * commitment scan run. A timer-based pump falsely kept a genuinely hung
      * INSERT alive forever once watchdog progress exemptions became active. */
-    sqlite3_progress_handler(ndb->db, 50000,
-                             snapshot_import_progress, NULL);
+    (void)db_progress_add(ndb->db, 50000,
+                          snapshot_import_progress, NULL);
     ok = snapshot_import_bulk_copy(ndb);
     /* WRITE-TIME VERIFICATION (mirrors utxo_recovery_restore.c):
      * before COMMIT, recompute the SHA3 over the just-installed set. At the

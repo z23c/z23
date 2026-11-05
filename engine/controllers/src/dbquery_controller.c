@@ -22,6 +22,7 @@
 #include "rpc/server.h"
 #include "controllers/strong_params.h"
 #include "models/database.h"
+#include "models/database_progress.h"
 #include "config/runtime.h"
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
@@ -363,12 +364,16 @@ bool dbquery_execute(sqlite3 *db, const char *sql_in, int64_t limit,
         .start_ms = now_ms(),
         .budget_ms = DBQUERY_BUDGET_MS,
     };
-    sqlite3_progress_handler(db, DBQUERY_PROGRESS_OPS_TICK,
-                             dbq_progress_cb, &pctx);
+    /* No budget, no query: an operator query must never run unbounded. */
+    if (!db_progress_add(db, DBQUERY_PROGRESS_OPS_TICK,
+                         dbq_progress_cb, &pctx)) {
+        json_set_str(result, "dbquery: time budget unavailable");
+        LOG_FAIL("diag", "dbquery: time budget unavailable");
+    }
 
     sqlite3_stmt *stmt = NULL;
     if (!node_db_prepare_readonly_stmt(db, executed, &stmt)) {
-        sqlite3_progress_handler(db, 0, NULL, NULL);
+        db_progress_remove(db, dbq_progress_cb, &pctx);
         json_set_str(result, "dbquery: prepare failed");
         LOG_FAIL("diag", "dbquery: prepare failed");
     }
@@ -392,7 +397,7 @@ bool dbquery_execute(sqlite3 *db, const char *sql_in, int64_t limit,
     if (dbq_step_failed(rc)) {
         const char *err = sqlite3_errmsg(db);
         sqlite3_finalize(stmt);
-        sqlite3_progress_handler(db, 0, NULL, NULL);
+        db_progress_remove(db, dbq_progress_cb, &pctx);
         json_set_str(result, "dbquery: step failed");
         LOG_FAIL("diag", "dbquery: step failed (rc=%d): %s",
                  rc, err ? err : "(null)");
@@ -402,7 +407,7 @@ bool dbquery_execute(sqlite3 *db, const char *sql_in, int64_t limit,
 
     int64_t elapsed = now_ms() - pctx.start_ms;
     sqlite3_finalize(stmt);
-    sqlite3_progress_handler(db, 0, NULL, NULL);
+    db_progress_remove(db, dbq_progress_cb, &pctx);
 
     json_push_kv(result, "rows", &rows_arr);
     json_free(&rows_arr);

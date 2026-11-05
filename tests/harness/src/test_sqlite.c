@@ -11,6 +11,7 @@
 #include "models/peer.h"
 #include "models/database_internal.h"
 #include "models/database_lifetime.h"
+#include "models/database_progress.h"
 #include "models/database_owner_lease.h"
 #include "controllers/snapshot_controller.h"
 #include "controllers/sync_controller.h"
@@ -4437,6 +4438,79 @@ static void check_sqlite_rebuild_stop_spares_other_work(int *failures)
     else { printf("FAIL\n"); (*failures)++; }
 }
 
+/* A budget on the shared connection (what dbquery installs) must outlive an
+ * index rebuild's own handler on the same connection, and a budget another
+ * thread registered must not interrupt the rebuild's statements. */
+#define PROGRESS_OWNER_LONG_SQL \
+    "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n" \
+    " WHERE x < 3000000) SELECT count(*) FROM n"
+
+static int progress_owner_budget_cb(void *arg)
+{
+    return *(const volatile int *)arg;
+}
+
+static int progress_owner_foreign_cb(void *arg)
+{
+    (void)arg;
+    return 1;
+}
+
+static void *progress_owner_foreign_add(void *arg)
+{
+    return db_progress_add(arg, 1000, progress_owner_foreign_cb, NULL) ?
+        arg : NULL;
+}
+
+static int progress_owner_long_rc(sqlite3 *db)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, PROGRESS_OWNER_LONG_SQL, -1, &st, NULL) !=
+        SQLITE_OK)
+        return -1;
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc;
+}
+
+static bool progress_owner_run(struct node_db *ndb)
+{
+    volatile int expired = 0;
+    pthread_t other;
+    void *added = NULL;
+    bool ok = db_progress_add(ndb->db, 1000, progress_owner_budget_cb,
+                              (void *)&expired);
+    ok = ok && pthread_create(&other, NULL, progress_owner_foreign_add,
+                              ndb->db) == 0;
+    ok = ok && pthread_join(other, &added) == 0 && added;
+    bool rebuilt = ok && node_db_rebuild_indexes(ndb);
+    /* Nothing edits the registry between the rebuild and this query, so a
+     * budget the rebuild erased is not quietly reinstalled by a later add or
+     * remove. The other thread's client never fires on this thread. */
+    expired = 1;
+    int held = ok ? progress_owner_long_rc(ndb->db) : -1;
+    db_progress_remove(ndb->db, progress_owner_foreign_cb, NULL);
+    db_progress_remove(ndb->db, progress_owner_budget_cb, (void *)&expired);
+    int freed = ok ? progress_owner_long_rc(ndb->db) : -1;
+    return rebuilt && held == SQLITE_INTERRUPT && freed == SQLITE_ROW;
+}
+
+static void check_sqlite_progress_handler_owners(int *failures)
+{
+    printf("SQLite progress budget survives an index rebuild on the shared "
+           "connection... ");
+    char dir[256], path[352];
+    test_make_tmpdir(dir, sizeof(dir), "sqlite", "progress_owner");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db ndb;
+    bool ok = node_db_open(&ndb, path) && node_db_ibd_turbo_mode(&ndb);
+    ok = ok && progress_owner_run(&ndb);
+    node_db_close(&ndb);
+    test_rm_rf_recursive(dir);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); (*failures)++; }
+}
+
 int test_sqlite(void) {
     int failures = 0;
 
@@ -4689,6 +4763,7 @@ int test_sqlite(void) {
     failures += check_sqlite_54_tx_index_shutdown_abort();
     check_sqlite_rebuild_stops_on_shutdown(&failures);
     check_sqlite_rebuild_stop_spares_other_work(&failures);
+    check_sqlite_progress_handler_owners(&failures);
 
 #if !defined(_WIN32)
     failures += check_sqlite_tx_statement_ownership();

@@ -28,6 +28,7 @@
 
 #include "models/database.h"
 #include "models/database_internal.h"
+#include "models/database_progress.h"
 #include "platform/time_compat.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
@@ -191,15 +192,15 @@ void db_long_op_start(sqlite3 *db, struct db_long_op_progress *progress,
     LOG_INFO("db", "db: %s start path=%s",
              progress->op ? progress->op : "long_op",
              progress->path ? progress->path : "(unknown)");
-    sqlite3_progress_handler(db, ZCL_DB_LONG_OP_PROGRESS_OPS,
-                             db_long_op_progress_cb, progress);
+    (void)db_progress_add(db, ZCL_DB_LONG_OP_PROGRESS_OPS,
+                          db_long_op_progress_cb, progress);
 }
 
 void db_long_op_finish(sqlite3 *db, struct db_long_op_progress *progress,
                        bool ok, int rc)
 {
-    if (db)
-        sqlite3_progress_handler(db, 0, NULL, NULL);
+    if (db && progress && progress->log_enabled)
+        db_progress_remove(db, db_long_op_progress_cb, progress);
     db_long_op_unpublish();
     if (!progress || !progress->log_enabled)
         return;
