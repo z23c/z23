@@ -5655,6 +5655,27 @@ int dl_lint_candidate(const struct dl_dirs *d, struct dl_row *row)
     return rc != 0 ? rc : dl_lint_new_source(d, row);
 }
 
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* Escape arbitrary child bytes to ASCII, so neither byte limits nor bad
+ * child output can put an incomplete UTF-8 sequence in a JSON detail. */
+static bool dl_lint_append_body(char *body, size_t cap, size_t *used, const char *line)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    for (const unsigned char *p = (const unsigned char *)line; *p; p++) {
+        unsigned char c = *p;
+        size_t n = c >= 0x7f ? 4u : 1u;
+        if (n > cap - 1 - *used) { body[*used] = '\0'; return false; }
+        if (n == 1) body[(*used)++] = c < 0x20 ? ' ' : (char)c;
+        else {
+            body[(*used)++] = '\\'; body[(*used)++] = 'x';
+            body[(*used)++] = hex[c >> 4]; body[(*used)++] = hex[c & 15];
+        }
+    }
+    body[*used] = '\0';
+    return true;
+}
+#endif
+
 #if !defined(_WIN32) && (defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING))
 /* Only lint's own failed-gate frame can supply the body; PASS output and
  * the verdict summary precede it and are not the gate's diagnosis. */
@@ -5688,25 +5709,6 @@ static bool dl_lint_frame(const char *line, char *gate, size_t cap)
     if (!(*p == '\0' || (*p == '\n' && p[1] == '\0') ||
           (*p == '\r' && p[1] == '\n' && p[2] == '\0'))) return false;
     (void)snprintf(gate, cap, "%.*s", (int)n, name);
-    return true;
-}
-
-/* Escape arbitrary child bytes to ASCII, so neither byte limits nor bad
- * child output can put an incomplete UTF-8 sequence in a JSON detail. */
-static bool dl_lint_append_body(char *body, size_t cap, size_t *used, const char *line)
-{
-    static const char hex[] = "0123456789ABCDEF";
-    for (const unsigned char *p = (const unsigned char *)line; *p; p++) {
-        unsigned char c = *p;
-        size_t n = c >= 0x7f ? 4u : 1u;
-        if (n > cap - 1 - *used) { body[*used] = '\0'; return false; }
-        if (n == 1) body[(*used)++] = c < 0x20 ? ' ' : (char)c;
-        else {
-            body[(*used)++] = '\\'; body[(*used)++] = 'x';
-            body[(*used)++] = hex[c >> 4]; body[(*used)++] = hex[c & 15];
-        }
-    }
-    body[*used] = '\0';
     return true;
 }
 
