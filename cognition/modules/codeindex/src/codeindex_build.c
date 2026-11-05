@@ -1203,6 +1203,32 @@ static bool ci_pages_import_stage(struct ci_rebuild_job *job, int dirfd,
     return ok;
 }
 
+static struct ci_store *ci_pages_fresh_published(struct codeindex *ci)
+{
+    struct ci_store *fresh = ci_store_open(ci->root);
+    struct codeindex view = {.store = fresh};
+    (void)snprintf(view.root, sizeof(view.root), "%s", ci->root);
+    bool valid = false, stale = true;
+    bool ok = fresh && ci_store_retrieval_projection_is_valid(fresh, &valid) && valid &&
+        ci_codeindex_source_view_is_stale(&view, &stale) && !stale;
+    ci_merkle_free(view.pending_merkle);
+    if (!ok && fresh) ci_store_close(fresh);
+    return ok ? fresh : NULL;
+}
+
+static bool ci_pages_publish_locked(struct ci_rebuild_job *job, int dirfd,
+                                    const struct ci_page *pages, size_t count,
+                                    const uint8_t artifact[32])
+{
+    struct ci_store *fresh = ci_pages_fresh_published(job->ci);
+    bool ok = fresh && ci_rebuild_refresh_inventory(job);
+    if (ok) memcpy(job->built_dep_stat_root, job->current_dep_stat, 32);
+    if (ok) ok = ci_pages_import_stage(job, dirfd, fresh, pages, count, artifact);
+    if (fresh) ci_store_close(fresh);
+    return ok && ci_rebuild_recheck_fresh(job) && ci_rebuild_publish(job, dirfd) &&
+           ci_rebuild_reopen(job, dirfd);
+}
+
 bool codeindex_pages_import_hints(struct codeindex *ci, const void *manifest,
     size_t manifest_size, const struct ci_page *pages, size_t count,
     uint8_t artifact_root[32])
@@ -1218,19 +1244,7 @@ bool codeindex_pages_import_hints(struct codeindex *ci, const void *manifest,
     if (!ci_rebuild_lock_open(ci->root, dir, &dirfd, &lockfd)) return false;
     struct ci_rebuild_job job = {.ci = ci, .stagefd = -1,
         .build_start_ms = platform_time_monotonic_ms(), .failure = "page hint import failed"};
-    struct ci_store *fresh = ci_store_open(ci->root);
-    struct codeindex view = {.store = fresh};
-    (void)snprintf(view.root, sizeof(view.root), "%s", ci->root);
-    bool valid = false, stale = true;
-    bool ok = fresh && ci_store_retrieval_projection_is_valid(fresh, &valid) && valid &&
-        ci_codeindex_source_view_is_stale(&view, &stale) && !stale;
-    ci_merkle_free(view.pending_merkle);
-    if (ok) ok = ci_rebuild_refresh_inventory(&job);
-    if (ok) memcpy(job.built_dep_stat_root, job.current_dep_stat, 32);
-    if (ok) ok = ci_pages_import_stage(&job, dirfd, fresh, pages, count, artifact);
-    if (fresh) ci_store_close(fresh);
-    if (ok) ok = ci_rebuild_recheck_fresh(&job) && ci_rebuild_publish(&job, dirfd) &&
-                 ci_rebuild_reopen(&job, dirfd);
+    bool ok = ci_pages_publish_locked(&job, dirfd, pages, count, artifact);
     ci_rebuild_release(&job, dirfd, lockfd);
     if (ok) memcpy(artifact_root, artifact, sizeof(artifact));
     return ok;

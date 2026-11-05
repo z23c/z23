@@ -233,16 +233,10 @@ static bool page_artifact_ok(const char *root, const struct ci_page *row)
     return ok;
 }
 
-bool ci_pages_copy(struct ci_store *from, struct ci_store *to)
+static bool page_copy_rows(struct ci_store *from, struct ci_store *to)
 {
-    if (!from || !to) return false;
-    ci_store_lock(from);
-    bool valid = false;
-    bool ok = ci_store_retrieval_projection_is_valid(from, &valid) && valid;
-    int state = ok ? page_state(ci_store_db(from)) : -1;
-    if (state < 0) ok = false;
     sqlite3_stmt *read = NULL, *write = NULL;
-    if (ok) ok = sqlite3_prepare_v2(ci_store_db(from),
+    bool ok = sqlite3_prepare_v2(ci_store_db(from),
         "SELECT directory,tree_oid,source_commit,body,artifact_root FROM pages "
         "ORDER BY directory,tree_oid,source_commit,artifact_root", -1, &read, NULL) == SQLITE_OK &&
         sqlite3_prepare_v2(ci_store_db(to),
@@ -258,35 +252,24 @@ bool ci_pages_copy(struct ci_store *from, struct ci_store *to)
     if (ok && rc != SQLITE_DONE) ok = false;
     if (read && sqlite3_finalize(read) != SQLITE_OK) ok = false;
     if (write && sqlite3_finalize(write) != SQLITE_OK) ok = false;
-    if (ok) ok = ci_pages_set_state(to, state);
+    return ok;
+}
+
+bool ci_pages_copy(struct ci_store *from, struct ci_store *to)
+{
+    if (!from || !to) return false;
+    ci_store_lock(from);
+    bool valid = false;
+    bool ok = ci_store_retrieval_projection_is_valid(from, &valid) && valid;
+    int state = ok ? page_state(ci_store_db(from)) : -1;
+    ok = state >= 0 && page_copy_rows(from, to) && ci_pages_set_state(to, state);
     ci_store_unlock(from);
     return ok;
 }
 
-int codeindex_pages_list(struct codeindex *ci, const char *directory,
-                         struct ci_page *out, int cap, bool *prior_untrusted)
+static int page_collect(sqlite3 *db, const char *directory, struct ci_page *rows, int cap)
 {
-    if (prior_untrusted) *prior_untrusted = false;
-    if (!ci || !ci->store || !directory || !directory[0] || !out || !prior_untrusted || cap < 1 || cap > 256)
-        return -1;
-    struct ci_page *rows = zcl_calloc((size_t)cap, sizeof(*rows), "codeindex page results");
-    if (!rows) return -1;
-    ci_store_lock(ci->store);
-    bool valid = false;
-    if (!ci_store_retrieval_projection_is_valid(ci->store, &valid) || !valid) {
-        ci_store_unlock(ci->store);
-        free(rows);
-        return -1;
-    }
-    int state = page_state(ci_store_db(ci->store));
-    if (state < 0) {
-        ci_store_unlock(ci->store);
-        free(rows);
-        return -1;
-    }
-    *prior_untrusted = state == 2;
     sqlite3_stmt *s = NULL;
-    sqlite3 *db = ci_store_db(ci->store);
     bool ok = sqlite3_prepare_v2(db, "SELECT directory,tree_oid,source_commit,body,artifact_root "
         "FROM pages WHERE directory=?1 ORDER BY tree_oid COLLATE BINARY,"
         "source_commit COLLATE BINARY,artifact_root", -1, &s, NULL) == SQLITE_OK &&
@@ -298,12 +281,34 @@ int codeindex_pages_list(struct codeindex *ci, const char *directory,
     }
     if (ok && rc != SQLITE_DONE) ok = false;
     if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok ? count : -1;
+}
+
+static int page_collect_verified(struct codeindex *ci, const char *directory,
+                                 struct ci_page *rows, int cap, bool *prior_untrusted)
+{
+    ci_store_lock(ci->store);
+    bool valid = false;
+    bool ok = ci_store_retrieval_projection_is_valid(ci->store, &valid) && valid;
+    int state = ok ? page_state(ci_store_db(ci->store)) : -1;
+    if (state >= 0) *prior_untrusted = state == 2;
+    int count = state >= 0 ? page_collect(ci_store_db(ci->store), directory, rows, cap) : -1;
     ci_store_unlock(ci->store);
-    bool artifact_missing = false;
-    for (int i = 0; ok && i < count; i++) {
-        if (!page_artifact_ok(ci->root, &rows[i])) { ok = false; artifact_missing = true; }
-    }
-    if (ok) memcpy(out, rows, (size_t)count * sizeof(*out));
+    for (int i = 0; i < count; i++)
+        if (!page_artifact_ok(ci->root, &rows[i])) return -2;
+    return count;
+}
+
+int codeindex_pages_list(struct codeindex *ci, const char *directory,
+                         struct ci_page *out, int cap, bool *prior_untrusted)
+{
+    if (prior_untrusted) *prior_untrusted = false;
+    if (!ci || !ci->store || !directory || !directory[0] || !out || !prior_untrusted || cap < 1 || cap > 256)
+        return -1;
+    struct ci_page *rows = zcl_calloc((size_t)cap, sizeof(*rows), "codeindex page results");
+    if (!rows) return -1;
+    int count = page_collect_verified(ci, directory, rows, cap, prior_untrusted);
+    if (count >= 0) memcpy(out, rows, (size_t)count * sizeof(*out));
     free(rows);
-    return ok ? count : artifact_missing ? -2 : -1;
+    return count;
 }
