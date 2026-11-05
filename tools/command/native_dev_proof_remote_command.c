@@ -127,9 +127,8 @@ void zcl_native_handle_dev_proof_remote(const struct zcl_command_request *reques
     char root[4096], destination[4096], why[256] = "remote_invalid_input";
     const struct zcl_command_context *ctx = request ? request->context : NULL;
     if (!ctx || ctx->authority_ceiling < ZCL_COMMAND_AUTH_OWNER ||
-        !ctx->source_root ||
         !remote_assignment(request->input, &a) ||
-        !platform_directory_canonical_real(ctx->source_root, root, sizeof(root)) ||
+        !platform_directory_canonical_real(zcl_native_source_root(request), root, sizeof(root)) ||
         !platform_directory_canonical_real(a.destination, destination, sizeof(destination)) ||
         strcmp(root, destination) != 0) {
         remote_fail(reply, "input", why, false, false);
