@@ -592,7 +592,7 @@ int test_catalog_lag_exceeded(void)
     failures += cl_mutant_tests();
 
     blocker_reset_for_testing();
-    failures += cl_mutant_tests();
+    catalog_lag_exceeded_test_reset();
     printf("catalog_lag_exceeded: %d failures\n", failures);
     return failures;
 }
