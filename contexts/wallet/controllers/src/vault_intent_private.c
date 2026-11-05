@@ -213,7 +213,7 @@ static bool vip_effect_parse(const struct json_value *value,
         return false;
 
     if (!vip_effect_memo_fields_ok(value))
-        return false;
+        return false; // raw-return-ok:the caller reports INVALID_EFFECT
     bool is_z = wallet_addr_is_sapling(to);
     const char *memo_hex = vip_memo_nonempty(
         json_get_str(json_get(value, "memo_hex")));
