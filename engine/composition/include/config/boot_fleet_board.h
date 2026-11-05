@@ -235,6 +235,10 @@ void boot_fleet_board_register_rpc(struct rpc_table *table);
 #define FLEET_BOARD_FLEET_ANSWER_POSTS_MAX 32u
 #define FLEET_BOARD_FLEET_INBOX_MAX 8u
 #define FLEET_BOARD_FLEET_PEERS_MAX 64u
+/* Paired peers and roster targets are planned apart, each up to PEERS_MAX per
+ * tick, and share one cursor table. It holds both, or least-recently-used
+ * eviction would drop the very cursor each pull is about to use. */
+#define FLEET_BOARD_FLEET_CURSOR_SLOTS (2u * FLEET_BOARD_FLEET_PEERS_MAX)
 
 void boot_fleet_board_fleet_wire(struct boot_svc_ctx *svc);
 void boot_fleet_board_fleet_shutdown(void);

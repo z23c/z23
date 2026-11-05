@@ -87,7 +87,8 @@ alternates with forward pulls until it is stored, refused for good, or no
 longer served, and never holds back the posts after it. The cursor file is
 synced but the row store may lose its last rows to a power cut, so every
 start sweeps each peer's rows up to its saved cursor and takes the ones this
-box no longer holds. The table keeps 64 peers; a new peer past that evicts
+box no longer holds. The table keeps 128 peers, every key the planners can name
+in a tick; a new peer past that evicts
 the one idle longest, which costs that peer one re-pull. An answer returns
 and verifies at most 32 matching rows in arrival order. SQL may inspect more
 entries for scope and expiry filters, so database work is not constant as

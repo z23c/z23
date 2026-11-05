@@ -88,7 +88,7 @@ static zcl_mutex_t g_lock;
 static zcl_once_t g_lock_once = ZCL_ONCE_INIT;
 static struct boot_svc_ctx *g_svc; /* borrowed; set by wire() */
 static struct board_inbox_slot g_inbox[FLEET_BOARD_FLEET_INBOX_MAX];
-static struct board_cursor g_cursors[FLEET_BOARD_FLEET_PEERS_MAX];
+static struct board_cursor g_cursors[FLEET_BOARD_FLEET_CURSOR_SLOTS];
 static bool g_cursors_loaded;
 static struct liveness_contract g_contract;
 static supervisor_child_id g_child = SUPERVISOR_INVALID_ID;
@@ -664,7 +664,7 @@ bool boot_fleet_board_fleet_register_service(void)
 static struct board_cursor *board_cursor_slot(const uint8_t box_id[32],
                                               bool create)
 {
-    return board_cursor_find(g_cursors, FLEET_BOARD_FLEET_PEERS_MAX, box_id,
+    return board_cursor_find(g_cursors, FLEET_BOARD_FLEET_CURSOR_SLOTS, box_id,
                              create);
 }
 
@@ -692,7 +692,7 @@ static bool board_cursor_file(char *out, size_t cap)
 static void board_cursors_load(void)
 {
     char path[1200];
-    struct board_cursor snap[FLEET_BOARD_FLEET_PEERS_MAX];
+    struct board_cursor snap[FLEET_BOARD_FLEET_CURSOR_SLOTS];
     size_t n = 0;
     bool loaded = false;
     board_lock();
@@ -701,14 +701,14 @@ static void board_cursors_load(void)
     if (loaded)
         return;
     if (board_cursor_file(path, sizeof path))
-        n = board_cursor_read(path, snap, FLEET_BOARD_FLEET_PEERS_MAX);
+        n = board_cursor_read(path, snap, FLEET_BOARD_FLEET_CURSOR_SLOTS);
     board_lock();
     if (!g_cursors_loaded) {
-        for (size_t i = 0; i < n && i < FLEET_BOARD_FLEET_PEERS_MAX; i++)
+        for (size_t i = 0; i < n && i < FLEET_BOARD_FLEET_CURSOR_SLOTS; i++)
             g_cursors[i] = snap[i];
         /* The file was synced; the row store, at synchronous=NORMAL, may
          * have lost rows a power cut after it. Offer them all again. */
-        board_cursor_arm_sweeps(g_cursors, FLEET_BOARD_FLEET_PEERS_MAX);
+        board_cursor_arm_sweeps(g_cursors, FLEET_BOARD_FLEET_CURSOR_SLOTS);
         g_cursors_loaded = true;
     }
     board_unlock();
@@ -757,7 +757,7 @@ static void board_cursor_load(const uint8_t box_id[32],
  * stores back. */
 static void board_cursor_store(const struct board_cursor *in)
 {
-    struct board_cursor snap[FLEET_BOARD_FLEET_PEERS_MAX];
+    struct board_cursor snap[FLEET_BOARD_FLEET_CURSOR_SLOTS];
     size_t n = 0;
     board_lock();
     struct board_cursor *c = board_cursor_slot(in->peer_box_id, false);
@@ -766,7 +766,7 @@ static void board_cursor_store(const struct board_cursor *in)
         *c = *in;
         c->seen = seen; /* the copy's epoch reset zeroed its own */
     }
-    for (size_t i = 0; i < FLEET_BOARD_FLEET_PEERS_MAX; i++) {
+    for (size_t i = 0; i < FLEET_BOARD_FLEET_CURSOR_SLOTS; i++) {
         if (g_cursors[i].used)
             snap[n++] = g_cursors[i];
     }

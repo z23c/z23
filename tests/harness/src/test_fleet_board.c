@@ -7687,14 +7687,22 @@ static int test_fleet_board_fleet_cursor_table_full(void)
         boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
                                                    w.f.genesis, FBW_NOW);
         boot_fleet_board_fleet_test_bind(&w.a);
-        for (unsigned i = 0; i < FLEET_BOARD_FLEET_PEERS_MAX; i++) {
+        for (unsigned i = 0; i + 1u < FLEET_BOARD_FLEET_CURSOR_SLOTS; i++) {
             uint8_t other[32];
             memset(other, (int)(i + 1u), sizeof other);
             ASSERT_EQ(fbw_pull(&w, other, &w.b, &frames), (size_t)0);
         }
         ASSERT(fbw_seed_answerer(&w, posts, "full"));
         memset(newcomer, 0xC3, sizeof newcomer);
-        ASSERT(fbw_pull_n(&w, newcomer, &w.b, 2) != SIZE_MAX);
+        ASSERT(fbw_pull_n(&w, newcomer, &w.b, 1) != SIZE_MAX);
+        /* Every key the planners can name takes its turn: the newcomer keeps
+         * its place, so its second page continues where the first stopped. */
+        for (unsigned i = 0; i + 1u < FLEET_BOARD_FLEET_CURSOR_SLOTS; i++) {
+            uint8_t other[32];
+            memset(other, (int)(i + 1u), sizeof other);
+            ASSERT(fbw_pull_n(&w, other, &w.b, 1) != SIZE_MAX);
+        }
+        ASSERT(fbw_pull_n(&w, newcomer, &w.b, 1) != SIZE_MAX);
         ASSERT(fbw_holds_all(&w.b, posts, FBW_POSTS));
         PASS();
     }
