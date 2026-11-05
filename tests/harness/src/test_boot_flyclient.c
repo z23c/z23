@@ -587,12 +587,13 @@ static bool gap_proof_challenge(struct fc_challenge *ch,
 static int gap_proof_checks(const char *dir)
 {
     int failures = 0;
-    struct mmb_chain_fixture fx;
+    struct mmb_chain_fixture fx = {0};
     struct fc_challenge ch;
     struct fc_response *resp = calloc(1, sizeof(*resp));
     struct mmb_leaf leaf = {0};
     rpc_blockchain_mmb_append(&leaf);   /* the proof builder needs MMB state */
-    bool ready = resp && mmb_chain_fixture_init(&fx, 40) &&
+    bool fixture = resp && mmb_chain_fixture_init(&fx, 40);
+    bool ready = fixture &&
                  mmb_seed_prefix(&g_mmb_leaf_store, dir, "g_proof.bin",
                                  &fx.chain, 40) &&
                  gap_proof_challenge(&ch, &g_mmb_leaf_store);
@@ -608,8 +609,9 @@ static int gap_proof_checks(const char *dir)
         mmb_leaf_store_close(&g_mmb_leaf_store);
         BFC_CHECK("proof builder refuses without an open leaf store",
                   !boot_build_flyclient_proof(resp, &ch, &fx.chain, NULL));
-        mmb_chain_fixture_free(&fx);
     }
+    if (fixture)
+        mmb_chain_fixture_free(&fx);
     free(resp);
     return failures;
 }
@@ -650,9 +652,14 @@ static bool gap_prepare(const char *dir, struct mmb_chain_fixture *fx,
                         boot_mmb_leaf_loader_fn loader)
 {
     struct main_state *ms = calloc(1, sizeof(*ms));
-    struct mmb_leaf_store seed;
+    struct mmb_leaf_store seed = {0};
+    memset(fx, 0, sizeof(*fx));
+    memset(ref, 0, sizeof(*ref));
     if (!ms || !mmb_chain_fixture_init(fx, chain_n))
+    {
+        free(ms);
         return false;
+    }
     active_chain_init(&ms->chain_active);
     active_chain_move_window_tip(&ms->chain_active, &fx->bi[chain_n - 1]);
     struct boot_svc_ctx svc = {0};
@@ -664,6 +671,14 @@ static bool gap_prepare(const char *dir, struct mmb_chain_fixture *fx,
     active_chain_free(&ms->chain_active);
     free(ms);
     return ok;
+}
+
+/* Safe after a gap_prepare that stopped at any step. */
+static void gap_release(struct mmb_chain_fixture *fx, struct mmb_leaf_store *ref)
+{
+    mmb_leaf_store_close(ref);
+    if (fx->bi)
+        mmb_chain_fixture_free(fx);
 }
 
 static uint64_t gap_mmb_leaves(void)
@@ -696,8 +711,7 @@ static int gap_legacy_catchup(const char *dir)
               gap_leaf_is_chain(&g_mmb_leaf_store, &ref, 2048) &&
               gap_leaf_is_chain(&g_mmb_leaf_store, &ref, (uint64_t)have - 1));
     mmb_leaf_store_close(&g_mmb_leaf_store);
-    mmb_leaf_store_close(&ref);
-    mmb_chain_fixture_free(&fx);
+    gap_release(&fx, &ref);
     return failures;
 }
 
@@ -712,8 +726,7 @@ static int gap_legacy_stops(const char *dir)
     BFC_CHECK("legacy catchup stops where the loader fails",
               ok && g_mmb_leaf_store.num_leaves == (uint64_t)have + 1);
     mmb_leaf_store_close(&g_mmb_leaf_store);
-    mmb_leaf_store_close(&ref);
-    mmb_chain_fixture_free(&fx);
+    gap_release(&fx, &ref);
     g_gap_fail_at = -1;
 
     have = (int)gap_mmb_leaves();
@@ -723,8 +736,7 @@ static int gap_legacy_stops(const char *dir)
               gap_leaf_is_chain(&g_mmb_leaf_store, &ref, 0) &&
               gap_leaf_is_chain(&g_mmb_leaf_store, &ref, (uint64_t)have - 1));
     mmb_leaf_store_close(&g_mmb_leaf_store);
-    mmb_leaf_store_close(&ref);
-    mmb_chain_fixture_free(&fx);
+    gap_release(&fx, &ref);
     return failures;
 }
 
