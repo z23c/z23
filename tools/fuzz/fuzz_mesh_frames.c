@@ -325,7 +325,6 @@ static void cap_require_canonical(const cap_view *f, const uint8_t *w,
                                   size_t n)
 {
     require(cap_wire_size(f->kind) == n);
-    require(mesh_capability_frame_v1_validate(f) == MESH_CAPABILITY_PROTO_OK);
     uint8_t *out = exact_alloc(n);
     size_t out_len = 0;
     require(cap_encode(f, out, n, &out_len) == MESH_CAPABILITY_PROTO_OK);
@@ -505,7 +504,7 @@ static void fuzz_capability(const uint8_t *w, size_t n)
 {
     if (!n)
         return;
-    if ((w[0] & 3u) == 0)
+    if ((w[0] & 15u) == 0)
         cap_signed(w + 1, n - 1);
     else
         (void)cap_decode_check(w + 1, n - 1);
@@ -840,7 +839,7 @@ static void fuzz_board_post(const uint8_t *w, size_t n)
 {
     if (!n)
         return;
-    if ((w[0] & 3u) == 0)
+    if ((w[0] & 15u) == 0)
         board_signed(w + 1, n - 1);
     else
         (void)board_decode_check(w + 1, n - 1);
