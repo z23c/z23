@@ -727,6 +727,7 @@ _test_next:
 #define VFROM(f) "\"from\":\"" f "\","
 #define VROUTE(r) "\"route\":\"" r "\","
 #define VEFF(...) "\"effects\":[" __VA_ARGS__ "]}"
+#define VEFF2(a, b) "\"effects\":[" a "," b "]}"
 #define VE(to, amt) "{\"asset\":\"ZCL\",\"to\":\"" to "\",\"amount\":\"" amt "\"}"
 #define VEM(to, amt, field, val) \
     "{\"asset\":\"ZCL\",\"to\":\"" to "\",\"amount\":\"" amt "\",\"" field \
@@ -779,13 +780,13 @@ static const struct vp_ref k_refs[] = {
       "INVALID_EFFECT" },
     { "memo_hex not hex", VSHIELD VEFF(VEM("@Z@", "1", "memo_hex", "zz")),
       "INVALID_EFFECT" },
-    { "second effect invalid", VSHIELD VEFF(VE("@Z@", "1"), VE("@Z@", "0")),
+    { "second effect invalid", VSHIELD VEFF2(VE("@Z@", "1"), VE("@Z@", "0")),
       "INVALID_EFFECT" },
-    { "first effect invalid", VSHIELD VEFF(VE("@Z@", "0"), VE("@Z@", "1")),
+    { "first effect invalid", VSHIELD VEFF2(VE("@Z@", "0"), VE("@Z@", "1")),
       "INVALID_EFFECT" },
     { "memo on the second, transparent effect",
       VPRE VFROM("@T@") VROUTE("mixed")
-      VEFF(VE("@Z@", "1"), VEM("@U@", "1", "memo", "x")), "INVALID_EFFECT" },
+      VEFF2(VE("@Z@", "1"), VEM("@U@", "1", "memo", "x")), "INVALID_EFFECT" },
     { "empty memo on transparent recipient is no memo",
       VSHIELD VEFF(VEM("@U@", "1", "memo", "")), "ROUTE_MISMATCH" },
     { "empty memo_hex on transparent recipient is no memo",
@@ -811,9 +812,9 @@ static const struct vp_ref k_refs[] = {
     { "z to t asked as mixed", VPRE VFROM("@Z@") VROUTE("mixed")
       VEFF(VE("@T@", "1")), "ROUTE_MISMATCH" },
     { "z to z and t asked as private", VPRE VFROM("@Z@") VROUTE("private")
-      VEFF(VE("@Y@", "1"), VE("@T@", "1")), "ROUTE_MISMATCH" },
+      VEFF2(VE("@Y@", "1"), VE("@T@", "1")), "ROUTE_MISMATCH" },
     { "t to z and t asked as shield", VSHIELD
-      VEFF(VE("@Z@", "1"), VE("@T@", "1")), "ROUTE_MISMATCH" },
+      VEFF2(VE("@Z@", "1"), VE("@T@", "1")), "ROUTE_MISMATCH" },
 };
 
 static void vp_expand(const char *tpl, char *out, size_t cap)
