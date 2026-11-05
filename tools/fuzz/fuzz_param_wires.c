@@ -8,6 +8,8 @@
  * a datadir, a socket or a thread. Replies land on a synthetic peer's send
  * queue, which is drained after every input. */
 
+#include "base/safe_alloc.h"
+#include "base/serialize_le.h"
 #include "chain/chainparams.h"
 #include "core/serialize.h"
 #include "net/msgprocessor.h"
@@ -246,15 +248,13 @@ struct cursor {
 
 static uint64_t take_le(struct cursor *c, unsigned bytes)
 {
-    uint64_t v = 0;
-    for (unsigned i = 0; i < bytes; i++) {
-        if (c->n > 0) {
-            v |= (uint64_t)c->p[0] << (8u * i);
-            c->p++;
-            c->n--;
-        }
-    }
-    return v;
+    uint8_t padded[8] = { 0 };
+    size_t have = c->n < bytes ? c->n : bytes;
+    if (have > 0)
+        memcpy(padded, c->p, have);
+    c->p += have;
+    c->n -= have;
+    return zcl_read_u64_le(padded);
 }
 
 /* ── buffers with guard bands ────────────────────────────────────────── */
@@ -267,7 +267,7 @@ struct guarded {
 
 static void guarded_open(struct guarded *g, size_t cap)
 {
-    g->raw = malloc(cap + 2u * FUZZ_PW_GUARD);
+    g->raw = zcl_malloc(cap + 2u * FUZZ_PW_GUARD, "fuzz_param_wires guarded buffer");
     if (!g->raw)
         abort();
     g->cap = cap;
