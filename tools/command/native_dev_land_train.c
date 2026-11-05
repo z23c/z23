@@ -81,29 +81,40 @@ struct dl_train_group {
     char tip[DL_TRAIN_MAX][41];
 };
 
+static bool dl_group_hex(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return false;
+    return true;
+}
+
+static const char *dl_group_entry(const char *s, struct dl_train_group *g)
+{
+    if (*s < '1' || *s > '9') return NULL;
+    char *end = NULL;
+    errno = 0;
+    long long seq = strtoll(s, &end, 10);
+    if (errno || seq < 1 || !end || *end++ != '=') return NULL;
+    for (size_t i = 0; i < g->n; i++) if (g->seq[i] == seq) return NULL;
+    if (!dl_group_hex(end, 40)) return NULL;
+    g->seq[g->n] = seq;
+    memcpy(g->tip[g->n], end, 40);
+    g->tip[g->n++][40] = '\0';
+    return end + 40;
+}
+
 /* A descriptor is an authority, never a hint: accept only canonical bytes. */
 static bool dl_train_group_parse(const char *s, struct dl_train_group *g)
 {
     memset(g, 0, sizeof(*g));
     if (strncmp(s, "1:", 2) != 0) return false;
     s += 2;
-    for (size_t i = 0; i < 64; i++)
-        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return false;
+    if (!dl_group_hex(s, 64)) return false;
     s += 64;
     if (*s++ != ':') return false;
     while (*s && g->n < DL_TRAIN_MAX) {
-        if (*s < '1' || *s > '9') return false;
-        char *end = NULL;
-        errno = 0;
-        long long seq = strtoll(s, &end, 10);
-        if (errno || seq < 1 || !end || *end++ != '=') return false;
-        for (size_t i = 0; i < g->n; i++) if (g->seq[i] == seq) return false;
-        for (size_t i = 0; i < 40; i++)
-            if (!((end[i] >= '0' && end[i] <= '9') || (end[i] >= 'a' && end[i] <= 'f'))) return false;
-        g->seq[g->n] = seq;
-        memcpy(g->tip[g->n], end, 40);
-        g->tip[g->n++][40] = '\0';
-        s = end + 40;
+        s = dl_group_entry(s, g);
+        if (!s) return false;
         if (!*s) break;
         if (*s++ != ',' || !*s) return false;
     }
@@ -358,6 +369,14 @@ static bool dl_split_descriptor(char *out, size_t cap, const char *intent,
     return true;
 }
 
+static bool dl_split_unpublished(const struct dl_row *r)
+{
+    return !r->publication_target[0] && !r->publication_proof[0] &&
+           !r->publication_bundle[0] && !r->publication_signer[0] && !r->publication_signature[0] &&
+           !r->remote_tip[0] && !r->remote_source[0] && !r->remote_signer[0] &&
+           !r->remote_signature[0] && !r->pushed[0] && !r->push_diagnostic_pending;
+}
+
 static bool dl_split_member_ok(const struct dl_row *r, const struct dl_row *head)
 {
     return (r->seq == head->seq || strcmp(r->state, "queued") == 0) &&
@@ -365,11 +384,7 @@ static bool dl_split_member_ok(const struct dl_row *r, const struct dl_row *head
            strcmp(r->train_group, head->train_group) == 0 && dl_sha_ok(r->train_commit) &&
            strcmp(r->local, head->local) == 0 && strcmp(r->base, head->base) == 0 &&
            strcmp(r->tree, head->tree) == 0 && !r->publication_hold && !r->fence_peer &&
-           !r->publication_target[0] && !r->publication_proof[0] &&
-           !r->publication_bundle[0] && !r->publication_signer[0] && !r->publication_signature[0] &&
-           !r->remote_tip[0] && !r->remote_source[0] && !r->remote_signer[0] &&
-           !r->remote_signature[0] && !r->pushed[0] && !r->push_diagnostic_pending &&
-           strcmp(r->phase, "push") != 0;
+           dl_split_unpublished(r) && strcmp(r->phase, "push") != 0;
 }
 
 static void dl_split_clear(struct dl_row *r, const char *group)
@@ -397,22 +412,36 @@ static bool dl_split_matches_group(const struct dl_row *head,
             strcmp(members[i]->train_group, head->train_group)) return false;
     return true;
 }
-static int dl_split_edit_rows(struct dl_row *rows, size_t n, void *context)
+/* Capture the exact bound cohort before changing any row. */
+static int dl_split_collect(struct dl_row *rows, size_t n, const struct dl_row *head,
+                            struct dl_row **members)
 {
-    struct dl_split_edit *e = context;
-    struct dl_row *members[DL_TRAIN_MAX];
     size_t count = 0;
     for (size_t i = 0; i < n; i++) {
-        if (rows[i].seq != e->head->seq && strcmp(rows[i].proof_intent, e->head->proof_intent)) continue;
-        if (count == DL_TRAIN_MAX || !dl_split_member_ok(&rows[i], e->head)) return -1;
+        if (rows[i].seq != head->seq && strcmp(rows[i].proof_intent, head->proof_intent)) continue;
+        if (count == DL_TRAIN_MAX || !dl_split_member_ok(&rows[i], head)) return -1;
         members[count++] = &rows[i];
     }
-    if (count < 2) return -1;
+    return (int)count;
+}
+
+static void dl_split_order(struct dl_row **members, size_t count)
+{
     for (size_t i = 0; i < count; i++)
         for (size_t j = i + 1; j < count; j++)
             if (dl_queued_precedes(members[j], members[i])) {
                 struct dl_row *tmp = members[i]; members[i] = members[j]; members[j] = tmp;
             }
+}
+
+static int dl_split_edit_rows(struct dl_row *rows, size_t n, void *context)
+{
+    struct dl_split_edit *e = context;
+    struct dl_row *members[DL_TRAIN_MAX];
+    int collected = dl_split_collect(rows, n, e->head, members);
+    if (collected < 2) return -1;
+    size_t count = (size_t)collected;
+    dl_split_order(members, count);
     if (members[0]->seq != e->head->seq || strcmp(members[0]->tip, e->head->tip) ||
         !dl_split_matches_group(e->head, members, count)) return -1;
     size_t first = (count + 1) / 2;
