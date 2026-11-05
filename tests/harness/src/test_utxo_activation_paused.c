@@ -1617,29 +1617,23 @@ static int uap_run_tip_not_advanced_case(void)
     block_height_census_test_reset();
     struct uint256 hashes[2];
     bool ok = uap_chain_with_tip(&ms, hashes, 100);
-    bool chain_ok = ok;
     gap_fill_test_set_running(true);
     condition_engine_set_main_state(&ms);
     register_utxo_activation_paused();
+    struct condition_runtime_snapshot s;
+    ok = ok && uap_snapshot(&s);
+    int cleared0 = s.cleared_count; /* the engine counter outlives a reset */
     process_block_test_set_utxo_activation_paused_height(150);
     condition_engine_tick();
     uap_tick_at(&clock, 6300);
     /* The flag is cleared, but the tip (100) neither reached the paused
      * height (150) nor moved past where it stood at detection (100). */
-    struct condition_runtime_snapshot s;
     ok = ok && uap_snapshot(&s);
     ok = ok && utxo_activation_paused_test_resume_calls() == 1;
     ok = ok && process_block_test_get_utxo_activation_paused_height() == -1;
-    ok = ok && s.currently_active && s.cleared_count == 0 && s.attempts == 1;
+    ok = ok && s.currently_active && s.cleared_count == cleared0 && s.attempts == 1;
     ok = ok && s.last_outcome == COND_REMEDY_UNWITNESSED;
     ok = ok && gap_fill_test_kick_pending(); /* the clearing remedy kicks */
-    if (!ok)
-        printf("[chain_ok=%d calls=%d paused=%d active=%d cleared=%d "
-               "attempts=%d outcome=%d kick=%d] ", chain_ok,
-               utxo_activation_paused_test_resume_calls(),
-               process_block_test_get_utxo_activation_paused_height(),
-               s.currently_active, s.cleared_count, s.attempts,
-               s.last_outcome, gap_fill_test_kick_pending());
     UAP_CHECK("clearing the flag without tip movement stays unwitnessed and kicks gap-fill", ok);
     gap_fill_test_set_running(false);
     condition_engine_set_main_state(NULL);
