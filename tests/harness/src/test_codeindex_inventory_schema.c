@@ -9,6 +9,8 @@
 #include "codeindex/codeindex_docs.h"
 #include "platform/directory_compat.h"
 #include "platform/temp_directory.h"
+#include "command/native_code_pages.h"
+#include "util/spawn.h"
 
 #include <sqlite3.h>
 
@@ -241,6 +243,36 @@ static bool cis_doc_limit(void)
     return refused;
 }
 
+static bool cis_page_subject(void)
+{
+    char root[PLATFORM_TEMP_PATH_MAX] = {0}, output[256], commit[65], expected[65], actual[65];
+    if (!platform_temp_directory_create("z23-page-subject-", root, sizeof(root)) ||
+        !cis_put(root, "module/file.c", "int test_value;\n")) return false;
+    const char *init[] = {"git", "-C", root, "init", "-q", NULL};
+    const char *add[] = {"git", "-C", root, "add", "--", "module/file.c", NULL};
+    const char *save[] = {"git", "-C", root, "-c", "user.name=Fixture", "-c",
+                          "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                          "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture", NULL};
+    const char *head[] = {"git", "-C", root, "rev-parse", "HEAD", NULL};
+    const char *tree[] = {"git", "-C", root, "rev-parse", "HEAD:module", NULL};
+    if (zcl_spawn_capture(init, output, sizeof(output), 10000) != 0 ||
+        zcl_spawn_capture(add, output, sizeof(output), 10000) != 0 ||
+        zcl_spawn_capture(save, output, sizeof(output), 10000) != 0 ||
+        zcl_spawn_capture(head, output, sizeof(output), 10000) != 0) return false;
+    output[strcspn(output, "\r\n")] = '\0';
+    if (strlen(output) != 40) return false;
+    memcpy(commit, output, 41);
+    if (zcl_spawn_capture(tree, output, sizeof(output), 10000) != 0) return false;
+    output[strcspn(output, "\r\n")] = '\0';
+    if (strlen(output) != 40) return false;
+    memcpy(expected, output, 41);
+    return zcl_code_pages_subject(root, commit, "module", actual) &&
+           strcmp(actual, expected) == 0 &&
+           !zcl_code_pages_subject(root, commit, "../module", actual) &&
+           !zcl_code_pages_subject(root, "HEAD", "module", actual) &&
+           !zcl_code_pages_subject(root, commit, "missing", actual);
+}
+
 int test_codeindex_inventory_schema(void)
 {
     int failures = 0;
@@ -251,6 +283,7 @@ int test_codeindex_inventory_schema(void)
                                                    sizeof(root)) &&
                  cis_fixture(root);
     CIS_CHECK("fixture tree is written", ready);
+    CIS_CHECK("page subject resolves exact commit tree and refuses invalid input", cis_page_subject());
 
     struct codeindex *ix = ready ? codeindex_open_retrieval_view(root) : NULL;
     CIS_CHECK("fixture index opens", ix != NULL);
