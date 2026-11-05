@@ -71,6 +71,25 @@ static bool vi_path(char out[PATH_MAX], const char *base, const char *leaf)
     return snprintf(out, PATH_MAX, "%s/%s", base, leaf) < PATH_MAX;
 }
 
+/* A relative link target that climbs from dir to the filesystem root and
+ * names /etc, an existing directory outside any image. The count of "../" is
+ * the real depth of dir, so the link resolves to /etc at any depth: a fixed
+ * count lands on a missing sibling of an ancestor (symlink_unresolved, not
+ * symlink_escapes_root) when the fixture root is deeper than the count. */
+static bool vi_escape_target(char out[PATH_MAX], const char *dir)
+{
+    char real[PATH_MAX];
+    size_t len = 0;
+    if (!realpath(dir, real)) return false;
+    for (const char *p = real; *p; p++) {
+        if (*p != '/') continue;
+        if (len + 3 >= PATH_MAX) return false;
+        memcpy(out + len, "../", 3);
+        len += 3;
+    }
+    return snprintf(out + len, PATH_MAX - len, "etc") < (int)(PATH_MAX - len);
+}
+
 static bool vi_dir(char out[PATH_MAX], const char *base, const char *leaf)
 {
     return vi_path(out, base, leaf) && mkdir(out, 0700) == 0;
@@ -401,11 +420,12 @@ static int test_vi_red_image_escape(struct vi_world *w)
 {
     int failures = 0;
     TEST("verifier images: RED an escaping link or a special file in an image refuses") {
-        char link[PATH_MAX], fifo[PATH_MAX];
+        char link[PATH_MAX], fifo[PATH_MAX], up[PATH_MAX], usr[PATH_MAX];
         struct zcl_tree_closure_roots r;
         ASSERT(w->tool_built);
+        ASSERT(vi_path(usr, w->tool, "usr") && vi_escape_target(up, usr));
         ASSERT(vi_path(link, w->tool, "usr/escape") &&
-               symlink("../../../../../../../../../../etc", link) == 0);
+               symlink(up, link) == 0);
         const char *why = zcl_tree_closure_hash(w->tool, geteuid(), NULL, &r);
         ASSERT(unlink(link) == 0);
         ASSERT(why && strcmp(why, "symlink_escapes_root") == 0);
