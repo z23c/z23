@@ -53,6 +53,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #define ZE_CHECK(name, expr) do {                                    \
     if (expr) { printf("  zendp: %s... OK\n", (name)); }             \
@@ -774,6 +775,447 @@ static int ze_case_net_adapter(void)
     return failures;
 }
 
+/* ── 8: mutation-sweep gap closers ──────────────────────────────────
+ *
+ * The shape rule, the decode refusals, the window rule and the sign /
+ * verify refusals each log a DISTINCT operator-facing sentence, and the
+ * sentence is the only thing that tells an operator which rule fired.
+ * So these cases capture stderr and assert the sentence, not just the
+ * false return. */
+
+static char g_cap_buf[8192];
+
+struct ze_cap {
+    FILE *tmp;
+    int saved_fd;
+    enum zcl_log_level lvl;
+};
+
+static bool ze_cap_begin(struct ze_cap *c)
+{
+    c->tmp = tmpfile();
+    if (!c->tmp)
+        return false;
+    (void)fflush(stderr);
+    c->saved_fd = dup(STDERR_FILENO);
+    if (c->saved_fd < 0 || dup2(fileno(c->tmp), STDERR_FILENO) < 0) {
+        if (c->saved_fd >= 0)
+            close(c->saved_fd);
+        fclose(c->tmp);
+        return false;
+    }
+    c->lvl = zcl_log_level_get();
+    zcl_log_level_set(ZCL_LOG_ERROR);
+    return true;
+}
+
+/* Restores stderr and leaves everything logged since begin in g_cap_buf. */
+static void ze_cap_end(struct ze_cap *c)
+{
+    (void)fflush(stderr);
+    (void)dup2(c->saved_fd, STDERR_FILENO);
+    close(c->saved_fd);
+    zcl_log_level_set(c->lvl);
+    rewind(c->tmp);
+    size_t n = fread(g_cap_buf, 1, sizeof(g_cap_buf) - 1, c->tmp);
+    g_cap_buf[n] = '\0';
+    fclose(c->tmp);
+}
+
+static bool ze_logged(const char *needle)
+{
+    return needle && strstr(g_cap_buf, needle) != NULL;
+}
+
+static bool ze_contains(const uint8_t *hay, size_t hn, const uint8_t *nd,
+                        size_t nn)
+{
+    for (size_t i = 0; i + nn <= hn; i++)
+        if (memcmp(hay + i, nd, nn) == 0)
+            return true;
+    return false;
+}
+
+/* One declarative row per shape-rule outcome. Unlisted fields are zero.
+ * needle == NULL means the record must be VALID. */
+struct ze_row {
+    const char *name;
+    uint8_t flags;
+    const char *onion;
+    uint16_t oport;
+    uint8_t v4_0, v4_3;
+    uint16_t v4port;
+    uint8_t v6_0, v6_15;
+    uint16_t v6port;
+    const char *needle;
+};
+
+#define ZE_N_HOST  "onion hostname is not a v3 address"
+#define ZE_N_OPORT "onion port 0 reaches no service"
+#define ZE_N_OUNCL "onion fields set without ZENDP_HAS_ONION"
+#define ZE_N_V4Z   "0.0.0.0 reaches nobody"
+#define ZE_N_V4P   "ipv4 port 0 reaches no service"
+#define ZE_N_V4U   "ipv4 fields set without ZENDP_HAS_IPV4"
+#define ZE_N_V6Z   ":: reaches nobody"
+#define ZE_N_V6P   "ipv6 port 0 reaches no service"
+#define ZE_N_V6U   "ipv6 fields set without ZENDP_HAS_IPV6"
+#define ZE_N_UNK   "unknown flag bits"
+#define ZE_N_NONE  "no endpoint claimed"
+
+static const struct ze_row ze_rows[] = {
+    {"onion: bad host", 1, "short.onion", 80, .needle = ZE_N_HOST},
+    {"onion: port 0", 1, ZE_ONION, 0, .needle = ZE_N_OPORT},
+    {"onion: unflagged name only", 2, "z", 0, .v4_0 = 1, .v4port = 80,
+     .needle = ZE_N_OUNCL},
+    {"onion: unflagged port only", 2, NULL, 5, .v4_0 = 1, .v4port = 80,
+     .needle = ZE_N_OUNCL},
+    {"onion: port 1 is fine", 1, ZE_ONION, 1},
+    {"v4: all zero", 2, .v4port = 80, .needle = ZE_N_V4Z},
+    {"v4: first byte alone is an address", 2, .v4_0 = 1, .v4port = 80},
+    {"v4: last byte alone is an address", 2, .v4_3 = 1, .v4port = 80},
+    {"v4: port 0", 2, .v4_0 = 1, .needle = ZE_N_V4P},
+    {"v4: unflagged first byte", 1, ZE_ONION, 80, .v4_0 = 1,
+     .needle = ZE_N_V4U},
+    {"v4: unflagged last byte", 1, ZE_ONION, 80, .v4_3 = 1,
+     .needle = ZE_N_V4U},
+    {"v4: unflagged port only", 1, ZE_ONION, 80, .v4port = 5,
+     .needle = ZE_N_V4U},
+    {"v6: all zero", 4, .v6port = 80, .needle = ZE_N_V6Z},
+    {"v6: first byte alone is an address", 4, .v6_0 = 1, .v6port = 80},
+    {"v6: last byte alone is an address", 4, .v6_15 = 1, .v6port = 80},
+    {"v6: port 0", 4, .v6_0 = 1, .needle = ZE_N_V6P},
+    {"v6: unflagged first byte", 1, ZE_ONION, 80, .v6_0 = 1,
+     .needle = ZE_N_V6U},
+    {"v6: unflagged last byte", 1, ZE_ONION, 80, .v6_15 = 1,
+     .needle = ZE_N_V6U},
+    {"v6: unflagged port only", 1, ZE_ONION, 80, .v6port = 5,
+     .needle = ZE_N_V6U},
+    {"flags: unknown bit beside a good onion", 0x81, ZE_ONION, 80,
+     .needle = ZE_N_UNK},
+    {"flags: only an unknown bit", 0x08, .needle = ZE_N_UNK},
+    {"flags: none claimed", 0, .needle = ZE_N_NONE},
+};
+
+static void ze_row_build(struct zendp *ep, const struct ze_row *r)
+{
+    memset(ep, 0, sizeof(*ep));
+    ep->flags = r->flags;
+    ep->not_before = ZE_NOT_BEFORE;
+    if (r->onion)
+        snprintf(ep->onion, sizeof(ep->onion), "%s", r->onion);
+    ep->onion_port = r->oport;
+    ep->ipv4[0] = r->v4_0;
+    ep->ipv4[3] = r->v4_3;
+    ep->ipv4_port = r->v4port;
+    ep->ipv6[0] = r->v6_0;
+    ep->ipv6[15] = r->v6_15;
+    ep->ipv6_port = r->v6port;
+}
+
+/* True when the row behaves as declared: valid, or refused with exactly
+ * its own sentence. */
+static bool ze_row_holds(const struct ze_row *r)
+{
+    struct zendp ep;
+    ze_row_build(&ep, r);
+    struct ze_cap cap;
+    if (!ze_cap_begin(&cap))
+        return false;
+    bool ok = zendp_valid(&ep);
+    ze_cap_end(&cap);
+    if (!r->needle)
+        return ok;
+    return !ok && ze_logged(r->needle);
+}
+
+static int ze_case_shape_rows(void)
+{
+    int failures = 0;
+    int bad = 0;
+    for (size_t i = 0; i < sizeof(ze_rows) / sizeof(ze_rows[0]); i++) {
+        if (!ze_row_holds(&ze_rows[i])) {
+            printf("  zendp: shape row \"%s\"... FAIL\n", ze_rows[i].name);
+            bad++;
+        }
+    }
+    ZE_CHECK("shape rows: every row valid, or refused with its own sentence",
+             bad == 0);
+    return failures;
+}
+
+/* A decode refusal: false return AND the named sentence. */
+static bool ze_decode_refused_with(const uint8_t *body, uint16_t len,
+                                   const char *needle, struct zendp *ep)
+{
+    struct ze_cap cap;
+    if (!ze_cap_begin(&cap))
+        return false;
+    bool ok = zendp_decode_body(ep, body, len);
+    ze_cap_end(&cap);
+    return !ok && ze_logged(needle);
+}
+
+static bool ze_zeroed(const struct zendp *ep)
+{
+    static const struct zendp zero;
+    return ep->flags == 0 && ep->services == 0 && ep->height == 0 &&
+           ep->not_before == 0 &&
+           memcmp(ep->onion, zero.onion, sizeof(ep->onion)) == 0 &&
+           ep->onion_port == 0 && memcmp(ep->ipv4, zero.ipv4, 4) == 0 &&
+           ep->ipv4_port == 0 && memcmp(ep->ipv6, zero.ipv6, 16) == 0 &&
+           ep->ipv6_port == 0;
+}
+
+static int ze_case_decode_refusal_sentences(void)
+{
+    int failures = 0;
+    uint8_t body[ZENDP_BODY_MAX + 8];
+    struct zendp ep, dec;
+    ze_make(&ep, ZENDP_FLAGS_KNOWN);
+    size_t full = zendp_encode_body(body, sizeof(body), &ep);
+    ZE_CHECK("decode sentences: setup", full == (size_t)ZENDP_BODY_MAX);
+
+    ZE_CHECK("decode sentences: 24 bytes is below the minimum",
+             ze_decode_refused_with(body, ZENDP_BODY_MIN - 1,
+                                    "below minimum", &dec));
+    /* Exactly the minimum is NOT 'below minimum': it is a length that
+     * disagrees with the flags (kills < -> <=). */
+    ZE_CHECK("decode sentences: exactly 25 bytes is a length mismatch",
+             ze_decode_refused_with(body, ZENDP_BODY_MIN, "does not match",
+                                    &dec) &&
+             !ze_logged("below minimum"));
+    ZE_CHECK("decode sentences: one past the maximum is over the maximum",
+             ze_decode_refused_with(body, ZENDP_BODY_MAX + 1, "exceeds max",
+                                    &dec));
+    uint8_t tmp[ZENDP_BODY_MAX + 8];
+    memcpy(tmp, body, full);
+    tmp[4] = 0x08;
+    ZE_CHECK("decode sentences: an unknown flag byte names the flags",
+             ze_decode_refused_with(tmp, (uint16_t)full,
+                                    "unknown or claim no endpoint", &dec));
+    tmp[4] = 0x00;
+    ZE_CHECK("decode sentences: a zero flag byte names the flags",
+             ze_decode_refused_with(tmp, (uint16_t)full,
+                                    "unknown or claim no endpoint", &dec));
+    return failures;
+}
+
+/* A body whose layout is fine but whose hostname is not: the shape rule
+ * rejects it only after every field has been filled in. The caller's
+ * struct must come back all zero, not half-decoded. */
+static int ze_case_decode_shape_failure_zeroes(void)
+{
+    int failures = 0;
+    uint8_t body[ZENDP_BODY_MAX];
+    struct zendp ep;
+    ze_make(&ep, ZENDP_FLAGS_KNOWN);
+    size_t n = zendp_encode_body(body, sizeof(body), &ep);
+    body[ZENDP_BODY_MIN] = '9'; /* first hostname char */
+    struct zendp dec;
+    memset(&dec, 0x5A, sizeof(dec));
+    ZE_CHECK("decode zero: a bad hostname in the body is refused by name",
+             ze_decode_refused_with(body, (uint16_t)n,
+                                    "failed the shape rule", &dec));
+    ZE_CHECK("decode zero: the refused record leaves nothing behind",
+             ze_zeroed(&dec));
+    return failures;
+}
+
+/* ── the window rule, as values and as words ── */
+
+static int ze_case_window_rule_values(void)
+{
+    int failures = 0;
+    const uint64_t max = ZENDP_MAX_WINDOW_SECONDS;
+    ZE_CHECK("window: expiry == not_before never opens",
+             zendp_window_check(5, 5) == ZENDP_WINDOW_NEVER_OPENS &&
+             zendp_window_check(5, 4) == ZENDP_WINDOW_NEVER_OPENS &&
+             zendp_window_check(0, 0) == ZENDP_WINDOW_NEVER_OPENS);
+    ZE_CHECK("window: one second is a lawful window",
+             zendp_window_check(5, 6) == ZENDP_WINDOW_OK);
+    ZE_CHECK("window: exactly the ceiling is accepted, one more is refused",
+             zendp_window_check(0, max) == ZENDP_WINDOW_OK &&
+             zendp_window_check(1000, 1000 + max) == ZENDP_WINDOW_OK &&
+             zendp_window_check(0, max + 1) == ZENDP_WINDOW_TOO_LONG &&
+             zendp_window_check(1000, 1001 + max) == ZENDP_WINDOW_TOO_LONG);
+    ZE_CHECK("window: every verdict has its exact name",
+             strcmp(zendp_window_string(ZENDP_WINDOW_OK), "ok") == 0 &&
+             strcmp(zendp_window_string(ZENDP_WINDOW_NEVER_OPENS),
+                    "window-never-opens") == 0 &&
+             strcmp(zendp_window_string(ZENDP_WINDOW_TOO_LONG),
+                    "window-exceeds-maximum") == 0 &&
+             strcmp(zendp_window_string((enum zendp_window)99),
+                    "unknown") == 0);
+    return failures;
+}
+
+static bool g_seed_leaked;
+
+/* sign() with the given window; returns the result, log in g_cap_buf. */
+static bool ze_sign_logged(struct zid_doc *doc, const struct zendp *ep,
+                           uint64_t expiry, const uint8_t seed[32])
+{
+    struct ze_cap cap;
+    if (!ze_cap_begin(&cap))
+        return true; /* setup failure reads as "accepted" = test FAIL */
+    bool ok = zendp_sign(doc, ep, 1, expiry, seed);
+    ze_cap_end(&cap);
+
+    /* No secret may reach the log: neither raw, nor as hex, nor by half. */
+    char hex[65];
+    static const char hd[] = "0123456789abcdef";
+    for (size_t i = 0; i < 32; i++) {
+        hex[2 * i] = hd[seed[i] >> 4];
+        hex[2 * i + 1] = hd[seed[i] & 0xf];
+    }
+    hex[64] = '\0';
+    if (ze_contains((const uint8_t *)g_cap_buf, strlen(g_cap_buf), seed,
+                    16) || strstr(g_cap_buf, hex) != NULL ||
+        strstr(g_cap_buf, hex + 32) != NULL)
+        g_seed_leaked = true;
+    return ok;
+}
+
+static int ze_case_sign_refusals(void)
+{
+    int failures = 0;
+    uint8_t seed[32];
+    for (size_t i = 0; i < sizeof(seed); i++)
+        seed[i] = (uint8_t)(0xC0u + i * 7u);
+    struct zendp ep;
+    ze_make(&ep, ZENDP_HAS_ONION);
+    struct zid_doc doc;
+
+    ZE_CHECK("sign: a window of exactly the ceiling is signed",
+             ze_sign_logged(&doc, &ep, ZE_NOT_BEFORE +
+                            ZENDP_MAX_WINDOW_SECONDS, seed));
+    ZE_CHECK("sign: the signed doc carries no seed bytes",
+             !ze_contains((const uint8_t *)&doc, sizeof(doc), seed, 32) &&
+             !ze_contains((const uint8_t *)&doc, sizeof(doc), seed, 16));
+
+    ZE_CHECK("sign: never-opens is refused in its own words",
+             !ze_sign_logged(&doc, &ep, ZE_NOT_BEFORE, seed) &&
+             ze_logged("validity window never opens") &&
+             ze_logged("sign: refused") &&
+             ze_logged("window-never-opens"));
+    ZE_CHECK("sign: too-long is refused in its own words",
+             !ze_sign_logged(&doc, &ep, ZE_NOT_BEFORE +
+                             ZENDP_MAX_WINDOW_SECONDS + 1, seed) &&
+             ze_logged("sign: validity window is 2592001 seconds") &&
+             ze_logged("maximum is 2592000 seconds (30 days)") &&
+             ze_logged("window-exceeds-maximum") &&
+             !ze_logged("never opens"));
+
+    struct zendp none;
+    ze_make(&none, 0);
+    ZE_CHECK("sign: a record that cannot encode is refused, not signed empty",
+             !ze_sign_logged(&doc, &none, ZE_EXPIRY, seed) &&
+             ze_logged("body encode failed"));
+
+    ZE_CHECK("sign: no seed (raw, hex, half) in any logged refusal",
+             !g_seed_leaked);
+
+    enum zcl_log_level saved = zcl_log_level_get();
+    zcl_log_level_set(ZCL_LOG_OFF);
+    ZE_CHECK("sign: NULL doc, record and seed are each refused",
+             !zendp_sign(NULL, &ep, 1, ZE_EXPIRY, seed) &&
+             !zendp_sign(&doc, NULL, 1, ZE_EXPIRY, seed) &&
+             !zendp_sign(&doc, &ep, 1, ZE_EXPIRY, NULL));
+    zcl_log_level_set(saved);
+    return failures;
+}
+
+/* verify() of `doc` at `now`; log in g_cap_buf. */
+static bool ze_verify_logged(const struct zid_doc *doc, uint64_t now,
+                             struct zendp *out)
+{
+    struct ze_cap cap;
+    if (!ze_cap_begin(&cap))
+        return true;
+    bool ok = zendp_verify(doc, out, now);
+    ze_cap_end(&cap);
+    return ok;
+}
+
+/* Sign `body` straight through zid_doc_sign, the way an older build or a
+ * hostile publisher could, bypassing the capped minter. */
+static bool ze_raw_doc(struct zid_doc *doc, const uint8_t *body, size_t n,
+                       uint64_t expiry)
+{
+    uint8_t seed[32];
+    memset(seed, 0x2b, sizeof(seed));
+    return zid_doc_sign(doc, body, (uint16_t)n, 1, expiry, seed);
+}
+
+static int ze_case_verify_refusals(void)
+{
+    int failures = 0;
+    struct zendp ep, out;
+    ze_make(&ep, ZENDP_HAS_ONION);
+    uint8_t body[ZENDP_BODY_MAX];
+    size_t n = zendp_encode_body(body, sizeof(body), &ep);
+    struct zid_doc doc;
+
+    ZE_CHECK("verify: setup signs",
+             n != 0 && ze_raw_doc(&doc, body, n, ZE_EXPIRY));
+    ZE_CHECK("verify: exactly at not_before is accepted",
+             ze_verify_logged(&doc, ZE_NOT_BEFORE, &out) &&
+             out.not_before == ZE_NOT_BEFORE);
+    ZE_CHECK("verify: one second before not_before is refused in words",
+             !ze_verify_logged(&doc, ZE_NOT_BEFORE - 1, &out) &&
+             ze_logged("record not yet valid"));
+
+    ZE_CHECK("verify: an over-long window is refused at the read end",
+             ze_raw_doc(&doc, body, n,
+                        ZE_NOT_BEFORE + ZENDP_MAX_WINDOW_SECONDS + 1) &&
+             !ze_verify_logged(&doc, ZE_NOT_BEFORE + 10, &out) &&
+             ze_logged("verify: validity window is 2592001 seconds") &&
+             ze_logged("verify: refused"));
+    ZE_CHECK("verify: a ceiling-width window is accepted",
+             ze_raw_doc(&doc, body, n,
+                        ZE_NOT_BEFORE + ZENDP_MAX_WINDOW_SECONDS) &&
+             ze_verify_logged(&doc, ZE_NOT_BEFORE + 10, &out));
+
+    /* Layout-valid body, bad hostname, not_before 0: decode zeroes the
+     * record, so only the decode failure itself can refuse it. */
+    struct zendp z;
+    ze_make(&z, ZENDP_HAS_ONION);
+    z.not_before = 0;
+    n = zendp_encode_body(body, sizeof(body), &z);
+    body[ZENDP_BODY_MIN] = '9';
+    memset(&out, 0x5A, sizeof(out));
+    ZE_CHECK("verify: a signed body that fails decode is refused, "
+             "output untouched",
+             ze_raw_doc(&doc, body, n, 1000) &&
+             !ze_verify_logged(&doc, 100, &out) &&
+             ze_logged("not a valid ZIDE record") && out.flags == 0x5A);
+
+    enum zcl_log_level saved = zcl_log_level_get();
+    zcl_log_level_set(ZCL_LOG_OFF);
+    ZE_CHECK("verify: a NULL doc is refused", !zendp_verify(NULL, &out, 100));
+    zcl_log_level_set(saved);
+    return failures;
+}
+
+static int ze_case_record_key_null_args(void)
+{
+    int failures = 0;
+    uint8_t pk[32], out[32];
+    memset(pk, 0x11, sizeof(pk));
+    memset(out, 0x77, sizeof(out));
+    struct ze_cap cap;
+    ZE_CHECK("record key: capture starts", ze_cap_begin(&cap));
+    zendp_record_key(NULL, pk, 1);
+    zendp_record_key(out, NULL, 1);
+    ze_cap_end(&cap);
+    uint8_t same[32];
+    memset(same, 0x77, sizeof(same));
+    ZE_CHECK("record key: a NULL argument logs and writes nothing",
+             memcmp(out, same, 32) == 0 &&
+             ze_logged("record_key: NULL argument"));
+    return failures;
+}
+
 int test_zendp(void)
 {
     int failures = 0;
@@ -787,6 +1229,13 @@ int test_zendp(void)
     failures += ze_case_period_boundary();
     failures += ze_case_projection();
     failures += ze_case_net_adapter();
+    failures += ze_case_shape_rows();
+    failures += ze_case_decode_refusal_sentences();
+    failures += ze_case_decode_shape_failure_zeroes();
+    failures += ze_case_window_rule_values();
+    failures += ze_case_sign_refusals();
+    failures += ze_case_verify_refusals();
+    failures += ze_case_record_key_null_args();
     printf("=== ZENDP: %d failure(s) ===\n", failures);
     return failures;
 }
