@@ -562,6 +562,31 @@ int test_mutation_harness(void)
         PASS();
     }
 
+    /* The build's own spelling, with the blank line and the bare `test -s`
+     * of the response file a real transcript carries before the link. */
+    TEST("the plan parser reads a zcc recipe past a blank line") {
+        const char *dry =
+            "build/bin/zcc --epoch-object dep \"build/o/lib/x/src/y.o\" "
+            "\"lib/x/src/y.c\" \\\n  \"aa\" \"1\" \"bb\" -- \\\n"
+            "  build/bin/zcc cc -std=c23 -O2 -Ilib/x/include\n"
+            "\n"
+            "test -s \"build/o/link.rsp\"\n"
+            "true;\n"
+            "set -eu; \\\ntmp=\"$(mktemp t.XXXX)\"; \\\n"
+            "build/bin/zcc cc -std=c23 -o \"$tmp\" \"@build/o/link.rsp\" -lm; \\\n"
+            "mv -f -- \"$tmp\" out\n";
+        struct zcl_mut_plan p;
+        char err[256];
+        ASSERT(zcl_mut_plan_from_dryrun(dry, "lib/x/src/y.c", &p, err,
+                                        sizeof err));
+        ASSERT_STR_EQ(p.object, "build/o/lib/x/src/y.o");
+        ASSERT_STR_EQ(p.rsp, "build/o/link.rsp");
+        ASSERT_STR_EQ(p.compile.argv[1], "cc");
+        ASSERT_STR_EQ(p.link.argv[p.link.count - 1], "-lm");
+        zcl_mut_plan_free(&p);
+        PASS();
+    }
+
     TEST("invalid plan inputs leave a non-null output free-safe") {
         struct zcl_mut_plan p;
         char err[256];

@@ -585,7 +585,9 @@ void zcl_mut_plan_free(struct zcl_mut_plan *p)
 
 /* Join `\`-continued recipe lines, then split on unquoted `;` so each
  * sub-command of a compound recipe can be inspected on its own. Returns a
- * fresh NUL-separated list terminated by an empty segment. */
+ * fresh NUL-separated list terminated by an empty segment. A blank line or a
+ * `;` at a line end adds no segment: an empty one in the middle would end the
+ * list and hide every recipe after it. */
 static char *mut_segments(const char *text, size_t len)
 {
     char *buf = zcl_malloc(len + 2, "mutation.segments");
@@ -612,7 +614,8 @@ static char *mut_segments(const char *text, size_t len)
             continue;
         }
         if (c == ';' || c == '\n') {
-            buf[o++] = '\0';
+            if (o > 0 && buf[o - 1] != '\0')
+                buf[o++] = '\0';
             continue;
         }
         buf[o++] = c;
@@ -627,8 +630,9 @@ static bool mut_seg_has(const char *seg, const char *needle)
     return strstr(seg, needle) != NULL;
 }
 
-/* The compile recipe is `compile-epoch-object.sh dep "OBJ" "SRC" ... --
- * COMPILER FLAGS...`; the wrapper then appends -MMD -MP -c -o OBJ SRC. Only
+/* The compile recipe is `zcc --epoch-object dep "OBJ" "SRC" ... -- COMPILER
+ * FLAGS...`, or the same words after compile-epoch-object.sh when the build
+ * uses that wrapper; it then appends -MMD -MP -c -o OBJ SRC. Only
  * the tail after ` -- ` is wanted, because the harness supplies its own -c
  * -o and its own scratch source. */
 static bool mut_plan_compile(const char *seg, const char *src_rel,
@@ -736,7 +740,9 @@ static void mut_plan_scan_segments(const char *segs, const char *src_rel,
                                    bool *have_compile, bool *have_link)
 {
     for (const char *s = segs; *s; s += strlen(s) + 1) {
-        if (!*have_compile && mut_seg_has(s, "compile-epoch-object.sh") &&
+        if (!*have_compile &&
+            (mut_seg_has(s, "--epoch-object") ||
+             mut_seg_has(s, "compile-epoch-object.sh")) &&
             mut_seg_has(s, src_rel) && mut_seg_has(s, " -- "))
             *have_compile = mut_plan_compile(s, src_rel, out);
         else if (!*have_link && mut_seg_has(s, ".rsp") &&
