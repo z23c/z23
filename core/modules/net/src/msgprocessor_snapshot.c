@@ -999,7 +999,7 @@ static mp_zs_hash32 *mp_zs_blkman_validate(struct msg_processor *mp,
         return NULL;
     }
     /* Verify piece count is consistent with height range */
-    uint32_t expected = (uint32_t)((m->end_h - m->start_h +
+    uint32_t expected = (uint32_t)(((int64_t)m->end_h - m->start_h +
         BLOCKS_PER_PIECE) / BLOCKS_PER_PIECE);
     if (m->num_pieces != expected) {
         fprintf(stderr, "Peer %s: block manifest piece count mismatch "  // obs-ok:helper-context-logged

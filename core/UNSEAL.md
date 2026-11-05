@@ -947,3 +947,7 @@ later lane flips it HARD.
 - 2026-11-05T19:39:04Z — REASON: Block manifest: arm the swarm only on a manifest that itself validated and anchored; cap block_swarm_init pieces. No consensus predicate change.
   old ROOT: 61a72f1a81b5e3241adb55a10f21dc74a7f8a06e112d7294c3d811fc814d3e41
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T19:39:17Z — REASON: Block manifest: compute the expected piece count in 64 bits so the widest height range is defined. No consensus predicate change.
+  old ROOT: 4f8bbe45e7fbb3a930066025dcc9c8f7c303291bb13c665df139958fb84bc679
+  by: owner unseal ritual (make core-unseal)
