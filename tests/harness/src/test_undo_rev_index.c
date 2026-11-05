@@ -14,6 +14,7 @@
 #include "coins/undo.h"
 #include "core/hash.h"
 #include "core/serialize.h"
+#include "platform/time_compat.h"
 #include "services/undo_rev_index.h"
 #include "util/safe_alloc.h"
 
@@ -310,6 +311,81 @@ static int test_misses_do_not_disable(void)
     return check(ok, "present block is found after three absent-block misses");
 }
 
+/* Scan bucket: a fresh locator starts with a burst of 8 whole-file scans
+ * (undo_rev_index.c UNDO_REV_SCAN_BURST); each one costs 10 s of credit
+ * (UNDO_REV_SCAN_COST_MS). The test moves time by backdating the bucket's own
+ * refill stamp, so no clock seam is needed. */
+#define BUCKET_BURST 8
+#define BUCKET_SCAN_COST_MS 10000
+#define BUCKET_HALF_SCAN_MS (BUCKET_SCAN_COST_MS / 2)
+
+/* Fresh locator over a rev file holding p: `misses` absent-block lookups
+ * (the cursor is cold, so each reaches the bucket), then one lookup for p.
+ * Returns the value found for p, -1 when refused, -2 when setup failed. */
+static int64_t probe_after_misses(const char *dir, const struct uint256 *p,
+                                  int misses)
+{
+    struct undo_rev_locator loc;
+    if (!undo_rev_locator_init(&loc, dir, TEST_MAGIC))
+        return -2;
+    for (int i = 0; i < misses; i++) {
+        struct uint256 absent = make_hash((unsigned char)(0xb0 + i));
+        (void)found_value(&loc, &absent, -1);
+    }
+    int64_t v = found_value(&loc, p, -1);
+    undo_rev_locator_free(&loc);
+    return v;
+}
+
+static int test_scan_bucket_burst(void)
+{
+    char dir[512];
+    if (!make_datadir(dir, sizeof(dir)))
+        return check(false, "bucket burst: temp datadir");
+    struct uint256 p = make_hash(0x55);
+    FILE *f = open_rev(dir, 0);
+    bool wrote = f && append_record(f, &p, 7, 1, FLAW_NONE);
+    if (f)
+        fclose(f);
+    int failures = 0;
+    failures += check(wrote && probe_after_misses(dir, &p, BUCKET_BURST - 1) == 7,
+                      "bucket: seven misses leave one scan, the next lookup is served");
+    failures += check(wrote && probe_after_misses(dir, &p, BUCKET_BURST) == -1,
+                      "bucket: eight misses spend the burst, the next lookup is refused");
+    remove_datadir(dir);
+    return failures;
+}
+
+static int test_scan_bucket_refills(void)
+{
+    char dir[512];
+    if (!make_datadir(dir, sizeof(dir)))
+        return check(false, "bucket refill: temp datadir");
+    struct uint256 p = make_hash(0x66);
+    FILE *f = open_rev(dir, 0);
+    bool wrote = f && append_record(f, &p, 7, 1, FLAW_NONE);
+    if (f)
+        fclose(f);
+    struct undo_rev_locator loc;
+    bool inited = wrote && undo_rev_locator_init(&loc, dir, TEST_MAGIC);
+    bool ok = inited;
+    for (int i = 0; ok && i < BUCKET_BURST; i++) {
+        struct uint256 absent = make_hash((unsigned char)(0xc0 + i));
+        ok = found_value(&loc, &absent, -1) == -1;
+    }
+    /* Empty bucket: refused. Each step below backdates the refill stamp by
+     * half a scan, so only the second step has a whole scan of credit. */
+    ok = ok && found_value(&loc, &p, -1) == -1;
+    loc.scan_stamp_ms = platform_time_monotonic_ms() - BUCKET_HALF_SCAN_MS;
+    ok = ok && found_value(&loc, &p, -1) == -1;
+    loc.scan_stamp_ms = platform_time_monotonic_ms() - BUCKET_HALF_SCAN_MS;
+    ok = ok && found_value(&loc, &p, -1) == 7;
+    if (inited)
+        undo_rev_locator_free(&loc);
+    remove_datadir(dir);
+    return check(ok, "bucket: credit returns one scan per 10 s, not faster");
+}
+
 int test_undo_rev_index(void)
 {
     printf("\n=== undo rev index ===\n");
@@ -319,5 +395,7 @@ int test_undo_rev_index(void)
     failures += test_hint_and_cursor();
     failures += test_fork_siblings();
     failures += test_misses_do_not_disable();
+    failures += test_scan_bucket_burst();
+    failures += test_scan_bucket_refills();
     return failures;
 }
