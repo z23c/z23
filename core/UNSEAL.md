@@ -955,3 +955,7 @@ later lane flips it HARD.
 - 2026-11-05T19:39:30Z — REASON: Compact block: place prefilled transactions at the absolute positions the decoder stores, refuse a position past 16 bits. Wire bytes unchanged. No consensus predicate change.
   old ROOT: 25bb121bccf955b07e221b606cd391257e6c44e880bec9529cf24747265b7412
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T19:47:07Z — REASON: Signed file offer: refuse a name field with a NUL inside its declared length or nonzero padding, so one signed offer has exactly one wire form. Honest encoders already write that form. Relay validity only, no consensus predicate change.
+  old ROOT: 80c445ee158eeededd3a1bf4c2e6649d6f468f942b9f624381a25948074c5552
+  by: owner unseal ritual (make core-unseal)

@@ -414,6 +414,15 @@ enum file_offer_auth_error file_offer_auth_encode(
         ? FILE_OFFER_AUTH_OK : FILE_OFFER_AUTH_ERR_WIRE_SIZE;
 }
 
+/* One signed meaning has exactly one encoding. The signature covers the
+ * re-encoding, which writes the name up to its first NUL and zeroes the rest of
+ * the field, so any other bytes here would verify and still relay. */
+static bool offer_name_field_canonical(const uint8_t *field, uint8_t name_len)
+{
+    return memchr(field, 0, name_len) == NULL &&
+           bytes_all_zero(field + name_len, 255u - name_len);
+}
+
 enum file_offer_auth_error file_offer_auth_decode(
     const uint8_t *wire, size_t wire_len, struct file_offer *out)
 {
@@ -453,6 +462,10 @@ enum file_offer_auth_error file_offer_auth_decode(
         memset(out, 0, sizeof(*out));
         return name_len == 0 ? FILE_OFFER_AUTH_ERR_FILENAME
                              : FILE_OFFER_AUTH_ERR_CHUNKS;
+    }
+    if (!offer_name_field_canonical(wire + off, name_len)) {
+        memset(out, 0, sizeof(*out));
+        return FILE_OFFER_AUTH_ERR_FILENAME;
     }
     memcpy(out->filename, wire + off, name_len);
     out->filename[name_len] = '\0';
