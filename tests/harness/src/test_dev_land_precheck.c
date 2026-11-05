@@ -587,9 +587,11 @@ static bool dlx_pc_need_case(const char *tag, const char *gate, const char *want
 {
     struct dlx_rig rig;
     struct dlx_call c;
-    char path[1400], known[128];
+    char path[1400], known[128], row[1024], detail[128];
     (void)snprintf(known, sizeof(known), "%s\n", gate);
-    if (!dlx_pc_rig(&rig, tag, true, known) ||
+    (void)snprintf(detail, sizeof(detail), "%s failed", gate);
+    dlx_pc_row(row, sizeof(row), 1, "failed", "lint", 1, detail);
+    if (!dlx_pc_rig(&rig, tag, true, known) || !dlx_pc_outcomes(row) ||
         !dlx_pc_file(&rig, "precheck-fail", gate))
         return false;
     if (present) {
