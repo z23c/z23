@@ -290,6 +290,61 @@ static bool offer_v1_decodes_beside_v2(const struct file_offer *persisted)
         memcmp(v1_roundtrip.offer_id, persisted->offer_id, 32) == 0;
 }
 
+/* The wire with its name field changed, decoded: one signed meaning has exactly
+ * one encoding, so an honest offer's other forms are refused as FILENAME. */
+static bool offer_name_patch_refused(const uint8_t *wire, size_t wire_len,
+                                     size_t patch_at, uint8_t value,
+                                     size_t len_at, uint8_t name_len)
+{
+    uint8_t copy[FILE_MARKET_OFFER_WIRE_BYTES_MAX];
+    struct file_offer out;
+    if (wire_len > sizeof(copy))
+        return false;
+    memcpy(copy, wire, wire_len);
+    copy[patch_at] = value;
+    copy[len_at] = name_len;
+    memset(&out, 0xCC, sizeof(out));
+    enum file_offer_auth_error error = file_offer_auth_decode(copy, wire_len, &out);
+    static const struct file_offer zero;
+    return error == FILE_OFFER_AUTH_ERR_FILENAME &&
+        memcmp(&out, &zero, sizeof(out)) == 0;
+}
+
+static bool offer_name_field_canonical(const uint8_t *wire, size_t wire_len,
+                                       size_t after_name,
+                                       const char *name)
+{
+    size_t len = strlen(name);
+    size_t at = wire_len - after_name - 255;
+    if (wire[at - 1] != (uint8_t)len || memcmp(wire + at, name, len) != 0 ||
+        len >= 254)
+        return false;
+    size_t len_at = at - 1;
+    struct file_offer plain;
+    return file_offer_auth_decode(wire, wire_len, &plain) == FILE_OFFER_AUTH_OK &&
+        offer_name_patch_refused(wire, wire_len, at + len, 0xFF, len_at,
+                                 (uint8_t)len) &&
+        offer_name_patch_refused(wire, wire_len, at + 254, 0x01, len_at,
+                                 (uint8_t)len) &&
+        offer_name_patch_refused(wire, wire_len, at + len, 0, len_at,
+                                 (uint8_t)(len + 1)) &&
+        offer_name_patch_refused(wire, wire_len, at + 1, 0, len_at,
+                                 (uint8_t)len);
+}
+
+/* A name that fills the field has no padding, and still decodes. */
+static bool offer_full_name_decodes(const struct file_offer *persisted)
+{
+    uint8_t wire[FILE_MARKET_OFFER_WIRE_BYTES];
+    struct file_offer offer = *persisted;
+    struct file_offer out;
+    memset(offer.filename, 'a', 255);
+    offer.filename[255] = '\0';
+    return file_offer_auth_encode(&offer, wire) == FILE_OFFER_AUTH_OK &&
+        file_offer_auth_decode(wire, sizeof(wire), &out) == FILE_OFFER_AUTH_OK &&
+        strlen(out.filename) == 255;
+}
+
 static bool offer_ingest_keeps_identity(enum file_market_offer_ingest ingest,
                                        const struct file_offer *ingested,
                                        const uint8_t offer_id[32])
@@ -471,6 +526,17 @@ int file_market_offer_tests(void)
 
     OFFER_CHECK("v1 wires keep decoding beside v2 (dual decode)",
         offer_v1_decodes_beside_v2(&persisted));
+
+    uint8_t name_v1_wire[FILE_MARKET_OFFER_WIRE_BYTES];
+    OFFER_CHECK("a v1 name field has one accepted form",
+        file_offer_auth_encode(&persisted, name_v1_wire) == FILE_OFFER_AUTH_OK &&
+        offer_name_field_canonical(name_v1_wire, sizeof(name_v1_wire), 64,
+                                   persisted.filename));
+    OFFER_CHECK("a v2 name field has one accepted form",
+        offer_name_field_canonical(fixture.wire, fixture.wire_len, 64 + 33,
+                                   persisted.filename));
+    OFFER_CHECK("a name that fills the field still decodes",
+        offer_full_name_decodes(&persisted));
 
     uint8_t v3_wire[FILE_MARKET_OFFER_WIRE_BYTES_V2];
     memcpy(v3_wire, fixture.wire, sizeof(v3_wire));
