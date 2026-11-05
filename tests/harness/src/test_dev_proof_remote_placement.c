@@ -12,6 +12,7 @@
 #include "command/native_dev_land_remote_shared.h"
 #include "crypto/sha3.h"
 #include "util/file_io.h"
+#include "util/compare.h"
 #include "util/spawn.h"
 #include <errno.h>
 #include <sys/wait.h>
@@ -551,6 +552,202 @@ static bool rpp_positive(struct rpp_fixture *f)
     return rpp_retire(&observed);
 }
 
+struct rpp_lazy_fixture {
+    struct rpp_fixture fixture;
+    char sentinel[1024], object[128];
+    uint8_t *object_bytes;
+    size_t object_size;
+    mode_t object_mode;
+};
+
+/* Compare the entire private receiver, including refs, index, config and
+ * objects. Only access/modify timestamps are omitted. Unexpected file kinds,
+ * truncation or bounded-inventory overflow refuse the oracle. */
+struct rpp_snapshot {
+    struct sha3_256_ctx hash;
+    size_t entries, bytes;
+};
+
+static bool rpp_snapshot_node(const char *path, struct rpp_snapshot *snapshot, unsigned depth);
+
+static bool rpp_snapshot_children(const char *path, struct rpp_snapshot *snapshot, unsigned depth)
+{
+    char storage[128][256], *names[128];
+    size_t count = 0;
+    DIR *dir = opendir(path);
+    if (!dir) return false;
+    bool ok = true;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) { if (errno) ok = false; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (count == 128 || strlen(entry->d_name) >= sizeof(storage[0])) { ok = false; break; }
+        names[count] = storage[count];
+        memcpy(names[count++], entry->d_name, strlen(entry->d_name) + 1u);
+    }
+    if (closedir(dir) != 0) ok = false;
+    qsort(names, count, sizeof(names[0]), zcl_cmp_cstr);
+    for (size_t i = 0; ok && i < count; i++) {
+        char child[4096];
+        ok = rpp_path(child, sizeof(child), path, names[i]) &&
+            rpp_snapshot_node(child, snapshot, depth + 1u);
+    }
+    return ok;
+}
+
+static bool rpp_snapshot_node(const char *path, struct rpp_snapshot *snapshot, unsigned depth)
+{
+    struct stat st;
+    char metadata[96];
+    if (depth > 24 || ++snapshot->entries > 2048 || lstat(path, &st) != 0) return false;
+    if (!S_ISDIR(st.st_mode) && !S_ISREG(st.st_mode)) return false;
+    int n = snprintf(metadata, sizeof(metadata), "%o %llu",
+        (unsigned)(st.st_mode & 0177777), (unsigned long long)(S_ISREG(st.st_mode) ? st.st_size : 0));
+    if (n < 0 || (size_t)n >= sizeof(metadata)) return false;
+    sha3_256_write(&snapshot->hash, (const uint8_t *)path, strlen(path) + 1u);
+    sha3_256_write(&snapshot->hash, (const uint8_t *)metadata, (size_t)n + 1u);
+    if (S_ISDIR(st.st_mode)) return rpp_snapshot_children(path, snapshot, depth);
+    uint8_t *bytes = NULL;
+    size_t size = 0;
+    bool ok = zcl_read_whole_file(path, 1024 * 1024, &bytes, &size, "placement-lazy-snapshot");
+    if (ok) {
+        snapshot->bytes += size;
+        ok = snapshot->bytes <= 16 * 1024 * 1024;
+        if (ok) sha3_256_write(&snapshot->hash, bytes, size);
+    }
+    free(bytes);
+    return ok;
+}
+
+static bool rpp_snapshot_root(const char *root, uint8_t out[32])
+{
+    struct rpp_snapshot snapshot = {0};
+    sha3_256_init(&snapshot.hash);
+    if (!rpp_snapshot_node(root, &snapshot, 0)) return false;
+    sha3_256_finalize(&snapshot.hash, out);
+    return true;
+}
+
+static bool rpp_sentinel(const struct rpp_lazy_fixture *lazy, bool present)
+{
+    struct stat st;
+    if (lstat(lazy->sentinel, &st) != 0) return !present && errno == ENOENT;
+    return present && S_ISREG(st.st_mode) && st.st_size == 0;
+}
+
+/* git-remote-ext uses percent quoting, not shell quoting. Keep the only
+ * transport local: touch creates the sentinel and speaks no Git protocol. */
+static bool rpp_sentinel_url(const char *marker, char *out, size_t cap)
+{
+    const char *prefix = "ext::/usr/bin/touch ";
+    size_t used = strlen(prefix);
+    if (used >= cap) return false;
+    memcpy(out, prefix, used);
+    for (size_t i = 0; marker[i]; i++) {
+        if (used + 3u >= cap) return false;
+        if (marker[i] == '%' || marker[i] == ' ') out[used++] = '%';
+        if (marker[i] == '\n' || marker[i] == '\r') return false;
+        out[used++] = marker[i];
+    }
+    out[used] = '\0';
+    return true;
+}
+
+static bool rpp_lazy_object(struct rpp_lazy_fixture *lazy)
+{
+    char tree[65], path[1024];
+    struct stat st;
+    struct rpp_fixture *f = &lazy->fixture;
+    if (!RPP_GIT(f->receiver, tree, sizeof(tree), "rev-parse", "HEAD^{tree}") || strlen(tree) != 40)
+        return false;
+    int n = snprintf(lazy->object, sizeof(lazy->object), ".git/objects/%.2s/%s", tree, tree + 2);
+    if (n < 0 || (size_t)n >= sizeof(lazy->object) ||
+        !rpp_path(path, sizeof(path), f->receiver, lazy->object) || lstat(path, &st) != 0 ||
+        !S_ISREG(st.st_mode) || st.st_nlink != 1) return false;
+    lazy->object_mode = st.st_mode & 0777;
+    return zcl_read_whole_file(path, 1024 * 1024, &lazy->object_bytes, &lazy->object_size,
+        "placement-lazy-loose-tree") &&
+        rpp_write(f->root, "lazy-tree.saved", lazy->object_bytes, lazy->object_size, 0600);
+}
+
+static bool rpp_lazy_setup(struct rpp_lazy_fixture *lazy, const struct rpp_fixture *original)
+{
+    lazy->fixture = *original;
+    struct rpp_fixture *f = &lazy->fixture;
+    char url[2400];
+    if (!rpp_path(f->receiver, sizeof(f->receiver), f->root, "lazy-receiver") ||
+        !rpp_path(lazy->sentinel, sizeof(lazy->sentinel), f->root, "lazy-fetch-contacted") ||
+        !rpp_sentinel_url(lazy->sentinel, url, sizeof(url))) return false;
+    f->assignment.repository = f->receiver;
+    f->assignment.destination = f->receiver;
+    if (!RPP_GIT(f->root, NULL, 0, "clone", "--quiet", "--local", "--no-hardlinks", f->sender, f->receiver) ||
+        !RPP_GIT(f->receiver, NULL, 0, "checkout", "--quiet", "--detach", f->base) ||
+        !RPP_GIT(f->receiver, f->refs, sizeof(f->refs), "for-each-ref", "--format=%(refname) %(objectname)"))
+        return false;
+    return RPP_GIT(f->receiver, NULL, 0, "config", "core.repositoryformatversion", "1") &&
+        RPP_GIT(f->receiver, NULL, 0, "config", "protocol.ext.allow", "always") &&
+        RPP_GIT(f->receiver, NULL, 0, "config", "remote.sentinel.url", url) && rpp_lazy_object(lazy);
+}
+
+static bool rpp_lazy_prepare_refused(struct rpp_lazy_fixture *lazy)
+{
+    struct rpp_fixture *f = &lazy->fixture;
+    uint8_t before[32], after[32];
+    if (!rpp_sentinel(lazy, false) || !rpp_snapshot_root(f->receiver, before)) return false;
+    struct zcl_dev_proof_remote_placement observed = {0};
+    char why[256] = {0};
+    bool accepted = zcl_dev_proof_remote_prepare(&f->assignment, rpp_owner, f->receiver,
+        &observed, why, sizeof(why));
+    bool ok = !accepted && !strcmp(why, "remote_git_lazy_fetch_config") &&
+        !observed.objects_imported && !observed.placed && !observed.evidence_dir[0];
+    ok = ok && rpp_sentinel(lazy, false) && rpp_snapshot_root(f->receiver, after) &&
+        memcmp(before, after, sizeof(before)) == 0;
+    if (!ok) printf("missing-object prepare: accepted=%d reason=%s\n", accepted, why);
+    return ok;
+}
+
+static bool rpp_lazy_case(struct rpp_lazy_fixture *lazy, const char *key, const char *value)
+{
+    struct rpp_fixture *f = &lazy->fixture;
+    char config[1024];
+    uint8_t *bytes = NULL;
+    size_t size = 0;
+    struct stat config_stat;
+    if (!rpp_path(config, sizeof(config), f->receiver, ".git/config") ||
+        lstat(config, &config_stat) != 0 || !S_ISREG(config_stat.st_mode) ||
+        !zcl_read_whole_file(config, 16384, &bytes, &size, "placement-lazy-config")) return false;
+    bool ok = RPP_GIT(f->receiver, NULL, 0, "config", "--local", key, value) &&
+        rpp_sentinel(lazy, false) && rpp_remove(f, lazy->object);
+    if (ok) {
+        bool status_ok = RPP_GIT(f->receiver, NULL, 0, "status", "--porcelain=v1", "--untracked-files=all");
+        ok = !status_ok && rpp_sentinel(lazy, true);
+        printf("missing-object status transport control %s: %s\n", key, ok ? "OBSERVED" : "FAIL");
+    }
+    if (ok) ok = unlink(lazy->sentinel) == 0 && rpp_lazy_prepare_refused(lazy);
+    /* Always repair the deliberately removed private object/config, even if
+     * an oracle fails. No original sender object is shared or removed. */
+    bool object_restored = rpp_write(f->receiver, lazy->object, lazy->object_bytes,
+        lazy->object_size, lazy->object_mode);
+    bool config_restored = rpp_write(f->receiver, ".git/config", bytes, size, config_stat.st_mode & 0777);
+    free(bytes);
+    return object_restored && config_restored && ok;
+}
+
+static bool rpp_missing_object_controls(struct rpp_fixture *original)
+{
+    struct rpp_lazy_fixture lazy = {0};
+    bool ok = rpp_lazy_setup(&lazy, original);
+    if (ok) ok = rpp_lazy_case(&lazy, "extensions.partialClone", "sentinel") &&
+        rpp_lazy_case(&lazy, "remote.sentinel.promisor", "true");
+    if (ok) ok = RPP_GIT(lazy.fixture.receiver, NULL, 0, "remote", "remove", "sentinel") &&
+        RPP_GIT(lazy.fixture.receiver, NULL, 0, "config", "--unset", "protocol.ext.allow") &&
+        rpp_sentinel(&lazy, false) && rpp_positive(&lazy.fixture);
+    if (!ok) printf("missing-object fixture retained: %s\n", lazy.fixture.receiver);
+    free(lazy.object_bytes);
+    return ok;
+}
+
 /* A fork confines environment qualification to the fixture process. Never set
  * DEVBUILD_ACTIVE: it must be inherited from the admitted registered runner. */
 static bool rpp_redirected_environment(const char *entry)
@@ -593,7 +790,8 @@ static int rpp_child(const char *source)
     /* Only this fork-isolated fixture may execute the real source helper. */
     bool ok = rpp_environment(home) &&
         setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0 && rpp_setup(&fixture, source);
-    if (ok) ok = rpp_negative_prepare(&fixture) && rpp_positive(&fixture);
+    if (ok) ok = rpp_missing_object_controls(&fixture) &&
+        rpp_negative_prepare(&fixture) && rpp_positive(&fixture);
     if (!ok) printf("real placement fixture retained: %s\n", fixture.root);
     else ok = test_rm_rf_recursive(fixture.root) == 0;
     if (test_rm_rf_recursive(home) != 0) ok = false;
