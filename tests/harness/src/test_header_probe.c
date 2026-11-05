@@ -73,6 +73,8 @@ struct hp_mock {
     int remote_tip;             /* canned getblockcount value */
     bool malformed_header;      /* true → return non-deserializable hex */
     _Atomic int requests_served;
+    _Atomic bool fail_batch;    /* true → answer batch requests with a non-array */
+    _Atomic int first_height;   /* first getblockhash height asked for, -1 none */
     _Atomic bool stop;
     pthread_t thread;
 };
@@ -100,6 +102,12 @@ static const char *HP_VALID_HDR_HEX =
 
 static const char *HP_MALFORMED_HEX = "deadbeef";
 
+static size_t hp_mock_body_len(const char *buf)
+{
+    const char *p = strstr(buf, "Content-Length:");
+    return p ? (size_t)strtoul(p + strlen("Content-Length:"), NULL, 10) : 0;
+}
+
 static size_t hp_mock_read_request(platform_socket_t cfd, char *buf,
                                    size_t cap)
 {
@@ -115,9 +123,11 @@ static size_t hp_mock_read_request(platform_socket_t cfd, char *buf,
         if (n <= 0) break;
         got += (size_t)n;
         buf[got] = '\0';
-        /* Stop reading once we have body + a chunk after the
-         * \r\n\r\n separator. (Tiny test bodies fit in 1 recv.) */
-        if (strstr(buf, "\r\n\r\n")) break;
+        /* Stop reading once the whole Content-Length body has arrived, so a
+         * large batch is drained before the reply and the close. */
+        const char *sep = strstr(buf, "\r\n\r\n");
+        if (sep && got >= (size_t)(sep + 4 - buf) + hp_mock_body_len(buf))
+            break;
         if (got >= cap - 1) break;
     }
     return got;
@@ -228,7 +238,7 @@ static void *hp_mock_loop(void *arg)  /* raw-pthread-ok: test-local */
                                                        &cl);
         if (cfd == PLATFORM_SOCKET_INVALID) break;
 
-        char buf[8192];
+        char buf[65536];
         size_t got = hp_mock_read_request(cfd, buf, sizeof(buf));
         if (got == 0) {
             /* Nothing arrived — answering would be answering noise. */
@@ -243,6 +253,13 @@ static void *hp_mock_loop(void *arg)  /* raw-pthread-ok: test-local */
         const char *body_sep = strstr(buf, "\r\n\r\n");
         const char *json_body = body_sep ? body_sep + 4 : buf;
         bool is_batch = (json_body[0] == '[');
+        if (method && strcmp(method, "getblockhash") == 0 &&
+            atomic_load(&m->first_height) < 0) {
+            const char *pp = strstr(json_body, "\"params\":[");
+            if (pp) atomic_store(&m->first_height, atoi(pp + 10));
+        }
+        if (is_batch && atomic_load(&m->fail_batch))
+            is_batch = false;   /* a single object where an array is due */
         int batch_n = 0;
         if (is_batch) batch_n = hp_mock_count_batch(json_body);
 
@@ -270,6 +287,7 @@ static bool hp_mock_start(struct hp_mock *m, int remote_tip,
     memset(m, 0, sizeof(*m));
     m->remote_tip = remote_tip;
     m->malformed_header = malformed;
+    atomic_store(&m->first_height, -1);
     m->listen_fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
     if (m->listen_fd == PLATFORM_SOCKET_INVALID) return false;
     (void)platform_socket_set_reuse_address(m->listen_fd, true);
@@ -360,6 +378,266 @@ static bool hp_dump_omits_config(const struct json_value *dump)
 }
 
 int test_header_probe(void);
+
+/* From test_header_probe_state.c. */
+struct hp_conf {
+    char dir[PATH_MAX];
+    char path[PATH_MAX + 32];
+    bool set;
+};
+bool hp_conf_write(struct hp_conf *c, const char *text);
+void hp_conf_drop(struct hp_conf *c);
+bool hp_state_is_pristine(void);
+int header_probe_state_tests(void);
+
+/* ── Scenario table: pull and tick counts observed through the mock ──
+ *
+ * A malformed header makes a whole batch fail to decode, which adds exactly
+ * the batch length n to rpc_errors and stops the pull, so rpc_errors reads
+ * back n = min(requested, remote tip - start + 1, 128). The mock also records
+ * the first height it was asked for. */
+
+#define HP_ANY (-999)
+
+struct hp_scn {
+    int tip;                         /* remote tip */
+    bool malformed, fail_batch, dead, tick, empty_chain, uninit_tick;
+    int local;                       /* local best-header height; 0 = genesis */
+    int batch, lag;                  /* config */
+    int start, max;                  /* pull_range arguments */
+    int conf_mode;                   /* 1 port from conf, 2 conf port ignored */
+};
+
+struct hp_want { int errors, rejected, calls, first, local, remote; };
+
+struct hp_got {
+    int added;
+    int64_t errors, rejected, calls, local, remote;
+    int first;
+};
+
+struct hp_row { const char *name; struct hp_scn s; struct hp_want w; };
+
+static bool hp_scn_init(const struct chain_params *params,
+                        const struct hp_scn *s, const struct hp_mock *srv,
+                        struct hp_conf *conf)
+{
+    struct header_probe_config cfg = {
+        .rpc_host = "127.0.0.1", .rpc_port = srv->port,
+        .rpc_user = "u", .rpc_password = "p",
+        .batch_size = s->batch, .lag_threshold = s->lag,
+    };
+    if (s->conf_mode) {
+        char text[96];
+        snprintf(text, sizeof(text), "rpcuser=cu\nrpcpassword=cp\nrpcport=%d\n",
+                 s->conf_mode == 1 ? srv->port : 1);
+        if (!hp_conf_write(conf, text)) return false;
+        cfg.rpc_user = NULL;
+        cfg.rpc_password = NULL;
+        cfg.rpc_port = s->conf_mode == 1 ? 0 : srv->port;
+    }
+    return header_probe_init(&cfg, &g_hp_ms, params).ok;
+}
+
+static void hp_scn_collect(struct hp_got *g, const struct hp_mock *srv)
+{
+    g->errors = hp_dump_int("rpc_errors");
+    g->rejected = hp_dump_int("headers_rejected");
+    g->calls = hp_dump_int("calls_total");
+    g->local = hp_dump_int("last_local_height");
+    g->remote = hp_dump_int("last_remote_height");
+    g->first = atomic_load(&srv->first_height);
+}
+
+static bool hp_scn_run(const struct chain_params *params,
+                       const struct hp_scn *s, struct hp_got *g)
+{
+    memset(g, 0, sizeof(*g));
+    if (s->empty_chain) {
+        main_state_init(&g_hp_ms);
+    } else {
+        hp_build_fixture();
+        if (s->local && g_hp_ms.pindex_best_header)
+            g_hp_ms.pindex_best_header->nHeight = s->local;
+    }
+    struct hp_mock srv;
+    struct hp_conf conf = {0};
+    bool ok = hp_mock_start(&srv, s->tip, s->malformed);
+    bool running = ok;
+    if (ok) {
+        atomic_store(&srv.fail_batch, s->fail_batch);
+        if (s->dead) { hp_mock_stop(&srv); running = false; }
+        ok = s->uninit_tick || hp_scn_init(params, s, &srv, &conf);
+    }
+    if (ok && s->tick) {
+        header_probe_tick_once();
+    } else if (ok) {
+        struct zcl_result r = header_probe_pull_range(s->start, s->max, &g->added);
+        ok = r.ok;
+    }
+    if (ok) hp_scn_collect(g, &srv);
+    if (running) hp_mock_stop(&srv);
+    hp_conf_drop(&conf);
+    hp_teardown();
+    return ok;
+}
+
+static bool hp_want_match(const struct hp_got *g, const struct hp_want *w)
+{
+    return (w->errors == HP_ANY || g->errors == w->errors) &&
+           (w->rejected == HP_ANY || g->rejected == w->rejected) &&
+           (w->calls == HP_ANY || g->calls == w->calls) &&
+           (w->first == HP_ANY || g->first == w->first) &&
+           (w->local == HP_ANY || g->local == w->local) &&
+           (w->remote == HP_ANY || g->remote == w->remote);
+}
+
+#define HP_W(e, r, c, f, l, rm) { (e), (r), (c), (f), (l), (rm) }
+
+static const struct hp_row g_pull_rows[] = {
+    {"pull: max 0 means the default, capped at one 128 batch",
+     {.tip = 1000, .malformed = true, .start = 1, .max = 0},
+     HP_W(128, 0, 1, 1, HP_ANY, 1000)},
+    {"pull: max 1 fetches one header",
+     {.tip = 1000, .malformed = true, .start = 1, .max = 1},
+     HP_W(1, 0, 1, 1, HP_ANY, HP_ANY)},
+    {"pull: max 5 from height 10 fetches 5",
+     {.tip = 1000, .malformed = true, .start = 10, .max = 5},
+     HP_W(5, 0, 1, 10, HP_ANY, HP_ANY)},
+    {"pull: the range ends at the remote tip",
+     {.tip = 3, .malformed = true, .start = 1, .max = 10},
+     HP_W(3, 0, 1, 1, HP_ANY, HP_ANY)},
+    {"pull: start at the remote tip fetches exactly one",
+     {.tip = 3, .malformed = true, .start = 3, .max = 10},
+     HP_W(1, 0, 1, 3, HP_ANY, HP_ANY)},
+    {"pull: start past the remote tip fetches nothing",
+     {.tip = 3, .malformed = true, .start = 4, .max = 10},
+     HP_W(0, 0, 1, -1, HP_ANY, 3)},
+    {"pull: start 0 is a legal height",
+     {.tip = 100, .malformed = true, .start = 0, .max = 3},
+     HP_W(3, 0, 1, 0, HP_ANY, HP_ANY)},
+    {"pull: max 100 under the batch cap",
+     {.tip = 10000, .malformed = true, .start = 1, .max = 100},
+     HP_W(100, 0, 1, 1, HP_ANY, HP_ANY)},
+    {"pull: max 129 is cut to one batch of 128",
+     {.tip = 10000, .malformed = true, .start = 1, .max = 129},
+     HP_W(128, 0, 1, 1, HP_ANY, HP_ANY)},
+    {"pull: max past 5000 is cut to one batch of 128",
+     {.tip = 10000, .malformed = true, .start = 1, .max = 200000},
+     HP_W(128, 0, 1, 1, HP_ANY, HP_ANY)},
+    {"pull: a valid-looking header the chain refuses stops the pull at once",
+     {.tip = 10, .start = 1, .max = 5},
+     HP_W(0, 1, 1, 1, HP_ANY, 10)},
+    {"pull: a failed batch falls back to one single fetch, refused once",
+     {.tip = 10, .fail_batch = true, .start = 1, .max = 3},
+     HP_W(1, 1, 1, 1, HP_ANY, HP_ANY)},
+    {"pull: a failed batch and a failed single fetch cost two errors",
+     {.tip = 10, .malformed = true, .fail_batch = true, .start = 1, .max = 3},
+     HP_W(2, 0, 1, 1, HP_ANY, HP_ANY)},
+    {"pull: an unreachable server costs exactly one error",
+     {.tip = 100, .dead = true, .start = 1, .max = 5},
+     HP_W(1, 0, 1, -1, 0, 0)},
+    {"pull: credentials and port from the conf reach the server",
+     {.tip = 50, .malformed = true, .start = 1, .max = 2, .conf_mode = 1},
+     HP_W(2, 0, 1, 1, HP_ANY, HP_ANY)},
+    {"pull: an explicit port beats the conf port",
+     {.tip = 50, .malformed = true, .start = 1, .max = 2, .conf_mode = 2},
+     HP_W(2, 0, 1, 1, HP_ANY, HP_ANY)},
+};
+
+static const struct hp_row g_tick_rows[] = {
+    {"tick: remote tip at local + lag does not pull",
+     {.tip = 10, .malformed = true, .tick = true, .local = 7, .batch = 100, .lag = 3},
+     HP_W(0, 0, 0, -1, 7, 10)},
+    {"tick: one past local + lag pulls from local + 1",
+     {.tip = 11, .malformed = true, .tick = true, .local = 7, .batch = 100, .lag = 3},
+     HP_W(4, 0, 1, 8, 7, 11)},
+    {"tick: lag 0 defaults to 100 and 107 does not pull",
+     {.tip = 107, .malformed = true, .tick = true, .local = 7},
+     HP_W(0, 0, 0, -1, 7, 107)},
+    {"tick: lag 0 defaults to 100 and 108 pulls 101 headers",
+     {.tip = 108, .malformed = true, .tick = true, .local = 7},
+     HP_W(101, 0, 1, 8, 7, 108)},
+    {"tick: lag 1 and tip local + 1 does not pull",
+     {.tip = 8, .malformed = true, .tick = true, .local = 7, .batch = 100, .lag = 1},
+     HP_W(0, 0, 0, -1, 7, 8)},
+    {"tick: lag 1 and tip local + 2 pulls two",
+     {.tip = 9, .malformed = true, .tick = true, .local = 7, .batch = 100, .lag = 1},
+     HP_W(2, 0, 1, 8, 7, 9)},
+    {"tick: batch 5 caps the pull at five",
+     {.tip = 300, .malformed = true, .tick = true, .local = 7, .batch = 5, .lag = 3},
+     HP_W(5, 0, 1, 8, 7, 300)},
+    {"tick: batch 1 is legal",
+     {.tip = 300, .malformed = true, .tick = true, .local = 7, .batch = 1, .lag = 3},
+     HP_W(1, 0, 1, 8, 7, 300)},
+    {"tick: batch 0 defaults and is capped at one 128 batch",
+     {.tip = 300, .malformed = true, .tick = true, .local = 7, .lag = 3},
+     HP_W(128, 0, 1, 8, 7, 300)},
+    {"tick: batch past 5000 is capped at one 128 batch",
+     {.tip = 300, .malformed = true, .tick = true, .local = 7, .batch = 9999, .lag = 3},
+     HP_W(128, 0, 1, 8, 7, 300)},
+    {"tick: an empty chain counts as local height 0",
+     {.tip = 4, .malformed = true, .tick = true, .empty_chain = true, .batch = 100, .lag = 3},
+     HP_W(4, 0, 1, 1, 0, 4)},
+    {"tick: an unreachable server costs exactly one error and no pull",
+     {.tip = 100, .dead = true, .tick = true, .batch = 100, .lag = 1},
+     HP_W(1, 0, 0, -1, 0, 0)},
+    {"tick: an uninitialized probe does nothing",
+     {.tip = 50, .uninit_tick = true, .tick = true},
+     HP_W(0, 0, 0, -1, 0, 0)},
+};
+
+static int hp_run_rows(const struct chain_params *params,
+                       const struct hp_row *rows, size_t n)
+{
+    int failures = 0;
+    for (size_t i = 0; i < n; i++) {
+        struct hp_got g;
+        bool ran = hp_scn_run(params, &rows[i].s, &g);
+        bool same = ran && hp_want_match(&g, &rows[i].w);
+        if (!same)
+            printf("header_probe: ran=%d errors=%lld rejected=%lld calls=%lld "
+                   "first=%d local=%lld remote=%lld\n", ran,
+                   (long long)g.errors, (long long)g.rejected,
+                   (long long)g.calls, g.first, (long long)g.local,
+                   (long long)g.remote);
+        HP_CHECK(rows[i].name, same);
+    }
+    return failures;
+}
+
+static int hp_test_reset_clears_everything(const struct chain_params *params)
+{
+    int failures = 0;
+    hp_build_fixture();
+    struct hp_mock srv;
+    bool up = hp_mock_start(&srv, 10, false);
+    HP_CHECK("mock starts (reset)", up);
+    if (up) {
+        struct header_probe_config cfg = {
+            .rpc_host = "127.0.0.1", .rpc_port = srv.port,
+            .rpc_user = "u", .rpc_password = "p",
+        };
+        HP_CHECK("init (reset)", header_probe_init(&cfg, &g_hp_ms, params).ok);
+        int added = 0;
+        struct zcl_result r = header_probe_pull_range(1, 5, &added);
+        HP_CHECK("pull (reset)", r.ok);
+        header_probe_note_repair_served(HEADER_PROBE_SRC_ORACLE, 9);
+        header_probe_note_repair_served(HEADER_PROBE_SRC_P2P, 9);
+        header_probe_note_p2p_request(9, 0);
+        header_probe_note_oracle_skipped();
+        HP_CHECK("counters are dirty before the reset",
+                 hp_dump_int("calls_total") == 1 &&
+                 hp_dump_int("last_remote_height") == 10 &&
+                 hp_dump_int("oracle_skipped") == 1 &&
+                 !hp_state_is_pristine());
+        hp_mock_stop(&srv);
+    }
+    header_probe_reset_for_test();
+    HP_CHECK("reset leaves every counter at zero", hp_state_is_pristine());
+    hp_teardown();
+    return failures;
+}
 
 static int hp_test_reinit_clears_credentials(const struct chain_params *params)
 {
@@ -602,6 +880,15 @@ int test_header_probe(void)
      * prior run. With no credentials in the replacement config and no conf
      * file, re-init fails closed and leaves the probe inactive. */
     failures += hp_test_reinit_clears_credentials(params);
+
+    /* Tests 7-10: exact pull and tick counts, reset, and the mock-free state
+     * and init guards (test_header_probe_state.c). */
+    failures += hp_run_rows(params, g_pull_rows,
+                            sizeof(g_pull_rows) / sizeof(g_pull_rows[0]));
+    failures += hp_run_rows(params, g_tick_rows,
+                            sizeof(g_tick_rows) / sizeof(g_tick_rows[0]));
+    failures += hp_test_reset_clears_everything(params);
+    failures += header_probe_state_tests();
 
     if (failures == 0)
         printf("=== header probe service: all checks passed ===\n");
