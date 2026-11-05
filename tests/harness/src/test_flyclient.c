@@ -390,7 +390,7 @@ static bool ref_taken(const uint64_t *a, uint32_t n, uint64_t v)
 }
 
 static uint64_t ref_retry(const uint8_t in36[36], uint64_t idx, const uint64_t *a,
-                          uint32_t i, uint64_t n, double e, int *probed)
+                          uint32_t i, uint64_t n, double e, int *stat)
 {
     uint8_t in37[37], h[32];
     memcpy(in37, in36, 36);
@@ -400,14 +400,16 @@ static uint64_t ref_retry(const uint8_t in36[36], uint64_t idx, const uint64_t *
         idx = ref_weighted(h, e, n);
         if (!ref_taken(a, i, idx)) return idx;
     }
-    (*probed)++;
-    while (ref_taken(a, i, idx))
+    stat[0]++; /* probe fallback used */
+    while (ref_taken(a, i, idx)) {
+        if (idx + 1 >= n) stat[1]++; /* probe wrapped past the tip */
         idx = (idx + 1 >= n) ? 0 : idx + 1;
+    }
     return idx;
 }
 
 static uint32_t ref_indices(const uint8_t seed[32], uint64_t n, uint64_t *out,
-                            int *probed)
+                            int *stat)
 {
     uint32_t count = n < FC_NUM_SAMPLES ? (uint32_t)n : FC_NUM_SAMPLES;
     double ln = log2((double)n);
@@ -420,7 +422,7 @@ static uint32_t ref_indices(const uint8_t seed[32], uint64_t n, uint64_t *out,
         sha3_256(in, 36, h);
         uint64_t idx = ref_weighted(h, e, n);
         if (ref_taken(out, i, idx) && n > count)
-            idx = ref_retry(in, idx, out, i, n, e, probed);
+            idx = ref_retry(in, idx, out, i, n, e, stat);
         out[i] = idx;
     }
     return count;
@@ -429,13 +431,13 @@ static uint32_t ref_indices(const uint8_t seed[32], uint64_t n, uint64_t *out,
 /* One seed/length/prefill comparison.  The prefill makes a one-past-the-end
  * read of the output array visible (a taken-looking or overwritten slot). */
 static bool indices_match_ref(const uint8_t seed[32], uint64_t n, uint64_t prefill,
-                              int *probed)
+                              int *stat)
 {
     uint64_t got[FC_MAX_SAMPLES], want[FC_MAX_SAMPLES];
     uint32_t gc = 0;
     for (int i = 0; i < FC_MAX_SAMPLES; i++) got[i] = prefill;
     fc_generate_indices(seed, n, got, &gc);
-    uint32_t wc = ref_indices(seed, n, want, probed);
+    uint32_t wc = ref_indices(seed, n, want, stat);
     if (gc != wc || got[gc] != prefill) return false;
     return memcmp(got, want, wc * sizeof(uint64_t)) == 0;
 }
@@ -445,7 +447,7 @@ static int test_fc_indices_match_reference(void)
     int failures = 0;
     TEST("fc: generate_indices equals the reference sampling model") {
         const uint64_t lens[] = {51, 60, 100, 1000, 3000000};
-        int probed51 = 0, probed_other = 0;
+        int st51[2] = {0, 0}, st_other[2] = {0, 0};
         for (size_t l = 0; l < sizeof(lens) / sizeof(lens[0]); l++) {
             const uint64_t pre[] = {UINT64_MAX, 0, lens[l] - 1};
             for (uint32_t s = 0; s < 150; s++) {
@@ -453,11 +455,13 @@ static int test_fc_indices_match_reference(void)
                 sha3_256((const uint8_t *)&s, sizeof(s), seed);
                 for (size_t p = 0; p < 3; p++)
                     ASSERT(indices_match_ref(seed, lens[l], pre[p],
-                                             l == 0 ? &probed51 : &probed_other));
+                                             l == 0 ? st51 : st_other));
             }
         }
-        /* 50 samples from 51 slots: the probe fallback must have run. */
-        ASSERT(probed51 > 0);
+        /* 50 samples from 51 slots: the probe fallback must have run, and
+         * must have wrapped past the tip back to slot 0 at least once. */
+        ASSERT(st51[0] > 0);
+        ASSERT(st51[1] > 0);
         PASS();
     } _test_next:;
     return failures;
@@ -625,6 +629,38 @@ static int test_fc_verify_response_count_rules(void)
     return failures;
 }
 
+/* A proof whose leaf_hash differs from the real leaf hash ONLY in the last
+ * byte, with a tree that commits to that forged hash: mmb_verify accepts it,
+ * so only the full 32-byte leaf-hash comparison can refuse the sample. */
+static int test_fc_verify_sample_last_byte_forgery(void)
+{
+    int failures = 0;
+    TEST("fc: verify_sample refuses a leaf hash forged in its last byte") {
+        fx_init(32);
+        ASSERT(fx_seal(0x3a));
+        uint8_t forged[32][32];
+        memcpy(forged, g_fx.hashes, sizeof(forged));
+        forged[5][31] ^= 0x01;
+        struct mmb fm;
+        mmb_init(&fm);
+        for (int i = 0; i < 32; i++)
+            (void)mmb_append_hash(&fm, forged[i]);
+        ASSERT(fm.num_leaves == 32);
+        uint8_t froot[32];
+        mmb_root(&fm, froot);
+        struct fc_sample s;
+        s.leaf = g_fx.leaves[5];
+        ASSERT(mmb_prove((const uint8_t (*)[32])forged, 32, 5, &s.proof));
+        ASSERT(mmb_verify(&s.proof, froot)); /* the tree itself is consistent */
+        ASSERT(!fc_verify_sample(&s, froot));
+        /* control: the honest proof against the honest root passes */
+        ASSERT(mmb_prove((const uint8_t (*)[32])g_fx.hashes, 32, 5, &s.proof));
+        ASSERT(fc_verify_sample(&s, g_fx.ch.mmb_root));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_fc_null_arguments(void)
 {
     int failures = 0;
@@ -691,6 +727,7 @@ static int test_fc_verify_response_wrong_index(void)
         ASSERT(mmb_prove((const uint8_t (*)[32])g_fx.hashes, 100, j,
                          &g_fx.resp.samples[0].proof));
         ASSERT(!fx_verify());
+        ASSERT(g_cap.bad_peer == 0);
         ASSERT(g_cap.idx_mm == 1);
         ASSERT(g_cap.valid_true == 49);
         ASSERT(strcmp(g_cap.chain, "samples=50 valid=49 all_valid=false") == 0);
@@ -728,6 +765,7 @@ static int test_fc_verify_response_bad_proof(void)
         ASSERT(fx_seal(0x38));
         g_fx.resp.samples[2].proof.peaks[0][0] ^= 0x01;
         ASSERT(!fx_verify());
+        ASSERT(g_cap.bad_peer == 0);
         ASSERT(g_cap.proof_f == 1);
         ASSERT(g_cap.valid_true == 49);
         ASSERT(strcmp(g_cap.chain, "samples=50 valid=49 all_valid=false") == 0);
@@ -765,6 +803,7 @@ static int test_fc_pow_target_edges(void)
         h[0] = 0x01;                                  /* target + 1 */
         ASSERT(!fx_pow_verdict(h, 0x2007ffff));
         ASSERT(g_cap.pow_f == 50 && g_cap.valid_true == 0);
+        ASSERT(g_cap.bad_peer == 0);
         ASSERT(strstr(g_cap.pow_first, "pow_failed nBits=2007ffff") != NULL);
         ASSERT(strcmp(g_cap.chain, "samples=50 valid=0 all_valid=false") == 0);
         memset(h, 0, 32);
@@ -822,6 +861,7 @@ int test_flyclient(void)
     failures += test_fc_indices_degenerate();
     failures += test_fc_verify_response_events();
     failures += test_fc_verify_response_count_rules();
+    failures += test_fc_verify_sample_last_byte_forgery();
     failures += test_fc_null_arguments();
     failures += test_fc_build_response_edges();
     failures += test_fc_verify_response_wrong_index();
