@@ -7300,13 +7300,22 @@ static bool parallel_sync_fixture_setup(sqlite3 **out_db,
                           SQLITE_STATIC);
     });
 
+    /* The manifest names the validated block row at that height. */
     uint8_t tip_hash[32];
+    uint8_t tip_work[32];
     memset(tip_hash, 0xAB, 32);
+    memset(tip_work, 0xCD, 32);
+    TEST_DB_EXEC(test_db,
+        "CREATE TABLE IF NOT EXISTS blocks ("
+        "hash BLOB PRIMARY KEY, height INTEGER NOT NULL, "
+        "chain_work BLOB, status INTEGER NOT NULL DEFAULT 0)");
     TEST_DB_RUN(test_db, ins,
-        "INSERT INTO node_state (key, value) VALUES (?, ?)",
+        "INSERT INTO blocks (hash, height, chain_work, status) "
+        "VALUES (?, ?, ?, 3)",
     {
-        sqlite3_bind_text(ins, 1, "tip_hash", -1, SQLITE_STATIC);
-        sqlite3_bind_blob(ins, 2, tip_hash, 32, SQLITE_STATIC);
+        sqlite3_bind_blob(ins, 1, tip_hash, 32, SQLITE_STATIC);
+        sqlite3_bind_int64(ins, 2, tip_height);
+        sqlite3_bind_blob(ins, 3, tip_work, 32, SQLITE_STATIC);
     });
 
     /* Insert 100 test UTXOs with deterministic data */

@@ -2065,7 +2065,7 @@ static bool fsb_create_chain_tables(sqlite3 *db)
     return sqlite3_exec(db,
         "CREATE TABLE node_state(key TEXT PRIMARY KEY, value BLOB);"
         "CREATE TABLE blocks(hash BLOB PRIMARY KEY, height INTEGER NOT NULL,"
-        " chain_work BLOB);"
+        " chain_work BLOB, status INTEGER NOT NULL DEFAULT 3);"
         "CREATE TABLE utxos(txid BLOB NOT NULL, vout INTEGER NOT NULL,"
         " value INTEGER NOT NULL, script BLOB NOT NULL,"
         " height INTEGER NOT NULL, is_coinbase INTEGER NOT NULL DEFAULT 0,"
@@ -2138,60 +2138,71 @@ struct fsb_offer_row {
     const char *name;
     const uint8_t *height_blob;  /* node_state tip_height; NULL = no row */
     int height_len;
-    int hash_len;                /* node_state tip_hash length; 0 = no row */
-    bool block_row;              /* blocks row for the 0x11 hash exists */
+    int hash_len;                /* hash length on the block row */
+    bool block_row;              /* blocks row at height 1234 exists */
     int work_len;                /* chain_work length on that row */
     int utxos;
     int cache;                   /* 0 none, 1 matching root cached, 2 stale */
     bool want_ok;
     int32_t want_height;
-    bool want_hash;              /* block_hash copied from tip_hash */
-    bool want_work;              /* chain_work copied from the blocks row */
+    bool want_hash;              /* block_hash copied from the block row */
+    bool want_work;              /* chain_work copied from the block row */
+    int block_status;            /* 0 = the validated default */
+    bool zero_work;              /* chain_work on the row is all zero */
 };
 
 static const struct fsb_offer_row fsb_offer_rows[] = {
     {"8-byte tip_height", fsb_height_le8, 8, 32, true, 32, 3, 0,
-     true, 1234, true, true},
+     true, 1234, true, true, 0, false},
     {"4-byte tip_height", fsb_height_le4, 4, 32, true, 32, 3, 0,
-     true, 1234, true, true},
+     true, 1234, true, true, 0, false},
     {"2-byte tip_height zero-extended", fsb_height_le2, 2, 32, true, 32, 3, 0,
-     true, 1234, true, true},
+     true, 1234, true, true, 0, false},
     {"empty tip_height blob", fsb_height_le2, 0, 32, true, 32, 3, 0,
-     false, 0, true, true},
+     false, 0, false, false, 0, false},
     {"9-byte tip_height ignored", fsb_height_le9, 9, 32, true, 32, 3, 0,
-     false, 0, true, true},
+     false, 0, false, false, 0, false},
     {"no tip_height row", NULL, 0, 32, true, 32, 3, 0,
-     false, 0, true, true},
-    {"short tip_hash not copied", fsb_height_le8, 8, 16, true, 32, 3, 0,
-     true, 1234, false, false},
-    {"no tip_hash row", fsb_height_le8, 8, 0, true, 32, 3, 0,
-     true, 1234, false, false},
-    {"short chain_work not copied", fsb_height_le8, 8, 32, true, 16, 3, 0,
-     true, 1234, true, false},
-    {"no blocks row for tip hash", fsb_height_le8, 8, 32, false, 32, 3, 0,
-     true, 1234, true, false},
+     false, 0, false, false, 0, false},
+    {"short block hash refuses the offer", fsb_height_le8, 8, 16, true, 32, 3, 0,
+     false, 1234, false, false, 0, false},
+    {"short chain_work refuses the offer", fsb_height_le8, 8, 32, true, 16, 3, 0,
+     false, 1234, false, false, 0, false},
+    {"no block row at the height refuses the offer", fsb_height_le8, 8, 32,
+     false, 32, 3, 0, false, 1234, false, false, 0, false},
+    {"unvalidated block row refuses the offer", fsb_height_le8, 8, 32, true, 32,
+     3, 0, false, 1234, false, false, 2, false},
+    {"zero chain_work refuses the offer", fsb_height_le8, 8, 32, true, 32, 3, 0,
+     false, 1234, false, false, 0, true},
     {"empty utxo set refuses the offer", fsb_height_le8, 8, 32, true, 32, 0, 0,
-     false, 1234, true, true},
+     false, 1234, true, true, 0, false},
     {"matching cached root reused", fsb_height_le8, 8, 32, true, 32, 3, 1,
-     true, 1234, true, true},
+     true, 1234, true, true, 0, false},
     {"stale cached count recomputed", fsb_height_le8, 8, 32, true, 32, 3, 2,
-     true, 1234, true, true},
+     true, 1234, true, true, 0, false},
 };
+
+static bool fsb_set_block_status(sqlite3 *db, int status)
+{
+    char sql[64];
+    snprintf(sql, sizeof(sql), "UPDATE blocks SET status=%d", status);
+    return sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
+}
 
 static bool fsb_seed_offer_db(sqlite3 *db, const struct fsb_offer_row *r)
 {
     uint8_t hash[32], work[32];
     bool ok = true;
     memset(hash, 0x11, sizeof(hash));
-    memset(work, 0x22, sizeof(work));
+    memset(work, r->zero_work ? 0x00 : 0x22, sizeof(work));
     if (!fsb_create_chain_tables(db))
         return false;
     if (r->height_blob)
         ok = fsb_put_node_state(db, "tip_height", r->height_blob, r->height_len);
-    if (ok && r->hash_len > 0)
-        ok = fsb_put_node_state(db, "tip_hash", hash, r->hash_len);
     if (ok && r->block_row)
-        ok = fsb_put_block(db, hash, 32, 1234, work, r->work_len);
+        ok = fsb_put_block(db, hash, r->hash_len, 1234, work, r->work_len);
+    if (ok && r->block_status != 0)
+        ok = fsb_set_block_status(db, r->block_status);
     return ok && fsb_put_utxos(db, r->utxos);
 }
 

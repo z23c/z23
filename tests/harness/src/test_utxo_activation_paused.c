@@ -183,8 +183,7 @@ static bool seed_snapshot_manifest_db(struct node_db *ndb,
     memset(merkle_root, 0x42, sizeof(merkle_root));
     memset(nonce, 0x43, sizeof(nonce));
 
-    if (!node_db_state_set_int(ndb, "tip_height", 101) ||
-        !node_db_state_set(ndb, "tip_hash", block_hash, 32))
+    if (!node_db_state_set_int(ndb, "tip_height", 101))
         return false;
     if (sqlite3_prepare_v2(ndb->db,
             "INSERT INTO blocks "

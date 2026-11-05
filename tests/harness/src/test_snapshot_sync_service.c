@@ -1776,7 +1776,6 @@ static int test_snapshot_local_recovery_manifest_builder(void)
 
         ASSERT(node_db_open(&ndb, ":memory:"));
         ASSERT(node_db_state_set_int(&ndb, "tip_height", 1));
-        ASSERT(node_db_state_set(&ndb, "tip_hash", block_hash, 32));
 
         sqlite3_stmt *st = NULL;
         ASSERT(sqlite3_prepare_v2(ndb.db,
