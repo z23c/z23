@@ -2028,11 +2028,12 @@ static const char *fmc_local_state(const struct fmc_queue_view *qv,
     if (fmc_lock_held(lo->worker_lock) || fmc_lock_held(lo->receive_lock)) {
         (void)snprintf(why, cap, "%s",
                        "a resident lock is held now; nothing queued or "
-                       "running");
+                       "running in dev.agent.queue");
         return "idle";
     }
     (void)snprintf(why, cap, "%s",
-                   "no resident lock held and nothing running");
+                   "no resident lock held and nothing running in "
+                   "dev.agent.queue");
     return "unknown";
 }
 
@@ -4097,6 +4098,10 @@ static void fmc_capacity_emit(struct json_value *cap,
                               const struct fmc_queue_view *qv)
 {
     char why[96];
+    (void)json_push_kv_str(cap, "source", "dev.agent.queue");
+    (void)json_push_kv_str(cap, "domain",
+                           "resident-worker-queue-and-worktree-pool");
+    (void)json_push_kv_str(cap, "host_builds", "not_measured");
     (void)json_push_kv_bool(cap, "known", qv->known);
     if (qv->known && !qv->pool_known) {
         (void)json_push_kv_str(cap, "pool_total", "UNKNOWN");

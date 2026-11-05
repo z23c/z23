@@ -2752,6 +2752,14 @@ static bool fmx_wnull(const struct json_value *o, const char *key)
     return v && v->type == JSON_NULL;
 }
 
+static bool fmx_capacity_domain(const struct json_value *capacity)
+{
+    return strcmp(fmx_wstr(capacity, "source"), "dev.agent.queue") == 0 &&
+           strcmp(fmx_wstr(capacity, "domain"),
+                  "resident-worker-queue-and-worktree-pool") == 0 &&
+           strcmp(fmx_wstr(capacity, "host_builds"), "not_measured") == 0;
+}
+
 static bool fmx_blocker_has(const struct fmx_call *c, const char *needle)
 {
     const struct json_value *arr = fmx_arr(c, "blockers");
@@ -2788,6 +2796,7 @@ static int fmx_t_capacity_unknown(void)
         ASSERT(fmx_missing_has(&b, "dev.agent.queue"));
         cap = fmx_get(&b, "capacity");
         ASSERT(cap && cap->type == JSON_OBJ);
+        ASSERT(fmx_capacity_domain(cap));
         ASSERT(json_get(cap, "known") &&
                !json_get_bool(json_get(cap, "known")));
         ASSERT(fmx_wnull(cap, "pool_total"));
@@ -2803,6 +2812,7 @@ static int fmx_t_capacity_unknown(void)
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
         cap = fmx_get(&b, "capacity");
+        ASSERT(fmx_capacity_domain(cap));
         ASSERT(json_get_bool(json_get(cap, "known")));
         ASSERT(fmx_wint(cap, "queued") == 0);
         ASSERT(fmx_wnull(cap, "reason"));
@@ -2815,6 +2825,40 @@ _test_next:;
     fmx_restore();
     return failures;
 #endif
+}
+
+static int fmx_t_capacity_queue_domain(void)
+{
+    int failures = 0;
+    TEST("steer: queued and running capacity names the native worker domain") {
+        struct fmx_call b;
+        const struct json_value *capacity;
+        fmx_isolate("capacity_queue_domain");
+        for (int running = 0; running < 2; running++) {
+            char row[512];
+            int length = snprintf(row, sizeof(row),
+                "{\"seq\":1,\"ts\":\"2026-09-15T00:00:00Z\","
+                "\"kind\":\"file\",\"name\":\"domain-job\",\"group\":\"g\","
+                "\"path\":\"p\",\"attempt\":1,\"state\":\"%s\","
+                "\"worktree\":\"\",\"pid_or_unit\":\"\",\"started\":0}\n",
+                running ? "running" : "queued");
+            ASSERT(length > 0 && (size_t)length < sizeof(row));
+            fmx_state_file("queue", "queue.jsonl", row, false);
+            fmx_brief(&b, NULL, 0);
+            ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+            ASSERT(fmx_ok(&b));
+            capacity = fmx_get(&b, "capacity");
+            ASSERT(fmx_capacity_domain(capacity));
+            ASSERT(fmx_wint(capacity, "queued") == 1 - running);
+            ASSERT(fmx_wint(capacity, "running") == running);
+            fmx_end(&b);
+        }
+        fmx_restore();
+        PASS();
+    }
+_test_next:;
+    fmx_restore();
+    return failures;
 }
 
 static int fmx_t_worker_answers(void)
@@ -3144,6 +3188,10 @@ static int fmx_t_process_not_work(void)
         ASSERT(w != NULL);
         ASSERT_STR_EQ(fmx_wstr(w, "state"), "idle");
         ASSERT(fmx_wint(w, "age_s") == 0);
+        ASSERT(strstr(fmx_wstr(w, "reason"), "in dev.agent.queue") != NULL);
+        ASSERT(fmx_capacity_domain(fmx_get(&b, "capacity")));
+        ASSERT(fmx_wint(fmx_get(&b, "capacity"), "queued") == 0);
+        ASSERT(fmx_wint(fmx_get(&b, "capacity"), "running") == 0);
         ASSERT(strstr(fmx_wstr(w, "reason"), "2 past intake failure") !=
                NULL);
         ASSERT(strstr(fmx_wstr(w, "reason"), "MAIL_READ_FAILED") != NULL);
@@ -4639,6 +4687,7 @@ static int fmx_t_pool_unmeasured(void)
         ASSERT(json_get(cap, "pool_known") &&
                !json_get_bool(json_get(cap, "pool_known")));
         ASSERT_STR_EQ(fmx_wstr(cap, "pool_total"), "UNKNOWN");
+        ASSERT(fmx_capacity_domain(cap));
         ASSERT_STR_EQ(fmx_wstr(cap, "pool_free"), "UNKNOWN");
         ASSERT(strstr(fmx_wstr(cap, "pool_reason"), "pool.txt") != NULL);
         fmx_end(&b);
@@ -4650,6 +4699,7 @@ static int fmx_t_pool_unmeasured(void)
         cap = fmx_get(&b, "capacity");
         ASSERT(json_get_bool(json_get(cap, "pool_known")));
         ASSERT(fmx_wint(cap, "pool_total") == 0);
+        ASSERT(fmx_capacity_domain(cap));
         ASSERT(fmx_wint(cap, "pool_free") == 0);
         fmx_end(&b);
         fmx_restore();
@@ -6123,6 +6173,7 @@ int test_fleet_steer(void)
     failures += fmx_t_sender_binding();
     failures += fmx_t_board_absent();
     failures += fmx_t_capacity_unknown();
+    failures += fmx_t_capacity_queue_domain();
     failures += fmx_t_worker_answers();
     failures += fmx_t_queued_stale();
     failures += fmx_t_receiver_down();
