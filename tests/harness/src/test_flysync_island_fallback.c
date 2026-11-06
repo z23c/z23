@@ -255,7 +255,6 @@ static int fsi_case_fallback_crash_rejoin(struct fsi_node *n)
 static int fsi_case_fallback_rejoin(struct fsi_node *n)
 {
     int failures = 0;
-    struct block_index *genesis = active_chain_tip(&n->ms.chain_active);
     sqlite3 *db = progress_store_db();
     struct island_anchor back;
     bool found = false;
@@ -275,7 +274,7 @@ static int fsi_case_fallback_rejoin(struct fsi_node *n)
               "hash",
               flysync_island_boot_after_index(NULL, &n->ms) &&
               fsi_rows_detached(n) &&
-              n->ms.pindex_best_header == (real ? real : genesis));
+              real && n->ms.pindex_best_header == real);
 
     struct block_index *p = fsi_redeliver(n);
     FSI_CHECK("normal sync re-delivers the window from its real parent", p);
