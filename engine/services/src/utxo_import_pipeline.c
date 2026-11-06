@@ -188,3 +188,19 @@ int utxo_import_decode_entry(const struct utxo_import_raw_entry *raw,
 
     return ctx.nrows;
 }
+
+bool utxo_import_entry_is_cut(const struct utxo_import_raw_entry *raw,
+                              int max_rows)
+{
+    struct coins_record_decode_options opts = {
+        .mode = COINS_RECORD_DECODE_UTXO_IMPORT,
+        .max_outputs = (size_t)max_rows,
+        .scratch = NULL,
+    };
+    struct coins_record_decode_result res;
+
+    return raw && max_rows > 0 &&
+           coins_record_decode(raw->value, raw->value_len, &opts, NULL, NULL,
+                               &res) == COINS_RECORD_DECODE_OK &&
+           res.live_outputs > (size_t)max_rows;
+}

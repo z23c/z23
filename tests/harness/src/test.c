@@ -1271,6 +1271,8 @@ static void run_full_suite_foundation(int *failures)
     *failures += test_chainstate_legacy_reader();
     *failures += test_chainstate_sapling_anchor();
     *failures += test_utxo_import_pipeline();
+    { extern int test_utxo_import_reject(void);
+      *failures += test_utxo_import_reject(); }
     *failures += test_ccoins_decoder_kat();
     *failures += test_coins_record_codec();
     *failures += test_blob_read_bounds();

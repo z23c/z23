@@ -56,6 +56,9 @@ struct import_context {
     _Atomic int total_rows;
     _Atomic int decode_failures;
     _Atomic int skipped_outputs;
+    /* Records the chunk had room for only part of. Any of these, or of
+     * skipped_outputs, refuses the import: a set missing outputs is not a set. */
+    _Atomic int records_cut;
     _Atomic bool cancel_requested;
     _Atomic bool reader_done;
     _Atomic bool decoders_done;

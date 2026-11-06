@@ -369,9 +369,10 @@ static void import_report_writer_stats(struct import_context *ctx)
 {
     int decode_fail = atomic_load(&ctx->decode_failures);
     int skip_out = atomic_load(&ctx->skipped_outputs);
-    if (decode_fail > 0 || skip_out > 0)
-        printf("UTXO import: %d decode failures, %d skipped outputs\n",
-               decode_fail, skip_out);
+    int cut = atomic_load(&ctx->records_cut);
+    if (decode_fail > 0 || skip_out > 0 || cut > 0)
+        printf("UTXO import: %d decode failures, %d skipped outputs, "
+               "%d records cut\n", decode_fail, skip_out, cut);
 }
 
 enum import_next {
@@ -547,6 +548,7 @@ static void import_scan_leveldb(struct import_context *ctx,
                          "malloc failed for chunk entry value (%u bytes), "
                          "skipping entry", checked_len);
                 skipped_entries++;
+                atomic_fetch_add(&ctx->skipped_outputs, 1);
                 continue;
             }
             if (nx == IMPORT_NEXT_STOP)
@@ -591,6 +593,25 @@ reader_done:
     *total_entries_out = total_entries;
 }
 
+/* Reject a set missing outputs the reader saw: a record the chunk could not hold
+ * whole, or one skipped for want of room or memory. */
+static struct zcl_result import_reject_dropped_records(struct import_context *ctx,
+                                                       struct sync_db_turbo_scope *turbo_mode,
+                                                       int total_rows)
+{
+    int cut = atomic_load(&ctx->records_cut);
+    int skipped = atomic_load(&ctx->skipped_outputs);
+
+    if (cut == 0 && skipped == 0)
+        return ZCL_OK;
+    LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: REJECTED — %d records cut and %d skipped, so the set is missing outputs", cut, skipped);
+    if (!sync_db_turbo_scope_end(turbo_mode))
+        LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: failed to restore normal mode");
+    import_job_teardown(ctx, total_rows);
+    return ZCL_ERR(-11, "import: REJECTED — %d records cut and %d skipped",
+                   cut, skipped);
+}
+
 /* Reject a truncated or aborted import. ZCL_OK means the rows can be kept. */
 static struct zcl_result import_reject_halted_scan(struct import_context *ctx,
                                                    struct sync_db_turbo_scope *turbo_mode,
@@ -628,7 +649,7 @@ static struct zcl_result import_reject_halted_scan(struct import_context *ctx,
         return ZCL_ERR(-8, "import: aborted%s",
                        g_shutdown_requested ? " on shutdown" : "");
     }
-    return ZCL_OK;
+    return import_reject_dropped_records(ctx, turbo_mode, total_rows);
 }
 
 /* End turbo mode and, when that succeeds, report index timing. */

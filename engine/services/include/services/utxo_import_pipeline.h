@@ -5,6 +5,7 @@
 
 #include "util/result.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -40,6 +41,9 @@ struct zcl_result utxo_import_value_len_checked(size_t value_len,
 int utxo_import_decode_entry(const struct utxo_import_raw_entry *raw,
                              struct utxo_import_row *out,
                              int max_rows);
+/* Does the record hold more live outputs than the max_rows it was decoded into? */
+bool utxo_import_entry_is_cut(const struct utxo_import_raw_entry *raw,
+                              int max_rows);
 struct zcl_result utxo_import_writer_bind_checked(sqlite3_stmt *stmt,
                                                   const char *label,
                                                   int rc,
