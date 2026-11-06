@@ -665,10 +665,11 @@ static int ms_failures_raw_id(void)
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
         char out[64] = "poison";
         bool got = ms_raw_id(rows[i].line, out, rows[i].cap);
-        bool ok = got == rows[i].ok && (!got || strcmp(out, rows[i].want) == 0);
-        if (!ok)
+        bool row_ok = got == rows[i].ok &&
+                      (!got || strcmp(out, rows[i].want) == 0);
+        if (!row_ok)
             printf("[raw_id row %zu got=%d out=%s] ", i, got, out);
-        MS_CHECK("raw_id row", ok);
+        MS_CHECK("raw_id row", row_ok);
     }
     return failures;
 }
