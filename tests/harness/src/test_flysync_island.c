@@ -613,6 +613,9 @@ static int fsi_case_island(void)
                   flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
                   flysync_island_phase() == FLYSYNC_SEEDED &&
                   flysync_island_holds_header_sync());
+        FSI_CHECK("seeded, not yet installed: only a rung offer is taken",
+                  flysync_island_wants_offer_height(FSI_RUNG_H) &&
+                  !flysync_island_wants_offer_height(FSI_RUNG_H - 1));
     }
     fsi_node_close(&n);
     chain_params_select(CHAIN_MAIN);
