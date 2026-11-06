@@ -392,11 +392,14 @@ static bool fsi_collect_island(struct main_state *ms, struct block_index *root,
     return true;
 }
 
-/* Rows a flushed detach left parentless: they load as roots with their own
- * proof as work, outside the root's ancestry. Each is found by the exact
- * (height, hash) in the durable row list. */
+/* Rows a flushed detach left outside the root's ancestry: all parentless after
+ * a full flush, or, after a crash mid-flush, a parentless row with the rows
+ * above it still linked to it. They load with work. Each is found by the exact
+ * (height, hash) in the durable row list, whatever its parent: the detach runs
+ * only while the root has no parent, so no listed row has rejoined. */
 static bool fsi_collect_listed(struct main_state *ms,
                                const struct island_anchor *a,
+                               const struct block_index *root,
                                struct fsi_rows *rows)
 {
     struct island_anchor_rows list;
@@ -409,7 +412,8 @@ static bool fsi_collect_listed(struct main_state *ms,
     for (int i = 1; found && i < ISLAND_ANCHOR_WINDOW; i++) {
         struct block_index *bi = block_map_find(&ms->map_block_index,
                                                 &list.hash[i]);
-        if (bi && !bi->pprev && bi->nHeight == a->root_height + i &&
+        if (bi && bi->nHeight == a->root_height + i &&
+            block_index_get_ancestor(bi, root->nHeight) != root &&
             !fsi_rows_push(rows, bi))
             return false;
     }
@@ -474,7 +478,7 @@ size_t flysync_island_detach(struct main_state *ms,
     struct fsi_rows rows = {0};
     bool island = root && root->nHeight == a->root_height && !root->pprev;
     bool listed = island && fsi_collect_island(ms, root, &rows) &&
-                  fsi_collect_listed(ms, a, &rows);
+                  fsi_collect_listed(ms, a, root, &rows);
     for (size_t i = 0; listed && i < rows.n; i++) {
         rows.v[i]->pprev = NULL;
         rows.v[i]->pskip = NULL;

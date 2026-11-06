@@ -744,6 +744,30 @@ static int fsi_case_fallback_detach(struct fsi_node *n)
     return failures;
 }
 
+/* A crash in the middle of the detach flush: row 5 stored parentless, rows
+ * 6..27 still stored linked to it, so they load with the summed work of their
+ * proofs, neither under the root nor parentless. */
+static int fsi_case_fallback_midflush(struct fsi_node *n)
+{
+    int failures = 0;
+    struct block_index *genesis = active_chain_tip(&n->ms.chain_active);
+    flysync_island_test_reset();
+    fsi_reload_rows(n);
+    n->rows[5]->pprev = NULL;
+    n->rows[5]->pskip = NULL;   /* a loaded parentless row has no skip */
+    fsi_reload_work(n);
+    n->ms.pindex_best_header = fsi_top(n);
+    FSI_CHECK("mid-flush restart: the rows above the break load with work",
+              fsi_top(n)->pprev == n->rows[FSI_W - 2] &&
+              arith_uint256_compare(&fsi_top(n)->nChainWork,
+                                    &n->rows[5]->nChainWork) > 0);
+    FSI_CHECK("mid-flush restart: the row list detaches linked and "
+              "parentless rows alike",
+              flysync_island_boot_after_index(NULL, &n->ms) &&
+              fsi_rows_detached(n) && n->ms.pindex_best_header == genesis);
+    return failures;
+}
+
 /* A flushed detach persists each row's parent as zero (the record takes
  * hashPrev from pprev): the loader brings every row back as a parentless root
  * carrying its own proof, outside the root's ancestry. Then normal sync
@@ -996,6 +1020,7 @@ static int fsi_case_island(void)
                   !flysync_island_wants_offer_height(FSI_RUNG_H - 1));
         failures += fsi_case_install_budget(&n);
         failures += fsi_case_fallback_detach(&n);
+        failures += fsi_case_fallback_midflush(&n);
         failures += fsi_case_fallback_rejoin(&n);
     }
     fsi_node_close(&n);
