@@ -133,6 +133,10 @@ struct zcl_result snapsync_build_local_recovery_manifest(struct node_db *ndb,
         return ZCL_ERR(-1, "build_local_recovery_manifest: null/closed ndb or null out");
 
     memset(out, 0, sizeof(*out));
+    /* The read below scans the whole mirror. A stall remedy re-arms for as long
+     * as the node is wedged, and with no peer named the request would refuse. */
+    if (peer_id == 0)
+        return ZCL_ERR(-3, "build_local_recovery_manifest: no peer to ask");
     read = snapshot_offer_anchor_read(ndb->path, &anchor);
     if (!read.ok)
         return ZCL_ERR(-2, "build_local_recovery_manifest: %s", read.message);
@@ -546,6 +550,13 @@ struct zcl_result snapsync_request_recovery(struct snapshot_sync_service *svc,
     if (!svc || !manifest)
         return ZCL_ERR(-1, "request_recovery: svc=%p manifest=%p",
                        (void*)svc, (const void*)manifest);
+
+    /* A recovery asks one peer for its proof. With none named, nothing would
+     * ever send the challenge, and the service would sit negotiating, ignoring
+     * every real offer until the stall reset. */
+    if (manifest->peer_id == 0)
+        return ZCL_ERR(-5, "request_recovery: no peer to ask at h=%d target=%d",
+                       manifest->height, target_height);
 
     snapsync_manifest_from_params_internal(&m, manifest);
     manifest_result = snapshot_manifest_validate_recovery(&m, target_height);

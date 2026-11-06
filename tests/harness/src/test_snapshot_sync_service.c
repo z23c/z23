@@ -1601,7 +1601,7 @@ static int test_snapshot_recovery_request_allows_populated_utxos(void)
         sqlite3_finalize(ins);
         node_db_exec(&ndb, "COMMIT");
 
-        fill_v2_offer_params(&params, 3000000, 2999000, 0);
+        fill_v2_offer_params(&params, 3000000, 2999000, 7);
         params.num_utxos = 1350000;
         params.total_bytes = 200000000;
         params.peer_tip_height = params.height + 10;
@@ -1609,6 +1609,13 @@ static int test_snapshot_recovery_request_allows_populated_utxos(void)
         ASSERT(snapsync_handle_offer(&svc, &params) ==
                SNAPSYNC_OFFER_REJECTED_NOT_AHEAD);
         ASSERT(svc.state == SNAPSYNC_IDLE);
+
+        /* With no peer named there is nobody to send the challenge to, and a
+         * service left negotiating would ignore every real offer. */
+        params.peer_id = 0;
+        ASSERT(!snapsync_request_recovery(&svc, 2999500, &params).ok);
+        ASSERT(svc.state == SNAPSYNC_IDLE);
+        params.peer_id = 7;
 
         ASSERT(snapsync_request_recovery(&svc, 2999500, &params).ok);
         ASSERT(svc.state == SNAPSYNC_NEGOTIATING);
@@ -1637,7 +1644,7 @@ static int test_snapshot_recovery_request_rejects_unverified_manifest(void)
         memset(&svc, 0, sizeof(svc));
         svc.state = SNAPSYNC_IDLE;
 
-        fill_v2_offer_params(&params, 3000000, 2999000, 0);
+        fill_v2_offer_params(&params, 3000000, 2999000, 7);
         params.peer_tip_height = params.height + 10;
 
         ASSERT(!snapsync_request_recovery(&svc, 3000001, &params).ok);
@@ -1673,7 +1680,7 @@ static int test_snapshot_recovery_requires_flyclient_and_sha3(void)
             "VALUES (X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF',"
             "0,100,X'51',0,1,0)"));
 
-        fill_v2_offer_params(&params, 3000000, 2999000, 0);
+        fill_v2_offer_params(&params, 3000000, 2999000, 7);
         params.num_utxos = 1;
         params.total_bytes = 128;
         params.peer_tip_height = params.height + 10;
@@ -1827,7 +1834,7 @@ static int test_snapshot_local_recovery_manifest_builder(void)
         persist_test_roots(&ndb, block_hash, chain_work, 2);
 
         /* A hole below the anchor leaves no chain to root. */
-        ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 0).ok);
+        ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 7).ok);
         sqlite3_reset(st);
         sqlite3_bind_blob(st, 1, prev_hash, 32, SQLITE_STATIC);
         sqlite3_bind_int(st, 2, 0);
@@ -1835,12 +1842,14 @@ static int test_snapshot_local_recovery_manifest_builder(void)
         sqlite3_finalize(st);
         ASSERT(node_db_exec(&ndb, "DELETE FROM node_state WHERE key='mmb_state'"));
 
-        ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 0).ok);
+        ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 7).ok);
         /* Roots over a chain longer than the anchor do not name the anchor. */
         persist_test_roots(&ndb, block_hash, chain_work, 3);
-        ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 0).ok);
+        ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 7).ok);
         persist_test_roots(&ndb, block_hash, chain_work, 2);
-        ASSERT_RESULT_OK(snapsync_build_local_recovery_manifest(&ndb, &params, 0));
+        /* No peer to ask: refused before the scan, for the stall remedy's sake. */
+        ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 0).ok);
+        ASSERT_RESULT_OK(snapsync_build_local_recovery_manifest(&ndb, &params, 7));
 
         utxo_commitment_sha3_compute(ndb.db, expected_root, &expected_count);
         ASSERT(params.height == 1);
@@ -1878,11 +1887,11 @@ static int test_snapshot_local_recovery_manifest_builder(void)
         trailing_cursor[sizeof(valid_cursor)] = 0xa5;
         ASSERT(node_db_state_set(&ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
                                  trailing_cursor, sizeof(trailing_cursor)));
-        ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 0).ok);
+        ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 7).ok);
 
         ASSERT(node_db_state_set(&ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
                                  &truncated_cursor, sizeof(truncated_cursor)));
-        ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 0).ok);
+        ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 7).ok);
 
         node_db_close(&ndb);
         recovery_db_remove(dir);
