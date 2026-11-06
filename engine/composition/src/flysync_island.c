@@ -455,7 +455,7 @@ static int fsi_cmp_height(const void *x, const void *y)
  * height order, an entry whose parent carries the detached token is detached
  * in turn, so its re-delivered header relinks it with real work. */
 static bool fsi_detach_descendants(struct main_state *ms, int32_t root_h,
-                                   struct fsi_rows *rows)
+                                   size_t *above)
 {
     struct fsi_rows up = {0};
     size_t it = 0;
@@ -470,8 +470,8 @@ static bool fsi_detach_descendants(struct main_state *ms, int32_t root_h,
     for (size_t i = 0; ok && i < up.n; i++) {
         if (!up.v[i]->pprev || !fsi_work_is_detached(up.v[i]->pprev))
             continue;
-        ok = fsi_rows_push(rows, up.v[i]);
         fsi_detach_row(up.v[i]);
+        (*above)++;
     }
     free(up.v);
     return ok;
@@ -534,23 +534,23 @@ size_t flysync_island_detach(struct main_state *ms,
     bool have = false;
     bool ok = fsi_collect_listed(ms, a, &rows, &have) ||
               (!have && fsi_collect_range(ms, a, &rows));
-    size_t seeds = ok ? rows.n : 0;
+    size_t seeds = ok ? rows.n : 0, above = 0;
     for (size_t i = 0; i < seeds; i++)
         fsi_detach_row(rows.v[i]);
-    ok = ok && fsi_detach_descendants(ms, a->root_height, &rows);
+    ok = ok && fsi_detach_descendants(ms, a->root_height, &above);
     zcl_mutex_unlock(&ms->cs_main);
-    if (rows.n)
+    free(rows.v);
+    size_t n = seeds + above;
+    if (n)
         fsi_reset_best_header(ms);
     if (!ok)
         LOG_ERROR(FSI_SUBSYS, "fallen-back island not fully detached: out of "
-                  "memory listing its rows (%zu detached)", rows.n);
-    else if (rows.n)
+                  "memory listing its rows (%zu detached)", n);
+    else if (n)
         LOG_WARN(FSI_SUBSYS, "fallen-back island detached: %zu rows from h=%d "
                  "(%zu above the window) no longer steer header sync; they "
-                 "rejoin when normal sync reaches their parent", rows.n,
-                 (int)a->root_height, rows.n - seeds);
-    size_t n = rows.n;
-    free(rows.v);
+                 "rejoin when normal sync reaches their parent", n,
+                 (int)a->root_height, above);
     return n;
 }
 
@@ -960,6 +960,35 @@ bool flysync_island_wants_offer_height(int32_t height)
  * rows from their durable records; detach them again until normal sync gives
  * the root its parent (then the root has one and nothing is detached). With
  * no fact (a fall-back before seeding) there is nothing to detach. */
+/* The canonical forward pass over every entry at or above the island root's
+ * height, in height order: each one's work is derived again from its stored
+ * links. The loader's work is stale above rows that rejoined in memory only
+ * and were not saved relinked. Entries below the root are left as loaded.
+ * It runs before the detach: after it, the pass would hand the detached rows
+ * their own proof again. */
+static void fsi_forward_pass_from(struct main_state *ms, int32_t root_h)
+{
+    struct fsi_rows up = {0};
+    size_t it = 0;
+    struct block_index *bi = NULL;
+    bool ok = true;
+    zcl_mutex_lock(&ms->cs_main);
+    while (ok && block_map_next(&ms->map_block_index, &it, NULL, &bi)) {
+        if (bi && bi->phashBlock && bi->nHeight >= root_h)
+            ok = fsi_rows_push(&up, bi);
+    }
+    if (ok && up.n) {
+        qsort(up.v, up.n, sizeof(*up.v), fsi_cmp_height);
+        block_index_forward_pass(up.v, up.n);
+    }
+    zcl_mutex_unlock(&ms->cs_main);
+    if (!ok)
+        LOG_ERROR(FSI_SUBSYS, "fallen-back island: forward pass from h=%d not "
+                  "run (out of memory); work above the island may stay stale "
+                  "until the next boot", (int)root_h);
+    free(up.v);
+}
+
 static void fsi_boot_detach_fallen_back(struct main_state *ms)
 {
     sqlite3 *db = progress_store_db();
@@ -969,24 +998,7 @@ static void fsi_boot_detach_fallen_back(struct main_state *ms)
     bool found = false;
     if (!island_anchor_load(db, &a, &found) || !found)
         return;
-    /* Derive every entry's work from its stored links first (the loader's
-     * per-row work is stale above rows that rejoined in memory only and were
-     * not saved relinked); then the detach sets its token on what stays off
-     * the chain. Running it after the detach would hand the detached rows
-     * their own proof again. */
-    zcl_mutex_lock(&ms->cs_main);
-    size_t total = block_map_count(&ms->map_block_index);
-    struct block_index **sorted =
-        total ? zcl_malloc(total * sizeof(*sorted), "flysync_forward_pass")
-              : NULL;
-    if (sorted)
-        (void)block_index_forward_pass_over_map(ms, sorted, total);
-    zcl_mutex_unlock(&ms->cs_main);
-    free(sorted);
-    if (total && !sorted)
-        LOG_ERROR(FSI_SUBSYS, "fallen-back island: forward pass not run (out "
-                  "of memory for %zu entries); work above the island may be "
-                  "stale until the next boot", total);
+    fsi_forward_pass_from(ms, a.root_height);
     struct block_index *rung = block_map_find(&ms->map_block_index,
                                               &a.rung_hash);
     if (rung && rung->nHeight == a.rung_height &&

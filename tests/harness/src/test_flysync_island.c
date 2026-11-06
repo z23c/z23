@@ -1060,6 +1060,25 @@ static int fsi_case_listonly(void)
     return failures;
 }
 
+/* A datadir that never ran FlySync: the state reads NONE, and a start without
+ * the flag passes the gate with FlySync off. */
+static int fsi_case_state_fresh(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    char why[320];
+    why[0] = '\0';
+    FSI_CHECK("fresh fixture opens", fsi_node_open(&n, "flysync_fresh"));
+    FSI_CHECK("a fresh progress store reads NONE, not UNREADABLE",
+              island_anchor_state_load(progress_store_db()) ==
+                  ISLAND_ANCHOR_STATE_NONE);
+    FSI_CHECK("no flag, no island keys: the gate passes, FlySync stays off",
+              flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
+              flysync_island_phase() == FLYSYNC_OFF);
+    fsi_node_close(&n);
+    return failures;
+}
+
 /* SHOULD 4 (re-review): an unreadable island state never reads as fresh. */
 static int fsi_case_state_unreadable(void)
 {
@@ -1465,6 +1484,7 @@ int test_flysync_island(void)
     failures += fsi_case_fetch_stall();
     failures += fsi_case_fetch_cap();
     failures += fsi_case_listonly();
+    failures += fsi_case_state_fresh();
     failures += fsi_case_state_unreadable();
     printf("flysync_island: %d failures\n", failures);
     return failures;
