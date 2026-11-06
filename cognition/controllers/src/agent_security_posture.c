@@ -3,11 +3,13 @@
 #include "controllers/agent_security_posture.h"
 
 #include "config/runtime.h"
+#include "controllers/sovereignty_controller.h"
 #include "jobs/utxo_apply_anchors.h"
 #include "jobs/utxo_apply_nullifiers.h"
 #include "json/json.h"
 #include "models/database.h"
 #include "platform/time_compat.h"
+#include "services/bg_validation_service.h"
 #include "services/chain_evidence_authority_service.h"
 #include "storage/anchor_kv.h"
 #include "storage/nullifier_kv.h"
@@ -314,6 +316,29 @@ static void posture_fill_review_required(struct agent_security_posture *out)
         !out->nullifier_history_complete;
 }
 
+/* A checkpoint install is the one bootstrap-trust shape that is ready for
+ * local use: every other review input must already be clean, and full-history
+ * validation must still be the only open item (never claimed here). */
+static void posture_fill_checkpoint(struct agent_security_posture *out)
+{
+    bool histories_clean =
+        out->node_db_available && out->progress_store_available &&
+        out->anchor_cursor_known && !out->anchor_backfill_gap &&
+        out->anchor_history_complete && out->nullifier_cursor_known &&
+        !out->nullifier_backfill_gap && out->nullifier_history_complete;
+    out->checkpoint_verified = out->checkpoint_verified && histories_clean &&
+                               !out->full_history_validation_complete;
+    if (!out->checkpoint_verified) {
+        out->checkpoint_height = -1;
+        return;
+    }
+    posture_str(out->bootstrap_model, sizeof(out->bootstrap_model),
+                "compiled_checkpoint_install_verified");
+    posture_str(out->full_history_validation_state,
+                sizeof(out->full_history_validation_state),
+                "checkpoint_seed_background_check_pending");
+}
+
 static void posture_fill_review_status(struct agent_security_posture *out)
 {
     if (out->anchor_backfill_gap) {
@@ -332,6 +357,10 @@ static void posture_fill_review_status(struct agent_security_posture *out)
                     "review_required_unknown");
         posture_str(out->next_action, sizeof(out->next_action),
                     "query_running_node_datadir_security_posture");
+    } else if (out->checkpoint_verified) {
+        posture_str(out->status, sizeof(out->status), "checkpoint_verified");
+        posture_str(out->next_action, sizeof(out->next_action),
+                    "wait_for_full_history_check");
     } else if (out->trusted_state_present ||
                !out->full_history_validation_complete) {
         posture_str(out->status, sizeof(out->status),
@@ -349,6 +378,7 @@ static void posture_finalize(struct agent_security_posture *out)
     if (!out)
         return;
     posture_fill_review_required(out);
+    posture_fill_checkpoint(out);
     posture_fill_review_status(out);
 }
 
@@ -365,6 +395,9 @@ static bool posture_collect_progress(struct agent_security_posture *out)
     out->progress_store_available = reader != NULL;
     posture_collect_anchors(out, reader);
     posture_collect_nullifiers(out, reader);
+    /* The spend guard's own derivation, under the trylock already held. */
+    out->checkpoint_verified = reader &&
+        sovereignty_checkpoint_install_locked(reader, &out->checkpoint_height);
     if (reader) {
         progress_store_tx_unlock();
         sqlite3_close(reader);
@@ -387,6 +420,7 @@ void agent_security_posture_collect(struct agent_security_posture *out,
     out->sprout_anchor_activation_cursor = -1;
     out->sapling_anchor_activation_cursor = -1;
     out->nullifier_activation_cursor = -1;
+    out->checkpoint_height = -1;
 
     resolved_ndb = ndb ? ndb : app_runtime_node_db();
 
@@ -438,6 +472,8 @@ void agent_security_posture_collect(struct agent_security_posture *out,
                     "unknown_progress_busy");
         posture_str(out->nullifier_history_state,
                     sizeof(out->nullifier_history_state), "unknown_progress_busy");
+        out->checkpoint_verified = false;
+        out->checkpoint_height = -1;
         posture_str(out->status, sizeof(out->status),
                     "review_required_progress_store_busy");
         posture_str(out->next_action, sizeof(out->next_action), "retry_status_query");
@@ -447,6 +483,8 @@ void agent_security_posture_collect(struct agent_security_posture *out,
     int override = atomic_load(&g_test_review_required);
     if (override >= 0) {
         out->review_required = override != 0;
+        out->checkpoint_verified = false;
+        out->checkpoint_height = -1;
         posture_str(out->status, sizeof(out->status),
                     out->review_required ? "review_required_test" : "ok");
         posture_str(out->next_action, sizeof(out->next_action),
@@ -459,6 +497,19 @@ bool agent_security_posture_allows_public_serving(
     const struct agent_security_posture *posture)
 {
     return posture && !posture->review_required;
+}
+
+bool agent_security_posture_needs_review(
+    const struct agent_security_posture *posture)
+{
+    return !posture ||
+           (posture->review_required && !posture->checkpoint_verified);
+}
+
+bool agent_security_posture_allows_local_ready(
+    const struct agent_security_posture *posture)
+{
+    return !agent_security_posture_needs_review(posture);
 }
 
 void agent_push_security_posture_snapshot_json(
@@ -532,11 +583,131 @@ void agent_push_security_posture_snapshot_json(
                       posture->nullifier_backfill_gap);
     json_push_kv_str(&obj, "nullifier_history_state",
                      posture->nullifier_history_state);
+    json_push_kv_bool(&obj, "checkpoint_verified",
+                      posture->checkpoint_verified);
+    json_push_kv_int(&obj, "checkpoint_height", posture->checkpoint_height);
+    json_push_kv_bool(&obj, "local_ready_allowed",
+                      agent_security_posture_allows_local_ready(posture));
     json_push_kv_str(&obj, "next_action", posture->next_action);
     json_push_kv_str(&obj, "semantics",
-                     "public serving and healthy fail closed while bootstrap "
-                     "or shielded-history trust requires review");
+                     "public serving fails closed while bootstrap or "
+                     "shielded-history trust requires review; a node "
+                     "installed from a checkpoint compiled into this binary "
+                     "is ready for local use while full history is checked");
     json_push_kv(out, key && key[0] ? key : "security_posture", &obj);
+    json_free(&obj);
+}
+
+/* ── Phone-facing trust object (zcl.status_trust.v1) ──────────────────── */
+
+struct posture_history_check {
+    const char *state;
+    int percent;
+};
+
+/* Percent of the background walk over the blocks it covers: above the
+ * checkpoint on a checkpoint node, from genesis otherwise. Never 100 unless
+ * full-history validation is complete. */
+static int posture_walk_percent(int64_t verified, int64_t tip, int64_t floor)
+{
+    int64_t span = tip - floor;
+    int64_t done = verified - floor;
+    if (span <= 0 || done <= 0)
+        return 0;
+    int64_t pct = done * 100 / span;
+    return pct > 99 ? 99 : (int)pct;
+}
+
+static const char *posture_walk_state(int state)
+{
+    switch ((enum bg_validation_state)state) {
+    case BG_VALIDATION_RUNNING:  return "running";
+    case BG_VALIDATION_PAUSED:   return "paused";
+    case BG_VALIDATION_COMPLETE: return "caught_up";
+    case BG_VALIDATION_FAILED:   return "failed";
+    case BG_VALIDATION_IDLE:     break;
+    }
+    return "starting";
+}
+
+static struct posture_history_check posture_history_check(
+    const struct agent_security_posture *p)
+{
+    if (p->full_history_validation_complete)
+        return (struct posture_history_check){ "complete", 100 };
+    if (!g_bg_validation)
+        return (struct posture_history_check){ "not_running", 0 };
+    struct bg_validation_progress pr = bg_validation_get_progress(g_bg_validation);
+    int64_t floor = p->checkpoint_verified ? p->checkpoint_height : 0;
+    return (struct posture_history_check){
+        posture_walk_state(pr.state),
+        posture_walk_percent(pr.verified_height, pr.chain_height, floor),
+    };
+}
+
+/* 3200000 -> "3,200,000". */
+static void posture_group_digits(char *dst, size_t cap, int64_t value)
+{
+    char raw[24];
+    int n = snprintf(raw, sizeof(raw), "%lld", (long long)(value < 0 ? 0 : value));
+    size_t at = 0;
+    for (int i = 0; i < n && at + 1 < cap; i++) {
+        if (i > 0 && (n - i) % 3 == 0 && at + 2 < cap)
+            dst[at++] = ',';
+        dst[at++] = raw[i];
+    }
+    if (cap)
+        dst[at < cap ? at : cap - 1] = '\0';
+}
+
+static const char *posture_trust_source(const struct agent_security_posture *p)
+{
+    if (p->full_history_validation_complete && !p->review_required)
+        return "full_history";
+    return p->checkpoint_verified ? "checkpoint" : "unverified";
+}
+
+static void posture_trust_summary(char *dst, size_t cap,
+                                  const struct agent_security_posture *p,
+                                  bool ready,
+                                  const struct posture_history_check *hc)
+{
+    const char *lead = ready ? "Ready." : "Not ready yet.";
+    char height[32];
+    if (p->checkpoint_verified) {
+        posture_group_digits(height, sizeof(height), p->checkpoint_height);
+        snprintf(dst, cap, "%s Verified from checkpoint %s built into this "
+                 "app; background check %d%%.", lead, height, hc->percent);
+    } else if (p->full_history_validation_complete && !p->review_required) {
+        snprintf(dst, cap, "%s Full history verified on this device.", lead);
+    } else {
+        snprintf(dst, cap, "%s Chain history not verified on this device "
+                 "yet.", lead);
+    }
+}
+
+void agent_push_status_trust_json(struct json_value *out, const char *key,
+                                  const struct agent_security_posture *posture,
+                                  bool ready)
+{
+    struct json_value obj = {0}, check = {0};
+    char summary[160];
+    if (!out || !posture)
+        return;
+    struct posture_history_check hc = posture_history_check(posture);
+    posture_trust_summary(summary, sizeof(summary), posture, ready, &hc);
+    json_set_object(&obj);
+    json_push_kv_str(&obj, "schema", "zcl.status_trust.v1");
+    json_push_kv_str(&obj, "source", posture_trust_source(posture));
+    json_push_kv_int(&obj, "checkpoint_height", posture->checkpoint_height);
+    json_set_object(&check);
+    json_push_kv_str(&check, "state", hc.state);
+    json_push_kv_int(&check, "percent", hc.percent);
+    json_push_kv(&obj, "history_check", &check);
+    json_free(&check);
+    json_push_kv_bool(&obj, "ready", ready);
+    json_push_kv_str(&obj, "summary", summary);
+    json_push_kv(out, key && key[0] ? key : "trust", &obj);
     json_free(&obj);
 }
 

@@ -873,7 +873,7 @@ struct api_node_summary_reason api_node_summary_select_reason(
         selected.reason = ZCL_STATUS_REASON_TYPED_BLOCKER;
         selected.primary = authority_blocker->id;
         selected.next_endpoint = "/api/v1/health";
-    } else if (posture->review_required) {
+    } else if (agent_security_posture_needs_review(posture)) {
         selected.reason = ZCL_STATUS_REASON_POSTURE_REVIEW;
         selected.primary = posture->status;
         selected.next_endpoint = "/api/v1/health";
@@ -963,7 +963,11 @@ size_t api_serve_node_summary(uint8_t *response, size_t response_max)
     json_push_kv_str(&body, "status", status);
     bool public_serving = health.serving && !operator_needed &&
         agent_security_posture_allows_public_serving(&posture);
-    json_push_kv_bool(&body, "healthy", health.healthy && public_serving); json_push_kv_bool(&body, "serving", public_serving);
+    /* healthy and readiness follow local readiness (a checkpoint-verified
+     * node qualifies); serving stays the public full-history gate. */
+    bool local_serving = health.serving && !operator_needed &&
+        agent_security_posture_allows_local_ready(&posture);
+    json_push_kv_bool(&body, "healthy", health.healthy && local_serving); json_push_kv_bool(&body, "serving", public_serving);
     json_push_kv_bool(&body, "operator_needed", operator_needed);
     api_node_summary_push_warnings(&body, &health, warning_blocker);
     json_push_kv_str(&body, "summary", summary);
@@ -972,7 +976,7 @@ size_t api_serve_node_summary(uint8_t *response, size_t response_max)
     agent_push_operator_lane_fields_json(&body);
     agent_push_operator_lane_public_json(&body, "operator_lane");
     agent_push_readiness_contract_json(
-        &body, "readiness", public_serving, health.has_peers,
+        &body, "readiness", local_serving, health.has_peers,
         operator_needed, health.validation_pack_ok, (int)gap,
         (int)index_gap, health.log_head_gap, &posture);
     json_push_kv_int(&body, "height", height);
@@ -986,9 +990,10 @@ size_t api_serve_node_summary(uint8_t *response, size_t response_max)
         &body, "height_contract", height, health.tip_height,
         health.header_height, health.peer_best_height, target, gap,
         health.log_head, health.log_head_gap);
-    agent_push_security_posture_json(
-        &body, "security_posture",
-        g_api_ctx.node_db ? g_api_ctx.node_db : app_runtime_node_db());
+    agent_push_security_posture_snapshot_json(&body, "security_posture",
+                                              &posture);
+    agent_push_status_trust_json(&body, "trust", &posture,
+                                 health.healthy && local_serving);
     json_push_kv_str(&body, "sync_state",
                      sync_state_name(health.sync_state));
     agent_push_restart_watchdog_json(&body, "restart_watchdog", NULL);

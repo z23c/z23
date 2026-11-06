@@ -93,6 +93,9 @@ static const struct agent_contract_schema_surface g_agent_schema_surfaces[] = {
     { 27, "zcl.blocker_registry_summary.v1",
       "nested in zcl.public_status.v3 blocker_registry",
       "typed-blocker-registry active count and dominant head, from the same authority as dumpstate blocker, so status surfaces cannot name disjoint blockers" },
+    { 28, "zcl.status_trust.v1",
+      "nested in zcl.public_status.v3 trust, the status brief, and the native status journey",
+      "plain trust source (checkpoint, full_history, unverified), compiled checkpoint height, background check progress, and one summary line for people" },
 };
 
 static const size_t g_agent_schema_surface_count =

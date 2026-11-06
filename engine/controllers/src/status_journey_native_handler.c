@@ -170,6 +170,8 @@ struct journey_facts {
     int64_t hstar, header, gap, peers;
     const char *sync_state, *primary_blocker;
     const char *pace;   /* node_pace word, NULL when the node did not answer */
+    /* The brief's zcl.status_trust.v1 object, NULL on an older node. */
+    const struct json_value *trust;
     bool wallet_fields, persistence_healthy, encrypted, unlocked;
     bool prover_ready, checkpoint_healthy, witness_ready;
     const char *witness_state;
@@ -201,6 +203,8 @@ static void journey_read_chain(struct journey_facts *f,
         ? json_get_str(json_get(brief, "sync_state")) : NULL;
     f->primary_blocker = brief_ok
         ? json_get_str(json_get(brief, "primary_blocker")) : NULL;
+    const struct json_value *trust = brief_ok ? json_get(brief, "trust") : NULL;
+    f->trust = journey_is_obj(trust) ? trust : NULL;
     /* Payment readiness follows the authoritative served frontier, not the
      * background archive FSM.  A node may keep fetching historical bodies
      * in blocks_download while H* has zero network gap and tip_follow=true. */
@@ -356,6 +360,8 @@ static void journey_render_chain(struct json_value *out,
                            f->primary_blocker ? f->primary_blocker
                                               : "unknown");
     (void)json_push_kv_str(out, "pace", f->pace ? f->pace : "unknown");
+    if (f->trust)
+        (void)json_push_kv(out, "trust", f->trust);
 }
 
 static void journey_render_money(struct json_value *out,
@@ -439,34 +445,17 @@ static void journey_read_pace(struct journey_facts *f, struct json_value *pace,
     f->pace = pace_ok ? json_get_str(json_get(pace, "pace")) : NULL;
 }
 
-char *zcl_native_status_journey_body(const struct json_value *args,
-                                     struct zcl_native_body_err *err)
+char *zcl_native_status_journey_compose(
+    const struct zcl_status_journey_sources *src,
+    struct zcl_native_body_err *err)
 {
-    (void)args;
-    struct zcl_native_body_err brief_err = {0};
-    char *brief_raw = zcl_native_status_brief_body(NULL, &brief_err);
-    char *money_raw = node_rpc_call_deadline(
-        "agentsession", "[\"custody_current\",{}]",
-        JOURNEY_RPC_CONNECT_MS, JOURNEY_RPC_TOTAL_MS);
-    char *wallet_raw = node_rpc_call_deadline(
-        "getwalletinfo", NULL, JOURNEY_RPC_CONNECT_MS,
-        JOURNEY_RPC_TOTAL_MS);
-    char *backup_raw = node_rpc_call_deadline(
-        "walletbackupstatus", NULL, JOURNEY_RPC_CONNECT_MS,
-        JOURNEY_RPC_TOTAL_MS);
-    char *mempool_raw = node_rpc_call_deadline(
-        "getmempoolinfo", NULL, JOURNEY_RPC_CONNECT_MS,
-        JOURNEY_RPC_TOTAL_MS);
-    char *pace_raw = node_rpc_call_deadline(
-        "getnodepace", NULL, JOURNEY_RPC_CONNECT_MS, JOURNEY_RPC_TOTAL_MS);
-
     struct json_value brief, money, wallet, backup, mempool, pace;
-    bool brief_ok = brief_raw && journey_obj(&brief, brief_raw);
-    bool money_ok = journey_obj(&money, money_raw);
-    bool wallet_ok = journey_obj(&wallet, wallet_raw);
-    bool backup_ok = journey_obj(&backup, backup_raw);
-    bool mempool_ok = journey_obj(&mempool, mempool_raw);
-    bool pace_ok = journey_obj(&pace, pace_raw);
+    bool brief_ok = src->brief && journey_obj(&brief, src->brief);
+    bool money_ok = journey_obj(&money, src->money);
+    bool wallet_ok = journey_obj(&wallet, src->wallet);
+    bool backup_ok = journey_obj(&backup, src->backup);
+    bool mempool_ok = journey_obj(&mempool, src->mempool);
+    bool pace_ok = journey_obj(&pace, src->pace);
 
     struct journey_facts f = {0};
     journey_read_chain(&f, &brief, brief_ok);
@@ -499,14 +488,42 @@ char *zcl_native_status_journey_body(const struct json_value *args,
     if (backup_ok) json_free(&backup);
     if (mempool_ok) json_free(&mempool);
     if (pace_ok) json_free(&pace);
-    free(brief_raw); free(money_raw); free(wallet_raw); free(backup_raw);
-    free(mempool_raw); free(pace_raw);
     if (!body) {
         err->status = ZCL_NATIVE_BODY_INTERNAL;
         (void)snprintf(err->message, sizeof(err->message),
                        "could not serialize status journey");
         LOG_NULL("native.status", "could not serialize status journey");
     }
+    return body;
+}
+
+char *zcl_native_status_journey_body(const struct json_value *args,
+                                     struct zcl_native_body_err *err)
+{
+    (void)args;
+    struct zcl_native_body_err brief_err = {0};
+    char *brief_raw = zcl_native_status_brief_body(NULL, &brief_err);
+    char *money_raw = node_rpc_call_deadline(
+        "agentsession", "[\"custody_current\",{}]",
+        JOURNEY_RPC_CONNECT_MS, JOURNEY_RPC_TOTAL_MS);
+    char *wallet_raw = node_rpc_call_deadline(
+        "getwalletinfo", NULL, JOURNEY_RPC_CONNECT_MS,
+        JOURNEY_RPC_TOTAL_MS);
+    char *backup_raw = node_rpc_call_deadline(
+        "walletbackupstatus", NULL, JOURNEY_RPC_CONNECT_MS,
+        JOURNEY_RPC_TOTAL_MS);
+    char *mempool_raw = node_rpc_call_deadline(
+        "getmempoolinfo", NULL, JOURNEY_RPC_CONNECT_MS,
+        JOURNEY_RPC_TOTAL_MS);
+    char *pace_raw = node_rpc_call_deadline(
+        "getnodepace", NULL, JOURNEY_RPC_CONNECT_MS, JOURNEY_RPC_TOTAL_MS);
+    const struct zcl_status_journey_sources src = {
+        .brief = brief_raw, .money = money_raw, .wallet = wallet_raw,
+        .backup = backup_raw, .mempool = mempool_raw, .pace = pace_raw,
+    };
+    char *body = zcl_native_status_journey_compose(&src, err);
+    free(brief_raw); free(money_raw); free(wallet_raw); free(backup_raw);
+    free(mempool_raw); free(pace_raw);
     return body;
 }
 

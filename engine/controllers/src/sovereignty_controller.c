@@ -26,6 +26,7 @@
 
 #include "controllers/sovereignty_controller.h"
 
+#include "chain/checkpoints.h"
 #include "config/consensus_state_snapshot_install.h"
 
 #include "jobs/reducer_frontier.h"
@@ -245,6 +246,19 @@ const char *sovereignty_trust_mode(bool proven_authority, bool self_folded)
     return self_folded ? "sovereign" : "release_assisted";
 }
 
+/* The three provenance predicates folded into one trust state. The caller
+ * holds progress_store_tx_lock (recursive), so the reads are one snapshot. */
+static enum sync_trust_state sov_derive_locked(sqlite3 *pdb, char *why,
+                                               size_t why_cap)
+{
+    int32_t hstar = reducer_frontier_provable_tip_cached();
+    bool proven = coins_kv_is_proven_authority(pdb, NULL);
+    bool refold = coins_kv_contains_refold_marker(pdb);
+    bool self_derived = coins_kv_tip_is_self_derived(pdb, hstar, why,
+                                                     why_cap);
+    return sync_trust_derive(proven, refold, self_derived);
+}
+
 /* The trust decision behind sovereignty_guard_allow, without its stamp write
  * or its log line. `st_out` receives the derived state when a progress store
  * is open; `why_out` receives the reason a refusal carries. */
@@ -257,7 +271,6 @@ static bool sov_guard_eval(sqlite3 *pdb, const char *action, char *reason,
             snprintf(reason, reason_cap, "progress_store_unavailable");
         return false;
     }
-    int32_t hstar = reducer_frontier_provable_tip_cached();
     /* Read the three provenance predicates under one consistent recursive-lock
      * scope and derive the trust state once, then route the action's allow
      * decision through the central capability table (services/sync_trust_
@@ -269,13 +282,8 @@ static bool sov_guard_eval(sqlite3 *pdb, const char *action, char *reason,
      * old bare `self_derived` gate — this centralizes the provenance bit only,
      * it does not change or weaken the gate. */
     progress_store_tx_lock();
-    bool proven = coins_kv_is_proven_authority(pdb, NULL);
-    bool refold = coins_kv_contains_refold_marker(pdb);
-    bool self_derived = coins_kv_tip_is_self_derived(pdb, hstar, why,
-                                                     why_cap);
+    enum sync_trust_state st = sov_derive_locked(pdb, why, why_cap);
     progress_store_tx_unlock();
-
-    enum sync_trust_state st = sync_trust_derive(proven, refold, self_derived);
     *st_out = st;
     enum sync_capability cap = (action && strcmp(action, "mint") == 0)
                                    ? SYNC_CAP_MINE
@@ -469,6 +477,41 @@ bool sovereignty_self_folded_marker(void)
     bool marked = coins_kv_contains_refold_marker(pdb);
     progress_store_tx_unlock();
     return marked;
+}
+
+/* A baked complete-state commitment with every component filled in. An
+ * all-zero component is an unbaked dev placeholder, which the install
+ * authority also refuses (activate_rom_checkpoint_is_placeholder). */
+static bool sov_baked_checkpoint_at(int32_t height)
+{
+    static const uint8_t zero32[32] = {0};
+    const struct rom_state_checkpoint *rom =
+        get_baked_rom_state_checkpoint_at_height(height);
+    return rom && memcmp(rom->utxo_root, zero32, 32) != 0 &&
+           memcmp(rom->anchor_digest, zero32, 32) != 0 &&
+           memcmp(rom->sprout_frontier_root, zero32, 32) != 0 &&
+           memcmp(rom->sapling_frontier_root, zero32, 32) != 0 &&
+           memcmp(rom->nullifier_digest, zero32, 32) != 0 &&
+           memcmp(rom->rom_state_root, zero32, 32) != 0;
+}
+
+bool sovereignty_checkpoint_install_locked(sqlite3 *pdb,
+                                           int32_t *checkpoint_height)
+{
+    int32_t seam = 0, seed = 0;
+    bool seam_found = false, seed_found = false;
+    char why[96] = {0};
+    if (checkpoint_height)
+        *checkpoint_height = -1;
+    if (!pdb || !sov_read_seeded(pdb, &seam, &seam_found, &seed, &seed_found))
+        return false; // raw-return-ok:unreadable provenance is not a checkpoint install
+    if (seam_found || !seed_found || !sov_baked_checkpoint_at(seed))
+        return false; // raw-return-ok:assisted, unseeded or unbaked height
+    if (sov_derive_locked(pdb, why, sizeof(why)) != SYNC_TRUST_SOVEREIGN)
+        return false; // raw-return-ok:the spend guard's own trust state decides
+    if (checkpoint_height)
+        *checkpoint_height = seed;
+    return true;
 }
 
 /* One capability the v2 dumper reports, with its stable JSON key. */

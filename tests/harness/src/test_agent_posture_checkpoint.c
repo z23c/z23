@@ -22,6 +22,7 @@
 #include "controllers/agent_security_posture.h"
 #include "controllers/operator_needed_policy.h"
 #include "controllers/sovereignty_controller.h"
+#include "controllers/status_native_handlers.h"
 #include "jobs/reducer_frontier.h"
 #include "json/json.h"
 #include "models/database.h"
@@ -35,6 +36,7 @@
 
 #include <sqlite3.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define CP_HEIGHT 3200000
@@ -130,6 +132,10 @@ static bool cp_open(struct cp_fixture *fx, const char *label,
     fx->open = true;
     cp_fill_rom(&fx->rom, shape->baked_height);
     checkpoints_set_rom_state_override_for_test(&fx->rom);
+    /* Replace the compiled ladder (it bakes a real rung at 3,200,000) with
+     * one unbaked placeholder, so the keystone override is the only commitment. */
+    static const struct rom_state_rung placeholder = { .cp = { .height = 7 } };
+    checkpoints_set_rom_state_rungs_override_for_test(&placeholder, 1);
     reducer_frontier_provable_tip_set(CP_HEIGHT);
     sqlite3 *pdb = progress_store_db();
     return cp_seed_schema(pdb, shape->history_cursor) &&
@@ -141,6 +147,7 @@ static void cp_close(struct cp_fixture *fx)
     if (!fx->open)
         return;
     reducer_frontier_provable_tip_reset();
+    checkpoints_reset_rom_state_rungs_override_for_test();
     checkpoints_reset_rom_state_override_for_test();
     node_db_close(&fx->ndb);
     progress_store_close();
@@ -179,6 +186,40 @@ static bool cp_spend_allowed(void)
     return sovereignty_guard_peek("wallet_spend", reason, sizeof(reason));
 }
 
+static bool cp_str_is(const struct json_value *v, const char *want)
+{
+    const char *s = v ? json_get_str(v) : NULL;
+    return s && strcmp(s, want) == 0;
+}
+
+/* The phone-facing trust object. No background walk runs in the harness, so
+ * the check reads not_running at 0%. */
+static int cp_check_trust(const struct agent_security_posture *p)
+{
+    int failures = 0;
+    struct json_value root = {0};
+    json_set_object(&root);
+    agent_push_status_trust_json(&root, "trust", p, true);
+    const struct json_value *t = json_get(&root, "trust");
+    const struct json_value *hc = json_get(t, "history_check");
+    const char *summary = json_get_str(json_get(t, "summary"));
+    printf("agent_posture_checkpoint: summary=\"%s\"\n",
+           summary ? summary : "(null)");
+    CP_CHECK("trust: typed schema, checkpoint source and height",
+             cp_str_is(json_get(t, "schema"), "zcl.status_trust.v1") &&
+             cp_str_is(json_get(t, "source"), "checkpoint") &&
+             json_get_int(json_get(t, "checkpoint_height")) == CP_HEIGHT);
+    CP_CHECK("trust: history check is visible and not claimed done",
+             cp_str_is(json_get(hc, "state"), "not_running") &&
+             json_get_int(json_get(hc, "percent")) == 0);
+    CP_CHECK("trust: one plain summary line",
+             summary && strcmp(summary,
+                 "Ready. Verified from checkpoint 3,200,000 built into this "
+                 "app; background check 0%.") == 0);
+    json_free(&root);
+    return failures;
+}
+
 static int case_checkpoint_install_is_verified(void)
 {
     int failures = 0;
@@ -210,6 +251,11 @@ static int case_checkpoint_install_is_verified(void)
     CP_CHECK("rom: status ladder does not stop at the posture rung",
              cp_ladder(&p) == ZCL_STATUS_REASON_NONE);
     CP_CHECK("rom: spend guard allows (pinned, unchanged)", cp_spend_allowed());
+    CP_CHECK("rom: local readiness allowed, review not needed",
+             p.checkpoint_verified && p.checkpoint_height == CP_HEIGHT &&
+             agent_security_posture_allows_local_ready(&p) &&
+             !agent_security_posture_needs_review(&p));
+    failures += cp_check_trust(&p);
     cp_close(&fx);
     return failures;
 }
@@ -237,7 +283,9 @@ static int cp_expect_review(const char *label, const struct cp_shape *shape,
     snprintf(name, sizeof(name), "%s: posture rung still stops the ladder",
              label);
     CP_CHECK(name, cp_ladder(&p) == ZCL_STATUS_REASON_POSTURE_REVIEW &&
-                   p.review_required);
+                   p.review_required && !p.checkpoint_verified &&
+                   agent_security_posture_needs_review(&p) &&
+                   !agent_security_posture_allows_local_ready(&p));
     snprintf(name, sizeof(name), "%s: spend guard %s (pinned, unchanged)",
              label, want_spend ? "allows" : "refuses");
     CP_CHECK(name, cp_spend_allowed() == want_spend);
@@ -337,9 +385,67 @@ static int case_soak_verdict_unchanged(void)
     return failures;
 }
 
+/* The native status journey on a healthy checkpoint node with a ready wallet:
+ * receive is on and the trust object reaches the phone unchanged. */
+static int case_journey_receive_with_trust(void)
+{
+    int failures = 0;
+    static const char brief[] =
+        "{\"hstar\":3300000,\"header_height\":3300000,\"gap\":0,"
+        "\"peer_count\":8,\"healthy\":true,\"serving\":false,"
+        "\"tip_follow\":true,\"wallet_view_ready\":true,"
+        "\"wallet_spend_allowed\":true,\"sync_state\":\"at_tip\","
+        "\"primary_blocker\":\"none\",\"trust\":{"
+        "\"schema\":\"zcl.status_trust.v1\",\"source\":\"checkpoint\","
+        "\"checkpoint_height\":3200000,\"history_check\":{\"state\":"
+        "\"running\",\"percent\":12},\"ready\":true,\"summary\":\"Ready. "
+        "Verified from checkpoint 3,200,000 built into this app; "
+        "background check 12%.\"}}";
+    static const char wallet[] =
+        "{\"persistence\":{\"healthy\":true},\"lock\":{\"encrypted_at_rest\":"
+        "true,\"unlocked\":false},\"sapling\":{\"prover_ready\":true,"
+        "\"checkpoint_healthy\":true,\"witness_ready\":true,"
+        "\"witness_state\":\"ready\"}}";
+    static const char backup[] =
+        "{\"healthy\":true,\"encrypted_backup_available\":true}";
+    static const char money[] =
+        "{\"ok\":true,\"snapshot\":{\"status\":\"CURRENT\",\"complete\":true,"
+        "\"confirmed_zat\":0,\"transparent_spendable_zat\":0,"
+        "\"shielded_spendable_zat\":0,\"pending_zat\":0,"
+        "\"encumbered_zat\":0,\"intent_reserved_zat\":0,"
+        "\"agent_available_zat\":0}}";
+    const struct zcl_status_journey_sources src = {
+        .brief = brief, .money = money, .wallet = wallet, .backup = backup,
+        .mempool = "{\"size\":0}", .pace = "{\"pace\":\"normal\"}",
+    };
+    struct zcl_native_body_err err = {0};
+    char *body = zcl_native_status_journey_compose(&src, &err);
+    struct json_value out = {0};
+    bool parsed = body && json_read(&out, body, strlen(body));
+    CP_CHECK("journey: composes from fixed sources", parsed);
+    if (parsed) {
+        CP_CHECK("journey: healthy checkpoint node with ready wallet can receive",
+                 json_get_bool(json_get(&out, "node_healthy")) &&
+                 json_get_bool(json_get(&out, "can_receive")));
+        CP_CHECK("journey: no owner review on a checkpoint node",
+                 !json_get_bool(json_get(&out, "owner_review_required")));
+        const struct json_value *t = json_get(&out, "trust");
+        CP_CHECK("journey: trust object carried to the phone",
+                 cp_str_is(json_get(t, "source"), "checkpoint") &&
+                 json_get_int(json_get(t, "checkpoint_height")) == CP_HEIGHT &&
+                 cp_str_is(json_get(t, "summary"),
+                           "Ready. Verified from checkpoint 3,200,000 built "
+                           "into this app; background check 12%."));
+        json_free(&out);
+    }
+    free(body);
+    return failures;
+}
+
 int test_agent_posture_checkpoint_cases(void)
 {
     int failures = 0;
+    failures += case_journey_receive_with_trust();
     failures += case_checkpoint_install_is_verified();
     failures += case_other_installs_stay_reviewed();
     failures += case_genesis_full_history_unchanged();

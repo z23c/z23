@@ -37,6 +37,13 @@ struct agent_security_posture {
     int64_t sprout_anchor_activation_cursor;
     int64_t sapling_anchor_activation_cursor;
     int64_t nullifier_activation_cursor;
+    /* The chain state was installed from a bundle at a height whose complete
+     * commitment is compiled into this binary, the spend guard's trust state
+     * is SOVEREIGN, and the shielded histories are complete. Full-history
+     * validation has not finished, so review_required (the public-serving and
+     * soak gate) stays true; only the local readiness rung is lifted. */
+    bool checkpoint_verified;
+    int32_t checkpoint_height;   /* -1 unless checkpoint_verified */
     char status[48];
     char bootstrap_model[64];
     char full_history_validation_origin[32];
@@ -57,6 +64,23 @@ void agent_security_posture_collect(struct agent_security_posture *out,
                                     struct node_db *ndb);
 bool agent_security_posture_allows_public_serving(
     const struct agent_security_posture *posture);
+/* The posture rung of the status ladders: review is needed unless the only
+ * open item is full-history validation on a checkpoint-verified node. */
+bool agent_security_posture_needs_review(
+    const struct agent_security_posture *posture);
+/* Local readiness (healthy, receive, readiness): public serving, or a
+ * checkpoint-verified node. Differs from public serving only when
+ * checkpoint_verified is true. */
+bool agent_security_posture_allows_local_ready(
+    const struct agent_security_posture *posture);
+/* The phone-facing trust object (zcl.status_trust.v1): where trust comes from,
+ * the checkpoint height, the background check, and one plain summary line.
+ * `ready` is the caller's healthy verdict. The background-check percent covers
+ * the blocks the background walk checks (above the checkpoint on a checkpoint
+ * node) and reads 100 only once full-history validation is complete. */
+void agent_push_status_trust_json(struct json_value *out, const char *key,
+                                  const struct agent_security_posture *posture,
+                                  bool ready);
 void agent_push_security_posture_json(struct json_value *out, const char *key,
                                       struct node_db *ndb);
 /* Render an already-collected posture without repeating its SQLite reads. */

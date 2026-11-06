@@ -276,6 +276,10 @@ struct status_brief_trust_tier {
     int64_t install_height; bool install_known;
     int64_t verified_height; bool verified_known;
     const char *capabilities_locked; /* trust_tier.capabilities_denied */
+    /* agent.trust (zcl.status_trust.v1): the phone-facing trust source,
+     * checkpoint height, background check and summary line, carried as one
+     * object. NULL on a node that predates it; points into agent. */
+    const struct json_value *status_trust;
 };
 
 static void status_brief_trust_tier_read(const struct json_value *agent,
@@ -294,6 +298,12 @@ static void status_brief_trust_tier_read(const struct json_value *agent,
         if (locked)
             out->capabilities_locked = locked;
     }
+    const struct json_value *trust = json_get(agent, "trust");
+    const char *trust_schema = trust && trust->type == JSON_OBJ
+        ? json_get_str(json_get(trust, "schema")) : NULL;
+    if (trust_schema &&
+        strcmp(trust_schema, "zcl.status_trust.v1") == 0)
+        out->status_trust = trust;
     (void)status_read_optional_nonnegative(security, "snapshot_anchor_height",
                                            &out->install_height,
                                            &out->install_known);
@@ -371,6 +381,8 @@ static void status_push_trust_tier_fields(
     if (tt->capabilities_locked)
         json_push_kv_str(root, "capabilities_locked",
                          tt->capabilities_locked);
+    if (tt->status_trust)
+        json_push_kv(root, "trust", tt->status_trust);
 }
 
 /* The v3 readiness facts, each emitted separately and only when the

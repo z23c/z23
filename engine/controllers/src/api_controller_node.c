@@ -156,7 +156,10 @@ static void api_health_public_serving_flags(
 {
     *public_serving = health->serving && !authority_blocker &&
         agent_security_posture_allows_public_serving(posture);
-    *public_healthy = health->healthy && *public_serving;
+    /* healthy follows local readiness: a checkpoint-verified node is healthy
+     * while serving stays gated on full-history validation. */
+    *public_healthy = health->healthy && health->serving &&
+        !authority_blocker && agent_security_posture_allows_local_ready(posture);
 }
 /* peer_best_height as the chain blocks report it. The snapshot value is the
  * best handshake starting height among our peers (or the modal view), which
@@ -335,7 +338,8 @@ size_t api_serve_health(uint8_t *response, size_t response_max)
     api_json_push_kv_nullable_str(
         &status, "blocking_reason",
         authority_blocker ? authority_blocker->id :
-        posture.review_required ? posture.status : health.blocking_reason);
+        agent_security_posture_needs_review(&posture) ? posture.status
+                                                      : health.blocking_reason);
     json_push_kv_bool(&status, "warning", public_warning_count > 0);
     json_push_kv_int(&status, "warning_count",
                      (int64_t)public_warning_count);

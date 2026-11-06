@@ -352,7 +352,7 @@ static void push_node_health_status_json(
     if (authority_blocker)
         json_push_kv_str(checks, "blocking_reason",
                          authority_blocker->id);
-    else if (posture->review_required)
+    else if (agent_security_posture_needs_review(posture))
         json_push_kv_str(checks, "blocking_reason", posture->status);
     else if (health->blocking_reason[0])
         json_push_kv_str(checks, "blocking_reason",
@@ -618,7 +618,10 @@ static bool rpc_healthcheck_full(const struct json_value *params,
         dominant && !authority_blocker ? dominant : NULL;
     bool public_serving = health.serving && !authority_blocker &&
         agent_security_posture_allows_public_serving(&posture);
-    bool public_healthy = health.healthy && public_serving;
+    /* healthy follows local readiness (a checkpoint-verified node qualifies);
+     * serving stays the public full-history gate. */
+    bool public_healthy = health.healthy && health.serving &&
+        !authority_blocker && agent_security_posture_allows_local_ready(&posture);
     json_push_kv_str(result, "status", public_healthy ? "ok" : "blocked");
     json_push_kv_str(result, "source_id_sha256",
                      zcl_build_source_id_sha256());
