@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/app_playtest_session.c", CAP_PROCESS|CAP_FS_WRITE, "Spawns the pinned app image through resident_launch, exchanges v=1 frames on its IPC socket, and kills and reaps its process group")
