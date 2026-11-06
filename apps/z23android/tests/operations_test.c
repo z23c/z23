@@ -218,13 +218,13 @@ static int preload_status_child(const char *mode, const char *dir)
     if (!strcmp(mode, "fail")) return 1;
     if (!strcmp(mode, "delay")) { sleep(1); preload_marker(dir, "preload-completed", 1); }
     if (!strcmp(mode, "signal")) {
-        puts("{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\"},\"data\":{\"persisted_shielded_address\":\"zs1fixture\"}}");
+        puts("{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\",\"facts\":{\"persisted_shielded_address\":\"zs1fixture\"}}}");
         fflush(stdout);
         raise(SIGKILL);
     }
 
     if (!strcmp(mode, "locked") || !strcmp(mode, "wrongexit")) {
-        puts("{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\"},\"data\":{\"persisted_shielded_address\":\"zs1fixture\"}}");
+        puts("{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\",\"facts\":{\"persisted_shielded_address\":\"zs1fixture\"}}}");
         return !strcmp(mode, "locked") ? 3 : 1;
     }
     puts("{\"ok\":true,\"data\":{\"persisted_shielded_address\":\"zs1fixture\"}}");

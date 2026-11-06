@@ -850,16 +850,22 @@ static bool preload_envelope_valid(const struct json_value *ok,
     if (json_get_bool(ok)) return exit_code == 0;
     return exit_code == 3 && code && !strcmp(code, "WALLET_LOCKED");
 }
+static const struct json_value *preload_address(const struct json_value *root,
+                                                const struct json_value *ok, const struct json_value *err)
+{
+    const struct json_value *data = json_get(root, "data");
+    const struct json_value *facts = err && err->type == JSON_OBJ ? json_get(err, "facts") : NULL;
+    const struct json_value *source = ok && ok->type == JSON_BOOL && json_get_bool(ok) ? data : facts;
+    return source && source->type == JSON_OBJ ? json_get(source, "persisted_shielded_address") : NULL;
+}
 static bool preload_reply_valid(const char *text, int exit_code)
 {
     const char *json = zapp_json_object(text);
     struct json_value root = {0};
     bool valid = json && json_read(&root, json, strlen(json));
     const struct json_value *ok = valid ? json_get(&root, "ok") : NULL;
-    const struct json_value *data = valid ? json_get(&root, "data") : NULL;
     const struct json_value *err = valid ? json_get(&root, "error") : NULL;
-    const struct json_value *addr = data && data->type == JSON_OBJ
-        ? json_get(data, "persisted_shielded_address") : NULL;
+    const struct json_value *addr = valid ? preload_address(&root, ok, err) : NULL;
     valid = addr && addr->type == JSON_STR && json_get_str(addr) &&
             json_get_str(addr)[0] && preload_envelope_valid(ok, err, exit_code);
     json_free(&root);
@@ -898,7 +904,9 @@ static bool wallet_offline_address(struct zapp_runtime *r, char *out, size_t cap
     bool built = ready && json_push_kv_str(&request, "datadir", r->directory);
     size_t n = built ? json_write(&request, input, sizeof(input)) : 0;
     json_free(&request);
-    bool ran = n && n < sizeof(input) && command(r, args, input, out, cap);
+    int exit_code = -1;
+    bool ran = n && n < sizeof(input) && command_run_cancel(r, args, input, read_limit(r), out, cap, NULL, NULL, NULL, &exit_code);
+    if (exit_code != 0 && exit_code != 3) out[0] = 0;
     bool same = !zapp_node_running(r) && zapp_setup_identity(r->files, after) && !strcmp(before, after);
     atomic_store(&r->setup_running, false);
     if (!same) { out[0] = 0; return false; }

@@ -1107,7 +1107,9 @@ static bool apply_offline(const struct reply *r)
     json_init(&root);
     bool parsed = r->json && json_read(&root, r->json, strlen(r->json));
     const struct json_value *data = parsed ? typed(&root, "data", JSON_OBJ) : NULL;
-    const char *address = text_of(data, "persisted_shielded_address");
+    const struct json_value *error = parsed ? typed(&root, "error", JSON_OBJ) : NULL;
+    const struct json_value *facts = typed(error, "facts", JSON_OBJ);
+    const char *address = text_of(r->ok ? data : facts, "persisted_shielded_address");
     bool valid = parsed && offline_envelope_ok(r, &root) && offline_address_valid(r, address) && preload_current(r);
     if (valid) {
         show_address(address);

@@ -20,6 +20,7 @@
 
 #define TXID "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+static int forced_exit;
 static int spawn_error;          /* when set, the next posix_spawn fails with it */
 static atomic_bool stuck_next;   /* when set, the next posix_spawn forks a child that never reaches exec */
 static atomic_bool silent_next;  /* when set, the next posix_spawn runs a program that never answers */
@@ -48,6 +49,13 @@ int __wrap_posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_acti
                        char *const argv[], char *const envp[])
 {
     static char *const silent[] = {"sleep", "60", NULL};
+    if (forced_exit) {
+        const char *script = forced_exit == 3 ? "cat >/dev/null; printf locked; exit 3" :
+                             forced_exit == 4 ? "cat >/dev/null; printf locked; exit 4" :
+                             "cat >/dev/null; printf locked; kill -TERM $$";
+        char *const args[] = {"sh", "-c", (char *)script, NULL};
+        return __real_posix_spawn(pid, "/bin/sh", actions, attr, args, envp);
+    }
     if (atomic_exchange(&stuck_next, false)) return stuck_spawn(pid);
     if (!atomic_exchange(&silent_next, false)) return spawn_error ? spawn_error : __real_posix_spawn(pid, path, actions, attr, argv, envp);
     int rc = __real_posix_spawn(pid, "/bin/sleep", actions, attr, silent, envp);
@@ -320,6 +328,16 @@ static void touch_in(const char *root, const char *name)
     FILE *f = fopen(path, "w");
     assert(f && fclose(f) == 0);
 }
+static void offline_exit_run(struct zapp_runtime *r, const char *root)
+{
+    char got[512], path[500];
+    assert(zapp_setup_mark_confirmed(root, true));
+    forced_exit = 3; assert(!zapp_wallet_run(r, "offline_address", "", got, sizeof(got)) && !strcmp(got, "locked"));
+    forced_exit = 4; assert(!zapp_wallet_run(r, "offline_address", "", got, sizeof(got)) && !got[0]);
+    forced_exit = 5; assert(!zapp_wallet_run(r, "offline_address", "", got, sizeof(got)) && !got[0]);
+    forced_exit = 0;
+    snprintf(path, sizeof(path), "%s/wallet_setup_confirmed", root); assert(unlink(path) == 0);
+}
 static void receive_gate_run(struct zapp_runtime *r, const char *root)
 {
     char got[512], path[500];
@@ -406,6 +424,7 @@ int main(int argc, char **argv)
     assert(!zapp_wallet_run(&r, NULL, "", out, sizeof(out)) && !zapp_wallet_run(&r, "summary", NULL, out, sizeof(out)));
     assert(!zapp_wallet_run(&r, "summary", "", out, 8));
 
+    offline_exit_run(&r, root);
     send_commands_run(&r);
     send_refusals_run(&r);
     send_timeouts_run(&r);

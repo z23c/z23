@@ -122,6 +122,20 @@ static void wrp_push_report(struct zcl_command_reply *reply,
                                rep->first_shielded_address);
 }
 
+/* Only this public address is safe to include in a locked error. */
+static void wrp_push_locked_address(struct zcl_command_reply *reply,
+                                    const struct wallet_recovery_report *rep)
+{
+    if (!rep->persisted_shielded_address[0])
+        return;
+    struct json_value facts = {0};
+    json_set_object(&facts);
+    if (json_push_kv_str(&facts, "persisted_shielded_address",
+                         rep->persisted_shielded_address))
+        (void)json_push_kv(&reply->data, "failure_facts", &facts);
+    json_free(&facts);
+}
+
 /* What kind of seed the target wallet holds, in one word, so a caller never
  * has to infer "locked" from a false. */
 static const char *wrp_seed_state_name(enum wallet_seed_state s)
@@ -297,6 +311,8 @@ void zcl_native_handle_wallet_recovery_status(
      * no phrase for this wallet" are opposite answers and now read that
      * way. */
     if (rep.seed_state_before == WALLET_SEED_LOCKED) {
+        wrp_push_locked_address(reply, &rep);
+
         (void)json_push_kv_str(&reply->data, "meaning",
             "this wallet IS seed-backed — the seed is right there in "
             "node.db — but it is encrypted and could not be decrypted "

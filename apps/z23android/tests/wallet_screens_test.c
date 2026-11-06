@@ -1518,7 +1518,7 @@ static void test_offline_receive(void)
     char address[92], response[512];
     CHECK(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
     snprintf(response, sizeof(response),
-             "{\"ok\":false,\"data\":{\"persisted_shielded_address\":\"%s\"},\"error\":{\"code\":\"WALLET_LOCKED\"}}", address);
+             "{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\",\"facts\":{\"persisted_shielded_address\":\"%s\"}}}", address);
     start(false);
     fake.node_up = false;
     fake.identity = "confirmed-wallet-one";
@@ -1574,7 +1574,7 @@ static void test_preload_arrives_on_open_receive(void)
     char address[92], response[512];
     CHECK(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
     snprintf(response, sizeof(response),
-             "{\"ok\":false,\"data\":{\"persisted_shielded_address\":\"%s\"},\"error\":{\"code\":\"WALLET_LOCKED\"}}", address);
+             "{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\",\"facts\":{\"persisted_shielded_address\":\"%s\"}}}", address);
     start(false);
     fake.node_up = false; fake.identity = identity; fake.latest = NULL;
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
@@ -1670,7 +1670,7 @@ static void test_preload_while_latest_waits(void)
     static const char identity[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-0000000000000000";
     uint8_t symbols[69] = {2}; char address[92], response[512];
     CHECK(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
-    snprintf(response, sizeof(response), "{\"ok\":false,\"data\":{\"persisted_shielded_address\":\"%s\"},\"error\":{\"code\":\"WALLET_LOCKED\"}}", address);
+    snprintf(response, sizeof(response), "{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\",\"facts\":{\"persisted_shielded_address\":\"%s\"}}}", address);
     start(true); fake.identity = identity; fake.latest = NULL;
     set_block(); CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE)); wait_for(latest_waiting);
     CHECK(wallet_screens_set_amount("1.25"));
