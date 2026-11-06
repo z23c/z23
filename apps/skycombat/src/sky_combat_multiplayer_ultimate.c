@@ -10,6 +10,7 @@
 
 #include <raylib.h>
 #include <raymath.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -454,6 +455,18 @@ static bool parse_game_options(int argc, char **argv,
     return true;
 }
 
+/* Agent modes keep stdout for protocol replies: raylib's default trace log
+ * writes to stdout, so route it to stderr explicitly instead of relying only
+ * on the descriptor redirect. */
+static void agent_trace_to_stderr(int level, const char *format, va_list args)
+{
+    const char *name = level == LOG_ERROR ? "ERROR" : level == LOG_WARNING ? "WARNING" :
+        level == LOG_DEBUG ? "DEBUG" : level == LOG_TRACE ? "TRACE" : "INFO";
+    fprintf(stderr, "Sky Combat raylib [%s] ", name);
+    vfprintf(stderr, format, args);
+    fputc('\n', stderr);
+}
+
 /* Keep admission and completion checks separate from the gameplay loop. */
 static int prepare_game_window(int argc, char **argv, unsigned *qa_frames,
                                struct sky_expr_option *option, bool *agent_mode,
@@ -480,6 +493,7 @@ static int prepare_game_window(int argc, char **argv, unsigned *qa_frames,
         fputs("Sky Combat: agent transport initialization failed\n", stderr);
         return 1;
     }
+    if (*agent_mode) SetTraceLogCallback(agent_trace_to_stderr);
     /* Initialize window */
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT);
     InitWindow(*agent_mode ? 960 : SCREEN_WIDTH, *agent_mode ? 540 : SCREEN_HEIGHT,
