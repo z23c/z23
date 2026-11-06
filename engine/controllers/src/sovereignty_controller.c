@@ -247,7 +247,10 @@ const char *sovereignty_trust_mode(bool proven_authority, bool self_folded)
 }
 
 /* The three provenance predicates folded into one trust state. The caller
- * holds progress_store_tx_lock (recursive), so the reads are one snapshot. */
+ * holds progress_store_tx_lock (recursive), so the reads are one snapshot.
+ * The spend guard and sovereignty_checkpoint_install_locked use this one
+ * function. The v2 dump is not routed through it: it reports the raw
+ * predicates against a freshly computed H*, not the cached one. */
 static enum sync_trust_state sov_derive_locked(sqlite3 *pdb, char *why,
                                                size_t why_cap)
 {
@@ -495,6 +498,23 @@ static bool sov_baked_checkpoint_at(int32_t height)
            memcmp(rom->rom_state_root, zero32, 32) != 0;
 }
 
+/* The activate's durable stamp says the live state came from a CHECKPOINT_ROM
+ * install at exactly `seed`, bound to the compiled commitment there. A later
+ * install of any authority overwrites the stamp; the floor does not move. */
+static bool sov_rom_stamp_at(sqlite3 *pdb, int32_t seed)
+{
+    struct consensus_state_install_stamp st;
+    bool found = false;
+    const struct rom_state_checkpoint *rom =
+        get_baked_rom_state_checkpoint_at_height(seed);
+    return rom &&
+           consensus_state_install_read_authority_stamp(pdb, &st, &found) &&
+           found && st.kind == CONSENSUS_INSTALL_STAMP_CHECKPOINT_ROM &&
+           st.height == seed &&
+           memcmp(st.utxo_root, rom->utxo_root, 32) == 0 &&
+           memcmp(st.block_hash, rom->block_hash, 32) == 0;
+}
+
 bool sovereignty_checkpoint_install_locked(sqlite3 *pdb,
                                            int32_t *checkpoint_height)
 {
@@ -507,6 +527,8 @@ bool sovereignty_checkpoint_install_locked(sqlite3 *pdb,
         return false; // raw-return-ok:unreadable provenance is not a checkpoint install
     if (seam_found || !seed_found || !sov_baked_checkpoint_at(seed))
         return false; // raw-return-ok:assisted, unseeded or unbaked height
+    if (!sov_rom_stamp_at(pdb, seed))
+        return false; // raw-return-ok:no CHECKPOINT_ROM install stamped at the floor
     if (sov_derive_locked(pdb, why, sizeof(why)) != SYNC_TRUST_SOVEREIGN)
         return false; // raw-return-ok:the spend guard's own trust state decides
     if (checkpoint_height)

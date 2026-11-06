@@ -9,6 +9,7 @@
 #include "json/json.h"
 #include "models/database.h"
 #include "platform/time_compat.h"
+#include "services/bg_validation_authority.h"
 #include "services/bg_validation_service.h"
 #include "services/chain_evidence_authority_service.h"
 #include "storage/anchor_kv.h"
@@ -615,8 +616,9 @@ struct posture_history_check {
 };
 
 /* Percent of the background walk over the blocks it covers: above the
- * checkpoint on a checkpoint node, from genesis otherwise. Never 100 unless
- * full-history validation is complete. */
+ * checkpoint on a checkpoint node, from genesis otherwise. The walk alone
+ * never reports 100: that comes only from full-history validation or, on a
+ * checkpoint node, from the publisher's typed "checked to tip" result. */
 static int posture_walk_percent(int64_t verified, int64_t tip, int64_t floor)
 {
     int64_t span = tip - floor;
@@ -646,6 +648,11 @@ static struct posture_history_check posture_history_check(
         return (struct posture_history_check){ "complete", 100 };
     if (!g_bg_validation)
         return (struct posture_history_check){ "not_running", 0 };
+    struct bg_validation_checkpoint_check cc;
+    if (p->checkpoint_verified &&
+        bg_validation_checkpoint_check_get(g_bg_validation, &cc) &&
+        cc.checkpoint_height == p->checkpoint_height)
+        return (struct posture_history_check){ "checked_to_tip", 100 };
     struct bg_validation_progress pr = bg_validation_get_progress(g_bg_validation);
     int64_t floor = p->checkpoint_verified ? p->checkpoint_height : 0;
     return (struct posture_history_check){
@@ -686,7 +693,7 @@ static void posture_trust_summary(char *dst, size_t cap,
     if (p->checkpoint_verified) {
         posture_group_digits(height, sizeof(height), p->checkpoint_height);
         snprintf(dst, cap, "%s Verified from checkpoint %s built into this "
-                 "app; background check %d%%.", lead, height, hc->percent);
+                 "version; background check %d%%.", lead, height, hc->percent);
     } else if (p->full_history_validation_complete && !p->review_required) {
         snprintf(dst, cap, "%s Full history verified on this device.", lead);
     } else {

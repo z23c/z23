@@ -16,6 +16,8 @@
  * in boot_services.c, so the four prototypes live in config/boot_internal.h. */
 
 #include "config/boot_internal.h"
+#include "controllers/sovereignty_controller.h"
+#include "services/bg_validation_authority.h"
 #include "util/util.h"  /* GetDataDir */
 #include <stdio.h>
 
@@ -33,6 +35,9 @@ bool boot_bg_validation_start(void *ctx)
     bg_validation_init(&svc->bg_validation, svc->state, svc->node_db,
                        net_dir[0] ? net_dir : svc->datadir, svc->params);
     g_bg_validation = &svc->bg_validation;
+    /* The publisher's checkpoint path asks the spend guard's own predicate. */
+    bg_validation_authority_set_checkpoint_probe(
+        sovereignty_checkpoint_install_locked);
     if (svc->app_ctx->no_bg_validation) {
         printf("[bg-valid] Disabled via -nobgvalidation\n");
         return true;

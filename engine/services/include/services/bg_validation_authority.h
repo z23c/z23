@@ -44,7 +44,9 @@ bool bg_validation_authority_catchup_wanted(
 /* Recompute the authoritative coins SHA3 and bind a complete walk to CEC.
  * `external_seeded` selects the assisted-snapshot evidence preflight; false
  * requires a genuine no-snapshot genesis-history campaign. A non-ok result
- * raises bg_validation.full_history_unproven with the exact missing proof. */
+ * raises bg_validation.full_history_unproven with the exact missing proof,
+ * except BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED (below), which raises
+ * nothing and pages nobody. */
 struct zcl_result bg_validation_authority_publish(
     struct bg_validation_service *svc, bool external_seeded,
     bool coverage_complete);
@@ -81,6 +83,17 @@ struct bg_validation_checkpoint_check {
     int32_t tip_height;
     uint8_t tip_hash[32];
 };
+
+/* The checkpoint-install predicate (sovereignty_checkpoint_install_locked),
+ * supplied by the composition root because services may not include
+ * controllers (lint gate #49). Called with progress_store_tx_lock held.
+ * Unset (NULL) means no checkpoint path: every pass refuses and pages as
+ * before. */
+struct sqlite3;
+typedef bool (*bg_validation_checkpoint_probe_fn)(struct sqlite3 *pdb,
+                                                  int32_t *checkpoint_height);
+void bg_validation_authority_set_checkpoint_probe(
+    bg_validation_checkpoint_probe_fn fn);
 
 /* Copy the last pass's checkpoint outcome; false when the last pass did not
  * produce one (or a pass raced the copy). */

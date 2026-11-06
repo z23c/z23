@@ -476,13 +476,35 @@ static bool activate_force_stage_cursors(
     return true;
 }
 
+/* Overwrite the install authority stamp: which resolved authority admitted
+ * this install, at the manifest height, block hash and UTXO root. Every
+ * install writes it, so it always names the install behind the live state. */
+static bool activate_stamp_install_authority(
+    sqlite3 *progress_db, const struct consensus_state_bundle_manifest *m,
+    enum consensus_state_install_stamp_kind install_kind,
+    struct consensus_state_activate_result *result)
+{
+    struct consensus_state_install_stamp stamp = {
+        .kind = install_kind, .height = m->height,
+    };
+    memcpy(stamp.block_hash, m->block_hash, 32);
+    memcpy(stamp.utxo_root, m->utxo_root, 32);
+    if (!consensus_state_install_record_authority_stamp(progress_db, &stamp))
+        return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
+                             "recording the install authority stamp failed");
+    return true;
+}
+
 /* Stamp the tier provenance markers. *seam_recorded reports an assisted
  * install so the caller can log it. */
 static bool activate_stamp_tier_markers(
     sqlite3 *progress_db, const struct consensus_state_bundle_manifest *m,
-    bool assisted_tier, bool *seam_recorded,
+    enum consensus_state_install_stamp_kind install_kind, bool *seam_recorded,
     struct consensus_state_activate_result *result)
 {
+    bool assisted_tier = install_kind == CONSENSUS_INSTALL_STAMP_ASSISTED;
+    if (!activate_stamp_install_authority(progress_db, m, install_kind, result))
+        return false; // raw-return-ok:logged-by-activate_fail
     /* 6. Provenance markers — the tier boundary. MIGRATION_COMPLETE (operational:
      * serve a validated tip + receive) is stamped on BOTH tiers. SELF_FOLDED (the
      * SOVEREIGN bit: mine/spend/export/seed) is stamped ONLY on a sovereign
@@ -517,7 +539,8 @@ static bool activate_stamp_tier_markers(
  * caller rolling back) on any failure. Never partially applies. */
 static bool activate_apply_in_tx(
     sqlite3 *progress_db, sqlite3 *bundle_db,
-    const struct consensus_state_bundle_manifest *m, bool assisted_tier,
+    const struct consensus_state_bundle_manifest *m,
+    enum consensus_state_install_stamp_kind install_kind,
     struct consensus_state_activate_result *result)
 {
     if (!activate_clear_derived_state(progress_db, result))
@@ -533,7 +556,7 @@ static bool activate_apply_in_tx(
         return false; // raw-return-ok:logged-by-activate_fail
 
     bool seam_recorded = false;
-    if (!activate_stamp_tier_markers(progress_db, m, assisted_tier,
+    if (!activate_stamp_tier_markers(progress_db, m, install_kind,
                                      &seam_recorded, result))
         return false; // raw-return-ok:logged-by-activate_fail
     if (seam_recorded)
@@ -801,6 +824,20 @@ static bool activate_check_decision_history(
     return true;
 }
 
+/* The durable stamp for a resolved, admitted authority. Only the four
+ * whitelisted authorities reach the cutover (activate_resolve_tier). */
+static enum consensus_state_install_stamp_kind activate_install_stamp_kind(
+    enum consensus_state_activate_authority authority)
+{
+    if (authority == CONSENSUS_STATE_ACTIVATE_AUTHORITY_RECEIPT)
+        return CONSENSUS_INSTALL_STAMP_RECEIPT;
+    if (authority == CONSENSUS_STATE_ACTIVATE_AUTHORITY_CHECKPOINT_ROM)
+        return CONSENSUS_INSTALL_STAMP_CHECKPOINT_ROM;
+    if (authority == CONSENSUS_STATE_ACTIVATE_AUTHORITY_CHECKPOINT_CONTENT)
+        return CONSENSUS_INSTALL_STAMP_CHECKPOINT_CONTENT;
+    return CONSENSUS_INSTALL_STAMP_ASSISTED;
+}
+
 static bool activate_resolve_tier(
     struct consensus_state_artifact_evidence *evidence,
     const struct consensus_state_bundle_manifest *manifest,
@@ -916,12 +953,12 @@ static bool activate_cutover_guard(
 static bool activate_cutover_body(
     sqlite3 *progress_db, sqlite3 *bundle_db,
     const struct consensus_state_bundle_manifest *leased_manifest,
-    bool install_is_assisted,
+    enum consensus_state_install_stamp_kind install_kind,
     struct consensus_state_artifact_evidence *evidence,
     struct consensus_state_activate_result *result)
 {
     if (!activate_apply_in_tx(progress_db, bundle_db, leased_manifest,
-                              install_is_assisted, result))
+                              install_kind, result))
         return false; // raw-return-ok:logged-by-activate_fail
     activate_run_after_stream_hook();
     if (!activate_verify_destination(progress_db, leased_manifest, result))
@@ -1015,7 +1052,7 @@ static bool activate_cutover_locked(
     const struct consensus_state_activate_request *request,
     const struct consensus_state_bundle_manifest *leased_manifest,
     const struct consensus_state_publication_decision_record *admitted_decision,
-    bool install_is_assisted,
+    enum consensus_state_install_stamp_kind install_kind,
     struct consensus_state_artifact_evidence *evidence,
     struct consensus_state_activate_result *result)
 {
@@ -1023,7 +1060,7 @@ static bool activate_cutover_locked(
     bool ok = activate_cutover_reserve(progress_db, request, result) &&
               activate_cutover_guard(progress_db, admitted_decision, result) &&
               activate_cutover_body(progress_db, bundle_db, leased_manifest,
-                                    install_is_assisted, evidence, result);
+                                    install_kind, evidence, result);
     if (ok)
         ok = activate_commit_in_tx(progress_db, result, &outcome_unknown);
     if (!ok)
@@ -1075,9 +1112,9 @@ bool consensus_state_snapshot_install_activate(
      * resolved authority (not the raw request flag) STRUCTURALLY prevents a
      * mis-set request from demoting a sovereign install — a compiled-checkpoint /
      * self-validated bundle resolves to RECEIPT/ROM/CONTENT (higher precedence),
-     * never ASSISTED. */
-    bool install_is_assisted =
-        authority == CONSENSUS_STATE_ACTIVATE_AUTHORITY_ASSISTED;
+     * never ASSISTED. The same resolved authority is stamped durably. */
+    enum consensus_state_install_stamp_kind install_kind =
+        activate_install_stamp_kind(authority);
 
     /* 4. Lease the immutable read transaction (revalidates the pinned file),
      *    then run the one atomic install transaction under the progress-store
@@ -1093,7 +1130,7 @@ bool consensus_state_snapshot_install_activate(
     progress_store_tx_lock();
     bool ok = activate_cutover_locked(progress_db, bundle_db, request,
                                       &leased_manifest, &admitted_decision,
-                                      install_is_assisted, evidence, result);
+                                      install_kind, evidence, result);
     progress_store_tx_unlock();
 
     consensus_state_artifact_evidence_candidate_lease_end(evidence);

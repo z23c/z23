@@ -94,15 +94,19 @@ bool sovereignty_guard_allow(const char *action, char *reason,
 bool sovereignty_guard_peek(const char *action, char *reason,
                             size_t reason_cap);
 
-/* True when the installed chain state came from a consensus bundle whose
- * height has a complete commitment compiled into this binary (keystone or
+/* True when the installed chain state came from a CHECKPOINT_ROM install at a
+ * height whose complete commitment is compiled into this binary (keystone or
  * ladder rung), and the trust state the spend guard derives is SOVEREIGN.
- * Durable facts only: the external-seed floor (the install height), no
+ * Durable facts only: the activate's install authority stamp names
+ * CHECKPOINT_ROM at exactly the external-seed floor with the compiled block
+ * hash and UTXO root (the floor alone proves nothing: every authority and
+ * cold import write it, and it keeps the first declaration), no
  * assisted-install seam, and the coins_kv provenance predicates the guard
  * reads. *checkpoint_height receives the floor height on true, else -1.
  * The caller holds progress_store_tx_lock (or its trylock) on the store that
- * owns `pdb`. SELECT-only: no stamp write, no log line. Status uses this to
- * say "verified from checkpoint"; it grants nothing. */
+ * owns `pdb`. SELECT-only: it writes nothing and logs only when a store read
+ * fails. Status and the background-check publisher use this to say "verified
+ * from checkpoint"; it grants nothing. */
 struct sqlite3;
 bool sovereignty_checkpoint_install_locked(struct sqlite3 *pdb,
                                            int32_t *checkpoint_height);

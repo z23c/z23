@@ -955,9 +955,13 @@ static bool gw_cp_open(struct gw_fixture *f, const struct gw_cp_shape *s,
         return false;
     blocker_reset_for_testing();
     *pages = 0;
+    /* The composition root wires the spend guard's predicate at boot. */
+    bg_validation_authority_set_checkpoint_probe(
+        sovereignty_checkpoint_install_locked);
     if (gw_cp_install(s) &&
         event_observe(EV_OPERATOR_NEEDED, gw_page_observer, pages))
         return true;
+    bg_validation_authority_set_checkpoint_probe(NULL);
     gw_cp_reset();
     gw_free(f);
     return false;
@@ -967,6 +971,7 @@ static void gw_cp_close(struct gw_fixture *f)
 {
     event_clear_observers(EV_OPERATOR_NEEDED);
     blocker_reset_for_testing();
+    bg_validation_authority_set_checkpoint_probe(NULL);
     gw_cp_reset();
     gw_free(f);
 }
@@ -992,13 +997,22 @@ static int test_checkpoint_walk_checked_to_tip(void)
     failures += gw_check("short walk: no checked result yet",
                          gw_trust_reads(&f, "starting", 0));
 
+    /* No predicate wired: fail closed, refuse and page as today. */
     gw_walk_verified(&f, GW_TIP, 0);
+    bg_validation_authority_set_checkpoint_probe(NULL);
+    blocker_reset_for_testing();
+    r = gw_cp_pass(&f, &pages);
+    failures += gw_check("unwired predicate refuses and pages",
+             !r.ok && r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED &&
+             pages == 2 && blocker_exists(GW_UNPROVEN));
+    bg_validation_authority_set_checkpoint_probe(
+        sovereignty_checkpoint_install_locked);
     for (int pass = 0; pass < 2; pass++) {
         r = gw_cp_pass(&f, &pages);
         failures += gw_check("checked to tip: typed, not published",
                  !r.ok && r.code == BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED);
-        failures += gw_check("checked to tip: no new page, no blocker",
-                 pages == 1 && !blocker_exists(GW_UNPROVEN));
+        failures += gw_check("checked to tip: no new page, own blocker retired",
+                 pages == 2 && !blocker_exists(GW_UNPROVEN));
     }
     struct bg_validation_checkpoint_check cc;
     failures += gw_check("typed result carries the checked range and tip",
@@ -1022,7 +1036,7 @@ static int test_checkpoint_walk_checked_to_tip(void)
     failures += gw_check("predicate false later: refusal and page return",
              removed && !r.ok &&
              r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED &&
-             pages == 2 && blocker_exists(GW_UNPROVEN));
+             pages == 3 && blocker_exists(GW_UNPROVEN));
     failures += gw_check("predicate false later: checked result withdrawn",
              !bg_validation_checkpoint_check_get(&f.svc, &cc));
     failures += gw_check("predicate false later: spend guard refuses (pinned)",

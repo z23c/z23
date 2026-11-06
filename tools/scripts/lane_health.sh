@@ -126,6 +126,7 @@ json_first_bool_field() {
 # soak. Only a trusted agent contract counts.
 soak_agent_reason() {
     local trusted="$1" operator_needed="$2" status="$3" pack_ok="$4"
+    local review_required="$5"
     [ "$trusted" = "1" ] || return 0
     if [ "$operator_needed" = "1" ]; then
         printf agent_operator_needed
@@ -133,6 +134,8 @@ soak_agent_reason() {
         printf agent_blocked
     elif [ "$pack_ok" = "0" ]; then
         printf validation_pack_failed
+    elif [ "$review_required" = "1" ]; then
+        printf security_review_required
     fi
 }
 

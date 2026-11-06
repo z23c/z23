@@ -155,7 +155,9 @@ struct api_health_flags api_health_flags(
         agent_security_posture_allows_public_serving(posture);
     f.local_ready = agent_security_posture_local_ready(
         posture, health->healthy, health->serving, authority_blocker != NULL);
-    f.public_healthy = f.local_ready;
+    /* The HTTP code keeps meaning "serving publicly": load balancers,
+     * zcl-nodectl and deploy_verify must never pass a non-serving node. */
+    f.public_healthy = health->healthy && f.public_serving;
     return f;
 }
 /* peer_best_height as the chain blocks report it. The snapshot value is the
@@ -336,8 +338,7 @@ size_t api_serve_health(uint8_t *response, size_t response_max)
     api_json_push_kv_nullable_str(
         &status, "blocking_reason",
         authority_blocker ? authority_blocker->id :
-        agent_security_posture_needs_review(&posture) ? posture.status
-                                                      : health.blocking_reason);
+        posture.review_required ? posture.status : health.blocking_reason);
     json_push_kv_bool(&status, "warning", public_warning_count > 0);
     json_push_kv_int(&status, "warning_count",
                      (int64_t)public_warning_count);

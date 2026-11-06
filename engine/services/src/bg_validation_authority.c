@@ -439,7 +439,70 @@ static enum chain_evidence_controller_result bgv_auth_mark(
         authority, root, &scanned->hash);
 }
 
-struct zcl_result bg_validation_authority_publish(
+static _Atomic(bg_validation_checkpoint_probe_fn) g_checkpoint_probe;
+
+void bg_validation_authority_set_checkpoint_probe(
+    bg_validation_checkpoint_probe_fn fn)
+{
+    atomic_store(&g_checkpoint_probe, fn);
+}
+
+static void bgv_auth_checkpoint_store(struct bg_validation_service *svc,
+                                      int32_t floor,
+                                      const struct bgv_scan_tip *tip)
+{
+    uint64_t words[4];
+    memcpy(words, tip->hash.data, sizeof(words));
+    atomic_store(&svc->checkpoint_check_tip, 0);
+    atomic_store(&svc->checkpoint_check_floor, floor);
+    for (int i = 0; i < 4; i++)
+        atomic_store(&svc->checkpoint_check_words[i], words[i]);
+    atomic_store(&svc->checkpoint_check_tip, tip->height);
+}
+
+/* A node installed from a checkpoint compiled into this binary carries no
+ * snapshot evidence, so the assisted mark would refuse forever. When the
+ * shared predicate holds THIS pass, the walk that just reached the scanned
+ * tip checked every block above the checkpoint: answer that as a typed,
+ * non-publishing result. CEC state and origin stay untouched (never
+ * GENESIS_HISTORY, never FULLY_VALIDATED); no operator is paged. The
+ * blocker id is raised only by bgv_auth_refuse in this file, so clearing it
+ * here retires this publisher's own earlier refusal, nobody else's. */
+static bool bgv_auth_checkpoint_checked(
+    struct bg_validation_service *svc, bool external_seeded,
+    const struct chain_evidence_controller_view *view,
+    const struct bgv_scan_tip *scanned, struct zcl_result *out)
+{
+    uint8_t snapshot_root[32];
+    size_t root_len = 0;
+    if (!external_seeded || view->snapshot_evidence_loaded ||
+        node_db_state_get(svc->ndb, "cec.snapshot_utxo_sha3", snapshot_root,
+                          sizeof(snapshot_root), &root_len))
+        return false;
+    bg_validation_checkpoint_probe_fn probe = atomic_load(&g_checkpoint_probe);
+    sqlite3 *pdb = progress_store_db();
+    int32_t floor = -1;
+    if (!probe || !pdb)
+        return false;
+    progress_store_tx_lock();
+    bool installed = probe(pdb, &floor);
+    progress_store_tx_unlock();
+    if (!installed || floor >= scanned->height)
+        return false;
+    bgv_auth_checkpoint_store(svc, floor, scanned);
+    blocker_clear("bg_validation.full_history_unproven");
+    LOG_INFO("bg_validation",
+             "[bg-valid] background check: checked blocks %d..%d above "
+             "checkpoint %d to the tip; full-history authority is not claimed",
+             floor + 1, scanned->height, floor);
+    *out = ZCL_ERR(BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED,
+                   "background check: checked blocks %d..%d above checkpoint "
+                   "%d to the tip (not full-history authority)", floor + 1,
+                   scanned->height, floor);
+    return true;
+}
+
+static struct zcl_result bgv_auth_publish_pass(
     struct bg_validation_service *svc, bool external_seeded,
     bool coverage_complete)
 {
@@ -490,6 +553,11 @@ struct zcl_result bg_validation_authority_publish(
         return ZCL_OK;
     }
 
+    struct zcl_result checked;
+    if (bgv_auth_checkpoint_checked(svc, external_seeded, &view, &scanned,
+                                    &checked))
+        return checked;
+
     if (!bgv_auth_prepare_and_check(svc, &authority, &view, external_seeded,
                                     reason))
         return bgv_auth_refuse(reason);
@@ -522,4 +590,17 @@ struct zcl_result bg_validation_authority_publish(
              chain_height, external_seeded ? "assisted_snapshot" :
                                              "genesis_history");
     return ZCL_OK;
+}
+
+/* Every pass rewrites or withdraws the typed checkpoint outcome, so a
+ * "checked to tip" never outlives the predicate or the walk behind it. */
+struct zcl_result bg_validation_authority_publish(
+    struct bg_validation_service *svc, bool external_seeded,
+    bool coverage_complete)
+{
+    struct zcl_result r =
+        bgv_auth_publish_pass(svc, external_seeded, coverage_complete);
+    if (svc && (r.ok || r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED))
+        atomic_store(&svc->checkpoint_check_tip, 0);
+    return r;
 }

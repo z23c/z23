@@ -352,7 +352,7 @@ static void push_node_health_status_json(
     if (authority_blocker)
         json_push_kv_str(checks, "blocking_reason",
                          authority_blocker->id);
-    else if (agent_security_posture_needs_review(posture))
+    else if (posture->review_required)
         json_push_kv_str(checks, "blocking_reason", posture->status);
     else if (health->blocking_reason[0])
         json_push_kv_str(checks, "blocking_reason",

@@ -813,10 +813,10 @@ bool rpc_agent_summary(const struct json_value *params, bool help,
         reason, (int64_t)health.warning_count);
     bool public_serving = health.serving && !operator_needed &&
         agent_security_posture_allows_public_serving(&posture);
-    /* Local readiness: public serving, or a checkpoint-verified node whose
-     * full-history check is still running. `serving` stays public. */
-    bool local_serving = health.serving && !operator_needed &&
-        agent_security_posture_allows_local_ready(&posture);
+    /* "Ready." on every status surface: one shared definition. `serving` and
+     * readiness.chain_serving_ready stay public. */
+    bool local_ready = agent_security_posture_local_ready(
+        &posture, health.healthy, health.serving, operator_needed);
 
     json_set_object(result);
     json_push_kv_str(result, "schema", ZCL_PUBLIC_STATUS_SCHEMA);
@@ -862,6 +862,7 @@ bool rpc_agent_summary(const struct json_value *params, bool help,
     json_push_kv_str(result, "status", status);
     json_push_kv_bool(result, "healthy", strcmp(status, "healthy") == 0);
     json_push_kv_bool(result, "serving", public_serving);
+    json_push_kv_bool(result, "local_ready", local_ready);
     json_push_kv_bool(result, "operator_needed", operator_needed);
     json_push_kv_str(result, "summary", summary);
     json_push_kv_str(result, "primary_blocker", primary);
@@ -921,7 +922,7 @@ bool rpc_agent_summary(const struct json_value *params, bool help,
     }
     legacy_mirror_sync_push_status_contract_json(result, &health.mirror);
     agent_push_readiness_contract_json(
-        result, "readiness", local_serving, health.has_peers, operator_needed,
+        result, "readiness", public_serving, health.has_peers, operator_needed,
         health.validation_pack_ok, health.gap, health.index_gap,
         health.log_head_gap, &posture);
     json_push_kv_int(result, "height", health.served_height);
@@ -956,8 +957,7 @@ bool rpc_agent_summary(const struct json_value *params, bool help,
         health.log_head, health.log_head_gap);
     agent_push_security_posture_snapshot_json(result, "security_posture",
                                                &posture);
-    agent_push_status_trust_json(result, "trust", &posture,
-                                 strcmp(status, "healthy") == 0);
+    agent_push_status_trust_json(result, "trust", &posture, local_ready);
     agent_push_trust_tier_json(result, "trust_tier"); /* OPTIONAL, see .h */
     agent_summary_push_detail_json(
         result, &health, first_call_budget.partial_result);
