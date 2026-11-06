@@ -2464,6 +2464,98 @@ static int test_block_local_memory_failure_stays_retryable(void)
     return failures;
 }
 
+/* What one block message left behind when its own body check could not get
+ * memory for the txid array. */
+struct pin_body_oom {
+    bool ran;
+    bool fired;
+    bool seen;
+    int misbehavior;
+    uint64_t orphaned;
+    uint64_t received;
+};
+
+static struct pin_body_oom pin_body_check_out_of_memory(bool requested,
+                                                        uint8_t marker)
+{
+    struct pin_body_oom r = {0};
+    struct block blk;
+    if (!pin_matching_block(&blk, marker))
+        return r;
+    struct uint256 hash;
+    block_get_hash(&blk, &hash);
+    block_clear_seen(&hash);
+    struct byte_stream s;
+    stream_init(&s, 256);
+    struct main_state ms;
+    main_state_init(&ms);
+    peer_scoring_init();
+    test_msg_dl_reset();
+    struct net_manager nm;
+    net_manager_init(&nm);
+    struct msg_processor mp;
+    pin_mp_init(&mp, &ms, &nm);
+    mp.block_submit = pin_submit_checks_merkle;
+    mp.block_submit_ctx = NULL;
+    struct p2p_node *node = pin_peer_node(&nm, 628);
+    test_msg_sync_to_blocks_download();
+    bool premise = node && block_serialize(&blk, &s) &&
+        sync_try_transition(SYNC_BLOCKS_DOWNLOAD, SYNC_AT_TIP,
+                            "msg_handlers memory premise") &&
+        (!requested ||
+         dl_mark_requested(get_download_mgr(), &hash, 1, node->id));
+    if (premise) {
+        zcl_alloc_fault_fail_nth("domain_check_block_txids", 1);
+        r.ran = process_block_msg(&mp, node, &s);
+        r.fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        r.seen = block_already_seen(&hash);
+        r.misbehavior = atomic_load(&node->misbehavior);
+        r.orphaned = get_download_mgr()->total_orphaned;
+        r.received = get_download_mgr()->total_received;
+    }
+    msg_processor_stop_block_intake(&mp);
+    test_msg_sync_to_idle();
+    if (node)
+        p2p_node_free(node);
+    net_manager_free(&nm);
+    stream_free(&s);
+    block_free(&blk);
+    main_state_free(&ms);
+    block_clear_seen(&hash);
+    test_msg_dl_reset();
+    return r;
+}
+
+/* The body check itself cannot get memory. That says nothing about the body or
+ * the peer: the request is settled as delivered, not as notfound from this
+ * peer, a body nobody asked for is not scored, and the block stays unseen. */
+static int test_block_body_check_out_of_memory_not_wrong_body(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: a body check out of memory is not a wrong body") {
+        struct pin_body_oom asked = pin_body_check_out_of_memory(true, 0x33);
+        printf("    asked: orphaned=%llu received=%llu misbehavior=%d\n",
+               (unsigned long long)asked.orphaned,
+               (unsigned long long)asked.received, asked.misbehavior);
+        ASSERT(asked.ran && asked.fired);
+        ASSERT(!asked.seen);
+        ASSERT(asked.misbehavior == 0);
+        ASSERT(asked.orphaned == 0);
+        ASSERT(asked.received == 1);
+
+        struct pin_body_oom pushed = pin_body_check_out_of_memory(false, 0x34);
+        printf("    pushed: orphaned=%llu received=%llu misbehavior=%d\n",
+               (unsigned long long)pushed.orphaned,
+               (unsigned long long)pushed.received, pushed.misbehavior);
+        ASSERT(pushed.ran && pushed.fired);
+        ASSERT(!pushed.seen);
+        ASSERT(pushed.misbehavior == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static bool pin_compact_submit_says_nothing(struct block *block,
                                             struct validation_state *out,
                                             void *ctx)
@@ -3191,6 +3283,7 @@ int test_msg_handlers(void)
     failures += test_pin_reject_more_work_marks_seen();
     failures += test_pin_reject_recheck_memory_failure_stays_retryable();
     failures += test_block_local_memory_failure_stays_retryable();
+    failures += test_block_body_check_out_of_memory_not_wrong_body();
     failures += test_compact_local_submit_failure_stays_retryable();
     failures += test_compact_requeue_guards();
     failures += test_block_data_local_memory_failure_not_scored();

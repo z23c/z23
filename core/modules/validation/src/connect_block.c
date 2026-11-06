@@ -628,7 +628,13 @@ static int connect_block_push_txdata(const struct transaction *tx,
                 state, undo, work, "out-of-memory", false, true);
         work->txdatas = nt;
     }
+    /* A precompute that ran out of memory hashed short streams; a signature
+     * check that reads them would say nothing about the block. */
+    uint64_t alloc_failures = zcl_alloc_failure_count();
     precompute_tx_data(tx, &work->txdatas[work->num_txdatas]);
+    if (zcl_alloc_failure_count() != alloc_failures)
+        return connect_block_reject_cleaned(
+            state, undo, work, "out-of-memory", false, true);
     work->num_txdatas++;
     return 0;
 }
@@ -893,6 +899,40 @@ bool connect_block_test_verify_scripts(const struct script *script_sig,
     block_index_init(&pindex);
     struct block_undo undo;
     block_undo_init(&undo);
+    return connect_block_verify_scripts(state, &pindex, &undo, &work) == 0;
+}
+
+/* Precompute one tx, then the script step for its input 0 against `spk`. */
+bool connect_block_test_verify_tx(const struct transaction *tx,
+                                  const struct script *spk, int64_t amount,
+                                  uint32_t branch_id,
+                                  struct validation_state *state)
+{
+    struct connect_script_work work = {0};
+    struct block_undo undo;
+    block_undo_init(&undo);
+    if (connect_block_push_txdata(tx, state, &undo, &work) != 0)
+        return false;
+    work.checks = zcl_calloc(1, sizeof(*work.checks), "test_script_checks");
+    work.check_ptrs = zcl_calloc(1, sizeof(*work.check_ptrs),
+                                 "test_script_ptrs");
+    if (!work.checks || !work.check_ptrs) {
+        free(work.checks);
+        free(work.check_ptrs);
+        free(work.txdatas);
+        return false;
+    }
+    struct script_check *sc = &work.checks[0];
+    sc->script_sig = &tx->vin[0].script_sig;
+    sc->script_pub_key = spk;
+    sc->flags = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;
+    sc->branch_id = branch_id;
+    sc->txdata = &work.txdatas[0];
+    tx_sig_checker_init(&sc->tsc, tx, 0, amount, branch_id, sc->txdata);
+    work.check_ptrs[0] = sc;
+    work.num_checks = 1;
+    struct block_index pindex;
+    block_index_init(&pindex);
     return connect_block_verify_scripts(state, &pindex, &undo, &work) == 0;
 }
 #endif

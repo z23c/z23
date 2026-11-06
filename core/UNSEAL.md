@@ -1187,3 +1187,11 @@ later lane flips it HARD.
 - 2026-11-06T09:33:47Z — REASON: Rebase reseal onto origin/main: msg_headers: narrow the empty-locator parity note to a known hash_stop; no change beyond the rebased commit
   old ROOT: 962b57f05a8d3c03e14a528223f66b85e83c91837906b8bced6555fc8ea710c3
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T11:52:34Z — REASON: Report a sighash precompute or block merkle check that runs out of memory as a local error, not a verdict on the block or the peer
+  old ROOT: b8c23a890c42b9f4909553186b50cce524dbe97654e76a8e414b8a5a6e0ee116
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T20:10:46Z — REASON: Rebase reseal onto origin/main: Connect precompute and block body checks out of memory are not verdicts; no change beyond the rebased commit
+  old ROOT: 9bded4c431f43bb20b95f43dbd3e0cbc0ce9ea1af4f0c6750d1e8aa9f2ea1ee0
+  by: owner unseal ritual (make core-unseal)

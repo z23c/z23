@@ -912,6 +912,7 @@ static void msg_block_penalize_invalid(struct msg_processor *mp,
  * would give for it. */
 struct msg_block_body_verdict {
     bool matches;
+    bool out_of_memory;     /* no verdict: the check could not get memory */
     int dos;
     char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
 };
@@ -923,6 +924,8 @@ static void msg_block_check_body(const struct block *blk,
     struct zcl_result r = domain_consensus_check_block_merkle_root(
         blk, body->reason, sizeof(body->reason), &body->dos);
     body->matches = r.ok;
+    body->out_of_memory =
+        !r.ok && r.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_OUT_OF_MEMORY;
 }
 
 bool msg_block_body_matches_header(const struct block *blk)
@@ -956,9 +959,17 @@ static void msg_block_track_wrong_body(struct msg_processor *mp,
 static void msg_block_track_received(struct msg_processor *mp,
                                      struct p2p_node *node,
                                      const struct uint256 *hash, size_t bytes,
-                                     bool body_matches)
+                                     const struct msg_block_body_verdict *body)
 {
-    if (!body_matches) {
+    if (body->out_of_memory) {
+        /* No verdict on the body or the peer: settle the request as delivered
+         * and score nothing. The out-of-memory reject then requeues the hash
+         * the same way a submit that runs out of memory does. */
+        (void)dl_mark_received(get_download_mgr(), hash);
+        dl_add_bytes_received(get_download_mgr(), bytes);
+        return;
+    }
+    if (!body->matches) {
         msg_block_track_wrong_body(mp, node, hash);
         dl_add_bytes_received(get_download_mgr(), bytes);
         return;
@@ -1022,6 +1033,10 @@ static bool msg_block_run_intake(struct msg_processor *mp,
      * match its header must not take that place. The sync state is read again
      * further down, so this holds in every state rather than depend on it; the
      * body gets here the verdict at-tip intake gives it. */
+    if (body->out_of_memory) {
+        (void)validation_state_error(state, "out-of-memory");
+        return true;
+    }
     if (!body->matches) {
         validation_state_dos(state, body->dos, false, REJECT_INVALID,
                              body->reason, true, NULL);
@@ -1288,7 +1303,7 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
     struct msg_block_body_verdict body;
     msg_block_check_body(&blk, &body);
 
-    msg_block_track_received(mp, node, &hash, s->size, body.matches);
+    msg_block_track_received(mp, node, &hash, s->size, &body);
 
     if (msg_block_defer_or_seen(mp, &hash)) {
         block_free(&blk);

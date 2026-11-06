@@ -37,6 +37,12 @@
 #include "core/uint256.h"
 #include "core/arith_uint256.h"
 #include "script/script.h"
+#include "script/sighashtype.h"
+#include "script/standard.h"
+#include "consensus/upgrades.h"
+#include "keys/key.h"
+#include "keys/pubkey.h"
+#include "validation/sighash.h"
 #include "util/safe_alloc.h"
 
 #include <stdatomic.h>
@@ -193,6 +199,81 @@ static bool cds_script_step(uint8_t pub_op, size_t n, const char *label,
     return ok;
 }
 
+/* A Sapling v4 tx spending one P2PKH coin of `amount` into `spk`'s key,
+ * signed under `branch_id`. Its signature hash reads the precomputed prevout,
+ * sequence and output hashes. */
+static bool cds_signed_spend(struct transaction *tx, struct script *spk,
+                             int64_t amount, uint32_t branch_id, bool corrupt)
+{
+    struct privkey key;
+    privkey_make_new(&key, true);
+    struct pubkey pub;
+    privkey_get_pubkey(&key, &pub);
+    struct key_id kid = pubkey_get_id(&pub);
+    script_for_p2pkh(spk, &kid);
+
+    transaction_init(tx);
+    if (!transaction_alloc(tx, 1, 1))
+        return false;
+    memset(tx->vin[0].prevout.hash.data, 0x44, 32);
+    tx->vin[0].prevout.n = 0;
+    tx->vout[0].value = amount - 1000;
+    script_init(&tx->vout[0].script_pub_key);
+    script_push_op(&tx->vout[0].script_pub_key, OP_TRUE);
+    tx->overwintered = true;
+    tx->version = 4;
+    tx->version_group_id = SAPLING_VERSION_GROUP_ID;
+
+    struct sighash_type ht = { .raw = SIGHASH_ALL };
+    struct uint256 sighash;
+    if (!signature_hash(spk, tx, 0, ht, amount, branch_id, NULL, &sighash))
+        return false;
+    unsigned char sig[80];
+    size_t siglen = sizeof(sig);
+    if (!privkey_sign(&key, &sighash, sig, &siglen) || siglen > 72)
+        return false;
+    if (corrupt)
+        sig[siglen - 4] ^= 0xFF;
+    sig[siglen++] = SIGHASH_ALL;
+    unsigned char ss[1 + 73 + 1 + 65];
+    size_t pklen = pub.size > 65 ? 65 : pub.size;
+    size_t n = 0;
+    ss[n++] = (unsigned char)siglen;
+    memcpy(&ss[n], sig, siglen);
+    n += siglen;
+    ss[n++] = (unsigned char)pklen;
+    memcpy(&ss[n], pub.vch, pklen);
+    n += pklen;
+    script_set(&tx->vin[0].script_sig, ss, n);
+    transaction_compute_hash(tx);
+    return true;
+}
+
+/* connect_block's precompute and script step over one signed spend, with
+ * `label` failing if given. Returns the result and copies the reason out. */
+static bool cds_signed_step(bool corrupt, const char *label, bool *fired,
+                            char reject_out[256])
+{
+    const int64_t amount = 50000;
+    uint32_t branch_id = NetworkUpgradeInfo[UPGRADE_SAPLING].nBranchId;
+    struct transaction tx;
+    struct script spk;
+    bool built = cds_signed_spend(&tx, &spk, amount, branch_id, corrupt);
+    struct validation_state vs;
+    validation_state_init(&vs);
+    if (label)
+        zcl_alloc_fault_fail_nth(label, 1);
+    bool ok = built &&
+              connect_block_test_verify_tx(&tx, &spk, amount, branch_id, &vs);
+    if (fired)
+        *fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    strncpy(reject_out, vs.reject_reason, 255);
+    reject_out[255] = '\0';
+    cds_free_tx(&tx);
+    return built && ok;
+}
+
 /* Run connect_block over the {coinbase, P2SH-spend} block. Returns the result
  * and copies the reject reason out. */
 static bool cds_run(char reject_out[256])
@@ -291,6 +372,26 @@ int test_connect_block_checkdatasig_sigops(void)
         bool ok = cds_script_step(OP_TRUE, n, "script_stack", &fired, reject);
         CDS_CHECK("script step: the check hit the failed allocation", fired);
         CDS_CHECK("script step: out of memory is not a script verdict",
+                  !ok && strcmp(reject, "out-of-memory") == 0);
+    }
+
+    /* A precompute that runs out of memory hashed a short stream, so the
+     * signature check that reads it fails through no fault of the block. That
+     * is a local error, not a rejected block. */
+    {
+        char reject[256] = "";
+        CDS_CHECK("signed spend: verifies",
+                  cds_signed_step(false, NULL, NULL, reject));
+        CDS_CHECK("signed spend: a corrupt signature fails on its merits",
+                  !cds_signed_step(true, NULL, NULL, reject) &&
+                  strcmp(reject, "mandatory-script-verify-flag-failed") == 0);
+        bool fired = false;
+        bool ok = cds_signed_step(false, "stream_data", &fired, reject);
+        printf("connect_block_checkdatasig_sigops: precompute out of memory "
+               "gives ok=%d reason=%s\n", (int)ok, reject);
+        CDS_CHECK("signed spend: the precompute hit the failed allocation",
+                  fired);
+        CDS_CHECK("signed spend: a precompute out of memory is not a verdict",
                   !ok && strcmp(reject, "out-of-memory") == 0);
     }
 

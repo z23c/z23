@@ -111,6 +111,10 @@ bool connect_block_test_verify_scripts(const struct script *script_sig,
                                        const struct script *script_pub_key,
                                        size_t n,
                                        struct validation_state *state);
+bool connect_block_test_verify_tx(const struct transaction *tx,
+                                  const struct script *spk, int64_t amount,
+                                  uint32_t branch_id,
+                                  struct validation_state *state);
 #endif
 
 bool disconnect_block(const struct block *block,
