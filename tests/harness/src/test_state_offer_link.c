@@ -193,11 +193,121 @@ static int test_window(void)
     if (!ok) fprintf(stderr, "state_offer_link: live window failed\n");
     return ok ? 0 : 1;
 }
+/* Several downloaders share the server: each owns one object stream. */
+#define SLOT_TEST_PEERS 4u
+struct slot_fixture {
+    char dir[256], path[512];
+    struct rom_artifact *artifact;
+    uint8_t *wire;
+    bool registered, started;
+    uint32_t got[SLOT_TEST_PEERS + 2];
+};
+static bool slot_setup(struct slot_fixture *f)
+{
+    test_make_tmpdir(f->dir, sizeof(f->dir), "state_offer_link", "slots");
+    snprintf(f->path, sizeof(f->path), "%s/consensus-state-bundle-200.sqlite", f->dir);
+    f->artifact = calloc(1, sizeof(*f->artifact));
+    f->wire = malloc(STATE_OFFER_LINK_FRAME_MAX);
+    if (!f->artifact || !f->wire) return false;
+    int fd = open(f->path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return false;
+    bool ok = write(fd, "SQLite format 3", 16) == 16 && !ftruncate(fd, ROM_SEED_CHUNK_SIZE);
+    close(fd);
+    rom_seed_reset(); rom_seed_set_enabled(true);
+    rom_seed_set_global_bps_cap(UINT64_C(1) << 40);
+    if (!ok || rom_seed_register(f->dir, "consensus-state-bundle-200.sqlite", NULL, f->artifact) != ROM_REG_OK)
+        return false;
+    f->registered = true;
+    f->started = state_offer_link_server_start(f->dir, NULL);
+    return f->started;
+}
+/* Each peer has its own address so the per-address throttle stays out of the way. */
+static bool slot_ask(struct slot_fixture *f, uint64_t peer, uint64_t nonce)
+{
+    struct state_offer_link_frame req = {.kind = STATE_OFFER_LINK_CHUNK_REQUEST, .nonce = nonce,
+        .total = ROM_SEED_CHUNK_SIZE};
+    memcpy(req.digest, f->artifact->chunk_root, 32);
+    uint8_t ip[16] = {0};
+    ip[14] = (uint8_t)(peer >> 8); ip[15] = (uint8_t)peer;
+    return state_offer_link_server_request(peer, ip, &req);
+}
+/* Take one frame for peer index i; false when nothing is ready yet. */
+static bool slot_take(struct slot_fixture *f, uint64_t peer, unsigned i, uint64_t nonce, bool *bad)
+{
+    size_t n = 0; struct state_offer_link_frame part;
+    if (!state_offer_link_server_next(peer, f->wire, STATE_OFFER_LINK_FRAME_MAX, &n)) return false;
+    *bad |= !state_offer_link_decode(f->wire, n, &part) || part.kind != STATE_OFFER_LINK_CHUNK_PART ||
+        part.nonce != nonce || part.offset != f->got[i] || part.total != ROM_SEED_CHUNK_SIZE ||
+        (!part.offset && memcmp(part.data, "SQLite format 3", 16));
+    f->got[i] += part.size;
+    return true;
+}
+/* Wait until every listed peer has received its first frame. */
+static bool slot_all_started(struct slot_fixture *f, uint64_t first, unsigned count, uint64_t nonce)
+{
+    bool bad = false;
+    for (int round = 0; round < 20000 && !bad; ++round) {
+        unsigned started = 0;
+        for (unsigned i = 0; i < count; ++i)
+            started += f->got[i] || slot_take(f, first + i, i, nonce, &bad);
+        if (started == count) return !bad;
+        test_wait();
+    }
+    return false;
+}
+/* Round-robin drain one frame per peer per pass until each object is complete. */
+static bool slot_finish(struct slot_fixture *f, uint64_t first, unsigned count, uint64_t nonce)
+{
+    bool bad = false;
+    for (int round = 0; round < 20000 && !bad; ++round) {
+        unsigned done = 0;
+        for (unsigned i = 0; i < count; ++i) {
+            if (f->got[i] < ROM_SEED_CHUNK_SIZE) (void)slot_take(f, first + i, i, nonce, &bad);
+            done += f->got[i] == ROM_SEED_CHUNK_SIZE;
+        }
+        if (done == count) return !bad;
+        test_wait();
+    }
+    return false;
+}
+/* Peers 1..4 stream at once while peer 99 has asked and then stopped reading. */
+static bool slot_parallel(struct slot_fixture *f)
+{
+    if (!slot_ask(f, 99, 990)) return false;
+    for (unsigned pass = 0; pass < 2; ++pass) {
+        memset(f->got, 0, sizeof(f->got));
+        for (uint64_t p = 1; p <= SLOT_TEST_PEERS; ++p)
+            if (!slot_ask(f, p, 100 + pass)) return false;
+        if (!slot_all_started(f, 1, SLOT_TEST_PEERS, 100 + pass) ||
+            !slot_finish(f, 1, SLOT_TEST_PEERS, 100 + pass)) return false;
+    }
+    /* The stalled reader kept its own stream and can still finish it. */
+    memset(f->got, 0, sizeof(f->got));
+    return slot_finish(f, 99, 1, 990);
+}
+static void slot_cleanup(struct slot_fixture *f)
+{
+    if (f->started) state_offer_link_server_shutdown();
+    rom_seed_reset();
+    if (f->registered) (void)unlink(f->path);
+    (void)rmdir(f->dir);
+    free(f->wire); free(f->artifact);
+}
+static int test_slots(void)
+{
+    struct slot_fixture f = {0};
+    bool ok = slot_setup(&f) && slot_parallel(&f);
+    slot_cleanup(&f);
+    if (!ok) fprintf(stderr, "state_offer_link: concurrent serve slots failed\n");
+    else puts("state_offer_link slots: ok");
+    return ok ? 0 : 1;
+}
 #else
 static int test_window(void) { return 0; }
+static int test_slots(void) { return 0; }
 #endif
 
-int test_state_offer_link(void) { return test_codec() + test_window(); }
+int test_state_offer_link(void) { return test_codec() + test_window() + test_slots(); }
 #ifdef STATE_OFFER_LINK_STANDALONE
 int main(void) { return test_state_offer_link(); }
 #endif

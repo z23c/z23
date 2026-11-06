@@ -57,8 +57,8 @@ struct peer_fixture {
     struct net_manager nm;
     struct msg_processor mp;
     struct boot_svc_ctx svc;
-    struct p2p_node *node, *list[1];
-    struct send_segment *sentinel;
+    struct p2p_node *node, *other, *list[2];
+    struct send_segment *sentinel, *other_sentinel;
     struct rom_artifact *artifact;
     uint8_t *wire, *batch_wire;
     char dir[256], path[512];
@@ -142,6 +142,55 @@ static bool peer_transfer(struct peer_fixture *p)
     }
     CHECK_PHASE(bytes==131072 && parts>=3); return true;
 }
+/* A second eligible connection with its own captured send queue. */
+static bool peer_add_node(struct peer_fixture *p)
+{
+    struct net_address addr={0};
+    p->other=p2p_node_create(&p->nm,ZCL_INVALID_SOCKET,&addr,"onion",true);
+    p->other_sentinel=calloc(1,sizeof(*p->other_sentinel));
+    CHECK_PHASE(p->other && p->other_sentinel);
+    p->other->send_head=p->other->send_tail=p->other_sentinel;
+    p->other->version=1; p->other->services=NODE_ZCL23|NODE_STATE_OFFER_LINK;
+    atomic_store(&p->other->state,PEER_HANDSHAKE_COMPLETE);
+    p->list[1]=p->other; p->nm.num_nodes=2; return true;
+}
+/* Drain node's queue; count parts of nonce and return true on any other frame. */
+static bool peer_collect(struct peer_fixture *p, struct p2p_node *node, struct send_segment *sentinel,
+                         uint64_t nonce, uint32_t *bytes)
+{
+    struct state_offer_link_frame f; bool stray=false;
+    while (frame_out(node,sentinel,&f,p->wire,STATE_OFFER_LINK_FRAME_MAX)) {
+        if (f.kind==STATE_OFFER_LINK_CHUNK_PART && f.nonce==nonce && f.offset==*bytes) *bytes+=f.size;
+        else stray=true;
+    }
+    return stray;
+}
+/* A connection whose send queue stays full keeps only its own stream; another
+ * connection is admitted and completes, then the stalled one resumes. */
+static bool peer_parallel(struct peer_fixture *p)
+{
+    CHECK_PHASE(peer_add_node(p));
+    struct state_offer_link_frame f={.kind=STATE_OFFER_LINK_CHUNK_REQUEST,.nonce=60,.total=ROM_SEED_CHUNK_SIZE};
+    memcpy(f.digest,p->artifact->chunk_root,32);
+    size_t held=p->node->send_size; p->node->send_size=1024u*1024u;
+    CHECK_PHASE(frame_in(&p->mp,p->node,&f));
+    f.nonce=61; CHECK_PHASE(frame_in(&p->mp,p->other,&f));
+    uint32_t a=0,b=0; bool stray=false;
+    for (int i=0;i<10000 && b<131072 && !stray;i++) {
+        state_offer_peer_pump(&p->mp);
+        stray=peer_collect(p,p->other,p->other_sentinel,61,&b);
+        if (b<131072) pause_ms();
+    }
+    CHECK_PHASE(!stray && b==131072 && !p->sentinel->next);
+    p->node->send_size=held;
+    for (int i=0;i<10000 && a<131072 && !stray;i++) {
+        state_offer_peer_pump(&p->mp);
+        stray=peer_collect(p,p->node,p->sentinel,60,&a);
+        if (a<131072) pause_ms();
+    }
+    CHECK_PHASE(!stray && a==131072);
+    p->list[1]=NULL; p->nm.num_nodes=1; return true;
+}
 /* A throttled request refuses and disconnect clears the server owner. */
 static bool peer_refuse_disconnect(struct peer_fixture *p)
 {
@@ -204,7 +253,13 @@ static void peer_cleanup(struct peer_fixture *p)
         while (p->sentinel->next) { struct send_segment *s=p->sentinel->next; p->sentinel->next=s->next; send_segment_free(s); }
         p->node->send_head=p->node->send_tail=NULL; free(p->sentinel);
     } else free(p->sentinel);
+    if (p->other && p->other_sentinel) {
+        while (p->other_sentinel->next) { struct send_segment *s=p->other_sentinel->next; p->other_sentinel->next=s->next; send_segment_free(s); }
+        p->other->send_head=p->other->send_tail=NULL;
+    }
+    free(p->other_sentinel);
     p->nm.nodes=NULL; p->nm.num_nodes=0;
+    if (p->other) p2p_node_free(p->other);
     if (p->node) p2p_node_free(p->node);
     net_manager_free(&p->nm); rom_seed_reset(); state_offer_store_reset();
     unlink(p->path); rmdir(p->dir); free(p->artifact); free(p->wire); free(p->batch_wire);
@@ -212,7 +267,7 @@ static void peer_cleanup(struct peer_fixture *p)
 int test_state_offer_peer(void)
 {
     struct peer_fixture p={0};
-    bool ok=peer_setup(&p) && peer_discovery(&p) && peer_transfer(&p) &&
+    bool ok=peer_setup(&p) && peer_discovery(&p) && peer_transfer(&p) && peer_parallel(&p) &&
         peer_refuse_disconnect(&p) && peer_client_disconnect(&p) && peer_shutdown(&p);
     peer_cleanup(&p); return ok ? 0 : 1;
 }
