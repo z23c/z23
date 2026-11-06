@@ -957,6 +957,8 @@ ZCL_TEST_GROUP(zcode_store)
 ZCL_TEST_GROUP(zcode_publish)
 /* Fork a published package, save and restore versions, share with parent. */
 ZCL_TEST_GROUP(zcode_package_fork)
+/* Receive a shared fork over the swarm: tree, lineage, corrupt chunk. */
+ZCL_TEST_GROUP(zcode_package_receive)
 ZCL_TEST_GROUP(zcode_package_dev)
 /* Every contexts/commons/packages package built from its own sources and
  * run against its own tests/test_<pkg>.c. */
