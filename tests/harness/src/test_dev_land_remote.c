@@ -17,6 +17,7 @@
 #include "kernel/command_registry.h"
 #include "platform/logical_cpu.h"
 #include "platform/state_root.h"
+#include "base/safe_alloc.h"
 #include "util/spawn.h"
 #include "zsha256/zsha256.h"
 
@@ -290,6 +291,265 @@ static bool dlt_sha_file(const char *path, char hex[ZSHA256_HEX_LEN])
         return false;
     zsha256_hex(blob, n, hex);
     return true;
+}
+
+/* The existing transport seam runs this inert native program instead of
+ * ssh/scp. Only the receive leg emits a reply; no network is contacted. */
+static bool dlt_relay_transport(const struct dlt_rig *rig, char binary[900])
+{
+    char source[900], output[4096];
+    int n = snprintf(source, sizeof(source), "%s/relay.c", rig->base);
+    int m = snprintf(binary, 900, "%s/relay", rig->base);
+    if (n < 0 || (size_t)n >= sizeof(source) || m < 0 || m >= 900) return false;
+    const char *body =
+        "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
+        "int main(int argc, char **argv)\n{\n"
+        "    int receive = 0;\n"
+        "    for (int i = 2; i < argc; i++)\n"
+        "        if (strcmp(argv[i], \"receive\") == 0) receive = 1;\n"
+        "    if (argc < 2 || strcmp(argv[1], \"ssh\") || !receive) return 0;\n"
+        "    const char *mode = getenv(\"ZCL_DLT_RELAY_MODE\");\n"
+        "    if (!mode) return 70;\n"
+        "    if (strcmp(mode, \"success\") == 0) {\n"
+        "        puts(\"{\\\"ok\\\":true,\\\"seq\\\":7}\");\n"
+        "        return 0;\n    }\n"
+        "    if (strcmp(mode, \"json\") == 0)\n"
+        "        puts(\"{\\\"ok\\\":false,\\\"error\\\":{\\\"code\\\":\\\"COMMAND_COMPAT_ONLY\\\",\\\"message\\\":\\\"use z23-dev\\\"}}\");\n"
+        "    else if (strcmp(mode, \"raw\") == 0)\n"
+        "        fputs(\"receiver failed\\nuse z23-dev\\n\", stdout);\n"
+        "    else if (!strcmp(mode, \"boundary\") || !strcmp(mode, \"controls\")) {\n"
+        "        const char *size = getenv(\"ZCL_DLT_RELAY_SIZE\");\n"
+        "        if (!size || !size[0]) return 70;\n"
+        "        char *end;\n"
+        "        unsigned long count = strtoul(size, &end, 10);\n"
+        "        if (*end || count > 16384) return 70;\n"
+        "        for (unsigned long i = 0; i < count; i++)\n"
+        "            putchar(!strcmp(mode, \"controls\") ? 1 : 'x');\n"
+        "    }\n"
+        "    else {\n"
+        "        int quoted = strcmp(mode, \"large-json\") == 0;\n"
+        "        if (quoted) fputs(\"{\\\"padding\\\":\\\"\", stdout);\n"
+        "        for (int i = 0; i < 4096; i++) putchar(quoted ? 'x' : 34);\n"
+        "        if (quoted) fputs(\"\\\"}\", stdout);\n    }\n"
+        "    return ferror(stdout) ? 70 : 2;\n}\n";
+    if (!dlt_write(source, body, 0600)) return false;
+    const char *argv[] = {"cc", "-std=c23", "-O0", "-Wall", "-Wextra", "-Werror",
+                          source, "-o", binary, NULL};
+    int rc = dlt_run(argv, output, sizeof(output));
+    if (rc != 0) printf("native relay fixture compile failed: rc=%d output=%s\n", rc, output);
+    return rc == 0;
+}
+
+static const struct zcl_command_reply *dlt_relay_captured;
+
+static void dlt_relay_captured_handler(const struct zcl_command_request *request,
+                                      struct zcl_command_reply *reply)
+{
+    (void)request;
+    json_free(&reply->data);
+    *reply = *dlt_relay_captured;
+    json_init(&reply->data);
+    if (!json_copy_checked(&reply->data, &dlt_relay_captured->data))
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+            "FIXTURE_COPY_FAILED", "fixture", false, false,
+            "cannot copy the captured relay reply", "native relay serialization fixture");
+}
+
+/* Serialize the actual send reply without repeating transport or effects. */
+static bool dlt_relay_wire(const struct dlt_call *call, struct json_value *doc,
+                           enum zcl_command_exit *exit_code)
+{
+    struct zcl_command_spec spec = *call->request.spec;
+    spec.handler = dlt_relay_captured_handler;
+    char wire[8192];
+    dlt_relay_captured = &call->reply;
+    size_t length = zcl_command_registry_execute_json(zcl_command_catalog(), &spec,
+        NULL, &call->input, false, spec.path, NULL, 0, 0, NULL,
+        wire, sizeof(wire), exit_code);
+    dlt_relay_captured = NULL;
+    return length > 0 && length <= ZCL_COMMAND_ERROR_BUDGET && json_read(doc, wire, length);
+}
+
+static bool dlt_relay_refusal(const struct json_value *doc, enum zcl_command_exit exit_code)
+{
+    const struct json_value *error = json_get(doc, "error");
+    const struct json_value *ok = json_get(doc, "ok");
+    return exit_code == ZCL_COMMAND_EXIT_FAILED && ok && ok->type == JSON_BOOL &&
+        !json_get_bool(ok) && !json_get(doc, "data") &&
+        strcmp(json_get_str(json_get(error, "code")), "SEND_REMOTE_REFUSED") == 0 &&
+        strcmp(json_get_str(json_get(error, "phase")), "receive") == 0;
+}
+
+static bool dlt_relay_omitted(const struct json_value *facts, size_t captured)
+{
+    const struct json_value *omitted = json_get(facts, "remote_diagnostic_omitted");
+    return omitted && omitted->type == JSON_BOOL && json_get_bool(omitted) &&
+        !json_get(facts, "remote") && !json_get(facts, "remote_output") &&
+        json_get_int(json_get(facts, "remote_captured_bytes")) == (int64_t)captured &&
+        json_get_int(json_get(facts, "remote_diagnostic_budget_bytes")) == ZCL_COMMAND_ERROR_BUDGET / 2 &&
+        json_get_int(json_get(facts, "remote_diagnostic_json_bytes")) > ZCL_COMMAND_ERROR_BUDGET / 2 &&
+        strcmp(json_get_str(json_get(facts, "remote_omission_reason")), "failure_diagnostic_budget") == 0;
+}
+
+static bool dlt_relay_budget_control(const struct dlt_rig *rig, const char *mode,
+                                     size_t bytes, bool omitted)
+{
+    char count[32];
+    int n = snprintf(count, sizeof(count), "%zu", bytes);
+    if (n < 0 || (size_t)n >= sizeof(count) || setenv("ZCL_DLT_RELAY_SIZE", count, 1) ||
+        setenv("ZCL_DLT_RELAY_MODE", mode, 1)) return false;
+    struct dlt_call call;
+    dlt_send(&call, rig, NULL);
+    struct json_value doc = {0};
+    enum zcl_command_exit exit_code;
+    bool ok = dlt_refused(&call, "SEND_REMOTE_REFUSED") &&
+        dlt_relay_wire(&call, &doc, &exit_code) && dlt_relay_refusal(&doc, exit_code);
+    const struct json_value *facts = json_get(json_get(&doc, "error"), "facts");
+    size_t captured = bytes + (!strcmp(mode, "large-json") ? strlen("{\"padding\":\"\"}") : 0);
+    if (omitted) ok = dlt_relay_omitted(facts, captured) && ok;
+    else {
+        const char *raw = json_get_str(json_get(facts, "remote_output"));
+        ok = ok && !json_get(facts, "remote_diagnostic_omitted") &&
+            strlen(raw) == bytes && strspn(raw, "x") == bytes &&
+            json_write(facts, NULL, 0) == ZCL_COMMAND_ERROR_BUDGET / 2;
+    }
+    printf("relay serialized budget mode=%s bytes=%zu omitted=%d: %s\n",
+           mode, bytes, omitted, ok ? "PASS" : "FAIL");
+    json_free(&doc);
+    dlt_end(&call);
+    return ok;
+}
+
+static bool dlt_relay_describe_fits(void)
+{
+    char wire[ZCL_COMMAND_SPEC_BUDGET + 1];
+    size_t length = zcl_command_registry_describe_json(zcl_command_catalog(),
+        "dev.land.send", wire, sizeof(wire));
+    struct json_value doc = {0};
+    if (!length || !json_read(&doc, wire, length)) return false;
+    /* Exercise the actual describe document, then reserve the largest native
+     * latency fields rather than depending on current timings/sample count. */
+    bool seen = false;
+    for (size_t i = 0; i < json_size(&doc); i++) {
+        if (strcmp(doc.keys[i], "policy")) continue;
+        struct json_value *policy = &doc.children[i];
+        for (size_t k = 0; k < json_size(policy); k++) {
+            if (!strcmp(policy->keys[k], "observed_p99_us"))
+                json_set_int(&policy->children[k], INT64_MAX);
+            if (!strcmp(policy->keys[k], "observed_samples")) {
+                json_set_int(&policy->children[k], UINT32_MAX);
+                seen = true;
+            }
+        }
+    }
+    size_t widest = json_write(&doc, NULL, 0);
+    printf("land.send actual describe bytes=%zu max-latency-width=%zu cap=%u\n",
+           length, widest, ZCL_COMMAND_SPEC_BUDGET);
+    bool ok = seen && widest <= ZCL_COMMAND_SPEC_BUDGET;
+    json_free(&doc);
+    return ok;
+}
+
+static int dlt_relay_cases(void)
+{
+    int failures = 0;
+    struct dlt_rig rig;
+    struct dlt_call call;
+    char binary[900];
+    if (!dlt_rig(&rig, "relay") || !dlt_commit(rig.sender, "relay.txt", "relay\n") ||
+        !dlt_relay_transport(&rig, binary) || setenv("ZCL_LAND_REMOTE_XPORT", binary, 1)) {
+        printf("native relay fixture setup FAILED\n");
+        return 1;
+    }
+    TEST("land.send: serialized remote JSON refusal retains the actual compatibility error") {
+        ASSERT_EQ(setenv("ZCL_DLT_RELAY_MODE", "json", 1), 0);
+        dlt_send(&call, &rig, NULL);
+        ASSERT(dlt_refused(&call, "SEND_REMOTE_REFUSED"));
+        struct json_value doc = {0};
+        enum zcl_command_exit exit_code;
+        ASSERT(dlt_relay_wire(&call, &doc, &exit_code));
+        ASSERT(dlt_relay_refusal(&doc, exit_code));
+        const struct json_value *facts = json_get(json_get(&doc, "error"), "facts");
+        const struct json_value *remote = json_get(facts, "remote");
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(remote, "error"), "code")), "COMMAND_COMPAT_ONLY");
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(remote, "error"), "message")), "use z23-dev");
+        json_free(&doc);
+        dlt_end(&call);
+        PASS();
+    }
+    TEST("land.send: serialized non-JSON refusal retains raw diagnostics") {
+        ASSERT_EQ(setenv("ZCL_DLT_RELAY_MODE", "raw", 1), 0);
+        dlt_send(&call, &rig, NULL);
+        struct json_value doc = {0};
+        enum zcl_command_exit exit_code;
+        ASSERT(dlt_relay_wire(&call, &doc, &exit_code));
+        ASSERT(dlt_relay_refusal(&doc, exit_code));
+        const struct json_value *facts = json_get(json_get(&doc, "error"), "facts");
+        ASSERT_STR_EQ(json_get_str(json_get(facts, "remote_output")), "receiver failed\nuse z23-dev\n");
+        json_free(&doc);
+        dlt_end(&call);
+        PASS();
+    }
+    TEST("land.send: serialized success still exposes data.remote") {
+        ASSERT_EQ(setenv("ZCL_DLT_RELAY_MODE", "success", 1), 0);
+        dlt_send(&call, &rig, NULL);
+        struct json_value doc = {0};
+        enum zcl_command_exit exit_code;
+        ASSERT(dlt_relay_wire(&call, &doc, &exit_code));
+        ASSERT_EQ(exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_get_bool(json_get(&doc, "ok")));
+        ASSERT_EQ(json_get_int(json_get(json_get(json_get(&doc, "data"), "remote"), "seq")), (int64_t)7);
+        ASSERT(!json_get(&doc, "error"));
+        json_free(&doc);
+        dlt_end(&call);
+        PASS();
+    }
+    TEST("land.send: exact encoded diagnostic allowance fits; one byte more is explicitly omitted") {
+        struct json_value empty = {0};
+        json_set_object(&empty);
+        ASSERT(json_push_kv_str(&empty, "remote_output", ""));
+        size_t overhead = json_write(&empty, NULL, 0);
+        json_free(&empty);
+        ASSERT(overhead < ZCL_COMMAND_ERROR_BUDGET / 2);
+        size_t bytes = ZCL_COMMAND_ERROR_BUDGET / 2 - overhead;
+        ASSERT(dlt_relay_budget_control(&rig, "boundary", bytes, false));
+        ASSERT(dlt_relay_budget_control(&rig, "boundary", bytes + 1, true));
+        PASS();
+    }
+    TEST("land.send: oversized JSON, quote-heavy raw and expanded control bytes retain a bounded refusal") {
+        ASSERT(dlt_relay_budget_control(&rig, "large-json", 4096, true));
+        ASSERT(dlt_relay_budget_control(&rig, "large-raw", 4096, true));
+        ASSERT(dlt_relay_budget_control(&rig, "controls", 256, true));
+        PASS();
+    }
+    TEST("land.send: capture allocation failure refuses without invoking the receiver") {
+        ASSERT_EQ(setenv("ZCL_DLT_RELAY_MODE", "success", 1), 0);
+        zcl_alloc_fault_fail_next("dev_land_remote.reply");
+        dlt_send(&call, &rig, NULL);
+        bool consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(consumed);
+        ASSERT(dlt_refused(&call, "SEND_RELAY_FAILED"));
+        struct json_value doc = {0};
+        enum zcl_command_exit exit_code;
+        ASSERT(dlt_relay_wire(&call, &doc, &exit_code));
+        ASSERT_EQ(exit_code, ZCL_COMMAND_EXIT_FAILED);
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&doc, "error"), "code")), "SEND_RELAY_FAILED");
+        ASSERT(!json_get(&doc, "data"));
+        json_free(&doc);
+        dlt_end(&call);
+        PASS();
+    }
+    TEST("land.send: updated describe fits the unchanged cap with maximum latency widths") {
+        ASSERT(dlt_relay_describe_fits());
+        PASS();
+    }
+_test_next:;
+    zcl_alloc_fault_clear();
+    (void)unsetenv("ZCL_DLT_RELAY_MODE");
+    (void)unsetenv("ZCL_DLT_RELAY_SIZE");
+    dlt_done(&rig);
+    return failures;
 }
 
 static int dlt_single_cases(void)
@@ -1593,7 +1853,7 @@ _test_next:;
 int test_dev_land_remote(void);
 int test_dev_land_remote(void)
 {
-    int failures = dlt_receive_cases() + dlt_send_cases() + dlt_single_cases() +
+    int failures = dlt_receive_cases() + dlt_send_cases() + dlt_relay_cases() + dlt_single_cases() +
                    dlt_offer_cases() + dlt_prereq_cases() +
                    dlt_receipt_cases() +
                    dlt_reverify_cases() + dlq_remote_cases();

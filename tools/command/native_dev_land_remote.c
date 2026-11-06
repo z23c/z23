@@ -10,7 +10,8 @@
  *          (SEND_NOTHING_AHEAD), bundles HEAD ^origin/main, copies it to
  *          <host>:<inbox>/<lane>-<sha12>.bundle with scp, then runs
  *          `dev land receive` over ssh and relays the remote JSON reply as
- *          data.remote. ssh joins argv into a remote shell string, so every
+ *          data.remote on success or bounded error.facts on refusal.
+ *          ssh joins argv into a remote shell string, so every
  *          note, lane, path and host is checked against a closed character
  *          set (SEND_BAD_ARGUMENT) and each remote argument is single-quoted.
  *          --commit=<sha or ref> sends exactly that commit instead of HEAD:
@@ -1024,23 +1025,59 @@ static bool dlr_send_copy(struct dlr_send *s, struct zcl_command_reply *reply)
     return false;
 }
 
-/* The remote reply is relayed verbatim as data.remote; a non-zero exit stays
- * a refusal of this leaf with the remote body beside it. */
+static bool dlr_relay_body(const char *out, struct json_value *target)
+{
+    struct json_value doc = {0};
+    bool parsed = json_read(&doc, out, strlen(out));
+    bool ok = parsed ? json_push_kv(target, "remote", &doc)
+                     : json_push_kv_str(target, "remote_output", out);
+    json_free(&doc);
+    return ok;
+}
+
+/* Reserve the other half for the fixed failure envelope, authority and next
+ * action. Measure the whole facts object after JSON escaping, not raw bytes.
+ * Oversize diagnostics are omitted explicitly, never silently clipped. */
+static bool dlr_relay_failure_facts(const char *out, struct zcl_command_reply *reply)
+{
+    const size_t budget = ZCL_COMMAND_ERROR_BUDGET / 2u;
+    struct json_value facts = {0};
+    json_set_object(&facts);
+    bool ok = dlr_relay_body(out, &facts);
+    size_t encoded = ok ? json_write(&facts, NULL, 0) : 0;
+    if (ok && encoded > budget) {
+        json_free(&facts);
+        json_set_object(&facts);
+        ok = json_push_kv_bool(&facts, "remote_diagnostic_omitted", true) &&
+            json_push_kv_int(&facts, "remote_captured_bytes", (int64_t)strlen(out)) &&
+            json_push_kv_int(&facts, "remote_diagnostic_json_bytes", (int64_t)encoded) &&
+            json_push_kv_int(&facts, "remote_diagnostic_budget_bytes", (int64_t)budget) &&
+            json_push_kv_str(&facts, "remote_omission_reason", "failure_diagnostic_budget");
+    }
+    if (ok) ok = json_push_kv(&reply->data, "failure_facts", &facts);
+    json_free(&facts);
+    return ok;
+}
+
+/* Success keeps data.remote; failures use the serializer's explicit facts
+ * opt-in instead of ordinary partial data, which is intentionally private. */
 static void dlr_send_relay(const char *out, int rc,
                            struct zcl_command_reply *reply)
 {
-    struct json_value doc;
-    json_init(&doc);
-    if (json_read(&doc, out, strlen(out)))
-        (void)json_push_kv(&reply->data, "remote", &doc);
-    else
-        (void)json_push_kv_str(&reply->data, "remote_output", out);
-    json_free(&doc);
-    if (rc != 0)
+    if (rc == 0) {
+        if (!dlr_relay_body(out, &reply->data))
+            dlr_send_fail(reply, "SEND_RELAY_FAILED", "receive",
+                          "cannot preserve the queue host reply", "remote reply allocation failed");
+        return;
+    }
+    dlr_send_fail(reply, "SEND_REMOTE_REFUSED", "receive",
+                  "the queue host refused or failed; its diagnostic or explicit "
+                  "omission is in error.facts",
+                  rc < 0 ? "ssh could not be launched" : "ssh exit nonzero");
+    if (!dlr_relay_failure_facts(out, reply))
         dlr_send_fail(reply, "SEND_REMOTE_REFUSED", "receive",
-                      "the queue host refused or failed; its reply is in "
-                      "data.remote",
-                      rc < 0 ? "ssh could not be launched" : "ssh exit nonzero");
+                      "the queue host refused or failed; its diagnostic could not be preserved",
+                      "remote diagnostic allocation failed");
 }
 
 /* The local lint precheck, before the bundle is made; --precheck=skip
@@ -1088,6 +1125,11 @@ static void dlr_send_receive(const struct dlr_send *s,
     }
     argv[k] = NULL;
     out = zcl_calloc(1, DLR_OUT_CAP, "dev_land_remote.reply");
+    if (!out) {
+        dlr_send_fail(reply, "SEND_RELAY_FAILED", "receive",
+                      "cannot allocate the queue host reply capture", "remote reply allocation failed");
+        return;
+    }
     rc = dlr_xport("ssh", argv, out, DLR_OUT_CAP);
     (void)json_push_kv_str(&reply->data, "leaf", "dev.land.send");
     (void)json_push_kv_str(&reply->data, "bundle", s->remote);
