@@ -313,6 +313,30 @@ void push_getheaders_span(struct msg_processor *mp, struct p2p_node *node,
 }
 
 /* See net/msg_internal.h. */
+void push_getheaders_by_hash(struct msg_processor *mp, struct p2p_node *node,
+                             const struct uint256 *hash)
+{
+    if (!mp || !node || !hash)
+        return;
+    if (msg_processor_snapshot_active(mp))
+        return;
+    struct block_locator loc;
+    block_locator_init(&loc);
+    struct byte_stream s;
+    stream_init(&s, 128);
+    if (getheaders_serialize(&s, &loc, hash)) {
+        p2p_node_begin_message(node, "getheaders", mp->params->pchMessageStart);
+        p2p_node_write_message_data(node, s.data, s.size);
+        p2p_node_end_message(node);
+    } else {
+        LOG_WARN("headers", "push_getheaders_by_hash: serialize failed for %s",
+                 node->addr_name);
+    }
+    stream_free(&s);
+    block_locator_free(&loc);
+}
+
+/* See net/msg_internal.h. */
 bool getheaders_try_append_header(struct byte_stream *body,
                                   const struct block_header *hdr)
 {

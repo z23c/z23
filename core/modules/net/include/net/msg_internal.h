@@ -344,6 +344,11 @@ void exec_getheaders_action(struct msg_processor *mp,
 void push_getheaders_span(struct msg_processor *mp, struct p2p_node *node,
                           const struct uint256 *start_hash,
                           const struct uint256 *stop_hash);
+/* getheaders with an EMPTY locator and hash_stop = `hash`: a zclassicd peer
+ * answers with exactly that one header. Used by the checkpoint header window
+ * walk, which knows a hash but none of its ancestors. */
+void push_getheaders_by_hash(struct msg_processor *mp, struct p2p_node *node,
+                             const struct uint256 *hash);
 bool msg_try_range_parallel_getheaders(struct msg_processor *mp,
                                        struct p2p_node *node,
                                        int our_height, int64_t now_seconds);

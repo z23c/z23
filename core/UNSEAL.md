@@ -1147,3 +1147,10 @@ later lane flips it HARD.
 - 2026-11-06T06:27:07Z — REASON: Requeue a retryable block unless it is held, failed or on the chain
   old ROOT: 747d63fffe21d98be43ed2782d2c1e6f03fa43f5b9643ec754372bc7be5cdfcd
   by: owner unseal ritual (make core-unseal)
+- 2026-11-06T04:39:14Z — REASON: FlySync island start: let checkpoint_header_fetch walk a hash-linked header window backward from a baked rung by empty-locator getheaders (no acceptance predicate changes); serve an empty-locator getheaders with the hash_stop header itself as zclassicd does
+  old ROOT: 48901636b304be5ba783e1209e88f8353b3b6d20e221ee77098f83276674dfce
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T09:31:10Z — REASON: Rebase reseal: carry the FlySync header-window walk onto origin/main; no code change beyond the rebased commit
+  old ROOT: b8c23a890c42b9f4909553186b50cce524dbe97654e76a8e414b8a5a6e0ee116
+  by: owner unseal ritual (make core-unseal)

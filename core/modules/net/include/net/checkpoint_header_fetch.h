@@ -84,6 +84,31 @@ void checkpoint_header_fetch_maybe_send(struct msg_processor *mp,
                                         struct p2p_node *node,
                                         int64_t now_seconds);
 
+/* ── Window mode (FlySync island start) ──────────────────────────────────────
+ * Walk `depth` headers BACKWARD from (height, hash): capture the header whose
+ * hash is the armed target, then re-target its hashPrevBlock one height lower,
+ * until `depth` headers are held. Each step is the same hash-pin capture as
+ * single mode; the request is a getheaders with an EMPTY locator and
+ * hash_stop = target, which zclassicd answers with exactly that header
+ * (main.cpp "If locator is null, return the hashStop block"). No header is
+ * validated here; the app layer re-verifies every link, PoW and Equihash. While
+ * a window is armed, the single-mode has_capture()/take() report nothing. */
+#define CHECKPOINT_HEADER_FETCH_WINDOW_MAX 32
+
+/* Arm a backward walk. depth in [1, CHECKPOINT_HEADER_FETCH_WINDOW_MAX]; other
+ * values (or a NULL hash / negative height) are a no-op. */
+void checkpoint_header_fetch_arm_window(int32_t height,
+                                        const struct uint256 *hash, int depth);
+
+/* Headers captured so far by the armed window walk (0 when none armed). */
+int checkpoint_header_fetch_window_progress(void);
+
+/* Consume a COMPLETE window: out[0] is the header at *out_top_height, out[i] the
+ * one at *out_top_height - i. Returns the header count (the armed depth) once,
+ * or 0 when no complete window is waiting or cap is too small. */
+int checkpoint_header_fetch_take_window(struct block_header *out, int cap,
+                                        int32_t *out_top_height);
+
 #ifdef ZCL_TESTING
 void checkpoint_header_fetch_test_reset(void);
 #endif
