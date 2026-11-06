@@ -932,7 +932,7 @@ struct gh_loc_case {
 };
 
 static const struct gh_loc_case gh_loc_cases[] = {
-    /* zclassicd parity: an empty locator serves exactly the hash_stop header. */
+    /* As zclassicd: an empty locator, known hash_stop, serves exactly it. */
     {"empty locator, stop on H2 serves exactly H2", 5, 0, {0, 0}, 2, 1, 2},
     {"empty locator, zero stop falls back to the active genesis", 5, 0, {0, 0},
      GH_STOP_ZERO, 6, 0},

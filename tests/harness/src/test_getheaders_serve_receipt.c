@@ -818,10 +818,10 @@ static bool rc_serve_locator(struct msg_processor *mp, struct p2p_node *node,
     return served;
 }
 
-/* ── F. zclassicd parity for an empty locator ─────────────
+/* ── F. zclassicd behaviour for an empty locator and a known hash_stop ──
  *
- * zclassicd answers getheaders with an empty locator by returning exactly the
- * hash_stop header (main.cpp "If locator is null, return the hashStop
+ * zclassicd answers getheaders with an empty locator and a known hash_stop
+ * by returning exactly the hash_stop header (main.cpp "If locator is null, return the hashStop
  * block"). A FlySync node walks a header window backward this way. A
  * non-empty locator keeps its fork-point-successor semantics. */
 static int rc_case_f_empty_locator(const struct chain_params *cp, char *dir)

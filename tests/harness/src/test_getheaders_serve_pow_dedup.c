@@ -803,8 +803,8 @@ static int pd_b1_locator_at_tip(struct msg_processor *mp,
 }
 
 /* B2/C: the hash_stop-only form names exactly the hash_stop header
- * (zclassicd parity). Anchored at an index entry with no header solution and
- * no parent, nothing is servable: requests move, headers do not, proving
+ * (as zclassicd does for a known hash_stop). Anchored at an index entry with
+ * no header solution and no parent, nothing is servable: requests move, headers do not, proving
  * neither counter copies the other or sticks at zero. */
 static int pd_b2_empty_reply(struct msg_processor *mp, struct p2p_node *node,
                              const struct pd_chain4 *c)
