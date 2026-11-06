@@ -39,12 +39,14 @@
 #include "command/native_zcode_package_copy.h"
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
 #include "sha3/sha3.h"
 #include "util/authority_receipt.h"
 #include "util/file_io.h"
 #include "util/file_tree_ops.h"
+#include "util/path_util.h"
 #include "vcs/package_deps.h"
 #include "vcs/package_prepare.h"
 #include "vcs/package_release.h"
@@ -87,12 +89,6 @@ static void zab_fail(struct zab *z, const char *code, bool mutated,
                      const char *message, const char *evidence)
 {
     zcl_package_copy_fail(z->reply, code, mutated, message, evidence);
-}
-
-static bool zab_pathf(char *out, size_t cap, const char *a, const char *b)
-{
-    int n = snprintf(out, cap, "%s/%s", a, b);
-    return n > 0 && (size_t)n < cap;
 }
 
 /* ── which copy, and may it be built ─────────────────────────────────── */
@@ -242,7 +238,7 @@ static bool zab_make_fragment(struct zab *z)
 {
     char path[ZAB_PATH];
     struct stat st;
-    if (zab_pathf(path, sizeof(path), z->copy_dir, "Makefile") &&
+    if (zcl_path_join(path, sizeof(path), z->copy_dir, "Makefile") &&
         lstat(path, &st) == 0 && S_ISREG(st.st_mode))
         return true;
     zab_fail(z, "NO_MAKE_FRAGMENT", false, "the copy has no Makefile with "
@@ -254,11 +250,11 @@ static bool zab_store_paths(struct zab *z)
 {
     char store[ZAB_PATH], fork[65], work[ZAB_PATH];
     zcl_hex_encode(z->copy.fork_version, 32, fork);
-    bool ok = zab_pathf(store, sizeof(store), z->datadir, ZAB_STORE) &&
-              zab_pathf(work, sizeof(work), store, "work") &&
-              zab_pathf(z->work, sizeof(z->work), work, fork) &&
-              zab_pathf(z->images, sizeof(z->images), store, "images") &&
-              zab_pathf(z->records, sizeof(z->records), store, "records");
+    bool ok = zcl_path_join(store, sizeof(store), z->datadir, ZAB_STORE) &&
+              zcl_path_join(work, sizeof(work), store, "work") &&
+              zcl_path_join(z->work, sizeof(z->work), work, fork) &&
+              zcl_path_join(z->images, sizeof(z->images), store, "images") &&
+              zcl_path_join(z->records, sizeof(z->records), store, "records");
     if (!ok)
         zab_fail(z, "PATH_TOO_LONG", false, "the datadir path is too long",
                  z->datadir);
@@ -283,7 +279,7 @@ static bool zab_image_path(const struct zab *z, const uint8_t sha[32],
 {
     char hex[65];
     zcl_hex_encode(sha, 32, hex);
-    return zab_pathf(out, cap, z->images, hex);
+    return zcl_path_join(out, cap, z->images, hex);
 }
 
 /* A record for (package, env, dependency) that holds this closure and whose
@@ -407,7 +403,7 @@ static bool zab_store_image(struct zab *z, const char *built, char *final,
     zcl_sha3_256(bytes, len, sha);
     char hex[65];
     zcl_hex_encode(sha, 32, hex);
-    bool ok = zab_pathf(final, cap, z->images, hex);
+    bool ok = zcl_path_join(final, cap, z->images, hex);
     if (ok && lstat(final, &st) != 0)
         ok = authority_receipt_write_atomic(z->images, hex, bytes, len, final,
                                             cap) &&
@@ -443,7 +439,7 @@ static bool zab_dirs(struct zab *z, char *run, size_t cap)
     bool ok = zcl_mkdir_p(z->work, 0700).ok &&
               zcl_mkdir_p(z->images, 0700).ok &&
               zcl_mkdir_p(z->records, 0700).ok &&
-              zab_pathf(run, cap, z->work, "run-XXXXXX") && mkdtemp(run);
+              zcl_path_join(run, cap, z->work, "run-XXXXXX") && mkdtemp(run);
     if (!ok)
         zab_fail(z, "BUILD_DIR_FAILED", false, "the build directories could "
                  "not be created", z->work);
@@ -470,7 +466,7 @@ static void zab_after_make(struct zab *z, const struct app_build_make *m,
                  "the closure the plan declared", why);
         return;
     }
-    if (!zab_pathf(built, sizeof(built), run, APP_BUILD_IMAGE_NAME) ||
+    if (!zcl_path_join(built, sizeof(built), run, APP_BUILD_IMAGE_NAME) ||
         !zab_store_image(z, built, image, sizeof(image), sha)) {
         zab_fail(z, "IMAGE_STORE_FAILED", true, "make app left no image at "
                  "$(APP_OUT)/app, or it could not be stored", run);
@@ -483,7 +479,8 @@ static void zab_after_make(struct zab *z, const struct app_build_make *m,
 static void zab_build(struct zab *z)
 {
     char run[ZAB_PATH];
-    struct app_build_make_result *res = calloc(1, sizeof(*res));
+    struct app_build_make_result *res =
+        zcl_calloc(1, sizeof(*res), "app.build.make_result");
     if (!res) {
         zab_fail(z, "ALLOCATION_FAILED", false, "build result allocation "
                  "failed", z->copy_dir);
@@ -525,7 +522,9 @@ static void zab_confirm(struct zab *z)
 void zcl_native_handle_app_build(const struct zcl_command_request *request,
                                  struct zcl_command_reply *reply)
 {
-    struct zab *z = request && reply ? calloc(1, sizeof(*z)) : NULL;
+    struct zab *z = request && reply
+                        ? zcl_calloc(1, sizeof(*z), "app.build.state")
+                        : NULL;
     if (!z) {
         if (reply)
             zcl_package_copy_fail(reply, "ALLOCATION_FAILED", false,

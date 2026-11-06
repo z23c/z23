@@ -5,6 +5,7 @@
 
 #include "command/app_build_make.h"
 
+#include "base/safe_alloc.h"
 #include "command/lab_exec.h"
 #include "sha3/sha3.h"
 #include "util/file_io.h"
@@ -52,10 +53,10 @@ void app_build_closure_free(struct app_build_closure *c)
 {
     if (!c)
         return;
-    for (size_t i = 0; i < c->count; i++)
-        free(c->paths[i]);
+    while (c->paths && c->count > 0)
+        free(c->paths[--c->count]);
     free(c->paths);
-    memset(c, 0, sizeof(*c));
+    c->paths = NULL;
 }
 
 /* ── the confined make child ─────────────────────────────────────────── */
@@ -198,11 +199,6 @@ static bool abm_exited_ok(const struct lab_proc *p)
 
 /* ── the declared closure ────────────────────────────────────────────── */
 
-static int abm_cmp(const void *a, const void *b)
-{
-    return strcmp(*(char *const *)a, *(char *const *)b);
-}
-
 /* A declared input the package root covers: canonical, not a local store. */
 static bool abm_declarable(const char *path)
 {
@@ -215,24 +211,48 @@ static bool abm_declarable(const char *path)
     return true;
 }
 
-static bool abm_push(struct app_build_closure *c, const char *path,
-                     size_t len)
+/* The first index whose path is not below `path` (the list stays sorted). */
+static size_t abm_lower_bound(const struct app_build_closure *c,
+                              const char *path)
 {
+    size_t lo = 0, hi = c->count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2u;
+        if (strcmp(c->paths[mid], path) < 0)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+static bool abm_declared(const struct app_build_closure *c, const char *path)
+{
+    size_t at = abm_lower_bound(c, path);
+    return at < c->count && strcmp(c->paths[at], path) == 0;
+}
+
+/* Insert in sorted order; a repeated path is kept once. */
+static bool abm_push(struct app_build_closure *c, const char *path)
+{
+    if (abm_declared(c, path))
+        return true;
     if (c->count >= APP_BUILD_CLOSURE_MAX)
         return false;
     if (!c->paths) {
-        c->paths = calloc(APP_BUILD_CLOSURE_MAX, sizeof(char *));
-        if (!c->paths) {
-            fprintf(stderr, "[app.build] closure list allocation failed\n");
+        c->paths = zcl_calloc(APP_BUILD_CLOSURE_MAX, sizeof(char *),
+                              "app.build.closure_list");
+        if (!c->paths)
             return false;
-        }
     }
-    char *copy = strndup(path, len);
-    if (!copy) {
-        fprintf(stderr, "[app.build] closure path allocation failed\n");
+    char *copy = zcl_strdup(path, "app.build.closure_path");
+    if (!copy)
         return false;
-    }
-    c->paths[c->count++] = copy;
+    size_t at = abm_lower_bound(c, path);
+    memmove(&c->paths[at + 1u], &c->paths[at],
+            (c->count - at) * sizeof(char *));
+    c->paths[at] = copy;
+    c->count++;
     return true;
 }
 
@@ -258,28 +278,14 @@ static bool abm_parse(char *text, struct app_build_closure *c, char *why,
                                   "a package path in the copy", line);
             return false;
         }
-        if (!abm_push(c, line, len)) {
+        if (!abm_push(c, line)) {
             abm_why(why, why_cap, "print-app-closure named more than %u "
-                                  "inputs", APP_BUILD_CLOSURE_MAX);
+                                  "inputs, or the list could not be "
+                                  "allocated", APP_BUILD_CLOSURE_MAX);
             return false;
         }
     }
     return true;
-}
-
-static void abm_sort_unique(struct app_build_closure *c)
-{
-    if (c->count < 2)
-        return;
-    qsort(c->paths, c->count, sizeof(char *), abm_cmp);
-    size_t kept = 1;
-    for (size_t i = 1; i < c->count; i++) {
-        if (strcmp(c->paths[i], c->paths[kept - 1]) == 0)
-            free(c->paths[i]);
-        else
-            c->paths[kept++] = c->paths[i];
-    }
-    c->count = kept;
 }
 
 /* SHA3-256 of one regular, unlinked-by-symlink copy file. */
@@ -386,8 +392,6 @@ bool app_build_closure_query(const struct app_build_make *m,
         abm_why(why, why_cap, "make print-app-closure declared no inputs");
         ok = false;
     }
-    if (ok)
-        abm_sort_unique(out);
     ok = ok && abm_root(m, out, why, why_cap);
     if (!ok)
         app_build_closure_free(out);
@@ -455,7 +459,7 @@ static bool abm_prereq_ok(struct abm_depcheck *d, const char *token)
     }
     while (strncmp(rel, "./", 2) == 0)
         rel += 2;
-    if (bsearch(&rel, d->c->paths, d->c->count, sizeof(char *), abm_cmp))
+    if (abm_declared(d->c, rel))
         return true;
     abm_why(d->why, d->why_cap, "the build read '%s', which "
                                 "print-app-closure does not declare", rel);
