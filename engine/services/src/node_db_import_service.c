@@ -19,6 +19,7 @@
  * is the liveness; a supervisor contract would be meaningless here. */
 
 #include "services/node_db_import_service.h"
+#include "core/uint256.h"
 
 #include "node_db_import_internal.h"
 #include "platform/logical_cpu.h"
@@ -363,6 +364,38 @@ static enum policy_decision import_wipe_policy_decision(int64_t existing)
         &rp, existing, "sync_controller.import_utxos_reimport");
 }
 
+struct zcl_result node_db_import_source_check(struct coins_view_db *cvdb)
+{
+    struct uint256 best;
+    struct db_iterator it;
+    char first[33];
+    size_t key_len = 0;
+    bool has_record;
+
+    if (!cvdb)
+        return ZCL_ERR(-12, "import: refused, no source chainstate was given; "
+                       "nothing was changed");
+    memset(&best, 0, sizeof(best));
+    if (!coins_view_db_get_best_block(cvdb, &best) || uint256_is_null(&best))
+        return ZCL_ERR(-12, "import: refused, the source names no best block, "
+                       "so it is not a chainstate (check the path); nothing "
+                       "was changed");
+    memset(first, 0, sizeof(first));
+    first[0] = 'c';
+    db_iter_init(&it, &cvdb->db);
+    db_iter_seek(&it, first, sizeof(first));
+    has_record = db_iter_valid(&it);
+    if (has_record) {
+        const char *key = db_iter_key(&it, &key_len);
+        has_record = key && key_len > 0 && key[0] == 'c';
+    }
+    db_iter_free(&it);
+    if (!has_record)
+        return ZCL_ERR(-12, "import: refused, the source holds no coin records; "
+                       "nothing was changed");
+    return ZCL_OK;
+}
+
 static bool import_args_invalid(struct node_db *ndb, struct coins_view_db *cvdb)
 {
     return !ndb || !ndb->open || !cvdb;
@@ -628,13 +661,14 @@ static struct zcl_result import_reject_dropped_records(struct import_context *ct
 {
     int cut = atomic_load(&ctx->records_cut);
     int skipped = atomic_load(&ctx->skipped_outputs);
+    int undecodable = atomic_load(&ctx->decode_failures);
 
-    if (cut == 0 && skipped == 0)
+    if (cut == 0 && skipped == 0 && undecodable == 0)
         return ZCL_OK;
-    LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: REJECTED — %d records cut and %d skipped, so the set is missing outputs", cut, skipped);
+    LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: REJECTED — %d records cut, %d skipped and %d undecodable, so the set is missing outputs", cut, skipped, undecodable);
     import_end_refused(ctx, turbo_mode, total_rows);
-    return ZCL_ERR(-11, "import: REJECTED — %d records cut and %d skipped"
-                   IMPORT_RERUN_NOTE, cut, skipped);
+    return ZCL_ERR(-11, "import: REJECTED — %d records cut, %d skipped and %d "
+                   "undecodable" IMPORT_RERUN_NOTE, cut, skipped, undecodable);
 }
 
 /* Reject a truncated or aborted import. ZCL_OK means the rows can be kept. */
@@ -727,6 +761,11 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
     if (import_args_invalid(ndb, cvdb))
         return ZCL_ERR(-10, "import_utxos: invalid args (ndb=%p, cvdb=%p)",
                        (void *)ndb, (void *)cvdb);
+    struct zcl_result source = node_db_import_source_check(cvdb);
+    if (!source.ok) {
+        LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO %s", source.message);
+        return source;
+    }
     sync_job_import_begin();
 
     int num_decoders = utxo_import_num_decoders();

@@ -37,6 +37,13 @@
 #define REJECT_CODE_DROPPED (-11)
 /* At 10 outputs each, more rows than boot's 100000 row mark. */
 #define REJECT_BOOT_RECORDS 12288
+/* Fixture outputs values that stand for a special record, not a count. */
+#define REJECT_UNDECODABLE (-1)
+#define REJECT_LONG_SCRIPTS (-2)
+/* Longer than utxo_import_row.script, so the decoder must allocate. */
+#define REJECT_LONG_SCRIPT_BYTES 100
+/* The result code of a source refused before anything was wiped. */
+#define REJECT_CODE_SOURCE (-12)
 
 struct reject_fixture {
     char dir[128];
@@ -79,8 +86,73 @@ static bool reject_write_record(struct db_wrapper *db, uint32_t key_index,
     return ok;
 }
 
-static bool reject_fixture_make(struct reject_fixture *f, const int *outputs,
-                                size_t count)
+/* A record whose value does not decode: its version is there, the rest is not. */
+static bool reject_write_undecodable(struct db_wrapper *db, uint32_t key_index)
+{
+    char key[33];
+    const char value[] = { 0x01 };
+
+    memset(key, 0x33, sizeof(key));
+    key[0] = 'c';
+    key[1] = (char)(key_index >> 24);
+    key[2] = (char)(key_index >> 16);
+    key[3] = (char)(key_index >> 8);
+    key[4] = (char)key_index;
+    return db_write(db, key, sizeof(key), value, sizeof(value), false);
+}
+
+/* A two-output record whose scripts are too long for a row's inline buffer. */
+static bool reject_write_long_scripts(struct db_wrapper *db, uint32_t key_index)
+{
+    struct byte_stream s;
+    char key[33];
+    uint8_t script[REJECT_LONG_SCRIPT_BYTES];
+    bool ok;
+
+    stream_init(&s, 2u * (sizeof(script) + 16u) + 16u);
+    memset(script, 0x51, sizeof(script));
+    ok = stream_write_varint(&s, 1);
+    ok &= stream_write_varint(&s, 0x06);
+    for (int i = 0; i < 2; i++) {
+        ok &= stream_write_varint(&s, compress_amount(1));
+        ok &= stream_write_varint(&s, sizeof(script) + 6u);
+        ok &= stream_write_bytes(&s, script, sizeof(script));
+    }
+    ok &= stream_write_varint(&s, 7);
+    memset(key, 0x33, sizeof(key));
+    key[0] = 'c';
+    key[1] = (char)(key_index >> 24);
+    key[2] = (char)(key_index >> 16);
+    key[3] = (char)(key_index >> 8);
+    key[4] = (char)key_index;
+    ok = ok && !s.error &&
+         db_write(db, key, sizeof(key), (const char *)s.data, s.size, false);
+    stream_free(&s);
+    return ok;
+}
+
+static bool reject_write_entry(struct db_wrapper *db, uint32_t key_index,
+                               int outputs)
+{
+    if (outputs == REJECT_UNDECODABLE)
+        return reject_write_undecodable(db, key_index);
+    if (outputs == REJECT_LONG_SCRIPTS)
+        return reject_write_long_scripts(db, key_index);
+    return reject_write_record(db, key_index, outputs);
+}
+
+/* Every source a node would accept names its best block. */
+static bool reject_write_best_block(struct db_wrapper *db)
+{
+    uint8_t best[32];
+
+    memset(best, 0x5a, sizeof(best));
+    return db_write(db, "B", 1, (const char *)best, sizeof(best), false);
+}
+
+static bool reject_fixture_make_with(struct reject_fixture *f,
+                                     const int *outputs, size_t count,
+                                     bool with_best_block)
 {
     struct db_wrapper db;
     bool ok = true;
@@ -96,9 +168,17 @@ static bool reject_fixture_make(struct reject_fixture *f, const int *outputs,
     if (!db_wrapper_open(&db, f->chainstate, 1u << 20, false, true))
         return false;
     for (size_t i = 0; ok && i < count; i++)
-        ok = reject_write_record(&db, (uint32_t)i, outputs[i]);
+        ok = reject_write_entry(&db, (uint32_t)i, outputs[i]);
+    if (ok && with_best_block)
+        ok = reject_write_best_block(&db);
     db_wrapper_close(&db);
     return ok;
+}
+
+static bool reject_fixture_make(struct reject_fixture *f, const int *outputs,
+                                size_t count)
+{
+    return reject_fixture_make_with(f, outputs, count, true);
 }
 
 struct reject_run {
@@ -508,9 +588,143 @@ static int reject_case_checkpoint_compared_only_at_its_block(void)
     return failures;
 }
 
+static int reject_case_undecodable_record_refused(void)
+{
+    int failures = 0;
+
+    TEST("utxo import reject: a record that decodes to no rows refuses") {
+        const int outputs[] = { 2, REJECT_UNDECODABLE, 2 };
+        struct reject_fixture f;
+        struct reject_run run;
+
+        ASSERT(reject_fixture_make(&f, outputs,
+                                   sizeof(outputs) / sizeof(outputs[0])));
+        ASSERT(reject_run_import(&f, &run));
+        ASSERT(!run.result.ok);
+        ASSERT(run.result.code == REJECT_CODE_DROPPED);
+        ASSERT(run.rows == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int reject_case_script_without_memory_refused(void)
+{
+    int failures = 0;
+
+    TEST("utxo import reject: a long script kept whole imports, and one that "
+         "could not be copied for want of memory refuses") {
+        const int outputs[] = { 2, REJECT_LONG_SCRIPTS };
+        struct reject_fixture whole;
+        struct reject_fixture short_of_memory;
+        struct reject_run run;
+
+        ASSERT(reject_fixture_make(&whole, outputs,
+                                   sizeof(outputs) / sizeof(outputs[0])));
+        ASSERT(reject_run_import(&whole, &run));
+        ASSERT_RESULT_OK(run.result);
+        ASSERT(run.rows == 4);
+
+        ASSERT(reject_fixture_make(&short_of_memory, outputs,
+                                   sizeof(outputs) / sizeof(outputs[0])));
+        zcl_alloc_fault_fail_nth("script overflow", 1);
+        bool ran = reject_run_import(&short_of_memory, &run);
+        zcl_alloc_fault_clear();
+        ASSERT(ran);
+        ASSERT(!run.result.ok);
+        ASSERT(run.result.code == REJECT_CODE_DROPPED);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Import a six-row set into f, then point `source` at f's node.db. */
+static bool reject_old_set_beside(struct reject_fixture *f,
+                                  struct reject_fixture *source)
+{
+    const int good[] = { 2, 2, 2 };
+    struct reject_run run;
+    struct node_db ndb;
+    uint8_t best[32];
+    bool ok;
+
+    if (!reject_fixture_make(f, good, sizeof(good) / sizeof(good[0])) ||
+        !reject_run_import(f, &run) || !run.result.ok || run.rows != 6)
+        return false;
+    /* A set a node runs on names the block it is at. */
+    memset(best, 0x5a, sizeof(best));
+    if (!node_db_open(&ndb, f->db_path))
+        return false;
+    ok = node_db_state_set(&ndb, "coins_best_block", best, sizeof(best));
+    node_db_close(&ndb);
+    memcpy(source->db_path, f->db_path, sizeof(source->db_path));
+    return ok;
+}
+
+static int reject_case_empty_source_wipes_nothing(void)
+{
+    int failures = 0;
+
+    TEST("utxo import reject: a source with no coin records, or no best block, "
+         "is refused before the set it would replace is wiped") {
+        const int records[] = { 2, 2 };
+        struct reject_fixture old_set;
+        struct reject_fixture no_records;
+        struct reject_fixture no_best_block;
+        struct reject_run run;
+
+        ASSERT(reject_fixture_make(&no_records, NULL, 0));
+        ASSERT(reject_old_set_beside(&old_set, &no_records));
+        ASSERT(reject_run_import(&no_records, &run));
+        ASSERT(!run.result.ok);
+        ASSERT(run.result.code == REJECT_CODE_SOURCE);
+        ASSERT(strstr(run.result.message, "nothing was changed") != NULL);
+        ASSERT(run.rows == 6);
+
+        ASSERT(reject_fixture_make_with(&no_best_block, records,
+                                        sizeof(records) / sizeof(records[0]),
+                                        false));
+        memcpy(no_best_block.db_path, old_set.db_path,
+               sizeof(no_best_block.db_path));
+        ASSERT(reject_run_import(&no_best_block, &run));
+        ASSERT(!run.result.ok);
+        ASSERT(run.result.code == REJECT_CODE_SOURCE);
+        ASSERT(run.rows == 6);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int reject_case_boot_empty_source_wipes_nothing(void)
+{
+    int failures = 0;
+
+    TEST("utxo import reject: boot refuses a source with no coin records before "
+         "wiping the set it has") {
+        struct reject_fixture old_set;
+        struct reject_fixture empty;
+        struct reject_boot_run run;
+
+        ASSERT(reject_fixture_make(&empty, NULL, 0));
+        ASSERT(reject_old_set_beside(&old_set, &empty));
+        ASSERT(reject_run_boot_import(&empty, &run));
+        ASSERT(!run.res.status.ok);
+        ASSERT(!run.res.imported);
+        ASSERT(!run.marked_migrated);
+        ASSERT(run.rows == 6);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_utxo_import_reject(void)
 {
     int failures = 0;
+
+    failures += reject_case_undecodable_record_refused();
+    failures += reject_case_script_without_memory_refused();
+    failures += reject_case_empty_source_wipes_nothing();
+    failures += reject_case_boot_empty_source_wipes_nothing();
 
     failures += reject_case_checkpoint_compared_only_at_its_block();
     failures += reject_case_boot_honours_refusal();

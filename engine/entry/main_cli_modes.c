@@ -3503,6 +3503,14 @@ int importchainstate_mode(int argc, char **argv)
     printf("Source: %s (LevelDB chainstate)\n", cs_path);
     printf("Target: %s (SQLite)\n\n", db_path);
 
+    /* Opening a missing path would create an empty LevelDB there. */
+    struct stat cs_st;
+    if (stat(cs_path, &cs_st) != 0 || !S_ISDIR(cs_st.st_mode)) {
+        fprintf(stderr, "Refused: %s is not a chainstate directory; nothing "
+                        "was changed\n", cs_path);
+        return 1;
+    }
+
     struct node_db ndb;
     if (!node_db_open(&ndb, db_path)) {
         fprintf(stderr, "Cannot open SQLite: %s\n", db_path);

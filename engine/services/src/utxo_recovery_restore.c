@@ -452,6 +452,34 @@ static void ldb_import_end_refused(struct utxo_recovery_ctx *ctx,
 
 /* ── LDB→SQLite UTXO import ─────────────────────────────────── */
 
+/* Open the source and check it before wiping the set it would replace; on
+ * refusal the set and the coins view are left as they were. */
+static bool ldb_import_open_source(struct utxo_recovery_ctx *ctx,
+                                   const char *import_path,
+                                   struct coins_view_db *migrate_db,
+                                   struct utxo_import_result *res)
+{
+    if (!coins_view_db_open(migrate_db, import_path, 450 << 20, false, false)) {
+        res->status = ZCL_ERR(-6, "utxo_recovery_import_ldb: cannot open the "
+                              "chainstate at %s; nothing was changed",
+                              import_path);
+        LOG_WARN("utxo_recovery", "%s", res->status.message);
+        return false;
+    }
+    res->status = node_db_import_source_check(migrate_db);
+    if (!res->status.ok) {
+        LOG_WARN("utxo_recovery", "%s", res->status.message);
+        coins_view_db_close(migrate_db);
+        return false;
+    }
+    struct zcl_result wipe =
+        utxo_recovery_wipe(ctx->ndb, "boot.ldb_import_prepare");
+    if (!wipe.ok)
+        LOG_WARN("utxo_recovery", "%s", wipe.message);
+    coins_view_sqlite_close(ctx->coins_sqlite);
+    return true;
+}
+
 
 static void ldb_import_note_height(int ldb_height)
 {
@@ -529,17 +557,8 @@ struct utxo_import_result utxo_recovery_import_ldb(
         goto cleanup;
     }
 
-    {
-        struct zcl_result wipe =
-            utxo_recovery_wipe(ctx->ndb, "boot.ldb_import_prepare");
-        if (!wipe.ok)
-            LOG_WARN("utxo_recovery", "%s", wipe.message);
-    }
-    coins_view_sqlite_close(ctx->coins_sqlite);
-
     struct coins_view_db migrate_db;
-    if (coins_view_db_open(&migrate_db, import_path,
-                           450 << 20, false, false)) {
+    if (ldb_import_open_source(ctx, import_path, &migrate_db, &res)) {
         res.status = ldb_import_sync_utxos(ctx, &migrate_db);
         if (!res.status.ok) {
             ldb_import_end_refused(ctx, &migrate_db, &res);

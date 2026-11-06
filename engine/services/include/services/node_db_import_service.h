@@ -40,4 +40,9 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
                                              struct coins_view_db *cvdb,
                                              int *out_rows);
 
+/* Refuse a source no import should replace a set with: one that names no best
+ * block, or holds no coin record. Every caller runs this before it wipes; a
+ * typo'd or empty directory opens as a fresh, empty LevelDB. */
+struct zcl_result node_db_import_source_check(struct coins_view_db *cvdb);
+
 #endif /* ZCL_SERVICES_NODE_DB_IMPORT_SERVICE_H */

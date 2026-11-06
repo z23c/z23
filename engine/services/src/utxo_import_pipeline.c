@@ -132,6 +132,7 @@ static bool utxo_import_decode_output(const struct coins_record_output *out,
     r->script_overflow = NULL;
     r->has_address = 0;
     r->script_type = 0;
+    r->script_dropped = 0;
 
     uint16_t slen = (uint16_t)out->script_len;
     r->script_len = slen;
@@ -144,6 +145,7 @@ static bool utxo_import_decode_output(const struct coins_record_output *out,
         } else {
             r->script_len = (uint16_t)sizeof(r->script);
             memcpy(r->script, out->script, sizeof(r->script));
+            r->script_dropped = 1;
         }
     }
 

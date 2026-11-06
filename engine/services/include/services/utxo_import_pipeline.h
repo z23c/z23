@@ -34,6 +34,8 @@ struct utxo_import_row {
     uint8_t  script_type;
     uint8_t  has_address;
     uint8_t  is_coinbase;
+    /* 1 when the script could not be copied whole: the row must not be kept. */
+    uint8_t  script_dropped;
 };
 
 int utxo_import_num_decoders(void);

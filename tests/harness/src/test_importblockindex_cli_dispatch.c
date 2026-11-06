@@ -20,6 +20,8 @@
 
 #include "test/test_core.h"
 #include "test/importblockindex_fixture.h"
+#include "coins/compressor.h"
+#include "core/serialize.h"
 #include "storage/dbwrapper.h"
 
 #include <errno.h>
@@ -284,9 +286,35 @@ static int icd_test_fresh_datadir_chooses_bulk(const char *src_dir,
     return failures;
 }
 
-/* --importchainstate: a chainstate with a best block that is not the checkpoint
- * block and no coins, so a run that reaches the importer exits 0. The children get
- * their own HOME: the bare form writes to $HOME/.zclassic-c23/node.db. */
+/* One coin record with two pay-to-key-hash outputs at height 7. */
+static bool icd_write_coin_record(struct db_wrapper *db)
+{
+    struct byte_stream s;
+    char key[33];
+    uint8_t hash[20];
+    bool ok;
+
+    stream_init(&s, 96);
+    memset(hash, 0x51, sizeof(hash));
+    ok = stream_write_varint(&s, 1);
+    ok &= stream_write_varint(&s, 0x06);
+    for (int i = 0; i < 2; i++) {
+        ok &= stream_write_varint(&s, compress_amount(1));
+        ok &= stream_write_varint(&s, 0);
+        ok &= stream_write_bytes(&s, hash, sizeof(hash));
+    }
+    ok &= stream_write_varint(&s, 7);
+    memset(key, 0x33, sizeof(key));
+    key[0] = 'c';
+    ok = ok && !s.error &&
+         db_write(db, key, sizeof(key), (const char *)s.data, s.size, false);
+    stream_free(&s);
+    return ok;
+}
+
+/* --importchainstate: a chainstate whose best block is not the checkpoint block,
+ * so a run that reaches the importer exits 0. The children get their own HOME:
+ * the bare form writes to $HOME/.zclassic-c23/node.db. */
 static bool icd_chainstate_fixture_build(const char *path)
 {
     struct db_wrapper db;
@@ -297,7 +325,8 @@ static bool icd_chainstate_fixture_build(const char *path)
     memset(best, 0x5a, sizeof(best));
     if (!db_wrapper_open(&db, path, 1u << 20, false, true))
         return false;
-    ok = db_write(&db, "B", 1, (const char *)best, sizeof(best), false);
+    ok = db_write(&db, "B", 1, (const char *)best, sizeof(best), false) &&
+         icd_write_coin_record(&db);
     db_wrapper_close(&db);
     return ok;
 }
@@ -371,6 +400,33 @@ static int icd_test_importchainstate_usage(const char *cs, const char *home)
     return failures;
 }
 
+static int icd_test_importchainstate_missing_source(const char *base,
+                                                    const char *home)
+{
+    int failures = 0;
+    TEST("importchainstate CLI: a missing chainstate path refuses and creates "
+         "nothing") {
+        char missing[PATH_MAX];
+        char target[PATH_MAX + 16];
+        struct stat st;
+
+        snprintf(missing, sizeof(missing), "%s/no_such_chainstate", base);
+        snprintf(target, sizeof(target), "%s/missing.db", base);
+        char *argv[] = {
+            (char *)ICD_BIN, (char *)"--importchainstate", missing, target, NULL,
+        };
+        char out[16384] = {0};
+        int rc = icd_run_with_home(argv, home, out, sizeof(out));
+
+        ASSERT(rc == 1);
+        ASSERT(icd_contains(out, "nothing was changed"));
+        ASSERT(stat(missing, &st) != 0);
+        ASSERT(stat(target, &st) != 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int icd_test_importchainstate(const char *base)
 {
     char cs[PATH_MAX], home[PATH_MAX], home_dir[PATH_MAX + 32], target[PATH_MAX];
@@ -389,6 +445,7 @@ static int icd_test_importchainstate(const char *base)
     failures += icd_test_importchainstate_bare_path(cs, home);
     failures += icd_test_importchainstate_explicit_target(cs, home, target);
     failures += icd_test_importchainstate_usage(cs, home);
+    failures += icd_test_importchainstate_missing_source(base, home);
     return failures;
 }
 

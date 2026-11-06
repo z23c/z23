@@ -66,6 +66,10 @@ static int decoder_decode_chunk_entries(struct import_context *ctx,
                    utxo_import_entry_is_cut(&chunk->entries[i], space)) {
             atomic_fetch_add(&ctx->records_cut, 1);
         }
+        for (int r = 0; r < n; r++) {
+            if (chunk->rows[chunk->num_rows + r].script_dropped)
+                atomic_fetch_add(&ctx->skipped_outputs, 1);
+        }
         chunk->num_rows += n;
     }
     return skipped_in_chunk;
