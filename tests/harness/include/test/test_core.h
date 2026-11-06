@@ -896,6 +896,7 @@ int test_workpool(void);
 int test_app_context(void);
 int test_service_kernel(void);
 int test_tor_watch(void);
+int test_tor_stop(void);
 int test_service_manifest(void);
 int test_app_checkpoint_manifest(void);
 int test_bip113_bip65(void);

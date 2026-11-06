@@ -1705,12 +1705,10 @@ static const char *stop_handoff_start_race_case(void)
     char tmpdir[512];
     test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "stoprace");
     const char *why = NULL;
-    for (int i = 0; i < 3 && !why; i++) {
-        pthread_t stopper;
-        if (pthread_create(&stopper, NULL, stop_handoff_stopper, NULL) != 0) {
-            why = "stopper thread";
-            break;
-        }
+    pthread_t stopper;
+    if (pthread_create(&stopper, NULL, stop_handoff_stopper, NULL) != 0) {
+        why = "stopper thread";
+    } else {
         bool started = tor_integration_start(tmpdir, 39254);
         pthread_join(stopper, NULL);
         tor_integration_stop();
@@ -1743,6 +1741,74 @@ static int test_tor_stop_hands_off_to_tor_thread(void)
     tor_integration_set_extra_torrc_for_test("");
     printf("%s%s%s\n", why ? "FAIL (" : "OK", why ? why : "", why ? ")" : "");
     return why ? 1 : 0;
+}
+
+/* Wait for the persistent service to be installed: the monitor sets dial-ready
+ * only after it. A failed install ends the wait at once; the limit catches a
+ * hang, it does not measure anything. */
+static bool persist_wait_installed(void)
+{
+    for (int i = 0; i < 1200; i++) {
+        struct tor_onion_port_map map;
+        tor_integration_port_map_snapshot(&map);
+        if (map.state == TOR_ONION_PORT_MAP_FAILED)
+            return false;
+        if (tor_integration_is_dial_ready())
+            return true;
+        platform_sleep_ms(100); /* real-clock: the monitor installs on its own thread */
+    }
+    return false;
+}
+
+extern void *dynhost_get_global_service(void) ZCL_WEAK_IMPORT;
+
+/* -onion-persist against the real Tor, network disabled: the node's own
+ * identity is registered while Tor's loop runs and dynhost points at it. */
+static int test_tor_persist_install_with_loop_running(void)
+{
+    printf("test_tor_persist_install_with_loop_running: ");
+    if (!app_tor_real_build_linked()) {
+        printf("OK (stub Tor linked: no service to install)\n");
+        return 0;
+    }
+    tor_integration_stop();
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "persist");
+    /* Local fixtures only: Tor must not bootstrap to the public network. */
+    tor_integration_set_extra_torrc_for_test("DisableNetwork 1");
+    tor_integration_configure_identity(true, false);
+
+    const char *why = NULL;
+    if (!tor_integration_start(tmpdir, 39256))
+        why = "tor_integration_start";
+    else if (!wait_tor_main_loop(tmpdir, 90))
+        why = "tor main loop never reached";
+    else if (!persist_wait_installed())
+        why = "the persistent identity was not installed";
+    else if (!*(void **)dynhost_get_global_service())
+        why = "dynhost does not point at a service";
+    tor_integration_stop();
+    if (!why)
+        why = stop_handoff_check_ended(tmpdir, true);
+
+    tor_integration_configure_identity(false, false);
+    tor_integration_set_extra_torrc_for_test("");
+    remove_tree(tmpdir);
+    printf("%s%s%s\n", why ? "FAIL (" : "OK", why ? why : "", why ? ")" : "");
+    return why ? 1 : 0;
+}
+
+/* Its own group, so it gets its own process. Tor keeps its pubsub name table
+ * across tor_run_main() calls but picks a new hash key each time, and on about
+ * the seventh run in one process the table grows, the names stop matching and
+ * Tor aborts in pubsub_install (vendor/tor/src/app/main/main.c). So one process
+ * may start Tor six times: these cases use all six. */
+int test_tor_stop(void)
+{
+    int failures = test_tor_stop_hands_off_to_tor_thread();
+    failures += test_tor_persist_install_with_loop_running();
+    printf("Tor stop: %d failures\n", failures);
+    return failures;
 }
 
 static int test_tor_write_torrc_reduced_padding(void)
@@ -2007,7 +2073,6 @@ int test_tor(void)
     failures += test_tor_leaves_sigterm_to_the_node();
     failures += test_tor_stop_ends_onion_dial();
     failures += test_tor_stop_close_race();
-    failures += test_tor_stop_hands_off_to_tor_thread();
     failures += test_tor_write_torrc_no_collision();
     failures += test_tor_write_torrc_datadir();
     failures += test_tor_write_torrc_idempotent();
