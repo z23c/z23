@@ -4,6 +4,8 @@
 #include "base/cleanse.h"
 #include "camera.h"
 #include "controller.h"
+#include "game.h"
+#include "shell.h"
 #include "jni_util.h"
 #include "device_key.h"
 #ifdef ZAPP_DEVKEY_PROBE
@@ -71,6 +73,12 @@ static void notify(void)
 {
     pthread_mutex_lock(&lock);
     if (signal_pipe[1] >= 0) { char byte = 1; (void)write(signal_pipe[1], &byte, 1); }
+    pthread_mutex_unlock(&lock);
+}
+static void notify_game(void)
+{
+    pthread_mutex_lock(&lock);
+    if (signal_pipe[1] >= 0) { char byte = 'g'; (void)write(signal_pipe[1], &byte, 1); }
     pthread_mutex_unlock(&lock);
 }
 /* True when the app is already exempt from battery optimization, or when that cannot be read. */
@@ -279,7 +287,9 @@ static int signal_ready(int fd, int events, void *context)
 {
     (void)context;
     if (!(events & ALOOPER_EVENT_INPUT)) return 1;
-    char bytes[64]; while (read(fd, bytes, sizeof(bytes)) > 0) {}
+    char bytes[64]; ssize_t count; bool normal = false, game = false;
+    while ((count = read(fd, bytes, sizeof(bytes))) > 0)
+        for (ssize_t i = 0; i < count; ++i) { if (bytes[i] == 'g') game = true; else normal = true; }
     JNIEnv *env = NULL; JavaVM *current_vm = atomic_load(&vm);
     if (!current_vm || (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return 1;
     pthread_mutex_lock(&lock);
@@ -288,7 +298,11 @@ static int signal_ready(int fd, int events, void *context)
     permission_ticket = 0;
     pthread_mutex_unlock(&lock);
     if (activity && request) request_permission(env, activity, "android.permission.CAMERA");
-    if (activity) { refresh(env); (*env)->DeleteLocalRef(env, activity); }
+    if (activity) {
+        if (normal) refresh(env);
+        if (game && foreground) zapp_shell_game_frame(env);
+        (*env)->DeleteLocalRef(env, activity);
+    }
     return 1;
 }
 static bool arm_tick(bool on);
@@ -555,6 +569,7 @@ static void detach_activity(JNIEnv *env)
     zapp_pay_stash_clear();
     zapp_controller_detach();
     zapp_camera_set_frame_notify(NULL);
+    zapp_game_set_notify(NULL);
     zapp_camera_stop();
     pthread_mutex_lock(&lock);
     jobject retained = active; active = NULL; copy_activity = NULL; permission_ticket = 0;
@@ -692,6 +707,7 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
     (void)zapp_params_launch(prepare_params, activity->assetManager, activity->internalDataPath);
     request_full_brightness(env, activity->clazz);
     zapp_camera_set_frame_notify(notify);
+    zapp_game_set_notify(notify_game);
     forward_pairing(env, activity->clazz);
     refresh(env); return;
 fail:

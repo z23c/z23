@@ -717,3 +717,34 @@ name and manager key; **Connect** imports
 the verified record and schedules its onion connection. A scheduled dial is
 not proof of a handshake or admission. If the import succeeds but the dial
 cannot be scheduled, the app says so and offers another Connect attempt.
+
+### Play a local Sky Combat build
+
+The paired laptop host can offer its own explicitly selected Sky Combat binary.
+Start the host yourself with an absolute path, for example:
+
+```sh
+build/android-app/z23-speech-bridge --dir /path/to/private/bridge-dir \
+  --game /absolute/path/to/z23-skycombat --game-only
+```
+
+Pair the phone through the existing protocol-2 pairing route, then tap **Play**.
+Touch the left half to fly, the lower right to fire and upper right to boost;
+Android Back ends the session. The game runs on the host and sends rendered PNG
+frames. It advances only in bounded steps requested by the phone. Pausing the
+app also leaves Play. A dropped request stops the child; if the phone disappears
+between requests, the host closes it after 15 seconds without a successful
+request. One session runs at a time and each authenticated call carries its
+random session identifier. Failed or uncertain steps are never retried.
+
+The host takes a private executable snapshot when Play starts and identifies
+those bytes by SHA-256 in every reply. This is an executable image identity,
+not a source or ancestry claim. Relative assets are not included in this
+snapshot; the current procedural game can be exercised, but edited asset
+bundles need a separate complete artifact binding. It neither downloads nor
+executes a Commons package. The game agent protocol's 640×360 and 1 MiB PNG
+ceilings fit the existing image and bridge limits. The connection requires the
+paired host and a display capable of running the game; a headless test does not
+qualify actual phone display, touch, or host graphics.
+
+`make test-game` runs the host lifecycle and phone decoder/control fixtures.

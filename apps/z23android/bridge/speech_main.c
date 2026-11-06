@@ -4,6 +4,7 @@
 #include "fleet_probe.h"
 #include "host_ops.h"
 #include "host.h"
+#include "game_host.h"
 #include "hosts.h"
 #include "relay.h"
 #include "json/json.h"
@@ -22,8 +23,9 @@
 #define FLEET_CAP 65536u
 #define OPS_CAP 4096
 struct options {
-    const char *dir, *llama, *models, *speaker, *fleet, *adb, *serial, *app, *qr_window;
+    const char *dir, *llama, *models, *speaker, *fleet, *adb, *serial, *app, *qr_window, *game;
     uint16_t port;
+    bool game_only;
 };
 static struct zapp_assistant assistant;
 static struct zapp_fleet_host fleet_hosts[16];
@@ -193,15 +195,48 @@ static bool timed_op(size_t op, const struct json_value *request, int client, st
         (long long)(end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000);
     return ok;
 }
+static bool game_step(int client, const char *token, const char *wire, char *reply, char image[65])
+{
+    struct json_value command = {0};
+    bool ok = no_nul_escape(wire) && json_read(&command, wire, strlen(wire)) && command.type == JSON_OBJ &&
+        (string_is(&command, "op", "step") || string_is(&command, "op", "observe"));
+    if (ok) ok = zapp_game_host_call(client, token, wire, image, reply, 1950000);
+    json_free(&command); return ok;
+}
+static bool game_action(const char *op, const char *wanted, const struct json_value *request, size_t fields)
+{
+    return op && !strcmp(op, wanted) && request->num_children == fields;
+}
+static bool game_answer(int client, const struct json_value *request, struct json_value *response)
+{
+    const char *op = json_get_str(json_get(request, "op"));
+    const char *token = json_get_str(json_get(request, "session"));
+    const char *wire = json_get_str(json_get(request, "request"));
+    char new_token[65] = "", image[65] = "";
+    char *reply = malloc(1950000);
+    bool ok = op && reply;
+    if (ok && game_action(op, "start", request, 2))
+        ok = zapp_game_host_start(client, new_token, image, reply, 1950000) && json_push_kv_str(response, "session", new_token);
+    else if (ok && game_action(op, "step", request, 4) && token && wire)
+        ok = game_step(client, token, wire, reply, image);
+    else if (ok && game_action(op, "close", request, 3) && token) {
+        ok = zapp_game_host_close(token) && json_push_kv_str(response, "closed", "true");
+        free(reply); return ok;
+    } else ok = false;
+    if (ok) ok = json_push_kv_str(response, "image_sha256", image) && json_push_kv_str(response, "reply", reply);
+    free(reply); return ok;
+}
 static bool answer(int client, const char *prompt, char *out, size_t capacity, const char **error)
 {
     struct json_value request = {0}, response = {0};
     *error = "The laptop host could not complete that request.";
     json_set_object(&response);
-    bool ok = prompt && no_nul_escape(prompt) && json_read(&request, prompt, strlen(prompt)) &&
-        request.type == JSON_OBJ && string_is(&request, "schema", "z23.voice/1") &&
-        request.num_children == (json_get(&request, "history") ? 4u : 3u);
-    if (ok) ok = timed_op(find_op(&request), &request, client, &response);
+    bool ok = prompt && no_nul_escape(prompt) && json_read(&request, prompt, strlen(prompt)) && request.type == JSON_OBJ;
+    if (ok && string_is(&request, "schema", "z23.game/1")) ok = game_answer(client, &request, &response);
+    else if (ok) {
+        ok = string_is(&request, "schema", "z23.voice/1") && request.num_children == (json_get(&request, "history") ? 4u : 3u);
+        if (ok) ok = timed_op(find_op(&request), &request, client, &response);
+    }
     if (ok) ok = json_write(&response, out, capacity) < capacity;
     if (!ok && capacity) out[0] = 0;
     json_cleanse_strings(&request); json_free(&request);
@@ -238,7 +273,7 @@ static const struct zapp_assistant_tools fleet_tools = {.schema = &tool_schema, 
 static const char usage[] =
     "Usage: z23-speech-bridge --dir DIR --llama-server PATH --models DIR [--port N]\n"
     "         [--speaker WAV] [--fleet label=ssh-destination,...]\n"
-    "         [--adb PATH --serial SERIAL [--app PACKAGE] [--qr-window PATH]]\n";
+    "         [--adb PATH --serial SERIAL [--app PACKAGE] [--qr-window PATH]] [--game PATH] [--game-only]\n";
 static bool set_option(int c, struct options *o)
 {
     switch (c) {
@@ -251,6 +286,8 @@ static bool set_option(int c, struct options *o)
     case 'S': o->serial = optarg; return true;
     case 'A': o->app = optarg; return true;
     case 'q': o->qr_window = optarg; return true;
+    case 'g': o->game = optarg; return true;
+    case 'G': o->game_only = true; return true;
     case 'p': {
         long v = strtol(optarg, NULL, 10);
         if (v < 1024 || v > 65530) return false;
@@ -261,7 +298,7 @@ static bool set_option(int c, struct options *o)
 }
 static bool options_valid(const struct options *o)
 {
-    return o->dir && o->llama && o->models && !o->adb == !o->serial &&
+    return o->dir && ((o->game_only && o->game && !o->llama && !o->models) || (!o->game_only && o->llama && o->models)) && !o->adb == !o->serial &&
         strspn(o->app, "abcdefghijklmnopqrstuvwxyz0123456789._") == strlen(o->app) &&
         (!o->qr_window || (o->adb && o->qr_window[0] == '/')) &&
         (!o->fleet || zapp_fleet_hosts_parse(o->fleet, fleet_hosts, 16, &fleet_count));
@@ -271,6 +308,7 @@ static bool parse(int argc, char **argv, struct options *o)
     static const struct option longs[] = {{"dir", 1, 0, 'd'}, {"llama-server", 1, 0, 'l'},
         {"models", 1, 0, 'm'}, {"port", 1, 0, 'p'}, {"speaker", 1, 0, 's'}, {"fleet", 1, 0, 'f'},
         {"adb", 1, 0, 'a'}, {"serial", 1, 0, 'S'}, {"app", 1, 0, 'A'}, {"qr-window", 1, 0, 'q'},
+        {"game", 1, 0, 'g'}, {"game-only", 0, 0, 'G'},
         {0, 0, 0, 0}};
     *o = (struct options){.port = 8770, .app = "org.z23.nativeapp"};
     for (int c; (c = getopt_long(argc, argv, "", longs, NULL)) != -1;)
@@ -284,15 +322,21 @@ static char *load_speaker(const char *path)
     free(wav);
     return b64;
 }
+static bool configure_game(const struct options *o)
+{
+    if (!o->game || zapp_game_host_configure(o->game)) return true;
+    fputs("Invalid local game executable.\n", stderr); return false;
+}
 int main(int argc, char **argv)
 {
     struct options o;
     if (!parse(argc, argv, &o)) { fputs(usage, stderr); return 2; }
     signal(SIGPIPE, SIG_IGN);
-    struct zapp_host_servers servers;
+    struct zapp_host_servers servers = {0};
+    if (!configure_game(&o)) return 1;
     char *speaker = load_speaker(o.speaker);
     if (o.speaker && !speaker) { fputs("Could not read the speaker reference WAV.\n", stderr); return 1; }
-    if (!zapp_host_start(o.llama, o.models, o.dir, o.port, &servers)) { free(speaker); return 1; }
+    if (o.llama && !zapp_host_start(o.llama, o.models, o.dir, o.port, &servers)) { free(speaker); return 1; }
     assistant = (struct zapp_assistant){.chat_port = servers.port[ZAPP_HOST_CHAT],
         .asr_port = servers.port[ZAPP_HOST_ASR], .tts_port = servers.port[ZAPP_HOST_TTS], .speaker_b64 = speaker};
     if (fleet_count && zapp_fleet_tool_schema(fleet_hosts, fleet_count, &tool_schema))
@@ -304,7 +348,8 @@ int main(int argc, char **argv)
     int rc = zapp_relay_run_persistent(o.dir, o.port, answer, 1300000, 1950000);
     if (rc) fprintf(stderr, "The laptop host stopped: port %u is in use or %s is not a private directory.\n",
         o.port, o.dir);
-    zapp_host_stop(&servers);
+    zapp_game_host_shutdown();
+    if (o.llama) zapp_host_stop(&servers);
     json_free(&tool_schema);
     free(speaker);
     return rc;

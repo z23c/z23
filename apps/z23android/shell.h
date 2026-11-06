@@ -21,6 +21,8 @@ bool zapp_shell_assistant(void);
 void zapp_shell_pause(JNIEnv *env);
 /* About every two seconds while the app is in front: refreshes the wallet screens when one is shown. */
 void zapp_shell_tick(JNIEnv *env);
+/* Called on the UI thread after the game worker publishes a newer frame. */
+void zapp_shell_game_frame(JNIEnv *env);
 /* A touch was dropped as obscured: tells the wallet screen, which says why nothing happened. */
 void zapp_shell_dropped(JNIEnv *env);
 /* On resume: hides the system bars again, re-reads the app list and the layout file. */

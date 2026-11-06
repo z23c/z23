@@ -5,6 +5,8 @@
 #include "fleet.h"
 #include "fleet_review_state.h"
 #include "home.h"
+#include "game.h"
+#include "game_view.h"
 #include "jni_util.h"
 #include "launcher.h"
 #include "layout.h"
@@ -32,8 +34,8 @@
 #define WHITE 0xffffffffu
 #define GRAVITY_CENTER_HORIZONTAL 1
 
-enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_FLEET_REVIEW, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_COUNT };
-enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_RETRY, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_START, CMD_FLEET_BACK, CMD_FLEET_COPY };
+enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_FLEET_REVIEW, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_GAME, SCREEN_COUNT };
+enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_PLAY, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_RETRY, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_START, CMD_FLEET_BACK, CMD_FLEET_COPY };
 enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND, TARGET_SETUP };
 
 struct nav { jobject view; enum command command; size_t arg; };
@@ -245,7 +247,7 @@ static bool build_home(JNIEnv *env, jobject root)
     bool ok = host && footer && add_notice(env, root, SCREEN_HOME) && build_outcome(env, root) && zj_padding(env, host, 20, 24) && zj_margins(env, host, MATCH, 0, 1.0f, 0, 0, 0, 0) &&
         zapp_surface_create(env, shell.activity, host) &&
         zj_append(env, root, host) && zj_append(env, root, footer) &&
-        button(env, footer, "Apps", CMD_APPS, 0, 1) && button(env, footer, "Settings", CMD_SETTINGS, 0, 1);
+        button(env, footer, "Play", CMD_PLAY, 0, 1) && button(env, footer, "Apps", CMD_APPS, 0, 1) && button(env, footer, "Settings", CMD_SETTINGS, 0, 1);
     return ok;
 }
 static bool build_apps(JNIEnv *env, jobject root)
@@ -511,7 +513,9 @@ static bool build_pages(JNIEnv *env, jobject stage, jobject home, jobject apps, 
 {
     jobject review = column(env, DARK, 0, false);
     jobject scan = column(env, 0xff000000u, 0, false), wallet = column(env, DARK, 0, false), send = column(env, DARK, 0, false), setup = column(env, DARK, 0, false);
-    return build_home(env, home) && build_apps(env, apps) && build_settings(env, settings) && build_scan(env, scan) &&
+    jobject game = column(env, DARK, 0, false);
+    return game && zapp_game_view_create(env, shell.activity, game) && add_screen(env, stage, SCREEN_GAME, game) &&
+           build_home(env, home) && build_apps(env, apps) && build_settings(env, settings) && build_scan(env, scan) &&
            add_screen(env, stage, SCREEN_HOME, home) &&
            add_screen(env, stage, SCREEN_APPS, apps) && add_screen(env, stage, SCREEN_SETTINGS, settings) &&
            add_screen(env, stage, SCREEN_SCAN, scan) && attach_extra_pages(env, stage, review, wallet, send, setup);
@@ -670,12 +674,14 @@ static void enter_screen(JNIEnv *env, enum screen next)
     if (next == SCREEN_SCAN) { zapp_shell_immersive(env); show_scan_screen(env, ZAPP_CAMERA_GRANTED); }
     if (next == SCREEN_WALLET) enter_wallet(env);
     if (next == SCREEN_SETUP) (void)zapp_setup_ui_open(env);
+    if (next == SCREEN_GAME) { zapp_game_view_clear(env); (void)zapp_game_open(shell.files); }
 }
 static bool leave_screen(JNIEnv *env, enum screen next)
 {
     if (shell.current == SCREEN_SETUP && next != SCREEN_SETUP && !leave_setup(env)) return false;
     if (shell.current == SCREEN_SEND && next != SCREEN_SEND && !leave_send(env)) return false;
     if (shell.current == SCREEN_WALLET) leave_wallet(env);
+    if (shell.current == SCREEN_GAME && next != SCREEN_GAME) zapp_game_close();
     return true;
 }
 static void go(JNIEnv *env, enum screen next)
@@ -852,6 +858,7 @@ static void run_nav(JNIEnv *env, const struct nav *nav)
     case CMD_HOME: go(env, SCREEN_HOME); break;
     case CMD_APPS: go(env, SCREEN_APPS); break;
     case CMD_SETTINGS: go(env, SCREEN_SETTINGS); break;
+    case CMD_PLAY: go(env, SCREEN_GAME); break;
     case CMD_HOME_SETTINGS: open_home_settings(env); break;
     case CMD_LAYOUT: choose_layout(env, nav->arg); break;
     case CMD_SCAN_CANCEL: back(env); break;
@@ -994,6 +1001,9 @@ bool zapp_shell_input(JNIEnv *env, const AInputEvent *event)
     if (key == AKEYCODE_BACK) {
         if (AKeyEvent_getAction(event) == AKEY_EVENT_ACTION_UP) back(env);
         return true;
+    }
+    if (type == AINPUT_EVENT_TYPE_MOTION && shell.current == SCREEN_GAME) {
+        zapp_game_view_touch(env, event); return true;
     }
     if ((key == AKEYCODE_ENTER || key == AKEYCODE_NUMPAD_ENTER) && field_key(env, AKeyEvent_getAction(event) == AKEY_EVENT_ACTION_UP)) return true;
     if (type == AINPUT_EVENT_TYPE_MOTION && zapp_touch_gate_drops(&shell.gate, AMotionEvent_getAction(event), AMotionEvent_getFlags(event))) {
@@ -1213,6 +1223,7 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
 }
 void zapp_shell_pause(JNIEnv *env)
 {
+    if (shell.activity && shell.current == SCREEN_GAME) { go(env, SCREEN_HOME); return; }
     if (shell.activity && shell.current == SCREEN_SEND) {
         /* A flow in authentication or building stays on this screen: the system credential screen pauses the app and its
          * result completes the payment, and a running commit is never cancelled. Any other flow is cancelled and returns
@@ -1238,6 +1249,7 @@ void zapp_shell_dropped(JNIEnv *env)
 void zapp_shell_tick(JNIEnv *env)
 {
     if (!shell.activity) return;
+    if (shell.current == SCREEN_GAME) zapp_game_view_render(env);
     if (shell.current == SCREEN_FLEET_REVIEW) fleet_scroll_hint(env);
     if (shell.current == SCREEN_SCAN && shell.paste_mode && shell.paste_result_ready) {
         struct zapp_view view; zapp_controller_snapshot(&view);
@@ -1258,6 +1270,10 @@ void zapp_shell_tick(JNIEnv *env)
      * kept can go. */
     if (shell.current == SCREEN_WALLET) zapp_wallet_ui_tick(env);
     else wallet_screens_settle();
+}
+void zapp_shell_game_frame(JNIEnv *env)
+{
+    if (shell.activity && shell.current == SCREEN_GAME) zapp_game_view_render(env);
 }
 void zapp_shell_focus(JNIEnv *env)
 {
@@ -1286,6 +1302,8 @@ void zapp_shell_resume(JNIEnv *env)
 void zapp_shell_destroy(JNIEnv *env)
 {
     if (!shell.activity) return;
+    zapp_game_close();
+    zapp_game_view_destroy(env);
     if (shell.paste_mode) zapp_controller_cancel_scan();
     leave_wallet(env);
     wallet_screens_close();

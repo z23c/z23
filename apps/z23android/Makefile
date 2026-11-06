@@ -64,8 +64,9 @@ test-bridge: bridge
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/relay-test' "$$scratch"
 
 SPEECH_JSON := ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c ../../platform/modules/base/src/safe_alloc.c
-SPEECH_INCLUDES := -I. -Ibridge -I../../platform/modules/json/include -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include -I../../platform/modules/encoding/include -I../../platform/modules/sha3/include
-HOST_SOURCES := bridge_auth.c bridge/assistant.c bridge/http.c bridge/fleet_probe.c private.c bridge/host_ops.c bridge/host.c bridge/relay.c hosts.c pairing.c voice.c \
+SPEECH_INCLUDES := -I. -Ibridge -I../../platform/modules/json/include -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include -I../../contexts/commons/packages/zsha256/include -I../../platform/modules/encoding/include -I../../platform/modules/sha3/include
+HOST_SOURCES := bridge_auth.c bridge/assistant.c bridge/http.c bridge/fleet_probe.c private.c bridge/host_ops.c bridge/host.c bridge/game_host.c bridge/relay.c hosts.c pairing.c voice.c \
+  ../../contexts/commons/packages/zsha256/src/zsha256.c \
   ../../platform/modules/sha3/src/sha3.c \
   ../../platform/modules/encoding/src/utilstrencodings.c ../../contexts/commons/packages/zutf8/src/zutf8.c
 .PHONY: speech-bridge speech-probe test-voice test-host preview-apk
@@ -110,7 +111,7 @@ test-voice:
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/speech-client.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/speech-client-test' "$$scratch"
 
-test: prepare-quirc test-bridge test-voice test-host test-devkey test-dexgen test-watch test-scan test-qr-window test-payment test-wallet test-wallet-send test-qr-fuzz test-setup test-camera-access
+test: prepare-quirc test-bridge test-voice test-host test-game test-devkey test-dexgen test-watch test-scan test-qr-window test-payment test-wallet test-wallet-send test-qr-fuzz test-setup test-camera-access
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' $(QUIRC_FLAGS) \
 	  tests/fleet_test.c fleet.c ../../vendor/qrcodegen/qrcodegen.c $(QUIRC_SOURCES) \
 	  -lm -o '$(BUILD_DIR)/fleet-test'
@@ -475,3 +476,12 @@ test-wallet-send:
 	@grep -q 'wallet_screens_spendable(&spendable)) zapp_send_ui_known_balance(spendable);' shell.c || { echo 'Send opened from Funds must start from the balance Funds shows' >&2; exit 1; }
 	@grep -q 'ui.drawn_flow && ui.keeper.screen) wss_keep_balance(ui.keeper.screen, true);' wallet_send_ui.c || { echo 'the Send page with no payment open must keep its balance reading while it is shown' >&2; exit 1; }
 	@grep -q 'wss_clip_check(&ui.clip, state, stamp, clip_text, ui.activity, ZAPP_SCAN_NETWORK);' wallet_send_ui.c || { echo 'the Send page must read each clip once, through wss_clip_check' >&2; exit 1; }
+
+.PHONY: test-game
+test-game:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) -fsyntax-only bridge/speech_main.c
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/game_host_test.c bridge/game_host.c ../../contexts/commons/packages/zsha256/src/zsha256.c -o '$(BUILD_DIR)/game-host-test'
+	'$(BUILD_DIR)/game-host-test'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/game_test.c $(SPEECH_JSON) -lm -o '$(BUILD_DIR)/game-test'
+	'$(BUILD_DIR)/game-test'
