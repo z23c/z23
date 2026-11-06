@@ -381,6 +381,18 @@ static bool aps_accept(const struct app_playtest_request *request,
     return true;
 }
 
+/* prepare names a live image that differs from the accepted record ESTALE;
+ * Windows has no ESTALE and refuses every exact launch with ENOTSUP. */
+static enum app_playtest_code aps_prepare_code(int err)
+{
+#if defined(ESTALE)
+    if (err == ESTALE)
+        return APP_PLAYTEST_IMAGE_HASH_MISMATCH;
+#endif
+    return err == ENOTSUP ? APP_PLAYTEST_UNSUPPORTED_PLATFORM
+                          : APP_PLAYTEST_IMAGE_UNAVAILABLE;
+}
+
 static bool aps_prepare(struct aps_session *s, const struct app_playtest_request *request,
                         struct app_playtest_result *out)
 {
@@ -390,11 +402,7 @@ static bool aps_prepare(struct aps_session *s, const struct app_playtest_request
         return false;
     if (!resident_launch_prepare(&s->launch, request->image_path, &accepted,
                                  error, sizeof(error))) {
-        int saved = errno;
-        return aps_fail(out, saved == ESTALE ? APP_PLAYTEST_IMAGE_HASH_MISMATCH
-                             : saved == ENOTSUP ? APP_PLAYTEST_UNSUPPORTED_PLATFORM
-                             : APP_PLAYTEST_IMAGE_UNAVAILABLE,
-                        "app playtest: %s", error);
+        return aps_fail(out, aps_prepare_code(errno), "app playtest: %s", error);
     }
     return true;
 }
