@@ -32,6 +32,8 @@ enum {
      * message. In the zcl23-reserved high range, same family as
      * NODE_BOOTSTRAP; ignored by zclassicd. */
     NODE_NOISE_HYBRID = (1 << 26),
+    /* In-band state offers and transfers over the existing peer link. */
+    NODE_STATE_OFFER_LINK = (1 << 27),
     /* NOTE — file-service (bundle-seeder) capability is NOT a service bit and
      * must not become one. It is advertised by the "zfileaddr" P2P message
      * (sent in core/modules/net/src/msg_version.c after a ZCL23 handshake, handled by

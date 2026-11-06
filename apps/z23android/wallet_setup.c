@@ -55,6 +55,18 @@ static void forget_choices_locked(struct wsu *w)
     memory_cleanse(w->picked, sizeof(w->picked));
     w->wrong = 0;
 }
+bool wsu_receive_address(struct wsu *w, char *out, size_t cap, uint64_t *generation)
+{
+    if (!out || !cap || !generation) return false;
+    out[0] = 0;
+    pthread_mutex_lock(&w->lock);
+    bool ok = w->confirmed && w->first_shielded_address[0] &&
+              zapp_setup_state(w->files) == ZAPP_SETUP_READY && zapp_setup_confirmed(w->files) &&
+              strlen(w->first_shielded_address) < cap;
+    if (ok) { memcpy(out, w->first_shielded_address, strlen(w->first_shielded_address) + 1); *generation = w->address_generation; }
+    pthread_mutex_unlock(&w->lock);
+    return ok;
+}
 void wsu_destroy(struct wsu *w)
 {
     zapp_words_cleanse(&w->held);
@@ -444,7 +456,7 @@ static bool begin_job(struct wsu *w, enum wsu_step from)
     pthread_mutex_lock(&w->lock);
     bool start = w->step == from;
     if (start && !w->protected) { w->step = WSU_FAILED; w->failure = WSU_UNPROTECTED; start = false; }
-    else if (start) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w, WSU_PHASE_NONE); }
+    else if (start) { w->first_shielded_address[0] = 0; ++w->address_generation; w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w, WSU_PHASE_NONE); }
     pthread_mutex_unlock(&w->lock);
     return start;
 }
@@ -541,6 +553,7 @@ static void write_ended(struct wsu *w, enum sun_result result, const struct sun_
         w->step = WSU_BLOCKED;
         w->failure = WSU_WALLET_THERE;
     } else if (result == SUN_OK) {
+        memcpy(w->first_shielded_address, restored->first_shielded_address, sizeof(w->first_shielded_address));
         w->birthday.known = restored->birthday_recorded && !restored->birthday_rejected;
         w->write = WSU_WRITE_DONE;
         zapp_words_cleanse(&w->phrase);
@@ -737,6 +750,7 @@ static struct sun_birthday birthday_at(struct wsu *w, int64_t height)
 static void restore_succeeded(struct wsu *w, const struct sun_restored *restored, bool honoured)
 {
     pthread_mutex_lock(&w->lock);
+    if (restored) memcpy(w->first_shielded_address, restored->first_shielded_address, sizeof(w->first_shielded_address));
     w->birthday_honoured = honoured || (restored && restored->birthday_recorded && !restored->birthday_rejected);
     memory_cleanse(w->form, sizeof(w->form));
     w->confirmed = true;
@@ -1013,7 +1027,7 @@ void wsu_start_over_job(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
     bool go = w->step == WSU_START_OVER;
-    if (go) { w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w, WSU_PHASE_NONE); }
+    if (go) { w->first_shielded_address[0] = 0; ++w->address_generation; w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w, WSU_PHASE_NONE); }
     pthread_mutex_unlock(&w->lock);
     if (!go) return;
     enum wsu_failure refusal = start_over_refusal(w);

@@ -996,6 +996,22 @@ later lane flips it HARD.
   old ROOT: 0a72eb43d6c4ea2926d86a7b048aebc2bda2d4bd1a343242c23b2a7ffa9c5cd9
   by: owner unseal ritual (make core-unseal)
 
+- 2026-11-06T01:48:05Z — REASON: Integrate approved state-link advertisement with landed upstream seal
+  old ROOT: 4d075f52fbf6c4785daf538c5a84b800dafa668584b11ec6a168d15cdc368137
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T00:19:28Z — REASON: Integrate approved state-link advertisement with landed upstream seal
+  old ROOT: 64cf473ef400951a39584c1beb5a16ef8f4f5241e856d712bc7006db488f64cd
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T23:38:14Z — REASON: Integrate approved state-link advertisement with landed upstream seal
+  old ROOT: b31e6304f44d494664620227bfc3a6f17817ba9d37c62755ad71a0fbef13dc9b
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-05T23:33:14Z — REASON: Owner approved 2026-11-05: advertise in-band state transfer in the version handshake; no consensus predicate changes
+  old ROOT: 61a72f1a81b5e3241adb55a10f21dc74a7f8a06e112d7294c3d811fc814d3e41
+  by: owner unseal ritual (make core-unseal)
+
 - 2026-11-06T00:50:59Z — REASON: Check the block merkle root without a second allocation
   old ROOT: 4d075f52fbf6c4785daf538c5a84b800dafa668584b11ec6a168d15cdc368137
   by: owner unseal ritual (make core-unseal)
@@ -1016,6 +1032,10 @@ later lane flips it HARD.
   old ROOT: 928e0668bb558123fe7ecb2dfc9e8dd8bfdfac229726143ad2ae6f041b534320
   by: owner unseal ritual (make core-unseal)
 
+- 2026-11-06T02:46:27Z — REASON: Integrate approved state-link advertisement with landed upstream seal
+  old ROOT: 82a532edf7e44ead87631be2852a141845f6cc099104c0b09689a67e042f9e2d
+  by: owner unseal ritual (make core-unseal)
+
 - 2026-11-06T02:32:22Z — REASON: Copy the mempool in one pass for compact block reconstruction
   old ROOT: 82a532edf7e44ead87631be2852a141845f6cc099104c0b09689a67e042f9e2d
   by: owner unseal ritual (make core-unseal)
@@ -1034,4 +1054,8 @@ later lane flips it HARD.
 
 - 2026-11-06T02:33:36Z — REASON: Drop a re-announced stored block only once it is on the active chain
   old ROOT: cd3f3a8fd748a84cf44ac73713e8ee43bdb66c727bf79719e7574f5e9265451f
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T03:17:56Z — REASON: Integrate approved state-link advertisement with landed upstream seal
+  old ROOT: 541b8a4eb1e4143895115b09ff493179e8acba37e8e8eadb112728d57ee4cd28
   by: owner unseal ritual (make core-unseal)

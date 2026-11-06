@@ -209,7 +209,7 @@ WALLET_FREE := home.c layout.c hosts.c pairing.c controller.c conversation.c bri
   launcher.c fleet.c voice.c speech_client.c scan.c audio.c nodelog.c rpc.c
 test-wallet:
 	@mkdir -p '$(BUILD_DIR)'
-	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/wallet_screens_test.c wallet_screens.c payment_code.c wallet_view.c \
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) -I../../platform/domain/encoding/include tests/wallet_screens_test.c wallet_screens.c ../../platform/domain/encoding/src/bech32.c payment_code.c wallet_view.c \
 	  ../../contexts/commons/packages/zutf8/src/zutf8.c $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-screens-test'
 	TMPDIR="$$(cd '$(BUILD_DIR)' && pwd)" '$(BUILD_DIR)/wallet-screens-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/wallet_run_test.c operations.c setup_state.c private.c params.c rpc.c nodelog.c \
@@ -345,7 +345,7 @@ test-host:
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/layout_test.c layout.c $(SPEECH_JSON) -o '$(BUILD_DIR)/layout-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/layout-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/layout-test' "$$scratch"
-	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -pthread -I../../vendor/qrcodegen tests/home_test.c home.c layout.c hosts.c private.c pairing.c scan.c payment_code.c wallet_screens.c wallet_view.c fleet.c speech_client.c bridge_client.c bridge_auth.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -pthread -I../../vendor/qrcodegen -I../../platform/domain/encoding/include ../../platform/domain/encoding/src/bech32.c tests/home_test.c home.c layout.c hosts.c private.c pairing.c scan.c payment_code.c wallet_screens.c wallet_view.c fleet.c speech_client.c bridge_client.c bridge_auth.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
 	'$(BUILD_DIR)/home-test'
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/node_notice_test.c node_notice.c -o '$(BUILD_DIR)/node-notice-test'
 	'$(BUILD_DIR)/node-notice-test'
@@ -382,8 +382,8 @@ test-devkey:
 .PHONY: test-setup
 test-setup:
 	@mkdir -p '$(BUILD_DIR)'
-	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/sha3/include -I../../platform/modules/json/include -I../../platform/modules/base/include \
-	  -I../../contexts/commons/packages/zsha256/include tests/setup_test.c setup_words.c setup_wordlist.c setup_state.c setup_node.c wallet_setup.c device_key.c ../../platform/modules/sha3/src/sha3.c ../../contexts/commons/packages/zsha256/src/zsha256.c $(SPEECH_JSON) -Wl,--wrap=free -o '$(BUILD_DIR)/setup-test'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread -I../../platform/domain/encoding/include -I. -I../../platform/modules/sha3/include -I../../platform/modules/json/include -I../../platform/modules/base/include \
+	  -I../../contexts/commons/packages/zsha256/include tests/setup_test.c setup_words.c setup_wordlist.c setup_state.c setup_node.c wallet_setup.c ../../platform/domain/encoding/src/bech32.c device_key.c ../../platform/modules/sha3/src/sha3.c ../../contexts/commons/packages/zsha256/src/zsha256.c $(SPEECH_JSON) -Wl,--wrap=free -o '$(BUILD_DIR)/setup-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/setup-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/setup-test' "$$(cd "$$scratch" && pwd)"
 	@sed -n '/^static const char \*const bip39_english\[2048\] = {$$/,/^};$$/p' ../../contexts/wallet/domain/src/mnemonic.c | sed '1d;$$d' > '$(BUILD_DIR)/wordlist.expect'; \

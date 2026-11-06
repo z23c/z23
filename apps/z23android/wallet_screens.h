@@ -155,6 +155,7 @@ struct wallet_env {
                  uint8_t iv[WALLET_SEAL_IV], uint8_t *out);
     bool (*unseal)(void *ctx, const uint8_t *aad, size_t aad_len, const uint8_t iv[WALLET_SEAL_IV],
                    const uint8_t *sealed, size_t len, uint8_t *plain);
+    bool (*setup_address)(void *ctx, char *out, size_t cap, uint64_t *generation);
 };
 
 bool wallet_screens_init(const struct wallet_env *env);

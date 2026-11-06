@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * The only lib/net-to-swarm adapter; see config/boot_zcode_swarm.h. */
 #include "config/state_offer_service.h"
+#include "config/state_offer_peer.h"
 #include "config/boot_plugin_fetch.h"
 #include "config/boot_zcode_swarm.h"
 #include "config/boot_zcode_swarm_membership.h"
@@ -46,6 +47,7 @@
 #include "services/build_fabric_service.h"
 #include "services/build_fabric_cache.h"
 #include "supervisors/domains.h"
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,8 +73,38 @@ static int64_t s_work_capability_expires;
 static char s_work_workspace[4096];
 static struct boot_svc_ctx *s_svc;          /* borrowed; set by wire() */
 static struct liveness_contract s_timer_contract;
-static supervisor_child_id s_timer_child = SUPERVISOR_INVALID_ID;
+static _Atomic supervisor_child_id s_timer_child = SUPERVISOR_INVALID_ID;
 static _Atomic bool s_work_wake_pending;
+static _Atomic bool s_frontend_ready;
+static pthread_mutex_t s_callback_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t s_callback_done = PTHREAD_COND_INITIALIZER;
+static unsigned s_callbacks;
+static bool s_callbacks_active;
+
+static bool boot_zcode_callback_enter(void)
+{
+    pthread_mutex_lock(&s_callback_lock);
+    bool active = s_callbacks_active;
+    if (active) ++s_callbacks;
+    pthread_mutex_unlock(&s_callback_lock);
+    return active;
+}
+
+static void boot_zcode_callback_leave(void)
+{
+    pthread_mutex_lock(&s_callback_lock);
+    if (--s_callbacks == 0) pthread_cond_broadcast(&s_callback_done);
+    pthread_mutex_unlock(&s_callback_lock);
+}
+
+static void boot_zcode_callbacks_stop(void)
+{
+    pthread_mutex_lock(&s_callback_lock);
+    s_callbacks_active = false;
+    while (s_callbacks) pthread_cond_wait(&s_callback_done, &s_callback_lock);
+    pthread_mutex_unlock(&s_callback_lock);
+}
+
 static uint64_t s_frames_sent;              /* supervisor progress marker */
 static size_t boot_zcode_swarm_drain_node(
     struct msg_processor *mp, struct vcs_swarm_engine *engine,
@@ -906,6 +938,8 @@ static bool boot_zcode_swarm_unhosted_frame(
     struct msg_processor *mp, struct p2p_node *node,
     const uint8_t *payload, size_t payload_len, void *ctx)
 {
+    if (state_offer_peer_frame(mp, node, payload, payload_len))
+        return true;
     if (boot_zcode_dht_frame(mp, node, payload, payload_len,
                              (struct boot_svc_ctx *)ctx))
         return true;
@@ -1187,6 +1221,7 @@ void boot_zcode_swarm_tick(struct msg_processor *mp, struct p2p_node *node,
      * not met yet; this is where it can. The call decides and returns — the
      * download it may start runs on its own thread, never on this one. */
     state_offer_service_tick();
+    state_offer_peer_tick(mp, node);
     int64_t wall = (int64_t)platform_time_wall_time_t();
     boot_zcode_swarm_lock();
     struct vcs_swarm_engine *engine =
@@ -1208,10 +1243,12 @@ void boot_zcode_swarm_tick(struct msg_processor *mp, struct p2p_node *node,
  * healthy connection still needs announces, WANTs, and outbound drains.
  * Progress marker = cumulative frames sent; a quiet child WITH active
  * downloads reports neither (a wedged download should raise NO_PROGRESS). */
-static void boot_zcode_swarm_timer_tick(struct liveness_contract *self)
+static void boot_zcode_swarm_timer_body(struct liveness_contract *self)
 {
     (void)self;
+    boot_zcode_swarm_lock();
     struct boot_svc_ctx *svc = s_svc;
+    zcl_mutex_unlock(&s_lock);
     if (!svc || !svc->msg_processor)
         return; /* not wired: nothing legitimate to report */
     struct msg_processor *mp = svc->msg_processor;
@@ -1222,6 +1259,7 @@ static void boot_zcode_swarm_timer_tick(struct liveness_contract *self)
         zcl_mutex_unlock(&s_lock);
         return; /* shutdown raced us */
     }
+    state_offer_peer_pump(mp);
     struct vcs_swarm_engine *engine = boot_zcode_swarm_ensure(svc);
     if (!engine) {
         zcl_mutex_unlock(&s_lock);
@@ -1273,23 +1311,73 @@ static void boot_zcode_swarm_timer_tick(struct liveness_contract *self)
     }
 }
 
+static void boot_zcode_swarm_timer_tick(struct liveness_contract *self)
+{
+    if (!boot_zcode_callback_enter()) return;
+    boot_zcode_swarm_timer_body(self);
+    boot_zcode_callback_leave();
+}
+
+static bool boot_zcode_network_frame(struct msg_processor *mp,
+    struct p2p_node *node, const uint8_t *payload, size_t len, void *ctx)
+{
+    if (!boot_zcode_callback_enter()) return true;
+    bool ok = true;
+    if (atomic_load(&s_frontend_ready))
+        ok = boot_zcode_swarm_frame(mp, node, payload, len, ctx);
+    else (void)state_offer_peer_frame(mp, node, payload, len);
+    boot_zcode_callback_leave();
+    return ok;
+}
+
+static void boot_zcode_network_tick(struct msg_processor *mp,
+    struct p2p_node *node, void *ctx)
+{
+    if (!boot_zcode_callback_enter()) return;
+    if (atomic_load(&s_frontend_ready))
+        boot_zcode_swarm_tick(mp, node, ctx);
+    boot_zcode_callback_leave();
+}
+
+bool boot_zcode_swarm_send_messages(void *ctx, struct p2p_node *node, bool trickle)
+{
+    bool ok = msg_send_messages(ctx, node, trickle);
+    if (!boot_zcode_callback_enter()) return ok;
+    if (node && boot_zcode_swarm_eligible(node)) {
+        state_offer_service_tick();
+        state_offer_peer_tick(ctx, node);
+    }
+    boot_zcode_callback_leave();
+    return ok;
+}
+
+void boot_zcode_swarm_wire_network(struct boot_svc_ctx *svc)
+{
+    if (!svc || !svc->msg_processor) return;
+    if (!s_lock_init) {
+        zcl_mutex_init(&s_lock);
+        s_lock_init = true;
+    }
+    atomic_store(&s_frontend_ready, false);
+    pthread_mutex_lock(&s_callback_lock);
+    s_callbacks_active = true;
+    pthread_mutex_unlock(&s_callback_lock);
+    if (svc->msg_processor->net_mgr)
+        svc->msg_processor->net_mgr->local_services |= NODE_STATE_OFFER_LINK;
+    msg_processor_set_zcode_swarm(svc->msg_processor,
+                                  boot_zcode_network_frame,
+                                  boot_zcode_network_tick, svc);
+}
+
 void boot_zcode_swarm_wire(struct boot_svc_ctx *svc)
 {
     if (!svc || !svc->msg_processor) {
         LOG_ERROR("net.zcode_swarm", "wire: null svc/msg_processor");
         return;
     }
-    /* Eager mutex init: the supervisor tick-runner races the lazy path
-     * in boot_zcode_swarm_lock otherwise. wire() runs single-threaded
-     * at boot before the child is armed. */
-    if (!s_lock_init) {
-        zcl_mutex_init(&s_lock);
-        s_lock_init = true;
-    }
-    msg_processor_set_zcode_swarm(svc->msg_processor,
-                                  boot_zcode_swarm_frame,
-                                  boot_zcode_swarm_tick, svc);
+    boot_zcode_swarm_lock();
     s_svc = svc;
+    zcl_mutex_unlock(&s_lock);
     boot_mesh_status_wire(svc);
     boot_fleet_board_wire(svc);
     mesh_stream_wire(svc);
@@ -1298,6 +1386,7 @@ void boot_zcode_swarm_wire(struct boot_svc_ctx *svc)
     boot_mesh_game_wire(svc);
     boot_fleet_ledger_wire(svc);
     boot_fleet_board_fleet_wire(svc);
+    atomic_store(&s_frontend_ready, true);
     liveness_contract_init(&s_timer_contract, "net.zcode_swarm");
     s_timer_contract.on_tick = boot_zcode_swarm_timer_tick;
     supervisor_domains_init();
@@ -1319,6 +1408,11 @@ void boot_zcode_swarm_wire(struct boot_svc_ctx *svc)
 
 void boot_zcode_swarm_shutdown(void)
 {
+    boot_zcode_callbacks_stop();
+    atomic_store(&s_frontend_ready, false);
+    boot_zcode_swarm_lock();
+    s_svc = NULL;
+    zcl_mutex_unlock(&s_lock);
     if (s_timer_child != SUPERVISOR_INVALID_ID) {
         supervisor_unregister(s_timer_child);
         s_timer_child = SUPERVISOR_INVALID_ID;

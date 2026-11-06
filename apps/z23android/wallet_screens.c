@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _GNU_SOURCE
 #include "wallet_screens.h"
+#include "domain/encoding/bech32.h"
 #include "base/cleanse.h"
 #include "json/json.h"
 #include "payment_code.h"
@@ -66,9 +67,11 @@ struct data {
     uint64_t initial_retry_at;
     struct wallet_view view;
     char fleet[WALLET_TEXT_MAX];
-    bool address_pending, has_amount, no_receive;
+    bool address_pending, has_amount, no_receive, address_fallback, setup_bound;
+    uint64_t address_generation;
     uint64_t amount_zat;
     enum zapp_pay_network network;
+    char setup_anchor[ZAPP_PAY_ADDRESS_MAX];
     char address[ZAPP_PAY_ADDRESS_MAX], code[ZAPP_RECEIVE_CODE_MAX], note[NOTE_MAX], scan_note[NOTE_MAX];
     bool history_pending, history_failed, has_more;
     enum history_state history_state;
@@ -744,10 +747,22 @@ bool wallet_screen_same(const struct wallet_screen *a, const struct wallet_scree
     return true;
 }
 
+static bool fallback_current(void)
+{
+    if (!st.d.setup_bound) return true;
+    char address[ZAPP_PAY_ADDRESS_MAX];
+    uint64_t generation = 0;
+    if (st.env.setup_address && st.env.setup_address(st.env.ctx, address, sizeof(address), &generation) &&
+        generation == st.d.address_generation && !strcmp(address, st.d.setup_anchor)) return true;
+    st.d.address[0] = 0; st.d.code[0] = 0; st.d.address_fallback = false; st.d.setup_bound = false;
+    st.d.address_pending = false; ++st.epoch; touch();
+    return false;
+}
 unsigned wallet_screens_snapshot(struct wallet_screen *out)
 {
     unsigned version;
     pthread_mutex_lock(&st.lock);
+    (void)fallback_current();
     out->page = st.page;
     out->count = 0;
     if (st.blocked) {
@@ -909,16 +924,17 @@ static void show_address(const char *address)
     }
 }
 /* A reply that names an address: {"address":"zs1..."}. latest may answer null when the wallet has none. */
-static void apply_address(bool ok, bool missing, bool latest, const char *json)
+static bool strict_private(const char *address)
 {
-    struct json_value root;
-    const struct json_value *data;
-    const char *address = NULL;
-    st.d.address_pending = false;
-    json_init(&root);
-    data = ok && json && json_read(&root, json, strlen(json)) ? data_of(&root) : NULL;
-    address = text_of(data, "address");
-    if (address && address[0] && strlen(address) < sizeof(st.d.address)) show_address(address);
+    char hrp[32]; uint8_t data[69]; size_t len = 0;
+    enum zapp_pay_network network;
+    return private_network(address, &network) &&
+           domain_encoding_bech32_decode(hrp, sizeof(hrp), data, sizeof(data), &len, address) &&
+           len == 69 && (data[68] & 1u) == 0;
+}
+static void address_failure(const struct json_value *data, bool missing, bool latest)
+{
+    if (latest && st.d.address_fallback) st.d.note[0] = 0;
     else if (data && latest && typed(data, "address", JSON_NULL)) copy(st.d.note, sizeof(st.d.note), "This wallet has no receive address yet. Tap New address.");
     else if (latest && missing) copy(st.d.note, sizeof(st.d.note), "This node cannot report its latest address yet. Tap New address to make one.");
     else if (latest) copy(st.d.note, sizeof(st.d.note), "The latest address could not be read. Check that your node is running, or tap New address.");
@@ -926,6 +942,23 @@ static void apply_address(bool ok, bool missing, bool latest, const char *json)
         st.d.no_receive = true;
         copy(st.d.note, sizeof(st.d.note), "This build cannot make a new address.");
     } else copy(st.d.note, sizeof(st.d.note), "No address was made. Check that your node is running.");
+}
+static void apply_address(bool ok, bool missing, bool latest, const char *json)
+{
+    struct json_value root;
+    const struct json_value *data;
+    const char *address = NULL;
+    if (!fallback_current()) return;
+    st.d.address_pending = false;
+    json_init(&root);
+    data = ok && json && json_read(&root, json, strlen(json)) ? data_of(&root) : NULL;
+    address = text_of(data, "address");
+    if (address && address[0] && strlen(address) < sizeof(st.d.address) &&
+        (!st.d.setup_bound || strict_private(address))) {
+        show_address(address);
+        st.d.address_fallback = false;
+    }
+    else address_failure(data, missing, latest);
     drop_tree(&root);
 }
 
@@ -1175,7 +1208,18 @@ static size_t enter(enum wallet_page page, struct job *jobs)
         (void)submit(jobs, &count, K_SUMMARY, "summary", "");
         (void)submit(jobs, &count, K_FLEET, "fleet", "");
     }
-    if (page == WALLET_PAGE_RECEIVE) { st.d.address_pending = true; (void)submit(jobs, &count, K_LATEST, "latest", ""); }
+    if (page == WALLET_PAGE_RECEIVE) {
+        char address[ZAPP_PAY_ADDRESS_MAX];
+        uint64_t generation = 0;
+        if (st.env.setup_address && st.env.setup_address(st.env.ctx, address, sizeof(address), &generation)) {
+            show_address(address);
+            st.d.address_fallback = st.d.address[0] != 0;
+            st.d.setup_bound = st.d.address_fallback;
+            if (st.d.setup_bound) copy(st.d.setup_anchor, sizeof(st.d.setup_anchor), address);
+            st.d.address_generation = generation;
+        }
+        st.d.address_pending = true; (void)submit(jobs, &count, K_LATEST, "latest", "");
+    }
     if (page == WALLET_PAGE_HISTORY) {
         st.d.history_pending = true;
         (void)submit(jobs, &count, K_HISTORY, "history", "");
@@ -1377,6 +1421,7 @@ enum wallet_outcome wallet_screens_activate(enum wallet_action action, unsigned 
     size_t count = 0;
     enum wallet_outcome outcome = WALLET_STAY;
     pthread_mutex_lock(&st.lock);
+    (void)fallback_current();
     if (st.dropped && action != WALLET_ACT_BACK) { st.dropped = 0; touch(); }
     if (st.ready && !st.blocked) {
         if (st.page == WALLET_PAGE_FUNDS) count = from_funds(action, jobs, &outcome);
@@ -1395,6 +1440,7 @@ bool wallet_screens_set_amount(const char *text)
     uint64_t zat = 0;
     bool ok = false, blank = true;
     pthread_mutex_lock(&st.lock);
+    (void)fallback_current();
     for (const char *c = text ? text : ""; *c; ++c) if (*c != ' ') blank = false;
     if (st.ready && !st.blocked && st.page == WALLET_PAGE_RECEIVE && text) {
         st.dropped = 0;

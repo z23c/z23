@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "residue.h"
 #include "wallet_screens.h"
+#include "domain/encoding/bech32.h"
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
@@ -147,6 +148,8 @@ struct fake {
     enum wallet_reveal reveal, reveal_after_start; /* the state the environment reports; the state a tap on Show private balance moves it to */
     int reveal_started, reveal_ended;
     bool reveal_refused; /* reveal_start returns false and changes nothing */
+    const char *setup_address;
+    uint64_t setup_generation;
     const char *progress;
     char copied[128];
     int secure_on_calls, secure_off_calls, changed, active, active_max, op_active[8];
@@ -162,6 +165,14 @@ struct fake {
 };
 static struct fake fake;
 
+static bool fake_setup_address(void *ctx, char *out, size_t cap, uint64_t *generation)
+{
+    (void)ctx;
+    if (!fake.setup_address || strlen(fake.setup_address) >= cap) return false;
+    snprintf(out, cap, "%s", fake.setup_address);
+    *generation = fake.setup_generation;
+    return true;
+}
 static bool fake_secure(void *ctx, bool on)
 {
     (void)ctx;
@@ -296,7 +307,7 @@ static void start(bool async)
     struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async, fake_refusal, fake_node_running, fake_copy_address,
                              cache_dir[0] ? cache_dir : NULL, fake_wall, fake_progress, fake_dismiss,
                              with_reveal ? fake_reveal_start : NULL, with_reveal ? fake_reveal_state : NULL,
-                             with_reveal ? fake_reveal_end : NULL, with_seal ? fake_seal : NULL, with_seal ? fake_unseal : NULL};
+                             with_reveal ? fake_reveal_end : NULL, with_seal ? fake_seal : NULL, with_seal ? fake_unseal : NULL, fake_setup_address};
     wallet_screens_shutdown();
     memset(&fake, 0, sizeof(fake));
     memset(&keystore, 0, sizeof(keystore));
@@ -1484,6 +1495,97 @@ static void test_receive_new_address(void)
     wallet_screens_close();
 }
 
+static int latest_changed_before;
+static bool latest_applied(void)
+{
+    pthread_mutex_lock(&fake.lock);
+    bool applied = fake.changed > latest_changed_before;
+    pthread_mutex_unlock(&fake.lock);
+    return applied;
+}
+static bool latest_waiting(void)
+{
+    pthread_mutex_lock(&fake.lock);
+    bool waiting = fake.counts[2] > 0 && fake.op_active[2] > 0;
+    pthread_mutex_unlock(&fake.lock);
+    return waiting;
+}
+static void test_setup_fallback_while_latest_waits(void)
+{
+    uint8_t symbols[69] = {2}; char fallback[92];
+    CHECK(domain_encoding_bech32_encode(fallback, sizeof(fallback), "zs", symbols, sizeof(symbols)));
+    start(true);
+    fake.setup_address = fallback; fake.setup_generation = 1; fake.latest = NULL;
+    set_block();
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    wait_for(latest_waiting);
+    struct wallet_screen *s = snap();
+    CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), fallback));
+    tap(WALLET_ACT_COPY_ADDRESS, 0, WALLET_STAY);
+    CHECK(!strcmp(fake.copied, fallback));
+    CHECK(wallet_screens_set_amount("1.25"));
+    s = snap();
+    CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount=1.25"));
+    pthread_mutex_lock(&fake.lock);
+    latest_changed_before = fake.changed;
+    pthread_mutex_unlock(&fake.lock);
+    release_block();
+    wait_for(latest_applied);
+    s = snap();
+    CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), fallback));
+    wallet_screens_close();
+}
+static void change_setup_generation(const char *op, const char *arg)
+{
+    (void)arg;
+    if (!strcmp(op, "latest")) ++fake.setup_generation;
+}
+static void test_setup_fallback(void)
+{
+    uint8_t symbols[69] = {0}; char fallback[92], valid[92], reply[256];
+    CHECK(domain_encoding_bech32_encode(fallback, sizeof(fallback), "zs", symbols, sizeof(symbols)));
+    start(false);
+    fake.setup_address = fallback; fake.setup_generation = 7; fake.latest = NULL;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    struct wallet_screen *s = snap();
+    CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), fallback));
+    fake.setup_generation++;
+    s = snap();
+    CHECK(find(s, WALLET_ITEM_QR, WALLET_ACT_NONE) < 0);
+    wallet_screens_close();
+    start(false);
+    fake.setup_address = fallback; fake.setup_generation = 1; fake.during = change_setup_generation;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    s = snap();
+    CHECK(find(s, WALLET_ITEM_QR, WALLET_ACT_NONE) < 0);
+    wallet_screens_close();
+    start(false);
+    fake.setup_address = fallback; fake.setup_generation = 1;
+    fake.latest = "{\"ok\":true,\"data\":{\"address\":\"" A2 "\"}}";
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    s = snap();
+    CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), fallback));
+    wallet_screens_close();
+    start(false);
+    fake.setup_address = fallback; fake.setup_generation = 1;
+    symbols[0] = 1;
+    CHECK(domain_encoding_bech32_encode(valid, sizeof(valid), "zs", symbols, sizeof(symbols)));
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"address\":\"%s\"}}", valid);
+    fake.latest = reply;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    s = snap();
+    CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), valid));
+    fake.receive = "{\"ok\":true,\"data\":{\"address\":\"" A2 "\"}}";
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);
+    s = snap();
+    CHECK(find(s, WALLET_ITEM_QR, WALLET_ACT_NONE) < 0);
+    fake.receive = reply;
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);
+    s = snap();
+    CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), valid));
+    wallet_screens_close();
+}
+
 static void reopen_during_receive(const char *op, const char *arg)
 {
     (void)arg;
@@ -2497,6 +2599,8 @@ int main(int argc, char **argv)
     test_reveal_across_pages();
     test_reveal_amount_not_kept();
     test_receive();
+    test_setup_fallback();
+    test_setup_fallback_while_latest_waits();
     test_every_page_pins_one_back();
     test_spendable_for_send();
     test_receive_amount();

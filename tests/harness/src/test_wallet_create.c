@@ -1508,6 +1508,76 @@ static bool wcr_restore_cli(const char *dir, const char *extra,
                                   run);
 }
 
+/* Find the persisted first account after each keystore load. */
+static struct sapling_key_entry *wcr_child_zero(struct wallet *w)
+{
+    for (size_t i = 0; i < w->sapling_keys.num_keys; ++i)
+        if (w->sapling_keys.keys[i].used && w->sapling_keys.keys[i].child_index == 0)
+            return &w->sapling_keys.keys[i];
+    return NULL;
+}
+/* Compare reopened spending scalars with the phrase-derived first account. */
+static bool wcr_first_spending_matches(const struct sapling_key_entry *entry)
+{
+    uint8_t seed[32], div[ZC_DIVERSIFIER_SIZE], pk_d[32];
+    struct sapling_keystore *expected = calloc(1, sizeof(*expected));
+    if (!expected) return false;
+    sapling_keystore_init(expected);
+    bool ok = mnemonic_to_wallet_seed(WCR_RESTORE_PHRASE, NULL, seed) &&
+        sapling_keystore_set_seed(expected, seed) &&
+        sapling_keystore_new_address(expected, div, pk_d) && entry && !entry->secret_wiped &&
+        !memcmp(entry->xsk.expsk.ask, expected->keys[0].xsk.expsk.ask, 32) &&
+        !memcmp(entry->xsk.expsk.nsk, expected->keys[0].xsk.expsk.nsk, 32);
+    memory_cleanse(seed, sizeof(seed)); sapling_keystore_free(expected); free(expected);
+    return ok;
+}
+
+/* The successful restore reply names the persisted account-0 receiving key. */
+static int restore_address_reopens(void)
+{
+    int failures = 0;
+    char dir[1024], address[200], encoded[200];
+    struct wcr_run run;
+    wcr_fixture(dir, sizeof(dir), "restore_address_reopens");
+    bool ran = wcr_restore_cli(dir, ",\"passphrase\":\"" WCR_PASS "\",\"shielded_only\":true", true, &run);
+    bool got = ran && run.rc == 0 && wcr_data_bool(&run, "committed") &&
+               wcr_data_bool(&run, "encrypted_at_rest") &&
+               wcr_field(&run, "first_shielded_address", address, sizeof(address));
+    WCR_CHECK("encrypted restore commits and returns its first address", got);
+    if (!got) { test_rm_rf(dir); return failures + 1; }
+
+    wallet_lock_reset_for_test();
+    struct node_db ndb;
+    bool db_open = wcr_open(&ndb, dir);
+    struct wallet_sqlite ws;
+    bool ws_open = db_open && wallet_sqlite_open_r(&ws, ndb.db).ok;
+    struct wallet *w = ws_open ? calloc(1, sizeof(*w)) : NULL;
+    WCR_CHECK("restored wallet reopens", w != NULL);
+    if (!w) {
+        if (ws_open) wallet_sqlite_close(&ws);
+        if (db_open) node_db_close(&ndb);
+        test_rm_rf(dir);
+        return failures + 1;
+    }
+    wallet_init(w);
+    bool found = wcr_locked_payment_found(w, &ws, address);
+    WCR_CHECK("reopened locked wallet detects payment to restore address", found);
+    struct sapling_key_entry *first = wcr_child_zero(w);
+    const struct chain_params *cp = chain_params_get();
+    bool matches = first && sapling_encode_payment_address(first->diversifier, first->pk_d,
+        cp->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS], encoded, sizeof(encoded)) &&
+        strcmp(encoded, address) == 0;
+    WCR_CHECK("reopened child zero encodes to the committed reply address", matches);
+    struct zcl_result unlocked = wallet_lock_unlock(w, &ws, WCR_PASS);
+    first = wcr_child_zero(w);
+    WCR_CHECK("restored wallet unlocks its child zero spending key",
+              unlocked.ok && wcr_first_spending_matches(first));
+    wallet_lock_lock(w);
+    wallet_free(w); free(w);
+    wallet_sqlite_close(&ws); node_db_close(&ndb);
+    test_rm_rf(dir);
+    return failures;
+}
 static bool wcr_wallet_rows_exist(const char *dir)
 {
     struct node_db ndb;
@@ -2981,6 +3051,7 @@ int test_wallet_create(void)
     failures += t_legacy_wallet_directory();
     failures += t_boot_guards();
     failures += t_locked_wallet();
+    failures += restore_address_reopens();
     failures += t_restore_inputs();
     failures += t_unreadable_file_fails_scan();
     failures += t_seed_proof_needs_a_full_read();

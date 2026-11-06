@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "setup_node.h"
 #include "base/cleanse.h"
+#include "domain/encoding/bech32.h"
 #include "json/json.h"
 #include <stdio.h>
 #include <string.h>
@@ -74,6 +75,16 @@ static bool flag_of(const struct json_value *obj, const char *key)
 {
     const struct json_value *v = json_get(obj, key);
     return v && v->type == JSON_BOOL && json_get_bool(v);
+}
+static bool shielded_address(const char *text)
+{
+    char hrp[32];
+    uint8_t data[69];
+    size_t len = 0;
+    if (!text || strlen(text) >= SUN_ADDRESS_MAX ||
+        !domain_encoding_bech32_decode(hrp, sizeof(hrp), data, sizeof(data), &len, text)) return false;
+    return len == 69 && (data[68] & 1u) == 0 &&
+           (!strcmp(hrp, "zs") || !strcmp(hrp, "ztestsapling") || !strcmp(hrp, "zregtestsapling"));
 }
 static bool hex_hash(const char *text)
 {
@@ -203,6 +214,8 @@ static enum sun_result restore_call(const struct sun *node, const struct zapp_wo
     reply_read(&r, text);
     enum sun_result result = r.parsed && r.ok && r.data && flag_of(r.data, "recovered") ? SUN_OK : result_of(&r);
     if (result == SUN_OK) {
+        const char *address = text_of(r.data, "first_shielded_address");
+        if (flag_of(r.data, "committed") && shielded_address(address)) snprintf(out->first_shielded_address, sizeof(out->first_shielded_address), "%s", address);
         out->birthday_recorded = flag_of(r.data, "birthday_recorded");
         out->birthday_rejected = flag_of(r.data, "birthday_rejected");
     }

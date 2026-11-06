@@ -9,6 +9,7 @@
 #include "util/sysinit.h"
 #include "config/boot_shutdown_marker.h"
 #include "config/state_offer_service.h"
+#include "config/boot_zcode_swarm.h"
 #include "util/shutdown_stagewatch.h"
 #include "config/boot_background_workers.h"
 #include "config/bundle_fetch_seeds.h"  /* ZCL_BUNDLE_FETCH_CLEARNET_SEEDS */
@@ -725,7 +726,7 @@ static void boot_init_connman(struct boot_svc_ctx *svc,
     struct node_signals signals = {
         .get_height = msg_get_height,
         .process_messages = msg_process_messages,
-        .send_messages = msg_send_messages,
+        .send_messages = boot_zcode_swarm_send_messages,
         .initialize_node = NULL,
         .finalize_node = NULL,
         .ctx = svc->msg_processor,
@@ -1356,6 +1357,7 @@ bool app_init_services(struct app_context *ctx, const struct chain_params *param
     t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.scrub_plaintext", "svc.init_wallet");
     boot_wire_msg_processor(svc, ctx, params);
     boot_init_connman(svc, ctx, params);
+    boot_zcode_swarm_wire_network(svc);
     if (!boot_start_wallet_broadcast(svc, ctx, params)) return boot_step_fail("wallet_broadcast_mode");
     /* NETWORK_READY boundary: connman and addrman ready, listeners bound just
      * below; advances the boot-stage machine via the net record in boot.c. */

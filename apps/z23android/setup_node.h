@@ -13,6 +13,7 @@
  *
  * Node message text never leaves it: the screens use their own wording for each result. */
 
+#define SUN_ADDRESS_MAX 92
 #define SUN_REPLY_MAX 16384
 #define SUN_INPUT_MAX 4096
 #define SUN_CREATE_TIMEOUT_MS 300000u
@@ -54,6 +55,7 @@ struct sun_created {
     struct sun_birthday birthday;   /* the block the new wallet starts reading at, when the datadir held one */
 };
 struct sun_restored {
+    char first_shielded_address[SUN_ADDRESS_MAX];
     bool birthday_recorded;
     bool birthday_rejected;
 };

@@ -387,6 +387,8 @@ void msg_version_build(struct version_message *ver,
     version_message_init(ver);
     ver->protocol_version = PROTOCOL_VERSION;
     ver->services = NODE_NETWORK | NODE_ZCL23;
+    if (mp->net_mgr)
+        ver->services |= mp->net_mgr->local_services & NODE_STATE_OFFER_LINK;
     if (bip37_enabled())
         ver->services |= NODE_BLOOM;
     if (mp->net_mgr && mp->net_mgr->noise_enabled)

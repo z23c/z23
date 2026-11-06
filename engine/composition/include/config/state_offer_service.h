@@ -130,6 +130,8 @@ bool state_offer_service_test_compose_path(const char *filename, char *out,
 void state_offer_service_test_set_fetch_running(bool running);
 bool state_offer_service_test_fetch_running(void);
 /* True iff the production fetch-running object has atomic boolean type. */
+/* Set the completed-install gate for a service tick fixture. */
+void state_offer_service_test_set_staged(bool staged);
 bool state_offer_service_test_fetch_running_is_atomic(void);
 #endif
 

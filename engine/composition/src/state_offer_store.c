@@ -33,6 +33,8 @@ static bool g_offer_used[STATE_OFFER_STORE_MAX];
 static bool g_offer_fetching[STATE_OFFER_STORE_MAX];
 static struct sos_bad g_bad[STATE_OFFER_STORE_BAD_MAX];
 static struct sos_peer_strike g_strikes[STATE_OFFER_STORE_BAD_MAX];
+static struct sos_peer_strike g_link_strikes[STATE_OFFER_STORE_BAD_MAX];
+static size_t g_link_strike_cursor;
 
 static bool g_wait_armed;
 static int64_t g_wait_started_ms;
@@ -79,6 +81,8 @@ void state_offer_store_reset(void)
     memset(g_offer_fetching, 0, sizeof(g_offer_fetching));
     memset(g_bad, 0, sizeof(g_bad));
     memset(g_strikes, 0, sizeof(g_strikes));
+    memset(g_link_strikes, 0, sizeof(g_link_strikes));
+    g_link_strike_cursor = 0;
     g_wait_armed = false;
     g_wait_started_ms = 0;
     g_offers_seen = 0;
@@ -126,12 +130,19 @@ bool state_offer_store_digest_is_bad(const uint8_t content_digest[32])
     return false;
 }
 
+static uint32_t link_peer_strikes(int64_t peer_id)
+{
+    for (size_t i = 0; i < STATE_OFFER_STORE_BAD_MAX; ++i)
+        if (g_link_strikes[i].used && g_link_strikes[i].peer_id == peer_id) return g_link_strikes[i].strikes;
+    return 0;
+}
+
 uint32_t state_offer_store_peer_strikes(int64_t peer_id)
 {
     for (size_t i = 0; i < STATE_OFFER_STORE_BAD_MAX; i++)
         if (g_strikes[i].used && g_strikes[i].peer_id == peer_id)
             return g_strikes[i].strikes;
-    return 0;
+    return link_peer_strikes(peer_id);
 }
 
 static void strike_peer(int64_t peer_id)
@@ -174,13 +185,17 @@ static bool endpoint_dialable(const uint8_t peer_ip[16], uint16_t port)
     return false;
 }
 
-static size_t find_by_digest(const uint8_t digest[32])
+static size_t find_offer(const uint8_t digest[32], bool link, int64_t peer)
 {
     for (size_t i = 0; i < STATE_OFFER_STORE_MAX; i++)
-        if (g_offer_used[i] && digest_eq(g_offers[i].offer.content_digest,
-                                         digest))
-            return i;
+        if (g_offer_used[i] && g_offers[i].peer_link == link &&
+            (!link || g_offers[i].peer_id == peer) &&
+            digest_eq(g_offers[i].offer.content_digest, digest)) return i;
     return STATE_OFFER_STORE_MAX;
+}
+static size_t find_by_digest(const uint8_t digest[32])
+{
+    return find_offer(digest, false, 0);
 }
 
 /* The weakest slot to evict: the LOWEST bundle height, breaking ties toward the
@@ -192,6 +207,7 @@ static size_t weakest_slot(void)
     for (size_t i = 0; i < STATE_OFFER_STORE_MAX; i++) {
         if (!g_offer_used[i])
             return i;
+        if (g_offer_fetching[i]) continue;
         if (worst == STATE_OFFER_STORE_MAX)
             worst = i;
         else if (g_offers[i].offer.bundle_height <
@@ -204,9 +220,24 @@ static size_t weakest_slot(void)
     return worst;
 }
 
-enum state_offer_store_result state_offer_store_record(
+/* Limit one digest while allowing a new peer to replace an idle source. */
+static size_t link_source_slot(const uint8_t digest[32], bool *limited)
+{
+    size_t count = 0, oldest = STATE_OFFER_STORE_MAX;
+    for (size_t i = 0; i < STATE_OFFER_STORE_MAX; ++i) {
+        if (!g_offer_used[i] || !g_offers[i].peer_link ||
+            !digest_eq(g_offers[i].offer.content_digest, digest)) continue;
+        count++;
+        if (!g_offer_fetching[i] && (oldest == STATE_OFFER_STORE_MAX ||
+            g_offers[i].heard_ms < g_offers[oldest].heard_ms)) oldest = i;
+    }
+    *limited = count >= 4;
+    return oldest;
+}
+
+static enum state_offer_store_result validate_offer(
     const struct state_offer_v1 *offer, const uint8_t peer_ip[16],
-    uint16_t file_service_port, int64_t peer_id, int64_t now_ms)
+    uint16_t file_service_port, int64_t peer_id, bool peer_link)
 {
     if (!offer || !peer_ip)
         return STATE_OFFER_STORE_DROPPED_INVALID;
@@ -228,38 +259,115 @@ enum state_offer_store_result state_offer_store_record(
      * teaches us the newest height a peer has) and not retained for choice. */
     if (offer->kind != (uint16_t)ROM_ARTIFACT_CONSENSUS_BUNDLE)
         return STATE_OFFER_STORE_DROPPED_KIND;
-    if (state_offer_store_digest_is_bad(offer->content_digest))
+    if ((!peer_link && state_offer_store_digest_is_bad(offer->content_digest)) ||
+        (peer_link && link_peer_strikes(peer_id)))
         return STATE_OFFER_STORE_DROPPED_BAD;
-    if (!endpoint_dialable(peer_ip, file_service_port))
+    if (!peer_link && !endpoint_dialable(peer_ip, file_service_port))
         return STATE_OFFER_STORE_DROPPED_ENDPOINT;
 
-    size_t existing = find_by_digest(offer->content_digest);
+    return STATE_OFFER_STORE_KEPT;
+}
+
+static enum state_offer_store_result record_offer(
+    const struct state_offer_v1 *offer, const uint8_t peer_ip[16],
+    uint16_t file_service_port, int64_t peer_id, int64_t now_ms, bool peer_link)
+{
+    enum state_offer_store_result result = validate_offer(offer, peer_ip, file_service_port, peer_id, peer_link);
+    if (result != STATE_OFFER_STORE_KEPT) return result;
+
+    size_t existing = find_offer(offer->content_digest, peer_link, peer_id);
     if (existing < STATE_OFFER_STORE_MAX) {
-        /* The same bundle from a second peer (or the same peer again) refreshes
-         * the endpoint rather than consuming a second slot: ZRC-0011 dedups on
-         * content, and one bundle held by several peers is one bundle. */
+        /* Link sources are independent; legacy endpoints retain their existing dedup rule. */
         memcpy(g_offers[existing].peer_ip, peer_ip, 16);
         g_offers[existing].file_service_port = file_service_port;
+        g_offers[existing].peer_link = peer_link;
+        if (g_offers[existing].peer_id != peer_id)
+            g_offers[existing].retry_after_ms = 0;
         g_offers[existing].peer_id = peer_id;
         return STATE_OFFER_STORE_KEPT_REPLACED;
     }
 
-    size_t slot = weakest_slot();
-    if (slot >= STATE_OFFER_STORE_MAX)
-        return STATE_OFFER_STORE_DROPPED_FULL;
-    if (g_offer_used[slot] &&
-        offer->bundle_height <= g_offers[slot].offer.bundle_height)
+    bool limited = false;
+    size_t slot = peer_link ? link_source_slot(offer->content_digest, &limited) : STATE_OFFER_STORE_MAX;
+    if (!limited) slot = weakest_slot();
+    if (slot >= STATE_OFFER_STORE_MAX) return STATE_OFFER_STORE_DROPPED_FULL;
+    if (!limited && g_offer_used[slot] && offer->bundle_height <= g_offers[slot].offer.bundle_height)
         return STATE_OFFER_STORE_DROPPED_FULL;
 
     memset(&g_offers[slot], 0, sizeof(g_offers[slot]));
     g_offers[slot].offer = *offer;
     memcpy(g_offers[slot].peer_ip, peer_ip, 16);
     g_offers[slot].file_service_port = file_service_port;
+    g_offers[slot].peer_link = peer_link;
     g_offers[slot].peer_id = peer_id;
     g_offers[slot].heard_ms = now_ms;
     g_offer_used[slot] = true;
     g_offer_fetching[slot] = false;
     return STATE_OFFER_STORE_KEPT;
+}
+
+enum state_offer_store_result state_offer_store_record(
+    const struct state_offer_v1 *offer, const uint8_t peer_ip[16],
+    uint16_t file_service_port, int64_t peer_id, int64_t now_ms)
+{
+    return record_offer(offer, peer_ip, file_service_port, peer_id, now_ms, false);
+}
+
+enum state_offer_store_result state_offer_store_record_link(
+    const struct state_offer_v1 *offer, int64_t peer_id, int64_t now_ms)
+{
+    static const uint8_t no_ip[16];
+    if (peer_id < 0) return STATE_OFFER_STORE_DROPPED_INVALID;
+    return record_offer(offer, no_ip, 0, peer_id, now_ms, true);
+}
+
+void state_offer_store_note_retry(const uint8_t digest[32], int64_t now_ms)
+{
+    if (!digest) return;
+    size_t slot = find_by_digest(digest);
+    if (slot == STATE_OFFER_STORE_MAX) return;
+    g_offer_fetching[slot] = false;
+    g_offers[slot].retry_after_ms = now_ms > INT64_MAX - 30000 ? INT64_MAX : now_ms + 30000;
+}
+
+void state_offer_store_note_link_fetching(const uint8_t digest[32], int64_t peer_id)
+{
+    if (!digest) return;
+    size_t slot = find_offer(digest, true, peer_id);
+    if (slot < STATE_OFFER_STORE_MAX) g_offer_fetching[slot] = true;
+}
+
+void state_offer_store_note_link_retry(const uint8_t digest[32], int64_t peer_id, int64_t now_ms)
+{
+    if (!digest) return;
+    size_t slot = find_offer(digest, true, peer_id);
+    if (slot == STATE_OFFER_STORE_MAX) return;
+    g_offer_fetching[slot] = false;
+    g_offers[slot].retry_after_ms = now_ms > INT64_MAX - 30000 ? INT64_MAX : now_ms + 30000;
+}
+
+static void link_strike_peer(int64_t peer_id)
+{
+    for (size_t i = 0; i < STATE_OFFER_STORE_BAD_MAX; ++i)
+        if (g_link_strikes[i].used && g_link_strikes[i].peer_id == peer_id) return;
+    size_t slot = g_link_strike_cursor++ % STATE_OFFER_STORE_BAD_MAX;
+    g_link_strikes[slot] = (struct sos_peer_strike){.used = true, .peer_id = peer_id, .strikes = 1};
+}
+
+void state_offer_store_note_link_bad(const uint8_t digest[32], int64_t peer_id)
+{
+    if (!digest) return;
+    size_t slot = find_offer(digest, true, peer_id);
+    if (slot == STATE_OFFER_STORE_MAX) return;
+    g_offers_rejected++;
+    link_strike_peer(peer_id);
+    g_offer_used[slot] = false;
+    g_offer_fetching[slot] = false;
+    memset(&g_offers[slot], 0, sizeof(g_offers[slot]));
+    if (digest_eq(g_chosen_digest, digest)) {
+        g_chosen_height = 0;
+        memset(g_chosen_digest, 0, sizeof(g_chosen_digest));
+    }
 }
 
 void state_offer_store_note_bad(const uint8_t content_digest[32],
@@ -316,15 +424,12 @@ int32_t state_offer_store_newest_height_seen(void)
     return g_newest_height_seen;
 }
 
-enum state_offer_decision state_offer_store_decide(
-    int64_t now_ms, struct state_offer_record *out)
+static size_t best_offer(int64_t now_ms)
 {
-    /* Newest first. Every retained offer already cleared the freshness rule
-     * against its OWN offerer's tip at parse time, so "newest" here is a
-     * preference among acceptable offers, never a way past the rule. */
     size_t best = STATE_OFFER_STORE_MAX;
     for (size_t i = 0; i < STATE_OFFER_STORE_MAX; i++) {
-        if (!g_offer_used[i] || g_offer_fetching[i])
+        if (!g_offer_used[i] || g_offer_fetching[i] || now_ms < g_offers[i].retry_after_ms ||
+            (g_offers[i].peer_link && link_peer_strikes(g_offers[i].peer_id)))
             continue;
         if (best == STATE_OFFER_STORE_MAX ||
             g_offers[i].offer.bundle_height >
@@ -334,6 +439,16 @@ enum state_offer_decision state_offer_store_decide(
              g_offers[i].heard_ms < g_offers[best].heard_ms))
             best = i;
     }
+    return best;
+}
+
+enum state_offer_decision state_offer_store_decide(
+    int64_t now_ms, struct state_offer_record *out)
+{
+    /* Newest first. Every retained offer already cleared the freshness rule
+     * against its OWN offerer's tip at parse time, so "newest" here is a
+     * preference among acceptable offers, never a way past the rule. */
+    size_t best = best_offer(now_ms);
     if (best < STATE_OFFER_STORE_MAX) {
         if (out)
             *out = g_offers[best];

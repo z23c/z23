@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _GNU_SOURCE
 #include "setup_node.h"
+#include "domain/encoding/bech32.h"
 #include "setup_field.h"
 #include "setup_state.h"
 #include "setup_words.h"
@@ -338,6 +339,44 @@ static void node_tests(void)
     assert(sun_create(&node, "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef", &c) == SUN_REFUSED && s.calls == 0);
 
 }
+static void node_restore_address_tests(struct script *s, struct sun *node, struct zapp_words *w, struct sun_restored *r)
+{
+    uint8_t symbols[69] = {0};
+    char addr[SUN_ADDRESS_MAX], reply[512];
+    assert(domain_encoding_bech32_encode(addr, sizeof(addr), "zs", symbols, sizeof(symbols)));
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"first_shielded_address\":\"%s\"}}", addr);
+    script_say(s, true, reply);
+    assert(sun_restore(node, w, PASS64, NULL, r) == SUN_OK && !strcmp(r->first_shielded_address, addr));
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"first_shielded_address\":\"%s\"}}", addr);
+    script_say(s, true, reply);
+    assert(sun_restore(node, w, PASS64, NULL, r) == SUN_OK && !r->first_shielded_address[0]);
+    for (uint8_t last = 2; last <= 6; last += 2) {
+        symbols[68] = last;
+        assert(domain_encoding_bech32_encode(addr, sizeof(addr), "zs", symbols, sizeof(symbols)));
+        snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"first_shielded_address\":\"%s\"}}", addr);
+        script_say(s, true, reply);
+        assert(sun_restore(node, w, PASS64, NULL, r) == SUN_OK && !strcmp(r->first_shielded_address, addr));
+    }
+    symbols[68] = 1;
+    assert(domain_encoding_bech32_encode(addr, sizeof(addr), "zs", symbols, sizeof(symbols)));
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"first_shielded_address\":\"%s\"}}", addr);
+    script_say(s, true, reply);
+    assert(sun_restore(node, w, PASS64, NULL, r) == SUN_OK && !r->first_shielded_address[0]);
+    symbols[68] = 0;
+    assert(domain_encoding_bech32_encode(addr, sizeof(addr), "wrong", symbols, sizeof(symbols)));
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"first_shielded_address\":\"%s\"}}", addr);
+    script_say(s, true, reply);
+    assert(sun_restore(node, w, PASS64, NULL, r) == SUN_OK && !r->first_shielded_address[0]);
+    assert(domain_encoding_bech32_encode(addr, sizeof(addr), "zs", symbols, 68));
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"first_shielded_address\":\"%s\"}}", addr);
+    script_say(s, true, reply);
+    assert(sun_restore(node, w, PASS64, NULL, r) == SUN_OK && !r->first_shielded_address[0]);
+    assert(domain_encoding_bech32_encode(addr, sizeof(addr), "zs", symbols, sizeof(symbols)));
+    addr[10] = 112;
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"first_shielded_address\":\"%s\"}}", addr);
+    script_say(s, true, reply);
+    assert(sun_restore(node, w, PASS64, NULL, r) == SUN_OK && !r->first_shielded_address[0]);
+}
 static void node_restore_tests(void)
 {
     struct script s = {0};
@@ -354,6 +393,7 @@ static void node_restore_tests(void)
     assert(sun_restore(&node, &w, PASS64, NULL, &r) == SUN_OK && !strstr(s.input, "birthday\""));
     struct sun_birthday none = {0};
     assert(sun_restore(&node, &w, PASS64, &none, &r) == SUN_OK && !strstr(s.input, "birthday\""));
+    node_restore_address_tests(&s, &node, &w, &r);
     script_say(&s, true, "{\"ok\":true,\"data\":{\"recovered\":false}}");
     assert(sun_restore(&node, &w, PASS64, NULL, &r) == SUN_UNKNOWN);
     error_reply(&s, "INVALID_PHRASE");
@@ -610,6 +650,18 @@ static void create_all(struct wsu *w)
     wsu_create_job(w);
     wsu_write_job(w);
 }
+static void check_created_address(struct wsu *w, const char *address)
+{
+    char copied[SUN_ADDRESS_MAX];
+    uint64_t generation = 0;
+    assert(wsu_receive_address(w, copied, sizeof(copied), &generation) && !strcmp(copied, address));
+    struct wsu reopened;
+    assert(wsu_init(&reopened, &w->env, &w->node, dir));
+    assert(!wsu_receive_address(&reopened, copied, sizeof(copied), &generation));
+    wsu_destroy(&reopened);
+    put(dir, "wallet_key.blob", "replacement");
+    assert(!wsu_receive_address(w, copied, sizeof(copied), &generation));
+}
 static void create_tests(void)
 {
     struct fake f;
@@ -617,8 +669,14 @@ static void create_tests(void)
     struct wsu_view v;
     fresh(&f, &w, true);
     assert(w.step == WSU_CHOICE);
-    script_say(&f.script, true, CREATED);
+    uint8_t symbols[69] = {0};
+    char address[SUN_ADDRESS_MAX], reply[512], copied[SUN_ADDRESS_MAX];
+    uint64_t generation = 0;
+    assert(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"birthday_recorded\":true,\"first_shielded_address\":\"%s\"}}", address);
+    script_say(&f.script, true, reply);
     create_all(&w);
+    assert(!wsu_receive_address(&w, copied, sizeof(copied), &generation));
     wsu_view_read(&w, &v);
     assert(v.step == WSU_WORDS && v.words.count == 24 && !strcmp(v.words.word[0], "alpha"));
     assert(v.write == WSU_WRITE_DONE && v.start_pending);
@@ -647,6 +705,7 @@ static void create_tests(void)
     assert(w.step == WSU_WORKING && w.held.count == 0 && zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED);
     wsu_finish_job(&w);
     assert(w.step == WSU_DONE && zapp_setup_state(dir) == ZAPP_SETUP_READY && !wsu_busy(&w));
+    check_created_address(&w, address);
     wsu_finish_job(&w);
     assert(w.step == WSU_DONE);
     wsu_destroy(&w);

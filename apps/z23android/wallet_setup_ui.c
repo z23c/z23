@@ -265,6 +265,11 @@ bool zapp_setup_attach(ANativeActivity *activity, void (*changed)(void))
     return snprintf(ui.blob, sizeof(ui.blob), "%s/wallet_key.blob", activity->internalDataPath) < (int)sizeof(ui.blob);
 }
 
+bool zapp_setup_receive_address(char *out, size_t cap, uint64_t *generation)
+{
+    return ui.model_ready && wsu_receive_address(&ui.model, out, cap, generation);
+}
+
 /* ---- widgets ---- */
 
 /* A line of text; keep, when given, holds the view so its text can change in place. */

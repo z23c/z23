@@ -9,6 +9,7 @@
 #include "setup_field.h"
 #include "wallet_reveal.h"
 #include "wallet_send_ui.h"
+#include "wallet_setup_ui.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -437,11 +438,17 @@ static bool bound_unseal(void *ctx, const uint8_t *aad, size_t aad_len, const ui
     return ok;
 }
 
+static bool bound_setup_address(void *ctx, char *out, size_t cap, uint64_t *generation)
+{
+    (void)ctx;
+    return zapp_setup_receive_address(out, cap, generation);
+}
+
 bool zapp_wallet_attach(ANativeActivity *activity, void (*changed)(void))
 {
     struct wallet_env env = {activity, bound_secure, bound_run, bound_changed, bound_now, true, bound_refusal, bound_node_running, bound_copy_address,
                              activity ? activity->internalDataPath : NULL, NULL, bound_send_progress, bound_send_dismiss,
-                             bound_reveal_start, bound_reveal_state, bound_reveal_end, bound_seal, bound_unseal};
+                             bound_reveal_start, bound_reveal_state, bound_reveal_end, bound_seal, bound_unseal, bound_setup_address};
     bound.changed = changed;
     bound.vm = activity ? activity->vm : NULL;
     return activity && wallet_screens_init(&env);

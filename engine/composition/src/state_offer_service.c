@@ -21,6 +21,9 @@
 #include "config/consensus_state_install_runtime.h"
 #include "config/consensus_state_snapshot_install.h"
 #include "config/state_offer_store.h"
+#include "config/state_offer_peer.h"
+#include "config/state_offer_link_session.h"
+#include "config/state_offer_link_receive.h"
 #include "conditions/stale_offers_only.h"
 
 #include "platform/time_compat.h"
@@ -36,9 +39,14 @@
 #include "net/state_offer.h"
 #include "storage/consensus_state_bundle_codec.h"
 #include "util/log_macros.h"
+#include "util/path_leaf.h"
 #include "util/thread_registry.h"
 #include "vcs/zcode_dht_identity.h"
 
+#include <errno.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -77,6 +85,7 @@ static bool g_identity_gap_logged;
 
 static struct sosvc_artifact g_artifacts[STATE_OFFER_MAX_PER_PEER];
 static uint32_t g_artifact_count;
+static int g_snapshot_registry_count;
 static int64_t g_snapshot_unix;
 static bool g_snapshot_valid;
 
@@ -84,8 +93,12 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t g_fetch_thread;
 static _Atomic bool g_fetch_running;
 static bool g_fetch_started;
+static bool g_fetch_staged;
 static bool g_fallback_raised;
 static struct state_offer_record g_fetch_target;
+static _Atomic bool g_fetch_stopping;
+static enum sol_receive_result g_fetch_result;
+static struct { uint32_t done, total; uint64_t bytes, size; bool dirty; } g_fetch_progress;
 
 static int64_t sosvc_now_unix(void)
 {
@@ -250,12 +263,13 @@ sosvc_cache_find(const struct rom_artifact *a, const struct sosvc_file_id *id)
 }
 
 /* Is this registered artifact something the offer path could ever describe? */
+
 static bool sosvc_artifact_eligible(const struct rom_artifact *a)
 {
     return a->used && a->kind == ROM_ARTIFACT_CONSENSUS_BUNDLE &&
            a->chunk_size == ROM_SEED_CHUNK_SIZE && a->num_chunks != 0 &&
-           a->filename[0] != '\0' &&
-           strlen(a->filename) < STATE_OFFER_NAME_MAX;
+           zcl_path_leaf(a->filename)[0] != '\0' &&
+           strlen(zcl_path_leaf(a->filename)) < STATE_OFFER_NAME_MAX;
 }
 
 enum sosvc_resolve { SOSVC_RESOLVE_FAILED, SOSVC_RESOLVE_CACHED,
@@ -308,8 +322,9 @@ static void sosvc_fill_artifact(struct sosvc_artifact *s,
     s->content_bytes = a->size_bytes;
     s->num_chunks = a->num_chunks;
     s->chunk_size = a->chunk_size;
-    s->filename_len = (uint16_t)strlen(a->filename);
-    memcpy(s->filename, a->filename, s->filename_len);
+    const char *name = zcl_path_leaf(a->filename);
+    s->filename_len = (uint16_t)strlen(name);
+    memcpy(s->filename, name, s->filename_len);
 }
 
 struct sosvc_refresh_tally {
@@ -360,10 +375,10 @@ static int sosvc_build_snapshot(struct sosvc_refresh_tally *t)
     return n;
 }
 
-/* Is a snapshot rebuild due? Caller holds g_lock. */
-static bool sosvc_refresh_due_locked(void)
+/* Count changes refresh promptly; same-count replacement waits for the TTL. Caller holds g_lock. */
+static bool sosvc_refresh_due_locked(int registry_count)
 {
-    return !g_snapshot_valid ||
+    return !g_snapshot_valid || registry_count != g_snapshot_registry_count ||
            sosvc_now_unix() - g_snapshot_unix >= SOSVC_SNAPSHOT_TTL_S;
 }
 
@@ -374,8 +389,9 @@ static bool sosvc_refresh_due_locked(void)
  * test hook): sosvc_provide, on the same message thread, never refreshes. */
 static void sosvc_refresh_snapshot(bool force)
 {
+    int registry_count = rom_seed_count();
     pthread_mutex_lock(&g_lock);
-    if (g_refreshing || (!force && !sosvc_refresh_due_locked())) {
+    if (g_refreshing || (!force && !sosvc_refresh_due_locked(registry_count))) {
         pthread_mutex_unlock(&g_lock);
         return;
     }
@@ -392,6 +408,7 @@ static void sosvc_refresh_snapshot(bool force)
         g_artifact_count = t.built;
         g_snapshot_unix = sosvc_now_unix();
         g_snapshot_valid = true;
+        g_snapshot_registry_count = n;
         memcpy(g_mcache, g_mcache_next, sizeof(g_mcache));
     }
     g_refreshing = false;
@@ -612,124 +629,113 @@ static bool sosvc_progress(uint32_t chunks_done, uint32_t num_chunks,
                            uint64_t bytes_done, void *ctx)
 {
     const struct state_offer_v1 *offer = ctx;
-    state_offer_store_note_fetch_progress(
-        chunks_done, num_chunks, bytes_done,
-        offer ? offer->content_bytes : 0);
-    return true;
+    pthread_mutex_lock(&g_lock);
+    g_fetch_progress.done = chunks_done;
+    g_fetch_progress.total = num_chunks;
+    g_fetch_progress.bytes = bytes_done;
+    g_fetch_progress.size = offer ? offer->content_bytes : 0;
+    g_fetch_progress.dirty = true;
+    pthread_mutex_unlock(&g_lock);
+    return !atomic_load(&g_fetch_stopping);
 }
-
-/* One download, on its own thread. Every check below already existed; this
- * function only chooses the arguments. */
+static bool sosvc_manifest(const struct state_offer_v1 *o, struct rom_fetch_manifest *m)
+{
+    memset(m, 0, sizeof(*m));
+    if (!state_offer_v1_filename(o, m->filename, sizeof(m->filename))) return false;
+    m->used = true; m->size_bytes = o->content_bytes; m->chunk_size = o->chunk_size;
+    m->num_chunks = o->num_chunks; m->kind = ROM_ARTIFACT_CONSENSUS_BUNDLE;
+    m->height = o->bundle_height;
+    memcpy(m->chunk_root, o->chunk_tree_root, 32);
+    memcpy(m->whole_sha3, o->content_digest, 32);
+    return rom_fetch_manifest_sane(m);
+}
+static bool sosvc_bundles(char *out, size_t cap)
+{
+    if (snprintf(out, cap, "%s/bundles", g_datadir) >= (int)cap) return false;
+#if defined(_WIN32)
+    return true; /* Preserve the existing pathname-based IP fetch on Windows. */
+#else
+    if (mkdir(out, 0700) && errno != EEXIST) return false;
+    struct stat st;
+    return !lstat(out, &st) && S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 0022);
+#endif
+}
+static enum sol_receive_result sosvc_fetch_ip(const struct state_offer_record *target,
+    const struct rom_fetch_manifest *m, const char *out_dir, char *landed, size_t cap)
+{
+    char host[NET_ADDR_STR_MAX + 1]; struct net_addr a;
+    net_addr_init(&a); memcpy(a.ip, target->peer_ip, sizeof(a.ip));
+    if (net_addr_to_string(&a, host, sizeof(host)) <= 0 || !host[0]) return SOL_RECEIVE_UNAVAILABLE;
+    static uint8_t hashes[ROM_SEED_MAX_CHUNKS][32]; uint32_t count = 0;
+    if (!rom_fetch_get_manifest(host, target->file_service_port, m->chunk_root,
+                                hashes, ROM_SEED_MAX_CHUNKS, &count) || count != m->num_chunks)
+        return SOL_RECEIVE_UNAVAILABLE;
+    if (!rom_fetch_download_verified(host, target->file_service_port, m, hashes, count,
+                                      out_dir, sosvc_progress, (void *)&target->offer))
+        return atomic_load(&g_fetch_stopping) ? SOL_RECEIVE_CANCELLED : SOL_RECEIVE_UNAVAILABLE;
+    return snprintf(landed, cap, "%s/%s", out_dir, m->filename) < (int)cap ? SOL_RECEIVE_OK : SOL_RECEIVE_LOCAL_IO;
+}
+static enum sol_receive_result sosvc_fetch_link(const struct state_offer_record *target,
+    const struct rom_fetch_manifest *m, const char *out_dir, char *landed, size_t cap)
+{
+    if (target->peer_id < 0 || target->peer_id == INT64_MAX) return SOL_RECEIVE_UNAVAILABLE;
+    uint64_t peer = (uint64_t)target->peer_id + 1;
+    pthread_mutex_lock(&g_lock);
+    bool started = !atomic_load(&g_fetch_stopping) && state_offer_peer_begin(peer);
+    pthread_mutex_unlock(&g_lock);
+    if (!started) return SOL_RECEIVE_UNAVAILABLE;
+    enum sol_receive_result r = state_offer_link_receive(m, out_dir, sol_client_read, &peer,
+        sosvc_progress, (void *)&target->offer, landed, cap);
+    state_offer_peer_end(peer);
+    return r;
+}
 static void *sosvc_fetch_main(void *arg)
 {
     (void)arg;
     struct state_offer_record target = g_fetch_target;
-    const struct state_offer_v1 *offer = &target.offer;
-
-    char host[NET_ADDR_STR_MAX + 1];
-    struct net_addr a;
-    net_addr_init(&a);
-    memcpy(a.ip, target.peer_ip, sizeof(a.ip));
-    if (net_addr_to_string(&a, host, sizeof(host)) <= 0 || !host[0]) {
-        LOG_WARN(SOSVC_SUBSYS, "chosen offer has no printable endpoint");
-        state_offer_store_note_bad(offer->content_digest, target.peer_id);
-        g_fetch_running = false;
-        return NULL;
+    struct rom_fetch_manifest m; char out_dir[1024], landed[1200];
+    enum sol_receive_result r = SOL_RECEIVE_BAD_DATA;
+    if (sosvc_manifest(&target.offer, &m)) {
+        r = SOL_RECEIVE_LOCAL_IO;
+        if (sosvc_bundles(out_dir, sizeof(out_dir)))
+            r = target.peer_link ? sosvc_fetch_link(&target, &m, out_dir, landed, sizeof(landed)) :
+                sosvc_fetch_ip(&target, &m, out_dir, landed, sizeof(landed));
     }
-
-    struct rom_fetch_manifest m;
-    memset(&m, 0, sizeof(m));
-    if (!state_offer_v1_filename(offer, m.filename, sizeof(m.filename))) {
-        state_offer_store_note_bad(offer->content_digest, target.peer_id);
-        g_fetch_running = false;
-        return NULL;
+    if (r == SOL_RECEIVE_OK && !atomic_load(&g_fetch_stopping)) {
+        if (boot_install_bundle_request(g_datadir, landed) <= 0) {
+            LOG_WARN(SOSVC_SUBSYS, "verified bundle staged but install request could not be armed");
+            r = SOL_RECEIVE_LOCAL_IO;
+        }
     }
-    m.used = true;
-    m.size_bytes = offer->content_bytes;
-    m.chunk_size = offer->chunk_size;
-    m.num_chunks = offer->num_chunks;
-    memcpy(m.chunk_root, offer->chunk_tree_root, 32);
-    memcpy(m.whole_sha3, offer->content_digest, 32);
-    m.kind = ROM_ARTIFACT_CONSENSUS_BUNDLE;
-    m.height = offer->bundle_height;
-    /* The existing sanity gate on the manifest we just built from a peer's
-     * claim. If it refuses, the peer described something the fetch path would
-     * never accept, and the dial is not worth making. */
-    if (!rom_fetch_manifest_sane(&m)) {
-        LOG_WARN(SOSVC_SUBSYS,
-                 "chosen offer describes an artifact the fetch path refuses — "
-                 "not dialled");
-        state_offer_store_note_bad(offer->content_digest, target.peer_id);
-        g_fetch_running = false;
-        return NULL;
-    }
-
-    char out_dir[1024];
-    if (snprintf(out_dir, sizeof(out_dir), "%s/bundles", g_datadir) >=
-        (int)sizeof(out_dir)) {
-        g_fetch_running = false;
-        return NULL;
-    }
-
-    LOG_INFO(SOSVC_SUBSYS,
-             "fetching offered bundle at height %ld (%llu bytes, %u chunks) "
-             "from %s:%u — every chunk is verified against the offer's own "
-             "chunk root before it is written",
-             (long)offer->bundle_height,
-             (unsigned long long)offer->content_bytes, offer->num_chunks, host,
-             (unsigned)target.file_service_port);
-
-    /* Per-chunk manifest, BOUND to the chunk root the offer committed to. A
-     * seeder that cannot serve it is not an offence — it is the legacy reply,
-     * and a bundle we cannot verify chunk by chunk is one we do not take in
-     * phase 1a. */
-    static uint8_t chunk_sha3[ROM_SEED_MAX_CHUNKS][32];
-    uint32_t num_chunks = 0;
-    bool ok = rom_fetch_get_manifest(host, target.file_service_port,
-                                     m.chunk_root, chunk_sha3,
-                                     ROM_SEED_MAX_CHUNKS, &num_chunks) &&
-              num_chunks == m.num_chunks;
-    if (ok)
-        ok = rom_fetch_download_verified(host, target.file_service_port, &m,
-                                         chunk_sha3, num_chunks, out_dir,
-                                         sosvc_progress,
-                                         (void *)&target.offer);
-    if (!ok) {
-        /* The bytes did not verify, or never arrived. rom_fetch has already
-         * discarded them; the store refuses this digest for the rest of the
-         * run and strikes the offerer, and the next offer is chosen. */
-        LOG_WARN(SOSVC_SUBSYS,
-                 "offered bundle at height %ld did not verify — discarded, "
-                 "peer struck, trying the next offer",
-                 (long)offer->bundle_height);
-        state_offer_store_note_bad(offer->content_digest, target.peer_id);
-        g_fetch_running = false;
-        return NULL;
-    }
-
-    char landed[1200];
-    if (snprintf(landed, sizeof(landed), "%s/%s", out_dir, m.filename) >=
-        (int)sizeof(landed)) {
-        g_fetch_running = false;
-        return NULL;
-    }
-    /* Hand it to the UNCHANGED install path. Checkpoint re-derivation and
-     * Sapling-root re-derivation decide whether this state is admissible; this
-     * module has no opinion and no override. */
-    if (boot_install_bundle_request(g_datadir, landed) != 0)
-        LOG_WARN(SOSVC_SUBSYS,
-                 "bundle landed at '%s' but the install request could not be "
-                 "armed — the file is staged and the autodetect path will "
-                 "still find it", landed);
-    else
-        LOG_INFO(SOSVC_SUBSYS,
-                 "offered bundle at height %ld landed and armed for install — "
-                 "no operator flag, no catalog, no configured file service",
-                 (long)offer->bundle_height);
-    g_fetch_running = false;
+    g_fetch_result = r;
+    atomic_store(&g_fetch_running, false);
     return NULL;
 }
-
+static void sosvc_drain_progress(void)
+{
+    pthread_mutex_lock(&g_lock);
+    uint32_t done = g_fetch_progress.done, total = g_fetch_progress.total;
+    uint64_t bytes = g_fetch_progress.bytes, size = g_fetch_progress.size;
+    bool dirty = g_fetch_progress.dirty;
+    g_fetch_progress.dirty = false;
+    pthread_mutex_unlock(&g_lock);
+    if (dirty) state_offer_store_note_fetch_progress(done, total, bytes, size);
+}
+static void sosvc_finish_fetch(void)
+{
+    pthread_join(g_fetch_thread, NULL);
+    g_fetch_started = false;
+    if (g_fetch_result == SOL_RECEIVE_OK) g_fetch_staged = true;
+    if (g_fetch_result == SOL_RECEIVE_BAD_DATA) {
+        if (g_fetch_target.peer_link)
+            state_offer_store_note_link_bad(g_fetch_target.offer.content_digest, g_fetch_target.peer_id);
+        else state_offer_store_note_bad(g_fetch_target.offer.content_digest, g_fetch_target.peer_id);
+    } else if (g_fetch_result != SOL_RECEIVE_OK) {
+        if (g_fetch_target.peer_link)
+            state_offer_store_note_link_retry(g_fetch_target.offer.content_digest, g_fetch_target.peer_id, sosvc_now_ms());
+        else state_offer_store_note_retry(g_fetch_target.offer.content_digest, sosvc_now_ms());
+    }
+}
 void state_offer_service_wire(struct msg_processor *mp)
 {
     if (!mp)
@@ -748,8 +754,14 @@ void state_offer_service_start(const char *datadir, struct node_db *ndb)
     g_refreshing = false;
     g_artifact_count = 0;
     g_fetch_started = false;
+    g_fetch_staged = false;
     g_fetch_running = false;
     g_fallback_raised = false;
+    atomic_store(&g_fetch_stopping, false);
+    g_fetch_result = SOL_RECEIVE_UNAVAILABLE;
+    memset(&g_fetch_progress, 0, sizeof(g_fetch_progress));
+    if (!state_offer_peer_start(datadir))
+        LOG_WARN(SOSVC_SUBSYS, "peer-link service could not start");
 
     uint8_t pubkey[32];
     char err[160];
@@ -768,6 +780,11 @@ void state_offer_service_start(const char *datadir, struct node_db *ndb)
 void state_offer_service_shutdown(void)
 {
     state_offer_set_provider(NULL, NULL);
+    pthread_mutex_lock(&g_lock);
+    atomic_store(&g_fetch_stopping, true);
+    sol_client_shutdown();
+    pthread_mutex_unlock(&g_lock);
+    state_offer_peer_shutdown();
     if (g_fetch_started) {
         pthread_join(g_fetch_thread, NULL);
         g_fetch_started = false;
@@ -784,6 +801,7 @@ void state_offer_service_shutdown(void)
 void state_offer_service_tick(void)
 {
     int64_t now_ms = sosvc_now_ms();
+    sosvc_drain_progress();
     state_offer_store_note_first_peer(now_ms);
     /* Producer side: make sure a node that HOLDS a bundle can actually say so.
      * It also refreshes the artifact snapshot every SOSVC_SNAPSHOT_TTL_S (a
@@ -794,10 +812,8 @@ void state_offer_service_tick(void)
         return;
     /* A finished thread is joined before another can start, so exactly one
      * download exists at a time and none is ever abandoned. */
-    if (g_fetch_started) {
-        pthread_join(g_fetch_thread, NULL);
-        g_fetch_started = false;
-    }
+    if (g_fetch_started) sosvc_finish_fetch();
+    if (g_fetch_staged) return;
 
     struct state_offer_record chosen;
     enum state_offer_decision decision =
@@ -822,10 +838,13 @@ void state_offer_service_tick(void)
         return;
 
     g_fetch_target = chosen;
-    state_offer_store_note_fetching(chosen.offer.content_digest);
+    if (chosen.peer_link) state_offer_store_note_link_fetching(chosen.offer.content_digest, chosen.peer_id);
+    else state_offer_store_note_fetching(chosen.offer.content_digest);
     g_fetch_running = true;
     if (pthread_create(&g_fetch_thread, NULL, sosvc_fetch_main, NULL) != 0) {
         g_fetch_running = false;
+        if (chosen.peer_link) state_offer_store_note_link_retry(chosen.offer.content_digest, chosen.peer_id, now_ms);
+        else state_offer_store_note_retry(chosen.offer.content_digest, now_ms);
         LOG_WARN(SOSVC_SUBSYS, "could not start the offer fetch thread");
         return;
     }
@@ -833,6 +852,7 @@ void state_offer_service_tick(void)
 }
 
 #ifdef ZCL_TESTING
+void state_offer_service_test_set_staged(bool staged) { g_fetch_staged = staged; }
 bool state_offer_service_test_fetch_running_is_atomic(void)
 {
     return _Generic(&g_fetch_running, _Atomic bool *: true, default: false);

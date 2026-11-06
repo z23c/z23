@@ -5,6 +5,7 @@
 #include <jni.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* The first-run setup screens: Create or Restore, the recovery words shown once, the words asked back, and the progress
  * of a restore, drawn as Android Views over the model of wallet_setup.c. The device key and the node commands run on a
@@ -21,6 +22,8 @@ enum zapp_setup_outcome {
 
 /* Binds setup to the activity. changed wakes the UI thread when the model changed what is shown. */
 bool zapp_setup_attach(ANativeActivity *activity, void (*changed)(void));
+/* Copies the current confirmed setup address, if this process created it. */
+bool zapp_setup_receive_address(char *out, size_t cap, uint64_t *generation);
 /* container is a vertical LinearLayout inside the setup screen's ScrollView. */
 bool zapp_setup_ui_create(JNIEnv *env, jobject activity, jobject container);
 void zapp_setup_ui_destroy(JNIEnv *env);

@@ -870,21 +870,57 @@ static bool bump_mtime(const char *path, int seconds)
     return utimensat(AT_FDCWD, path, ts, 0) == 0;
 }
 
+static int late_registered_bundle_is_offered(void)
+{
+    int failures = 0;
+    TEST_CASE("a bundle registered after the empty snapshot is offered on the next tick") {
+        char dir[PATH_MAX], bundles[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "state_offer_cache", "late");
+        snprintf(bundles, sizeof(bundles), "%s/bundles", dir);
+        ASSERT(mkdir(bundles, 0700) == 0);
+        rom_seed_reset();
+        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+        ASSERT(cp != NULL);
+        g_cache_reader_height = cp->height;
+        int32_t tip = cp->height + 100000;
+        state_offer_service_test_set_manifest_reader(cache_fixture_reader);
+        state_offer_service_start(dir, NULL);
+        state_offer_service_test_ensure_identity(tip);
+        ASSERT(!state_offer_service_test_have_identity());
+        uint8_t content[64 * 1024];
+        gen_bundle_content(content, sizeof(content));
+        ASSERT(write_bundle_file(bundles, "consensus-state-bundle-780.sqlite", content, sizeof(content)));
+        struct rom_artifact art;
+        ASSERT_EQ(rom_seed_register(dir, "bundles/consensus-state-bundle-780.sqlite", NULL, &art), ROM_REG_OK);
+        state_offer_service_test_ensure_identity(tip);
+        ASSERT(state_offer_service_test_have_identity());
+        struct state_offer_batch_v1 batch = {0};
+        ASSERT_EQ(state_offer_service_test_provide(&batch, tip), 1u);
+        ASSERT_EQ(state_offer_v1_verify(&batch.offers[0]), STATE_OFFER_OK);
+        state_offer_service_test_set_manifest_reader(NULL);
+        state_offer_service_shutdown();
+        rom_seed_reset();
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
 static int manifest_cache_skips_unchanged_bundles(void)
 {
     int failures = 0;
     TEST_CASE("an unchanged bundle is not re-opened by the refresh; a changed "
               "one is; the send path never opens; a removed one drops out") {
-        char dir[PATH_MAX], file[PATH_MAX];
+        char dir[PATH_MAX], file[PATH_MAX], bundles[PATH_MAX];
         test_make_tmpdir(dir, sizeof(dir), "state_offer_cache", "refresh");
-        snprintf(file, sizeof(file), "%s/consensus-state-bundle-780.sqlite",
-                 dir);
+        snprintf(bundles, sizeof(bundles), "%s/bundles", dir);
+        ASSERT(mkdir(bundles, 0700) == 0);
+        snprintf(file, sizeof(file), "%s/bundles/consensus-state-bundle-780.sqlite", dir);
         uint8_t content[64 * 1024];
         gen_bundle_content(content, sizeof(content));
-        ASSERT(write_bundle_file(dir, "consensus-state-bundle-780.sqlite",
+        ASSERT(write_bundle_file(bundles, "consensus-state-bundle-780.sqlite",
                                  content, sizeof(content)));
         struct rom_artifact art;
-        ASSERT(rom_seed_register(dir, "consensus-state-bundle-780.sqlite", NULL,
+        ASSERT(rom_seed_register(dir, "bundles/consensus-state-bundle-780.sqlite", NULL,
                                  &art) == ROM_REG_OK);
 
         const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
@@ -917,6 +953,8 @@ static int manifest_cache_skips_unchanged_bundles(void)
         memset(&batch, 0, sizeof(batch));
         ASSERT_EQ(state_offer_service_test_provide(&batch, tip), 1u);
         ASSERT_EQ(state_offer_service_test_manifest_opens(), base + 2);
+        ASSERT(strcmp((const char *)batch.offers[0].filename, "consensus-state-bundle-780.sqlite") == 0);
+        ASSERT_EQ(state_offer_v1_verify(&batch.offers[0]), STATE_OFFER_OK);
 
         /* An artifact gone from rom_seed_list drops out of the snapshot. */
         rom_seed_reset();
@@ -964,6 +1002,140 @@ static int identity_gap_rewarns_after_restart(void)
     return failures;
 }
 
+static int peer_link_retry(void)
+{
+    int failures = 0;
+    TEST_CASE("live peer offers retain zero-IP routes and transient retry") {
+        struct state_offer_v1 offer, tampered;
+        struct state_offer_record selected;
+        uint8_t zero_ip[16] = {0};
+        state_offer_store_reset();
+        make_offer(&offer, 900000, 900000, 0x20);
+        ASSERT_EQ(state_offer_store_record(&offer, zero_ip, 0, 4, 1000), STATE_OFFER_STORE_DROPPED_ENDPOINT);
+        ASSERT_EQ(state_offer_store_record_link(&offer, -1, 1000), STATE_OFFER_STORE_DROPPED_INVALID);
+        tampered = offer; tampered.signature[0] ^= 1;
+        ASSERT_EQ(state_offer_store_record_link(&tampered, 4, 1000), STATE_OFFER_STORE_DROPPED_UNSIGNED);
+        ASSERT_EQ(state_offer_store_record_link(&offer, 4, 1000), STATE_OFFER_STORE_KEPT);
+        ASSERT_EQ(state_offer_store_decide(1000, &selected), STATE_OFFER_DECIDE_FETCH);
+        ASSERT(selected.peer_link && selected.peer_id == 4 && selected.file_service_port == 0);
+        state_offer_store_note_link_fetching(offer.content_digest, 4);
+        state_offer_store_note_link_retry(offer.content_digest, 4, 1000);
+        ASSERT(!state_offer_store_digest_is_bad(offer.content_digest));
+        ASSERT_EQ(state_offer_store_peer_strikes(4), 0u);
+        ASSERT_EQ(state_offer_store_decide(30999, &selected), STATE_OFFER_DECIDE_WAIT);
+        ASSERT_EQ(state_offer_store_record_link(&offer, 4, 1500), STATE_OFFER_STORE_KEPT_REPLACED);
+        ASSERT_EQ(state_offer_store_decide(30999, &selected), STATE_OFFER_DECIDE_WAIT);
+        ASSERT_EQ(state_offer_store_decide(31000, &selected), STATE_OFFER_DECIDE_FETCH);
+        state_offer_store_note_link_retry(offer.content_digest, 4, 32000);
+        ASSERT_EQ(state_offer_store_record_link(&offer, 5, 33000), STATE_OFFER_STORE_KEPT);
+        ASSERT_EQ(state_offer_store_decide(33000, &selected), STATE_OFFER_DECIDE_FETCH);
+        ASSERT(selected.peer_link && selected.peer_id == 5);
+        state_offer_store_note_link_bad(offer.content_digest, 5);
+        ASSERT_EQ(state_offer_store_peer_strikes(5), 1u);
+        ASSERT(!state_offer_store_digest_is_bad(offer.content_digest));
+        ASSERT_EQ(state_offer_store_record_link(&offer, 5, 34000), STATE_OFFER_STORE_DROPPED_BAD);
+        ASSERT_EQ(state_offer_store_decide(61999, &selected), STATE_OFFER_DECIDE_WAIT);
+        ASSERT_EQ(state_offer_store_decide(62000, &selected), STATE_OFFER_DECIDE_FETCH);
+        ASSERT(selected.peer_id == 4);
+    } TEST_END
+    state_offer_store_reset();
+    return failures;
+}
+
+static int peer_link_strike_eviction(void)
+{
+    int failures = 0;
+    TEST_CASE("link strike memory remains bounded without excluding new peers") {
+        struct state_offer_v1 offer;
+        state_offer_store_reset();
+        make_offer(&offer, 900000, 900000, 0x20);
+        for (int64_t i = 0; i <= STATE_OFFER_STORE_BAD_MAX; ++i) {
+            ASSERT_EQ(state_offer_store_record_link(&offer, i, 1000), STATE_OFFER_STORE_KEPT);
+            state_offer_store_note_link_bad(offer.content_digest, i);
+        }
+        ASSERT_EQ(state_offer_store_record_link(&offer, 0, 1000), STATE_OFFER_STORE_KEPT);
+        ASSERT_EQ(state_offer_store_record_link(&offer, STATE_OFFER_STORE_BAD_MAX, 1000), STATE_OFFER_STORE_DROPPED_BAD);
+    } TEST_END
+    state_offer_store_reset();
+    return failures;
+}
+
+static int peer_link_inflight(void)
+{
+    int failures = 0;
+    TEST_CASE("in-flight sources are never evicted") {
+        struct state_offer_v1 offer, newer;
+        uint8_t first[32];
+        state_offer_store_reset();
+        for (int64_t i = 0; i < STATE_OFFER_STORE_MAX; ++i) {
+            make_offer(&offer, 900000 + (int32_t)i, 900000 + (int32_t)i, (uint8_t)(0x20 + i));
+            if (!i) memcpy(first, offer.content_digest, sizeof(first));
+            ASSERT_EQ(state_offer_store_record_link(&offer, i, 1000), STATE_OFFER_STORE_KEPT);
+            state_offer_store_note_link_fetching(offer.content_digest, i);
+        }
+        make_offer(&newer, 900100, 900100, 0x70);
+        ASSERT_EQ(state_offer_store_record_link(&newer, 99, 1000), STATE_OFFER_STORE_DROPPED_FULL);
+        state_offer_store_note_link_retry(first, 0, 1000);
+        ASSERT_EQ(state_offer_store_record_link(&newer, 99, 1000), STATE_OFFER_STORE_KEPT);
+    } TEST_END
+    state_offer_store_reset();
+    return failures;
+}
+
+static int peer_link_replay_rotation(void)
+{
+    int failures = 0;
+    TEST_CASE("replayed offers cannot exclude a later source of the same digest") {
+        struct state_offer_v1 offer;
+        struct state_offer_record selected;
+        struct state_offer_store_status status;
+        state_offer_store_reset();
+        make_offer(&offer, 900000, 900000, 0x20);
+        for (int64_t peer = 0; peer < 64; ++peer)
+            ASSERT_EQ(state_offer_store_record_link(&offer, peer, 1000 + peer), STATE_OFFER_STORE_KEPT);
+        state_offer_store_status_get(&status);
+        ASSERT_EQ(status.offers_retained, 4u);
+        ASSERT_EQ(state_offer_store_record_link(&offer, 100, 1064), STATE_OFFER_STORE_KEPT);
+        for (int64_t peer = 61; peer <= 63; ++peer)
+            state_offer_store_note_link_retry(offer.content_digest, peer, 1064);
+        ASSERT_EQ(state_offer_store_decide(1064, &selected), STATE_OFFER_DECIDE_FETCH);
+        ASSERT_EQ(selected.peer_id, 100);
+        state_offer_store_note_link_fetching(offer.content_digest, 100);
+        state_offer_store_note_link_bad(offer.content_digest, 100);
+        ASSERT(!state_offer_store_digest_is_bad(offer.content_digest));
+        ASSERT_EQ(state_offer_store_record_link(&offer, 101, 1065), STATE_OFFER_STORE_KEPT);
+        ASSERT_EQ(state_offer_store_decide(1065, &selected), STATE_OFFER_DECIDE_FETCH);
+        ASSERT_EQ(selected.peer_id, 101);
+    } TEST_END
+    state_offer_store_reset();
+    return failures;
+}
+
+static int staged_bundle_prevents_repeat_fetch(void)
+{
+    int failures = 0;
+    TEST_CASE("a staged bundle prevents another provider fetch") {
+        char dir[PATH_MAX];
+        struct state_offer_v1 offer;
+        struct state_offer_record selected;
+        test_make_tmpdir(dir, sizeof(dir), "state_offer_stage", "repeat");
+        state_offer_store_reset();
+        state_offer_service_start(dir, NULL);
+        make_offer(&offer, 900000, 900000, 0x20);
+        ASSERT_EQ(state_offer_store_record_link(&offer, 4, 1000), STATE_OFFER_STORE_KEPT);
+        ASSERT_EQ(state_offer_store_record_link(&offer, 5, 1001), STATE_OFFER_STORE_KEPT);
+        state_offer_service_test_set_staged(true);
+        state_offer_service_tick();
+        ASSERT(!state_offer_service_test_fetch_running());
+        ASSERT_EQ(state_offer_store_decide(2000, &selected), STATE_OFFER_DECIDE_FETCH);
+        state_offer_service_test_set_staged(false);
+        state_offer_service_shutdown();
+        state_offer_store_reset();
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
 int test_state_offer_store(void)
 {
     int failures = 0;
@@ -980,12 +1152,18 @@ int test_state_offer_store(void)
     failures += store_is_bounded();
     failures += silent_peer_set_fallback();
     failures += endpoint_required();
+    failures += peer_link_retry();
+    failures += peer_link_strike_eviction();
+    failures += peer_link_inflight();
+    failures += peer_link_replay_rotation();
+    failures += staged_bundle_prevents_repeat_fetch();
     failures += unsigned_offer_refused();
     failures += first_boot_peer_offer_is_consumed();
     failures += catalog_bundles_prefix_resolves();
     failures += catalog_bare_basename_resolves();
     failures += missing_bundle_file_fails_closed_with_named_log();
     failures += manifest_cache_skips_unchanged_bundles();
+    failures += late_registered_bundle_is_offered();
     state_offer_store_reset();
     return failures;
 }

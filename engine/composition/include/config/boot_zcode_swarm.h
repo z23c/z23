@@ -71,9 +71,15 @@ void boot_zcode_swarm_request_tick(void);
 size_t boot_zcode_swarm_peers_for_onion(const char *onion, uint64_t *ids,
                                         size_t max);
 
-/* Wire the hooks onto svc->msg_processor and arm the supervisor child
- * that clock-drives the swarm. Cheap; safe before the store opens (the
- * engine is created lazily on first use). */
+/* Publish stable message callbacks and peer-link capability before connman
+ * starts. This does not open the optional frontend services. */
+void boot_zcode_swarm_wire_network(struct boot_svc_ctx *svc);
+/* Compose ordinary sends with bounded peer-link progress on every connman
+ * cycle, including quiet connections with no inbound messages. */
+bool boot_zcode_swarm_send_messages(void *ctx, struct p2p_node *node, bool trickle);
+
+/* Initialize optional frontend services asynchronously, publish their readiness
+ * to the existing callbacks, and arm the supervisor clock. */
 void boot_zcode_swarm_wire(struct boot_svc_ctx *svc);
 
 /* Free the engine + book + ledger and clear the node-global engine.

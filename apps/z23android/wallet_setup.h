@@ -145,6 +145,8 @@ struct wsu {
     bool birthday_honoured;
     size_t bad_word;     /* with BAD_WORD: the index of the word, counted from 0 */
     enum wsu_failure refusal;   /* with NO_BIRTHDAY: why the last Start over was refused, or none */
+    char first_shielded_address[SUN_ADDRESS_MAX];
+    uint64_t address_generation;
     bool confirmed;      /* the owner proved the words (create) or typed them (restore) */
     bool restored;       /* the setup was a restore */
     bool protected;      /* every window protection is in force */
@@ -162,6 +164,7 @@ struct wsu {
 };
 bool wsu_init(struct wsu *w, const struct wsu_env *env, const struct sun *node, const char *files);
 void wsu_destroy(struct wsu *w);
+bool wsu_receive_address(struct wsu *w, char *out, size_t cap, uint64_t *generation);
 
 /* Protects the window and returns whether every protection is in force. Words are withheld, and no wallet is made, while
  * it is not. */

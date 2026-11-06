@@ -68,6 +68,8 @@ struct state_offer_record {
     struct state_offer_v1 offer;
     uint8_t peer_ip[16];
     uint16_t file_service_port;
+    bool peer_link;
+    int64_t retry_after_ms;
     int64_t peer_id;
     int64_t heard_ms;
 };
@@ -106,6 +108,16 @@ bool state_offer_store_wait_armed(void);
 enum state_offer_store_result state_offer_store_record(
     const struct state_offer_v1 *offer, const uint8_t peer_ip[16],
     uint16_t file_service_port, int64_t peer_id, int64_t now_ms);
+
+/* Signed offer received on the existing live peer connection; no second dial. */
+enum state_offer_store_result state_offer_store_record_link(
+    const struct state_offer_v1 *offer, int64_t peer_id, int64_t now_ms);
+void state_offer_store_note_link_fetching(const uint8_t digest[32], int64_t peer_id);
+void state_offer_store_note_link_retry(const uint8_t digest[32], int64_t peer_id, int64_t now_ms);
+void state_offer_store_note_link_bad(const uint8_t digest[32], int64_t peer_id);
+/* A transport interruption is not evidence of bad content. Retry after the
+ * bounded delay, retaining the manifest and durable download journal. */
+void state_offer_store_note_retry(const uint8_t content_digest[32], int64_t now_ms);
 
 /* Remember that this content digest was fetched and did NOT verify. The offer
  * is dropped, the digest is refused if re-offered, and the offering peer takes
