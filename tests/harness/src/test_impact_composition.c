@@ -6832,6 +6832,10 @@ static bool ic_split_base_build(void)
            ic_split_w("Makefile", ic_split_make_base) &&
            ic_split_w("mk/extra.mk", "EXTRA = $(D)/other.c\n") &&
            ic_split_w("docs/NOTES.txt", "pending: native_devagent_rules\n") &&
+           ic_split_w("tools/zz/m1.txt", "one\n") &&
+           ic_split_w("tools/zz/m2.txt", "two\n") &&
+           ic_split_w("tools/zz/m3.txt", "three\n") &&
+           ic_split_w("tools/zz/m4.txt", "four\n") &&
            /* a generic leaf name used as a word, and a path into the app */
            ic_split_w("docs/APP_NOTES.txt",
                       "home.c and rpc.c are generic names\n"
@@ -7338,6 +7342,44 @@ static bool ic_fresh_edit_other_app(void)
                       "int main(void)\n{\n    return 0;\n}\n");
 }
 
+/* Rows that sort after an admitted sidecar are edited too: dropping the
+ * sidecar from the closure input must keep every one of them. */
+static bool ic_fresh_edit_dropcur(void)
+{
+    return ic_fresh_edit_sidecar() &&
+           ic_split_w("tools/zz/m1.txt", "one edited\n") &&
+           ic_split_w("tools/zz/m2.txt", "two edited\n") &&
+           ic_split_w("tools/zz/m3.txt", "three edited\n") &&
+           ic_split_w("tools/zz/m4.txt", "four edited\n");
+}
+
+/* The closure input is every changed row but the dropped sidecar, each once
+ * and in place. Pointers are compared, never read: a corrupt entry must fail
+ * the check, not the process. */
+static bool ic_current_intact(const struct zcl_dev_proof_changed_set *set)
+{
+    if (!set->current_files || set->fresh_sidecars != 1 ||
+        set->current_count + 1 != set->count)
+        return false;
+    size_t at = 0;
+    for (size_t i = 0; i < set->count; i++) {
+        size_t len = strlen(set->files[i]);
+        bool sidecar = len > 17 &&
+                       strcmp(set->files[i] + len - 17, ".capabilities.def") == 0;
+        if (sidecar) continue;
+        if (at >= set->current_count || set->current_files[at++] != set->files[i])
+            return false;
+    }
+    return at == set->current_count;
+}
+
+/* The per-case checks beyond the selection itself. */
+static bool ic_fresh_extra(const char *name,
+                           const struct zcl_dev_proof_changed_set *set)
+{
+    return strcmp(name, "freshdropcur") != 0 || ic_current_intact(set);
+}
+
 static bool ic_fresh_fixture_build(void)
 {
     static const struct {
@@ -7388,6 +7430,7 @@ static bool ic_fresh_fixture_build(void)
         {"freshtestnorow", ic_fresh_edit_test_norow},
         {"freshtestoldrow", ic_fresh_edit_test_oldrow},
         {"freshtestotherrow", ic_fresh_edit_test_otherrow},
+        {"freshdropcur", ic_fresh_edit_dropcur},
     };
     if (!ic_split_base_build()) return false;
     for (size_t i = 0; i < sizeof branches / sizeof branches[0]; i++)
@@ -7406,6 +7449,7 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"fresh", 0, "devagent_situation", NULL},   /* new impl, its rule's group */
     {"freshtest", 0, "devagent_start", NULL},   /* new test file, its own group */
     {"freshsidecar", 0, "devagent_situation", "package_capability_claim"},
+    {"freshdropcur", 0, "devagent_situation", "package_capability_claim"},
     {"freshstatic", 0, "devagent_situation", NULL}, /* a private helper */
     {"freshproto", 0, "devagent_situation", NULL},  /* its own prototype */
     {"freshheader", 0, "devagent_situation", NULL}, /* its header beside it */
@@ -7513,6 +7557,7 @@ static int test_ic_changed_set_fresh_source_closure(void)
                 ASSERT(strcmp(reason, "fresh-source-closure") == 0);
                 ASSERT((size_t)selected < zcl_test_group_catalog_count());
                 ASSERT(c->group && strstr(selector, c->group));
+                ASSERT(ic_fresh_extra(c->name, &set));
                 ASSERT(!c->group2 || strstr(selector, c->group2));
                 /* The source-universe walkers and the registry's own
                  * checks see a new source file though no row names them. */

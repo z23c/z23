@@ -2929,7 +2929,7 @@ static void dp_set_drop_current(struct zcl_dev_proof_changed_set *set,
     for (size_t k = 0; k < set->current_count; k++)
         if (set->current_files[k] == ref) {
             memmove(&set->current_files[k], &set->current_files[k + 1],
-                    (set->current_count - k - 1) * sizeof(*ref));
+                    (set->current_count - k - 1) * sizeof(*set->current_files));
             set->current_count--;
             return;
         }
