@@ -30,4 +30,8 @@ deadlock:tor_cond_wait
 # control_lock is a semaphore on purpose: the pool's creator leaves it locked
 # and the last worker to exit unlocks it, which is how threadpool_stop_threads
 # waits for the workers to finish.
+#
+# This row is deliberately broad: it drops every mutex-misuse report that passes
+# through Tor's unlock wrapper, not only the pool's. No narrower name exists while
+# libtor.a is uninstrumented.
 mutex:tor_mutex_release
