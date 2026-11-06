@@ -122,6 +122,7 @@ struct import_tally {
     int skipped;
     int64_t value;   /* sum of the imported rows */
     bool withheld;   /* no coins view: no row was looked at */
+    bool capped;     /* the row cap was reached: more rows may exist */
 };
 
 /* Copy one utxos row into wallet_utxos, with the height and coinbase flag of
@@ -154,12 +155,17 @@ static void import_confirmed_rows(struct wallet_rpc_context *ctx,
         tally->withheld = true;
         return;
     }
-    struct db_utxo utxos[512];
-    int found = db_utxo_list_for_address(ctx->node_db, addr_hash, utxos, 512);
+    struct db_utxo utxos[WALLET_IMPORT_ROW_CAP];
+    int found = db_utxo_list_for_address(ctx->node_db, addr_hash, utxos,
+                                         WALLET_IMPORT_ROW_CAP);
+    tally->capped = found >= WALLET_IMPORT_ROW_CAP;
     for (int i = 0; i < found; i++) {
         struct db_utxo full;
-        if (!db_utxo_find(ctx->node_db, utxos[i].txid, utxos[i].vout, &full))
+        if (!db_utxo_find(ctx->node_db, utxos[i].txid, utxos[i].vout,
+                          &full)) {
+            tally->skipped++;   /* listed a moment ago, now unreadable */
             continue;
+        }
         struct wallet_row_coin coin;
         if (wallet_row_check_coin(ctx->coins_tip, full.txid, full.vout,
                                   full.value, full.script, full.script_len,
@@ -180,19 +186,24 @@ static void import_confirmed_rows(struct wallet_rpc_context *ctx,
 static bool import_warning(char *msg, size_t cap, bool have_db,
                            const struct import_tally *tally)
 {
+    int n = 0;
+    msg[0] = '\0';
     if (tally->withheld && have_db)
-        snprintf(msg, cap,
-                 "Imported; coin discovery withheld: the coins database "
-                 "is unavailable. Once it is, run rescanwallet to rebuild "
-                 "wallet_utxos from the blocks.");
+        n = snprintf(msg, cap,
+                     "Imported; coin discovery withheld: the coins database "
+                     "is unavailable. Once it is, run rescanwallet to rebuild "
+                     "wallet_utxos from the blocks.");
     else if (tally->skipped > 0)
-        snprintf(msg, cap,
-                 "Imported; %d utxos rows skipped because the coins "
-                 "database does not confirm them. Run rescanwallet to rebuild "
-                 "wallet_utxos from the blocks.", tally->skipped);
-    else
-        return false;
-    return true;
+        n = snprintf(msg, cap,
+                     "Imported; %d utxos rows skipped because the coins "
+                     "database does not confirm them. Run rescanwallet to "
+                     "rebuild wallet_utxos from the blocks.", tally->skipped);
+    if (tally->capped && n >= 0 && (size_t)n < cap)
+        snprintf(msg + n, cap - (size_t)n,
+                 "%sOnly the first %d rows were looked at; rescanwallet "
+                 "covers the rest.", n > 0 ? " " : "Imported; ",
+                 WALLET_IMPORT_ROW_CAP);
+    return msg[0] != '\0';
 }
 
 /* An import whose rows all agree replies null, as it always has. A refusal
@@ -202,7 +213,7 @@ static void import_set_reply(struct json_value *result,
                              const struct wallet_rpc_context *ctx,
                              const struct import_tally *tally)
 {
-    char msg[256];
+    char msg[384];
     if (!import_warning(msg, sizeof(msg), ctx->node_db != NULL, tally)) {
         if (ctx->node_db)
             printf("importprivkey: %d UTXOs imported (instant)\n",
@@ -394,11 +405,12 @@ bool rpc_importaddress(const struct json_value *params, bool help,
     json_push_kv_bool(result, "watch_only", true);
     json_push_kv_int(result, "utxos", tally.imported);
     json_push_kv_real(result, "balance", (double)tally.value / 1e8);
-    char msg[256];
+    char msg[384];
     if (import_warning(msg, sizeof(msg), ctx->node_db != NULL, &tally)) {
         LOG_WARN("wallet", "importaddress: %s", msg);
         json_push_kv_int(result, "utxos_skipped", tally.skipped);
         json_push_kv_bool(result, "coin_discovery_withheld", tally.withheld);
+        json_push_kv_bool(result, "rows_capped", tally.capped);
         json_push_kv_str(result, "warning", msg);
     }
     return true;
