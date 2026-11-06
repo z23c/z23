@@ -93,9 +93,10 @@ bool consensus_state_install_read_assisted_seam(
     return true;
 }
 
-/* key -> kind[1] || 4-byte LE height || block_hash[32] || utxo_root[32]. */
+/* key -> kind[1] || 4-byte LE height || block_hash[32] || utxo_root[32] ||
+ * 8-byte LE coins authority generation. */
 #define INSTALL_STAMP_META_KEY "consensus_state.install_authority"
-#define INSTALL_STAMP_BLOB_LEN (1u + 4u + 32u + 32u)
+#define INSTALL_STAMP_BLOB_LEN (1u + 4u + 32u + 32u + 8u)
 
 static bool install_stamp_kind_known(int kind)
 {
@@ -118,6 +119,8 @@ bool consensus_state_install_record_authority_stamp(
         blob[1 + i] = (uint8_t)(h >> (8u * i));
     memcpy(blob + 5, stamp->block_hash, 32);
     memcpy(blob + 37, stamp->utxo_root, 32);
+    for (size_t i = 0; i < 8; i++)
+        blob[69 + i] = (uint8_t)(stamp->coins_generation >> (8u * i));
     /* Must run inside the caller's open activate cutover transaction. */
     if (!progress_meta_set_in_tx(progress_db, INSTALL_STAMP_META_KEY, blob,
                                  sizeof(blob))) {
@@ -161,6 +164,9 @@ bool consensus_state_install_read_authority_stamp(
     out->height = (int32_t)h;
     memcpy(out->block_hash, blob + 5, 32);
     memcpy(out->utxo_root, blob + 37, 32);
+    out->coins_generation = 0;
+    for (size_t i = 0; i < 8; i++)
+        out->coins_generation |= (uint64_t)blob[69 + i] << (8u * i);
     *found = true;
     return true;
 }

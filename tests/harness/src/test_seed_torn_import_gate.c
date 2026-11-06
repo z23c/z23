@@ -41,6 +41,7 @@
 
 #include "test/test_core.h"
 
+#include "config/consensus_state_snapshot_install.h"
 #include "services/block_index_loader.h"
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
@@ -802,6 +803,71 @@ static int stig_run_no_fire_guard_cases(void)
     return failures;
 }
 
+/* Case 7: a checkpoint install stamped this store, then an operator cold
+ * import seeds the stages at its own height. The coins are now the import's,
+ * so the install authority stamp must not survive the seed: a store that kept
+ * it would still read as "verified from the compiled checkpoint". */
+static int stig_run_install_stamp_case(void)
+{
+    int failures = 0;
+    char dir[256];
+    snprintf(dir, sizeof(dir), "./test-tmp/torn_import_%d_stamp",
+             (int)getpid());
+    mkdir("./test-tmp", 0755);
+    mkdir(dir, 0755);
+    blocker_reset_for_testing();
+
+    const int H = STIG_ANCHOR + 88837;
+    progress_store_close();
+    STIG_CHECK("stamp: progress store opens", progress_store_open(dir));
+    sqlite3 *pk = progress_store_db();
+    int64_t live_ck = -1;
+    STIG_CHECK("stamp: coins_kv seeded (no ok=0 row)",
+               stig_case_seed_fixture(pk, &live_ck) && live_ck == 8);
+    STIG_CHECK("stamp: coins applied below the import",
+               pk && stig_set_applied(pk, H));
+
+    struct consensus_state_install_stamp st = {
+        .kind = CONSENSUS_INSTALL_STAMP_CHECKPOINT_ROM, .height = STIG_ANCHOR,
+    };
+    memset(st.block_hash, 0x21, 32);
+    memset(st.utxo_root, 0x22, 32);
+    bool stamped = pk && sqlite3_exec(pk, "BEGIN IMMEDIATE", NULL, NULL,
+                                      NULL) == SQLITE_OK;
+    stamped = stamped && consensus_state_install_record_authority_stamp(pk, &st);
+    stamped = pk && sqlite3_exec(pk, stamped ? "COMMIT" : "ROLLBACK", NULL,
+                                 NULL, NULL) == SQLITE_OK && stamped;
+    STIG_CHECK("stamp: checkpoint install authority stamped", stamped);
+
+    struct node_db ndb;
+    STIG_CHECK("stamp: node_db opens", node_db_open(&ndb, ":memory:"));
+    struct uint256 anchor_hash;
+    stig_hash_for(H, &anchor_hash);
+    STIG_CHECK("stamp: seed keys stamped",
+               stig_stamp_seed_keys(&ndb, H, &anchor_hash, live_ck));
+    struct main_state ms;
+    main_state_init(&ms);
+    STIG_CHECK("stamp: anchor in index at H",
+               stig_insert_anchor(&ms, &anchor_hash, H) != NULL);
+
+    (void)block_index_loader_seed_stages_from_cold_import(&ms, &ndb, pk);
+
+    STIG_CHECK("stamp: the seed committed (coins applied at H+1)",
+               stig_coins_applied(pk) == (int64_t)(H + 1));
+    struct consensus_state_install_stamp after;
+    bool found = true;
+    STIG_CHECK("stamp: install authority stamp released by the seed",
+               consensus_state_install_read_authority_stamp(pk, &after,
+                                                            &found) &&
+               !found);
+
+    main_state_free(&ms);
+    node_db_close(&ndb);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_seed_torn_import_gate(void)
 {
     test_reset_shared_globals();   /* monolith isolation: see test_helpers.c */
@@ -817,6 +883,7 @@ int test_seed_torn_import_gate(void)
     failures += stig_run_seed_range_cases();
     failures += stig_run_forward_region_cases();
     failures += stig_run_no_fire_guard_cases();
+    failures += stig_run_install_stamp_case();
 
     blocker_reset_for_testing();
     return failures;

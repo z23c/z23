@@ -402,6 +402,11 @@ struct consensus_state_install_stamp {
     int32_t height;
     uint8_t block_hash[32];
     uint8_t utxo_root[32];
+    /* The coins authority generation the install committed with. Every coin
+     * reset (coins_kv_reset_for_reseed: reindex, staged refold, mint-anchor
+     * reset) and every install bumps it, so a stamp whose generation is not
+     * the live one no longer describes the live coins. */
+    uint64_t coins_generation;
 };
 
 /* The recorder MUST run inside the open activate cutover transaction. The

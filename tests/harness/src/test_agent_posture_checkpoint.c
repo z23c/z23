@@ -468,6 +468,66 @@ static int case_trust_shapes_stay_reviewed(void)
     return failures;
 }
 
+/* A fold re-stamps what the reseed reset cleared: migration-complete, the
+ * refold marker and coins applied at H*+1. The floor and the ROM stamp are
+ * untouched by both. */
+static bool cp_refold_after_reset(sqlite3 *pdb)
+{
+    static const uint8_t txid[32] = {0x6b};
+    static const uint8_t script[] = {0x51};
+    static const uint8_t one = 1;
+    if (!coins_kv_reset_for_reseed(pdb) ||
+        !coins_kv_add(pdb, txid, 0, 77, 50000, false, script, sizeof(script)))
+        return false;
+    progress_store_tx_lock();
+    bool ok = sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+    ok = ok && progress_meta_set_in_tx(pdb, COINS_KV_MIGRATION_COMPLETE_KEY,
+                                       &one, 1) &&
+         progress_meta_set_in_tx(pdb, COINS_KV_SELF_FOLDED_KEY, &one, 1) &&
+         coins_kv_set_applied_height_in_tx(pdb, CP_HEIGHT + 1);
+    ok = sqlite3_exec(pdb, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) ==
+             SQLITE_OK && ok;
+    progress_store_tx_unlock();
+    return ok;
+}
+
+/* -reindex, a staged or genesis refold and a mint-anchor reset all reset the
+ * coins through coins_kv_reset_for_reseed. Coins folded afterwards are not the
+ * checkpoint install, even when they reach H*+1 again under the same floor. */
+static int case_reseed_after_rom_drops_checkpoint(void)
+{
+    int failures = 0;
+    struct cp_fixture fx;
+    const struct cp_shape shape = {
+        .self_folded = true, .seed_floor = true, .baked_height = CP_HEIGHT,
+        .stamp_kind = CP_ROM,
+    };
+    bool ok = cp_open(&fx, "reseed", &shape);
+    CP_CHECK("reseed: checkpoint install fixture seeds", ok);
+    struct agent_security_posture p;
+    if (ok) {
+        agent_security_posture_collect(&p, &fx.ndb);
+        CP_CHECK("reseed: checkpoint verified before the reset",
+                 p.checkpoint_verified);
+    }
+    ok = ok && cp_refold_after_reset(progress_store_db());
+    CP_CHECK("reseed: reset then refold to H*+1 commits", ok);
+    if (ok) {
+        agent_security_posture_collect(&p, &fx.ndb);
+        CP_CHECK("reseed: no longer labeled checkpoint verified",
+                 !p.checkpoint_verified &&
+                 !cp_json_has(&p, "\"checkpoint_verified\":true") &&
+                 strcmp(p.status, "review_required_bootstrap_trust") == 0);
+        CP_CHECK("reseed: review kept, posture rung stops the ladder",
+                 p.review_required && agent_security_posture_needs_review(&p) &&
+                 cp_ladder(&p) == ZCL_STATUS_REASON_POSTURE_REVIEW);
+        CP_CHECK("reseed: spend guard allows sovereign refold (pinned, unchanged)",
+                 cp_spend_allowed());
+    }
+    cp_close(&fx);
+    return failures;
+}
+
 struct cp_holder {
     pthread_mutex_t mu;
     pthread_cond_t cv;
@@ -652,6 +712,7 @@ int test_agent_posture_checkpoint_cases(void)
     failures += case_other_installs_stay_reviewed();
     failures += case_floor_alone_is_not_rom();
     failures += case_trust_shapes_stay_reviewed();
+    failures += case_reseed_after_rom_drops_checkpoint();
     failures += case_busy_store_is_not_checkpoint();
     failures += case_genesis_full_history_unchanged();
     failures += case_soak_verdict_unchanged();
