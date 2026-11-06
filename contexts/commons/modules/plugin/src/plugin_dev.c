@@ -5,10 +5,10 @@
 #include "plugin/plugin_dev.h"
 
 #include "plugin_internal.h"
+#include "util/path_util.h"
 
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #define PD_DEFAULT_VERSION "0.0.0-dev"
 #define PD_KEY_LEAF "plugin_dev.key"
@@ -69,13 +69,12 @@ static bool pd_name(const struct plugin_dev_request *rq, struct plugin_dev_resul
 static enum plugin_status pd_args(const struct plugin_dev_request *rq,
                                   struct plugin_dev_result *res, const char **version)
 {
-    struct stat sb;
     if (!rq || !res || !rq->root || !rq->dir || !*rq->dir || !pd_name(rq, res))
         return PLUGIN_ERR_ARGUMENT;
     *version = rq->version ? rq->version : PD_DEFAULT_VERSION;
     if (!plugin_version_valid(*version) || !plugin_version_semver(*version))
         return PLUGIN_ERR_VERSION;
-    if (stat(rq->dir, &sb) != 0 || !S_ISDIR(sb.st_mode))
+    if (!zcl_path_is_dir(rq->dir))
         return PLUGIN_ERR_DEV_DIR;
     if (rq->key_path)
         return snprintf(res->key_path, sizeof(res->key_path), "%s", rq->key_path) <
