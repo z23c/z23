@@ -256,10 +256,24 @@ static unsigned ic_guest_host_missing(void)
            !ic_release_host_ready() + !ic_image_host_ready();
 }
 
+/* The display-app group is selected only where ZCL_TEST_DISPLAY_APPS is set
+ * to a non-empty value (an ENV host need: getenv non-NULL and non-empty). */
+static bool ic_display_apps_ready(void)
+{
+    const char *set = getenv("ZCL_TEST_DISPLAY_APPS");
+    return set && set[0];
+}
+
+static unsigned ic_display_apps_missing(void)
+{
+    return !ic_display_apps_ready();
+}
+
 /* A guest-fixture group the host cannot run: its environment variable is unset. */
 static bool ic_guest_group_absent(const char *group)
 {
-    return (!ic_geli_host_ready() && strcmp(group, "test_rvmachine_geli_volume") == 0) ||
+    return (!ic_display_apps_ready() && strcmp(group, "test_app_launch_skycombat") == 0) ||
+           (!ic_geli_host_ready() && strcmp(group, "test_rvmachine_geli_volume") == 0) ||
            (!ic_ports_host_ready() && strcmp(group, "test_rvmachine_freebsd_ports") == 0) ||
            (!ic_release_host_ready() && strcmp(group, "test_rvmachine_freebsd_release") == 0) ||
            (!ic_image_host_ready() && strcmp(group, "test_guest_image_admission") == 0);
@@ -274,6 +288,7 @@ static bool ic_guest_groups_gated(const char *selector, const char *gated)
         {"test_rvmachine_freebsd_ports", "test_rvmachine_freebsd_ports:env:ZCL_TEST_FREEBSD_PORT_FIXTURE_KERNEL", ic_ports_host_ready},
         {"test_rvmachine_freebsd_release", "test_rvmachine_freebsd_release:env:ZCL_TEST_FREEBSD_RELEASE_KERNEL", ic_release_host_ready},
         {"test_guest_image_admission", "test_guest_image_admission:env:ZCL_TEST_PUBLIC_GUEST_IMAGE_KERNEL", ic_image_host_ready},
+        {"test_app_launch_skycombat", "test_app_launch_skycombat:env:ZCL_TEST_DISPLAY_APPS", ic_display_apps_ready},
     };
     for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++)
         if (ic_selector_has(selector, rows[i].group) != rows[i].ready() ||
@@ -1515,7 +1530,7 @@ static int test_ic_capacity_bound_runs_everything(void)
         ASSERT(zcl_test_group_catalog_count() > 2);
         bool fuzz_ready = ic_fuzz_host_ready();
         ASSERT(ic_selector_is_universal(selector, selected,
-                                        3 + !fuzz_ready + ic_guest_host_missing()));
+                                        3 + !fuzz_ready + (ic_guest_host_missing() + ic_display_apps_missing())));
         ASSERT(!ic_selector_has(selector, "test_onion_pair_watch_live"));
         ASSERT(!ic_selector_has(selector, "test_onion_persistence"));
         ASSERT(!ic_selector_has(selector, "test_self_folded_anchor_heavy"));
@@ -1556,8 +1571,8 @@ static int test_ic_capacity_bound_runs_everything(void)
                    &capped, IC_FIX_HOST_FULL, selector,
                    sizeof(selector), &selected, gated, sizeof(gated)));
         ASSERT(ic_selector_is_universal(selector, selected,
-                                        !fuzz_ready + ic_guest_host_missing()));
-        ASSERT((gated[0] == '\0') == (fuzz_ready && ic_guest_host_missing() == 0));
+                                        !fuzz_ready + (ic_guest_host_missing() + ic_display_apps_missing())));
+        ASSERT((gated[0] == '\0') == (fuzz_ready && (ic_guest_host_missing() + ic_display_apps_missing()) == 0));
         for (size_t i = 0; i < zcl_test_group_catalog_count(); i++)
             ASSERT(zcl_test_group_is_umbrella(zcl_test_group_catalog_at(i)) ||
                    (!fuzz_ready && strcmp(zcl_test_group_catalog_at(i),
@@ -6564,9 +6579,9 @@ static int test_ic_changed_set_widens_structural_changes(void)
              * never an inventory-only or empty selection. */
             ASSERT(chose);
             ASSERT(universal);
-            ASSERT((gated[0] == '\0') == (ic_fuzz_host_ready() && ic_guest_host_missing() == 0));
+            ASSERT((gated[0] == '\0') == (ic_fuzz_host_ready() && (ic_guest_host_missing() + ic_display_apps_missing()) == 0));
             ASSERT(ic_selector_is_universal(selector, selected,
-                                            !ic_fuzz_host_ready() + ic_guest_host_missing()));
+                                            !ic_fuzz_host_ready() + (ic_guest_host_missing() + ic_display_apps_missing())));
             for (size_t g = 0; g < catalog; g++) {
                 const char *group = zcl_test_group_catalog_at(g);
                 if (ic_full_host_selects(group, ic_fuzz_host_ready()))
@@ -15254,8 +15269,8 @@ static int test_ic_include_capacity_runs_everything(void)
                    &selected, gated, sizeof(gated)));
         ic_host_fixture_restore(ic_fixture_saved, ic_fixture_was_set);
         ASSERT(ic_selector_is_universal(selector, selected,
-                                        !ic_fuzz_host_ready() + ic_guest_host_missing()));
-        ASSERT((gated[0] == '\0') == (ic_fuzz_host_ready() && ic_guest_host_missing() == 0));
+                                        !ic_fuzz_host_ready() + (ic_guest_host_missing() + ic_display_apps_missing())));
+        ASSERT((gated[0] == '\0') == (ic_fuzz_host_ready() && (ic_guest_host_missing() + ic_display_apps_missing()) == 0));
         for (size_t i = 0; i < zcl_test_group_catalog_count(); i++)
             ASSERT(zcl_test_group_is_umbrella(zcl_test_group_catalog_at(i)) ||
                    (!ic_fuzz_host_ready() &&
@@ -15406,7 +15421,7 @@ static int test_ic_path_group_cap_runs_everything(void)
                    &selected, gated, sizeof(gated)));
         ic_host_fixture_restore(ic_fixture_saved, ic_fixture_was_set);
         ASSERT(ic_selector_is_universal(selector, selected,
-                                        !ic_fuzz_host_ready() + ic_guest_host_missing()));
+                                        !ic_fuzz_host_ready() + (ic_guest_host_missing() + ic_display_apps_missing())));
 
         /* Control: under the cap the same sweep plans exactly. */
         static struct zcl_devloop_plan small;

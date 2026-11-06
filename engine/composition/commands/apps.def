@@ -20,7 +20,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_COMMAND(
     "app.open", "app", "", "Open a desktop app or game, such as Sky Combat",
-    "Starts a desktop app or game by name or alias, e.g. skycombat, sky or "
+    "Opens a desktop app or game by name or alias, e.g. skycombat, sky or "
     "airplane for the Sky Combat airplane game (see app list). Requires a "
     "desktop session, then either reports the verified running copy "
     "(already_open: a pid whose executable and start time match; raise is "
@@ -32,7 +32,7 @@ ZCL_COMMAND_READY_COMMAND(
     "not_installed, no_desktop, config_refused, spawn_failed, exited_early "
     "(exit code and log tail) or not_ready (still running, pid given). "
     "Launch commands come only from this binary and the operator's apps.tsv.",
-    0, "apps,launch,open,start,play,desktop,window,game,games,skycombat,"
+    0, "apps,launch,open,play,desktop,window,game,games,skycombat,"
     "sky-combat,airplane",
     "zcl.app_open.input.v1", "zcl.app_open.v1", "name", "name",
     "z23 app open skycombat",

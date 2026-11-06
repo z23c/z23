@@ -2497,6 +2497,8 @@ Z23_FLAG("ZCL_TEST_FREEBSD_PORT_FIXTURE_KERNEL", "env_test", "-", "-",
           "PUBLIC FreeBSD named-port image locator; compiled digest binds exact bytes; first use tests/harness/src/test_rvmachine_freebsd_ports.c:auto")
 Z23_FLAG("ZCL_TEST_PUBLIC_GUEST_IMAGE_KERNEL", "env_test", "-", "-",
           "PUBLIC2445 copied-image fixture locator; compiled digest binds exact bytes; first use tests/harness/src/test_guest_image_admission.c:auto")
+Z23_FLAG("ZCL_TEST_DISPLAY_APPS", "env_test", "-", "-",
+          "Non-empty on a host with Xvfb and the game's X11/GL headers; universal selection then includes the real-game launch group; first use tests/harness/src/test_impact_composition.c:auto")
 Z23_FLAG("ZCL_TEST_GUEST_IMAGE_CAPTURE_REPO", "env_test", "-", "-",
           "Optional create-only retained PUBLIC image CAS destination; first use tests/harness/src/test_guest_image_admission.c:auto")
 Z23_FLAG("ZCL_TEST_GUEST_IMAGE_CAPTURE_KERNEL", "env_test", "-", "-",
