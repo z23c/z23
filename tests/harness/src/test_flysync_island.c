@@ -985,13 +985,73 @@ static int fsi_case_fetch_stall(void)
     FSI_CHECK("the rung offer is chosen",
               state_offer_store_decide(t0 + 1000, &rec) ==
               STATE_OFFER_DECIDE_FETCH);
-    flysync_island_test_set_clock_ms(t0 + FLYSYNC_FETCH_TIMEOUT_MS - 1);
+    /* A slow link that keeps moving: one verified chunk every 9 minutes for
+     * an hour, past any total-time rule shorter than the cap. */
+    const int64_t step = FLYSYNC_FETCH_STALL_MS - 60000;
+    bool waiting = true;
+    int64_t t = t0;
+    for (uint32_t c = 1; c <= 7; c++) {
+        t += step;
+        state_offer_store_note_fetch_progress(c, 1000, (uint64_t)c << 20,
+                                              (uint64_t)1000 << 20);
+        flysync_island_test_set_clock_ms(t);
+        flysync_island_tick();
+        waiting = waiting && flysync_island_phase() == FLYSYNC_WAIT;
+    }
+    FSI_CHECK("a slow download that keeps landing chunks keeps waiting",
+              waiting && t - t0 > INT64_C(1800000)); /* old 30 min rule */
+    flysync_island_test_set_clock_ms(t + FLYSYNC_FETCH_STALL_MS - 1);
     flysync_island_tick();
-    FSI_CHECK("inside the fetch bound the node keeps waiting",
+    FSI_CHECK("inside the stall bound the node keeps waiting",
               flysync_island_phase() == FLYSYNC_WAIT);
-    flysync_island_test_set_clock_ms(t0 + FLYSYNC_FETCH_TIMEOUT_MS);
+    flysync_island_test_set_clock_ms(t + FLYSYNC_FETCH_STALL_MS);
     flysync_island_tick();
-    FSI_CHECK("a chosen offer never staged: fall back",
+    FSI_CHECK("no new chunk for the stall bound: fall back",
+              flysync_island_phase() == FLYSYNC_FELL_BACK);
+    fsi_release_globals();
+    fsi_node_close(&n);
+    return failures;
+}
+
+/* The cap: a download that keeps moving still ends after FLYSYNC_FETCH_CAP_MS
+ * of this process's time. */
+static int fsi_case_fetch_cap(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    FSI_CHECK("cap fixture opens", fsi_node_open(&n, "flysync_cap"));
+    fsi_build_island(&n.is);
+    flysync_island_test_set_rung(&n.is.rung);
+    flysync_island_set_requested(true);
+    const int64_t t0 = INT64_C(9000000000);
+    flysync_island_test_set_clock_ms(t0);
+    (void)flysync_island_boot_after_index(NULL, &n.ms);
+    struct state_offer_v1 o;
+    fsi_make_offer(&o, FSI_RUNG_H, 0x51);
+    uint8_t ip[16] = {0};
+    ip[10] = 0xff; ip[11] = 0xff; ip[12] = 10; ip[15] = 35;
+    struct state_offer_record rec;
+    state_offer_store_note_first_peer(t0);
+    (void)state_offer_store_record(&o, ip, 18035, 3, t0);
+    (void)state_offer_store_decide(t0 + 1000, &rec);
+    const int64_t step = FLYSYNC_FETCH_STALL_MS / 2;
+    bool waiting = true;
+    uint32_t c = 0;
+    int64_t t = t0;
+    while (t + step < t0 + FLYSYNC_FETCH_CAP_MS) {
+        t += step;
+        c++;
+        state_offer_store_note_fetch_progress(c, 100000, c, 100000);
+        flysync_island_test_set_clock_ms(t);
+        flysync_island_tick();
+        waiting = waiting && flysync_island_phase() == FLYSYNC_WAIT;
+    }
+    FSI_CHECK("a moving download waits up to the cap", waiting);
+    c++;
+    state_offer_store_note_fetch_progress(c, 100000, c, 100000);
+    flysync_island_test_set_clock_ms(t0 + FLYSYNC_FETCH_CAP_MS);
+    flysync_island_tick();
+    FSI_CHECK("at the cap a still-moving download falls back",
               flysync_island_phase() == FLYSYNC_FELL_BACK);
     fsi_release_globals();
     fsi_node_close(&n);
@@ -1176,6 +1236,7 @@ int test_flysync_island(void)
     failures += fsi_case_installed();
     failures += fsi_case_hold_bound();
     failures += fsi_case_fetch_stall();
+    failures += fsi_case_fetch_cap();
     printf("flysync_island: %d failures\n", failures);
     return failures;
 }

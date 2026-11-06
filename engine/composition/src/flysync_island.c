@@ -737,6 +737,26 @@ static void fsi_fall_back(const char *why)
     fsi_fall_back_at(fsi_main_state(), why, true);
 }
 
+/* The chosen offer's download progress: the verified-chunk count last seen and
+ * when it last moved (this process's clock). 0 = no chosen offer seen yet. */
+static _Atomic uint32_t g_fetch_chunks_seen = 0;
+static _Atomic int64_t g_fetch_moved_ms = 0;
+
+/* True when the chosen offer's download has stalled: no new verified chunk
+ * for FLYSYNC_FETCH_STALL_MS. The first sighting of a chosen offer starts the
+ * clock, so a resumed download counts from this boot. */
+static bool fsi_fetch_stalled(const struct state_offer_store_status *st,
+                              int64_t now)
+{
+    if (atomic_load(&g_fetch_moved_ms) == 0 ||
+        st->fetch_chunks_done != atomic_load(&g_fetch_chunks_seen)) {
+        atomic_store(&g_fetch_chunks_seen, st->fetch_chunks_done);
+        atomic_store(&g_fetch_moved_ms, now);
+        return false;
+    }
+    return now - atomic_load(&g_fetch_moved_ms) >= FLYSYNC_FETCH_STALL_MS;
+}
+
 static void fsi_tick_wait_offers(int64_t now)
 {
     struct state_offer_store_status st;
@@ -746,10 +766,13 @@ static void fsi_tick_wait_offers(int64_t now)
     else if (st.wait_armed && st.chosen_height == 0 &&
              now - st.wait_started_ms >= STATE_OFFER_WAIT_MS + 30000)
         fsi_fall_back("no rung offer chosen inside the state-offer wait");
+    else if (st.chosen_height != 0 && fsi_fetch_stalled(&st, now))
+        fsi_fall_back("the chosen rung offer's download stalled: no new "
+                      "verified chunk within its bound");
     else if (st.chosen_height != 0 &&
-             now - atomic_load(&g_phase_since_ms) >= FLYSYNC_FETCH_TIMEOUT_MS)
+             now - atomic_load(&g_phase_since_ms) >= FLYSYNC_FETCH_CAP_MS)
         fsi_fall_back("the chosen rung offer was not fetched and staged "
-                      "within its bound");
+                      "within the running-time cap");
 }
 
 static void fsi_tick_wait(int64_t now)
@@ -961,6 +984,8 @@ void flysync_island_test_reset(void)
     atomic_store(&g_phase_since_ms, 0);
     atomic_store(&g_tick_busy, false);
     atomic_store(&g_test_respawns, 0);
+    atomic_store(&g_fetch_chunks_seen, 0);
+    atomic_store(&g_fetch_moved_ms, 0);
     island_anchor_unregister();
 }
 

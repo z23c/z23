@@ -47,7 +47,13 @@ struct uint256;
 /* Bounds. The offer wait itself is the state-offer store's STATE_OFFER_WAIT_MS. */
 #define FLYSYNC_WALK_TIMEOUT_MS     INT64_C(300000)   /* window walk */
 #define FLYSYNC_INSTALL_TIMEOUT_MS  INT64_C(1800000)  /* seeded -> installed */
-#define FLYSYNC_FETCH_TIMEOUT_MS    INT64_C(1800000)  /* chosen offer -> staged */
+/* The chosen rung offer's download: fall back only when no new verified chunk
+ * has landed for FLYSYNC_FETCH_STALL_MS (a slow link that keeps moving, such
+ * as a phone on Tor, keeps waiting), or when the wait has run
+ * FLYSYNC_FETCH_CAP_MS in this process (time switched off never counts; the
+ * held-boot count bounds restarts). */
+#define FLYSYNC_FETCH_STALL_MS      INT64_C(600000)     /* 10 min, no chunk */
+#define FLYSYNC_FETCH_CAP_MS        INT64_C(21600000)   /* 6 h while running */
 #define FLYSYNC_WALK_ATTEMPTS       3
 /* Boots that may hold header sync (WAIT, WALK, SEEDED), counted durably in
  * "flysync.hold_boots": the boot that fetches, the install respawns and a few
