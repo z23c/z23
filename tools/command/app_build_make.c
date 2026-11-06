@@ -14,8 +14,6 @@
 #include "vcs/package_manifest.h"
 
 #include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +25,7 @@
 #define ABM_QUERY_TIMEOUT_MS 60000u
 #define ABM_BUILD_TIMEOUT_MS 600000u
 #define ABM_DEPFILE_MAX (4u << 20)
+#define ABM_INPUT_MAX (64u << 20)
 #define ABM_DEPFILE_DEPTH 8
 #define ABM_DECLARED_DOMAIN "zcl.app_build.declared_closure.v1"
 #define ABM_NONE_DOMAIN "zcl.app_build.closure.none.v1"
@@ -293,29 +292,19 @@ static bool abm_hash_file(const char *copy_dir, const char *rel,
                           uint8_t out[32])
 {
     char path[ABM_PATH];
-    uint8_t buf[16384];
     struct stat st;
+    uint8_t *bytes = NULL;
+    size_t len = 0;
     int n = snprintf(path, sizeof(path), "%s/%s", copy_dir, rel);
-    if (n <= 0 || (size_t)n >= sizeof(path))
+    /* The copy already prepared as a package, which refuses symlinks and
+     * special files; lstat keeps a later swap from being followed. */
+    if (n <= 0 || (size_t)n >= sizeof(path) || lstat(path, &st) != 0 ||
+        !S_ISREG(st.st_mode) ||
+        !zcl_read_whole_file(path, ABM_INPUT_MAX, &bytes, &len, "app.build"))
         return false;
-    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0)
-        return false;
-    bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode);
-    struct sha3_256_ctx sha;
-    sha3_256_init(&sha);
-    while (ok) {
-        ssize_t got = read(fd, buf, sizeof(buf));
-        if (got < 0 && errno == EINTR)
-            continue;
-        ok = got >= 0;
-        if (got <= 0)
-            break;
-        sha3_256_write(&sha, buf, (size_t)got);
-    }
-    (void)close(fd);
-    sha3_256_finalize(&sha, out);
-    return ok;
+    zcl_sha3_256(bytes, len, out);
+    free(bytes);
+    return true;
 }
 
 static void abm_named(const char *text, const uint8_t *extra,
