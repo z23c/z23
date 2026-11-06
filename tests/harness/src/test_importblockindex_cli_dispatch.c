@@ -20,6 +20,7 @@
 
 #include "test/test_core.h"
 #include "test/importblockindex_fixture.h"
+#include "storage/dbwrapper.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -53,7 +54,9 @@ static long icd_file_mtime(const char *path)
  * SKIP with a clear message. */
 static const char *const icd_stale_witnesses[] = {
     "engine/entry/main.c",
+    "engine/entry/main_cli_modes.c",
     "engine/controllers/src/snapshot_controller_import.c",
+    "engine/services/src/utxo_import_pipeline.c",
     NULL,
 };
 
@@ -83,7 +86,8 @@ static void icd_mkdir_p(const char *path)
 /* Fork/exec argv (the exec target is always ICD_BIN), capturing stdout+stderr
  * into out (NUL-terminated, truncated to cap-1; excess is drained). Returns the
  * child's exit code, or a negative sentinel on spawn/wait failure or signal. */
-static int icd_run(char *const argv[], char *out, size_t cap)
+static int icd_run_with_home(char *const argv[], const char *home, char *out,
+                             size_t cap)
 {
     int pipefd[2];
     if (pipe(pipefd) != 0) return -1;
@@ -100,6 +104,8 @@ static int icd_run(char *const argv[], char *out, size_t cap)
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[0]);
         close(pipefd[1]);
+        if (home && setenv("HOME", home, 1) != 0)
+            _exit(126);
         execv(ICD_BIN, argv);
         _exit(127);
     }
@@ -126,6 +132,11 @@ static int icd_run(char *const argv[], char *out, size_t cap)
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return -100 - WTERMSIG(status);
     return -1;
+}
+
+static int icd_run(char *const argv[], char *out, size_t cap)
+{
+    return icd_run_with_home(argv, NULL, out, cap);
 }
 
 static bool icd_contains(const char *hay, const char *needle)
@@ -273,6 +284,114 @@ static int icd_test_fresh_datadir_chooses_bulk(const char *src_dir,
     return failures;
 }
 
+/* --importchainstate: a chainstate with a best block that is not the checkpoint
+ * block and no coins, so a run that reaches the importer exits 0. The children get
+ * their own HOME: the bare form writes to $HOME/.zclassic-c23/node.db. */
+static bool icd_chainstate_fixture_build(const char *path)
+{
+    struct db_wrapper db;
+    uint8_t best[32];
+    bool ok;
+
+    memset(&db, 0, sizeof(db));
+    memset(best, 0x5a, sizeof(best));
+    if (!db_wrapper_open(&db, path, 1u << 20, false, true))
+        return false;
+    ok = db_write(&db, "B", 1, (const char *)best, sizeof(best), false);
+    db_wrapper_close(&db);
+    return ok;
+}
+
+static int icd_test_importchainstate_bare_path(const char *cs, const char *home)
+{
+    int failures = 0;
+    TEST("importchainstate CLI: `--importchainstate <path>` reaches the importer "
+         "and writes under HOME") {
+        char *argv[] = {
+            (char *)ICD_BIN, (char *)"--importchainstate", (char *)cs, NULL,
+        };
+        char out[16384] = {0};
+        char db_path[PATH_MAX];
+        struct stat st;
+        int rc = icd_run_with_home(argv, home, out, sizeof(out));
+
+        ASSERT(icd_contains(out, "=== ZClassic UTXO Import ==="));
+        ASSERT(icd_contains(out, "not compared"));
+        ASSERT(rc == 0);
+        snprintf(db_path, sizeof(db_path), "%s/.zclassic-c23/node.db", home);
+        ASSERT(stat(db_path, &st) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int icd_test_importchainstate_explicit_target(const char *cs,
+                                                     const char *home,
+                                                     const char *target)
+{
+    int failures = 0;
+    TEST("importchainstate CLI: `--importchainstate <path> <db>` reaches the "
+         "importer and writes to the target") {
+        char *argv[] = {
+            (char *)ICD_BIN, (char *)"--importchainstate", (char *)cs,
+            (char *)target, NULL,
+        };
+        char out[16384] = {0};
+        struct stat st;
+        int rc = icd_run_with_home(argv, home, out, sizeof(out));
+
+        ASSERT(icd_contains(out, "=== ZClassic UTXO Import ==="));
+        ASSERT(rc == 0);
+        ASSERT(stat(target, &st) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int icd_test_importchainstate_usage(const char *cs, const char *home)
+{
+    int failures = 0;
+    TEST("importchainstate CLI: no path, or a flag as the target, prints the usage") {
+        char *no_path[] = {
+            (char *)ICD_BIN, (char *)"--importchainstate", NULL,
+        };
+        char *flag_target[] = {
+            (char *)ICD_BIN, (char *)"--importchainstate", (char *)cs,
+            (char *)"-datadir=/nonexistent", NULL,
+        };
+        char out[16384] = {0};
+
+        ASSERT(icd_run_with_home(no_path, home, out, sizeof(out)) == 1);
+        ASSERT(icd_contains(out, "usage: z23 --importchainstate"));
+        memset(out, 0, sizeof(out));
+        ASSERT(icd_run_with_home(flag_target, home, out, sizeof(out)) == 1);
+        ASSERT(icd_contains(out, "usage: z23 --importchainstate"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int icd_test_importchainstate(const char *base)
+{
+    char cs[PATH_MAX], home[PATH_MAX], home_dir[PATH_MAX + 32], target[PATH_MAX];
+    int failures = 0;
+
+    snprintf(cs, sizeof(cs), "%s/chainstate", base);
+    snprintf(home, sizeof(home), "%s/home", base);
+    snprintf(home_dir, sizeof(home_dir), "%s/.zclassic-c23", home);
+    snprintf(target, sizeof(target), "%s/import_target.db", base);
+    icd_mkdir_p(home);
+    icd_mkdir_p(home_dir);
+    if (!icd_chainstate_fixture_build(cs)) {
+        fprintf(stderr, "importchainstate CLI: failed to build chainstate fixture\n");
+        return 1;
+    }
+    failures += icd_test_importchainstate_bare_path(cs, home);
+    failures += icd_test_importchainstate_explicit_target(cs, home, target);
+    failures += icd_test_importchainstate_usage(cs, home);
+    return failures;
+}
+
 static int test_importblockindex_cli_dispatch_platform_arm(void);
 
 static int test_importblockindex_cli_dispatch_platform_arm(void)
@@ -315,6 +434,7 @@ static int test_importblockindex_cli_dispatch_platform_arm(void)
     failures += icd_test_bad_path_refuses();
     failures += icd_test_missing_source_arg_refuses();
     failures += icd_test_fresh_datadir_chooses_bulk(src_dir, target_db3);
+    failures += icd_test_importchainstate(base);
 
     /* LevelDB and SQLite both own nested/sidecar files. */
     (void)test_rm_rf_recursive(base);

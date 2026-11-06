@@ -417,6 +417,14 @@ static bool main_dispatch_snapshot_and_cli_modes(int argc, char **argv,
         return true;
     }
 
+    /* Direct chainstate import, no node startup:
+     * z23 --importchainstate /path/to/chainstate [dbpath]. Its path is a
+     * bare word too, so it must also come before is_cli_mode(). */
+    if (argc >= 2 && strcmp(argv[1], "--importchainstate") == 0) {
+        *rc = importchainstate_mode(argc, argv);
+        return true;
+    }
+
     /* CLI mode: z23 getblockcount */
     if (argc > 1 && is_cli_mode(argc, argv)) {
         *rc = cli_main(argc, argv);
@@ -466,13 +474,6 @@ static bool main_dispatch_recovery_modes(int argc, char **argv, int *rc)
      * UTXOs into SQLite with correct byte order. Restart node after. */
     if (argc >= 2 && strcmp(argv[1], "--repair") == 0) {
         *rc = repair_utxos_mode(argc, argv);
-        return true;
-    }
-
-    /* Direct chainstate import mode — no full node startup needed.
-     * Usage: z23 --importchainstate /path/to/chainstate [dbpath] */
-    if (argc >= 3 && strcmp(argv[1], "--importchainstate") == 0) {
-        *rc = importchainstate_mode(argc, argv);
         return true;
     }
 
