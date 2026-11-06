@@ -562,8 +562,12 @@ int dl_reseal_rebase(const char *wt, struct dl_row *row,
             return dl_reseal_end(row, picked == DL_SEAL_NO ? 0 : -1);
         if (dl_git(wt, cont, NULL, 0, DL_SEAL_TOOL_MS) == 0)
             return dl_reseal_end(row, 1);
-        (void)dl_git(wt, unmerged, paths, cap, DL_SEAL_TOOL_MS);
+        int listed = dl_git(wt, unmerged, paths, cap, DL_SEAL_TOOL_MS);
         dl_seal_trim(paths);
+        /* A failed continue that names no conflict is git failing. */
+        if (listed != 0 || !paths[0])
+            return dl_reseal_end(row, dl_reseal_fail(why, why_cap, DL_SEAL_ERR,
+                "git rebase --continue failed without a conflict"));
         if (!dl_seal_paths_only(paths))
             return dl_reseal_end(row, 0);
     }
