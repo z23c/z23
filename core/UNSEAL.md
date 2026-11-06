@@ -1007,3 +1007,7 @@ later lane flips it HARD.
 - 2026-11-06T00:58:11Z — REASON: Keep a block asked for during a snapshot serve and finish it after
   old ROOT: a3e4344f4b13f60fab86918666042bf174a194d28aec11ca63beeb1f1577fb55
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T00:59:04Z — REASON: Throttle the log line for a chunk dropped with no swarm active
+  old ROOT: 374b2091ff94bb9963e7b43787ebb1bf29548472bcb67fb4b1c9b9df80d86e1a
+  by: owner unseal ritual (make core-unseal)

@@ -26,6 +26,7 @@
 #include "jobs/reducer_frontier.h"  // lib-layer-ok:provable-tip-for-seed-floor-swarm-completion
 #include "net/snapshot_sync_contract.h"
 #include "validation/main_state.h"
+#include "support/log_throttle.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
 #include "util/sync.h"
@@ -788,8 +789,13 @@ static bool mp_zs_on_chunk_data(struct msg_processor *mp,
         printf("Peer %s: bad zchunkdata header\n", node->addr_name);
         peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_INVALID_PAYLOAD, "bad zchunkdata");
     } else if (!g_swarm_active) {
-        printf("Peer %s: zchunkdata but no swarm active\n",
-               node->addr_name);
+        static struct log_throttle dropped_throttle = LOG_THROTTLE_INIT;
+        uint64_t reps = 0;
+        if (log_throttle_should_emit(&dropped_throttle, 0,
+                                     platform_time_wall_unix(), 60, &reps))
+            LOG_INFO("net", "Peer %s: dropping zchunkdata, no swarm active "
+                     "(%llu suppressed since last line)",
+                     node->addr_name, (unsigned long long)reps);
     } else {
         struct utxo_chunk *chunk = zcl_calloc(1, sizeof(struct utxo_chunk), "utxo_chunk");
         if (chunk) {
