@@ -160,7 +160,7 @@ static void scs_wire(struct scs_fx *fx, const struct scs_spec *sp)
         ms = &fx->ms;
     }
     wallet_rpc_context_set_node_db(&fx->ndb);
-    rpc_rawtx_set_state(ms, NULL, &fx->cache, "/tmp");
+    rpc_rawtx_set_state(ms, NULL, &fx->cache, NULL);
     rpc_rawtx_set_keystore(&fx->ks);
     rpc_table_init(&fx->tbl);
     register_rawtransaction_rpc_commands(&fx->tbl);
