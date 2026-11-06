@@ -948,8 +948,13 @@ static int zpf_adopt_local_and_foreign(const struct zpf_world *w,
         char status[32];
         int64_t count = 0;
         uint8_t version[32];
+        char boosted[65] = {0};
         ASSERT(zpf_append(first, ZPF_EDITED, "/* my own boost */\n"));
+        ASSERT(zpf_save(first, boosted));
+        ASSERT(zpf_adoption(w, first) == ZCL_PACKAGE_COPY_ADOPTED);
+        ASSERT(zpf_append(first, ZPF_EDITED, "/* a second boost */\n"));
         ASSERT(zpf_save(first, NULL));
+        ASSERT(zpf_restore(first, boosted));
         ASSERT(zpf_adoption(w, first) == ZCL_PACKAGE_COPY_ADOPTED);
 
         ASSERT(zpf_append(second, ZPF_EDITED, "/* someone else's code */\n"));

@@ -138,10 +138,10 @@ static bool zpa_record_decode(const uint8_t *wire, size_t len,
                               struct zcl_package_adopt_record *r)
 {
     uint8_t digest[32];
-    const uint8_t *p = wire + ZPA_DOMAIN_BYTES;
     if (!wire || len != ZPA_WIRE_BYTES ||
         memcmp(wire, ZPA_DOMAIN, ZPA_DOMAIN_BYTES) != 0)
         return false;
+    const uint8_t *p = wire + ZPA_DOMAIN_BYTES;
     zpa_record_digest(wire, digest);
     if (memcmp(digest, wire + ZPA_BODY_BYTES, 32) != 0)
         return false;
