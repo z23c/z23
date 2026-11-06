@@ -58,18 +58,32 @@ if [[ "$(uname -s 2>/dev/null)" == Darwin && "$bin_format" != pei-* && "$elf_mag
     # Windows API floor comment in the Makefile describes: two sides that must
     # agree, and a disagreement that is invisible because both sides compile.
     #
-    # Anti-hollow: assert a floor on the parse. An unparsed or renamed variable
-    # would yield an empty set, and an empty set grades every binary against no
-    # rule at all -- a pass that checked nothing. Fail loudly instead.
-    weak_names="$(sed -n \
-        '/^ZCL_DARWIN_TOR_WEAK_UNDEFS[[:space:]]*=/,/[^\\]$/p' \
-        "$repo_root/Makefile" \
-        | grep -oE '\-Wl,-U,_[A-Za-z0-9_]+' | sed 's/^-Wl,-U,_//' | sort -u)"
-    weak_count="$(printf '%s\n' "$weak_names" | grep -c . || true)"
-    if [ "$weak_count" -lt 14 ]; then
-        echo "c23-node: could not read ZCL_DARWIN_TOR_WEAK_UNDEFS from" \
-             "$repo_root/Makefile (parsed $weak_count name(s), expected at" \
-             "least 14) -- refusing to grade against an empty rule" >&2
+    # Validate the complete assignment, not just matching substrings: a
+    # malformed or unfinished list must not silently narrow the audit. The
+    # current Tor stub needs ten names; deliberate reductions must update this
+    # floor along with the Makefile list.
+    if ! weak_names="$(awk '
+        /^ZCL_DARWIN_TOR_WEAK_UNDEFS[[:space:]]*=/ {
+            if (seen++) { bad=1; next }
+            active=1
+            sub(/^[^=]*=/, "")
+        }
+        active {
+            line=$0
+            continued = sub(/[[:space:]]*\\[[:space:]]*$/, "", line)
+            n=split(line, words, /[[:space:]]+/)
+            for (i=1; i<=n; i++) {
+                if (words[i] == "") continue
+                if (words[i] !~ /^-Wl,-U,_[A-Za-z0-9_]+$/) { bad=1; continue }
+                name=words[i]; sub(/^-Wl,-U,_/, "", name)
+                if (names[name]++) bad=1
+                count++; print name
+            }
+            if (!continued) { active=0; complete=1 }
+        }
+        END { if (bad || seen != 1 || active || !complete || count < 10) exit 1 }
+    ' "$repo_root/Makefile")"; then
+        echo "c23-node: malformed, incomplete or too-small ZCL_DARWIN_TOR_WEAK_UNDEFS in $repo_root/Makefile" >&2
         exit 1
     fi
     allowed_weak="^_($(printf '%s\n' "$weak_names" | paste -sd'|' -))\$"
