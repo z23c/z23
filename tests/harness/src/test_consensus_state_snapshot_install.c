@@ -22,6 +22,7 @@
 #include "config/consensus_state_replay_receipt.h"
 #include "config/consensus_state_snapshot_export.h"
 #include "config/consensus_state_snapshot_install.h"
+#include "controllers/agent_security_posture.h"
 #include "core/serialize.h"
 #include "core/uint256.h"
 #include "crypto/sha3.h"
@@ -2765,6 +2766,37 @@ static int rung_act_tamper_tests(struct rung_act_ctx *c)
     return failures;
 }
 
+/* The real activate leaves exactly the durable facts the status posture keys
+ * on: a node installed from this baked rung reports checkpoint_verified at
+ * the rung height, while the public-serving gate stays closed. */
+static int rung_act_posture_check(struct rung_act_ctx *c)
+{
+    int failures = 0;
+    struct node_db ndb;
+    bool opened = node_db_open(&ndb, ":memory:");
+    CSI_CHECK("rung-activate: posture node.db opens", opened);
+    if (!opened)
+        return failures;
+    reducer_frontier_provable_tip_set(c->kb.height);
+    struct agent_security_posture p;
+    agent_security_posture_collect(&p, &ndb);
+    printf("consensus_state_install: rung-activate posture status=%s "
+           "anchor=%s nullifier=%s checkpoint_height=%d\n", p.status,
+           p.anchor_history_state, p.nullifier_history_state,
+           (int)p.checkpoint_height);
+    CSI_CHECK("rung-activate: status reports checkpoint_verified at the rung",
+              p.checkpoint_verified &&
+              p.checkpoint_height == c->rung.cp.height &&
+              strcmp(p.status, "checkpoint_verified") == 0);
+    CSI_CHECK("rung-activate: public serving still waits for full history",
+              p.review_required &&
+              !agent_security_posture_allows_public_serving(&p) &&
+              agent_security_posture_allows_local_ready(&p));
+    reducer_frontier_provable_tip_reset();
+    node_db_close(&ndb);
+    return failures;
+}
+
 static int rung_act_commit_tests(struct rung_act_ctx *c)
 {
     int failures = 0;
@@ -2793,6 +2825,7 @@ static int rung_act_commit_tests(struct rung_act_ctx *c)
               strstr(ares.reason, "authority=checkpoint_rom") != NULL);
     CSI_CHECK("rung-activate: installed state matches the bundle",
               active_is(c->pdb, &c->kb));
+    failures += rung_act_posture_check(c);
     if (ares.prior_generation_path[0])
         (void)unlink(ares.prior_generation_path);
     return failures;
