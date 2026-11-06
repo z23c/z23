@@ -1063,6 +1063,61 @@ void plugin_store_list_free(struct plugin_info *infos, size_t count)
     free(infos);
 }
 
+/* Generations of info whose id starts with token (by_version false) or whose
+ * verified manifest has version token (by_version true); *only is the last. */
+static size_t ps_resolve_count(const char *root, const struct plugin_info *info,
+                               const char *token, bool by_version, size_t *only)
+{
+    size_t found = 0, len = strlen(token);
+    for (size_t i = 0; i < info->generation_count; i++) {
+        struct plugin_manifest m;
+        bool hit = by_version
+            ? plugin_verify_generation_manifest(root, info->name, info->generations[i], &m) ==
+                  PLUGIN_OK && strcmp(m.version, token) == 0
+            : strncmp(info->generations[i], token, len) == 0;
+        if (hit) {
+            found++;
+            *only = i;
+        }
+    }
+    return found;
+}
+
+/* The one generation of info that token names, by version first, then by id prefix. */
+static enum plugin_status ps_resolve_info(const char *root, const struct plugin_info *info,
+                                          const char *token, char out[PLUGIN_HEX_SHA3_512 + 1])
+{
+    size_t len = strlen(token), only = 0;
+    size_t found = ps_resolve_count(root, info, token, true, &only);
+    if (found == 0 && len >= 4 && strspn(token, "0123456789abcdef") == len)
+        found = ps_resolve_count(root, info, token, false, &only);
+    if (found == 1)
+        memcpy(out, info->generations[only], PLUGIN_HEX_SHA3_512 + 1u);
+    if (found == 0)
+        return info->generations_state == PLUGIN_SLOT_MISSING ? PLUGIN_ERR_NOT_INSTALLED
+                                                              : PLUGIN_ERR_NO_GENERATION;
+    return found == 1 ? PLUGIN_OK : PLUGIN_ERR_GENERATION_AMBIGUOUS;
+}
+
+enum plugin_status plugin_store_resolve_generation(const char *root, const char *name,
+                                                   const char *token,
+                                                   char out[PLUGIN_HEX_SHA3_512 + 1])
+{
+    size_t len = token ? strlen(token) : 0;
+    struct plugin_info info;
+    if (!root || !name || !out || len == 0 || !plugin_name_valid(name))
+        return PLUGIN_ERR_ARGUMENT;
+    if (len == PLUGIN_HEX_SHA3_512) {
+        memcpy(out, token, len + 1u);
+        return PLUGIN_OK;
+    }
+    enum plugin_status st = ps_load_info(root, name, &info);
+    if (st == PLUGIN_OK)
+        st = ps_resolve_info(root, &info, token, out);
+    free(info.generations);
+    return st;
+}
+
 static enum plugin_status ps_keys_dirs(const char *root)
 {
     char parent[PLUGIN_PATH_MAX];

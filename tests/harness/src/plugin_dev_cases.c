@@ -283,6 +283,57 @@ static int pdc_case_refusals(struct pdc_env *e)
     return failures;
 }
 
+/* A file path where a directory belongs, and a non-semver version, are
+ * refused before any step: nothing is written and nothing is marked mutated. */
+static int pdc_case_early_refusals(struct pdc_env *e)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    char before[PLUGIN_HEX_SHA3_512 + 1], after[PLUGIN_HEX_SHA3_512 + 1];
+    size_t count = 0;
+    TEST_CASE("plugin dev refuses a file path as dir with the dir plus --name form, before any write") {
+        ASSERT(pdc_state(e, &count, before));
+        ASSERT(pdc_write(e->exe, "not a directory"));
+        int n = snprintf(e->input, sizeof(e->input), "{\"dir\":\"%s\"}", e->exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(e->input));
+        ASSERT(pdc_dev(e, &r));
+        ASSERT(r.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_DEV_DIR");
+        ASSERT(!r.error.mutated);
+        ASSERT(strstr(r.error.next_action, "--name") != NULL);
+        ASSERT(strstr(r.error.next_action, "permissions") == NULL);
+        zcl_command_reply_free(&r);
+        ASSERT(pdc_state(e, &count, after));
+        ASSERT_STR_EQ(after, before);
+    } TEST_END
+    return failures;
+}
+
+static int pdc_case_version(struct pdc_env *e)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    char before[PLUGIN_HEX_SHA3_512 + 1], after[PLUGIN_HEX_SHA3_512 + 1];
+    size_t count = 0;
+    TEST_CASE("plugin dev refuses a non-semver version at dev time and names the version") {
+        ASSERT(pdc_state(e, &count, before));
+        int n = snprintf(e->input, sizeof(e->input), "{\"dir\":\"%s\",\"version\":\"orig\"}", e->dir);
+        ASSERT(n > 0 && (size_t)n < sizeof(e->input));
+        ASSERT(pdc_dev(e, &r));
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_VERSION");
+        ASSERT(!r.error.mutated);
+        ASSERT(strstr(r.error.next_action, "semver") != NULL);
+        ASSERT(strstr(r.error.next_action, "release key") == NULL);
+        zcl_command_reply_free(&r);
+        ASSERT(plugin_version_semver("1.0.0-rc.1+b5"));
+        ASSERT(!plugin_version_semver("1.0") && !plugin_version_semver("01.0.0") &&
+               !plugin_version_semver("1.0.0-") && !plugin_version_semver("orig"));
+        ASSERT(pdc_state(e, &count, after));
+        ASSERT_STR_EQ(after, before);
+    } TEST_END
+    return failures;
+}
+
 static int pdc_case_key_step(struct pdc_env *e)
 {
     int failures = 0;
@@ -324,6 +375,8 @@ int plugin_dev_cases(void)
         failures += pdc_case_cases_unavailable(&e);
 #endif
         failures += pdc_case_refusals(&e);
+        failures += pdc_case_early_refusals(&e);
+        failures += pdc_case_version(&e);
         failures += pdc_case_key_step(&e);
     }
     if (old_home)

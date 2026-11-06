@@ -531,6 +531,47 @@ static int pd_commit_checks(void)
     return failures;
 }
 
+/* ---- 10. the SPDX id is inferred from the LICENSE text ------------------- */
+static int pd_infer_spdx(void)
+{
+    int failures = 0;
+    struct pd_fixture f = {0};
+    struct plugin_dist_prepared *prep = NULL;
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    TEST("plugin dist: publish infers Apache-2.0 from the LICENSE text and otherwise names --spdx") {
+        struct plugin_pack_result v1;
+        struct plugin_dist_published pub;
+        struct plugin_dist_publish_request rq;
+        struct vcs_package_release rel;
+        char dir[1400];
+        ASSERT(pd_open(&f));
+        ASSERT(pd_pack(&f, "packed1", "1.0.0", &v1));
+        ASSERT(pd_path(dir, sizeof(dir), f.base, "packed1"));
+        ASSERT(pd_split_rq(&f, dir, &rq));
+        rq.spdx = NULL;
+        ASSERT(pd_write(f.license, TEST_LICENSE_TEXT_APACHE_2_0, strlen(TEST_LICENSE_TEXT_APACHE_2_0), 0644));
+        ASSERT_EQ(plugin_dist_prepare(&rq, &prep, &pub), PLUGIN_DIST_OK);
+        ASSERT_EQ(plugin_dist_sign_release(prep, &rq, &wire, &wire_len, &pub), PLUGIN_DIST_OK);
+        ASSERT_EQ(vcs_package_release_parse(wire, wire_len, &rel), VCS_PACKAGE_RELEASE_OK);
+        ASSERT_STR_EQ(rel.license, "Apache-2.0");
+        /* an explicit --spdx that does not match is still refused */
+        rq.spdx = "MIT";
+        ASSERT_EQ(plugin_dist_publish(f.publisher.store, &rq, &pub), PLUGIN_DIST_ERR_LICENSE);
+        /* text that is no known license is refused naming --spdx */
+        rq.spdx = NULL;
+        ASSERT(pd_write(f.license, "all rights reserved\n", 20, 0644));
+        ASSERT_EQ(plugin_dist_publish(f.publisher.store, &rq, &pub), PLUGIN_DIST_ERR_LICENSE);
+        ASSERT(strstr(pub.detail, "--spdx") != NULL);
+        ASSERT(strstr(plugin_dist_status_next_action(PLUGIN_DIST_ERR_LICENSE), "--spdx") != NULL);
+        PASS();
+    } _test_next:;
+    free(wire);
+    plugin_dist_prepared_free(prep);
+    pd_close(&f);
+    return failures;
+}
+
 int test_plugin_dist(void)
 {
     int failures = 0;
@@ -547,6 +588,7 @@ int test_plugin_dist(void)
     failures += pd_refuse_big_and_link();
     failures += pd_split();
     failures += pd_commit_checks();
+    failures += pd_infer_spdx();
     /* Every case has ended (pass or fail); drop this run's RAM trees. */
     test_shm_reap_own("zcode_swarm-test-tmp_");
     return failures;

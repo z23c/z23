@@ -200,6 +200,8 @@ enum plugin_status plugin_pack(const struct plugin_pack_request *request,
     uint8_t seed[PLUGIN_KEY_FILE_BYTES];
     if (!pp_args_valid(request) || !result)
         return PLUGIN_ERR_ARGUMENT;
+    if (!plugin_version_semver(request->version))
+        return PLUGIN_ERR_VERSION; /* a release needs semver; refuse it before a write */
     memset(result, 0, sizeof(*result));
     enum plugin_status st = plugin_key_load(request->key_path, seed);
     if (st != PLUGIN_OK)

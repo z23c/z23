@@ -49,7 +49,10 @@ enum plugin_status {
     PLUGIN_ERR_INTERFACE, /* the command does not run this interface version */
     PLUGIN_ERR_BUSY, /* another process holds the plugin mutation lock */
     PLUGIN_ERR_ATTEST_POLICY_INVALID,
-    PLUGIN_ERR_SWITCH_UNATTESTED
+    PLUGIN_ERR_SWITCH_UNATTESTED,
+    PLUGIN_ERR_VERSION, /* the version is not semver MAJOR.MINOR.PATCH */
+    PLUGIN_ERR_DEV_DIR, /* dev dir is not a directory */
+    PLUGIN_ERR_GENERATION_AMBIGUOUS /* a switch token names several generations */
 };
 
 struct plugin_gate_report {
@@ -65,6 +68,19 @@ const char *plugin_status_code(enum plugin_status status);
 
 /* The operator action that resolves the refusal. */
 const char *plugin_status_next_action(enum plugin_status status);
+
+/* True for a strict semver 2.0.0 version (MAJOR.MINOR.PATCH, no leading
+ * zeros, optional -prerelease and +build): the grammar a release requires. */
+bool plugin_version_semver(const char *version);
+
+/* Resolve a switch token to a full 128-hex generation id of plugin name: a
+ * full id passes through, otherwise the token is the version of exactly one
+ * installed generation or a lowercase hex prefix (4 or more characters) of
+ * exactly one generation id. Refuses PLUGIN_ERR_NO_GENERATION when nothing
+ * matches and PLUGIN_ERR_GENERATION_AMBIGUOUS when several do. */
+enum plugin_status plugin_store_resolve_generation(const char *root, const char *name,
+                                                   const char *token,
+                                                   char out[PLUGIN_HEX_SHA3_512 + 1]);
 
 struct plugin_manifest {
     char name[PLUGIN_NAME_MAX + 1];

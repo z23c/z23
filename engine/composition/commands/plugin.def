@@ -144,8 +144,12 @@ ZCL_COMMAND_READY_COMMAND(
     "Make an installed plugin generation current",
     "Verifies the named generation again (signature, publisher key, executable "
     "hash), records the previous current generation as last-good, then "
-    "replaces the current link atomically by symlink and rename. Switching "
-    "to the generation that is already current changes nothing.",
+    "replaces the current link atomically by symlink and rename. The generation "
+    "is the full 128-hex id, a unique prefix of it (4 or more hex characters) or "
+    "the version of exactly one installed generation, such as 1.0.0; several "
+    "matches are refused as PLUGIN_GENERATION_AMBIGUOUS. Switching stays an "
+    "explicit step. Switching to the generation that is already current changes "
+    "nothing.",
     ZCL_COMMAND_RESULT_BUDGET,
     "plugin,switch,activate,generation,current,last-good",
     "zcl.plugin_switch.input.v1", "zcl.plugin_switch.v1",
@@ -181,8 +185,12 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_COMMAND(
     "plugin.dev", "plugin", "",
     "Pack, install and switch to a plugin in one step for development",
-    "Runs the developer loop for the executable dir/NAME (NAME defaults to the "
-    "last component of dir). With cases (the lab.promote case array) it first "
+    "Runs the developer loop for the executable DIR/NAME: dir is the DIRECTORY "
+    "that holds the executable and name its file name (name defaults to the "
+    "last component of dir, so z23 plugin dev ./pk --name=skycombat packs "
+    "./pk/skycombat). A file path as dir, or a version that is not semver "
+    "(MAJOR.MINOR.PATCH), is refused as PLUGIN_DEV_DIR or PLUGIN_VERSION before "
+    "any write. With cases (the lab.promote case array) it first "
     "runs each case against that executable under the plugin.call confinement "
     "and refuses with PLUGIN_DEV_CASES_FAILED, the failing case's name and "
     "diff, before any other step; a malformed array is PLUGIN_DEV_BAD_CASES. "
@@ -319,7 +327,9 @@ ZCL_COMMAND_READY_COMMAND(
     "Takes a plugin generation (manifest, detached signature and image, from "
     "the installed store or a packed dir), refuses one whose image does not "
     "match its manifest, and files it with a LICENSE as a four-file content.v2 "
-    "package root, signed as a release by a package key, in this datadir's "
+    "package root, signed as a release by a package key (spdx defaults to the "
+    "license the LICENSE text matches: MIT, Apache-2.0, BSD-2-Clause, "
+    "BSD-3-Clause, ISC, Zlib or 0BSD; other text is refused naming spdx), in this datadir's "
     "package store. Replies with the root and the signed-manifest SHA3-512 (the "
     "generation id). A hosting node on the datadir then serves the root; "
     "nothing is sent by this command and nothing is installed.",
@@ -374,7 +384,8 @@ ZCL_COMMAND_READY_COMMAND(
     "never switches, never changes current and never runs the plugin. At most "
     "two jobs run at once; each has a byte cap (max-bytes) and a deadline "
     "(timeout seconds). The node must run with -packagehost=1 and the signing "
-    "key must already be in publisher_keys.",
+    "key must already be in publisher_keys. When the client cannot read the "
+    "node's RPC cookie, pass -datadir (and -rpcport when not the default).",
     ZCL_COMMAND_RESULT_BUDGET,
     "plugin,fetch,remote,p2p,package,swarm,root,verify,install,running,node,job",
     "zcl.plugin_fetch_remote.input.v1", "zcl.plugin_fetch_job.v1",

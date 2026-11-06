@@ -486,6 +486,39 @@ static int pjr_case_3(void)
     return failures;
 }
 
+static char *pjr_cookie_hook(const char *method, const char *params)
+{
+    (void)method;
+    (void)params;
+    return strdup("{\"code\":-32603,\"message\":\"cannot read RPC auth cookie at /x/.cookie\"}");
+}
+
+/* Without -datadir/-rpcport the client cannot find the node's cookie; the
+ * refusal must say which flags fix that, not only to start a node. */
+static int pjr_case_cookie(void)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    TEST_CASE("fetch_remote with no readable RPC cookie names -datadir and -rpcport") {
+        struct json_value in;
+        const char *text = "{\"root\":\"0000000000000000000000000000000000000000000000000000000000000001\","
+                           "\"name\":\"demo\",\"wait\":\"5\"}";
+        json_init(&in);
+        ASSERT(json_read(&in, text, strlen(text)));
+        struct zcl_command_request request = { .input = &in, .view = "normal" };
+        zcl_command_reply_init(&r, "zcl.plugin_test.v1");
+        node_rpc_client_set_test_hook(pjr_cookie_hook);
+        zcl_native_handle_plugin_fetch_remote(&request, &r);
+        node_rpc_client_set_test_hook(NULL);
+        json_free(&in);
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_FETCH_NO_NODE");
+        ASSERT(strstr(r.error.evidence, "-datadir") != NULL);
+        ASSERT(strstr(r.error.evidence, "-rpcport") != NULL);
+        zcl_command_reply_free(&r);
+    } TEST_END
+    return failures;
+}
+
 int test_plugin_fetch_job(void)
 {
     int failures = 0;
@@ -501,6 +534,7 @@ int test_plugin_fetch_job(void)
     failures += pjr_case_2();
     failures += pjr_case_3();
     failures += pjr_case_4();
+    failures += pjr_case_cookie();
     /* Every case has ended (pass or fail); drop this run's RAM trees. */
     test_shm_reap_own("zcode_swarm-test-tmp_");
     return failures;

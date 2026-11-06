@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define PD_DEFAULT_VERSION "0.0.0-dev"
 #define PD_KEY_LEAF "plugin_dev.key"
@@ -55,24 +56,32 @@ static bool pd_default_key(const char *root, char *out, size_t cap)
     return plugin_join(out, cap, parent, PD_KEY_LEAF, NULL, NULL);
 }
 
-static bool pd_args(const struct plugin_dev_request *rq,
-                    struct plugin_dev_result *res, const char **version)
+static bool pd_name(const struct plugin_dev_request *rq, struct plugin_dev_result *res)
 {
-    if (!rq || !res || !rq->root || !rq->dir || !*rq->dir)
-        return false;
+    if (rq->name)
+        return snprintf(res->name, sizeof(res->name), "%s", rq->name) < (int)sizeof(res->name) &&
+               plugin_name_valid(res->name);
+    return pd_leaf(rq->dir, res->name, sizeof(res->name)) && plugin_name_valid(res->name);
+}
+
+/* Every argument is checked before the first write: dir must be a directory
+ * and the version semver, so a bad value is a refusal and not a half-run. */
+static enum plugin_status pd_args(const struct plugin_dev_request *rq,
+                                  struct plugin_dev_result *res, const char **version)
+{
+    struct stat sb;
+    if (!rq || !res || !rq->root || !rq->dir || !*rq->dir || !pd_name(rq, res))
+        return PLUGIN_ERR_ARGUMENT;
     *version = rq->version ? rq->version : PD_DEFAULT_VERSION;
-    if (rq->name) {
-        if (snprintf(res->name, sizeof(res->name), "%s", rq->name) >= (int)sizeof(res->name))
-            return false;
-    } else if (!pd_leaf(rq->dir, res->name, sizeof(res->name))) {
-        return false;
-    }
-    if (!plugin_name_valid(res->name) || !plugin_version_valid(*version))
-        return false;
+    if (!plugin_version_valid(*version) || !plugin_version_semver(*version))
+        return PLUGIN_ERR_VERSION;
+    if (stat(rq->dir, &sb) != 0 || !S_ISDIR(sb.st_mode))
+        return PLUGIN_ERR_DEV_DIR;
     if (rq->key_path)
         return snprintf(res->key_path, sizeof(res->key_path), "%s", rq->key_path) <
-               (int)sizeof(res->key_path);
-    return pd_default_key(rq->root, res->key_path, sizeof(res->key_path));
+                       (int)sizeof(res->key_path) ? PLUGIN_OK : PLUGIN_ERR_ARGUMENT;
+    return pd_default_key(rq->root, res->key_path, sizeof(res->key_path))
+               ? PLUGIN_OK : PLUGIN_ERR_ARGUMENT;
 }
 
 /* Creates the key unless one is already there; an existing key is reused. */
@@ -153,10 +162,11 @@ enum plugin_status plugin_dev(const struct plugin_dev_request *rq,
         return PLUGIN_ERR_ARGUMENT;
     memset(res, 0, sizeof(*res));
     res->failed = PLUGIN_DEV_STEP_COUNT; /* refused before any step ran */
-    if (!pd_args(rq, res, &version))
-        return PLUGIN_ERR_ARGUMENT;
+    enum plugin_status st = pd_args(rq, res, &version);
+    if (st != PLUGIN_OK)
+        return st;
     res->failed = PLUGIN_DEV_STEP_KEY;
-    enum plugin_status st = pd_key(res, rq->key_path == NULL);
+    st = pd_key(res, rq->key_path == NULL);
     if (st != PLUGIN_OK)
         return st;
     res->steps_done = 1;

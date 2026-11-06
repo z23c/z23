@@ -2542,6 +2542,43 @@ static int pst_case_registered(void)
     return failures;
 }
 
+static int pst_case_resolve_generation(void)
+{
+    int failures = 0;
+    struct pst_fx fx;
+    bool ready = pst_fx_open(&fx, true);
+    TEST_CASE("switch resolves a version or a unique id prefix to one generation and refuses the rest") {
+        struct pst_opts o = {0};
+        char a[PST_HEX], b[PST_HEX], got[PST_HEX], prefix[17];
+        ASSERT(ready);
+        ASSERT_EQ(pst_install(&fx, "solo", "only build", &o), PLUGIN_OK);
+        memcpy(a, fx.generation, PST_HEX);
+        ASSERT_EQ(plugin_store_resolve_generation(fx.root, "solo", "1.0.0", got), PLUGIN_OK);
+        ASSERT_STR_EQ(got, a);
+        ASSERT_EQ(plugin_store_resolve_generation(fx.root, "solo", a, got), PLUGIN_OK);
+        ASSERT_STR_EQ(got, a);
+        snprintf(prefix, sizeof(prefix), "%.16s", a);
+        ASSERT_EQ(plugin_store_resolve_generation(fx.root, "solo", prefix, got), PLUGIN_OK);
+        ASSERT_STR_EQ(got, a);
+        ASSERT_EQ(plugin_store_resolve_generation(fx.root, "solo", "9.9.9", got), PLUGIN_ERR_NO_GENERATION);
+        ASSERT_EQ(plugin_store_resolve_generation(fx.root, "solo", "abc", got), PLUGIN_ERR_NO_GENERATION);
+        ASSERT_EQ(plugin_store_resolve_generation(fx.root, "nothing", "1.0.0", got), PLUGIN_ERR_NOT_INSTALLED);
+        /* a second build with the same version makes the version ambiguous, its id prefix not */
+        ASSERT_EQ(pst_install(&fx, "solo", "second build", &o), PLUGIN_OK);
+        memcpy(b, fx.generation, PST_HEX);
+        ASSERT_EQ(plugin_store_resolve_generation(fx.root, "solo", "1.0.0", got),
+                  PLUGIN_ERR_GENERATION_AMBIGUOUS);
+        snprintf(prefix, sizeof(prefix), "%.16s", b);
+        ASSERT_EQ(plugin_store_resolve_generation(fx.root, "solo", prefix, got), PLUGIN_OK);
+        ASSERT_STR_EQ(got, b);
+        ASSERT_EQ(plugin_store_resolve_generation(fx.root, "solo", "", got), PLUGIN_ERR_ARGUMENT);
+        /* resolving never switches */
+        ASSERT_EQ(plugin_store_switch(fx.root, "solo", got), PLUGIN_OK);
+    } TEST_END
+    pst_fx_close(&fx);
+    return failures;
+}
+
 static int pst_case_run_status_text(void)
 {
     int failures = 0;
@@ -2646,6 +2683,7 @@ int test_plugin_store(void)
     failures += pst_case_unique_names();
 #endif
     failures += pst_case_crashed_install();
+    failures += pst_case_resolve_generation();
     failures += pst_case_run_status_text();
     failures += pst_case_registered();
     failures += plugin_dev_cases();

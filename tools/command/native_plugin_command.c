@@ -480,9 +480,17 @@ void zcl_native_handle_plugin_switch(const struct zcl_command_request *request,
     if (!plg_begin(request, reply, "switch", root, sizeof(root)))
         return;
     const char *name = plg_str(request, "name");
-    const char *generation = plg_str(request, "generation");
+    const char *token = plg_str(request, "generation");
+    char generation[PLUGIN_HEX_SHA3_512 + 1];
     struct plugin_gate_report report;
-    enum plugin_status st = plugin_store_switch_report(root, name, generation, &report);
+    memset(&report, 0, sizeof(report));
+    /* A version or a unique id prefix names the generation; switching is still this explicit call. */
+    enum plugin_status st = plugin_store_resolve_generation(root, name, token, generation);
+    if (st != PLUGIN_OK) {
+        plg_refuse(reply, st, "switch", token);
+        return;
+    }
+    st = plugin_store_switch_report(root, name, generation, &report);
     if (st != PLUGIN_OK) {
         plg_gate_refuse(reply, st, "switch", &report);
         return;
@@ -649,6 +657,24 @@ static void plg_run_report(struct zcl_command_reply *reply, const char *name,
     reply->error.mutated = info->fell_back;
 }
 
+/* A game asks for ui.panel, which plugin run never grants. Names that and the
+ * installed path it can be run from; nothing is granted and nothing runs. */
+static void plg_run_game_hint(struct zcl_command_reply *reply, const char *root, const char *name)
+{
+    struct plugin_manifest m;
+    char exe[PATH_MAX];
+    if (!name || plugin_store_current(root, name, &m, exe, sizeof(exe)) != PLUGIN_OK)
+        return;
+    for (unsigned bit = 0; plugin_capability_name(bit); bit++) {
+        if (strcmp(plugin_capability_name(bit), "ui.panel") != 0 || !(m.capabilities & (1u << bit)))
+            continue;
+        (void)snprintf(reply->error.evidence, sizeof(reply->error.evidence), "%s", exe);
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                       "%s asks for ui.panel and plugin run grants no capability, so it does not run here; "
+                       "it is a game: run it from its installed path %s", name, exe);
+    }
+}
+
 void zcl_native_handle_plugin_run(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply)
 {
@@ -667,6 +693,8 @@ void zcl_native_handle_plugin_run(const struct zcl_command_request *request,
     enum plugin_run_status st = plugin_run_open(&options, &run, &store);
     if (st != PLUGIN_RUN_OK) {
         plg_run_refuse(reply, st, store, name);
+        if (st == PLUGIN_RUN_ERR_CAPABILITY)
+            plg_run_game_hint(reply, root, name);
         return;
     }
     struct plg_handlers saved;

@@ -1481,6 +1481,35 @@ static int prt_case_hash_mismatch(void)
     return failures;
 }
 
+static int prt_case_game_refusal(void)
+{
+    int failures = 0;
+    struct prt_env e;
+    bool ready = prt_env_open(&e);
+    const char *old_home = getenv("HOME");
+    char saved[PATH_MAX] = "";
+    if (old_home)
+        snprintf(saved, sizeof(saved), "%s", old_home);
+    TEST_CASE("plugin.run refuses a ui.panel game, grants nothing and names its installed path") {
+        char gen[PRT_HEX];
+        struct zcl_command_reply r;
+        ASSERT(ready);
+        ASSERT_EQ(setenv("HOME", e.home, 1), 0);
+        ASSERT(prt_install(&e, "skygame", "normal", "g1", "\"ui.panel\"", gen));
+        ASSERT(prt_call("{\"name\":\"skygame\",\"seconds\":1}", &r));
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_RUN_CAPABILITY");
+        ASSERT(strstr(r.error.next_action, "ui.panel") != NULL);
+        ASSERT(strstr(r.error.next_action, "installed path") != NULL);
+        ASSERT(strstr(r.error.evidence, "/skygame/generations/") != NULL);
+        ASSERT(!r.error.mutated);
+        zcl_command_reply_free(&r);
+    } TEST_END
+    if (old_home)
+        setenv("HOME", saved, 1);
+    prt_env_close(&e);
+    return failures;
+}
+
 int test_plugin_run(void)
 {
     int failures = 0;
@@ -1520,6 +1549,7 @@ int test_plugin_run(void)
     failures += prt_case_signal_state();
     failures += prt_case_status_lost();
     failures += prt_case_hash_mismatch();
+    failures += prt_case_game_refusal();
     return failures;
 }
 #endif

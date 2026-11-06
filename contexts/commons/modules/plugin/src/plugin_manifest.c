@@ -95,8 +95,63 @@ static const struct {
     [PLUGIN_ERR_ATTEST_POLICY_INVALID] = { "PLUGIN_ATTEST_POLICY_INVALID",
         "correct attest.policy and its builder pin file" },
     [PLUGIN_ERR_SWITCH_UNATTESTED] = { "PLUGIN_SWITCH_UNATTESTED",
-        "add an attestation: z23 plugin attest_add NAME <path>" }
+        "add an attestation: z23 plugin attest_add NAME <path>" },
+    [PLUGIN_ERR_VERSION] = { "PLUGIN_VERSION",
+        "use a semver version such as 1.0.0 (MAJOR.MINOR.PATCH, optional -pre or +build), not a label like orig" },
+    [PLUGIN_ERR_DEV_DIR] = { "PLUGIN_DEV_DIR",
+        "pass the directory that holds the executable plus --name: z23 plugin dev ./pk --name=skycombat packs ./pk/skycombat; a file path is not a directory" },
+    [PLUGIN_ERR_GENERATION_AMBIGUOUS] = { "PLUGIN_GENERATION_AMBIGUOUS",
+        "several generations match; pass a longer generation id prefix or the full id (z23 plugin status NAME lists them)" }
 };
+
+/* One semver identifier of [0-9A-Za-z-]; a numeric one has no leading zero
+ * unless it is build metadata. */
+static bool pm_semver_ident(const char **pp, bool build)
+{
+    const char *p = *pp;
+    bool numeric = true;
+    while ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'z') ||
+           (*p >= 'A' && *p <= 'Z') || *p == '-') {
+        numeric = numeric && *p >= '0' && *p <= '9';
+        p++;
+    }
+    if (p == *pp || (!build && numeric && p - *pp > 1 && **pp == '0'))
+        return false;
+    *pp = p;
+    return true;
+}
+
+/* MAJOR.MINOR.PATCH, each decimal without a leading zero. */
+static bool pm_semver_core(const char **pp)
+{
+    const char *p = *pp;
+    for (int part = 0; part < 3; part++) {
+        const char *start = p;
+        while (*p >= '0' && *p <= '9')
+            p++;
+        if (p == start || (p - start > 1 && *start == '0') || (part < 2 && *p++ != '.'))
+            return false;
+    }
+    *pp = p;
+    return true;
+}
+
+bool plugin_version_semver(const char *version)
+{
+    const char *p = version;
+    if (!version || strlen(version) > PLUGIN_VERSION_MAX || !pm_semver_core(&p))
+        return false;
+    for (int phase = 0; phase < 2; phase++) {
+        if (*p != (phase ? '+' : '-'))
+            continue;
+        do {
+            p++;
+            if (!pm_semver_ident(&p, phase == 1))
+                return false;
+        } while (*p == '.');
+    }
+    return *p == '\0';
+}
 
 const char *plugin_status_code(enum plugin_status status)
 {

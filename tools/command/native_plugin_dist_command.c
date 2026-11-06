@@ -335,10 +335,13 @@ static enum pdc_call pdc_remote_call(struct zcl_command_reply *reply, const char
         json_init(body);
     }
     if (!pdc_body_is_node_answer(body)) {
+        const char *why = pdc_transport_text(body);
+        bool cookie = strstr(why, "RPC auth cookie") != NULL;
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_TRANSIENT,
-                               "PLUGIN_FETCH_NO_NODE", "fetch_remote", true, false,
-                               pdc_transport_text(body),
-                               "start the node with -packagehost=1, or use the two-phase plugin fetch");
+                               "PLUGIN_FETCH_NO_NODE", "fetch_remote", true, false, why,
+                               cookie ? "pass -datadir=<the running node's data directory> and, when it is not the default, "
+                                        "-rpcport=<its RPC port>, so the cookie and the node are found; the node must run with -packagehost=1"
+                                      : "start the node with -packagehost=1, or use the two-phase plugin fetch");
         return PDC_CALL_TRANSPORT;
     }
     if (!json_get_bool_or(body, "ok", false)) {

@@ -38,7 +38,7 @@ static const struct {
     [PLUGIN_DIST_ERR_SOURCE] = {"PLUGIN_DIST_SOURCE",
         "the generation must have NAME, NAME.plugin.json and NAME.plugin.sig that agree; re-run plugin pack or plugin install"},
     [PLUGIN_DIST_ERR_LICENSE] = {"PLUGIN_DIST_LICENSE",
-        "pass --license-file with the real text of the SPDX license named by --spdx"},
+        "pass --license-file with the real text of a known license (MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, 0BSD), or name its SPDX id with --spdx"},
     [PLUGIN_DIST_ERR_RELEASE] = {"PLUGIN_DIST_RELEASE",
         "pass --release-key with a 32-byte package signing key and a --sequence not used before by that key"},
     [PLUGIN_DIST_ERR_STORE] = {"PLUGIN_DIST_STORE",
@@ -63,6 +63,8 @@ static const struct {
         "the plugin image is over the 48 MiB cap; do not install it, ask the publisher for a smaller build"},
     [PLUGIN_DIST_ERR_IO] = {"PLUGIN_DIST_IO",
         "a file operation failed; check permissions and free space"},
+    [PLUGIN_DIST_ERR_VERSION] = {"PLUGIN_DIST_VERSION",
+        "repack with a semver version (MAJOR.MINOR.PATCH), for example z23 plugin dev DIR --version=1.0.0, then publish again"},
 };
 
 const char *plugin_dist_status_code(enum plugin_dist_status status)
@@ -319,7 +321,7 @@ static enum plugin_dist_status pd_release_key(
 static bool pd_release_fill(struct vcs_package_release *r,
                             const struct plugin_dist_publish_request *rq,
                             const struct plugin_manifest *m, const uint8_t root[32],
-                            const struct pubkey *pk)
+                            const struct pubkey *pk, const char *spdx)
 {
     memset(r, 0, sizeof(*r));
     r->schema_version = VCS_PACKAGE_RELEASE_VERSION;
@@ -332,7 +334,7 @@ static bool pd_release_fill(struct vcs_package_release *r,
         r->recipe_root[i] = (uint8_t)(0x50 + i);
     memcpy(r->publisher_pubkey, pk->vch, VCS_PACKAGE_RELEASE_PUBKEY_BYTES);
     r->publisher_sequence = rq->sequence ? rq->sequence : 1u;
-    snprintf(r->license, sizeof(r->license), "%s", rq->spdx ? rq->spdx : "MIT");
+    snprintf(r->license, sizeof(r->license), "%s", spdx);
     return ok && vcs_package_accept_chain_id(r->chain_id, sizeof(r->chain_id));
 }
 
@@ -340,6 +342,7 @@ struct plugin_dist_prepared {
     struct pd_member mem[4]; /* LICENSE, image, manifest, signature */
     char *manifest_bytes, *sig_bytes, *license;
     size_t manifest_len, sig_len, license_len;
+    char spdx[VCS_PACKAGE_RELEASE_LICENSE_MAX + 1u]; /* named by --spdx or inferred */
     struct plugin_manifest m;
     uint8_t root[32];
     uint8_t *wire; /* serialized package manifest */
@@ -373,6 +376,37 @@ static bool pd_pub_members(struct plugin_dist_prepared *p, const struct plugin_d
     return true;
 }
 
+/* The known license ids, most specific text first: a BSD-3 text also holds the
+ * BSD-2 phrase and an ISC text the 0BSD phrase. */
+static const char *const k_pd_spdx_order[] = {
+    "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause", "MIT", "ISC", "Zlib", "0BSD"
+};
+
+/* The SPDX id --spdx names, or the one the LICENSE text matches. */
+static enum plugin_dist_status pd_pub_license(struct plugin_dist_prepared *p,
+                                              const struct plugin_dist_publish_request *rq,
+                                              struct plugin_dist_published *out)
+{
+    const uint8_t *text = (const uint8_t *)p->license;
+    if (rq->spdx) {
+        if (vcs_package_release_license_text_matches(rq->spdx, text, p->license_len) &&
+            snprintf(p->spdx, sizeof(p->spdx), "%s", rq->spdx) < (int)sizeof(p->spdx))
+            return PLUGIN_DIST_OK;
+        pd_detail(out->detail, sizeof(out->detail),
+                  "the license file is unreadable or is not the %s text", rq->spdx);
+        return PLUGIN_DIST_ERR_LICENSE;
+    }
+    for (size_t i = 0; i < sizeof(k_pd_spdx_order) / sizeof(k_pd_spdx_order[0]); i++) {
+        if (vcs_package_release_license_text_matches(k_pd_spdx_order[i], text, p->license_len)) {
+            snprintf(p->spdx, sizeof(p->spdx), "%s", k_pd_spdx_order[i]);
+            return PLUGIN_DIST_OK;
+        }
+    }
+    pd_detail(out->detail, sizeof(out->detail), "%s",
+              "the license file is not a known license text; pass --spdx with its SPDX id");
+    return PLUGIN_DIST_ERR_LICENSE;
+}
+
 /* The three generation files must agree before they are offered. */
 static enum plugin_dist_status pd_pub_source(struct plugin_dist_prepared *p,
                                              const struct plugin_dist_publish_request *rq,
@@ -393,6 +427,11 @@ static enum plugin_dist_status pd_pub_source(struct plugin_dist_prepared *p,
                   "the manifest in %s is not a valid manifest for this plugin", dir);
         return PLUGIN_DIST_ERR_SOURCE;
     }
+    if (!plugin_version_semver(p->m.version)) {
+        pd_detail(out->detail, sizeof(out->detail),
+                  "the plugin version \"%.32s\" is not semver (MAJOR.MINOR.PATCH)", p->m.version);
+        return PLUGIN_DIST_ERR_VERSION;
+    }
     char digest[PLUGIN_HEX_SHA3_512 + 1];
     if (!PD_SKIP_SOURCE_CHECK &&
         (plugin_hash_file(p->mem[1].path, digest) != PLUGIN_OK ||
@@ -401,7 +440,6 @@ static enum plugin_dist_status pd_pub_source(struct plugin_dist_prepared *p,
                   "the image in %s does not match the manifest sha3_512", dir);
         return PLUGIN_DIST_ERR_SOURCE;
     }
-    const char *spdx = rq->spdx ? rq->spdx : "MIT";
     if (!plugin_read_file(rq->license_file, PD_LICENSE_MAX, PLUGIN_OPEN_NOFOLLOW, &p->license,
                           &p->license_len)) {
         pd_detail(out->detail, sizeof(out->detail),
@@ -409,13 +447,7 @@ static enum plugin_dist_status pd_pub_source(struct plugin_dist_prepared *p,
                                  : "the license file is unreadable%s", "");
         return PLUGIN_DIST_ERR_LICENSE;
     }
-    if (!vcs_package_release_license_text_matches(spdx, (const uint8_t *)p->license,
-                                                  p->license_len)) {
-        pd_detail(out->detail, sizeof(out->detail),
-                  "the license file is unreadable or is not the %s text", spdx);
-        return PLUGIN_DIST_ERR_LICENSE;
-    }
-    return PLUGIN_DIST_OK;
+    return pd_pub_license(p, rq, out);
 }
 
 static bool pd_pub_hash(struct plugin_dist_prepared *p, struct plugin_dist_published *out)
@@ -517,7 +549,7 @@ static bool pd_sign_with_key(const struct privkey *sk, const struct pubkey *pk,
     uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
     struct uint256 hash;
     unsigned char compact[COMPACT_SIGNATURE_SIZE];
-    if (!pd_release_fill(r, rq, &p->m, p->root, pk) ||
+    if (!pd_release_fill(r, rq, &p->m, p->root, pk, p->spdx) ||
         vcs_package_release_id(r, id) != VCS_PACKAGE_RELEASE_OK)
         return false;
     memcpy(hash.data, id, 32);
@@ -552,7 +584,7 @@ static enum plugin_dist_status pd_sign_release(
                    VCS_PACKAGE_RELEASE_OK;
     if (!ok) {
         pd_detail(out->detail, sizeof(out->detail), "%s",
-                  "release refused: the plugin version must be semver and the chain id available");
+                  "release refused: the package chain id is not available on this host");
         return PLUGIN_DIST_ERR_RELEASE;
     }
     return PLUGIN_DIST_OK;

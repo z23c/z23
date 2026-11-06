@@ -50,7 +50,8 @@ enum plugin_dist_status {
     PLUGIN_DIST_ERR_DOWNGRADE,
     PLUGIN_DIST_ERR_PLUGIN,       /* the plugin store refused; see plugin_status */
     PLUGIN_DIST_ERR_IO,
-    PLUGIN_DIST_ERR_TOO_LARGE     /* image over the 48 MiB plugin image cap */
+    PLUGIN_DIST_ERR_TOO_LARGE,    /* image over the 48 MiB plugin image cap */
+    PLUGIN_DIST_ERR_VERSION       /* the manifest version is not semver */
 };
 
 const char *plugin_dist_status_code(enum plugin_dist_status status);
@@ -68,7 +69,7 @@ struct plugin_dist_publish_request {
     const char *generation;    /* 128 hex, or NULL for the current one */
     const char *src_dir;       /* packed output directory, instead of the store */
     const char *license_file;  /* LICENSE text shipped inside the package */
-    const char *spdx;          /* SPDX id the license must match; NULL = MIT */
+    const char *spdx;          /* SPDX id the license must match; NULL = inferred from the LICENSE text */
     const char *release_key;   /* 32-byte secp256k1 package signing key file */
     uint64_t sequence;         /* publisher sequence; 0 means 1 */
 };
