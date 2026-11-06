@@ -1982,6 +1982,8 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     { extern int test_zcode_package_receive(void);
       *failures += test_zcode_package_receive(); }
     { extern int test_zcode_package_dev(void); *failures += test_zcode_package_dev(); }
+    { extern int test_zcode_package_dev_prepare_budget(void);
+      *failures += test_zcode_package_dev_prepare_budget(); }
     { extern int test_zcode_node_command(void);
       *failures += test_zcode_node_command(); }
     { extern int test_peer_dos_fairness(void);

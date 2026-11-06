@@ -960,6 +960,7 @@ ZCL_TEST_GROUP(zcode_package_fork)
 /* Receive a shared fork over the swarm: tree, lineage, corrupt chunk. */
 ZCL_TEST_GROUP(zcode_package_receive)
 ZCL_TEST_GROUP(zcode_package_dev)
+ZCL_TEST_GROUP(zcode_package_dev_prepare_budget)
 /* Every contexts/commons/packages package built from its own sources and
  * run against its own tests/test_<pkg>.c. */
 ZCL_TEST_GROUP(commons_package_tests)
