@@ -33,6 +33,7 @@
 #include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"
 #include "../../../engine/controllers/src/api_controller_internal.h"
+#include "../../../cognition/controllers/src/event_agent_summary_internal.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
@@ -180,6 +181,21 @@ static enum node_status_reason cp_ladder(const struct agent_security_posture *p)
         .reason;
 }
 
+/* The `agent` status ladder (the phone's path) on an otherwise clean node:
+ * true when a leading rung stops it. */
+static bool cp_agent_rung_stops(const struct agent_security_posture *p)
+{
+    static struct agent_fast_snapshot health;
+    enum node_status_reason reason = ZCL_STATUS_REASON_NONE;
+    const char *primary = "none", *next = "none";
+    memset(&health, 0, sizeof(health));
+    health.peer_snapshot_available = true;
+    health.has_peers = true;
+    return agent_summary_pick_leading_reason(&health, p, &reason, &primary,
+                                             &next) ||
+           reason != ZCL_STATUS_REASON_NONE;
+}
+
 static bool cp_spend_allowed(void)
 {
     char reason[128];
@@ -250,6 +266,8 @@ static int case_checkpoint_install_is_verified(void)
              p.review_required && !agent_security_posture_allows_public_serving(&p));
     CP_CHECK("rom: status ladder does not stop at the posture rung",
              cp_ladder(&p) == ZCL_STATUS_REASON_NONE);
+    CP_CHECK("rom: agent status ladder passes the posture rung",
+             !cp_agent_rung_stops(&p));
     CP_CHECK("rom: spend guard allows (pinned, unchanged)", cp_spend_allowed());
     CP_CHECK("rom: local readiness allowed, review not needed",
              p.checkpoint_verified && p.checkpoint_height == CP_HEIGHT &&
@@ -286,6 +304,9 @@ static int cp_expect_review(const char *label, const struct cp_shape *shape,
                    p.review_required && !p.checkpoint_verified &&
                    agent_security_posture_needs_review(&p) &&
                    !agent_security_posture_allows_local_ready(&p));
+    snprintf(name, sizeof(name), "%s: agent status ladder stops at posture",
+             label);
+    CP_CHECK(name, cp_agent_rung_stops(&p));
     snprintf(name, sizeof(name), "%s: spend guard %s (pinned, unchanged)",
              label, want_spend ? "allows" : "refuses");
     CP_CHECK(name, cp_spend_allowed() == want_spend);

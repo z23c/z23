@@ -4,6 +4,7 @@
 #define ZCL_CONTROLLERS_EVENT_AGENT_SUMMARY_INTERNAL_H
 
 #include "controllers/agent_resources.h"
+#include "controllers/operator_needed_policy.h"
 #include "services/legacy_mirror_sync_service.h"
 #include "services/node_health_service.h"
 #include "sync/sync_state.h"
@@ -203,5 +204,14 @@ void agent_push_trust_tier_json(struct json_value *out, const char *key);
  * height is unknown. */
 int agent_fast_log_head_gap(int header_height, int peer_best_height,
                             int log_head);
+
+/* Leading rungs of the `agent`/status ladder: typed blocker, posture review,
+ * health-operator blockers, then peer availability. Returns false when none
+ * applies. The posture rung uses agent_security_posture_needs_review, so a
+ * checkpoint-verified node passes it. */
+bool agent_summary_pick_leading_reason(
+    const struct agent_fast_snapshot *health,
+    const struct agent_security_posture *posture,
+    enum node_status_reason *reason, const char **primary, const char **next);
 
 #endif

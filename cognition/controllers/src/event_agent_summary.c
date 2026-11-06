@@ -695,7 +695,7 @@ static void agent_fast_collect(struct agent_fast_snapshot *s,
 /* Leading rungs of the status ladder: typed blocker, posture review and
  * health-operator blockers, then peer availability. Returns false when none
  * applies so the caller runs the gap rungs. */
-static bool agent_summary_pick_leading_reason(
+bool agent_summary_pick_leading_reason(
     const struct agent_fast_snapshot *health,
     const struct agent_security_posture *posture,
     enum node_status_reason *reason, const char **primary, const char **next)
