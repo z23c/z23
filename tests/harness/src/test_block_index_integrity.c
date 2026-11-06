@@ -21,7 +21,9 @@
 #include "event/event.h"
 #include "sha3/sha3.h"
 
+#include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -1026,6 +1028,682 @@ static int t_verified_memo(void)
     return failures;
 }
 
+/* ── Mutation-gap tests ───────────────────────────────────────
+ * Assertions aimed at survivors the mutation sweep measured: verdict and
+ * action names, status reset, the dump-state shape, the pprev-repair scan
+ * set / read order / limit / per-entry repair, and the height-repair
+ * verdicts and exact counts. */
+
+static _Atomic int g_bii_ev_repair;
+
+static void bii_repair_observer(enum event_type type, uint32_t peer_id,
+                                const void *payload, uint32_t payload_len,
+                                void *ctx)
+{
+    (void)peer_id; (void)payload; (void)payload_len; (void)ctx;
+    if (type == EV_BLOCK_INDEX_REPAIR)
+        atomic_fetch_add(&g_bii_ev_repair, 1);
+}
+
+static void bii_repair_observer_install(void)
+{
+    event_clear_observers(EV_BLOCK_INDEX_REPAIR);
+    atomic_store(&g_bii_ev_repair, 0);
+    event_observe(EV_BLOCK_INDEX_REPAIR, bii_repair_observer, NULL);
+}
+
+static bool bii_streq(const char *a, const char *b)
+{
+    return a && b && strcmp(a, b) == 0;
+}
+
+static int t_mg_names(void)
+{
+    int failures = 0;
+    bool verdicts = bii_streq(bii_verdict_name((enum bii_verdict)9999),
+                              "unknown");
+    bool actions =
+        bii_streq(bii_recovery_action_name(BII_RECOVERY_NONE), "none") &&
+        bii_streq(bii_recovery_action_name(BII_RECOVERY_ACCEPTED),
+                  "accepted") &&
+        bii_streq(bii_recovery_action_name(BII_RECOVERY_QUARANTINED),
+                  "quarantined") &&
+        bii_streq(bii_recovery_action_name(BII_RECOVERY_OVERRIDE),
+                  "override") &&
+        bii_streq(bii_recovery_action_name((enum bii_recovery_action)9999),
+                  "unknown");
+    BII_RUN("bii: an out-of-range verdict is named unknown", verdicts);
+    BII_RUN("bii: every recovery action has its own name", actions);
+    return failures;
+}
+
+/* A later record replaces the whole status: no reason, flags back off. */
+static int t_mg_status_replaced(void)
+{
+    int failures = 0;
+    bii_repair_observer_install();
+    bii_record_recovery_status(BII_HASH_MISMATCH, BII_RECOVERY_OVERRIDE,
+                               "first reason", true, true);
+    struct bii_recovery_status first;
+    memset(&first, 0, sizeof(first));
+    bii_get_recovery_status(&first);
+
+    bii_record_recovery_status(BII_OK, BII_RECOVERY_NONE, NULL,
+                               false, false);
+    struct bii_recovery_status second;
+    memset(&second, 0, sizeof(second));
+    bii_get_recovery_status(&second);
+
+    bool first_ok = first.unsafe_override && first.degraded &&
+                    bii_streq(first.reason, "first reason");
+    bool second_ok = second.verdict == BII_OK &&
+                     second.action == BII_RECOVERY_NONE &&
+                     !second.degraded && !second.unsafe_override &&
+                     second.reason[0] == '\0';
+    bool events_ok = atomic_load(&g_bii_ev_repair) == 2;
+    event_clear_observers(EV_BLOCK_INDEX_REPAIR);
+    BII_RUN("bii: status keeps the override flag and reason it was given",
+            first_ok);
+    BII_RUN("bii: a later status clears the earlier reason and flags",
+            second_ok);
+    BII_RUN("bii: each recorded status emits a repair event", events_ok);
+    return failures;
+}
+
+/* The dump must build its own object, refuse a NULL target, and carry
+ * every field, including the ones the first dump test never read. */
+static int t_mg_dump_fields(void)
+{
+    int failures = 0;
+    bii_record_recovery_status(BII_SIDECAR_STALE, BII_RECOVERY_OVERRIDE,
+                               "stale body", true, true);
+    BII_RUN("bii: dump_state_json refuses a NULL target",
+            !block_index_integrity_dump_state_json(NULL, NULL));
+
+    struct json_value v = {0};
+    bool ok = block_index_integrity_dump_state_json(&v, NULL);
+    const struct json_value *verdict = json_get(&v, "verdict");
+    const struct json_value *unsafe = json_get(&v, "unsafe_override");
+    const struct json_value *when = json_get(&v, "unix_time");
+    const struct json_value *rep = json_get(&v, "heights_repaired");
+    bool shape = ok && verdict && unsafe && when && rep;
+    bool values = shape &&
+                  bii_streq(json_get_str(verdict), "sidecar_stale") &&
+                  json_get_bool(unsafe) && json_get_int(when) > 0 &&
+                  json_get_bool(rep) == block_index_heights_repaired();
+    json_free(&v);
+    BII_RUN("bii: dump_state_json fills a fresh object with every field",
+            values);
+    return failures;
+}
+
+/* ── pprev-repair fixture ───────────────────────────────────── */
+
+enum { PP_MAX = 64 };
+
+struct pp_fx {
+    struct main_state ms;
+    struct block_index b[PP_MAX];
+    struct uint256 h[PP_MAX];
+    char dir[256];
+    int n;
+};
+
+static void pp_free(struct pp_fx *fx)
+{
+    main_state_free(&fx->ms);
+    if (fx->dir[0])
+        bii_tear_down(fx->dir);
+}
+
+/* Chain of n blocks, genesis first, heights/links/work-inputs correct, every
+ * block flagged HAVE_DATA at (file 0, 100 + 40 i). No disk records yet. */
+static bool pp_init(struct pp_fx *fx, int n)
+{
+    memset(fx, 0, sizeof(*fx));
+    fx->n = n;
+    main_state_init(&fx->ms);
+    if (!bii_make_tmpdir(fx->dir, sizeof(fx->dir)))
+        return false;
+    char blocks[300];
+    snprintf(blocks, sizeof(blocks), "%s/blocks", fx->dir);
+    if (mkdir(blocks, 0755) != 0 && errno != EEXIST)
+        return false;
+    for (int i = 0; i < n; i++) {
+        struct block_index *bi = &fx->b[i];
+        fx->h[i].data[0] = (uint8_t)(i + 1);
+        fx->h[i].data[1] = 0x5A;
+        fx->h[i].data[31] = (uint8_t)(0xB0 + (i & 7));
+        if (i == 0)
+            fx->h[0] = chain_params_get()->consensus.hashGenesisBlock;
+        bi->phashBlock = &fx->h[i];
+        bi->pprev = i ? &fx->b[i - 1] : NULL;
+        bi->nHeight = i;
+        bi->nBits = 0x2007ffff;
+        bi->nTx = 1;
+        bi->nChainTx = (unsigned)(i + 1);
+        bi->nStatus = BLOCK_HAVE_DATA;
+        bi->nFile = 0;
+        bi->nDataPos = (unsigned)(100 + 40 * i);
+        test_block_map_insert(&fx->ms.map_block_index, &fx->h[i], bi);
+    }
+    return true;
+}
+
+/* Write `len` (<= 36) bytes of a header record (nVersion + prev hash). */
+static bool pp_put(const struct pp_fx *fx, int file, long pos,
+                   const struct uint256 *prev, size_t len)
+{
+    char path[320];
+    snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat", fx->dir, file);
+    FILE *f = fopen(path, "r+b");
+    if (!f)
+        f = fopen(path, "w+b");
+    if (!f)
+        return false;
+    uint8_t rec[36] = {0};
+    memcpy(rec + 4, prev->data, 32);
+    bool ok = fseek(f, pos, SEEK_SET) == 0 && fwrite(rec, 1, len, f) == len;
+    return fclose(f) == 0 && ok;
+}
+
+/* Record for each block i >= 1 at its own position, naming block i-1. */
+static bool pp_put_default(const struct pp_fx *fx)
+{
+    for (int i = 1; i < fx->n; i++) {
+        if (!pp_put(fx, fx->b[i].nFile, (long)fx->b[i].nDataPos,
+                    &fx->h[i - 1], 36))
+            return false;
+    }
+    return true;
+}
+
+static void pp_detach_all(struct pp_fx *fx)
+{
+    for (int i = 1; i < fx->n; i++)
+        fx->b[i].pprev = NULL;
+}
+
+static int pp_linked(const struct pp_fx *fx)
+{
+    int c = 0;
+    for (int i = 1; i < fx->n; i++)
+        if (fx->b[i].pprev)
+            c++;
+    return c;
+}
+
+/* True iff b->nChainWork is k times the block's own proof. */
+static bool work_is(const struct block_index *b, int k)
+{
+    struct arith_uint256 proof = GetBlockProof(b);
+    struct arith_uint256 sum = {0};
+    for (int j = 0; j < k; j++) {
+        struct arith_uint256 next;
+        arith_uint256_add(&next, &sum, &proof);
+        sum = next;
+    }
+    return arith_uint256_compare(&sum, &b->nChainWork) == 0;
+}
+
+static bool work_is_chain(const struct block_index *b, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (!work_is(&b[i], i + 1))
+            return false;
+    return true;
+}
+
+static bool heights_are_index(const struct block_index *b, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (b[i].nHeight != i)
+            return false;
+    return true;
+}
+
+/* Which entries the scan selects: height above the cursor, flagged data,
+ * a real file position (0 and 1 are the boundary), never the genesis. */
+static int t_mg_pprev_scan_set(void)
+{
+    int failures = 0;
+    struct pp_fx fx;
+    if (!pp_init(&fx, 8)) {
+        BII_RUN("bii: pprev scan fixture setup", false);
+        pp_free(&fx);
+        return failures;
+    }
+    pp_detach_all(&fx);
+    fx.b[3].nDataPos = 1;        /* smallest real position: scanned */
+    fx.b[5].nStatus = 0;         /* no data: never scanned */
+    fx.b[7].nDataPos = 0;        /* no position: never scanned */
+    bool wrote = pp_put_default(&fx) &&
+                 pp_put(&fx, 0, 1, &fx.h[2], 36) &&
+                 pp_put(&fx, 0, 0, &fx.h[6], 36) &&
+                 pp_put(&fx, 0, (long)fx.b[0].nDataPos, &fx.h[4], 36);
+
+    int out = -999;
+    int ra = wrote ? block_index_repair_pprev(&fx.ms, fx.dir, 2, &out) : -1;
+    bool a_set = fx.b[3].pprev == &fx.b[2] && fx.b[4].pprev == &fx.b[3] &&
+                 fx.b[6].pprev == &fx.b[5] && !fx.b[1].pprev &&
+                 !fx.b[2].pprev && !fx.b[5].pprev && !fx.b[7].pprev;
+    BII_RUN("bii: pprev scan above cursor relinks exactly the entries "
+            "past it with data and a position", wrote && ra == 3 && a_set);
+    BII_RUN("bii: pprev scan reports the highest height", out == 7);
+
+    int rb = wrote ? block_index_repair_pprev(&fx.ms, fx.dir, -1, &out) : -1;
+    bool b_set = fx.b[1].pprev == &fx.b[0] && fx.b[2].pprev == &fx.b[1] &&
+                 !fx.b[5].pprev && !fx.b[7].pprev;
+    BII_RUN("bii: pprev scan from the start picks up the rest",
+            rb == 2 && b_set);
+    BII_RUN("bii: pprev scan never relinks the genesis", !fx.b[0].pprev);
+    pp_free(&fx);
+    return failures;
+}
+
+/* ZCL_PPREV_REPAIR_MAX_READS: a count of entries to read, 0 when unset or
+ * not a plain non-negative integer. */
+static bool pp_env_case(const char *val, int n, int expect)
+{
+    struct pp_fx fx;
+    bool ok = false;
+    if (val)
+        setenv("ZCL_PPREV_REPAIR_MAX_READS", val, 1);
+    else
+        unsetenv("ZCL_PPREV_REPAIR_MAX_READS");
+    if (pp_init(&fx, n) && pp_put_default(&fx)) {
+        pp_detach_all(&fx);
+        int r = block_index_repair_pprev(&fx.ms, fx.dir, -1, NULL);
+        ok = r == expect && pp_linked(&fx) == expect;
+    }
+    pp_free(&fx);
+    unsetenv("ZCL_PPREV_REPAIR_MAX_READS");
+    return ok;
+}
+
+static int t_mg_pprev_max_reads_env(void)
+{
+    int failures = 0;
+    BII_RUN("bii: pprev max-reads unset reads every entry",
+            pp_env_case(NULL, 12, 11));
+    BII_RUN("bii: pprev max-reads empty reads every entry",
+            pp_env_case("", 12, 11));
+    BII_RUN("bii: pprev max-reads 1 reads one entry",
+            pp_env_case("1", 12, 1));
+    BII_RUN("bii: pprev max-reads 10 is decimal and reads ten",
+            pp_env_case("10", 12, 10));
+    BII_RUN("bii: pprev max-reads with trailing junk is ignored",
+            pp_env_case("3x", 12, 11));
+    BII_RUN("bii: pprev max-reads that is not a number is ignored",
+            pp_env_case("abc", 12, 11));
+    BII_RUN("bii: pprev max-reads negative is ignored",
+            pp_env_case("-1", 12, 11));
+    BII_RUN("bii: pprev max-reads 0 means no limit",
+            pp_env_case("0", 12, 11));
+    return failures;
+}
+
+/* Reads go in (file, position) order: each height is taken from the parent
+ * as it stands, so a child read before its parent keeps a stale height. */
+static int t_mg_pprev_disk_order(void)
+{
+    int failures = 0;
+    struct pp_fx fx;
+    bool wrote = pp_init(&fx, 31);
+    for (int i = 1; wrote && i < 31; i++) {
+        struct block_index *bi = &fx.b[i];
+        bi->nHeight = 100;
+        bi->nFile = (i - 1) / 10;
+        bi->nDataPos = (unsigned)(100 + 40 * ((i - 1) % 10));
+        wrote = pp_put(&fx, bi->nFile, (long)bi->nDataPos, &fx.h[i - 1], 36);
+    }
+    int r = wrote ? block_index_repair_pprev(&fx.ms, fx.dir, -1, NULL) : -1;
+    bool skips = true;
+    for (int i = 1; i < 31; i++)
+        skips = skips && fx.b[i].pskip != NULL;
+    BII_RUN("bii: pprev heights follow disk order across files",
+            wrote && r == 30 && heights_are_index(fx.b, 31));
+    BII_RUN("bii: pprev repair rebuilds the skip pointer of a moved entry",
+            skips);
+    BII_RUN("bii: pprev repair recomputes chain work parents first",
+            work_is_chain(fx.b, 31));
+    pp_free(&fx);
+    return failures;
+}
+
+static bool pp_detail_links(const struct pp_fx *fx)
+{
+    return fx->b[1].pprev == &fx->b[0] && fx->b[3].pprev == &fx->b[2] &&
+           heights_are_index(fx->b, 7) &&
+           fx->b[2].pskip == &fx->b[0] && fx->b[3].pskip == &fx->b[1];
+}
+
+static bool pp_detail_tx(const struct pp_fx *fx)
+{
+    return fx->b[1].nChainTx == 2 && fx->b[2].nChainTx == 3 &&
+           fx->b[3].nChainTx == 4 && fx->b[4].nChainTx == 5 &&
+           fx->b[5].nChainTx == 0 && fx->b[6].nChainTx == 888;
+}
+
+/* One fix per kind: missing link, wrong height, both, already right, then
+ * the chain-tx rules (no tx or no parent total leaves the stored total). */
+static int t_mg_pprev_fix_details(void)
+{
+    int failures = 0;
+    struct pp_fx fx;
+    bool ok = pp_init(&fx, 7) && pp_put_default(&fx);
+    fx.b[1].pprev = NULL;
+    fx.b[2].nHeight = 50;
+    fx.b[3].pprev = &fx.b[0];
+    fx.b[3].nHeight = 77;
+    fx.b[1].nChainTx = 0;
+    fx.b[2].nChainTx = fx.b[3].nChainTx = fx.b[4].nChainTx = 999;
+    fx.b[5].nTx = 0;
+    fx.b[5].nChainTx = 0;
+    fx.b[6].nChainTx = 888;
+    int r = ok ? block_index_repair_pprev(&fx.ms, fx.dir, -1, NULL) : -1;
+    BII_RUN("bii: pprev repair counts each fixed link and height once",
+            ok && r == 4);
+    BII_RUN("bii: pprev repair fixes links, heights and skip pointers",
+            pp_detail_links(&fx));
+    BII_RUN("bii: pprev repair recomputes chain tx only with tx and a parent "
+            "total", pp_detail_tx(&fx));
+    BII_RUN("bii: pprev repair recomputes chain work after a relink",
+            work_is_chain(fx.b, 7));
+    pp_free(&fx);
+    return failures;
+}
+
+/* A record shorter than the 36-byte header is a read error, not a parent;
+ * a record that ends exactly at end of file is read whole. */
+static int t_mg_pprev_short_record(void)
+{
+    int failures = 0;
+    struct pp_fx fx;
+    bool ok = pp_init(&fx, 3);
+    fx.b[1].pprev = NULL;
+    fx.b[2].pprev = NULL;
+    fx.b[2].nFile = 1;
+    fx.b[2].nDataPos = 1;
+    ok = ok && pp_put(&fx, 0, (long)fx.b[1].nDataPos, &fx.h[0], 35) &&
+         pp_put(&fx, 1, 1, &fx.h[1], 36);
+    int r = ok ? block_index_repair_pprev(&fx.ms, fx.dir, -1, NULL) : -1;
+    BII_RUN("bii: pprev short record is not read as a parent",
+            ok && !fx.b[1].pprev);
+    BII_RUN("bii: pprev record ending at end of file is read whole",
+            fx.b[2].pprev == &fx.b[1] && r == 1);
+    pp_free(&fx);
+    return failures;
+}
+
+static int t_mg_pprev_edges(void)
+{
+    int failures = 0;
+    int out = -999;
+    BII_RUN("bii: pprev NULL state returns 0 and -1",
+            block_index_repair_pprev(NULL, "/nonexistent-dir", -1, &out) == 0 &&
+            out == -1);
+    struct pp_fx fx;
+    bool ok = pp_init(&fx, 4);
+    out = -999;
+    BII_RUN("bii: pprev NULL datadir returns 0 and -1",
+            ok && block_index_repair_pprev(&fx.ms, NULL, -1, &out) == 0 &&
+            out == -1);
+    pp_free(&fx);
+
+    struct main_state empty;
+    main_state_init(&empty);
+    out = -999;
+    BII_RUN("bii: pprev on an empty index returns 0",
+            block_index_repair_pprev(&empty, "/nonexistent-dir", -1, &out) == 0);
+    main_state_free(&empty);
+
+    /* One entry whose parent is absent: nothing to fix, max still reported. */
+    ok = pp_init(&fx, 2);
+    fx.b[1].nHeight = 7;
+    fx.b[1].pprev = NULL;
+    fx.b[1].nStatus = 0;
+    fx.b[0].nStatus = 0;
+    out = -999;
+    int r = ok ? block_index_repair_pprev(&fx.ms, fx.dir, -1, &out) : -1;
+    BII_RUN("bii: pprev with nothing to scan still reports the max height",
+            ok && r == 0 && out == 7);
+    pp_free(&fx);
+
+    /* Exactly one fixable entry is still scanned. */
+    ok = pp_init(&fx, 2) && pp_put_default(&fx);
+    fx.b[1].pprev = NULL;
+    r = ok ? block_index_repair_pprev(&fx.ms, fx.dir, -1, NULL) : -1;
+    BII_RUN("bii: pprev with one fixable entry fixes it",
+            ok && r == 1 && fx.b[1].pprev == &fx.b[0]);
+    pp_free(&fx);
+    return failures;
+}
+
+/* ── height-repair verdicts and exact counts ────────────────── */
+
+static bool work_all_zero(const struct block_index *b, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (!work_is(&b[i], 0))
+            return false;
+    return true;
+}
+
+/* A clean index plus parentless non-genesis entries is NOT wrong: the repair
+ * leaves heights and chain work untouched. */
+static int t_mg_hr_clean_stubs(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    enum { N = 6 };
+    struct block_index blocks[N];
+    struct uint256 hashes[N];
+    bcs_build_chain(&ms, blocks, hashes, N);
+
+    struct block_index s[3];
+    struct uint256 sh[3];
+    memset(s, 0, sizeof(s));
+    memset(sh, 0, sizeof(sh));
+    for (int i = 0; i < 3; i++) {
+        sh[i].data[0] = (uint8_t)(0xC1 + i);
+        s[i].phashBlock = &sh[i];
+        s[i].nBits = 0x2007ffff;
+    }
+    s[0].nHeight = 9;  s[0].nStatus = BLOCK_HAVE_DATA;  /* detached root */
+    s[1].nHeight = 5;  s[1].phashBlock = NULL;          /* no hash at all */
+    s[2].nHeight = 0;  s[2].nStatus = 0;                /* empty stub */
+    for (int i = 0; i < 3; i++)
+        test_block_map_insert(&ms.map_block_index, &sh[i], &s[i]);
+
+    int out = -999;
+    int r = block_index_repair_heights_range(&ms, -1, &out);
+    BII_RUN("bii: parentless non-genesis entries are not wrong heights",
+            r == 0 && out == 9 && s[1].nHeight == 5 && s[0].nHeight == 9);
+    BII_RUN("bii: a clean index keeps its stored chain work",
+            work_all_zero(blocks, N) && work_all_zero(s, 3));
+    main_state_free(&ms);
+    return failures;
+}
+
+/* The cursor: an entry AT min_height is covered by the prior run. */
+static int t_mg_hr_cursor_edge(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    enum { N = 5 };
+    struct block_index blocks[N];
+    struct uint256 hashes[N];
+    bcs_build_chain(&ms, blocks, hashes, N);
+    blocks[3].nHeight = 7;
+
+    int at = block_index_repair_heights_range(&ms, 7, NULL);
+    BII_RUN("bii: height at the cursor is covered, not repaired",
+            at == 0 && blocks[3].nHeight == 7 && blocks[4].nHeight == 4);
+    int below = block_index_repair_heights_range(&ms, 6, NULL);
+    BII_RUN("bii: height above the cursor is repaired and counted once",
+            below == 1 && heights_are_index(blocks, N));
+    BII_RUN("bii: height repair recomputes chain work from the genesis",
+            work_is_chain(blocks, N));
+    main_state_free(&ms);
+    return failures;
+}
+
+/* A wrong genesis counts once and a wrong follower counts once. */
+static int t_mg_hr_exact_counts(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    enum { N = 5 };
+    struct block_index blocks[N];
+    struct uint256 hashes[N];
+    bcs_build_chain(&ms, blocks, hashes, N);
+    blocks[0].nHeight = 4;
+    blocks[4].nHeight = 9;
+    int r = block_index_repair_heights_range(&ms, -1, NULL);
+    BII_RUN("bii: height repair returns the number of heights fixed",
+            r == 2 && heights_are_index(blocks, N));
+    BII_RUN("bii: a correct genesis at height 0 is not counted",
+            block_index_repair_heights_range(&ms, -1, NULL) == 0);
+    main_state_free(&ms);
+    return failures;
+}
+
+static bool hr_untouched(const struct block_index *b, int h, uint32_t work)
+{
+    return b->nHeight == h && b->nChainWork.pn[0] == work;
+}
+
+/* Detached roots, their children, and an entry whose parent left the map
+ * keep their stored work and heights; only genesis-rooted work is rebuilt. */
+static int t_mg_hr_detached_work(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    enum { N = 3 };
+    struct block_index blocks[N];
+    struct uint256 hashes[N];
+    bcs_build_chain(&ms, blocks, hashes, N);
+    blocks[2].nHeight = 9;
+
+    struct block_index d[3], outside;
+    struct uint256 dh[3];
+    memset(d, 0, sizeof(d));
+    memset(dh, 0, sizeof(dh));
+    memset(&outside, 0, sizeof(outside));
+    outside.nHeight = 2;
+    for (int i = 0; i < 3; i++) {
+        dh[i].data[0] = (uint8_t)(0xD1 + i);
+        d[i].phashBlock = &dh[i];
+        d[i].nBits = 0x2007ffff;
+        d[i].nChainWork.pn[0] = 0x1234;
+    }
+    d[0].nHeight = 7;  d[0].nStatus = BLOCK_HAVE_DATA;  /* detached root */
+    d[1].nHeight = 8;  d[1].pprev = &d[0];              /* its child */
+    d[2].nHeight = 3;  d[2].pprev = &outside;           /* parent unmapped */
+    for (int i = 0; i < 3; i++)
+        test_block_map_insert(&ms.map_block_index, &dh[i], &d[i]);
+
+    int r = block_index_repair_heights_range(&ms, -1, NULL);
+    BII_RUN("bii: height repair fixes the genesis-rooted height once",
+            r == 1 && blocks[2].nHeight == 2);
+    BII_RUN("bii: detached entries keep stored heights and chain work",
+            hr_untouched(&d[0], 7, 0x1234) && hr_untouched(&d[1], 8, 0x1234) &&
+            hr_untouched(&d[2], 3, 0x1234));
+    main_state_free(&ms);
+    return failures;
+}
+
+static int t_mg_hr_lone_entries(void)
+{
+    int failures = 0;
+    int out = -999;
+    BII_RUN("bii: height repair NULL state returns 0 and -1",
+            block_index_repair_heights_range(NULL, -1, &out) == 0 &&
+            out == -1);
+
+    struct main_state ms;
+    main_state_init(&ms);
+    struct block_index g;
+    struct uint256 gh = chain_params_get()->consensus.hashGenesisBlock;
+    memset(&g, 0, sizeof(g));
+    g.phashBlock = &gh;
+    g.nHeight = 7;
+    g.nBits = 0x2007ffff;
+    test_block_map_insert(&ms.map_block_index, &gh, &g);
+    out = -999;
+    int r = block_index_repair_heights_range(&ms, -1, &out);
+    BII_RUN("bii: a lone wrong genesis is repaired and its max reported",
+            r == 1 && g.nHeight == 0 && out == 7 && work_is(&g, 1));
+    main_state_free(&ms);
+
+    main_state_init(&ms);
+    struct block_index s;
+    struct uint256 sh = {0};
+    memset(&s, 0, sizeof(s));
+    sh.data[0] = 0xE1;
+    s.phashBlock = &sh;
+    s.nHeight = -1;
+    test_block_map_insert(&ms.map_block_index, &sh, &s);
+    out = -999;
+    r = block_index_repair_heights_range(&ms, -1, &out);
+    BII_RUN("bii: a lone unset-height entry reports max -1",
+            r == 0 && out == -1);
+    main_state_free(&ms);
+    return failures;
+}
+
+/* A chain whose stored heights are all offset: propagation must walk it in
+ * height order (one pass), not in map order (more passes than allowed). */
+static int t_mg_hr_long_offset_chain(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    enum { N = 60 };
+    struct block_index blocks[N];
+    struct uint256 hashes[N];
+    bcs_build_chain(&ms, blocks, hashes, N);
+    for (int i = 0; i < N; i++)
+        blocks[i].nHeight = 100 + i;
+    bii_repair_observer_install();
+    int r = block_index_repair_heights_range(&ms, -1, NULL);
+    BII_RUN("bii: an offset long chain is fully repaired",
+            r == N && heights_are_index(blocks, N));
+    BII_RUN("bii: height repair emits one repair event",
+            atomic_load(&g_bii_ev_repair) == 1);
+    BII_RUN("bii: an offset long chain gets cumulative work",
+            work_is_chain(blocks, N));
+    event_clear_observers(EV_BLOCK_INDEX_REPAIR);
+    main_state_free(&ms);
+    return failures;
+}
+
+static int bii_mutant_gap_tests(void)
+{
+    int failures = 0;
+    failures += t_mg_names();
+    failures += t_mg_status_replaced();
+    failures += t_mg_dump_fields();
+    failures += t_mg_pprev_scan_set();
+    failures += t_mg_pprev_max_reads_env();
+    failures += t_mg_pprev_disk_order();
+    failures += t_mg_pprev_fix_details();
+    failures += t_mg_pprev_short_record();
+    failures += t_mg_pprev_edges();
+    failures += t_mg_hr_clean_stubs();
+    failures += t_mg_hr_cursor_edge();
+    failures += t_mg_hr_exact_counts();
+    failures += t_mg_hr_detached_work();
+    failures += t_mg_hr_lone_entries();
+    failures += t_mg_hr_long_offset_chain();
+    return failures;
+}
+
 int test_block_index_integrity(void)
 {
     printf("\n=== block_index_integrity tests ===\n");
@@ -1055,5 +1733,6 @@ int test_block_index_integrity(void)
     failures += t_bcs_repair_heights_range_cursor();
     failures += t_bcs_clamp_on_reorg();
     failures += t_bcs_repair_heights_wrapper();
+    failures += bii_mutant_gap_tests();
     return failures;
 }
