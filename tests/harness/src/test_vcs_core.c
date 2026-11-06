@@ -2829,6 +2829,8 @@ static int t_package_swarm_cancel_round_trip(
     return failures;
 }
 
+int package_capsule_wire_tests(void); /* test_package_capsule_wire.c */
+
 static int t_package_swarm(void)
 {
     int failures = 0;
@@ -3070,6 +3072,7 @@ int test_vcs_core(void)
     failures += t_manifest_fixedpoint();
     failures += t_package_manifest();
     failures += t_package_swarm();
+    failures += package_capsule_wire_tests();
     failures += t_source_bundle();
     failures += t_commit_record();
 
