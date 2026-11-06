@@ -132,23 +132,20 @@ static bool ia_state_save(struct sqlite3 *db, enum island_anchor_state st)
     return progress_meta_set(db, IA_STATE_KEY, &v, 1);
 }
 
-bool island_anchor_save(struct sqlite3 *db, const struct island_anchor *a)
+struct zcl_result island_anchor_save(struct sqlite3 *db,
+                                     const struct island_anchor *a)
 {
-    if (!db || !ia_valid(a)) {
-        LOG_WARN(IA_SUBSYS, "island anchor save refused: %s",
-                 db ? "malformed fact" : "progress store not open");
-        return false;
-    }
+    if (!db || !ia_valid(a))
+        return ZCL_ERR(-1, "island anchor save refused: %s",
+                       db ? "malformed fact" : "progress store not open");
     uint8_t buf[IA_FACT_LEN];
     ia_encode(a, buf);
     if (!progress_meta_table_ensure(db) ||
         !progress_meta_set(db, IA_FACT_KEY, buf, sizeof(buf)) ||
-        !ia_state_save(db, ISLAND_ANCHOR_STATE_SEEDED)) {
-        LOG_WARN(IA_SUBSYS, "island anchor save failed (root h=%d)",
-                 a->root_height);
-        return false;
-    }
-    return true;
+        !ia_state_save(db, ISLAND_ANCHOR_STATE_SEEDED))
+        return ZCL_ERR(-2, "island anchor save failed writing progress_meta "
+                       "(root h=%d)", a->root_height);
+    return ZCL_OK;
 }
 
 bool island_anchor_load(struct sqlite3 *db, struct island_anchor *out,
@@ -198,7 +195,8 @@ enum island_anchor_state island_anchor_state_load(struct sqlite3 *db)
     return ISLAND_ANCHOR_STATE_NONE;
 }
 
-bool island_anchor_note_fallback(struct sqlite3 *db, const char *why)
+struct zcl_result island_anchor_note_fallback(struct sqlite3 *db,
+                                              const char *why)
 {
     island_anchor_unregister();
     bool ok = db && progress_meta_table_ensure(db) &&
@@ -206,7 +204,11 @@ bool island_anchor_note_fallback(struct sqlite3 *db, const char *why)
     LOG_WARN(IA_SUBSYS,
              "FlySync falls back to normal sync: %s (state %s)",
              why ? why : "unspecified", ok ? "recorded" : "NOT recorded");
-    return ok;
+    if (!ok)
+        return ZCL_ERR(-1, "FlySync fall-back state not recorded (%s)",
+                       db ? "progress_meta write failed"
+                          : "progress store not open");
+    return ZCL_OK;
 }
 
 bool island_anchor_boot_register(struct sqlite3 *db)

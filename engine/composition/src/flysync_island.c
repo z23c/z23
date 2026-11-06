@@ -283,6 +283,16 @@ static bool fsi_work_matches_rung(const struct block_index *top,
     return arith_uint256_compare(&top->nChainWork, &want) == 0;
 }
 
+/* Record a fall-back durably. The in-process fall-back stands either way; an
+ * unrecorded one is logged with its reason (the next boot then sees the fact
+ * as SEEDED and its reconcile decides again). */
+static void fsi_note_fallback(const char *why)
+{
+    struct zcl_result r = island_anchor_note_fallback(progress_store_db(), why);
+    if (!r.ok)
+        LOG_ERROR(FSI_SUBSYS, "%s", r.message);
+}
+
 bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
                          int n, const struct island_anchor *a)
 {
@@ -291,8 +301,12 @@ bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
     /* The fact goes down before any row: a crash after it leaves a fact whose
      * rows are missing (reconcile falls back), never rows without a fact (a
      * datadir that -flysync would refuse forever). */
-    if (!island_anchor_save(progress_store_db(), a) ||
-        !island_anchor_register(a))
+    struct zcl_result saved = island_anchor_save(progress_store_db(), a);
+    if (!saved.ok) {
+        LOG_WARN(FSI_SUBSYS, "island seed refused: %s", saved.message);
+        return false;
+    }
+    if (!island_anchor_register(a))
         return false;
     zcl_mutex_lock(&ms->cs_main);
     struct block_index *top = fsi_insert_window(ms, w, n, a);
@@ -300,8 +314,8 @@ bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
     if (!top || !fsi_work_matches_rung(top, a)) {
         LOG_WARN(FSI_SUBSYS, "island seed refused: %s",
                  top ? "rung chainwork mismatch" : "insert failed");
-        island_anchor_note_fallback(progress_store_db(),
-                                    "the verified window could not be seeded");
+        fsi_note_fallback(
+            "the verified window could not be seeded");
         return false;
     }
     bool promoted = false;
@@ -414,7 +428,7 @@ bool flysync_island_boot_reconcile(struct main_state *ms)
         return true;
     }
     LOG_WARN(FSI_SUBSYS, "island does not stand after load: %s", why);
-    island_anchor_note_fallback(progress_store_db(), why);
+    fsi_note_fallback(why);
     fsi_set_phase(FLYSYNC_FELL_BACK);
     return false;
 }
@@ -429,7 +443,7 @@ static _Atomic bool g_rearm_keystone_on_fall_back = false;
 static void fsi_fall_back(const char *why)
 {
     checkpoint_header_fetch_disarm();
-    island_anchor_note_fallback(progress_store_db(), why);
+    fsi_note_fallback(why);
     fsi_set_phase(FLYSYNC_FELL_BACK);
     if (atomic_exchange(&g_rearm_keystone_on_fall_back, false))
         checkpoint_header_fetch_arm_compiled();

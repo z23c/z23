@@ -24,6 +24,8 @@
 #ifndef ZCL_SERVICES_ISLAND_ANCHOR_H
 #define ZCL_SERVICES_ISLAND_ANCHOR_H
 
+#include "base/result.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -79,12 +81,14 @@ void island_anchor_work_from_be(struct arith_uint256 *out,
 
 /* Durable fact. save() writes the fact, then state SEEDED; a fact found
  * without its state reads as SEEDED (an interrupted save). */
-bool island_anchor_save(struct sqlite3 *db, const struct island_anchor *a);
+struct zcl_result island_anchor_save(struct sqlite3 *db,
+                                     const struct island_anchor *a);
 bool island_anchor_load(struct sqlite3 *db, struct island_anchor *out,
                         bool *found);
 enum island_anchor_state island_anchor_state_load(struct sqlite3 *db);
 /* Record the fall-back durably and drop the in-process registration. */
-bool island_anchor_note_fallback(struct sqlite3 *db, const char *why);
+struct zcl_result island_anchor_note_fallback(struct sqlite3 *db,
+                                              const char *why);
 
 /* Boot: register the durable fact when the state is SEEDED. Returns true when
  * a fact was registered. Call after the progress store opens and before the
