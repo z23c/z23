@@ -132,6 +132,9 @@ bool state_offer_service_test_fetch_running(void);
 /* True iff the production fetch-running object has atomic boolean type. */
 /* Set the completed-install gate for a service tick fixture. */
 void state_offer_service_test_set_staged(bool staged);
+/* The local need the tick feeds the store (marker, refold, height). */
+struct state_offer_need;
+void state_offer_service_test_local_need(struct state_offer_need *need);
 bool state_offer_service_test_fetch_running_is_atomic(void);
 #endif
 

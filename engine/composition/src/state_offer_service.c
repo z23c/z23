@@ -33,6 +33,7 @@
 #include "base/cleanse.h"
 #include "chain/mmb.h"
 #include "jobs/reducer_frontier.h"
+#include "jobs/refold_progress.h"
 #include "models/database.h"
 #include "net/msgprocessor.h"
 #include "net/rom_fetch.h"
@@ -814,6 +815,12 @@ static void sosvc_local_need(struct state_offer_need *need)
     need->height_known = h > 0 || reducer_frontier_provable_tip_is_published() ||
                          progress_store_db() != NULL;
     need->local_height = h > 0 ? h : 0;
+    /* A from-genesis or from-anchor refold (refold_in_progress is set by both)
+     * is deliberately self-derived and sits at a low height for hours with no
+     * marker; it must never take an offered bundle. Report it as unknown so it
+     * takes the existing fail-towards-not-fetching path. */
+    if (refold_in_progress())
+        need->height_known = false;
 }
 
 void state_offer_service_tick(void)
@@ -872,6 +879,11 @@ void state_offer_service_tick(void)
 }
 
 #ifdef ZCL_TESTING
+void state_offer_service_test_local_need(struct state_offer_need *need)
+{
+    sosvc_local_need(need);
+}
+
 void state_offer_service_test_set_staged(bool staged) { g_fetch_staged = staged; }
 bool state_offer_service_test_fetch_running_is_atomic(void)
 {

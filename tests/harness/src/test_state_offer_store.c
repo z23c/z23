@@ -15,6 +15,9 @@
 
 #include "config/state_offer_service.h"
 #include "config/state_offer_store.h"
+#include "config/boot_consensus_bundle_marker.h"
+#include "jobs/reducer_frontier.h"
+#include "jobs/refold_progress.h"
 #include "chain/checkpoints.h"
 #include "net/rom_seed.h"
 #include "net/state_offer.h"
@@ -1201,10 +1204,48 @@ static int satisfied_node_does_not_fetch(void)
     return failures;
 }
 
+/* The service builds the need from the datadir marker, refold state and H*. */
+static int service_local_need(void)
+{
+    int failures = 0;
+    TEST_CASE("the service reports marker, refold and fresh need correctly") {
+        char dir[PATH_MAX];
+        struct state_offer_need n;
+        test_make_tmpdir(dir, sizeof(dir), "state_offer_need", "svc");
+        state_offer_service_start(dir, NULL);
+        /* Publish H*=0: a fresh datadir whose height is known and empty. */
+        reducer_frontier_provable_tip_set(0);
+
+        state_offer_service_test_local_need(&n);
+        ASSERT(!n.marker_present);
+        ASSERT(n.height_known);
+        ASSERT(n.local_height == 0);
+        struct state_offer_need want = n;
+        ASSERT(!want.marker_present && want.height_known &&
+               want.local_height < 900000); /* fresh node wants state */
+
+        refold_progress_test_set_cached(true);
+        state_offer_service_test_local_need(&n);
+        ASSERT(!n.height_known); /* refold: never wants an offered bundle */
+        refold_progress_test_set_cached(false);
+
+        uint8_t digest[32] = {0};
+        ASSERT(boot_consensus_bundle_marker_write(dir, 5, digest));
+        state_offer_service_test_local_need(&n);
+        ASSERT(n.marker_present);
+
+        reducer_frontier_provable_tip_reset();
+        state_offer_service_shutdown();
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
 int test_state_offer_store(void)
 {
     int failures = 0;
 
+    failures += service_local_need();
     failures += satisfied_node_does_not_fetch();
     failures += advertise_only_when_we_hold_a_bundle();
     failures += advertise_when_we_hold_the_checkpoint_bundle();
