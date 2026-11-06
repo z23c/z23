@@ -4928,6 +4928,56 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_zcode_package_share)
 
+/* Adopt is the owner's decision to keep and run one release as their own
+ * copy. Fork stays inert and open to agents; adopt is owner authority, so
+ * MCP refuses it. The adopt record lives in the datadir, never in the copy,
+ * and covers later local saves and restores of that copy only. */
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.adopt", "zcode.package", "",
+    "Keep a published package as your own runnable copy",
+    "root names a persisted release id, or a package root carried by exactly "
+    "one persisted release. Without confirm, verifies the release and shows "
+    "its publisher key, its parent release and package roots, the files it "
+    "changed against that parent, the copy name it will make and a plan_id. "
+    "With that plan_id and confirm:true, checks the release out as "
+    "<datadir>/copies/<name>-<n> with a fork record and writes an adopt "
+    "record in the datadir. Later saves and restores in that copy stay "
+    "adopted; a fetched or merged commit needs a new adopt. Nothing is "
+    "built or executed. Owner only: agents may fork but not adopt.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "zcode,package,adopt,keep,copy,trust,publisher,remix,run,game",
+    "zcl.zcode_package_adopt.input.v1", "zcl.zcode_package_adopt.v1",
+    "root,datadir,plan_id,confirm", "root",
+    "z23 zcode package adopt --input='{\"root\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_zcode_package_adopt)
+
+ZCL_COMMAND_READY_READ(
+    "zcode.package.copies", "zcode.package", "",
+    "List your adopted package copies",
+    "Reads the datadir's adopt records and reports each copy's name, "
+    "directory, release and whether it is still adopted: adopted, "
+    "foreign_commits (a commit that is not a local save or restore needs a "
+    "new adopt), missing or history_invalid. Nothing is written.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "zcode,package,copies,adopt,copy,list,mine,game",
+    "zcl.zcode_package_copies.input.v1", "zcl.zcode_package_copies.v1",
+    "datadir", "",
+    "z23 zcode package copies",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_zcode_package_copies)
+
 /* ── the install lifecycle (add plan / add commit / rollback) ──────────
  *
  * Phase 1: the package must already be in the local content-addressed

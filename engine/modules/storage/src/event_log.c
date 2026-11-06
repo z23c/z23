@@ -136,6 +136,8 @@ struct event_log {
     uint32_t last_crc;
     uint64_t open_prefix_end;
     _Atomic bool receipt_poisoned;
+    /* event_log_open_readonly(): append refuses and close writes nothing. */
+    bool read_only;
 };
 
 /* Append-path attribution (see event_log.h "Which append path did the fold
@@ -514,6 +516,27 @@ struct recover_out {
     uint64_t prefix_end;   /* receipt-vouched prefix, 0 after a full walk */
 };
 
+/* Fold every whole verified record from `cursor` on into `out` and return the
+ * end of the last one: the first byte that is not part of a good record. */
+static uint64_t walk_good_records(struct platform_private_file *file,
+                                  uint64_t cursor, uint64_t size,
+                                  struct walk_scratch *scratch,
+                                  struct recover_out *out)
+{
+    while (cursor + EVT_HDR_LEN + EVT_SENTINEL_LEN <= size) {
+        uint64_t need = 0;
+        uint32_t crc = 0;
+        if (!verify_record_at(file, cursor, size, scratch, &need, &crc))
+            break;
+        /* Event is well-formed and durable. */
+        out->last_start = cursor;
+        out->last_crc   = crc;
+        out->records++;
+        cursor += need;
+    }
+    return cursor;
+}
+
 /* Walk forward from the start (or from a validated receipt), tracking the last
  * KNOWN-good end offset; anything past that is partial and gets truncated.
  * Returns false on a hard error. */
@@ -531,12 +554,11 @@ static bool recover_truncate_partial(struct platform_private_file *file,
 
     struct walk_scratch scratch = {0};
     uint64_t cursor = 0;
-    uint64_t last_good_end = 0;
     memset(out, 0, sizeof(*out));
 
     struct receipt r;
     if (receipt_try(file, path, size, &scratch, &r)) {
-        cursor = last_good_end = r.verified_end;
+        cursor = r.verified_end;
         out->records    = r.records;
         out->last_start = r.last_start;
         out->last_crc   = r.last_crc;
@@ -544,19 +566,8 @@ static bool recover_truncate_partial(struct platform_private_file *file,
     }
     const uint64_t walk_from = cursor;
 
-    while (cursor + EVT_HDR_LEN + EVT_SENTINEL_LEN <= size) {
-        uint64_t need = 0;
-        uint32_t crc = 0;
-        if (!verify_record_at(file, cursor, size, &scratch, &need, &crc))
-            break;
-
-        /* Event is well-formed and durable. */
-        out->last_start = cursor;
-        out->last_crc   = crc;
-        out->records++;
-        cursor       += need;
-        last_good_end = cursor;
-    }
+    cursor = walk_good_records(file, cursor, size, &scratch, out);
+    const uint64_t last_good_end = cursor;
     free(scratch.buf);
 
     atomic_store_explicit(&g_last_open_walked, cursor - walk_from,
@@ -602,6 +613,39 @@ static bool recover_truncate_partial(struct platform_private_file *file,
     return true;
 }
 
+/* Take ownership of an opened, walked file as a new handle. */
+static event_log_t *event_log_handle_new(struct platform_private_file *file,
+                                         const char *path,
+                                         const struct recover_out *rec,
+                                         bool read_only)
+{
+    event_log_t *log = (event_log_t *)zcl_malloc(sizeof(*log),
+                                                  "event_log/handle");
+    if (!log) {
+        platform_private_file_close(file);
+        return NULL;
+    }
+    log->file = *file;
+    pthread_mutex_init(&log->lock, NULL);
+    snprintf(log->path, sizeof(log->path), "%s", path);
+    log->end_offset = rec->end;
+    log->deferred_sync = false;
+    log->dirty = false;
+    log->pending = (struct event_log_pending){0};
+    log->records = rec->records;
+    log->last_start = rec->last_start;
+    log->last_crc = rec->last_crc;
+    log->open_prefix_end = rec->prefix_end;
+    atomic_init(&log->receipt_poisoned, false);
+    log->read_only = read_only;
+
+    fprintf(stderr,  // obs-ok:event-log-lifecycle
+            "[event_log] opened %s (size=%llu%s)\n",
+            path, (unsigned long long)log->end_offset,
+            read_only ? ", read-only" : "");
+    return log;
+}
+
 /* ── public API ─────────────────────────────────────────────────────── */
 
 event_log_t *event_log_open(const char *path)
@@ -623,36 +667,44 @@ event_log_t *event_log_open(const char *path)
         platform_private_file_close(&file);
         return NULL;
     }
-    int64_t end = (int64_t)rec.end;
+    return event_log_handle_new(&file, path, &rec, false);
+}
 
-    event_log_t *log = (event_log_t *)zcl_malloc(sizeof(*log),
-                                                  "event_log/handle");
-    if (!log) {
+event_log_t *event_log_open_readonly(const char *path)
+{
+    if (!path || !path[0])
+        LOG_NULL("event_log", "open_readonly: empty path");
+
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    if (!platform_private_file_open_observation(path, &file)) {
+        fprintf(stderr,  // obs-ok:event-log-open-failure
+                "[event_log] read-only open(%s) failed: %s\n",
+                path, strerror(errno));
+        return NULL;
+    }
+    /* Always the full walk from 0: reading the receipt could unlink a stale
+     * one, and a read-only open never changes a byte. */
+    uint64_t size = 0;
+    struct recover_out rec = {0};
+    struct walk_scratch scratch = {0};
+    bool sized = platform_private_file_size(&file, &size) && size <= INT64_MAX;
+    rec.end = sized ? walk_good_records(&file, 0, size, &scratch, &rec) : 0;
+    free(scratch.buf);
+    if (!sized || rec.end != size) {
+        fprintf(stderr,  // obs-ok:event-log-open-failure
+                "[event_log] read-only open refused %s: only %llu of %llu "
+                "bytes are whole records; nothing was truncated\n",
+                path, (unsigned long long)rec.end, (unsigned long long)size);
         platform_private_file_close(&file);
         return NULL;
     }
-    log->file = file;
-    pthread_mutex_init(&log->lock, NULL);
-    snprintf(log->path, sizeof(log->path), "%s", path);
-    log->end_offset = (uint64_t)end;
-    log->deferred_sync = false;
-    log->dirty = false;
-    log->pending = (struct event_log_pending){0};
-    log->records = rec.records;
-    log->last_start = rec.last_start;
-    log->last_crc = rec.last_crc;
-    log->open_prefix_end = rec.prefix_end;
-    atomic_init(&log->receipt_poisoned, false);
-
-    fprintf(stderr,  // obs-ok:event-log-lifecycle
-            "[event_log] opened %s (size=%llu)\n",
-            path, (unsigned long long)log->end_offset);
-    return log;
+    return event_log_handle_new(&file, path, &rec, true);
 }
 
-void event_log_close(event_log_t *log)
+/* Flush, then publish (or drop) the verified-prefix receipt at close. */
+static void event_log_close_vouch(event_log_t *log)
 {
-    if (!log) return;
     /* Best-effort flush also publishes any deferred in-memory span. */
     bool flushed = event_log_flush(log);
     if (atomic_load_explicit(&log->receipt_poisoned, memory_order_relaxed)) {
@@ -667,6 +719,13 @@ void event_log_close(event_log_t *log)
         if (platform_private_file_flush(&log->file))
             receipt_publish(log);
     }
+}
+
+void event_log_close(event_log_t *log)
+{
+    if (!log) return;
+    if (!log->read_only)
+        event_log_close_vouch(log);
     platform_private_file_close(&log->file);
     event_log_pending_destroy(&log->pending);
     pthread_mutex_destroy(&log->lock);
@@ -777,6 +836,12 @@ uint64_t event_log_append(event_log_t *log,
 {
     if (!log) return UINT64_MAX;
     if (payload_len > 0 && !payload) return UINT64_MAX;
+    if (log->read_only) {
+        fprintf(stderr,  // obs-ok:event-log-append-failure
+                "[event_log] append rejected: %s was opened read-only\n",
+                log->path);
+        return UINT64_MAX;
+    }
     if (payload_len > EVENT_LOG_MAX_PAYLOAD) {
         fprintf(stderr,  // obs-ok:event-log-append-failure
                 "[event_log] append rejected: payload_len=%zu > max=%zu\n",

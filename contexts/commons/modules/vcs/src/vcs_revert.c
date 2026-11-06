@@ -219,7 +219,7 @@ static bool revert_commit_op(struct revert_op *op)
 static bool revert_args_ok(const struct vcs_repo *r, const uint8_t target_commit[32],
                            const uint8_t out_new_commit[32])
 {
-    return r && target_commit && out_new_commit;
+    return r && r->idx && target_commit && out_new_commit;
 }
 
 /* Load the target commit, then its tree manifest. Returns 0 on success, 1 when

@@ -203,6 +203,30 @@ struct vcs_repo *vcs_open(const char *repo_root)
     return r;
 }
 
+struct vcs_repo *vcs_open_readonly(const char *repo_root)
+{
+    if (!repo_root || !repo_root[0])
+        LOG_NULL("vcs", "null repo_root");
+    struct vcs_repo *r = zcl_calloc(1, sizeof(*r), "vcs_repo_readonly");
+    if (!r)
+        LOG_NULL("vcs", "calloc vcs_repo");
+    char logpath[VCS_FA_PATH_MAX];
+    int n = snprintf(r->root, sizeof(r->root), "%s", repo_root);
+    int ln = snprintf(logpath, sizeof(logpath), "%s/.zvcs/commits.log",
+                      repo_root);
+    if (n <= 0 || (size_t)n >= sizeof(r->root) || ln <= 0 ||
+        (size_t)ln >= sizeof(logpath)) {
+        free(r);
+        LOG_NULL("vcs", "repo path too long");
+    }
+    r->log = event_log_open_readonly(logpath);
+    if (!r->log) {
+        free(r);
+        LOG_NULL("vcs", "commits.log is absent, held or damaged: %s", logpath);
+    }
+    return r;
+}
+
 void vcs_close(struct vcs_repo *r)
 {
     if (!r) return;
@@ -291,8 +315,8 @@ static int tree_capture_from(const char *scan_root, struct vcs_index *idx,
 }
 int vcs_tree_capture(struct vcs_repo *r, uint8_t out_tree_hash[32])
 {
-    if (!r || !out_tree_hash)
-        LOG_ERR("vcs", "null arg to tree_capture");
+    if (!r || !r->idx || !out_tree_hash)
+        LOG_ERR("vcs", "null arg or read-only repo to tree_capture");
     return tree_capture_from(r->root, r->idx, r->root, out_tree_hash);
 }
 
@@ -323,7 +347,7 @@ static bool snapshot_args_ok(const struct vcs_repo *r,
                              const struct vcs_snapshot_meta *meta,
                              const uint8_t *out_commit_id)
 {
-    return r && meta && out_commit_id;
+    return r && r->idx && meta && out_commit_id;
 }
 
 /* Fill every commit field that does not come from the index (parent is
@@ -497,8 +521,8 @@ int vcs_status(struct vcs_repo *r, vcs_diff_cb cb, void *user,
                size_t *out_nchanges)
 {
     if (out_nchanges) *out_nchanges = 0;
-    if (!r)
-        LOG_ERR("vcs", "null repo");
+    if (!r || !r->idx)
+        LOG_ERR("vcs", "null or read-only repo");
 
     struct vcs_manifest cur;
     if (!vcs_manifest_build(r->root, r->idx, &cur))

@@ -25,6 +25,7 @@ struct vcs_repo *vcs_open(const char *root)
     (void)root;
     LOG_NULL("vcs", "Windows snapshot/status/revert remain unavailable until POSIX mode capture is qualified");
 }
+struct vcs_repo *vcs_open_readonly(const char *root) { return vcs_open(root); }
 void vcs_close(struct vcs_repo *repo) { free(repo); }
 struct vcs_index *vcs_repo_index(struct vcs_repo *repo)
 { return repo ? repo->idx : NULL; }

@@ -155,6 +155,15 @@ enum event_log_type {
  * failure. */
 event_log_t *event_log_open(const char *path);
 
+/* Open an EXISTING log for reading only. Never creates, truncates or writes
+ * the file and never reads, writes or removes its `.verified` receipt: it
+ * walks every record from offset 0 under a shared lock. Returns NULL when the
+ * file is absent or unreadable, when a writer holds it, and when any byte
+ * past the last whole verified record exists — a torn or damaged log is
+ * refused here, never repaired (only event_log_open() recovers). Appends on
+ * the handle are refused and close writes nothing. */
+event_log_t *event_log_open_readonly(const char *path);
+
 /* Close the log. Flushes any pending data. NULL-safe. */
 void event_log_close(event_log_t *log);
 

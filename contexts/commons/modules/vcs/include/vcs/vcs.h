@@ -60,6 +60,12 @@ struct vcs_snapshot_meta {
 /* Open (creating .zvcs/ if needed) the repo rooted at repo_root. NULL on
  * failure. */
 struct vcs_repo *vcs_open(const char *repo_root);
+/* Open an EXISTING repo for history reads only (vcs_log): the commit log is
+ * opened with event_log_open_readonly() and neither the object store nor the
+ * index is opened, so nothing under repo_root is created or changed. NULL when
+ * the log is absent, held by a writer or damaged — a torn tail is refused, not
+ * truncated. snapshot, status, tree_capture and revert refuse this handle. */
+struct vcs_repo *vcs_open_readonly(const char *repo_root);
 void vcs_close(struct vcs_repo *r);
 
 /* Accessors (handy for tests / seal-token grants). */

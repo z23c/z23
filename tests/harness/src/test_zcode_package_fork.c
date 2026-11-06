@@ -3,14 +3,19 @@
  * package, save and restore versions, share a release that names its parent,
  * and see the parent in zcode.commons.lineage. Refusals: an unknown root, a
  * share without changes, unsaved changes, a forged fork record and a broken
- * commit log. Every leaf runs the way the CLI and MCP run it: the registry
- * input contract first, then the bound handler. */
+ * commit log. Read leaves and plan halves leave a torn copy byte-identical.
+ * Adopt keeps an owner-approved copy under <datadir>/copies with a datadir
+ * record: refused over MCP, numbered per adopt, kept across local saves,
+ * lost to a foreign commit, never granted by a copied commit log. Every leaf
+ * runs the way the CLI and MCP run it: the registry input contract first,
+ * then the bound handler. */
 
 #include "test/test_core.h"
 
 #include "base/hex.h"
 #include "chain/chainparams.h"
 #include "command/native_command.h"
+#include "command/native_zcode_package_copy.h"
 #include "config/command_catalog.h"
 #include "core/uint256.h"
 #include "json/json.h"
@@ -18,10 +23,12 @@
 #include "keys/key.h"
 #include "keys/pubkey.h"
 #include "mcp/mcp_policy.h"
+#include "sha3/sha3.h"
 #include "vcs/package_prepare.h"
 #include "vcs/package_release.h"
 #include "vcs/vcs.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -665,6 +672,373 @@ static int zpf_tamper_refusals(const struct zpf_world *w,
     return failures;
 }
 
+/* ── read leaves never repair: a torn copy stays byte-for-byte as it was ── */
+
+static void zpf_mix(uint8_t acc[32], const char *rel, FILE *f)
+{
+    struct sha3_256_ctx ctx;
+    unsigned char buf[4096];
+    uint8_t h[32];
+    size_t got;
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, (const unsigned char *)rel, strlen(rel) + 1u);
+    while (f && (got = fread(buf, 1, sizeof(buf), f)) > 0)
+        sha3_256_write(&ctx, buf, got);
+    sha3_256_finalize(&ctx, h);
+    for (size_t i = 0; i < 32; i++)
+        acc[i] ^= h[i];
+}
+
+/* Order-free digest of every name and every file's bytes beneath dir. */
+static bool zpf_tree_digest(const char *dir, const char *rel, uint8_t acc[32],
+                            size_t *entries)
+{
+    char path[1400];
+    (void)snprintf(path, sizeof(path), "%s%s%s", dir, rel[0] ? "/" : "", rel);
+    DIR *d = opendir(path);
+    struct dirent *e;
+    bool ok = d != NULL;
+    while (ok && (e = readdir(d)) != NULL) {
+        char child_rel[1200], child[2700];
+        struct stat st;
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        (void)snprintf(child_rel, sizeof(child_rel), "%s%s%s", rel,
+                       rel[0] ? "/" : "", e->d_name);
+        (void)snprintf(child, sizeof(child), "%s/%s", dir, child_rel);
+        ok = lstat(child, &st) == 0;
+        (*entries)++;
+        if (ok && S_ISDIR(st.st_mode)) {
+            zpf_mix(acc, child_rel, NULL);
+            ok = zpf_tree_digest(dir, child_rel, acc, entries);
+        } else if (ok) {
+            FILE *f = fopen(child, "rb");
+            ok = f != NULL;
+            zpf_mix(acc, child_rel, f);
+            if (f)
+                ok = fclose(f) == 0 && ok;
+        }
+    }
+    if (d)
+        closedir(d);
+    return ok;
+}
+
+static bool zpf_same_tree(const char *dir, const uint8_t want[32],
+                          size_t want_entries)
+{
+    uint8_t got[32] = {0};
+    size_t entries = 0;
+    bool ok = zpf_tree_digest(dir, "", got, &entries) &&
+              entries == want_entries && memcmp(got, want, 32) == 0;
+    if (!ok)
+        printf("  [copy bytes changed: %zu entries, want %zu]\n", entries,
+               want_entries);
+    return ok;
+}
+
+static bool zpf_dir_refused(const char *path, const char *dir,
+                            const char *extra_key, const char *extra)
+{
+    struct zpf_call c;
+    zpf_begin(&c);
+    (void)json_push_kv_str(&c.input, "dir", dir);
+    if (extra_key)
+        (void)json_push_kv_str(&c.input, extra_key, extra);
+    bool ok = zpf_run(path, &c) && zpf_refused(&c, "COPY_HISTORY_INVALID");
+    zpf_end(&c);
+    return ok;
+}
+
+static int zpf_torn_copy_reads(const struct zpf_world *w)
+{
+    int failures = 0;
+    TEST("zcode package version list and plans: a torn copy is refused and "
+         "left byte-for-byte untouched") {
+        char torn[700], log[800], plan_id[65];
+        uint8_t digest[32] = {0};
+        size_t entries = 0;
+        struct zpf_call c;
+        (void)snprintf(torn, sizeof(torn), "%s/torn", w->root);
+        ASSERT(zpf_fork(w, w->origin_release_hex, torn, NULL));
+        ASSERT(zpf_append(torn, ZPF_EDITED, "/* before the tear */\n"));
+        zpf_begin(&c);
+        (void)json_push_kv_str(&c.input, "dir", torn);
+        ASSERT(zpf_run("zcode.package.version.save", &c) && zpf_passed(&c));
+        (void)snprintf(plan_id, sizeof(plan_id), "%s",
+                       zpf_data_str(&c, "plan_id"));
+        zpf_end(&c);
+
+        /* A clean read writes nothing either. */
+        ASSERT(zpf_tree_digest(torn, "", digest, &entries));
+        zpf_begin(&c);
+        (void)json_push_kv_str(&c.input, "dir", torn);
+        ASSERT(zpf_run("zcode.package.version.list", &c) && zpf_passed(&c));
+        zpf_end(&c);
+        ASSERT(zpf_same_tree(torn, digest, entries));
+
+        (void)snprintf(log, sizeof(log), "torn/.zvcs/commits.log");
+        ASSERT(zpf_append(w->root, log, "a torn half-record"));
+        memset(digest, 0, sizeof(digest));
+        entries = 0;
+        ASSERT(zpf_tree_digest(torn, "", digest, &entries));
+        ASSERT(zpf_dir_refused("zcode.package.version.list", torn, NULL, NULL));
+        ASSERT(zpf_dir_refused("zcode.package.version.save", torn, NULL, NULL));
+        ASSERT(zpf_dir_refused("zcode.package.version.restore", torn,
+                               "version", w->origin_release_hex));
+        ASSERT(zpf_share_plan(&c, w, torn));
+        ASSERT(zpf_refused(&c, "COPY_HISTORY_INVALID"));
+        zpf_end(&c);
+        ASSERT(zpf_same_tree(torn, digest, entries));
+
+        /* A confirmed save keeps the recovering open: the plan bound before
+         * the tear still matches once the torn tail is dropped. */
+        zpf_begin(&c);
+        (void)json_push_kv_str(&c.input, "dir", torn);
+        (void)json_push_kv_str(&c.input, "plan_id", plan_id);
+        (void)json_push_kv_bool(&c.input, "confirm", true);
+        ASSERT(zpf_run("zcode.package.version.save", &c) && zpf_passed(&c));
+        zpf_end(&c);
+        zpf_begin(&c);
+        (void)json_push_kv_str(&c.input, "dir", torn);
+        ASSERT(zpf_run("zcode.package.version.list", &c) && zpf_passed(&c));
+        ASSERT(json_get_int(json_get(&c.reply.data, "count")) == 2);
+        zpf_end(&c);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── adopt: the owner keeps a runnable copy ─────────────────────────── */
+
+static void zpf_adopt_input(struct zpf_call *c, const struct zpf_world *w,
+                            const char *root)
+{
+    zpf_begin(c);
+    (void)json_push_kv_str(&c->input, "root", root);
+    (void)json_push_kv_str(&c->input, "datadir", w->datadir);
+}
+
+static bool zpf_adopt(const struct zpf_world *w, const char *root,
+                      char name[40], char copy[700])
+{
+    struct zpf_call c;
+    char plan_id[65] = {0};
+    zpf_adopt_input(&c, w, root);
+    bool ok = zpf_plan_commit("zcode.package.adopt", &c, plan_id);
+    const struct json_value *adopted = json_get(&c.reply.data, "adopted");
+    ok = ok && adopted && json_get_bool(adopted);
+    (void)snprintf(name, 40, "%s", zpf_data_str(&c, "copy_name"));
+    (void)snprintf(copy, 700, "%s", zpf_data_str(&c, "copy"));
+    zpf_end(&c);
+    return ok;
+}
+
+static enum zcl_package_copy_adoption zpf_adoption(const struct zpf_world *w,
+                                                   const char *dir)
+{
+    struct zcl_package_copy copy;
+    struct zcl_command_reply reply;
+    enum zcl_package_copy_adoption a = ZCL_PACKAGE_COPY_ADOPTION_UNREADABLE;
+    zcl_command_reply_init(&reply, "zcl.test.zcode_package_fork.v1");
+    if (zcl_package_copy_open_as(dir, ZCL_PACKAGE_COPY_READ, &copy, &reply,
+                                 "test")) {
+        a = zcl_package_copy_adopted(w->datadir, &copy, NULL);
+        zcl_package_copy_close(&copy);
+    }
+    zcl_command_reply_free(&reply);
+    return a;
+}
+
+/* The copies list row for `name`: its status, or "" when absent. */
+static bool zpf_copies_status(const struct zpf_world *w, const char *name,
+                              char status[32], int64_t *count)
+{
+    struct zpf_call c;
+    zpf_begin(&c);
+    (void)json_push_kv_str(&c.input, "datadir", w->datadir);
+    bool ok = zpf_run("zcode.package.copies", &c) && zpf_passed(&c);
+    const struct json_value *rows = json_get(&c.reply.data, "copies");
+    status[0] = '\0';
+    *count = ok ? json_get_int(json_get(&c.reply.data, "count")) : -1;
+    for (size_t i = 0; ok && i < json_size(rows); i++) {
+        const struct json_value *row = json_at(rows, i);
+        const char *n = json_get_str(json_get(row, "name"));
+        const char *s = json_get_str(json_get(row, "status"));
+        if (n && s && strcmp(n, name) == 0)
+            (void)snprintf(status, 32, "%s", s);
+    }
+    zpf_end(&c);
+    return ok;
+}
+
+static int zpf_adopt_mcp(const struct zpf_world *w)
+{
+    int failures = 0;
+    TEST("zcode package adopt: MCP refuses adopt and still allows fork") {
+        const struct zcl_command_spec *adopt = zpf_leaf("zcode.package.adopt");
+        const struct zcl_command_spec *fork = zpf_leaf("zcode.package.fork");
+        const struct zcl_command_spec *copies = zpf_leaf("zcode.package.copies");
+        struct mcp_refusal why = {0};
+        struct json_value in;
+        ASSERT(adopt && fork && copies);
+        ASSERT(adopt->authority == ZCL_COMMAND_AUTH_OWNER &&
+               adopt->confirmation == ZCL_COMMAND_CONFIRM_PLAN_COMMIT);
+        json_init(&in); json_set_object(&in);
+        (void)json_push_kv_str(&in, "root", w->origin_release_hex);
+        ASSERT(!mcp_policy_allows(adopt, zcl_command_catalog(), &in, &why));
+        ASSERT(why.code &&
+               strcmp(why.code, "MUTATION_REFUSED_OWNER_AUTHORITY") == 0);
+        (void)json_push_kv_str(&in, "plan_id", w->origin_release_hex);
+        (void)json_push_kv_bool(&in, "confirm", true);
+        ASSERT(!mcp_policy_allows(adopt, zcl_command_catalog(), &in, &why));
+        ASSERT(mcp_policy_allows(fork, zcl_command_catalog(), &in, &why));
+        ASSERT(mcp_policy_allows(copies, zcl_command_catalog(), &in, &why));
+        json_free(&in);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int zpf_adopt_two_copies(const struct zpf_world *w, char first[700],
+                                char second[700])
+{
+    int failures = 0;
+    TEST("zcode package adopt: the plan names the publisher and two adopts "
+         "make skycombat-1 and skycombat-2") {
+        char pubkey[67], name[40], status[32];
+        int64_t count = 0;
+        struct zpf_call c;
+        struct stat st;
+        ASSERT(zpf_pubkey_hex(ZPF_ORIGIN_SEED, pubkey));
+        zpf_adopt_input(&c, w, w->origin_release_hex);
+        ASSERT(zpf_run("zcode.package.adopt", &c) && zpf_passed(&c));
+        ASSERT(strcmp(zpf_data_str(&c, "stage"), "plan") == 0);
+        ASSERT(strcmp(zpf_data_str(&c, "publisher"), pubkey) == 0);
+        ASSERT(strcmp(zpf_data_str(&c, "release_root"),
+                      w->origin_release_hex) == 0);
+        ASSERT(strcmp(zpf_data_str(&c, "package_root"),
+                      w->origin_package_hex) == 0);
+        ASSERT(strcmp(zpf_data_str(&c, "copy_name"), "skycombat-1") == 0);
+        ASSERT(!json_get_bool(json_get(&c.reply.data, "has_parent")));
+        ASSERT(stat(zpf_data_str(&c, "copy"), &st) != 0);
+        zpf_end(&c);
+
+        ASSERT(zpf_adopt(w, w->origin_release_hex, name, first));
+        ASSERT(strcmp(name, "skycombat-1") == 0);
+        ASSERT(strstr(first, "/copies/skycombat-1") != NULL);
+        ASSERT(zpf_adopt(w, w->origin_package_hex, name, second));
+        ASSERT(strcmp(name, "skycombat-2") == 0);
+        ASSERT(zpf_same_as_source(first, ZPF_EDITED));
+        ASSERT(zpf_adoption(w, first) == ZCL_PACKAGE_COPY_ADOPTED);
+        ASSERT(zpf_adoption(w, second) == ZCL_PACKAGE_COPY_ADOPTED);
+        ASSERT(zpf_copies_status(w, "skycombat-2", status, &count));
+        ASSERT(count == 2 && strcmp(status, "adopted") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int zpf_adopt_local_and_foreign(const struct zpf_world *w,
+                                       const char *first, const char *second)
+{
+    int failures = 0;
+    TEST("zcode package adopt: a local save stays adopted; a merged commit "
+         "is foreign") {
+        char status[32];
+        int64_t count = 0;
+        uint8_t version[32];
+        ASSERT(zpf_append(first, ZPF_EDITED, "/* my own boost */\n"));
+        ASSERT(zpf_save(first, NULL));
+        ASSERT(zpf_adoption(w, first) == ZCL_PACKAGE_COPY_ADOPTED);
+
+        ASSERT(zpf_append(second, ZPF_EDITED, "/* someone else's code */\n"));
+        const struct vcs_snapshot_meta meta = {
+            .phase = "merge", .task_ref = "zcode.merge:friend",
+        };
+        struct vcs_repo *repo = vcs_open(second);
+        ASSERT(repo && vcs_snapshot(repo, &meta, version) == VCS_OK);
+        vcs_close(repo);
+        ASSERT(zpf_adoption(w, second) == ZCL_PACKAGE_COPY_FOREIGN_COMMITS);
+        ASSERT(zpf_copies_status(w, "skycombat-2", status, &count));
+        ASSERT(strcmp(status, "foreign_commits") == 0);
+        ASSERT(zpf_copies_status(w, "skycombat-1", status, &count));
+        ASSERT(strcmp(status, "adopted") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool zpf_copy_file(const char *from, const char *to)
+{
+    FILE *in = fopen(from, "rb"), *out = fopen(to, "wb");
+    unsigned char buf[4096];
+    size_t got;
+    bool ok = in && out;
+    while (ok && (got = fread(buf, 1, sizeof(buf), in)) > 0)
+        ok = fwrite(buf, 1, got, out) == got;
+    if (in)
+        fclose(in);
+    if (out)
+        ok = fclose(out) == 0 && ok;
+    return ok;
+}
+
+static int zpf_adopt_hand_edit(const struct zpf_world *w, const char *first)
+{
+    int failures = 0;
+    TEST("zcode package adopt: a hand-edited commit log is not adoption") {
+        char plain[700], from[800], to[800];
+        (void)snprintf(plain, sizeof(plain), "%s/plain-fork", w->root);
+        ASSERT(zpf_fork(w, w->origin_release_hex, plain, NULL));
+        ASSERT(zpf_adoption(w, plain) == ZCL_PACKAGE_COPY_NOT_ADOPTED);
+        /* The adopted copy's whole history, root commit and all. */
+        (void)snprintf(from, sizeof(from), "%s/.zvcs/commits.log", first);
+        (void)snprintf(to, sizeof(to), "%s/.zvcs/commits.log", plain);
+        ASSERT(zpf_copy_file(from, to));
+        ASSERT(zpf_adoption(w, plain) == ZCL_PACKAGE_COPY_NOT_ADOPTED);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool zpf_has_change(const struct zpf_call *c, const char *path)
+{
+    const struct json_value *rows = json_get(&c->reply.data, "changed_paths");
+    for (size_t i = 0; i < json_size(rows); i++) {
+        const char *p = json_get_str(json_get(json_at(rows, i), "path"));
+        if (p && strcmp(p, path) == 0)
+            return true;
+    }
+    return false;
+}
+
+static int zpf_adopt_remix_plan(const struct zpf_world *w,
+                                const char *shared_release)
+{
+    int failures = 0;
+    TEST("zcode package adopt: a remix's plan shows its parent and the files "
+         "it changed") {
+        char pubkey[67];
+        struct zpf_call c;
+        ASSERT(zpf_pubkey_hex(ZPF_PLAYER_SEED, pubkey));
+        zpf_adopt_input(&c, w, shared_release);
+        ASSERT(zpf_run("zcode.package.adopt", &c) && zpf_passed(&c));
+        ASSERT(strcmp(zpf_data_str(&c, "publisher"), pubkey) == 0);
+        ASSERT(json_get_bool(json_get(&c.reply.data, "has_parent")));
+        ASSERT(strcmp(zpf_data_str(&c, "parent_release_root"),
+                      w->origin_release_hex) == 0);
+        ASSERT(strcmp(zpf_data_str(&c, "parent_package_root"),
+                      w->origin_package_hex) == 0);
+        ASSERT(json_get_int(json_get(&c.reply.data, "changes")) == 2);
+        ASSERT(zpf_has_change(&c, "zcode-package.json"));
+        ASSERT(zpf_has_change(&c, ZPF_EDITED));
+        zpf_end(&c);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_zcode_package_fork(void)
 {
     int failures = 0;
@@ -685,6 +1059,13 @@ int test_zcode_package_fork(void)
     failures += zpf_unsaved_refusal(&w);
     failures += zpf_share_names_parent(&w, shared_release);
     failures += zpf_tamper_refusals(&w, shared_release);
+    failures += zpf_torn_copy_reads(&w);
+    char first[700] = {0}, second[700] = {0};
+    failures += zpf_adopt_mcp(&w);
+    failures += zpf_adopt_two_copies(&w, first, second);
+    failures += zpf_adopt_local_and_foreign(&w, first, second);
+    failures += zpf_adopt_hand_edit(&w, first);
+    failures += zpf_adopt_remix_plan(&w, shared_release);
     if (!failures)
         (void)test_rm_rf_recursive(w.root);
     return failures;
