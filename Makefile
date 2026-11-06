@@ -7034,6 +7034,7 @@ LINT_FAST_GATES := \
     check-silent-errors-bool \
     check-no-raw-clock-outside-platform \
     check-hex-codec-single \
+    check-sqlite-step-row \
     check-byte-order-codec-single \
     check-no-operator-paths
 
@@ -15863,6 +15864,15 @@ check-hex-codec-single: $(LINTC_TOOL)
 	@./build/bin/z23-lint check-hex-codec-single --selftest
 	@./build/bin/z23-lint check-hex-codec-single
 
+# Gate — a SQLite step error is an error, never "no row". A step compared
+# straight to SQLITE_ROW folds BUSY/IOERR/CORRUPT/INTERRUPT into "absent";
+# use ar_step_checked() (util/ar_step_readonly.h). RATCHET per file:
+# tools/lint/sqlite_step_row_baseline.txt counts may only shrink.
+check-sqlite-step-row: $(LINTC_TOOL)
+	@echo "══ LINT: SQLite step errors are not \"no row\" ══"
+	@./build/bin/z23-lint check-sqlite-step-row --selftest
+	@./build/bin/z23-lint check-sqlite-step-row
+
 # Gate E2 — new service functions return struct zcl_result, not bare
 # bool/int (RATCHET at file granularity; baseline at
 # tools/scripts/one_result_type_baseline.txt may only shrink).
@@ -16487,6 +16497,7 @@ LINT_GATES := \
     check-markdown-links \
     check-doc-inline-paths \
     check-hex-codec-single \
+    check-sqlite-step-row \
     check-one-result-type \
     check-no-secret-printf \
     check-service-result-convergence \
