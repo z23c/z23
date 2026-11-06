@@ -56,6 +56,8 @@ enum island_anchor_state {
     ISLAND_ANCHOR_STATE_SEEDED,      /* window seeded; fact is authoritative */
     ISLAND_ANCHOR_STATE_FELL_BACK,   /* gave up; normal sync owns the node */
     ISLAND_ANCHOR_STATE_INSTALLED,   /* rung bundle installed; never falls back */
+    ISLAND_ANCHOR_STATE_UNREADABLE,  /* not a stored value: the read failed or
+                                      * the value is malformed; never decide */
 };
 
 /* In-process registration. register() refuses a malformed fact. */
@@ -100,10 +102,14 @@ bool island_anchor_rows_load(struct sqlite3 *db,
                              struct island_anchor_rows *out, bool *found);
 bool island_anchor_load(struct sqlite3 *db, struct island_anchor *out,
                         bool *found);
+/* UNREADABLE when the stored state cannot be read or is malformed; NONE when
+ * no state is stored or no progress store is open. Callers never decide a
+ * fall-back or a fresh start on UNREADABLE. */
 enum island_anchor_state island_anchor_state_load(struct sqlite3 *db);
 /* Record the fall-back durably and drop the in-process registration. Refused
- * (error, registration kept) once the state is INSTALLED: an installed island
- * stands on its state, and a damaged row never turns it back into a fall-back. */
+ * (error, registration kept) once the state is INSTALLED or UNREADABLE: an
+ * installed island stands on its state, and a damaged row never turns it back
+ * into a fall-back; an unreadable state may be an installed one. */
 struct zcl_result island_anchor_note_fallback(struct sqlite3 *db,
                                               const char *why);
 

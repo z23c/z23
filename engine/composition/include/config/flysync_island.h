@@ -49,8 +49,9 @@ struct uint256;
 #define FLYSYNC_INSTALL_TIMEOUT_MS  INT64_C(1800000)  /* seeded -> installed */
 /* The chosen rung offer's download: fall back only when no new verified chunk
  * has landed for FLYSYNC_FETCH_STALL_MS (a slow link that keeps moving, such
- * as a phone on Tor, keeps waiting), or when the wait has run
- * FLYSYNC_FETCH_CAP_MS in this process (time switched off never counts; the
+ * as a phone on Tor, keeps waiting), or when the download has run
+ * FLYSYNC_FETCH_CAP_MS in this process, counted from the first sighting of the
+ * chosen offer, not from the offer wait (time switched off never counts; the
  * held-boot count bounds restarts). */
 #define FLYSYNC_FETCH_STALL_MS      INT64_C(600000)     /* 10 min, no chunk */
 #define FLYSYNC_FETCH_CAP_MS        INT64_C(21600000)   /* 6 h while running */
@@ -129,10 +130,10 @@ bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
  * the damage and keeps its registration). Returns true when the island stands. */
 bool flysync_island_boot_reconcile(struct main_state *ms);
 
-/* Detach a fallen-back island (see flysync_island.c): every row rooted at the
- * fact's root, while that root has no parent, and every listed row found
- * parentless at its height, loses its parent and keeps only a token work below
- * any real entry's; the best header moves to the best remaining entry.
+/* Detach a fallen-back island (see flysync_island.c): every listed row still
+ * off the chain (by the fact's height range when the list is unreadable) and
+ * every entry descending from one loses its parent and keeps only a token work
+ * below any real entry's; the best header moves to the best remaining entry.
  * Returns rows detached. */
 size_t flysync_island_detach(struct main_state *ms,
                              const struct island_anchor *a);

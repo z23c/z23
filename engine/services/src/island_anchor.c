@@ -256,14 +256,26 @@ enum island_anchor_state island_anchor_state_load(struct sqlite3 *db)
     uint8_t v = 0;
     size_t len = 0;
     bool have = false;
-    if (!db || !progress_meta_get(db, IA_STATE_KEY, &v, 1, &len, &have))
+    /* A failed read or a malformed value is UNREADABLE, never NONE: NONE
+     * means "never a FlySync datadir", and a SEEDED island misread as fresh
+     * could be written FELL_BACK for good. No progress store holds no state
+     * at all (and nothing durable can be written to it). */
+    if (!db)
         return ISLAND_ANCHOR_STATE_NONE;
-    if (!have || len != 1)
+    if (!progress_meta_get(db, IA_STATE_KEY, &v, 1, &len, &have)) {
+        LOG_WARN(IA_SUBSYS, "island state unreadable: progress_meta read "
+                 "failed");
+        return ISLAND_ANCHOR_STATE_UNREADABLE;
+    }
+    if (!have)
         return ISLAND_ANCHOR_STATE_NONE;   /* save() writes both or neither */
-    if (v == ISLAND_ANCHOR_STATE_SEEDED || v == ISLAND_ANCHOR_STATE_FELL_BACK ||
-        v == ISLAND_ANCHOR_STATE_INSTALLED)
+    if (len == 1 && (v == ISLAND_ANCHOR_STATE_SEEDED ||
+                     v == ISLAND_ANCHOR_STATE_FELL_BACK ||
+                     v == ISLAND_ANCHOR_STATE_INSTALLED))
         return (enum island_anchor_state)v;
-    return ISLAND_ANCHOR_STATE_NONE;
+    LOG_WARN(IA_SUBSYS, "island state malformed (length %zu, value %u)", len,
+             (unsigned)v);
+    return ISLAND_ANCHOR_STATE_UNREADABLE;
 }
 
 struct zcl_result island_anchor_note_installed(struct sqlite3 *db)
@@ -314,9 +326,14 @@ struct zcl_result island_anchor_hold_boot(struct sqlite3 *db, uint64_t *boots)
 struct zcl_result island_anchor_note_fallback(struct sqlite3 *db,
                                               const char *why)
 {
-    if (island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_INSTALLED)
+    enum island_anchor_state st = island_anchor_state_load(db);
+    if (st == ISLAND_ANCHOR_STATE_INSTALLED)
         return ZCL_ERR(-2, "FlySync fall-back refused: the rung bundle is "
                        "installed (%s)", why ? why : "unspecified");
+    if (st == ISLAND_ANCHOR_STATE_UNREADABLE)
+        return ZCL_ERR(-3, "FlySync fall-back refused: the island state is "
+                       "unreadable, so it may be installed (%s)",
+                       why ? why : "unspecified");
     island_anchor_unregister();
     bool ok = db && progress_meta_table_ensure(db) &&
               ia_state_save(db, ISLAND_ANCHOR_STATE_FELL_BACK);

@@ -599,10 +599,11 @@ static const char *topup_source_name(bool bounded)
 }
 
 /* Collect the map's entries into sorted, height ASC, and run the canonical
- * forward pass over them. Returns how many were collected. */
-static size_t topup_forward_pass_over_map(struct main_state *ms,
-                                          struct block_index **sorted,
-                                          size_t total)
+ * forward pass over them. Returns how many were collected. Declared in
+ * services/block_index_loader.h. */
+size_t block_index_forward_pass_over_map(struct main_state *ms,
+                                         struct block_index **sorted,
+                                         size_t total)
 {
     size_t n = 0, it = 0;
     struct block_index *e;
@@ -702,7 +703,7 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
             ? zcl_malloc(total * sizeof(*sorted), "topup.forward_pass")
             : NULL;
         if (sorted) {
-            size_t n = topup_forward_pass_over_map(ms, sorted, total);
+            size_t n = block_index_forward_pass_over_map(ms, sorted, total);
             free(sorted);
             printf("[boot] topup: global forward pass after %zu stub "
                    "hydration(s) — %zu entries recomputed\n",

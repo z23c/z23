@@ -342,6 +342,12 @@ void block_index_set_chainwork(struct block_index *bi);
  * ordered. */
 void block_index_forward_pass(struct block_index **sorted, size_t count);
 
+/* Collect every map entry into `sorted` (room for `total`), sort it by height
+ * and run block_index_forward_pass over it. Returns the entries passed. */
+size_t block_index_forward_pass_over_map(struct main_state *ms,
+                                         struct block_index **sorted,
+                                         size_t total);
+
 /* Publish the max-chainwork header of a just-loaded, forward-passed map into
  * pindex_best_header and seat it in the active_chain[] window (THE LINCHPIN so
  * active_chain_tip() is non-NULL over a freshly-hydrated header map). Shared by
