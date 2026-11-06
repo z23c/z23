@@ -681,6 +681,7 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/boot_verify_rom.c", CAP_FS_WRITE, 
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_wallet_credential.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_wallet_keypool.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_wallet_phrase.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_wallet_rebuild.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_zcode_dht.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_zcode_dht_publish_gate.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_zcode_swarm.c", CAP_FS_WRITE|CAP_FS_READ, "")

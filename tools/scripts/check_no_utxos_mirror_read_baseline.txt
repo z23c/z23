@@ -15,7 +15,7 @@ engine/services/src/utxo_recovery_torn_anchor.c
 engine/composition/src/boot_address_backfill.c
 engine/composition/src/boot_index.c
 engine/composition/src/boot_steps.c
-engine/composition/src/boot_services.c
+engine/composition/src/boot_wallet_rebuild.c
 engine/composition/src/boot_snapshot_import.c
 engine/composition/src/consensus_state_install_derived_state.c
 engine/composition/src/runtime.c
