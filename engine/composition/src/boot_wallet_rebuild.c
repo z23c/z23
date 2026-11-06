@@ -7,11 +7,14 @@
  * key; the coins database decides which of them become wallet rows. A row is
  * inserted only when its coin exists and its amount and script match, and it
  * takes its height and coinbase flag from the coin. Any other row is skipped
- * and counted. With no coins view nothing is inserted. */
+ * and counted, and the count is logged with the repair command (rescanwallet,
+ * which rewrites wallet_utxos from the blocks). With no coins view nothing is
+ * inserted. */
 
 #include "config/boot_internal.h"
 #include "controllers/wallet_row_coins.h"
 #include "util/ar_step_readonly.h"
+#include "util/log_macros.h"
 #include <sqlite3.h>
 #include <stdio.h>
 
@@ -90,8 +93,10 @@ int boot_wallet_rebuild_confirmed(struct node_db *ndb,
     if (!ndb || !ndb->db)
         return -1;
     if (!coins) {
-        fprintf(stderr, "wallet_utxos: rebuild withheld because the coins "
-                "database is unavailable\n");
+        LOG_WARN("wallet_utxos", "rebuild withheld: the coins database is "
+                 "unavailable; once it is, run rescanwallet to rebuild "
+                 "wallet_utxos from the blocks (this boot rebuild does not "
+                 "run again while the table holds a row)");
         return -1;
     }
     if (sqlite3_exec(ndb->db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
@@ -113,6 +118,11 @@ int boot_wallet_rebuild_confirmed(struct node_db *ndb,
                     sqlite3_errmsg(ndb->db));
         return -1;
     }
+    if (t.skipped > 0)
+        LOG_WARN("wallet_utxos", "rebuild skipped %d utxos rows the coins "
+                 "database does not confirm; run rescanwallet to rebuild "
+                 "wallet_utxos from the blocks (this boot rebuild does not "
+                 "run again while the table holds a row)", t.skipped);
     if (skipped)
         *skipped = t.skipped;
     return t.inserted;
