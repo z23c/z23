@@ -262,9 +262,10 @@ bool getheaders_replay_deferred(struct msg_processor *mp,
  * regression tests and operator diagnostics; nothing branches on it. */
 uint64_t getheaders_replayed_deferred(void);
 
-/* getdata_replay_kept() — serve the blocks the send budget stopped for this peer
+/* getdata_replay_kept() — serve the blocks held back for this peer
  * (struct p2p_node::getdata_kept), oldest first, until none are left or the
- * peer is over budget again. A kept block this node can no longer serve gets
+ * peer is over budget again. Nothing moves while a snapshot is being served to
+ * this peer. A kept block this node can no longer serve gets
  * notfound. Returns true when any were taken from the slot. Single
  * message-handler thread only. */
 bool getdata_replay_kept(struct msg_processor *mp, struct p2p_node *node);

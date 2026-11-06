@@ -313,6 +313,8 @@ bool getdata_replay_kept(struct msg_processor *mp, struct p2p_node *node)
 {
     if (!mp || !node || node->getdata_kept_count == 0)
         return false; // raw-return-ok:nothing-kept-for-this-peer
+    if (node->state == PEER_SNAPSHOT_SERVING)
+        return false; // raw-return-ok:kept-until-the-snapshot-serve-ends
     if (atomic_load(&node->disconnect))
         return false; // raw-return-ok:peer-is-going-away
 
@@ -342,11 +344,18 @@ void msg_send_replay_held(struct msg_processor *mp, struct p2p_node *node)
     (void)getdata_replay_kept(mp, node);
 }
 
-/* A request item that reached the send budget. A block goes in the peer's slot
- * and is served from the send tick. Past the slot it gets notfound, and a peer
- * that ignores notfound leaves it in flight until its own timeout: an honest
- * legacy peer never gets here, it has at most 16 blocks in flight. Other items
- * get no reply; the peer's own retry deals with those. */
+/* A request item that has to wait: a snapshot is being served to this peer, blocks
+ * it asked for earlier are still kept, or it reached the send budget. */
+static bool msg_getdata_must_hold(const struct p2p_node *node)
+{
+    return node->state == PEER_SNAPSHOT_SERVING ||
+           node->getdata_kept_count > 0 || net_send_over_budget(node);
+}
+
+/* A block goes in the peer's slot and is served from the send tick. Past the slot
+ * it gets notfound, and a peer that ignores notfound leaves it in flight until
+ * its own timeout: an honest legacy peer never gets here, it has at most 16 blocks
+ * in flight. Other items get no reply; the peer's own retry deals with those. */
 static void msg_getdata_hold_item(struct msg_processor *mp,
                                   struct p2p_node *node,
                                   struct inv_item *not_found,
@@ -355,6 +364,9 @@ static void msg_getdata_hold_item(struct msg_processor *mp,
 {
     if (inv->type != MSG_BLOCK)
         return; // raw-return-ok:only-blocks-are-kept-past-the-budget
+    if (node->state == PEER_SNAPSHOT_SERVING && node->getdata_kept_count == 0)
+        LOG_INFO("net", "Peer %s: keeping getdata until the snapshot serve ends",
+                 node->addr_name);
     if (node->getdata_kept_count < GETDATA_KEPT_BLOCKS_MAX)
         node->getdata_kept[node->getdata_kept_count++] = inv->hash;
     else
@@ -364,12 +376,6 @@ static void msg_getdata_hold_item(struct msg_processor *mp,
 bool process_getdata(struct msg_processor *mp, struct p2p_node *node,
                      struct byte_stream *s)
 {
-    if (node->state == PEER_SNAPSHOT_SERVING) {
-        printf("Peer %s: deferring getdata while serving snapshot\n",
-               node->addr_name);
-        return true;
-    }
-
     uint64_t count;
     if (!stream_read_compact_size(s, &count))
         LOG_FAIL("net", "failed to read getdata count from %s",
@@ -413,7 +419,7 @@ bool process_getdata(struct msg_processor *mp, struct p2p_node *node,
          * peer's fixed slot for the send tick (msg_getdata_hold_item). Do
          * NOT disconnect. Whitelisted/trusted peers are exempt (checked
          * inside net_send_over_budget). */
-        if (node->getdata_kept_count > 0 || net_send_over_budget(node)) {
+        if (msg_getdata_must_hold(node)) {
             msg_getdata_hold_item(mp, node, not_found, &not_found_count, &inv);
             continue;
         }

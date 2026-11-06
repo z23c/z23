@@ -1003,3 +1003,7 @@ later lane flips it HARD.
 - 2026-11-06T00:52:17Z — REASON: Hold getdata and getheaders only while a snapshot is being served
   old ROOT: 18a5c995eaa1426aed57056b5d522136cfbb0e4370467e3715593d73de01e8a1
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T00:58:11Z — REASON: Keep a block asked for during a snapshot serve and finish it after
+  old ROOT: a3e4344f4b13f60fab86918666042bf174a194d28aec11ca63beeb1f1577fb55
+  by: owner unseal ritual (make core-unseal)

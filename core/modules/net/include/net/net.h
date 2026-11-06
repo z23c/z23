@@ -447,9 +447,9 @@ struct p2p_node {
     uint16_t getheaders_deferred_len;
     int64_t getheaders_deferred_replay_after;
 
-    /* Blocks this peer asked for that the send budget stopped, oldest first,
-     * served from the send tick once the peer is under budget (msg_blocks.c::
-     * getdata_replay_kept). zclassicd does not ask again and ignores notfound,
+    /* Blocks this peer asked for that the send budget or a snapshot serve stopped,
+     * oldest first, served from the send tick once the serve is over and the peer
+     * is under budget (msg_blocks.c::getdata_replay_kept). zclassicd does not ask again and ignores notfound,
      * so nobody else would finish them. Fixed bytes, so the hostile path
      * allocates nothing; zero-initialised by p2p_node_create (calloc), where a
      * count of 0 means nothing is kept, and gone with the connection. Written
