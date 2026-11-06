@@ -42,6 +42,9 @@
 #include "sapling/incremental_merkle_tree.h"
 #include "support/cleanse.h"
 #include "util/safe_alloc.h"
+#include "keys/key.h"
+#include "keys/pubkey.h"
+#include "script/standard.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -436,6 +439,148 @@ static int vpd_real_sapling_small_sets(int height)
     return vpd_real_small_set(false, height) + vpd_real_small_set(true, height);
 }
 
+/* ── a signed Sapling spend, for the precompute out-of-memory case ───────── */
+
+struct vpd_signed_prev {
+    struct script spk;
+    int64_t value;
+};
+
+static bool vpd_signed_prevout(const struct outpoint *po, struct tx_out *out,
+                               void *user)
+{
+    const struct vpd_signed_prev *p = user;
+    if (!po || !out || !p)
+        return false;
+    tx_out_set_null(out);
+    out->value = p->value;
+    out->script_pub_key = p->spk;
+    return true;
+}
+
+/* {coinbase, a Sapling v4 tx spending one P2PKH coin}, signed for `height`.
+ * The Sapling signature hash reads the precomputed prevout, sequence and
+ * output hashes, so it signs over exactly what precompute_tx_data supplies. */
+static bool vpd_signed_spend_block(struct block *b,
+                                   struct vpd_signed_prev *prev, int height,
+                                   bool corrupt)
+{
+    struct privkey key;
+    privkey_make_new(&key, true);
+    struct pubkey pub;
+    privkey_get_pubkey(&key, &pub);
+    struct key_id kid = pubkey_get_id(&pub);
+    script_for_p2pkh(&prev->spk, &kid);
+    prev->value = 100000000;
+
+    block_init(b);
+    b->vtx = zcl_calloc(2, sizeof(struct transaction), "vpd");
+    if (!b->vtx)
+        return false;
+    b->num_vtx = 2;
+    int one[1] = {0};
+    struct transaction *tx = &b->vtx[1];
+    if (!vpd_build_tx(&b->vtx[0], 0, true, NULL, 0, 0) ||
+        !vpd_build_tx(tx, 1, false, one, 1, 0))
+        return false;
+    tx->overwintered = true;
+    tx->version = 4;
+    tx->version_group_id = SAPLING_VERSION_GROUP_ID;
+
+    uint32_t branch_id = consensus_current_epoch_branch_id(
+        height, &chain_params_get()->consensus);
+    struct sighash_type ht = { .raw = SIGHASH_ALL };
+    struct uint256 sighash;
+    if (!signature_hash(&prev->spk, tx, 0, ht, prev->value, branch_id, NULL,
+                        &sighash))
+        return false;
+    unsigned char sig[80];
+    size_t siglen = sizeof(sig);
+    if (!privkey_sign(&key, &sighash, sig, &siglen) || siglen > 72)
+        return false;
+    if (corrupt)
+        sig[siglen - 4] ^= 0xFF;    /* still a DER integer, wrong value */
+    sig[siglen++] = SIGHASH_ALL;
+
+    unsigned char ss[1 + 73 + 1 + 65];
+    size_t pklen = pub.size > 65 ? 65 : pub.size;
+    size_t n = 0;
+    ss[n++] = (unsigned char)siglen;
+    memcpy(&ss[n], sig, siglen);
+    n += siglen;
+    ss[n++] = (unsigned char)pklen;
+    memcpy(&ss[n], pub.vch, pklen);
+    n += pklen;
+    script_set(&tx->vin[0].script_sig, ss, n);
+    transaction_compute_hash(tx);
+    return true;
+}
+
+/* One script_verify_block call with `label` failing if given, under one
+ * routing: 0 = serial entry, 1 = pool fan, 2 = parallel entry folded serially. */
+static void vpd_signed_run(const struct block *b, struct vpd_signed_prev *prev,
+                           int height, int routing, const char *label,
+                           bool *fired, struct script_verify_summary *out)
+{
+    script_verify_set_parallel_min_inputs_for_test(routing == 1 ? 0 : 1 << 30);
+    if (label)
+        zcl_alloc_fault_fail_nth(label, 1);
+    script_verify_block(b, height, NULL, NULL, vpd_signed_prevout, prev,
+                        routing != 0, out);
+    if (fired)
+        *fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    script_verify_set_parallel_min_inputs_for_test(-1);
+}
+
+/* precompute_tx_data hashes into streams it allocates. One that could not get
+ * memory hashed a short stream, so the signature check that reads it fails
+ * through no fault of the block. That is no verdict: every routing reports a
+ * local failure with no failed input, and the same block verifies with memory
+ * back. A corrupt signature still fails on its merits. */
+static int vpd_case_precompute_out_of_memory(int height)
+{
+    int failures = 0;
+    struct block b, bad;
+    struct vpd_signed_prev prev, bad_prev;
+    VPD_CHECK("precompute oom: signed fixture",
+              vpd_signed_spend_block(&b, &prev, height, false) &&
+              vpd_signed_spend_block(&bad, &bad_prev, height, true));
+
+    struct script_verify_summary ref, s;
+    vpd_signed_run(&b, &prev, height, 0, NULL, NULL, &ref);
+    VPD_CHECK("precompute oom: the signed spend verifies",
+              ref.ok == 1 && ref.inputs_verified == 1);
+    vpd_signed_run(&bad, &bad_prev, height, 0, NULL, NULL, &s);
+    VPD_CHECK("precompute oom: a corrupt signature fails on its merits",
+              s.ok == 0 && !s.internal_error && s.inputs_failed == 1 &&
+              s.first_failure_serror != SCRIPT_ERR_OK);
+
+    struct script_verify_summary serial;
+    for (int routing = 0; routing < 3; routing++) {
+        bool fired = false;
+        vpd_signed_run(&b, &prev, height, routing, "stream_data", &fired, &s);
+        printf("parallel_determinism: precompute oom routing=%d: %s\n",
+               routing, s.reason);
+        VPD_CHECK("precompute oom: the precompute hit the failed allocation",
+                  fired);
+        VPD_CHECK("precompute oom: no script verdict",
+                  s.ok == 0 && s.internal_error && s.local_failure &&
+                  s.inputs_failed == 0 &&
+                  strncmp(s.reason, "out_of_memory", 13) == 0);
+        if (routing == 0)
+            serial = s;
+        else
+            VPD_CHECK("precompute oom: parallel matches serial",
+                      sv_eq(&s, &serial));
+        vpd_signed_run(&b, &prev, height, routing, NULL, NULL, &s);
+        VPD_CHECK("precompute oom: verifies with memory back", sv_eq(&s, &ref));
+    }
+    vpd_block_free(&b);
+    vpd_block_free(&bad);
+    return failures;
+}
+
 /* ── the tests ────────────────────────────────────────────────────────────── */
 
 int test_validate_parallel_determinism(void);
@@ -662,6 +807,10 @@ int test_validate_parallel_determinism(void)
         VPD_CHECK("proof big-block deep-invalid", pv_determinism(&b, H, &exp));
         vpd_block_free(&b);
     }
+
+    failures += vpd_case_precompute_out_of_memory(
+        chain_params_get()->consensus.vUpgrades[UPGRADE_SAPLING]
+            .nActivationHeight + 1);
 
     /* ---- THROUGHPUT / KEEPS-FED ---- */
 

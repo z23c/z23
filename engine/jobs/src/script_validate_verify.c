@@ -151,11 +151,19 @@ static void sv_serial(const struct block *blk, int height, uint32_t flags,
 
         struct precomputed_tx_data txdata;
         int64_t precompute_started = platform_time_monotonic_us();
+        uint64_t precompute_failures = zcl_alloc_failure_count();
         precompute_tx_data(tx, &txdata);
+        bool precompute_oom = zcl_alloc_failure_count() != precompute_failures;
         reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
                                          RPF_TX_PRECOMPUTE_US,
                                   (uint64_t)(platform_time_monotonic_us() -
                                              precompute_started));
+        /* A precompute that ran out of memory hashed short streams, so no
+         * signature check that reads them says anything about this tx. */
+        if (precompute_oom && tx->num_vin > 0) {
+            sv_write_local_failure(out, &tx->hash, 0);
+            return;
+        }
 
         for (size_t vi = 0; vi < tx->num_vin; vi++) {
             struct tx_out prev;
@@ -247,6 +255,7 @@ struct sv_job {
     unsigned int vi;
     int ti;                 /* owning tx index — reproduces serial tx_count */
     bool prevout_ok;        /* set in the serial build phase */
+    bool precompute_oom;    /* the tx's precompute ran out of memory */
     /* result (only meaningful when prevout_ok) */
     bool verified;
     bool local_failure;     /* unverified because the check ran out of memory */
@@ -262,7 +271,7 @@ static void sv_worker(void *j, void *u)
 {
     struct sv_job *job = j;
     struct sv_ctx *ctx = u;
-    if (!job->prevout_ok)
+    if (!job->prevout_ok || job->precompute_oom)
         return;
     struct tx_sig_checker tsc;
     tx_sig_checker_init(&tsc, job->tx, job->vi, job->prev.value,
@@ -334,13 +343,18 @@ static void sv_parallel_build_jobs(const struct block *blk,
         if (transaction_is_coinbase(tx))
             continue;
         int64_t precompute_started = platform_time_monotonic_us();
+        /* The count is per thread and this runs on the drive, so the jobs
+         * carry the answer past the workers to the reduce. */
+        uint64_t precompute_failures = zcl_alloc_failure_count();
         precompute_tx_data(tx, &txdata_arr[ti]);
+        bool precompute_oom = zcl_alloc_failure_count() != precompute_failures;
         reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
                                          RPF_TX_PRECOMPUTE_US,
                                   (uint64_t)(platform_time_monotonic_us() -
                                              precompute_started));
         for (size_t vi = 0; vi < tx->num_vin; vi++) {
             struct sv_job *job = &jobs[k++];
+            job->precompute_oom = precompute_oom;
             job->tx = tx;
             job->txid = tx->hash;
             job->vi = (unsigned int)vi;
@@ -366,6 +380,13 @@ static void sv_parallel_reduce(const struct block *blk, struct sv_job *jobs,
     bool stopped = false;
     for (size_t i = 0; i < n_inputs && !stopped; i++) {
         struct sv_job *job = &jobs[i];
+        /* Before the prevouts, as the serial sweep checks it. */
+        if (job->precompute_oom) {
+            out->tx_count = (size_t)job->ti + 1;
+            sv_write_local_failure(out, &job->txid, job->vi);
+            stopped = true;
+            break;
+        }
         if (!job->prevout_ok) {
             out->tx_count = (size_t)job->ti + 1;
             sv_write_prevout_unresolved(out, &job->txid, job->vi, height);
