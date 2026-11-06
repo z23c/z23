@@ -1083,3 +1083,7 @@ later lane flips it HARD.
 - 2026-11-06T05:28:49Z — REASON: Check that dynhost's slot holds the persistent service, not just anything
   old ROOT: 019c0299b613b8cb502e90e956792971df2302b756c3a5083c3c39761255476c
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T05:29:58Z — REASON: Make the Tor start race test real, and test a start after Tor ended by itself
+  old ROOT: 9c15f56ebad69107cb59dc34be1941104b329dc376e9ce89d3ad735d4c1509a6
+  by: owner unseal ritual (make core-unseal)

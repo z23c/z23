@@ -334,6 +334,9 @@ bool tor_integration_control_sockets_for_test(int64_t *ours, int64_t *tors,
 /* Test seam: the service Tor registered for this address (56 chars, no
  * ".onion"), or NULL. */
 void *tor_integration_find_service_for_test(const char *address);
+/* Test seam: runs inside tor_integration_start(), after the Tor thread exists
+ * and before the run can be stopped. NULL clears it. */
+void tor_integration_set_start_window_for_test(void (*window)(void));
 #endif
 
 #ifdef ZCL_TESTING

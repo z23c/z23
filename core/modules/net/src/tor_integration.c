@@ -1160,6 +1160,17 @@ static bool tor_append_test_torrc(const char *datadir)
  * either finds nothing started yet or finds a run it can end and join. */
 static pthread_mutex_t g_tor_lifecycle = PTHREAD_MUTEX_INITIALIZER;
 
+#ifdef ZCL_TESTING
+/* Test seam: runs inside a start, after the Tor thread exists and before the
+ * run can be stopped, so a test can put a stop in exactly that window. */
+static void (*g_test_start_window)(void);
+
+void tor_integration_set_start_window_for_test(void (*window)(void))
+{
+    g_test_start_window = window;
+}
+#endif
+
 /* End the current run, if any, and release everything it held. Caller holds
  * g_tor_lifecycle.
  *
@@ -1296,6 +1307,10 @@ static bool tor_start_locked(const char *datadir, uint16_t p2p_port)
         g_tor_control_peer = PLATFORM_SOCKET_INVALID;
         LOG_FAIL("tor", "thread_registry_spawn failed for tor thread");
     }
+#ifdef ZCL_TESTING
+    if (g_test_start_window)
+        g_test_start_window();
+#endif
     atomic_store(&g_tor_started, true);
     thread_liveness_register(&g_tor_liveness, "zcl_tor", 0, 0);
     return true;

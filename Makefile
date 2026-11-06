@@ -5766,7 +5766,7 @@ t-tsan-locked: $(TEST_TSAN_CANDIDATE) dev-package-verifier-ensure \
 # report into a red group (mirrors asan-ci's UBSan posture) — a red tsan-ci
 # is a real NEW finding, not expected noise. setarch -R: see the t-tsan note
 # above.
-TSAN_CI_GROUPS ?= test_supervisor test_workpool test_mailbox test_parallel_range_fold test_validate_parallel_determinism test_net_bootstrap test_cpu_topology
+TSAN_CI_GROUPS ?= test_supervisor test_workpool test_mailbox test_parallel_range_fold test_validate_parallel_determinism test_net_bootstrap test_cpu_topology test_tor_stop
 tsan-ci: $(TEST_TSAN_CANDIDATE) dev-package-verifier-ensure
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
