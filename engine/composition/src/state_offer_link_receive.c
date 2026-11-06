@@ -16,6 +16,7 @@ enum sol_receive_result state_offer_link_receive(const struct rom_fetch_manifest
 #include "base/safe_alloc.h"
 #include "net/rom_journal.h"
 #include "net/rom_seed.h"
+#include "platform/file_sync.h"
 #include "platform/rename_compat.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -77,7 +78,7 @@ static enum sol_receive_result fetch_chunks(int fd, struct rom_journal *j,
             if (r != SOL_RECEIVE_OK) return r;
             if (got != want || !rom_fetch_verify_chunk(buf, got, hashes[i])) return SOL_RECEIVE_BAD_DATA;
             if (!io_at(fd, buf, got, (off_t)((uint64_t)i * m->chunk_size), true) ||
-                fdatasync(fd) || !rom_journal_mark(j, i)) return SOL_RECEIVE_LOCAL_IO;
+                platform_data_sync(fd) || !rom_journal_mark(j, i)) return SOL_RECEIVE_LOCAL_IO;
         }
         done_bytes += want;
         if (progress && !progress(rom_journal_count_done(j), m->num_chunks, done_bytes, progress_ctx))
@@ -161,12 +162,12 @@ static bool prepare_journal(struct receive_job *s)
     if (rom_journal_count_done(s->journal) &&
         !resume_valid(s->fd, s->journal, s->m, s->buf, (const uint8_t (*)[32])s->hashes) &&
         !reset_resume(s)) return false;
-    return rom_journal_count_done(s->journal) || (!ftruncate(s->fd, 0) && !fdatasync(s->fd));
+    return rom_journal_count_done(s->journal) || (!ftruncate(s->fd, 0) && !platform_data_sync(s->fd));
 }
 static bool verify_partial(struct receive_job *s)
 {
     char path[1200];
-    if (ftruncate(s->fd, (off_t)s->m->size_bytes) || fdatasync(s->fd) ||
+    if (ftruncate(s->fd, (off_t)s->m->size_bytes) || platform_data_sync(s->fd) ||
         snprintf(path, sizeof(path), "%s/%s", s->dir_path, s->part) >= (int)sizeof(path)) return false;
     return same_directory(s->dir, s->dir_path) && rom_fetch_verify_file(path, s->m) &&
         same_directory(s->dir, s->dir_path) && !fchmod(s->fd, 0444);
@@ -175,7 +176,7 @@ static bool publish_partial(struct receive_job *s)
 {
     struct stat a, b;
     if (fstat(s->fd, &a) || fstatat(s->dir, s->part, &b, AT_SYMLINK_NOFOLLOW) ||
-        a.st_dev != b.st_dev || a.st_ino != b.st_ino || a.st_nlink != 1 || fdatasync(s->fd) ||
+        a.st_dev != b.st_dev || a.st_ino != b.st_ino || a.st_nlink != 1 || platform_data_sync(s->fd) ||
         platform_renameat_noreplace(s->dir, s->part, s->dir, s->m->filename)) return false;
     s->published = true;
     if (fsync(s->dir)) return false;
