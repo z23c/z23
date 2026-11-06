@@ -471,7 +471,7 @@ ZCL_WINDOWS_LAUNCHER_GOALS := windows-headless-run windows-headless-run-selftest
 ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs help doctor doctor-env doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
 # Receipt hooks use in-tree C23 and system libraries, never node archives.
 ZCL_GIT_HOOK_GOALS := git-hook git-hook-selftest install-hooks
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe,$(MAKECMDGOALS))),,1),)
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client,$(MAKECMDGOALS))),,1),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -1723,7 +1723,7 @@ TOR_MISSING_ARCHIVES := $(filter-out $(wildcard $(TOR_ARCHIVE_PATHS)),$(TOR_ARCH
 ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready c3-mutex-probe c3-speed-bench c3-tip-seam build/bin/c3-mutex-probe.so \
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
 	worktree-prime-selftest $(ZCL_GIT_HOOK_GOALS) setup \
-	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe \
+	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe skycombat-agent-client \
 	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS)
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
 	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
@@ -3040,6 +3040,8 @@ SKYCOMBAT_CFLAGS := -std=$(ZCL_C_STD) -O2 -Wall -Wextra -Werror -pedantic \
 	-I$(SKYCOMBAT_DIR)/include -I$(SKYCOMBAT_DIR)/specifications \
 	-I$(SKYCOMBAT_DIR)/modules/compile_time_gdb_proof/include \
 	-Iplatform/modules/base/include -Iplatform/modules/platform/include \
+	-Iplatform/modules/json/include -Iplatform/modules/util/include \
+	-Icontexts/commons/packages/zbase64/include \
 	-Icontexts/commons/packages/zsha256/include
 
 Z23RAYLIB_SRCS := $(Z23RAYLIB_DIR)/src/rcore.c $(Z23RAYLIB_DIR)/src/rshapes.c \
@@ -3069,6 +3071,7 @@ SKYCOMBAT_OBJS := $(patsubst $(SKYCOMBAT_DIR)/%.c,$(SKYCOMBAT_OBJ_DIR)/%.o,$(SKY
 # every file; only the link is selective.
 SKYCOMBAT_GAME_MAIN := $(SKYCOMBAT_DIR)/src/sky_combat_multiplayer_ultimate.c
 SKYCOMBAT_GAME_SRCS := $(SKYCOMBAT_GAME_MAIN) \
+	$(SKYCOMBAT_DIR)/src/agent_session.c \
 	$(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) \
 	$(SKYCOMBAT_DIR)/src/controllers/input_controller_fast.c \
 	$(SKYCOMBAT_DIR)/src/controllers/input_mvc_fast.c \
@@ -3152,7 +3155,10 @@ $(patsubst $(SKYCOMBAT_DIR)/%.c,$(SKYCOMBAT_OBJ_DIR)/%.o,$(wildcard $(SKYCOMBAT_
 
 # Standalone canonical reader/hash support: no core/engine or node link.
 SKYCOMBAT_SUPPORT_SRCS := platform/modules/platform/src/positioned_file.c \
-	platform/modules/base/src/safe_alloc.c contexts/commons/packages/zsha256/src/zsha256.c
+	platform/modules/base/src/safe_alloc.c platform/modules/base/src/cleanse.c \
+	platform/modules/json/src/json.c platform/modules/util/src/png_writer.c \
+	contexts/commons/packages/zbase64/src/zbase64.c \
+	contexts/commons/packages/zsha256/src/zsha256.c
 SKYCOMBAT_SUPPORT_OBJS := $(addprefix $(SKYCOMBAT_OBJ_DIR)/support/,$(SKYCOMBAT_SUPPORT_SRCS:.c=.o))
 $(SKYCOMBAT_OBJ_DIR)/support/%.o: %.c | $(SKYCOMBAT_PLATFORM_STAMP)
 	@mkdir -p $(@D)
@@ -3193,14 +3199,40 @@ plugin-skycombat: plugin-skycombat-key game $(Z23_BIN)
 # Source-bound QA entrypoint fixture: no window-system headers or GPU needed.
 SKYCOMBAT_QA_BIN := $(BIN_DIR)/skycombat-qa-entrypoint
 $(SKYCOMBAT_QA_BIN): tests/fixtures/skycombat_qa/run.c $(SKYCOMBAT_GAME_MAIN) Makefile \
+	               $(SKYCOMBAT_DIR)/src/agent_session.c \
                    $(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) $(wildcard $(SKYCOMBAT_DIR)/part/*.h) \
                    $(SKYCOMBAT_SUPPORT_SRCS) \
                    $(wildcard apps/skycombat/include/sky_combat/*.h) \
                    $(wildcard apps/skycombat/include/sky_combat/*/*.h) | $(BIN_DIR)
 	$(CC) $(SKYCOMBAT_CFLAGS) $(SKYCOMBAT_SIM_FP_FLAGS) $< \
+	    $(SKYCOMBAT_DIR)/src/agent_session.c \
 	    $(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) $(SKYCOMBAT_SUPPORT_SRCS) -o $@ -lm
 .PHONY: skycombat-qa-entrypoint
 skycombat-qa-entrypoint: $(SKYCOMBAT_QA_BIN)
+
+# Explicit real-display client; never launch a GUI from generic harness goals.
+# The fixture includes png_writer.c for checksum controls: do not link it twice.
+.PHONY: skycombat-agent-client
+ifeq ($(ZCL_HOST_OS),Linux)
+SKYCOMBAT_AGENT_CLIENT_SRCS := tests/fixtures/skycombat_agent_client.c \
+	platform/modules/json/src/json.c platform/modules/base/src/cleanse.c \
+	platform/modules/base/src/safe_alloc.c \
+	contexts/commons/packages/zbase64/src/zbase64.c \
+	contexts/commons/packages/zutf8/src/zutf8.c
+$(BIN_DIR)/skycombat-agent-client: $(SKYCOMBAT_AGENT_CLIENT_SRCS) Makefile \
+	platform/modules/util/src/png_writer.c \
+	$(wildcard platform/modules/json/include/json/*.h) \
+	$(wildcard platform/modules/base/include/base/*.h) \
+	$(wildcard platform/modules/util/include/util/*.h) \
+	$(wildcard contexts/commons/packages/zbase64/include/zbase64/*.h) \
+	$(wildcard contexts/commons/packages/zutf8/include/zutf8/*.h) | $(BIN_DIR)
+	$(CC) $(SKYCOMBAT_CFLAGS) -Icontexts/commons/packages/zutf8/include \
+	    $(SKYCOMBAT_AGENT_CLIENT_SRCS) -o $@ -lm
+skycombat-agent-client: $(BIN_DIR)/skycombat-agent-client
+else
+skycombat-agent-client:
+	@echo "skycombat_agent_client_requires_linux" >&2; exit 2
+endif
 
 .PHONY: worktree-prime worktree-prime-selftest
 # Formalizes the "copy generated vendor inputs before a fresh worktree can

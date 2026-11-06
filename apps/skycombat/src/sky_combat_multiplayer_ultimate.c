@@ -25,6 +25,7 @@
 #include "sky_combat/controllers/input_mvc_fast.h"
 #include "sky_combat/views/combat_effects.h"
 #include "sky_combat/qa_frames.h"
+#include "sky_combat/agent_session.h"
 
 #include "../part/expr_use.h"
 
@@ -296,7 +297,7 @@ static void update_camera_ultimate(multiplayer_game_t* game, float dt) {
 }
 
 static void destroy_game_systems(multiplayer_game_t *game) {
-    if (game->match->match_started && !game->match->match_ended)
+    if (game->match && game->match->match_started && !game->match->match_ended)
         (void)match_state_finish(game->match);
     input_mvc_fast_destroy(game->input_system);
     cyberpunk_world_destroy(game->world);
@@ -360,13 +361,15 @@ static void poll_part_hud(const struct sky_expr_option *option,multiplayer_game_
 /* Compose strict option contracts without opening a window on refusal.
  * The two outputs change only when both parsers have accepted their input. */
 static bool parse_game_options(int argc, char **argv,
-                               struct sky_expr_option *option, unsigned *frames)
+                               struct sky_expr_option *option, unsigned *frames,
+                               bool *agent_mode)
 {
-    if (!option || !frames || !argv || argc < 1) return false;
+    /* Called only from main with its argument vector and local outputs. */
     char *hud_argv[3] = {argv[0]};
     int hud_argc = 1;
     unsigned count = 0;
     bool seen_frames = false;
+    bool agent = false;
     for (int i = 1; i < argc; ++i) {
         if (!argv[i]) return false;
         if (strncmp(argv[i], "--qa-frames=", 12) == 0) {
@@ -374,30 +377,41 @@ static bool parse_game_options(int argc, char **argv,
             if (seen_frames || !sky_combat_qa_frames_parse(2, qa_argv, &count))
                 return false;
             seen_frames = true;
+        } else if (strcmp(argv[i], "--agent-stdio") == 0) {
+            if (agent) return false;
+            agent = true;
         } else {
             if (hud_argc == 3) return false;
             hud_argv[hud_argc++] = argv[i];
         }
     }
     struct sky_expr_option candidate;
+    if (agent && seen_frames) return false;
     if (!sky_expr_option_parse(hud_argc, hud_argv, &candidate)) return false;
     *option = candidate;
     *frames = count;
+    *agent_mode = agent;
     return true;
 }
 
 /* Keep admission and completion checks separate from the gameplay loop. */
 static int prepare_game_window(int argc, char **argv, unsigned *qa_frames,
-                               struct sky_expr_option *option)
+                               struct sky_expr_option *option, bool *agent_mode,
+                               struct sky_agent_session *session)
 {
-    if (!parse_game_options(argc, argv, option, qa_frames)) {
-        fprintf(stderr, "Usage: z23-skycombat [--qa-frames=1..%u] [--hud-part=<64 hex SHA-256>:<file> [--hud-pin-file=<file>]]\n",
+    if (!parse_game_options(argc, argv, option, qa_frames, agent_mode)) {
+        fprintf(stderr, "Usage: z23-skycombat [--agent-stdio | --qa-frames=1..%u] [--hud-part=<64 hex SHA-256>:<file> [--hud-pin-file=<file>]]\n",
                 SKY_COMBAT_QA_FRAMES_MAX);
         return 2;
     }
+    if (*agent_mode && !sky_agent_open(session)) {
+        fputs("Sky Combat: agent transport initialization failed\n", stderr);
+        return 1;
+    }
     /* Initialize window */
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT);
-    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Sky Combat - Multiplayer Ultimate");
+    InitWindow(*agent_mode ? 960 : SCREEN_WIDTH, *agent_mode ? 540 : SCREEN_HEIGHT,
+               "Sky Combat - Multiplayer Ultimate");
     if (!IsWindowReady()) {
         fprintf(stderr, "Sky Combat: window initialization failed\n");
         return 1;
@@ -439,13 +453,13 @@ static void read_keyboard_flight_stick(const multiplayer_game_t *game,
 
 static void apply_boost_and_throttle(multiplayer_game_t *game,
                                      managed_aircraft_t *player,
-                                     input_state_fast_t input, float dt)
+                                     input_state_fast_t input, float dt, bool external)
 {
     /* Mario Kart boost system - UR button (speed_boost) is mushroom boost */
     game->boost_timer -= dt;
 
     bool boost_pressed = input.speed_boost || 
-                       (!game->input_system->model.connected && IsKeyPressed(KEY_SPACE));
+                       (!external && !game->input_system->model.connected && IsKeyPressed(KEY_SPACE));
 
     if (boost_pressed && game->boost_timer <= 0) {
         game->boost_timer = 0.75f;
@@ -474,7 +488,7 @@ static void apply_boost_and_throttle(multiplayer_game_t *game,
         }
     }
     /* UL button (brake) = normal throttle (SWAPPED) */
-    else if (input.brake || (!game->input_system->model.connected && IsKeyDown(KEY_LEFT_SHIFT))) {
+    else if (input.brake || (!external && !game->input_system->model.connected && IsKeyDown(KEY_LEFT_SHIFT))) {
         player->aircraft->speed = fminf(player->aircraft->speed + 60.0f * dt,
                                       AIRCRAFT_MAX_SPEED * 1.2f);
         game->speed_lines_intensity = 0.6f;
@@ -488,7 +502,7 @@ static void apply_boost_and_throttle(multiplayer_game_t *game,
 }
 
 static void control_local_player(multiplayer_game_t *game, input_state_fast_t input,
-                                 float dt)
+                                 float dt, bool external)
 {
     /* Handle input for local player */
     managed_aircraft_t* player = aircraft_manager_get(game->aircraft_mgr, game->local_player_id);
@@ -497,15 +511,15 @@ static void control_local_player(multiplayer_game_t *game, input_state_fast_t in
         float stick_x = input.move_x;
         float stick_y = input.move_y;
 
-        read_keyboard_flight_stick(game, &stick_x, &stick_y);
+        if (!external) read_keyboard_flight_stick(game, &stick_x, &stick_y);
 
         /* Responsive aircraft control */
         aircraft_update_responsive(player->aircraft, stick_x, stick_y, dt);
 
-        apply_boost_and_throttle(game, player, input, dt);
+        apply_boost_and_throttle(game, player, input, dt, external);
 
         /* Weapons */
-        if (input.fire_guns || (!game->input_system->model.connected && IsKeyPressed(KEY_LEFT_CONTROL))) {
+        if (input.fire_guns || (!external && !game->input_system->model.connected && IsKeyPressed(KEY_LEFT_CONTROL))) {
             aircraft_manager_fire_weapon(game->aircraft_mgr, game->local_player_id);
 
             /* Weapon effects */
@@ -572,7 +586,8 @@ static void collect_aircraft_powerups(multiplayer_game_t *game)
 static void render_ultimate_frame(multiplayer_game_t *game,
                                   RenderTexture2D screen_buffer, float game_time,
                                   const struct sky_expr_hud *part_hud,
-                                  const struct sky_expr_notice *notice)
+                                  const struct sky_expr_notice *notice,
+                                  struct sky_agent_capture *capture)
 {
     /* Render to texture for post-processing */
     BeginTextureMode(screen_buffer);
@@ -624,6 +639,7 @@ static void render_ultimate_frame(multiplayer_game_t *game,
                      Fade(RED, game->damage_flash * 0.3f));
     }
 
+    if (capture) sky_agent_capture_frame(capture);
     EndDrawing();
 }
 
@@ -633,17 +649,23 @@ static void advance_ultimate_frame(multiplayer_game_t *game,
                                    struct sky_expr_notice *notice,
                                    RenderTexture2D screen_buffer,
                                    float *game_time, unsigned *rendered_frames,
-                                   unsigned qa_frames)
+                                   const input_state_fast_t *external_input,
+                                   struct sky_agent_capture *capture)
 {
-    float dt = GetFrameTime();
+    float dt = external_input ? 1.0f / 60.0f : GetFrameTime();
     *game_time += dt;
-    poll_part_hud(option,game,part_hud,notice,dt);
+    if (!external_input) poll_part_hud(option,game,part_hud,notice,dt);
+    else sky_expr_notice_tick(notice, dt);
 
     /* Update input system */
-    input_view_fast_t view = input_mvc_fast_update(game->input_system);
-    input_state_fast_t input = input_view_get_state(view);
+    input_state_fast_t input;
+    if (external_input) input = *external_input;
+    else {
+        input_view_fast_t view = input_mvc_fast_update(game->input_system);
+        input = input_view_get_state(view);
+    }
 
-    control_local_player(game, input, dt);
+    control_local_player(game, input, dt, external_input != NULL);
 
     /* Update systems */
     aircraft_manager_update(game->aircraft_mgr, dt);
@@ -660,18 +682,67 @@ static void advance_ultimate_frame(multiplayer_game_t *game,
     /* Damage flash */
     if (game->damage_flash > 0) game->damage_flash -= dt;
 
-    render_ultimate_frame(game, screen_buffer, *game_time, part_hud, notice);
+    render_ultimate_frame(game, screen_buffer, *game_time, part_hud, notice, capture);
 
-    *rendered_frames += qa_frames != 0;
+    ++*rendered_frames;
+}
+
+struct game_agent_context {
+    multiplayer_game_t *game;
+    const struct sky_expr_option *option;
+    struct sky_expr_hud *hud;
+    struct sky_expr_notice *notice;
+    RenderTexture2D screen;
+    float time;
+    unsigned frames;
+};
+
+static input_mvc_fast_t *game_input_create(bool external)
+{
+    if (!external) return input_mvc_fast_create();
+    /* External sessions need the model/view for HUD state, but never open or
+     * poll a hardware controller. The normal destructor accepts NULL controller. */
+    input_mvc_fast_t *input = calloc(1, sizeof(*input));
+    if (!input) return NULL;
+    input_model_fast_init(&input->model);
+    input->view = input_view_fast_create(&input->model);
+    return input;
+}
+
+static void game_agent_frame(void *context, const input_state_fast_t *input,
+    struct sky_agent_observation *state, struct sky_agent_capture *capture)
+{
+    struct game_agent_context *agent = context;
+    if (input) {
+        advance_ultimate_frame(agent->game, agent->option, agent->hud, agent->notice,
+            agent->screen, &agent->time, &agent->frames, input, capture);
+    } else {
+        render_ultimate_frame(agent->game, agent->screen, agent->time,
+                               agent->hud, agent->notice, capture);
+    }
+    *state = (struct sky_agent_observation){.frame = agent->frames, .time = agent->time};
+    managed_aircraft_t *player = aircraft_manager_get(agent->game->aircraft_mgr,
+                                                      agent->game->local_player_id);
+    if (player && player->aircraft) {
+        state->player_present = true;
+        state->x = player->aircraft->position.x;
+        state->y = player->aircraft->position.y;
+        state->z = player->aircraft->position.z;
+        state->yaw = player->aircraft->yaw;
+        state->speed = player->aircraft->speed;
+        state->health = player->health;
+    }
 }
 
 int main(int argc, char **argv) {
     unsigned qa_frames;
+    bool agent_mode = false;
+    struct sky_agent_session session = {0};
     struct sky_expr_option option;
     static struct sky_expr_hud part_hud;
     struct sky_expr_notice notice={0};
-    int launch = prepare_game_window(argc, argv, &qa_frames, &option);
-    if (launch) return launch;
+    int launch = prepare_game_window(argc, argv, &qa_frames, &option, &agent_mode, &session);
+    if (launch) { sky_agent_close(&session); return launch; }
     
     /* Create game state */
     multiplayer_game_t game = {0};
@@ -681,12 +752,15 @@ int main(int argc, char **argv) {
     game.powerup_mgr = powerup_manager_create();
     game.match = match_state_create(MATCH_TYPE_TEAM_DEATHMATCH);
     game.world = cyberpunk_world_create();
-    game.input_system = input_mvc_fast_create();
+    game.input_system = game_input_create(agent_mode);
     game.effects = effects_create(1000, 10000);  /* Lots of particles! */
     game.weapons = weapons_create();
     
     if (!game_systems_ready(&game)) {
         fprintf(stderr, "Failed to create game systems\n");
+        destroy_game_systems(&game);
+        CloseWindow();
+        sky_agent_close(&session);
         return 1;
     }
     
@@ -702,6 +776,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Could not begin match\n");
         destroy_game_systems(&game);
         CloseWindow();
+        sky_agent_close(&session);
         return 1;
     }
     
@@ -759,9 +834,17 @@ int main(int argc, char **argv) {
     float game_time = 0;
     unsigned rendered_frames = 0;
     
-    while (game_frame_pending(qa_frames, rendered_frames)) {
-        advance_ultimate_frame(&game, &option, &part_hud, &notice, screen_buffer,
-                               &game_time, &rendered_frames, qa_frames);
+    int result;
+    if (agent_mode) {
+        struct game_agent_context context = {&game, &option, &part_hud, &notice,
+                                              screen_buffer, 0, 0};
+        result = sky_agent_run(&session, &context, game_agent_frame);
+    } else {
+        while (game_frame_pending(qa_frames, rendered_frames)) {
+            advance_ultimate_frame(&game, &option, &part_hud, &notice, screen_buffer,
+                                   &game_time, &rendered_frames, NULL, NULL);
+        }
+        result = game_frame_result(qa_frames, rendered_frames);
     }
     
     /* Cleanup */
@@ -769,5 +852,6 @@ int main(int argc, char **argv) {
     destroy_game_systems(&game);
     
     CloseWindow();
-    return game_frame_result(qa_frames, rendered_frames);
+    if (!sky_agent_close(&session)) result = 1;
+    return result;
 }

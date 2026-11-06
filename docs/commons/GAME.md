@@ -54,6 +54,86 @@ difference; native math-library results can still differ between platforms.
 QA frame limits can be combined with the pinned HUD option in either argument
 order. All options are validated before window setup.
 
+## Agent stdio session
+
+Launch the same game with `--agent-stdio` and private stdin/stdout pipes.
+Ordinary game and renderer logs go to stderr; stdout contains one JSON reply
+per request line. This option cannot be combined with `--qa-frames`.
+It does not add a listener, plugin permission, or remote execution authority.
+
+```json
+{"v":1,"id":1,"op":"observe","capture":true}
+{"v":1,"id":2,"op":"step","frames":60,"input":{"move_x":0.5,"move_y":0,"camera_x":0,"fire_guns":false,"speed_boost":false,"throttle":true},"capture":true}
+{"v":1,"id":3,"op":"close"}
+```
+
+Each LF-terminated request is at most 4096 bytes. Version 1 uses ASCII field
+names and operations; unknown fields, duplicate decoded keys, invalid types,
+nonfinite axes and axes outside [-1,1] are refused without simulation advance.
+Step requires 1–120 frames and an input object. Omitted input fields are neutral;
+capture defaults to false. Each step uses the maintained simulation with fixed
+1/60-second ticks and local-player controls, bypassing hardware polling and
+keyboard fallbacks. Guns are held on each requested tick; boost triggers on a
+rising edge between accepted step inputs, on the first tick only. `throttle`
+uses the existing normal-throttle control. Observe renders without advancing.
+Window events are pumped while waiting, without ticking the simulation.
+
+IDs are integers from 0 through 4294967295, strictly increasing within this
+process session. A fully validated fresh request consumes its ID before
+execution, including subsequent capture, window or frame-budget failure.
+Validation failures do not consume IDs. Duplicate/stale IDs return
+`STALE_REQUEST_ID` without executing or capturing. Every reply reports
+`accepted_id` (initially null), `id`, `ok`, simulation `frame` and `time`, and
+the current player's position, yaw, speed and health. Errors include a named
+`error`. Never blindly retry an uncertain step: use a higher-ID observe to
+reconcile its frame/state. Restarting the game creates a new simulation;
+broker session identity and executable/source binding remain the broker's
+responsibility. At the maximum ID, EOF can close the session.
+
+The agent viewport is 960×540 logical pixels. Capture reads the final composited
+frame including HUD before swap, refuses physical readbacks above 1920×1080,
+then uses raylib's existing RGBA resampler to fit within 640×360 while preserving aspect ratio
+with integer rounding, without upscaling. PNG replies contain
+`png:{width,height,bytes,base64}` with actual encoded dimensions. PNG is capped
+at 1 MiB and the JSON reply at 2 MiB. Capture failures return no image, never a
+previous frame. A failed capture after a step still reports the advanced frame.
+The resampler's allocation and resize result are checked directly; the void
+`ImageResize` wrapper does not expose resize failure.
+There is no full-resolution capture option in v1.
+
+Sessions allow at most 4096 requests and 36000 simulation ticks. EOF, close and
+window cancellation end the session and clean up game/window resources;
+controls are ephemeral to each step. Partial or oversized lines refuse and
+close. Output failures exit unsuccessfully. A caller must drain stdout and
+retain its own process/graphics-driver watchdog. The QA shim checks protocol
+wiring and cleanup, not actual physics or pixels; real-display qualification
+is separate and does not establish phone hosting or cross-platform replay.
+
+<!-- claim: symbol-present sky_agent_run apps/skycombat/src/agent_session.c # bounded stdio session -->
+<!-- claim: symbol-present game_agent_frame apps/skycombat/src/sky_combat_multiplayer_ultimate.c # maintained frame adapter -->
+
+The explicit Linux real-display client is built with `make skycombat-agent-client`;
+it is not run by generic tests. It uses private pipes to the actual game and
+checks observe, neutral/turn steps, refused requests and close. Saved PNGs are
+checked for complete RGBA8/stored-DEFLATE structure, checksums and raster size,
+not merely a PNG header. This validates the current encoder profile, not every
+PNG format. With Xvfb installed, an example admitted, bounded invocation is:
+
+```sh
+# Set sky_output to a new, owned mode-0700 directory in sanctioned scratch.
+devbuild --wait --project z23 --class normal \
+  build/bin/z23_bounded_run 30000 /usr/bin/xvfb-run -a \
+  -s '-screen 0 960x540x24' /usr/bin/env LIBGL_ALWAYS_SOFTWARE=1 \
+  "$PWD/build/bin/skycombat-agent-client" "$PWD/build/bin/z23-skycombat" "$sky_output"
+```
+
+Build the game and bounded runner first using their native targets. The client
+takes absolute game/output paths; a failed case still reaps its child. Keep
+actual renderer, executable identity and output evidence with the result.
+Successful Linux software rendering does not qualify macOS, Windows or phones.
+
+<!-- claim: symbol-present skycombat-agent-client Makefile # opt-in real-display fixture target -->
+
 ## Signed plugin package
 
 `make plugin-skycombat` packs the game as a signed z23 plugin. It depends on
