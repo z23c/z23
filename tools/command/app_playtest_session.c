@@ -442,6 +442,8 @@ static bool aps_session_run(struct aps_session *s, const struct app_playtest_req
 bool app_playtest_run(const struct app_playtest_request *request,
                       struct app_playtest_result *out)
 {
+    if (!out)
+        return false;
     memset(out, 0, sizeof(*out));
     if (!aps_request_valid(request, out))
         return false;
