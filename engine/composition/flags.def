@@ -2341,6 +2341,8 @@ Z23_FLAG("ZCL_STALE_FACTS_EMIT_BASELINE", "env_build", "0", "-",
           "undocumented; first use tools/lint/lintc/gate_no_stale_pinned_facts.c:auto")
 Z23_FLAG("ZCL_STALE_FACTS_SCAN_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_no_stale_pinned_facts.c:auto")
+Z23_FLAG("ZCL_STATE_OFFER_BENCH", "env_test", "-", "-",
+          "first use tests/harness/src/test_state_offer_peer.c:auto; set to 1 to print the peer-link serve throughput for one and four local connections.")
 Z23_FLAG("ZCL_STATUS_DEADLINE_MS", "env_runtime", "-", "-",
           "undocumented; first use engine/controllers/src/status_brief_native_handler.c:auto")
 Z23_FLAG("ZCL_STATUS_REASON_GATE_BASELINE", "env_build", "-", "-",
