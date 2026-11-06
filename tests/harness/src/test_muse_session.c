@@ -773,6 +773,18 @@ static int ms_failures_send(void)
  * dies on SIGKILL, or idles; checks the recorded stdout-closed reason. */
 enum mx_exit_mode { MX_EXIT3, MX_KILL, MX_IDLE };
 
+/* Blocks until pid is a zombie without reaping it, so the reap inside
+ * ms_read_line is immediate however loaded the host. */
+static bool mx_wait_zombie(pid_t pid)
+{
+    siginfo_t si;
+    int w;
+    do {
+        w = waitid(P_PID, (id_t)pid, &si, WEXITED | WNOWAIT);
+    } while (w != 0 && errno == EINTR);
+    return w == 0;
+}
+
 static bool mx_stdout_closed_case(enum mx_exit_mode mode, long long mem_max,
                                   const char *want_err, bool want_reaped)
 {
@@ -793,17 +805,8 @@ static bool mx_stdout_closed_case(enum mx_exit_mode mode, long long mem_max,
             pause();
     }
     close(p[1]);
-    if (mode != MX_IDLE) {
-        /* Wait for the child to become a zombie without reaping it, so the
-         * reap inside ms_read_line is immediate however loaded the host. */
-        siginfo_t si;
-        int w;
-        do {
-            w = waitid(P_PID, (id_t)pid, &si, WEXITED | WNOWAIT);
-        } while (w != 0 && errno == EINTR);
-        if (w != 0)
-            return false;
-    }
+    if (mode != MX_IDLE && !mx_wait_zombie(pid))
+        return false;
     struct muse_session s;
     mx_session(&s);
     s.child = pid;
