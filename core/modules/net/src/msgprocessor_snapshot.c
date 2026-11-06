@@ -624,10 +624,11 @@ static void mp_zs_manifest_accept(struct msg_processor *mp,
     node->swarm_manifest_received = true;
     int our_h = active_chain_height(
         &mp->main_state->chain_active);
-    printf("Peer %s: manifest h=%d chunks=%u "
-           "(%llu UTXOs)\n",
-           node->addr_name, m->height, m->num_chunks,
-           (unsigned long long)m->num_utxos);
+    if (first_manifest)
+        printf("Peer %s: manifest h=%d chunks=%u "
+               "(%llu UTXOs)\n",
+               node->addr_name, m->height, m->num_chunks,
+               (unsigned long long)m->num_utxos);
 
     if (first_manifest && m->height > our_h + 100)
         LOG_INFO("net",
