@@ -37,6 +37,7 @@
 #include "vcs/package_manifest.h"
 #include "vcs/package_release.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -174,9 +175,14 @@ static void zpa_key_name(const uint8_t root_commit[32],
     (void)snprintf(out, 72, "%s%s", hex, ZPA_SUFFIX);
 }
 
-static bool zpa_join(char *out, size_t cap, const char *a, const char *b)
+/* Format one path into out; false when it does not fit. */
+[[gnu::format(printf, 3, 4)]]
+static bool zpa_pathf(char *out, size_t cap, const char *fmt, ...)
 {
-    int n = snprintf(out, cap, "%s/%s", a, b);
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(out, cap, fmt, ap);
+    va_end(ap);
     return n > 0 && (size_t)n < cap;
 }
 
@@ -190,8 +196,8 @@ bool zcl_package_adopt_record_save(const char *datadir,
                         "record\n");
         return false;
     }
-    if (!zpa_join(zcode, sizeof(zcode), datadir, "zcode") ||
-        !zpa_join(store, sizeof(store), zcode, "adopted") ||
+    if (!zpa_pathf(zcode, sizeof(zcode), "%s/zcode", datadir) ||
+        !zpa_pathf(store, sizeof(store), "%s/adopted", zcode) ||
         !platform_directory_ensure(zcode, 0700) ||
         !platform_directory_ensure(store, 0700)) {
         fprintf(stderr, "[zcode.package.adopt] cannot create %s/zcode/adopted\n",
@@ -222,12 +228,12 @@ bool zcl_package_adopt_record_load(const char *datadir,
                                    struct zcl_package_adopt_record *out,
                                    bool *found)
 {
-    char name[72], rel[160], path[ZPA_PATH_MAX];
+    char name[72], path[ZPA_PATH_MAX];
     struct stat st;
     *found = false;
     zpa_key_name(root_commit, release_id, name);
-    (void)snprintf(rel, sizeof(rel), "zcode/adopted/%s", name);
-    if (!datadir || !zpa_join(path, sizeof(path), datadir, rel))
+    if (!datadir ||
+        !zpa_pathf(path, sizeof(path), "%s/zcode/adopted/%s", datadir, name))
         return false;
     if (stat(path, &st) != 0)
         return true;
@@ -388,14 +394,14 @@ static void zpa_change(struct zpa_changes *ch, const char *path,
 static bool zpa_manifest_load(const char *datadir, const uint8_t root[32],
                               struct vcs_package_manifest *m)
 {
-    char hex[65], rel[96], path[ZPA_PATH_MAX];
+    char hex[65], path[ZPA_PATH_MAX];
     uint8_t *wire = NULL, got[32];
     size_t len = 0;
     struct stat st;
     zcl_hex_encode(root, 32, hex);
-    (void)snprintf(rel, sizeof(rel), "zcode/manifests/%s", hex);
     vcs_package_manifest_init(m);
-    if (!zpa_join(path, sizeof(path), datadir, rel) || stat(path, &st) != 0 ||
+    if (!zpa_pathf(path, sizeof(path), "%s/zcode/manifests/%s", datadir, hex) ||
+        stat(path, &st) != 0 ||
         !zcl_read_whole_file(path, VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES, &wire,
                              &len, "zcode.package.adopt"))
         return false;
@@ -500,7 +506,7 @@ static bool zpa_commit(struct zpa_plan *p, struct zcl_command_reply *reply,
     char copies[ZPA_PATH_MAX], session[64], nonce_hex[33];
     uint8_t nonce[16];
     struct vcs_package_checkout_metrics metrics = {0};
-    if (!zpa_join(copies, sizeof(copies), p->datadir, "copies") ||
+    if (!zpa_pathf(copies, sizeof(copies), "%s/copies", p->datadir) ||
         !platform_directory_ensure(copies, 0700)) {
         zcl_package_copy_fail(reply, "COPIES_UNWRITABLE", false,
                               "<datadir>/copies could not be created", copies);
@@ -607,7 +613,7 @@ static void zpa_copies_row(struct json_value *rows, const char *datadir,
     char path[ZPA_PATH_MAX], dir[ZPA_PATH_MAX];
     json_init(&row);
     json_set_object(&row);
-    if (!zpa_join(path, sizeof(path), store, file) ||
+    if (!zpa_pathf(path, sizeof(path), "%s/%s", store, file) ||
         !zpa_record_read(path, &rec)) {
         (void)json_push_kv_str(&row, "record", file);
         (void)json_push_kv_str(&row, "status", "record_invalid");
@@ -646,8 +652,9 @@ void zcl_native_handle_zcode_package_copies(
         zcl_package_copy_datadir(request->input, reply, command);
     if (!datadir)
         return;
-    bool present = zpa_join(store, sizeof(store), datadir, "zcode/adopted") &&
-                   stat(store, &st) == 0;
+    bool present =
+        zpa_pathf(store, sizeof(store), "%s/zcode/adopted", datadir) &&
+        stat(store, &st) == 0;
     if (present && !platform_directory_list_regular_sorted(store, &list)) {
         zcl_package_copy_fail(reply, "ADOPTED_UNREADABLE", false,
                               "the adopt records could not be listed", store);
