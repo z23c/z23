@@ -3740,7 +3740,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_COMMAND(
     "zcode.package.pin", "zcode.package", "",
-    "Pin a tracked package (PINS pool, never evicted)",
+    "Pin a tracked package",
     "Pins one tracked 64-hex package `root` into the PINS pool: pinned "
     "packages are never evicted. This is the OPERATOR path — never "
     "tier-gated; the contributor-requested pin allowance "
@@ -3798,7 +3798,7 @@ ZCL_COMMAND_READY_COMMAND(
  * branch menu and fails the whole push. The CLI words are unchanged
  * (zcode package fastobj export / admit resolve through this branch). */
 ZCL_COMMAND_BRANCH("zcode.package.fastobj", "zcode.package",
-                   "Move a compile cache between nodes as one carrier",
+                   "Move a compile cache between nodes",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_COMMAND(
@@ -4781,7 +4781,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_COMMAND(
     "zcode.package.checkout", "zcode.package", "",
-    "Reconstruct one verified package tree without executing it",
+    "Check out a verified package tree",
     "Reads one complete ordinary content.v2 package from the local CAS by "
     "immutable `root`, rederives the manifest root, re-verifies every chunk "
     "at its exact coordinate, and atomically reconstructs the canonical "
@@ -5172,7 +5172,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "zcode.package.rollback", "zcode.package", "",
-    "Go back one step: re-activate the previous generation",
+    "Re-activate the previous generation",
     "Reads the append-only generation log and re-activates the newest "
     "DISTINCT root older than the active one, by the same atomic "
     "rename-based symlink swap install uses. `name` is OPTIONAL: with no "
@@ -5206,7 +5206,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "zcode.package.reproduce", "zcode.package", "",
-    "Reproduce one installed package's build receipt",
+    "Reproduce an installed build",
     "The installed-node reproduction step: for one ALREADY-INSTALLED "
     "package (`name_or_root` is a 64-hex root, publisher/package, or "
     "name@semver), re-verifies every committed input against the CAS, "

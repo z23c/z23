@@ -184,6 +184,9 @@ static int test_every_branch_menu_lists_only_own_children(void)
 
             size_t n = zcl_command_registry_menu_json(reg, branch->path, out,
                                                        sizeof(out));
+            if (n == 0)
+                printf("  [branch menu %s does not fit its budget]\n",
+                       branch->path);
             ASSERT(n > 0);
             ASSERT(n <= ZCL_COMMAND_BRANCH_BUDGET);
 
