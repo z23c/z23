@@ -29,7 +29,6 @@
 int s_utxo_fail_count = 0;
 int s_utxo_fail_height = -1;
 int s_utxo_hot_loop_reported_height = -1;
-int s_utxo_activation_paused_height = -1;
 
 bool process_block_is_missing_utxo_failure(
     const struct validation_state *state)
@@ -54,7 +53,6 @@ void process_block_note_utxo_failure(struct main_state *ms,
         s_utxo_fail_height = height;
         s_utxo_fail_count = 1;
         s_utxo_hot_loop_reported_height = -1;
-        s_utxo_activation_paused_height = -1;
     }
 
     int durable_utxo_max_h =
@@ -71,8 +69,6 @@ void process_block_note_utxo_failure(struct main_state *ms,
                 "the snapshot/coins anchor instead of replaying history.\n",
                 height, durable_utxo_max_h);
         }
-        if (s_utxo_fail_count >= 5)
-            s_utxo_activation_paused_height = height;
         return;
     }
 
@@ -122,7 +118,6 @@ void process_block_test_set_utxo_fail_state(int height, int count)
     s_utxo_fail_height = height;
     s_utxo_fail_count = count;
     s_utxo_hot_loop_reported_height = -1;
-    s_utxo_activation_paused_height = -1;
 }
 
 int process_block_test_get_utxo_fail_count(void)

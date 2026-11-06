@@ -985,7 +985,7 @@ int test_supervisor_backstop(void);
 int test_sd_notify(void);
 int test_self_heal_supervisor(void);
 int test_condition_engine(void);
-int test_utxo_activation_paused(void);
+int test_block_failed_mask_conditions(void);
 int test_sync_watchdog_conditions(void);
 int test_peer_snapshot_conditions(void);
 int test_snapshot_receive_stalled_condition(void);

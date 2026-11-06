@@ -59,7 +59,6 @@ extern _Atomic int g_test_crash_stage_storage;
 extern int s_utxo_fail_count;
 extern int s_utxo_fail_height;
 extern int s_utxo_hot_loop_reported_height;
-extern int s_utxo_activation_paused_height;
 
 /* Owner: process_block_self_heal_scan_state.c */
 extern _Atomic uint64_t g_self_heal_tx_index_hits;

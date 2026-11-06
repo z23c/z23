@@ -319,25 +319,6 @@ bool process_block_should_skip_contextual_header(
     const struct block_index *pindex_prev,
     const struct consensus_params *consensus);
 
-void process_block_clear_utxo_activation_pause_range(int scan_start,
-                                                     int scan_end);
-
-/* expose paused-height so the sync watchdog can
- * detect when activation has been silently paused after an unrecovered
- * UTXO mismatch. Returns -1 when activation is not paused.
- *
- * The pause state is set inside
- * process_block_maybe_trigger_hot_loop_exit() at
- * core/modules/validation/src/process_block_self_heal_hot_loop.c — specifically
- * the branch that fires when a reimport attempt was already made
- * recently (last_reimport_attempted marker) and still failed to heal the
- * chain, so the hot-loop exit refuses to auto-restart and pauses instead.
- * That helper is reached through the self-heal failure coordinator
- * (process_block_note_utxo_failure() in process_block_self_heal.c), not
- * from process_block.c directly. Without watchdog coverage the sync state
- * stays in BLOCKS_DOWNLOAD with no height progress event — invisible. */
-int process_block_get_utxo_activation_paused_height(void);
-
 /* Signal that a staged activation drain reached the per-pass
  * tip_child_connect_limit (128 blocks by default) and may have more children
  * ready to connect. The activation controller drain loop should schedule
@@ -355,10 +336,6 @@ bool process_block_tip_is_best_work(const struct main_state *ms,
 #ifdef ZCL_TESTING
 void process_block_test_set_utxo_fail_state(int height, int count);
 int  process_block_test_get_utxo_fail_count(void);
-int  process_block_test_get_utxo_activation_paused_height(void);
-/* directly set the pause height to drive watchdog tests
- * without exercising the full hot-loop-exit failure path. */
-void process_block_test_set_utxo_activation_paused_height(int height);
 void process_block_test_trigger_hot_loop_check(int height,
                                                const char *datadir);
 void process_block_test_note_utxo_failure(int height, const char *datadir);

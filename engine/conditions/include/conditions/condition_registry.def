@@ -11,7 +11,6 @@
 ZCL_CONDITION(block_failed_mask_at_tip)
 ZCL_CONDITION(contradiction_frozen)
 ZCL_CONDITION(chain_integrity_failed)
-ZCL_CONDITION(utxo_activation_paused)
 ZCL_CONDITION(utxo_drift_detected)
 ZCL_CONDITION(header_stall_at_height)
 ZCL_CONDITION(sync_state_stuck)

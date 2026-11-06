@@ -27,7 +27,6 @@ engine/conditions/include/conditions/sync_state_stuck.h
 engine/conditions/include/conditions/sync_violation_lag.h
 engine/conditions/include/conditions/tip_fork_stale.h
 engine/conditions/include/conditions/tip_stall_oracle_rebuild.h
-engine/conditions/include/conditions/utxo_activation_paused.h
 engine/conditions/include/conditions/utxo_drift_detected.h
 engine/conditions/src/block_failed_mask_at_tip.c
 engine/conditions/src/body_fetch_missing_have_data.c
@@ -58,7 +57,6 @@ engine/conditions/src/tip_fork_stale.c
 engine/conditions/src/tip_label_divergence.c
 engine/conditions/src/tip_stall_oracle_rebuild.c
 engine/conditions/src/tip_wedged_resnapshot.c
-engine/conditions/src/utxo_activation_paused.c
 engine/conditions/src/utxo_drift_detected.c
 cognition/controllers/include/controllers/agent_background_quality.h
 cognition/controllers/include/controllers/agent_controller.h

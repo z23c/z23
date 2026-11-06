@@ -987,9 +987,9 @@ int t_agent_fast_ci_contract(void)
                != NULL);
         ASSERT(strstr(rules, "engine/conditions/src/block_failed_mask_at_tip.c")
                != NULL);
-        ASSERT(strstr(rules, "tests/harness/src/test_utxo_activation_paused.c")
+        ASSERT(strstr(rules, "tests/harness/src/test_block_failed_mask_conditions.c")
                != NULL);
-        ASSERT(strstr(rules, "utxo_activation_paused") != NULL);
+        ASSERT(strstr(rules, "block_failed_mask_conditions") != NULL);
         ASSERT(strstr(rules, "condition_engine") != NULL);
         ASSERT(strstr(rules, "engine/conditions/src/download_queue_starved.c")
                != NULL);

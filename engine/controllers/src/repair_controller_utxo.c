@@ -757,11 +757,6 @@ bool rpc_repairutxos(const struct json_value *params, bool help,
         return false;
     }
 
-    if (scan_complete && cnt.repair_failed == 0 &&
-        (cnt.repaired_gettxout + cnt.repaired_rawtx) > 0)
-        process_block_clear_utxo_activation_pause_range(tip_height + 1,
-                                                        scan_end);
-
     int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
 
     repairutxos_report_result(result, &cnt, scan_complete, scan_error,

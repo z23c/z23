@@ -1,10 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Missing-UTXO hot-loop and reimport pause policy.
+ * Missing-UTXO hot-loop and reimport policy.
  *
  * The failure coordinator owns s_utxo_* counters. This file owns the side
  * effects once those counters cross repair thresholds: needs_reimport flag
- * writes, shutdown request, and activation-pause visibility/clearing. */
+ * writes and shutdown request. */
 
 #include "platform/time_compat.h"
 #include <stdbool.h>
@@ -72,7 +72,6 @@ void process_block_maybe_trigger_hot_loop_exit(int height,
             height,
             (long)(now_s - mst.st_mtime));
         fflush(stderr);
-        s_utxo_activation_paused_height = height;
     } else {
         event_emitf(EV_BOOT_ACTIVATE, 0,
             "FATAL_HOT_LOOP h=%d fails=%d "
@@ -93,43 +92,7 @@ void process_block_maybe_trigger_hot_loop_exit(int height,
     s_utxo_hot_loop_reported_height = height;
 }
 
-int process_block_get_utxo_activation_paused_height(void)
-{
-    return s_utxo_activation_paused_height;
-}
-
-void process_block_clear_utxo_activation_pause_range(int scan_start,
-                                                     int scan_end)
-{
-    if (scan_start <= 0 || scan_end < scan_start)
-        return;
-    if (s_utxo_activation_paused_height < scan_start ||
-        s_utxo_activation_paused_height > scan_end)
-        return;
-
-    fprintf(stderr, // obs-ok:pre-existing-diagnostic
-        "[recovery] clearing UTXO activation pause at h=%d after "
-        "successful repair scan [%d,%d]\n",
-        s_utxo_activation_paused_height, scan_start, scan_end);
-    s_utxo_activation_paused_height = -1;
-    s_utxo_hot_loop_reported_height = -1;
-    if (s_utxo_fail_height >= scan_start && s_utxo_fail_height <= scan_end) {
-        s_utxo_fail_height = -1;
-        s_utxo_fail_count = 0;
-    }
-}
-
 #ifdef ZCL_TESTING
-int process_block_test_get_utxo_activation_paused_height(void)
-{
-    return s_utxo_activation_paused_height;
-}
-
-void process_block_test_set_utxo_activation_paused_height(int height)
-{
-    s_utxo_activation_paused_height = height;
-}
-
 void process_block_test_trigger_hot_loop_check(int height,
                                                const char *datadir)
 {

@@ -409,7 +409,7 @@ void activation_request_connect(struct chain_activation_controller *ctl,
     /* Execute. The chokepoint drives the staged Job pipeline to
      * convergence — the reducer is the engine. Every Group-2 NULL-block
      * caller (boot, msg_headers all-data, sync_monitor,
-     * utxo_activation_paused, repair_controller, invalidate/revalidate
+     * repair_controller, invalidate/revalidate
      * reconnect, the behind-blocker escape) funnels here and connects via the
      * reducer. We are already under ctl->mutex (the same serialization
      * point), so we call the non-locking drain helper directly —

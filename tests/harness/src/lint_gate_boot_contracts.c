@@ -1049,10 +1049,6 @@ int t_process_block_node_db_access_is_runtime_owned(void)
                != NULL);
         ASSERT(strstr(buf, "process_block_maybe_trigger_hot_loop_exit")
                != NULL);
-        ASSERT(strstr(buf, "process_block_get_utxo_activation_paused_height")
-               != NULL);
-        ASSERT(strstr(buf, "process_block_clear_utxo_activation_pause_range")
-               != NULL);
         ASSERT(strstr(buf, "utxo_reimport_flag_set") != NULL);
         ASSERT(strstr(buf, "FATAL_HOT_LOOP") != NULL);
         ASSERT(strstr(buf, "last_reimport_attempted") != NULL);

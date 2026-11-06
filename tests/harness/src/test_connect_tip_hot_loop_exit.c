@@ -20,7 +20,6 @@ enum {
     HOT_LOOP_TEST_HEIGHT = 3078015,
     HOT_LOOP_OVER_LIMIT_HEIGHT = 3078016,
     HOT_LOOP_NOTE_HEIGHT = 3087380,
-    HOT_LOOP_REPAIR_PAUSE_HEIGHT = 3079000,
 };
 
 static int hot_loop_event_count(const char *needle)
@@ -96,8 +95,6 @@ static bool hot_loop_recent_marker_blocks_shutdown(const char *datadir,
         struct stat st;
         ok = stat(flag_path, &st) == 0 &&
              g_shutdown_requested == 0 &&
-             process_block_test_get_utxo_activation_paused_height() ==
-                 HOT_LOOP_TEST_HEIGHT &&
              hot_loop_event_count_for_height(
                  "FATAL_HOT_LOOP", HOT_LOOP_TEST_HEIGHT) == 0 &&
              hot_loop_event_count_for_height(
@@ -203,46 +200,6 @@ static bool hot_loop_note_failure_counts_and_exits(const char *datadir,
     return ok;
 }
 
-static bool hot_loop_repair_clears_matching_pause(const char *datadir,
-                                                  const char *flag_path,
-                                                  const char *marker_path)
-{
-    remove_if_exists(flag_path);
-    FILE *marker = fopen(marker_path, "w");
-    bool ok = marker != NULL;
-    if (marker) {
-        fputs("1\n", marker);
-        fclose(marker);
-    }
-
-    if (ok) {
-        event_log_init();
-        g_shutdown_requested = 0;
-        process_block_test_set_utxo_fail_state(
-            HOT_LOOP_REPAIR_PAUSE_HEIGHT, 10);
-        process_block_test_trigger_hot_loop_check(
-            HOT_LOOP_REPAIR_PAUSE_HEIGHT, datadir);
-        ok = process_block_test_get_utxo_activation_paused_height() ==
-             HOT_LOOP_REPAIR_PAUSE_HEIGHT;
-    }
-    if (ok) {
-        process_block_clear_utxo_activation_pause_range(
-            HOT_LOOP_REPAIR_PAUSE_HEIGHT + 1,
-            HOT_LOOP_REPAIR_PAUSE_HEIGHT + 10);
-        ok = process_block_test_get_utxo_activation_paused_height() ==
-             HOT_LOOP_REPAIR_PAUSE_HEIGHT;
-    }
-    if (ok) {
-        process_block_clear_utxo_activation_pause_range(
-            HOT_LOOP_REPAIR_PAUSE_HEIGHT - 1,
-            HOT_LOOP_REPAIR_PAUSE_HEIGHT);
-        ok = process_block_test_get_utxo_activation_paused_height() ==
-                 -1 &&
-             process_block_test_get_utxo_fail_count() == 0;
-    }
-    return ok;
-}
-
 int test_connect_tip_hot_loop_exit(void)
 {
     int failures = 0;
@@ -292,12 +249,6 @@ int test_connect_tip_hot_loop_exit(void)
     printf("hot_loop_exit: note_utxo_failure counts and exits... ");
     if (hot_loop_note_failure_counts_and_exits(datadir, flag_path,
                                                marker_path))
-        printf("OK\n");
-    else { printf("FAIL\n"); failures++; }
-
-    printf("hot_loop_exit: successful repair clears matching pause... ");
-    if (hot_loop_repair_clears_matching_pause(datadir, flag_path,
-                                              marker_path))
         printf("OK\n");
     else { printf("FAIL\n"); failures++; }
 

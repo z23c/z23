@@ -539,10 +539,10 @@ static bool run_only_sync_conditions(const char *only, int *failures)
                *failures);
         return true;
     }
-    if (strcmp(only, "utxo_activation_paused") == 0) {
-        printf("[test] ZCL_TEST_ONLY=utxo_activation_paused — running only\n");
-        *failures += test_utxo_activation_paused();
-        printf("\n=== utxo_activation_paused subset complete: %d failure(s) ===\n",
+    if (strcmp(only, "block_failed_mask_conditions") == 0) {
+        printf("[test] ZCL_TEST_ONLY=block_failed_mask_conditions — running only\n");
+        *failures += test_block_failed_mask_conditions();
+        printf("\n=== block_failed_mask_conditions subset complete: %d failure(s) ===\n",
                *failures);
         return true;
     }
@@ -1829,7 +1829,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_sd_notify();
     *failures += test_self_heal_supervisor();
     *failures += test_condition_engine();
-    *failures += test_utxo_activation_paused();
+    *failures += test_block_failed_mask_conditions();
     *failures += test_sync_watchdog_conditions();
     { extern int test_sticky_conditions(void);
       *failures += test_sticky_conditions(); }

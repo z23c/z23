@@ -93,7 +93,7 @@ static void vpc_clock_clear(void)
 /* No header exists for these three conditions (see engine/conditions/include/
  * conditions/ — only conditions with test-visible internal state get one).
  * Forward-declare the register_* entry points the same way
- * test_utxo_activation_paused.c does for block_failed_mask_at_tip. */
+ * test_block_failed_mask_conditions.c does for block_failed_mask_at_tip. */
 void register_mirror_divergence_located(void);
 void register_tip_label_divergence(void);
 void register_state_window_inconsistent(void);

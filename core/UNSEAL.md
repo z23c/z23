@@ -1059,3 +1059,7 @@ later lane flips it HARD.
 - 2026-11-06T03:17:56Z — REASON: Integrate approved state-link advertisement with landed upstream seal
   old ROOT: 541b8a4eb1e4143895115b09ff493179e8acba37e8e8eadb112728d57ee4cd28
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T04:21:39Z — REASON: Remove the unreachable utxo_activation_paused condition
+  old ROOT: 48901636b304be5ba783e1209e88f8353b3b6d20e221ee77098f83276674dfce
+  by: owner unseal ritual (make core-unseal)

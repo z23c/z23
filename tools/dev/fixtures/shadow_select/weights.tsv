@@ -268,6 +268,7 @@ test_group	test_blake2b_batch_parity	0	17
 test_group	test_blake3_kat	0	17
 test_group	test_blob_read_bounds	59	17
 test_group	test_block_deserialize_txcount_amplification	59	17
+test_group	test_block_failed_mask_conditions	1256	39
 test_group	test_block_index_integrity	1260	50
 test_group	test_block_index_loader	10804	46
 test_group	test_block_index_node_db_topup	3600	20
@@ -1218,7 +1219,6 @@ test_group	test_tx_property	0	17
 test_group	test_txindex_projection	714	21
 test_group	test_unclean_shutdown_advance	10796	49
 test_group	test_util_signal_handler	1484	31
-test_group	test_utxo_activation_paused	1256	39
 test_group	test_utxo_apply_coinbase_maturity	0	19
 test_group	test_utxo_apply_crash_replay	2366	41
 test_group	test_utxo_apply_stage	26822	73
