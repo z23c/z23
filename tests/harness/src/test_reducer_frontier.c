@@ -9,9 +9,11 @@
 #include "json/json.h"
 
 #include "coins/utxo_commitment.h"
+#include "chain/chainparams.h"
 #include "config/db_service.h"
 #include "config/runtime.h"
 #include "jobs/reducer_frontier.h"
+#include "jobs/refold_progress.h"
 #include "models/database.h"
 #include "storage/progress_store.h"
 #include "storage/seal_kv.h"
@@ -24,6 +26,12 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+/* Test-only hook and the src-private itag probes, declared the way the other
+ * consumers of reducer_frontier_test_set_compiled_anchor declare them. */
+void reducer_frontier_test_set_compiled_anchor(int32_t height);
+int32_t reducer_frontier_itag_watermark(sqlite3 *db);
+uint64_t reducer_frontier_itag_null_count(void);
 
 #define RF_CHECK(name, expr) do {                                  \
     printf("reducer_frontier: %s... ", (name));                    \
@@ -2498,6 +2506,417 @@ static int case_unseeded_store_warnings_are_throttled(void)
     return failures;
 }
 
+/* ── mutation-gap cases: published tip, age, floor, anchor candidates ───── */
+
+/* Process-global tip state back to "nothing published, real clock". */
+static void rf_tip_clean(void)
+{
+    reducer_frontier_test_set_age_clock_ms(-1);
+    reducer_frontier_test_reset_high_water();
+    reducer_frontier_provable_tip_reset();
+}
+
+static int case_tip_published_flag(void)
+{
+    int failures = 0;
+    rf_tip_clean();
+    RF_CHECK("tip-flag: unpublished after reset",
+             !reducer_frontier_provable_tip_is_published());
+    RF_CHECK("tip-flag: unpublished serves 0",
+             reducer_frontier_provable_tip_cached() == 0);
+    reducer_frontier_provable_tip_set(0);
+    RF_CHECK("tip-flag: height 0 counts as published",
+             reducer_frontier_provable_tip_is_published());
+    RF_CHECK("tip-flag: published 0 serves 0",
+             reducer_frontier_provable_tip_cached() == 0);
+    reducer_frontier_provable_tip_set(9);
+    RF_CHECK("tip-flag: published 9 serves 9",
+             reducer_frontier_provable_tip_cached() == 9);
+    reducer_frontier_provable_tip_reset();
+    RF_CHECK("tip-flag: reset unpublishes",
+             !reducer_frontier_provable_tip_is_published());
+    rf_tip_clean();
+    return failures;
+}
+
+/* Age of the last tip advance on the pinned clock: a first publish, an equal
+ * or lower height, and a reset are not advances. */
+static int case_tip_age_stamping(void)
+{
+    int failures = 0;
+    rf_tip_clean();
+    reducer_frontier_test_set_age_clock_ms(1000);
+    reducer_frontier_provable_tip_set(5);
+    RF_CHECK("tip-age: first publish is not an advance",
+             reducer_frontier_provable_tip_advance_age_ms() == -1);
+    reducer_frontier_test_set_age_clock_ms(2000);
+    reducer_frontier_provable_tip_set(6);
+    RF_CHECK("tip-age: advance read at its own instant is 0",
+             reducer_frontier_provable_tip_advance_age_ms() == 0);
+    reducer_frontier_test_set_age_clock_ms(2500);
+    RF_CHECK("tip-age: age grows with the clock",
+             reducer_frontier_provable_tip_advance_age_ms() == 500);
+    reducer_frontier_test_set_age_clock_ms(3000);
+    reducer_frontier_provable_tip_set(6);
+    reducer_frontier_provable_tip_set(4);
+    RF_CHECK("tip-age: equal and lower heights do not restamp",
+             reducer_frontier_provable_tip_advance_age_ms() == 1000);
+    reducer_frontier_test_set_age_clock_ms(1500);
+    RF_CHECK("tip-age: clock before the stamp reports none",
+             reducer_frontier_provable_tip_advance_age_ms() == -1);
+    reducer_frontier_provable_tip_reset();
+    reducer_frontier_test_set_age_clock_ms(3000);
+    RF_CHECK("tip-age: reset clears the stamp",
+             reducer_frontier_provable_tip_advance_age_ms() == -1);
+    rf_tip_clean();
+    return failures;
+}
+
+/* Edges of the age stamp: stamp at clock 1, pinned clock 0, the high-water
+ * seed, and the high-water test reset. */
+static int case_tip_age_edges(void)
+{
+    int failures = 0;
+    rf_tip_clean();
+    reducer_frontier_test_set_age_clock_ms(1);
+    reducer_frontier_provable_tip_set(10);
+    reducer_frontier_provable_tip_set(11);
+    RF_CHECK("tip-edge: a stamp at clock 1 reads age 0",
+             reducer_frontier_provable_tip_advance_age_ms() == 0);
+
+    rf_tip_clean();
+    reducer_frontier_test_set_age_clock_ms(0);
+    reducer_frontier_provable_tip_set(5);
+    reducer_frontier_provable_tip_set(6);
+    RF_CHECK("tip-edge: a pinned clock of 0 stamps nothing",
+             reducer_frontier_provable_tip_advance_age_ms() == -1);
+
+    rf_tip_clean();
+    reducer_frontier_test_set_age_clock_ms(1000);
+    reducer_frontier_provable_tip_seed_high_water(0);
+    reducer_frontier_provable_tip_set(1);
+    reducer_frontier_test_set_age_clock_ms(1500);
+    RF_CHECK("tip-edge: a seeded high water of 0 makes the next rise an advance",
+             reducer_frontier_provable_tip_advance_age_ms() == 500);
+
+    reducer_frontier_provable_tip_seed_high_water(10);
+    reducer_frontier_provable_tip_seed_high_water(5);
+    reducer_frontier_provable_tip_reset();
+    reducer_frontier_provable_tip_set(7);
+    RF_CHECK("tip-edge: a lower seed never lowers the high water",
+             reducer_frontier_provable_tip_advance_age_ms() == -1);
+
+    reducer_frontier_test_reset_high_water();
+    reducer_frontier_provable_tip_set(3);
+    reducer_frontier_provable_tip_set(5);
+    RF_CHECK("tip-edge: the high-water reset forgets the old high water",
+             reducer_frontier_provable_tip_advance_age_ms() == 0);
+    rf_tip_clean();
+    return failures;
+}
+
+/* The compiled floor: test override, refold scoping, the override's own
+ * boundary values, and the non-mainnet genesis floor. */
+static int case_floor_override_and_refold(void)
+{
+    int failures = 0;
+    reducer_frontier_test_set_compiled_anchor(5);
+    RF_CHECK("floor: override 5 is the floor", reducer_frontier_floor() == 5);
+    refold_progress_test_set_cached(true);
+    RF_CHECK("floor: a refold in progress zeroes it",
+             reducer_frontier_floor() == 0);
+    refold_progress_test_set_cached(false);
+    reducer_frontier_test_set_compiled_anchor(0);
+    RF_CHECK("floor: override 0 is honoured, not the checkpoint",
+             reducer_frontier_floor() == 0);
+    reducer_frontier_test_set_compiled_anchor(-1);
+    RF_CHECK("floor: no override on mainnet is the checkpoint",
+             reducer_frontier_floor() > 0);
+    return failures;
+}
+
+static int case_floor_regtest_is_genesis(void)
+{
+    int failures = 0;
+    const struct chain_params *p = chain_params_get();
+    if (!p || strcmp(p->strNetworkID, "main") != 0) {
+        printf("reducer_frontier: floor-regtest: harness is not on main... SKIP\n");
+        return 0;
+    }
+    chain_params_select(CHAIN_REGTEST);
+    reducer_frontier_test_set_compiled_anchor(-1);
+    int32_t regtest_floor = reducer_frontier_floor();
+    chain_params_select(CHAIN_MAIN);
+    RF_CHECK("floor-regtest: non-mainnet floor is genesis", regtest_floor == 0);
+    RF_CHECK("floor-regtest: mainnet floor restored",
+             reducer_frontier_floor() > 0);
+    return failures;
+}
+
+/* An override of 1 over a store that does not cover it must fall to 0. */
+static int case_floor_one_uncovered_falls_to_genesis(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+    RF_CHECK("floor-one: schema", build_schema(db));
+    reducer_frontier_test_set_compiled_anchor(1);
+    int32_t hstar = -1, served = -1;
+    RF_CHECK("floor-one: compute succeeds",
+             reducer_frontier_compute_hstar(db, &hstar, &served));
+    RF_CHECK("floor-one: uncovered floor 1 falls to genesis", hstar == 0);
+    reducer_frontier_test_set_compiled_anchor(-1);
+    sqlite3_close(db);
+    return failures;
+}
+
+/* tip_finalize's cursor is a served tip: cursor C means rows through C. */
+static int case_tip_finalize_cursor_frame(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+    RF_CHECK("tipfin-frame: schema", build_schema(db));
+    RF_CHECK("tipfin-frame: row at height 1", put_consistent_height(db, 1));
+    RF_CHECK("tipfin-frame: upstream cursors", set_tipfin_upstream_cursors(db, 2));
+    RF_CHECK("tipfin-frame: served tip 1", set_cursor(db, "tip_finalize", 1));
+    int32_t hstar = -1, served = -1;
+    RF_CHECK("tipfin-frame: compute succeeds",
+             reducer_frontier_compute_hstar(db, &hstar, &served));
+    RF_CHECK("tipfin-frame: served-tip cursor 1 reaches height 1", hstar == 1);
+    sqlite3_close(db);
+    return failures;
+}
+
+/* A non-integer ok cell is NOT ok. */
+static int case_non_integer_ok_cell_fails(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+    RF_CHECK("ok-type: schema", build_schema(db));
+    RF_CHECK("ok-type: rows 1..3", put_consistent_range(db, 1, 3));
+    RF_CHECK("ok-type: text planted in body_persist ok at 2",
+             sqlite3_exec(db,
+                 "UPDATE body_persist_log SET ok='bad' WHERE height=2",
+                 NULL, NULL, NULL) == SQLITE_OK);
+    RF_CHECK("ok-type: cursors", set_tipfin_upstream_cursors(db, 4));
+    RF_CHECK("ok-type: tip cursor", set_cursor(db, "tip_finalize", 3));
+    int32_t hstar = -1, served = -1;
+    RF_CHECK("ok-type: compute succeeds",
+             reducer_frontier_compute_hstar(db, &hstar, &served));
+    RF_CHECK("ok-type: a text ok cell stops the prefix at 1", hstar == 1);
+    sqlite3_close(db);
+    return failures;
+}
+
+/* Anchor-candidate fixture: anchor row at H (coin authority through H), one
+ * consistent height H+1, every cursor one past it. `variant` then breaks one
+ * thing; returns H* (or -1 on a setup/compute failure). */
+enum rf_cand_variant {
+    RF_CAND_CLEAN,
+    RF_CAND_VALIDATE_CURSOR_BEHIND,
+    RF_CAND_TIP_CURSOR_BEHIND,
+    RF_CAND_BODY_FAIL_AT_FIRST,
+    RF_CAND_SCRIPT_ROW_ABSENT,
+};
+
+static bool rf_cand_break(sqlite3 *db, enum rf_cand_variant v, int32_t H)
+{
+    switch (v) {
+    case RF_CAND_VALIDATE_CURSOR_BEHIND:
+        return set_cursor(db, "validate_headers", H);
+    case RF_CAND_TIP_CURSOR_BEHIND:
+        return set_cursor(db, "tip_finalize", H - 1);
+    case RF_CAND_BODY_FAIL_AT_FIRST:
+        return sqlite3_exec(db, "UPDATE body_persist_log SET ok=0",
+                            NULL, NULL, NULL) == SQLITE_OK;
+    case RF_CAND_SCRIPT_ROW_ABSENT:
+        return sqlite3_exec(db, "DELETE FROM script_validate_log",
+                            NULL, NULL, NULL) == SQLITE_OK;
+    default:
+        return true;
+    }
+}
+
+static int32_t rf_cand_hstar(enum rf_cand_variant v)
+{
+    const int32_t H = 20;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return -1;
+    bool built = build_schema(db) && stamp_proven_authority(db, H + 1) &&
+                 put_tip_anchor(db, H) && put_consistent_height(db, H + 1) &&
+                 set_tipfin_upstream_cursors(db, H + 2) &&
+                 set_cursor(db, "tip_finalize", H + 1) &&
+                 rf_cand_break(db, v, H);
+    int32_t hstar = -1, served = -1;
+    if (!built || !reducer_frontier_compute_hstar(db, &hstar, &served))
+        hstar = -1;
+    sqlite3_close(db);
+    return hstar;
+}
+
+static int case_anchor_candidate_gate(void)
+{
+    int failures = 0;
+    RF_CHECK("candidate: a vetted anchor row is adopted",
+             rf_cand_hstar(RF_CAND_CLEAN) == 21);
+    RF_CHECK("candidate: a stage cursor below H+1 rejects it",
+             rf_cand_hstar(RF_CAND_VALIDATE_CURSOR_BEHIND) == 0);
+    RF_CHECK("candidate: tip_finalize served tip below H rejects it",
+             rf_cand_hstar(RF_CAND_TIP_CURSOR_BEHIND) == 0);
+    RF_CHECK("candidate: an ok=0 first row rejects a row marker",
+             rf_cand_hstar(RF_CAND_BODY_FAIL_AT_FIRST) == 0);
+    RF_CHECK("candidate: an absent first row rejects a row marker",
+             rf_cand_hstar(RF_CAND_SCRIPT_ROW_ABSENT) == 0);
+    return failures;
+}
+
+/* H+1 == INT32_MAX is still a representable first row. */
+static int case_anchor_candidate_at_int32_edge(void)
+{
+    int failures = 0;
+    const int32_t H = INT32_MAX - 1;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+    RF_CHECK("candidate-edge: schema", build_schema(db));
+    RF_CHECK("candidate-edge: authority through H",
+             stamp_proven_authority(db, INT32_MAX));
+    RF_CHECK("candidate-edge: anchor row", put_tip_anchor(db, H));
+    RF_CHECK("candidate-edge: upstream cursors",
+             set_tipfin_upstream_cursors(db, INT32_MAX));
+    RF_CHECK("candidate-edge: tip cursor", set_cursor(db, "tip_finalize", H));
+    int32_t hstar = -1, served = -1;
+    RF_CHECK("candidate-edge: compute succeeds",
+             reducer_frontier_compute_hstar(db, &hstar, &served));
+    RF_CHECK("candidate-edge: the anchor at INT32_MAX-1 is adopted", hstar == H);
+    sqlite3_close(db);
+    return failures;
+}
+
+/* A store with no cursor rows at all: every stage reads 0, warns once, and the
+ * fold still succeeds. */
+static int case_missing_cursor_rows_warn_per_stage(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+    RF_CHECK("cursor-warn: schema", build_schema(db));
+    reducer_frontier_log_throttles_reset_for_test();
+    RF_CHECK("cursor-warn: counters start at zero",
+             reducer_frontier_cursor_warn_emitted_for_test() +
+             reducer_frontier_schema_warn_emitted_for_test() == 0);
+    int32_t hstar = -1, served = -1;
+    RF_CHECK("cursor-warn: absent cursor rows are not an error",
+             reducer_frontier_compute_hstar(db, &hstar, &served));
+    RF_CHECK("cursor-warn: one warning per stage log (six)",
+             reducer_frontier_cursor_warn_emitted_for_test() == 6);
+    reducer_frontier_log_throttles_reset_for_test();
+    RF_CHECK("cursor-warn: reset zeroes the cursor counter",
+             reducer_frontier_cursor_warn_emitted_for_test() == 0);
+    RF_CHECK("cursor-warn: the throttle reopens after reset",
+             reducer_frontier_compute_hstar(db, &hstar, &served) &&
+             reducer_frontier_cursor_warn_emitted_for_test() == 6);
+    sqlite3_close(db);
+    return failures;
+}
+
+static int case_schema_warning_reopens_after_reset(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+    reducer_frontier_log_throttles_reset_for_test();
+    int32_t hstar = -1, served = -1;
+    RF_CHECK("schema-warn: schema-less store fails closed",
+             !reducer_frontier_compute_hstar(db, &hstar, &served));
+    RF_CHECK("schema-warn: one warning",
+             reducer_frontier_schema_warn_emitted_for_test() == 1);
+    reducer_frontier_log_throttles_reset_for_test();
+    RF_CHECK("schema-warn: reset zeroes the counter",
+             reducer_frontier_schema_warn_emitted_for_test() == 0);
+    RF_CHECK("schema-warn: still fails closed",
+             !reducer_frontier_compute_hstar(db, &hstar, &served));
+    RF_CHECK("schema-warn: the throttle reopened, one new warning",
+             reducer_frontier_schema_warn_emitted_for_test() == 1);
+    sqlite3_close(db);
+    return failures;
+}
+
+/* The cursor-below-anchor diagnostic: exactly at anchor+1 is fine, a
+ * tip_finalize served tip of 0 is below, and a refold silences it. */
+static int case_cursor_warning_boundaries(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+    RF_CHECK("warn-edge: schema", build_schema(db));
+    RF_CHECK("warn-edge: upstream cursors at anchor+1",
+             set_tipfin_upstream_cursors(db, 1));
+    RF_CHECK("warn-edge: tip_finalize cursor 0",
+             set_cursor(db, "tip_finalize", 0));
+    reducer_frontier_log_throttles_reset_for_test();
+    int32_t hstar = -1, served = -1;
+    RF_CHECK("warn-edge: compute succeeds",
+             reducer_frontier_compute_hstar(db, &hstar, &served));
+    RF_CHECK("warn-edge: only the served-tip-0 stage warns",
+             reducer_frontier_cursor_warn_emitted_for_test() == 1);
+    RF_CHECK("warn-edge: every cursor back to 0", set_all_cursors(db, 0));
+    refold_progress_test_set_cached(true);
+    reducer_frontier_log_throttles_reset_for_test();
+    RF_CHECK("warn-edge: refold compute succeeds",
+             reducer_frontier_compute_hstar(db, &hstar, &served));
+    refold_progress_test_set_cached(false);
+    RF_CHECK("warn-edge: a refold silences the diagnostic",
+             reducer_frontier_cursor_warn_emitted_for_test() == 0);
+    sqlite3_close(db);
+    return failures;
+}
+
+/* The itag watermark follows the resolved H*, a reset revokes it, and a store
+ * with no itag column never counts untagged rows. */
+static int case_itag_watermark_follows_hstar(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+    RF_CHECK("itag-wm: schema", build_schema(db));
+    RF_CHECK("itag-wm: rows 1..3", put_consistent_range(db, 1, 3));
+    RF_CHECK("itag-wm: cursors", set_tipfin_upstream_cursors(db, 4));
+    RF_CHECK("itag-wm: tip cursor", set_cursor(db, "tip_finalize", 3));
+    rf_tip_clean();
+    int32_t hstar = -1, served = -1;
+    RF_CHECK("itag-wm: compute succeeds",
+             reducer_frontier_compute_hstar(db, &hstar, &served));
+    RF_CHECK("itag-wm: H* is 3", hstar == 3);
+    RF_CHECK("itag-wm: watermark published at H*",
+             reducer_frontier_itag_watermark(db) == 3);
+    RF_CHECK("itag-wm: no untagged rows counted without an itag column",
+             reducer_frontier_itag_null_count() == 0);
+    reducer_frontier_provable_tip_reset();
+    RF_CHECK("itag-wm: tip reset revokes the watermark",
+             reducer_frontier_itag_watermark(db) == -1);
+    sqlite3_close(db);
+    return failures;
+}
+
+static int case_compute_rejects_null_arguments(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+    RF_CHECK("null-args: schema", build_schema(db));
+    int32_t hstar = -1, served = -1;
+    RF_CHECK("null-args: NULL db refused",
+             !reducer_frontier_compute_hstar(NULL, &hstar, &served));
+    RF_CHECK("null-args: NULL served_floor refused",
+             !reducer_frontier_compute_hstar(db, &hstar, NULL));
+    RF_CHECK("null-args: NULL hstar refused",
+             !reducer_frontier_compute_hstar(db, NULL, &served));
+    sqlite3_close(db);
+    return failures;
+}
+
 int test_reducer_frontier(void)
 {
     int failures = 0;
@@ -2528,6 +2947,21 @@ int test_reducer_frontier(void)
     failures += case_log_frontier_above_tip_finalize_cursor();
     failures += case_dump_reports_rewind_bases();
     failures += case_sovereign_base_ignores_borrowed_higher_stamp();
+    failures += case_tip_published_flag();
+    failures += case_tip_age_stamping();
+    failures += case_tip_age_edges();
+    failures += case_floor_override_and_refold();
+    failures += case_floor_regtest_is_genesis();
+    failures += case_floor_one_uncovered_falls_to_genesis();
+    failures += case_tip_finalize_cursor_frame();
+    failures += case_non_integer_ok_cell_fails();
+    failures += case_anchor_candidate_gate();
+    failures += case_anchor_candidate_at_int32_edge();
+    failures += case_missing_cursor_rows_warn_per_stage();
+    failures += case_schema_warning_reopens_after_reset();
+    failures += case_cursor_warning_boundaries();
+    failures += case_itag_watermark_follows_hstar();
+    failures += case_compute_rejects_null_arguments();
     if (failures == 0)
         printf("reducer_frontier: all cases passed\n");
     else
