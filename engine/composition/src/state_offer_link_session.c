@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
  * Bounded synchronous object reads over a live peer link. */
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #define _DARWIN_C_SOURCE
 #endif
 #define _POSIX_C_SOURCE 200809L
