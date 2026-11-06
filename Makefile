@@ -7037,15 +7037,49 @@ LINT_FAST_GATES := \
     check-byte-order-codec-single \
     check-no-operator-paths
 
+# lint-fast also runs `z23-lint precheck` on every gate lint-fast does not run
+# itself: each runs here and in the merge-base worktree, and only a gate that
+# passes there and fails here is reported (`NEW <gate>`), so a pre-existing
+# failure never blocks the edit loop. This is what keeps the cheap gates that
+# are outside LINT_FAST_GATES (service-result-convergence, live-datadir-
+# isolation, blocker-remedy, consensus-parity, blocker-handoff-declared ...)
+# from first failing in the 5-10 minute full lint. LINT_FAST_PRECHECK_HEAVY
+# are the whole-tree compile/link/sweep gates (about 40 s to 3 min each on a
+# loaded host); they stay in `make lint` and `make lint-preflight` only.
+# Opt out with ZCL_LINT_FAST_PRECHECK=0.
+LINT_FAST_PRECHECK_HEAVY := \
+    check-standalone-tools-link check-vcs-no-sha1 check-codeindex-coverage \
+    check-windows-cross-syntax check-z23-release-install \
+    check-shell-host-assumptions check-zcode-package-registry \
+    check-no-wallclock-assertion check-zcc-cache check-command-input-keys \
+    check-clang-portability check-object-reproducible \
+    check-outparam-init-before-return check-retrieval-historical-evidence \
+    check-host-gc-selftest check-ship-remote-transaction \
+    check-promotion-receipt-chain check-riscv64-universal check-reproducible-build
+lint_fast_empty :=
+lint_fast_comma := ,
+lint_fast_space := $(lint_fast_empty) $(lint_fast_empty)
+LINT_FAST_PRECHECK_NATIVE = $(shell sed -n -e '/^LINT_GATE./{s/^LINT_GATE..//;s/".*//;p;}' tools/lint/lintc/gates.def)
+LINT_FAST_PRECHECK_SKIP = $(subst $(lint_fast_space),$(lint_fast_comma),$(strip $(filter $(LINT_FAST_PRECHECK_NATIVE),$(LINT_FAST_GATES) $(LINT_FAST_PRECHECK_HEAVY))))
+ZCL_LINT_FAST_PRECHECK ?= 1
+define LINT_FAST_PRECHECK_RUN
+if [ "$(ZCL_LINT_FAST_PRECHECK)" = 1 ]; then \
+	  $(LINTC_TOOL) precheck --jobs=$(ZCL_LINT_JOBS) --skip=$(LINT_FAST_PRECHECK_SKIP) || { echo "lint-fast: precheck found gates outside the fast subset that newly fail"; false; }; \
+	fi
+endef
+
 # These gates check the generated capability inventory and package registry
 # roots, including zcode-package.json dependency pins. Both also run in full lint.
 ifeq ($(ZCL_LINT_SERIAL),1)
-lint-fast: $(LINT_FAST_GATES)
+lint-fast: $(LINT_FAST_GATES) $(LINTC_TOOL)
+	@$(LINT_FAST_PRECHECK_RUN)
 	@echo "lint-fast: OK (serial)"
 else
 lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(TOR_PROVENANCE_BIN) \
 		$(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL) $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
-	@ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
+	@rc=0; ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES) || rc=1; \
+	$(LINT_FAST_PRECHECK_RUN) || rc=1; \
+	[ "$$rc" = 0 ] || exit 1
 	@echo "lint-fast: OK"
 endif
 

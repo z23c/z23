@@ -366,7 +366,7 @@ Now you can take a turn. The inner loop is three commands:
 ```bash
 make -j"$(nproc)" dev                  # compiler-speed rebuild -> build/bin/z23.dev
 make t-fast ONLY=<group>               # one test group
-make lint-fast                         # the fast gate subset
+make lint-fast                         # fast gate subset + precheck of the rest
 ```
 
 `make -s print-CFLAGS` and `print-DEV-CFLAGS` show the two flag sets if you
@@ -1023,6 +1023,12 @@ freshness from the full lint umbrella.
 
 `lint-fast` also checks generated capability-inventory freshness and package
 registry roots, including dependency pins. Both remain full-lint gates.
+
+`lint-fast` also runs `z23-lint precheck` (every gate outside its fixed subset,
+reporting only `NEW <gate>` failures against the merge-base worktree, cached
+under `$ZCL_PRECHECK_CACHE`). The whole-tree compile and sweep gates named in
+`LINT_FAST_PRECHECK_HEAVY` in the Makefile stay in full `make lint` and
+`lint-preflight`; `ZCL_LINT_FAST_PRECHECK=0` skips the precheck leg.
 
 ### Module mode — run a test group without relinking
 
