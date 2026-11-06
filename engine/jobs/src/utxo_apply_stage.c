@@ -15,6 +15,7 @@
 #include "jobs/utxo_apply_turnstile.h"
 #include "jobs/reducer_commit_invariants.h"
 #include "jobs/stage_helpers.h"
+#include "jobs/stage_db_fault.h"
 #include "utxo_apply_created_outputs_prune.h"
 #include "utxo_apply_log_store.h"
 #include "utxo_apply_stage_internal.h"
@@ -464,6 +465,25 @@ static enum ua_apply_flow ua_open_apply_frontier(struct ua_apply_work *w,
 }
 
 /* Read both height-keyed verdicts. A hole or an evidence mismatch stops. */
+/* Infra-db fault ladder for the verdict read: a transient sqlite fault (busy,
+ * locked, interrupt, io) holds the cursor and retries with JOB_IDLE and no
+ * blocker; a permanent fault or an exhausted retry budget requests the bounded
+ * auto-reindex and takes the permanent-blocker JOB_FATAL path. Never used for a
+ * validity verdict. */
+static struct stage_db_fault g_ua_db_fault;
+
+static job_result_t ua_verdict_read_fault(const struct ua_apply_work *w)
+{
+    int rc = sqlite3_extended_errcode(w->db);
+    if (stage_db_fault_note(&g_ua_db_fault, rc, g_datadir, (int32_t)w->next_h,
+                            "utxo_apply: script_validate_log verdict read") ==
+        STAGE_DB_FAULT_RETRY)
+        return JOB_IDLE;
+    ua_fatal_permanent_blocker(w->next_h,
+                               "script_validate_log verdict read returned error");
+    return JOB_FATAL;
+}
+
 static enum ua_apply_flow ua_read_apply_verdicts(struct ua_apply_work *w,
                                                 job_result_t *result)
 {
@@ -495,11 +515,10 @@ static enum ua_apply_flow ua_read_apply_verdicts(struct ua_apply_work *w,
      * Missing or foreign hashes refuse apply before verdict interpretation. */
     w->sv_found = script_validate_log_verdict_at(w->db, w->next_h, &w->sv_row);
     if (w->sv_found < 0) {
-        ua_fatal_permanent_blocker(w->next_h,
-                                   "script_validate_log verdict read returned error");
-        *result = JOB_FATAL;
+        *result = ua_verdict_read_fault(w);
         return UA_APPLY_DONE;
     }
+    stage_db_fault_clear(&g_ua_db_fault);
     if (w->upstream.ok == 1 && w->sv_found == 1 && w->sv_row.ok == 1 &&
         (w->upstream.evidence != w->expected_evidence ||
          w->sv_row.evidence != w->expected_evidence)) {

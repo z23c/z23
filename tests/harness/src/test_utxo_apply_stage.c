@@ -3036,6 +3036,50 @@ static int uv_fatal_store_cases(void)
     return failures;
 }
 
+/* SQL function that fails with SQLITE_BUSY and counts its calls, standing in
+ * for a lock-contended script_validate_log verdict read. */
+static void uv_busy_fn(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+{
+    (void)argc; (void)argv;
+    int *calls = sqlite3_user_data(ctx);
+    (*calls)++;
+    sqlite3_result_error_code(ctx, SQLITE_BUSY);
+}
+
+/* A BUSY step error in the verdict read is transient: the stage holds its
+ * cursor, returns JOB_IDLE and raises NO permanent blocker (the old path
+ * latched utxo_apply dead with an operator blocker on one BUSY). */
+static int uv_verdict_busy_cases(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_uv sc;
+    blocker_clear("utxo_apply.fatal_store");
+    UV_CHECK("verdict_busy: setup",
+             uv_setup("verdict_busy", 2, UV_FAIL_NONE, -1, dir,
+                      sizeof(dir), &ms, &sc) == 0);
+    sqlite3 *db = progress_store_db();
+    int calls = 0;
+    UV_CHECK("verdict_busy: hold utxo_apply cursor at h=1",
+             exec_sql(db, "INSERT OR REPLACE INTO stage_cursor(name,cursor,"
+                          "updated_at) VALUES('utxo_apply',1,1)"));
+    UV_CHECK("verdict_busy: register BUSY function",
+             sqlite3_create_function(db, "uv_busy", 0, SQLITE_UTF8, &calls,
+                                     uv_busy_fn, NULL, NULL) == SQLITE_OK);
+    UV_CHECK("verdict_busy: script_validate_log reads BUSY",
+             exec_sql(db, "DROP TABLE script_validate_log") &&
+             exec_sql(db, "CREATE VIEW script_validate_log(height,ok,status,"
+                          "block_hash) AS SELECT uv_busy(),1,NULL,NULL"));
+    job_result_t r = utxo_apply_stage_step_once();
+    UV_CHECK("verdict_busy: the verdict read was reached", calls > 0);
+    UV_CHECK("verdict_busy: BUSY holds the cursor with JOB_IDLE",
+             r == JOB_IDLE);
+    UV_CHECK("verdict_busy: no permanent blocker raised",
+             !blocker_exists("utxo_apply.fatal_store"));
+    blocker_clear("utxo_apply.fatal_store");
+    uv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
 static int uv_prune_decouple_coins_commitment_cases(sqlite3 *db, const int N)
 {
     int failures = 0;
@@ -3630,6 +3674,7 @@ int test_utxo_apply_stage(void)
      * the step_apply permanent-blocker mechanism at a site that IS reachable
      * through the public entry point.) */
     failures += uv_fatal_store_cases();
+    failures += uv_verdict_busy_cases();
 
     /* ── Lane A1: created_outputs prune DECOUPLED from the kernel co-commit ──
      * The prune now runs post-commit in its OWN tx from utxo_apply_stage_drain,

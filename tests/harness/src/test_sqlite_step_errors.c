@@ -188,9 +188,12 @@ static int sse_case_verdict_at(sqlite3 *db)
     struct sse_budget b;
     sse_arm(db, &b, 1);
     int rc = script_validate_log_verdict_at(db, 5, &row);
+    int err = sqlite3_extended_errcode(db);
     sse_disarm(db);
     SSE_CHECK("an interrupted read is an error (-1), not absent (0)",
               rc == -1);
+    SSE_CHECK("the failing sqlite code stays readable for fault routing",
+              (err & 0xff) == SQLITE_INTERRUPT);
     return failures;
 }
 
