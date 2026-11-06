@@ -590,10 +590,11 @@ void agent_push_security_posture_snapshot_json(
                       agent_security_posture_allows_local_ready(posture));
     json_push_kv_str(&obj, "next_action", posture->next_action);
     json_push_kv_str(&obj, "semantics",
-                     "public serving fails closed while bootstrap or "
-                     "shielded-history trust requires review; a node "
+                     "public serving and healthy fail closed while bootstrap "
+                     "or shielded-history trust requires review; a node "
                      "installed from a checkpoint compiled into this binary "
-                     "is ready for local use while full history is checked");
+                     "is healthy for local use while full history is "
+                     "checked, and public serving waits for that check");
     json_push_kv(out, key && key[0] ? key : "security_posture", &obj);
     json_free(&obj);
 }
