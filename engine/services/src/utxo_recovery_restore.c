@@ -12,6 +12,7 @@
  *                                     best block / metadata anchor).
  * Both share the CSR-gated commit primitives in utxo_recovery_internal.h. */
 
+#include "services/node_db_import_service.h"
 #include "services/utxo_recovery_service.h"
 #include "services/seed_integrity_gate.h"
 #include "services/chain_restore_executor.h"
@@ -169,16 +170,18 @@ static struct zcl_result ldb_import_prepare_source(
     return ZCL_OK;
 }
 
-static void ldb_import_sync_utxos(struct utxo_recovery_ctx *ctx,
-                                  struct coins_view_db *migrate_db)
+static struct zcl_result ldb_import_sync_utxos(struct utxo_recovery_ctx *ctx,
+                                               struct coins_view_db *migrate_db)
 {
     struct node_db import_db;
+    int rows = -1;
     if (node_db_sync_open_private_db_like(ctx->ndb, &import_db)) {
-        node_db_sync_import_utxos(&import_db, migrate_db);
+        struct zcl_result r = node_db_import_service_run(&import_db, migrate_db,
+                                                         &rows);
         node_db_close(&import_db);
-    } else {
-        node_db_sync_import_utxos(ctx->ndb, migrate_db);
+        return r;
     }
+    return node_db_import_service_run(ctx->ndb, migrate_db, &rows);
 }
 
 static void ldb_import_note_found_tip(struct utxo_recovery_ctx *ctx,
@@ -327,6 +330,35 @@ static void ldb_import_stamp_seed(struct utxo_recovery_ctx *ctx,
                     ctx->ndb, ldb_height, imported_root, imported_count);
 }
 
+/* Mark an accepted import as migrated, seed coins_kv from it and stamp the seed. */
+static void ldb_import_mark_accepted(struct utxo_recovery_ctx *ctx,
+                                     int ldb_height,
+                                     const struct uint256 *ldb_best,
+                                     const uint8_t imported_root[32],
+                                     uint64_t imported_count,
+                                     bool sha3_root_valid,
+                                     bool checkpoint_match)
+{
+            uint8_t one = 1;
+            if (!node_db_state_set(ctx->ndb, "leveldb_utxo_migrated",
+                                   &one, 1))
+                LOG_WARN("utxo_recovery",
+                         "failed to persist leveldb_utxo_migrated stamp; "
+                         "re-import retried next boot");
+
+            /* Seed coins_kv from the ACCEPTED import (prevout resolver needs
+             * pre-anchor coins). MUST run only after the verification gate: the
+             * seed stamps a one-way migration key on SQL success, so seeding a
+             * gate-wiped partial import strands coins_kv vs the next reimport. */
+            if (!coins_kv_seed_from_node_db(progress_store_db(),
+                    sqlite3_db_filename(ctx->ndb->db, "main")))
+                LOG_WARN("utxo_recovery", "coins_kv import seed failed");
+
+            ldb_import_stamp_seed(ctx, ldb_height, ldb_best,
+                                  imported_root, imported_count,
+                                  sha3_root_valid, checkpoint_match);
+}
+
 static void ldb_import_write_reimport_marker(
     const struct utxo_recovery_ctx *ctx)
 {
@@ -383,14 +415,16 @@ static bool ldb_import_sha3_keep(struct utxo_recovery_ctx *ctx,
     return true;
 }
 
-static void ldb_import_reopen_coins(struct utxo_recovery_ctx *ctx,
-                                    int ldb_height)
+static void ldb_import_reopen_coins(struct utxo_recovery_ctx *ctx)
 {
         coins_view_sqlite_open(ctx->coins_sqlite, ctx->ndb->db);
         /* Re-init coins cache after import */
         coins_view_cache_init(ctx->coins_tip, &ctx->coins_sqlite->view);
         set_coins_sqlite_for_commitment(ctx->coins_sqlite);
+}
 
+static void ldb_import_note_tip(struct utxo_recovery_ctx *ctx, int ldb_height)
+{
         /* Diagnostic: log UTXO height vs chain tip after import */
         {
             int tip_h = active_chain_height(&ctx->state->chain_active);
@@ -400,6 +434,20 @@ static void ldb_import_reopen_coins(struct utxo_recovery_ctx *ctx,
                    ldb_height != tip_h
                        ? " (MISMATCH — adjusting tip)" : "");
         }
+}
+
+/* The import was refused: report it, mark nothing as imported, seed nothing, and
+ * leave the coins view open on the now empty table. The next boot tries again. */
+static void ldb_import_end_refused(struct utxo_recovery_ctx *ctx,
+                                   struct coins_view_db *migrate_db,
+                                   const struct utxo_import_result *res)
+{
+    LOG_WARN("utxo_recovery", "%s", res->status.message);
+    coins_view_db_close(migrate_db);
+    node_db_wal_checkpoint(ctx->ndb);
+    /* The import wrote on a private connection: drop any stale read snapshot. */
+    sqlite3_exec(ctx->ndb->db, "BEGIN; END;", NULL, NULL, NULL);
+    ldb_import_reopen_coins(ctx);
 }
 
 /* ── LDB→SQLite UTXO import ─────────────────────────────────── */
@@ -492,7 +540,11 @@ struct utxo_import_result utxo_recovery_import_ldb(
     struct coins_view_db migrate_db;
     if (coins_view_db_open(&migrate_db, import_path,
                            450 << 20, false, false)) {
-        ldb_import_sync_utxos(ctx, &migrate_db);
+        res.status = ldb_import_sync_utxos(ctx, &migrate_db);
+        if (!res.status.ok) {
+            ldb_import_end_refused(ctx, &migrate_db, &res);
+            goto cleanup;
+        }
 
         /* Discover LDB height from imported UTXOs */
         int ldb_height = utxo_recovery_max_utxo_height(ctx);
@@ -543,29 +595,14 @@ struct utxo_import_result utxo_recovery_import_ldb(
                 LOG_WARN("utxo_recovery", "%s", wipe.message);
         }
 
-        uint8_t one = 1;
-        if (imported_count > 100000) {
-            if (!node_db_state_set(ctx->ndb, "leveldb_utxo_migrated",
-                                   &one, 1))
-                LOG_WARN("utxo_recovery",
-                         "failed to persist leveldb_utxo_migrated stamp; "
-                         "re-import retried next boot");
-
-            /* Seed coins_kv from the ACCEPTED import (prevout resolver needs
-             * pre-anchor coins). MUST run only after the verification gate: the
-             * seed stamps a one-way migration key on SQL success, so seeding a
-             * gate-wiped partial import strands coins_kv vs the next reimport. */
-            if (!coins_kv_seed_from_node_db(progress_store_db(),
-                    sqlite3_db_filename(ctx->ndb->db, "main")))
-                LOG_WARN("utxo_recovery", "coins_kv import seed failed");
-
-            ldb_import_stamp_seed(ctx, ldb_height, &ldb_best,
-                                  imported_root, imported_count,
-                                  sha3_root_valid, checkpoint_match);
-        }
+        if (imported_count > 100000)
+            ldb_import_mark_accepted(ctx, ldb_height, &ldb_best,
+                                     imported_root, imported_count,
+                                     sha3_root_valid, checkpoint_match);
 
         ldb_import_write_reimport_marker(ctx);
-        ldb_import_reopen_coins(ctx, ldb_height);
+        ldb_import_reopen_coins(ctx);
+        ldb_import_note_tip(ctx, ldb_height);
 
         printf("UTXO migration complete.\n");
         fflush(stdout);

@@ -61,6 +61,12 @@ int snapshot_import(const char *snapshot_dir,
 bool snapshot_import_block_index(const char *snapshot_dir, const char *db_path,
                                  bool header_only, int *out_count);
 
+#ifdef ZCL_TESTING
+/* The snapshot import's UTXO worker, run on the caller's thread. */
+bool snapshot_import_utxos_for_test(const char *snapshot_dir, const char *db_path,
+                                    int *out_count);
+#endif
+
 /* Process-lifetime count of rows quarantined by the per-row hash-bind /
  * PoW-target verify inside snapshot_import_block_index() (see the
  * import_row_verify block comment in snapshot_controller_import.c). A

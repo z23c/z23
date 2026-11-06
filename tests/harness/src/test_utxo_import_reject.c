@@ -7,13 +7,18 @@
 #include "test/test_core.h"
 
 #include "coins/compressor.h"
+#include "controllers/snapshot_controller.h"
 #include "core/serialize.h"
 #include "models/database.h"
 #include "services/node_db_import_service.h"
+#include "services/utxo_recovery_service.h"
 #include "storage/coins_db.h"
+#include "storage/coins_view_sqlite.h"
 #include "storage/dbwrapper.h"
 #include "storage/utxo_mirror_schema.h"
 #include "util/safe_alloc.h"
+#include "validation/main_state.h"
+#include "validation/process_block.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -27,6 +32,8 @@
 #define REJECT_BIG_RECORD 4090
 /* The result code of a set refused for missing outputs. */
 #define REJECT_CODE_DROPPED (-11)
+/* At 10 outputs each, more rows than boot's 100000 row mark. */
+#define REJECT_BOOT_RECORDS 12288
 
 struct reject_fixture {
     char dir[128];
@@ -35,7 +42,7 @@ struct reject_fixture {
 };
 
 /* outputs must be 2 + 8k: the first two live, then whole mask bytes. */
-static bool reject_write_record(struct db_wrapper *db, uint8_t key_byte,
+static bool reject_write_record(struct db_wrapper *db, uint32_t key_index,
                                 int outputs)
 {
     struct byte_stream s;
@@ -56,10 +63,15 @@ static bool reject_write_record(struct db_wrapper *db, uint8_t key_byte,
         ok &= stream_write_bytes(&s, hash, sizeof(hash));
     }
     ok &= stream_write_varint(&s, 7);
+    /* Big-endian, so the reader sees the records in the order they were made. */
+    memset(key, 0x33, sizeof(key));
     key[0] = 'c';
-    memset(key + 1, key_byte, 32);
+    key[1] = (char)(key_index >> 24);
+    key[2] = (char)(key_index >> 16);
+    key[3] = (char)(key_index >> 8);
+    key[4] = (char)key_index;
     ok = ok && !s.error &&
-         db_write(db, key, sizeof(key), (const char *)s.data, s.size, true);
+         db_write(db, key, sizeof(key), (const char *)s.data, s.size, false);
     stream_free(&s);
     return ok;
 }
@@ -81,7 +93,7 @@ static bool reject_fixture_make(struct reject_fixture *f, const int *outputs,
     if (!db_wrapper_open(&db, f->chainstate, 1u << 20, false, true))
         return false;
     for (size_t i = 0; ok && i < count; i++)
-        ok = reject_write_record(&db, (uint8_t)(i + 1), outputs[i]);
+        ok = reject_write_record(&db, (uint32_t)i, outputs[i]);
     db_wrapper_close(&db);
     return ok;
 }
@@ -279,10 +291,147 @@ static int reject_case_refusal_clears_the_set(void)
     return failures;
 }
 
+/* Boot only marks a set as imported above 100000 rows, so both fixtures clear
+ * that count. The refused one would keep it if its rows were left in place. */
+static int k_boot_outputs[REJECT_BOOT_RECORDS];
+
+static void reject_fill_boot_outputs(bool with_cut_record)
+{
+    for (int i = 0; i < REJECT_BOOT_RECORDS; i++)
+        k_boot_outputs[i] = 10;
+    for (int i = 0; with_cut_record && i < 9; i++)
+        k_boot_outputs[i] = REJECT_BIG_RECORD;
+}
+
+struct reject_boot_run {
+    struct utxo_import_result res;
+    int64_t rows;
+    bool marked_migrated;
+};
+
+static bool reject_run_boot_import(const struct reject_fixture *f,
+                                   struct reject_boot_run *out)
+{
+    char lock[200];
+    struct node_db ndb;
+    struct main_state ms;
+    struct coins_view_sqlite cvs;
+    struct coins_view_cache cache;
+    uint8_t mark[8];
+    size_t mark_len = 0;
+
+    /* Otherwise boot takes the copy path meant for a running zclassicd. */
+    snprintf(lock, sizeof(lock), "%s/LOCK", f->chainstate);
+    (void)unlink(lock);
+    if (!node_db_open(&ndb, f->db_path))
+        return false;
+    main_state_init(&ms);
+    memset(&cvs, 0, sizeof(cvs));
+    if (!coins_view_sqlite_open(&cvs, ndb.db)) {
+        main_state_free(&ms);
+        node_db_close(&ndb);
+        return false;
+    }
+    coins_view_cache_init(&cache, &cvs.view);
+
+    struct utxo_recovery_ctx uctx = {
+        .state = &ms,
+        .coins_sqlite = &cvs,
+        .coins_tip = &cache,
+        .ndb = &ndb,
+        .datadir = f->dir,
+    };
+    out->res = utxo_recovery_import_ldb(&uctx);
+    out->rows = node_db_utxo_count(&ndb);
+    out->marked_migrated = node_db_state_get(&ndb, "leveldb_utxo_migrated", mark,
+                                             sizeof(mark), &mark_len);
+
+    set_coins_sqlite_for_commitment(NULL);
+    coins_view_cache_free(&cache);
+    coins_view_sqlite_close(&cvs);
+    main_state_free(&ms);
+    node_db_close(&ndb);
+    return true;
+}
+
+static int reject_case_boot_honours_refusal(void)
+{
+    int failures = 0;
+
+    TEST("utxo import reject: boot reports a refused import and marks nothing") {
+        struct reject_fixture f;
+        struct reject_boot_run run;
+
+        reject_fill_boot_outputs(true);
+        ASSERT(reject_fixture_make(&f, k_boot_outputs, REJECT_BOOT_RECORDS));
+        ASSERT(reject_run_boot_import(&f, &run));
+        ASSERT(!run.res.status.ok);
+        ASSERT(strstr(run.res.status.message, "run the import again") != NULL);
+        ASSERT(!run.res.imported);
+        ASSERT(!run.marked_migrated);
+        ASSERT(run.rows == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int reject_case_boot_keeps_a_whole_set(void)
+{
+    int failures = 0;
+
+    TEST("utxo import reject: boot keeps and marks a whole set of the same size") {
+        struct reject_fixture f;
+        struct reject_boot_run run;
+
+        reject_fill_boot_outputs(false);
+        ASSERT(reject_fixture_make(&f, k_boot_outputs, REJECT_BOOT_RECORDS));
+        ASSERT(reject_run_boot_import(&f, &run));
+        ASSERT_RESULT_OK(run.res.status);
+        ASSERT(run.res.imported);
+        ASSERT(run.marked_migrated);
+        ASSERT(run.rows == (int64_t)REJECT_BOOT_RECORDS * 10);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int reject_case_snapshot_honours_refusal(void)
+{
+    int failures = 0;
+
+    TEST("utxo import reject: the snapshot worker fails on a refused import and "
+         "succeeds on a whole one") {
+        const int good[] = { 2, 2, 2 };
+        const int bad[] = {
+            REJECT_BIG_RECORD, REJECT_BIG_RECORD, REJECT_BIG_RECORD,
+            REJECT_BIG_RECORD, REJECT_BIG_RECORD, REJECT_BIG_RECORD,
+            REJECT_BIG_RECORD, REJECT_BIG_RECORD, 50,
+        };
+        struct reject_fixture good_set;
+        struct reject_fixture bad_set;
+        int count = -1;
+
+        ASSERT(reject_fixture_make(&good_set, good,
+                                   sizeof(good) / sizeof(good[0])));
+        ASSERT(snapshot_import_utxos_for_test(good_set.dir, good_set.db_path,
+                                              &count));
+        ASSERT(count == 6);
+
+        ASSERT(reject_fixture_make(&bad_set, bad, sizeof(bad) / sizeof(bad[0])));
+        ASSERT(!snapshot_import_utxos_for_test(bad_set.dir, bad_set.db_path,
+                                               &count));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_utxo_import_reject(void)
 {
     int failures = 0;
 
+    failures += reject_case_boot_honours_refusal();
+    failures += reject_case_boot_keeps_a_whole_set();
+    failures += reject_case_snapshot_honours_refusal();
     failures += reject_case_refusal_clears_the_set();
     failures += reject_case_exact_fit_imports();
     failures += reject_case_cut_record_refused();

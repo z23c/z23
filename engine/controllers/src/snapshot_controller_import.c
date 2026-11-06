@@ -617,10 +617,15 @@ static void *import_utxos_thread(void *arg)
         node_db_close(&ndb);
         return NULL;
     }
-    node_db_sync_import_job_join(&job, &a->count);
+    bool joined = node_db_sync_import_job_join(&job, &a->count);
 
     coins_view_db_close(&cvdb);
     node_db_close(&ndb);
+
+    if (!joined || a->count < 0) {
+        LOG_WARN("snapshot", "T2: UTXO import failed or was refused; the UTXO set is not usable, run the import again");
+        return NULL;
+    }
 
     printf("T2: UTXO import complete: %d outputs\n", a->count);
     fflush(stdout);
@@ -628,6 +633,20 @@ static void *import_utxos_thread(void *arg)
     a->result = 0;
     return NULL;
 }
+
+#ifdef ZCL_TESTING
+bool snapshot_import_utxos_for_test(const char *snapshot_dir, const char *db_path,
+                                    int *out_count)
+{
+    struct utxo_import_args a = {
+        .snapshot_dir = snapshot_dir,
+        .db_path = db_path,
+    };
+    import_utxos_thread(&a);
+    *out_count = a.count;
+    return a.result == 0;
+}
+#endif
 
 /* ---- Thread 3: Wallet scan of block files ---- */
 
