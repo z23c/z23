@@ -152,12 +152,22 @@ static bool push_getheaders_build_locator(struct msg_processor *mp,
     return true;
 }
 
+static void push_getheaders_from_unheld(struct msg_processor *mp,
+                                        struct p2p_node *node,
+                                        struct block_index *from);
+
 void push_getheaders_from(struct msg_processor *mp,
                           struct p2p_node *node,
                           struct block_index *from)
 {
-    if (getheaders_held("push_getheaders_from", node))
-        return;
+    if (!getheaders_held("push_getheaders_from", node))
+        push_getheaders_from_unheld(mp, node, from);
+}
+
+static void push_getheaders_from_unheld(struct msg_processor *mp,
+                                        struct p2p_node *node,
+                                        struct block_index *from)
+{
     /* Robust continuation anchor. A caller may hand us a block_index whose
      * stable per-node hash slot was never populated (phashBlock == NULL).
      * Dropping the request here is a SILENT header-sync stop — forbidden by

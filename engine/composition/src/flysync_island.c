@@ -504,6 +504,8 @@ static void fsi_tick_seeded(int64_t now)
 bool flysync_island_wants_offer_height(int32_t height)
 {
     int p = atomic_load(&g_phase);
+    if (p == FLYSYNC_DONE)
+        return false;      /* the rung bundle is installed: no second bundle */
     if (p != FLYSYNC_WAIT && p != FLYSYNC_WALK && p != FLYSYNC_SEEDED)
         return true;
     return fsi_rung_at(height) != NULL;

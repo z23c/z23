@@ -91,6 +91,15 @@ static bool cer_record_equal(const struct chain_evidence_record *a,
            a->full_validation_complete == b->full_validation_complete;
 }
 
+/* Where the ancestry walk may end: genesis (height 0, no parent), or the
+ * FlySync island root (exactly the recorded height and hash, no parent). */
+static bool cer_ancestry_terminus(const struct block_index *p)
+{
+    if (p->nHeight == 0)
+        return p->pprev == NULL;
+    return !p->pprev && island_anchor_is_root(p);
+}
+
 /* Ancestry walk: tip must be canonical in the block map and link, by
  * strictly decreasing height, to genesis (height 0 with no pprev). */
 static bool cer_tip_ancestry_linked(struct chain_state_repository *csr,
@@ -107,12 +116,9 @@ static bool cer_tip_ancestry_linked(struct chain_state_repository *csr,
         if (csr && csr->block_map &&
             block_map_find(csr->block_map, p->phashBlock) != p)
             return false;
-        if (p->nHeight == 0)
-            return p->pprev == NULL;
-        /* FlySync island root: exactly the recorded (height, hash). */
-        if (!p->pprev && island_anchor_is_root(p))
-            return true;
-        if (!p->pprev || p->pprev->nHeight != p->nHeight - 1)
+        if (p->nHeight == 0 || !p->pprev)
+            return cer_ancestry_terminus(p);
+        if (p->pprev->nHeight != p->nHeight - 1)
             return false;
     }
     return false;

@@ -1171,3 +1171,11 @@ later lane flips it HARD.
 - 2026-11-06T09:32:24Z — REASON: Rebase reseal onto origin/main: Let the engine hold outgoing header requests and drop NODE_NETWORK; no change beyond the rebased commit
   old ROOT: 468f62ad1e6403eb430bc28b0b36319e66fad0e4798079bc0db6c0cb7f0fe684
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T06:12:43Z — REASON: Split push_getheaders_from so the FlySync header-sync hold check sits in a thin wrapper under the cyclomatic cap. Request path only; no behavior or validation predicate change
+  old ROOT: 0ae3f5cd0d2d0b8319d6438afb3c392e4936987aa042dc41915e7815b5209745
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T09:33:23Z — REASON: Rebase reseal onto origin/main: FlySync: keep the hold under the complexity cap; no offers once installed; no change beyond the rebased commit
+  old ROOT: e2a8455f973cd2993dd44cf707ba2683ee72eb8453384392208f474b87432dc9
+  by: owner unseal ritual (make core-unseal)

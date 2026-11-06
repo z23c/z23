@@ -85,7 +85,8 @@ bool flysync_island_boot_after_index(struct app_context *ctx,
                                      struct main_state *ms);
 
 /* State-offer height filter: until its rung bundle installs (WAIT/WALK/SEEDED)
- * the node takes only an offer at a baked rung; otherwise every height. */
+ * the node takes only an offer at a baked rung; once it is installed (DONE)
+ * none; otherwise (off, fallen back) every height. */
 bool flysync_island_wants_offer_height(int32_t height);
 
 /* True while normal getheaders requests must not go out (WAIT/WALK/SEEDED). */
