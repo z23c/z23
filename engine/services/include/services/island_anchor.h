@@ -101,13 +101,12 @@ struct zcl_result island_anchor_retire(struct sqlite3 *db);
 /* Record that the rung bundle installed (SEEDED -> INSTALLED, idempotent). */
 struct zcl_result island_anchor_note_installed(struct sqlite3 *db);
 
-/* The wall-clock second this datadir first held header sync for FlySync
- * (progress_meta "flysync.hold_since"), written once on first call; later
- * calls return the stored value, so a crash loop never restarts the bound.
+/* Count one more boot that held header sync for FlySync (progress_meta
+ * "flysync.hold_boots") and return the new total. A crash loop cannot reset
+ * it, and time the process is not running never counts.
  * hold_recorded() reads only: true once FlySync ever held this datadir. */
 bool island_anchor_hold_recorded(struct sqlite3 *db);
-struct zcl_result island_anchor_hold_since(struct sqlite3 *db, int64_t now_s,
-                                           int64_t *since_s);
+struct zcl_result island_anchor_hold_boot(struct sqlite3 *db, uint64_t *boots);
 
 /* Boot: register the durable fact when the state is SEEDED or INSTALLED.
  * Returns true when

@@ -768,7 +768,13 @@ static int fsi_case_installed(void)
                               ISLAND_ANCHOR_STATE_SEEDED);
     uint8_t digest[32] = {0};
     char why[320];
-    FSI_CHECK("the bundle marker makes the island INSTALLED, durably",
+    FSI_CHECK("a bundle marker at another height leaves the island SEEDED",
+              boot_consensus_bundle_marker_write(n.dir, FSI_RUNG_H - 100000,
+                                                 digest) &&
+              flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
+              flysync_island_phase() == FLYSYNC_SEEDED &&
+              island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_SEEDED);
+    FSI_CHECK("the rung bundle marker makes the island INSTALLED, durably",
               boot_consensus_bundle_marker_write(n.dir, FSI_RUNG_H, digest) &&
               flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
               flysync_island_phase() == FLYSYNC_DONE &&
@@ -808,32 +814,54 @@ static int fsi_case_hold_bound(void)
     FSI_CHECK("hold fixture opens", fsi_node_open(&n, "flysync_hold"));
     sqlite3 *db = progress_store_db();
     const int64_t t0 = INT64_C(5000000000);
+    const int64_t day_ms = INT64_C(86400000);
     flysync_island_set_requested(true);
     flysync_island_test_set_clock_ms(t0);
-    FSI_CHECK("a held boot records when the hold started",
+    FSI_CHECK("a held boot is counted durably",
               flysync_island_boot_after_index(NULL, &n.ms) &&
               flysync_island_phase() == FLYSYNC_WAIT &&
               island_anchor_hold_recorded(db));
 
-    flysync_island_test_reset();
-    flysync_island_set_requested(true);
-    int64_t t1 = t0 + (FLYSYNC_HOLD_BOUND_S - 10) * 1000;
-    flysync_island_test_set_clock_ms(t1);
-    state_offer_store_note_first_peer(t1);
-    (void)flysync_island_boot_after_index(NULL, &n.ms);
-    flysync_island_tick();
-    FSI_CHECK("a restart inside the bound keeps waiting",
-              flysync_island_phase() == FLYSYNC_WAIT);
-    flysync_island_test_set_clock_ms(t0 + FLYSYNC_HOLD_BOUND_S * 1000);
+    /* Boots 2..N, each 30 days after the last: downtime never counts. */
+    bool waiting = true;
+    for (int b = 2; b <= FLYSYNC_HOLD_BOOTS; b++) {
+        flysync_island_test_reset();
+        fsi_release_globals();
+        flysync_island_set_requested(true);
+        int64_t tb = t0 + (int64_t)b * 30 * day_ms;
+        flysync_island_test_set_clock_ms(tb);
+        state_offer_store_note_first_peer(tb);
+        (void)flysync_island_boot_after_index(NULL, &n.ms);
+        flysync_island_tick();
+        waiting = waiting && flysync_island_phase() == FLYSYNC_WAIT;
+    }
+    FSI_CHECK("boots up to the bound keep waiting, however long apart",
+              waiting);
+    int64_t tl = t0 + (int64_t)FLYSYNC_HOLD_BOOTS * 30 * day_ms +
+                 STATE_OFFER_WAIT_MS * 4;
+    flysync_island_test_set_clock_ms(tl);
     flysync_island_test_hold_tick(true);
     flysync_island_tick();
     FSI_CHECK("the tick is single-entry: a second caller does nothing",
               flysync_island_phase() == FLYSYNC_WAIT);
     flysync_island_test_hold_tick(false);
     flysync_island_tick();
-    FSI_CHECK("the hold bound counts from the first boot: fall back, restart",
+    FSI_CHECK("released, the same tick closes the offer wait",
+              flysync_island_phase() == FLYSYNC_FELL_BACK);
+
+    flysync_island_test_reset();
+    fsi_release_globals();
+    FSI_CHECK("hold count kept for the over-bound boot",
+              progress_meta_delete(db, "flysync.island_state"));
+    flysync_island_set_requested(true);
+    flysync_island_test_set_clock_ms(tl + day_ms);
+    FSI_CHECK("the boot past the bound falls back before choosing a source, "
+              "with no restart",
+              flysync_island_boot_after_index(NULL, &n.ms) &&
               flysync_island_phase() == FLYSYNC_FELL_BACK &&
-              flysync_island_test_respawns() == 1);
+              flysync_island_test_respawns() == 0 &&
+              island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_FELL_BACK &&
+              !flysync_island_holds_header_sync());
 
     flysync_island_test_reset();
     flysync_island_set_requested(true);

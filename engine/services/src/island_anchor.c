@@ -17,7 +17,7 @@
 #define IA_SUBSYS "flysync"
 #define IA_FACT_KEY "flysync.island_anchor.v1"
 #define IA_STATE_KEY "flysync.island_state"
-#define IA_HOLD_KEY "flysync.hold_since"
+#define IA_HOLD_KEY "flysync.hold_boots"
 #define IA_FACT_LEN (4 + 32 + 32 + 4 + 32)
 
 static pthread_mutex_t g_ia_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -251,27 +251,24 @@ bool island_anchor_hold_recorded(struct sqlite3 *db)
                                    &have) && have && len == sizeof(buf);
 }
 
-struct zcl_result island_anchor_hold_since(struct sqlite3 *db, int64_t now_s,
-                                           int64_t *since_s)
+struct zcl_result island_anchor_hold_boot(struct sqlite3 *db, uint64_t *boots)
 {
-    if (since_s)
-        *since_s = now_s;
-    if (!db || !since_s)
-        return ZCL_ERR(-1, "FlySync hold start not read: progress store not "
+    if (boots)
+        *boots = 0;
+    if (!db || !boots)
+        return ZCL_ERR(-1, "FlySync held boot not counted: progress store not "
                        "open");
     uint8_t buf[8];
     size_t len = 0;
     bool have = false;
     if (!progress_meta_table_ensure(db) ||
         !progress_meta_get(db, IA_HOLD_KEY, buf, sizeof(buf), &len, &have))
-        return ZCL_ERR(-2, "FlySync hold start not read from progress_meta");
-    if (have && len == sizeof(buf)) {
-        *since_s = (int64_t)zcl_read_u64_le(buf);
-        return ZCL_OK;
-    }
-    zcl_write_u64_le(buf, (uint64_t)now_s);
+        return ZCL_ERR(-2, "FlySync held boots not read from progress_meta");
+    uint64_t n = (have && len == sizeof(buf)) ? zcl_read_u64_le(buf) : 0;
+    zcl_write_u64_le(buf, n + 1);
     if (!progress_meta_set(db, IA_HOLD_KEY, buf, sizeof(buf)))
-        return ZCL_ERR(-3, "FlySync hold start not written to progress_meta");
+        return ZCL_ERR(-3, "FlySync held boot not written to progress_meta");
+    *boots = n + 1;
     return ZCL_OK;
 }
 

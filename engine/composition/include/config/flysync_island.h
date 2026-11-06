@@ -49,10 +49,12 @@ struct uint256;
 #define FLYSYNC_INSTALL_TIMEOUT_MS  INT64_C(1800000)  /* seeded -> installed */
 #define FLYSYNC_FETCH_TIMEOUT_MS    INT64_C(1800000)  /* chosen offer -> staged */
 #define FLYSYNC_WALK_ATTEMPTS       3
-/* The whole hold (WAIT, WALK, SEEDED) across restarts, from the durable
- * "flysync.hold_since": fetch, walk and an install with its respawns fit well
- * inside it; a crash loop cannot stretch it. */
-#define FLYSYNC_HOLD_BOUND_S        INT64_C(10800)
+/* Boots that may hold header sync (WAIT, WALK, SEEDED), counted durably in
+ * "flysync.hold_boots": the boot that fetches, the install respawns and a few
+ * ordinary restarts fit; a crash loop cannot hold the node forever. Time the
+ * process is not running never counts (a phone killed overnight still waits);
+ * each boot keeps its own in-memory wait, walk, fetch and install bounds. */
+#define FLYSYNC_HOLD_BOOTS          8
 
 enum flysync_phase {
     FLYSYNC_OFF = 0,
