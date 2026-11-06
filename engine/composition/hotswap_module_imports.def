@@ -406,6 +406,7 @@ HOTSWAP_MODULE_IMPORT("zcl_ed25519_keypair", "NODE_UTIL")
  * triple used to pin a resident service across a swap, the resident-policy
  * dispatch notes, and the dev-only allocation fault-injection hook. */
 HOTSWAP_MODULE_IMPORT("zcl_alloc_fault_should_fail", "NODE_HOTSWAP")
+HOTSWAP_MODULE_IMPORT("zcl_alloc_note_failure", "NODE_HOTSWAP")
 HOTSWAP_MODULE_IMPORT("zcl_hotswap_service_acquire", "NODE_HOTSWAP")
 HOTSWAP_MODULE_IMPORT("zcl_hotswap_service_generation", "NODE_HOTSWAP")
 HOTSWAP_MODULE_IMPORT("zcl_hotswap_service_release", "NODE_HOTSWAP")

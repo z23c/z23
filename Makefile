@@ -13571,7 +13571,7 @@ check-hotswap-package-receipt-is-not-authority: $(LINTC_TOOL)
 # what the artifact LINKS AGAINST, so one added #include could acquire a door
 # into the reducer, coins, wallet or chain state and still mount. This gate
 # reads `nm -D --undefined-only` over every built module and refuses any name
-# absent from engine/composition/hotswap_module_imports.def (282 rows, derived from the
+# absent from engine/composition/hotswap_module_imports.def (294 rows, derived from the
 # real union across 93 artifacts, each grouped with the reason it is allowed).
 # The allowlist leg is fail-closed and needs no build; the artifact leg is
 # UNOBSERVED (loud, never "OK") when build/hotswap has never been produced,

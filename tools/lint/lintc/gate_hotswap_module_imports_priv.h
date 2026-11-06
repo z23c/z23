@@ -3,7 +3,7 @@
  * Shared declarations for the check_hotswap_module_imports port
  * (gate_hotswap_module_imports.c and its selftest). No heap: all state is
  * fixed-size static storage, sized generously over the measured tree
- * (282 allowlist rows, 547 capability rows).
+ * (294 allowlist rows, 547 capability rows).
  */
 #ifndef GATE_HOTSWAP_MODULE_IMPORTS_PRIV_H
 #define GATE_HOTSWAP_MODULE_IMPORTS_PRIV_H
@@ -16,7 +16,7 @@ enum {
     HMI_SYM = 160,
     HMI_GRP = 48,
     HMI_LINE = 1024,
-    HMI_ROWS = 512,        /* allowlist rows (real: 282, floor 100) */
+    HMI_ROWS = 512,        /* allowlist rows (real: 294, floor 100) */
     HMI_CAP_LINES = 2048,  /* physical lines of capability_symbols.def */
     HMI_CAPROWS = 2048,    /* ZCL_CAPABILITY_SYMBOL rows (real: 547) */
     HMI_SEEN = 4096,       /* distinct imports seen across modules */

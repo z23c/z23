@@ -692,7 +692,7 @@ assert green).
   acquire a door into the reducer, the coins view, the wallet spend path or
   chain state, pass every one of them, and mount — with no diff a reviewer
   could read as a reach change, because the change *is* an `#include`. The
-  declared contract is `engine/composition/hotswap_module_imports.def`: 282 rows derived
+  declared contract is `engine/composition/hotswap_module_imports.def`: 294 rows derived
   mechanically from the real undefined-symbol union across the 93 built module
   artifacts (`nm -D --undefined-only`, `@GLIBC_x.y.z` version suffix stripped —
   a glibc bump renames a symbol without widening reach), each row carrying the
