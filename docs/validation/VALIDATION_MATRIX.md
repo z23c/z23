@@ -28,7 +28,7 @@ sync, cleared when `bg_validation` completes full chain verification).
 **SHA256d (double SHA-256):**
 - Block header hash (`block_header_get_hash`)
 - Transaction hash / txid (`transaction_compute_hash`)
-- Merkle root (`compute_merkle_root_mutated`)
+- Merkle root (`merkle_root_mutated_in_place`, the loop `compute_merkle_root_mutated` also runs)
 
 **Blake2b-256:**
 - Equihash PoW (personalized `"ZcashPoW"` + N,K params)
