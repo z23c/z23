@@ -620,6 +620,8 @@ static const char *pick_snapshot_path(void)
     return NULL;
 }
 
+int chainstate_import_census_run(const char *path);
+
 int test_chainstate_legacy_reader(void)
 {
     int failures = 0;
@@ -686,5 +688,6 @@ int test_chainstate_legacy_reader(void)
     }
 
     chainstate_legacy_close(h);
+    failures += chainstate_import_census_run(path);
     return failures;
 }
