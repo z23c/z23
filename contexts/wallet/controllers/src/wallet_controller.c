@@ -12,6 +12,7 @@
 #include "controllers/agent_session_controller.h"
 #include "controllers/vault_intent_controller.h"
 #include "controllers/wallet_activity.h"
+#include "controllers/wallet_row_coins.h"
 #include "controllers/yardsale_wallet_controller.h"
 #include "wallet/wallet_lock.h"
 void rpc_wallet_set_state(struct wallet *w, struct main_state *ms,
@@ -333,19 +334,25 @@ static void listunspent_push_db_script_address(struct json_value *entry,
     }
 }
 
-static int listunspent_db_utxo_height(struct node_db *ndb,
-                                      struct db_wallet_utxo *u)
+/* A wallet row that carries a height keeps it. A row at height 0 gets its
+ * height (and coinbase flag) from the coin in the coins database, which must
+ * exist and agree with the row's amount and script; the utxos projection is
+ * not consulted. False means the row is not confirmed and is left out. */
+static bool listunspent_db_utxo_height(const struct wallet_rpc_context *ctx,
+                                       struct db_wallet_utxo *u, int *height)
 {
-    int h = u->height;
-    /* Fix height=0: look up real height from global UTXO index */
-    if (h <= 0) {
-        struct db_utxo global;
-        if (db_utxo_find(ndb, u->txid, u->vout, &global)) {
-            h = global.height;
-            db_utxo_free(&global);
-        }
-    }
-    return h;
+    *height = u->height;
+    if (u->height > 0)
+        return true;
+    struct wallet_row_coin coin;
+    if (!ctx->coins_tip ||
+        wallet_row_check_coin(ctx->coins_tip, u->txid, u->vout, u->value,
+                              u->script, u->script_len, &coin) !=
+            WALLET_ROW_AGREES)
+        return false;
+    *height = coin.height;
+    u->is_coinbase = coin.is_coinbase;
+    return true;
 }
 
 static bool listunspent_db_utxo_eligible(struct db_wallet_utxo *u, int confs,
@@ -364,8 +371,14 @@ static void listunspent_push_db_utxos(struct wallet_rpc_context *ctx,
 {
     struct db_wallet_utxo utxos[4096];
     int n = db_wallet_utxo_list_unspent(ctx->node_db, utxos, 4096);
+    int unconfirmed = 0;
     for (int i = 0; i < n; i++) {
-        int h = listunspent_db_utxo_height(ctx->node_db, &utxos[i]);
+        int h = 0;
+        if (!listunspent_db_utxo_height(ctx, &utxos[i], &h)) {
+            unconfirmed++;
+            db_wallet_utxo_free(&utxos[i]);
+            continue;
+        }
         int confs = (h > 0) ? tip - h + 1 : 0;
         if (!listunspent_db_utxo_eligible(&utxos[i], confs, min_conf,
                                           max_conf)) {
@@ -397,6 +410,9 @@ static void listunspent_push_db_utxos(struct wallet_rpc_context *ctx,
         json_free(&entry);
         db_wallet_utxo_free(&utxos[i]);
     }
+    if (unconfirmed > 0)
+        LOG_WARN("wallet", "listunspent: %d height-0 wallet_utxos rows left "
+                 "out: the coins database does not confirm them", unconfirmed);
 }
 
 static void listunspent_push_wallet_coins(struct wallet_rpc_context *ctx,
