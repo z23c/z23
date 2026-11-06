@@ -18,6 +18,7 @@
 #define IA_FACT_KEY "flysync.island_anchor.v1"
 #define IA_STATE_KEY "flysync.island_state"
 #define IA_HOLD_KEY "flysync.hold_boots"
+#define IA_ROWS_KEY "flysync.island_rows.v1"
 #define IA_FACT_LEN (4 + 32 + 32 + 4 + 32)
 
 static pthread_mutex_t g_ia_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -145,12 +146,23 @@ static bool ia_state_save(struct sqlite3 *db, enum island_anchor_state st)
     return progress_meta_set(db, IA_STATE_KEY, &v, 1);
 }
 
-struct zcl_result island_anchor_save(struct sqlite3 *db,
-                                     const struct island_anchor *a)
+static bool ia_rows_match(const struct island_anchor *a,
+                          const struct island_anchor_rows *rows)
 {
-    if (!db || !ia_valid(a))
+    return rows &&
+           uint256_eq(&rows->hash[0], &a->root_hash) &&
+           uint256_eq(&rows->hash[ISLAND_ANCHOR_WINDOW - 1], &a->rung_hash);
+}
+
+struct zcl_result island_anchor_save(struct sqlite3 *db,
+                                     const struct island_anchor *a,
+                                     const struct island_anchor_rows *rows)
+{
+    if (!db || !ia_valid(a) || !ia_rows_match(a, rows))
         return ZCL_ERR(-1, "island anchor save refused: %s",
-                       db ? "malformed fact" : "progress store not open");
+                       !db ? "progress store not open" :
+                       !ia_valid(a) ? "malformed fact" :
+                       "row list does not run from the root to the rung");
     uint8_t buf[IA_FACT_LEN];
     ia_encode(a, buf);
     if (!progress_meta_table_ensure(db))
@@ -163,6 +175,8 @@ struct zcl_result island_anchor_save(struct sqlite3 *db,
     bool begun = ia_exec(db, "BEGIN IMMEDIATE");
     bool wrote = begun &&
                  progress_meta_set_in_tx(db, IA_FACT_KEY, buf, sizeof(buf)) &&
+                 progress_meta_set_in_tx(db, IA_ROWS_KEY, rows->hash,
+                                         sizeof(rows->hash)) &&
                  progress_meta_set_in_tx(db, IA_STATE_KEY, &st, 1);
     bool committed = wrote && ia_exec(db, "COMMIT");
     if (begun && !committed)
@@ -179,7 +193,8 @@ struct zcl_result island_anchor_retire(struct sqlite3 *db)
 {
     if (island_anchor_state_load(db) != ISLAND_ANCHOR_STATE_FELL_BACK)
         return ZCL_ERR(-1, "island fact not retired: state is not FELL_BACK");
-    if (!progress_meta_delete(db, IA_FACT_KEY))
+    if (!progress_meta_delete(db, IA_FACT_KEY) ||
+        !progress_meta_delete(db, IA_ROWS_KEY))
         return ZCL_ERR(-2, "island fact not retired: progress_meta delete "
                        "failed");
     LOG_INFO(IA_SUBSYS, "fallen-back island rejoined the chain; fact retired");
@@ -207,6 +222,30 @@ bool island_anchor_load(struct sqlite3 *db, struct island_anchor *out,
         return false;
     }
     ia_decode(buf, out);
+    if (found)
+        *found = true;
+    return true;
+}
+
+bool island_anchor_rows_load(struct sqlite3 *db,
+                             struct island_anchor_rows *out, bool *found)
+{
+    if (found)
+        *found = false;
+    if (!db || !out)
+        return false;
+    size_t len = 0;
+    bool have = false;
+    if (!progress_meta_get_blob_exact(db, IA_ROWS_KEY, out->hash,
+                                      sizeof(out->hash), &len, &have))
+        return false;
+    if (!have)
+        return true;
+    if (len != sizeof(out->hash)) {
+        LOG_WARN(IA_SUBSYS, "island row list has length %zu, want %zu", len,
+                 sizeof(out->hash));
+        return false;
+    }
     if (found)
         *found = true;
     return true;

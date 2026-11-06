@@ -80,11 +80,24 @@ bool island_anchor_refuses_fork_at(int32_t fork_height);
 void island_anchor_work_from_be(struct arith_uint256 *out,
                                 const uint8_t be[32]);
 
-/* Durable fact. save() commits the fact and state SEEDED in one transaction;
- * a fact without a state reads as NONE. After a fall-back the fact stays until
- * its rows rejoin the chain (the boot detach needs the exact root). */
+/* The window's row hashes, root first: hash[i] is the row at root_height + i,
+ * so hash[0] is the root and hash[ISLAND_ANCHOR_WINDOW - 1] the rung. A row's
+ * persisted parent link follows its in-memory pprev, so after a fall-back's
+ * detach is flushed the rows load parentless; this list finds each one by
+ * exact (height, hash). */
+struct island_anchor_rows {
+    struct uint256 hash[ISLAND_ANCHOR_WINDOW];
+};
+
+/* Durable fact. save() commits the fact, its row list and state SEEDED in one
+ * transaction (refused unless the list's ends are the fact's root and rung);
+ * a fact without a state reads as NONE. After a fall-back the fact and list
+ * stay until the rows rejoin the chain (the boot detach needs them). */
 struct zcl_result island_anchor_save(struct sqlite3 *db,
-                                     const struct island_anchor *a);
+                                     const struct island_anchor *a,
+                                     const struct island_anchor_rows *rows);
+bool island_anchor_rows_load(struct sqlite3 *db,
+                             struct island_anchor_rows *out, bool *found);
 bool island_anchor_load(struct sqlite3 *db, struct island_anchor *out,
                         bool *found);
 enum island_anchor_state island_anchor_state_load(struct sqlite3 *db);

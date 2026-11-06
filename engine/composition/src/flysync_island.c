@@ -383,6 +383,30 @@ static bool fsi_collect_island(struct main_state *ms, struct block_index *root,
     return true;
 }
 
+/* Rows a flushed detach left parentless: they load as roots with their own
+ * proof as work, outside the root's ancestry. Each is found by the exact
+ * (height, hash) in the durable row list. */
+static bool fsi_collect_listed(struct main_state *ms,
+                               const struct island_anchor *a,
+                               struct fsi_rows *rows)
+{
+    struct island_anchor_rows list;
+    bool found = false;
+    if (!island_anchor_rows_load(progress_store_db(), &list, &found)) {
+        LOG_WARN(FSI_SUBSYS, "island row list unreadable; detaching by "
+                 "ancestry only");
+        return true;
+    }
+    for (int i = 1; found && i < ISLAND_ANCHOR_WINDOW; i++) {
+        struct block_index *bi = block_map_find(&ms->map_block_index,
+                                                &list.hash[i]);
+        if (bi && !bi->pprev && bi->nHeight == a->root_height + i &&
+            !fsi_rows_push(rows, bi))
+            return false;
+    }
+    return true;
+}
+
 /* The most-work entry that still has work, else the active tip. */
 static struct block_index *fsi_best_remaining(struct main_state *ms)
 {
@@ -438,7 +462,8 @@ size_t flysync_island_detach(struct main_state *ms,
     struct block_index *root = block_map_find(&ms->map_block_index, &root_hash);
     struct fsi_rows rows = {0};
     bool island = root && root->nHeight == a->root_height && !root->pprev;
-    bool listed = island && fsi_collect_island(ms, root, &rows);
+    bool listed = island && fsi_collect_island(ms, root, &rows) &&
+                  fsi_collect_listed(ms, a, &rows);
     for (size_t i = 0; listed && i < rows.n; i++) {
         rows.v[i]->pprev = NULL;
         rows.v[i]->pskip = NULL;
@@ -466,7 +491,10 @@ bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
     /* The fact goes down before any row: a crash after it leaves a fact whose
      * rows are missing (reconcile falls back), never rows without a fact (a
      * datadir that -flysync would refuse forever). */
-    struct zcl_result saved = island_anchor_save(progress_store_db(), a);
+    struct island_anchor_rows rows;
+    for (int i = 0; i < n; i++)   /* w[0] is the rung, w[n - 1] the root */
+        block_header_get_hash(&w[n - 1 - i], &rows.hash[i]);
+    struct zcl_result saved = island_anchor_save(progress_store_db(), a, &rows);
     if (!saved.ok) {
         LOG_WARN(FSI_SUBSYS, "island seed refused: %s", saved.message);
         return false;
