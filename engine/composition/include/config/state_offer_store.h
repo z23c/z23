@@ -78,6 +78,20 @@ enum state_offer_decision {
     STATE_OFFER_DECIDE_WAIT = 0,
     STATE_OFFER_DECIDE_FETCH,
     STATE_OFFER_DECIDE_FALL_BACK,
+    /* This node already holds chain state (or an install marker) and no
+     * retained offer is above it: it needs no bundle, so it neither fetches
+     * nor falls back. Offers are still recorded and counted. */
+    STATE_OFFER_DECIDE_SATISFIED,
+};
+
+/* What the local node already has, passed IN so the store reads no datadir.
+ * A node wants an offer only when it has no install marker AND its state
+ * height is known and below the offer's bundle_height. An unknown height fails
+ * towards NOT fetching. */
+struct state_offer_need {
+    bool marker_present;
+    bool height_known;
+    int32_t local_height;
 };
 
 /* Why an offer was not retained. Named so a status row can say which, and so a
@@ -130,9 +144,13 @@ void state_offer_store_note_bad(const uint8_t content_digest[32],
 bool state_offer_store_digest_is_bad(const uint8_t content_digest[32]);
 uint32_t state_offer_store_peer_strikes(int64_t peer_id);
 
-/* The decision. `out` is filled only for STATE_OFFER_DECIDE_FETCH. */
+/* The decision. `out` is filled only for STATE_OFFER_DECIDE_FETCH. The plain
+ * form decides for a FRESH node (no marker, height 0); the service uses _for. */
 enum state_offer_decision state_offer_store_decide(
     int64_t now_ms, struct state_offer_record *out);
+enum state_offer_decision state_offer_store_decide_for(
+    int64_t now_ms, struct state_offer_record *out,
+    const struct state_offer_need *need);
 
 /* Mark the chosen offer as being acted on, so a second decide() does not hand
  * the same offer to a second fetch. Cleared by note_bad (try the next one). */

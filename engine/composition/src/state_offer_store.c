@@ -70,6 +70,7 @@ const char *state_offer_decision_string(enum state_offer_decision d)
     case STATE_OFFER_DECIDE_WAIT: return "wait";
     case STATE_OFFER_DECIDE_FETCH: return "fetch";
     case STATE_OFFER_DECIDE_FALL_BACK: return "fall-back";
+    case STATE_OFFER_DECIDE_SATISFIED: return "satisfied";
     }
     return "unknown";
 }
@@ -424,11 +425,20 @@ int32_t state_offer_store_newest_height_seen(void)
     return g_newest_height_seen;
 }
 
-static size_t best_offer(int64_t now_ms)
+/* A node wants a bundle only with no install marker and a KNOWN state height
+ * below the offer's. Unknown fails towards not fetching. */
+static bool need_wants(const struct state_offer_need *need, int32_t bundle_height)
+{
+    return !need->marker_present && need->height_known &&
+           need->local_height < bundle_height;
+}
+
+static size_t best_offer(int64_t now_ms, const struct state_offer_need *need)
 {
     size_t best = STATE_OFFER_STORE_MAX;
     for (size_t i = 0; i < STATE_OFFER_STORE_MAX; i++) {
         if (!g_offer_used[i] || g_offer_fetching[i] || now_ms < g_offers[i].retry_after_ms ||
+            !need_wants(need, g_offers[i].offer.bundle_height) ||
             (g_offers[i].peer_link && link_peer_strikes(g_offers[i].peer_id)))
             continue;
         if (best == STATE_OFFER_STORE_MAX ||
@@ -445,10 +455,20 @@ static size_t best_offer(int64_t now_ms)
 enum state_offer_decision state_offer_store_decide(
     int64_t now_ms, struct state_offer_record *out)
 {
+    return state_offer_store_decide_for(now_ms, out, nullptr);
+}
+
+enum state_offer_decision state_offer_store_decide_for(
+    int64_t now_ms, struct state_offer_record *out,
+    const struct state_offer_need *need)
+{
+    static const struct state_offer_need fresh = {false, true, 0};
+    if (!need)
+        need = &fresh;
     /* Newest first. Every retained offer already cleared the freshness rule
      * against its OWN offerer's tip at parse time, so "newest" here is a
      * preference among acceptable offers, never a way past the rule. */
-    size_t best = best_offer(now_ms);
+    size_t best = best_offer(now_ms, need);
     if (best < STATE_OFFER_STORE_MAX) {
         if (out)
             *out = g_offers[best];
@@ -456,6 +476,14 @@ enum state_offer_decision state_offer_store_decide(
         memcpy(g_chosen_digest, g_offers[best].offer.content_digest, 32);
         g_last_decision = STATE_OFFER_DECIDE_FETCH;
         return STATE_OFFER_DECIDE_FETCH;
+    }
+
+    /* No offer is wanted. A node that already has state (marker, an unknown
+     * height, or a height above 0) is satisfied: it must not be told to fetch
+     * or fall back, and the stale-offers condition must not be raised. */
+    if (need->marker_present || !need->height_known || need->local_height > 0) {
+        g_last_decision = STATE_OFFER_DECIDE_SATISFIED;
+        return STATE_OFFER_DECIDE_SATISFIED;
     }
 
     /* Nothing acceptable. The window only runs once a peer exists to answer. */

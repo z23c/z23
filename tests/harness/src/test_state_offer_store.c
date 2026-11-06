@@ -1136,10 +1136,76 @@ static int staged_bundle_prevents_repeat_fetch(void)
     return failures;
 }
 
+/* A node that already holds state must not fetch an offered bundle. */
+static int satisfied_node_does_not_fetch(void)
+{
+    int failures = 0;
+    TEST_CASE("a node with state or a marker decides satisfied, not fetch") {
+        struct state_offer_v1 offer;
+        struct state_offer_record chosen;
+        uint8_t ip[16];
+        an_ip(ip, 9);
+        make_offer(&offer, 900000, 900100, 0x20);
+
+        /* Fresh node (no marker, height 0, known): still fetches. */
+        struct state_offer_need fresh = {false, true, 0};
+        state_offer_store_reset();
+        ASSERT_EQ(state_offer_store_record(&offer, ip, 18034, 1, 1000),
+                  STATE_OFFER_STORE_KEPT);
+        ASSERT_EQ(state_offer_store_decide_for(2000, &chosen, &fresh),
+                  STATE_OFFER_DECIDE_FETCH);
+        ASSERT(chosen.offer.bundle_height == 900000);
+
+        /* Marker present: no fetch, and the offer is still counted. */
+        struct state_offer_need marker = {true, true, 0};
+        state_offer_store_reset();
+        ASSERT_EQ(state_offer_store_record(&offer, ip, 18034, 1, 1000),
+                  STATE_OFFER_STORE_KEPT);
+        ASSERT_EQ(state_offer_store_decide_for(2000, &chosen, &marker),
+                  STATE_OFFER_DECIDE_SATISFIED);
+        struct state_offer_store_status st;
+        state_offer_store_status_get(&st);
+        ASSERT_EQ(st.offers_seen, 1u);
+        ASSERT(st.newest_height_seen == 900000);
+        ASSERT_EQ(st.last_decision, STATE_OFFER_DECIDE_SATISFIED);
+
+        /* Height at or above the offer: no fetch. */
+        struct state_offer_need at = {false, true, 900000};
+        struct state_offer_need above = {false, true, 950000};
+        ASSERT_EQ(state_offer_store_decide_for(2000, &chosen, &at),
+                  STATE_OFFER_DECIDE_SATISFIED);
+        ASSERT_EQ(state_offer_store_decide_for(2000, &chosen, &above),
+                  STATE_OFFER_DECIDE_SATISFIED);
+
+        /* Height below the offer, no marker: fetch. */
+        struct state_offer_need below = {false, true, 100};
+        ASSERT_EQ(state_offer_store_decide_for(2000, &chosen, &below),
+                  STATE_OFFER_DECIDE_FETCH);
+
+        /* Unknown height fails towards NOT fetching. */
+        struct state_offer_need unknown = {false, false, 0};
+        ASSERT_EQ(state_offer_store_decide_for(2000, &chosen, &unknown),
+                  STATE_OFFER_DECIDE_SATISFIED);
+
+        /* A satisfied node never falls back, even after the wait closes. */
+        state_offer_store_reset();
+        state_offer_store_note_first_peer(1000);
+        ASSERT_EQ(state_offer_store_decide_for(1000 + STATE_OFFER_WAIT_MS + 1,
+                                               &chosen, &marker),
+                  STATE_OFFER_DECIDE_SATISFIED);
+
+        ASSERT(strcmp(state_offer_decision_string(STATE_OFFER_DECIDE_SATISFIED),
+                      "satisfied") == 0);
+        state_offer_store_reset();
+    } TEST_END
+    return failures;
+}
+
 int test_state_offer_store(void)
 {
     int failures = 0;
 
+    failures += satisfied_node_does_not_fetch();
     failures += advertise_only_when_we_hold_a_bundle();
     failures += advertise_when_we_hold_the_checkpoint_bundle();
     failures += no_advertisement_for_a_stale_bundle();

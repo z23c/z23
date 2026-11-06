@@ -21,6 +21,8 @@
 #include "config/consensus_state_install_runtime.h"
 #include "config/consensus_state_snapshot_install.h"
 #include "config/state_offer_store.h"
+#include "config/boot_consensus_bundle_marker.h"
+#include "storage/progress_store.h"
 #include "config/state_offer_peer.h"
 #include "config/state_offer_link_session.h"
 #include "config/state_offer_link_receive.h"
@@ -798,6 +800,22 @@ void state_offer_service_shutdown(void)
     g_ndb = NULL;
 }
 
+/* What this node already holds. Height is reducer_frontier_external_tip_height
+ * (published H* once warm, else the durable tip_finalize witness read from the
+ * progress store at boot), NOT active_chain_height (a lookahead number that is
+ * 0 until headers load). That getter returns 0 both for a fresh datadir and
+ * when it cannot read, so an unreadable progress store with H* unpublished is
+ * reported UNKNOWN and fails towards not fetching. */
+static void sosvc_local_need(struct state_offer_need *need)
+{
+    need->marker_present =
+        g_datadir[0] && boot_consensus_bundle_marker_exists(g_datadir);
+    int32_t h = reducer_frontier_external_tip_height();
+    need->height_known = h > 0 || reducer_frontier_provable_tip_is_published() ||
+                         progress_store_db() != NULL;
+    need->local_height = h > 0 ? h : 0;
+}
+
 void state_offer_service_tick(void)
 {
     int64_t now_ms = sosvc_now_ms();
@@ -816,8 +834,10 @@ void state_offer_service_tick(void)
     if (g_fetch_staged) return;
 
     struct state_offer_record chosen;
+    struct state_offer_need need;
+    sosvc_local_need(&need);
     enum state_offer_decision decision =
-        state_offer_store_decide(now_ms, &chosen);
+        state_offer_store_decide_for(now_ms, &chosen, &need);
     if (decision == STATE_OFFER_DECIDE_FALL_BACK && !g_fallback_raised) {
         /* Raised ONCE, the moment the wait closes: the node is folding forward
          * from whatever it has, and an operator is entitled to read why and
