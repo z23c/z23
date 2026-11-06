@@ -1075,3 +1075,7 @@ later lane flips it HARD.
 - 2026-11-06T05:27:38Z — REASON: Open Tor's control socket pair close-on-exec from birth on Linux
   old ROOT: ecfaa435ee5bdb667a63e42724bb9b726f13328656167862921735699d8a1f14
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T05:28:14Z — REASON: Name the 15 s frontend-stop alarm as what ends a node with Tor stuck
+  old ROOT: 65bddea1a06fae69423193cfac04dc78c3bfc85fe849679702a1c712edc55e76
+  by: owner unseal ritual (make core-unseal)

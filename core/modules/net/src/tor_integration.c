@@ -1158,8 +1158,10 @@ static pthread_mutex_t g_tor_lifecycle = PTHREAD_MUTEX_INITIALIZER;
  * The request is event-driven, so a healthy Tor is joined as soon as its loop
  * reads it. Bound: if the thread has not ended after 10 s (the same total as
  * the earlier 5 s of retries plus a 5 s join) the join names the straggler on
- * stderr and keeps waiting, retaining ownership; the node's 90 s shutdown
- * watchdog (engine/entry/main.c) is what ends a process with Tor stuck.
+ * stderr and keeps waiting, retaining ownership. What ends a node with Tor
+ * stuck is the shutdown stage this runs in: frontend-stop's 15 s alarm
+ * (engine/composition/src/boot_services_shutdown.c) forces the exit. The 90 s
+ * watchdog (engine/entry/main.c) covers the time before a stage is armed.
  * Once Tor runs its shutdown, its own timer asserts if the loop fails to exit
  * within 10 s, as it always has. */
 static void tor_run_end(void)
