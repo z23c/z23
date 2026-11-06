@@ -573,6 +573,15 @@ on what you already have, so read the first line of each before picking:
    `getheaders` with exactly the requested header, which needs a serving fleet
    on a build with that fix.
 
+   A slow link keeps its rung download. While header sync is held, the peer
+   streaming the bundle is not dropped or rotated for missing headers or chain
+   lag, as long as link bytes keep arriving (an object is abandoned only after
+   30 s with no data). If every source drops at once, the node does not fall
+   back while the partial download in `bundles/` gained bytes within the last
+   3 minutes: reconnected peers are asked for offers at once and the download
+   resumes from its journal. With no offer and no new bytes for 3 minutes it
+   falls back as above.
+
 A published/prebuilt starter-pack snapshot loader also exists
 (`-load-snapshot-at-own-height`) as a faster-but-partial extra option; it
 seeds transparent state quickly but the node's shielded-history gate
