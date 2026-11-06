@@ -64,6 +64,32 @@ offline. macOS, Windows and the rest are in
 [Getting Started](docs/node/GETTING_STARTED.md). For an experimental Android app, see
 [Android ARM64](docs/dev/ANDROID.md).
 
+## Try an app
+
+The quickest thing to touch is Sky Combat, a split-screen flight game that
+ships in this repo. It needs no node and no network:
+
+```bash
+make game                    # links build/bin/z23-skycombat (needs X11 + GL headers)
+build/bin/z23-skycombat      # opens the game window
+```
+
+[Sky Combat](docs/commons/GAME.md) covers controls, checks and packaging.
+
+Bare `build/bin/z23` uses the default ports and data directory and starts
+syncing mainnet. To run a node beside other work, or just to look around,
+give it its own data directory and ports:
+
+```bash
+build/bin/z23 -datadir="$HOME/.zclassic-c23-dev" -port=8035 -rpcport=18234 \
+    -fsport=18035 -httpsport=8445
+build/bin/z23 -datadir="$HOME/.zclassic-c23-dev" -rpcport=18234 stop   # when done
+```
+
+Sharing a package with a friend means hosting it from a node. Start that
+node with `-packagehost=1` (no coins or sign-up); see the
+[Commons quickstart](docs/commons/C23_COMMONS_QUICKSTART.md).
+
 ## Run a node
 
 ```bash
