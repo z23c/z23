@@ -41,6 +41,7 @@ static bool rs_makefile(const char *clone)
         "SEAL := %s\n"
         ".PHONY: core-seal core-seal-check\n"
         "core-seal:\n"
+        "\ttest -z \"$(RS_SEAL_FAIL)\"\n"
         "\tgit ls-files -z core/ | $(SEAL) seal " RS_MANIFEST "\n"
         "\tawk '$$1 == \"ROOT\" { print \"#define ZCL_CORE_SEAL_ROOT \\\"\" $$2 \"\\\"\" }' "
         RS_MANIFEST " > " RS_ROOT_H "\n"
@@ -502,6 +503,240 @@ _test_next:;
     return failures;
 }
 
+/* A 60-line core/a.c: the first five lines carry `top`, the last ten
+ * `bottom`, so two edits of it touch disjoint hunks git merges cleanly. */
+static bool rs_long_body(char *out, size_t cap, int top, int bottom)
+{
+    size_t used = 0;
+    for (int i = 0; i < 60; i++) {
+        int v = i < 5 ? top : i >= 50 ? bottom : 1;
+        int n = snprintf(out + used, cap - used, "int a%02d = %d;\n", i, v);
+        if (n <= 0 || (size_t)n >= cap - used)
+            return false;
+        used += (size_t)n;
+    }
+    return true;
+}
+
+/* MUST 1 shape: main's ritual edits the top of core/a.c; the row edits its
+ * bottom, either in its one ritual commit or (`unsealed_first`) in a commit
+ * that neither ran the ritual nor resealed, followed by a ritual commit on
+ * core/b.c. git merges core/a.c cleanly either way, and only the seal files
+ * stop the rebase: the merged core/a.c is a file nobody sealed. */
+static bool rs_overlap_row(const char *tag, bool unsealed_first, char tip[64],
+                           char *line, size_t cap, char before[64],
+                           char after[64])
+{
+    struct dlx_rig rig;
+    char rig_tag[64], base[64], grown[64], c1[64], m1[64], body[2048];
+    const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+    (void)snprintf(rig_tag, sizeof(rig_tag), "%s_rig", tag);
+    dlx_isolate(tag);
+    if (!rs_rig(&rig, rig_tag, base) || !rs_long_body(body, sizeof(body), 1, 1) ||
+        !rs_core_commit(rig.clone, "core/a.c", body, "grow a", true, true,
+                        NULL, 0, grown) ||
+        dlx_git(rig.clone, push) != 0 || !rs_checkout(rig.clone, "row", grown) ||
+        !rs_long_body(body, sizeof(body), 1, 2))
+        return false;
+    if (unsealed_first
+            ? !dlx_write_dep(rig.clone, "core/a.c", body) ||
+              !dlx_commit_tree(rig.clone, "the row edits a, unsealed", c1) ||
+              !rs_core_commit(rig.clone, "core/b.c", "int b = 4;\n",
+                              "the row's ritual on b", true, true, NULL, 0, tip)
+            : !rs_core_commit(rig.clone, "core/a.c", body, "the row edits a",
+                              true, true, NULL, 0, tip))
+        return false;
+    if (!rs_checkout(rig.clone, "mover", grown) ||
+        !rs_long_body(body, sizeof(body), 2, 1) ||
+        !rs_core_commit(rig.clone, "core/a.c", body, "main edits a", true, true,
+                        NULL, 0, m1) ||
+        dlx_git(rig.clone, push) != 0 || !dlx_origin_main(&rig, before))
+        return false;
+    setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+    setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+    return dlx_qp_submit(&rig, tip, 1) && rs_drain(tip, 6) &&
+           rs_outcome_line(tip, line, cap) && dlx_origin_main(&rig, after);
+}
+
+static int rs_case_same_file_hunks(void)
+{
+    int failures = 0;
+    TEST("land: two ritual rows editing disjoint hunks of one core file are "
+         "not re-derived; the row ends as a conflict naming that file") {
+        char tip[64], before[64], after[64], line[16384];
+        ASSERT(rs_overlap_row("reseal_hunks", false, tip, line, sizeof(line),
+                              before, after));
+        if (!rs_has(line, "state", "conflict"))
+            printf("[outcome %s] ", line);
+        ASSERT(rs_has(line, "state", "conflict"));
+        ASSERT(strstr(line, "core paths changed on both sides") != NULL);
+        ASSERT(strstr(line, "core/a.c") != NULL);
+        ASSERT(strstr(line, "seal_new_root") == NULL);
+        ASSERT_STR_EQ(after, before);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int rs_case_unsealed_then_ritual(void)
+{
+    int failures = 0;
+    TEST("land: a row whose unsealed commit merges cleanly into a core file "
+         "main resealed is not re-derived at its later ritual commit") {
+        char tip[64], before[64], after[64], line[16384];
+        ASSERT(rs_overlap_row("reseal_c1c2", true, tip, line, sizeof(line),
+                              before, after));
+        if (!rs_has(line, "state", "conflict"))
+            printf("[outcome %s] ", line);
+        ASSERT(rs_has(line, "state", "conflict"));
+        ASSERT(strstr(line, "core paths changed on both sides") != NULL);
+        ASSERT(strstr(line, "seal_new_root") == NULL);
+        ASSERT_STR_EQ(after, before);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+/* A step killed mid-reseal leaves a stopped rebase in the landing worktree.
+ * The next row's rebase must not inherit it as a conflict. */
+static int rs_case_leftover_rebase(void)
+{
+    int failures = 0;
+    TEST("land: a rebase left in the landing worktree is aborted before the "
+         "next row rebases, which then lands") {
+        struct dlx_rig rig;
+        char base[64], a[64], b[64], wt[1400], line[16384], at[2048];
+        const char *stop[] = { "-c", "user.name=t", "-c",
+                               "user.email=t@example.invalid", "rebase",
+                               "--exec", "false", "HEAD~1", NULL };
+        const char *where[] = { "rev-parse", "--path-format=absolute",
+                                "--git-path", "rebase-merge", NULL };
+        dlx_isolate("reseal_left");
+        ASSERT(rs_rig(&rig, "reseal_left_rig", base));
+        ASSERT(rs_checkout(rig.clone, "row-a", base));
+        ASSERT(dlx_commit(rig.clone, "change.txt", "one\n", a));
+        ASSERT(rs_checkout(rig.clone, "row-b", base));
+        ASSERT(dlx_commit(rig.clone, "b.txt", "two\n", b));
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        ASSERT(dlx_qp_submit(&rig, a, 1));
+        ASSERT(rs_drain(a, 6));
+        ASSERT(rs_outcome_line(a, line, sizeof(line)));
+        ASSERT(rs_has(line, "state", "landed"));
+        /* What a kill leaves: a rebase stopped with its state directory. */
+        dlx_landdir(wt, sizeof(wt));
+        ASSERT(strlen(wt) + 4 < sizeof(wt));
+        (void)strcat(wt, "/wt");
+        ASSERT(dlx_git(wt, stop) != 0);
+        ASSERT(dlx_git_out(wt, where, at, sizeof(at)) == 0);
+        ASSERT(dlx_file_exists(at));
+        ASSERT(dlx_qp_submit(&rig, b, 2));
+        ASSERT(rs_drain(b, 6));
+        ASSERT(rs_outcome_line(b, line, sizeof(line)));
+        if (!rs_has(line, "state", "landed"))
+            printf("[outcome %s] ", line);
+        ASSERT(rs_has(line, "state", "landed"));
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+/* `make core-seal` failing in the landing tree says nothing about the row:
+ * the row is requeued as a host-load failure, then lands once it works. */
+static int rs_case_tool_fails(void)
+{
+    int failures = 0;
+    TEST("land: a failing make core-seal requeues the row as host load "
+         "instead of ending it as a conflict") {
+        struct dlx_rig rig;
+        char base[64], tip[64], m1[64], line[16384];
+        struct dlx_call c;
+        const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+        dlx_isolate("reseal_tool");
+        ASSERT(rs_rig(&rig, "reseal_tool_rig", base));
+        ASSERT(rs_checkout(rig.clone, "row", base));
+        ASSERT(rs_core_commit(rig.clone, "core/b.c", "int b = 5;\n",
+                              "the row edits b", true, true, NULL, 0, tip));
+        ASSERT(rs_checkout(rig.clone, "mover", base));
+        ASSERT(rs_core_commit(rig.clone, "core/a.c", "int a = 2;\n",
+                              "main edits a", true, true, NULL, 0, m1));
+        ASSERT(dlx_git(rig.clone, push) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        ASSERT(dlx_qp_submit(&rig, tip, 1));
+        setenv("RS_SEAL_FAIL", "1", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        if (strcmp(dlx_str(&c, "state"), "rebased") != 0)
+            printf("[state %s] ", dlx_str(&c, "state"));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "rebased");
+        dlx_end(&c);
+        ASSERT(!rs_outcome_line(tip, line, sizeof(line)));
+        unsetenv("RS_SEAL_FAIL");
+        ASSERT(rs_drain(tip, 6));
+        ASSERT(rs_outcome_line(tip, line, sizeof(line)));
+        ASSERT(rs_has(line, "state", "landed"));
+        ASSERT(strstr(line, "seal_new_root") != NULL);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    unsetenv("RS_SEAL_FAIL");
+    dlx_restore();
+    return failures;
+}
+
+/* A train member stacked on a ritual head re-derives its seal in the
+ * stacking rebase; its outcome carries the ROOTs like a single row's. */
+static int rs_case_train_member(void)
+{
+    int failures = 0;
+    TEST("land: a ritual row stacked in a train on a ritual head records "
+         "its old and new ROOT") {
+        struct dlx_rig rig;
+        char base[64], a[64], b[64], old_root[80], new_root[80];
+        char line[16384];
+        dlx_isolate("reseal_train");
+        ASSERT(rs_rig(&rig, "reseal_train_rig", base));
+        ASSERT(rs_checkout(rig.clone, "row-a", base));
+        ASSERT(rs_core_commit(rig.clone, "core/a.c", "int a = 6;\n",
+                              "row A edits a", true, true, NULL, 0, a));
+        ASSERT(rs_checkout(rig.clone, "row-b", base));
+        ASSERT(rs_core_commit(rig.clone, "core/b.c", "int b = 6;\n",
+                              "row B edits b", true, true, NULL, 0, b));
+        ASSERT(rs_root_at(rig.clone, b, old_root));
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        setenv("ZCL_LAND_TRAIN_WIDTH", "2", 1);
+        ASSERT(dlx_qp_submit(&rig, a, 1));
+        ASSERT(dlx_qp_submit(&rig, b, 2));
+        ASSERT(rs_drain(b, 8));
+        ASSERT(rs_outcome_line(b, line, sizeof(line)));
+        if (!rs_has(line, "state", "landed") || !strstr(line, "train_commit"))
+            printf("[outcome %s] ", line);
+        ASSERT(rs_has(line, "state", "landed"));
+        ASSERT(strstr(line, "train_commit") != NULL);
+        ASSERT(rs_main_sealed(rig.clone, new_root));
+        ASSERT(rs_has(line, "seal_old_root", old_root));
+        ASSERT(rs_has(line, "seal_new_root", new_root));
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    unsetenv("ZCL_LAND_TRAIN_WIDTH");
+    dlx_restore();
+    return failures;
+}
+
 int dlx_case_core_reseal(void)
 {
     int failures = 0;
@@ -511,6 +746,11 @@ int dlx_case_core_reseal(void)
     failures += rs_case_source_conflict();
     failures += rs_case_stale_seal();
     failures += rs_case_precheck_no_ritual();
+    failures += rs_case_same_file_hunks();
+    failures += rs_case_unsealed_then_ritual();
+    failures += rs_case_leftover_rebase();
+    failures += rs_case_tool_fails();
+    failures += rs_case_train_member();
     return failures;
 }
 

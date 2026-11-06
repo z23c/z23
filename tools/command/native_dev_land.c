@@ -5336,7 +5336,9 @@ static void dl_beat(const struct dl_row *row, const char *beat, int64_t started)
  * author owns the fix. A rebase that conflicts on one is therefore REFUSED
  * like any other conflict, with the one thing the author needs added: the
  * make target that rewrites the file. Neither side is picked, nothing is
- * resolved, nothing is folded. */
+ * resolved, nothing is folded. The one exception is not a document: the core
+ * seal files, which native_dev_land_reseal.c re-derives (never merges) for a
+ * row whose own commits ran the unseal ritual. */
 struct dl_generated_doc {
     const char *path;
     const char *fix;
@@ -5405,6 +5407,12 @@ static void dl_conflict_why(const char *paths, char *why, size_t cap)
     }
 }
 
+bool dl_fixture_unsigned(void)
+{
+    const char *allow = dl_allow_unsigned();
+    return allow && strcmp(allow, "1") == 0 && dl_stub() != NULL;
+}
+
 /* Preserve the resolved source while giving the integrated proposal a linear
  * publication identity. The queue retains the original submitted tip.
  * `replay` marks a commit dl_rebase() will replay onto a newer main, where
@@ -5423,12 +5431,10 @@ static bool dl_linear_commit(const struct dl_dirs *d, struct dl_row *row,
             "Prepare integrated candidate for linear publication\n\n"
             "Original-Candidate: %s\nIntegrated-Base: %s\nSource-Tree: %s",
             row->tip, base, tree);
-    const char *allow = dl_allow_unsigned();
-    bool fixture = allow && strcmp(allow, "1") == 0 && dl_stub() != NULL;
     const char *args[10];
     size_t n = 0;
     args[n++] = "commit-tree";
-    if (!fixture) args[n++] = "-S";
+    if (!dl_fixture_unsigned()) args[n++] = "-S";
     args[n++] = tree;
     args[n++] = "-p"; args[n++] = base;
     args[n++] = "-m"; args[n++] = message;
@@ -5566,11 +5572,60 @@ static void dl_row_move_base(struct dl_row *row, const char *observed_main)
     (void)snprintf(row->base, sizeof(row->base), "%s", observed_main);
 }
 
+/* A rebase a killed step left in the landing worktree (a stop the resealer
+ * was settling, say) makes every later `git rebase` exit 128, which would
+ * end the next row as a conflict it never had. Abort it first; false when
+ * one is left and cannot be aborted. */
+static bool dl_rebase_clear_leftover(const struct dl_dirs *d)
+{
+    static const char *const dirs[] = { "rebase-merge", "rebase-apply" };
+    const char *abort_args[] = { "rebase", "--abort", NULL };
+    char buf[DL_GIT_CAP];
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        const char *where[] = { "rev-parse", "--path-format=absolute",
+                                "--git-path", dirs[i], NULL };
+        struct stat st;
+        if (dl_git(d->wt, where, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) != 0)
+            return false;
+        dl_trim(buf);
+        if (stat(buf, &st) != 0)
+            continue;
+        if (dl_git(d->wt, abort_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) != 0)
+            return false;
+    }
+    return true;
+}
+
+/* A rebase stopped in the landing worktree that the resealer did not
+ * finish: name the conflict, with why the seal was not re-derived, and
+ * abort. 0 conflict, -1 a seal tool failed (a host-load failure the step
+ * retries). */
+static int dl_rebase_refused(const struct dl_dirs *d, const char *paths,
+                             const char *seal_why, int sealed, char *why,
+                             size_t why_cap)
+{
+    const char *abort_args[] = { "rebase", "--abort", NULL };
+    char buf[DL_GIT_CAP];
+    if (sealed < 0)
+        (void)snprintf(why, why_cap, "core seal tool failed: %s", seal_why);
+    else
+        dl_conflict_why(paths, why, why_cap);
+    size_t used = strlen(why);
+    if (sealed == 0 && seal_why[0] && used + 1 < why_cap)
+        (void)snprintf(why + used, why_cap - used,
+                       " -- core seal not re-derived: %s", seal_why);
+    (void)dl_git(d->wt, abort_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS);
+    return sealed < 0 ? -1 : 0;
+}
+
 /* Rebase the row's tip onto origin/main inside the private landing
  * worktree. Returns 1 prepared, 0 conflict, -1 setup failure.
-
+ *
  * A conflict is never settled here: it is named (dl_conflict_why()) and the
- * rebase aborted, whatever paths it touches. */
+ * rebase aborted, whatever paths it touches. The one exception is a stop on
+ * the core seal files alone, which dl_reseal_rebase() settles for a row
+ * that ran the unseal ritual itself (native_dev_land_reseal.c); any other
+ * path still conflicts as before, and a declined reseal says why. */
 int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
                      const char *observed_main, char *why, size_t why_cap)
 {
@@ -5579,28 +5634,33 @@ int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
     const char *rebase_args[] = { "--no-replace-objects", "-c",
                                   "rerere.autoupdate=false", "rebase", observed_main, NULL };
     const char *unmerged_args[] = { "diff", "--name-only", "--diff-filter=U", NULL };
-    const char *abort_args[] = { "rebase", "--abort", NULL };
+    struct dl_seal_gate gate = { DL_SEAL_NO, "" };
+    if (!dl_rebase_clear_leftover(d)) {
+        (void)snprintf(why, why_cap, "%s", "cannot abort a rebase left in the "
+                                           "landing worktree");
+        return -1;
+    }
     if (!dl_tip_checkout(d, row, observed_main, &integrated, why, why_cap))
         return -1;
     dl_row_move_base(row, observed_main);
     row->seal_old_root[0] = row->seal_new_root[0] = '\0';
     /* Read at the tip, before the replay moves the checkout off it. */
-    bool tip_sealed = !integrated && dl_reseal_tip_sealed(d->wt, observed_main);
+    if (!integrated)
+        dl_reseal_gate(d->wt, observed_main, &gate);
     /* Replaying an already-integrated merge discards its resolution and
      * can reintroduce conflicts from previously published work. Skip only
      * that replay; preparation and exact proof below remain mandatory. */
     if (!integrated &&
         dl_git(d->wt, rebase_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) !=
         0) {
-        char paths[DL_GIT_CAP];
+        char paths[DL_GIT_CAP], seal_why[400];
         (void)dl_git(d->wt, unmerged_args, paths, sizeof(paths),
                      DL_GIT_TIMEOUT_MS);
         dl_trim(paths);
-        if (dl_reseal_rebase(d->wt, row, tip_sealed, paths, sizeof(paths)) != 1) {
-            dl_conflict_why(paths, why, why_cap);
-            (void)dl_git(d->wt, abort_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS);
-            return 0;
-        }
+        int sealed = dl_reseal_rebase(d->wt, row, &gate, paths, sizeof(paths),
+                                      seal_why, sizeof(seal_why));
+        if (sealed != 1)
+            return dl_rebase_refused(d, paths, seal_why, sealed, why, why_cap);
     }
     if (!dl_rev_parse(d->wt, "HEAD", row->local)) {
         (void)snprintf(why, why_cap, "the rebased head cannot be named");
@@ -7818,6 +7878,28 @@ static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
     }
 }
 
+/* A seal tool (git, make core-seal) that failed or timed out while the
+ * rebase re-derived the core seal says nothing about the row: requeue it
+ * as a host-load failure, bounded by DL_ATTEMPT_MAX like the lint's. */
+static bool dl_step_start_seal_retry(const struct dl_dirs *d,
+                                     struct dl_row *row, const char *why,
+                                     struct zcl_command_reply *reply)
+{
+    if (!strstr(why, "core seal tool failed") ||
+        row->attempt >= DL_ATTEMPT_MAX)
+        return false;
+    row->attempt++;
+    dl_log(row, why);
+    dl_log(row, "\n");
+    (void)snprintf(row->phase, sizeof(row->phase), "rebase");
+    (void)snprintf(row->state, sizeof(row->state), "queued");
+    (void)snprintf(row->dimension, sizeof(row->dimension), "host_load");
+    (void)snprintf(row->detail, sizeof(row->detail), "%s", why);
+    if (dl_commit_or_report(d, row, false, reply, "rebased"))
+        dl_step_reply(reply, row, "rebased");
+    return true;
+}
+
 static bool dl_step_start_lint_stopped(const struct dl_dirs *d,
                                        struct dl_row *row,
                                        struct zcl_command_reply *reply)
@@ -7925,6 +8007,8 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
             dl_step_reply(reply, row, "conflict");
         return;
     }
+    if (rebased < 0 && dl_step_start_seal_retry(d, row, why, reply))
+        return;
     if (rebased < 0) {
         (void)snprintf(row->state, sizeof(row->state), "failed");
         (void)snprintf(row->dimension, sizeof(row->dimension), "rebase");
@@ -9698,9 +9782,12 @@ static void dl_step_proof_unclaimed(const char *detail, struct zcl_command_reply
  *
  * VERDICTS. Only CERTAINTY ends a row. CONFLICT: the first conflicting
  * replay conflicts on any path at all, generated documents included —
- * dl_rebase() stops on that same commit and aborts as a conflict. CLEAN:
+ * dl_rebase() stops on that same commit and aborts as a conflict — except a
+ * conflict on the core seal files alone of a commit that ran the unseal
+ * ritual, which dl_rebase() may re-derive, so it is DEFERRED. CLEAN:
  * every replay merged. DEFERRED: a settled answer that is not a conflict —
- * the replay is longer than DL_PRECHECK_COMMITS. CLEAN and DEFERRED rows
+ * the replay is longer than DL_PRECHECK_COMMITS, or that seal-only
+ * conflict. CLEAN and DEFERRED rows
  * are marked as checked for this main. UNCERTAIN: anything else — git failing, crashing or timing
  * out, a missing object or unresolvable ref, a capture that may be
  * truncated, an empty or unparseable conflict list. The row is left
@@ -9926,6 +10013,13 @@ static int dl_pc_git(struct dl_pc *pc, const char *const *args, char *out,
     return dl_pc_expired(pc) ? -1 : rc;
 }
 
+/* dl_pc_git() as the runner a seal check reads objects through. */
+static int dl_pc_seal_run(void *ctx, const char *const *args, char *out,
+                          size_t cap)
+{
+    return dl_pc_git(ctx, args, out, cap);
+}
+
 /* dl_rev_parse() held to the beat's deadline. */
 static bool dl_pc_rev(struct dl_pc *pc, const char *what, char out[80])
 {
@@ -10084,10 +10178,20 @@ static enum dl_precheck dl_precheck_merge(struct dl_pc *pc, const char *base,
 static enum dl_precheck dl_precheck_classify(struct dl_pc *pc, const char *commit,
                                              const char *paths)
 {
-    /* A ritual commit's seal-only conflict: dl_rebase() decides (_reseal.c). */
-    if (dl_seal_paths_only(paths) && dl_seal_ritual_commit(pc->d->wt, commit)) {
-        (void)snprintf(pc->why, sizeof(pc->why), "only core seal files conflict");
-        return DL_PRECHECK_DEFERRED;
+    /* A ritual commit's seal-only conflict: dl_rebase() decides (_reseal.c).
+     * The ritual reads go through dl_pc_git(): the beat's deadline and the
+     * scratch directory hold for them as for every merge here. */
+    if (dl_seal_paths_only(paths)) {
+        const struct dl_seal_git g = { dl_pc_seal_run, pc };
+        int ritual = dl_seal_ritual_commit(&g, commit);
+        if (ritual == DL_SEAL_ERR)
+            return dl_precheck_uncertain(pc, "cannot read the commit's seal "
+                                             "files");
+        if (ritual == DL_SEAL_YES) {
+            (void)snprintf(pc->why, sizeof(pc->why),
+                           "only core seal files conflict");
+            return DL_PRECHECK_DEFERRED;
+        }
     }
     dl_conflict_why(paths, pc->why, sizeof(pc->why));
     return DL_PRECHECK_CONFLICT;

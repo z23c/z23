@@ -586,6 +586,11 @@ static int dl_train_add(const struct dl_dirs *d, const struct dl_row *head,
     if (rc <= 0)
         return rc;
     t->m[t->n] = *next;
+    /* The member's own rebase may have re-derived the core seal. */
+    (void)snprintf(t->m[t->n].seal_old_root, sizeof(m.seal_old_root), "%s",
+                   m.seal_old_root);
+    (void)snprintf(t->m[t->n].seal_new_root, sizeof(m.seal_new_root), "%s",
+                   m.seal_new_root);
     (void)snprintf(t->commit[t->n], sizeof(t->commit[0]), "%s", m.local);
     t->n++;
     (void)snprintf(t->tip, sizeof(t->tip), "%s", m.local);
@@ -766,6 +771,15 @@ struct dl_train_bind {
     const struct dl_train *t;
 };
 
+/* The ROOTs the member's stacking rebase recorded, or none. */
+static void dl_train_bind_seal(struct dl_row *row, const struct dl_row *m)
+{
+    (void)snprintf(row->seal_old_root, sizeof(row->seal_old_root), "%s",
+                   m->seal_old_root);
+    (void)snprintf(row->seal_new_root, sizeof(row->seal_new_root), "%s",
+                   m->seal_new_root);
+}
+
 /* All or nothing: every member must still be the row that was stacked;
  * its commits are already in the tip, so none can be dropped alone. */
 static int dl_train_bind_edit(struct dl_row *rows, size_t n, void *context)
@@ -796,6 +810,7 @@ static int dl_train_bind_edit(struct dl_row *rows, size_t n, void *context)
             (void)snprintf(rows[i].train_commit,
                            sizeof(rows[i].train_commit), "%s",
                            b->t->commit[j]);
+            dl_train_bind_seal(&rows[i], &b->t->m[j]);
             bound++;
         }
     }

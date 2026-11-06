@@ -129,19 +129,42 @@ struct dl_row {
 /* True when the newline-separated path list is non-empty and names only
  * the four derived core seal files. */
 bool dl_seal_paths_only(const char *paths);
+/* Verdicts of the seal checks: certainly yes, certainly no, or a tool
+ * (git, make) failed or timed out, which is retryable and never a no. */
+enum { DL_SEAL_NO = 0, DL_SEAL_YES = 1, DL_SEAL_ERR = -1 };
+/* The git runner a seal check reads objects through: the landing worktree,
+ * or the queued precheck's deadline-bound scratch runner. */
+struct dl_seal_git {
+    int (*run)(void *ctx, const char *const *args, char *out, size_t cap);
+    void *ctx;
+};
 /* `commit` itself ran the unseal ritual: it changed the manifest and its
- * UNSEAL.md is its parent's bytes plus a non-empty tail (object reads only). */
-bool dl_seal_ritual_commit(const char *wt, const char *commit);
-/* With `wt` checked out at the tip: the tip re-froze the manifest since
- * merge-base(`main`, tip) and that seal verifies in the tip's own tree. */
-bool dl_reseal_tip_sealed(const char *wt, const char *main);
+ * UNSEAL.md is its parent's bytes plus a non-empty tail (object reads only).
+ * A DL_SEAL_* verdict. */
+int dl_seal_ritual_commit(const struct dl_seal_git *g, const char *commit);
+/* May the queue re-derive this row's seal at all? Read with `wt` checked out
+ * at the tip, before the replay moves it: both the tip and `main` re-froze
+ * the manifest since their merge base, no core/ path but the manifest and
+ * the log changed on both sides, no unseal token is present and the tip's
+ * own seal verifies. `why` names the first rule that declined. */
+struct dl_seal_gate {
+    int verdict;
+    char why[320];
+};
+void dl_reseal_gate(const char *wt, const char *main, struct dl_seal_gate *gate);
 /* Continue a rebase stopped in `wt` whose unmerged list `paths` names only
  * seal files, re-deriving the seal at each pick that itself ran the unseal
- * ritual; nothing when `tip_sealed` is false. 1: the rebase completed;
- * 0: refused, `paths` holds the unmerged list to report and the caller
- * aborts the rebase exactly as before. */
-int dl_reseal_rebase(const char *wt, struct dl_row *row, bool tip_sealed,
-                     char *paths, size_t cap);
+ * ritual, when `gate` allowed it. 1: the rebase completed; 0: declined,
+ * `paths` holds the unmerged list to report, `why` says why the seal was
+ * not re-derived (empty when other files conflict) and the caller aborts
+ * the rebase exactly as before; -1: a tool failed or timed out (`why`),
+ * retryable, the caller aborts the rebase. */
+int dl_reseal_rebase(const char *wt, struct dl_row *row,
+                     const struct dl_seal_gate *gate, char *paths, size_t cap,
+                     char *why, size_t why_cap);
+/* The queue's own commits are signed unless this is the unsigned fixture
+ * (ZCL_LAND_ALLOW_UNSIGNED=1 under the proof stub). */
+bool dl_fixture_unsigned(void);
 /* Append the optional seal_old_root/seal_new_root members to an encoded
  * row line of `size` bytes ending in "}\n"; returns the new size. */
 size_t dl_seal_append(const struct dl_row *r, char *out, size_t cap,
