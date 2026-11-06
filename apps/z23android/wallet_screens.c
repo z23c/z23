@@ -106,6 +106,7 @@ static struct {
     unsigned epoch, version, dropped;
     enum wallet_page page;
     struct data d;
+    struct { bool valid; uint64_t amount; char identity[82], address[ZAPP_PAY_ADDRESS_MAX]; } request;
     struct flight flight[K_COUNT];
 } st = {.lock = PTHREAD_MUTEX_INITIALIZER};
 
@@ -749,8 +750,10 @@ bool wallet_screen_same(const struct wallet_screen *a, const struct wallet_scree
     return true;
 }
 
+static void request_guard(void);
 static bool fallback_current(void)
 {
+    request_guard();
     if (st.d.offline_bound) {
         char identity[82];
         if (st.env.setup_identity && st.env.setup_identity(st.env.ctx, identity) && !strcmp(identity, st.d.offline_identity)) return true;
@@ -923,13 +926,46 @@ static void rebuild_code(void)
     copy(d->note, sizeof(d->note), "A code could not be made for this address. Tap New address.");
 }
 
+static void request_clear(void) { memory_cleanse(&st.request, sizeof(st.request)); }
+static void request_guard(void)
+{
+    char identity[82];
+    if (!st.request.valid) return;
+    if (st.env.setup_identity && st.env.setup_identity(st.env.ctx, identity) &&
+        !strcmp(identity, st.request.identity)) return;
+    request_clear(); st.d.has_amount = false; st.d.amount_zat = 0;
+    if (st.d.address[0]) rebuild_code();
+    touch();
+}
+static void request_save(void)
+{
+    char identity[82];
+    request_clear();
+    if (!st.d.has_amount || !st.d.address[0] || !st.env.setup_identity ||
+        !st.env.setup_identity(st.env.ctx, identity)) return;
+    st.request.valid = true; st.request.amount = st.d.amount_zat;
+    copy(st.request.identity, sizeof(st.request.identity), identity);
+    copy(st.request.address, sizeof(st.request.address), st.d.address);
+}
+static void request_restore(const char *address)
+{
+    char identity[82];
+    if (!st.request.valid) return;
+    if (!st.env.setup_identity || !st.env.setup_identity(st.env.ctx, identity) ||
+        strcmp(identity, st.request.identity) || strcmp(address, st.request.address)) {
+        request_clear(); st.d.has_amount = false; st.d.amount_zat = 0; return;
+    }
+    st.d.has_amount = true; st.d.amount_zat = st.request.amount;
+}
 static void show_address(const char *address)
 {
     st.d.note[0] = '\0';
     if (!private_network(address, &st.d.network)) copy(st.d.note, sizeof(st.d.note), "The wallet returned an address that is not private, so it is not shown. Tap New address.");
     else {
         copy(st.d.address, sizeof(st.d.address), address);
+        request_restore(address);
         rebuild_code();
+        if (st.d.has_amount && !st.request.valid) request_save();
     }
 }
 /* A reply that names an address: {"address":"zs1..."}. latest may answer null when the wallet has none. */
@@ -1312,12 +1348,9 @@ static size_t enter(enum wallet_page page, struct job *jobs)
 {
     size_t count = 0;
     st.dropped = 0;
-    bool keep_amount = page == WALLET_PAGE_RECEIVE && st.page == WALLET_PAGE_RECEIVE && st.d.has_amount;
-    uint64_t amount = st.d.amount_zat;
     wipe();
     ++st.epoch;
     st.page = page;
-    if (keep_amount) { st.d.has_amount = true; st.d.amount_zat = amount; }
     if (page == WALLET_PAGE_FUNDS) {
         cache_load();
         send_refresh();
@@ -1351,6 +1384,7 @@ bool wallet_screens_init(const struct wallet_env *env)
     if (!env || !env->secure || !env->run || !env->now_ms) return false;
     pthread_mutex_lock(&st.lock);
     memset(&st.d, 0, sizeof(st.d));
+    request_clear();
     drop_queued();
     st.env = *env;
     st.ready = true; st.secure = false; st.blocked = false;
@@ -1392,6 +1426,7 @@ void wallet_screens_shutdown(void)
     pthread_mutex_lock(&st.lock);
     if (st.ready) leave_locked(false);
     st.ready = false;
+    request_clear();
     memset(&st.env, 0, sizeof(st.env));
     pthread_mutex_unlock(&st.lock);
 }
@@ -1477,6 +1512,7 @@ static size_t new_address(struct job *jobs)
     if (st.d.no_receive) return 0;
     ++st.epoch;
     if (!submit(jobs, &count, K_NEW, "receive", "")) { --st.epoch; return 0; }
+    request_clear(); st.d.has_amount = false; st.d.amount_zat = 0;
     memory_cleanse(st.d.address, sizeof(st.d.address));
     memory_cleanse(st.d.code, sizeof(st.d.code));
     st.d.note[0] = '\0';
@@ -1565,7 +1601,7 @@ bool wallet_screens_set_amount(const char *text)
         if (blank) { st.d.has_amount = false; ok = true; }
         else if (zapp_zat_parse(text, &zat) && zat > 0) { st.d.has_amount = true; st.d.amount_zat = zat; ok = true; }
         else copy(st.d.note, sizeof(st.d.note), "Enter an amount above zero in ZCL, with up to 8 decimals.");
-        if (ok && st.d.address[0]) rebuild_code();
+        if (ok) { request_save(); if (st.d.address[0]) rebuild_code(); }
         touch();
     }
     pthread_mutex_unlock(&st.lock);

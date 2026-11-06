@@ -1594,7 +1594,7 @@ static void test_preload_arrives_on_open_receive(void)
     tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);
     fake.preload_ready = false;
     s = snap();
-    CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount=1.25"));
+    CHECK(!strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount="));
     CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), address));
     wallet_screens_close();
 
@@ -1624,17 +1624,52 @@ static void test_preload_arrives_on_open_receive(void)
     wallet_screens_close();
 }
 
+static void test_receive_amount_navigation(void)
+{
+    uint8_t symbols[69] = {2}; char address[92], reply[256];
+    CHECK(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"address\":\"%s\"}}", address);
+    start(false); fake.identity = "confirmed-wallet-one"; fake.latest = reply;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(wallet_screens_set_amount("0.001"));
+    CHECK(wallet_screens_back());
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    struct wallet_screen *s = snap();
+    CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount=0.001"));
+    wallet_screens_close();
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    s = snap(); CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount=0.001"));
+    wallet_screens_pause();
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    s = snap(); CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount=0.001"));
+    CHECK(wallet_screens_back());
+    symbols[0] = 3; char other[92], other_reply[256];
+    CHECK(domain_encoding_bech32_encode(other, sizeof(other), "zs", symbols, sizeof(symbols)));
+    snprintf(other_reply, sizeof(other_reply), "{\"ok\":true,\"data\":{\"address\":\"%s\"}}", other);
+    fake.latest = other_reply; tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    s = snap(); CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), other));
+    CHECK(wallet_screens_set_amount("0.001"));
+    fake.identity = "confirmed-wallet-two";
+    s = snap(); CHECK(!strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount="));
+    CHECK(wallet_screens_back());
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    s = snap(); CHECK(!strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount="));
+    wallet_screens_close();
+}
+
 static void test_receive_new_address(void)
 {
     start(false);
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
     CHECK(wallet_screens_set_amount("0.00000001"));
     struct wallet_screen *s;
-    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);                    /* only this makes an address, and the amount stays */
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);                    /* only this makes an address and clears the request */
     s = snap();
     CHECK(count_ops("receive") == 1 && count_ops("latest") == 1);
     CHECK(!has("may have been shown") && !has("shown before"));
-    CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "zclassic:" A2 "?amount=0.00000001") && find_text(s, A1) < 0);
+    CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), A2) && find_text(s, A1) < 0);
 
     CHECK(wallet_screens_back() && snap()->page == WALLET_PAGE_FUNDS);   /* leaving wipes the address from the screens */
     for (size_t i = 0; i < snap()->count; ++i) CHECK(!strstr(snap()->items[i].text, "zs1"));
@@ -2776,6 +2811,7 @@ int main(int argc, char **argv)
     test_every_page_pins_one_back();
     test_spendable_for_send();
     test_receive_amount();
+    test_receive_amount_navigation();
     test_receive_new_address();
     test_offline_receive();
     test_preload_arrives_on_open_receive();
