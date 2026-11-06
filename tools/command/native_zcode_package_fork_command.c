@@ -165,7 +165,7 @@ bool zcl_package_copy_open(const char *dir, struct zcl_package_copy *copy,
     int n = snprintf(log_path, sizeof(log_path), "%s/.zvcs/commits.log",
                      dir ? dir : "");
     if (!dir || n <= 0 || (size_t)n >= sizeof(log_path) ||
-        lstat(log_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        stat(log_path, &st) != 0 || !S_ISREG(st.st_mode)) {
         zcl_package_copy_fail(reply, "NOT_A_PACKAGE_COPY", false,
                               "dir has no version history; make a copy with "
                               "zcode package fork first",
@@ -261,7 +261,7 @@ static bool zpc_fork_inputs(const struct zcl_command_request *request,
                               "destination is required", command);
         return false;
     }
-    if (lstat(f->destination, &st) == 0) {
+    if (stat(f->destination, &st) == 0) {
         zcl_package_copy_fail(reply, "DESTINATION_EXISTS", false,
                               "a fork is made beneath an absent destination",
                               f->destination);
