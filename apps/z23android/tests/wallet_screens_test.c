@@ -1601,6 +1601,20 @@ static void test_preload_arrives_on_open_receive(void)
     start(false);
     fake.node_up = false; fake.identity = identity; fake.latest = NULL;
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(wallet_screens_set_amount("1.25"));
+    fake.node_up = true; fake.preloaded = response; fake.preload_ready = true;
+    wallet_screens_tick();
+    fake.preload_ready = false;
+    s = snap();
+    CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), address));
+    CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount=1.25"));
+    fake.identity = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-0000000000000000";
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) < 0);
+    wallet_screens_close();
+
+    start(false);
+    fake.node_up = false; fake.identity = identity; fake.latest = NULL;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
     fake.node_up = true; fake.preloaded = "{bad"; fake.preload_ready = true;
     wallet_screens_tick();
     reads = fake.preload_reads;

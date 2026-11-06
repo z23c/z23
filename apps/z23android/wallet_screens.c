@@ -68,7 +68,7 @@ struct data {
     struct wallet_view view;
     char fleet[WALLET_TEXT_MAX];
     bool address_pending, has_amount, no_receive, address_fallback, setup_bound, offline_bound;
-    bool preload_bound, preload_tried;
+    bool preload_tried;
     char offline_identity[82];
     uint64_t address_generation;
     uint64_t amount_zat;
@@ -751,10 +751,6 @@ bool wallet_screen_same(const struct wallet_screen *a, const struct wallet_scree
 
 static bool fallback_current(void)
 {
-    if (st.d.preload_bound && (!st.env.preload_ready || !st.env.preload_ready(st.env.ctx))) {
-        st.d.address[0] = 0; st.d.code[0] = 0; st.d.preload_bound = false; st.d.offline_bound = false;
-        st.d.address_fallback = false; ++st.epoch; touch(); return false;
-    }
     if (st.d.offline_bound) {
         char identity[82];
         if (st.env.setup_identity && st.env.setup_identity(st.env.ctx, identity) && !strcmp(identity, st.d.offline_identity)) return true;
@@ -970,7 +966,6 @@ static void apply_address(bool ok, bool missing, bool latest, const char *json)
         (!(st.d.setup_bound || st.d.offline_bound) || strict_private(address))) {
         show_address(address);
         st.d.offline_bound = false;
-        st.d.preload_bound = false;
         st.d.address_fallback = false;
     }
     else address_failure(data, missing, latest);
@@ -1118,7 +1113,6 @@ static bool apply_offline(const struct reply *r)
         show_address(address);
         copy(st.d.offline_identity, sizeof(st.d.offline_identity), r->identity);
         st.d.offline_bound = st.d.address[0] != 0;
-        st.d.preload_bound = r->preloaded && st.d.offline_bound;
         st.d.address_fallback = st.d.offline_bound;
         st.d.address_pending = false;
         st.d.note[0] = 0;
