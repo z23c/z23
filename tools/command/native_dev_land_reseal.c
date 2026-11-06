@@ -165,25 +165,33 @@ static bool dl_seal_root_at(const char *wt, const char *rev, char root[65])
 
 /* ── rule 1: the pick ran the ritual itself ────────────────────────────── */
 
-static bool dl_pick_froze_manifest(const char *wt)
+/* Read-only object queries: they never touch the worktree or its index, so
+ * the queued precheck may ask them of any commit in the store too. */
+static bool dl_pick_froze_manifest(const char *wt, const char *commit)
 {
-    const char *args[] = { "diff", "--quiet", "REBASE_HEAD^", "REBASE_HEAD",
+    char parent[96];
+    const char *args[] = { "diff", "--quiet", parent, commit,
                            "--", DL_SEAL_MANIFEST, NULL };
+    if (snprintf(parent, sizeof(parent), "%s^", commit) >= (int)sizeof(parent))
+        return false;
     return dl_git(wt, args, NULL, 0, DL_GIT_TIMEOUT_MS) == 1;
 }
 
-/* The bytes the pick appended to UNSEAL.md: its parent's log must be a
+/* The bytes `commit` appended to UNSEAL.md: its parent's log must be a
  * strict byte prefix of its own. Anything else (an edited or dropped line,
  * no entry at all) is not the ritual and is refused. */
-static bool dl_pick_log_tail(const char *wt, struct dl_blob *tail)
+static bool dl_pick_log_tail(const char *wt, const char *commit,
+                             struct dl_blob *tail)
 {
     struct dl_blob parent, own;
+    char up[96];
     bool ok = false;
     tail->text = NULL;
     tail->len = 0;
-    if (!dl_blob_read(wt, "REBASE_HEAD^", DL_SEAL_LOG, &parent))
+    if (snprintf(up, sizeof(up), "%s^", commit) >= (int)sizeof(up) ||
+        !dl_blob_read(wt, up, DL_SEAL_LOG, &parent))
         return false;
-    if (dl_blob_read(wt, "REBASE_HEAD", DL_SEAL_LOG, &own)) {
+    if (dl_blob_read(wt, commit, DL_SEAL_LOG, &own)) {
         ok = own.len > parent.len &&
              memcmp(own.text, parent.text, parent.len) == 0;
         if (ok) {
@@ -196,6 +204,48 @@ static bool dl_pick_log_tail(const char *wt, struct dl_blob *tail)
     }
     dl_blob_free(&parent);
     return ok;
+}
+
+bool dl_seal_ritual_commit(const char *wt, const char *commit)
+{
+    struct dl_blob tail;
+    if (!dl_pick_froze_manifest(wt, commit) ||
+        !dl_pick_log_tail(wt, commit, &tail))
+        return false;
+    dl_blob_free(&tail);
+    return true;
+}
+
+/* The tip's own seal holds: a tip that re-froze the manifest since `main`
+ * must verify against it in its own tree (the worktree is at the tip), or
+ * the queue would seal edits the author never sealed. A live unseal token
+ * would lift that check, so one in the landing tree is a refusal. */
+bool dl_reseal_tip_sealed(const char *wt, const char *main)
+{
+    char base[96], token[4096 + 32];
+    const char *mb[] = { "merge-base", main, "HEAD", NULL };
+    const char *diff[] = { "diff", "--quiet", base, "HEAD", "--",
+                           DL_SEAL_MANIFEST, NULL };
+    const char *argv[] = { "make", "-s", "-C", wt, "core-seal-check", NULL };
+    char *out;
+    if (dl_git(wt, mb, base, sizeof(base), DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_seal_trim(base);
+    if (!dl_sha_ok(base) || dl_git(wt, diff, NULL, 0, DL_GIT_TIMEOUT_MS) != 1 ||
+        snprintf(token, sizeof(token), "%s/.core-unseal-token", wt) >=
+            (int)sizeof(token))
+        return false;
+    FILE *f = fopen(token, "rb");
+    if (f) {
+        (void)fclose(f);
+        return false;
+    }
+    out = zcl_malloc(DL_LOG_CAP, "dev.land.seal.check");
+    if (!out)
+        return false;
+    int rc = zcl_spawn_capture(argv, out, DL_LOG_CAP, DL_GIT_TIMEOUT_MS);
+    free(out);
+    return rc == 0;
 }
 
 /* ── resolution ─────────────────────────────────────────────────────────── */
@@ -299,7 +349,8 @@ static bool dl_reseal_pick(const char *wt, struct dl_row *row)
     const char *commit[] = { "commit", "--quiet", "--no-verify",
                              "-C", "REBASE_HEAD", NULL };
     struct dl_blob tail;
-    if (!dl_pick_froze_manifest(wt) || !dl_pick_log_tail(wt, &tail))
+    if (!dl_pick_froze_manifest(wt, "REBASE_HEAD") ||
+        !dl_pick_log_tail(wt, "REBASE_HEAD", &tail))
         return false;
     bool ok = dl_reseal_log(wt, &tail);
     dl_blob_free(&tail);
@@ -308,13 +359,13 @@ static bool dl_reseal_pick(const char *wt, struct dl_row *row)
            dl_git(wt, commit, NULL, 0, DL_GIT_TIMEOUT_MS) == 0;
 }
 
-int dl_reseal_rebase(const char *wt, struct dl_row *row, char *paths,
-                     size_t cap)
+int dl_reseal_rebase(const char *wt, struct dl_row *row, bool tip_sealed,
+                     char *paths, size_t cap)
 {
     const char *cont[] = { "-c", "rerere.autoupdate=false", "rebase",
                            "--continue", NULL };
     const char *unmerged[] = { "diff", "--name-only", "--diff-filter=U", NULL };
-    for (int stop = 0; stop < DL_SEAL_STOPS; stop++) {
+    for (int stop = 0; tip_sealed && stop < DL_SEAL_STOPS; stop++) {
         if (!dl_seal_paths_only(paths) || !dl_reseal_pick(wt, row))
             break;
         if (dl_git(wt, cont, NULL, 0, DL_GIT_TIMEOUT_MS) == 0)

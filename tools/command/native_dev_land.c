@@ -5584,6 +5584,8 @@ int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
         return -1;
     dl_row_move_base(row, observed_main);
     row->seal_old_root[0] = row->seal_new_root[0] = '\0';
+    /* Read at the tip, before the replay moves the checkout off it. */
+    bool tip_sealed = !integrated && dl_reseal_tip_sealed(d->wt, observed_main);
     /* Replaying an already-integrated merge discards its resolution and
      * can reintroduce conflicts from previously published work. Skip only
      * that replay; preparation and exact proof below remain mandatory. */
@@ -5594,7 +5596,7 @@ int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
         (void)dl_git(d->wt, unmerged_args, paths, sizeof(paths),
                      DL_GIT_TIMEOUT_MS);
         dl_trim(paths);
-        if (dl_reseal_rebase(d->wt, row, paths, sizeof(paths)) != 1) {
+        if (dl_reseal_rebase(d->wt, row, tip_sealed, paths, sizeof(paths)) != 1) {
             dl_conflict_why(paths, why, why_cap);
             (void)dl_git(d->wt, abort_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS);
             return 0;
@@ -10079,10 +10081,11 @@ static enum dl_precheck dl_precheck_merge(struct dl_pc *pc, const char *base,
  * (dl_conflict_why(): newlines as spaces, and the make target for any
  * generated document among them). The list is known complete here
  * (dl_precheck_merge() refuses a capture that may be truncated). */
-static enum dl_precheck dl_precheck_classify(struct dl_pc *pc,
+static enum dl_precheck dl_precheck_classify(struct dl_pc *pc, const char *commit,
                                              const char *paths)
 {
-    if (dl_seal_paths_only(paths)) { /* dl_rebase() decides, see _reseal.c */
+    /* A ritual commit's seal-only conflict: dl_rebase() decides (_reseal.c). */
+    if (dl_seal_paths_only(paths) && dl_seal_ritual_commit(pc->d->wt, commit)) {
         (void)snprintf(pc->why, sizeof(pc->why), "only core seal files conflict");
         return DL_PRECHECK_DEFERRED;
     }
@@ -10120,7 +10123,7 @@ static enum dl_precheck dl_precheck_replay(struct dl_pc *pc, char *list,
         enum dl_precheck v = dl_precheck_merge(pc, parent, ours, c, tree,
                                                &paths);
         if (v == DL_PRECHECK_CONFLICT)
-            return dl_precheck_classify(pc, paths);
+            return dl_precheck_classify(pc, c, paths);
         if (v != DL_PRECHECK_CLEAN)
             return dl_precheck_uncertain(pc, "merge-tree failed, timed out "
                                              "or gave no complete verdict");

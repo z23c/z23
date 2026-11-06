@@ -115,7 +115,8 @@ static bool rs_append(const char *clone, const char *rel, const char *text)
 }
 
 /* A core edit on the current checkout. `ritual` appends the UNSEAL entry the
- * owner ritual writes; `seal` re-freezes the manifest and the mirrors. The
+ * owner ritual writes; the manifest and mirrors are re-frozen, and `seal`
+ * false edits another core file after that (a stale seal). The
  * entry text is copied into `entry` (may be NULL). */
 static bool rs_core_commit(const char *clone, const char *file,
                            const char *body, const char *reason, bool ritual,
@@ -131,7 +132,10 @@ static bool rs_core_commit(const char *clone, const char *file,
         return false;
     if (entry)
         (void)snprintf(entry, entry_cap, "%s", ritual ? text : "");
-    return (!seal || rs_make(clone, "core-seal")) &&
+    /* !seal: the author seals, then edits core/c.c before committing, so
+     * the commit's own manifest no longer verifies. */
+    return rs_make(clone, "core-seal") &&
+           (seal || dlx_write_dep(clone, "core/c.c", "int c = 9;\n")) &&
            dlx_commit_tree(clone, reason, out);
 }
 
@@ -357,7 +361,7 @@ _test_next:;
  * `ritual` shape the row's own commit. Returns the row's terminal outcome
  * line and leaves origin/main's id in `main_after`. */
 static bool rs_single_row(const char *tag, const char *file, bool ritual,
-                          char tip[64], char *line, size_t cap,
+                          bool fresh, char tip[64], char *line, size_t cap,
                           char before[64], char after[64])
 {
     struct dlx_rig rig;
@@ -368,7 +372,7 @@ static bool rs_single_row(const char *tag, const char *file, bool ritual,
     if (!rs_rig(&rig, rig_tag, base) ||
         !rs_checkout(rig.clone, "row", base) ||
         !rs_core_commit(rig.clone, file, "int row = 3;\n", "the row's edit",
-                        ritual, true, NULL, 0, tip) ||
+                        ritual, fresh, NULL, 0, tip) ||
         !rs_checkout(rig.clone, "mover", base) ||
         !rs_core_commit(rig.clone, "core/a.c", "int a = 2;\n",
                         "main edits a", true, true, NULL, 0, m1) ||
@@ -388,7 +392,7 @@ static int rs_case_no_ritual(void)
     TEST("land: a row that resealed core without an UNSEAL entry still "
          "ends as a seal conflict, nothing re-derived") {
         char tip[64], before[64], after[64], line[16384];
-        ASSERT(rs_single_row("reseal_none", "core/b.c", false, tip, line,
+        ASSERT(rs_single_row("reseal_none", "core/b.c", false, true, tip, line,
                              sizeof(line), before, after));
         ASSERT(rs_has(line, "state", "conflict"));
         ASSERT(rs_has(line, "dimension", "rebase"));
@@ -411,12 +415,85 @@ static int rs_case_source_conflict(void)
     TEST("land: a ritual row with a real conflict in a core source file "
          "still ends as a conflict naming that file") {
         char tip[64], before[64], after[64], line[16384];
-        ASSERT(rs_single_row("reseal_src", "core/a.c", true, tip, line,
+        ASSERT(rs_single_row("reseal_src", "core/a.c", true, true, tip, line,
                              sizeof(line), before, after));
         ASSERT(rs_has(line, "state", "conflict"));
         ASSERT(strstr(line, "core/a.c") != NULL);
         ASSERT(strstr(line, "seal_new_root") == NULL);
         ASSERT_STR_EQ(after, before);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+/* Rule 1 again: the ritual ran, but the author edited core/c.c after the
+ * seal, so the tip's own manifest does not verify. Re-deriving would seal
+ * an edit the author never sealed; the conflict stands. */
+static int rs_case_stale_seal(void)
+{
+    int failures = 0;
+    TEST("land: a ritual row whose own seal does not verify is not "
+         "re-derived; it ends as a seal conflict") {
+        char tip[64], before[64], after[64], line[16384];
+        ASSERT(rs_single_row("reseal_stale", "core/b.c", true, false, tip,
+                             line, sizeof(line), before, after));
+        ASSERT(rs_has(line, "state", "conflict"));
+        ASSERT(strstr(line, RS_MANIFEST) != NULL);
+        ASSERT(strstr(line, "seal_new_root") == NULL);
+        ASSERT_STR_EQ(after, before);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+/* The queued check still ends a seal-only conflict at once when the row's
+ * commit did not run the ritual, exactly as before. */
+static int rs_case_precheck_no_ritual(void)
+{
+    int failures = 0;
+    TEST("land: the queued check still ends a seal-only conflict of a row "
+         "that did not run the ritual") {
+        struct dlx_rig rig;
+        char base[64], b[64], m1[64], detail[512];
+        struct dlx_call c;
+        dlx_isolate("reseal_pcn");
+        ASSERT(rs_rig(&rig, "reseal_pcn_rig", base));
+        ASSERT(rs_checkout(rig.clone, "row-a", base));
+        ASSERT(dlx_commit(rig.clone, "change.txt", "one\n", rig.tip));
+        ASSERT(rs_checkout(rig.clone, "row-b", base));
+        ASSERT(rs_core_commit(rig.clone, "core/b.c", "int b = 2;\n",
+                              "row B edits b", false, true, NULL, 0, b));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        ASSERT(dlx_qp_submit(&rig, rig.tip, 1));
+        ASSERT(dlx_qp_submit(&rig, b, 2));
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        ASSERT(rs_checkout(rig.clone, "mover", base));
+        ASSERT(rs_core_commit(rig.clone, "core/a.c", "int a = 2;\n",
+                              "main edits a", true, true, NULL, 0, m1));
+        ASSERT(dlx_git(rig.clone, (const char *[]){ "push", "--quiet",
+                       "origin", "HEAD:main", NULL }) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "rebased");
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        ASSERT(dlx_int(&c, "queued_conflicts") == 1);
+        dlx_end(&c);
+        ASSERT(dlx_qp_outcome(b, "conflict", detail, sizeof(detail)));
+        ASSERT(strstr(detail, "detected while queued") != NULL);
+        ASSERT(strstr(detail, RS_MANIFEST) != NULL);
         dlx_restore();
         PASS();
     }
@@ -432,6 +509,8 @@ int dlx_case_core_reseal(void)
     failures += rs_case_precheck_defers();
     failures += rs_case_no_ritual();
     failures += rs_case_source_conflict();
+    failures += rs_case_stale_seal();
+    failures += rs_case_precheck_no_ritual();
     return failures;
 }
 

@@ -129,12 +129,19 @@ struct dl_row {
 /* True when the newline-separated path list is non-empty and names only
  * the four derived core seal files. */
 bool dl_seal_paths_only(const char *paths);
+/* `commit` itself ran the unseal ritual: it changed the manifest and its
+ * UNSEAL.md is its parent's bytes plus a non-empty tail (object reads only). */
+bool dl_seal_ritual_commit(const char *wt, const char *commit);
+/* With `wt` checked out at the tip: the tip re-froze the manifest since
+ * merge-base(`main`, tip) and that seal verifies in the tip's own tree. */
+bool dl_reseal_tip_sealed(const char *wt, const char *main);
 /* Continue a rebase stopped in `wt` whose unmerged list `paths` names only
  * seal files, re-deriving the seal at each pick that itself ran the unseal
- * ritual. 1: the rebase completed; 0: refused, `paths` holds the unmerged
- * list to report and the caller aborts the rebase exactly as before. */
-int dl_reseal_rebase(const char *wt, struct dl_row *row, char *paths,
-                     size_t cap);
+ * ritual; nothing when `tip_sealed` is false. 1: the rebase completed;
+ * 0: refused, `paths` holds the unmerged list to report and the caller
+ * aborts the rebase exactly as before. */
+int dl_reseal_rebase(const char *wt, struct dl_row *row, bool tip_sealed,
+                     char *paths, size_t cap);
 /* Append the optional seal_old_root/seal_new_root members to an encoded
  * row line of `size` bytes ending in "}\n"; returns the new size. */
 size_t dl_seal_append(const struct dl_row *r, char *out, size_t cap,
