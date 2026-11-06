@@ -1,3 +1,0 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Source-owned capability declaration for the FlySync island-anchor fact. */
-ZCL_MODULE_CAPABILITY("engine/services/src/island_anchor.c", CAP_FS_READ|CAP_FS_WRITE, "reads and writes two progress_meta rows in the node's own progress store; no other file")
