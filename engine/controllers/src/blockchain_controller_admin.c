@@ -18,6 +18,7 @@
 #include "models/database.h"
 #include "models/wallet_tx.h"
 #include "services/chain_state_service.h"
+#include "services/node_db_import_service.h"
 #include "storage/coins_db.h"
 #include "util/log_macros.h"
 #include "validation/main_state.h"
@@ -56,18 +57,20 @@ static bool importchainstate_best_block_indexed(
     return ldb_tip && ldb_tip->phashBlock;
 }
 
-static int importchainstate_import_utxo_set(struct node_db *node_db,
-                                            struct coins_view_db *ext_db)
+/* *count is the imported rows; on failure the result carries the importer's reason. */
+static struct zcl_result importchainstate_import_utxo_set(
+    struct node_db *node_db, struct coins_view_db *ext_db, int *count)
 {
     struct node_db import_db;
     struct node_db *import_target = node_db;
     if (node_db_sync_open_private_db_like(node_db, &import_db))
         import_target = &import_db;
 
-    int count = node_db_sync_import_utxos(import_target, ext_db);
+    struct zcl_result r = node_db_import_service_run(import_target, ext_db,
+                                                     count);
     if (import_target == &import_db)
         node_db_close(&import_db);
-    return count;
+    return r;
 }
 
 static void importchainstate_fix_zero_heights(struct node_db *node_db)
@@ -176,12 +179,15 @@ bool rpc_importchainstate(const struct json_value *params, bool help,
                  "importchainstate: best block missing from block index");
     }
 
-    int count = importchainstate_import_utxo_set(ctx->node_db, &ext_db);
+    int count = -1;
+    struct zcl_result imported = importchainstate_import_utxo_set(
+        ctx->node_db, &ext_db, &count);
     coins_view_db_close(&ext_db);
 
-    if (count < 0) {
-        json_set_str(result, "Import failed");
-        LOG_FAIL("blockchain", "importchainstate: UTXO import failed (count=%d)", count);
+    if (!imported.ok) {
+        json_set_str(result, imported.message);
+        LOG_FAIL("blockchain", "importchainstate: UTXO import failed: %s",
+                 imported.message);
     }
 
     importchainstate_fix_zero_heights(ctx->node_db);
