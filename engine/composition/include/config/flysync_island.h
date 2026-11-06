@@ -47,7 +47,12 @@ struct uint256;
 /* Bounds. The offer wait itself is the state-offer store's STATE_OFFER_WAIT_MS. */
 #define FLYSYNC_WALK_TIMEOUT_MS     INT64_C(300000)   /* window walk */
 #define FLYSYNC_INSTALL_TIMEOUT_MS  INT64_C(1800000)  /* seeded -> installed */
+#define FLYSYNC_FETCH_TIMEOUT_MS    INT64_C(1800000)  /* chosen offer -> staged */
 #define FLYSYNC_WALK_ATTEMPTS       3
+/* The whole hold (WAIT, WALK, SEEDED) across restarts, from the durable
+ * "flysync.hold_since": fetch, walk and an install with its respawns fit well
+ * inside it; a crash loop cannot stretch it. */
+#define FLYSYNC_HOLD_BOUND_S        INT64_C(10800)
 
 enum flysync_phase {
     FLYSYNC_OFF = 0,
@@ -112,8 +117,15 @@ bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
 
 /* After the block index loads on a registered island: the rung row must be in
  * the index, link down to the root, and carry the compiled rung chainwork.
- * Otherwise the island falls back. Returns true when the island stands. */
+ * Otherwise a SEEDED island falls back; an INSTALLED one never does (it logs
+ * the damage and keeps its registration). Returns true when the island stands. */
 bool flysync_island_boot_reconcile(struct main_state *ms);
+
+/* Detach a fallen-back island (see flysync_island.c): every row rooted at the
+ * fact's root, while that root has no parent, loses its parent and work, and
+ * the best header moves to the best remaining entry. Returns rows detached. */
+size_t flysync_island_detach(struct main_state *ms,
+                             const struct island_anchor *a);
 
 #ifdef ZCL_TESTING
 typedef bool (*flysync_frozen_verify_fn)(const struct uint256 *hash,
@@ -121,6 +133,10 @@ typedef bool (*flysync_frozen_verify_fn)(const struct uint256 *hash,
 void flysync_island_test_set_frozen_verifier(flysync_frozen_verify_fn fn);
 void flysync_island_test_reset(void);
 void flysync_island_test_set_clock_ms(int64_t now_ms);
+/* Hold the tick as if another thread were inside it (single-entry proof). */
+void flysync_island_test_hold_tick(bool held);
+/* Restarts a fall-back requested (counted instead of shutting down). */
+int flysync_island_test_respawns(void);
 /* Replace the compiled rung ladder with one rung (NULL restores it). */
 struct rom_state_rung;
 void flysync_island_test_set_rung(const struct rom_state_rung *rung);

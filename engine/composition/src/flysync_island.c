@@ -26,10 +26,13 @@
 #include "primitives/block.h"
 #include "services/block_row_verify.h"
 #include "services/chain_state_service.h"
+#include "services/chain_tip_watchdog.h"
 #include "services/island_anchor.h"
 #include "services/sync_monitor.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
+#include "util/safe_alloc.h"
+#include "util/thread_registry.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
@@ -42,11 +45,14 @@
 
 static _Atomic bool g_requested = false;
 static _Atomic int g_phase = FLYSYNC_OFF;
-static int64_t g_phase_since_ms;        /* tick thread only */
-static int g_walk_attempts;             /* tick thread only */
+/* The tick runs from two swarm call sites; g_tick_busy admits one at a time. */
+static _Atomic int64_t g_phase_since_ms;
+static _Atomic int g_walk_attempts;
+static _Atomic bool g_tick_busy = false;
 static _Atomic uint64_t g_window_headers_seeded;
 
 #ifdef ZCL_TESTING
+static _Atomic int g_test_respawns = 0;
 static _Atomic(flysync_frozen_verify_fn) g_test_verify;
 static _Atomic int64_t g_test_now_ms = -1;
 static struct rom_state_rung g_test_rung;
@@ -71,10 +77,21 @@ static int64_t fsi_now_ms(void)
     return platform_time_monotonic_ms();
 }
 
+/* Wall-clock seconds for the durable hold bound (the test clock when set). */
+static int64_t fsi_wall_s(void)
+{
+#ifdef ZCL_TESTING
+    int64_t t = atomic_load(&g_test_now_ms);
+    if (t >= 0)
+        return t / 1000;
+#endif
+    return platform_time_wall_unix();
+}
+
 static void fsi_set_phase(enum flysync_phase p)
 {
     enum flysync_phase was = (enum flysync_phase)atomic_exchange(&g_phase, p);
-    g_phase_since_ms = fsi_now_ms();
+    atomic_store(&g_phase_since_ms, fsi_now_ms());
     if (was != p)
         LOG_INFO(FSI_SUBSYS, "FlySync phase %s -> %s", flysync_phase_name(was),
                  flysync_phase_name(p));
@@ -293,6 +310,140 @@ static void fsi_note_fallback(const char *why)
         LOG_ERROR(FSI_SUBSYS, "%s", r.message);
 }
 
+static bool fsi_note_installed(void)
+{
+    struct zcl_result r = island_anchor_note_installed(progress_store_db());
+    if (!r.ok)
+        LOG_ERROR(FSI_SUBSYS, "%s", r.message);
+    return r.ok;
+}
+
+static void fsi_fall_back_at(struct main_state *ms, const char *why,
+                             bool respawn);
+
+/* ── Detaching a fallen-back island ──────────────────────────────────────────
+ * After a fall-back the island rows are real headers whose root has no parent
+ * here, and they carry the rung's chainwork: left alone they would stay the
+ * best header and steer header sync above the rung, where normal sync can
+ * fetch no block. So every row rooted at the island (the window and anything
+ * above it) is detached: no parent, no skip, no work. Best-header selection
+ * then passes over it, and when normal sync re-delivers these headers from
+ * their real parent, accept_block_header's known-header relink sets each
+ * parent and derives its work, so the rows rejoin the chain as ordinary
+ * headers. Keyed on the durable fact: exactly its root hash at its root
+ * height, still without a parent. It runs at the fall-back and again at every
+ * boot whose durable state is FELL_BACK (the loader relinks the rows from
+ * their durable records), so a crash between the durable FELL_BACK and the
+ * detach is repaired by the next boot. Idempotent. */
+struct fsi_rows {
+    struct block_index **v;
+    size_t n, cap;
+};
+
+static bool fsi_rows_push(struct fsi_rows *r, struct block_index *bi)
+{
+    if (r->n == r->cap) {
+        size_t cap = r->cap ? r->cap * 2 : 64;
+        struct block_index **v =
+            zcl_realloc(r->v, cap * sizeof(*v), "flysync_detach_rows");
+        if (!v)
+            return false;
+        r->v = v;
+        r->cap = cap;
+    }
+    r->v[r->n++] = bi;
+    return true;
+}
+
+static bool fsi_collect_island(struct main_state *ms, struct block_index *root,
+                               struct fsi_rows *rows)
+{
+    size_t it = 0;
+    struct block_index *bi = NULL;
+    while (block_map_next(&ms->map_block_index, &it, NULL, &bi)) {
+        if (bi && bi->nHeight >= root->nHeight &&
+            block_index_get_ancestor(bi, root->nHeight) == root &&
+            !fsi_rows_push(rows, bi))
+            return false;
+    }
+    return true;
+}
+
+/* The most-work entry that still has work, else the active tip. */
+static struct block_index *fsi_best_remaining(struct main_state *ms)
+{
+    struct block_index *best = active_chain_tip(&ms->chain_active);
+    size_t it = 0;
+    struct block_index *bi = NULL;
+    while (block_map_next(&ms->map_block_index, &it, NULL, &bi)) {
+        if (!bi || arith_uint256_is_zero(&bi->nChainWork))
+            continue;
+        if (!best || arith_uint256_compare(&bi->nChainWork,
+                                           &best->nChainWork) > 0)
+            best = bi;
+    }
+    return best;
+}
+
+static void fsi_reset_best_header(struct main_state *ms)
+{
+    struct block_index *cur = ms->pindex_best_header;
+    if (cur && !arith_uint256_is_zero(&cur->nChainWork))
+        return;
+    struct block_index *best = fsi_best_remaining(ms);
+    if (!best)
+        return;
+    struct chain_state_rollback_authorization auth = {
+        .source = CSR_ROLLBACK_SOURCE_HEADER_SYNC,
+        .decision = POLICY_ALLOW,
+        .from_height = cur ? cur->nHeight : -1,
+        .to_height = best->nHeight,
+        .max_depth = INT64_MAX,
+        .evidence_class = "flysync_island_fallback",
+        .reason = "the fallen-back island is not a chain to sync from",
+    };
+    struct chain_state_header_commit commit = {
+        .new_header_tip = best,
+        .rollback_auth = &auth,
+        .reason = "flysync_island_fallback",
+    };
+    enum csr_result rc = csr_commit_header_tip(csr_instance(), &commit);
+    if (rc != CSR_OK)
+        LOG_ERROR(FSI_SUBSYS, "best header not moved off the fallen-back "
+                  "island (h=%d -> h=%d): %s", cur ? cur->nHeight : -1,
+                  best->nHeight, csr_result_name(rc));
+}
+
+size_t flysync_island_detach(struct main_state *ms,
+                             const struct island_anchor *a)
+{
+    if (!ms || !a)
+        return 0;
+    struct uint256 root_hash = a->root_hash;
+    zcl_mutex_lock(&ms->cs_main);
+    struct block_index *root = block_map_find(&ms->map_block_index, &root_hash);
+    struct fsi_rows rows = {0};
+    bool island = root && root->nHeight == a->root_height && !root->pprev;
+    bool listed = island && fsi_collect_island(ms, root, &rows);
+    for (size_t i = 0; listed && i < rows.n; i++) {
+        rows.v[i]->pprev = NULL;
+        rows.v[i]->pskip = NULL;
+        arith_uint256_set_zero(&rows.v[i]->nChainWork);
+    }
+    zcl_mutex_unlock(&ms->cs_main);
+    if (listed)
+        fsi_reset_best_header(ms);
+    if (island && !listed)
+        LOG_ERROR(FSI_SUBSYS, "fallen-back island rows not detached: out of "
+                  "memory listing them");
+    else if (listed)
+        LOG_WARN(FSI_SUBSYS, "fallen-back island detached: %zu rows from h=%d "
+                 "no longer steer header sync; they rejoin when normal sync "
+                 "reaches their parent", rows.n, (int)a->root_height);
+    free(rows.v);
+    return listed ? rows.n : 0;
+}
+
 bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
                          int n, const struct island_anchor *a)
 {
@@ -312,10 +463,9 @@ bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
     struct block_index *top = fsi_insert_window(ms, w, n, a);
     zcl_mutex_unlock(&ms->cs_main);
     if (!top || !fsi_work_matches_rung(top, a)) {
-        LOG_WARN(FSI_SUBSYS, "island seed refused: %s",
+        LOG_WARN(FSI_SUBSYS, "island seed refused: %s (the caller falls "
+                 "back and detaches the rows)",
                  top ? "rung chainwork mismatch" : "insert failed");
-        fsi_note_fallback(
-            "the verified window could not be seeded");
         return false;
     }
     bool promoted = false;
@@ -330,8 +480,9 @@ bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
                  (int)a->rung_height);
     atomic_store(&g_window_headers_seeded, (uint64_t)n);
     LOG_WARN(FSI_SUBSYS,
-             "FlySync island seeded: %d verified headers h=%d..%d hash-linked "
-             "to the compiled rung, chainwork equals the compiled rung", n,
+             "FlySync island seeded: %d headers h=%d..%d, each passing PoW and "
+             "Equihash, hash-linked down from the compiled rung hash (root "
+             "work is set from the compiled rung chainwork)", n,
              (int)a->root_height, (int)a->rung_height);
     return true;
 }
@@ -352,6 +503,9 @@ static const char *fsi_datadir(void)
     return g_datadir[0] ? g_datadir : agent_runtime_context_datadir();
 }
 
+static bool fsi_gate_fresh(sqlite3 *db, struct main_state *ms, char *why,
+                           size_t why_cap);
+
 bool flysync_island_boot_gate(const char *datadir, struct main_state *ms,
                               char *why, size_t why_cap)
 {
@@ -361,8 +515,13 @@ bool flysync_island_boot_gate(const char *datadir, struct main_state *ms,
     enum island_anchor_state st = island_anchor_state_load(db);
     /* A seeded island continues with or without the flag: a respawn or an app
      * restart may drop -flysync from argv, and the island must still finish. */
-    if (st == ISLAND_ANCHOR_STATE_SEEDED) {
-        bool installed = datadir && boot_consensus_bundle_marker_exists(datadir);
+    if (st == ISLAND_ANCHOR_STATE_SEEDED && datadir &&
+        boot_consensus_bundle_marker_exists(datadir))
+        st = fsi_note_installed() ? ISLAND_ANCHOR_STATE_INSTALLED : st;
+    if (st == ISLAND_ANCHOR_STATE_INSTALLED ||
+        st == ISLAND_ANCHOR_STATE_SEEDED) {
+        bool installed = st == ISLAND_ANCHOR_STATE_INSTALLED ||
+                         (datadir && boot_consensus_bundle_marker_exists(datadir));
         fsi_set_phase(installed ? FLYSYNC_DONE : FLYSYNC_SEEDED);
         return true;
     }
@@ -371,6 +530,23 @@ bool flysync_island_boot_gate(const char *datadir, struct main_state *ms,
     if (st == ISLAND_ANCHOR_STATE_FELL_BACK) {
         LOG_WARN(FSI_SUBSYS, "-flysync: this datadir fell back to normal sync "
                  "earlier; continuing with normal sync");
+        fsi_set_phase(FLYSYNC_FELL_BACK);
+        return true;
+    }
+    return fsi_gate_fresh(db, ms, why, why_cap);
+}
+
+/* -flysync on a datadir that never seeded: start the wait on an empty one;
+ * one that FlySync already held (headers below the rung admitted while it
+ * waited) falls back instead of being refused forever; refuse the rest. */
+static bool fsi_gate_fresh(sqlite3 *db, struct main_state *ms, char *why,
+                           size_t why_cap)
+{
+    if (fsi_datadir_has_chain_state(ms) && island_anchor_hold_recorded(db)) {
+        LOG_WARN(FSI_SUBSYS, "-flysync: FlySync waited on this datadir before "
+                 "and it now holds chain state below the rung; continuing "
+                 "with normal sync");
+        fsi_note_fallback("chain state admitted below the rung while waiting");
         fsi_set_phase(FLYSYNC_FELL_BACK);
         return true;
     }
@@ -422,14 +598,21 @@ bool flysync_island_boot_reconcile(struct main_state *ms)
         return false;
     const char *why = NULL;
     if (fsi_reconcile_walk(ms, &a, &why)) {
-        LOG_INFO(FSI_SUBSYS, "island reloaded: root h=%d .. rung h=%d, "
-                 "chainwork equals the compiled rung", (int)a.root_height,
+        LOG_INFO(FSI_SUBSYS, "island reloaded: the compiled rung hash links "
+                 "down to the recorded root, h=%d .. %d", (int)a.root_height,
                  (int)a.rung_height);
         return true;
     }
+    if (island_anchor_state_load(progress_store_db()) ==
+        ISLAND_ANCHOR_STATE_INSTALLED) {
+        /* Installed state stands on the bundle, not on these rows: keep the
+         * registration the reorg floor and the loader rely on, and say so. */
+        LOG_ERROR(FSI_SUBSYS, "installed island: %s; the island stays "
+                  "registered (no fall-back once installed)", why);
+        return true;
+    }
     LOG_WARN(FSI_SUBSYS, "island does not stand after load: %s", why);
-    fsi_note_fallback(why);
-    fsi_set_phase(FLYSYNC_FELL_BACK);
+    fsi_fall_back_at(ms, why, false);
     return false;
 }
 
@@ -440,18 +623,80 @@ bool flysync_island_boot_reconcile(struct main_state *ms)
  * normal sync gets exactly what a node without -flysync gets. */
 static _Atomic bool g_rearm_keystone_on_fall_back = false;
 
-static void fsi_fall_back(const char *why)
-{
-    checkpoint_header_fetch_disarm();
-    fsi_note_fallback(why);
-    fsi_set_phase(FLYSYNC_FELL_BACK);
-    if (atomic_exchange(&g_rearm_keystone_on_fall_back, false))
-        checkpoint_header_fetch_arm_compiled();
-}
+/* -1 until boot reads the durable hold start (island_anchor_hold_since). */
+static _Atomic int64_t g_hold_since_s = -1;
 
 static struct main_state *fsi_main_state(void)
 {
     return sync_monitor_main_state();
+}
+
+/* A fall-back in the running node ends in a restart: the boot that follows
+ * sees FELL_BACK and runs as a node without -flysync (full-history service
+ * bit, keystone capture, weld and header-seed import, a fresh offer wait),
+ * detaching any island rows the loader brings back. Off systemd main()
+ * re-execs; under systemd the unit restarts it. */
+static void fsi_request_respawn(void)
+{
+    LOG_WARN(FSI_SUBSYS, "FlySync fell back: restarting so normal sync boots "
+             "as a node without -flysync");
+#ifdef ZCL_TESTING
+    atomic_fetch_add(&g_test_respawns, 1);
+#else
+    chain_tip_watchdog_request_respawn();
+    thread_registry_request_shutdown();
+#endif
+}
+
+/* Order: the durable FELL_BACK first, then the in-memory detach, then the
+ * phase (which lifts the hold), then the restart. A crash after the first
+ * step is finished by the next boot's detach (flysync_island_boot_after_index).
+ * The boot-time reconcile calls this before the network starts, so it does
+ * not restart: that boot continues as the fallen-back node. */
+static void fsi_fall_back_at(struct main_state *ms, const char *why,
+                             bool respawn)
+{
+    if (island_anchor_state_load(progress_store_db()) ==
+        ISLAND_ANCHOR_STATE_INSTALLED) {
+        LOG_ERROR(FSI_SUBSYS, "fall-back refused, the rung bundle is "
+                  "installed: %s", why);
+        fsi_set_phase(FLYSYNC_DONE);
+        return;
+    }
+    struct island_anchor a;
+    bool island = island_anchor_get(&a);
+    checkpoint_header_fetch_disarm();
+    fsi_note_fallback(why);
+    if (island && ms)
+        (void)flysync_island_detach(ms, &a);
+    else if (island)
+        LOG_ERROR(FSI_SUBSYS, "fallen-back island not detached in process (no "
+                  "main state); the next boot detaches it");
+    fsi_set_phase(FLYSYNC_FELL_BACK);
+    if (atomic_exchange(&g_rearm_keystone_on_fall_back, false))
+        checkpoint_header_fetch_arm_compiled();
+    if (respawn)
+        fsi_request_respawn();
+}
+
+static void fsi_fall_back(const char *why)
+{
+    fsi_fall_back_at(fsi_main_state(), why, true);
+}
+
+static void fsi_tick_wait_offers(int64_t now)
+{
+    struct state_offer_store_status st;
+    state_offer_store_status_get(&st);
+    if (st.last_decision == STATE_OFFER_DECIDE_FALL_BACK)
+        fsi_fall_back("no acceptable rung offer inside the state-offer wait");
+    else if (st.wait_armed && st.chosen_height == 0 &&
+             now - st.wait_started_ms >= STATE_OFFER_WAIT_MS + 30000)
+        fsi_fall_back("no rung offer chosen inside the state-offer wait");
+    else if (st.chosen_height != 0 &&
+             now - atomic_load(&g_phase_since_ms) >= FLYSYNC_FETCH_TIMEOUT_MS)
+        fsi_fall_back("the chosen rung offer was not fetched and staged "
+                      "within its bound");
 }
 
 static void fsi_tick_wait(int64_t now)
@@ -463,24 +708,20 @@ static void fsi_tick_wait(int64_t now)
         uint8_t hash[32];
         bool ok = boot_staged_bundle_wait_target(bundle, &h, hash);
         free(bundle);
-        if (!ok || !fsi_rung_at(h)) {
-            fsi_fall_back("the staged bundle is not at a baked ladder rung");
+        const struct rom_state_rung *rung = ok ? fsi_rung_at(h) : NULL;
+        if (!rung || memcmp(hash, rung->cp.block_hash, 32) != 0) {
+            fsi_fall_back("the staged bundle is not at a baked ladder rung "
+                          "with the compiled rung hash");
             return;
         }
-        struct uint256 top;
-        memcpy(top.data, hash, 32);
+        struct uint256 top;   /* the walk starts from the compiled hash */
+        memcpy(top.data, rung->cp.block_hash, 32);
         checkpoint_header_fetch_arm_window(h, &top, ISLAND_ANCHOR_WINDOW);
-        g_walk_attempts++;
+        atomic_fetch_add(&g_walk_attempts, 1);
         fsi_set_phase(FLYSYNC_WALK);
         return;
     }
-    struct state_offer_store_status st;
-    state_offer_store_status_get(&st);
-    if (st.last_decision == STATE_OFFER_DECIDE_FALL_BACK)
-        fsi_fall_back("no acceptable rung offer inside the state-offer wait");
-    else if (st.wait_armed && st.chosen_height == 0 &&
-             now - st.wait_started_ms >= STATE_OFFER_WAIT_MS + 30000)
-        fsi_fall_back("no rung offer chosen inside the state-offer wait");
+    fsi_tick_wait_offers(now);
 }
 
 static void fsi_tick_walk(int64_t now)
@@ -500,15 +741,16 @@ static void fsi_tick_walk(int64_t now)
                 fsi_fall_back("the verified header window could not be seeded");
             return;
         }
+        int attempts = atomic_load(&g_walk_attempts);
         LOG_WARN(FSI_SUBSYS, "header window refused (attempt %d/%d): %s",
-                 g_walk_attempts, FLYSYNC_WALK_ATTEMPTS, why);
-        if (g_walk_attempts >= FLYSYNC_WALK_ATTEMPTS)
+                 attempts, FLYSYNC_WALK_ATTEMPTS, why);
+        if (attempts >= FLYSYNC_WALK_ATTEMPTS)
             fsi_fall_back("the header window failed verification");
         else
             fsi_set_phase(FLYSYNC_WAIT);   /* re-arms from the staged bundle */
         return;
     }
-    if (now - g_phase_since_ms >= FLYSYNC_WALK_TIMEOUT_MS)
+    if (now - atomic_load(&g_phase_since_ms) >= FLYSYNC_WALK_TIMEOUT_MS)
         fsi_fall_back("the header window walk timed out (no peer served "
                       "the rung window)");
 }
@@ -517,6 +759,7 @@ static void fsi_tick_seeded(int64_t now)
 {
     const char *datadir = fsi_datadir();
     if (datadir && boot_consensus_bundle_marker_exists(datadir)) {
+        (void)fsi_note_installed();
         fsi_set_phase(FLYSYNC_DONE);
         LOG_WARN(FSI_SUBSYS, "FlySync: rung bundle installed; header sync "
                  "continues from the rung");
@@ -530,7 +773,7 @@ static void fsi_tick_seeded(int64_t now)
     else if (!staged)
         fsi_fall_back("the rung bundle is no longer installable (failed or "
                       "removed)");
-    else if (now - g_phase_since_ms >= FLYSYNC_INSTALL_TIMEOUT_MS)
+    else if (now - atomic_load(&g_phase_since_ms) >= FLYSYNC_INSTALL_TIMEOUT_MS)
         fsi_fall_back("the rung bundle did not install within its bound");
 }
 
@@ -542,6 +785,41 @@ bool flysync_island_wants_offer_height(int32_t height)
     if (p != FLYSYNC_WAIT && p != FLYSYNC_WALK && p != FLYSYNC_SEEDED)
         return true;
     return fsi_rung_at(height) != NULL;
+}
+
+/* Every boot whose durable state is FELL_BACK: the loader relinked the island
+ * rows from their durable records; detach them again until normal sync gives
+ * the root its parent (then the root has one and nothing is detached). With
+ * no fact (a fall-back before seeding) there is nothing to detach. */
+static void fsi_boot_detach_fallen_back(struct main_state *ms)
+{
+    sqlite3 *db = progress_store_db();
+    if (!ms || island_anchor_state_load(db) != ISLAND_ANCHOR_STATE_FELL_BACK)
+        return;
+    struct island_anchor a;
+    bool found = false;
+    if (!island_anchor_load(db, &a, &found) || !found)
+        return;
+    struct block_index *root = block_map_find(&ms->map_block_index,
+                                              &a.root_hash);
+    if (root && root->pprev) {
+        struct zcl_result r = island_anchor_retire(db);
+        if (!r.ok)
+            LOG_ERROR(FSI_SUBSYS, "%s", r.message);
+        return;
+    }
+    (void)flysync_island_detach(ms, &a);
+}
+
+static void fsi_boot_note_hold_start(void)
+{
+    int64_t since = -1;
+    struct zcl_result r =
+        island_anchor_hold_since(progress_store_db(), fsi_wall_s(), &since);
+    if (!r.ok)
+        LOG_ERROR(FSI_SUBSYS, "%s; the hold bound counts from this boot",
+                  r.message);
+    atomic_store(&g_hold_since_s, since);
 }
 
 void flysync_island_boot_register(void)
@@ -566,7 +844,10 @@ bool flysync_island_boot_after_index(struct app_context *ctx,
     }
     if (island_anchor_registered())
         (void)flysync_island_boot_reconcile(ms);
+    fsi_boot_detach_fallen_back(ms);
     enum flysync_phase p = flysync_island_phase();
+    if (flysync_island_holds_header_sync())
+        fsi_boot_note_hold_start();
     if (p != FLYSYNC_OFF && p != FLYSYNC_FELL_BACK) {
         msg_processor_set_header_sync_hold(flysync_island_holds_header_sync);
         state_offer_store_set_height_filter(flysync_island_wants_offer_height);
@@ -583,17 +864,32 @@ bool flysync_island_boot_after_index(struct app_context *ctx,
     return true;
 }
 
+/* The whole hold, across restarts, from the durable start. */
+static bool fsi_hold_expired(void)
+{
+    int64_t since = atomic_load(&g_hold_since_s);
+    return since >= 0 && flysync_island_holds_header_sync() &&
+           fsi_wall_s() - since >= FLYSYNC_HOLD_BOUND_S;
+}
+
 void flysync_island_tick(void)
 {
     if (atomic_load(&g_phase) == FLYSYNC_OFF)
         return;
+    bool idle = false;
+    if (!atomic_compare_exchange_strong(&g_tick_busy, &idle, true))
+        return;   /* the other swarm call site is inside the tick */
     int64_t now = fsi_now_ms();
+    if (fsi_hold_expired())
+        fsi_fall_back("FlySync held header sync longer than its bound "
+                      "(counted across restarts)");
     switch ((enum flysync_phase)atomic_load(&g_phase)) {
     case FLYSYNC_WAIT:   fsi_tick_wait(now);   break;
     case FLYSYNC_WALK:   fsi_tick_walk(now);   break;
     case FLYSYNC_SEEDED: fsi_tick_seeded(now); break;
     default: break;
     }
+    atomic_store(&g_tick_busy, false);
 }
 
 #ifdef ZCL_TESTING
@@ -610,14 +906,27 @@ void flysync_island_test_reset(void)
     atomic_store(&g_test_now_ms, -1);
     atomic_store(&g_test_rung_set, false);
     g_datadir[0] = '\0';
-    g_walk_attempts = 0;
-    g_phase_since_ms = 0;
+    atomic_store(&g_walk_attempts, 0);
+    atomic_store(&g_phase_since_ms, 0);
+    atomic_store(&g_hold_since_s, -1);
+    atomic_store(&g_tick_busy, false);
+    atomic_store(&g_test_respawns, 0);
     island_anchor_unregister();
 }
 
 void flysync_island_test_set_clock_ms(int64_t now_ms)
 {
     atomic_store(&g_test_now_ms, now_ms);
+}
+
+void flysync_island_test_hold_tick(bool held)
+{
+    atomic_store(&g_tick_busy, held);
+}
+
+int flysync_island_test_respawns(void)
+{
+    return atomic_load(&g_test_respawns);
 }
 #endif
 

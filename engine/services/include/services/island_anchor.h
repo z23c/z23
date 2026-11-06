@@ -55,6 +55,7 @@ enum island_anchor_state {
     ISLAND_ANCHOR_STATE_NONE = 0,    /* never a FlySync datadir */
     ISLAND_ANCHOR_STATE_SEEDED,      /* window seeded; fact is authoritative */
     ISLAND_ANCHOR_STATE_FELL_BACK,   /* gave up; normal sync owns the node */
+    ISLAND_ANCHOR_STATE_INSTALLED,   /* rung bundle installed; never falls back */
 };
 
 /* In-process registration. register() refuses a malformed fact. */
@@ -79,18 +80,37 @@ bool island_anchor_refuses_fork_at(int32_t fork_height);
 void island_anchor_work_from_be(struct arith_uint256 *out,
                                 const uint8_t be[32]);
 
-/* Durable fact. save() writes the fact, then state SEEDED; a fact found
- * without its state reads as SEEDED (an interrupted save). */
+/* Durable fact. save() commits the fact and state SEEDED in one transaction;
+ * a fact without a state reads as NONE. After a fall-back the fact stays until
+ * its rows rejoin the chain (the boot detach needs the exact root). */
 struct zcl_result island_anchor_save(struct sqlite3 *db,
                                      const struct island_anchor *a);
 bool island_anchor_load(struct sqlite3 *db, struct island_anchor *out,
                         bool *found);
 enum island_anchor_state island_anchor_state_load(struct sqlite3 *db);
-/* Record the fall-back durably and drop the in-process registration. */
+/* Record the fall-back durably and drop the in-process registration. Refused
+ * (error, registration kept) once the state is INSTALLED: an installed island
+ * stands on its state, and a damaged row never turns it back into a fall-back. */
 struct zcl_result island_anchor_note_fallback(struct sqlite3 *db,
                                               const char *why);
 
-/* Boot: register the durable fact when the state is SEEDED. Returns true when
+/* A fallen-back island whose rows rejoined the chain (the root has its real
+ * parent): delete the fact; nothing is left to detach. */
+struct zcl_result island_anchor_retire(struct sqlite3 *db);
+
+/* Record that the rung bundle installed (SEEDED -> INSTALLED, idempotent). */
+struct zcl_result island_anchor_note_installed(struct sqlite3 *db);
+
+/* The wall-clock second this datadir first held header sync for FlySync
+ * (progress_meta "flysync.hold_since"), written once on first call; later
+ * calls return the stored value, so a crash loop never restarts the bound.
+ * hold_recorded() reads only: true once FlySync ever held this datadir. */
+bool island_anchor_hold_recorded(struct sqlite3 *db);
+struct zcl_result island_anchor_hold_since(struct sqlite3 *db, int64_t now_s,
+                                           int64_t *since_s);
+
+/* Boot: register the durable fact when the state is SEEDED or INSTALLED.
+ * Returns true when
  * a fact was registered. Call after the progress store opens and before the
  * block index loads (the loader's work pass reads the registration). */
 bool island_anchor_boot_register(struct sqlite3 *db);
