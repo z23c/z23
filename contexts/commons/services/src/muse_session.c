@@ -312,6 +312,8 @@ static bool ms_raw_id_number(const char **pp, char *out, size_t cap,
     while (((*p >= '0' && *p <= '9') || *p == '-') && n + 1 < cap)
         out[n++] = *p++;
     if (n == 0) return false;
+    /* More digits remain: the id did not fit, never answer with a prefix. */
+    if ((*p >= '0' && *p <= '9') || *p == '-') return false;
     *pp = p;
     *np = n;
     return true;
