@@ -170,8 +170,8 @@ void tx_mempool_query_hashes(struct tx_mempool *pool,
  * empty) that the caller frees with transaction_free per element and free();
  * on failure both are cleared and the pool is unchanged. The lock is held for
  * at most TX_MEMPOOL_SNAPSHOT_CHUNK copies at a time and never across the
- * array allocation; a removal between chunks can make a transaction missing
- * from the copy, never repeated. */
+ * array allocation; a removal or re-add between chunks can make a transaction
+ * missing from the copy or appear in it twice. */
 bool tx_mempool_snapshot_txs(struct tx_mempool *pool,
                              struct transaction **out, size_t *num_out);
 

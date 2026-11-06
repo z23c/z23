@@ -595,8 +595,10 @@ bool tx_mempool_snapshot_txs(struct tx_mempool *pool,
 
     /* Copied in chunks so validation never waits on the whole pool: the lock
      * is dropped between chunks. A removal in between swaps the last entry
-     * into the freed slot, so a transaction can be missed but never read
-     * twice, which a reconstruction treats like any transaction not held. */
+     * into the freed slot, and a transaction removed and added again lands at
+     * the end, so a transaction can be missing or repeated. A reconstruction
+     * treats a missing one like any transaction not held, and a repeat adds
+     * nothing. */
     size_t n = 0;
     bool ok = true;
     while (ok && n < cap) {
@@ -617,11 +619,11 @@ bool tx_mempool_snapshot_txs(struct tx_mempool *pool,
             break;
     }
 
-    if (!ok) {
+    if (!ok || n == 0) {
         for (size_t i = 0; i < n; i++)
             transaction_free(&txs[i]);
         free(txs);
-        return false;
+        return ok; /* an emptied pool is success with no array */
     }
     *out = txs;
     *num_out = n;

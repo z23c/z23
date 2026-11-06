@@ -1027,3 +1027,7 @@ later lane flips it HARD.
 - 2026-11-06T02:33:03Z — REASON: Floor the compact fallback history check at the provable frontier
   old ROOT: cba5628f8714b3093ad772ee44ff26343e4a6410307a123df8ce162365b541da
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T02:33:20Z — REASON: Correct the mempool snapshot comments and return no array when it is empty
+  old ROOT: db87d45a4941e40e4969a1b0e6b6d0b1d5b9ff6bc6a7d4983712b7b278b75688
+  by: owner unseal ritual (make core-unseal)
