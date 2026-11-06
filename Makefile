@@ -366,10 +366,11 @@ ZCL_GENERATED_HEADER_GOALS := contexts/wallet/views/include/views/wallet_templat
 	build/identity/gen-stamps/native_tunnel_export_binding.stamp
 ZCL_GENERATED_HEADER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_GENERATED_HEADER_GOALS),$(MAKECMDGOALS))),,1),)
 
-# These exact goals build standalone C23 checker tools. They consume no node
+# These exact goals build standalone C23 checkers or list game inputs. They consume no node
 # objects, vendor archives, generated view headers, or compile epoch. Mixed
 # goals keep the full parse; the inventory lint still runs its complete census.
-ZCL_INVENTORY_LINT_ONLY := $(if $(filter check-capability-inventory-generated docs-proof-tools,$(MAKECMDGOALS)),$(if $(filter-out check-capability-inventory-generated docs-proof-tools,$(MAKECMDGOALS)),,1),)
+ZCL_INVENTORY_LINT_ONLY := $(if $(filter check-capability-inventory-generated docs-proof-tools print-game-closure,$(MAKECMDGOALS)),$(if $(filter-out check-capability-inventory-generated docs-proof-tools print-game-closure,$(MAKECMDGOALS)),,1),)
+ZCL_GAME_INPUT_QUERY_ONLY := $(if $(filter print-game-closure,$(MAKECMDGOALS)),$(if $(filter-out print-game-closure,$(MAKECMDGOALS)),,1),)
 
 # The module recipes compile one TU (or declared island) directly with $(CC),
 # never through make's %.o pattern rules. t-hotswap runs an already-linked
@@ -412,9 +413,11 @@ ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_HOTSWAP_LOOP_ONLY),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
+ifneq ($(ZCL_GAME_INPUT_QUERY_ONLY),1)
 ZCL_TOOLCHAIN_RC := $(shell CC="$(CC)" tools/dev/check-toolchain.sh >/dev/null; printf '%s' $$?)
 ifneq ($(ZCL_TOOLCHAIN_RC),0)
 $(error C23 toolchain check failed — this project requires gcc 14 or newer)
+endif
 endif
 endif
 endif
@@ -468,10 +471,10 @@ VENDOR_REPAIR_REQUESTED := $(filter $(VENDOR_REPAIR_GOALS),$(MAKECMDGOALS))
 ZCL_WINDOWS_LAUNCHER_GOALS := windows-headless-run windows-headless-run-selftest \
 	build/bin/z23-headless-run.exe
 # Build queries and game-only goals need no node vendor configure.
-ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs help doctor doctor-env doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
+ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs print-game-closure help doctor doctor-env doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
 # Receipt hooks use in-tree C23 and system libraries, never node archives.
 ZCL_GIT_HOOK_GOALS := git-hook git-hook-selftest install-hooks
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client,$(MAKECMDGOALS))),,1),)
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint,$(MAKECMDGOALS))),,1),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -1723,7 +1726,7 @@ TOR_MISSING_ARCHIVES := $(filter-out $(wildcard $(TOR_ARCHIVE_PATHS)),$(TOR_ARCH
 ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready c3-mutex-probe c3-speed-bench c3-tip-seam build/bin/c3-mutex-probe.so \
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
 	worktree-prime-selftest $(ZCL_GIT_HOOK_GOALS) setup \
-	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe skycombat-agent-client \
+	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint \
 	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS)
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
 	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
@@ -3028,11 +3031,11 @@ Z23RAYLIB_CPPFLAGS := -DPLATFORM_DESKTOP_RGFW -DGRAPHICS_API_OPENGL_33 \
 	-DSUPPORT_IMAGE_EXPORT=0 -DSUPPORT_SCREEN_CAPTURE=0 \
 	-DSUPPORT_MESH_GENERATION=0 -DSUPPORT_COMPRESSION_API=0 \
 	-I$(Z23RAYLIB_DIR)/src
-Z23RAYLIB_CFLAGS := -std=$(ZCL_C_STD) -O2 -Wall -Wextra $(Z23RAYLIB_CPPFLAGS)
+Z23RAYLIB_CFLAGS := -std=$(ZCL_C_STD) -O2 -Wall -Wextra $(REPRO_CFLAGS) $(Z23RAYLIB_CPPFLAGS)
 
 # RAYMATH_USE_SIMD_INTRINSICS is the one raymath.h knob the game's own -Wundef
 # would trip over, so it is spelled out rather than left undefined.
-SKYCOMBAT_CFLAGS := -std=$(ZCL_C_STD) -O2 -Wall -Wextra -Werror -pedantic \
+SKYCOMBAT_CFLAGS := -std=$(ZCL_C_STD) -O2 -Wall -Wextra -Werror -pedantic $(REPRO_CFLAGS) \
 	$(filter-out -Wdouble-promotion,$(ZCL_WARN_EXTRA_GATES)) \
 	$(ZCL_WARN_STRINGOP_OVERFLOW) -D_POSIX_C_SOURCE=200809L \
 	$(ZCL_PLATFORM_CPPFLAGS) \
@@ -3072,6 +3075,8 @@ SKYCOMBAT_OBJS := $(patsubst $(SKYCOMBAT_DIR)/%.c,$(SKYCOMBAT_OBJ_DIR)/%.o,$(SKY
 SKYCOMBAT_GAME_MAIN := $(SKYCOMBAT_DIR)/src/sky_combat_multiplayer_ultimate.c
 SKYCOMBAT_GAME_SRCS := $(SKYCOMBAT_GAME_MAIN) \
 	$(SKYCOMBAT_DIR)/src/agent_session.c \
+	$(SKYCOMBAT_DIR)/src/agent_resident.c \
+	$(SKYCOMBAT_DIR)/src/game_runtime.c \
 	$(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) \
 	$(SKYCOMBAT_DIR)/src/controllers/input_controller_fast.c \
 	$(SKYCOMBAT_DIR)/src/controllers/input_mvc_fast.c \
@@ -3100,7 +3105,7 @@ SKYCOMBAT_SIM_FP_FLAGS := -ffp-contract=off -DRAYMATH_STATIC_INLINE
 # The real game still probes its platform before compiling raylib and views.
 $(SKYCOMBAT_SIM_OBJS): $(SKYCOMBAT_OBJ_DIR)/%.o: $(SKYCOMBAT_DIR)/%.c Makefile
 	@mkdir -p $(dir $@)
-	$(CC) $(SKYCOMBAT_CFLAGS) $(SKYCOMBAT_SIM_FP_FLAGS) -c $< -o $@
+	$(CC) $(SKYCOMBAT_CFLAGS) $(SKYCOMBAT_SIM_FP_FLAGS) -MMD -MP -c $< -o $@
 
 SKYCOMBAT_FP_CONTRACT_BIN := $(BIN_DIR)/skycombat-fp-contract
 $(SKYCOMBAT_FP_CONTRACT_BIN): tools/dev/fixtures/skycombat/fp_contract_rounding.c \
@@ -3112,12 +3117,10 @@ $(SKYCOMBAT_FP_CONTRACT_BIN): tools/dev/fixtures/skycombat/fp_contract_rounding.
 .PHONY: skycombat-fp-contract
 skycombat-fp-contract: $(SKYCOMBAT_FP_CONTRACT_BIN)
 
-# The probe is a FILE target, not just a phony one, and every rendering and
-# raylib object takes it as an order-only prerequisite. Simulation objects
-# remain usable by the headless rounding test. Under `make -j` a phony
-# sibling prerequisite does not stop the other siblings, so a host without the
-# headers used to print the refusal and then keep compiling for a screenful;
-# the stamp keeps missing SDK headers out of rendering compiler diagnostics.
+# The probe is a FILE target, not just a phony one. Only raylib's SDK-using
+# objects take it as an order-only prerequisite; game/support objects consume
+# portable declarations and remain available to headless tests. Under `make -j`
+# the stamp prevents SDK-using objects from starting before a named refusal.
 # FORCE keeps the probe honest on every run without dirtying a single object.
 SKYCOMBAT_PLATFORM_STAMP := $(SKYCOMBAT_OBJ_DIR)/.platform-ok
 
@@ -3133,13 +3136,15 @@ $(SKYCOMBAT_PLATFORM_STAMP): FORCE
 	fi
 	@touch $@
 
-$(Z23RAYLIB_OBJ_DIR)/%.o: $(Z23RAYLIB_DIR)/src/%.c | $(SKYCOMBAT_PLATFORM_STAMP)
+$(Z23RAYLIB_OBJ_DIR)/%.o: $(Z23RAYLIB_DIR)/src/%.c Makefile | $(SKYCOMBAT_PLATFORM_STAMP)
 	@mkdir -p $(dir $@)
-	$(CC) $(Z23RAYLIB_CFLAGS) -c $< -o $@
+	$(CC) $(Z23RAYLIB_CFLAGS) -MMD -MP -c $< -o $@
 
-$(SKYCOMBAT_OBJ_DIR)/%.o: $(SKYCOMBAT_DIR)/%.c | $(SKYCOMBAT_PLATFORM_STAMP)
+# These application TUs consume portable raylib declarations, not SDK headers.
+# Only raylib's platform TUs (above) need the native SDK admission probe.
+$(SKYCOMBAT_OBJ_DIR)/%.o: $(SKYCOMBAT_DIR)/%.c Makefile
 	@mkdir -p $(dir $@)
-	$(CC) $(SKYCOMBAT_CFLAGS) -c $< -o $@
+	$(CC) $(SKYCOMBAT_CFLAGS) -MMD -MP -c $< -o $@
 
 $(Z23RAYLIB_LIB): $(Z23RAYLIB_OBJS)
 	@mkdir -p $(dir $@)
@@ -3160,9 +3165,50 @@ SKYCOMBAT_SUPPORT_SRCS := platform/modules/platform/src/positioned_file.c \
 	contexts/commons/packages/zbase64/src/zbase64.c \
 	contexts/commons/packages/zsha256/src/zsha256.c
 SKYCOMBAT_SUPPORT_OBJS := $(addprefix $(SKYCOMBAT_OBJ_DIR)/support/,$(SKYCOMBAT_SUPPORT_SRCS:.c=.o))
-$(SKYCOMBAT_OBJ_DIR)/support/%.o: %.c | $(SKYCOMBAT_PLATFORM_STAMP)
+$(SKYCOMBAT_OBJ_DIR)/support/%.o: %.c Makefile
 	@mkdir -p $(@D)
-	$(CC) $(SKYCOMBAT_CFLAGS) -c $< -o $@
+	$(CC) $(SKYCOMBAT_CFLAGS) -MMD -MP -c $< -o $@
+
+# Compilation inputs, not a standalone build recipe or a host SDK. Header
+# directories are a conservative export set; translation units retain their
+# existing ordered lists above. Included vendor .c files are inputs, not extra
+# link objects. The default game has no external image/model/font asset files.
+SKYCOMBAT_HEADER_DIRS := $(SKYCOMBAT_DIR)/include/sky_combat \
+	$(addprefix $(SKYCOMBAT_DIR)/include/sky_combat/,controllers models utils views)
+SKYCOMBAT_GAME_HEADERS := $(wildcard $(addsuffix /*.h,$(SKYCOMBAT_HEADER_DIRS))) \
+	$(SKYCOMBAT_DIR)/part/expr_format.h $(SKYCOMBAT_DIR)/part/expr_use.h
+SKYCOMBAT_SUPPORT_HEADERS := platform/modules/base/include/base/safe_alloc.h \
+	platform/modules/base/include/base/cleanse.h platform/modules/base/include/base/hex.h \
+	platform/modules/base/include/base/serialize_le.h platform/modules/base/include/base/result.h \
+	platform/modules/base/include/base/format_attribute.h platform/modules/json/include/json/json.h \
+	platform/modules/platform/include/platform/positioned_file.h \
+	platform/modules/platform/include/platform/windows_path.h \
+	platform/modules/platform/src/windows_path_internal.h \
+	platform/modules/platform/include/platform/resident_launch.h \
+	platform/modules/platform/include/platform/os_sandbox.h \
+	platform/modules/util/include/util/png_writer.h platform/modules/util/include/util/safe_alloc.h \
+	platform/modules/util/include/util/result.h \
+	contexts/commons/packages/zbase64/include/zbase64/zbase64.h \
+	contexts/commons/packages/zsha256/include/zsha256/zsha256.h
+Z23RAYLIB_INCLUDE_INPUTS := $(addprefix $(Z23RAYLIB_DIR)/src/,config.h raylib.h \
+	raymath.h rcamera.h rgestures.h rlgl.h platforms/rcore_desktop_rgfw.c \
+	external/RGFW/RGFW.h external/RGFW/deps/minigamepad.h external/glad.h \
+	external/rprand.h external/stb_image_resize2.h external/stb_perlin.h \
+	external/fix_win32_compatibility.h external/win32_clipboard.h)
+SKYCOMBAT_GAME_CLOSURE = $(sort $(SKYCOMBAT_GAME_SRCS) $(SKYCOMBAT_SUPPORT_SRCS) \
+	$(Z23RAYLIB_SRCS) $(SKYCOMBAT_GAME_HEADERS) $(SKYCOMBAT_SUPPORT_HEADERS) \
+	$(Z23RAYLIB_INCLUDE_INPUTS))
+.PHONY: print-game-closure
+print-game-closure:
+	@set -eu; for input in $(SKYCOMBAT_GAME_CLOSURE); do \
+	  test -f "$$input" || { printf 'game input missing or not regular: %s\n' "$$input" >&2; exit 2; }; \
+	done; printf '%s\n' $(SKYCOMBAT_GAME_CLOSURE)
+
+# Rebuild on real transitive include changes, and retain the compiler's input
+# evidence for closure qualification. Pure queries never read warm depfiles.
+ifeq ($(ZCL_INVENTORY_LINT_ONLY),)
+-include $(SKYCOMBAT_GAME_OBJS:.o=.d) $(SKYCOMBAT_SUPPORT_OBJS:.o=.d) $(Z23RAYLIB_OBJS:.o=.d)
+endif
 
 game: $(SKYCOMBAT_SUPPORT_OBJS) $(SKYCOMBAT_GAME_OBJS) $(Z23RAYLIB_LIB)
 	@mkdir -p $(BIN_DIR)
@@ -3196,19 +3242,41 @@ plugin-skycombat: plugin-skycombat-key game $(Z23_BIN)
 	  --key=$(PLUGIN_KEY) --dir=$(PLUGIN_SKYCOMBAT_DIR)
 	@echo "plugin-skycombat: packed $(PLUGIN_SKYCOMBAT_DIR)/skycombat (not run: plugin run needs ui.panel and GPU access)"
 
+# Actual-model replay reuses the native game objects with their own FP policy;
+# only the included main and renderer/device boundary belong to this fixture.
+SKYCOMBAT_REPLAY_BIN ?= $(BIN_DIR)/skycombat-model-replay
+SKYCOMBAT_REPLAY_SOURCE ?= tests/fixtures/skycombat_qa/replay.c
+SKYCOMBAT_REPLAY_OBJS := $(filter-out $(patsubst $(SKYCOMBAT_DIR)/%.c,$(SKYCOMBAT_OBJ_DIR)/%.o,$(SKYCOMBAT_GAME_MAIN)),$(SKYCOMBAT_GAME_OBJS))
+$(SKYCOMBAT_REPLAY_BIN): $(SKYCOMBAT_REPLAY_SOURCE) $(SKYCOMBAT_GAME_MAIN) Makefile \
+                       $(SKYCOMBAT_REPLAY_OBJS) $(SKYCOMBAT_SUPPORT_OBJS) | $(BIN_DIR)
+	$(CC) $(SKYCOMBAT_CFLAGS) $(SKYCOMBAT_SIM_FP_FLAGS) -I. -MMD -MP -MF $@.d $< \
+	    $(SKYCOMBAT_REPLAY_OBJS) $(SKYCOMBAT_SUPPORT_OBJS) -lm -o $@
+ifeq ($(ZCL_INVENTORY_LINT_ONLY),)
+-include $(SKYCOMBAT_REPLAY_BIN).d
+endif
+.PHONY: skycombat-model-replay
+skycombat-model-replay: $(SKYCOMBAT_REPLAY_BIN) $(BIN_DIR)/z23_bounded_run
+
 # Source-bound QA entrypoint fixture: no window-system headers or GPU needed.
 SKYCOMBAT_QA_BIN := $(BIN_DIR)/skycombat-qa-entrypoint
 $(SKYCOMBAT_QA_BIN): tests/fixtures/skycombat_qa/run.c $(SKYCOMBAT_GAME_MAIN) Makefile \
 	               $(SKYCOMBAT_DIR)/src/agent_session.c \
+	               $(SKYCOMBAT_DIR)/src/agent_resident.c \
+	               $(SKYCOMBAT_DIR)/src/game_runtime.c \
                    $(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) $(wildcard $(SKYCOMBAT_DIR)/part/*.h) \
                    $(SKYCOMBAT_SUPPORT_SRCS) \
                    $(wildcard apps/skycombat/include/sky_combat/*.h) \
                    $(wildcard apps/skycombat/include/sky_combat/*/*.h) | $(BIN_DIR)
 	$(CC) $(SKYCOMBAT_CFLAGS) $(SKYCOMBAT_SIM_FP_FLAGS) $< \
 	    $(SKYCOMBAT_DIR)/src/agent_session.c \
+	    $(SKYCOMBAT_DIR)/src/agent_resident.c \
+	    $(SKYCOMBAT_DIR)/src/game_runtime.c \
 	    $(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) $(SKYCOMBAT_SUPPORT_SRCS) -o $@ -lm
 .PHONY: skycombat-qa-entrypoint
 skycombat-qa-entrypoint: $(SKYCOMBAT_QA_BIN)
+ifeq ($(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),)
+skycombat-qa-entrypoint: $(SKYCOMBAT_REPLAY_BIN) $(BIN_DIR)/z23_bounded_run
+endif
 
 # Explicit real-display client; never launch a GUI from generic harness goals.
 # The fixture includes png_writer.c for checksum controls: do not link it twice.

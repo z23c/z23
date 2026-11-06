@@ -20,6 +20,7 @@
 #define sky_close _close
 #define sky_read _read
 #else
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <unistd.h>
@@ -39,6 +40,45 @@ struct sky_agent_request {
     bool capture;
     input_state_fast_t input;
 };
+
+#if !defined(_WIN32)
+/* Capture every original slot before opening anything: open/dup must never
+ * mistake a newly occupied low slot for an inherited standard descriptor. */
+static bool sky_resident_stdio_prepare(unsigned *closed_mask)
+{
+    *closed_mask = 0;
+    for (int fd = 0; fd < 3; fd++) {
+        if (fcntl(fd, F_GETFD) >= 0) continue;
+        if (errno != EBADF) return false;
+        *closed_mask |= 1u << fd;
+    }
+    for (int fd = 0; fd < 3; fd++) {
+        if (!(*closed_mask & (1u << fd))) continue;
+        int sink = open("/dev/null", (fd == 0 ? O_RDONLY : O_WRONLY) | O_CLOEXEC);
+        if (sink < 0) return false;
+        if (sink != fd) {
+            bool copied = dup2(sink, fd) >= 0;
+            bool closed = close(sink) == 0;
+            if (!copied || !closed) return false;
+        }
+        clearerr(fd == 0 ? stdin : fd == 1 ? stdout : stderr);
+    }
+    return true;
+}
+
+static bool sky_resident_stdio_restore(struct sky_agent_session *session)
+{
+    unsigned mask = session->resident_closed_stdio;
+    session->resident_closed_stdio = 0;
+    bool ok = true;
+    for (int fd = 0; fd < 3; fd++) {
+        if (!(mask & (1u << fd))) continue;
+        if (close(fd) != 0 && errno != EBADF) ok = false;
+        clearerr(fd == 0 ? stdin : fd == 1 ? stdout : stderr);
+    }
+    return ok;
+}
+#endif
 
 bool sky_agent_open(struct sky_agent_session *session)
 {
@@ -75,8 +115,15 @@ bool sky_agent_open(struct sky_agent_session *session)
 
 bool sky_agent_close(struct sky_agent_session *session)
 {
-    if (!session->reply) return true;
-    bool ok = fflush(stdout) == 0;
+    bool ok = sky_game_raise_close();
+    if (session->resident.active && !sky_resident_close(&session->resident)) ok = false;
+    if (!session->reply) {
+#if !defined(_WIN32)
+        if (!sky_resident_stdio_restore(session)) ok = false;
+#endif
+        return ok;
+    }
+    if (fflush(stdout) != 0) ok = false;
     if (sky_dup2(sky_fileno(session->reply), sky_fileno(stdout)) < 0) ok = false;
     if (fclose(session->reply) != 0) ok = false;
     session->reply = NULL;
@@ -87,7 +134,36 @@ bool sky_agent_close(struct sky_agent_session *session)
         if (signal(SIGPIPE, session->previous_sigpipe) == SIG_ERR) ok = false;
 #endif
     if (!ok) fputs("Sky Combat agent: transport cleanup failed\n", stderr);
+#if !defined(_WIN32)
+    if (!sky_resident_stdio_restore(session)) ok = false;
+#endif
     return ok;
+}
+
+bool sky_agent_open_resident(struct sky_agent_session *session, const char *nonce)
+{
+#if defined(_WIN32)
+    memset(session, 0, sizeof(*session));
+    (void)nonce;
+    return false;
+#else
+    /* Reuse checked stdout save/redirect and signal cleanup. The saved stream
+     * is only for restoration here; resident replies always use fd 3. */
+    unsigned closed_mask;
+    bool prepared = sky_resident_stdio_prepare(&closed_mask);
+    bool opened = prepared && sky_agent_open(session);
+    if (!opened) {
+        /* sky_agent_open initializes session itself; prepare failure does not. */
+        if (!prepared) memset(session, 0, sizeof(*session));
+        session->resident_closed_stdio = closed_mask;
+        (void)sky_agent_close(session);
+        return false;
+    }
+    session->resident_closed_stdio = closed_mask;
+    if (sky_resident_open(&session->resident, nonce)) return true;
+    (void)sky_agent_close(session);
+    return false;
+#endif
 }
 
 /* Only pipes and regular redirected input are the agent transport. Waiting
@@ -116,7 +192,7 @@ static int sky_agent_line(char line[SKY_AGENT_LINE_MAX + 1], size_t *length)
 {
     *length = 0;
     for (;;) {
-        PollInputEvents();
+        sky_game_event_pump();
         if (WindowShouldClose()) return 0;
         int ready = sky_agent_input_ready();
         if (ready < 0) return -1;
@@ -323,12 +399,11 @@ static bool sky_agent_image(FILE *out, const struct sky_agent_capture *capture)
         sky_agent_base64(out, capture->png, capture->size) && fputs("\"}", out) != EOF;
 }
 
-static bool sky_agent_reply(struct sky_agent_session *session, uint32_t id,
+static bool sky_agent_reply_body(FILE *out, struct sky_agent_session *session, uint32_t id,
     const struct sky_agent_observation *state, const struct sky_agent_capture *capture,
     const char *error)
 {
-    FILE *out = session->reply;
-    if (fprintf(out, "{\"v\":1,\"id\":%u,\"ok\":%s,\"frame\":%u,\"time\":%.9g,\"player\":",
+    if (fprintf(out, "{\"v\":1,\"id\":%u,\"ok\":%s,\"frame\":%u,\"time\":%.17g,\"player\":",
         id, error ? "false" : "true", state->frame, (double)state->time) < 0 ||
         !sky_agent_player(out, state)) return false;
     if (session->has_accepted_id) {
@@ -337,6 +412,27 @@ static bool sky_agent_reply(struct sky_agent_session *session, uint32_t id,
     if (error && fprintf(out, ",\"error\":\"%s\"", error) < 0) return false;
     if (!error && !sky_agent_image(out, capture)) return false;
     return fputs("}\n", out) != EOF && fflush(out) == 0 && !ferror(out);
+}
+
+static bool sky_agent_reply(struct sky_agent_session *session, uint32_t id,
+    const struct sky_agent_observation *state, const struct sky_agent_capture *capture,
+    const char *error)
+{
+    if (!session->resident.active)
+        return sky_agent_reply_body(session->reply, session, id, state, capture, error);
+#if defined(_WIN32)
+    return false;
+#else
+    char *payload = NULL;
+    size_t length = 0;
+    FILE *out = open_memstream(&payload, &length);
+    if (!out) return false;
+    bool ok = sky_agent_reply_body(out, session, id, state, capture, error);
+    if (fclose(out) != 0) ok = false;
+    if (ok) ok = sky_resident_write(&session->resident, payload, length);
+    free(payload);
+    return ok;
+#endif
 }
 
 static const char *sky_agent_execute(struct sky_agent_request *request, bool *boost_held,
@@ -353,6 +449,7 @@ static const char *sky_agent_execute(struct sky_agent_request *request, bool *bo
     request->input.speed_boost = boost && !*boost_held;
     *boost_held = boost;
     for (unsigned i = 0; i < request->frames; i++) {
+        sky_game_raise_apply();
         if (WindowShouldClose()) return "WINDOW_CLOSED";
         frame(context, &request->input, state,
             request->capture && i + 1 == request->frames ? capture : NULL);
@@ -369,7 +466,9 @@ int sky_agent_run(struct sky_agent_session *session, void *context, sky_agent_fr
     for (unsigned count = 0; count < SKY_AGENT_REQUEST_MAX; count++) {
         char line[SKY_AGENT_LINE_MAX + 1];
         size_t length;
-        int status = sky_agent_line(line, &length);
+        int status = session->resident.active
+            ? sky_resident_read(&session->resident, line, &length)
+            : sky_agent_line(line, &length);
         if (!status) return 0;
         struct sky_agent_request request = {0};
         struct sky_agent_capture capture = {0};
@@ -377,6 +476,7 @@ int sky_agent_run(struct sky_agent_session *session, void *context, sky_agent_fr
         if (status == -1) error = "INPUT_IO";
         else if (status == -2) error = "INCOMPLETE_REQUEST";
         else if (status == -3) error = "REQUEST_TOO_LARGE";
+        else if (status == -4) error = "INVALID_FRAME";
         else if (!sky_agent_parse(line, length, &request)) error = "INVALID_REQUEST";
         else if (session->has_accepted_id && request.id <= session->accepted_id)
             error = "STALE_REQUEST_ID";

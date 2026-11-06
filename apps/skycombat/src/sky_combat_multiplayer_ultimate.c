@@ -26,6 +26,7 @@
 #include "sky_combat/views/combat_effects.h"
 #include "sky_combat/qa_frames.h"
 #include "sky_combat/agent_session.h"
+#include "sky_combat/game_runtime.h"
 
 #include "../part/expr_use.h"
 
@@ -35,7 +36,7 @@
 
 /* Forward declarations */
 static void render_aircraft_ultimate(const managed_aircraft_t* aircraft, 
-                                   effects_manager_t* effects, float game_time);
+                                   float game_time);
 static void render_powerup_ultimate(const powerup_t* powerup, 
                                   effects_manager_t* effects, float game_time);
 void camera_update_responsive(Camera3D* camera, Vector3 target, float yaw, 
@@ -76,8 +77,8 @@ static void draw_speed_effects(multiplayer_game_t* game) {
     
     for (int i = 0; i < line_count; i++) {
         float angle = (float)i / line_count * 360.0f;
-        float length = GetRandomValue(100, 300) * game->speed_lines_intensity;
-        float offset = GetRandomValue(50, 150);
+        float length = (float)sky_game_visual_sample(SKY_VISUAL_SPEED, (uint32_t)i * 2u, 100, 300) * game->speed_lines_intensity;
+        float offset = (float)sky_game_visual_sample(SKY_VISUAL_SPEED, (uint32_t)i * 2u + 1u, 50, 150);
         
         Vector2 start = {
             center.x + cosf(angle * DEG2RAD) * offset,
@@ -95,7 +96,7 @@ static void draw_speed_effects(multiplayer_game_t* game) {
 
 /* Render aircraft with effects */
 static void render_aircraft_ultimate(const managed_aircraft_t* aircraft, 
-                                   effects_manager_t* effects, float game_time) {
+                                   float game_time) {
     if (!aircraft || !aircraft->aircraft) return;
     
     Vector3 pos = aircraft->aircraft->position;
@@ -139,11 +140,19 @@ static void render_aircraft_ultimate(const managed_aircraft_t* aircraft,
     
     rlPopMatrix();
     
-    /* Damage smoke - using small explosions for now */
-    if (aircraft->health < aircraft->max_health * 0.5f && GetRandomValue(0, 100) < 10) {
-        Vector3 smoke_pos = pos;
-        smoke_pos.y += 1.0f;
-        effects_spawn_explosion(effects, smoke_pos, 0.5f, DARKGRAY);
+}
+
+/* Effects are created only by simulation ticks, never by observe/capture. */
+static void update_damage_smoke(multiplayer_game_t *game)
+{
+    for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
+        const managed_aircraft_t *aircraft = &game->aircraft_mgr->aircraft[i];
+        if (aircraft->aircraft && aircraft->health < aircraft->max_health * 0.5f &&
+            GetRandomValue(0, 100) < 10) {
+            Vector3 smoke_pos = aircraft->aircraft->position;
+            smoke_pos.y += 1.0f;
+            effects_spawn_explosion(game->effects, smoke_pos, 0.5f, DARKGRAY);
+        }
     }
 }
 
@@ -362,7 +371,7 @@ static void poll_part_hud(const struct sky_expr_option *option,multiplayer_game_
  * The two outputs change only when both parsers have accepted their input. */
 static bool parse_game_options(int argc, char **argv,
                                struct sky_expr_option *option, unsigned *frames,
-                               bool *agent_mode)
+                               bool *agent_mode, const char **nonce, uint32_t *seed)
 {
     /* Called only from main with its argument vector and local outputs. */
     char *hud_argv[3] = {argv[0]};
@@ -370,6 +379,9 @@ static bool parse_game_options(int argc, char **argv,
     unsigned count = 0;
     bool seen_frames = false;
     bool agent = false;
+    bool resident_agent = false, seen_seed = false;
+    const char *resident_nonce = NULL;
+    uint32_t agent_seed = 1;
     for (int i = 1; i < argc; ++i) {
         if (!argv[i]) return false;
         if (strncmp(argv[i], "--qa-frames=", 12) == 0) {
@@ -380,6 +392,24 @@ static bool parse_game_options(int argc, char **argv,
         } else if (strcmp(argv[i], "--agent-stdio") == 0) {
             if (agent) return false;
             agent = true;
+        } else if (strcmp(argv[i], "--agent") == 0) {
+            if (agent) return false;
+            resident_agent = agent = true;
+        } else if (strcmp(argv[i], "--resident") == 0) {
+            if (resident_nonce || i + 1 == argc || !sky_resident_nonce_valid(argv[i + 1]))
+                return false;
+            resident_nonce = argv[++i];
+        } else if (strncmp(argv[i], "--seed=", 7) == 0) {
+            const char *number = argv[i] + 7;
+            if (seen_seed || !number[0] || (number[0] == '0' && number[1])) return false;
+            agent_seed = 0;
+            for (size_t k = 0; number[k]; k++) {
+                if (number[k] < '0' || number[k] > '9') return false;
+                unsigned digit = (unsigned)(number[k] - '0');
+                if (agent_seed > (UINT32_MAX - digit) / 10u) return false;
+                agent_seed = agent_seed * 10u + digit;
+            }
+            seen_seed = true;
         } else {
             if (hud_argc == 3) return false;
             hud_argv[hud_argc++] = argv[i];
@@ -387,10 +417,13 @@ static bool parse_game_options(int argc, char **argv,
     }
     struct sky_expr_option candidate;
     if (agent && seen_frames) return false;
+    if (resident_agent != (resident_nonce != NULL) || (seen_seed && !agent)) return false;
     if (!sky_expr_option_parse(hud_argc, hud_argv, &candidate)) return false;
     *option = candidate;
     *frames = count;
     *agent_mode = agent;
+    *nonce = resident_nonce;
+    *seed = agent_seed;
     return true;
 }
 
@@ -399,12 +432,24 @@ static int prepare_game_window(int argc, char **argv, unsigned *qa_frames,
                                struct sky_expr_option *option, bool *agent_mode,
                                struct sky_agent_session *session)
 {
-    if (!parse_game_options(argc, argv, option, qa_frames, agent_mode)) {
-        fprintf(stderr, "Usage: z23-skycombat [--agent-stdio | --qa-frames=1..%u] [--hud-part=<64 hex SHA-256>:<file> [--hud-pin-file=<file>]]\n",
+    const char *nonce = NULL;
+    uint32_t seed;
+    if (!parse_game_options(argc, argv, option, qa_frames, agent_mode, &nonce, &seed)) {
+        fprintf(stderr, "Usage: z23-skycombat [--agent-stdio | --resident <64 lower hex nonce> --agent | --qa-frames=1..%u] [--seed=UINT32] [--hud-part=<64 hex SHA-256>:<file> [--hud-pin-file=<file>]]\n",
                 SKY_COMBAT_QA_FRAMES_MAX);
         return 2;
     }
-    if (*agent_mode && !sky_agent_open(session)) {
+#if defined(_WIN32)
+    if (nonce) {
+        fputs("Sky Combat: RESIDENT_UNSUPPORTED_WINDOWS; use --agent-stdio\n", stderr);
+        return 2;
+    }
+#endif
+    if (!sky_game_raise_open()) {
+        fputs("Sky Combat: SIGUSR1 handler initialization failed\n", stderr);
+        return 1;
+    }
+    if (*agent_mode && !(nonce ? sky_agent_open_resident(session, nonce) : sky_agent_open(session))) {
         fputs("Sky Combat: agent transport initialization failed\n", stderr);
         return 1;
     }
@@ -417,6 +462,7 @@ static int prepare_game_window(int argc, char **argv, unsigned *qa_frames,
         return 1;
     }
     SetTargetFPS(TARGET_FPS);
+    sky_game_runtime_begin(*agent_mode, seed);
     return 0;
 }
 static bool game_systems_ready(const multiplayer_game_t *game)
@@ -600,7 +646,7 @@ static void render_ultimate_frame(multiplayer_game_t *game,
 
     /* Draw aircraft with effects */
     for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
-        render_aircraft_ultimate(&game->aircraft_mgr->aircraft[i], game->effects, game_time);
+        render_aircraft_ultimate(&game->aircraft_mgr->aircraft[i], game_time);
     }
 
     /* Draw power-ups */
@@ -653,7 +699,10 @@ static void advance_ultimate_frame(multiplayer_game_t *game,
                                    struct sky_agent_capture *capture)
 {
     float dt = external_input ? 1.0f / 60.0f : GetFrameTime();
-    *game_time += dt;
+    if (external_input) {
+        sky_game_runtime_tick();
+        *game_time = (float)sky_game_runtime_time();
+    } else *game_time += dt;
     if (!external_input) poll_part_hud(option,game,part_hud,notice,dt);
     else sky_expr_notice_tick(notice, dt);
 
@@ -682,6 +731,7 @@ static void advance_ultimate_frame(multiplayer_game_t *game,
     /* Damage flash */
     if (game->damage_flash > 0) game->damage_flash -= dt;
 
+    update_damage_smoke(game);
     render_ultimate_frame(game, screen_buffer, *game_time, part_hud, notice, capture);
 
     ++*rendered_frames;
@@ -720,7 +770,7 @@ static void game_agent_frame(void *context, const input_state_fast_t *input,
         render_ultimate_frame(agent->game, agent->screen, agent->time,
                                agent->hud, agent->notice, capture);
     }
-    *state = (struct sky_agent_observation){.frame = agent->frames, .time = agent->time};
+    *state = (struct sky_agent_observation){.frame = agent->frames, .time = sky_game_runtime_time()};
     managed_aircraft_t *player = aircraft_manager_get(agent->game->aircraft_mgr,
                                                       agent->game->local_player_id);
     if (player && player->aircraft) {
@@ -824,6 +874,9 @@ int main(int argc, char **argv) {
     /* Generate cyberpunk world */
     cyberpunk_world_generate(game.world, 42);
     cyberpunk_set_theme_blade_runner(game.world);
+    /* Layout stays fixed at 42. Actor/system initialization above used the
+     * session seed; restart both active RNG streams after world's srand(42). */
+    sky_game_runtime_reseed();
     
     update_part_hud(&option,&game,&part_hud,false,&notice);
 
@@ -841,6 +894,7 @@ int main(int argc, char **argv) {
         result = sky_agent_run(&session, &context, game_agent_frame);
     } else {
         while (game_frame_pending(qa_frames, rendered_frames)) {
+            sky_game_raise_apply();
             advance_ultimate_frame(&game, &option, &part_hud, &notice, screen_buffer,
                                    &game_time, &rendered_frames, NULL, NULL);
         }

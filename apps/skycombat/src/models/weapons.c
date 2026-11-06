@@ -9,6 +9,7 @@
 #endif
 
 #include "sky_combat/models/weapons.h"
+#include "sky_combat/game_runtime.h"
 #include "sky_combat/utils/safety_macros.h"
 #include <raylib.h>
 #include <raymath.h>
@@ -356,7 +357,7 @@ static void weapons_draw_lasers(weapons_system_t* weapons) {
     for (int i = 0; i < MAX_LASERS; i++) {
         if (weapons->lasers[i].active) {
             // Draw laser beam with glow effect
-            float beam_width = 2.0f + sinf((float)GetTime() * 20.0f) * 0.5f;
+            float beam_width = 2.0f + sinf((float)sky_game_runtime_time() * 20.0f) * 0.5f;
             
             // Outer glow
             DrawCylinderEx(weapons->lasers[i].position, weapons->lasers[i].end_position, 
@@ -379,7 +380,7 @@ static void weapons_draw_plasma(weapons_system_t* weapons) {
     for (int i = 0; i < MAX_PLASMA; i++) {
         if (weapons->plasma[i].active) {
             // Plasma ball with energy effect
-            float pulse = sinf((float)GetTime() * 10.0f + (float)i) * 0.3f + 1.0f;
+            float pulse = sinf((float)sky_game_runtime_time() * 10.0f + (float)i) * 0.3f + 1.0f;
             
             // Outer energy field
             DrawSphere(weapons->plasma[i].position, weapons->plasma[i].size * 2 * pulse, 

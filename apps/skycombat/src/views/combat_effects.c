@@ -4,6 +4,7 @@
  */
 
 #include "sky_combat/views/combat_effects.h"
+#include "sky_combat/game_runtime.h"
 #include "sky_combat/utils/zero_crash.h"
 #include <raymath.h>
 #include <stdlib.h>
@@ -536,8 +537,8 @@ void effects_draw_ui(effects_manager_t* manager, int screen_width, int screen_he
         PROVES_UNREACHABLE("shake_range < 1");
         
         int shake_offset = (int)(manager->screen_shake * 10.0f);
-        shake_x = (rand() % shake_range) - shake_offset;
-        shake_y = (rand() % shake_range) - shake_offset;
+        shake_x = sky_game_visual_sample(SKY_VISUAL_SHAKE, 0, 0, shake_range - 1) - shake_offset;
+        shake_y = sky_game_visual_sample(SKY_VISUAL_SHAKE, 1, 0, shake_range - 1) - shake_offset;
     }
     
     // Draw damage numbers

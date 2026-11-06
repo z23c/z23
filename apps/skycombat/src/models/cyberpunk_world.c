@@ -4,6 +4,7 @@
  */
 
 #include "sky_combat/models/cyberpunk_world.h"
+#include "sky_combat/game_runtime.h"
 #include <raymath.h>
 #include <stdlib.h>
 #include <math.h>
@@ -341,7 +342,7 @@ void cyberpunk_world_draw(cyberpunk_world_t* world, Camera3D camera) {
                 // Glitch effect
                 if (fmodf(elem->animation_time, 3.0f) < 0.1f) {
                     Vector3 glitch_pos = elem->position;
-                    glitch_pos.x += (rand() % 10) - 5;
+                    glitch_pos.x += (float)sky_game_visual_sample(SKY_VISUAL_WORLD, (uint32_t)i, -5, 4);
                     DrawCubeWires(glitch_pos, elem->scale.x * 1.1f, elem->scale.y * 1.1f, elem->scale.z * 1.1f, RED);
                 }
                 break;

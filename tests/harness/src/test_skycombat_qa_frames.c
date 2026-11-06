@@ -3,8 +3,18 @@
 #include "test/test_core.h"
 #include "test/host_tool_capture.h"
 #include "sky_combat/qa_frames.h"
+#include "platform/resident_launch.h"
 #include "json/json.h"
 #include <string.h>
+#if !defined(_WIN32)
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #if defined(_WIN32)
 #define QA_ENTRY "build/bin/skycombat-qa-entrypoint.exe"
@@ -287,6 +297,405 @@ _test_next:;
     return failures;
 }
 
+#if !defined(_WIN32)
+static const char sky_fixture_nonce[] =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+struct sky_resident_fixture {
+    pid_t pid;
+    int socket, diagnostics, stdout_fd;
+    char stdout_text[4096];
+};
+
+static bool sky_resident_io(int fd, void *bytes, size_t size, bool writing)
+{
+    size_t done = 0;
+    while (done < size) {
+        struct pollfd p = {.fd = fd, .events = writing ? POLLOUT : POLLIN};
+        int ready = poll(&p, 1, 5000);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0) return false;
+        ssize_t got;
+        if (writing) {
+#if defined(MSG_NOSIGNAL)
+            got = send(fd, (char *)bytes + done, size - done, MSG_NOSIGNAL);
+#else
+            got = send(fd, (char *)bytes + done, size - done, 0);
+#endif
+        } else got = read(fd, (char *)bytes + done, size - done);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) return false;
+        done += (size_t)got;
+    }
+    return true;
+}
+
+static bool sky_resident_start_config(struct sky_resident_fixture *f, bool window_fails,
+                                      unsigned closed_mask, unsigned endpoint, bool raise_test)
+{
+    int sockets[2], diagnostics[2], standard_output[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) return false;
+    if (pipe(diagnostics) != 0) { close(sockets[0]); close(sockets[1]); return false; }
+    if (pipe(standard_output) != 0) {
+        close(sockets[0]); close(sockets[1]); close(diagnostics[0]); close(diagnostics[1]);
+        return false;
+    }
+#if defined(SO_NOSIGPIPE)
+    int enabled = 1;
+    if (setsockopt(sockets[0], SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) != 0) {
+        close(sockets[0]); close(sockets[1]); close(diagnostics[0]); close(diagnostics[1]);
+        close(standard_output[0]); close(standard_output[1]);
+        return false;
+    }
+#endif
+    if (endpoint == 2 && shutdown(sockets[0], SHUT_RD) != 0) {
+        close(sockets[0]); close(sockets[1]); close(diagnostics[0]); close(diagnostics[1]);
+        close(standard_output[0]); close(standard_output[1]); return false;
+    }
+    char closed_option[40];
+    snprintf(closed_option, sizeof(closed_option), "--fixture-closed-stdio=%u", closed_mask);
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Preserve the socket while mapping fd 3 even when socketpair used 3. */
+        int ipc = dup(sockets[1]);
+        close(sockets[0]); close(sockets[1]); close(diagnostics[0]); close(standard_output[0]);
+        if (ipc < 0 || dup2(standard_output[1], STDOUT_FILENO) < 0 ||
+            dup2(diagnostics[1], STDERR_FILENO) < 0 ||
+            dup2(ipc, RESIDENT_LAUNCH_CHILD_FD) < 0) _exit(125);
+        close(ipc); close(diagnostics[1]); close(standard_output[1]);
+        int input = open("/dev/null", O_RDONLY);
+        if (input < 0 || (input != STDIN_FILENO && dup2(input, STDIN_FILENO) < 0)) _exit(125);
+        if (input != STDIN_FILENO) close(input);
+        const char *args[12]; size_t n = 0;
+        args[n++] = QA_ENTRY;
+        if (window_fails) args[n++] = "--fixture-window-fails";
+        if (closed_mask) args[n++] = closed_option;
+        if (raise_test) args[n++] = "--fixture-raise";
+        args[n++] = "--fixture-resident";
+        args[n++] = "--resident"; args[n++] = sky_fixture_nonce;
+        args[n++] = "--agent"; args[n++] = "--seed=4294967295"; args[n] = NULL;
+        if (endpoint == 1) close(RESIDENT_LAUNCH_CHILD_FD);
+        for (int fd = 0; fd < 3; fd++)
+            if (closed_mask & (1u << fd)) close(fd);
+        execv(QA_ENTRY, (char *const *)args);
+        _exit(126);
+    }
+    close(sockets[1]); close(diagnostics[1]); close(standard_output[1]);
+    if (pid < 0) { close(sockets[0]); close(diagnostics[0]); close(standard_output[0]); return false; }
+    *f = (struct sky_resident_fixture){.pid = pid, .socket = sockets[0],
+        .diagnostics = diagnostics[0], .stdout_fd = standard_output[0]};
+    return true;
+}
+
+static bool sky_resident_start_stdio(struct sky_resident_fixture *f, bool window_fails,
+                                      unsigned closed_mask, unsigned endpoint)
+{
+    return sky_resident_start_config(f, window_fails, closed_mask, endpoint, false);
+}
+
+static bool sky_resident_start(struct sky_resident_fixture *f, bool window_fails)
+{
+    return sky_resident_start_stdio(f, window_fails, 0, 0);
+}
+
+static bool sky_resident_text(int fd, char output[4096])
+{
+    size_t used = 0;
+    for (;;) {
+        ssize_t got = read(fd, output + used, 4095 - used);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) { output[used] = '\0'; return got == 0; }
+        used += (size_t)got;
+        output[used] = '\0';
+        if (used == 4095) return false;
+    }
+}
+
+static int sky_resident_finish(struct sky_resident_fixture *f, char output[4096])
+{
+    int status = 0;
+    pid_t reaped = 0;
+    for (unsigned i = 0; i < 500; i++) {
+        reaped = waitpid(f->pid, &status, WNOHANG);
+        if (reaped != 0) break;
+        (void)poll(NULL, 0, 10);
+    }
+    if (!reaped) { kill(f->pid, SIGKILL); (void)waitpid(f->pid, &status, 0); }
+    bool captured = sky_resident_text(f->diagnostics, output);
+    if (!sky_resident_text(f->stdout_fd, f->stdout_text)) captured = false;
+    close(f->socket); close(f->diagnostics); close(f->stdout_fd); f->pid = -1;
+    return captured && reaped > 0 && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static bool sky_resident_receive(struct sky_resident_fixture *f, char payload[4096])
+{
+    struct resident_result_header header;
+    return sky_resident_io(f->socket, &header, sizeof(header), false) &&
+        !memcmp(header.magic, "z23-res-run-v1\0\0", sizeof(header.magic)) &&
+        !memcmp(header.nonce, sky_fixture_nonce, sizeof(header.nonce)) &&
+        header.payload_len < 4096 &&
+        sky_resident_io(f->socket, payload, header.payload_len, false) &&
+        (payload[header.payload_len] = '\0', true);
+}
+
+static struct resident_result_header sky_resident_header(uint32_t length)
+{
+    struct resident_result_header header = {.magic = "z23-res-run-v1", .payload_len = length};
+    memcpy(header.nonce, sky_fixture_nonce, sizeof(header.nonce));
+    return header;
+}
+
+static bool sky_resident_request(struct sky_resident_fixture *f, const char *request, bool fragment)
+{
+    struct resident_result_header header = sky_resident_header((uint32_t)strlen(request));
+    if (!fragment)
+        return sky_resident_io(f->socket, &header, sizeof(header), true) &&
+            sky_resident_io(f->socket, (void *)request, strlen(request), true);
+    const size_t prefix = sizeof(header.magic) + sizeof(header.nonce);
+    if (!sky_resident_io(f->socket, &header, 7, true)) return false;
+    (void)poll(NULL, 0, 30);
+    if (!sky_resident_io(f->socket, (char *)&header + 7, prefix - 7, true)) return false;
+    (void)poll(NULL, 0, 30);
+    if (!sky_resident_io(f->socket, (char *)&header + prefix, sizeof(header) - prefix, true) ||
+        !sky_resident_io(f->socket, (void *)request, 3, true)) return false;
+    (void)poll(NULL, 0, 30);
+    return sky_resident_io(f->socket, (char *)request + 3, strlen(request) - 3, true);
+}
+
+static bool sky_resident_json(struct sky_resident_fixture *f, unsigned frame,
+                               unsigned id, int64_t accepted, const char *error)
+{
+    char payload[4096]; struct json_value reply; json_init(&reply);
+    bool ok = sky_resident_receive(f, payload) && json_read(&reply, payload, strlen(payload)) &&
+        json_get_int(json_get(&reply, "frame")) == frame &&
+        json_get_int(json_get(&reply, "id")) == id;
+    const struct json_value *accepted_id = json_get(&reply, "accepted_id");
+    ok = ok && accepted_id && (accepted < 0 ? accepted_id->type == JSON_NULL
+        : accepted_id->type == JSON_INT && json_get_int(accepted_id) == accepted);
+    const struct json_value *value = json_get(&reply, "error");
+    ok = ok && (error ? value && value->type == JSON_STR && !strcmp(json_get_str(value), error)
+                     : json_get_bool(json_get(&reply, "ok")));
+    json_free(&reply);
+    return ok;
+}
+
+static int skycombat_resident_frames(void)
+{
+    int failures = 0; struct sky_resident_fixture f = {.pid = -1};
+    char payload[4096] = {0}, output[4096];
+    TEST("resident: native fragmented framing, exact ticks, IDs and cleanup use actual entrypoint") {
+        ASSERT(sky_resident_start(&f, false));
+        ASSERT(sky_resident_receive(&f, payload) && !strcmp(payload, "READY"));
+        ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":1,\"op\":\"observe\"}", true));
+        ASSERT(sky_resident_json(&f, 0, 1, 1, NULL));
+        ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":2,\"op\":\"step\",\"frames\":60,\"input\":{}}", false));
+        ASSERT(sky_resident_json(&f, 60, 2, 2, NULL));
+        ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":2,\"op\":\"step\",\"frames\":1,\"input\":{}}", false));
+        ASSERT(sky_resident_json(&f, 60, 2, 2, "STALE_REQUEST_ID"));
+        ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":3,\"op\":\"observe\"}\n", false));
+        ASSERT(sky_resident_json(&f, 60, 3, 3, NULL));
+        ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":4,\"op\":\"close\"}", false));
+        ASSERT(sky_resident_json(&f, 60, 4, 4, NULL));
+        ASSERT_EQ(sky_resident_finish(&f, output), 0);
+        ASSERT(strstr(output, "closed=1 destroyed=127 unloads=1"));
+        ASSERT(strstr(output, "QA_AGENT ticks=60 keys=0 polls=0"));
+        ASSERT(strstr(output, "QA_RESIDENT window stdout"));
+        ASSERT(strstr(output, "QA_RESIDENT close stdout"));
+        ASSERT_EQ(strcmp(f.stdout_text, "QA_RESIDENT stdout restored\n"), 0);
+        PASS();
+    } _test_next:;
+    if (f.pid > 0) { fprintf(stderr, "resident fixture: %s\n", payload); (void)sky_resident_finish(&f, output); }
+    return failures;
+}
+
+static int skycombat_resident_end(unsigned mode)
+{
+    int failures = 0; struct sky_resident_fixture f = {.pid = -1};
+    char payload[4096] = {0}, output[4096];
+    const char *errors[] = {NULL, NULL, "INCOMPLETE_REQUEST", "INCOMPLETE_REQUEST",
+                            "REQUEST_TOO_LARGE", "INVALID_FRAME", "INVALID_FRAME", NULL, NULL};
+    TEST("resident: stop/EOF/framing/init/broken-reply paths preserve streams and reap normally") {
+        ASSERT(sky_resident_start(&f, mode == 7));
+        ASSERT(sky_resident_receive(&f, payload) && !strcmp(payload, "READY"));
+        struct resident_result_header header = sky_resident_header(mode == 4 ? 4097 : 20);
+        size_t prefix = sizeof(header.magic) + sizeof(header.nonce);
+        if (mode == 0 || mode == 5) memcpy(header.magic, "z23-res-stop-v1\0", sizeof(header.magic));
+        if (mode == 5) header.nonce[64] = 'x';
+        if (mode == 6) header.magic[0] = 'x';
+        if (mode == 0 || mode == 5 || mode == 6)
+            ASSERT(sky_resident_io(f.socket, &header, prefix, true));
+        if (mode == 2) ASSERT(sky_resident_io(f.socket, &header, 10, true));
+        if (mode == 3 || mode == 4) ASSERT(sky_resident_io(f.socket, &header, sizeof(header), true));
+        if (mode == 3) ASSERT(sky_resident_io(f.socket, (void *)"{", 1, true));
+        if (mode >= 1 && mode <= 3) ASSERT_EQ(shutdown(f.socket, SHUT_WR), 0);
+        if (mode == 8) {
+            ASSERT_EQ(shutdown(f.socket, SHUT_RD), 0);
+            ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":1,\"op\":\"observe\"}", false));
+        }
+        if (errors[mode]) ASSERT(sky_resident_json(&f, 0, 0, -1, errors[mode]));
+        ASSERT_EQ(sky_resident_finish(&f, output), errors[mode] || mode >= 7 ? 1 : 0);
+        if (mode == 7) ASSERT(strstr(output, "window initialization failed"));
+        else ASSERT(strstr(output, "closed=1 destroyed=127 unloads=1"));
+        ASSERT(strstr(output, "QA_RESIDENT window stdout"));
+        if (mode != 7) ASSERT(strstr(output, "QA_RESIDENT close stdout"));
+        if (mode == 8) ASSERT(strstr(output, "Sky Combat agent: reply IO failed"));
+        ASSERT_EQ(strcmp(f.stdout_text, "QA_RESIDENT stdout restored\n"), 0);
+        PASS();
+    } _test_next:;
+    if (f.pid > 0) { (void)sky_resident_finish(&f, output); fprintf(stderr, "%s\n", output); }
+    return failures;
+}
+
+static int skycombat_resident_closed_stdio(unsigned mask, unsigned mode)
+{
+    int failures = 0; struct sky_resident_fixture f = {.pid = -1};
+    char payload[4096] = {0}, output[4096] = {0};
+    TEST("resident: closed stdio normalizes access modes and restores original mask on every exit") {
+        ASSERT(sky_resident_start_config(&f, mode == 2, mask, mode >= 3 ? mode - 2 : 0, true));
+        if (mode < 3) ASSERT(sky_resident_receive(&f, payload) && !strcmp(payload, "READY"));
+        if (mode <= 1) {
+            if (mode == 1) ASSERT_EQ(shutdown(f.socket, SHUT_RD), 0);
+            ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":1,\"op\":\"observe\"}", false));
+            if (!mode) {
+                ASSERT(sky_resident_json(&f, 0, 1, 1, NULL));
+                ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":2,\"op\":\"close\"}", false));
+                ASSERT(sky_resident_json(&f, 0, 2, 2, NULL));
+            }
+        }
+        ASSERT_EQ(sky_resident_finish(&f, output), mode ? 1 : 0);
+        ASSERT_EQ(strcmp(f.stdout_text, mask & 2u ? "" : "QA_RESIDENT stdout restored\n"), 0);
+        if (!(mask & 4u) && mode < 2) ASSERT(strstr(output, "closed=1 destroyed=127 unloads=1"));
+        PASS();
+    } _test_next:;
+    if (f.pid > 0) (void)sky_resident_finish(&f, output);
+    if (failures) fprintf(stderr, "closed stdio mask=%u mode=%u diagnostics=%s stdout=%s\n",
+                           mask, mode, output, f.stdout_text);
+    return failures;
+}
+
+static bool sky_resident_raise_marker(struct sky_resident_fixture *f)
+{
+    char line[4096]; size_t used = 0;
+    while (used < sizeof(line) - 1) {
+        if (!sky_resident_io(f->diagnostics, line + used, 1, false)) return false;
+        line[++used] = '\0';
+        if (strstr(line, "QA_RAISE applied\n")) return true;
+    }
+    return false;
+}
+
+static int skycombat_resident_raise(void)
+{
+    int failures = 0; struct sky_resident_fixture f = {.pid = -1};
+    char payload[4096] = {0}, output[4096] = {0};
+    TEST("raise: resident idle, partial header and partial payload dispatch without ticks/RNG") {
+        ASSERT(sky_resident_start_config(&f, false, 0, 0, true));
+        ASSERT(sky_resident_receive(&f, payload) && !strcmp(payload, "READY"));
+        ASSERT_EQ(kill(f.pid, SIGUSR1), 0);
+        ASSERT(sky_resident_raise_marker(&f)); /* No request bytes exist yet. */
+        const char *request = "{\"v\":1,\"id\":1,\"op\":\"observe\"}";
+        struct resident_result_header header = sky_resident_header((uint32_t)strlen(request));
+        ASSERT(sky_resident_io(f.socket, &header, 7, true));
+        ASSERT_EQ(kill(f.pid, SIGUSR1), 0);
+        ASSERT(sky_resident_raise_marker(&f)); /* The run header is incomplete. */
+        ASSERT(sky_resident_io(f.socket, (char *)&header + 7, sizeof(header) - 7, true));
+        ASSERT(sky_resident_io(f.socket, (void *)request, 3, true));
+        ASSERT_EQ(kill(f.pid, SIGUSR1), 0);
+        ASSERT(sky_resident_raise_marker(&f)); /* The JSON payload is incomplete. */
+        ASSERT(sky_resident_io(f.socket, (char *)request + 3, strlen(request) - 3, true));
+        ASSERT(sky_resident_json(&f, 0, 1, 1, NULL));
+        ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":2,\"op\":\"close\"}", false));
+        ASSERT(sky_resident_json(&f, 0, 2, 2, NULL));
+        ASSERT_EQ(sky_resident_finish(&f, output), 0);
+        ASSERT(strstr(output, "QA_RAISE restore=3 focus=3 prior=1 pure=1"));
+        ASSERT(strstr(output, "closed=1 destroyed=127 unloads=1"));
+        PASS();
+    } _test_next:;
+    if (f.pid > 0) (void)sky_resident_finish(&f, output);
+    if (failures) fprintf(stderr, "%s\n", output);
+    return failures;
+}
+
+static int skycombat_raise_other_modes(bool stdio)
+{
+    int failures = 0; char output[8192] = {0}, diagnostics[513] = {0};
+    const char *interactive[] = {QA_ENTRY, "--fixture-raise", "--qa-frames=2", NULL};
+    const char *agent[] = {QA_ENTRY,
+        "--fixture-agent={\"v\":1,\"id\":1,\"op\":\"observe\"}\n{\"v\":1,\"id\":2,\"op\":\"close\"}\n",
+        "--fixture-raise", "--agent-stdio", NULL};
+    TEST("raise: stdio byte waits and interactive tick dispatch preserve prior handler and input polls") {
+        ASSERT_EQ(skycombat_agent_capture(stdio ? agent : interactive, output, sizeof(output), diagnostics), 0);
+        ASSERT(strstr(diagnostics, stdio ? "QA_RAISE restore=2 focus=2 prior=1 pure=1"
+                                        : "QA_RAISE restore=1 focus=1 prior=1 pure=1 events=0"));
+        if (stdio) ASSERT(strstr(output, "\"frame\":0"));
+        PASS();
+    } _test_next:;
+    if (failures) fprintf(stderr, "%s\n%s\n", output, diagnostics);
+    return failures;
+}
+
+static int skycombat_actual_model_replay(void)
+{
+    int failures = 0;
+    char cwd[PATH_MAX], image[PATH_MAX];
+    const char *args[] = {"build/bin/z23_bounded_run", "60000", image, NULL};
+    char output[32768] = {0};
+    TEST("replay: native maintained models preserve full state across partition/observe/capture/delay") {
+        ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
+        int length = snprintf(image, sizeof(image), "%s/build/bin/skycombat-model-replay", cwd);
+        ASSERT(length > 0 && (size_t)length < sizeof(image));
+        int status = test_host_tool_capture(args, output, sizeof(output), 70000);
+        if (status) fprintf(stderr, "%s\n", output);
+        ASSERT_EQ(status, 0);
+        ASSERT(strstr(output, "skycombat actual-model replay: PASS ticks=120"));
+        ASSERT(strstr(output, "seed_control=changed input_control=changed"));
+        ASSERT(strstr(output, "smoke=observed patrol=observed chase=observed"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
+static int skycombat_resident_options(void)
+{
+    static const char nonce[] =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const char *const invalid[][6] = {
+        {"--resident", nonce, NULL}, {"--agent", NULL},
+        {"--resident", "", "--agent", NULL},
+        {"--resident", "abc", "--agent", NULL},
+        {"--resident", "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd", "--agent", NULL},
+        {"--resident", nonce, "--agent-stdio", NULL},
+        {"--resident", nonce, "--agent", "--qa-frames=1", NULL},
+        {"--resident", nonce, "--agent", "--seed=4294967296", NULL},
+        {"--resident", nonce, "--agent", "--seed=01", NULL},
+        {"--seed=1", NULL}
+    };
+    int failures = 0;
+    TEST("resident: invalid mode/nonce/seed combinations refuse before any window") {
+        for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+            const char *args[8] = {QA_ENTRY};
+            size_t n = 0;
+            while (invalid[i][n]) { args[n + 1] = invalid[i][n]; n++; }
+            char output[8192] = {0}, diagnostics[513] = {0};
+            ASSERT_EQ(skycombat_agent_capture(args, output, sizeof(output), diagnostics), 2);
+            ASSERT(strstr(output, "windows=0 frames=0 closed=0"));
+        }
+        PASS();
+    }
+#if defined(_WIN32)
+    TEST("resident: Windows names unsupported mode and keeps stdio available") {
+        const char *args[] = {QA_ENTRY, "--resident", nonce, "--agent", NULL};
+        char output[8192] = {0}, diagnostics[513] = {0};
+        ASSERT_EQ(skycombat_agent_capture(args, output, sizeof(output), diagnostics), 2);
+        ASSERT(strstr(diagnostics, "RESIDENT_UNSUPPORTED_WINDOWS"));
+        ASSERT(strstr(output, "windows=0 frames=0 closed=0"));
+        PASS();
+    }
+#endif
+_test_next:;
+    return failures;
+}
+
 int test_skycombat_qa_frames(void);
 int test_skycombat_qa_frames(void)
 {
@@ -357,5 +766,16 @@ _test_next:;
     failures += skycombat_agent_physical_bytes("--fixture-prefix-nul");
     failures += skycombat_agent_physical_bytes("--fixture-prefix-sub");
     failures += skycombat_agent_transport_bounds();
+    failures += skycombat_resident_options();
+#if !defined(_WIN32)
+    failures += skycombat_resident_frames();
+    for (unsigned mode = 0; mode < 9; mode++) failures += skycombat_resident_end(mode);
+    for (unsigned mask = 1; mask <= 7; mask++) failures += skycombat_resident_closed_stdio(mask, 0);
+    for (unsigned mode = 1; mode <= 4; mode++) failures += skycombat_resident_closed_stdio(7, mode);
+    failures += skycombat_resident_raise();
+    failures += skycombat_raise_other_modes(true);
+    failures += skycombat_raise_other_modes(false);
+    failures += skycombat_actual_model_replay();
+#endif
     return failures;
 }

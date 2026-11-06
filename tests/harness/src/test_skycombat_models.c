@@ -56,6 +56,7 @@
 static double skycombat_stub_time = 0.0;
 
 static double skycombat_stub_GetTime(void) { return skycombat_stub_time; }
+static void skycombat_stub_SetRandomSeed(unsigned int seed) { (void)seed; }
 static bool skycombat_stub_random_min;
 static int skycombat_stub_GetRandomValue(int lo, int hi)
 { return skycombat_stub_random_min ? lo : lo + (hi - lo) / 2; }
@@ -70,6 +71,7 @@ static void skycombat_stub_DrawLine3D(Vector3 a, Vector3 b, Color t)
 { (void)a; (void)b; (void)t; }
 
 #define GetTime skycombat_stub_GetTime
+#define SetRandomSeed skycombat_stub_SetRandomSeed
 #define GetRandomValue skycombat_stub_GetRandomValue
 #define Fade skycombat_stub_Fade
 #define DrawSphere skycombat_stub_DrawSphere
@@ -77,6 +79,7 @@ static void skycombat_stub_DrawLine3D(Vector3 a, Vector3 b, Color t)
 #define DrawCylinderEx skycombat_stub_DrawCylinderEx
 #define DrawLine3D skycombat_stub_DrawLine3D
 
+#include "../../../apps/skycombat/src/game_runtime.c"
 #include "../../../apps/skycombat/src/models/aircraft.c"
 #include "../../../apps/skycombat/src/models/weapons.c"
 #include "../../../apps/skycombat/src/models/match_rules.c"
@@ -385,6 +388,37 @@ _test_next:;
     return failures;
 }
 
+static int skycombat_runtime_tests(void)
+{
+    int failures = 0;
+    TEST("runtime: integer ticks, keyed samples and post-world reseed preserve clock/RNG contracts") {
+        sky_game_runtime_begin(true, 73);
+        ASSERT_EQ(sky_game_runtime_ticks(), 0);
+        for (unsigned i = 0; i < 60; i++) sky_game_runtime_tick();
+        ASSERT(sky_game_runtime_time() == 1.0);
+        sky_game_runtime_reseed();
+        int first = rand();
+        srand(42); (void)rand(); /* The fixed-layout world's RNG reset. */
+        sky_game_runtime_reseed();
+        ASSERT_EQ(rand(), first);
+        srand(19); int expected = rand(); srand(19);
+        int sample = sky_game_visual_sample(SKY_VISUAL_SPEED, 7, -10, 10);
+        for (unsigned i = 0; i < 100; i++)
+            ASSERT_EQ(sky_game_visual_sample(SKY_VISUAL_SPEED, 7, -10, 10), sample);
+        ASSERT_EQ(rand(), expected);
+        ASSERT_EQ(sky_game_runtime_ticks(), 60);
+        sky_game_runtime_begin(false, 1);
+        skycombat_stub_time = 123.25;
+        sky_game_runtime_tick();
+        ASSERT(sky_game_runtime_time() == 123.25);
+        ASSERT_EQ(sky_game_runtime_ticks(), 0);
+        PASS();
+    } _test_next:;
+    sky_game_runtime_begin(false, 1);
+    skycombat_stub_time = 0;
+    return failures;
+}
+
 static int skycombat_wrap_tests(void)
 {
     int failures = 0;
@@ -638,6 +672,7 @@ _test_next:;
     failures += skycombat_wrap_tests();
     failures += skycombat_document_tests();
     failures += skycombat_gun_pattern_tests();
+    failures += skycombat_runtime_tests();
     if (failures == 0)
         printf("test_skycombat_models: all passed\n");
     else

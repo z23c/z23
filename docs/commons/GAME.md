@@ -54,6 +54,33 @@ difference; native math-library results can still differ between platforms.
 QA frame limits can be combined with the pinned HUD option in either argument
 order. All options are validated before window setup.
 
+## Agent resident transport
+
+POSIX `--resident NONCE --agent [--seed=UINT32]` uses a private stream socket
+at fd 3. NONCE is exactly 64 lowercase hex characters. Windows refuses with
+`RESIDENT_UNSUPPORTED_WINDOWS`; `--agent-stdio` remains available.
+Diagnostics use stderr in both modes; cleanup restores stdout.
+
+Frames reuse the native `resident_result_header` ABI from
+`platform/modules/platform/include/platform/resident_launch.h`:
+`z23-res-run-v1`, launch nonce, payload length,
+then JSON. Input is at most 4096 bytes (optional trailing LF); replies at most
+2 MiB. Both transports use the v1 IDs and budgets below. Fragment waits pump
+window events without simulation ticks.
+
+The five-byte `READY` payload precedes `InitWindow` and proves protocol entry
+only: require a successful first observe for rendering. Init failure closes
+the channel and exits. STOP is exactly 16 magic bytes `z23-res-stop-v1` plus
+65 nonce bytes including NUL: 81 bytes, no length/padding. It is handled before
+the rest of a run header. EOF closes cleanly. The parent retains image/nonce
+authority and its watchdog.
+
+Seed is canonical decimal 0..4294967295 (default 1), applied to libc and raylib
+after window initialization, before systems. Replay determinism requires
+separate qualification.
+
+<!-- claim: symbol-present sky_resident_read apps/skycombat/src/agent_resident.c # native child framing -->
+
 ## Agent stdio session
 
 Launch the same game with `--agent-stdio` and private stdin/stdout pipes.

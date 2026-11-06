@@ -14,6 +14,7 @@
 #endif
 
 #include "sky_combat/models/aircraft_manager.h"
+#include "sky_combat/game_runtime.h"
 #include <raymath.h>
 #include <stdlib.h>
 #include <string.h>
@@ -687,7 +688,7 @@ static void refresh_ghost_target(aircraft_manager_t* manager, managed_aircraft_t
 
 static void fly_patrol_circle(managed_aircraft_t* ai, float dt) {
     /* Lazy circular patrol */
-    float time = GetTime() + ai->id * 1.5f; /* Offset for each ghost */
+    float time = sky_game_runtime_time() + ai->id * 1.5f; /* Offset for each ghost */
     float patrol_x = sinf(time * 0.3f) * 0.5f;
     float patrol_y = cosf(time * 0.2f) * 0.2f;
     
@@ -726,7 +727,7 @@ static void steer_toward_target(managed_aircraft_t* ai, Vector3 to_target, float
     float input_y = Clamp(pitch_diff / 30.0f * turn_rate, -0.3f, 0.3f);
     
     /* Add some wobble for ghost-like movement */
-    float wobble = sinf(GetTime() * 2.0f + ai->id) * 0.1f;
+    float wobble = sinf(sky_game_runtime_time() * 2.0f + ai->id) * 0.1f;
     input_x += wobble;
     
     /* Update aircraft with slow inputs */

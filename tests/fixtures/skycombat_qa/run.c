@@ -13,6 +13,9 @@
 #define qa_fileno _fileno
 #define qa_close _close
 #else
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 #define qa_dup2 dup2
 #define qa_fileno fileno
@@ -20,6 +23,10 @@
 #endif
 static unsigned qa_windows, qa_frames, qa_closed, qa_destroyed, qa_unloads;
 static unsigned qa_keys, qa_polls, qa_ticks;
+static unsigned qa_events;
+static bool qa_resident;
+static unsigned qa_original_closed;
+static bool qa_bad_stdio;
 static float qa_stick_x, qa_stick_y;
 static bool qa_agent;
 static bool qa_resize_fails;
@@ -27,6 +34,20 @@ static bool qa_broken_reply;
 static unsigned qa_close_after = 64;
 static bool qa_window_failed;
 static bool qa_hud_keys;
+#if !defined(_WIN32)
+static bool qa_raise_test;
+static volatile sig_atomic_t qa_prior_seen, qa_in_signal, qa_bad_raise;
+static unsigned qa_restores, qa_focuses;
+static struct sigaction qa_original_signal;
+static void qa_prior_signal(int signum) { (void)signum; qa_prior_seen = 1; }
+static void qa_self_signal(void)
+{
+    qa_in_signal = 1;
+    if (raise(SIGUSR1) != 0) qa_bad_raise = 1;
+    qa_in_signal = 0;
+}
+#endif
+static unsigned qa_random_calls, qa_seed_calls, qa_last_seed;
 static int sky_qa_entry(int argc, char **argv);
 /* Adapt only the entry signature for the pre-fix main(void) removal witness.
  * The entire production function body, argument admission and loop are used. */
@@ -49,7 +70,26 @@ int GetScreenWidth(void) { return 640; }
 int GetScreenHeight(void) { return 480; }
 int GetRenderWidth(void) { return 640; }
 int GetRenderHeight(void) { return 480; }
-void PollInputEvents(void) { }
+void PollInputEvents(void) {
+    ++qa_events;
+#if !defined(_WIN32)
+    if (qa_raise_test && qa_agent && !qa_resident && (qa_events == 1 || qa_events == 8))
+        qa_self_signal();
+#endif
+}
+void RestoreWindow(void) {
+#if !defined(_WIN32)
+    if (qa_in_signal || !qa_windows || qa_restores != qa_focuses) qa_bad_raise = 1;
+    ++qa_restores;
+#endif
+}
+void SetWindowFocused(void) {
+#if !defined(_WIN32)
+    if (qa_in_signal || qa_restores != qa_focuses + 1) qa_bad_raise = 1;
+    ++qa_focuses;
+    if (qa_raise_test) { fputs("QA_RAISE applied\n", stderr); fflush(stderr); }
+#endif
+}
 void rlDrawRenderBatchActive(void) { }
 Image LoadImageFromScreen(void)
 {
@@ -64,7 +104,7 @@ unsigned char *stbir_resize_uint8_linear([[maybe_unused]] const unsigned char *i
     [[maybe_unused]] int output_stride, [[maybe_unused]] stbir_pixel_layout layout)
 { return NULL; }
 void UnloadImage(Image image) { free(image.data); }
-int GetRandomValue([[maybe_unused]] int min, [[maybe_unused]] int max) { return (int){0}; }
+int GetRandomValue([[maybe_unused]] int min, [[maybe_unused]] int max) { ++qa_random_calls; return (int){0}; }
 Color Fade([[maybe_unused]] Color color, [[maybe_unused]] float alpha) { return (Color){0}; }
 void DrawLineEx([[maybe_unused]] Vector2 startPos, [[maybe_unused]] Vector2 endPos, [[maybe_unused]] float thick, [[maybe_unused]] Color color) {  }
 void rlPushMatrix(void) {  }
@@ -99,7 +139,20 @@ void weapons_destroy([[maybe_unused]] weapons_system_t* weapons) { qa_destroyed 
 bool match_state_set_team_scores([[maybe_unused]] match_state_t* state, [[maybe_unused]] const int scores[4]) { return true; }
 void match_state_update([[maybe_unused]] match_state_t* state, [[maybe_unused]] float dt) {  }
 void SetConfigFlags([[maybe_unused]] unsigned int flags) {  }
-void InitWindow([[maybe_unused]] int width, [[maybe_unused]] int height, [[maybe_unused]] const char *title) { ++qa_windows; }
+void InitWindow([[maybe_unused]] int width, [[maybe_unused]] int height, [[maybe_unused]] const char *title) {
+    ++qa_windows;
+#if !defined(_WIN32)
+    if (qa_original_closed) {
+        for (int fd = 0; fd < 3; fd++) {
+            int flags = fcntl(fd, F_GETFL);
+            if (flags < 0 || ((qa_original_closed & (1u << fd)) &&
+                (flags & O_ACCMODE) != (fd == 0 ? O_RDONLY : O_WRONLY))) qa_bad_stdio = true;
+        }
+    }
+#endif
+    if (qa_resident) puts("QA_RESIDENT window stdout");
+}
+void SetRandomSeed(unsigned int seed) { ++qa_seed_calls; qa_last_seed = seed; }
 void SetTargetFPS([[maybe_unused]] int fps) {  }
 aircraft_manager_t* aircraft_manager_create(void) { return &qa_aircraft; }
 powerup_manager_t* powerup_manager_create(void) { return &qa_powerups; }
@@ -110,7 +163,10 @@ void input_model_fast_init(input_model_fast_t *model) { memset(model, 0, sizeof(
 effects_manager_t* effects_create([[maybe_unused]] int max_effects, [[maybe_unused]] int max_particles) { return &qa_effects; }
 weapons_system_t* weapons_create(void) { return &qa_weapons; }
 bool match_state_begin([[maybe_unused]] match_state_t* state) { return true; }
-void CloseWindow(void) { ++qa_closed; }
+void CloseWindow(void) {
+    ++qa_closed;
+    if (qa_resident) puts("QA_RESIDENT close stdout");
+}
 int aircraft_manager_add_with_team([[maybe_unused]] aircraft_manager_t* manager, [[maybe_unused]] const char* name, [[maybe_unused]] Color color, [[maybe_unused]] bool is_ai, [[maybe_unused]] bool is_local, [[maybe_unused]] int team_id) { return (int){0}; }
 void powerup_manager_add_spawn_point([[maybe_unused]] powerup_manager_t* manager, [[maybe_unused]] Vector3 position, [[maybe_unused]] powerup_type_t type, [[maybe_unused]] float respawn_time) {  }
 void cyberpunk_world_generate([[maybe_unused]] cyberpunk_world_t* world, [[maybe_unused]] int seed) {  }
@@ -118,6 +174,7 @@ void cyberpunk_set_theme_blade_runner([[maybe_unused]] cyberpunk_world_t* world)
 RenderTexture2D LoadRenderTexture([[maybe_unused]] int width, [[maybe_unused]] int height) { return (RenderTexture2D){0}; }
 bool WindowShouldClose(void) { return qa_frames >= qa_close_after; }
 float GetFrameTime(void) { return 1.0f / 60.0f; }
+double GetTime(void) { return (double)qa_frames / 60.0; }
 bool IsKeyDown([[maybe_unused]] int key) { ++qa_keys; return qa_agent; }
 void aircraft_update_responsive([[maybe_unused]] aircraft_t* aircraft, float stick_x, float stick_y, [[maybe_unused]] float dt) { ++qa_ticks; qa_stick_x = stick_x; qa_stick_y = stick_y; }
 bool IsKeyPressed(int key) {
@@ -148,13 +205,17 @@ void weapons_draw([[maybe_unused]] weapons_system_t* weapons) {  }
 void effects_draw([[maybe_unused]] effects_manager_t* manager, [[maybe_unused]] Camera3D camera) {  }
 void EndMode3D(void) {  }
 void EndTextureMode(void) {  }
-void BeginDrawing(void) {  }
+void BeginDrawing(void) {
+#if !defined(_WIN32)
+    if (qa_raise_test && !qa_agent && !qa_frames) qa_self_signal();
+#endif
+}
 void DrawTextureRec([[maybe_unused]] Texture2D texture, [[maybe_unused]] Rectangle rec, [[maybe_unused]] Vector2 position, [[maybe_unused]] Color tint) {  }
 void effects_draw_ui([[maybe_unused]] effects_manager_t* manager, [[maybe_unused]] int screen_width, [[maybe_unused]] int screen_height) {  }
 void EndDrawing(void) { ++qa_frames; }
 void UnloadRenderTexture([[maybe_unused]] RenderTexture2D target) { ++qa_unloads; }
 void input_controller_fast_update([[maybe_unused]] input_controller_fast_t* controller) { ++qa_polls; }
-bool IsWindowReady(void) { return !qa_window_failed; }
+bool IsWindowReady(void) { return qa_windows > 0 && !qa_window_failed; }
 
 static bool qa_agent_flag(const char *arg, int *prefix)
 {
@@ -228,18 +289,74 @@ int main(int argc, char **argv)
         --argc; ++argv;
     }
     qa_window_options(&argc, &argv);
+    if (argc > 1) {
+        static const char closed_prefix[] = "--fixture-closed-stdio=";
+        size_t length = sizeof(closed_prefix) - 1;
+        if (!strncmp(argv[1], closed_prefix, length)) {
+            if (argv[1][length] < '1' || argv[1][length] > '7' || argv[1][length + 1]) return 3;
+            qa_original_closed = (unsigned)(argv[1][length] - '0');
+            --argc; ++argv;
+        }
+    }
+#if !defined(_WIN32)
+    if (argc > 1 && !strcmp(argv[1], "--fixture-raise")) {
+        qa_raise_test = true;
+        --argc; ++argv;
+        struct sigaction prior = {.sa_handler = qa_prior_signal, .sa_flags = SA_RESTART};
+        if (sigemptyset(&prior.sa_mask) != 0 || sigaddset(&prior.sa_mask, SIGUSR2) != 0 ||
+            sigaction(SIGUSR1, &prior, &qa_original_signal) != 0) return 3;
+    }
+#endif
+    if (argc > 1 && strcmp(argv[1], "--fixture-resident") == 0) {
+        qa_agent = qa_resident = true;
+        --argc; ++argv;
+    }
     if (qa_broken_reply && !qa_close_reply_reader()) {
         if (agent_input) fclose(agent_input);
         return 3;
     }
     int result = sky_qa_entry(argc, argv);
+#if !defined(_WIN32)
+    if (qa_raise_test) {
+        bool pure = true;
+        if (qa_agent && qa_windows && !qa_window_failed && !qa_ticks) {
+            int actual = rand(); srand(qa_last_seed);
+            pure = actual == rand() && !qa_random_calls && qa_seed_calls == 2 &&
+                   sky_game_runtime_ticks() == 0;
+        }
+        struct sigaction restored;
+        bool prior = sigaction(SIGUSR1, NULL, &restored) == 0 &&
+            restored.sa_handler == qa_prior_signal && (restored.sa_flags & SA_RESTART) &&
+            sigismember(&restored.sa_mask, SIGUSR2) == 1;
+        if (!prior || raise(SIGUSR1) != 0 || !qa_prior_seen || qa_bad_raise || !pure) result = 5;
+        if (sigaction(SIGUSR1, &qa_original_signal, NULL) != 0) result = 5;
+        if (!(qa_original_closed & 4u))
+            fprintf(stderr, "QA_RAISE restore=%u focus=%u prior=%d pure=%d events=%u\n",
+                    qa_restores, qa_focuses, (int)qa_prior_seen, pure, qa_events);
+    }
+    if (qa_original_closed) {
+        for (int fd = 0; fd < 3; fd++) {
+            int status = fcntl(fd, F_GETFD);
+            bool closed = status < 0 && errno == EBADF;
+            if ((status < 0 && !closed) || closed != ((qa_original_closed & (1u << fd)) != 0))
+                qa_bad_stdio = true;
+        }
+    }
+#endif
+    if (qa_bad_stdio) result = 4;
+    if (qa_resident && !(qa_original_closed & 2u)) {
+        /* The production main must restore its caller's stdout, including
+         * failure after READY but before a usable renderer exists. */
+        if (puts("QA_RESIDENT stdout restored") == EOF || fflush(stdout) != 0) result = 3;
+    }
 #if defined(_WIN32)
     if (qa_agent && _setmode(qa_fileno(stdin), _O_TEXT) != _O_TEXT) result = 3;
 #endif
     if (agent_input) fclose(agent_input);
-    fprintf(qa_agent ? stderr : stdout, "QA_TEST status=%d windows=%u frames=%u closed=%u destroyed=%u unloads=%u\n",
+    if (!(qa_original_closed & 4u)) fprintf(qa_agent ? stderr : stdout, "QA_TEST status=%d windows=%u frames=%u closed=%u destroyed=%u unloads=%u\n",
         result, qa_windows, qa_frames, qa_closed, qa_destroyed, qa_unloads);
-    if (qa_agent) fprintf(stderr, "QA_AGENT ticks=%u keys=%u polls=%u stick=%.3f,%.3f\n",
+    if (qa_agent && !(qa_original_closed & 4u)) fprintf(stderr, "QA_AGENT ticks=%u keys=%u polls=%u stick=%.3f,%.3f\n",
         qa_ticks, qa_keys, qa_polls, (double)qa_stick_x, (double)qa_stick_y);
+    if (qa_resident && !(qa_original_closed & 4u)) fprintf(stderr, "QA_RESIDENT events=%u\n", qa_events);
     return result;
 }
