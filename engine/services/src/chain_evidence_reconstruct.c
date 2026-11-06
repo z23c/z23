@@ -20,6 +20,7 @@
 #include "services/chain_evidence_authority_service.h"
 #include "services/chain_evidence_persistence_service.h"
 #include "chain_evidence_reconstruct.h"
+#include "services/island_anchor.h"
 
 #include "models/database.h"
 #include "chain/pow.h"
@@ -108,6 +109,9 @@ static bool cer_tip_ancestry_linked(struct chain_state_repository *csr,
             return false;
         if (p->nHeight == 0)
             return p->pprev == NULL;
+        /* FlySync island root: exactly the recorded (height, hash). */
+        if (!p->pprev && island_anchor_is_root(p))
+            return true;
         if (!p->pprev || p->pprev->nHeight != p->nHeight - 1)
             return false;
     }
@@ -190,6 +194,14 @@ static bool cer_check_tip_hash(struct block_index *active_tip,
     }
     return true;
 }
+
+#ifdef ZCL_TESTING
+bool cec_test_tip_ancestry_linked(struct chain_state_repository *csr,
+                                  struct block_index *tip)
+{
+    return cer_tip_ancestry_linked(csr, tip);
+}
+#endif
 
 static bool cer_check_tip_ancestry(struct chain_evidence_controller *authority,
                                    struct block_index *active_tip,

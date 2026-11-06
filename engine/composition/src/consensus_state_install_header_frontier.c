@@ -7,6 +7,7 @@
 #include "chain/checkpoints.h"
 #include "jobs/validate_headers_stage.h"
 #include "services/chain_state_service.h"
+#include "services/island_anchor.h"
 #include "util/log_macros.h"
 #include "validation/main_state.h"
 
@@ -94,4 +95,22 @@ bool consensus_state_header_chain_owns(struct main_state *ms, int32_t height,
     struct block_index *at = block_index_get_ancestor(header, (int)height);
     return at && at->phashBlock &&
            memcmp(at->phashBlock->data, block_hash, 32) == 0;
+}
+
+/* True iff the registered FlySync island anchor names exactly this rung. */
+static bool install_island_rung_is(int32_t height, const uint8_t block_hash[32])
+{
+    struct island_anchor a;
+    return island_anchor_get(&a) && a.rung_height == height &&
+           memcmp(a.rung_hash.data, block_hash, 32) == 0;
+}
+
+bool consensus_state_install_header_ready_for(struct main_state *ms,
+                                              int32_t height,
+                                              const uint8_t block_hash[32])
+{
+    if (!consensus_state_header_chain_owns(ms, height, block_hash))
+        return false;
+    return consensus_state_checkpoint_header_ready(ms) ||
+           install_island_rung_is(height, block_hash);
 }

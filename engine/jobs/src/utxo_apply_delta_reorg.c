@@ -16,6 +16,7 @@
 #include "jobs/stage_helpers.h"
 #include "jobs/stage_log_rows.h"
 #include "jobs/utxo_apply_stage.h"
+#include "services/island_anchor.h"   /* FlySync rung floor */
 #include "chain/chain.h"
 #include "core/uint256.h"
 #include "event/event.h"
@@ -588,6 +589,17 @@ static bool utxo_apply_reorg_fork_below_finality(int fork, int floor_h)
     return fork < 0 && floor_h > 0;
 }
 
+/* FlySync: a node installed from a rung bundle holds no state below the rung,
+ * so an unwind whose fork point lies below it is refused. Only a node whose
+ * durable island-anchor fact is registered is affected. */
+static bool utxo_apply_reorg_island_refuses(int fork, const char **reason)
+{
+    if (!island_anchor_refuses_fork_at((int32_t)fork))
+        return false;
+    *reason = "fork point below the FlySync rung; no state exists below it";
+    return true;
+}
+
 /* Emit the shared refusal side effects for a below-finality unwind refusal:
  * the EV_BLOCK_REJECTED event and the typed blocker. */
 static void utxo_apply_reorg_emit_refusal(int tip_h, int fork_h)
@@ -679,7 +691,8 @@ bool utxo_apply_reorg_unwind_if_needed(sqlite3 *db,
      * gated purely on this — there is no external engine to wait on. */
     {
         const char *reason = NULL;
-        if (!reorg_is_allowed(C - 1, fork, &reason)) {
+        if (!reorg_is_allowed(C - 1, fork, &reason) ||
+            utxo_apply_reorg_island_refuses(fork, &reason)) {
             LOG_WARN("utxo_apply",
                 "[utxo_apply] reorg unwind refused below finality floor "
                 "tip=%d fork=%d depth=%d reason=%s (ZCL_FINALITY_DEPTH=%d)",

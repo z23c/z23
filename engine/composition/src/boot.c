@@ -9,6 +9,7 @@
 #include "config/boot_blkidx_ladder.h"
 #include "config/boot_blocktree_cleanup.h"
 #include "config/boot_flight_recorder.h"
+#include "config/flysync_island.h"
 #include "config/bundle_exporter.h"
 #include "config/boot_cursor_state.h"
 #include "config/boot_datadir_lock.h"
@@ -1601,6 +1602,7 @@ static bool boot_step_open_progress_store(struct app_context *ctx)
     bool progress_open = progress_store_open(ctx->datadir);
     t = boot_submark("progress.store_open", t);
     boot_snapshot_install_gate_boot(progress_open, ctx->load_snapshot_at_own_height);
+    if (progress_open) flysync_island_boot_register(); /* before the index loads */
     t = boot_submark("progress.install_gate", t);
     if (progress_open) {
         /* Wave A3 flip, second half: progress_store_open() already migrated a
@@ -3623,6 +3625,7 @@ bool app_init(struct app_context *ctx)
     if (!boot_seq_load_wallet(ctx, &seq)) return false;
     if (!boot_seq_open_coins_state(ctx, &seq)) return false;
     if (!boot_seq_load_block_index(ctx, &seq)) return false;
+    if (!flysync_island_boot_after_index(ctx, &g_state)) return false;
     if (!boot_seq_reconcile_chain_state(ctx, &seq)) return false;
     if (!boot_seq_load_sapling_tree(ctx)) return false;
     if (!boot_seq_select_state_source(ctx)) return false;

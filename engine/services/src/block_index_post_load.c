@@ -8,6 +8,7 @@
 #include "services/block_index_loader.h"
 #include "services/chain_state_service.h"
 #include "services/chain_tip.h"
+#include "services/island_anchor.h"
 #include "chain/chain.h"
 #include "chain/pow.h"
 #include "validation/chainstate.h"
@@ -33,8 +34,8 @@ void block_index_forward_pass(struct block_index **sorted,
         if (pindex->pprev)
             arith_uint256_add(&pindex->nChainWork,
                               &pindex->pprev->nChainWork, &proof);
-        else
-            pindex->nChainWork = proof;
+        else if (!island_anchor_seed_root_work(pindex))
+            pindex->nChainWork = proof;   /* FlySync root keeps its work */
 
         if (pindex->nTx > 0) {
             if (pindex->pprev) {

@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for FlySync island start. */
+ZCL_MODULE_CAPABILITY("engine/composition/src/flysync_island.c", CAP_FS_READ|CAP_FS_WRITE, "reads the datadir's staged bundle path and sovereign marker; writes island header rows through the event log and the island fact through the progress store")

@@ -244,8 +244,7 @@ static bool detect_checkpoint_header_solution_repair(void)
 
     /* The header chain must own the checkpoint block so the fetched solution can
      * be validated + a pass record minted against a resolvable index entry. */
-    if (!consensus_state_checkpoint_header_ready(ms) ||
-        !consensus_state_header_chain_owns(ms, tgt.height, cp_hash.data))
+    if (!consensus_state_install_header_ready_for(ms, tgt.height, cp_hash.data))
         return false; // raw-return-ok:header-chain-not-yet-at-checkpoint
 
     /* Only fetch if there is actually a bundle waiting to install. */

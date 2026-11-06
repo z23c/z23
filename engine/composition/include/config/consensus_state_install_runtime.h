@@ -157,6 +157,14 @@ bool boot_staged_bundle_wait_target(const char *bundle_path, int32_t *height,
 bool consensus_state_header_chain_owns(struct main_state *ms, int32_t height,
                                        const uint8_t block_hash[32]);
 
+/* The install-readiness header gate: the header chain owns (height, hash) AND
+ * either owns the compiled keystone (unchanged rule) or is a FlySync island
+ * whose durable anchor fact names exactly this rung (services/island_anchor.h).
+ * A node without that fact gets the unchanged keystone requirement. */
+bool consensus_state_install_header_ready_for(struct main_state *ms,
+                                              int32_t height,
+                                              const uint8_t block_hash[32]);
+
 /* Post-install fold-span gate — the call-site wiring around
  * boot_refold_body_span_contiguous() (impl in engine/composition/src/boot_refold_staged.c,
  * contract in config/boot.h), reused here (impl in engine/composition/src/

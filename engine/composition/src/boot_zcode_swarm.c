@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * The only lib/net-to-swarm adapter; see config/boot_zcode_swarm.h. */
+#include "config/flysync_island.h"
 #include "config/state_offer_service.h"
 #include "config/state_offer_peer.h"
 #include "config/boot_plugin_fetch.h"
@@ -1221,6 +1222,7 @@ void boot_zcode_swarm_tick(struct msg_processor *mp, struct p2p_node *node,
      * not met yet; this is where it can. The call decides and returns — the
      * download it may start runs on its own thread, never on this one. */
     state_offer_service_tick();
+    flysync_island_tick();
     state_offer_peer_tick(mp, node);
     int64_t wall = (int64_t)platform_time_wall_time_t();
     boot_zcode_swarm_lock();
@@ -1345,6 +1347,7 @@ bool boot_zcode_swarm_send_messages(void *ctx, struct p2p_node *node, bool trick
     if (!boot_zcode_callback_enter()) return ok;
     if (node && boot_zcode_swarm_eligible(node)) {
         state_offer_service_tick();
+        flysync_island_tick();
         state_offer_peer_tick(ctx, node);
     }
     boot_zcode_callback_leave();

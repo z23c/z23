@@ -99,8 +99,7 @@ static bool detect_checkpoint_bundle_install_ready(void)
 
     /* The header chain must genuinely own the baked block before the install can
      * bind — the exact precondition the boot-time deferral waits on. */
-    if (!consensus_state_checkpoint_header_ready(ms) ||
-        !consensus_state_header_chain_owns(ms, target_h, target_hash))
+    if (!consensus_state_install_header_ready_for(ms, target_h, target_hash))
         return false; // raw-return-ok:detect-poll-headers-not-yet-at-checkpoint-is-normal
 
     /* The header's Equihash solution must be durably available so the install
@@ -137,8 +136,7 @@ static enum condition_remedy_result remedy_checkpoint_bundle_install_ready(void)
     int32_t target_h = 0;
     uint8_t target_hash[32];
     if (!boot_staged_bundle_wait_target(bundle, &target_h, target_hash) ||
-        !consensus_state_checkpoint_header_ready(ms) ||
-        !consensus_state_header_chain_owns(ms, target_h, target_hash)) {
+        !consensus_state_install_header_ready_for(ms, target_h, target_hash)) {
         free(bundle);
         return COND_REMEDY_SKIP; // raw-return-ok:precondition-regressed-this-tick
     }

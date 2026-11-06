@@ -43,4 +43,11 @@ bool cec_reconstruct_active_tip_evidence(
     bool drift_refused,
     char reason_out[192]);
 
+#ifdef ZCL_TESTING
+/* The startup ancestry walk (tip links down to genesis, or to a registered
+ * FlySync island root), exposed for tests. */
+bool cec_test_tip_ancestry_linked(struct chain_state_repository *csr,
+                                  struct block_index *tip);
+#endif
+
 #endif /* ZCL_SERVICES_CHAIN_EVIDENCE_RECONSTRUCT_H */

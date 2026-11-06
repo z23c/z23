@@ -20,6 +20,7 @@
  * install SUPERSEDES the transparent-only from-anchor reset. Fail-closed
  * everywhere; a durable marker prevents re-installing over sovereign state. */
 
+#include "config/flysync_island.h"
 #include "config/consensus_state_install_runtime.h"
 
 #include "config/boot.h"                       /* app_context, boot_refold_body_span_contiguous,
@@ -804,7 +805,10 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
      * repair condition's old path) misses the one header a new node needs.
      * Mainnet only: the compiled checkpoint is mainnet. Skip a datadir that
      * already holds sovereign installed state. */
-    if (!ctx->regtest && !ctx->testnet &&
+    /* -flysync (config/flysync_island.h) walks only the rung window: no
+     * keystone capture, no weld, no header-seed import below the rung. */
+    const bool flysync = flysync_island_phase() != FLYSYNC_OFF;
+    if (!flysync && !ctx->regtest && !ctx->testnet &&
         !boot_consensus_bundle_marker_exists(ctx->datadir))
         checkpoint_header_fetch_arm_compiled();
 
@@ -827,9 +831,6 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
      * all it contributes; the content verification and the CHECKPOINT_ROM
      * install authority below are untouched. Never fails boot; a first-ever
      * boot with an empty table arms nothing and behaves exactly as before. */
-    boot_bundle_fetch_arm_peer_seeds(ndb);
-    (void)boot_bundle_fetch_maybe(ctx->datadir, ctx);
-
     /* Import the swarm-downloaded header-chain seed (block_index.bin) into the
      * header index IN-PROCESS so pindex_best_header climbs to the artifact tip
      * THIS boot — the checkpoint-bundle install below defers on the header chain
@@ -837,7 +838,11 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
      * crawl that otherwise gates it. Verified flat load + header-only clamp; a
      * miss is fail-open (headers still arrive via P2P). No-op unless a fresh
      * node actually downloaded the artifact above. */
-    (void)boot_header_seed_import_maybe(ctx->datadir, ms);
+    if (!flysync) {
+        boot_bundle_fetch_arm_peer_seeds(ndb);
+        (void)boot_bundle_fetch_maybe(ctx->datadir, ctx);
+        (void)boot_header_seed_import_maybe(ctx->datadir, ms);
+    }
 
     /* 1b/1c — a complete-state install (durable request OR autodetected bundle)
      * SUPERSEDES the transparent-only from-anchor reset (which leaves shielded

@@ -48,6 +48,7 @@
 
 #include "services/utxo_recovery_service.h"
 #include "services/block_index_loader.h"
+#include "services/island_anchor.h"     /* FlySync island root */
 #include "chain/chain.h"                 /* block_index_build_skip */
 #include "validation/main_state.h"
 #include "jobs/reducer_frontier.h"
@@ -203,6 +204,10 @@ const struct block_index *utxo_recovery_block_ancestry_break(
      * root exactly there). A root strictly above anchor+1 is a detached
      * island — not derivable state. */
     if (p->nHeight == 0 || p->nHeight <= anchor + 1)
+        return NULL;
+    /* FlySync: the durable island-anchor fact names exactly this root (height
+     * and hash), hash-linked to a compiled ladder rung. No fact, no change. */
+    if (island_anchor_is_root(p))
         return NULL;
     /* PART C: the operator's cold-import UTXO-snapshot seed anchor is a
      * SHA3-attested trust root above the compiled anchor — terminate cleanly
