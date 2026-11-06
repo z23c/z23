@@ -232,6 +232,10 @@ static bool onion_discover_and_fetch(struct onion_fixture *f)
     ONION_CHECK(st.chosen_height == ONION_RUNG);
     ONION_CHECK(st.last_decision == STATE_OFFER_DECIDE_FETCH);
     ONION_CHECK(state_offer_service_test_fetch_running());
+    /* The fetch thread opens its link session on its own schedule. */
+    struct timespec t = {0, 1000000};
+    for (int i = 0; i < 10000 && !state_offer_peer_serving_held_fetch(f->to_server); i++)
+        (void)nanosleep(&t, NULL);
     return true;
 }
 
@@ -367,7 +371,7 @@ static bool onion_reconnect_resumes(struct onion_fixture *f)
     f->list[0] = f->to_server; f->list[1] = f->to_client;
     f->nm.num_nodes = 2;
     memset(f->chunk_req, 0, sizeof(f->chunk_req));
-    for (int i = 0; i < 200 && !state_offer_peer_serving_held_fetch(f->to_server); i++)
+    for (int i = 0; i < 5000 && !state_offer_peer_serving_held_fetch(f->to_server); i++)
         onion_cycle(f);
     ONION_CHECK(state_offer_peer_serving_held_fetch(f->to_server));
     return true;
