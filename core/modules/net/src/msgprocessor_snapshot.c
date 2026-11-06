@@ -1288,6 +1288,7 @@ static void mp_zs_on_block_data(struct msg_processor *mp,
     }
 }
 
+#ifdef ZCL_TESTING
 void msgprocessor_test_block_data_during_swarm(struct msg_processor *mp,
                                                struct p2p_node *node,
                                                struct byte_stream *s)
@@ -1296,6 +1297,7 @@ void msgprocessor_test_block_data_during_swarm(struct msg_processor *mp,
     mp_zs_on_block_data(mp, node, s);
     atomic_store(&g_block_swarm_active, was_active);
 }
+#endif
 
 /* Peer sends their piece availability bitmap.
  * DEFENSIVE: validate length is reasonable. */

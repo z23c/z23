@@ -2497,17 +2497,23 @@ struct pin_compact_outcome {
 enum pin_requeue_setup {
     PIN_REQUEUE_WANTED,        /* a known block above the tip */
     PIN_REQUEUE_NO_INDEX,      /* the block has no index */
-    PIN_REQUEUE_BELOW_TIP,     /* at or below the provable frontier */
+    PIN_REQUEUE_FORK_BELOW_TIP, /* off the active chain, at or below the
+                                 * provable frontier: a branch that may
+                                 * carry more work */
+    PIN_REQUEUE_ON_CHAIN,      /* already on the active chain */
     PIN_REQUEUE_HAVE_DATA,     /* the body is already held */
     PIN_REQUEUE_TOMBSTONED,    /* requested, and received moments ago */
 };
 
 static void pin_requeue_apply_setup(enum pin_requeue_setup setup,
+                                    struct main_state *ms,
                                     struct block_index *bi,
                                     const struct uint256 *hash)
 {
-    if (setup == PIN_REQUEUE_BELOW_TIP) {
-        reducer_frontier_provable_tip_set(bi->nHeight);
+    if (setup == PIN_REQUEUE_FORK_BELOW_TIP) {
+        reducer_frontier_provable_tip_set(bi->nHeight + 1);
+    } else if (setup == PIN_REQUEUE_ON_CHAIN) {
+        (void)active_chain_install_tip_slot(&ms->chain_active, bi);
     } else if (setup == PIN_REQUEUE_HAVE_DATA) {
         bi->nStatus |= BLOCK_HAVE_DATA;
     } else if (setup == PIN_REQUEUE_TOMBSTONED) {
@@ -2540,7 +2546,7 @@ static struct pin_compact_outcome pin_compact_assemble_with(
     peer_scoring_init();
     test_msg_dl_reset();
     if (bi)
-        pin_requeue_apply_setup(setup, bi, &hash);
+        pin_requeue_apply_setup(setup, &ms, bi, &hash);
     struct net_manager nm;
     net_manager_init(&nm);
     struct msg_processor mp;
@@ -2626,8 +2632,14 @@ static int test_compact_requeue_guards(void)
             pin_compact_submit_says_nothing, 0x44, PIN_REQUEUE_WANTED);
         ASSERT(wanted.handled && !wanted.seen && wanted.queued);
 
+        /* Height is not the test: a branch block at or below our tip is still
+         * fetched, or a reorg onto more work would stall. */
+        struct pin_compact_outcome fork = pin_compact_assemble_with(
+            pin_compact_submit_says_nothing, 0x44, PIN_REQUEUE_FORK_BELOW_TIP);
+        ASSERT(fork.handled && !fork.seen && fork.queued);
+
         enum pin_requeue_setup refused[] = {
-            PIN_REQUEUE_NO_INDEX, PIN_REQUEUE_BELOW_TIP, PIN_REQUEUE_HAVE_DATA,
+            PIN_REQUEUE_NO_INDEX, PIN_REQUEUE_ON_CHAIN, PIN_REQUEUE_HAVE_DATA,
         };
         for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
             struct pin_compact_outcome out = pin_compact_assemble_with(

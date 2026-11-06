@@ -1143,3 +1143,7 @@ later lane flips it HARD.
 - 2026-11-06T06:26:55Z — REASON: Treat a bad undo count as a bad record, not a memory failure
   old ROOT: 652c67d10321259bfa9988225a25ea911c2b4d43dc5eebf17007611f9447d614
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T06:27:07Z — REASON: Requeue a retryable block unless it is held, failed or on the chain
+  old ROOT: 747d63fffe21d98be43ed2782d2c1e6f03fa43f5b9643ec754372bc7be5cdfcd
+  by: owner unseal ritual (make core-unseal)

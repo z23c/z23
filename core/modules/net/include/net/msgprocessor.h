@@ -558,10 +558,12 @@ bool msgprocessor_test_swarm_try_claim(void);
 void msgprocessor_test_swarm_release(void);
 bool msgprocessor_test_swarm_is_active(void);
 
+#ifdef ZCL_TESTING
 /* test hook: run one zblkdata message as if a block swarm were active. */
 void msgprocessor_test_block_data_during_swarm(struct msg_processor *mp,
                                                struct p2p_node *node,
                                                struct byte_stream *s);
+#endif
 
 /* test hook (D1): drive the swarm's aggregate SHA3 UTXO-snapshot verify
  * + reaction (peer offence + typed blocker on mismatch) directly,
