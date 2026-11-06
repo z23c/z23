@@ -58,8 +58,20 @@ static _Atomic int32_t g_baseline_hstar = 0;
  * END, so this wording is kept under that cap deliberately (228 bytes
  * formatted). A longer one silently loses the only sentence that says what to
  * do about it. */
+static _Atomic bool g_rung_only = false;
+
 static void build_reason(char *out, size_t cap)
 {
+    if (atomic_load(&g_rung_only)) {
+        /* A FlySync island refuses every offer but its checkpoint rung, so a
+         * keystone or newer offer is not "stale" here: name what is missing. */
+        snprintf(out, cap,
+                 "no peer offers the checkpoint rung bundle: a FlySync node "
+                 "takes only that one (none once it is installed), so other "
+                 "offers are not taken; a waiting node falls back to normal "
+                 "sync when its wait closes; see node.log");
+        return;
+    }
     snprintf(out, cap,
              "no connected peer offered a state bundle within %d blocks of "
              "its own tip — the node is doing full from-genesis IBD; see "
@@ -88,8 +100,18 @@ void stale_offers_only_raise(const struct stale_offers_only_facts *f)
     atomic_store(&g_peers_offering, f->peers_offering);
     atomic_store(&g_offers_seen, f->offers_seen);
     atomic_store(&g_baseline_hstar, f->baseline_hstar);
+    atomic_store(&g_rung_only, f->rung_only);
     atomic_store(&g_active, true);
     raise_blocker();
+    if (f->rung_only) {
+        LOG_WARN(SOO_SUBSYS,
+                 "[condition:%s] no peer offers the checkpoint rung, the only "
+                 "bundle a FlySync node takes (newest_height_seen=%d "
+                 "peers_offering=%u offers_seen=%u) — named blocker "
+                 "%s", SOO_NAME, f->newest_height_seen, f->peers_offering,
+                 f->offers_seen, STALE_OFFERS_ONLY_BLOCKER_ID);
+        return;
+    }
     LOG_WARN(SOO_SUBSYS,
              "[condition:%s] all connected peers' state offers are stale "
              "(newest_height_seen=%d peers_offering=%u offers_seen=%u "
@@ -172,6 +194,7 @@ void stale_offers_only_test_reset(void)
     atomic_store(&g_peers_offering, 0);
     atomic_store(&g_offers_seen, 0);
     atomic_store(&g_baseline_hstar, 0);
+    atomic_store(&g_rung_only, false);
     blocker_clear(STALE_OFFERS_ONLY_BLOCKER_ID);
     condition_reset_state(&c_stale_offers_only);
 }

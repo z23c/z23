@@ -27,6 +27,7 @@ struct stale_offers_only_facts {
     uint32_t peers_offering;     /* distinct peers that sent an offer at all */
     uint32_t offers_seen;        /* verified offers this run, retained or not */
     int32_t  baseline_hstar;     /* provable tip at raise time, for the log/detail */
+    bool     rung_only;          /* a FlySync island takes only its checkpoint rung */
 };
 
 /* Raise the typed bootstrap.stale_offers_only DEPENDENCY blocker immediately

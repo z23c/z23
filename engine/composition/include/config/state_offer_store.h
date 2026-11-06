@@ -114,6 +114,7 @@ const char *state_offer_decision_string(enum state_offer_decision d);
  * height). Offers it refuses are kept but never chosen. */
 typedef bool (*state_offer_height_filter_fn)(int32_t bundle_height);
 void state_offer_store_set_height_filter(state_offer_height_filter_fn fn);
+bool state_offer_store_height_filter_active(void);
 
 /* Clear every offer, strike and clock. */
 void state_offer_store_reset(void);

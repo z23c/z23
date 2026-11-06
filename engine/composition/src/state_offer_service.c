@@ -858,6 +858,7 @@ void state_offer_service_tick(void)
             .peers_offering = st.peers_offering,
             .offers_seen = st.offers_seen,
             .baseline_hstar = reducer_frontier_provable_tip_cached(),
+            .rung_only = state_offer_store_height_filter_active(),
         };
         stale_offers_only_raise(&f);
     }

@@ -104,6 +104,7 @@ static void facts_from_store(struct stale_offers_only_facts *f)
 {
     struct state_offer_store_status st;
     state_offer_store_status_get(&st);
+    memset(f, 0, sizeof(*f));
     f->newest_height_seen = st.newest_height_seen;
     f->peers_offering = st.peers_offering;
     f->offers_seen = st.offers_seen;
@@ -138,6 +139,31 @@ static int raised_when_nothing_offered(void)
         char reason[BLOCKER_REASON_MAX];
         soo_reason(reason, sizeof(reason));
         ASSERT(strstr(reason, "bundles/") != NULL);
+    } TEST_END
+    return failures;
+}
+
+/* ── (1b) a FlySync island (height filter on) → the reason names the rung ── */
+
+static int rung_only_reason_names_the_rung(void)
+{
+    int failures = 0;
+    TEST_CASE("a FlySync island's reason names the missing checkpoint rung") {
+        blocker_module_init();
+        stale_offers_only_test_reset();
+        struct stale_offers_only_facts f;
+        memset(&f, 0, sizeof(f));
+        f.newest_height_seen = 3056758;
+        f.peers_offering = 1;
+        f.offers_seen = 1;
+        f.rung_only = true;
+        stale_offers_only_raise(&f);
+        char reason[BLOCKER_REASON_MAX];
+        soo_reason(reason, sizeof(reason));
+        ASSERT(strstr(reason, "checkpoint rung") != NULL);
+        ASSERT(strstr(reason, "from-genesis") == NULL);
+        ASSERT(strlen(reason) < BLOCKER_REASON_MAX - 1);
+        stale_offers_only_test_reset();
     } TEST_END
     return failures;
 }
@@ -337,6 +363,7 @@ int test_stale_offers_only(void)
     int failures = 0;
 
     failures += raised_when_nothing_offered();
+    failures += rung_only_reason_names_the_rung();
     failures += raised_when_only_stale_offers_seen();
     failures += witness_clears_on_hstar_climb();
     failures += witness_clears_on_offer_chosen();

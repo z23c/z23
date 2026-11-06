@@ -49,6 +49,11 @@ void state_offer_store_set_height_filter(state_offer_height_filter_fn fn)
 {
     atomic_store(&g_height_filter, fn);
 }
+
+bool state_offer_store_height_filter_active(void)
+{
+    return atomic_load(&g_height_filter) != NULL;
+}
 static uint8_t g_chosen_digest[32];
 static bool g_fallback_named;
 static char g_fallback_reason[128];
