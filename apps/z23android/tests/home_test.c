@@ -344,10 +344,12 @@ static void scrollable_home_grid(const struct zapp_node *home)
 {
     /* Primary and app grids must retain their row heights inside a scrollable Home. */
     assert(home->kind == ZAPP_NODE_LIST && home->child_count >= 3);
-    assert(home->children[1].kind == ZAPP_NODE_GRID && home->children[1].child_count == 3);
-    assert(!strcmp(home->children[1].children[0].id, "wallet") &&
-           !strcmp(home->children[1].children[1].id, "scan") &&
-           !strcmp(home->children[1].children[2].id, "assistant"));
+    assert(home->children[0].kind == ZAPP_NODE_GRID && home->children[0].child_count == 3);
+    assert(!strcmp(home->children[0].children[0].id, "wallet") &&
+           !strcmp(home->children[0].children[1].id, "scan") &&
+           !strcmp(home->children[0].children[2].id, "assistant"));
+    assert(home->children[1].kind == ZAPP_NODE_COLUMN && !strcmp(home->children[1].card, "phone"));
+    assert(home->children[1].child_count == 3 && !strcmp(home->children[1].children[2].id, "node_toggle"));
     assert(home->children[2].kind == ZAPP_NODE_GRID && !strcmp(home->children[2].card, "z23_app"));
 }
 static void built_in_layouts(void)

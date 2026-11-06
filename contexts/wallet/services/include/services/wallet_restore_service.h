@@ -92,6 +92,10 @@ struct wallet_restore_report {
  * path does not fit the probe buffer is refused before any filesystem call. */
 struct zcl_result wallet_restore_datadir_free(const char *datadir);
 
+/* Holds the existing node PID lock until release; -1 means no pidfile. */
+struct zcl_result wallet_restore_node_lock_acquire(const char *datadir, int *lock_fd);
+void wallet_restore_node_lock_release(int *lock_fd);
+
 /* ── the WRITER's lock, held across check-then-write ──────────────────
  *
  * wallet_restore_datadir_free() above answers a question and lets go. That

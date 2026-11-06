@@ -79,6 +79,7 @@
 #include "models/database_owner_lease.h"
 #include "models/wallet_key.h"
 #include "services/wallet_recovery_service.h"
+#include "services/wallet_restore_service.h"
 #include "support/cleanse.h"
 #include "wallet/mnemonic.h"
 #include "wallet/wallet.h"
@@ -94,6 +95,8 @@
 #include <sys/types.h>
 #if !defined(_WIN32)
 #include <sys/wait.h>
+#include <sys/file.h>
+#include <fcntl.h>
 #endif
 #include <unistd.h>
 
@@ -216,6 +219,109 @@ static struct zcl_result wrs_restore(const char *dir, const char *phrase,
     };
     return wallet_recovery_run(&req, rep);
 }
+
+#if !defined(_WIN32)
+static void wrs_status(const char *dir, struct zcl_command_reply *reply)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_str(&input, "datadir", dir);
+    struct zcl_command_request request = { .input = &input };
+    zcl_command_reply_init(reply, "zcl.wallet_recovery_status.v1");
+    zcl_native_handle_wallet_recovery_status(&request, reply);
+    json_free(&input);
+}
+
+static int t_persisted_receive_address(void)
+{
+    int failures = 0;
+    char dir[256], pid[300], dbpath[300];
+    wrs_mkfixture(dir, sizeof(dir), "receive");
+    wrs_set_at_rest("case-receive-passphrase", NULL);
+    struct wallet_recovery_report rep;
+    struct zcl_result r = wrs_restore(dir, WRS_PHRASE_A, &rep);
+    WRS_CHECK("encrypted wallet fixture created", r.ok);
+    if (!r.ok) { test_rm_rf(dir); return failures; }
+    wrs_set_at_rest(NULL, NULL);
+    wallet_lock_reset_for_test();
+    struct zcl_command_reply reply;
+    wrs_status(dir, &reply);
+    WRS_CHECK("missing pidfile does not expose persisted address",
+              !json_get(&reply.data, "persisted_shielded_address"));
+    zcl_command_reply_free(&reply);
+    snprintf(pid, sizeof(pid), "%s/zclassic23.pid", dir);
+    int fd = open(pid, O_CREAT | O_RDWR, 0600);
+    WRS_CHECK("pidfile fixture created", fd >= 0);
+    if (fd < 0) { test_rm_rf(dir); return failures; }
+    int guard_fd = -1;
+    struct zcl_result guard = wallet_restore_node_lock_acquire(dir, &guard_fd);
+    WRS_CHECK("status guard holds the node lock", guard.ok && guard_fd >= 0);
+    WRS_CHECK("a competing node cannot acquire the held guard",
+              flock(fd, LOCK_EX | LOCK_NB) != 0);
+    wallet_restore_node_lock_release(&guard_fd);
+    wrs_status(dir, &reply);
+    const char *address = json_get_str(json_get(&reply.data, "persisted_shielded_address"));
+    WRS_CHECK("locked wallet exposes its persisted public address", address && address[0]);
+    WRS_CHECK("selected address is the first committed address",
+              address && !strcmp(address, rep.first_shielded_address));
+    WRS_CHECK("locked wallet remains locked", !strcmp(reply.error.code, "WALLET_LOCKED"));
+    zcl_command_reply_free(&reply);
+    WRS_CHECK("fixture acquires node lock", flock(fd, LOCK_EX | LOCK_NB) == 0);
+    wrs_status(dir, &reply);
+    WRS_CHECK("held node lock refuses status", !strcmp(reply.error.code, "DATADIR_LOCKED"));
+    WRS_CHECK("held node lock exposes no address", !json_get(&reply.data, "persisted_shielded_address"));
+    zcl_command_reply_free(&reply);
+    (void)flock(fd, LOCK_UN);
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(dbpath, &db);
+    WRS_CHECK("fixture database opens", rc == SQLITE_OK);
+    if (rc == SQLITE_OK) {
+        rc = sqlite3_exec(db, "CREATE TEMP TABLE saved AS SELECT * FROM wallet_sapling_keys;"
+                              "UPDATE wallet_sapling_keys SET pk_d=zeroblob(32)", NULL, NULL, NULL);
+        WRS_CHECK("fixture invalidates public keys", rc == SQLITE_OK);
+        wrs_status(dir, &reply);
+        WRS_CHECK("mismatched public key is not exposed", !json_get(&reply.data, "persisted_shielded_address"));
+        zcl_command_reply_free(&reply);
+        const char *const damage[] = {
+            "CAST(zeroblob(4)||substr(xsk,5) AS BLOB)",
+            "CAST(substr(xsk,1,4)||zeroblob(4)||substr(xsk,9) AS BLOB)",
+            "CAST(substr(xsk,1,8)||zeroblob(4)||substr(xsk,13) AS BLOB)",
+            "zeroblob(0)"
+        };
+        for (size_t i = 0; i < sizeof(damage) / sizeof(damage[0]); i++) {
+            char sql[512];
+            snprintf(sql, sizeof(sql), "DELETE FROM wallet_sapling_keys;"
+                     "INSERT INTO wallet_sapling_keys SELECT * FROM saved;"
+                     "UPDATE wallet_sapling_keys SET xsk=%s", damage[i]);
+            rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+            WRS_CHECK("fixture changes xsk envelope field", rc == SQLITE_OK);
+            wrs_status(dir, &reply);
+            WRS_CHECK("invalid envelope or watch-only row exposes no address",
+                      !json_get(&reply.data, "persisted_shielded_address"));
+            zcl_command_reply_free(&reply);
+        }
+        rc = sqlite3_exec(db, "DELETE FROM wallet_sapling_keys;"
+                              "INSERT INTO wallet_sapling_keys SELECT * FROM saved;"
+                              "UPDATE wallet_sapling_keys SET xsk=zeroblob(1)", NULL, NULL, NULL);
+        WRS_CHECK("fixture invalidates xsk rows", rc == SQLITE_OK);
+        wrs_status(dir, &reply);
+        WRS_CHECK("malformed xsk is not exposed", !json_get(&reply.data, "persisted_shielded_address"));
+        zcl_command_reply_free(&reply);
+        rc = sqlite3_exec(db, "DELETE FROM wallet_sapling_keys", NULL, NULL, NULL);
+        WRS_CHECK("fixture removes sapling rows", rc == SQLITE_OK);
+        sqlite3_close(db);
+        wrs_status(dir, &reply);
+        WRS_CHECK("missing row exposes no address", !json_get(&reply.data, "persisted_shielded_address"));
+        zcl_command_reply_free(&reply);
+    } else if (db) sqlite3_close(db);
+    close(fd);
+    wallet_lock_reset_for_test();
+    test_rm_rf(dir);
+    return failures;
+}
+#endif
 
 /* ── case 1: a damaged node.db is refused, never quarantined ───────── */
 
@@ -1298,6 +1404,9 @@ int test_wallet_recovery_safety(void)
 
     failures += t_damaged_db_is_refused_not_reset();
     failures += t_recovery_status_rejects_a_truncated_datadir();
+#if !defined(_WIN32)
+    failures += t_persisted_receive_address();
+#endif
     failures += t_restore_leaf_requires_an_explicit_datadir();
     failures += t_backup_restore_leaf_rejects_a_truncated_datadir();
     failures += t_restore_leaf_rejects_a_truncated_datadir();

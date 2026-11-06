@@ -165,6 +165,7 @@ struct wsu {
 bool wsu_init(struct wsu *w, const struct wsu_env *env, const struct sun *node, const char *files);
 void wsu_destroy(struct wsu *w);
 bool wsu_receive_address(struct wsu *w, char *out, size_t cap, uint64_t *generation);
+bool wsu_address_generation(struct wsu *w, uint64_t *generation);
 
 /* Protects the window and returns whether every protection is in force. Words are withheld, and no wallet is made, while
  * it is not. */

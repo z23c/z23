@@ -143,12 +143,12 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
 #define DETAIL(memo_member) "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entry\":{\"txid\":\"" TX_A "\"," memo_member "}}}"
 
 struct fake {
-    bool secure_ok, secure_on, block, async, always_ok, node_up, copy_ok;
+    bool secure_ok, secure_on, block, async, always_ok, node_up, copy_ok, offline_failure, setup_active;
     int copy_calls, dismissed;
     enum wallet_reveal reveal, reveal_after_start; /* the state the environment reports; the state a tap on Show private balance moves it to */
     int reveal_started, reveal_ended;
     bool reveal_refused; /* reveal_start returns false and changes nothing */
-    const char *setup_address;
+    const char *setup_address, *identity, *offline;
     uint64_t setup_generation;
     const char *progress;
     char copied[128];
@@ -173,6 +173,14 @@ static bool fake_setup_address(void *ctx, char *out, size_t cap, uint64_t *gener
     *generation = fake.setup_generation;
     return true;
 }
+static bool fake_setup_identity(void *ctx, char out[82])
+{
+    (void)ctx;
+    if (!fake.identity || fake.setup_active) return false;
+    snprintf(out, 82, "%s", fake.identity);
+    return true;
+}
+
 static bool fake_secure(void *ctx, bool on)
 {
     (void)ctx;
@@ -192,6 +200,7 @@ static const char *answer(const char *op, const char *arg)
     if (!strcmp(op, "summary")) return fake.summary;
     if (!strcmp(op, "fleet")) return fake.fleet;
     if (!strcmp(op, "latest")) return fake.latest;
+    if (!strcmp(op, "offline_address")) return fake.offline;
     if (!strcmp(op, "receive")) return fake.receive;
     if (!strcmp(op, "detail")) { CHECK(!strcmp(arg, TX_A)); return fake.detail; }
     CHECK(!strcmp(op, "history"));
@@ -199,8 +208,8 @@ static const char *answer(const char *op, const char *arg)
 }
 static int op_slot(const char *op)
 {
-    static const char *const names[] = {"summary", "fleet", "latest", "receive", "history", "detail"};
-    for (int i = 0; i < 6; ++i) if (!strcmp(op, names[i])) return i;
+    static const char *const names[] = {"summary", "fleet", "latest", "receive", "history", "detail", "offline_address"};
+    for (int i = 0; i < 7; ++i) if (!strcmp(op, names[i])) return i;
     CHECK(false);
     return 0;
 }
@@ -222,6 +231,7 @@ static bool fake_run(void *ctx, const char *op, const char *arg, char *out, size
     pthread_mutex_unlock(&fake.lock);
     if (fake.during) fake.during(op, arg);
     bool ok = reply(answer(op, arg), out, cap);
+    if (!strcmp(op, "offline_address") && fake.offline_failure) ok = false;
     pthread_mutex_lock(&fake.lock);
     --fake.op_active[slot];
     --fake.active;
@@ -307,7 +317,7 @@ static void start(bool async)
     struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async, fake_refusal, fake_node_running, fake_copy_address,
                              cache_dir[0] ? cache_dir : NULL, fake_wall, fake_progress, fake_dismiss,
                              with_reveal ? fake_reveal_start : NULL, with_reveal ? fake_reveal_state : NULL,
-                             with_reveal ? fake_reveal_end : NULL, with_seal ? fake_seal : NULL, with_seal ? fake_unseal : NULL, fake_setup_address};
+                             with_reveal ? fake_reveal_end : NULL, with_seal ? fake_seal : NULL, with_seal ? fake_unseal : NULL, fake_setup_address, fake_setup_identity};
     wallet_screens_shutdown();
     memset(&fake, 0, sizeof(fake));
     memset(&keystore, 0, sizeof(keystore));
@@ -1474,6 +1484,67 @@ static void test_receive_amount(void)
     wallet_screens_close();
 }
 
+static void change_offline_identity(const char *op, const char *arg)
+{
+    (void)arg;
+    if (!strcmp(op, "offline_address")) fake.setup_active = true;
+}
+
+static void test_offline_receive(void)
+{
+    uint8_t symbols[69] = {2};
+    char address[92], response[512];
+    CHECK(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
+    snprintf(response, sizeof(response),
+             "{\"ok\":false,\"data\":{\"persisted_shielded_address\":\"%s\"},\"error\":{\"code\":\"WALLET_LOCKED\"}}", address);
+    start(false);
+    fake.node_up = false;
+    fake.identity = "confirmed-wallet-one";
+    fake.latest = NULL;
+    fake.offline = response;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(count_ops("latest") == 0);
+    struct wallet_screen *s = snap();
+    CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), address));
+    tap(WALLET_ACT_COPY_ADDRESS, 0, WALLET_STAY);
+    CHECK(!strcmp(fake.copied, address));
+    fake.identity = "confirmed-wallet-two";
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) < 0);
+    wallet_screens_close();
+    start(false);
+    fake.node_up = false; fake.identity = "confirmed-wallet-one"; fake.offline = response;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) >= 0);
+    fake.node_up = true;
+    symbols[0] = 3;
+    char live_address[92], live_reply[256];
+    CHECK(domain_encoding_bech32_encode(live_address, sizeof(live_address), "zs", symbols, sizeof(symbols)));
+    snprintf(live_reply, sizeof(live_reply), "{\"ok\":true,\"data\":{\"address\":\"%s\"}}", live_address);
+    fake.latest = live_reply;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(!strcmp(text_at(snap(), find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE)), live_address));
+    wallet_screens_close();
+    start(false);
+    fake.node_up = false; fake.identity = "confirmed-wallet-one"; fake.offline = response;
+    fake.during = change_offline_identity;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) < 0);
+    wallet_screens_close();
+    start(false);
+    fake.node_up = false; fake.identity = "confirmed-wallet-one"; fake.offline = response;
+    fake.always_ok = true;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) < 0);
+    wallet_screens_close();
+    start(false);
+    fake.node_up = false; fake.identity = "confirmed-wallet-one"; fake.offline_failure = true;
+    snprintf(response, sizeof(response), "{\"ok\":true,\"data\":{\"persisted_shielded_address\":\"%s\"}}", address);
+    fake.offline = response;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) < 0);
+    wallet_screens_close();
+}
+
 static void test_receive_new_address(void)
 {
     start(false);
@@ -2605,6 +2676,7 @@ int main(int argc, char **argv)
     test_spendable_for_send();
     test_receive_amount();
     test_receive_new_address();
+    test_offline_receive();
     test_receive_copy();
     test_receive_copy_without_address();
     test_receive_never_makes_keys();

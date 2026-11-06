@@ -270,6 +270,13 @@ bool zapp_setup_receive_address(char *out, size_t cap, uint64_t *generation)
     return ui.model_ready && wsu_receive_address(&ui.model, out, cap, generation);
 }
 
+bool zapp_setup_address_generation(uint64_t *generation)
+{
+    if (!generation) return false;
+    if (!ui.model_ready) { *generation = 0; return true; }
+    return wsu_address_generation(&ui.model, generation);
+}
+
 /* ---- widgets ---- */
 
 /* A line of text; keep, when given, holds the view so its text can change in place. */

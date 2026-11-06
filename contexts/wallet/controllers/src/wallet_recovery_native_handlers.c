@@ -48,6 +48,7 @@
 #include "models/database.h"                   /* struct node_db (RO shim) */
 #include "services/wallet_create_service.h"
 #include "services/wallet_recovery_service.h"
+#include "services/wallet_restore_service.h"
 #include "support/cleanse.h"
 #include "util/boot_phase.h"
 
@@ -113,6 +114,9 @@ static void wrp_push_report(struct zcl_command_reply *reply,
     if (rep->first_address[0])
         (void)json_push_kv_str(&reply->data, "first_address",
                                rep->first_address);
+    if (rep->persisted_shielded_address[0])
+        (void)json_push_kv_str(&reply->data, "persisted_shielded_address",
+                               rep->persisted_shielded_address);
     if (rep->first_shielded_address[0])
         (void)json_push_kv_str(&reply->data, "first_shielded_address",
                                rep->first_shielded_address);
@@ -226,12 +230,24 @@ void zcl_native_handle_wallet_recovery_status(
      * wallet yet" and "I could not read your wallet" are opposite answers
      * to the question this leaf is asked, and collapsing them would tell
      * an operator with an unreadable wallet that they never had one. */
+    /* The address is exposed only while the node lock spans the read. */
+    int pid_fd = -1;
+    struct zcl_result lock = wallet_restore_node_lock_acquire(datadir, &pid_fd);
+    if (!lock.ok) {
+        wrp_push_report(reply, &rep);
+        wnh_fail(reply, ZCL_COMMAND_EXIT_BLOCKED, "DATADIR_LOCKED",
+                 lock.message, datadir);
+        return;
+    }
+    rep.inspect_persisted_address = pid_fd >= 0;
+
     sqlite3 *db = NULL;
     struct node_db ndb;
     char ndb_path[1200];
     enum zcl_node_db_ro_status ro_st = zcl_native_node_db_open_readonly(
         datadir, &db, &ndb, ndb_path, sizeof(ndb_path));
     if (ro_st == ZCL_NODE_DB_RO_ABSENT) {
+        wallet_restore_node_lock_release(&pid_fd);
         wrp_push_report(reply, &rep);
         (void)json_push_kv_str(&reply->data, "what_to_do",
             "nothing here is broken — this datadir has no wallet database "
@@ -245,6 +261,7 @@ void zcl_native_handle_wallet_recovery_status(
         return;
     }
     if (ro_st != ZCL_NODE_DB_RO_OK) {
+        wallet_restore_node_lock_release(&pid_fd);
         wrp_push_report(reply, &rep);
         /* Fills the reply with NODE_DB_UNREADABLE / MISSING_DATADIR /
          * DATADIR_PATH_TOO_LONG and returns false; never "ok": true. */
@@ -257,6 +274,7 @@ void zcl_native_handle_wallet_recovery_status(
 
     struct zcl_result r = wallet_recovery_status(datadir, &ndb, &rep);
     zcl_native_node_db_close_readonly(&db, &ndb);
+    wallet_restore_node_lock_release(&pid_fd);
     if (!r.ok) {
         wrp_push_report(reply, &rep);
         wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "NO_WALLET", r.message,

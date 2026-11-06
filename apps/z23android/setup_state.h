@@ -40,6 +40,8 @@ bool zapp_setup_aside_path(const char *dir, const char *name, int64_t now_s, cha
  * written without one. */
 bool zapp_setup_mark_confirmed(const char *files, bool start_known);
 bool zapp_setup_confirmed(const char *files);
+/* Stable identity for the currently confirmed setup; false unless setup is ready. */
+bool zapp_setup_identity(const char *files, char out[65]);
 /* Whether the record says the wallet recorded a start height. */
 bool zapp_setup_confirmed_start(const char *files);
 

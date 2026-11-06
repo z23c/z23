@@ -520,6 +520,8 @@ static bool fake_hook(struct script *s, const char *op)
 static enum zapp_devkey_status f_wrap(void *ctx, uint8_t secret[ZAPP_DEVKEY_SECRET])
 {
     struct fake *f = ctx;
+    uint64_t generation;
+    assert(!wsu_address_generation(model_of, &generation));
     ++f->wraps;
     if (f->close_on_wrap) wsu_close(model_of);
     if (f->supersede_on_wrap) { pthread_mutex_lock(&model_of->lock); model_of->step = WSU_BLOCKED; pthread_mutex_unlock(&model_of->lock); }
@@ -662,6 +664,12 @@ static void check_created_address(struct wsu *w, const char *address)
     put(dir, "wallet_key.blob", "replacement");
     assert(!wsu_receive_address(w, copied, sizeof(copied), &generation));
 }
+static void check_generation_ready(struct wsu *w, bool ready)
+{
+    uint64_t generation = 0;
+    assert(wsu_address_generation(w, &generation) == ready);
+    if (ready) assert(generation > 0);
+}
 static void create_tests(void)
 {
     struct fake f;
@@ -669,13 +677,17 @@ static void create_tests(void)
     struct wsu_view v;
     fresh(&f, &w, true);
     assert(w.step == WSU_CHOICE);
+    check_generation_ready(&w, false);
     uint8_t symbols[69] = {0};
     char address[SUN_ADDRESS_MAX], reply[512], copied[SUN_ADDRESS_MAX];
     uint64_t generation = 0;
     assert(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
     snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"birthday_recorded\":true,\"first_shielded_address\":\"%s\"}}", address);
     script_say(&f.script, true, reply);
-    create_all(&w);
+    wsu_create_job(&w);
+    assert(w.step == WSU_WORDS);
+    check_generation_ready(&w, false);
+    wsu_write_job(&w);
     assert(!wsu_receive_address(&w, copied, sizeof(copied), &generation));
     wsu_view_read(&w, &v);
     assert(v.step == WSU_WORDS && v.words.count == 24 && !strcmp(v.words.word[0], "alpha"));
@@ -705,6 +717,7 @@ static void create_tests(void)
     assert(w.step == WSU_WORKING && w.held.count == 0 && zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED);
     wsu_finish_job(&w);
     assert(w.step == WSU_DONE && zapp_setup_state(dir) == ZAPP_SETUP_READY && !wsu_busy(&w));
+    check_generation_ready(&w, true);
     check_created_address(&w, address);
     wsu_finish_job(&w);
     assert(w.step == WSU_DONE);

@@ -160,3 +160,12 @@ bool zapp_setup_confirmed(const char *files)
     char text[CONFIRMATION_MAX];
     return read_confirmation(files, text);
 }
+
+bool zapp_setup_identity(const char *files, char out[65])
+{
+    if (!out) return false;
+    out[0] = 0;
+    return zapp_setup_state(files) == ZAPP_SETUP_READY &&
+           zapp_setup_confirmed(files) && blob_hash_hex(files, out) &&
+           zapp_setup_confirmed(files);
+}

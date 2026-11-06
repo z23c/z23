@@ -60,8 +60,10 @@ static long wrs_holder_pid(int fd)
 }
 #endif
 
-struct zcl_result wallet_restore_datadir_free(const char *datadir)
+struct zcl_result wallet_restore_node_lock_acquire(const char *datadir, int *lock_fd)
 {
+    if (!lock_fd) return ZCL_ERR(-50, "node lock output is NULL");
+    *lock_fd = -1;
     if (!datadir || !datadir[0]) {
         LOG_WARN(WRS_TAG, "datadir_free: datadir path is empty");
         return ZCL_ERR(-50, "datadir path is empty");
@@ -90,23 +92,37 @@ struct zcl_result wallet_restore_datadir_free(const char *datadir)
         return ZCL_ERR(-51, "cannot open %s: %s", path, strerror(errno));
     }
 
-    /* Take + immediately release a non-blocking exclusive flock. Holding it
-     * would be pointless: node.db is opened later on a different fd, and a
-     * node that starts mid-restore is refused by its OWN acquire. */
+    /* The caller holds this flock across any protected read. */
     bool free_now = flock(fd, LOCK_EX | LOCK_NB) == 0;
     int saved = errno;
     long pid = free_now ? 0 : wrs_holder_pid(fd);
-    if (free_now)
-        (void)flock(fd, LOCK_UN);
-    close(fd);
-    if (free_now)
+    if (free_now) {
+        *lock_fd = fd;
         return ZCL_OK;
+    }
+    close(fd);
     if (pid > 0)
         return ZCL_ERR(-52, "a node is holding %s (pid %ld); stop it first",
                        datadir, pid);
     return ZCL_ERR(-52, "a node is holding %s (flock: %s); stop it first",
                    datadir, strerror(saved));
 #endif
+}
+
+void wallet_restore_node_lock_release(int *lock_fd)
+{
+#ifndef _WIN32
+    if (lock_fd && *lock_fd >= 0) close(*lock_fd);
+#endif
+    if (lock_fd) *lock_fd = -1;
+}
+
+struct zcl_result wallet_restore_datadir_free(const char *datadir)
+{
+    int fd = -1;
+    struct zcl_result r = wallet_restore_node_lock_acquire(datadir, &fd);
+    wallet_restore_node_lock_release(&fd);
+    return r;
 }
 
 /* ── the WRITER's lock, held across check-then-write ─────────── */

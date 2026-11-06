@@ -67,7 +67,8 @@ struct data {
     uint64_t initial_retry_at;
     struct wallet_view view;
     char fleet[WALLET_TEXT_MAX];
-    bool address_pending, has_amount, no_receive, address_fallback, setup_bound;
+    bool address_pending, has_amount, no_receive, address_fallback, setup_bound, offline_bound;
+    char offline_identity[82];
     uint64_t address_generation;
     uint64_t amount_zat;
     enum zapp_pay_network network;
@@ -749,6 +750,13 @@ bool wallet_screen_same(const struct wallet_screen *a, const struct wallet_scree
 
 static bool fallback_current(void)
 {
+    if (st.d.offline_bound) {
+        char identity[82];
+        if (st.env.setup_identity && st.env.setup_identity(st.env.ctx, identity) && !strcmp(identity, st.d.offline_identity)) return true;
+        st.d.address[0] = 0; st.d.code[0] = 0; st.d.address_fallback = false; st.d.offline_bound = false;
+        st.d.address_pending = false; ++st.epoch; touch();
+        return false;
+    }
     if (!st.d.setup_bound) return true;
     char address[ZAPP_PAY_ADDRESS_MAX];
     uint64_t generation = 0;
@@ -954,8 +962,9 @@ static void apply_address(bool ok, bool missing, bool latest, const char *json)
     data = ok && json && json_read(&root, json, strlen(json)) ? data_of(&root) : NULL;
     address = text_of(data, "address");
     if (address && address[0] && strlen(address) < sizeof(st.d.address) &&
-        (!st.d.setup_bound || strict_private(address))) {
+        (!(st.d.setup_bound || st.d.offline_bound) || strict_private(address))) {
         show_address(address);
+        st.d.offline_bound = false;
         st.d.address_fallback = false;
     }
     else address_failure(data, missing, latest);
@@ -1060,7 +1069,44 @@ static void apply_detail(bool ok, const char *json)
 
 /* ---- commands ---- */
 
-struct reply { bool ok, missing, silent, received; const char *json; };
+struct reply { bool ok, missing, silent, received, offline; char identity[82]; const char *json; };
+
+static bool offline_envelope_ok(const struct reply *r, const struct json_value *root)
+{
+    const struct json_value *ok = typed(root, "ok", JSON_BOOL);
+    const struct json_value *err = typed(root, "error", JSON_OBJ);
+    const char *code = text_of(err, "code");
+    if (!ok) return false;
+    if (json_get_bool(ok)) return r->ok;
+    return !r->ok && code && !strcmp(code, "WALLET_LOCKED");
+}
+
+static bool offline_address_valid(const struct reply *r, const char *address)
+{
+    char now[82];
+    return address && strict_private(address) && st.env.setup_identity &&
+           st.env.setup_identity(st.env.ctx, now) && !strcmp(now, r->identity);
+}
+
+static bool apply_offline(const struct reply *r)
+{
+    struct json_value root;
+    json_init(&root);
+    bool parsed = r->json && json_read(&root, r->json, strlen(r->json));
+    const struct json_value *data = parsed ? typed(&root, "data", JSON_OBJ) : NULL;
+    const char *address = text_of(data, "persisted_shielded_address");
+    bool valid = parsed && offline_envelope_ok(r, &root) && offline_address_valid(r, address);
+    if (valid) {
+        show_address(address);
+        copy(st.d.offline_identity, sizeof(st.d.offline_identity), r->identity);
+        st.d.offline_bound = st.d.address[0] != 0;
+        st.d.address_fallback = st.d.offline_bound;
+        st.d.address_pending = false;
+        st.d.note[0] = 0;
+    }
+    drop_tree(&root);
+    return valid;
+}
 
 static void apply(const struct job *j, const struct reply *r)
 {
@@ -1068,6 +1114,7 @@ static void apply(const struct job *j, const struct reply *r)
     else if (!strcmp(j->op, "fleet")) apply_fleet(r->ok, r->json);
     else if (!strcmp(j->op, "history")) apply_history(r->ok, r->json);
     else if (!strcmp(j->op, "detail")) apply_detail(r->ok, r->json);
+    else if (r->offline) { if (!apply_offline(r)) apply_address(false, r->missing, true, NULL); }
     else apply_address(r->ok, r->missing, !strcmp(j->op, "latest"), r->json);
 }
 
@@ -1084,19 +1131,47 @@ static void finish(const struct job *j, const struct reply *r)
     if (live && j->env.changed) j->env.changed(j->env.ctx);
 }
 
+static bool offline_eligible(const struct job *j, char identity[82])
+{
+    return !strcmp(j->op, "latest") && j->env.node_running &&
+           !j->env.node_running(j->env.ctx) && j->env.setup_identity &&
+           j->env.setup_identity(j->env.ctx, identity);
+}
+
+static void run_offline(const struct job *j, char *out, struct reply *r)
+{
+    char after[82];
+    out[0] = 0;
+    r->ok = j->env.run(j->env.ctx, "offline_address", "", out, OUT_CAP);
+    r->offline = offline_eligible(j, after) && !strcmp(after, r->identity);
+    if (!r->offline) { out[0] = 0; r->ok = false; }
+}
+
+static void classify_reply(struct reply *r, char *out)
+{
+    r->missing = out && !r->ok && strstr(out, "UNKNOWN_COMMAND");
+    r->silent = out && !r->ok && (strstr(out, "NODE_UNAVAILABLE") || strstr(out, "The command timed out."));
+    r->received = r->ok || (out && out[0]);
+    r->json = json_start(out ? out : "");
+}
+
 static void run_job(const struct job *j)
 {
     char *out = calloc(1, OUT_CAP);
     struct reply r = {0};
-    r.ok = out && j->env.run && j->env.run(j->env.ctx, j->op, j->arg, out, OUT_CAP);
-    r.missing = out && !r.ok && strstr(out, "UNKNOWN_COMMAND");
-    r.silent = out && !r.ok && (strstr(out, "NODE_UNAVAILABLE") || strstr(out, "The command timed out."));
-    r.received = r.ok || (out && out[0]);
-    r.json = json_start(out ? out : "");
+    bool offline_first = out && offline_eligible(j, r.identity);
+    if (offline_first)
+        run_offline(j, out, &r);
+    else {
+        r.ok = out && j->env.run && j->env.run(j->env.ctx, j->op, j->arg, out, OUT_CAP);
+        if (out && !r.ok && offline_eligible(j, r.identity)) run_offline(j, out, &r);
+    }
+    classify_reply(&r, out);
     finish(j, &r);
     if (out) memory_cleanse(out, OUT_CAP);
     free(out);
 }
+
 static void *job_main(void *opaque)
 {
     struct job *j = opaque;

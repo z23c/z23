@@ -24,6 +24,7 @@ enum zapp_setup_outcome {
 bool zapp_setup_attach(ANativeActivity *activity, void (*changed)(void));
 /* Copies the current confirmed setup address, if this process created it. */
 bool zapp_setup_receive_address(char *out, size_t cap, uint64_t *generation);
+bool zapp_setup_address_generation(uint64_t *generation);
 /* container is a vertical LinearLayout inside the setup screen's ScrollView. */
 bool zapp_setup_ui_create(JNIEnv *env, jobject activity, jobject container);
 void zapp_setup_ui_destroy(JNIEnv *env);

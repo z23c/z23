@@ -1092,3 +1092,13 @@ int wsu_history_state(const struct json_value *data)
     }
     return lists ? 1 : -1;
 }
+
+bool wsu_address_generation(struct wsu *w, uint64_t *generation)
+{
+    if (!generation) return false;
+    pthread_mutex_lock(&w->lock);
+    bool ready = w->step == WSU_DONE || w->step == WSU_READING;
+    *generation = w->address_generation;
+    pthread_mutex_unlock(&w->lock);
+    return ready;
+}

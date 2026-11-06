@@ -106,6 +106,8 @@ struct wallet_recovery_report {
      * thing a user can check against what they remember. */
     char    first_address[128];
     char    first_shielded_address[160];
+    char    persisted_shielded_address[160];
+    bool    inspect_persisted_address;
     int     keys_minted;
 
     /* ── Gap-limit scan (wallet_derive_gap_limited) ────────────────

@@ -677,9 +677,29 @@ static bool wallet_argument(enum wallet_arg kind, const char *arg, const char **
     return true;
 }
 
+/* Read only while the app is not starting its node. */
+static bool wallet_offline_address(struct zapp_runtime *r, char *out, size_t cap)
+{
+    static const char *const args[] = {"core", "wallet", "recovery", "status", NULL};
+    char before[65], after[65], input[1200];
+    struct json_value request = {0};
+    if (r->preview || !zapp_setup_identity(r->files, before) || atomic_exchange(&r->setup_running, true)) return false;
+    bool ready = !zapp_node_running(r);
+    json_set_object(&request);
+    bool built = ready && json_push_kv_str(&request, "datadir", r->directory);
+    size_t n = built ? json_write(&request, input, sizeof(input)) : 0;
+    json_free(&request);
+    bool ran = n && n < sizeof(input) && command(r, args, input, out, cap);
+    bool same = !zapp_node_running(r) && zapp_setup_identity(r->files, after) && !strcmp(before, after);
+    atomic_store(&r->setup_running, false);
+    if (!same) { out[0] = 0; return false; }
+    return ran;
+}
+
 bool zapp_wallet_run(struct zapp_runtime *r, const char *op, const char *arg, char *out, size_t cap)
 {
     if (!r || !op || !arg || !out || cap < 64) return false;
+    if (!strcmp(op, "offline_address")) return !arg[0] && wallet_offline_address(r, out, cap);
     for (size_t i = 0; i < sizeof(wallet_commands) / sizeof(wallet_commands[0]); ++i) {
         const char *args[8] = {0};
         char value[WALLET_CURSOR_MAX + 48];

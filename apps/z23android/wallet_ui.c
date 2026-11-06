@@ -7,6 +7,7 @@
 #include "jni_util.h"
 #include "secure_window.h"
 #include "setup_field.h"
+#include "setup_state.h"
 #include "wallet_reveal.h"
 #include "wallet_send_ui.h"
 #include "wallet_setup_ui.h"
@@ -444,11 +445,21 @@ static bool bound_setup_address(void *ctx, char *out, size_t cap, uint64_t *gene
     return zapp_setup_receive_address(out, cap, generation);
 }
 
+static bool bound_setup_identity(void *ctx, char out[82])
+{
+    ANativeActivity *activity = ctx;
+    char digest[65];
+    uint64_t generation;
+    if (!activity || !zapp_setup_address_generation(&generation) ||
+        !zapp_setup_identity(activity->internalDataPath, digest)) return false;
+    return snprintf(out, 82, "%s-%016llx", digest, (unsigned long long)generation) == 81;
+}
+
 bool zapp_wallet_attach(ANativeActivity *activity, void (*changed)(void))
 {
     struct wallet_env env = {activity, bound_secure, bound_run, bound_changed, bound_now, true, bound_refusal, bound_node_running, bound_copy_address,
                              activity ? activity->internalDataPath : NULL, NULL, bound_send_progress, bound_send_dismiss,
-                             bound_reveal_start, bound_reveal_state, bound_reveal_end, bound_seal, bound_unseal, bound_setup_address};
+                             bound_reveal_start, bound_reveal_state, bound_reveal_end, bound_seal, bound_unseal, bound_setup_address, bound_setup_identity};
     bound.changed = changed;
     bound.vm = activity ? activity->vm : NULL;
     return activity && wallet_screens_init(&env);

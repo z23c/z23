@@ -14,6 +14,8 @@
 #include "models/block.h"                       /* active tip for the birthday */
 #include "models/utxo.h"                /* gap-scan history oracle */
 #include "models/wallet_key.h"
+#include "sapling/sapling.h"
+#include "util/ar_step_readonly.h"
 #include "models/wallet_tx.h"                    /* note count */
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
@@ -267,6 +269,55 @@ static bool wrc_fill_addresses(const uint8_t seed[32],
     return true;
 }
 
+static bool wrc_persisted_columns_valid(sqlite3_stmt *s)
+{
+    return sqlite3_column_bytes(s, 0) == 32 &&
+           sqlite3_column_bytes(s, 1) == (int)wks_envelope_size(sizeof(struct zip32_xsk)) &&
+           sqlite3_column_bytes(s, 2) == (int)sizeof(struct zip32_xfvk) &&
+           sqlite3_column_bytes(s, 3) == 11 && sqlite3_column_bytes(s, 4) == 32;
+}
+
+/* Public fields are accepted only with a structurally valid encrypted xsk. */
+static bool wrc_persisted_row_address(sqlite3_stmt *s, struct wallet_recovery_report *out)
+{
+    if (!wrc_persisted_columns_valid(s))
+        return false; // raw-return-ok:invalid-row
+    const uint8_t *ivk = sqlite3_column_blob(s, 0);
+    const uint8_t *xsk = sqlite3_column_blob(s, 1);
+    const void *fv = sqlite3_column_blob(s, 2);
+    const uint8_t *div = sqlite3_column_blob(s, 3);
+    const uint8_t *pk = sqlite3_column_blob(s, 4);
+    if (!ivk || !xsk || !fv || !div || !pk ||
+        !wks_envelope_iterations(xsk, (size_t)sqlite3_column_bytes(s, 1)))
+        return false;
+    struct zip32_xfvk xfvk;
+    uint8_t derived_ivk[32], derived_pk[32];
+    memcpy(&xfvk, fv, sizeof(xfvk));
+    sapling_crh_ivk(xfvk.fvk.ak, xfvk.fvk.nk, derived_ivk);
+    if (memcmp(ivk, derived_ivk, 32) ||
+        !sapling_ivk_to_pkd(ivk, div, derived_pk) || memcmp(pk, derived_pk, 32))
+        return false;
+    const struct chain_params *cp = chain_params_get();
+    return cp && sapling_encode_payment_address(div, pk,
+            cp->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS],
+            out->persisted_shielded_address,
+            sizeof(out->persisted_shielded_address));
+}
+
+static void wrc_persisted_address(sqlite3 *db, struct wallet_recovery_report *out)
+{
+    sqlite3_stmt *s = NULL;
+    const char *sql = "SELECT ivk,xsk,xfvk,diversifier,pk_d FROM wallet_sapling_keys "
+                      "ORDER BY child_index,ivk";
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK)
+        return;
+    while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+        if (wrc_persisted_row_address(s, out))
+            break;
+    }
+    sqlite3_finalize(s);
+}
+
 /* ── status ──────────────────────────────────────────────────────── */
 
 struct zcl_result wallet_recovery_status_preflight(
@@ -290,6 +341,37 @@ struct zcl_result wallet_recovery_status_preflight(
                  lock_r.message);
         return ZCL_ERR(-61, "%s", lock_r.message);
     }
+    return ZCL_OK;
+}
+
+static struct zcl_result wrc_status_check_seed(
+    struct wallet_sqlite *ws, const uint8_t seed[32],
+    struct wallet_recovery_report *out)
+{
+    struct wallet *w = zcl_malloc(sizeof(*w), "wallet_recovery.status");
+    if (!w) {
+        return ZCL_ERR(-63, "out of memory loading the wallet");
+    }
+    wallet_init(w);
+    /* A read failure here would leave an empty keystore, and an empty
+     * keystore makes wallet_hd_adopt_seed say yes unconditionally —
+     * i.e. it would report a legacy wallet as phrase-recoverable. Fail
+     * the question instead of answering it wrong. */
+    struct zcl_result kr = wallet_sqlite_read_keys_r(ws, w);
+    if (!kr.ok) {
+        wallet_free(w);
+        free(w);
+        return ZCL_ERR(-63, "cannot read this wallet's keys, so whether "
+                       "a phrase would bring them back is unknown: %s",
+                       kr.message);
+    }
+    out->seed_installed = wallet_hd_adopt_seed(w, seed);
+    if (out->seed_installed)
+        (void)wallet_seed_address_at(seed, 0, BIP44_EXTERNAL, 0,
+                                     out->first_address,
+                                     sizeof(out->first_address));
+    wallet_free(w);
+    free(w);
     return ZCL_OK;
 }
 
@@ -322,6 +404,9 @@ struct zcl_result wallet_recovery_status(const char *datadir,
                            out->target_db, wr.message);
     }
 
+    if (out->inspect_persisted_address)
+        wrc_persisted_address(ndb->db, out);
+
     out->keys_before = db_wallet_key_count(ndb);
     out->keys_after = out->keys_before;
 
@@ -339,47 +424,15 @@ struct zcl_result wallet_recovery_status(const char *datadir,
     bool seed_readable = (out->seed_state_before == WALLET_SEED_PLAINTEXT ||
                           out->seed_state_before == WALLET_SEED_UNLOCKED);
 
-    /* "Would a recovery phrase bring these keys back?" is answered by
-     * derivation, exactly as boot answers it: load the wallet and ask
-     * wallet_hd_adopt_seed whether this seed governs key 0. A LOCKED seed
-     * cannot be asked that question at all — which is precisely why it must
-     * not be answered "no". */
-    if (seed_readable) {
-        struct wallet *w = zcl_malloc(sizeof(*w), "wallet_recovery.status");
-        if (!w) {
-            memory_cleanse(seed, sizeof(seed));
-            wallet_sqlite_close(&ws);
-            return ZCL_ERR(-63, "out of memory loading the wallet");
-        }
-        wallet_init(w);
-        /* A read failure here would leave an empty keystore, and an empty
-         * keystore makes wallet_hd_adopt_seed say yes unconditionally —
-         * i.e. it would report a legacy wallet as phrase-recoverable. Fail
-         * the question instead of answering it wrong. */
-        struct zcl_result kr = wallet_sqlite_read_keys_r(&ws, w);
-        if (!kr.ok) {
-            wallet_free(w);
-            free(w);
-            memory_cleanse(seed, sizeof(seed));
-            wallet_sqlite_close(&ws);
-            return ZCL_ERR(-63, "cannot read this wallet's keys, so whether "
-                           "a phrase would bring them back is unknown: %s",
-                           kr.message);
-        }
-        out->seed_installed = wallet_hd_adopt_seed(w, seed);
-        if (out->seed_installed)
-            (void)wallet_seed_address_at(seed, 0, BIP44_EXTERNAL, 0,
-                                         out->first_address,
-                                         sizeof(out->first_address));
-        wallet_free(w);
-        free(w);
-    }
+    struct zcl_result result = ZCL_OK;
+    if (seed_readable)
+        result = wrc_status_check_seed(&ws, seed, out);
     memory_cleanse(seed, sizeof(seed));
 
     /* The wallet_sqlite statement set is ours; the node_db handle under it
      * is the caller's and stays open. */
     wallet_sqlite_close(&ws);
-    return ZCL_OK;
+    return result;
 }
 
 /* ── target inspection and creation extras ───────────────────────── */
