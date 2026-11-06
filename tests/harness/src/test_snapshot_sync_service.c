@@ -24,6 +24,7 @@
 #include "storage/coins_kv.h"
 #include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"
+#include "storage/utxo_mirror_schema.h"
 #include "util/blocker.h"
 #include "validation/main_state.h"
 #include <limits.h>
@@ -1727,25 +1728,39 @@ static int test_snapshot_recovery_requires_flyclient_and_sha3(void)
 
 static void persist_test_roots(struct node_db *ndb,
                                const uint8_t block_hash[32],
-                               const uint8_t chain_work[32])
+                               const uint8_t chain_work[32],
+                               uint32_t leaves)
 {
-    struct mmr mmr;
     struct mmb mmb;
     struct mmb_leaf leaf;
     uint8_t buf[MMB_SERIALIZED_MAX];
     size_t len;
 
-    mmr_init(&mmr);
-    mmr_append(&mmr, block_hash);
-    len = mmr_serialize(&mmr, buf, sizeof(buf));
-    node_db_state_set(ndb, "mmr_state", buf, len);
-
     mmb_init(&mmb);
     mmb_leaf_from_block(&leaf, block_hash, 1, 1234567890, 0x1d00ffff,
                         block_hash, chain_work, NULL);
-    mmb_append(&mmb, &leaf);
+    for (uint32_t i = 0; i < leaves; i++)
+        mmb_append(&mmb, &leaf);
     len = mmb_serialize(&mmb, buf, sizeof(buf));
     node_db_state_set(ndb, "mmb_state", buf, len);
+}
+
+/* The manifest reads on a connection of its own, so the database is a file. */
+static void recovery_db_path(char *out, size_t max, const char *dir)
+{
+    snprintf(out, max, "%s/node.db", dir);
+}
+
+static void recovery_db_remove(const char *dir)
+{
+    static const char *const suffixes[] = { "", "-wal", "-shm" };
+    char path[256];
+
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+        snprintf(path, sizeof(path), "%s/node.db%s", dir, suffixes[i]);
+        (void)unlink(path);
+    }
+    (void)rmdir(dir);
 }
 
 static int test_snapshot_local_recovery_manifest_builder(void)
@@ -1763,10 +1778,12 @@ static int test_snapshot_local_recovery_manifest_builder(void)
         uint8_t solution[1] = {0};
         uint8_t chain_work[32];
         uint8_t expected_root[32];
-        uint8_t truncated_height = 1;
-        int64_t valid_height = 1;
-        uint8_t trailing_height[sizeof(valid_height) + 1];
+        uint8_t truncated_cursor = 2;
+        int64_t valid_cursor = 2;
+        uint8_t trailing_cursor[sizeof(valid_cursor) + 1];
         uint64_t expected_count = 0;
+        char dir[128];
+        char db_path[256];
 
         memset(block_hash, 0x41, sizeof(block_hash));
         memset(prev_hash, 0x40, sizeof(prev_hash));
@@ -1774,8 +1791,14 @@ static int test_snapshot_local_recovery_manifest_builder(void)
         memset(nonce, 0x43, sizeof(nonce));
         memset(chain_work, 0x55, sizeof(chain_work));
 
-        ASSERT(node_db_open(&ndb, ":memory:"));
-        ASSERT(node_db_state_set_int(&ndb, "tip_height", 1));
+        snprintf(dir, sizeof(dir), "./test-tmp/recovery_manifest_%d_XXXXXX",
+                 (int)getpid());
+        (void)mkdir("./test-tmp", 0755);
+        ASSERT(mkdtemp(dir) != NULL);
+        recovery_db_path(db_path, sizeof(db_path), dir);
+        ASSERT(node_db_open(&ndb, db_path));
+        /* The next height the mirror applies: its rows are through height 1. */
+        ASSERT(node_db_state_set_int(&ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, 2));
 
         sqlite3_stmt *st = NULL;
         ASSERT(sqlite3_prepare_v2(ndb.db,
@@ -1795,17 +1818,29 @@ static int test_snapshot_local_recovery_manifest_builder(void)
         sqlite3_bind_blob(st, 9, solution, sizeof(solution), SQLITE_STATIC);
         sqlite3_bind_blob(st, 10, chain_work, 32, SQLITE_STATIC);
         ASSERT(sqlite3_step(st) == SQLITE_DONE);
-        sqlite3_finalize(st);
 
         ASSERT(node_db_exec(&ndb,
             "INSERT INTO utxos "
             "(txid,vout,value,script,script_type,height,is_coinbase) "
             "VALUES (X'0102030405060708090A0B0C0D0E0F101112131415161718"
             "191A1B1C1D1E1F20',0,5000,X'51',0,1,0)"));
+        persist_test_roots(&ndb, block_hash, chain_work, 2);
+
+        /* A hole below the anchor leaves no chain to root. */
+        ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 0).ok);
+        sqlite3_reset(st);
+        sqlite3_bind_blob(st, 1, prev_hash, 32, SQLITE_STATIC);
+        sqlite3_bind_int(st, 2, 0);
+        ASSERT(sqlite3_step(st) == SQLITE_DONE);
+        sqlite3_finalize(st);
+        ASSERT(node_db_exec(&ndb, "DELETE FROM node_state WHERE key='mmb_state'"));
 
         ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 0).ok);
-        persist_test_roots(&ndb, block_hash, chain_work);
-        ASSERT(snapsync_build_local_recovery_manifest(&ndb, &params, 0).ok);
+        /* Roots over a chain longer than the anchor do not name the anchor. */
+        persist_test_roots(&ndb, block_hash, chain_work, 3);
+        ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 0).ok);
+        persist_test_roots(&ndb, block_hash, chain_work, 2);
+        ASSERT_RESULT_OK(snapsync_build_local_recovery_manifest(&ndb, &params, 0));
 
         utxo_commitment_sha3_compute(ndb.db, expected_root, &expected_count);
         ASSERT(params.height == 1);
@@ -1814,6 +1849,15 @@ static int test_snapshot_local_recovery_manifest_builder(void)
         ASSERT(memcmp(params.utxo_root, expected_root, 32) == 0);
         ASSERT(memcmp(params.block_hash, block_hash, 32) == 0);
         ASSERT(memcmp(params.chain_work, chain_work, 32) == 0);
+        {
+            struct mmr replay;
+            uint8_t expected_mmr[32];
+            mmr_init(&replay);
+            mmr_append(&replay, prev_hash);
+            mmr_append(&replay, block_hash);
+            mmr_root(&replay, expected_mmr);
+            ASSERT(memcmp(params.mmr_root, expected_mmr, 32) == 0);
+        }
 
         memset(&manifest, 0, sizeof(manifest));
         manifest.height = params.height;
@@ -1830,17 +1874,18 @@ static int test_snapshot_local_recovery_manifest_builder(void)
         ASSERT(snapshot_manifest_validate_recovery(&manifest, 1) ==
                SNAPSHOT_MANIFEST_OK);
 
-        memcpy(trailing_height, &valid_height, sizeof(valid_height));
-        trailing_height[sizeof(valid_height)] = 0xa5;
-        ASSERT(node_db_state_set(&ndb, "tip_height", trailing_height,
-                                 sizeof(trailing_height)));
+        memcpy(trailing_cursor, &valid_cursor, sizeof(valid_cursor));
+        trailing_cursor[sizeof(valid_cursor)] = 0xa5;
+        ASSERT(node_db_state_set(&ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
+                                 trailing_cursor, sizeof(trailing_cursor)));
         ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 0).ok);
 
-        ASSERT(node_db_state_set(&ndb, "tip_height", &truncated_height,
-                                 sizeof(truncated_height)));
+        ASSERT(node_db_state_set(&ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
+                                 &truncated_cursor, sizeof(truncated_cursor)));
         ASSERT(!snapsync_build_local_recovery_manifest(&ndb, &params, 0).ok);
 
         node_db_close(&ndb);
+        recovery_db_remove(dir);
         PASS();
     } _test_next:;
 

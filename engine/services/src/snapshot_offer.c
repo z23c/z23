@@ -10,9 +10,9 @@
 #include "net/snapshot_sync_contract.h"
 #include "models/block.h"
 #include "services/snapshot_manifest.h"
+#include "services/snapshot_offer_anchor.h"
 #include "services/block_source_policy.h"
 #include "chain/mmb.h"
-#include "chain/mmr.h"
 #include "net/fast_sync.h"
 #include "core/random.h"
 #include "crypto/sha3.h"
@@ -40,41 +40,11 @@ static bool snapsync_bytes32_nonzero_internal(const uint8_t b[32])
     return false;
 }
 
-static bool snapsync_read_tip_height_internal(struct node_db *ndb,
-                                               int64_t *out)
-{
-    uint8_t tip_bytes[sizeof(*out) + 1];
-    size_t tip_len = 0;
-
-    if (!node_db_state_get(ndb, "tip_height", tip_bytes,
-                           sizeof(tip_bytes), &tip_len) ||
-        tip_len != sizeof(*out))
-        return false;
-    memcpy(out, tip_bytes, sizeof(*out));
-    return *out > 0 && *out <= INT32_MAX;
-}
-
-static bool snapsync_load_state_mmr_root_internal(struct node_db *ndb,
-                                                  uint8_t out[32])
-{
-    uint8_t buf[MMR_SERIALIZED_MAX];
-    size_t len = 0;
-    struct mmr m;
-
-    if (!ndb || !out)
-        return false;
-    memset(buf, 0, sizeof(buf));
-    if (!node_db_state_get(ndb, "mmr_state", buf, sizeof(buf), &len) ||
-        len < 12 ||
-        !mmr_deserialize(&m, buf, len) ||
-        m.num_leaves == 0)
-        return false;
-    mmr_root(&m, out);
-    return snapsync_bytes32_nonzero_internal(out);
-}
-
-static bool snapsync_load_state_mmb_root_internal(struct node_db *ndb,
-                                                  uint8_t out[32])
+/* The persisted MMB is the tree at the tip. It speaks for the anchor only when
+ * it holds exactly the anchor's leaves: heights are zero-based. */
+static bool snapsync_load_anchor_mmb_root_internal(struct node_db *ndb,
+                                                   int32_t height,
+                                                   uint8_t out[32])
 {
     uint8_t buf[MMB_SERIALIZED_MAX];
     size_t len = 0;
@@ -86,24 +56,10 @@ static bool snapsync_load_state_mmb_root_internal(struct node_db *ndb,
     if (!node_db_state_get(ndb, "mmb_state", buf, sizeof(buf), &len) ||
         len < 13 ||
         !mmb_deserialize(&m, buf, len) ||
-        m.num_leaves == 0)
+        m.num_leaves != (uint64_t)height + 1)
         return false;
     mmb_root(&m, out);
     return snapsync_bytes32_nonzero_internal(out);
-}
-
-static bool snapsync_read_tip_chainwork_internal(struct node_db *ndb,
-                                                 const uint8_t hash[32],
-                                                 uint8_t chain_work[32])
-{
-    struct snapshot_store_sqlite_ctx sctx;
-    struct snapshot_store_port store = {0};
-
-    if (!ndb || !ndb->open || !hash || !chain_work)
-        return false;
-    if (!snapsync_bind_store_internal(&sctx, ndb, &store).ok)
-        return false;  // raw-return-ok:bind-only-fails-on-null-ctx/port-both-local-addresses
-    return store.tip_chainwork(store.self, hash, chain_work);
 }
 
 enum snapsync_offer_result snapsync_offer_result_from_manifest_internal(
@@ -170,59 +126,32 @@ struct zcl_result snapsync_build_local_recovery_manifest(struct node_db *ndb,
                                             struct snapshot_offer_params *out,
                                             uint32_t peer_id)
 {
-    int64_t tip_height = 0;
-    struct db_block tip_block;
-    uint64_t utxo_count = 0;
+    struct snapshot_offer_anchor anchor;
+    struct zcl_result read;
 
     if (!ndb || !ndb->open || !out)
         return ZCL_ERR(-1, "build_local_recovery_manifest: null/closed ndb or null out");
 
     memset(out, 0, sizeof(*out));
-    if (!snapsync_read_tip_height_internal(ndb, &tip_height))
-        return ZCL_ERR(-2, "build_local_recovery_manifest: invalid tip_height=%lld",
-                       (long long)tip_height);
-    out->height = (int32_t)tip_height;
-    out->peer_tip_height = out->height;
-    out->our_height = out->height;
+    read = snapshot_offer_anchor_read(ndb->path, &anchor);
+    if (!read.ok)
+        return ZCL_ERR(-2, "build_local_recovery_manifest: %s", read.message);
+    if (!snapsync_load_anchor_mmb_root_internal(ndb, anchor.height,
+                                                out->mmb_root))
+        return ZCL_ERR(-5, "build_local_recovery_manifest: no MMB root at height %d",
+                       anchor.height);
+    out->height = anchor.height;
+    out->peer_tip_height = anchor.height;
+    out->our_height = anchor.height;
     out->peer_id = peer_id;
     out->protocol_version = FAST_SYNC_PROTOCOL_VERSION;
     out->snapshot_schema_version = FAST_SYNC_SNAPSHOT_SCHEMA_VERSION;
-
-    /* The validated block row at that height, not node_state tip_hash, which
-     * nothing writes. Its bytes are what a receiver compares with its header. */
-    if (!db_block_find_by_height(ndb, out->height, &tip_block) ||
-        !snapsync_bytes32_nonzero_internal(tip_block.hash))
-        return ZCL_ERR(-3, "build_local_recovery_manifest: no validated block at height %d",
-                       out->height);
-    memcpy(out->block_hash, tip_block.hash, 32);
-    if (!snapsync_read_tip_chainwork_internal(ndb, out->block_hash,
-                                              out->chain_work))
-        return ZCL_ERR(-4, "build_local_recovery_manifest: missing tip chainwork");
-    if (!snapsync_load_state_mmr_root_internal(ndb, out->mmr_root) ||
-        !snapsync_load_state_mmb_root_internal(ndb, out->mmb_root))
-        return ZCL_ERR(-5, "build_local_recovery_manifest: missing MMR/MMB root");
-
-    /* SHA3 UTXO-root commitment math stays inline with the live handle —
-     * it is the value the snapshot is pinned to, not storage access. */
-    fast_sync_compute_utxo_root_db(ndb->db, out->utxo_root);
-    if (!snapsync_bytes32_nonzero_internal(out->utxo_root))
-        return ZCL_ERR(-6, "build_local_recovery_manifest: zero utxo root");
-
-    {
-        struct snapshot_store_sqlite_ctx sctx;
-        struct snapshot_store_port store = {0};
-        int64_t count = 0;
-        struct zcl_result bind = snapsync_bind_store_internal(&sctx, ndb, &store);
-        if (!bind.ok)
-            return ZCL_ERR(-7, "build_local_recovery_manifest: %s", bind.message);
-        if (!store.utxo_count(store.self, &count))
-            return ZCL_ERR(-7, "build_local_recovery_manifest: prepare utxo count failed");
-        utxo_count = (uint64_t)count;
-    }
-    if (utxo_count == 0)
-        return ZCL_ERR(-8, "build_local_recovery_manifest: zero utxos");
-    out->num_utxos = utxo_count;
-    out->total_bytes = utxo_count * 80;
+    memcpy(out->block_hash, anchor.block_hash, 32);
+    memcpy(out->chain_work, anchor.chain_work, 32);
+    memcpy(out->utxo_root, anchor.utxo_root, 32);
+    memcpy(out->mmr_root, anchor.mmr_root, 32);
+    out->num_utxos = anchor.num_utxos;
+    out->total_bytes = anchor.num_utxos * 80;
     return ZCL_OK;
 }
 
