@@ -266,10 +266,22 @@ void testcache_probe_group_proof(
  * the source tree and assert the list still covers it. */
 bool testcache_group_is_denylisted(const char *group_name);
 
-/* Store a PASS verdict at key[32] (best effort; a store failure is ignored —
- * it only costs a future re-run, never correctness). Pass the key from a
- * prior cacheable probe of a group that then ran and PASSED. */
-void testcache_store_pass(struct testcache *tc, const uint8_t key[32]);
+/* Store a PASS verdict at key[32]. True confirms durable publication; false
+ * does not prove absence (a final barrier can fail after publication).
+ * Best-effort callers may ignore failure: it only costs a future re-run.
+ * Pass the key from a prior cacheable probe of a group that ran and PASSED. */
+bool testcache_store_pass(struct testcache *tc, const uint8_t key[32]);
+
+struct testcache_seed_counts {
+    size_t stored;
+    size_t attempted;
+    size_t failed;
+};
+
+/* The shadow runner's seed operation, after an accepted cold proof. */
+void testcache_seed_probe(struct testcache *tc,
+                          const struct testcache_probe *probe, bool skipped,
+                          struct testcache_seed_counts *counts);
 
 /* Store a PASS verdict exactly like testcache_store_pass, but flagged
  * load-flaky: the group FAILed or was WEDGED once under a contended pool

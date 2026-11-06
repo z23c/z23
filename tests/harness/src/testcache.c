@@ -2848,11 +2848,11 @@ bool testcache_probe_groups(struct testcache *tc,
     return true;
 }
 
-static void trc_store_pass_ex(struct testcache *tc, const uint8_t key[32],
+static bool trc_store_pass_ex(struct testcache *tc, const uint8_t key[32],
                               bool flaky)
 {
     if (!tc || !key)
-        return;
+        return false;
     struct trc_record r;
     memset(&r, 0, sizeof(r));
     memcpy(r.magic, TRC_MAGIC, 8);
@@ -2871,20 +2871,37 @@ static void trc_store_pass_ex(struct testcache *tc, const uint8_t key[32],
      * silently keep a stale flaky record forever. The _repair variant
      * replaces an existing object at this address when the bytes differ,
      * which is exactly the update semantics a verdict record needs. */
-    if (!vcs_object_put_addressed_repair(tc->store_root, key,
-                                        (const uint8_t *)&r, sizeof(r), NULL))
+    bool stored = vcs_object_put_addressed_repair(tc->store_root, key,
+                                                (const uint8_t *)&r,
+                                                sizeof(r), NULL);
+    if (!stored)
         ZCL_LOG_EMIT_AT(ZCL_LOG_WARN,
                         "[testcache] store_pass put_addressed failed\n");
+    return stored;
 }
 
-void testcache_store_pass(struct testcache *tc, const uint8_t key[32])
+bool testcache_store_pass(struct testcache *tc, const uint8_t key[32])
 {
-    trc_store_pass_ex(tc, key, false);
+    return trc_store_pass_ex(tc, key, false);
 }
 
 void testcache_store_pass_flaky(struct testcache *tc, const uint8_t key[32])
 {
-    trc_store_pass_ex(tc, key, true);
+    (void)trc_store_pass_ex(tc, key, true);
+}
+
+void testcache_seed_probe(struct testcache *tc,
+                          const struct testcache_probe *probe, bool skipped,
+                          struct testcache_seed_counts *counts)
+{
+    if (!tc || !probe || !counts || skipped || !probe->cacheable ||
+        !probe->key_valid || probe->hit)
+        return;
+    counts->attempted++;
+    if (testcache_store_pass(tc, probe->key))
+        counts->stored++;
+    else
+        counts->failed++;
 }
 
 void testcache_dump_group(struct testcache *tc, const char *group_name)

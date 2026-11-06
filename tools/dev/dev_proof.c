@@ -12761,19 +12761,85 @@ static void dp_worker_shadow_probe(struct dp_worker *w)
 
 /* Seed PASS records after an accepted proof: a second probe-only spawn
  * keyed on the generation the receipt just sealed. */
+static bool dp_seed_count(const char **cursor, const char *label, size_t *out)
+{
+    size_t length = strlen(label);
+    if (strncmp(*cursor, label, length) != 0)
+        return false;
+    const char *digits = *cursor + length;
+    if (*digits < '0' || *digits > '9')
+        return false;
+    char *end = NULL;
+    errno = 0;
+    unsigned long long value = strtoull(digits, &end, 10);
+    if (errno || value > SIZE_MAX)
+        return false;
+    *cursor = end;
+    *out = (size_t)value;
+    return true;
+}
+
+/* Exactly one anchored, newline-complete summary. Other runner lines are
+ * diagnostics, not counts; a malformed or duplicate summary refuses. */
+static bool dp_seed_summary(const char *bytes, size_t len, char summary[128])
+{
+    bool found = false;
+    for (size_t start = 0; start < len;) {
+        size_t end = start;
+        while (end < len && bytes[end] != '\n')
+            end++;
+        size_t length = end - start;
+        if (length >= 12 && memcmp(bytes + start, "SEED-SUMMARY", 12) == 0) {
+            if (found || end == len || length >= 128)
+                return false;
+            memcpy(summary, bytes + start, length);
+            summary[length] = '\0';
+            found = true;
+        }
+        start = end < len ? end + 1 : len;
+    }
+    return found;
+}
+
+static bool dp_shadow_seed_note(bool spawned, const char *bytes, size_t len,
+                                 char *note, size_t cap)
+{
+    char summary[128];
+    size_t stored, attempted, failed;
+    if (!note || !cap)
+        return false;
+    note[0] = '\0';
+    if (!spawned || !bytes || memchr(bytes, '\0', len) ||
+        !dp_seed_summary(bytes, len, summary))
+        return false;
+    const char *cursor = summary;
+    if (!dp_seed_count(&cursor, "SEED-SUMMARY stored=", &stored) ||
+        !dp_seed_count(&cursor, " attempted=", &attempted) ||
+        !dp_seed_count(&cursor, " failed=", &failed) || *cursor ||
+        attempted < stored || failed != attempted - stored)
+        return false;
+    int written = snprintf(note, cap, "stored=%zu attempted=%zu failed=%zu",
+                           stored, attempted, failed);
+    return written >= 0 && (size_t)written < cap;
+}
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_shadow_seed_note(bool spawned, const char *bytes,
+                                        size_t len, char *note, size_t cap)
+{
+    return dp_shadow_seed_note(spawned, bytes, len, note, cap);
+}
+#endif
+
 static void dp_worker_shadow_seed(struct dp_worker *w, const char *store)
 {
     char log[PATH_MAX], note[96], *bytes = NULL;
     size_t len = 0;
-    unsigned stored = 0;
-    const char *at;
     if (!dp_shadow_log_path(w, "test-shadow-seed", log, sizeof(log)))
         return;
-    (void)dp_shadow_spawn(w, store, "test_shadow_seed", log, true);
-    if (dp_preflight_log_read(log, &bytes, &len) &&
-        (at = strstr(bytes, "SEED-SUMMARY stored=")) != NULL &&
-        sscanf(at, "SEED-SUMMARY stored=%u", &stored) == 1) {
-        (void)snprintf(note, sizeof(note), "stored=%u", stored);
+    bool spawned = dp_shadow_spawn(w, store, "test_shadow_seed", log, true);
+    if (spawned && dp_preflight_log_read(log, &bytes, &len) &&
+        dp_shadow_seed_note(spawned, bytes, len, note, sizeof(note))) {
         (void)zcl_dev_proof_phase_note(w->paths->phases, "test_shadow_seed",
                                        note);
     } else {

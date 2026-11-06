@@ -3145,6 +3145,72 @@ static int tc_phase_a2_verdict_store(uint8_t keyA[32], bool have_keyA)
     return failures;
 }
 
+static int tc_seed_ineligible(struct testcache *tc, struct testcache_probe *probe,
+                               const struct testcache_probe *readback)
+{
+    int failures = 0;
+    struct testcache_seed_counts counts = {0};
+    testcache_seed_probe(tc, NULL, false, &counts);
+    testcache_seed_probe(tc, probe, true, &counts);
+    testcache_seed_probe(tc, readback, false, &counts);
+    probe->key_valid = false;
+    testcache_seed_probe(tc, probe, false, &counts);
+    probe->key_valid = true;
+    probe->cacheable = false;
+    testcache_seed_probe(tc, probe, false, &counts);
+    TC_CHECK("empty or ineligible seeds are 0/0/0",
+             counts.stored == 0 && counts.attempted == 0 && counts.failed == 0);
+    return failures;
+}
+
+static int tc_seed_counts(void)
+{
+    int failures = 0;
+    struct testcache *tc = NULL;
+    struct testcache_probe probe;
+    struct testcache_seed_counts counts = {0};
+    char shard[256];
+    TC_CHECK("seed fixture private store",
+             tc_shell("rm -rf %s", TC_STORE) &&
+             mkdir(TC_STORE, 0755) == 0 &&
+             setenv("ZCL_TESTCACHE_STORE_ROOT", TC_STORE, 1) == 0);
+    tc = testcache_open(TC_FIX);
+    TC_CHECK("seed fixture opens", tc != NULL);
+    if (!tc)
+        goto cleanup;
+    testcache_probe_group(tc, "test_demo_entry", &probe);
+    TC_CHECK("seed fixture has a missing valid key",
+             probe.cacheable && probe.key_valid && !probe.hit);
+    if (!probe.cacheable || !probe.key_valid || probe.hit)
+        goto cleanup;
+    snprintf(shard, sizeof(shard), ".zvcs/objects/%02x", probe.key[0]);
+    TC_CHECK("seed shard blocked by a regular file",
+             mk_write(TC_STORE, shard, "blocked"));
+    testcache_seed_probe(tc, &probe, false, &counts);
+    printf("  seed blocked: stored=%zu attempted=%zu failed=%zu\n",
+           counts.stored, counts.attempted, counts.failed);
+    TC_CHECK("seed failed publication is 0/1/1",
+             counts.stored == 0 && counts.attempted == 1 && counts.failed == 1);
+    struct testcache_probe readback;
+    testcache_probe_group(tc, "test_demo_entry", &readback);
+    TC_CHECK("failed seed cannot hit", !readback.hit);
+    snprintf(shard, sizeof(shard), "%s/.zvcs/objects/%02x",
+             TC_STORE, probe.key[0]);
+    TC_CHECK("remove only shard blocker", unlink(shard) == 0);
+    counts = (struct testcache_seed_counts){0};
+    testcache_seed_probe(tc, &probe, false, &counts);
+    TC_CHECK("seed successful publication is 1/1/0",
+             counts.stored == 1 && counts.attempted == 1 && counts.failed == 0);
+    testcache_probe_group(tc, "test_demo_entry", &readback);
+    TC_CHECK("successful seed reads back the same key",
+             readback.hit && memcmp(readback.key, probe.key, 32) == 0);
+    failures += tc_seed_ineligible(tc, &probe, &readback);
+cleanup:
+    testcache_close(tc);
+    unsetenv("ZCL_TESTCACHE_STORE_ROOT");
+    return failures;
+}
+
 static int tc_phase_a3_flaky_store(void)
 {
     int failures = 0;
@@ -3952,6 +4018,7 @@ int test_testcache(void)
     failures += tc_phase_policy_modes();
     failures += tc_phase_a2_verdict_store(keyA, have_keyA);
     failures += tc_phase_a3_flaky_store();
+    failures += tc_seed_counts();
     failures += tc_phase_b_c_leaf_edits(keyA, have_keyA);
     failures += tc_phase_c2_snapshot(keyA, have_keyA);
     failures += tc_phase_d_uncacheable();

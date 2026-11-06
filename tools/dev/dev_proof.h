@@ -766,6 +766,9 @@ const char *zcl_dev_proof_test_changed_set_reason(
  * proof cycle or spawning a runner. */
 bool zcl_dev_proof_test_preflight_parse(const char *bytes, size_t len,
                                         struct zcl_dev_proof_preflight *out);
+/* Exact shadow seed telemetry decision, including current spawn status. */
+bool zcl_dev_proof_test_shadow_seed_note(bool spawned, const char *bytes,
+                                        size_t len, char *note, size_t cap);
 /* Seam for the shadow lane's divergence audit: the exact comparison the
  * proof worker makes between the pre-run probe log (`PROBE <group> HIT|MISS
  * ...` lines with their PROBE-SUMMARY) and the cold test log (one SUITE

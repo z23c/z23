@@ -12451,6 +12451,76 @@ static bool ic_preflight_case(const char *bytes, size_t len, bool want,
     return true;
 }
 
+static int test_ic_shadow_seed_note(void)
+{
+    int failures = 0;
+    static const struct {
+        bool spawned;
+        const char *log;
+        const char *note;
+    } cases[] = {
+        {true, "SEED-SUMMARY stored=0 attempted=1 failed=1\n",
+         "stored=0 attempted=1 failed=1"},
+        {true, "noise\nSEED-SUMMARY stored=1 attempted=1 failed=0\nend\n",
+         "stored=1 attempted=1 failed=0"},
+        {true, "SEED-SUMMARY stored=0 attempted=0 failed=0\n",
+         "stored=0 attempted=0 failed=0"},
+        {false, "SEED-SUMMARY stored=1 attempted=1 failed=0\n", NULL},
+        {true, "prefix SEED-SUMMARY stored=1 attempted=1 failed=0\n", NULL},
+        {true, "SEED-SUMMARY stored=1 attempted=1 failed=0 trailing\n", NULL},
+        {true, "SEED-SUMMARY stored=1 attempted=1 failed=0", NULL},
+        {true, "SEED-SUMMARY stored=1\n", NULL},
+        {true, "SEED-SUMMARY stored=2 attempted=1 failed=0\n", NULL},
+        {true, "SEED-SUMMARY stored=0 attempted=1 failed=0\n", NULL},
+        {true, "SEED-SUMMARY stored=-1 attempted=1 failed=0\n", NULL},
+        {true, "SEED-SUMMARY stored=+1 attempted=1 failed=0\n", NULL},
+        {true, "SEED-SUMMARY stored=1x attempted=1 failed=0\n", NULL},
+        {true, "SEED-SUMMARY stored=18446744073709551616 attempted=1 failed=0\n", NULL},
+        {true, "SEED-SUMMARY stored=0 attempted=18446744073709551616 failed=0\n", NULL},
+        {true, "SEED-SUMMARY stored=0 attempted=1 failed=18446744073709551616\n", NULL},
+        {true, "SEED-SUMMARY stored=0 attempted=0 failed=0\n"
+               "SEED-SUMMARY stored=0 attempted=0 failed=0\n", NULL},
+        {true, "SEED-SUMMARY stored=0 attempted=0 failed=0\n"
+               "SEED-SUMMARY broken\n", NULL},
+        {true, "no summary\n", NULL},
+    };
+    TEST("shadow seed: successful current producer and complete consistent counts") {
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            char note[128] = "";
+            bool ok = zcl_dev_proof_test_shadow_seed_note(
+                cases[i].spawned, cases[i].log, strlen(cases[i].log),
+                note, sizeof(note));
+            if (ok != (cases[i].note != NULL) ||
+                (ok && strcmp(note, cases[i].note) != 0)) {
+                printf("shadow seed case %zu: ok=%d note=%s\n", i, ok, note);
+                failures++;
+            }
+        }
+        static const char nul[] =
+            "SEED-SUMMARY stored=0 attempted=0 failed=0\n\0hidden";
+        char note[128];
+        ASSERT(!zcl_dev_proof_test_shadow_seed_note(true, nul, sizeof(nul) - 1,
+                                                   note, sizeof(note)));
+        char maximum[128], expected[96];
+        snprintf(maximum, sizeof(maximum),
+                 "SEED-SUMMARY stored=%zu attempted=%zu failed=0\n",
+                 SIZE_MAX, SIZE_MAX);
+        snprintf(expected, sizeof(expected),
+                 "stored=%zu attempted=%zu failed=0", SIZE_MAX, SIZE_MAX);
+        ASSERT(zcl_dev_proof_test_shadow_seed_note(true, maximum, strlen(maximum),
+                                                  note, sizeof(note)));
+        ASSERT(strcmp(note, expected) == 0);
+        snprintf(maximum, sizeof(maximum),
+                 "SEED-SUMMARY stored=1 attempted=0 failed=%zu\n", SIZE_MAX);
+        ASSERT(!zcl_dev_proof_test_shadow_seed_note(true, maximum, strlen(maximum),
+                                                   note, sizeof(note)));
+        ASSERT(!zcl_dev_proof_test_shadow_seed_note(true, NULL, 0,
+                                                   note, sizeof(note)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_preflight_parse(void)
 {
     int failures = 0;
@@ -16355,6 +16425,7 @@ int test_impact_composition(void)
     failures += test_ic_proof_test_dimension_runs_cold();
     failures += test_ic_proof_test_accounting_refuses_reuse();
     failures += test_ic_preflight_parse();
+    failures += test_ic_shadow_seed_note();
     failures += test_ic_preflight_skips_only_empty_store();
     failures += test_ic_capsule_argv_write();
     failures += test_ic_capsule_argv_use();

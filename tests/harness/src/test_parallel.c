@@ -864,19 +864,12 @@ static void seed_probe_passes(const struct group_result *results,
                               const struct testcache_probe *probes,
                               struct testcache *tc)
 {
-    size_t stored = 0;
-    if (!tc || !probes) {
-        printf("SEED-SUMMARY stored=0\n");
-        return;
-    }
-    for (size_t i = 0; i < g_num_groups; i++) {
-        const struct testcache_probe *p = &probes[i];
-        if (results[i].skipped || !p->cacheable || !p->key_valid || p->hit)
-            continue;
-        testcache_store_pass(tc, p->key);
-        stored++;
-    }
-    printf("SEED-SUMMARY stored=%zu\n", stored);
+    struct testcache_seed_counts counts = {0};
+    if (tc && probes)
+        for (size_t i = 0; i < g_num_groups; i++)
+            testcache_seed_probe(tc, &probes[i], results[i].skipped, &counts);
+    printf("SEED-SUMMARY stored=%zu attempted=%zu failed=%zu\n",
+           counts.stored, counts.attempted, counts.failed);
 }
 
 /* ── The per-group watchdog is on SILENCE, not on runtime ──────────────────
