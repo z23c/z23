@@ -228,8 +228,10 @@ void boot_auto_install_clear_failed_marker(const char *bundle_path);
  * (empty datadir/path, an embedded newline, or an I/O failure). */
 int boot_install_bundle_request(const char *datadir, const char *bundle_path);
 
-/* True iff the request on disk is the terminal marker (budget spent). */
-bool boot_install_bundle_terminal(const char *datadir);
+/* True iff the request on disk is the terminal marker (budget spent). Logs
+ * nothing: *read_errno (may be NULL) gets the errno of a request that exists
+ * but cannot be opened, 0 otherwise. */
+bool boot_install_bundle_terminal(const char *datadir, int *read_errno);
 
 /* True iff a request is on disk AND is not the terminal marker. */
 bool boot_install_bundle_pending(const char *datadir);

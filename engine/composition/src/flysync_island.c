@@ -953,6 +953,18 @@ static void fsi_tick_walk(int64_t now)
                       "the rung window)");
 }
 
+/* The install request's budget is spent. An unreadable request is logged and
+ * not taken as spent (the install bound still applies). */
+static bool fsi_install_budget_spent(const char *datadir)
+{
+    int err = 0;
+    bool spent = datadir && boot_install_bundle_terminal(datadir, &err);
+    if (err != 0)
+        LOG_WARN(FSI_SUBSYS, "install request in %s unreadable (%s); its "
+                 "budget is not treated as spent", datadir, strerror(err));
+    return spent;
+}
+
 static void fsi_tick_seeded(int64_t now)
 {
     const char *datadir = fsi_datadir();
@@ -966,7 +978,7 @@ static void fsi_tick_seeded(int64_t now)
     char *bundle = datadir ? boot_autodetect_consensus_bundle(datadir) : NULL;
     bool staged = bundle != NULL;
     free(bundle);
-    if (datadir && boot_install_bundle_terminal(datadir))
+    if (fsi_install_budget_spent(datadir))
         fsi_fall_back("the rung bundle's bounded install budget is spent");
     else if (!staged)
         fsi_fall_back("the rung bundle is no longer installable (failed or "

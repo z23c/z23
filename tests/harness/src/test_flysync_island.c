@@ -635,7 +635,7 @@ static int fsi_case_install_budget(struct fsi_node *n)
     for (int i = 0; i <= BOOT_INSTALL_BUNDLE_MAX; i++)
         (void)boot_install_bundle_consume(n->dir, out, sizeof(out));
     FSI_CHECK("the install budget is spent",
-              boot_install_bundle_terminal(n->dir));
+              boot_install_bundle_terminal(n->dir, NULL));
     flysync_island_tick();
     FSI_CHECK("budget spent: FlySync falls back, hold lifts",
               flysync_island_phase() == FLYSYNC_FELL_BACK &&
