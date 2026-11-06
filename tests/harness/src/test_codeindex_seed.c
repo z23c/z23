@@ -569,7 +569,6 @@ int test_codeindex_seed(void)
     if (!ready) return failures;
 
     failures += cis_identical_and_near(&repo);
-    failures += cis_donor_pages(&repo);
     failures += cis_different_depfiles(&repo);
     failures += cis_absolute_depfile_paths(&repo);
     failures += cis_altered_donor_includes(&repo);
@@ -577,5 +576,6 @@ int test_codeindex_seed(void)
     failures += cis_corrupt_donor(&repo);
     failures += cis_foreign_donor(&foreign);
     failures += cis_owner_refusal(&repo);
+    failures += cis_donor_pages(&repo); /* last: it imports a page hint into the donor */
     return failures;
 }
