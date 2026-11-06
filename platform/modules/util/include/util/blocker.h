@@ -236,6 +236,15 @@ static inline void blocker_name_dependency(const char *id, const char *owner,
     }
 }
 
+/* A sync stage is holding its cursor because a check ran out of memory on this
+ * host: "<stage>.local_out_of_memory". TRANSIENT, retired by the supervisor
+ * sweep once the stage stops refreshing it, and the one TRANSIENT shape the
+ * recovery ladder holds on, since no rung can cure it. */
+#define BLOCKER_LOCAL_MEMORY_SUFFIX ".local_out_of_memory"
+#define BLOCKER_LOCAL_MEMORY_TTL_SECS 300
+void blocker_note_local_memory_hold(const char *stage);
+bool blocker_is_local_memory_hold(const char *id);
+
 /* Additive variant of blocker_set: same storage/rate-limit/return contract,
  * plus records a root-cause edge. `caused_by` is the id of the blocker
  * judged to be the root cause; NULL or "" means no known cause (identical

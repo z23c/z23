@@ -1578,6 +1578,60 @@ static int t17_t19_permanent_blocker_hold(void)
         reducer_frontier_provable_tip_reset();
     }
 
+    /* ── T18b: a stage holding for lack of memory stops the ladder ───────
+     * A reindex needs more memory, not less, and it is destructive. The hold is
+     * narrow: a plain TRANSIENT sync blocker keeps the ladder moving, and it
+     * releases when the stage stops refreshing the hold. */
+    {
+        sticky_escalator_test_reset();
+        reducer_frontier_provable_tip_reset();
+        reducer_frontier_provable_tip_set(1000);
+        blocker_reset_for_testing();
+
+        blocker_note_local_memory_hold("validate_headers");
+        sticky_escalator_note_stall("test_local_memory_hold");
+        int64_t t = (int64_t)platform_time_wall_time_t();
+        SE_CHECK("T18b: a validate_headers memory hold keeps the ladder on retry",
+                 sticky_escalator_test_drive(1000, t + 31) == STICKY_RUNG_RETRY &&
+                 sticky_escalator_test_held_by_permanent());
+        SE_CHECK("T18b: still on retry far past every rung window",
+                 sticky_escalator_test_drive(1000, t + 5000) ==
+                     STICKY_RUNG_RETRY);
+        blocker_clear("validate_headers.local_out_of_memory");
+        blocker_note_local_memory_hold("script_validate");
+        SE_CHECK("T18b: a script_validate memory hold does the same",
+                 sticky_escalator_test_drive(1000, t + 5001) ==
+                     STICKY_RUNG_RETRY);
+        blocker_clear("script_validate.local_out_of_memory");
+
+        struct blocker_record plain;
+        SE_CHECK("T18b: register a plain TRANSIENT sync blocker",
+                 blocker_init(&plain, "validate_headers.other",
+                              "validate_headers", BLOCKER_TRANSIENT,
+                              "not a memory hold (test)") &&
+                 blocker_set(&plain) == 0);
+        SE_CHECK("T18b: a plain TRANSIENT blocker does not hold the ladder",
+                 sticky_escalator_test_drive(1000, t + 5002) ==
+                     STICKY_RUNG_TARGETED_REDERIVE &&
+                 !sticky_escalator_test_held_by_permanent());
+
+        blocker_reset_for_testing();
+        blocker_set_clock_for_testing(1000000000);
+        blocker_note_local_memory_hold("validate_headers");
+        blocker_advance_clock_for_testing(
+            (int64_t)(BLOCKER_LOCAL_MEMORY_TTL_SECS - 1) * 1000000);
+        blocker_supervisor_sweep();
+        SE_CHECK("T18b: the hold outlives a sweep while it is fresh",
+                 blocker_exists("validate_headers.local_out_of_memory"));
+        blocker_advance_clock_for_testing((int64_t)2 * 1000000);
+        blocker_supervisor_sweep();
+        SE_CHECK("T18b: the hold retires once the stage stops refreshing it",
+                 !blocker_exists("validate_headers.local_out_of_memory"));
+
+        blocker_reset_for_testing();
+        sticky_escalator_test_reset();
+    }
+
     /* ── T19: clearing the permanent blocker RESUMES escalation ──────────────
      * The hold must release the moment the blocker clears/retires — the ladder
      * resumes advancing on the normal cadence, no restart needed. */

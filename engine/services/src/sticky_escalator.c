@@ -237,7 +237,10 @@ static bool permanent_sync_blocker_active(char id_out[BLOCKER_ID_MAX])
     struct blocker_snapshot snaps[BLOCKER_CAP];
     int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
     for (int i = 0; i < n; i++) {
-        if (snaps[i].class != BLOCKER_PERMANENT)
+        /* A stage holding because this host ran out of memory is the other
+         * cause no rung can cure: a reindex needs more memory, not less. */
+        if (snaps[i].class != BLOCKER_PERMANENT &&
+            !blocker_is_local_memory_hold(snaps[i].id))
             continue;
         if (!blocker_in_sync_domain(&snaps[i]))
             continue;
@@ -1018,9 +1021,9 @@ static void apply_drive(int64_t tip, int64_t now)
             enum sticky_rung held_rung = (enum sticky_rung)atomic_load(&g_rung);
             if (drive_hold_warn_due(now)) {
                 LOG_WARN("sticky_escalator",
-                         "[sticky_escalator] escalation held: permanent blocker "
-                         "'%s' owns this stall — rungs cannot cure incomplete "
-                         "state (holding at rung '%s', re-checking each cadence)",
+                         "[sticky_escalator] escalation held: blocker '%s' owns "
+                         "this stall — rungs cannot cure this cause (holding "
+                         "at rung '%s', re-checking each cadence)",
                          held_id, sticky_rung_name(held_rung));
                 event_emitf(EV_RECOVERY_ACTION, 0,
                             "action=sticky-escalation-held blocker=%s rung=%s "

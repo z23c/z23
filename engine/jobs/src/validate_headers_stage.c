@@ -73,6 +73,7 @@ static struct vh_pool    g_pool;   /* also owns the per-step vh_job scratch */
 
 static _Atomic uint64_t g_passed_total = 0;
 static _Atomic uint64_t g_failed_total = 0;
+static _Atomic uint64_t g_local_failure_total = 0;
 static _Atomic int64_t  g_last_step_unix = 0;
 static _Atomic int64_t  g_last_blocked_unix = 0;
 static _Atomic int64_t  g_failure_recheck_cursor = 0;
@@ -178,6 +179,8 @@ static bool vh_batch_failed_locally(const struct vh_job *jobs, int n)
                      "the cursor (no verdict written, %llu suppressed)",
                      jobs[i].height, (unsigned long long)reps);
         atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+        atomic_fetch_add(&g_local_failure_total, 1);
+        blocker_note_local_memory_hold(STAGE_NAME);
         return true;
     }
     return false;
@@ -1166,6 +1169,7 @@ void validate_headers_stage_shutdown(void)
     g_validator_user = NULL;
     atomic_store(&g_passed_total, (uint64_t)0);
     atomic_store(&g_failed_total, (uint64_t)0);
+    atomic_store(&g_local_failure_total, (uint64_t)0);
     atomic_store(&g_last_step_unix, (int64_t)0);
     atomic_store(&g_last_blocked_unix, (int64_t)0);
     atomic_store(&g_failure_recheck_cursor, (int64_t)0);
@@ -1207,6 +1211,11 @@ int64_t validate_headers_stage_step_us_ewma(void)
 uint64_t validate_headers_stage_passed_total(void)
 {
     return atomic_load(&g_passed_total);
+}
+
+uint64_t validate_headers_stage_local_failure_total(void)
+{
+    return atomic_load(&g_local_failure_total);
 }
 
 uint64_t validate_headers_stage_failed_total(void)

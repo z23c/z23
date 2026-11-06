@@ -384,6 +384,31 @@ int blocker_class_for(const char *id)
     return cls;
 }
 
+void blocker_note_local_memory_hold(const char *stage)
+{
+    if (!stage)
+        return;
+    char id[BLOCKER_ID_MAX];
+    snprintf(id, sizeof(id), "%s%s", stage, BLOCKER_LOCAL_MEMORY_SUFFIX);
+    struct blocker_record r;
+    if (!blocker_init(&r, id, stage, BLOCKER_TRANSIENT,
+                      "holding: a check ran out of memory on this host; "
+                      "no verdict written, retrying"))
+        return;
+    r.transient_ttl_secs = BLOCKER_LOCAL_MEMORY_TTL_SECS;
+    (void)blocker_set(&r);
+}
+
+bool blocker_is_local_memory_hold(const char *id)
+{
+    if (!id)
+        return false;
+    size_t len = strlen(id);
+    size_t suffix = strlen(BLOCKER_LOCAL_MEMORY_SUFFIX);
+    return len > suffix &&
+           strcmp(id + len - suffix, BLOCKER_LOCAL_MEMORY_SUFFIX) == 0;
+}
+
 bool blocker_exists(const char *id)
 {
     if (!id) return false;

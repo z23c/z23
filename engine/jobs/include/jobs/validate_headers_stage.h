@@ -150,6 +150,8 @@ int64_t  validate_headers_stage_step_us_ewma(void);
 int validate_headers_stage_catchup_step_cap(int normal_steps);
 uint64_t validate_headers_stage_passed_total(void);
 uint64_t validate_headers_stage_failed_total(void);
+/* Batches dropped because a check ran out of memory on this host. */
+uint64_t validate_headers_stage_local_failure_total(void);
 
 /* Rising-edge count of "header mark refused" WARNs emitted — one per mark-
  * failure streak (the storm→typed-blocker throttle). Test hook + diagnostics;

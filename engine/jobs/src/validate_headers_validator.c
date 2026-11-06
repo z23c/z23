@@ -26,6 +26,7 @@
 #include "validation/main_state.h"          /* struct main_state */
 #include "validate_headers_log_store.h"     /* validate_headers_log_insert */
 #include "util/log_macros.h"
+#include "util/safe_alloc.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -561,13 +562,11 @@ static bool validate_from_index_sources(const struct block_index *bi,
     return false;
 }
 
-bool validate_headers_default_validator(const struct block_index *bi,
-                                        const char *datadir,
-                                        char *out_reason,
-                                        size_t out_reason_size,
-                                        void *user)
+static bool validate_headers_resolve_and_check(const struct block_index *bi,
+                                               const char *datadir,
+                                               char *out_reason,
+                                               size_t out_reason_size)
 {
-    (void)user;
     (void)datadir;
 
     /* Entry preamble: null guard, chain params, the genesis exemption and
@@ -630,6 +629,25 @@ bool validate_headers_default_validator(const struct block_index *bi,
     return validate_from_index_sources(bi, cp, out_reason, out_reason_size,
                                        &had_hash_bound_header,
                                        &had_hash_mismatch);
+}
+
+bool validate_headers_default_validator(const struct block_index *bi,
+                                        const char *datadir,
+                                        char *out_reason,
+                                        size_t out_reason_size,
+                                        void *user)
+{
+    (void)user;
+    /* A source that could not be read for lack of memory falls through to the
+     * next one, so whatever the last source reported may only mean this host
+     * ran short. Any failure in that window reaches no verdict. */
+    uint64_t alloc_failures = zcl_alloc_failure_count();
+    bool ok = validate_headers_resolve_and_check(bi, datadir, out_reason,
+                                                 out_reason_size);
+    if (!ok && zcl_alloc_failure_count() != alloc_failures)
+        snprintf(out_reason, out_reason_size, "%s",
+                 VALIDATE_HEADERS_LOCAL_FAILURE_REASON);
+    return ok;
 }
 
 /* ── On-demand single-header pass record (the instant-on seam) ──────────────

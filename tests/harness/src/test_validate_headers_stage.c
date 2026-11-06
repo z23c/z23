@@ -808,6 +808,11 @@ static int vh_check_local_memory_failure_holds(void)
         VH_CHECK("local-oom: no row written",
                  !log_row_at(progress_store_db(), 0, &ok,
                              reason, sizeof(reason)));
+        VH_CHECK("local-oom: the hold is counted",
+                 validate_headers_stage_local_failure_total() == 1);
+        VH_CHECK("local-oom: the hold is named for the recovery ladder",
+                 blocker_exists("validate_headers.local_out_of_memory"));
+        blocker_clear("validate_headers.local_out_of_memory");
 
         VH_CHECK("local-oom: with memory back the height is checked again",
                  validate_headers_stage_drain(10) == 1);
@@ -1288,6 +1293,24 @@ static int vh_check_disk_block_source(void)
         bool ok = validate_headers_default_validator(
             &sc.blocks[0], dir, reason, sizeof(reason), NULL);
         VH_CHECK("disk-block: full block header reaches validation",
+                 !ok && strcmp(reason, "invalid-solution") == 0);
+
+        /* A disk read that ran out of memory falls through to the sources after
+         * it. Whatever the last of them says is not a verdict on the header. */
+        reason[0] = '\0';
+        zcl_alloc_fault_fail_nth("read_block_pread_buf", 1);
+        ok = validate_headers_default_validator(
+            &sc.blocks[0], dir, reason, sizeof(reason), NULL);
+        bool read_fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        VH_CHECK("disk-block: the read hit the failed allocation", read_fired);
+        VH_CHECK("disk-block: out of memory on the read is no verdict",
+                 !ok && strcmp(reason, "out-of-memory") == 0);
+
+        reason[0] = '\0';
+        ok = validate_headers_default_validator(
+            &sc.blocks[0], dir, reason, sizeof(reason), NULL);
+        VH_CHECK("disk-block: the same verdict once memory is back",
                  !ok && strcmp(reason, "invalid-solution") == 0);
 
         validate_headers_validator_set_node_db(NULL);
