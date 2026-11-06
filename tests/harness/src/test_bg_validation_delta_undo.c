@@ -467,6 +467,57 @@ static int du_case_memory_failure_no_skip(struct du_fixture *fx)
     return failures;
 }
 
+/* A well-formed rev record whose parse runs out of memory on a SMALL
+ * allocation (not the read buffer) is not missing undo either: it must fail
+ * the block as a local failure, not book script skips. */
+static int du_case_small_alloc_failure_no_skip(struct du_fixture *fx)
+{
+    int failures = 0;
+    static const char *const labels[] = { "block_undo_txs", "tx_undo_prevout" };
+    TEST("delta_undo: out of memory parsing undo books no script skip") {
+        ASSERT(fx->opened);
+        char path[512];
+        snprintf(path, sizeof(path), "%s/blocks", fx->dir);
+        (void)mkdir(path, 0700);
+        snprintf(path, sizeof(path), "%s/blocks/rev00000.dat", fx->dir);
+        /* 8 pad bytes, then: 1 tx undo holding 1 prevout (code 0, value 0,
+         * empty script), then the 32-byte sprout root. */
+        unsigned char rec[8 + 5 + 32];
+        memset(rec, 0, sizeof(rec));
+        rec[8] = 1;
+        rec[9] = 1;
+        rec[12] = 6;
+        for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
+            FILE *rev = fopen(path, "wb");
+            ASSERT(rev != NULL);
+            ASSERT_EQ(fwrite(rec, 1, sizeof(rec), rev), sizeof(rec));
+            ASSERT_EQ(fclose(rev), 0);
+
+            struct block_index bi;
+            du_bg_index(&bi, &fx->c, 1);
+            bi.nStatus |= BLOCK_HAVE_UNDO;
+            bi.nUndoPos = 8;
+            bg_validation_reset_undo_skip_stats();
+            int64_t sigs = 0, proofs = 0, skips = 0;
+            uint64_t before = zcl_alloc_failure_count();
+            zcl_alloc_fault_fail_nth(labels[i], 1);
+            bool valid = bg_validation_validate_block_proofs(
+                &fx->c.body[1], &bi, fx->dir, fx->cp, 1, 0,
+                &sigs, &proofs, &skips);
+            bool fired = zcl_alloc_fault_armed_label() == NULL;
+            zcl_alloc_fault_clear();
+            ASSERT(fired);
+            ASSERT(!valid);
+            ASSERT(zcl_alloc_failure_count() != before);
+            ASSERT_EQ(skips, 0);
+            ASSERT_EQ(bg_validation_get_undo_skip_stats().blocks, 0);
+        }
+        remove(path);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* A rev position that lands on a huge entry count is a bad record: it books
  * the script skip and the block verifies, so the walk moves on. It must not
  * ask for memory and must not read as a local failure. */
@@ -1224,6 +1275,7 @@ static int test_delta_undo_forward_record(const struct chain_params *cp)
     failures += du_case_delta_script(&fx);
     failures += du_case_other_branch(&fx);
     failures += du_case_memory_failure_no_skip(&fx);
+    failures += du_case_small_alloc_failure_no_skip(&fx);
     failures += du_case_garbage_count_books_skip(&fx);
     failures += du_case_input_mismatch(&fx);
     failures += du_case_decode_out_of_range(&fx);

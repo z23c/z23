@@ -526,13 +526,17 @@ bool bg_validation_validate_block_proofs(const struct block *block,
 
     if (block->num_vtx > 1) {
         bool undo_out_of_memory = false;
+        uint64_t alloc_failures = zcl_alloc_failure_count();
         have_undo = read_undo_rev_or_delta(&blockundo, block, pindex,
                                            datadir, params, &undo_out_of_memory);
-        /* A rev record that could not be read for lack of a buffer is not
-         * missing undo: a persisted script skip would block publishing until
-         * a refold. Fail here and let the caller's allocation count make it a
-         * retry. A record that fails to parse is missing undo, as before. */
-        if (!have_undo && undo_out_of_memory)
+        /* Undo that could not be read for lack of memory (the read buffer, or
+         * any smaller allocation while parsing or loading it) is not missing
+         * undo: a persisted script skip would block publishing until a
+         * refold. Fail here and let the caller's allocation count make it a
+         * retry. A record that fails to parse without an allocation failure
+         * is missing undo, as before. */
+        if (!have_undo &&
+            (undo_out_of_memory || zcl_alloc_failure_count() != alloc_failures))
             goto out;
     }
 
