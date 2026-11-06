@@ -13,7 +13,7 @@
 #include <string.h>
 #include <time.h>
 
-#define SOL_INACTIVITY_SECONDS 30
+#define SOL_INACTIVITY_SECONDS STATE_OFFER_LINK_CLIENT_IDLE_SECONDS
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed;

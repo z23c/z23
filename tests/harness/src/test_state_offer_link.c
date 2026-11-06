@@ -356,6 +356,95 @@ static bool slot_shutdown_restart(struct slot_fixture *f)
     memset(f->got, 0, sizeof(f->got));
     return f->started && slot_ask(f, 402, 402) && slot_finish(f, 402, 1, 402);
 }
+static bool slot_wait_gate(unsigned waiting)
+{
+    for (int i = 0; i < 5000; ++i) {
+        if (state_offer_link_test_gate_waiting() == waiting) return true;
+        test_wait();
+    }
+    return false;
+}
+static bool slot_wait_idle(void)
+{
+    for (int i = 0; i < 5000; ++i) {
+        if (!state_offer_link_test_working()) return true;
+        test_wait();
+    }
+    return false;
+}
+/* Every slot admits a new connection and is released again. */
+static bool slot_fill_all(struct slot_fixture *f, uint64_t first)
+{
+    bool ok = true;
+    for (uint64_t p = first; ok && p < first + STATE_OFFER_LINK_SERVER_SLOTS; ++p) ok = slot_ask(f, p, first);
+    for (uint64_t p = first; p < first + STATE_OFFER_LINK_SERVER_SLOTS; ++p) state_offer_link_server_drop(p);
+    return slot_wait_idle() && ok;
+}
+/* A disconnect while the worker is mid-read releases the connection at once;
+ * the late result is discarded and the slot returns to service. */
+static bool slot_disconnect_mid_read(struct slot_fixture *f)
+{
+    uint64_t held[STATE_OFFER_LINK_SERVER_SLOTS]; size_t n = 0;
+    state_offer_link_test_gate(true);
+    bool ok = slot_ask(f, 600, 600) && slot_wait_gate(1);
+    state_offer_link_server_drop(600);
+    ok = ok && !state_offer_link_server_peers(held, STATE_OFFER_LINK_SERVER_SLOTS);
+    state_offer_link_test_gate(false);
+    ok = ok && slot_wait_idle() && !state_offer_link_server_next(600, f->wire, STATE_OFFER_LINK_FRAME_MAX, &n);
+    return ok && slot_fill_all(f, 700);
+}
+static void *slot_shutdown_thread(void *arg)
+{
+    state_offer_link_server_shutdown();
+    atomic_store((atomic_bool *)arg, true);
+    return NULL;
+}
+/* Shutdown while a worker is mid-read waits for it, discards its result and
+ * leaves no worker unjoined; the server restarts with every slot usable. */
+static bool slot_shutdown_mid_read(struct slot_fixture *f)
+{
+    uint64_t held[STATE_OFFER_LINK_SERVER_SLOTS]; size_t n = 0;
+    atomic_bool done = false; pthread_t t;
+    state_offer_link_test_gate(true);
+    bool ok = slot_ask(f, 610, 610) && slot_wait_gate(1) && !pthread_create(&t, NULL, slot_shutdown_thread, &done);
+    bool spawned = ok;
+    for (int i = 0; ok && i < 5000 && state_offer_link_server_peers(held, STATE_OFFER_LINK_SERVER_SLOTS); ++i)
+        test_wait();
+    ok = ok && !state_offer_link_server_peers(held, STATE_OFFER_LINK_SERVER_SLOTS) && !atomic_load(&done) &&
+        state_offer_link_test_gate_waiting() == 1;
+    state_offer_link_test_gate(false);
+    if (spawned) { (void)pthread_join(t, NULL); f->started = false; }
+    ok = ok && atomic_load(&done) && state_offer_link_test_all_joined() &&
+        !state_offer_link_server_next(610, f->wire, STATE_OFFER_LINK_FRAME_MAX, &n);
+    if (!ok || f->started) return false;
+    f->started = state_offer_link_server_start(f->dir, NULL);
+    return f->started && slot_fill_all(f, 720);
+}
+/* The client abandons an object after the client idle interval; a request
+ * on the same connection before then is refused, after it replaces the
+ * abandoned stream from offset 0. */
+static bool slot_stale_replace(struct slot_fixture *f)
+{
+    memset(f->got, 0, sizeof(f->got));
+    bool ok = slot_ask(f, 620, 620) && slot_all_started(f, 620, 1, 620) && !slot_ask(f, 620, 621);
+    state_offer_link_test_advance_ms((int64_t)STATE_OFFER_LINK_CLIENT_IDLE_SECONDS * 1000);
+    memset(f->got, 0, sizeof(f->got));
+    return ok && slot_ask(f, 620, 621) && slot_finish(f, 620, 1, 621);
+}
+/* A silent connection's slot is swept after 45 s without progress. */
+static bool slot_idle_sweep(struct slot_fixture *f)
+{
+    uint64_t held[STATE_OFFER_LINK_SERVER_SLOTS]; size_t n = 0;
+    memset(f->got, 0, sizeof(f->got));
+    bool ok = slot_ask(f, 630, 630) && slot_all_started(f, 630, 1, 630);
+    state_offer_link_test_advance_ms(44000);
+    state_offer_link_server_tick();
+    ok = ok && state_offer_link_server_peers(held, STATE_OFFER_LINK_SERVER_SLOTS) == 1;
+    state_offer_link_test_advance_ms(1000);
+    state_offer_link_server_tick();
+    return ok && !state_offer_link_server_peers(held, STATE_OFFER_LINK_SERVER_SLOTS) &&
+        !state_offer_link_server_next(630, f->wire, STATE_OFFER_LINK_FRAME_MAX, &n);
+}
 static void slot_cleanup(struct slot_fixture *f)
 {
     if (f->started) state_offer_link_server_shutdown();
@@ -367,7 +456,9 @@ static void slot_cleanup(struct slot_fixture *f)
 static int test_slots(void)
 {
     struct slot_fixture f = {0};
-    bool ok = slot_setup(&f) && slot_parallel(&f) && slot_full_retry(&f) && slot_shutdown_restart(&f);
+    bool ok = slot_setup(&f) && slot_parallel(&f) && slot_full_retry(&f) && slot_shutdown_restart(&f) &&
+        slot_disconnect_mid_read(&f) && slot_shutdown_mid_read(&f) && slot_stale_replace(&f) && slot_idle_sweep(&f);
+    state_offer_link_test_gate(false);
     slot_cleanup(&f);
     if (!ok) fprintf(stderr, "state_offer_link: concurrent serve slots failed\n");
     else puts("state_offer_link slots: ok");

@@ -118,13 +118,20 @@ bool state_offer_link_read_registered(const char *datadir, enum state_offer_link
 }
 
 /* Each serve slot streams one object to one connection. Its disk read runs in
- * a one-shot worker, so the message thread only
- * copies a bounded request and the peer tick takes a bounded number of ready
- * frames per connection. A slot is free when it is neither working nor ready;
- * clearing a working slot bumps its generation so the late result is dropped.
- * The client abandons an object after SOL_INACTIVITY_SECONDS (30 s) without a
- * part; a slot idle 15 s longer than that has no reader left. */
+ * a one-shot worker, so the message thread only copies a bounded request and
+ * the peer tick takes a bounded number of ready frames per connection. A slot
+ * is free when it is neither working nor ready; clearing a working slot bumps
+ * its generation so the late result is dropped.
+ *
+ * The client abandons an object after STATE_OFFER_LINK_CLIENT_IDLE_SECONDS
+ * without a part. It receives a part only after this server queued it, so by
+ * then the slot has been idle at least that long here too: a new request from
+ * the same connection after that interval replaces its abandoned slot, and an
+ * earlier one is refused. The tick frees an abandoned slot of a connection
+ * that stays silent after SOL_SERVER_IDLE_MS. */
+#define SOL_CLIENT_IDLE_MS ((int64_t)STATE_OFFER_LINK_CLIENT_IDLE_SECONDS * 1000)
 #define SOL_SERVER_IDLE_MS INT64_C(45000)
+_Static_assert(SOL_SERVER_IDLE_MS > SOL_CLIENT_IDLE_MS, "the idle sweep must outlast the client's patience");
 struct sol_slot {
     pthread_t thread;
     bool working, ready, thread_started;
@@ -150,6 +157,72 @@ static void sol_slot_clear_locked(struct sol_slot *s)
     s->peer = 0;
     ++s->generation;
 }
+
+#ifdef ZCL_TESTING
+/* Test seams: a gate that holds workers between read and publish, a clock
+ * offset, and spawn/join counts. Production builds compile none of this. */
+static pthread_mutex_t test_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t test_cond = PTHREAD_COND_INITIALIZER;
+static bool test_gate_closed;
+static unsigned test_gate_waiting;
+static int64_t test_skew_ms;
+static uint64_t test_spawned, test_joined;
+static void sol_test_count(uint64_t *counter)
+{
+    pthread_mutex_lock(&test_lock); ++*counter; pthread_mutex_unlock(&test_lock);
+}
+static void sol_test_gate(void)
+{
+    pthread_mutex_lock(&test_lock);
+    ++test_gate_waiting;
+    pthread_cond_broadcast(&test_cond);
+    while (test_gate_closed) pthread_cond_wait(&test_cond, &test_lock);
+    --test_gate_waiting;
+    pthread_mutex_unlock(&test_lock);
+}
+static int64_t sol_test_skew(void)
+{
+    pthread_mutex_lock(&test_lock); int64_t skew = test_skew_ms; pthread_mutex_unlock(&test_lock);
+    return skew;
+}
+void state_offer_link_test_gate(bool closed)
+{
+    pthread_mutex_lock(&test_lock); test_gate_closed = closed; pthread_cond_broadcast(&test_cond);
+    pthread_mutex_unlock(&test_lock);
+}
+unsigned state_offer_link_test_gate_waiting(void)
+{
+    pthread_mutex_lock(&test_lock); unsigned n = test_gate_waiting; pthread_mutex_unlock(&test_lock);
+    return n;
+}
+void state_offer_link_test_advance_ms(int64_t ms)
+{
+    pthread_mutex_lock(&test_lock); test_skew_ms += ms; pthread_mutex_unlock(&test_lock);
+}
+bool state_offer_link_test_all_joined(void)
+{
+    pthread_mutex_lock(&test_lock); bool all = test_spawned == test_joined; pthread_mutex_unlock(&test_lock);
+    return all;
+}
+unsigned state_offer_link_test_working(void)
+{
+    unsigned n = 0;
+    pthread_mutex_lock(&server.mutex);
+    for (size_t i = 0; i < STATE_OFFER_LINK_SERVER_SLOTS; ++i) n += server.slots[i].working;
+    pthread_mutex_unlock(&server.mutex);
+    return n;
+}
+#define SOL_TEST_GATE() sol_test_gate()
+#define SOL_TEST_SPAWNED() sol_test_count(&test_spawned)
+#define SOL_TEST_JOINED() sol_test_count(&test_joined)
+#define SOL_TEST_SKEW() sol_test_skew()
+#else
+#define SOL_TEST_GATE() ((void)0)
+#define SOL_TEST_SPAWNED() ((void)0)
+#define SOL_TEST_JOINED() ((void)0)
+#define SOL_TEST_SKEW() INT64_C(0)
+#endif
+static int64_t sol_now_ms(void) { return platform_time_monotonic_ms() + SOL_TEST_SKEW(); }
 
 struct sol_job {
     struct state_offer_link_frame request;
@@ -183,7 +256,7 @@ static void sol_server_publish(const struct sol_job *job, uint8_t *bytes, uint32
         s->cursor = size ? r->offset : 0;
         s->end = size && r->total < size - r->offset ? r->offset + r->total : size;
         s->ready = true;
-        s->last_ms = platform_time_monotonic_ms();
+        s->last_ms = sol_now_ms();
         if (size) bytes = NULL;
         wake = server.wake;
     }
@@ -199,6 +272,7 @@ static void *sol_server_worker(void *arg)
     uint8_t *bytes = zcl_malloc(ROM_SEED_CHUNK_SIZE, "state_offer_link_chunk");
     uint32_t size = 0;
     if (!sol_server_read(job, bytes, &size)) size = 0;
+    SOL_TEST_GATE();
     sol_server_publish(job, bytes, size);
     free(job);
     return NULL;
@@ -217,17 +291,21 @@ bool state_offer_link_server_start(const char *datadir, void (*wake)(void))
     return true;
 }
 
-/* One stream per connection; otherwise the first free slot. */
+/* One stream per connection: a live one refuses the new request, an abandoned
+ * one is replaced. Then the first free slot. */
 static struct sol_slot *sol_server_admit_locked(uint64_t peer)
 {
-    struct sol_slot *free_slot = NULL;
     if (!server.started || server.stop) return NULL;
+    int64_t now = sol_now_ms();
     for (size_t i = 0; i < STATE_OFFER_LINK_SERVER_SLOTS; ++i) {
         struct sol_slot *s = &server.slots[i];
-        if (s->peer == peer) return NULL;
-        if (!free_slot && !s->working && !s->ready) free_slot = s;
+        if (s->peer != peer) continue;
+        if (now < s->last_ms || now - s->last_ms < SOL_CLIENT_IDLE_MS) return NULL;
+        sol_slot_clear_locked(s);
     }
-    return free_slot;
+    for (size_t i = 0; i < STATE_OFFER_LINK_SERVER_SLOTS; ++i)
+        if (!server.slots[i].working && !server.slots[i].ready) return &server.slots[i];
+    return NULL;
 }
 
 /* The previous worker of a free slot has already published; join it before reuse. */
@@ -235,11 +313,12 @@ static bool sol_server_spawn_locked(struct sol_slot *s, uint64_t peer, struct so
 {
     if (s->thread_started) {
         (void)pthread_join(s->thread, NULL);
+        SOL_TEST_JOINED();
         s->thread_started = false;
     }
     s->peer = peer;
     s->request = job->request;
-    s->last_ms = platform_time_monotonic_ms();
+    s->last_ms = sol_now_ms();
     job->slot = (size_t)(s - server.slots);
     job->generation = s->generation;
     memcpy(job->datadir, server.datadir, sizeof(job->datadir));
@@ -247,6 +326,7 @@ static bool sol_server_spawn_locked(struct sol_slot *s, uint64_t peer, struct so
     // thread-supervision-ok: one bounded object read per slot, joined before reuse and shutdown
     s->thread_started = thread_registry_spawn("zcl_state_offer", sol_server_worker, job, &s->thread) == 0;
     if (!s->thread_started) { s->working = false; s->peer = 0; }
+    else SOL_TEST_SPAWNED();
     return s->thread_started;
 }
 
@@ -294,7 +374,7 @@ bool state_offer_link_server_next(uint64_t peer, uint8_t *wire, size_t cap, size
     bool ok = state_offer_link_encode(&f, wire, cap, size);
     if (ok) {
         s->cursor += f.size;
-        s->last_ms = platform_time_monotonic_ms();
+        s->last_ms = sol_now_ms();
         if (!s->object_size || s->cursor == s->end) sol_slot_clear_locked(s);
     }
     pthread_mutex_unlock(&server.mutex);
@@ -322,7 +402,7 @@ size_t state_offer_link_server_peers(uint64_t *out, size_t cap)
 void state_offer_link_server_tick(void)
 {
     pthread_mutex_lock(&server.mutex);
-    int64_t now = platform_time_monotonic_ms();
+    int64_t now = sol_now_ms();
     for (size_t i = 0; i < STATE_OFFER_LINK_SERVER_SLOTS; ++i) {
         struct sol_slot *s = &server.slots[i];
         if (s->peer && now >= s->last_ms && now - s->last_ms >= SOL_SERVER_IDLE_MS) sol_slot_clear_locked(s);
@@ -343,7 +423,10 @@ void state_offer_link_server_shutdown(void)
         s->thread_started = false;
     }
     pthread_mutex_unlock(&server.mutex);
-    for (size_t i = 0; i < n; ++i) (void)pthread_join(joins[i], NULL);
+    for (size_t i = 0; i < n; ++i) {
+        (void)pthread_join(joins[i], NULL);
+        SOL_TEST_JOINED();
+    }
     pthread_mutex_lock(&server.mutex);
     server.started = false;
     pthread_mutex_unlock(&server.mutex);

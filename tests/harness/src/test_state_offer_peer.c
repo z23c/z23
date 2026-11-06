@@ -212,6 +212,8 @@ static bool bench_ask(struct peer_fixture *p, struct bench_peer *b, const uint8_
     memcpy(f.digest,root,32); b->bytes=0;
     return frame_in(&p->mp,b->node,&f);
 }
+/* Yield to the slot workers while their disk reads complete. */
+static void bench_pause(void) { struct timespec t={0,100000}; (void)nanosleep(&t,NULL); }
 static bool bench_run(struct peer_fixture *p, const uint8_t root[32], size_t peers, double *mib_s)
 {
     struct bench_peer b[1+PEER_EXTRA]={{p->node,p->sentinel,0,0}};
@@ -227,7 +229,7 @@ static bool bench_run(struct peer_fixture *p, const uint8_t root[32], size_t pee
                 CHECK_PHASE(bench_ask(p,&b[k],root));
             done+=b[k].chunk==BENCH_CHUNKS;
         }
-        if (done<peers) { struct timespec t={0,100000}; (void)nanosleep(&t,NULL); }
+        if (done<peers) bench_pause();
     }
     clock_gettime(CLOCK_MONOTONIC,&t1);
     double s=(double)(t1.tv_sec-t0.tv_sec)+(double)(t1.tv_nsec-t0.tv_nsec)/1e9;

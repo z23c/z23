@@ -43,9 +43,13 @@ bool state_offer_link_read_registered(const char *datadir, enum state_offer_link
  * seed in-flight cap per address, which every onion peer shares at the zero
  * address, and the default per-address rate of eight chunks per second. */
 #define STATE_OFFER_LINK_SERVER_SLOTS 8u
+/* A client abandons an object after this long without receiving a part. */
+#define STATE_OFFER_LINK_CLIENT_IDLE_SECONDS 30
 bool state_offer_link_server_start(const char *datadir, void (*wake)(void));
 /* False (answer with a retryable refusal) when the server is stopped, the
- * connection already has an object in flight, or every slot is busy. */
+ * connection has an object in flight that progressed within the client idle
+ * interval, or every slot is busy. An older object of the same connection is
+ * abandoned and replaced. */
 bool state_offer_link_server_request(uint64_t peer, const uint8_t ip[16], const struct state_offer_link_frame *request);
 bool state_offer_link_server_next(uint64_t peer, uint8_t *wire, size_t cap, size_t *size);
 void state_offer_link_server_drop(uint64_t peer);
@@ -53,4 +57,14 @@ void state_offer_link_server_drop(uint64_t peer);
 size_t state_offer_link_server_peers(uint64_t *out, size_t cap);
 void state_offer_link_server_tick(void);
 void state_offer_link_server_shutdown(void);
+#ifdef ZCL_TESTING
+/* Hold every worker between its read and its publish while closed. */
+void state_offer_link_test_gate(bool closed);
+unsigned state_offer_link_test_gate_waiting(void);
+/* Move the server's idle clock forward. */
+void state_offer_link_test_advance_ms(int64_t ms);
+/* Every spawned worker has been joined. */
+bool state_offer_link_test_all_joined(void);
+unsigned state_offer_link_test_working(void);
+#endif
 #endif
