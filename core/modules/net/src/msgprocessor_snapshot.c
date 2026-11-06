@@ -490,13 +490,10 @@ bool mp_snapshot_check_stall(void)
     return snapsync_check_stall();
 }
 
-/* D1: aggregate SHA3 UTXO-snapshot verify for the swarm chunk-download
- * path. Was previously a silent-accept: FAILED printed, then fell
- * through into the same cleanup as PASSED (no offence, no blocker) —
- * invisible to the self-healing safety net. Advisory layer only
- * (background validation independently re-verifies block contents), so
- * the already-applied rows stay; a mismatch now scores the peer, names
- * a retry-forever DEPENDENCY blocker, and reports NOT complete. */
+/* Aggregate SHA3 check on a finished swarm chunk download. Nothing starts a chunk
+ * swarm in production (see g_swarm), so only tests reach this today, and its one
+ * caller discards the result. A mismatch scores the peer, names a retry-forever
+ * DEPENDENCY blocker, and returns false. */
 static bool msg_swarm_utxo_sha3_verify(struct msg_processor *mp,
                                        struct p2p_node *node,
                                        const uint8_t local_root[32],

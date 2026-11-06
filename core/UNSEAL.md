@@ -1119,3 +1119,7 @@ later lane flips it HARD.
 - 2026-11-06T06:25:38Z — REASON: Log a peer's swarm manifest line once, not once per message
   old ROOT: a9264a483a483547da308f37d0d9254befd40fd750bfcfe2107a84d62d2265ad
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T06:25:49Z — REASON: Update comments that no longer match the code around swarm and revalidation
+  old ROOT: 161d916d24f002e35fd1a2857dadf48932f2168bc97dfb2016576a268ab103e0
+  by: owner unseal ritual (make core-unseal)

@@ -4293,9 +4293,9 @@ static int test_net_fc_rate_and_swarm_cas_race_checks(void)
     }
 
     /* ── g_swarm_active TOCTOU (atomic CAS gate) ──────────── */
-    /* The zmanifest handler claims the swarm slot with
-     * atomic_compare_exchange_strong so exactly one of two racing peers
-     * transitions g_swarm_active and calls swarm_sync_init. */
+    /* A swarm start would claim the slot with atomic_compare_exchange_strong, so
+     * exactly one of two racing peers transitions g_swarm_active. Nothing starts
+     * one in production; this pins the claim itself. */
 
     printf("swarm_cas: no-race fast path claims once... ");
     {

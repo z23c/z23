@@ -484,8 +484,8 @@ enum reval_result process_block_revalidate(int target_height,
      *       will re-mark BLOCK_FAILED_VALID if the block genuinely
      *       fails. The single-source verdict only unblocks the gate
      *       so the validator can re-run. The "live at tip via the
-     *       always-on local authority" mandate (CLAUDE.md, "Personal
-     *       Sovereignty Stack") requires this — otherwise a personal
+     *       always-on local authority" mandate (docs/adr/0001-personal-
+     *       sovereignty-stack.md) requires this — otherwise a personal
      *       node with no zcl23 peers can never auto-clear a stale
      *       FAILED bit and the chain silently halts.
      *
