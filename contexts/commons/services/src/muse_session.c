@@ -89,9 +89,10 @@ bool ms_command_id_format(char out[MUSE_COMMAND_ID_MAX], int64_t wall_ms,
     const uint8_t rnd[10])
 {
     uint64_t ms = (uint64_t)wall_ms;
-    unsigned a = (unsigned)((ms >> 32) & 0xffffffffu);
-    unsigned b = (unsigned)((ms >> 16) & 0xffffu);
-    unsigned c = (unsigned)(0x7000u | (ms & 0x0fffu));
+    unsigned a = (unsigned)((ms >> 16) & 0xffffffffu);
+    unsigned b = (unsigned)(ms & 0xffffu);
+    unsigned r12 = (unsigned)((rnd[8] << 8 | rnd[9]) & 0x0fffu);
+    unsigned c = 0x7000u | r12;
     /* variant 10xxxxxx on the clock_seq_hi octet. */
     unsigned d = (unsigned)(0x8000u | (((unsigned)rnd[0] << 8 | rnd[1]) & 0x3fffu));
     int n = snprintf(out, MUSE_COMMAND_ID_MAX, "%08x-%04x-%04x-%04x-%02x%02x%02x%02x%02x%02x",
