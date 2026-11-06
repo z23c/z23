@@ -423,8 +423,8 @@ change hosts or spend funds.
 ### Developer notes
 
 - Host tests run on Linux with `make -C apps/z23android test HOST_CC=clang
-  BUILD_DIR=../../build/android-voice`. `preview-apk` needs `NODE_BIN`,
-  `ANDROID_NDK_ROOT`, `SDK_ROOT` and `JAVA_HOME`; without them it stops before
+  BUILD_DIR=../../build/android-voice`. `preview-apk` omits the node binary and
+  needs `ANDROID_NDK_ROOT`, `SDK_ROOT` and `JAVA_HOME`; without them it stops before
   building and leaves any previous APK in place. The proving parameters are not a
   prerequisite: a preview leaves them out unless `PREVIEW_PARAMS=1` (then
   `vendor/params` or `PARAMS_DIR` must hold them, as for `make apk`).
@@ -608,7 +608,7 @@ rule, not with the headline.
 `org.z23.voicepreview` package with debugging enabled for testing, written to
 `z23-preview.apk` beside the production APK. That
 preview is separate from the production `org.z23.nativeapp` package and its
-private state; it does not establish production readiness.
+private state; it contains no node binary and does not establish production readiness.
 
 The app uses Android widgets and the system keyboard. Camera scanning, chat,
 and fleet operations still require device qualification. Chat and voice

@@ -26,6 +26,8 @@ PARAMS_SUMS := params.sha256
 # unless PREVIEW_PARAMS=1, because a preview runs no node and the files add 51.6 MB.
 PACK_PARAMS ?= 1
 PREVIEW_PARAMS ?= 0
+# Only preview-apk selects this; check-node verifies the exact generated manifest.
+PACKAGE_PREVIEW ?= 0
 HOST_CC ?= cc
 HOST_WARNINGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic
 export JAVA_HOME
@@ -100,7 +102,7 @@ preview-apk:
 	@mkdir -p '$(BUILD_DIR)/preview'
 	sed -e 's/package="org.z23.nativeapp"/package="org.z23.voicepreview"/' -e 's/android:label="Z23"/android:label="Z23 Voice Preview"/' \
 	  -e 's/android:debuggable="false"/android:debuggable="true"/' AndroidManifest.xml > '$(BUILD_DIR)/preview/AndroidManifest.xml'
-	$(MAKE) apk PACK_PARAMS='$(PREVIEW_PARAMS)' APP_MANIFEST='$(BUILD_DIR)/preview/AndroidManifest.xml' APK='$(BUILD_DIR)/z23-preview.apk'
+	$(MAKE) apk PACKAGE_PREVIEW=1 PACK_PARAMS='$(PREVIEW_PARAMS)' APP_MANIFEST='$(BUILD_DIR)/preview/AndroidManifest.xml' APK='$(BUILD_DIR)/z23-preview.apk'
 
 test-voice:
 	@mkdir -p '$(BUILD_DIR)'
@@ -233,9 +235,24 @@ test-wallet:
 	@grep -q 'zapp_wallet_ui_create(env, shell.activity, content, footer)' shell.c && grep -q 'wallet_item_pinned(&ui.screen.items\[item\]) ? ui.footer : ui.container' wallet_ui.c || { echo 'the wallet Back must be pinned under the scrolling content' >&2; exit 1; }
 
 check-node:
-	@test -x '$(NODE_BIN)' || { echo 'Build the Android node first' >&2; exit 1; }
-	@headers="$$(LC_ALL=C readelf -lW '$(NODE_BIN)')" && printf '%s\n' "$$headers" | grep -F '/system/bin/linker64' >/dev/null || { echo 'NODE_BIN must be an Android ARM64 executable' >&2; exit 1; }
-	@../../tools/scripts/check_c23_node_binary.sh '$(NODE_BIN)'
+	@if test '$(PACKAGE_PREVIEW)' = 1; then \
+	  sed -e 's/package="org.z23.nativeapp"/package="org.z23.voicepreview"/' -e 's/android:label="Z23"/android:label="Z23 Voice Preview"/' \
+	    -e 's/android:debuggable="false"/android:debuggable="true"/' AndroidManifest.xml | cmp -s - '$(APP_MANIFEST)' || \
+	    { echo 'Preview packaging requires the generated preview manifest' >&2; exit 1; }; \
+	elif test '$(PACKAGE_PREVIEW)' = 0; then \
+	  test -x '$(NODE_BIN)' || { echo 'Build the Android node first' >&2; exit 1; }; \
+	  headers="$$(LC_ALL=C readelf -lW '$(NODE_BIN)')" && printf '%s\n' "$$headers" | grep -F '/system/bin/linker64' >/dev/null || \
+	    { echo 'NODE_BIN must be an Android ARM64 executable' >&2; exit 1; }; \
+	  ../../tools/scripts/check_c23_node_binary.sh '$(NODE_BIN)' || exit 1; \
+	else echo 'Invalid PACKAGE_PREVIEW' >&2; exit 1; fi
+
+.PHONY: stage-node
+stage-node: check-node
+	@mkdir -p '$(BUILD_DIR)/package/lib/arm64-v8a'
+	@if test '$(PACKAGE_PREVIEW)' = 1; then \
+	  if test -e '$(BUILD_DIR)/package/lib/arm64-v8a/libz23node.so' || test -L '$(BUILD_DIR)/package/lib/arm64-v8a/libz23node.so'; then \
+	    unlink '$(BUILD_DIR)/package/lib/arm64-v8a/libz23node.so'; fi; \
+	else cp '$(NODE_BIN)' '$(BUILD_DIR)/package/lib/arm64-v8a/libz23node.so'; fi
 
 check-probe:
 	@test "$(DEVKEY_PROBE)" = OFF || grep -q 'package="org.z23.voicepreview"' '$(APP_MANIFEST)' || { echo "DEVKEY_PROBE=$(DEVKEY_PROBE) refused: the device key probe is built only into the org.z23.voicepreview manifest (make preview-apk), never into org.z23.nativeapp" >&2; exit 1; }
@@ -274,11 +291,9 @@ $(KEYSTORE): | check-signer-input
 	  -alias z23-development -keypass android -dname 'CN=Z23 Development' \
 	  -keyalg RSA -keysize 3072 -validity 3650 -noprompt
 
-apk: check-signer-input check-probe check-node $(if $(filter 1,$(PACK_PARAMS)),check-params) native dexgen $(KEYSTORE)
-	@test -x '$(NODE_BIN)' || { echo 'Build the Android node with make ZCL_TARGET=android-arm64 z23 first' >&2; exit 1; }
+apk: check-signer-input check-probe stage-node $(if $(filter 1,$(PACK_PARAMS)),check-params) native dexgen $(KEYSTORE)
 	@mkdir -p '$(BUILD_DIR)/package/lib/arm64-v8a'
 	cp '$(BUILD_DIR)/native/libz23android.so' '$(BUILD_DIR)/package/lib/arm64-v8a/'
-	cp '$(NODE_BIN)' '$(BUILD_DIR)/package/lib/arm64-v8a/libz23node.so'
 	rm -rf '$(BUILD_DIR)/assets'
 	$(if $(filter 1,$(PACK_PARAMS)),mkdir -p '$(BUILD_DIR)/assets/params' && cp $(addprefix '$(PARAMS_DIR)'/,$(shell awk '{print $$2}' $(PARAMS_SUMS))) '$(BUILD_DIR)/assets/params/')
 	'$(TOOLS)/aapt' package -f -M '$(APP_MANIFEST)' -S res $(if $(filter 1,$(PACK_PARAMS)),-A '$(BUILD_DIR)/assets' -0 params) \
