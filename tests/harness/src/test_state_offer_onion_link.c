@@ -8,6 +8,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "config/boot_internal.h"
 #include "config/boot_zcode_swarm.h"
+#include "config/boot_zcode_swarm_membership.h"
 #include "config/state_offer_link.h"
 #include "config/state_offer_link_session.h"
 #include "config/state_offer_peer.h"
@@ -347,8 +348,15 @@ static bool onion_cut_mid_fetch(struct onion_fixture *f)
     ONION_CHECK(need.resume_progressing);
 
     sol_client_test_age_progress(STATE_OFFER_FETCH_PROGRESS_WINDOW_MS);
+    /* A retried offer from the dead connection opens a session but no byte
+     * comes: that is no progress, so a node with no source still falls back. */
+    int64_t aged = sol_client_last_progress_ms();
+    uint64_t dead = boot_zcode_swarm_peer_id(f->to_server);
+    bool began = state_offer_peer_begin(dead);
+    if (began) state_offer_peer_end(dead);
+    bool unstamped = began && sol_client_last_progress_ms() == aged;
     state_offer_service_test_local_need(&need);
-    bool stalled = !need.resume_progressing;
+    bool stalled = unstamped && !need.resume_progressing;
     struct state_offer_record rec;
     bool fell = state_offer_store_decide_for(platform_time_monotonic_ms(), &rec, &need) ==
                 STATE_OFFER_DECIDE_FALL_BACK;
