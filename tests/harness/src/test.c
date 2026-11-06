@@ -1771,6 +1771,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_simnet_fuzz();
     *failures += test_connect_block_sapling_root();
     *failures += test_connect_block_checkdatasig_sigops();
+    { extern int test_core_oom_verdicts(void); *failures += test_core_oom_verdicts(); }
     *failures += test_utxo_apply_coinbase_maturity();
     *failures += test_key_scrub();
     *failures += test_block_index_loader();
