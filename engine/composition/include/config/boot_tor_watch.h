@@ -52,6 +52,14 @@
 #define BOOT_TOR_RETRY_GROWTH   3
 #define BOOT_TOR_RETRY_CAP_US   (300LL * 1000000LL)
 
+/* How long Tor must stay running after a retry before the retry counts as having
+ * worked. A start reports running before Tor has parsed its configuration or
+ * bound a port, and a Tor that cannot do those ends within moments. Without this
+ * every failed retry read as a success, the schedule reset, and the starts one
+ * process allows ran out at the 5 s poll. A Tor slower than this to fail only
+ * resets the schedule early; the start limit still holds. */
+#define BOOT_TOR_UP_SETTLE_US   (30LL * 1000000LL)
+
 /* Longest tail of tor.log scanned for the failure reason. */
 #define BOOT_TOR_LOG_TAIL_BYTES 8192
 /* Reason text handed to the blocker record. */
@@ -144,8 +152,14 @@ bool boot_tor_watch_due(const struct boot_tor_watch *w, int64_t now_us);
  * boot_tor_watch_failed() going false, never by this return. */
 bool boot_tor_watch_retry(struct boot_tor_watch *w, int64_t now_us);
 
-/* Tor bootstrapped: clear the fault and reset the schedule. */
+/* Clear the fault and reset the schedule. */
 void boot_tor_watch_note_up(struct boot_tor_watch *w);
+
+/* Whether a Tor reported as `running` has come up: true once it has run for
+ * BOOT_TOR_UP_SETTLE_US since the last retry, which also does what note_up does.
+ * Until then the schedule stands. */
+bool boot_tor_watch_confirm_up(struct boot_tor_watch *w, bool running,
+                               int64_t now_us);
 
 /* ── Status leg for the sd-watchdog READY line ─────────────────────── */
 

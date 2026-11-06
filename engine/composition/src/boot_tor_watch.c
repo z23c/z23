@@ -322,6 +322,17 @@ void boot_tor_watch_note_up(struct boot_tor_watch *w)
     atomic_store(&w->next_attempt_us, 0);
 }
 
+bool boot_tor_watch_confirm_up(struct boot_tor_watch *w, bool running,
+                               int64_t now_us)
+{
+    if (!running)
+        return false;
+    if (w && now_us - atomic_load(&w->last_attempt_us) < BOOT_TOR_UP_SETTLE_US)
+        return false;
+    boot_tor_watch_note_up(w);
+    return true;
+}
+
 /* ── Status leg ────────────────────────────────────────────────────── */
 
 void boot_tor_watch_status(const struct boot_tor_watch *w,

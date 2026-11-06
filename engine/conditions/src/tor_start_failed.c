@@ -75,17 +75,17 @@ static enum condition_remedy_result remedy_tor_start_failed(void)
 static bool witness_tor_start_failed(int64_t target_at_detect)
 {
     // honest-witness-ok: the observable is core's own live-thread predicate
-    // tor_integration_is_enabled(), which the remedy cannot set. The remedy
-    // only calls tor_integration_start(); that returns true the instant the
-    // pthread exists, even if the thread then dies on a config parse. The flag
-    // read here flips only once tor_run_main accepted the configuration and
-    // entered its event loop, so it is independent evidence that the symptom
-    // moved — not the inverse of detect and not a flag the remedy wrote.
+    // tor_integration_is_enabled(), still true after the settling time. The
+    // remedy's start sets that flag at once, before Tor has parsed anything, so
+    // the flag alone proves nothing right after a retry. Tor's own thread clears
+    // it when Tor ends, and the remedy cannot keep it set, so a Tor that is still
+    // running after the settling time is independent evidence the symptom moved.
     (void)target_at_detect;
-    if (!tor_integration_is_enabled())
+    if (!boot_tor_watch_confirm_up(boot_tor_watch_current(),
+                                   tor_integration_is_enabled(),
+                                   platform_time_monotonic_us()))
         return false; // raw-return-ok:witness-observation-not-an-error
 
-    boot_tor_watch_note_up(boot_tor_watch_current());
     blocker_clear(BOOT_TOR_START_FAILED_BLOCKER);
     return true;
 }

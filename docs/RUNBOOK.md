@@ -590,10 +590,10 @@ an ordinary slow bootstrap, and from a bare `descriptor=no`, which both states
 produce.
 
 **What the node does on its own:** the `tor_start_failed` condition
-(`engine/conditions/src/tor_start_failed.c`) retries the start through the
-same wrapper that boots Tor, at 5s, 15s, 45s, 135s and then every 5 minutes,
-until Tor has used the 6 starts one process allows. The blocker clears when
-Tor's thread is running again. The commonest cause — `port_in_use` after a restart,
+(`engine/conditions/src/tor_start_failed.c`) retries Tor's start at 5s, 15s,
+45s, 135s and then every 5 minutes, until Tor has used the 6 starts one process
+allows. The blocker clears when Tor has stayed running for 30 seconds after a
+retry. The commonest cause — `port_in_use` after a restart,
 because the departing process still holds Tor's bootstrap SocksPort — clears
 itself within seconds and needs no operator at all.
 

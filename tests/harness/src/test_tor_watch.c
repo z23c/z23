@@ -213,6 +213,49 @@ static int test_tor_watch_retries(void)
     return failures;
 }
 
+/* A start reports Tor running before Tor can fail. Read as success, that reset
+ * the schedule after every retry, so all retries ran at the 5 s poll. */
+static int test_tor_watch_retry_is_not_up_at_once(void)
+{
+    int failures = 0;
+    struct boot_tor_watch w = {0};
+
+    TEST("tor_watch_keeps_its_schedule_until_tor_has_stayed_up") {
+        const int64_t sec = 1000000LL;
+        const int64_t t = 1000LL * sec;
+        boot_tor_watch_arm(&w, "/nonexistent-datadir", count_restart, NULL);
+
+        ASSERT(boot_tor_watch_retry(&w, t));
+        ASSERT(!boot_tor_watch_confirm_up(&w, true, t));
+        ASSERT(!boot_tor_watch_due(&w, t + 4 * sec));
+        ASSERT(boot_tor_watch_due(&w, t + 5 * sec));
+
+        ASSERT(boot_tor_watch_retry(&w, t + 5 * sec));
+        ASSERT(!boot_tor_watch_confirm_up(&w, true, t + 5 * sec));
+        ASSERT(!boot_tor_watch_due(&w, t + 19 * sec));
+        ASSERT(boot_tor_watch_due(&w, t + 20 * sec));
+        ASSERT_EQ(atomic_load(&w.attempts), 2);
+
+        /* Tor that is not running never counts, however long it has been. */
+        ASSERT(!boot_tor_watch_confirm_up(&w, false, t + 1000 * sec));
+        ASSERT_EQ(atomic_load(&w.attempts), 2);
+
+        /* Still running once it has settled: the next episode starts over. */
+        const int64_t settled = t + 5 * sec + BOOT_TOR_UP_SETTLE_US;
+        ASSERT(!boot_tor_watch_confirm_up(&w, true, settled - 1));
+        ASSERT(boot_tor_watch_confirm_up(&w, true, settled));
+        ASSERT_EQ(atomic_load(&w.attempts), 0);
+        ASSERT(boot_tor_watch_due(&w, settled));
+
+        boot_tor_watch_disarm(&w);
+        /* No watch left to wait on: only the running flag decides. */
+        ASSERT(boot_tor_watch_confirm_up(NULL, true, t));
+        ASSERT(!boot_tor_watch_confirm_up(NULL, false, t));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_tor_watch_status_labels(void)
 {
     int failures = 0;
@@ -307,6 +350,7 @@ int test_tor_watch(void)
     failures += test_tor_watch_reason_is_the_cause();
     failures += test_tor_watch_redacts_onion();
     failures += test_tor_watch_retries();
+    failures += test_tor_watch_retry_is_not_up_at_once();
     failures += test_tor_watch_status_labels();
     failures += test_tor_watch_start_limit();
     printf("Tor start watch: %d failures\n", failures);
