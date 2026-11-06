@@ -554,6 +554,24 @@ on what you already have, so read the first line of each before picking:
    `zclassicd` running while this happens. Full detail:
    [`docs/node/SYNC.md`](SYNC.md) "Method 3".
 
+4. **FlySync island start (`-flysync`, off by default)** — for a new, empty
+   datadir that needs no history below the newest compiled checkpoint rung
+   (phones, light hosts). The node fetches only the 28 headers ending at the
+   rung, checks each one's PoW and Equihash and that they hash-link down from
+   the rung hash compiled into the binary, then installs the rung's consensus
+   state bundle and syncs only above it, validating every block above the rung
+   in full. It serves no history below the rung, so it does not advertise
+   `NODE_NETWORK`. `-flysync` also implies no legacy import from a local
+   `zclassicd` datadir. It refuses a datadir that already holds chain state.
+
+   If no peer offers the rung bundle within the offer wait, no peer serves the
+   rung window, or the install fails its bounded budget, the node logs one
+   line, `FlySync falls back to normal sync: <reason>`, records the fall-back
+   in the datadir and restarts as an ordinary node; later starts keep normal
+   sync. The window is served by peers that answer an empty-locator
+   `getheaders` with exactly the requested header, which needs a serving fleet
+   on a build with that fix.
+
 A published/prebuilt starter-pack snapshot loader also exists
 (`-load-snapshot-at-own-height`) as a faster-but-partial extra option; it
 seeds transparent state quickly but the node's shielded-history gate
