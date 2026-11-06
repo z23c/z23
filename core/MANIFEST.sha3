@@ -38,7 +38,7 @@
 #       pair — the sealed core's identity, mirrored into
 #       hotswap/core_seal_root.h. FROZEN: SECTION/TREE are additive and
 #       do not enter this preimage.
-6f29c757c06b5da4edd02a807c31bf1c19b41bd52bbb9abc93ebc46974992d8a  core/UNSEAL.md
+4e1102a04c0009bd776c265d6b17fa586b7acdc5c56323964b692be512219380  core/UNSEAL.md
 0154dee8b452e80f28e6d9c915483ab19cf93ee834518edc355885204dad4119  core/chainparams/include/chain/chainparams.h
 76417939b54d9b0d0b2309c66b90fd20a510de3492bb6f97a11f4198292aa01f  core/chainparams/include/chain/chainparamsbase.h
 1b38019875d5bb928f13ca3ac4f2d93f346c4a12699fbb41265f23cc3d7ee8c2  core/chainparams/include/chain/checkpoints.h
@@ -119,7 +119,7 @@ a63739f8c055d1ee6b4da923a3e9328af70e6b27c0e295dd7cd419d606135bf9  core/modules/c
 b02ebca76a588aa72a9f1820d6f34ae9c486a4a16a1d1e50e143d0bf4df724d6  core/modules/coins/include/coins/coins_fault.h
 52f28a50e98049c518333c8791b1bafc8f4f8ee6e5c53f447bda30b07170d3e7  core/modules/coins/include/coins/coins_view.h
 e4164a1ec7b2713e2887156d7ae1826dab50c3a70c93f53b5e2ac8646a2c6811  core/modules/coins/include/coins/compressor.h
-0c2c06241fdb69c27252801f0a2f9450d4c1dc106622eb59803e7899ff7f6f16  core/modules/coins/include/coins/undo.h
+07afb822434871ca08ec995418afbe5ecbe4c51672c33b61b534d79bd09abfc0  core/modules/coins/include/coins/undo.h
 d1980967e9a00cf1b44c694f463e0922389e5d4560688d3c1390ec95c63282e6  core/modules/coins/include/coins/utxo_commitment.h
 62ba9d7312070b9a4313d0cdca51ed3c8fbcc8f66611923df1a92828b4aa4594  core/modules/coins/src/coins.c
 b13b23855cbcc32991ec53a7a19f3b4a915ef3fdd2fc96cdc80f7e6e76c2811d  core/modules/coins/src/coins_fault.c
@@ -611,7 +611,7 @@ e84a4566fb4a01985ccbec9a4d3136a278422e1efe4f00cb8d0cf01480531064  core/params/in
 5ed0e4562789e7ea0bd9ff1238a27172669074b3d26201195aafffe1f863558e  core/params/module.cfg
 4d62b9a9b8824925e2f7efebca536ff924a96c7464067472cb07b9dd57e356dc  core/params/src/params.c
 9907071da9b95e13d236ac70fe8fa95612c7873ff9a88102d988c83ba8492b89  core/params/src/upgrades.c
-SECTION  573  4  1502ffda41459f8d18fcebe5e337c8f27e727390596f0ed2d640377d59ad0d20  core
+SECTION  573  4  c1480e64eb1eb0dea6e798e9c2306df03670e16229840ec0232d706bd49eaf94  core
 SECTION  12  16  bb1ab0b704bd8de6e2525c68c4dd1b09285aea134e2a122fa2ba2eec508adc78  core/chainparams
 SECTION  6  24  63dff36c30ea1f9c45ed358d05006795f91e44b502d1d1b1196fc4a2cca2570b  core/chainparams/include
 SECTION  6  30  c247859f7b026dc314874fe7f2bfda58f885c05c44ff2fd601ebc3ce25ebeb48  core/chainparams/include/chain
@@ -625,7 +625,7 @@ SECTION  10  9  e58bb8adba34a3a498b5711462d83fc0eb37999ee2b6a7037247cebb64b2487d
 SECTION  5  17  3d74828940990b6914192791641041d1ad63de1b84d7693d2533f1c9b29a7edd  core/math/include
 SECTION  5  22  13bc29100524578193cb79036f24fe9e1d8538c0f45dcc4dd87956a25f4f2b38  core/math/include/core
 SECTION  5  13  489136c5ceec46980deb06e9a9437c79b691a13606b3fcab9d6130508dad43a8  core/math/src
-SECTION  507  12  4bbec2f71537a583b563da763df3f649de7f44311ec47ff77d09fbbbe3c3e126  core/modules
+SECTION  507  12  37ae580f0359ad6fd09de4ab2afccd9b94066f3864d8b00568599c487a271912  core/modules
 SECTION  6  18  20fc50fc216a21b99b3704761fd36818bad04788f7fc18fc2f774277ab273515  core/modules/bloom
 SECTION  3  26  7a098567b94e3d3fd1052926ea2ffc0f31a7ce8af8272230303cb9265abfb5b4  core/modules/bloom/include
 SECTION  3  32  c04a8ab82826feec2741f1227988f50a8b73bf6744c2c02462ddcc003a3eadfd  core/modules/bloom/include/bloom
@@ -634,9 +634,9 @@ SECTION  12  18  f459cf977a8e2af458db1ca857fb3f97ea8a233f111e586f6ab6ec9d341bd93
 SECTION  6  26  ad044d1afd58af5e911e09b6f782fa40d8cd7ae47db761afdea58e7f47c0b282  core/modules/chain/include
 SECTION  6  32  9d2c427fce2b902c6dd6d8a400296f6ab01b7aa2461881fae4838207a458a9a7  core/modules/chain/include/chain
 SECTION  6  22  9958f0ac36c89f86e1934c29967f5efb67cfbac7ce45001a95250a40067e519f  core/modules/chain/src
-SECTION  11  18  59c458f72c5becb00e7af46f5445ea76c1ead94c577fb6dd681de0e4191291af  core/modules/coins
-SECTION  6  26  54af65fed882eb12e6e5fc15e47e05848719dca863fc7bc4134c1d9a4c22d994  core/modules/coins/include
-SECTION  6  32  1eb19c1df39eca30cab7c8266c68f1cfb86dc5f23009f40ce6e2945eed281345  core/modules/coins/include/coins
+SECTION  11  18  991e4f0be6ba934d6d9d7ce5c315909d463c2a9ea5b65e5a5e9ab30bea5af2b5  core/modules/coins
+SECTION  6  26  3ca2e095f30ddc7a2469c5522e4f4b76f0bac7c8d9fd36a1ff2b6f2a6784c1c0  core/modules/coins/include
+SECTION  6  32  f3324f2a6810009af56bdba5d46b67fd7c87eed33990885c21d1500275d5d38d  core/modules/coins/include/coins
 SECTION  5  22  5c6981135ea7de19ea69aab53bd7a1be1617146ee5192580b2cbe1c15c0667c8  core/modules/coins/src
 SECTION  6  17  9f93a9d826d9998bae5496b332226098a2ed5ff28255d01b62451433c203300d  core/modules/core
 SECTION  4  25  4f0656acb8d6958bb8411ddb13b248dec101a956c7350c21da2f52f99855a23c  core/modules/core/include
@@ -691,5 +691,5 @@ SECTION  7  11  9b023bcd18300a51052f45e69609bb741b2832e3ce6e6a02fd21a12ea94647c0
 SECTION  4  19  e07dc0f2326862830b48105e02648f8d76dfeee9a859b7c56679c461e2cca7f1  core/params/include
 SECTION  4  29  5680a2f2d804163e77f94854ee18838480d785b74b297265f2f8a77db9d02242  core/params/include/consensus
 SECTION  2  15  8fdd673c41b8758e48c6fb225c15d7bbdf79f6816066a1d0c793d4bee2c5f6b1  core/params/src
-TREE  4482563261d14a3401aeec64bc5b69df599e0da6d69756e959fa5e63f3b2bfab
-ROOT  652c67d10321259bfa9988225a25ea911c2b4d43dc5eebf17007611f9447d614
+TREE  6ee370180ca29000a1eb81ac205ab32fd16ebb9f6b07abacb1780de79298d725
+ROOT  747d63fffe21d98be43ed2782d2c1e6f03fa43f5b9643ec754372bc7be5cdfcd

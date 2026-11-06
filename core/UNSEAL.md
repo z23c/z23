@@ -1139,3 +1139,7 @@ later lane flips it HARD.
 - 2026-11-06T06:26:43Z — REASON: Keep the connect path's out-of-memory signal with its own block
   old ROOT: 1bcfba073a7d3f5731d2392b33a66fc3625c09f799e90820074e98fa3cc63094
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T06:26:55Z — REASON: Treat a bad undo count as a bad record, not a memory failure
+  old ROOT: 652c67d10321259bfa9988225a25ea911c2b4d43dc5eebf17007611f9447d614
+  by: owner unseal ritual (make core-unseal)

@@ -163,6 +163,10 @@ static inline bool tx_undo_deserialize(struct tx_undo *u,
     uint64_t n = 0;
     if (!stream_read_compact_size(s, &n))
         return false;
+    /* Each entry takes at least 3 bytes (code, value, script size), so a
+     * larger count is a bad record, not a request for memory. */
+    if (n > stream_remaining(s) / 3)
+        return false;
     if (!tx_undo_alloc(u, (size_t)n))
         return false;
     for (size_t i = 0; i < u->num_prevout; i++) {
@@ -222,6 +226,9 @@ static inline bool block_undo_deserialize(struct block_undo *u,
 {
     uint64_t n = 0;
     if (!stream_read_compact_size(s, &n))
+        return false;
+    /* Each entry takes at least 1 byte, so a larger count is a bad record. */
+    if (n > stream_remaining(s))
         return false;
     if (!block_undo_alloc(u, (size_t)n))
         return false;

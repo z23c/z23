@@ -467,6 +467,47 @@ static int du_case_memory_failure_no_skip(struct du_fixture *fx)
     return failures;
 }
 
+/* A rev position that lands on a huge entry count is a bad record: it books
+ * the script skip and the block verifies, so the walk moves on. It must not
+ * ask for memory and must not read as a local failure. */
+static int du_case_garbage_count_books_skip(struct du_fixture *fx)
+{
+    int failures = 0;
+    TEST("delta_undo: a garbage undo count books a skip, no memory asked") {
+        ASSERT(fx->opened);
+        char path[512];
+        snprintf(path, sizeof(path), "%s/blocks", fx->dir);
+        (void)mkdir(path, 0700);
+        snprintf(path, sizeof(path), "%s/blocks/rev00000.dat", fx->dir);
+        FILE *rev = fopen(path, "wb");
+        ASSERT(rev != NULL);
+        unsigned char rec[24];
+        memset(rec, 0xff, sizeof(rec));
+        memset(rec, 0, 8);
+        ASSERT_EQ(fwrite(rec, 1, sizeof(rec), rev), sizeof(rec));
+        ASSERT_EQ(fclose(rev), 0);
+
+        struct block_index bi;
+        du_bg_index(&bi, &fx->c, 1);
+        bi.nStatus |= BLOCK_HAVE_UNDO;
+        bi.nUndoPos = 8;
+        bg_validation_reset_undo_skip_stats();
+        int64_t sigs = 0, proofs = 0, skips = 0;
+        uint64_t before = zcl_alloc_failure_count();
+        bool valid = bg_validation_validate_block_proofs(
+            &fx->c.body[1], &bi, fx->dir, fx->cp, 1, 0,
+            &sigs, &proofs, &skips);
+        uint64_t after = zcl_alloc_failure_count();
+        remove(path);
+        ASSERT(valid);
+        ASSERT_EQ(after, before);
+        ASSERT(skips > 0);
+        ASSERT_EQ(bg_validation_get_undo_skip_stats().blocks, 1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int du_case_delta_script(struct du_fixture *fx)
 {
     int failures = 0;
@@ -1183,6 +1224,7 @@ static int test_delta_undo_forward_record(const struct chain_params *cp)
     failures += du_case_delta_script(&fx);
     failures += du_case_other_branch(&fx);
     failures += du_case_memory_failure_no_skip(&fx);
+    failures += du_case_garbage_count_books_skip(&fx);
     failures += du_case_input_mismatch(&fx);
     failures += du_case_decode_out_of_range(&fx);
     failures += du_case_decode_empty_blob(&fx);

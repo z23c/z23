@@ -55,8 +55,10 @@
  * This caps memory per-block without rejecting large rev files. */
 #define MAX_UNDO_READ  (4 * 1024 * 1024)
 
+/* `*out_of_memory` is set only when the read buffer could not be allocated;
+ * every other failure, a bad record included, is missing undo. */
 static bool read_block_undo(struct block_undo *undo, const struct block_index *pindex,
-                            const char *datadir)
+                            const char *datadir, bool *out_of_memory)
 {
     block_undo_init(undo);
 
@@ -94,6 +96,7 @@ static bool read_block_undo(struct block_undo *undo, const struct block_index *p
 
     uint8_t *buf = zcl_malloc(read_len, "bg_valid undo buf");
     if (!buf) {
+        *out_of_memory = true;
         platform_positioned_file_close(&file);
         LOG_FAIL("bg_validation", "read_block_undo: malloc failed for %zu bytes", read_len);
     }
@@ -219,9 +222,10 @@ static bool read_undo_rev_or_delta(struct block_undo *undo,
                                    const struct block *block,
                                    const struct block_index *pindex,
                                    const char *datadir,
-                                   const struct chain_params *params)
+                                   const struct chain_params *params,
+                                   bool *out_of_memory)
 {
-    if (read_block_undo(undo, pindex, datadir))
+    if (read_block_undo(undo, pindex, datadir, out_of_memory))
         return true;
     /* A torn rev parse may leave partial allocations behind. */
     block_undo_free(undo);
@@ -521,13 +525,14 @@ bool bg_validation_validate_block_proofs(const struct block *block,
     uint32_t flags = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;
 
     if (block->num_vtx > 1) {
-        uint64_t undo_alloc_failures = zcl_alloc_failure_count();
+        bool undo_out_of_memory = false;
         have_undo = read_undo_rev_or_delta(&blockundo, block, pindex,
-                                           datadir, params);
-        /* Undo that could not be read for lack of memory is not missing undo:
-         * a persisted script skip would block publishing until a refold. Fail
-         * here and let the caller's allocation count make it a retry. */
-        if (!have_undo && zcl_alloc_failure_count() != undo_alloc_failures)
+                                           datadir, params, &undo_out_of_memory);
+        /* A rev record that could not be read for lack of a buffer is not
+         * missing undo: a persisted script skip would block publishing until
+         * a refold. Fail here and let the caller's allocation count make it a
+         * retry. A record that fails to parse is missing undo, as before. */
+        if (!have_undo && undo_out_of_memory)
             goto out;
     }
 
