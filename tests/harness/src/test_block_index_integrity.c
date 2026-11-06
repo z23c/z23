@@ -1264,6 +1264,32 @@ static bool heights_are_index(const struct block_index *b, int n)
 
 /* Which entries the scan selects: height above the cursor, flagged data,
  * a real file position (0 and 1 are the boundary), never the genesis. */
+static bool pp_scan_a_links(const struct pp_fx *fx)
+{
+    return fx->b[3].pprev == &fx->b[2] && fx->b[4].pprev == &fx->b[3] &&
+           fx->b[6].pprev == &fx->b[5] && !fx->b[1].pprev &&
+           !fx->b[2].pprev && !fx->b[5].pprev && !fx->b[7].pprev;
+}
+
+static bool pp_scan_b_links(const struct pp_fx *fx)
+{
+    return fx->b[1].pprev == &fx->b[0] && fx->b[2].pprev == &fx->b[1] &&
+           !fx->b[5].pprev && !fx->b[7].pprev;
+}
+
+static bool pp_scan_setup(struct pp_fx *fx)
+{
+    pp_detach_all(fx);
+    fx->b[3].nDataPos = 1;       /* smallest real position: scanned */
+    fx->b[5].nStatus = 0;        /* no data: never scanned */
+    fx->b[7].nFile = 1;          /* own file, so its record cannot overlap */
+    fx->b[7].nDataPos = 0;       /* no position: never scanned */
+    return pp_put_default(fx) &&
+           pp_put(fx, 0, 1, &fx->h[2], 36) &&
+           pp_put(fx, 1, 0, &fx->h[6], 36) &&
+           pp_put(fx, 0, (long)fx->b[0].nDataPos, &fx->h[4], 36);
+}
+
 static int t_mg_pprev_scan_set(void)
 {
     int failures = 0;
@@ -1273,30 +1299,18 @@ static int t_mg_pprev_scan_set(void)
         pp_free(&fx);
         return failures;
     }
-    pp_detach_all(&fx);
-    fx.b[3].nDataPos = 1;        /* smallest real position: scanned */
-    fx.b[5].nStatus = 0;         /* no data: never scanned */
-    fx.b[7].nFile = 1;           /* own file, so its record cannot overlap */
-    fx.b[7].nDataPos = 0;        /* no position: never scanned */
-    bool wrote = pp_put_default(&fx) &&
-                 pp_put(&fx, 0, 1, &fx.h[2], 36) &&
-                 pp_put(&fx, 1, 0, &fx.h[6], 36) &&
-                 pp_put(&fx, 0, (long)fx.b[0].nDataPos, &fx.h[4], 36);
+    bool wrote = pp_scan_setup(&fx);
 
     int out = -999;
     int ra = wrote ? block_index_repair_pprev(&fx.ms, fx.dir, 2, &out) : -1;
-    bool a_set = fx.b[3].pprev == &fx.b[2] && fx.b[4].pprev == &fx.b[3] &&
-                 fx.b[6].pprev == &fx.b[5] && !fx.b[1].pprev &&
-                 !fx.b[2].pprev && !fx.b[5].pprev && !fx.b[7].pprev;
     BII_RUN("bii: pprev scan above cursor relinks exactly the entries "
-            "past it with data and a position", wrote && ra == 3 && a_set);
+            "past it with data and a position",
+            wrote && ra == 3 && pp_scan_a_links(&fx));
     BII_RUN("bii: pprev scan reports the highest height", out == 7);
 
     int rb = wrote ? block_index_repair_pprev(&fx.ms, fx.dir, -1, &out) : -1;
-    bool b_set = fx.b[1].pprev == &fx.b[0] && fx.b[2].pprev == &fx.b[1] &&
-                 !fx.b[5].pprev && !fx.b[7].pprev;
     BII_RUN("bii: pprev scan from the start picks up the rest",
-            rb == 2 && b_set);
+            rb == 2 && pp_scan_b_links(&fx));
     BII_RUN("bii: pprev scan never relinks the genesis", !fx.b[0].pprev);
     pp_free(&fx);
     return failures;
