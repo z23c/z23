@@ -292,6 +292,15 @@ static void bii_height_scan_entries(struct block_index *const *arr, size_t n,
     }
 }
 
+/* Reachability marks, one byte per entry. Only BII_MARK_ROOTED means
+ * "genesis-rooted"; every reader tests for it exactly. */
+enum bii_mark {
+    BII_MARK_UNSEEN = 0,
+    BII_MARK_ROOTED = 1,   /* chains to the true genesis; height settled */
+    BII_MARK_UNROOTED = 2, /* ends at a detached root, a stranger or a cycle */
+    BII_MARK_WALKING = 3,  /* on the current climb (reaching it again = cycle) */
+};
+
 /* Seed the reachability marks from the true genesis; returns heights fixed. */
 static int bii_height_mark_genesis(struct block_index *const *arr, size_t n,
                                    struct block_index *const *byptr,
@@ -307,46 +316,104 @@ static int bii_height_mark_genesis(struct block_index *const *arr, size_t n,
             }
             size_t gi = bii_ptr_index(byptr, n, b);
             if (gi < n)
-                mark[gi] = 1;
+                mark[gi] = BII_MARK_ROOTED;
         }
     }
     return repaired;
 }
 
-/* Multi-pass forward propagation through genesis-rooted entries; returns
- * heights fixed. */
-static int bii_height_propagate(struct block_index *const *arr, size_t n,
-                                struct block_index *const *byptr,
-                                uint8_t *mark)
+/* Work area for the linear height walk. */
+struct bii_height_walk {
+    struct block_index *const *byptr; /* pointer-sorted, n entries */
+    size_t n;
+    uint8_t *mark;
+    size_t *stack; /* n slots: byptr indices of the current climb */
+};
+
+/* Climb pprev links from byptr[start] pushing each unseen entry, until a
+ * rooted ancestor (*rooted = true) or a dead end: no pprev, a parent outside
+ * the index, an entry already unrooted, or one on this climb (a cycle).
+ * Returns the number of entries pushed. Each entry is pushed at most once. */
+static size_t bii_height_climb(struct bii_height_walk *w, size_t start,
+                               bool *rooted)
+{
+    size_t depth = 0;
+    size_t cur = start;
+    *rooted = false;
+    for (;;) {
+        w->mark[cur] = BII_MARK_WALKING;
+        w->stack[depth++] = cur;
+        const struct block_index *p = w->byptr[cur]->pprev;
+        if (!p)
+            return depth;
+        size_t pi = bii_ptr_index(w->byptr, w->n, p);
+        if (pi >= w->n)
+            return depth;
+        if (w->mark[pi] == BII_MARK_ROOTED) {
+            *rooted = true;
+            return depth;
+        }
+        if (w->mark[pi] != BII_MARK_UNSEEN)
+            return depth;
+        cur = pi;
+    }
+}
+
+/* Settle a climb from the top down: rooted entries take parent height + 1,
+ * unrooted ones keep their stored label. Returns heights changed. */
+static int bii_height_settle(struct bii_height_walk *w, size_t depth,
+                             bool rooted)
 {
     int repaired = 0;
-    for (int pass = 0; pass < 20; pass++) {
-        int progressed = 0;
-        for (size_t i = 0; i < n; i++) {
-            struct block_index *b = arr[i];
-            if (!b->pprev)
-                continue;
-            size_t bi_idx = bii_ptr_index(byptr, n, b);
-            if (bi_idx >= n || mark[bi_idx])
-                continue;
-            size_t pp_idx = bii_ptr_index(byptr, n, b->pprev);
-            if (pp_idx >= n || !mark[pp_idx])
-                continue; /* parent not (yet) genesis-rooted */
+    while (depth-- > 0) {
+        struct block_index *b = w->byptr[w->stack[depth]];
+        if (rooted) {
             int expected = b->pprev->nHeight + 1;
             if (b->nHeight != expected) {
                 b->nHeight = expected;
                 repaired++;
             }
-            mark[bi_idx] = 1;
-            progressed++;
+            w->mark[w->stack[depth]] = BII_MARK_ROOTED;
+        } else {
+            w->mark[w->stack[depth]] = BII_MARK_UNROOTED;
         }
-        if (progressed == 0)
-            break;
     }
     return repaired;
 }
 
-/* Recompute nChainWork for genesis-rooted entries of a height-sorted array. */
+/* Linear height propagation through genesis-rooted entries; returns heights
+ * fixed. Every unseen entry is climbed once toward a rooted ancestor and then
+ * settled top-down, so each entry is visited a constant number of times
+ * (O(n log n) with the pointer lookup) however its stored label is ordered.
+ * Entries whose climb dead-ends are marked unrooted and keep their labels. */
+static int bii_height_propagate(struct block_index *const *arr, size_t n,
+                                struct block_index *const *byptr,
+                                uint8_t *mark)
+{
+    size_t *stack = zcl_malloc(n * sizeof(*stack), "height_repair_stack");
+    if (!stack) {
+        LOG_WARN("height", "[height-repair] stack alloc failed for %zu "
+                 "entries — heights left as stored this boot", n);
+        return 0;
+    }
+    struct bii_height_walk w = { byptr, n, mark, stack };
+    int repaired = 0;
+    for (size_t i = 0; i < n; i++) {
+        size_t idx = bii_ptr_index(byptr, n, arr[i]);
+        if (idx >= n || mark[idx] != BII_MARK_UNSEEN)
+            continue;
+        bool rooted;
+        size_t depth = bii_height_climb(&w, idx, &rooted);
+        repaired += bii_height_settle(&w, depth, rooted);
+    }
+    free(stack);
+    return repaired;
+}
+
+/* Recompute nChainWork and the skip pointer for genesis-rooted entries of a
+ * height-sorted array. Parents come first, so each skip is built from a
+ * parent whose own skip is already right; descendants whose skip jumps across
+ * a relabeled link are rebuilt too. */
 static void bii_height_recompute_work(struct block_index *const *arr, size_t n,
                                       struct block_index *const *byptr,
                                       const uint8_t *mark)
@@ -354,13 +421,14 @@ static void bii_height_recompute_work(struct block_index *const *arr, size_t n,
     for (size_t i = 0; i < n; i++) {
         struct block_index *b = arr[i];
         size_t bi_idx = bii_ptr_index(byptr, n, b);
-        if (bi_idx >= n || !mark[bi_idx])
+        if (bi_idx >= n || mark[bi_idx] != BII_MARK_ROOTED)
             continue;
         struct arith_uint256 proof = GetBlockProof(b);
         if (b->pprev)
             arith_uint256_add(&b->nChainWork, &b->pprev->nChainWork, &proof);
         else
             b->nChainWork = proof;
+        block_index_build_skip(b);
     }
 }
 
@@ -414,7 +482,7 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
            wrong, n);
     fflush(stdout);
 
-    /* Pass 2: Fix heights via multi-pass forward propagation — but ONLY
+    /* Pass 2: Fix heights by one linear walk toward the root — but ONLY
      * through entries reachable from the TRUE genesis (by hash). A fix
      * may not flow out of a detached non-genesis root: its stored label
      * can be arbitrary, so propagating from it re-anchors an entire —
@@ -424,9 +492,8 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
      * boot sequence then re-runs this repair and the genesis-rooted
      * propagation fixes any residual labels. Reachability marks live in
      * a parallel array; pprev->mark lookups go through a pointer-sorted
-     * copy (bsearch). Iteration stays height-sorted so propagation
-     * converges in ~1-3 passes. */
-    qsort(arr, n, sizeof(*arr), bii_cmp_height);
+     * copy (bsearch). The walk does not depend on the stored order, so a
+     * chain labeled in reverse costs the same as one labeled in order. */
     struct block_index **byptr =
         zcl_malloc(n * sizeof(*byptr), "height_repair_byptr");
     uint8_t *mark = zcl_calloc(n, 1, "height_repair_mark");
@@ -574,6 +641,8 @@ static bool bii_pprev_fix_entry(struct main_state *ms, const char *datadir,
     if (!correct_pprev)
         return false; /* parent not in index — can't fix */
 
+    /* Skip pointers (this entry's and its descendants') are rebuilt for every
+     * entry in bii_pprev_recompute_chain, in height order. */
     if (bi->pprev != correct_pprev) {
         bi->pprev = correct_pprev;
         tally->repaired++;
@@ -581,7 +650,6 @@ static bool bii_pprev_fix_entry(struct main_state *ms, const char *datadir,
     if (bi->nHeight != correct_pprev->nHeight + 1) {
         bi->nHeight = correct_pprev->nHeight + 1;
         tally->heights_fixed++;
-        block_index_build_skip(bi);
     }
     return true;
 }
@@ -624,6 +692,11 @@ static void bii_pprev_recompute_chain(struct main_state *ms, size_t n)
             } else {
                 b->nChainWork = proof;
             }
+            /* Height order: the parent's pskip is built first. Descendants
+             * whose skip jumps across a fixed link were built at load
+             * through the old one, so every entry is rebuilt, not only the
+             * entries this repair touched. Safe on a NULL pprev. */
+            block_index_build_skip(b);
         }
         free(all);
 

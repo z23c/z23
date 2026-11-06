@@ -1719,6 +1719,359 @@ static int bii_mutant_gap_tests(void)
     return failures;
 }
 
+/* ── Index repair gaps: pskip after a link-only fix, deep reverse chains,
+ *    and heights after a pprev repair that read a child before its parent ── */
+
+/* Write blocks/blk00000.dat holding one 36-byte header prefix (nVersion +
+ * hashPrevBlock) per entry; record k starts at byte 8 + 36 * k. */
+static bool bii_gap_write_blk(const char *datadir,
+                              const struct uint256 *const *prevs, size_t n)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/blocks", datadir);
+    (void)mkdir(path, 0755);
+    snprintf(path, sizeof(path), "%s/blocks/blk00000.dat", datadir);
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    uint8_t pad[8] = {0};
+    uint8_t ver[4] = {0};
+    bool ok = fwrite(pad, 1, sizeof(pad), f) == sizeof(pad);
+    for (size_t k = 0; ok && k < n; k++)
+        ok = fwrite(ver, 1, sizeof(ver), f) == sizeof(ver) &&
+             fwrite(prevs[k]->data, 1, 32, f) == 32;
+    fclose(f);
+    return ok;
+}
+
+static void bii_gap_cleanup(const char *datadir)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/blocks/blk00000.dat", datadir);
+    (void)unlink(path);
+    snprintf(path, sizeof(path), "%s/blocks", datadir);
+    (void)rmdir(path);
+    bii_tear_down(datadir);
+}
+
+static void bii_gap_init(struct block_index *b, struct uint256 *h,
+                         uint8_t tag, int height)
+{
+    memset(b, 0, sizeof(*b));
+    memset(h, 0, sizeof(*h));
+    h->data[0] = tag;
+    b->phashBlock = h;
+    b->nHeight = height;
+    b->nBits = 0x2007ffff;
+}
+
+static void bii_gap_mark_disk(struct block_index *b, size_t k)
+{
+    b->nStatus = BLOCK_HAVE_DATA;
+    b->nFile = 0;
+    b->nDataPos = (unsigned)(8 + 36 * k);
+}
+
+/* Link fixed, height already right: pskip must follow the corrected link. */
+static int t_pprev_repair_rebuilds_skip_on_link_only_fix(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    char dir[256];
+    bii_make_tmpdir(dir, sizeof(dir));
+
+    struct block_index b[4];
+    struct uint256 h[4];
+    for (int i = 0; i < 4; i++) {
+        bii_gap_init(&b[i], &h[i], (uint8_t)(i + 1), i);
+        test_block_map_insert(&ms.map_block_index, &h[i], &b[i]);
+    }
+    h[0] = chain_params_get()->consensus.hashGenesisBlock;
+    b[1].pprev = &b[0];
+    b[2].pprev = &b[1];
+    /* b[3] names b[1] as its parent but its disk header names b[2]; its
+     * height 3 is already right, so only the link differs. */
+    b[3].pprev = &b[1];
+    b[3].pskip = &b[0]; /* stale: the true skip target at height 3 is 1 */
+    bii_gap_mark_disk(&b[3], 0);
+    const struct uint256 *prevs[1] = {&h[2]};
+    bool wrote = bii_gap_write_blk(dir, prevs, 1);
+
+    int fixed = block_index_repair_pprev(&ms, dir, -1, NULL);
+    BII_RUN("bii: pprev link-only fix: block file written", wrote);
+    BII_RUN("bii: pprev link-only fix: link corrected, height untouched",
+            fixed == 1 && b[3].pprev == &b[2] && b[3].nHeight == 3);
+    BII_RUN("bii: pprev link-only fix: pskip rebuilt for the new link",
+            b[3].pskip == &b[1]);
+    BII_RUN("bii: pprev link-only fix: ancestor lookup lands on the right block",
+            block_index_get_ancestor(&b[3], 1) == &b[1]);
+
+    bii_gap_cleanup(dir);
+    main_state_free(&ms);
+    return failures;
+}
+
+/* Stored heights in reverse chain order need one propagation pass per link. */
+static int t_height_repair_deep_reverse_order(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+
+    enum { DEPTH = 64 };
+    struct block_index b[DEPTH];
+    struct uint256 h[DEPTH];
+    for (int i = 0; i < DEPTH; i++) {
+        bii_gap_init(&b[i], &h[i], (uint8_t)(i + 1),
+                     i == 0 ? 0 : 1000 - i);
+        b[i].pprev = (i > 0) ? &b[i - 1] : NULL;
+        test_block_map_insert(&ms.map_block_index, &h[i], &b[i]);
+    }
+    h[0] = chain_params_get()->consensus.hashGenesisBlock;
+
+    (void)block_index_repair_heights(&ms);
+    int wrong = 0;
+    for (int i = 0; i < DEPTH; i++)
+        if (b[i].nHeight != i)
+            wrong++;
+    BII_RUN("bii: height repair converges on a 64-deep reverse-ordered chain",
+            wrong == 0);
+    BII_RUN("bii: reverse-ordered chain gets strictly increasing chain work",
+            arith_uint256_compare(&b[DEPTH - 1].nChainWork,
+                                  &b[DEPTH - 2].nChainWork) > 0);
+
+    main_state_free(&ms);
+    return failures;
+}
+
+/* A child read before its parent keeps a stale height out of the pprev pass;
+ * the boot sequence reruns the height repair, which must settle it. */
+static int t_pprev_then_height_repair_settles_child_order(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    char dir[256];
+    bii_make_tmpdir(dir, sizeof(dir));
+
+    struct block_index b[4];
+    struct uint256 h[4];
+    for (int i = 0; i < 4; i++) {
+        bii_gap_init(&b[i], &h[i], (uint8_t)(i + 1), i == 0 ? 0 : 7);
+        test_block_map_insert(&ms.map_block_index, &h[i], &b[i]);
+    }
+    h[0] = chain_params_get()->consensus.hashGenesisBlock;
+    b[1].pprev = &b[0];
+    b[1].nHeight = 1;
+    /* b[2] is detached (stale label 7); b[3] hangs off it. b[3] sits first
+     * on disk, so it is read while b[2] still carries the stale label. */
+    b[3].pprev = &b[2];
+    bii_gap_mark_disk(&b[3], 0);
+    bii_gap_mark_disk(&b[2], 1);
+    const struct uint256 *prevs[2] = {&h[2], &h[1]};
+    bool wrote = bii_gap_write_blk(dir, prevs, 2);
+
+    int fixed = block_index_repair_pprev(&ms, dir, -1, NULL);
+    BII_RUN("bii: pprev repair on child-before-parent order reports work",
+            wrote && fixed > 0 && b[2].pprev == &b[1]);
+    if (fixed > 0)
+        (void)block_index_repair_heights(&ms);
+    BII_RUN("bii: height rerun settles the child read before its parent",
+            b[2].nHeight == 2 && b[3].nHeight == 3);
+    BII_RUN("bii: chain work follows the settled heights",
+            arith_uint256_compare(&b[3].nChainWork, &b[2].nChainWork) > 0 &&
+            arith_uint256_compare(&b[2].nChainWork, &b[1].nChainWork) > 0);
+
+    bii_gap_cleanup(dir);
+    main_state_free(&ms);
+    return failures;
+}
+
+
+/* ── pskip of descendants after a repair ─────────────────────────────── */
+
+/* Rebuild every skip pointer in the order given (callers pass height order). */
+static void bii_gap_build_all_skips(struct block_index *const *order, int n)
+{
+    for (int i = 0; i < n; i++)
+        block_index_build_skip(order[i]);
+}
+
+/* Two branches share genesis. Entry E (height 4) is linked to the wrong
+ * branch's height-3 block but its disk header names the right one, and its
+ * height already fits. a7's skip jumps from 7 to 1, across the fixed link, and
+ * was built through the old link at load. */
+static int t_pprev_repair_rebuilds_descendant_skips(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    char dir[256];
+    bii_make_tmpdir(dir, sizeof(dir));
+
+    enum { NA = 8, NB = 4 };
+    struct block_index a[NA], b[NB];
+    struct uint256 ha[NA], hb[NB];
+    struct block_index *order[NA + NB - 1];
+    int no = 0;
+    for (int i = 0; i < NA; i++) {
+        bii_gap_init(&a[i], &ha[i], (uint8_t)(i + 1), i);
+        test_block_map_insert(&ms.map_block_index, &ha[i], &a[i]);
+    }
+    ha[0] = chain_params_get()->consensus.hashGenesisBlock;
+    for (int i = 1; i < NB; i++) {
+        bii_gap_init(&b[i], &hb[i], (uint8_t)(0x40 + i), i);
+        test_block_map_insert(&ms.map_block_index, &hb[i], &b[i]);
+    }
+    for (int i = 1; i < NA; i++)
+        a[i].pprev = &a[i - 1];
+    for (int i = 1; i < NB; i++)
+        b[i].pprev = (i == 1) ? &a[0] : &b[i - 1];
+    a[4].pprev = &b[3]; /* the corrupt link; a[3] is the real parent */
+
+    order[no++] = &a[0];
+    for (int i = 1; i < NB; i++) {
+        order[no++] = &a[i];
+        order[no++] = &b[i];
+    }
+    for (int i = NB; i < NA; i++)
+        order[no++] = &a[i];
+    bii_gap_build_all_skips(order, no); /* load-time skips through the bad link */
+
+    bii_gap_mark_disk(&a[4], 0);
+    const struct uint256 *prevs[1] = {&ha[3]};
+    bool wrote = bii_gap_write_blk(dir, prevs, 1);
+
+    (void)block_index_repair_pprev(&ms, dir, -1, NULL);
+    BII_RUN("bii: descendant skip: block file written and link fixed",
+            wrote && a[4].pprev == &a[3]);
+    BII_RUN("bii: descendant skip: lookup across the fixed link stays on the branch",
+            block_index_get_ancestor(&a[7], 1) == &a[1] &&
+            block_index_get_ancestor(&a[7], 3) == &a[3]);
+    BII_RUN("bii: descendant skip: pskip matches a fresh rebuild",
+            a[7].pskip == &a[1] && a[5].pskip == &a[1]);
+
+    bii_gap_cleanup(dir);
+    main_state_free(&ms);
+    return failures;
+}
+
+/* Height repair: skips that were built from scrambled labels are rebuilt. */
+static int t_height_repair_rebuilds_skips(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+
+    enum { N = 9 };
+    struct block_index a[N];
+    struct uint256 h[N];
+    for (int i = 0; i < N; i++) {
+        bii_gap_init(&a[i], &h[i], (uint8_t)(i + 1), i == 0 ? 0 : 100 - i);
+        a[i].pprev = (i > 0) ? &a[i - 1] : NULL;
+        a[i].pskip = (i > 1) ? &a[0] : NULL; /* stale */
+        test_block_map_insert(&ms.map_block_index, &h[i], &a[i]);
+    }
+    h[0] = chain_params_get()->consensus.hashGenesisBlock;
+
+    (void)block_index_repair_heights(&ms);
+    BII_RUN("bii: height repair skip: heights corrected",
+            a[8].nHeight == 8 && a[7].nHeight == 7);
+    BII_RUN("bii: height repair skip: lookup lands on the right ancestor",
+            block_index_get_ancestor(&a[7], 1) == &a[1] &&
+            block_index_get_ancestor(&a[8], 3) == &a[3]);
+    BII_RUN("bii: height repair skip: pskip matches a fresh rebuild",
+            a[7].pskip == &a[1] && a[6].pskip == &a[4]);
+
+    main_state_free(&ms);
+    return failures;
+}
+
+/* A pprev cycle, and a child hanging off it, are not genesis-rooted: they keep
+ * their stored labels while the rooted chain is corrected. */
+static int t_height_repair_cycle_keeps_labels(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+
+    struct block_index g, r1, r2, x, y, w;
+    struct uint256 hg, hr1, hr2, hx, hy, hw;
+    bii_gap_init(&g, &hg, 1, 0);
+    bii_gap_init(&r1, &hr1, 2, 9);
+    bii_gap_init(&r2, &hr2, 3, 9);
+    bii_gap_init(&x, &hx, 4, 50);
+    bii_gap_init(&y, &hy, 5, 51);
+    bii_gap_init(&w, &hw, 6, 52);
+    hg = chain_params_get()->consensus.hashGenesisBlock;
+    r1.pprev = &g;
+    r2.pprev = &r1;
+    x.pprev = &y;
+    y.pprev = &x;
+    w.pprev = &x;
+    test_block_map_insert(&ms.map_block_index, &hg, &g);
+    test_block_map_insert(&ms.map_block_index, &hr1, &r1);
+    test_block_map_insert(&ms.map_block_index, &hr2, &r2);
+    test_block_map_insert(&ms.map_block_index, &hx, &x);
+    test_block_map_insert(&ms.map_block_index, &hy, &y);
+    test_block_map_insert(&ms.map_block_index, &hw, &w);
+
+    (void)block_index_repair_heights(&ms);
+    BII_RUN("bii: cycle beside a rooted chain: rooted heights corrected",
+            r1.nHeight == 1 && r2.nHeight == 2);
+    BII_RUN("bii: cycle and its child keep their stored labels",
+            x.nHeight == 50 && y.nHeight == 51 && w.nHeight == 52);
+
+    main_state_free(&ms);
+    return failures;
+}
+
+
+/* A long chain labeled in reverse order is repaired by one linear walk; this
+ * only has to finish (the old pass loop cost one pass per link). */
+static int t_height_repair_deep_reverse_heap(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+
+    enum { DEPTH = 200000 };
+    struct block_index *b = calloc(DEPTH, sizeof(*b));
+    struct uint256 *h = calloc(DEPTH, sizeof(*h));
+    if (!b || !h) {
+        free(b);
+        free(h);
+        main_state_free(&ms);
+        BII_RUN("bii: deep reverse chain: allocation", false);
+        return failures;
+    }
+    for (int i = 0; i < DEPTH; i++) {
+        bii_gap_init(&b[i], &h[i], 0, i == 0 ? 0 : 2000000 - i);
+        h[i].data[1] = (uint8_t)(i & 0xff);
+        h[i].data[2] = (uint8_t)((i >> 8) & 0xff);
+        h[i].data[3] = (uint8_t)((i >> 16) & 0xff);
+        h[i].data[0] = 0xd0;
+        b[i].pprev = (i > 0) ? &b[i - 1] : NULL;
+        test_block_map_insert(&ms.map_block_index, &h[i], &b[i]);
+    }
+    h[0] = chain_params_get()->consensus.hashGenesisBlock;
+
+    (void)block_index_repair_heights(&ms);
+    int wrong = 0;
+    for (int i = 0; i < DEPTH; i++)
+        if (b[i].nHeight != i)
+            wrong++;
+    BII_RUN("bii: 200000-deep reverse-ordered chain fully repaired", wrong == 0);
+    BII_RUN("bii: deep chain skip pointer follows the corrected heights",
+            block_index_get_ancestor(&b[DEPTH - 1], 1000) == &b[1000]);
+
+    main_state_free(&ms);
+    free(b);
+    free(h);
+    return failures;
+}
+
+
 int test_block_index_integrity(void)
 {
     printf("\n=== block_index_integrity tests ===\n");
@@ -1749,5 +2102,12 @@ int test_block_index_integrity(void)
     failures += t_bcs_clamp_on_reorg();
     failures += t_bcs_repair_heights_wrapper();
     failures += bii_mutant_gap_tests();
+    failures += t_pprev_repair_rebuilds_skip_on_link_only_fix();
+    failures += t_height_repair_deep_reverse_order();
+    failures += t_pprev_then_height_repair_settles_child_order();
+    failures += t_pprev_repair_rebuilds_descendant_skips();
+    failures += t_height_repair_rebuilds_skips();
+    failures += t_height_repair_cycle_keeps_labels();
+    failures += t_height_repair_deep_reverse_heap();
     return failures;
 }
