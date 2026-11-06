@@ -51,9 +51,8 @@ struct script_check {
     uint32_t branch_id;
     struct tx_sig_checker tsc;
     struct precomputed_tx_data *txdata; /* shared per-tx, read-only */
+    bool local_failure;                 /* failed because it ran out of memory */
 };
-
-static _Atomic uint64_t g_script_check_local_failures = 0;
 
 static bool script_check_fn(void *item)
 {
@@ -61,12 +60,11 @@ static bool script_check_fn(void *item)
     struct sig_checker checker = tx_make_sig_checker(&sc->tsc);
     ScriptError serror = SCRIPT_ERR_OK;
     /* The count is per thread, so only the thread that ran the check can see it
-     * run out of memory; this total carries that across the pool. */
+     * run out of memory; the check itself carries that back to its block. */
     uint64_t alloc_failures = zcl_alloc_failure_count();
     bool ok = verify_script(sc->script_sig, sc->script_pub_key,
                             sc->flags, &checker, sc->branch_id, &serror);
-    if (!ok && zcl_alloc_failure_count() != alloc_failures)
-        atomic_fetch_add(&g_script_check_local_failures, 1);
+    sc->local_failure = !ok && zcl_alloc_failure_count() != alloc_failures;
     return ok;
 }
 
@@ -684,6 +682,7 @@ static int connect_block_collect_one_input(
     sc->flags = flags;
     sc->branch_id = branch_id;
     sc->txdata = &work->txdatas[work->num_txdatas - 1];
+    sc->local_failure = false;
     tx_sig_checker_init(&sc->tsc, tx, (unsigned int)j,
                         prev_out->value, branch_id,
                         sc->txdata);
@@ -829,7 +828,6 @@ static int connect_block_verify_scripts(struct validation_state *state,
     }
 
     struct workpool *pool = get_script_pool();
-    uint64_t local_failures = atomic_load(&g_script_check_local_failures);
     bool scripts_ok;
     if (pool && num_checks >= 4) {
         /* Parallel path: dispatch to worker threads */
@@ -840,6 +838,9 @@ static int connect_block_verify_scripts(struct validation_state *state,
         for (size_t c = 0; c < num_checks && scripts_ok; c++)
             scripts_ok = script_check_fn(work->check_ptrs[c]);
     }
+    bool local_failure = false;
+    for (size_t c = 0; c < num_checks && !scripts_ok && !local_failure; c++)
+        local_failure = work->checks[c].local_failure;
 
     free(work->checks);
     free(work->check_ptrs);
@@ -850,7 +851,7 @@ static int connect_block_verify_scripts(struct validation_state *state,
 
     if (!scripts_ok) {
         block_undo_free(undo);
-        if (atomic_load(&g_script_check_local_failures) != local_failures) {
+        if (local_failure) {
             (void)validation_state_error(state, "out-of-memory");
             return -1;
         }

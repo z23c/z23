@@ -1135,3 +1135,7 @@ later lane flips it HARD.
 - 2026-11-06T06:26:31Z — REASON: Connect and mempool out-of-memory checks; guard the compact requeue
   old ROOT: 3d0fa71838e985c3b8c94a9b334992c10288c85eecfb1e9ebdea70e5d0ab7604
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T06:26:43Z — REASON: Keep the connect path's out-of-memory signal with its own block
+  old ROOT: 1bcfba073a7d3f5731d2392b33a66fc3625c09f799e90820074e98fa3cc63094
+  by: owner unseal ritual (make core-unseal)
