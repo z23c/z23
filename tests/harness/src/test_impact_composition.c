@@ -9752,6 +9752,140 @@ static bool ic_original_plan_recovers_fixtures(
 }
 #endif
 
+#if !defined(_WIN32)
+struct ic_checkout_case {
+    const char *mode;
+    const char *reason;
+    const char *status;
+    bool success;
+};
+
+static bool ic_checkout_diagnostic_payload(const char *text,
+                                            const struct ic_checkout_case *item)
+{
+    if (strcmp(item->mode, "wide") != 0)
+        return strstr(text, "checkout fixture stderr\n") &&
+            strstr(text, "output_truncated=0");
+    char bound[96];
+    snprintf(bound, sizeof(bound), "output_len=%zu captured_bytes=%zu ",
+             (size_t)ZCL_DEVLOOP_OUTPUT_MAX - 1,
+             (size_t)ZCL_DEVLOOP_OUTPUT_MAX - 1);
+    return strstr(text, bound) && strstr(text, "output_truncated=1") &&
+        strstr(text, "checkout fixture tail\n") &&
+        !strstr(text, "checkout fixture stderr\n");
+}
+
+static bool ic_checkout_diagnostic_contents(const char *path,
+                                            const struct ic_checkout_case *item)
+{
+    char text[ZCL_DEVLOOP_OUTPUT_MAX + 1024];
+    size_t size = 0;
+    struct stat st;
+    bool ok = stat(path, &st) == 0 && (st.st_mode & 0777) == 0600 &&
+        ic_failure_record_read(path, text, sizeof(text), &size);
+    if (!ok) {
+        printf("checkout diagnostic %s: private retained output missing\n", item->mode);
+        return false;
+    }
+    const char *payload = strstr(text, "--- git worktree add output begin ---\n");
+    size_t header_size = payload ? (size_t)(payload - text) : size;
+    if (header_size > 512)
+        header_size = 512;
+    printf("checkout diagnostic mode=%s bytes=%zu header=%.*s\n",
+           item->mode, size, (int)header_size, text);
+    return size <= ZCL_DEVLOOP_OUTPUT_MAX + 1023 &&
+        strstr(text, "attempt=checkout-diagnostic-fixture\n") &&
+        strstr(text, "pair=fixture-local-fixture-base\n") &&
+        strstr(text, item->reason) && strstr(text, item->status) &&
+        ic_checkout_diagnostic_payload(text, item) &&
+        strstr(text, "--- git worktree add output end ---\n");
+}
+
+static bool ic_checkout_diagnostic_case(const char *root, const char *child,
+                                         const struct ic_checkout_case *item)
+{
+    char logs[4096], path[4608], why[128];
+    if (snprintf(logs, sizeof(logs), "%s/%s", root, item->mode) >= (int)sizeof(logs) ||
+        mkdir(logs, 0700) != 0 ||
+        snprintf(path, sizeof(path), "%s/generation-checkout.log", logs) >= (int)sizeof(path))
+        return false;
+    const char *argv[] = {child, item->mode, NULL};
+    bool result = zcl_dev_proof_test_checkout_command(".", logs, argv,
+                                                      2000, why, sizeof(why));
+    if (result != item->success)
+        return false;
+    if (item->success)
+        return why[0] == '\0' && access(path, F_OK) != 0 && errno == ENOENT;
+    return strcmp(why, "proof_generation_checkout_failed") == 0 &&
+        ic_checkout_diagnostic_contents(path, item);
+}
+
+static bool ic_checkout_diagnostic_fixture(void)
+{
+    static const char source[] =
+        "#include <stdio.h>\n#include <signal.h>\n#include <unistd.h>\n"
+        "int main(int argc, char **argv)\n{\n"
+        "    if (argc != 2) return 90;\n"
+        "    if (argv[1][0] == 'o') return 0;\n"
+        "    fputs(\"checkout fixture stderr\\n\", stderr);\n"
+        "    fflush(stderr);\n"
+        "    if (argv[1][0] == 't') { for (;;) pause(); }\n"
+        "    if (argv[1][0] == 's') { raise(SIGTERM); return 91; }\n"
+        "    if (argv[1][0] == 'w') {\n"
+        "        for (unsigned i = 0; i < 131072; i++) fputc('x', stderr);\n"
+        "        fputs(\"checkout fixture tail\\n\", stderr);\n"
+        "        return 0;\n    }\n    return 7;\n}\n";
+    char root[4096], cfile[4608], child[4608], signal_reason[96];
+    test_make_tmpdir(root, sizeof(root), "checkout_diagnostic", "native");
+    snprintf(cfile, sizeof(cfile), "%s/child.c", root);
+    snprintf(child, sizeof(child), "%s/child", root);
+    snprintf(signal_reason, sizeof(signal_reason), "reason=git_worktree_add_signal_%d", SIGTERM);
+    const struct ic_checkout_case cases[] = {
+        {"ok", "", "", true},
+        {"exit", "reason=git_worktree_add_exit_7", "rc=7 signal=0 timed_out=0", false},
+        {"timeout", "reason=git_worktree_add_timeout", "timed_out=1", false},
+        {"signal", signal_reason, "timed_out=0", false},
+        {"wide", "reason=git_worktree_add_truncated", "output_truncated=1", false},
+    };
+    const char *environment = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    char *saved = environment ? strdup(environment) : NULL;
+    if (environment && !saved) {
+        (void)test_rm_rf_recursive(root);
+        return false;
+    }
+    struct zcl_devloop_process_result compiled = {0};
+    const char *compile[] = {"cc", "-std=c23", cfile, "-o", child, NULL};
+    bool ok = setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0 &&
+        ic_write(root, "child.c", source) &&
+        zcl_devloop_process_run(".", compile, 30000, &compiled) &&
+        compiled.exit_code == 0 && !compiled.timed_out && !compiled.term_signal;
+    if (ok)
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+            ok = ic_checkout_diagnostic_case(root, child, &cases[i]) && ok;
+    if (saved)
+        (void)setenv("ZCL_DEVLOOP_TEST_PROCESS", saved, 1);
+    else
+        (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+    free(saved);
+    return test_rm_rf_recursive(root) == 0 && ok;
+}
+#endif
+
+static int test_ic_checkout_diagnostics(void)
+{
+    int failures = 0;
+    TEST("proof checkout: retain observed child cause and bounded private output") {
+#if defined(_WIN32)
+        printf("SKIP (checkout diagnostic fixture requires POSIX child signals)\n");
+        goto _test_next;
+#else
+        ASSERT(ic_checkout_diagnostic_fixture());
+        PASS();
+#endif
+    } _test_next:;
+    return failures;
+}
+
 static bool ic_worktree_diagnostic_read(
     const char *root, char *text, size_t cap, size_t *size)
 {
@@ -16364,6 +16498,7 @@ int test_impact_composition(void)
     failures += test_pw_generation_retire_wide_locked();
     failures += test_pw_memory_scope_verdict();
     failures += test_pw_generation_checkout_clears_pruned();
+    failures += test_ic_checkout_diagnostics();
     failures += test_pw_abandoned_generation_reaped_by_age();
     failures += test_pw_pressure_evicts_oldest_until_satisfied();
     failures += test_pw_pressure_evicts_unclaimed_young_generation();

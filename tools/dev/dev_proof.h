@@ -943,6 +943,11 @@ bool zcl_dev_proof_test_generation_checkout(const char *repo_root,
                                             const char *generation,
                                             const char *local, char *why,
                                             size_t why_len);
+/* Actual checkout command capture/diagnostic path, with a bounded fixture
+ * command and deadline. Production worktree add retains its 30000ms bound. */
+bool zcl_dev_proof_test_checkout_command(const char *root, const char *logs,
+                                         const char *const argv[], int timeout_ms,
+                                         char *why, size_t why_len);
 /* Name dp_donor_trust_verdict() returns for `path`: a path this uid owns,
  * or one lstat cannot see, is donor_untrusted_same_uid. A path another uid
  * owns stays donor_verifier_unqualified until a separate verifier is

@@ -6926,6 +6926,61 @@ static bool dp_generation_clear_pruned(const struct proof_paths *paths,
     return true;
 }
 
+/* Diagnostic evidence belongs to this private attempt, before retirement
+ * can remove the failed generation. Never print environment or argv here. */
+static bool dp_generation_checkout_record(const struct proof_paths *paths,
+                                           const struct zcl_devloop_process_result *result)
+{
+    char path[PATH_MAX], header[1024], reason[128];
+    static const char end[] = "\n--- git worktree add output end ---\n";
+    const size_t cap = sizeof(result->output);
+    const size_t bytes = result->output_len < cap ? result->output_len : cap;
+    if (!paths->logs[0] ||
+        snprintf(path, sizeof(path), "%s/generation-checkout.log", paths->logs) >=
+            (int)sizeof(path))
+        return false;
+    git_capture_why("git_worktree_add", result, cap, reason, sizeof(reason));
+    int n = snprintf(header, sizeof(header),
+        "operation=git_worktree_add\nattempt=%s\npair=%s\nreason=%s\n"
+        "rc=%d signal=%d timed_out=%d cancelled=%d elapsed_ms=%lld "
+        "output_len=%zu captured_bytes=%zu output_truncated=%d capacity=%zu\n"
+        "--- git worktree add output begin ---\n",
+        paths->attempt_token, paths->key, reason, result->exit_code,
+        result->term_signal, result->timed_out, result->cancelled,
+        (long long)result->elapsed_ms, result->output_len, bytes,
+        result->output_truncated, cap);
+    if (n < 0 || (size_t)n >= sizeof(header))
+        return false;
+    size_t size = (size_t)n + bytes + sizeof(end) - 1;
+    char *body = zcl_malloc(size, "proof generation checkout diagnostic");
+    if (!body)
+        return false;
+    memcpy(body, header, (size_t)n);
+    memcpy(body + n, result->output, bytes);
+    memcpy(body + n + bytes, end, sizeof(end) - 1);
+    bool ok = write_atomic(path, body, size, 0600);
+    free(body);
+    return ok;
+}
+
+static bool dp_generation_checkout_command(const struct proof_paths *paths,
+                                            const char *const argv[], int timeout_ms,
+                                            char *why, size_t why_len)
+{
+    char output[ZCL_DEVLOOP_OUTPUT_MAX];
+    struct zcl_devloop_process_result observed = {0};
+    if (!git_capture_observed(paths->root, argv, timeout_ms, output,
+                              sizeof(output), &observed)) {
+        if (!dp_generation_checkout_record(paths, &observed))
+            fprintf(stderr, "[devproof] private generation checkout diagnostic unavailable\n");
+        /* Keep the machine refusal stable: the private log distinguishes
+         * causes without changing retry/recovery classification. */
+        proof_why(why, why_len, "proof_generation_checkout_failed");
+        return false;
+    }
+    return true;
+}
+
 /* Check the generation out when it is not already there. */
 static bool dp_generation_checkout(const struct proof_paths *paths,
                                    const char *generation, const char *local,
@@ -6949,12 +7004,7 @@ static bool dp_generation_checkout(const struct proof_paths *paths,
     (void)git_capture(paths->root, prune_argv, pruned, sizeof(pruned));
     const char *argv[] = {"git", "worktree", "add", "--detach",
                           generation, local, NULL};
-    char output[ZCL_DEVLOOP_OUTPUT_MAX];
-    if (!git_capture(paths->root, argv, output, sizeof(output))) {
-        proof_why(why, why_len, "proof_generation_checkout_failed");
-        return false;
-    }
-    return true;
+    return dp_generation_checkout_command(paths, argv, 30000, why, why_len);
 }
 
 /* A retried exact pair reuses its private generation. Fuzz depfiles are not
@@ -7832,6 +7882,21 @@ bool zcl_dev_proof_test_generation_checkout(const char *repo_root,
             (int)sizeof(paths.root))
         return false;
     return dp_generation_checkout(&paths, generation, local, why, why_len);
+}
+
+bool zcl_dev_proof_test_checkout_command(const char *root, const char *logs,
+                                         const char *const argv[], int timeout_ms,
+                                         char *why, size_t why_len)
+{
+    struct proof_paths paths = {0};
+    if (!root || !logs || !why || !why_len ||
+        snprintf(paths.root, sizeof(paths.root), "%s", root) >= (int)sizeof(paths.root) ||
+        snprintf(paths.logs, sizeof(paths.logs), "%s", logs) >= (int)sizeof(paths.logs))
+        return false;
+    snprintf(paths.attempt_token, sizeof(paths.attempt_token), "checkout-diagnostic-fixture");
+    snprintf(paths.key, sizeof(paths.key), "fixture-local-fixture-base");
+    why[0] = '\0';
+    return dp_generation_checkout_command(&paths, argv, timeout_ms, why, why_len);
 }
 #endif
 
