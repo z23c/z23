@@ -600,6 +600,621 @@ static int check_run_fail_closed_guards(void)
     return failures;
 }
 
+/* ── mutation-gap coverage: names, CAS currency boundaries, wire codec ───── */
+
+static const struct {
+    int refusal;
+    const char *name;
+} pcas_refusal_names[] = {
+    {CONSENSUS_PUBLICATION_REFUSAL_NONE, "none"},
+    {CONSENSUS_PUBLICATION_REFUSAL_NULL_INPUT, "null_input"},
+    {CONSENSUS_PUBLICATION_REFUSAL_LANE_UNKNOWN, "lane_unknown"},
+    {CONSENSUS_PUBLICATION_REFUSAL_ARTIFACT_MANIFEST,
+     "artifact_manifest_incomplete"},
+    {CONSENSUS_PUBLICATION_REFUSAL_ARTIFACT_DIGEST_MISMATCH,
+     "artifact_digest_mismatch"},
+    {CONSENSUS_PUBLICATION_REFUSAL_CHAIN_ARTIFACT_MISMATCH,
+     "chain_evidence_not_bound_to_artifact"},
+    {CONSENSUS_PUBLICATION_REFUSAL_SOURCE_RECEIPT_MISSING,
+     "source_receipt_missing"},
+    {CONSENSUS_PUBLICATION_REFUSAL_SOURCE_RECEIPT_MALFORMED,
+     "source_receipt_malformed"},
+    {CONSENSUS_PUBLICATION_REFUSAL_SOURCE_ARTIFACT_MISMATCH,
+     "source_receipt_not_bound_to_artifact"},
+    {CONSENSUS_PUBLICATION_REFUSAL_PROFILE_NOT_SERVING,
+     "validation_profile_not_serving"},
+    {CONSENSUS_PUBLICATION_REFUSAL_FRONTIER_UNKNOWN, "frontier_unknown"},
+    {CONSENSUS_PUBLICATION_REFUSAL_FRONTIER_BEHIND, "frontier_behind_bundle"},
+};
+
+/* Every enum value maps to its own stable string; unknown values fail
+ * closed to the documented fallback. */
+static int check_enum_names(void)
+{
+    int failures = 0;
+    bool all_named = true;
+    for (size_t i = 0; i < sizeof(pcas_refusal_names) /
+                               sizeof(pcas_refusal_names[0]); i++) {
+        const char *got = consensus_state_publication_refusal_name(
+            (enum consensus_state_publication_refusal)
+                pcas_refusal_names[i].refusal);
+        if (!got || strcmp(got, pcas_refusal_names[i].name) != 0)
+            all_named = false;
+    }
+    PCAS_CHECK("every refusal enum has its pinned name", all_named);
+    const char *admit = consensus_state_publication_decision_name(
+        CONSENSUS_PUBLICATION_ADMIT);
+    const char *refused = consensus_state_publication_decision_name(
+        CONSENSUS_PUBLICATION_REFUSED);
+    const char *unk_dec = consensus_state_publication_decision_name(
+        (enum consensus_state_publication_decision)77);
+    const char *unk_ref = consensus_state_publication_refusal_name(
+        (enum consensus_state_publication_refusal)999);
+    PCAS_CHECK("decision names are ADMIT and REFUSED",
+               admit && refused && strcmp(admit, "ADMIT") == 0 &&
+               strcmp(refused, "REFUSED") == 0);
+    PCAS_CHECK("an unknown decision fails closed to REFUSED",
+               unk_dec && strcmp(unk_dec, "REFUSED") == 0);
+    PCAS_CHECK("an unknown refusal is named unknown",
+               unk_ref && strcmp(unk_ref, "unknown") == 0);
+    return failures;
+}
+
+/* CAS currency: a decision is current only at the exact bound (height, hash)
+ * pair; a one-byte hash difference anywhere, or a null input, is stale. */
+static int check_is_current_boundaries(void)
+{
+    int failures = 0;
+    struct consensus_state_publication_cas_inputs in = make_inputs();
+    struct consensus_state_publication_decision_record rec;
+    consensus_state_publication_cas_decide(&in, &rec);
+    uint8_t hash[32];
+    memcpy(hash, in.frontier_hash, 32);
+    PCAS_CHECK("current at the exact bound frontier",
+               consensus_state_publication_cas_decision_is_current(
+                   &rec, 120, hash));
+    hash[31] ^= 1u;
+    PCAS_CHECK("last-byte hash difference is stale",
+               !consensus_state_publication_cas_decision_is_current(
+                   &rec, 120, hash));
+    hash[31] ^= 1u;
+    hash[0] ^= 1u;
+    PCAS_CHECK("first-byte hash difference is stale",
+               !consensus_state_publication_cas_decision_is_current(
+                   &rec, 120, hash));
+    hash[0] ^= 1u;
+    PCAS_CHECK("height difference with equal hash is stale",
+               !consensus_state_publication_cas_decision_is_current(
+                   &rec, 119, hash));
+    PCAS_CHECK("null record is never current",
+               !consensus_state_publication_cas_decision_is_current(
+                   NULL, 120, hash));
+    PCAS_CHECK("null frontier hash is never current",
+               !consensus_state_publication_cas_decision_is_current(
+                   &rec, 120, NULL));
+    return failures;
+}
+
+static int check_digest_null_guards(void)
+{
+    int failures = 0;
+    struct consensus_state_publication_cas_inputs in = make_inputs();
+    struct consensus_state_publication_decision_record rec;
+    consensus_state_publication_cas_decide(&in, &rec);
+    uint8_t out[32];
+    memset(out, 0xEE, sizeof(out));
+    PCAS_CHECK("digest of a null record is refused",
+               !consensus_state_publication_decision_digest(NULL, out));
+    PCAS_CHECK("digest into a null output is refused",
+               !consensus_state_publication_decision_digest(&rec, NULL));
+    PCAS_CHECK("a refused digest leaves the output untouched",
+               out[0] == 0xEE && out[31] == 0xEE);
+    return failures;
+}
+
+#define PCAS_WIRE 438u        /* 214 preimage + 32 digest + 192 reason */
+#define PCAS_OFF_DIGEST 214u
+#define PCAS_OFF_REASON 246u
+#define PCAS_REASON_LEN 192u
+
+static_assert(sizeof(((struct consensus_state_publication_decision_record *)0)
+                         ->reason) == PCAS_REASON_LEN,
+              "wire reason width");
+
+struct pcas_fx {
+    int dir_fd;
+    struct consensus_state_publication_decision_record rec;
+    uint8_t wire[PCAS_WIRE + 1];
+    size_t wire_n;
+};
+
+static uint32_t pcas_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |
+           (uint32_t)p[3] << 24;
+}
+
+/* A raw codec record with distinct multi-byte values in every field. The
+ * decision/refusal pairing is synthetic: the codec is field-agnostic. */
+static struct consensus_state_publication_decision_record pcas_wire_record(void)
+{
+    struct consensus_state_publication_decision_record r;
+    memset(&r, 0, sizeof(r));
+    r.decision = CONSENSUS_PUBLICATION_ADMIT;
+    r.refusal = CONSENSUS_PUBLICATION_REFUSAL_FRONTIER_BEHIND;
+    fill(r.artifact_receipt_digest, 32, 0x10);
+    fill(r.chain_evidence_digest, 32, 0x30);
+    fill(r.source_receipt_digest, 32, 0x50);
+    fill(r.source_epoch_digest, 32, 0x70);
+    r.bundle_height = 0x01020304;
+    fill(r.bundle_hash, 32, 0x90);
+    r.validation_profile = 0x5A;
+    r.target_lane = CONSENSUS_STATE_TARGET_LANE_CANONICAL;
+    r.expected_frontier_height = 0x7A6B5C4D;
+    fill(r.expected_frontier_hash, 32, 0xB0);
+    memset(r.reason, 'R', sizeof(r.reason) - 1);
+    return r;
+}
+
+static size_t pcas_slurp(int dir_fd, const char *name, uint8_t *buf,
+                         size_t cap)
+{
+    int fd = openat(dir_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return 0;
+    size_t off = 0;
+    ssize_t r;
+    while (off < cap && (r = read(fd, buf + off, cap - off)) > 0)
+        off += (size_t)r;
+    (void)close(fd);
+    return off;
+}
+
+/* Replace `name` with exactly `buf[0..n)`. */
+static bool pcas_spit(int dir_fd, const char *name, const uint8_t *buf,
+                      size_t n)
+{
+    (void)unlinkat(dir_fd, name, 0);
+    int fd = openat(dir_fd, name,
+                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return false;
+    size_t off = 0;
+    ssize_t w = 0;
+    while (off < n && (w = write(fd, buf + off, n - off)) > 0)
+        off += (size_t)w;
+    return close(fd) == 0 && off == n;
+}
+
+static bool pcas_wire_head_ok(const uint8_t *w,
+    const struct consensus_state_publication_decision_record *r)
+{
+    return pcas_le32(w) == 1u && w[4] == (uint8_t)r->decision &&
+           pcas_le32(w + 5) == (uint32_t)r->refusal &&
+           memcmp(w + 9, r->artifact_receipt_digest, 32) == 0 &&
+           memcmp(w + 41, r->chain_evidence_digest, 32) == 0 &&
+           memcmp(w + 73, r->source_receipt_digest, 32) == 0 &&
+           memcmp(w + 105, r->source_epoch_digest, 32) == 0 &&
+           pcas_le32(w + 137) == (uint32_t)r->bundle_height &&
+           memcmp(w + 141, r->bundle_hash, 32) == 0;
+}
+
+static bool pcas_wire_tail_ok(const uint8_t *w,
+    const struct consensus_state_publication_decision_record *r)
+{
+    uint8_t digest[32];
+    return consensus_state_publication_decision_digest(r, digest) &&
+           w[173] == r->validation_profile &&
+           pcas_le32(w + 174) == (uint32_t)r->target_lane &&
+           pcas_le32(w + 178) == (uint32_t)r->expected_frontier_height &&
+           memcmp(w + 182, r->expected_frontier_hash, 32) == 0 &&
+           memcmp(w + PCAS_OFF_DIGEST, digest, 32) == 0 &&
+           memcmp(w + PCAS_OFF_REASON, r->reason, PCAS_REASON_LEN) == 0;
+}
+
+/* The persisted file is exactly the documented little-endian layout. */
+static int check_wire_layout(struct pcas_fx *fx)
+{
+    int failures = 0;
+    struct zcl_result pr = consensus_state_publication_cas_persist_for_test(
+        fx->dir_fd, "wire.rec", &fx->rec);
+    PCAS_CHECK("persist writes the wire record", pr.ok);
+    fx->wire_n = pcas_slurp(fx->dir_fd, "wire.rec", fx->wire, sizeof(fx->wire));
+    PCAS_CHECK("wire record is exactly 438 bytes", fx->wire_n == PCAS_WIRE);
+    if (fx->wire_n != PCAS_WIRE)
+        return failures;
+    PCAS_CHECK("wire preimage head fields sit at their offsets",
+               pcas_wire_head_ok(fx->wire, &fx->rec));
+    PCAS_CHECK("wire preimage tail, digest and reason sit at their offsets",
+               pcas_wire_tail_ok(fx->wire, &fx->rec));
+    PCAS_CHECK("wire height bytes are little-endian",
+               fx->wire[137] == 0x04 && fx->wire[140] == 0x01 &&
+               fx->wire[178] == 0x4D && fx->wire[181] == 0x7A);
+    return failures;
+}
+
+static bool pcas_records_match(
+    const struct consensus_state_publication_decision_record *a,
+    const struct consensus_state_publication_decision_record *b)
+{
+    return a->decision == b->decision && a->refusal == b->refusal &&
+           memcmp(a->artifact_receipt_digest, b->artifact_receipt_digest,
+                  32) == 0 &&
+           memcmp(a->chain_evidence_digest, b->chain_evidence_digest,
+                  32) == 0 &&
+           memcmp(a->source_receipt_digest, b->source_receipt_digest,
+                  32) == 0 &&
+           memcmp(a->source_epoch_digest, b->source_epoch_digest, 32) == 0 &&
+           a->bundle_height == b->bundle_height &&
+           memcmp(a->bundle_hash, b->bundle_hash, 32) == 0 &&
+           a->validation_profile == b->validation_profile &&
+           a->target_lane == b->target_lane &&
+           a->expected_frontier_height == b->expected_frontier_height &&
+           memcmp(a->expected_frontier_hash, b->expected_frontier_hash,
+                  32) == 0 &&
+           memcmp(a->reason, b->reason, sizeof(a->reason)) == 0;
+}
+
+static int check_load_roundtrip(struct pcas_fx *fx)
+{
+    int failures = 0;
+    struct consensus_state_publication_decision_record out;
+    memset(&out, 0xFF, sizeof(out));
+    struct zcl_result lr =
+        consensus_state_publication_cas_load(fx->dir_fd, "wire.rec", &out);
+    PCAS_CHECK("load accepts the persisted record", lr.ok);
+    PCAS_CHECK("load returns every field with its distinct value",
+               lr.ok && pcas_records_match(&fx->rec, &out));
+    uint8_t digest[32];
+    PCAS_CHECK("loaded decision digest is the recomputed digest",
+               lr.ok &&
+               consensus_state_publication_decision_digest(&out, digest) &&
+               memcmp(digest, out.decision_digest, 32) == 0 &&
+               memcmp(digest, fx->wire + PCAS_OFF_DIGEST, 32) == 0);
+    return failures;
+}
+
+static bool pcas_all_bytes(const void *p, size_t n, uint8_t v)
+{
+    const uint8_t *b = p;
+    for (size_t i = 0; i < n; i++)
+        if (b[i] != v)
+            return false;
+    return true;
+}
+
+/* Flip one bit in every digest-bound byte (preimage and stored digest):
+ * each must fail digest verification (-55). */
+static bool pcas_every_bound_byte_is_checked(struct pcas_fx *fx)
+{
+    uint8_t mod[PCAS_WIRE];
+    for (size_t i = 0; i < PCAS_OFF_REASON; i++) {
+        memcpy(mod, fx->wire, PCAS_WIRE);
+        mod[i] ^= 0x01;
+        if (!pcas_spit(fx->dir_fd, "flip.rec", mod, PCAS_WIRE))
+            return false;
+        struct consensus_state_publication_decision_record out;
+        memset(&out, 0xFF, sizeof(out));
+        struct zcl_result r = consensus_state_publication_cas_load(
+            fx->dir_fd, "flip.rec", &out);
+        if (r.ok || r.code != -55)
+            return false;
+    }
+    return true;
+}
+
+static int check_tamper_rejection(struct pcas_fx *fx)
+{
+    int failures = 0;
+    PCAS_CHECK("a bit flip in any digest-bound byte fails verification",
+               pcas_every_bound_byte_is_checked(fx));
+    uint8_t mod[PCAS_WIRE + 1];
+    struct consensus_state_publication_decision_record out;
+
+    /* A wrong version with an otherwise intact record (the digest does not
+     * cover the version bytes it recomputes) must still be refused, and the
+     * output must be left zeroed, not stale or partially decoded. */
+    memcpy(mod, fx->wire, PCAS_WIRE);
+    mod[0] ^= 0x01;
+    memset(&out, 0xFF, sizeof(out));
+    bool wrote = pcas_spit(fx->dir_fd, "ver.rec", mod, PCAS_WIRE);
+    struct zcl_result vr =
+        consensus_state_publication_cas_load(fx->dir_fd, "ver.rec", &out);
+    PCAS_CHECK("unknown wire version is refused with a zeroed output",
+               wrote && !vr.ok && vr.code == -55 &&
+               pcas_all_bytes(&out, sizeof(out), 0));
+
+    /* Reason is not digest-bound and may arrive unterminated: load must
+     * terminate it in place without clobbering the byte before it. */
+    memcpy(mod, fx->wire, PCAS_WIRE);
+    memset(mod + PCAS_OFF_REASON, 'R', PCAS_REASON_LEN);
+    wrote = pcas_spit(fx->dir_fd, "rsn.rec", mod, PCAS_WIRE);
+    memset(&out, 0xFF, sizeof(out));
+    struct zcl_result rr =
+        consensus_state_publication_cas_load(fx->dir_fd, "rsn.rec", &out);
+    PCAS_CHECK("load NUL-terminates an unterminated reason",
+               wrote && rr.ok && out.reason[0] == 'R' &&
+               out.reason[PCAS_REASON_LEN - 2] == 'R' &&
+               out.reason[PCAS_REASON_LEN - 1] == '\0');
+
+    memcpy(mod, fx->wire, PCAS_WIRE);
+    wrote = pcas_spit(fx->dir_fd, "short.rec", mod, PCAS_WIRE - 1);
+    struct zcl_result sr =
+        consensus_state_publication_cas_load(fx->dir_fd, "short.rec", &out);
+    PCAS_CHECK("a one-byte-short record is refused as a size mismatch",
+               wrote && !sr.ok && sr.code == -54);
+    mod[PCAS_WIRE] = 'Z';
+    wrote = pcas_spit(fx->dir_fd, "long.rec", mod, PCAS_WIRE + 1);
+    struct zcl_result lr =
+        consensus_state_publication_cas_load(fx->dir_fd, "long.rec", &out);
+    PCAS_CHECK("a one-byte-long record is refused as a size mismatch",
+               wrote && !lr.ok && lr.code == -54);
+    return failures;
+}
+
+static const char *pcas_long_name(char buf[260], size_t n)
+{
+    memset(buf, 'n', n);
+    buf[n] = '\0';
+    return buf;
+}
+
+/* Output-name validation: one normalized path component below 200 bytes. */
+static int check_output_name_rules(struct pcas_fx *fx)
+{
+    int failures = 0;
+    const struct consensus_state_publication_decision_record *rec = &fx->rec;
+    char long199[260], long200[260];
+    pcas_long_name(long199, 199);
+    pcas_long_name(long200, 200);
+    const char *bad[] = {NULL, "", ".", "..", "a/b", "/", long200};
+    bool all_refused = true;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        struct zcl_result r = consensus_state_publication_cas_persist_for_test(
+            fx->dir_fd, bad[i], rec);
+        if (r.ok || r.code != -41)
+            all_refused = false;
+    }
+    PCAS_CHECK("persist refuses every malformed output name with -41",
+               all_refused);
+    struct consensus_state_publication_decision_record out;
+    PCAS_CHECK("a one-character name is accepted and reloads",
+               consensus_state_publication_cas_persist_for_test(
+                   fx->dir_fd, "a", rec).ok &&
+               consensus_state_publication_cas_load(fx->dir_fd, "a", &out).ok);
+    PCAS_CHECK("a 199-byte name is accepted and reloads",
+               consensus_state_publication_cas_persist_for_test(
+                   fx->dir_fd, long199, rec).ok &&
+               consensus_state_publication_cas_load(
+                   fx->dir_fd, long199, &out).ok);
+    bool load_refused = true;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        struct zcl_result r =
+            consensus_state_publication_cas_load(fx->dir_fd, bad[i], &out);
+        if (r.ok || r.code != -51)
+            load_refused = false;
+    }
+    PCAS_CHECK("load refuses every malformed name with -51", load_refused);
+    return failures;
+}
+
+/* Run `persist` and `load` with descriptor 0 pointing at /dev/null, so a
+ * "descriptor is invalid" test of fd 0 touches nothing real. */
+static bool pcas_codes_on_fd0(
+    const struct consensus_state_publication_decision_record *rec,
+    int *persist_code, int *load_code)
+{
+    int saved = dup(0);
+    (void)close(0);
+    int z = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    bool usable = z == 0;
+    if (usable) {
+        *persist_code = consensus_state_publication_cas_persist_for_test(
+            0, "fd0.rec", rec).code;
+        struct consensus_state_publication_decision_record out;
+        *load_code =
+            consensus_state_publication_cas_load(0, "fd0.rec", &out).code;
+    }
+    if (saved >= 0) {
+        (void)dup2(saved, 0);
+        (void)close(saved);
+    } else if (z == 0) {
+        (void)close(0);
+    }
+    if (z > 0)
+        (void)close(z);
+    return usable;
+}
+
+static int check_error_codes(struct pcas_fx *fx)
+{
+    int failures = 0;
+    struct consensus_state_publication_decision_record out;
+    PCAS_CHECK("persist refuses a negative directory fd with -40",
+               consensus_state_publication_cas_persist_for_test(
+                   -1, "x.rec", &fx->rec).code == -40);
+    PCAS_CHECK("persist refuses a null record with -46",
+               consensus_state_publication_cas_persist_for_test(
+                   fx->dir_fd, "x.rec", NULL).code == -46);
+    PCAS_CHECK("load refuses a null output with -50",
+               consensus_state_publication_cas_load(
+                   fx->dir_fd, "wire.rec", NULL).code == -50);
+    PCAS_CHECK("load refuses a negative directory fd with -51",
+               consensus_state_publication_cas_load(
+                   -1, "wire.rec", &out).code == -51);
+    PCAS_CHECK("load of a missing record reports the open failure (-52)",
+               consensus_state_publication_cas_load(
+                   fx->dir_fd, "absent.rec", &out).code == -52);
+    PCAS_CHECK("load of a directory reports the read failure (-53)",
+               mkdirat(fx->dir_fd, "isdir.rec", 0700) == 0 &&
+               consensus_state_publication_cas_load(
+                   fx->dir_fd, "isdir.rec", &out).code == -53);
+    int pcode = 0, lcode = 0;
+    bool usable = pcas_codes_on_fd0(&fx->rec, &pcode, &lcode);
+    PCAS_CHECK("descriptor 0 is a usable fd, not an invalid one",
+               !usable || (pcode == -43 && lcode == -52));
+    return failures;
+}
+
+/* A failed publish before the rename removes its temp file and says -44. */
+static bool pcas_has_prefix(int dir_fd, const char *prefix, uint64_t *nonce)
+{
+    int scan_fd = dup(dir_fd);
+    DIR *dir = scan_fd >= 0 ? fdopendir(scan_fd) : NULL;
+    if (!dir) {
+        if (scan_fd >= 0)
+            (void)close(scan_fd);
+        return false;
+    }
+    rewinddir(dir); /* dup shares the directory offset with dir_fd */
+    bool found = false;
+    struct dirent *de;
+    size_t n = strlen(prefix);
+    while ((de = readdir(dir)) != NULL) {
+        if (strncmp(de->d_name, prefix, n) != 0)
+            continue;
+        found = true;
+        const char *dot = strrchr(de->d_name, '.');
+        if (nonce && dot)
+            *nonce = strtoull(dot + 1, NULL, 16);
+    }
+    closedir(dir);
+    return found;
+}
+
+static int check_failed_publish_cleans_temp(struct pcas_fx *fx)
+{
+    int failures = 0;
+    PCAS_CHECK("fixture target directory", mkdirat(fx->dir_fd, "blocked",
+                                                   0700) == 0);
+    struct zcl_result r = consensus_state_publication_cas_persist_for_test(
+        fx->dir_fd, "blocked", &fx->rec);
+    PCAS_CHECK("renaming onto a directory fails the publish with -44",
+               !r.ok && r.code == -44);
+    PCAS_CHECK("a failed publish leaves no temp file behind",
+               !pcas_has_prefix(fx->dir_fd, "blocked.tmp.", NULL));
+    (void)unlinkat(fx->dir_fd, "blocked", AT_REMOVEDIR);
+    return failures;
+}
+
+struct pcas_probe {
+    int dir_fd;
+    uint64_t nonce;
+};
+
+static void pcas_probe_hook(
+    const struct consensus_state_publication_decision_record *record,
+    void *opaque)
+{
+    (void)record;
+    struct pcas_probe *p = opaque;
+    (void)pcas_has_prefix(p->dir_fd, "col.rec.tmp.", &p->nonce);
+}
+
+static bool pcas_precreate_temps(int dir_fd, uint64_t first, unsigned count)
+{
+    char nm[256];
+    for (unsigned k = 0; k < count; k++) {
+        snprintf(nm, sizeof(nm), "col.rec.tmp.%ld.%016llx", (long)getpid(),
+                 (unsigned long long)(first + k));
+        int fd = openat(dir_fd, nm, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+                        0600);
+        if (fd < 0)
+            return false;
+        (void)close(fd);
+    }
+    return true;
+}
+
+/* The temp-name retry loop gives up after exactly 1024 collisions: 1024
+ * pre-existing names refuse the publish, 1023 still let the 1024th win. */
+static int check_temp_collision_bound(struct pcas_fx *fx)
+{
+    int failures = 0;
+    struct pcas_probe probe = {.dir_fd = fx->dir_fd, .nonce = 0};
+    consensus_state_publication_cas_test_set_after_temp_open_hook(
+        pcas_probe_hook, &probe);
+    bool first = consensus_state_publication_cas_persist_for_test(
+        fx->dir_fd, "col.rec", &fx->rec).ok;
+    consensus_state_publication_cas_test_set_after_temp_open_hook(NULL, NULL);
+    PCAS_CHECK("nonce probe publish succeeds", first);
+    if (!first)
+        return failures;
+    uint64_t next = probe.nonce + 1; /* single writer: nonces are sequential */
+    bool made = pcas_precreate_temps(fx->dir_fd, next, 1024);
+    struct zcl_result exhausted =
+        consensus_state_publication_cas_persist_for_test(
+            fx->dir_fd, "col.rec", &fx->rec);
+    PCAS_CHECK("1024 colliding temp names exhaust the retry budget (-43)",
+               made && !exhausted.ok && exhausted.code == -43);
+    made = pcas_precreate_temps(fx->dir_fd, next + 1024, 1023);
+    struct consensus_state_publication_decision_record out;
+    PCAS_CHECK("1023 colliding temp names still publish on the 1024th try",
+               made && consensus_state_publication_cas_persist_for_test(
+                           fx->dir_fd, "col.rec", &fx->rec).ok &&
+               consensus_state_publication_cas_load(
+                   fx->dir_fd, "col.rec", &out).ok);
+    return failures;
+}
+
+static void pcas_purge_dir(int dir_fd)
+{
+    int scan_fd = dup(dir_fd);
+    DIR *dir = scan_fd >= 0 ? fdopendir(scan_fd) : NULL;
+    if (!dir) {
+        if (scan_fd >= 0)
+            (void)close(scan_fd);
+        return;
+    }
+    rewinddir(dir);
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+        if (unlinkat(dir_fd, de->d_name, 0) != 0)
+            (void)unlinkat(dir_fd, de->d_name, AT_REMOVEDIR);
+    }
+    closedir(dir);
+}
+
+static int check_codec_with_fixture(struct pcas_fx *fx)
+{
+    int failures = 0;
+    failures += check_wire_layout(fx);
+    if (fx->wire_n != PCAS_WIRE)
+        return failures;
+    failures += check_load_roundtrip(fx);
+    failures += check_tamper_rejection(fx);
+    failures += check_output_name_rules(fx);
+    failures += check_error_codes(fx);
+    failures += check_failed_publish_cleans_temp(fx);
+    failures += check_temp_collision_bound(fx);
+    return failures;
+}
+
+static int check_codec_mutation_gaps(void)
+{
+    int failures = 0;
+    struct pcas_fx fx;
+    memset(&fx, 0, sizeof(fx));
+    fx.dir_fd = -1;
+    fx.rec = pcas_wire_record();
+    char dir_template[PATH_MAX] = "";
+    char *dir = test_mkdtemp(dir_template, sizeof(dir_template), "zcl-pcas-mg");
+    PCAS_CHECK("mutation-gap fixture directory", dir != NULL);
+    if (!dir)
+        return failures;
+    fx.dir_fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    PCAS_CHECK("mutation-gap directory descriptor", fx.dir_fd >= 0);
+    if (fx.dir_fd >= 0) {
+        failures += check_codec_with_fixture(&fx);
+        pcas_purge_dir(fx.dir_fd);
+        (void)close(fx.dir_fd);
+    }
+    (void)rmdir(dir);
+    return failures;
+}
+
 static int test_consensus_state_publication_cas_platform_arm(void)
 {
     int failures = 0;
@@ -613,6 +1228,10 @@ static int test_consensus_state_publication_cas_platform_arm(void)
     failures += check_mutual_binding_refusals();
     failures += check_durable_record_roundtrip_and_race(&admit, &admit2);
     failures += check_run_fail_closed_guards();
+    failures += check_enum_names();
+    failures += check_is_current_boundaries();
+    failures += check_digest_null_guards();
+    failures += check_codec_mutation_gaps();
 
     printf("consensus_state_publication_cas: %s\n",
            failures ? "FAILED" : "ALL PASSED");
