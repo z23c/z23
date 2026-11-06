@@ -54,7 +54,7 @@
 #define RR_ARG_MAX 512
 #define RR_SOURCE_MAX 32
 #define RR_OVERLAY_MAX (RR_SOURCE_MAX + 1)
-#define RR_EXACT_GROUP_MAX 128
+#define RR_EXACT_GROUP_MAX ZCL_DEVLOOP_RESTART_EXACT_GROUP_MAX
 /* Finite aggregate proof budget, distinct from the runner's per-group
  * silence watchdog. A valid closure can include a group weighted at 312
  * seconds (vcs_devloop) and over a hundred groups; 300 seconds can reject a

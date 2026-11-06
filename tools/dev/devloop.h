@@ -548,6 +548,10 @@ bool zcl_devloop_restart_prove(
     struct zcl_devloop_process_result *process,
     char *why, size_t why_len);
 
+/* Most selected groups the resident proof names individually; a wider
+ * selection takes the count-only path-floor fallback described below. */
+#define ZCL_DEVLOOP_RESTART_EXACT_GROUP_MAX 128
+
 /* Save-cycle tier: executes every selected group except exact integration-only
  * groups. If a reverse-caller closure exceeds the resident bound, it executes
  * the complete explicit path floor and hash-binds the broader closure into the

@@ -7424,6 +7424,7 @@ static bool dp_rr_exact_edit_revert(struct dp_rr_fx *f)
 
 static bool dp_rr_edit_build(struct dp_rr_fx *f)
 {
+    f->stage = "edit build";
     struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
     f->stage = "edit build";
     f->why[0] = 0;
@@ -7448,6 +7449,7 @@ static bool dp_rr_edit_build(struct dp_rr_fx *f)
 
 static bool dp_rr_revert_build(struct dp_rr_fx *f)
 {
+    f->stage = "revert build";
     struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
     f->stage = "revert build";
     f->why[0] = 0;
@@ -7470,6 +7472,47 @@ static bool dp_rr_revert_build(struct dp_rr_fx *f)
     return ok;
 }
 
+/* The restart proof enumerates at most this many selected groups by name
+ * (ZCL_DEVLOOP_RESTART_EXACT_GROUP_MAX); a wider
+ * selection takes the count-only path-floor fallback. The named-deferral
+ * contract below must therefore be exercised on a selection that is known to
+ * fit, whatever the catalog has grown to: a fixed wallet+net closure sat just
+ * under the cap and crossed it when unrelated wallet lanes added groups. */
+#define DP_RR_EXACT_CAP ((size_t)ZCL_DEVLOOP_RESTART_EXACT_GROUP_MAX)
+
+static size_t dp_rr_selected(const struct zcl_devloop_plan *plan)
+{
+    const char *ids[ZCL_DEVLOOP_MAX_PLAN_GROUPS * 2];
+    size_t n = 0;
+    for (size_t i = 0; i < plan->path_groups_len; i++)
+        ids[n++] = plan->path_groups[i];
+    for (size_t i = 0; i < plan->closure_groups_len; i++)
+        ids[n++] = plan->closure_groups[i];
+    bool truncated = false;
+    return zcl_test_group_expand_plan(ids, n, NULL, 0, &truncated);
+}
+
+/* Widen the closure with each family in turn while the whole selection stays
+ * nameable. Returns how many families were taken. */
+static size_t dp_rr_widen_within_cap(struct zcl_devloop_plan *plan,
+                                     const char *const *families, size_t count)
+{
+    size_t taken = 0;
+    plan->closure_groups_len = 0;
+    for (size_t i = 0; i < count; i++) {
+        (void)snprintf(plan->closure_groups[plan->closure_groups_len],
+                       sizeof(plan->closure_groups[0]), "%s", families[i]);
+        plan->closure_groups_len++;
+        size_t selected = dp_rr_selected(plan);
+        if (selected == SIZE_MAX || selected > DP_RR_EXACT_CAP) {
+            plan->closure_groups_len--;
+            continue;
+        }
+        taken++;
+    }
+    return taken;
+}
+
 static bool dp_rr_overwide_a(struct dp_rr_fx *f, const struct zcl_devloop_plan *overwide)
 {
     struct zcl_devloop_restart_proof_receipt *proof = &f->proof;
@@ -7482,31 +7525,67 @@ static bool dp_rr_overwide_a(struct dp_rr_fx *f, const struct zcl_devloop_plan *
         proof->deferred_group_count != 0;
 }
 
-static bool dp_rr_overwide_b(const struct zcl_devloop_restart_proof_receipt *proof)
+static bool dp_rr_overwide_b(const struct zcl_devloop_restart_proof_receipt *proof,
+                             const char *const *families, size_t count)
 {
+    /* Every family the closure kept must be named as deferred and absent from
+     * the immediate list; the families are the catalog's "test_<family>". */
+    for (size_t i = 0; i < count; i++) {
+        char name[64];
+        (void)snprintf(name, sizeof(name), "test_%s", families[i]);
+        if (strstr(proof->groups, name) || !strstr(proof->deferred_groups, name))
+            return false;
+    }
     return strstr(proof->groups, "test_dev_platform") &&
-        !strstr(proof->groups, "test_wallet") && !strstr(proof->groups, "test_net") &&
-        strstr(proof->deferred_groups, "test_wallet") &&
-        strstr(proof->deferred_groups, "test_net") &&
         proof->compiler_processes == 2 && proof->linker_processes == 0 && proof->complete_graph_linker_processes == 0 &&
         proof->test_processes == 1;
 }
 
 static bool dp_rr_overwide(struct dp_rr_fx *f)
 {
+    f->stage = "overwide proof receipt accounting";
+    static const char *const families[] = {"wallet", "net"};
     struct zcl_devloop_plan overwide = f->proof_plan;
-    (void)snprintf(overwide.closure_groups[0],
-                   sizeof(overwide.closure_groups[0]), "%s", "wallet");
-    (void)snprintf(overwide.closure_groups[1],
-                   sizeof(overwide.closure_groups[1]), "%s", "net");
-    overwide.closure_groups_len = 2;
+    size_t taken = dp_rr_widen_within_cap(&overwide, families, 2);
+    /* The wallet family alone must always fit, else this fixture proves
+     * nothing about named deferral. */
+    if (taken == 0 || strcmp(overwide.closure_groups[0], "wallet") != 0) {
+        (void)snprintf(f->why, sizeof(f->why),
+                       "wallet closure no longer fits the %zu-group naming cap",
+                       DP_RR_EXACT_CAP);
+        return false;
+    }
     memset(&f->proof, 0, sizeof(f->proof));
     memset(&f->process, 0, sizeof(f->process));
-    return dp_rr_overwide_a(f, &overwide) && dp_rr_overwide_b(&f->proof);
+    if (!dp_rr_overwide_a(f, &overwide))
+        return false;
+    /* The kept families are the leading ones, in order. */
+    bool named = dp_rr_overwide_b(&f->proof, families, overwide.closure_groups_len);
+    if (!named)
+        return false;
+    /* Over the naming cap the proof must still select the path floor, defer
+     * the rest by count only and never claim completion. The universal
+     * closure is over the cap for any catalog larger than the cap. */
+    struct zcl_devloop_plan universal = f->proof_plan;
+    universal.closure_universal = true;
+    memset(&f->proof, 0, sizeof(f->proof));
+    memset(&f->process, 0, sizeof(f->process));
+    return zcl_test_group_catalog_count() > DP_RR_EXACT_CAP &&
+        zcl_devloop_restart_prove_immediate(
+            f->root, f->changed, 1, &universal, &f->proof, &f->process,
+            f->why, sizeof(f->why)) &&
+        f->proof.immediate_proof_complete && !f->proof.proof_complete &&
+        f->proof.bounded_proof_deferred && f->proof.deferred_groups[0] == 0 &&
+        f->proof.group_count != 0 && f->proof.group_count <= 32 &&
+        (size_t)f->proof.group_count + f->proof.deferred_group_count ==
+            zcl_test_group_catalog_count() &&
+        strstr(f->proof.groups, "test_dev_platform") &&
+        f->proof.test_processes == 1;
 }
 
 static bool dp_rr_substituted(struct dp_rr_fx *f)
 {
+    f->stage = "substituted proof group";
     struct zcl_devloop_plan substituted = f->proof_plan;
     (void)snprintf(substituted.path_groups[0],
                    sizeof(substituted.path_groups[0]), "%s", "json");
@@ -7522,6 +7601,7 @@ static bool dp_rr_substituted(struct dp_rr_fx *f)
 
 static bool dp_rr_second_build(struct dp_rr_fx *f)
 {
+    f->stage = "second edit build";
     struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
     /* A later edit links both its new overlay and the prior source's still
      * exact overlay. The fake linker always requires the first overlay, so
@@ -7538,6 +7618,7 @@ static bool dp_rr_second_build(struct dp_rr_fx *f)
 
 static bool dp_rr_second_refused(struct dp_rr_fx *f)
 {
+    f->stage = "second edit refusal";
     struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
     const char *second[] = { "tools/dev/restart_second.c" };
     if (!dp_mk_write(f->root, "tools/dev/restart_second.c",
@@ -7555,6 +7636,7 @@ static bool dp_rr_second_refused(struct dp_rr_fx *f)
 
 static bool dp_rr_forbidden(struct dp_rr_fx *f)
 {
+    f->stage = "forbidden input refusal";
     struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
     const char *forbidden[] = { "core/consensus/src/restart_fixture.c" };
     memset(receipt, 0, sizeof(*receipt));
