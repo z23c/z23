@@ -523,34 +523,50 @@ static bool rs_long_body(char *out, size_t cap, int top, int bottom)
  * that neither ran the ritual nor resealed, followed by a ritual commit on
  * core/b.c. git merges core/a.c cleanly either way, and only the seal files
  * stop the rebase: the merged core/a.c is a file nobody sealed. */
+/* The row's side: the bottom of core/a.c, sealed by its own ritual or
+ * (`unsealed_first`) left unsealed before a ritual commit on core/b.c. */
+static bool rs_overlap_commits(const char *clone, bool unsealed_first,
+                               char tip[64])
+{
+    char c1[64], body[2048];
+    if (!rs_long_body(body, sizeof(body), 1, 2))
+        return false;
+    if (!unsealed_first)
+        return rs_core_commit(clone, "core/a.c", body, "the row edits a",
+                              true, true, NULL, 0, tip);
+    return dlx_write_dep(clone, "core/a.c", body) &&
+           dlx_commit_tree(clone, "the row edits a, unsealed", c1) &&
+           rs_core_commit(clone, "core/b.c", "int b = 4;\n",
+                          "the row's ritual on b", true, true, NULL, 0, tip);
+}
+
+static bool rs_overlap_rig(const char *tag, bool unsealed_first,
+                           struct dlx_rig *rig, char tip[64], char before[64])
+{
+    char rig_tag[64], base[64], grown[64], m1[64], body[2048], top[2048];
+    const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+    (void)snprintf(rig_tag, sizeof(rig_tag), "%s_rig", tag);
+    dlx_isolate(tag);
+    return rs_long_body(body, sizeof(body), 1, 1) &&
+           rs_long_body(top, sizeof(top), 2, 1) &&
+           rs_rig(rig, rig_tag, base) &&
+           rs_core_commit(rig->clone, "core/a.c", body, "grow a", true, true,
+                          NULL, 0, grown) &&
+           dlx_git(rig->clone, push) == 0 &&
+           rs_checkout(rig->clone, "row", grown) &&
+           rs_overlap_commits(rig->clone, unsealed_first, tip) &&
+           rs_checkout(rig->clone, "mover", grown) &&
+           rs_core_commit(rig->clone, "core/a.c", top, "main edits a", true,
+                          true, NULL, 0, m1) &&
+           dlx_git(rig->clone, push) == 0 && dlx_origin_main(rig, before);
+}
+
 static bool rs_overlap_row(const char *tag, bool unsealed_first, char tip[64],
                            char *line, size_t cap, char before[64],
                            char after[64])
 {
     struct dlx_rig rig;
-    char rig_tag[64], base[64], grown[64], c1[64], m1[64], body[2048];
-    const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
-    (void)snprintf(rig_tag, sizeof(rig_tag), "%s_rig", tag);
-    dlx_isolate(tag);
-    if (!rs_rig(&rig, rig_tag, base) || !rs_long_body(body, sizeof(body), 1, 1) ||
-        !rs_core_commit(rig.clone, "core/a.c", body, "grow a", true, true,
-                        NULL, 0, grown) ||
-        dlx_git(rig.clone, push) != 0 || !rs_checkout(rig.clone, "row", grown) ||
-        !rs_long_body(body, sizeof(body), 1, 2))
-        return false;
-    if (unsealed_first
-            ? !dlx_write_dep(rig.clone, "core/a.c", body) ||
-              !dlx_commit_tree(rig.clone, "the row edits a, unsealed", c1) ||
-              !rs_core_commit(rig.clone, "core/b.c", "int b = 4;\n",
-                              "the row's ritual on b", true, true, NULL, 0, tip)
-            : !rs_core_commit(rig.clone, "core/a.c", body, "the row edits a",
-                              true, true, NULL, 0, tip))
-        return false;
-    if (!rs_checkout(rig.clone, "mover", grown) ||
-        !rs_long_body(body, sizeof(body), 2, 1) ||
-        !rs_core_commit(rig.clone, "core/a.c", body, "main edits a", true, true,
-                        NULL, 0, m1) ||
-        dlx_git(rig.clone, push) != 0 || !dlx_origin_main(&rig, before))
+    if (!rs_overlap_rig(tag, unsealed_first, &rig, tip, before))
         return false;
     setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
     setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
