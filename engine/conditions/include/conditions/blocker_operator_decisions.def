@@ -80,6 +80,19 @@ ZCL_BLOCKER_DECISION(shielded_spend_unavailable,
     "would require creating a shielded proof. Consensus sync and transparent "
     "transactions are unaffected.")
 
+/* A validation stage held because a check keeps running out of memory on this
+ * host (engine/jobs/src/stage_db_fault.c); permanent after the memory budget. */
+ZCL_BLOCKER_DECISION(*.local_out_of_memory,
+    "A person must give this node enough memory or move it. OPTION A - stop "
+    "other memory-heavy work on the host or raise the node's memory limit; the "
+    "held stage retries and clears itself on its next pass that does not run "
+    "out of memory. Cost: host capacity taken from other work. OPTION B - move "
+    "the node to a host with more memory. Cost: a node move and its downtime. "
+    "While held the node writes no verdict, marks no block invalid, scores no "
+    "peer and never escalates to a reindex, so waiting is safe, but the held "
+    "stage stays stopped at the held height (for bg_validation only background "
+    "re-verification stops; sync continues).")
+
 /* ── Projection index coverage floor (engine/services/src/index_fold_guard.c,
  * raised for address_index / txindex / op_return_index). ─────────────── */
 ZCL_BLOCKER_DECISION(*.below_snapshot_seed,
