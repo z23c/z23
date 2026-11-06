@@ -43,13 +43,6 @@ static bool aib_zero(const uint8_t root[32])
     return any == 0;
 }
 
-/* Domain-tagged SHA3-256: the domain is hashed with its trailing NUL. */
-static void aib_hash_begin(struct sha3_256_ctx *sha, const char *domain)
-{
-    sha3_256_init(sha);
-    sha3_256_write(sha, (const uint8_t *)domain, strlen(domain) + 1u);
-}
-
 /* ---- closure and env roots ------------------------------------------- */
 
 static struct zcl_result aib_action_closure(
@@ -90,7 +83,9 @@ struct zcl_result app_image_closure_root(
         return aib_action_closure(&actions[0], 0, out);
     struct sha3_256_ctx sha;
     uint8_t count_le[4];
-    aib_hash_begin(&sha, APP_IMAGE_BUILD_CLOSURE_SET_DOMAIN);
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)APP_IMAGE_BUILD_CLOSURE_SET_DOMAIN,
+                   sizeof(APP_IMAGE_BUILD_CLOSURE_SET_DOMAIN)); /* domain plus its NUL */
     zcl_write_u32_le(count_le, (uint32_t)count);
     sha3_256_write(&sha, count_le, sizeof(count_le));
     for (size_t i = 0; i < count; i++) {
@@ -203,7 +198,9 @@ static void aib_record_id(const uint8_t body[APP_IMAGE_BUILD_BODY_BYTES],
                           uint8_t out[32])
 {
     struct sha3_256_ctx sha;
-    aib_hash_begin(&sha, APP_IMAGE_BUILD_DOMAIN);
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)APP_IMAGE_BUILD_DOMAIN,
+                   sizeof(APP_IMAGE_BUILD_DOMAIN)); /* domain plus its NUL */
     sha3_256_write(&sha, body, APP_IMAGE_BUILD_BODY_BYTES);
     sha3_256_finalize(&sha, out);
 }
@@ -296,7 +293,9 @@ void app_image_build_key(const uint8_t package_root[32],
                          const uint8_t dependency_root[32], uint8_t out[32])
 {
     struct sha3_256_ctx sha;
-    aib_hash_begin(&sha, APP_IMAGE_BUILD_KEY_DOMAIN);
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)APP_IMAGE_BUILD_KEY_DOMAIN,
+                   sizeof(APP_IMAGE_BUILD_KEY_DOMAIN)); /* domain plus its NUL */
     sha3_256_write(&sha, package_root, 32);
     sha3_256_write(&sha, env_root, 32);
     sha3_256_write(&sha, dependency_root, 32);
