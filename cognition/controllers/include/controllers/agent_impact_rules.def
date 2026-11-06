@@ -3032,6 +3032,7 @@ AGENT_IMPACT_RULE("engine/services/src/build_fabric_worker_windows.c|engine/serv
  * compile, not an execution. Closing the rest needs registered tests/harness/src
  * groups driving those POSIX arms directly -- take and release the store
  * lock, acquire and drop a lease -- the way the two above now do. */
+AGENT_IMPACT_RULE("tools/command/app_playtest_session.c|tools/command/app_playtest_session.h|tests/harness/src/test_app_playtest_session.c|tests/harness/fixtures/app_playtest_stub_child.c", "app_playtest_session make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/platform/src/directory_watcher.c|platform/modules/platform/include/platform/directory_watcher.h", "directory_watcher make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/platform/src/watcher_record.c|platform/modules/platform/include/platform/watcher_record.h", "watcher_record make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/platform/src/resident_launch.c|platform/modules/platform/include/platform/resident_launch.h|platform/modules/platform/src/resident_launch_mac.c|platform/modules/platform/src/resident_launch_internal.h|tests/harness/src/test_resident_launch.c|tests/harness/src/test_resident_launch_contract.c|tests/harness/src/test_resident_confined_run.c|tests/harness/src/test_resident_result_fragments.c|tests/harness/fixtures/resident_confined_child.c|platform/modules/platform/src/positioned_file.c|platform/modules/platform/include/platform/positioned_file.h", "resident_launch resident_launch_contract resident_confined_run make_lint_gates")

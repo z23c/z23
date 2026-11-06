@@ -1873,6 +1873,8 @@ static void run_full_suite_crypto_and_wallet(int *failures)
       *failures += test_watcher_lease(); }
     { extern int test_resident_launch(void);
       *failures += test_resident_launch(); }
+    { extern int test_app_playtest_session(void);
+      *failures += test_app_playtest_session(); }
     { extern int test_resident_launch_contract(void);
       *failures += test_resident_launch_contract(); }
     { extern int test_resident_confined_run(void);

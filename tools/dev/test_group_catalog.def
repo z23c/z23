@@ -1687,6 +1687,10 @@ ZCL_TEST_GROUP(watcher_lease)
  * launch/cancel cycle that leaves neither descriptors nor children behind.
  * Windows asserts the named platform refusal. */
 ZCL_TEST_GROUP(resident_launch)
+/* Scripted v=1 playtest driver over resident_launch against a stub child:
+ * exact frames, typed timeout with a reaped process group, reply cap,
+ * duplicate ids and edited images refused before spawn. */
+ZCL_TEST_GROUP(app_playtest_session)
 ZCL_TEST_GROUP(resident_capability_image)
 /* Product acceptance contract for the resident-launch CONSUMER, driven
  * against C's landed app.invoke.package slice: installs REAL packages

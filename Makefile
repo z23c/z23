@@ -3560,7 +3560,23 @@ RESIDENT_CONTRACT_FIXTURE_BINS += $(BUILD_DIR)/fixtures/plugin_run_child$(ZCL_HO
 RESIDENT_CONTRACT_FIXTURE_BINS += $(BUILD_DIR)/fixtures/plugin_call_upper$(ZCL_HOST_EXEEXT)
 RESIDENT_CONTRACT_FIXTURE_BINS += $(PLUGIN_BUILTIN_BINS)
 RESIDENT_CONTRACT_FIXTURE_BINS += $(BUILD_DIR)/fixtures/plugin_hostcall_child$(ZCL_HOST_EXEEXT)
+RESIDENT_CONTRACT_FIXTURE_BINS += $(APP_PLAYTEST_STUB_BINS)
 endif
+
+# v=1 agent-protocol stub child for the app_playtest_session group: one
+# source, three behaviours (protocol, hang with a group helper, 13 MiB reply).
+APP_PLAYTEST_STUB_SRC = tests/harness/fixtures/app_playtest_stub_child.c
+APP_PLAYTEST_STUB_BINS = $(BUILD_DIR)/fixtures/aps_stub \
+	$(BUILD_DIR)/fixtures/aps_stub_hang $(BUILD_DIR)/fixtures/aps_stub_huge
+$(BUILD_DIR)/fixtures/aps_stub: $(APP_PLAYTEST_STUB_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) $(TEST_FAST_CFLAGS) -Iplatform/modules/platform/include -o $@ $<
+$(BUILD_DIR)/fixtures/aps_stub_hang: $(APP_PLAYTEST_STUB_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) $(TEST_FAST_CFLAGS) -DAPS_STUB_HANG -Iplatform/modules/platform/include -o $@ $<
+$(BUILD_DIR)/fixtures/aps_stub_huge: $(APP_PLAYTEST_STUB_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) $(TEST_FAST_CFLAGS) -DAPS_STUB_HUGE -Iplatform/modules/platform/include -o $@ $<
 
 $(BUILD_DIR)/fixtures/rlc_child_v1$(ZCL_HOST_EXEEXT): $(RESIDENT_CONTRACT_FIXTURE_SRC)
 	@mkdir -p $(dir $@)
