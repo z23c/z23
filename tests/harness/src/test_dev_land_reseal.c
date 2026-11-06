@@ -82,10 +82,12 @@ static bool rs_root_at(const char *dir, const char *rev, char root[80])
 static bool rs_file_at(const char *dir, const char *rev, const char *path,
                        char *out, size_t cap)
 {
+    /* Exact bytes: dlx_git_out() strips the trailing newline the log ends in. */
     char spec[400];
-    const char *show[] = { "show", spec, NULL };
+    const char *argv[] = { "git", "-C", dir, "cat-file", "blob", spec, NULL };
     (void)snprintf(spec, sizeof(spec), "%s:%s", rev, path);
-    return dlx_git_out(dir, show, out, cap) == 0;
+    return zcl_spawn_capture(argv, out, cap, 60000) == 0 &&
+           strlen(out) + 1 < cap;
 }
 
 /* One unseal-ritual entry, appended verbatim to core/UNSEAL.md. */
@@ -162,10 +164,16 @@ static bool rs_checkout(const char *clone, const char *branch,
     return dlx_git(clone, co) == 0;
 }
 
-/* Step until the queue is empty or `beats` run out. */
-static bool rs_drain(int beats)
+static bool rs_outcome_line(const char *tip, char *line, size_t cap);
+
+/* Step until `tip` has a terminal outcome and nothing is queued, or `beats`
+ * run out. dlx_queue_empty() does not count the in-flight row. */
+static bool rs_drain(const char *tip, int beats)
 {
-    for (int i = 0; i < beats && !dlx_queue_empty(); i++) {
+    static char line[16384];
+    for (int i = 0; i < beats; i++) {
+        if (dlx_queue_empty() && rs_outcome_line(tip, line, sizeof(line)))
+            return true;
         struct dlx_call c;
         dlx_begin(&c, "step");
         bool ok = dlx_run(&c) && dlx_ok(&c);
@@ -173,7 +181,7 @@ static bool rs_drain(int beats)
         if (!ok)
             return false;
     }
-    return dlx_queue_empty();
+    return dlx_queue_empty() && rs_outcome_line(tip, line, sizeof(line));
 }
 
 /* The last outcomes.jsonl line naming `tip`. */
@@ -258,7 +266,7 @@ static int rs_case_two_rituals(void)
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
         ASSERT(dlx_qp_submit(&rig, a, 1));
         ASSERT(dlx_qp_submit(&rig, b2, 2));
-        ASSERT(rs_drain(12));
+        ASSERT(rs_drain(b2, 12));
         ASSERT(rs_outcome_line(a, line, sizeof(line)));
         ASSERT(rs_has(line, "state", "landed"));
         ASSERT(strstr(line, "seal_new_root") == NULL);
@@ -331,7 +339,7 @@ static int rs_case_precheck_defers(void)
         ASSERT(dlx_int(&c, "queued_conflicts") == 0);
         dlx_end(&c);
         setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
-        ASSERT(rs_drain(12));
+        ASSERT(rs_drain(b, 12));
         char line[16384], root[80];
         ASSERT(rs_outcome_line(b, line, sizeof(line)));
         ASSERT(rs_has(line, "state", "landed"));
@@ -368,7 +376,7 @@ static bool rs_single_row(const char *tag, const char *file, bool ritual,
         return false;
     setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
     setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-    return dlx_qp_submit(&rig, tip, 1) && rs_drain(6) &&
+    return dlx_qp_submit(&rig, tip, 1) && rs_drain(tip, 6) &&
            rs_outcome_line(tip, line, cap) && dlx_origin_main(&rig, after);
 }
 
