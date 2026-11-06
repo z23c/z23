@@ -11,6 +11,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* The most utxos rows one import looks at. An import that reaches it says so. */
+#define WALLET_IMPORT_ROW_CAP 512
+
 struct coins_view_cache;
 
 enum wallet_row_verdict {

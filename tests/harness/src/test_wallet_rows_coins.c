@@ -17,6 +17,7 @@
 #include "coins/coins_view.h"
 #include "config/boot_internal.h"
 #include "controllers/wallet_controller.h"
+#include "controllers/wallet_row_coins.h"
 #include "controllers/wallet_helpers.h"
 #include "json/json.h"
 #include "keys/key.h"
@@ -51,7 +52,7 @@ enum wrc_kind {
 
 struct wrc_row {
     enum wrc_kind kind;
-    uint8_t tag;          /* distinguishes the txid */
+    uint16_t tag;         /* distinguishes the txid */
     int row_height;       /* height the projection row claims */
     int coin_height;      /* height of the coin */
     bool coinbase;        /* coin is a coinbase */
@@ -103,10 +104,11 @@ static bool wrc_make_keys(struct wrc_fx *fx)
     return true;
 }
 
-static void wrc_txid(uint8_t tag, uint8_t out[32])
+static void wrc_txid(uint16_t tag, uint8_t out[32])
 {
-    memset(out, 0x30 + tag, 32);
-    out[0] = tag;
+    memset(out, 0x30 + (tag & 0x3f), 32);
+    out[0] = (uint8_t)(tag & 0xff);
+    out[1] = (uint8_t)(tag >> 8);
 }
 
 static void wrc_ensure_warmup_finished(void)
@@ -231,7 +233,7 @@ static int wrc_wallet_rows(struct wrc_fx *fx)
 }
 
 /* The wallet_utxos row for a tag: value, height, coinbase. */
-static bool wrc_wallet_row(struct wrc_fx *fx, uint8_t tag, int64_t *value,
+static bool wrc_wallet_row(struct wrc_fx *fx, uint16_t tag, int64_t *value,
                            int *height, bool *coinbase)
 {
     uint8_t txid[32];
@@ -459,6 +461,64 @@ static int wrc_importaddress_without_coins_view_withholds(void)
     return failures;
 }
 
+/* ---- the per-import row cap ---- */
+
+/* One more agreeing row than an import looks at. */
+static bool wrc_seed_over_cap(struct wrc_fx *fx)
+{
+    for (int i = 0; i <= WALLET_IMPORT_ROW_CAP; i++) {
+        struct wrc_row r = {WRC_AGREE, (uint16_t)(i + 1), 7, 7, false};
+        if (!wrc_seed_utxos(fx, &r, 1))
+            return false;
+    }
+    return true;
+}
+
+static bool wrc_cap_text(const char *s)
+{
+    char want[64];
+    snprintf(want, sizeof(want), "first %d rows", WALLET_IMPORT_ROW_CAP);
+    return s && strstr(s, want) && strstr(s, "rescanwallet");
+}
+
+static int wrc_importprivkey_says_when_capped(void)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST("wallet_rows_coins: importprivkey says when it stopped at the row cap") {
+        ASSERT(wrc_open(&fx, true));
+        ASSERT(wrc_seed_over_cap(&fx));
+        struct json_value result;
+        ASSERT(wrc_import(&fx, &result));
+        ASSERT(wrc_wallet_rows(&fx) == WALLET_IMPORT_ROW_CAP);
+        ASSERT(wrc_cap_text(json_get_str(&result)));
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int wrc_importaddress_says_when_capped(void)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST("wallet_rows_coins: importaddress says when it stopped at the row cap") {
+        ASSERT(wrc_open(&fx, true));
+        ASSERT(wrc_seed_over_cap(&fx));
+        struct json_value result;
+        ASSERT(wrc_import_address(&fx, &result));
+        ASSERT(json_get_int(json_get(&result, "utxos")) ==
+               WALLET_IMPORT_ROW_CAP);
+        ASSERT(json_get_bool(json_get(&result, "rows_capped")));
+        ASSERT(wrc_cap_text(json_get_str(json_get(&result, "warning"))));
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ---- listunspent ---- */
 
 static bool wrc_seed_wallet_row(struct wrc_fx *fx, const struct wrc_row *r,
@@ -505,7 +565,7 @@ static bool wrc_listunspent(struct wrc_fx *fx, struct json_value *result)
 }
 
 /* Was the row with this tag listed, and with how many confirmations? */
-static bool wrc_listed(const struct json_value *result, uint8_t tag,
+static bool wrc_listed(const struct json_value *result, uint16_t tag,
                        int64_t *confs)
 {
     uint8_t raw[32];
@@ -758,6 +818,8 @@ int wrc_run_tests(void)
     failures += wrc_import_without_coins_view_withholds();
     failures += wrc_importaddress_skips_disagreeing_rows();
     failures += wrc_importaddress_without_coins_view_withholds();
+    failures += wrc_importprivkey_says_when_capped();
+    failures += wrc_importaddress_says_when_capped();
     failures += wrc_listunspent_agreeing_row_same();
     failures += wrc_listunspent_coinbase_height_from_coin();
     failures += wrc_listunspent_disagreeing_rows_skipped();
