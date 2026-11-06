@@ -6,6 +6,7 @@
 
 #include "event/event.h"
 #include "models/database.h"
+#include "services/wallet_recovery_service.h"
 #include "support/cleanse.h"
 #include "util/ar_step_readonly.h"
 #include "util/blocker.h"
@@ -267,10 +268,26 @@ void boot_wallet_show_recovery_phrase_once(const char *phrase)
     fflush(stdout);
 }
 
+/* A brand-new wallet drawn just now: nothing already mined can pay it. Only
+ * when the keys are on disk (ws open), so a birthday never names a wallet that
+ * is not there. A failure leaves the wallet scanning from 0, as before. */
+static void boot_wallet_record_fresh_birthday(struct wallet_sqlite *ws,
+                                              struct node_db *ndb,
+                                              const char *datadir)
+{
+    int64_t birthday = 0;
+    if (!ws || !ws->open || !ndb || !ndb->open)
+        return;
+    if (wallet_recovery_record_fresh_birthday(datadir, ndb, &birthday))
+        printf("Wallet birthday recorded at height %lld.\n",
+               (long long)birthday);
+}
+
 bool boot_wallet_create_new(struct wallet *w, struct wallet_sqlite *ws,
                             struct node_db *ndb,
                             enum wallet_boot_wallet_action action,
-                            enum zcl_operator_lane lane)
+                            enum zcl_operator_lane lane,
+                            const char *datadir)
 {
     GUARD_NOT_NULL(w, "wallet_phrase", "wallet");
 
@@ -370,6 +387,7 @@ bool boot_wallet_create_new(struct wallet *w, struct wallet_sqlite *ws,
         phrase_ok = false;
     }
     wallet_key_pool_mark_persisted_through(w, pool_generation);
+    boot_wallet_record_fresh_birthday(ws, ndb, datadir);
     if (ndb && ndb->open)
         node_db_wal_checkpoint(ndb);
 

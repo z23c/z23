@@ -131,11 +131,20 @@ boot_wallet_phrase_plan_for(bool stdout_is_terminal,
  * returns, so a caller that exits cannot leave boot_status.json reading
  * phase=loading with no reason in it. The operator's move is to run the
  * node once from a terminal, or to set ZCL_WALLET_PASSPHRASE, or to waive
- * the backup on purpose, or to declare the lane. */
+ * the backup on purpose, or to declare the lane.
+ *
+ * Once the keys are durable, a wallet persisted in `ndb` records a birthday at
+ * the height `datadir`'s node.db and the shipped anchor prove
+ * (wallet_recovery_record_fresh_birthday): keys drawn now cannot have been
+ * paid earlier, so the first scan need not read from block 0. With no known
+ * height, or a failed write, none is recorded and the wallet scans from 0
+ * (the write failure is logged, not fatal). This is the only boot path that
+ * records one; a loaded, restored or imported wallet never reaches it. */
 bool boot_wallet_create_new(struct wallet *w, struct wallet_sqlite *ws,
                             struct node_db *ndb,
                             enum wallet_boot_wallet_action action,
-                            enum zcl_operator_lane lane);
+                            enum zcl_operator_lane lane,
+                            const char *datadir);
 
 /* Name the refusal above. Raises the typed blocker
  * `wallet_phrase_no_terminal` in the in-process registry AND writes it into

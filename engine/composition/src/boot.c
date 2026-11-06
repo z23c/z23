@@ -1531,7 +1531,8 @@ static void boot_wallet_mint_first_keypool(struct app_context *ctx)
             printf("Wallet: NO-SPEND mode (0 keys) — syncing.\n");
         } else if (!boot_wallet_create_new(&g_wallet, &g_wallet_sqlite,
                                            &g_node_db, act,
-                                           ctx->operator_lane)) {
+                                           ctx->operator_lane,
+                                           ctx->datadir)) {
             exit(1);   /* refusal already NAMED its blocker in the beacon */
         }
     }

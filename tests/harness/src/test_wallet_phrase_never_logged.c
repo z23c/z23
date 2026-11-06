@@ -187,7 +187,7 @@ static bool wpl_run_create_with_captured_stdio(
 {
     bool began = wpl_capture_begin(cap, dir, tag);
     if (began)
-        *created = boot_wallet_create_new(w, ws, ndb, act, lane);
+        *created = boot_wallet_create_new(w, ws, ndb, act, lane, dir);
     wpl_capture_end(cap);
     return began;
 }
@@ -650,7 +650,7 @@ static int t_declared_lane_creates_without_a_phrase(const char *dir)
     if (began)
         created = boot_wallet_create_new(w, &ws, &ndb,
                                          WALLET_BOOT_CREATE_PLAINTEXT,
-                                         ZCL_OPERATOR_LANE_DEV);
+                                         ZCL_OPERATOR_LANE_DEV, sub);
     wpl_capture_end(&cap);
     WPL_CHECK("capture harness installed for the declared-lane creation",
               began);

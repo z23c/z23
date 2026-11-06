@@ -2065,6 +2065,8 @@ static void run_full_suite_crypto_and_wallet(int *failures)
       *failures += test_offline_datadir_query(); }
     { extern int test_read_leaf_no_datadir_write(void);
       *failures += test_read_leaf_no_datadir_write(); }
+    { extern int test_wallet_boot_birthday(void);
+      *failures += test_wallet_boot_birthday(); }
     { extern int test_wallet_phrase_never_logged(void);
       *failures += test_wallet_phrase_never_logged(); }
     { extern int test_wallet_recovery_safety(void);

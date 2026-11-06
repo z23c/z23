@@ -721,6 +721,41 @@ static void wrc_record_birthday(const struct wallet_recovery_request *req,
         memcpy(out->birthday_hash, f.hash, sizeof(f.hash));
 }
 
+bool wallet_recovery_record_fresh_birthday(const char *datadir,
+                                           struct node_db *ndb,
+                                           int64_t *birthday_out)
+{
+    struct wrc_floor f;
+    int64_t have = 0;
+    uint8_t have_hash[32];
+    if (birthday_out)
+        *birthday_out = 0;
+    if (!ndb || !ndb->open) {
+        LOG_WARN(WRC_TAG, "fresh birthday not recorded: node.db is not open");
+        return false;
+    }
+    /* Written once, with the wallet: never replace an existing birthday. */
+    if (db_wallet_birthday_get(ndb, &have, have_hash))
+        return false;
+    wrc_birthday_floor(datadir ? datadir : "", ndb, &f);
+    /* Keys drawn by this running release postdate its shipped anchor, so the
+     * anchor is a floor too, whichever of the two is higher. */
+    struct wrc_floor release;
+    wrc_release_floor(&release);
+    wrc_floor_offer(&f, release.height, release.hash);
+    if (f.height <= 0 || f.height > INT_MAX - WALLET_BIRTHDAY_MARGIN)
+        return false;
+    int64_t birthday = (int64_t)f.height + WALLET_BIRTHDAY_MARGIN;
+    if (!db_wallet_birthday_set(ndb, birthday, f.hash)) {
+        LOG_WARN(WRC_TAG, "fresh birthday %lld could not be stored",
+                 (long long)birthday);
+        return false;
+    }
+    if (birthday_out)
+        *birthday_out = birthday;
+    return true;
+}
+
 /* True when the caller's birthday names a block this datadir holds: the block
  * WALLET_BIRTHDAY_MARGIN below the height must exist, connected, with the
  * given hash. This is the test wallet_birthday_check applies to the active

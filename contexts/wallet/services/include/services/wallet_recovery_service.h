@@ -254,4 +254,19 @@ struct zcl_result wallet_recovery_status(const char *datadir,
                                          struct node_db *ndb,
                                          struct wallet_recovery_report *out);
 
+
+/* Boot's brand-new wallet only (boot_wallet_create_new, after its keys are
+ * flushed): store a birthday at the height this datadir proves, so the first
+ * scan has no earlier block to read. Keys drawn now cannot have been paid in a
+ * block that already exists. The floor is the highest of the connected tip,
+ * the best header and the shipped anchor, each less the margin, as in
+ * wallet_recovery_run's record_birthday. Never replaces a stored birthday.
+ * Returns false and stores nothing when no floor above genesis is known, when
+ * a birthday is already stored, or when the write fails; *birthday_out (if
+ * non-NULL) is the stored birthday or 0. Never call it for a restored,
+ * imported or loaded wallet. */
+bool wallet_recovery_record_fresh_birthday(const char *datadir,
+                                           struct node_db *ndb,
+                                           int64_t *birthday_out);
+
 #endif /* ZCL_SERVICES_WALLET_RECOVERY_SERVICE_H */
