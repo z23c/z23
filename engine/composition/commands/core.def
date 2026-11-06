@@ -442,6 +442,20 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_BRANCH("core.consensus.bundle", "core.consensus",
+                   "Offline consensus bundle inspection", ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.consensus.bundle.validate", "core.consensus.bundle", "",
+    "Validate a standalone consensus bundle",
+    "Fully validates one read-only artifact and reports its manifest and whole-file digest. "
+    "This does not establish selected-chain binding, publication authority, or spend readiness.", 8192,
+    "consensus,bundle,validate,offline",
+    "zcl.bundle_validate.input.v1", "zcl.bundle_validate.v1", "artifact_file", "artifact_file",
+    "z23 core consensus bundle validate --input='{\"artifact_file\":\"/absolute/bundle.sqlite\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_OFFLINE_COPY, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_HIGH, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_consensus_bundle_validate)
 ZCL_COMMAND_BRANCH("core.consensus.utxo", "core.consensus",
                    "UTXO set commitment and audit", ZCL_COMMAND_LAYER_CORE)
 ZCL_COMMAND_READY_READ(

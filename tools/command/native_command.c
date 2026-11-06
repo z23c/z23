@@ -5032,7 +5032,8 @@ static bool nc_main_train_input(struct nc_main_state *st, int *rc)
  * still enforces the contract and any smaller caller-requested budget. */
 static bool nc_compare_leaf(const struct zcl_command_spec *spec)
 {
-    return spec && strcmp(spec->path, "core.consensus.utxo.compare.offline") == 0;
+    return spec && (strcmp(spec->path, "core.consensus.utxo.compare.offline") == 0 ||
+        strcmp(spec->path, "core.consensus.bundle.validate") == 0);
 }
 
 /* Read only the built-in catalog. Preserve ordinary preload-before-resolve
@@ -5089,8 +5090,8 @@ static bool nc_compare_end(struct nc_main_state *st,
         if (!cleaned || !restored || cancelled) {
             memset(out, 0, capacity); json_free(&st->input);
             nc_print_error(st->spec->path,
-                !cleaned ? "COMPARISON_CLEANUP_FAILED" :
-                restored ? "COMPARISON_CANCELLED" : "CANCELLATION_RESTORE_FAILED",
+                !cleaned ? (strcmp(st->spec->path, "core.consensus.bundle.validate") == 0 ? "VALIDATION_CLEANUP_FAILED" : "COMPARISON_CLEANUP_FAILED") :
+                restored ? (strcmp(st->spec->path, "core.consensus.bundle.validate") == 0 ? "VALIDATION_CANCELLED" : "COMPARISON_CANCELLED") : "CANCELLATION_RESTORE_FAILED",
                 "cleanup", "completed output withheld", "", "", "", "");
             g_native_input_from_stdin = false;
             *rc = ZCL_COMMAND_EXIT_INTERNAL; return false;
@@ -5294,7 +5295,7 @@ static int nc_main_standalone_preflight(const char *root_word,
     const char *preload = getenv("ZCL_HOTSWAP_PRELOAD");
     if (preload && preload[0] && nc_compare_preflight(root_word, args, nargs)) {
         nc_print_error(root_word, "COMPARISON_PRELOAD_REFUSED", "startup",
-            "offline comparison requires the built-in standalone reader", "", "", "", "");
+            "offline copy inspection requires the built-in standalone reader", "", "", "", "");
         return ZCL_COMMAND_EXIT_BLOCKED;
     }
     return NC_MAIN_CONTINUE;

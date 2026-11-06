@@ -238,3 +238,73 @@ void zcl_native_handle_core_consensus_utxo_compare_offline(
     if (!uco_report(&reply->data, &result)) { uco_fail(reply, "COMPARISON_ENCODING_FAILED"); return; }
     reply->status = ZCL_COMMAND_STATUS_PASSED; reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }
+
+#define UBV_PATH "core.consensus.bundle.validate"
+static void ubv_fail(struct zcl_command_reply *reply, const char *code, const char *message)
+{
+    json_free(&reply->data); json_set_object(&reply->data);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_BLOCKED,
+        code, "validate", false, false, message, UBV_PATH);
+}
+static bool ubv_report(struct json_value *out, const struct consensus_state_bundle_manifest *m,
+                       const uint8_t whole[32])
+{
+    return json_push_kv_str(out, "validation_scope", "artifact_semantics") &&
+        json_push_kv_int(out, "height", m->height) &&
+        uco_hash(out, "block_hash", m->block_hash) &&
+        uco_hash(out, "artifact_digest", m->artifact_digest) &&
+        uco_hash(out, "whole_file_sha3_256", whole) &&
+        uco_hash(out, "utxo_root", m->utxo_root) &&
+        uco_u64(out, "utxo_count", m->utxo_count) &&
+        uco_u64(out, "anchor_count", m->anchor_count) &&
+        uco_u64(out, "nullifier_count", m->nullifier_count);
+}
+static const char *ubv_input(const struct zcl_command_request *request)
+{
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), UBV_PATH, NULL);
+    char why[256];
+    if (!request || !request->input || !spec ||
+        !zcl_command_registry_input_validate(spec, request->input, why, sizeof why)) return NULL;
+    const char *path = uco_string(request->input, "artifact_file");
+    return uco_path(path) && path[0] == '/' ? path : NULL;
+}
+static struct zcl_command_cleanup_slot *ubv_reserve(const struct zcl_command_request *request)
+{
+    if (!request->context || !request->context->invocation || !request->context->invocation->reserve_cleanup)
+        return NULL;
+    struct zcl_command_cleanup_slot *slot = NULL;
+    const struct zcl_command_invocation_runtime *runtime = request->context->invocation;
+    if (!runtime->reserve_cleanup(runtime->cleanup_context, ZCL_COMMAND_CLEANUP_SLOTS_MAX, &slot) ||
+        !slot || slot->owner || slot->release_failed || slot[1].owner || slot[1].release_failed) return NULL;
+    slot->release = uco_artifact_release;
+    return slot;
+}
+static bool ubv_evidence(const char *path, struct zcl_command_cleanup_slot *slot,
+                         struct consensus_state_bundle_manifest *manifest,
+                         uint8_t whole[32], struct zcl_result *result)
+{
+    struct consensus_state_artifact_evidence *artifact = NULL;
+    *result = consensus_state_artifact_evidence_open(path, -1, &artifact);
+    slot->owner = artifact;
+    return result->ok && artifact && consensus_state_artifact_evidence_manifest_copy(artifact, manifest) &&
+        consensus_state_artifact_evidence_file_digest(artifact, whole);
+}
+void zcl_native_handle_core_consensus_bundle_validate(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!reply) return;
+    const char *path = ubv_input(request);
+    if (!path) { ubv_fail(reply, "INVALID_INPUT", "an absolute artifact_file is required"); return; }
+    struct zcl_command_cleanup_slot *slot = ubv_reserve(request);
+    if (!slot) { ubv_fail(reply, "CLEANUP_UNAVAILABLE", "cannot reserve checked cleanup"); return; }
+    struct consensus_state_bundle_manifest manifest = {0}; uint8_t whole[32] = {0};
+    struct zcl_result result = {0};
+    bool valid = ubv_evidence(path, slot, &manifest, whole, &result);
+    bool closed = slot->release(&slot->owner);
+    if (!closed || slot->owner) slot->release_failed = true;
+    if (slot->release_failed) { ubv_fail(reply, "CLEANUP_FAILED", "artifact cleanup failed"); return; }
+    if (!valid) { ubv_fail(reply, "ARTIFACT_INVALID", result.ok ? "artifact evidence changed" : result.message); return; }
+    json_free(&reply->data); json_set_object(&reply->data);
+    if (!ubv_report(&reply->data, &manifest, whole)) { ubv_fail(reply, "ENCODING_FAILED", "cannot encode validated artifact"); return; }
+    reply->status = ZCL_COMMAND_STATUS_PASSED; reply->exit_code = ZCL_COMMAND_EXIT_OK;
+}

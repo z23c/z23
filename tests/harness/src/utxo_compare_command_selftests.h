@@ -185,9 +185,116 @@ static bool ucot_both_owner_cleanup(struct json_value *input, const struct csi_f
     return observed && restored;
 }
 
+struct ubvt_runtime { struct zcl_command_cleanup_slot slots[ZCL_COMMAND_CLEANUP_SLOTS_MAX]; bool reserved; };
+static bool ubvt_reserve(void *context, unsigned count, struct zcl_command_cleanup_slot **out)
+{
+    struct ubvt_runtime *r = context;
+    if (count != ZCL_COMMAND_CLEANUP_SLOTS_MAX || r->reserved) return false;
+    r->reserved = true; *out = r->slots; return true;
+}
+static bool ubvt_case(const char *path, bool extra, const char *expected)
+{
+    struct ubvt_runtime state = {0};
+    struct zcl_command_invocation_runtime runtime = {NULL, NULL, ubvt_reserve, &state};
+    struct zcl_command_context context = {.invocation = &runtime};
+    struct json_value input = {0}; json_set_object(&input);
+    bool built = json_push_kv_str(&input, "artifact_file", path);
+    if (extra) built = built && json_push_kv_bool(&input, "skip_validation", true);
+    struct zcl_command_request request = {.context = &context, .input = &input};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.bundle_validate.v1");
+    if (built) zcl_native_handle_core_consensus_bundle_validate(&request, &reply);
+    bool ok = built && !state.slots[0].owner && !state.slots[0].release_failed;
+    if (expected) ok = ok && reply.status == ZCL_COMMAND_STATUS_FAILED &&
+        strcmp(reply.error.code, expected) == 0 && !json_get(&reply.data, "whole_file_sha3_256");
+    else ok = ok && reply.status == ZCL_COMMAND_STATUS_PASSED && state.reserved &&
+        json_get_str(json_get(&reply.data, "validation_scope")) &&
+        strcmp(json_get_str(json_get(&reply.data, "validation_scope")), "artifact_semantics") == 0 &&
+        json_get(&reply.data, "height") && json_get(&reply.data, "artifact_digest") &&
+        json_get(&reply.data, "whole_file_sha3_256");
+    zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
+static bool ubvt_busy(const char *path)
+{
+    struct ubvt_runtime state = {0};
+    struct zcl_command_invocation_runtime runtime = {NULL, NULL, ubvt_reserve, &state};
+    struct zcl_command_context context = {.invocation = &runtime};
+    struct json_value input = {0}; json_set_object(&input);
+    bool built = json_push_kv_str(&input, "artifact_file", path);
+    struct zcl_command_request request = {.context = &context, .input = &input};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.bundle_validate.v1");
+    ucot_busy_statement = NULL; ucot_busy_opens = 0;
+    int added = sqlite3_auto_extension((void (*)(void))ucot_hold_artifact_statement);
+    if (built && added == SQLITE_OK) zcl_native_handle_core_consensus_bundle_validate(&request, &reply);
+    int removed = sqlite3_cancel_auto_extension((void (*)(void))ucot_hold_artifact_statement);
+    bool ok = built && added == SQLITE_OK && removed == 1 && ucot_busy_statement &&
+        reply.status == ZCL_COMMAND_STATUS_FAILED && strcmp(reply.error.code, "CLEANUP_FAILED") == 0 &&
+        state.slots[0].owner && state.slots[0].release_failed && !json_get(&reply.data, "whole_file_sha3_256");
+    int finalized = sqlite3_finalize(ucot_busy_statement); ucot_busy_statement = NULL;
+    bool released = state.slots[0].owner && state.slots[0].release && state.slots[0].release(&state.slots[0].owner);
+    ok = ok && finalized == SQLITE_OK && released && !state.slots[0].owner && state.slots[0].release_failed;
+    zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
+static bool ubvt_malformed(const char *dir)
+{
+    char path[1024];
+    int n = snprintf(path, sizeof path, "%s/bundle-validator-malformed", dir);
+    if (n < 0 || (size_t)n >= sizeof path) return false;
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    bool wrote = fwrite("not a bundle", 1, 12, file) == 12;
+    bool closed = fclose(file) == 0;
+    bool readonly = chmod(path, 0400) == 0;
+    bool rejected = wrote && closed && readonly && ubvt_case(path, false, "ARTIFACT_INVALID");
+    bool removed = unlink(path) == 0;
+    return rejected && removed;
+}
+static bool ubvt_dispatch(const char *path, const char *directory)
+{
+    struct json_value input = {0}; json_set_object(&input);
+    bool built = json_push_kv_str(&input, "artifact_file", path);
+    char raw[4096], argument[4128]; size_t n = json_write(&input, raw, sizeof raw);
+    int len = n ? snprintf(argument, sizeof argument, "--input=%s", raw) : -1;
+    json_free(&input);
+    if (!built || !n || len < 0 || (size_t)len >= sizeof argument) return false;
+    int output[2], diagnostic[2]; if (!ucod_pipes(output, diagnostic)) return false;
+    pid_t child = fork();
+    if (child == 0) {
+        ucod_child_redirect(output, diagnostic);
+        struct ucod_runtime state = {.mode = UCOD_OK};
+        const struct zcl_native_standalone_runtime runtime = {
+            .begin = ucod_begin, .end = ucod_end, .cancelled = ucod_cancel,
+            .reserve_cleanup = ucod_reserve, .cleanup = ucod_cleanup, .context = &state
+        };
+        const char *args[] = {"consensus", "bundle", "validate", "--format=json", argument};
+        if (!ucod_direct_environment()) _exit(96);
+        int status = zcl_native_command_main_standalone("core", args, 5, directory, 1, CHAIN_MAIN, true, &runtime);
+        if (state.begins != 1 || state.cleanups != 1 || state.ends != 1 || state.bad_order ||
+            state.signals.slots[0].owner || state.phase != 3) _exit(91);
+        if (fflush(stdout) != 0 || fflush(stderr) != 0) _exit(97);
+        _exit(status);
+    }
+    struct ucod_capture capture = {0};
+    bool captured = ucod_parent_capture(child, output, diagnostic, &capture);
+    struct json_value envelope = {0};
+    bool parsed = captured && json_read(&envelope, capture.out.text, capture.out.used);
+    const struct json_value *data = parsed ? json_get(&envelope, "data") : NULL;
+    bool ok = parsed && WEXITSTATUS(capture.status) == ZCL_COMMAND_EXIT_OK &&
+        ucod_envelope(&envelope, "core.consensus.bundle.validate", true) && data &&
+        ucod_string_is(data, "validation_scope", "artifact_semantics") &&
+        json_get(data, "whole_file_sha3_256");
+    if (!ok) fprintf(stderr, "validator dispatch: captured=%d parsed=%d status=%d stdout=%.2048s stderr=%.2048s\n", captured, parsed, capture.status, capture.out.text, capture.err.text);
+    json_free(&envelope); return ok;
+}
 static int csi_compare_command_cases(const char *dir, const struct csi_fixture *bundle)
 {
     int failures = csi_compare_runtime_cases();
+    CSI_CHECK("bundle validator standalone dispatcher receives cleanup scope", ubvt_dispatch(bundle->path, dir));
+    CSI_CHECK("bundle validator rejects malformed file", ubvt_malformed(dir));
+    CSI_CHECK("bundle validator withholds result on busy cleanup", ubvt_busy(bundle->path));
+    CSI_CHECK("bundle validator accepts fixture with checked cleanup", ubvt_case(bundle->path, false, NULL));
+    CSI_CHECK("bundle validator refuses missing file", ubvt_case("/nonexistent/z23-bundle.sqlite", false, "ARTIFACT_INVALID"));
+    CSI_CHECK("bundle validator refuses unknown bypass", ubvt_case(bundle->path, true, "INVALID_INPUT"));
+    CSI_CHECK("bundle validator refuses relative path", ubvt_case("bundle.sqlite", false, "INVALID_INPUT"));
     struct ucf_owners owners = {0}; struct ucf_manifest manifest = {0};
     struct json_value input = {0}; char path[1024] = {0};
     enum utxo_mirror_byte_order order = UTXO_MIRROR_LITTLE_ENDIAN;
