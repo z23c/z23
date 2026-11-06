@@ -43,9 +43,11 @@ static_assert(MAX_SOLUTION_SIZE <= 0xffff,
 void block_header_get_hash(const struct block_header *h, struct uint256 *out)
 {
     unsigned char buf[BLOCK_HEADER_MAX_SERIALIZED];
-    struct byte_stream s;
-    stream_init_from_data(&s, buf, sizeof(buf));
-    s.size = 0; /* an empty, fixed-capacity write buffer */
+    /* An empty, fixed-capacity write buffer that does not own buf. */
+    struct byte_stream s = {
+        .data = buf, .size = 0, .capacity = sizeof(buf), .read_pos = 0,
+        .error = false, .owns_data = false,
+    };
     if (h->nSolutionSize > MAX_SOLUTION_SIZE ||
         !block_header_serialize(h, &s)) {
         LOG_ERROR("block", "header solution size %zu exceeds %d; not hashed",
