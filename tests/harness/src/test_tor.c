@@ -1674,6 +1674,12 @@ static const char *stop_handoff_gate_case(bool race_stop)
         platform_sleep_ms(100); /* real-clock: Tor ends on its own thread; the bound only catches a hang */
     if (!why && !race_stop && tor_integration_is_enabled())
         why = "Tor did not end after the gate closed";
+    /* The run still holds its socket, shut down, with Tor gone: a late command
+     * must fail plainly and must not report the network enabled. */
+    tor_integration_enable_reset_for_test();
+    if (!why && !race_stop && tor_integration_enable_network_for_test())
+        why = "a command succeeded after Tor ended";
+    tor_integration_enable_reset_for_test();
     tor_integration_stop();
     if (!why)
         why = stop_handoff_check_ended(tmpdir, true);
