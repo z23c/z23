@@ -785,6 +785,17 @@ static bool mx_wait_zombie(pid_t pid)
     return w == 0;
 }
 
+/* The forked child: exit 3, die on SIGKILL, or idle forever. */
+[[noreturn]] static void mx_child_body(enum mx_exit_mode mode)
+{
+    if (mode == MX_EXIT3)
+        _exit(3);
+    if (mode == MX_KILL)
+        (void)kill(getpid(), SIGKILL);
+    for (;;)
+        pause();
+}
+
 static bool mx_stdout_closed_case(enum mx_exit_mode mode, long long mem_max,
                                   const char *want_err, bool want_reaped)
 {
@@ -797,12 +808,7 @@ static bool mx_stdout_closed_case(enum mx_exit_mode mode, long long mem_max,
     if (pid == 0) {
         close(p[0]);
         close(p[1]);
-        if (mode == MX_EXIT3)
-            _exit(3);
-        if (mode == MX_KILL)
-            (void)kill(getpid(), SIGKILL);
-        for (;;)
-            pause();
+        mx_child_body(mode);
     }
     close(p[1]);
     if (mode != MX_IDLE && !mx_wait_zombie(pid))
