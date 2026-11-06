@@ -31,7 +31,9 @@
  *   package_root <64 hex>
  *   parent_release_root <64 hex | none>
  *   confirmed owner
- * The adopt check (zcl_package_copy_adopted) reads it through
+ * copy_root is the copy's fork commit (zcl_package_copy_open's fork_version,
+ * stable across later edits) and release_id its parent_release. The adopt
+ * check (zcl_package_copy_adopted) reads it through
  * zcl_package_receive_trust_read. */
 
 #ifndef ZCL_NATIVE_ZCODE_PACKAGE_BUNDLE_H

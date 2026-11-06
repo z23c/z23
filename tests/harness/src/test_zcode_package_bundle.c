@@ -410,17 +410,24 @@ static bool zpb_lineage_names(const struct zpb_world *w)
     return ok;
 }
 
-static bool zpb_copy_names_release(const struct zpb_world *w)
+/* The copy's fork record names the shared release, and its fork commit is the
+ * copy_root the trust record is keyed by: the adopt check reads both from
+ * zcl_package_copy_open (fork_version, parent_release) after any later edit. */
+static bool zpb_copy_names_release(const struct zpb_world *w,
+                                   const char *copy_root_hex)
 {
     struct zcl_package_copy copy;
     struct zcl_command_reply r;
-    char hex[65];
+    char hex[65], fork[65];
     zcl_command_reply_init(&r, "zcl.test.zcode_package_bundle.v1");
     bool ok = zcl_package_copy_open(w->bob_copy, &copy, &r,
                                     "zcode.package.bundle.receive");
-    if (ok)
+    if (ok) {
         zcl_hex_encode(copy.parent_release, 32, hex);
-    ok = ok && strcmp(hex, w->shared_release) == 0;
+        zcl_hex_encode(copy.fork_version, 32, fork);
+    }
+    ok = ok && strcmp(hex, w->shared_release) == 0 &&
+         strcmp(fork, copy_root_hex) == 0;
     zcl_package_copy_close(&copy);
     zcl_command_reply_free(&r);
     return ok;
@@ -495,7 +502,7 @@ static int zpb_bob_receives(const struct zpb_world *w)
         ASSERT(strcmp(zpb_get(&l, "parent_release_root"), w->origin_release) ==
                0);
         zpb_close(&l);
-        ASSERT(zpb_copy_names_release(w));
+        ASSERT(zpb_copy_names_release(w, copy_root));
         ASSERT(zpb_lineage_names(w));
         ASSERT(zpb_trust_recorded(w, copy_root));
         PASS();
