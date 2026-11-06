@@ -565,7 +565,8 @@ on what you already have, so read the first line of each before picking:
    `zclassicd` datadir. It refuses a datadir that already holds chain state.
 
    If no peer offers the rung bundle within the offer wait, no peer serves the
-   rung window, or the install fails its bounded budget, the node logs one
+   rung window, the install fails its bounded budget, or the node has held
+   header sync across 8 starts (time switched off never counts), it logs one
    line, `FlySync falls back to normal sync: <reason>`, records the fall-back
    in the datadir and restarts as an ordinary node; later starts keep normal
    sync. The window is served by peers that answer an empty-locator
