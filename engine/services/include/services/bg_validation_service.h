@@ -68,6 +68,13 @@ enum bg_validation_block_outcome {
     BG_VALIDATION_BLOCK_LOCAL_FAILURE, /* out of memory: no verdict, retry */
 };
 
+/* What the sampled re-verify loop does after one outcome. */
+enum bg_validation_reverify_next {
+    BG_VALIDATION_REVERIFY_DRAW_AGAIN, /* the height left the chain */
+    BG_VALIDATION_REVERIFY_IDLE,       /* wait, then draw another sample */
+    BG_VALIDATION_REVERIFY_STOP,       /* a re-verify failed; loop ends */
+};
+
 struct bg_validation_progress {
     _Atomic int verified_height;       /* last fully-verified block */
     _Atomic int chain_height;          /* current chain tip height */
@@ -250,6 +257,9 @@ bool bg_validation_read_body_resilient(
     struct bg_validation_service *svc, int height, const char *datadir,
     enum bg_validation_state ready_state, struct block *block,
     struct block_index **index_out);
+enum bg_validation_reverify_next bg_validation_reverify_take_outcome(
+    struct bg_validation_service *svc, int h,
+    enum bg_validation_block_outcome outcome);
 /* Runs one publish catch-up round (verify verified+1..tip with the walk's own
  * block step). True when verified reached `tip`. */
 bool bg_validation_test_catch_up_round(

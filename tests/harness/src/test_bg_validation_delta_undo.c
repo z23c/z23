@@ -48,6 +48,7 @@
 #include <stdatomic.h>
 #include <sqlite3.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
@@ -419,6 +420,48 @@ static int du_case_bg_zero_skips(struct du_fixture *fx)
         ASSERT_EQ(bg_validation_undo_from_delta_blocks() - from_delta,
                   (uint64_t)DU_BLOCKS);
         ASSERT_EQ(bg_validation_get_undo_skip_stats().blocks, 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Undo that could not be read for lack of memory must not book a script skip:
+ * skips persist and block publishing until a refold. */
+static int du_case_memory_failure_no_skip(struct du_fixture *fx)
+{
+    int failures = 0;
+    TEST("delta_undo: out of memory reading undo books no script skip") {
+        ASSERT(fx->opened);
+        /* Height 1 has no usable delta row after du_case_other_branch, so the
+         * rev record is its only undo, and reading that one runs out of memory. */
+        char path[512];
+        snprintf(path, sizeof(path), "%s/blocks", fx->dir);
+        (void)mkdir(path, 0700);
+        snprintf(path, sizeof(path), "%s/blocks/rev00000.dat", fx->dir);
+        FILE *rev = fopen(path, "wb");
+        ASSERT(rev != NULL);
+        ASSERT_EQ(fwrite("0123456789abcdef", 1, 16, rev), (size_t)16);
+        ASSERT_EQ(fclose(rev), 0);
+
+        struct block_index bi;
+        du_bg_index(&bi, &fx->c, 1);
+        bi.nStatus |= BLOCK_HAVE_UNDO;
+        bi.nUndoPos = 8;
+        bg_validation_reset_undo_skip_stats();
+        int64_t sigs = 0, proofs = 0, skips = 0;
+        uint64_t before = zcl_alloc_failure_count();
+        zcl_alloc_fault_fail_nth("bg_valid undo buf", 1);
+        bool valid = bg_validation_validate_block_proofs(
+            &fx->c.body[1], &bi, fx->dir, fx->cp, 1, 0,
+            &sigs, &proofs, &skips);
+        bool fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(fired);
+        ASSERT(!valid);
+        ASSERT(zcl_alloc_failure_count() != before);
+        ASSERT_EQ(skips, 0);
+        ASSERT_EQ(bg_validation_get_undo_skip_stats().blocks, 0);
+        remove(path);
         PASS();
     } _test_next:;
     return failures;
@@ -1139,6 +1182,7 @@ static int test_delta_undo_forward_record(const struct chain_params *cp)
     failures += du_case_bg_zero_skips(&fx);
     failures += du_case_delta_script(&fx);
     failures += du_case_other_branch(&fx);
+    failures += du_case_memory_failure_no_skip(&fx);
     failures += du_case_input_mismatch(&fx);
     failures += du_case_decode_out_of_range(&fx);
     failures += du_case_decode_empty_blob(&fx);

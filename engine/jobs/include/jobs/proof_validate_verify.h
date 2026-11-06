@@ -48,6 +48,9 @@ typedef void (*proof_verify_failure_cb)(const char *type, void *user);
 
 void proof_verify_summary_init(struct proof_verify_summary *s);
 
+/* first_failure_proof_type of a check that ran out of memory on this host. */
+#define PROOF_VERIFY_OUT_OF_MEMORY "out_of_memory"
+
 /* Verify every tx of `blk` at `height`. `verifier`/`verifier_user` is the
  * effective tx verifier (the stage passes its installed override, or NULL to
  * use the built-in real-proof verifier). When `parallel` is true the per-tx

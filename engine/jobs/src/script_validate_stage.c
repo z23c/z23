@@ -38,6 +38,7 @@
 #include "script/script.h"
 #include "storage/progress_store.h"
 #include "storage/coins_kv.h"
+#include "support/log_throttle.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -98,6 +99,7 @@ static job_result_t sv_db_fault(int rc, int height, const char *ctx)
 static _Atomic uint64_t g_verified_total = 0;
 static _Atomic uint64_t g_script_invalid_total = 0;
 static _Atomic uint64_t g_internal_error_total = 0;
+static _Atomic uint64_t g_local_failure_total = 0;
 static _Atomic uint64_t g_upstream_failed_total = 0;
 static _Atomic uint64_t g_inputs_verified_total = 0;
 static _Atomic uint64_t g_inputs_failed_total = 0;
@@ -220,6 +222,23 @@ const char *sv_find_body_availability_cause(
 /* First tick of a HOLD episode at `height`: (re)start the blocked-since
  * clock, reset the paged marker, count one internal error and publish the
  * non-terminal pending-prevout signal for the prevout_unresolved class. */
+/* Hold the cursor for a check that ran out of memory, and name the hold so the
+ * recovery ladder does not walk toward a reindex that cannot help. */
+static void sv_hold_local_failure(int height,
+                                  const struct script_verify_summary *s)
+{
+    atomic_fetch_add(&g_local_failure_total, 1);
+    blocker_note_local_memory_hold(STAGE_NAME);
+    static struct log_throttle throttle = LOG_THROTTLE_INIT;
+    uint64_t reps = 0;
+    if (log_throttle_should_emit(&throttle, 1, platform_time_wall_unix(), 60,
+                                 &reps))
+        LOG_WARN(STAGE_NAME,
+                 "[script_validate] holding height=%d, no verdict written: %s "
+                 "(%llu suppressed)", height, s->reason,
+                 (unsigned long long)reps);
+}
+
 static void sv_hold_begin_episode(int height, int64_t now,
                                   const struct script_verify_summary *s,
                                   sqlite3 *db,
@@ -397,7 +416,9 @@ static bool dry_run_block_impl(
     out->first_failure_serror = summary.first_failure_serror;
 
     const char *status = "verified";
-    if (!summary.ok && summary.internal_error) {
+    if (summary.local_failure) {
+        status = "out_of_memory";
+    } else if (!summary.ok && summary.internal_error) {
         status = (summary.reason[0] != '\0' &&
                   strncmp(summary.reason, "block_decode_failed", 19) == 0)
                      ? "block_decode_failed"
@@ -716,6 +737,13 @@ static job_result_t step_validate(struct stage_step_ctx *c)
     sv_step_verify_block(blk, next_h, skip_crypto, &summary);
     sv_release_stage_block(&handle, &owned, borrowed);
 
+    /* Out of memory on this host: no verdict and no row, and not a missing
+     * prevout, so none of the backfill or budget in the hold below applies. */
+    if (summary.local_failure) {
+        sv_hold_local_failure(next_h, &summary);
+        return JOB_IDLE;
+    }
+
     /* STEP 2A: the internal_error class (prevout_unresolved / block_decode_failed)
      * is a TRANSIENT "cannot determine validity yet" — utxo_apply / the creating
      * body is still behind — NOT a permanent reject. HOLD the cursor and
@@ -833,6 +861,7 @@ void script_validate_stage_shutdown(void)
     atomic_store(&g_verified_total, (uint64_t)0);
     atomic_store(&g_script_invalid_total, (uint64_t)0);
     atomic_store(&g_internal_error_total, (uint64_t)0);
+    atomic_store(&g_local_failure_total, (uint64_t)0);
     atomic_store(&g_upstream_failed_total, (uint64_t)0);
     script_validate_contextual_counters_reset();
     atomic_store(&g_inputs_verified_total, (uint64_t)0);
@@ -880,6 +909,11 @@ int64_t script_validate_stage_step_us_ewma(void)
 uint64_t script_validate_stage_verified_total(void)
 {
     return atomic_load(&g_verified_total);
+}
+
+uint64_t script_validate_stage_local_failure_total(void)
+{
+    return atomic_load(&g_local_failure_total);
 }
 
 uint64_t script_validate_stage_script_invalid_total(void)

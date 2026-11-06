@@ -520,9 +520,16 @@ bool bg_validation_validate_block_proofs(const struct block *block,
         pindex->nHeight, &params->consensus);
     uint32_t flags = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;
 
-    if (block->num_vtx > 1)
+    if (block->num_vtx > 1) {
+        uint64_t undo_alloc_failures = zcl_alloc_failure_count();
         have_undo = read_undo_rev_or_delta(&blockundo, block, pindex,
                                            datadir, params);
+        /* Undo that could not be read for lack of memory is not missing undo:
+         * a persisted script skip would block publishing until a refold. Fail
+         * here and let the caller's allocation count make it a retry. */
+        if (!have_undo && zcl_alloc_failure_count() != undo_alloc_failures)
+            goto out;
+    }
 
     size_t alloc_size = script_batch_alloc_size(block, max_script_batch);
 

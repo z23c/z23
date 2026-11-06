@@ -597,6 +597,34 @@ static bool bg_validation_reverify_draw(struct bg_validation_service *svc,
     return false;
 }
 
+/* Books one sampled outcome and says what the sampling loop does next. Running
+ * out of memory reaches no verdict and goes to the idle like any other sample,
+ * so a host short of memory is not read and validated in a tight loop. */
+#ifndef ZCL_TESTING
+static
+#endif
+enum bg_validation_reverify_next bg_validation_reverify_take_outcome(
+    struct bg_validation_service *svc, int h,
+    enum bg_validation_block_outcome outcome)
+{
+    if (outcome == BG_VALIDATION_BLOCK_ORPHAN)
+        return BG_VALIDATION_REVERIFY_DRAW_AGAIN;
+    if (outcome == BG_VALIDATION_BLOCK_LOCAL_FAILURE) {
+        static struct log_throttle throttle = LOG_THROTTLE_INIT;
+        uint64_t reps = 0;
+        if (log_throttle_should_emit(&throttle, 1, platform_time_wall_unix(),
+                                     60, &reps))
+            LOG_WARN("bg_validation", "[bg-valid] out of memory re-verifying "
+                     "height %d; no verdict (%llu suppressed)",
+                     h, (unsigned long long)reps);
+        return BG_VALIDATION_REVERIFY_IDLE;
+    }
+    return bg_validation_record_reverify(svc, h,
+                                         outcome == BG_VALIDATION_BLOCK_VALID)
+        ? BG_VALIDATION_REVERIFY_IDLE
+        : BG_VALIDATION_REVERIFY_STOP;
+}
+
 /* Low-rate, always-on re-verification of RANDOM already-verified heights.
  * Re-runs the SAME read-only proof/script verification under the SAME
  * sched_yield/idle throttle the forward walk uses — it changes NO validity
@@ -661,11 +689,11 @@ static void bg_validation_sampled_reverify_loop(
                             ms, h, &blk, pindex, datadir, params, num_workers,
                             svc->max_script_batch, &s, &p, &k);
                     block_free(&blk);
-                    if (outcome == BG_VALIDATION_BLOCK_ORPHAN ||
-                        outcome == BG_VALIDATION_BLOCK_LOCAL_FAILURE)
+                    enum bg_validation_reverify_next next =
+                        bg_validation_reverify_take_outcome(svc, h, outcome);
+                    if (next == BG_VALIDATION_REVERIFY_DRAW_AGAIN)
                         continue;
-                    if (!bg_validation_record_reverify(
-                            svc, h, outcome == BG_VALIDATION_BLOCK_VALID)) {
+                    if (next == BG_VALIDATION_REVERIFY_STOP) {
                         /* Re-verify FAILED — blocker raised, state FAILED. */
                         atomic_store(&svc->progress.reverify_active, false);
                         return;
@@ -722,7 +750,11 @@ static enum bg_validation_height_result bg_validation_height_validate(
                      "height %d; retrying it (%llu suppressed)",
                      h, (unsigned long long)reps);
         block_free(blk);
+#ifdef ZCL_TESTING
+        g_row_backoff_sleep_fn(1000);
+#else
         platform_sleep_ms(1000);
+#endif
         return BG_VALIDATION_HEIGHT_RETRY;
     }
     if (outcome == BG_VALIDATION_BLOCK_INVALID) {

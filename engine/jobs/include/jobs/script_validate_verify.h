@@ -31,7 +31,9 @@
 
 struct script_verify_summary {
     int ok;
-    int internal_error;       /* umbrella: block_decode OR prevout_unresolved */
+    int internal_error;       /* umbrella: block_decode, prevout_unresolved or
+                               * local_failure; no verdict in any of them */
+    int local_failure;        /* a check ran out of memory on this host */
     size_t tx_count;
     size_t input_count;       /* inputs that reached verify_script */
     /* Reached-input tallies, computed in original order up to the first

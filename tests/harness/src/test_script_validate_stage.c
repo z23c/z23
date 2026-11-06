@@ -19,6 +19,7 @@
 #include "jobs/script_validate_stage.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
+#include "jobs/script_validate_verify.h"
 #include "util/blocker.h"
 #include "util/safe_alloc.h"
 #include "util/stage.h"
@@ -501,6 +502,70 @@ static int sv_case_internal_error(void)
                               sizeof(status), &vin);
         SV_CHECK("internal_error: no terminal row written at the hole",
                  !row && ok == -1);
+        sv_teardown(dir, &ms, &sc);
+    }
+    return failures;
+}
+
+/* A check that runs out of memory writes nothing and moves nothing, whether it
+ * ran on the stage's thread or on a pool worker, and the same height verifies
+ * once memory is back. */
+static int sv_case_local_failure_one(const char *tag, bool on_worker)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_sv sc;
+    SV_CHECK("local_failure: setup",
+             sv_setup(tag, 3, -1, dir, sizeof(dir), &ms, &sc) == 0);
+    script_verify_set_parallel_min_inputs_for_test(on_worker ? 0 : 1000);
+    blocker_clear("script_validate.local_out_of_memory");
+
+    zcl_alloc_fault_fail_nth("script_stack", 1);
+    int advanced = script_validate_stage_drain(100);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    SV_CHECK("local_failure: the check hit the failed allocation", fired);
+    SV_CHECK("local_failure: nothing advanced", advanced == 0);
+    SV_CHECK("local_failure: cursor held", script_validate_stage_cursor() == 0);
+    SV_CHECK("local_failure: no invalid verdict",
+             script_validate_stage_script_invalid_total() == 0);
+    SV_CHECK("local_failure: the hold is counted",
+             script_validate_stage_local_failure_total() == 1);
+    SV_CHECK("local_failure: the hold is named",
+             blocker_exists("script_validate.local_out_of_memory"));
+    SV_CHECK("local_failure: not the unresolved-prevout hold",
+             !blocker_exists("script_validate.prevout_unresolved"));
+    int ok = -1, vin = -2; char status[32];
+    bool row = log_row_at(progress_store_db(), 0, &ok, status, sizeof(status),
+                          &vin);
+    SV_CHECK("local_failure: no row written", !row && ok == -1);
+
+    SV_CHECK("local_failure: same heights verify with memory back",
+             script_validate_stage_drain(100) == 3);
+    row = log_row_at(progress_store_db(), 0, &ok, status, sizeof(status), &vin);
+    SV_CHECK("local_failure: row is a pass", row && ok == 1);
+
+    script_verify_set_parallel_min_inputs_for_test(-1);
+    blocker_clear("script_validate.local_out_of_memory");
+    sv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int sv_case_local_failure(void)
+{
+    int failures = 0;
+    failures += sv_case_local_failure_one("local_stage", false);
+    failures += sv_case_local_failure_one("local_worker", true);
+    {
+        char dir[256]; struct main_state ms; struct synth_chain_sv sc;
+        SV_CHECK("local_failure_dry_run: setup",
+                 sv_setup("local_dry", 3, -1, dir, sizeof(dir), &ms, &sc) == 0);
+        struct script_validate_dry_run_report dry;
+        zcl_alloc_fault_fail_nth("script_stack", 1);
+        bool ran = script_validate_stage_dry_run_block(&sc.bodies[1], 1, &dry);
+        zcl_alloc_fault_clear();
+        SV_CHECK("local_failure_dry_run: reports no verdict",
+                 ran && !dry.ok && dry.internal_error &&
+                 strcmp(dry.status, "out_of_memory") == 0);
         sv_teardown(dir, &ms, &sc);
     }
     return failures;
@@ -1458,6 +1523,7 @@ int test_script_validate_stage(void)
     failures += sv_case_upstream_failed();
     failures += sv_case_upstream_storage();
     failures += sv_case_internal_error();
+    failures += sv_case_local_failure();
     failures += sv_case_torn_hold_signal();
     failures += sv_case_internal_error_dry_run();
     failures += sv_case_script_invalid_dry_run();

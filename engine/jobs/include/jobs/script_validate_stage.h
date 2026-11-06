@@ -58,6 +58,8 @@ int64_t  script_validate_stage_step_us_ewma(void);
 uint64_t script_validate_stage_verified_total(void);
 uint64_t script_validate_stage_script_invalid_total(void);
 uint64_t script_validate_stage_internal_error_total(void);
+/* Steps held because a check ran out of memory on this host. */
+uint64_t script_validate_stage_local_failure_total(void);
 uint64_t script_validate_stage_upstream_failed_total(void);
 uint64_t script_validate_stage_inputs_verified_total(void);
 

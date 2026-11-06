@@ -49,6 +49,7 @@ struct worker_ctx {
     size_t start;
     size_t count;
     bool result;
+    bool local_failure; /* a check failed because it ran out of memory */
 };
 
 static void *worker_thread(void *arg)
@@ -62,9 +63,13 @@ static void *worker_thread(void *arg)
     (void)zcl_thread_qos_background();
 
     w->result = true;
+    /* The allocation-failure count is per thread, so only this worker can see
+     * its own checks run out of memory. */
+    uint64_t alloc_failures = zcl_alloc_failure_count();
     for (size_t i = 0; i < w->count; i++) {
         if (!verify_script_item(&w->items[w->start + i])) {
             w->result = false;
+            w->local_failure = zcl_alloc_failure_count() != alloc_failures;
             return NULL;
         }
     }
@@ -184,12 +189,19 @@ static bool join_workers_collect_results(struct worker_ctx *workers,
                                          int nthreads)
 {
     bool all_ok = true;
+    bool local_failure = false;
     for (int t = 0; t < nthreads; t++) {
         if (created[t])
             pthread_join(threads[t], NULL);
         if (!workers[t].result)
             all_ok = false;
+        if (workers[t].local_failure)
+            local_failure = true;
     }
+    /* Carry a worker's failure to this thread, whose count the caller reads to
+     * tell an allocation failure from a script that failed on its merits. */
+    if (local_failure)
+        zcl_alloc_note_failure();
     return all_ok;
 }
 

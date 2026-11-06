@@ -122,6 +122,11 @@ static job_result_t pv_hold_unresolved(struct stage_step_ctx *c, int height,
                                        const struct uint256 *fail_txid,
                                        const char *fail_type)
 {
+    /* Name a memory hold at once for the recovery ladder: its reindex rung comes
+     * up well inside the budget below, and cannot help. */
+    if (fail_type && strcmp(fail_type, PROOF_VERIFY_OUT_OF_MEMORY) == 0)
+        blocker_note_local_memory_hold(STAGE_NAME);
+
     int64_t now = platform_time_wall_unix();
     if (atomic_load(&g_pv_unresolved_height) != (int64_t)height) {
         atomic_store(&g_pv_unresolved_height, (int64_t)height);

@@ -10,6 +10,7 @@
  * branch the loop depends on without needing an on-disk historical chain. */
 
 #include "test/test_core.h"
+#include "../../../engine/services/src/bg_validation_internal.h"
 #include "bloom/merkle.h"
 #include "chain/chainparams.h"
 #include "consensus/upgrades.h"
@@ -1066,6 +1067,151 @@ static bool validation_fails_on_its_merits(
     return false;
 }
 
+static bool body_read_always_succeeds(
+    struct block *block, const struct block_index *index, const char *datadir);
+
+/* Both places that read a LOCAL_FAILURE outcome: without either branch the block
+ * would be booked as verified, or as a failed re-verify. */
+static int test_bg_validation_memory_failure_consumers(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: the sampler books no verdict for out of memory") {
+        struct bg_validation_service svc;
+        struct main_state ms;
+        main_state_init(&ms);
+        walk_svc_init(&svc, &ms);
+        blocker_clear("bg_validation.reverify_failed");
+
+        ASSERT(bg_validation_reverify_take_outcome(
+                   &svc, 5, BG_VALIDATION_BLOCK_LOCAL_FAILURE) ==
+               BG_VALIDATION_REVERIFY_IDLE);
+        ASSERT(!blocker_exists("bg_validation.reverify_failed"));
+        ASSERT_EQ(atomic_load(&svc.progress.reverify_passes), (uint64_t)0);
+        ASSERT(bg_validation_reverify_take_outcome(
+                   &svc, 5, BG_VALIDATION_BLOCK_ORPHAN) ==
+               BG_VALIDATION_REVERIFY_DRAW_AGAIN);
+        ASSERT(bg_validation_reverify_take_outcome(
+                   &svc, 5, BG_VALIDATION_BLOCK_VALID) ==
+               BG_VALIDATION_REVERIFY_IDLE);
+        ASSERT_EQ(atomic_load(&svc.progress.reverify_passes), (uint64_t)1);
+        ASSERT(bg_validation_reverify_take_outcome(
+                   &svc, 5, BG_VALIDATION_BLOCK_INVALID) ==
+               BG_VALIDATION_REVERIFY_STOP);
+        ASSERT(blocker_exists("bg_validation.reverify_failed"));
+
+        blocker_clear("bg_validation.reverify_failed");
+        main_state_free(&ms);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static int test_bg_validation_walk_memory_failure_not_booked(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: the walk does not book a block it ran out of memory on") {
+        struct bg_validation_service svc;
+        struct main_state ms;
+        main_state_init(&ms);
+        struct uint256 h0_hash, h1_hash;
+        struct block_index *h0 = make_repair_index(&ms, &h0_hash);
+        ASSERT(h0 && extend_repair_chain(&ms, h0, &h1_hash));
+        walk_svc_init(&svc, &ms);
+        atomic_store(&svc.progress.verified_height, 0);
+        atomic_store(&svc.progress.chain_height, 0);
+        atomic_store(&svc.progress.state, BG_VALIDATION_COMPLETE);
+        g_restart_progress = 0;
+        bg_validation_test_set_body_repair_stubs(body_read_always_succeeds,
+                                                 body_repair_no_sleep);
+        bg_validation_test_set_row_backoff_stubs(NULL, body_repair_no_sleep);
+        bg_validation_test_set_validate_stub(validation_fails_out_of_memory);
+        bool reached =
+            bg_validation_test_catch_up_round(&svc, 1, "unused", NULL, 1);
+        bg_validation_test_set_validate_stub(NULL);
+        bg_validation_test_set_row_backoff_stubs(NULL, NULL);
+        bg_validation_test_set_body_repair_stubs(NULL, NULL);
+        reducer_frontier_body_read_note_reset_for_testing();
+
+        ASSERT(!reached);
+        ASSERT_EQ(atomic_load(&svc.progress.verified_height), 0);
+        ASSERT(atomic_load(&svc.progress.state) != BG_VALIDATION_FAILED);
+        main_state_free(&ms);
+        g_restart_progress = 1;
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+/* Six OP_TRUE (or OP_FALSE) script checks over one transaction: enough that the
+ * batch runs on worker threads. */
+#define BG_SCRIPT_BATCH 6
+struct bg_script_batch {
+    struct transaction tx;
+    struct script_check_item items[BG_SCRIPT_BATCH];
+};
+
+static bool bg_script_batch_init(struct bg_script_batch *b, uint8_t pub_op)
+{
+    memset(b, 0, sizeof(*b));
+    transaction_init(&b->tx);
+    b->tx.vin = zcl_calloc(BG_SCRIPT_BATCH, sizeof(*b->tx.vin), "bg_test_vin");
+    if (!b->tx.vin)
+        return false;
+    b->tx.num_vin = BG_SCRIPT_BATCH;
+    for (unsigned i = 0; i < BG_SCRIPT_BATCH; i++) {
+        struct script_check_item *it = &b->items[i];
+        it->tx = &b->tx;
+        it->input_index = i;
+        script_init(&it->script_pub_key);
+        script_push_op(&it->script_pub_key, pub_op);
+    }
+    return true;
+}
+
+static int test_bg_validation_worker_memory_failure_reaches_caller(void)
+{
+    int failures = 0;
+    TEST("bg_validation: a script worker's out of memory reaches the caller") {
+        struct bg_script_batch good;
+        ASSERT(bg_script_batch_init(&good, OP_TRUE));
+        uint64_t before = zcl_alloc_failure_count();
+        ASSERT(bg_validation_verify_scripts_parallel(good.items,
+                                                     BG_SCRIPT_BATCH, 3));
+        ASSERT_EQ(zcl_alloc_failure_count(), before);
+
+        /* The caller's own count stays put while a worker runs out of memory,
+         * unless the batch carries it across. */
+        zcl_alloc_fault_fail_nth("script_stack", 1);
+        bool verified = bg_validation_verify_scripts_parallel(
+            good.items, BG_SCRIPT_BATCH, 3);
+        bool fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(fired);
+        ASSERT(!verified);
+        ASSERT(zcl_alloc_failure_count() != before);
+
+        /* The same batch verifies once memory is back, and a script that fails
+         * on its merits moves nothing. */
+        ASSERT(bg_validation_verify_scripts_parallel(good.items,
+                                                     BG_SCRIPT_BATCH, 3));
+        struct bg_script_batch bad;
+        ASSERT(bg_script_batch_init(&bad, OP_FALSE));
+        before = zcl_alloc_failure_count();
+        ASSERT(!bg_validation_verify_scripts_parallel(bad.items,
+                                                      BG_SCRIPT_BATCH, 3));
+        ASSERT_EQ(zcl_alloc_failure_count(), before);
+
+        free(good.tx.vin);
+        free(bad.tx.vin);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bg_validation_memory_failure_is_no_verdict(void)
 {
     int failures = 0;
@@ -1754,6 +1900,9 @@ int test_bg_validation_reverify(void)
     failures += test_bg_validation_body_repair_reproves_reorg();
     failures += test_bg_validation_post_verify_reorg_is_orphan();
     failures += test_bg_validation_memory_failure_is_no_verdict();
+    failures += test_bg_validation_memory_failure_consumers();
+    failures += test_bg_validation_walk_memory_failure_not_booked();
+    failures += test_bg_validation_worker_memory_failure_reaches_caller();
     failures += test_bg_validation_restart_keeps_reverify_worker();
     failures += test_bg_validation_reverify_skips_absent_by_design();
     failures += test_bg_validation_reverify_held_unreadable_still_repairs();

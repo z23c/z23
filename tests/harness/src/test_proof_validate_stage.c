@@ -11,6 +11,7 @@
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "jobs/proof_validate_stage.h"
+#include "jobs/proof_validate_verify.h"
 #include "jobs/proof_validate_null_hash_rearm.h"
 #include "services/recovery_policy.h"
 #include "sapling/params_init.h"
@@ -40,6 +41,7 @@ enum pv_fail_kind {
     PV_FAIL_SPROUT_PHGR13,
     PV_FAIL_BINDING_SIG,
     PV_FAIL_INTERNAL,
+    PV_FAIL_LOCAL_MEMORY,
 };
 
 struct synth_chain_pv {
@@ -154,6 +156,7 @@ static const char *fail_kind_name(enum pv_fail_kind k)
     case PV_FAIL_SPROUT_PHGR13:   return "sprout_phgr13";
     case PV_FAIL_BINDING_SIG:     return "binding_sig";
     case PV_FAIL_INTERNAL:        return "sapling_ctx";
+    case PV_FAIL_LOCAL_MEMORY:    return PROOF_VERIFY_OUT_OF_MEMORY;
     case PV_FAIL_NONE:
     default:                      return NULL;
     }
@@ -172,7 +175,8 @@ static bool fake_tx_verifier(const struct transaction *tx, int height,
     if (!sc || height != sc->fail_height || sc->fail_kind == PV_FAIL_NONE)
         return true;
     out->ok = false;
-    out->internal_error = (sc->fail_kind == PV_FAIL_INTERNAL);
+    out->internal_error = sc->fail_kind == PV_FAIL_INTERNAL ||
+                          sc->fail_kind == PV_FAIL_LOCAL_MEMORY;
     out->first_failure_proof_type = fail_kind_name(sc->fail_kind);
     return true;
 }
@@ -638,6 +642,48 @@ static void run_internal_error_case(int *failures_out)
     *failures_out += failures;
 }
 
+/* The built-in verifier needs loaded params to reach its allocations. A proof
+ * check that runs out of memory joins the internal_error class, which holds and
+ * writes no row, and names the hold for the recovery ladder. */
+static void run_local_failure_case(int *failures_out)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_pv sc;
+    PV_CHECK("local_failure: setup",
+             pv_setup("local", 3, -1, dir, sizeof(dir), &ms, &sc) == 0);
+    blocker_clear("proof_validate.local_out_of_memory");
+    if (ensure_params_loaded_pv()) {
+        struct transaction *tx = &sc.bodies[0].vtx[0];
+        size_t joinsplits = tx->num_joinsplit;
+        tx->num_joinsplit = 0; /* straight to the Sapling allocations */
+        struct proof_verify_summary s;
+        zcl_alloc_fault_fail_nth("pv sapling proofs", 1);
+        proof_verify_block(&sc.bodies[0], 0, NULL, NULL, false, NULL, NULL,
+                           NULL, &s);
+        bool fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        tx->num_joinsplit = joinsplits;
+        PV_CHECK("local_failure: the check hit the failed allocation", fired);
+        PV_CHECK("local_failure: reported as no verdict",
+                 !s.ok && s.internal_error && s.first_failure_proof_type &&
+                 strcmp(s.first_failure_proof_type,
+                        PROOF_VERIFY_OUT_OF_MEMORY) == 0);
+    } else {
+        printf("local_failure: no sapling params; built-in verifier not run\n");
+    }
+
+    sc.fail_height = 0;
+    sc.fail_kind = PV_FAIL_LOCAL_MEMORY;
+    PV_CHECK("local_failure: holds at the height",
+             proof_validate_stage_drain(100) == 0 &&
+             proof_validate_stage_cursor() == 0);
+    PV_CHECK("local_failure: the hold is named",
+             blocker_exists("proof_validate.local_out_of_memory"));
+    blocker_clear("proof_validate.local_out_of_memory");
+    pv_teardown(dir, &ms, &sc);
+    *failures_out += failures;
+}
+
 static void run_idle_case(int *failures_out)
 {
     int failures = 0;
@@ -841,6 +887,7 @@ int test_proof_validate_stage(void)
     run_joinsplit_sig_case(&failures);
     run_upstream_failed_case(&failures);
     run_internal_error_case(&failures);
+    run_local_failure_case(&failures);
     run_idle_case(&failures);
 
     {

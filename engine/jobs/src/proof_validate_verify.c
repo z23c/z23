@@ -217,9 +217,9 @@ static bool pv_verify_sprout_joinsplits(const struct transaction *tx,
     return true;
 }
 
-static bool default_verify_tx(const struct transaction *tx, int height,
-                              struct proof_validate_tx_report *out,
-                              void *user)
+static bool default_verify_tx_checks(const struct transaction *tx, int height,
+                                     struct proof_validate_tx_report *out,
+                                     void *user)
 {
     (void)user;
     tx_report_init(out);
@@ -270,6 +270,22 @@ static bool default_verify_tx(const struct transaction *tx, int height,
         return true;
 
     return true;
+}
+
+/* A proof check that ran out of memory on this thread, a pool worker or not, says
+ * nothing about the proof: the internal_error class holds the stage's cursor and
+ * writes no row. */
+static bool default_verify_tx(const struct transaction *tx, int height,
+                              struct proof_validate_tx_report *out,
+                              void *user)
+{
+    uint64_t alloc_failures = zcl_alloc_failure_count();
+    bool ret = default_verify_tx_checks(tx, height, out, user);
+    if (ret && !out->ok && zcl_alloc_failure_count() != alloc_failures) {
+        out->internal_error = true;
+        out->first_failure_proof_type = PROOF_VERIFY_OUT_OF_MEMORY;
+    }
+    return ret;
 }
 
 void proof_verify_summary_init(struct proof_verify_summary *s)

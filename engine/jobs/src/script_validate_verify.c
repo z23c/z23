@@ -86,6 +86,22 @@ static void sv_write_script_invalid(struct script_verify_summary *out,
              "serror=%d (%s)", height, txhex, (int)vi, (int)serror, estr);
 }
 
+/* A check that ran out of memory says nothing about the script. Report no
+ * verdict: internal_error keeps every reader of the summary from taking this
+ * for a script_invalid result, and local_failure tells the stage to hold. */
+static void sv_write_local_failure(struct script_verify_summary *out,
+                                   const struct uint256 *txid,
+                                   unsigned int vi)
+{
+    out->ok = 0;
+    out->internal_error = 1;
+    out->local_failure = 1;
+    char txhex[65];
+    uint256_get_hex(txid, txhex);
+    snprintf(out->reason, sizeof(out->reason),
+             "out_of_memory tx=%s vin=%d", txhex, (int)vi);
+}
+
 /* Resolve the effective per-input resolver + user (override wins, else the
  * default, else the created-index resolver seeded with the per-block view). */
 struct sv_resolvers {
@@ -156,9 +172,12 @@ static void sv_serial(const struct block *blk, int height, uint32_t flags,
             ScriptError serror = SCRIPT_ERR_OK;
             out->input_count++;
             int64_t cpu_started = clock_thread_cpu_ns();
+            uint64_t alloc_failures = zcl_alloc_failure_count();
             bool ok = verify_script(&tx->vin[vi].script_sig,
                                     &prev.script_pub_key, flags, &checker,
                                     branch_id, &serror);
+            bool local_failure = !ok &&
+                zcl_alloc_failure_count() != alloc_failures;
             int64_t cpu_ns = clock_thread_cpu_ns() - cpu_started;
             if (cpu_ns > 0)
                 reducer_stage_profile_observe_us(
@@ -166,6 +185,9 @@ static void sv_serial(const struct block *blk, int height, uint32_t flags,
                     RPF_VERIFY_SCRIPT_CPU_US, (uint64_t)cpu_ns / 1000u);
             if (ok) {
                 out->inputs_verified++;
+            } else if (local_failure) {
+                sv_write_local_failure(out, &tx->hash, (unsigned)vi);
+                return;
             } else {
                 out->inputs_failed++;
                 sv_write_script_invalid(out, &tx->hash, (unsigned)vi, serror,
@@ -227,6 +249,7 @@ struct sv_job {
     bool prevout_ok;        /* set in the serial build phase */
     /* result (only meaningful when prevout_ok) */
     bool verified;
+    bool local_failure;     /* unverified because the check ran out of memory */
     ScriptError serror;
 };
 
@@ -247,9 +270,14 @@ static void sv_worker(void *j, void *u)
     struct sig_checker checker = tx_make_sig_checker(&tsc);
     ScriptError serror = SCRIPT_ERR_OK;
     int64_t cpu_started = clock_thread_cpu_ns();
+    /* The count is per thread: only the worker that ran the check can see it
+     * run out of memory, so the job carries the answer to the reduce. */
+    uint64_t alloc_failures = zcl_alloc_failure_count();
     job->verified = verify_script(&job->tx->vin[job->vi].script_sig,
                                   &job->prev.script_pub_key, ctx->flags,
                                   &checker, ctx->branch_id, &serror);
+    job->local_failure = !job->verified &&
+        zcl_alloc_failure_count() != alloc_failures;
     int64_t cpu_ns = clock_thread_cpu_ns() - cpu_started;
     if (cpu_ns > 0)
         reducer_stage_profile_observe_us(REDUCER_PROFILE_SCRIPT_VALIDATE,
@@ -349,8 +377,13 @@ static void sv_parallel_reduce(const struct block *blk, struct sv_job *jobs,
             out->inputs_verified++;
             continue;
         }
-        out->inputs_failed++;
         out->tx_count = (size_t)job->ti + 1;
+        if (job->local_failure) {
+            sv_write_local_failure(out, &job->txid, job->vi);
+            stopped = true;
+            break;
+        }
+        out->inputs_failed++;
         sv_write_script_invalid(out, &job->txid, job->vi, job->serror, height);
         stopped = true;
     }
