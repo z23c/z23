@@ -39,7 +39,15 @@
 #include "validation/chainstate.h"             /* active_chain_height */
 #include "validation/main_state.h"
 
+#include <errno.h>
+#include <stdio.h>
 #include <string.h>
+
+/* The durable install-on-next-boot request file (both platform arms). */
+static void ibr_path(const char *datadir, char *out, size_t n)
+{
+    snprintf(out, n, "%s/install_bundle_request", datadir);
+}
 
 #if defined(_WIN32)
 
@@ -66,12 +74,6 @@ int boot_install_bundle_request(const char *datadir, const char *bundle_path)
 }
 
 bool boot_install_bundle_pending(const char *datadir)
-{
-    (void)datadir;
-    return false;
-}
-
-bool boot_install_bundle_terminal(const char *datadir)
 {
     (void)datadir;
     return false;
@@ -298,11 +300,6 @@ void boot_auto_install_clear_failed_marker(const char *bundle_path)
 
 /* ── 1c — Durable "install-on-next-boot" request (mirror of boot_auto_refold_*) */
 
-static void ibr_path(const char *datadir, char *out, size_t n)
-{
-    snprintf(out, n, "%s/install_bundle_request", datadir);
-}
-
 /* Read the on-disk (attempts, path). Returns true iff a well-formed request was
  * read (a numeric attempts line + a non-empty path line). On any miss *attempts
  * is 0 and bundle_out is empty. When bundle_out is provided the path must fit in
@@ -421,18 +418,6 @@ bool boot_install_bundle_pending(const char *datadir)
     if (ibr_read(path, &a, b, sizeof(b)) && a == BOOT_INSTALL_BUNDLE_TERMINAL)
         return false; /* terminal: present-but-not-pending */
     return true;
-}
-
-bool boot_install_bundle_terminal(const char *datadir)
-{
-    if (!datadir)
-        return false;
-    char path[512];
-    ibr_path(datadir, path, sizeof(path));
-    int a = 0;
-    char b[PATH_MAX];
-    return access(path, F_OK) == 0 && ibr_read(path, &a, b, sizeof(b)) &&
-           a == BOOT_INSTALL_BUNDLE_TERMINAL;
 }
 
 bool boot_install_bundle_consume(const char *datadir, char *out_path,
@@ -905,3 +890,26 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
 }
 
 #endif /* _WIN32 */
+
+/* One definition for both platform arms: read only the attempts line of the
+ * request. Native Windows never writes a request, so it reads false there. */
+bool boot_install_bundle_terminal(const char *datadir)
+{
+    if (!datadir || !datadir[0])
+        return false;
+    char path[512];
+    ibr_path(datadir, path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        if (errno != ENOENT)
+            LOG_WARN("install_consensus_bundle", "install request %s unreadable "
+                     "(%s); its budget is not treated as spent", path,
+                     strerror(errno));
+        return false;
+    }
+    int attempts = 0;
+    bool terminal = fscanf(f, "%d", &attempts) == 1 &&
+                    attempts == BOOT_INSTALL_BUNDLE_TERMINAL;
+    fclose(f);
+    return terminal;
+}
