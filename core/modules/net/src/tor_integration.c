@@ -1339,10 +1339,23 @@ static bool tor_start_locked(const char *datadir, uint16_t p2p_port)
     return true;
 }
 
+/* Set by a stop, cleared by an explicit start, guarded by g_tor_lifecycle. A retry
+ * decided on before a stop must not bring Tor back after it. */
+static bool g_tor_stop_latched;
+
 bool tor_integration_start(const char *datadir, uint16_t p2p_port)
 {
     pthread_mutex_lock(&g_tor_lifecycle);
+    g_tor_stop_latched = false;
     bool started = tor_start_locked(datadir, p2p_port);
+    pthread_mutex_unlock(&g_tor_lifecycle);
+    return started;
+}
+
+bool tor_integration_retry_start(const char *datadir, uint16_t p2p_port)
+{
+    pthread_mutex_lock(&g_tor_lifecycle);
+    bool started = !g_tor_stop_latched && tor_start_locked(datadir, p2p_port);
     pthread_mutex_unlock(&g_tor_lifecycle);
     return started;
 }
@@ -1351,6 +1364,7 @@ void tor_integration_stop(void)
 {
     tor_integration_clear_requested();
     pthread_mutex_lock(&g_tor_lifecycle);
+    g_tor_stop_latched = true;
     tor_run_end();
     pthread_mutex_unlock(&g_tor_lifecycle);
 }

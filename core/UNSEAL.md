@@ -1091,3 +1091,7 @@ later lane flips it HARD.
 - 2026-11-06T05:30:33Z — REASON: Rotate the onion identity once per process, not at every start
   old ROOT: f90f9713f87c2dfd52c447881bd62f29ccc2d9c399d28d947deeb469e1b47c91
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T05:32:18Z — REASON: Stop a Tor watch retry from starting Tor after stop returned
+  old ROOT: 3b298c47f0ea5a4aabcf31c77df2a2eced8d1cc3a98484124ecb07f268333e8d
+  by: owner unseal ritual (make core-unseal)

@@ -1736,7 +1736,8 @@ static const char *stop_handoff_self_end_case(void)
         why = stop_handoff_wait_self_end();
     tor_integration_close_gate_for_test(false);
     tor_integration_service_reset_for_test();
-    if (!why && !tor_integration_start(tmpdir, 39255))
+    /* The watch's own route: no stop ran, so a retry may start Tor. */
+    if (!why && !tor_integration_retry_start(tmpdir, 39255))
         why = "the start after Tor ended by itself was refused";
     if (!why && (stop_handoff_socket_open(&old, 0) ||
                  stop_handoff_socket_open(&old, 1)))
@@ -1919,6 +1920,27 @@ static int test_tor_persist_install_with_loop_running(void)
     return why ? 1 : 0;
 }
 
+/* A watch retry decided on before the stop arrives at the lock after it: Tor
+ * stays down, and it starts no thread, so this uses no start. */
+static int test_tor_retry_after_stop_stays_down(void)
+{
+    printf("test_tor_retry_after_stop_stays_down: ");
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "retrystop");
+    tor_integration_set_extra_torrc_for_test("DisableNetwork 1");
+    tor_integration_stop();
+    const char *why = NULL;
+    if (tor_integration_retry_start(tmpdir, 39257))
+        why = "the retry after stop reported a start";
+    else if (tor_integration_is_enabled())
+        why = "the retry after stop brought Tor back";
+    tor_integration_stop();
+    tor_integration_set_extra_torrc_for_test("");
+    remove_tree(tmpdir);
+    printf("%s%s%s\n", why ? "FAIL (" : "OK", why ? why : "", why ? ")" : "");
+    return why ? 1 : 0;
+}
+
 /* Its own group, so it gets its own process. Tor keeps its pubsub name table
  * across tor_run_main() calls but picks a new hash key each time, and on about
  * the seventh run in one process the table grows, the names stop matching and
@@ -1926,7 +1948,8 @@ static int test_tor_persist_install_with_loop_running(void)
  * may start Tor six times: these cases use all six. */
 int test_tor_stop(void)
 {
-    int failures = test_tor_stop_hands_off_to_tor_thread();
+    int failures = test_tor_retry_after_stop_stays_down();
+    failures += test_tor_stop_hands_off_to_tor_thread();
     failures += test_tor_persist_install_with_loop_running();
     printf("Tor stop: %d failures\n", failures);
     return failures;

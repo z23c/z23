@@ -51,6 +51,11 @@ void tor_integration_set_handler(tor_request_handler_fn handler, void *ctx);
  * the temporary localhost-only Tor bootstrap listener. */
 bool tor_integration_start(const char *datadir, uint16_t p2p_port);
 
+/* tor_integration_start() for a retry: refused once tor_integration_stop() has
+ * run, until the next explicit start, so a retry already under way when the node
+ * stops cannot bring Tor back after the stop returned. */
+bool tor_integration_retry_start(const char *datadir, uint16_t p2p_port);
+
 /* Stop Tor and join its thread. Tor exits on its own thread through its owning
  * control connection; no other thread touches its event base. Safe from any
  * thread, safe to repeat, and serialized with tor_integration_start(). */

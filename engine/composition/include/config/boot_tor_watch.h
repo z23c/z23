@@ -21,9 +21,8 @@
  *     can never carry an onion hostname, no matter what Tor logged. The
  *     full (redacted) warn line goes to the blocker record and the log,
  *     which are operator surfaces, not the process title.
- *   - The retry runs through the SAME engine-side wrapper that boots Tor
- *     (boot_onion_tor_start_early), on an exponential schedule that never
- *     gives up while the node runs.
+ *   - The retry starts Tor again through tor_integration_retry_start(), which
+ *     a stop refuses, on an exponential schedule.
  *
  * Threading: everything the sd-watchdog pet thread touches is a lock-free
  * atomic load (boot_tor_watch_status). The file scan and the retry run on

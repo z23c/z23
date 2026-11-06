@@ -610,10 +610,22 @@ bool boot_onion_tor_start_early(const struct app_context *app)
     return true;
 }
 
-/* The retry entry point handed to the Tor watch: the SAME wrapper the
- * frontend kernel starts Tor with, so a retry matches a boot. tor_integration_start() and onion_service_start() both return
- * early when they are already up, so calling this again is a no-op the
- * moment Tor is healthy. */
+/* The retry entry point handed to the Tor watch. The first start already marked
+ * Tor requested, set its identity and started the onion service, and those stay
+ * set. Only Tor itself is retried, and a retry that was already under way when
+ * the node stopped is refused rather than bringing Tor back. */
+static bool boot_onion_tor_retry(void *ctx)
+{
+    struct boot_svc_ctx *svc = ctx;
+    if (!svc || !svc->app_ctx)
+        return false;
+    if (!tor_integration_retry_start(svc->app_ctx->datadir,
+                                     (uint16_t)svc->app_ctx->p2p_port) ||
+        !tor_integration_is_enabled())
+        LOG_FAIL("onion_tor", "the embedded Tor retry did not start Tor");
+    return true;
+}
+
 static bool boot_onion_tor_start(void *ctx)
 {
     struct boot_svc_ctx *svc = ctx;
@@ -622,12 +634,11 @@ static bool boot_onion_tor_start(void *ctx)
     bool ok = boot_onion_tor_start_early(svc->app_ctx);
 
     /* Arm the watch AFTER the first start attempt so the first failure is
-     * covered; its detect reads core's live predicates. Arming is idempotent
-     * and does not reset the schedule on retry. */
+     * covered; its detect reads core's live predicates. */
     if (boot_profile_has_onion(svc->app_ctx) &&
         app_tor_real_build_linked())
         boot_tor_watch_arm(&svc->tor_watch, svc->app_ctx->datadir,
-                           boot_onion_tor_start, svc);
+                           boot_onion_tor_retry, svc);
     return ok;
 }
 
