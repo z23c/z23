@@ -615,8 +615,14 @@ static bool boot_receive_utxo_snapshot(struct node_db *ndb, const char *path,
     return true;
 }
 
-static void boot_wallet_rebuild_insert(struct node_db *ndb)
+int boot_wallet_rebuild_confirmed(struct node_db *ndb,
+                                  struct coins_view_cache *coins,
+                                  int *skipped)
 {
+    (void)coins;
+    if (skipped)
+        *skipped = 0;
+    int inserted = -1;
     int rc = sqlite3_exec(ndb->db, "BEGIN", NULL, NULL, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "wallet_utxos: BEGIN failed: %s\n", sqlite3_errmsg(ndb->db));
@@ -633,17 +639,24 @@ static void boot_wallet_rebuild_insert(struct node_db *ndb)
         if (sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) {
             fprintf(stderr, "wallet_utxos: ROLLBACK failed: %s\n", sqlite3_errmsg(ndb->db));
         }
-    } else if (sqlite3_exec(ndb->db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
-        fprintf(stderr, "wallet_utxos: COMMIT failed: %s\n", sqlite3_errmsg(ndb->db));
-        if (sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) {
-            fprintf(stderr, "wallet_utxos: ROLLBACK after COMMIT failure failed: %s\n",
-                    sqlite3_errmsg(ndb->db));
+    } else {
+        int changed = sqlite3_changes(ndb->db);
+        if (sqlite3_exec(ndb->db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+            fprintf(stderr, "wallet_utxos: COMMIT failed: %s\n", sqlite3_errmsg(ndb->db));
+            if (sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) {
+                fprintf(stderr, "wallet_utxos: ROLLBACK after COMMIT failure failed: %s\n",
+                        sqlite3_errmsg(ndb->db));
+            }
+        } else {
+            inserted = changed;
         }
     }
+    return inserted;
 }
 
 /* Rebuild wallet_utxos from ground truth ONLY if empty */
-static void boot_wallet_rebuild_if_empty(struct node_db *ndb)
+static void boot_wallet_rebuild_if_empty(struct node_db *ndb,
+                                         struct coins_view_cache *coins)
 {
     bool has_utxos = false;
     bool has_keys = false;
@@ -657,7 +670,8 @@ static void boot_wallet_rebuild_if_empty(struct node_db *ndb)
     } else if (!has_keys) {
         printf("wallet_utxos: no wallet keys; ground-truth rebuild skipped\n");
     } else {
-        boot_wallet_rebuild_insert(ndb);
+        int skipped = 0;
+        (void)boot_wallet_rebuild_confirmed(ndb, coins, &skipped);
     }
 }
 
@@ -666,7 +680,7 @@ static void boot_wallet_ground_truth_check(struct boot_svc_ctx *svc)
     struct node_db *ndb = boot_node_db(svc);
     if (ndb && ndb->open) {
         int64_t t0 = (int64_t)platform_time_wall_time_t();
-        boot_wallet_rebuild_if_empty(ndb);
+        boot_wallet_rebuild_if_empty(ndb, svc->coins_tip);
         int64_t bal = 0;
         sqlite3_stmt *s = NULL;
         sqlite3_prepare_v2(ndb->db, "SELECT COALESCE(sum(value),0) FROM wallet_utxos "

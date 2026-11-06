@@ -2225,6 +2225,7 @@ static int rs_case_p2sh_2of2(void)
 }
 
 int scs_run_tests(void);
+int wrc_run_tests(void);
 int test_rpc_safety(void);
 int test_rpc_safety(void)
 {
@@ -2267,6 +2268,7 @@ int test_rpc_safety(void)
     (void)thread_registry_join_all(5);
 #if defined(__GLIBC__) && !defined(__SANITIZE_ADDRESS__)
     failures += t_listunspent_frees_filtered_rows();
+    failures += wrc_run_tests();
 #endif
 
     return failures;

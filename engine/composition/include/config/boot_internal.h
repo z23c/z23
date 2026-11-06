@@ -370,6 +370,13 @@ void boot_pv_lookahead_stop(void);
  * through these accessors, which stay in boot_services.c (they have 30+ call
  * sites there). Declared here so the two engine/composition/src TUs share one definition. */
 struct node_db *boot_node_db(struct boot_svc_ctx *svc);
+
+/* Fill an empty wallet_utxos from the utxos rows that belong to wallet_keys.
+ * Returns the number of rows inserted, or -1 when nothing was inserted (a
+ * database error). *skipped receives the number of candidate rows left out. */
+int boot_wallet_rebuild_confirmed(struct node_db *ndb,
+                                  struct coins_view_cache *coins,
+                                  int *skipped);
 struct db_service *boot_db_service(struct boot_svc_ctx *svc);
 bool boot_running(const struct boot_svc_ctx *svc);
 bool boot_profile_has_file_service(const struct app_context *ctx);
