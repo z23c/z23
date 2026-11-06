@@ -2579,101 +2579,147 @@ static void rf_crash_run_child(struct rf_crash_child *children, int which,
     _exit(ok ? 0 : 1);
 }
 
+struct rf_crash_fixture_state {
+    struct rf_index_peer index_peer;
+    struct rf_crash_child child[2];
+    struct rom_artifact artifact;
+    struct rom_fetch_manifest manifest;
+    bool marked[9];
+    char server_dir[PATH_MAX], client_dir[PATH_MAX];
+    char source[1200], part[1200], journal[1264], final[1200];
+};
+
+static void rf_crash_cleanup_children(struct rf_crash_child children[2])
+{
+    for (int i = 0; i < 2; i++) {
+        struct rf_crash_child *c = &children[i];
+        if (c->pid > 0) {
+            kill(c->pid, SIGKILL);
+            (void)rf_crash_wait(c->pid, NULL);
+        }
+        if (c->start[0] >= 0) close(c->start[0]);
+        if (c->start[1] >= 0) close(c->start[1]);
+        if (c->result[0] >= 0) close(c->result[0]);
+        if (c->result[1] >= 0) close(c->result[1]);
+    }
+}
+
+static bool rf_crash_prepare(struct rf_crash_fixture_state *s)
+{
+    const char *name = "consensus-state-bundle-crash.sqlite";
+    if (!test_mkdtemp(s->server_dir, sizeof(s->server_dir), "zcl_rom_crash_srv") ||
+        !test_mkdtemp(s->client_dir, sizeof(s->client_dir), "zcl_rom_crash_cli")) return false;
+    snprintf(s->source, sizeof(s->source), "%s/%s", s->server_dir, name);
+    snprintf(s->part, sizeof(s->part), "%s/%s%s", s->client_dir, name, ROM_FETCH_PART_SUFFIX);
+    snprintf(s->journal, sizeof(s->journal), "%s.journal", s->part);
+    snprintf(s->final, sizeof(s->final), "%s/%s", s->client_dir, name);
+    if (!write_sparse_bundle(s->server_dir, name, 8ull * ROM_SEED_CHUNK_SIZE + 4096) ||
+        rom_seed_register(s->server_dir, name, NULL, &s->artifact) != ROM_REG_OK) return false;
+    manifest_from_artifact(&s->artifact, &s->manifest);
+    for (int i = 0; i < 2; i++)
+        if (pipe(s->child[i].start) || pipe(s->child[i].result)) return false;
+    for (int i = 0; i < 2; i++) {
+        s->child[i].pid = fork();
+        if (s->child[i].pid == 0)
+            rf_crash_run_child(s->child, i, &s->manifest, s->client_dir);
+        if (s->child[i].pid < 0) return false;
+    }
+    for (int i = 0; i < 2; i++) {
+        close(s->child[i].start[0]); s->child[i].start[0] = -1;
+        close(s->child[i].result[1]); s->child[i].result[1] = -1;
+    }
+    return true;
+}
+
+static bool rf_crash_interrupt(struct rf_crash_fixture_state *s)
+{
+    if (!fs_server_start(s->server_dir, 0, NULL)) return false;
+    for (int i = 0; i < 40 && !fs_server_is_running(); i++) platform_sleep_ms(50);
+    uint16_t port = fs_server_get_port();
+    struct rf_crash_child *c = &s->child[0];
+    char signal_byte = 0;
+    int status = 0;
+    if (!port || write(c->start[1], &port, sizeof(port)) != sizeof(port) ||
+        !rf_crash_read(c->result[0], &signal_byte, 1, 60000) || signal_byte != 0x44 ||
+        access(s->final, F_OK) == 0 || kill(c->pid, SIGKILL) ||
+        rf_crash_wait(c->pid, &status) != c->pid) return false;
+    c->pid = -1;
+    return WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
+}
+
+static bool rf_crash_read_durable(struct rf_crash_fixture_state *s)
+{
+    const struct rom_fetch_manifest *m = &s->manifest;
+    struct rom_journal *j = rom_journal_open(s->journal, m->chunk_root, m->whole_sha3,
+                                            m->chunk_size, m->num_chunks);
+    if (!j) return false;
+    uint32_t durable = rom_journal_count_done(j);
+    for (uint32_t i = 0; i < m->num_chunks && i < 9; i++)
+        s->marked[i] = rom_journal_is_done(j, i);
+    rom_journal_close(j);
+    return m->num_chunks == 9 && durable && durable < m->num_chunks &&
+           access(s->part, F_OK) == 0 && access(s->final, F_OK) != 0;
+}
+
+static bool rf_crash_resume(struct rf_crash_fixture_state *s)
+{
+    struct rf_crash_child *c = &s->child[1];
+    uint16_t port = s->index_peer.port;
+    char signal_byte = 0;
+    int status = 0;
+    if (write(c->start[1], &port, sizeof(port)) != sizeof(port) ||
+        !rf_crash_read(c->result[0], &signal_byte, 1, 60000) || signal_byte != 0x53 ||
+        rf_crash_wait(c->pid, &status) != c->pid) return false;
+    c->pid = -1;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static bool rf_crash_verify(const struct rf_crash_fixture_state *s)
+{
+    bool ok = rom_fetch_verify_file(s->final, &s->manifest) &&
+              access(s->journal, F_OK) != 0 && access(s->part, F_OK) != 0;
+    for (uint32_t i = 0; i < s->manifest.num_chunks; i++)
+        if (atomic_load(&s->index_peer.requests[i]) != (s->marked[i] ? 0u : 1u)) ok = false;
+    return ok;
+}
+
+static void rf_crash_cleanup(struct rf_crash_fixture_state *s)
+{
+    rf_crash_cleanup_children(s->child);
+    if (*s->source) unlink(s->source);
+    if (*s->part) unlink(s->part);
+    if (*s->journal) unlink(s->journal);
+    if (*s->final) unlink(s->final);
+    if (*s->server_dir) rmdir(s->server_dir);
+    if (*s->client_dir) rmdir(s->client_dir);
+    rom_seed_reset();
+    rom_peer_scoring_test_reset();
+}
+
 static bool rf_crash_fixture(void)
 {
-    bool ok = false, server_started = false, index_started = false;
-    struct rf_index_peer index_peer;
-    bool marked[9] = {false};
-    struct rf_crash_child c[2] = {
-        {.start = {-1, -1}, .result = {-1, -1}, .pid = -1},
-        {.start = {-1, -1}, .result = {-1, -1}, .pid = -1}
+    struct rf_crash_fixture_state s = {
+        .child = {
+            {.start = {-1, -1}, .result = {-1, -1}, .pid = -1},
+            {.start = {-1, -1}, .result = {-1, -1}, .pid = -1}
+        }
     };
-    char sr[PATH_MAX] = "", cr[PATH_MAX] = "";
-    char source[1200] = "", part[1200] = "", journal[1264] = "", final[1200] = "";
-    const char *name = "consensus-state-bundle-crash.sqlite";
-    struct rom_artifact art;
-    struct rom_fetch_manifest m;
-    struct rom_journal *j = NULL;
-    uint32_t durable = 0;
-    uint16_t port = 0;
-    int status = 0;
-    char signal_byte = 0;
+    bool ok = false;
     fs_server_stop();
     rom_seed_reset();
     rom_peer_scoring_test_reset();
     rom_seed_set_peer_bps_cap(1ull << 30);
     rom_seed_set_global_bps_cap(1ull << 30);
-    if (!test_mkdtemp(sr, sizeof(sr), "zcl_rom_crash_srv") ||
-        !test_mkdtemp(cr, sizeof(cr), "zcl_rom_crash_cli")) goto out;
-    snprintf(source, sizeof(source), "%s/%s", sr, name);
-    snprintf(part, sizeof(part), "%s/%s%s", cr, name, ROM_FETCH_PART_SUFFIX);
-    snprintf(journal, sizeof(journal), "%s.journal", part);
-    snprintf(final, sizeof(final), "%s/%s", cr, name);
-    if (!write_sparse_bundle(sr, name, 8ull * ROM_SEED_CHUNK_SIZE + 4096) ||
-        rom_seed_register(sr, name, NULL, &art) != ROM_REG_OK) goto out;
-    manifest_from_artifact(&art, &m);
-    for (int i = 0; i < 2; i++)
-        if (pipe(c[i].start) || pipe(c[i].result)) goto out;
-    for (int i = 0; i < 2; i++) {
-        c[i].pid = fork();
-        if (c[i].pid == 0) rf_crash_run_child(c, i, &m, cr);
-        if (c[i].pid < 0) goto out;
-    }
-    for (int i = 0; i < 2; i++) {
-        close(c[i].start[0]); c[i].start[0] = -1;
-        close(c[i].result[1]); c[i].result[1] = -1;
-    }
-    if (!fs_server_start(sr, 0, NULL)) goto out;
-    server_started = true;
-    for (int i = 0; i < 40 && !fs_server_is_running(); i++) platform_sleep_ms(50);
-    port = fs_server_get_port();
-    if (!port || write(c[0].start[1], &port, sizeof(port)) != sizeof(port) ||
-        !rf_crash_read(c[0].result[0], &signal_byte, 1, 60000) || signal_byte != 0x44 ||
-        access(final, F_OK) == 0 || kill(c[0].pid, SIGKILL) ||
-        rf_crash_wait(c[0].pid, &status) != c[0].pid) goto out;
-    c[0].pid = -1;
-    if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL) goto out;
-    fs_server_stop(); server_started = false; /* drain old requests before accounting */
-    j = rom_journal_open(journal, m.chunk_root, m.whole_sha3, m.chunk_size, m.num_chunks);
-    if (!j) goto out;
-    durable = rom_journal_count_done(j);
-    for (uint32_t i = 0; i < m.num_chunks && i < 9; i++)
-        marked[i] = rom_journal_is_done(j, i);
-    rom_journal_close(j); j = NULL;
-    if (m.num_chunks != 9 || !durable || durable >= m.num_chunks || access(part, F_OK) != 0 ||
-        access(final, F_OK) == 0) goto out;
-    if (!rf_index_start(&index_peer, sr, &art)) goto out;
-    index_started = true;
-    port = index_peer.port;
-    if (write(c[1].start[1], &port, sizeof(port)) != sizeof(port) ||
-        !rf_crash_read(c[1].result[0], &signal_byte, 1, 60000) || signal_byte != 0x53 ||
-        rf_crash_wait(c[1].pid, &status) != c[1].pid) goto out;
-    c[1].pid = -1;
-    rf_index_stop(&index_peer); index_started = false;
-    ok = WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
-         rom_fetch_verify_file(final, &m) && access(journal, F_OK) != 0 &&
-         access(part, F_OK) != 0;
-    for (uint32_t i = 0; i < m.num_chunks; i++)
-        if (atomic_load(&index_peer.requests[i]) != (marked[i] ? 0u : 1u)) ok = false;
+    if (!rf_crash_prepare(&s)) goto out;
+    bool interrupted = rf_crash_interrupt(&s);
+    fs_server_stop(); /* Drain old requests before accounting. */
+    if (!interrupted || !rf_crash_read_durable(&s)) goto out;
+    if (!rf_index_start(&s.index_peer, s.server_dir, &s.artifact)) goto out;
+    bool resumed = rf_crash_resume(&s);
+    rf_index_stop(&s.index_peer);
+    ok = resumed && rf_crash_verify(&s);
 out:
-    rom_journal_close(j);
-    for (int i = 0; i < 2; i++) {
-        if (c[i].pid > 0) { kill(c[i].pid, SIGKILL); (void)rf_crash_wait(c[i].pid, NULL); }
-        if (c[i].start[0] >= 0) close(c[i].start[0]);
-        if (c[i].start[1] >= 0) close(c[i].start[1]);
-        if (c[i].result[0] >= 0) close(c[i].result[0]);
-        if (c[i].result[1] >= 0) close(c[i].result[1]);
-    }
-    if (server_started) fs_server_stop();
-    if (index_started) rf_index_stop(&index_peer);
-    if (*source) unlink(source);
-    if (*part) unlink(part);
-    if (*journal) unlink(journal);
-    if (*final) unlink(final);
-    if (*sr) rmdir(sr);
-    if (*cr) rmdir(cr);
-    rom_seed_reset();
-    rom_peer_scoring_test_reset();
+    rf_crash_cleanup(&s);
     return ok;
 }
 
