@@ -1,3 +1,4 @@
+/* purpose: Declare import, listing and capacity of unsigned page hints in the code index. */
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
 #ifndef ZCL_CODEINDEX_PAGES_H
 #define ZCL_CODEINDEX_PAGES_H

@@ -1,3 +1,4 @@
+/* purpose: Declare the native code pages import and read commands. */
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
 #ifndef ZCL_NATIVE_CODE_PAGES_H
 #define ZCL_NATIVE_CODE_PAGES_H

@@ -1,3 +1,4 @@
+/* purpose: Serve native code pages import and read against the exact committed module tree. */
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
 /* Purpose: Resolve a module's exact committed tree without trusting the live overlay. */
 #include "native_code_pages.h"
