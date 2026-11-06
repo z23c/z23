@@ -158,11 +158,18 @@ static bool step_game(char token[65], char image[65], unsigned id, uint32_t *las
     int n = snprintf(cmd, sizeof(cmd), "{\"v\":1,\"id\":%u,\"op\":\"step\",\"frames\":4,\"capture\":true,\"input\":{\"move_x\":%.3f,\"move_y\":%.3f,\"camera_x\":0,\"fire_guns\":%s,\"speed_boost\":%s,\"throttle\":false}}", id, (double)x, (double)y, fire ? "true" : "false", boost ? "true" : "false");
     return n > 0 && (size_t)n < sizeof(cmd) && request("step", token, cmd, out, RESPONSE_CAP, &game.cancel) && response(out, token, image, id, last_frame);
 }
+static const char *failure_text(bool allocated, bool started)
+{
+    if (!allocated) return "Could not start Play on this phone. Go Back and try again.";
+    if (started) return "Game disconnected. Check laptop game host and USB. Back > Play to retry. If pairing changed: Back > Scan QR, compare codes and Accept.";
+    return "Start your laptop's Z23 game host and connect USB. For pairing: Back > Scan its QR code, compare the codes and Accept. Then Home > Play.";
+}
 static void *run(void *unused)
 {
     (void)unused;
     for (;;) {
     char token[65] = "", image[65] = "", *out = malloc(RESPONSE_CAP);
+    bool allocated = out != NULL;
     uint32_t last_frame = 0;
     bool ok = out && request("start", NULL, NULL, out, RESPONSE_CAP, &game.cancel) && response(out, token, image, 0, &last_frame);
     bool started = ok;
@@ -185,8 +192,7 @@ static void *run(void *unused)
         notify_view();
         continue;
     }
-    if (game.wanted) snprintf(game.status, sizeof(game.status), "%s", started ?
-        "Game connection ended. Return home and try again." : "Could not start the game. Return home and try again.");
+    if (game.wanted) snprintf(game.status, sizeof(game.status), "%s", failure_text(allocated, started));
     game.running = false;
     pthread_mutex_unlock(&game.lock);
     notify_view();
@@ -212,7 +218,7 @@ bool zapp_game_open(const char *files)
     pthread_t thread;
     bool ok = pthread_create(&thread, NULL, run, NULL) == 0;
     if (ok) pthread_detach(thread);
-    else { game.running = false; game.wanted = false; snprintf(game.status, sizeof(game.status), "Could not start the game. Return home and try again."); }
+    else { game.running = false; game.wanted = false; snprintf(game.status, sizeof(game.status), "%s", failure_text(false, false)); }
     pthread_mutex_unlock(&game.lock); notify_view(); return ok;
 }
 void zapp_game_close(void)
