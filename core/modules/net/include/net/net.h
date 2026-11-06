@@ -272,10 +272,10 @@ struct ban_entry {
  * grow. An oversized payload is simply not parked. */
 #define GETHEADERS_DEFERRED_REQ_MAX_BYTES 2176
 
-/* Block requests held per peer when the send budget stops a getdata (see
- * getdata_kept in struct p2p_node below). zclassicd keeps at most
- * MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16 blocks in flight from one peer, so an
- * honest legacy peer always fits. Past this a request gets notfound. */
+/* Block requests held per peer when the send budget or a snapshot serve stops
+ * a getdata (see getdata_kept in struct p2p_node below). zclassicd keeps at
+ * most MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16 blocks in flight from one peer, so
+ * an honest legacy peer always fits. Past this a request gets notfound. */
 #define GETDATA_KEPT_BLOCKS_MAX 16
 
 struct askfor_entry {

@@ -1011,3 +1011,7 @@ later lane flips it HARD.
 - 2026-11-06T00:59:04Z — REASON: Throttle the log line for a chunk dropped with no swarm active
   old ROOT: 374b2091ff94bb9963e7b43787ebb1bf29548472bcb67fb4b1c9b9df80d86e1a
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T01:23:16Z — REASON: Comments on held getdata and the send tick name the snapshot serve as well as the send budget. No behaviour change.
+  old ROOT: 928e0668bb558123fe7ecb2dfc9e8dd8bfdfac229726143ad2ae6f041b534320
+  by: owner unseal ritual (make core-unseal)
