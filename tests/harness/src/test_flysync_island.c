@@ -660,11 +660,19 @@ static int fsi_case_install_budget(struct fsi_node *n)
     return failures;
 }
 
+/* Detached: no parent, and work that is not zero (the boot block-index scan
+ * ranks a zero-work entry by height, so the rung row would win) yet below
+ * genesis's, so every work comparison passes over the row. */
 static bool fsi_rows_detached(struct fsi_node *n)
 {
+    struct block_index *genesis = active_chain_tip(&n->ms.chain_active);
+    if (!genesis)
+        return false;
     for (int i = 0; i < FSI_W; i++)
         if (n->rows[i]->pprev ||
-            !arith_uint256_is_zero(&n->rows[i]->nChainWork))
+            arith_uint256_is_zero(&n->rows[i]->nChainWork) ||
+            arith_uint256_compare(&n->rows[i]->nChainWork,
+                                  &genesis->nChainWork) >= 0)
             return false;
     return true;
 }

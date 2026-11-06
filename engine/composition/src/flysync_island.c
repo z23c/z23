@@ -340,15 +340,24 @@ static void fsi_fall_back_at(struct main_state *ms, const char *why,
  * here, and they carry the rung's chainwork: left alone they would stay the
  * best header and steer header sync above the rung, where normal sync can
  * fetch no block. So every row rooted at the island (the window and anything
- * above it) is detached: no parent, no skip, no work. Best-header selection
- * then passes over it, and when normal sync re-delivers these headers from
- * their real parent, accept_block_header's known-header relink sets each
- * parent and derives its work, so the rows rejoin the chain as ordinary
- * headers. Keyed on the durable fact: exactly its root hash at its root
- * height, still without a parent. It runs at the fall-back and again at every
- * boot whose durable state is FELL_BACK (the loader relinks the rows from
- * their durable records), so a crash between the durable FELL_BACK and the
- * detach is repaired by the next boot. Idempotent. */
+ * above it) is detached: no parent, no skip, and work FSI_DETACHED_WORK, below
+ * any real entry's (genesis included). Not zero: the boot block-index scan
+ * ranks a zero-work entry by height, which would make the rung row the best
+ * header again. Every work comparison passes over the rows, and when normal
+ * sync re-delivers these headers from their real parent, accept_block_header's
+ * known-header relink sets each parent and derives its work, so the rows
+ * rejoin the chain as ordinary headers. Keyed on the durable fact: exactly its
+ * root hash at its root height, still without a parent, and the listed rows at
+ * their exact heights. It runs at the fall-back and again at every boot whose
+ * durable state is FELL_BACK (the loader brings the rows back with work), so a
+ * crash between the durable FELL_BACK and the detach is repaired by the next
+ * boot. Idempotent. */
+#define FSI_DETACHED_WORK 1u
+
+static bool fsi_work_is_detached(const struct block_index *bi)
+{
+    return arith_uint256_equal_u64(&bi->nChainWork, FSI_DETACHED_WORK);
+}
 struct fsi_rows {
     struct block_index **v;
     size_t n, cap;
@@ -407,14 +416,15 @@ static bool fsi_collect_listed(struct main_state *ms,
     return true;
 }
 
-/* The most-work entry that still has work, else the active tip. */
+/* The most-work entry that still has real work, else the active tip. */
 static struct block_index *fsi_best_remaining(struct main_state *ms)
 {
     struct block_index *best = active_chain_tip(&ms->chain_active);
     size_t it = 0;
     struct block_index *bi = NULL;
     while (block_map_next(&ms->map_block_index, &it, NULL, &bi)) {
-        if (!bi || arith_uint256_is_zero(&bi->nChainWork))
+        if (!bi || arith_uint256_is_zero(&bi->nChainWork) ||
+            fsi_work_is_detached(bi))
             continue;
         if (!best || arith_uint256_compare(&bi->nChainWork,
                                            &best->nChainWork) > 0)
@@ -426,7 +436,8 @@ static struct block_index *fsi_best_remaining(struct main_state *ms)
 static void fsi_reset_best_header(struct main_state *ms)
 {
     struct block_index *cur = ms->pindex_best_header;
-    if (cur && !arith_uint256_is_zero(&cur->nChainWork))
+    if (cur && !arith_uint256_is_zero(&cur->nChainWork) &&
+        !fsi_work_is_detached(cur))
         return;
     struct block_index *best = fsi_best_remaining(ms);
     if (!best)
@@ -467,7 +478,7 @@ size_t flysync_island_detach(struct main_state *ms,
     for (size_t i = 0; listed && i < rows.n; i++) {
         rows.v[i]->pprev = NULL;
         rows.v[i]->pskip = NULL;
-        arith_uint256_set_zero(&rows.v[i]->nChainWork);
+        arith_uint256_set_u64(&rows.v[i]->nChainWork, FSI_DETACHED_WORK);
     }
     zcl_mutex_unlock(&ms->cs_main);
     if (listed)

@@ -124,8 +124,10 @@ bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
 bool flysync_island_boot_reconcile(struct main_state *ms);
 
 /* Detach a fallen-back island (see flysync_island.c): every row rooted at the
- * fact's root, while that root has no parent, loses its parent and work, and
- * the best header moves to the best remaining entry. Returns rows detached. */
+ * fact's root, while that root has no parent, and every listed row found
+ * parentless at its height, loses its parent and keeps only a token work below
+ * any real entry's; the best header moves to the best remaining entry.
+ * Returns rows detached. */
 size_t flysync_island_detach(struct main_state *ms,
                              const struct island_anchor *a);
 
