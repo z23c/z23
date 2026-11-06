@@ -288,6 +288,13 @@ struct zcl_result snapsync_prepare_serve_step(struct snapsync_serve_step *step,
     entries = buf[pos] | ((uint32_t)buf[pos + 1] << 8) |
               ((uint32_t)buf[pos + 2] << 16) |
               ((uint32_t)buf[pos + 3] << 24);
+    /* The file writer starts a chunk after each full one, so a set that exactly
+     * fills its last chunk ends in one empty header. Nothing follows it. */
+    if (entries == 0 && pos + 4 == buf_size) {
+        node->zsync_file_offset = buf_size;
+        step->action = SNAPSYNC_SERVE_ACTION_SEND_END;
+        return ZCL_OK;
+    }
     if (entries == 0 || entries > 1000)
         return ZCL_ERR(-3, "prepare_serve_step: bad entry count %u at pos %lld",
                        entries, (long long)pos);

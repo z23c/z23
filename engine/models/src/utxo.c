@@ -668,10 +668,15 @@ static bool snap_write_fixed_fields(struct snapshot_writer *w,
 static bool snap_write_script(struct snapshot_writer *w,
                               const struct db_utxo *u)
 {
-    /* Compact size for script length */
+    /* Compact size for script length. The whole script goes out: snap_feed_sha3
+     * hashes all of it, so a shortened one makes an honest file fail its root. */
     uint8_t buf[2];
     size_t slen = u->script_len;
-    if (slen > 520) slen = 520;
+    if (slen > UINT16_MAX) {
+        w->failed = true;
+        LOG_FAIL("utxo", "snapshot script of %zu bytes is past any legal script",
+                 slen);
+    }
     if (slen < 253) {
         uint8_t b = (uint8_t)slen;
         if (!snap_write(w, &b, 1))
