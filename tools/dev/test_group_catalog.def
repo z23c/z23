@@ -959,6 +959,9 @@ ZCL_TEST_GROUP(zcode_publish)
 ZCL_TEST_GROUP(zcode_package_fork)
 /* Receive a shared fork over the swarm: tree, lineage, corrupt chunk. */
 ZCL_TEST_GROUP(zcode_package_receive)
+/* Sign a copy's share with the owner's local key and hand it to a friend as
+ * one file: verify, explicit trust, a copy that names the sender's release. */
+ZCL_TEST_GROUP(zcode_package_bundle)
 ZCL_TEST_GROUP(zcode_package_dev)
 ZCL_TEST_GROUP(zcode_package_dev_prepare_budget)
 /* Every contexts/commons/packages package built from its own sources and

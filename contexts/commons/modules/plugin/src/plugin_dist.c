@@ -541,22 +541,50 @@ static enum plugin_dist_status pd_prepare(
     return PLUGIN_DIST_OK;
 }
 
+/* The release envelope's compact low-S signature (no recovery byte). */
+static bool pd_compact_sign(const struct privkey *sk,
+                            const uint8_t digest[VCS_PACKAGE_RELEASE_ID_BYTES],
+                            uint8_t signature[VCS_PACKAGE_RELEASE_SIGNATURE_BYTES])
+{
+    struct uint256 hash;
+    unsigned char compact[COMPACT_SIGNATURE_SIZE];
+    memcpy(hash.data, digest, 32);
+    if (!privkey_sign_compact(sk, &hash, compact))
+        return false;
+    memcpy(signature, compact + 1, VCS_PACKAGE_RELEASE_SIGNATURE_BYTES);
+    return true;
+}
+
 /* Sign the release id with the loaded key. */
 static bool pd_sign_with_key(const struct privkey *sk, const struct pubkey *pk,
                              const struct plugin_dist_publish_request *rq,
                              const struct plugin_dist_prepared *p, struct vcs_package_release *r)
 {
     uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
-    struct uint256 hash;
-    unsigned char compact[COMPACT_SIGNATURE_SIZE];
-    if (!pd_release_fill(r, rq, &p->m, p->root, pk, p->spdx) ||
-        vcs_package_release_id(r, id) != VCS_PACKAGE_RELEASE_OK)
-        return false;
-    memcpy(hash.data, id, 32);
-    if (!privkey_sign_compact(sk, &hash, compact))
-        return false;
-    memcpy(r->signature, compact + 1, VCS_PACKAGE_RELEASE_SIGNATURE_BYTES);
-    return true;
+    return pd_release_fill(r, rq, &p->m, p->root, pk, p->spdx) &&
+           vcs_package_release_id(r, id) == VCS_PACKAGE_RELEASE_OK &&
+           pd_compact_sign(sk, id, r->signature);
+}
+
+static enum plugin_dist_status pd_release_key_sign(
+    const char *key_path, const uint8_t *digest,
+    uint8_t pubkey[VCS_PACKAGE_RELEASE_PUBKEY_BYTES],
+    uint8_t signature[VCS_PACKAGE_RELEASE_SIGNATURE_BYTES],
+    struct plugin_dist_published *out)
+{
+    struct privkey sk;
+    struct pubkey pk;
+    enum plugin_dist_status ds = pd_release_key(key_path, &sk, &pk, out);
+    if (ds != PLUGIN_DIST_OK)
+        return ds;
+    memcpy(pubkey, pk.vch, VCS_PACKAGE_RELEASE_PUBKEY_BYTES);
+    bool ok = !digest || pd_compact_sign(&sk, digest, signature);
+    memset(&sk, 0, sizeof(sk));
+    if (ok)
+        return PLUGIN_DIST_OK;
+    pd_detail(out->detail, sizeof(out->detail), "%s",
+              "the release key could not sign the digest");
+    return PLUGIN_DIST_ERR_RELEASE;
 }
 
 static enum plugin_dist_status pd_sign_release(
@@ -985,6 +1013,31 @@ enum plugin_dist_status plugin_dist_publish(
     return PLUGIN_DIST_ERR_ARGUMENT;
 #else
     return pd_publish(store, request, out);
+#endif
+}
+
+enum plugin_dist_status plugin_dist_release_key_sign(
+    const char *key_path, const uint8_t *digest,
+    uint8_t pubkey[VCS_PACKAGE_RELEASE_PUBKEY_BYTES],
+    uint8_t signature[VCS_PACKAGE_RELEASE_SIGNATURE_BYTES],
+    struct plugin_dist_published *out)
+{
+    if (!out)
+        return PLUGIN_DIST_ERR_ARGUMENT;
+    memset(out, 0, sizeof(*out));
+#if defined(_WIN32)
+    (void)key_path;
+    (void)digest;
+    (void)pubkey;
+    (void)signature;
+    snprintf(out->detail, sizeof(out->detail), "needs POSIX file semantics");
+    return PLUGIN_DIST_ERR_ARGUMENT;
+#else
+    if (!pubkey || (digest && !signature)) {
+        snprintf(out->detail, sizeof(out->detail), "a public key buffer is required");
+        return PLUGIN_DIST_ERR_ARGUMENT;
+    }
+    return pd_release_key_sign(key_path, digest, pubkey, signature, out);
 #endif
 }
 

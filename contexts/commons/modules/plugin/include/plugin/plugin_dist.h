@@ -27,6 +27,7 @@
 #define ZCL_PLUGIN_DIST_H
 
 #include "plugin/plugin_store.h"
+#include "vcs/package_release.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -111,6 +112,20 @@ enum plugin_dist_status plugin_dist_sign_release(
     const struct plugin_dist_prepared *prepared,
     const struct plugin_dist_publish_request *request,
     uint8_t **release_wire_out, size_t *release_len_out,
+    struct plugin_dist_published *out);
+
+/* The package release key that plugin publish --release-key reads: a 32-byte
+ * secp256k1 secret in an owner-only (0600) file, made by plugin_keygen. Loads
+ * it and returns its 33-byte compressed public key; when digest is not NULL
+ * it also returns the compact low-S signature over that 32-byte release id.
+ * The secret never leaves this call. zcode package sign uses it so a copy's
+ * share is signed with the same key format and store as plugin publishing.
+ * PLUGIN_DIST_ERR_RELEASE names a missing, insecure or malformed key in
+ * out->detail. */
+enum plugin_dist_status plugin_dist_release_key_sign(
+    const char *key_path, const uint8_t *digest,
+    uint8_t pubkey[VCS_PACKAGE_RELEASE_PUBKEY_BYTES],
+    uint8_t signature[VCS_PACKAGE_RELEASE_SIGNATURE_BYTES],
     struct plugin_dist_published *out);
 
 enum plugin_dist_status plugin_dist_commit(
