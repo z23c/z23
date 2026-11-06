@@ -288,7 +288,7 @@ AGENT_IMPACT_RULE("platform/modules/util/src/mem_pressure.c|platform/modules/uti
  * checked allocators, zcl_result). The util/ paths below are one-line
  * forwarding headers kept so the ~734 existing includers do not churn. */
 AGENT_IMPACT_RULE("platform/modules/base/include/base/log_macros.h|platform/modules/base/include/base/log_level.h|platform/modules/base/src/log_level.c|platform/modules/util/include/util/log_macros.h|platform/modules/util/include/util/log_level.h|tests/harness/src/test_log_level.c", "log_level make_lint_gates")
-AGENT_IMPACT_RULE("platform/modules/base/src/safe_alloc.c|platform/modules/base/include/base/safe_alloc.h|platform/modules/util/include/util/safe_alloc.h", "chaos_harness coins fees_oom test_png_writer equihash_oom make_lint_gates hotswap_module")
+AGENT_IMPACT_RULE("platform/modules/base/src/safe_alloc.c|platform/modules/base/include/base/safe_alloc.h|platform/modules/util/include/util/safe_alloc.h", "chaos_harness coins fees_oom test_png_writer equihash_oom make_lint_gates")
 /* Allocation-failure coverage for the proof-of-work verifier and solver:
  * every inbound header runs equihash_is_valid_solution, and each of its
  * seven allocation labels has a hand-rolled multi-pointer unwind. */

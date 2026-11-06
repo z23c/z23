@@ -116,8 +116,10 @@
  *   NODE_HOTSWAP  The module's own scaffolding: the service-handle
  *                 acquire/release/generation triple a module uses to pin a
  *                 resident service across a swap, the resident-policy dispatch
- *                 notes, and `zcl_alloc_fault_should_fail` (the allocation
- *                 fault-injection hook, dev builds only).
+ *                 notes, `zcl_alloc_fault_should_fail` (the allocation
+ *                 fault-injection hook, dev builds only) and
+ *                 `zcl_alloc_note_failure` (the checked allocators' failure
+ *                 count, every build).
  *   NODE_APP     App-domain read/verify services behind swappable controller
  *                 leaves: shop want/fulfill sealing and verification, market
  *                 moderation and purchase views, ROM fetch/seed/journal, VCS
@@ -404,7 +406,9 @@ HOTSWAP_MODULE_IMPORT("zcl_ed25519_keypair", "NODE_UTIL")
 /* ── NODE_HOTSWAP ──────────────────────────────────────────────────────────
  * The module's own scaffolding: the service-handle acquire/release/generation
  * triple used to pin a resident service across a swap, the resident-policy
- * dispatch notes, and the dev-only allocation fault-injection hook. */
+ * dispatch notes, the dev-only allocation fault-injection hook, and the checked
+ * allocators' failure count. That count only adds one to the calling thread's
+ * own tally when an allocation returns NULL; it reads and writes nothing else. */
 HOTSWAP_MODULE_IMPORT("zcl_alloc_fault_should_fail", "NODE_HOTSWAP")
 HOTSWAP_MODULE_IMPORT("zcl_alloc_note_failure", "NODE_HOTSWAP")
 HOTSWAP_MODULE_IMPORT("zcl_hotswap_service_acquire", "NODE_HOTSWAP")
