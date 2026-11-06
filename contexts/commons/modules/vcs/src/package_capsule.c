@@ -127,10 +127,12 @@ enum vcs_package_capsule_error vcs_package_capsule_serialize(
     return VCS_PACKAGE_CAPSULE_OK;
 }
 
-/* Decode one wire entry, advancing only through bytes already available. */
+/* Decode one wire entry, advancing only through bytes already available. A
+ * path is counted on the wire but a C string in memory, so a NUL inside it
+ * would re-encode shorter than it arrived; note it for the header check. */
 static bool capsule_read_header(const uint8_t *wire, size_t wire_len,
                                 size_t *off, struct vcs_package_capsule *out,
-                                uint16_t i)
+                                uint16_t i, bool *nul_in_path)
 {
     if (*off > wire_len || wire_len - *off < 2u)
         return false;
@@ -139,6 +141,8 @@ static bool capsule_read_header(const uint8_t *wire, size_t wire_len,
     if (len == 0 || len > VCS_PACKAGE_PATH_MAX ||
         *off > wire_len || wire_len - *off < (size_t)len + 32u)
         return false;
+    if (memchr(wire + *off, 0, len) != NULL)
+        *nul_in_path = true;
     memcpy(out->headers[i].path, wire + *off, len);
     *off += len;
     memcpy(out->headers[i].file_root, wire + *off, 32);
@@ -167,15 +171,17 @@ enum vcs_package_capsule_error vcs_package_capsule_parse(
     uint16_t count = vcs_rd_u16le(wire + off); off += 2u;
     if (count > VCS_PACKAGE_CAPSULE_MAX_HEADERS)
         return VCS_PACKAGE_CAPSULE_ERR_COUNT;
+    bool nul_in_path = false;
     for (uint16_t i = 0; i < count; i++) {
-        if (!capsule_read_header(wire, wire_len, &off, out, i))
+        if (!capsule_read_header(wire, wire_len, &off, out, i, &nul_in_path))
             goto truncated;
     }
     if (off != wire_len) {
         vcs_package_capsule_init(out);
         return VCS_PACKAGE_CAPSULE_ERR_TRAILING;
     }
-    enum vcs_package_capsule_error err = capsule_validate(out);
+    enum vcs_package_capsule_error err = nul_in_path
+        ? VCS_PACKAGE_CAPSULE_ERR_HEADER : capsule_validate(out);
     if (err != VCS_PACKAGE_CAPSULE_OK)
         vcs_package_capsule_init(out);
     return err;
