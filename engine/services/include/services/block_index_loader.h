@@ -329,6 +329,11 @@ block_index_apply_persisted_failure_trust(struct block_index *pindex,
 int64_t block_index_failed_bits_stripped(void);
 int64_t block_index_failed_bits_demoted(void);
 
+/* One entry's nChainWork from its parent (or, parentless, its own proof; the
+ * registered FlySync island root keeps its recorded work). The loader, the
+ * top-up and the forward pass all derive work through it. */
+void block_index_set_chainwork(struct block_index *bi);
+
 /* Forward pass over a height-sorted block_index array: recompute
  * nChainWork, nChainTx, skip links, cached branch id, and failed-child
  * propagation from each entry's (already-linked) pprev. Shared by the

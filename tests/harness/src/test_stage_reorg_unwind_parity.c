@@ -53,6 +53,7 @@
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "jobs/utxo_apply_stage.h"
+#include "services/island_anchor.h"
 #include "storage/coins_kv.h"
 #include "storage/event_log.h"
 #include "storage/progress_store.h"
@@ -406,6 +407,68 @@ static bool sru_commitments_diverged_both_present(bool cmt_eq, bool have_c1,
     return !cmt_eq && have_c1 && have_c2;
 }
 
+/* ── RUN 3: a FlySync island refuses an unwind whose fork lies below its rung.
+ * The same L -> W swap (fork at h0, depth 3, inside finality) with a registered
+ * island-anchor fact whose rung is h28: the unwind is refused, L stays applied.
+ * Without the fact RUN 1 unwinds it (the unchanged path). */
+static void sru_register_island(void)
+{
+    struct island_anchor a;
+    memset(&a, 0, sizeof(a));
+    a.root_height = 1;
+    a.rung_height = 1 + ISLAND_ANCHOR_WINDOW - 1;
+    memset(a.root_hash.data, 0x1A, 32);
+    memset(a.rung_hash.data, 0x2B, 32);
+    a.root_work.pn[0] = 1;
+    (void)island_anchor_register(&a);
+}
+
+static int sru_run_island_floor(struct branch *L, struct branch *W,
+                                const struct ext_coin *ext)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "stage_reorg_unwind", "run3");
+    char log_path[512];
+    snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
+    SRU_CHECK("run3: progress_store opens", progress_store_open(dir));
+    event_log_t *lg = event_log_open(log_path);
+    SRU_CHECK("run3: event log opens", lg != NULL);
+    if (lg) {
+        seed_base_coins(progress_store_db(), ext, 2);
+        struct main_state ms;
+        memset(&ms, 0, sizeof(ms));
+        main_state_init(&ms);
+        ms.nMaxTipAge = 0;
+        ms.fCheckpointsEnabled = false;
+        active_chain_move_window_tip(&ms.chain_active, &L->blocks[L->n - 1]);
+        struct sru_ctx ctx = { .active = L, .ext = ext, .n_ext = 2 };
+        SRU_CHECK("run3: stage init", utxo_apply_stage_init(&ms));
+        utxo_apply_stage_set_reader(sru_reader, &ctx);
+        utxo_apply_stage_set_lookup(sru_lookup, &ctx);
+        SRU_CHECK("run3: L seed proof_validate",
+                  seed_proof_validate(progress_store_db(), L, L->n - 1));
+        SRU_CHECK("run3: L drains all", utxo_apply_stage_drain(100) == L->n);
+        sru_register_island();
+        ctx.active = W;
+        active_chain_move_window_tip(&ms.chain_active, &W->blocks[W->n - 1]);
+        SRU_CHECK("run3: W seed proof_validate",
+                  seed_proof_validate(progress_store_db(), W, W->n - 1));
+        (void)utxo_apply_stage_drain(100);
+        SRU_CHECK("run3: island: no unwind below the rung",
+                  utxo_apply_stage_reorg_unwound_total() == 0);
+        SRU_CHECK("run3: island: L stays applied (L-only outpoints present)",
+                  sru_count_l_only_outpoints_absent(progress_store_db()) == 0);
+        island_anchor_unregister();
+        utxo_apply_stage_shutdown();
+        main_state_free(&ms);
+        event_log_close(lg);
+    }
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_stage_reorg_unwind_parity(void);
 int test_stage_reorg_unwind_parity(void)
 {
@@ -591,6 +654,8 @@ int test_stage_reorg_unwind_parity(void)
               "(byte-exact SHA3 UTXO set via STAGE inverse path)", cmt_eq);
     SRU_CHECK("PROOF: every L-only outpoint absent from P1", l_only_absent == 4);
 
+    if (built)
+        failures += sru_run_island_floor(&L, &W, ext);
     branch_free(&L);
     branch_free(&W);
 

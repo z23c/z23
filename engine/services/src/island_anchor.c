@@ -4,6 +4,7 @@
 
 #include "services/island_anchor.h"
 
+#include "base/serialize_le.h"
 #include "chain/chain.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
@@ -100,46 +101,28 @@ bool island_anchor_refuses_fork_at(int32_t fork_height)
 void island_anchor_work_from_be(struct arith_uint256 *out,
                                 const uint8_t be[32])
 {
-    for (int limb = 0; limb < ARITH_UINT256_WIDTH; limb++) {
-        int at = 28 - 4 * limb;
-        out->pn[limb] = ((uint32_t)be[at] << 24) | ((uint32_t)be[at + 1] << 16) |
-                        ((uint32_t)be[at + 2] << 8) | (uint32_t)be[at + 3];
-    }
-}
-
-static void ia_put32(uint8_t *p, int32_t v)
-{
-    uint32_t u = (uint32_t)v;
-    for (int i = 0; i < 4; i++)
-        p[i] = (uint8_t)(u >> (8 * i));
-}
-
-static int32_t ia_get32(const uint8_t *p)
-{
-    uint32_t u = 0;
-    for (int i = 0; i < 4; i++)
-        u |= (uint32_t)p[i] << (8 * i);
-    return (int32_t)u;
+    for (int limb = 0; limb < ARITH_UINT256_WIDTH; limb++)
+        out->pn[limb] = zcl_read_u32_be(be + 28 - 4 * limb);
 }
 
 static void ia_encode(const struct island_anchor *a, uint8_t out[IA_FACT_LEN])
 {
-    ia_put32(out, a->root_height);
+    zcl_write_i32_le(out, a->root_height);
     memcpy(out + 4, a->root_hash.data, 32);
     for (int l = 0; l < ARITH_UINT256_WIDTH; l++)
-        ia_put32(out + 36 + 4 * l, (int32_t)a->root_work.pn[l]);
-    ia_put32(out + 68, a->rung_height);
+        zcl_write_u32_le(out + 36 + 4 * l, a->root_work.pn[l]);
+    zcl_write_i32_le(out + 68, a->rung_height);
     memcpy(out + 72, a->rung_hash.data, 32);
 }
 
 static void ia_decode(const uint8_t in[IA_FACT_LEN], struct island_anchor *a)
 {
     memset(a, 0, sizeof(*a));
-    a->root_height = ia_get32(in);
+    a->root_height = zcl_read_i32_le(in);
     memcpy(a->root_hash.data, in + 4, 32);
     for (int l = 0; l < ARITH_UINT256_WIDTH; l++)
-        a->root_work.pn[l] = (uint32_t)ia_get32(in + 36 + 4 * l);
-    a->rung_height = ia_get32(in + 68);
+        a->root_work.pn[l] = zcl_read_u32_le(in + 36 + 4 * l);
+    a->rung_height = zcl_read_i32_le(in + 68);
     memcpy(a->rung_hash.data, in + 72, 32);
 }
 

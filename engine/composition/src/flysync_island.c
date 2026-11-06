@@ -330,9 +330,19 @@ static bool fsi_datadir_has_chain_state(struct main_state *ms)
                   ms->map_block_index.size > 1);
 }
 
+/* The datadir the boot gate saw; the agent runtime's otherwise. */
+static char g_datadir[1024];
+
+static const char *fsi_datadir(void)
+{
+    return g_datadir[0] ? g_datadir : agent_runtime_context_datadir();
+}
+
 bool flysync_island_boot_gate(const char *datadir, struct main_state *ms,
                               char *why, size_t why_cap)
 {
+    if (datadir)
+        snprintf(g_datadir, sizeof(g_datadir), "%s", datadir);
     sqlite3 *db = progress_store_db();
     enum island_anchor_state st = island_anchor_state_load(db);
     /* A seeded island continues with or without the flag: a respawn or an app
@@ -411,11 +421,18 @@ bool flysync_island_boot_reconcile(struct main_state *ms)
 
 /* ── Phase machine ───────────────────────────────────────────────────────── */
 
+/* Set at boot: a mainnet node whose boot skipped the compiled keystone header
+ * capture because FlySync owned the state source. Fall-back re-arms it, so
+ * normal sync gets exactly what a node without -flysync gets. */
+static _Atomic bool g_rearm_keystone_on_fall_back = false;
+
 static void fsi_fall_back(const char *why)
 {
     checkpoint_header_fetch_disarm();
     island_anchor_note_fallback(progress_store_db(), why);
     fsi_set_phase(FLYSYNC_FELL_BACK);
+    if (atomic_exchange(&g_rearm_keystone_on_fall_back, false))
+        checkpoint_header_fetch_arm_compiled();
 }
 
 static struct main_state *fsi_main_state(void)
@@ -425,7 +442,7 @@ static struct main_state *fsi_main_state(void)
 
 static void fsi_tick_wait(int64_t now)
 {
-    const char *datadir = agent_runtime_context_datadir();
+    const char *datadir = fsi_datadir();
     char *bundle = datadir ? boot_autodetect_consensus_bundle(datadir) : NULL;
     if (bundle) {
         int32_t h = -1;
@@ -484,7 +501,7 @@ static void fsi_tick_walk(int64_t now)
 
 static void fsi_tick_seeded(int64_t now)
 {
-    const char *datadir = agent_runtime_context_datadir();
+    const char *datadir = fsi_datadir();
     if (datadir && boot_consensus_bundle_marker_exists(datadir)) {
         fsi_set_phase(FLYSYNC_DONE);
         LOG_WARN(FSI_SUBSYS, "FlySync: rung bundle installed; header sync "
@@ -494,7 +511,9 @@ static void fsi_tick_seeded(int64_t now)
     char *bundle = datadir ? boot_autodetect_consensus_bundle(datadir) : NULL;
     bool staged = bundle != NULL;
     free(bundle);
-    if (!staged)
+    if (datadir && boot_install_bundle_terminal(datadir))
+        fsi_fall_back("the rung bundle's bounded install budget is spent");
+    else if (!staged)
         fsi_fall_back("the rung bundle is no longer installable (failed or "
                       "removed)");
     else if (now - g_phase_since_ms >= FLYSYNC_INSTALL_TIMEOUT_MS)
@@ -538,6 +557,9 @@ bool flysync_island_boot_after_index(struct app_context *ctx,
         msg_processor_set_header_sync_hold(flysync_island_holds_header_sync);
         state_offer_store_set_height_filter(flysync_island_wants_offer_height);
         net_set_advertise_full_history(false);
+        atomic_store(&g_rearm_keystone_on_fall_back,
+                     ctx && !ctx->regtest && !ctx->testnet &&
+                     !boot_consensus_bundle_marker_exists(ctx->datadir));
         LOG_WARN(FSI_SUBSYS, "FlySync phase %s: header sync %s; NODE_NETWORK "
                  "not advertised (no history below the rung)",
                  flysync_phase_name(p),
@@ -573,6 +595,7 @@ void flysync_island_test_reset(void)
     atomic_store(&g_test_verify, NULL);
     atomic_store(&g_test_now_ms, -1);
     atomic_store(&g_test_rung_set, false);
+    g_datadir[0] = '\0';
     g_walk_attempts = 0;
     g_phase_since_ms = 0;
     island_anchor_unregister();
@@ -592,3 +615,9 @@ void flysync_island_test_set_rung(const struct rom_state_rung *rung)
     atomic_store(&g_test_rung_set, rung != NULL);
 }
 #endif
+
+bool flysync_island_owns_state_source(void)
+{
+    int p = atomic_load(&g_phase);
+    return p != FLYSYNC_OFF && p != FLYSYNC_FELL_BACK;
+}

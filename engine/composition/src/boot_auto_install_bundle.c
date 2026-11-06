@@ -71,6 +71,12 @@ bool boot_install_bundle_pending(const char *datadir)
     return false;
 }
 
+bool boot_install_bundle_terminal(const char *datadir)
+{
+    (void)datadir;
+    return false;
+}
+
 bool boot_install_bundle_consume(const char *datadir, char *out_path,
                                  size_t out_cap)
 {
@@ -415,6 +421,18 @@ bool boot_install_bundle_pending(const char *datadir)
     if (ibr_read(path, &a, b, sizeof(b)) && a == BOOT_INSTALL_BUNDLE_TERMINAL)
         return false; /* terminal: present-but-not-pending */
     return true;
+}
+
+bool boot_install_bundle_terminal(const char *datadir)
+{
+    if (!datadir)
+        return false;
+    char path[512];
+    ibr_path(datadir, path, sizeof(path));
+    int a = 0;
+    char b[PATH_MAX];
+    return access(path, F_OK) == 0 && ibr_read(path, &a, b, sizeof(b)) &&
+           a == BOOT_INSTALL_BUNDLE_TERMINAL;
 }
 
 bool boot_install_bundle_consume(const char *datadir, char *out_path,
@@ -807,7 +825,7 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
      * already holds sovereign installed state. */
     /* -flysync (config/flysync_island.h) walks only the rung window: no
      * keystone capture, no weld, no header-seed import below the rung. */
-    const bool flysync = flysync_island_phase() != FLYSYNC_OFF;
+    const bool flysync = flysync_island_owns_state_source();
     if (!flysync && !ctx->regtest && !ctx->testnet &&
         !boot_consensus_bundle_marker_exists(ctx->datadir))
         checkpoint_header_fetch_arm_compiled();

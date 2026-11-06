@@ -19,6 +19,19 @@
 
 #include <stddef.h>
 
+/* nChainWork from the parent's work plus this entry's proof; a parentless
+ * entry gets its own proof, except the registered FlySync island root, which
+ * keeps the work recorded in its durable fact (services/island_anchor.h).
+ * Declared in services/block_index_loader.h. */
+void block_index_set_chainwork(struct block_index *bi)
+{
+    struct arith_uint256 proof = GetBlockProof(bi);
+    if (bi->pprev)
+        arith_uint256_add(&bi->nChainWork, &bi->pprev->nChainWork, &proof);
+    else if (!island_anchor_seed_root_work(bi))
+        bi->nChainWork = proof;
+}
+
 /* Forward pass over a height-sorted block_index array: recompute nChainWork,
  * nChainTx, skip links, cached branch id, and failed-child propagation from
  * each entry's already-linked pprev. Shared by the legacy LevelDB loader and
@@ -30,12 +43,7 @@ void block_index_forward_pass(struct block_index **sorted,
     for (size_t i = 0; i < count; i++) {
         struct block_index *pindex = sorted[i];
 
-        struct arith_uint256 proof = GetBlockProof(pindex);
-        if (pindex->pprev)
-            arith_uint256_add(&pindex->nChainWork,
-                              &pindex->pprev->nChainWork, &proof);
-        else if (!island_anchor_seed_root_work(pindex))
-            pindex->nChainWork = proof;   /* FlySync root keeps its work */
+        block_index_set_chainwork(pindex);
 
         if (pindex->nTx > 0) {
             if (pindex->pprev) {

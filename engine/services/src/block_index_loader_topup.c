@@ -32,7 +32,6 @@
  * and the active-chain rebuild key on. */
 
 #include "services/block_index_loader.h"
-#include "services/island_anchor.h"
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "chain/pow.h"
@@ -506,12 +505,7 @@ static void topup_compute_inserted_chainwork(struct topup_ctx *c)
           topup_cmp_height);
     for (size_t i = 0; i < c->new_count; i++) {
         struct block_index *bi = c->new_entries[i];
-        struct arith_uint256 proof = GetBlockProof(bi);
-        if (bi->pprev)
-            arith_uint256_add(&bi->nChainWork, &bi->pprev->nChainWork,
-                              &proof);
-        else if (!island_anchor_seed_root_work(bi))
-            bi->nChainWork = proof;   /* FlySync root keeps its work */
+        block_index_set_chainwork(bi);
         block_index_build_skip(bi);
     }
 }
@@ -1062,11 +1056,7 @@ static size_t node_db_link_new_entries(struct main_state *ms,
                 }
             }
         }
-        struct arith_uint256 proof = GetBlockProof(bi);
-        if (bi->pprev)
-            arith_uint256_add(&bi->nChainWork, &bi->pprev->nChainWork, &proof);
-        else if (!island_anchor_seed_root_work(bi))
-            bi->nChainWork = proof;   /* FlySync root keeps its work */
+        block_index_set_chainwork(bi);
         block_index_build_skip(bi);
     }
     return linked;

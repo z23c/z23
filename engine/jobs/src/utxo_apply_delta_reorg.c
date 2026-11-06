@@ -594,10 +594,10 @@ static bool utxo_apply_reorg_fork_below_finality(int fork, int floor_h)
  * durable island-anchor fact is registered is affected. */
 static bool utxo_apply_reorg_island_refuses(int fork, const char **reason)
 {
-    if (!island_anchor_refuses_fork_at((int32_t)fork))
-        return false;
-    *reason = "fork point below the FlySync rung; no state exists below it";
-    return true;
+    bool refuse = island_anchor_refuses_fork_at((int32_t)fork);
+    if (refuse)
+        *reason = "fork point below the FlySync rung; no state exists below it";
+    return refuse;
 }
 
 /* Emit the shared refusal side effects for a below-finality unwind refusal:

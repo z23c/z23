@@ -89,6 +89,11 @@ bool flysync_island_boot_after_index(struct app_context *ctx,
  * none; otherwise (off, fallen back) every height. */
 bool flysync_island_wants_offer_height(int32_t height);
 
+/* True while FlySync owns this node's state source (WAIT..DONE): boot skips the
+ * keystone capture, the weld and the header-seed import. False when off or
+ * fallen back, so a fallen-back node boots exactly like a node without it. */
+bool flysync_island_owns_state_source(void);
+
 /* True while normal getheaders requests must not go out (WAIT/WALK/SEEDED). */
 bool flysync_island_holds_header_sync(void);
 

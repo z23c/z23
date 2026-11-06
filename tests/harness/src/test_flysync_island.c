@@ -44,6 +44,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define FSI_CHECK(desc, cond)                                                \
     do {                                                                     \
@@ -596,6 +597,41 @@ static int fsi_case_contextual(struct fsi_node *n)
     return failures;
 }
 
+/* A seeded island whose rung bundle install budget is spent falls back; while
+ * the budget lasts and the bundle is staged it keeps waiting. */
+static int fsi_case_install_budget(struct fsi_node *n)
+{
+    int failures = 0;
+    char bdir[512], bpath[600];
+    snprintf(bdir, sizeof(bdir), "%s/bundles", n->dir);
+    snprintf(bpath, sizeof(bpath), "%s/consensus-state-bundle-%d.sqlite", bdir,
+             FSI_RUNG_H);
+    FILE *fp = (mkdir(bdir, 0700) == 0) ? fopen(bpath, "w") : NULL;
+    FSI_CHECK("a rung bundle is staged", fp != NULL);
+    if (fp)
+        fclose(fp);
+    FSI_CHECK("install requested", boot_install_bundle_request(n->dir, bpath) == 1);
+    flysync_island_tick();
+    FSI_CHECK("seeded, bundle staged, budget left: still waiting",
+              flysync_island_phase() == FLYSYNC_SEEDED &&
+              flysync_island_owns_state_source());
+    char out[600];
+    for (int i = 0; i <= BOOT_INSTALL_BUNDLE_MAX; i++)
+        (void)boot_install_bundle_consume(n->dir, out, sizeof(out));
+    FSI_CHECK("the install budget is spent",
+              boot_install_bundle_terminal(n->dir));
+    flysync_island_tick();
+    FSI_CHECK("budget spent: FlySync falls back, hold lifts",
+              flysync_island_phase() == FLYSYNC_FELL_BACK &&
+              !flysync_island_holds_header_sync() &&
+              !flysync_island_owns_state_source() &&
+              !island_anchor_registered());
+    FSI_CHECK("the budget fall-back is durable",
+              island_anchor_state_load(progress_store_db()) ==
+              ISLAND_ANCHOR_STATE_FELL_BACK);
+    return failures;
+}
+
 static int fsi_case_island(void)
 {
     int failures = 0;
@@ -616,6 +652,7 @@ static int fsi_case_island(void)
         FSI_CHECK("seeded, not yet installed: only a rung offer is taken",
                   flysync_island_wants_offer_height(FSI_RUNG_H) &&
                   !flysync_island_wants_offer_height(FSI_RUNG_H - 1));
+        failures += fsi_case_install_budget(&n);
     }
     fsi_node_close(&n);
     chain_params_select(CHAIN_MAIN);
@@ -739,7 +776,8 @@ static int fsi_case_boot_gate(void)
     (void)chainstate_insert_block_index((struct chainstate *)&n.ms, &h2);
     FSI_CHECK("a fallen-back datadir continues with normal sync",
               flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
-              flysync_island_phase() == FLYSYNC_FELL_BACK);
+              flysync_island_phase() == FLYSYNC_FELL_BACK &&
+              !flysync_island_owns_state_source());
     state_offer_store_reset();
     fsi_node_close(&n);
 
