@@ -55,6 +55,7 @@
 #include "controllers/wallet_scan.h"
 #include "core/arith_uint256.h"
 #include "json/json.h"
+#include "zjsonp/zjsonp.h"
 #include "kernel/command_registry.h"
 #include "keys/key.h"
 #include "keys/pubkey.h"
@@ -102,6 +103,7 @@
 
 struct wcr_run {
     char wire[WCR_WIRE_CAP];    /* stdout: the one JSON document */
+    size_t wire_len;
     char err[WCR_WIRE_CAP];     /* stderr: everything logged */
     int  rc;
 };
@@ -126,12 +128,14 @@ static bool wcr_restore_fd(int saved, FILE *stream)
     return ok;
 }
 
-static bool wcr_slurp(FILE *f, char *out, size_t cap)
+static bool wcr_slurp(FILE *f, char *out, size_t cap, size_t *length)
 {
     if (fflush(f) != 0 || fseek(f, 0, SEEK_SET) != 0)
         return false;
     size_t n = fread(out, 1, cap - 1, f);
     out[n] = '\0';
+    if (length)
+        *length = n;
     return !ferror(f) && n < cap - 1;
 }
 
@@ -159,12 +163,12 @@ static bool wcr_cap_begin(struct wcr_cap *c, FILE *stream, const char *feed)
 }
 
 /* Put the stream back and, when `out` is given, read what was written. */
-static bool wcr_cap_end(struct wcr_cap *c, char *out, size_t cap)
+static bool wcr_cap_end(struct wcr_cap *c, char *out, size_t cap, size_t *length)
 {
     fflush(c->stream);
     bool ok = wcr_restore_fd(c->saved, c->stream);
     if (ok && out)
-        ok = wcr_slurp(c->tmp, out, cap);
+        ok = wcr_slurp(c->tmp, out, cap, length);
     if (c->tmp)
         fclose(c->tmp);
     return ok;
@@ -183,9 +187,9 @@ static bool wcr_cli_args(const char *const *args, int nargs,
         run->rc = zcl_native_command_main("core", args, nargs, "", 0,
                                           CHAIN_MAIN, false);
     }
-    ok = wcr_cap_end(&in, NULL, 0) && ok;
-    ok = wcr_cap_end(&out, run->wire, sizeof(run->wire)) && ok;
-    ok = wcr_cap_end(&err, run->err, sizeof(run->err)) && ok;
+    ok = wcr_cap_end(&in, NULL, 0, NULL) && ok;
+    ok = wcr_cap_end(&out, run->wire, sizeof(run->wire), &run->wire_len) && ok;
+    ok = wcr_cap_end(&err, run->err, sizeof(run->err), NULL) && ok;
     return ok;
 }
 
@@ -658,7 +662,7 @@ static bool scan_is_not_raised(struct node_db *ndb, struct wcr_chain *k)
     if (ok)
         (void)wallet_scan_blocks(ndb, &k->chain, w, "/nonexistent", 0, 500);
     char log[4096] = {0};
-    ok = wcr_cap_end(&cap, log, sizeof(log)) && ok;
+    ok = wcr_cap_end(&cap, log, sizeof(log), NULL) && ok;
     free(w);
     return ok && strstr(log, "range empty") == NULL &&
            strstr(log, "no wallet keys") != NULL;
@@ -2126,6 +2130,96 @@ static bool wcr_recovery_new(struct wcr_run *run)
     return wcr_cli_args(args, 4, "", run);
 }
 
+/* Inspect every decoded member name, including nested/duplicate members.
+ * Phrase values may contain BIP39's "seed"; captured bytes must form one object. */
+static bool wcr_reply_has_no_secret_fields(const char *wire, size_t length)
+{
+    zjsonp parser;
+    zjsonp_event event;
+    zjsonp_init(&parser, wire, length);
+    if (zjsonp_next(&parser, &event) != ZJRP_OK || event.kind != ZJRP_OBJ_OPEN)
+        return false;
+    zjsonp_status status;
+    while ((status = zjsonp_next(&parser, &event)) == ZJRP_OK) {
+        if (event.kind != ZJRP_KEY)
+            continue;
+        char key[7];
+        size_t decoded = zjsonp_str_decode(wire, &event, key, sizeof(key));
+        if (decoded == SIZE_MAX ||
+            (decoded == 4 && memcmp(key, "seed", 4) == 0) ||
+            (decoded == 7 && memcmp(key, "entropy", 7) == 0))
+            return false;
+    }
+    return status == ZJRP_DONE;
+}
+
+static int t_recovery_reply_capture(void)
+{
+    int failures = 0;
+    static const char nul_suffix[] = "{}\0{\"seed\":null}";
+    WCR_CHECK("physical NUL cannot hide additional reply bytes",
+              !wcr_reply_has_no_secret_fields(nul_suffix, sizeof(nul_suffix) - 1));
+    FILE *capture = tmpfile();
+    char captured[64];
+    size_t captured_len = 0;
+    bool read = capture &&
+        fwrite(nul_suffix, 1, sizeof(nul_suffix) - 1, capture) == sizeof(nul_suffix) - 1 &&
+        wcr_slurp(capture, captured, sizeof(captured), &captured_len);
+    if (capture)
+        read = fclose(capture) == 0 && read;
+    WCR_CHECK("stdout capture retains the physical length past a NUL",
+              read && captured_len == sizeof(nul_suffix) - 1 &&
+              !wcr_reply_has_no_secret_fields(captured, captured_len));
+    return failures;
+}
+
+static int t_recovery_reply_fields(void)
+{
+    int failures = 0;
+    uint8_t entropy[32] = {0};
+    char phrase[MNEMONIC_MAX_PHRASE_SIZE] = "", wire[1024];
+    int seed_index = mnemonic_wordlist_find("seed");
+    bool made = seed_index >= 0 && seed_index < BIP39_WORDLIST_SIZE;
+    if (made) {
+        /* The first eleven entropy bits select the first BIP39 word. */
+        entropy[0] = (uint8_t)(seed_index >> 3);
+        entropy[1] = (uint8_t)((seed_index & 7) << 5);
+        made = mnemonic_from_entropy(entropy, sizeof(entropy), phrase, sizeof(phrase));
+    }
+    WCR_CHECK("deterministic recovery fixture is a valid phrase beginning with seed",
+              made && mnemonic_validate(phrase) && strncmp(phrase, "seed ", 5) == 0);
+    int size = snprintf(wire, sizeof(wire), "{\"data\":{\"phrase\":\"%s\",\"words\":24}}", phrase);
+    WCR_CHECK("a valid recovery phrase containing seed is not a secret field",
+              made && size > 0 && (size_t)size < sizeof(wire) &&
+              wcr_reply_has_no_secret_fields(wire, (size_t)size));
+    static const char *const allowed[] = {
+        "{}", "{\"data\":{\"phrase\":\"seed entropy\"}}",
+        "{\"seedling\":null,\"entropy_hint\":false}",
+        "{\"data\":[\"seed\",{\"message\":\"entropy\"}]}\n",
+        "{\"seed\\u0000suffix\":null}"
+    };
+    for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++)
+        WCR_CHECK("values and distinct decoded member names remain allowed",
+                  wcr_reply_has_no_secret_fields(allowed[i], strlen(allowed[i])));
+    static const char *const refused[] = {
+        "{\"seed\":null}", "{\"entropy\":null}",
+        "{\"data\":{\"seed\":\"bytes\"}}",
+        "{\"data\":[{\"entropy\":false}]}",
+        "{\"s\\u0065ed\":null}", "{\"\\u0065ntropy\":null}",
+        "{\"data\":{},\"data\":{\"seed\":null}}",
+        "", "null", "[]", "{\"data\":", "{\"data\":{}} trailing",
+        "{} {}", "{\"data\":\"\\uZZZZ\"}", "{\"data\":\"\xff\"}"
+    };
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++)
+        WCR_CHECK("forbidden members or incomplete reply documents refuse",
+                  !wcr_reply_has_no_secret_fields(refused[i], strlen(refused[i])));
+    failures += t_recovery_reply_capture();
+    memory_cleanse(entropy, sizeof(entropy));
+    memory_cleanse(phrase, sizeof(phrase));
+    memory_cleanse(wire, sizeof(wire));
+    return failures;
+}
+
 static int t_recovery_new(void)
 {
     int failures = 0;
@@ -2140,8 +2234,8 @@ static int t_recovery_new(void)
               strlen(p1) > 24 * 3);
     WCR_CHECK("two calls give different phrases", strcmp(p1, p2) != 0);
     WCR_CHECK("the reply carries no seed or entropy field",
-              strstr(a.wire, "seed") == NULL &&
-              strstr(a.wire, "entropy") == NULL);
+              ran && wcr_reply_has_no_secret_fields(a.wire, a.wire_len) &&
+              wcr_reply_has_no_secret_fields(b.wire, b.wire_len));
     WCR_CHECK("the phrase is in the reply once and never on standard error",
               wcr_count(a.wire, strlen(a.wire), p1, strlen(p1)) == 1 &&
               strstr(a.err, p1) == NULL);
@@ -3059,6 +3153,7 @@ int test_wallet_create(void)
     failures += t_live_wallet_refused();
     failures += t_create_failure_codes();
     failures += t_recovery_new();
+    failures += t_recovery_reply_fields();
     failures += t_restore_at_local_tip();
     failures += t_scan_positive_control();
     failures += t_unsynced_create();
