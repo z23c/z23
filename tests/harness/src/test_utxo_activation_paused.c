@@ -61,6 +61,7 @@ void tip_wedged_resnapshot_test_set_runtime(
 int tip_wedged_resnapshot_test_remedy_calls(void);
 int tip_wedged_resnapshot_test_recovery_accepted(void);
 int tip_wedged_resnapshot_test_last_manifest_height(void);
+const char *tip_wedged_resnapshot_test_last_refusal(void);
 
 struct fake_clock {
     _Atomic int64_t wall_ms;
@@ -1282,6 +1283,7 @@ static int uap_run_snapshot_recovery_case(void)
 /* A refusal retries on the condition's own backoff, the same cadence as a
  * recovery nobody answers, and never occupies the service. */
 static bool uap_no_peer_retries_on_backoff(struct fake_clock *clock,
+                                           struct node_db *ndb,
                                            const struct snapshot_sync_service *svc)
 {
     struct watchdog_stats wd;
@@ -1290,14 +1292,25 @@ static bool uap_no_peer_retries_on_backoff(struct fake_clock *clock,
     fake_clock_set(clock, 7001);
     condition_engine_tick();
     ok = ok && tip_wedged_resnapshot_test_remedy_calls() == 1;
-    for (int i = 1; i <= 2; i++) {
-        fake_clock_set(clock, 7000 + i * 301);
-        condition_engine_tick();
-        ok = ok && tip_wedged_resnapshot_test_remedy_calls() == 1 + i;
-        ok = ok && tip_wedged_resnapshot_test_recovery_accepted() == 0;
-        ok = ok && svc->state == SNAPSYNC_IDLE;
-        ok = ok && condition_engine_get_active_count() == 1;
-    }
+    fake_clock_set(clock, 7301);
+    condition_engine_tick();
+    ok = ok && tip_wedged_resnapshot_test_remedy_calls() == 2;
+    ok = ok && strcmp(tip_wedged_resnapshot_test_last_refusal(),
+                      "no_recovery_peer") == 0;
+
+    /* With a peer to name, a mirror with no cursor is a different refusal. */
+    tip_wedged_resnapshot_test_set_recovery_peer(UAP_RECOVERY_PEER);
+    ok = ok && node_db_exec(ndb, "DELETE FROM node_state WHERE key='"
+                                 UTXO_MIRROR_SYNC_CURSOR_KEY "'");
+    fake_clock_set(clock, 7602);
+    condition_engine_tick();
+    ok = ok && tip_wedged_resnapshot_test_remedy_calls() == 3;
+    ok = ok && strcmp(tip_wedged_resnapshot_test_last_refusal(),
+                      "manifest_unavailable") == 0;
+
+    ok = ok && tip_wedged_resnapshot_test_recovery_accepted() == 0;
+    ok = ok && svc->state == SNAPSYNC_IDLE;
+    ok = ok && condition_engine_get_active_count() == 1;
     sync_monitor_get_stats(&wd);
     return ok && wd.last_recovery != WATCHDOG_SNAPSHOT_RESNAPSHOT;
 }
@@ -1350,6 +1363,8 @@ static int uap_run_no_recovery_peer_case(void)
     ok = ok && tip_wedged_resnapshot_test_remedy_calls() == 1;
     ok = ok && tip_wedged_resnapshot_test_recovery_accepted() == 0;
     ok = ok && tip_wedged_resnapshot_test_last_manifest_height() == -1;
+    ok = ok && strcmp(tip_wedged_resnapshot_test_last_refusal(),
+                      "no_recovery_peer") == 0;
     ok = ok && svc.state == SNAPSYNC_IDLE;
     sync_monitor_get_stats(&wd);
     ok = ok && wd.last_recovery != WATCHDOG_SNAPSHOT_RESNAPSHOT;
@@ -1357,7 +1372,7 @@ static int uap_run_no_recovery_peer_case(void)
     UAP_CHECK("tip_wedged_resnapshot with no peer to ask stays idle", ok);
 
     UAP_CHECK("tip_wedged_resnapshot refusal retries on backoff, service idle",
-              uap_no_peer_retries_on_backoff(&clock, &svc));
+              uap_no_peer_retries_on_backoff(&clock, &ndb, &svc));
     snapsync_reset(&svc);
     node_db_close(&ndb);
     main_state_free(&ms);

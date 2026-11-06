@@ -791,7 +791,7 @@ static int e2e_case_cursor_shapes_refuse(void)
     TEST("offer e2e: only a well-formed cursor with rows under it names an "
          "anchor") {
         struct snapshot_offer_anchor a;
-        const int64_t bad_values[] = { -1, 0, 1, (int64_t)INT32_MAX + 2 };
+        const int64_t bad_values[] = { -1, 0, (int64_t)INT32_MAX + 2 };
         uint8_t short_blob = 2;
 
         ASSERT(e2e_setup());
@@ -823,9 +823,34 @@ static int e2e_case_cursor_shapes_refuse(void)
     return failures;
 }
 
+/* Everything else about this mirror would serve: one height up it reads, so at
+ * cursor 1 the only thing left to refuse is the cursor naming genesis. */
+static int e2e_case_genesis_cursor_refuses(void)
+{
+    int failures = 0;
+
+    TEST("offer e2e: a cursor that names genesis names no anchor") {
+        struct snapshot_offer_anchor a;
+
+        ASSERT(e2e_setup());
+        ASSERT(node_db_exec(&g.ndb_a, "UPDATE utxos SET height=0"));
+        ASSERT(node_db_state_set_int(&g.ndb_a, UTXO_MIRROR_SYNC_CURSOR_KEY, 2));
+        ASSERT_RESULT_OK(snapshot_offer_anchor_read(g.db_path, &a));
+        ASSERT(a.height == 1);
+
+        ASSERT(node_db_state_set_int(&g.ndb_a, UTXO_MIRROR_SYNC_CURSOR_KEY, 1));
+        ASSERT(!snapshot_offer_anchor_read(g.db_path, &a).ok);
+        PASS();
+    } _test_next:;
+    e2e_teardown();
+    return failures;
+}
+
 int test_snapshot_offer_e2e(void)
 {
     int failures = 0;
+
+    failures += e2e_case_genesis_cursor_refuses();
 
     failures += e2e_case_honest_offer_is_staged_and_contained();
     failures += e2e_case_exact_chunk_multiple_reaches_the_end();

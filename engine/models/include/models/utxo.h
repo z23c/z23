@@ -137,7 +137,7 @@ bool db_utxo_insert_raw(struct node_db *ndb, const struct db_utxo *u);
 /* Serialize all UTXOs to a binary snapshot file in wire format.
  * File format: sequence of chunks, each: entry_count(4LE) + entries.
  * Each entry: txid(32) + vout(4) + value(8) + height(4) + coinbase(1) +
- * compact_size + script (capped at 520 bytes).
+ * compact_size + script (whole; one past UINT16_MAX fails the write).
  * Uses db_utxo_each() internally. Returns total UTXOs written, or -1 when
  * opening, writing, seeking, or closing the output fails.
  * chunk_size = UTXOs per chunk (default 500).

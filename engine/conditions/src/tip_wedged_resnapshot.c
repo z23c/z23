@@ -38,6 +38,8 @@ static _Atomic int g_recovery_accepted;
 static _Atomic int g_last_manifest_height = -1;
 static _Atomic int g_last_witness_local_height = -1;
 static _Atomic int g_last_witness_snapsync_state = SNAPSYNC_IDLE;
+/* Why the last remedy started nothing; always a string literal. */
+static const char *_Atomic g_last_refusal = "none";
 
 #ifdef ZCL_TESTING
 static struct node_db *g_test_ndb;
@@ -179,6 +181,20 @@ static bool detect_tip_wedged_resnapshot(void)
     return true;
 }
 
+static enum condition_remedy_result refuse_recovery(const char *refusal,
+                                                    const char *why,
+                                                    enum tip_wedged_trigger trigger,
+                                                    int target)
+{
+    atomic_store(&g_last_refusal, refusal);
+    LOG_WARN("condition", "[condition:tip_wedged_resnapshot] trigger=%s target=%d local=%d best=%d result=%s: %s", trigger_name(trigger), target, atomic_load(&g_local_height_at_detect), atomic_load(&g_best_header_at_detect), refusal, why);
+    event_emitf(EV_SYNC_STATE_CHANGE, 0,
+                "condition tip_wedged_resnapshot result=failed "
+                "reason=%s target=%d",
+                refusal, target);
+    return COND_REMEDY_FAILED;
+}
+
 static enum condition_remedy_result remedy_tip_wedged_resnapshot(void)
 {
     struct node_db *ndb = runtime_ndb();
@@ -202,16 +218,17 @@ static enum condition_remedy_result remedy_tip_wedged_resnapshot(void)
         return COND_REMEDY_FAILED;
     }
 
-    if (!snapsync_build_local_recovery_manifest(ndb, &manifest,
-                                                recovery_peer_id()).ok) {
-        LOG_WARN("condition", "[condition:tip_wedged_resnapshot] trigger=%s target=%d " "local=%d best=%d result=manifest_unavailable", trigger_name(trigger), target, atomic_load(&g_local_height_at_detect), atomic_load(&g_best_header_at_detect));
-        event_emitf(EV_SYNC_STATE_CHANGE, 0,
-                    "condition tip_wedged_resnapshot result=failed "
-                    "reason=manifest_unavailable target=%d",
-                    target);
-        return COND_REMEDY_FAILED;
-    }
+    uint32_t peer_id = recovery_peer_id();
+    if (peer_id == 0)
+        return refuse_recovery("no_recovery_peer",
+                               "nothing selects a peer to ask", trigger, target);
+    struct zcl_result built =
+        snapsync_build_local_recovery_manifest(ndb, &manifest, peer_id);
+    if (!built.ok)
+        return refuse_recovery("manifest_unavailable", built.message, trigger,
+                               target);
 
+    atomic_store(&g_last_refusal, "none");
     atomic_store(&g_last_manifest_height, manifest.height);
     bool accepted = snapsync_request_recovery(svc, target, &manifest).ok;
     atomic_store(&g_recovery_accepted, accepted ? 1 : 0);
@@ -302,9 +319,11 @@ static bool detail_tip_wedged_resnapshot(struct json_value *out)
 
     bool ok = push_tip_wedged_detect_fields(out, current_local);
     ok = ok && push_tip_wedged_recovery_fields(out, st);
+    ok = ok && json_push_kv_str(out, "last_refusal",
+                                atomic_load(&g_last_refusal));
     ok = ok && json_push_kv_str(
         out, "remedy_contract",
-        "snapshot recovery is witnessed when local height reaches target or snapshot sync completes");
+        "no snapshot recovery starts until a peer is selected to ask, and last_refusal says why none did; clears when local height reaches target or a snapshot sync completes");
     return ok;
 }
 
@@ -342,6 +361,7 @@ void tip_wedged_resnapshot_test_set_recovery_peer(uint32_t peer_id)
 void tip_wedged_resnapshot_test_reset(void)
 {
     atomic_store(&g_test_recovery_peer, 0);
+    atomic_store(&g_last_refusal, "none");
     atomic_store(&g_trigger_at_detect, TWR_TRIGGER_NONE);
     atomic_store(&g_local_height_at_detect, -1);
     atomic_store(&g_best_header_at_detect, -1);
@@ -372,6 +392,11 @@ int tip_wedged_resnapshot_test_remedy_calls(void)
 int tip_wedged_resnapshot_test_recovery_accepted(void)
 {
     return atomic_load(&g_recovery_accepted);
+}
+
+const char *tip_wedged_resnapshot_test_last_refusal(void)
+{
+    return atomic_load(&g_last_refusal);
 }
 
 int tip_wedged_resnapshot_test_last_manifest_height(void)

@@ -2,8 +2,8 @@
  *
  * Boot snapshot-offer worker — the fast-sync snapshot offer + manifest
  * builder, lifted out of boot_background_workers.c so that file stays under
- * the E1 800-line ceiling. PURE relocation: the worker body is byte-identical
- * to its prior home; only its surrounding TU changed.
+ * the E1 800-line ceiling. The offer's height, hash and work come from
+ * services/snapshot_offer_anchor.h.
  *
  * UTXO snapshot export stays opt-in (ZCL_PUBLISH_FASTSYNC_ON_BOOT) because
  * it takes live DB read locks. Block-piece swarm publishing is default-on
@@ -242,6 +242,17 @@ static bool snapshot_offer_payload_authority_is_bound(char *reason,
         return override != 0;
     }
 #endif
+    /* Before this can ever return true, besides the binding above:
+     * - a size bound on chunks of long scripts sent by
+     *   msgprocessor_snapshot_serve.c;
+     * - the MMB root read inside the anchor's transaction, and the MMR rows
+     *   below the anchor checked against the active chain;
+     * - a partial read of the mirror fails the SHA3 root rather than hashing
+     *   what it got (utxo_commitment.c);
+     * - the anchor's mirror read, a row in the reader freeze list by way of
+     *   utxo_mirror_sync_service.c, moved to the kernel coins store;
+     * - a real check of the genesis row's status; the two-fixture proof seeds
+     *   its rows by hand. */
     if (reason && reason_size)
         (void)snprintf(reason, reason_size,
                        "snapshot_payload_authority_binding_incomplete");
