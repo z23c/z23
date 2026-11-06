@@ -277,8 +277,9 @@ static bool wrc_persisted_columns_valid(sqlite3_stmt *s)
            sqlite3_column_bytes(s, 3) == 11 && sqlite3_column_bytes(s, 4) == 32;
 }
 
-/* Public fields are accepted only with a structurally valid encrypted xsk. */
-static bool wrc_persisted_row_address(sqlite3_stmt *s, struct wallet_recovery_report *out)
+/* Refuse an unsafe selected account rather than choosing a different one. */
+static bool wrc_persisted_row_address(struct wallet_sqlite *ws, sqlite3_stmt *s,
+                                      struct wallet_recovery_report *out)
 {
     if (!wrc_persisted_columns_valid(s))
         return false; // raw-return-ok:invalid-row
@@ -290,31 +291,92 @@ static bool wrc_persisted_row_address(sqlite3_stmt *s, struct wallet_recovery_re
     if (!ivk || !xsk || !fv || !div || !pk ||
         !wks_envelope_iterations(xsk, (size_t)sqlite3_column_bytes(s, 1)))
         return false;
-    struct zip32_xfvk xfvk;
+    struct sapling_key_entry acct = {0};
     uint8_t derived_ivk[32], derived_pk[32];
-    memcpy(&xfvk, fv, sizeof(xfvk));
-    sapling_crh_ivk(xfvk.fvk.ak, xfvk.fvk.nk, derived_ivk);
+    memcpy(&acct.xfvk, fv, sizeof(acct.xfvk));
+    sapling_crh_ivk(acct.xfvk.fvk.ak, acct.xfvk.fvk.nk, derived_ivk);
     if (memcmp(ivk, derived_ivk, 32) ||
-        !sapling_ivk_to_pkd(ivk, div, derived_pk) || memcmp(pk, derived_pk, 32))
+        !sapling_ivk_to_pkd(ivk, div, derived_pk) || memcmp(pk, derived_pk, 32)) {
+        memory_cleanse(&acct, sizeof(acct));
         return false;
+    }
+    memcpy(acct.ivk, ivk, 32);
+    memcpy(acct.diversifier, div, ZC_DIVERSIFIER_SIZE);
+    memcpy(acct.pk_d, pk, 32);
+    acct.used = true;
+    uint8_t current_div[ZC_DIVERSIFIER_SIZE], current_pk[32];
+    enum wallet_diversifier_current current =
+        wallet_sqlite_diversifier_current(ws, &acct, current_div, current_pk);
+    if (current == WALLET_DIVERSIFIER_ABSENT) {
+        memcpy(current_div, acct.diversifier, sizeof(current_div));
+        memcpy(current_pk, acct.pk_d, sizeof(current_pk));
+    }
     const struct chain_params *cp = chain_params_get();
-    return cp && sapling_encode_payment_address(div, pk,
+    bool ok = current != WALLET_DIVERSIFIER_INVALID && cp &&
+        sapling_encode_payment_address(current_div, current_pk,
             cp->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS],
-            out->persisted_shielded_address,
-            sizeof(out->persisted_shielded_address));
+            out->persisted_shielded_address, sizeof(out->persisted_shielded_address));
+    memory_cleanse(&acct, sizeof(acct));
+    return ok;
 }
 
-static void wrc_persisted_address(sqlite3 *db, struct wallet_recovery_report *out)
+/* SQL ordering agrees with the live uint32 and bytewise account ordering. */
+static bool wrc_account_order_row_valid(sqlite3_stmt *s)
+{
+    sqlite3_int64 index = sqlite3_column_int64(s, 1);
+    return sqlite3_column_type(s, 0) == SQLITE_BLOB &&
+           sqlite3_column_bytes(s, 0) == 32 &&
+           sqlite3_column_type(s, 1) == SQLITE_INTEGER &&
+           index >= 0 && (uint64_t)index <= UINT32_MAX;
+}
+
+static bool wrc_account_order_valid(sqlite3 *db)
 {
     sqlite3_stmt *s = NULL;
-    const char *sql = "SELECT ivk,xsk,xfvk,diversifier,pk_d FROM wallet_sapling_keys "
-                      "ORDER BY child_index,ivk";
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK)
-        return;
-    while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        if (wrc_persisted_row_address(s, out))
-            break;
+    if (sqlite3_prepare_v2(db,
+            "SELECT ivk,child_index FROM wallet_sapling_keys LIMIT ?",
+            -1, &s, NULL) != SQLITE_OK || !s) {
+        if (s) sqlite3_finalize(s);
+        return false;
     }
+    if (sqlite3_bind_int(s, 1, MAX_SAPLING_KEYS + 1) != SQLITE_OK) {
+        sqlite3_finalize(s);
+        return false;
+    }
+    size_t count = 0;
+    int rc;
+    bool ok = true;
+    while ((rc = AR_STEP_ROW_READONLY(s)) == SQLITE_ROW) {
+        if (++count > MAX_SAPLING_KEYS || !wrc_account_order_row_valid(s)) {
+            ok = false;
+            break;
+        }
+    }
+    ok = ok && rc == SQLITE_DONE;
+    sqlite3_finalize(s);
+    return ok;
+}
+
+static void wrc_persisted_address(struct wallet_sqlite *ws,
+                                  struct wallet_recovery_report *out)
+{
+    if (!wrc_account_order_valid(ws->db)) {
+        out->persisted_address_unavailable = true;
+        return;
+    }
+    sqlite3_stmt *s = NULL;
+    const char *sql = "SELECT ivk,xsk,xfvk,diversifier,pk_d FROM wallet_sapling_keys "
+                      "ORDER BY child_index,ivk LIMIT 1";
+    if (sqlite3_prepare_v2(ws->db, sql, -1, &s, NULL) != SQLITE_OK || !s) {
+        if (s) sqlite3_finalize(s);
+        out->persisted_address_unavailable = true;
+        return;
+    }
+    int rc = AR_STEP_ROW_READONLY(s);
+    if (rc == SQLITE_ROW)
+        out->persisted_address_unavailable = !wrc_persisted_row_address(ws, s, out);
+    else if (rc != SQLITE_DONE)
+        out->persisted_address_unavailable = true;
     sqlite3_finalize(s);
 }
 
@@ -405,7 +467,7 @@ struct zcl_result wallet_recovery_status(const char *datadir,
     }
 
     if (out->inspect_persisted_address)
-        wrc_persisted_address(ndb->db, out);
+        wrc_persisted_address(&ws, out);
 
     out->keys_before = db_wallet_key_count(ndb);
     out->keys_after = out->keys_before;

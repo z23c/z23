@@ -1311,13 +1311,13 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
 ZCL_COMMAND_READY_READ(
     "core.wallet.shielded.latest", "core.wallet.shielded", "",
-    "Newest shielded receive address, or null",
-    "Read-only: the most recently added Sapling address in the keystore as "
-    "{address, state}: state ok with the address, none with null for a "
-    "wallet with no shielded key, or keys_unavailable with null when the "
-    "wallet is locked and holds none. It never derives, imports or stores a "
-    "key or address under any path; use core.wallet.shielded.address to "
-    "create one.", 0,
+    "Current shielded receive address, or null",
+    "Read-only: the selected receive account's latest durable address "
+    "reservation, or its default address if no reservation exists. A "
+    "reservation can have been recorded without reaching the caller. "
+    "State ok carries an address; none, keys_unavailable and "
+    "address_unavailable carry null. Creates and stores nothing; use "
+    "core.wallet.shielded.receive to reserve a new receive address.", 0,
     "shielded,sapling,address,latest,receive",
     "zcl.command.empty_input.v1", "zcl.wallet_latest_address.v1", "", "",
     "z23 core wallet shielded latest",

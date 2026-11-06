@@ -670,15 +670,18 @@ bool sapling_keystore_copy_seed(struct sapling_keystore *sks, uint8_t seed[32])
     return ok;
 }
 
-bool sapling_keystore_copy_account(struct sapling_keystore *sks,
-                                    struct sapling_key_entry *out)
+static bool sapling_keystore_copy_account_mode(struct sapling_keystore *sks,
+                                               struct sapling_key_entry *out,
+                                               bool receive_order)
 {
     memset(out, 0, sizeof(*out));
     zcl_mutex_lock(&sks->cs);
     const struct sapling_key_entry *acct = NULL;
     for (size_t i = 0; i < sks->num_keys; i++) {
         const struct sapling_key_entry *e = &sks->keys[i];
-        if (e->used && (!acct || e->child_index < acct->child_index))
+        if (e->used && (!acct || e->child_index < acct->child_index ||
+                        (receive_order && e->child_index == acct->child_index &&
+                         memcmp(e->ivk, acct->ivk, 32) < 0)))
             acct = e;
     }
     if (acct) {
@@ -692,6 +695,18 @@ bool sapling_keystore_copy_account(struct sapling_keystore *sks,
     }
     zcl_mutex_unlock(&sks->cs);
     return acct != NULL;
+}
+
+bool sapling_keystore_copy_account(struct sapling_keystore *sks,
+                                    struct sapling_key_entry *out)
+{
+    return sapling_keystore_copy_account_mode(sks, out, false);
+}
+
+bool sapling_keystore_copy_receive_account(struct sapling_keystore *sks,
+                                            struct sapling_key_entry *out)
+{
+    return sapling_keystore_copy_account_mode(sks, out, true);
 }
 
 bool sapling_account_diversified_address(

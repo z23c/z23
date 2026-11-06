@@ -1870,6 +1870,64 @@ static void test_receive_replies(void)
     wallet_screens_close();
 }
 
+static void test_receive_unavailable(void)
+{
+    uint8_t symbols[69] = {2};
+    char address[92], live[256], offline[512];
+    CHECK(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
+    snprintf(live, sizeof(live), "{\"ok\":true,\"data\":{\"address\":\"%s\",\"state\":\"ok\"}}", address);
+    start(false);
+    fake.identity = "confirmed-wallet-one"; fake.latest = live;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(wallet_screens_set_amount("1.25"));
+    wallet_screens_close();
+    fake.setup_address = address; fake.setup_generation = 1;
+    fake.latest = "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_latest_address.v1\",\"address\":null,\"state\":\"address_unavailable\"}}";
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) < 0);
+    CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) < 0);
+    CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_RETRY_ADDRESS) >= 0);
+    CHECK(has("cannot be checked") && !has("no receive address yet"));
+    int before = count_ops("receive");
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);
+    CHECK(count_ops("receive") == before);
+    fake.latest = live;
+    tap(WALLET_ACT_RETRY_ADDRESS, 0, WALLET_STAY);
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) >= 0);
+    CHECK(!strstr(text_at(snap(), find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount="));
+    CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0);
+    wallet_screens_close();
+
+    start(false);
+    fake.latest = "{\"ok\":true,\"data\":{\"address\":null,\"state\":\"keys_unavailable\"}}";
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(has("cannot be checked") && !has("no receive address yet"));
+    CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) < 0);
+    fake.latest = "{\"ok\":true,\"data\":{\"address\":null,\"state\":\"none\"}}";
+    tap(WALLET_ACT_RETRY_ADDRESS, 0, WALLET_STAY);
+    CHECK(has("no receive address yet"));
+    CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0);
+    wallet_screens_close();
+
+    start(false);
+    fake.node_up = false; fake.identity = "confirmed-wallet-one";
+    fake.offline = "{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\",\"facts\":{\"receive_address_status\":\"unavailable\"}}}";
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(has("cannot be checked") && !has("no receive address yet"));
+    CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) < 0);
+    CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_RETRY_ADDRESS) >= 0);
+    before = count_ops("receive");
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);
+    CHECK(count_ops("receive") == before);
+    snprintf(offline, sizeof(offline),
+        "{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\",\"facts\":{\"persisted_shielded_address\":\"%s\"}}}", address);
+    fake.offline = offline;
+    tap(WALLET_ACT_RETRY_ADDRESS, 0, WALLET_STAY);
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) >= 0);
+    CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0);
+    wallet_screens_close();
+}
+
 static void test_receive_without_new_address(void)
 {
     struct wallet_screen *s;
@@ -2833,6 +2891,7 @@ int main(int argc, char **argv)
     test_funds_action_positions();
     test_receive_amount_navigation();
     test_receive_new_address();
+    test_receive_unavailable();
     test_offline_receive();
     test_preload_arrives_on_open_receive();
     test_receive_copy();

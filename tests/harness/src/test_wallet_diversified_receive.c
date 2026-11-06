@@ -21,6 +21,7 @@
 #include "controllers/rpc_client.h"
 #include "controllers/wallet_activity.h"
 #include "controllers/wallet_controller.h"
+#include "controllers/wallet_native_handlers.h"
 #include "controllers/wallet_helpers.h"
 #include "controllers/wallet_shielded_internal.h"
 #include "controllers/wallet_shielded_controller.h"
@@ -223,9 +224,11 @@ static bool wdr_receive(struct wdr *f, char *out, size_t size)
     return true;
 }
 
+static bool wdr_live_latest(struct wdr *f, char *out, size_t size);
+
 static bool wdr_account(struct wdr *f, struct sapling_key_entry *acct)
 {
-    return sapling_keystore_copy_account(&f->w->sapling_keys, acct);
+    return sapling_keystore_copy_receive_account(&f->w->sapling_keys, acct);
 }
 
 static bool wdr_encode(const uint8_t d[11], const uint8_t pk_d[32], char *out,
@@ -585,8 +588,14 @@ static int test_crash_after_index_write(void)
         bool failed = !wdr_receive(&f, burnt, sizeof(burnt));
         wallet_receive_fault_after_reserve_for_test(false);
         ASSERT(failed);
+        /* The counter records the burned reservation, not proof of delivery. */
+        char current[128];
+        ASSERT(wdr_expected_from(&acct, start, 1, want, sizeof(want)));
+        ASSERT(wdr_live_latest(&f, current, sizeof(current)));
+        ASSERT_STR_EQ(current, want);
 
         /* New process: reopen the database and reload the wallet. */
+
         wdr_close(&f);
         ASSERT(wdr_boot(&f));
         ASSERT(wdr_receive(&f, again, sizeof(again)));
@@ -1395,10 +1404,210 @@ static int test_receive_cost(void)
 }
 
 
+static bool wdr_live_latest(struct wdr *f, char *out, size_t size)
+{
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_table_execute(f->tbl, "walletlatestaddress", &params, &result);
+    const char *schema = json_get_str(json_get(&result, "schema"));
+    const char *value = json_get_str(json_get(&result, "address"));
+    ok = ok && result.type == JSON_OBJ && schema &&
+         !strcmp(schema, "zcl.wallet_latest_address.v1") && value;
+    if (ok) snprintf(out, size, "%s", value);
+    json_free(&params);
+    json_free(&result);
+    return ok;
+}
+
+static bool wdr_offline_current(struct wdr *f, char *out, size_t size)
+{
+    char pid[320];
+    snprintf(pid, sizeof(pid), "%s/zclassic23.pid", f->dir);
+    int fd = open(pid, O_CREAT | O_RDWR, 0600);
+    if (fd < 0) return false;
+    close(fd);
+    struct json_value input = {0};
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "datadir", f->dir);
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.wallet_recovery_status.v1");
+    if (ok) zcl_native_handle_wallet_recovery_status(&request, &reply);
+    const char *value = json_get_str(json_get(&reply.data, "persisted_shielded_address"));
+    ok = ok && !strcmp(reply.error.code, "WALLET_LOCKED") && value &&
+         strlen(value) < size;
+    if (ok) snprintf(out, size, "%s", value);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
+}
+
+/* New is durable: the ordinary read must return it before and after boot. */
+static int test_latest_after_new_and_restart(void)
+{
+    int failures = 0;
+    struct wdr f;
+    memset(&f, 0, sizeof(f));
+    TEST("wallet_diversified_receive: latest matches New before and after restart") {
+        ASSERT(setenv("ZCL_WALLET_PASSPHRASE", WDR_PASS, 1) == 0);
+        wallet_lock_reset_for_test();
+        ASSERT(wdr_restore(&f));
+        ASSERT(f.w->sapling_keys.num_keys > 1);
+        wdr_use_start(0x123456789ULL);
+        char issued[128] = "", before[128] = "", offline[128] = "", after[128] = "";
+        ASSERT(wdr_receive(&f, issued, sizeof(issued)));
+        bool read_before = wdr_live_latest(&f, before, sizeof(before));
+        wdr_close(&f);
+        ASSERT(unsetenv("ZCL_WALLET_PASSPHRASE") == 0);
+        wallet_lock_reset_for_test();
+        bool read_offline = wdr_offline_current(&f, offline, sizeof(offline));
+        ASSERT(setenv("ZCL_WALLET_PASSPHRASE", WDR_PASS, 1) == 0);
+        wallet_lock_reset_for_test();
+        ASSERT(wdr_boot(&f));
+        bool read_after = wdr_live_latest(&f, after, sizeof(after));
+        printf("(live_schema=%d restart_schema=%d live_matches=%d restart_matches=%d) ",
+               read_before, read_after,
+               read_before && !strcmp(issued, before),
+               read_after && !strcmp(issued, after));
+        ASSERT(read_before);
+        ASSERT(read_after);
+        ASSERT(read_offline);
+        ASSERT(!strcmp(issued, offline));
+        ASSERT(!strcmp(issued, before));
+        ASSERT(!strcmp(issued, after));
+        PASS();
+    } _test_next:;
+    wdr_use_system_rng();
+    wdr_teardown(&f);
+    unsetenv("ZCL_WALLET_PASSPHRASE");
+    wallet_lock_reset_for_test();
+    return failures;
+}
+
+static bool wdr_live_unavailable(struct wdr *f)
+{
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_table_execute(f->tbl, "walletlatestaddress", &params, &result);
+    const char *state = json_get_str(json_get(&result, "state"));
+    const struct json_value *address = json_get(&result, "address");
+    ok = ok && state && !strcmp(state, "address_unavailable") &&
+         address && address->type == JSON_NULL;
+    json_free(&params);
+    json_free(&result);
+    return ok;
+}
+
+static bool wdr_set_counter(struct wdr *f, const struct sapling_key_entry *acct,
+                            sqlite3_int64 value, const char *text)
+{
+    sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_prepare_v2(f->ndb.db,
+        "INSERT OR REPLACE INTO wallet_sapling_diversifier(ivk,next_index) VALUES(?,?)",
+        -1, &s, NULL) == SQLITE_OK && s;
+    if (ok) ok = sqlite3_bind_blob(s, 1, acct->ivk, 32, SQLITE_STATIC) == SQLITE_OK;
+    if (ok) ok = text ? sqlite3_bind_text(s, 2, text, -1, SQLITE_STATIC) == SQLITE_OK
+                      : sqlite3_bind_int64(s, 2, value) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(s) == SQLITE_DONE;
+    if (s) sqlite3_finalize(s);
+    return ok;
+}
+
+static bool wdr_find_slot(const struct sapling_key_entry *acct, uint64_t from,
+                          bool valid, uint64_t *index)
+{
+    for (uint64_t i = 0; i < 128; i++) {
+        uint64_t at = from - i, got = 0;
+        uint8_t d[11], pk[32];
+        if (sapling_account_diversified_address(acct, at, &got, d, pk) &&
+            ((got == at) == valid)) {
+            *index = at;
+            return true;
+        }
+    }
+    return false;
+}
+
+static int test_current_counter_edges(void)
+{
+    int failures = 0;
+    struct wdr f;
+    memset(&f, 0, sizeof(f));
+    TEST("wallet_diversified_receive: current counter is exact and fail-closed") {
+        ASSERT(wdr_restore(&f));
+        struct sapling_key_entry acct;
+        ASSERT(wdr_account(&f, &acct));
+        uint8_t d[11], pk[32];
+        ASSERT(wallet_sqlite_diversifier_current(&f.ws, &acct, d, pk) ==
+               WALLET_DIVERSIFIER_ABSENT);
+        /* Exercise damaged rows that the normal schema refuses to insert. */
+        ASSERT(sqlite3_exec(f.ndb.db, "PRAGMA ignore_check_constraints=ON",
+                            NULL, NULL, NULL) == SQLITE_OK);
+        const sqlite3_int64 invalid[] = {0, -1, 1, (sqlite3_int64)WALLET_DIVERSIFIER_INDEX_MAX};
+        for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+            ASSERT(wdr_set_counter(&f, &acct, invalid[i], NULL));
+            ASSERT(wallet_sqlite_diversifier_current(&f.ws, &acct, d, pk) ==
+                   WALLET_DIVERSIFIER_INVALID);
+        }
+        ASSERT(wdr_set_counter(&f, &acct, 0, "bad"));
+        ASSERT(wallet_sqlite_diversifier_current(&f.ws, &acct, d, pk) ==
+               WALLET_DIVERSIFIER_INVALID);
+        ASSERT(wdr_live_unavailable(&f));
+        uint64_t invalid_slot = 0, last_slot = 0;
+        ASSERT(wdr_find_slot(&acct, 1024, false, &invalid_slot));
+        ASSERT(wdr_set_counter(&f, &acct, (sqlite3_int64)(invalid_slot + 1), NULL));
+        ASSERT(wallet_sqlite_diversifier_current(&f.ws, &acct, d, pk) ==
+               WALLET_DIVERSIFIER_INVALID);
+        ASSERT(wdr_find_slot(&acct, WALLET_DIVERSIFIER_INDEX_MAX - 2, true, &last_slot));
+        ASSERT(wdr_set_counter(&f, &acct, (sqlite3_int64)(last_slot + 1), NULL));
+        ASSERT(wallet_sqlite_diversifier_current(&f.ws, &acct, d, pk) ==
+               WALLET_DIVERSIFIER_PRESENT);
+        ASSERT(sqlite3_exec(f.ndb.db, "DROP TABLE wallet_sapling_diversifier",
+                            NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(wallet_sqlite_diversifier_current(&f.ws, &acct, d, pk) ==
+               WALLET_DIVERSIFIER_INVALID);
+        memory_cleanse(&acct, sizeof(acct));
+        PASS();
+    } _test_next:;
+    wdr_teardown(&f);
+    return failures;
+}
+
+static int test_account_tie_order(void)
+{
+    int failures = 0;
+    TEST("wallet_diversified_receive: account tie uses key identifier") {
+        struct sapling_keystore ks;
+        sapling_keystore_init(&ks);
+        ks.num_keys = 2;
+        ks.keys[0].used = ks.keys[1].used = true;
+        ks.keys[0].child_index = ks.keys[1].child_index = 4;
+        ks.keys[0].ivk[0] = 9;
+        ks.keys[1].ivk[0] = 2;
+        struct sapling_key_entry acct;
+        ASSERT(sapling_keystore_copy_account(&ks, &acct));
+        ASSERT(acct.ivk[0] == 9); /* Shield selection keeps its original tie rule. */
+        ASSERT(sapling_keystore_copy_receive_account(&ks, &acct));
+        ASSERT(acct.ivk[0] == 2);
+        struct sapling_key_entry swap = ks.keys[0];
+        ks.keys[0] = ks.keys[1]; ks.keys[1] = swap;
+        ASSERT(sapling_keystore_copy_receive_account(&ks, &acct));
+        ASSERT(acct.ivk[0] == 2);
+        memory_cleanse(&swap, sizeof(swap));
+        memory_cleanse(&acct, sizeof(acct));
+        sapling_keystore_free(&ks);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_wallet_diversified_receive(void)
 {
     int failures = 0;
     failures += test_receive_find_and_restore();
+    failures += test_latest_after_new_and_restart();
+    failures += test_current_counter_edges();
+    failures += test_account_tie_order();
     failures += test_crash_after_index_write();
     failures += test_receive_while_locked();
     failures += test_agent_session_refused();

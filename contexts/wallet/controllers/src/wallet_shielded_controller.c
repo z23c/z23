@@ -161,7 +161,7 @@ bool rpc_z_getreceiveaddress(const struct json_value *params, bool help,
      * account's incoming viewing key and diversifier key, both resident while
      * locked. No seed or spending key is read or written. */
     struct sapling_key_entry acct;
-    if (!sapling_keystore_copy_account(&ctx->wallet->sapling_keys, &acct)) {
+    if (!sapling_keystore_copy_receive_account(&ctx->wallet->sapling_keys, &acct)) {
         json_set_str(result, "Error: the wallet has no shielded account");
         LOG_FAIL("wallet_shielded",
                  "z_getreceiveaddress: keystore holds no account");

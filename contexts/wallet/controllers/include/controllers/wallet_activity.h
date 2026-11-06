@@ -205,9 +205,6 @@ bool rpc_walletsummary(const struct json_value *params, bool help,
                        struct json_value *result);
 bool rpc_wallethistory(const struct json_value *params, bool help,
                        struct json_value *result);
-struct sapling_keystore;
-bool wallet_latest_shielded_address(const struct sapling_keystore *ks,
-                                    const char *hrp, char *out, size_t cap);
 bool rpc_walletlatestaddress(const struct json_value *params, bool help,
                              struct json_value *result);
 void register_wallet_activity_rpc_commands(struct rpc_table *t);

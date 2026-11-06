@@ -117,6 +117,8 @@ static void wrp_push_report(struct zcl_command_reply *reply,
     if (rep->persisted_shielded_address[0])
         (void)json_push_kv_str(&reply->data, "persisted_shielded_address",
                                rep->persisted_shielded_address);
+    else if (rep->persisted_address_unavailable)
+        (void)json_push_kv_str(&reply->data, "receive_address_status", "unavailable");
     if (rep->first_shielded_address[0])
         (void)json_push_kv_str(&reply->data, "first_shielded_address",
                                rep->first_shielded_address);
@@ -126,13 +128,14 @@ static void wrp_push_report(struct zcl_command_reply *reply,
 static void wrp_push_locked_address(struct zcl_command_reply *reply,
                                     const struct wallet_recovery_report *rep)
 {
-    if (!rep->persisted_shielded_address[0])
+    if (!rep->persisted_shielded_address[0] && !rep->persisted_address_unavailable)
         return;
     struct json_value facts = {0};
     json_set_object(&facts);
-    if (json_push_kv_str(&facts, "persisted_shielded_address",
-                         rep->persisted_shielded_address))
-        (void)json_push_kv(&reply->data, "failure_facts", &facts);
+    bool ok = rep->persisted_shielded_address[0]
+        ? json_push_kv_str(&facts, "persisted_shielded_address", rep->persisted_shielded_address)
+        : json_push_kv_str(&facts, "receive_address_status", "unavailable");
+    if (ok) (void)json_push_kv(&reply->data, "failure_facts", &facts);
     json_free(&facts);
 }
 

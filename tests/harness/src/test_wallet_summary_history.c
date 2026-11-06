@@ -12,6 +12,9 @@
 #include "controllers/sovereignty_controller.h"
 #include "controllers/sync_controller.h"
 #include "controllers/wallet_activity.h"
+#include "controllers/wallet_controller.h"
+#include "wallet/wallet.h"
+#include "wallet/wallet_sqlite.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "models/block.h"
@@ -841,43 +844,67 @@ static int test_history_received_privacy(struct node_db *ndb)
     return failures;
 }
 
+static bool wsh_latest(char *out, size_t cap, bool *empty)
+{
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_walletlatestaddress(&params, false, &result);
+    const struct json_value *address = json_get(&result, "address");
+    const char *value = json_get_str(address);
+    *empty = address && address->type == JSON_NULL;
+    if (value && strlen(value) < cap) snprintf(out, cap, "%s", value);
+    else if (!*empty) ok = false;
+    json_free(&params);
+    json_free(&result);
+    return ok;
+}
+
 static int test_latest_address(struct node_db *ndb)
 {
     int failures = 0;
-    TEST_CASE("wallet_latest: null when empty, newest when present, creates nothing") {
-        struct sapling_keystore ks;
+    struct wallet *w = NULL;
+    struct wallet_sqlite ws = {0};
+    bool ws_open = false;
+    TEST_CASE("wallet_latest: empty or selected account default, creates nothing") {
         char got[128] = {0}, want[128] = {0};
+        bool empty = false;
         struct whf before, after;
-        sapling_keystore_init(&ks);
+        w = calloc(1, sizeof(*w));
+        ASSERT(w != NULL);
+        wallet_init(w);
+        ASSERT(wallet_sqlite_open_r(&ws, ndb->db).ok);
+        ws_open = true;
+        rpc_wallet_set_state(w, NULL, NULL, &ws, NULL, NULL);
         ASSERT(load(ndb, &before));
-        ASSERT(!wallet_latest_shielded_address(&ks, "zs", got, sizeof(got)));
-        ASSERT_EQ(ks.num_keys, 0);
+        ASSERT(wsh_latest(got, sizeof(got), &empty) && empty);
+        ASSERT_EQ(w->sapling_keys.num_keys, 0);
         for (size_t i = 0; i < 2; i++) {
-            ks.keys[i].used = true;
-            memset(ks.keys[i].diversifier, 0x10 + (int)i, 11);
-            memset(ks.keys[i].pk_d, 0x20 + (int)i, 32);
+            w->sapling_keys.keys[i].used = true;
+            w->sapling_keys.keys[i].child_index = (uint32_t)i;
+            memset(w->sapling_keys.keys[i].diversifier, 0x10 + (int)i, 11);
+            memset(w->sapling_keys.keys[i].pk_d, 0x20 + (int)i, 32);
         }
-        ks.num_keys = 2;
-        ASSERT(sapling_encode_payment_address(ks.keys[1].diversifier,
-                                              ks.keys[1].pk_d, "zs", want,
-                                              sizeof(want)));
-        ASSERT(wallet_latest_shielded_address(&ks, "zs", got, sizeof(got)));
+        w->sapling_keys.num_keys = 2;
+        ASSERT(sapling_encode_payment_address(w->sapling_keys.keys[0].diversifier,
+            w->sapling_keys.keys[0].pk_d, "zs", want, sizeof(want)));
+        ASSERT(wsh_latest(got, sizeof(got), &empty) && !empty);
         ASSERT_STR_EQ(got, want);
-        ks.keys[1].used = false;
-        ASSERT(sapling_encode_payment_address(ks.keys[0].diversifier,
-                                              ks.keys[0].pk_d, "zs", want,
-                                              sizeof(want)));
-        ASSERT(wallet_latest_shielded_address(&ks, "zs", got, sizeof(got)));
+        w->sapling_keys.keys[0].used = false;
+        ASSERT(sapling_encode_payment_address(w->sapling_keys.keys[1].diversifier,
+            w->sapling_keys.keys[1].pk_d, "zs", want, sizeof(want)));
+        ASSERT(wsh_latest(got, sizeof(got), &empty) && !empty);
         ASSERT_STR_EQ(got, want);
-        ASSERT_EQ(ks.num_keys, 2);
+        ASSERT_EQ(w->sapling_keys.num_keys, 2);
         ASSERT(load(ndb, &after));
         ASSERT_EQ(after.nn, before.nn);
         ASSERT_EQ(after.nc, before.nc);
         ASSERT_EQ(after.nt, before.nt);
         unload(&before);
         unload(&after);
-        sapling_keystore_free(&ks);
     } TEST_END
+    rpc_wallet_set_state(NULL, NULL, NULL, NULL, NULL, NULL);
+    if (ws_open) wallet_sqlite_close(&ws);
+    if (w) { wallet_free(w); free(w); }
     return failures;
 }
 

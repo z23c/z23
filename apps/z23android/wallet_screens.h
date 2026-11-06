@@ -73,7 +73,7 @@ enum wallet_action {
     WALLET_ACT_START_NODE, WALLET_ACT_COPY_ADDRESS, WALLET_ACT_DISMISS_SEND,
     WALLET_ACT_SHOW_PRIVATE, /* ask the screen lock and show the private balance of a locked wallet for a short while */
     WALLET_ACT_MAKE_PRIVATE, /* open the review that moves public funds into the private balance */
-    WALLET_ACT_RETRY_SUMMARY
+    WALLET_ACT_RETRY_SUMMARY, WALLET_ACT_RETRY_ADDRESS
 };
 /* Where the private balance request stands, as the environment reports it. WALLET_REVEAL_OPEN: the wallet is unlocked for
  * the owner and not yet locked again. The reasons after it say why the last request left the wallet locked. */

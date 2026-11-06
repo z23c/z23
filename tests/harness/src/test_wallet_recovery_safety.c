@@ -74,6 +74,9 @@
 #include "command/native_command.h"   /* the restore leaf's handler */
 #include "config/boot_shutdown_marker.h"
 #include "config/command_catalog.h"
+#include "controllers/wallet_activity.h"
+#include "controllers/wallet_controller.h"
+#include "controllers/rpc_client.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "models/database.h"
@@ -234,30 +237,38 @@ static void wrs_status(const char *dir, struct zcl_command_reply *reply)
     json_free(&input);
 }
 
+static bool wrs_failure_facts_match(const struct json_value *facts,
+                                    const char *address, bool unavailable)
+{
+    if (address) {
+        const char *got = json_get_str(json_get(facts, "persisted_shielded_address"));
+        return facts && facts->type == JSON_OBJ && facts->num_children == 1 &&
+               got && !strcmp(got, address);
+    }
+    if (unavailable) {
+        const char *reason = json_get_str(json_get(facts, "receive_address_status"));
+        return facts && facts->type == JSON_OBJ && facts->num_children == 1 &&
+               reason && !strcmp(reason, "unavailable") &&
+               !json_get(facts, "persisted_shielded_address");
+    }
+    return !facts;
+}
+
 static bool wrs_envelope_fields_match(const struct json_value *root,
-    enum zcl_command_exit exit_code, const char *code, const char *address)
+    enum zcl_command_exit exit_code, const char *code, const char *address, bool unavailable)
 {
     const struct json_value *ok = json_get(root, "ok");
     const struct json_value *error = json_get(root, "error");
     const char *actual_code = json_get_str(json_get(error, "code"));
-    const struct json_value *facts = json_get(error, "facts");
-    const char *actual_address = json_get_str(json_get(facts, "persisted_shielded_address"));
-    bool valid = exit_code == ZCL_COMMAND_EXIT_BLOCKED &&
-                 ok && ok->type == JSON_BOOL && !json_get_bool(ok) &&
-                 actual_code && !strcmp(actual_code, code) &&
-                 !json_get(root, "data");
-    if (address)
-        valid = valid && facts && facts->type == JSON_OBJ &&
-                facts->num_children == 1 && actual_address &&
-                !strcmp(actual_address, address);
-    else
-        valid = valid && !facts;
-    return valid;
+    return exit_code == ZCL_COMMAND_EXIT_BLOCKED &&
+           ok && ok->type == JSON_BOOL && !json_get_bool(ok) &&
+           actual_code && !strcmp(actual_code, code) && !json_get(root, "data") &&
+           wrs_failure_facts_match(json_get(error, "facts"), address, unavailable);
 }
 
 /* Execute through the same registry serializer as the CLI. */
 static bool wrs_status_envelope(const char *dir, const char *code,
-                                const char *address)
+                                const char *address, bool unavailable)
 {
     const struct zcl_command_registry *reg = zcl_command_catalog();
     const struct zcl_command_spec *spec = zcl_command_registry_find(
@@ -276,10 +287,98 @@ static bool wrs_status_envelope(const char *dir, const char *code,
         reg, spec, &ctx, &input, false, spec->path, "normal", 0, 0, NULL,
         wire, sizeof(wire), &exit_code) : 0;
     bool parsed = n > 0 && n < sizeof(wire) && json_read(&root, wire, n);
-    bool valid = parsed && wrs_envelope_fields_match(&root, exit_code, code, address);
+    bool valid = parsed && wrs_envelope_fields_match(&root, exit_code, code, address, unavailable);
     json_free(&root);
     json_free(&input);
     return valid;
+}
+
+/* The native bridge calls the real RPC implementation against the fixture. */
+static char *wrs_latest_rpc_hook(const char *method, const char *params_json)
+{
+    (void)params_json;
+    if (!method || strcmp(method, "walletlatestaddress")) return strdup("null");
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_walletlatestaddress(&params, false, &result);
+    char wire[4096];
+    size_t n = ok ? json_write(&result, wire, sizeof(wire)) : 0;
+    char *answer = n && n < sizeof(wire) ? strdup(wire) : NULL;
+    json_free(&params);
+    json_free(&result);
+    return answer;
+}
+
+static bool wrs_latest_envelope(char *out, size_t cap)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        reg, "core.wallet.shielded.latest", NULL);
+    if (!spec) return false;
+    struct zcl_command_context ctx = {
+        .registry = reg, .granted_capabilities = ~(uint64_t)0,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER,
+    };
+    struct json_value input = {0}, root = {0};
+    json_set_object(&input);
+    char wire[8192];
+    enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_FAILED;
+    node_rpc_client_set_test_hook(wrs_latest_rpc_hook);
+    size_t n = zcl_command_registry_execute_json(reg, spec, &ctx, &input,
+        false, spec->path, "normal", 0, 0, NULL, wire, sizeof(wire), &exit_code);
+    node_rpc_client_set_test_hook(NULL);
+    bool ok = n > 0 && n < sizeof(wire) && json_read(&root, wire, n) &&
+              exit_code == ZCL_COMMAND_EXIT_OK;
+    const char *value = json_get_str(json_get(json_get(&root, "data"), "address"));
+    if (ok && value && strlen(value) < cap) snprintf(out, cap, "%s", value);
+    else ok = false;
+    json_free(&root);
+    json_free(&input);
+    return ok;
+}
+
+/* Load the same fixture through the node's public latest-address selector. */
+static bool wrs_loaded_latest(const char *path, char *out, size_t cap, size_t *count)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    struct wallet_sqlite ws;
+    if (!wallet_sqlite_open_r(&ws, db).ok) { sqlite3_close(db); return false; }
+    struct wallet *w = malloc(sizeof(*w));
+    if (!w) { wallet_sqlite_close(&ws); sqlite3_close(db); return false; }
+    wallet_init(w);
+    bool ok = wallet_sqlite_read_sapling_keys(&ws, w);
+    *count = w->sapling_keys.num_keys;
+    rpc_wallet_set_state(w, NULL, NULL, &ws, NULL, NULL);
+    ok = ok && wrs_latest_envelope(out, cap);
+    rpc_wallet_set_state(NULL, NULL, NULL, NULL, NULL, NULL);
+    wallet_free(w);
+    free(w);
+    wallet_sqlite_close(&ws);
+    sqlite3_close(db);
+    return ok;
+}
+
+/* Reinsert in reverse order and create a child-index tie in this fixture. */
+static bool wrs_reorder_accounts(const char *path)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open(path, &db) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    bool ok = sqlite3_exec(db,
+        "CREATE TEMP TABLE rev AS SELECT * FROM wallet_sapling_keys;"
+        "DELETE FROM wallet_sapling_keys;"
+        "INSERT INTO wallet_sapling_keys SELECT * FROM rev ORDER BY child_index DESC,ivk DESC;"
+        "UPDATE wallet_sapling_keys SET child_index=0 WHERE ivk IN "
+        "(SELECT ivk FROM wallet_sapling_keys ORDER BY child_index,ivk LIMIT 2)",
+        NULL, NULL, NULL) == SQLITE_OK;
+    sqlite3_close(db);
+    return ok;
 }
 
 static int t_persisted_receive_address(void)
@@ -299,7 +398,7 @@ static int t_persisted_receive_address(void)
     WRS_CHECK("missing pidfile does not expose persisted address",
               !json_get(&reply.data, "persisted_shielded_address"));
     WRS_CHECK("missing pidfile exports no failure facts",
-              wrs_status_envelope(dir, "WALLET_LOCKED", NULL));
+              wrs_status_envelope(dir, "WALLET_LOCKED", NULL, false));
     zcl_command_reply_free(&reply);
     snprintf(pid, sizeof(pid), "%s/zclassic23.pid", dir);
     int fd = open(pid, O_CREAT | O_RDWR, 0600);
@@ -316,16 +415,32 @@ static int t_persisted_receive_address(void)
     WRS_CHECK("locked wallet exposes its persisted public address", address && address[0]);
     WRS_CHECK("selected address is the first committed address",
               address && !strcmp(address, rep.first_shielded_address));
+    char live[160] = "";
+    size_t loaded_count = 0;
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+    bool loaded = wrs_loaded_latest(dbpath, live, sizeof(live), &loaded_count);
+    WRS_CHECK("fixture loads multiple persisted Sapling accounts", loaded && loaded_count > 1);
+    WRS_CHECK("stopped and live selectors agree before a new address",
+              loaded && address && !strcmp(live, address));
+
     WRS_CHECK("locked wallet remains locked", !strcmp(reply.error.code, "WALLET_LOCKED"));
     WRS_CHECK("locked serialized reply exposes only the public address",
-              wrs_status_envelope(dir, "WALLET_LOCKED", rep.first_shielded_address));
+              wrs_status_envelope(dir, "WALLET_LOCKED", rep.first_shielded_address, false));
+    zcl_command_reply_free(&reply);
+    WRS_CHECK("fixture reverses rows and ties two account indices", wrs_reorder_accounts(dbpath));
+    wrs_status(dir, &reply);
+    address = json_get_str(json_get(&reply.data, "persisted_shielded_address"));
+    loaded = wrs_loaded_latest(dbpath, live, sizeof(live), &loaded_count);
+    WRS_CHECK("tied accounts choose the same address independent of insertion order",
+              loaded && address && !strcmp(live, address));
     zcl_command_reply_free(&reply);
     WRS_CHECK("fixture acquires node lock", flock(fd, LOCK_EX | LOCK_NB) == 0);
+
     wrs_status(dir, &reply);
     WRS_CHECK("held node lock refuses status", !strcmp(reply.error.code, "DATADIR_LOCKED"));
     WRS_CHECK("held node lock exposes no address", !json_get(&reply.data, "persisted_shielded_address"));
     WRS_CHECK("held node lock exports no failure facts",
-              wrs_status_envelope(dir, "DATADIR_LOCKED", NULL));
+              wrs_status_envelope(dir, "DATADIR_LOCKED", NULL, false));
     zcl_command_reply_free(&reply);
     (void)flock(fd, LOCK_UN);
     snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
@@ -333,13 +448,33 @@ static int t_persisted_receive_address(void)
     int rc = sqlite3_open(dbpath, &db);
     WRS_CHECK("fixture database opens", rc == SQLITE_OK);
     if (rc == SQLITE_OK) {
-        rc = sqlite3_exec(db, "CREATE TEMP TABLE saved AS SELECT * FROM wallet_sapling_keys;"
-                              "UPDATE wallet_sapling_keys SET pk_d=zeroblob(32)", NULL, NULL, NULL);
+        rc = sqlite3_exec(db,
+            "INSERT INTO wallet_sapling_diversifier(ivk,next_index) "
+            "SELECT ivk,0 FROM wallet_sapling_keys ORDER BY child_index,ivk LIMIT 1",
+            NULL, NULL, NULL);
+        WRS_CHECK("fixture plants an invalid selected counter", rc == SQLITE_OK);
+        WRS_CHECK("invalid counter exports only a constant reason",
+                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL, true));
+        WRS_CHECK("fixture removes invalid counter",
+            sqlite3_exec(db, "DELETE FROM wallet_sapling_diversifier", NULL, NULL, NULL) == SQLITE_OK);
+        rc = sqlite3_exec(db,
+            "CREATE TEMP TABLE saved AS SELECT * FROM wallet_sapling_keys;"
+            "UPDATE wallet_sapling_keys SET child_index=-1 WHERE ivk="
+            "(SELECT ivk FROM wallet_sapling_keys ORDER BY child_index DESC,ivk DESC LIMIT 1)",
+            NULL, NULL, NULL);
+        WRS_CHECK("fixture corrupts later account ordering", rc == SQLITE_OK);
+        WRS_CHECK("bad account ordering exports only a constant reason",
+                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL, true));
+        rc = sqlite3_exec(db, "DELETE FROM wallet_sapling_keys;"
+                              "INSERT INTO wallet_sapling_keys SELECT * FROM saved;"
+                              "UPDATE wallet_sapling_keys SET pk_d=zeroblob(32) WHERE ivk="
+
+                              "(SELECT ivk FROM wallet_sapling_keys ORDER BY child_index,ivk LIMIT 1)", NULL, NULL, NULL);
         WRS_CHECK("fixture invalidates public keys", rc == SQLITE_OK);
         wrs_status(dir, &reply);
         WRS_CHECK("mismatched public key is not exposed", !json_get(&reply.data, "persisted_shielded_address"));
-        WRS_CHECK("mismatched public key exports no failure facts",
-                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL));
+        WRS_CHECK("unsafe leading account exports only a constant reason",
+                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL, true));
         zcl_command_reply_free(&reply);
         const char *const damage[] = {
             "CAST(zeroblob(4)||substr(xsk,5) AS BLOB)",
@@ -357,8 +492,8 @@ static int t_persisted_receive_address(void)
             wrs_status(dir, &reply);
             WRS_CHECK("invalid envelope or watch-only row exposes no address",
                       !json_get(&reply.data, "persisted_shielded_address"));
-            WRS_CHECK("invalid envelope or watch-only row exports no facts",
-                      wrs_status_envelope(dir, "WALLET_LOCKED", NULL));
+            WRS_CHECK("invalid envelope or watch-only row exports only a reason",
+                      wrs_status_envelope(dir, "WALLET_LOCKED", NULL, true));
             zcl_command_reply_free(&reply);
         }
         rc = sqlite3_exec(db, "DELETE FROM wallet_sapling_keys;"
@@ -374,7 +509,7 @@ static int t_persisted_receive_address(void)
         wrs_status(dir, &reply);
         WRS_CHECK("missing row exposes no address", !json_get(&reply.data, "persisted_shielded_address"));
         WRS_CHECK("missing row exports no failure facts",
-                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL));
+                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL, false));
         zcl_command_reply_free(&reply);
     } else if (db) sqlite3_close(db);
     close(fd);

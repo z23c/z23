@@ -67,7 +67,7 @@ struct data {
     uint64_t initial_retry_at;
     struct wallet_view view;
     char fleet[WALLET_TEXT_MAX];
-    bool address_pending, has_amount, no_receive, address_fallback, setup_bound, offline_bound;
+    bool address_pending, has_amount, no_receive, address_fallback, setup_bound, offline_bound, address_unavailable;
     bool preload_tried;
     char offline_identity[82];
     uint64_t address_generation;
@@ -577,7 +577,8 @@ static void receive_items(struct wallet_screen *s)
             line(s, text);
         }
     } else if (d->address_pending) line(s, "Loading the address…");
-    if (!d->no_receive) button(s, WALLET_ACT_NEW_ADDRESS, "New address");
+    if (d->address_unavailable && !d->address_pending) button(s, WALLET_ACT_RETRY_ADDRESS, "Retry");
+    else if (!d->address_unavailable && !d->no_receive) button(s, WALLET_ACT_NEW_ADDRESS, "New address");
     if (d->note[0]) note(s, d->note);
     (void)add(s, WALLET_ITEM_INPUT, WALLET_ACT_NONE, "Amount in ZCL (optional)");
     button(s, WALLET_ACT_SET_AMOUNT, "Set amount");
@@ -977,9 +978,24 @@ static bool strict_private(const char *address)
            domain_encoding_bech32_decode(hrp, sizeof(hrp), data, sizeof(data), &len, address) &&
            len == 69 && (data[68] & 1u) == 0;
 }
+static void address_unavailable(void)
+{
+    request_clear(); st.d.has_amount = false; st.d.amount_zat = 0;
+    memory_cleanse(st.d.address, sizeof(st.d.address));
+    memory_cleanse(st.d.code, sizeof(st.d.code));
+    st.d.address_fallback = false;
+    st.d.offline_bound = false;
+    st.d.setup_bound = false;
+    st.d.address_pending = false;
+    st.d.address_unavailable = true;
+    copy(st.d.note, sizeof(st.d.note),
+         "The receive address cannot be checked. Retry or check your wallet.");
+}
+
 static void address_failure(const struct json_value *data, bool missing, bool latest)
 {
-    if (latest && st.d.address_fallback) st.d.note[0] = 0;
+    if (latest && st.d.address_unavailable) address_unavailable();
+    else if (latest && st.d.address_fallback) st.d.note[0] = 0;
     else if (data && latest && typed(data, "address", JSON_NULL)) copy(st.d.note, sizeof(st.d.note), "This wallet has no receive address yet. Tap New address.");
     else if (latest && missing) copy(st.d.note, sizeof(st.d.note), "This node cannot report its latest address yet. Tap New address to make one.");
     else if (latest) copy(st.d.note, sizeof(st.d.note), "The latest address could not be read. Check that your node is running, or tap New address.");
@@ -988,6 +1004,17 @@ static void address_failure(const struct json_value *data, bool missing, bool la
         copy(st.d.note, sizeof(st.d.note), "This build cannot make a new address.");
     } else copy(st.d.note, sizeof(st.d.note), "No address was made. Check that your node is running.");
 }
+static bool address_reply_unavailable(const struct json_value *data)
+{
+    const char *state = text_of(data, "state");
+    return is(state, "address_unavailable") || is(state, "keys_unavailable");
+}
+static bool address_is_showable(const char *address)
+{
+    return address && address[0] && strlen(address) < sizeof(st.d.address) &&
+           (!(st.d.setup_bound || st.d.offline_bound) || strict_private(address));
+}
+
 static void apply_address(bool ok, bool missing, bool latest, const char *json)
 {
     struct json_value root;
@@ -998,9 +1025,16 @@ static void apply_address(bool ok, bool missing, bool latest, const char *json)
     json_init(&root);
     data = ok && json && json_read(&root, json, strlen(json)) ? data_of(&root) : NULL;
     address = text_of(data, "address");
-    if (address && address[0] && strlen(address) < sizeof(st.d.address) &&
-        (!(st.d.setup_bound || st.d.offline_bound) || strict_private(address))) {
+    if (latest && address_reply_unavailable(data)) {
+        address_unavailable();
+        drop_tree(&root);
+        return;
+    }
+    if (latest && data && typed(data, "address", JSON_NULL) &&
+        is(text_of(data, "state"), "none")) st.d.address_unavailable = false;
+    if (address_is_showable(address)) {
         show_address(address);
+        if (st.d.address[0]) st.d.address_unavailable = false;
         st.d.offline_bound = false;
         st.d.address_fallback = false;
     }
@@ -1137,6 +1171,16 @@ static bool preload_current(const struct reply *r)
            !strncmp(identity, r->identity, 64);
 }
 
+static bool offline_unavailable(const struct reply *r, const struct json_value *root,
+                                const struct json_value *source, const char *address)
+{
+    char current_identity[82];
+    return !address && offline_envelope_ok(r, root) &&
+        is(text_of(source, "receive_address_status"), "unavailable") &&
+        st.env.setup_identity && st.env.setup_identity(st.env.ctx, current_identity) &&
+        !strcmp(current_identity, r->identity) && preload_current(r);
+}
+
 static bool apply_offline(const struct reply *r)
 {
     struct json_value root;
@@ -1146,9 +1190,14 @@ static bool apply_offline(const struct reply *r)
     const struct json_value *error = parsed ? typed(&root, "error", JSON_OBJ) : NULL;
     const struct json_value *facts = typed(error, "facts", JSON_OBJ);
     const char *address = text_of(r->ok ? data : facts, "persisted_shielded_address");
+    const struct json_value *source = r->ok ? data : facts;
+    bool unavailable = parsed && offline_unavailable(r, &root, source, address);
     bool valid = parsed && offline_envelope_ok(r, &root) && offline_address_valid(r, address) && preload_current(r);
+    if (unavailable) address_unavailable();
+
     if (valid) {
         show_address(address);
+        if (st.d.address[0]) st.d.address_unavailable = false;
         copy(st.d.offline_identity, sizeof(st.d.offline_identity), r->identity);
         st.d.offline_bound = st.d.address[0] != 0;
         st.d.address_fallback = st.d.offline_bound;
@@ -1156,7 +1205,7 @@ static bool apply_offline(const struct reply *r)
         st.d.note[0] = 0;
     }
     drop_tree(&root);
-    return valid;
+    return valid || unavailable;
 }
 
 static void apply(const struct job *j, const struct reply *r)
@@ -1509,7 +1558,7 @@ static size_t open_detail(unsigned row, struct job *jobs)
 static size_t new_address(struct job *jobs)
 {
     size_t count = 0;
-    if (st.d.no_receive) return 0;
+    if (st.d.no_receive || st.d.address_unavailable) return 0;
     ++st.epoch;
     if (!submit(jobs, &count, K_NEW, "receive", "")) { --st.epoch; return 0; }
     request_clear(); st.d.has_amount = false; st.d.amount_zat = 0;
@@ -1517,6 +1566,17 @@ static size_t new_address(struct job *jobs)
     memory_cleanse(st.d.code, sizeof(st.d.code));
     st.d.note[0] = '\0';
     st.d.address_pending = true;
+    touch();
+    return count;
+}
+
+/* Retry only the read; an unsafe reservation never triggers a new address. */
+static size_t retry_address(struct job *jobs)
+{
+    size_t count = 0;
+    if (!st.d.address_unavailable || st.d.address_pending) return 0;
+    st.d.address_pending = true;
+    (void)submit(jobs, &count, K_LATEST, "latest", "");
     touch();
     return count;
 }
@@ -1580,6 +1640,7 @@ enum wallet_outcome wallet_screens_activate(enum wallet_action action, unsigned 
         if (st.page == WALLET_PAGE_FUNDS) count = from_funds(action, jobs, &outcome);
         else if (st.page == WALLET_PAGE_RECEIVE && action == WALLET_ACT_NEW_ADDRESS) count = new_address(jobs);
         else if (st.page == WALLET_PAGE_RECEIVE && action == WALLET_ACT_COPY_ADDRESS) copy_address();
+        else if (st.page == WALLET_PAGE_RECEIVE && action == WALLET_ACT_RETRY_ADDRESS) count = retry_address(jobs);
         else if (st.page == WALLET_PAGE_HISTORY) count = from_history(action, arg, jobs);
     }
     pthread_mutex_unlock(&st.lock);

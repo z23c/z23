@@ -167,6 +167,9 @@ bool sapling_decode_payment_address(const char *str,
  * keystore holds no entry. */
 bool sapling_keystore_copy_account(struct sapling_keystore *sks,
                                     struct sapling_key_entry *out);
+/* Receive chooses the lowest child index, then the lowest IVK. */
+bool sapling_keystore_copy_receive_account(struct sapling_keystore *sks,
+                                            struct sapling_key_entry *out);
 
 /* The first valid ZIP-32 diversified address of `acct` at or after
  * `from_index`. The diversifier index found is written to `index_out`. Needs

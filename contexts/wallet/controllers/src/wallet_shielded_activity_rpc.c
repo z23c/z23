@@ -16,10 +16,13 @@
 #include "services/sync_monitor.h"
 #include "validation/main_state.h"
 #include "wallet/wallet_lock.h"
+#include "wallet/wallet_sqlite.h"
+#include "support/cleanse.h"
 #include "core/uint256.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* The one place the summary asks whether the wallet may send. It reads the
  * guard's decision without the guard's progress-store stamp or its log line:
@@ -687,21 +690,27 @@ bool rpc_wallethistory(const struct json_value *params, bool help,
     return ok;
 }
 
-/* Most recently added shielded address, or false when the wallet has none.
- * Reads the keystore only; it derives and stores nothing. */
-bool wallet_latest_shielded_address(const struct sapling_keystore *ks,
-                                    const char *hrp, char *out, size_t cap)
+/* Resolve the selected account's durable reservation without issuing one. */
+static enum wallet_diversifier_current wa_current_receive(
+    struct wallet_rpc_context *ctx, char *out, size_t cap)
 {
-    bool found = false;
-    zcl_mutex_lock((zcl_mutex_t *)&ks->cs);
-    for (size_t i = ks->num_keys; i > 0 && !found; i--) {
-        const struct sapling_key_entry *k = &ks->keys[i - 1];
-        found = k->used &&
-                sapling_encode_payment_address(k->diversifier, k->pk_d, hrp,
-                                               out, cap);
+    struct sapling_key_entry acct;
+    if (!sapling_keystore_copy_receive_account(&ctx->wallet->sapling_keys, &acct))
+        return WALLET_DIVERSIFIER_ABSENT;
+    uint8_t d[ZC_DIVERSIFIER_SIZE], pk_d[32];
+    enum wallet_diversifier_current current = ctx->wallet_db
+        ? wallet_sqlite_diversifier_current(ctx->wallet_db, &acct, d, pk_d)
+        : WALLET_DIVERSIFIER_INVALID;
+    if (current == WALLET_DIVERSIFIER_ABSENT) {
+        memcpy(d, acct.diversifier, sizeof(d));
+        memcpy(pk_d, acct.pk_d, sizeof(pk_d));
     }
-    zcl_mutex_unlock((zcl_mutex_t *)&ks->cs);
-    return found;
+    const struct chain_params *cp = chain_params_get();
+    bool encoded = current != WALLET_DIVERSIFIER_INVALID && cp &&
+        sapling_encode_payment_address(d, pk_d,
+            cp->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS], out, cap);
+    memory_cleanse(&acct, sizeof(acct));
+    return encoded ? WALLET_DIVERSIFIER_PRESENT : WALLET_DIVERSIFIER_INVALID;
 }
 
 bool rpc_walletlatestaddress(const struct json_value *params, bool help,
@@ -709,17 +718,15 @@ bool rpc_walletlatestaddress(const struct json_value *params, bool help,
 {
     struct wallet_rpc_context *ctx = wallet_ctx();
     RPC_HELP(help, result, "walletlatestaddress\n"
-        "\nReturns the newest shielded address, or null. Creates nothing.\n");
+        "\nReturns the current reserved receive address, or the account default. Creates nothing.\n");
     (void)params;
     if (!ctx->wallet) {
         json_set_str(result, "Wallet not available");
         LOG_FAIL("wallet_activity", "walletlatestaddress: no wallet");
     }
-    const struct chain_params *cp = chain_params_get();
     char addr[128];
-    bool have = cp && wallet_latest_shielded_address(
-        &ctx->wallet->sapling_keys,
-        cp->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS], addr, sizeof(addr));
+    enum wallet_diversifier_current current = wa_current_receive(ctx, addr, sizeof(addr));
+    bool have = current == WALLET_DIVERSIFIER_PRESENT;
     json_set_object(result);
     json_push_kv_str(result, "schema", "zcl.wallet_latest_address.v1");
     if (have)
@@ -729,8 +736,9 @@ bool rpc_walletlatestaddress(const struct json_value *params, bool help,
     /* A wallet that holds no loaded key cannot say it has none unless it is
      * unlocked and no key is persisted. */
     json_push_kv_str(result, "state",
-                     have ? "ok" : wa_no_sapling_keys_certain(ctx)
-                                       ? "none" : "keys_unavailable");
+                     have ? "ok" : current == WALLET_DIVERSIFIER_INVALID
+                         ? "address_unavailable" : wa_no_sapling_keys_certain(ctx)
+                             ? "none" : "keys_unavailable");
     return true;
 }
 

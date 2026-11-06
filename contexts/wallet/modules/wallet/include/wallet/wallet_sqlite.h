@@ -359,8 +359,17 @@ bool wallet_sqlite_unsynced(struct wallet_sqlite *ws);
 void wallet_sqlite_diversifier_set_rng_for_test(bool (*fn)(uint8_t *, size_t));
 #endif
 
-/* The address most recently returned by wallet_sqlite_diversifier_reserve for
- * `acct`; false when none was issued. Creates and writes nothing. */
+/* The durable reservation, which may not have reached a caller before failure. */
+enum wallet_diversifier_current {
+    WALLET_DIVERSIFIER_INVALID = -1,
+    WALLET_DIVERSIFIER_ABSENT = 0,
+    WALLET_DIVERSIFIER_PRESENT = 1,
+};
+enum wallet_diversifier_current wallet_sqlite_diversifier_current(
+    struct wallet_sqlite *ws, const struct sapling_key_entry *acct,
+    uint8_t diversifier_out[ZC_DIVERSIFIER_SIZE], uint8_t pk_d_out[32]);
+
+/* Legacy lookup used by shield planning; false when no index can be read. */
 bool wallet_sqlite_diversifier_latest(
     struct wallet_sqlite *ws, const struct sapling_key_entry *acct,
     uint8_t diversifier_out[ZC_DIVERSIFIER_SIZE], uint8_t pk_d_out[32]);

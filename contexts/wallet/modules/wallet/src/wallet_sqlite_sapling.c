@@ -669,6 +669,53 @@ bool wallet_sqlite_diversifier_reserve(
     return true;
 }
 
+static enum wallet_diversifier_current wsql_current_row(
+    sqlite3_stmt *s, const struct sapling_key_entry *acct,
+    uint8_t diversifier_out[ZC_DIVERSIFIER_SIZE], uint8_t pk_d_out[32])
+{
+    if (sqlite3_column_type(s, 0) != SQLITE_INTEGER)
+        return WALLET_DIVERSIFIER_INVALID;
+    sqlite3_int64 next = sqlite3_column_int64(s, 0);
+    if (next < 2 || (uint64_t)next >= WALLET_DIVERSIFIER_INDEX_MAX)
+        return WALLET_DIVERSIFIER_INVALID;
+    uint64_t first = 0, slot = 0;
+    uint8_t d[ZC_DIVERSIFIER_SIZE], pk_d[32];
+    if (!sapling_account_diversified_address(acct, 0, &first, d, pk_d) ||
+        !sapling_account_diversified_address(acct, (uint64_t)next - 1,
+                                             &slot, d, pk_d) ||
+        slot != (uint64_t)next - 1 || slot <= first)
+        return WALLET_DIVERSIFIER_INVALID;
+    memcpy(diversifier_out, d, sizeof(d));
+    memcpy(pk_d_out, pk_d, sizeof(pk_d));
+    return WALLET_DIVERSIFIER_PRESENT;
+}
+
+/* Read without repairing or advancing the durable reservation. */
+enum wallet_diversifier_current wallet_sqlite_diversifier_current(
+    struct wallet_sqlite *ws, const struct sapling_key_entry *acct,
+    uint8_t diversifier_out[ZC_DIVERSIFIER_SIZE], uint8_t pk_d_out[32])
+{
+    if (!ws || !ws->open || !ws->db || !acct || !acct->used ||
+        !diversifier_out || !pk_d_out)
+        return WALLET_DIVERSIFIER_INVALID;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ws->db,
+            "SELECT next_index FROM wallet_sapling_diversifier WHERE ivk=?",
+            -1, &s, NULL) != SQLITE_OK || !s) {
+        if (s) sqlite3_finalize(s);
+        return WALLET_DIVERSIFIER_INVALID;
+    }
+    enum wallet_diversifier_current result = WALLET_DIVERSIFIER_INVALID;
+    if (sqlite3_bind_blob(s, 1, acct->ivk, 32, SQLITE_STATIC) == SQLITE_OK) {
+        int rc = AR_STEP_ROW_READONLY(s);
+        if (rc == SQLITE_DONE) result = WALLET_DIVERSIFIER_ABSENT;
+        else if (rc == SQLITE_ROW)
+            result = wsql_current_row(s, acct, diversifier_out, pk_d_out);
+    }
+    sqlite3_finalize(s);
+    return result;
+}
+
 bool wallet_sqlite_diversifier_latest(
     struct wallet_sqlite *ws, const struct sapling_key_entry *acct,
     uint8_t diversifier_out[ZC_DIVERSIFIER_SIZE], uint8_t pk_d_out[32])

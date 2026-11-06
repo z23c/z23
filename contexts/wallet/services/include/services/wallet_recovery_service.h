@@ -107,6 +107,7 @@ struct wallet_recovery_report {
     char    first_address[128];
     char    first_shielded_address[160];
     char    persisted_shielded_address[160];
+    bool    persisted_address_unavailable;
     bool    inspect_persisted_address;
     int     keys_minted;
 
