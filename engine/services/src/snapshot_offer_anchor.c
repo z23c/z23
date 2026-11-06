@@ -1,10 +1,15 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: read a snapshot offer's height, hash, work and roots from the
+ * mirror's cursor and block rows in one read transaction.
+ */
 
 #include "services/snapshot_offer_anchor.h"
 
 #include "chain/mmr.h"
 #include "coins/utxo_commitment.h"
 #include "net/fast_sync.h"
+#include "services/utxo_mirror_sync_service.h"
 #include "storage/utxo_mirror_schema.h"
 #include "util/log_macros.h"
 
@@ -127,10 +132,12 @@ static struct zcl_result anchor_check_rows_below_cursor(sqlite3 *db,
     sqlite3_stmt *st = NULL;
     bool beyond = true;
 
-    if (sqlite3_prepare_v2(db, "SELECT 1 FROM utxos WHERE height>? LIMIT 1",
-                           -1, &st, NULL) != SQLITE_OK)
-        return ZCL_ERR(-7, "snapshot anchor: row scan: %s", sqlite3_errmsg(db));
-    sqlite3_bind_int(st, 1, height);
+    if (utxo_mirror_prepare_rows_above_scan(db, height, &st) != SQLITE_OK) {
+        struct zcl_result r =
+            ZCL_ERR(-7, "snapshot anchor: row scan: %s", sqlite3_errmsg(db));
+        sqlite3_finalize(st);
+        return r;
+    }
     beyond = sqlite3_step(st) == SQLITE_ROW;  // raw-sql-ok:read-only-introspection
     sqlite3_finalize(st);
     if (beyond)
@@ -199,12 +206,17 @@ struct zcl_result snapshot_offer_anchor_read(const char *db_path,
     return r;
 }
 
-bool snapshot_offer_anchor_matches_payload(
+struct zcl_result snapshot_offer_anchor_check_payload(
     const struct snapshot_offer_anchor *anchor,
     const uint8_t payload_sha3[32], uint64_t payload_count)
 {
-    return anchor && payload_sha3 && payload_count == anchor->num_utxos &&
-           memcmp(payload_sha3, anchor->utxo_root, 32) == 0;
+    if (!anchor || !payload_sha3)
+        return ZCL_ERR(-1, "snapshot anchor: payload check needs both sides");
+    if (payload_count != anchor->num_utxos ||
+        memcmp(payload_sha3, anchor->utxo_root, 32) != 0)
+        return ZCL_ERR(-11, "snapshot anchor: payload is not the set at %d",
+                       anchor->height);
+    return ZCL_OK;
 }
 
 void snapshot_offer_from_anchor(struct snapshot_offer *offer,

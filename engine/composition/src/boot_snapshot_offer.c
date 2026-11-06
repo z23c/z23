@@ -525,7 +525,7 @@ static bool snapshot_offer_prebuild_serving_snapshot(
                                     ndb) <= 0 ||
         !fast_sync_get_snapshot_sha3(snap_sha3, &snap_n))
         return false;
-    if (!snapshot_offer_anchor_matches_payload(anchor, snap_sha3, snap_n)) {
+    if (!snapshot_offer_anchor_check_payload(anchor, snap_sha3, snap_n).ok) {
         printf("Fast sync: snapshot moved past the anchor at h=%d, "
                "withholding the offer\n", anchor->height);
         fast_sync_reset_snapshot_cache();

@@ -36,7 +36,7 @@ struct zcl_result snapshot_offer_anchor_read(const char *db_path,
 
 /* Do the bytes about to be served hash to what the anchor read? The file is
  * written apart from the anchor's transaction, so the root is what ties them. */
-bool snapshot_offer_anchor_matches_payload(
+struct zcl_result snapshot_offer_anchor_check_payload(
     const struct snapshot_offer_anchor *anchor,
     const uint8_t payload_sha3[32], uint64_t payload_count);
 

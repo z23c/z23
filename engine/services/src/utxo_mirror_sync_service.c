@@ -1366,3 +1366,13 @@ int utxo_mirror_prepare_key_scan(sqlite3 *db, sqlite3_stmt **out)
         db, "SELECT txid, vout, value, height FROM utxos ORDER BY txid, vout",
         -1, out, NULL);
 }
+
+int utxo_mirror_prepare_rows_above_scan(sqlite3 *db, int32_t height,
+                                        sqlite3_stmt **out)
+{
+    int rc = sqlite3_prepare_v2(db, "SELECT 1 FROM utxos WHERE height>? LIMIT 1",
+                                -1, out, NULL);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_bind_int(*out, 1, height);
+    return rc;
+}

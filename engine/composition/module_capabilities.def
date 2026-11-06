@@ -505,7 +505,7 @@ ZCL_MODULE_CAPABILITY("tools/command/legacy_seed_windows_stub.c", CAP_NONE, "Win
 ZCL_MODULE_CAPABILITY("tools/command/legacy_status.c", CAP_FS_READ, "hashes the pinned legacy binary")
 ZCL_MODULE_CAPABILITY("tools/command/native_ops_host_legacy.c", CAP_FS_READ, "legacy status and seed JSON handlers; stat() compares the node conf with the instance conf;  every file and RPC reach lives in legacy_seed, legacy_status and slo_monitor_io")
 ZCL_MODULE_CAPABILITY("engine/services/src/snapshot_fetch.c", CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("engine/services/src/snapshot_offer_anchor.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/services/src/snapshot_offer_anchor.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "opens node.db read-only on a connection of its own for the anchor's one transaction; logging reads the clock")
 ZCL_MODULE_CAPABILITY("engine/services/src/snapshot_verify.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/source_bundle_fetch.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/source_bundle_publish.c", CAP_FS_WRITE|CAP_FS_READ, "")

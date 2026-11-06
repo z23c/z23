@@ -249,6 +249,10 @@ void utxo_mirror_sync_test_set_pre_snapshot_hook(void (*fn)(void *), void *ctx);
  * utxos-mirror reader freeze (check-no-utxos-mirror-read) stays closed. */
 int utxo_mirror_prepare_key_scan(sqlite3 *db, sqlite3_stmt **out);
 
+/* Prepare a scan that yields a row when the mirror holds one above `height`. */
+int utxo_mirror_prepare_rows_above_scan(sqlite3 *db, int32_t height,
+                                        sqlite3_stmt **out);
+
 struct json_value;
 bool utxo_mirror_sync_dump_state_json(struct json_value *out,
                                       const char *key);
