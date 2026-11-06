@@ -615,45 +615,6 @@ static bool boot_receive_utxo_snapshot(struct node_db *ndb, const char *path,
     return true;
 }
 
-int boot_wallet_rebuild_confirmed(struct node_db *ndb,
-                                  struct coins_view_cache *coins,
-                                  int *skipped)
-{
-    (void)coins;
-    if (skipped)
-        *skipped = 0;
-    int inserted = -1;
-    int rc = sqlite3_exec(ndb->db, "BEGIN", NULL, NULL, NULL);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "wallet_utxos: BEGIN failed: %s\n", sqlite3_errmsg(ndb->db));
-    } else {
-        rc = ar_exec_write_sql(ndb->db, "INSERT OR IGNORE INTO wallet_utxos "
-        "(txid, vout, value, address_hash, script, height, is_coinbase) "
-        "SELECT u.txid, u.vout, u.value, u.address_hash, u.script, "
-        "u.height, u.is_coinbase "
-        "FROM utxos u INNER JOIN wallet_keys wk "
-        "ON u.address_hash = wk.pubkey_hash");
-    }
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "wallet_utxos INSERT failed: %s\n", sqlite3_errmsg(ndb->db));
-        if (sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) {
-            fprintf(stderr, "wallet_utxos: ROLLBACK failed: %s\n", sqlite3_errmsg(ndb->db));
-        }
-    } else {
-        int changed = sqlite3_changes(ndb->db);
-        if (sqlite3_exec(ndb->db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
-            fprintf(stderr, "wallet_utxos: COMMIT failed: %s\n", sqlite3_errmsg(ndb->db));
-            if (sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) {
-                fprintf(stderr, "wallet_utxos: ROLLBACK after COMMIT failure failed: %s\n",
-                        sqlite3_errmsg(ndb->db));
-            }
-        } else {
-            inserted = changed;
-        }
-    }
-    return inserted;
-}
-
 /* Rebuild wallet_utxos from ground truth ONLY if empty */
 static void boot_wallet_rebuild_if_empty(struct node_db *ndb,
                                          struct coins_view_cache *coins)
@@ -671,7 +632,10 @@ static void boot_wallet_rebuild_if_empty(struct node_db *ndb,
         printf("wallet_utxos: no wallet keys; ground-truth rebuild skipped\n");
     } else {
         int skipped = 0;
-        (void)boot_wallet_rebuild_confirmed(ndb, coins, &skipped);
+        int rebuilt = boot_wallet_rebuild_confirmed(ndb, coins, &skipped);
+        if (rebuilt >= 0)
+            printf("wallet_utxos: rebuilt %d rows confirmed by the coins "
+                   "database, %d skipped\n", rebuilt, skipped);
     }
 }
 
