@@ -129,6 +129,7 @@ static void aib_request(struct aib_fx *x, const uint8_t env_root[32])
         .abi_count = 1,
     };
     memcpy(r->toolchain_root, env_root, 32);
+    aib_named_root("app_build fixture sysroot objects", r->sysroot_objects_sha3);
     r->harness.present = r->fixtures.present = r->policy.present = true;
     aib_named_root("app_build fixture harness", r->harness.root);
     aib_named_root("app_build fixture make fragment", r->fixtures.root);
@@ -159,8 +160,9 @@ static bool aib_init(struct aib_fx *x, const char *tag,
 }
 
 /* The depfile's prerequisites, in order, the target and continuations
- * skipped. */
-static size_t aib_depfile_list(const char *path, char deps[][64], size_t cap)
+ * skipped. An absolute (system) prerequisite is spelled as the derivation
+ * tokens it: "@sys" followed by its path. */
+static size_t aib_depfile_list(const char *path, char deps[][128], size_t cap)
 {
     char text[2048];
     FILE *f = fopen(path, "rb");
@@ -176,9 +178,17 @@ static size_t aib_depfile_list(const char *path, char deps[][64], size_t cap)
         size_t tl = strlen(t);
         if (strcmp(t, "\\") == 0 || (tl > 0 && t[tl - 1u] == ':'))
             continue;
-        (void)snprintf(deps[n++], 64, "%s", t);
+        (void)snprintf(deps[n++], 128, "%s%s", t[0] == '/' ? "@sys" : "", t);
     }
     return n;
+}
+
+static bool aib_listed(char deps[][128], size_t n, const char *want)
+{
+    for (size_t i = 0; i < n; i++)
+        if (strcmp(deps[i], want) == 0)
+            return true;
+    return false;
 }
 
 static int aib_cmp(const void *a, const void *b)
@@ -189,17 +199,20 @@ static int aib_cmp(const void *a, const void *b)
 /* The derived action's sources, as paths, equal the depfile list. */
 static bool aib_sources_equal_depfile(const struct aib_fx *x)
 {
-    char deps[AIB_MAX_DEPS][64];
+    char deps[AIB_MAX_DEPS][128];
     size_t n = aib_depfile_list(x->depfile, deps, AIB_MAX_DEPS);
     struct zcl_action_root_result r = {0};
     struct vcs_action_preimage_v2_decoded d = {0};
     char why[256] = "";
-    bool ok = n == 2 && zcl_action_root_derive(&x->req, &r) &&
+    bool ok = n >= 2 && n < AIB_MAX_DEPS && aib_listed(deps, n, "main.c") &&
+              aib_listed(deps, n, "f.h") &&
+              zcl_action_root_derive(&x->req, &r) &&
               vcs_action_preimage_v2_decode(r.preimage, r.preimage_len, &d,
                                             why, sizeof(why)) &&
               d.view.source_count == n;
     if (!ok)
-        printf("    depfile n=%zu derive=%s why=%s\n", n, r.miss, why);
+        printf("    depfile n=%zu derive=%s (%s) decode=%s\n", n, r.miss,
+               r.why, why);
     qsort(deps, n, sizeof(deps[0]), aib_cmp);
     for (size_t i = 0; ok && i < n; i++)
         ok = strcmp(d.view.sources[i].path, deps[i]) == 0;
@@ -271,8 +284,12 @@ static bool aib_record(const struct aib_fx *x, const uint8_t env_root[32],
     aib_named_root(version, rec->package_root);
     memcpy(rec->env_root, env_root, 32);
     aib_named_root("app_build fixture dependencies", rec->dependency_root);
-    return app_image_closure_root(&x->req, 1, rec->closure_root).ok &&
-           app_image_capture(x->image, rec).ok;
+    struct zcl_result r = app_image_closure_root(&x->req, 1, rec->closure_root);
+    if (r.ok)
+        r = app_image_capture(x->image, rec);
+    if (!r.ok)
+        printf("    record: %s\n", r.message);
+    return r.ok;
 }
 
 static bool aib_record_equal(const struct app_image_build *a,
@@ -342,6 +359,14 @@ static int test_aib_launch(const struct aib_fx *x, const uint8_t env_root[32])
             resident_launch_close(&launch);
         ASSERT(ok.ok);
         ASSERT(aib_flip_image_byte(x->image));
+        /* Same inode and size: only the recorded digest can refuse it. */
+        struct app_image_build now = rec;
+        ASSERT(app_image_capture(x->image, &now).ok);
+        ASSERT(now.image_volume == rec.image_volume &&
+               now.image_low == rec.image_low &&
+               now.image_high == rec.image_high &&
+               now.image_size == rec.image_size &&
+               memcmp(now.image_sha3, rec.image_sha3, 32) != 0);
         struct zcl_result edited =
             app_image_build_prepare(&rec, x->image, &launch);
         ASSERT(!edited.ok && strstr(edited.message, x->image) != NULL);
