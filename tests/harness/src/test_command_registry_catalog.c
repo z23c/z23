@@ -6656,6 +6656,181 @@ static int test_describe_emits_observed_p99(void)
     return failures;
 }
 
+static bool describe_budget_finished, describe_budget_baseline;
+static int64_t describe_budget_monotonic(void *self)
+{
+    (void)self;
+    return describe_budget_finished ? INT64_MAX : 0;
+}
+static int64_t describe_budget_wall(void *self)
+{
+    (void)self;
+    return describe_budget_baseline ? -1 : INT64_C(1700000000000);
+}
+static void describe_budget_handler(const struct zcl_command_request *request,
+                                    struct zcl_command_reply *reply)
+{
+    (void)request;
+    (void)reply;
+    describe_budget_finished = true;
+}
+
+/* Record through ordinary dispatch at the catalog's ring offset, but execute
+ * only this inert handler, never the real command (including wallet leaves). */
+static bool describe_budget_record(size_t index)
+{
+    const struct zcl_command_spec *base =
+        find_spec(zcl_command_catalog(), "discover.help");
+    if (!base || index >= ZCL_COMMAND_LATENCY_TABLE_MAX) return false;
+    struct zcl_command_spec *probe = &latency_specs[index];
+    *probe = *base;
+    probe->path = "latency.describe.budget";
+    probe->handler = describe_budget_handler;
+    char wire[ZCL_COMMAND_RESULT_BUDGET + 1];
+    bool ok = true;
+    for (unsigned sample = 0; sample < 64 && ok; sample++) {
+        enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+        describe_budget_finished = false;
+        ok = exec_leaf(&latency_registry, probe, wire, sizeof(wire), &code) &&
+             code == ZCL_COMMAND_EXIT_OK;
+    }
+    size_t n = zcl_command_registry_describe_json(&latency_registry,
+        probe->path, wire, sizeof(wire));
+    struct json_value document = {0};
+    ok = ok && n > 0 && json_read(&document, wire, n);
+    const struct json_value *policy = json_get(&document, "policy");
+    ok = ok && json_get_int(json_get(policy, "observed_p99_us")) == INT64_MAX / 1000 &&
+         json_get_int(json_get(policy, "observed_samples")) == 64;
+    json_free(&document);
+    probe->path = "";
+    return ok;
+}
+
+struct describe_budget_census {
+    size_t leaves, aliases, canonical_aliases, overflows, maximum;
+    char largest[ZCL_COMMAND_MAX_PATH];
+};
+
+static bool describe_budget_compare(const struct zcl_command_registry *registry,
+                                     const char *path, struct json_value *document,
+                                     size_t baseline,
+                                     struct describe_budget_census *census)
+{
+    char wire[ZCL_COMMAND_SPEC_BUDGET + 1];
+    size_t required = json_write(document, NULL, 0);
+    size_t actual = zcl_command_registry_describe_json(registry, path, wire,
+                                                       sizeof(wire));
+    if (required > census->maximum) {
+        census->maximum = required;
+        (void)snprintf(census->largest, sizeof(census->largest), "%s", path);
+    }
+    if (required > ZCL_COMMAND_SPEC_BUDGET) {
+        printf("\n[wide describe: %s baseline=%zu required=%zu cap=%u actual=%zu] ",
+               path, baseline, required, ZCL_COMMAND_SPEC_BUDGET, actual);
+        census->overflows++;
+        return actual == 0;
+    }
+    char expected[ZCL_COMMAND_SPEC_BUDGET + 1];
+    size_t expected_length = json_write(document, expected, sizeof(expected));
+    bool matches = actual == required && expected_length == required &&
+                   memcmp(wire, expected, required) == 0;
+    if (!matches) {
+        printf("\n[wide describe mismatch: %s required=%zu expected=%zu actual=%zu] ",
+               path, required, expected_length, actual);
+        if (actual > 0) printf("\nactual: %.*s\n", (int)actual, wire);
+        if (expected_length == required) printf("expected: %s\n", expected);
+    }
+    return matches;
+}
+
+static bool describe_budget_aliases(const struct zcl_command_registry *registry,
+                                     const struct zcl_command_spec *spec,
+                                     struct json_value *document, size_t baseline,
+                                     struct describe_budget_census *census)
+{
+    if (!spec->aliases || !spec->aliases[0]) return true;
+    size_t canonical_size = json_write(document, NULL, 0);
+    if (!json_push_kv_str(document, "canonical_path", spec->path)) return false;
+    size_t alias_baseline = baseline + json_write(document, NULL, 0) - canonical_size;
+    const char *at = spec->aliases;
+    while (*at) {
+        const char *end = strchr(at, ',');
+        size_t length = end ? (size_t)(end - at) : strlen(at);
+        char alias[ZCL_COMMAND_MAX_PATH];
+        if (!length || length >= sizeof(alias)) return false;
+        memcpy(alias, at, length);
+        alias[length] = '\0';
+        bool was_alias = false;
+        const struct zcl_command_spec *resolved =
+            zcl_command_registry_find(registry, alias, &was_alias);
+        bool canonical_alias = strcmp(alias, spec->path) == 0;
+        if (resolved != spec || was_alias == canonical_alias) {
+            printf("\n[wide alias resolution: %s expected=%s resolved=%s was_alias=%d] ",
+                   alias, spec->path, resolved ? resolved->path : "missing", was_alias);
+            return false;
+        }
+        if (canonical_alias) {
+            /* Canonical lookup wins; its unchanged response was checked above. */
+            census->canonical_aliases++;
+        } else {
+            if (!describe_budget_compare(registry, alias, document, alias_baseline,
+                                          census))
+                return false;
+            census->aliases++;
+        }
+        if (!end) break;
+        at = end + 1;
+    }
+    return true;
+}
+
+static int test_describe_wide_observation_budget(void)
+{
+    int failures = 0;
+    const clock_iface_t *saved = clock_default();
+    static const clock_iface_t clock = {
+        .now_monotonic_ns = describe_budget_monotonic,
+        .now_wall_ms = describe_budget_wall };
+    struct json_value document = {0};
+    TEST("every describe fits legal maximum observed timing and full sample ring") {
+        const struct zcl_command_registry *registry = zcl_command_catalog();
+        char wire[ZCL_COMMAND_SPEC_BUDGET + 1];
+        struct describe_budget_census census = {0};
+        for (size_t i = 0; i < ZCL_COMMAND_LATENCY_TABLE_MAX; i++)
+            latency_specs[i].path = "";
+        clock_set_default(&clock);
+        for (size_t i = 0; i < registry->count; i++) {
+            const struct zcl_command_spec *spec = &registry->commands[i];
+            if (spec->mode == ZCL_COMMAND_MODE_BRANCH) continue;
+            describe_budget_baseline = true;
+            size_t baseline = zcl_command_registry_describe_json(registry,
+                spec->path, wire, sizeof(wire));
+            ASSERT(baseline > 0 && json_read(&document, wire, baseline));
+            describe_budget_baseline = false;
+            ASSERT(describe_budget_record(i));
+            struct json_value *policy = (struct json_value *)json_get(&document, "policy");
+            ASSERT(policy != NULL);
+            json_set_int((struct json_value *)json_get(policy, "observed_p99_us"), INT64_MAX / 1000);
+            json_set_int((struct json_value *)json_get(policy, "observed_samples"), 64);
+            ASSERT(describe_budget_compare(registry, spec->path, &document,
+                                            baseline, &census));
+            ASSERT(describe_budget_aliases(registry, spec, &document,
+                                            baseline, &census));
+            json_free(&document);
+            census.leaves++;
+        }
+        printf("\n[wide describe census: leaves=%zu aliases=%zu canonical_aliases=%zu overflow=%zu maximum=%zu path=%s] ",
+               census.leaves, census.aliases, census.canonical_aliases,
+               census.overflows, census.maximum, census.largest);
+        ASSERT(census.overflows == 0);
+        PASS();
+    } _test_next:;
+    clock_set_default(saved);
+    describe_budget_baseline = false;
+    json_free(&document);
+    return failures;
+}
+
 /* core.wallet.shielded is a complete surface: the node could already SPEND
  * shielded funds through a typed command while it could not READ them, so
  * balance/notes/address are bound rather than PLANNED. balance and notes are
@@ -7504,6 +7679,7 @@ int test_command_registry_catalog(void)
     failures += test_dev_vcs_seal_grant_release_stub();
     failures += test_is_root_ownership();
     failures += test_zses_invite_leaves();
+    failures += test_describe_wide_observation_budget();
     printf("=== command_registry_catalog: %d failures ===\n", failures);
     return failures;
 }

@@ -26,7 +26,7 @@
 ZCL_COMMAND_READY_COMMAND(
     "dev.fleet.agents", "dev.fleet", "fleet.agents",
     "Every AI agent working on this box, and each executor's grade over time",
-    "Three sections, always in this order. RUNNING NOW lists one row per agent "
+    "Three sections in this order. RUNNING NOW lists one row per agent "
     "workspace under ~/.z23/lanes, ~/.z23/units, ~/.z23/trains and the native "
     "landing worktree: its name, kind, short HEAD, count of files Git reports "
     "dirty, how long ago its newest source file and its Git state changed, the "

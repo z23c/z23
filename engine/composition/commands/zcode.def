@@ -2339,18 +2339,17 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_COMMAND(
     "zcode.package.dev.improve", "zcode.package.dev", "zcode.improve",
     "Improve code candidate",
-    "mode=plan stores the workspace and returns immutable task, context, and "
-    "scope roots without launching work. mode=admit re-derives the candidate "
-    "tree/patch, enforces scope and limits, and queues the selected fixed "
-    "compile, package, test, or fuzz action. The task binds every input and "
-    "expiry. Before task/context persistence, both modes rebuild the CAS task "
-    "projection and refuse an exact same-source/same-goal open task or a "
-    "component-bounded declared-scope overlap; incomplete scans refuse. This "
-    "is collision evidence only: ownership, assignment, and execution remain "
-    "unobserved, and no adapter gains acceptance authority. Admission appends one "
-    "root-bound async proof request and returns before discovery, packaging, "
-    "transfer, or remote execution. remote_peer is an optional local hint; "
-    "zero permits later discovery of any eligible full-node peer.", 0,
+    "mode=plan stores workspace; returns immutable task, context and scope "
+    "roots, launching no work. mode=admit re-derives candidate tree/patch, "
+    "enforces scope/limits and queues the chosen fixed compile, package, test "
+    "or fuzz action. Tasks bind all inputs and expiry. Both modes rebuild CAS "
+    "task projection before persisting task/context; reject exact same-source/"
+    "same-goal open tasks, component-bounded declared-scope overlaps and "
+    "incomplete scans. Collision evidence only; ownership, assignment and "
+    "execution stay unobserved. No adapter gains acceptance authority. Admit "
+    "appends one root-bound async proof request; returns before discovery, "
+    "packaging, transfer or remote execution. remote_peer: optional local hint; "
+    "zero allows later discovery of any eligible full-node peer.", 0,
     "zcode,improve,task,agent,zbuild,proof,compile,package,test,fuzz",
     "zcl.zcode_improve.input.v1", "zcl.zcode_improve.v1",
     "workspace,candidate_workspace,datadir,mode,planned_task_root,planned_context_root,candidate_source_sha256,source_root,dependency_lock_root,dependency_lock_hex,write_scope_root,write_scope_csv,acceptance_tests_root,acceptance_recipe_hex,model_policy_root,goal,proof_policy_hex,action_kind,fixed_input_path,fixed_input_relpath,preprocessed_path,patch_root,candidate_source_root,adapter_policy_root,author_pubkey,candidate_sequence,candidate_created_unix,profile,expires_unix,max_changed_files,max_patch_bytes,max_context_bytes,max_cpu_seconds,max_memory_bytes,max_output_bytes,context_symbol,remote_peer",
@@ -3917,8 +3916,8 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_READ(
     "zcode.release.verify", "zcode.release", "",
     "Verify a signed release record (optionally its batch inclusion)",
-    "Decodes a zid release doc from --doc=<hex> or --file=<path to a saved "
-    ".zid> and verifies it against the current time: prints name, version, "
+    "Decodes a zid release doc from --doc=<hex> or --file=<saved .zid path> "
+    "and verifies against current time: prints name, version, "
     "manifest_root, master_pubkey, seq, expiry, and valid. A failing "
     "verification is a hard error naming the reason — DOC_EXPIRED (re-sign "
     "with a higher seq), BAD_SIGNATURE "
@@ -4821,8 +4820,8 @@ ZCL_COMMAND_READY_COMMAND(
     "`name_or_root` is a 64-hex byte identity or a publisher/package name "
     "selecting the highest published semver. Locks the package's "
     "zcode-package.json dependencies to immutable roots in a bounded acyclic "
-    "DAG; reports steps in dependency-first build order "
-    "with the lifecycle state it has actually reached: `installed` (this "
+    "DAG; reports dependency-first build steps "
+    "with their reached lifecycle state: `installed` (this "
     "exact root is already installed), `verified` (every manifest chunk "
     "re-hashed from the CAS, envelope and recipe root check out), "
     "`fetching` (bytes still missing locally — rule `package-incomplete`; "

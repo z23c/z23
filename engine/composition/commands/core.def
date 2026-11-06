@@ -875,8 +875,8 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_READ(
     "core.wallet.summary", "core.wallet", "",
     "Spendable, pending and public funds with sync state",
-    "Read-only funds screen, answered while the wallet is locked from the "
-    "loaded viewing keys. Amounts are integer zatoshi plus an exact "
+    "Read-only funds screen from loaded viewing keys, including while locked. "
+    "Amounts are integer zatoshi plus an exact "
     "8-decimal string. An unreadable amount is null, never 0: a locked "
     "wallet holding no viewing key has shielded_state keys_unavailable and "
     "every shielded amount and count null. "

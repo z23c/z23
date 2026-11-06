@@ -2584,8 +2584,8 @@ ZCL_COMMAND_DEV_COMMAND(
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.send", "dev.land", "",
     "Send this checkout's unlanded commits to the queue host",
-    "Refuses a dirty tracked tree (SEND_DIRTY_TREE), fetches origin main and "
-    "refuses when HEAD is not ahead (SEND_NOTHING_AHEAD), bundles HEAD "
+    "Refuses dirty tracked files (SEND_DIRTY_TREE), fetches origin main, "
+    "refuses HEAD not ahead (SEND_NOTHING_AHEAD), bundles HEAD "
     "^origin/main, copies it with scp to <host>:<inbox>/<lane>-<sha12>.bundle "
     "(inbox defaults to .cache/development-scratch/z23/land-inbox under the "
     "remote home) and runs `<remote_cmd> dev land receive` over ssh "
@@ -2861,9 +2861,9 @@ ZCL_COMMAND_DEV_COMMAND(
 ZCL_COMMAND_DEV_COMMAND(
     "dev.agent.worker", "dev.agent", "",
     "Consume the unit queue with a bounded worker",
-    "One active job per worker over the owner-private state root: claim "
-    "takes the oldest unfinished row and persists the claim identity "
-    "before any model submission; the executor runs forked under "
+    "One active job per worker in the owner-private state root: claim "
+    "takes the oldest unfinished row and persists claim identity "
+    "before model submission; the executor runs forked under "
     "RLIMIT_CPU/RLIMIT_AS with a wall-clock watchdog (on Windows: a "
     "restricted low-integrity child in a kill-on-close Job Object with "
     "the same memory and CPU caps, writing only its run dir and named "
@@ -2923,8 +2923,7 @@ ZCL_COMMAND_DEV_COMMAND(
 ZCL_COMMAND_DEV_COMMAND(
     "dev.agent.receive", "dev.agent", "",
     "Turn agent-mail directives into queued work",
-    "Each beat, directive "
-    "pages are pulled in-process from a durable cursor (receive/intake."
+    "Each beat pulls directive pages in-process from a durable cursor (receive/intake."
     "state), four a beat, advanced after each handled page; status shows "
     "intake_failures and intake_last_error. "
     "A row is admitted only when it is addressed to this receiver, carries "
@@ -3223,19 +3222,19 @@ ZCL_COMMAND_BRANCH("dev.app.machine", "dev.app",
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.app.machine.boot", "dev.app.machine", "dev.machine.boot",
-    "Boot a RISC-V kernel in the built-in machine and report the run",
+    "Boot and report a RISC-V kernel in the built-in machine",
     "Boot RV64 ELF/flat; optional disk. Report stop/work/console/"
-    "script/overlay/inputs. max_instr bounds retired+firmware+device "
+    "script/overlay/inputs. max_instr caps retired+firmware+device "
     "work, including started 4096-byte disk/entropy rounds. Ordinary runs "
     "use no host clock. type_after sends [marker,text] on console suffixes; "
     "until stops after its last step. Goals/faults/limits/input changes/"
-    "transcript errors fail with evidence; transcripts require fresh paths. "
+    "transcript errors fail with evidence; transcripts need fresh paths. "
     "No chain/network access. test_entropy_seed is repeatable, NOT secure; "
-    "early_seed test requires it and ELF, supplies 2048 insecure bytes "
+    "early_seed test needs it and ELF, supplies 2048 insecure bytes "
     "and reports clearing. entropy host uses OS RNG; no test seeds; "
     "early_seed host allowed; RNG failure refuses. No source, no entropy "
     "device. OS delivery proves no guest RNG readiness or key safety. "
-    "accepted_kernel checks installed output byte limits before/after; "
+    "accepted_kernel checks installed output byte limits pre/post; "
     "guest recipes remain unqualified. public_kernel reads bounded fixed PUBLIC "
     "copied CAS observations; protected_kernel selects separate fixed "
     "protected image/evidence. Neither installs software or "
@@ -3243,7 +3242,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "no arbitrary credential/private identity/transcript/SSH readiness. "
     "protected_unlock needs current invocation authority plus native "
     "OS-RNG INITIAL creation or an existing locked credential. "
-    "Autostart is configured separately. ports allows one/two test-only "
+    "Configure autostart separately. ports allows 1 or 2 test-only "
     "regular input/expect pairs, 65536 bytes total: exact replies/consumption "
     "within work budget; no host transport/secrets. docs/commons/RISCV_MACHINE.md.", 8192,
     "machine,riscv,rv64,boot,kernel,emulator,freebsd,console,transcript,deterministic",
