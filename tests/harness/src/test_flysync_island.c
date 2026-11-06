@@ -733,10 +733,20 @@ static int fsi_case_fallback_detach(struct fsi_node *n)
               fsi_rows_detached(n) && n->ms.pindex_best_header == genesis &&
               flysync_island_phase() == FLYSYNC_OFF &&
               !flysync_island_holds_header_sync());
+    return failures;
+}
 
-    /* A flushed detach persists each row's parent as zero (the record takes
-     * hashPrev from pprev): the loader brings every row back as a parentless
-     * root carrying its own proof, outside the root's ancestry. */
+/* A flushed detach persists each row's parent as zero (the record takes
+ * hashPrev from pprev): the loader brings every row back as a parentless root
+ * carrying its own proof, outside the root's ancestry. Then normal sync
+ * reaches the island and the fact retires. */
+static int fsi_case_fallback_rejoin(struct fsi_node *n)
+{
+    int failures = 0;
+    struct block_index *genesis = active_chain_tip(&n->ms.chain_active);
+    sqlite3 *db = progress_store_db();
+    struct island_anchor back;
+    bool found = false;
     flysync_island_test_reset();
     for (int i = 0; i < FSI_W; i++)
         n->rows[i]->pprev = NULL;
@@ -765,8 +775,34 @@ static int fsi_case_fallback_detach(struct fsi_node *n)
     return failures;
 }
 
-/* SHOULD 3 and C: an installed island never falls back; the fact and its
- * state are one record. */
+/* C: the fact, its row list and its state are one record. */
+static int fsi_case_fact_record(struct fsi_node *nn)
+{
+    int failures = 0;
+    sqlite3 *db = progress_store_db();
+    FSI_CHECK("a fact without its state reads as no island",
+              progress_meta_delete(db, "flysync.island_state") &&
+              island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_NONE);
+    struct island_anchor_rows list, back;
+    for (int i = 0; i < FSI_W; i++)
+        list.hash[i] = nn->is.hash[FSI_W - 1 - i];
+    struct island_anchor_rows wrong = list;
+    wrong.hash[FSI_W - 1] = list.hash[FSI_W - 2];
+    FSI_CHECK("save refuses a row list that does not end at the rung",
+              !island_anchor_save(db, &nn->a, &wrong).ok &&
+              island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_NONE);
+    struct zcl_result saved = island_anchor_save(db, &nn->a, &list);
+    bool rows_found = false;
+    FSI_CHECK("save writes the fact, its rows and SEEDED together",
+              saved.ok && island_anchor_state_load(db) ==
+                              ISLAND_ANCHOR_STATE_SEEDED &&
+              island_anchor_rows_load(db, &back, &rows_found) && rows_found &&
+              memcmp(back.hash, list.hash, sizeof(list.hash)) == 0);
+    return failures;
+}
+
+/* SHOULD 3: an installed island never falls back, and INSTALLED keys on the
+ * exact rung. */
 static int fsi_case_installed(void)
 {
     int failures = 0;
@@ -778,24 +814,7 @@ static int fsi_case_installed(void)
         return failures;
     }
     sqlite3 *db = progress_store_db();
-    FSI_CHECK("a fact without its state reads as no island",
-              progress_meta_delete(db, "flysync.island_state") &&
-              island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_NONE);
-    struct island_anchor_rows list, back;
-    for (int i = 0; i < FSI_W; i++)
-        list.hash[i] = n.is.hash[FSI_W - 1 - i];
-    struct island_anchor_rows wrong = list;
-    wrong.hash[FSI_W - 1] = list.hash[FSI_W - 2];
-    FSI_CHECK("save refuses a row list that does not end at the rung",
-              !island_anchor_save(db, &n.a, &wrong).ok &&
-              island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_NONE);
-    struct zcl_result saved = island_anchor_save(db, &n.a, &list);
-    bool rows_found = false;
-    FSI_CHECK("save writes the fact, its rows and SEEDED together",
-              saved.ok && island_anchor_state_load(db) ==
-                              ISLAND_ANCHOR_STATE_SEEDED &&
-              island_anchor_rows_load(db, &back, &rows_found) && rows_found &&
-              memcmp(back.hash, list.hash, sizeof(list.hash)) == 0);
+    failures += fsi_case_fact_record(&n);
     uint8_t digest[32] = {0};
     char why[320];
     FSI_CHECK("a bundle marker at another height leaves the island SEEDED",
@@ -969,6 +988,7 @@ static int fsi_case_island(void)
                   !flysync_island_wants_offer_height(FSI_RUNG_H - 1));
         failures += fsi_case_install_budget(&n);
         failures += fsi_case_fallback_detach(&n);
+        failures += fsi_case_fallback_rejoin(&n);
     }
     fsi_node_close(&n);
     chain_params_select(CHAIN_MAIN);
