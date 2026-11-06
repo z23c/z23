@@ -6,7 +6,6 @@
 
 #include "conditions/utxo_activation_paused.h"
 #include "chain/mmb.h"
-#include "chain/mmr.h"
 #include "coins/utxo_commitment.h"
 #include "event/event.h"
 #include "sync/sync_state.h"
@@ -21,11 +20,17 @@
 #include "services/sync_monitor.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
+#include "storage/utxo_mirror_schema.h"
 #include "validation/process_block.h"
 
 #include <stdatomic.h>
 #include <sqlite3.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/* The peer a recovery names in a test; production has none to name. */
+#define UAP_RECOVERY_PEER 7U
 
 #define UAP_CHECK(name, expr) do { \
     printf("utxo_activation_paused: %s... ", (name)); \
@@ -49,6 +54,7 @@ void block_failed_mask_at_tip_test_mark_no_advance_exhausted(
 bool block_failed_mask_at_tip_recovery_exhausted(int *target_height,
                                                  int *attempts_out);
 void tip_wedged_resnapshot_test_reset(void);
+void tip_wedged_resnapshot_test_set_recovery_peer(uint32_t peer_id);
 void tip_wedged_resnapshot_test_set_runtime(
     struct node_db *ndb,
     struct snapshot_sync_service *svc);
@@ -150,41 +156,52 @@ static void persist_snapshot_roots(struct node_db *ndb,
                                    const uint8_t block_hash[32],
                                    const uint8_t chain_work[32])
 {
-    struct mmr mmr;
     struct mmb mmb;
     struct mmb_leaf leaf;
     uint8_t buf[MMB_SERIALIZED_MAX];
     size_t len;
 
-    mmr_init(&mmr);
-    mmr_append(&mmr, block_hash);
-    len = mmr_serialize(&mmr, buf, sizeof(buf));
-    node_db_state_set(ndb, "mmr_state", buf, len);
-
     mmb_init(&mmb);
     mmb_leaf_from_block(&leaf, block_hash, 101, 1234567890, 0x1d00ffff,
                         block_hash, chain_work, NULL);
-    mmb_append(&mmb, &leaf);
+    /* Heights are zero-based: the anchor at 101 has 102 leaves. */
+    for (int i = 0; i < 102; i++)
+        mmb_append(&mmb, &leaf);
     len = mmb_serialize(&mmb, buf, sizeof(buf));
     node_db_state_set(ndb, "mmb_state", buf, len);
 }
 
-static bool seed_snapshot_manifest_db(struct node_db *ndb,
-                                      const uint8_t block_hash[32],
-                                      const uint8_t chain_work[32])
+/* The manifest reads on a connection of its own, so the database is a file. */
+static bool open_manifest_db(struct node_db *ndb)
+{
+    char dir[128];
+    char path[192];
+
+    snprintf(dir, sizeof(dir), "./test-tmp/uap_manifest_%d_XXXXXX",
+             (int)getpid());
+    (void)mkdir("./test-tmp", 0755);
+    if (!mkdtemp(dir))
+        return false;
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    return node_db_open(ndb, path);
+}
+
+/* A validated row for every height through the anchor, which holds block_hash. */
+static bool seed_manifest_block_rows(struct node_db *ndb,
+                                     const uint8_t block_hash[32],
+                                     const uint8_t chain_work[32])
 {
     uint8_t prev_hash[32];
     uint8_t merkle_root[32];
     uint8_t nonce[32];
     uint8_t solution[1] = {0};
     sqlite3_stmt *st = NULL;
+    bool ok;
 
     memset(prev_hash, 0x40, sizeof(prev_hash));
     memset(merkle_root, 0x42, sizeof(merkle_root));
     memset(nonce, 0x43, sizeof(nonce));
 
-    if (!node_db_state_set_int(ndb, "tip_height", 101))
-        return false;
     if (sqlite3_prepare_v2(ndb->db,
             "INSERT INTO blocks "
             "(hash,height,prev_hash,version,merkle_root,time,bits,nonce,"
@@ -192,19 +209,38 @@ static bool seed_snapshot_manifest_db(struct node_db *ndb,
             "VALUES (?,?,?,?,?,?,?,?,?,?,3)",
             -1, &st, NULL) != SQLITE_OK)
         return false;
-    sqlite3_bind_blob(st, 1, block_hash, 32, SQLITE_STATIC);
-    sqlite3_bind_int(st, 2, 101);
-    sqlite3_bind_blob(st, 3, prev_hash, 32, SQLITE_STATIC);
-    sqlite3_bind_int(st, 4, 4);
-    sqlite3_bind_blob(st, 5, merkle_root, 32, SQLITE_STATIC);
-    sqlite3_bind_int(st, 6, 1234567890);
-    sqlite3_bind_int(st, 7, 0x1d00ffff);
-    sqlite3_bind_blob(st, 8, nonce, 32, SQLITE_STATIC);
-    sqlite3_bind_blob(st, 9, solution, sizeof(solution), SQLITE_STATIC);
-    sqlite3_bind_blob(st, 10, chain_work, 32, SQLITE_STATIC);
-    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    ok = true;
+    for (int h = 0; ok && h <= 101; h++) {
+        uint8_t hash[32];
+
+        memset(hash, 0x40, sizeof(hash));
+        hash[0] = (uint8_t)h;
+        sqlite3_bind_blob(st, 1, h == 101 ? block_hash : hash, 32,
+                          SQLITE_STATIC);
+        sqlite3_bind_int(st, 2, h);
+        sqlite3_bind_blob(st, 3, prev_hash, 32, SQLITE_STATIC);
+        sqlite3_bind_int(st, 4, 4);
+        sqlite3_bind_blob(st, 5, merkle_root, 32, SQLITE_STATIC);
+        sqlite3_bind_int(st, 6, 1234567890);
+        sqlite3_bind_int(st, 7, 0x1d00ffff);
+        sqlite3_bind_blob(st, 8, nonce, 32, SQLITE_STATIC);
+        sqlite3_bind_blob(st, 9, solution, sizeof(solution), SQLITE_STATIC);
+        sqlite3_bind_blob(st, 10, chain_work, 32, SQLITE_STATIC);
+        ok = sqlite3_step(st) == SQLITE_DONE;
+        sqlite3_reset(st);
+    }
     sqlite3_finalize(st);
-    if (!ok)
+    return ok;
+}
+
+static bool seed_snapshot_manifest_db(struct node_db *ndb,
+                                      const uint8_t block_hash[32],
+                                      const uint8_t chain_work[32])
+{
+    /* The mirror's next height to apply: its rows are through the anchor. */
+    if (!node_db_state_set_int(ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, 102))
+        return false;
+    if (!seed_manifest_block_rows(ndb, block_hash, chain_work))
         return false;
     if (!node_db_exec(ndb,
             "INSERT INTO utxos "
@@ -814,8 +850,9 @@ static int uap_run_tip_wedged_no_advance_case(void)
     ms.pindex_best_header = &best_header;
     ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
 
-    ok = ok && node_db_open(&ndb, ":memory:");
+    ok = ok && open_manifest_db(&ndb);
     ok = ok && seed_snapshot_manifest_db(&ndb, block_hash, chain_work);
+    tip_wedged_resnapshot_test_set_recovery_peer(UAP_RECOVERY_PEER);
     snapsync_init(&svc, &ndb);
 
     condition_engine_set_main_state(&ms);
@@ -1203,8 +1240,9 @@ static int uap_run_snapshot_recovery_case(void)
     ms.pindex_best_header = &best_header;
     ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
 
-    ok = ok && node_db_open(&ndb, ":memory:");
+    ok = ok && open_manifest_db(&ndb);
     ok = ok && seed_snapshot_manifest_db(&ndb, block_hash, chain_work);
+    tip_wedged_resnapshot_test_set_recovery_peer(UAP_RECOVERY_PEER);
     snapsync_init(&svc, &ndb);
 
     condition_engine_set_main_state(&ms);
@@ -1233,6 +1271,93 @@ static int uap_run_snapshot_recovery_case(void)
     json_free(&root);
 
     UAP_CHECK("tip_wedged_resnapshot requests snapshot recovery", ok);
+    snapsync_reset(&svc);
+    node_db_close(&ndb);
+    main_state_free(&ms);
+    clock_reset_default();
+
+    return failures;
+}
+
+/* A refusal retries on the condition's own backoff, the same cadence as a
+ * recovery nobody answers, and never occupies the service. */
+static bool uap_no_peer_retries_on_backoff(struct fake_clock *clock,
+                                           const struct snapshot_sync_service *svc)
+{
+    struct watchdog_stats wd;
+    bool ok = true;
+
+    fake_clock_set(clock, 7001);
+    condition_engine_tick();
+    ok = ok && tip_wedged_resnapshot_test_remedy_calls() == 1;
+    for (int i = 1; i <= 2; i++) {
+        fake_clock_set(clock, 7000 + i * 301);
+        condition_engine_tick();
+        ok = ok && tip_wedged_resnapshot_test_remedy_calls() == 1 + i;
+        ok = ok && tip_wedged_resnapshot_test_recovery_accepted() == 0;
+        ok = ok && svc->state == SNAPSYNC_IDLE;
+        ok = ok && condition_engine_get_active_count() == 1;
+    }
+    sync_monitor_get_stats(&wd);
+    return ok && wd.last_recovery != WATCHDOG_SNAPSHOT_RESNAPSHOT;
+}
+
+/* What a node does today: the remedy has no peer to name, so it gives up before
+ * scanning the mirror and leaves the service free to hear a real offer. */
+static int uap_run_no_recovery_peer_case(void)
+{
+    int failures = 0;
+
+    reset_conditions();
+    struct fake_clock clock;
+    fake_clock_install(&clock, 7000);
+    bool ok = true;
+    struct main_state ms;
+    struct block_index tip;
+    struct block_index best_header;
+    struct node_db ndb;
+    struct snapshot_sync_service svc;
+    uint8_t block_hash[32];
+    uint8_t chain_work[32];
+    struct watchdog_stats wd;
+
+    memset(&tip, 0, sizeof(tip));
+    memset(&best_header, 0, sizeof(best_header));
+    memset(block_hash, 0x53, sizeof(block_hash));
+    memset(chain_work, 0x57, sizeof(chain_work));
+    main_state_init(&ms);
+    block_height_census_test_reset();
+    tip.nHeight = 100;
+    tip.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    best_header.nHeight = 110;
+    ms.pindex_best_header = &best_header;
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
+
+    ok = ok && open_manifest_db(&ndb);
+    ok = ok && seed_snapshot_manifest_db(&ndb, block_hash, chain_work);
+    tip_wedged_resnapshot_test_set_recovery_peer(0);
+    snapsync_init(&svc, &ndb);
+
+    condition_engine_set_main_state(&ms);
+    sync_monitor_init();
+    sync_monitor_set_context(NULL, NULL, &ms);
+    sync_monitor_test_set_local_recovery(true, true, 101, 3,
+                                         "next-child-missing");
+    tip_wedged_resnapshot_test_set_runtime(&ndb, &svc);
+    register_tip_wedged_resnapshot();
+
+    condition_engine_tick();
+    ok = ok && tip_wedged_resnapshot_test_remedy_calls() == 1;
+    ok = ok && tip_wedged_resnapshot_test_recovery_accepted() == 0;
+    ok = ok && tip_wedged_resnapshot_test_last_manifest_height() == -1;
+    ok = ok && svc.state == SNAPSYNC_IDLE;
+    sync_monitor_get_stats(&wd);
+    ok = ok && wd.last_recovery != WATCHDOG_SNAPSHOT_RESNAPSHOT;
+
+    UAP_CHECK("tip_wedged_resnapshot with no peer to ask stays idle", ok);
+
+    UAP_CHECK("tip_wedged_resnapshot refusal retries on backoff, service idle",
+              uap_no_peer_retries_on_backoff(&clock, &svc));
     snapsync_reset(&svc);
     node_db_close(&ndb);
     main_state_free(&ms);
@@ -1270,8 +1395,9 @@ static int uap_run_local_import_case(void)
     ms.pindex_best_header = &best_header;
     ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
 
-    ok = ok && node_db_open(&ndb, ":memory:");
+    ok = ok && open_manifest_db(&ndb);
     ok = ok && seed_snapshot_manifest_db(&ndb, block_hash, chain_work);
+    tip_wedged_resnapshot_test_set_recovery_peer(UAP_RECOVERY_PEER);
     snapsync_init(&svc, &ndb);
 
     condition_engine_set_main_state(&ms);
@@ -1345,8 +1471,9 @@ static int uap_run_cooldown_rearm_case(void)
     ms.pindex_best_header = &best_header;
     ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
 
-    ok = ok && node_db_open(&ndb, ":memory:");
+    ok = ok && open_manifest_db(&ndb);
     ok = ok && seed_snapshot_manifest_db(&ndb, block_hash, chain_work);
+    tip_wedged_resnapshot_test_set_recovery_peer(UAP_RECOVERY_PEER);
     snapsync_init(&svc, &ndb);
 
     condition_engine_set_main_state(&ms);
@@ -1425,8 +1552,9 @@ static int uap_run_idle_snapshot_wait_case(void)
     ms.pindex_best_header = &best_header;
     ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
 
-    ok = ok && node_db_open(&ndb, ":memory:");
+    ok = ok && open_manifest_db(&ndb);
     ok = ok && seed_snapshot_manifest_db(&ndb, block_hash, chain_work);
+    tip_wedged_resnapshot_test_set_recovery_peer(UAP_RECOVERY_PEER);
     snapsync_init(&svc, &ndb);
     svc.state = SNAPSYNC_NEGOTIATING;
 
@@ -1778,6 +1906,7 @@ int test_utxo_activation_paused(void)
     failures += uap_run_max_attempts_case();
     failures += uap_run_snapshot_recovery_case();
     failures += uap_run_local_import_case();
+    failures += uap_run_no_recovery_peer_case();
     failures += uap_run_cooldown_rearm_case();
     failures += uap_run_idle_snapshot_wait_case();
     failures += uap_boundary_cases();

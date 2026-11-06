@@ -43,7 +43,20 @@ static _Atomic int g_last_witness_snapsync_state = SNAPSYNC_IDLE;
 static struct node_db *g_test_ndb;
 static struct snapshot_sync_service *g_test_svc;
 static _Atomic int g_test_remedy_calls;
+static _Atomic uint32_t g_test_recovery_peer;
 #endif
+
+/* The peer a recovery asks. Nothing picks one yet: choosing a peer and sending
+ * it a challenge would be new network reach, and for a snapshot that cannot be
+ * installed. Zero makes the manifest refuse before it scans the mirror. */
+static uint32_t recovery_peer_id(void)
+{
+#ifdef ZCL_TESTING
+    return atomic_load(&g_test_recovery_peer);
+#else
+    return 0;
+#endif
+}
 
 static const char *trigger_name(enum tip_wedged_trigger trigger)
 {
@@ -189,7 +202,8 @@ static enum condition_remedy_result remedy_tip_wedged_resnapshot(void)
         return COND_REMEDY_FAILED;
     }
 
-    if (!snapsync_build_local_recovery_manifest(ndb, &manifest, 0).ok) {
+    if (!snapsync_build_local_recovery_manifest(ndb, &manifest,
+                                                recovery_peer_id()).ok) {
         LOG_WARN("condition", "[condition:tip_wedged_resnapshot] trigger=%s target=%d " "local=%d best=%d result=manifest_unavailable", trigger_name(trigger), target, atomic_load(&g_local_height_at_detect), atomic_load(&g_best_header_at_detect));
         event_emitf(EV_SYNC_STATE_CHANGE, 0,
                     "condition tip_wedged_resnapshot result=failed "
@@ -320,8 +334,14 @@ void register_tip_wedged_resnapshot(void)
 }
 
 #ifdef ZCL_TESTING
+void tip_wedged_resnapshot_test_set_recovery_peer(uint32_t peer_id)
+{
+    atomic_store(&g_test_recovery_peer, peer_id);
+}
+
 void tip_wedged_resnapshot_test_reset(void)
 {
+    atomic_store(&g_test_recovery_peer, 0);
     atomic_store(&g_trigger_at_detect, TWR_TRIGGER_NONE);
     atomic_store(&g_local_height_at_detect, -1);
     atomic_store(&g_best_header_at_detect, -1);
