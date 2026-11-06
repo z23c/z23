@@ -501,6 +501,14 @@ static void fsi_tick_seeded(int64_t now)
         fsi_fall_back("the rung bundle did not install within its bound");
 }
 
+bool flysync_island_wants_offer_height(int32_t height)
+{
+    int p = atomic_load(&g_phase);
+    if (p != FLYSYNC_WAIT && p != FLYSYNC_WALK)
+        return true;
+    return fsi_rung_at(height) != NULL;
+}
+
 void flysync_island_boot_register(void)
 {
     (void)island_anchor_boot_register(progress_store_db());
@@ -526,6 +534,7 @@ bool flysync_island_boot_after_index(struct app_context *ctx,
     enum flysync_phase p = flysync_island_phase();
     if (p != FLYSYNC_OFF && p != FLYSYNC_FELL_BACK) {
         msg_processor_set_header_sync_hold(flysync_island_holds_header_sync);
+        state_offer_store_set_height_filter(flysync_island_wants_offer_height);
         net_set_advertise_full_history(false);
         LOG_WARN(FSI_SUBSYS, "FlySync phase %s: header sync %s; NODE_NETWORK "
                  "not advertised (no history below the rung)",

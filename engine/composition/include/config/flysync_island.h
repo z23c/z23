@@ -84,6 +84,10 @@ void flysync_island_boot_register(void);
 bool flysync_island_boot_after_index(struct app_context *ctx,
                                      struct main_state *ms);
 
+/* State-offer height filter: while waiting for its rung (WAIT/WALK) the node
+ * takes only an offer at a baked rung; otherwise every height. */
+bool flysync_island_wants_offer_height(int32_t height);
+
 /* True while normal getheaders requests must not go out (WAIT/WALK/SEEDED). */
 bool flysync_island_holds_header_sync(void);
 

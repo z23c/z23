@@ -11,6 +11,7 @@
 #include "json/json.h"
 #include "util/log_macros.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -42,6 +43,12 @@ static uint32_t g_offers_seen;
 static uint32_t g_offers_rejected;
 static int32_t g_newest_height_seen;
 static int32_t g_chosen_height;
+static _Atomic(state_offer_height_filter_fn) g_height_filter = NULL;
+
+void state_offer_store_set_height_filter(state_offer_height_filter_fn fn)
+{
+    atomic_store(&g_height_filter, fn);
+}
 static uint8_t g_chosen_digest[32];
 static bool g_fallback_named;
 static char g_fallback_reason[128];
@@ -433,13 +440,22 @@ static bool need_wants(const struct state_offer_need *need, int32_t bundle_heigh
            need->local_height < bundle_height;
 }
 
+/* The engine-set height filter (NULL: every height). A FlySync node waiting
+ * for its rung takes only a baked rung's offer. */
+static bool offer_height_wanted(int32_t height)
+{
+    state_offer_height_filter_fn fn = atomic_load(&g_height_filter);
+    return !fn || fn(height);
+}
+
 static size_t best_offer(int64_t now_ms, const struct state_offer_need *need)
 {
     size_t best = STATE_OFFER_STORE_MAX;
     for (size_t i = 0; i < STATE_OFFER_STORE_MAX; i++) {
         if (!g_offer_used[i] || g_offer_fetching[i] || now_ms < g_offers[i].retry_after_ms ||
             !need_wants(need, g_offers[i].offer.bundle_height) ||
-            (g_offers[i].peer_link && link_peer_strikes(g_offers[i].peer_id)))
+            (g_offers[i].peer_link && link_peer_strikes(g_offers[i].peer_id)) ||
+            !offer_height_wanted(g_offers[i].offer.bundle_height))
             continue;
         if (best == STATE_OFFER_STORE_MAX ||
             g_offers[i].offer.bundle_height >

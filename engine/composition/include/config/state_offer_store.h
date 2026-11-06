@@ -110,6 +110,11 @@ enum state_offer_store_result {
 const char *state_offer_store_result_string(enum state_offer_store_result r);
 const char *state_offer_decision_string(enum state_offer_decision d);
 
+/* Optional filter on offered bundle heights (NULL, the default, takes every
+ * height). Offers it refuses are kept but never chosen. */
+typedef bool (*state_offer_height_filter_fn)(int32_t bundle_height);
+void state_offer_store_set_height_filter(state_offer_height_filter_fn fn);
+
 /* Clear every offer, strike and clock. */
 void state_offer_store_reset(void);
 

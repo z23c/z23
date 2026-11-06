@@ -34,6 +34,8 @@
 #include "net/net.h"
 #include "net/netbase.h"
 #include "net/protocol.h"
+#include "net/rom_seed.h"
+#include "net/state_offer.h"
 #include "primitives/block.h"
 #include "util/util.h"
 #include "validation/main_state.h"
@@ -586,6 +588,81 @@ static int fsi_case_island(void)
     return failures;
 }
 
+/* ── State-offer height filter ───────────────────────────────────────────── */
+
+/* A signed offer at `height`, built as test_stale_offers_only builds one. */
+static void fsi_make_offer(struct state_offer_v1 *o, int32_t height,
+                           uint8_t tag)
+{
+    memset(o, 0, sizeof(*o));
+    o->version = STATE_OFFER_VERSION;
+    o->flags = STATE_OFFER_FLAGS_NONE;
+    o->bundle_height = height;
+    o->offerer_tip_height = 3309702;
+    o->chunk_size = STATE_OFFER_CHUNK_SIZE_BYTES;
+    o->content_bytes = (uint64_t)STATE_OFFER_CHUNK_SIZE_BYTES * 8u;
+    o->num_chunks = 8u;
+    o->kind = (uint16_t)ROM_ARTIFACT_CONSENSUS_BUNDLE;
+    for (size_t i = 0; i < 32; i++) {
+        o->header_hash[i] = (uint8_t)(0x11u + tag + i);
+        o->content_digest[i] = (uint8_t)(tag + i);
+        o->chunk_tree_root[i] = (uint8_t)(0x51u + tag + i);
+        o->mmb_peaks_digest[i] = (uint8_t)(0x71u + i);
+        o->producer_receipt_id[i] = (uint8_t)(0x91u + i);
+    }
+    o->issued_unix = UINT64_C(1800000000);
+    memcpy(o->filename, "consensus-state-bundle-1.sqlite", 31);
+    o->filename_len = 31;
+    uint8_t seed[32];
+    for (size_t i = 0; i < 32; i++)
+        seed[i] = (uint8_t)(0x0du ^ (uint8_t)(i * 7u + 3u));
+    (void)state_offer_v1_sign(o, seed);
+}
+
+/* Only a keystone offer on the table: chosen without the filter, never while
+ * a FlySync node waits for its rung. */
+static int fsi_case_offer_filter(void)
+{
+    int failures = 0;
+    const struct rom_state_checkpoint *ks = get_rom_state_checkpoint();
+    struct state_offer_v1 o;
+    fsi_make_offer(&o, ks ? ks->height : 3056758, 0x40);
+    uint8_t ip[16] = {0};
+    ip[10] = 0xff; ip[11] = 0xff; ip[12] = 10; ip[15] = 33;
+    struct state_offer_record rec;
+
+    state_offer_store_reset();
+    state_offer_store_set_height_filter(NULL);
+    bool kept = state_offer_store_record(&o, ip, 18034, 3, 1000) ==
+                STATE_OFFER_STORE_KEPT;
+    FSI_CHECK("no filter: the keystone offer is kept and chosen",
+              kept && state_offer_store_decide(2000, &rec) ==
+                          STATE_OFFER_DECIDE_FETCH);
+
+    state_offer_store_reset();
+    flysync_island_test_reset();
+    flysync_island_set_requested(true);
+    struct main_state ms;
+    main_state_init(&ms);
+    char why[160];
+    (void)flysync_island_boot_gate(NULL, &ms, why, sizeof(why));
+    state_offer_store_set_height_filter(flysync_island_wants_offer_height);
+    (void)state_offer_store_record(&o, ip, 18034, 3, 1000);
+    FSI_CHECK("FlySync waiting: the keystone offer is not chosen",
+              flysync_island_phase() == FLYSYNC_WAIT &&
+              state_offer_store_decide(2000, &rec) != STATE_OFFER_DECIDE_FETCH);
+    FSI_CHECK("FlySync waiting: a baked rung height is wanted",
+              flysync_island_wants_offer_height(FSI_RUNG_H) &&
+              !flysync_island_wants_offer_height(FSI_RUNG_H + 1));
+    flysync_island_test_reset();
+    FSI_CHECK("FlySync off: every height is wanted",
+              flysync_island_wants_offer_height(ks ? ks->height : 1));
+    state_offer_store_set_height_filter(NULL);
+    state_offer_store_reset();
+    main_state_free(&ms);
+    return failures;
+}
+
 /* ── Boot gate and fall-back ─────────────────────────────────────────────── */
 
 static int fsi_case_boot_gate(void)
@@ -654,6 +731,7 @@ int test_flysync_island(void)
     failures += fsi_case_verify_window();
     failures += fsi_case_island();
     failures += fsi_case_boot_gate();
+    failures += fsi_case_offer_filter();
     printf("flysync_island: %d failures\n", failures);
     return failures;
 }
