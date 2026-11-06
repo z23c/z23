@@ -2455,6 +2455,53 @@ static int rf_reap_case(const struct rf_forked_case *c)
     return WEXITSTATUS(status);
 }
 
+/* A canonical root-level seed travels over the actual file service without
+ * using the bundles/ directory reserved for install discovery. */
+static int test_root_seed_retrieval(void)
+{
+    int failures = 0;
+    char sr[PATH_MAX], cr[PATH_MAX];
+    char *sdir = NULL, *cdir = NULL;
+    uint8_t *content = NULL;
+    uint8_t (*chunks)[32] = NULL;
+    TEST("rom_fetch: root-level bundle scan serves exact verified bytes") {
+        fs_server_stop(); rom_seed_reset(); rom_peer_scoring_test_reset();
+        rom_seed_set_peer_bps_cap(1ull << 30); rom_seed_set_global_bps_cap(1ull << 30);
+        sdir = test_mkdtemp(sr, sizeof sr, "zcl_root_seed_server");
+        cdir = test_mkdtemp(cr, sizeof cr, "zcl_root_seed_client");
+        ASSERT(sdir && cdir);
+        size_t size = 65536;
+        content = malloc(size); ASSERT(content != NULL);
+        gen_content(content, size);
+        const char *name = "consensus-state-bundle-3200000.sqlite";
+        ASSERT(write_file(sdir, name, content, size));
+        ASSERT(rom_seed_scan_datadir(sdir) == 1);
+        struct rom_artifact arts[ROM_SEED_MAX_ARTIFACTS];
+        ASSERT(rom_seed_list(arts, ROM_SEED_MAX_ARTIFACTS) == 1);
+        ASSERT(strcmp(arts[0].filename, name) == 0);
+        struct rom_fetch_manifest manifest; manifest_from_artifact(&arts[0], &manifest);
+        uint16_t port = 0; fs_server_start(sdir, 0, NULL);
+        for (int w = 0; w < 40 && !fs_server_is_running(); w++) platform_sleep_ms(50);
+        if (fs_server_is_running()) port = fs_server_get_port();
+        ASSERT(port != 0);
+        chunks = malloc((size_t)ROM_SEED_MAX_CHUNKS * 32); ASSERT(chunks != NULL);
+        uint32_t count = 0;
+        ASSERT(rom_fetch_get_manifest("127.0.0.1", port, manifest.chunk_root, chunks,
+                                      ROM_SEED_MAX_CHUNKS, &count));
+        ASSERT(count == arts[0].num_chunks);
+        struct rom_fetch_peer peer = {0};
+        snprintf(peer.addr, sizeof peer.addr, "%s", "127.0.0.1"); peer.port = port;
+        ASSERT(rom_fetch_download_verified_parallel(&peer, 1, &manifest, chunks, count, cdir, NULL, NULL));
+        char path[PATH_MAX]; snprintf(path, sizeof path, "%s/%s", cdir, name);
+        ASSERT(rom_fetch_verify_file(path, &manifest));
+        PASS();
+    } _test_next:;
+    fs_server_stop(); rom_seed_reset(); free(chunks); free(content);
+    if (sdir) test_rm_rf_recursive(sdir);
+    if (cdir) test_rm_rf_recursive(cdir);
+    return failures;
+}
+
 static int test_rom_fetch_platform_arm(void)
 {
     int failures = 0;
@@ -2483,6 +2530,7 @@ static int test_rom_fetch_platform_arm(void)
     failures += test_verified_core_resume_without_part();
     failures += rf_reap_case(&cut_case);
     failures += rf_reap_case(&no_seeder_case);
+    failures += test_root_seed_retrieval();
     return failures;
 }
 #else /* _WIN32 */

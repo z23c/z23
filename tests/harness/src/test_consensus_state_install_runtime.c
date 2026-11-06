@@ -811,7 +811,6 @@ static int case_retry_condition(void)
     char bundles[320];
     snprintf(bundles, sizeof(bundles), "%s/bundles", dir);
     CSIR_CHECK("cond: mkdir bundles/", mkdir(bundles, 0700) == 0);
-    CSIR_CHECK("cond: stage bundle", csir_touch(bundles, "consensus-state-bundle-5000.sqlite"));
     checkpoint_bundle_install_ready_test_set_datadir(dir);
 
      /* The install-ready gate requires the checkpoint header's Equihash
@@ -820,6 +819,16 @@ static int case_retry_condition(void)
     validate_headers_ensure_set_validator_for_test(csir_header_pass, NULL);
     CSIR_CHECK("cond: checkpoint header solution landed (pass record minted)",
                validate_headers_stage_ensure_pass_record(&ms, CP));
+
+    /* Root-level ROM seed is served without becoming an install candidate. */
+    CSIR_CHECK("cond: root seed fixture", csir_touch(dir, "consensus-state-bundle-5000.sqlite"));
+    char *seed_candidate = boot_autodetect_consensus_bundle(dir);
+    CSIR_CHECK("cond: root seed is not autodetected", seed_candidate == NULL);
+    free(seed_candidate);
+    CSIR_CHECK("cond: root seed never arms install", !checkpoint_bundle_install_ready_test_detect() &&
+               checkpoint_bundle_install_ready_test_remedy() == (int)COND_REMEDY_SKIP &&
+               !boot_install_bundle_pending(dir));
+    CSIR_CHECK("cond: stage positive control", csir_touch(bundles, "consensus-state-bundle-5000.sqlite"));
 
     /* detect FIRES: headers ready + solution available + bundle staged. */
     CSIR_CHECK("cond: detect fires when headers reach checkpoint + bundle staged",
