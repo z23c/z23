@@ -45,6 +45,8 @@
 #include "storage/chainstate_legacy_reader.h"
 #include "storage/progress_store.h"
 #include "services/shielded_history_import_service.h"
+#include "services/node_db_import_service.h"
+#include "services/utxo_import_pipeline.h"
 #include "services/utxo_recovery_service.h" /* utxo_recovery_copy_chainstate_stable */
 #include "jobs/reducer_frontier.h"          /* reducer_frontier_derive_coins_best */
 #include "services/block_index_loader.h"    /* block_index_flat_header_at */
@@ -3470,40 +3472,13 @@ static void importchainstate_print_results(struct node_db *ndb,
     printf("Time:      %llds\n", (long long)(t1 - t0));
 }
 
-/* Check the imported set against the SHA3 checkpoint. Closes ndb on mismatch. */
-static int importchainstate_verify_sha3(struct node_db *ndb)
-{
-    /* ── SHA3 UTXO integrity verification ── */
-    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-    if (cp && cp->height > 0) {
-        printf("\nVerifying UTXO set against SHA3 checkpoint "
-               "(h=%d, %llu expected UTXOs)...\n",
-               cp->height, (unsigned long long)cp->utxo_count);
-        uint8_t sha3[32];
-        uint64_t sha3_count = 0;
-        utxo_commitment_sha3_compute(ndb->db, sha3, &sha3_count);
-        if (memcmp(sha3, cp->sha3_hash, 32) == 0 &&
-            sha3_count == cp->utxo_count) {
-            printf("SHA3 UTXO verification PASSED (%llu UTXOs match)\n",
-                   (unsigned long long)sha3_count);
-        } else {
-            fprintf(stderr,
-                "SHA3 UTXO MISMATCH — imported UTXO set is corrupt!\n"
-                "  Expected: %llu UTXOs, got %llu\n",
-                (unsigned long long)cp->utxo_count,
-                (unsigned long long)sha3_count);
-            if (sha3_count != cp->utxo_count)
-                fprintf(stderr, "  Count delta: %lld\n",
-                        (long long)sha3_count - (long long)cp->utxo_count);
-            node_db_close(ndb);
-            return 1;
-        }
-    }
-    return 0;
-}
-
 int importchainstate_mode(int argc, char **argv)
 {
+    if (argc < 3) {
+        fprintf(stderr, "usage: z23 --importchainstate <chainstate-dir>"
+                        " [<target-node.db-path>]\n");
+        return 1;
+    }
     const char *cs_path = argv[2];
     const char *home = getenv("HOME");
     char db_path[512];
@@ -3543,12 +3518,15 @@ int importchainstate_mode(int argc, char **argv)
     }
 
     int64_t t0 = (int64_t)time(NULL);
-    int count = node_db_sync_import_utxos(&ndb, &cvdb);
+    int count = -1;
+    struct zcl_result imported = node_db_import_service_run(&ndb, &cvdb, &count);
     int64_t t1 = (int64_t)time(NULL);
+    struct uint256 best_block;
+    bool have_best_block = coins_view_db_get_best_block(&cvdb, &best_block);
     coins_view_db_close(&cvdb);
 
-    if (count < 0) {
-        fprintf(stderr, "Import failed\n");
+    if (!imported.ok) {
+        fprintf(stderr, "Import failed: %s\n", imported.message);
         node_db_close(&ndb);
         return 1;
     }
@@ -3557,10 +3535,13 @@ int importchainstate_mode(int argc, char **argv)
     if (importchainstate_rebuild_tables(&ndb) != 0)
         return 1;
     importchainstate_print_results(&ndb, t0, t1);
-    if (importchainstate_verify_sha3(&ndb) != 0)
-        return 1;
-
+    struct zcl_result verified = utxo_import_verify_checkpoint(
+        &ndb, have_best_block ? &best_block : NULL);
     node_db_close(&ndb);
+    if (!verified.ok) {
+        fprintf(stderr, "%s\n", verified.message);
+        return 1;
+    }
     return 0;
 }
 

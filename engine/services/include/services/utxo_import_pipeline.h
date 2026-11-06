@@ -10,6 +10,7 @@
 #include <stddef.h>
 
 struct node_db;
+struct uint256;
 typedef struct sqlite3_stmt sqlite3_stmt;
 
 #define UTXO_IMPORT_NUM_DECODERS_MAX 32
@@ -44,6 +45,12 @@ int utxo_import_decode_entry(const struct utxo_import_raw_entry *raw,
 /* Does the record hold more live outputs than the max_rows it was decoded into? */
 bool utxo_import_entry_is_cut(const struct utxo_import_raw_entry *raw,
                               int max_rows);
+/* Compare an imported set with the compiled SHA3 checkpoint when the chainstate's
+ * best block is the checkpoint block. A set at another block cannot match it, so
+ * that is reported as not compared and is not a failure. With no best block
+ * (NULL) nobody can say which it is, and that is a failure. */
+struct zcl_result utxo_import_verify_checkpoint(struct node_db *ndb,
+                                                const struct uint256 *best_block);
 struct zcl_result utxo_import_writer_bind_checked(sqlite3_stmt *stmt,
                                                   const char *label,
                                                   int rc,

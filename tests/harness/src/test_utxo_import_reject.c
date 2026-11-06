@@ -6,11 +6,14 @@
 
 #include "test/test_core.h"
 
+#include "chain/checkpoints.h"
 #include "coins/compressor.h"
+#include "coins/utxo_commitment.h"
 #include "controllers/snapshot_controller.h"
 #include "core/serialize.h"
 #include "models/database.h"
 #include "services/node_db_import_service.h"
+#include "services/utxo_import_pipeline.h"
 #include "services/utxo_recovery_service.h"
 #include "storage/coins_db.h"
 #include "storage/coins_view_sqlite.h"
@@ -425,10 +428,91 @@ static int reject_case_snapshot_honours_refusal(void)
     return failures;
 }
 
+/* The checkpoint a fixture's imported set is compared with: at block 0x77..,
+ * holding that set's own root and count, then changed by each case. */
+static bool reject_checkpoint_for_set(const char *db_path,
+                                      struct sha3_utxo_checkpoint *cp)
+{
+    struct node_db ndb;
+
+    memset(cp, 0, sizeof(*cp));
+    cp->height = 1000;
+    memset(cp->block_hash, 0x77, sizeof(cp->block_hash));
+    if (!node_db_open(&ndb, db_path))
+        return false;
+    utxo_commitment_sha3_compute(ndb.db, cp->sha3_hash, &cp->utxo_count);
+    node_db_close(&ndb);
+    return cp->utxo_count == 6;
+}
+
+static struct zcl_result reject_verify_at(const char *db_path,
+                                          const struct sha3_utxo_checkpoint *cp,
+                                          const struct uint256 *best)
+{
+    struct node_db ndb;
+    struct zcl_result r;
+
+    if (!node_db_open(&ndb, db_path))
+        return ZCL_ERR(-100, "test could not open %s", db_path);
+    checkpoints_set_sha3_override_for_test(cp);
+    r = utxo_import_verify_checkpoint(&ndb, best);
+    checkpoints_reset_sha3_override_for_test();
+    node_db_close(&ndb);
+    return r;
+}
+
+static int reject_case_checkpoint_compared_only_at_its_block(void)
+{
+    int failures = 0;
+
+    TEST("utxo import reject: only a set at the checkpoint block is compared with "
+         "it, and a real mismatch there still fails") {
+        const int outputs[] = { 2, 2, 2 };
+        struct reject_fixture f;
+        struct reject_run run;
+        struct sha3_utxo_checkpoint cp;
+        struct uint256 at_checkpoint;
+        struct uint256 elsewhere;
+
+        ASSERT(reject_fixture_make(&f, outputs,
+                                   sizeof(outputs) / sizeof(outputs[0])));
+        ASSERT(reject_run_import(&f, &run));
+        ASSERT_RESULT_OK(run.result);
+        ASSERT(reject_checkpoint_for_set(f.db_path, &cp));
+        memcpy(at_checkpoint.data, cp.block_hash, sizeof(at_checkpoint.data));
+        memset(elsewhere.data, 0x78, sizeof(elsewhere.data));
+
+        /* The right set at the checkpoint block passes. */
+        ASSERT_RESULT_OK(reject_verify_at(f.db_path, &cp, &at_checkpoint));
+
+        /* The wrong root fails at the checkpoint block and is not compared at
+         * any other. */
+        cp.sha3_hash[0] ^= 0x01;
+        struct zcl_result wrong_root = reject_verify_at(f.db_path, &cp,
+                                                        &at_checkpoint);
+        ASSERT(!wrong_root.ok);
+        ASSERT(strstr(wrong_root.message, "SHA3 UTXO MISMATCH") != NULL);
+        ASSERT_RESULT_OK(reject_verify_at(f.db_path, &cp, &elsewhere));
+        cp.sha3_hash[0] ^= 0x01;
+
+        /* So does the wrong count with the right root. */
+        cp.utxo_count += 1;
+        ASSERT(!reject_verify_at(f.db_path, &cp, &at_checkpoint).ok);
+        ASSERT_RESULT_OK(reject_verify_at(f.db_path, &cp, &elsewhere));
+        cp.utxo_count -= 1;
+
+        /* No best block: nobody can say it is not the checkpoint block. */
+        ASSERT(!reject_verify_at(f.db_path, &cp, NULL).ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_utxo_import_reject(void)
 {
     int failures = 0;
 
+    failures += reject_case_checkpoint_compared_only_at_its_block();
     failures += reject_case_boot_honours_refusal();
     failures += reject_case_boot_keeps_a_whole_set();
     failures += reject_case_snapshot_honours_refusal();

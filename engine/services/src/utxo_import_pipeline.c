@@ -3,6 +3,9 @@
 #include "services/utxo_import_pipeline.h"
 
 #include "../../../engine/modules/storage/src/coins_record_codec.h"
+#include "chain/checkpoints.h"
+#include "coins/utxo_commitment.h"
+#include "core/uint256.h"
 #include "models/database.h"
 #include "platform/logical_cpu.h"
 #include "util/ar_step_readonly.h"
@@ -203,4 +206,38 @@ bool utxo_import_entry_is_cut(const struct utxo_import_raw_entry *raw,
            coins_record_decode(raw->value, raw->value_len, &opts, NULL, NULL,
                                &res) == COINS_RECORD_DECODE_OK &&
            res.live_outputs > (size_t)max_rows;
+}
+
+struct zcl_result utxo_import_verify_checkpoint(struct node_db *ndb,
+                                                const struct uint256 *best_block)
+{
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    uint8_t sha3[32];
+    uint64_t sha3_count = 0;
+
+    if (!cp || cp->height <= 0)
+        return ZCL_OK;
+    if (!best_block || uint256_is_null(best_block))
+        return ZCL_ERR(-1, "SHA3 UTXO checkpoint not checked: the chainstate has "
+                       "no best block, so its height is unknown");
+    if (memcmp(best_block->data, cp->block_hash, 32) != 0) {
+        char best_hex[65];
+
+        uint256_get_hex(best_block, best_hex);
+        printf("SHA3 UTXO checkpoint not compared: the imported set is at block "
+               "%s, not the checkpoint block at h=%d, and a set at any other "
+               "block cannot match it.\n", best_hex, cp->height);
+        return ZCL_OK;
+    }
+    printf("Verifying UTXO set against SHA3 checkpoint (h=%d, %llu expected "
+           "UTXOs)...\n", cp->height, (unsigned long long)cp->utxo_count);
+    utxo_commitment_sha3_compute(ndb->db, sha3, &sha3_count);
+    if (memcmp(sha3, cp->sha3_hash, 32) != 0 || sha3_count != cp->utxo_count)
+        return ZCL_ERR(-2, "SHA3 UTXO MISMATCH — imported UTXO set is corrupt: "
+                       "expected %llu UTXOs at h=%d, got %llu",
+                       (unsigned long long)cp->utxo_count, cp->height,
+                       (unsigned long long)sha3_count);
+    printf("SHA3 UTXO verification PASSED (%llu UTXOs match)\n",
+           (unsigned long long)sha3_count);
+    return ZCL_OK;
 }
