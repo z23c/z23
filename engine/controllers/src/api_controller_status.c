@@ -971,11 +971,10 @@ size_t api_serve_node_summary(uint8_t *response, size_t response_max)
     json_push_kv_str(&body, "status", status);
     bool public_serving = health.serving && !operator_needed &&
         agent_security_posture_allows_public_serving(&posture);
-    /* healthy is the shared "Ready." definition (a checkpoint-verified node
-     * qualifies); serving and readiness stay the public full-history gate. */
+    /* Field meanings: api_controller_internal.h, struct api_health_flags. */
     bool local_ready = agent_security_posture_local_ready(
         &posture, health.healthy, health.serving, operator_needed);
-    json_push_kv_bool(&body, "healthy", local_ready); json_push_kv_bool(&body, "serving", public_serving);
+    json_push_kv_bool(&body, "healthy", health.healthy && public_serving); json_push_kv_bool(&body, "serving", public_serving);
     json_push_kv_bool(&body, "local_ready", local_ready);
     json_push_kv_bool(&body, "operator_needed", operator_needed);
     api_node_summary_push_warnings(&body, &health, warning_blocker);

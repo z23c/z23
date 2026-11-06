@@ -52,9 +52,13 @@ static inline const struct blocker_snapshot *api_authority_blocker(
     return api_blocker_hard_gates_public_serving(dominant) ? dominant : NULL;
 }
 
-/* /health and healthcheck flags. public_serving and public_healthy (the HTTP
- * code) mean serving publicly; local_ready is the shared "Ready." definition
- * (agent_security_posture_local_ready), reported as a body field. */
+/* The one place the status words are defined. On /health, healthcheck and
+ * /api/status alike, top-level "healthy" (and the /health HTTP code) means
+ * public_healthy and "serving" means public_serving: serving publicly, which
+ * still needs full-history validation. zcl-nodectl and deploy_verify gate on
+ * them. "local_ready" is the shared "Ready." definition
+ * (agent_security_posture_local_ready): a checkpoint-verified node qualifies,
+ * and trust.ready on the status routes is this value. */
 struct api_health_flags {
     bool public_serving;
     bool public_healthy;

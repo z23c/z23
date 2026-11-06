@@ -566,6 +566,10 @@ int t_native_agent_api_contract(void)
         ASSERT(strstr(agent_summary_buf, "\"local_ready\"") != NULL);
         ASSERT(native_contract_checkpoint_probe_wired());
         ASSERT(strstr(api_status_buf, "\"local_ready\"") != NULL);
+        /* Top-level healthy means serving publicly here as on /health and
+         * healthcheck (api_controller_internal.h, struct api_health_flags). */
+        ASSERT(strstr(api_status_buf,
+                      "\"healthy\", health.healthy && public_serving") != NULL);
         ASSERT(strstr(agent_summary_buf,
                       "agent_push_security_posture_snapshot_json") != NULL);
         ASSERT(strstr(api_status_buf, "agent_push_security_posture_json")
