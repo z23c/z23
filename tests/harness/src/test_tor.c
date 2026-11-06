@@ -1630,6 +1630,13 @@ static bool stop_handoff_socket_open(const struct stop_handoff_sockets *s, int i
            (uint64_t)now.st_ino == s->ino[i];
 }
 
+/* Call only once no Tor is running: a live Tor may close its end at any moment. */
+static bool stop_handoff_sockets_any_open(const struct stop_handoff_sockets *s)
+{
+    return s->held && (stop_handoff_socket_open(s, 0) ||
+                       stop_handoff_socket_open(s, 1));
+}
+
 /* Stop a Tor that reached its main loop, then stop it again. */
 static const char *stop_handoff_running_case(bool real_tor)
 {
@@ -1649,8 +1656,7 @@ static const char *stop_handoff_running_case(bool real_tor)
     stop_handoff_timed("running");
     if (!why)
         why = stop_handoff_check_ended(tmpdir, real_tor);
-    if (!why && sockets.held && (stop_handoff_socket_open(&sockets, 0) ||
-                                 stop_handoff_socket_open(&sockets, 1)))
+    if (!why && stop_handoff_sockets_any_open(&sockets))
         why = "a control socket outlived the stop";
     stop_handoff_timed("second");
     if (!why && tor_integration_is_enabled())
@@ -1714,6 +1720,51 @@ static const char *stop_handoff_wait_self_end(void)
     return answered ? "a command succeeded after Tor ended" : NULL;
 }
 
+/* The first run: the gate closes and Tor ends by itself. */
+static const char *stop_handoff_self_end_first_run(const char *tmpdir,
+                                                   struct stop_handoff_sockets *old)
+{
+    tor_integration_set_serve_onion(false);
+    tor_integration_close_gate_for_test(true);
+    const char *why = NULL;
+    if (!tor_integration_start(tmpdir, 39255))
+        why = "tor_integration_start";
+    stop_handoff_sockets_capture(old);
+    if (!why && !old->held)
+        why = "the first run holds no control connection";
+    if (!why)
+        why = stop_handoff_wait_self_end();
+    tor_integration_close_gate_for_test(false);
+    tor_integration_service_reset_for_test();
+    return why;
+}
+
+/* The second run: the watch's own route, since no stop ran a retry may start Tor. */
+static const char *stop_handoff_self_end_second_run(const char *tmpdir,
+                                                    const struct stop_handoff_sockets *old)
+{
+    struct stop_handoff_sockets fresh = { .held = false };
+    const char *why = NULL;
+    if (!tor_integration_retry_start(tmpdir, 39255))
+        why = "the start after Tor ended by itself was refused";
+    if (!why && !tor_integration_is_enabled())
+        why = "the start after Tor ended by itself did not run Tor";
+    stop_handoff_sockets_capture(&fresh);
+    if (!why && (!fresh.held || fresh.ino[0] == old->ino[0]))
+        why = "the new run did not make its own control connection";
+    stop_handoff_timed("early");
+    /* Only now: the new run may hold the old descriptor numbers, and its Tor may
+     * close them at any moment. An old socket nothing closed still has its inode
+     * here, because the stop closes only the new run's. */
+    if (!why && stop_handoff_sockets_any_open(old))
+        why = "the start did not close the ended run's control sockets";
+    if (!why && tor_log_owner_close_count(tmpdir) != 2)
+        why = "the second run did not exit through its control connection";
+    if (!why && tor_integration_is_enabled())
+        why = "Tor still reports running after stop";
+    return why;
+}
+
 /* Tor ends by itself, then a start with no stop in between: it joins that run
  * and closes its sockets before making new ones. The new run is stopped at once,
  * before Tor has parsed its configuration, so the request also has to survive
@@ -1722,39 +1773,12 @@ static const char *stop_handoff_self_end_case(void)
 {
     char tmpdir[512];
     test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "stopself");
-    tor_integration_set_serve_onion(false);
-    tor_integration_close_gate_for_test(true);
     struct stop_handoff_sockets old = { .held = false };
-    struct stop_handoff_sockets fresh = { .held = false };
-    const char *why = NULL;
-    if (!tor_integration_start(tmpdir, 39255))
-        why = "tor_integration_start";
-    stop_handoff_sockets_capture(&old);
-    if (!why && !old.held)
-        why = "the first run holds no control connection";
-    if (!why)
-        why = stop_handoff_wait_self_end();
-    tor_integration_close_gate_for_test(false);
-    tor_integration_service_reset_for_test();
-    /* The watch's own route: no stop ran, so a retry may start Tor. */
-    if (!why && !tor_integration_retry_start(tmpdir, 39255))
-        why = "the start after Tor ended by itself was refused";
-    if (!why && !tor_integration_is_enabled())
-        why = "the start after Tor ended by itself did not run Tor";
-    stop_handoff_sockets_capture(&fresh);
-    if (!why && (!fresh.held || fresh.ino[0] == old.ino[0]))
-        why = "the new run did not make its own control connection";
-    stop_handoff_timed("early");
-    /* Only now: the new run may hold the old descriptor numbers, and its Tor may
-     * close them at any moment. An old socket nothing closed still has its inode
-     * here, because the stop closes only the new run's. */
-    if (!why && (stop_handoff_socket_open(&old, 0) ||
-                 stop_handoff_socket_open(&old, 1)))
-        why = "the start did not close the ended run's control sockets";
-    if (!why && tor_log_owner_close_count(tmpdir) != 2)
-        why = "the second run did not exit through its control connection";
-    if (!why && tor_integration_is_enabled())
-        why = "Tor still reports running after stop";
+    const char *why = stop_handoff_self_end_first_run(tmpdir, &old);
+    if (why)
+        stop_handoff_timed("early");
+    else
+        why = stop_handoff_self_end_second_run(tmpdir, &old);
     remove_tree(tmpdir);
     return why;
 }
