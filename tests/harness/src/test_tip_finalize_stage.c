@@ -57,6 +57,8 @@ enum tf_fail_kind {
     TF_FAIL_REORG,
     TF_FAIL_PRECONDITION,
     TF_FAIL_UTXO_COUNT,
+    TF_FAIL_UTXO_ZERO,
+    TF_FAIL_UTXO_ERR,
 };
 
 struct synth_chain_tf {
@@ -555,6 +557,12 @@ static bool fake_utxo_count(int height_after, int64_t *out_count, void *user)
         *out_count = 99;
         return true;
     }
+    if (sc && sc->fail_kind == TF_FAIL_UTXO_ZERO && height_after == 2) {
+        *out_count = 0;
+        return true;
+    }
+    if (sc && sc->fail_kind == TF_FAIL_UTXO_ERR && height_after == 2)
+        return false;
     *out_count = height_after;
     return true;
 }
@@ -2969,6 +2977,272 @@ static int case_reorg_stale_row_body_first(void)
     return failures;
 }
 
+/* ---- Mutation-gap cases (tip_finalize_stage.c survivors) ---------------- */
+
+static int64_t tf_dump_int(const char *key)
+{
+    struct json_value v;
+    json_init(&v);
+    int64_t r = -1;
+    if (tip_finalize_dump_state_json(&v, NULL))
+        r = json_get_int(json_get(&v, key));
+    json_free(&v);
+    return r;
+}
+
+/* A new tip whose parent link is gone is one step from the finalized tip: the
+ * logged reorg depth is exactly 1, not merely positive. */
+static int case_mut_reorg_depth(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms = {0}; struct synth_chain_tf sc = {0};
+    if (tf_setup("mut_depth", 3, TF_FAIL_REORG, -1, dir, sizeof(dir), &ms,
+                 &sc) != 0) {
+        TF_CHECK("mut_depth: setup", false);
+        return failures + 1;
+    }
+    TF_CHECK("mut_depth: h=0 finalizes",
+             tip_finalize_stage_step_once() == JOB_ADVANCED);
+    TF_CHECK("mut_depth: h=1 logs the structural reorg and advances",
+             tip_finalize_stage_step_once() == JOB_ADVANCED &&
+             tip_finalize_stage_cursor() == 2);
+    int ok = -1, depth = -1; int64_t utxos = -1; char status[32];
+    TF_CHECK("mut_depth: row is an ok=0 reorg_detected row",
+             log_row_at(progress_store_db(), 1, &ok, status, sizeof(status),
+                        &depth, &utxos) &&
+             ok == 0 && strcmp(status, "reorg_detected") == 0);
+    TF_CHECK("mut_depth: depth is exactly 1", depth == 1);
+    tf_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* A body-less successor must not finalize on header evidence when the best
+ * header is below it, or when it has no PoW-verified header level. */
+static int case_mut_witness_refusals(void)
+{
+    int failures = 0;
+    for (int variant = 0; variant < 2; variant++) {
+        char dir[256]; struct main_state ms = {0}; struct synth_chain_tf sc = {0};
+        if (tf_setup(variant ? "mut_wit_hdr" : "mut_wit_low", 3,
+                     TF_FAIL_PRECONDITION, -1, dir, sizeof(dir), &ms,
+                     &sc) != 0) {
+            TF_CHECK("mut_witness: setup", false);
+            return failures + 1;
+        }
+        if (variant == 0) {
+            ms.pindex_best_header = &sc.blocks[1];   /* below block[2] */
+        } else {
+            ms.pindex_best_header = &sc.blocks[3];
+            sc.blocks[2].nStatus = 0;                /* no header level */
+        }
+        const char *tag = variant ? "no header level" : "best header below";
+        printf("tip_finalize: mut_witness variant: %s\n", tag);
+        TF_CHECK("mut_witness: only h=0 finalizes",
+                 tip_finalize_stage_drain(100) == 1 &&
+                 tip_finalize_stage_cursor() == 1);
+        TF_CHECK("mut_witness: no header-witness finalize",
+                 tip_finalize_stage_header_witness_total() == 0);
+        TF_CHECK("mut_witness: held as successor pending",
+                 tip_finalize_stage_successor_pending_total() == 1);
+        tf_teardown(dir, &ms, &sc);
+    }
+    return failures;
+}
+
+/* A rewind stops at the nearest still-matching finalized row: with only the
+ * served tip's hash changed, the cursor drops to cursor-1, and re-finalizing
+ * the same height re-publishes the new hash as the served authority. */
+static int case_mut_rewind_nearest(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms = {0}; struct synth_chain_tf sc = {0};
+    if (tf_setup("mut_rw_near", 3, TF_FAIL_NONE, -1, dir, sizeof(dir), &ms,
+                 &sc) != 0) {
+        TF_CHECK("mut_rw_near: setup", false);
+        return failures + 1;
+    }
+    TF_CHECK("mut_rw_near: initial drain",
+             tip_finalize_stage_drain(100) == 3 &&
+             tip_finalize_stage_cursor() == 3);
+    sc.hashes[3].data[0] = 0xf3;
+    TF_CHECK("mut_rw_near: replays only the changed top row",
+             tip_finalize_stage_step_once() == JOB_ADVANCED &&
+             tip_finalize_stage_cursor() == 3);
+    TF_CHECK("mut_rw_near: one rewind counted",
+             tip_finalize_stage_reorg_detected_total() == 1);
+    TF_CHECK("mut_rw_near: row 2 names the new hash",
+             stale_row_is(progress_store_db(), 2, &sc.hashes[3]));
+    int64_t ph = -1; uint8_t pub[32] = {0};
+    TF_CHECK("mut_rw_near: served authority republished at the same height",
+             tip_finalize_stage_authority_snapshot(&ph, pub) && ph == 3 &&
+             memcmp(pub, sc.hashes[3].data, 32) == 0);
+    tf_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* Cursor 1 with row 0 reorged: the rewind must run (cursor 0) and the replay
+ * rewrites row 0, rather than the stage finalizing on past it. */
+static int case_mut_rewind_cursor_one(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms = {0}; struct synth_chain_tf sc = {0};
+    if (tf_setup("mut_rw_one", 3, TF_FAIL_NONE, -1, dir, sizeof(dir), &ms,
+                 &sc) != 0) {
+        TF_CHECK("mut_rw_one: setup", false);
+        return failures + 1;
+    }
+    TF_CHECK("mut_rw_one: h=0 finalizes",
+             tip_finalize_stage_step_once() == JOB_ADVANCED &&
+             tip_finalize_stage_cursor() == 1);
+    sc.hashes[1].data[0] = 0xf1;
+    TF_CHECK("mut_rw_one: rewinds to 0 and replays row 0",
+             tip_finalize_stage_step_once() == JOB_ADVANCED &&
+             tip_finalize_stage_cursor() == 1);
+    TF_CHECK("mut_rw_one: row 0 names the new hash",
+             stale_row_is(progress_store_db(), 0, &sc.hashes[1]));
+    TF_CHECK("mut_rw_one: one rewind counted",
+             tip_finalize_stage_reorg_detected_total() == 1);
+    tf_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* An anchor (seed) row at cursor-1 stores its own hash and must never read as
+ * a reorg: the step idles at the utxo frontier instead of failing. */
+static int case_mut_anchor_row_skipped(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms = {0}; struct synth_chain_tf sc = {0};
+    if (tf_setup("mut_anchor_skip", 3, TF_FAIL_NONE, -1, dir, sizeof(dir),
+                 &ms, &sc) != 0) {
+        TF_CHECK("mut_anchor_skip: setup", false);
+        return failures + 1;
+    }
+    TF_CHECK("mut_anchor_skip: initial drain",
+             tip_finalize_stage_drain(100) == 3);
+    TF_CHECK("mut_anchor_skip: row 2 becomes an anchor row",
+             seed_tip_anchor_tf(progress_store_db(), 2, &sc.hashes[2]));
+    TF_CHECK("mut_anchor_skip: step idles, no fatal",
+             tip_finalize_stage_step_once() == JOB_IDLE);
+    TF_CHECK("mut_anchor_skip: no rewind, cursor unchanged",
+             tip_finalize_stage_cursor() == 3 &&
+             tip_finalize_stage_reorg_detected_total() == 0);
+    tf_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* The live utxo count is checked even when it is exactly 0, and a counter
+ * failure is fatal; a diverged row carries reorg_depth 0. */
+static int case_mut_utxo_count(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms = {0}; struct synth_chain_tf sc = {0};
+    if (tf_setup("mut_utxo_zero", 3, TF_FAIL_UTXO_ZERO, -1, dir, sizeof(dir),
+                 &ms, &sc) != 0) {
+        TF_CHECK("mut_utxo_zero: setup", false);
+        return failures + 1;
+    }
+    TF_CHECK("mut_utxo_zero: drains 3", tip_finalize_stage_drain(100) == 3);
+    TF_CHECK("mut_utxo_zero: a zero count diverges from the expected sum",
+             tip_finalize_stage_utxo_count_diverged_total() == 1);
+    int ok = -1, depth = -1; int64_t utxos = -1; char status[32];
+    log_row_at(progress_store_db(), 1, &ok, status, sizeof(status), &depth,
+               &utxos);
+    TF_CHECK("mut_utxo_zero: diverged row ok=0 count 0 depth 0",
+             ok == 0 && strcmp(status, "utxo_count_diverged") == 0 &&
+             utxos == 0 && depth == 0);
+    tf_teardown(dir, &ms, &sc);
+
+    if (tf_setup("mut_utxo_err", 3, TF_FAIL_UTXO_ERR, -1, dir, sizeof(dir),
+                 &ms, &sc) != 0) {
+        TF_CHECK("mut_utxo_err: setup", false);
+        return failures + 1;
+    }
+    TF_CHECK("mut_utxo_err: h=0 finalizes",
+             tip_finalize_stage_step_once() == JOB_ADVANCED);
+    TF_CHECK("mut_utxo_err: a counter failure is fatal and writes no row",
+             tip_finalize_stage_step_once() == JOB_FATAL &&
+             !log_row_at(progress_store_db(), 1, &ok, status, sizeof(status),
+                         &depth, &utxos));
+    tf_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* The frontier idle and the cursor-gap idle are told apart by the blocked
+ * class counters, and the gap blocker clears once the gap closes. */
+static int case_mut_blocked_classes(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms = {0}; struct synth_chain_tf sc = {0};
+    if (tf_setup("mut_blocked", 3, TF_FAIL_NONE, -1, dir, sizeof(dir), &ms,
+                 &sc) != 0) {
+        TF_CHECK("mut_blocked: setup", false);
+        return failures + 1;
+    }
+    sqlite3 *db = progress_store_db();
+    TF_CHECK("mut_blocked: utxo frontier 1, advance one",
+             exec_sql(db, "UPDATE stage_cursor SET cursor=1 "
+                          "WHERE name='utxo_apply'") &&
+             tip_finalize_stage_drain(100) == 1);
+    int64_t front0 = tf_dump_int("blocked_at_utxo_frontier_total");
+    int64_t gap0 = tf_dump_int("blocked_uv_cursor_gap_total");
+    TF_CHECK("mut_blocked: counters present", front0 >= 0 && gap0 >= 0);
+    TF_CHECK("mut_blocked: at the frontier: idle, frontier class only",
+             tip_finalize_stage_step_once() == JOB_IDLE &&
+             tf_dump_int("blocked_at_utxo_frontier_total") == front0 + 1 &&
+             tf_dump_int("blocked_uv_cursor_gap_total") == gap0 &&
+             !blocker_exists("tip_finalize.uv_cursor_gap"));
+    TF_CHECK("mut_blocked: utxo cursor behind: idle, gap class only",
+             exec_sql(db, "UPDATE stage_cursor SET cursor=0 "
+                          "WHERE name='utxo_apply'") &&
+             tip_finalize_stage_step_once() == JOB_IDLE &&
+             tf_dump_int("blocked_uv_cursor_gap_total") == gap0 + 1 &&
+             tf_dump_int("blocked_at_utxo_frontier_total") == front0 + 1 &&
+             blocker_exists("tip_finalize.uv_cursor_gap"));
+    TF_CHECK("mut_blocked: gap closes, blocker cleared, cursor unmoved",
+             exec_sql(db, "UPDATE stage_cursor SET cursor=1 "
+                          "WHERE name='utxo_apply'") &&
+             tip_finalize_stage_step_once() == JOB_IDLE &&
+             !blocker_exists("tip_finalize.uv_cursor_gap") &&
+             tip_finalize_stage_cursor() == 1);
+    tf_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* A window slot that reads empty is re-resolved from the durable finalized
+ * hash, so finalize proceeds instead of idling on a missing tip. */
+static int case_mut_durable_slot(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms = {0}; struct synth_chain_tf sc = {0};
+    if (tf_setup("mut_durable", 3, TF_FAIL_NONE, -1, dir, sizeof(dir), &ms,
+                 &sc) != 0) {
+        TF_CHECK("mut_durable: setup", false);
+        return failures + 1;
+    }
+    TF_CHECK("mut_durable: h=0 finalizes",
+             tip_finalize_stage_step_once() == JOB_ADVANCED);
+    ms.chain_active.chain[1] = NULL;
+    TF_CHECK("mut_durable: h=1 finalizes through the durable hash",
+             tip_finalize_stage_step_once() == JOB_ADVANCED &&
+             tip_finalize_stage_cursor() == 2);
+    tf_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+static int tip_finalize_mutant_gap_tests(void)
+{
+    int failures = 0;
+    failures += case_mut_reorg_depth();
+    failures += case_mut_witness_refusals();
+    failures += case_mut_rewind_nearest();
+    failures += case_mut_rewind_cursor_one();
+    failures += case_mut_anchor_row_skipped();
+    failures += case_mut_utxo_count();
+    failures += case_mut_blocked_classes();
+    failures += case_mut_durable_slot();
+    return failures;
+}
+
 int test_tip_finalize_stage(void);
 int test_tip_finalize_stage(void)
 {
@@ -3152,6 +3426,8 @@ int test_tip_finalize_stage(void)
     failures += case_reorg_stale_fork_duplicate();
 
     failures += case_reorg_stale_row_body_first();
+
+    failures += tip_finalize_mutant_gap_tests();
 
     printf("tip_finalize_stage tests: %s\n",
            failures ? "FAILED" : "PASSED");
