@@ -37,6 +37,7 @@ const char *boot_tor_fault_name(enum boot_tor_fault fault)
     case BOOT_TOR_FAULT_DATADIR:        return "datadir";
     case BOOT_TOR_FAULT_CONFIG_INVALID: return "config_invalid";
     case BOOT_TOR_FAULT_EXITED:         return "exited";
+    case BOOT_TOR_FAULT_START_LIMIT:    return "start_limit";
     }
     return "exited";
 }
@@ -252,6 +253,13 @@ void boot_tor_watch_capture_fault(struct boot_tor_watch *w,
     out[0] = '\0';
     if (!w)
         return;
+    if (tor_integration_start_limit_reached()) {
+        atomic_store(&w->fault, (int)BOOT_TOR_FAULT_START_LIMIT);
+        snprintf(out, cap, "Tor has used all %d starts one process allows; "
+                 "restart the node to bring the onion back. The node keeps "
+                 "validating.", TOR_MAX_STARTS_IN_PROCESS);
+        return;
+    }
 
     char path[1024];
     enum boot_tor_fault fault = BOOT_TOR_FAULT_EXITED;
@@ -273,7 +281,7 @@ void boot_tor_watch_capture_fault(struct boot_tor_watch *w,
 
 bool boot_tor_watch_due(const struct boot_tor_watch *w, int64_t now_us)
 {
-    if (!w || !atomic_load(&w->armed))
+    if (!w || !atomic_load(&w->armed) || tor_integration_start_limit_reached())
         return false;
     int64_t due = atomic_load(&w->next_attempt_us);
     return due == 0 || now_us >= due;
@@ -281,7 +289,8 @@ bool boot_tor_watch_due(const struct boot_tor_watch *w, int64_t now_us)
 
 bool boot_tor_watch_retry(struct boot_tor_watch *w, int64_t now_us)
 {
-    if (!w || !atomic_load(&w->armed) || !w->restart)
+    if (!w || !atomic_load(&w->armed) || !w->restart ||
+        tor_integration_start_limit_reached())
         return false;
 
     int attempts = atomic_load(&w->attempts);
@@ -335,6 +344,8 @@ void boot_tor_watch_status(const struct boot_tor_watch *w,
         snprintf(out, cap, "tor=starting");
         return;
     }
-    snprintf(out, cap, "tor=failed(%s)",
-             boot_tor_fault_name((enum boot_tor_fault)atomic_load(&w->fault)));
+    enum boot_tor_fault fault = tor_integration_start_limit_reached()
+        ? BOOT_TOR_FAULT_START_LIMIT
+        : (enum boot_tor_fault)atomic_load(&w->fault);
+    snprintf(out, cap, "tor=failed(%s)", boot_tor_fault_name(fault));
 }

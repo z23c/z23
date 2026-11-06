@@ -42,10 +42,12 @@
 #define BOOT_TOR_START_FAILED_BLOCKER "tor.start_failed"
 #define BOOT_TOR_START_FAILED_OWNER   "onion_tor"
 
-/* Retry schedule: 5s, 15s, 45s, 135s, then the 300s cap, forever. Forever is
- * deliberate — the fault that produced it (a port held by an outgoing
- * process, a torrc a human is fixing) clears on its own timescale, and a
- * node that stops trying is a node that needs a human. */
+/* Retry schedule: 5s, 15s, 45s, 135s, then the 300s cap, for as long as Tor has
+ * starts left in this process (TOR_MAX_STARTS_IN_PROCESS). The fault that
+ * produced it (a port held by an outgoing process, a torrc a human is fixing)
+ * clears on its own timescale. Past the limit another start could abort the
+ * node, so the watch stops, the blocker stays up and says so, and the node goes
+ * on validating with the onion off until a process restart. */
 #define BOOT_TOR_RETRY_FIRST_US (5LL * 1000000LL)
 #define BOOT_TOR_RETRY_GROWTH   3
 #define BOOT_TOR_RETRY_CAP_US   (300LL * 1000000LL)
@@ -68,7 +70,9 @@ enum boot_tor_fault {
     BOOT_TOR_FAULT_PORT_IN_USE,      /* "Could not bind to ...: Address already in use" */
     BOOT_TOR_FAULT_DATADIR,          /* permissions / lock under tor_data */
     BOOT_TOR_FAULT_CONFIG_INVALID,   /* "Failed to parse/validate config" */
-    BOOT_TOR_FAULT_EXITED            /* thread returned, cause not recognised */
+    BOOT_TOR_FAULT_EXITED,           /* thread returned, cause not recognised */
+    BOOT_TOR_FAULT_START_LIMIT       /* TOR_MAX_STARTS_IN_PROCESS used; never
+                                      * read from the log */
 };
 
 /* One retry attempt through the engine-side Tor wrapper. */

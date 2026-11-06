@@ -51,6 +51,20 @@ void tor_integration_set_handler(tor_request_handler_fn handler, void *ctx);
  * the temporary localhost-only Tor bootstrap listener. */
 bool tor_integration_start(const char *datadir, uint16_t p2p_port);
 
+/* The most times one process may start a linked Tor. Tor keeps its pubsub name
+ * tables (vendor/tor/src/lib/dispatch/dispatch_naming.c) across tor_run_main()
+ * calls but picks a new hash key each run (crypto_init.c), so the tables fill up
+ * with duplicates. Some later run then fails tor_assert in pubsub_install and
+ * aborts the whole node. That check runs before Tor reads its configuration, so
+ * failed starts count too. vendor/ is pinned, so the node stays below it: over 16
+ * measured processes the earliest abort was the 7th start, and no process aborted
+ * at 6 or fewer. Past this, Tor stays off, the node keeps validating, and only a
+ * process restart brings the onion back. */
+#define TOR_MAX_STARTS_IN_PROCESS 6
+
+/* True when a linked Tor has used all its starts in this process. Lock-free. */
+bool tor_integration_start_limit_reached(void);
+
 /* tor_integration_start() for a retry: refused once tor_integration_stop() has
  * run, until the next explicit start, so a retry already under way when the node
  * stops cannot bring Tor back after the stop returned. */
@@ -344,6 +358,8 @@ void *tor_integration_find_service_for_test(const char *address);
 void tor_integration_set_start_window_for_test(void (*window)(void));
 /* Test seam: the -onion-rotate step of a start, without starting Tor. */
 bool tor_integration_rotate_once_for_test(const char *datadir);
+/* Test seam: how many starts this process has used. */
+void tor_integration_set_start_count_for_test(int starts);
 #endif
 
 #ifdef ZCL_TESTING

@@ -21,6 +21,7 @@
 
 #include "test/test_core.h"
 
+#include "config/boot.h"
 #include "config/boot_tor_watch.h"
 #include "net/tor_integration.h"
 #include "net/tor_request_state.h"
@@ -245,6 +246,58 @@ static int test_tor_watch_status_labels(void)
     return failures;
 }
 
+/* Past the in-process start limit the watch stops: no retry, a plain reason, and
+ * the start itself refuses, so Tor cannot abort the node. */
+static int test_tor_watch_start_limit(void)
+{
+    int failures = 0;
+    struct boot_tor_watch w = {0};
+    char label[64];
+    char reason[BOOT_TOR_REASON_MAX];
+
+    TEST("tor_watch_stops_at_the_in_process_start_limit") {
+        if (!app_tor_real_build_linked()) {
+            PASS(); /* The stub has no name tables, so it has no limit. */
+            goto _test_next;
+        }
+        tor_integration_stop();
+        tor_integration_mark_requested();
+        g_restart_calls = 0;
+        boot_tor_watch_arm(&w, "/nonexistent-datadir", count_restart, NULL);
+
+        /* One start left: the schedule still runs. */
+        tor_integration_set_start_count_for_test(TOR_MAX_STARTS_IN_PROCESS - 1);
+        ASSERT(!tor_integration_start_limit_reached());
+        ASSERT(boot_tor_watch_due(&w, 0));
+
+        tor_integration_set_start_count_for_test(TOR_MAX_STARTS_IN_PROCESS);
+        ASSERT(tor_integration_start_limit_reached());
+        ASSERT(!boot_tor_watch_due(&w, 0));
+        ASSERT(!boot_tor_watch_due(&w, 1000LL * 1000000LL));
+        ASSERT(!boot_tor_watch_retry(&w, 1000LL * 1000000LL));
+        ASSERT_EQ(g_restart_calls, 0);
+
+        /* The failure stays visible and names the way out. */
+        ASSERT(boot_tor_watch_failed(&w));
+        boot_tor_watch_capture_fault(&w, reason, sizeof(reason));
+        ASSERT(strstr(reason, "restart the node") != NULL);
+        ASSERT_EQ(atomic_load(&w.fault), (int)BOOT_TOR_FAULT_START_LIMIT);
+        boot_tor_watch_status(&w, label, sizeof(label));
+        ASSERT_STR_EQ(label, "tor=failed(start_limit)");
+
+        /* The start refuses before it touches the datadir or starts anything. */
+        ASSERT(!tor_integration_start("/nonexistent-datadir", 39258));
+        ASSERT(!tor_integration_retry_start("/nonexistent-datadir", 39258));
+        ASSERT(!tor_integration_is_enabled());
+
+        boot_tor_watch_disarm(&w);
+        tor_integration_set_start_count_for_test(0);
+        tor_integration_stop();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_tor_watch(void)
 {
     int failures = 0;
@@ -255,6 +308,7 @@ int test_tor_watch(void)
     failures += test_tor_watch_redacts_onion();
     failures += test_tor_watch_retries();
     failures += test_tor_watch_status_labels();
+    failures += test_tor_watch_start_limit();
     printf("Tor start watch: %d failures\n", failures);
     return failures;
 }

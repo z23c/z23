@@ -1095,3 +1095,7 @@ later lane flips it HARD.
 - 2026-11-06T05:32:18Z — REASON: Stop a Tor watch retry from starting Tor after stop returned
   old ROOT: 3b298c47f0ea5a4aabcf31c77df2a2eced8d1cc3a98484124ecb07f268333e8d
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T05:32:41Z — REASON: Cap in-process Tor starts below the point where Tor can abort the node
+  old ROOT: 177ca7d7d6aa930d3cf924d41c68d3a777a42f674784626f3e15c1d771b910d0
+  by: owner unseal ritual (make core-unseal)

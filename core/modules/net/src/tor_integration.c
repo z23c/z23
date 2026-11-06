@@ -1207,6 +1207,21 @@ static void tor_run_end(void)
     thread_liveness_retire(&g_tor_liveness);
 }
 
+static _Atomic int g_tor_starts_in_process;
+
+bool tor_integration_start_limit_reached(void)
+{
+    return tor_is_linked() &&
+           atomic_load(&g_tor_starts_in_process) >= TOR_MAX_STARTS_IN_PROCESS;
+}
+
+#ifdef ZCL_TESTING
+void tor_integration_set_start_count_for_test(int starts)
+{
+    atomic_store(&g_tor_starts_in_process, starts);
+}
+#endif
+
 /* -onion-rotate asks for one new identity for this process, at its first start.
  * A later start in the same process (the watch retrying a Tor that died, or Tor
  * ended by itself) must come back on the address already announced. Caller holds
@@ -1251,6 +1266,11 @@ static bool tor_start_locked(const char *datadir, uint16_t p2p_port)
         return true;
     /* A run that ended on its own still holds a thread and a socket. */
     tor_run_end();
+
+    if (tor_integration_start_limit_reached())
+        LOG_FAIL("tor", "Tor has started %d times in this process, the most it "
+                        "can take; the onion stays off until the process is "
+                        "restarted", TOR_MAX_STARTS_IN_PROCESS);
 
     snprintf(g_tor_datadir, sizeof(g_tor_datadir), "%s", datadir);
     atomic_store(&g_tor_p2p_port, p2p_port);
@@ -1320,6 +1340,7 @@ static bool tor_start_locked(const char *datadir, uint16_t p2p_port)
         LOG_FAIL("tor", "cannot create Tor's owning control connection: %s",
                  strerror(errno));
 
+    atomic_fetch_add(&g_tor_starts_in_process, 1);
     atomic_store(&g_tor_running, true);
     if (thread_registry_spawn("zcl_tor", tor_thread_fn, NULL,
                                   &g_tor_thread) != 0) {

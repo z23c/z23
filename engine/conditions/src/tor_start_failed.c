@@ -98,9 +98,11 @@ static struct condition c_tor_start_failed = {
      * releases the earlier, shorter retries. */
     .backoff_secs = 300,
     /* Four attempts (5s, 15s, 45s, 135s) before the operator is paged, then
-     * the cooldown re-arm keeps retrying every 5 minutes with no bound —
-     * an external-resource fault (a port a departing process still holds, a
-     * torrc a human is editing) must never become a permanent give-up. */
+     * the cooldown re-arm keeps retrying every 5 minutes with no bound of its
+     * own — an external-resource fault (a port a departing process still holds,
+     * a torrc a human is editing) must not become a give-up. The one bound is
+     * the watch's: past TOR_MAX_STARTS_IN_PROCESS it is never due again, and
+     * this remedy only keeps the blocker up saying a restart is needed. */
     .max_attempts = 4,
     .cooldown_secs = 300,
     .cooldown_max_rearms = 0,

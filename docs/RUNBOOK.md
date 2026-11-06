@@ -579,7 +579,7 @@ accepted, and `-no-tor` disables it where the operator lane permits that.
 Either it never started
 or it started and exited. The blocker's reason quotes the most specific
 warning from this boot's `<datadir>/tor.log`, classified as one of
-`port_in_use`, `datadir`, `config_invalid` or `exited`; any onion address in
+`port_in_use`, `datadir`, `config_invalid`, `exited` or `start_limit`; any onion address in
 the quoted line is replaced with `<onion>` before it reaches the blocker or
 the log.
 
@@ -591,9 +591,9 @@ produce.
 
 **What the node does on its own:** the `tor_start_failed` condition
 (`engine/conditions/src/tor_start_failed.c`) retries the start through the
-same wrapper that boots Tor, at 5s, 15s, 45s, 135s and then every 5 minutes
-for as long as the node runs. It never gives up. The blocker clears when Tor's
-thread is running again. The commonest cause — `port_in_use` after a restart,
+same wrapper that boots Tor, at 5s, 15s, 45s, 135s and then every 5 minutes,
+until Tor has used the 6 starts one process allows. The blocker clears when
+Tor's thread is running again. The commonest cause — `port_in_use` after a restart,
 because the departing process still holds Tor's bootstrap SocksPort — clears
 itself within seconds and needs no operator at all.
 
@@ -613,6 +613,9 @@ itself within seconds and needs no operator at all.
   is fixed.
 - `exited` — Tor stopped for a reason this node could not classify. Read
   `<datadir>/tor.log` directly.
+- `start_limit` — Tor has used all 6 starts one process allows. Another start
+  could abort the whole node, so the retries have stopped and the node keeps
+  validating with the onion off. Fix what the log shows and restart the node.
 
 **What it does NOT affect:** RPC, the HTTPS explorer, P2P and chain advance
 are all independent of the onion. If any of those are also down while this

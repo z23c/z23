@@ -1941,16 +1941,40 @@ static int test_tor_retry_after_stop_stays_down(void)
     return why ? 1 : 0;
 }
 
-/* Its own group, so it gets its own process. Tor keeps its pubsub name table
- * across tor_run_main() calls but picks a new hash key each time, and on about
- * the seventh run in one process the table grows, the names stop matching and
- * Tor aborts in pubsub_install (vendor/tor/src/app/main/main.c). So one process
- * may start Tor six times: these cases use all six. */
+/* Against the real Tor, after the cases above used up every start: the next one
+ * is refused, nothing starts, and the process is still here to say so. */
+static int test_tor_start_limit_holds(void)
+{
+    printf("test_tor_start_limit_holds: ");
+    if (!app_tor_real_build_linked()) {
+        printf("OK (stub Tor linked: no name tables, no limit)\n");
+        return 0;
+    }
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "startlimit");
+    tor_integration_set_extra_torrc_for_test("DisableNetwork 1");
+    const char *why = NULL;
+    if (!tor_integration_start_limit_reached())
+        why = "the cases above did not use every start";
+    else if (tor_integration_start(tmpdir, 39259))
+        why = "a start past the limit was not refused";
+    else if (tor_integration_is_enabled())
+        why = "a start past the limit ran Tor";
+    tor_integration_stop();
+    tor_integration_set_extra_torrc_for_test("");
+    remove_tree(tmpdir);
+    printf("%s%s%s\n", why ? "FAIL (" : "OK", why ? why : "", why ? ")" : "");
+    return why ? 1 : 0;
+}
+
+/* Its own group, so it gets its own process, which may start Tor only
+ * TOR_MAX_STARTS_IN_PROCESS times. These cases use all of them. */
 int test_tor_stop(void)
 {
     int failures = test_tor_retry_after_stop_stays_down();
     failures += test_tor_stop_hands_off_to_tor_thread();
     failures += test_tor_persist_install_with_loop_running();
+    failures += test_tor_start_limit_holds();
     printf("Tor stop: %d failures\n", failures);
     return failures;
 }
