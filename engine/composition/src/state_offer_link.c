@@ -4,7 +4,6 @@
 #include "config/state_offer_link.h"
 #include "base/serialize_le.h"
 #include "base/safe_alloc.h"
-#include "util/thread_qos.h"
 #include "util/thread_registry.h"
 #include "net/rom_seed.h"
 #include "net/state_offer.h"
@@ -119,7 +118,7 @@ bool state_offer_link_read_registered(const char *datadir, enum state_offer_link
 }
 
 /* Each serve slot streams one object to one connection. Its disk read runs in
- * a one-shot worker at background I/O priority, so the message thread only
+ * a one-shot worker, so the message thread only
  * copies a bounded request and the peer tick takes a bounded number of ready
  * frames per connection. A slot is free when it is neither working nor ready;
  * clearing a working slot bumps its generation so the late result is dropped.
@@ -197,7 +196,6 @@ static void sol_server_publish(const struct sol_job *job, uint8_t *bytes, uint32
 static void *sol_server_worker(void *arg)
 {
     struct sol_job *job = arg;
-    (void)zcl_thread_qos_background();
     uint8_t *bytes = zcl_malloc(ROM_SEED_CHUNK_SIZE, "state_offer_link_chunk");
     uint32_t size = 0;
     if (!sol_server_read(job, bytes, &size)) size = 0;
