@@ -10,6 +10,7 @@
 #include "test/test_core.h"
 
 #include "services/network_monitor.h"
+#include "util/supervisor.h"
 #include "models/peer_chain_observation.h"
 #include "models/database.h"
 
@@ -394,6 +395,29 @@ static int test_partition_rejects_malformed_window(void)
 
 int network_monitor_fold_tests(void);
 
+/* ── 4. supervisor registration pairs with start/stop ────────────────── */
+static int run_restart_registration_case(void)
+{
+    int failures = 0;
+    printf("network_monitor: stop unregisters, restart registers once...\n");
+    int base = supervisor_child_count_total();
+
+    struct network_monitor_config cfg;
+    network_monitor_config_defaults(&cfg);
+    for (int round = 0; round < 2; round++) {
+        struct zcl_result r = network_monitor_start(&cfg, NULL);
+        NM_CHECK(r.ok);
+        if (!r.ok)
+            return failures;
+        NM_CHECK(supervisor_child_count_total() == base + 1);
+        network_monitor_stop();
+        NM_CHECK(supervisor_child_count_total() == base);
+    }
+    network_monitor_stop(); /* a second stop stays a no-op */
+    NM_CHECK(supervisor_child_count_total() == base);
+    return failures;
+}
+
 int test_network_monitor(void)
 {
     printf("\n=== network_monitor tests ===\n");
@@ -406,6 +430,7 @@ int test_network_monitor(void)
     failures += test_partition_condition();
     failures += test_partition_rejects_malformed_window();
     failures += network_monitor_fold_tests();
+    failures += run_restart_registration_case();
     if (failures == 0)
         printf("=== network_monitor: all passed ===\n");
     else
