@@ -22,6 +22,7 @@
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
 #include "services/block_index_loader.h"
+#include "services/chain_frontier_snapshot_service.h"
 #include "services/island_anchor.h"
 #include "services/utxo_recovery_service.h"
 #include "storage/progress_store.h"
@@ -489,6 +490,34 @@ static int fsi_case_seed_rows(struct fsi_node *n)
     return failures;
 }
 
+/* The chain-binding frontier: is genesis an ancestor of the island's rung? */
+static int fsi_case_frontier_ancestry(struct fsi_node *n, const char *who,
+                                      bool island)
+{
+    int failures = 0;
+    const struct chain_params *cp = chain_params_get();
+    struct uint256 genesis_hash = cp->consensus.hashGenesisBlock, other;
+    memset(other.data, 0x47, 32);
+    struct block_index genesis, stranger;
+    memset(&genesis, 0, sizeof(genesis));
+    genesis.phashBlock = &genesis_hash;
+    stranger = genesis;
+    stranger.phashBlock = &other;
+    bool known = false;
+    bool rel = chain_frontier_test_ancestor_relation(&genesis, fsi_top(n),
+                                                     &known);
+    char d[128];
+    snprintf(d, sizeof(d), "%s: frontier ancestry genesis -> rung is %s", who,
+             island ? "known and true" : "unknown (refused as before)");
+    FSI_CHECK(d, island ? (known && rel) : (!known && !rel));
+    known = false;
+    rel = chain_frontier_test_ancestor_relation(&stranger, fsi_top(n), &known);
+    snprintf(d, sizeof(d), "%s: a height-0 entry that is not genesis is "
+             "never the rung's ancestor", who);
+    FSI_CHECK(d, !rel);
+    return failures;
+}
+
 static int fsi_case_exemptions(struct fsi_node *n)
 {
     int failures = 0;
@@ -508,6 +537,7 @@ static int fsi_case_exemptions(struct fsi_node *n)
                                                        n->is.hash[0].data) &&
               !consensus_state_install_header_ready_for(&n->ms, FSI_RUNG_H,
                                                         n->is.hash[1].data));
+    failures += fsi_case_frontier_ancestry(n, "island", true);
 
     island_anchor_unregister();
     fsi_reload_work(n);
@@ -525,6 +555,7 @@ static int fsi_case_exemptions(struct fsi_node *n)
     FSI_CHECK("no fact: the install header gate still wants the keystone",
               !consensus_state_install_header_ready_for(&n->ms, FSI_RUNG_H,
                                                         n->is.hash[0].data));
+    failures += fsi_case_frontier_ancestry(n, "no fact", false);
     (void)island_anchor_boot_register(progress_store_db());
     return failures;
 }

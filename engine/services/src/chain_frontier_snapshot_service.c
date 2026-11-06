@@ -11,6 +11,8 @@
 #include "jobs/reducer_frontier.h"
 #include "jobs/tip_finalize_stage.h"
 #include "services/chain_state_service.h"
+#include "services/island_anchor.h"
+#include "chain/chainparams.h"
 #include "storage/progress_store.h"
 #include "validation/main_state.h"
 
@@ -92,6 +94,29 @@ static bool chain_frontier_read_authority(
     return false;
 }
 
+/* FlySync island: a header chain whose walk ends at the registered island root
+ * (exactly the recorded height and hash) holds nothing below it, so
+ * get_ancestor cannot reach genesis. The island root is hash-linked to a
+ * compiled ladder rung, and the compiled rung's chain begins at the compiled
+ * genesis, so genesis, and only genesis, is its known ancestor at height 0.
+ * Returns false (not handled) for every node without the fact. */
+static bool chain_frontier_island_genesis_relation(struct block_index *lower,
+                                                   struct block_index *higher,
+                                                   bool *known, bool *related)
+{
+    struct island_anchor a;
+    if (lower->nHeight != 0 || !island_anchor_get(&a) ||
+        higher->nHeight < a.root_height)
+        return false;
+    struct block_index *root = block_index_get_ancestor(higher, a.root_height);
+    const struct chain_params *cp = chain_params_get();
+    if (!root || root->pprev || !island_anchor_is_root(root) || !cp)
+        return false;
+    *known = true;
+    *related = uint256_eq(lower->phashBlock, &cp->consensus.hashGenesisBlock);
+    return true;
+}
+
 static bool chain_frontier_ancestor_relation(
     struct block_index *lower,
     struct block_index *higher,
@@ -103,11 +128,24 @@ static bool chain_frontier_ancestor_relation(
         return false;
     struct block_index *ancestor = block_index_get_ancestor(
         higher, lower->nHeight);
+    bool related = false;
+    if (!ancestor &&
+        chain_frontier_island_genesis_relation(lower, higher, known, &related))
+        return related;
     if (!ancestor || !ancestor->phashBlock)
         return false;
     *known = true;
     return uint256_eq(ancestor->phashBlock, lower->phashBlock);
 }
+
+#ifdef ZCL_TESTING
+bool chain_frontier_test_ancestor_relation(struct block_index *lower,
+                                           struct block_index *higher,
+                                           bool *known)
+{
+    return chain_frontier_ancestor_relation(lower, higher, known);
+}
+#endif
 
 static void chain_frontier_record_authority_match(
     struct chain_frontier_snapshot *snapshot,

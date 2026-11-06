@@ -76,4 +76,13 @@ bool chain_frontier_snapshot_clean_genesis(
 const char *chain_frontier_authority_source_name(
     enum chain_frontier_authority_source source);
 
+#ifdef ZCL_TESTING
+struct block_index;
+/* The frontier ancestry relation (lower is an ancestor of higher), exposed for
+ * tests; *known reports whether the relation could be decided. */
+bool chain_frontier_test_ancestor_relation(struct block_index *lower,
+                                           struct block_index *higher,
+                                           bool *known);
+#endif
+
 #endif
