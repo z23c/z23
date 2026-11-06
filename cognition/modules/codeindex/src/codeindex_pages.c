@@ -10,9 +10,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { CI_PAGE_MANIFEST_MAX = 1024 * 1024, CI_PAGE_BATCH_MAX = 256 };
+enum { CI_PAGE_MANIFEST_MAX = 1024 * 1024, CI_PAGE_BATCH_MAX = 256, CI_PAGE_STORE_MAX = 65536 };
+
+/* Rows a generation may hold; ci_pages_copy must always be able to carry them all. */
+static size_t page_store_cap = CI_PAGE_STORE_MAX;
 
 #if defined(ZCL_TESTING)
+void codeindex_pages_test_set_store_cap(size_t cap)
+{
+    page_store_cap = cap ? cap : CI_PAGE_STORE_MAX;
+}
+
 bool codeindex_pages_test_reseal(const char *dbpath)
 {
     struct ci_store *store = ci_store_open_path(dbpath);
@@ -165,6 +173,25 @@ static bool page_insert_one(sqlite3_stmt *s, const struct ci_page *p, const uint
     return sqlite3_reset(s) == SQLITE_OK && sqlite3_clear_bindings(s) == SQLITE_OK && ok;
 }
 
+static size_t page_row_count(sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    size_t n = SIZE_MAX;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM pages", -1, &s, NULL) != SQLITE_OK) return n;
+    if (sqlite3_step(s) == SQLITE_ROW) n = (size_t)sqlite3_column_int64(s, 0); // raw-sql-ok:codeindex-derived
+    if (sqlite3_finalize(s) != SQLITE_OK) n = SIZE_MAX;
+    return n;
+}
+
+bool codeindex_pages_capacity_ok(struct codeindex *ci, size_t count)
+{
+    if (!ci || !ci->store) return false;
+    ci_store_lock(ci->store);
+    size_t rows = page_row_count(ci_store_db(ci->store));
+    ci_store_unlock(ci->store);
+    return rows != SIZE_MAX && count <= page_store_cap && rows <= page_store_cap - count;
+}
+
 bool ci_pages_stage_insert(struct ci_store *store, const struct ci_page *pages,
                            size_t count, const uint8_t artifact_root[32])
 {
@@ -175,7 +202,9 @@ bool ci_pages_stage_insert(struct ci_store *store, const struct ci_page *pages,
     bool ok = true;
     for (size_t i = 0; ok && i < count; i++) ok = page_insert_one(s, &pages[i], artifact_root);
     if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
-    return ok;
+    /* Backstop for a race with another importer: the pre-check in
+     * codeindex_pages_capacity_ok is advisory, this one rolls the import back. */
+    return ok && page_row_count(db) <= page_store_cap;
 }
 
 bool ci_pages_set_state(struct ci_store *store, int state)
@@ -288,8 +317,10 @@ bool ci_pages_copy(struct ci_store *from, struct ci_store *to)
     return ok;
 }
 
-static int page_collect(sqlite3 *db, const char *directory, struct ci_page *rows, int cap)
+static int page_collect(sqlite3 *db, const char *directory, struct ci_page *rows, int cap,
+                        bool *truncated)
 {
+    *truncated = false;
     sqlite3_stmt *s = NULL;
     bool ok = sqlite3_prepare_v2(db, "SELECT directory,tree_oid,source_commit,body,artifact_root "
         "FROM pages WHERE directory=?1 ORDER BY tree_oid COLLATE BINARY,"
@@ -297,7 +328,10 @@ static int page_collect(sqlite3 *db, const char *directory, struct ci_page *rows
         sqlite3_bind_text(s, 1, directory, -1, SQLITE_TRANSIENT) == SQLITE_OK;
     int count = 0, rc = SQLITE_ERROR;
     while (ok && (rc = sqlite3_step(s)) == SQLITE_ROW) { // raw-sql-ok:codeindex-derived
-        if (count == cap || !page_row(s, &rows[count])) { ok = false; break; }
+        /* A row past the cap is not an error: the first cap rows in the fixed
+         * order are returned and the caller is told the list was cut. */
+        if (count == cap) { *truncated = true; rc = SQLITE_DONE; break; }
+        if (!page_row(s, &rows[count])) { ok = false; break; }
         count++;
     }
     if (ok && rc != SQLITE_DONE) ok = false;
@@ -306,30 +340,61 @@ static int page_collect(sqlite3 *db, const char *directory, struct ci_page *rows
 }
 
 static int page_collect_verified(struct codeindex *ci, const char *directory,
-                                 struct ci_page *rows, int cap, bool *prior_untrusted)
+                                 struct ci_page *rows, int cap, bool *prior_untrusted,
+                                 bool *truncated)
 {
     ci_store_lock(ci->store);
     bool valid = false;
     bool ok = ci_store_retrieval_projection_is_valid(ci->store, &valid) && valid;
     int state = ok ? page_state(ci_store_db(ci->store)) : -1;
     if (state >= 0) *prior_untrusted = state == 2;
-    int count = state >= 0 ? page_collect(ci_store_db(ci->store), directory, rows, cap) : -1;
+    int count = state >= 0 ? page_collect(ci_store_db(ci->store), directory, rows, cap, truncated) : -1;
     ci_store_unlock(ci->store);
     for (int i = 0; i < count; i++)
         if (!page_artifact_ok(ci->root, &rows[i])) return -2;
     return count;
 }
 
-int codeindex_pages_list(struct codeindex *ci, const char *directory,
-                         struct ci_page *out, int cap, bool *prior_untrusted)
+int codeindex_pages_list_bounded(struct codeindex *ci, const char *directory,
+                                 struct ci_page *out, int cap, bool *prior_untrusted,
+                                 bool *truncated)
 {
     if (prior_untrusted) *prior_untrusted = false;
-    if (!ci || !ci->store || !directory || !directory[0] || !out || !prior_untrusted || cap < 1 || cap > 256)
+    if (truncated) *truncated = false;
+    if (!ci || !ci->store || !directory || !directory[0] || !out || !prior_untrusted || !truncated ||
+        cap < 1 || cap > 256)
         return -1;
     struct ci_page *rows = zcl_calloc((size_t)cap, sizeof(*rows), "codeindex page results");
     if (!rows) return -1;
-    int count = page_collect_verified(ci, directory, rows, cap, prior_untrusted);
+    int count = page_collect_verified(ci, directory, rows, cap, prior_untrusted, truncated);
     if (count >= 0) memcpy(out, rows, (size_t)count * sizeof(*out));
     free(rows);
     return count;
+}
+
+int codeindex_pages_list(struct codeindex *ci, const char *directory,
+                         struct ci_page *out, int cap, bool *prior_untrusted)
+{
+    bool truncated = false;
+    int count = codeindex_pages_list_bounded(ci, directory, out, cap, prior_untrusted, &truncated);
+    return truncated ? -1 : count;
+}
+
+/* True when there is nothing in a prior generation worth carrying forward: no
+ * pages tables at all (a store from before this feature), or an untouched empty
+ * table at state 0. Any read trouble answers false so the caller stays cautious. */
+bool ci_pages_prior_is_empty(struct ci_store *store)
+{
+    if (!store) return false;
+    ci_store_lock(store);
+    sqlite3 *db = ci_store_db(store);
+    sqlite3_stmt *s = NULL;
+    int tables = -1;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                           "AND name IN ('pages','pages_state')", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW) tables = sqlite3_column_int(s, 0); // raw-sql-ok:codeindex-derived
+    if (s && sqlite3_finalize(s) != SQLITE_OK) tables = -1;
+    bool empty = tables == 0 || (tables == 2 && page_state(db) == 0 && page_row_count(db) == 0);
+    ci_store_unlock(store);
+    return empty;
 }

@@ -250,6 +250,19 @@ struct ci_store *ci_store_open(const char *root)
 #endif
 }
 
+bool ci_store_same_inode(struct ci_store *a, struct ci_store *b)
+{
+#if defined(_WIN32)
+    (void)a; (void)b;
+    return false;
+#else
+    struct stat sa, sb;
+    return a && b && a->bound_fd >= 0 && b->bound_fd >= 0 &&
+           fstat(a->bound_fd, &sa) == 0 && fstat(b->bound_fd, &sb) == 0 &&
+           sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+#endif
+}
+
 #if !defined(_WIN32)
 struct ci_store *ci_store_open_readonly_fd(int fd)
 {

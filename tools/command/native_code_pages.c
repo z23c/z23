@@ -231,6 +231,13 @@ void zcl_native_handle_code_pages_import(const struct zcl_command_request *reque
     struct codeindex *ci = ok ? codeindex_open_retrieval_view(root) : NULL;
     uint8_t artifact[32];
     bool attempted = ok && ci;
+    if (attempted && !codeindex_pages_capacity_ok(ci, batch.accepted)) {
+        pages_refuse(reply, "CODE_PAGES_FULL", "page store row limit reached; no page generation accepted");
+        codeindex_close(ci);
+        free(batch.pages);
+        free(batch.bytes);
+        return;
+    }
     if (ok) ok = attempted && codeindex_pages_import_hints(ci, batch.bytes, batch.size, batch.pages, batch.accepted, artifact);
     bool published = ok;
     if (ok) ok = pages_import_render(reply, commit, batch.accepted, batch.count, artifact);
@@ -257,24 +264,27 @@ static int pages_find_match(const struct ci_page *pages, int n, const char *tree
     return matches;
 }
 
-static const char *pages_match_state(int count, int matches, bool conflict)
+static const char *pages_match_state(int count, int matches, bool conflict, bool truncated)
 {
     if (conflict) return "ambiguous";
     if (matches) return "committed_match";
+    if (truncated) return "truncated";
     return count ? "stale" : "missing";
 }
 
 static bool pages_get_render(struct zcl_command_reply *reply, const char *commit, const char *path,
-                             const char *actual, const struct ci_page *pages, int n, bool prior_untrusted)
+                             const char *actual, const struct ci_page *pages, int n, bool prior_untrusted,
+                             bool truncated)
 {
     int selected = -1;
     bool conflict = false;
     int matches = pages_find_match(pages, n, actual, &selected, &conflict);
     bool ok = n >= 0 && json_push_kv_str(&reply->data, "commit", commit) &&
         json_push_kv_str(&reply->data, "path", path) && json_push_kv_str(&reply->data, "tree", actual) &&
-        json_push_kv_str(&reply->data, "state", pages_match_state(n, matches, conflict)) &&
+        json_push_kv_str(&reply->data, "state", pages_match_state(n, matches, conflict, truncated)) &&
         json_push_kv_int(&reply->data, "matches", matches) &&
         json_push_kv_bool(&reply->data, "prior_untrusted", prior_untrusted) &&
+        json_push_kv_bool(&reply->data, "truncated", truncated) &&
         json_push_kv_str(&reply->data, "provenance", "unsigned_model_hint") &&
         json_push_kv_str(&reply->data, "live_overlay", "unknown");
     if (ok && matches && !conflict) {
@@ -300,8 +310,9 @@ void zcl_native_handle_code_pages_get(const struct zcl_command_request *request,
     struct codeindex *ci = codeindex_open_retrieval_view(root);
     struct ci_page *pages = zcl_calloc(PAGE_QUERY_MAX, sizeof(*pages), "code page query");
     bool prior_untrusted = false;
-    int n = ci && pages ? codeindex_pages_list(ci, path, pages, PAGE_QUERY_MAX, &prior_untrusted) : -1;
-    bool ok = n >= 0 && pages_get_render(reply, commit, path, actual, pages, n, prior_untrusted);
+    bool truncated = false;
+    int n = ci && pages ? codeindex_pages_list_bounded(ci, path, pages, PAGE_QUERY_MAX, &prior_untrusted, &truncated) : -1;
+    bool ok = n >= 0 && pages_get_render(reply, commit, path, actual, pages, n, prior_untrusted, truncated);
     free(pages);
     codeindex_close(ci);
     if (!ok) pages_refuse(reply, "CODE_PAGES_UNAVAILABLE", "page evidence is missing, corrupt, incomplete or unreadable");

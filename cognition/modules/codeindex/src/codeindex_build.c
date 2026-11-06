@@ -963,6 +963,10 @@ static bool ci_rebuild_reserve_stage(struct ci_rebuild_job *job, int dirfd)
 static bool ci_rebuild_carry_pages(struct ci_rebuild_job *job)
 {
     if (!job->ci->store && !job->prior_unavailable) return true;
+    /* Nothing to carry from a pre-feature or never-imported prior. Skipping also skips a full
+     * projection hash; losing an advisory flag on rows deleted without a reseal is acceptable
+     * for unsigned hints. */
+    if (job->ci->store && ci_pages_prior_is_empty(job->ci->store)) return true;
     bool valid = false;
     if (job->ci->store && !ci_store_retrieval_projection_is_valid(job->ci->store, &valid)) valid = false;
     if (!ci_store_begin(job->st)) return false;
@@ -1146,13 +1150,16 @@ static void ci_rebuild_run(struct ci_rebuild_job *job, int dirfd)
         job->prior_unavailable = fstatat(dirfd, "index.kv", &st, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT;
     }
     struct ci_store *old = job->ci->store;
+    bool republished = !ci_store_same_inode(old, latest);
     job->ci->store = latest;
     if (old) ci_store_close(old);
-    ci_merkle_free(job->ci->pending_merkle);
-    job->ci->pending_merkle = NULL;
-    job->ci->pending_merkle_snapshot_used = false;
-    job->ci->pending_merkle_full_rescan = false;
-    job->ci->pending_merkle_inventory_changed = false;
+    if (republished) { /* the pending snapshot described the older generation */
+        ci_merkle_free(job->ci->pending_merkle);
+        job->ci->pending_merkle = NULL;
+        job->ci->pending_merkle_snapshot_used = false;
+        job->ci->pending_merkle_full_rescan = false;
+        job->ci->pending_merkle_inventory_changed = false;
+    }
     if (!ci_rebuild_refresh_inventory(job))
         return;
     if (!ci_rebuild_note_changes(job))

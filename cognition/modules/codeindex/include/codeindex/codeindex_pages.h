@@ -25,6 +25,15 @@ bool codeindex_pages_validate_hints(const void *manifest, size_t size,
  * generation even when a later import supplied some independently bound hints. */
 int codeindex_pages_list(struct codeindex *ci, const char *directory,
                          struct ci_page *out, int cap, bool *prior_untrusted);
+/* Like codeindex_pages_list, but a directory with more than cap rows returns the
+ * first cap rows (ordered by tree, source commit, artifact root) and sets
+ * *truncated instead of failing. */
+int codeindex_pages_list_bounded(struct codeindex *ci, const char *directory,
+                                 struct ci_page *out, int cap, bool *prior_untrusted,
+                                 bool *truncated);
+/* True when importing count more rows still fits the store row limit, so a
+ * later rebuild can always carry every row forward. */
+bool codeindex_pages_capacity_ok(struct codeindex *ci, size_t count);
 /* Store bounded unsigned hints from exact manifest lines as one sealed
  * generation. This does not verify a commit or establish freshness. */
 bool codeindex_pages_import_hints(struct codeindex *ci, const void *manifest,
@@ -32,5 +41,7 @@ bool codeindex_pages_import_hints(struct codeindex *ci, const void *manifest,
     uint8_t artifact_root[32]);
 #if defined(ZCL_TESTING)
 bool codeindex_pages_test_reseal(const char *dbpath);
+/* Lower the store row limit for tests; 0 restores the real limit. */
+void codeindex_pages_test_set_store_cap(size_t cap);
 #endif
 #endif

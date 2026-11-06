@@ -3506,6 +3506,7 @@ AGENT_IMPACT_RULE("tests/harness/src/test_checkpoints_progress.c", "checkpoints_
 AGENT_IMPACT_RULE("tests/harness/src/test_codeindex_projection.c", "codeindex_projection_integrity")
 AGENT_IMPACT_RULE("tests/harness/src/test_codeindex_inventory_schema.c|cognition/modules/codeindex/src/codeindex_scan_docs.c|cognition/modules/codeindex/src/codeindex_docs_read.c|cognition/modules/codeindex/include/codeindex/codeindex_docs.h", "codeindex_inventory_schema codeindex codeindex_projection_integrity")
 AGENT_IMPACT_RULE("tools/command/native_code_pages.c|tools/command/native_code_pages.h", "codeindex_inventory_schema codeindex command_registry_catalog native_api_contract")
+AGENT_IMPACT_RULE("tests/harness/src/test_codeindex_pages_bounds.c|cognition/modules/codeindex/src/codeindex_pages.c|cognition/modules/codeindex/include/codeindex/codeindex_pages.h|cognition/modules/codeindex/src/codeindex_build.c|cognition/modules/codeindex/src/codeindex_store.c|cognition/modules/codeindex/src/codeindex_store_hash.c|cognition/modules/codeindex/src/codeindex_priv.h", "codeindex_pages_bounds codeindex_inventory_schema codeindex_projection_integrity codeindex")
 AGENT_IMPACT_RULE("tests/harness/src/test_coins_amount_codec.c", "coins_amount_codec_roundtrip coins_amount_codec_boundary_exponents coins_amount_codec_digit_preservation coins_amount_codec_regression_seal")
 AGENT_IMPACT_RULE("tests/harness/src/test_coins_anchor_reconcile.c", "coins_anchor_reconcile_all")
 AGENT_IMPACT_RULE("tests/harness/src/test_connman_noise_required.c", "connman_addnode_fallback")
