@@ -4,8 +4,10 @@
 #include "util/log_macros.h"
 #include "framework/condition.h"
 
+#include "config/state_offer_peer.h"   /* the held-rung-fetch exemption */
 #include "event/event.h"
 #include "net/connman.h"
+#include "net/net.h"
 #include "platform/time_compat.h"
 #include "services/sync_monitor.h"
 #include "sync/sync_state.h"
@@ -73,6 +75,43 @@ static bool detect_sync_violation_lag(void)
     return true;
 }
 
+/* Under the FlySync header hold the local tip cannot move until the rung
+ * bundle lands, so the lag is expected; rotating the peer streaming that
+ * bundle only restarts the fetch (run F2 at 600 s). When such a peer exists,
+ * rotate every other outbound peer exactly as connman_force_outbound_rotation
+ * would; otherwise use it unchanged. Returns the peers asked to disconnect. */
+static bool live_outbound(const struct p2p_node *n)
+{
+    return n && !n->inbound && !n->disconnect;
+}
+
+static int rotate_outbound(struct connman *cm, const char *reason)
+{
+    bool spare = false;
+    zcl_mutex_lock(&cm->manager.cs_nodes);
+    for (size_t i = 0; i < cm->manager.num_nodes && !spare; i++)
+        spare = live_outbound(cm->manager.nodes[i]) &&
+                state_offer_peer_serving_held_fetch(cm->manager.nodes[i]);
+    int disconnected = 0;
+    for (size_t i = 0; i < cm->manager.num_nodes && spare; i++) {
+        struct p2p_node *n = cm->manager.nodes[i];
+        if (!live_outbound(n) || state_offer_peer_serving_held_fetch(n))
+            continue;
+        (void)p2p_node_request_disconnect(n, P2P_DISCONNECT_POLICY_ROTATION,
+                                          P2P_DISCONNECT_SOURCE_PEER_POLICY,
+                                          n->endpoint_generation);
+        disconnected++;
+    }
+    zcl_mutex_unlock(&cm->manager.cs_nodes);
+    if (!spare)
+        return connman_force_outbound_rotation(cm, reason);
+    LOG_WARN("condition", "[condition:sync_violation_lag] outbound rotation reason=%s "
+             "disconnected=%d; kept the peer streaming the held FlySync rung bundle",
+             reason, disconnected);
+    connman_kick_seed_discovery(cm);
+    return disconnected;
+}
+
 static enum condition_remedy_result remedy_sync_violation_lag(void)
 {
     int64_t now = platform_time_wall_unix();
@@ -90,8 +129,7 @@ static enum condition_remedy_result remedy_sync_violation_lag(void)
                 atomic_load(&g_local_tip_at_detect),
                 atomic_load(&g_peer_max_at_detect),
                 atomic_load(&g_gap_at_detect));
-    int disconnected = connman_force_outbound_rotation(
-        cm, "condition:sync_violation_lag");
+    int disconnected = rotate_outbound(cm, "condition:sync_violation_lag");
     sync_monitor_record_recovery(WATCHDOG_SYNC_VIOLATION,
                                  atomic_load(&g_local_tip_at_detect),
                                  atomic_load(&g_peer_max_at_detect),

@@ -3,6 +3,7 @@
 // pure; both fallible operation executors return contextual zcl_result values.
 #include "services/sync_monitor.h"
 #include "util/log_macros.h"
+#include "config/state_offer_peer.h"   /* the held-rung-fetch exemption */
 
 #include "jobs/reducer_frontier.h"
 #include "json/json.h"
@@ -805,6 +806,11 @@ int sync_monitor_local_header_refill(struct connman *cm,
         eligible++;
         local_refill_reset_peer(n);
 
+        /* Under the FlySync header hold no peer can deliver headers; the one
+         * streaming the rung bundle is never the "worst" (run F2 lost it at
+         * 303 s and 599 s). A peer serving nothing still rotates. */
+        if (state_offer_peer_serving_held_fetch(n))
+            continue;
         if (!worst ||
             n->total_headers_delivered < worst->total_headers_delivered)
             worst = n;

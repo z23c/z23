@@ -821,8 +821,27 @@ void state_offer_service_shutdown(void)
  * 0 until headers load). That getter returns 0 both for a fresh datadir and
  * when it cannot read, so an unreadable progress store with H* unpublished is
  * reported UNKNOWN and fails towards not fetching. */
+/* The last chosen offer's partial download still has its journal in bundles/
+ * (the next fetch resumes from it) and link bytes arrived inside the progress
+ * window: a source is still delivering. Owner tick only (reads the target). */
+static bool sosvc_resume_progressing(void)
+{
+    int64_t last = sol_client_last_progress_ms();
+    if (last == INT64_MIN ||
+        platform_time_monotonic_ms() - last >= STATE_OFFER_FETCH_PROGRESS_WINDOW_MS)
+        return false;
+    char name[ROM_FETCH_NAME_MAX], path[1400];
+    struct stat st;
+    return g_datadir[0] && g_fetch_target.offer.bundle_height > 0 &&
+           state_offer_v1_filename(&g_fetch_target.offer, name, sizeof(name)) &&
+           snprintf(path, sizeof(path), "%s/bundles/%s.part.journal", g_datadir, name) <
+               (int)sizeof(path) &&
+           stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
 static void sosvc_local_need(struct state_offer_need *need)
 {
+    need->resume_progressing = sosvc_resume_progressing();
     need->marker_present =
         g_datadir[0] && boot_consensus_bundle_marker_exists(g_datadir);
     int32_t h = reducer_frontier_external_tip_height();

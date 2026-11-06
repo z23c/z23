@@ -481,6 +481,16 @@ static size_t best_offer(int64_t now_ms, const struct state_offer_need *need)
     return best;
 }
 
+/* Nothing acceptable right now. Wait while the window has not run (it only
+ * runs once a peer exists to answer) or while a resumable partial download
+ * is still gaining bytes: every source of a long fetch can drop at once and
+ * reconnect seconds later (run F2), and that is not "no source". */
+static bool still_waiting(int64_t now_ms, const struct state_offer_need *need)
+{
+    return !g_wait_armed || now_ms - g_wait_started_ms < STATE_OFFER_WAIT_MS ||
+           need->resume_progressing;
+}
+
 enum state_offer_decision state_offer_store_decide(
     int64_t now_ms, struct state_offer_record *out)
 {
@@ -515,12 +525,7 @@ enum state_offer_decision state_offer_store_decide_for(
         return STATE_OFFER_DECIDE_SATISFIED;
     }
 
-    /* Nothing acceptable. The window only runs once a peer exists to answer. */
-    if (!g_wait_armed) {
-        g_last_decision = STATE_OFFER_DECIDE_WAIT;
-        return STATE_OFFER_DECIDE_WAIT;
-    }
-    if (now_ms - g_wait_started_ms < STATE_OFFER_WAIT_MS) {
+    if (still_waiting(now_ms, need)) {
         g_last_decision = STATE_OFFER_DECIDE_WAIT;
         return STATE_OFFER_DECIDE_WAIT;
     }
