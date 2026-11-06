@@ -17,10 +17,13 @@
 /* Failed preparation output is bounded and delivered synchronously. The sink
  * must copy bytes it retains; no new log authority is created here. */
 typedef void (*zcl_land_prepare_sink)(void *context, const char *text);
+typedef bool (*zcl_land_prepare_begin)(void *context, const char *target);
 bool zcl_dev_land_restart_plan_prepare_observed(const char *wt, char *why,
-    size_t cap, zcl_land_prepare_sink sink, void *context);
+    size_t cap, zcl_land_prepare_sink sink, void *context,
+    zcl_land_prepare_begin begin);
 bool zcl_dev_land_proof_tools_prepare_observed(const char *wt, char *why,
-    size_t cap, zcl_land_prepare_sink sink, void *context);
+    size_t cap, zcl_land_prepare_sink sink, void *context,
+    zcl_land_prepare_begin begin);
 #ifdef ZCL_TESTING
 int zcl_dev_land_prepare_make_for_test(const char *wt, const char *target,
     int idle_ms, int hard_ms, bool allocation_failure,

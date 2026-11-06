@@ -245,6 +245,39 @@ int dl_train_rebase(const struct dl_dirs *d, struct dl_row *row,
 
 /* ── queue edits ───────────────────────────────────────────────────────── */
 
+bool dl_progress_merge(struct dl_row *progress, const struct dl_row *durable)
+{
+    if (progress->seq != durable->seq ||
+        progress->attempt != durable->attempt ||
+        progress->started != durable->started ||
+        strcmp(progress->tip, durable->tip) != 0 ||
+        strcmp(durable->state, "inflight") != 0 ||
+        (strcmp(durable->phase, "rebase") != 0 &&
+         strcmp(durable->phase, "prebuild") != 0))
+        return false;
+    char detail[sizeof(progress->detail)];
+    memcpy(detail, progress->detail, sizeof(detail));
+    *progress = *durable;
+    memcpy(progress->detail, detail, sizeof(detail));
+    (void)snprintf(progress->phase, sizeof(progress->phase), "prebuild");
+    return true;
+}
+
+bool dl_commit_merge_durable(struct dl_row *row, const struct dl_row *durable,
+                              bool progress)
+{
+    if (progress && !dl_progress_merge(row, durable))
+        return false;
+    /* Hold/release and solo invalidation are durable queue edits. A stale
+     * step must not undo them after a subgroup bind has refused. */
+    row->publication_hold = durable->publication_hold;
+    if (durable->train_solo && !durable->train_group[0]) {
+        row->train_solo = 1;
+        row->train_group[0] = '\0';
+    }
+    return true;
+}
+
 /* Run `edit` over the live rows under queue.lock: it returns -1 to refuse,
  * 0 when nothing changed, 1 to rewrite the queue with its edits. */
 static bool dl_rows_edit(const struct dl_dirs *d,
@@ -650,6 +683,7 @@ enum dl_train_prep { DL_TRAIN_PREP_OK, DL_TRAIN_PREP_LINT_RED, DL_TRAIN_PREP_STO
 /* LINT_RED only for a verdict on the tree: a loaded host or a lint run that
  * never reported is no reason to try a smaller stack. */
 static enum dl_train_prep dl_train_lint(const struct dl_dirs *d,
+                                        struct dl_row *head,
                                         struct dl_row *probe)
 {
     probe->dimension[0] = '\0';
@@ -657,7 +691,7 @@ static enum dl_train_prep dl_train_lint(const struct dl_dirs *d,
     if (dl_train_test_lint_red(d, probe->local))
         return DL_TRAIN_PREP_LINT_RED;
 #endif
-    if (dl_stubbed() || dl_lint_candidate(d, probe) == 0)
+    if (dl_stubbed() || dl_lint_candidate(d, head, probe) == 0)
         return DL_TRAIN_PREP_OK;
     return strcmp(probe->dimension, "lint") == 0 ? DL_TRAIN_PREP_LINT_RED
                                                  : DL_TRAIN_PREP_STOP;
@@ -666,19 +700,30 @@ static enum dl_train_prep dl_train_lint(const struct dl_dirs *d,
 /* Lint-land and the proof dependencies again, on the stacked tip. A scratch
  * row keeps the head's own detail and dimension untouched. Nothing here
  * rewrites a commit: the stacked tip is exactly the members as submitted. */
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+static _Thread_local void (*dl_prepare_test_hook)(void);
+void zcl_dev_land_train_prepare_hook_for_test(void (*hook)(void))
+{
+    dl_prepare_test_hook = hook;
+}
+#endif
+
 static enum dl_train_prep dl_train_prepare(const struct dl_dirs *d,
-                                           const struct dl_row *head,
+                                           struct dl_row *head,
                                            struct dl_train *t)
 {
     char why[512] = { 0 };
     struct dl_row probe = *head;
     (void)snprintf(probe.local, sizeof(probe.local), "%s", t->tip);
-    enum dl_train_prep lint = dl_train_lint(d, &probe);
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+    if (dl_prepare_test_hook) dl_prepare_test_hook();
+#endif
+    enum dl_train_prep lint = dl_train_lint(d, head, &probe);
     if (lint != DL_TRAIN_PREP_OK) {
         dl_log(head, "train: lint-land failed on the stacked tip\n");
         return lint;
     }
-    if (!dl_wt_proof_deps_ensure(d, &probe, dl_stubbed(), why,
+    if (!dl_wt_proof_deps_ensure(d, head, &probe, dl_stubbed(), why,
                                  sizeof(why))) {
         dl_log(head, "train: proof dependencies failed on the stacked tip\n");
         return DL_TRAIN_PREP_STOP;
@@ -695,7 +740,7 @@ static enum dl_train_prep dl_train_prepare(const struct dl_dirs *d,
  * starts once DL_TRAIN_LINT_RETRY_MS have gone. True when t holds a prepared
  * stack. */
 static bool dl_train_prepare_stack(const struct dl_dirs *d,
-                                   const struct dl_row *head,
+                                   struct dl_row *head,
                                    struct dl_train *t)
 {
     int64_t stop_at = platform_time_monotonic_ms() + DL_TRAIN_LINT_RETRY_MS;
@@ -804,7 +849,7 @@ static bool dl_train_solo(const struct dl_dirs *d, struct dl_row *row,
     (void)snprintf(row->local, sizeof(row->local), "%s", solo);
     dl_log(row, "train: proving the head alone\n");
     if (dl_train_checkout(d, solo) &&
-        dl_wt_proof_deps_ensure(d, row, dl_stubbed(), why, sizeof(why)))
+        dl_wt_proof_deps_ensure(d, row, row, dl_stubbed(), why, sizeof(why)))
         return true;
     dl_log(row, "train: cannot restore the head's own commit: ");
     dl_log(row, why);
@@ -827,6 +872,8 @@ bool dl_train_intent_bind(const struct dl_dirs *d, struct dl_row *row,
     formed = dl_train_form(d, row, t, &touched);
     *members = formed ? t->n : 0;
     free(t);
+    if (strcmp(row->dimension, "preparation_persist") == 0)
+        return false;
     if (formed) {
         (void)snprintf(row->train_commit, sizeof(row->train_commit), "%s", solo);
         return true;

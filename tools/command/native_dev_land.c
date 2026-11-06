@@ -5059,8 +5059,8 @@ static bool dl_phase_stamp(struct dl_row *row, long long posted)
 
 /* Persist one row back into the queue file, or drop it and record it as an
  * outcome when its state is terminal. */
-static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
-                          bool terminal)
+static bool dl_commit_row_mode(const struct dl_dirs *d, struct dl_row *row,
+                               bool terminal, bool progress)
 {
     struct dl_row *rows = NULL;
     size_t nrows = 0, kept = 0;
@@ -5080,11 +5080,10 @@ static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
     for (size_t i = 0; i < nrows; i++) {
         if (rows[i].seq == row->seq) {
             found = true;
-            /* publication_hold is owned by dl_hold, which writes it under
-             * this lock while a step runs. The step's copy of the row may
-             * be stale, so the durable value always wins: a hold set (or
-             * released) since the row was picked is never overwritten. */
-            row->publication_hold = rows[i].publication_hold;
+            if (!dl_commit_merge_durable(row, &rows[i], progress)) {
+                held_seal = true;
+                break;
+            }
             if (terminal)
                 continue;
             if (!dl_hold_row_ok(row)) {
@@ -5124,6 +5123,29 @@ static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
     if (ok && post)
         (void)dl_outbox(d, row, "phase");
     return ok;
+}
+
+static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
+                          bool terminal)
+{
+    return dl_commit_row_mode(d, row, terminal, false);
+}
+
+bool dl_prepare_progress(const struct dl_dirs *d, struct dl_row *head,
+                         const struct dl_row *candidate, const char *target)
+{
+    struct dl_row progress = *head;
+    int n = snprintf(progress.detail, sizeof(progress.detail),
+        "preparing target=%s source=%s base=%s%s", target,
+        candidate->local, candidate->base,
+        candidate == head ? "" : " (tentative stack; not a bound proof pair)");
+    if (n > 0 && (size_t)n < sizeof(progress.detail) &&
+        dl_commit_row_mode(d, &progress, false, true))
+        return true;
+    (void)snprintf(head->dimension, sizeof(head->dimension), "preparation_persist");
+    (void)snprintf(head->detail, sizeof(head->detail),
+        "cannot persist preparation progress for %s; child not started", target);
+    return false;
 }
 
 static size_t dl_successor_index(const struct dl_row *rows, size_t nrows,
@@ -5603,9 +5625,12 @@ int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
  * the attempt log either way. */
 static int dl_lint_run(struct dl_row *row, const char *const argv[]);
 
-static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *row)
+static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *head,
+                        struct dl_row *row)
 {
     const char *argv[] = { "make", "-C", d->wt, "lint-land", NULL };
+    if (!dl_prepare_progress(d, head, row, "lint-land"))
+        return -1;
     return dl_lint_run(row, argv);
 }
 
@@ -5640,7 +5665,8 @@ int zcl_native_dev_land_test_range_adds_source(const char *wt,
  * every landing and are run only when the range adds a `.c` file. A range
  * git cannot classify runs them: the cost of a needless minute is smaller
  * than the cost of the proof they would have saved. */
-static int dl_lint_new_source(const struct dl_dirs *d, struct dl_row *row)
+static int dl_lint_new_source(const struct dl_dirs *d, struct dl_row *head,
+                              struct dl_row *row)
 {
     char jobs[16];
     if (dl_range_adds_source(d->wt, row->base, row->local) == 0)
@@ -5651,14 +5677,17 @@ static int dl_lint_new_source(const struct dl_dirs *d, struct dl_row *row)
     }
     const char *argv[] = { "make", jobs, "-C", d->wt, "lint-preflight",
                            NULL };
+    if (!dl_prepare_progress(d, head, row, "lint-preflight"))
+        return -1;
     return dl_lint_run(row, argv);
 }
 
 /* Everything the landing lints before it asks for a proof. */
-int dl_lint_candidate(const struct dl_dirs *d, struct dl_row *row)
+int dl_lint_candidate(const struct dl_dirs *d, struct dl_row *head,
+                       struct dl_row *row)
 {
-    int rc = dl_lint_fast(d, row);
-    return rc != 0 ? rc : dl_lint_new_source(d, row);
+    int rc = dl_lint_fast(d, head, row);
+    return rc != 0 ? rc : dl_lint_new_source(d, head, row);
 }
 
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
@@ -6993,9 +7022,23 @@ static bool dl_wt_hooks_refresh(const struct dl_dirs *d,
 #endif
 
 #if !defined(_WIN32)
+struct dl_prepare_context {
+    const struct dl_dirs *dirs;
+    struct dl_row *head;
+    const struct dl_row *candidate;
+};
+
+static bool dl_prepare_begin(void *context, const char *target)
+{
+    const struct dl_prepare_context *prepare = context;
+    return dl_prepare_progress(prepare->dirs, prepare->head,
+                                prepare->candidate, target);
+}
+
 static void dl_prepare_log(void *context, const char *text)
 {
-    dl_log(context, text);
+    const struct dl_prepare_context *prepare = context;
+    dl_log(prepare->candidate, text);
 }
 
 #ifdef ZCL_TESTING
@@ -7003,18 +7046,21 @@ void zcl_dev_land_prepare_log_for_test(void *path, const char *text)
 {
     struct dl_row row = {0};
     (void)snprintf(row.log_path, sizeof(row.log_path), "%s", (const char *)path);
-    dl_prepare_log(&row, text);
+    const struct dl_prepare_context prepare = { .candidate = &row };
+    dl_prepare_log((void *)&prepare, text);
 }
 #endif
 
 #endif
 
 bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
+                                    struct dl_row *head,
                                     const struct dl_row *r, bool stubbed,
                                     char *why, size_t why_cap)
 {
 #if defined(_WIN32)
     (void)d;
+    (void)head;
     (void)r;
     (void)stubbed;
     (void)snprintf(why, why_cap, "%s",
@@ -7043,9 +7089,10 @@ bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
         if (!dl_wt_dependency_links_repair(d, r, stubbed, why, why_cap))
             return false;
     }
-    if (!stubbed && !zcl_dev_land_proof_tools_prepare_observed(d->wt, why, why_cap, dl_prepare_log, (void *)r))
+    struct dl_prepare_context prepare = { d, head, r };
+    if (!stubbed && !zcl_dev_land_proof_tools_prepare_observed(d->wt, why, why_cap, dl_prepare_log, &prepare, dl_prepare_begin))
         return false;
-    if (!stubbed && !zcl_dev_land_restart_plan_prepare_observed(d->wt, why, why_cap, dl_prepare_log, (void *)r))
+    if (!stubbed && !zcl_dev_land_restart_plan_prepare_observed(d->wt, why, why_cap, dl_prepare_log, &prepare, dl_prepare_begin))
         return false;
     return true;
 #endif
@@ -7718,6 +7765,10 @@ static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
     size_t members = 0;
     (void)snprintf(row->phase, sizeof(row->phase), "prove");
     if (!dl_train_intent_bind(d, row, &members)) {
+        if (strcmp(row->dimension, "preparation_persist") == 0) {
+            dl_fail(reply, "QUEUE_WRITE_FAILED", "prebuild", row->detail, d->land);
+            return;
+        }
         (void)snprintf(row->state, sizeof(row->state), "failed");
         (void)snprintf(row->dimension, sizeof(row->dimension),
                        "proof_intent");
@@ -7766,7 +7817,11 @@ static bool dl_step_start_lint_stopped(const struct dl_dirs *d,
     /* The lint pass is what the proof would discover last and cheapest to
      * discover first. The proof stub skips it: a test of this queue is not
      * a test of the lint suite. */
-    if (!dl_stub() && dl_lint_candidate(d, row) != 0) {
+    if (!dl_stub() && dl_lint_candidate(d, row, row) != 0) {
+        if (strcmp(row->dimension, "preparation_persist") == 0) {
+            dl_fail(reply, "QUEUE_WRITE_FAILED", "prebuild", row->detail, d->land);
+            return true;
+        }
         bool retry = strcmp(row->dimension, "host_load") == 0 &&
                      row->attempt < DL_ATTEMPT_MAX;
         if (retry) {
@@ -7785,6 +7840,14 @@ static bool dl_step_start_lint_stopped(const struct dl_dirs *d,
     return false;
 }
 
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+bool zcl_dev_land_prepare_lint_for_test(const struct dl_dirs *d,
+    struct dl_row *row, struct zcl_command_reply *reply)
+{
+    return dl_step_start_lint_stopped(d, row, reply);
+}
+#endif
+
 static bool dl_step_start_deps_failed(const struct dl_dirs *d,
                                       struct dl_row *row,
                                       struct zcl_command_reply *reply,
@@ -7795,7 +7858,11 @@ static bool dl_step_start_deps_failed(const struct dl_dirs *d,
      * straight from it; it never builds any of them. The stub skips the
      * make-based restart plan for the same reason it skips lint: it
      * replaces the proof, not the worktree the proof would have used. */
-    if (!dl_wt_proof_deps_ensure(d, row, dl_stub() != NULL, why, why_cap)) {
+    if (!dl_wt_proof_deps_ensure(d, row, row, dl_stub() != NULL, why, why_cap)) {
+        if (strcmp(row->dimension, "preparation_persist") == 0) {
+            dl_fail(reply, "QUEUE_WRITE_FAILED", "prebuild", row->detail, d->land);
+            return true;
+        }
         (void)snprintf(row->state, sizeof(row->state), "failed");
         (void)snprintf(row->dimension, sizeof(row->dimension),
                        "worktree_deps");

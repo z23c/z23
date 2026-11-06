@@ -11,6 +11,7 @@
 #include "test/test_dev_land_common.h"
 #include "command/native_dev_land_internal.h"
 #include "zutf8/zutf8.h"
+#include "util/spawn.h"
 
 #if !defined(_WIN32)
 
@@ -278,6 +279,287 @@ static int dlx_lint_failure_detail(void)
     return failures;
 }
 
+static bool dlx_progress_child_build(const char *root)
+{
+    static const char source[] =
+        "#define _POSIX_C_SOURCE 200809L\n"
+        "#include <stdio.h>\n#include <time.h>\n#include <unistd.h>\n"
+        "int main(void) {\n"
+        "    FILE *ready = fopen(\"ready\", \"wb\");\n"
+        "    if (!ready || fclose(ready)) return 2;\n"
+        "    const struct timespec pause = { .tv_nsec = 10000000 };\n"
+        "    for (int i = 0; i < 3000; i++) {\n"
+        "        if (access(\"release\", F_OK) == 0) return 0;\n"
+        "        nanosleep(&pause, 0);\n"
+        "    }\n    return 3;\n}\n";
+    char input[1400], binary[1400], output[2048];
+    if (!dlx_write_dep(root, "blocked.c", source) ||
+        !dlx_write_dep(root, "Makefile", ".PHONY: lint-land lint-preflight\n"
+            "lint-land:\n\t./blocked\nlint-preflight:\n")) return false;
+    snprintf(input, sizeof(input), "%s/blocked.c", root);
+    snprintf(binary, sizeof(binary), "%s/blocked", root);
+    const char *argv[] = { "cc", "-std=c23", "-Wall", "-Wextra", "-Werror",
+        input, "-o", binary, NULL };
+    return zcl_spawn_capture(argv, output, sizeof(output), 30000) == 0;
+}
+
+static bool dlx_progress_ready(const char *path)
+{
+    const struct timespec pause = { .tv_nsec = 10000000 };
+    for (int i = 0; i < 1000; i++) {
+        if (access(path, F_OK) == 0) return true;
+        nanosleep(&pause, NULL); /* real-clock: a separate native child publishes readiness; the nominal 10 s polling bound may false-fail under scheduling stalls, then cleanup releases/reaps it. */
+    }
+    return false;
+}
+
+static bool dlx_progress_submit_fixture(const struct dlx_rig *rig)
+{
+    struct dlx_call call;
+    dlx_submit(&call, rig, rig->tip);
+    bool ran = dlx_run(&call);
+    printf("[preparation fixture initial submit] code=%s evidence=%s\n",
+           dlx_err_code(&call), dlx_err_evidence(&call));
+    bool unsigned_refused = ran && !dlx_ok(&call) &&
+        strcmp(dlx_err_code(&call), "TIP_UNSIGNED") == 0;
+    dlx_end(&call);
+    if (!unsigned_refused) return false;
+    setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+    setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+    dlx_submit(&call, rig, rig->tip);
+    bool ok = dlx_run(&call) && dlx_ok(&call);
+    if (!ok) printf("[preparation fixture admitted submit] code=%s evidence=%s\n",
+                    dlx_err_code(&call), dlx_err_evidence(&call));
+    dlx_end(&call);
+    return ok;
+}
+
+static int dlx_progress_blocked_status(void)
+{
+    int failures = 0, status = 0;
+    pid_t child = -1;
+    struct dl_row *rows = NULL;
+    struct dlx_rig rig = {0};
+    TEST("land: normal status observes prebuild while a real native lint child blocks") {
+        struct dlx_call call;
+        struct dl_dirs dirs = {0};
+        char queue[4200], ready[1400];
+        size_t count = 0;
+        dlx_isolate("progress_blocked");
+        ASSERT(dlx_rig_make(&rig, "progress_blocked_rig"));
+        ASSERT(dlx_progress_submit_fixture(&rig));
+        ASSERT(dlx_progress_child_build(rig.clone));
+        dlx_landdir(dirs.land, sizeof(dirs.land));
+        snprintf(dirs.wt, sizeof(dirs.wt), "%s", rig.clone);
+        snprintf(queue, sizeof(queue), "%s/queue.jsonl", dirs.land);
+        snprintf(ready, sizeof(ready), "%s/ready", rig.clone);
+        ASSERT(dl_load_rows(queue, &rows, &count, NULL, 0) && count == 1);
+        snprintf(rows[0].state, sizeof(rows[0].state), "inflight");
+        snprintf(rows[0].phase, sizeof(rows[0].phase), "rebase");
+        snprintf(rows[0].local, sizeof(rows[0].local), "%s", rig.tip);
+        ASSERT(dlx_origin_main(&rig, rows[0].base));
+        rows[0].started = 1;
+        snprintf(rows[0].log_path, sizeof(rows[0].log_path), "%s/progress.log", rig.clone);
+        ASSERT(dl_rewrite_rows(dirs.land, queue, rows, count));
+        unsetenv("ZCL_LAND_PROOF_STUB");
+        child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            struct dlx_call result;
+            dlx_begin(&result, "step");
+            bool stopped = zcl_dev_land_prepare_lint_for_test(&dirs, rows, &result.reply);
+            dlx_end(&result);
+            _exit(stopped ? 4 : 0);
+        }
+        ASSERT(dlx_progress_ready(ready));
+        dlx_begin(&call, "status");
+        bool read_ok = dlx_run(&call) && dlx_ok(&call);
+        const struct json_value *active = json_get(&call.reply.data, "in_flight");
+        const char *phase = json_get_str(json_get(active, "phase"));
+        const char *detail = json_get_str(json_get(active, "detail"));
+        bool observed = read_ok && phase && detail &&
+            strcmp(phase, "prebuild") == 0 &&
+            strstr(detail, "target=lint-land") && strstr(detail, rig.tip) &&
+            strstr(detail, rows[0].base);
+        dlx_end(&call);
+        ASSERT(observed);
+        ASSERT(dlx_write_dep(rig.clone, "release", "release\n"));
+        ASSERT(waitpid(child, &status, 0) == child);
+        child = -1;
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        PASS();
+    } _test_next:;
+    if (child > 0) {
+        (void)dlx_write_dep(rig.clone, "release", "release\n");
+        (void)waitpid(child, &status, 0);
+    }
+    free(rows);
+    dlx_restore();
+    return failures;
+}
+
+static bool dlx_progress_hold_observed;
+
+static void dlx_progress_hold_other_reader(void)
+{
+    zcl_dev_land_train_prepare_hook_for_test(NULL);
+    pid_t child = fork();
+    if (child == 0) {
+        struct dlx_call hold;
+        dlx_begin(&hold, "hold");
+        bool ok = json_push_kv_int(&hold.input, "seq", 1) &&
+            dlx_run(&hold) && dlx_ok(&hold);
+        dlx_end(&hold);
+        _exit(ok ? 0 : 1);
+    }
+    int status = 0;
+    dlx_progress_hold_observed = child > 0 && waitpid(child, &status, 0) == child &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int dlx_progress_hold_fallback(void)
+{
+    int failures = 0;
+    struct dl_row *rows = NULL;
+    TEST("land: concurrent hold invalidation survives stale train bind, solo fallback and commit") {
+        struct dlx_rig rig;
+        struct dlx_call call;
+        char second[64], land[1200], queue[1400], group[768];
+        size_t count = 0;
+        dlx_isolate("progress_hold_fallback");
+        ASSERT(dlx_rig_make(&rig, "progress_hold_fallback_rig"));
+        ASSERT(dlx_qp_branch(&rig, "progress-second", "second.txt", "second\n",
+                              NULL, NULL, second));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        setenv("ZCL_LAND_TRAIN_WIDTH", "2", 1);
+        ASSERT(dlx_qp_submit(&rig, rig.tip, 1));
+        ASSERT(dlx_qp_submit(&rig, second, 2));
+        dlx_landdir(land, sizeof(land));
+        snprintf(queue, sizeof(queue), "%s/queue.jsonl", land);
+        ASSERT(dl_load_rows(queue, &rows, &count, NULL, 0) && count == 2);
+        snprintf(group, sizeof(group), "1:%064d:1=%s,2=%s", 0, rig.tip, second);
+        for (size_t i = 0; i < count; i++) {
+            rows[i].train_solo = 1;
+            snprintf(rows[i].train_group, sizeof(rows[i].train_group), "%s", group);
+        }
+        ASSERT(dl_rewrite_rows(land, queue, rows, count));
+        free(rows); rows = NULL;
+        dlx_progress_hold_observed = false;
+        zcl_dev_land_train_prepare_hook_for_test(dlx_progress_hold_other_reader);
+        dlx_begin(&call, "step");
+        bool stepped = dlx_run(&call) && dlx_ok(&call);
+        bool solo = strcmp(dlx_str(&call, "state"), "started") == 0 &&
+            dlx_int(&call, "train_members") == -1;
+        dlx_end(&call);
+        ASSERT(stepped && solo && dlx_progress_hold_observed);
+        ASSERT(dl_load_rows(queue, &rows, &count, NULL, 0) && count == 2);
+        for (size_t i = 0; i < count; i++) {
+            ASSERT(rows[i].train_solo == 1 && !rows[i].train_group[0]);
+            ASSERT(!rows[i].train_commit[0]);
+        }
+        ASSERT(rows[0].publication_hold);
+        ASSERT_STR_EQ(rows[0].local, rig.tip);
+        ASSERT(!rows[1].proof_intent[0]);
+        PASS();
+    } _test_next:;
+    zcl_dev_land_train_prepare_hook_for_test(NULL);
+    free(rows);
+    dlx_restore();
+    return failures;
+}
+
+static int dlx_progress_merge_controls(void)
+{
+    int failures = 0;
+    TEST("land: preparation merge preserves durable authority and refuses advanced rows") {
+        struct dl_row durable = { .seq = 1, .attempt = 2, .started = 3,
+            .publication_hold = true, .train_solo = 1 };
+        snprintf(durable.tip, sizeof(durable.tip), "submitted");
+        snprintf(durable.state, sizeof(durable.state), "inflight");
+        snprintf(durable.phase, sizeof(durable.phase), "rebase");
+        snprintf(durable.local, sizeof(durable.local), "durable-local");
+        snprintf(durable.base, sizeof(durable.base), "durable-base");
+        struct dl_row stale = durable;
+        stale.publication_hold = false;
+        stale.train_solo = 0;
+        snprintf(stale.train_group, sizeof(stale.train_group), "invalidated-group");
+        snprintf(stale.local, sizeof(stale.local), "tentative-stack");
+        snprintf(stale.detail, sizeof(stale.detail), "target=lint-land");
+        struct dl_row expected = durable;
+        snprintf(expected.phase, sizeof(expected.phase), "prebuild");
+        snprintf(expected.detail, sizeof(expected.detail), "%s", stale.detail);
+        ASSERT(dl_progress_merge(&stale, &durable));
+        ASSERT(memcmp(&stale, &expected, sizeof(stale)) == 0);
+        /* A release is equally durable; the stale held copy cannot undo it. */
+        durable.publication_hold = false;
+        ASSERT(dl_progress_merge(&stale, &durable));
+        ASSERT(!stale.publication_hold);
+        durable.attempt++;
+        ASSERT(!dl_progress_merge(&stale, &durable));
+        durable.attempt--;
+        snprintf(durable.phase, sizeof(durable.phase), "prove");
+        ASSERT(!dl_progress_merge(&stale, &durable));
+        snprintf(durable.phase, sizeof(durable.phase), "prebuild");
+        snprintf(durable.state, sizeof(durable.state), "cancelled");
+        ASSERT(!dl_progress_merge(&stale, &durable));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dlx_progress_queue_controls(void)
+{
+    int failures = 0;
+    struct dl_row *rows = NULL;
+    TEST("land: progress persists only detail and leaves a newer attempt untouched") {
+        struct dlx_rig rig;
+        struct dlx_call call;
+        struct dl_dirs dirs = {0};
+        char path[4200], before[16384], after[16384];
+        size_t count = 0, before_len = 0, after_len = 0;
+        dlx_isolate("preparation_progress");
+        ASSERT(dlx_rig_make(&rig, "preparation_progress_rig"));
+        ASSERT(dlx_progress_submit_fixture(&rig));
+        dlx_landdir(dirs.land, sizeof(dirs.land));
+        snprintf(path, sizeof(path), "%s/queue.jsonl", dirs.land);
+        ASSERT(dl_load_rows(path, &rows, &count, NULL, 0) && count == 1);
+        snprintf(rows[0].state, sizeof(rows[0].state), "inflight");
+        snprintf(rows[0].phase, sizeof(rows[0].phase), "rebase");
+        rows[0].started = 1;
+        rows[0].publication_hold = true;
+        rows[0].train_solo = 1;
+        ASSERT(dl_rewrite_rows(dirs.land, path, rows, count));
+        struct dl_row head = rows[0], probe = head;
+        snprintf(probe.local, sizeof(probe.local), "%s", rig.tip);
+        ASSERT(dl_prepare_progress(&dirs, &head, &probe, "lint-land"));
+        free(rows); rows = NULL;
+        ASSERT(dl_load_rows(path, &rows, &count, NULL, 0) && count == 1);
+        ASSERT_STR_EQ(rows[0].phase, "prebuild");
+        ASSERT_STR_EQ(rows[0].local, head.local);
+        ASSERT(rows[0].publication_hold && rows[0].train_solo == 1);
+        ASSERT(strstr(rows[0].detail, "tentative stack") != NULL);
+        rows[0].attempt++;
+        ASSERT(dl_rewrite_rows(dirs.land, path, rows, count));
+        ASSERT(dlx_slurp(path, before, sizeof(before), &before_len));
+        unsetenv("ZCL_LAND_PROOF_STUB");
+        dlx_begin(&call, "step");
+        bool refused = zcl_dev_land_prepare_lint_for_test(&dirs, &head, &call.reply);
+        bool queue_failure = strcmp(dlx_err_code(&call), "QUEUE_WRITE_FAILED") == 0;
+        dlx_end(&call);
+        ASSERT(refused && queue_failure);
+        ASSERT_STR_EQ(head.dimension, "preparation_persist");
+        ASSERT(strstr(head.detail, "child not started") != NULL);
+        ASSERT(dlx_slurp(path, after, sizeof(after), &after_len));
+        ASSERT_EQ(before_len, after_len);
+        ASSERT(memcmp(before, after, before_len) == 0);
+        PASS();
+    } _test_next:;
+    free(rows);
+    dlx_restore();
+    return failures;
+}
+
 int test_dev_land_final_plan_preparation(void)
 {
     int failures = 0;
@@ -285,6 +567,10 @@ int test_dev_land_final_plan_preparation(void)
     failures += dlx_prepare_failed_output();
     failures += dlx_prepare_bounded_output();
     failures += dlx_prepare_budget();
+    failures += dlx_progress_merge_controls();
+    failures += dlx_progress_queue_controls();
+    failures += dlx_progress_blocked_status();
+    failures += dlx_progress_hold_fallback();
     TEST("land: final preparation refreshes an existing plan and preserves make failures") {
         char root[1024], path[1200], body[128], why[512];
         size_t len = 0;

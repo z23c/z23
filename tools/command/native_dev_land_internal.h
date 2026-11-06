@@ -139,6 +139,12 @@ void dl_fail(struct zcl_command_reply *reply, const char *code,
              const char *phase, const char *msg, const char *evidence);
 void dl_log(const struct dl_row *row, const char *text);
 void dl_log_path(const struct dl_dirs *d, struct dl_row *row);
+/* Preparation is observational: retain every durable authority field. */
+bool dl_progress_merge(struct dl_row *progress, const struct dl_row *durable);
+bool dl_commit_merge_durable(struct dl_row *row, const struct dl_row *durable,
+                              bool progress);
+bool dl_prepare_progress(const struct dl_dirs *d, struct dl_row *head,
+                         const struct dl_row *candidate, const char *target);
 void dl_step_reply(struct zcl_command_reply *reply, const struct dl_row *row,
                    const char *state);
 bool dl_commit_or_report(const struct dl_dirs *d, struct dl_row *row,
@@ -157,10 +163,15 @@ int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
 bool dl_push_identity_ok(const struct dl_dirs *d, const struct dl_row *row);
 void dl_publication_clear(struct dl_row *r);
 bool dl_proof_intent_bind(const struct dl_dirs *d, struct dl_row *row);
-bool dl_wt_proof_deps_ensure(const struct dl_dirs *d, const struct dl_row *r,
+bool dl_wt_proof_deps_ensure(const struct dl_dirs *d, struct dl_row *head,
+                             const struct dl_row *r,
                              bool stubbed, char *why, size_t why_cap);
-int dl_lint_candidate(const struct dl_dirs *d, struct dl_row *row);
+int dl_lint_candidate(const struct dl_dirs *d, struct dl_row *head,
+                       struct dl_row *row);
 #if defined(ZCL_TESTING) && !defined(_WIN32)
+void zcl_dev_land_train_prepare_hook_for_test(void (*hook)(void));
+bool zcl_dev_land_prepare_lint_for_test(const struct dl_dirs *d,
+    struct dl_row *row, struct zcl_command_reply *reply);
 int zcl_dev_land_lint_test(const char *const argv[], const char *log,
                            char *detail, size_t detail_cap);
 #endif

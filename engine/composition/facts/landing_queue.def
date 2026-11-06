@@ -47,9 +47,9 @@ ZCL_FACT("landing.queue", "land_rebase_fn",
          "tools/command/native_dev_land.c",
          "int dl_rebase(const struct dl_dirs *d, struct dl_row *row,")
 ZCL_FACT("landing.queue", "land_lint_fast_fn",
-         "dl_lint_fast runs make lint-fast in the landing worktree as the step before requesting a proof.",
+         "dl_lint_fast persists preparation progress before running make lint-land in the landing worktree, before requesting a proof.",
          "tools/command/native_dev_land.c",
-         "static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *row)")
+         "static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *head,")
 ZCL_FACT("landing.queue", "land_nothing_waits",
          "dev.land step returns after requesting proof; drive is a bounded foreground integrator session.",
          "tools/command/native_dev_land.c",

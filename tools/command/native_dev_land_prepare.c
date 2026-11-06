@@ -260,7 +260,8 @@ int zcl_dev_land_prepare_make_for_test(const char *wt, const char *target,
 #endif
 
 bool zcl_dev_land_restart_plan_prepare_observed(const char *wt, char *why,
-                                       size_t why_cap, zcl_land_prepare_sink sink, void *context)
+                                       size_t why_cap, zcl_land_prepare_sink sink, void *context,
+                                       zcl_land_prepare_begin begin)
 {
     char path[4096 + 32];
     struct stat st;
@@ -275,6 +276,10 @@ bool zcl_dev_land_restart_plan_prepare_observed(const char *wt, char *why,
      * runs. Mere existence says nothing about the
      * plan's BASE_GENERATION. The native target's FORCE prerequisite seals
      * this checkout after every preparation stage has finished. */
+    if (begin && !begin(context, "build/dev-loop/restart.env")) {
+        (void)snprintf(why, why_cap, "preparation progress persistence refused");
+        return false;
+    }
     if (dlp_make(wt, "build/dev-loop/restart.env", DLP_MAKE_IDLE_MS, DLP_MAKE_HARD_MS, false, sink, context, why, why_cap) != 0)
         return false;
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
@@ -310,7 +315,8 @@ static bool dlp_proof_tool_present(const char *wt, const char *tool,
 }
 
 bool zcl_dev_land_proof_tools_prepare_observed(const char *wt, char *why,
-                                      size_t why_cap, zcl_land_prepare_sink sink, void *context)
+                                      size_t why_cap, zcl_land_prepare_sink sink, void *context,
+                                      zcl_land_prepare_begin begin)
 {
     size_t missing = 0, i;
     if (!wt || !why || why_cap == 0) return false;
@@ -326,6 +332,10 @@ bool zcl_dev_land_proof_tools_prepare_observed(const char *wt, char *why,
     }
     if (!missing)
         return true;
+    if (begin && !begin(context, "docs-proof-tools")) {
+        (void)snprintf(why, why_cap, "preparation progress persistence refused");
+        return false;
+    }
     if (dlp_make(wt, "docs-proof-tools", DLP_MAKE_IDLE_MS, DLP_MAKE_HARD_MS, false, sink, context, why, why_cap) != 0)
         return false;
     for (i = 0; i < sizeof(DLP_PROOF_TOOLS) / sizeof(DLP_PROOF_TOOLS[0]);
@@ -344,10 +354,10 @@ bool zcl_dev_land_proof_tools_prepare_observed(const char *wt, char *why,
 
 bool zcl_dev_land_restart_plan_prepare(const char *wt, char *why, size_t cap)
 {
-    return zcl_dev_land_restart_plan_prepare_observed(wt, why, cap, NULL, NULL);
+    return zcl_dev_land_restart_plan_prepare_observed(wt, why, cap, NULL, NULL, NULL);
 }
 
 bool zcl_dev_land_proof_tools_prepare(const char *wt, char *why, size_t cap)
 {
-    return zcl_dev_land_proof_tools_prepare_observed(wt, why, cap, NULL, NULL);
+    return zcl_dev_land_proof_tools_prepare_observed(wt, why, cap, NULL, NULL, NULL);
 }
