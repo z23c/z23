@@ -1276,10 +1276,11 @@ static int t_mg_pprev_scan_set(void)
     pp_detach_all(&fx);
     fx.b[3].nDataPos = 1;        /* smallest real position: scanned */
     fx.b[5].nStatus = 0;         /* no data: never scanned */
+    fx.b[7].nFile = 1;           /* own file, so its record cannot overlap */
     fx.b[7].nDataPos = 0;        /* no position: never scanned */
     bool wrote = pp_put_default(&fx) &&
                  pp_put(&fx, 0, 1, &fx.h[2], 36) &&
-                 pp_put(&fx, 0, 0, &fx.h[6], 36) &&
+                 pp_put(&fx, 1, 0, &fx.h[6], 36) &&
                  pp_put(&fx, 0, (long)fx.b[0].nDataPos, &fx.h[4], 36);
 
     int out = -999;
