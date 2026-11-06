@@ -75,7 +75,7 @@ struct opret_leg_state {
     _Atomic int32_t pinned_h_start;
     _Atomic int32_t pinned_h_end;
     pthread_mutex_t detail_lock;
-    char            detail[192];
+    char            detail[256];
 };
 
 struct coins_leg_state {
@@ -88,7 +88,7 @@ struct coins_leg_state {
     _Atomic int32_t last_h_max;
     pthread_mutex_t lock;       /* protects pinned_txid_lo + detail */
     uint8_t         pinned_txid_lo[32];
-    char            detail[192];
+    char            detail[256];
 };
 
 static struct opret_leg_state g_opret_leg = {
@@ -355,7 +355,7 @@ static void opret_leg_tick(struct node_db *ndb, struct main_state *ms,
         return;
     }
 
-    char detail[192] = {0};
+    char detail[256] = {0};
     enum audit_tick_result res =
         opret_check_window(ndb, ms, datadir, h_start, h_end, detail,
                            sizeof(detail));
@@ -540,7 +540,7 @@ static void coins_leg_tick(sqlite3 *pdb, struct node_db *ndb, uint64_t seed)
     }
 
     int32_t h_min = -1, h_max = -1;
-    char detail[192] = {0};
+    char detail[256] = {0};
     enum audit_tick_result res =
         coins_check_window(pdb, ndb, txid_lo, &h_min, &h_max, detail,
                            sizeof(detail));

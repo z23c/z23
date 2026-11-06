@@ -94,6 +94,23 @@ struct sa_opret_fixture {
  * output; the rest are sole-output blocks (no OP_RETURN at all), so the
  * fixture exercises both "nothing to catalog" and "something to catalog"
  * heights within the one pinned window. */
+/* True when detail ends with "digest_extracted=" plus all 64 hex characters:
+ * a short buffer cuts the tail of the message, not its head. */
+static bool sa_detail_has_full_extracted_digest(const char *detail)
+{
+    const char *tag = strstr(detail, "digest_extracted=");
+    if (!tag)
+        return false;
+    const char *hex = tag + strlen("digest_extracted=");
+    if (strlen(hex) != 64)
+        return false;
+    for (int i = 0; i < 64; i++)
+        if (!((hex[i] >= '0' && hex[i] <= '9') ||
+              (hex[i] >= 'a' && hex[i] <= 'f')))
+            return false;
+    return true;
+}
+
 static bool sa_opret_build_block(struct block *b, int height)
 {
     block_init(b);
@@ -258,7 +275,8 @@ static int test_state_auditor_opret_leg(void)
             latched = info.latched;
         }
         bool ok = latched && info.h_start == 0 && info.h_end == SA_OPRET_HEIGHTS - 1
-                  && strstr(info.detail, "height=5") != NULL;
+                  && strstr(info.detail, "height=5") != NULL
+                  && sa_detail_has_full_extracted_digest(info.detail);
         if (ok) printf("OK\n");
         else {
             printf("FAIL (latched=%d h=[%d,%d] detail=%s)\n", latched,

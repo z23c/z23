@@ -92,7 +92,7 @@ struct state_auditor_mismatch_info {
     bool     latched;        /* CONFIRM_STREAK consecutive mismatches seen */
     int32_t  h_start;        /* inclusive height span the pinned window covers */
     int32_t  h_end;
-    char     detail[192];    /* human-readable specifics (rows/digests/etc) */
+    char     detail[256];    /* human-readable specifics (rows/digests/etc) */
 };
 
 /* Snapshot the current latch state for one leg. Pure read of atomics/a short
