@@ -1376,7 +1376,7 @@ static int t_lint_fast_tor_graph(void)
         "if [ -f \"$1/tools/retrieval_pair_sources.mk\" ]; then cp \"$1/tools/retrieval_pair_sources.mk\" tools/; fi\n"
         "printf '#!/bin/sh\\nexit 0\\n' > tools/dev/check-toolchain.sh\n"
         "printf '#!/bin/sh\\nprintf fixture\\n' > tools/dev/process-start-token.sh\n"
-        "printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$@\" > \"$HOME/args\"\\n' > stub-lint\n"
+        "printf '#!/bin/sh\\n[ \"$1\" = run ] || exit 0\\nprintf \"%%s\\\\n\" \"$@\" > \"$HOME/args\"\\n' > stub-lint\n"
         "chmod +x tools/dev/check-toolchain.sh tools/dev/process-start-token.sh stub-lint\n"
         "printf '%s\\n' '.PHONY: tor-provenance-ready check-native-tunnel-export-binding' 'tor-provenance-ready:' '\t@printf called > \"$(HOME)/tor\"; exit 77' 'check-native-tunnel-export-binding:' '\t@printf binding > \"$(HOME)/binding\"' 'fixture-print-gates:' '\t@printf \"%s\\\\n\" $(LINT_FAST_GATES)' > overlay.mk\n"
         "HOME=\"$2/home\" TMPDIR=\"$2/tmp\"; export HOME TMPDIR\n"
