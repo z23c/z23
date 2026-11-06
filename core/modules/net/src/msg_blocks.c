@@ -485,6 +485,8 @@ bool msg_block_validation_is_retryable(const struct validation_state *state)
         "p2p-block-intake-stopped",
         "p2p-block-intake-full",
         "p2p-block-clone-failed",
+        /* A check that ran out of memory has no verdict on the block. */
+        "out-of-memory",
     };
     for (size_t i = 0; i < sizeof(retryable_reasons) /
                            sizeof(retryable_reasons[0]); i++) {
@@ -502,7 +504,8 @@ static bool msg_block_retryable_needs_redownload(
     return strcmp(state->reject_reason, "p2p-block-intake-unavailable") == 0 ||
            strcmp(state->reject_reason, "p2p-block-intake-stopped") == 0 ||
            strcmp(state->reject_reason, "p2p-block-intake-full") == 0 ||
-           strcmp(state->reject_reason, "p2p-block-clone-failed") == 0;
+           strcmp(state->reject_reason, "p2p-block-clone-failed") == 0 ||
+           strcmp(state->reject_reason, "out-of-memory") == 0;
 }
 
 static uint64_t msg_block_retryable_log_key(

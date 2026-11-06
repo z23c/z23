@@ -1111,3 +1111,7 @@ later lane flips it HARD.
 - 2026-11-06T06:25:15Z — REASON: Stop reading a local allocation failure as a verdict on a block or piece
   old ROOT: d31622b9d07398a5be5065fb1122263eca16969d574f74e5630385ec09b60ffb
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T06:25:26Z — REASON: Leave a block unseen when a check on it runs out of memory
+  old ROOT: b34519dbdb1a15fb1f856ff005be5278ad690e4eaabbc39f3bb409f689ed834b
+  by: owner unseal ritual (make core-unseal)

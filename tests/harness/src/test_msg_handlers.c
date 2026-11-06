@@ -30,6 +30,7 @@
 #include "util/safe_alloc.h"
 #include "util/blocker.h"
 #include "util/thread_registry.h"
+#include "validation/check_block.h"
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
 #include "platform/socket_compat.h"
@@ -2350,6 +2351,74 @@ static bool pin_matching_block(struct block *blk, uint8_t marker)
     return true;
 }
 
+/* Runs the merkle check the way check_block does at submission. */
+static bool pin_submit_checks_merkle(struct block *block,
+                                     struct validation_state *out, void *ctx)
+{
+    (void)ctx;
+    return check_block(block, out, chain_params_get(), false, true, false);
+}
+
+/* The body check passes, then the check at submission cannot get memory for its
+ * txid array. That says nothing about the block: the block is not marked seen,
+ * so a later delivery is processed, and the sender is not penalized. */
+static int test_block_local_memory_failure_stays_retryable(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: a block check that runs out of memory leaves the block unseen") {
+        struct block blk;
+        ASSERT(pin_matching_block(&blk, 0x31));
+        struct uint256 hash;
+        block_get_hash(&blk, &hash);
+        block_clear_seen(&hash);
+        struct byte_stream s;
+        stream_init(&s, 256);
+        ASSERT(block_serialize(&blk, &s));
+
+        struct main_state ms;
+        main_state_init(&ms);
+        peer_scoring_init();
+        test_msg_dl_reset();
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct msg_processor mp;
+        pin_mp_init(&mp, &ms, &nm);
+        mp.block_submit = pin_submit_checks_merkle;
+        mp.block_submit_ctx = NULL;
+        struct p2p_node *node = pin_peer_node(&nm, 626);
+        ASSERT(node != NULL);
+        test_msg_sync_to_blocks_download();
+        ASSERT(sync_try_transition(SYNC_BLOCKS_DOWNLOAD, SYNC_AT_TIP,
+                                   "msg_handlers memory premise"));
+
+        /* Asked for, so an unrequested-block penalty cannot hide the result. */
+        ASSERT(dl_mark_requested(get_download_mgr(), &hash, 1, node->id));
+        zcl_alloc_fault_fail_nth("domain_check_block_txids", 2);
+        ASSERT(process_block_msg(&mp, node, &s));
+        bool fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(fired);
+        ASSERT(!block_already_seen(&hash));
+        ASSERT(atomic_load(&node->misbehavior) == 0);
+
+        struct validation_state state;
+        validation_state_init(&state);
+        validation_state_error(&state, "out-of-memory");
+        ASSERT(msg_block_validation_is_retryable(&state));
+
+        msg_processor_stop_block_intake(&mp);
+        test_msg_sync_to_idle();
+        p2p_node_free(node);
+        net_manager_free(&nm);
+        stream_free(&s);
+        block_free(&blk);
+        main_state_free(&ms);
+        block_clear_seen(&hash);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* A zblkdata message for piece 0 carrying one block, under `named_hash`. */
 static void pin_block_data_stream(struct byte_stream *s,
                                   const struct byte_stream *body,
@@ -2844,6 +2913,7 @@ int test_msg_handlers(void)
     failures += test_pin_reject_no_index_marks_seen();
     failures += test_pin_reject_equal_work_marks_seen();
     failures += test_pin_reject_more_work_marks_seen();
+    failures += test_block_local_memory_failure_stays_retryable();
     failures += test_block_data_local_memory_failure_not_scored();
     failures += test_msg_build_identity_prefix_branches();
     { extern int msg_block_body_identity_tests(void); failures += msg_block_body_identity_tests(); }
