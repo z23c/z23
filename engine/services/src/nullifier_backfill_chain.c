@@ -279,7 +279,11 @@ struct zcl_result nbf_chain_body_verify(
                        (long long)height);
     for (size_t i = 0; i < blk->num_vtx; i++)
         txids[i] = blk->vtx[i].hash;
-    merkle_root = compute_merkle_root(txids, blk->num_vtx);
+    /* In place: this array is freed on the next line. As before, this compares
+     * the root only and leaves the repeated-transaction flag unread. */
+    bool unused_mutated = false;
+    merkle_root = merkle_root_mutated_in_place(txids, blk->num_vtx,
+                                               &unused_mutated);
     free(txids);
     if (!uint256_eq(&merkle_root, &blk->header.hashMerkleRoot)) {
         LOG_WARN(NBF_CHAIN_SUBSYS, "verify_selected_body: merkle mismatch h=%lld",

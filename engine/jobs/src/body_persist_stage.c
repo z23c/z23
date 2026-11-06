@@ -221,9 +221,10 @@ static enum merkle_verify_result verify_merkle_root(const struct block *blk)
         g_merkle_txids[i] = blk->vtx[i].hash;
     /* A body with a repeated transaction sequence reproduces the root of a
      * shorter list but never belongs to its header, so it takes the same
-     * repair as a root mismatch. */
+     * repair as a root mismatch. In place: this function refills the array on
+     * every call and nothing else reads it. */
     bool mutated = false;
-    struct uint256 root = compute_merkle_root_mutated(
+    struct uint256 root = merkle_root_mutated_in_place(
         g_merkle_txids, blk->num_vtx, &mutated);
     return !mutated && uint256_eq(&root, &blk->header.hashMerkleRoot)
         ? MERKLE_VERIFY_OK : MERKLE_VERIFY_MISMATCH;

@@ -7,6 +7,7 @@
 #include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 #include "test/block_fixtures.h"
+#include "../../../engine/services/src/nullifier_backfill_chain.h"
 
 #include "bloom/merkle.h"
 #include "chain/chain.h"
@@ -610,10 +611,52 @@ static int nbf_test_missing_activation(struct nullifier_backfill_config *cfg,
     return failures;
 }
 
+/* A selected body that matches its header stays good when memory is short: the
+ * root is worked out in the verifier's own txid array, with no scratch copy. */
+static int nbf_test_body_verify_needs_no_scratch(void)
+{
+    int failures = 0;
+    struct block b;
+    block_init(&b);
+    b.vtx = zcl_calloc(3, sizeof(*b.vtx), "nbf_scratch_tx");
+    NB_CHECK("body verify: fixture allocated", b.vtx != NULL);
+    if (!b.vtx)
+        return failures;
+    b.num_vtx = 3;
+    struct uint256 ids[3];
+    for (size_t i = 0; i < 3; i++) {
+        transaction_init(&b.vtx[i]);
+        b.vtx[i].hash.data[0] = (uint8_t)(0xE0 + i);
+        ids[i] = b.vtx[i].hash;
+    }
+    b.header.hashMerkleRoot = compute_merkle_root(ids, 3);
+
+    struct block_index idx;
+    block_index_init(&idx);
+    block_get_hash(&b, &idx.hashBlock);
+    idx.phashBlock = &idx.hashBlock;
+    idx.nHeight = 0;
+    tbi_ext(&idx)->hashMerkleRoot = b.header.hashMerkleRoot;
+    idx.nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
+    block_index_build_skip(&idx);
+    struct nbf_chain_binding binding = {.target_height = 0, .target = &idx};
+
+    zcl_alloc_fault_fail_next("merkle_level");
+    struct zcl_result r = nbf_chain_body_verify(&binding, &b, 0);
+    bool no_scratch = zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
+    NB_CHECK("body verify: asked for no scratch allocation", no_scratch);
+    NB_CHECK("body verify: matching body passes with no scratch memory", r.ok);
+
+    block_free(&b);
+    return failures;
+}
+
 int test_nullifier_backfill_service(void);
 int test_nullifier_backfill_service(void)
 {
     int failures = 0;
+    failures += nbf_test_body_verify_needs_no_scratch();
     char dir[256];
     struct nbf_chain ch;
     struct nbf_chain fork;

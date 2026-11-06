@@ -1037,6 +1037,27 @@ int test_body_persist_stage(void)
     }
 
     {
+        /* A body that matches its header stays good when memory is short: the
+         * root is worked out in the stage's own array, with no scratch copy. */
+        char dir[256]; struct main_state ms; struct synth_chain_bp sc;
+        BP_CHECK("merkle_scratch: setup",
+                 bp_setup("merkle_scratch", 2, -1, -1, dir, sizeof(dir), &ms,
+                          &sc) == 0 && bp_reshape(&sc, 0, 3, false));
+        zcl_alloc_fault_fail_next("merkle_level");
+        job_result_t result = body_persist_stage_step_once();
+        BP_CHECK("merkle_scratch: asked for no scratch allocation",
+                 zcl_alloc_fault_armed_label() != NULL);
+        zcl_alloc_fault_clear();
+        BP_CHECK("merkle_scratch: the body advances the cursor",
+                 result != JOB_FATAL && body_persist_stage_cursor() == 1);
+        BP_CHECK("merkle_scratch: no merkle mismatch is counted",
+                 body_persist_stage_merkle_mismatch_total() == 0);
+        BP_CHECK("merkle_scratch: HAVE_DATA is retained",
+                 (sc.blocks[0].nStatus & BLOCK_HAVE_DATA) != 0);
+        bp_teardown(dir, &ms, &sc);
+    }
+
+    {
         char dir[256]; struct main_state ms; struct synth_chain_bp sc;
         BP_CHECK("upstream_failed: setup",
                  bp_setup("upstream", 5, 3, -1, dir, sizeof(dir), &ms, &sc) == 0);
