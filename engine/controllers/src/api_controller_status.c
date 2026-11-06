@@ -916,6 +916,18 @@ static void api_node_summary_push_warnings(
                       health->operator_latch_recovered);
 }
 
+/* The best height this endpoint knows of: served, indexed, header or peer. */
+static int64_t api_node_summary_target(const struct node_health_snapshot *health,
+                                       int64_t height, int64_t indexed_height)
+{
+    int64_t target = indexed_height > height ? indexed_height : height;
+    if (health->header_height > target)
+        target = health->header_height;
+    if (health->peer_best_height > target)
+        target = health->peer_best_height;
+    return target;
+}
+
 /* Route: /api/status and /api/node/summary */
 size_t api_serve_node_summary(uint8_t *response, size_t response_max)
 {
@@ -934,11 +946,7 @@ size_t api_serve_node_summary(uint8_t *response, size_t response_max)
     api_freshness_prepare(&freshness, "served_tip", health.tip_height);
     int64_t height = freshness.served_height;
     int64_t indexed_height = freshness.indexed_height;
-    int64_t target = indexed_height > height ? indexed_height : height;
-    if (health.header_height > target)
-        target = health.header_height;
-    if (health.peer_best_height > target)
-        target = health.peer_best_height;
+    int64_t target = api_node_summary_target(&health, height, indexed_height);
     int64_t gap = target > height ? target - height : 0;
     int64_t index_gap = indexed_height > height ? indexed_height - height : 0;
     bool material_gap = gap > ZCL_NODE_HEALTH_LAG_WARN_BLOCKS;
