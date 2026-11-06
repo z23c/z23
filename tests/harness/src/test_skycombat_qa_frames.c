@@ -329,6 +329,38 @@ static bool sky_resident_io(int fd, void *bytes, size_t size, bool writing)
     return true;
 }
 
+static void sky_resident_child_stdio(int sockets[2], int diagnostics[2], int standard_output[2])
+{
+    /* Preserve the socket while mapping fd 3 even when socketpair used 3. */
+    int ipc = dup(sockets[1]);
+    close(sockets[0]); close(sockets[1]); close(diagnostics[0]); close(standard_output[0]);
+    if (ipc < 0 || dup2(standard_output[1], STDOUT_FILENO) < 0 ||
+        dup2(diagnostics[1], STDERR_FILENO) < 0 ||
+        dup2(ipc, RESIDENT_LAUNCH_CHILD_FD) < 0) _exit(125);
+    close(ipc); close(diagnostics[1]); close(standard_output[1]);
+    int input = open("/dev/null", O_RDONLY);
+    if (input < 0 || (input != STDIN_FILENO && dup2(input, STDIN_FILENO) < 0)) _exit(125);
+    if (input != STDIN_FILENO) close(input);
+}
+
+static void sky_resident_child_exec(bool window_fails, unsigned closed_mask,
+                                     unsigned endpoint, bool raise_test, const char *closed_option)
+{
+    const char *args[12]; size_t n = 0;
+    args[n++] = QA_ENTRY;
+    if (window_fails) args[n++] = "--fixture-window-fails";
+    if (closed_mask) args[n++] = closed_option;
+    if (raise_test) args[n++] = "--fixture-raise";
+    args[n++] = "--fixture-resident";
+    args[n++] = "--resident"; args[n++] = sky_fixture_nonce;
+    args[n++] = "--agent"; args[n++] = "--seed=4294967295"; args[n] = NULL;
+    if (endpoint == 1) close(RESIDENT_LAUNCH_CHILD_FD);
+    for (int fd = 0; fd < 3; fd++)
+        if (closed_mask & (1u << fd)) close(fd);
+    execv(QA_ENTRY, (char *const *)args);
+    _exit(126);
+}
+
 static bool sky_resident_start_config(struct sky_resident_fixture *f, bool window_fails,
                                       unsigned closed_mask, unsigned endpoint, bool raise_test)
 {
@@ -355,29 +387,8 @@ static bool sky_resident_start_config(struct sky_resident_fixture *f, bool windo
     snprintf(closed_option, sizeof(closed_option), "--fixture-closed-stdio=%u", closed_mask);
     pid_t pid = fork();
     if (pid == 0) {
-        /* Preserve the socket while mapping fd 3 even when socketpair used 3. */
-        int ipc = dup(sockets[1]);
-        close(sockets[0]); close(sockets[1]); close(diagnostics[0]); close(standard_output[0]);
-        if (ipc < 0 || dup2(standard_output[1], STDOUT_FILENO) < 0 ||
-            dup2(diagnostics[1], STDERR_FILENO) < 0 ||
-            dup2(ipc, RESIDENT_LAUNCH_CHILD_FD) < 0) _exit(125);
-        close(ipc); close(diagnostics[1]); close(standard_output[1]);
-        int input = open("/dev/null", O_RDONLY);
-        if (input < 0 || (input != STDIN_FILENO && dup2(input, STDIN_FILENO) < 0)) _exit(125);
-        if (input != STDIN_FILENO) close(input);
-        const char *args[12]; size_t n = 0;
-        args[n++] = QA_ENTRY;
-        if (window_fails) args[n++] = "--fixture-window-fails";
-        if (closed_mask) args[n++] = closed_option;
-        if (raise_test) args[n++] = "--fixture-raise";
-        args[n++] = "--fixture-resident";
-        args[n++] = "--resident"; args[n++] = sky_fixture_nonce;
-        args[n++] = "--agent"; args[n++] = "--seed=4294967295"; args[n] = NULL;
-        if (endpoint == 1) close(RESIDENT_LAUNCH_CHILD_FD);
-        for (int fd = 0; fd < 3; fd++)
-            if (closed_mask & (1u << fd)) close(fd);
-        execv(QA_ENTRY, (char *const *)args);
-        _exit(126);
+        sky_resident_child_stdio(sockets, diagnostics, standard_output);
+        sky_resident_child_exec(window_fails, closed_mask, endpoint, raise_test, closed_option);
     }
     close(sockets[1]); close(diagnostics[1]); close(standard_output[1]);
     if (pid < 0) { close(sockets[0]); close(diagnostics[0]); close(standard_output[0]); return false; }
@@ -507,6 +518,34 @@ static int skycombat_resident_frames(void)
     return failures;
 }
 
+static struct resident_result_header sky_resident_end_header(unsigned mode)
+{
+    struct resident_result_header header = sky_resident_header(mode == 4 ? 4097 : 20);
+    if (mode == 0 || mode == 5) memcpy(header.magic, "z23-res-stop-v1\0", sizeof(header.magic));
+    if (mode == 5) header.nonce[64] = 'x';
+    if (mode == 6) header.magic[0] = 'x';
+    return header;
+}
+
+static bool sky_resident_send_end(struct sky_resident_fixture *f, unsigned mode)
+{
+    struct resident_result_header header = sky_resident_end_header(mode);
+    size_t prefix = sizeof(header.magic) + sizeof(header.nonce);
+    if (mode <= 3) {
+        if (mode == 0) return sky_resident_io(f->socket, &header, prefix, true);
+        if (mode == 2 && !sky_resident_io(f->socket, &header, 10, true)) return false;
+        if (mode == 3 && (!sky_resident_io(f->socket, &header, sizeof(header), true) ||
+                         !sky_resident_io(f->socket, (void *)"{", 1, true))) return false;
+        return shutdown(f->socket, SHUT_WR) == 0;
+    }
+    if (mode == 4) return sky_resident_io(f->socket, &header, sizeof(header), true);
+    if (mode == 5 || mode == 6) return sky_resident_io(f->socket, &header, prefix, true);
+    if (mode == 8)
+        return shutdown(f->socket, SHUT_RD) == 0 &&
+               sky_resident_request(f, "{\"v\":1,\"id\":1,\"op\":\"observe\"}", false);
+    return true;
+}
+
 static int skycombat_resident_end(unsigned mode)
 {
     int failures = 0; struct sky_resident_fixture f = {.pid = -1};
@@ -516,21 +555,7 @@ static int skycombat_resident_end(unsigned mode)
     TEST("resident: stop/EOF/framing/init/broken-reply paths preserve streams and reap normally") {
         ASSERT(sky_resident_start(&f, mode == 7));
         ASSERT(sky_resident_receive(&f, payload) && !strcmp(payload, "READY"));
-        struct resident_result_header header = sky_resident_header(mode == 4 ? 4097 : 20);
-        size_t prefix = sizeof(header.magic) + sizeof(header.nonce);
-        if (mode == 0 || mode == 5) memcpy(header.magic, "z23-res-stop-v1\0", sizeof(header.magic));
-        if (mode == 5) header.nonce[64] = 'x';
-        if (mode == 6) header.magic[0] = 'x';
-        if (mode == 0 || mode == 5 || mode == 6)
-            ASSERT(sky_resident_io(f.socket, &header, prefix, true));
-        if (mode == 2) ASSERT(sky_resident_io(f.socket, &header, 10, true));
-        if (mode == 3 || mode == 4) ASSERT(sky_resident_io(f.socket, &header, sizeof(header), true));
-        if (mode == 3) ASSERT(sky_resident_io(f.socket, (void *)"{", 1, true));
-        if (mode >= 1 && mode <= 3) ASSERT_EQ(shutdown(f.socket, SHUT_WR), 0);
-        if (mode == 8) {
-            ASSERT_EQ(shutdown(f.socket, SHUT_RD), 0);
-            ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":1,\"op\":\"observe\"}", false));
-        }
+        ASSERT(sky_resident_send_end(&f, mode));
         if (errors[mode]) ASSERT(sky_resident_json(&f, 0, 0, -1, errors[mode]));
         ASSERT_EQ(sky_resident_finish(&f, output), errors[mode] || mode >= 7 ? 1 : 0);
         if (mode == 7) ASSERT(strstr(output, "window initialization failed"));

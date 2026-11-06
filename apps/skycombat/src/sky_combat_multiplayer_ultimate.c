@@ -367,63 +367,90 @@ static void poll_part_hud(const struct sky_expr_option *option,multiplayer_game_
     if(IsKeyPressed(KEY_F7))sky_expr_toggle(hud);
 }
 
+struct game_option_input {
+    char *hud_argv[3];
+    int hud_argc;
+    unsigned frames;
+    bool seen_frames, agent, resident_agent, seen_seed;
+    const char *nonce;
+    uint32_t seed;
+};
+
+static bool parse_game_seed(const char *number, uint32_t *seed)
+{
+    if (!number[0] || (number[0] == '0' && number[1])) return false;
+    uint32_t candidate = 0;
+    for (size_t k = 0; number[k]; k++) {
+        if (number[k] < '0' || number[k] > '9') return false;
+        unsigned digit = (unsigned)(number[k] - '0');
+        if (candidate > (UINT32_MAX - digit) / 10u) return false;
+        candidate = candidate * 10u + digit;
+    }
+    *seed = candidate;
+    return true;
+}
+
+static bool parse_game_transport(int argc, char **argv, int *index,
+                                 struct game_option_input *input, bool *matched)
+{
+    const char *argument = argv[*index];
+    *matched = true;
+    if (strcmp(argument, "--agent-stdio") == 0) {
+        if (input->agent) return false;
+        input->agent = true;
+    } else if (strcmp(argument, "--agent") == 0) {
+        if (input->agent) return false;
+        input->resident_agent = input->agent = true;
+    } else if (strcmp(argument, "--resident") == 0) {
+        if (input->nonce || *index + 1 == argc ||
+            !sky_resident_nonce_valid(argv[*index + 1])) return false;
+        input->nonce = argv[++*index];
+    } else *matched = false;
+    return true;
+}
+
+static bool parse_game_argument(int argc, char **argv, int *index,
+                                struct game_option_input *input)
+{
+    const char *argument = argv[*index];
+    if (!argument) return false;
+    if (strncmp(argument, "--qa-frames=", 12) == 0) {
+        char *qa_argv[2] = {argv[0], argv[*index]};
+        if (input->seen_frames || !sky_combat_qa_frames_parse(2, qa_argv, &input->frames))
+            return false;
+        input->seen_frames = true;
+    } else if (strncmp(argument, "--seed=", 7) == 0) {
+        if (input->seen_seed || !parse_game_seed(argument + 7, &input->seed)) return false;
+        input->seen_seed = true;
+    } else {
+        bool matched;
+        if (!parse_game_transport(argc, argv, index, input, &matched)) return false;
+        if (!matched) {
+            if (input->hud_argc == 3) return false;
+            input->hud_argv[input->hud_argc++] = argv[*index];
+        }
+    }
+    return true;
+}
+
 /* Compose strict option contracts without opening a window on refusal.
- * The two outputs change only when both parsers have accepted their input. */
+ * Caller outputs change only after every option has been accepted. */
 static bool parse_game_options(int argc, char **argv,
                                struct sky_expr_option *option, unsigned *frames,
                                bool *agent_mode, const char **nonce, uint32_t *seed)
 {
-    /* Called only from main with its argument vector and local outputs. */
-    char *hud_argv[3] = {argv[0]};
-    int hud_argc = 1;
-    unsigned count = 0;
-    bool seen_frames = false;
-    bool agent = false;
-    bool resident_agent = false, seen_seed = false;
-    const char *resident_nonce = NULL;
-    uint32_t agent_seed = 1;
-    for (int i = 1; i < argc; ++i) {
-        if (!argv[i]) return false;
-        if (strncmp(argv[i], "--qa-frames=", 12) == 0) {
-            char *qa_argv[2] = {argv[0], argv[i]};
-            if (seen_frames || !sky_combat_qa_frames_parse(2, qa_argv, &count))
-                return false;
-            seen_frames = true;
-        } else if (strcmp(argv[i], "--agent-stdio") == 0) {
-            if (agent) return false;
-            agent = true;
-        } else if (strcmp(argv[i], "--agent") == 0) {
-            if (agent) return false;
-            resident_agent = agent = true;
-        } else if (strcmp(argv[i], "--resident") == 0) {
-            if (resident_nonce || i + 1 == argc || !sky_resident_nonce_valid(argv[i + 1]))
-                return false;
-            resident_nonce = argv[++i];
-        } else if (strncmp(argv[i], "--seed=", 7) == 0) {
-            const char *number = argv[i] + 7;
-            if (seen_seed || !number[0] || (number[0] == '0' && number[1])) return false;
-            agent_seed = 0;
-            for (size_t k = 0; number[k]; k++) {
-                if (number[k] < '0' || number[k] > '9') return false;
-                unsigned digit = (unsigned)(number[k] - '0');
-                if (agent_seed > (UINT32_MAX - digit) / 10u) return false;
-                agent_seed = agent_seed * 10u + digit;
-            }
-            seen_seed = true;
-        } else {
-            if (hud_argc == 3) return false;
-            hud_argv[hud_argc++] = argv[i];
-        }
-    }
+    struct game_option_input input = {.hud_argv = {argv[0]}, .hud_argc = 1, .seed = 1};
+    for (int i = 1; i < argc; ++i)
+        if (!parse_game_argument(argc, argv, &i, &input)) return false;
     struct sky_expr_option candidate;
-    if (agent && seen_frames) return false;
-    if (resident_agent != (resident_nonce != NULL) || (seen_seed && !agent)) return false;
-    if (!sky_expr_option_parse(hud_argc, hud_argv, &candidate)) return false;
+    if (input.agent && input.seen_frames) return false;
+    if (input.resident_agent != (input.nonce != NULL) || (input.seen_seed && !input.agent)) return false;
+    if (!sky_expr_option_parse(input.hud_argc, input.hud_argv, &candidate)) return false;
     *option = candidate;
-    *frames = count;
-    *agent_mode = agent;
-    *nonce = resident_nonce;
-    *seed = agent_seed;
+    *frames = input.frames;
+    *agent_mode = input.agent;
+    *nonce = input.nonce;
+    *seed = input.seed;
     return true;
 }
 
