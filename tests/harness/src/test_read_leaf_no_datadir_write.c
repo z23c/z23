@@ -282,6 +282,12 @@ static const struct rlw_leaf g_rlw_leaves[] = {
      * STORE_UNREADABLE. */
     { "zcode.package.offered",  zcl_native_handle_zcode_package_offered,
       NULL, NULL,               NULL, NULL, "zcode/manifests" },
+    /* Lineage lists persisted releases of one package root from
+     * <datadir>/zcode/releases; an absent directory is an empty list and a
+     * plain file there is RELEASES_UNREADABLE. */
+    { "zcode.commons.lineage",  zcl_native_handle_zcode_commons_lineage,
+      "workspace", RLW_DATADIR_VALUE, "package_root", RLW_ZID_PUBKEY,
+      "zcode/releases" },
     /* Policy inspection is a READ leaf: its loader must not create
      * zcode/policy on an absent datadir or repair an unreadable store. */
     { "zcode.network.policy.list",
