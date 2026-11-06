@@ -502,6 +502,11 @@ static bool bgv_auth_checkpoint_checked(
     return true;
 }
 
+static struct zcl_result bgv_auth_publish_scanned(
+    struct bg_validation_service *svc, bool external_seeded,
+    const struct bgv_scan_tip *scanned, const uint8_t root_bytes[32],
+    int chain_height);
+
 static struct zcl_result bgv_auth_publish_pass(
     struct bg_validation_service *svc, bool external_seeded,
     bool coverage_complete)
@@ -543,7 +548,18 @@ static struct zcl_result bgv_auth_publish_pass(
         return bgv_auth_refuse("authoritative coins commitment failed");
     if (!bgv_auth_scan_tip_stable(svc, &scanned, reason))
         return bgv_auth_refuse(reason);
+    return bgv_auth_publish_scanned(svc, external_seeded, &scanned,
+                                    root_bytes, chain_height);
+}
 
+/* The scanned, stable frontier meets the controller: already published,
+ * the checkpoint answer, or the full-history mark. */
+static struct zcl_result bgv_auth_publish_scanned(
+    struct bg_validation_service *svc, bool external_seeded,
+    const struct bgv_scan_tip *scanned, const uint8_t root_bytes[32],
+    int chain_height)
+{
+    char reason[192] = {0};
     struct chain_evidence_controller authority;
     struct chain_evidence_controller_view view;
     chain_evidence_controller_init(&authority, svc->ndb, csr_instance());
@@ -554,7 +570,7 @@ static struct zcl_result bgv_auth_publish_pass(
     }
 
     struct zcl_result checked;
-    if (bgv_auth_checkpoint_checked(svc, external_seeded, &view, &scanned,
+    if (bgv_auth_checkpoint_checked(svc, external_seeded, &view, scanned,
                                     &checked))
         return checked;
 
@@ -571,7 +587,7 @@ static struct zcl_result bgv_auth_publish_pass(
     struct uint256 root;
     memcpy(root.data, authority_root_bytes, sizeof(root.data));
     enum chain_evidence_controller_result result =
-        bgv_auth_mark(svc, &authority, &scanned, external_seeded, &root);
+        bgv_auth_mark(svc, &authority, scanned, external_seeded, &root);
     if (result != CEC_OK) {
         snprintf(reason, sizeof(reason),
                  "CEC full-validation publication refused result=%s%s",

@@ -980,6 +980,82 @@ static const struct gw_cp_shape GW_ROM_INSTALL = {
     .self_folded = true, .stamp_kind = CONSENSUS_INSTALL_STAMP_CHECKPOINT_ROM,
 };
 
+/* Before the walk reaches the tip, and with no predicate wired, the
+ * publisher refuses and pages exactly as today. */
+static int gw_cp_phase_refusals(struct gw_fixture *f, int *pages)
+{
+    int failures = 0;
+    gw_walk_verified(f, GW_TIP, 0);
+    atomic_store(&f->svc.progress.verified_height, GW_TIP - 1);
+    struct zcl_result r = gw_cp_pass(f, pages);
+    failures += gw_check("short walk still refuses and pages",
+                         !r.ok && *pages == 1 && blocker_exists(GW_UNPROVEN));
+    failures += gw_check("short walk: no checked result yet",
+                         gw_trust_reads(f, "starting", 0));
+    gw_walk_verified(f, GW_TIP, 0);
+    bg_validation_authority_set_checkpoint_probe(NULL);
+    blocker_reset_for_testing();
+    r = gw_cp_pass(f, pages);
+    failures += gw_check("unwired predicate refuses and pages",
+             !r.ok && r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED &&
+             *pages == 2 && blocker_exists(GW_UNPROVEN));
+    bg_validation_authority_set_checkpoint_probe(
+        sovereignty_checkpoint_install_locked);
+    return failures;
+}
+
+/* The walk reached the tip and the predicate holds: typed, quiet, 100%. */
+static int gw_cp_phase_checked(struct gw_fixture *f, int *pages,
+                               const struct chain_evidence_controller_view *was)
+{
+    int failures = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        struct zcl_result r = gw_cp_pass(f, pages);
+        failures += gw_check("checked to tip: typed, not published",
+                 !r.ok && r.code == BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED);
+        failures += gw_check("checked to tip: no new page, own blocker retired",
+                 *pages == 2 && !blocker_exists(GW_UNPROVEN));
+    }
+    struct bg_validation_checkpoint_check cc;
+    failures += gw_check("typed result carries the checked range and tip",
+             bg_validation_checkpoint_check_get(&f->svc, &cc) &&
+             cc.checkpoint_height == GW_CP && cc.first_height == GW_CP + 1 &&
+             cc.tip_height == GW_TIP &&
+             memcmp(cc.tip_hash, f->hashes[GW_TIP].data, 32) == 0);
+    failures += gw_check("CEC state and origin untouched, never fully validated",
+                         gw_cec_untouched(f, was));
+    failures += gw_check("summary progress from the typed result reaches 100",
+                         gw_trust_reads(f, "checked_to_tip", 100));
+    failures += gw_check("spend guard allows (pinned, unchanged)",
+                         gw_spend_allowed());
+    return failures;
+}
+
+/* The trust state leaves SOVEREIGN: the next pass refuses and pages. */
+static int gw_cp_phase_predicate_lost(
+    struct gw_fixture *f, int *pages,
+    const struct chain_evidence_controller_view *was)
+{
+    int failures = 0;
+    progress_store_tx_lock();
+    bool removed = progress_meta_delete(progress_store_db(),
+                                        COINS_KV_SELF_FOLDED_KEY);
+    progress_store_tx_unlock();
+    struct zcl_result r = gw_cp_pass(f, pages);
+    failures += gw_check("predicate false later: refusal and page return",
+             removed && !r.ok &&
+             r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED &&
+             *pages == 3 && blocker_exists(GW_UNPROVEN));
+    struct bg_validation_checkpoint_check cc;
+    failures += gw_check("predicate false later: checked result withdrawn",
+             !bg_validation_checkpoint_check_get(&f->svc, &cc));
+    failures += gw_check("predicate false later: spend guard refuses (pinned)",
+                         !gw_spend_allowed());
+    failures += gw_check("predicate false later: CEC still untouched",
+                         gw_cec_untouched(f, was));
+    return failures;
+}
+
 static int test_checkpoint_walk_checked_to_tip(void)
 {
     int failures = 0, pages = 0;
@@ -988,61 +1064,9 @@ static int test_checkpoint_walk_checked_to_tip(void)
         return gw_check("checkpoint fixture", false);
     struct chain_evidence_controller_view was;
     gw_view(&f, &was);
-    /* A short walk refuses and pages exactly as today (a real refusal). */
-    gw_walk_verified(&f, GW_TIP, 0);
-    atomic_store(&f.svc.progress.verified_height, GW_TIP - 1);
-    struct zcl_result r = gw_cp_pass(&f, &pages);
-    failures += gw_check("short walk still refuses and pages",
-                         !r.ok && pages == 1 && blocker_exists(GW_UNPROVEN));
-    failures += gw_check("short walk: no checked result yet",
-                         gw_trust_reads(&f, "starting", 0));
-
-    /* No predicate wired: fail closed, refuse and page as today. */
-    gw_walk_verified(&f, GW_TIP, 0);
-    bg_validation_authority_set_checkpoint_probe(NULL);
-    blocker_reset_for_testing();
-    r = gw_cp_pass(&f, &pages);
-    failures += gw_check("unwired predicate refuses and pages",
-             !r.ok && r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED &&
-             pages == 2 && blocker_exists(GW_UNPROVEN));
-    bg_validation_authority_set_checkpoint_probe(
-        sovereignty_checkpoint_install_locked);
-    for (int pass = 0; pass < 2; pass++) {
-        r = gw_cp_pass(&f, &pages);
-        failures += gw_check("checked to tip: typed, not published",
-                 !r.ok && r.code == BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED);
-        failures += gw_check("checked to tip: no new page, own blocker retired",
-                 pages == 2 && !blocker_exists(GW_UNPROVEN));
-    }
-    struct bg_validation_checkpoint_check cc;
-    failures += gw_check("typed result carries the checked range and tip",
-             bg_validation_checkpoint_check_get(&f.svc, &cc) &&
-             cc.checkpoint_height == GW_CP && cc.first_height == GW_CP + 1 &&
-             cc.tip_height == GW_TIP &&
-             memcmp(cc.tip_hash, f.hashes[GW_TIP].data, 32) == 0);
-    failures += gw_check("CEC state and origin untouched, never fully validated",
-                         gw_cec_untouched(&f, &was));
-    failures += gw_check("summary progress from the typed result reaches 100",
-                         gw_trust_reads(&f, "checked_to_tip", 100));
-    failures += gw_check("spend guard allows (pinned, unchanged)",
-                         gw_spend_allowed());
-
-    /* The trust state leaves SOVEREIGN: the next pass refuses and pages. */
-    progress_store_tx_lock();
-    bool removed = progress_meta_delete(progress_store_db(),
-                                        COINS_KV_SELF_FOLDED_KEY);
-    progress_store_tx_unlock();
-    r = gw_cp_pass(&f, &pages);
-    failures += gw_check("predicate false later: refusal and page return",
-             removed && !r.ok &&
-             r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED &&
-             pages == 3 && blocker_exists(GW_UNPROVEN));
-    failures += gw_check("predicate false later: checked result withdrawn",
-             !bg_validation_checkpoint_check_get(&f.svc, &cc));
-    failures += gw_check("predicate false later: spend guard refuses (pinned)",
-                         !gw_spend_allowed());
-    failures += gw_check("predicate false later: CEC still untouched",
-                         gw_cec_untouched(&f, &was));
+    failures += gw_cp_phase_refusals(&f, &pages);
+    failures += gw_cp_phase_checked(&f, &pages, &was);
+    failures += gw_cp_phase_predicate_lost(&f, &pages, &was);
     gw_cp_close(&f);
     return failures;
 }
