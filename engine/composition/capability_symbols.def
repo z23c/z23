@@ -1408,6 +1408,7 @@ ZCL_CAPABILITY_SYMBOL("CFBundleCopyResourcesDirectoryURL", CAP_FS_READ, "Resolve
 ZCL_CAPABILITY_SYMBOL("_NSGetExecutablePath", CAP_FS_READ, "Returns the running Mach-O filesystem path.")
 ZCL_CAPABILITY_SYMBOL("proc_pidinfo", CAP_FS_READ, "Reads Darwin process metadata.")
 ZCL_CAPABILITY_SYMBOL("proc_listpids", CAP_FS_READ, "Enumerates Darwin process identifiers.")
+ZCL_CAPABILITY_SYMBOL("proc_listpgrppids", CAP_FS_READ, "Enumerates the members of a Darwin process group.")
 ZCL_CAPABILITY_SYMBOL("proc_pidfdinfo", CAP_FS_READ, "Reads Darwin process file descriptor metadata.")
 ZCL_CAPABILITY_SYMBOL("proc_pidpath", CAP_FS_READ, "Reads a Darwin process executable path.")
 ZCL_CAPABILITY_SYMBOL("task_threads", CAP_FS_READ, "Enumerates threads belonging to a Mach task.")
