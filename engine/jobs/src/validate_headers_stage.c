@@ -189,8 +189,12 @@ static bool vh_batch_failed_locally(struct stage_memory_hold *hold,
                      jobs[i].height, (unsigned long long)reps);
         atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
         atomic_fetch_add(&g_local_failure_total, 1);
-        *held = stage_memory_hold_note(hold, STAGE_NAME, jobs[i].height,
-                                       jobs[i].reason, out);
+        /* Key the hold on the batch start, which stays put while the cursor
+         * holds; which job runs out of memory first can change per tick. */
+        char detail[64];
+        snprintf(detail, sizeof(detail), "first at h=%d", jobs[i].height);
+        *held = stage_memory_hold_note(hold, STAGE_NAME, jobs[0].height,
+                                       detail, out);
         return true;
     }
     stage_memory_hold_clear(hold, STAGE_NAME);

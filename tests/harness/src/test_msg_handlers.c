@@ -2497,9 +2497,9 @@ struct pin_compact_outcome {
 enum pin_requeue_setup {
     PIN_REQUEUE_WANTED,        /* a known block above the tip */
     PIN_REQUEUE_NO_INDEX,      /* the block has no index */
-    PIN_REQUEUE_FORK_BELOW_TIP, /* off the active chain, at or below the
-                                 * provable frontier: a branch that may
-                                 * carry more work */
+    PIN_REQUEUE_FORK_BELOW_TIP, /* off the active chain, at our tip's height
+                                 * and below the provable frontier: a branch
+                                 * that may carry more work */
     PIN_REQUEUE_ON_CHAIN,      /* already on the active chain */
     PIN_REQUEUE_HAVE_DATA,     /* the body is already held */
     PIN_REQUEUE_TOMBSTONED,    /* requested, and received moments ago */
@@ -2511,6 +2511,15 @@ static void pin_requeue_apply_setup(enum pin_requeue_setup setup,
                                     const struct uint256 *hash)
 {
     if (setup == PIN_REQUEUE_FORK_BELOW_TIP) {
+        /* Our tip is a sibling at the same height; H* is above both. */
+        struct uint256 sibling;
+        memset(sibling.data, 0x77, sizeof(sibling.data));
+        struct block_index *tip =
+            chainstate_insert_block_index((struct chainstate *)ms, &sibling);
+        if (tip) {
+            tip->nHeight = bi->nHeight;
+            (void)active_chain_install_tip_slot(&ms->chain_active, tip);
+        }
         reducer_frontier_provable_tip_set(bi->nHeight + 1);
     } else if (setup == PIN_REQUEUE_ON_CHAIN) {
         (void)active_chain_install_tip_slot(&ms->chain_active, bi);
