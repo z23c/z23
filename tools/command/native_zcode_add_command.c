@@ -21,7 +21,7 @@
 #include "base/safe_alloc.h"
 #include "command/native_command.h"
 #include "command/native_package_artifact.h"
-
+#include "command/native_zcode_package_copy.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "services/package_lifecycle.h"
@@ -69,14 +69,6 @@ static int64_t za_now(const struct zcl_command_request *request)
     if (v)
         return json_get_int(v);
     return (int64_t)platform_time_wall_unix();
-}
-
-static void za_push_hex(struct json_value *obj, const char *key,
-                        const uint8_t root[32])
-{
-    char hex[65];
-    zcl_hex_encode(root, 32, hex);
-    (void)json_push_kv_str(obj, key, hex);
 }
 
 /* One named rejection, rendered the same way from every leaf. The rule is
@@ -328,7 +320,8 @@ void zcl_native_handle_zcode_package_add_plan(
         (void)json_push_kv_str(&reply->data, "datadir", local_report.datadir);
         (void)json_push_kv_bool(&reply->data, "local_only", true);
         (void)json_push_kv_bool(&reply->data, "publication", false);
-        za_push_hex(&reply->data, "transport_root", local_report.transport_root);
+        zcl_package_copy_push_root(&reply->data, "transport_root",
+                                   local_report.transport_root);
     } else {
         r = package_lifecycle_plan(datadir, target, za_now(request), &report);
     }
@@ -338,9 +331,11 @@ void zcl_native_handle_zcode_package_add_plan(
         return;
     }
 
-    za_push_hex(&reply->data, "plan_id", report.plan_id);
-    za_push_hex(&reply->data, "target_root", report.plan.target_root);
-    za_push_hex(&reply->data, "lock_root", report.plan.lock_root);
+    zcl_package_copy_push_root(&reply->data, "plan_id", report.plan_id);
+    zcl_package_copy_push_root(&reply->data, "target_root",
+                               report.plan.target_root);
+    zcl_package_copy_push_root(&reply->data, "lock_root",
+                               report.plan.lock_root);
     (void)json_push_kv_bool(&reply->data, "ready", report.ready);
     (void)json_push_kv_int(&reply->data, "expires_unix",
                            report.plan.expires_unix);
@@ -359,7 +354,7 @@ void zcl_native_handle_zcode_package_add_plan(
         struct json_value row;
         json_init(&row);
         json_set_object(&row);
-        za_push_hex(&row, "root", s->root);
+        zcl_package_copy_push_root(&row, "root", s->root);
         (void)json_push_kv_str(&row, "name", s->name);
         (void)json_push_kv_str(&row, "semver", s->semver);
         (void)json_push_kv_str(&row, "license", s->license);
@@ -505,7 +500,7 @@ void zcl_native_handle_zcode_package_add_commit(
         struct json_value row;
         json_init(&row);
         json_set_object(&row);
-        za_push_hex(&row, "root", s->root);
+        zcl_package_copy_push_root(&row, "root", s->root);
         (void)json_push_kv_str(&row, "name", s->name);
         (void)json_push_kv_str(&row, "semver", s->semver);
         (void)json_push_kv_int(&row, "depth", (int64_t)s->depth);
@@ -518,7 +513,8 @@ void zcl_native_handle_zcode_package_add_commit(
         (void)json_push_kv_bool(&row, "receipt_reused",
                                 s->receipt_reused);
         if (s->has_receipt)
-            za_push_hex(&row, "build_receipt_id", s->receipt_id);
+            zcl_package_copy_push_root(&row, "build_receipt_id",
+                                       s->receipt_id);
         if (s->rule[0]) {
             (void)json_push_kv_str(&row, "rule", s->rule);
             (void)json_push_kv_str(&row, "detail", s->detail);
@@ -536,13 +532,14 @@ void zcl_native_handle_zcode_package_add_commit(
         return;
     }
 
-    za_push_hex(&reply->data, "plan_id", report.plan_id);
+    zcl_package_copy_push_root(&reply->data, "plan_id", report.plan_id);
     (void)json_push_kv_bool(&reply->data, "installed", report.installed);
-    za_push_hex(&reply->data, "active_root", report.active_root);
+    zcl_package_copy_push_root(&reply->data, "active_root", report.active_root);
     (void)json_push_kv_bool(&reply->data, "had_previous",
                             report.had_previous);
     if (report.had_previous)
-        za_push_hex(&reply->data, "previous_root", report.previous_root);
+        zcl_package_copy_push_root(&reply->data, "previous_root",
+                                   report.previous_root);
     (void)json_push_kv_int(&reply->data, "step_count",
                            (int64_t)report.step_count);
     za_push_commit_data_dir(reply, datadir, &report);
@@ -592,8 +589,8 @@ void zcl_native_handle_zcode_package_rollback(
     (void)json_push_kv_str(&reply->data, "name", report.name);
     (void)json_push_kv_bool(&reply->data, "selected_by_default",
                             report.selected_by_default);
-    za_push_hex(&reply->data, "from_root", report.from_root);
-    za_push_hex(&reply->data, "to_root", report.to_root);
+    zcl_package_copy_push_root(&reply->data, "from_root", report.from_root);
+    zcl_package_copy_push_root(&reply->data, "to_root", report.to_root);
     za_push_installed_programs(reply, datadir, report.to_root);
     (void)json_push_kv_int(&reply->data, "generation_count",
                            (int64_t)report.generation_count);
@@ -681,10 +678,10 @@ void zcl_native_handle_zcode_package_reproduce(
                 r.message, command);
         return;
     }
-    za_push_hex(&reply->data, "package_root", report.root);
-    za_push_hex(&reply->data, "reference_receipt_id",
+    zcl_package_copy_push_root(&reply->data, "package_root", report.root);
+    zcl_package_copy_push_root(&reply->data, "reference_receipt_id",
                 report.reference_receipt_id);
-    za_push_hex(&reply->data, "receipt_id", report.receipt_id);
+    zcl_package_copy_push_root(&reply->data, "receipt_id", report.receipt_id);
     (void)json_push_kv_bool(&reply->data, "reproduced", report.matched);
     (void)json_push_kv_str(
         &reply->data, "match_rule",
