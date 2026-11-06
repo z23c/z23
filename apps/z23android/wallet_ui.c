@@ -32,12 +32,24 @@
 static struct {
     jobject activity, container, footer, input, buttons[WALLET_ITEMS_MAX];
     size_t button_item[WALLET_ITEMS_MAX], button_count;
+    jint body_index;
     struct wallet_screen screen;
     unsigned version;
-    bool drawn;
+    bool drawn, damaged;
 } ui;
 
 /* ---- widgets ---- */
+
+/* Insert around a retained input without detaching it from the window. */
+static bool append_body(JNIEnv *env, jobject view)
+{
+    jmethodID add = zj_method(env, ui.container, "addView", "(Landroid/view/View;I)V");
+    if (!add) return false;
+    (*env)->CallVoidMethod(env, ui.container, add, view, ui.body_index);
+    if (!zj_clean(env)) return false;
+    ++ui.body_index;
+    return true;
+}
 
 /* Text is never selectable: a long press would offer Copy and Share, and the clipboard is open to other apps. */
 static bool text_view(JNIEnv *env, const char *text, float sp, uint32_t color)
@@ -45,7 +57,7 @@ static bool text_view(JNIEnv *env, const char *text, float sp, uint32_t color)
     jobject view = zj_widget(env, "android/widget/TextView", ui.activity);
     bool ok = view && zj_typography(env, view, sp, (jint)color) && zj_padding(env, view, 0, 6) && zj_text(env, view, text) &&
         zj_bool_property(env, view, "setTextIsSelectable", false) && zj_bool_property(env, view, "setLongClickable", false) &&
-        zj_margins(env, view, MATCH, WRAP, 0.0f, 0, 0, 0, 0) && zj_append(env, ui.container, view);
+        zj_margins(env, view, MATCH, WRAP, 0.0f, 0, 0, 0, 0) && append_body(env, view);
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
@@ -56,7 +68,7 @@ static bool memo_view(JNIEnv *env, const char *text)
     bool ok = view && zj_typography(env, view, MEMO_SP, (jint)SOFT) && zj_pill(env, view, (jint)MEMO_PANEL, 8.0f) && zj_padding(env, view, 12, 10) &&
         zj_text(env, view, text) && zj_bool_property(env, view, "setTextIsSelectable", false) &&
         zj_bool_property(env, view, "setLongClickable", false) && zj_margins(env, view, MATCH, WRAP, 0.0f, 0, 2, 0, 2) &&
-        zj_append(env, ui.container, view);
+        append_body(env, view);
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
@@ -66,19 +78,20 @@ static bool qr_view(JNIEnv *env, const char *code)
     unsigned char *bmp = zapp_fleet_qr_bmp(code, &size);
     jobject view = bmp ? zj_widget(env, "android/widget/ImageView", ui.activity) : NULL;
     bool ok = view && zj_bitmap(env, view, bmp, size) && zj_margins(env, view, zj_dp(QR_DP), zj_dp(QR_DP), 0.0f, 0, 8, 0, 8) &&
-        zj_append(env, ui.container, view);
+        append_body(env, view);
     free(bmp);
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
 static bool input_view(JNIEnv *env, const char *hint)
 {
+    if (ui.input) { ++ui.body_index; return true; }
     jobject view = zj_widget(env, "android/widget/EditText", ui.activity);
     bool ok = view && zj_typography(env, view, 18.0f, (jint)WHITE) && zj_int_property(env, view, "setInputType", INPUT_TYPE_DECIMAL) &&
         zj_int_property(env, view, "setImeOptions", ZAPP_FIELD_IME_NO_LEARNING | ZAPP_FIELD_IME_ACTION_GO) && zj_editor_listener(env, view) &&
         zj_int_property(env, view, "setHintTextColor", (jint)0xff808080u) &&
         zj_char_sequence(env, view, "setHint", hint) && zj_margins(env, view, MATCH, WRAP, 0.0f, 0, 8, 0, 0) &&
-        zj_append(env, ui.container, view) && zj_keep(env, &ui.input, view);
+        append_body(env, view) && zj_keep(env, &ui.input, view);
     if (view) {
         (void)zj_int_property(env, view, "setImportantForAutofill", ZAPP_FIELD_AUTOFILL_NO);
         (*env)->DeleteLocalRef(env, view);
@@ -119,10 +132,15 @@ static bool bottom_space(JNIEnv *env)
 {
     jobject view = zj_widget(env, "android/widget/TextView", ui.activity);
     bool ok = view && zj_padding(env, view, 0, BOTTOM_SPACE_DP) && zj_margins(env, view, MATCH, WRAP, 0.0f, 0, 0, 0, 0) &&
-        zj_append(env, ui.container, view);
+        append_body(env, view);
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
+static bool append_button(JNIEnv *env, jobject parent, jobject view)
+{
+    return parent == ui.footer ? zj_append(env, parent, view) : append_body(env, view);
+}
+
 /* Back sits in the fixed bar under the page, so it stays on the screen however long the page is. */
 static bool button_view(JNIEnv *env, size_t item, const char *text, bool row)
 {
@@ -131,7 +149,7 @@ static bool button_view(JNIEnv *env, size_t item, const char *text, bool row)
     bool ok = view && ui.button_count < WALLET_ITEMS_MAX && zj_typography(env, view, 16.0f, (jint)WHITE) &&
         zj_bool_property(env, view, "setAllCaps", false) && zj_pill(env, view, (jint)BUTTON_COLOR, 24.0f) &&
         zj_flatten(env, view) && zj_text(env, view, text) && zj_margins(env, view, MATCH, WRAP, 0.0f, 4, 4, 4, 4) &&
-        zj_append(env, parent, view) && zj_keep(env, &ui.buttons[ui.button_count], view);
+        append_button(env, parent, view) && zj_keep(env, &ui.buttons[ui.button_count], view);
     if (ok && row) row_style(env, view, text);
     if (ok) ui.button_item[ui.button_count++] = item;
     if (view) (*env)->DeleteLocalRef(env, view);
@@ -155,27 +173,61 @@ static bool draw_item(JNIEnv *env, size_t index)
     return false;
 }
 
-static void remove_children(JNIEnv *env, jobject group)
+static bool remove_children(JNIEnv *env, jobject group)
 {
     jmethodID clear = group ? zj_method(env, group, "removeAllViews", "()V") : NULL;
-    if (clear) (*env)->CallVoidMethod(env, group, clear);
-    (void)zj_clean(env);
+    if (!clear) return false;
+    (*env)->CallVoidMethod(env, group, clear);
+    return zj_clean(env);
 }
-static void release_widgets(JNIEnv *env)
+static bool remove_except_input(JNIEnv *env)
 {
-    remove_children(env, ui.container);
-    remove_children(env, ui.footer);
+    jmethodID count = zj_method(env, ui.container, "getChildCount", "()I");
+    jmethodID child = zj_method(env, ui.container, "getChildAt", "(I)Landroid/view/View;");
+    jmethodID remove = zj_method(env, ui.container, "removeViewAt", "(I)V");
+    if (!count || !child || !remove) return false;
+    jint n = (*env)->CallIntMethod(env, ui.container, count);
+    if (!zj_clean(env)) return false;
+    bool found = false;
+    for (jint i = n; i > 0; --i) {
+        jobject view = (*env)->CallObjectMethod(env, ui.container, child, i - 1);
+        if (!zj_clean(env) || !view) return false;
+        bool keep = (*env)->IsSameObject(env, view, ui.input);
+        found |= keep;
+        (*env)->DeleteLocalRef(env, view);
+        if (!keep) (*env)->CallVoidMethod(env, ui.container, remove, i - 1);
+        if (!zj_clean(env)) return false;
+    }
+    if (!found) {
+        (*env)->DeleteGlobalRef(env, ui.input);
+        ui.input = NULL;
+    }
+    return found;
+}
+static bool release_widgets(JNIEnv *env, bool keep_input)
+{
+    if (keep_input) {
+        if (!remove_except_input(env)) return false;
+    } else if (!remove_children(env, ui.container)) return false;
+    if (!remove_children(env, ui.footer)) return false;
     for (size_t i = 0; i < ui.button_count; ++i) (*env)->DeleteGlobalRef(env, ui.buttons[i]);
     ui.button_count = 0;
-    if (ui.input) (*env)->DeleteGlobalRef(env, ui.input);
-    ui.input = NULL;
+    if (!keep_input && ui.input) (*env)->DeleteGlobalRef(env, ui.input);
+    if (!keep_input) ui.input = NULL;
+    return true;
 }
 
 void zapp_wallet_ui_clear(JNIEnv *env)
 {
-    release_widgets(env);
+    if (!release_widgets(env, false)) {
+        for (size_t i = 0; i < ui.button_count; ++i) (*env)->DeleteGlobalRef(env, ui.buttons[i]);
+        ui.button_count = 0;
+        if (ui.input) (*env)->DeleteGlobalRef(env, ui.input);
+        ui.input = NULL;
+    }
     memory_cleanse(&ui.screen, sizeof(ui.screen));
     ui.drawn = false;
+    ui.damaged = false;
 }
 
 /* The amount field's text, or false when it cannot be read or does not fit. */
@@ -191,25 +243,40 @@ static bool read_input(JNIEnv *env, char *out, size_t cap)
     return ok;
 }
 
+static bool retain_receive_input(const struct wallet_screen *next)
+{
+    bool has_input = false;
+    for (size_t i = 0; i < next->count; ++i) has_input |= next->items[i].kind == WALLET_ITEM_INPUT;
+    return ui.drawn && ui.input && has_input && ui.screen.page == WALLET_PAGE_RECEIVE && next->page == WALLET_PAGE_RECEIVE;
+}
+
 void zapp_wallet_ui_render(JNIEnv *env)
 {
     static struct wallet_screen next;
-    char typed[AMOUNT_TEXT_CAP];
     if (!ui.container) return;
     wallet_screens_refresh_send();
     unsigned version = wallet_screens_snapshot(&next);
-    if (ui.drawn && version == ui.version) { memory_cleanse(&next, sizeof(next)); return; }
+    if (ui.drawn && !ui.damaged && version == ui.version) { memory_cleanse(&next, sizeof(next)); return; }
+    if (ui.drawn && !ui.damaged && wallet_screen_same(&ui.screen, &next)) {
+        ui.version = version;
+        memory_cleanse(&next, sizeof(next));
+        return;
+    }
+    bool keep_input = retain_receive_input(&next);
+    if (!release_widgets(env, keep_input)) {
+        ui.damaged = true;
+        memory_cleanse(&next, sizeof(next));
+        return;
+    }
     ui.version = version;
-    if (ui.drawn && wallet_screen_same(&ui.screen, &next)) { memory_cleanse(&next, sizeof(next)); return; }
-    /* When the items change, the amount field is drawn again; what the owner typed in it is put back. */
-    bool kept = ui.input && read_input(env, typed, sizeof(typed)) && typed[0] != '\0';
-    release_widgets(env);
+    ui.body_index = 0;
     ui.screen = next;
     memory_cleanse(&next, sizeof(next));
-    for (size_t i = 0; i < ui.screen.count; ++i) (void)draw_item(env, i);
-    if (ui.screen.count) (void)bottom_space(env);
-    if (kept && ui.input) (void)zj_text_at_end(env, ui.input, typed);
-    memory_cleanse(typed, sizeof(typed));
+    bool ok = true;
+    for (size_t i = 0; i < ui.screen.count; ++i)
+        if (!draw_item(env, i)) ok = false;
+    if (ui.screen.count && !bottom_space(env)) ok = false;
+    ui.damaged = !ok;
     ui.drawn = true;
 }
 
