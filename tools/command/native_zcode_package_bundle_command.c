@@ -15,6 +15,7 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "codec/cursor.h"
+#include "config/command_catalog.h"
 #include "json/json.h"
 #include "platform/temp_directory.h"
 #include "sha3/sha3.h"
@@ -508,14 +509,20 @@ static bool zpb_store(struct zpb_receive *s, const struct zpb_keep *k)
     return ok;
 }
 
-/* One zcode.package.fork call, plan or confirm. */
+/* One zcode.package.fork call, plan or confirm, through the registered leaf.
+ * Its input (root, destination, datadir) is built here from the verified
+ * file, never taken from the receive caller. */
 static bool zpb_fork_call(struct json_value *in, struct zcl_command_reply *out)
 {
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), "zcode.package.fork", NULL);
     const struct zcl_command_request request = {
-        .input = in, .invoked_name = "zcode.package.fork",
+        .input = in, .spec = spec, .invoked_name = "zcode.package.fork",
     };
     zcl_command_reply_init(out, "zcl.zcode_package_fork.v1");
-    zcl_native_handle_zcode_package_fork(&request, out);
+    if (!spec || !spec->handler)
+        return false;
+    spec->handler(&request, out);
     return out->status == ZCL_COMMAND_STATUS_PASSED;
 }
 

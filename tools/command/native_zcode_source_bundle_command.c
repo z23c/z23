@@ -129,8 +129,8 @@ static bool zsb_write_child_exclusive(
 }
 
 #if defined(_WIN32)
-bool zcl_native_source_bundle_write_exclusive(const char *path,
-                                              const uint8_t *bytes, size_t len)
+static bool zsb_write_exclusive(const char *path, const uint8_t *bytes,
+                                size_t len)
 {
     char resolved[ZSB_PATH_MAX], parent[ZSB_PATH_MAX];
     if (!path || !bytes || !platform_private_path_resolve(
@@ -155,8 +155,8 @@ static bool zsb_sync_close(int fd, bool ok)
     return ok;
 }
 
-bool zcl_native_source_bundle_write_exclusive(const char *path,
-                                              const uint8_t *bytes, size_t len)
+static bool zsb_write_exclusive(const char *path, const uint8_t *bytes,
+                                size_t len)
 {
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
                   0400);
@@ -166,6 +166,12 @@ bool zcl_native_source_bundle_write_exclusive(const char *path,
     return ok;
 }
 #endif
+
+bool zcl_native_source_bundle_write_exclusive(const char *path,
+                                              const uint8_t *bytes, size_t len)
+{
+    return zsb_write_exclusive(path, bytes, len);
+}
 
 static bool zsb_empty_dir(const char *path)
 {

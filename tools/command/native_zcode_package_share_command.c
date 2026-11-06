@@ -167,7 +167,15 @@ bool zcl_package_copy_lineage_releases(const char *datadir,
 
 /* ── zcode package share ────────────────────────────────────────────── */
 
+/* The offline signer's inputs; only zcode.package.share reads them, so the
+ * owner's sign leaf neither declares nor accepts them. */
+struct zps_offline {
+    const char *publisher_pubkey;
+    const char *signature_hex;
+};
+
 struct zps_share {
+    struct zps_offline offline;
     const struct json_value *input;
     struct zcl_command_reply *reply;
     const char *command;
@@ -227,7 +235,7 @@ static bool zps_prepare_tree(struct zps_share *s, const uint8_t tree[32],
 
 static bool zps_pubkey_input(struct zps_share *s)
 {
-    const char *pubkey = zcl_package_copy_str(s->input, "publisher_pubkey");
+    const char *pubkey = s->offline.publisher_pubkey;
     if (pubkey && zcl_hex_decode(pubkey, s->options.publisher_pubkey,
                                  VCS_PACKAGE_RELEASE_PUBKEY_BYTES))
         return true;
@@ -500,7 +508,7 @@ static bool zps_signature(struct zps_share *s, uint8_t *signature)
     uint8_t pubkey[VCS_PACKAGE_RELEASE_PUBKEY_BYTES];
     struct plugin_dist_published why;
     if (!s->local_key) {
-        const char *hex = zcl_package_copy_str(s->input, "signature_hex");
+        const char *hex = s->offline.signature_hex;
         return hex && zcl_hex_decode(hex, signature,
                                      VCS_PACKAGE_RELEASE_SIGNATURE_BYTES);
     }
@@ -597,11 +605,11 @@ static bool zps_ready(struct zps_share *s)
            zps_next_sequence(s) && zps_prepare_head(s);
 }
 
-/* share (offline signature) and sign (the owner's local key) differ only in
- * where the publisher key and signature come from. */
+/* share (offline signature) and sign (the owner's local key, offline NULL)
+ * differ only in where the publisher key and signature come from. */
 static void zps_run(const struct zcl_command_request *request,
                     struct zcl_command_reply *reply, const char *command,
-                    bool local_key)
+                    const struct zps_offline *offline)
 {
     if (!request || !reply)
         return;
@@ -613,7 +621,9 @@ static void zps_run(const struct zcl_command_request *request,
     s->input = request->input;
     s->reply = reply;
     s->command = command;
-    s->local_key = local_key;
+    s->local_key = offline == NULL;
+    if (offline)
+        s->offline = *offline;
     if (zps_ready(s)) {
         if (zcl_package_copy_confirmed(s->input))
             zps_commit(s);
@@ -630,11 +640,16 @@ static void zps_run(const struct zcl_command_request *request,
 void zcl_native_handle_zcode_package_share(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    zps_run(request, reply, k_zps_command, false);
+    const struct json_value *input = request ? request->input : NULL;
+    const struct zps_offline offline = {
+        .publisher_pubkey = zcl_package_copy_str(input, "publisher_pubkey"),
+        .signature_hex = zcl_package_copy_str(input, "signature_hex"),
+    };
+    zps_run(request, reply, k_zps_command, &offline);
 }
 
 void zcl_native_handle_zcode_package_bundle_sign(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    zps_run(request, reply, k_zps_sign, true);
+    zps_run(request, reply, k_zps_sign, NULL);
 }

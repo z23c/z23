@@ -229,3 +229,5 @@ plugin.fetch_remote exempt: asks the node running on this datadir over its local
 
 dev.test.canary_sentinel exempt: durably resets or publishes fixed replay-canary verdict evidence in a validated owner directory; installs no privileged artifact and changes no running binary or canonical node
 ops.telegram.configure exempt: writes only the caller's owner-private Telegram credentials file from stdin; it installs no artifact, changes no running binary and grants no authority
+zcode.package.bundle.sign exempt: creates the owner's 0600 publisher key once under $HOME/.z23 (never replacing it), signs the exact release id of a saved copy, keeps that release in the copy's own store and writes one new share file; it installs and activates nothing, changes no running binary and grants no authority
+zcode.package.bundle.receive exempt: verifies a share file's signature, manifest, recipe and every chunk, then on the owner's explicit trust of that publisher and root keeps the release in this datadir's package store, checks out an inert copy and records that trust as data; it builds, runs and activates nothing and changes no running binary
