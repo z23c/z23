@@ -150,6 +150,7 @@ job_result_t stage_memory_hold_note(struct stage_memory_hold *h,
     }
 
     char id[BLOCKER_ID_MAX];
+    /* blocker-id: *.local_out_of_memory */
     snprintf(id, sizeof(id), "%s%s", stage, BLOCKER_LOCAL_MEMORY_SUFFIX);
     char reason[BLOCKER_REASON_MAX];
     snprintf(reason, sizeof(reason),

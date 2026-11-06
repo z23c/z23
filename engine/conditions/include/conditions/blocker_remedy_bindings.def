@@ -302,6 +302,11 @@ ZCL_BLOCKER_REMEDY(window.consistency,                          OWNER)
  * single subsystem's own condition). ────────────────────────────────── */
 ZCL_BLOCKER_REMEDY(stage_spin_*,                                OWNER)
 ZCL_BLOCKER_REMEDY(*.disk_low,                                  OWNER)
+/* A validation stage held because a check keeps running out of memory on this
+ * host (engine/jobs/src/stage_db_fault.c). It clears itself on the next other
+ * outcome; after the ten-minute budget it pages once, and only an operator
+ * freeing memory or moving the node cures it. */
+ZCL_BLOCKER_REMEDY(*.local_out_of_memory,                       OWNER)
 ZCL_BLOCKER_REMEDY(*.below_snapshot_seed,                       OWNER)
 /* The DECLARED successor to below_snapshot_seed: the projection adopted the
  * seed floor as its base and folds forward. Standing fact, not a stall — but
