@@ -666,6 +666,22 @@ static int test_block_files_clean_selection(void)
     return failures;
 }
 
+/* The short side of a path-limit scenario only has to be a modest, valid
+ * path. It was a fixed 100 bytes, which is shorter than root + "/<tag>" once
+ * the fixture root (test-tmp under a long checkout path, or a long
+ * ZCL_TEST_TMPROOT) passes ~97 bytes, so fo_long_dir refused it and the
+ * scenario never reached the code under test. FO_SHORT asks for the root
+ * length plus slack instead; the long side still lands on exactly 1023/1024. */
+#define FO_SHORT ((size_t)0)
+
+static size_t fo_short_total(const char *root, size_t total)
+{
+    if (total != FO_SHORT)
+        return total;
+    size_t floor = strlen(root) + 3 + 50; /* "/<tag>" is 3 bytes here */
+    return floor > 100 ? floor : 100;
+}
+
 /* ---- path-length edges: scratch buffers are exactly 1024 and 4096 ---- */
 
 static bool fo_block_scenario(const char *root, const char *tag, size_t src_len,
@@ -674,8 +690,8 @@ static bool fo_block_scenario(const char *root, const char *tag, size_t src_len,
     char src_tag[16], dst_tag[16], src[PATH_MAX], dst[PATH_MAX];
     snprintf(src_tag, sizeof(src_tag), "%ss", tag);
     snprintf(dst_tag, sizeof(dst_tag), "%sd", tag);
-    if (!fo_long_dir(root, src_tag, src_len, src, sizeof(src)) ||
-        !fo_long_dir(root, dst_tag, dst_len, dst, sizeof(dst)) ||
+    if (!fo_long_dir(root, src_tag, fo_short_total(root, src_len), src, sizeof(src)) ||
+        !fo_long_dir(root, dst_tag, fo_short_total(root, dst_len), dst, sizeof(dst)) ||
         !fo_series_file(src, "blk00000.dat", 9))
         return false;
     return block_files_copy(src, dst) == expected;
@@ -689,10 +705,10 @@ static int test_block_files_copy_path_limits(void)
         char root[PATH_MAX] = "";
         bool ok = fo_root(root, "zcl_block_long");
         /* dir + '/' + "blk00000.dat" (12) is 1023 for a 1010-byte dir. */
-        bool src_fits = ok && fo_block_scenario(root, "a", 1010, 100, 1);
-        bool src_over = ok && fo_block_scenario(root, "b", 1011, 100, -1);
-        bool dst_fits = ok && fo_block_scenario(root, "c", 100, 1010, 1);
-        bool dst_over = ok && fo_block_scenario(root, "e", 100, 1011, -1);
+        bool src_fits = ok && fo_block_scenario(root, "a", 1010, FO_SHORT, 1);
+        bool src_over = ok && fo_block_scenario(root, "b", 1011, FO_SHORT, -1);
+        bool dst_fits = ok && fo_block_scenario(root, "c", FO_SHORT, 1010, 1);
+        bool dst_over = ok && fo_block_scenario(root, "e", FO_SHORT, 1011, -1);
         fo_cleanup(root);
         ASSERT(ok);
         ASSERT(src_fits);
@@ -712,8 +728,8 @@ static int fo_dir_scenario(const char *root, const char *tag, size_t src_len,
     char out[256] = "", err[256] = "";
     snprintf(src_tag, sizeof(src_tag), "%ss", tag);
     snprintf(dst_tag, sizeof(dst_tag), "%sd", tag);
-    if (!fo_long_dir(root, src_tag, src_len, src, sizeof(src)) ||
-        !fo_long_dir(root, dst_tag, dst_len, dst, sizeof(dst)) ||
+    if (!fo_long_dir(root, src_tag, fo_short_total(root, src_len), src, sizeof(src)) ||
+        !fo_long_dir(root, dst_tag, fo_short_total(root, dst_len), dst, sizeof(dst)) ||
         !fo_series_file(src, "f", 9))
         return -1;
     return fo_dir_copy_captured(root, src, dst, out, err);
@@ -726,10 +742,10 @@ static int test_dir_copy_path_limits(void)
     TEST("file_ops dir_copy joins entry paths up to 1023 bytes and refuses 1024") {
         char root[PATH_MAX] = "";
         bool ok = fo_root(root, "zcl_dir_long");
-        int src_fits = ok ? fo_dir_scenario(root, "a", 1021, 100) : -1;
-        int src_over = ok ? fo_dir_scenario(root, "b", 1022, 100) : -1;
-        int dst_fits = ok ? fo_dir_scenario(root, "c", 100, 1021) : -1;
-        int dst_over = ok ? fo_dir_scenario(root, "e", 100, 1022) : -1;
+        int src_fits = ok ? fo_dir_scenario(root, "a", 1021, FO_SHORT) : -1;
+        int src_over = ok ? fo_dir_scenario(root, "b", 1022, FO_SHORT) : -1;
+        int dst_fits = ok ? fo_dir_scenario(root, "c", FO_SHORT, 1021) : -1;
+        int dst_over = ok ? fo_dir_scenario(root, "e", FO_SHORT, 1022) : -1;
         fo_cleanup(root);
         ASSERT(ok);
         ASSERT_EQ(src_fits, 1);
