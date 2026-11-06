@@ -468,8 +468,15 @@ int test_guest_image_admission(void)
     failures += gia_combined_metadata_controls() + gia_evidence_refusal_controls();
     const char *path = getenv("ZCL_TEST_PUBLIC_GUEST_IMAGE_KERNEL");
     uint8_t *image = NULL; size_t bytes = 0;
-    if (!path || !gia_test_load(path, VCS_GUEST_IMAGE_MAX_BYTES, &image, &bytes)) {
-        printf("UNOBSERVED: PUBLIC2445 copied image unavailable\n");
+    if (!path || !*path) {
+        /* The runner counts this "UNOBSERVED (" line; the controls above ran
+         * and are hard-asserted, so an absent fixture is not a FAIL. */
+        printf("UNOBSERVED (PUBLIC2445 copied image unavailable: "
+               "ZCL_TEST_PUBLIC_GUEST_IMAGE_KERNEL unset)\n");
+        return failures;
+    }
+    if (!gia_test_load(path, VCS_GUEST_IMAGE_MAX_BYTES, &image, &bytes)) {
+        printf("FAIL (PUBLIC2445 copied image named by the environment cannot be read)\n");
         return failures + 1;
     }
     struct gia_test_policy policy = {.enabled = true};

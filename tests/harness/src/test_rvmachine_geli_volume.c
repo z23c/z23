@@ -202,8 +202,8 @@ int test_rvmachine_geli_volume(void)
     int failures = 0;
     const char *packet = getenv("ZCL_TEST_GELI_FIXTURE_PACKET");
     if (packet == NULL || *packet == '\0') {
-        printf("UNOBSERVED: ZCL_TEST_GELI_FIXTURE_PACKET exact public packet required\n");
-        return 1;
+        printf("UNOBSERVED (ZCL_TEST_GELI_FIXTURE_PACKET exact public packet required)\n");
+        return 0;
     }
     /* Clock availability and overflow are execution prerequisites, not a
      * storage-performance assertion. Capture enforces the shared budget;
