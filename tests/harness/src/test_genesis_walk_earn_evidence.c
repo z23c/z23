@@ -894,13 +894,20 @@ static void gw_page_observer(enum event_type type, uint32_t peer_id,
 static const char *const GW_UNPROVEN = "bg_validation.full_history_unproven";
 
 /* One publish pass: the result, and whether it paged. */
-static struct zcl_result gw_cp_pass(struct gw_fixture *f, int *pages)
+static struct zcl_result gw_cp_pass_cov(struct gw_fixture *f, int *pages,
+                                        bool coverage_complete)
 {
     int before = *pages;
-    struct zcl_result r = bg_validation_authority_publish(&f->svc, true, true);
+    struct zcl_result r =
+        bg_validation_authority_publish(&f->svc, true, coverage_complete);
     printf("  checkpoint pass: ok=%d code=%d pages=+%d msg=%s\n", r.ok,
            r.code, *pages - before, r.message);
     return r;
+}
+
+static struct zcl_result gw_cp_pass(struct gw_fixture *f, int *pages)
+{
+    return gw_cp_pass_cov(f, pages, true);
 }
 
 static bool gw_cec_untouched(struct gw_fixture *f,
@@ -980,25 +987,49 @@ static const struct gw_cp_shape GW_ROM_INSTALL = {
     .self_folded = true, .stamp_kind = CONSENSUS_INSTALL_STAMP_CHECKPOINT_ROM,
 };
 
-/* Before the walk reaches the tip, and with no predicate wired, the
- * publisher refuses and pages exactly as today. */
+/* While the predicate holds, a walk short of the tip or paused on a coverage
+ * gap is a check still running: typed, no page, no checked range. A script
+ * skip is a real gap and still pages, as does an unwired predicate. */
+static bool gw_cp_still_checking(struct gw_fixture *f, struct zcl_result r,
+                                 int pages)
+{
+    struct bg_validation_checkpoint_check cc;
+    return !r.ok && r.code == BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKING &&
+           pages == 0 && !blocker_exists(GW_UNPROVEN) &&
+           !bg_validation_checkpoint_check_get(&f->svc, &cc);
+}
+
+static bool gw_cp_paged_refusal(struct zcl_result r, int pages, int want)
+{
+    return !r.ok && r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKING &&
+           r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED &&
+           pages == want && blocker_exists(GW_UNPROVEN);
+}
+
 static int gw_cp_phase_refusals(struct gw_fixture *f, int *pages)
 {
     int failures = 0;
     gw_walk_verified(f, GW_TIP, 0);
     atomic_store(&f->svc.progress.verified_height, GW_TIP - 1);
     struct zcl_result r = gw_cp_pass(f, pages);
-    failures += gw_check("short walk still refuses and pages",
-                         !r.ok && *pages == 1 && blocker_exists(GW_UNPROVEN));
+    failures += gw_check("short walk: still checking, typed, no page",
+                         gw_cp_still_checking(f, r, *pages));
     failures += gw_check("short walk: no checked result yet",
                          gw_trust_reads(f, "starting", 0));
+    gw_walk_verified(f, GW_TIP, 0);
+    r = gw_cp_pass_cov(f, pages, false);
+    failures += gw_check("paused walk: still checking, typed, no page",
+                         gw_cp_still_checking(f, r, *pages));
+    gw_walk_verified(f, GW_TIP, 1);
+    r = gw_cp_pass(f, pages);
+    failures += gw_check("script skips: refuses and pages",
+                         gw_cp_paged_refusal(r, *pages, 1));
     gw_walk_verified(f, GW_TIP, 0);
     bg_validation_authority_set_checkpoint_probe(NULL);
     blocker_reset_for_testing();
     r = gw_cp_pass(f, pages);
     failures += gw_check("unwired predicate refuses and pages",
-             !r.ok && r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED &&
-             *pages == 2 && blocker_exists(GW_UNPROVEN));
+                         gw_cp_paged_refusal(r, *pages, 2));
     bg_validation_authority_set_checkpoint_probe(
         sovereignty_checkpoint_install_locked);
     return failures;
@@ -1043,9 +1074,11 @@ static int gw_cp_phase_predicate_lost(
     progress_store_tx_unlock();
     struct zcl_result r = gw_cp_pass(f, pages);
     failures += gw_check("predicate false later: refusal and page return",
-             removed && !r.ok &&
-             r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED &&
-             *pages == 3 && blocker_exists(GW_UNPROVEN));
+                         removed && gw_cp_paged_refusal(r, *pages, 3));
+    r = gw_cp_pass_cov(f, pages, false);
+    failures += gw_check("predicate false later: a paused walk refuses",
+             !r.ok && r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKING &&
+             blocker_exists(GW_UNPROVEN));
     struct bg_validation_checkpoint_check cc;
     failures += gw_check("predicate false later: checked result withdrawn",
              !bg_validation_checkpoint_check_get(&f->svc, &cc));

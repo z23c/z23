@@ -74,6 +74,12 @@ bool bg_validation_verified_tip(const struct bg_validation_service *svc,
  * refusal and page return. */
 enum { BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED = 2 };
 
+/* The same node while its walk is short of the tip or paused on a coverage
+ * gap (no script skips): the check is still running. Typed like CHECKED
+ * (ok false, CEC untouched, no page), but it claims no checked range and
+ * withdraws any earlier CHECKED outcome. */
+enum { BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKING = 3 };
+
 /* The typed outcome that code reports: blocks first_height..tip_height (the
  * checkpoint at checkpoint_height is the compiled commitment) were checked,
  * ending at the active tip whose hash is tip_hash. */
