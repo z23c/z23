@@ -28,7 +28,9 @@
 #include "conditions/state_auditor_mismatch.h"
 #include "coins/utxo_commitment.h"
 #include "crypto/sha3.h"
+#include "encoding/utilstrencodings.h"
 #include "framework/condition.h"
+#include "json/json.h"
 #include "jobs/reducer_frontier.h"
 #include "models/database.h"
 #include "models/op_return_index.h"
@@ -44,7 +46,9 @@
 #include "storage/progress_store.h"
 #include "util/blocker.h"
 
+#include <pthread.h>
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -614,6 +618,681 @@ static int test_state_auditor_condition(void)
     return failures;
 }
 
+/* ── (4) exact-counter and boundary tests (mutation-gap closers) ────── */
+
+#define SA_OPRET sa_leg_opret()
+static enum state_auditor_leg sa_leg_opret(void)
+{
+    return STATE_AUDITOR_LEG_OP_RETURN_INDEX;
+}
+
+static void sa_ck(int *failures, const char *name, bool ok)
+{
+    printf("  state_auditor: %s... %s\n", name, ok ? "OK" : "FAIL");
+    if (!ok) (*failures)++;
+}
+
+static int64_t sa_dump_int(const char *key)
+{
+    struct json_value v;
+    json_init(&v);
+    int64_t r = INT64_MIN;
+    if (state_auditor_dump_state_json(&v, NULL))
+        r = json_get_int(json_get(&v, key));
+    json_free(&v);
+    return r;
+}
+
+static struct state_auditor_mismatch_info sa_tick_info(enum state_auditor_leg leg)
+{
+    struct state_auditor_mismatch_info info;
+    state_auditor_tick_once();
+    state_auditor_get_mismatch(leg, &info);
+    return info;
+}
+
+/* reset_for_test also drops the forced seed; every case re-arms seed 0. */
+static void sa_reset_seed0(void)
+{
+    state_auditor_reset_for_test();
+    state_auditor_set_test_seed(0);
+}
+
+/* True when `label` is present in `detail` and is followed by at least `n`
+ * lowercase hex digits. */
+static bool sa_hex_field(const char *detail, const char *label, int n)
+{
+    const char *p = strstr(detail, label);
+    if (!p) return false;
+    p += strlen(label);
+    for (int i = 0; i < n; i++) {
+        bool hex = (p[i] >= '0' && p[i] <= '9') || (p[i] >= 'a' && p[i] <= 'f');
+        if (!hex) return false;
+    }
+    return true;
+}
+
+static bool sa_opret_attach(struct sa_opret_fixture *f)
+{
+    g_op_return_backfill_test_ndb = &f->ndb;
+    g_op_return_backfill_test_ms = &f->ms;
+    g_op_return_backfill_test_datadir = f->datadir;
+    op_return_backfill_reset_for_test();
+    reducer_frontier_provable_tip_set(SA_OPRET_HEIGHTS - 1);
+    int folded = op_return_backfill_run_once();
+    g_state_auditor_test_ndb = &f->ndb;
+    g_state_auditor_test_ms = &f->ms;
+    g_state_auditor_test_datadir = f->datadir;
+    g_state_auditor_test_pdb = NULL;
+    sa_reset_seed0();
+    return folded == SA_OPRET_HEIGHTS;
+}
+
+static void sa_opret_detach(struct sa_opret_fixture *f)
+{
+    g_op_return_backfill_test_ndb = NULL;
+    g_op_return_backfill_test_ms = NULL;
+    g_op_return_backfill_test_datadir = NULL;
+    reducer_frontier_provable_tip_reset();
+    g_state_auditor_test_ndb = NULL;
+    g_state_auditor_test_ms = NULL;
+    g_state_auditor_test_datadir = NULL;
+    state_auditor_reset_for_test();
+    sa_opret_fixture_free(f);
+}
+
+static bool sa_opret_corrupt(struct node_db *ndb, int height)
+{
+    uint8_t bad[32];
+    memset(bad, 0xEE, sizeof(bad));
+    sqlite3_stmt *s = NULL;
+    const char *sql = "UPDATE op_return_index SET payload_sha3=? WHERE height=?";
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_blob(s, 1, bad, 32, SQLITE_STATIC);
+    sqlite3_bind_int(s, 2, height);
+    int rc = sqlite3_step(s); // raw-sql-ok:test-fixture-corruption
+    sqlite3_finalize(s);
+    return rc == SQLITE_DONE && sqlite3_changes(ndb->db) == 1;
+}
+
+static bool sa_opret_restore(struct node_db *ndb)
+{
+    op_return_index_truncate(ndb);
+    return op_return_backfill_run_once() == SA_OPRET_HEIGHTS;
+}
+
+/* Corrupt -> candidate -> latch -> hold -> restore -> clear, with every
+ * counter checked at each step. */
+static void sa_opret_lifecycle(struct sa_opret_fixture *f, int *failures)
+{
+    struct state_auditor_mismatch_info in;
+    state_auditor_tick_once();
+    state_auditor_tick_once();
+    state_auditor_tick_once();
+    sa_ck(failures, "opret clean ticks: exact counters",
+          sa_dump_int("opret_ticks_total") == 3 &&
+          sa_dump_int("opret_skipped_total") == 0 &&
+          sa_dump_int("opret_mismatches_total") == 0 &&
+          sa_dump_int("opret_clears_total") == 0);
+
+    sa_ck(failures, "opret corrupt h=5", sa_opret_corrupt(&f->ndb, 5));
+    in = sa_tick_info(SA_OPRET);
+    sa_ck(failures, "opret first mismatch is a candidate, window pinned",
+          !in.latched && in.h_start == 0 && in.h_end == SA_OPRET_HEIGHTS - 1 &&
+          sa_dump_int("opret_mismatches_total") == 0 &&
+          sa_dump_int("opret_skipped_total") == 0);
+    sa_ck(failures, "opret detail names height and row counts",
+          strstr(in.detail, "height=5 stored_rows=1 extracted_rows=1 ") != NULL);
+    sa_ck(failures, "opret detail carries both digests",
+          sa_hex_field(in.detail, "digest_stored=", 64) &&
+          sa_hex_field(in.detail, "digest_extracted=", 32));
+
+    in = sa_tick_info(SA_OPRET);
+    sa_ck(failures, "opret second mismatch latches once",
+          in.latched && sa_dump_int("opret_mismatches_total") == 1);
+    in = sa_tick_info(SA_OPRET);
+    sa_ck(failures, "opret held latch does not recount",
+          in.latched && sa_dump_int("opret_mismatches_total") == 1);
+
+    sa_ck(failures, "opret restore", sa_opret_restore(&f->ndb));
+    in = sa_tick_info(SA_OPRET);
+    sa_ck(failures, "opret clean tick clears latch and counts one clear",
+          !in.latched && sa_dump_int("opret_clears_total") == 1 &&
+          sa_dump_int("opret_mismatches_total") == 1);
+    state_auditor_tick_once();
+    sa_ck(failures, "opret second clean tick adds no clear",
+          sa_dump_int("opret_clears_total") == 1);
+
+    sa_ck(failures, "opret re-corrupt h=5", sa_opret_corrupt(&f->ndb, 5));
+    in = sa_tick_info(SA_OPRET);
+    sa_ck(failures, "opret clear reset the streak: one mismatch is no latch",
+          !in.latched && sa_dump_int("opret_mismatches_total") == 1);
+    sa_ck(failures, "opret restore again", sa_opret_restore(&f->ndb));
+    state_auditor_tick_once();
+}
+
+/* Pinned-window handling, driven through force_latch so the pinned range is
+ * chosen by the test. The catalog is clean on entry. */
+static void sa_opret_pinned(struct sa_opret_fixture *f, int *failures)
+{
+    struct state_auditor_mismatch_info in;
+
+    /* inverted pin: dropped without a verdict, then a fresh window clears */
+    state_auditor_force_latch_for_test(SA_OPRET, 20, 10, "forced");
+    int64_t sk = sa_dump_int("opret_skipped_total");
+    int64_t cl = sa_dump_int("opret_clears_total");
+    in = sa_tick_info(SA_OPRET);
+    sa_ck(failures, "opret inverted pin is skipped, latch untouched",
+          in.latched && sa_dump_int("opret_skipped_total") == sk + 1 &&
+          sa_dump_int("opret_clears_total") == cl);
+    in = sa_tick_info(SA_OPRET);
+    sa_ck(failures, "opret dropped pin: next tick re-checks a fresh window",
+          !in.latched && sa_dump_int("opret_clears_total") == cl + 1);
+
+    /* a one-block pin on a corrupt height is still checked */
+    sa_ck(failures, "opret corrupt h=5 for one-block pin",
+          sa_opret_corrupt(&f->ndb, 5));
+    state_auditor_force_latch_for_test(SA_OPRET, 5, 5, "forced");
+    sk = sa_dump_int("opret_skipped_total");
+    in = sa_tick_info(SA_OPRET);
+    sa_ck(failures, "opret one-block pin [5,5] is checked, mismatch held",
+          in.latched && in.h_start == 5 && in.h_end == 5 &&
+          strstr(in.detail, "height=5") != NULL &&
+          sa_dump_int("opret_skipped_total") == sk);
+    sa_ck(failures, "opret restore after one-block pin", sa_opret_restore(&f->ndb));
+    in = sa_tick_info(SA_OPRET);
+    sa_ck(failures, "opret clean one-block pin clears", !in.latched);
+
+    /* the clear released the pin: a corrupt height outside [5,5] is seen */
+    sa_ck(failures, "opret corrupt h=0 outside the old pin",
+          sa_opret_corrupt(&f->ndb, 0));
+    in = sa_tick_info(SA_OPRET);
+    sa_ck(failures, "opret clear dropped investigating: fresh window sees h=0",
+          strstr(in.detail, "height=0") != NULL && in.h_start == 0 &&
+          in.h_end == SA_OPRET_HEIGHTS - 1);
+    sa_ck(failures, "opret restore after h=0", sa_opret_restore(&f->ndb));
+    state_auditor_tick_once();
+}
+
+/* An unreadable body is a skip, never a clear and never a mismatch. */
+static void sa_opret_unreadable(struct sa_opret_fixture *f, int *failures)
+{
+    struct state_auditor_mismatch_info in;
+    unsigned int saved = f->blocks[5].nStatus;
+    int saved_file = f->blocks[5].nFile;
+
+    f->blocks[5].nStatus = saved & ~(unsigned int)BLOCK_HAVE_DATA;
+    state_auditor_force_latch_for_test(SA_OPRET, 5, 5, "forced");
+    int64_t sk = sa_dump_int("opret_skipped_total");
+    in = sa_tick_info(SA_OPRET);
+    sa_ck(failures, "opret block without data: skipped, latch kept",
+          in.latched && sa_dump_int("opret_skipped_total") == sk + 1);
+    f->blocks[5].nStatus = saved;
+
+    f->blocks[5].nFile = 99;
+    state_auditor_force_latch_for_test(SA_OPRET, 5, 5, "forced");
+    sk = sa_dump_int("opret_skipped_total");
+    in = sa_tick_info(SA_OPRET);
+    sa_ck(failures, "opret unreadable body: skipped, latch kept",
+          in.latched && sa_dump_int("opret_skipped_total") == sk + 1);
+    f->blocks[5].nFile = saved_file;
+    state_auditor_force_clear_for_test(SA_OPRET);
+}
+
+/* Inputs that make the opret leg skip before or inside window choice. */
+static void sa_opret_skip_inputs(struct sa_opret_fixture *f, int *failures)
+{
+    struct node_db closed;
+    memset(&closed, 0, sizeof(closed));
+    g_state_auditor_test_ndb = &closed;
+    sa_reset_seed0();
+    sa_auditor_tick_n_times(3);
+    sa_ck(failures, "opret closed node_db: 3 skips, no tick counted",
+          sa_dump_int("opret_ticks_total") == 0 &&
+          sa_dump_int("opret_skipped_total") == 3);
+    g_state_auditor_test_ndb = &f->ndb;
+
+    g_state_auditor_test_datadir = "/";
+    sa_reset_seed0();
+    state_auditor_tick_once();
+    sa_ck(failures, "opret one-char datadir is accepted (tick counted), body unreadable",
+          sa_dump_int("opret_ticks_total") == 1 &&
+          sa_dump_int("opret_skipped_total") == 1);
+    g_state_auditor_test_datadir = f->datadir;
+
+    struct node_db fresh;
+    memset(&fresh, 0, sizeof(fresh));
+    bool opened = node_db_open(&fresh, ":memory:") && fresh.open;
+    sa_ck(failures, "opret open empty node_db", opened);
+    if (opened) {
+        g_state_auditor_test_ndb = &fresh;
+        sa_reset_seed0();
+        state_auditor_tick_once();
+        sa_ck(failures, "opret empty catalog: tick counted, then skipped",
+              sa_dump_int("opret_ticks_total") == 1 &&
+              sa_dump_int("opret_skipped_total") == 1);
+        g_state_auditor_test_ndb = &f->ndb;
+    }
+    node_db_close(&fresh);
+}
+
+/* History one block short of a window is skipped, whatever the base. */
+static void sa_opret_short_history(struct sa_opret_fixture *f, int *failures)
+{
+    struct op_return_index_cursor saved, cur;
+    sa_ck(failures, "opret read cursor", op_return_index_get_cursor(&f->ndb, &saved));
+    cur = saved;
+    cur.height = saved.height - 1;
+    sa_ck(failures, "opret cursor one short", op_return_index_set_cursor(&f->ndb, &cur));
+    sa_reset_seed0();
+    state_auditor_tick_once();
+    sa_ck(failures, "opret 31 folded blocks: skipped, no window checked",
+          sa_dump_int("opret_ticks_total") == 1 &&
+          sa_dump_int("opret_skipped_total") == 1);
+
+    cur = saved;
+    cur.base_height = 1;
+    sa_ck(failures, "opret cursor base 1", op_return_index_set_cursor(&f->ndb, &cur));
+    sa_reset_seed0();
+    state_auditor_tick_once();
+    sa_ck(failures, "opret base 1 leaves 31 blocks: skipped",
+          sa_dump_int("opret_skipped_total") == 1);
+    sa_ck(failures, "opret cursor restored", op_return_index_set_cursor(&f->ndb, &saved));
+    sa_reset_seed0();
+    state_auditor_tick_once();
+    sa_ck(failures, "opret full window at base 0 is audited, not skipped",
+          sa_dump_int("opret_ticks_total") == 1 &&
+          sa_dump_int("opret_skipped_total") == 0);
+}
+
+static int sa_opret_counter_tests(void)
+{
+    int failures = 0;
+    struct sa_opret_fixture f;
+    if (!sa_opret_fixture_init(&f)) {
+        printf("  state_auditor: counter fixture... FAIL\n");
+        sa_opret_fixture_free(&f);
+        return 1;
+    }
+    bool attached = sa_opret_attach(&f);
+    sa_ck(&failures, "opret counter fixture backfilled", attached);
+    if (attached) {
+        sa_opret_lifecycle(&f, &failures);
+        sa_opret_pinned(&f, &failures);
+        sa_opret_unreadable(&f, &failures);
+        sa_opret_skip_inputs(&f, &failures);
+        sa_opret_short_history(&f, &failures);
+    }
+    sa_opret_detach(&f);
+    return failures;
+}
+
+/* ── coins leg: exact-counter fixture ────────────────────────────────── */
+
+struct sa_cfx {
+    sqlite3 *pdb;
+    struct node_db ndb;
+    struct utxo_mirror_sync_service guard;
+    uint8_t lo[32];
+};
+
+static bool sa_cfx_init(struct sa_cfx *c)
+{
+    memset(c, 0, sizeof(*c));
+    if (sqlite3_open(":memory:", &c->pdb) != SQLITE_OK) return false;
+    if (!coins_kv_ensure_schema(c->pdb) || !progress_meta_table_ensure(c->pdb))
+        return false;
+    if (!node_db_open(&c->ndb, ":memory:") || !c->ndb.open) return false;
+    sa_derive_coins_txid_lo(0, c->lo);
+    return true;
+}
+
+static void sa_cfx_attach(struct sa_cfx *c)
+{
+    g_state_auditor_test_pdb = c->pdb;
+    g_state_auditor_test_ndb = &c->ndb;
+    g_state_auditor_test_ms = NULL;
+    g_state_auditor_test_datadir = NULL;
+    g_utxo_mirror_sync = &c->guard;
+    sa_reset_seed0();
+}
+
+static void sa_cfx_free(struct sa_cfx *c)
+{
+    g_state_auditor_test_pdb = NULL;
+    g_state_auditor_test_ndb = NULL;
+    g_utxo_mirror_sync = NULL;
+    state_auditor_reset_for_test();
+    node_db_close(&c->ndb);
+    sqlite3_close(c->pdb);
+}
+
+static bool sa_cfx_put(struct sa_cfx *c, int delta, uint32_t vout, int64_t value,
+                       int32_t height, bool in_auth, bool in_proj)
+{
+    uint8_t txid[32];
+    sa_txid_add(c->lo, delta, txid);
+    if (in_auth &&
+        !coins_kv_add(c->pdb, txid, vout, value, height, false, NULL, 0))
+        return false;
+    return !in_proj || sa_insert_utxo_row(&c->ndb, txid, vout, value, height);
+}
+
+static bool sa_cfx_markers(struct sa_cfx *c, int32_t h)
+{
+    return sa_set_applied_height(c->pdb, h) &&
+           node_db_state_set_int(&c->ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, h);
+}
+
+static bool sa_cfx_update_b(struct sa_cfx *c, const char *sql)
+{
+    uint8_t txid_b[32];
+    sa_txid_add(c->lo, 1, txid_b);
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(c->ndb.db, sql, -1, &s, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_blob(s, 1, txid_b, 32, SQLITE_STATIC);
+    int rc = sqlite3_step(s); // raw-sql-ok:test-fixture-corruption
+    sqlite3_finalize(s);
+    return rc == SQLITE_DONE && sqlite3_changes(c->ndb.db) == 1;
+}
+
+/* First seed >= 1 whose keyspace window starts above every fixture row, so a
+ * window drawn from it holds none of them. */
+static int64_t sa_far_seed(const uint8_t rows_max[32])
+{
+    uint8_t lo[32];
+    for (uint64_t s = 1; s < 4096; s++) {
+        sa_derive_coins_txid_lo(s, lo);
+        if (memcmp(lo, rows_max, 32) > 0) return (int64_t)s;
+    }
+    return -1;
+}
+
+static bool sa_detail_has_window(const char *detail, const uint8_t lo[32],
+                                 const char *rows)
+{
+    char hex[65] = {0};
+    char want[96];
+    HexStr(lo, 32, false, hex, sizeof(hex));
+    snprintf(want, sizeof(want), "txid_lo=%s", hex);
+    return strstr(detail, want) != NULL && strstr(detail, rows) != NULL;
+}
+
+/* Install A(h100) B(h90) C(h110) in both stores, markers at 100. */
+static bool sa_cfx_standard_rows(struct sa_cfx *c)
+{
+    return sa_cfx_put(c, 0, 0, 5000, 100, true, true) &&
+           sa_cfx_put(c, 1, 0, 6000, 90, true, true) &&
+           sa_cfx_put(c, 2, 1, 7000, 110, true, true) &&
+           sa_cfx_markers(c, 100);
+}
+
+static void sa_coins_lifecycle_first(struct sa_cfx *c, int *failures)
+{
+    sa_ck(failures, "coins corrupt B (value and height) in the projection",
+          sa_cfx_update_b(c, "UPDATE utxos SET value=value+1, height=120 "
+                             "WHERE txid=?"));
+    struct state_auditor_mismatch_info in = sa_tick_info(STATE_AUDITOR_LEG_COINS_COMMITMENT);
+    sa_ck(failures, "coins first mismatch is a candidate with exact counters",
+          !in.latched && sa_dump_int("coins_ticks_total") == 1 &&
+          sa_dump_int("coins_skipped_total") == 0 &&
+          sa_dump_int("coins_mismatches_total") == 0);
+    sa_ck(failures, "coins detail: window, row counts, merged heights",
+          sa_detail_has_window(in.detail, c->lo, "rows(auth=3 proj=3) heights=[90,120]"));
+    sa_ck(failures, "coins last height span stored on the first mismatch",
+          in.h_start == 90 && in.h_end == 120 &&
+          sa_dump_int("coins_h_min") == 90 && sa_dump_int("coins_h_max") == 120);
+}
+
+static void sa_coins_lifecycle_pinned(struct sa_cfx *c, int64_t far, int *failures)
+{
+    state_auditor_set_test_seed(far);
+    struct state_auditor_mismatch_info in = sa_tick_info(STATE_AUDITOR_LEG_COINS_COMMITMENT);
+    sa_ck(failures, "coins second tick re-checks the PINNED window and latches",
+          in.latched && sa_dump_int("coins_mismatches_total") == 1);
+    sa_ck(failures, "coins pinned window kept in the detail",
+          sa_detail_has_window(in.detail, c->lo, "rows(auth=3 proj=3)"));
+    in = sa_tick_info(STATE_AUDITOR_LEG_COINS_COMMITMENT);
+    sa_ck(failures, "coins held latch does not recount",
+          in.latched && sa_dump_int("coins_mismatches_total") == 1);
+    sa_ck(failures, "coins restore B",
+          sa_cfx_update_b(c, "UPDATE utxos SET value=value-1, height=90 "
+                             "WHERE txid=?"));
+    in = sa_tick_info(STATE_AUDITOR_LEG_COINS_COMMITMENT);
+    sa_ck(failures, "coins clean tick clears: one clear, no extra skip",
+          !in.latched && sa_dump_int("coins_clears_total") == 1 &&
+          sa_dump_int("coins_skipped_total") == 0);
+}
+
+static void sa_coins_lifecycle_after_clear(struct sa_cfx *c, int *failures)
+{
+    struct state_auditor_mismatch_info in;
+    sa_ck(failures, "coins re-corrupt B",
+          sa_cfx_update_b(c, "UPDATE utxos SET value=value+1, height=120 "
+                             "WHERE txid=?"));
+    /* far seed still set: a released pin means a fresh, empty window */
+    state_auditor_tick_once();
+    in = sa_tick_info(STATE_AUDITOR_LEG_COINS_COMMITMENT);
+    sa_ck(failures, "coins clear released the pin: far window sees nothing",
+          !in.latched && sa_dump_int("coins_mismatches_total") == 1 &&
+          sa_dump_int("coins_clears_total") == 1);
+    state_auditor_set_test_seed(0);
+    in = sa_tick_info(STATE_AUDITOR_LEG_COINS_COMMITMENT);
+    sa_ck(failures, "coins clear reset the streak: one mismatch is no latch",
+          !in.latched && sa_dump_int("coins_mismatches_total") == 1);
+    sa_ck(failures, "coins restore B again",
+          sa_cfx_update_b(c, "UPDATE utxos SET value=value-1, height=90 "
+                             "WHERE txid=?"));
+    state_auditor_tick_once();
+}
+
+static int sa_coins_lifecycle_tests(void)
+{
+    int failures = 0;
+    struct sa_cfx c;
+    bool ok = sa_cfx_init(&c) && sa_cfx_standard_rows(&c);
+    sa_ck(&failures, "coins lifecycle fixture", ok);
+    if (ok) {
+        sa_cfx_attach(&c);
+        uint8_t row_c[32];
+        sa_txid_add(c.lo, 2, row_c);
+        int64_t far = sa_far_seed(row_c);
+        sa_ck(&failures, "coins found a seed whose window misses the rows", far > 0);
+        sa_coins_lifecycle_first(&c, &failures);
+        if (far > 0) {
+            sa_coins_lifecycle_pinned(&c, far, &failures);
+            sa_coins_lifecycle_after_clear(&c, &failures);
+        }
+    }
+    sa_cfx_free(&c);
+    return failures;
+}
+
+/* Merged height span for each combination of populated/empty sides. Auth
+ * rows use txid lo+i, projection rows lo+10+i, so every case mismatches. */
+struct sa_merge_case {
+    int n_auth;
+    int32_t auth_h[3];
+    int n_proj;
+    int32_t proj_h[3];
+    int32_t want_min, want_max;
+    const char *rows;
+};
+
+static bool sa_merge_fill(struct sa_cfx *c, const struct sa_merge_case *m)
+{
+    for (int i = 0; i < m->n_auth; i++)
+        if (!sa_cfx_put(c, i, 0, 1000 + i, m->auth_h[i], true, false))
+            return false;
+    for (int i = 0; i < m->n_proj; i++)
+        if (!sa_cfx_put(c, 10 + i, 0, 2000 + i, m->proj_h[i], false, true))
+            return false;
+    return sa_cfx_markers(c, 100);
+}
+
+static void sa_merge_run(const struct sa_merge_case *m, int *failures)
+{
+    struct sa_cfx c;
+    bool ok = sa_cfx_init(&c) && sa_merge_fill(&c, m);
+    sa_ck(failures, "coins merge fixture", ok);
+    if (ok) {
+        sa_cfx_attach(&c);
+        struct state_auditor_mismatch_info in = sa_tick_info(STATE_AUDITOR_LEG_COINS_COMMITMENT);
+        char want[64];
+        snprintf(want, sizeof(want), "heights=[%d,%d]", (int)m->want_min,
+                 (int)m->want_max);
+        sa_ck(failures, m->rows,
+              sa_detail_has_window(in.detail, c.lo, m->rows) &&
+              strstr(in.detail, want) != NULL && !in.latched &&
+              in.h_start == m->want_min && in.h_end == m->want_max);
+    }
+    sa_cfx_free(&c);
+}
+
+static int sa_coins_merge_tests(void)
+{
+    static const struct sa_merge_case k_cases[] = {
+        { 1, {50}, 1, {40}, 40, 50, "rows(auth=1 proj=1)" },
+        { 0, {0}, 2, {7, 9}, 7, 9, "rows(auth=0 proj=2)" },
+        { 2, {5, 8}, 0, {0}, 5, 8, "rows(auth=2 proj=0)" },
+        { 3, {100, 90, 110}, 3, {100, 120, 110}, 90, 120, "rows(auth=3 proj=3)" },
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(k_cases) / sizeof(k_cases[0]); i++)
+        sa_merge_run(&k_cases[i], &failures);
+    return failures;
+}
+
+/* ── coins leg: states that must be skipped, never cleared ───────────── */
+
+static void sa_coins_expect_skip(const char *label, int *failures)
+{
+    state_auditor_force_latch_for_test(STATE_AUDITOR_LEG_COINS_COMMITMENT, 1, 2,
+                                       "forced");
+    int64_t sk = sa_dump_int("coins_skipped_total");
+    int64_t cl = sa_dump_int("coins_clears_total");
+    struct state_auditor_mismatch_info in = sa_tick_info(STATE_AUDITOR_LEG_COINS_COMMITMENT);
+    sa_ck(failures, label,
+          in.latched && sa_dump_int("coins_skipped_total") == sk + 1 &&
+          sa_dump_int("coins_clears_total") == cl);
+    state_auditor_force_clear_for_test(STATE_AUDITOR_LEG_COINS_COMMITMENT);
+}
+
+struct sa_lock_holder {
+    pthread_mutex_t m;
+    pthread_cond_t cv;
+    bool held;
+    bool release;
+};
+
+static void *sa_lock_holder_main(void *arg)
+{
+    struct sa_lock_holder *h = arg;
+    progress_store_tx_lock();
+    pthread_mutex_lock(&h->m);
+    h->held = true;
+    pthread_cond_broadcast(&h->cv);
+    while (!h->release) pthread_cond_wait(&h->cv, &h->m);
+    pthread_mutex_unlock(&h->m);
+    progress_store_tx_unlock();
+    return NULL;
+}
+
+/* The reducer holds the progress-store transaction lock: skip. */
+static void sa_coins_busy_lock(int *failures)
+{
+    struct sa_lock_holder h = { PTHREAD_MUTEX_INITIALIZER,
+                                PTHREAD_COND_INITIALIZER, false, false };
+    pthread_t t;
+    if (pthread_create(&t, NULL, sa_lock_holder_main, &h) != 0) {
+        sa_ck(failures, "coins lock holder thread", false);
+        return;
+    }
+    pthread_mutex_lock(&h.m);
+    while (!h.held) pthread_cond_wait(&h.cv, &h.m);
+    pthread_mutex_unlock(&h.m);
+    sa_coins_expect_skip("coins busy progress-store lock: skipped", failures);
+    pthread_mutex_lock(&h.m);
+    h.release = true;
+    pthread_cond_broadcast(&h.cv);
+    pthread_mutex_unlock(&h.m);
+    pthread_join(t, NULL);
+}
+
+/* Applied height absent while the cursor reads -1: -1 == -1 must not make the
+ * pair comparable. */
+static void sa_coins_missing_marker(struct sa_cfx *c, int *failures)
+{
+    sqlite3 *empty = NULL;
+    bool ok = sqlite3_open(":memory:", &empty) == SQLITE_OK &&
+              coins_kv_ensure_schema(empty) && progress_meta_table_ensure(empty) &&
+              node_db_state_set_int(&c->ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, -1);
+    sa_ck(failures, "coins missing-marker fixture", ok);
+    if (ok) {
+        g_state_auditor_test_pdb = empty;
+        sa_coins_expect_skip("coins applied height absent, cursor -1: skipped",
+                             failures);
+        g_state_auditor_test_pdb = c->pdb;
+    }
+    sqlite3_close(empty);
+    node_db_state_set_int(&c->ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, 100);
+}
+
+static int sa_coins_skip_tests(void)
+{
+    int failures = 0;
+    struct sa_cfx c;
+    bool ok = sa_cfx_init(&c) && sa_cfx_standard_rows(&c);
+    sa_ck(&failures, "coins skip fixture", ok);
+    if (ok) {
+        sa_cfx_attach(&c);
+        sa_ck(&failures, "coins skip fixture sets cursor off by one",
+              node_db_state_set_int(&c.ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, 101));
+        sa_coins_expect_skip("coins projection cursor ahead of authority: skipped",
+                             &failures);
+        node_db_state_set_int(&c.ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, 100);
+
+        atomic_store(&c.guard.updates_active, 1u);
+        sa_coins_expect_skip("coins active mirror rebuild: skipped", &failures);
+        atomic_store(&c.guard.updates_active, 0u);
+
+        struct node_db closed;
+        memset(&closed, 0, sizeof(closed));
+        g_state_auditor_test_ndb = &closed;
+        sa_coins_expect_skip("coins closed node_db: skipped", &failures);
+        g_state_auditor_test_ndb = &c.ndb;
+
+        sa_coins_missing_marker(&c, &failures);
+        sa_coins_busy_lock(&failures);
+    }
+    sa_cfx_free(&c);
+    return failures;
+}
+
+static int sa_coins_counter_tests(void)
+{
+    return sa_coins_lifecycle_tests() + sa_coins_merge_tests() +
+           sa_coins_skip_tests();
+}
+
+/* ── leg names ──────────────────────────────────────────────────────── */
+
+static int sa_leg_name_tests(void)
+{
+    int failures = 0;
+    sa_ck(&failures, "leg name op_return_index",
+          strcmp(state_auditor_leg_name(STATE_AUDITOR_LEG_OP_RETURN_INDEX),
+                 "op_return_index") == 0);
+    sa_ck(&failures, "leg name coins_commitment",
+          strcmp(state_auditor_leg_name(STATE_AUDITOR_LEG_COINS_COMMITMENT),
+                 "coins_commitment") == 0);
+    sa_ck(&failures, "leg name unknown",
+          strcmp(state_auditor_leg_name(STATE_AUDITOR_LEG_COUNT), "unknown") == 0);
+    return failures;
+}
+
 /* ── entry point ──────────────────────────────────────────────────── */
 
 int test_state_auditor(void)
@@ -623,5 +1302,8 @@ int test_state_auditor(void)
     failures += test_state_auditor_opret_leg();
     failures += test_state_auditor_coins_leg();
     failures += test_state_auditor_condition();
+    failures += sa_opret_counter_tests();
+    failures += sa_coins_counter_tests();
+    failures += sa_leg_name_tests();
     return failures;
 }
