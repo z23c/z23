@@ -218,6 +218,14 @@ bool resident_result_read(struct resident_launch *launch,
                           void *payload, size_t payload_cap,
                           uint32_t timeout_ms,
                           char *error, size_t error_size);
+/* Sends one z23-res-run-v1 frame carrying this launch's nonce to the child.
+ * Never raises SIGPIPE and never blocks past `budget_ms` on a full queue: a
+ * child that stopped reading fails the send (errno EAGAIN), a closed channel
+ * fails it with the send errno. */
+bool resident_launch_send_frame(struct resident_launch *launch,
+                                const void *payload, uint32_t payload_len,
+                                uint32_t budget_ms,
+                                char *error, size_t error_size);
 /* Resource cleanup only — closes descriptors and frees state. It does NOT
  * stop a live child: cancellation is an explicit lifecycle act. */
 void resident_launch_close(struct resident_launch *launch);

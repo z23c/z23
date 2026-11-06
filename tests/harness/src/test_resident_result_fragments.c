@@ -85,6 +85,7 @@ static ssize_t rlf_recv(int fd, void *data, size_t size, int flags)
 #define resident_launch_spawn_confined rlf_launch_spawn_confined
 #define resident_launch_cancel rlf_launch_cancel
 #define resident_result_read rlf_result_read
+#define resident_launch_send_frame rlf_launch_send_frame
 #define resident_launch_close rlf_launch_close
 #include "platform/resident_launch.h"
 #define recv rlf_recv
@@ -107,6 +108,7 @@ static ssize_t rlf_recv(int fd, void *data, size_t size, int flags)
 #undef resident_launch_spawn_confined
 #undef resident_launch_cancel
 #undef resident_result_read
+#undef resident_launch_send_frame
 #undef resident_launch_close
 
 /* Piece sizes the recv wrapper releases on later empty reads, so one frame

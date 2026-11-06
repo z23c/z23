@@ -1062,6 +1062,43 @@ bool resident_result_read(struct resident_launch *launch,
 #endif
 }
 
+bool resident_launch_send_frame(struct resident_launch *launch,
+                                const void *payload, uint32_t payload_len,
+                                uint32_t budget_ms,
+                                char *error, size_t error_size)
+{
+#if defined(_WIN32)
+    (void)launch; (void)payload; (void)payload_len; (void)budget_ms;
+    errno = ENOTSUP;
+    resident_fail(error, error_size, "%s", RESIDENT_WIN_REFUSAL);
+    return false;
+#else
+    if (!launch || launch->ipc_native == (uintptr_t)-1 ||
+        (!payload && payload_len)) {
+        errno = EINVAL;
+        resident_fail(error, error_size,
+                      "resident launch: frame send needs a live launch");
+        return false;
+    }
+    struct resident_result_header header;
+    memset(&header, 0, sizeof(header));
+    memcpy(header.magic, RESIDENT_FRAME_MAGIC_RESULT,
+           sizeof(RESIDENT_FRAME_MAGIC_RESULT));
+    memcpy(header.nonce, launch->nonce, sizeof(header.nonce));
+    header.payload_len = payload_len;
+    int fd = (int)launch->ipc_native;
+    if (!resident_send_bounded(fd, &header, sizeof(header), budget_ms) ||
+        !resident_send_bounded(fd, payload, payload_len, budget_ms)) {
+        int saved = errno;
+        resident_fail(error, error_size,
+                      "resident launch: frame send failed: %s", strerror(saved));
+        errno = saved;
+        return false;
+    }
+    return true;
+#endif
+}
+
 #if !defined(_WIN32)
 static bool resident_startup_expired(const char *phase, char *error, size_t error_size)
 {
