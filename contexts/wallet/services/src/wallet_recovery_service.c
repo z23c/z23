@@ -721,6 +721,29 @@ static void wrc_record_birthday(const struct wallet_recovery_request *req,
         memcpy(out->birthday_hash, f.hash, sizeof(f.hash));
 }
 
+/* The highest checkpoint compiled into this binary on mainnet: the sha3 UTXO
+ * checkpoint, the ROM keystone or a baked ROM rung. 0 elsewhere. A mint by this
+ * binary cannot hold funds below any of them. */
+static int wrc_highest_compiled(uint8_t hash[32])
+{
+    int height = wrc_shipped_anchor(hash);
+    const struct rom_state_checkpoint *ks = get_rom_state_checkpoint();
+    if (height <= 0)
+        return 0;
+    if (ks && ks->height > height) {
+        height = ks->height;
+        memcpy(hash, ks->block_hash, 32);
+    }
+    for (size_t i = 0; i < get_rom_state_rung_count(); i++) {
+        const struct rom_state_rung *r = get_rom_state_rung_at(i);
+        if (r && r->cp.height > height) {
+            height = r->cp.height;
+            memcpy(hash, r->cp.block_hash, 32);
+        }
+    }
+    return height;
+}
+
 bool wallet_recovery_record_fresh_birthday(const char *datadir,
                                            struct node_db *ndb,
                                            int64_t *birthday_out)
@@ -738,10 +761,11 @@ bool wallet_recovery_record_fresh_birthday(const char *datadir,
     if (db_wallet_birthday_get(ndb, &have, have_hash))
         return false;
     wrc_birthday_floor(datadir ? datadir : "", ndb, &f);
-    /* Keys drawn by this running release postdate its shipped anchor, so the
-     * anchor is a floor too, whichever of the two is higher. */
+    /* Keys drawn by this running binary postdate every checkpoint compiled
+     * into it, so the highest of them is a floor too, whichever is higher. */
     struct wrc_floor release;
-    wrc_release_floor(&release);
+    memset(&release, 0, sizeof(release));
+    release.height = wrc_highest_compiled(release.hash);
     wrc_floor_offer(&f, release.height, release.hash);
     if (f.height <= 0 || f.height > INT_MAX - WALLET_BIRTHDAY_MARGIN)
         return false;

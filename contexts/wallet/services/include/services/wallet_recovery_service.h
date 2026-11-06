@@ -259,7 +259,8 @@ struct zcl_result wallet_recovery_status(const char *datadir,
  * flushed): store a birthday at the height this datadir proves, so the first
  * scan has no earlier block to read. Keys drawn now cannot have been paid in a
  * block that already exists. The floor is the highest of the connected tip,
- * the best header and the shipped anchor, each less the margin, as in
+ * the best header and every checkpoint compiled into this binary (sha3 UTXO
+ * checkpoint, ROM keystone, baked ROM rungs), each less the margin, as in
  * wallet_recovery_run's record_birthday. Never replaces a stored birthday.
  * Returns false and stores nothing when no floor above genesis is known, when
  * a birthday is already stored, or when the write fails; *birthday_out (if

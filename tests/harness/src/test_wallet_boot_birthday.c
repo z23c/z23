@@ -475,6 +475,75 @@ static int t_existing_birthday_is_never_replaced(void)
     return failures;
 }
 
+/* Compiled checkpoints above the sha3 UTXO checkpoint. A fresh mint by this
+ * binary cannot hold funds below any of them, so the floor follows the highest
+ * of the sha3 checkpoint, the ROM keystone and the baked rungs. */
+static int wbb_mint_birthday(const char *tag, int64_t *b, uint8_t hash[32])
+{
+    struct wbb_fixture f;
+    bool open = wbb_open(&f, tag, 0);
+    struct wallet *w = calloc(1, sizeof(*w));
+    bool minted = open && w && wbb_mint(&f, w);
+    bool got = minted && db_wallet_birthday_get(&f.ndb, b, hash);
+    if (w) {
+        if (minted)
+            wallet_free(w);
+        free(w);
+    }
+    wbb_close(&f);
+    return got ? 0 : 1;
+}
+
+static int t_floor_follows_the_highest_compiled_checkpoint(void)
+{
+    int failures = 0;
+    static struct sha3_utxo_checkpoint sha3;
+    static struct rom_state_checkpoint keystone;
+    static struct rom_state_rung rungs[2];
+    memset(&sha3, 0, sizeof(sha3));
+    sha3.height = 5000;
+    memset(sha3.block_hash, 0x0b, sizeof(sha3.block_hash));
+    checkpoints_set_sha3_override_for_test(&sha3);
+    int64_t b = 0;
+    uint8_t hash[32], want[32];
+
+    memset(&keystone, 0, sizeof(keystone));
+    checkpoints_set_rom_state_override_for_test(&keystone);
+    checkpoints_set_rom_state_rungs_override_for_test(rungs, 0);
+    memset(want, 0x0b, sizeof(want));
+    WBB_CHECK("no keystone and no rung: the sha3 checkpoint, unchanged",
+              wbb_mint_birthday("hi0", &b, hash) == 0 && b == 5100 &&
+              memcmp(hash, want, sizeof(want)) == 0);
+
+    keystone.height = 6000;
+    memset(keystone.block_hash, 0x0c, sizeof(keystone.block_hash));
+    memset(want, 0x0c, sizeof(want));
+    WBB_CHECK("a keystone above it: the floor follows the keystone",
+              wbb_mint_birthday("hi1", &b, hash) == 0 && b == 6100 &&
+              memcmp(hash, want, sizeof(want)) == 0);
+
+    rungs[0].cp.height = 8000;
+    memset(rungs[0].cp.block_hash, 0x0d, sizeof(rungs[0].cp.block_hash));
+    rungs[1].cp.height = 7000;
+    memset(rungs[1].cp.block_hash, 0x0e, sizeof(rungs[1].cp.block_hash));
+    checkpoints_set_rom_state_rungs_override_for_test(rungs, 2);
+    memset(want, 0x0d, sizeof(want));
+    WBB_CHECK("a rung above all: the floor follows the highest rung",
+              wbb_mint_birthday("hi2", &b, hash) == 0 && b == 8100 &&
+              memcmp(hash, want, sizeof(want)) == 0);
+
+    rungs[0].cp.height = 5500;
+    rungs[1].cp.height = 5600;
+    memset(want, 0x0c, sizeof(want));
+    WBB_CHECK("a rung below the keystone does not lower the floor",
+              wbb_mint_birthday("hi3", &b, hash) == 0 && b == 6100 &&
+              memcmp(hash, want, sizeof(want)) == 0);
+
+    checkpoints_reset_rom_state_rungs_override_for_test();
+    checkpoints_reset_rom_state_override_for_test();
+    return failures;
+}
+
 int test_wallet_boot_birthday(void);
 int test_wallet_boot_birthday(void)
 {
@@ -483,6 +552,10 @@ int test_wallet_boot_birthday(void)
     static const struct sha3_utxo_checkpoint no_anchor = { .height = 0 };
     chain_params_select(CHAIN_MAIN);
     checkpoints_set_sha3_override_for_test(&no_anchor);
+    static const struct rom_state_checkpoint no_keystone = { .height = 0 };
+    static const struct rom_state_rung no_rungs[1];
+    checkpoints_set_rom_state_override_for_test(&no_keystone);
+    checkpoints_set_rom_state_rungs_override_for_test(no_rungs, 0);
     failures += t_fresh_wallet_records_birthday();
     failures += t_unknown_height_records_none();
     failures += t_restored_wallet_keeps_full_scan();
@@ -491,6 +564,9 @@ int test_wallet_boot_birthday(void)
     failures += t_other_key_rows_get_no_birthday();
     failures += t_import_after_mint_rescans_below_the_birthday();
     failures += t_existing_birthday_is_never_replaced();
+    failures += t_floor_follows_the_highest_compiled_checkpoint();
     checkpoints_reset_sha3_override_for_test();
+    checkpoints_reset_rom_state_override_for_test();
+    checkpoints_reset_rom_state_rungs_override_for_test();
     return failures;
 }
