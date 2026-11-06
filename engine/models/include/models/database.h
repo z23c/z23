@@ -311,6 +311,11 @@ bool node_db_state_delete(struct node_db *ndb, const char *key);
  * an explicit offline repair path (ZCL_OFFLINE_REPAIR=1). */
 bool node_db_wipe_utxos(struct node_db *ndb);
 
+/* Delete the rows of an import that was refused, and every cursor that would
+ * describe them. Has no row cap: the import's own wipe already passed the
+ * recovery policy, so the rows here are only what that import wrote. */
+bool node_db_clear_rejected_import(struct node_db *ndb);
+
 /* Count UTXOs in the database. */
 int64_t node_db_utxo_count(struct node_db *ndb);
 

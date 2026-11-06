@@ -33,6 +33,7 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/thread_registry.h"
+#include "utxo_recovery_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +43,9 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <signal.h>
+
+/* Ends every refusal that clears the set: the caller has nothing to keep. */
+#define IMPORT_RERUN_NOTE "; the earlier UTXO set is gone, run the import again"
 
 /* db_iter_check_error is declared in storage/dbwrapper.h (included above) and
  * now returns bool (true = clean scan, false = LevelDB iterator error). */
@@ -488,17 +492,40 @@ static struct zcl_result import_prepare_reimport(struct node_db *ndb,
     return ZCL_OK;
 }
 
+/* The set this import replaced is already gone. Nothing may read what is left of
+ * the new one as a set, so the rows and every cursor describing them go too. */
+static void import_clear_rejected_set(struct node_db *ndb)
+{
+    bool cleared = false;
+    {
+        DB_TXN_SCOPE(txn, ndb, "sync_controller.import_clear_rejected");
+        cleared = txn && node_db_clear_rejected_import(ndb) && db_txn_commit(txn);
+    }
+    cleared = cleared && utxo_recovery_clear_cold_import_seed_checked(ndb);
+    if (cleared)
+        LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: refused. Any earlier UTXO set in this database is gone and the partial rows and cursors are cleared; run the import again");
+    else
+        LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: refused, and clearing the partial rows failed. Any earlier UTXO set in this database is gone and partial rows may remain; run the import again before trusting this database");
+}
+
+/* Clear what the refused import left, leave turbo mode and close the job. */
+static void import_end_refused(struct import_context *ctx,
+                               struct sync_db_turbo_scope *turbo_mode,
+                               int total_rows)
+{
+    import_clear_rejected_set(ctx->ndb);
+    if (!sync_db_turbo_scope_end(turbo_mode))
+        LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: failed to restore normal mode after a refused import");
+    import_job_teardown(ctx, total_rows);
+}
+
 /* Free a context whose worker threads failed to start. */
 static struct zcl_result import_fail_worker_pipeline(struct import_context *ctx,
                                                      struct sync_db_turbo_scope *turbo_mode)
 {
     LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: FATAL — worker pipeline failed to start");
-    import_context_release_chunks(ctx);
-    if (!sync_db_turbo_scope_end(turbo_mode))
-        LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: failed to restore normal mode after worker startup failure");
-    free(ctx);
-    sync_job_import_finish(0);
-    return ZCL_ERR(-7, "import: worker pipeline failed to start");
+    import_end_refused(ctx, turbo_mode, 0);
+    return ZCL_ERR(-7, "import: worker pipeline failed to start" IMPORT_RERUN_NOTE);
 }
 
 /* Fill the chunk ring from the LevelDB coins range; *total_entries_out is the txid count. */
@@ -605,11 +632,9 @@ static struct zcl_result import_reject_dropped_records(struct import_context *ct
     if (cut == 0 && skipped == 0)
         return ZCL_OK;
     LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: REJECTED — %d records cut and %d skipped, so the set is missing outputs", cut, skipped);
-    if (!sync_db_turbo_scope_end(turbo_mode))
-        LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: failed to restore normal mode");
-    import_job_teardown(ctx, total_rows);
-    return ZCL_ERR(-11, "import: REJECTED — %d records cut and %d skipped",
-                   cut, skipped);
+    import_end_refused(ctx, turbo_mode, total_rows);
+    return ZCL_ERR(-11, "import: REJECTED — %d records cut and %d skipped"
+                   IMPORT_RERUN_NOTE, cut, skipped);
 }
 
 /* Reject a truncated or aborted import. ZCL_OK means the rows can be kept. */
@@ -633,20 +658,16 @@ static struct zcl_result import_reject_halted_scan(struct import_context *ctx,
                  "TRUNCATED set (%d txids, %d rows read before the error); "
                  "refusing to accept a partial UTXO set", total_entries,
                  total_rows);
-        if (!sync_db_turbo_scope_end(turbo_mode))
-            LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: failed to restore normal mode after iterator-error reject");
-        import_job_teardown(ctx, total_rows);
+        import_end_refused(ctx, turbo_mode, total_rows);
         return ZCL_ERR(-10, "import: REJECTED — LevelDB iterator error left a "
-                       "truncated UTXO set (%d txids read before error)",
-                       total_entries);
+                       "truncated UTXO set (%d txids read before error)"
+                       IMPORT_RERUN_NOTE, total_entries);
     }
 
     if (import_ctx_should_stop(ctx)) {
         LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: aborted%s", g_shutdown_requested ? " on shutdown" : "");
-        if (!sync_db_turbo_scope_end(turbo_mode))
-            LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: failed to restore normal mode after abort");
-        import_job_teardown(ctx, total_rows);
-        return ZCL_ERR(-8, "import: aborted%s",
+        import_end_refused(ctx, turbo_mode, total_rows);
+        return ZCL_ERR(-8, "import: aborted%s" IMPORT_RERUN_NOTE,
                        g_shutdown_requested ? " on shutdown" : "");
     }
     return import_reject_dropped_records(ctx, turbo_mode, total_rows);
@@ -723,8 +744,11 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
     /* ── Initialize pipeline context ───────────────────────────────── */
     struct import_context *ctx = import_context_create(ndb, cvdb);
     if (!ctx) {
+        /* The wipe above committed, so cursors must not outlive the rows. */
+        import_clear_rejected_set(ndb);
         import_abort_before_pipeline(&turbo_mode, "alloc failure");
-        return ZCL_ERR(-6, "import: failed to allocate import context");
+        return ZCL_ERR(-6, "import: failed to allocate import context"
+                       IMPORT_RERUN_NOTE);
     }
     import_job_init(&job, ctx, num_decoders);
 

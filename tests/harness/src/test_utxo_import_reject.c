@@ -12,6 +12,7 @@
 #include "services/node_db_import_service.h"
 #include "storage/coins_db.h"
 #include "storage/dbwrapper.h"
+#include "storage/utxo_mirror_schema.h"
 #include "util/safe_alloc.h"
 
 #include <stdint.h>
@@ -205,10 +206,84 @@ static int reject_case_dropped_for_memory_refused(void)
     return failures;
 }
 
+/* What a node trusts about a set. Each must be gone once the set is. */
+static bool reject_seed_state(const char *db_path)
+{
+    static const char *const keys[] = {
+        UTXO_MIRROR_SYNC_CURSOR_KEY, "coins_best_block", "utxo_commitment",
+        "leveldb_utxo_migrated", "cold_import_seed_anchor_height",
+    };
+    struct node_db ndb;
+    bool ok = node_db_open(&ndb, db_path);
+
+    for (size_t i = 0; ok && i < sizeof(keys) / sizeof(keys[0]); i++)
+        ok = node_db_state_set_int(&ndb, keys[i], 5);
+    if (ok)
+        node_db_close(&ndb);
+    return ok;
+}
+
+static bool reject_state_is_gone(const char *db_path)
+{
+    static const char *const keys[] = {
+        UTXO_MIRROR_SYNC_CURSOR_KEY, "coins_best_block", "utxo_commitment",
+        "leveldb_utxo_migrated", "cold_import_seed_anchor_height",
+    };
+    struct node_db ndb;
+    bool gone = node_db_open(&ndb, db_path);
+
+    for (size_t i = 0; gone && i < sizeof(keys) / sizeof(keys[0]); i++) {
+        int64_t value = 0;
+        gone = !node_db_state_get_int(&ndb, keys[i], &value);
+    }
+    if (node_db_utxo_count(&ndb) != 0)
+        gone = false;
+    node_db_close(&ndb);
+    return gone;
+}
+
+static int reject_case_refusal_clears_the_set(void)
+{
+    int failures = 0;
+
+    TEST("utxo import reject: a refused import leaves no rows and no claim about "
+         "them, and says the import must be rerun") {
+        const int good[] = { 2, 2, 2 };
+        const int bad[] = {
+            REJECT_BIG_RECORD, REJECT_BIG_RECORD, REJECT_BIG_RECORD,
+            REJECT_BIG_RECORD, REJECT_BIG_RECORD, REJECT_BIG_RECORD,
+            REJECT_BIG_RECORD, REJECT_BIG_RECORD, 50,
+        };
+        struct reject_fixture old_set;
+        struct reject_fixture refused;
+        struct reject_run run;
+
+        ASSERT(reject_fixture_make(&old_set, good,
+                                   sizeof(good) / sizeof(good[0])));
+        ASSERT(reject_run_import(&old_set, &run));
+        ASSERT_RESULT_OK(run.result);
+        ASSERT(run.rows == 6);
+        ASSERT(reject_seed_state(old_set.db_path));
+
+        ASSERT(reject_fixture_make(&refused, bad,
+                                   sizeof(bad) / sizeof(bad[0])));
+        memcpy(refused.db_path, old_set.db_path, sizeof(refused.db_path));
+        ASSERT(reject_run_import(&refused, &run));
+        ASSERT(!run.result.ok);
+        ASSERT(run.result.code == REJECT_CODE_DROPPED);
+        ASSERT(strstr(run.result.message, "run the import again") != NULL);
+        ASSERT(run.rows == 0);
+        ASSERT(reject_state_is_gone(refused.db_path));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_utxo_import_reject(void)
 {
     int failures = 0;
 
+    failures += reject_case_refusal_clears_the_set();
     failures += reject_case_exact_fit_imports();
     failures += reject_case_cut_record_refused();
     failures += reject_case_skipped_record_refused();

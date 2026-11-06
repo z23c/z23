@@ -20,6 +20,7 @@
 #include "models/database_progress.h"
 #include "models/utxo_count_cache.h"
 #include "platform/time_compat.h"
+#include "storage/utxo_mirror_schema.h"
 #include "support/log_throttle.h"
 #include "util/thread_registry.h"
 #include <limits.h>
@@ -47,6 +48,17 @@ bool node_db_wipe_utxos(struct node_db *ndb)
     ok &= node_db_exec(ndb, "DELETE FROM node_state WHERE key='utxo_commitment'");
     if (ok)
         printf("db: wiped UTXO set + coins state\n");
+    return ok;
+}
+
+bool node_db_clear_rejected_import(struct node_db *ndb)
+{
+    if (!ndb || !ndb->open) return false;
+    bool ok = node_db_exec(ndb, "DELETE FROM utxos");
+    ok &= node_db_exec(ndb, "DELETE FROM node_state WHERE key IN ("
+                            "'coins_best_block','utxo_commitment',"
+                            "'" UTXO_MIRROR_SYNC_CURSOR_KEY "',"
+                            "'leveldb_utxo_migrated')");
     return ok;
 }
 
