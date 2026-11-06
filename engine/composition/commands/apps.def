@@ -1,18 +1,48 @@
 /* Dynamic application mounts. App-specific children come from app.def. */
 
 ZCL_COMMAND_READY_READ(
-    "app.list", "app", "", "List installed App manifests",
-    "Every installed App manifest from the local App registry; a complete "
-    "snapshot at call time, unpaged, static until an App is mounted or removed.",
+    "app.list", "app", "", "List installed App manifests and launchable apps",
+    "Every installed App manifest from the local App registry (apps, count), "
+    "plus `launchable`: each desktop app or game `app open` can start (such "
+    "as skycombat, kind desktop), built-in "
+    "or from the operator's apps.tsv, with aliases, installed yes/no, raise "
+    "support, "
+    "resolved path and the verified running pid. A complete snapshot at call "
+    "time, unpaged; the launchable part changes as programs start and stop.",
     ZCL_COMMAND_LIST_BUDGET,
-    "apps,manifest,installed", "zcl.command.empty_input.v1",
+    "apps,manifest,installed,launch,desktop,game", "zcl.command.empty_input.v1",
     "zcl.app_index.v1", "", "", "z23 app list",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
     ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
-    ZCL_COMMAND_CAP_APP_MANIFEST_READ,
-    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
-    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_list)
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_list_launchable)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.open", "app", "", "Open a desktop app or game, such as Sky Combat",
+    "Starts a desktop app or game by name or alias, e.g. skycombat, sky or "
+    "airplane for the Sky Combat airplane game (see app list). Requires a "
+    "desktop session, then either reports the verified running copy "
+    "(already_open: a pid whose executable and start time match; raise is "
+    "delivered by SIGUSR1 only to an app that declares raise support, else "
+    "unsupported_by_app) or spawns the "
+    "program with no shell, detached, logging to ~/.local/state/z23/apps, "
+    "and waits up to 15 s for its ready marker (opened: pid, ready_ms, "
+    "executable, sha256, log). A refusal names its stage: unknown_app, "
+    "not_installed, no_desktop, config_refused, spawn_failed, exited_early "
+    "(exit code and log tail) or not_ready (still running, pid given). "
+    "Launch commands come only from this binary and the operator's apps.tsv.",
+    0, "apps,launch,open,start,play,desktop,window,game,games,skycombat,"
+    "sky-combat,airplane",
+    "zcl.app_open.input.v1", "zcl.app_open.v1", "name", "name",
+    "z23 app open skycombat",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_PROCESS_EXEC, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_app_open)
 
 ZCL_COMMAND_READY_READ(
     "app.inspect", "app", "", "Inspect one App manifest and bindings",

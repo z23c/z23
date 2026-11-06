@@ -220,6 +220,9 @@ ZCL_CAPABILITY_SYMBOL("posix_spawn_file_actions_addchdir_np", CAP_PROCESS,
     "Chooses the working directory inherited by a posix_spawn child.")
 ZCL_CAPABILITY_SYMBOL("posix_spawn_file_actions_addclose", CAP_PROCESS,
     "Builds the descriptor inheritance policy for a posix_spawn child.")
+ZCL_CAPABILITY_SYMBOL("posix_spawn_file_actions_addclosefrom_np", CAP_PROCESS,
+    "Builds the descriptor inheritance policy for a posix_spawn child: "
+    "closes every descriptor from a floor upward in the child.")
 ZCL_CAPABILITY_SYMBOL("posix_spawn_file_actions_adddup2", CAP_PROCESS,
     "Builds the descriptor inheritance policy for a posix_spawn child.")
 ZCL_CAPABILITY_SYMBOL("posix_spawn_file_actions_addopen", CAP_PROCESS,
@@ -235,6 +238,11 @@ ZCL_CAPABILITY_SYMBOL("posix_spawnattr_init", CAP_PROCESS,
 ZCL_CAPABILITY_SYMBOL("posix_spawnattr_setflags", CAP_PROCESS,
     "Selects process-level spawn semantics, including suspended start "
     "and creation of a new session on Darwin.")
+ZCL_CAPABILITY_SYMBOL("posix_spawnattr_setsigdefault", CAP_PROCESS,
+    "Chooses which signals a posix_spawn child starts with at their "
+    "default action.")
+ZCL_CAPABILITY_SYMBOL("posix_spawnattr_setsigmask", CAP_PROCESS,
+    "Chooses the signal mask a posix_spawn child starts with.")
 ZCL_CAPABILITY_SYMBOL("setenv", CAP_PROCESS,
     "Mutates the block a later exec inherits, which is how PATH and the "
     "loader variables get chosen.")

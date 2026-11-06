@@ -699,6 +699,23 @@ static int test_native_app_catalog_uses_strict_builtin_source(void)
                       "built-in-strict-v1");
         zcl_command_reply_free(&reply);
 
+        /* app.list's own handler keeps zcl.app_index.v1 and only adds the
+         * launchable section (dev.app.list keeps the plain handler). */
+        zcl_command_reply_init(&reply, "zcl.app_index.v1");
+        zcl_native_handle_app_list_launchable(&request, &reply);
+        apps = json_get(&reply.data, "apps");
+        ASSERT(apps && apps->type == JSON_ARR && apps->num_children == 3);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "count")), 3);
+        const struct json_value *launchable = json_get(&reply.data, "launchable");
+        ASSERT(launchable && launchable->type == JSON_ARR &&
+               launchable->num_children >= 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&launchable->children[0], "id")),
+                      "skycombat");
+        ASSERT_STR_EQ(json_get_str(json_get(&launchable->children[0], "kind")),
+                      "desktop");
+        ASSERT(json_get(&reply.data, "launchable_config") != NULL);
+        zcl_command_reply_free(&reply);
+
         (void)json_push_kv_str(&input, "app_id", "blog");
         request.invoked_name = "app.inspect";
         zcl_command_reply_init(&reply, "zcl.app_inspect.v1");

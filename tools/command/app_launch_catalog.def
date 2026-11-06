@@ -1,0 +1,31 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Built-in launchable desktop programs for `z23 app open`.
+ *
+ * ZCL_APP_LAUNCH(id, aliases, executable, argv, ready_marker, raise,
+ *                build_hint)
+ *   id            lower-case name the launcher reports
+ *   aliases       comma-separated other names, "" for none
+ *   executable    basename, resolved ONLY in the directory that holds the
+ *                 running z23 binary; never PATH, never the network
+ *   argv          ZCL_APP_ARGV(...) fixed arguments after argv[0]; no shell
+ *   ready_marker  substring of the program's own log that proves its window
+ *                 exists; "" means "still running after the settle time"
+ *   raise         ZCL_APP_RAISE_SIGUSR1 when the program handles SIGUSR1 by
+ *                 bringing its window to the front, else
+ *                 ZCL_APP_RAISE_UNSUPPORTED. The launcher never signals an
+ *                 app that does not declare it (SIGUSR1's default action
+ *                 ends the process).
+ *   build_hint    what to run when the executable is missing
+ *
+ * Launch commands are data compiled into this binary or read from the
+ * operator's own apps.tsv. They never come from the board, wiki, packages
+ * or fetched source.
+ */
+
+/* raylib prints this from InitPlatform() once the window and GL context
+ * exist (vendor/raylib/src/platforms/rcore_desktop_rgfw.c), then flushes.
+ * Raise stays UNSUPPORTED until the game's own SIGUSR1 handler lands. */
+ZCL_APP_LAUNCH("skycombat", "sky,sky-combat,airplane", "z23-skycombat",
+               ZCL_APP_ARGV(), "DISPLAY: Device initialized successfully",
+               ZCL_APP_RAISE_UNSUPPORTED, "make game")

@@ -170,6 +170,16 @@ bool mcp_policy_fleet_write(const struct zcl_command_spec *spec)
     return false;
 }
 
+bool mcp_policy_app_open(const struct zcl_command_spec *spec)
+{
+    return spec && spec->mode != ZCL_COMMAND_MODE_BRANCH &&
+           strcmp(spec->path, "app.open") == 0 &&
+           spec->effect == ZCL_COMMAND_EFFECT_MUTATE &&
+           spec->risk == ZCL_COMMAND_RISK_APP_WRITE &&
+           spec->authority != ZCL_COMMAND_AUTH_OWNER &&
+           spec->layer == ZCL_COMMAND_LAYER_APP;
+}
+
 /* Read leaves that return wallet amounts without declaring the wallet
  * request capability: the metaverse custody reports and the agent grant and
  * spend telemetry and the store purchase history. */

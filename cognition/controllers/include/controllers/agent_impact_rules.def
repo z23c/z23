@@ -3477,7 +3477,11 @@ AGENT_IMPACT_RULE("engine/services/include/services/plugin_host_handlers.h|engin
 AGENT_IMPACT_RULE("contexts/commons/modules/plugin/include/plugin/plugin_hostcall.h|contexts/commons/modules/plugin/src/plugin_hostcall.c|tests/harness/src/test_plugin_hostcall.c", "plugin_hostcall plugin_run_hostcall make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_plugin_call.c|tests/harness/fixtures/plugin_call_upper.c", "plugin_call make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_plugin_builtin.c|contexts/commons/apps/*", "plugin_builtin plugin_call make_lint_gates")
-AGENT_IMPACT_RULE("tools/mcp/*|tests/harness/src/test_mcp_serve.c", "mcp_serve command_registry_catalog native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("tools/mcp/*|tests/harness/src/test_mcp_serve.c", "mcp_serve mcp_serve_apps command_registry_catalog native_api_contract make_lint_gates")
+/* `z23 app open`: the display-free launcher group and the MCP apps tools.
+ * The real-game group app_launch_skycombat needs Xvfb, so no rule selects it;
+ * run it by name on a display host. */
+AGENT_IMPACT_RULE("tools/command/native_app_launch*|tools/command/app_launch_catalog.def|tests/harness/src/test_app_launch.c|tests/fixtures/app_launch/*|tests/harness/src/test_mcp_serve_apps.c", "app_launch mcp_serve_apps command_registry_catalog native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_command_outcome.c", "command_outcome command_registry_catalog native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("engine/models/src/device_pairing.c|engine/models/include/models/device_pairing.h|tests/harness/src/test_device_pairing.c", "device_pairing models crypto make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/platform/src/private_file_state.c|platform/modules/platform/include/platform/private_file_state.h", "device_pairing device_host_bridge device_host_runtime native_tunnel_export make_lint_gates")

@@ -513,6 +513,32 @@ ZCL_TEST_GROUP_BUILD_NEED("test_zcode_package_artifact", "build/bin/z23", "z23")
 ZCL_TEST_GROUP_BUILD_NEED("test_mcp_serve", "build/bin/z23-dev", "dev-bin")
 ZCL_TEST_GROUP_BUILD_NEED("test_mcp_plugin_call", "build/bin/z23-dev", "dev-bin")
 
+/* `z23 app open`: app_launch spawns the display-free stand-in app in
+ * process; mcp_serve_apps reaches it through the dev binary's MCP adapter.
+ * Both are POSIX-only (posix_spawn, signals, /proc). */
+#if defined(_WIN32)
+ZCL_TEST_GROUP_NEED("test_app_launch", ZCL_HOST_NEED_ENV,
+    "ZCL_POSIX_DESCRIPTOR_TESTS")
+ZCL_TEST_GROUP_NEED("test_mcp_serve_apps", ZCL_HOST_NEED_ENV,
+    "ZCL_POSIX_DESCRIPTOR_TESTS")
+#endif
+ZCL_TEST_GROUP_BUILD_NEED("test_app_launch",
+    "build/bin/z23-app-launch-fixture", "app-launch-fixture")
+ZCL_TEST_GROUP_BUILD_NEED("test_mcp_serve_apps", "build/bin/z23-dev", "dev-bin")
+ZCL_TEST_GROUP_BUILD_NEED("test_mcp_serve_apps",
+    "build/bin/z23-app-launch-fixture", "app-launch-fixture")
+/* The real game on a private Xvfb display. `make game` needs X11/GL headers
+ * and the run needs Xvfb, which most build hosts lack, so universal selection
+ * takes this group only where the operator sets ZCL_TEST_DISPLAY_APPS (a
+ * host with Xvfb and the game's headers). An exact selection still runs it
+ * and builds both binaries; without Xvfb it prints SKIP. */
+ZCL_TEST_GROUP_NEED("test_app_launch_skycombat", ZCL_HOST_NEED_ENV,
+    "ZCL_TEST_DISPLAY_APPS")
+ZCL_TEST_GROUP_BUILD_NEED("test_app_launch_skycombat", "build/bin/z23-dev",
+    "dev-bin")
+ZCL_TEST_GROUP_BUILD_NEED("test_app_launch_skycombat",
+    "build/bin/z23-skycombat", "game")
+
 #if defined(__linux__)
 /* The terminal high-FD regression executes this existing trusted C fixture. */
 ZCL_TEST_GROUP_BUILD_NEED("test_mesh_terminal_worker",

@@ -80,3 +80,24 @@ This page is linked from [`docs/README.md`](../README.md) and from [`docs/work/F
 <!-- claim: file-present apps/skycombat/zcode-package.json # skycombat source package declaration -->
 <!-- claim: symbol-present zcl_native_handle_zcode_package_share tools/command/native_zcode_package_share_command.c # share with parent -->
 <!-- claim: symbol-present test_zcode_package_fork tests/harness/src/test_zcode_package_fork.c # fork, versions and share journey -->
+
+## Opening a desktop app or game today (`z23 app open`)
+
+Until the `ui.panel` descriptor exists, a desktop app or game such as Sky Combat, the airplane game, runs as its own process. The node's launcher starts it, not the plugin runner.
+
+```bash
+z23 app list               # launchable: id, aliases, kind, installed, raise, path, running_pid
+z23 app open skycombat     # also: sky, sky-combat, airplane
+z23 discover search game   # finds app.open (also: airplane, skycombat)
+```
+
+- **Where launch commands come from.** The compiled-in table `tools/command/app_launch_catalog.def`, whose executables resolve only in the directory of the running `z23` binary (`make game` builds `build/bin/z23-skycombat` there), and the owner's own `$XDG_CONFIG_HOME/z23/apps.tsv` (default `~/.config/z23/apps.tsv`). Nothing is read from the network, the board, the wiki, packages or fetched source.
+- **apps.tsv.** One app per line, tab-separated: `id`, `aliases` (comma-separated or `-`), absolute `executable`, `ready marker` (a log substring, or `-` for "still running after one second"), `raise` (`sigusr1` if the program brings its window to the front on `SIGUSR1`, else `-`), then up to eight fixed arguments. There is no shell and no variable expansion. The whole file is refused unless you own it and it is not group- or world-writable. Each executable must be an absolute path to a regular executable file that you or root own and that is not group- or world-writable. A path that does not exist yet is listed as not installed.
+- **What open does.** It resolves the name and requires a desktop session (on Linux, `DISPLAY` or `WAYLAND_DISPLAY`). It then looks for a running copy. A copy counts only if the pid record `~/.local/state/z23/apps/<id>.pid` still matches the live process's executable and start time, or, on Linux, if a process of yours runs the same executable. If a copy is running, open reports it (see Bring to front). Otherwise open starts the program with `posix_spawn` in a new session. Its stdin is `/dev/null`, its output goes to `~/.local/state/z23/apps/<id>.log`, and open waits up to 15 seconds for the ready marker.
+- **Results (`zcl.app_open.v1`).** `opened` returns pid, ready_ms, executable, sha256 and log. The sha256 identifies the bytes on disk; it does not claim which source produced them. `already_open` returns the same pid and `raise`: `delivered`, `unsupported_by_app`, `no_handler` or `failed`. A refusal names its stage: `unknown_app` (lists the known names), `not_installed` (gives the build command), `no_desktop`, `config_refused`, `spawn_failed`, `exited_early` (exit code and log tail), or `not_ready` (the program is still running; its pid is given).
+- **Bring to front.** An app declares raise support in its entry: `ZCL_APP_RAISE_SIGUSR1` in the compiled-in table, or `sigusr1` in the apps.tsv raise column. The launcher signals only an app that declares it, because the default action of `SIGUSR1` ends the process. On Linux the launcher also checks that the running copy really handles the signal. `raise` is `delivered` only when the launcher sent the signal. Sky Combat is marked unsupported until the game's own handler lands, so a second open returns `already_open` with the same pid and `raise: "unsupported_by_app"`. For a later handler: with the vendored RGFW backend, raylib `SetWindowFocused` works on X11 (once the window is viewable), macOS and Win32; on Wayland it does nothing, and Windows has no `SIGUSR1`.
+- **Agents.** The MCP adapter (`z23 mcp serve`) exposes `apps_list` and `apps_open`, thin wrappers over `app.list` and `app.open`. `z23_run` still refuses `app.open`, because the leaf has no confirmation flow.
+- **Proof.** `make t-fast-exact ONLY=app_launch` and `ONLY=mcp_serve_apps` need no display. `ONLY=app_launch_skycombat` builds the game and drives it on a private Xvfb display; it runs only on hosts that have Xvfb.
+
+<!-- claim: file-present tools/command/app_launch_catalog.def # the compiled-in launch table -->
+<!-- claim: symbol-present mcp_policy_app_open tools/mcp/mcp_policy.c # the apps_open allowance -->

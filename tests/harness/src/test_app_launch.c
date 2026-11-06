@@ -1,0 +1,623 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * test_app_launch - `z23 app open`, the native desktop launcher
+ * (tools/command/native_app_launch*.c), without a display.
+ *
+ * A stand-in app, build/bin/z23-app-launch-fixture, is copied into a
+ * temporary directory once per behaviour (so a /proc scan for one copy never
+ * finds another) and registered through a temporary apps.tsv. It prints the
+ * ready marker, appends "raised" to a file on SIGUSR1 and exits on SIGTERM.
+ * Every spawned copy is tracked and killed and reaped at the end, on every
+ * path.
+ *
+ * make t-fast-exact ONLY=app_launch */
+
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
+#include "test/test_core.h"
+
+#include "command/native_app_launch.h"
+#include "command/native_command.h"
+#include "config/command_catalog.h"
+#include "json/json.h"
+#include "kernel/command_registry.h"
+#include "platform/time_compat.h"
+
+#if !defined(_WIN32)
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#define AL_FIXTURE "build/bin/z23-app-launch-fixture"
+#define AL_MARKER "FIXTURE: Device initialized successfully"
+#define AL_PIDS_MAX 16
+
+static long al_pids[AL_PIDS_MAX];
+static unsigned al_npids;
+
+static void al_track(long pid)
+{
+    if (pid > 1 && al_npids < AL_PIDS_MAX)
+        al_pids[al_npids++] = pid;
+}
+
+/* SIGTERM every copy this group started, then reap it (SIGKILL after 3 s). */
+static void al_kill_all(void)
+{
+    for (unsigned i = 0; i < al_npids; i++) {
+        pid_t pid = (pid_t)al_pids[i];
+        int status;
+        (void)kill(pid, SIGTERM);
+        int64_t stop = platform_time_monotonic_ms() + 3000;
+        while (waitpid(pid, &status, WNOHANG) == 0) {
+            if (platform_time_monotonic_ms() > stop) {
+                (void)kill(pid, SIGKILL);
+                (void)waitpid(pid, &status, 0);
+                break;
+            }
+            platform_sleep_ms(10); /* real-clock: reaping a real child */
+        }
+    }
+    al_npids = 0;
+}
+
+struct al_fx {
+    char root[PATH_MAX];
+    char raised[PATH_MAX];
+    char bin_ready[PATH_MAX];
+    char bin_exit[PATH_MAX];
+    char bin_silent[PATH_MAX];
+    char bin_quiet[PATH_MAX]; /* declares no raise, has no handler */
+    char bin_liar[PATH_MAX];  /* declares raise, has no handler */
+    struct app_launch_env env;
+    struct app_launch_registry reg;
+    struct app_open_result res;
+};
+
+static bool al_path(char *out, size_t cap, const char *dir, const char *leaf)
+{
+    int n = snprintf(out, cap, "%s/%s", dir, leaf);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool al_copy_exe(const char *from, const char *to, mode_t mode)
+{
+    char buf[65536];
+    int in = open(from, O_RDONLY | O_CLOEXEC);
+    int out = open(to, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
+    bool ok = in >= 0 && out >= 0;
+    ssize_t n = 0;
+    while (ok && (n = read(in, buf, sizeof(buf))) > 0)
+        ok = write(out, buf, (size_t)n) == n;
+    ok = ok && n == 0 && fchmod(out, mode) == 0;
+    if (in >= 0)
+        (void)close(in);
+    if (out >= 0)
+        ok = close(out) == 0 && ok;
+    return ok;
+}
+
+static bool al_write_file(const char *path, const char *text, mode_t mode)
+{
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return false;
+    bool ok = fputs(text, f) >= 0;
+    ok = fclose(f) == 0 && ok;
+    return ok && chmod(path, mode) == 0;
+}
+
+/* One tsv row: id, aliases, executable, marker, raise, then the fixture's
+ * two arguments: mode and raise file. */
+static int al_row(char *out, size_t cap, const char *id, const char *aliases,
+                  const char *exe, const char *raise, const char *mode,
+                  const char *raised)
+{
+    return snprintf(out, cap, "%s\t%s\t%s\t" AL_MARKER "\t%s\t%s\t%s\n", id,
+                    aliases, exe, raise, mode, raised);
+}
+
+static bool al_write_tsv(struct al_fx *f)
+{
+    char text[8192];
+    size_t at = 0;
+    at += (size_t)snprintf(text + at, sizeof(text) - at,
+                           "# test apps\n\n");
+    at += (size_t)al_row(text + at, sizeof(text) - at, "fixtureapp",
+                         "fx,fixture-alias", f->bin_ready, "sigusr1", "ready",
+                         f->raised);
+    at += (size_t)al_row(text + at, sizeof(text) - at, "crashy", "-",
+                         f->bin_exit, "-", "exit", f->raised);
+    at += (size_t)al_row(text + at, sizeof(text) - at, "slowapp", "-",
+                         f->bin_silent, "-", "silent", f->raised);
+    at += (size_t)al_row(text + at, sizeof(text) - at, "quietapp", "-",
+                         f->bin_quiet, "-", "nohandler", f->raised);
+    at += (size_t)al_row(text + at, sizeof(text) - at, "liarapp", "-",
+                         f->bin_liar, "sigusr1", "nohandler", f->raised);
+    return at < sizeof(text) &&
+           al_write_file(f->env.config_path, text, 0600);
+}
+
+/* The fixture's paths under f->root. bin_dir is an empty directory, so the
+ * built-in skycombat row is never installed here. */
+static bool al_paths(struct al_fx *f)
+{
+    bool ok = al_path(f->env.bin_dir, sizeof(f->env.bin_dir), f->root, "bin") &&
+              mkdir(f->env.bin_dir, 0700) == 0 &&
+              al_path(f->env.config_path, sizeof(f->env.config_path),
+                      f->root, "apps.tsv") &&
+              al_path(f->env.state_dir, sizeof(f->env.state_dir), f->root,
+                      "state/z23/apps") &&
+              al_path(f->raised, sizeof(f->raised), f->root, "raised");
+    return ok &&
+           al_path(f->bin_ready, sizeof(f->bin_ready), f->root, "app-ready") &&
+           al_path(f->bin_exit, sizeof(f->bin_exit), f->root, "app-exit") &&
+           al_path(f->bin_silent, sizeof(f->bin_silent), f->root, "app-silent") &&
+           al_path(f->bin_quiet, sizeof(f->bin_quiet), f->root, "app-quiet") &&
+           al_path(f->bin_liar, sizeof(f->bin_liar), f->root, "app-liar");
+}
+
+static bool al_setup(struct al_fx *f)
+{
+    char fixture[PATH_MAX];
+    memset(f, 0, sizeof(*f));
+    if (!realpath(AL_FIXTURE, fixture) ||
+        !test_mkdtemp(f->root, sizeof(f->root), "app_launch"))
+        return false;
+    f->env.desktop = true;
+    f->env.ready_timeout_ms = 10000;
+    f->env.settle_ms = 200;
+    bool ok = al_paths(f);
+    ok = ok && al_copy_exe(fixture, f->bin_ready, 0700) &&
+         al_copy_exe(fixture, f->bin_exit, 0700) &&
+         al_copy_exe(fixture, f->bin_silent, 0700) &&
+         al_copy_exe(fixture, f->bin_quiet, 0700) &&
+         al_copy_exe(fixture, f->bin_liar, 0700) && al_write_tsv(f);
+    if (ok)
+        app_launch_registry_load(&f->env, &f->reg);
+    return ok;
+}
+
+static void al_open(struct al_fx *f, const char *name)
+{
+    app_launch_open(&f->env, &f->reg, name, &f->res);
+    al_track(f->res.pid);
+}
+
+/* Whether the fixture appended "raised" within 3 s. */
+static bool al_wait_raised(const char *path)
+{
+    int64_t stop = platform_time_monotonic_ms() + 3000;
+    for (;;) {
+        char buf[64] = {0};
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            ssize_t n = read(fd, buf, sizeof(buf) - 1);
+            (void)close(fd);
+            if (n > 0 && strstr(buf, "raised"))
+                return true;
+        }
+        if (platform_time_monotonic_ms() > stop)
+            return false;
+        platform_sleep_ms(20); /* real-clock: waiting on a real child's signal */
+    }
+}
+
+static bool al_alive(long pid)
+{
+    return kill((pid_t)pid, 0) == 0;
+}
+
+/* ── cases ────────────────────────────────────────────────────────────── */
+
+static int case_open_raise_reopen(struct al_fx *f)
+{
+    int failures = 0;
+    long first = 0;
+    TEST("open starts the app and waits for its ready marker") {
+        ASSERT(f->reg.config_error[0] == '\0');
+        ASSERT(f->reg.count == 6u);
+        al_open(f, "fixtureapp");
+        ASSERT_STR_EQ(app_open_status_name(f->res.status), "opened");
+        ASSERT(f->res.pid > 1);
+        ASSERT_STR_EQ(f->res.ready_basis, "marker");
+        ASSERT_STR_EQ(f->res.executable, f->bin_ready);
+        ASSERT_EQ(strlen(f->res.sha256), 64u);
+        ASSERT(strstr(f->res.log_path, "/state/z23/apps/fixtureapp.log"));
+        struct app_launch_record rec;
+        ASSERT(app_launch_record_load(f->env.state_dir, "fixtureapp", &rec));
+        ASSERT_EQ(rec.pid, f->res.pid);
+        ASSERT_STR_EQ(rec.executable, f->bin_ready);
+        first = f->res.pid;
+    PASS(); }
+    TEST("open again by alias raises the same pid instead of a copy") {
+        ASSERT(first > 1);
+        al_open(f, "fx");
+        ASSERT_STR_EQ(app_open_status_name(f->res.status), "already_open");
+        ASSERT_EQ(f->res.pid, first);
+        ASSERT_STR_EQ(f->res.found_by, "record");
+        ASSERT_STR_EQ(app_raise_outcome_name(f->res.raise), "delivered");
+        ASSERT(al_wait_raised(f->raised));
+    PASS(); }
+    TEST("after the app is killed, open starts a new pid") {
+        ASSERT(first > 1);
+        al_kill_all();
+        ASSERT(!al_alive(first));
+        al_open(f, "fixture-alias");
+        ASSERT_STR_EQ(app_open_status_name(f->res.status), "opened");
+        ASSERT(f->res.pid > 1);
+        ASSERT(f->res.pid != first);
+    PASS(); }
+_test_next:;
+    al_kill_all();
+    return failures;
+}
+
+static int case_refusals(struct al_fx *f)
+{
+    int failures = 0;
+    TEST("an unknown name is refused with the known names") {
+        al_open(f, "nosuchapp");
+        ASSERT_STR_EQ(app_open_status_name(f->res.status), "failed");
+        ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "unknown_app");
+        ASSERT(strstr(f->res.message, "nosuchapp"));
+        ASSERT(strstr(f->res.hint, "skycombat"));
+        ASSERT(strstr(f->res.hint, "fixtureapp"));
+        ASSERT_EQ(f->res.pid, 0);
+    PASS(); }
+    TEST("a known app whose executable is missing is not_installed") {
+        al_open(f, "sky");
+        ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "not_installed");
+        ASSERT_STR_EQ(f->res.id, "skycombat");
+        ASSERT(strstr(f->res.message, "z23-skycombat"));
+        ASSERT_STR_EQ(f->res.hint, "build it with make game");
+    PASS(); }
+    TEST("without a desktop session open is refused as no_desktop") {
+        f->env.desktop = false;
+        al_open(f, "fixtureapp");
+        f->env.desktop = true;
+        ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "no_desktop");
+        ASSERT(strstr(f->res.message, "no desktop session on this host"));
+        ASSERT_EQ(f->res.pid, 0);
+    PASS(); }
+    TEST("an app that exits before ready is exited_early with its log") {
+        al_open(f, "crashy");
+        ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "exited_early");
+        ASSERT(f->res.exited);
+        ASSERT_EQ(f->res.exit_code, 3);
+        ASSERT(strstr(f->res.log_tail, "cannot open display"));
+    PASS(); }
+    TEST("an app with no ready marker in time is not_ready and running") {
+        f->env.ready_timeout_ms = 400;
+        al_open(f, "slowapp");
+        f->env.ready_timeout_ms = 10000;
+        ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "not_ready");
+        ASSERT(f->res.pid > 1);
+        ASSERT(al_alive(f->res.pid));
+        ASSERT(strstr(f->res.message, "still running as pid"));
+    PASS(); }
+_test_next:;
+    f->env.desktop = true;
+    f->env.ready_timeout_ms = 10000;
+    al_kill_all();
+    return failures;
+}
+
+/* An app that does not declare raise support is never signalled: the
+ * nohandler fixture would die from SIGUSR1, so "still alive" proves it. */
+static int case_raise_declaration(struct al_fx *f)
+{
+    int failures = 0;
+    long pid = 0;
+    TEST("already_open for an app without raise support sends nothing") {
+        al_open(f, "quietapp");
+        ASSERT_STR_EQ(app_open_status_name(f->res.status), "opened");
+        pid = f->res.pid;
+        al_open(f, "quietapp");
+        ASSERT_STR_EQ(app_open_status_name(f->res.status), "already_open");
+        ASSERT_EQ(f->res.pid, pid);
+        ASSERT_STR_EQ(app_raise_outcome_name(f->res.raise),
+                      "unsupported_by_app");
+        ASSERT(strstr(f->res.raise_note, "no signal was sent"));
+        platform_sleep_ms(100); /* real-clock: a stray signal would land */
+        ASSERT(al_alive(pid));
+        ASSERT(waitpid((pid_t)pid, &(int){0}, WNOHANG) == 0);
+    PASS(); }
+#if defined(__linux__)
+    TEST("a declared raise is not sent to a copy with no handler") {
+        al_open(f, "liarapp");
+        ASSERT_STR_EQ(app_open_status_name(f->res.status), "opened");
+        pid = f->res.pid;
+        al_open(f, "liarapp");
+        ASSERT_STR_EQ(app_open_status_name(f->res.status), "already_open");
+        ASSERT_EQ(f->res.pid, pid);
+        ASSERT_STR_EQ(app_raise_outcome_name(f->res.raise), "no_handler");
+        platform_sleep_ms(100); /* real-clock: a stray signal would land */
+        ASSERT(waitpid((pid_t)pid, &(int){0}, WNOHANG) == 0);
+    PASS(); }
+#endif
+_test_next:;
+    al_kill_all();
+    return failures;
+}
+
+/* Load a one-row apps.tsv at <root>/<leaf> and return the registry error. */
+static const char *al_load_tsv(struct al_fx *f, const char *leaf,
+                               const char *row, mode_t mode)
+{
+    struct app_launch_env env = f->env;
+    if (!al_path(env.config_path, sizeof(env.config_path), f->root, leaf) ||
+        !al_write_file(env.config_path, row, mode))
+        return "(fixture write failed)";
+    app_launch_registry_load(&env, &f->reg);
+    return f->reg.config_error;
+}
+
+static int case_unsafe_tsv(struct al_fx *f)
+{
+    int failures = 0;
+    char row[PATH_MAX + 64], unsafe_exe[PATH_MAX];
+    TEST("a group-writable apps.tsv is refused whole") {
+        ASSERT(chmod(f->env.config_path, 0620) == 0);
+        app_launch_registry_load(&f->env, &f->reg);
+        ASSERT(chmod(f->env.config_path, 0600) == 0);
+        ASSERT(strstr(f->reg.config_error, "not group- or world-writable"));
+        ASSERT(f->reg.count == 1u); /* the built-in rows only */
+        al_open(f, "fixtureapp");
+        ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "config_refused");
+        ASSERT_EQ(f->res.pid, 0);
+    PASS(); }
+    TEST("a relative executable path refuses the file") {
+        const char *why = al_load_tsv(f, "relative.tsv",
+                                      "relapp\t-\tbin/app\t-\t-\n", 0600);
+        ASSERT(strstr(why, "absolute path"));
+        ASSERT(f->reg.count == 1u);
+    PASS(); }
+    TEST("a group-writable executable refuses the file") {
+        ASSERT(al_path(unsafe_exe, sizeof(unsafe_exe), f->root, "app-gw"));
+        ASSERT(al_copy_exe(f->bin_ready, unsafe_exe, 0770));
+        snprintf(row, sizeof(row), "gwapp\t-\t%s\t-\t-\n", unsafe_exe);
+        const char *why = al_load_tsv(f, "gw.tsv", row, 0600);
+        ASSERT(strstr(why, "group- or world-writable"));
+        ASSERT(f->reg.count == 1u);
+    PASS(); }
+    TEST("a name that collides with a built-in refuses the file") {
+        snprintf(row, sizeof(row), "mine\tsky\t%s\t-\t-\n", f->bin_ready);
+        const char *why = al_load_tsv(f, "dup.tsv", row, 0600);
+        ASSERT(strstr(why, "name already used: sky"));
+    PASS(); }
+    TEST("a raise column other than sigusr1 or - refuses the file") {
+        snprintf(row, sizeof(row), "mine\t-\t%s\t-\tyes\n", f->bin_ready);
+        const char *why = al_load_tsv(f, "raise.tsv", row, 0600);
+        ASSERT(strstr(why, "raise must be sigusr1 or -: yes"));
+        snprintf(row, sizeof(row), "mine\t-\t%s\t-\n", f->bin_ready);
+        why = al_load_tsv(f, "short.tsv", row, 0600);
+        ASSERT(strstr(why, "need id, aliases, executable, ready marker and "
+                           "raise"));
+    PASS(); }
+_test_next:;
+    (void)chmod(f->env.config_path, 0600);
+    app_launch_registry_load(&f->env, &f->reg);
+    return failures;
+}
+
+static int case_stale_record(struct al_fx *f)
+{
+    int failures = 0;
+    TEST("a pid record whose pid now runs another program is not open") {
+        char self_exe[APP_LAUNCH_PATH_MAX];
+        uint64_t self_start = 0;
+        ASSERT(app_proc_identity((long)getpid(), self_exe, &self_start));
+        /* The record names this test's own live pid: the pid exists, but it
+         * runs the test binary, not the app. */
+        struct app_launch_record rec = {.pid = getpid(),
+                                        .start_time = self_start};
+        snprintf(rec.id, sizeof(rec.id), "fixtureapp");
+        snprintf(rec.executable, sizeof(rec.executable), "%s", f->bin_ready);
+        ASSERT(app_launch_record_save(f->env.state_dir, &rec));
+        const struct app_launch_entry *e =
+            app_launch_registry_find(&f->reg, "fixtureapp");
+        const char *found = NULL;
+        ASSERT(e != NULL);
+        ASSERT_EQ(app_launch_running_pid(&f->env, e, &found), 0);
+        ASSERT(found == NULL);
+    PASS(); }
+    TEST("a pid record with the right program but another start time is "
+              "not open") {
+        struct app_launch_entry self = {.installed = false};
+        struct app_launch_record rec = {.pid = getpid()};
+        const char *found = NULL;
+        snprintf(self.id, sizeof(self.id), "selfapp");
+        snprintf(rec.id, sizeof(rec.id), "selfapp");
+        ASSERT(app_proc_identity((long)getpid(), self.executable,
+                                 &rec.start_time));
+        snprintf(rec.executable, sizeof(rec.executable), "%s", self.executable);
+        rec.start_time += 1;
+        ASSERT(app_launch_record_save(f->env.state_dir, &rec));
+        ASSERT_EQ(app_launch_running_pid(&f->env, &self, &found), 0);
+        /* Positive control: the exact identity is accepted. */
+        rec.start_time -= 1;
+        ASSERT(app_launch_record_save(f->env.state_dir, &rec));
+        ASSERT_EQ(app_launch_running_pid(&f->env, &self, &found),
+                  (long)getpid());
+        ASSERT_STR_EQ(found, "record");
+    PASS(); }
+    TEST("a malformed pid record is refused by validation") {
+        struct app_launch_record rec = {.pid = 1, .start_time = 1};
+        snprintf(rec.id, sizeof(rec.id), "Bad Id");
+        snprintf(rec.executable, sizeof(rec.executable), "relative");
+        ASSERT(!app_launch_record_save(f->env.state_dir, &rec));
+    PASS(); }
+_test_next:;
+    return failures;
+}
+
+/* ── process environment and the native handlers ──────────────────────── */
+
+struct al_saved_env {
+    const char *key;
+    char *value;
+};
+
+static void al_env_save(struct al_saved_env *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        const char *v = getenv(s[i].key);
+        s[i].value = v ? strdup(v) : NULL;
+    }
+}
+
+static void al_env_restore(struct al_saved_env *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (s[i].value)
+            (void)setenv(s[i].key, s[i].value, 1);
+        else
+            (void)unsetenv(s[i].key);
+        free(s[i].value);
+        s[i].value = NULL;
+    }
+}
+
+static int case_process_env(struct al_fx *f)
+{
+    int failures = 0;
+    struct al_saved_env saved[] = {{"HOME", NULL}, {"DISPLAY", NULL},
+                                   {"WAYLAND_DISPLAY", NULL},
+                                   {"XDG_CONFIG_HOME", NULL},
+                                   {"XDG_STATE_HOME", NULL}};
+    size_t nsaved = sizeof(saved) / sizeof(saved[0]);
+    struct app_launch_env env;
+    char why[256], expect[PATH_MAX];
+    al_env_save(saved, nsaved);
+    TEST("the process environment names apps.tsv, the state dir and "
+              "the desktop") {
+        ASSERT(setenv("HOME", f->root, 1) == 0);
+        ASSERT(unsetenv("XDG_CONFIG_HOME") == 0);
+        ASSERT(unsetenv("XDG_STATE_HOME") == 0);
+        ASSERT(unsetenv("DISPLAY") == 0);
+        ASSERT(unsetenv("WAYLAND_DISPLAY") == 0);
+        ASSERT(app_launch_env_from_process(&env, why, sizeof(why)));
+        snprintf(expect, sizeof(expect), "%s/.config/z23/apps.tsv", f->root);
+        ASSERT_STR_EQ(env.config_path, expect);
+        snprintf(expect, sizeof(expect), "%s/.local/state/z23/apps", f->root);
+        ASSERT_STR_EQ(env.state_dir, expect);
+        ASSERT_EQ(env.ready_timeout_ms, APP_LAUNCH_READY_TIMEOUT_MS);
+#if defined(__linux__)
+        ASSERT(!env.desktop);
+        ASSERT(setenv("WAYLAND_DISPLAY", "wayland-0", 1) == 0);
+        ASSERT(app_launch_env_from_process(&env, why, sizeof(why)));
+        ASSERT(env.desktop);
+#endif
+        ASSERT(env.bin_dir[0] == '/');
+    PASS(); }
+_test_next:;
+    al_env_restore(saved, nsaved);
+    return failures;
+}
+
+static int case_handlers(struct al_fx *f)
+{
+    int failures = 0;
+    struct al_saved_env saved[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL},
+                                   {"XDG_STATE_HOME", NULL}};
+    size_t nsaved = sizeof(saved) / sizeof(saved[0]);
+    struct json_value input;
+    struct zcl_command_reply reply = {0};
+    struct zcl_command_request request = {.input = &input, .view = "normal"};
+    al_env_save(saved, nsaved);
+    json_init(&input);
+    json_set_object(&input);
+    TEST("app.open without a name is refused as MISSING_NAME") {
+        ASSERT(setenv("HOME", f->root, 1) == 0);
+        ASSERT(unsetenv("XDG_CONFIG_HOME") == 0);
+        ASSERT(unsetenv("XDG_STATE_HOME") == 0);
+        request.invoked_name = "app.open";
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_handle_app_open(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(reply.error.code, "MISSING_NAME");
+        zcl_command_reply_free(&reply);
+    PASS(); }
+    TEST("app.open of an unknown name is UNKNOWN_APP with next app.list") {
+        ASSERT(json_push_kv_str(&input, "name", "nosuchapp"));
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_handle_app_open(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")),
+                      "unknown_app");
+        ASSERT(strstr(json_get_str(json_get(&reply.data, "hint")), "skycombat"));
+        ASSERT_EQ(reply.next_count, 1u);
+        ASSERT_STR_EQ(reply.next[0].command, "app.list");
+    PASS(); }
+_test_next:;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    al_env_restore(saved, nsaved);
+    return failures;
+}
+
+/* A stranger with only the public words finds app.open. */
+static int case_discover(void)
+{
+    int failures = 0;
+    static const char *const queries[] = {"airplane", "skycombat", "game",
+                                          "sky combat", "play a game"};
+    static char out[16384];
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    for (size_t q = 0; q < sizeof(queries) / sizeof(queries[0]); q++) {
+        TEST("discover search finds app.open") {
+            test_note("query: %s", queries[q]);
+            size_t n = zcl_command_registry_search_json(reg, queries[q], out,
+                                                        sizeof(out));
+            ASSERT(n > 0 && n < sizeof(out));
+            ASSERT(strstr(out, "\"path\":\"app.open\""));
+        PASS(); }
+    _test_next:;
+    }
+    return failures;
+}
+
+int test_app_launch(void);
+int test_app_launch(void)
+{
+    int failures = 0;
+    static struct al_fx f;
+    TEST("fixture: the stand-in app and a temporary apps.tsv") {
+        ASSERT(al_setup(&f));
+    PASS(); }
+_test_next:
+    if (failures)
+        return failures;
+    failures += case_open_raise_reopen(&f);
+    failures += case_refusals(&f);
+    failures += case_raise_declaration(&f);
+    failures += case_unsafe_tsv(&f);
+    failures += case_stale_record(&f);
+    failures += case_process_env(&f);
+    failures += case_handlers(&f);
+    failures += case_discover();
+    al_kill_all();
+    return failures;
+}
+
+#else
+
+int test_app_launch(void);
+int test_app_launch(void)
+{
+    printf("SKIP (app_launch: desktop launch is POSIX-only)\n");
+    return 0;
+}
+
+#endif

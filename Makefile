@@ -7997,6 +7997,14 @@ $(PROCESS_GROUP_EXEC_BIN): tools/process_group_exec.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -o $@ $<
 
+# Stand-in desktop app for the app_launch group: prints a ready marker,
+# records SIGUSR1, exits on SIGTERM. Needs no display.
+.PHONY: app-launch-fixture
+app-launch-fixture: $(BIN_DIR)/z23-app-launch-fixture
+$(BIN_DIR)/z23-app-launch-fixture: tests/fixtures/app_launch/fixture_app.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -o $@ $<
+
 # zcl-portfwd: tiny self-contained userspace TCP forwarder that maps public
 # 443/80 -> the node's unprivileged high ports (8443/8080). It is the ONE file
 # that gets cap_net_bind_service (via tools/scripts/zcl-portfwd-setup.sh), so

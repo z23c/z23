@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_app_launch_process.c", CAP_PROCESS|CAP_FS_READ|CAP_CLOCK, "z23 app open: posix_spawns a listed desktop app detached with its output in an owner-private log, signals SIGUSR1 only to an app that declares raise support, reads /proc to verify a pid's executable and start time, and polls the log for the ready marker on a bounded clock")

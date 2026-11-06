@@ -45,6 +45,13 @@ bool mcp_policy_allows(const struct zcl_command_spec *spec,
  * policy. */
 bool mcp_policy_fleet_write(const struct zcl_command_spec *spec);
 
+/* The one mutation the dedicated apps_open tool runs without a plan or
+ * confirm flow: app.open, while it stays an app-layer app-write mutation
+ * outside the owner authority. It starts or raises only a program this
+ * binary names or the owner listed in apps.tsv, with fixed argv; the agent
+ * supplies only the name. z23_run keeps the plain policy for app.open. */
+bool mcp_policy_app_open(const struct zcl_command_spec *spec);
+
 /* True when the leaf can return wallet-private data: it declares the wallet
  * request capability, or it is one of the named amount-bearing leaves that do
  * not (metaverse custody reports, agent grant and spend telemetry, store purchases).

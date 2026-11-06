@@ -466,13 +466,15 @@ static int case_not_toplevel(const char *home, const char *checkout)
 static int case_list(struct ms *m)
 {
     int failures = 0;
-    TEST_CASE("tools/list holds exactly the four tools") {
+    TEST_CASE("tools/list holds exactly the six tools") {
         size_t names = 0;
         ASSERT(ms_call(m, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":"
                           "\"tools/list\"}"));
-        for (const char *p = m->line; (p = strstr(p, "\"name\":")); p++)
+        /* "name":" is a tool name; apps_open's schema key is "name":{. */
+        for (const char *p = m->line; (p = strstr(p, "\"name\":\"")); p++)
             names++;
-        ASSERT_EQ(names, 4u);
+        ASSERT_EQ(names, 6u);
+        ASSERT(has(m, "\"name\":\"apps_list\"") && has(m, "\"name\":\"apps_open\""));
         ASSERT(has(m, "\"name\":\"z23_search\""));
         ASSERT(has(m, "\"name\":\"z23_describe\""));
         ASSERT(has(m, "\"name\":\"z23_run\""));

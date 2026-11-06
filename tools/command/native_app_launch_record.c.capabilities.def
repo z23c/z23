@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_app_launch_record.c", CAP_FS_READ|CAP_FS_WRITE, "z23 app open: creates the owner-private state directory and saves and loads each launched app's pid record (temp file, fsync, rename, directory fsync)")
