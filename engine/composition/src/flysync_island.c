@@ -970,16 +970,18 @@ bool flysync_island_wants_offer_height(int32_t height)
     return fsi_rung_at(height) != NULL;
 }
 
-/* Every boot whose durable state is FELL_BACK: the loader relinked the island
- * rows from their durable records; detach them again until normal sync gives
- * the root its parent (then the root has one and nothing is detached). With
- * no fact (a fall-back before seeding) there is nothing to detach. */
 /* The canonical forward pass over every entry at or above the island root's
  * height, in height order: each one's work is derived again from its stored
  * links. The loader's work is stale above rows that rejoined in memory only
  * and were not saved relinked. Entries below the root are left as loaded.
  * It runs before the detach: after it, the pass would hand the detached rows
- * their own proof again. */
+ * their own proof again.
+ * The pass also rewrites nChainTx, the skip link, the cached branch id and
+ * the failed-child bit of each entry from its parent, as the loader's own
+ * pass does at every boot. nChainTx follows the loader's rule: the parent's
+ * nChainTx plus nTx, 0 when the parent has none, so a still-detached or
+ * parentless row starts its own count. Every entry gets the value the loader
+ * would derive from these links; nothing below the root changes. */
 static void fsi_forward_pass_from(struct main_state *ms, int32_t root_h)
 {
     struct fsi_rows up = {0};
@@ -1003,6 +1005,10 @@ static void fsi_forward_pass_from(struct main_state *ms, int32_t root_h)
     free(up.v);
 }
 
+/* Every boot whose durable state is FELL_BACK: run the forward pass above,
+ * retire the fact once the rung row is on the chain, otherwise detach what is
+ * still off it. With no fact (a fall-back before seeding) there is nothing to
+ * detach. */
 static void fsi_boot_detach_fallen_back(struct main_state *ms)
 {
     sqlite3 *db = progress_store_db();
