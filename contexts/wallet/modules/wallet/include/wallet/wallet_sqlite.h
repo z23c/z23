@@ -351,7 +351,8 @@ bool wallet_sqlite_diversifier_reserve(
     uint8_t diversifier_out[ZC_DIVERSIFIER_SIZE], uint8_t pk_d_out[32]);
 
 /* True while the connection runs at synchronous=OFF, the node's bulk-sync
- * mode. wallet_sqlite_diversifier_reserve issues nothing then. */
+ * mode, or when the level cannot be read (unknown is not "syncing").
+ * wallet_sqlite_diversifier_reserve issues nothing then. */
 bool wallet_sqlite_unsynced(struct wallet_sqlite *ws);
 
 #ifdef ZCL_TESTING

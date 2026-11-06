@@ -17,6 +17,7 @@
 #include "storage/coins_kv.h"
 #include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"
+#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 #include "util/stage.h"
 
@@ -122,18 +123,39 @@ static void cdb_set_err(char *errbuf, size_t errcap, const char *fmt, ...)
     va_end(ap);
 }
 
-static bool cdb_table_exists(sqlite3 *db, const char *name)
+/* ZCL_STEP_ROW present, ZCL_STEP_DONE absent, ZCL_STEP_ERROR unknown (a
+ * prepare or step failure, logged): a failed read is never "no table". */
+static enum zcl_step cdb_table_presence(sqlite3 *db, const char *name)
 {
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(
             db,
             "SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1",
-            -1, &st, NULL) != SQLITE_OK)
-        return false;
+            -1, &st, NULL) != SQLITE_OK) {
+        LOG_WARN("consensus_db", "table probe %s: prepare failed: %s", name,
+                 sqlite3_errmsg(db));
+        return ZCL_STEP_ERROR;
+    }
     sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
-    bool found = sqlite3_step(st) == SQLITE_ROW; // raw-sql-ok:progress-kv-kernel-store
+    enum zcl_step step = ar_step_checked(st, "consensus_db: table probe", NULL);
     sqlite3_finalize(st);
-    return found;
+    return step;
+}
+
+/* Positive evidence only: an unknown answer is "not proven present". */
+static bool cdb_table_exists(sqlite3 *db, const char *name)
+{
+    return cdb_table_presence(db, name) == ZCL_STEP_ROW;
+}
+
+/* Record a mid-enumeration step failure: the loop that ended on it did not
+ * see every row, so its caller must not report the pass complete. */
+static bool cdb_scan_failed(sqlite3 *db, const char *what, char *errbuf,
+                            size_t errcap)
+{
+    cdb_set_err(errbuf, errcap, "consensus_db: %s step failed: %s", what,
+                sqlite3_errmsg(db));
+    return false;
 }
 
 /* Durable row count of `table`. A missing table (or a prepare error) yields 0
@@ -250,9 +272,12 @@ static bool cdb_copy_table(sqlite3 *db, const char *name, char *errbuf,
         return false;
     }
     sqlite3_bind_text(chk, 1, name, -1, SQLITE_STATIC);
-    bool src_has = sqlite3_step(chk) == SQLITE_ROW; // raw-sql-ok:progress-kv-kernel-store
+    enum zcl_step src_has = ar_step_checked(chk, "consensus_db: src schema probe",
+                                            NULL);
     sqlite3_finalize(chk);
-    if (!src_has)
+    if (src_has == ZCL_STEP_ERROR)
+        return cdb_scan_failed(db, "src schema probe", errbuf, errcap);
+    if (src_has == ZCL_STEP_DONE)
         return true; /* nothing to copy for this table */
 
     char sql[128];
@@ -370,7 +395,9 @@ static bool cdb_ddl_copy_indexes(sqlite3 *db, const char *name, char *errbuf,
     }
     sqlite3_bind_text(ix, 1, name, -1, SQLITE_STATIC);
     bool ok = true;
-    while (ok && sqlite3_step(ix) == SQLITE_ROW) { // raw-sql-ok:progress-kv-kernel-store
+    enum zcl_step step = ZCL_STEP_DONE;
+    while (ok && (step = ar_step_checked(ix, "consensus_db: index enumerate",
+                                         NULL)) == ZCL_STEP_ROW) {
         const unsigned char *t = sqlite3_column_text(ix, 0);
         if (!t) continue;
         char one[2048];
@@ -385,6 +412,8 @@ static bool cdb_ddl_copy_indexes(sqlite3 *db, const char *name, char *errbuf,
         if (err) { sqlite3_free(err); err = NULL; }
     }
     sqlite3_finalize(ix);
+    if (ok && step == ZCL_STEP_ERROR)
+        return cdb_scan_failed(db, "index enumerate", errbuf, errcap);
     return ok;
 }
 
@@ -425,7 +454,9 @@ static bool cdb_copy_nonstay_tables(sqlite3 *db, char *errbuf, size_t errcap)
         return false;
     }
     bool ok = true;
-    while (ok && sqlite3_step(st) == SQLITE_ROW) { // raw-sql-ok:progress-kv-kernel-store
+    enum zcl_step step = ZCL_STEP_DONE;
+    while (ok && (step = ar_step_checked(st, "consensus_db: src table enumerate",
+                                         NULL)) == ZCL_STEP_ROW) {
         const unsigned char *nm = sqlite3_column_text(st, 0);
         if (!nm) continue;
         char name[128];
@@ -438,8 +469,14 @@ static bool cdb_copy_nonstay_tables(sqlite3 *db, char *errbuf, size_t errcap)
             ok = cdb_ddl_copy_table(db, name, errbuf, errcap); /* Class B/D + any */
     }
     sqlite3_finalize(st);
+    /* A truncated enumeration would leave tables behind for the repointed
+     * kernel handle to auto-recreate empty. */
+    if (ok && step == ZCL_STEP_ERROR)
+        return cdb_scan_failed(db, "src table enumerate", errbuf, errcap);
     return ok;
 }
+
+static bool cdb_verify_extra_tables(sqlite3 *db, char *errbuf, size_t errcap);
 
 /* Prove the copy is complete: for every source non-STAY table, the destination
  * row count EQUALS the source. This is the row-level completeness proof that
@@ -458,7 +495,9 @@ static bool cdb_verify_nonstay_counts(sqlite3 *db, char *errbuf, size_t errcap)
         return false;
     }
     bool ok = true;
-    while (ok && sqlite3_step(st) == SQLITE_ROW) { // raw-sql-ok:progress-kv-kernel-store
+    enum zcl_step step = ZCL_STEP_DONE;
+    while (ok && (step = ar_step_checked(st, "consensus_db: verify enumerate",
+                                         NULL)) == ZCL_STEP_ROW) {
         const unsigned char *nm = sqlite3_column_text(st, 0);
         if (!nm) continue;
         char name[128];
@@ -477,10 +516,18 @@ static bool cdb_verify_nonstay_counts(sqlite3 *db, char *errbuf, size_t errcap)
     sqlite3_finalize(st);
     if (!ok)
         return false;
+    /* Tables after a failed step were never compared: no completeness proof. */
+    if (step == ZCL_STEP_ERROR)
+        return cdb_scan_failed(db, "verify enumerate", errbuf, errcap);
+    return cdb_verify_extra_tables(db, errbuf, errcap);
+}
 
-    /* Positive assertion: every documented Class B/D table that EXISTS in the
-     * source MUST exist in the destination (guards a regression that stops
-     * moving one — e.g. a name accidentally added to the STAY list). */
+/* Positive assertion: every documented Class B/D table that EXISTS in the
+ * source MUST exist in the destination (guards a regression that stops
+ * moving one — e.g. a name accidentally added to the STAY list). A probe
+ * that cannot answer fails the assertion. */
+static bool cdb_verify_extra_tables(sqlite3 *db, char *errbuf, size_t errcap)
+{
     sqlite3_stmt *chk = NULL;
     if (sqlite3_prepare_v2(
             db, "SELECT 1 FROM src.sqlite_schema WHERE type='table' AND name=?1",
@@ -489,11 +536,16 @@ static bool cdb_verify_nonstay_counts(sqlite3 *db, char *errbuf, size_t errcap)
                     sqlite3_errmsg(db));
         return false;
     }
+    bool ok = true;
     for (size_t i = 0; ok && i < KERNEL_COPY_EXTRA_COUNT; i++) {
         sqlite3_reset(chk);
         sqlite3_bind_text(chk, 1, KERNEL_COPY_EXTRA[i], -1, SQLITE_STATIC);
-        bool src_has = sqlite3_step(chk) == SQLITE_ROW; // raw-sql-ok:progress-kv-kernel-store
-        if (src_has && !cdb_table_exists(db, KERNEL_COPY_EXTRA[i])) {
+        enum zcl_step src_has = ar_step_checked(
+            chk, "consensus_db: extra-table probe", NULL);
+        if (src_has == ZCL_STEP_ERROR) {
+            ok = cdb_scan_failed(db, "extra-table probe", errbuf, errcap);
+        } else if (src_has == ZCL_STEP_ROW &&
+                   !cdb_table_exists(db, KERNEL_COPY_EXTRA[i])) {
             cdb_set_err(errbuf, errcap,
                         "consensus_db: kernel table %s present in source but "
                         "missing from consensus.db (incomplete migration)",
@@ -534,7 +586,17 @@ cdb_migrate_read_source(const char *ppath,
         if (src) sqlite3_close(src);
         return CDB_SRC_FAIL;
     }
-    if (!cdb_table_exists(src, "coins")) {
+    enum zcl_step coins = cdb_table_presence(src, "coins");
+    if (coins == ZCL_STEP_ERROR) {
+        /* Unknown is not "uninitialised": a skip would let the kernel be
+         * recreated empty over a progress.kv that holds coins. */
+        cdb_set_err(errbuf, errcap,
+                    "consensus_db: source %s coins-table probe failed: %s",
+                    ppath, sqlite3_errmsg(src));
+        sqlite3_close(src);
+        return CDB_SRC_FAIL;
+    }
+    if (coins == ZCL_STEP_DONE) {
         /* progress.kv present but uninitialised — nothing to migrate. */
         sqlite3_close(src);
         return CDB_SRC_SKIP;

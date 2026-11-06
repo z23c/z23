@@ -103,7 +103,11 @@ static bool collect_nullifiers(struct sqlite3 *db, int64_t height,
                                uint8_t **buf_out, uint64_t *count_out)
 {
     *buf_out = NULL; *count_out = 0;
-    if (!nullifier_kv_table_exists(db))
+    int present = nullifier_kv_table_presence(db);
+    if (present < 0)
+        LOG_FAIL("snap_shielded", "collect: nullifier table probe failed; "
+                 "refusing an artifact without its nullifier set");
+    if (present == 0)
         return true;   /* no set yet — v3 with an empty nullifier section */
 
     sqlite3_stmt *s = NULL;

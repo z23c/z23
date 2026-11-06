@@ -7,6 +7,7 @@
 #include "jobs/reducer_frontier.h"
 #include "platform/time_compat.h"
 #include "storage/progress_store.h"
+#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 #include "support/log_throttle.h"
 
@@ -87,9 +88,13 @@ static bool column_exists(sqlite3 *db, const char *table, const char *col)
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
         return false;
-    bool found = sqlite3_step(st) == SQLITE_ROW;  // raw-sql-ok:progress-kv-kernel-store
+    /* A failed probe answers "present": the split scan then references the
+     * witness, so it either checks it or its PREPARE fails and the H* fold
+     * errors. Reading the failure as "absent" would drop the check silently. */
+    enum zcl_step step = ar_step_checked(st, "reducer: witness column probe",
+                                         NULL);
     sqlite3_finalize(st);
-    return found;
+    return step != ZCL_STEP_DONE;
 }
 
 /* Clamp H* below the first missing, malformed, or mixed-fork binding.  Every

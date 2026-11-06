@@ -31,6 +31,7 @@
 #include "script/script.h"
 #include "storage/coins_ram.h"
 #include "storage/progress_store.h"
+#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 
 #include <sqlite3.h>
@@ -497,9 +498,9 @@ int coins_kv_exists_sqlite_checked(sqlite3 *db, const uint8_t txid[32],
         sqlite3_finalize(s);
         return -1;
     }
-    rc = sqlite3_step(s);  // raw-sql-ok:progress-kv-kernel-store
+    enum zcl_step step = ar_step_checked(s, "coins_kv: exists probe", NULL);
     sqlite3_finalize(s);
-    return rc == SQLITE_ROW ? 1 : rc == SQLITE_DONE ? 0 : -1;
+    return step == ZCL_STEP_ROW ? 1 : step == ZCL_STEP_DONE ? 0 : -1;
 }
 
 bool coins_kv_exists_sqlite_cached(sqlite3 *db, sqlite3_stmt **cache,
@@ -516,6 +517,13 @@ bool coins_kv_exists(sqlite3 *db, const uint8_t txid[32], uint32_t vout)
     if (coins_kv_overlay_safe())
         return coins_ram_exists(txid, vout);
     return coins_kv_exists_sqlite(db, txid, vout);
+}
+
+int coins_kv_exists_checked(sqlite3 *db, const uint8_t txid[32], uint32_t vout)
+{
+    if (coins_kv_overlay_safe())
+        return coins_ram_exists_checked(txid, vout);
+    return coins_kv_exists_sqlite_checked(db, txid, vout);
 }
 
 /* Bind (txid,vout), step, and extract the (value,script) column set; reset
@@ -718,7 +726,9 @@ bool coins_kv_get_coins_sqlite(sqlite3 *db, const uint8_t txid[32],
 
     uint32_t max_vout = 0;
     int nrows = 0, height = 0, is_coinbase = 0;
-    while (sqlite3_step(s) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
+    enum zcl_step step;
+    while ((step = ar_step_checked(s, "coins_kv: get_coins size scan", NULL)) ==
+           ZCL_STEP_ROW) {
         uint32_t vi = (uint32_t)sqlite3_column_int(s, 0);
         if (nrows == 0) {
             height      = sqlite3_column_int(s, 3);
@@ -727,7 +737,7 @@ bool coins_kv_get_coins_sqlite(sqlite3 *db, const uint8_t txid[32],
         if (vi > max_vout) max_vout = vi;
         nrows++;
     }
-    if (nrows == 0) {
+    if (nrows == 0 || step == ZCL_STEP_ERROR) {
         sqlite3_finalize(s);
         return false;
     }
@@ -742,7 +752,8 @@ bool coins_kv_get_coins_sqlite(sqlite3 *db, const uint8_t txid[32],
 
     sqlite3_reset(s);
     sqlite3_bind_blob(s, 1, txid, 32, SQLITE_STATIC);
-    while (sqlite3_step(s) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
+    while ((step = ar_step_checked(s, "coins_kv: get_coins fill scan", NULL)) ==
+           ZCL_STEP_ROW) {
         uint32_t vi = (uint32_t)sqlite3_column_int(s, 0);
         if (vi >= out->num_vout) continue;
         out->vout[vi].value = sqlite3_column_int64(s, 1);
@@ -755,8 +766,14 @@ bool coins_kv_get_coins_sqlite(sqlite3 *db, const uint8_t txid[32],
             out->vout[vi].script_pub_key.size = slen;
         }
     }
-    coins_cleanup(out);
     sqlite3_finalize(s);
+    if (step == ZCL_STEP_ERROR) {
+        /* Unfilled vouts would read as spent: never hand back a partial set. */
+        coins_free(out);
+        coins_init(out);
+        return false;
+    }
+    coins_cleanup(out);
     return true;
 }
 

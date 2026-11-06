@@ -121,7 +121,9 @@ bool db_utxo_refresh_caches_for_address(struct node_db *ndb,
 typedef bool (*db_utxo_each_fn)(const struct db_utxo *u, void *ctx);
 
 /* Iterate all UTXOs in canonical (txid, vout) order.
- * Calls fn for each UTXO. Returns number of UTXOs visited.
+ * Calls fn for each UTXO. Returns number of UTXOs visited, or -1 when the
+ * walk could not run to its end (a prepare or step error, logged): a short
+ * walk is never reported as the whole set.
  * Uses a single cursor on ndb — no separate connection. */
 int64_t db_utxo_each(struct node_db *ndb, db_utxo_each_fn fn, void *ctx);
 

@@ -84,8 +84,14 @@ bool coins_kv_add_many(struct sqlite3 *db, const struct coins_kv_add_row *rows,
 bool coins_kv_spend_many(struct sqlite3 *db,
                          const struct coins_kv_spend_row *rows, size_t count);
 
-/* True iff (txid,vout) is currently live (unspent). */
+/* True iff (txid,vout) is currently live (unspent). A read error is false. */
 bool coins_kv_exists(struct sqlite3 *db, const uint8_t txid[32], uint32_t vout);
+
+/* coins_kv_exists with the error kept apart: 1 live, 0 absent, -1 the read
+ * failed (logged). Same overlay dispatch. A caller that would ADD a coin, or
+ * skip a refusal, on "absent" must use this one. */
+int coins_kv_exists_checked(struct sqlite3 *db, const uint8_t txid[32],
+                            uint32_t vout);
 
 /* Point-read one live output (txid,vout). Returns true iff the output is
  * currently live (unspent), filling value/script via the non-NULL out-pointers.

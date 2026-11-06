@@ -180,7 +180,11 @@ static enum suffix_spend_outcome suffix_restore_one_spend(
             &value, script, &script_len, creator_height,
             &is_coinbase))
         return SUFFIX_SPEND_UNPROVEN;
-    bool live = coins_kv_exists(db, op->hash.data, op->n);
+    /* An unreadable live state proves nothing: never restore or pass on it. */
+    int live_rc = coins_kv_exists_checked(db, op->hash.data, op->n);
+    if (live_rc < 0)
+        return SUFFIX_SPEND_UNPROVEN;
+    bool live = live_rc > 0;
     if (*creator_height < applied_first) {
         if (live) {
             if (!live_coin_matches(db, op, value, script, script_len,

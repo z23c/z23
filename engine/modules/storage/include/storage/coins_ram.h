@@ -155,6 +155,10 @@ bool coins_ram_get_prevout(const uint8_t txid[32], uint32_t vout,
 /* Mirror coins_kv_exists over the effective set. */
 bool coins_ram_exists(const uint8_t txid[32], uint32_t vout);
 
+/* coins_ram_exists with the cold durable read's error kept apart: 1 live,
+ * 0 absent, -1 inactive overlay or a failed durable read. */
+int coins_ram_exists_checked(const uint8_t txid[32], uint32_t vout);
+
 /* Mirror coins_kv_get_coins: reconstruct a `struct coins` for `txid` from the
  * effective live set (RAM overlay merged over the durable rows). Returns false
  * (num_vout==0) when the txid has no live output anywhere. */

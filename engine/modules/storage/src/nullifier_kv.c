@@ -11,6 +11,7 @@
 
 #include "storage/anchor_kv.h"
 #include "storage/progress_store.h"
+#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 
 #include <sqlite3.h>
@@ -669,20 +670,25 @@ bool shielded_history_reset_to_boundary(sqlite3 *db,
     return ok;
 }
 
-bool nullifier_kv_table_exists(sqlite3 *db)
+int nullifier_kv_table_presence(sqlite3 *db)
 {
-    if (!db) return false;
+    if (!db) return -1;
     sqlite3_stmt *s = NULL;
     if (sqlite3_prepare_v2(db,
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nullifiers'",
         -1, &s, NULL) != SQLITE_OK) {
         LOG_WARN("nullifier_kv", "[nullifier_kv] table_exists prepare: %s",
                  sqlite3_errmsg(db));
-        return false;
+        return -1;
     }
-    bool found = sqlite3_step(s) == SQLITE_ROW;  // raw-sql-ok:progress-kv-kernel-store
+    enum zcl_step step = ar_step_checked(s, "nullifier_kv: table probe", NULL);
     sqlite3_finalize(s);
-    return found;
+    return step == ZCL_STEP_ROW ? 1 : step == ZCL_STEP_DONE ? 0 : -1;
+}
+
+bool nullifier_kv_table_exists(sqlite3 *db)
+{
+    return nullifier_kv_table_presence(db) == 1;
 }
 
 bool nullifier_kv_row_count(sqlite3 *db, int pool, int64_t *count_out)

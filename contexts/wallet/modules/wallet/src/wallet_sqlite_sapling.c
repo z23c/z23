@@ -540,14 +540,21 @@ static int wsql_synchronous_level(sqlite3 *db)
     if (sqlite3_prepare_v2(db, "PRAGMA synchronous", -1, &s, NULL) !=
             SQLITE_OK || !s)
         return -1;
-    int level = sqlite3_step(s) == SQLITE_ROW ? sqlite3_column_int(s, 0) : -1;  // raw-sql-ok:wallet-pragma-read
+    int level = ar_step_checked(s, "wallet_sqlite: synchronous level read",
+                                NULL) == ZCL_STEP_ROW
+                    ? sqlite3_column_int(s, 0) : -1;
     sqlite3_finalize(s);
     return level;
 }
 
+/* A level that cannot be read is not proof of syncing: it counts as unsynced,
+ * so the address gates that ask refuse rather than issue. */
 bool wallet_sqlite_unsynced(struct wallet_sqlite *ws)
 {
-    return ws && ws->open && wsql_synchronous_level(ws->db) == 0;
+    if (!ws || !ws->open)
+        return false;
+    int level = wsql_synchronous_level(ws->db);
+    return level <= 0;
 }
 
 static bool wsql_set_synchronous(sqlite3 *db, int level)

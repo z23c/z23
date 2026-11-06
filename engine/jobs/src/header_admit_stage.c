@@ -25,6 +25,7 @@
 #include "storage/event_log_singleton.h"
 #include "jobs/block_header_emit.h"
 #include "storage/progress_store.h"
+#include "util/ar_step_readonly.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -299,7 +300,11 @@ static bool log_row_active_match(sqlite3_stmt *st, int height,
     sqlite3_reset(st);
     sqlite3_clear_bindings(st);
     sqlite3_bind_int(st, 1, height);
-    if (sqlite3_step(st) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
+    enum zcl_step step = ar_step_checked(st, "header_admit: reorg audit row",
+                                         NULL);
+    if (step == ZCL_STEP_ERROR)
+        return false;  /* not "no durable row": the audit cannot vouch */
+    if (step == ZCL_STEP_ROW) {
         const void *blob = sqlite3_column_blob(st, 0);
         int nb = sqlite3_column_bytes(st, 0);
         if (blob && nb == 32) {

@@ -475,6 +475,17 @@ bool coins_ram_exists(const uint8_t txid[32], uint32_t vout)
     return coins_kv_exists_sqlite_cached(G.db, &G.rd_exists, txid, vout);
 }
 
+int coins_ram_exists_checked(const uint8_t txid[32], uint32_t vout)
+{
+    if (!coins_ram_active() || !txid) return -1;
+    bool found = false;
+    size_t i = probe(txid, vout, &found);
+    if (found)
+        return G.slots[i].state == SLOT_LIVE ? 1 : 0;
+    /* Cold miss: a fresh statement (repair paths, not the fold hot path). */
+    return coins_kv_exists_sqlite_checked(G.db, txid, vout);
+}
+
 struct get_coins_meta {
     uint32_t max_vout;
     bool any;

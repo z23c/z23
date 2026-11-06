@@ -7,6 +7,7 @@
 #include "jobs/stage_row_itag.h"
 #include "event/event.h"
 #include "platform/time_compat.h"
+#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 #include "support/log_throttle.h"
 #include "util/safe_alloc.h"
@@ -189,7 +190,9 @@ bool reducer_frontier_itag_column_present(sqlite3 *db, const char *table)
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
         return false;  // raw-return-ok:absent-column-means-skip-verify
     bool present = false;
-    while (sqlite3_step(st) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
+    enum zcl_step step;
+    while ((step = ar_step_checked(st, "reducer: itag column probe", NULL)) ==
+           ZCL_STEP_ROW) {
         const unsigned char *name = sqlite3_column_text(st, 1);  /* col 1 = name */
         if (name && strcmp((const char *)name, "itag") == 0) {
             present = true;
@@ -197,5 +200,7 @@ bool reducer_frontier_itag_column_present(sqlite3 *db, const char *table)
         }
     }
     sqlite3_finalize(st);
-    return present;
+    /* A probe cut short answers "present": the fold then selects itag and
+     * either verifies it or fails its PREPARE, never skipping verification. */
+    return present || step == ZCL_STEP_ERROR;
 }

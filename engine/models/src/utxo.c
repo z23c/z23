@@ -14,6 +14,7 @@
 
 #include "models/utxo.h"
 #include "models/tx_index.h"
+#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 #include "event/event.h"
 #include "crypto/sha3.h"
@@ -518,10 +519,12 @@ int64_t db_utxo_each(struct node_db *ndb, db_utxo_each_fn fn, void *ctx)
     AR_PREPARE_RET(ndb, s,
         "SELECT txid, vout, value, script, height, is_coinbase, "
         "script_type, address_hash FROM utxos ORDER BY txid, vout",
-        0);
+        -1);
 
     int64_t count = 0;
-    while (sqlite3_step(s) == SQLITE_ROW) {  // raw-sql-ok:read-only-introspection
+    enum zcl_step step;
+    while ((step = ar_step_checked(s, "utxo: iterate utxos", NULL)) ==
+           ZCL_STEP_ROW) {
         struct db_utxo u;
         memset(&u, 0, sizeof(u));
 
@@ -549,6 +552,10 @@ int64_t db_utxo_each(struct node_db *ndb, db_utxo_each_fn fn, void *ctx)
         if (!fn(&u, ctx)) break;
     }
     AR_FINALIZE(s);
+    /* A failed step ends the walk short: that is not the whole set. */
+    if (step == ZCL_STEP_ERROR)
+        LOG_ERR("utxo", "utxo iteration stopped by a step error after %lld "
+                "rows", (long long)count);
     return count;
 }
 
@@ -750,8 +757,10 @@ int64_t db_utxo_serialize_snapshot(struct node_db *ndb,
         .failed = false
     };
 
-    if (snap_begin_chunk(&w))
-        db_utxo_each(ndb, snap_write_utxo, &w);
+    /* A walk the database cut short is a truncated set: a snapshot over it
+     * would carry a valid-looking commitment over the wrong set. */
+    if (snap_begin_chunk(&w) && db_utxo_each(ndb, snap_write_utxo, &w) < 0)
+        w.failed = true;
 
     /* Flush final partial chunk */
     if (!w.failed && w.entries_in_chunk > 0)

@@ -591,7 +591,13 @@ bool boot_wallet_rebuild_probe(sqlite3 *db, bool *has_utxos, bool *has_keys)
 static bool boot_receive_utxo_snapshot(struct node_db *ndb, const char *path,
     off_t source_size, bool *has_snapshot)
 {
-    int64_t existing_utxos = node_db_utxo_count(ndb);
+    int64_t existing_utxos = 0;
+    /* Unknown is neither "imported" nor "empty": stop here, keep the datadir. */
+    if (!node_db_utxo_count_checked(ndb, &existing_utxos)) {
+        LOG_WARN("boot_snapshot_import", "cannot read the utxo row count; "
+            "refusing to decide whether the snapshot is imported");
+        return false;
+    }
     if (existing_utxos > 1000) {
         printf("=== UTXO snapshot already imported (%lld UTXOs, %.0f MB on disk) ===\n",
             (long long)existing_utxos, (double)source_size / (1024.0 * 1024.0));

@@ -120,6 +120,7 @@ enum cb_insert_step {
     CB_STEP_KEY_FAILED,
     CB_STEP_VALUE_OVERFLOW,
     CB_STEP_MARKER_FAILED,
+    CB_STEP_READ_FAILED,    /* absence unknown: never insert on it */
 };
 
 /* Steps 2-4 for one outpoint: absence check, insert, outpoint-keyed one-shot
@@ -129,7 +130,10 @@ static enum cb_insert_step cb_insert_one(sqlite3 *db, int hole_height,
                                          const struct coin_backfill_outpoint *o,
                                          char okey[160])
 {
-    if (coins_kv_exists(db, o->txid, o->vout))
+    int live = coins_kv_exists_checked(db, o->txid, o->vout);
+    if (live < 0)
+        return CB_STEP_READ_FAILED;  /* default arm: rolls back as infra */
+    if (live > 0)
         return CB_STEP_PRESENT;
     if (!coins_kv_add(db, o->txid, o->vout, o->value, o->creator_height,
                       o->is_coinbase, o->script_len ? o->script : NULL,

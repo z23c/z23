@@ -11,6 +11,7 @@
 #include "net/fast_sync.h"
 #include "services/utxo_mirror_sync_service.h"
 #include "storage/utxo_mirror_schema.h"
+#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 
 #include <limits.h>
@@ -48,7 +49,14 @@ static struct zcl_result anchor_read_height(sqlite3 *db, int32_t *height)
         return ZCL_ERR(-2, "snapshot anchor: cursor read: %s",
                        sqlite3_errmsg(db));
     sqlite3_bind_text(st, 1, UTXO_MIRROR_SYNC_CURSOR_KEY, -1, SQLITE_STATIC);
-    if (sqlite3_step(st) == SQLITE_ROW &&  // raw-sql-ok:read-only-introspection
+    struct zcl_result err = ZCL_OK;
+    enum zcl_step step = ar_step_checked(st, "snapshot anchor: cursor read",
+                                         &err);
+    if (step == ZCL_STEP_ERROR) {
+        sqlite3_finalize(st);
+        return err;
+    }
+    if (step == ZCL_STEP_ROW &&
         sqlite3_column_type(st, 0) == SQLITE_BLOB &&
         sqlite3_column_bytes(st, 0) == (int)sizeof(cursor)) {
         memcpy(&cursor, sqlite3_column_blob(st, 0), sizeof(cursor));
@@ -79,7 +87,14 @@ static struct zcl_result anchor_read_block(sqlite3 *db,
         return ZCL_ERR(-5, "snapshot anchor: block read: %s",
                        sqlite3_errmsg(db));
     sqlite3_bind_int(st, 1, out->height);
-    if (sqlite3_step(st) == SQLITE_ROW) {  // raw-sql-ok:read-only-introspection
+    struct zcl_result err = ZCL_OK;
+    enum zcl_step step = ar_step_checked(st, "snapshot anchor: block read",
+                                         &err);
+    if (step == ZCL_STEP_ERROR) {
+        sqlite3_finalize(st);
+        return err;
+    }
+    if (step == ZCL_STEP_ROW) {
         memcpy(out->block_hash, sqlite3_column_blob(st, 0), 32);
         memcpy(out->chain_work, sqlite3_column_blob(st, 1), 32);
         found = anchor_bytes32_nonzero(out->chain_work);
@@ -109,14 +124,19 @@ static struct zcl_result anchor_read_mmr_root(sqlite3 *db,
                        sqlite3_errmsg(db));
     sqlite3_bind_int(st, 1, out->height);
     mmr_init(&m);
+    struct zcl_result err = ZCL_OK;
+    enum zcl_step step = ZCL_STEP_DONE;
     while (contiguous &&
-           sqlite3_step(st) == SQLITE_ROW) {  // raw-sql-ok:read-only-introspection
+           (step = ar_step_checked(st, "snapshot anchor: block hash read",
+                                   &err)) == ZCL_STEP_ROW) {
         contiguous = sqlite3_column_int(st, 0) == next;
         next++;
         if (contiguous)
             mmr_append(&m, sqlite3_column_blob(st, 1));
     }
     sqlite3_finalize(st);
+    if (step == ZCL_STEP_ERROR)
+        return err;
     if (!contiguous || next != out->height + 1)
         return ZCL_ERR(-12, "snapshot anchor: validated blocks stop short of "
                        "height %d", out->height);
@@ -130,7 +150,7 @@ static struct zcl_result anchor_check_rows_below_cursor(sqlite3 *db,
                                                         int32_t height)
 {
     sqlite3_stmt *st = NULL;
-    bool beyond = true;
+    struct zcl_result err = ZCL_OK;
 
     if (utxo_mirror_prepare_rows_above_scan(db, height, &st) != SQLITE_OK) {
         struct zcl_result r =
@@ -138,9 +158,12 @@ static struct zcl_result anchor_check_rows_below_cursor(sqlite3 *db,
         sqlite3_finalize(st);
         return r;
     }
-    beyond = sqlite3_step(st) == SQLITE_ROW;  // raw-sql-ok:read-only-introspection
+    /* A failed step proves nothing about the rows past the cursor: refuse. */
+    enum zcl_step step = ar_step_checked(st, "snapshot anchor: row scan", &err);
     sqlite3_finalize(st);
-    if (beyond)
+    if (step == ZCL_STEP_ERROR)
+        return err;
+    if (step == ZCL_STEP_ROW)
         return ZCL_ERR(-8, "snapshot anchor: mirror holds rows past height %d",
                        height);
     return ZCL_OK;

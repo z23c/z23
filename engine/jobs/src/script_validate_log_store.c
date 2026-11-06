@@ -9,6 +9,7 @@
 #include "jobs/stage_row_itag.h"
 #include "storage/consensus_state_bundle_codec.h"
 #include "storage/progress_store.h"
+#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 #include "util/stage.h"
 
@@ -282,7 +283,14 @@ int script_validate_log_verdict_at(sqlite3 *db, int height,
         return -1;  // raw-return-ok:logged-above
     }
     int found = 0;
-    if (sqlite3_step(st) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
+    enum zcl_step step = ar_step_checked(st, "script_validate: verdict_at",
+                                         NULL);
+    if (step == ZCL_STEP_ERROR) {
+        /* Unknown, not absent: callers treat <0 as fatal, 0 as no row. */
+        sqlite3_finalize(st);
+        return -1;  // raw-return-ok:logged-above
+    }
+    if (step == ZCL_STEP_ROW) {
         out->ok = sqlite3_column_type(st, 0) == SQLITE_INTEGER
                     ? sqlite3_column_int(st, 0) : -1;
         int status_type = sqlite3_column_type(st, 1);

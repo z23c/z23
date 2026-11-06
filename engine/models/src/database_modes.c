@@ -12,6 +12,7 @@
  *   validation lives on the models that use this handle (same rationale
  *   as database.c). */
 
+#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 #include "models/activerecord.h"
 #include "models/database.h"
@@ -35,7 +36,13 @@
 bool node_db_wipe_utxos(struct node_db *ndb)
 {
     if (!ndb || !ndb->open) return false;
-    int64_t existing = node_db_utxo_count(ndb);
+    int64_t existing = 0;
+    /* An unread count is not an empty set: the size guard must see it. */
+    if (!node_db_utxo_count_checked(ndb, &existing)) {
+        LOG_WARN("db", "db: refused to wipe UTXOs: the row count could not be "
+                 "read");
+        return false;
+    }
     const char *offline_repair = getenv("ZCL_OFFLINE_REPAIR");
     if (existing > 1000 &&
         (!offline_repair || strcmp(offline_repair, "1") != 0)) {
@@ -84,7 +91,7 @@ bool node_db_utxo_count_checked(struct node_db *ndb, int64_t *out)
     if (sqlite3_prepare_v2(ndb->db, "SELECT count(*) FROM utxos",
                            -1, &stmt, NULL) != SQLITE_OK)
         return false;
-    bool ok = sqlite3_step(stmt) == SQLITE_ROW; // raw-sql-ok:read-only-introspection
+    bool ok = ar_step_checked(stmt, "db: utxo count", NULL) == ZCL_STEP_ROW;
     if (ok)
         *out = sqlite3_column_int64(stmt, 0);
     sqlite3_finalize(stmt);

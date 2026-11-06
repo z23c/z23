@@ -448,11 +448,14 @@ static enum import_next import_reader_next(struct import_context *ctx,
     return IMPORT_NEXT_FULL;
 }
 
+/* The rows the reimport must wipe first, or -1 when the count cannot be read
+ * (never 0: an unread table is not an empty one). */
 static int64_t import_existing_rows(struct node_db *ndb)
 {
-    int64_t existing = node_db_utxo_count(ndb);
-    if (existing < 0) existing = 0;
-    return existing;
+    int64_t existing = 0;
+    if (!node_db_utxo_count_checked(ndb, &existing))
+        return -1;
+    return existing < 0 ? 0 : existing;
 }
 
 static void import_publish_rows(int *out_rows, int total_rows)
@@ -491,6 +494,11 @@ static struct zcl_result import_prepare_reimport(struct node_db *ndb,
      * "boot.ldb_import_prepare" wipe in utxo_recovery_restore.c.
      * This was the third redundant wipe that destroyed data. */
     int64_t existing = import_existing_rows(ndb);
+    if (existing < 0) {
+        LOG_WARN_IN("node_db_import_service_run", "sync", "UTXO import: cannot read the existing utxo row count");
+        import_abort_before_pipeline(turbo_mode, "row count unreadable");
+        return ZCL_ERR(-6, "import: existing utxo row count unreadable");
+    }
 
     if (existing > 0) {
         enum policy_decision pd = import_wipe_policy_decision(existing);

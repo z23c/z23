@@ -181,6 +181,11 @@ bool shielded_history_reset_to_boundary(struct sqlite3 *db,
  * table existence is never completeness evidence. */
 bool nullifier_kv_table_exists(struct sqlite3 *db);
 
+/* 1 present, 0 absent, -1 unknown (NULL db, prepare or step failure, logged).
+ * A caller that reads absence as "the set is empty" must use this, never
+ * nullifier_kv_table_exists: a failed probe is not an empty set. */
+int nullifier_kv_table_presence(struct sqlite3 *db);
+
 /* Durable row count of revealed nullifiers in `pool` (0=Sprout, 1=Sapling).
  * Diagnostic-only: an operator/dumper's observable proof of HOW MANY
  * historical nullifiers a completed import
