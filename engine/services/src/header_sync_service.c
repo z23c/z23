@@ -8,6 +8,7 @@
 #include "services/configured_sync_peers.h"
 #include "net/snapshot_sync_contract.h"
 #include "net/download.h"
+#include "net/msgprocessor.h"
 #include "net/net.h"
 #include "net/netaddr.h"
 #include "validation/chainstate.h"
@@ -729,6 +730,11 @@ bool syncsvc_should_disconnect_stale_header_peer(const struct p2p_node *node,
         return false;
     if (configured_inbound_body_rules_fire(node, our_height, now_seconds))
         return true;
+    /* Header hold: this node withholds its own getheaders (FlySync waits for
+     * its rung bundle), so no peer can deliver a useful header. Judging it on
+     * headers then drops the peer streaming that bundle at 120 s. */
+    if (msg_processor_header_sync_held())
+        return false;
 
     /* Frontier-parity gate (P2): when our HEADER frontier has already
      * reached the peer's claimed tip, getheaders cannot be "useful" by
@@ -811,6 +817,9 @@ bool syncsvc_is_header_sync_stalled(enum sync_state state,
 {
     (void)best_header_height; /* used by caller for logging */
     if (state != SYNC_HEADERS_DOWNLOAD)
+        return false;
+    /* A frontier this node holds still on purpose is not stalled. */
+    if (msg_processor_header_sync_held())
         return false;
     if (last_advance_time == 0)
         return false;

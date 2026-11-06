@@ -118,3 +118,34 @@ unobserved. The candidate was integrated onto
 the unchanged approved handshake edits were resealed with core root
 `01cbeec8a6d0b1c3d459bbc7341cf7f11d5121486292e3b1a2dac046b985e30c`.
 Integrated candidate gates and device activation remain pending.
+
+## Onion FlySync run of 2026-11-06
+
+A fresh `-onlynet=onion -flysync` client without `-packagehost`, connected
+to two capable onion peers on release `3be2ba86`, fell back after 120 seconds
+with `peers_offering=2 offers_seen=20`. The fallback counters contradict the
+first reading of zero link offers. Legacy handshake offers are never retained
+from an all-zero onion address, so the two retained offers came from link
+discovery. The fallback came within five seconds after both serving peers were
+disconnected by the stale-header rules. Header sync is held during FlySync,
+so no peer could deliver a useful header. One connection had sent the client
+29.6 MB with no headers accepted, which indicates a bundle transfer was in
+progress. The single `engine not running` warning came from an ordinary
+package frame. Every `ZBND` frame is handled before that check.
+
+The `state_offer_onion_link` group reproduces this case in one process. Two
+connections at the zero address are cross-wired through the production frame
+and tick entries. The client has the package engine off and a header-sync
+hold. The fixture shows the following:
+
+- the legacy offer is dropped as `dropped-endpoint`;
+- link discovery records the signed rung offer;
+- the fetch starts and lands the verified bundle;
+- the client sends only link frames.
+
+On unchanged source the group failed because the stale-header predicate
+still dropped the serving peer at 121 seconds under the hold. Both
+stale-header predicates now return false while this node holds header sync.
+Both return true again once the hold ends. Each fetch now logs one line when
+it starts and one when it ends, naming its height, peer, transport and
+result. Device activation and transfer time over Tor remain unmeasured.

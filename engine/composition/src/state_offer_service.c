@@ -724,10 +724,24 @@ static void sosvc_drain_progress(void)
     pthread_mutex_unlock(&g_lock);
     if (dirty) state_offer_store_note_fetch_progress(done, total, bytes, size);
 }
+static const char *sosvc_receive_name(enum sol_receive_result r)
+{
+    static const char *const names[] = {"ok", "unavailable", "bad-data", "cancelled", "local-io"};
+    return (unsigned)r < sizeof(names) / sizeof(names[0]) ? names[r] : "unknown";
+}
+/* One line per fetch start and end: run F fell back with no trace of either. */
+static void sosvc_log_fetch(const char *what, const struct state_offer_record *t, const char *result)
+{
+    LOG_INFO(SOSVC_SUBSYS, "bundle fetch %s: h=%d peer %lld over %s%s%s", what,
+             (int)t->offer.bundle_height, (long long)t->peer_id,
+             t->peer_link ? "peer link" : "file service", result ? " result=" : "",
+             result ? result : "");
+}
 static void sosvc_finish_fetch(void)
 {
     pthread_join(g_fetch_thread, NULL);
     g_fetch_started = false;
+    sosvc_log_fetch("ended", &g_fetch_target, sosvc_receive_name(g_fetch_result));
     if (g_fetch_result == SOL_RECEIVE_OK) g_fetch_staged = true;
     if (g_fetch_result == SOL_RECEIVE_BAD_DATA) {
         if (g_fetch_target.peer_link)
@@ -877,6 +891,7 @@ void state_offer_service_tick(void)
         return;
     }
     g_fetch_started = true;
+    sosvc_log_fetch("started", &chosen, NULL);
 }
 
 #ifdef ZCL_TESTING
