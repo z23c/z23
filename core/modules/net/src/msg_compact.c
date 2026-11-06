@@ -181,8 +181,9 @@ static void compact_submit_block(struct msg_processor *mp,
         char hex[65];
         uint256_get_hex(&hash, hex);
         LOG_INFO("compact",
-                 "peer %s: compact block %s pending reducer finalization; leaving retryable",
-                 node->addr_name, hex);
+                 "peer %s: compact block %s not finalized (%s); leaving retryable",
+                 node->addr_name, hex, state.reject_reason);
+        msg_block_note_retryable(mp, &hash, &state);
     } else if (!validation_state_is_valid(&state)) {
         char hex[65];
         uint256_get_hex(&hash, hex);

@@ -487,6 +487,9 @@ bool msg_block_validation_is_retryable(const struct validation_state *state)
         "p2p-block-clone-failed",
         /* A check that ran out of memory has no verdict on the block. */
         "out-of-memory",
+        /* Neither has a compact block that could not be submitted. */
+        "compact-submit-unavailable",
+        "compact-submit-failed",
     };
     for (size_t i = 0; i < sizeof(retryable_reasons) /
                            sizeof(retryable_reasons[0]); i++) {
@@ -505,7 +508,9 @@ static bool msg_block_retryable_needs_redownload(
            strcmp(state->reject_reason, "p2p-block-intake-stopped") == 0 ||
            strcmp(state->reject_reason, "p2p-block-intake-full") == 0 ||
            strcmp(state->reject_reason, "p2p-block-clone-failed") == 0 ||
-           strcmp(state->reject_reason, "out-of-memory") == 0;
+           strcmp(state->reject_reason, "out-of-memory") == 0 ||
+           strcmp(state->reject_reason, "compact-submit-unavailable") == 0 ||
+           strcmp(state->reject_reason, "compact-submit-failed") == 0;
 }
 
 static uint64_t msg_block_retryable_log_key(
@@ -1037,9 +1042,9 @@ static bool msg_block_classify_reject(struct msg_processor *mp,
     return reject_nonretryable;
 }
 
-static void msg_block_note_retryable(struct msg_processor *mp,
-                                     struct uint256 *hash,
-                                     const struct validation_state *state)
+void msg_block_note_retryable(struct msg_processor *mp,
+                              struct uint256 *hash,
+                              const struct validation_state *state)
 {
     if (!msg_block_validation_is_retryable(state))
         return;

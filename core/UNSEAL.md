@@ -1127,3 +1127,7 @@ later lane flips it HARD.
 - 2026-11-06T06:26:01Z — REASON: Report an Equihash check that runs out of memory as a local error
   old ROOT: c791f7ab7df76f841b77dc90768f81e1c11f59adb2bef536e4be39ca195c39b4
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T06:26:15Z — REASON: Leave a compact block unseen when it could not be submitted
+  old ROOT: 21b3abf686b1de010648bf9e3e4903e4f0e02915ed64f3d2dc86a4e6c7dce157
+  by: owner unseal ritual (make core-unseal)

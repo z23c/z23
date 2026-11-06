@@ -17,7 +17,9 @@
 #include "core/hash.h"
 #include "net/fast_sync.h"
 #include "net/msgprocessor.h"
+#include "net/compact_blocks.h"
 #include "net/msg_internal.h"
+#include "platform/time_compat.h"
 #include "net/version.h"
 #include "net/download.h"
 #include "net/file_market.h"
@@ -2461,6 +2463,119 @@ static int test_block_local_memory_failure_stays_retryable(void)
     return failures;
 }
 
+static bool pin_compact_submit_says_nothing(struct block *block,
+                                            struct validation_state *out,
+                                            void *ctx)
+{
+    (void)block;
+    (void)out;
+    (void)ctx;
+    return false;
+}
+
+static bool pin_compact_submit_rejects(struct block *block,
+                                       struct validation_state *out, void *ctx)
+{
+    (void)block;
+    (void)ctx;
+    validation_state_invalid(out, false, REJECT_INVALID,
+                             "bad-txns-inputs-missingorspent", NULL);
+    return false;
+}
+
+struct pin_compact_outcome {
+    bool handled;
+    bool seen;
+    bool queued;
+};
+
+/* Assembles a pending compact block through blocktxn with `submit` as the hook
+ * (NULL: no hook wired yet). */
+static struct pin_compact_outcome pin_compact_assemble(
+    msg_compact_block_submit_fn submit, uint8_t marker)
+{
+    struct pin_compact_outcome out = {0};
+    struct block *pending = zcl_calloc(1, sizeof(*pending), "pin_compact_block");
+    if (!pending || !pin_matching_block(pending, marker)) {
+        free(pending);
+        return out;
+    }
+    struct uint256 hash;
+    block_get_hash(pending, &hash);
+    block_clear_seen(&hash);
+
+    struct main_state ms;
+    main_state_init(&ms);
+    struct block_index *bi =
+        chainstate_insert_block_index((struct chainstate *)&ms, &hash);
+    if (bi)
+        bi->nHeight = 1;
+    peer_scoring_init();
+    test_msg_dl_reset();
+    struct net_manager nm;
+    net_manager_init(&nm);
+    struct msg_processor mp;
+    pin_mp_init(&mp, &ms, &nm);
+    mp.compact_block_submit = submit;
+    struct p2p_node *node = pin_peer_node(&nm, 631);
+
+    struct block_txn_response resp;
+    block_txn_response_init(&resp);
+    resp.block_hash = hash;
+    struct byte_stream s;
+    stream_init(&s, 64);
+    bool built = block_txn_response_serialize(&resp, &s);
+    if (node && built) {
+        node->compact_pending_block = pending;
+        pending = NULL;
+        node->compact_pending_hash = hash;
+        node->compact_request_time = (int64_t)platform_time_wall_time_t();
+        out.handled = process_blocktxn(&mp, node, &s);
+    }
+    out.seen = block_already_seen(&hash);
+    out.queued = get_download_mgr()->queue_len > 0;
+
+    stream_free(&s);
+    block_txn_response_free(&resp);
+    if (pending) {
+        block_free(pending);
+        free(pending);
+    }
+    if (node)
+        p2p_node_free(node);
+    net_manager_free(&nm);
+    main_state_free(&ms);
+    block_clear_seen(&hash);
+    test_msg_dl_reset();
+    return out;
+}
+
+static int test_compact_local_submit_failure_stays_retryable(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: a compact block that could not be submitted stays unseen and is queued again") {
+        struct pin_compact_outcome unavailable = pin_compact_assemble(NULL, 0x41);
+        ASSERT(unavailable.handled);
+        ASSERT(!unavailable.seen);
+        ASSERT(unavailable.queued);
+
+        struct pin_compact_outcome failed =
+            pin_compact_assemble(pin_compact_submit_says_nothing, 0x42);
+        ASSERT(failed.handled);
+        ASSERT(!failed.seen);
+        ASSERT(failed.queued);
+
+        /* A verdict from the hook is still a verdict. */
+        struct pin_compact_outcome rejected =
+            pin_compact_assemble(pin_compact_submit_rejects, 0x43);
+        ASSERT(rejected.handled);
+        ASSERT(rejected.seen);
+        ASSERT(!rejected.queued);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* A zblkdata message for piece 0 carrying one block, under `named_hash`. */
 static void pin_block_data_stream(struct byte_stream *s,
                                   const struct byte_stream *body,
@@ -2957,6 +3072,7 @@ int test_msg_handlers(void)
     failures += test_pin_reject_more_work_marks_seen();
     failures += test_pin_reject_recheck_memory_failure_stays_retryable();
     failures += test_block_local_memory_failure_stays_retryable();
+    failures += test_compact_local_submit_failure_stays_retryable();
     failures += test_block_data_local_memory_failure_not_scored();
     failures += test_msg_build_identity_prefix_branches();
     { extern int msg_block_body_identity_tests(void); failures += msg_block_body_identity_tests(); }

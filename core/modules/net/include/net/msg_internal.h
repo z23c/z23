@@ -482,6 +482,10 @@ struct active_chain;
 struct block_index;
 struct validation_state;
 bool msg_block_validation_is_retryable(const struct validation_state *state);
+/* Puts a block with a retryable verdict back in the download queue when its
+ * reason calls for that, and logs it. No effect on any other verdict. */
+void msg_block_note_retryable(struct msg_processor *mp, struct uint256 *hash,
+                              const struct validation_state *state);
 /* A block's hash covers its header, so only a body that matches the header's
  * merkle commitment says anything about the block with that hash. False for a
  * wrong body, for repeated transactions under the right root, and when the
