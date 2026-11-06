@@ -1891,6 +1891,8 @@ static void run_full_suite_crypto_and_wallet(int *failures)
       *failures += test_package_resident_record(); }
     { extern int test_app_image_build(void);
       *failures += test_app_image_build(); }
+    { extern int test_app_build_copy(void);
+      *failures += test_app_build_copy(); }
     { extern int test_package_local(void);
       *failures += test_package_local(); }
     *failures += test_hw_bench();

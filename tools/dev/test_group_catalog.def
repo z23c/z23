@@ -1722,6 +1722,9 @@ ZCL_TEST_GROUP(package_resident_record)
 /* zcl.app_build.v1 record: -MD closure, toolchain env root, image triple
  * for resident_launch, keyed store, domain separation from ZCLBLD. */
 ZCL_TEST_GROUP(app_image_build)
+/* app.build on an adopted or received-trusted copy: stub app package,
+ * plan/confirm, cache hit with no make, refusals, Landlock containment. */
+ZCL_TEST_GROUP(app_build_copy)
 ZCL_TEST_GROUP(task_document)
 ZCL_TEST_GROUP(package_local)
 /* astro lane: platform/modules/astro's exact fixed-grid arithmetic and the birth chart
