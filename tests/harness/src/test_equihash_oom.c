@@ -35,8 +35,17 @@
 #include "test/test_core.h"
 
 #include "base/safe_alloc.h"
+#include "chain/chainparams.h"
+#include "chain/pow.h"
+#include "consensus/validation.h"
+#include "core/arith_uint256.h"
 #include "crypto/blake2b.h"
 #include "crypto/equihash.h"
+#include "mining/miner.h"
+#include "net/msg_internal.h"
+#include "primitives/block.h"
+#include "services/block_row_verify.h"
+#include "validation/check_block.h"
 
 /* (N=96, K=5) witness from the Zcash reference suite (same vector as
  * test_domain_consensus_equihash.c), for the BLAKE2b state seeded by the
@@ -423,6 +432,154 @@ static int eho_injector_contract(void)
     return failures;
 }
 
+/* ── The callers: a failed allocation is not a verdict on a header ── */
+
+static const char *const kEhoVerifierAllocLabels[] = {
+    "eh_expand_indices", "equihash_indices", "equihash_rows",
+    "equihash_tmp_hash", "eh_row_data", "equihash_collision_rows",
+    "eh_row_xor",
+};
+
+/* A regtest (48,5) header with a real solution. */
+static bool eho_mine_header(struct block_header *out,
+                            const struct chain_params *cp)
+{
+    struct block blk;
+    block_init(&blk);
+    blk.header.nVersion = 4;
+    blk.header.hashMerkleRoot.data[0] = 0x51;
+    blk.header.nTime = 1600000000u;
+    struct arith_uint256 pow_limit;
+    uint256_to_arith(&pow_limit, &cp->consensus.powLimit);
+    blk.header.nBits = arith_uint256_get_compact(&pow_limit, false);
+    bool ok = mine_block_pow(&blk, 1, cp, 0);
+    if (ok)
+        *out = blk.header;
+    block_free(&blk);
+    return ok;
+}
+
+/* The same header with a broken solution and PoW that still passes. */
+static bool eho_break_solution(struct block_header *h,
+                               const struct chain_params *cp)
+{
+    h->nSolution[0] ^= 0xFF;
+    for (uint32_t i = 0; i < 100000; i++) {
+        memcpy(h->nNonce.data, &i, sizeof(i));
+        struct uint256 hash;
+        block_header_get_hash(h, &hash);
+        if (CheckProofOfWork(hash, h->nBits, &cp->consensus))
+            return true;
+    }
+    return false;
+}
+
+static bool eho_row_verdict_is(const struct block_header *h,
+                               const struct chain_params *cp,
+                               enum block_row_verify_result want)
+{
+    struct uint256 hash;
+    block_header_get_hash(h, &hash);
+    return block_row_verify(hash.data, h->nBits, h, cp, true) == want;
+}
+
+/* Every allocation in the verifier failing: a local error with no DoS score that
+ * P2P intake keeps retryable, from both header checks. A broken solution can be
+ * rejected before a later allocation is reached, which is then still its verdict,
+ * so `expect_all` is true only for a valid header, which reaches them all. */
+static bool eho_alloc_failure_is_local(const struct block_header *h,
+                                       const struct chain_params *cp,
+                                       bool expect_all)
+{
+    bool all_local = true;
+    for (size_t i = 0; i < sizeof(kEhoVerifierAllocLabels) /
+                           sizeof(kEhoVerifierAllocLabels[0]); i++) {
+        const char *label = kEhoVerifierAllocLabels[i];
+        struct validation_state state;
+        validation_state_init(&state);
+        int dos = -1;
+        zcl_alloc_fault_fail_nth(label, 1);
+        bool accepted = check_block_header(h, &state, cp, true);
+        bool header_fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        bool header_local = !accepted &&
+                            validation_state_is_error(&state) &&
+                            !validation_state_get_dos(&state, &dos) &&
+                            msg_block_validation_is_retryable(&state);
+
+        zcl_alloc_fault_fail_nth(label, 1);
+        bool row_local =
+            eho_row_verdict_is(h, cp, BLOCK_ROW_VERIFY_LOCAL_FAILURE);
+        bool row_fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+
+        bool label_ok = (header_fired ? header_local : !expect_all) &&
+                        (row_fired ? row_local : !expect_all);
+        if (!label_ok) {
+            printf("\n  (label '%s': header_fired=%d header_local=%d "
+                   "row_fired=%d row_local=%d)\n",
+                   label, header_fired, header_local, row_fired, row_local);
+            all_local = false;
+        }
+    }
+    return all_local;
+}
+
+static int eho_caller_verdicts(void)
+{
+    int failures = 0;
+    printf("\n--- callers: allocation failure is a local error, not a verdict ---\n");
+
+    chain_params_select(CHAIN_REGTEST);
+    const struct chain_params *cp = chain_params_get();
+    struct block_header good;
+    block_header_init(&good);
+    bool mined = eho_mine_header(&good, cp);
+    EHO_CHECK("regtest header with a real solution mined", mined);
+    if (!mined) {
+        chain_params_select(CHAIN_MAIN);
+        return failures;
+    }
+
+    struct validation_state state;
+    validation_state_init(&state);
+    EHO_CHECK("valid header passes check_block_header",
+              check_block_header(&good, &state, cp, true));
+    EHO_CHECK("valid header passes block_row_verify",
+              eho_row_verdict_is(&good, cp, BLOCK_ROW_VERIFY_OK));
+    EHO_CHECK("valid header: each failed allocation is local",
+              eho_alloc_failure_is_local(&good, cp, true));
+    validation_state_init(&state);
+    EHO_CHECK("valid header still passes once memory is back",
+              check_block_header(&good, &state, cp, true) &&
+              eho_row_verdict_is(&good, cp, BLOCK_ROW_VERIFY_OK));
+
+    struct block_header bad = good;
+    EHO_CHECK("broken solution with passing PoW built",
+              eho_break_solution(&bad, cp));
+    int dos = 0;
+    validation_state_init(&state);
+    bool bad_rejected = !check_block_header(&bad, &state, cp, true);
+    EHO_CHECK("invalid solution is rejected with DoS 100",
+              bad_rejected && validation_state_get_dos(&state, &dos) &&
+              dos == 100 &&
+              strcmp(state.reject_reason, "invalid-solution") == 0);
+    EHO_CHECK("invalid solution is BAD_EQUIHASH from block_row_verify",
+              eho_row_verdict_is(&bad, cp, BLOCK_ROW_VERIFY_BAD_EQUIHASH));
+    EHO_CHECK("invalid header: each failed allocation is local",
+              eho_alloc_failure_is_local(&bad, cp, false));
+    validation_state_init(&state);
+    dos = 0;
+    bad_rejected = !check_block_header(&bad, &state, cp, true);
+    EHO_CHECK("invalid solution is the same verdict once memory is back",
+              bad_rejected && validation_state_get_dos(&state, &dos) &&
+              dos == 100 &&
+              eho_row_verdict_is(&bad, cp, BLOCK_ROW_VERIFY_BAD_EQUIHASH));
+
+    chain_params_select(CHAIN_MAIN);
+    return failures;
+}
+
 /* ── Entry point ──────────────────────────────────────────────────── */
 
 int test_equihash_oom(void)
@@ -453,6 +610,7 @@ int test_equihash_oom(void)
     failures += eho_solver_refusals();
     failures += eho_solver_output_bytes();
     failures += eho_injector_contract();
+    failures += eho_caller_verdicts();
 
     zcl_alloc_fault_clear();
     return failures;

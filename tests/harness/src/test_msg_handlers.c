@@ -2213,6 +2213,8 @@ enum pin_reject_mode {
     PIN_REJECT_NO_INDEX,
     PIN_REJECT_EQUAL_WORK,
     PIN_REJECT_MORE_WORK,
+    /* More work, and the gate's own body re-check runs out of memory. */
+    PIN_REJECT_MORE_WORK_RECHECK_OOM,
 };
 
 static bool pin_submit_invalid(struct block *block,
@@ -2231,15 +2233,26 @@ static bool pin_submit_invalid(struct block *block,
  * would be queued as retryable and never reach block_mark_seen.) The gate
  * declines to self-suspect in every mode here (no index, equal work, or a
  * more-work block that the height or body gate declines), so the block must
- * be dedup-marked. */
-static bool pin_reject_marks_seen(enum pin_reject_mode mode)
+ * be dedup-marked. PIN_REJECT_MORE_WORK_RECHECK_OOM is the exception: its gate
+ * has no verdict, so the block stays unseen and its peer unpenalised. */
+struct pin_reject_outcome {
+    bool handled;
+    bool seen;
+    bool penalised;
+    bool alloc_fault_fired;
+};
+
+static struct pin_reject_outcome pin_reject_run(enum pin_reject_mode mode)
 {
+    bool recheck_oom = mode == PIN_REJECT_MORE_WORK_RECHECK_OOM;
     struct block blk;
     block_init(&blk);
     blk.header.nVersion = 4;
     blk.header.nTime = 1700000030u + (uint32_t)mode;
     blk.header.nBits = 0x1f00ffffu;
     blk.header.nNonce.data[0] = (uint8_t)(40 + mode);
+    if (recheck_oom)
+        blk.header.nSolutionSize = MAX_SOLUTION_SIZE; /* reaches the allocations */
 
     struct uint256 hash;
     block_get_hash(&blk, &hash);
@@ -2265,7 +2278,7 @@ static bool pin_reject_marks_seen(enum pin_reject_mode mode)
             chainstate_insert_block_index((struct chainstate *)&ms, &hash);
         if (bi) {
             bi->nHeight = 1;
-            if (mode == PIN_REJECT_MORE_WORK) {
+            if (mode == PIN_REJECT_MORE_WORK || recheck_oom) {
                 bool neg = false, ovf = false;
                 arith_uint256_set_compact(&bi->nChainWork, 0x1f00ffffu,
                                           &neg, &ovf);
@@ -2288,8 +2301,16 @@ static bool pin_reject_marks_seen(enum pin_reject_mode mode)
     bool at_tip = sync_try_transition(SYNC_BLOCKS_DOWNLOAD, SYNC_AT_TIP,
                                       "msg_handlers reject premise");
 
-    bool ret = at_tip && ok && node && process_block_msg(&mp, node, &s);
-    bool seen = block_already_seen(&hash);
+    if (recheck_oom && node) {
+        (void)dl_mark_requested(get_download_mgr(), &hash, 1, node->id);
+        zcl_alloc_fault_fail_nth("equihash_indices", 1);
+    }
+    struct pin_reject_outcome out = {0};
+    out.handled = at_tip && ok && node && process_block_msg(&mp, node, &s);
+    out.alloc_fault_fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    out.seen = block_already_seen(&hash);
+    out.penalised = node && atomic_load(&node->misbehavior) != 0;
 
     msg_processor_stop_block_intake(&mp);
     test_msg_sync_to_idle();
@@ -2300,7 +2321,13 @@ static bool pin_reject_marks_seen(enum pin_reject_mode mode)
     block_free(&blk);
     main_state_free(&ms);
     block_clear_seen(&hash);
-    return ret && seen;
+    return out;
+}
+
+static bool pin_reject_marks_seen(enum pin_reject_mode mode)
+{
+    struct pin_reject_outcome out = pin_reject_run(mode);
+    return out.handled && out.seen;
 }
 
 static int test_pin_reject_no_index_marks_seen(void)
@@ -2328,6 +2355,21 @@ static int test_pin_reject_more_work_marks_seen(void)
     int failures = 0;
     TEST("msg_handlers: more-work block the self-suspicion gate declines is marked seen (ban path)") {
         ASSERT(pin_reject_marks_seen(PIN_REJECT_MORE_WORK));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pin_reject_recheck_memory_failure_stays_retryable(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: a self-suspicion re-check that runs out of memory leaves the block unseen and the peer unpenalised") {
+        struct pin_reject_outcome out =
+            pin_reject_run(PIN_REJECT_MORE_WORK_RECHECK_OOM);
+        ASSERT(out.handled);
+        ASSERT(out.alloc_fault_fired);
+        ASSERT(!out.seen);
+        ASSERT(!out.penalised);
         PASS();
     } _test_next:;
     return failures;
@@ -2913,6 +2955,7 @@ int test_msg_handlers(void)
     failures += test_pin_reject_no_index_marks_seen();
     failures += test_pin_reject_equal_work_marks_seen();
     failures += test_pin_reject_more_work_marks_seen();
+    failures += test_pin_reject_recheck_memory_failure_stays_retryable();
     failures += test_block_local_memory_failure_stays_retryable();
     failures += test_block_data_local_memory_failure_not_scored();
     failures += test_msg_build_identity_prefix_branches();

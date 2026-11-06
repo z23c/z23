@@ -28,6 +28,7 @@
 #include "primitives/block.h"
 #include "jobs/header_admit_stage.h"
 #include "jobs/stage_repair.h"
+#include "jobs/stage_repair_internal.h"
 #include "jobs/validate_headers_stage.h"
 #include "storage/block_index_db.h"
 #include "storage/disk_block_io.h"
@@ -747,6 +748,113 @@ static int vh_check_frontier_priority(void)
                  ok == 0 &&
                  strcmp(reason, "stub-injected-failure") == 0);
 
+        vh_teardown(dir, &ms, &sc);
+    }
+    return failures;
+}
+
+/* Fails every header with the reason passed as `user`. */
+static bool stub_fail_with_reason(const struct block_index *bi,
+                                  const char *datadir, char *out_reason,
+                                  size_t out_reason_size, void *user)
+{
+    (void)bi;
+    (void)datadir;
+    snprintf(out_reason, out_reason_size, "%s", (const char *)user);
+    return false;
+}
+
+/* The real validator running out of memory on a PoW-valid header: no row and no
+ * cursor move. With memory back, the same height gets its real verdict. */
+static int vh_check_local_memory_failure_holds(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_REGTEST);
+    {
+        char dir[256]; struct main_state ms; struct synth_chain_vh sc;
+        VH_CHECK("local-oom: setup default validator",
+                 vh_setup("local_oom", 1, NULL, NULL,
+                          dir, sizeof(dir), &ms, &sc) == 0);
+        struct block_index *bi = &sc.blocks[0];
+        bi->nBits = 0x200f0f0f; /* regtest powLimit compact */
+        tbi_ext(bi)->nSolutionSize = 36; /* regtest Equihash(48,5) */
+        tbi_ext(bi)->nSolution = zcl_malloc(36, "vh_local_oom_solution");
+        VH_CHECK("local-oom: alloc solution", tbi_ext(bi)->nSolution != NULL);
+        if (tbi_ext(bi)->nSolution)
+            memset(tbi_ext(bi)->nSolution, 0x42, 36);
+
+        const struct chain_params *cp = chain_params_get();
+        bool pow_ok = false;
+        for (uint32_t i = 0; i < 100000 && !pow_ok && tbi_ext(bi)->nSolution; i++) {
+            memcpy(tbi_ext(bi)->nNonce.data, &i, sizeof(i));
+            pow_ok = vh_set_bi_hash_for_solution(bi, &sc.hashes[0],
+                                                 tbi_ext(bi)->nSolution, 36) &&
+                     domain_consensus_verify_pow_solution(&sc.hashes[0],
+                                                          bi->nBits,
+                                                          &cp->consensus).ok;
+        }
+        VH_CHECK("local-oom: grind PoW-valid header", pow_ok);
+
+        header_admit_stage_drain(10);
+        zcl_alloc_fault_fail_nth("equihash_indices", 1);
+        int advanced = validate_headers_stage_drain(10);
+        bool fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        VH_CHECK("local-oom: the check hit the failed allocation", fired);
+        VH_CHECK("local-oom: nothing advanced", advanced == 0);
+        VH_CHECK("local-oom: cursor held", validate_headers_stage_cursor() == 0);
+        int ok = -1;
+        char reason[64] = {0};
+        VH_CHECK("local-oom: no row written",
+                 !log_row_at(progress_store_db(), 0, &ok,
+                             reason, sizeof(reason)));
+
+        VH_CHECK("local-oom: with memory back the height is checked again",
+                 validate_headers_stage_drain(10) == 1);
+        VH_CHECK("local-oom: the real verdict is the row",
+                 log_row_at(progress_store_db(), 0, &ok,
+                            reason, sizeof(reason)) &&
+                 ok == 0 && strcmp(reason, "invalid-solution") == 0);
+        vh_teardown(dir, &ms, &sc);
+    }
+    chain_params_select(CHAIN_MAIN);
+    return failures;
+}
+
+/* A recheck that runs out of memory keeps the row and its reason, so the row
+ * stays a recheck candidate and a later pass can still clear it. */
+static int vh_check_local_memory_failure_keeps_recheck(void)
+{
+    int failures = 0;
+    {
+        char dir[256]; struct main_state ms; struct synth_chain_vh sc;
+        VH_CHECK("recheck-oom: setup",
+                 vh_setup("recheck_oom", 1, stub_fail_with_reason,
+                          (void *)"out-of-memory",
+                          dir, sizeof(dir), &ms, &sc) == 0);
+        sqlite3 *db = progress_store_db();
+        VH_CHECK("recheck-oom: seed repairable row",
+                 seed_failed_vh_row(db, 0, &sc.hashes[0],
+                                    STAGE_REPAIR_SOLUTIONLESS_REASON));
+        VH_CHECK("recheck-oom: seed repair header",
+                 seed_repair_header_for_block(db, &sc.blocks[0],
+                                              &sc.hashes[0]));
+        VH_CHECK("recheck-oom: advance cursor past the row",
+                 set_stage_cursor(db, "validate_headers", 1));
+
+        VH_CHECK("recheck-oom: the pass holds",
+                 validate_headers_stage_step_once() == JOB_IDLE);
+        int ok = -1;
+        char reason[64] = {0};
+        VH_CHECK("recheck-oom: the row keeps its reason",
+                 log_row_at(db, 0, &ok, reason, sizeof(reason)) && ok == 0 &&
+                 strcmp(reason, STAGE_REPAIR_SOLUTIONLESS_REASON) == 0);
+
+        validate_headers_stage_set_validator(stub_pass, NULL);
+        VH_CHECK("recheck-oom: a later pass runs",
+                 validate_headers_stage_step_once() == JOB_ADVANCED);
+        VH_CHECK("recheck-oom: and clears the row",
+                 log_row_at(db, 0, &ok, reason, sizeof(reason)) && ok == 1);
         vh_teardown(dir, &ms, &sc);
     }
     return failures;
@@ -2229,6 +2337,8 @@ int test_validate_headers_stage(void)
     failures += vh_check_admit_floor();
     failures += vh_check_injected_failure();
     failures += vh_check_frontier_priority();
+    failures += vh_check_local_memory_failure_holds();
+    failures += vh_check_local_memory_failure_keeps_recheck();
     failures += vh_check_index_header_source();
     failures += vh_check_persisted_solution_source();
     failures += vh_check_node_db_loader_bounds();

@@ -160,8 +160,13 @@ static bool check_block_header_impl(const struct block_header *header,
               state, 100, "version-too-low");
 
     if (check_pow) {
-        REJECT_IF(!check_equihash_solution_via_registry(header),
-                  state, 100, "invalid-solution");
+        uint64_t alloc_failures = zcl_alloc_failure_count();
+        bool solution_ok = check_equihash_solution_via_registry(header);
+        /* The verifier returns false when it cannot allocate as well, and that
+         * is no verdict on this header. */
+        if (!solution_ok && zcl_alloc_failure_count() != alloc_failures)
+            REJECT_FATAL(state, "out-of-memory");
+        REJECT_IF(!solution_ok, state, 100, "invalid-solution");
 
         struct uint256 hash;
         block_header_get_hash(header, &hash);

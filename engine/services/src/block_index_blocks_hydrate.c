@@ -80,6 +80,7 @@ enum bhc_bad_reason {
     BHC_BAD_HASH_MISMATCH,      /* header re-serializes to a different PoW hash */
     BHC_BAD_HIGH_HASH,          /* stored hash fails the PoW difficulty target */
     BHC_BAD_EQUIHASH,           /* Equihash solution check failed */
+    BHC_LOCAL_FAILURE,          /* the check ran out of memory: no verdict, no purge */
 };
 
 static const char *bhc_bad_reason_name(enum bhc_bad_reason r)
@@ -90,6 +91,7 @@ static const char *bhc_bad_reason_name(enum bhc_bad_reason r)
         case BHC_BAD_HASH_MISMATCH:   return "hash-mismatch";
         case BHC_BAD_HIGH_HASH:       return "high-hash";
         case BHC_BAD_EQUIHASH:        return "invalid-equihash-solution";
+        case BHC_LOCAL_FAILURE:       return "local-allocation-failure";
     }
     return "unknown";
 }
@@ -352,6 +354,9 @@ static bool bih_row_is_poisoned(sqlite3_stmt *sel, bool has_hash,
             case BLOCK_ROW_VERIFY_BAD_EQUIHASH:
                 *reason = BHC_BAD_EQUIHASH;
                 return true;
+            case BLOCK_ROW_VERIFY_LOCAL_FAILURE:
+                *reason = BHC_LOCAL_FAILURE;
+                return true;
             case BLOCK_ROW_VERIFY_NO_PARAMS:
                 *reason = BHC_BAD_HASH_MISMATCH; /* unreachable: cp != NULL */
                 return true;
@@ -411,7 +416,7 @@ static enum bih_queue_status bih_queue_bad_row(struct bhc_bad_row **bad,
 enum bih_validate_status {
     BIH_VALIDATE_OK      = 0,
     BIH_VALIDATE_PREPARE = -3,  /* validate SELECT refused to prepare */
-    BIH_VALIDATE_OOM     = -7,  /* quarantine-list allocation failed (the
+    BIH_VALIDATE_OOM     = -7,  /* a row check or quarantine-list allocationfailed (the
                                  * SELECT is already finalized by then) */
 };
 
@@ -459,6 +464,14 @@ static int bih_validate_rows(sqlite3 *db, const struct chain_params *cp,
                                  rom_checkpoint_height, h, &hdr, &reason)) {
             validated++;
             continue;
+        }
+
+        /* Out of memory says nothing about this row: end the pass with nothing
+         * purged and the map untouched, as for the quarantine list below. */
+        if (reason == BHC_LOCAL_FAILURE) {
+            sqlite3_finalize(sel);
+            free(bad);
+            return BIH_VALIDATE_OOM;
         }
 
         /* Queue the poisoned row for deferred purge. */
@@ -655,8 +668,8 @@ struct zcl_result load_block_index_from_blocks_table(struct node_db *ndb,
                                   row_count, &bad, &bad_count, &validated,
                                   &gross_corruption);
     if (vstat == BIH_VALIDATE_OOM)
-        return ZCL_ERR(-7, "load_block_index_from_blocks_table: OOM for "
-                       "quarantine list");
+        return ZCL_ERR(-7, "load_block_index_from_blocks_table: OOM while "
+                       "validating rows");
     if (vstat == BIH_VALIDATE_PREPARE)
         return ZCL_ERR(-3, "load_block_index_from_blocks_table: failed to "
                        "prepare validate SELECT over `blocks`");

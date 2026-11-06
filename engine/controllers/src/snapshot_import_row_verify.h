@@ -10,6 +10,10 @@
 
 struct chain_params;
 
+/* out_reason when the row check ran out of memory. It is no verdict on the row,
+ * so the import stops instead of quarantining it. */
+#define SNAPSHOT_IMPORT_LOCAL_FAILURE_REASON "local-allocation-failure"
+
 bool snapshot_import_row_verify(const struct disk_block_index *dbi,
                                 const uint8_t block_hash[32],
                                 const struct chain_params *cp,

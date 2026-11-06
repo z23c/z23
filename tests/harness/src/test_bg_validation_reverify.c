@@ -28,6 +28,7 @@
 #include "storage/disk_block_io.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
+#include "util/safe_alloc.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
@@ -1028,6 +1029,78 @@ static int test_bg_validation_post_verify_reorg_is_orphan(void)
     return failures;
 }
 
+static bool validation_fails_out_of_memory(
+    const struct block *block, struct block_index *index, const char *datadir,
+    const struct chain_params *params, int num_workers,
+    size_t max_script_batch, int64_t *sigs_out, int64_t *proofs_out,
+    int64_t *skips_out)
+{
+    (void)block;
+    (void)index;
+    (void)datadir;
+    (void)params;
+    (void)num_workers;
+    (void)max_script_batch;
+    (void)sigs_out;
+    (void)proofs_out;
+    (void)skips_out;
+    zcl_alloc_note_failure();
+    return false;
+}
+
+static bool validation_fails_on_its_merits(
+    const struct block *block, struct block_index *index, const char *datadir,
+    const struct chain_params *params, int num_workers,
+    size_t max_script_batch, int64_t *sigs_out, int64_t *proofs_out,
+    int64_t *skips_out)
+{
+    (void)block;
+    (void)index;
+    (void)datadir;
+    (void)params;
+    (void)num_workers;
+    (void)max_script_batch;
+    (void)sigs_out;
+    (void)proofs_out;
+    (void)skips_out;
+    return false;
+}
+
+static int test_bg_validation_memory_failure_is_no_verdict(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: a check that runs out of memory is not a failed block") {
+        struct main_state ms;
+        main_state_init(&ms);
+        struct uint256 hash;
+        struct block_index *index = make_repair_index(&ms, &hash);
+        ASSERT(index != NULL);
+
+        struct block block;
+        block_init(&block);
+        int64_t sigs = 0, proofs = 0, skips = 0;
+        bg_validation_test_set_validate_stub(validation_fails_out_of_memory);
+        enum bg_validation_block_outcome local =
+            bg_validation_validate_canonical_block(
+                &ms, 0, &block, index, "unused", NULL, 1, 0,
+                &sigs, &proofs, &skips);
+        bg_validation_test_set_validate_stub(validation_fails_on_its_merits);
+        enum bg_validation_block_outcome invalid =
+            bg_validation_validate_canonical_block(
+                &ms, 0, &block, index, "unused", NULL, 1, 0,
+                &sigs, &proofs, &skips);
+        bg_validation_test_set_validate_stub(NULL);
+        ASSERT(local == BG_VALIDATION_BLOCK_LOCAL_FAILURE);
+        ASSERT(invalid == BG_VALIDATION_BLOCK_INVALID);
+
+        block_free(&block);
+        main_state_free(&ms);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bg_validation_restart_keeps_reverify_worker(void)
 {
     int failures = 0;
@@ -1680,6 +1753,7 @@ int test_bg_validation_reverify(void)
     failures += test_bg_validation_body_blocker_cleared_on_coverage_gap();
     failures += test_bg_validation_body_repair_reproves_reorg();
     failures += test_bg_validation_post_verify_reorg_is_orphan();
+    failures += test_bg_validation_memory_failure_is_no_verdict();
     failures += test_bg_validation_restart_keeps_reverify_worker();
     failures += test_bg_validation_reverify_skips_absent_by_design();
     failures += test_bg_validation_reverify_held_unreadable_still_repairs();

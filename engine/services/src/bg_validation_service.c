@@ -92,6 +92,7 @@
 #include <sys/stat.h>
 #include <sched.h>
 #include "platform/allocator_compat.h"
+#include "support/log_throttle.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/supervisor.h"
@@ -660,7 +661,8 @@ static void bg_validation_sampled_reverify_loop(
                             ms, h, &blk, pindex, datadir, params, num_workers,
                             svc->max_script_batch, &s, &p, &k);
                     block_free(&blk);
-                    if (outcome == BG_VALIDATION_BLOCK_ORPHAN)
+                    if (outcome == BG_VALIDATION_BLOCK_ORPHAN ||
+                        outcome == BG_VALIDATION_BLOCK_LOCAL_FAILURE)
                         continue;
                     if (!bg_validation_record_reverify(
                             svc, h, outcome == BG_VALIDATION_BLOCK_VALID)) {
@@ -708,6 +710,19 @@ static enum bg_validation_height_result bg_validation_height_validate(
             max_script_batch, block_sigs, block_proofs, block_skips);
     if (outcome == BG_VALIDATION_BLOCK_ORPHAN) {
         block_free(blk);
+        return BG_VALIDATION_HEIGHT_RETRY;
+    }
+    if (outcome == BG_VALIDATION_BLOCK_LOCAL_FAILURE) {
+        /* Out of memory: wait for some to come back, then redo this height. */
+        static struct log_throttle throttle = LOG_THROTTLE_INIT;
+        uint64_t reps = 0;
+        if (log_throttle_should_emit(&throttle, (uint64_t)h + 1,
+                                     platform_time_wall_unix(), 60, &reps))
+            LOG_WARN("bg_validation", "[bg-valid] out of memory checking "
+                     "height %d; retrying it (%llu suppressed)",
+                     h, (unsigned long long)reps);
+        block_free(blk);
+        platform_sleep_ms(1000);
         return BG_VALIDATION_HEIGHT_RETRY;
     }
     if (outcome == BG_VALIDATION_BLOCK_INVALID) {

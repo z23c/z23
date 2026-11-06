@@ -65,6 +65,7 @@ enum bg_validation_block_outcome {
     BG_VALIDATION_BLOCK_VALID = 0,
     BG_VALIDATION_BLOCK_INVALID,
     BG_VALIDATION_BLOCK_ORPHAN,
+    BG_VALIDATION_BLOCK_LOCAL_FAILURE, /* out of memory: no verdict, retry */
 };
 
 struct bg_validation_progress {

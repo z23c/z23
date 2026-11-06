@@ -1123,3 +1123,7 @@ later lane flips it HARD.
 - 2026-11-06T06:25:49Z — REASON: Update comments that no longer match the code around swarm and revalidation
   old ROOT: 161d916d24f002e35fd1a2857dadf48932f2168bc97dfb2016576a268ab103e0
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T06:26:01Z — REASON: Report an Equihash check that runs out of memory as a local error
+  old ROOT: c791f7ab7df76f841b77dc90768f81e1c11f59adb2bef536e4be39ca195c39b4
+  by: owner unseal ritual (make core-unseal)

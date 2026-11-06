@@ -26,6 +26,7 @@ enum block_row_verify_result {
     BLOCK_ROW_VERIFY_HASH_BIND_MISMATCH, /* header re-hash != expected_hash */
     BLOCK_ROW_VERIFY_HIGH_HASH,          /* CheckProofOfWork target failed */
     BLOCK_ROW_VERIFY_BAD_EQUIHASH,       /* check_equihash_solution failed */
+    BLOCK_ROW_VERIFY_LOCAL_FAILURE,      /* the check ran out of memory: no verdict */
 };
 
 /* Verify one persisted block row against the frozen consensus checks.

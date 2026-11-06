@@ -84,6 +84,7 @@ static const char *row_verify_verdict_name(enum block_row_verify_result r)
         case BLOCK_ROW_VERIFY_HASH_BIND_MISMATCH:  return "hash-bind-mismatch";
         case BLOCK_ROW_VERIFY_HIGH_HASH:           return "high-hash";
         case BLOCK_ROW_VERIFY_BAD_EQUIHASH:        return "invalid-equihash-solution";
+        case BLOCK_ROW_VERIFY_LOCAL_FAILURE:       return "local-allocation-failure";
     }
     return "unknown";
 }
@@ -220,6 +221,17 @@ bool stage_repair_quarantine_blocks_row(
                  (long long)height, hex);
         row_quarantine_copy_result(out, &r);
         return false; // raw-return-ok:no-params-refused
+    }
+
+    if (verdict == BLOCK_ROW_VERIFY_LOCAL_FAILURE) {
+        /* The check ran out of memory, which says nothing about the row. */
+        r.local_failure = true;
+        LOG_WARN("stage_repair",
+                 "[row_quarantine] h=%lld hash=%s: out of memory while "
+                 "verifying — refusing to purge (no verdict on the row)",
+                 (long long)height, hex);
+        row_quarantine_copy_result(out, &r);
+        return false; // raw-return-ok:no-verdict-refused
     }
 
     if (verdict == BLOCK_ROW_VERIFY_OK) {

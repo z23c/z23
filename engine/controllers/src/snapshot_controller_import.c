@@ -270,7 +270,8 @@ static bool import_block_index_begin_bulk_scan(struct node_db *ndb,
 enum snapshot_import_row_status {
     SNAPSHOT_IMPORT_ROW_END,      /* non-'b' key: the 'b' walk is over */
     SNAPSHOT_IMPORT_ROW_SKIPPED,  /* row not imported; iterator advanced */
-    SNAPSHOT_IMPORT_ROW_READY     /* row verified and filled into *db_blk */
+    SNAPSHOT_IMPORT_ROW_READY,    /* row verified and filled into *db_blk */
+    SNAPSHOT_IMPORT_ROW_FAILED    /* the row check ran out of memory: stop */
 };
 
 /* Fetch, deserialize, and harden-verify the row under *it. Rows that are
@@ -335,6 +336,11 @@ import_block_index_next_row(struct db_iterator *it,
     if (!snapshot_import_row_verify(dbi, block_hash, cp,
                                     rom_checkpoint_height,
                                     reason, sizeof(reason))) {
+        if (strcmp(reason, SNAPSHOT_IMPORT_LOCAL_FAILURE_REASON) == 0) {
+            LOG_WARN("snapshot", "T1: out of memory verifying the row at "
+                     "height %d; stopping the import", dbi->nHeight);
+            return SNAPSHOT_IMPORT_ROW_FAILED;
+        }
         import_row_quarantine(dbi->nHeight, block_hash, reason);
         a->quarantined++;
         db_iter_next(it);
@@ -530,6 +536,10 @@ static void *import_block_index_thread(void *arg)
             break;
         if (row == SNAPSHOT_IMPORT_ROW_SKIPPED)
             continue;
+        if (row == SNAPSHOT_IMPORT_ROW_FAILED) {
+            ok = false;
+            break;
+        }
 
         /* Insert into SQLite blocks table */
         if (!db_block_save(&ndb, &db_blk)) {

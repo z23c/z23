@@ -33,6 +33,7 @@
 #include "chain/chainparams.h"
 #include "chain/checkpoints.h"
 #include "chain/pow.h"
+#include "util/safe_alloc.h"
 #include "controllers/snapshot_controller.h"
 #include "core/arith_uint256.h"
 #include "core/serialize.h"
@@ -723,6 +724,31 @@ static int ibr_d_check_import(const char *base, const char *src_dir_d)
     return failures;
 }
 
+/* The full Equihash check running out of memory is no verdict on the row: the
+ * import stops without quarantining it, and the run after it decides. */
+static int ibr_d_check_local_memory_failure(const char *base,
+                                            const char *src_dir_d)
+{
+    int failures = 0;
+    char db_path[380];
+    snprintf(db_path, sizeof(db_path), "%s/node_d_oom.db", base);
+
+    uint64_t q_before = snapshot_import_block_index_quarantine_total();
+    int count = -1;
+    zcl_alloc_fault_fail_nth("equihash_indices", 1);
+    bool ok = snapshot_import_block_index(src_dir_d, db_path,
+                                          /*header_only=*/true, &count);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    uint64_t q_after = snapshot_import_block_index_quarantine_total();
+
+    IBR_CHECK("scenario D: the row check hit the failed allocation", fired);
+    IBR_CHECK("scenario D: out of memory stops the import", !ok);
+    IBR_CHECK("scenario D: out of memory quarantines nothing",
+              q_after == q_before);
+    return failures;
+}
+
 /* ==================================================================
  * Scenario D — the stride/above-checkpoint full-Equihash gate
  * (import_row_verify's expensive path) fires. The ROM checkpoint is
@@ -744,8 +770,10 @@ static int ibr_scenario_d(const char *base)
 
     bool built = false;
     failures += ibr_d_write_fixture(src_dir_d, &built);
-    if (built)
+    if (built) {
+        failures += ibr_d_check_local_memory_failure(base, src_dir_d);
         failures += ibr_d_check_import(base, src_dir_d);
+    }
 
     checkpoints_reset_rom_state_override_for_test();
     return failures;

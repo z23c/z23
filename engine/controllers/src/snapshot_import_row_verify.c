@@ -55,6 +55,10 @@ bool snapshot_import_row_verify(const struct disk_block_index *dbi,
         case BLOCK_ROW_VERIFY_BAD_EQUIHASH:
             snprintf(out_reason, out_reason_size, "invalid-equihash-solution");
             return false;
+        case BLOCK_ROW_VERIFY_LOCAL_FAILURE:
+            snprintf(out_reason, out_reason_size, "%s",
+                     SNAPSHOT_IMPORT_LOCAL_FAILURE_REASON);
+            return false;
     }
     snprintf(out_reason, out_reason_size, "unknown-verify-verdict");
     return false;

@@ -71,15 +71,16 @@ struct node_db;
 
 /* Outcome of one runtime poisoned-blocks-row quarantine attempt
  * (stage_repair_quarantine_blocks_row). Exactly one of quarantined /
- * refused_clean / row_absent / no_params is the operative result on a given
- * call; `verdict` carries the enum block_row_verify_result the frozen verify
- * produced. */
+ * refused_clean / row_absent / no_params / local_failure is the operative
+ * result on a given call; `verdict` carries the enum block_row_verify_result
+ * the frozen verify produced. */
 struct stage_repair_row_quarantine_result {
     bool attempted;      /* the evidence gate ran (a candidate row was read) */
     bool quarantined;    /* row FAILED the frozen verify AND was purged */
     bool refused_clean;  /* row PASSED the frozen verify — deliberately NOT deleted */
     bool row_absent;     /* no addressable `blocks` row at (hash | height) */
     bool no_params;      /* chain params unavailable — cannot prove evidence, refused */
+    bool local_failure;  /* the verify ran out of memory — no verdict, refused */
     bool deleted_by_height; /* purge used db_block_delete_by_height (hash unusable) */
     int  height;
     int  verdict;        /* enum block_row_verify_result */
@@ -91,7 +92,8 @@ struct stage_repair_row_quarantine_result {
  * forever. Evidence-gated and conservative: the row is read RAW and run through
  * block_row_verify() against the canonical `hash`; the DELETE fires ONLY on a
  * concrete failure verdict (hash-bind / high-hash / bad-Equihash). A row that
- * verifies OK is REFUSED (never "row looks odd"). On a fired quarantine it also
+ * verifies OK, or whose verify ran out of memory, is REFUSED (never "row looks
+ * odd"). On a fired quarantine it also
  * clears BLOCK_HAVE_DATA on the in-memory canonical block_index entry (via `ms`,
  * best-effort) and re-emits the header event so the cleared re-fetch state is
  * durable, bumps the process counter (stage_repair_runtime_row_quarantined), and

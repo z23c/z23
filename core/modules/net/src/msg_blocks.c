@@ -710,6 +710,15 @@ static bool msg_block_reject_self_suspected(struct msg_processor *mp,
     char hex[65];
     uint256_get_hex(hash, hex);
 
+    /* The re-check itself ran out of memory: it condemns nothing. */
+    if (!body_ok && validation_state_is_error(&body_state)) {
+        LOG_WARN("net",
+                 "self-suspicion: out of memory re-checking more-work block "
+                 "%s at h=%d; leaving it retryable",
+                 hex, landed->nHeight);
+        return true;
+    }
+
     if (!body_ok) {
         /* The block body itself condemns the block — a genuine
          * consensus-invalid. Ban normally; parity + DoS preserved. */

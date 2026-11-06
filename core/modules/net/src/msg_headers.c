@@ -628,8 +628,10 @@ static const char *headers_verify_bound_header(struct msg_processor *mp,
         return NULL;
 
     atomic_fetch_add(&g_headers_serve_pow_checks, 1);
+    uint64_t alloc_failures = zcl_alloc_failure_count();
     if (!check_equihash_solution(hdr, mp->params))
-        return "invalid-solution";
+        return zcl_alloc_failure_count() != alloc_failures
+            ? "out-of-memory" : "invalid-solution";
 
     if (!CheckProofOfWork(*hash, hdr->nBits, &mp->params->consensus))
         return "high-hash";

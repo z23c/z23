@@ -50,9 +50,9 @@
 /* Raised when the UNCHANGED PoW+Equihash validator PASSES a header but the
  * block_index entry is BLOCK_FAILED-masked and the stale mask cannot be
  * cleared here (no repairable evidence). Root cause: the getheaders serve
- * path (core/modules/net/src/msg_headers.c) sets BLOCK_FAILED_VALID when its local index
- * copy of a header has a missing/corrupt Equihash solution ("invalid-solution",
- * classified permanent); that mask persists across boots via block_index_cache
+ * path (core/modules/net/src/msg_headers.c) once set BLOCK_FAILED_VALID when its local index
+ * copy of a header had a missing/corrupt Equihash solution ("invalid-solution",
+ * classified permanent); it no longer does, but a mask from then persists across boots via block_index_cache
  * and mark_valid_header refuses any FAILED-masked entry forever. A
  * throttled blocker + JOB_IDLE backoff keeps that from becoming a
  * WARN/JOB_FATAL hot loop. */
@@ -158,6 +158,29 @@ static inline bool vh_failure_is_recheck_candidate(const char *reason)
     return reason &&
            (strcmp(reason, STAGE_REPAIR_SOLUTIONLESS_REASON) == 0 ||
             strcmp(reason, "header-source-hash-mismatch") == 0);
+}
+
+/* True when a job's check ran out of memory. A durable ok=0 row is a verdict and
+ * downstream stages inherit it, so the whole batch is dropped unwritten and the
+ * cursor holds; the same heights run again on a later tick. */
+static bool vh_batch_failed_locally(const struct vh_job *jobs, int n)
+{
+    for (int i = 0; i < n; i++) {
+        if (jobs[i].ok ||
+            strcmp(jobs[i].reason, VALIDATE_HEADERS_LOCAL_FAILURE_REASON) != 0)
+            continue;
+        static struct log_throttle throttle = LOG_THROTTLE_INIT;
+        uint64_t reps = 0;
+        if (log_throttle_should_emit(&throttle, 1,
+                                     platform_time_wall_unix(), 60, &reps))
+            LOG_WARN("validate_headers",
+                     "[validate_headers] out of memory checking h=%d; holding "
+                     "the cursor (no verdict written, %llu suppressed)",
+                     jobs[i].height, (unsigned long long)reps);
+        atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+        return true;
+    }
+    return false;
 }
 
 /* ── Worker pool ──────────────────────────────────────────────────── */
@@ -608,6 +631,8 @@ static job_result_t vh_recheck_run_and_settle(sqlite3 *db, struct vh_job *jobs,
                                               int64_t start)
 {
     vh_pool_run_batch(&g_pool, jobs, sizeof(jobs[0]), n);
+    if (vh_batch_failed_locally(jobs, n))
+        return JOB_IDLE;
     char *err = NULL;
     progress_store_tx_lock();
     /* This path runs both standalone (validate_headers_stage_step_once with no
@@ -982,6 +1007,8 @@ static job_result_t step_validate(struct stage_step_ctx *c)
 
     /* Dispatch + await. Pool stays inside this step. */
     vh_pool_run_batch(&g_pool, jobs, sizeof(jobs[0]), batch_n);
+    if (vh_batch_failed_locally(jobs, batch_n))
+        return JOB_IDLE;
 
     /* Write rows + bump cursor, all under the F-2 BEGIN IMMEDIATE txn. */
     int wfault_rc = 0;

@@ -19,6 +19,7 @@
 #include "chain/pow.h"
 #include "primitives/block.h"
 #include "core/uint256.h"
+#include "util/safe_alloc.h"
 
 #include <string.h>
 
@@ -46,8 +47,13 @@ block_row_verify(const uint8_t expected_hash[32], uint32_t n_bits,
     if (!CheckProofOfWork(hash, n_bits, &cp->consensus))
         return BLOCK_ROW_VERIFY_HIGH_HASH;
 
-    if (check_equihash && header && !check_equihash_solution(header, cp))
-        return BLOCK_ROW_VERIFY_BAD_EQUIHASH;
+    if (check_equihash && header) {
+        uint64_t alloc_failures = zcl_alloc_failure_count();
+        if (!check_equihash_solution(header, cp))
+            return zcl_alloc_failure_count() != alloc_failures
+                ? BLOCK_ROW_VERIFY_LOCAL_FAILURE
+                : BLOCK_ROW_VERIFY_BAD_EQUIHASH;
+    }
 
     return BLOCK_ROW_VERIFY_OK;
 }

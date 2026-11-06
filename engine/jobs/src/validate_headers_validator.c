@@ -408,6 +408,10 @@ static bool validate_header_fields(const struct block_header *header,
         case BLOCK_ROW_VERIFY_HIGH_HASH:
             snprintf(out_reason, out_reason_size, "high-hash");
             return false;
+        case BLOCK_ROW_VERIFY_LOCAL_FAILURE:
+            snprintf(out_reason, out_reason_size, "%s",
+                     VALIDATE_HEADERS_LOCAL_FAILURE_REASON);
+            return false;
         case BLOCK_ROW_VERIFY_BAD_EQUIHASH:
         case BLOCK_ROW_VERIFY_HASH_BIND_MISMATCH:
         case BLOCK_ROW_VERIFY_NO_PARAMS:

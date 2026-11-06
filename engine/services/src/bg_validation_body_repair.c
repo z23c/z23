@@ -22,6 +22,7 @@
 #include "storage/disk_block_io.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
+#include "util/safe_alloc.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
@@ -57,6 +58,7 @@ enum bg_validation_block_outcome bg_validation_validate_canonical_block(
     size_t max_script_batch, int64_t *sigs_out, int64_t *proofs_out,
     int64_t *skips_out)
 {
+    uint64_t alloc_failures = zcl_alloc_failure_count();
 #ifdef ZCL_TESTING
     bool valid = g_validate_fn(
 #else
@@ -66,6 +68,8 @@ enum bg_validation_block_outcome bg_validation_validate_canonical_block(
         sigs_out, proofs_out, skips_out);
     if (!bg_validation_index_is_active(ms, height, index))
         return BG_VALIDATION_BLOCK_ORPHAN;
+    if (!valid && zcl_alloc_failure_count() != alloc_failures)
+        return BG_VALIDATION_BLOCK_LOCAL_FAILURE;
     return valid ? BG_VALIDATION_BLOCK_VALID : BG_VALIDATION_BLOCK_INVALID;
 }
 

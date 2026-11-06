@@ -18,6 +18,10 @@ struct block_index;
 struct node_db;
 struct sqlite3;
 
+/* The validator's reason when its check ran out of memory. It is no verdict on
+ * the header: the stage writes no row and holds its cursor. */
+#define VALIDATE_HEADERS_LOCAL_FAILURE_REASON "out-of-memory"
+
 /* ── Failed-row readiness (validate_headers_recheck_readiness.c) ───
  * A repairable row is runnable only after an exact header solution source is
  * available.  This is a byte-readiness predicate; it never validates or

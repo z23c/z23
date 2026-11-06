@@ -24,6 +24,7 @@
 #include "chain/chainparams.h"
 #include "chain/chainparamsbase.h"
 #include "chain/pow.h"
+#include "util/safe_alloc.h"
 #include "core/arith_uint256.h"
 #include "models/block.h"
 #include "util/blocker.h"
@@ -124,9 +125,10 @@ static bool bih_create_blocks_table(sqlite3 *db)
  * header-only `blocks` row (status=SCRIPTS but NO HAVE_DATA, chain_work=0 —
  * exactly what --importblockindex writes), and return its real PoW hash so the
  * stored `hash` column hash-binds. Returns false on any DB error. */
-static bool bih_insert_header_row(sqlite3 *db, int h,
-                                  const struct uint256 *prev,
-                                  struct uint256 *out_hash)
+static bool bih_insert_row_with_solution(sqlite3 *db, int h,
+                                         const struct uint256 *prev,
+                                         struct uint256 *out_hash,
+                                         unsigned int solution_size)
 {
     struct block_header hdr;
     block_header_init(&hdr);
@@ -144,9 +146,9 @@ static bool bih_insert_header_row(sqlite3 *db, int h,
     memset(hdr.nNonce.data, 0, 32);
     hdr.nNonce.data[0] = (uint8_t)(h & 0xFF);
     hdr.nNonce.data[1] = 0xC3;
-    hdr.nSolutionSize = 32;
-    for (int i = 0; i < 32; i++)
-        hdr.nSolution[i] = (uint8_t)(i + h);
+    hdr.nSolutionSize = solution_size;
+    for (unsigned int i = 0; i < solution_size; i++)
+        hdr.nSolution[i] = (uint8_t)(i + (unsigned int)h);
 
     /* Mine (bump nTime) until the header hash meets the PoW target at nBits;
      * the hydrate loader verifies hash-bind + CheckProofOfWork on every row.
@@ -190,7 +192,7 @@ static bool bih_insert_header_row(sqlite3 *db, int h,
     sqlite3_bind_int64(s, 6, hdr.nTime);
     sqlite3_bind_int64(s, 7, hdr.nBits);
     sqlite3_bind_blob(s, 8, hdr.nNonce.data, 32, SQLITE_TRANSIENT);
-    sqlite3_bind_blob(s, 9, hdr.nSolution, 32, SQLITE_TRANSIENT);
+    sqlite3_bind_blob(s, 9, hdr.nSolution, (int)solution_size, SQLITE_TRANSIENT);
     sqlite3_bind_blob(s, 10, zero32, 32, SQLITE_TRANSIENT);
     sqlite3_bind_int(s, 11, BLOCK_VALID_SCRIPTS);   /* no HAVE bits */
     sqlite3_bind_int(s, 12, 0);
@@ -204,6 +206,13 @@ static bool bih_insert_header_row(sqlite3 *db, int h,
     bool ok = (sqlite3_step(s) == SQLITE_DONE);
     sqlite3_finalize(s);
     return ok;
+}
+
+static bool bih_insert_header_row(sqlite3 *db, int h,
+                                  const struct uint256 *prev,
+                                  struct uint256 *out_hash)
+{
+    return bih_insert_row_with_solution(db, h, prev, out_hash, 32);
 }
 
 /* 15a helpers: the union-boot fixture. The flat rung's rows carry body
@@ -1936,6 +1945,82 @@ static int bil_runtime_row_quarantine_case(void)
     return failures;
 }
 
+static int bil_local_oom_hydrate_refuses(struct node_db *ndb,
+                                         struct main_state *ms)
+{
+    int failures = 0;
+    int64_t q0 = block_index_blocks_hydrate_quarantined();
+    zcl_alloc_fault_fail_nth("equihash_indices", 1);
+    bool loaded = load_block_index_from_blocks_table(ndb, ms).ok;
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    BIL_CHECK("bil/local-oom: hydrate refuses and keeps the row",
+              fired && !loaded && !bil_blocks_hydrate_row_gone(ndb, 1) &&
+              block_index_blocks_hydrate_quarantined() == q0);
+    return failures;
+}
+
+static int bil_local_oom_quarantine_refuses(struct node_db *ndb,
+                                            struct main_state *ms,
+                                            const struct uint256 *hash)
+{
+    int failures = 0;
+    int64_t q0 = stage_repair_runtime_row_quarantined();
+    struct stage_repair_row_quarantine_result qr;
+    memset(&qr, 0, sizeof(qr));
+    zcl_alloc_fault_fail_nth("equihash_indices", 1);
+    bool purged = stage_repair_quarantine_blocks_row(ndb, ms, 1, hash, &qr);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    BIL_CHECK("bil/local-oom: runtime quarantine refuses and keeps the row",
+              fired && !purged && qr.local_failure && !qr.quarantined &&
+              !bil_blocks_hydrate_row_gone(ndb, 1) &&
+              stage_repair_runtime_row_quarantined() == q0);
+
+    memset(&qr, 0, sizeof(qr));
+    purged = stage_repair_quarantine_blocks_row(ndb, ms, 1, hash, &qr);
+    BIL_CHECK("bil/local-oom: with memory back the invalid row is purged",
+              purged && qr.quarantined && bil_blocks_hydrate_row_gone(ndb, 1));
+    return failures;
+}
+
+/* The full Equihash check running out of memory is no verdict on a durable row:
+ * neither the hydrate nor the runtime quarantine may delete it. With memory back
+ * the row gets its real verdict. */
+static int bil_local_memory_failure_keeps_row_case(void)
+{
+    int failures = 0;
+    struct rom_state_checkpoint low_cp;
+    memset(&low_cp, 0, sizeof(low_cp));
+    low_cp.height = 0; /* height 1 is above it, so the full check runs */
+    checkpoints_set_rom_state_override_for_test(&low_cp);
+
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    bool ok = (sqlite3_open(":memory:", &ndb.db) == SQLITE_OK);
+    ndb.open = ok;
+    ok = ok && bih_create_blocks_table(ndb.db);
+    struct uint256 zero;
+    struct uint256 hash;
+    memset(&zero, 0, sizeof(zero));
+    ok = ok && bih_insert_row_with_solution(ndb.db, 1, &zero, &hash,
+                                            MAX_SOLUTION_SIZE);
+    BIL_CHECK("bil/local-oom: row with a full-size solution seeded", ok);
+
+    struct main_state ms;
+    main_state_init(&ms);
+    if (ok) {
+        failures += bil_local_oom_hydrate_refuses(&ndb, &ms);
+        failures += bil_local_oom_quarantine_refuses(&ndb, &ms, &hash);
+    }
+
+    blocker_clear("block_index.runtime_row_quarantine");
+    main_state_free(&ms);
+    if (ndb.db) sqlite3_close(ndb.db);
+    checkpoints_reset_rom_state_override_for_test();
+    return failures;
+}
+
 static int bil_fast_restart_forward_case(void)
 {
     int failures = 0;
@@ -2650,6 +2735,7 @@ int test_block_index_loader(void)
      *        back to db_block_delete_by_height when the stored `hash` column
      *        does not match the canonical hash. ──────── */
     failures += bil_runtime_row_quarantine_case();
+    failures += bil_local_memory_failure_keeps_row_case();
 
     /* ── 16c. Repair-storm throttle: N rapid same-key failures collapse to a
      *        bounded emission count (first-fire + one keepalive per window),
