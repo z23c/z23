@@ -7,6 +7,7 @@
  * importprivkey, and importaddress. */
 
 #include "controllers/wallet_controller_internal.h"
+#include "controllers/wallet_row_coins.h"
 #include "wallet/wallet_lock.h"
 
 bool wallet_rpc_set_secret_string(struct json_value *result, char *secret,
@@ -115,6 +116,90 @@ struct zcl_result wallet_import_key_commit(const struct wallet_rpc_context *ctx,
                   : ZCL_ERR(-1, "keystore full");
 }
 
+/* What importprivkey did with the utxos rows it found for the key. */
+struct import_tally {
+    int imported;
+    int skipped;
+    bool withheld;   /* no coins view: no row was looked at */
+};
+
+/* Copy one utxos row into wallet_utxos, with the height and coinbase flag of
+ * the coin that confirmed it. */
+static void import_save_row(struct node_db *ndb, const struct db_utxo *row,
+                            const uint8_t addr_hash[20],
+                            const struct wallet_row_coin *coin)
+{
+    struct db_wallet_utxo wu;
+    memset(&wu, 0, sizeof(wu));
+    memcpy(wu.txid, row->txid, 32);
+    wu.vout = row->vout;
+    wu.value = row->value;
+    memcpy(wu.address_hash, addr_hash, 20);
+    wu.script = row->script;
+    wu.script_len = row->script_len;
+    wu.height = coin->height;
+    wu.is_coinbase = coin->is_coinbase;
+    db_wallet_utxo_save(ndb, &wu);
+}
+
+/* The utxos table only nominates candidates: a row becomes a wallet_utxos row
+ * when the coins database confirms the coin, its amount and its script. A row
+ * that does not agree is skipped and counted. */
+static void import_confirmed_rows(struct wallet_rpc_context *ctx,
+                                  const uint8_t addr_hash[20],
+                                  struct import_tally *tally)
+{
+    if (!ctx->coins_tip) {
+        tally->withheld = true;
+        return;
+    }
+    struct db_utxo utxos[512];
+    int found = db_utxo_list_for_address(ctx->node_db, addr_hash, utxos, 512);
+    for (int i = 0; i < found; i++) {
+        struct db_utxo full;
+        if (!db_utxo_find(ctx->node_db, utxos[i].txid, utxos[i].vout, &full))
+            continue;
+        struct wallet_row_coin coin;
+        if (wallet_row_check_coin(ctx->coins_tip, full.txid, full.vout,
+                                  full.value, full.script, full.script_len,
+                                  &coin) == WALLET_ROW_AGREES) {
+            import_save_row(ctx->node_db, &full, addr_hash, &coin);
+            tally->imported++;
+        } else {
+            tally->skipped++;
+        }
+        db_utxo_free(&full);
+    }
+}
+
+/* An import whose rows all agree replies null, as it always has. A refusal
+ * to look, or a row that did not agree, is said in a string reply and logged
+ * once. A later rescanblockchain finds the key's coins from the blocks. */
+static void import_set_reply(struct json_value *result,
+                             const struct wallet_rpc_context *ctx,
+                             const struct import_tally *tally)
+{
+    char msg[256];
+    if (tally->withheld && ctx->node_db) {
+        snprintf(msg, sizeof(msg),
+                 "Key imported; coin discovery withheld: the coins database "
+                 "is unavailable. Run rescanblockchain once it is.");
+    } else if (tally->skipped > 0) {
+        snprintf(msg, sizeof(msg),
+                 "Key imported; %d utxos rows skipped because the coins "
+                 "database does not confirm them. Run rescanblockchain to "
+                 "discover this key's coins.", tally->skipped);
+    } else {
+        if (ctx->node_db)
+            printf("importprivkey: %d UTXOs imported (instant)\n",
+                   tally->imported);
+        json_set_null(result);
+        return;
+    }
+    LOG_WARN("wallet", "importprivkey: %s", msg);
+    json_set_str(result, msg);
+}
+
 bool rpc_importprivkey(const struct json_value *params, bool help,
                                 struct json_value *result)
 {
@@ -209,35 +294,10 @@ bool rpc_importprivkey(const struct json_value *params, bool help,
     uint8_t addr_hash[20];
     hash160(pk.vch, pk.size, addr_hash);
 
-    if (ctx->node_db) {
-        struct db_utxo utxos[512];
-        int found = db_utxo_list_for_address(ctx->node_db, addr_hash,
-                                              utxos, 512);
-        for (int i = 0; i < found; i++) {
-            struct db_utxo full;
-            if (!db_utxo_find(ctx->node_db, utxos[i].txid, utxos[i].vout,
-                              &full))
-                continue;
-
-            struct db_wallet_utxo wu;
-            memset(&wu, 0, sizeof(wu));
-            memcpy(wu.txid, full.txid, 32);
-            wu.vout = full.vout;
-            wu.value = full.value;
-            memcpy(wu.address_hash, addr_hash, 20);
-            wu.script = full.script;
-            wu.script_len = full.script_len;
-            wu.height = full.height;
-            wu.is_coinbase = full.is_coinbase;
-
-            db_wallet_utxo_save(ctx->node_db, &wu);
-            db_utxo_free(&full);
-        }
-
-        printf("importprivkey: %d UTXOs imported (instant)\n", found);
-    }
-
-    json_set_null(result);
+    struct import_tally tally = {0};
+    if (ctx->node_db)
+        import_confirmed_rows(ctx, addr_hash, &tally);
+    import_set_reply(result, ctx, &tally);
     return true;
 }
 
