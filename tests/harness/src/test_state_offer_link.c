@@ -456,11 +456,18 @@ static void slot_cleanup(struct slot_fixture *f)
 static int test_slots(void)
 {
     struct slot_fixture f = {0};
-    bool ok = slot_setup(&f) && slot_parallel(&f) && slot_full_retry(&f) && slot_shutdown_restart(&f) &&
-        slot_disconnect_mid_read(&f) && slot_shutdown_mid_read(&f) && slot_stale_replace(&f) && slot_idle_sweep(&f);
+    static const struct { const char *name; bool (*run)(struct slot_fixture *); } phases[] = {
+        {"parallel", slot_parallel}, {"full_retry", slot_full_retry},
+        {"shutdown_restart", slot_shutdown_restart}, {"disconnect_mid_read", slot_disconnect_mid_read},
+        {"shutdown_mid_read", slot_shutdown_mid_read}, {"stale_replace", slot_stale_replace},
+        {"idle_sweep", slot_idle_sweep}};
+    bool ok = slot_setup(&f);
+    const char *failed = ok ? NULL : "setup";
+    for (size_t i = 0; ok && i < sizeof(phases) / sizeof(phases[0]); ++i)
+        if (!(ok = phases[i].run(&f))) failed = phases[i].name;
     state_offer_link_test_gate(false);
     slot_cleanup(&f);
-    if (!ok) fprintf(stderr, "state_offer_link: concurrent serve slots failed\n");
+    if (!ok) fprintf(stderr, "state_offer_link: concurrent serve slots failed in %s\n", failed);
     else puts("state_offer_link slots: ok");
     return ok ? 0 : 1;
 }
