@@ -49,6 +49,7 @@
 
 #include "domain/consensus/check_block.h"
 #include "bloom/merkle.h"
+#include "core/hash.h"
 #include "core/uint256.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
@@ -345,39 +346,147 @@ static int cbe_check_merkle_no_scratch_alloc(void)
     return failures;
 }
 
-/* The in-place root agrees with the copying root on every tree shape up to
- * nine leaves, in the root and in the mutation flag, with and without a
- * duplicated last leaf, and on the empty and single-leaf cases. */
-static int cbe_check_in_place_matches_copying(void)
+#define CBE_REF_LEAVES_MAX 40
+/* The bound legacy reserves for its tree: leaves * 2 + 16. */
+#define CBE_REF_NODES_MAX (CBE_REF_LEAVES_MAX * 2 + 16)
+
+/* The merkle root and mutation flag as zclassicd computes them
+ * (src/primitives/block.cpp, CBlock::BuildMerkleTree): an append-only array of
+ * every node, walked level by level with an offset, hashing with hash256
+ * directly. Shares no code with the production loop on purpose. */
+static struct uint256 cbe_ref_merkle_root(const struct uint256 *ids, int count,
+                                          bool *mutated_out)
+{
+    struct uint256 tree[CBE_REF_NODES_MAX];
+    int tree_size = 0;
+    for (int i = 0; i < count; i++)
+        tree[tree_size++] = ids[i];
+
+    int j = 0;
+    bool mutated = false;
+    for (int size = count; size > 1; size = (size + 1) / 2) {
+        for (int i = 0; i < size; i += 2) {
+            int i2 = (i + 1 < size - 1) ? i + 1 : size - 1;
+            if (i2 == i + 1 && i2 + 1 == size &&
+                memcmp(tree[j + i].data, tree[j + i2].data, 32) == 0) {
+                /* Two identical hashes at the end of a level. */
+                mutated = true;
+            }
+            unsigned char pair[64];
+            memcpy(pair, tree[j + i].data, 32);
+            memcpy(pair + 32, tree[j + i2].data, 32);
+            hash256(pair, sizeof(pair), tree[tree_size++].data);
+        }
+        j += size;
+    }
+    *mutated_out = mutated;
+    struct uint256 root;
+    uint256_set_null(&root);
+    if (tree_size > 0)
+        root = tree[tree_size - 1];
+    return root;
+}
+
+static struct uint256 cbe_ref_leaf(unsigned int seed)
+{
+    unsigned char in[2] = { (unsigned char)seed, 0xc5 };
+    struct uint256 leaf;
+    hash256(in, sizeof(in), leaf.data);
+    return leaf;
+}
+
+/* Both production entry points against the reference, root and flag. Hands back
+ * the reference's answer for a caller that also pins an expected one. */
+static int cbe_merkle_agrees(const char *shape, const struct uint256 *ids,
+                             int count, struct uint256 *ref_root,
+                             bool *ref_mutated)
+{
+    struct uint256 scratch[CBE_REF_LEAVES_MAX];
+    if (count > 0)
+        memcpy(scratch, ids, (size_t)count * sizeof(scratch[0]));
+    *ref_root = cbe_ref_merkle_root(ids, count, ref_mutated);
+    bool copy_mut = !*ref_mutated, place_mut = !*ref_mutated;
+    struct uint256 copy_root =
+        compute_merkle_root_mutated(ids, (size_t)count, &copy_mut);
+    struct uint256 place_root =
+        merkle_root_mutated_in_place(scratch, (size_t)count, &place_mut);
+    if (uint256_eq(ref_root, &copy_root) && uint256_eq(ref_root, &place_root) &&
+        copy_mut == *ref_mutated && place_mut == *ref_mutated)
+        return 0;
+    printf("check_block_edge: %s n=%d differs from reference: root %d/%d "
+           "flag ref=%d copy=%d place=%d\n", shape, count,
+           uint256_eq(ref_root, &copy_root), uint256_eq(ref_root, &place_root),
+           *ref_mutated, copy_mut, place_mut);
+    return 1;
+}
+
+/* Every list length up to 40, as distinct leaves, with the trailing pair
+ * repeated, with a repeated pair anywhere, and with a trailing sequence
+ * repeated. */
+static int cbe_check_merkle_reference_sweep(void)
 {
     int failures = 0;
-    for (size_t n = 0; n <= 9; n++) {
-        struct uint256 ids[9];
-        struct uint256 scratch[9];
-        for (int dup = 0; dup < 2; dup++) {
-            memset(ids, 0, sizeof(ids));
-            for (size_t i = 0; i < n; i++) {
-                ids[i].data[0] = (uint8_t)(0x80 + i);
-                ids[i].data[31] = 0x3c;
-            }
-            if (dup && n >= 2)
-                ids[n - 1] = ids[n - 2];
-            memcpy(scratch, ids, sizeof(ids));
-            bool copy_mut = true, place_mut = true;
-            struct uint256 copy_root =
-                compute_merkle_root_mutated(ids, n, &copy_mut);
-            struct uint256 place_root =
-                merkle_root_mutated_in_place(scratch, n, &place_mut);
-            if (!uint256_eq(&copy_root, &place_root) ||
-                copy_mut != place_mut) {
-                printf("check_block_edge: in-place differs n=%zu dup=%d "
-                       "mut=%d/%d\n", n, dup, copy_mut, place_mut);
-                failures++;
-            }
+    struct uint256 ids[CBE_REF_LEAVES_MAX];
+    struct uint256 root;
+    bool flag;
+    for (int n = 0; n <= CBE_REF_LEAVES_MAX; n++) {
+        for (int i = 0; i < n; i++)
+            ids[i] = cbe_ref_leaf((unsigned int)i);
+        failures += cbe_merkle_agrees("distinct", ids, n, &root, &flag);
+        if (flag) {
+            printf("check_block_edge: reference flagged distinct n=%d\n", n);
+            failures++;
+        }
+
+        for (int at = 0; at + 1 < n; at++) {
+            struct uint256 kept = ids[at + 1];
+            ids[at + 1] = ids[at];
+            failures += cbe_merkle_agrees("repeated pair", ids, n, &root, &flag);
+            ids[at + 1] = kept;
+        }
+
+        for (int tail = 1; tail <= n / 2; tail++) {
+            for (int i = 0; i < tail; i++)
+                ids[n - tail + i] = ids[n - 2 * tail + i];
+            failures += cbe_merkle_agrees("repeated tail", ids, n, &root, &flag);
+            for (int i = 0; i < tail; i++)
+                ids[n - tail + i] = cbe_ref_leaf((unsigned int)(n - tail + i));
         }
     }
-    CBE_CHECK("in-place merkle root matches the copying root, 0..9 leaves",
+    CBE_CHECK("merkle root and flag match the legacy reference, 0..40 leaves",
               failures == 0);
+    return failures;
+}
+
+/* A list and its mutated form share one root, and only the mutated form is
+ * flagged. `l` holds the mutated form; its first `plain` leaves are the list. */
+static int cbe_check_merkle_form(const char *name, const struct uint256 *l,
+                                 int plain, int mutated_len)
+{
+    int failures = 0;
+    struct uint256 root, mut_root;
+    bool flag, mut_flag;
+    int bad = cbe_merkle_agrees(name, l, plain, &root, &flag);
+    bad += cbe_merkle_agrees(name, l, mutated_len, &mut_root, &mut_flag);
+    CBE_CHECK(name, bad == 0 && !flag && mut_flag &&
+                    uint256_eq(&root, &mut_root));
+    return failures;
+}
+
+/* The two known forms by value. */
+static int cbe_check_merkle_reference_named(void)
+{
+    struct uint256 l[8];
+    for (unsigned int i = 0; i < 6; i++)
+        l[i] = cbe_ref_leaf(0x40 + i);
+    struct uint256 abcc[4] = { l[0], l[1], l[2], l[2] };
+    int failures = cbe_check_merkle_form(
+        "[A,B,C,C] flagged, same root as [A,B,C]", abcc, 3, 4);
+
+    l[6] = l[4];
+    l[7] = l[5];
+    failures += cbe_check_merkle_form(
+        "[1,2,3,4,5,6,5,6] flagged, same root as [1,2,3,4,5,6]", l, 6, 8);
     return failures;
 }
 
@@ -464,7 +573,8 @@ int test_check_block_edge(void)
 
     /* A local memory failure is not a verdict on the block. */
     failures += cbe_check_merkle_no_scratch_alloc();
-    failures += cbe_check_in_place_matches_copying();
+    failures += cbe_check_merkle_reference_sweep();
+    failures += cbe_check_merkle_reference_named();
 
     /* ================================================================
      * 4. Aggregate sigops boundary: MAX_BLOCK_SIGOPS == 20000.
