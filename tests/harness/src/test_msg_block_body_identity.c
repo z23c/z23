@@ -865,6 +865,145 @@ static int bbi_test_compact_rebuilds_from_mempool(void)
     return failures;
 }
 
+/* The same compact block again, inside the reply window, does not rebuild or
+ * ask again: one getblocktxn, the same stash, the same request time, no score.
+ * The reply to that one request still completes the block. */
+static int bbi_test_repeat_of_pending_asks_once(void)
+{
+    int failures = 0;
+    printf("compact repeat: a repeat of the pending block rebuilds nothing... ");
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_AT_TIP)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct block real;
+    bbi_real_block(&real, 3, 82);
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &real));
+    struct block *stash = e.sender->compact_pending_block;
+    BBI_CHECK(stash != NULL);
+    BBI_CHECK(bbi_count_sent(e.sender, "getblocktxn") == 1);
+    int64_t asked = e.sender->compact_request_time;
+    for (int i = 0; i < 3; i++)
+        BBI_CHECK(bbi_deliver_compact(&e, e.sender, &real));
+    BBI_CHECK(bbi_count_sent(e.sender, "getblocktxn") == 1);
+    BBI_CHECK(e.sender->compact_pending_block == stash);
+    BBI_CHECK(e.sender->compact_request_time == asked);
+    BBI_CHECK(bbi_score(e.sender) == 0);
+
+    BBI_CHECK(bbi_deliver_blocktxn(&e, e.sender, &real));
+    BBI_CHECK(e.sender->compact_pending_block == NULL);
+    BBI_CHECK(atomic_load(&e.submit.accepted) == 1);
+    if (!failures)
+        printf("OK\n");
+    block_free(&real);
+    bbi_env_free(&e);
+    return failures;
+}
+
+/* Past the reply window the stash could not be completed, so a repeat rebuilds
+ * and asks again. */
+static int bbi_test_repeat_after_window_asks_again(void)
+{
+    int failures = 0;
+    printf("compact repeat: a repeat past the reply window asks again... ");
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_AT_TIP)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct block real;
+    bbi_real_block(&real, 3, 83);
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &real) &&
+              e.sender->compact_pending_block);
+    e.sender->compact_request_time -= 100;
+    int64_t stale = e.sender->compact_request_time;
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &real));
+    BBI_CHECK(bbi_count_sent(e.sender, "getblocktxn") == 2);
+    BBI_CHECK(e.sender->compact_pending_block != NULL);
+    BBI_CHECK(e.sender->compact_request_time > stale);
+    if (!failures)
+        printf("OK\n");
+    block_free(&real);
+    bbi_env_free(&e);
+    return failures;
+}
+
+/* A cmpctblock for a different hash replaces the pending one and asks for its
+ * own missing transactions. */
+static int bbi_test_other_hash_replaces_pending(void)
+{
+    int failures = 0;
+    printf("compact repeat: a different block replaces the pending one... ");
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_AT_TIP)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct block first, second;
+    bbi_real_block(&first, 3, 84);
+    bbi_real_block(&second, 3, 85);
+    struct uint256 h2;
+    block_get_hash(&second, &h2);
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &first) &&
+              e.sender->compact_pending_block);
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &second));
+    BBI_CHECK(bbi_count_sent(e.sender, "getblocktxn") == 2);
+    BBI_CHECK(e.sender->compact_pending_block != NULL);
+    BBI_CHECK(memcmp(&e.sender->compact_pending_hash, &h2, sizeof(h2)) == 0);
+    if (!failures)
+        printf("OK\n");
+    block_free(&first);
+    block_free(&second);
+    bbi_env_free(&e);
+    return failures;
+}
+
+/* A block whose data is already stored is not rebuilt: nothing is asked for,
+ * nothing is stashed and the sender is not scored. A pending block for another
+ * hash is still dropped, as it always was. */
+static int bbi_test_held_block_is_not_rebuilt(void)
+{
+    int failures = 0;
+    printf("compact repeat: a block already stored is not rebuilt... ");
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_AT_TIP)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct block other, held;
+    bbi_real_block(&other, 3, 86);
+    bbi_real_block(&held, 3, 87);
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &other) &&
+              e.sender->compact_pending_block);
+    bbi_drop_sends(e.sender);
+    if (!bbi_known_header(&e, &held, BLOCK_HAVE_DATA)) {
+        printf("FAIL (setup index)\n");
+        failures = 1;
+        goto out;
+    }
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &held));
+    BBI_CHECK(bbi_count_sent(e.sender, "getblocktxn") == 0);
+    BBI_CHECK(e.sender->compact_pending_block == NULL);
+    BBI_CHECK(atomic_load(&e.submit.calls) == 0);
+    BBI_CHECK(bbi_score(e.sender) == 0);
+    if (!failures)
+        printf("OK\n");
+out:
+    block_free(&other);
+    block_free(&held);
+    bbi_env_free(&e);
+    return failures;
+}
+
 /* Fabricated headers cost little to make, so one peer sending many of them
  * holds no download slots, queues no work, leaves intake room as it was, and
  * gets one rate-limited header request rather than one for each. */
@@ -1334,6 +1473,10 @@ int msg_block_body_identity_tests(void)
     failures += bbi_test_compact_wrong_body_have_data_no_request();
     failures += bbi_test_compact_matching_unchanged();
     failures += bbi_test_compact_rebuilds_from_mempool();
+    failures += bbi_test_repeat_of_pending_asks_once();
+    failures += bbi_test_repeat_after_window_asks_again();
+    failures += bbi_test_other_hash_replaces_pending();
+    failures += bbi_test_held_block_is_not_rebuilt();
     failures += bbi_test_wrong_body_with_no_request_is_unrequested();
     failures += bbi_test_unknown_headers_hold_nothing();
     failures += bbi_run_compact_cannot_take_slot(false, "a peer at its window "

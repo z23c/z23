@@ -1019,3 +1019,7 @@ later lane flips it HARD.
 - 2026-11-06T02:32:22Z — REASON: Copy the mempool in one pass for compact block reconstruction
   old ROOT: 82a532edf7e44ead87631be2852a141845f6cc099104c0b09689a67e042f9e2d
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T02:32:43Z — REASON: Do not rebuild a compact block that is already pending or already stored
+  old ROOT: 52482eb35412870dae7f8ac5f6f5268d63701db722d40230fa35f851c2fe9298
+  by: owner unseal ritual (make core-unseal)

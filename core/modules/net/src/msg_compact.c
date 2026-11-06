@@ -220,6 +220,36 @@ bool process_sendcmpct(struct msg_processor *mp, struct p2p_node *node,
     return true;
 }
 
+/* A getblocktxn reply is only taken within this long of the request. */
+#define COMPACT_PENDING_MAX_AGE_SECS 30
+
+/* A repeat of the cmpctblock this peer is already pending on, still inside the
+ * reply window, has nothing to add: its getblocktxn is out and the stashed
+ * partial block stands. Past the window the reply would be refused, so a
+ * repeat then rebuilds and asks again. */
+static bool compact_repeats_pending(const struct p2p_node *node,
+                                    const struct uint256 *hash)
+{
+    if (!node->compact_pending_block ||
+        memcmp(hash, &node->compact_pending_hash, sizeof(*hash)) != 0)
+        return false;
+    int64_t age = (int64_t)platform_time_wall_time_t() - node->compact_request_time;
+    return age <= COMPACT_PENDING_MAX_AGE_SECS;
+}
+
+/* True when the block's data is already stored and it has not failed, so a
+ * reconstruction of it could not be used. */
+static bool compact_block_held(const struct msg_processor *mp,
+                               const struct uint256 *hash)
+{
+    if (!mp->main_state)
+        return false;
+    const struct block_index *bi =
+        block_map_find(&mp->main_state->map_block_index, hash);
+    return bi && (bi->nStatus & BLOCK_HAVE_DATA) &&
+           !(bi->nStatus & BLOCK_FAILED_MASK);
+}
+
 /* ── Helper: copy the mempool txs for reconstruction (one pass, one lock) ── */
 
 static struct transaction *compact_load_mempool_txs(struct msg_processor *mp,
@@ -326,8 +356,20 @@ bool process_cmpctblock(struct msg_processor *mp, struct p2p_node *node,
         LOG_FAIL("compact", "cmpctblock from %s failed pow gate", node->addr_name);
     }
 
+    /* A repeat of what is already pending and a block already stored add
+     * nothing to rebuild; like the seen-block repeat above, neither is scored. */
+    if (compact_repeats_pending(node, &block_hash)) {
+        compact_block_msg_free(&cb);
+        return true;
+    }
+
     /* Discard any prior pending compact block for this peer */
     compact_pending_clear(node);
+
+    if (compact_block_held(mp, &block_hash)) {
+        compact_block_msg_free(&cb);
+        return true;
+    }
 
     /* Copy the mempool transactions for reconstruction in one pass */
     size_t num_mp_txs = 0;
@@ -484,7 +526,7 @@ bool process_blocktxn(struct msg_processor *mp, struct p2p_node *node,
 
     /* Timeout check: reject stale responses (>30 seconds) */
     int64_t age = (int64_t)platform_time_wall_time_t() - node->compact_request_time;
-    if (age > 30) {
+    if (age > COMPACT_PENDING_MAX_AGE_SECS) {
         LOG_WARN("compact", "peer %s: blocktxn %s — stale response (%lld sec), discarding",
                  node->addr_name, hex, (long long)age);
         compact_pending_clear(node);
