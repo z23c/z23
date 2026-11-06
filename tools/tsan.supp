@@ -3,6 +3,8 @@
 #
 # Format (one per line, matched against report stack frames / module names):
 #   race:<function-or-source-file>   — drop race reports whose stack contains it
+#   deadlock:<function>              — drop lock-order reports whose stack contains it
+#   mutex:<function>                 — drop mutex-misuse reports whose stack contains it
 #   thread:<function>                — drop reports on threads started there
 #   called_from_lib:<module>         — drop reports called from an uninstrumented lib
 #
@@ -12,5 +14,20 @@
 # only what is provably benign. Current triage state: docs/dev/BUILD.md
 # "ThreadSanitizer profiles" (known-good-as-of note).
 #
-# No active suppressions — the first sweep's one finding was fixed in code
-# (atomic publication of thread_liveness_child.id), not suppressed.
+# Project code has no active suppressions — the first sweep's one finding was
+# fixed in code (atomic publication of thread_liveness_child.id), not suppressed.
+#
+# Vendored Tor's thread pool, vendor/tor/src/lib/evloop/workqueue.c. The Tor
+# archive is not instrumented, so TSan records only the libc call and its
+# immediate caller: the pool's own functions never appear in these reports, and
+# these two frames are the narrowest names they carry.
+#
+# threadpool_start_threads holds pool->control_lock, takes pool->lock, then
+# waits on the condition with control_lock while holding lock. Only the thread
+# creating the pool ever nests the two; workers take them one at a time, so no
+# second thread can complete the cycle.
+deadlock:tor_cond_wait
+# control_lock is a semaphore on purpose: the pool's creator leaves it locked
+# and the last worker to exit unlocks it, which is how threadpool_stop_threads
+# waits for the workers to finish.
+mutex:tor_mutex_release

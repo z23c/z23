@@ -480,9 +480,10 @@ inside them.
 
 `t-tsan` and `tsan-ci` both read `tools/tsan.supp` via
 `TSAN_OPTIONS=suppressions=...`. Every active entry there must be confirmed
-benign with a written justification — never suppress an untriaged report. It
-ships with zero active suppressions (comments only): fix a real race in code,
-never hide it behind a suppression.
+benign with a written justification — never suppress an untriaged report. Its
+only active entries are two for vendored Tor's thread pool, whose mutex is a
+semaphore by design: project code ships with no suppressions. Fix a real race
+in code, never hide it behind a suppression.
 
 `thread_liveness_child.id` (`platform/modules/util/src/thread_liveness.c`) is
 `_Atomic supervisor_child_id`, release-stored after `supervisor_register()`
