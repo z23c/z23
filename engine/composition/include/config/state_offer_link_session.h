@@ -12,10 +12,12 @@ enum sol_read_result sol_client_read(void *peer_id, enum sol_object_kind kind,
     const uint8_t root[32], uint32_t index, uint8_t *buf, uint32_t cap, uint32_t *len);
 bool sol_client_poll(uint64_t peer, struct state_offer_link_frame *out);
 bool sol_client_consume(uint64_t peer, const struct state_offer_link_frame *frame);
-/* Monotonic ms of the last link progress this run: a session start or a part
- * received. INT64_MIN before the first or after shutdown. Lock-free. */
+/* Monotonic ms when the last part was received this run (opening a session is
+ * not progress). INT64_MIN before the first or after shutdown. Lock-free. */
 int64_t sol_client_last_progress_ms(void);
 #ifdef ZCL_TESTING
+/* Stamp progress now, as if a part had just arrived. */
+void sol_client_test_note_part(void);
 /* Move the last progress back by ms (|ms| < 1e9), as if no part had arrived
  * since; a negative ms moves it forward again. */
 void sol_client_test_age_progress(int64_t ms);

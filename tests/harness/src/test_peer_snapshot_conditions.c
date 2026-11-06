@@ -6,6 +6,7 @@
 #include "conditions/snapshot_offer_ready.h"
 #include "conditions/sync_violation_lag.h"
 #include "config/boot_zcode_swarm_membership.h"
+#include "config/state_offer_link_session.h"
 #include "config/state_offer_peer.h"
 #include "framework/condition.h"
 #include "net/msgprocessor.h"
@@ -440,6 +441,7 @@ static int run_sync_violation_spares_rung_server_case(void)
     msg_processor_set_header_sync_hold(peer_snapshot_hold);
     uint64_t link = boot_zcode_swarm_peer_id(&server);
     ok = ok && state_offer_peer_begin(link);
+    sol_client_test_note_part(); /* a part lands */
     ok = ok && state_offer_peer_serving_held_fetch(&server) &&
          !state_offer_peer_serving_held_fetch(&idle);
 

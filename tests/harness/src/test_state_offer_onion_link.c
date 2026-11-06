@@ -221,6 +221,8 @@ static bool onion_legacy_dropped(void)
     return true;
 }
 
+static void onion_trickle(struct onion_fixture *f);
+
 /* Discovery over the link records the rung offer and starts its fetch. */
 static bool onion_discover_and_fetch(struct onion_fixture *f)
 {
@@ -233,10 +235,10 @@ static bool onion_discover_and_fetch(struct onion_fixture *f)
     ONION_CHECK(st.chosen_height == ONION_RUNG);
     ONION_CHECK(st.last_decision == STATE_OFFER_DECIDE_FETCH);
     ONION_CHECK(state_offer_service_test_fetch_running());
-    /* The fetch thread opens its link session on its own schedule. */
-    struct timespec t = {0, 1000000};
+    /* The fetch thread opens its link session on its own schedule, and only
+     * a received part counts as progress: let the server's first part in. */
     for (int i = 0; i < 10000 && !state_offer_peer_serving_held_fetch(f->to_server); i++)
-        (void)nanosleep(&t, NULL);
+        onion_trickle(f);
     return true;
 }
 

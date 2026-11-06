@@ -16,10 +16,11 @@
 #include <time.h>
 
 /* The no-bytes bound of one object read: the fetch aborts only when no part
- * arrives for this long (a session start counts as the first arrival). */
+ * arrives for this long after the request. */
 #define SOL_INACTIVITY_SECONDS STATE_OFFER_LINK_CLIENT_IDLE_SECONDS
-/* Last link progress (session start or part), read lock-free by the peer
- * rules and the fall-back decision. */
+/* When the last part arrived, read lock-free by the peer rules and the
+ * fall-back decision. Only received bytes count: a session opened to a peer
+ * that is gone (a retried stale offer) must not look like progress. */
 static _Atomic int64_t g_progress_ms = INT64_MIN;
 static void note_progress(void) { atomic_store(&g_progress_ms, platform_time_monotonic_ms()); }
 static pthread_once_t once = PTHREAD_ONCE_INIT;
@@ -89,7 +90,7 @@ bool sol_client_start(uint64_t peer, void (*wake)(void *), void *wake_ctx)
     if (!peer || !wake || !ready()) return false;
     pthread_mutex_lock(&lock);
     bool ok = !s.active && !s.busy;
-    if (ok) { s.active = true; s.peer = peer; s.wake = wake; s.wake_ctx = wake_ctx; note_progress(); }
+    if (ok) { s.active = true; s.peer = peer; s.wake = wake; s.wake_ctx = wake_ctx; }
     pthread_mutex_unlock(&lock);
     return ok;
 }
@@ -98,6 +99,7 @@ int64_t sol_client_last_progress_ms(void)
     return atomic_load(&g_progress_ms);
 }
 #ifdef ZCL_TESTING
+void sol_client_test_note_part(void) { note_progress(); }
 void sol_client_test_age_progress(int64_t ms)
 {
     int64_t t = atomic_load(&g_progress_ms);
