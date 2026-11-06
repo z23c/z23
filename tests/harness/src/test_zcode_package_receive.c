@@ -7,7 +7,8 @@
  * `zcode package admit` and checks it out. Proven: B's tree has A's head
  * package root and A's head bytes; B's lineage row names the parent release;
  * and one corrupted chunk during receive writes nothing to B: no tree, no
- * release, no lineage row. */
+ * release, no lineage row. A fresh C also receives the same shared version
+ * after A edits its working copy without saving or sharing again. */
 
 #include "test/test_core.h"
 
@@ -606,6 +607,51 @@ static int zpr_tree_equals_head(const struct zpr_world *w)
     return failures;
 }
 
+static int zpr_shared_version_survives_edits(const struct zpr_world *w)
+{
+    int failures = 0;
+    struct zpr_world recipient = *w;
+    struct vcs_package_manifest manifest = {0};
+    struct zpr_call c;
+    bool call_open = false;
+    (void)snprintf(recipient.b_dir, sizeof(recipient.b_dir), "%s/c", w->root);
+    (void)snprintf(recipient.b_tree, sizeof(recipient.b_tree), "%s/c-tree", w->root);
+    TEST("zcode package receive: unpublished A edits cannot change C's selected share") {
+        uint8_t shared[32], changed[32], received[32];
+        struct zpr_pump stats = {0};
+        ASSERT(!zpr_exists(recipient.b_dir) && !zpr_exists(recipient.b_tree));
+        ASSERT(mkdir(recipient.b_dir, 0700) == 0);
+        ASSERT(zpr_write(w->a_copy, ZPR_EDITED,
+                          "\n/* later unpublished publisher edit */\n", "ab"));
+        ASSERT(zcl_hex_decode(w->shared_package_hex, shared, 32));
+        ASSERT(zpr_tree_root(w->a_copy, changed, NULL));
+        ASSERT(memcmp(changed, shared, 32) != 0);
+        ASSERT(zpr_transfer(&recipient, false, &stats));
+        call_open = true;
+        ASSERT(zpr_admit(&recipient, &c) && zpr_passed(&c));
+        ASSERT(strcmp(zpr_str(&c, "release_id"), w->shared_release_hex) == 0);
+        ASSERT(strcmp(zpr_str(&c, "package_root"), w->shared_package_hex) == 0);
+        ASSERT(strcmp(zpr_str(&c, "transport_root"), w->transport_hex) == 0);
+        zpr_end(&c);
+        ASSERT(zpr_checkout(&recipient, &c) && zpr_passed(&c));
+        zpr_end(&c);
+        call_open = false;
+        ASSERT(zpr_tree_root(recipient.b_tree, received, &manifest));
+        ASSERT(memcmp(received, shared, 32) == 0);
+        ASSERT(memcmp(received, changed, 32) != 0);
+        ASSERT(manifest.count > 1);
+        for (size_t i = 0; i < manifest.count; i++)
+            ASSERT(zpr_same_bytes(w->b_tree, recipient.b_tree,
+                                  manifest.files[i].path));
+        ASSERT(!zpr_same_bytes(w->a_copy, recipient.b_tree, ZPR_EDITED));
+        PASS();
+    } _test_next:;
+    if (call_open)
+        zpr_end(&c);
+    vcs_package_manifest_free(&manifest);
+    return failures;
+}
+
 static int zpr_lineage_names_parent(const struct zpr_world *w)
 {
     int failures = 0;
@@ -641,6 +687,8 @@ int test_zcode_package_receive(void)
     failures += zpr_corrupt_chunk_writes_nothing(&w);
     failures += zpr_tree_equals_head(&w);
     failures += zpr_lineage_names_parent(&w);
+    if (!failures)
+        failures += zpr_shared_version_survives_edits(&w);
     if (!failures)
         (void)test_rm_rf_recursive(w.root);
     return failures;
