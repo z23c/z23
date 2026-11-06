@@ -32,6 +32,7 @@
 #define ZPF_DAY 20400
 #define ZPF_ORIGIN_SEED 0x31
 #define ZPF_PLAYER_SEED 0x52
+#define ZPF_ENVELOPE_MARGIN 1024u
 
 struct zpf_world {
     char root[512];
@@ -90,6 +91,15 @@ static bool zpf_run(const char *path, struct zpf_call *c)
     c->request.spec = spec;
     c->request.invoked_name = spec->path;
     spec->handler(&c->request, &c->reply);
+    /* The CLI and MCP serialize the reply under the leaf's budget; keep a
+     * margin for the result envelope around `data`. */
+    size_t data_bytes = json_write(&c->reply.data, NULL, 0);
+    if (spec->budget_bytes && data_bytes + ZPF_ENVELOPE_MARGIN >
+                                  spec->budget_bytes) {
+        printf("  [%s reply %zu bytes over budget %zu]\n", path, data_bytes,
+               (size_t)spec->budget_bytes);
+        return false;
+    }
     return true;
 }
 

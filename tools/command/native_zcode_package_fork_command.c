@@ -26,9 +26,12 @@
 #include <sys/stat.h>
 
 #define ZPC_PATH_MAX 4400
-#define ZPC_LIST_DEFAULT 50
-#define ZPC_LIST_MAX 200
-#define ZPC_CHANGED_PATHS_SHOWN 32
+/* Bounded so a full page fits the leaf's response budget: one version row
+ * is about 300 bytes, and the list budget is 8 KiB. */
+#define ZPC_LIST_DEFAULT 20
+#define ZPC_LIST_MAX 20
+#define ZPC_CHANGED_PATHS_SHOWN 16
+#define ZPC_CHANGED_PATH_BYTES 1536
 
 static const uint8_t k_zpc_zero[32];
 
@@ -366,6 +369,8 @@ struct zpc_changes {
     struct sha3_256_ctx ctx;
     struct json_value paths;
     size_t count;
+    size_t shown;
+    size_t shown_bytes;
 };
 
 static void zpc_change_cb(enum vcs_diff_kind kind, const struct vcs_entry *a,
@@ -379,8 +384,13 @@ static void zpc_change_cb(enum vcs_diff_kind kind, const struct vcs_entry *a,
     sha3_256_write(&ch->ctx, &tag, 1);
     zpc_hash_text(&ch->ctx, e->path);
     sha3_256_write(&ch->ctx, b ? b->blob : k_zpc_zero, 32);
-    if (ch->count++ < ZPC_CHANGED_PATHS_SHOWN) {
+    ch->count++;
+    size_t len = strlen(e->path);
+    if (ch->shown < ZPC_CHANGED_PATHS_SHOWN &&
+        ch->shown_bytes + len <= ZPC_CHANGED_PATH_BYTES) {
         struct json_value path;
+        ch->shown++;
+        ch->shown_bytes += len;
         json_init(&path);
         json_set_str(&path, e->path);
         (void)json_push_back(&ch->paths, &path);
@@ -417,6 +427,8 @@ void zcl_native_handle_zcode_package_version_save(
         zcl_package_copy_push_root(&reply->data, "version", copy.head_version);
         (void)json_push_kv_int(&reply->data, "changes", (int64_t)ch.count);
         (void)json_push_kv(&reply->data, "changed_paths", &ch.paths);
+        (void)json_push_kv_bool(&reply->data, "changed_paths_truncated",
+                                ch.count > ch.shown);
     } else if (zcl_package_copy_plan_matches(request->input, plan_id, reply,
                                              command)) {
         const struct vcs_snapshot_meta meta = {.phase = "save"};

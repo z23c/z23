@@ -605,7 +605,7 @@ AGENT_IMPACT_RULE("contexts/commons/apps/yardsale/*|contexts/market/controllers/
  * directly, so a change to them has no other reachable test. make_lint_gates
  * rides along because apps/ and vendor/ are both scanned roots for the
  * structural gates. */
-AGENT_IMPACT_RULE("apps/skycombat/*|vendor/raylib/*|tests/harness/src/test_skycombat_models.c", "skycombat_models make_lint_gates")
+AGENT_IMPACT_RULE("apps/skycombat/*|vendor/raylib/*|tests/harness/src/test_skycombat_models.c", "skycombat_models zcode_package_fork make_lint_gates")
 AGENT_IMPACT_RULE("apps/skycombat/include/sky_combat/qa_frames.h|apps/skycombat/src/sky_combat_multiplayer_ultimate.c|tests/harness/src/test_skycombat_qa_frames.c|tests/fixtures/skycombat_qa/*", "skycombat_qa_frames skycombat_models make_lint_gates")
 /* Yardsale wallet glue: typed yardsale.* native leaves -> node RPC ->
  * yardsale_wallet_service plan/commit against the yardsale_plans table. */
