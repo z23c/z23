@@ -13,6 +13,7 @@
 #include "models/activerecord.h"
 #include "platform/file_sync.h"
 #include "util/log_macros.h"
+#include "util/write_all.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -118,20 +119,6 @@ static bool app_record_path(char *out, size_t cap, const char *state_dir,
     return n > 0 && (size_t)n < cap;
 }
 
-static bool app_write_all(int fd, const char *text, size_t len)
-{
-    while (len) {
-        ssize_t n = write(fd, text, len);
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n <= 0)
-            return false;
-        text += n;
-        len -= (size_t)n;
-    }
-    return true;
-}
-
 static bool app_dir_sync(const char *dir)
 {
     int fd = open(dir, O_RDONLY | O_CLOEXEC | O_DIRECTORY);
@@ -162,7 +149,7 @@ static bool app_record_write(const char *state_dir,
                   0600);
     if (fd < 0)
         return false;
-    bool ok = app_write_all(fd, text, (size_t)n) && platform_file_sync(fd) == 0;
+    bool ok = zcl_write_all(fd, text, (size_t)n) && platform_file_sync(fd) == 0;
     ok = close(fd) == 0 && ok;
     ok = ok && rename(tmp, dst) == 0;
     if (!ok) {

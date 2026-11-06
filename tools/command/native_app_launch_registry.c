@@ -52,11 +52,13 @@ static const struct app_builtin k_app_builtins[] = {
 
 static bool app_copy(char *dst, size_t cap, const char *src, size_t len)
 {
-    if (len >= cap)
-        return false;
-    memcpy(dst, src, len);
-    dst[len] = '\0';
-    return true;
+    bool fits = len < cap;
+
+    if (fits) {
+        memcpy(dst, src, len);
+        dst[len] = '\0';
+    }
+    return fits;
 }
 
 /* [a-z0-9-], 1..APP_LAUNCH_ID_MAX bytes, starting with a letter or digit. */
