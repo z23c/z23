@@ -626,6 +626,12 @@ void network_monitor_stop(void)
         pthread_join(g_nm.thread, NULL);
         g_nm.thread_running = false;
     }
+    /* Drop the supervisor entry so a later start registers the same contract
+     * name once instead of colliding with this stopped one. */
+    supervisor_child_id id =
+        atomic_exchange(&g_nm.supervisor_id, SUPERVISOR_INVALID_ID);
+    if (id != SUPERVISOR_INVALID_ID)
+        supervisor_unregister(id);
     g_nm.started = false;
 }
 
