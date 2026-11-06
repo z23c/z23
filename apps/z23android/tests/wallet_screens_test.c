@@ -1624,6 +1624,25 @@ static void test_preload_arrives_on_open_receive(void)
     wallet_screens_close();
 }
 
+static void funds_actions_first(void)
+{
+    struct wallet_screen *s = snap();
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_RECEIVE) == 1);
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SEND) == 2);
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_HISTORY) == 3);
+}
+static void test_funds_action_positions(void)
+{
+    start(true); set_block(); CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    funds_actions_first(); release_block(); wait_for(settled); wallet_screens_close();
+    start(false); fake.summary = NODE_UNAVAILABLE_ERROR; fake.node_up = false;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS)); funds_actions_first(); wallet_screens_close();
+    start(false); fake.summary = SUMMARY_SCAN("2999000");
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS)); funds_actions_first(); wallet_screens_close();
+    start(false); CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    funds_actions_first(); wallet_screens_close();
+}
+
 static void test_receive_amount_navigation(void)
 {
     uint8_t symbols[69] = {2}; char address[92], reply[256];
@@ -2811,6 +2830,7 @@ int main(int argc, char **argv)
     test_every_page_pins_one_back();
     test_spendable_for_send();
     test_receive_amount();
+    test_funds_action_positions();
     test_receive_amount_navigation();
     test_receive_new_address();
     test_offline_receive();

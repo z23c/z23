@@ -552,13 +552,13 @@ static void funds_items(struct wallet_screen *s)
 {
     const struct data *d = &st.d;
     title(s, "Wallet");
-    if (d->scan_note[0]) note(s, d->scan_note);
-    funds_balance_items(s, d);
-    if (d->fleet_loaded && !d->node_silent) line(s, d->fleet_fresh ? d->fleet : WALLET_FLEET_UNCHECKED);
     button(s, WALLET_ACT_RECEIVE, "Receive");
     if (!(d->summary_failed && d->view.known))
         button(s, WALLET_ACT_SEND, d->scan_note[0] ? "Scan again" : "Send");
     button(s, WALLET_ACT_HISTORY, "History");
+    if (d->scan_note[0]) note(s, d->scan_note);
+    funds_balance_items(s, d);
+    if (d->fleet_loaded && !d->node_silent) line(s, d->fleet_fresh ? d->fleet : WALLET_FLEET_UNCHECKED);
     button(s, WALLET_ACT_BACK, "Home");
 }
 
