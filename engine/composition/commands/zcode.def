@@ -4812,7 +4812,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "zcode.package.fork", "zcode.package", "",
-    "Make a personal working copy of a published package",
+    "Copy a package to change it",
     "root names a persisted release id, or a package root carried by exactly "
     "one persisted release. Without confirm, verifies the release and returns "
     "a plan_id. With that plan_id and confirm:true, reconstructs the package "
@@ -4834,7 +4834,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_zcode_package_fork)
 
 ZCL_COMMAND_BRANCH("zcode.package.version", "zcode.package",
-                   "Recoverable versions of a personal package copy",
+                   "Saved versions of a copy",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_COMMAND(
@@ -4934,7 +4934,7 @@ ZCL_COMMAND_READY_COMMAND(
  * and covers later local saves and restores of that copy only. */
 ZCL_COMMAND_READY_COMMAND(
     "zcode.package.adopt", "zcode.package", "",
-    "Keep a published package as your own runnable copy",
+    "Keep a package as your copy",
     "root names a persisted release id, or a package root carried by exactly "
     "one persisted release. Without confirm, verifies the release and shows "
     "its publisher key, its parent release and package roots, the files it "
@@ -4959,7 +4959,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_zcode_package_adopt)
 
 ZCL_COMMAND_READY_READ(
-    "zcode.package.copies", "zcode.package", "",
+    "zcode.copies", "zcode", "",
     "List your adopted package copies",
     "Reads the datadir's adopt records and reports each copy's name, "
     "directory, release and whether it is still adopted: adopted, "
@@ -4969,7 +4969,7 @@ ZCL_COMMAND_READY_READ(
     "zcode,package,copies,adopt,copy,list,mine,game",
     "zcl.zcode_package_copies.input.v1", "zcl.zcode_package_copies.v1",
     "datadir", "",
-    "z23 zcode package copies",
+    "z23 zcode copies",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
     ZCL_COMMAND_COST_LOW,

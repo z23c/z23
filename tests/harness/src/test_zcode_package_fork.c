@@ -857,7 +857,7 @@ static bool zpf_copies_status(const struct zpf_world *w, const char *name,
     struct zpf_call c;
     zpf_begin(&c);
     (void)json_push_kv_str(&c.input, "datadir", w->datadir);
-    bool ok = zpf_run("zcode.package.copies", &c) && zpf_passed(&c);
+    bool ok = zpf_run("zcode.copies", &c) && zpf_passed(&c);
     const struct json_value *rows = json_get(&c.reply.data, "copies");
     status[0] = '\0';
     *count = ok ? json_get_int(json_get(&c.reply.data, "count")) : -1;
@@ -878,7 +878,7 @@ static int zpf_adopt_mcp(const struct zpf_world *w)
     TEST("zcode package adopt: MCP refuses adopt and still allows fork") {
         const struct zcl_command_spec *adopt = zpf_leaf("zcode.package.adopt");
         const struct zcl_command_spec *fork = zpf_leaf("zcode.package.fork");
-        const struct zcl_command_spec *copies = zpf_leaf("zcode.package.copies");
+        const struct zcl_command_spec *copies = zpf_leaf("zcode.copies");
         struct mcp_refusal why = {0};
         struct json_value in;
         ASSERT(adopt && fork && copies);

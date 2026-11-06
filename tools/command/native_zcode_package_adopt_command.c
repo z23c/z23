@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: zcode.package.adopt — the owner keeps one published release as
- * their own runnable copy — zcode.package.copies, the adopt record and the
+ * their own runnable copy — zcode.copies, the adopt record and the
  * adoption check later leaves (app.build, the launcher's copy open) call.
  *
  * Adopt plans first: it verifies the release and shows its publisher key,
@@ -572,7 +572,7 @@ void zcl_native_handle_zcode_package_adopt(
     reply->error.mutated = true;
 }
 
-/* ── zcode package copies ───────────────────────────────────────────── */
+/* ── zcode copies ───────────────────────────────────────────── */
 
 /* The live status of one recorded copy, read without writing. */
 static const char *zpa_copy_status(const char *datadir,
@@ -588,7 +588,7 @@ static const char *zpa_copy_status(const char *datadir,
         return "missing";
     zcl_command_reply_init(&scratch, "zcl.zcode_package_copies.v1");
     if (zcl_package_copy_open_as(dir, ZCL_PACKAGE_COPY_READ, &copy, &scratch,
-                                 "zcode.package.copies")) {
+                                 "zcode.copies")) {
         status = memcmp(copy.fork_version, rec->root_commit, 32) == 0
                      ? zcl_package_copy_adoption_name(
                            zcl_package_copy_adopted(datadir, &copy, NULL))
@@ -634,7 +634,7 @@ static bool zpa_is_record(const char *name)
 void zcl_native_handle_zcode_package_copies(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    const char *command = "zcode.package.copies";
+    const char *command = "zcode.copies";
     struct platform_directory_list list = {0};
     struct json_value rows;
     char store[ZPA_PATH_MAX];
