@@ -1179,3 +1179,11 @@ later lane flips it HARD.
 - 2026-11-06T09:33:23Z — REASON: Rebase reseal onto origin/main: FlySync: keep the hold under the complexity cap; no offers once installed; no change beyond the rebased commit
   old ROOT: e2a8455f973cd2993dd44cf707ba2683ee72eb8453384392208f474b87432dc9
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T07:37:33Z — REASON: Comment only: narrow the empty-locator getheaders parity note in msg_headers.c to the known-hash_stop case; no code change
+  old ROOT: 9dc222e1a24ecfd552c4f3755f245d31a55bd1964d92f82d815f3b6dbcf60ee4
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T09:33:47Z — REASON: Rebase reseal onto origin/main: msg_headers: narrow the empty-locator parity note to a known hash_stop; no change beyond the rebased commit
+  old ROOT: 962b57f05a8d3c03e14a528223f66b85e83c91837906b8bced6555fc8ea710c3
+  by: owner unseal ritual (make core-unseal)

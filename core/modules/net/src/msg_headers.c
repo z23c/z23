@@ -1046,9 +1046,12 @@ static struct block_index *headers_start_from_locator(
         return NULL;
 
     if (locator && locator->num_hashes == 0 && hash_stop) {
-        /* zclassicd parity: an empty locator asks for exactly the hash_stop
-         * header itself, not its successor (main.cpp "If locator is null,
-         * return the hashStop block"). The serve loop stops at hash_stop. */
+        /* An empty locator with a KNOWN hash_stop asks for exactly that header,
+         * not its successor, as zclassicd answers it (main.cpp "If locator is
+         * null, return the hashStop block"); the serve loop stops at hash_stop.
+         * This branch claims parity for that case only: an unknown hash_stop
+         * falls through to the genesis walk below, and other getheaders forms
+         * are not claimed to match zclassicd byte for byte. */
         pindex = block_map_find(&ms->map_block_index, hash_stop);
         if (pindex)
             return pindex;
