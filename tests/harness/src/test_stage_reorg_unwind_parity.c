@@ -420,7 +420,8 @@ static void sru_register_island(void)
     memset(a.root_hash.data, 0x1A, 32);
     memset(a.rung_hash.data, 0x2B, 32);
     a.root_work.pn[0] = 1;
-    (void)island_anchor_register(&a);
+    if (!island_anchor_register(&a).ok)
+        fprintf(stderr, "sru: island anchor fixture not registered\n");
 }
 
 static int sru_run_island_floor(struct branch *L, struct branch *W,

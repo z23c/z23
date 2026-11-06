@@ -311,7 +311,7 @@ static bool fsi_rung_installed(const char *datadir)
         return false;
     struct island_anchor a;
     bool found = false;
-    if (!island_anchor_load(progress_store_db(), &a, &found) || !found) {
+    if (!island_anchor_load(progress_store_db(), &a, &found).ok || !found) {
         LOG_WARN(FSI_SUBSYS, "bundle marker h=%d present but the island fact "
                  "is unreadable; the island is not marked installed", h);
         return false;
@@ -410,8 +410,11 @@ static bool fsi_collect_listed(struct main_state *ms,
 {
     struct island_anchor_rows list;
     bool found = false;
-    *have = island_anchor_rows_load(progress_store_db(), &list, &found) &&
-            found;
+    struct zcl_result r = island_anchor_rows_load(progress_store_db(), &list,
+                                                  &found);
+    if (!r.ok)
+        LOG_ERROR(FSI_SUBSYS, "%s", r.message);
+    *have = r.ok && found;
     for (int i = 0; *have && i < ISLAND_ANCHOR_WINDOW; i++) {
         struct block_index *bi = block_map_find(&ms->map_block_index,
                                                 &list.hash[i]);
@@ -570,8 +573,11 @@ bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
         LOG_WARN(FSI_SUBSYS, "island seed refused: %s", saved.message);
         return false;
     }
-    if (!island_anchor_register(a))
+    struct zcl_result reg = island_anchor_register(a);
+    if (!reg.ok) {
+        LOG_WARN(FSI_SUBSYS, "island seed refused: %s", reg.message);
         return false;
+    }
     zcl_mutex_lock(&ms->cs_main);
     struct block_index *top = fsi_insert_window(ms, w, n, a);
     zcl_mutex_unlock(&ms->cs_main);
@@ -629,7 +635,7 @@ static bool fsi_gate_unreadable(sqlite3 *db, char *why, size_t why_cap)
 {
     struct island_anchor a;
     bool found = false;
-    bool no_fact = !(island_anchor_load(db, &a, &found) && found);
+    bool no_fact = !(island_anchor_load(db, &a, &found).ok && found);
     if (!atomic_load(&g_requested) && no_fact) {
         LOG_WARN(FSI_SUBSYS, "island state unreadable and no readable island "
                  "fact: continuing without FlySync");
@@ -681,7 +687,15 @@ bool flysync_island_boot_gate(const char *datadir, struct main_state *ms,
 static bool fsi_gate_fresh(sqlite3 *db, struct main_state *ms, char *why,
                            size_t why_cap)
 {
-    if (fsi_datadir_has_chain_state(ms) && island_anchor_hold_recorded(db)) {
+    bool held = false;
+    struct zcl_result hr = island_anchor_hold_recorded(db, &held);
+    if (!hr.ok) {
+        snprintf(why, why_cap, "-flysync cannot tell whether FlySync held this "
+                 "datadir before (%s), so it decides nothing; start again",
+                 hr.message);
+        return false;
+    }
+    if (fsi_datadir_has_chain_state(ms) && held) {
         LOG_WARN(FSI_SUBSYS, "-flysync: FlySync waited on this datadir before "
                  "and it now holds chain state below the rung; continuing "
                  "with normal sync");
@@ -996,7 +1010,11 @@ static void fsi_boot_detach_fallen_back(struct main_state *ms)
         return;
     struct island_anchor a;
     bool found = false;
-    if (!island_anchor_load(db, &a, &found) || !found)
+    struct zcl_result r = island_anchor_load(db, &a, &found);
+    if (!r.ok)
+        LOG_ERROR(FSI_SUBSYS, "fallen-back island not detached this boot: %s",
+                  r.message);
+    if (!r.ok || !found)
         return;
     fsi_forward_pass_from(ms, a.root_height);
     struct block_index *rung = block_map_find(&ms->map_block_index,
@@ -1033,7 +1051,11 @@ static void fsi_boot_count_hold(struct main_state *ms)
 
 void flysync_island_boot_register(void)
 {
-    (void)island_anchor_boot_register(progress_store_db());
+    bool registered = false;
+    struct zcl_result r = island_anchor_boot_register(progress_store_db(),
+                                                      &registered);
+    if (!r.ok)
+        LOG_WARN(FSI_SUBSYS, "%s", r.message);
 }
 
 bool flysync_island_boot_after_index(struct app_context *ctx,

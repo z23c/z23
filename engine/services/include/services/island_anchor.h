@@ -60,8 +60,16 @@ enum island_anchor_state {
                                       * the value is malformed; never decide */
 };
 
-/* In-process registration. register() refuses a malformed fact. */
-bool island_anchor_register(const struct island_anchor *a);
+/* Typed failure codes of the fallible exports (zcl_result.code). */
+enum island_anchor_err {
+    ISLAND_ANCHOR_ERR_UNREADABLE = 1,   /* the progress store read failed */
+    ISLAND_ANCHOR_ERR_MALFORMED = 2,    /* a stored value has the wrong shape */
+    ISLAND_ANCHOR_ERR_INVALID = 3,      /* a malformed fact or a missing output */
+};
+
+/* In-process registration. register() refuses a malformed fact
+ * (ISLAND_ANCHOR_ERR_INVALID). The bool exports are total predicates. */
+struct zcl_result island_anchor_register(const struct island_anchor *a);
 void island_anchor_unregister(void);
 bool island_anchor_registered(void);
 bool island_anchor_get(struct island_anchor *out);
@@ -98,10 +106,14 @@ struct island_anchor_rows {
 struct zcl_result island_anchor_save(struct sqlite3 *db,
                                      const struct island_anchor *a,
                                      const struct island_anchor_rows *rows);
-bool island_anchor_rows_load(struct sqlite3 *db,
-                             struct island_anchor_rows *out, bool *found);
-bool island_anchor_load(struct sqlite3 *db, struct island_anchor *out,
-                        bool *found);
+/* Loads: OK with *found false when absent; ISLAND_ANCHOR_ERR_UNREADABLE when
+ * the read fails (or no store is open), ISLAND_ANCHOR_ERR_MALFORMED when the
+ * stored length is wrong. Never decide "absent" on an error. */
+struct zcl_result island_anchor_rows_load(struct sqlite3 *db,
+                                          struct island_anchor_rows *out,
+                                          bool *found);
+struct zcl_result island_anchor_load(struct sqlite3 *db,
+                                     struct island_anchor *out, bool *found);
 /* UNREADABLE when the stored state cannot be read or is malformed; NONE when
  * no state is stored or no progress store is open. Callers never decide a
  * fall-back or a fresh start on UNREADABLE. */
@@ -123,14 +135,17 @@ struct zcl_result island_anchor_note_installed(struct sqlite3 *db);
 /* Count one more boot that held header sync for FlySync (progress_meta
  * "flysync.hold_boots") and return the new total. A crash loop cannot reset
  * it, and time the process is not running never counts.
- * hold_recorded() reads only: true once FlySync ever held this datadir. */
-bool island_anchor_hold_recorded(struct sqlite3 *db);
+ * hold_recorded() reads only: *held true once FlySync ever held this datadir
+ * (ISLAND_ANCHOR_ERR_UNREADABLE when the read fails). */
+struct zcl_result island_anchor_hold_recorded(struct sqlite3 *db, bool *held);
 struct zcl_result island_anchor_hold_boot(struct sqlite3 *db, uint64_t *boots);
 
-/* Boot: register the durable fact when the state is SEEDED or INSTALLED.
- * Returns true when
- * a fact was registered. Call after the progress store opens and before the
- * block index loads (the loader's work pass reads the registration). */
-bool island_anchor_boot_register(struct sqlite3 *db);
+/* Boot: register the durable fact when the state is SEEDED or INSTALLED
+ * (*registered true). OK with nothing registered for any other readable state;
+ * an error (typed code) when the state or the fact cannot be read or used.
+ * Call after the progress store opens and before the block index loads (the
+ * loader's work pass reads the registration). */
+struct zcl_result island_anchor_boot_register(struct sqlite3 *db,
+                                              bool *registered);
 
 #endif /* ZCL_SERVICES_ISLAND_ANCHOR_H */

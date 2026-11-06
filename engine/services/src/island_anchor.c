@@ -2,6 +2,13 @@
  * purpose: Hold and persist the FlySync island-anchor fact; see
  * services/island_anchor.h for the contract. */
 
+// one-result-type-ok:zcl-result-plus-pure-predicates — every fallible export
+// (register, the progress_meta loads, save, retire, the state notes, the hold
+// count) returns struct zcl_result with a typed island_anchor_err code; the
+// bool exports left (registered, get, is_root, seed_root_work,
+// refuses_fork_at) are total in-memory predicates over the registered fact,
+// called per entry on the block-index load and reorg paths.
+
 #include "services/island_anchor.h"
 
 #include "base/serialize_le.h"
@@ -34,12 +41,11 @@ static bool ia_valid(const struct island_anchor *a)
            !arith_uint256_is_zero(&a->root_work);
 }
 
-bool island_anchor_register(const struct island_anchor *a)
+struct zcl_result island_anchor_register(const struct island_anchor *a)
 {
-    if (!ia_valid(a)) {
-        LOG_WARN(IA_SUBSYS, "island anchor refused: malformed fact");
-        return false;
-    }
+    if (!ia_valid(a))
+        return ZCL_ERR(ISLAND_ANCHOR_ERR_INVALID, "island anchor refused: "
+                       "malformed fact");
     pthread_mutex_lock(&g_ia_lock);
     g_ia = *a;
     atomic_store(&g_ia_set, true);
@@ -47,7 +53,7 @@ bool island_anchor_register(const struct island_anchor *a)
     LOG_INFO(IA_SUBSYS,
              "island anchor registered: root h=%d, rung h=%d",
              a->root_height, a->rung_height);
-    return true;
+    return ZCL_OK;
 }
 
 void island_anchor_unregister(void)
@@ -201,54 +207,61 @@ struct zcl_result island_anchor_retire(struct sqlite3 *db)
     return ZCL_OK;
 }
 
-bool island_anchor_load(struct sqlite3 *db, struct island_anchor *out,
-                        bool *found)
+/* Read one exact-length progress_meta blob: OK with *found false when absent,
+ * UNREADABLE when the read fails, MALFORMED when the length is wrong. */
+static struct zcl_result ia_blob_load(struct sqlite3 *db, const char *key,
+                                      void *buf, size_t want, bool *found)
 {
-    if (found)
-        *found = false;
-    if (!db || !out)
-        return false;
-    uint8_t buf[IA_FACT_LEN];
-    size_t len = 0;
     bool have = false;
-    if (!progress_meta_get_blob_exact(db, IA_FACT_KEY, buf, sizeof(buf),
-                                      &len, &have))
-        return false;
-    if (!have)
-        return true;
-    if (len != sizeof(buf)) {
-        LOG_WARN(IA_SUBSYS, "island anchor fact has length %zu, want %d",
-                 len, IA_FACT_LEN);
-        return false;
-    }
-    ia_decode(buf, out);
-    if (found)
-        *found = true;
-    return true;
+    size_t len = 0;
+    *found = false;
+    if (!db)
+        return ZCL_ERR(ISLAND_ANCHOR_ERR_UNREADABLE, "%s not read: progress "
+                       "store not open", key);
+    if (!progress_meta_get_blob_exact(db, key, buf, want, &len, &have))
+        return ZCL_ERR(ISLAND_ANCHOR_ERR_UNREADABLE, "%s not read: "
+                       "progress_meta read failed", key);
+    if (have && len != want)
+        return ZCL_ERR(ISLAND_ANCHOR_ERR_MALFORMED, "%s has length %zu, want "
+                       "%zu", key, len, want);
+    *found = have;
+    return ZCL_OK;
 }
 
-bool island_anchor_rows_load(struct sqlite3 *db,
-                             struct island_anchor_rows *out, bool *found)
+struct zcl_result island_anchor_load(struct sqlite3 *db,
+                                     struct island_anchor *out, bool *found)
 {
+    bool have = false;
     if (found)
         *found = false;
-    if (!db || !out)
-        return false;
-    size_t len = 0;
-    bool have = false;
-    if (!progress_meta_get_blob_exact(db, IA_ROWS_KEY, out->hash,
-                                      sizeof(out->hash), &len, &have))
-        return false;
-    if (!have)
-        return true;
-    if (len != sizeof(out->hash)) {
-        LOG_WARN(IA_SUBSYS, "island row list has length %zu, want %zu", len,
-                 sizeof(out->hash));
-        return false;
-    }
+    if (!out)
+        return ZCL_ERR(ISLAND_ANCHOR_ERR_INVALID, "island fact not loaded: no "
+                       "output");
+    uint8_t buf[IA_FACT_LEN];
+    struct zcl_result r = ia_blob_load(db, IA_FACT_KEY, buf, sizeof(buf),
+                                       &have);
+    if (r.ok && have)
+        ia_decode(buf, out);
     if (found)
-        *found = true;
-    return true;
+        *found = r.ok && have;
+    return r;
+}
+
+struct zcl_result island_anchor_rows_load(struct sqlite3 *db,
+                                          struct island_anchor_rows *out,
+                                          bool *found)
+{
+    bool have = false;
+    if (found)
+        *found = false;
+    if (!out)
+        return ZCL_ERR(ISLAND_ANCHOR_ERR_INVALID, "island rows not loaded: no "
+                       "output");
+    struct zcl_result r = ia_blob_load(db, IA_ROWS_KEY, out->hash,
+                                       sizeof(out->hash), &have);
+    if (found)
+        *found = r.ok && have;
+    return r;
 }
 
 enum island_anchor_state island_anchor_state_load(struct sqlite3 *db)
@@ -293,13 +306,22 @@ struct zcl_result island_anchor_note_installed(struct sqlite3 *db)
     return ZCL_OK;
 }
 
-bool island_anchor_hold_recorded(struct sqlite3 *db)
+struct zcl_result island_anchor_hold_recorded(struct sqlite3 *db, bool *held)
 {
     uint8_t buf[8];
     size_t len = 0;
     bool have = false;
-    return db && progress_meta_get(db, IA_HOLD_KEY, buf, sizeof(buf), &len,
-                                   &have) && have && len == sizeof(buf);
+    if (!held)
+        return ZCL_ERR(ISLAND_ANCHOR_ERR_INVALID, "hold count not read: no "
+                       "output");
+    *held = false;
+    if (!db)
+        return ZCL_OK;   /* no progress store holds no hold (as state NONE) */
+    if (!progress_meta_get(db, IA_HOLD_KEY, buf, sizeof(buf), &len, &have))
+        return ZCL_ERR(ISLAND_ANCHOR_ERR_UNREADABLE, "FlySync hold count not "
+                       "read: progress_meta read failed");
+    *held = have && len == sizeof(buf);
+    return ZCL_OK;
 }
 
 struct zcl_result island_anchor_hold_boot(struct sqlite3 *db, uint64_t *boots)
@@ -347,19 +369,31 @@ struct zcl_result island_anchor_note_fallback(struct sqlite3 *db,
     return ZCL_OK;
 }
 
-bool island_anchor_boot_register(struct sqlite3 *db)
+struct zcl_result island_anchor_boot_register(struct sqlite3 *db,
+                                              bool *registered)
 {
+    if (registered)
+        *registered = false;
     enum island_anchor_state st = island_anchor_state_load(db);
+    if (st == ISLAND_ANCHOR_STATE_UNREADABLE)
+        return ZCL_ERR(ISLAND_ANCHOR_ERR_UNREADABLE, "island state unreadable; "
+                       "the island is not registered");
     if (st != ISLAND_ANCHOR_STATE_SEEDED && st != ISLAND_ANCHOR_STATE_INSTALLED)
-        return false;
+        return ZCL_OK;
     struct island_anchor a;
     bool found = false;
-    if (!island_anchor_load(db, &a, &found) || !found) {
-        LOG_WARN(IA_SUBSYS,
-                 "island state is %s but the anchor fact is unreadable; "
-                 "the island is not registered",
-                 st == ISLAND_ANCHOR_STATE_INSTALLED ? "INSTALLED" : "SEEDED");
-        return false;
-    }
-    return island_anchor_register(&a);
+    struct zcl_result r = island_anchor_load(db, &a, &found);
+    if (r.ok && !found)
+        r = ZCL_ERR(ISLAND_ANCHOR_ERR_MALFORMED, "the anchor fact is missing");
+    if (r.ok)
+        r = island_anchor_register(&a);
+    if (!r.ok)
+        return ZCL_ERR(r.code, "island state is %s but %s; the island is not "
+                       "registered",
+                       st == ISLAND_ANCHOR_STATE_INSTALLED ? "INSTALLED"
+                                                           : "SEEDED",
+                       r.message);
+    if (registered)
+        *registered = true;
+    return ZCL_OK;
 }

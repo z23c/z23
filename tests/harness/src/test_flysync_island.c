@@ -484,6 +484,18 @@ static bool fsi_top_work_is_rung(struct fsi_node *n)
                                  &n->is.rung_work) == 0;
 }
 
+static bool fsi_boot_reg(sqlite3 *db)
+{
+    bool reg = false;
+    return island_anchor_boot_register(db, &reg).ok && reg;
+}
+
+static bool fsi_held(sqlite3 *db)
+{
+    bool held = false;
+    return island_anchor_hold_recorded(db, &held).ok && held;
+}
+
 /* The loader's forward pass over the island, as a warm boot runs it. */
 static void fsi_reload_work(struct fsi_node *n)
 {
@@ -512,7 +524,7 @@ static int fsi_case_seed_rows(struct fsi_node *n)
     island_anchor_unregister();
     struct island_anchor back;
     FSI_CHECK("a restart registers the durable fact again",
-              island_anchor_boot_register(db) && island_anchor_get(&back) &&
+              fsi_boot_reg(db) && island_anchor_get(&back) &&
               back.root_height == n->a.root_height &&
               uint256_eq(&back.root_hash, &n->a.root_hash) &&
               arith_uint256_compare(&back.root_work, &n->a.root_work) == 0);
@@ -585,7 +597,7 @@ static int fsi_case_exemptions(struct fsi_node *n)
               !consensus_state_install_header_ready_for(&n->ms, FSI_RUNG_H,
                                                         n->is.hash[0].data));
     failures += fsi_case_frontier_ancestry(n, "no fact", false);
-    (void)island_anchor_boot_register(progress_store_db());
+    (void)fsi_boot_reg(progress_store_db());
     return failures;
 }
 
@@ -729,7 +741,7 @@ static int fsi_case_fallback_detach(struct fsi_node *n)
     FSI_CHECK("a fall-back in the running node asks for a restart",
               flysync_island_test_respawns() == 1);
     FSI_CHECK("the fact stays for the boot detach",
-              island_anchor_load(db, &back, &found) && found);
+              island_anchor_load(db, &back, &found).ok && found);
 
     flysync_island_test_reset();
     fsi_reload_rows(n);
@@ -903,12 +915,12 @@ static int fsi_case_fallback_rejoin(struct fsi_node *n)
     struct arith_uint256 want = p ? fsi_work_over(p->nChainWork, n->rows, FSI_W)
                                   : n->is.rung_work;
     FSI_CHECK("rejoined: the next boot retires the fact, detaches nothing",
-              booted && island_anchor_load(db, &back, &found) && !found &&
+              booted && island_anchor_load(db, &back, &found).ok && !found &&
               n->rows[0]->pprev == p &&
               arith_uint256_compare(&fsi_top(n)->nChainWork, &want) == 0);
     struct island_anchor_rows list;
     FSI_CHECK("retired: the row list goes with the fact",
-              island_anchor_rows_load(db, &list, &found) && !found);
+              island_anchor_rows_load(db, &list, &found).ok && !found);
     return failures;
 }
 
@@ -933,7 +945,8 @@ static int fsi_case_fact_record(struct fsi_node *nn)
     FSI_CHECK("save writes the fact, its rows and SEEDED together",
               saved.ok && island_anchor_state_load(db) ==
                               ISLAND_ANCHOR_STATE_SEEDED &&
-              island_anchor_rows_load(db, &back, &rows_found) && rows_found &&
+              island_anchor_rows_load(db, &back, &rows_found).ok &&
+              rows_found &&
               memcmp(back.hash, list.hash, sizeof(list.hash)) == 0);
     return failures;
 }
@@ -978,7 +991,7 @@ static int fsi_case_installed(void)
               island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_INSTALLED);
     n.rows[5]->pprev = saved_prev;
     FSI_CHECK("an installed island registers at every boot",
-              (island_anchor_unregister(), island_anchor_boot_register(db)));
+              (island_anchor_unregister(), fsi_boot_reg(db)));
     fsi_node_close(&n);
     return failures;
 }
@@ -1134,7 +1147,7 @@ static int fsi_case_hold_bound(void)
     FSI_CHECK("a held boot is counted durably",
               flysync_island_boot_after_index(NULL, &n.ms) &&
               flysync_island_phase() == FLYSYNC_WAIT &&
-              island_anchor_hold_recorded(db));
+              fsi_held(db));
 
     /* Boots 2..N, each 30 days after the last: downtime never counts. */
     bool waiting = true;
