@@ -401,17 +401,23 @@ static void *slot_shutdown_thread(void *arg)
 }
 /* Shutdown while a worker is mid-read waits for it, discards its result and
  * leaves no worker unjoined; the server restarts with every slot usable. */
+/* Shutdown has cleared every slot but still waits on the held worker. */
+static bool slot_shutdown_waits(atomic_bool *done)
+{
+    uint64_t held[STATE_OFFER_LINK_SERVER_SLOTS];
+    for (int i = 0; i < 5000 && state_offer_link_server_peers(held, STATE_OFFER_LINK_SERVER_SLOTS); ++i)
+        test_wait();
+    return !state_offer_link_server_peers(held, STATE_OFFER_LINK_SERVER_SLOTS) && !atomic_load(done) &&
+        state_offer_link_test_gate_waiting() == 1;
+}
 static bool slot_shutdown_mid_read(struct slot_fixture *f)
 {
-    uint64_t held[STATE_OFFER_LINK_SERVER_SLOTS]; size_t n = 0;
+    size_t n = 0;
     atomic_bool done = false; pthread_t t;
     state_offer_link_test_gate(true);
     bool ok = slot_ask(f, 610, 610) && slot_wait_gate(1) && !pthread_create(&t, NULL, slot_shutdown_thread, &done);
     bool spawned = ok;
-    for (int i = 0; ok && i < 5000 && state_offer_link_server_peers(held, STATE_OFFER_LINK_SERVER_SLOTS); ++i)
-        test_wait();
-    ok = ok && !state_offer_link_server_peers(held, STATE_OFFER_LINK_SERVER_SLOTS) && !atomic_load(&done) &&
-        state_offer_link_test_gate_waiting() == 1;
+    ok = ok && slot_shutdown_waits(&done);
     state_offer_link_test_gate(false);
     if (spawned) { (void)pthread_join(t, NULL); f->started = false; }
     ok = ok && atomic_load(&done) && state_offer_link_test_all_joined() &&
