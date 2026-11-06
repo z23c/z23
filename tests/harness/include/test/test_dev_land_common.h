@@ -365,6 +365,7 @@ int dlx_case_generated_conflict(void);
 int dlx_case_rerere_conflict(void);
 int dlx_case_retired_generated_conflict(void);
 int dlx_case_mixed_conflict(void);
+int dlx_case_core_reseal(void);
 int test_dev_land_window_defer(void);
 int test_dev_land_window_replay(void);
 int test_dev_land_rebase_count_conflicts(void);

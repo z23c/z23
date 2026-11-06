@@ -144,6 +144,12 @@ ZCL_TEST_GROUP_BUILD_NEED("test_zcode_swarm_net_shard_01",
 #endif
 
 #if !defined(_WIN32)
+/* dlx_case_core_reseal() seals its fixture core/ with the real sealer, which
+ * the queue runs through the fixture's `make core-seal` (shard_04 owns it). */
+ZCL_TEST_GROUP_BUILD_NEED("test_dev_land", "build/bin/core_seal",
+    "build/bin/core_seal")
+ZCL_TEST_GROUP_BUILD_NEED("test_dev_land_shard_04", "build/bin/core_seal",
+    "build/bin/core_seal")
 ZCL_TEST_GROUP_BUILD_NEED("test_resident_confined_run",
     "build/fixtures/rcc_child", "build/fixtures/rcc_child")
 ZCL_TEST_GROUP_BUILD_NEED("test_resident_confined_run",

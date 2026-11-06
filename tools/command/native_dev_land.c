@@ -1036,7 +1036,9 @@ static bool dl_optional_row_strings(const char *line, struct dl_row *r)
         { "tip_pushed", r->pushed, sizeof(r->pushed) },
         { "dimension", r->dimension, sizeof(r->dimension) },
         { "log_path", r->log_path, sizeof(r->log_path) },
-        { "detail", r->detail, sizeof(r->detail) }
+        { "detail", r->detail, sizeof(r->detail) },
+        { "seal_old_root", r->seal_old_root, sizeof(r->seal_old_root) },
+        { "seal_new_root", r->seal_new_root, sizeof(r->seal_new_root) }
     };
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
         struct dl_string_result value = dl_line_string(line, fields[i].key,
@@ -1269,6 +1271,7 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
         return false;
     size_t size = dl_failure_append(r, out, cap, (size_t)w);
     size = dl_terminal_time_append(r, out, cap, size);
+    size = dl_seal_append(r, out, cap, size);
     if (len_out)
         *len_out = size;
     return true;
@@ -5580,6 +5583,7 @@ int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
     if (!dl_tip_checkout(d, row, observed_main, &integrated, why, why_cap))
         return -1;
     dl_row_move_base(row, observed_main);
+    row->seal_old_root[0] = row->seal_new_root[0] = '\0';
     /* Replaying an already-integrated merge discards its resolution and
      * can reintroduce conflicts from previously published work. Skip only
      * that replay; preparation and exact proof below remain mandatory. */
@@ -5590,9 +5594,11 @@ int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
         (void)dl_git(d->wt, unmerged_args, paths, sizeof(paths),
                      DL_GIT_TIMEOUT_MS);
         dl_trim(paths);
-        dl_conflict_why(paths, why, why_cap);
-        (void)dl_git(d->wt, abort_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS);
-        return 0;
+        if (dl_reseal_rebase(d->wt, row, paths, sizeof(paths)) != 1) {
+            dl_conflict_why(paths, why, why_cap);
+            (void)dl_git(d->wt, abort_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS);
+            return 0;
+        }
     }
     if (!dl_rev_parse(d->wt, "HEAD", row->local)) {
         (void)snprintf(why, why_cap, "the rebased head cannot be named");
@@ -10076,6 +10082,10 @@ static enum dl_precheck dl_precheck_merge(struct dl_pc *pc, const char *base,
 static enum dl_precheck dl_precheck_classify(struct dl_pc *pc,
                                              const char *paths)
 {
+    if (dl_seal_paths_only(paths)) { /* dl_rebase() decides, see _reseal.c */
+        (void)snprintf(pc->why, sizeof(pc->why), "only core seal files conflict");
+        return DL_PRECHECK_DEFERRED;
+    }
     dl_conflict_why(paths, pc->why, sizeof(pc->why));
     return DL_PRECHECK_CONFLICT;
 }

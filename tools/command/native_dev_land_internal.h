@@ -117,7 +117,28 @@ struct dl_row {
     char train_commit[80];
     /* Versioned, replicated split cohort; empty retains legacy behavior. */
     char train_group[768];
+    /* The core seal the rebase re-derived (native_dev_land_reseal.c): the
+     * ROOT the row's last ritual commit carried and the ROOT it carries on
+     * the new main. Both "" when nothing was re-derived. Optional on disk. */
+    char seal_old_root[65];
+    char seal_new_root[65];
 };
+
+/* ── core seal re-derivation (native_dev_land_reseal.c) ───────────────── */
+
+/* True when the newline-separated path list is non-empty and names only
+ * the four derived core seal files. */
+bool dl_seal_paths_only(const char *paths);
+/* Continue a rebase stopped in `wt` whose unmerged list `paths` names only
+ * seal files, re-deriving the seal at each pick that itself ran the unseal
+ * ritual. 1: the rebase completed; 0: refused, `paths` holds the unmerged
+ * list to report and the caller aborts the rebase exactly as before. */
+int dl_reseal_rebase(const char *wt, struct dl_row *row, char *paths,
+                     size_t cap);
+/* Append the optional seal_old_root/seal_new_root members to an encoded
+ * row line of `size` bytes ending in "}\n"; returns the new size. */
+size_t dl_seal_append(const struct dl_row *r, char *out, size_t cap,
+                      size_t size);
 
 /* ── the objectives snapshot (native_dev_land_objectives.c) ───────────── */
 
