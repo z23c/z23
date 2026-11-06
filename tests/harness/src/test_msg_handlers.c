@@ -1865,6 +1865,103 @@ static int test_pin_getdata_after_manifest_answers(void)
     return failures;
 }
 
+/* A reply on the socketless fixture latches a local-shutdown disconnect from the
+ * failed send, and the replay skips a peer that is going away. */
+static void pin_clear_fixture_disconnect(struct p2p_node *node)
+{
+    node->disconnect = false;
+    node->disconnect_reason = P2P_DISCONNECT_NONE;
+}
+
+/* A block asked for while a snapshot is served goes in the peer's slot and waits:
+ * no reply during the stream, and the send tick finishes it once the stream is
+ * over. The block is unknown here, so finishing it means its notfound. */
+static int test_getdata_held_while_serving_finishes_after(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: a block asked for while serving is kept and finished after") {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct main_state ms;
+        main_state_init(&ms);
+        struct msg_processor mp;
+        pin_mp_init(&mp, &ms, &nm);
+        struct p2p_node *node = pin_peer_node(&nm, 623);
+        ASSERT(node != NULL);
+        node->state = PEER_SNAPSHOT_SERVING;
+
+        struct uint256 h;
+        memset(h.data, 0x65, sizeof(h.data));
+        struct byte_stream s;
+        stream_init(&s, 64);
+        stream_write_compact_size(&s, 1);
+        pin_inv_stream(&s, MSG_BLOCK, &h);
+        ASSERT(process_getdata(&mp, node, &s) == true);
+        ASSERT(pin_segment_count(node) == 0);
+        ASSERT(node->getdata_kept_count == 1);
+
+        msg_send_replay_held(&mp, node);
+        ASSERT(pin_segment_count(node) == 0);
+        ASSERT(node->getdata_kept_count == 1);
+
+        node->state = PEER_ACTIVE;
+        msg_send_replay_held(&mp, node);
+        ASSERT(node->getdata_kept_count == 0);
+        ASSERT(pin_is_single_notfound(node, &h));
+        stream_free(&s);
+        p2p_node_free(node);
+        main_state_free(&ms);
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Past the slot a block gets notfound at once; an item that is not a block gets
+ * no reply, as past the send budget. */
+static int test_getdata_held_while_serving_past_the_slot(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: past the slot while serving a block gets notfound at once") {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct main_state ms;
+        main_state_init(&ms);
+        struct msg_processor mp;
+        pin_mp_init(&mp, &ms, &nm);
+        struct p2p_node *node = pin_peer_node(&nm, 624);
+        ASSERT(node != NULL);
+        node->state = PEER_SNAPSHOT_SERVING;
+
+        struct uint256 h;
+        memset(h.data, 0x66, sizeof(h.data));
+        struct byte_stream s;
+        stream_init(&s, 1024);
+        stream_write_compact_size(&s, GETDATA_KEPT_BLOCKS_MAX + 2);
+        for (uint8_t i = 0; i <= GETDATA_KEPT_BLOCKS_MAX; i++) {
+            h.data[0] = i;
+            pin_inv_stream(&s, MSG_BLOCK, &h);
+        }
+        pin_inv_stream(&s, MSG_TX, &h);
+        ASSERT(process_getdata(&mp, node, &s) == true);
+        ASSERT(node->getdata_kept_count == GETDATA_KEPT_BLOCKS_MAX);
+        h.data[0] = GETDATA_KEPT_BLOCKS_MAX;
+        ASSERT(pin_is_single_notfound(node, &h));
+
+        pin_clear_fixture_disconnect(node);
+        node->state = PEER_ACTIVE;
+        msg_send_replay_held(&mp, node);
+        ASSERT(node->getdata_kept_count == 0);
+        ASSERT(pin_segment_count(node) == 2);
+        stream_free(&s);
+        p2p_node_free(node);
+        main_state_free(&ms);
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_pin_getdata_count_unreadable(void)
 {
     int failures = 0;
@@ -2586,6 +2683,8 @@ int test_msg_handlers(void)
     failures += test_swarm_manifest_near_tip_as_before();
     failures += test_swarm_manifest_bad_root_not_recorded();
     failures += test_pin_getdata_after_manifest_answers();
+    failures += test_getdata_held_while_serving_finishes_after();
+    failures += test_getdata_held_while_serving_past_the_slot();
     failures += test_pin_getdata_count_unreadable();
     failures += test_pin_getdata_oversized_count();
     failures += test_pin_getdata_empty_count();
