@@ -288,6 +288,11 @@ static const struct rlw_leaf g_rlw_leaves[] = {
     { "zcode.commons.lineage",  zcl_native_handle_zcode_commons_lineage,
       "workspace", RLW_DATADIR_VALUE, "package_root", RLW_ZID_PUBKEY,
       "zcode/releases" },
+    /* Adopted copies are listed from <datadir>/zcode/adopted; an absent
+     * directory is an empty list and a plain file there is
+     * ADOPTED_UNREADABLE. Each copy is read through the read-only open. */
+    { "zcode.package.copies",   zcl_native_handle_zcode_package_copies,
+      NULL, NULL,               NULL, NULL, "zcode/adopted" },
     /* Policy inspection is a READ leaf: its loader must not create
      * zcode/policy on an absent datadir or repair an unreadable store. */
     { "zcode.network.policy.list",

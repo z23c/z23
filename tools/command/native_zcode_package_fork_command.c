@@ -115,9 +115,18 @@ static void zpc_hash_text(struct sha3_256_ctx *ctx, const char *text)
 struct zpc_walk {
     struct zcl_package_copy *copy;
     bool broken;
+    size_t nonlocal;
     uint8_t expect[32];
     struct vcs_commit oldest;
 };
+
+static bool zpc_local_phase(const struct vcs_commit *c)
+{
+    return strncmp(c->phase, ZCL_PACKAGE_COPY_SAVE_PHASE,
+                   sizeof(c->phase)) == 0 ||
+           strncmp(c->phase, ZCL_PACKAGE_COPY_RESTORE_PHASE,
+                   sizeof(c->phase)) == 0;
+}
 
 static bool zpc_walk_cb(const struct vcs_commit *c, const uint8_t id[32],
                         void *user)
@@ -128,6 +137,8 @@ static bool zpc_walk_cb(const struct vcs_commit *c, const uint8_t id[32],
         w->broken = true;
         return false;
     }
+    if (!zpc_local_phase(c))
+        w->nonlocal++;
     if (copy->versions == 0) {
         memcpy(copy->head_version, id, 32);
         memcpy(copy->head_tree, c->tree_hash, 32);
@@ -158,9 +169,33 @@ static bool zpc_fork_record(const struct vcs_commit *root,
     return zcl_hex_decode_lower(hex, parent_release, 32);
 }
 
+/* READ never writes; CHECKED refuses a damaged log through the read-only
+ * open before the full open could repair it; RECOVER is the full open. */
+static struct vcs_repo *zpc_repo_open(const char *dir,
+                                      enum zcl_package_copy_access access)
+{
+    if (access == ZCL_PACKAGE_COPY_RECOVER)
+        return vcs_open(dir);
+    struct vcs_repo *probe = vcs_open_readonly(dir);
+    if (!probe || access == ZCL_PACKAGE_COPY_READ)
+        return probe;
+    vcs_close(probe);
+    return vcs_open(dir);
+}
+
 bool zcl_package_copy_open(const char *dir, struct zcl_package_copy *copy,
                            struct zcl_command_reply *reply,
                            const char *command)
+{
+    return zcl_package_copy_open_as(dir, ZCL_PACKAGE_COPY_CHECKED, copy,
+                                    reply, command);
+}
+
+bool zcl_package_copy_open_as(const char *dir,
+                              enum zcl_package_copy_access access,
+                              struct zcl_package_copy *copy,
+                              struct zcl_command_reply *reply,
+                              const char *command)
 {
     char log_path[ZPC_PATH_MAX];
     struct stat st;
@@ -175,7 +210,7 @@ bool zcl_package_copy_open(const char *dir, struct zcl_package_copy *copy,
                               dir ? dir : command);
         return false;
     }
-    copy->repo = vcs_open(dir);
+    copy->repo = zpc_repo_open(dir, access);
     struct zpc_walk walk = {.copy = copy};
     bool ok = copy->repo &&
               vcs_log(copy->repo, 0, zpc_walk_cb, &walk) == VCS_OK &&
@@ -184,10 +219,14 @@ bool zcl_package_copy_open(const char *dir, struct zcl_package_copy *copy,
     if (!ok) {
         zcl_package_copy_close(copy);
         zcl_package_copy_fail(reply, "COPY_HISTORY_INVALID", false,
-                              "the copy's version chain is broken or its "
-                              "fork record is missing or altered", dir);
+                              "the copy's version log is damaged, its chain "
+                              "is broken or its fork record is missing or "
+                              "altered", dir);
+        return false;
     }
-    return ok;
+    /* The fork record itself is the one non-local commit a copy starts with. */
+    copy->foreign_versions = walk.nonlocal - 1u;
+    return true;
 }
 
 void zcl_package_copy_close(struct zcl_package_copy *copy)
@@ -196,6 +235,13 @@ void zcl_package_copy_close(struct zcl_package_copy *copy)
         vcs_close(copy->repo);
         copy->repo = NULL;
     }
+}
+
+/* A plan half only reads; the confirmed half keeps the recovering open. */
+static enum zcl_package_copy_access zpc_access(const struct json_value *input)
+{
+    return zcl_package_copy_confirmed(input) ? ZCL_PACKAGE_COPY_RECOVER
+                                             : ZCL_PACKAGE_COPY_CHECKED;
 }
 
 bool zcl_package_copy_unsaved(struct zcl_package_copy *copy, size_t *changes)
@@ -214,10 +260,12 @@ struct zpc_fork {
     uint8_t plan_id[32];
 };
 
-static bool zpc_fork_resolve(const struct json_value *input,
-                             struct zpc_fork *f,
-                             struct zcl_command_reply *reply,
-                             const char *command)
+bool zcl_package_copy_resolve_release(const struct json_value *input,
+                                      const char *datadir,
+                                      struct vcs_package_release *release,
+                                      uint8_t release_id[32],
+                                      struct zcl_command_reply *reply,
+                                      const char *command)
 {
     static const char *const codes[] = {
         "", "FORK_ROOT_UNKNOWN", "FORK_ROOT_AMBIGUOUS", "RELEASES_UNREADABLE",
@@ -235,13 +283,13 @@ static bool zpc_fork_resolve(const struct json_value *input,
         return false;
     }
     enum zcl_package_copy_lookup found = zcl_package_copy_find_release(
-        f->datadir, root, &f->release, f->release_id);
+        datadir, root, release, release_id);
     if (found != ZCL_PACKAGE_COPY_FOUND) {
         zcl_package_copy_fail(reply, codes[found], false, messages[found],
                               root_hex);
         return false;
     }
-    if (vcs_package_release_verify(&f->release) != VCS_PACKAGE_RELEASE_OK) {
+    if (vcs_package_release_verify(release) != VCS_PACKAGE_RELEASE_OK) {
         zcl_package_copy_fail(reply, "FORK_PARENT_INVALID", false,
                               "the stored release envelope does not verify",
                               root_hex);
@@ -270,7 +318,9 @@ static bool zpc_fork_inputs(const struct zcl_command_request *request,
                               f->destination);
         return false;
     }
-    if (!zpc_fork_resolve(request->input, f, reply, command))
+    if (!zcl_package_copy_resolve_release(request->input, f->datadir,
+                                          &f->release, f->release_id, reply,
+                                          command))
         return false;
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
@@ -295,43 +345,46 @@ static void zpc_fork_describe(struct json_value *data,
     (void)json_push_kv_str(data, "destination", f->destination);
 }
 
-/* Checkout, then the fork record as the copy's first commit. */
-static bool zpc_fork_commit(struct zpc_fork *f,
-                            struct zcl_command_reply *reply,
-                            uint8_t version[32],
-                            struct vcs_package_checkout_metrics *metrics)
+bool zcl_package_copy_make(const char *datadir,
+                           const struct vcs_package_release *release,
+                           const uint8_t release_id[32],
+                           const char *destination, const char *session,
+                           uint8_t version[32],
+                           struct vcs_package_checkout_metrics *metrics,
+                           struct zcl_command_reply *reply)
 {
     struct vcs_package_store *store = vcs_package_store_open(
-        f->datadir, vcs_package_store_quota_bytes());
+        datadir, vcs_package_store_quota_bytes());
     if (!store) {
         zcl_package_copy_fail(reply, "NO_STORE", false,
-                              "the package store failed to open", f->datadir);
+                              "the package store failed to open", datadir);
         return false;
     }
     enum vcs_package_checkout_result result = vcs_package_checkout(
-        store, f->release.package_root, f->destination, metrics);
+        store, release->package_root, destination, metrics);
     vcs_package_store_close(store);
     if (result != VCS_PACKAGE_CHECKOUT_OK) {
         zcl_package_copy_fail(reply, "FORK_CHECKOUT_REFUSED", false,
                               vcs_package_checkout_result_string(result),
-                              f->destination);
+                              destination);
         return false;
     }
     char task_ref[96], release_hex[65];
-    zcl_hex_encode(f->release_id, 32, release_hex);
+    zcl_hex_encode(release_id, 32, release_hex);
     (void)snprintf(task_ref, sizeof(task_ref), "%s%s",
                    ZCL_PACKAGE_COPY_FORK_PREFIX, release_hex);
     const struct vcs_snapshot_meta meta = {
         .phase = ZCL_PACKAGE_COPY_FORK_PHASE, .task_ref = task_ref,
+        .session_id = session,
     };
-    struct vcs_repo *repo = vcs_open(f->destination);
+    struct vcs_repo *repo = vcs_open(destination);
     bool ok = repo && vcs_snapshot(repo, &meta, version) == VCS_OK;
     vcs_close(repo);
     if (!ok)
         zcl_package_copy_fail(reply, "FORK_RECORD_FAILED", true,
                               "the package was checked out but its fork "
                               "record was not written; remove the "
-                              "destination and fork again", f->destination);
+                              "destination and try again", destination);
     return ok;
 }
 
@@ -353,7 +406,8 @@ void zcl_native_handle_zcode_package_fork(
     struct vcs_package_checkout_metrics metrics = {0};
     if (!zcl_package_copy_plan_matches(request->input, f.plan_id, reply,
                                        command) ||
-        !zpc_fork_commit(&f, reply, version, &metrics))
+        !zcl_package_copy_make(f.datadir, &f.release, f.release_id,
+                               f.destination, NULL, version, &metrics, reply))
         return;
     zpc_fork_describe(&reply->data, &f, "commit");
     zcl_package_copy_push_root(&reply->data, "version", version);
@@ -404,8 +458,9 @@ void zcl_native_handle_zcode_package_version_save(
     const char *command = "zcode.package.version.save";
     struct zcl_package_copy copy;
     if (!request || !reply ||
-        !zcl_package_copy_open(zcl_package_copy_str(request->input, "dir"),
-                               &copy, reply, command))
+        !zcl_package_copy_open_as(zcl_package_copy_str(request->input, "dir"),
+                                  zpc_access(request->input), &copy, reply,
+                                  command))
         return;
     struct zpc_changes ch = {.count = 0};
     uint8_t plan_id[32], version[32];
@@ -490,8 +545,9 @@ void zcl_native_handle_zcode_package_version_list(
     const char *command = "zcode.package.version.list";
     struct zcl_package_copy copy;
     if (!request || !reply ||
-        !zcl_package_copy_open(zcl_package_copy_str(request->input, "dir"),
-                               &copy, reply, command))
+        !zcl_package_copy_open_as(zcl_package_copy_str(request->input, "dir"),
+                                  ZCL_PACKAGE_COPY_READ, &copy, reply,
+                                  command))
         return;
     struct zpc_rows r;
     size_t limit = zpc_list_limit(request->input);
@@ -611,8 +667,9 @@ void zcl_native_handle_zcode_package_version_restore(
                               command);
         return;
     }
-    if (!zcl_package_copy_open(zcl_package_copy_str(request->input, "dir"),
-                               &copy, reply, command))
+    if (!zcl_package_copy_open_as(zcl_package_copy_str(request->input, "dir"),
+                                  zpc_access(request->input), &copy, reply,
+                                  command))
         return;
     if (zpc_restore_admit(&copy, target, reply, command))
         zpc_restore_run(request, reply, &copy, target, command);
