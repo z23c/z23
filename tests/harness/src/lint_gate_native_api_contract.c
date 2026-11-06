@@ -21,6 +21,24 @@
 
 #include "lint_gate_selftests.h"
 
+/* The composition root wires the background-check publisher's checkpoint
+ * predicate. Without that line every checkpoint node would fall back to
+ * refusing and paging, and the publisher's own tests (which install the
+ * probe themselves) would stay green. */
+static bool native_contract_checkpoint_probe_wired(void)
+{
+    char path[PATH_MAX];
+    char *buf = NULL;
+    bool ok = repo_path(path, sizeof(path),
+                        "engine/composition/src/boot_bg_verification.c") == 0 &&
+              read_entire_file(path, &buf) == 0 && buf &&
+              strstr(buf, "bg_validation_authority_set_checkpoint_probe(\n"
+                          "        sovereignty_checkpoint_install_locked);") !=
+                  NULL;
+    free(buf);
+    return ok;
+}
+
 int t_native_agent_api_contract(void)
 {
     int failures = 0;
@@ -546,6 +564,7 @@ int t_native_agent_api_contract(void)
         ASSERT(strstr(api_status_buf, "agent_security_posture_local_ready(")
                != NULL);
         ASSERT(strstr(agent_summary_buf, "\"local_ready\"") != NULL);
+        ASSERT(native_contract_checkpoint_probe_wired());
         ASSERT(strstr(api_status_buf, "\"local_ready\"") != NULL);
         ASSERT(strstr(agent_summary_buf,
                       "agent_push_security_posture_snapshot_json") != NULL);
