@@ -25,7 +25,7 @@ numbers move.
 - Enemy count and difficulty: the `aircraft_manager_add_with_team()` calls in
   `main()` are the roster (four AI entries marked as AI; add or remove calls, up
   to the manager's capacity). Difficulty is the `ai_skill` loop right below them
-  (`0.6f + (float)(rand() % 40) / 100.0f`); the AI logic is `src/systems/ai_system.c`.
+  (`0.6f + (float)(rand() % 40) / 100.0f`); the AI logic is `apps/skycombat/src/systems/ai_system.c`.
 - Match rules: `game.match->rules.score_limit`, `time_limit`, `respawn_time`,
   `team_count` in `main()`.
 
