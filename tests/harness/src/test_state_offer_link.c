@@ -437,6 +437,21 @@ static bool slot_stale_replace(struct slot_fixture *f)
     memset(f->got, 0, sizeof(f->got));
     return ok && slot_ask(f, 620, 621) && slot_finish(f, 620, 1, 621);
 }
+/* Each queued part restarts the idle clock: a slow client that keeps reading
+ * inside the client idle interval is never replaced by a new request. */
+static bool slot_live_not_replaced(struct slot_fixture *f)
+{
+    bool bad = false;
+    int64_t step = (int64_t)STATE_OFFER_LINK_CLIENT_IDLE_SECONDS * 1000 - 1000;
+    memset(f->got, 0, sizeof(f->got));
+    bool ok = slot_ask(f, 640, 640) && slot_all_started(f, 640, 1, 640);
+    state_offer_link_test_advance_ms(step);
+    ok = ok && slot_take(f, 640, 0, 640, &bad) && !bad;
+    state_offer_link_test_advance_ms(step);
+    ok = ok && !slot_ask(f, 640, 641);
+    state_offer_link_server_drop(640);
+    return ok && slot_wait_idle();
+}
 /* A silent connection's slot is swept after 45 s without progress. */
 static bool slot_idle_sweep(struct slot_fixture *f)
 {
@@ -466,7 +481,7 @@ static int test_slots(void)
         {"parallel", slot_parallel}, {"full_retry", slot_full_retry},
         {"shutdown_restart", slot_shutdown_restart}, {"disconnect_mid_read", slot_disconnect_mid_read},
         {"shutdown_mid_read", slot_shutdown_mid_read}, {"stale_replace", slot_stale_replace},
-        {"idle_sweep", slot_idle_sweep}};
+        {"live_not_replaced", slot_live_not_replaced}, {"idle_sweep", slot_idle_sweep}};
     bool ok = slot_setup(&f);
     const char *failed = ok ? NULL : "setup";
     for (size_t i = 0; ok && i < sizeof(phases) / sizeof(phases[0]); ++i)
