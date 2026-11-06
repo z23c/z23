@@ -337,6 +337,8 @@ void *tor_integration_find_service_for_test(const char *address);
 /* Test seam: runs inside tor_integration_start(), after the Tor thread exists
  * and before the run can be stopped. NULL clears it. */
 void tor_integration_set_start_window_for_test(void (*window)(void));
+/* Test seam: the -onion-rotate step of a start, without starting Tor. */
+bool tor_integration_rotate_once_for_test(const char *datadir);
 #endif
 
 #ifdef ZCL_TESTING

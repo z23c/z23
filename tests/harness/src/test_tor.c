@@ -2175,11 +2175,43 @@ static int test_tor_log_has_bootstrap_complete(void)
     return failures;
 }
 
+/* -onion-rotate gives one new identity per process: the first start rotates, and
+ * a later start in the same process keeps the address the first one announced. */
+static int test_tor_rotate_once_per_process(void)
+{
+    printf("test_tor_rotate_once_per_process: ");
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "rotateonce");
+    uint8_t seed[32];
+    char before[57], first[57], second[57];
+    bool created = false;
+    tor_integration_configure_identity(true, true);
+    const char *why = NULL;
+    if (!onion_identity_ensure(tmpdir, seed, before, sizeof(before), &created))
+        why = "could not make the first identity";
+    else if (!tor_integration_rotate_once_for_test(tmpdir) ||
+             !onion_identity_ensure(tmpdir, seed, first, sizeof(first), &created))
+        why = "the first start's rotation failed";
+    else if (strcmp(before, first) == 0)
+        why = "the first start did not rotate";
+    else if (!tor_integration_rotate_once_for_test(tmpdir) ||
+             !onion_identity_ensure(tmpdir, seed, second, sizeof(second), &created))
+        why = "the second start's rotation step failed";
+    else if (strcmp(first, second) != 0)
+        why = "a second start in one process rotated the identity again";
+    tor_integration_configure_identity(false, false);
+    remove_tree(tmpdir);
+    printf("%s%s%s\n", why ? "FAIL (" : "OK", why ? why : "", why ? ")" : "");
+    return why ? 1 : 0;
+}
+
 int test_tor(void)
 
 {
     int failures = 0;
     printf("\n=== Tor Integration Tests ===\n");
+
+    failures += test_tor_rotate_once_per_process();
 
     failures += test_tor_initial_state();
     failures += test_tor_requested_without_start();

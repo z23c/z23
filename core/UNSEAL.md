@@ -1087,3 +1087,7 @@ later lane flips it HARD.
 - 2026-11-06T05:29:58Z — REASON: Make the Tor start race test real, and test a start after Tor ended by itself
   old ROOT: 9c15f56ebad69107cb59dc34be1941104b329dc376e9ce89d3ad735d4c1509a6
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T05:30:33Z — REASON: Rotate the onion identity once per process, not at every start
+  old ROOT: f90f9713f87c2dfd52c447881bd62f29ccc2d9c399d28d947deeb469e1b47c91
+  by: owner unseal ritual (make core-unseal)

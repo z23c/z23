@@ -1207,6 +1207,44 @@ static void tor_run_end(void)
     thread_liveness_retire(&g_tor_liveness);
 }
 
+/* -onion-rotate asks for one new identity for this process, at its first start.
+ * A later start in the same process (the watch retrying a Tor that died, or Tor
+ * ended by itself) must come back on the address already announced. Caller holds
+ * g_tor_lifecycle. False only when the retired name is invalid. */
+static bool tor_onion_rotate_once(const char *datadir)
+{
+    static bool rotated_this_process;
+    if (!atomic_load(&g_onion_rotate) || rotated_this_process)
+        return true;
+    rotated_this_process = true;
+
+    char old[128];
+    if (onion_identity_rotate(datadir, old, sizeof(old))) {
+        size_t old_len = strlen(old);
+        if (old_len + sizeof(".onion") > sizeof(g_rotated_old_address)) {
+            LOG_WARN("tor", "rotated onion identity name is invalid");
+            return false;
+        }
+        memcpy(g_rotated_old_address, old, old_len);
+        memcpy(g_rotated_old_address + old_len, ".onion", sizeof(".onion"));
+    } else {
+        fprintf(stderr,  // obs-ok:rotation-named-noop
+                "Tor: -onion-rotate found no existing persistent "
+                "identity to archive; a fresh one will be minted\n");
+    }
+    return true;
+}
+
+#ifdef ZCL_TESTING
+bool tor_integration_rotate_once_for_test(const char *datadir)
+{
+    pthread_mutex_lock(&g_tor_lifecycle);
+    bool ok = tor_onion_rotate_once(datadir);
+    pthread_mutex_unlock(&g_tor_lifecycle);
+    return ok;
+}
+#endif
+
 static bool tor_start_locked(const char *datadir, uint16_t p2p_port)
 {
     if (atomic_load(&g_tor_running))
@@ -1227,23 +1265,8 @@ static bool tor_start_locked(const char *datadir, uint16_t p2p_port)
         atomic_store(&g_onion_persist, false);
         atomic_store(&g_onion_rotate, false);
     }
-    if (atomic_load(&g_onion_rotate)) {
-        char old[128];
-        if (onion_identity_rotate(datadir, old, sizeof(old))) {
-            size_t old_len = strlen(old);
-            if (old_len + sizeof(".onion") > sizeof(g_rotated_old_address)) {
-                LOG_WARN("tor", "rotated onion identity name is invalid");
-                return false;
-            }
-            memcpy(g_rotated_old_address, old, old_len);
-            memcpy(g_rotated_old_address + old_len, ".onion",
-                   sizeof(".onion"));
-        } else {
-            fprintf(stderr,  // obs-ok:rotation-named-noop
-                    "Tor: -onion-rotate found no existing persistent "
-                    "identity to archive; a fresh one will be minted\n");
-        }
-    }
+    if (!tor_onion_rotate_once(datadir))
+        return false;
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/tor_data", datadir);
