@@ -264,6 +264,42 @@ static int store_case_blob_corrupted_cas(struct vcs_package_store *s,
     return failures;
 }
 
+/* A tracked root whose manifest is not the one-file blob shape is refused
+ * as SHAPE (an expected answer, not a fault), and it is never CORRUPT. */
+static int store_case_blob_shape_refusal(struct vcs_package_store *s,
+                                         const uint8_t a[256])
+{
+    int failures = 0;
+    struct vcs_package_manifest m;
+    vcs_package_manifest_init(&m);
+    uint8_t chunk_hash[32];
+    bool built = vcs_package_chunk_hash(a, 256, chunk_hash) &&
+                 vcs_package_manifest_add(&m, "other.bin",
+                                          VCS_PACKAGE_MODE_FILE, 256,
+                                          chunk_hash, 1u);
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    uint8_t root[32];
+    bool rooted = built &&
+                  vcs_package_manifest_serialize(&m, &wire, &wire_len) &&
+                  vcs_package_manifest_root(&m, root);
+    vcs_package_manifest_free(&m);
+    bool admitted = rooted &&
+        vcs_package_store_put_manifest(s, wire, wire_len, NULL) ==
+            VCS_PACKAGE_STORE_OK &&
+        vcs_package_store_put_chunk(s, root, "other.bin", 0, a, 256) ==
+            VCS_PACKAGE_STORE_OK;
+    free(wire);
+    ZS_CHECK("blob: non-blob package is admitted for the shape check",
+             admitted);
+    uint8_t out[512];
+    size_t out_len = SIZE_MAX;
+    ZS_CHECK("blob: non-blob package refused as SHAPE, not CORRUPT",
+             vcs_blob_get_from(s, root, out, sizeof(out), &out_len) ==
+                 VCS_BLOB_ERR_SHAPE && out_len == 0);
+    return failures;
+}
+
 static int store_case_blob_named_results(void)
 {
     int failures = 0;
@@ -317,6 +353,7 @@ int t_store_blob(void)
     uint8_t root[32];
     failures += store_case_blob_put_get_roundtrip(s, a, root_a, root);
     failures += store_case_blob_absent_and_bad_args(s, root);
+    failures += store_case_blob_shape_refusal(s, a);
     failures += store_case_blob_corrupted_cas(s, dd, a, root);
     failures += store_case_blob_named_results();
     failures += store_case_blob_global_accessors(a, root);

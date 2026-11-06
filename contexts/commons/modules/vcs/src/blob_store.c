@@ -238,10 +238,14 @@ static enum vcs_blob_result blob_shape_of(struct vcs_package_store *store,
             memcpy(out_chunk_hash, manifest.files[0].chunk_hashes, 32);
     }
     vcs_package_manifest_free(&manifest);
-    if (vr != VCS_BLOB_OK)
-        LOG_RETURN(vr, BLOB_LOG, "blob shape check: %s",
-                   vcs_blob_result_string(vr));
-    return VCS_BLOB_OK;
+    if (vr == VCS_BLOB_OK)
+        return VCS_BLOB_OK;
+    /* SHAPE is an expected answer: a store also holds other package kinds,
+     * and proof rebuild scans every listed root. Only CORRUPT is a fault. */
+    if (vr == VCS_BLOB_ERR_SHAPE)
+        return vr;
+    LOG_RETURN(vr, BLOB_LOG, "blob shape check: %s",
+               vcs_blob_result_string(vr));
 }
 
 enum vcs_blob_result vcs_blob_get_from(struct vcs_package_store *store,
