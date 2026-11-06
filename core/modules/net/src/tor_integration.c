@@ -530,12 +530,21 @@ static bool tor_control_open(void)
     if (!tor_is_linked())
         return true;
     platform_socket_t pair[2];
+    /* A child process must not inherit either end: Tor pre-authenticates this
+     * connection. Another thread may fork and exec at any moment, so where the
+     * flag exists the pair is close-on-exec from birth. */
+#ifdef SOCK_CLOEXEC
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) != 0)
+        return false;
+#else
     if (!platform_socket_pair(pair))
         return false;
 #ifndef _WIN32
-    /* A child process must not inherit either end. */
     (void)fcntl(pair[0], F_SETFD, FD_CLOEXEC);
     (void)fcntl(pair[1], F_SETFD, FD_CLOEXEC);
+#endif
+#endif
+#ifndef _WIN32
     if (fstat(pair[1], &g_tor_control_peer_id) != 0) {
         (void)platform_socket_close(pair[0]);
         (void)platform_socket_close(pair[1]);

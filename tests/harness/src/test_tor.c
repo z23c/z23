@@ -1644,6 +1644,8 @@ static const char *stop_handoff_running_case(bool real_tor)
     stop_handoff_sockets_capture(&sockets);
     if (!why && real_tor != sockets.held)
         why = "a real Tor owns a control connection and the stub none";
+    if (!why && sockets.held && !(fcntl(sockets.fd[0], F_GETFD) & FD_CLOEXEC))
+        why = "a child process would inherit the control connection";
     stop_handoff_timed("running");
     if (!why)
         why = stop_handoff_check_ended(tmpdir, real_tor);

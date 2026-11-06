@@ -1071,3 +1071,7 @@ later lane flips it HARD.
 - 2026-11-06T05:27:09Z — REASON: Register the persistent onion identity from Tor's own thread
   old ROOT: 6950828ea128837247ea981837fc2b1c28b41e1adb1ecaade046caef4ce5143e
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T05:27:38Z — REASON: Open Tor's control socket pair close-on-exec from birth on Linux
+  old ROOT: ecfaa435ee5bdb667a63e42724bb9b726f13328656167862921735699d8a1f14
+  by: owner unseal ritual (make core-unseal)
