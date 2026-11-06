@@ -106,6 +106,13 @@ bool connect_block(const struct block *block,
                    const struct chain_params *params,
                    bool just_check);
 
+#ifdef ZCL_TESTING
+bool connect_block_test_verify_scripts(const struct script *script_sig,
+                                       const struct script *script_pub_key,
+                                       size_t n,
+                                       struct validation_state *state);
+#endif
+
 bool disconnect_block(const struct block *block,
                       struct validation_state *state,
                       struct block_index *pindex,

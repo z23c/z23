@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdatomic.h>
 #include "util/log_macros.h"
+#include "util/safe_alloc.h"
 #include "validation/connect_block.h"
 #include "validation/check_block.h"
 #include "validation/check_transaction.h"
@@ -52,13 +53,21 @@ struct script_check {
     struct precomputed_tx_data *txdata; /* shared per-tx, read-only */
 };
 
+static _Atomic uint64_t g_script_check_local_failures = 0;
+
 static bool script_check_fn(void *item)
 {
     struct script_check *sc = (struct script_check *)item;
     struct sig_checker checker = tx_make_sig_checker(&sc->tsc);
     ScriptError serror = SCRIPT_ERR_OK;
-    return verify_script(sc->script_sig, sc->script_pub_key,
-                         sc->flags, &checker, sc->branch_id, &serror);
+    /* The count is per thread, so only the thread that ran the check can see it
+     * run out of memory; this total carries that across the pool. */
+    uint64_t alloc_failures = zcl_alloc_failure_count();
+    bool ok = verify_script(sc->script_sig, sc->script_pub_key,
+                            sc->flags, &checker, sc->branch_id, &serror);
+    if (!ok && zcl_alloc_failure_count() != alloc_failures)
+        atomic_fetch_add(&g_script_check_local_failures, 1);
+    return ok;
 }
 
 /* Lazy-initialized global workpool for script verification.
@@ -820,6 +829,7 @@ static int connect_block_verify_scripts(struct validation_state *state,
     }
 
     struct workpool *pool = get_script_pool();
+    uint64_t local_failures = atomic_load(&g_script_check_local_failures);
     bool scripts_ok;
     if (pool && num_checks >= 4) {
         /* Parallel path: dispatch to worker threads */
@@ -840,6 +850,10 @@ static int connect_block_verify_scripts(struct validation_state *state,
 
     if (!scripts_ok) {
         block_undo_free(undo);
+        if (atomic_load(&g_script_check_local_failures) != local_failures) {
+            (void)validation_state_error(state, "out-of-memory");
+            return -1;
+        }
         (void)validation_state_dos(state, 100, false,
             REJECT_INVALID, "mandatory-script-verify-flag-failed",
             false, NULL);
@@ -852,6 +866,35 @@ static int connect_block_verify_scripts(struct validation_state *state,
                 (pool && num_checks >= 4) ? "yes" : "no");
     return 0;
 }
+
+#ifdef ZCL_TESTING
+/* The script step alone, over `n` checks of one script pair. */
+bool connect_block_test_verify_scripts(const struct script *script_sig,
+                                       const struct script *script_pub_key,
+                                       size_t n,
+                                       struct validation_state *state)
+{
+    struct connect_script_work work = {0};
+    work.checks = zcl_calloc(n, sizeof(*work.checks), "test_script_checks");
+    work.check_ptrs = zcl_calloc(n, sizeof(*work.check_ptrs), "test_script_ptrs");
+    if (!work.checks || !work.check_ptrs) {
+        free(work.checks);
+        free(work.check_ptrs);
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        work.checks[i].script_sig = script_sig;
+        work.checks[i].script_pub_key = script_pub_key;
+        work.check_ptrs[i] = &work.checks[i];
+    }
+    work.num_checks = n;
+    struct block_index pindex;
+    block_index_init(&pindex);
+    struct block_undo undo;
+    block_undo_init(&undo);
+    return connect_block_verify_scripts(state, &pindex, &undo, &work) == 0;
+}
+#endif
 
 /* Connect every tx, then verify the collected scripts. */
 static int connect_block_apply_transactions(

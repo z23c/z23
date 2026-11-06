@@ -477,6 +477,25 @@ static bool atm_case_script_invalid(const struct atm_ctx *c)
     return ok;
 }
 
+/* Running out of memory on a script check is not a verdict on the transaction:
+ * a sender is scored for an invalid result and not for an internal error. */
+static bool atm_case_script_local_failure(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xEC, atm_det_utxo, 50 * COIN_VALUE,
+                               true);
+    char detail[64] = "";
+    zcl_alloc_fault_fail_nth("script_stack", 1);
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    bool ok = seeded && fired && r == MEMPOOL_ACCEPT_INTERNAL_ERROR &&
+              tx_mempool_size(&f.pool) == 0;
+    atm_fix_free(&f);
+    return ok;
+}
+
 static bool atm_case_missing_inputs(const struct atm_ctx *c)
 {
     struct atm_fix f;
@@ -731,6 +750,8 @@ static const struct atm_det_case atm_det_cases[] = {
     { "zero fee under relay floor -> BELOW_FEE", atm_case_below_fee },
     { "bad transparent sig -> transparent-script-invalid",
       atm_case_script_invalid },
+    { "a script check out of memory is an internal error, not invalid",
+      atm_case_script_local_failure },
     { "unknown prevout -> MISSING_INPUTS", atm_case_missing_inputs },
     { "accepted tx clears detail -> OK", atm_case_success_clears_detail },
     { "zero detail cap writes nothing; NULL detail ok",

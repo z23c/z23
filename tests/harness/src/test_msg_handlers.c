@@ -15,6 +15,7 @@
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "core/hash.h"
+#include "jobs/reducer_frontier.h"
 #include "net/fast_sync.h"
 #include "net/msgprocessor.h"
 #include "net/compact_blocks.h"
@@ -2487,12 +2488,38 @@ struct pin_compact_outcome {
     bool handled;
     bool seen;
     bool queued;
+    bool suppressed;
 };
 
 /* Assembles a pending compact block through blocktxn with `submit` as the hook
  * (NULL: no hook wired yet). */
-static struct pin_compact_outcome pin_compact_assemble(
-    msg_compact_block_submit_fn submit, uint8_t marker)
+/* What the requeue after a failed compact submit finds in place. */
+enum pin_requeue_setup {
+    PIN_REQUEUE_WANTED,        /* a known block above the tip */
+    PIN_REQUEUE_NO_INDEX,      /* the block has no index */
+    PIN_REQUEUE_BELOW_TIP,     /* at or below the provable frontier */
+    PIN_REQUEUE_HAVE_DATA,     /* the body is already held */
+    PIN_REQUEUE_TOMBSTONED,    /* requested, and received moments ago */
+};
+
+static void pin_requeue_apply_setup(enum pin_requeue_setup setup,
+                                    struct block_index *bi,
+                                    const struct uint256 *hash)
+{
+    if (setup == PIN_REQUEUE_BELOW_TIP) {
+        reducer_frontier_provable_tip_set(bi->nHeight);
+    } else if (setup == PIN_REQUEUE_HAVE_DATA) {
+        bi->nStatus |= BLOCK_HAVE_DATA;
+    } else if (setup == PIN_REQUEUE_TOMBSTONED) {
+        struct download_manager *dm = get_download_mgr();
+        (void)dl_mark_requested(dm, hash, bi->nHeight, 631);
+        (void)dl_mark_received(dm, hash);
+    }
+}
+
+static struct pin_compact_outcome pin_compact_assemble_with(
+    msg_compact_block_submit_fn submit, uint8_t marker,
+    enum pin_requeue_setup setup)
 {
     struct pin_compact_outcome out = {0};
     struct block *pending = zcl_calloc(1, sizeof(*pending), "pin_compact_block");
@@ -2506,12 +2533,14 @@ static struct pin_compact_outcome pin_compact_assemble(
 
     struct main_state ms;
     main_state_init(&ms);
-    struct block_index *bi =
+    struct block_index *bi = setup == PIN_REQUEUE_NO_INDEX ? NULL :
         chainstate_insert_block_index((struct chainstate *)&ms, &hash);
     if (bi)
         bi->nHeight = 1;
     peer_scoring_init();
     test_msg_dl_reset();
+    if (bi)
+        pin_requeue_apply_setup(setup, bi, &hash);
     struct net_manager nm;
     net_manager_init(&nm);
     struct msg_processor mp;
@@ -2534,6 +2563,7 @@ static struct pin_compact_outcome pin_compact_assemble(
     }
     out.seen = block_already_seen(&hash);
     out.queued = get_download_mgr()->queue_len > 0;
+    out.suppressed = get_download_mgr()->total_requeue_suppressed_pending > 0;
 
     stream_free(&s);
     block_txn_response_free(&resp);
@@ -2547,7 +2577,75 @@ static struct pin_compact_outcome pin_compact_assemble(
     main_state_free(&ms);
     block_clear_seen(&hash);
     test_msg_dl_reset();
+    reducer_frontier_provable_tip_reset();
     return out;
+}
+
+static struct pin_compact_outcome pin_compact_assemble(
+    msg_compact_block_submit_fn submit, uint8_t marker)
+{
+    return pin_compact_assemble_with(submit, marker, PIN_REQUEUE_WANTED);
+}
+
+/* The queue after msg_block_note_retryable reports `reason` for a known block
+ * above the tip. */
+static bool pin_retryable_queues(const char *reason)
+{
+    struct uint256 hash;
+    memset(hash.data, 0x5a, sizeof(hash.data));
+    struct main_state ms;
+    main_state_init(&ms);
+    struct block_index *bi =
+        chainstate_insert_block_index((struct chainstate *)&ms, &hash);
+    if (bi)
+        bi->nHeight = 1;
+    test_msg_dl_reset();
+    struct net_manager nm;
+    net_manager_init(&nm);
+    struct msg_processor mp;
+    pin_mp_init(&mp, &ms, &nm);
+    struct validation_state state;
+    validation_state_init(&state);
+    (void)validation_state_error(&state, reason);
+    msg_block_note_retryable(&mp, &hash, &state);
+    bool queued = get_download_mgr()->queue_len > 0;
+    net_manager_free(&nm);
+    main_state_free(&ms);
+    test_msg_dl_reset();
+    return queued;
+}
+
+static int test_compact_requeue_guards(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: a failed submit requeues only a block still wanted") {
+        ASSERT(pin_retryable_queues("out-of-memory"));
+        ASSERT(!pin_retryable_queues("p2p-block-queued-for-reducer"));
+
+        struct pin_compact_outcome wanted = pin_compact_assemble_with(
+            pin_compact_submit_says_nothing, 0x44, PIN_REQUEUE_WANTED);
+        ASSERT(wanted.handled && !wanted.seen && wanted.queued);
+
+        enum pin_requeue_setup refused[] = {
+            PIN_REQUEUE_NO_INDEX, PIN_REQUEUE_BELOW_TIP, PIN_REQUEUE_HAVE_DATA,
+        };
+        for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+            struct pin_compact_outcome out = pin_compact_assemble_with(
+                pin_compact_submit_says_nothing, 0x44, refused[i]);
+            ASSERT(out.handled && !out.seen);
+            ASSERT(!out.queued);
+        }
+
+        /* Delivered by a peer moments ago: the receipt tombstone keeps it off
+         * the queue until it expires, and the stall logic owns the retry. */
+        struct pin_compact_outcome received = pin_compact_assemble_with(
+            pin_compact_submit_says_nothing, 0x44, PIN_REQUEUE_TOMBSTONED);
+        ASSERT(received.handled && !received.seen);
+        ASSERT(!received.queued);
+        ASSERT(received.suppressed);
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static int test_compact_local_submit_failure_stays_retryable(void)
@@ -3073,6 +3171,7 @@ int test_msg_handlers(void)
     failures += test_pin_reject_recheck_memory_failure_stays_retryable();
     failures += test_block_local_memory_failure_stays_retryable();
     failures += test_compact_local_submit_failure_stays_retryable();
+    failures += test_compact_requeue_guards();
     failures += test_block_data_local_memory_failure_not_scored();
     failures += test_msg_build_identity_prefix_branches();
     { extern int msg_block_body_identity_tests(void); failures += msg_block_body_identity_tests(); }

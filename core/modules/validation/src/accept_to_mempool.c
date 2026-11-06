@@ -25,6 +25,7 @@
 #include "script/script_flags.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
+#include "util/safe_alloc.h"
 
 #include <stdio.h>
 #include <stdatomic.h>
@@ -256,8 +257,13 @@ static enum mempool_accept_result mempool_accept_transparent_scripts(
     /* Transparent scriptSig verification — a bad-sig tx is rejected here,
      * BEFORE add+relay. */
     bool missing_inputs = false;
+    uint64_t alloc_failures = zcl_alloc_failure_count();
     if (!verify_tx_inputs_scripts(coins_tip, tx, branch_id,
                                   &missing_inputs)) {
+        /* Running out of memory says nothing about the transaction or the peer
+         * that sent it. */
+        if (!missing_inputs && zcl_alloc_failure_count() != alloc_failures)
+            return MEMPOOL_ACCEPT_INTERNAL_ERROR;
         if (!missing_inputs)
             mempool_accept_detail(detail_out, detail_cap,
                                   "transparent-script-invalid");

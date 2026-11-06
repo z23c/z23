@@ -558,10 +558,23 @@ static void msg_block_requeue_after_intake_backpressure(
 {
     if (!mp || !mp->main_state || !hash)
         return;
+    /* The same floor as the compact path's full-block request: a block with no
+     * index, already held, or at or below the provable frontier never goes to
+     * the front of the queue. When the block was requested, dl_mark_received
+     * has already set the receipt tombstone, so this is a no-op until that
+     * expires (DL_RECEIVED_PENDING_SECS) and the stall logic owns the retry. */
     struct block_index *bi = block_map_find(
         &mp->main_state->map_block_index, hash);
-    int32_t height = bi ? bi->nHeight : -1;
-    dl_queue_priority(get_download_mgr(), hash, height);
+    if (!bi)
+        return;
+    int32_t history = active_chain_height(&mp->main_state->chain_active);
+    int32_t hstar = reducer_frontier_provable_tip_cached();
+    if (hstar > history)
+        history = hstar;
+    if ((bi->nStatus & (BLOCK_HAVE_DATA | BLOCK_FAILED_MASK)) ||
+        (int32_t)bi->nHeight <= history)
+        return;
+    dl_queue_priority(get_download_mgr(), hash, (int32_t)bi->nHeight);
 }
 
 /* ── Self-suspicion gate for the block-reject ban path ──────────────────

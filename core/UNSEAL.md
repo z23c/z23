@@ -1131,3 +1131,7 @@ later lane flips it HARD.
 - 2026-11-06T06:26:15Z — REASON: Leave a compact block unseen when it could not be submitted
   old ROOT: 21b3abf686b1de010648bf9e3e4903e4f0e02915ed64f3d2dc86a4e6c7dce157
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T06:26:31Z — REASON: Connect and mempool out-of-memory checks; guard the compact requeue
+  old ROOT: 3d0fa71838e985c3b8c94a9b334992c10288c85eecfb1e9ebdea70e5d0ab7604
+  by: owner unseal ritual (make core-unseal)

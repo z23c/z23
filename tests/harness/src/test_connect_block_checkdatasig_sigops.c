@@ -171,6 +171,28 @@ static struct chain_params cds_params(struct checkpoint_entry *out_entry)
     return p;
 }
 
+/* connect_block's script step over `n` checks of one script, with `label`
+ * failing if given. Returns the result and copies the reject reason out. */
+static bool cds_script_step(uint8_t pub_op, size_t n, const char *label,
+                            bool *fired, char reject_out[256])
+{
+    struct script sig, pub;
+    script_init(&sig);
+    script_init(&pub);
+    script_push_op(&pub, pub_op);
+    struct validation_state vs;
+    validation_state_init(&vs);
+    if (label)
+        zcl_alloc_fault_fail_nth(label, 1);
+    bool ok = connect_block_test_verify_scripts(&sig, &pub, n, &vs);
+    if (fired)
+        *fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    strncpy(reject_out, vs.reject_reason, 255);
+    reject_out[255] = '\0';
+    return ok;
+}
+
 /* Run connect_block over the {coinbase, P2SH-spend} block. Returns the result
  * and copies the reject reason out. */
 static bool cds_run(char reject_out[256])
@@ -255,6 +277,22 @@ int test_connect_block_checkdatasig_sigops(void)
     CDS_CHECK("fixture: legacy + redeem exceeds MAX_BLOCK_SIGOPS",
               (unsigned)(CDS_LEGACY_OPS + CDS_REDEEM_OPS) >
                   (unsigned)MAX_BLOCK_SIGOPS);
+
+    /* A script check that runs out of memory is not a verdict on the block,
+     * inline (under 4 checks) or on a pool worker. */
+    for (size_t n = 2; n <= 6; n += 4) {
+        char reject[256] = "";
+        CDS_CHECK("script step: valid scripts pass",
+                  cds_script_step(OP_TRUE, n, NULL, NULL, reject));
+        CDS_CHECK("script step: a script fails on its merits",
+                  !cds_script_step(OP_FALSE, n, NULL, NULL, reject) &&
+                  strcmp(reject, "mandatory-script-verify-flag-failed") == 0);
+        bool fired = false;
+        bool ok = cds_script_step(OP_TRUE, n, "script_stack", &fired, reject);
+        CDS_CHECK("script step: the check hit the failed allocation", fired);
+        CDS_CHECK("script step: out of memory is not a script verdict",
+                  !ok && strcmp(reject, "out-of-memory") == 0);
+    }
 
     /* 1. DEFAULT (flag OFF): P2SH OP_CHECKDATASIG counts 0 -> total under the
      * ceiling -> no bad-blk-sigops (byte-identical to today). */
