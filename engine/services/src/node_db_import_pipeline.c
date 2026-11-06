@@ -339,8 +339,14 @@ void *node_db_import_writer_thread(void *arg)
     }
 
     enum writer_finish_result fin = writer_finish_transaction(ctx, ndb);
-    if (fin == WRITER_FINISH_COMMIT_FAILED)
+    if (fin == WRITER_FINISH_COMMIT_FAILED) {
+        /* The last batch is not durable, so the set is incomplete: leave no
+         * open transaction and make the caller refuse the import. */
         LOG_WARN("sync", "UTXO import writer: final COMMIT failed");
+        if (!node_db_rollback(ndb))
+            LOG_WARN("sync", "UTXO import writer: ROLLBACK failed after final commit failure");
+        import_ctx_request_stop(ctx);
+    }
     if (fin == WRITER_FINISH_ROLLBACK_FAILED)
         LOG_WARN("sync", "UTXO import writer: rollback requested by stop flag failed");
     sync_job_import_progress(total_rows);

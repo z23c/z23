@@ -707,6 +707,19 @@ static struct zcl_result import_reject_halted_scan(struct import_context *ctx,
     return import_reject_dropped_records(ctx, turbo_mode, total_rows);
 }
 
+/* Refuse a set whose SQLite row count differs from what the writer counted:
+ * rows were lost, so it is not the whole coins set. */
+static struct zcl_result import_reject_sql_mismatch(struct import_context *ctx,
+                                                    struct sync_db_turbo_scope *turbo_mode,
+                                                    int total_rows,
+                                                    int64_t sql_rows)
+{
+    LOG_WARN("sync", "UTXO IMPORT ERROR: wrote %d rows but " "SQLite has %lld rows — data loss!", total_rows, (long long)sql_rows);
+    import_end_refused(ctx, turbo_mode, total_rows);
+    return ZCL_ERR(-13, "import: REJECTED — wrote %d rows but SQLite holds %lld"
+                   IMPORT_RERUN_NOTE, total_rows, (long long)sql_rows);
+}
+
 /* End turbo mode and, when that succeeds, report index timing. */
 static struct zcl_result import_finish_index_build(struct import_context *ctx,
                                                    struct sync_db_turbo_scope *turbo_mode,
@@ -813,11 +826,8 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
 
     /* Validation: verify all txids made it to SQLite */
     int64_t sql_rows = 0;
-    if (import_validate_sql_rows(ndb, total_rows, total_entries, &sql_rows) ==
-        IMPORT_SQL_MISMATCH) {
-        /* Row count mismatch = real data loss — pipeline bug */
-        LOG_WARN("sync", "UTXO IMPORT ERROR: wrote %d rows but " "SQLite has %lld rows — data loss!", total_rows, (long long)sql_rows);
-    }
+    enum import_sql_check sql_check =
+        import_validate_sql_rows(ndb, total_rows, total_entries, &sql_rows);
     fflush(stdout);
 
     struct timespec ts_write;
@@ -831,6 +841,10 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
                                                         total_rows);
     if (!halted.ok)
         return halted;
+    /* Row count mismatch = real data loss — pipeline bug */
+    if (sql_check == IMPORT_SQL_MISMATCH)
+        return import_reject_sql_mismatch(ctx, &turbo_mode, total_rows,
+                                          sql_rows);
 
     struct zcl_result done = import_finish_index_build(ctx, &turbo_mode,
                                                       &ts_start, pipe_ms,

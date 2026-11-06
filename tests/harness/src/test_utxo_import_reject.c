@@ -23,6 +23,8 @@
 #include "validation/main_state.h"
 #include "validation/process_block.h"
 
+#include <pthread.h>
+#include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -296,6 +298,47 @@ static int reject_case_dropped_for_memory_refused(void)
         ASSERT(ran);
         ASSERT(!run.result.ok);
         ASSERT(run.result.code == REJECT_CODE_DROPPED);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Refuse every COMMIT issued off the thread that installed the hook, i.e. the
+ * import writer's. SQLite turns a refused COMMIT into a rollback. */
+static pthread_t g_commit_main_thread;
+
+static int reject_writer_commit_hook(void *unused)
+{
+    (void)unused;
+    return pthread_equal(pthread_self(), g_commit_main_thread) ? 0 : 1;
+}
+
+static int reject_case_final_commit_failure_refused(void)
+{
+    int failures = 0;
+
+    TEST("utxo import reject: a failed final writer COMMIT refuses the import "
+         "instead of publishing it as complete") {
+        const int outputs[] = { 2, 2, 2 };
+        struct reject_fixture f;
+        struct coins_view_db cvdb;
+        struct node_db ndb;
+        int rows = -1;
+        struct zcl_result r;
+
+        ASSERT(reject_fixture_make(&f, outputs,
+                                   sizeof(outputs) / sizeof(outputs[0])));
+        memset(&cvdb, 0, sizeof(cvdb));
+        ASSERT(coins_view_db_open(&cvdb, f.chainstate, 1u << 20, false, false));
+        ASSERT(node_db_open(&ndb, f.db_path));
+        g_commit_main_thread = pthread_self();
+        sqlite3_commit_hook(ndb.db, reject_writer_commit_hook, NULL);
+        r = node_db_import_service_run(&ndb, &cvdb, &rows);
+        sqlite3_commit_hook(ndb.db, NULL, NULL);
+        node_db_close(&ndb);
+        coins_view_db_close(&cvdb);
+        ASSERT(!r.ok);
+        ASSERT(rows != 6);
         PASS();
     } _test_next:;
     return failures;
@@ -735,5 +778,6 @@ int test_utxo_import_reject(void)
     failures += reject_case_cut_record_refused();
     failures += reject_case_skipped_record_refused();
     failures += reject_case_dropped_for_memory_refused();
+    failures += reject_case_final_commit_failure_refused();
     return failures;
 }
