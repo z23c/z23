@@ -510,10 +510,11 @@ static bool bgv_auth_checkpoint_checked(
     return true;
 }
 
-/* The same checkpoint node before its walk reaches the tip, or paused on a
- * coverage gap with no script skips: the check is still running, so answer
- * typed instead of paging. It names no checked range; the public wrapper
- * withdraws any earlier CHECKED outcome. */
+/* The same checkpoint node whose walk PAUSED on a coverage gap with no script
+ * skips: the check is still running, so answer typed instead of paging. It
+ * names no checked range; the public wrapper withdraws any earlier CHECKED
+ * outcome. Any other short walk (a completed walk whose catch-up could not
+ * reach a moved tip, a FAILED walk) keeps the ordinary refusal and page. */
 static bool bgv_auth_checkpoint_checking(
     struct bg_validation_service *svc, bool external_seeded, int64_t skips,
     int verified, int chain_height, struct zcl_result *out)
@@ -521,7 +522,8 @@ static bool bgv_auth_checkpoint_checking(
     struct chain_evidence_controller authority;
     struct chain_evidence_controller_view view;
     int32_t floor = -1;
-    if (skips != 0)
+    if (skips != 0 ||
+        atomic_load(&svc->progress.state) != BG_VALIDATION_PAUSED)
         return false;
     chain_evidence_controller_init(&authority, svc->ndb, csr_instance());
     chain_evidence_controller_snapshot(&authority, &view);

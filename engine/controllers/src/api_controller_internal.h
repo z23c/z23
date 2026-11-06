@@ -58,7 +58,12 @@ static inline const struct blocker_snapshot *api_authority_blocker(
  * still needs full-history validation. zcl-nodectl and deploy_verify gate on
  * them. "local_ready" is the shared "Ready." definition
  * (agent_security_posture_local_ready): a checkpoint-verified node qualifies,
- * and trust.ready on the status routes is this value. */
+ * and trust.ready on the status routes is this value. The agent summary's
+ * "healthy" is a different word: its status ladder reads "healthy" (no
+ * posture stop for a checkpoint-verified node), and the status brief and the
+ * status journey's node_healthy, which the phone shows, carry that word, so a
+ * checkpoint node reads healthy there while top-level healthy and serving
+ * stay false. */
 struct api_health_flags {
     bool public_serving;
     bool public_healthy;
