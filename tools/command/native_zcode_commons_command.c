@@ -2,6 +2,7 @@
  * Purpose: read-only native views of the ZC23 Living Commons projection. */
 
 #include "command/native_command.h"
+#include "command/native_zcode_package_copy.h"
 
 #include "base/checked.h"
 #include "base/hex.h"
@@ -771,10 +772,11 @@ void zcl_native_handle_zcode_commons_creation_show(
 void zcl_native_handle_zcode_commons_lineage(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    static const char *const keys[] = {"workspace", "package_root"};
+    static const char *const keys[] = {"workspace", "package_root",
+                                       "datadir"};
     uint8_t package[32];
     struct vcs_zcode_commons_projection *projection =
-        zcc_build(request, reply, keys, 2);
+        zcc_build(request, reply, keys, 3);
     if (!projection) return;
     if (!zcc_root(request->input, "package_root", package)) {
         vcs_zcode_commons_projection_free(projection);
@@ -803,4 +805,9 @@ void zcl_native_handle_zcode_commons_lineage(
     (void)json_push_kv(&reply->data, "creations", &rows); json_free(&rows);
     (void)json_push_kv_bool(&reply->data, "implies_package_ownership", false);
     vcs_zcode_commons_projection_free(projection);
+    const char *datadir = zcc_str(request->input, "datadir");
+    if (datadir && !zcl_package_copy_lineage_releases(datadir, package,
+                                                      &reply->data))
+        zcc_fail(reply, "RELEASES_UNREADABLE",
+                 "persisted releases under datadir could not be read");
 }

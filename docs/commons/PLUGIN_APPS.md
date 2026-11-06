@@ -14,7 +14,7 @@ Plugin path is one of three things: **now** (possible with the current host), **
 
 | app | path | today | plugin path | blocker | evidence |
 | --- | --- | --- | --- | --- | --- |
-| skycombat | `apps/skycombat/` | separate C23 program, no `app.def` | needs API 2 for the game window; headless simulation could use interface 2 | no `ui.panel` descriptor | `apps/AGENTS.md:5`; PLUGINS.md 316-318 |
+| skycombat | `apps/skycombat/` | separate C23 program, no `app.def`; a source package through `zcode-package.json` (section 4a) | needs API 2 for the game window; headless simulation could use interface 2 | no `ui.panel` descriptor | `apps/AGENTS.md:5`; PLUGINS.md 316-318; `apps/skycombat/zcode-package.json` |
 | zcl-ledger | `apps/zcl-ledger/` | separate host over Linux `hidraw` | **in-tree behind a facade**: signing and custody stay out of plugins; the host remains a separate binary | custody rule; no wallet broker (API 6); no device descriptor | `apps/zcl-ledger/README.md:5`; `apps/AGENTS.md:11`; `engine/modules/framework/include/zclassic23/app.h:127` |
 | z23kernel | `apps/z23kernel/` | separate freestanding RV64 image that links no node code | not a plugin candidate: it is a boot image, so it stays separate | needs a non-Linux execution host (API 9) | `apps/z23kernel/README.md:5`; PLUGINS.md 61-63 |
 | wallet | `contexts/wallet/` | linked into z23 (`PRODUCT_CONTEXTS`); custody-bearing | **in-tree behind a facade** through `wallet_request` | wallet broker (API 6); `make custody-check` | `Makefile:849`; `engine/modules/framework/include/zclassic23/app.h:127` |
@@ -47,6 +47,23 @@ The order is the order of work: each later item depends on the earlier ones. Shi
 
 The command catalog in `engine/composition/commands/plugin.def` and `plugin_attest.def` provides `plugin publish`, `plugin fetch`, `plugin fetch_remote`, `plugin attest`, and `plugin attest_verify`. `tests/harness/src/test_plugin_package.c` composes two-store transfer, pinned local fixture attestations, installation and a confined resident plugin chain-tip read against a node-backed fixture chain; `tests/harness/src/test_plugin_attest.c` covers attestation verification. The local fixture does not demonstrate independent reproduction or network authentication. An attestation records a builder's signed claim; it does not by itself establish independent reproduction. The full app journey and its acceptance remain to be demonstrated.
 
+### 4a. Fork, versions and share for source packages
+
+Skycombat is the first app with this path. `apps/skycombat/zcode-package.json` and `LICENSE` make it an ordinary source package: `zcode package dev prepare` derives its content root, and the offline-signed release goes through `zcode package publish commit`. No second format or store is involved.
+
+| step | command | what it reuses |
+| --- | --- | --- |
+| fork | `zcode package fork` `root,destination` | the verified `zcode package checkout`, then a ZVCS repository in the copy whose first commit records `zcode.fork:<parent release id>` |
+| save | `zcode package version save` `dir` | one append-only ZVCS snapshot; a copy with no changes is refused |
+| history | `zcode package version list` `dir` | the self-verifying ZVCS commit log, newest first, with the recorded parent |
+| restore | `zcode package version restore` `dir,version` | a source-only ZVCS revert recorded as a new version; unsaved changes are refused |
+| share | `zcode package share` `dir,publisher_pubkey` | the saved head is rebuilt in private scratch and prepared by `vcs_package_prepare`; the release envelope's `parent_root` is the forked release id; the offline signature goes through the local publication commit |
+| lineage | `zcode commons lineage` `workspace,package_root,datadir` | lists the persisted releases of a package root with each parent release and parent package root |
+
+Fork, save, restore and share run plan-first: a call without `confirm` returns a `plan_id`; the same call with that `plan_id` and `confirm:true` acts, so MCP `z23_run` drives them like any other plan-commit leaf. Share refuses unsaved changes, a saved head equal to the fork, a parent release not persisted in the datadir, and a copy whose recorded fork tree no longer prepares to the parent release's package root. The publisher secret never enters: share returns the signing digest, and the caller signs it offline.
+
+`parent_root` names a release id, the same field the reward gate reads. That gate also requires the parent to share the publisher key and the sequence to increase by one, so a fork shared under a different key is not reward-eligible through lineage. Sharing grants no reward, install or execution authority. A forker under a new key also renames the package namespace in `zcode-package.json`, because the namespace is bound first-come to the original publisher's key. `tests/harness/src/test_zcode_package_fork.c` runs this journey on local fixtures and an isolated datadir.
+
 ## 5. Links
 
 This page is linked from [`docs/README.md`](../README.md) and from [`docs/work/FORWARD_PLAN.md`](../work/FORWARD_PLAN.md).
@@ -60,3 +77,6 @@ This page is linked from [`docs/README.md`](../README.md) and from [`docs/work/F
 <!-- claim: symbol-present ZCL_SERVICE_ENFORCEMENT_SHADOW engine/composition/services/catalog.def # still shadow-only -->
 
 <!-- claim: symbol-present pp_attested_host_journey tests/harness/src/test_plugin_package.c # local attested transfer and node-backed hostcall -->
+<!-- claim: file-present apps/skycombat/zcode-package.json # skycombat source package declaration -->
+<!-- claim: symbol-present zcl_native_handle_zcode_package_share tools/command/native_zcode_package_share_command.c # share with parent -->
+<!-- claim: symbol-present test_zcode_package_fork tests/harness/src/test_zcode_package_fork.c # fork, versions and share journey -->
