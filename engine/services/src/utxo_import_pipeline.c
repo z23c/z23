@@ -194,8 +194,8 @@ int utxo_import_decode_entry(const struct utxo_import_raw_entry *raw,
     return ctx.nrows;
 }
 
-bool utxo_import_entry_is_cut(const struct utxo_import_raw_entry *raw,
-                              int max_rows)
+struct zcl_result utxo_import_entry_whole(const struct utxo_import_raw_entry *raw,
+                                         int max_rows)
 {
     struct coins_record_decode_options opts = {
         .mode = COINS_RECORD_DECODE_UTXO_IMPORT,
@@ -204,10 +204,13 @@ bool utxo_import_entry_is_cut(const struct utxo_import_raw_entry *raw,
     };
     struct coins_record_decode_result res;
 
-    return raw && max_rows > 0 &&
-           coins_record_decode(raw->value, raw->value_len, &opts, NULL, NULL,
-                               &res) == COINS_RECORD_DECODE_OK &&
-           res.live_outputs > (size_t)max_rows;
+    if (raw && max_rows > 0 &&
+        coins_record_decode(raw->value, raw->value_len, &opts, NULL, NULL,
+                            &res) == COINS_RECORD_DECODE_OK &&
+        res.live_outputs > (size_t)max_rows)
+        return ZCL_ERR(-1, "utxo import: record holds %zu live outputs, only "
+                       "%d rows were free", res.live_outputs, max_rows);
+    return ZCL_OK;
 }
 
 struct zcl_result utxo_import_verify_checkpoint(struct node_db *ndb,

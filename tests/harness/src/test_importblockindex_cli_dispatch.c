@@ -434,7 +434,9 @@ static int icd_test_importchainstate(const char *base)
 
     snprintf(cs, sizeof(cs), "%s/chainstate", base);
     snprintf(home, sizeof(home), "%s/home", base);
-    snprintf(home_dir, sizeof(home_dir), "%s/.zclassic-c23", home);
+    /* The node.db the bare form writes under the tmp HOME, less its file name. */
+    snprintf(home_dir, sizeof(home_dir), "%s/.zclassic-c23/node.db", home);
+    *strrchr(home_dir, '/') = '\0';
     snprintf(target, sizeof(target), "%s/import_target.db", base);
     icd_mkdir_p(home);
     icd_mkdir_p(home_dir);

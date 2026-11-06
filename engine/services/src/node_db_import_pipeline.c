@@ -63,7 +63,7 @@ static int decoder_decode_chunk_entries(struct import_context *ctx,
         if (n == 0) {
             atomic_fetch_add(&ctx->decode_failures, 1);
         } else if (n == space &&
-                   utxo_import_entry_is_cut(&chunk->entries[i], space)) {
+                   !utxo_import_entry_whole(&chunk->entries[i], space).ok) {
             atomic_fetch_add(&ctx->records_cut, 1);
         }
         for (int r = 0; r < n; r++) {

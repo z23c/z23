@@ -44,9 +44,10 @@ struct zcl_result utxo_import_value_len_checked(size_t value_len,
 int utxo_import_decode_entry(const struct utxo_import_raw_entry *raw,
                              struct utxo_import_row *out,
                              int max_rows);
-/* Does the record hold more live outputs than the max_rows it was decoded into? */
-bool utxo_import_entry_is_cut(const struct utxo_import_raw_entry *raw,
-                              int max_rows);
+/* An error when the record holds more live outputs than the max_rows it was
+ * decoded into, so decoding it there cut it; ZCL_OK otherwise. */
+struct zcl_result utxo_import_entry_whole(const struct utxo_import_raw_entry *raw,
+                                         int max_rows);
 /* Compare an imported set with the compiled SHA3 checkpoint when the chainstate's
  * best block is the checkpoint block. A set at another block cannot match it, so
  * that is reported as not compared and is not a failure. With no best block
