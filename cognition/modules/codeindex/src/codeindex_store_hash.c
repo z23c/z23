@@ -295,7 +295,9 @@ static bool projection_root_locked(struct ci_store *store, uint8_t out[32])
          "source_commit COLLATE BINARY,artifact_root",
          page_columns, sizeof(page_columns) / sizeof(page_columns[0]),
          UINT64_C(65536)},
-        {0x41, "SELECT id,state FROM pages_state ORDER BY id",
+        /* Bind only "hints imported"; the untrusted-prior flag (state 2) is an advisory
+         * local flag anyone with write access can recompute, and clearing it changes no page content. */
+        {0x41, "SELECT id,CASE state WHEN 1 THEN 1 ELSE 0 END FROM pages_state ORDER BY id",
          page_state_columns, sizeof(page_state_columns) / sizeof(page_state_columns[0]), UINT64_C(1)},
     };
 

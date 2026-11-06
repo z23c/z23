@@ -281,6 +281,18 @@ int test_codeindex_projection_integrity(void)
                                          projection_root));
     codeindex_close(existing);
 
+    existing = cip_open_after_sql(
+        rooted, first, "UPDATE pages_state SET state=2 WHERE id=1");
+    bool untrusted_same = cip_logical_root_preserved(existing, source_root,
+                                                     projection_root);
+    codeindex_close(existing);
+    existing = cip_open_after_sql(
+        rooted, first, "UPDATE pages_state SET state=0 WHERE id=1");
+    CIP_CHECK("a pages_state flip between 2 and 0 is accepted without changing the root",
+              untrusted_same && cip_logical_root_preserved(
+                                    existing, source_root, projection_root));
+    codeindex_close(existing);
+
     static const struct cip_poison poisons[] = {
         {"group row change",
          "UPDATE groups SET purpose=purpose||' poison' WHERE path='lib/net'"},
