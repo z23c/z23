@@ -398,3 +398,18 @@ bool ci_pages_prior_is_empty(struct ci_store *store)
     ci_store_unlock(store);
     return empty;
 }
+
+/* Page hints belong to the checkout whose object store holds their artifacts; a donor
+ * generation copied from a sibling checkout carries none of them forward. */
+bool ci_pages_discard(struct ci_store *store)
+{
+    if (!store) return false;
+    if (ci_pages_prior_is_empty(store)) return true;
+    char *err = NULL;
+    ci_store_lock(store);
+    bool ok = sqlite3_exec(ci_store_db(store), "DELETE FROM pages; UPDATE pages_state SET state=0 WHERE id=1",
+                           NULL, NULL, &err) == SQLITE_OK;
+    ci_store_unlock(store);
+    if (err) sqlite3_free(err);
+    return ok;
+}

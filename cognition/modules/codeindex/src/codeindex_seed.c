@@ -519,6 +519,7 @@ static bool seed_refresh_staged(const char *root, int stagefd,
               seed_reconcile_includes(root, staged, dep_root) &&
               ci_store_meta_set(staged, "dep_root_sha3", dep_root, 32) &&
               seed_stamp_edge_root(staged) &&
+              ci_pages_discard(staged) &&
               ci_build_store_incremental_scanned(root, staged, scratch, changed,
                                          dep_stat, merkle_root) &&
               seed_write_receipt(staged, kind, changed);

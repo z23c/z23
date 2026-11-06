@@ -74,6 +74,7 @@ bool ci_pages_copy(struct ci_store *from, struct ci_store *to);
 bool ci_pages_set_state(struct ci_store *store, int state);
 bool ci_pages_note_import(struct ci_store *store);
 bool ci_pages_prior_is_empty(struct ci_store *store);
+bool ci_pages_discard(struct ci_store *store);
 /* True when both handles are the same canonical inode (no one republished). */
 bool ci_store_same_inode(struct ci_store *a, struct ci_store *b);
 struct ci_merkle;
