@@ -325,6 +325,8 @@ struct scan_acc {
     bool memo_ok;           /* g_memo was made under this root and state */
     bool unreadable;        /* a row to check no longer reads back */
     size_t unknown;         /* unproven rows met by the walk */
+    size_t proved;          /* of those, proved by this scan: the next walk
+                             * no longer numbers them */
     size_t skip;            /* g_scan_skip as this scan began */
     size_t n_pending;
     struct scan_pending pending[BOOT_FLEET_ROSTER_SCAN_ROWS];
@@ -467,9 +469,11 @@ static void scan_judge(const struct scan_pending *line, struct scan_acc *acc,
     bool ok = roster_verify(row->post.text, acc->rv, signer, box, &sealed);
     if (sealed)
         acc->sealed++;
-    if (ok)
+    if (ok) {
+        size_t held = acc->next.n;
         scan_member(acc, line->digest, signer, box);
-    else if (sealed)
+        acc->proved += acc->next.n - held;
+    } else if (sealed)
         acc->refused++;
     else
         acc->bad++;
@@ -511,7 +515,11 @@ static enum snap_state scan_fold(const struct root_view *rv,
     scan_report(acc);
     size_t turn = acc->skip + (acc->n_pending > SCAN_NEWEST
                                    ? acc->n_pending - SCAN_NEWEST : 0);
-    g_scan_skip = acc->deferred && turn + SCAN_NEWEST < acc->unknown ? turn : 0;
+    /* A line proved now is a memo hit on the next walk and is not numbered
+     * there, so every unproven line behind it moves down by one. */
+    size_t left = acc->unknown - acc->proved;
+    turn = turn > acc->proved ? turn - acc->proved : 0;
+    g_scan_skip = acc->deferred && turn + SCAN_NEWEST < left ? turn : 0;
     acc->next.valid = true;
     memcpy(acc->next.root, rv->root, 32);
     acc->next.state = rv->state;
