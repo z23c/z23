@@ -952,6 +952,8 @@ ZCL_TEST_GROUP(vcs_accept)
 ZCL_TEST_GROUP(package_capability_claim)
 ZCL_TEST_GROUP(zcode_store)
 ZCL_TEST_GROUP(zcode_publish)
+/* Fork a published package, save and restore versions, share with parent. */
+ZCL_TEST_GROUP(zcode_package_fork)
 ZCL_TEST_GROUP(zcode_package_dev)
 /* Every contexts/commons/packages package built from its own sources and
  * run against its own tests/test_<pkg>.c. */

@@ -1860,11 +1860,13 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_READ(
     "zcode.commons.lineage", "zcode.commons", "",
     "Show package continuity lineage",
-    "Lists creation attributions matching one exact package root. It does "
+    "Lists creation attributions matching one exact package root. With "
+    "datadir, also lists the persisted releases of that package root and "
+    "each one's parent release and parent package root. It does "
     "not rank importance or imply ownership.", ZCL_COMMAND_LIST_BUDGET,
-    "zcode,commons,zc23,creation,attribution",
+    "zcode,commons,zc23,creation,attribution,release,parent,fork",
     "zcl.zcode_commons_lineage.input.v1", "zcl.zcode_commons_lineage.v1",
-    "workspace,package_root", "workspace,package_root",
+    "workspace,package_root,datadir", "workspace,package_root",
     "z23 zcode commons lineage --input='{\"workspace\":\"/tmp/zclassic23-zcode-scratch\",\"package_root\":\"<64hex>\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
@@ -4796,6 +4798,135 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_zcode_package_checkout)
+
+/* ── personal copies: fork, version history, share ────────────────────
+ *
+ * A fork is an ordinary verified checkout plus a ZVCS repository whose
+ * first commit names the parent release in its task reference. Versions
+ * are ordinary ZVCS snapshots and source-only reverts. Share prepares the
+ * committed head with the existing package prepare rules, sets the release
+ * envelope's parent to the forked release, and publishes the offline-signed
+ * envelope through the existing local publication commit. Every mutating
+ * leaf plans first: a call without confirm returns a plan_id; the same call
+ * with that plan_id and confirm:true acts. */
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.fork", "zcode.package", "",
+    "Make a personal working copy of a published package",
+    "root names a persisted release id, or a package root carried by exactly "
+    "one persisted release. Without confirm, verifies the release and returns "
+    "a plan_id. With that plan_id and confirm:true, reconstructs the package "
+    "beneath an absent destination through the verified checkout, then "
+    "records the parent release id in the copy's first ZVCS commit. Nothing "
+    "is built, executed or published.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "zcode,package,fork,copy,remix,lineage,checkout,zvcs",
+    "zcl.zcode_package_fork.input.v1", "zcl.zcode_package_fork.v1",
+    "root,destination,datadir,plan_id,confirm", "root,destination",
+    "z23 zcode package fork --input='{\"root\":\"<64hex>\",\"destination\":\"/home/me/skycombat\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_zcode_package_fork)
+
+ZCL_COMMAND_BRANCH("zcode.package.version", "zcode.package",
+                   "Recoverable versions of a personal package copy",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.version.save", "zcode.package.version", "",
+    "Save the copy's changes as a new version",
+    "dir must be a copy made by zcode package fork. Without confirm, lists "
+    "the changed paths and returns a plan_id bound to the current version "
+    "and those changes. With that plan_id and confirm:true, takes one "
+    "append-only ZVCS snapshot. A copy without changes is refused.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "zcode,package,version,save,commit,snapshot,zvcs,history",
+    "zcl.zcode_package_version_save.input.v1",
+    "zcl.zcode_package_version_save.v1",
+    "dir,plan_id,confirm", "dir",
+    "z23 zcode package version save --input='{\"dir\":\"/home/me/skycombat\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_zcode_package_version_save)
+
+ZCL_COMMAND_READY_READ(
+    "zcode.package.version.list", "zcode.package.version", "",
+    "List the saved versions of a personal package copy",
+    "Reads the copy's self-verifying ZVCS commit log newest first and names "
+    "the parent release recorded by the fork. A broken commit chain or a "
+    "missing fork record is refused. Nothing is written.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "zcode,package,version,list,history,log,zvcs",
+    "zcl.zcode_package_version_list.input.v1",
+    "zcl.zcode_package_version_list.v1",
+    "dir,limit", "dir",
+    "z23 zcode package version list --input='{\"dir\":\"/home/me/skycombat\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_zcode_package_version_list)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.version.restore", "zcode.package.version", "",
+    "Restore the copy to an earlier saved version",
+    "version is a commit id from zcode package version list. Unsaved changes "
+    "are refused so no work is lost. Without confirm, returns a plan_id "
+    "bound to the current and target versions. With that plan_id and "
+    "confirm:true, restores the files and records the restore as a new "
+    "append-only version.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "zcode,package,version,restore,revert,undo,zvcs,history",
+    "zcl.zcode_package_version_restore.input.v1",
+    "zcl.zcode_package_version_restore.v1",
+    "dir,version,plan_id,confirm", "dir,version",
+    "z23 zcode package version restore --input='{\"dir\":\"/home/me/skycombat\",\"version\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_zcode_package_version_restore)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.share", "zcode.package", "",
+    "Publish a personal copy as a new release that names its parent",
+    "dir must be a copy made by zcode package fork with no unsaved changes "
+    "and a saved version that differs from the fork. The fork's recorded "
+    "tree must still prepare to the parent release's package root. Without "
+    "confirm, prepares the saved head and returns the unsigned release body "
+    "whose parent is the forked release, the signing digest and a plan_id. "
+    "Sign the digest offline. With that plan_id, signature_hex and "
+    "confirm:true, verifies the signed envelope and publishes it through "
+    "zcode.package.publish.commit. The publisher secret never enters.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "zcode,package,share,publish,release,parent,lineage,remix",
+    "zcl.zcode_package_share.input.v1", "zcl.zcode_package_share.v1",
+    "dir,datadir,publisher_pubkey,signature_hex,reward_address,day,plan_id,confirm",
+    "dir,publisher_pubkey",
+    "z23 zcode package share --input='{\"dir\":\"/home/me/skycombat\",\"publisher_pubkey\":\"<66hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_zcode_package_share)
 
 /* ── the install lifecycle (add plan / add commit / rollback) ──────────
  *
