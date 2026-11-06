@@ -1120,3 +1120,149 @@ bool platform_private_file_validate_owner_private(
 unsigned long platform_private_flush_events(void) {
   return atomic_load(&g_pf_flush_events);
 }
+
+static bool pf_staging_leaf_valid(const char *leaf) {
+  return leaf && leaf[0] && strlen(leaf) < 256 &&
+         !strchr(leaf, '/') && !strchr(leaf, '\\') &&
+         strcmp(leaf, ".") && strcmp(leaf, "..");
+}
+
+void platform_private_staging_init(struct platform_private_staging *staging) {
+  if (!staging) return;
+  platform_private_file_init(&staging->file);
+  staging->parent = UINTPTR_MAX;
+  staging->parent_path = NULL;
+  staging->leaf[0] = '\0';
+}
+
+void platform_private_staging_close(struct platform_private_staging *staging) {
+  if (!staging) return;
+  platform_private_file_close(&staging->file);
+  if (staging->parent != UINTPTR_MAX) {
+#if defined(_WIN32)
+    CloseHandle((HANDLE)staging->parent);
+#else
+    close((int)staging->parent);
+#endif
+  }
+  free(staging->parent_path);
+  platform_private_staging_init(staging);
+}
+
+#if defined(_WIN32)
+static char *pf_staging_windows_path(const char *parent, const char *leaf) {
+  size_t parent_length = strlen(parent), leaf_length = strlen(leaf);
+  if (parent_length > SIZE_MAX - leaf_length - 2) return NULL;
+  size_t size = parent_length + leaf_length + 2;
+  char *path = zcl_malloc(size, "private-staging-path");
+  if (path) (void)snprintf(path, size, "%s/%s", parent, leaf);
+  return path;
+}
+
+static bool pf_staging_open(struct platform_private_staging *staging,
+                            const char *parent, const char *leaf) {
+  wchar_t wide[32768];
+  if (!pf_wide(parent, wide)) return false;
+  HANDLE directory = CreateFileW(wide, FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  if (directory == INVALID_HANDLE_VALUE) return false;
+  staging->parent = (uintptr_t)directory;
+  BY_HANDLE_FILE_INFORMATION info = {0};
+  if (!GetFileInformationByHandle(directory, &info) ||
+      !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+      (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+  staging->parent_path = zcl_strdup(parent, "private-staging-parent");
+  if (!staging->parent_path) return false;
+  char *path = pf_staging_windows_path(parent, leaf);
+  if (!path) return false;
+  bool ok = platform_private_file_create(path, &staging->file);
+  free(path);
+  return ok;
+}
+#else
+static bool pf_staging_open(struct platform_private_staging *staging,
+                            const char *parent, const char *leaf) {
+  int directory = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  if (directory < 0) return false;
+  staging->parent = (uintptr_t)directory;
+  int file = openat(directory, leaf,
+                    O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (file < 0) return false;
+  staging->file.native = (uintptr_t)file;
+  return true;
+}
+
+static bool pf_staging_identity(const struct platform_private_staging *staging) {
+  struct stat held, named;
+  if (fstat((int)staging->file.native, &held) != 0 ||
+      fstatat((int)staging->parent, staging->leaf, &named,
+               AT_SYMLINK_NOFOLLOW) != 0) return false;
+  if (!S_ISREG(held.st_mode) || !S_ISREG(named.st_mode) ||
+      held.st_dev != named.st_dev || held.st_ino != named.st_ino) {
+    errno = ESTALE;
+    return false;
+  }
+  return true;
+}
+#endif
+
+bool platform_private_staging_create(struct platform_private_staging *staging,
+                                     const char *parent, const char *leaf) {
+  if (!staging || !parent || !parent[0] || !pf_staging_leaf_valid(leaf) ||
+      staging->parent != UINTPTR_MAX || staging->file.native != UINTPTR_MAX) {
+    errno = EINVAL;
+    return false;
+  }
+  if (!pf_staging_open(staging, parent, leaf)) {
+    int error = errno;
+    platform_private_staging_close(staging);
+    errno = error;
+    return false;
+  }
+  memcpy(staging->leaf, leaf, strlen(leaf) + 1);
+  return true;
+}
+
+bool platform_private_staging_replace(struct platform_private_staging *staging,
+                                      const char *destination_leaf) {
+  if (!staging || staging->parent == UINTPTR_MAX ||
+      staging->file.native == UINTPTR_MAX ||
+      !pf_staging_leaf_valid(destination_leaf)) {
+    errno = EINVAL;
+    return false;
+  }
+#if defined(_WIN32)
+  char *destination = pf_staging_windows_path(staging->parent_path,
+                                             destination_leaf);
+  if (!destination) return false;
+  bool renamed = platform_private_file_replace(&staging->file, NULL, destination);
+  free(destination);
+  return renamed && platform_private_parent_flush(staging->parent_path);
+#else
+  if (!pf_staging_identity(staging) ||
+      !platform_private_file_flush(&staging->file) ||
+      renameat((int)staging->parent, staging->leaf,
+               (int)staging->parent, destination_leaf) != 0) return false;
+  /* The name has committed. Close before the directory barrier so a failed
+   * barrier cannot make caller cleanup unlink the newly installed binary. */
+  platform_private_file_close(&staging->file);
+  atomic_fetch_add(&g_pf_flush_events, 1);
+  return fsync((int)staging->parent) == 0;
+#endif
+}
+
+bool platform_private_staging_retire(struct platform_private_staging *staging) {
+  if (!staging || staging->parent == UINTPTR_MAX ||
+      staging->file.native == UINTPTR_MAX) return false;
+#if defined(_WIN32)
+  return platform_private_file_retire(&staging->file, NULL) &&
+         platform_private_parent_flush(staging->parent_path);
+#else
+  if (!pf_staging_identity(staging) ||
+      unlinkat((int)staging->parent, staging->leaf, 0) != 0) return false;
+  platform_private_file_close(&staging->file);
+  atomic_fetch_add(&g_pf_flush_events, 1);
+  return fsync((int)staging->parent) == 0;
+#endif
+}

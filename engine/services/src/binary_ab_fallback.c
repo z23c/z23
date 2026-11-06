@@ -76,35 +76,33 @@ bool binary_ab_note_self_respawn_exit(const char *streak_file)
 
 /* ── Promotion (current -> last-good) ───────────────────────────────── */
 
-static bool binary_ab_open_staging(const char *destination,
-                                   char staging[1088],
-                                   struct platform_private_file *output)
+static bool binary_ab_open_staging(const char *parent,
+                                   struct platform_private_staging *staging)
 {
     for (unsigned attempt = 0; attempt < 16; ++attempt) {
         uint8_t nonce[16];
         if (!rng_fill(nonce, sizeof(nonce)))
             LOG_FAIL("binary_ab",
                      "open_staging(%s): no entropy for the staging suffix",
-                     destination);
+                     parent);
         char suffix[2 * sizeof(nonce) + 1];
         for (size_t i = 0; i < sizeof(nonce); ++i)
             (void)snprintf(suffix + 2 * i, 3, "%02x", nonce[i]);
-        int n = snprintf(staging, 1088, "%s.tmp.%s", destination, suffix);
-        if (n <= 0 || n >= 1088)
+        char leaf[64];
+        int n = snprintf(leaf, sizeof(leaf), "%s.tmp.%s",
+                         BINARY_AB_LASTGOOD_BASENAME, suffix);
+        if (n <= 0 || (size_t)n >= sizeof(leaf))
             return false;
-        if (platform_private_file_create(staging, output))
+        if (platform_private_staging_create(staging, parent, leaf))
             return true;
     }
     return false;
 }
 
-static bool binary_ab_install_staging(struct platform_private_file *output,
-                                      const char *staging,
-                                      const char *destination,
-                                      const char *parent)
+static bool binary_ab_install_staging(struct platform_private_staging *staging)
 {
-    if (!platform_private_file_mark_executable(output) ||
-        !platform_private_file_flush(output))
+    if (!platform_private_file_mark_executable(&staging->file) ||
+        !platform_private_file_flush(&staging->file))
         return false;
 #ifdef ZCL_TESTING
     if (g_binary_ab_fail_before_promote_rename_once) {
@@ -113,8 +111,8 @@ static bool binary_ab_install_staging(struct platform_private_file *output,
         return false;
     }
 #endif
-    return platform_private_file_replace(output, staging, destination) &&
-           platform_private_parent_flush(parent);
+    return platform_private_staging_replace(staging,
+                                            BINARY_AB_LASTGOOD_BASENAME);
 }
 
 static bool binary_ab_copy_stream_to_file(FILE *input,
@@ -138,11 +136,11 @@ static bool binary_ab_copy_stream_to_file(FILE *input,
 }
 
 static void binary_ab_retire_or_close_output(
-    struct platform_private_file *output, const char *staging, bool committed)
+    struct platform_private_staging *staging, bool committed)
 {
-    if (!committed && output->native != (uintptr_t)-1)
-        (void)platform_private_file_retire(output, staging);
-    platform_private_file_close(output);
+    if (!committed && staging->file.native != (uintptr_t)-1)
+        (void)platform_private_staging_retire(staging);
+    platform_private_staging_close(staging);
 }
 
 static bool binary_ab_promote_stream(const char *slots_dir, FILE *input,
@@ -162,13 +160,12 @@ static bool binary_ab_promote_stream(const char *slots_dir, FILE *input,
     if (!platform_private_path_resolve(requested, dst, sizeof(dst), parent,
                                        sizeof(parent)))
         LOG_FAIL("binary_ab", "promote: cannot resolve slots directory");
-    char tmp[1088];
-    struct platform_private_file output;
-    platform_private_file_init(&output);
-    if (!binary_ab_open_staging(dst, tmp, &output))
+    struct platform_private_staging staging;
+    platform_private_staging_init(&staging);
+    if (!binary_ab_open_staging(parent, &staging))
         LOG_FAIL("binary_ab", "promote: cannot create exclusive staging file");
 
-    bool copy_ok = binary_ab_copy_stream_to_file(input, &output);
+    bool copy_ok = binary_ab_copy_stream_to_file(input, &staging.file);
     if (ferror(input)) {
         LOG_WARN("binary_ab", "promote: read(%s) failed: %s",
                  source_name, strerror(errno));
@@ -176,8 +173,8 @@ static bool binary_ab_promote_stream(const char *slots_dir, FILE *input,
     }
 
     if (copy_ok)
-        copy_ok = binary_ab_install_staging(&output, tmp, dst, parent);
-    binary_ab_retire_or_close_output(&output, tmp, copy_ok);
+        copy_ok = binary_ab_install_staging(&staging);
+    binary_ab_retire_or_close_output(&staging, copy_ok);
     if (!copy_ok)
         return false;
     LOG_INFO("binary_ab", "promoted current binary to last-good slot (%s)", dst);
@@ -215,25 +212,25 @@ bool binary_ab_promote(const char *slots_dir, const char *current_path)
                  current_path);
         ok = false;
     }
-    char requested[1024], dst[1024], parent[1024], tmp[1088];
+    char requested[1024], dst[1024], parent[1024];
     int requested_len = snprintf(requested, sizeof(requested), "%s/%s",
                                  slots_dir, BINARY_AB_LASTGOOD_BASENAME);
     ok = binary_ab_lastgood_request_ok(ok, requested, requested_len, dst,
                                        parent);
-    struct platform_private_file output;
-    platform_private_file_init(&output);
-    if (ok) ok = binary_ab_open_staging(dst, tmp, &output);
+    struct platform_private_staging staging;
+    platform_private_staging_init(&staging);
+    if (ok) ok = binary_ab_open_staging(parent, &staging);
     unsigned char buf[BINARY_AB_COPY_CHUNK];
     for (uint64_t offset = 0; ok && offset < size;) {
         size_t chunk = size - offset > sizeof(buf) ? sizeof(buf) :
                        (size_t)(size - offset);
         int64_t read = platform_positioned_file_read(&input, buf, chunk, offset);
         ok = read == (int64_t)chunk &&
-             platform_private_file_write_at(&output, buf, chunk, offset);
+             platform_private_file_write_at(&staging.file, buf, chunk, offset);
         offset += chunk;
     }
-    if (ok) ok = binary_ab_install_staging(&output, tmp, dst, parent);
-    binary_ab_retire_or_close_output(&output, tmp, ok);
+    if (ok) ok = binary_ab_install_staging(&staging);
+    binary_ab_retire_or_close_output(&staging, ok);
     platform_positioned_file_close(&input);
     return ok;
 }

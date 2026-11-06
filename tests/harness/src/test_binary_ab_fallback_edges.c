@@ -30,10 +30,12 @@
 #include "services/binary_ab_fallback.h"
 #include "base/log_level.h"
 #include "util/blocker.h"
+#include "platform/private_file.h"
 
 #if !defined(_WIN32)
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -434,8 +436,136 @@ static int ae_long_lastgood(const char *mut, const char *cur)
     snprintf(dst, sizeof(dst), "%s/%s", deep, BINARY_AB_LASTGOOD_BASENAME);
     AE_CHECK("a 1023-byte last-good path is accepted and written whole",
              ok && ae_text_is(dst, "LONG-PATH"));
+    binary_ab_test_fail_before_promote_rename_once();
+    AE_CHECK("long last-good survives failed replacement",
+             ae_write_str(cur, "REPLACEMENT", 0755) &&
+             !binary_ab_promote(deep, cur) && ae_text_is(dst, "LONG-PATH"));
+    ae_scan(deep, &entries, &staging);
+    AE_CHECK("long failed replacement leaves only last-good",
+             entries == 1 && staging == 0);
     (void)unlink(dst);
     ae_rm_nested(mut, deep);
+    return failures;
+}
+
+static int ae_staging_beyond_path_max(const char *parent, char *path, size_t cap)
+{
+    int failures = 0;
+    const char *leaf = "last-good.tmp.0123456789abcdef0123456789abcdef";
+    snprintf(path, cap, "%s/last-good", parent);
+    AE_CHECK("seed old last-good below native path limit",
+             ae_write_str(path, "OLD", 0755));
+    snprintf(path, cap, "%s/%s", parent, leaf);
+    struct platform_private_file old;
+    platform_private_file_init(&old);
+    errno = 0;
+    bool old_created = platform_private_file_create(path, &old);
+    AE_CHECK("old full staging pathname exceeds the actual OS limit",
+             !old_created && errno == ENAMETOOLONG);
+    if (old_created) (void)platform_private_file_retire(&old, path);
+    platform_private_file_close(&old);
+
+    struct platform_private_staging staging;
+    platform_private_staging_init(&staging);
+    bool created = platform_private_staging_create(&staging, parent, leaf);
+    AE_CHECK("parent-relative staging creates beyond full-path limit", created);
+    bool installed = created &&
+        platform_private_file_write_at(&staging.file, "NEW", 3, 0) &&
+        platform_private_file_mark_executable(&staging.file) &&
+        platform_private_staging_replace(&staging, "last-good");
+    snprintf(path, cap, "%s/last-good", parent);
+    AE_CHECK("relative replace installs complete executable",
+             installed && ae_text_is(path, "NEW") && access(path, X_OK) == 0);
+    platform_private_staging_close(&staging);
+    created = platform_private_staging_create(&staging, parent, leaf);
+    AE_CHECK("relative cleanup retires staging and preserves last-good",
+             created && platform_private_staging_retire(&staging) &&
+             ae_text_is(path, "NEW"));
+    platform_private_staging_close(&staging);
+    int entries = 0, staged = 0;
+    ae_scan(parent, &entries, &staged);
+    AE_CHECK("no staging name remains after relative cleanup",
+             entries == 1 && staged == 0);
+    (void)unlink(path);
+    return failures;
+}
+
+static int ae_native_path_limit(const char *mut)
+{
+    int failures = 0;
+    long limit = pathconf(mut, _PC_PATH_MAX);
+    AE_CHECK("fixture filesystem reports a bounded path limit",
+             limit > 512 && limit <= 65536);
+    if (limit <= 512 || limit > 65536) return failures;
+    size_t capacity = (size_t)limit + 256;
+    char *parent = calloc(capacity, 1), *path = calloc(capacity, 1);
+    AE_CHECK("allocate real path-limit fixture", parent && path);
+    if (parent && path) {
+        bool built = ae_nested_dir(mut, (size_t)limit - 11, parent, capacity);
+        AE_CHECK("destination fits but old staging exceeds native PATH_MAX", built);
+        if (built) failures += ae_staging_beyond_path_max(parent, path, capacity);
+        ae_rm_nested(mut, parent);
+    }
+    free(parent);
+    free(path);
+    return failures;
+}
+
+static int ae_staging_identity(const char *mut)
+{
+    int failures = 0;
+    struct platform_private_staging staging;
+    platform_private_staging_init(&staging);
+    bool created = platform_private_staging_create(&staging, mut, "identity.tmp");
+    AE_CHECK("create retained staging identity", created);
+    if (!created) return failures;
+    int directory = (int)staging.parent;
+    AE_CHECK("move held staging aside", renameat(directory, staging.leaf,
+                                                directory, "identity-held") == 0);
+    AE_CHECK("missing staging refuses replace and retirement",
+             !platform_private_staging_replace(&staging, "identity-good") &&
+             !platform_private_staging_retire(&staging));
+    int substituted = openat(directory, staging.leaf,
+                             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    AE_CHECK("substitute a distinct regular inode", substituted >= 0);
+    if (substituted >= 0) close(substituted);
+    AE_CHECK("identity substitution refuses replace and retirement",
+             !platform_private_staging_replace(&staging, "identity-good") &&
+             !platform_private_staging_retire(&staging) &&
+             faccessat(directory, staging.leaf, F_OK, 0) == 0);
+    AE_CHECK("restore held identity for exact cleanup",
+             unlinkat(directory, staging.leaf, 0) == 0 &&
+             renameat(directory, "identity-held", directory, staging.leaf) == 0 &&
+             platform_private_staging_retire(&staging));
+    platform_private_staging_close(&staging);
+    return failures;
+}
+
+static int ae_staging_parent_binding(const char *mut)
+{
+    int failures = 0;
+    char parent[1200], moved[1200], installed[1280];
+    snprintf(parent, sizeof(parent), "%s/staging-parent", mut);
+    snprintf(moved, sizeof(moved), "%s/staging-moved", mut);
+    struct platform_private_staging staging;
+    platform_private_staging_init(&staging);
+    bool created = mkdir(parent, 0700) == 0 &&
+        platform_private_staging_create(&staging, parent, "stage.tmp");
+    AE_CHECK("create pinned parent fixture", created);
+    if (!created) return failures;
+    bool rebound = rename(parent, moved) == 0 && mkdir(parent, 0700) == 0;
+    AE_CHECK("replace original parent pathname with a new directory", rebound);
+    AE_CHECK("retained parent installs in original directory after rename",
+             rebound && platform_private_file_write_at(&staging.file, "PIN", 3, 0) &&
+             platform_private_staging_replace(&staging, "last-good"));
+    platform_private_staging_close(&staging);
+    snprintf(installed, sizeof(installed), "%s/last-good", moved);
+    AE_CHECK("installed bytes belong to moved parent", ae_text_is(installed, "PIN"));
+    (void)unlink(installed);
+    snprintf(installed, sizeof(installed), "%s/last-good", parent);
+    AE_CHECK("replacement parent remains untouched", access(installed, F_OK) != 0);
+    (void)rmdir(parent);
+    (void)rmdir(moved);
     return failures;
 }
 
@@ -711,6 +841,9 @@ static int ae_run_cases(const char *mut, const char *cur,
     failures += ae_promote_after_injected_failure(mut, cur, lastgood);
     failures += ae_promote_short_relative(mut);
     failures += ae_long_lastgood(mut, cur);
+    failures += ae_native_path_limit(mut);
+    failures += ae_staging_identity(mut);
+    failures += ae_staging_parent_binding(mut);
     failures += ae_long_streak(mut);
     failures += ae_on_ready_cases(mut, cur, lastgood, streak);
     failures += ae_on_ready_logs(mut);

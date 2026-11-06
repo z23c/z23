@@ -19,6 +19,25 @@ struct platform_private_file_identity {
   uint64_t file;
 };
 
+/* A sibling staging file with its parent retained until close. POSIX namespace
+ * operations use this directory descriptor, never a concatenated pathname.
+ * Windows retains the checked file-handle replacement/retirement semantics.
+ * Initialize before create; close after either replace or retire. A failed
+ * replace may already have renamed if the final directory flush failed. */
+struct platform_private_staging {
+  struct platform_private_file file;
+  uintptr_t parent;
+  char *parent_path; /* Windows only; owned by this object. */
+  char leaf[256];
+};
+void platform_private_staging_init(struct platform_private_staging *staging);
+bool platform_private_staging_create(struct platform_private_staging *staging,
+                                     const char *parent, const char *leaf);
+bool platform_private_staging_replace(struct platform_private_staging *staging,
+                                      const char *destination_leaf);
+bool platform_private_staging_retire(struct platform_private_staging *staging);
+void platform_private_staging_close(struct platform_private_staging *staging);
+
 void platform_private_file_init(struct platform_private_file *file);
 bool platform_private_file_create(const char *path,
                                   struct platform_private_file *file);
