@@ -4914,13 +4914,16 @@ ZCL_COMMAND_READY_COMMAND(
     "tree must still prepare to the parent release's package root. Without "
     "confirm, prepares the saved head and returns the unsigned release body "
     "whose parent is the forked release, the signing digest and a plan_id. "
-    "Sign the digest offline. With that plan_id, signature_hex and "
-    "confirm:true, verifies the signed envelope and publishes it through "
-    "zcode.package.publish.commit. The publisher secret never enters.",
+    "Sign the digest offline, or let the owner sign with their own key via "
+    "zcode package sign (the plan's next names that command). With that "
+    "plan_id, signature_hex and confirm:true, verifies the signed envelope "
+    "and publishes it through zcode.package.publish.commit; with output it "
+    "also writes one .z23share file a friend can receive with no node. The "
+    "publisher secret never enters.",
     ZCL_COMMAND_LIST_BUDGET,
     "zcode,package,share,publish,release,parent,lineage,remix",
     "zcl.zcode_package_share.input.v1", "zcl.zcode_package_share.v1",
-    "dir,datadir,publisher_pubkey,signature_hex,reward_address,day,plan_id,confirm",
+    "dir,datadir,publisher_pubkey,signature_hex,reward_address,day,output,plan_id,confirm",
     "dir,publisher_pubkey",
     "z23 zcode package share --input='{\"dir\":\"/tmp/my-skycombat\",\"publisher_pubkey\":\"<66hex>\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
@@ -4931,6 +4934,95 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_zcode_package_share)
+
+/* The owner's local signer for a copy's share. AUTH_OWNER: MCP refuses it
+ * (MUTATION_REFUSED_OWNER_AUTHORITY), so an agent never signs; the share
+ * plan an agent can run names this command for the human. */
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.sign", "zcode.package", "",
+    "Sign and share a personal copy with your own local publisher key",
+    "Owner-only CLI path of zcode.package.share for people with no offline "
+    "signer. Uses the release key format plugin publish --release-key reads "
+    "(a 32-byte secp256k1 secret) at ~/.z23/zcode_publisher.key, creating it "
+    "0600 on first use, and shows its publisher fingerprint (the 66-hex "
+    "public key the release binds). Without confirm, prepares the saved head "
+    "exactly as share does and returns the plan_id. With that plan_id and "
+    "confirm:true, signs the digest inside the key module, publishes through "
+    "zcode.package.publish.commit and writes one .z23share file (output, "
+    "default <dir>.z23share) with one share line: name, package root, "
+    "publisher fingerprint and file. Nothing is built or executed.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "zcode,package,sign,share,publisher,key,fingerprint,file,friend,remix",
+    "zcl.zcode_package_sign.input.v1", "zcl.zcode_package_sign.v1",
+    "dir,datadir,output,reward_address,day,plan_id,confirm", "dir",
+    "z23 zcode package sign --input='{\"dir\":\"/tmp/my-skycombat\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_zcode_package_sign)
+
+/* ── share by file: verify and receive a .z23share with no node ───────── */
+
+ZCL_COMMAND_BRANCH("zcode.package.bundle", "zcode.package",
+                   "Verify and receive a shared copy as one file",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "zcode.package.bundle.verify", "zcode.package.bundle", "",
+    "Verify a .z23share file and show who signed it",
+    "Reads one share file written by zcode package sign, rebuilds its saved "
+    "tree from the ZVCS source bundle in private scratch and applies the "
+    "publication rules publish.commit applies: release signature, manifest "
+    "root, recipe root and every chunk. Shows the name, package root, "
+    "release id, parent release and the publisher fingerprint. Needs no node "
+    "and keeps nothing; the scratch is removed.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "zcode,package,bundle,share,file,verify,fingerprint,friend,no-node",
+    "zcl.zcode_package_bundle_verify.input.v1",
+    "zcl.zcode_package_bundle_verify.v1",
+    "file", "file",
+    "z23 zcode package bundle verify --input='{\"file\":\"/tmp/skycombat.z23share\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_zcode_package_bundle_verify)
+
+/* AUTH_OWNER: trusting a publisher and root lets the received copy be built
+ * and opened outside the sandbox later (owner decision 11-06), so only the
+ * owner confirms it, never an agent and never automatically. */
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.package.bundle.receive", "zcode.package.bundle", "",
+    "Keep a verified shared copy after confirming its publisher",
+    "Owner-only. Verifies the share file as bundle verify does, then returns "
+    "a plan_id. With that plan_id, confirm:true and trust_publisher and "
+    "trust_root equal to the file's publisher fingerprint and package root, "
+    "keeps the package through zcode.package.publish.commit in the datadir, "
+    "makes a copy beneath the absent destination with zcode.package.fork "
+    "(its fork record names the sender's release, whose envelope names its "
+    "parent) and records the one-time trust confirmation under "
+    "<datadir>/zcode/received. Needs no node; nothing is built or executed.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "zcode,package,bundle,share,file,receive,trust,fingerprint,friend,fork",
+    "zcl.zcode_package_bundle_receive.input.v1",
+    "zcl.zcode_package_bundle_receive.v1",
+    "file,destination,datadir,trust_publisher,trust_root,day,plan_id,confirm",
+    "file,destination",
+    "z23 zcode package bundle receive --input='{\"file\":\"/tmp/skycombat.z23share\",\"destination\":\"/tmp/skycombat-from-a-friend\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_zcode_package_bundle_receive)
 
 /* Adopt is the owner's decision to keep and run one release as their own
  * copy. Fork stays inert and open to agents; adopt is owner authority, so

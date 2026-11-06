@@ -351,12 +351,12 @@ static int zpb_alice_signs(struct zpb_world *w)
     return failures;
 }
 
-static void zpb_receive_input(struct zpb_leaf *l, const struct zpb_world *w,
-                              const char *file, const char *datadir)
+static void zpb_receive_input(struct zpb_leaf *l, const char *file,
+                              const char *datadir, const char *destination)
 {
     zpb_open(l);
     (void)json_push_kv_str(&l->in, "file", file);
-    (void)json_push_kv_str(&l->in, "destination", w->bob_copy);
+    (void)json_push_kv_str(&l->in, "destination", destination);
     (void)json_push_kv_str(&l->in, "datadir", datadir);
     (void)json_push_kv_int(&l->in, "day", ZPB_DAY);
 }
@@ -365,7 +365,7 @@ static void zpb_receive_input(struct zpb_leaf *l, const struct zpb_world *w,
 static bool zpb_receive(struct zpb_leaf *l, const struct zpb_world *w,
                         const char *publisher, const char *root)
 {
-    zpb_receive_input(l, w, w->share_file, w->bob_datadir);
+    zpb_receive_input(l, w->share_file, w->bob_datadir, w->bob_copy);
     if (!zpb_pass("zcode.package.bundle.receive", l))
         return false;
     char plan[65];
@@ -511,7 +511,7 @@ static int zpb_flipped_refused(const struct zpb_world *w)
     int failures = 0;
     TEST("zcode package bundle: a flipped byte is refused and writes nothing") {
         static const long offsets[] = {64, 200, -5};
-        char bad[800], datadir[800];
+        char bad[800], datadir[800], copy[800];
         struct stat st;
         for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
             struct zpb_leaf l;
@@ -526,12 +526,15 @@ static int zpb_flipped_refused(const struct zpb_world *w)
             ASSERT(zpb_exec("zcode.package.bundle.verify", &l));
             ASSERT(zpb_refusal(&l, "BUNDLE_REFUSED"));
             zpb_close(&l);
-            zpb_receive_input(&l, w, bad, datadir);
+            (void)snprintf(copy, sizeof(copy), "%s/bob/never-%zu", w->root, i);
+            zpb_receive_input(&l, bad, datadir, copy);
+            (void)json_push_kv_str(&l.in, "trust_publisher", w->fingerprint);
+            (void)json_push_kv_str(&l.in, "trust_root", w->shared_package);
             ASSERT(zpb_exec("zcode.package.bundle.receive", &l));
             ASSERT(zpb_refusal(&l, "BUNDLE_REFUSED"));
             zpb_close(&l);
             (void)snprintf(bad, sizeof(bad), "%s/zcode", datadir);
-            ASSERT(stat(bad, &st) != 0);
+            ASSERT(stat(bad, &st) != 0 && stat(copy, &st) != 0);
         }
         PASS();
     } _test_next:;

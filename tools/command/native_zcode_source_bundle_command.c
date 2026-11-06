@@ -81,7 +81,7 @@ static bool zsb_paths_disjoint(const char *left, const char *right)
 #endif
 }
 
-static uint8_t *zsb_read(const char *path, size_t *len_out)
+uint8_t *zcl_native_source_bundle_read(const char *path, size_t *len_out)
 {
     *len_out = 0;
     struct platform_positioned_file file;
@@ -129,8 +129,8 @@ static bool zsb_write_child_exclusive(
 }
 
 #if defined(_WIN32)
-static bool zsb_write_exclusive(const char *path, const uint8_t *bytes,
-                                size_t len)
+bool zcl_native_source_bundle_write_exclusive(const char *path,
+                                              const uint8_t *bytes, size_t len)
 {
     char resolved[ZSB_PATH_MAX], parent[ZSB_PATH_MAX];
     if (!path || !bytes || !platform_private_path_resolve(
@@ -155,8 +155,8 @@ static bool zsb_sync_close(int fd, bool ok)
     return ok;
 }
 
-static bool zsb_write_exclusive(const char *path, const uint8_t *bytes,
-                                size_t len)
+bool zcl_native_source_bundle_write_exclusive(const char *path,
+                                              const uint8_t *bytes, size_t len)
 {
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
                   0400);
@@ -280,7 +280,7 @@ void zcl_native_handle_zcode_source_bundle_create(
     enum vcs_source_bundle_result result = vcs_source_bundle_create(
         workspace, root, &wire, &wire_len, &metrics);
     if (result != VCS_SOURCE_BUNDLE_OK ||
-        !zsb_write_exclusive(output, wire, wire_len)) {
+        !zcl_native_source_bundle_write_exclusive(output, wire, wire_len)) {
         free(wire);
         zsb_fail(reply, result == VCS_SOURCE_BUNDLE_OK
                             ? "SOURCE_BUNDLE_OUTPUT_REFUSED"
@@ -303,7 +303,7 @@ void zcl_native_handle_zcode_source_bundle_verify(
     const char *bundle = zsb_str(request->input, "bundle");
     uint8_t root[32];
     size_t wire_len = 0;
-    uint8_t *wire = bundle ? zsb_read(bundle, &wire_len) : NULL;
+    uint8_t *wire = bundle ? zcl_native_source_bundle_read(bundle, &wire_len) : NULL;
     struct vcs_source_bundle_metrics metrics;
     enum vcs_source_bundle_result result = wire && zsb_root(request->input, root)
         ? vcs_source_bundle_verify(wire, wire_len, root, &metrics)
@@ -335,7 +335,7 @@ void zcl_native_handle_zcode_source_bundle_import(
         return;
     }
     size_t wire_len = 0;
-    uint8_t *wire = zsb_read(bundle, &wire_len);
+    uint8_t *wire = zcl_native_source_bundle_read(bundle, &wire_len);
     struct vcs_source_bundle_metrics metrics;
     enum vcs_source_bundle_result result = wire
         ? vcs_source_bundle_import(wire, wire_len, root, workspace_real,
@@ -374,7 +374,7 @@ static enum vcs_source_bundle_result zsb_checkout_import(
     struct vcs_source_bundle_metrics *metrics)
 {
     size_t wire_len = 0;
-    uint8_t *wire = zsb_read(bundle, &wire_len);
+    uint8_t *wire = zcl_native_source_bundle_read(bundle, &wire_len);
     enum vcs_source_bundle_result result = wire
         ? vcs_source_bundle_import(wire, wire_len, root, workspace_real,
                                    metrics)

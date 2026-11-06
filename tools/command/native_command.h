@@ -534,6 +534,14 @@ struct zcl_native_local_publication {
 void zcl_native_zcode_local_publication_commit(
     const struct zcl_native_local_publication *publication,
     struct zcl_command_reply *reply);
+/* zcode.workspace.source.bundle file I/O (native_zcode_source_bundle_command.c),
+ * shared with the .z23share leaves: a stable read of one non-empty regular
+ * file of at most 64 MiB (caller frees; NULL on refusal), and an exclusive
+ * no-follow create of a new file, flushed before it reports success. */
+uint8_t *zcl_native_source_bundle_read(const char *path, size_t *len_out);
+bool zcl_native_source_bundle_write_exclusive(const char *path,
+                                              const uint8_t *bytes,
+                                              size_t len);
 /* Owner-signed public work cards (tools/command/native_work_command.c),
  * bound by engine/composition/commands/work.def. */
 /* The one-file lab (tools/command/native_lab_command.c and

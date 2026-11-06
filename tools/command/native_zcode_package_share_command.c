@@ -8,17 +8,28 @@
  * existing vcs_package_prepare derives the manifest, recipe and unsigned
  * release there. The fork record is checked first: the recorded fork tree
  * must prepare to the parent release's own package root. The publisher
- * secret never enters; the caller signs the returned digest offline and the
- * signed envelope goes through zcl_native_zcode_local_publication_commit,
- * the same lifecycle zcode.package.publish.commit uses. */
+ * secret never enters share; the caller signs the returned digest offline and
+ * the signed envelope goes through zcl_native_zcode_local_publication_commit,
+ * the same lifecycle zcode.package.publish.commit uses.
+ *
+ * zcode.package.sign is the same flow for an owner with no offline signer:
+ * an AUTH_OWNER leaf (MCP refuses it, so an agent never signs) that signs
+ * with the owner's own release key file, the format plugin publish
+ * --release-key reads, kept at ~/.z23/zcode_publisher.key and made 0600 on
+ * first use. Signing happens inside plugin_dist_release_key_sign; the secret
+ * never reaches this file. Either confirm can also write one .z23share file
+ * (native_zcode_package_bundle.h) that a friend receives with no node. */
 
 #include "command/native_command.h"
+#include "command/native_zcode_package_bundle.h"
 #include "command/native_zcode_package_copy.h"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/temp_directory.h"
+#include "plugin/plugin_dist.h"
+#include "plugin/plugin_pack.h"
 #include "util/file_tree_ops.h"
 #include "vcs/package_accept.h"
 #include "vcs/package_prepare.h"
@@ -30,8 +41,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define ZPS_PATH_MAX 4400
+#define ZPS_KEY_LEAF "zcode_publisher.key"
 
 /* ── persisted releases ─────────────────────────────────────────────── */
 
@@ -157,6 +170,12 @@ bool zcl_package_copy_lineage_releases(const char *datadir,
 struct zps_share {
     const struct json_value *input;
     struct zcl_command_reply *reply;
+    const char *command;
+    bool local_key;
+    bool key_created;
+    char key_path[ZPS_PATH_MAX];
+    const char *output;
+    char output_buf[ZPS_PATH_MAX];
     const char *dir;
     const char *datadir;
     struct zcl_package_copy copy;
@@ -171,6 +190,7 @@ struct zps_share {
 };
 
 static const char k_zps_command[] = "zcode.package.share";
+static const char k_zps_sign[] = "zcode.package.sign";
 
 static void zps_scratch_remove(char scratch[PLATFORM_TEMP_PATH_MAX])
 {
@@ -205,29 +225,97 @@ static bool zps_prepare_tree(struct zps_share *s, const uint8_t tree[32],
     return true;
 }
 
-static bool zps_inputs(struct zps_share *s)
+static bool zps_pubkey_input(struct zps_share *s)
 {
     const char *pubkey = zcl_package_copy_str(s->input, "publisher_pubkey");
-    s->dir = zcl_package_copy_str(s->input, "dir");
-    s->datadir = zcl_package_copy_datadir(s->input, s->reply, k_zps_command);
-    if (!s->datadir)
-        return false;
-    if (!pubkey || !zcl_hex_decode(pubkey, s->options.publisher_pubkey,
-                                   VCS_PACKAGE_RELEASE_PUBKEY_BYTES)) {
-        zcl_package_copy_fail(s->reply, "BAD_PUBLISHER_PUBKEY", false,
-                              "publisher_pubkey must be 66 hex characters",
-                              k_zps_command);
+    if (pubkey && zcl_hex_decode(pubkey, s->options.publisher_pubkey,
+                                 VCS_PACKAGE_RELEASE_PUBKEY_BYTES))
+        return true;
+    zcl_package_copy_fail(s->reply, "BAD_PUBLISHER_PUBKEY", false,
+                          "publisher_pubkey must be 66 hex characters",
+                          s->command);
+    return false;
+}
+
+/* The share file goes to output, or for sign to <dir>.z23share beside the
+ * copy; an existing path is refused before anything is signed. */
+static bool zps_output(struct zps_share *s)
+{
+    struct stat st;
+    size_t len = strlen(s->dir);
+    while (len > 1 && s->dir[len - 1] == '/')
+        len--;
+    s->output = zcl_package_copy_str(s->input, "output");
+    if (!s->output && s->local_key) {
+        int n = snprintf(s->output_buf, sizeof(s->output_buf), "%.*s%s",
+                         (int)len, s->dir, ZCL_PACKAGE_BUNDLE_SUFFIX);
+        s->output = n > 0 && (size_t)n < sizeof(s->output_buf)
+                        ? s->output_buf : NULL;
+    }
+    if (s->local_key && !s->output) {
+        zcl_package_copy_fail(s->reply, "BAD_OUTPUT", false,
+                              "name the share file with output", s->dir);
         return false;
     }
+    if (s->output && stat(s->output, &st) == 0) {
+        zcl_package_copy_fail(s->reply, "OUTPUT_EXISTS", false,
+                              "the share file is written to a new path; "
+                              "name another output", s->output);
+        return false;
+    }
+    return true;
+}
+
+static bool zps_inputs(struct zps_share *s)
+{
+    s->dir = zcl_package_copy_str(s->input, "dir");
+    s->datadir = zcl_package_copy_datadir(s->input, s->reply, s->command);
+    if (!s->datadir || (!s->local_key && !zps_pubkey_input(s)))
+        return false;
     if (!vcs_package_accept_chain_id(s->chain_id, sizeof(s->chain_id))) {
         zcl_package_copy_fail(s->reply, "NO_CHAIN", false,
-                              "no active chain is selected", k_zps_command);
+                              "no active chain is selected", s->command);
         return false;
     }
     s->options.chain_id = s->chain_id;
     s->options.reward_address =
         zcl_package_copy_str(s->input, "reward_address");
-    return zcl_package_copy_open(s->dir, &s->copy, s->reply, k_zps_command);
+    return zcl_package_copy_open(s->dir, &s->copy, s->reply, s->command) &&
+           zps_output(s);
+}
+
+/* The owner's publisher key: the release key file plugin publish
+ * --release-key reads, under ~/.z23 and made 0600 on first use the way
+ * plugin dev makes its key. Only its public key is read here. */
+static bool zps_local_key(struct zps_share *s)
+{
+    char store[ZPS_PATH_MAX], made_hex[PLUGIN_HEX_PUBLIC_KEY + 1];
+    struct plugin_dist_published why;
+    const char *home = getenv("HOME");
+    int n = home && home[0] == '/'
+                ? snprintf(store, sizeof(store), "%s/.z23", home) : -1;
+    int m = n > 0 && (size_t)n < sizeof(store)
+                ? snprintf(s->key_path, sizeof(s->key_path), "%s/%s", store,
+                           ZPS_KEY_LEAF)
+                : -1;
+    if (m <= 0 || (size_t)m >= sizeof(s->key_path) ||
+        !zcl_mkdir_p(store, 0700).ok) {
+        zcl_package_copy_fail(s->reply, "PUBLISHER_KEY_UNAVAILABLE", false,
+                              "HOME must be an absolute directory where "
+                              "~/.z23 can hold the owner's key", s->command);
+        return false;
+    }
+    enum plugin_status made = plugin_keygen(s->key_path, made_hex);
+    s->key_created = made == PLUGIN_OK;
+    if ((made == PLUGIN_OK || made == PLUGIN_ERR_KEY_EXISTS) &&
+        plugin_dist_release_key_sign(s->key_path, NULL,
+                                     s->options.publisher_pubkey, NULL,
+                                     &why) == PLUGIN_DIST_OK)
+        return true;
+    zcl_package_copy_fail(s->reply, "PUBLISHER_KEY_REFUSED", false,
+                          "the owner's publisher key must be a private "
+                          "(0600) 32-byte key file", s->key_path);
+    return false;
 }
 
 /* Saved, changed, and the recorded parent is a persisted, valid release. */
@@ -346,13 +434,44 @@ static void zps_describe(struct zps_share *s, const char *stage)
                            (int64_t)s->prepared.release.publisher_sequence);
 }
 
+/* The one command the owner runs next: sign confirms its own plan; a share
+ * plan (which an agent may run) names the owner's local signer. */
+static void zps_next(struct zps_share *s)
+{
+    char next[ZPS_PATH_MAX * 2u + 512u], plan[65];
+    zcl_hex_encode(s->release_id, 32, plan);
+    if (s->local_key)
+        (void)snprintf(next, sizeof(next),
+                       "check the name, version and publisher fingerprint, "
+                       "then: z23 zcode package sign --input='{\"dir\":\"%s\","
+                       "\"output\":\"%s\",\"plan_id\":\"%s\","
+                       "\"confirm\":true}'", s->dir, s->output, plan);
+    else
+        (void)snprintf(next, sizeof(next),
+                       "sign signing_digest offline, then repeat with "
+                       "plan_id, signature_hex and confirm:true; or the "
+                       "owner (never an agent) signs with their own local "
+                       "key: z23 zcode package sign --input='{\"dir\":\"%s\"}'",
+                       s->dir);
+    (void)json_push_kv_str(&s->reply->data, "next", next);
+}
+
+static void zps_push_fingerprint(struct zps_share *s)
+{
+    char fingerprint[VCS_PACKAGE_RELEASE_PUBKEY_BYTES * 2u + 1u];
+    zcl_hex_encode(s->options.publisher_pubkey,
+                   VCS_PACKAGE_RELEASE_PUBKEY_BYTES, fingerprint);
+    (void)json_push_kv_str(&s->reply->data, "publisher_fingerprint",
+                           fingerprint);
+}
+
 static void zps_plan_reply(struct zps_share *s)
 {
     char *body = zcl_malloc(s->prepared.release_body_len * 2u + 1u,
                             "zcode.package.share.body");
     if (!body) {
         zcl_package_copy_fail(s->reply, "ALLOC", false,
-                              "release body buffer", k_zps_command);
+                              "release body buffer", s->command);
         return;
     }
     zcl_hex_encode(s->prepared.release_body, s->prepared.release_body_len,
@@ -363,29 +482,78 @@ static void zps_plan_reply(struct zps_share *s)
     zcl_package_copy_push_root(&s->reply->data, "signing_digest",
                                s->release_id);
     (void)json_push_kv_str(&s->reply->data, "release_body_hex", body);
-    (void)json_push_kv_str(&s->reply->data, "next",
-                           "sign signing_digest offline, then repeat with "
-                           "plan_id, signature_hex and confirm:true");
+    zps_push_fingerprint(s);
+    if (s->local_key) {
+        (void)json_push_kv_str(&s->reply->data, "key_path", s->key_path);
+        (void)json_push_kv_bool(&s->reply->data, "key_created",
+                                s->key_created);
+    }
+    if (s->output)
+        (void)json_push_kv_str(&s->reply->data, "output", s->output);
+    zps_next(s);
     free(body);
+}
+
+/* A local signature from the owner's key, or the offline signature_hex. */
+static bool zps_signature(struct zps_share *s, uint8_t *signature)
+{
+    uint8_t pubkey[VCS_PACKAGE_RELEASE_PUBKEY_BYTES];
+    struct plugin_dist_published why;
+    if (!s->local_key) {
+        const char *hex = zcl_package_copy_str(s->input, "signature_hex");
+        return hex && zcl_hex_decode(hex, signature,
+                                     VCS_PACKAGE_RELEASE_SIGNATURE_BYTES);
+    }
+    return plugin_dist_release_key_sign(s->key_path, s->release_id, pubkey,
+                                        signature, &why) == PLUGIN_DIST_OK &&
+           memcmp(pubkey, s->options.publisher_pubkey, sizeof(pubkey)) == 0;
 }
 
 static bool zps_signed_wire(struct zps_share *s, uint8_t **wire,
                             size_t *wire_len)
 {
-    const char *hex = zcl_package_copy_str(s->input, "signature_hex");
     struct vcs_package_release *r = &s->prepared.release;
-    if (!hex || !zcl_hex_decode(hex, r->signature,
-                                VCS_PACKAGE_RELEASE_SIGNATURE_BYTES) ||
+    if (!zps_signature(s, r->signature) ||
         vcs_package_release_verify(r) != VCS_PACKAGE_RELEASE_OK ||
         vcs_package_release_serialize(r, wire, wire_len) !=
             VCS_PACKAGE_RELEASE_OK) {
         zcl_package_copy_fail(s->reply, "SHARE_SIGNATURE_INVALID", false,
-                              "signature_hex must be the publisher's compact "
-                              "low-S signature over signing_digest",
-                              k_zps_command);
+                              s->local_key
+                                  ? "the owner's local key did not give a "
+                                    "valid signature over signing_digest"
+                                  : "signature_hex must be the publisher's "
+                                    "compact low-S signature over "
+                                    "signing_digest",
+                              s->local_key ? s->key_path : s->command);
         return false;
     }
     return true;
+}
+
+/* One .z23share file and the one share line a friend needs. */
+static void zps_share_file(struct zps_share *s, const uint8_t *wire,
+                           size_t wire_len)
+{
+    const struct zcl_package_bundle_wires wires = {
+        .release = wire, .release_len = wire_len,
+        .manifest = s->prepared.manifest_wire,
+        .manifest_len = s->prepared.manifest_wire_len,
+        .recipe = s->prepared.recipe_wire,
+        .recipe_len = s->prepared.recipe_wire_len,
+    };
+    char line[ZPS_PATH_MAX + 512u], root[65], fingerprint[67];
+    if (!zcl_package_bundle_write(s->output, s->dir, s->copy.head_tree,
+                                  &wires, s->reply))
+        return;
+    zcl_hex_encode(s->prepared.package_root, 32, root);
+    zcl_hex_encode(s->options.publisher_pubkey,
+                   VCS_PACKAGE_RELEASE_PUBKEY_BYTES, fingerprint);
+    (void)snprintf(line, sizeof(line),
+                   "share %s %s root=%s publisher=%s file=%s",
+                   s->prepared.release.name, s->prepared.release.semver,
+                   root, fingerprint, s->output);
+    (void)json_push_kv_str(&s->reply->data, "share_file", s->output);
+    (void)json_push_kv_str(&s->reply->data, "share_line", line);
 }
 
 static void zps_commit(struct zps_share *s)
@@ -393,7 +561,7 @@ static void zps_commit(struct zps_share *s)
     uint8_t *wire = NULL;
     size_t wire_len = 0;
     if (!zcl_package_copy_plan_matches(s->input, s->release_id, s->reply,
-                                       k_zps_command) ||
+                                       s->command) ||
         !zps_signed_wire(s, &wire, &wire_len))
         return;
     const struct json_value *day = json_get(s->input, "day");
@@ -407,32 +575,46 @@ static void zps_commit(struct zps_share *s)
         .has_day = day != NULL, .day = day ? json_get_int(day) : 0,
     };
     zcl_native_zcode_local_publication_commit(&publication, s->reply);
+    if (s->reply->status == ZCL_COMMAND_STATUS_PASSED) {
+        zcl_package_copy_push_root(&s->reply->data, "parent_release_root",
+                                   s->parent_id);
+        zcl_package_copy_push_root(&s->reply->data, "parent_package_root",
+                                   s->parent.package_root);
+        zcl_package_copy_push_root(&s->reply->data, "version",
+                                   s->copy.head_version);
+        zps_push_fingerprint(s);
+        if (s->output)
+            zps_share_file(s, wire, wire_len);
+    }
     free(wire);
-    if (s->reply->status != ZCL_COMMAND_STATUS_PASSED)
-        return;
-    zcl_package_copy_push_root(&s->reply->data, "parent_release_root",
-                               s->parent_id);
-    zcl_package_copy_push_root(&s->reply->data, "parent_package_root",
-                               s->parent.package_root);
-    zcl_package_copy_push_root(&s->reply->data, "version",
-                               s->copy.head_version);
 }
 
-void zcl_native_handle_zcode_package_share(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+/* Everything both plan and confirm re-derive, in order. */
+static bool zps_ready(struct zps_share *s)
+{
+    return zps_inputs(s) && zps_admit(s) &&
+           (!s->local_key || zps_local_key(s)) && zps_fork_untampered(s) &&
+           zps_next_sequence(s) && zps_prepare_head(s);
+}
+
+/* share (offline signature) and sign (the owner's local key) differ only in
+ * where the publisher key and signature come from. */
+static void zps_run(const struct zcl_command_request *request,
+                    struct zcl_command_reply *reply, const char *command,
+                    bool local_key)
 {
     if (!request || !reply)
         return;
-    struct zps_share *s = zcl_calloc(1, sizeof(*s), "zcode.package.share");
+    struct zps_share *s = zcl_calloc(1, sizeof(*s), command);
     if (!s) {
-        zcl_package_copy_fail(reply, "ALLOC", false, "share state",
-                              k_zps_command);
+        zcl_package_copy_fail(reply, "ALLOC", false, "share state", command);
         return;
     }
     s->input = request->input;
     s->reply = reply;
-    if (zps_inputs(s) && zps_admit(s) && zps_fork_untampered(s) &&
-        zps_next_sequence(s) && zps_prepare_head(s)) {
+    s->command = command;
+    s->local_key = local_key;
+    if (zps_ready(s)) {
         if (zcl_package_copy_confirmed(s->input))
             zps_commit(s);
         else
@@ -443,4 +625,16 @@ void zcl_native_handle_zcode_package_share(
     zps_scratch_remove(s->scratch);
     zcl_package_copy_close(&s->copy);
     free(s);
+}
+
+void zcl_native_handle_zcode_package_share(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zps_run(request, reply, k_zps_command, false);
+}
+
+void zcl_native_handle_zcode_package_sign(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    zps_run(request, reply, k_zps_sign, true);
 }
