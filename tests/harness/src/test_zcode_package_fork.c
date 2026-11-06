@@ -94,8 +94,8 @@ static bool zpf_run(const char *path, struct zpf_call *c)
     /* The CLI and MCP serialize the reply under the leaf's budget; keep a
      * margin for the result envelope around `data`. */
     size_t data_bytes = json_write(&c->reply.data, NULL, 0);
-    if (spec->budget_bytes && data_bytes + ZPF_ENVELOPE_MARGIN >
-                                  spec->budget_bytes) {
+    size_t budget = (size_t)spec->budget_bytes;
+    if (budget && data_bytes + ZPF_ENVELOPE_MARGIN > budget) {
         printf("  [%s reply %zu bytes over budget %zu]\n", path, data_bytes,
                (size_t)spec->budget_bytes);
         return false;

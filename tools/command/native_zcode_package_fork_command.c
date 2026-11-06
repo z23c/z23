@@ -479,9 +479,9 @@ static size_t zpc_list_limit(const struct json_value *input)
 {
     const struct json_value *v = input ? json_get(input, "limit") : NULL;
     int64_t limit = v ? json_get_int(v) : ZPC_LIST_DEFAULT;
-    if (limit <= 0 || limit > ZPC_LIST_MAX)
-        limit = limit <= 0 ? ZPC_LIST_DEFAULT : ZPC_LIST_MAX;
-    return (size_t)limit;
+    if (limit <= 0)
+        limit = ZPC_LIST_DEFAULT;
+    return (size_t)(limit < ZPC_LIST_MAX ? limit : ZPC_LIST_MAX);
 }
 
 void zcl_native_handle_zcode_package_version_list(
