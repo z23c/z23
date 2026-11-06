@@ -297,6 +297,45 @@ static int fsi_case_fallback_rejoin(struct fsi_node *n)
     return failures;
 }
 
+/* Rows saved relinked to their real parent but loaded with the work they
+ * carried while parentless (their own proofs): the boot's forward pass derives
+ * the rung work from the parent's work and the window's proofs, then the fact
+ * retires. */
+static int fsi_case_relinked_stale(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    bool ok = fsi_node_open(&n, "flysync_relinked") && fsi_node_seed(&n) &&
+              island_anchor_note_fallback(progress_store_db(), "test").ok;
+    FSI_CHECK("relinked fixture opens, seeds and falls back", ok);
+    struct block_index *p = ok ? fsi_redeliver(&n) : NULL;
+    FSI_CHECK("the window relinks to its real parent",
+              p && n.rows[0]->pprev == p);
+    struct arith_uint256 zero;
+    arith_uint256_set_zero(&zero);
+    for (int i = 0; p && i < FSI_W; i++)
+        n.rows[i]->nChainWork = fsi_work_over(zero, n.rows, i + 1);
+    if (p)
+        n.ms.pindex_best_header = fsi_top(&n);
+    FSI_CHECK("loaded with their own proofs, the rows do not carry rung work",
+              p && !fsi_top_work_is_rung(&n));
+    flysync_island_test_reset();
+    struct arith_uint256 want =
+        p ? fsi_work_over(p->nChainWork, n.rows, FSI_W) : n.is.rung_work;
+    struct island_anchor back;
+    bool found = true;
+    FSI_CHECK("the boot pass sets the rung work to the parent's work plus the "
+              "window's proofs, then retires the fact",
+              p && flysync_island_boot_after_index(NULL, &n.ms) &&
+              arith_uint256_compare(&fsi_top(&n)->nChainWork, &want) == 0 &&
+              fsi_top_work_is_rung(&n) &&
+              island_anchor_load(progress_store_db(), &back, &found).ok &&
+              !found);
+    fsi_release_globals();
+    fsi_node_close(&n);
+    return failures;
+}
+
 /* A fallen-back datadir whose root row never reached the index: rows 1..27
  * load linked to each other, row 1 parentless, with real work. */
 static bool fsi_listonly_load(struct fsi_node *n)
@@ -436,6 +475,7 @@ int fsi_fallback_cases(struct fsi_node *n)
 int fsi_state_cases(void)
 {
     int failures = 0;
+    failures += fsi_case_relinked_stale();
     failures += fsi_case_listonly();
     failures += fsi_case_state_fresh();
     failures += fsi_case_state_unreadable();
