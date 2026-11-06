@@ -798,6 +798,22 @@ static void fsi_request_respawn(void)
 #endif
 }
 
+/* A fall-back deferred on an unreadable island state: the tick retries every
+ * pass, so log one line per FSI_UNREADABLE_LOG_MS, not one per tick. */
+#define FSI_UNREADABLE_LOG_MS INT64_C(60000)
+static _Atomic int64_t g_deferred_logged_ms = 0;
+
+static void fsi_log_deferred(const char *why)
+{
+    int64_t now = fsi_now_ms();
+    int64_t last = atomic_load(&g_deferred_logged_ms);
+    if (last != 0 && now - last < FSI_UNREADABLE_LOG_MS)
+        return;
+    atomic_store(&g_deferred_logged_ms, now);
+    LOG_ERROR(FSI_SUBSYS, "fall-back deferred, the island state is unreadable "
+              "(it may be installed): %s", why);
+}
+
 /* Order: the durable FELL_BACK first, then the in-memory detach, then the
  * phase (which lifts the hold), then the restart. A crash after the first
  * step is finished by the next boot's detach (flysync_island_boot_after_index).
@@ -816,8 +832,7 @@ static void fsi_fall_back_at(struct main_state *ms, const char *why,
     if (st == ISLAND_ANCHOR_STATE_UNREADABLE) {
         /* Never decide on an unreadable state: stay held, the next tick (or
          * the next boot) reads it again. */
-        LOG_ERROR(FSI_SUBSYS, "fall-back deferred, the island state is "
-                  "unreadable (it may be installed): %s", why);
+        fsi_log_deferred(why);
         return;
     }
     struct island_anchor a;
@@ -1142,6 +1157,7 @@ void flysync_island_test_reset(void)
     atomic_store(&g_fetch_chunks_seen, 0);
     atomic_store(&g_fetch_moved_ms, 0);
     atomic_store(&g_fetch_started_ms, 0);
+    atomic_store(&g_deferred_logged_ms, 0);
     island_anchor_unregister();
 }
 
