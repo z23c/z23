@@ -35,6 +35,7 @@
 #include "../../../engine/controllers/src/api_controller_internal.h"
 #include "../../../cognition/controllers/src/event_agent_summary_internal.h"
 
+#include <pthread.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +56,11 @@ struct cp_shape {
     bool seed_floor;      /* external-seed floor (any bundle install) */
     int64_t history_cursor; /* anchor + nullifier activation cursor */
     int32_t baked_height; /* compiled ROM commitment height */
+    int stamp_kind;       /* install authority stamp; 0 = none written */
+    int32_t stamp_height; /* stamp height; 0 = CP_HEIGHT */
+    bool stamp_root_mismatch; /* stamp a UTXO root the ROM does not hold */
+    int32_t first_floor;  /* a floor declared earlier (kept first); 0 = none */
+    int32_t applied_skew; /* coins_applied_height = CP_HEIGHT + 1 + skew */
 };
 
 struct cp_fixture {
@@ -90,6 +96,21 @@ static bool cp_seed_schema(sqlite3 *pdb, int64_t cursor)
                         sizeof(script));
 }
 
+/* The authority stamp the activate writes, bound to the compiled ROM
+ * (cp_fill_rom) unless the shape asks for a mismatched root. */
+static bool cp_seed_stamp(sqlite3 *pdb, const struct cp_shape *shape)
+{
+    if (!shape->stamp_kind)
+        return true;
+    struct consensus_state_install_stamp st = {
+        .kind = (enum consensus_state_install_stamp_kind)shape->stamp_kind,
+        .height = shape->stamp_height ? shape->stamp_height : CP_HEIGHT,
+    };
+    memset(st.block_hash, 0x21, 32);
+    memset(st.utxo_root, shape->stamp_root_mismatch ? 0x99 : 0x22, 32);
+    return consensus_state_install_record_authority_stamp(pdb, &st);
+}
+
 /* The activate's tier markers, in one transaction under the store lock. */
 static bool cp_seed_markers(sqlite3 *pdb, const struct cp_shape *shape)
 {
@@ -100,14 +121,19 @@ static bool cp_seed_markers(sqlite3 *pdb, const struct cp_shape *shape)
     bool ok = sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
     ok = ok && progress_meta_set_in_tx(pdb, COINS_KV_MIGRATION_COMPLETE_KEY,
                                        &one, 1) &&
-         coins_kv_set_applied_height_in_tx(pdb, CP_HEIGHT + 1);
+         coins_kv_set_applied_height_in_tx(pdb,
+                                           CP_HEIGHT + 1 + shape->applied_skew);
     if (ok && shape->self_folded)
         ok = progress_meta_set_in_tx(pdb, COINS_KV_SELF_FOLDED_KEY, &one, 1);
     if (ok && shape->assisted_seam)
         ok = consensus_state_install_record_assisted_seam(pdb, CP_HEIGHT, root,
                                                           root, root);
+    if (ok && shape->first_floor)
+        ok = reducer_seed_floor_declare_if_absent(pdb, shape->first_floor);
     if (ok && shape->seed_floor)
         ok = reducer_seed_floor_declare_if_absent(pdb, CP_HEIGHT);
+    if (ok)
+        ok = cp_seed_stamp(pdb, shape);
     ok = sqlite3_exec(pdb, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) ==
              SQLITE_OK && ok;
     progress_store_tx_unlock();
@@ -196,6 +222,16 @@ static bool cp_agent_rung_stops(const struct agent_security_posture *p)
            reason != ZCL_STATUS_REASON_NONE;
 }
 
+/* /health and healthcheck on a node whose own health is green: the HTTP code
+ * follows public serving; local readiness is a body field. */
+static struct api_health_flags cp_health_flags(const struct agent_security_posture *p)
+{
+    struct node_health_snapshot health = {0};
+    health.serving = true;
+    health.healthy = true;
+    return api_health_flags(&health, p, NULL);
+}
+
 static bool cp_spend_allowed(void)
 {
     char reason[128];
@@ -231,7 +267,7 @@ static int cp_check_trust(const struct agent_security_posture *p)
     CP_CHECK("trust: one plain summary line",
              summary && strcmp(summary,
                  "Ready. Verified from checkpoint 3,200,000 built into this "
-                 "app; background check 0%.") == 0);
+                 "version; background check 0%.") == 0);
     json_free(&root);
     return failures;
 }
@@ -242,6 +278,7 @@ static int case_checkpoint_install_is_verified(void)
     struct cp_fixture fx;
     const struct cp_shape shape = {
         .self_folded = true, .seed_floor = true, .baked_height = CP_HEIGHT,
+        .stamp_kind = CONSENSUS_INSTALL_STAMP_CHECKPOINT_ROM,
     };
     bool ok = cp_open(&fx, "rom", &shape);
     CP_CHECK("rom: sovereign-tier install fixture seeds", ok);
@@ -273,6 +310,14 @@ static int case_checkpoint_install_is_verified(void)
              p.checkpoint_verified && p.checkpoint_height == CP_HEIGHT &&
              agent_security_posture_allows_local_ready(&p) &&
              !agent_security_posture_needs_review(&p));
+    struct api_health_flags hf = cp_health_flags(&p);
+    CP_CHECK("rom: /health stays not-serving (503); local_ready is a body fact",
+             !hf.public_serving && !hf.public_healthy && hf.local_ready);
+    CP_CHECK("rom: one Ready definition for every status surface",
+             agent_security_posture_local_ready(&p, true, true, false) &&
+             !agent_security_posture_local_ready(&p, false, true, false) &&
+             !agent_security_posture_local_ready(&p, true, false, false) &&
+             !agent_security_posture_local_ready(&p, true, true, true));
     failures += cp_check_trust(&p);
     cp_close(&fx);
     return failures;
@@ -307,6 +352,10 @@ static int cp_expect_review(const char *label, const struct cp_shape *shape,
     snprintf(name, sizeof(name), "%s: agent status ladder stops at posture",
              label);
     CP_CHECK(name, cp_agent_rung_stops(&p));
+    struct api_health_flags hf = cp_health_flags(&p);
+    snprintf(name, sizeof(name), "%s: not ready, /health not serving", label);
+    CP_CHECK(name, !hf.public_serving && !hf.public_healthy && !hf.local_ready &&
+                   !agent_security_posture_local_ready(&p, true, true, false));
     snprintf(name, sizeof(name), "%s: spend guard %s (pinned, unchanged)",
              label, want_spend ? "allows" : "refuses");
     CP_CHECK(name, cp_spend_allowed() == want_spend);
@@ -314,22 +363,26 @@ static int cp_expect_review(const char *label, const struct cp_shape *shape,
     return failures;
 }
 
+#define CP_ROM CONSENSUS_INSTALL_STAMP_CHECKPOINT_ROM
+
 static int case_other_installs_stay_reviewed(void)
 {
     int failures = 0;
     const struct cp_shape assisted = {
         .assisted_seam = true, .seed_floor = true, .baked_height = CP_HEIGHT,
+        .stamp_kind = CONSENSUS_INSTALL_STAMP_ASSISTED,
     };
     failures += cp_expect_review("assisted", &assisted,
                                  "review_required_bootstrap_trust", false);
     const struct cp_shape promoted = {
         .self_folded = true, .assisted_seam = true, .seed_floor = true,
-        .baked_height = CP_HEIGHT,
+        .baked_height = CP_HEIGHT, .stamp_kind = CP_ROM,
     };
     failures += cp_expect_review("promoted_assisted", &promoted,
                                  "review_required_bootstrap_trust", true);
     const struct cp_shape unbaked = {
         .self_folded = true, .seed_floor = true, .baked_height = CP_HEIGHT + 1,
+        .stamp_kind = CP_ROM,
     };
     failures += cp_expect_review("unbaked_height", &unbaked,
                                  "review_required_bootstrap_trust", true);
@@ -340,10 +393,135 @@ static int case_other_installs_stay_reviewed(void)
                                  "review_required_bootstrap_trust", true);
     const struct cp_shape gap = {
         .self_folded = true, .seed_floor = true, .baked_height = CP_HEIGHT,
-        .history_cursor = 500,
+        .history_cursor = 500, .stamp_kind = CP_ROM,
     };
     failures += cp_expect_review("anchor_gap", &gap,
                                  "review_required_anchor_backfill_gap", true);
+    return failures;
+}
+
+/* The floor alone never proves a CHECKPOINT_ROM install: it is written by
+ * every authority and by cold import, and it keeps the first declaration.
+ * Only the activate's authority stamp, at the floor and bound to the compiled
+ * commitment, does. Each shape is sovereign, so the spend guard allows. */
+static int case_floor_alone_is_not_rom(void)
+{
+    int failures = 0;
+    const struct cp_shape unstamped = {
+        .self_folded = true, .seed_floor = true, .baked_height = CP_HEIGHT,
+    };
+    failures += cp_expect_review("no_install_stamp", &unstamped,
+                                 "review_required_bootstrap_trust", true);
+    const struct cp_shape receipt = {
+        .self_folded = true, .seed_floor = true, .baked_height = CP_HEIGHT,
+        .stamp_kind = CONSENSUS_INSTALL_STAMP_RECEIPT,
+    };
+    failures += cp_expect_review("receipt_at_baked_height", &receipt,
+                                 "review_required_bootstrap_trust", true);
+    const struct cp_shape content = {
+        .self_folded = true, .seed_floor = true, .baked_height = CP_HEIGHT,
+        .stamp_kind = CONSENSUS_INSTALL_STAMP_CHECKPOINT_CONTENT,
+    };
+    failures += cp_expect_review("content_at_baked_height", &content,
+                                 "review_required_bootstrap_trust", true);
+    const struct cp_shape reinstall = {
+        .self_folded = true, .first_floor = CP_HEIGHT,
+        .baked_height = CP_HEIGHT,
+        .stamp_kind = CONSENSUS_INSTALL_STAMP_RECEIPT,
+        .stamp_height = CP_HEIGHT + 5,
+    };
+    failures += cp_expect_review("stale_floor_then_receipt", &reinstall,
+                                 "review_required_bootstrap_trust", true);
+    const struct cp_shape moved = {
+        .self_folded = true, .first_floor = CP_HEIGHT,
+        .baked_height = CP_HEIGHT, .stamp_kind = CP_ROM,
+        .stamp_height = CP_HEIGHT + 5,
+    };
+    failures += cp_expect_review("stale_floor_rom_elsewhere", &moved,
+                                 "review_required_bootstrap_trust", true);
+    const struct cp_shape mismatch = {
+        .self_folded = true, .seed_floor = true, .baked_height = CP_HEIGHT,
+        .stamp_kind = CP_ROM, .stamp_root_mismatch = true,
+    };
+    failures += cp_expect_review("rom_stamp_root_mismatch", &mismatch,
+                                 "review_required_bootstrap_trust", true);
+    return failures;
+}
+
+/* The spend guard's own trust derivation decides: a borrowed seed with no
+ * seam and no refold marker, or coins applied off H*+1, is not sovereign, so
+ * neither is labeled and spend refuses (pinned). */
+static int case_trust_shapes_stay_reviewed(void)
+{
+    int failures = 0;
+    const struct cp_shape borrowed = {
+        .seed_floor = true, .baked_height = CP_HEIGHT, .stamp_kind = CP_ROM,
+    };
+    failures += cp_expect_review("borrowed_no_seam", &borrowed,
+                                 "review_required_bootstrap_trust", false);
+    const struct cp_shape skewed = {
+        .self_folded = true, .seed_floor = true, .baked_height = CP_HEIGHT,
+        .stamp_kind = CP_ROM, .applied_skew = 1,
+    };
+    failures += cp_expect_review("applied_not_hstar_plus_one", &skewed,
+                                 "review_required_bootstrap_trust", false);
+    return failures;
+}
+
+struct cp_holder {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    bool held;
+    bool release;
+};
+
+static void *cp_hold_progress_lock(void *arg)
+{
+    struct cp_holder *h = arg;
+    progress_store_tx_lock();
+    pthread_mutex_lock(&h->mu);
+    h->held = true;
+    pthread_cond_broadcast(&h->cv);
+    while (!h->release)
+        pthread_cond_wait(&h->cv, &h->mu);
+    pthread_mutex_unlock(&h->mu);
+    progress_store_tx_unlock();
+    return NULL;
+}
+
+/* A busy progress store answers the labeled busy partial: never the
+ * checkpoint label, never a lifted gate. */
+static int case_busy_store_is_not_checkpoint(void)
+{
+    int failures = 0;
+    struct cp_fixture fx;
+    const struct cp_shape shape = {
+        .self_folded = true, .seed_floor = true, .baked_height = CP_HEIGHT,
+        .stamp_kind = CP_ROM,
+    };
+    bool ok = cp_open(&fx, "busy", &shape);
+    CP_CHECK("busy: checkpoint fixture seeds", ok);
+    struct cp_holder h = { .mu = PTHREAD_MUTEX_INITIALIZER,
+                           .cv = PTHREAD_COND_INITIALIZER };
+    pthread_t th;
+    if (ok && pthread_create(&th, NULL, cp_hold_progress_lock, &h) == 0) {
+        pthread_mutex_lock(&h.mu);
+        while (!h.held)
+            pthread_cond_wait(&h.cv, &h.mu);
+        pthread_mutex_unlock(&h.mu);
+        struct agent_security_posture p;
+        agent_security_posture_collect(&p, &fx.ndb);
+        pthread_mutex_lock(&h.mu);
+        h.release = true;
+        pthread_cond_broadcast(&h.cv);
+        pthread_mutex_unlock(&h.mu);
+        pthread_join(th, NULL);
+        CP_CHECK("busy: labeled busy, not checkpoint verified, review kept",
+                 strcmp(p.status, "review_required_progress_store_busy") == 0 &&
+                 !p.checkpoint_verified && p.review_required &&
+                 agent_security_posture_needs_review(&p));
+    }
+    cp_close(&fx);
     return failures;
 }
 
@@ -370,6 +548,9 @@ static int case_genesis_full_history_unchanged(void)
                  !cp_json_has(&p, "\"checkpoint_verified\":true"));
         CP_CHECK("genesis: ladder passes the posture rung",
                  cp_ladder(&p) == ZCL_STATUS_REASON_NONE);
+        struct api_health_flags hf = cp_health_flags(&p);
+        CP_CHECK("genesis: /health serving and healthy, locally ready",
+                 hf.public_serving && hf.public_healthy && hf.local_ready);
     }
     cp_close(&fx);
     return failures;
@@ -420,7 +601,7 @@ static int case_journey_receive_with_trust(void)
         "\"schema\":\"zcl.status_trust.v1\",\"source\":\"checkpoint\","
         "\"checkpoint_height\":3200000,\"history_check\":{\"state\":"
         "\"running\",\"percent\":12},\"ready\":true,\"summary\":\"Ready. "
-        "Verified from checkpoint 3,200,000 built into this app; "
+        "Verified from checkpoint 3,200,000 built into this version; "
         "background check 12%.\"}}";
     static const char wallet[] =
         "{\"persistence\":{\"healthy\":true},\"lock\":{\"encrypted_at_rest\":"
@@ -456,7 +637,7 @@ static int case_journey_receive_with_trust(void)
                  json_get_int(json_get(t, "checkpoint_height")) == CP_HEIGHT &&
                  cp_str_is(json_get(t, "summary"),
                            "Ready. Verified from checkpoint 3,200,000 built "
-                           "into this app; background check 12%."));
+                           "into this version; background check 12%."));
         json_free(&out);
     }
     free(body);
@@ -469,6 +650,9 @@ int test_agent_posture_checkpoint_cases(void)
     failures += case_journey_receive_with_trust();
     failures += case_checkpoint_install_is_verified();
     failures += case_other_installs_stay_reviewed();
+    failures += case_floor_alone_is_not_rom();
+    failures += case_trust_shapes_stay_reviewed();
+    failures += case_busy_store_is_not_checkpoint();
     failures += case_genesis_full_history_unchanged();
     failures += case_soak_verdict_unchanged();
     return failures;

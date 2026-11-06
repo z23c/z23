@@ -73,6 +73,13 @@ bool agent_security_posture_needs_review(
  * checkpoint_verified is true. */
 bool agent_security_posture_allows_local_ready(
     const struct agent_security_posture *posture);
+/* The one definition of "Ready." on every status surface (agent status,
+ * /api/status, /health, healthcheck and the trust summary): the node's own
+ * health is green, it serves its validated frontier, nothing needs an
+ * operator, and the posture allows local use. */
+bool agent_security_posture_local_ready(
+    const struct agent_security_posture *posture, bool healthy, bool serving,
+    bool operator_needed);
 /* The phone-facing trust object (zcl.status_trust.v1): where trust comes from,
  * the checkpoint height, the background check, and one plain summary line.
  * `ready` is the caller's healthy verdict. The background-check percent covers

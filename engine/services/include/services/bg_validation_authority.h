@@ -62,6 +62,32 @@ void bg_validation_note_verified_tip(struct bg_validation_service *svc,
 bool bg_validation_verified_tip(const struct bg_validation_service *svc,
                                 int *height, uint8_t hash[32]);
 
+/* The non-publishing result code of bg_validation_authority_publish for a
+ * node installed from a checkpoint compiled into this binary
+ * (sovereignty_checkpoint_install_locked holds, no snapshot evidence) whose
+ * walk checked every block from the checkpoint to the active tip. It is not
+ * full-history authority: ok stays false so callers keep re-running the
+ * publisher, CEC state and origin are untouched, and no operator is paged.
+ * The predicate is re-evaluated on every pass; once it fails the ordinary
+ * refusal and page return. */
+enum { BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED = 2 };
+
+/* The typed outcome that code reports: blocks first_height..tip_height (the
+ * checkpoint at checkpoint_height is the compiled commitment) were checked,
+ * ending at the active tip whose hash is tip_hash. */
+struct bg_validation_checkpoint_check {
+    int32_t checkpoint_height;
+    int32_t first_height;
+    int32_t tip_height;
+    uint8_t tip_hash[32];
+};
+
+/* Copy the last pass's checkpoint outcome; false when the last pass did not
+ * produce one (or a pass raced the copy). */
+bool bg_validation_checkpoint_check_get(
+    const struct bg_validation_service *svc,
+    struct bg_validation_checkpoint_check *out);
+
 #ifdef ZCL_TESTING
 typedef void (*bg_validation_authority_test_hook_fn)(void);
 /* Runs in the genesis publish after the evidence is judged ready and before

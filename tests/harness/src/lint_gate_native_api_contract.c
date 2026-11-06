@@ -535,6 +535,18 @@ int t_native_agent_api_contract(void)
                != NULL);
         ASSERT(strstr(api_status_buf, "agent_push_readiness_contract_json")
                != NULL);
+        /* readiness.chain_serving_ready keeps its public-serving meaning;
+         * local readiness is its own field, from one shared definition. */
+        ASSERT(strstr(agent_summary_buf, "\"readiness\", public_serving")
+               != NULL);
+        ASSERT(strstr(api_status_buf, "\"readiness\", public_serving")
+               != NULL);
+        ASSERT(strstr(agent_summary_buf, "agent_security_posture_local_ready(")
+               != NULL);
+        ASSERT(strstr(api_status_buf, "agent_security_posture_local_ready(")
+               != NULL);
+        ASSERT(strstr(agent_summary_buf, "\"local_ready\"") != NULL);
+        ASSERT(strstr(api_status_buf, "\"local_ready\"") != NULL);
         ASSERT(strstr(agent_summary_buf,
                       "agent_push_security_posture_snapshot_json") != NULL);
         ASSERT(strstr(api_status_buf, "agent_push_security_posture_json")

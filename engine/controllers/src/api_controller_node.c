@@ -145,21 +145,18 @@ static void api_health_format_public_warning_reasons(
              warning_blocker ? warning_blocker->id : "");
 }
 
-/* Derive the public serving and healthy flags from the health snapshot,
- * the authority blocker, and the agent security posture. */
-static void api_health_public_serving_flags(
+struct api_health_flags api_health_flags(
     const struct node_health_snapshot *health,
-    struct agent_security_posture *posture,
-    const struct blocker_snapshot *authority_blocker,
-    bool *public_serving,
-    bool *public_healthy)
+    const struct agent_security_posture *posture,
+    const struct blocker_snapshot *authority_blocker)
 {
-    *public_serving = health->serving && !authority_blocker &&
+    struct api_health_flags f;
+    f.public_serving = health->serving && !authority_blocker &&
         agent_security_posture_allows_public_serving(posture);
-    /* healthy follows local readiness: a checkpoint-verified node is healthy
-     * while serving stays gated on full-history validation. */
-    *public_healthy = health->healthy && health->serving &&
-        !authority_blocker && agent_security_posture_allows_local_ready(posture);
+    f.local_ready = agent_security_posture_local_ready(
+        posture, health->healthy, health->serving, authority_blocker != NULL);
+    f.public_healthy = f.local_ready;
+    return f;
 }
 /* peer_best_height as the chain blocks report it. The snapshot value is the
  * best handshake starting height among our peers (or the modal view), which
@@ -207,10 +204,10 @@ size_t api_serve_health(uint8_t *response, size_t response_max)
     api_health_format_public_warning_reasons(&health, warning_blocker,
                                              public_warning_reasons,
                                              sizeof(public_warning_reasons));
-    bool public_serving;
-    bool public_healthy;
-    api_health_public_serving_flags(&health, &posture, authority_blocker,
-                                    &public_serving, &public_healthy);
+    struct api_health_flags flags =
+        api_health_flags(&health, &posture, authority_blocker);
+    bool public_serving = flags.public_serving;
+    bool public_healthy = flags.public_healthy;
 
     struct json_value body;
     json_init(&body);
@@ -219,6 +216,7 @@ size_t api_serve_health(uint8_t *response, size_t response_max)
     api_json_add_freshness(&body, "served_tip", -1);
     json_push_kv_bool(&body, "healthy", public_healthy);
     json_push_kv_bool(&body, "serving", public_serving);
+    json_push_kv_bool(&body, "local_ready", flags.local_ready);
     json_push_kv_int(&body, "warning_count",
                      (int64_t)public_warning_count);
     json_push_kv_str(&body, "sync_state", sync_state_name(health.sync_state));

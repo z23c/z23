@@ -133,6 +133,29 @@ bool bg_validation_verified_tip(const struct bg_validation_service *svc,
     return true;
 }
 
+bool bg_validation_checkpoint_check_get(
+    const struct bg_validation_service *svc,
+    struct bg_validation_checkpoint_check *out)
+{
+    uint64_t words[4];
+    if (!svc || !out)
+        return false;
+    int tip = atomic_load(&svc->checkpoint_check_tip);
+    int floor = atomic_load(&svc->checkpoint_check_floor);
+    if (tip <= 0)
+        return false;
+    for (int i = 0; i < 4; i++)
+        words[i] = atomic_load(&svc->checkpoint_check_words[i]);
+    if (atomic_load(&svc->checkpoint_check_tip) != tip ||
+        atomic_load(&svc->checkpoint_check_floor) != floor)
+        return false;
+    out->checkpoint_height = floor;
+    out->first_height = floor + 1;
+    out->tip_height = tip;
+    memcpy(out->tip_hash, words, sizeof(words));
+    return true;
+}
+
 /* True when the walk's last booked block IS this tip, by hash. */
 static bool bgv_auth_walk_verified_tip_is(
     const struct bg_validation_service *svc, const struct block_index *tip)

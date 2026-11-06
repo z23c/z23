@@ -15,9 +15,17 @@
 #include "test/test_block_map.h"
 
 #include "chain/chain.h"
+#include "chain/checkpoints.h"
 #include "coins/coins_view.h"
+#include "config/consensus_state_snapshot_install.h"
+#include "controllers/agent_security_posture.h"
+#include "controllers/sovereignty_controller.h"
+#include "event/event.h"
+#include "jobs/reducer_frontier.h"
+#include "json/json.h"
 #include "models/block.h"
 #include "models/database.h"
+#include "util/blocker.h"
 #include "services/bg_validation_authority.h"
 #include "services/bg_validation_service.h"
 #include "services/chain_evidence_authority_service.h"
@@ -801,6 +809,276 @@ static int test_mark_refuses_same_height_rival_after_scan(void)
     return failures;
 }
 
+/* ── Checkpoint install: checked from the checkpoint to the tip ──────────
+ * A node installed from a checkpoint compiled into this binary has no
+ * snapshot evidence; its walk checks every block above the checkpoint. The
+ * publisher answers a typed, non-publishing "checked to tip" result: no page,
+ * no blocker, CEC untouched, and the predicate re-checked on every pass. */
+
+#define GW_CP 1 /* the compiled checkpoint the install was seeded at */
+
+struct gw_cp_shape {
+    bool self_folded;
+    bool assisted_seam;
+    int stamp_kind;
+    bool root_mismatch;
+};
+
+static struct rom_state_checkpoint g_gw_rom;
+
+static bool gw_cp_markers_in_tx(sqlite3 *pdb, const struct gw_cp_shape *s)
+{
+    static const uint8_t one = 1;
+    uint8_t seam_root[32];
+    memset(seam_root, 0x33, sizeof(seam_root));
+    struct consensus_state_install_stamp st = {
+        .kind = (enum consensus_state_install_stamp_kind)s->stamp_kind,
+        .height = GW_CP,
+    };
+    memcpy(st.block_hash, g_gw_rom.block_hash, 32);
+    memset(st.utxo_root, s->root_mismatch ? 0x99 : 0x22, 32);
+    bool ok = true;
+    if (s->self_folded)
+        ok = progress_meta_set_in_tx(pdb, COINS_KV_SELF_FOLDED_KEY, &one, 1);
+    if (ok && s->assisted_seam)
+        ok = consensus_state_install_record_assisted_seam(
+            pdb, GW_CP, seam_root, seam_root, seam_root);
+    return ok && reducer_seed_floor_declare_if_absent(pdb, GW_CP) &&
+           consensus_state_install_record_authority_stamp(pdb, &st);
+}
+
+/* The activate's durable facts for an install at GW_CP, with the compiled
+ * commitment at GW_CP. */
+static bool gw_cp_install(const struct gw_cp_shape *s)
+{
+    memset(&g_gw_rom, 0, sizeof(g_gw_rom));
+    g_gw_rom.height = GW_CP;
+    memset(g_gw_rom.block_hash, 0x21, 32);
+    memset(g_gw_rom.utxo_root, 0x22, 32);
+    memset(g_gw_rom.anchor_digest, 0x23, 32);
+    memset(g_gw_rom.sprout_frontier_root, 0x24, 32);
+    memset(g_gw_rom.sapling_frontier_root, 0x25, 32);
+    memset(g_gw_rom.nullifier_digest, 0x26, 32);
+    memset(g_gw_rom.rom_state_root, 0x27, 32);
+    g_gw_rom.utxo_count = 1;
+    checkpoints_set_rom_state_override_for_test(&g_gw_rom);
+    static const struct rom_state_rung placeholder = { .cp = { .height = 7 } };
+    checkpoints_set_rom_state_rungs_override_for_test(&placeholder, 1);
+    reducer_frontier_provable_tip_set(GW_TIP);
+    sqlite3 *pdb = progress_store_db();
+    progress_store_tx_lock();
+    bool ok = sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL, NULL) ==  // raw-sql-ok:test-fixture-seeding
+              SQLITE_OK;
+    ok = ok && gw_cp_markers_in_tx(pdb, s);
+    ok = sqlite3_exec(pdb, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) ==  // raw-sql-ok:test-fixture-seeding
+             SQLITE_OK && ok;
+    progress_store_tx_unlock();
+    return ok;
+}
+
+static void gw_cp_reset(void)
+{
+    reducer_frontier_provable_tip_reset();
+    checkpoints_reset_rom_state_rungs_override_for_test();
+    checkpoints_reset_rom_state_override_for_test();
+}
+
+static void gw_page_observer(enum event_type type, uint32_t peer_id,
+                             const void *payload, uint32_t payload_len,
+                             void *ctx)
+{
+    (void)type; (void)peer_id; (void)payload; (void)payload_len;
+    (*(int *)ctx)++;
+}
+
+static const char *const GW_UNPROVEN = "bg_validation.full_history_unproven";
+
+/* One publish pass: the result, and whether it paged. */
+static struct zcl_result gw_cp_pass(struct gw_fixture *f, int *pages)
+{
+    int before = *pages;
+    struct zcl_result r = bg_validation_authority_publish(&f->svc, true, true);
+    printf("  checkpoint pass: ok=%d code=%d pages=+%d msg=%s\n", r.ok,
+           r.code, *pages - before, r.message);
+    return r;
+}
+
+static bool gw_cec_untouched(struct gw_fixture *f,
+                             const struct chain_evidence_controller_view *was)
+{
+    struct chain_evidence_controller_view v;
+    gw_view(f, &v);
+    return v.state == was->state &&
+           v.full_validation_origin == was->full_validation_origin &&
+           !v.active_tip_evidence.full_validation_complete &&
+           v.state != CEC_FULLY_VALIDATED;
+}
+
+static bool gw_spend_allowed(void)
+{
+    char reason[128];
+    return sovereignty_guard_peek("wallet_spend", reason, sizeof(reason));
+}
+
+/* The phone's trust object for a checkpoint node, fed by this service. */
+static bool gw_trust_reads(struct gw_fixture *f, const char *state, int pct)
+{
+    struct agent_security_posture p = {0};
+    p.checkpoint_verified = true;
+    p.checkpoint_height = GW_CP;
+    p.review_required = true;
+    struct bg_validation_service *saved = g_bg_validation;
+    g_bg_validation = &f->svc;
+    struct json_value root = {0};
+    json_set_object(&root);
+    agent_push_status_trust_json(&root, "trust", &p, true);
+    g_bg_validation = saved;
+    const struct json_value *t = json_get(&root, "trust");
+    const struct json_value *hc = json_get(t, "history_check");
+    const char *got = json_get_str(json_get(hc, "state"));
+    const char *summary = json_get_str(json_get(t, "summary"));
+    char want[96];
+    snprintf(want, sizeof(want), "background check %d%%.", pct);
+    bool ok = got && strcmp(got, state) == 0 &&
+              json_get_int(json_get(hc, "percent")) == pct && summary &&
+              strstr(summary, want) != NULL;
+    printf("  trust: state=%s summary=%s\n", got ? got : "(null)",
+           summary ? summary : "(null)");
+    json_free(&root);
+    return ok;
+}
+
+static bool gw_cp_open(struct gw_fixture *f, const struct gw_cp_shape *s,
+                       int *pages)
+{
+    if (!gw_init(f))
+        return false;
+    blocker_reset_for_testing();
+    *pages = 0;
+    if (gw_cp_install(s) &&
+        event_observe(EV_OPERATOR_NEEDED, gw_page_observer, pages))
+        return true;
+    gw_cp_reset();
+    gw_free(f);
+    return false;
+}
+
+static void gw_cp_close(struct gw_fixture *f)
+{
+    event_clear_observers(EV_OPERATOR_NEEDED);
+    blocker_reset_for_testing();
+    gw_cp_reset();
+    gw_free(f);
+}
+
+static const struct gw_cp_shape GW_ROM_INSTALL = {
+    .self_folded = true, .stamp_kind = CONSENSUS_INSTALL_STAMP_CHECKPOINT_ROM,
+};
+
+static int test_checkpoint_walk_checked_to_tip(void)
+{
+    int failures = 0, pages = 0;
+    struct gw_fixture f;
+    if (!gw_cp_open(&f, &GW_ROM_INSTALL, &pages))
+        return gw_check("checkpoint fixture", false);
+    struct chain_evidence_controller_view was;
+    gw_view(&f, &was);
+    /* A short walk refuses and pages exactly as today (a real refusal). */
+    gw_walk_verified(&f, GW_TIP, 0);
+    atomic_store(&f.svc.progress.verified_height, GW_TIP - 1);
+    struct zcl_result r = gw_cp_pass(&f, &pages);
+    failures += gw_check("short walk still refuses and pages",
+                         !r.ok && pages == 1 && blocker_exists(GW_UNPROVEN));
+    failures += gw_check("short walk: no checked result yet",
+                         gw_trust_reads(&f, "starting", 0));
+
+    gw_walk_verified(&f, GW_TIP, 0);
+    for (int pass = 0; pass < 2; pass++) {
+        r = gw_cp_pass(&f, &pages);
+        failures += gw_check("checked to tip: typed, not published",
+                 !r.ok && r.code == BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED);
+        failures += gw_check("checked to tip: no new page, no blocker",
+                 pages == 1 && !blocker_exists(GW_UNPROVEN));
+    }
+    struct bg_validation_checkpoint_check cc;
+    failures += gw_check("typed result carries the checked range and tip",
+             bg_validation_checkpoint_check_get(&f.svc, &cc) &&
+             cc.checkpoint_height == GW_CP && cc.first_height == GW_CP + 1 &&
+             cc.tip_height == GW_TIP &&
+             memcmp(cc.tip_hash, f.hashes[GW_TIP].data, 32) == 0);
+    failures += gw_check("CEC state and origin untouched, never fully validated",
+                         gw_cec_untouched(&f, &was));
+    failures += gw_check("summary progress from the typed result reaches 100",
+                         gw_trust_reads(&f, "checked_to_tip", 100));
+    failures += gw_check("spend guard allows (pinned, unchanged)",
+                         gw_spend_allowed());
+
+    /* The trust state leaves SOVEREIGN: the next pass refuses and pages. */
+    progress_store_tx_lock();
+    bool removed = progress_meta_delete(progress_store_db(),
+                                        COINS_KV_SELF_FOLDED_KEY);
+    progress_store_tx_unlock();
+    r = gw_cp_pass(&f, &pages);
+    failures += gw_check("predicate false later: refusal and page return",
+             removed && !r.ok &&
+             r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED &&
+             pages == 2 && blocker_exists(GW_UNPROVEN));
+    failures += gw_check("predicate false later: checked result withdrawn",
+             !bg_validation_checkpoint_check_get(&f.svc, &cc));
+    failures += gw_check("predicate false later: spend guard refuses (pinned)",
+                         !gw_spend_allowed());
+    failures += gw_check("predicate false later: CEC still untouched",
+                         gw_cec_untouched(&f, &was));
+    gw_cp_close(&f);
+    return failures;
+}
+
+/* Shapes the predicate rejects keep refusing and paging exactly as today. */
+static int gw_cp_expect_refusal(const char *label, const struct gw_cp_shape *s,
+                                bool want_spend)
+{
+    int pages = 0;
+    struct gw_fixture f;
+    if (!gw_cp_open(&f, s, &pages))
+        return gw_check(label, false);
+    struct chain_evidence_controller_view was;
+    gw_view(&f, &was);
+    gw_walk_verified(&f, GW_TIP, 0);
+    struct zcl_result r = gw_cp_pass(&f, &pages);
+    struct bg_validation_checkpoint_check cc;
+    bool ok = !r.ok && r.code != BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED &&
+              pages == 1 && blocker_exists(GW_UNPROVEN) &&
+              !bg_validation_checkpoint_check_get(&f.svc, &cc) &&
+              gw_cec_untouched(&f, &was) && gw_spend_allowed() == want_spend;
+    if (!ok)
+        printf("  FAIL: %s refuses, pages, CEC untouched, spend pinned\n",
+               label);
+    gw_cp_close(&f);
+    return ok ? 0 : 1;
+}
+
+static int test_checkpoint_other_installs_still_refuse(void)
+{
+    int failures = 0;
+    const struct gw_cp_shape assisted = {
+        .assisted_seam = true, .stamp_kind = CONSENSUS_INSTALL_STAMP_ASSISTED,
+    };
+    failures += gw_cp_expect_refusal("assisted install", &assisted, false);
+    const struct gw_cp_shape mismatch = {
+        .self_folded = true,
+        .stamp_kind = CONSENSUS_INSTALL_STAMP_CHECKPOINT_ROM,
+        .root_mismatch = true,
+    };
+    failures += gw_cp_expect_refusal("mismatched checkpoint root", &mismatch,
+                                     true);
+    const struct gw_cp_shape receipt = {
+        .self_folded = true, .stamp_kind = CONSENSUS_INSTALL_STAMP_RECEIPT,
+    };
+    failures += gw_cp_expect_refusal("receipt install at the checkpoint",
+                                     &receipt, true);
+    return failures;
+}
+
 int test_genesis_walk_earn_evidence(void)
 {
     int failures = 0;
@@ -822,6 +1100,8 @@ int test_genesis_walk_earn_evidence(void)
     failures += test_pre_earned_other_hash_stays_empty();
     failures += test_pre_earned_snapshot_state_untouched();
     failures += test_mark_refuses_same_height_rival_after_scan();
+    failures += test_checkpoint_walk_checked_to_tip();
+    failures += test_checkpoint_other_installs_still_refuse();
     if (failures == 0)
         printf("  all genesis_walk_earn_evidence tests passed\n");
     return failures;

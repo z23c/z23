@@ -122,9 +122,52 @@ json_first_bool_field() {
     esac
 }
 
+# The agent contract's soak refusal, or nothing when the agent fields allow
+# soak. Only a trusted agent contract counts.
+soak_agent_reason() {
+    local trusted="$1" operator_needed="$2" status="$3" pack_ok="$4"
+    [ "$trusted" = "1" ] || return 0
+    if [ "$operator_needed" = "1" ]; then
+        printf agent_operator_needed
+    elif [ "$status" = "blocked" ]; then
+        printf agent_blocked
+    elif [ "$pack_ok" = "0" ]; then
+        printf validation_pack_failed
+    fi
+}
+
+# Soak needs the full-history posture. A checkpoint-installed node reports a
+# healthy agent status while its posture still requires review; it stays out
+# of soak exactly as when that review made the agent status "blocked".
+lane_health_soak_selftest() {
+    local healthy_review blocked_review healthy_clean untrusted
+    healthy_review="$(soak_agent_reason 1 0 healthy 1 1)"
+    blocked_review="$(soak_agent_reason 1 0 blocked 1 1)"
+    healthy_clean="$(soak_agent_reason 1 0 healthy 1 0)"
+    untrusted="$(soak_agent_reason 0 0 healthy 1 1)"
+    [ "$healthy_review" = "security_review_required" ] || {
+        echo "lane-health selftest: healthy agent under review was soak eligible" >&2
+        return 1
+    }
+    [ "$blocked_review" = "agent_blocked" ] || {
+        echo "lane-health selftest: blocked agent reason changed" >&2
+        return 1
+    }
+    [ -z "$healthy_clean" ] && [ -z "$untrusted" ] || {
+        echo "lane-health selftest: clean or untrusted agent refused soak" >&2
+        return 1
+    }
+    return 0
+}
+
 lane_health_selftest() {
     local sample op blocked detail ready source_id
-    sample='{"schema":"zcl.public_status.v2","source_id_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","build_commit":"display-only","status":"blocked","operator_needed":true,"primary_blocker":"operator_needed:window.consistency","restart_watchdog":{"operator_needed":false},"readiness":{"chain_serving_ready":true},"reducer":{"validation_pack_ok":false,"validation_pack_detail":"window.consistency"}}'
+    lane_health_soak_selftest || return 1
+    sample='{"schema":"zcl.public_status.v2","source_id_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","build_commit":"display-only","status":"blocked","operator_needed":true,"primary_blocker":"operator_needed:window.consistency","restart_watchdog":{"operator_needed":false},"readiness":{"chain_serving_ready":true},"reducer":{"validation_pack_ok":false,"validation_pack_detail":"window.consistency"},"owner_review_required":false,"security_posture":{"review_required":true}}'
+    [ "$(json_first_bool_field "$sample" "review_required")" = "1" ] || {
+        echo "lane-health selftest: expected security_posture review_required=true" >&2
+        return 1
+    }
     op="$(json_first_bool_field "$sample" "operator_needed")"
     blocked="$(zcl_json_first_string "$sample" "status")"
     detail="$(zcl_json_first_string "$sample" "validation_pack_detail")"
@@ -268,7 +311,8 @@ report_lane() {
     local agent_contract_trusted agent_contract_trust_reason
     local agent_status agent_operator_needed agent_primary_blocker
     local agent_next agent_validation_pack_ok agent_validation_pack_detail
-    local agent_chain_serving_ready agent_work_ready
+    local agent_chain_serving_ready agent_work_ready agent_review_required
+    local agent_soak_reason
     local bootstrap_json snapshot_info snapshot_seed_height snapshot_path
     local snapshot_present loader_path loader_configured recovery_hint
     local chaininfo_json chain_headers initialblockdownload
@@ -340,6 +384,7 @@ report_lane() {
     agent_validation_pack_detail=""
     agent_chain_serving_ready="null"
     agent_work_ready="null"
+    agent_review_required="null"
 
     p2p_listening=0
     rpc_listening=0
@@ -407,6 +452,7 @@ report_lane() {
             agent_validation_pack_detail="$(zcl_json_first_string "$agent_json" "validation_pack_detail")"
             agent_chain_serving_ready="$(json_first_bool_field "$agent_json" "chain_serving_ready")"
             agent_work_ready="$(json_first_bool_field "$agent_json" "agent_work_ready")"
+            agent_review_required="$(json_first_bool_field "$agent_json" "review_required")"
         fi
         if [ "$agent_contract_trusted" != "1" ]; then
             condition_json="$(rpc_call "$datadir" "$rpcport" dumpstate condition_engine || true)"
@@ -582,15 +628,11 @@ report_lane() {
             soak_reason="forced_reindex_flag_present"
         elif [ "$rpc_up" != "1" ]; then
             soak_reason="rpc_down"
-        elif [ "$agent_contract_trusted" = "1" ] &&
-             [ "$agent_operator_needed" = "1" ]; then
-            soak_reason="agent_operator_needed"
-        elif [ "$agent_contract_trusted" = "1" ] &&
-             [ "$agent_status" = "blocked" ]; then
-            soak_reason="agent_blocked"
-        elif [ "$agent_contract_trusted" = "1" ] &&
-             [ "$agent_validation_pack_ok" = "0" ]; then
-            soak_reason="validation_pack_failed"
+        elif agent_soak_reason="$(soak_agent_reason "$agent_contract_trusted" \
+                 "$agent_operator_needed" "$agent_status" \
+                 "$agent_validation_pack_ok" "$agent_review_required")" &&
+             [ -n "$agent_soak_reason" ]; then
+            soak_reason="$agent_soak_reason"
         elif is_number "$condition_operator_needed_count" &&
              [ "$condition_operator_needed_count" -gt 0 ]; then
             soak_reason="condition_operator_needed"

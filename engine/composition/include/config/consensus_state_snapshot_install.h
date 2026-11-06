@@ -382,6 +382,38 @@ bool consensus_state_install_read_assisted_seam(
     struct sqlite3 *progress_db, int32_t *height, uint8_t utxo_root[32],
     uint8_t anchor_digest[32], uint8_t nullifier_digest[32], bool *found);
 
+/* ── Install authority stamp ────────────────────────────────────────────────
+ * Every activate records, inside its atomic cutover transaction, which
+ * authority admitted the install and the manifest's height, block hash and
+ * UTXO root. A later install of any authority overwrites it, so the stamp
+ * always names the install that produced the live state. It is the one
+ * durable fact a reader may use to tell a CHECKPOINT_ROM install apart from a
+ * receipt, content or assisted install at the same height; the seed floor is
+ * not (it keeps the first declaration forever and other seeders write it). */
+enum consensus_state_install_stamp_kind {
+    CONSENSUS_INSTALL_STAMP_RECEIPT = 1,
+    CONSENSUS_INSTALL_STAMP_CHECKPOINT_ROM = 2,
+    CONSENSUS_INSTALL_STAMP_CHECKPOINT_CONTENT = 3,
+    CONSENSUS_INSTALL_STAMP_ASSISTED = 4,
+};
+
+struct consensus_state_install_stamp {
+    enum consensus_state_install_stamp_kind kind;
+    int32_t height;
+    uint8_t block_hash[32];
+    uint8_t utxo_root[32];
+};
+
+/* The recorder MUST run inside the open activate cutover transaction. The
+ * reader is a standalone SELECT: `*found` is false when no install stamped
+ * this store. Both return false only on a store error or a corrupt record. */
+bool consensus_state_install_record_authority_stamp(
+    struct sqlite3 *progress_db,
+    const struct consensus_state_install_stamp *stamp);
+bool consensus_state_install_read_authority_stamp(
+    struct sqlite3 *progress_db, struct consensus_state_install_stamp *out,
+    bool *found);
+
 #ifdef ZCL_TESTING
 /* Force activate's independent-replay authority gate open, bypassing the
  * on-disk replay receipt. Lets the activate/copy-proof fixtures drive the

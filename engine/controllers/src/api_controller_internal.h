@@ -52,6 +52,20 @@ static inline const struct blocker_snapshot *api_authority_blocker(
     return api_blocker_hard_gates_public_serving(dominant) ? dominant : NULL;
 }
 
+/* /health and healthcheck flags. public_serving and public_healthy (the HTTP
+ * code) mean serving publicly; local_ready is the shared "Ready." definition
+ * (agent_security_posture_local_ready), reported as a body field. */
+struct api_health_flags {
+    bool public_serving;
+    bool public_healthy;
+    bool local_ready;
+};
+
+struct api_health_flags api_health_flags(
+    const struct node_health_snapshot *health,
+    const struct agent_security_posture *posture,
+    const struct blocker_snapshot *authority_blocker);
+
 struct api_node_summary_reason {
     enum node_status_reason reason;
     const char *primary;

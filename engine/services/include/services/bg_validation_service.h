@@ -139,6 +139,14 @@ struct bg_validation_service {
      * before and after copying the words. See bg_validation_note_verified_tip. */
     _Atomic int verified_tip_height;
     _Atomic uint64_t verified_tip_words[4];
+
+    /* The last publish pass's typed "checked from checkpoint to tip" outcome
+     * (bg_validation_authority.h). checkpoint_check_tip 0 = none; it is
+     * cleared first and written last, and every pass rewrites or clears it.
+     * Single writer (the publisher); see bg_validation_checkpoint_check_get. */
+    _Atomic int checkpoint_check_floor;
+    _Atomic int checkpoint_check_tip;
+    _Atomic uint64_t checkpoint_check_words[4];
 };
 
 /* Initialize the service (does not start the thread). */

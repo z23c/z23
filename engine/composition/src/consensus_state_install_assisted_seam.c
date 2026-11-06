@@ -8,8 +8,9 @@
  * nullifier_digest) the borrowed state was verified against at activate time —
  * inside the same atomic cutover transaction. Background promotion later
  * re-derives from the compiled checkpoint UP TO this height and ratifies the
- * borrowed install to sovereign ONLY on an exact match. Contract:
- * config/consensus_state_snapshot_install.h. */
+ * borrowed install to sovereign ONLY on an exact match. The same file keeps
+ * the install authority stamp every activate writes in that transaction.
+ * Contract: config/consensus_state_snapshot_install.h. */
 
 #include "config/consensus_state_snapshot_install.h"
 
@@ -88,6 +89,78 @@ bool consensus_state_install_read_assisted_seam(
     memcpy(utxo_root, blob + 4, 32);
     memcpy(anchor_digest, blob + 36, 32);
     memcpy(nullifier_digest, blob + 68, 32);
+    *found = true;
+    return true;
+}
+
+/* key -> kind[1] || 4-byte LE height || block_hash[32] || utxo_root[32]. */
+#define INSTALL_STAMP_META_KEY "consensus_state.install_authority"
+#define INSTALL_STAMP_BLOB_LEN (1u + 4u + 32u + 32u)
+
+static bool install_stamp_kind_known(int kind)
+{
+    return kind >= CONSENSUS_INSTALL_STAMP_RECEIPT &&
+           kind <= CONSENSUS_INSTALL_STAMP_ASSISTED;
+}
+
+bool consensus_state_install_record_authority_stamp(
+    sqlite3 *progress_db, const struct consensus_state_install_stamp *stamp)
+{
+    if (!progress_db || !stamp || stamp->height < 0 ||
+        !install_stamp_kind_known((int)stamp->kind)) {
+        LOG_WARN(ASSISTED_SEAM_SUBSYS, "record_authority_stamp: invalid args");
+        return false;
+    }
+    uint8_t blob[INSTALL_STAMP_BLOB_LEN];
+    uint32_t h = (uint32_t)stamp->height;
+    blob[0] = (uint8_t)stamp->kind;
+    for (size_t i = 0; i < 4; i++)
+        blob[1 + i] = (uint8_t)(h >> (8u * i));
+    memcpy(blob + 5, stamp->block_hash, 32);
+    memcpy(blob + 37, stamp->utxo_root, 32);
+    /* Must run inside the caller's open activate cutover transaction. */
+    if (!progress_meta_set_in_tx(progress_db, INSTALL_STAMP_META_KEY, blob,
+                                 sizeof(blob))) {
+        LOG_WARN(ASSISTED_SEAM_SUBSYS,
+                 "record_authority_stamp: progress_meta_set_in_tx failed");
+        return false;
+    }
+    return true;
+}
+
+bool consensus_state_install_read_authority_stamp(
+    sqlite3 *progress_db, struct consensus_state_install_stamp *out,
+    bool *found)
+{
+    if (found)
+        *found = false;
+    if (!progress_db || !out || !found) {
+        LOG_WARN(ASSISTED_SEAM_SUBSYS, "read_authority_stamp: invalid args");
+        return false;
+    }
+    uint8_t blob[INSTALL_STAMP_BLOB_LEN];
+    size_t got = 0;
+    bool present = false;
+    if (!progress_meta_get_blob_exact(progress_db, INSTALL_STAMP_META_KEY, blob,
+                                      sizeof(blob), &got, &present)) {
+        LOG_WARN(ASSISTED_SEAM_SUBSYS, "read_authority_stamp: blob read failed");
+        return false;
+    }
+    if (!present)
+        return true; /* no install stamped this store */
+    if (got != sizeof(blob) || !install_stamp_kind_known(blob[0])) {
+        LOG_WARN(ASSISTED_SEAM_SUBSYS,
+                 "read_authority_stamp: record length %zu kind %u (corrupt)",
+                 got, (unsigned)blob[0]);
+        return false;
+    }
+    uint32_t h = 0;
+    for (size_t i = 0; i < 4; i++)
+        h |= (uint32_t)blob[1 + i] << (8u * i);
+    out->kind = (enum consensus_state_install_stamp_kind)blob[0];
+    out->height = (int32_t)h;
+    memcpy(out->block_hash, blob + 5, 32);
+    memcpy(out->utxo_root, blob + 37, 32);
     *found = true;
     return true;
 }

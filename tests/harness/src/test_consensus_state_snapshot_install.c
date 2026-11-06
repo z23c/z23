@@ -2769,9 +2769,23 @@ static int rung_act_tamper_tests(struct rung_act_ctx *c)
 /* The real activate leaves exactly the durable facts the status posture keys
  * on: a node installed from this baked rung reports checkpoint_verified at
  * the rung height, while the public-serving gate stays closed. */
+/* The activate stamped which authority admitted the install, at its height. */
+static bool csi_stamp_is(sqlite3 *pdb, enum consensus_state_install_stamp_kind kind,
+                         int32_t height, const uint8_t utxo_root[32])
+{
+    struct consensus_state_install_stamp st;
+    bool found = false;
+    return consensus_state_install_read_authority_stamp(pdb, &st, &found) &&
+           found && st.kind == kind && st.height == height &&
+           (!utxo_root || memcmp(st.utxo_root, utxo_root, 32) == 0);
+}
+
 static int rung_act_posture_check(struct rung_act_ctx *c)
 {
     int failures = 0;
+    CSI_CHECK("rung-activate: install stamped checkpoint_rom at the rung root",
+              csi_stamp_is(c->pdb, CONSENSUS_INSTALL_STAMP_CHECKPOINT_ROM,
+                           c->rung.cp.height, c->rung.cp.utxo_root));
     struct node_db ndb;
     bool opened = node_db_open(&ndb, ":memory:");
     CSI_CHECK("rung-activate: posture node.db opens", opened);
@@ -5439,6 +5453,9 @@ static int csi_checkpoint_content_activation_cases(
     CSI_CHECK("checkpoint-content: installed coins/anchors/nullifiers match "
               "the bundle with COMPLETE (cursor 0) history",
               active_is(s->pdb, s->b));
+    CSI_CHECK("checkpoint-content: install stamped checkpoint_content",
+              csi_stamp_is(s->pdb, CONSENSUS_INSTALL_STAMP_CHECKPOINT_CONTENT,
+                           s->b->height, NULL));
     if (s->cc_ares.prior_generation_path[0])
         (void)unlink(s->cc_ares.prior_generation_path);
 
@@ -5629,6 +5646,9 @@ static int csi_assisted_activation_cases(struct csi_assisted_scene *s)
     CSI_CHECK("assisted: installed state matches the bundle (COMPLETE "
               "cursor-0 history — the wedge-immune atomic path)",
               active_is(s->pdb, s->b));
+    CSI_CHECK("assisted: install stamped assisted",
+              csi_stamp_is(s->pdb, CONSENSUS_INSTALL_STAMP_ASSISTED,
+                           s->b->height, NULL));
     return failures;
 }
 

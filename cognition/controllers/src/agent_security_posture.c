@@ -512,6 +512,14 @@ bool agent_security_posture_allows_local_ready(
     return !agent_security_posture_needs_review(posture);
 }
 
+bool agent_security_posture_local_ready(
+    const struct agent_security_posture *posture, bool healthy, bool serving,
+    bool operator_needed)
+{
+    return healthy && serving && !operator_needed &&
+           agent_security_posture_allows_local_ready(posture);
+}
+
 void agent_push_security_posture_snapshot_json(
     struct json_value *out, const char *key,
     const struct agent_security_posture *posture)

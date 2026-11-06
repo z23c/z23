@@ -616,13 +616,11 @@ static bool rpc_healthcheck_full(const struct json_value *params,
         api_authority_blocker(blockers, blocker_count);
     const struct blocker_snapshot *warning_blocker =
         dominant && !authority_blocker ? dominant : NULL;
-    bool public_serving = health.serving && !authority_blocker &&
-        agent_security_posture_allows_public_serving(&posture);
-    /* healthy follows local readiness (a checkpoint-verified node qualifies);
-     * serving stays the public full-history gate. */
-    bool public_healthy = health.healthy && health.serving &&
-        !authority_blocker && agent_security_posture_allows_local_ready(&posture);
-    json_push_kv_str(result, "status", public_healthy ? "ok" : "blocked");
+    struct api_health_flags flags =
+        api_health_flags(&health, &posture, authority_blocker);
+    bool public_serving = flags.public_serving;
+    json_push_kv_str(result, "status", flags.public_healthy ? "ok" : "blocked");
+    json_push_kv_bool(result, "local_ready", flags.local_ready);
     json_push_kv_str(result, "source_id_sha256",
                      zcl_build_source_id_sha256());
     json_push_kv_str(result, "build_commit", zcl_build_commit());
@@ -649,7 +647,7 @@ static bool rpc_healthcheck_full(const struct json_value *params,
     json_push_kv_int(&checks, "tip_advance_age_seconds",
                      health.tip_advance_age_seconds);
 
-    json_push_kv_bool(result, "healthy", public_healthy);
+    json_push_kv_bool(result, "healthy", flags.public_healthy);
     json_push_kv_bool(result, "serving", public_serving);
     json_push_kv_int(result, "warning_count",
                      (int64_t)health.warning_count +
