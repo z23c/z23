@@ -187,13 +187,7 @@ ZCL_CAPABILITY_SYMBOL("tor_main_configuration_new", CAP_NETWORK,
 ZCL_CAPABILITY_SYMBOL("tor_main_configuration_set_command_line", CAP_NETWORK,
     "Sends no packet, but it decides what the embedded Tor will do, and "
     "the whole tor_ family is held at this boundary for that reason.")
-ZCL_CAPABILITY_SYMBOL("tor_main_configuration_setup_control_socket", CAP_NETWORK,
-    "Opens the owning control connection that private wallet broadcast "
-    "uses to enable the network only after it holds dynhost's service slot.")
 ZCL_CAPABILITY_SYMBOL("tor_run_main", CAP_NETWORK, "")
-ZCL_CAPABILITY_SYMBOL("tor_shutdown_event_loop_and_exit", CAP_NETWORK,
-    "Stops the embedded Tor event loop, which is the same subject as "
-    "starting it.")
 ZCL_CAPABILITY_SYMBOL("webkit_web_view_load_uri", CAP_NETWORK,
     "Can initiate URI loading; the wallet host restricts calls to its "
     "registered in-process zcl scheme.")

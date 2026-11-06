@@ -226,8 +226,7 @@ ZCL_DARWIN_TOR_WEAK_UNDEFS = \
 	-Wl,-U,_smartlist_free_ -Wl,-U,_smartlist_new \
 	-Wl,-U,_tor_free_ -Wl,-U,_tor_malloc_zero_ \
 	-Wl,-U,_dynhost_reassembly_cap -Wl,-U,_dynhost_reassembly_admits \
-	-Wl,-U,_dynhost_webserver_has_complete_request \
-	-Wl,-U,_tor_main_configuration_setup_control_socket
+	-Wl,-U,_dynhost_webserver_has_complete_request
 ZCL_PLATFORM_NODE_LIBS = -framework Cocoa -framework CoreGraphics \
 	-framework QuartzCore -framework CoreVideo \
 	$(if $(TOR_FULL),,$(ZCL_DARWIN_TOR_WEAK_UNDEFS))

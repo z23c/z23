@@ -1596,22 +1596,81 @@ static const char *stop_handoff_check_ended(const char *tmpdir, bool real_tor)
     return NULL;
 }
 
+/* The run's two control sockets, identified by inode: a descriptor number may
+ * be reused once closed, the inode of a closed socket is gone. */
+struct stop_handoff_sockets {
+    bool held;
+    int fd[2];
+    struct stat id[2];
+};
+
+static void stop_handoff_sockets_capture(struct stop_handoff_sockets *s)
+{
+    int64_t ours = -1, tors = -1;
+    s->held = tor_integration_control_sockets_for_test(&ours, &tors);
+    s->fd[0] = (int)ours;
+    s->fd[1] = (int)tors;
+    if (s->held)
+        s->held = fstat(s->fd[0], &s->id[0]) == 0 &&
+                  fstat(s->fd[1], &s->id[1]) == 0;
+}
+
+static bool stop_handoff_socket_open(const struct stop_handoff_sockets *s, int i)
+{
+    struct stat now;
+    return fstat(s->fd[i], &now) == 0 && now.st_dev == s->id[i].st_dev &&
+           now.st_ino == s->id[i].st_ino;
+}
+
 /* Stop a Tor that reached its main loop, then stop it again. */
 static const char *stop_handoff_running_case(bool real_tor)
 {
     char tmpdir[512];
     test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "stoprun");
     const char *why = NULL;
+    struct stop_handoff_sockets sockets = { .held = false };
     if (!tor_integration_start(tmpdir, 39252))
         why = "tor_integration_start";
     else if (real_tor && !wait_tor_main_loop(tmpdir, 90))
         why = "tor main loop never reached";
+    stop_handoff_sockets_capture(&sockets);
+    if (!why && real_tor != sockets.held)
+        why = "a real Tor owns a control connection and the stub none";
     stop_handoff_timed("running");
     if (!why)
         why = stop_handoff_check_ended(tmpdir, real_tor);
+    if (!why && sockets.held && (stop_handoff_socket_open(&sockets, 0) ||
+                                 stop_handoff_socket_open(&sockets, 1)))
+        why = "a control socket outlived the stop";
     stop_handoff_timed("second");
     if (!why && tor_integration_is_enabled())
         why = "a second stop left Tor running";
+    remove_tree(tmpdir);
+    return why;
+}
+
+/* The monitor closes the gate while a stop may be running: both ask Tor to
+ * exit through the same socket and neither may close it under the other. With
+ * no racing stop, Tor must still end on its own. */
+static const char *stop_handoff_gate_case(bool race_stop)
+{
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "stopgate");
+    tor_integration_set_serve_onion(false);
+    tor_integration_close_gate_for_test(true);
+    const char *why = NULL;
+    if (!tor_integration_start(tmpdir, 39255))
+        why = "tor_integration_start";
+    for (int i = 0; !why && !race_stop && tor_integration_is_enabled() &&
+                    i < 1200; i++)
+        platform_sleep_ms(100); /* real-clock: Tor ends on its own thread; the bound only catches a hang */
+    if (!why && !race_stop && tor_integration_is_enabled())
+        why = "Tor did not end after the gate closed";
+    tor_integration_stop();
+    if (!why)
+        why = stop_handoff_check_ended(tmpdir, true);
+    tor_integration_close_gate_for_test(false);
+    tor_integration_service_reset_for_test();
     remove_tree(tmpdir);
     return why;
 }
@@ -1676,6 +1735,10 @@ static int test_tor_stop_hands_off_to_tor_thread(void)
         why = stop_handoff_early_case(real_tor);
     if (!why)
         why = stop_handoff_start_race_case();
+    if (!why && real_tor)
+        why = stop_handoff_gate_case(false);
+    if (!why && real_tor)
+        why = stop_handoff_gate_case(true);
     tor_integration_stop();
     tor_integration_set_extra_torrc_for_test("");
     printf("%s%s%s\n", why ? "FAIL (" : "OK", why ? why : "", why ? ")" : "");

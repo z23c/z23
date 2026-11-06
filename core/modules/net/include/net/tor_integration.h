@@ -51,7 +51,9 @@ void tor_integration_set_handler(tor_request_handler_fn handler, void *ctx);
  * the temporary localhost-only Tor bootstrap listener. */
 bool tor_integration_start(const char *datadir, uint16_t p2p_port);
 
-/* Stop Tor. */
+/* Stop Tor and join its thread. Tor exits on its own thread through its owning
+ * control connection; no other thread touches its event base. Safe from any
+ * thread, safe to repeat, and serialized with tor_integration_start(). */
 void tor_integration_stop(void);
 
 /* Get .onion address (NULL if not ready). */
@@ -315,6 +317,12 @@ void tor_integration_service_reset_for_test(void);
 bool tor_integration_enable_network_for_test(void);
 unsigned tor_integration_enable_failures_for_test(void);
 void tor_integration_enable_reset_for_test(void);
+/* Test seam: the no-onion monitor reads the gate as closed without running
+ * it, so a fixture reaches that path with the network still disabled. */
+void tor_integration_close_gate_for_test(bool closed);
+/* Test seam: this run's two control sockets (ours, Tor's). False when the run
+ * holds none: no run, or the Tor stub. */
+bool tor_integration_control_sockets_for_test(int64_t *ours, int64_t *tors);
 #endif
 
 #ifdef ZCL_TESTING

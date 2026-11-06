@@ -19,10 +19,13 @@
 #include "net/tor_request_state.h"
 #include "net/net.h"      /* net_set_onion_ingress_port() */
 #ifndef _WIN32
+#include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 #include <errno.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -40,7 +43,6 @@ static _Atomic bool g_tor_running = false;
 static _Atomic bool g_tor_ready = false;
 static _Atomic bool g_tor_dial_ready = false;
 static _Atomic bool g_tor_started = false;   /* true once tor thread spawn succeeds */
-static _Atomic bool g_tor_thread_done = false; /* true once tor thread returns */
 static _Atomic bool g_monitor_started = false;
 
 /* Supervisor liveness (root children — core/modules/net cannot include the app-side
@@ -656,17 +658,28 @@ extern int tor_main_configuration_set_command_line(
     tor_main_configuration_t *cfg, int argc, char *argv[]);
 extern void tor_main_configuration_free(tor_main_configuration_t *cfg);
 extern int tor_run_main(const tor_main_configuration_t *);
-#ifndef _WIN32
-typedef int tor_control_socket_t;
-#define TOR_CONTROL_SOCKET_NONE (-1)
-#else
-typedef uintptr_t tor_control_socket_t;
-#define TOR_CONTROL_SOCKET_NONE ((tor_control_socket_t)~(uintptr_t)0)
-#endif
-extern tor_control_socket_t tor_main_configuration_setup_control_socket(
-    tor_main_configuration_t *cfg) ZCL_WEAK_IMPORT;
 
-static tor_control_socket_t g_tor_control = TOR_CONTROL_SOCKET_NONE;
+/* The owning control connection: an unnamed socket pair, not a listener, so
+ * it exposes no control port. Tor's event base and main-loop globals have no
+ * locks and belong to the Tor thread alone, so every request from another
+ * thread goes through this socket and Tor acts on it from its own loop.
+ * Closing our direction ends Tor: Tor reads end-of-file, logs that its owning
+ * controller closed, and shuts down on its own thread. End-of-file waits in
+ * the socket, so a request made before Tor reached its loop is not lost.
+ *
+ * We make the pair and pass __OwningControllerFD ourselves instead of calling
+ * tor_main_configuration_setup_control_socket(). That helper also records
+ * Tor's end in the configuration, and tor_main_configuration_free() closes
+ * that number after Tor has already closed it, when another thread may own
+ * the number. Passing it on the command line leaves one closer.
+ *
+ * Both values are written before the Tor thread starts. g_tor_control is
+ * closed only after that thread and the monitor have been joined. */
+static platform_socket_t g_tor_control = PLATFORM_SOCKET_INVALID;
+static platform_socket_t g_tor_control_peer = PLATFORM_SOCKET_INVALID;
+#ifndef _WIN32
+static struct stat g_tor_control_peer_id;
+#endif
 static _Atomic bool g_serve_onion = true;
 static _Atomic int64_t g_claim_ms = -1;
 static _Atomic int64_t g_network_enabled_ms = -1;
@@ -678,7 +691,61 @@ static int64_t tor_wall_ms(void)
     return clock_now_wall_ms();
 }
 
-extern void tor_shutdown_event_loop_and_exit(int exitcode);
+/* True when a real Tor is linked; the stub has no dynhost and no control
+ * connection to own. */
+static bool tor_is_linked(void)
+{
+    return dynhost_get_global_service != NULL;
+}
+
+/* Open the owning control connection, before the Tor thread exists. The tor
+ * stub never reads it, so it gets none. */
+static bool tor_control_open(void)
+{
+    if (!tor_is_linked())
+        return true;
+    platform_socket_t pair[2];
+    if (!platform_socket_pair(pair))
+        return false;
+#ifndef _WIN32
+    /* A child process must not inherit either end. */
+    (void)fcntl(pair[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(pair[1], F_SETFD, FD_CLOEXEC);
+    if (fstat(pair[1], &g_tor_control_peer_id) != 0) {
+        (void)platform_socket_close(pair[0]);
+        (void)platform_socket_close(pair[1]);
+        return false;
+    }
+#endif
+    g_tor_control = pair[0];
+    g_tor_control_peer = pair[1];
+    return true;
+}
+
+/* Ask Tor to exit, from any thread, any number of times. shutdown() rather
+ * than close(): the number stays ours until the join, so a monitor blocked in
+ * recv() wakes instead of reading a number some other thread now owns. */
+static void tor_request_exit(void)
+{
+    if (g_tor_control != PLATFORM_SOCKET_INVALID)
+        (void)platform_socket_shutdown_both(g_tor_control);
+}
+
+/* On the Tor thread, once tor_run_main() has returned: Tor closes its end when
+ * it took it, and leaves it open when it failed before reading its options.
+ * The socket's identity tells the two apart even if the number was reused.
+ * Windows has no such check, so a failed start there keeps one socket. */
+static void tor_control_peer_release(void)
+{
+#ifndef _WIN32
+    struct stat now;
+    if (g_tor_control_peer != PLATFORM_SOCKET_INVALID &&
+        fstat(g_tor_control_peer, &now) == 0 &&
+        now.st_dev == g_tor_control_peer_id.st_dev &&
+        now.st_ino == g_tor_control_peer_id.st_ino)
+        (void)close(g_tor_control_peer);
+#endif
+}
 
 /* Dynhost external handler — routes .onion requests to our code */
 typedef size_t (*dynhost_external_handler_fn)(const char *, const char *,
@@ -711,13 +778,16 @@ static void *tor_thread_fn(void *arg)
     fflush(stdout);
 
     tor_main_configuration_t *cfg = tor_main_configuration_new();
-    char *argv[] = {"tor", "-f", torrc_path};
-    tor_main_configuration_set_command_line(cfg, 3, argv);
-    /* A node that serves no onion starts with the network disabled and clears
-     * it through this pre-authenticated control connection. */
-    if (!atomic_load(&g_serve_onion) &&
-        tor_main_configuration_setup_control_socket)
-        g_tor_control = tor_main_configuration_setup_control_socket(cfg);
+    /* Tor pre-authenticates this control connection. Stop ends Tor through it,
+     * and a node that serves no onion starts with the network disabled and
+     * clears it here. */
+    char owner_fd[32];
+    snprintf(owner_fd, sizeof(owner_fd), "%" PRIu64,
+             (uint64_t)g_tor_control_peer);
+    char *argv[] = {"tor", "-f", torrc_path,
+                    "__OwningControllerFD", owner_fd};
+    int argc = g_tor_control != PLATFORM_SOCKET_INVALID ? 5 : 3;
+    tor_main_configuration_set_command_line(cfg, argc, argv);
 
     /* Monitor for .onion address in parallel when the helper thread starts. */
     if (thread_registry_spawn("zcl_tor_monitor", tor_onion_monitor, NULL,
@@ -732,6 +802,7 @@ static void *tor_thread_fn(void *arg)
     /* Run Tor in this thread (blocks until exit) */
     int result = tor_run_main(cfg);
     tor_main_configuration_free(cfg);
+    tor_control_peer_release();
 
     /* Signal monitor to stop, then join it if it actually started. */
     atomic_store(&g_tor_running, false);
@@ -743,7 +814,6 @@ static void *tor_thread_fn(void *arg)
     }
 
     printf("Tor: exited with code %d\n", result);
-    atomic_store(&g_tor_thread_done, true);
     return NULL;
 }
 
@@ -891,7 +961,7 @@ static const char *tor_control_enable(void)
 #ifdef _WIN32
     return "clearing DisableNetwork is not supported on this platform";
 #else
-    if (g_tor_control == TOR_CONTROL_SOCKET_NONE)
+    if (g_tor_control == PLATFORM_SOCKET_INVALID)
         return "no control connection to enable the network";
     static const char cmd[] = "SETCONF DisableNetwork=0\r\n";
     struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
@@ -954,7 +1024,27 @@ void tor_integration_enable_reset_for_test(void)
     atomic_store(&g_enable_failures, 0);
     atomic_store(&g_enable_retry_ms, 0);
 }
+
+/* Test seam: the monitor reads the gate as closed without running it, so a
+ * fixture reaches that path with the network still disabled. */
+static _Atomic bool g_test_gate_closed = false;
+
+void tor_integration_close_gate_for_test(bool closed)
+{
+    atomic_store(&g_test_gate_closed, closed);
+}
 #endif
+
+/* One gate pass from the monitor loop. */
+static enum tor_gate tor_monitor_gate_step(bool *enabled)
+{
+#ifdef ZCL_TESTING
+    if (atomic_load(&g_test_gate_closed))
+        return TOR_GATE_CLOSED;
+#endif
+    return tor_network_gate_step(dynhost_get_global_service(), false,
+                                 tor_enable_network, enabled);
+}
 
 /* The monitor of a node that serves no onion: run the gate, then wait for
  * Tor to bootstrap, then keep verifying for as long as Tor runs. */
@@ -967,11 +1057,9 @@ static void tor_monitor_without_service(const char *datadir)
     bool enabled = false;
     bool announced = false;
     for (unsigned spin = 0; atomic_load(&g_tor_running); spin++) {
-        enum tor_gate gate = tor_network_gate_step(
-            dynhost_get_global_service(), false, tor_enable_network,
-            &enabled);
+        enum tor_gate gate = tor_monitor_gate_step(&enabled);
         if (gate == TOR_GATE_CLOSED) {
-            tor_shutdown_event_loop_and_exit(0);
+            tor_request_exit();
             return;
         }
         if (enabled && !announced &&
@@ -1060,10 +1148,50 @@ static bool tor_append_test_torrc(const char *datadir)
 }
 #endif
 
-bool tor_integration_start(const char *datadir, uint16_t p2p_port)
+/* Serializes start and stop, so a stop racing a start ends one whole run: it
+ * either finds nothing started yet or finds a run it can end and join. */
+static pthread_mutex_t g_tor_lifecycle = PTHREAD_MUTEX_INITIALIZER;
+
+/* End the current run, if any, and release everything it held. Caller holds
+ * g_tor_lifecycle.
+ *
+ * The request is event-driven, so a healthy Tor is joined as soon as its loop
+ * reads it. Bound: if the thread has not ended after 10 s (the same total as
+ * the earlier 5 s of retries plus a 5 s join) the join names the straggler on
+ * stderr and keeps waiting, retaining ownership; the node's 90 s shutdown
+ * watchdog (engine/entry/main.c) is what ends a process with Tor stuck.
+ * Once Tor runs its shutdown, its own timer asserts if the loop fails to exit
+ * within 10 s, as it always has. */
+static void tor_run_end(void)
+{
+    if (!atomic_exchange(&g_tor_started, false))
+        return; /* Never started or already stopped */
+
+    atomic_store(&g_tor_running, false);
+    atomic_store(&g_tor_ready, false);
+    atomic_store(&g_tor_dial_ready, false);
+    /* No hidden-service route any more: loopback goes back to meaning
+     * same-host. Disarming can only ever RESTORE a trust exemption, so it
+     * belongs here, on the way down. */
+    net_set_onion_ingress_port(0);
+
+    tor_request_exit();
+    tor_join_thread_bounded(g_tor_thread, "main", 10);
+    if (g_tor_control != PLATFORM_SOCKET_INVALID)
+        (void)platform_socket_close(g_tor_control);
+    g_tor_control = PLATFORM_SOCKET_INVALID;
+    g_tor_control_peer = PLATFORM_SOCKET_INVALID;
+    atomic_store(&g_network_enabled_ms, -1);
+    atomic_store(&g_claim_ms, -1);
+    thread_liveness_retire(&g_tor_liveness);
+}
+
+static bool tor_start_locked(const char *datadir, uint16_t p2p_port)
 {
     if (atomic_load(&g_tor_running))
         return true;
+    /* A run that ended on its own still holds a thread and a socket. */
+    tor_run_end();
 
     snprintf(g_tor_datadir, sizeof(g_tor_datadir), "%s", datadir);
     atomic_store(&g_tor_p2p_port, p2p_port);
@@ -1139,15 +1267,23 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
         printf("Tor: external handler registered for .onion requests\n");
     }
 
-    atomic_store(&g_tor_running, true);
     atomic_store(&g_tor_ready, false);
     atomic_store(&g_tor_dial_ready, false);
-    atomic_store(&g_tor_thread_done, false);
     atomic_store(&g_monitor_started, false);
 
+    /* Tor exits only through this socket, so no socket means no start. */
+    if (!tor_control_open())
+        LOG_FAIL("tor", "cannot create Tor's owning control connection: %s",
+                 strerror(errno));
+
+    atomic_store(&g_tor_running, true);
     if (thread_registry_spawn("zcl_tor", tor_thread_fn, NULL,
                                   &g_tor_thread) != 0) {
         atomic_store(&g_tor_running, false);
+        (void)platform_socket_close(g_tor_control);
+        (void)platform_socket_close(g_tor_control_peer);
+        g_tor_control = PLATFORM_SOCKET_INVALID;
+        g_tor_control_peer = PLATFORM_SOCKET_INVALID;
         LOG_FAIL("tor", "thread_registry_spawn failed for tor thread");
     }
     atomic_store(&g_tor_started, true);
@@ -1155,40 +1291,34 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
     return true;
 }
 
+bool tor_integration_start(const char *datadir, uint16_t p2p_port)
+{
+    pthread_mutex_lock(&g_tor_lifecycle);
+    bool started = tor_start_locked(datadir, p2p_port);
+    pthread_mutex_unlock(&g_tor_lifecycle);
+    return started;
+}
+
 void tor_integration_stop(void)
 {
     tor_integration_clear_requested();
-    if (!atomic_exchange(&g_tor_started, false))
-        return; /* Never started or already stopped */
-
-    atomic_store(&g_tor_running, false);
-    atomic_store(&g_tor_ready, false);
-    atomic_store(&g_tor_dial_ready, false);
-    /* No hidden-service route any more: loopback goes back to meaning
-     * same-host. Disarming can only ever RESTORE a trust exemption, so it
-     * belongs here, on the way down. */
-    net_set_onion_ingress_port(0);
-
-    /* Tell Tor's event loop to exit. Retry briefly in case Tor
-     * hasn't entered its main loop yet when we first call. */
-    for (int i = 0; i < 50; i++) {
-        tor_shutdown_event_loop_and_exit(0);
-        if (atomic_load(&g_tor_thread_done))
-            break;
-        platform_sleep_ms(100); /* up to 5s total */
-    }
-
-    tor_join_thread_bounded(g_tor_thread, "main", 5);
-#ifndef _WIN32
-    if (g_tor_control != TOR_CONTROL_SOCKET_NONE)
-        (void)close(g_tor_control);
-#endif
-    g_tor_control = TOR_CONTROL_SOCKET_NONE;
-    atomic_store(&g_network_enabled_ms, -1);
-    atomic_store(&g_claim_ms, -1);
-    atomic_store(&g_tor_thread_done, false);
-    thread_liveness_retire(&g_tor_liveness);
+    pthread_mutex_lock(&g_tor_lifecycle);
+    tor_run_end();
+    pthread_mutex_unlock(&g_tor_lifecycle);
 }
+
+#ifdef ZCL_TESTING
+/* Test seam: this run's two control sockets, or false when it holds none. */
+bool tor_integration_control_sockets_for_test(int64_t *ours, int64_t *tors)
+{
+    pthread_mutex_lock(&g_tor_lifecycle);
+    bool held = g_tor_control != PLATFORM_SOCKET_INVALID;
+    *ours = (int64_t)g_tor_control;
+    *tors = (int64_t)g_tor_control_peer;
+    pthread_mutex_unlock(&g_tor_lifecycle);
+    return held;
+}
+#endif
 
 const char *tor_integration_get_onion_address(void)
 {
