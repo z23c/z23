@@ -48,7 +48,6 @@ contexts/wallet/modules/wallet/src/wallet_sqlite_keypool.c 2
 contexts/wallet/modules/wallet/src/wallet_sqlite_sapling.c 2
 contexts/wallet/modules/wallet/src/wallet_sqlite_scan_state.c 1
 contexts/wallet/services/src/vault_read.c 2
-contexts/wallet/services/src/wallet_recovery_service.c 1
 core/modules/coins/src/utxo_commitment.c 7
 core/modules/net/src/fast_sync.c 7
 core/modules/net/src/onion_directory.c 5
