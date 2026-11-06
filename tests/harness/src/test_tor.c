@@ -1552,6 +1552,136 @@ static int test_tor_stop_ends_onion_dial(void)
     return why ? 1 : 0;
 }
 
+/* ── Stop hands off to Tor's own thread ──────────────────────────────────
+ *
+ * Tor's event base has no locks, so tor_integration_stop() must not call into
+ * it. Stop ends Tor by closing the owning control connection, which Tor reads
+ * on its own thread. This line in Tor's log records that route; the old
+ * cross-thread call never writes it. */
+#define TOR_OWNER_CLOSED_LINE "Owning controller connection has closed"
+
+/* True when Tor's log names the owner close. The test is about the route, so
+ * it reads the whole file and takes no time limit beyond Tor's own exit. */
+static bool tor_log_shows_owner_close(const char *datadir)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/" TOR_LOG_BASENAME, datadir);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return false;
+    static char buf[262144];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return strstr(buf, TOR_OWNER_CLOSED_LINE) != NULL;
+}
+
+/* Run one stop and print how long it took; the number is reported, not
+ * asserted, so a busy host cannot flip the verdict. */
+static void stop_handoff_timed(const char *label)
+{
+    int64_t t0 = platform_time_monotonic_ms();
+    tor_integration_stop();
+    printf("[%s stop_ms=%lld] ", label,
+           (long long)(platform_time_monotonic_ms() - t0));
+}
+
+static const char *stop_handoff_check_ended(const char *tmpdir, bool real_tor)
+{
+    if (tor_integration_is_enabled() || tor_integration_is_ready() ||
+        tor_integration_is_dial_ready())
+        return "Tor still reports running after stop";
+    if (real_tor && !tor_log_shows_owner_close(tmpdir))
+        return "Tor did not exit through its owning control connection";
+    return NULL;
+}
+
+/* Stop a Tor that reached its main loop, then stop it again. */
+static const char *stop_handoff_running_case(bool real_tor)
+{
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "stoprun");
+    const char *why = NULL;
+    if (!tor_integration_start(tmpdir, 39252))
+        why = "tor_integration_start";
+    else if (real_tor && !wait_tor_main_loop(tmpdir, 90))
+        why = "tor main loop never reached";
+    stop_handoff_timed("running");
+    if (!why)
+        why = stop_handoff_check_ended(tmpdir, real_tor);
+    stop_handoff_timed("second");
+    if (!why && tor_integration_is_enabled())
+        why = "a second stop left Tor running";
+    remove_tree(tmpdir);
+    return why;
+}
+
+/* Stop at once, before Tor has parsed its configuration: the request has to
+ * survive until Tor's loop runs. */
+static const char *stop_handoff_early_case(bool real_tor)
+{
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "stopearly");
+    const char *why = NULL;
+    if (!tor_integration_start(tmpdir, 39253))
+        why = "tor_integration_start";
+    stop_handoff_timed("early");
+    if (!why)
+        why = stop_handoff_check_ended(tmpdir, real_tor);
+    remove_tree(tmpdir);
+    return why;
+}
+
+static void *stop_handoff_stopper(void *arg)
+{
+    (void)arg;
+    tor_integration_stop();
+    return NULL;
+}
+
+/* A stop racing a start: either order is fine, and one more stop always ends
+ * with no Tor and nothing left to join. */
+static const char *stop_handoff_start_race_case(void)
+{
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "stoprace");
+    const char *why = NULL;
+    for (int i = 0; i < 3 && !why; i++) {
+        pthread_t stopper;
+        if (pthread_create(&stopper, NULL, stop_handoff_stopper, NULL) != 0) {
+            why = "stopper thread";
+            break;
+        }
+        bool started = tor_integration_start(tmpdir, 39254);
+        pthread_join(stopper, NULL);
+        tor_integration_stop();
+        if (!started)
+            why = "tor_integration_start";
+        else if (tor_integration_is_enabled())
+            why = "Tor still running after the race";
+    }
+    remove_tree(tmpdir);
+    return why;
+}
+
+static int test_tor_stop_hands_off_to_tor_thread(void)
+{
+    printf("test_tor_stop_hands_off_to_tor_thread: ");
+    bool real_tor = app_tor_real_build_linked();
+    tor_integration_stop();
+    /* Local fixtures only: Tor must not bootstrap to the public network. */
+    tor_integration_set_extra_torrc_for_test("DisableNetwork 1");
+    const char *why = stop_handoff_running_case(real_tor);
+    if (!why)
+        why = stop_handoff_early_case(real_tor);
+    if (!why)
+        why = stop_handoff_start_race_case();
+    tor_integration_stop();
+    tor_integration_set_extra_torrc_for_test("");
+    printf("%s%s%s\n", why ? "FAIL (" : "OK", why ? why : "", why ? ")" : "");
+    return why ? 1 : 0;
+}
+
 static int test_tor_write_torrc_reduced_padding(void)
 {
     int failures = 0;
@@ -1814,6 +1944,7 @@ int test_tor(void)
     failures += test_tor_leaves_sigterm_to_the_node();
     failures += test_tor_stop_ends_onion_dial();
     failures += test_tor_stop_close_race();
+    failures += test_tor_stop_hands_off_to_tor_thread();
     failures += test_tor_write_torrc_no_collision();
     failures += test_tor_write_torrc_datadir();
     failures += test_tor_write_torrc_idempotent();
