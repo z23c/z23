@@ -19,6 +19,7 @@
 
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_build.h"
+#include "codeindex/codeindex_pages.h"
 
 #include "platform/directory_compat.h"
 #include "platform/temp_directory.h"
@@ -328,6 +329,36 @@ static int cis_identical_and_near(const struct cis_repo *repo)
     return failures;
 }
 
+/* A donor's page hints name artifacts in the donor's object store; a seeded worktree must not adopt them. */
+static int cis_donor_pages(const struct cis_repo *repo)
+{
+    static const char body[] = "{\"dir\":\"lib/net\",\"tree\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"topic\":\"net\",\"summary\":\"donor hint\",\"lessons\":[],\"applies_to\":[],"
+        "\"updated\":\"2026-11-04T00:00:00Z\"}";
+    int failures = 0;
+    struct ci_page in = {0}, out;
+    snprintf(in.directory, sizeof(in.directory), "lib/net");
+    snprintf(in.tree_oid, sizeof(in.tree_oid), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    snprintf(in.source_commit, sizeof(in.source_commit), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    snprintf(in.body, sizeof(in.body), "%s", body);
+    uint8_t artifact[32];
+    struct codeindex *donor = codeindex_open_retrieval_view(repo->main_root);
+    bool imported = donor && codeindex_pages_import_hints(donor, body, strlen(body), &in, 1, artifact);
+    codeindex_close(donor);
+    bool ready = imported && cis_drop_store(repo->target_root) &&
+                 cis_write_tree(repo->target_root, cis_units, CIS_UNIT_COUNT, 1);
+    struct cis_observation seeded;
+    if (ready) cis_observe(repo->target_root, &seeded);
+    struct codeindex *ix = ready ? codeindex_open_retrieval_view(repo->target_root) : NULL;
+    bool untrusted = true, truncated = true;
+    CIS_CHECK("a seeded worktree does not adopt its donor's page hints",
+              ready && seeded.seeded && ix &&
+              codeindex_pages_list_bounded(ix, "lib/net", &out, 1, &untrusted, &truncated) == 0 &&
+              !untrusted && !truncated);
+    codeindex_close(ix);
+    return failures;
+}
+
 static int cis_corrupt_donor(const struct cis_repo *repo)
 {
     int failures = 0;
@@ -538,6 +569,7 @@ int test_codeindex_seed(void)
     if (!ready) return failures;
 
     failures += cis_identical_and_near(&repo);
+    failures += cis_donor_pages(&repo);
     failures += cis_different_depfiles(&repo);
     failures += cis_absolute_depfile_paths(&repo);
     failures += cis_altered_donor_includes(&repo);
