@@ -551,12 +551,17 @@ uint32_t msgprocessor_test_fc_rate_dropped(node_id_t peer_id);
 bool msgprocessor_test_fc_rate_should_score(node_id_t peer_id);
 void msgprocessor_test_fc_rate_reset(void);
 
-/* test hooks: drive the g_swarm_active atomic CAS used by the
- * zmanifest handler. try_claim returns true exactly once until
+/* test hooks: drive the g_swarm_active atomic CAS a swarm start would use;
+ * nothing starts one in production. try_claim returns true exactly once until
  * release() is called; concurrent callers see at most one success. */
 bool msgprocessor_test_swarm_try_claim(void);
 void msgprocessor_test_swarm_release(void);
 bool msgprocessor_test_swarm_is_active(void);
+
+/* test hook: run one zblkdata message as if a block swarm were active. */
+void msgprocessor_test_block_data_during_swarm(struct msg_processor *mp,
+                                               struct p2p_node *node,
+                                               struct byte_stream *s);
 
 /* test hook (D1): drive the swarm's aggregate SHA3 UTXO-snapshot verify
  * + reaction (peer offence + typed blocker on mismatch) directly,

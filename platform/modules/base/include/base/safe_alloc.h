@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 
 /* ── Allocation fault injection ─────────────────────────
@@ -34,6 +35,15 @@ void zcl_alloc_fault_clear(void);
 const char *zcl_alloc_fault_armed_label(void);
 bool zcl_alloc_fault_should_fail(const char *label);
 
+/* ── Allocation failures seen on this thread ────────────────────────
+ *
+ * Counts every checked allocation that returned NULL on the calling thread,
+ * real or injected. A step whose result is a plain false can read this before
+ * and after: if the count moved, the failure may be local memory rather than
+ * anything about the data it was looking at. */
+uint64_t zcl_alloc_failure_count(void);
+void zcl_alloc_note_failure(void);
+
 /* ── Checked allocators ─────────────────────────────────────────── */
 
 /* Returns NULL on failure, but logs + emits event first.
@@ -44,12 +54,14 @@ static inline void *zcl_malloc_impl(size_t size, const char *label,
     if (size > 0 && zcl_alloc_fault_should_fail(label)) {
         fprintf(stderr, "zcl_malloc INJECTED FAILURE: %zu bytes for '%s' at %s:%d\n",
                 size, label, file, line);
+        zcl_alloc_note_failure();
         return NULL;
     }
     void *p = malloc(size);
     if (!p && size > 0) {
         fprintf(stderr, "zcl_malloc FAILED: %zu bytes for '%s' at %s:%d\n",
                 size, label, file, line);
+        zcl_alloc_note_failure();
     }
     return p;
 }
@@ -61,12 +73,14 @@ static inline void *zcl_calloc_impl(size_t count, size_t size,
     if (count > 0 && size > 0 && zcl_alloc_fault_should_fail(label)) {
         fprintf(stderr, "zcl_calloc INJECTED FAILURE: %zu x %zu bytes for '%s' at %s:%d\n",
                 count, size, label, file, line);
+        zcl_alloc_note_failure();
         return NULL;
     }
     void *p = calloc(count, size);
     if (!p && count > 0 && size > 0) {
         fprintf(stderr, "zcl_calloc FAILED: %zu x %zu bytes for '%s' at %s:%d\n",
                 count, size, label, file, line);
+        zcl_alloc_note_failure();
     }
     return p;
 }
@@ -80,12 +94,14 @@ static inline void *zcl_realloc_impl(void *ptr, size_t size,
     if (size > 0 && zcl_alloc_fault_should_fail(label)) {
         fprintf(stderr, "zcl_realloc INJECTED FAILURE: %zu bytes for '%s' at %s:%d\n",
                 size, label, file, line);
+        zcl_alloc_note_failure();
         return NULL;
     }
     void *p = realloc(ptr, size);
     if (!p && size > 0) {
         fprintf(stderr, "zcl_realloc FAILED: %zu bytes for '%s' at %s:%d\n",
                 size, label, file, line);
+        zcl_alloc_note_failure();
     }
     return p;
 }

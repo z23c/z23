@@ -1107,3 +1107,7 @@ later lane flips it HARD.
 - 2026-11-06T06:24:59Z — REASON: Work out two merkle roots in the array each caller already owns
   old ROOT: 6fb5a6f97cab20d9ae219c9c01fd480fac0eed7322983c90b5bcc56d2d5ddfc9
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T06:25:15Z — REASON: Stop reading a local allocation failure as a verdict on a block or piece
+  old ROOT: d31622b9d07398a5be5065fb1122263eca16969d574f74e5630385ec09b60ffb
+  by: owner unseal ritual (make core-unseal)

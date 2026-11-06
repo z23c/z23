@@ -449,7 +449,8 @@ static const char k_replay_probe_head[] =
 
 static const char k_replay_probe_fault[] =
     "bool zcl_alloc_fault_should_fail(const char *label)\n"
-    "{ (void)label; alloc_calls++; return true; }\n";
+    "{ (void)label; alloc_calls++; return true; }\n"
+    "void zcl_alloc_note_failure(void) {}\n";
 
 static const char k_replay_probe_snap[] =
     "int main(int argc, char **argv)\n"

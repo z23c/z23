@@ -26,6 +26,7 @@
 #include "core/uint256.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
+#include "util/safe_alloc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -164,6 +165,51 @@ static struct zcl_result rv_truncated_iter(void *self, uint32_t start_height,
     return ZCL_OK;
 }
 
+/* A verifier that runs out of memory has no verdict on the block. The sweep stops
+ * with a failed run and counts nothing against the block. The fixture block
+ * carries a full-size solution, so the Equihash check reaches its allocation. */
+static int rv_ci_local_memory_failure(void)
+{
+    int failures = 0;
+    char tmpl[PATH_MAX];
+    char *dir = test_mkdtemp(tmpl, sizeof tmpl, "zcl_rv_oom");
+    RV_CHECK("ci: mkdtemp memory-failure", dir != NULL);
+    if (!dir) return failures;
+
+    struct block_log_file *log = NULL;
+    struct block_log_port port = {0};
+    struct zcl_result opened = block_log_file_open(dir, &log, &port);
+    RV_CHECK("ci: open memory-failure log", opened.ok);
+    if (!opened.ok) return failures;
+
+    struct block b;
+    rv_build_block(&b, 0, NULL);
+    b.header.nSolutionSize = 1344;
+    memset(b.header.nSolution, 0x5a, b.header.nSolutionSize);
+    bool appended = rv_append_block(&port, 0, &b, NULL);
+    RV_CHECK("ci: append full-size solution block", appended);
+    if (appended) {
+        /* With memory, the same block gets a real verdict. */
+        struct replay_verify_report rep;
+        struct zcl_result swept = replay_verify_run_port(&port, 0, 0, &rep);
+        RV_CHECK("ci: bad solution is a pow failure with memory",
+                 swept.ok && rep.pow_failures == 1);
+
+        zcl_alloc_fault_fail_next("equihash_indices");
+        swept = replay_verify_run_port(&port, 0, 0, &rep);
+        bool fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        RV_CHECK("ci: the verifier's allocation failed", fired);
+        RV_CHECK("ci: memory failure fails the run", !swept.ok);
+        RV_CHECK("ci: memory failure counts nothing against the block",
+                 rep.pow_failures == 0 && rep.merkle_failures == 0 &&
+                 rep.blocks_checked == 0 && rep.first_fail_height == -1);
+    }
+    block_free(&b);
+    block_log_file_close(log);
+    return failures;
+}
+
 static int rv_ci_wrong_hash_teeth(void)
 {
     int failures = 0;
@@ -258,6 +304,7 @@ static int rv_ci_fixture_teeth(void)
 
     /* The index hash must identify the block payload. */
     failures += rv_ci_wrong_hash_teeth();
+    failures += rv_ci_local_memory_failure();
 
     /* 2. NEGATIVE CONTROL: a fresh dir whose middle block points at the
      * wrong prev hash; the linkage failure must be detected. */

@@ -81,6 +81,7 @@ bool zssh_wr_ok(const struct zssh_wr *w) { return !w->bad; }
 #ifndef ZSSH_AUTH_TEST_REAL_LIBS
 bool zcl_random_secret_bytes(uint8_t *out, size_t n) { (void)out; (void)n; return false; }
 bool zcl_alloc_fault_should_fail(const char *label) { (void)label; return false; }
+void zcl_alloc_note_failure(void) {}
 #endif
 
 /* ---- harness ------------------------------------------------------------ */

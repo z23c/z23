@@ -28,6 +28,7 @@ bool zcl_alloc_fault_should_fail(const char *label) {
     (void)label;
     return false;
 }
+void zcl_alloc_note_failure(void) {}
 enum zcl_log_level zcl_log_level_get(void) { return ZCL_LOG_OFF; }
 void zcl_log_emit_at(enum zcl_log_level level, const char *format, ...) {
     (void)level;

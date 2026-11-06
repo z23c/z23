@@ -327,6 +327,13 @@ static bool parse_block_piece_payload_refs(
     return true;
 }
 
+/* What a failed payload parse says about the sender. An allocation failure on
+ * this thread means the payloads were not fully checked, so it says nothing. */
+static bool block_piece_parse_failed_locally(uint64_t alloc_failures_before)
+{
+    return zcl_alloc_failure_count() != alloc_failures_before;
+}
+
 bool mp_snapshot_is_active(void)
 {
     return snapsync_is_active();
@@ -1167,9 +1174,17 @@ static void mp_zs_blkdata_apply_piece(struct msg_processor *mp,
     struct block_piece_payload_ref *block_refs = NULL;
     struct block_swarm_abandonment integrity_abandoned = {0};
     bool did_abandon_integrity = false;
+    uint64_t alloc_failures = zcl_alloc_failure_count();
     if (!parse_block_piece_payload_refs(
             s, (const uint8_t (*)[32])blk_hashes,
             block_count, &block_refs)) {
+        if (block_piece_parse_failed_locally(alloc_failures)) {
+            LOG_WARN("net",
+                     "zblkdata piece %u from peer %s not checked, out of "
+                     "memory; waiting for timeout retry",
+                     piece_index, node->addr_name);
+            return;
+        }
         printf("Peer %s: bad zblkdata block payloads\n",
                node->addr_name);
         peer_scoring_record(mp->net_mgr, node,
@@ -1250,15 +1265,20 @@ static void mp_zs_on_block_data(struct msg_processor *mp,
     } else {
         /* Read block hashes */
         uint8_t (*blk_hashes)[32] = zcl_calloc(block_count, 32, "blk_piece_hashes");
+        if (!blk_hashes) {
+            LOG_WARN("net",
+                     "zblkdata piece %u from peer %s not read, out of memory; "
+                     "waiting for timeout retry",
+                     piece_index, node->addr_name);
+            return;
+        }
         bool parse_ok = true;
-        if (blk_hashes) {
-            for (uint32_t i = 0; i < block_count && parse_ok; i++) {
-                if (!stream_read_bytes(s, blk_hashes[i], 32))
-                    parse_ok = false;
-            }
+        for (uint32_t i = 0; i < block_count && parse_ok; i++) {
+            if (!stream_read_bytes(s, blk_hashes[i], 32))
+                parse_ok = false;
         }
 
-        if (parse_ok && blk_hashes) {
+        if (parse_ok) {
             mp_zs_blkdata_apply_piece(mp, node, s, blk_hashes,
                                       block_count, piece_index);
         } else {
@@ -1268,6 +1288,15 @@ static void mp_zs_on_block_data(struct msg_processor *mp,
         }
         free(blk_hashes);
     }
+}
+
+void msgprocessor_test_block_data_during_swarm(struct msg_processor *mp,
+                                               struct p2p_node *node,
+                                               struct byte_stream *s)
+{
+    bool was_active = atomic_exchange(&g_block_swarm_active, true);
+    mp_zs_on_block_data(mp, node, s);
+    atomic_store(&g_block_swarm_active, was_active);
 }
 
 /* Peer sends their piece availability bitmap.

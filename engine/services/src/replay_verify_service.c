@@ -33,6 +33,7 @@
 
 #include "util/log_json.h"
 #include "util/log_macros.h"
+#include "util/safe_alloc.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -50,6 +51,8 @@ struct sweep_state {
     uint64_t                     max_blocks;     /* 0 == unbounded            */
     bool                         deser_failed;   /* operational stop signal   */
     uint32_t                     deser_height;   /* height that failed parse  */
+    bool                         local_failed;   /* could not run the checks  */
+    uint32_t                     local_height;   /* height left unchecked     */
 };
 
 /* Record the first observed failure (any class) into the report. Static
@@ -109,10 +112,22 @@ static bool sweep_cb(uint32_t height,
      * off: we are proving PoW + integrity, not contextual block policy. */
     struct validation_state vstate;
     validation_state_init(&vstate);
+    uint64_t alloc_failures = zcl_alloc_failure_count();
     bool block_ok = check_block(&blk, &vstate, st->params,
                                 /*check_pow=*/true,
                                 /*check_merkle_root=*/true,
                                 /*check_size_limits=*/false);
+
+    /* A check that ran out of memory has no verdict on the block: nothing is
+     * counted against it. Like a parse failure, it stops the sweep and surfaces
+     * as a non-OK run, so a short sweep cannot read as a clean one. */
+    if (!block_ok && (validation_state_is_error(&vstate) ||
+                      zcl_alloc_failure_count() != alloc_failures)) {
+        block_free(&blk);
+        st->local_failed = true;
+        st->local_height = height;
+        return false; /* stop iteration */
+    }
 
     if (!block_ok) {
         /* check_block folds PoW (equihash + high-hash) and merkle into one
@@ -224,6 +239,13 @@ struct zcl_result replay_verify_run_port(struct block_log_port *port,
                    "replay_verify_run_port: block deserialize failed at "
                    "height %u (corrupt/truncated storage)",
                    st.deser_height);
+    }
+
+    if (st.local_failed) {
+        return ZCL_ERR(-9,
+                   "replay_verify_run_port: block checks ran out of memory at "
+                   "height %u; no verdict on that block",
+                   st.local_height);
     }
 
     /* An adapter may return OK after reaching its own end of iteration.

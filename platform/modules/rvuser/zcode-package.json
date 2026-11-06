@@ -8,12 +8,12 @@
   "source_dir": "src",
   "dependencies": [
     {
-      "root": "bba848117874ece6474e20ff50c40df773255bf1e0a0075eab7a76ebe45992de",
+      "root": "9eb43df134f89ffd511a557c93bca0c15c65563fe63a41c491e295fdc159afdc",
       "name": "zclassic23/base",
       "semver": "0.1.0-dev.1"
     },
     {
-      "root": "10f058cf346b27e752a124d08a27791467e84659e266337a8a4081d7d0eea617",
+      "root": "cbc6238ef0e9e950e5d19eed075fa740819aa5da6d290c8e9cbd42c64a0154e8",
       "name": "zclassic23/rvemu",
       "semver": "0.1.0-dev.1"
     }

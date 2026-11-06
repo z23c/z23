@@ -2332,6 +2332,103 @@ static int test_pin_reject_more_work_marks_seen(void)
     return failures;
 }
 
+/* A one-transaction block whose header commits to that transaction. */
+static bool pin_matching_block(struct block *blk, uint8_t marker)
+{
+    block_init(blk);
+    blk->vtx = zcl_calloc(1, sizeof(*blk->vtx), "pin_matching_block");
+    if (!blk->vtx)
+        return false;
+    blk->num_vtx = 1;
+    transaction_init(&blk->vtx[0]);
+    blk->vtx[0].lock_time = marker;
+    transaction_compute_hash(&blk->vtx[0]);
+    blk->header.nVersion = 4;
+    blk->header.nTime = 1700000100u + marker;
+    blk->header.nBits = 0x1f00ffffu;
+    blk->header.hashMerkleRoot = blk->vtx[0].hash;
+    return true;
+}
+
+/* A zblkdata message for piece 0 carrying one block, under `named_hash`. */
+static void pin_block_data_stream(struct byte_stream *s,
+                                  const struct byte_stream *body,
+                                  const struct uint256 *named_hash)
+{
+    stream_init(s, body->size + 64);
+    (void)stream_write_u32_le(s, 0);
+    (void)stream_write_u32_le(s, 1);
+    (void)stream_write(s, named_hash->data, 32);
+    (void)stream_write_compact_size(s, body->size);
+    (void)stream_write(s, body->data, body->size);
+}
+
+/* The sender's penalty for one zblkdata message, with `label` failing if given. */
+static int pin_block_data_penalty(const struct byte_stream *body,
+                                  const struct uint256 *named_hash,
+                                  const char *label, bool *fired)
+{
+    peer_scoring_init();
+    struct net_manager nm;
+    net_manager_init(&nm);
+    struct msg_processor mp;
+    pin_mp_init(&mp, NULL, &nm);
+    struct p2p_node *node = pin_peer_node(&nm, 627);
+    if (!node) {
+        net_manager_free(&nm);
+        return -1;
+    }
+    struct byte_stream s;
+    pin_block_data_stream(&s, body, named_hash);
+    if (label)
+        zcl_alloc_fault_fail_next(label);
+    msgprocessor_test_block_data_during_swarm(&mp, node, &s);
+    *fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    int penalty = atomic_load(&node->misbehavior);
+    stream_free(&s);
+    p2p_node_free(node);
+    net_manager_free(&nm);
+    return penalty;
+}
+
+/* zblkdata the node cannot check for want of memory costs the sender nothing,
+ * at each allocation on the way; the same message naming the wrong block is
+ * still penalized. */
+static int test_block_data_local_memory_failure_not_scored(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: zblkdata checked with no memory does not penalize the sender") {
+        struct block blk;
+        ASSERT(pin_matching_block(&blk, 0x32));
+        struct uint256 hash;
+        block_get_hash(&blk, &hash);
+        struct byte_stream body;
+        stream_init(&body, 256);
+        ASSERT(block_serialize(&blk, &body));
+
+        static const char *const labels[] = {
+            "blk_piece_hashes", "block_piece_payload_refs", "block_vtx",
+            "domain_check_block_txids",
+        };
+        bool fired = false;
+        for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
+            fired = false;
+            ASSERT(pin_block_data_penalty(&body, &hash, labels[i], &fired) == 0);
+            ASSERT(fired);
+        }
+
+        struct uint256 wrong = hash;
+        wrong.data[0] ^= 0xff;
+        ASSERT(pin_block_data_penalty(&body, &wrong, NULL, &fired) > 0);
+
+        stream_free(&body);
+        block_free(&blk);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* Build-identity prefix reader (msg_version_parse_build_identity_prefix),
  * one row per branch. A "(src:" candidate whose first 12 characters are not
  * lowercase hex is skipped and the scan moves to the next marker. Success
@@ -2747,6 +2844,7 @@ int test_msg_handlers(void)
     failures += test_pin_reject_no_index_marks_seen();
     failures += test_pin_reject_equal_work_marks_seen();
     failures += test_pin_reject_more_work_marks_seen();
+    failures += test_block_data_local_memory_failure_not_scored();
     failures += test_msg_build_identity_prefix_branches();
     { extern int msg_block_body_identity_tests(void); failures += msg_block_body_identity_tests(); }
 

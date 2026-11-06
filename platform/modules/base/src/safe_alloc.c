@@ -36,6 +36,18 @@ const char *zcl_alloc_fault_armed_label(void)
     return atomic_load(&g_alloc_fault_site);
 }
 
+static _Thread_local uint64_t g_alloc_failures_this_thread;
+
+uint64_t zcl_alloc_failure_count(void)
+{
+    return g_alloc_failures_this_thread;
+}
+
+void zcl_alloc_note_failure(void)
+{
+    g_alloc_failures_this_thread++;
+}
+
 bool zcl_alloc_fault_should_fail(const char *label)
 {
     if (!label || !*label) return false;
