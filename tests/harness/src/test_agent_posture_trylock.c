@@ -543,6 +543,10 @@ int test_agent_posture_trylock(void)
     failures += case_background_validation_height_populates();
     failures += case_collect_never_repairs_cec_state();
     failures += case_progress_contention_preserves_bootstrap();
+    {
+        extern int test_agent_posture_checkpoint_cases(void);
+        failures += test_agent_posture_checkpoint_cases();
+    }
     AP_CHECK("SQLite contention probes restored", ap_restore_probes());
     if (failures == 0)
         printf("test_agent_posture_trylock: ALL PASSED\n");
