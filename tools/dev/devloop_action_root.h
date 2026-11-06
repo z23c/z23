@@ -236,6 +236,35 @@ struct zcl_action_root_result {
 bool zcl_action_root_derive(const struct zcl_action_root_request *req,
                             struct zcl_action_root_result *out);
 void zcl_action_root_result_free(struct zcl_action_root_result *out);
+
+/* Trusted-caller compile observation, not execution proof. Begin owns all
+ * strings and captures driver facts/environment, then T0. Caller must execute
+ * exactly argv/env in cwd. Only -c, -MD, split -o/-MF and the documented
+ * bounded compile-flag subset are admitted; no cache or command is executed
+ * automatically (bounded compiler fact queries do run). Existing outputs are
+ * never removed. Finish is single-use and requires a newly written depfile.
+ * Stage c23.compile.observed.v1 binds a fixed compile-only policy and ABI
+ * generation 1 with an empty symbol list, not a borrowed hotload ABI.
+ * Returned pointers remain borrowed until close. No publication.
+ * Begin initializes every supplied output before any failure: *out is NULL
+ * and diagnostic is zeroed, then populated with a refusal when available.
+ */
+struct zcl_compile_observation;
+/* Existing action grammar, restricted to valueless/joined semantic compile
+ * flags. Does not admit action mode, dependency controls or linker options. */
+bool zcl_action_root_semantic_compile_flag(const char *arg);
+bool zcl_compile_observation_begin(
+    const char *root, const char *const *argv, size_t argc, const char *depfile,
+    struct zcl_compile_observation **out,
+    struct zcl_action_root_result *diagnostic);
+const char *zcl_compile_observation_cwd(const struct zcl_compile_observation *o);
+const char *const *zcl_compile_observation_argv(const struct zcl_compile_observation *o);
+const char *const *zcl_compile_observation_env(const struct zcl_compile_observation *o);
+bool zcl_compile_observation_finish(struct zcl_compile_observation *o,
+    bool compile_succeeded, struct zcl_action_root_result *result);
+const struct zcl_action_root_request *zcl_compile_observation_request(
+    const struct zcl_compile_observation *o);
+void zcl_compile_observation_close(struct zcl_compile_observation *o);
 /* SHA3-256 of a regular file's bytes, memoized by its stat identity once
  * settled (the same digest the derivation records). */
 bool zcl_action_root_file_sha3(const char *path, uint8_t out[32]);

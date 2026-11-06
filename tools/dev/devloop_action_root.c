@@ -927,6 +927,7 @@ static const char *const k_ar_exact[] = {
     "-g0", "-g1", "-g2", "-g3", "-ggdb", "-gdwarf-4", "-gdwarf-5",
     "-gno-record-gcc-switches", "-grecord-gcc-switches", "-O", "-O0", "-O1",
     "-O2", "-O3", "-Os", "-Og", "-Oz", "-mno-red-zone",
+    "-ffp-contract=off", "-pthread",
 };
 
 /* Joined-value families whose value names no file (bound by value: a
@@ -982,6 +983,20 @@ static bool ar_flag_ok(const char *arg)
     /* Warnings name no file; -Wp, and -Wa, forward to other programs. */
     return arg[1] == 'W' && strncmp(arg, "-Wp,", 4) != 0 &&
            strncmp(arg, "-Wa,", 4) != 0;
+}
+
+bool zcl_action_root_semantic_compile_flag(const char *arg)
+{
+    if (!arg || arg[0] != '-' || !arg[1])
+        return false;
+    /* These are admitted by general action derivation, but are not semantic
+     * compile flags: the observer validates its own action/dependency mode. */
+    static const char *const controls[] = {
+        "-c", "-MD", "-MMD", "-MP", "-shared", "-bundle", "-nostartfiles"
+    };
+    return !ar_in(controls, sizeof(controls) / sizeof(controls[0]), arg,
+                  strlen(arg)) && strncmp(arg, "-Wl,", 4) != 0 &&
+           ar_flag_ok(arg);
 }
 
 static const struct ar_valued *ar_valued_opt(const char *arg)

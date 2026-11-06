@@ -35,6 +35,10 @@
  *
  * All fixture state lives under ./test-tmp/. */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "test/test_core.h"
 #include "test/action_root_codec_checks.h"
 
@@ -2874,6 +2878,232 @@ static void test_cc1_sysroot_parse(void)
              "driver that cannot answer -print-sysroot", ok);
 }
 
+#if !defined(_WIN32)
+struct observation_fixture {
+    char root[PATH_MAX];
+    char compiler[PATH_MAX];
+    char prefix_map[PATH_MAX + 64];
+    const char *argv[32];
+    size_t argc;
+};
+
+static bool observation_fixture_init(struct observation_fixture *fixture)
+{
+    char raw[PATH_MAX];
+    test_make_tmpdir(raw, sizeof(raw), "action_root", "compile_observation");
+    if (!platform_directory_canonical_real(raw, fixture->root, sizeof(fixture->root)) ||
+        !realpath("/usr/bin/cc", fixture->compiler) ||
+        !fx_write(fixture->root, "inc/defs.h", "#define VALUE 7\n") ||
+        !fx_write(fixture->root, "unit.c",
+                  "#include <stddef.h>\n#include \"defs.h\"\n"
+                  "const char *message = TEXT;\nint value = VALUE;\n"))
+        return false;
+    (void)snprintf(fixture->prefix_map, sizeof(fixture->prefix_map),
+                   "-ffile-prefix-map=%s=/zclassic23", fixture->root);
+    const char *args[] = {
+        fixture->compiler, "-std=c23", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-pedantic", "-Wundef", "-Wshadow", "-ffp-contract=off", "-pthread",
+        fixture->prefix_map, "-D_POSIX_C_SOURCE=200809L", "-DRAYMATH_STATIC_INLINE",
+        "-DTEXT=\"hello space\"", "-I", "inc", "-MD", "-MP", "-c",
+        "unit.c", "-o", "unit.o", "-MF", "unit.d", NULL
+    };
+    fixture->argc = sizeof(args) / sizeof(args[0]) - 1;
+    memcpy(fixture->argv, args, sizeof(args));
+    return true;
+}
+
+static bool observation_compile(const struct zcl_compile_observation *observation)
+{
+    const char *command[ZCL_ACTION_ROOT_CHILD_ENV_MAX + 260];
+    size_t count = 0;
+    command[count++] = "/usr/bin/env";
+    command[count++] = "-i";
+    const char *const *environment = zcl_compile_observation_env(observation);
+    const char *const *arguments = zcl_compile_observation_argv(observation);
+    for (size_t i = 0; environment[i]; i++)
+        command[count++] = environment[i];
+    for (size_t i = 0; arguments[i]; i++)
+        command[count++] = arguments[i];
+    command[count] = NULL;
+    char output[4096];
+    bool timed_out = false;
+    int status = zcl_spawn_capture_merged_in_dir_observed(command,
+        zcl_compile_observation_cwd(observation), output, sizeof(output),
+        10000, &timed_out);
+    if (status != 0 || timed_out)
+        printf("  observation compiler: status=%d timeout=%d %s\n",
+               status, timed_out, output);
+    return status == 0 && !timed_out;
+}
+
+static bool observation_begin(struct observation_fixture *fixture,
+                              struct zcl_compile_observation **observation)
+{
+    struct zcl_action_root_result diagnostic = {0};
+    bool ok = zcl_compile_observation_begin(fixture->root, fixture->argv,
+        fixture->argc, fixture->argv[24], observation, &diagnostic);
+    if (!ok)
+        printf("  observation begin: %s: %s\n", diagnostic.miss, diagnostic.why);
+    zcl_action_root_result_free(&diagnostic);
+    return ok;
+}
+
+static bool observation_root(struct observation_fixture *fixture, uint8_t root[32])
+{
+    struct zcl_compile_observation *observation = NULL;
+    struct zcl_action_root_result result = {0}, repeated = {0};
+    bool ok = observation_begin(fixture, &observation) &&
+              observation_compile(observation) &&
+              zcl_compile_observation_finish(observation, true, &result);
+    if (!ok)
+        printf("  observation finish: %s: %s\n", result.miss, result.why);
+    if (ok) {
+        const struct zcl_action_root_request *request =
+            zcl_compile_observation_request(observation);
+        ok = request && zcl_action_root_derive(request, &repeated) &&
+             memcmp(result.root, repeated.root, 32) == 0;
+        memcpy(root, result.root, 32);
+        zcl_action_root_result_free(&repeated);
+        AR_CHECK("observation finish is single-use",
+                 !zcl_compile_observation_finish(observation, true, &repeated) &&
+                 strcmp(repeated.miss, "observation_consumed") == 0);
+    }
+    zcl_action_root_result_free(&result);
+    zcl_action_root_result_free(&repeated);
+    zcl_compile_observation_close(observation);
+    return ok;
+}
+
+static void observation_refusals(struct observation_fixture *fixture)
+{
+    const char *refused[] = { "-MMD", "-shared", "-Wl,-z,now",
+                            "-fplugin=unknown", "@response", "-unknown" };
+    const char *saved = fixture->argv[9];
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        fixture->argv[9] = refused[i];
+        struct zcl_compile_observation *observation = NULL;
+        AR_CHECK("observation rejects unsupported compile flag",
+                 !observation_begin(fixture, &observation) && !observation);
+        zcl_compile_observation_close(observation);
+    }
+    fixture->argv[9] = saved;
+    struct zcl_compile_observation *observation = NULL;
+    struct zcl_action_root_result result = {0};
+    bool begun = observation_begin(fixture, &observation);
+    AR_CHECK("observation rejects stale depfile despite reported success",
+             begun && !zcl_compile_observation_finish(observation, true, &result) &&
+             strcmp(result.miss, "depfile_stale") == 0);
+    zcl_action_root_result_free(&result);
+    zcl_compile_observation_close(observation);
+    observation = NULL;
+    begun = observation_begin(fixture, &observation);
+    AR_CHECK("observation rejects failed compile",
+             begun && !zcl_compile_observation_finish(observation, false, &result) &&
+             strcmp(result.miss, "closure_unobserved") == 0);
+    zcl_action_root_result_free(&result);
+    zcl_compile_observation_close(observation);
+}
+
+static void observation_leaf_refusals(struct observation_fixture *fixture)
+{
+    const size_t slots[] = { 20, 22, 24 };
+    char leaf[PATH_MAX];
+    (void)snprintf(leaf, sizeof(leaf), "%s/escape.c", fixture->root);
+    bool linked = symlink("/outside-observation-root/missing", leaf) == 0;
+    for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); i++) {
+        const char *saved = fixture->argv[slots[i]];
+        fixture->argv[slots[i]] = "escape.c";
+        struct zcl_compile_observation *observation = NULL;
+        AR_CHECK("observation refuses source/output/depfile leaf symlink",
+                 linked && !observation_begin(fixture, &observation) && !observation);
+        zcl_compile_observation_close(observation);
+        fixture->argv[slots[i]] = saved;
+    }
+    (void)unlink(leaf);
+    struct zcl_compile_observation *observation = NULL;
+    struct zcl_action_root_result result = {0};
+    bool ready = observation_begin(fixture, &observation) && observation_compile(observation);
+    (void)snprintf(leaf, sizeof(leaf), "%s/%s", fixture->root, fixture->argv[24]);
+    bool swapped = ready && unlink(leaf) == 0 && symlink("unit.c", leaf) == 0;
+    AR_CHECK("observation rejects depfile symlink swapped after compile",
+             swapped && !zcl_compile_observation_finish(observation, true, &result) &&
+             strcmp(result.miss, "depfile_stale") == 0);
+    zcl_action_root_result_free(&result);
+    zcl_compile_observation_close(observation);
+    (void)unlink(leaf);
+}
+
+static void observation_window_refusals(struct observation_fixture *fixture)
+{
+    struct zcl_compile_observation *observation = NULL;
+    struct zcl_action_root_result result = {0};
+    bool ready = observation_begin(fixture, &observation);
+    const char *saved = fixture->argv[14];
+    fixture->argv[14] = "-DTEXT=broken";
+    AR_CHECK("observation owns exact argument tokens and cwd",
+             ready && strcmp(zcl_compile_observation_argv(observation)[14], saved) == 0 &&
+             strcmp(zcl_compile_observation_cwd(observation), fixture->root) == 0);
+    fixture->argv[14] = saved;
+    bool compiled = ready && observation_compile(observation);
+    bool changed = compiled && fx_write(fixture->root, "inc/defs.h", "#define VALUE 9\n");
+    AR_CHECK("observation refuses input mutation after T0",
+             changed && !zcl_compile_observation_finish(observation, true, &result) &&
+             strcmp(result.miss, "input_changed_during_compile") == 0);
+    zcl_action_root_result_free(&result);
+    zcl_compile_observation_close(observation);
+    AR_CHECK("observation restores private input", fx_write(fixture->root,
+             "inc/defs.h", "#define VALUE 7\n"));
+
+    char driver[PATH_MAX];
+    (void)snprintf(driver, sizeof(driver), "%s/cc", fixture->root);
+    bool linked = symlink(fixture->compiler, driver) == 0;
+    const char *original = fixture->argv[0];
+    fixture->argv[0] = driver;
+    observation = NULL;
+    ready = linked && observation_begin(fixture, &observation) &&
+            observation_compile(observation);
+    bool replaced = ready && unlink(driver) == 0 && symlink("/usr/bin/false", driver) == 0;
+    AR_CHECK("observation refuses compiler replacement during window",
+             replaced && !zcl_compile_observation_finish(observation, true, &result) &&
+             strcmp(result.miss, "toolchain_changed") == 0);
+    zcl_action_root_result_free(&result);
+    zcl_compile_observation_close(observation);
+    fixture->argv[0] = original;
+    (void)unlink(driver);
+}
+
+static void test_compile_observation(void)
+{
+    struct observation_fixture fixture = {0};
+    bool ready = observation_fixture_init(&fixture);
+    AR_CHECK("observation native compiler fixture", ready);
+    if (!ready)
+        return;
+    uint8_t baseline[32], relocated[32], changed[32];
+    bool initial = observation_root(&fixture, baseline);
+    AR_CHECK("observation real compile and normal derive agree with game flags", initial);
+    fixture.argv[22] = "relocated.o";
+    fixture.argv[24] = "relocated.d";
+    AR_CHECK("observation output relocation preserves root",
+             observation_root(&fixture, relocated) && initial &&
+             memcmp(baseline, relocated, 32) == 0);
+    fixture.argv[10] = "-pipe";
+    AR_CHECK("observation pthread flag changes root",
+             observation_root(&fixture, changed) && initial &&
+             memcmp(baseline, changed, 32) != 0);
+    fixture.argv[10] = "-pthread";
+    fixture.argv[9] = "-pipe";
+    AR_CHECK("observation fp contraction flag changes root",
+             observation_root(&fixture, changed) && initial &&
+             memcmp(baseline, changed, 32) != 0);
+    fixture.argv[9] = "-ffp-contract=off";
+    observation_refusals(&fixture);
+    observation_leaf_refusals(&fixture);
+    observation_window_refusals(&fixture);
+    test_rm_rf_recursive(fixture.root);
+}
+#endif
+
 int test_action_root(void)
 {
 #if defined(__linux__) && ATOMIC_INT_LOCK_FREE == 2
@@ -2892,6 +3122,9 @@ int test_action_root(void)
     test_builtin_dir_parse();
     test_cc1_sysroot_parse();
     test_canon_driver_word();
+#if !defined(_WIN32)
+    test_compile_observation();
+#endif
 #if defined(__linux__) && ATOMIC_INT_LOCK_FREE == 2
     image_isolated_controls();
 #endif

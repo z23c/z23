@@ -301,7 +301,16 @@ static const char *const k_ars_implicit[] = {
 };
 #define ARS_IMPLICIT_N (sizeof(k_ars_implicit) / sizeof(k_ars_implicit[0]))
 
+/* Owned token storage: copied driver-cache entries never borrow argv. */
+struct ars_vector {
+    size_t count, used;
+    size_t offsets[ARS_ARG_MAX];
+    char text[16384];
+};
+
 struct ars_driver {
+    struct ars_vector vector;
+    bool vector_mode;
     char driver[512];
     char targets[ARS_TARGETS_MAX]; /* the plan's target flags, asked with */
     /* The plan's full compile flags and checkout root: -### is asked with
@@ -348,6 +357,7 @@ struct ars_driver {
 struct ars_ask {
     const char *cc, *targets, *flags, *root;
     const struct zcl_action_root_child_env *env;
+    const struct ars_vector *vector;
 };
 
 #if !defined(_WIN32)
@@ -455,6 +465,36 @@ static bool ars_system_parse(const char *out, struct ars_driver *sd,
                              char miss[40])
 {
     ars_absent_parse(out, out + strlen(out), sd);
+    if (sd->vector_mode) {
+        const char *start = strstr(out, "#include <...> search starts here:");
+        const char *end = start ? strstr(start, "End of search list.") : NULL;
+        if (!end) return false;
+        const char *cursor = strchr(start, '\n'), *line = NULL;
+        size_t length = 0;
+        sd->count = 0;
+        while (ars_builtin_next(&cursor, end, &line, &length)) {
+            bool explicit = false;
+            for (size_t i = 0; i < sd->vector.count; i++) {
+                const char *word = sd->vector.text + sd->vector.offsets[i];
+                if (strncmp(word, "-I", 2) != 0) continue;
+                const char *dir = word + 2;
+                if (!*dir && i + 1 < sd->vector.count)
+                    dir = sd->vector.text + sd->vector.offsets[++i];
+                if (strlen(dir) == length && memcmp(dir, line, length) == 0)
+                    explicit = true;
+            }
+            /* The actual argv records explicit -I entries as search inputs;
+             * do not mislabel them as compiler built-ins. */
+            if (explicit) continue;
+            const char *error = ars_builtin_entry(line, length, sd->dirs,
+                                                  ARS_SYSTEM_DIR_MAX, &sd->count);
+            if (error) {
+                if (miss) (void)snprintf(miss, 40, "%s", error);
+                return false;
+            }
+        }
+        return sd->count > 0;
+    }
     return zcl_action_root_parse_builtin_dirs(out, sd->dirs,
                                               ARS_SYSTEM_DIR_MAX, &sd->count,
                                               miss);
@@ -802,10 +842,39 @@ static size_t ars_ask_env_argv(const struct ars_driver *d, const char **argv,
 /* Run `cc <flags...> <args...>` under the child environment and capture
  * merged output. Flags that would not all fit the argv, and output that
  * fills the buffer, are refused, never used truncated. */
+static bool ars_driver_ask_vector(const struct ars_driver *d,
+                                  const char *const *args, char *capture,
+                                  size_t cap)
+{
+    const char *argv[ARS_ARG_MAX];
+    char env_path[PATH_MAX];
+    size_t n = ars_ask_env_argv(d, argv, env_path);
+    if (!n || n + d->vector.count + 20 >= ARS_ARG_MAX)
+        return false;
+    argv[n++] = d->driver;
+    for (size_t i = 0; i < d->vector.count; i++) {
+        const char *word = d->vector.text + d->vector.offsets[i];
+        argv[n++] = word;
+    }
+    for (size_t i = 0; args[i]; i++) {
+        if (n + 1 >= ARS_ARG_MAX)
+            return false;
+        argv[n++] = args[i];
+    }
+    argv[n] = NULL;
+    bool timeout = false;
+    capture[0] = '\0';
+    return zcl_spawn_capture_merged_in_dir_observed(argv, d->root,
+               capture, cap, 10000, &timeout) == 0 && !timeout &&
+           strlen(capture) + 1 < cap;
+}
+
 static bool ars_driver_ask_with(const struct ars_driver *d, const char *flags,
                                 const char *const *args, char *capture,
                                 size_t cap)
 {
+    if (d->vector_mode)
+        return ars_driver_ask_vector(d, args, capture, cap);
     char text[512], env_path[PATH_MAX];
     char *words = zcl_malloc(ARS_FLAGS_MAX, "driver query flags");
     const char *argv[ARS_ARG_MAX];
@@ -953,25 +1022,53 @@ static void ars_shadow_state(const struct ars_driver *d, uint8_t out[32])
 }
 
 
+/* GCC/Clang escape quotes and backslashes inside a quoted driver word. The
+ * vector path decodes only these two spellings, never shell expansions. */
+static bool ars_vector_quoted_word(const char **cursor, char word[PATH_MAX])
+{
+    const char *p = *cursor + 1;
+    size_t used = 0;
+    while (*p && *p != '"' && *p != '\n' && *p != '\r') {
+        if (*p == '\\') {
+            p++;
+            if (*p != '"' && *p != '\\')
+                return false;
+        }
+        if (used + 1 >= PATH_MAX)
+            return false;
+        word[used++] = *p++;
+    }
+    if (*p++ != '"' || (*p && !strchr(" \t\r\n", *p)))
+        return false;
+    word[used] = '\0';
+    *cursor = p;
+    return true;
+}
+
 /* One command line of -### output: each word (quoted or bare) canonical and
  * hashed with its terminator. A word with an escape is refused. */
 static bool ars_line_sha3(struct sha3_256_ctx *sha, const char *p,
-                          const char *root, const char *tmp)
+                          const char *root, const char *tmp, bool vector)
 {
     for (;;) {
         p += strspn(p, " \t");
         if (!*p || strchr("\r\n", *p))
             break;
         bool quoted = *p == '"';
-        p += quoted;
-        size_t n = strcspn(p, quoted ? "\"\r\n" : " \t\r\n");
         char word[PATH_MAX], canon[PATH_MAX + 64];
-        if ((quoted && p[n] != '"') || n >= sizeof(word) ||
-            memchr(p, '\\', n))
-            return false;
-        memcpy(word, p, n);
-        word[n] = '\0';
-        p += n + quoted;
+        if (vector && quoted) {
+            if (!ars_vector_quoted_word(&p, word))
+                return false;
+        } else {
+            p += quoted;
+            size_t n = strcspn(p, quoted ? "\"\r\n" : " \t\r\n");
+            if ((quoted && p[n] != '"') || n >= sizeof(word) ||
+                memchr(p, '\\', n))
+                return false;
+            memcpy(word, p, n);
+            word[n] = '\0';
+            p += n + quoted;
+        }
         if (!zcl_action_root_canon_driver_word(word, root, tmp, canon,
                                                sizeof(canon)))
             return false;
@@ -1014,7 +1111,7 @@ static bool ars_lines_capture(const struct ars_driver *d, const char *out,
         const char *p = line + strspn(line, " ");
         bool command = line[0] == ' ' && !strchr("\r\n", *p) &&
                        strncmp(p, "(in-process)", 12) != 0;
-        if (command && !ars_line_sha3(&sha, p, d->root, tmp))
+        if (command && !ars_line_sha3(&sha, p, d->root, tmp, d->vector_mode))
             return false;
         line = strchr(line, '\n');
         line += line != NULL;
@@ -1043,7 +1140,7 @@ static bool ars_programs_ask(const struct ars_driver *d,
                                         NULL };
     char *capture = zcl_malloc(ARS_HASH_OUT_MAX, "driver -### output");
     bool ok = capture &&
-              ars_driver_ask_with(d, d->flags, hash, capture,
+              ars_driver_ask_with(d, d->flags, d->vector_mode ? hash + 1 : hash, capture,
                                   ARS_HASH_OUT_MAX) &&
               ars_lines_capture(d, capture, p->lines_sha3, miss) &&
               zcl_action_root_parse_driver_programs(
@@ -1134,6 +1231,9 @@ static bool ars_driver_capture(const struct ars_ask *q, struct ars_driver *d,
     (void)snprintf(d->targets, sizeof(d->targets), "%s", q->targets);
     (void)snprintf(d->root, sizeof(d->root), "%s", q->root);
     d->ask_env = q->env;
+    d->vector_mode = q->vector != NULL;
+    if (q->vector)
+        d->vector = *q->vector;
     bool ok = snprintf(d->flags, sizeof(d->flags), "%s", q->flags) <
                   (int)sizeof(d->flags) &&
               ars_driver_ask(d, search, capture, sizeof(capture)) &&
@@ -1364,7 +1464,15 @@ static void ars_env_sha3(const struct zcl_action_root_child_env *env,
 static bool ars_driver_cached(const struct ars_ask *q, const uint8_t bytes[32],
                               const uint8_t env_sha3[32])
 {
-    return g_driver.valid && strcmp(g_driver.driver, q->cc) == 0 &&
+    return g_driver.valid && g_driver.vector_mode == (q->vector != NULL) &&
+           (!q->vector ||
+            (g_driver.vector.count == q->vector->count &&
+             g_driver.vector.used == q->vector->used &&
+             memcmp(g_driver.vector.text, q->vector->text,
+                    q->vector->used) == 0 &&
+             memcmp(g_driver.vector.offsets, q->vector->offsets,
+                    q->vector->count * sizeof(size_t)) == 0)) &&
+           strcmp(g_driver.driver, q->cc) == 0 &&
            strcmp(g_driver.targets, q->targets) == 0 &&
            strcmp(g_driver.flags, q->flags) == 0 &&
            strcmp(g_driver.root, q->root) == 0 &&
@@ -1393,7 +1501,11 @@ static bool ars_driver_facts(const struct ars_ask *q, struct ars_driver *out,
     if (miss)
         miss[0] = '\0';
     uint8_t bytes[32], env_sha3[32];
-    if (!ars_driver_bytes(q->cc, bytes, miss))
+    bool driver_ok = q->vector
+        ? q->cc[0] == '/' && !ars_cache_opaque(q->cc, q->cc) &&
+          zcl_action_root_file_sha3(q->cc, bytes)
+        : ars_driver_bytes(q->cc, bytes, miss);
+    if (!driver_ok)
         return false;
     ars_env_sha3(q->env, env_sha3);
     pthread_mutex_lock(&g_driver_mu);
@@ -1629,6 +1741,7 @@ struct ars_compile {
     const struct zcl_action_root_t0 *t0; /* the compile start, or NULL */
     /* The environment the build spawned the compile under, or NULL. */
     const struct zcl_action_root_child_env *env;
+    const struct ars_vector *vector;
 };
 
 /* The first miss wins: a stable code plus a human detail. */
@@ -1751,7 +1864,7 @@ static bool ars_hook_driver(struct ars_hook *h, const struct ars_compile *k,
     }
     if (!ars_targets(k->cflags, k->unity ? NULL : k->ldflags, targets) ||
         !ars_driver_facts(&(const struct ars_ask){ k->cc, targets, k->cflags,
-                                                   k->root, h->envp },
+                                                   k->root, h->envp, k->vector },
                           &h->driver, driver_miss) ||
         !ars_implicit_sha3(&h->driver, implicit)) {
         if (driver_miss[0])
@@ -2278,7 +2391,7 @@ void zcl_devloop_action_root_hotswap(
     if (!receipt || ars_harness_child_receipt(receipt))
         return;
     const struct ars_compile k = { root, owner, cc, cflags, ldflags, depfile,
-                                   NULL, t0, env };
+                                   NULL, t0, env, NULL };
     ars_hook_run(&k, owner, receipt);
 }
 
@@ -2294,7 +2407,7 @@ void zcl_devloop_action_root_hotfork(
     char unit[320];
     (void)snprintf(unit, sizeof(unit), "hotfork:%s", owner ? owner : "");
     const struct ars_compile k = { root, owner, cc, cflags, "",
-                                   depfile, unity ? unity : "", t0, env };
+                                   depfile, unity ? unity : "", t0, env, NULL };
     ars_hook_run(&k, unit, receipt);
 }
 
@@ -2316,7 +2429,7 @@ bool zcl_devloop_action_root_key(
     }
     const struct ars_compile k = { root, owner, cc, cflags,
                                    unity ? "" : ldflags, depfile, unity, t0,
-                                   env };
+                                   env, NULL };
     struct ars_miss m = {0};
     struct zcl_action_root_result result = {0};
     bool ok = ars_hook_derive(&k, &result, &m);
@@ -2326,6 +2439,381 @@ bool zcl_devloop_action_root_key(
         (void)snprintf(miss, 40, "%s", m.code[0] ? m.code : "unclassified");
     zcl_action_root_result_free(&result);
     return ok;
+}
+
+/* A bounded compile-only observer. It runs fact queries, never the compile. */
+struct zcl_compile_observation {
+    struct ars_hook hook;
+    struct ars_vector arguments, flags;
+    const char *argv[ARS_ARG_MAX + 1];
+    char root[PATH_MAX], depfile[PATH_MAX], object[PATH_MAX], source[PATH_MAX];
+    const char *outputs[2];
+    const char *tokens[2];
+    struct stat previous_dep;
+    bool had_dep, finished, accepted;
+    uint8_t identity[32];
+};
+
+static bool aco_miss(struct zcl_action_root_result *out, const char *code,
+                     const char *detail)
+{
+    memset(out, 0, sizeof(*out));
+    (void)snprintf(out->miss, sizeof(out->miss), "%s", code);
+    (void)snprintf(out->why, sizeof(out->why), "%s", detail);
+    return false;
+}
+
+static bool aco_push(struct ars_vector *v, const char *word)
+{
+    size_t n = strlen(word) + 1;
+    if (v->count >= ARS_ARG_MAX || n > sizeof(v->text) - v->used)
+        return false;
+    v->offsets[v->count++] = v->used;
+    memcpy(v->text + v->used, word, n);
+    v->used += n;
+    return true;
+}
+
+/* Initial grammar deliberately refuses wrappers, specs/plugins, responses,
+ * sysroot overrides, language changes, implicit outputs and unknown flags. */
+static bool aco_flag(const char *s)
+{
+    return zcl_action_root_semantic_compile_flag(s) ||
+           (s[0] == '-' && (s[1] == 'D' || s[1] == 'U' || s[1] == 'I') &&
+            s[2] != '\0');
+}
+
+/* No leaf symlinks, including dangling links. This is bounded admission for
+ * a trusted caller, not a filesystem sandbox or a race-free execution grant. */
+static bool aco_leaf_ok(const char *path)
+{
+#if defined(_WIN32)
+    (void)path;
+    return false;
+#else
+    struct stat metadata;
+    if (lstat(path, &metadata) == 0)
+        return S_ISREG(metadata.st_mode);
+    return errno == ENOENT;
+#endif
+}
+
+static bool aco_path(const char *root, const char *path, char out[PATH_MAX])
+{
+    char joined[PATH_MAX], parent[PATH_MAX], resolved[PATH_MAX];
+    int n = path[0] == '/' ? snprintf(joined, sizeof(joined), "%s", path)
+                           : snprintf(joined, sizeof(joined), "%s/%s", root, path);
+    if (n <= 0 || (size_t)n >= sizeof(joined))
+        return false;
+    memcpy(parent, joined, (size_t)n + 1);
+    char *slash = strrchr(parent, '/');
+    if (!slash || !slash[1] || strcmp(slash + 1, ".") == 0 ||
+        strcmp(slash + 1, "..") == 0)
+        return false;
+    *slash = '\0';
+    if (!realpath(parent, resolved))
+        return false;
+    n = snprintf(out, PATH_MAX, "%s/%s", resolved, slash + 1);
+    size_t root_len = strlen(root);
+    return n > 0 && n < PATH_MAX && strncmp(out, root, root_len) == 0 &&
+           out[root_len] == '/' && aco_leaf_ok(out);
+}
+
+static bool aco_collision(const char *a, const char *b)
+{
+    struct stat sa, sb;
+    return strcmp(a, b) == 0 ||
+           (stat(a, &sa) == 0 && stat(b, &sb) == 0 &&
+            sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino);
+}
+
+struct aco_arguments {
+    bool compile, md, mp;
+    const char *object, *dep, *source;
+};
+
+static bool aco_source_argument(struct aco_arguments *parsed, const char *arg)
+{
+    size_t n = strlen(arg);
+    if (parsed->source || arg[0] == '-' || arg[0] == '@' || n < 3 ||
+        strcmp(arg + n - 2, ".c"))
+        return false;
+    parsed->source = arg;
+    return true;
+}
+
+static bool aco_output_argument(struct zcl_compile_observation *o,
+                                size_t *index, const char **slot)
+{
+    if (*slot || ++*index == o->arguments.count)
+        return false;
+    *slot = o->argv[*index];
+    return true;
+}
+
+static bool aco_semantic_argument(struct zcl_compile_observation *o,
+                                  struct aco_arguments *parsed, size_t *index)
+{
+    const char *arg = o->argv[*index];
+    if (strcmp(arg, "-I") == 0 || strcmp(arg, "-D") == 0 ||
+        strcmp(arg, "-U") == 0) {
+        if (++*index == o->arguments.count || !o->argv[*index][0])
+            return false;
+        return aco_push(&o->flags, arg) && aco_push(&o->flags, o->argv[*index]);
+    }
+    if (aco_flag(arg))
+        return aco_push(&o->flags, arg);
+    return aco_source_argument(parsed, arg);
+}
+
+static bool aco_argument(struct zcl_compile_observation *o,
+                         struct aco_arguments *parsed, size_t *index)
+{
+    const char *arg = o->argv[*index];
+    bool *mode = strcmp(arg, "-c") == 0 ? &parsed->compile :
+                 strcmp(arg, "-MD") == 0 ? &parsed->md :
+                 strcmp(arg, "-MP") == 0 ? &parsed->mp : NULL;
+    if (mode) {
+        if (*mode)
+            return false;
+        *mode = true;
+        return true;
+    }
+    if (strcmp(arg, "-o") == 0)
+        return aco_output_argument(o, index, &parsed->object);
+    if (strcmp(arg, "-MF") == 0)
+        return aco_output_argument(o, index, &parsed->dep);
+    return aco_semantic_argument(o, parsed, index);
+}
+
+static bool aco_bind_paths(struct zcl_compile_observation *o,
+                           const struct aco_arguments *parsed, const char *depfile)
+{
+    char requested[PATH_MAX];
+    if (!parsed->compile || !parsed->md || !parsed->object ||
+        !parsed->dep || !parsed->source ||
+        !aco_path(o->root, parsed->object, o->object) ||
+        !aco_path(o->root, parsed->dep, o->depfile) ||
+        !aco_path(o->root, depfile, requested) || strcmp(requested, o->depfile) ||
+        !aco_path(o->root, parsed->source, o->source) ||
+        aco_collision(o->object, o->source) ||
+        aco_collision(o->depfile, o->source) ||
+        aco_collision(o->depfile, o->object))
+        return false;
+    o->outputs[0] = parsed->object;
+    o->outputs[1] = parsed->dep;
+    return true;
+}
+
+static bool aco_parse(struct zcl_compile_observation *o, const char *depfile)
+{
+    struct aco_arguments parsed = {0};
+    for (size_t i = 1; i < o->arguments.count; i++)
+        if (!aco_argument(o, &parsed, &i))
+            return false;
+    return aco_bind_paths(o, &parsed, depfile);
+}
+
+static bool aco_facts(struct zcl_compile_observation *o, struct ars_hook *h,
+                      uint8_t identity[32], struct ars_miss *miss)
+{
+    const struct ars_compile k = {
+        .root = o->root, .cc = o->argv[0], .cflags = "", .ldflags = "",
+        .depfile = o->depfile, .env = &o->hook.env, .vector = &o->flags,
+    };
+    uint8_t capsule[32], implicit[32], backend[32];
+    h->envp = &o->hook.env;
+    if (!ars_hook_capture_pair(h, &k, miss, capsule, implicit, backend))
+        return false;
+#if defined(__APPLE__)
+    if (!ars_sdk_matches_capsule(h))
+        return false;
+#endif
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    static const char domain[] = "zcl.compile.observation.toolchain.v1";
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, capsule, 32);
+    sha3_256_write(&sha, h->driver.bytes, 32);
+    sha3_256_write(&sha, h->driver.lines_sha3, 32);
+    sha3_256_write(&sha, implicit, 32);
+    sha3_256_write(&sha, backend, 32);
+    sha3_256_finalize(&sha, identity);
+    return true;
+}
+
+static void aco_request(struct zcl_compile_observation *o)
+{
+    static const char policy[] = "zcl.compile.observation.v1;compile-only;"
+        "trusted-caller;MD;single-use;owned-env;no-cache;no-publication";
+    struct zcl_action_root_request *r = &o->hook.req;
+    r->root = o->root;
+    r->stage_kind = "c23.compile.observed";
+    r->stage_version = 1;
+    /* The v2 codec requires a nonzero generation. Generation 1 here is the
+     * fixed compile-observer contract with no declared hotload symbols. */
+    r->abi_generation = 1;
+    r->argv = o->argv;
+    r->argc = o->arguments.count;
+    r->depfile = o->depfile;
+    o->tokens[0] = "@out/object";
+    o->tokens[1] = "@out/depfile";
+    r->virtual_from = o->outputs;
+    r->virtual_to = o->tokens;
+    r->virtual_count = 2;
+    for (size_t i = 0; i < o->hook.driver.count; i++)
+        o->hook.system_dirs[i] = o->hook.driver.dirs[i];
+    r->system_dirs = o->hook.system_dirs;
+    r->system_dir_count = o->hook.driver.count;
+    r->sysroot = o->hook.driver.sysroot;
+    memcpy(r->sysroot_objects_sha3, o->hook.capsule.sysroot_sha3, 32);
+    memcpy(r->toolchain_root, o->identity, 32);
+    r->child_env = o->hook.env.v;
+    r->policy.present = true;
+    zcl_sha3_256((const uint8_t *)policy, sizeof(policy), r->policy.root);
+}
+
+static bool aco_copy_arguments(struct zcl_compile_observation *o,
+                               const char *root, const char *const *argv,
+                               size_t argc, const char *depfile)
+{
+    bool ok = realpath(root, o->root) && strcmp(root, o->root) == 0;
+    for (size_t i = 0; ok && i < argc; i++) {
+        ok = argv[i] && argv[i][0] && aco_push(&o->arguments, argv[i]);
+        if (ok)
+            o->argv[i] = o->arguments.text + o->arguments.offsets[i];
+    }
+    return ok && o->argv[0][0] == '/' && strlen(o->argv[0]) < 512 &&
+           aco_parse(o, depfile);
+}
+
+static bool aco_dep_before(struct zcl_compile_observation *o)
+{
+#if defined(_WIN32)
+    (void)o;
+    return false;
+#else
+    o->had_dep = lstat(o->depfile, &o->previous_dep) == 0;
+    return o->had_dep ? S_ISREG(o->previous_dep.st_mode) : errno == ENOENT;
+#endif
+}
+
+static bool aco_capture_before(struct zcl_compile_observation *o,
+                               const char *root, const char *const *argv,
+                               size_t argc, const char *depfile, struct ars_miss *miss)
+{
+    const struct ars_compile k = { .env = NULL };
+    return aco_copy_arguments(o, root, argv, argc, depfile) &&
+           ars_hook_env(&o->hook, &k, miss) &&
+           aco_facts(o, &o->hook, o->identity, miss) && aco_dep_before(o);
+}
+
+static bool aco_request_complete(const char *root, const char *const *argv,
+                                  size_t argc, const char *depfile)
+{
+    return root && argv && argc > 0 && argc <= 256 && depfile;
+}
+
+bool zcl_compile_observation_begin(const char *root, const char *const *argv,
+    size_t argc, const char *depfile, struct zcl_compile_observation **out,
+    struct zcl_action_root_result *diagnostic)
+{
+    if (out)
+        *out = NULL;
+    if (diagnostic)
+        memset(diagnostic, 0, sizeof(*diagnostic));
+    if (!diagnostic)
+        return false;
+    if (!out || !aco_request_complete(root, argv, argc, depfile))
+        return aco_miss(diagnostic, "request_incomplete", "missing compile inputs");
+    struct zcl_compile_observation *o = zcl_calloc(1, sizeof(*o), "compile observation");
+    if (!o)
+        return aco_miss(diagnostic, "out_of_memory", "compile observation");
+    struct ars_miss miss = {0};
+    bool ok = aco_capture_before(o, root, argv, argc, depfile, &miss);
+    if (!ok) {
+        free(o);
+        return aco_miss(diagnostic, miss.code[0] ? miss.code : "argv_unrecognised",
+                        miss.why[0] ? miss.why : "unsupported compile or output path");
+    }
+    aco_request(o);
+    if (!ars_harness_capture(&o->hook, &miss) || !o->hook.req.harness.present) {
+        zcl_compile_observation_close(o);
+        return aco_miss(diagnostic, "harness_image_unavailable", "observer image unavailable");
+    }
+    zcl_action_root_t0_take(&o->hook.req.compile_t0);
+    *out = o;
+    return true;
+}
+
+static bool aco_dep_fresh(const struct zcl_compile_observation *o)
+{
+#if defined(_WIN32)
+    (void)o;
+    return false;
+#else
+    struct stat now;
+    if (lstat(o->depfile, &now) != 0 || !S_ISREG(now.st_mode) || now.st_size <= 0)
+        return false;
+#if defined(__APPLE__)
+    struct timespec modified = now.st_mtimespec, changed = now.st_ctimespec;
+    struct timespec old = o->previous_dep.st_ctimespec;
+#else
+    struct timespec modified = now.st_mtim, changed = now.st_ctim;
+    struct timespec old = o->previous_dep.st_ctim;
+#endif
+    const struct zcl_action_root_t0 *t = &o->hook.req.compile_t0;
+    bool after = modified.tv_sec > t->sec ||
+        (modified.tv_sec == t->sec && modified.tv_nsec > t->nsec);
+    bool different = !o->had_dep || now.st_ino != o->previous_dep.st_ino ||
+        now.st_dev != o->previous_dep.st_dev || changed.tv_sec != old.tv_sec ||
+        changed.tv_nsec != old.tv_nsec;
+    return after && different;
+#endif
+}
+
+bool zcl_compile_observation_finish(struct zcl_compile_observation *o,
+    bool compile_succeeded, struct zcl_action_root_result *result)
+{
+    if (!result) return false;
+    memset(result, 0, sizeof(*result));
+    if (!o || o->finished)
+        return aco_miss(result, "observation_consumed", "finish is single-use");
+    o->finished = true;
+    if (!compile_succeeded)
+        return aco_miss(result, "closure_unobserved", "compile did not succeed");
+    if (!aco_dep_fresh(o))
+        return aco_miss(result, "depfile_stale", "no fresh regular -MD depfile");
+    struct ars_hook *current = zcl_calloc(1, sizeof(*current), "finish driver facts");
+    if (!current)
+        return aco_miss(result, "out_of_memory", "finish driver facts allocation failed");
+    struct ars_miss miss = {0};
+    uint8_t identity[32];
+    bool same = ars_harness_finish(&o->hook, &miss) &&
+        ars_driver_fresh(&o->hook.driver) &&
+        aco_facts(o, current, identity, &miss) &&
+        memcmp(identity, o->identity, 32) == 0;
+    free(current);
+    if (!same)
+        return aco_miss(result, "toolchain_changed", "driver/capsule changed during compile");
+    o->accepted = zcl_action_root_derive(&o->hook.req, result);
+    return o->accepted;
+}
+
+const char *zcl_compile_observation_cwd(const struct zcl_compile_observation *o)
+{ return o ? o->root : NULL; }
+const char *const *zcl_compile_observation_argv(const struct zcl_compile_observation *o)
+{ return o ? o->argv : NULL; }
+const char *const *zcl_compile_observation_env(const struct zcl_compile_observation *o)
+{ return o ? o->hook.env.v : NULL; }
+const struct zcl_action_root_request *zcl_compile_observation_request(
+    const struct zcl_compile_observation *o)
+{ return o && o->accepted ? &o->hook.req : NULL; }
+void zcl_compile_observation_close(struct zcl_compile_observation *o)
+{
+    if (o && o->hook.harness_image)
+        (void)fclose(o->hook.harness_image);
+    free(o);
 }
 
 void zcl_devloop_action_root_emit(
