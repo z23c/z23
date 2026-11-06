@@ -305,8 +305,13 @@ static int artifact_binary_roundtrip(void)
     static const char *const seal[] = {"dev", "seal", NULL}, *const plan[] = {"publish", "plan", NULL}, *const commit[] = {"publish", "commit", NULL};
     TEST_CASE("package artifacts: actual111-file source exports bounded raw wires then verified file-body seal and file publish plan") {
         ASSERT(artifact_fixture_open(&fixture)); ASSERT(artifact_fixture_large(&fixture));
-        ASSERT(artifact_prepare_input(&input, &fixture, false)); ASSERT(artifact_native(&fixture, prepare, &input, &reply, false));
-        const char *code = json_get_str(json_get(json_get(&reply, "error"), "code")); ASSERT(code != NULL); ASSERT_EQ(strcmp(code, "RESPONSE_BUDGET_EXCEEDED"), 0);
+        ASSERT(artifact_prepare_input(&input, &fixture, false)); ASSERT(artifact_native(&fixture, prepare, &input, &reply, true));
+        /* Prepare used to overflow its reply here (RESPONSE_BUDGET_EXCEEDED); it now answers within the budget,
+         * says it left the large wires out, and keeps the roots and the exact manifest length. */
+        const struct json_value *prepare_data = json_get(&reply, "data"); ASSERT(prepare_data != NULL);
+        ASSERT(json_get(&reply, "error") == NULL); ASSERT(json_get_bool(json_get(prepare_data, "truncated")));
+        ASSERT(json_get(prepare_data, "manifest_hex") == NULL); ASSERT(json_get(prepare_data, "package_root") != NULL);
+        ASSERT(json_get_int(json_get(prepare_data, "manifest_bytes")) > 8192);
         json_free(&input); ASSERT(artifact_prepare_input(&input, &fixture, true)); ASSERT(artifact_native(&fixture, exporting, &input, &prepared, true));
         const struct json_value *data = json_get(&prepared, "data"); ASSERT(data != NULL);
         ASSERT(json_get_int(json_get(data, "manifest_bytes")) > 8192); ASSERT(artifact_verify_exports(&fixture, data));

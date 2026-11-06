@@ -114,6 +114,77 @@ static bool zpd_prepare_source(const struct zcl_command_request *request,
     }
     return true;
 }
+static bool zpd_push_back_str(struct json_value *array, const char *text)
+{
+    struct json_value item;
+    json_init(&item);
+    json_set_str(&item, text);
+    bool ok = json_push_back(array, &item);
+    json_free(&item);
+    return ok;
+}
+
+/* The four wires that grow with the package (manifest, recipe, lock, capsule)
+ * are inlined as hex only while they fit this allowance; past it the reply
+ * keeps the exact roots, the release body and every wire's byte length, says
+ * so with truncated=true, and points at `prepare export`, which writes the
+ * full wires to files. A 167-file package used to overflow the 8192-byte
+ * reply and answer RESPONSE_BUDGET_EXCEEDED. */
+#define ZPD_INLINE_WIRE_HEX_MAX 3072u
+
+struct zpd_scaling_wire {
+    const char *name, *hex_key, *bytes_key;
+    const uint8_t *bytes;
+    size_t length;
+};
+
+static void zpd_scaling_wires(const struct vcs_package_prepared *prepared,
+                              struct zpd_scaling_wire wires[4])
+{
+    wires[0] = (struct zpd_scaling_wire){"manifest", "manifest_hex",
+        "manifest_bytes", prepared->manifest_wire, prepared->manifest_wire_len};
+    wires[1] = (struct zpd_scaling_wire){"recipe", "recipe_hex",
+        "recipe_bytes", prepared->recipe_wire, prepared->recipe_wire_len};
+    wires[2] = (struct zpd_scaling_wire){"dependency_lock",
+        "dependency_lock_hex", "dependency_lock_bytes",
+        prepared->lock_wire, prepared->lock_wire_len};
+    wires[3] = (struct zpd_scaling_wire){"api_capsule", "api_capsule_hex",
+        "api_capsule_bytes", prepared->capsule_wire,
+        prepared->capsule_wire_len};
+}
+
+static bool zpd_scaling_fit(const struct zpd_scaling_wire wires[4])
+{
+    size_t total = 0;
+    for (size_t i = 0; i < 4; i++) total += wires[i].length * 2u;
+    return total <= ZPD_INLINE_WIRE_HEX_MAX;
+}
+
+static bool zpd_prepare_push_scaling(struct zcl_command_reply *reply,
+    const struct vcs_package_prepared *prepared)
+{
+    struct zpd_scaling_wire wires[4];
+    zpd_scaling_wires(prepared, wires);
+    bool fit = zpd_scaling_fit(wires);
+    struct json_value omitted;
+    json_init(&omitted);
+    json_set_array(&omitted);
+    bool ok = true;
+    for (size_t i = 0; ok && i < 4; i++) {
+        ok = json_push_kv_int(&reply->data, wires[i].bytes_key,
+                              (int64_t)wires[i].length);
+        if (ok && fit)
+            ok = zpd_push_hex(&reply->data, wires[i].hex_key, wires[i].bytes,
+                              wires[i].length);
+        else if (ok)
+            ok = zpd_push_back_str(&omitted, wires[i].hex_key);
+    }
+    ok = ok && json_push_kv_bool(&reply->data, "truncated", !fit);
+    if (ok && !fit) ok = json_push_kv(&reply->data, "omitted_fields", &omitted);
+    json_free(&omitted);
+    return ok;
+}
+
 static bool zpd_prepare_push_wires(struct zcl_command_reply *reply,
     const struct vcs_package_prepared *prepared)
 {
@@ -127,14 +198,7 @@ static bool zpd_prepare_push_wires(struct zcl_command_reply *reply,
                      prepared->capsule_root, 32) &&
         zpd_push_hex(&reply->data, "release_body_hex", prepared->release_body,
                      prepared->release_body_len) &&
-        zpd_push_hex(&reply->data, "manifest_hex", prepared->manifest_wire,
-                     prepared->manifest_wire_len) &&
-        zpd_push_hex(&reply->data, "recipe_hex", prepared->recipe_wire,
-                     prepared->recipe_wire_len) &&
-        zpd_push_hex(&reply->data, "dependency_lock_hex", prepared->lock_wire,
-                     prepared->lock_wire_len) &&
-        zpd_push_hex(&reply->data, "api_capsule_hex", prepared->capsule_wire,
-                     prepared->capsule_wire_len);
+        zpd_prepare_push_scaling(reply, prepared);
 }
 static bool zpd_prepare_push_fields(struct zcl_command_reply *reply,
     const struct vcs_package_prepared *prepared)
@@ -155,6 +219,34 @@ static bool zpd_prepare_push_fields(struct zcl_command_reply *reply,
         json_push_kv_bool(&reply->data, "read_only", true) &&
         json_push_kv_str(&reply->data, "signature_status", "unsigned");
 }
+/* When the large wires were left out, name the one command that writes them
+ * all to files, with the same source and release inputs so its roots match. */
+static void zpd_prepare_next_export(const struct zcl_command_request *request,
+                                    struct zcl_command_reply *reply)
+{
+    static const char *const copied[] = {
+        "dir", "publisher_pubkey", "reward_address", "chain_id"};
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof(copied) / sizeof(copied[0]); i++) {
+        const char *text = zpd_str(request->input, copied[i]);
+        if (text && text[0]) ok = json_push_kv_str(&input, copied[i], text);
+    }
+    int64_t sequence = 0;
+    ok = ok && zpd_int(request->input, "publisher_sequence", &sequence) &&
+        json_push_kv_int(&input, "publisher_sequence", sequence) &&
+        json_push_kv_str(&input, "artifact_dir", "<new-empty-dir>") &&
+        json_push_kv_bool(&input, "confirm", true);
+    char rendered[512];
+    size_t length = ok ? json_write(&input, rendered, sizeof(rendered)) : 0;
+    json_free(&input);
+    if (length > 0 && length < sizeof(rendered))
+        (void)zcl_command_reply_add_next(reply,
+            "zcode.package.dev.prepare.export", rendered,
+            "wires omitted from this reply; export writes them all to files");
+}
 void zcl_native_handle_zcode_package_dev_prepare(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -163,6 +255,9 @@ void zcl_native_handle_zcode_package_dev_prepare(
     bool ok = zpd_prepare_push_wires(reply, &prepared) &&
         zpd_prepare_push_fields(reply, &prepared);
     vcs_package_prepared_free(&prepared);
+    const struct json_value *truncated = json_get(&reply->data, "truncated");
+    if (ok && truncated && json_get_bool(truncated))
+        zpd_prepare_next_export(request, reply);
     if (!ok)
         zpd_fail(reply, "PACKAGE_PREPARE_OUTPUT",
                  "bounded canonical output could not be rendered");

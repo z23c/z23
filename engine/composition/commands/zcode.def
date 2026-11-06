@@ -2175,7 +2175,11 @@ ZCL_COMMAND_READY_READ(
     "file and any file that changes while read, and returns the content "
     "manifest, declarative recipe, target-inclusive exact-root dependency "
     "lock, bounded public-API capsule, unsigned existing release body, and "
-    "signing digest. It creates no datadir and persists nothing.",
+    "signing digest. The manifest, recipe, lock and capsule wires are inlined "
+    "only while they fit the reply budget; a larger package sets truncated, "
+    "lists omitted_fields, keeps every root, count and wire length, and points "
+    "at prepare export for the full wires. It creates no datadir and persists "
+    "nothing.",
     ZCL_COMMAND_LIST_BUDGET,
     "zcode,package,dev,prepare,manifest,recipe,lock,capsule,offline",
     "zcl.zcode_package_dev_prepare.input.v1",
