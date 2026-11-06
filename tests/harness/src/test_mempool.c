@@ -312,6 +312,87 @@ static int mpool_case_query_hashes(void)
     return failures;
 }
 
+/* The one-pass snapshot returns what a lookup of every queried hash returns:
+ * the same transactions, in the same order, with the same stored hashes. */
+static bool mpool_snapshot_fill(struct tx_mempool *pool, int n)
+{
+    for (int i = 0; i < n; i++) {
+        struct transaction tx;
+        transaction_init(&tx);
+        transaction_alloc(&tx, 1, 2);
+        memset(tx.vin[0].prevout.hash.data, 0x40, 32);
+        tx.vin[0].prevout.hash.data[0] = (unsigned char)i;
+        tx.vin[0].prevout.hash.data[1] = (unsigned char)(i >> 8);
+        tx.vin[0].prevout.n = 0;
+        tx.vin[0].sequence = 0xFFFFFFFF;
+        tx.vout[0].value = COIN_VALUE + i;
+        tx.vout[1].value = i;
+        transaction_compute_hash(&tx);
+        struct mempool_entry entry;
+        mempool_entry_init(&entry, &tx, 1000, 1700000000, 1e6, 100, true,
+                           false, 0);
+        bool added = tx_mempool_add_unchecked(pool, &tx.hash, &entry);
+        mempool_entry_free(&entry);
+        transaction_free(&tx);
+        if (!added)
+            return false;
+    }
+    return true;
+}
+
+static int mpool_case_snapshot_txs(void)
+{
+    int failures = 0;
+    printf("txmempool snapshot_txs matches query_hashes + lookup... ");
+    struct tx_mempool pool;
+    tx_mempool_init(&pool, 1000);
+
+    struct transaction *snap = (struct transaction *)(uintptr_t)1;
+    size_t num = 99;
+    bool ok = tx_mempool_snapshot_txs(&pool, &snap, &num) && num == 0 &&
+              snap == NULL;
+
+    /* Spans three chunks, with a short last one. */
+    enum { N = 2 * TX_MEMPOOL_SNAPSHOT_CHUNK + 44 };
+    ok = ok && mpool_snapshot_fill(&pool, N);
+    struct uint256 hashes[N];
+    size_t nh = 0;
+    tx_mempool_query_hashes(&pool, hashes, N, &nh);
+    ok = ok && nh == N && tx_mempool_snapshot_txs(&pool, &snap, &num) &&
+         num == nh && snap != NULL;
+    for (size_t i = 0; ok && i < nh; i++) {
+        struct transaction one;
+        transaction_init(&one);
+        struct byte_stream a, b;
+        stream_init(&a, 256);
+        stream_init(&b, 256);
+        ok = tx_mempool_lookup(&pool, &hashes[i], &one) &&
+             uint256_eq(&snap[i].hash, &hashes[i]) &&
+             uint256_eq(&snap[i].hash, &one.hash) &&
+             transaction_serialize(&snap[i], &a) &&
+             transaction_serialize(&one, &b) && a.size == b.size &&
+             memcmp(a.data, b.data, a.size) == 0;
+        stream_free(&a);
+        stream_free(&b);
+        transaction_free(&one);
+    }
+    for (size_t i = 0; snap && i < num; i++)
+        transaction_free(&snap[i]);
+    free(snap);
+
+    /* An allocation failure reports false and hands back nothing. */
+    snap = (struct transaction *)(uintptr_t)1;
+    num = 99;
+    zcl_alloc_fault_fail_next("mempool_snapshot_txs");
+    bool faulted = tx_mempool_snapshot_txs(&pool, &snap, &num);
+    zcl_alloc_fault_clear();
+    ok = ok && !faulted && snap == NULL && num == 0;
+
+    tx_mempool_free(&pool);
+    if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
 static int mpool_case_remove_without_branch_id(void)
 {
     int failures = 0;
@@ -1279,6 +1360,7 @@ int test_mempool(void)
     failures += mpool_case_clear();
     failures += mpool_case_prioritise_apply_deltas();
     failures += mpool_case_query_hashes();
+    failures += mpool_case_snapshot_txs();
     failures += mpool_case_remove_without_branch_id();
     failures += mpool_case_has_no_inputs_of();
     failures += mpool_case_entry_get_priority();

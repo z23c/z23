@@ -575,6 +575,59 @@ void tx_mempool_query_hashes(struct tx_mempool *pool,
     zcl_mutex_unlock(&pool->cs);
 }
 
+bool tx_mempool_snapshot_txs(struct tx_mempool *pool,
+                             struct transaction **out, size_t *num_out)
+{
+    *out = NULL;
+    *num_out = 0;
+
+    zcl_mutex_lock(&pool->cs);
+    size_t cap = pool->num_entries;
+    zcl_mutex_unlock(&pool->cs);
+    if (cap == 0)
+        return true;
+
+    /* Allocated outside the lock; the copy takes at most cap entries. */
+    struct transaction *txs =
+        zcl_calloc(cap, sizeof(struct transaction), "mempool_snapshot_txs");
+    if (!txs)
+        return false;
+
+    /* Copied in chunks so validation never waits on the whole pool: the lock
+     * is dropped between chunks. A removal in between swaps the last entry
+     * into the freed slot, so a transaction can be missed but never read
+     * twice, which a reconstruction treats like any transaction not held. */
+    size_t n = 0;
+    bool ok = true;
+    while (ok && n < cap) {
+        zcl_mutex_lock(&pool->cs);
+        size_t end = pool->num_entries < cap ? pool->num_entries : cap;
+        if (end > n + TX_MEMPOOL_SNAPSHOT_CHUNK)
+            end = n + TX_MEMPOOL_SNAPSHOT_CHUNK;
+        bool drained = end <= n;
+        while (n < end) {
+            if (!transaction_copy(&txs[n], &pool->entries[n].tx)) {
+                ok = false;
+                break;
+            }
+            n++;
+        }
+        zcl_mutex_unlock(&pool->cs);
+        if (drained)
+            break;
+    }
+
+    if (!ok) {
+        for (size_t i = 0; i < n; i++)
+            transaction_free(&txs[i]);
+        free(txs);
+        return false;
+    }
+    *out = txs;
+    *num_out = n;
+    return true;
+}
+
 size_t tx_mempool_collect_views(struct tx_mempool *pool,
                                  struct tx_mempool_entry_view *out,
                                  size_t max_out)

@@ -1015,3 +1015,7 @@ later lane flips it HARD.
 - 2026-11-06T01:23:16Z — REASON: Comments on held getdata and the send tick name the snapshot serve as well as the send budget. No behaviour change.
   old ROOT: 928e0668bb558123fe7ecb2dfc9e8dd8bfdfac229726143ad2ae6f041b534320
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T02:32:22Z — REASON: Copy the mempool in one pass for compact block reconstruction
+  old ROOT: 82a532edf7e44ead87631be2852a141845f6cc099104c0b09689a67e042f9e2d
+  by: owner unseal ritual (make core-unseal)

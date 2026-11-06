@@ -161,6 +161,20 @@ void tx_mempool_query_hashes(struct tx_mempool *pool,
                               struct uint256 *out, size_t max_out,
                               size_t *num_out);
 
+/* Entries copied per lock hold by tx_mempool_snapshot_txs. */
+#define TX_MEMPOOL_SNAPSHOT_CHUNK 128
+
+/* Copies every entry's transaction, in query_hashes order, in one pass over
+ * the pool and with no per-hash search. Each copy carries the stored hash. On
+ * success *out is a calloc'd array of *num_out copies (NULL when the pool is
+ * empty) that the caller frees with transaction_free per element and free();
+ * on failure both are cleared and the pool is unchanged. The lock is held for
+ * at most TX_MEMPOOL_SNAPSHOT_CHUNK copies at a time and never across the
+ * array allocation; a removal between chunks can make a transaction missing
+ * from the copy, never repeated. */
+bool tx_mempool_snapshot_txs(struct tx_mempool *pool,
+                             struct transaction **out, size_t *num_out);
+
 /* ── Lightweight view snapshot (hash + fee + size + time) ──
  *
  * Policy modules (mempool_limits, fee estimation) need a stable

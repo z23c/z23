@@ -220,44 +220,17 @@ bool process_sendcmpct(struct msg_processor *mp, struct p2p_node *node,
     return true;
 }
 
-/* ── Helper: snapshot mempool tx hashes for reconstruction ─────── */
-
-static struct uint256 *compact_collect_mempool_hashes(struct msg_processor *mp,
-                                                      size_t *out_num)
-{
-    struct uint256 *mp_hashes = NULL;
-    size_t max_mp = tx_mempool_size(mp->mempool);
-    if (max_mp > 0) {
-        mp_hashes = zcl_malloc(max_mp * sizeof(struct uint256), "compact_mp_hashes");
-        if (mp_hashes) {
-            tx_mempool_query_hashes(mp->mempool, mp_hashes, max_mp, out_num);
-        }
-    }
-    return mp_hashes;
-}
-
-/* ── Helper: copy the mempool txs named by hashes (misses are skipped) ── */
+/* ── Helper: copy the mempool txs for reconstruction (one pass, one lock) ── */
 
 static struct transaction *compact_load_mempool_txs(struct msg_processor *mp,
-                                                    struct uint256 *mp_hashes,
-                                                    size_t num_mp,
                                                     size_t *out_num_txs)
 {
     struct transaction *mp_txs = NULL;
-    size_t num_mp_txs = 0;
-    if (num_mp > 0) {
-        mp_txs = zcl_calloc(num_mp, sizeof(struct transaction), "compact_mp_txs");
-        if (mp_txs) {
-            for (size_t i = 0; i < num_mp; i++) {
-                transaction_init(&mp_txs[num_mp_txs]);
-                if (tx_mempool_lookup(mp->mempool, &mp_hashes[i], &mp_txs[num_mp_txs])) {
-                    transaction_compute_hash(&mp_txs[num_mp_txs]);
-                    num_mp_txs++;
-                }
-            }
-        }
-    }
-    *out_num_txs = num_mp_txs;
+    *out_num_txs = 0;
+    if (tx_mempool_size(mp->mempool) == 0)
+        return NULL;
+    if (!tx_mempool_snapshot_txs(mp->mempool, &mp_txs, out_num_txs))
+        return NULL;
     return mp_txs;
 }
 
@@ -356,15 +329,9 @@ bool process_cmpctblock(struct msg_processor *mp, struct p2p_node *node,
     /* Discard any prior pending compact block for this peer */
     compact_pending_clear(node);
 
-    /* Collect mempool transactions for reconstruction */
-    size_t num_mp = 0;
-    struct uint256 *mp_hashes = compact_collect_mempool_hashes(mp, &num_mp);
-
-    /* Look up each mempool hash to get the full transaction */
+    /* Copy the mempool transactions for reconstruction in one pass */
     size_t num_mp_txs = 0;
-    struct transaction *mp_txs = compact_load_mempool_txs(mp, mp_hashes, num_mp,
-                                                          &num_mp_txs);
-    free(mp_hashes);
+    struct transaction *mp_txs = compact_load_mempool_txs(mp, &num_mp_txs);
 
     /* Attempt reconstruction. out_block is initialized here as well as in
      * compact_block_reconstruct(): the block_free() calls below run on

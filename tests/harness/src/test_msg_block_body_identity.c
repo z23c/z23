@@ -797,6 +797,74 @@ static int bbi_test_compact_matching_unchanged(void)
     return failures;
 }
 
+/* A block whose non-coinbase transactions spend distinct outputs, so they can
+ * all sit in the mempool at once; the header commits to them. */
+static void bbi_mempool_block(struct block *blk, size_t n, uint8_t tag)
+{
+    bbi_real_block(blk, n, tag);
+    struct uint256 txids[8];
+    for (size_t i = 1; i < n; i++) {
+        memset(blk->vtx[i].vin[0].prevout.hash.data, (int)(0x60 + i), 32);
+        blk->vtx[i].vin[0].prevout.n = 0;
+        transaction_compute_hash(&blk->vtx[i]);
+    }
+    for (size_t i = 0; i < n && i < 8; i++)
+        txids[i] = blk->vtx[i].hash;
+    blk->header.hashMerkleRoot = compute_merkle_root(txids, n);
+}
+
+/* Put a copy of tx in the mempool. */
+static bool bbi_pool_add(struct bbi_env *e, const struct transaction *tx)
+{
+    struct mempool_entry entry;
+    mempool_entry_init(&entry, tx, 1000, 1700000000, 1e6, 100, true, false, 0);
+    bool added = tx_mempool_add_unchecked(&e->pool, &tx->hash, &entry);
+    mempool_entry_free(&entry);
+    return added;
+}
+
+/* Every transaction is in the mempool among unrelated ones: the block is
+ * rebuilt from it and submitted, and no getblocktxn goes out. */
+static int bbi_test_compact_rebuilds_from_mempool(void)
+{
+    int failures = 0;
+    printf("block body identity: a compact block is rebuilt from the mempool "
+           "and submitted... ");
+
+    struct bbi_env e;
+    if (!bbi_env_init(&e, SYNC_AT_TIP)) {
+        printf("FAIL (setup)\n");
+        bbi_env_free(&e);
+        return 1;
+    }
+    struct block real;
+    bbi_mempool_block(&real, 3, 81);
+    struct uint256 hash;
+    block_get_hash(&real, &hash);
+    for (uint32_t i = 0; i < 20; i++) {
+        struct transaction noise;
+        bbi_make_tx(&noise, 5000 + i);
+        memset(noise.vin[0].prevout.hash.data, (int)(0x90 + i), 32);
+        transaction_compute_hash(&noise);
+        BBI_CHECK(bbi_pool_add(&e, &noise));
+        transaction_free(&noise);
+    }
+    BBI_CHECK(bbi_pool_add(&e, &real.vtx[1]));
+    BBI_CHECK(bbi_pool_add(&e, &real.vtx[2]));
+
+    BBI_CHECK(bbi_deliver_compact(&e, e.sender, &real));
+    BBI_CHECK(atomic_load(&e.submit.calls) == 1);
+    BBI_CHECK(atomic_load(&e.submit.accepted) == 1);
+    BBI_CHECK(e.sender->compact_pending_block == NULL);
+    BBI_CHECK(bbi_count_sent(e.sender, "getblocktxn") == 0);
+    BBI_CHECK(bbi_score(e.sender) == 0);
+    if (!failures)
+        printf("OK\n");
+    block_free(&real);
+    bbi_env_free(&e);
+    return failures;
+}
+
 /* Fabricated headers cost little to make, so one peer sending many of them
  * holds no download slots, queues no work, leaves intake room as it was, and
  * gets one rate-limited header request rather than one for each. */
@@ -1265,6 +1333,7 @@ int msg_block_body_identity_tests(void)
     failures += bbi_test_blocktxn_mutation_asks_for_full_block();
     failures += bbi_test_compact_wrong_body_have_data_no_request();
     failures += bbi_test_compact_matching_unchanged();
+    failures += bbi_test_compact_rebuilds_from_mempool();
     failures += bbi_test_wrong_body_with_no_request_is_unrequested();
     failures += bbi_test_unknown_headers_hold_nothing();
     failures += bbi_run_compact_cannot_take_slot(false, "a peer at its window "
