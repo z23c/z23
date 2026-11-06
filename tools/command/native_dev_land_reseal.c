@@ -255,7 +255,7 @@ static int dl_pick_ritual(const struct dl_seal_git *g, const char *commit,
 
 int dl_seal_ritual_commit(const struct dl_seal_git *g, const char *commit)
 {
-    struct dl_blob tail;
+    struct dl_blob tail = {0};
     int ritual = dl_pick_ritual(g, commit, &tail);
     dl_blob_free(&tail);
     return ritual;

@@ -16,6 +16,7 @@
 #endif
 
 #include "test/test_dev_land_common.h"
+#include "command/native_dev_land_internal.h"
 
 #include <unistd.h>
 
@@ -753,9 +754,35 @@ _test_next:;
     return failures;
 }
 
+/* Early manifest verdicts do not allocate a log tail. */
+static int rs_manifest_verdict(void *ctx, const char *const *args,
+                                char *out, size_t cap)
+{
+    (void)out;
+    (void)cap;
+    if (strcmp(args[0], "diff") != 0) return 128;
+    return *(int *)ctx;
+}
+
+static int rs_case_ritual_early_return(void)
+{
+    int failures = 0;
+    TEST("land: unchanged manifest and git failure return without a log tail") {
+        int rc = 0;
+        struct dl_seal_git git = {.run = rs_manifest_verdict, .ctx = &rc};
+        ASSERT(dl_seal_ritual_commit(&git, "HEAD") == DL_SEAL_NO);
+        rc = 128;
+        ASSERT(dl_seal_ritual_commit(&git, "HEAD") == DL_SEAL_ERR);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int dlx_case_core_reseal(void)
 {
     int failures = 0;
+    failures += rs_case_ritual_early_return();
     failures += rs_case_two_rituals();
     failures += rs_case_precheck_defers();
     failures += rs_case_no_ritual();
