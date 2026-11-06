@@ -1,9 +1,10 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
  * purpose: Bounded state-offer peer frames and registered bundle serving. */
-// supervisor-ok:bounded-object-read — one-shot worker joined before reuse and shutdown; no resident service
+// supervisor-ok:bounded-object-read — one-shot worker per serve slot, joined before reuse and shutdown; no resident service
 #include "config/state_offer_link.h"
 #include "base/serialize_le.h"
 #include "base/safe_alloc.h"
+#include "util/thread_qos.h"
 #include "util/thread_registry.h"
 #include "net/rom_seed.h"
 #include "net/state_offer.h"
@@ -117,70 +118,91 @@ bool state_offer_link_read_registered(const char *datadir, enum state_offer_link
     return true;
 }
 
-/* Server disk work is serialized in a worker. The message thread only copies a
- * bounded request; the peer tick takes a bounded number of ready frames. */
-#define SOL_SERVER_IDLE_MS INT64_C(120000)
-struct sol_server {
-    pthread_mutex_t mutex;
+/* Each serve slot streams one object to one connection. Its disk read runs in
+ * a one-shot worker at background I/O priority, so the message thread only
+ * copies a bounded request and the peer tick takes a bounded number of ready
+ * frames per connection. A slot is free when it is neither working nor ready;
+ * clearing a working slot bumps its generation so the late result is dropped.
+ * The client abandons an object after SOL_INACTIVITY_SECONDS (30 s) without a
+ * part; a slot idle 15 s longer than that has no reader left. */
+#define SOL_SERVER_IDLE_MS INT64_C(45000)
+struct sol_slot {
     pthread_t thread;
-    char datadir[1024];
-    bool started, stop, working, ready, thread_started;
-    void (*wake)(void);
+    bool working, ready, thread_started;
     uint64_t generation, peer;
-    uint8_t ip[16];
     struct state_offer_link_frame request;
     uint8_t *data;
     uint32_t object_size, cursor, end;
     int64_t last_ms;
 };
-static struct sol_server server = {.mutex = PTHREAD_MUTEX_INITIALIZER};
+static struct {
+    pthread_mutex_t mutex;
+    char datadir[1024];
+    bool started, stop;
+    void (*wake)(void);
+    struct sol_slot slots[STATE_OFFER_LINK_SERVER_SLOTS];
+} server = {.mutex = PTHREAD_MUTEX_INITIALIZER};
 
-static void sol_server_clear_locked(void)
+static void sol_slot_clear_locked(struct sol_slot *s)
 {
-    free(server.data);
-    server.data = NULL;
-    server.ready = false;
-    ++server.generation;
+    free(s->data);
+    s->data = NULL;
+    s->ready = false;
+    s->peer = 0;
+    ++s->generation;
 }
 
 struct sol_job {
     struct state_offer_link_frame request;
     uint8_t ip[16];
     uint64_t generation;
+    size_t slot;
+    char datadir[sizeof(server.datadir)];
 };
+
+/* Admission, registered read and byte-rate charge for one object. */
+static bool sol_server_read(const struct sol_job *job, uint8_t *bytes, uint32_t *size)
+{
+    bool acquired = bytes && rom_seed_peer_acquire(job->ip);
+    bool ok = acquired && state_offer_link_read_registered(job->datadir, job->request.kind, job->request.digest,
+                                                            job->request.index, bytes, ROM_SEED_CHUNK_SIZE, size) &&
+        rom_seed_rate_charge(job->ip, *size, (int64_t)platform_time_wall_time_t());
+    if (acquired) rom_seed_peer_release(job->ip);
+    return ok && job->request.offset < *size;
+}
+
+/* Publish the object (or a refusal when size is 0) unless the slot moved on. */
+static void sol_server_publish(const struct sol_job *job, uint8_t *bytes, uint32_t size)
+{
+    const struct state_offer_link_frame *r = &job->request;
+    pthread_mutex_lock(&server.mutex);
+    struct sol_slot *s = &server.slots[job->slot];
+    void (*wake)(void) = NULL;
+    if (!server.stop && job->generation == s->generation) {
+        s->data = size ? bytes : NULL;
+        s->object_size = size;
+        s->cursor = size ? r->offset : 0;
+        s->end = size && r->total < size - r->offset ? r->offset + r->total : size;
+        s->ready = true;
+        s->last_ms = platform_time_monotonic_ms();
+        if (size) bytes = NULL;
+        wake = server.wake;
+    }
+    free(bytes);
+    s->working = false;
+    pthread_mutex_unlock(&server.mutex);
+    if (wake) wake();
+}
 
 static void *sol_server_worker(void *arg)
 {
     struct sol_job *job = arg;
-    struct state_offer_link_frame request = job->request;
-    uint8_t ip[16]; memcpy(ip, job->ip, sizeof(ip));
-    uint64_t generation = job->generation;
-    free(job);
+    (void)zcl_thread_qos_background();
     uint8_t *bytes = zcl_malloc(ROM_SEED_CHUNK_SIZE, "state_offer_link_chunk");
     uint32_t size = 0;
-    bool acquired = bytes && rom_seed_peer_acquire(ip);
-    bool ok = acquired && state_offer_link_read_registered(server.datadir, request.kind, request.digest, request.index,
-                                                            bytes, ROM_SEED_CHUNK_SIZE, &size) &&
-        rom_seed_rate_charge(ip, size, (int64_t)platform_time_wall_time_t());
-    if (acquired) rom_seed_peer_release(ip);
-    if (ok && request.offset >= size) ok = false;
-    pthread_mutex_lock(&server.mutex);
-    bool notify = false;
-    if (!server.stop && generation == server.generation) {
-        server.data = bytes;
-        server.object_size = ok ? size : 0;
-        server.cursor = ok ? request.offset : 0;
-        server.end = ok && request.total < size - request.offset ? request.offset + request.total : size;
-        server.ready = true;
-        server.last_ms = platform_time_monotonic_ms();
-        bytes = NULL;
-        notify = server.wake != NULL;
-    }
-    free(bytes);
-    void (*wake)(void) = notify ? server.wake : NULL;
-    server.working = false;
-    pthread_mutex_unlock(&server.mutex);
-    if (wake) wake();
+    if (!sol_server_read(job, bytes, &size)) size = 0;
+    sol_server_publish(job, bytes, size);
+    free(job);
     return NULL;
 }
 
@@ -197,36 +219,61 @@ bool state_offer_link_server_start(const char *datadir, void (*wake)(void))
     return true;
 }
 
+/* One stream per connection; otherwise the first free slot. */
+static struct sol_slot *sol_server_admit_locked(uint64_t peer)
+{
+    struct sol_slot *free_slot = NULL;
+    if (!server.started || server.stop) return NULL;
+    for (size_t i = 0; i < STATE_OFFER_LINK_SERVER_SLOTS; ++i) {
+        struct sol_slot *s = &server.slots[i];
+        if (s->peer == peer) return NULL;
+        if (!free_slot && !s->working && !s->ready) free_slot = s;
+    }
+    return free_slot;
+}
+
+/* The previous worker of a free slot has already published; join it before reuse. */
+static bool sol_server_spawn_locked(struct sol_slot *s, uint64_t peer, struct sol_job *job)
+{
+    if (s->thread_started) {
+        (void)pthread_join(s->thread, NULL);
+        s->thread_started = false;
+    }
+    s->peer = peer;
+    s->request = job->request;
+    s->last_ms = platform_time_monotonic_ms();
+    job->slot = (size_t)(s - server.slots);
+    job->generation = s->generation;
+    memcpy(job->datadir, server.datadir, sizeof(job->datadir));
+    s->working = true;
+    // thread-supervision-ok: one bounded object read per slot, joined before reuse and shutdown
+    s->thread_started = thread_registry_spawn("zcl_state_offer", sol_server_worker, job, &s->thread) == 0;
+    if (!s->thread_started) { s->working = false; s->peer = 0; }
+    return s->thread_started;
+}
+
 bool state_offer_link_server_request(uint64_t peer, const uint8_t ip[16], const struct state_offer_link_frame *request)
 {
     if (!peer || !ip || !valid(request) ||
         (request->kind != STATE_OFFER_LINK_MANIFEST_REQUEST && request->kind != STATE_OFFER_LINK_CHUNK_REQUEST)) return false;
+    struct sol_job *job = zcl_malloc(sizeof(*job), "state_offer_link_job");
+    if (!job) return false;
+    job->request = *request;
+    job->request.data = NULL;
+    memcpy(job->ip, ip, sizeof(job->ip));
     pthread_mutex_lock(&server.mutex);
-    bool ok = server.started && !server.stop && !server.working && !server.ready;
-    if (ok && server.thread_started) {
-        (void)pthread_join(server.thread, NULL);
-        server.thread_started = false;
-    }
-    if (ok) {
-        server.peer = peer;
-        memcpy(server.ip, ip, 16);
-        server.request = *request;
-        server.request.data = NULL;
-        server.last_ms = platform_time_monotonic_ms();
-        struct sol_job *job = zcl_malloc(sizeof(*job), "state_offer_link_job");
-        if (job) {
-            job->request = server.request;
-            memcpy(job->ip, server.ip, sizeof(job->ip));
-            job->generation = server.generation;
-            server.working = true;
-            // thread-supervision-ok: one bounded object read, joined before reuse and shutdown
-            ok = thread_registry_spawn("zcl_state_offer", sol_server_worker, job, &server.thread) == 0;
-            server.thread_started = ok;
-            if (!ok) { server.working = false; free(job); }
-        } else ok = false;
-    }
+    struct sol_slot *s = sol_server_admit_locked(peer);
+    bool ok = s && sol_server_spawn_locked(s, peer, job);
     pthread_mutex_unlock(&server.mutex);
+    if (!ok) free(job);
     return ok;
+}
+
+static struct sol_slot *sol_server_ready_locked(uint64_t peer)
+{
+    for (size_t i = 0; peer && i < STATE_OFFER_LINK_SERVER_SLOTS; ++i)
+        if (server.slots[i].peer == peer && server.slots[i].ready) return &server.slots[i];
+    return NULL;
 }
 
 bool state_offer_link_server_next(uint64_t peer, uint8_t *wire, size_t cap, size_t *size)
@@ -234,22 +281,23 @@ bool state_offer_link_server_next(uint64_t peer, uint8_t *wire, size_t cap, size
     if (size) *size = 0;
     if (!wire || !size) return false;
     pthread_mutex_lock(&server.mutex);
-    if (!server.ready || server.peer != peer) { pthread_mutex_unlock(&server.mutex); return false; }
-    struct state_offer_link_frame f = server.request;
-    f.kind = server.object_size ? (f.kind == STATE_OFFER_LINK_CHUNK_REQUEST ? STATE_OFFER_LINK_CHUNK_PART :
-                                   STATE_OFFER_LINK_MANIFEST_PART) : STATE_OFFER_LINK_REFUSAL;
-    if (server.object_size) {
-        f.offset = server.cursor;
-        f.total = server.object_size;
-        f.size = server.end - server.cursor;
+    struct sol_slot *s = sol_server_ready_locked(peer);
+    if (!s) { pthread_mutex_unlock(&server.mutex); return false; }
+    struct state_offer_link_frame f = s->request;
+    f.kind = s->object_size ? (f.kind == STATE_OFFER_LINK_CHUNK_REQUEST ? STATE_OFFER_LINK_CHUNK_PART :
+                               STATE_OFFER_LINK_MANIFEST_PART) : STATE_OFFER_LINK_REFUSAL;
+    if (s->object_size) {
+        f.offset = s->cursor;
+        f.total = s->object_size;
+        f.size = s->end - s->cursor;
         if (f.size > STATE_OFFER_LINK_PAYLOAD_MAX) f.size = STATE_OFFER_LINK_PAYLOAD_MAX;
-        f.data = server.data + server.cursor;
+        f.data = s->data + s->cursor;
     } else { f.index = f.offset = f.total = f.size = 0; f.data = NULL; }
     bool ok = state_offer_link_encode(&f, wire, cap, size);
     if (ok) {
-        server.cursor += f.size;
-        server.last_ms = platform_time_monotonic_ms();
-        if (!server.object_size || server.cursor == server.end) sol_server_clear_locked();
+        s->cursor += f.size;
+        s->last_ms = platform_time_monotonic_ms();
+        if (!s->object_size || s->cursor == s->end) sol_slot_clear_locked(s);
     }
     pthread_mutex_unlock(&server.mutex);
     return ok;
@@ -258,37 +306,47 @@ bool state_offer_link_server_next(uint64_t peer, uint8_t *wire, size_t cap, size
 void state_offer_link_server_drop(uint64_t peer)
 {
     pthread_mutex_lock(&server.mutex);
-    if (server.peer == peer) sol_server_clear_locked();
+    for (size_t i = 0; peer && i < STATE_OFFER_LINK_SERVER_SLOTS; ++i)
+        if (server.slots[i].peer == peer) sol_slot_clear_locked(&server.slots[i]);
     pthread_mutex_unlock(&server.mutex);
 }
 
-uint64_t state_offer_link_server_peer(void)
+size_t state_offer_link_server_peers(uint64_t *out, size_t cap)
 {
+    size_t n = 0;
     pthread_mutex_lock(&server.mutex);
-    uint64_t peer = (server.working || server.ready) ? server.peer : 0;
+    for (size_t i = 0; out && i < STATE_OFFER_LINK_SERVER_SLOTS && n < cap; ++i)
+        if (server.slots[i].peer) out[n++] = server.slots[i].peer;
     pthread_mutex_unlock(&server.mutex);
-    return peer;
+    return n;
 }
 
 void state_offer_link_server_tick(void)
 {
     pthread_mutex_lock(&server.mutex);
     int64_t now = platform_time_monotonic_ms();
-    if ((server.working || server.ready) && now >= server.last_ms &&
-        now - server.last_ms >= SOL_SERVER_IDLE_MS) sol_server_clear_locked();
+    for (size_t i = 0; i < STATE_OFFER_LINK_SERVER_SLOTS; ++i) {
+        struct sol_slot *s = &server.slots[i];
+        if (s->peer && now >= s->last_ms && now - s->last_ms >= SOL_SERVER_IDLE_MS) sol_slot_clear_locked(s);
+    }
     pthread_mutex_unlock(&server.mutex);
 }
 
 void state_offer_link_server_shutdown(void)
 {
+    pthread_t joins[STATE_OFFER_LINK_SERVER_SLOTS];
+    size_t n = 0;
     pthread_mutex_lock(&server.mutex);
-    bool join = server.thread_started;
     server.stop = true;
-    sol_server_clear_locked();
+    for (size_t i = 0; i < STATE_OFFER_LINK_SERVER_SLOTS; ++i) {
+        struct sol_slot *s = &server.slots[i];
+        sol_slot_clear_locked(s);
+        if (s->thread_started) joins[n++] = s->thread;
+        s->thread_started = false;
+    }
     pthread_mutex_unlock(&server.mutex);
-    if (join) (void)pthread_join(server.thread, NULL);
+    for (size_t i = 0; i < n; ++i) (void)pthread_join(joins[i], NULL);
     pthread_mutex_lock(&server.mutex);
     server.started = false;
-    server.thread_started = false;
     pthread_mutex_unlock(&server.mutex);
 }

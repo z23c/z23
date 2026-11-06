@@ -285,6 +285,77 @@ static bool slot_parallel(struct slot_fixture *f)
     memset(f->got, 0, sizeof(f->got));
     return slot_finish(f, 99, 1, 990);
 }
+/* Answer one client object request the way the peer adapter does: serve it
+ * when a slot admits it, otherwise send the retryable refusal. */
+static bool slot_serve(struct slot_fixture *f, struct link_read_test *r,
+                       const struct state_offer_link_frame *req, bool admit)
+{
+    uint8_t ip[16] = {0}; ip[15] = (uint8_t)r->peer;
+    bool admitted = state_offer_link_server_request(r->peer, ip, req);
+    for (int i = 0; admit && !admitted && i < 5000; ++i) {
+        test_wait();
+        admitted = state_offer_link_server_request(r->peer, ip, req);
+    }
+    if (admitted != admit) return false;
+    if (!admitted) {
+        struct state_offer_link_frame refusal = {.kind = STATE_OFFER_LINK_REFUSAL, .nonce = req->nonce};
+        memcpy(refusal.digest, req->digest, 32);
+        return sol_client_consume(r->peer, &refusal);
+    }
+    for (int i = 0; i < 20000 && !atomic_load(&r->done); ++i) {
+        size_t n = 0; struct state_offer_link_frame part;
+        if (!state_offer_link_server_next(r->peer, f->wire, STATE_OFFER_LINK_FRAME_MAX, &n)) { test_wait(); continue; }
+        if (!state_offer_link_decode(f->wire, n, &part) || !sol_client_consume(r->peer, &part)) return false;
+    }
+    return true;
+}
+/* One blocking client read against the server; the reader is always joined. */
+static bool slot_read_once(struct slot_fixture *f, struct link_read_test *r, bool admit)
+{
+    pthread_t t; struct state_offer_link_frame req;
+    atomic_store(&r->done, false);
+    if (pthread_create(&t, NULL, test_read, r)) return false;
+    bool ok = false;
+    for (int i = 0; i < 5000 && !ok; ++i) { ok = sol_client_poll(r->peer, &req); if (!ok) test_wait(); }
+    ok = ok && slot_serve(f, r, &req, admit);
+    if (!ok) sol_client_shutdown();
+    (void)pthread_join(t, NULL);
+    return ok;
+}
+/* Fill every slot, refuse a further connection and a second object on a busy
+ * one, free a slot by disconnect and let the refused reader retry. */
+static bool slot_full_retry(struct slot_fixture *f)
+{
+    for (uint64_t p = 201; p < 201 + STATE_OFFER_LINK_SERVER_SLOTS; ++p)
+        if (!slot_ask(f, p, 200)) return false;
+    uint64_t held[STATE_OFFER_LINK_SERVER_SLOTS + 1];
+    if (state_offer_link_server_peers(held, STATE_OFFER_LINK_SERVER_SLOTS + 1) != STATE_OFFER_LINK_SERVER_SLOTS ||
+        slot_ask(f, 201, 201)) return false;
+    struct link_read_test r = {.peer = 300};
+    memcpy(r.root, f->artifact->chunk_root, 32);
+    r.body = malloc(ROM_SEED_CHUNK_SIZE);
+    bool client = r.body && sol_client_start(r.peer, test_wake, NULL);
+    bool ok = client && slot_read_once(f, &r, false) && r.result == SOL_READ_UNAVAILABLE;
+    state_offer_link_server_drop(201);
+    ok = ok && slot_read_once(f, &r, true) && r.result == SOL_READ_OK && r.size == ROM_SEED_CHUNK_SIZE &&
+        !memcmp(r.body, "SQLite format 3", 16);
+    if (client) sol_client_shutdown();
+    free(r.body);
+    return ok;
+}
+/* Shutdown with ready and working slots joins every reader and frees every
+ * buffer; the server then restarts empty and serves again. */
+static bool slot_shutdown_restart(struct slot_fixture *f)
+{
+    uint64_t held[STATE_OFFER_LINK_SERVER_SLOTS];
+    if (!slot_ask(f, 400, 400)) return false;
+    state_offer_link_server_shutdown();
+    f->started = false;
+    if (state_offer_link_server_peers(held, STATE_OFFER_LINK_SERVER_SLOTS) || slot_ask(f, 401, 401)) return false;
+    f->started = state_offer_link_server_start(f->dir, NULL);
+    memset(f->got, 0, sizeof(f->got));
+    return f->started && slot_ask(f, 402, 402) && slot_finish(f, 402, 1, 402);
+}
 static void slot_cleanup(struct slot_fixture *f)
 {
     if (f->started) state_offer_link_server_shutdown();
@@ -296,7 +367,7 @@ static void slot_cleanup(struct slot_fixture *f)
 static int test_slots(void)
 {
     struct slot_fixture f = {0};
-    bool ok = slot_setup(&f) && slot_parallel(&f);
+    bool ok = slot_setup(&f) && slot_parallel(&f) && slot_full_retry(&f) && slot_shutdown_restart(&f);
     slot_cleanup(&f);
     if (!ok) fprintf(stderr, "state_offer_link: concurrent serve slots failed\n");
     else puts("state_offer_link slots: ok");

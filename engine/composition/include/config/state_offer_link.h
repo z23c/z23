@@ -38,11 +38,19 @@ bool state_offer_link_decode(const uint8_t *wire, size_t len, struct state_offer
 bool state_offer_link_read_registered(const char *datadir, enum state_offer_link_kind request_kind,
                                       const uint8_t root[32], uint32_t index,
                                       uint8_t *scratch, uint32_t cap, uint32_t *size);
+/* Concurrent serve slots. Each holds one object (at most one chunk, 8 MiB)
+ * for one connection, so slot memory peaks at 64 MiB. Eight matches the ROM
+ * seed in-flight cap per address, which every onion peer shares at the zero
+ * address, and the default per-address rate of eight chunks per second. */
+#define STATE_OFFER_LINK_SERVER_SLOTS 8u
 bool state_offer_link_server_start(const char *datadir, void (*wake)(void));
+/* False (answer with a retryable refusal) when the server is stopped, the
+ * connection already has an object in flight, or every slot is busy. */
 bool state_offer_link_server_request(uint64_t peer, const uint8_t ip[16], const struct state_offer_link_frame *request);
 bool state_offer_link_server_next(uint64_t peer, uint8_t *wire, size_t cap, size_t *size);
 void state_offer_link_server_drop(uint64_t peer);
-uint64_t state_offer_link_server_peer(void);
+/* Copy the connections that currently hold a slot; returns how many. */
+size_t state_offer_link_server_peers(uint64_t *out, size_t cap);
 void state_offer_link_server_tick(void);
 void state_offer_link_server_shutdown(void);
 #endif

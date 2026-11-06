@@ -53,15 +53,16 @@ static void *read_thread(void *arg)
     atomic_store(&t->done,true);
     return NULL;
 }
+#define PEER_EXTRA 3u
 struct peer_fixture {
     struct net_manager nm;
     struct msg_processor mp;
     struct boot_svc_ctx svc;
-    struct p2p_node *node, *other, *list[2];
-    struct send_segment *sentinel, *other_sentinel;
+    struct p2p_node *node, *extra[PEER_EXTRA], *list[1+PEER_EXTRA];
+    struct send_segment *sentinel, *extra_sentinel[PEER_EXTRA];
     struct rom_artifact *artifact;
     uint8_t *wire, *batch_wire;
-    char dir[256], path[512];
+    char dir[256], path[512], bench_path[512];
     bool started, thread_started;
     pthread_t thread;
     struct read_test read;
@@ -142,17 +143,22 @@ static bool peer_transfer(struct peer_fixture *p)
     }
     CHECK_PHASE(bytes==131072 && parts>=3); return true;
 }
-/* A second eligible connection with its own captured send queue. */
-static bool peer_add_node(struct peer_fixture *p)
+/* Further eligible connections, each with its own captured send queue. */
+static bool peer_add_nodes(struct peer_fixture *p, size_t count)
 {
     struct net_address addr={0};
-    p->other=p2p_node_create(&p->nm,ZCL_INVALID_SOCKET,&addr,"onion",true);
-    p->other_sentinel=calloc(1,sizeof(*p->other_sentinel));
-    CHECK_PHASE(p->other && p->other_sentinel);
-    p->other->send_head=p->other->send_tail=p->other_sentinel;
-    p->other->version=1; p->other->services=NODE_ZCL23|NODE_STATE_OFFER_LINK;
-    atomic_store(&p->other->state,PEER_HANDSHAKE_COMPLETE);
-    p->list[1]=p->other; p->nm.num_nodes=2; return true;
+    for (size_t k=0;k<count && k<PEER_EXTRA;k++) {
+        if (!p->extra[k]) {
+            p->extra[k]=p2p_node_create(&p->nm,ZCL_INVALID_SOCKET,&addr,"onion",true);
+            p->extra_sentinel[k]=calloc(1,sizeof(*p->extra_sentinel[k]));
+            CHECK_PHASE(p->extra[k] && p->extra_sentinel[k]);
+            p->extra[k]->send_head=p->extra[k]->send_tail=p->extra_sentinel[k];
+            p->extra[k]->version=1; p->extra[k]->services=NODE_ZCL23|NODE_STATE_OFFER_LINK;
+            atomic_store(&p->extra[k]->state,PEER_HANDSHAKE_COMPLETE);
+        }
+        p->list[k+1]=p->extra[k];
+    }
+    p->nm.num_nodes=1+(count<PEER_EXTRA?count:PEER_EXTRA); return true;
 }
 /* Drain node's queue; count parts of nonce and return true on any other frame. */
 static bool peer_collect(struct peer_fixture *p, struct p2p_node *node, struct send_segment *sentinel,
@@ -169,16 +175,16 @@ static bool peer_collect(struct peer_fixture *p, struct p2p_node *node, struct s
  * connection is admitted and completes, then the stalled one resumes. */
 static bool peer_parallel(struct peer_fixture *p)
 {
-    CHECK_PHASE(peer_add_node(p));
+    CHECK_PHASE(peer_add_nodes(p,1));
     struct state_offer_link_frame f={.kind=STATE_OFFER_LINK_CHUNK_REQUEST,.nonce=60,.total=ROM_SEED_CHUNK_SIZE};
     memcpy(f.digest,p->artifact->chunk_root,32);
     size_t held=p->node->send_size; p->node->send_size=1024u*1024u;
     CHECK_PHASE(frame_in(&p->mp,p->node,&f));
-    f.nonce=61; CHECK_PHASE(frame_in(&p->mp,p->other,&f));
+    f.nonce=61; CHECK_PHASE(frame_in(&p->mp,p->extra[0],&f));
     uint32_t a=0,b=0; bool stray=false;
     for (int i=0;i<10000 && b<131072 && !stray;i++) {
         state_offer_peer_pump(&p->mp);
-        stray=peer_collect(p,p->other,p->other_sentinel,61,&b);
+        stray=peer_collect(p,p->extra[0],p->extra_sentinel[0],61,&b);
         if (b<131072) pause_ms();
     }
     CHECK_PHASE(!stray && b==131072 && !p->sentinel->next);
@@ -190,6 +196,63 @@ static bool peer_parallel(struct peer_fixture *p)
     }
     CHECK_PHASE(!stray && a==131072);
     p->list[1]=NULL; p->nm.num_nodes=1; return true;
+}
+/* Optional measurement (ZCL_STATE_OFFER_BENCH=1): each of `peers` connections
+ * fetches every chunk of a 4-chunk (32 MiB) bundle one object at a time, as the
+ * client does, through the real request, slot, pump and send-queue path. The
+ * fixture empties each send queue at once, so sockets and Tor are excluded and
+ * the figure is the server-side ceiling. Rate caps are lifted because every
+ * test connection shares the zero address. */
+#define BENCH_CHUNKS 4u
+struct bench_peer { struct p2p_node *node; struct send_segment *sentinel; uint32_t chunk, bytes; };
+static bool bench_ask(struct peer_fixture *p, struct bench_peer *b, const uint8_t root[32])
+{
+    struct state_offer_link_frame f={.kind=STATE_OFFER_LINK_CHUNK_REQUEST,.nonce=1000+b->chunk,
+        .index=b->chunk,.total=ROM_SEED_CHUNK_SIZE};
+    memcpy(f.digest,root,32); b->bytes=0;
+    return frame_in(&p->mp,b->node,&f);
+}
+static bool bench_run(struct peer_fixture *p, const uint8_t root[32], size_t peers, double *mib_s)
+{
+    struct bench_peer b[1+PEER_EXTRA]={{p->node,p->sentinel,0,0}};
+    for (size_t k=1;k<peers;k++) b[k]=(struct bench_peer){p->extra[k-1],p->extra_sentinel[k-1],0,0};
+    struct timespec t0,t1; clock_gettime(CLOCK_MONOTONIC,&t0);
+    for (size_t k=0;k<peers;k++) CHECK_PHASE(bench_ask(p,&b[k],root));
+    size_t done=0;
+    for (long i=0;i<2000000 && done<peers;i++) {
+        state_offer_peer_pump(&p->mp); done=0;
+        for (size_t k=0;k<peers;k++) {
+            if (b[k].chunk<BENCH_CHUNKS) CHECK_PHASE(!peer_collect(p,b[k].node,b[k].sentinel,1000+b[k].chunk,&b[k].bytes));
+            if (b[k].chunk<BENCH_CHUNKS && b[k].bytes==ROM_SEED_CHUNK_SIZE && ++b[k].chunk<BENCH_CHUNKS)
+                CHECK_PHASE(bench_ask(p,&b[k],root));
+            done+=b[k].chunk==BENCH_CHUNKS;
+        }
+        if (done<peers) { struct timespec t={0,100000}; (void)nanosleep(&t,NULL); }
+    }
+    clock_gettime(CLOCK_MONOTONIC,&t1);
+    double s=(double)(t1.tv_sec-t0.tv_sec)+(double)(t1.tv_nsec-t0.tv_nsec)/1e9;
+    *mib_s=s>0 ? (double)peers*BENCH_CHUNKS*8.0/s : 0;
+    return done==peers;
+}
+static bool peer_bench(struct peer_fixture *p)
+{
+    const char *on=getenv("ZCL_STATE_OFFER_BENCH");
+    if (!on || strcmp(on,"1")) return true;
+    snprintf(p->bench_path,sizeof(p->bench_path),"%s/consensus-state-bundle-300.sqlite",p->dir);
+    int fd=open(p->bench_path,O_WRONLY|O_CREAT|O_TRUNC,0600);
+    CHECK_PHASE(fd>=0);
+    bool ok=write(fd,"SQLite format 3",16)==16 && !ftruncate(fd,(off_t)BENCH_CHUNKS*ROM_SEED_CHUNK_SIZE);
+    close(fd); CHECK_PHASE(ok);
+    struct rom_artifact *art=calloc(1,sizeof(*art)); CHECK_PHASE(art);
+    ok=rom_seed_register(p->dir,"consensus-state-bundle-300.sqlite",NULL,art)==ROM_REG_OK;
+    rom_seed_set_peer_bps_cap(UINT64_C(1)<<40); rom_seed_set_global_bps_cap(UINT64_C(1)<<40);
+    double one=0,four=0;
+    ok=ok && peer_add_nodes(p,PEER_EXTRA) && bench_run(p,art->chunk_root,1,&one) && bench_run(p,art->chunk_root,4,&four);
+    printf("state_offer_peer bench: 1 peer %.0f MiB/s, 4 peers %.0f MiB/s aggregate (%u x 8 MiB chunks each)\n",
+           one,four,BENCH_CHUNKS);
+    rom_seed_set_peer_bps_cap(ROM_SEED_DEFAULT_PEER_BPS_CAP); rom_seed_set_global_bps_cap(ROM_SEED_DEFAULT_GLOBAL_BPS_CAP);
+    for (size_t k=1;k<=PEER_EXTRA;k++) p->list[k]=NULL;
+    p->nm.num_nodes=1; free(art); return ok;
 }
 /* A throttled request refuses and disconnect clears the server owner. */
 static bool peer_refuse_disconnect(struct peer_fixture *p)
@@ -207,10 +270,12 @@ static bool peer_refuse_disconnect(struct peer_fixture *p)
     rom_seed_set_peer_bps_cap(ROM_SEED_DEFAULT_PEER_BPS_CAP); CHECK_PHASE(refused);
     f=(struct state_offer_link_frame){.kind=STATE_OFFER_LINK_CHUNK_REQUEST,.nonce=56,.total=ROM_SEED_CHUNK_SIZE};
     memcpy(f.digest,p->artifact->chunk_root,32); CHECK_PHASE(frame_in(&p->mp,p->node,&f));
-    CHECK_PHASE(state_offer_link_server_peer()==(uint64_t)p->node->id+1);
+    uint64_t held[STATE_OFFER_LINK_SERVER_SLOTS];
+    CHECK_PHASE(state_offer_link_server_peers(held,STATE_OFFER_LINK_SERVER_SLOTS)==1 && held[0]==(uint64_t)p->node->id+1);
     atomic_store(&p->node->disconnect,true); state_offer_peer_pump(&p->mp);
-    for (int i=0;i<5000 && state_offer_link_server_peer();i++) pause_ms();
-    CHECK_PHASE(!state_offer_link_server_peer()); atomic_store(&p->node->disconnect,false); return true;
+    for (int i=0;i<5000 && state_offer_link_server_peers(held,STATE_OFFER_LINK_SERVER_SLOTS);i++) pause_ms();
+    CHECK_PHASE(!state_offer_link_server_peers(held,STATE_OFFER_LINK_SERVER_SLOTS));
+    atomic_store(&p->node->disconnect,false); return true;
 }
 /* A pending object read is cancelled when its connection disappears. */
 static bool peer_client_disconnect(struct peer_fixture *p)
@@ -253,21 +318,22 @@ static void peer_cleanup(struct peer_fixture *p)
         while (p->sentinel->next) { struct send_segment *s=p->sentinel->next; p->sentinel->next=s->next; send_segment_free(s); }
         p->node->send_head=p->node->send_tail=NULL; free(p->sentinel);
     } else free(p->sentinel);
-    if (p->other && p->other_sentinel) {
-        while (p->other_sentinel->next) { struct send_segment *s=p->other_sentinel->next; p->other_sentinel->next=s->next; send_segment_free(s); }
-        p->other->send_head=p->other->send_tail=NULL;
+    for (size_t k=0;k<PEER_EXTRA;k++) {
+        struct send_segment *head=p->extra_sentinel[k];
+        while (head && head->next) { struct send_segment *s=head->next; head->next=s->next; send_segment_free(s); }
+        if (p->extra[k]) p->extra[k]->send_head=p->extra[k]->send_tail=NULL;
+        free(head);
     }
-    free(p->other_sentinel);
     p->nm.nodes=NULL; p->nm.num_nodes=0;
-    if (p->other) p2p_node_free(p->other);
+    for (size_t k=0;k<PEER_EXTRA;k++) if (p->extra[k]) p2p_node_free(p->extra[k]);
     if (p->node) p2p_node_free(p->node);
     net_manager_free(&p->nm); rom_seed_reset(); state_offer_store_reset();
-    unlink(p->path); rmdir(p->dir); free(p->artifact); free(p->wire); free(p->batch_wire);
+    unlink(p->path); if (p->bench_path[0]) unlink(p->bench_path); rmdir(p->dir); free(p->artifact); free(p->wire); free(p->batch_wire);
 }
 int test_state_offer_peer(void)
 {
     struct peer_fixture p={0};
-    bool ok=peer_setup(&p) && peer_discovery(&p) && peer_transfer(&p) && peer_parallel(&p) &&
+    bool ok=peer_setup(&p) && peer_discovery(&p) && peer_transfer(&p) && peer_parallel(&p) && peer_bench(&p) &&
         peer_refuse_disconnect(&p) && peer_client_disconnect(&p) && peer_shutdown(&p);
     peer_cleanup(&p); return ok ? 0 : 1;
 }

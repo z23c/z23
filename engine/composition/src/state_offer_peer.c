@@ -185,26 +185,35 @@ static struct p2p_node **hold_peers(struct net_manager *nm, size_t *count, size_
     zcl_mutex_unlock(&nm->cs_nodes);
     return nodes;
 }
+static bool peer_held(struct p2p_node **nodes, size_t held, uint64_t peer)
+{
+    for (size_t i = 0; i < held; ++i)
+        if (boot_zcode_swarm_peer_id(nodes[i]) == peer) return true;
+    return false;
+}
+/* Drain every eligible connection, then release client and server state for
+ * connections that are gone. A failed snapshot proves nothing is gone. */
 void state_offer_peer_pump(struct msg_processor *mp)
 {
     if (!mp || !mp->net_mgr) return;
     struct net_manager *nm = mp->net_mgr;
-    uint64_t receiving = atomic_load(&receiving_peer); bool live = false;
-    uint64_t serving = state_offer_link_server_peer(); bool serving_live = false;
+    uint64_t receiving = atomic_load(&receiving_peer);
+    uint64_t serving[STATE_OFFER_LINK_SERVER_SLOTS];
+    size_t serving_count = state_offer_link_server_peers(serving, STATE_OFFER_LINK_SERVER_SLOTS);
     size_t count = 0, held = 0;
     struct p2p_node **nodes = hold_peers(nm, &count, &held);
-    for (size_t i = 0; i < held; ++i) {
-        live |= boot_zcode_swarm_peer_id(nodes[i]) == receiving;
-        serving_live |= boot_zcode_swarm_peer_id(nodes[i]) == serving;
-        drain(mp, nodes[i]);
-    }
+    for (size_t i = 0; i < held; ++i) drain(mp, nodes[i]);
+    bool known = nodes || !count;
+    bool drop_receiving = receiving && known && !peer_held(nodes, held, receiving);
+    for (size_t i = 0; i < serving_count; ++i)
+        if (!known || peer_held(nodes, held, serving[i])) serving[i] = 0;
     zcl_mutex_lock(&nm->cs_nodes);
     for (size_t i = 0; i < held; ++i)
         p2p_node_release(nodes[i]);
     zcl_mutex_unlock(&nm->cs_nodes);
-    if (receiving && !live && (nodes || !count)) sol_client_drop(receiving);
-    if (serving && !serving_live && (nodes || !count))
-        state_offer_link_server_drop(serving);
+    if (drop_receiving) sol_client_drop(receiving);
+    for (size_t i = 0; i < serving_count; ++i)
+        if (serving[i]) state_offer_link_server_drop(serving[i]);
     free(nodes);
     state_offer_link_server_tick();
 }
