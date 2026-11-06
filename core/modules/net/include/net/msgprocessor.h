@@ -419,6 +419,20 @@ void msg_processor_set_state_offer_record(struct msg_processor *mp,
 void msg_processor_set_snapshot_active(struct msg_processor *mp,
                                        msg_snapshot_active_fn active,
                                        void *ctx);
+
+/* Process-wide hold on OUTGOING getheaders requests (push_getheaders_from,
+ * push_getheaders, push_getheaders_span). NULL (the default) never holds.
+ * Received headers are processed as always, and the checkpoint header window
+ * walk (push_getheaders_by_hash) is not held. Set by a FlySync node until its
+ * rung bundle installs. */
+typedef bool (*msg_header_sync_hold_fn)(void);
+void msg_processor_set_header_sync_hold(msg_header_sync_hold_fn fn);
+bool msg_processor_header_sync_held(void);
+
+/* Whether this node advertises NODE_NETWORK (full block history). Default
+ * true. A FlySync node holds no block below its rung and turns it off. */
+void net_set_advertise_full_history(bool on);
+bool net_advertises_full_history(void);
 void msg_processor_set_snapshot_anchor_accessors(
     struct msg_processor *mp,
     msg_snapshot_anchor_get_fn get_anchor,

@@ -10,9 +10,17 @@
 
 #include "test/test_core.h"
 
+#include "chain/chainparams.h"
 #include "core/uint256.h"
 #include "net/checkpoint_header_fetch.h"
+#include "net/msg_internal.h"
+#include "net/msgprocessor.h"
+#include "net/net.h"
+#include "net/netbase.h"
+#include "net/protocol.h"
 #include "primitives/block.h"
+#include "util/util.h"
+#include "validation/main_state.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -160,11 +168,99 @@ static int fsi_case_window_args_and_single_mode(void)
     return failures;
 }
 
+/* ── Header-sync hold and service bits ───────────────────────────────────── */
+
+static bool fsi_hold_on(void) { return true; }
+
+static void fsi_setup_node(struct p2p_node *node)
+{
+    memset(node, 0, sizeof(*node));
+    snprintf(node->addr_name, sizeof(node->addr_name), "203.0.113.7:8033");
+    node->id = 7;
+    node->services = NODE_ZCL23;
+    node->socket = ZCL_INVALID_SOCKET;
+}
+
+/* Count queued messages named `cmd`, then drop the queue. */
+static int fsi_drain_count(struct p2p_node *node, const char *cmd)
+{
+    int n = 0;
+    struct send_segment *seg = node->send_head;
+    while (seg) {
+        struct send_segment *next = seg->next;
+        if (seg->size >= MSG_HEADER_SIZE &&
+            strncmp((const char *)seg->data + MESSAGE_START_SIZE, cmd,
+                    strlen(cmd)) == 0)
+            n++;
+        send_segment_free(seg);
+        seg = next;
+    }
+    node->send_head = NULL;
+    node->send_tail = NULL;
+    node->send_size = 0;
+    node->send_offset = 0;
+    return n;
+}
+
+static struct net_manager g_fsi_nm;
+
+static int fsi_case_hold_and_services(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_REGTEST);
+    const struct chain_params *cp = chain_params_get();
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "flysync_hold", "ok");
+    SetDataDir(dir);
+    struct main_state ms;
+    main_state_init(&ms);
+    struct msg_processor mp;
+    msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_fsi_nm, NULL);
+    struct p2p_node node;
+    fsi_setup_node(&node);
+    struct uint256 a, b;
+    memset(a.data, 0x21, 32);
+    memset(b.data, 0x22, 32);
+
+    msg_processor_set_header_sync_hold(NULL);
+    push_getheaders_span(&mp, &node, &a, &b);
+    FSI_CHECK("no hold: a span request goes out",
+              fsi_drain_count(&node, "getheaders") == 1);
+    msg_processor_set_header_sync_hold(fsi_hold_on);
+    push_getheaders_span(&mp, &node, &a, &b);
+    push_getheaders(&mp, &node);
+    FSI_CHECK("hold: span and plain getheaders are held",
+              fsi_drain_count(&node, "getheaders") == 0);
+    push_getheaders_by_hash(&mp, &node, &a);
+    FSI_CHECK("hold: the window walk request still goes out",
+              fsi_drain_count(&node, "getheaders") == 1);
+    msg_processor_set_header_sync_hold(NULL);
+
+    struct version_message ver;
+    msg_version_build(&ver, &mp, &node, 0);
+    FSI_CHECK("default node advertises NODE_NETWORK",
+              (ver.services & NODE_NETWORK) != 0 &&
+              (ver.services & NODE_ZCL23) != 0);
+    net_set_advertise_full_history(false);
+    msg_version_build(&ver, &mp, &node, 0);
+    FSI_CHECK("island node does not advertise NODE_NETWORK",
+              (ver.services & NODE_NETWORK) == 0 &&
+              (ver.services & NODE_ZCL23) != 0);
+    net_set_advertise_full_history(true);
+
+    main_state_free(&ms);
+    ClearDataDirCache();
+    test_rm_rf(dir);
+    chain_params_select(CHAIN_MAIN);
+    return failures;
+}
+
 int test_flysync_island(void)
 {
     int failures = 0;
     failures += fsi_case_window_walk();
     failures += fsi_case_window_args_and_single_mode();
+    failures += fsi_case_hold_and_services();
     printf("flysync_island: %d failures\n", failures);
     return failures;
 }

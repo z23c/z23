@@ -57,6 +57,25 @@ static _Atomic bool g_no_hash_streak = false;
 static _Atomic bool g_snapshot_streak = false;
 static _Atomic bool g_push_getheaders_snapshot_streak = false;
 static _Atomic bool g_push_getheaders_span_snapshot_streak = false;
+static _Atomic bool g_header_sync_hold_streak = false;
+static _Atomic uint64_t g_header_sync_held_requests = 0;
+
+/* The engine-set header-sync hold (msg_processor_set_header_sync_hold): true
+ * means this request does not go out. Named once per held streak. */
+static bool getheaders_held(const char *who, const struct p2p_node *node)
+{
+    if (!msg_processor_header_sync_held()) {
+        atomic_store(&g_header_sync_hold_streak, false);
+        return false;
+    }
+    uint64_t n = atomic_fetch_add(&g_header_sync_held_requests, 1) + 1;
+    if (getheaders_suppress_rising_edge(&g_header_sync_hold_streak))
+        LOG_INFO("headers",
+                 "%s: header request to %s HELD (FlySync waits for its rung "
+                 "bundle; held=%llu)", who, node ? node->addr_name : "?",
+                 (unsigned long long)n);
+    return true;
+}
 
 static struct block_index *push_getheaders_reanchor_target(struct msg_processor *mp)
 {
@@ -137,6 +156,8 @@ void push_getheaders_from(struct msg_processor *mp,
                           struct p2p_node *node,
                           struct block_index *from)
 {
+    if (getheaders_held("push_getheaders_from", node))
+        return;
     /* Robust continuation anchor. A caller may hand us a block_index whose
      * stable per-node hash slot was never populated (phashBlock == NULL).
      * Dropping the request here is a SILENT header-sync stop — forbidden by
@@ -216,6 +237,8 @@ void push_getheaders_from(struct msg_processor *mp,
 
 void push_getheaders(struct msg_processor *mp, struct p2p_node *node)
 {
+    if (getheaders_held("push_getheaders", node))
+        return;
     if (msg_processor_snapshot_active(mp)) {
         uint64_t n =
             atomic_fetch_add(&g_push_getheaders_suppressed_snapshot, 1) + 1;
@@ -268,6 +291,8 @@ void push_getheaders_span(struct msg_processor *mp, struct p2p_node *node,
                           const struct uint256 *stop_hash)
 {
     if (!mp || !node || !start_hash)
+        return;
+    if (getheaders_held("push_getheaders_span", node))
         return;
     if (msg_processor_snapshot_active(mp)) {
         uint64_t n = atomic_fetch_add(

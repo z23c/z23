@@ -36,7 +36,7 @@
 
 /* Root node digest over the whole sealed set (dirpath ""). */
 #define ZCL_CORE_SEAL_TREE \
-    "2fc64d0dc42e7fb223659d12a773319d73ebed8e023d8c3f2f1f2d481b366db9"
+    "c940d37a94d8d028c93681a68848fdcf758d3da0f5e761d9def1259f639b9030"
 
 /* SECTION lines in core/MANIFEST.sha3 at generation time. */
 #define ZCL_CORE_SEAL_SECTION_COUNT 80u
@@ -45,7 +45,7 @@
  * hotswap/hotswap_module.h defines it as an initializer element. */
 #define ZCL_CORE_SEAL_SECTION_ROWS \
     ZCL_HOTSWAP_SECTION_ROW("core", \
-        "55c5513f8f639315cd6e9464bfdcbe7f70d8a9581377792eeb35780dc68bd70f") \
+        "02e7cde2a9f15f54676db8764a938dbc5f0869150710de0b5b18017009f7cdd0") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams", \
         "bb1ab0b704bd8de6e2525c68c4dd1b09285aea134e2a122fa2ba2eec508adc78") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams/include", \
@@ -73,7 +73,7 @@
     ZCL_HOTSWAP_SECTION_ROW("core/math/src", \
         "489136c5ceec46980deb06e9a9437c79b691a13606b3fcab9d6130508dad43a8") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules", \
-        "62555b2e54b06ffbca98c6627ae013fb8f2a0c1627c58000d2713c4dc9ac72d4") \
+        "a1f90944f2c8777393226766d4f8fcecef0cb2734a084d17838dc99c1ba41210") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/bloom", \
         "20fc50fc216a21b99b3704761fd36818bad04788f7fc18fc2f774277ab273515") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/bloom/include", \
@@ -133,13 +133,13 @@
     ZCL_HOTSWAP_SECTION_ROW("core/modules/mining/src", \
         "1a0f108af6d2295b0a5f1b6a5d1ca8b07968047b8e330eeccdb7c93323f64c1a") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/net", \
-        "d80003e8727d64bb4b285e30987502bcadc6d23ae176661fc9623cec4e568f56") \
+        "bd9669ed53ae1284b4302e84e5ffd04473c4c7305ef00ad7719c17e6e4387581") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/net/include", \
-        "16275f35803a41603c68b0a6ddc0aba9ad40b64cd13e3f13d14056f971e60bbe") \
+        "265e4f4a6cbec817252e2d6eacb3bf13a107cb34191264b6d017c1cc45445293") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/net/include/net", \
-        "aef8f4ccc7c317ad0c7a472d7f6292f78bae167be61d05ac144a6413cfaa1ad8") \
+        "48e561f765c31d257b23257aa05b18c320b7266fe05008c0af035653378c4d44") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/net/src", \
-        "725652b04bffb0a55f81f0b0da13b790f7041d5bd74368b12bf04b60e0971702") \
+        "46efd0477acef1ab439dee3d00afc923b1b00ed305286cb1b0051d6a4cd823f0") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/noise", \
         "e42cfdc83e077ddbcdf0ef107b353614ca36a7b18c10492a396ebbbfe42e3eda") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/noise/include", \

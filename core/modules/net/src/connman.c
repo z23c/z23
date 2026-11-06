@@ -13,6 +13,7 @@
 #include "platform/private_file.h"
 #include "connman_internal.h"
 #include "net/connman.h"
+#include "net/msgprocessor.h"           /* net_advertises_full_history */
 #include "net/noise_transport.h"
 #include "net/v2_identity.h"
 #include "net/addrman.h"
@@ -1727,7 +1728,8 @@ bool connman_init(struct connman *cm, const struct chain_params *params,
     memcpy(cm->manager.message_start, params->pchMessageStart,
            MESSAGE_START_SIZE);
     cm->manager.default_port = (uint16_t)params->nDefaultPort;
-    cm->manager.local_services = NODE_NETWORK | NODE_ZCL23;
+    cm->manager.local_services =
+        (net_advertises_full_history() ? NODE_NETWORK : 0) | NODE_ZCL23;
     if (bip37_enabled())
         cm->manager.local_services |= NODE_BLOOM;
 

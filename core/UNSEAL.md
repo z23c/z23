@@ -1163,3 +1163,11 @@ later lane flips it HARD.
 - 2026-11-06T09:31:55Z — REASON: Rebase reseal: carry the empty-locator getheaders serve fix onto origin/main; no code change beyond the rebased commit
   old ROOT: 8e0b4d0677abb3f1bce4dfaf3cf88c6c8f336aa11512264e18c0fbbbbe854c5c
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T04:58:45Z — REASON: FlySync: an engine-set hold on outgoing getheaders requests (push_getheaders_from, push_getheaders, push_getheaders_span) and an engine-set switch that stops advertising NODE_NETWORK on a node without full history. Request and advertisement only; no validation predicate changes
+  old ROOT: a73b588bd7a5585e774631caa643c10a23db5547026363c5596e89b1773a08ce
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T09:32:24Z — REASON: Rebase reseal onto origin/main: Let the engine hold outgoing header requests and drop NODE_NETWORK; no change beyond the rebased commit
+  old ROOT: 468f62ad1e6403eb430bc28b0b36319e66fad0e4798079bc0db6c0cb7f0fe684
+  by: owner unseal ritual (make core-unseal)

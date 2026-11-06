@@ -356,6 +356,30 @@ void msg_processor_set_utxo_sha3_compute(
     mp->utxo_sha3_compute_ctx = ctx;
 }
 
+static _Atomic(msg_header_sync_hold_fn) g_header_sync_hold = NULL;
+static _Atomic bool g_advertise_full_history = true;
+
+void msg_processor_set_header_sync_hold(msg_header_sync_hold_fn fn)
+{
+    atomic_store(&g_header_sync_hold, fn);
+}
+
+bool msg_processor_header_sync_held(void)
+{
+    msg_header_sync_hold_fn fn = atomic_load(&g_header_sync_hold);
+    return fn && fn();
+}
+
+void net_set_advertise_full_history(bool on)
+{
+    atomic_store(&g_advertise_full_history, on);
+}
+
+bool net_advertises_full_history(void)
+{
+    return atomic_load(&g_advertise_full_history);
+}
+
 bool msg_processor_snapshot_active(const struct msg_processor *mp)
 {
     return mp && mp->snapshot_active &&

@@ -386,7 +386,8 @@ void msg_version_build(struct version_message *ver,
         return;
     version_message_init(ver);
     ver->protocol_version = PROTOCOL_VERSION;
-    ver->services = NODE_NETWORK | NODE_ZCL23;
+    ver->services = (net_advertises_full_history() ? NODE_NETWORK : 0) |
+                    NODE_ZCL23;
     if (mp->net_mgr)
         ver->services |= mp->net_mgr->local_services & NODE_STATE_OFFER_LINK;
     if (bip37_enabled())
