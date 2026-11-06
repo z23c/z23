@@ -246,6 +246,39 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_LOW,
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_PROCESS_EXEC, 0, zcl_native_handle_package_resident)
+/* Building a copy only produces bytes; open and playtest still need
+ * accept_execution for the exact image_sha3. So an agent may plan and
+ * confirm it (AUTH_OPERATOR, plan first), on an adopted copy or a received
+ * copy the owner confirmed once at bundle receive. */
+ZCL_COMMAND_READY_COMMAND(
+    "app.build", "app", "", "Build your app copy into an image",
+    "copy is an adopted copy (a name under <datadir>/copies or its absolute "
+    "directory) or a received copy whose publisher and root the owner "
+    "confirmed at zcode package bundle receive; anything else is "
+    "NOT_ADOPTED. The copy's Makefile prints its inputs with "
+    "print-app-closure and builds $(APP_OUT)/app with -MD. Without confirm, "
+    "refuses unsaved changes and returns package_root, closure_root, "
+    "env_root (toolchain capsule), dependency_root (from zcode-package.json; "
+    "a different dependency_root input is DEPENDENCY_MISMATCH), cache_hit "
+    "and a plan_id; it writes nothing. With that plan_id and confirm:true, "
+    "a cache hit returns the existing record and runs no make; otherwise "
+    "make runs out of tree under lab_exec confinement where the host can "
+    "(the reply says unconfined where not), and the image is stored under "
+    "<datadir>/app_build/images/<image_sha3> with a zcl.app_build.v1 record. "
+    "Refusals: BUILD_FAILED with a log tail, CLOSURE_DRIFT, UNSAVED_CHANGES. "
+    "Nothing is executed but the build.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "app,build,copy,image,compile,make,remix,game,cache",
+    "zcl.app_build.input.v1", "zcl.app_build.v1",
+    "copy,datadir,dependency_root,plan_id,confirm", "copy",
+    "z23 app build --input='{\"copy\":\"skycombat-1\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_PROCESS_EXEC, 0, zcl_native_handle_app_build)
+
 ZCL_COMMAND_BRANCH("app.run", "app", "Run accepted installed binaries",
                    ZCL_COMMAND_LAYER_APP)
 

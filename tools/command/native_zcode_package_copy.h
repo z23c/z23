@@ -172,9 +172,14 @@ enum zcl_package_copy_adoption {
     ZCL_PACKAGE_COPY_NOT_ADOPTED,
     ZCL_PACKAGE_COPY_FOREIGN_COMMITS,
     ZCL_PACKAGE_COPY_ADOPTION_UNREADABLE,
+    /* No adopt record, but the owner confirmed this received copy's
+     * publisher and root once at zcode.package.bundle.receive (owner
+     * decision 11-06): it may be built and opened like an adopted copy. */
+    ZCL_PACKAGE_COPY_RECEIVED_TRUSTED,
 };
 
-/* "adopted", "not_adopted", "foreign_commits" or "adoption_unreadable". */
+/* "adopted", "not_adopted", "foreign_commits", "received_trusted" or
+ * "adoption_unreadable". */
 const char *zcl_package_copy_adoption_name(enum zcl_package_copy_adoption a);
 
 /* Validate, encode and durably write the record (tmp, fsync, rename, fsync
@@ -196,7 +201,12 @@ bool zcl_package_adopt_record_load(const char *datadir,
  * <datadir>/copies/<record name> itself, and every later commit to be a
  * local save or restore; FOREIGN_COMMITS when the record and place hold but
  * a later commit is not local. A hand-written or copied commit log is never
- * adoption. `record` (optional) receives the record when one was found. */
+ * adoption. `record` (optional) receives the record when one was found.
+ * With no adopt record, a received copy is RECEIVED_TRUSTED when the
+ * datadir holds the owner's receive trust record for (its fork record
+ * commit, its parent release), that release is persisted here with the
+ * trusted package root, and every later commit is local (else
+ * FOREIGN_COMMITS). One check serves adopted and received copies. */
 enum zcl_package_copy_adoption zcl_package_copy_adopted(
     const char *datadir, const struct zcl_package_copy *copy,
     struct zcl_package_adopt_record *record);

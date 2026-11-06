@@ -104,12 +104,14 @@ bool zcl_package_receive_trust_read(const char *datadir,
     char name[160], path[ZPB_PATH_MAX], canonical[ZPB_RECORD_MAX];
     char *text = NULL;
     size_t len = 0;
+    struct stat st;
     if (!datadir || !copy_root || !release_id || !out ||
         !zpb_record_name(copy_root, release_id, name, sizeof(name)))
         return false;
     int n = snprintf(path, sizeof(path), "%s/%s/%s", datadir,
                      ZCL_PACKAGE_RECEIVE_TRUST_DIR, name);
-    if (n <= 0 || (size_t)n >= sizeof(path) ||
+    /* No record is the ordinary "never confirmed" answer: no error log. */
+    if (n <= 0 || (size_t)n >= sizeof(path) || lstat(path, &st) != 0 ||
         !zcl_read_whole_file_text(path, ZPB_RECORD_MAX, &text, &len,
                                   "zcode.package.receive_trust"))
         return false;

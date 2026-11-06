@@ -22,6 +22,7 @@
  * (authority_receipt_write_atomic) under <datadir>/zcode/adopted. */
 
 #include "command/native_command.h"
+#include "command/native_zcode_package_bundle.h"
 #include "command/native_zcode_package_copy.h"
 
 #include "base/hex.h"
@@ -72,6 +73,7 @@ const char *zcl_package_copy_adoption_name(enum zcl_package_copy_adoption a)
     case ZCL_PACKAGE_COPY_ADOPTED:         return "adopted";
     case ZCL_PACKAGE_COPY_NOT_ADOPTED:     return "not_adopted";
     case ZCL_PACKAGE_COPY_FOREIGN_COMMITS: return "foreign_commits";
+    case ZCL_PACKAGE_COPY_RECEIVED_TRUSTED: return "received_trusted";
     case ZCL_PACKAGE_COPY_ADOPTION_UNREADABLE: break;
     }
     return "adoption_unreadable";
@@ -257,6 +259,25 @@ static bool zpa_copy_in_place(const char *datadir, const char *name,
            strcmp(want_real, got_real) == 0;
 }
 
+/* The owner-confirmed receive of this copy: a trust record for (fork record
+ * commit, parent release) whose package root is the persisted release's. */
+static enum zcl_package_copy_adoption zpa_received(
+    const char *datadir, const struct zcl_package_copy *copy)
+{
+    struct zcl_package_receive_trust trust;
+    struct vcs_package_release release;
+    uint8_t release_id[32];
+    if (!zcl_package_receive_trust_read(datadir, copy->fork_version,
+                                        copy->parent_release, &trust) ||
+        zcl_package_copy_find_release(datadir, copy->parent_release, &release,
+                                      release_id) != ZCL_PACKAGE_COPY_FOUND ||
+        memcmp(release_id, copy->parent_release, 32) != 0 ||
+        memcmp(release.package_root, trust.package_root, 32) != 0)
+        return ZCL_PACKAGE_COPY_NOT_ADOPTED;
+    return copy->foreign_versions ? ZCL_PACKAGE_COPY_FOREIGN_COMMITS
+                                  : ZCL_PACKAGE_COPY_RECEIVED_TRUSTED;
+}
+
 enum zcl_package_copy_adoption zcl_package_copy_adopted(
     const char *datadir, const struct zcl_package_copy *copy,
     struct zcl_package_adopt_record *record)
@@ -268,7 +289,7 @@ enum zcl_package_copy_adoption zcl_package_copy_adopted(
                                        copy->parent_release, &rec, &found))
         return ZCL_PACKAGE_COPY_ADOPTION_UNREADABLE;
     if (!found)
-        return ZCL_PACKAGE_COPY_NOT_ADOPTED;
+        return zpa_received(datadir, copy);
     if (record)
         *record = rec;
     if (!zpa_copy_in_place(datadir, rec.name, vcs_repo_root(copy->repo)))

@@ -158,8 +158,11 @@ static bool abc_confirm(const char *path, struct abc_leaf *l)
 
 static bool abc_plan_confirm(const char *path, struct abc_leaf *l)
 {
-    return abc_pass(path, l) && abc_confirm(path, l) &&
-           l->out.status == ZCL_COMMAND_STATUS_PASSED;
+    bool ok = abc_pass(path, l) && abc_confirm(path, l);
+    if (ok && l->out.status != ZCL_COMMAND_STATUS_PASSED)
+        printf("  [%s confirm refused %s: %s]\n", path, l->out.error.code,
+               l->out.error.message);
+    return ok && l->out.status == ZCL_COMMAND_STATUS_PASSED;
 }
 
 static bool abc_put(const char *dir, const char *rel, const char *text)
@@ -197,6 +200,12 @@ static const char k_meta[] =
     "  \"license\": \"Apache-2.0\",\n  \"include_dir\": \"include\",\n"
     "  \"source_dir\": \"src\",\n  \"dependencies\": []\n}\n";
 
+static const char k_alice_meta[] =
+    "{\n  \"schema\": 1,\n  \"name\": \"alice/tinyapp\",\n"
+    "  \"semver\": \"0.2.0\",\n  \"language\": \"c23\",\n"
+    "  \"license\": \"Apache-2.0\",\n  \"include_dir\": \"include\",\n"
+    "  \"source_dir\": \"src\",\n  \"dependencies\": []\n}\n";
+
 static const char k_main[] =
     "#include \"boost.h\"\nint main(void) { return BOOST - 1; }\n";
 
@@ -227,11 +236,10 @@ static bool abc_stub_source(struct abc_world *w)
            abc_put(w->src, "src/main.c", k_main);
 }
 
-/* Alice publishes the stub with her own publisher key (the key file the
- * owner's sign leaf uses later), so her shared edit keeps the name. */
+/* The original publisher signs the stub with its own release key. */
 static bool abc_publish_origin(struct abc_world *w)
 {
-    char key[700], z23[700], pubhex[PLUGIN_HEX_PUBLIC_KEY + 1];
+    char key[700], pubhex[PLUGIN_HEX_PUBLIC_KEY + 1];
     struct plugin_dist_published why;
     struct vcs_package_prepare_options o = {
         .dir = w->src, .publisher_sequence = 1, .reward_address = "",
@@ -241,9 +249,8 @@ static bool abc_publish_origin(struct abc_world *w)
     char detail[256] = {0};
     uint8_t *wire = NULL;
     size_t wire_len = 0;
-    (void)snprintf(z23, sizeof(z23), "%s/.z23", w->alice_home);
-    (void)snprintf(key, sizeof(key), "%s/zcode_publisher.key", z23);
-    if (mkdir(z23, 0700) != 0 || plugin_keygen(key, pubhex) != PLUGIN_OK ||
+    (void)snprintf(key, sizeof(key), "%s/origin.key", w->root);
+    if (plugin_keygen(key, pubhex) != PLUGIN_OK ||
         plugin_dist_release_key_sign(key, NULL, o.publisher_pubkey, NULL,
                                      &why) != PLUGIN_DIST_OK ||
         vcs_package_prepare(&o, &p, detail, sizeof(detail)) !=
@@ -497,7 +504,10 @@ static int abc_builds_v1_then_v2(struct abc_world *w)
         /* The copy itself was not written: it is still clean. */
         ASSERT(abc_save(w->copy, NULL) == false);
 
+        /* v2: a stronger boost, under Alice's own name (the stub's name is
+         * bound to the original publisher's key). */
         ASSERT(abc_put(w->copy, "include/boost.h", "#define BOOST 2\n"));
+        ASSERT(abc_put(w->copy, "zcode-package.json", k_alice_meta));
         ASSERT(abc_save(w->copy, w->v2));
         ASSERT(abc_build(&l, w->copy, w->alice_datadir));
         (void)snprintf(w->image_v2, 65, "%s", abc_get(&l, "image_sha3"));
@@ -692,6 +702,7 @@ static int abc_landlock_contains(const struct abc_world *w)
         ASSERT(abc_put(w->copy, "src/main.c", "int main(void) { return 0; }\n"));
         ASSERT(abc_build_refused(w, "Makefile", makefile, "BUILD_FAILED", &l));
         ASSERT(strcmp(abc_get(&l, "confinement"), "landlock") == 0);
+        ASSERT(strstr(abc_get(&l, "log_tail"), "denied") != NULL);
         abc_close(&l);
         ASSERT(stat(escape, &st) != 0);
         PASS();
