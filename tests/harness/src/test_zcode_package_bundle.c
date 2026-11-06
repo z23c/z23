@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: share a personal package copy with a friend by one file, with no
  * account and no node. Alice forks skycombat, saves an edit and signs the
- * share with her own local publisher key (zcode.package.sign, created 0600 on
+ * share with her own local publisher key (zcode.package.bundle.sign, created 0600 on
  * first use, owner-only); the confirm writes one .z23share file and prints one
  * share line. Bob, in a second HOME with no node, verifies the file, must name
  * Alice's publisher fingerprint and the package root before anything is
@@ -254,10 +254,10 @@ static bool zpb_world_init(struct zpb_world *w)
 static int zpb_agents_never_sign(const struct zpb_world *w)
 {
     int failures = 0;
-    TEST("zcode package sign/bundle receive: MCP is refused; the plan names "
+    TEST("zcode package bundle sign/bundle receive: MCP is refused; the plan names "
          "the owner's command") {
         static const char *const owner_only[] = {
-            "zcode.package.sign", "zcode.package.bundle.receive",
+            "zcode.package.bundle.sign", "zcode.package.bundle.receive",
         };
         for (size_t i = 0; i < 2; i++) {
             const struct zcl_command_spec *spec = zpb_spec(owner_only[i]);
@@ -291,7 +291,7 @@ static int zpb_agents_never_sign(const struct zpb_world *w)
         (void)json_push_kv_str(&share.in, "publisher_pubkey",
             "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5");
         ASSERT(zpb_pass("zcode.package.share", &share));
-        ASSERT(strstr(zpb_get(&share, "next"), "z23 zcode package sign") !=
+        ASSERT(strstr(zpb_get(&share, "next"), "z23 zcode package bundle sign") !=
                NULL);
         zpb_close(&share);
         PASS();
@@ -311,14 +311,14 @@ static bool zpb_sign_input(struct zpb_leaf *l, const struct zpb_world *w)
 static int zpb_alice_signs(struct zpb_world *w)
 {
     int failures = 0;
-    TEST("zcode package sign: the owner key is made 0600 once, shown by "
+    TEST("zcode package bundle sign: the owner key is made 0600 once, shown by "
          "fingerprint, and the confirm writes one share file") {
         struct zpb_leaf l;
         struct stat st;
         char key[700];
         ASSERT(zpb_as(w->alice_home));
         ASSERT(zpb_sign_input(&l, w));
-        ASSERT(zpb_pass("zcode.package.sign", &l));
+        ASSERT(zpb_pass("zcode.package.bundle.sign", &l));
         (void)snprintf(key, sizeof(key), "%s/.z23/zcode_publisher.key",
                        w->alice_home);
         ASSERT(stat(key, &st) == 0 && (st.st_mode & 0777) == 0600);
@@ -328,11 +328,19 @@ static int zpb_alice_signs(struct zpb_world *w)
                        zpb_get(&l, "publisher_fingerprint"));
         ASSERT(strlen(w->fingerprint) == 66);
         ASSERT(stat(w->share_file, &st) != 0);
+        char plan[65];
+        (void)snprintf(plan, sizeof(plan), "%s", zpb_get(&l, "plan_id"));
+        ASSERT(stat(key, &st) == 0);
+        ino_t key_inode = st.st_ino;
         zpb_close(&l);
 
+        /* The confirm reuses the same key file: same fingerprint, same file. */
         ASSERT(zpb_sign_input(&l, w));
-        ASSERT(zpb_plan_confirm("zcode.package.sign", &l));
-        ASSERT(!json_get_bool(json_get(&l.out.data, "key_created")));
+        (void)json_push_kv_str(&l.in, "plan_id", plan);
+        (void)json_push_kv_bool(&l.in, "confirm", true);
+        ASSERT(zpb_pass("zcode.package.bundle.sign", &l));
+        ASSERT(stat(key, &st) == 0 && st.st_ino == key_inode &&
+               (st.st_mode & 0777) == 0600);
         ASSERT(strcmp(zpb_get(&l, "publisher_fingerprint"), w->fingerprint) ==
                0);
         (void)snprintf(w->shared_release, 65, "%s", zpb_get(&l, "release_id"));
@@ -361,17 +369,13 @@ static void zpb_receive_input(struct zpb_leaf *l, const char *file,
     (void)json_push_kv_int(&l->in, "day", ZPB_DAY);
 }
 
-/* Confirm one receive with the given trust (NULL leaves it out). */
+/* Confirm one receive of Bob's plan with the given trust (NULL leaves it
+ * out). */
 static bool zpb_receive(struct zpb_leaf *l, const struct zpb_world *w,
-                        const char *publisher, const char *root)
+                        const char *plan, const char *publisher,
+                        const char *root)
 {
     zpb_receive_input(l, w->share_file, w->bob_datadir, w->bob_copy);
-    if (!zpb_pass("zcode.package.bundle.receive", l))
-        return false;
-    char plan[65];
-    (void)snprintf(plan, sizeof(plan), "%s", zpb_get(l, "plan_id"));
-    zcl_command_reply_free(&l->out);
-    zcl_command_reply_init(&l->out, "zcl.test.zcode_package_bundle.v1");
     (void)json_push_kv_str(&l->in, "plan_id", plan);
     (void)json_push_kv_bool(&l->in, "confirm", true);
     if (publisher)
@@ -457,21 +461,33 @@ static int zpb_bob_receives(const struct zpb_world *w)
         ASSERT(strstr(zpb_get(&l, "next"), w->fingerprint) != NULL);
         zpb_close(&l);
 
-        ASSERT(zpb_receive(&l, w, NULL, NULL));
+        /* The owner's plan shows the same publisher and names the confirm. */
+        char plan[65];
+        zpb_receive_input(&l, w->share_file, w->bob_datadir, w->bob_copy);
+        ASSERT(zpb_pass("zcode.package.bundle.receive", &l));
+        ASSERT(strcmp(zpb_get(&l, "publisher_fingerprint"), w->fingerprint) ==
+               0);
+        ASSERT(strstr(zpb_get(&l, "next"), "trust_publisher") != NULL);
+        (void)snprintf(plan, sizeof(plan), "%s", zpb_get(&l, "plan_id"));
+        ASSERT(strlen(plan) == 64);
+        zpb_close(&l);
+
+        ASSERT(zpb_receive(&l, w, plan, NULL, NULL));
         ASSERT(zpb_refusal(&l, "TRUST_REQUIRED"));
         ASSERT(stat(w->bob_copy, &st) != 0);
         zpb_close(&l);
-        ASSERT(zpb_receive(&l, w,
+        ASSERT(zpb_receive(&l, w, plan,
             "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
             w->shared_package));
         ASSERT(zpb_refusal(&l, "TRUST_MISMATCH"));
         zpb_close(&l);
-        ASSERT(zpb_receive(&l, w, w->fingerprint, w->origin_package));
+        ASSERT(zpb_receive(&l, w, plan, w->fingerprint, w->origin_package));
         ASSERT(zpb_refusal(&l, "TRUST_MISMATCH"));
         ASSERT(stat(w->bob_copy, &st) != 0);
+        ASSERT(stat(w->bob_datadir, &st) != 0);
         zpb_close(&l);
 
-        ASSERT(zpb_receive(&l, w, w->fingerprint, w->shared_package));
+        ASSERT(zpb_receive(&l, w, plan, w->fingerprint, w->shared_package));
         ASSERT(l.out.status == ZCL_COMMAND_STATUS_PASSED);
         char copy_root[65];
         (void)snprintf(copy_root, sizeof(copy_root), "%s",

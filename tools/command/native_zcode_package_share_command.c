@@ -12,7 +12,7 @@
  * the signed envelope goes through zcl_native_zcode_local_publication_commit,
  * the same lifecycle zcode.package.publish.commit uses.
  *
- * zcode.package.sign is the same flow for an owner with no offline signer:
+ * zcode.package.bundle.sign is the same flow for an owner with no offline signer:
  * an AUTH_OWNER leaf (MCP refuses it, so an agent never signs) that signs
  * with the owner's own release key file, the format plugin publish
  * --release-key reads, kept at ~/.z23/zcode_publisher.key and made 0600 on
@@ -190,7 +190,7 @@ struct zps_share {
 };
 
 static const char k_zps_command[] = "zcode.package.share";
-static const char k_zps_sign[] = "zcode.package.sign";
+static const char k_zps_sign[] = "zcode.package.bundle.sign";
 
 static void zps_scratch_remove(char scratch[PLATFORM_TEMP_PATH_MAX])
 {
@@ -443,7 +443,7 @@ static void zps_next(struct zps_share *s)
     if (s->local_key)
         (void)snprintf(next, sizeof(next),
                        "check the name, version and publisher fingerprint, "
-                       "then: z23 zcode package sign --input='{\"dir\":\"%s\","
+                       "then: z23 zcode package bundle sign --input='{\"dir\":\"%s\","
                        "\"output\":\"%s\",\"plan_id\":\"%s\","
                        "\"confirm\":true}'", s->dir, s->output, plan);
     else
@@ -451,7 +451,7 @@ static void zps_next(struct zps_share *s)
                        "sign signing_digest offline, then repeat with "
                        "plan_id, signature_hex and confirm:true; or the "
                        "owner (never an agent) signs with their own local "
-                       "key: z23 zcode package sign --input='{\"dir\":\"%s\"}'",
+                       "key: z23 zcode package bundle sign --input='{\"dir\":\"%s\"}'",
                        s->dir);
     (void)json_push_kv_str(&s->reply->data, "next", next);
 }
@@ -633,7 +633,7 @@ void zcl_native_handle_zcode_package_share(
     zps_run(request, reply, k_zps_command, false);
 }
 
-void zcl_native_handle_zcode_package_sign(
+void zcl_native_handle_zcode_package_bundle_sign(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     zps_run(request, reply, k_zps_sign, true);

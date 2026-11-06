@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: share a personal package copy by one file, with no account and no
- * node — the .z23share file zcode.package.sign (or share with `output`)
+ * node — the .z23share file zcode.package.bundle.sign (or share with `output`)
  * writes, the verify and receive leaves that read it, and the receive trust
  * record a later build or open of the received copy reads.
  *

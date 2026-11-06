@@ -274,8 +274,13 @@ static bool zpb_load(struct zpb_receive *s)
                                   s->file.wires.release_len, &s->release) !=
             VCS_PACKAGE_RELEASE_OK ||
         vcs_package_release_id(&s->release, s->release_id) !=
-            VCS_PACKAGE_RELEASE_OK)
-        return zpb_refuse(s, "the release envelope does not parse");
+            VCS_PACKAGE_RELEASE_OK ||
+        vcs_package_release_verify(&s->release) != VCS_PACKAGE_RELEASE_OK)
+        return zpb_refuse(s, "the signed release envelope does not verify");
+    zcl_hex_encode(s->release.publisher_pubkey,
+                   VCS_PACKAGE_RELEASE_PUBKEY_BYTES, s->fingerprint);
+    zcl_hex_encode(s->release.package_root, 32, s->package_hex);
+    zcl_hex_encode(s->release_id, 32, s->release_hex);
     vcs_package_manifest_init(&s->manifest);
     vcs_package_recipe_init(&s->recipe);
     s->parsed = true;
@@ -327,16 +332,13 @@ static bool zpb_validate(struct zpb_receive *s)
                                  ? vcs_package_publish_rule_string(
                                        s->report.failures[0].rule)
                                  : "publication rules");
-    zcl_hex_encode(s->release.publisher_pubkey,
-                   VCS_PACKAGE_RELEASE_PUBKEY_BYTES, s->fingerprint);
-    zcl_hex_encode(s->release.package_root, 32, s->package_hex);
-    zcl_hex_encode(s->release_id, 32, s->release_hex);
     return true;
 }
 
-static bool zpb_check(struct zpb_receive *s)
+/* The source half of the check, after the cheap envelope half (zpb_load). */
+static bool zpb_check_source(struct zpb_receive *s)
 {
-    return zpb_load(s) && zpb_materialize(s) && zpb_validate(s);
+    return zpb_materialize(s) && zpb_validate(s);
 }
 
 static void zpb_free(struct zpb_receive *s)
@@ -393,7 +395,7 @@ void zcl_native_handle_zcode_package_bundle_verify(
     struct zpb_receive *s = zpb_new(request, reply, k_zpb_verify);
     if (!s)
         return;
-    if (zpb_check(s)) {
+    if (zpb_load(s) && zpb_check_source(s)) {
         char next[1024];
         zpb_describe(s, "verify");
         (void)snprintf(next, sizeof(next),
@@ -417,20 +419,20 @@ struct zpb_keep {
     char record[ZPB_PATH_MAX];
 };
 
-static void zpb_hash_text(struct sha3_256_ctx *ctx, const char *text)
-{
-    sha3_256_write(ctx, (const unsigned char *)text, strlen(text) + 1u);
-}
-
+/* Bound to the exact file contents, destination and datadir; each string is
+ * hashed with its NUL so adjacent fields cannot run together. */
 static void zpb_plan_id(const struct zpb_receive *s, struct zpb_keep *k)
 {
+    static const char domain[] = "zcl.zcode_package_bundle_receive.plan.v1";
+    const char *const texts[] = {k->destination, k->datadir};
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
-    zpb_hash_text(&ctx, "zcl.zcode_package_bundle_receive.plan.v1");
+    sha3_256_write(&ctx, (const unsigned char *)domain, sizeof(domain));
     sha3_256_write(&ctx, s->release_id, 32);
     sha3_256_write(&ctx, s->file.tree, 32);
-    zpb_hash_text(&ctx, k->destination);
-    zpb_hash_text(&ctx, k->datadir);
+    for (size_t i = 0; i < 2; i++)
+        sha3_256_write(&ctx, (const unsigned char *)texts[i],
+                       strlen(texts[i]) + 1u);
     sha3_256_finalize(&ctx, k->plan_id);
 }
 
@@ -615,14 +617,18 @@ void zcl_native_handle_zcode_package_bundle_receive(
     struct zpb_keep k = {0};
     if (!s)
         return;
-    if (zpb_receive_inputs(s, &k) && zpb_check(s)) {
+    /* Trust is checked against the signed envelope before the source is
+     * rebuilt; nothing is kept until the whole file verifies. */
+    if (zpb_receive_inputs(s, &k) && zpb_load(s)) {
         zpb_plan_id(s, &k);
-        if (!zcl_package_copy_confirmed(s->input))
-            zpb_receive_plan(s, &k);
-        else if (zcl_package_copy_plan_matches(s->input, k.plan_id, reply,
-                                               k_zpb_receive) &&
-                 zpb_trusted(s) && zpb_store(s, &k) && zpb_fork(s, &k) &&
-                 zpb_record_write(s, &k))
+        if (!zcl_package_copy_confirmed(s->input)) {
+            if (zpb_check_source(s))
+                zpb_receive_plan(s, &k);
+        } else if (zcl_package_copy_plan_matches(s->input, k.plan_id, reply,
+                                                 k_zpb_receive) &&
+                   zpb_trusted(s) && zpb_check_source(s) &&
+                   zpb_store(s, &k) && zpb_fork(s, &k) &&
+                   zpb_record_write(s, &k))
             zpb_keep_reply(s, &k);
     }
     zpb_free(s);
