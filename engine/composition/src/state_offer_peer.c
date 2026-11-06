@@ -54,6 +54,16 @@ void state_offer_peer_end(uint64_t peer)
     sol_client_drop(peer);
     (void)atomic_compare_exchange_strong(&receiving_peer, &peer, 0);
 }
+bool state_offer_peer_serving_held_fetch(const struct p2p_node *node)
+{
+    if (!node || !msg_processor_header_sync_held()) return false;
+    uint64_t peer = atomic_load(&receiving_peer);
+    if (!peer || peer != boot_zcode_swarm_peer_id(node)) return false;
+    int64_t last = sol_client_last_progress_ms();
+    /* A future stamp (clock step) counts as recent rather than as a cut. */
+    return last != INT64_MIN &&
+           platform_time_monotonic_ms() - last < STATE_OFFER_FETCH_PROGRESS_WINDOW_MS;
+}
 void state_offer_peer_shutdown(void)
 {
     sol_client_shutdown();

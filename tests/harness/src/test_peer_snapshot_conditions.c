@@ -5,7 +5,10 @@
 #include "conditions/peer_floor_violated.h"
 #include "conditions/snapshot_offer_ready.h"
 #include "conditions/sync_violation_lag.h"
+#include "config/boot_zcode_swarm_membership.h"
+#include "config/state_offer_peer.h"
 #include "framework/condition.h"
+#include "net/msgprocessor.h"
 #include "platform/clock.h"
 #include "jobs/header_admit_stage.h"
 #include "net/protocol.h"
@@ -406,6 +409,53 @@ static int run_sync_violation_rearms_on_cooldown_case(void)
     return failures;
 }
 
+static bool peer_snapshot_hold(void) { return true; }
+
+/* Run F2 at 600 s: the lag rotation cut every outbound peer, the one
+ * streaming the FlySync rung bundle included. During the header hold the tip
+ * cannot move, so the streaming peer is spared and the idle one still goes. */
+static int run_sync_violation_spares_rung_server_case(void)
+{
+    int failures = 0;
+    struct fake_clock_peer_snapshot clock;
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    begin_peer_snapshot_condition_case(&clock, &cm, &dm, &ms, 7000);
+    bool ok = true;
+    register_sync_violation_lag();
+
+    struct block_index tip = {0};
+    tip.nHeight = 100;
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
+    struct p2p_node server = {0}, idle = {0};
+    server.id = 11;
+    idle.id = 12;
+    server.starting_height = idle.starting_height = 250;
+    server.state = idle.state = PEER_ACTIVE;
+    server.services = idle.services = NODE_NETWORK;
+    struct p2p_node *peers[2] = { &idle, &server };
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = 2;
+    msg_processor_set_header_sync_hold(peer_snapshot_hold);
+    uint64_t link = boot_zcode_swarm_peer_id(&server);
+    ok = ok && state_offer_peer_begin(link);
+    ok = ok && state_offer_peer_serving_held_fetch(&server) &&
+         !state_offer_peer_serving_held_fetch(&idle);
+
+    condition_engine_tick();
+    fake_clock_set(&clock, 7601);  /* past SYNC_VIOLATION_SECS (600) */
+    condition_engine_tick();
+    ok = ok && sync_violation_lag_test_remedy_calls() == 1;
+    ok = ok && idle.disconnect && !server.disconnect;
+    state_offer_peer_end(link);
+    msg_processor_set_header_sync_hold(NULL);
+    PEER_SNAPSHOT_CHECK("sync violation spares the peer streaming a held rung", ok);
+    cleanup_peer_snapshot_conditions();
+    main_state_free(&ms);
+    return failures;
+}
+
 static int run_snapshot_offer_reasserts_receive_case(void)
 {
     int failures = 0;
@@ -495,6 +545,7 @@ int test_peer_snapshot_conditions(void)
     failures += run_sync_violation_rotates_peers_case();
     failures += run_sync_violation_timer_resets_case();
     failures += run_sync_violation_rearms_on_cooldown_case();
+    failures += run_sync_violation_spares_rung_server_case();
     failures += run_snapshot_offer_reasserts_receive_case();
     failures += run_snapshot_offer_ignores_at_tip_case();
 

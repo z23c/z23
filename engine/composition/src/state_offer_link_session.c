@@ -10,10 +10,18 @@
 #include "platform/time_compat.h"
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <stdint.h>
 #include <string.h>
 #include <time.h>
 
+/* The no-bytes bound of one object read: the fetch aborts only when no part
+ * arrives for this long (a session start counts as the first arrival). */
 #define SOL_INACTIVITY_SECONDS STATE_OFFER_LINK_CLIENT_IDLE_SECONDS
+/* Last link progress (session start or part), read lock-free by the peer
+ * rules and the fall-back decision. */
+static _Atomic int64_t g_progress_ms = INT64_MIN;
+static void note_progress(void) { atomic_store(&g_progress_ms, platform_time_monotonic_ms()); }
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed;
@@ -81,12 +89,26 @@ bool sol_client_start(uint64_t peer, void (*wake)(void *), void *wake_ctx)
     if (!peer || !wake || !ready()) return false;
     pthread_mutex_lock(&lock);
     bool ok = !s.active && !s.busy;
-    if (ok) { s.active = true; s.peer = peer; s.wake = wake; s.wake_ctx = wake_ctx; }
+    if (ok) { s.active = true; s.peer = peer; s.wake = wake; s.wake_ctx = wake_ctx; note_progress(); }
     pthread_mutex_unlock(&lock);
     return ok;
 }
+int64_t sol_client_last_progress_ms(void)
+{
+    return atomic_load(&g_progress_ms);
+}
+#ifdef ZCL_TESTING
+void sol_client_test_age_progress(int64_t ms)
+{
+    int64_t t = atomic_load(&g_progress_ms);
+    if (t != INT64_MIN && ms > -1000000000 && ms < 1000000000 && t > INT64_MIN + 1000000000 &&
+        t < INT64_MAX - 1000000000)
+        atomic_store(&g_progress_ms, t - ms); /* negative ms moves it forward */
+}
+#endif
 void sol_client_shutdown(void)
 {
+    atomic_store(&g_progress_ms, INT64_MIN);
     if (!ready()) return;
     pthread_mutex_lock(&lock);
     s.active = false;
@@ -190,6 +212,7 @@ static void accept_part(const struct state_offer_link_frame *f)
 {
     memcpy(s.buffer + s.received, f->data, f->size);
     s.total = f->total; s.received += f->size;
+    note_progress();
     if (s.received == s.total) finish(SOL_READ_OK);
     else if (!deadline()) finish(SOL_READ_UNAVAILABLE);
     else pthread_cond_signal(&changed);

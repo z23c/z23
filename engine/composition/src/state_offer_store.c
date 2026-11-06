@@ -128,6 +128,14 @@ bool state_offer_store_wait_armed(void)
     return g_wait_armed;
 }
 
+#ifdef ZCL_TESTING
+void state_offer_store_test_age_wait(int64_t ms)
+{
+    if (g_wait_armed && ms > 0 && g_wait_started_ms > INT64_MIN + ms)
+        g_wait_started_ms -= ms;
+}
+#endif
+
 static bool digest_eq(const uint8_t a[32], const uint8_t b[32])
 {
     return memcmp(a, b, 32) == 0;
@@ -483,7 +491,7 @@ enum state_offer_decision state_offer_store_decide_for(
     int64_t now_ms, struct state_offer_record *out,
     const struct state_offer_need *need)
 {
-    static const struct state_offer_need fresh = {false, true, 0};
+    static const struct state_offer_need fresh = {false, true, 0, false};
     if (!need)
         need = &fresh;
     /* Newest first. Every retained offer already cleared the freshness rule

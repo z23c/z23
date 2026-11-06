@@ -289,6 +289,36 @@ static int silent_peer_set_fallback(void)
     return failures;
 }
 
+/* Run F2: the wait had long closed when every source dropped at once; the
+ * resumable .part had just gained bytes. Progress holds the fall-back; with
+ * no byte for the progress window the named fall-back stands. */
+static int resume_progress_holds_fallback(void)
+{
+    int failures = 0;
+    TEST_CASE("a progressing resumable fetch holds the fall-back") {
+        struct state_offer_record chosen;
+        struct state_offer_store_status st;
+        state_offer_store_reset();
+        state_offer_store_note_first_peer(0);
+        struct state_offer_need moving = {false, true, 0, true};
+        ASSERT_EQ(state_offer_store_decide_for(10 * STATE_OFFER_WAIT_MS, &chosen, &moving),
+                  STATE_OFFER_DECIDE_WAIT);
+        state_offer_store_status_get(&st);
+        ASSERT(st.fallback_reason[0] == '\0');
+        struct state_offer_need stalled = {false, true, 0, false};
+        ASSERT_EQ(state_offer_store_decide_for(10 * STATE_OFFER_WAIT_MS, &chosen, &stalled),
+                  STATE_OFFER_DECIDE_FALL_BACK);
+        state_offer_store_status_get(&st);
+        ASSERT(strstr(st.fallback_reason, "no peer offered") != NULL);
+        /* Progress never makes a node that holds state fetch or wait. */
+        struct state_offer_need marker = {true, true, 0, true};
+        ASSERT_EQ(state_offer_store_decide_for(10 * STATE_OFFER_WAIT_MS, &chosen, &marker),
+                  STATE_OFFER_DECIDE_SATISFIED);
+        state_offer_store_reset();
+    } TEST_END
+    return failures;
+}
+
 static int store_is_bounded(void)
 {
     int failures = 0;
@@ -1151,7 +1181,7 @@ static int satisfied_node_does_not_fetch(void)
         make_offer(&offer, 900000, 900100, 0x20);
 
         /* Fresh node (no marker, height 0, known): still fetches. */
-        struct state_offer_need fresh = {false, true, 0};
+        struct state_offer_need fresh = {false, true, 0, false};
         state_offer_store_reset();
         ASSERT_EQ(state_offer_store_record(&offer, ip, 18034, 1, 1000),
                   STATE_OFFER_STORE_KEPT);
@@ -1160,7 +1190,7 @@ static int satisfied_node_does_not_fetch(void)
         ASSERT(chosen.offer.bundle_height == 900000);
 
         /* Marker present: no fetch, and the offer is still counted. */
-        struct state_offer_need marker = {true, true, 0};
+        struct state_offer_need marker = {true, true, 0, false};
         state_offer_store_reset();
         ASSERT_EQ(state_offer_store_record(&offer, ip, 18034, 1, 1000),
                   STATE_OFFER_STORE_KEPT);
@@ -1173,20 +1203,20 @@ static int satisfied_node_does_not_fetch(void)
         ASSERT_EQ(st.last_decision, STATE_OFFER_DECIDE_SATISFIED);
 
         /* Height at or above the offer: no fetch. */
-        struct state_offer_need at = {false, true, 900000};
-        struct state_offer_need above = {false, true, 950000};
+        struct state_offer_need at = {false, true, 900000, false};
+        struct state_offer_need above = {false, true, 950000, false};
         ASSERT_EQ(state_offer_store_decide_for(2000, &chosen, &at),
                   STATE_OFFER_DECIDE_SATISFIED);
         ASSERT_EQ(state_offer_store_decide_for(2000, &chosen, &above),
                   STATE_OFFER_DECIDE_SATISFIED);
 
         /* Height below the offer, no marker: fetch. */
-        struct state_offer_need below = {false, true, 100};
+        struct state_offer_need below = {false, true, 100, false};
         ASSERT_EQ(state_offer_store_decide_for(2000, &chosen, &below),
                   STATE_OFFER_DECIDE_FETCH);
 
         /* Unknown height fails towards NOT fetching. */
-        struct state_offer_need unknown = {false, false, 0};
+        struct state_offer_need unknown = {false, false, 0, false};
         ASSERT_EQ(state_offer_store_decide_for(2000, &chosen, &unknown),
                   STATE_OFFER_DECIDE_SATISFIED);
 
@@ -1258,6 +1288,7 @@ int test_state_offer_store(void)
     failures += bounded_wait_names_the_newest_height();
     failures += store_is_bounded();
     failures += silent_peer_set_fallback();
+    failures += resume_progress_holds_fallback();
     failures += endpoint_required();
     failures += peer_link_retry();
     failures += peer_link_strike_eviction();

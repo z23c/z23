@@ -18,4 +18,11 @@ bool state_offer_peer_frame(struct msg_processor *mp, struct p2p_node *node,
 void state_offer_peer_tick(struct msg_processor *mp, struct p2p_node *node);
 /* Supervisor may drain owned frames, never mutate discovery or offer state. */
 void state_offer_peer_pump(struct msg_processor *mp);
+/* The one exemption every header-progress, lag or stall rule honours: true
+ * while header sync is held (FlySync waits for its rung) AND this connection
+ * streams this node's link fetch with bytes inside
+ * STATE_OFFER_FETCH_PROGRESS_WINDOW_MS. Such a peer is not dropped, rotated
+ * or scored for missing headers; a peer that serves nothing stays fair game.
+ * Reads atomics only, so callers may hold cs_nodes. */
+bool state_offer_peer_serving_held_fetch(const struct p2p_node *node);
 #endif

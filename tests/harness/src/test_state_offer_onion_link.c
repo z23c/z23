@@ -9,12 +9,14 @@
 #include "config/boot_internal.h"
 #include "config/boot_zcode_swarm.h"
 #include "config/state_offer_link.h"
+#include "config/state_offer_link_session.h"
 #include "config/state_offer_peer.h"
 #include "config/state_offer_service.h"
 #include "config/state_offer_store.h"
 #include "chain/chainparams.h"
 #include "chain/checkpoints.h"
 #include "jobs/reducer_frontier.h"
+#include "net/connman.h"
 #include "net/fast_sync.h"
 #include "net/msg_internal.h"
 #include "net/msgprocessor.h"
@@ -22,6 +24,7 @@
 #include "net/rom_seed.h"
 #include "net/state_offer.h"
 #include "platform/time_compat.h"
+#include "services/sync_monitor.h"
 #include "sync/sync_planner.h"
 #include "test/test_core.h"
 #include "util/util.h"
@@ -34,7 +37,8 @@
 #include <unistd.h>
 
 #define ONION_RUNG 3200000
-#define ONION_BYTES 131072u
+/* Two whole chunks, so a cut between them leaves a journal to resume. */
+#define ONION_BYTES (2u * ROM_SEED_CHUNK_SIZE)
 #define ONION_PEER_TIP 3310392
 #define ONION_NAME "consensus-state-bundle-3200000.sqlite"
 #define ONION_CHECK(x) do { if (!(x)) { \
@@ -49,9 +53,12 @@ struct onion_fixture {
     struct p2p_node *to_client;   /* the server's view of the client */
     struct p2p_node *list[2];
     struct send_segment *to_server_q, *to_client_q;
+    struct p2p_node *old_server, *old_client, *idle; /* the cut pair, a peer serving nothing */
+    struct send_segment *old_server_q, *old_client_q, *idle_q;
     struct rom_artifact *artifact;
     uint8_t *wire;
     unsigned stray;               /* non-ZBND frames the client sent */
+    unsigned chunk_req[2];        /* chunk requests the client sent, by index */
     char dir[256], bundle[512], landed[512];
     bool started;
 };
@@ -181,7 +188,11 @@ static void onion_relay(struct onion_fixture *f, struct p2p_node *from, struct s
 {
     size_t n = 0;
     while (onion_pop(from, q, f->wire, &n)) {
+        struct state_offer_link_frame fr;
         if (stray && (n < 4 || memcmp(f->wire, "ZBND", 4))) ++*stray;
+        else if (stray && state_offer_link_decode(f->wire, n, &fr) &&
+                 fr.kind == STATE_OFFER_LINK_CHUNK_REQUEST && fr.index < 2)
+            f->chunk_req[fr.index]++;
         (void)boot_zcode_swarm_frame(&f->mp, to, f->wire, n, &f->svc);
     }
 }
@@ -232,10 +243,133 @@ static bool onion_serving_peer_kept(struct onion_fixture *f)
     f->to_server->time_connected = now - 121;
     ONION_CHECK(!syncsvc_should_disconnect_stale_header_peer(f->to_server, 0, 0, 0, now));
     ONION_CHECK(!syncsvc_is_header_sync_stalled(SYNC_HEADERS_DOWNLOAD, 0, now - 121, now));
+    /* The one shared exemption: the streaming connection, not its far end. */
+    ONION_CHECK(state_offer_peer_serving_held_fetch(f->to_server));
+    ONION_CHECK(!state_offer_peer_serving_held_fetch(f->to_client));
     msg_processor_set_header_sync_hold(NULL);   /* the hold ends: discipline returns */
     ONION_CHECK(syncsvc_should_disconnect_stale_header_peer(f->to_server, 0, 0, 0, now));
     ONION_CHECK(syncsvc_is_header_sync_stalled(SYNC_HEADERS_DOWNLOAD, 0, now - 121, now));
+    ONION_CHECK(!state_offer_peer_serving_held_fetch(f->to_server));
     msg_processor_set_header_sync_hold(onion_hold);
+    return true;
+}
+
+/* One message-loop turn of a slow server: the client's requests go out, but
+ * at most one queued server frame comes back. */
+static void onion_trickle(struct onion_fixture *f)
+{
+    boot_zcode_swarm_tick(&f->mp, f->to_server, &f->svc);
+    state_offer_peer_pump(&f->mp);
+    onion_relay(f, f->to_server, f->to_server_q, f->to_client, &f->stray);
+    size_t n = 0;
+    if (onion_pop(f->to_client, f->to_client_q, f->wire, &n))
+        (void)boot_zcode_swarm_frame(&f->mp, f->to_server, f->wire, n, &f->svc);
+    struct timespec t = {0, 1000000};
+    (void)nanosleep(&t, NULL);
+}
+
+/* Trickle until one more part lands (the link progress stamp moves). */
+static bool onion_one_part(struct onion_fixture *f)
+{
+    int64_t before = sol_client_last_progress_ms();
+    for (int i = 0; i < 3000; i++) {
+        onion_trickle(f);
+        if (sol_client_last_progress_ms() != before) return true;
+    }
+    return false;
+}
+
+/* Run F2: refill attempt 2 cut the streaming peer at 303 s and again at
+ * 599 s. A slow server trickles one part every 29 s (under the 30 s no-part
+ * bound) for 609 s; across both refill attempts only the idle peer goes. */
+static bool onion_slow_server_kept(struct onion_fixture *f)
+{
+    struct connman cm;
+    memset(&cm, 0, sizeof(cm));
+    zcl_mutex_init(&cm.manager.cs_nodes);
+    f->idle = onion_node(f, &f->idle_q, false);
+    ONION_CHECK(f->idle && f->idle_q);
+    struct p2p_node *peers[2] = {f->to_server, f->idle};
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = 2;
+    sync_monitor_init();
+    bool ok = sync_monitor_local_header_refill(&cm, 1, "test attempt 1") == 2;
+    for (int step = 0; ok && step < 21; step++) {
+        sol_client_test_age_progress(29000);
+        ok = state_offer_peer_serving_held_fetch(f->to_server) && onion_one_part(f) &&
+             state_offer_peer_serving_held_fetch(f->to_server) &&
+             !state_offer_peer_serving_held_fetch(f->idle);
+    }
+    ok = ok && sync_monitor_local_header_refill(&cm, 1, "test attempt 2") == 2;
+    zcl_mutex_destroy(&cm.manager.cs_nodes);
+    ONION_CHECK(ok);
+    ONION_CHECK(!atomic_load(&f->to_server->disconnect));
+    ONION_CHECK(atomic_load(&f->idle->disconnect)); /* serving nothing: still rotated */
+    return true;
+}
+
+static bool onion_journal_exists(const struct onion_fixture *f)
+{
+    char path[600];
+    struct stat st;
+    snprintf(path, sizeof(path), "%s.part.journal", f->landed);
+    return stat(path, &st) == 0;
+}
+
+/* Run F2 at 22:04:40: every serving peer dropped at once, long after the
+ * offer wait closed. The resumable .part had just gained bytes, so the node
+ * waits; once no byte has come for the progress window it falls back. */
+static bool onion_cut_mid_fetch(struct onion_fixture *f)
+{
+    struct state_offer_store_status st = {0};
+    for (int i = 0; i < 20000 && st.fetch_chunks_done < 1; i++) {
+        onion_trickle(f);
+        state_offer_store_status_get(&st);
+    }
+    ONION_CHECK(st.fetch_chunks_done == 1 && st.fetch_chunks_total == 2);
+    state_offer_store_test_age_wait(STATE_OFFER_WAIT_MS);
+    f->nm.num_nodes = 0; /* both ends of the connection are gone */
+    atomic_store(&f->to_server->disconnect, true);
+    atomic_store(&f->to_client->disconnect, true);
+    for (int i = 0; i < 5000 && state_offer_service_test_fetch_running(); i++)
+        onion_cycle(f);
+    for (int i = 0; i < 5; i++) onion_cycle(f);
+    ONION_CHECK(!state_offer_service_test_fetch_running());
+    ONION_CHECK(onion_journal_exists(f));
+    state_offer_store_status_get(&st);
+    ONION_CHECK(st.last_decision == STATE_OFFER_DECIDE_WAIT && !st.fallback_reason[0]);
+    struct state_offer_need need;
+    state_offer_service_test_local_need(&need);
+    ONION_CHECK(need.resume_progressing);
+
+    sol_client_test_age_progress(STATE_OFFER_FETCH_PROGRESS_WINDOW_MS);
+    state_offer_service_test_local_need(&need);
+    bool stalled = !need.resume_progressing;
+    struct state_offer_record rec;
+    bool fell = state_offer_store_decide_for(platform_time_monotonic_ms(), &rec, &need) ==
+                STATE_OFFER_DECIDE_FALL_BACK;
+    state_offer_store_status_get(&st);
+    sol_client_test_age_progress(-STATE_OFFER_FETCH_PROGRESS_WINDOW_MS);
+    ONION_CHECK(stalled && fell);
+    ONION_CHECK(strstr(st.fallback_reason, "no acceptable offer within") != NULL);
+    return true;
+}
+
+/* The peers come back on new connections: they are asked for offers at once
+ * and the fetch resumes from the journal (chunk 0 is never asked again). */
+static bool onion_reconnect_resumes(struct onion_fixture *f)
+{
+    f->old_server = f->to_server; f->old_server_q = f->to_server_q;
+    f->old_client = f->to_client; f->old_client_q = f->to_client_q;
+    f->to_server = onion_node(f, &f->to_server_q, false);
+    f->to_client = onion_node(f, &f->to_client_q, true);
+    ONION_CHECK(f->to_server && f->to_client && f->to_server_q && f->to_client_q);
+    f->list[0] = f->to_server; f->list[1] = f->to_client;
+    f->nm.num_nodes = 2;
+    memset(f->chunk_req, 0, sizeof(f->chunk_req));
+    for (int i = 0; i < 200 && !state_offer_peer_serving_held_fetch(f->to_server); i++)
+        onion_cycle(f);
+    ONION_CHECK(state_offer_peer_serving_held_fetch(f->to_server));
     return true;
 }
 
@@ -251,6 +385,7 @@ static bool onion_lands(struct onion_fixture *f)
     state_offer_store_status_get(&s);
     ONION_CHECK(s.fetch_bytes_done == ONION_BYTES && s.offers_rejected == 0);
     ONION_CHECK(f->stray == 0); /* the engine-off client sent only link frames */
+    ONION_CHECK(f->chunk_req[0] == 0 && f->chunk_req[1] >= 1); /* resumed from the journal */
     return true;
 }
 
@@ -274,9 +409,15 @@ static void onion_cleanup(struct onion_fixture *f)
     g_onion_served = NULL;
     onion_drop_queue(f->to_server, f->to_server_q);
     onion_drop_queue(f->to_client, f->to_client_q);
+    onion_drop_queue(f->old_server, f->old_server_q);
+    onion_drop_queue(f->old_client, f->old_client_q);
+    onion_drop_queue(f->idle, f->idle_q);
     f->nm.nodes = NULL; f->nm.num_nodes = 0;
     if (f->to_server) p2p_node_free(f->to_server);
     if (f->to_client) p2p_node_free(f->to_client);
+    if (f->old_server) p2p_node_free(f->old_server);
+    if (f->old_client) p2p_node_free(f->old_client);
+    if (f->idle) p2p_node_free(f->idle);
     net_manager_free(&f->nm);
     rom_seed_reset(); state_offer_store_reset();
     if (f->dir[0]) test_rm_rf_recursive(f->dir);
@@ -287,7 +428,8 @@ int test_state_offer_onion_link(void)
 {
     struct onion_fixture f = {0};
     bool ok = onion_setup(&f) && onion_legacy_dropped() && onion_discover_and_fetch(&f) &&
-              onion_serving_peer_kept(&f) && onion_lands(&f);
+              onion_serving_peer_kept(&f) && onion_slow_server_kept(&f) &&
+              onion_cut_mid_fetch(&f) && onion_reconnect_resumes(&f) && onion_lands(&f);
     onion_cleanup(&f);
     printf("state_offer_onion_link: %s\n", ok ? "OK" : "FAIL");
     return ok ? 0 : 1;

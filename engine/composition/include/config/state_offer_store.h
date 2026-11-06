@@ -61,6 +61,17 @@
  * forward long before an operator would think to look. */
 #define STATE_OFFER_WAIT_MS INT64_C(120000)
 
+/* A bundle fetch is PROGRESSING while link bytes arrived within this window.
+ * Peer-cutting rules and the fall-back decision are bounded by it instead of
+ * by wall-clock time, so a slow link that keeps moving keeps its fetch.
+ * Three minutes on Tor: the client abandons an object after 30 s without a
+ * part (STATE_OFFER_LINK_CLIENT_IDLE_SECONDS), the store waits 30 s before
+ * retrying that source, and rebuilding a dead onion connection takes up to
+ * about two minutes (introduction plus rendezvous circuits, each bounded by
+ * Tor's 60 s circuit-build timeout). A 64 KiB part needs only ~6.5 s even at
+ * 10 KB/s, so a live link refreshes the window many times over. */
+#define STATE_OFFER_FETCH_PROGRESS_WINDOW_MS INT64_C(180000)
+
 /* One retained offer plus the endpoint that would be dialled for it. The
  * endpoint comes from the LIVE CONNECTION and the message's own port field,
  * never from the offer — see net/state_offer.h. */
@@ -92,6 +103,10 @@ struct state_offer_need {
     bool marker_present;
     bool height_known;
     int32_t local_height;
+    /* A resumable partial download (.part journal) of the last chosen offer
+     * exists and link bytes arrived within STATE_OFFER_FETCH_PROGRESS_WINDOW_MS:
+     * a source is still delivering, so the store waits instead of falling back. */
+    bool resume_progressing;
 };
 
 /* Why an offer was not retained. Named so a status row can say which, and so a
@@ -199,5 +214,10 @@ void state_offer_store_note_fetch_progress(uint32_t chunks_done,
  * stopped waiting — the reason, naming the newest height any peer offered. */
 struct json_value;
 bool state_offer_dump_state_json(struct json_value *out, const char *key);
+
+#ifdef ZCL_TESTING
+/* Move the armed wait's start back by ms, as if the first peer came earlier. */
+void state_offer_store_test_age_wait(int64_t ms);
+#endif
 
 #endif /* ZCL_CONFIG_STATE_OFFER_STORE_H */
