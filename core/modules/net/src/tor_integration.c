@@ -507,10 +507,16 @@ extern int tor_run_main(const tor_main_configuration_t *);
  * the number. Passing it on the command line leaves one closer.
  *
  * Both values are written before the Tor thread starts. g_tor_control is
- * closed only after that thread and the monitor have been joined. */
+ * closed only after that thread and the monitor have been joined.
+ *
+ * Tor closes its end when it reads its options. A start that fails before that
+ * leaves the end open with nothing on the far side once ours is closed. Nothing
+ * closes it: by then the number may belong to another thread, and looking at a
+ * number to find out touches that thread's descriptor. A process makes at most
+ * TOR_MAX_STARTS_IN_PROCESS of these. */
 static platform_socket_t g_tor_control = PLATFORM_SOCKET_INVALID;
 static platform_socket_t g_tor_control_peer = PLATFORM_SOCKET_INVALID;
-#ifndef _WIN32
+#if defined(ZCL_TESTING) && !defined(_WIN32)
 static struct stat g_tor_control_peer_id;
 #endif
 static _Atomic bool g_serve_onion = true;
@@ -552,7 +558,7 @@ static bool tor_control_open(void)
     (void)fcntl(pair[1], F_SETFD, FD_CLOEXEC);
 #endif
 #endif
-#ifndef _WIN32
+#if defined(ZCL_TESTING) && !defined(_WIN32)
     if (fstat(pair[1], &g_tor_control_peer_id) != 0) {
         (void)platform_socket_close(pair[0]);
         (void)platform_socket_close(pair[1]);
@@ -571,22 +577,6 @@ static void tor_request_exit(void)
 {
     if (g_tor_control != PLATFORM_SOCKET_INVALID)
         (void)platform_socket_shutdown_both(g_tor_control);
-}
-
-/* On the Tor thread, once tor_run_main() has returned: Tor closes its end when
- * it took it, and leaves it open when it failed before reading its options.
- * The socket's identity tells the two apart even if the number was reused.
- * Windows has no such check, so a failed start there keeps one socket. */
-static void tor_control_peer_release(void)
-{
-#ifndef _WIN32
-    struct stat now;
-    if (g_tor_control_peer != PLATFORM_SOCKET_INVALID &&
-        fstat(g_tor_control_peer, &now) == 0 &&
-        now.st_dev == g_tor_control_peer_id.st_dev &&
-        now.st_ino == g_tor_control_peer_id.st_ino)
-        (void)close(g_tor_control_peer);
-#endif
 }
 
 /* Dynhost external handler — routes .onion requests to our code */
@@ -644,7 +634,6 @@ static void *tor_thread_fn(void *arg)
     /* Run Tor in this thread (blocks until exit) */
     int result = tor_run_main(cfg);
     tor_main_configuration_free(cfg);
-    tor_control_peer_release();
 
     /* Signal monitor to stop, then join it if it actually started. */
     atomic_store(&g_tor_running, false);
