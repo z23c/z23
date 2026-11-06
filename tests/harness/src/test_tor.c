@@ -1601,25 +1601,33 @@ static const char *stop_handoff_check_ended(const char *tmpdir, bool real_tor)
 struct stop_handoff_sockets {
     bool held;
     int fd[2];
-    struct stat id[2];
+    uint64_t dev[2];
+    uint64_t ino[2];
 };
 
+/* Tor's end comes from the seam: Tor may close it at any moment, so this thread
+ * does not touch it until the stop has joined Tor. */
 static void stop_handoff_sockets_capture(struct stop_handoff_sockets *s)
 {
     int64_t ours = -1, tors = -1;
-    s->held = tor_integration_control_sockets_for_test(&ours, &tors);
+    s->held = tor_integration_control_sockets_for_test(&ours, &tors,
+                                                       &s->dev[1], &s->ino[1]);
     s->fd[0] = (int)ours;
     s->fd[1] = (int)tors;
-    if (s->held)
-        s->held = fstat(s->fd[0], &s->id[0]) == 0 &&
-                  fstat(s->fd[1], &s->id[1]) == 0;
+    struct stat id;
+    if (s->held && fstat(s->fd[0], &id) == 0) {
+        s->dev[0] = (uint64_t)id.st_dev;
+        s->ino[0] = (uint64_t)id.st_ino;
+    } else {
+        s->held = false;
+    }
 }
 
 static bool stop_handoff_socket_open(const struct stop_handoff_sockets *s, int i)
 {
     struct stat now;
-    return fstat(s->fd[i], &now) == 0 && now.st_dev == s->id[i].st_dev &&
-           now.st_ino == s->id[i].st_ino;
+    return fstat(s->fd[i], &now) == 0 && (uint64_t)now.st_dev == s->dev[i] &&
+           (uint64_t)now.st_ino == s->ino[i];
 }
 
 /* Stop a Tor that reached its main loop, then stop it again. */

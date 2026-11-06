@@ -213,6 +213,11 @@ bool tor_integration_persistence_enabled(void);
 bool onion_identity_address_from_seed(const uint8_t seed[32],
                                       char *out, size_t out_size);
 
+/* Tor's 64-byte expanded ed25519 secret key for a seed, as ADD_ONION takes it:
+ * SHA-512 of the seed, clamped as RFC 8032 specifies. Secret: wipe after use. */
+void onion_identity_tor_secret_from_seed(const uint8_t seed[32],
+                                         uint8_t out[64]);
+
 /* Load-or-create the persistent identity under
  * <datadir>/tor_data/onion_service/: reads identity_seed when present
  * (a short/corrupt seed is a named refusal, never a silent remint),
@@ -320,9 +325,12 @@ void tor_integration_enable_reset_for_test(void);
 /* Test seam: the no-onion monitor reads the gate as closed without running
  * it, so a fixture reaches that path with the network still disabled. */
 void tor_integration_close_gate_for_test(bool closed);
-/* Test seam: this run's two control sockets (ours, Tor's). False when the run
- * holds none: no run, or the Tor stub. */
-bool tor_integration_control_sockets_for_test(int64_t *ours, int64_t *tors);
+/* Test seam: this run's two control sockets (ours, Tor's) and the identity of
+ * Tor's end, recorded before Tor could close it. False when the run holds none:
+ * no run, or the Tor stub. */
+bool tor_integration_control_sockets_for_test(int64_t *ours, int64_t *tors,
+                                              uint64_t *tors_dev,
+                                              uint64_t *tors_ino);
 #endif
 
 #ifdef ZCL_TESTING

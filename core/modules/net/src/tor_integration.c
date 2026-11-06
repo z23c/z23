@@ -15,6 +15,8 @@
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
 #include "base/compiler.h"
+#include "encoding/utilstrencodings.h"
+#include "support/cleanse.h"
 #include "net/tor_integration.h"
 #include "net/tor_request_state.h"
 #include "net/net.h"      /* net_set_onion_ingress_port() */
@@ -175,16 +177,15 @@ void tor_integration_set_handler(tor_request_handler_fn handler, void *ctx)
  *    is a throwaway ephemeral key minted every boot. So persistence cannot
  *    come from a torrc HiddenServiceDir (such a service would fall through
  *    to a real-port connect and die). Instead the monitor thread waits for
- *    the dynhost subsystem to appear inside the Tor thread, registers an
- *    ephemeral service built from OUR persisted seed via
- *    hs_service_add_ephemeral, and points dynhost's global hs_service at
- *    it before dynhost_check_and_activate can mint its throwaway (that
- *    activation is gated on a live consensus + completed circuit, which
- *    takes seconds after the 1s poll here sees the subsystem). If the race
- *    is ever lost, dynhost's throwaway stays registered but unreferenced
- *    (harmless): the pointer swap below still retargets interception at
- *    our persistent service because the comparison reads
- *    dynhost->hs_service at connection time. */
+ *    the dynhost subsystem to appear inside the Tor thread, holds dynhost's
+ *    service slot so no throwaway is minted, sends ADD_ONION with OUR
+ *    persisted key over the owning control connection, and points dynhost's
+ *    global hs_service at the result. Tor registers the service from its own
+ *    loop: registering one changes which periodic events run, and that touches
+ *    the event base, which only the Tor thread may do. If a throwaway exists
+ *    anyway, it stays registered but unreferenced (harmless): the pointer swap
+ *    below still retargets interception at our persistent service because the
+ *    comparison reads dynhost->hs_service at connection time. */
 
 /* ── Persistent identity install (real-Tor builds only) ────────
  *
@@ -194,25 +195,7 @@ void tor_integration_set_handler(tor_request_handler_fn handler, void *ctx)
  * the include path; the fork is pinned, and the boot-time cross-check
  * below (pure-derived address vs Tor-derived) fails loudly if these ever
  * drift. All weak: NULL under the Tor stub. */
-typedef struct { uint8_t seckey[64]; } tor_ed25519_secret_key_t;
 typedef struct { uint8_t pubkey[32]; } tor_ed25519_public_key_t;
-typedef struct smartlist_t tor_smartlist_t;
-
-struct tor_addr_compat {                 /* tor_addr_t (linux layout) */
-    uint16_t family;                     /* sa_family_t; 0 == AF_UNSPEC */
-    union {
-        uint32_t dummy_;
-        uint8_t in_addr[4];
-        uint8_t in6_addr[16];
-    } addr;
-};
-typedef struct {                         /* hs_port_config_t */
-    uint16_t virtual_port;
-    unsigned int is_unix_addr : 1;
-    uint16_t real_port;
-    struct tor_addr_compat real_addr;
-    char unix_addr[];
-} tor_hs_port_config_t;
 
 /* dynhost_service_t: only the first member is ever touched. */
 struct dynhost_service_head_compat {
@@ -220,24 +203,6 @@ struct dynhost_service_head_compat {
 };
 
 extern void *dynhost_get_global_service(void) ZCL_WEAK_IMPORT;
-/* Tor names the real symbol tor_malloc_zero_ (tor_malloc_zero is a macro
- * over it); the weak extern must use the underscored name or it resolves
- * NULL against libtor.a and reads as "stub build". */
-extern void *tor_malloc_zero_(size_t n) ZCL_WEAK_IMPORT;
-extern void tor_free_(void *ptr) ZCL_WEAK_IMPORT;
-extern tor_smartlist_t *smartlist_new(void) ZCL_WEAK_IMPORT;
-extern void smartlist_free_(tor_smartlist_t *sl) ZCL_WEAK_IMPORT;
-extern void smartlist_add(tor_smartlist_t *sl, void *element)
-    ZCL_WEAK_IMPORT;
-extern int ed25519_secret_key_from_seed(tor_ed25519_secret_key_t *out,
-                                        const uint8_t *seed)
-    ZCL_WEAK_IMPORT;
-extern int hs_service_add_ephemeral(tor_ed25519_secret_key_t *sk,
-    tor_smartlist_t *ports, int max_streams_per_rdv_circuit,
-    int max_streams_close_circuit, int pow_defenses_enabled,
-    uint32_t pow_queue_rate, uint32_t pow_queue_burst,
-    tor_smartlist_t *auth_clients_v3, char **address_out)
-    ZCL_WEAK_IMPORT;
 extern int hs_parse_address(const char *address,
     tor_ed25519_public_key_t *key_out, uint8_t *checksum_out,
     uint8_t *version_out) ZCL_WEAK_IMPORT;
@@ -247,64 +212,7 @@ extern void *hs_service_find(const tor_ed25519_public_key_t *identity_pk)
 /* True when every Tor/dynhost symbol the install path needs is linked. */
 static bool tor_persist_symbols_available(void)
 {
-    return dynhost_get_global_service && tor_malloc_zero_ && tor_free_ &&
-           smartlist_new && smartlist_free_ && smartlist_add &&
-           ed25519_secret_key_from_seed && hs_service_add_ephemeral &&
-           hs_parse_address && hs_service_find;
-}
-
-/* Allocate the port list and the two port configs. On failure everything
- * allocated here is already released and the outputs are untouched. */
-static bool tor_persist_alloc_ports(tor_smartlist_t **ports_out,
-                                    tor_hs_port_config_t **pc_out,
-                                    tor_hs_port_config_t **p2p_pc_out)
-{
-    tor_smartlist_t *ports = smartlist_new();
-    tor_hs_port_config_t *pc = NULL;
-    tor_hs_port_config_t *p2p_pc = NULL;
-    if (ports) {
-        pc = tor_malloc_zero_(sizeof(*pc) + 1);
-        p2p_pc = tor_malloc_zero_(sizeof(*p2p_pc) + 1);
-    }
-    if (!ports || !pc || !p2p_pc) {
-        if (pc) tor_free_(pc);
-        if (p2p_pc) tor_free_(p2p_pc);
-        if (ports) smartlist_free_(ports);
-        return false;
-    }
-    *ports_out = ports;
-    *pc_out = pc;
-    *p2p_pc_out = p2p_pc;
-    return true;
-}
-
-/* Add the P2P port mapping to the list, or release its config when the P2P
- * port needs no mapping. */
-static void tor_persist_add_p2p_port(tor_smartlist_t *ports,
-                                     tor_hs_port_config_t *p2p_pc,
-                                     uint16_t p2p_port)
-{
-    /* SECOND port mapping: the node's P2P port. Inbound P2P rides the
-     * persistent onion identity at <onion>:<p2p_port>, forwarded to the
-     * local listener by stock Tor hidden-service machinery
-     * (hs_service.c -> connection_exit_connect) as an ordinary TCP
-     * connection from 127.0.0.1 — no fork change needed. Deliberately NOT
-     * dynhost_add_virtual_port: that would route the port into the HTTP
-     * interception layer (dynhost_handlers.c), which exists for port-80
-     * traffic only. */
-    if (p2p_port > 0 && p2p_port != 80) {
-        p2p_pc->virtual_port = p2p_port;
-        p2p_pc->is_unix_addr = 0;
-        p2p_pc->real_port = p2p_port;
-        p2p_pc->real_addr.family = AF_INET;
-        p2p_pc->real_addr.addr.in_addr[0] = 127;
-        p2p_pc->real_addr.addr.in_addr[1] = 0;
-        p2p_pc->real_addr.addr.in_addr[2] = 0;
-        p2p_pc->real_addr.addr.in_addr[3] = 1;
-        smartlist_add(ports, p2p_pc);
-    } else {
-        tor_free_(p2p_pc);
-    }
+    return dynhost_get_global_service && hs_parse_address && hs_service_find;
 }
 
 /* Look up the registered service for a Tor-derived address, NULL if the
@@ -331,90 +239,7 @@ static void tor_persist_announce(bool created, const char *address)
     }
 }
 
-/* One install attempt from the monitor poll loop.
- * Returns 1 once the persistent service is registered with dynhost,
- * 0 while the dynhost subsystem is not up yet (retry next poll — not an
- * error), -1 on a named hard failure. */
-static int tor_try_install_persistent_identity(const char *datadir)
-{
-    void *global = dynhost_get_global_service();
-    if (!global)
-        return 0;   /* Tor thread still in early startup; retried */
-
-    uint8_t seed[32];
-    char addr[57];
-    bool created = false;
-    if (!onion_identity_ensure(datadir, seed, addr, sizeof(addr), &created))
-        LOG_ERR("tor", "persistent onion identity ensure failed for %s",
-                datadir);
-
-    /* Build the Tor-side service key from the SAME persisted seed. */
-    tor_ed25519_secret_key_t *sk = tor_malloc_zero_(sizeof(*sk));
-    if (!sk)
-        LOG_ERR("tor", "tor_malloc_zero_ failed for service key");
-    if (ed25519_secret_key_from_seed(sk, seed) != 0) {
-        tor_free_(sk);
-        LOG_ERR("tor", "ed25519_secret_key_from_seed rejected the "
-                       "persisted onion identity seed");
-    }
-
-    /* Virtual port 80 with NO real port — exactly how dynhost.c configures
-     * its own service: interception happens before any real-port mapping
-     * is consulted, so real_addr stays AF_UNSPEC. */
-    tor_smartlist_t *ports = NULL;
-    tor_hs_port_config_t *pc = NULL;
-    tor_hs_port_config_t *p2p_pc = NULL;
-    if (!tor_persist_alloc_ports(&ports, &pc, &p2p_pc)) {
-        tor_free_(sk);
-        LOG_ERR("tor", "allocation failed for persistent onion ports");
-    }
-    pc->virtual_port = 80;
-    smartlist_add(ports, pc);
-
-    uint16_t p2p_port = atomic_load(&g_tor_p2p_port);
-    tor_persist_add_p2p_port(ports, p2p_pc, p2p_port);
-
-    char *address_out = NULL;
-    /* Ownership of sk and ports passes to Tor on EVERY path below. */
-    int status = hs_service_add_ephemeral(sk, ports, 0, 0, 0, 0, 0, NULL,
-                                          &address_out);
-    if (status != 0 || !address_out)
-        LOG_ERR("tor", "hs_service_add_ephemeral failed (status=%d) for "
-                       "the persistent onion identity", status);
-
-    /* Cross-check: Tor's derivation MUST equal the pure layer's (the unit
-     * vector pins the pure layer to prop224). A mismatch means the
-     * vendored fork drifted under us — fail loudly, never report one
-     * address while serving another. */
-    if (strcmp(address_out, addr) != 0) {
-        tor_free_(address_out);
-        LOG_ERR("tor", "Tor-derived persistent address does not match the "
-                       "pure prop224 derivation — vendored fork drift");
-    }
-
-    void *service = tor_persist_find_service(address_out);
-    if (!service) {
-        tor_free_(address_out);
-        LOG_ERR("tor", "persistent onion service missing right after "
-                       "registration: %s", addr);
-    }
-
-    /* Become the dynhost service (see the layer-2 comment above). */
-    ((struct dynhost_service_head_compat *)global)->hs_service = service;
-
-    /* The P2P route is live: from here on, inbound connections arriving at
-     * 127.0.0.1:<p2p_port> may be anonymous strangers Tor forwarded, not
-     * same-host processes. Tell core/modules/net so it stops handing those peers the
-     * trusted-peer exemption from misbehaviour scoring — see
-     * net_set_onion_ingress_port() in net/net.h for why the two are
-     * indistinguishable at accept() and what the operator escape is. */
-    if (p2p_port > 0 && p2p_port != 80)
-        net_set_onion_ingress_port(p2p_port);
-
-    tor_persist_announce(created, address_out);
-    tor_free_(address_out);
-    return 1;
-}
+static int tor_try_install_persistent_identity(const char *datadir);
 
 void tor_integration_configure_identity(bool persist, bool rotate)
 {
@@ -893,6 +718,172 @@ static bool tor_service_verify(void *global)
     return false;
 }
 
+/* True once Tor's reply is complete: its last line has a space after the
+ * status code. */
+static bool tor_control_reply_complete(const char *reply)
+{
+    for (const char *line = reply;;) {
+        const char *eol = strstr(line, "\r\n");
+        if (!eol)
+            return false;
+        if (eol - line >= 4 && line[3] == ' ')
+            return true;
+        line = eol + 2;
+    }
+}
+
+/* Send one command over the owning control connection and read Tor's whole
+ * reply. Tor answers from its loop, which may not be running yet, so this waits
+ * for as long as Tor runs; a stop ends the wait at once by shutting the socket
+ * down. False when Tor ended, or the reply did not fit. */
+static bool tor_control_exchange(const char *cmd, char *reply, size_t reply_size)
+{
+    size_t cmd_len = strlen(cmd);
+    (void)platform_socket_set_receive_timeout(g_tor_control, 1000);
+    if ((size_t)send(g_tor_control, cmd, (int)cmd_len, 0) != cmd_len)
+        return false;
+    size_t have = 0;
+    while (atomic_load(&g_tor_running) && have + 1 < reply_size) {
+        long n = (long)recv(g_tor_control, reply + have,
+                            (int)(reply_size - 1 - have), 0);
+        if (n > 0) {
+            have += (size_t)n;
+            reply[have] = '\0';
+            if (tor_control_reply_complete(reply))
+                return true;
+            continue;
+        }
+        int error = platform_socket_last_error();
+        if (n == 0 || (!platform_socket_error_would_block(error) &&
+                       !platform_socket_error_timed_out(error) &&
+                       !platform_socket_error_interrupted(error)))
+            return false;
+        thread_liveness_beat(&g_tor_monitor_liveness,
+                             (int64_t)atomic_fetch_add(
+                                 &g_tor_monitor_poll_count, 1) + 1);
+    }
+    return false;
+}
+
+/* The ADD_ONION command for this seed. Same service as dynhost's own: virtual
+ * port 80 is taken by dynhost's interception before any target is consulted,
+ * so its target is a path that can never exist. Flags=Detach keeps the service
+ * registered until Tor exits, whatever happens to this connection. */
+static bool tor_add_onion_compose(const uint8_t seed[32], uint16_t p2p_port,
+                                  char *cmd, size_t cmd_size)
+{
+    uint8_t secret[64];
+    char key[96];
+    onion_identity_tor_secret_from_seed(seed, secret);
+    size_t key_len = EncodeBase64(secret, sizeof(secret), key, sizeof(key));
+    memory_cleanse(secret, sizeof(secret));
+    /* SECOND port mapping: the node's P2P port. Inbound P2P rides the
+     * persistent onion identity at <onion>:<p2p_port>, forwarded to the
+     * local listener by stock Tor hidden-service machinery
+     * (hs_service.c -> connection_exit_connect) as an ordinary TCP
+     * connection from 127.0.0.1 — no fork change needed. Deliberately NOT
+     * dynhost_add_virtual_port: that would route the port into the HTTP
+     * interception layer (dynhost_handlers.c), which exists for port-80
+     * traffic only. */
+    char p2p[48] = "";
+    if (p2p_port > 0 && p2p_port != 80)
+        snprintf(p2p, sizeof(p2p), " Port=%u,127.0.0.1:%u",
+                 (unsigned)p2p_port, (unsigned)p2p_port);
+    int n = snprintf(cmd, cmd_size,
+                     "ADD_ONION ED25519-V3:%s Flags=Detach "
+                     "Port=80,unix:/dev/null/no-target%s\r\n", key, p2p);
+    memory_cleanse(key, sizeof(key));
+    return key_len > 0 && n > 0 && (size_t)n < cmd_size;
+}
+
+/* True when Tor accepted ADD_ONION and named this address. */
+static bool tor_add_onion_reply_names(const char *reply, const char *addr)
+{
+    static const char id_prefix[] = "250-ServiceID=";
+    if (strncmp(reply, id_prefix, sizeof(id_prefix) - 1) != 0)
+        LOG_FAIL("tor", "ADD_ONION for the persistent onion identity was "
+                        "refused (%.3s)", reply);
+
+    /* Cross-check: Tor's derivation MUST equal the pure layer's (the unit
+     * vector pins the pure layer to prop224). A mismatch means the
+     * vendored fork drifted under us — fail loudly, never report one
+     * address while serving another. */
+    const char *tor_addr = reply + sizeof(id_prefix) - 1;
+    if (strncmp(tor_addr, addr, 56) != 0 ||
+        strncmp(tor_addr + 56, "\r\n", 2) != 0)
+        LOG_FAIL("tor", "Tor-derived persistent address does not match the "
+                        "pure prop224 derivation — vendored fork drift");
+    return true;
+}
+
+/* One install attempt from the monitor poll loop.
+ * Returns 1 once the persistent service is registered with dynhost,
+ * 0 while the dynhost subsystem is not up yet or Tor is stopping (retried on
+ * the next poll, which ends if Tor ended — not an error), -1 on a named hard
+ * failure. */
+static int tor_try_install_persistent_identity(const char *datadir)
+{
+    void *global = dynhost_get_global_service();
+    if (!global)
+        return 0;   /* Tor thread still in early startup; retried */
+
+    uint8_t seed[32];
+    char addr[57];
+    bool created = false;
+    if (!onion_identity_ensure(datadir, seed, addr, sizeof(addr), &created))
+        LOG_ERR("tor", "persistent onion identity ensure failed for %s",
+                datadir);
+
+    /* Hold the slot: with it taken dynhost mints no throwaway, so nothing else
+     * adds to Tor's service table and the lookup below cannot race an insert. */
+    (void)tor_service_claim_step(global, false);
+
+    char cmd[256];
+    char reply[256];
+    uint16_t p2p_port = atomic_load(&g_tor_p2p_port);
+    bool composed = tor_add_onion_compose(seed, p2p_port, cmd, sizeof(cmd));
+    memory_cleanse(seed, sizeof(seed));
+    bool answered = composed && tor_control_exchange(cmd, reply, sizeof(reply));
+    memory_cleanse(cmd, sizeof(cmd));
+    if (!composed)
+        LOG_ERR("tor", "could not compose ADD_ONION for the persistent onion "
+                       "identity");
+    if (!answered) {
+        if (!atomic_load(&g_tor_running))
+            return 0;
+        LOG_ERR("tor", "no complete reply to ADD_ONION for the persistent "
+                       "onion identity");
+    }
+
+    if (!tor_add_onion_reply_names(reply, addr))
+        return -1;
+
+    void *service = tor_persist_find_service(addr);
+    if (!service)
+        LOG_ERR("tor", "persistent onion service missing right after "
+                       "registration: %s", addr);
+
+    /* Become the dynhost service (see the layer-2 comment above). */
+    __atomic_store_n(&((struct dynhost_service_head_compat *)global)->hs_service,
+                     service, __ATOMIC_RELEASE);
+    /* Tor reads that slot without atomics and later frees the block holding
+     * it. One more exchange orders our store before everything Tor does after
+     * answering; no reply only means Tor is ending, which needs no order. */
+    (void)tor_control_exchange("GETINFO version\r\n", reply, sizeof(reply));
+
+    /* The P2P route is live: from here on, inbound connections arriving at
+     * 127.0.0.1:<p2p_port> may be anonymous strangers Tor forwarded, not
+     * same-host processes. Tell core/modules/net so it stops handing those peers the
+     * trusted-peer exemption from misbehaviour scoring — see
+     * net_set_onion_ingress_port() in net/net.h for why the two are
+     * indistinguishable at accept() and what the operator escape is. */
+    if (p2p_port > 0 && p2p_port != 80)
+        net_set_onion_ingress_port(p2p_port);
+
+    tor_persist_announce(created, addr);
+    return 1;
+}
+
 #ifdef ZCL_TESTING
 int tor_integration_service_step_for_test(void *global, bool serve)
 {
@@ -1308,13 +1299,23 @@ void tor_integration_stop(void)
 }
 
 #ifdef ZCL_TESTING
-/* Test seam: this run's two control sockets, or false when it holds none. */
-bool tor_integration_control_sockets_for_test(int64_t *ours, int64_t *tors)
+/* Test seam: this run's two control sockets and the identity of Tor's end, or
+ * false when it holds none. */
+bool tor_integration_control_sockets_for_test(int64_t *ours, int64_t *tors,
+                                              uint64_t *tors_dev,
+                                              uint64_t *tors_ino)
 {
     pthread_mutex_lock(&g_tor_lifecycle);
     bool held = g_tor_control != PLATFORM_SOCKET_INVALID;
     *ours = (int64_t)g_tor_control;
     *tors = (int64_t)g_tor_control_peer;
+#ifndef _WIN32
+    *tors_dev = (uint64_t)g_tor_control_peer_id.st_dev;
+    *tors_ino = (uint64_t)g_tor_control_peer_id.st_ino;
+#else
+    *tors_dev = 0;
+    *tors_ino = 0;
+#endif
     pthread_mutex_unlock(&g_tor_lifecycle);
     return held;
 }

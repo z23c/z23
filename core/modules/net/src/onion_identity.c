@@ -5,6 +5,8 @@
 #include "net/tor_integration.h"
 #include "crypto/ed25519.h"
 #include "crypto/random_secret.h"
+#include "crypto/sha512.h"
+#include "support/cleanse.h"
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
 #include "sha3/sha3.h"
@@ -86,6 +88,19 @@ static void base32_lower_encode(const uint8_t *data, size_t len, char *out)
     if (bits > 0)
         *p++ = alpha[(buffer << (5 - bits)) & 31u];
     *p = '\0';
+}
+
+void onion_identity_tor_secret_from_seed(const uint8_t seed[32],
+                                         uint8_t out[64])
+{
+    struct sha512_ctx ctx;
+    sha512_init(&ctx);
+    sha512_write(&ctx, seed, 32);
+    sha512_finalize(&ctx, out);
+    out[0] &= 248;
+    out[31] &= 63;
+    out[31] |= 64;
+    memory_cleanse(&ctx, sizeof(ctx));
 }
 
 bool onion_identity_address_from_seed(const uint8_t seed[32],

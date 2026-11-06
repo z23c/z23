@@ -1067,3 +1067,7 @@ later lane flips it HARD.
 - 2026-11-06T05:26:31Z — REASON: End embedded Tor on its own thread through its owning control socket
   old ROOT: ae415e90df987b9bd3429c7e25aba323a3963e3130e563efb815ebf8212f1ccc
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T05:27:09Z — REASON: Register the persistent onion identity from Tor's own thread
+  old ROOT: 6950828ea128837247ea981837fc2b1c28b41e1adb1ecaade046caef4ce5143e
+  by: owner unseal ritual (make core-unseal)
