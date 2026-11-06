@@ -61,6 +61,7 @@ bool IsMouseButtonDown([[maybe_unused]] int button) { return false; }
 Vector2 GetMouseDelta(void) { return (Vector2){0}; }
 void PollInputEvents(void) { }
 void SetConfigFlags([[maybe_unused]] unsigned flags) { }
+void SetTraceLogCallback([[maybe_unused]] TraceLogCallback callback) { }
 void SetTargetFPS([[maybe_unused]] int fps) { }
 void InitWindow([[maybe_unused]] int width, [[maybe_unused]] int height,
                 [[maybe_unused]] const char *title) { ++replay_unexpected_window_calls; }

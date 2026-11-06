@@ -86,15 +86,15 @@ static bool skycombat_agent_replies(const char *output)
     for (const char *line = output; *line;) {
         const char *end = strchr(line, '\n');
         if (!end) break;
-        if (*line == '{') {
-            struct json_value reply;
-            json_init(&reply);
-            bool valid = json_read(&reply, line, (size_t)(end - line)) &&
-                skycombat_agent_reply_matches(&reply, replies);
-            json_free(&reply);
-            if (!valid) return false;
-            ++replies;
-        }
+        struct json_value reply;
+        json_init(&reply);
+        /* Agent stdout is protocol only: every line is a v=1 JSON reply. */
+        bool valid = *line == '{' && json_read(&reply, line, (size_t)(end - line)) &&
+            json_get_int(json_get(&reply, "v")) == 1 &&
+            skycombat_agent_reply_matches(&reply, replies);
+        json_free(&reply);
+        if (!valid) return false;
+        ++replies;
         line = end + 1;
     }
     return replies == 8;
@@ -121,6 +121,9 @@ static int skycombat_agent_session(void)
         ASSERT(strstr(diagnostics, "QA_AGENT ticks=2 keys=0 polls=0 stick=0.500,-0.250"));
         ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=1"));
         ASSERT(skycombat_agent_replies(output));
+        /* raylib trace output is routed to stderr by the game's own callback. */
+        ASSERT(strstr(diagnostics, "raylib [INFO] QA_TRACE"));
+        ASSERT(!strstr(output, "QA_TRACE"));
         PASS();
     }
 _test_next:;

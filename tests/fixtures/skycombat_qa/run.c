@@ -2,6 +2,7 @@
  * purpose: execute the actual game entrypoint against a bounded window/draw
  * fixture. No GPU, window system, live input or model correctness is claimed.
  * Missing QA loop bounds stop at 64 frames so regressions cannot hang tests. */
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -139,8 +140,20 @@ void weapons_destroy([[maybe_unused]] weapons_system_t* weapons) { qa_destroyed 
 bool match_state_set_team_scores([[maybe_unused]] match_state_t* state, [[maybe_unused]] const int scores[4]) { return true; }
 void match_state_update([[maybe_unused]] match_state_t* state, [[maybe_unused]] float dt) {  }
 void SetConfigFlags([[maybe_unused]] unsigned int flags) {  }
+static TraceLogCallback qa_trace_callback;
+void SetTraceLogCallback(TraceLogCallback callback) { qa_trace_callback = callback; }
+/* Mimic raylib's TraceLog: the registered callback, else its stdout default. */
+static void qa_raylib_info(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    if (qa_trace_callback) qa_trace_callback(LOG_INFO, format, args);
+    else { printf("INFO: "); vprintf(format, args); printf("\n"); }
+    va_end(args);
+}
 void InitWindow([[maybe_unused]] int width, [[maybe_unused]] int height, [[maybe_unused]] const char *title) {
     ++qa_windows;
+    if (qa_agent) qa_raylib_info("QA_TRACE");
 #if !defined(_WIN32)
     if (qa_original_closed) {
         for (int fd = 0; fd < 3; fd++) {
