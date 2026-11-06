@@ -346,6 +346,27 @@ static const char receipt_overlap_script[] =
     "  seal=$(sed '$d' \"$receipt\" | build/bin/agent_sha3 -); grep -qx \"receipt_sha3=$seal\" \"$receipt\"\n"
     "done\n";
 
+/* Root rejection must precede every gate effect; valid roots must still
+ * produce evidence accepted by the independent strict checker. */
+static const char receipt_root_script[] =
+    RECEIPT_FIXTURE_PREAMBLE
+    /* Reject unusable roots before creating output, compiling a helper or
+     * starting the gate. The direct binary bypasses the shim's absolute root. */
+    "mv build/bin/agent_sha3 build/bin/agent_sha3.saved\n"
+    "for root in '' '.' 'tools/..' 'missing-relative-root'; do\n"
+    "  rc=0; CC=/nonexistent/compiler build/bin/gate_receipt \"$root\" --dir rejected-receipts --gate custom -- sh -c 'touch child-started; echo child-output' >rejected.out 2>rejected.err || rc=$?\n"
+    "  [ \"$rc\" = 2 ]; grep -q 'REPO_ROOT.*nonempty absolute path' rejected.err\n"
+    "  [ ! -s rejected.out ]; [ ! -e child-started ]; [ ! -e rejected-receipts ]; [ ! -e build/bin/agent_sha3 ]\n"
+    "done\n"
+    "build/bin/gate_receipt . --help >help.out; grep -q 'REPO_ROOT.*nonempty absolute root path' help.out\n"
+    "mv build/bin/agent_sha3.saved build/bin/agent_sha3\n"
+    /* A valid absolute root must produce evidence accepted by the actual
+     * strict verifier, not just a writer-local PASS flag. */
+    "cc -std=c23 -O2 -Wall -Wextra -Werror \"${inc[@]}\" -o build/bin/check_claims \"$1/tools/agent/check_claims.c\" \"$1/platform/modules/sha3/src/sha3.c\" \"$1/platform/modules/base/src/safe_alloc.c\"\n"
+    "build/bin/gate_receipt \"$PWD\" --dir absolute-receipts --gate custom -- sh -c 'touch child-started; echo absolute-output' >absolute.out 2>absolute.err\n"
+    "[ -e child-started ]; grep -qx absolute-output absolute.out\n"
+    "build/bin/check_claims --strict --require custom --dir absolute-receipts >strict.out\n";
+
 /* Exit status, merged output, receipt fields, default tokens, the shell
  * quoting of the recorded command and the strictness of option parsing. */
 static const char receipt_contract_script[] =
@@ -396,6 +417,9 @@ static int t_receipt_overlap(void)
 
 static int t_receipt_contract(void)
 { return receipt_fixture_run("contract", receipt_contract_script); }
+
+static int t_receipt_root(void)
+{ return receipt_fixture_run("root", receipt_root_script); }
 
 /* Pure wait deadlines for the observation children: a child that needs a few
  * seconds idle can need minutes on a host at load 300. Nothing asserts on
@@ -762,6 +786,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     S_(t_template_required_root),
     N_(t_receipt_overlap),
     N_(t_receipt_contract),
+    N_(t_receipt_root),
     N_(t_receipt_signals),
     S_(t_baseline_passes),
     S_(t_fixture_trips_gate),

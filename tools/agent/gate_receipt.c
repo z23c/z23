@@ -98,6 +98,8 @@ static const char *const gtr_help_text[] = {
     "#   tools/agent/gate-receipt.sh --gate t-fast -- make t-fast ONLY=boot_phase\n",
     "#   tools/agent/gate-receipt.sh --gate custom --expect 'MY OK TOKEN' -- ./thing\n",
     "#   make gate-receipt GATE=lint CMD='make lint'\n",
+    "#   gate_receipt REPO_ROOT [options] -- COMMAND [ARG...]\n",
+    "#   REPO_ROOT must be the worktree's nonempty absolute root path.\n",
     "#\n",
     "#   --gate <slug>      names the claim. Repeated runs of the same slug are all\n",
     "#                      kept; `make check-claims` judges the NEWEST per slug and\n",
@@ -874,6 +876,8 @@ int main(int argc, char **argv)
         return rc;
     }
     gtr_validate(&o);
+    if (o.repo[0] != '/')
+        gtr_die("REPO_ROOT must be a nonempty absolute path (use the worktree's absolute root)");
     env = getenv("ZCL_RECEIPT_DIR");
     if (o.dir == nullptr)
         o.dir = env != nullptr && *env != '\0' ? env : gtr_fmt("%s/.cache/agent-receipts", o.repo);
