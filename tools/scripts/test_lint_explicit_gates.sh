@@ -81,6 +81,7 @@ awk '
     copy && /^endif$/ { exit }
 ' "$root/Makefile" >> "$fixture/Makefile"
 cat >> "$fixture/Makefile" <<'EOF_FAST'
+ZCL_LINT_FAST_PRECHECK := 0
 .PHONY: $(LINT_FAST_GATES)
 $(LINT_FAST_GATES):
 	@echo $@ >> calls

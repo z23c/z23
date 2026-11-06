@@ -1028,7 +1028,7 @@ registry roots, including dependency pins. Both remain full-lint gates.
 reporting only `NEW <gate>` failures against the merge-base worktree, cached
 under `$ZCL_PRECHECK_CACHE`). The whole-tree compile and sweep gates named in
 `LINT_FAST_PRECHECK_HEAVY` in the Makefile stay in full `make lint` and
-`lint-preflight`; `ZCL_LINT_FAST_PRECHECK=0` skips the precheck leg.
+`lint-preflight`; `ZCL_LINT_FAST_PRECHECK=0` skips the precheck leg. When the merge-base tree is unavailable (no `origin/main`, shallow clone, cache failure) it prints `lint-fast: precheck skipped: <why>` and passes; the base tree is cached per clone.
 
 ### Module mode — run a test group without relinking
 

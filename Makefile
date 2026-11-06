@@ -7064,7 +7064,7 @@ LINT_FAST_PRECHECK_SKIP = $(subst $(lint_fast_space),$(lint_fast_comma),$(strip 
 ZCL_LINT_FAST_PRECHECK ?= 1
 define LINT_FAST_PRECHECK_RUN
 if [ "$(ZCL_LINT_FAST_PRECHECK)" = 1 ]; then \
-	  $(LINTC_TOOL) precheck --jobs=$(ZCL_LINT_JOBS) --skip=$(LINT_FAST_PRECHECK_SKIP) || { echo "lint-fast: precheck found gates outside the fast subset that newly fail"; false; }; \
+	  $(LINTC_TOOL) precheck --jobs=$(ZCL_LINT_JOBS) --skip-if-no-base --skip=$(LINT_FAST_PRECHECK_SKIP) || { echo "lint-fast: precheck found gates outside the fast subset that newly fail"; false; }; \
 	fi
 endef
 

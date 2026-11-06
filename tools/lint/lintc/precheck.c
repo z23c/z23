@@ -7,7 +7,7 @@
  * goes to /dev/null. One line per gate that passes in DIR and fails here:
  * `NEW <gate> rc=<n>`.
  *
- *   z23-lint precheck [--base=DIR] [--jobs=N] [--gates=a,b] [--skip=a,b]
+ *   z23-lint precheck [--base=DIR] [--jobs=N] [--gates=a,b] [--skip=a,b] [--skip-if-no-base]
  *                     [--json]
  *
  * A gate that passes in DIR and fails here, but whose output contains
@@ -32,7 +32,9 @@
  *
  * At most N children run at once (default 8, accepted 1..32). A child killed
  * by a signal counts as rc=124. Exit 0 = no new failure, 1 = new failure(s),
- * 2 = usage or setup error.
+ * 2 = usage or setup error, 3 = the merge-base tree is unavailable (no
+ * origin/main, cache or checkout failure). --skip-if-no-base turns 3 into a
+ * printed `lint-fast: precheck skipped: <why>` line and exit 0.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -58,6 +60,7 @@ struct pc_opts {
     const char *base;
     int jobs;
     bool json;
+    bool soft;                    /* --skip-if-no-base */
     bool have_list;
     bool have_skip;
     char list[PC_LIST];
@@ -93,7 +96,7 @@ static const char *const k_pc_unbuilt[] = {
 
 static const char k_pc_usage[] =
     "z23-lint: usage: z23-lint precheck [--base=DIR] [--jobs=N] "
-    "[--gates=a,b] [--skip=a,b] [--json]\n";
+    "[--gates=a,b] [--skip=a,b] [--skip-if-no-base] [--json]\n";
 
 static bool pc_parse_jobs(const char *s, int *out)
 {
@@ -129,6 +132,10 @@ static int pc_parse_arg(struct pc_opts *o, const char *arg)
     }
     if (strncmp(arg, "--skip=", 7) == 0 && pc_parse_list(o->skip_list, arg + 7)) {
         o->have_skip = true;
+        return 0;
+    }
+    if (strcmp(arg, "--skip-if-no-base") == 0) {
+        o->soft = true;
         return 0;
     }
     if (strcmp(arg, "--json") == 0) {
@@ -418,8 +425,11 @@ static int pc_auto_open(struct pc_opts *o, const struct lint_gate *tab,
 {
     char why[160];
     if (precheck_base_open(pb, why, sizeof why) != 0) {
-        fprintf(stderr, "precheck: %s\n", why);
-        return 2;
+        if (o->soft)
+            printf("lint-fast: precheck skipped: %s\n", why);
+        else
+            fprintf(stderr, "precheck: base unavailable: %s\n", why);
+        return o->soft ? 4 : 3;
     }
     o->base = pb->tree;
     for (size_t k = 0; k < o->n_sel; k++) {
@@ -456,8 +466,9 @@ static int pc_run_report(const struct lint_gate *tab, struct pc_opts *o)
     memset(&cap, 0, sizeof cap);
     for (size_t i = 0; i < 2 * o->n_sel; i++)
         rc[i] = -1;
-    if (autob && pc_auto_open(o, tab, &pb, rc) != 0)
-        return 2;
+    int opened = autob ? pc_auto_open(o, tab, &pb, rc) : 0;
+    if (opened != 0)
+        return opened == 4 ? 0 : opened;
     int run = pc_run_all(tab, o, rc, &cap);
     if (autob && run == 0)
         pc_auto_save(tab, o, &pb, rc);

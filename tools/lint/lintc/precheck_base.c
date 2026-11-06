@@ -113,14 +113,31 @@ static int pb_mkdirs(char *path)
     return mkdir(path, 0755) != 0 && errno != EEXIST ? -1 : 0;
 }
 
-static int pb_cache_dir(char *dst, size_t cap)
+/* One cache per clone: the base worktree is added from, and checked out with
+ * the objects of, the repo that first created it, so a second clone sharing it
+ * would not have the merge-base sha. Key the directory by a hash of this
+ * repo's absolute common dir. */
+static int pb_clone_key(char *dst, size_t cap)
+{
+    const char *args[] = { "rev-parse", "--git-common-dir", NULL };
+    char dir[PATH_MAX], real[PATH_MAX];
+    unsigned long long h = 1469598103934665603ULL;
+    if (precheck_base_git(NULL, args, dir, sizeof dir) != 0 || !*dir
+        || !realpath(dir, real))
+        return -1;
+    for (const char *s = real; *s; s++)
+        h = (h ^ (unsigned char)*s) * 1099511628211ULL;
+    return snprintf(dst, cap, "%016llx", h) < 0 ? -1 : 0;
+}
+
+static int pb_cache_dir(char *dst, size_t cap, const char *key)
 {
     const char *c = getenv("ZCL_PRECHECK_CACHE"), *h = getenv("HOME");
     int n;
     if (c && *c)
-        n = snprintf(dst, cap, "%s", c);
+        n = snprintf(dst, cap, "%s/%s", c, key);
     else if (h && *h)
-        n = snprintf(dst, cap, "%s/.cache/development-scratch/z23/precheck", h);
+        n = snprintf(dst, cap, "%s/.cache/development-scratch/z23/precheck/%s", h, key);
     else
         return -1;
     return n < 0 || (size_t)n >= cap ? -1 : 0;
@@ -133,13 +150,13 @@ static int pb_resolve_sha(struct precheck_base *b, char *why, size_t wcap)
     char tip[72];
     if (precheck_base_git(NULL, tip_args, tip, sizeof tip) != 0 || !*tip) {
         snprintf(why, wcap, "origin/main not found in the current tree");
-        return 2;
+        return 3;
     }
     const char *mb_args[] = { "merge-base", "HEAD", tip, NULL };
     if (precheck_base_git(NULL, mb_args, b->sha, sizeof b->sha) != 0
         || !*b->sha) {
         snprintf(why, wcap, "git merge-base HEAD origin/main failed");
-        return 2;
+        return 3;
     }
     return 0;
 }
@@ -209,31 +226,32 @@ const char *precheck_base_binary_tag(char *out, size_t cap)
 
 int precheck_base_open(struct precheck_base *b, char *why, size_t wcap)
 {
-    char cache[PATH_MAX - 64], tag[48];
+    char cache[PATH_MAX - 64], tag[48], key[24];
     memset(b, 0, sizeof *b);
     b->lock_fd = -1;
     if (pb_resolve_sha(b, why, wcap) != 0)
-        return 2;
-    if (pb_cache_dir(cache, sizeof cache) != 0 || pb_mkdirs(cache) != 0) {
+        return 3;
+    if (pb_clone_key(key, sizeof key) != 0
+        || pb_cache_dir(cache, sizeof cache, key) != 0 || pb_mkdirs(cache) != 0) {
         snprintf(why, wcap, "cannot create the precheck cache directory");
-        return 2;
+        return 3;
     }
     snprintf(b->tree, sizeof b->tree, "%s/base-tree", cache);
     int n = snprintf(b->results, sizeof b->results, "%s/base-native-%s-%s.txt",
                      cache, b->sha, precheck_base_binary_tag(tag, sizeof tag));
     if (n < 0 || (size_t)n >= sizeof b->results) {
         snprintf(why, wcap, "the precheck cache path is too long");
-        return 2;
+        return 3;
     }
     b->lock_fd = pb_lock(cache);
     if (b->lock_fd < 0) {
         snprintf(why, wcap, "cannot lock the precheck cache");
-        return 2;
+        return 3;
     }
     if (pb_ensure_tree(b) != 0) {
         precheck_base_close(b);
         snprintf(why, wcap, "cannot check out the base tree at %.12s", b->sha);
-        return 2;
+        return 3;
     }
     return 0;
 }

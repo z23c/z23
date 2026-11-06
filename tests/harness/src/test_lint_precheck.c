@@ -330,16 +330,45 @@ static size_t lsel_pc_file_size(const char *path)
     return stat(path, &st) == 0 ? (size_t)st.st_size : 0;
 }
 
+/* The per-clone cache subdirectory precheck made under <root>/cache. */
+static const char *lsel_pc_key(const char *root)
+{
+    static char key[64];
+    char dir[PATH_MAX + 8];
+    struct dirent *e;
+    DIR *d;
+    key[0] = '\0';
+    (void)snprintf(dir, sizeof(dir), "%s/cache", root);
+    d = opendir(dir);
+    while (d && (e = readdir(d)) != NULL) {
+        if (e->d_name[0] != '.' && strlen(e->d_name) == 16) {
+            (void)snprintf(key, sizeof(key), "%s", e->d_name);
+            break;
+        }
+    }
+    if (d)
+        closedir(d);
+    return key;
+}
+
 static int test_lsel_precheck_no_origin(void)
 {
     int failures = 0;
-    TEST_CASE("lint_selection: precheck without --base needs origin/main, exit 2") {
+    TEST_CASE("lint_selection: precheck without --base needs origin/main, exit 3 (base unavailable)") {
         struct lsel_pc_fx fx;
         char repo[PATH_MAX], out[512];
         char *argv[] = { (char *)"--gates=check-clean" };
         ASSERT(lsel_pc_plant(&fx));
         ASSERT(lsel_pc_git_repo(&fx, repo, sizeof(repo)) && lsel_pc_commit(repo));
-        ASSERT_EQ(lsel_pc_run(&fx, repo, argv, 1, out, sizeof(out)), 2);
+        ASSERT_EQ(lsel_pc_run(&fx, repo, argv, 1, out, sizeof(out)), 3);
+        /* --skip-if-no-base: lint-fast passes with a skip line instead. */
+        char *soft[] = { (char *)"--gates=check-clean", (char *)"--skip-if-no-base" };
+        ASSERT_EQ(lsel_pc_run(&fx, repo, soft, 2, out, sizeof(out)), 0);
+        ASSERT(strstr(out, "lint-fast: precheck skipped: origin/main not found") != NULL);
+        ASSERT(strstr(out, "NEW ") == NULL);
+        /* A usage error still fails under --skip-if-no-base. */
+        char *bad[] = { (char *)"--skip-if-no-base", (char *)"--jobs=0" };
+        ASSERT_EQ(lsel_pc_run(&fx, repo, bad, 2, out, sizeof(out)), 2);
         (void)unsetenv("ZCL_PRECHECK_CACHE");
         test_rm_rf_recursive(fx.root);
     } TEST_END
@@ -368,7 +397,7 @@ static int test_lsel_precheck_auto_base(void)
         ASSERT_EQ(lsel_pc_run(&fx, repo, argv, 1, out, sizeof(out)), 1);
         ASSERT(strstr(out, "NEW check-no-python rc=1\n") != NULL);
         ASSERT_EQ(lsel_pc_file_size(cnt), 4U);
-        (void)snprintf(res, sizeof(res), "%s/cache/base-native-%s-%s.txt", fx.root, sha,
+        (void)snprintf(res, sizeof(res), "%s/cache/%s/base-native-%s-%s.txt", fx.root, lsel_pc_key(fx.root), sha,
                        precheck_base_binary_tag(tag, sizeof(tag)));
         FILE *f = fopen(res, "r");
         ASSERT(f != NULL);

@@ -5,7 +5,8 @@
  * tree, takes an exclusive flock on <cache>/base.lock (held until
  * precheck_base_close), and leaves <cache>/base-tree checked out detached at
  * that sha. <cache> is $ZCL_PRECHECK_CACHE, default
- * $HOME/.cache/development-scratch/z23/precheck. Base gate results are kept in
+ * $HOME/.cache/development-scratch/z23/precheck, each with a subdirectory per
+ * clone (hash of the git common dir). Base gate results are kept in
  * <cache>/base-native-<sha>-<binary>.txt (binary = lint exe size+mtime), one
  * `gate rc` line each.
  */
@@ -24,7 +25,7 @@ struct precheck_base {
 
 /* The <binary> part of the results name for the running executable. */
 const char *precheck_base_binary_tag(char *out, size_t cap);
-/* 0 on success; else 2 with a one-line reason in why (no newline). */
+/* 0 on success; else 3 (base unavailable) with a one-line reason in why. */
 int precheck_base_open(struct precheck_base *b, char *why, size_t wcap);
 void precheck_base_close(struct precheck_base *b);
 /* 0 and *rc when the cached results hold gate name, else 1. */
