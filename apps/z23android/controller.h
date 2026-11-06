@@ -18,9 +18,13 @@ void zapp_controller_cancel_scan(void);
 void zapp_controller_visible(bool visible);
 /* True while the node process runs; safe from any thread, with or without an activity. */
 bool zapp_controller_node_running(void);
+bool zapp_controller_setup_node_active(void);
 /* Runs one wallet command on the calling thread (see zapp_wallet_run); the controller worker stays free,
  * so a slow wallet command never delays the node status. Safe from any thread. */
 bool zapp_controller_wallet_run(const char *op, const char *arg, char *out, size_t cap);
+/* Read a validated process-local preload; ready is only a hint. */
+bool zapp_controller_preload_ready(void);
+bool zapp_controller_preload_get(char *out, size_t cap, char identity[65], uint64_t *epoch, bool *command_ok);
 /* Runs one step of a send on the calling thread (see zapp_wallet_send_run), never on the controller worker. Safe from any
  * thread. */
 bool zapp_controller_send_run(const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap);

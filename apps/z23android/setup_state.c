@@ -3,6 +3,7 @@
 #include "setup_state.h"
 #include "sha3/sha3.h"
 #include <errno.h>
+#include <stdatomic.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
@@ -10,6 +11,10 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+static atomic_bool preload_invalidated;
+bool zapp_setup_preload_allowed(void) { return !atomic_load(&preload_invalidated); }
+void zapp_setup_preload_invalidate(void) { atomic_store(&preload_invalidated, true); }
 
 #define BLOB "wallet_key.blob"
 #define DONE "wallet_setup_done"

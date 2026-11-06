@@ -131,6 +131,24 @@ bool zapp_node_running(struct zapp_runtime *r)
     return child_running(r) || earlier_node(r) > 0;
 }
 
+bool zapp_node_start_pending(struct zapp_runtime *r)
+{
+    if (!r) return false;
+    pthread_mutex_lock(&r->mutex);
+    bool pending = r->start_pending;
+    pthread_mutex_unlock(&r->mutex);
+    return pending;
+}
+
+bool zapp_node_start_pending_or_running(struct zapp_runtime *r)
+{
+    if (!r) return false;
+    pthread_mutex_lock(&r->mutex);
+    bool active = r->start_pending || running_locked(r) || earlier_node(r) > 0;
+    pthread_mutex_unlock(&r->mutex);
+    return active;
+}
+
 static int environment_count(size_t *count)
 {
     size_t bytes = 0;
@@ -336,28 +354,153 @@ static int spawn_node(struct zapp_runtime *r)
     if (!rc) (void)zapp_nodelog_start(&r->log, log, offset < 0 ? 0 : offset, r->node, cap);
     return rc;
 }
-bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap)
+struct preload_result {
+    char reply[8192], identity[65];
+    bool valid, command_ok;
+};
+static void node_preload(struct zapp_runtime *, struct preload_result *);
+bool zapp_node_preload_ready(const struct zapp_runtime *r)
 {
+    return r && atomic_load(&r->preload_ready) && zapp_setup_preload_allowed();
+}
+bool zapp_node_preload_get(struct zapp_runtime *r, char *out, size_t cap,
+    char identity[65], uint64_t *epoch, bool *command_ok)
+{
+    if (!r || !out || !cap || !identity || !epoch || !command_ok) return false;
     pthread_mutex_lock(&r->mutex);
-    bool setting_up = atomic_load(&r->setup_running);
-    if (r->preview || r->stopping || setting_up || running_locked(r) || earlier_node(r)) {
-        snprintf(out, cap, "%s", r->preview ? "The preview app does not run a node. Use the main Z23 app." :
-                 r->stopping ? "App is closing." : setting_up ? "Wallet setup is running. The node can start when it ends." :
-                 "The local node is already running.");
+    char current[65];
+    bool ok = zapp_setup_preload_allowed() &&
+              zapp_setup_identity(r->files, current) &&
+              zapp_setup_preload_allowed() &&
+              r->preload_reply[0] && r->preload_epoch == r->start_epoch &&
+              !strcmp(current, r->preload_identity) && strlen(r->preload_reply) < cap;
+    if (ok) {
+        snprintf(out, cap, "%s", r->preload_reply);
+        memcpy(identity, r->preload_identity, 65);
+        *epoch = r->preload_epoch;
+        *command_ok = r->preload_ok;
+    }
+    pthread_mutex_unlock(&r->mutex);
+    return ok;
+}
+static const char *node_start_refusal(struct zapp_runtime *r)
+{
+    if (r->preview) return "The preview app does not run a node. Use the main Z23 app.";
+    if (r->stopping) return "App is closing.";
+    if (r->start_pending) return "The local node is already starting.";
+    if (atomic_load(&r->setup_running)) return "Wallet setup is running. The node can start when it ends.";
+    if (running_locked(r) || earlier_node(r)) return "The local node is already running.";
+    return NULL;
+}
+
+bool zapp_node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap)
+{
+    if (!r || !ticket || !out || !cap) return false;
+    pthread_mutex_lock(&r->mutex);
+    const char *refusal = node_start_refusal(r);
+    if (refusal) {
+        snprintf(out, cap, "%s", refusal);
         pthread_mutex_unlock(&r->mutex); return false;
     }
+    if (atomic_exchange(&r->setup_running, true)) {
+        snprintf(out, cap, "Wallet setup is running. The node can start when it ends.");
+        pthread_mutex_unlock(&r->mutex); return false;
+    }
+    r->start_pending = true;
+    r->start_executing = false;
+    r->start_preload_allowed = zapp_setup_preload_allowed();
+    atomic_store(&r->start_cancel, false);
+    r->reserved_epoch = ++r->start_epoch;
+    *ticket = r->reserved_epoch;
+    r->preload_reply[0] = 0;
+    atomic_store(&r->preload_ready, false);
+    pthread_mutex_unlock(&r->mutex);
+    return true;
+}
+
+void zapp_node_start_discard(struct zapp_runtime *r, uint64_t ticket)
+{
+    if (!r) return;
+    pthread_mutex_lock(&r->mutex);
+    if (r->start_pending && !r->start_executing && r->reserved_epoch == ticket) {
+        r->start_pending = false;
+        ++r->start_epoch;
+        atomic_store(&r->setup_running, false);
+        atomic_store(&r->start_cancel, true);
+    }
+    pthread_mutex_unlock(&r->mutex);
+}
+
+static bool node_start_finish_locked(struct zapp_runtime *r, uint64_t ticket,
+    const struct preload_result *preload, char *out, size_t cap)
+{
+    bool cancelled = r->stopping || atomic_load(&r->start_cancel) || ticket != r->start_epoch ||
+                     (r->start_preload_allowed && !zapp_setup_preload_allowed());
+    r->start_pending = false;
+    r->start_executing = false;
+    atomic_store(&r->setup_running, false);
+    if (cancelled) {
+        snprintf(out, cap, "Node start cancelled.");
+        return false;
+    }
+    if (running_locked(r) || earlier_node(r)) {
+        snprintf(out, cap, "The local node is already running.");
+        return false;
+    }
     int rc = spawn_node(r);
+    if (!rc && preload->valid) {
+        memcpy(r->preload_reply, preload->reply, sizeof(r->preload_reply));
+        memcpy(r->preload_identity, preload->identity, sizeof(r->preload_identity));
+        r->preload_epoch = ticket;
+        r->preload_ok = preload->command_ok;
+        atomic_store(&r->preload_ready, true);
+    }
     r->stop_sent = false;
     if (rc) { r->node = 0; snprintf(out, cap, "Could not start Z23: %s", strerror(rc)); }
     else snprintf(out, cap, "Node starting.%s",
                   remember_on(r, true) ? "" : " The app could not save this choice.");
-    pthread_mutex_unlock(&r->mutex);
     return rc == 0;
+}
+
+bool zapp_node_start_reserved(struct zapp_runtime *r, uint64_t ticket, char *out, size_t cap)
+{
+    if (!r || !out || !cap) return false;
+    pthread_mutex_lock(&r->mutex);
+    if (!r->start_pending || r->start_executing || r->reserved_epoch != ticket ||
+        r->start_epoch != ticket || atomic_load(&r->start_cancel)) {
+        snprintf(out, cap, "Node start cancelled.");
+        pthread_mutex_unlock(&r->mutex); return false;
+    }
+    r->start_executing = true;
+    pthread_mutex_unlock(&r->mutex);
+    struct preload_result preload = {0};
+    node_preload(r, &preload);
+    pthread_mutex_lock(&r->mutex);
+    bool ok = node_start_finish_locked(r, ticket, &preload, out, cap);
+    pthread_mutex_unlock(&r->mutex);
+    return ok;
+}
+
+bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap)
+{
+    uint64_t ticket;
+    return zapp_node_start_reserve(r, &ticket, out, cap) &&
+           zapp_node_start_reserved(r, ticket, out, cap);
 }
 
 static bool request_stop(struct zapp_runtime *r, char *out, size_t cap, bool owner_choice)
 {
     pthread_mutex_lock(&r->mutex);
+    ++r->start_epoch;
+    r->preload_reply[0] = 0;
+    atomic_store(&r->preload_ready, false);
+    if (r->start_pending) {
+        atomic_store(&r->start_cancel, true);
+        if (!r->start_executing) {
+            r->start_pending = false;
+            atomic_store(&r->setup_running, false);
+        }
+    }
     pid_t node = running_locked(r) ? r->node : earlier_node(r);
     int rc = node > 0 ? kill(node, SIGINT) : 0;
     r->stop_sent = node > 0 && rc == 0;
@@ -389,6 +532,16 @@ void zapp_runtime_signal_stop(struct zapp_runtime *r)
 {
     pthread_mutex_lock(&r->mutex);
     r->stopping = true;
+    ++r->start_epoch;
+    r->preload_reply[0] = 0;
+    atomic_store(&r->preload_ready, false);
+    if (r->start_pending) {
+        atomic_store(&r->start_cancel, true);
+        if (!r->start_executing) {
+            r->start_pending = false;
+            atomic_store(&r->setup_running, false);
+        }
+    }
     if (running_locked(r)) (void)kill(r->node, SIGINT);
     pthread_mutex_unlock(&r->mutex);
 }
@@ -415,7 +568,7 @@ void zapp_runtime_destroy(struct zapp_runtime *r)
 
 #define COMMAND_TIMEOUT_MS 15000
 struct pump { int input, output; pid_t pid; const char *body; size_t sent, length, used; bool truncated; unsigned timeout_ms;
-              const char *const *args; const atomic_bool *cancel; bool cancelled; };
+              const char *const *args; const atomic_bool *cancel; bool cancelled; int exit_code; };
 
 static void pump_output(struct pump *p, char *out, size_t cap)
 {
@@ -491,6 +644,11 @@ static bool pump_step(struct pump *p, char *out, size_t cap, bool *ended, int *s
     if (!*ended && p->output < 0) *ended = waitpid(p->pid, status, WNOHANG) == p->pid;
     return true;
 }
+static int pump_exit_code(const struct pump *p, bool ended, int status)
+{
+    return !p->cancelled && ended && WIFEXITED(status) &&
+           !p->truncated && p->sent == p->length ? WEXITSTATUS(status) : -1;
+}
 static bool pump_command(struct pump *p, char *out, size_t cap)
 {
     int status = 0; bool ended = false; int64_t start = milliseconds();
@@ -503,6 +661,7 @@ static bool pump_command(struct pump *p, char *out, size_t cap)
     if (p->cancel && atomic_load(p->cancel)) p->cancelled = true;
     pump_finish(p, out, cap, ended, &status);
     if (p->cancelled) memory_cleanse(out, cap);
+    p->exit_code = pump_exit_code(p, ended, status);
     return !p->cancelled && pump_success(p, ended, status);
 }
 
@@ -531,22 +690,28 @@ static bool command_spawn_error(int rc, const atomic_bool *cancel, bool *cancell
     else snprintf(out, cap, "Unable to run native Z23: %s", strerror(rc));
     return false;
 }
-static bool command_pump_result(struct pump *pump, char *out, size_t cap, bool *started, bool *cancelled)
+static bool command_pump_result(struct pump *pump, char *out, size_t cap, bool *started, bool *cancelled, int *exit_code)
 {
     if (started) *started = true;
     if (!pump->length) { close(pump->input); pump->input = -1; }
     bool ok = pump_command(pump, out, cap);
     if (cancelled) *cancelled = pump->cancelled;
+    if (exit_code) *exit_code = pump->exit_code;
     return ok;
 }
 
 /* started is set when the process was spawned: a false return with started false means the command never ran. */
-static bool command_run_cancel(struct zapp_runtime *r, const char *const *args, const char *input,
-                               unsigned timeout_ms, char *out, size_t cap, bool *started,
-                               const atomic_bool *cancel, bool *cancelled)
+static void command_reset(bool *started, bool *cancelled, int *exit_code)
 {
+    if (exit_code) *exit_code = -1;
     if (cancelled) *cancelled = false;
     if (started) *started = false;
+}
+static bool command_run_cancel(struct zapp_runtime *r, const char *const *args, const char *input,
+                               unsigned timeout_ms, char *out, size_t cap, bool *started,
+                               const atomic_bool *cancel, bool *cancelled, int *exit_code)
+{
+    command_reset(started, cancelled, exit_code);
     if (!out || cap < 64) return false;
     out[0] = 0;
     if (cancel && atomic_load(cancel)) { if (cancelled) *cancelled = true; return false; }
@@ -560,11 +725,11 @@ static bool command_run_cancel(struct zapp_runtime *r, const char *const *args, 
     pthread_mutex_unlock(&r->mutex);
     close(stdin_pipe[0]); close(pipes[1]);
     if (rc) { close(stdin_pipe[1]); close(pipes[0]); return command_spawn_error(rc, cancel, cancelled, out, cap); }
-    return command_pump_result(&pump, out, cap, started, cancelled);
+    return command_pump_result(&pump, out, cap, started, cancelled, exit_code);
 }
 static bool command_run(struct zapp_runtime *r, const char *const *args, const char *input,
                         unsigned timeout_ms, char *out, size_t cap, bool *started)
-{ return command_run_cancel(r, args, input, timeout_ms, out, cap, started, NULL, NULL); }
+{ return command_run_cancel(r, args, input, timeout_ms, out, cap, started, NULL, NULL, NULL); }
 static bool command_timed(struct zapp_runtime *r, const char *const *args, const char *input,
                           unsigned timeout_ms, char *out, size_t cap)
 {
@@ -675,6 +840,50 @@ static bool wallet_argument(enum wallet_arg kind, const char *arg, const char **
         args[(*n)++] = value;
     } else if (arg[0]) { snprintf(out, cap, "This wallet command takes no argument."); return false; }
     return true;
+}
+
+static bool preload_envelope_valid(const struct json_value *ok,
+                                   const struct json_value *err, int exit_code)
+{
+    const char *code = err && err->type == JSON_OBJ ? json_get_str(json_get(err, "code")) : NULL;
+    if (!ok || ok->type != JSON_BOOL) return false;
+    if (json_get_bool(ok)) return exit_code == 0;
+    return exit_code == 3 && code && !strcmp(code, "WALLET_LOCKED");
+}
+static bool preload_reply_valid(const char *text, int exit_code)
+{
+    const char *json = zapp_json_object(text);
+    struct json_value root = {0};
+    bool valid = json && json_read(&root, json, strlen(json));
+    const struct json_value *ok = valid ? json_get(&root, "ok") : NULL;
+    const struct json_value *data = valid ? json_get(&root, "data") : NULL;
+    const struct json_value *err = valid ? json_get(&root, "error") : NULL;
+    const struct json_value *addr = data && data->type == JSON_OBJ
+        ? json_get(data, "persisted_shielded_address") : NULL;
+    valid = addr && addr->type == JSON_STR && json_get_str(addr) &&
+            json_get_str(addr)[0] && preload_envelope_valid(ok, err, exit_code);
+    json_free(&root);
+    return valid;
+}
+static void node_preload(struct zapp_runtime *r, struct preload_result *result)
+{
+    static const char *const args[] = {"core", "wallet", "recovery", "status", NULL};
+    char after[65], input[1200];
+    if (!zapp_setup_preload_allowed() ||
+        !zapp_setup_identity(r->files, result->identity)) return;
+    struct json_value request = {0};
+    json_set_object(&request);
+    bool built = json_push_kv_str(&request, "datadir", r->directory);
+    size_t n = built ? json_write(&request, input, sizeof(input)) : 0;
+    json_free(&request);
+    if (!n || n >= sizeof(input)) return;
+    bool cancelled = false;
+    int exit_code = -1;
+    result->command_ok = command_run_cancel(r, args, input, r->preload_ms ? r->preload_ms : 2000,
+        result->reply, sizeof(result->reply), NULL, &r->start_cancel, &cancelled, &exit_code);
+    result->valid = !cancelled && preload_reply_valid(result->reply, exit_code) &&
+        zapp_setup_preload_allowed() && zapp_setup_identity(r->files, after) &&
+        !strcmp(result->identity, after) && zapp_setup_preload_allowed();
 }
 
 /* Read only while the app is not starting its node. */
@@ -870,7 +1079,7 @@ static enum zapp_preview_result preview_cancelable(struct zapp_runtime *r, const
     json_free(&input);
     const char *args[] = {"fleet", "preview", NULL};
     bool cancelled = false;
-    ok = n < sizeof(wire) && command_run_cancel(r, args, wire, 5000u, out, cap, NULL, cancel, &cancelled);
+    ok = n < sizeof(wire) && command_run_cancel(r, args, wire, 5000u, out, cap, NULL, cancel, &cancelled, NULL);
     memory_cleanse(wire, sizeof(wire));
     if (cancel && atomic_load(cancel)) cancelled = true;
     if (cancelled) { memory_cleanse(out, cap); return ZAPP_PREVIEW_CANCELLED; }

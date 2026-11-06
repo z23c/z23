@@ -144,6 +144,9 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
 
 struct fake {
     bool secure_ok, secure_on, block, async, always_ok, node_up, copy_ok, offline_failure, setup_active;
+    bool preload_ready, preload_ok;
+    int preload_reads;
+    const char *preloaded;
     int copy_calls, dismissed;
     enum wallet_reveal reveal, reveal_after_start; /* the state the environment reports; the state a tap on Show private balance moves it to */
     int reveal_started, reveal_ended;
@@ -178,6 +181,25 @@ static bool fake_setup_identity(void *ctx, char out[82])
     (void)ctx;
     if (!fake.identity || fake.setup_active) return false;
     snprintf(out, 82, "%s", fake.identity);
+    return true;
+}
+
+static bool fake_preload_ready(void *ctx)
+{
+    (void)ctx;
+    return fake.preload_ready;
+}
+static bool fake_preload_get(void *ctx, char *out, size_t cap, char identity[65],
+                             uint64_t *epoch, bool *command_ok)
+{
+    (void)ctx;
+    ++fake.preload_reads;
+    if (!fake.preload_ready || !fake.preloaded || !fake.identity || strlen(fake.identity) < 64) return false;
+    snprintf(out, cap, "%s", fake.preloaded);
+    memcpy(identity, fake.identity, 64);
+    identity[64] = 0;
+    *epoch = 7;
+    *command_ok = fake.preload_ok;
     return true;
 }
 
@@ -317,7 +339,7 @@ static void start(bool async)
     struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async, fake_refusal, fake_node_running, fake_copy_address,
                              cache_dir[0] ? cache_dir : NULL, fake_wall, fake_progress, fake_dismiss,
                              with_reveal ? fake_reveal_start : NULL, with_reveal ? fake_reveal_state : NULL,
-                             with_reveal ? fake_reveal_end : NULL, with_seal ? fake_seal : NULL, with_seal ? fake_unseal : NULL, fake_setup_address, fake_setup_identity};
+                             with_reveal ? fake_reveal_end : NULL, with_seal ? fake_seal : NULL, with_seal ? fake_unseal : NULL, fake_setup_address, fake_setup_identity, fake_preload_ready, fake_preload_get};
     wallet_screens_shutdown();
     memset(&fake, 0, sizeof(fake));
     memset(&keystore, 0, sizeof(keystore));
@@ -1545,6 +1567,49 @@ static void test_offline_receive(void)
     wallet_screens_close();
 }
 
+static void test_preload_arrives_on_open_receive(void)
+{
+    static const char identity[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-0000000000000000";
+    uint8_t symbols[69] = {2};
+    char address[92], response[512];
+    CHECK(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
+    snprintf(response, sizeof(response),
+             "{\"ok\":false,\"data\":{\"persisted_shielded_address\":\"%s\"},\"error\":{\"code\":\"WALLET_LOCKED\"}}", address);
+    start(false);
+    fake.node_up = false; fake.identity = identity; fake.latest = NULL;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(wallet_screens_set_amount("1.25"));
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) < 0);
+    fake.node_up = true; fake.preloaded = response; fake.preload_ready = true;
+    wallet_screens_tick();
+    struct wallet_screen *s = snap();
+    CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount=1.25"));
+    CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), address));
+    int reads = fake.preload_reads;
+    wallet_screens_tick();
+    CHECK(fake.preload_reads == reads);
+    char live_reply[256];
+    snprintf(live_reply, sizeof(live_reply), "{\"ok\":true,\"data\":{\"address\":\"%s\"}}", address);
+    fake.receive = live_reply;
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);
+    fake.preload_ready = false;
+    s = snap();
+    CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount=1.25"));
+    CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), address));
+    wallet_screens_close();
+
+    start(false);
+    fake.node_up = false; fake.identity = identity; fake.latest = NULL;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    fake.node_up = true; fake.preloaded = "{bad"; fake.preload_ready = true;
+    wallet_screens_tick();
+    reads = fake.preload_reads;
+    wallet_screens_tick();
+    CHECK(fake.preload_reads == reads);
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) < 0);
+    wallet_screens_close();
+}
+
 static void test_receive_new_address(void)
 {
     start(false);
@@ -1580,6 +1645,27 @@ static bool latest_waiting(void)
     bool waiting = fake.counts[2] > 0 && fake.op_active[2] > 0;
     pthread_mutex_unlock(&fake.lock);
     return waiting;
+}
+static bool preload_qr_visible(void)
+{
+    struct wallet_screen *s = snap();
+    return find(s, WALLET_ITEM_QR, WALLET_ACT_NONE) >= 0;
+}
+static void test_preload_while_latest_waits(void)
+{
+    static const char identity[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-0000000000000000";
+    uint8_t symbols[69] = {2}; char address[92], response[512];
+    CHECK(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
+    snprintf(response, sizeof(response), "{\"ok\":false,\"data\":{\"persisted_shielded_address\":\"%s\"},\"error\":{\"code\":\"WALLET_LOCKED\"}}", address);
+    start(true); fake.identity = identity; fake.latest = NULL;
+    set_block(); CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE)); wait_for(latest_waiting);
+    CHECK(wallet_screens_set_amount("1.25"));
+    fake.preloaded = response; fake.preload_ready = true;
+    wallet_screens_tick(); wait_for(preload_qr_visible);
+    struct wallet_screen *s = snap();
+    CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), address));
+    CHECK(strstr(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount=1.25"));
+    release_block(); wait_for(settled); wallet_screens_close();
 }
 static void test_setup_fallback_while_latest_waits(void)
 {
@@ -2671,12 +2757,14 @@ int main(int argc, char **argv)
     test_reveal_amount_not_kept();
     test_receive();
     test_setup_fallback();
+    test_preload_while_latest_waits();
     test_setup_fallback_while_latest_waits();
     test_every_page_pins_one_back();
     test_spendable_for_send();
     test_receive_amount();
     test_receive_new_address();
     test_offline_receive();
+    test_preload_arrives_on_open_receive();
     test_receive_copy();
     test_receive_copy_without_address();
     test_receive_never_makes_keys();

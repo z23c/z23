@@ -45,7 +45,8 @@ static struct {
     enum button button_id[BUTTONS_MAX];
     size_t button_count;
     struct wsu model;
-    bool model_ready, open_intent;
+    atomic_bool model_ready;
+    bool open_intent;
     char blob[512];
     bool dropped, launch_failed, height_bad, height_locked;
     char height_text[24];
@@ -152,7 +153,7 @@ static void env_discard(void *ctx)
     (void)ctx;
     if (key_ops(&ops)) zapp_devkey_discard(&ops, ui.blob);
 }
-static bool env_running(void *ctx) { (void)ctx; return zapp_controller_node_running(); }
+static bool env_running(void *ctx) { (void)ctx; return zapp_controller_setup_node_active(); }
 static void env_control(void *ctx, bool start)
 {
     (void)ctx;

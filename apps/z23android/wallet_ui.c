@@ -455,11 +455,22 @@ static bool bound_setup_identity(void *ctx, char out[82])
     return snprintf(out, 82, "%s-%016llx", digest, (unsigned long long)generation) == 81;
 }
 
+static bool bound_preload_ready(void *ctx)
+{
+    (void)ctx;
+    return zapp_controller_preload_ready();
+}
+static bool bound_preload_get(void *ctx, char *out, size_t cap, char identity[65], uint64_t *epoch, bool *command_ok)
+{
+    (void)ctx;
+    return zapp_controller_preload_get(out, cap, identity, epoch, command_ok);
+}
+
 bool zapp_wallet_attach(ANativeActivity *activity, void (*changed)(void))
 {
     struct wallet_env env = {activity, bound_secure, bound_run, bound_changed, bound_now, true, bound_refusal, bound_node_running, bound_copy_address,
                              activity ? activity->internalDataPath : NULL, NULL, bound_send_progress, bound_send_dismiss,
-                             bound_reveal_start, bound_reveal_state, bound_reveal_end, bound_seal, bound_unseal, bound_setup_address, bound_setup_identity};
+                             bound_reveal_start, bound_reveal_state, bound_reveal_end, bound_seal, bound_unseal, bound_setup_address, bound_setup_identity, bound_preload_ready, bound_preload_get};
     bound.changed = changed;
     bound.vm = activity ? activity->vm : NULL;
     return activity && wallet_screens_init(&env);

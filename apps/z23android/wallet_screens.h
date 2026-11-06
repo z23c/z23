@@ -157,6 +157,8 @@ struct wallet_env {
                    const uint8_t *sealed, size_t len, uint8_t *plain);
     bool (*setup_address)(void *ctx, char *out, size_t cap, uint64_t *generation);
     bool (*setup_identity)(void *ctx, char out[82]);
+    bool (*preload_ready)(void *ctx);
+    bool (*preload_get)(void *ctx, char *out, size_t cap, char identity[65], uint64_t *epoch, bool *command_ok);
 };
 
 bool wallet_screens_init(const struct wallet_env *env);

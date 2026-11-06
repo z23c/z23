@@ -46,6 +46,10 @@ static void node_button_states(void)
     assert(!strcmp(zapp_home_node_action_for_label("Stop node"), "node_stop"));
     assert(!strcmp(zapp_home_node_action_for_label(""), "") && !strcmp(zapp_home_node_action_for_label("Stopping…"), ""));
     assert(!strcmp(zapp_home_node_label(&view), "Start node"));
+    view.node_starting = true;
+    assert(!strcmp(zapp_home_node_label(&view), "Stop node"));
+    assert(!strcmp(zapp_home_node_action_for_label(zapp_home_node_label(&view)), "node_stop"));
+    view.node_starting = false;
     view.node_process_running = true;
     view.node_wanted = true;
     assert(!strcmp(zapp_home_node_label(&view), "Stop node"));

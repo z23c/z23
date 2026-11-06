@@ -2,6 +2,9 @@
 #ifndef ZAPP_SETUP_STATE_H
 #define ZAPP_SETUP_STATE_H
 #include <stdbool.h>
+/* A setup attempt permanently invalidates this process startup preload. */
+bool zapp_setup_preload_allowed(void);
+void zapp_setup_preload_invalidate(void);
 #include <stddef.h>
 #include <stdint.h>
 

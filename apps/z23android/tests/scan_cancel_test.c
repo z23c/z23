@@ -6,6 +6,14 @@ bool zapp_send_busy(void);
 #include "../fleet_review_state.h"
 #include <assert.h>
 
+bool zapp_send_busy(void) { return false; }
+const char *zapp_node_stop_refusal(bool busy) { (void)busy; return NULL; }
+void zapp_restart_stopped(struct zapp_restart *r) { (void)r; }
+bool zapp_node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap)
+{ (void)r; (void)out; (void)cap; *ticket = 42; return true; }
+bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap)
+{ (void)r; (void)out; (void)cap; return true; }
+
 static int offers, clears;
 static bool fixture_paired;
 static bool held;
@@ -93,7 +101,9 @@ int main(void)
     char join_output[ZAPP_TEXT_CAP] = "";
     assert(!join_fleet(&c, "synthetic", join_output));
     assert(join_calls == 0 && strstr(join_output, "Start the node first"));
-    c.camera_ticket = 7; c.view.scanning = true;
+    c.camera_ticket = 7; c.start_ticket = 42;
+    assert(action_ticket(&c, "node_start") == 42 && action_ticket(&c, "scan") == 7);
+    c.view.scanning = true;
     scan_denied(&c, 8); assert(!c.view.scan_permission_denied);
     c.scan_cancelled = true; scan_denied(&c, 7); assert(!c.view.scan_permission_denied);
     c.scan_cancelled = false; scan_denied(&c, 7); assert(c.view.scan_permission_denied);

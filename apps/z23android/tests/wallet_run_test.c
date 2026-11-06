@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _GNU_SOURCE
 #include "operations.h"
+#include "setup_state.h"
 #include <assert.h>
 #include <pthread.h>
 #include <signal.h>
@@ -333,6 +334,27 @@ static void receive_gate_run(struct zapp_runtime *r, const char *root)
     touch_in(root, "wallet_key.blob");
 }
 
+/* Offline reads require a confirmed setup and never run beside an existing node. */
+static void offline_guards_run(struct zapp_runtime *r, const char *root)
+{
+    char out[512], path[500];
+    assert(!zapp_wallet_run(r, "offline_address", "", out, sizeof(out)));
+    snprintf(path, sizeof(path), "%s/wallet_key.blob", root);
+    FILE *f = fopen(path, "w");
+    assert(f && fputs("fixture key", f) >= 0 && fclose(f) == 0);
+    assert(zapp_setup_mark_confirmed(root, false));
+    pid_t node = fork();
+    assert(node >= 0);
+    if (!node) { sleep(30); _exit(0); }
+    r->node = node;
+    assert(!zapp_wallet_run(r, "offline_address", "", out, sizeof(out)));
+    assert(kill(node, 0) == 0);
+    assert(kill(node, SIGKILL) == 0 && waitpid(node, NULL, 0) == node);
+    r->node = 0;
+    snprintf(path, sizeof(path), "%s/wallet_setup_confirmed", root);
+    assert(unlink(path) == 0);
+}
+
 /* The scratch directory comes from the caller: the test makes no path of its own. */
 int main(int argc, char **argv)
 {
@@ -353,6 +375,7 @@ int main(int argc, char **argv)
 
     snprintf(r.files, sizeof(r.files), "%s", root);
     receive_gate_run(&r, root);
+    offline_guards_run(&r, root);
     expect_args(&r, "summary", "", "core wallet summary");
     expect_args(&r, "fleet", "", "core wallet fleet status");
     expect_args(&r, "latest", "", "core wallet shielded latest");

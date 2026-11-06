@@ -6,6 +6,7 @@
 #include "thermal.h"
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <sys/types.h>
 struct zapp_runtime {
     pthread_mutex_t mutex;
@@ -34,13 +35,34 @@ struct zapp_runtime {
     atomic_bool direct_reported;
     /* A wallet setup command is running: the node is not started until it ends. */
     atomic_bool setup_running;
+    atomic_bool start_cancel;
+    bool start_pending, start_executing, start_preload_allowed;
+    uint64_t start_epoch, reserved_epoch;
+    unsigned preload_ms; /* 0 means 2000 ms */
+    char preload_reply[8192];
+    char preload_identity[65];
+    uint64_t preload_epoch;
+    bool preload_ok;
+    atomic_bool preload_ready;
 };
 bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *libs, bool preview);
 void zapp_runtime_signal_stop(struct zapp_runtime *r);
 void zapp_runtime_destroy(struct zapp_runtime *r);
 bool zapp_node_running(struct zapp_runtime *r);
+/* Setup waits until a reserved or executing start has fully stopped. */
+bool zapp_node_start_pending(struct zapp_runtime *r);
+/* Setup's single snapshot for a node or a start in progress. */
+bool zapp_node_start_pending_or_running(struct zapp_runtime *r);
 /* True from a successful stop request until the node exits. */
 bool zapp_node_stopping(struct zapp_runtime *r);
+/* Nonblocking hint; the getter still revalidates the binding. */
+bool zapp_node_preload_ready(const struct zapp_runtime *r);
+/* Copy a current public status reply and its setup binding. */
+bool zapp_node_preload_get(struct zapp_runtime *r, char *out, size_t cap,
+    char identity[65], uint64_t *epoch, bool *command_ok);
+bool zapp_node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap);
+bool zapp_node_start_reserved(struct zapp_runtime *r, uint64_t ticket, char *out, size_t cap);
+void zapp_node_start_discard(struct zapp_runtime *r, uint64_t ticket);
 bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap);
 bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap);
 /* Asks the node to exit exactly as zapp_node_stop does but leaves the marker that starts it when the app opens, so a stop made by

@@ -57,6 +57,7 @@ const char *zapp_home_action_label(const char *id)
 }
 const char *zapp_home_node_label(const struct zapp_view *view)
 {
+    if (view->node_starting) return "Stop node";
     if (!view->node_process_running) return "Start node";
     return view->node_stopping ? "" : "Stop node";
 }

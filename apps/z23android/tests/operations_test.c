@@ -5,7 +5,9 @@
 #endif
 #include "operations.h"
 #include "params.h"
+#include "setup_state.h"
 #include <assert.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
@@ -197,9 +199,58 @@ static void preview_cancel_tests(struct zapp_runtime *r)
     sleep(3); assert(access(descendant, F_OK) != 0); assert(unlink(started) == 0);
     assert(rmdir(directory) == 0); memcpy(r->directory, saved, sizeof(saved));
 }
-static int child(int argc, char **argv)
+/* The status child and node leave separate markers so ordering is observable. */
+static void preload_marker(const char *dir, const char *name, long value)
 {
-    if (!child_environment()) return 3;
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *f = fopen(path, "w");
+    if (f) { fprintf(f, "%ld", value); fclose(f); }
+}
+static int preload_status_child(const char *mode, const char *dir)
+{
+    char input[1200];
+    size_t n = fread(input, 1, sizeof(input) - 1, stdin);
+    input[n] = 0;
+    if (!strstr(input, dir)) return 8;
+    preload_marker(dir, "preload-started", (long)getpid());
+    if (!strcmp(mode, "wait")) { sleep(60); return 1; }
+    if (!strcmp(mode, "fail")) return 1;
+    if (!strcmp(mode, "delay")) { sleep(1); preload_marker(dir, "preload-completed", 1); }
+    if (!strcmp(mode, "signal")) {
+        puts("{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\"},\"data\":{\"persisted_shielded_address\":\"zs1fixture\"}}");
+        fflush(stdout);
+        raise(SIGKILL);
+    }
+
+    if (!strcmp(mode, "locked") || !strcmp(mode, "wrongexit")) {
+        puts("{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\"},\"data\":{\"persisted_shielded_address\":\"zs1fixture\"}}");
+        return !strcmp(mode, "locked") ? 3 : 1;
+    }
+    puts("{\"ok\":true,\"data\":{\"persisted_shielded_address\":\"zs1fixture\"}}");
+    return 0;
+}
+static int preload_child(int argc, char **argv)
+{
+    const char *mode = getenv("ZAPP_TEST_PRELOAD");
+    if (!mode) return -1;
+    const char *dir = NULL;
+    for (int i = 1; i < argc; ++i)
+        if (!strncmp(argv[i], "-datadir=", 9)) dir = argv[i] + 9;
+    if (!dir) return -1;
+    if (!strncmp(argv[1], "-datadir=", 9)) {
+        char ready[1200];
+        snprintf(ready, sizeof(ready), "%s/preload-started", dir);
+        if (access(ready, F_OK) != 0) return 10;
+        preload_marker(dir, "node-spawned", 1);
+        return -1;
+    }
+    if (argc < 5 || strcmp(argv[1], "core") || strcmp(argv[2], "wallet") ||
+        strcmp(argv[3], "recovery") || strcmp(argv[4], "status")) return -1;
+    return preload_status_child(mode, dir);
+}
+static int basic_child(int argc, char **argv)
+{
     if ((argc >= 10 && argc <= 12) && !strncmp(argv[1], "-datadir=", 9)) {
         int bad = node_arguments(argc, argv);
         if (bad) return bad;
@@ -210,6 +261,15 @@ static int child(int argc, char **argv)
         for (int i = 0; i < 5000; ++i) putchar('x');
         return 0;
     }
+    return -1;
+}
+static int child(int argc, char **argv)
+{
+    if (!child_environment()) return 3;
+    int preload = preload_child(argc, argv);
+    if (preload >= 0) return preload;
+    int basic = basic_child(argc, argv);
+    if (basic >= 0) return basic;
     int fleet = fleet_child(argc, argv);
     if (fleet >= 0) return fleet;
     if (argc > 2 && strcmp(argv[1], "fleet") == 0 && strcmp(argv[2], "join") == 0) {
@@ -727,6 +787,198 @@ static void linked_files_tests(void)
     assert(rmdir(real_files) == 0 && unlink(link) == 0 && rmdir(user) == 0 && rmdir(data) == 0 && rmdir(base) == 0);
 }
 
+struct preload_start_test { struct zapp_runtime *r; bool ok; char out[256]; };
+static void *preload_start_main(void *arg)
+{
+    struct preload_start_test *t = arg;
+    t->ok = zapp_node_start(t->r, t->out, sizeof(t->out));
+    return NULL;
+}
+static void preload_unlink(const char *dir, const char *name)
+{
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    (void)unlink(path);
+}
+static long preload_read_marker(const char *dir, const char *name)
+{
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *f = fopen(path, "r");
+    long value = 0;
+    if (f) { if (fscanf(f, "%ld", &value) != 1) value = 0; fclose(f); }
+    return value;
+}
+static void preload_wait_marker(const char *dir)
+{
+    for (int i = 0; i < 300 && !preload_read_marker(dir, "preload-started"); ++i) {
+        struct timespec pause = {.tv_nsec = 10000000}; nanosleep(&pause, NULL);
+    }
+    assert(preload_read_marker(dir, "preload-started") > 0);
+}
+static void preload_reap_node(struct zapp_runtime *r)
+{
+    int status;
+    assert(r->node > 0 && waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    r->node = 0;
+}
+static void preload_reservation_cases(struct zapp_runtime *r)
+{
+    uint64_t stale, current;
+    char reservation[256];
+    assert(zapp_node_start_reserve(r, &stale, reservation, sizeof(reservation)));
+    assert(zapp_node_stop(r, reservation, sizeof(reservation)));
+    assert(zapp_node_start_reserve(r, &current, reservation, sizeof(reservation)));
+    assert(stale != current);
+    assert(!zapp_node_start_reserved(r, stale, reservation, sizeof(reservation)));
+    assert(!zapp_node_start_reserve(r, &stale, reservation, sizeof(reservation)));
+    zapp_node_start_discard(r, current);
+    assert(!atomic_load(&r->setup_running));
+}
+
+static void preload_mode_cases(struct zapp_runtime *r, const char *dir)
+{
+    char out[8192], identity[65]; uint64_t epoch; bool command_ok;
+    static const char *const modes[] = {"valid", "locked", "fail", "wrongexit", "signal"};
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
+        assert(setenv("ZAPP_TEST_PRELOAD", modes[i], 1) == 0);
+        preload_unlink(dir, "preload-started"); preload_unlink(dir, "node-spawned");
+        char start[256]; assert(zapp_node_start(r, start, sizeof(start)));
+        assert(preload_read_marker(dir, "preload-started") > 0);
+        preload_reap_node(r);
+        assert(preload_read_marker(dir, "node-spawned") > 0);
+        assert(zapp_node_preload_ready(r) == (i < 2));
+        bool got = zapp_node_preload_get(r, out, sizeof(out), identity, &epoch, &command_ok);
+        assert(got == (i < 2));
+        if (got) assert(strstr(out, "zs1fixture") && command_ok == (i == 0));
+        assert(zapp_node_stop(r, start, sizeof(start)));
+        assert(!zapp_node_preload_ready(r));
+        assert(!zapp_node_preload_get(r, out, sizeof(out), identity, &epoch, &command_ok));
+    }
+}
+
+static void preload_race_cases(struct zapp_runtime *r, const char *dir, const char *path)
+{
+    char out[8192], identity[65]; uint64_t epoch; bool command_ok; FILE *f;
+    /* A node that appears during the read wins; start must not spawn or stop it. */
+    assert(setenv("ZAPP_TEST_PRELOAD", "delay", 1) == 0);
+    preload_unlink(dir, "preload-started"); preload_unlink(dir, "node-spawned");
+    struct preload_start_test competing = {.r = r};
+    pthread_t competing_thread;
+    assert(pthread_create(&competing_thread, NULL, preload_start_main, &competing) == 0);
+    preload_wait_marker(dir);
+    char node_arg[1200], pidfile[1200];
+    snprintf(node_arg, sizeof(node_arg), "-datadir=%s", dir);
+    snprintf(pidfile, sizeof(pidfile), "%s/zclassic23.pid", dir);
+    pid_t external = spawn_orphan(r->executable, node_arg, "orphan", pidfile);
+    await_running(r);
+    assert(zapp_node_start_pending_or_running(r));
+    assert(pthread_join(competing_thread, NULL) == 0 && !competing.ok);
+    assert(kill(external, 0) == 0 && !preload_read_marker(dir, "node-spawned"));
+    assert(kill(external, SIGINT) == 0 && waitpid(external, NULL, 0) == external);
+    assert(unlink(pidfile) == 0);
+    /* A replaced key invalidates the answer while the status child runs. */
+    assert(setenv("ZAPP_TEST_PRELOAD", "delay", 1) == 0);
+    preload_unlink(dir, "preload-started"); preload_unlink(dir, "node-spawned");
+    preload_unlink(dir, "preload-completed");
+    struct preload_start_test changed = {.r = r};
+    pthread_t changed_thread;
+    assert(pthread_create(&changed_thread, NULL, preload_start_main, &changed) == 0);
+    preload_wait_marker(dir);
+    f = fopen(path, "w"); assert(f && fputs("replacement key", f) >= 0 && fclose(f) == 0);
+    assert(pthread_join(changed_thread, NULL) == 0 && changed.ok);
+    assert(preload_read_marker(dir, "preload-completed") > 0);
+    preload_reap_node(r);
+    assert(!zapp_node_preload_ready(r));
+    assert(!zapp_node_preload_get(r, out, sizeof(out), identity, &epoch, &command_ok));
+    char changed_stop[256]; assert(zapp_node_stop(r, changed_stop, sizeof(changed_stop)));
+    f = fopen(path, "w"); assert(f && fputs("fixture key", f) >= 0 && fclose(f) == 0);
+    assert(zapp_setup_mark_confirmed(dir, false));
+}
+
+static void preload_cancel_cases(struct zapp_runtime *r, const char *dir)
+{
+    char out[8192], identity[65]; uint64_t epoch; bool command_ok;
+    assert(setenv("ZAPP_TEST_PRELOAD", "wait", 1) == 0);
+    preload_unlink(dir, "preload-started"); preload_unlink(dir, "node-spawned");
+    r->preload_ms = 5000;
+    struct preload_start_test t = {.r = r};
+    pthread_t thread;
+    assert(pthread_create(&thread, NULL, preload_start_main, &t) == 0);
+    preload_wait_marker(dir);
+    assert(zapp_node_start_pending(r));
+    assert(zapp_node_start_pending_or_running(r));
+    pid_t child = (pid_t)preload_read_marker(dir, "preload-started");
+    char stop[256]; struct timespec a, b;
+    assert(!zapp_node_start(r, stop, sizeof(stop)));
+    assert(clock_gettime(CLOCK_MONOTONIC, &a) == 0);
+    assert(zapp_node_stop(r, stop, sizeof(stop)));
+    assert(clock_gettime(CLOCK_MONOTONIC, &b) == 0);
+    assert((b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000 < 1000);
+    assert(pthread_join(thread, NULL) == 0 && !t.ok && !zapp_node_wanted(r));
+    assert(!zapp_node_start_pending(r));
+    assert(!zapp_node_start_pending_or_running(r));
+    errno = 0;
+    assert(waitpid(child, NULL, WNOHANG) == -1 && errno == ECHILD);
+    assert(!preload_read_marker(dir, "node-spawned"));
+    preload_unlink(dir, "preload-started");
+    r->preload_ms = 250;
+    assert(zapp_node_start(r, stop, sizeof(stop)));
+    child = (pid_t)preload_read_marker(dir, "preload-started");
+    errno = 0;
+    assert(child > 0 && waitpid(child, NULL, WNOHANG) == -1 && errno == ECHILD);
+    preload_reap_node(r);
+    assert(preload_read_marker(dir, "node-spawned") > 0);
+    assert(!zapp_node_preload_get(r, out, sizeof(out), identity, &epoch, &command_ok));
+    assert(zapp_node_stop(r, stop, sizeof(stop)));
+}
+
+static void preload_invalidation_case(struct zapp_runtime *r, const char *dir)
+{
+    /* Keep the process-lifetime invalidation isolated from the remaining tests. */
+    zapp_nodelog_stop(&r->log);
+    pid_t isolation = fork(); assert(isolation >= 0);
+    if (!isolation) {
+        assert(setenv("ZAPP_TEST_PRELOAD", "delay", 1) == 0);
+        preload_unlink(dir, "preload-started"); preload_unlink(dir, "node-spawned");
+        r->preload_ms = 5000;
+        struct preload_start_test invalidated = {.r = r};
+        pthread_t worker;
+        assert(pthread_create(&worker, NULL, preload_start_main, &invalidated) == 0);
+        preload_wait_marker(dir);
+        assert(zapp_node_start_pending(r));
+        zapp_setup_preload_invalidate();
+        assert(pthread_join(worker, NULL) == 0 && !invalidated.ok);
+        assert(!zapp_node_start_pending(r) && !preload_read_marker(dir, "node-spawned"));
+        _exit(0);
+    }
+    int isolation_status;
+    assert(waitpid(isolation, &isolation_status, 0) == isolation &&
+           WIFEXITED(isolation_status) && WEXITSTATUS(isolation_status) == 0);
+}
+
+static void preload_cases(struct zapp_runtime *r, const char *dir)
+{
+    char path[1200], identity[65];
+    snprintf(path, sizeof(path), "%s/wallet_key.blob", dir);
+    FILE *f = fopen(path, "w"); assert(f && fputs("fixture key", f) >= 0 && fclose(f) == 0);
+    assert(zapp_setup_mark_done(dir) && zapp_setup_mark_confirmed(dir, false));
+    assert(zapp_setup_identity(dir, identity));
+    assert(snprintf(r->files, sizeof(r->files), "%s", dir) > 0);
+    r->preload_ms = 2000;
+    preload_reservation_cases(r);
+    preload_mode_cases(r, dir);
+    preload_race_cases(r, dir, path);
+    preload_cancel_cases(r, dir);
+    preload_invalidation_case(r, dir);
+    assert(unsetenv("ZAPP_TEST_PRELOAD") == 0);
+    r->preload_ms = 0;
+    preload_unlink(dir, "preload-started"); preload_unlink(dir, "node-spawned");
+    preload_unlink(dir, "wallet_key.blob"); preload_unlink(dir, "wallet_setup_done");
+    preload_unlink(dir, "wallet_setup_confirmed");
+    preload_unlink(dir, "preload-completed");
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && (!strcmp(argv[2], "orphan") || !strcmp(argv[2], "saving"))) return orphan(argv[2], argv[1]);
@@ -762,6 +1014,8 @@ int main(int argc, char **argv)
     char directory[] = "/tmp/zapp-ops-test-XXXXXX", log[256], out[128];
     assert(mkdtemp(directory));
     node_cases(&r, argv[0], directory);
+    preload_cases(&r, directory);
+    preload_unlink(directory, "app-console.log.1");
     if (runner_home) assert(setenv("HOME", runner_home, 1) == 0);
     else assert(unsetenv("HOME") == 0);
     free(runner_home);

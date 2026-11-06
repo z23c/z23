@@ -456,7 +456,7 @@ static bool begin_job(struct wsu *w, enum wsu_step from)
     pthread_mutex_lock(&w->lock);
     bool start = w->step == from;
     if (start && !w->protected) { w->step = WSU_FAILED; w->failure = WSU_UNPROTECTED; start = false; }
-    else if (start) { w->first_shielded_address[0] = 0; ++w->address_generation; w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w, WSU_PHASE_NONE); }
+    else if (start) { zapp_setup_preload_invalidate(); w->first_shielded_address[0] = 0; ++w->address_generation; w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w, WSU_PHASE_NONE); }
     pthread_mutex_unlock(&w->lock);
     return start;
 }
@@ -1027,7 +1027,7 @@ void wsu_start_over_job(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
     bool go = w->step == WSU_START_OVER;
-    if (go) { w->first_shielded_address[0] = 0; ++w->address_generation; w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w, WSU_PHASE_NONE); }
+    if (go) { zapp_setup_preload_invalidate(); w->first_shielded_address[0] = 0; ++w->address_generation; w->step = WSU_WORKING; w->failure = WSU_NO_FAILURE; work_begins_locked(w, WSU_PHASE_NONE); }
     pthread_mutex_unlock(&w->lock);
     if (!go) return;
     enum wsu_failure refusal = start_over_refusal(w);

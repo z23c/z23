@@ -38,7 +38,7 @@ enum status { STATUS_UNKNOWN, STATUS_CONFIRMED, STATUS_PENDING };
 /* What the node says about private payments in a history page: complete, hidden because a locked wallet holds no viewing
  * key, or nothing usable. Only a page that says "ok" is the whole history. */
 enum history_state { HIST_UNSAID, HIST_OK, HIST_HIDDEN };
-enum kind { K_SUMMARY, K_FLEET, K_LATEST, K_NEW, K_HISTORY, K_DETAIL, K_COUNT };
+enum kind { K_SUMMARY, K_FLEET, K_LATEST, K_PRELOAD, K_NEW, K_HISTORY, K_DETAIL, K_COUNT };
 
 struct entry {
     enum direction direction;
@@ -68,6 +68,7 @@ struct data {
     struct wallet_view view;
     char fleet[WALLET_TEXT_MAX];
     bool address_pending, has_amount, no_receive, address_fallback, setup_bound, offline_bound;
+    bool preload_bound, preload_tried;
     char offline_identity[82];
     uint64_t address_generation;
     uint64_t amount_zat;
@@ -750,6 +751,10 @@ bool wallet_screen_same(const struct wallet_screen *a, const struct wallet_scree
 
 static bool fallback_current(void)
 {
+    if (st.d.preload_bound && (!st.env.preload_ready || !st.env.preload_ready(st.env.ctx))) {
+        st.d.address[0] = 0; st.d.code[0] = 0; st.d.preload_bound = false; st.d.offline_bound = false;
+        st.d.address_fallback = false; ++st.epoch; touch(); return false;
+    }
     if (st.d.offline_bound) {
         char identity[82];
         if (st.env.setup_identity && st.env.setup_identity(st.env.ctx, identity) && !strcmp(identity, st.d.offline_identity)) return true;
@@ -965,6 +970,7 @@ static void apply_address(bool ok, bool missing, bool latest, const char *json)
         (!(st.d.setup_bound || st.d.offline_bound) || strict_private(address))) {
         show_address(address);
         st.d.offline_bound = false;
+        st.d.preload_bound = false;
         st.d.address_fallback = false;
     }
     else address_failure(data, missing, latest);
@@ -1069,7 +1075,7 @@ static void apply_detail(bool ok, const char *json)
 
 /* ---- commands ---- */
 
-struct reply { bool ok, missing, silent, received, offline; char identity[82]; const char *json; };
+struct reply { bool ok, missing, silent, received, offline, preloaded; char identity[82]; uint64_t preload_epoch; const char *json; };
 
 static bool offline_envelope_ok(const struct reply *r, const struct json_value *root)
 {
@@ -1088,6 +1094,18 @@ static bool offline_address_valid(const struct reply *r, const char *address)
            st.env.setup_identity(st.env.ctx, now) && !strcmp(now, r->identity);
 }
 
+static bool preload_current(const struct reply *r)
+{
+    if (!r->preloaded) return true;
+    char text[8192], identity[65];
+    uint64_t epoch = 0;
+    bool command_ok = false;
+    return st.env.preload_get &&
+           st.env.preload_get(st.env.ctx, text, sizeof(text), identity, &epoch, &command_ok) &&
+           epoch == r->preload_epoch && command_ok == r->ok &&
+           !strncmp(identity, r->identity, 64);
+}
+
 static bool apply_offline(const struct reply *r)
 {
     struct json_value root;
@@ -1095,11 +1113,12 @@ static bool apply_offline(const struct reply *r)
     bool parsed = r->json && json_read(&root, r->json, strlen(r->json));
     const struct json_value *data = parsed ? typed(&root, "data", JSON_OBJ) : NULL;
     const char *address = text_of(data, "persisted_shielded_address");
-    bool valid = parsed && offline_envelope_ok(r, &root) && offline_address_valid(r, address);
+    bool valid = parsed && offline_envelope_ok(r, &root) && offline_address_valid(r, address) && preload_current(r);
     if (valid) {
         show_address(address);
         copy(st.d.offline_identity, sizeof(st.d.offline_identity), r->identity);
         st.d.offline_bound = st.d.address[0] != 0;
+        st.d.preload_bound = r->preloaded && st.d.offline_bound;
         st.d.address_fallback = st.d.offline_bound;
         st.d.address_pending = false;
         st.d.note[0] = 0;
@@ -1114,6 +1133,9 @@ static void apply(const struct job *j, const struct reply *r)
     else if (!strcmp(j->op, "fleet")) apply_fleet(r->ok, r->json);
     else if (!strcmp(j->op, "history")) apply_history(r->ok, r->json);
     else if (!strcmp(j->op, "detail")) apply_detail(r->ok, r->json);
+    else if (!strcmp(j->op, "preload")) {
+        if (r->preloaded && (!st.d.address[0] || st.d.address_fallback)) (void)apply_offline(r);
+    }
     else if (r->offline) { if (!apply_offline(r)) apply_address(false, r->missing, true, NULL); }
     else apply_address(r->ok, r->missing, !strcmp(j->op, "latest"), r->json);
 }
@@ -1155,10 +1177,34 @@ static void classify_reply(struct reply *r, char *out)
     r->json = json_start(out ? out : "");
 }
 
+static void run_preloaded(const struct job *j, char *out, struct reply *r)
+{
+    char before[82], after[82], identity[65];
+    uint64_t epoch = 0;
+    bool command_ok = false;
+    if (!j->env.setup_identity || !j->env.preload_get ||
+        !j->env.setup_identity(j->env.ctx, before) ||
+        !j->env.preload_get(j->env.ctx, out, OUT_CAP, identity, &epoch, &command_ok) ||
+        !j->env.setup_identity(j->env.ctx, after) || strcmp(before, after) ||
+        strncmp(identity, before, 64)) return;
+    copy(r->identity, sizeof(r->identity), before);
+    r->preload_epoch = epoch;
+    r->preloaded = true;
+    r->offline = true;
+    r->ok = command_ok;
+}
+
 static void run_job(const struct job *j)
 {
     char *out = calloc(1, OUT_CAP);
     struct reply r = {0};
+    if (out && !strcmp(j->op, "preload")) {
+        run_preloaded(j, out, &r);
+        classify_reply(&r, out);
+        finish(j, &r);
+        memory_cleanse(out, OUT_CAP); free(out);
+        return;
+    }
     bool offline_first = out && offline_eligible(j, r.identity);
     if (offline_first)
         run_offline(j, out, &r);
@@ -1577,6 +1623,14 @@ static void funds_schedule_refresh(struct job *jobs, size_t *count, uint64_t t)
     (void)submit(jobs, count, K_FLEET, "fleet", "");
 }
 
+static void preload_schedule(struct job *jobs, size_t *count)
+{
+    if (!st.ready || st.blocked || st.page != WALLET_PAGE_RECEIVE || st.d.address[0] ||
+        st.d.preload_tried || !st.env.preload_ready || !st.env.preload_ready(st.env.ctx)) return;
+    st.d.preload_tried = true;
+    (void)submit(jobs, count, K_PRELOAD, "preload", "");
+}
+
 void wallet_screens_tick(void)
 {
     struct job jobs[3];
@@ -1595,6 +1649,7 @@ void wallet_screens_tick(void)
         }
         funds_schedule_refresh(jobs, &count, t);
     }
+    preload_schedule(jobs, &count);
     pthread_mutex_unlock(&st.lock);
     dispatch(jobs, count);
 }

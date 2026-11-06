@@ -471,7 +471,7 @@ struct fake {
     /* A node that needs exit_after_ms of simulated time to exit once asked; pause_ms advances the clock, nothing sleeps. */
     unsigned exit_after_ms;
     int64_t now_ms, stop_at_ms, wall_offset;
-    bool exiting, watch;
+    bool exiting, watch, pending_start;
     int starts_refused, step_at_start, phase_key, step_at_stop, step_at_write;
     bool tap_on_start;
     int tapped_write, tapped_phase, tapped_give_up, tapped_retry;
@@ -546,8 +546,10 @@ static void f_discard(void *ctx)
 static bool f_running(void *ctx)
 {
     struct fake *f = ctx;
-    if (f->exiting && f->now_ms - f->stop_at_ms >= (int64_t)f->exit_after_ms) { f->running = false; f->exiting = false; }
-    return f->running;
+    if (f->exiting && f->now_ms - f->stop_at_ms >= (int64_t)f->exit_after_ms) {
+        f->running = false; f->pending_start = false; f->exiting = false;
+    }
+    return f->running || f->pending_start;
 }
 static void f_control(void *ctx, bool start)
 {
@@ -573,6 +575,7 @@ static void f_control(void *ctx, bool start)
     ++f->stops;
     if (f->watch) f->step_at_stop = (int)model_of->step;
     if (!f->stops_when_asked) return;
+    if (f->pending_start) { f->exiting = true; f->stop_at_ms = f->now_ms; return; }
     f->exiting = f->exit_after_ms > 0;
     f->stop_at_ms = f->now_ms;
     f->running = f->exiting;
@@ -670,6 +673,22 @@ static void check_generation_ready(struct wsu *w, bool ready)
     assert(wsu_address_generation(w, &generation) == ready);
     if (ready) assert(generation > 0);
 }
+static void preload_invalidation_test(void)
+{
+    struct fake f;
+    struct wsu w;
+    assert(zapp_setup_preload_allowed());
+    fresh(&f, &w, false);
+    put(dir, "wallet_key.blob", "unchanged");
+    f.wrap_status = ZAPP_DEVKEY_DECLINED;
+    wsu_create_job(&w);
+    assert(!zapp_setup_preload_allowed());
+    assert(w.step == WSU_CHOICE);
+    assert(holds(dir, "wallet_key.blob", "unchanged"));
+    wsu_destroy(&w);
+    wipe_dir_at(dir);
+}
+
 static void create_tests(void)
 {
     struct fake f;
@@ -2149,6 +2168,19 @@ static void slow_exit_tests(void)
     zapp_words_cleanse(&v.words);
     wsu_destroy(&w);
 }
+static void pending_start_wait_test(void)
+{
+    struct fake f; struct wsu w;
+    fresh(&f, &w, false);
+    f.pending_start = true; f.exit_after_ms = 500;
+    wsu_open_restore(&w);
+    script_say(&f.script, true, "{\"ok\":true,\"data\":{\"recovered\":true,\"birthday_recorded\":false,\"birthday_rejected\":false}}");
+    wsu_restore_job(&w, VALID_PHRASE, 0);
+    assert(f.now_ms >= 500 && !f.pending_start && f.stops == 1);
+    assert(w.step != WSU_FAILED && f.starts == 1 && f.starts_refused == 0);
+    wsu_destroy(&w);
+}
+
 /* The same wait before a restore. */
 static void slow_exit_restore_tests(void)
 {
@@ -2781,11 +2813,12 @@ static void resume_needed_tests(void)
 
 int main(int argc, char **argv)
 {
+    assert(argc == 2);
+    dir = argv[1];
+    preload_invalidation_test();
     resume_needed_tests();
     launch_failure_tests();
     height_parse_tests();
-    assert(argc == 2);
-    dir = argv[1];
     words_tests();
     check_tests();
     state_tests();
@@ -2864,6 +2897,7 @@ int main(int argc, char **argv)
     pick_random_failure_tests();
     phase_order_tests();
     slow_exit_tests();
+    pending_start_wait_test();
     slow_exit_restore_tests();
     stuck_exit_late_tests();
     stuck_exit_forever_tests();
