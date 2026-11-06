@@ -340,6 +340,37 @@ static bool mpool_snapshot_fill(struct tx_mempool *pool, int n)
     return true;
 }
 
+/* True when the copy at `snap` is the pool's lookup of `hash`, byte for byte. */
+static bool mpool_snapshot_same_as_lookup(struct tx_mempool *pool,
+                                          const struct transaction *snap,
+                                          const struct uint256 *hash)
+{
+    struct transaction one;
+    transaction_init(&one);
+    struct byte_stream a, b;
+    stream_init(&a, 256);
+    stream_init(&b, 256);
+    bool ok = tx_mempool_lookup(pool, hash, &one) &&
+              uint256_eq(&snap->hash, hash) && uint256_eq(&snap->hash, &one.hash) &&
+              transaction_serialize(snap, &a) && transaction_serialize(&one, &b) &&
+              a.size == b.size && memcmp(a.data, b.data, a.size) == 0;
+    stream_free(&a);
+    stream_free(&b);
+    transaction_free(&one);
+    return ok;
+}
+
+/* An allocation failure reports false and hands back nothing. */
+static bool mpool_snapshot_alloc_failure(struct tx_mempool *pool)
+{
+    struct transaction *snap = (struct transaction *)(uintptr_t)1;
+    size_t num = 99;
+    zcl_alloc_fault_fail_next("mempool_snapshot_txs");
+    bool faulted = tx_mempool_snapshot_txs(pool, &snap, &num);
+    zcl_alloc_fault_clear();
+    return !faulted && snap == NULL && num == 0;
+}
+
 static int mpool_case_snapshot_txs(void)
 {
     int failures = 0;
@@ -360,34 +391,13 @@ static int mpool_case_snapshot_txs(void)
     tx_mempool_query_hashes(&pool, hashes, N, &nh);
     ok = ok && nh == N && tx_mempool_snapshot_txs(&pool, &snap, &num) &&
          num == nh && snap != NULL;
-    for (size_t i = 0; ok && i < nh; i++) {
-        struct transaction one;
-        transaction_init(&one);
-        struct byte_stream a, b;
-        stream_init(&a, 256);
-        stream_init(&b, 256);
-        ok = tx_mempool_lookup(&pool, &hashes[i], &one) &&
-             uint256_eq(&snap[i].hash, &hashes[i]) &&
-             uint256_eq(&snap[i].hash, &one.hash) &&
-             transaction_serialize(&snap[i], &a) &&
-             transaction_serialize(&one, &b) && a.size == b.size &&
-             memcmp(a.data, b.data, a.size) == 0;
-        stream_free(&a);
-        stream_free(&b);
-        transaction_free(&one);
-    }
+    for (size_t i = 0; ok && i < nh; i++)
+        ok = mpool_snapshot_same_as_lookup(&pool, &snap[i], &hashes[i]);
     for (size_t i = 0; snap && i < num; i++)
         transaction_free(&snap[i]);
     free(snap);
 
-    /* An allocation failure reports false and hands back nothing. */
-    snap = (struct transaction *)(uintptr_t)1;
-    num = 99;
-    zcl_alloc_fault_fail_next("mempool_snapshot_txs");
-    bool faulted = tx_mempool_snapshot_txs(&pool, &snap, &num);
-    zcl_alloc_fault_clear();
-    ok = ok && !faulted && snap == NULL && num == 0;
-
+    ok = ok && mpool_snapshot_alloc_failure(&pool);
     tx_mempool_free(&pool);
     if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     return failures;

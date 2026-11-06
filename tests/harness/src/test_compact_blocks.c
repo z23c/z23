@@ -1384,6 +1384,7 @@ int test_compact_blocks(void)
     failures += test_cb_recon_duplicate_hash_first_wins();
     failures += test_cb_recon_wire_decoded_short_ids();
     { extern int compact_blocks_prefilled_tests(void); failures += compact_blocks_prefilled_tests(); }
+    { extern int compact_blocks_frontier_tests(void); failures += compact_blocks_frontier_tests(); }
 
     return failures;
 }

@@ -1023,3 +1023,7 @@ later lane flips it HARD.
 - 2026-11-06T02:32:43Z — REASON: Do not rebuild a compact block that is already pending or already stored
   old ROOT: 52482eb35412870dae7f8ac5f6f5268d63701db722d40230fa35f851c2fe9298
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T02:33:03Z — REASON: Floor the compact fallback history check at the provable frontier
+  old ROOT: cba5628f8714b3093ad772ee44ff26343e4a6410307a123df8ce162365b541da
+  by: owner unseal ritual (make core-unseal)

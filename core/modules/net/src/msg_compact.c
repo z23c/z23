@@ -18,6 +18,7 @@
 #include "consensus/validation.h"
 #include "chain/pow.h"
 #include "event/event.h"
+#include "jobs/reducer_frontier.h"  // lib-layer-ok:provable-tip-for-history-floor-compact-fallback
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include <stdio.h>
@@ -83,8 +84,15 @@ static void compact_request_full_block(struct msg_processor *mp,
         compact_probe_unknown_header(mp, node);
         return;
     }
+    /* The provable frontier (H*) runs ahead of the chain on a seeded node, and
+     * what lies at or below it is history: the same floor the block manifest
+     * seed uses. */
+    int32_t history = active_chain_height(&mp->main_state->chain_active);
+    int32_t hstar = reducer_frontier_provable_tip_cached();
+    if (hstar > history)
+        history = hstar;
     if ((bi->nStatus & (BLOCK_HAVE_DATA | BLOCK_FAILED_MASK)) ||
-        bi->nHeight <= active_chain_height(&mp->main_state->chain_active))
+        (int32_t)bi->nHeight <= history)
         return;
 
     struct download_manager *dm = get_download_mgr();
