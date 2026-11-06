@@ -28,6 +28,19 @@
 #include <stdint.h>
 
 struct boot_svc_ctx;
+struct main_state;
+struct node_db;
+struct snapshot_offer;
+
+/* Build an offer from the UTXO mirror: anchor, the MMB root over its leaves, and
+ * the serialized file, which must hash to the anchor. False leaves nothing to
+ * publish. *serving_ready says whether a RAM buffer exists to serve from;
+ * nothing in production creates one, so a built offer is still withheld. */
+bool boot_snapshot_offer_build_from_mirror(struct node_db *ndb,
+                                           struct main_state *state,
+                                           const char *datadir,
+                                           struct snapshot_offer *offer,
+                                           bool *serving_ready);
 
 /* Pure trust policy behind snapshot re-serving. Assisted state is never
  * advertised: transparent state must be self-derived at H*, and every

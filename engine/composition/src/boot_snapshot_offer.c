@@ -27,6 +27,7 @@
 #include "config/boot_background_workers.h"
 #include "config/boot_snapshot_offer.h"
 #include "services/consensus_snapshot_export_service.h"
+#include "services/snapshot_offer_anchor.h"
 #include "models/mmb_leaf_store.h"
 #include "chain/mmb.h"
 #include "controllers/blockchain_controller.h"
@@ -472,19 +473,6 @@ static void snapshot_offer_export_consensus_snapshot(const char *datadir,
     }
 }
 
-/* Embed the peer-advertised header MMR root.  It proves membership in
- * that advertised header history, but ZClassic headers do not commit
- * the UTXO payload; never call this a consensus state binding. */
-static void snapshot_offer_embed_advertised_mmr_root(
-    struct snapshot_offer *offer)
-{
-    uint64_t mmr_leaves = 0;
-    if (!rpc_blockchain_mmr_snapshot(offer->mmr_root, &mmr_leaves, NULL) ||
-        mmr_leaves == 0) {
-        memset(offer->mmr_root, 0, 32);
-    }
-}
-
 /* Embed MMB root — replayed from leaf hash store via
  * mmb_append_hash(), guaranteeing identical merge logic
  * as mmb_prove() uses internally. */
@@ -522,32 +510,76 @@ static void snapshot_offer_embed_replayed_mmb_root(struct snapshot_offer *offer)
     }
 }
 
-/* Pre-serializes the snapshot file through the node DB and reports whether a
- * bounded RAM serving buffer materialized. */
-static void snapshot_offer_prebuild_serving_snapshot(
-    struct boot_svc_ctx *svc, const char *datadir,
-    struct snapshot_offer *offer, bool *serving_ready)
+/* Pre-serializes the snapshot file through the node DB. False unless the file
+ * hashes to the anchor: it is written apart from the anchor's read transaction,
+ * and a mirror that moved between them has no offer to make. */
+static bool snapshot_offer_prebuild_serving_snapshot(
+    struct node_db *ndb, const char *datadir,
+    const struct snapshot_offer_anchor *anchor, bool *serving_ready)
 {
-    struct node_db *ndb = boot_node_db(svc);
-    if (ndb && ndb->open) {
-        int64_t snap_count = fast_sync_prebuild_snapshot(
-            datadir, boot_serialize_utxo_snapshot, ndb);
-        if (snap_count > 0) {
-            /* Use the SHA3 computed during serialization */
-            uint8_t snap_sha3[32];
-            uint64_t snap_n = 0;
-            if (fast_sync_get_snapshot_sha3(snap_sha3, &snap_n)) {
-                memcpy(offer->utxo_root, snap_sha3, 32);
-                offer->num_utxos = snap_n;
-                printf("Snapshot: %llu UTXOs, SHA3 from file\n",
-                       (unsigned long long)snap_n);
-            }
-            int64_t snap_buf_size = 0;
-            *serving_ready =
-                fast_sync_get_snapshot_buf(&snap_buf_size) != NULL &&
-                snap_buf_size > 0;
-        }
+    uint8_t snap_sha3[32];
+    uint64_t snap_n = 0;
+    int64_t snap_buf_size = 0;
+
+    if (fast_sync_prebuild_snapshot(datadir, boot_serialize_utxo_snapshot,
+                                    ndb) <= 0 ||
+        !fast_sync_get_snapshot_sha3(snap_sha3, &snap_n))
+        return false;
+    if (!snapshot_offer_anchor_matches_payload(anchor, snap_sha3, snap_n)) {
+        printf("Fast sync: snapshot moved past the anchor at h=%d, "
+               "withholding the offer\n", anchor->height);
+        fast_sync_reset_snapshot_cache();
+        return false;
     }
+    printf("Snapshot: %llu UTXOs, SHA3 from file\n",
+           (unsigned long long)snap_n);
+    *serving_ready = fast_sync_get_snapshot_buf(&snap_buf_size) != NULL &&
+                     snap_buf_size > 0;
+    return true;
+}
+
+/* The anchor names a block on the chain this node follows, not only one it
+ * validated. A branch it has left can still have a row. */
+static bool snapshot_offer_anchor_is_active(
+    struct main_state *state, const struct snapshot_offer_anchor *anchor)
+{
+    bool active;
+
+    zcl_mutex_lock(&state->cs_main);
+    const struct block_index *bi =
+        active_chain_at(&state->chain_active, anchor->height);
+    active = bi && bi->phashBlock &&
+             memcmp(bi->phashBlock->data, anchor->block_hash, 32) == 0;
+    zcl_mutex_unlock(&state->cs_main);
+    return active;
+}
+
+bool boot_snapshot_offer_build_from_mirror(struct node_db *ndb,
+                                           struct main_state *state,
+                                           const char *datadir,
+                                           struct snapshot_offer *offer,
+                                           bool *serving_ready)
+{
+    struct snapshot_offer_anchor anchor;
+    struct zcl_result read;
+
+    *serving_ready = false;
+    if (!ndb || !ndb->open || !state)
+        return false;
+    read = snapshot_offer_anchor_read(ndb->path, &anchor);
+    if (!read.ok) {
+        printf("Fast sync: no offer from the mirror: %s\n", read.message);
+        return false;
+    }
+    if (!snapshot_offer_anchor_is_active(state, &anchor)) {
+        printf("Fast sync: mirror anchor h=%d is off the active chain\n",
+               anchor.height);
+        return false;
+    }
+    snapshot_offer_from_anchor(offer, &anchor);
+    snapshot_offer_embed_replayed_mmb_root(offer);
+    return snapshot_offer_prebuild_serving_snapshot(ndb, datadir, &anchor,
+                                                    serving_ready);
 }
 
 /* True when the offer carries any non-zero byte in its root field. */
@@ -668,25 +700,14 @@ static void *build_snapshot_offer_thread(void *arg)
 
     printf("Building fast sync snapshot offer...\n");
 
-    /* Zero-init: on the no-snapshot-yet path fast_sync_build_offer() returns
-     * false WITHOUT filling offer, but offer.height is still read below to
-     * gate the block-piece manifest. Uninitialized, that fed a garbage
-     * end-height into the manifest builder on every at-tip node. With {0},
-     * height==0 fails the `tip_h > BLOCKS_PER_PIECE` guard and we skip it. */
+    /* Pre-serialize the snapshot file and publish its SHA3 metadata. The legacy
+     * zsnapshot offer is only advertised when an explicit bounded RAM serving
+     * cache exists; otherwise peers should use the chunk/file manifests below. */
     struct snapshot_offer offer = {0};
-    if (fast_sync_build_offer(datadir, &offer)) {
-        snapshot_offer_embed_advertised_mmr_root(&offer);
-
-        snapshot_offer_embed_replayed_mmb_root(&offer);
-
-        /* Pre-serialize snapshot file and publish its SHA3 metadata.
-         * The legacy zsnapshot offer is only advertised when an explicit
-         * bounded RAM serving cache exists; otherwise peers should use the
-         * chunk/file manifests below. */
-        bool snapshot_serving_ready = false;
-        snapshot_offer_prebuild_serving_snapshot(svc, datadir, &offer,
-                                                 &snapshot_serving_ready);
-
+    bool snapshot_serving_ready = false;
+    if (boot_snapshot_offer_build_from_mirror(boot_node_db(svc), svc->state,
+                                              datadir, &offer,
+                                              &snapshot_serving_ready)) {
         bool have_mmb_root = snapshot_offer_has_mmb_root(&offer);
         snapshot_offer_announce_publication(&offer, have_mmb_root,
                                             snapshot_serving_ready);
