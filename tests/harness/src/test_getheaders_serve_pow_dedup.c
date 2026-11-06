@@ -802,18 +802,30 @@ static int pd_b1_locator_at_tip(struct msg_processor *mp,
     return failures;
 }
 
-/* B2/C: hash_stop-only form anchored at the best header (successor NULL)
- * serves nothing: requests move, headers do not, proving neither
- * counter copies the other or sticks at zero. */
+/* B2/C: the hash_stop-only form names exactly the hash_stop header
+ * (zclassicd parity). Anchored at an index entry with no header solution and
+ * no parent, nothing is servable: requests move, headers do not, proving
+ * neither counter copies the other or sticks at zero. */
 static int pd_b2_empty_reply(struct msg_processor *mp, struct p2p_node *node,
                              const struct pd_chain4 *c)
 {
     int failures = 0;
+    (void)c;
+    struct uint256 bare_hash;
+    memset(bare_hash.data, 0xB2, sizeof(bare_hash.data));
+    struct block_index *bare = chainstate_insert_block_index(
+        (struct chainstate *)mp->main_state, &bare_hash);
+    PD_CHECK("B2: an unservable index entry (no solution, no parent)",
+             bare != NULL);
+    if (bare) {
+        bare->nHeight = 9;
+        bare->nStatus = BLOCK_VALID_TREE;
+    }
     struct msg_headers_stats st_before, st_after;
     msg_headers_get_stats(&st_before);
     uint64_t pow_before = getheaders_serve_pow_checks();
     struct byte_stream buf2, req2;
-    bool built2 = pd_build_getheaders(&buf2, NULL, 0, &c->hash[3]);
+    bool built2 = pd_build_getheaders(&buf2, NULL, 0, &bare_hash);
     PD_CHECK("B2: empty-locator getheaders payload built", built2);
     stream_init_from_data(&req2, buf2.data, buf2.size);
     bool served2 = built2 && process_getheaders(mp, node, &req2);

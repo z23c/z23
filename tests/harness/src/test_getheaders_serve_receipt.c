@@ -776,6 +776,93 @@ static int rc_case_e_cap_under_flood(const struct chain_params *cp, char *dir)
     return failures;
 }
 
+/* Hash of the first header in the queued `headers` reply; false when absent. */
+static bool rc_queued_first_hash(struct p2p_node *node, struct uint256 *out)
+{
+    struct send_segment *seg = node->send_head;
+    if (!seg || seg->size < MSG_HEADER_SIZE + 1 ||
+        memcmp(seg->data + MESSAGE_START_SIZE, "headers", 7) != 0)
+        return false;
+    struct byte_stream s;
+    stream_init_from_data(&s, seg->data + MSG_HEADER_SIZE,
+                          seg->size - MSG_HEADER_SIZE);
+    uint64_t n = 0;
+    struct block_header h;
+    block_header_init(&h);
+    bool ok = stream_read_compact_size(&s, &n) && n > 0 &&
+              block_header_deserialize(&h, &s);
+    stream_free(&s);
+    if (ok)
+        block_header_get_hash(&h, out);
+    return ok;
+}
+
+/* Serve one request with an EMPTY locator (or one hash) and report the wire
+ * count and first served hash. */
+static bool rc_serve_locator(struct msg_processor *mp, struct p2p_node *node,
+                             const struct uint256 *locator, size_t n_loc,
+                             const struct uint256 *hash_stop,
+                             int64_t *wire_count, struct uint256 *first)
+{
+    struct byte_stream buf, req;
+    if (!rc_build_getheaders(&buf, locator, n_loc, hash_stop))
+        return false;
+    stream_init_from_data(&req, buf.data, buf.size);
+    bool served = process_getheaders(mp, node, &req);
+    *wire_count = rc_queued_headers_count(node);
+    if (!rc_queued_first_hash(node, first))
+        uint256_set_null(first);
+    stream_free(&req);
+    stream_free(&buf);
+    rc_drain_send_queue(node);
+    return served;
+}
+
+/* ── F. zclassicd parity for an empty locator ─────────────
+ *
+ * zclassicd answers getheaders with an empty locator by returning exactly the
+ * hash_stop header (main.cpp "If locator is null, return the hashStop
+ * block"). A FlySync node walks a header window backward this way. A
+ * non-empty locator keeps its fork-point-successor semantics. */
+static int rc_case_f_empty_locator(const struct chain_params *cp, char *dir)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    struct block_header h[4];
+    struct uint256 hash[4], null_hash;
+    uint256_set_null(&null_hash);
+    struct block_index *bi[4] = {0};
+    bool seeded = rc_mine_header_chain(h, hash, 4, cp, 0xF1) &&
+                  rc_seed_chain_with_solutions(&ms, h, hash, bi, 4);
+    RC_CHECK("F: mined and seeded a 4-header chain", seeded);
+    struct msg_processor mp;
+    msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_rc_nm, NULL);
+    if (seeded) {
+        bi[0]->nStatus |= BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+        bi[0]->nTx = 1;
+        bi[0]->nChainTx = 1;
+        (void)active_chain_move_window_tip(&ms.chain_active, bi[0]);
+        ms.pindex_best_header = bi[3];
+        struct p2p_node node;
+        rc_setup_node(&node);
+        int64_t wire = -1;
+        struct uint256 first;
+        bool served = rc_serve_locator(&mp, &node, NULL, 0, &hash[2],
+                                       &wire, &first);
+        RC_CHECK("F: empty locator + hash_stop is served", served);
+        RC_CHECK("F: empty locator returns exactly one header", wire == 1);
+        RC_CHECK("F: that header is the hash_stop header",
+                 uint256_eq(&first, &hash[2]));
+        served = rc_serve_locator(&mp, &node, &hash[0], 1, &null_hash,
+                                  &wire, &first);
+        RC_CHECK("F: a non-empty locator still serves the successors",
+                 served && wire == 3 && uint256_eq(&first, &hash[1]));
+    }
+    main_state_free(&ms);
+    return failures;
+}
+
 int test_getheaders_serve_receipt(void);
 int test_getheaders_serve_receipt(void)
 {
@@ -831,6 +918,7 @@ int test_getheaders_serve_receipt(void)
     failures += rc_case_a_served_twice(cp, dir, &rs0);
     failures += rc_case_d_failures_not_cached(cp, dir);
     failures += rc_case_e_cap_under_flood(cp, dir);
+    failures += rc_case_f_empty_locator(cp, dir);
 
     app_runtime_set_current(NULL);
     db_service_stop(&dbsvc);

@@ -932,7 +932,8 @@ struct gh_loc_case {
 };
 
 static const struct gh_loc_case gh_loc_cases[] = {
-    {"empty locator, stop on H2 selects its successor H3", 5, 0, {0, 0}, 2, 3, 3},
+    /* zclassicd parity: an empty locator serves exactly the hash_stop header. */
+    {"empty locator, stop on H2 serves exactly H2", 5, 0, {0, 0}, 2, 1, 2},
     {"empty locator, zero stop falls back to the active genesis", 5, 0, {0, 0},
      GH_STOP_ZERO, 6, 0},
     {"empty locator, unknown stop falls back to the active genesis", 5, 0, {0, 0},
@@ -945,7 +946,7 @@ static const struct gh_loc_case gh_loc_cases[] = {
     {"all-unknown locator falls back to the active genesis", 5, 1,
      {GH_LOC_UNKNOWN, 0}, GH_STOP_ZERO, 6, 0},
     {"hash_stop reached mid-walk ends the reply at the stop", 5, 1, {0, 0}, 2, 2, 1},
-    {"stop at the tip leaves no successor to serve", 5, 0, {0, 0}, 5, 0, GH_FIRST_NONE},
+    {"empty locator, stop at the tip serves exactly the tip", 5, 0, {0, 0}, 5, 1, 5},
     {"locator at the tip leaves no successor to serve", 5, 1, {5, 0}, GH_STOP_ZERO,
      0, GH_FIRST_NONE},
     {"no active chain and no genesis entry serves nothing", -1, 0, {0, 0},

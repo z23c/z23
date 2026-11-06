@@ -1046,7 +1046,12 @@ static struct block_index *headers_start_from_locator(
         return NULL;
 
     if (locator && locator->num_hashes == 0 && hash_stop) {
+        /* zclassicd parity: an empty locator asks for exactly the hash_stop
+         * header itself, not its successor (main.cpp "If locator is null,
+         * return the hashStop block"). The serve loop stops at hash_stop. */
         pindex = block_map_find(&ms->map_block_index, hash_stop);
+        if (pindex)
+            return pindex;
     } else if (locator) {
         pindex = headers_locator_fork_point(ms, chain, locator, params);
     }
