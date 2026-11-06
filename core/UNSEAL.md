@@ -1195,3 +1195,7 @@ later lane flips it HARD.
 - 2026-11-06T20:10:46Z — REASON: Rebase reseal onto origin/main: Connect precompute and block body checks out of memory are not verdicts; no change beyond the rebased commit
   old ROOT: 9bded4c431f43bb20b95f43dbd3e0cbc0ce9ea1af4f0c6750d1e8aa9f2ea1ee0
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T20:17:50Z — REASON: Report a header hash, UTXO update or undo allocation that runs out of memory as a local error: hash the header from a fixed stack buffer, and give update_coins and undo storage failures out-of-memory with no DoS score. No predicate change
+  old ROOT: c2dd62717ab2799a315afa3d19ab4dcf6bc72311e0f1379ee3e98756168cde56
+  by: owner unseal ritual (make core-unseal)

@@ -40,6 +40,7 @@
 #include "script/sighashtype.h"
 #include "script/standard.h"
 #include "consensus/upgrades.h"
+#include "consensus/validation.h"
 #include "keys/key.h"
 #include "keys/pubkey.h"
 #include "validation/sighash.h"
@@ -274,9 +275,17 @@ static bool cds_signed_step(bool corrupt, const char *label, bool *fired,
     return built && ok;
 }
 
-/* Run connect_block over the {coinbase, P2SH-spend} block. Returns the result
- * and copies the reject reason out. */
-static bool cds_run(char reject_out[256])
+/* What one connect_block run left behind. `local` is a local error with no
+ * DoS score; `fired` is whether the armed allocation failed. */
+struct cds_outcome {
+    char reject[256];
+    bool fired;
+    bool local;
+};
+
+/* Run connect_block over the {coinbase, P2SH-spend} block, with the first
+ * allocation under `fail_label` failing if given. Returns the result. */
+static bool cds_run_with(const char *fail_label, struct cds_outcome *out)
 {
     atomic_store(&g_deferred_proof_validation_below_height, -1);
 
@@ -331,18 +340,61 @@ static bool cds_run(char reject_out[256])
     struct validation_state vs;
     validation_state_init(&vs);
 
+    if (fail_label)
+        zcl_alloc_fault_fail_nth(fail_label, 1);
     bool ok = connect_block(&blk, &vs, &pindex, &view, &params,
                             false /* just_check=false */);
-    if (reject_out) {
-        strncpy(reject_out, vs.reject_reason, 255);
-        reject_out[255] = '\0';
-    }
+    out->fired = fail_label && zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    int dos = -1;
+    out->local = !ok && validation_state_is_error(&vs) &&
+                 !validation_state_get_dos(&vs, &dos);
+    strncpy(out->reject, vs.reject_reason, 255);
+    out->reject[255] = '\0';
 
     coins_view_cache_free(&view);
     free(blk.vtx);
     cds_free_tx(&cb);
     cds_free_tx(&spend);
     return ok;
+}
+
+/* Run connect_block with no failing allocation; copies the reason out. */
+static bool cds_run(char reject_out[256])
+{
+    struct cds_outcome out;
+    bool ok = cds_run_with(NULL, &out);
+    memcpy(reject_out, out.reject, 256);
+    return ok;
+}
+
+/* A block connect whose UTXO update or undo storage cannot get memory is a
+ * local error with no DoS score, not bad-txns-utxo-update-failed. The same
+ * block connects once memory is back. */
+static int cds_connect_alloc_failures(void)
+{
+    int failures = 0;
+    static const char *const labels[] = {
+        "block_undo_txs",   /* connect_block_prepare_undo */
+        "coins_vout",       /* the coinbase's new outputs, dummy undo */
+        "tx_undo_prevout",  /* the spend's undo record */
+    };
+    atomic_store(&g_enforce_checkdatasig_sigops, false);
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
+        struct cds_outcome out;
+        bool ok = cds_run_with(labels[i], &out);
+        printf("connect_block_checkdatasig_sigops: %s out of memory gives "
+               "ok=%d local=%d reason=%s\n",
+               labels[i], (int)ok, (int)out.local, out.reject);
+        CDS_CHECK("connect: the run hit the failed allocation", out.fired);
+        CDS_CHECK("connect: out of memory is a local error, not a verdict",
+                  !ok && out.local &&
+                  strcmp(out.reject, "out-of-memory") == 0);
+        char reject[256] = "";
+        CDS_CHECK("connect: the same block connects once memory is back",
+                  cds_run(reject));
+    }
+    return failures;
 }
 
 int test_connect_block_checkdatasig_sigops(void);
@@ -394,6 +446,8 @@ int test_connect_block_checkdatasig_sigops(void)
         CDS_CHECK("signed spend: a precompute out of memory is not a verdict",
                   !ok && strcmp(reject, "out-of-memory") == 0);
     }
+
+    failures += cds_connect_alloc_failures();
 
     /* 1. DEFAULT (flag OFF): P2SH OP_CHECKDATASIG counts 0 -> total under the
      * ceiling -> no bad-blk-sigops (byte-identical to today). */

@@ -737,6 +737,21 @@ static int connect_block_collect_scripts(
         tx, state, view, flags, branch_id, undo, work);
 }
 
+/* A failed UTXO update: out of memory if an allocation failed on this thread
+ * since `alloc_failures` was read, which is a local error and no verdict on
+ * the block; otherwise bad-txns-utxo-update-failed as before. */
+static int connect_block_update_failed(struct validation_state *state,
+                                       struct block_undo *undo,
+                                       struct connect_script_work *work,
+                                       uint64_t alloc_failures)
+{
+    if (zcl_alloc_failure_count() != alloc_failures)
+        return connect_block_reject_cleaned(
+            state, undo, work, "out-of-memory", false, true);
+    return connect_block_reject_cleaned(
+        state, undo, work, "bad-txns-utxo-update-failed", true, false);
+}
+
 /* Apply this tx to the view, keeping undo for every non-coinbase tx. */
 static int connect_block_update_tx_coins(
     const struct transaction *tx,
@@ -748,12 +763,13 @@ static int connect_block_update_tx_coins(
     struct connect_script_work *work)
 {
     /* ── Update UTXO set ──────────────────────────── */
+    uint64_t alloc_failures = zcl_alloc_failure_count();
     if (tx_index > 0) {
         bool updated = update_coins_with_undo(
             tx, view, &undo->vtxundo[tx_index - 1], pindex->nHeight);
         if (!updated)
-            return connect_block_reject_cleaned(
-                state, undo, work, "bad-txns-utxo-update-failed", true, false);
+            return connect_block_update_failed(state, undo, work,
+                                               alloc_failures);
         return 0;
     }
     struct tx_undo dummy;
@@ -761,8 +777,7 @@ static int connect_block_update_tx_coins(
     bool ok = update_coins_with_undo(tx, view, &dummy, pindex->nHeight);
     tx_undo_free(&dummy);
     if (!ok)
-        return connect_block_reject_cleaned(
-            state, undo, work, "bad-txns-utxo-update-failed", true, false);
+        return connect_block_update_failed(state, undo, work, alloc_failures);
     return 0;
 }
 
@@ -1127,8 +1142,11 @@ bool connect_block(const struct block *block,
     struct block_undo blockundo;
     bool undo_ok = connect_block_prepare_undo(&blockundo, block);
     if (!undo_ok) {
-        LOG_FAIL("connect", "block_undo_alloc failed at height %d ntx=%zu",
-                 pindex->nHeight, block->num_vtx);
+        /* prepare_undo freed what it allocated. Out of memory is a local
+         * error, like the script buffers below, not a verdict. */
+        LOG_ERROR("connect", "block_undo_alloc failed at height %d ntx=%zu",
+                  pindex->nHeight, block->num_vtx);
+        REJECT_FATAL(state, "out-of-memory");
     }
 
     uint32_t branch_id = consensus_current_epoch_branch_id(

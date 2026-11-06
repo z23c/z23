@@ -42,6 +42,8 @@
 #include "chain/pow.h"
 #include "consensus/validation.h"
 #include "core/arith_uint256.h"
+#include "core/hash.h"
+#include "core/serialize.h"
 #include "crypto/blake2b.h"
 #include "crypto/equihash.h"
 #include "mining/miner.h"
@@ -531,6 +533,133 @@ static bool eho_alloc_failure_is_local(const struct block_header *h,
     return all_local;
 }
 
+/* The header hash as it was computed before: the serialized bytes through a
+ * growable stream. Fails rather than hash a short stream. */
+static bool eho_reference_hash(const struct block_header *h,
+                               struct uint256 *out)
+{
+    struct byte_stream s;
+    stream_init(&s, 0);
+    bool ok = block_header_serialize(h, &s) && !s.error;
+    if (ok)
+        hash256(s.data, s.size, out->data);
+    stream_free(&s);
+    return ok;
+}
+
+/* block_header_get_hash matches the reference for `h`. */
+static bool eho_hash_matches_reference(const struct block_header *h)
+{
+    struct uint256 want, got;
+    if (!eho_reference_hash(h, &want))
+        return false;
+    block_header_get_hash(h, &got);
+    return uint256_eq(&want, &got);
+}
+
+/* The header wire layout written out by hand, independent of
+ * block_header_serialize: version, prev, merkle, sapling root, time, bits,
+ * nonce (all little-endian), then a compact size and the solution. */
+static bool eho_hand_laid_hash_matches(const struct block_header *h)
+{
+    unsigned char buf[BLOCK_HEADER_SIZE + 3 + MAX_SOLUTION_SIZE];
+    size_t n = 0;
+    uint32_t v = (uint32_t)h->nVersion;
+    for (int i = 0; i < 4; i++)
+        buf[n++] = (unsigned char)(v >> (8 * i));
+    memcpy(&buf[n], h->hashPrevBlock.data, 32);
+    memcpy(&buf[n + 32], h->hashMerkleRoot.data, 32);
+    memcpy(&buf[n + 64], h->hashFinalSaplingRoot.data, 32);
+    n += 96;
+    for (int i = 0; i < 4; i++)
+        buf[n++] = (unsigned char)(h->nTime >> (8 * i));
+    for (int i = 0; i < 4; i++)
+        buf[n++] = (unsigned char)(h->nBits >> (8 * i));
+    memcpy(&buf[n], h->nNonce.data, 32);
+    n += 32;
+    if (h->nSolutionSize < 253) {
+        buf[n++] = (unsigned char)h->nSolutionSize;
+    } else {
+        buf[n++] = 0xfd;
+        buf[n++] = (unsigned char)(h->nSolutionSize & 0xff);
+        buf[n++] = (unsigned char)(h->nSolutionSize >> 8);
+    }
+    memcpy(&buf[n], h->nSolution, h->nSolutionSize);
+    n += h->nSolutionSize;
+    struct uint256 want, got;
+    hash256(buf, n, want.data);
+    block_header_get_hash(h, &got);
+    return uint256_eq(&want, &got);
+}
+
+/* Header hashes are byte-identical to the stream path at the solution sizes
+ * below (compact-size boundaries, 192,7 and 200,9 widths), and match the
+ * wire layout written out by hand. */
+static int eho_header_hash_sizes(const struct block_header *good)
+{
+    int failures = 0;
+    EHO_CHECK("mined header: hash matches the stream path",
+              eho_hash_matches_reference(good));
+    EHO_CHECK("mined header: hash matches the hand-laid wire bytes",
+              eho_hand_laid_hash_matches(good));
+    static const size_t sizes[] = { 0, 100, 252, 253, 400, MAX_SOLUTION_SIZE };
+    bool all_match = true;
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        struct block_header h = *good;
+        for (size_t b = 0; b < MAX_SOLUTION_SIZE; b++)
+            h.nSolution[b] = (unsigned char)(b * 7u + i);
+        h.nSolutionSize = sizes[i];
+        if (!eho_hash_matches_reference(&h) ||
+            !eho_hand_laid_hash_matches(&h)) {
+            printf("\n  (solution size %zu: hash differs)\n", sizes[i]);
+            all_match = false;
+        }
+    }
+    EHO_CHECK("sizes 0, 100, 252, 253, 400 and 1344 hash the same bytes",
+              all_match);
+    return failures;
+}
+
+/* The header hash needs no allocation, so one that cannot be had changes
+ * neither the hash nor the verdict. A header claiming more solution than it
+ * can hold is refused, and its hash never meets a target. */
+static int eho_header_hash_without_memory(const struct block_header *good,
+                                          const struct chain_params *cp)
+{
+    int failures = 0;
+    printf("\n--- header hash: no allocation, no high-hash verdict ---\n");
+    failures += eho_header_hash_sizes(good);
+
+    struct uint256 want, got;
+    block_header_get_hash(good, &want);
+    zcl_alloc_fault_fail_nth("stream_data", 1);
+    block_header_get_hash(good, &got);
+    bool untouched = zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
+    EHO_CHECK("header hash: no allocation is made", untouched);
+    EHO_CHECK("header hash: same hash with memory refused",
+              uint256_eq(&want, &got));
+
+    struct validation_state state;
+    validation_state_init(&state);
+    zcl_alloc_fault_fail_nth("stream_data", 1);
+    bool accepted = check_block_header(good, &state, cp, true);
+    zcl_alloc_fault_clear();
+    printf("  (check_block_header with stream_data refused: ok=%d "
+           "reason=%s)\n", (int)accepted, state.reject_reason);
+    EHO_CHECK("valid header passes with stream_data refused", accepted);
+
+    struct block_header over = *good;
+    over.nSolutionSize = MAX_SOLUTION_SIZE + 1;
+    block_header_get_hash(&over, &got);
+    struct uint256 ones;
+    memset(ones.data, 0xFF, sizeof(ones.data));
+    EHO_CHECK("oversized solution: refused, never hashed",
+              uint256_eq(&got, &ones) &&
+              !CheckProofOfWork(got, over.nBits, &cp->consensus));
+    return failures;
+}
+
 static int eho_caller_verdicts(void)
 {
     int failures = 0;
@@ -555,6 +684,7 @@ static int eho_caller_verdicts(void)
               eho_row_verdict_is(&good, cp, BLOCK_ROW_VERIFY_OK));
     EHO_CHECK("valid header: each failed allocation is local",
               eho_alloc_failure_is_local(&good, cp, NULL));
+    failures += eho_header_hash_without_memory(&good, cp);
     validation_state_init(&state);
     EHO_CHECK("valid header still passes once memory is back",
               check_block_header(&good, &state, cp, true) &&

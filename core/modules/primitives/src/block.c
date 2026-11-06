@@ -28,13 +28,32 @@ bool block_header_serialize(const struct block_header *h, struct byte_stream *s)
     return true;
 }
 
+/* The largest header block_header_serialize can write: the fixed fields, a
+ * 3-byte compact size and a full nSolution[]. MAX_SOLUTION_SIZE (1344, the
+ * Equihash 200,9 width) is the widest solution any ZClassic parameter set
+ * uses, and block_header_deserialize refuses a wider one. */
+#define BLOCK_HEADER_MAX_SERIALIZED (BLOCK_HEADER_SIZE + 3 + MAX_SOLUTION_SIZE)
+static_assert(MAX_SOLUTION_SIZE <= 0xffff,
+              "a solution length must fit a 3-byte compact size");
+
+/* Hash the serialized header from a stack buffer, so the hash cannot fail
+ * for want of memory. A header claiming more solution than nSolution[] holds
+ * cannot be serialized; it is logged and given the all-ones hash, which
+ * meets no target and names no block. */
 void block_header_get_hash(const struct block_header *h, struct uint256 *out)
 {
+    unsigned char buf[BLOCK_HEADER_MAX_SERIALIZED];
     struct byte_stream s;
-    stream_init(&s, 256);
-    block_header_serialize(h, &s);
-    hash256(s.data, s.size, out->data);
-    stream_free(&s);
+    stream_init_from_data(&s, buf, sizeof(buf));
+    s.size = 0; /* an empty, fixed-capacity write buffer */
+    if (h->nSolutionSize > MAX_SOLUTION_SIZE ||
+        !block_header_serialize(h, &s)) {
+        LOG_ERROR("block", "header solution size %zu exceeds %d; not hashed",
+                  h->nSolutionSize, MAX_SOLUTION_SIZE);
+        memset(out->data, 0xFF, sizeof(out->data));
+        return;
+    }
+    hash256(buf, s.size, out->data);
 }
 
 bool block_header_deserialize(struct block_header *h, struct byte_stream *s)
