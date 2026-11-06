@@ -181,3 +181,106 @@ int compact_blocks_frontier_tests(void)
     failures += cbf_run(CBF_HSTAR + 1, CBF_HSTAR, true, 94);
     return failures;
 }
+
+/* A stored block is dropped on re-announcement only once it is on the active
+ * chain. HAVE_DATA is set before the reducer finalizes a block, and a stored
+ * block not yet connected is retried by its next arrival, so it must still be
+ * submitted. */
+static int cbf_submits;
+
+static bool cbf_count_submit(struct block *blk, struct validation_state *st,
+                             void *ctx)
+{
+    (void)blk;
+    (void)st;
+    (void)ctx;
+    cbf_submits++;
+    return true;
+}
+
+static int cbf_held(uint32_t status, bool on_chain, int expect_submits,
+                    uint8_t tag)
+{
+    int failures = 0;
+    printf("compact stored block: status %u, %s... ", status,
+           on_chain ? "on the active chain" : "not connected");
+
+    struct chain_params params = *chain_params_get();
+    memset(params.consensus.powLimit.data, 0xff, 32);
+    peer_scoring_init();
+    msgprocessor_test_reset_recent_blocks();
+    struct main_state ms;
+    struct net_manager nm;
+    struct tx_mempool pool;
+    main_state_init(&ms);
+    net_manager_init(&nm);
+    tx_mempool_init(&pool, 0);
+    struct msg_processor mp;
+    memset(&mp, 0, sizeof(mp));
+    mp.main_state = &ms;
+    mp.params = &params;
+    mp.net_mgr = &nm;
+    mp.mempool = &pool;
+    mp.compact_block_submit = cbf_count_submit;
+
+    struct net_address addr;
+    net_address_init(&addr);
+    unsigned char ip[4] = {198, 51, 100, 22};
+    net_addr_set_ipv4(&addr.svc.addr, ip);
+    addr.svc.port = 8033;
+    struct p2p_node *peer =
+        p2p_node_create(&nm, ZCL_INVALID_SOCKET, &addr, "held-peer", true);
+
+    struct block real, bad;
+    cbf_blocks(&real, &bad, tag);
+    struct uint256 hash;
+    block_get_hash(&real, &hash);
+    struct block_index *bi =
+        chainstate_insert_block_index((struct chainstate *)&ms, &hash);
+    if (!peer || !bi) {
+        printf("FAIL (setup)\n");
+        failures = 1;
+        goto out;
+    }
+    bi->nHeight = 5;
+    bi->nStatus = status;
+    if (on_chain)
+        active_chain_move_window_tip(&ms.chain_active, bi);
+
+    cbf_submits = 0;
+    struct compact_block_msg cb;
+    struct byte_stream s;
+    stream_init(&s, 1024);
+    bool sent = compact_block_from_block(&cb, &real, 7) &&
+                compact_block_msg_serialize(&cb, &s) &&
+                process_cmpctblock(&mp, peer, &s);
+    stream_free(&s);
+    compact_block_msg_free(&cb);
+    if (!sent || cbf_submits != expect_submits ||
+        atomic_load(&peer->misbehavior) != 0) {
+        printf("FAIL (submits=%d, want %d)\n", cbf_submits, expect_submits);
+        failures = 1;
+    } else {
+        printf("OK\n");
+    }
+out:
+    block_free(&real);
+    block_free(&bad);
+    if (peer)
+        p2p_node_free(peer);
+    tx_mempool_free(&pool);
+    net_manager_free(&nm);
+    main_state_free(&ms);
+    return failures;
+}
+
+int compact_blocks_stored_tests(void)
+{
+    int failures = 0;
+    uint32_t stored = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+    failures += cbf_held(stored, true, 0, 95);
+    failures += cbf_held(stored, false, 1, 96);
+    failures += cbf_held(BLOCK_VALID_SCRIPTS, false, 1, 97);
+    failures += cbf_held(stored | BLOCK_FAILED_VALID, true, 1, 98);
+    return failures;
+}

@@ -1031,3 +1031,7 @@ later lane flips it HARD.
 - 2026-11-06T02:33:20Z — REASON: Correct the mempool snapshot comments and return no array when it is empty
   old ROOT: db87d45a4941e40e4969a1b0e6b6d0b1d5b9ff6bc6a7d4983712b7b278b75688
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T02:33:36Z — REASON: Drop a re-announced stored block only once it is on the active chain
+  old ROOT: cd3f3a8fd748a84cf44ac73713e8ee43bdb66c727bf79719e7574f5e9265451f
+  by: owner unseal ritual (make core-unseal)

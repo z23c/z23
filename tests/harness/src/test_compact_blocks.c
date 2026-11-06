@@ -1385,6 +1385,7 @@ int test_compact_blocks(void)
     failures += test_cb_recon_wire_decoded_short_ids();
     { extern int compact_blocks_prefilled_tests(void); failures += compact_blocks_prefilled_tests(); }
     { extern int compact_blocks_frontier_tests(void); failures += compact_blocks_frontier_tests(); }
+    { extern int compact_blocks_stored_tests(void); failures += compact_blocks_stored_tests(); }
 
     return failures;
 }

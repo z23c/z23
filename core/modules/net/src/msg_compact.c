@@ -245,8 +245,13 @@ static bool compact_repeats_pending(const struct p2p_node *node,
     return age <= COMPACT_PENDING_MAX_AGE_SECS;
 }
 
-/* True when the block's data is already stored and it has not failed, so a
- * reconstruction of it could not be used. */
+/* True when the block is stored, has not failed and is already on the active
+ * chain, so a reconstruction of it could not be used. HAVE_DATA alone is not
+ * enough: the reducer sets it when the body is persisted, before the block is
+ * finalized (reducer_persist_ingested_body_locked), and a stored block that is
+ * not yet connected is retried by its next arrival, which re-enters
+ * reducer_ingest_block (the HAVE_DATA early return in the persist step, then
+ * the drain). Such a block must still reach compact_submit_block. */
 static bool compact_block_held(const struct msg_processor *mp,
                                const struct uint256 *hash)
 {
@@ -255,7 +260,8 @@ static bool compact_block_held(const struct msg_processor *mp,
     const struct block_index *bi =
         block_map_find(&mp->main_state->map_block_index, hash);
     return bi && (bi->nStatus & BLOCK_HAVE_DATA) &&
-           !(bi->nStatus & BLOCK_FAILED_MASK);
+           !(bi->nStatus & BLOCK_FAILED_MASK) &&
+           active_chain_contains(&mp->main_state->chain_active, bi);
 }
 
 /* ── Helper: copy the mempool txs for reconstruction (one pass, one lock) ── */
