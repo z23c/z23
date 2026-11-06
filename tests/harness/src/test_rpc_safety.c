@@ -2260,6 +2260,7 @@ int test_rpc_safety(void)
     failures += rs_case_rawsign_supplemental();
     failures += rs_case_p2sh_2of2();
     failures += scs_run_tests();
+    failures += wrc_run_tests();
 
     /* parse_amount arithmetic guards: see rs_check_parse_amount_guards. */
     failures += rs_check_parse_amount_guards();
@@ -2268,7 +2269,6 @@ int test_rpc_safety(void)
     (void)thread_registry_join_all(5);
 #if defined(__GLIBC__) && !defined(__SANITIZE_ADDRESS__)
     failures += t_listunspent_frees_filtered_rows();
-    failures += wrc_run_tests();
 #endif
 
     return failures;

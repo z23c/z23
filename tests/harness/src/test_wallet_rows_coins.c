@@ -335,6 +335,7 @@ static int wrc_import_disagreeing_rows_skipped(void)
         ASSERT(!wrc_wallet_row(&fx, 4, &value, &height, &cb));
         ASSERT(wrc_wallet_rows(&fx) == 1);
         ASSERT(wrc_reply_has(&result, "3 utxos rows skipped"));
+        ASSERT(wrc_reply_has(&result, "rescanwallet"));
         json_free(&result);
         wrc_close(&fx);
         PASS();
@@ -378,6 +379,79 @@ static int wrc_import_without_coins_view_withholds(void)
         ASSERT(keystore_have_key(&fx.w->keystore, &kid));
         ASSERT(wrc_wallet_rows(&fx) == 0);
         ASSERT(wrc_reply_has(&result, "coin discovery withheld"));
+        ASSERT(wrc_reply_has(&result, "rescanwallet"));
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ---- importaddress ---- */
+
+static bool wrc_import_address(struct wrc_fx *fx, struct json_value *result)
+{
+    struct tx_destination dest;
+    dest.type = DEST_KEY_ID;
+    dest.id.key = pubkey_get_id(&fx->pub);
+    char addr[128];
+    if (!wallet_encode_destination(&dest, addr, sizeof(addr)))
+        return false;
+    struct json_value params, v;
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&v);
+    json_set_str(&v, addr);
+    bool ok = json_push_back(&params, &v);
+    json_free(&v);
+    json_init(result);
+    ok = ok && rpc_table_execute(&fx->tbl, "importaddress", &params, result);
+    json_free(&params);
+    return ok;
+}
+
+static int wrc_importaddress_skips_disagreeing_rows(void)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST("wallet_rows_coins: importaddress imports only rows the coin confirms") {
+        struct wrc_row rows[] = {
+            {WRC_AGREE, 1, 2, 9, true},
+            {WRC_BAD_AMOUNT, 2, 7, 7, false},
+            {WRC_SPENT, 3, 7, 7, false},
+        };
+        ASSERT(wrc_open(&fx, true));
+        ASSERT(wrc_seed_utxos(&fx, rows, 3));
+        struct json_value result;
+        ASSERT(wrc_import_address(&fx, &result));
+        ASSERT(json_get_int(json_get(&result, "utxos")) == 1);
+        ASSERT(json_get_int(json_get(&result, "utxos_skipped")) == 2);
+        int64_t value;
+        int height = 0;
+        bool cb = false;
+        ASSERT(wrc_wallet_row(&fx, 1, &value, &height, &cb));
+        ASSERT(height == 9 && cb);
+        ASSERT(wrc_wallet_rows(&fx) == 1);
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int wrc_importaddress_without_coins_view_withholds(void)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST("wallet_rows_coins: importaddress withholds coin discovery without a coins view") {
+        struct wrc_row rows[] = {{WRC_AGREE, 1, 7, 7, false}};
+        ASSERT(wrc_open(&fx, false));
+        ASSERT(wrc_seed_utxos(&fx, rows, 1));
+        struct json_value result;
+        ASSERT(wrc_import_address(&fx, &result));
+        ASSERT(json_get_bool(json_get(&result, "coin_discovery_withheld")));
+        ASSERT(json_get_int(json_get(&result, "utxos")) == 0);
+        ASSERT(wrc_wallet_rows(&fx) == 0);
         json_free(&result);
         wrc_close(&fx);
         PASS();
@@ -405,15 +479,29 @@ static bool wrc_seed_wallet_row(struct wrc_fx *fx, const struct wrc_row *r,
     return db_wallet_utxo_save(&fx->ndb, &wu);
 }
 
-static bool wrc_listunspent(struct wrc_fx *fx, struct json_value *result)
+/* minconf < 0 sends no argument (the RPC default, 1). */
+static bool wrc_listunspent_min(struct wrc_fx *fx, struct json_value *result,
+                                int minconf)
 {
-    struct json_value params;
+    struct json_value params, arg;
     json_init(&params);
     json_set_array(&params);
+    json_init(&arg);
+    bool ok = true;
+    if (minconf >= 0) {
+        json_set_int(&arg, minconf);
+        ok = json_push_back(&params, &arg);
+    }
+    json_free(&arg);
     json_init(result);
-    bool ok = rpc_table_execute(&fx->tbl, "listunspent", &params, result);
+    ok = ok && rpc_table_execute(&fx->tbl, "listunspent", &params, result);
     json_free(&params);
     return ok;
+}
+
+static bool wrc_listunspent(struct wrc_fx *fx, struct json_value *result)
+{
+    return wrc_listunspent_min(fx, result, -1);
 }
 
 /* Was the row with this tag listed, and with how many confirmations? */
@@ -498,12 +586,61 @@ static int wrc_listunspent_disagreeing_rows_skipped(void)
         for (size_t i = 0; i < 4; i++)
             ASSERT(wrc_seed_wallet_row(&fx, &rows[i], 0, false));
         struct json_value result;
-        ASSERT(wrc_listunspent(&fx, &result));
+        ASSERT(wrc_listunspent_min(&fx, &result, 0));
         int64_t confs;
         ASSERT(wrc_listed(&result, 1, &confs));
+        ASSERT(!wrc_listed(&result, 2, &confs));   /* amount disagrees */
+        ASSERT(!wrc_listed(&result, 3, &confs));   /* script disagrees */
+        /* No coin is not a disagreement: see the mempool cases. */
+        ASSERT(wrc_listed(&result, 4, &confs) && confs == 0);
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A mempool output has a height-0 wallet row and no coin yet. */
+static int wrc_listunspent_mempool_row_no_coin(void)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST("wallet_rows_coins: listunspent lists a mempool row with no coin as unconfirmed") {
+        struct wrc_row mempool = {WRC_SPENT, 1, 0, 0, false};
+        struct wrc_row change = {WRC_SPENT, 2, 0, 0, false};
+        ASSERT(wrc_open(&fx, true));
+        ASSERT(wrc_seed_wallet_row(&fx, &mempool, 0, false));
+        ASSERT(wrc_seed_wallet_row(&fx, &change, 0, false));
+        struct json_value result;
+        int64_t confs = -1;
+        ASSERT(wrc_listunspent_min(&fx, &result, 0));
+        ASSERT(wrc_listed(&result, 1, &confs) && confs == 0);
+        ASSERT(wrc_listed(&result, 2, &confs) && confs == 0);
+        json_free(&result);
+        ASSERT(wrc_listunspent_min(&fx, &result, 1));
+        ASSERT(!wrc_listed(&result, 1, &confs));
         ASSERT(!wrc_listed(&result, 2, &confs));
-        ASSERT(!wrc_listed(&result, 3, &confs));
-        ASSERT(!wrc_listed(&result, 4, &confs));
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The projection's height is never used: no coin, no maturity. */
+static int wrc_listunspent_coinbase_no_coin_never_mature(void)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST("wallet_rows_coins: listunspent never lists a coinbase row that has no coin") {
+        struct wrc_row cb = {WRC_SPENT, 1, 1, 1, true};
+        ASSERT(wrc_open(&fx, true));
+        ASSERT(wrc_seed_utxos(&fx, &cb, 1));   /* utxos row at height 1 */
+        ASSERT(wrc_seed_wallet_row(&fx, &cb, 0, true));
+        struct json_value result;
+        int64_t confs;
+        ASSERT(wrc_listunspent_min(&fx, &result, 0));
+        ASSERT(!wrc_listed(&result, 1, &confs));
         json_free(&result);
         wrc_close(&fx);
         PASS();
@@ -525,8 +662,12 @@ static int wrc_listunspent_without_coins_view(void)
         ASSERT(wrc_seed_wallet_row(&fx, &rows[0], 0, false));
         ASSERT(wrc_seed_wallet_row(&fx, &rows[1], 6, false));
         struct json_value result;
+        ASSERT(wrc_listunspent_min(&fx, &result, 0));
+        int64_t confs = -1;
+        /* No coins view: unconfirmed, never the projection's height. */
+        ASSERT(wrc_listed(&result, 1, &confs) && confs == 0);
+        json_free(&result);
         ASSERT(wrc_listunspent(&fx, &result));
-        int64_t confs = 0;
         ASSERT(!wrc_listed(&result, 1, &confs));
         /* A row that already has a height is not touched by the fix-up. */
         ASSERT(wrc_listed(&result, 2, &confs));
@@ -615,9 +756,13 @@ int wrc_run_tests(void)
     failures += wrc_import_disagreeing_rows_skipped();
     failures += wrc_import_height_comes_from_coin();
     failures += wrc_import_without_coins_view_withholds();
+    failures += wrc_importaddress_skips_disagreeing_rows();
+    failures += wrc_importaddress_without_coins_view_withholds();
     failures += wrc_listunspent_agreeing_row_same();
     failures += wrc_listunspent_coinbase_height_from_coin();
     failures += wrc_listunspent_disagreeing_rows_skipped();
+    failures += wrc_listunspent_mempool_row_no_coin();
+    failures += wrc_listunspent_coinbase_no_coin_never_mature();
     failures += wrc_listunspent_without_coins_view();
     failures += wrc_rebuild_mixed_rows();
     failures += wrc_rebuild_without_coins_view();
