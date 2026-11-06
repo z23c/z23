@@ -1655,7 +1655,8 @@ static bool boot_step_create_legacy_snapshot(struct app_context *ctx)
         /* Step 2: Parallel import (block index + UTXOs + wallet) */
         if (snapshot_import(snap, ctx->datadir,
                             &g_node_db, &g_wallet) < 0) {
-            fprintf(stderr, "Warning: Snapshot import had errors\n");
+            fprintf(stderr, "Warning: snapshot import failed; the blocks table "
+                    "may be partial and the import must be rerun\n");
         }
         /* Step 3: Build transaction index after runtime services take
          * ownership of background jobs, so shutdown can join it cleanly. */

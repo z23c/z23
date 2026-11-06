@@ -416,7 +416,7 @@ static enum bih_queue_status bih_queue_bad_row(struct bhc_bad_row **bad,
 enum bih_validate_status {
     BIH_VALIDATE_OK      = 0,
     BIH_VALIDATE_PREPARE = -3,  /* validate SELECT refused to prepare */
-    BIH_VALIDATE_OOM     = -7,  /* a row check or quarantine-list allocationfailed (the
+    BIH_VALIDATE_OOM     = -7,  /* a row check or quarantine-list allocation failed (the
                                  * SELECT is already finalized by then) */
 };
 

@@ -75,6 +75,13 @@ void stale_validate_headers_repair_test_set_node_db(struct node_db *ndb)
 {
     g_test_node_db = ndb;
 }
+/* The next quarantine attempt reports that its check ran out of memory. */
+static _Atomic bool g_test_quarantine_out_of_memory = false;
+void stale_validate_headers_repair_test_quarantine_out_of_memory(void);
+void stale_validate_headers_repair_test_quarantine_out_of_memory(void)
+{
+    atomic_store(&g_test_quarantine_out_of_memory, true);
+}
 int stale_validate_headers_repair_test_quarantine_escalations(void);
 int stale_validate_headers_repair_test_quarantine_escalations(void)
 {
@@ -718,13 +725,12 @@ static void maybe_escalate_runtime_row_quarantine(
     if (runtime_quarantine_already_fired(target))
         return;
 
-    /* Mark BEFORE the attempt so a second exhaustion at this height can never
-     * re-enter — one attempt per height, whatever its outcome. */
-    runtime_quarantine_mark_fired(target);
     atomic_fetch_add(&g_runtime_quarantine_escalations, 1);
 
     struct node_db *ndb = runtime_row_quarantine_node_db();
     if (!ndb) {
+        /* Nothing to retry against: no handle stays no handle. */
+        runtime_quarantine_mark_fired(target);
         LOG_WARN("condition",
                  "[condition:stale_validate_headers_repair] runtime row "
                  "quarantine escalation h=%d: no node_db handle — skipped "
@@ -733,8 +739,24 @@ static void maybe_escalate_runtime_row_quarantine(
     }
 
     struct stage_repair_row_quarantine_result qr;
+#ifdef ZCL_TESTING
+    bool purged;
+    if (atomic_exchange(&g_test_quarantine_out_of_memory, false)) {
+        memset(&qr, 0, sizeof(qr));
+        qr.local_failure = true;
+        purged = false;
+    } else {
+        purged = stage_repair_quarantine_blocks_row(
+            ndb, ms, (int64_t)target, canon, &qr);
+    }
+#else
     bool purged = stage_repair_quarantine_blocks_row(
         ndb, ms, (int64_t)target, canon, &qr);
+#endif
+    /* One attempt per height, whatever its verdict. Running out of memory
+     * reached none, so it does not spend this height's attempt. */
+    if (!qr.local_failure)
+        runtime_quarantine_mark_fired(target);
     if (purged)
         LOG_WARN("condition",
                  "[condition:stale_validate_headers_repair] EXHAUSTION h=%d: "
@@ -745,9 +767,10 @@ static void maybe_escalate_runtime_row_quarantine(
         LOG_WARN("condition",
                  "[condition:stale_validate_headers_repair] EXHAUSTION h=%d: "
                  "runtime row quarantine did NOT purge (attempted=%d "
-                 "refused_clean=%d row_absent=%d no_params=%d verdict=%d) — "
-                 "operator page remains the backstop", target, qr.attempted,
-                 qr.refused_clean, qr.row_absent, qr.no_params, qr.verdict);
+                 "refused_clean=%d row_absent=%d no_params=%d local_failure=%d "
+                 "verdict=%d) — operator page remains the backstop", target,
+                 qr.attempted, qr.refused_clean, qr.row_absent, qr.no_params,
+                 qr.local_failure, qr.verdict);
 }
 
 static bool witness_stale_validate_headers_repair(int64_t target_at_detect)

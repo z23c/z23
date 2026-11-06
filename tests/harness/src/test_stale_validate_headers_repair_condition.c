@@ -35,6 +35,7 @@ void reducer_frontier_test_set_compiled_anchor(int32_t height);
 void stale_validate_headers_repair_test_set_peer_count(int n);
 void stale_validate_headers_repair_test_set_node_db(struct node_db *ndb);
 int stale_validate_headers_repair_test_quarantine_escalations(void);
+void stale_validate_headers_repair_test_quarantine_out_of_memory(void);
 
 static bool exec_sql(sqlite3 *db, const char *sql)
 {
@@ -774,6 +775,61 @@ static int svhr_case_frontier_advance_clears(void)
     return failures;
 }
 
+/* An attempt that ran out of memory reached no verdict, so it does not spend the
+ * height's one attempt: the next exhaustion at the same height runs it. */
+static int svhr_case_quarantine_memory_failure_keeps_attempt(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+
+    char dir[256];
+    struct main_state ms;
+    struct block_index blocks[2];
+    struct uint256 hashes[2];
+    bool ok = setup_condition_case("b3_row_quarantine_oom", dir, sizeof(dir),
+                                   &ms, blocks, hashes);
+    sqlite3 *db = progress_store_db();
+
+    struct block_index block2;
+    struct uint256 hash2;
+    block_index_init(&block2);
+    memset(&hash2, 0, sizeof(hash2));
+    hash2.data[0] = 2;
+    hash2.data[1] = 0xA7;
+    block2.phashBlock = &hash2;
+    block2.nHeight = 2;
+    block2.nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
+    block2.pprev = &blocks[1];
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, &block2);
+    ms.pindex_best_header = &block2;
+
+    struct node_db ndb;
+    ok = ok && seed_poisoned_node_db(&ndb, &hash2);
+    stale_validate_headers_repair_test_set_node_db(&ndb);
+    stale_validate_headers_repair_test_set_peer_count(0);
+    ok = ok && seed_cursors(db, 5, 5);
+
+    int64_t rq_before = stage_repair_runtime_row_quarantined();
+    stale_validate_headers_repair_test_quarantine_out_of_memory();
+    ok = svhr_reseed_solutionless_poison_five_ticks(db, ok);
+    ok = ok && stale_validate_headers_repair_test_quarantine_escalations() == 1;
+    ok = ok && stage_repair_runtime_row_quarantined() == rq_before;
+    ok = ok && node_db_block_count(&ndb) == 1;
+
+    ok = svhr_reseed_solutionless_poison_five_ticks(db, ok);
+    ok = ok && stale_validate_headers_repair_test_quarantine_escalations() == 2;
+    ok = ok && stage_repair_runtime_row_quarantined() - rq_before == 1;
+    ok = ok && node_db_block_count(&ndb) == 0;
+
+    SVHR_CHECK("quarantine out of memory keeps the height's attempt; the next "
+               "exhaustion runs it and purges the row", ok);
+
+    stale_validate_headers_repair_test_set_node_db(NULL);
+    if (ndb.db) sqlite3_close(ndb.db);
+    teardown_condition_case(dir, &ms);
+    return failures;
+}
+
 static int svhr_case_b3_quarantine_fires_once(void)
 {
     int failures = 0;
@@ -1314,6 +1370,7 @@ int test_stale_validate_headers_repair_condition(void)
      * The cases below hold peers at 5 and distinguish usable exact H*+1
      * authority from absent or disagreeing authority. Refusal must NOT claim
      * peer. ───────────────────────────────────────────────────────────────── */
+    failures += svhr_case_quarantine_memory_failure_keeps_attempt();
     failures += svhr_case_hstar_next_child_queued();
     failures += svhr_case_best_header_parent_disagrees();
     failures += svhr_case_visible_parent_absent();

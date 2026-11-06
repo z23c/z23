@@ -35,6 +35,9 @@
 #include "test/test_core.h"
 
 #include "base/safe_alloc.h"
+
+#include <pthread.h>
+#include <stdint.h>
 #include "chain/chainparams.h"
 #include "chain/pow.h"
 #include "consensus/validation.h"
@@ -489,7 +492,7 @@ static bool eho_row_verdict_is(const struct block_header *h,
  * so `expect_all` is true only for a valid header, which reaches them all. */
 static bool eho_alloc_failure_is_local(const struct block_header *h,
                                        const struct chain_params *cp,
-                                       bool expect_all)
+                                       const char *unreached_label)
 {
     bool all_local = true;
     for (size_t i = 0; i < sizeof(kEhoVerifierAllocLabels) /
@@ -513,8 +516,11 @@ static bool eho_alloc_failure_is_local(const struct block_header *h,
         bool row_fired = zcl_alloc_fault_armed_label() == NULL;
         zcl_alloc_fault_clear();
 
-        bool label_ok = (header_fired ? header_local : !expect_all) &&
-                        (row_fired ? row_local : !expect_all);
+        /* A label fires, or it is the one this header is known not to reach. */
+        bool unreached = unreached_label &&
+                         strcmp(label, unreached_label) == 0;
+        bool label_ok = (header_fired ? header_local : unreached) &&
+                        (row_fired ? row_local : unreached);
         if (!label_ok) {
             printf("\n  (label '%s': header_fired=%d header_local=%d "
                    "row_fired=%d row_local=%d)\n",
@@ -548,7 +554,7 @@ static int eho_caller_verdicts(void)
     EHO_CHECK("valid header passes block_row_verify",
               eho_row_verdict_is(&good, cp, BLOCK_ROW_VERIFY_OK));
     EHO_CHECK("valid header: each failed allocation is local",
-              eho_alloc_failure_is_local(&good, cp, true));
+              eho_alloc_failure_is_local(&good, cp, NULL));
     validation_state_init(&state);
     EHO_CHECK("valid header still passes once memory is back",
               check_block_header(&good, &state, cp, true) &&
@@ -567,7 +573,7 @@ static int eho_caller_verdicts(void)
     EHO_CHECK("invalid solution is BAD_EQUIHASH from block_row_verify",
               eho_row_verdict_is(&bad, cp, BLOCK_ROW_VERIFY_BAD_EQUIHASH));
     EHO_CHECK("invalid header: each failed allocation is local",
-              eho_alloc_failure_is_local(&bad, cp, false));
+              eho_alloc_failure_is_local(&bad, cp, "eh_row_xor"));
     validation_state_init(&state);
     dos = 0;
     bad_rejected = !check_block_header(&bad, &state, cp, true);
@@ -577,6 +583,56 @@ static int eho_caller_verdicts(void)
               eho_row_verdict_is(&bad, cp, BLOCK_ROW_VERIFY_BAD_EQUIHASH));
 
     chain_params_select(CHAIN_MAIN);
+    return failures;
+}
+
+/* ── The failure count: real NULL returns, per thread ──────────
+ *
+ * Injected failures are not the production path. These requests are ones no
+ * allocator can satisfy, so each checked allocator's own NULL branch runs. */
+
+static volatile size_t g_eho_impossible_size = SIZE_MAX / 2;
+
+static void *eho_count_on_worker(void *arg)
+{
+    uint64_t before = zcl_alloc_failure_count();
+    void *p = zcl_malloc(g_eho_impossible_size, "eho_worker_impossible");
+    *(uint64_t *)arg = zcl_alloc_failure_count() - before;
+    free(p);
+    return NULL;
+}
+
+static int eho_failure_count_contract(void)
+{
+    int failures = 0;
+    printf("\n--- failure count: real NULL returns, per thread ---\n");
+
+    uint64_t before = zcl_alloc_failure_count();
+    void *ok_block = zcl_malloc(16, "eho_possible");
+    EHO_CHECK("a successful allocation moves nothing",
+              ok_block && zcl_alloc_failure_count() == before);
+
+    void *p = zcl_malloc(g_eho_impossible_size, "eho_impossible");
+    EHO_CHECK("zcl_malloc NULL counts one",
+              !p && zcl_alloc_failure_count() == before + 1);
+    p = zcl_calloc(g_eho_impossible_size, 4, "eho_impossible");
+    EHO_CHECK("zcl_calloc NULL counts one",
+              !p && zcl_alloc_failure_count() == before + 2);
+    p = zcl_realloc(ok_block, g_eho_impossible_size, "eho_impossible");
+    EHO_CHECK("zcl_realloc NULL counts one and keeps the block",
+              !p && ok_block && zcl_alloc_failure_count() == before + 3);
+    free(ok_block);
+
+    uint64_t worker_moved = 0;
+    uint64_t caller_before = zcl_alloc_failure_count();
+    pthread_t th;
+    bool started = pthread_create(&th, NULL, eho_count_on_worker,
+                                  &worker_moved) == 0;
+    if (started)
+        pthread_join(th, NULL);
+    EHO_CHECK("a worker counts its own failure", started && worker_moved == 1);
+    EHO_CHECK("a worker's failure does not move the caller's count",
+              zcl_alloc_failure_count() == caller_before);
     return failures;
 }
 
@@ -611,6 +667,7 @@ int test_equihash_oom(void)
     failures += eho_solver_output_bytes();
     failures += eho_injector_contract();
     failures += eho_caller_verdicts();
+    failures += eho_failure_count_contract();
 
     zcl_alloc_fault_clear();
     return failures;

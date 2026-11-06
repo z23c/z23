@@ -211,6 +211,19 @@ static void import_block_index_close_sources(struct db_wrapper *dbw,
     node_db_close(ndb);
 }
 
+static bool import_block_index_rebuild_block_indexes(struct node_db *ndb);
+
+/* A failed import keeps the delete and the batches it already committed, so the
+ * blocks table is partial and the import must be rerun. Put back the dropped
+ * indexes for the rest of this boot; on shutdown leave that to the next open,
+ * whose schema step creates them. */
+static void import_block_index_restore_after_failure(struct node_db *ndb)
+{
+    LOG_WARN("snapshot", "T1: the blocks table is partial; rerun the import");
+    if (!thread_registry_shutdown_requested())
+        (void)import_block_index_rebuild_block_indexes(ndb);
+}
+
 /* Prepare the SQLite side for the bulk walk and position the iterator:
  * turbo pragmas, busy timeout, drop the block indexes, reset the blocks
  * projection, then seek to the first 'b' key and open the bulk load
@@ -245,6 +258,7 @@ static bool import_block_index_begin_bulk_scan(struct node_db *ndb,
     if (ok)
         ok = import_block_index_reset(ndb);
     if (!ok) {
+        import_block_index_restore_after_failure(ndb);
         import_block_index_close_sources(dbw, chain, ndb);
         return ok;
     }
@@ -261,6 +275,7 @@ static bool import_block_index_begin_bulk_scan(struct node_db *ndb,
                                            "T1 begin bulk load transaction");
     if (!begun) {
         db_iter_free(it);
+        import_block_index_restore_after_failure(ndb);
         import_block_index_close_sources(dbw, chain, ndb);
     }
     return begun;
@@ -417,6 +432,8 @@ static void import_block_index_finalize(struct node_db *ndb,
     if (!ok) {
         if (tx_open)
             snapshot_tx_rollback_best_effort(ndb, "T1 rollback after failure");
+        LOG_WARN("snapshot", "T1: import failed after %d rows", a->count);
+        import_block_index_restore_after_failure(ndb);
         import_block_index_close_sources(dbw, chain, ndb);
         return;
     }

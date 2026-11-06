@@ -76,5 +76,9 @@ bool boot_dispatch_blocks_table_hydrate(struct node_db *ndb, struct main_state *
                   : "skip (map already covers blocks table)");
     if (!want)
         return false;
-    return load_block_index_from_blocks_table(ndb, ms).ok;
+    struct zcl_result hydrated = load_block_index_from_blocks_table(ndb, ms);
+    if (!hydrated.ok)
+        LOG_WARN("block_index", "blocks-table hydrate refused: %s",
+                 hydrated.message);
+    return hydrated.ok;
 }

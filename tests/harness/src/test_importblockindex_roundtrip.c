@@ -746,6 +746,23 @@ static int ibr_d_check_local_memory_failure(const char *base,
     IBR_CHECK("scenario D: out of memory stops the import", !ok);
     IBR_CHECK("scenario D: out of memory quarantines nothing",
               q_after == q_before);
+
+    /* Read the file directly: opening it as a node database recreates them. */
+    sqlite3 *db = NULL;
+    int indexes = -1;
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+        sqlite3_stmt *st = NULL;
+        if (sqlite3_prepare_v2(db,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name"
+                " IN ('idx_blocks_height','idx_blocks_prev',"
+                "'idx_blocks_chainwork')", -1, &st, NULL) == SQLITE_OK &&
+            sqlite3_step(st) == SQLITE_ROW)
+            indexes = sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
+    }
+    sqlite3_close(db);
+    IBR_CHECK("scenario D: the failed import put the block indexes back",
+              indexes == 3);
     return failures;
 }
 
