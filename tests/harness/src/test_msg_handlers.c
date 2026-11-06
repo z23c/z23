@@ -1899,15 +1899,18 @@ static int test_getdata_held_while_serving_finishes_after(void)
         ASSERT(process_getdata(&mp, node, &s) == true);
         ASSERT(pin_segment_count(node) == 0);
         ASSERT(node->getdata_kept_count == 1);
+        ASSERT(atomic_load(&node->misbehavior) == 0);
 
         msg_send_replay_held(&mp, node);
         ASSERT(pin_segment_count(node) == 0);
         ASSERT(node->getdata_kept_count == 1);
+        ASSERT(atomic_load(&node->misbehavior) == 0);
 
         node->state = PEER_ACTIVE;
         msg_send_replay_held(&mp, node);
         ASSERT(node->getdata_kept_count == 0);
         ASSERT(pin_is_single_notfound(node, &h));
+        ASSERT(atomic_load(&node->misbehavior) == 0);
         stream_free(&s);
         p2p_node_free(node);
         main_state_free(&ms);
@@ -1947,15 +1950,63 @@ static int test_getdata_held_while_serving_past_the_slot(void)
         ASSERT(node->getdata_kept_count == GETDATA_KEPT_BLOCKS_MAX);
         h.data[0] = GETDATA_KEPT_BLOCKS_MAX;
         ASSERT(pin_is_single_notfound(node, &h));
+        ASSERT(atomic_load(&node->misbehavior) == 0);
 
         pin_clear_fixture_disconnect(node);
         node->state = PEER_ACTIVE;
         msg_send_replay_held(&mp, node);
         ASSERT(node->getdata_kept_count == 0);
         ASSERT(pin_segment_count(node) == 2);
+        ASSERT(atomic_load(&node->misbehavior) == 0);
         stream_free(&s);
         p2p_node_free(node);
         main_state_free(&ms);
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A truncated getdata fails while a snapshot is served, as at any other time,
+ * with no reply. Items read before the cut are kept as usual and still wait for
+ * the serve to end. */
+static int test_getdata_truncated_while_serving(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: a truncated getdata while serving fails, no reply") {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct msg_processor mp;
+        pin_mp_init(&mp, NULL, &nm);
+        struct p2p_node *node = pin_peer_node(&nm, 625);
+        ASSERT(node != NULL);
+        node->state = PEER_SNAPSHOT_SERVING;
+
+        /* The count promises an item and no item follows. */
+        struct byte_stream s;
+        stream_init(&s, 64);
+        stream_write_compact_size(&s, 1);
+        ASSERT(process_getdata(&mp, node, &s) == false);
+        ASSERT(pin_segment_count(node) == 0);
+        ASSERT(node->getdata_kept_count == 0);
+        stream_free(&s);
+
+        /* One whole item, then a second cut off part way through its bytes. */
+        struct uint256 h;
+        memset(h.data, 0x67, sizeof(h.data));
+        struct byte_stream cut;
+        stream_init(&cut, 64);
+        stream_write_compact_size(&cut, 2);
+        pin_inv_stream(&cut, MSG_BLOCK, &h);
+        const uint8_t partial[3] = { 0x02, 0x00, 0x00 };
+        stream_write(&cut, partial, sizeof(partial));
+        ASSERT(process_getdata(&mp, node, &cut) == false);
+        ASSERT(pin_segment_count(node) == 0);
+        ASSERT(node->getdata_kept_count == 1);
+        ASSERT(node->state == PEER_SNAPSHOT_SERVING);
+        stream_free(&cut);
+
+        p2p_node_free(node);
         net_manager_free(&nm);
         PASS();
     } _test_next:;
@@ -2685,6 +2736,7 @@ int test_msg_handlers(void)
     failures += test_pin_getdata_after_manifest_answers();
     failures += test_getdata_held_while_serving_finishes_after();
     failures += test_getdata_held_while_serving_past_the_slot();
+    failures += test_getdata_truncated_while_serving();
     failures += test_pin_getdata_count_unreadable();
     failures += test_pin_getdata_oversized_count();
     failures += test_pin_getdata_empty_count();
