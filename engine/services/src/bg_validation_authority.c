@@ -468,10 +468,9 @@ static void bgv_auth_checkpoint_store(struct bg_validation_service *svc,
  * GENESIS_HISTORY, never FULLY_VALIDATED); no operator is paged. The
  * blocker id is raised only by bgv_auth_refuse in this file, so clearing it
  * here retires this publisher's own earlier refusal, nobody else's. */
-static bool bgv_auth_checkpoint_checked(
+static bool bgv_auth_checkpoint_floor(
     struct bg_validation_service *svc, bool external_seeded,
-    const struct chain_evidence_controller_view *view,
-    const struct bgv_scan_tip *scanned, struct zcl_result *out)
+    const struct chain_evidence_controller_view *view, int32_t *floor)
 {
     uint8_t snapshot_root[32];
     size_t root_len = 0;
@@ -481,13 +480,22 @@ static bool bgv_auth_checkpoint_checked(
         return false;
     bg_validation_checkpoint_probe_fn probe = atomic_load(&g_checkpoint_probe);
     sqlite3 *pdb = progress_store_db();
-    int32_t floor = -1;
     if (!probe || !pdb)
         return false;
     progress_store_tx_lock();
-    bool installed = probe(pdb, &floor);
+    bool installed = probe(pdb, floor);
     progress_store_tx_unlock();
-    if (!installed || floor >= scanned->height)
+    return installed;
+}
+
+static bool bgv_auth_checkpoint_checked(
+    struct bg_validation_service *svc, bool external_seeded,
+    const struct chain_evidence_controller_view *view,
+    const struct bgv_scan_tip *scanned, struct zcl_result *out)
+{
+    int32_t floor = -1;
+    if (!bgv_auth_checkpoint_floor(svc, external_seeded, view, &floor) ||
+        floor >= scanned->height)
         return false;
     bgv_auth_checkpoint_store(svc, floor, scanned);
     blocker_clear("bg_validation.full_history_unproven");
@@ -499,6 +507,32 @@ static bool bgv_auth_checkpoint_checked(
                    "background check: checked blocks %d..%d above checkpoint "
                    "%d to the tip (not full-history authority)", floor + 1,
                    scanned->height, floor);
+    return true;
+}
+
+/* The same checkpoint node before its walk reaches the tip, or paused on a
+ * coverage gap with no script skips: the check is still running, so answer
+ * typed instead of paging. It names no checked range; the public wrapper
+ * withdraws any earlier CHECKED outcome. */
+static bool bgv_auth_checkpoint_checking(
+    struct bg_validation_service *svc, bool external_seeded, int64_t skips,
+    int verified, int chain_height, struct zcl_result *out)
+{
+    struct chain_evidence_controller authority;
+    struct chain_evidence_controller_view view;
+    int32_t floor = -1;
+    if (skips != 0)
+        return false;
+    chain_evidence_controller_init(&authority, svc->ndb, csr_instance());
+    chain_evidence_controller_snapshot(&authority, &view);
+    if (view.state == CEC_FULLY_VALIDATED ||
+        !bgv_auth_checkpoint_floor(svc, external_seeded, &view, &floor))
+        return false;
+    blocker_clear("bg_validation.full_history_unproven");
+    *out = ZCL_ERR(BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKING,
+                   "background check: checking blocks above checkpoint %d, "
+                   "at %d of tip %d (not full-history authority)", floor,
+                   verified, chain_height);
     return true;
 }
 
@@ -526,8 +560,13 @@ static struct zcl_result bgv_auth_publish_pass(
 
     chain_height = active_chain_height(&svc->ms->chain_active);
     if (!bgv_auth_walk_current(verified, chain_height, skips,
-                               coverage_complete, reason))
+                               coverage_complete, reason)) {
+        struct zcl_result checking;
+        if (bgv_auth_checkpoint_checking(svc, external_seeded, skips, verified,
+                                         chain_height, &checking))
+            return checking;
         return bgv_auth_refuse(reason);
+    }
 
     bool root_ok = false;
     int chain_height_after = -1;

@@ -45,8 +45,8 @@ bool bg_validation_authority_catchup_wanted(
  * `external_seeded` selects the assisted-snapshot evidence preflight; false
  * requires a genuine no-snapshot genesis-history campaign. A non-ok result
  * raises bg_validation.full_history_unproven with the exact missing proof,
- * except BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED (below), which raises
- * nothing and pages nobody. */
+ * except BG_VALIDATION_AUTHORITY_CHECKPOINT_CHECKED and _CHECKING (below),
+ * which raise nothing and page nobody. */
 struct zcl_result bg_validation_authority_publish(
     struct bg_validation_service *svc, bool external_seeded,
     bool coverage_complete);
