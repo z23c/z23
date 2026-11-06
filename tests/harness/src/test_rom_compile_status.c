@@ -767,6 +767,22 @@ static bool rcs_tip_bundle_layers_ok(const struct json_value *layers)
 
 /* Closed progress store: the shielded_import defaults the dumper reports
  * when no snapshot could be read. */
+static bool rcs_si_closed_pools_ok(const struct json_value *a,
+                                   const struct json_value *n)
+{
+    return !json_get_bool(json_get(a, "cursor_known")) &&
+           json_get_int(json_get(a, "sprout_activation_cursor")) == -1 &&
+           json_get_int(json_get(a, "sapling_activation_cursor")) == -1 &&
+           json_get_int(json_get(a, "sprout_anchors_imported")) == 0 &&
+           json_get_int(json_get(a, "sapling_anchors_imported")) == 0 &&
+           json_get_bool(json_get(a, "gap")) &&
+           !json_get_bool(json_get(n, "cursor_known")) &&
+           json_get_int(json_get(n, "activation_cursor")) == -1 &&
+           json_get_int(json_get(n, "sprout_nullifiers_imported")) == 0 &&
+           json_get_int(json_get(n, "sapling_nullifiers_imported")) == 0 &&
+           json_get_bool(json_get(n, "gap"));
+}
+
 static bool rcs_si_closed_ok(const struct json_value *si)
 {
     const struct json_value *a = json_get(si, "anchor");
@@ -779,17 +795,7 @@ static bool rcs_si_closed_ok(const struct json_value *si)
                       "progress_store_closed") &&
            rcs_str_is(json_get(si, "status"),
                       "unknown_snapshot_unavailable") &&
-           !json_get_bool(json_get(a, "cursor_known")) &&
-           json_get_int(json_get(a, "sprout_activation_cursor")) == -1 &&
-           json_get_int(json_get(a, "sapling_activation_cursor")) == -1 &&
-           json_get_int(json_get(a, "sprout_anchors_imported")) == 0 &&
-           json_get_int(json_get(a, "sapling_anchors_imported")) == 0 &&
-           json_get_bool(json_get(a, "gap")) &&
-           !json_get_bool(json_get(n, "cursor_known")) &&
-           json_get_int(json_get(n, "activation_cursor")) == -1 &&
-           json_get_int(json_get(n, "sprout_nullifiers_imported")) == 0 &&
-           json_get_int(json_get(n, "sapling_nullifiers_imported")) == 0 &&
-           json_get_bool(json_get(n, "gap"));
+           rcs_si_closed_pools_ok(a, n);
 }
 
 static int test_rom_compile_dump_closed_store_values(void)

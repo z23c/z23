@@ -831,6 +831,18 @@ static int ms_failures_stdout_closed(void)
     return failures;
 }
 
+static bool mx_uuid_shaped(const char *a)
+{
+    if (strlen(a) != 36)
+        return false;
+    for (size_t i = 0; i < 36; i++) {
+        bool dash = i == 8 || i == 13 || i == 18 || i == 23;
+        if (dash ? a[i] != '-' : strchr("0123456789abcdef", a[i]) == NULL)
+            return false;
+    }
+    return true;
+}
+
 static int ms_failures_command_id(void)
 {
     int failures = 0;
@@ -838,14 +850,8 @@ static int ms_failures_command_id(void)
     MS_CHECK("command_id refuses a NULL buffer", !muse_session_command_id(NULL));
     MS_CHECK("command_id mints a lowercase UUID-shaped, version-7, "
              "variant-10 handle", muse_session_command_id(a) && strlen(a) == 36);
-    bool shaped = strlen(a) == 36;
-    for (size_t i = 0; shaped && i < 36; i++) {
-        bool dash = i == 8 || i == 13 || i == 18 || i == 23;
-        bool hex = (a[i] >= '0' && a[i] <= '9') || (a[i] >= 'a' && a[i] <= 'f');
-        shaped = dash ? a[i] == '-' : hex;
-    }
-    MS_CHECK("command_id layout", shaped && a[14] == '7' &&
-             (a[19] == '8' || a[19] == '9' || a[19] == 'a' || a[19] == 'b'));
+    MS_CHECK("command_id layout", mx_uuid_shaped(a) && a[14] == '7' &&
+             strchr("89ab", a[19]) != NULL);
     MS_CHECK("command_id two handles differ in their random tail",
         muse_session_command_id(b) && strcmp(a + 24, b + 24) != 0);
     return failures;
