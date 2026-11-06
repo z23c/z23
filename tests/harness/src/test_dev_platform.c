@@ -7425,31 +7425,49 @@ static bool dp_rr_exact_edit_revert(struct dp_rr_fx *f)
 static bool dp_rr_edit_build(struct dp_rr_fx *f)
 {
     struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
+    f->stage = "edit build";
+    f->why[0] = 0;
     if (!dp_mk_write(f->root, "tools/dev/restart_fixture.c",
                      "int restart_fixture(void) { return 9; }\n"))
         return false;
     memset(receipt, 0, sizeof(*receipt));
-    return zcl_devloop_restart_build(f->root, f->changed, 1, receipt, &f->process,
-                                   f->why, sizeof(f->why)) &&
+    bool built = zcl_devloop_restart_build(f->root, f->changed, 1, receipt, &f->process,
+                                           f->why, sizeof(f->why));
+    bool ok = built &&
         !receipt->artifact_cache_hit && receipt->compiler_processes == 2 &&
         receipt->linker_processes == 1 &&
         receipt->complete_graph_linker_processes == dp_restart_complete_links(receipt->linker_processes) &&
         strcmp(receipt->artifact_cache_key, f->first_build_key) != 0;
+    if (!ok)
+        fprintf(stderr, "edit build: built=%d hit=%d compile=%u link=%u complete_link=%u key_match=%d why=%s\n",
+                built, receipt->artifact_cache_hit, receipt->compiler_processes, receipt->linker_processes,
+                receipt->complete_graph_linker_processes,
+                strcmp(receipt->artifact_cache_key, f->first_build_key) == 0, f->why);
+    return ok;
 }
 
 static bool dp_rr_revert_build(struct dp_rr_fx *f)
 {
     struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
+    f->stage = "revert build";
+    f->why[0] = 0;
     if (!dp_mk_write(f->root, "tools/dev/restart_fixture.c",
                      "int restart_fixture(void) { return 7; }\n"))
         return false;
     memset(receipt, 0, sizeof(*receipt));
-    return zcl_devloop_restart_build(f->root, f->changed, 1, receipt, &f->process,
-                                   f->why, sizeof(f->why)) &&
-        receipt->artifact_cache_hit && receipt->compiler_processes == 2 &&
+    bool built = zcl_devloop_restart_build(f->root, f->changed, 1, receipt, &f->process,
+                                           f->why, sizeof(f->why));
+    bool ok = built && receipt->artifact_cache_hit && receipt->compiler_processes == 2 &&
         receipt->linker_processes == 0 && receipt->complete_graph_linker_processes == 0 &&
         strcmp(receipt->artifact_cache_key, f->first_build_key) == 0 &&
         strcmp(receipt->artifact_sha256, f->first_build_hash) == 0;
+    if (!ok)
+        fprintf(stderr, "revert build: built=%d hit=%d compile=%u link=%u complete_link=%u key_match=%d hash_match=%d why=%s\n",
+                built, receipt->artifact_cache_hit, receipt->compiler_processes, receipt->linker_processes,
+                receipt->complete_graph_linker_processes,
+                strcmp(receipt->artifact_cache_key, f->first_build_key) == 0,
+                strcmp(receipt->artifact_sha256, f->first_build_hash) == 0, f->why);
+    return ok;
 }
 
 static bool dp_rr_overwide_a(struct dp_rr_fx *f, const struct zcl_devloop_plan *overwide)
