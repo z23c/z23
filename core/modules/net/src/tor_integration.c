@@ -226,6 +226,14 @@ static void *tor_persist_find_service(const char *address)
     return service;
 }
 
+#ifdef ZCL_TESTING
+void *tor_integration_find_service_for_test(const char *address)
+{
+    return tor_persist_symbols_available() ? tor_persist_find_service(address)
+                                           : NULL;
+}
+#endif
+
 /* Print the install summary lines. */
 static void tor_persist_announce(bool created, const char *address)
 {

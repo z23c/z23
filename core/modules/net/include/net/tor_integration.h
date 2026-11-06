@@ -331,6 +331,9 @@ void tor_integration_close_gate_for_test(bool closed);
 bool tor_integration_control_sockets_for_test(int64_t *ours, int64_t *tors,
                                               uint64_t *tors_dev,
                                               uint64_t *tors_ino);
+/* Test seam: the service Tor registered for this address (56 chars, no
+ * ".onion"), or NULL. */
+void *tor_integration_find_service_for_test(const char *address);
 #endif
 
 #ifdef ZCL_TESTING

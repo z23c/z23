@@ -1079,3 +1079,7 @@ later lane flips it HARD.
 - 2026-11-06T05:28:14Z — REASON: Name the 15 s frontend-stop alarm as what ends a node with Tor stuck
   old ROOT: 65bddea1a06fae69423193cfac04dc78c3bfc85fe849679702a1c712edc55e76
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-06T05:28:49Z — REASON: Check that dynhost's slot holds the persistent service, not just anything
+  old ROOT: 019c0299b613b8cb502e90e956792971df2302b756c3a5083c3c39761255476c
+  by: owner unseal ritual (make core-unseal)

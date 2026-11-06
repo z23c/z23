@@ -1778,6 +1778,25 @@ static bool persist_wait_installed(void)
 
 extern void *dynhost_get_global_service(void) ZCL_WEAK_IMPORT;
 
+/* Onion HTTP reaches the node only when dynhost's slot holds the service Tor
+ * registered for our address. A non-NULL slot proves nothing: the install holds
+ * it with a sentinel before it registers anything. */
+static const char *persist_slot_problem(const char *datadir)
+{
+    uint8_t seed[32];
+    char addr[57];
+    bool created = false;
+    if (!onion_identity_ensure(datadir, seed, addr, sizeof(addr), &created) ||
+        created)
+        return "the install left no persistent identity to read";
+    void *service = tor_integration_find_service_for_test(addr);
+    if (!service)
+        return "Tor has no service for the persistent address";
+    if (*(void **)dynhost_get_global_service() != service)
+        return "dynhost does not point at the persistent service";
+    return NULL;
+}
+
 /* -onion-persist against the real Tor, network disabled: the node's own
  * identity is registered while Tor's loop runs and dynhost points at it. */
 static int test_tor_persist_install_with_loop_running(void)
@@ -1801,8 +1820,8 @@ static int test_tor_persist_install_with_loop_running(void)
         why = "tor main loop never reached";
     else if (!persist_wait_installed())
         why = "the persistent identity was not installed";
-    else if (!*(void **)dynhost_get_global_service())
-        why = "dynhost does not point at a service";
+    else
+        why = persist_slot_problem(tmpdir);
     tor_integration_stop();
     if (!why)
         why = stop_handoff_check_ended(tmpdir, true);
