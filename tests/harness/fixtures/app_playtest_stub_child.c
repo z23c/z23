@@ -36,7 +36,7 @@ extern char **environ;
 #define APS_REQUEST_MAX 4096u
 #define APS_HUGE_BYTES (13u * 1024u * 1024u)
 
-static bool aps_io(void *buffer, size_t size, bool sending)
+static bool apc_io(void *buffer, size_t size, bool sending)
 {
     unsigned char *bytes = buffer;
     for (size_t done = 0; done < size;) {
@@ -52,22 +52,22 @@ static bool aps_io(void *buffer, size_t size, bool sending)
     return true;
 }
 
-static bool aps_header(const char *nonce, uint32_t length)
+static bool apc_header(const char *nonce, uint32_t length)
 {
     struct resident_result_header header;
     memset(&header, 0, sizeof(header));
     (void)snprintf(header.magic, sizeof(header.magic), "%s", "z23-res-run-v1");
     (void)snprintf(header.nonce, sizeof(header.nonce), "%s", nonce);
     header.payload_len = length;
-    return aps_io(&header, sizeof(header), true);
+    return apc_io(&header, sizeof(header), true);
 }
 
-static bool aps_send(const char *nonce, const char *payload, size_t length)
+static bool apc_send(const char *nonce, const char *payload, size_t length)
 {
-    return aps_header(nonce, (uint32_t)length) && aps_io((void *)payload, length, true);
+    return apc_header(nonce, (uint32_t)length) && apc_io((void *)payload, length, true);
 }
 
-static bool aps_env_allowed(void)
+static bool apc_env_allowed(void)
 {
     static const char *const names[] = {"DISPLAY", "WAYLAND_DISPLAY",
         "XDG_RUNTIME_DIR", "XAUTHORITY", "XDG_SESSION_TYPE"};
@@ -84,7 +84,7 @@ static bool aps_env_allowed(void)
     return true;
 }
 
-static bool aps_args(int argc, char **argv)
+static bool apc_args(int argc, char **argv)
 {
     return argc == 5 && strcmp(argv[1], "--resident") == 0 &&
            strlen(argv[2]) == RESIDENT_LAUNCH_NONCE_HEX &&
@@ -93,7 +93,7 @@ static bool aps_args(int argc, char **argv)
 }
 
 /* 1 = a request in payload, 0 = STOP or EOF, -1 = malformed. */
-static int aps_read(const char *nonce, char payload[APS_REQUEST_MAX + 1])
+static int apc_read(const char *nonce, char payload[APS_REQUEST_MAX + 1])
 {
     struct resident_result_header header;
     memset(&header, 0, sizeof(header));
@@ -101,59 +101,57 @@ static int aps_read(const char *nonce, char payload[APS_REQUEST_MAX + 1])
     ssize_t first = read(RESIDENT_LAUNCH_CHILD_FD, &header, 1);
     if (first == 0)
         return 0;
-    if (first != 1 || !aps_io((char *)&header + 1, prefix - 1, false) ||
+    if (first != 1 || !apc_io((char *)&header + 1, prefix - 1, false) ||
         memcmp(header.nonce, nonce, sizeof(header.nonce)) != 0)
         return -1;
     if (memcmp(header.magic, "z23-res-stop-v1", sizeof("z23-res-stop-v1")) == 0)
         return 0;
     if (memcmp(header.magic, "z23-res-run-v1", sizeof("z23-res-run-v1")) != 0 ||
-        !aps_io((char *)&header + prefix, sizeof(header) - prefix, false) ||
+        !apc_io((char *)&header + prefix, sizeof(header) - prefix, false) ||
         header.payload_len == 0 || header.payload_len > APS_REQUEST_MAX ||
-        !aps_io(payload, header.payload_len, false))
+        !apc_io(payload, header.payload_len, false))
         return -1;
     payload[header.payload_len] = '\0';
     return 1;
 }
 
-static unsigned long aps_number(const char *payload, const char *key)
+static unsigned long apc_field(const char *payload, const char *key)
 {
     const char *at = strstr(payload, key);
     return at ? strtoul(at + strlen(key), NULL, 10) : 0;
 }
 
-#if defined(APS_STUB_HANG)
-static void aps_misbehave(const char *nonce)
+#if defined(APS_STUB_HANG) || defined(APS_STUB_HUGE)
+/* The HANG and HUGE builds misbehave on their first step; never returns. */
+[[noreturn]] static void apc_misbehave(const char *nonce)
 {
+#if defined(APS_STUB_HANG)
     (void)nonce;
     (void)fork(); /* a helper in the same process group */
-    for (;;)
-        pause();
-}
-#elif defined(APS_STUB_HUGE)
-static void aps_misbehave(const char *nonce)
-{
+#else
     static char filler[65536];
     memset(filler, ' ', sizeof(filler));
-    if (!aps_header(nonce, APS_HUGE_BYTES))
+    if (!apc_header(nonce, APS_HUGE_BYTES))
         exit(5);
     for (size_t sent = 0; sent < APS_HUGE_BYTES; sent += sizeof(filler))
-        if (!aps_io(filler, sizeof(filler), true))
+        if (!apc_io(filler, sizeof(filler), true))
             exit(5);
+#endif
     for (;;)
         pause();
 }
 #endif
 
-static bool aps_reply(const char *nonce, const char *request, unsigned *frame)
+static bool apc_reply(const char *nonce, const char *request, unsigned *frame)
 {
-    unsigned long id = aps_number(request, "\"id\":");
+    unsigned long id = apc_field(request, "\"id\":");
     bool step = strstr(request, "\"op\":\"step\"") != NULL;
 #if defined(APS_STUB_HANG) || defined(APS_STUB_HUGE)
     if (step)
-        aps_misbehave(nonce);
+        apc_misbehave(nonce);
 #endif
     if (step)
-        *frame += (unsigned)aps_number(request, "\"frames\":");
+        *frame += (unsigned)apc_field(request, "\"frames\":");
     bool capture = strstr(request, "\"capture\":true") != NULL;
     char reply[1024];
     int n = snprintf(reply, sizeof(reply),
@@ -163,25 +161,25 @@ static bool aps_reply(const char *nonce, const char *request, unsigned *frame)
         id, *frame, (double)*frame / 60.0, *frame, id,
         capture ? ",\"png\":{\"width\":1,\"height\":1,\"bytes\":3,"
                   "\"base64\":\"YWJj\"}" : "");
-    return n > 0 && (size_t)n < sizeof(reply) && aps_send(nonce, reply, (size_t)n);
+    return n > 0 && (size_t)n < sizeof(reply) && apc_send(nonce, reply, (size_t)n);
 }
 
 int main(int argc, char **argv)
 {
-    if (!aps_args(argc, argv))
+    if (!apc_args(argc, argv))
         return 2;
-    if (!aps_env_allowed())
+    if (!apc_env_allowed())
         return 3;
     const char *nonce = argv[2];
-    if (!aps_send(nonce, "READY", 5))
+    if (!apc_send(nonce, "READY", 5))
         return 4;
     unsigned frame = 0;
     char request[APS_REQUEST_MAX + 1];
     for (;;) {
-        int got = aps_read(nonce, request);
+        int got = apc_read(nonce, request);
         if (got == 0)
             return 0;
-        if (got < 0 || !aps_reply(nonce, request, &frame))
+        if (got < 0 || !apc_reply(nonce, request, &frame))
             return 6;
     }
 }

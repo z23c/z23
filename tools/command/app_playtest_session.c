@@ -7,6 +7,7 @@
 #include "json/json.h"
 #include "platform/positioned_file.h"
 #include "sha3/sha3.h"
+#include "util/path_util.h"
 #include "zbase64/zbase64.h"
 
 #include <errno.h>
@@ -97,16 +98,6 @@ static bool aps_step_valid(const struct app_playtest_step *step)
            aps_axis_valid(step->input.camera_x);
 }
 
-static bool aps_sha3_hex_valid(const char *hex)
-{
-    if (!hex || strlen(hex) != RESIDENT_LAUNCH_DIGEST_HEX)
-        return false;
-    for (size_t i = 0; i < RESIDENT_LAUNCH_DIGEST_HEX; i++)
-        if (!((hex[i] >= '0' && hex[i] <= '9') || (hex[i] >= 'a' && hex[i] <= 'f')))
-            return false;
-    return true;
-}
-
 static bool aps_script_valid(const struct app_playtest_request *request,
                              struct app_playtest_result *out)
 {
@@ -140,7 +131,7 @@ static bool aps_request_valid(const struct app_playtest_request *request,
         return false;
     if (!request->image_path || !request->image_path[0])
         return aps_fail(out, APP_PLAYTEST_INVALID_REQUEST, "app playtest: no image path");
-    if (!aps_sha3_hex_valid(request->image_sha3_hex))
+    if (!zcl_is_lower_hex(request->image_sha3_hex, RESIDENT_LAUNCH_DIGEST_HEX))
         return aps_fail(out, APP_PLAYTEST_INVALID_REQUEST,
                         "app playtest: image_sha3 must be 64 lowercase hex digits");
     return true;
@@ -213,10 +204,7 @@ static bool aps_capture_bytes(const char *base64, size_t declared,
                         &decoded) || decoded != declared)
         return false;
     uint8_t digest[32];
-    struct sha3_256_ctx sha;
-    sha3_256_init(&sha);
-    sha3_256_write(&sha, capture->png, decoded);
-    sha3_256_finalize(&sha, digest);
+    zcl_sha3_256(capture->png, decoded, digest);
     zcl_hex_encode(digest, sizeof(digest), capture->sha3_hex);
     capture->bytes = decoded;
     capture->present = true;

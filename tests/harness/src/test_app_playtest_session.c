@@ -63,17 +63,6 @@ static bool aps_file_sha3(const char *path, char hex[RESIDENT_LAUNCH_DIGEST_HEX 
     return ok;
 }
 
-static void aps_bytes_sha3(const void *bytes, size_t n,
-                           char hex[RESIDENT_LAUNCH_DIGEST_HEX + 1u])
-{
-    struct sha3_256_ctx sha;
-    sha3_256_init(&sha);
-    sha3_256_write(&sha, bytes, n);
-    unsigned char digest[32];
-    sha3_256_finalize(&sha, digest);
-    zcl_hex_encode(digest, sizeof(digest), hex);
-}
-
 static struct app_playtest_step aps_step(uint32_t id, uint32_t frames, bool capture)
 {
     struct app_playtest_step s = {.id = id, .capture = capture};
@@ -91,8 +80,11 @@ static struct app_playtest_result *aps_result(void)
 
 #if defined(__linux__)
 /* The child (and group leader) is gone: no longer our child, and no member
- * of its process group survives. A helper orphaned by the group kill is
- * reparented to a subreaper (us, if we are one) and reaped there. */
+ * of its process group survives. A helper killed with the group stays a
+ * zombie member until its new parent (init, or us when we are a subreaper)
+ * reaps it, so wait for that outcome without a deadline of our own: a
+ * helper the group kill missed never exits, and the group watchdog fails
+ * the run instead of this case passing. */
 static bool aps_group_gone(uint64_t pid)
 {
     if (!pid)
@@ -102,15 +94,14 @@ static bool aps_group_gone(uint64_t pid)
         return false;
     int subreaper = 0;
     (void)prctl(PR_GET_CHILD_SUBREAPER, &subreaper);
-    for (int i = 0; i < 300; i++) {
+    for (;;) {
         if (subreaper)
             (void)waitpid(-(pid_t)pid, &status, WNOHANG);
-        if (kill(-(pid_t)pid, 0) != 0 && errno == ESRCH)
-            return true;
+        if (kill(-(pid_t)pid, 0) != 0)
+            return errno == ESRCH;
         struct timespec nap = {0, 10 * 1000 * 1000};
         nanosleep(&nap, NULL);
     }
-    return false;
 }
 
 static bool aps_run(const char *image, const struct app_playtest_step *steps,
@@ -159,7 +150,9 @@ static int test_aps_frames(void)
         ASSERT(out->steps[2].player_present);
         ASSERT(out->steps[2].y == 120.0);
         char abc[RESIDENT_LAUNCH_DIGEST_HEX + 1u];
-        aps_bytes_sha3("abc", 3, abc);
+        unsigned char abc_digest[32];
+        zcl_sha3_256((const unsigned char *)"abc", 3, abc_digest);
+        zcl_hex_encode(abc_digest, sizeof(abc_digest), abc);
         ASSERT(out->steps[0].capture.present);
         ASSERT_STR_EQ(out->steps[0].capture.sha3_hex, abc);
         ASSERT_EQ(out->steps[0].capture.bytes, (size_t)3);
