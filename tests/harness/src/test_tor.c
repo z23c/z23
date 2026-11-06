@@ -1739,15 +1739,18 @@ static const char *stop_handoff_self_end_case(void)
     /* The watch's own route: no stop ran, so a retry may start Tor. */
     if (!why && !tor_integration_retry_start(tmpdir, 39255))
         why = "the start after Tor ended by itself was refused";
-    if (!why && (stop_handoff_socket_open(&old, 0) ||
-                 stop_handoff_socket_open(&old, 1)))
-        why = "the start did not close the ended run's control sockets";
     if (!why && !tor_integration_is_enabled())
         why = "the start after Tor ended by itself did not run Tor";
     stop_handoff_sockets_capture(&fresh);
     if (!why && (!fresh.held || fresh.ino[0] == old.ino[0]))
         why = "the new run did not make its own control connection";
     stop_handoff_timed("early");
+    /* Only now: the new run may hold the old descriptor numbers, and its Tor may
+     * close them at any moment. An old socket nothing closed still has its inode
+     * here, because the stop closes only the new run's. */
+    if (!why && (stop_handoff_socket_open(&old, 0) ||
+                 stop_handoff_socket_open(&old, 1)))
+        why = "the start did not close the ended run's control sockets";
     if (!why && tor_log_owner_close_count(tmpdir) != 2)
         why = "the second run did not exit through its control connection";
     if (!why && tor_integration_is_enabled())
