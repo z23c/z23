@@ -334,25 +334,31 @@ static void listunspent_push_db_script_address(struct json_value *entry,
     }
 }
 
-/* A wallet row that carries a height keeps it. A row at height 0 gets its
- * height (and coinbase flag) from the coin in the coins database, which must
- * exist and agree with the row's amount and script; the utxos projection is
- * not consulted. False means the row is not confirmed and is left out. */
+/* A wallet row that carries a height keeps it. A row at height 0 is normal
+ * for a mempool output or the wallet's own change: it has no coin yet, so it
+ * stays at height 0 (zero confirmations, never mature, excluded by minconf 1)
+ * with no fix-up. When the coin exists and agrees with the row's amount and
+ * script, the height and coinbase flag come from the coin. The utxos
+ * projection is never consulted. False means a coin exists but its amount or
+ * script disagrees with the row: the row is left out. */
 static bool listunspent_db_utxo_height(const struct wallet_rpc_context *ctx,
                                        struct db_wallet_utxo *u, int *height)
 {
-    *height = u->height;
-    if (u->height > 0)
+    *height = u->height > 0 ? u->height : 0;
+    if (u->height > 0 || !ctx->coins_tip)
         return true;
     struct wallet_row_coin coin;
-    if (!ctx->coins_tip ||
-        wallet_row_check_coin(ctx->coins_tip, u->txid, u->vout, u->value,
-                              u->script, u->script_len, &coin) !=
-            WALLET_ROW_AGREES)
+    switch (wallet_row_check_coin(ctx->coins_tip, u->txid, u->vout, u->value,
+                                  u->script, u->script_len, &coin)) {
+    case WALLET_ROW_AGREES:
+        *height = coin.height;
+        u->is_coinbase = coin.is_coinbase;
+        return true;
+    case WALLET_ROW_NO_COIN:
+        return true;
+    default:
         return false;
-    *height = coin.height;
-    u->is_coinbase = coin.is_coinbase;
-    return true;
+    }
 }
 
 static bool listunspent_db_utxo_eligible(struct db_wallet_utxo *u, int confs,
@@ -371,11 +377,11 @@ static void listunspent_push_db_utxos(struct wallet_rpc_context *ctx,
 {
     struct db_wallet_utxo utxos[4096];
     int n = db_wallet_utxo_list_unspent(ctx->node_db, utxos, 4096);
-    int unconfirmed = 0;
+    int disagreeing = 0;
     for (int i = 0; i < n; i++) {
         int h = 0;
         if (!listunspent_db_utxo_height(ctx, &utxos[i], &h)) {
-            unconfirmed++;
+            disagreeing++;
             db_wallet_utxo_free(&utxos[i]);
             continue;
         }
@@ -410,9 +416,10 @@ static void listunspent_push_db_utxos(struct wallet_rpc_context *ctx,
         json_free(&entry);
         db_wallet_utxo_free(&utxos[i]);
     }
-    if (unconfirmed > 0)
+    if (disagreeing > 0)
         LOG_WARN("wallet", "listunspent: %d height-0 wallet_utxos rows left "
-                 "out: the coins database does not confirm them", unconfirmed);
+                 "out: the coin carries a different amount or script than "
+                 "the row", disagreeing);
 }
 
 static void listunspent_push_wallet_coins(struct wallet_rpc_context *ctx,
