@@ -419,6 +419,12 @@ bool consensus_state_install_read_authority_stamp(
     struct sqlite3 *progress_db, struct consensus_state_install_stamp *out,
     bool *found);
 
+/* Drops the stamp when the coins stop being the install's without a coins
+ * reset (the cold-import stage seed). Standalone; the caller holds
+ * progress_store_tx_lock. False only on a store error. */
+bool consensus_state_install_release_authority_stamp(
+    struct sqlite3 *progress_db);
+
 #ifdef ZCL_TESTING
 /* Force activate's independent-replay authority gate open, bypassing the
  * on-disk replay receipt. Lets the activate/copy-proof fixtures drive the

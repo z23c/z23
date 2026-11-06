@@ -505,12 +505,17 @@ static bool sov_rom_stamp_at(sqlite3 *pdb, int32_t seed)
 {
     struct consensus_state_install_stamp st;
     bool found = false;
+    uint64_t live_generation = 0;
     const struct rom_state_checkpoint *rom =
         get_baked_rom_state_checkpoint_at_height(seed);
+    /* A coin reset since the install (reindex, refold, mint-anchor reset)
+     * bumped the generation: the live coins are not the install's. */
     return rom &&
            consensus_state_install_read_authority_stamp(pdb, &st, &found) &&
            found && st.kind == CONSENSUS_INSTALL_STAMP_CHECKPOINT_ROM &&
            st.height == seed &&
+           coins_kv_get_authority_generation(pdb, &live_generation) &&
+           st.coins_generation == live_generation &&
            memcmp(st.utxo_root, rom->utxo_root, 32) == 0 &&
            memcmp(st.block_hash, rom->block_hash, 32) == 0;
 }

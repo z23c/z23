@@ -170,3 +170,14 @@ bool consensus_state_install_read_authority_stamp(
     *found = true;
     return true;
 }
+
+bool consensus_state_install_release_authority_stamp(sqlite3 *progress_db)
+{
+    if (!progress_db || !progress_meta_delete(progress_db,
+                                              INSTALL_STAMP_META_KEY)) {
+        LOG_WARN(ASSISTED_SEAM_SUBSYS,
+                 "release_authority_stamp: progress_meta_delete failed");
+        return false;
+    }
+    return true;
+}

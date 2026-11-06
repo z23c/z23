@@ -489,6 +489,12 @@ static bool activate_stamp_install_authority(
     };
     memcpy(stamp.block_hash, m->block_hash, 32);
     memcpy(stamp.utxo_root, m->utxo_root, 32);
+    /* The generation this cutover just bumped: any later coin reset bumps
+     * it again, and the stamp stops describing the live coins. */
+    if (!coins_kv_get_authority_generation(progress_db,
+                                           &stamp.coins_generation))
+        return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
+                             "reading the coins authority generation failed");
     if (!consensus_state_install_record_authority_stamp(progress_db, &stamp))
         return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
                              "recording the install authority stamp failed");

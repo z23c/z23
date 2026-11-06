@@ -30,7 +30,8 @@
 #include "storage/coins_kv.h"
 #include "models/database.h"
 #include "core/uint256.h"
-#include "config/boot.h"          /* boot_refold_from_anchor_reset/_artifact_available (W1-L1) */
+#include "config/consensus_state_snapshot_install.h"
+#include "config/boot.h"       /* boot_refold_from_anchor_reset/_artifact_available (W1-L1) */
 #include "jobs/refold_progress.h" /* refold_progress_mark_started_from_anchor (W1-L1) */
 
 #include <sqlite3.h>
@@ -755,6 +756,21 @@ static bool cold_import_seed_declare_floor(sqlite3 *db, int32_t H)
     return ok;
 }
 
+/* Drops any bundle install's authority stamp under the progress-store
+ * transaction lock; logs and returns false on a store error. */
+static bool cold_import_seed_release_install_stamp(sqlite3 *db, int32_t H)
+{
+    progress_store_tx_lock();
+    bool ok = consensus_state_install_release_authority_stamp(db);
+    progress_store_tx_unlock();
+    if (!ok)
+        LOG_WARN_IN("block_index_loader_seed_stages_from_cold_import",
+                 "block_index",
+                 "cold-import seed: releasing the install authority stamp "
+                 "failed H=%d — leaving durable anchor for next-boot retry", H);
+    return ok;
+}
+
 /* Gates (2b) forward-only and (2c) live-import provenance for the cold-import
  * seed; logs and returns false on either refusal. */
 static bool cold_import_seed_chain_provenance_ok(struct main_state *ms,
@@ -800,6 +816,12 @@ static int cold_import_seed_commit(sqlite3 *progress_db,
                                    const uint8_t anchor_hash[32],
                                    int32_t H, int32_t hstar)
 {
+    /* (3c) The coins now answer for this import, not for any earlier bundle
+     *      install: drop its authority stamp before any cursor moves, so a
+     *      half-done seed can never read as "verified from the checkpoint". */
+    if (!cold_import_seed_release_install_stamp(progress_db, H))
+        return -1;  // raw-return-ok:logged by cold_import_seed_release_install_stamp
+
     /* (4) Set the SECOND authority FIRST: coins_applied_height = H+1 (the
      *     utxo_apply NEXT-height cursor convention — applied through H means
      *     coins_applied_height == H+1). reducer_anchor_candidate_ok normalizes
