@@ -602,10 +602,23 @@ static void *eho_count_on_worker(void *arg)
     return NULL;
 }
 
+/* AddressSanitizer aborts on a request this size unless told to return NULL. */
+#if defined(__SANITIZE_ADDRESS__)
+#define EHO_UNDER_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define EHO_UNDER_ASAN 1
+#endif
+#endif
+
 static int eho_failure_count_contract(void)
 {
     int failures = 0;
     printf("\n--- failure count: real NULL returns, per thread ---\n");
+#ifdef EHO_UNDER_ASAN
+    printf("  (AddressSanitizer build: impossible-size requests not made)\n");
+    return failures;
+#endif
 
     uint64_t before = zcl_alloc_failure_count();
     void *ok_block = zcl_malloc(16, "eho_possible");

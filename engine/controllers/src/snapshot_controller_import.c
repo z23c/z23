@@ -219,7 +219,8 @@ static bool import_block_index_rebuild_block_indexes(struct node_db *ndb);
  * whose schema step creates them. */
 static void import_block_index_restore_after_failure(struct node_db *ndb)
 {
-    LOG_WARN("snapshot", "T1: the blocks table is partial; rerun the import");
+    LOG_WARN("snapshot", "T1: the blocks table may be partial; rerun the "
+             "import");
     if (!thread_registry_shutdown_requested())
         (void)import_block_index_rebuild_block_indexes(ndb);
 }
