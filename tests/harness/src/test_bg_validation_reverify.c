@@ -16,7 +16,9 @@
 #include "consensus/upgrades.h"
 #include "core/arith_uint256.h"
 #include "core/serialize.h"
+#include "event/event.h"
 #include "jobs/reducer_frontier.h"
+#include "jobs/stage_db_fault.h"
 #include "mining/miner.h"
 #include "platform/rng.h"
 #include "platform/time_compat.h"
@@ -1108,6 +1110,13 @@ static int test_bg_validation_memory_failure_consumers(void)
     return failures;
 }
 
+static void bg_count_page(enum event_type type, uint32_t peer_id,
+                          const void *payload, uint32_t payload_len, void *ctx)
+{
+    (void)type; (void)peer_id; (void)payload; (void)payload_len;
+    atomic_fetch_add((_Atomic int *)ctx, 1);
+}
+
 static int test_bg_validation_walk_memory_failure_not_booked(void)
 {
     int failures = 0;
@@ -1128,16 +1137,33 @@ static int test_bg_validation_walk_memory_failure_not_booked(void)
                                                  body_repair_no_sleep);
         bg_validation_test_set_row_backoff_stubs(NULL, body_repair_no_sleep);
         bg_validation_test_set_validate_stub(validation_fails_out_of_memory);
+        /* Held past its budget, the hold names a permanent blocker and pages
+         * the operator once for the height, however often it retries. */
+        static _Atomic int pages = 0;
+        atomic_store(&pages, 0);
+        blocker_clear("bg_validation.local_out_of_memory");
+        event_clear_observers(EV_OPERATOR_NEEDED);
+        bool observing = event_observe(EV_OPERATOR_NEEDED, bg_count_page,
+                                       &pages);
+        stage_memory_hold_budget_set_for_test(0);
         bool reached =
             bg_validation_test_catch_up_round(&svc, 1, "unused", NULL, 1);
+        stage_memory_hold_budget_set_for_test(-1);
+        event_clear_observers(EV_OPERATOR_NEEDED);
         bg_validation_test_set_validate_stub(NULL);
         bg_validation_test_set_row_backoff_stubs(NULL, NULL);
         bg_validation_test_set_body_repair_stubs(NULL, NULL);
         reducer_frontier_body_read_note_reset_for_testing();
+        int blocker_class =
+            blocker_class_for("bg_validation.local_out_of_memory");
+        blocker_clear("bg_validation.local_out_of_memory");
 
         ASSERT(!reached);
         ASSERT_EQ(atomic_load(&svc.progress.verified_height), 0);
         ASSERT(atomic_load(&svc.progress.state) != BG_VALIDATION_FAILED);
+        ASSERT(observing);
+        ASSERT_EQ(blocker_class, (int)BLOCKER_PERMANENT);
+        ASSERT_EQ(atomic_load(&pages), 1);
         main_state_free(&ms);
         g_restart_progress = 1;
         PASS();

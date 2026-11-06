@@ -20,6 +20,8 @@
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 #include "jobs/script_validate_verify.h"
+#include "jobs/stage_db_fault.h"
+#include "event/event.h"
 #include "util/blocker.h"
 #include "util/safe_alloc.h"
 #include "util/stage.h"
@@ -550,11 +552,62 @@ static int sv_case_local_failure_one(const char *tag, bool on_worker)
     return failures;
 }
 
+static void sv_count_page(enum event_type type, uint32_t peer_id,
+                          const void *payload, uint32_t payload_len, void *ctx)
+{
+    (void)type; (void)peer_id; (void)payload; (void)payload_len;
+    atomic_fetch_add((_Atomic int *)ctx, 1);
+}
+
+/* A memory hold that outlasts its budget names a permanent blocker, pages the
+ * operator once for the height, and lets go once memory is back. */
+static int sv_case_local_failure_budget(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_sv sc;
+    SV_CHECK("local_failure_budget: setup",
+             sv_setup("local_budget", 3, -1, dir, sizeof(dir), &ms, &sc) == 0);
+    script_verify_set_parallel_min_inputs_for_test(1000);
+    blocker_clear("script_validate.local_out_of_memory");
+    static _Atomic int pages = 0;
+    atomic_store(&pages, 0);
+    event_clear_observers(EV_OPERATOR_NEEDED);
+    SV_CHECK("local_failure_budget: page observer",
+             event_observe(EV_OPERATOR_NEEDED, sv_count_page, &pages));
+    stage_memory_hold_budget_set_for_test(0);
+
+    for (int i = 0; i < 2; i++) {
+        zcl_alloc_fault_fail_nth("script_stack", 1);
+        int advanced = script_validate_stage_drain(100);
+        zcl_alloc_fault_clear();
+        SV_CHECK("local_failure_budget: nothing advanced", advanced == 0);
+    }
+    SV_CHECK("local_failure_budget: cursor held",
+             script_validate_stage_cursor() == 0);
+    SV_CHECK("local_failure_budget: the hold is a permanent blocker",
+             blocker_class_for("script_validate.local_out_of_memory") ==
+                 BLOCKER_PERMANENT);
+    SV_CHECK("local_failure_budget: paged once for the height",
+             atomic_load(&pages) == 1);
+
+    SV_CHECK("local_failure_budget: heights verify with memory back",
+             script_validate_stage_drain(100) == 3);
+    SV_CHECK("local_failure_budget: the blocker is released",
+             !blocker_exists("script_validate.local_out_of_memory"));
+
+    stage_memory_hold_budget_set_for_test(-1);
+    event_clear_observers(EV_OPERATOR_NEEDED);
+    script_verify_set_parallel_min_inputs_for_test(-1);
+    sv_teardown(dir, &ms, &sc);
+    return failures;
+}
+
 static int sv_case_local_failure(void)
 {
     int failures = 0;
     failures += sv_case_local_failure_one("local_stage", false);
     failures += sv_case_local_failure_one("local_worker", true);
+    failures += sv_case_local_failure_budget();
     {
         char dir[256]; struct main_state ms; struct synth_chain_sv sc;
         SV_CHECK("local_failure_dry_run: setup",

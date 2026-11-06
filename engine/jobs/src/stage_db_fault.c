@@ -4,11 +4,15 @@
 
 #include "jobs/stage_db_fault.h"
 
+#include "event/event.h"
+#include "platform/time_compat.h"
 #include "storage/boot_auto_reindex.h"
+#include "util/blocker.h"
 #include "util/log_macros.h"
 
 #include <sqlite3.h>
 #include <stdatomic.h>
+#include <stdio.h>
 
 bool stage_db_err_is_transient(int rc)
 {
@@ -105,4 +109,75 @@ int stage_db_fault_consecutive_for_testing(const struct stage_db_fault *f)
 {
     return f ? atomic_load(&f->consecutive) : -1;
 }
+
+static _Atomic int g_memory_hold_budget_override = -1;
+
+void stage_memory_hold_budget_set_for_test(int seconds)
+{
+    atomic_store(&g_memory_hold_budget_override, seconds);
+}
+
+static int64_t memory_hold_budget(void)
+{
+    int o = atomic_load(&g_memory_hold_budget_override);
+    return o >= 0 ? o : STAGE_MEMORY_HOLD_BUDGET_SECONDS;
+}
+#else
+static int64_t memory_hold_budget(void)
+{
+    return STAGE_MEMORY_HOLD_BUDGET_SECONDS;
+}
 #endif
+
+job_result_t stage_memory_hold_note(struct stage_memory_hold *h,
+                                    const char *stage, int64_t height,
+                                    const char *detail,
+                                    struct blocker_record *out)
+{
+    if (!h || !stage || !out)
+        return JOB_FATAL;
+    int64_t now = platform_time_wall_unix();
+    if (atomic_load(&h->held_height) != height + 1) {
+        atomic_store(&h->held_height, height + 1);
+        atomic_store(&h->since_unix, now);
+        atomic_store(&h->paged_height, 0);
+    }
+    int64_t since = atomic_load(&h->since_unix);
+    int64_t elapsed = now >= since ? now - since : 0;
+    if (elapsed < memory_hold_budget()) {
+        blocker_note_local_memory_hold(stage);
+        return JOB_IDLE;
+    }
+
+    char id[BLOCKER_ID_MAX];
+    snprintf(id, sizeof(id), "%s%s", stage, BLOCKER_LOCAL_MEMORY_SUFFIX);
+    char reason[BLOCKER_REASON_MAX];
+    snprintf(reason, sizeof(reason),
+             "%s held at height=%lld for %llds: a check keeps running out of "
+             "memory on this host; no verdict written (%.80s)",
+             stage, (long long)height, (long long)elapsed,
+             detail ? detail : "out-of-memory");
+    if (!blocker_init(out, id, stage, BLOCKER_PERMANENT, reason)) {
+        LOG_WARN("stage_db_fault",
+                 "[stage_db_fault] could not name %s height=%lld — latching "
+                 "JOB_FATAL rather than holding unnamed", id, (long long)height);
+        return JOB_FATAL;
+    }
+    out->retry_budget = -1;
+    if (atomic_exchange(&h->paged_height, height + 1) != height + 1)
+        event_emitf(EV_OPERATOR_NEEDED, 0,
+                    "%s held at height=%lld for %llds: a check keeps running "
+                    "out of memory on this host; free memory or move the node",
+                    stage, (long long)height, (long long)elapsed);
+    return JOB_BLOCKED;
+}
+
+void stage_memory_hold_clear(struct stage_memory_hold *h, const char *stage)
+{
+    if (!h || !stage || atomic_exchange(&h->held_height, 0) == 0)
+        return;
+    atomic_store(&h->paged_height, 0);
+    char id[BLOCKER_ID_MAX];
+    snprintf(id, sizeof(id), "%s%s", stage, BLOCKER_LOCAL_MEMORY_SUFFIX);
+    blocker_clear(id);
+}

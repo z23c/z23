@@ -97,9 +97,39 @@ stage_db_fault_result(struct stage_db_fault *f, int sqlite_rc,
                : JOB_FATAL;
 }
 
+/* ── Local memory hold ───────────────────────────────────────────────────
+ * A check that ran out of memory on this host writes no verdict: the caller
+ * holds its cursor and retries. Within STAGE_MEMORY_HOLD_BUDGET_SECONDS of the
+ * first held tick at a height, each tick refreshes the TRANSIENT
+ * "<stage>.local_out_of_memory" blocker and the result is JOB_IDLE. Once the
+ * budget lapses, the result is JOB_BLOCKED with `out` filled as the PERMANENT
+ * blocker of the same id, and the operator is paged once per held height
+ * (EV_OPERATOR_NEEDED). JOB_FATAL means `out` could not be filled. One
+ * zero-initialised instance per caller. */
+#define STAGE_MEMORY_HOLD_BUDGET_SECONDS 600
+
+struct blocker_record;
+
+struct stage_memory_hold {
+    _Atomic int64_t held_height;  /* height + 1; 0 = not holding */
+    _Atomic int64_t since_unix;
+    _Atomic int64_t paged_height; /* height + 1; 0 = not paged */
+};
+
+job_result_t stage_memory_hold_note(struct stage_memory_hold *h,
+                                    const char *stage, int64_t height,
+                                    const char *detail,
+                                    struct blocker_record *out);
+
+/* End the hold after the height produced any other outcome: the next hold
+ * starts a fresh budget and the named blocker is released. */
+void stage_memory_hold_clear(struct stage_memory_hold *h, const char *stage);
+
 #ifdef ZCL_TESTING
 /* Test-only: read the live consecutive-fault count. */
 int stage_db_fault_consecutive_for_testing(const struct stage_db_fault *f);
+/* Test-only: override the memory hold budget; a negative value restores it. */
+void stage_memory_hold_budget_set_for_test(int seconds);
 #endif
 
 #endif /* ZCL_JOBS_STAGE_DB_FAULT_H */

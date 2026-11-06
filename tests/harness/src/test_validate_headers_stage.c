@@ -27,6 +27,8 @@
 #include "models/database.h"
 #include "primitives/block.h"
 #include "jobs/header_admit_stage.h"
+#include "event/event.h"
+#include "jobs/stage_db_fault.h"
 #include "jobs/stage_repair.h"
 #include "jobs/stage_repair_internal.h"
 #include "jobs/validate_headers_stage.h"
@@ -764,6 +766,13 @@ static bool stub_fail_with_reason(const struct block_index *bi,
     return false;
 }
 
+static void vh_count_page(enum event_type type, uint32_t peer_id,
+                          const void *payload, uint32_t payload_len, void *ctx)
+{
+    (void)type; (void)peer_id; (void)payload; (void)payload_len;
+    atomic_fetch_add((_Atomic int *)ctx, 1);
+}
+
 /* The real validator running out of memory on a PoW-valid header: no row and no
  * cursor move. With memory back, the same height gets its real verdict. */
 static int vh_check_local_memory_failure_holds(void)
@@ -811,11 +820,38 @@ static int vh_check_local_memory_failure_holds(void)
         VH_CHECK("local-oom: the hold is counted",
                  validate_headers_stage_local_failure_total() == 1);
         VH_CHECK("local-oom: the hold is named for the recovery ladder",
-                 blocker_exists("validate_headers.local_out_of_memory"));
-        blocker_clear("validate_headers.local_out_of_memory");
+                 blocker_class_for("validate_headers.local_out_of_memory") ==
+                     BLOCKER_TRANSIENT);
+
+        /* Past its budget the same hold turns permanent and pages once. The
+         * blocker registry's same-id rate limit would hold back an upgrade
+         * made within milliseconds of the transient note; lift it here. */
+        blocker_set_rate_limit_ms_for_testing(0);
+        static _Atomic int pages = 0;
+        atomic_store(&pages, 0);
+        event_clear_observers(EV_OPERATOR_NEEDED);
+        VH_CHECK("local-oom: page observer",
+                 event_observe(EV_OPERATOR_NEEDED, vh_count_page, &pages));
+        stage_memory_hold_budget_set_for_test(0);
+        for (int i = 0; i < 2; i++) {
+            zcl_alloc_fault_fail_nth("equihash_indices", 1);
+            VH_CHECK("local-oom: still held past the budget",
+                     validate_headers_stage_drain(10) == 0);
+            zcl_alloc_fault_clear();
+        }
+        stage_memory_hold_budget_set_for_test(-1);
+        event_clear_observers(EV_OPERATOR_NEEDED);
+        blocker_set_rate_limit_ms_for_testing(BLOCKER_DEFAULT_RATE_LIMIT_MS);
+        VH_CHECK("local-oom: past the budget the hold is a permanent blocker",
+                 blocker_class_for("validate_headers.local_out_of_memory") ==
+                     BLOCKER_PERMANENT);
+        VH_CHECK("local-oom: paged once for the height",
+                 atomic_load(&pages) == 1);
 
         VH_CHECK("local-oom: with memory back the height is checked again",
                  validate_headers_stage_drain(10) == 1);
+        VH_CHECK("local-oom: the blocker is released",
+                 !blocker_exists("validate_headers.local_out_of_memory"));
         VH_CHECK("local-oom: the real verdict is the row",
                  log_row_at(progress_store_db(), 0, &ok,
                             reason, sizeof(reason)) &&

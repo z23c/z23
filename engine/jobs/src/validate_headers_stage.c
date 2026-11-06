@@ -163,8 +163,17 @@ static inline bool vh_failure_is_recheck_candidate(const char *reason)
 
 /* True when a job's check ran out of memory. A durable ok=0 row is a verdict and
  * downstream stages inherit it, so the whole batch is dropped unwritten and the
- * cursor holds; the same heights run again on a later tick. */
-static bool vh_batch_failed_locally(const struct vh_job *jobs, int n)
+ * cursor holds; the same heights run again on a later tick. `*held` is the
+ * result the caller returns: JOB_IDLE within the hold budget, then JOB_BLOCKED
+ * with `out` named as a permanent blocker (stage_memory_hold_note). The forward
+ * walk and the failed-row recheck keep separate hold clocks. */
+static struct stage_memory_hold g_vh_forward_memory_hold;
+static struct stage_memory_hold g_vh_recheck_memory_hold;
+
+static bool vh_batch_failed_locally(struct stage_memory_hold *hold,
+                                    const struct vh_job *jobs, int n,
+                                    struct blocker_record *out,
+                                    job_result_t *held)
 {
     for (int i = 0; i < n; i++) {
         if (jobs[i].ok ||
@@ -180,9 +189,11 @@ static bool vh_batch_failed_locally(const struct vh_job *jobs, int n)
                      jobs[i].height, (unsigned long long)reps);
         atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
         atomic_fetch_add(&g_local_failure_total, 1);
-        blocker_note_local_memory_hold(STAGE_NAME);
+        *held = stage_memory_hold_note(hold, STAGE_NAME, jobs[i].height,
+                                       jobs[i].reason, out);
         return true;
     }
+    stage_memory_hold_clear(hold, STAGE_NAME);
     return false;
 }
 
@@ -634,8 +645,14 @@ static job_result_t vh_recheck_run_and_settle(sqlite3 *db, struct vh_job *jobs,
                                               int64_t start)
 {
     vh_pool_run_batch(&g_pool, jobs, sizeof(jobs[0]), n);
-    if (vh_batch_failed_locally(jobs, n))
-        return JOB_IDLE;
+    struct blocker_record hold_blocker;
+    job_result_t held = JOB_IDLE;
+    if (vh_batch_failed_locally(&g_vh_recheck_memory_hold, jobs, n,
+                                &hold_blocker, &held)) {
+        if (held == JOB_BLOCKED)
+            (void)blocker_set(&hold_blocker);
+        return held;
+    }
     char *err = NULL;
     progress_store_tx_lock();
     /* This path runs both standalone (validate_headers_stage_step_once with no
@@ -1010,8 +1027,10 @@ static job_result_t step_validate(struct stage_step_ctx *c)
 
     /* Dispatch + await. Pool stays inside this step. */
     vh_pool_run_batch(&g_pool, jobs, sizeof(jobs[0]), batch_n);
-    if (vh_batch_failed_locally(jobs, batch_n))
-        return JOB_IDLE;
+    job_result_t held = JOB_IDLE;
+    if (vh_batch_failed_locally(&g_vh_forward_memory_hold, jobs, batch_n,
+                                &c->blocker, &held))
+        return held;
 
     /* Write rows + bump cursor, all under the F-2 BEGIN IMMEDIATE txn. */
     int wfault_rc = 0;

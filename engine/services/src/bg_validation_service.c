@@ -78,6 +78,7 @@
 #include "models/database.h"
 #include "ports/bg_validation_store_port.h"
 #include "jobs/reducer_frontier.h"           /* reducer_seed_floor_height_read */
+#include "jobs/stage_db_fault.h"             /* stage_memory_hold */
 #include "jobs/utxo_apply_delta_undo.h"      /* bg_validation_applied_next */
 #include "storage/progress_store.h"          /* progress_store_db */
 #include "event/event.h"
@@ -715,6 +716,35 @@ enum bg_validation_height_result {
     BG_VALIDATION_HEIGHT_FAILED,   /* state set FAILED; thread must return */
 };
 
+/* Out of memory checking `h`: wait for some to come back, then redo this
+ * height. The hold names "bg_validation.local_out_of_memory"; once it outlasts
+ * its budget that blocker turns permanent and the operator is paged once. */
+#define BG_MEMORY_HOLD_NAME "bg_validation"
+static struct stage_memory_hold g_bg_memory_hold;
+
+static enum bg_validation_height_result bg_validation_hold_out_of_memory(
+    int h, struct block *blk)
+{
+    static struct log_throttle throttle = LOG_THROTTLE_INIT;
+    uint64_t reps = 0;
+    if (log_throttle_should_emit(&throttle, (uint64_t)h + 1,
+                                 platform_time_wall_unix(), 60, &reps))
+        LOG_WARN("bg_validation", "[bg-valid] out of memory checking "
+                 "height %d; retrying it (%llu suppressed)",
+                 h, (unsigned long long)reps);
+    struct blocker_record named;
+    if (stage_memory_hold_note(&g_bg_memory_hold, BG_MEMORY_HOLD_NAME, h,
+                               "out-of-memory", &named) == JOB_BLOCKED)
+        (void)blocker_set(&named);
+    block_free(blk);
+#ifdef ZCL_TESTING
+    g_row_backoff_sleep_fn(1000);
+#else
+    platform_sleep_ms(1000);
+#endif
+    return BG_VALIDATION_HEIGHT_RETRY;
+}
+
 /* Runs the one full validation for `h` (already body-read into `blk`,
  * against the pindex that read actually returned) and decides what the
  * walk does with the result, pulled out of bg_validation_thread to keep
@@ -740,23 +770,9 @@ static enum bg_validation_height_result bg_validation_height_validate(
         block_free(blk);
         return BG_VALIDATION_HEIGHT_RETRY;
     }
-    if (outcome == BG_VALIDATION_BLOCK_LOCAL_FAILURE) {
-        /* Out of memory: wait for some to come back, then redo this height. */
-        static struct log_throttle throttle = LOG_THROTTLE_INIT;
-        uint64_t reps = 0;
-        if (log_throttle_should_emit(&throttle, (uint64_t)h + 1,
-                                     platform_time_wall_unix(), 60, &reps))
-            LOG_WARN("bg_validation", "[bg-valid] out of memory checking "
-                     "height %d; retrying it (%llu suppressed)",
-                     h, (unsigned long long)reps);
-        block_free(blk);
-#ifdef ZCL_TESTING
-        g_row_backoff_sleep_fn(1000);
-#else
-        platform_sleep_ms(1000);
-#endif
-        return BG_VALIDATION_HEIGHT_RETRY;
-    }
+    if (outcome == BG_VALIDATION_BLOCK_LOCAL_FAILURE)
+        return bg_validation_hold_out_of_memory(h, blk);
+    stage_memory_hold_clear(&g_bg_memory_hold, BG_MEMORY_HOLD_NAME);
     if (outcome == BG_VALIDATION_BLOCK_INVALID) {
         fprintf(stderr, "[bg-valid] VALIDATION FAILURE at height %d\n", h);
         atomic_store(&svc->progress.state, BG_VALIDATION_FAILED);

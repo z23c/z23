@@ -223,12 +223,17 @@ const char *sv_find_body_availability_cause(
  * clock, reset the paged marker, count one internal error and publish the
  * non-terminal pending-prevout signal for the prevout_unresolved class. */
 /* Hold the cursor for a check that ran out of memory, and name the hold so the
- * recovery ladder does not walk toward a reindex that cannot help. */
-static void sv_hold_local_failure(int height,
-                                  const struct script_verify_summary *s)
+ * recovery ladder does not walk toward a reindex that cannot help. A hold that
+ * outlasts its budget becomes a permanent blocker and pages once. */
+static struct stage_memory_hold g_sv_memory_hold;
+
+static job_result_t sv_hold_local_failure(struct stage_step_ctx *c, int height,
+                                          const struct script_verify_summary *s)
 {
     atomic_fetch_add(&g_local_failure_total, 1);
-    blocker_note_local_memory_hold(STAGE_NAME);
+    atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+    job_result_t r = stage_memory_hold_note(&g_sv_memory_hold, STAGE_NAME,
+                                            height, s->reason, &c->blocker);
     static struct log_throttle throttle = LOG_THROTTLE_INIT;
     uint64_t reps = 0;
     if (log_throttle_should_emit(&throttle, 1, platform_time_wall_unix(), 60,
@@ -237,6 +242,7 @@ static void sv_hold_local_failure(int height,
                  "[script_validate] holding height=%d, no verdict written: %s "
                  "(%llu suppressed)", height, s->reason,
                  (unsigned long long)reps);
+    return r;
 }
 
 static void sv_hold_begin_episode(int height, int64_t now,
@@ -739,10 +745,9 @@ static job_result_t step_validate(struct stage_step_ctx *c)
 
     /* Out of memory on this host: no verdict and no row, and not a missing
      * prevout, so none of the backfill or budget in the hold below applies. */
-    if (summary.local_failure) {
-        sv_hold_local_failure(next_h, &summary);
-        return JOB_IDLE;
-    }
+    if (summary.local_failure)
+        return sv_hold_local_failure(c, next_h, &summary);
+    stage_memory_hold_clear(&g_sv_memory_hold, STAGE_NAME);
 
     /* STEP 2A: the internal_error class (prevout_unresolved / block_decode_failed)
      * is a TRANSIENT "cannot determine validity yet" — utxo_apply / the creating
