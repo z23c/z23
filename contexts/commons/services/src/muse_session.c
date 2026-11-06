@@ -81,6 +81,13 @@ bool muse_session_command_id(char out[MUSE_COMMAND_ID_MAX])
     } else {
         return false;
     }
+    return ms_command_id_format(out, wall_ms, rnd);
+}
+
+/* Formats a version-7 handle from a millisecond stamp and ten random bytes. */
+bool ms_command_id_format(char out[MUSE_COMMAND_ID_MAX], int64_t wall_ms,
+    const uint8_t rnd[10])
+{
     uint64_t ms = (uint64_t)wall_ms;
     unsigned a = (unsigned)((ms >> 32) & 0xffffffffu);
     unsigned b = (unsigned)((ms >> 16) & 0xffffu);

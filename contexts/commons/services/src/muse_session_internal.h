@@ -42,6 +42,8 @@ void ms_fail(struct muse_session *s, const char *kind, bool retryable,
 int64_t ms_monotonic_ms(void);
 int ms_read_line(struct muse_session *s, char *buf, size_t cap,
                  int64_t deadline_ms);
+bool ms_command_id_format(char out[MUSE_COMMAND_ID_MAX], int64_t wall_ms,
+                          const uint8_t rnd[10]);
 bool ms_raw_id(const char *line, char *out, size_t cap);
 bool ms_send(struct muse_session *s, int id, const char *method,
              const char *params_json);

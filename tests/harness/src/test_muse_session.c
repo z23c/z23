@@ -36,6 +36,7 @@ int test_muse_session(void)
 #include "test/muse_fake_host.h"
 #include "../../../contexts/commons/services/src/muse_session_internal.h"
 
+#include <errno.h>
 #include <limits.h>
 
 static int ms_failures_journey(void)
@@ -660,6 +661,7 @@ static int ms_failures_raw_id(void)
         { "{\"id\":\"a\"}", 1, false, "" },
         { "{\"id\":12}", 3, true, "12" },
         { "{\"id\":1}", 1, false, "" },
+        { "{\"id\":12345}", 4, false, "" },
         { "{\"id\":7}", 0, false, "" },
     };
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
@@ -791,6 +793,17 @@ static bool mx_stdout_closed_case(enum mx_exit_mode mode, long long mem_max,
             pause();
     }
     close(p[1]);
+    if (mode != MX_IDLE) {
+        /* Wait for the child to become a zombie without reaping it, so the
+         * reap inside ms_read_line is immediate however loaded the host. */
+        siginfo_t si;
+        int w;
+        do {
+            w = waitid(P_PID, (id_t)pid, &si, WEXITED | WNOWAIT);
+        } while (w != 0 && errno == EINTR);
+        if (w != 0)
+            return false;
+    }
     struct muse_session s;
     mx_session(&s);
     s.child = pid;
@@ -854,6 +867,13 @@ static int ms_failures_command_id(void)
              strchr("89ab", a[19]) != NULL);
     MS_CHECK("command_id two handles differ in their random tail",
         muse_session_command_id(b) && strcmp(a + 24, b + 24) != 0);
+    /* RFC 9562 UUIDv7: 48-bit ms split 32/16, then 0x7 and 12 random bits. */
+    static const uint8_t rnd[10] = { 0xff, 0xff, 0x11, 0x22, 0x33, 0x44,
+                                     0x55, 0x66, 0xf1, 0x23 };
+    char f[MUSE_COMMAND_ID_MAX] = {0};
+    MS_CHECK("command_id v7 layout for a known stamp",
+        ms_command_id_format(f, 0x0123456789abLL, rnd) &&
+        strcmp(f, "01234567-89ab-7123-bfff-112233445566") == 0);
     return failures;
 }
 
