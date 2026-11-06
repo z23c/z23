@@ -709,6 +709,28 @@ int64_t coins_kv_count(sqlite3 *db)
     return coins_kv_count_sqlite(db);
 }
 
+/* Second pass of get_coins: copy each row into its vout slot. Returns the
+ * last step outcome, so a scan cut short by an error is visible. */
+static enum zcl_step ckv_coins_fill(sqlite3_stmt *s, struct coins *out)
+{
+    enum zcl_step step;
+    while ((step = ar_step_checked(s, "coins_kv: get_coins fill scan", NULL)) ==
+           ZCL_STEP_ROW) {
+        uint32_t vi = (uint32_t)sqlite3_column_int(s, 0);
+        if (vi >= out->num_vout) continue;
+        out->vout[vi].value = sqlite3_column_int64(s, 1);
+        const void *script = sqlite3_column_blob(s, 2);
+        int script_len = sqlite3_column_bytes(s, 2);
+        if (script && script_len > 0) {
+            size_t slen = (size_t)script_len;
+            if (slen > MAX_SCRIPT_SIZE) slen = MAX_SCRIPT_SIZE;
+            memcpy(out->vout[vi].script_pub_key.data, script, slen);
+            out->vout[vi].script_pub_key.size = slen;
+        }
+    }
+    return step;
+}
+
 bool coins_kv_get_coins_sqlite(sqlite3 *db, const uint8_t txid[32],
                                struct coins *out)
 {
@@ -752,20 +774,7 @@ bool coins_kv_get_coins_sqlite(sqlite3 *db, const uint8_t txid[32],
 
     sqlite3_reset(s);
     sqlite3_bind_blob(s, 1, txid, 32, SQLITE_STATIC);
-    while ((step = ar_step_checked(s, "coins_kv: get_coins fill scan", NULL)) ==
-           ZCL_STEP_ROW) {
-        uint32_t vi = (uint32_t)sqlite3_column_int(s, 0);
-        if (vi >= out->num_vout) continue;
-        out->vout[vi].value = sqlite3_column_int64(s, 1);
-        const void *script = sqlite3_column_blob(s, 2);
-        int script_len = sqlite3_column_bytes(s, 2);
-        if (script && script_len > 0) {
-            size_t slen = (size_t)script_len;
-            if (slen > MAX_SCRIPT_SIZE) slen = MAX_SCRIPT_SIZE;
-            memcpy(out->vout[vi].script_pub_key.data, script, slen);
-            out->vout[vi].script_pub_key.size = slen;
-        }
-    }
+    step = ckv_coins_fill(s, out);
     sqlite3_finalize(s);
     if (step == ZCL_STEP_ERROR) {
         /* Unfilled vouts would read as spent: never hand back a partial set. */

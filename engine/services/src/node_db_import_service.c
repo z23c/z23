@@ -454,7 +454,7 @@ static int64_t import_existing_rows(struct node_db *ndb)
 {
     int64_t existing = 0;
     if (!node_db_utxo_count_checked(ndb, &existing))
-        return -1;
+        return -1;  // raw-return-ok:caller-logs-and-aborts-the-import
     return existing < 0 ? 0 : existing;
 }
 

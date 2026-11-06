@@ -83,15 +83,18 @@ static size_t ssr_skip_block_comment(char *b, size_t i, size_t n)
     return i;
 }
 
+/* 1'000: a C23 digit separator, not a character literal. */
+static int ssr_digit_sep(const char *b, size_t i, size_t n)
+{
+    return b[i] == '\'' && i > 0 && i + 1 < n &&
+           isdigit((unsigned char)b[i - 1]) && isdigit((unsigned char)b[i + 1]);
+}
+
 void ssr_blank(char *b, size_t n)
 {
     size_t i = 0;
     while (i < n) {
-        /* 1'000: a C23 digit separator, not a character literal. */
-        int sep = b[i] == '\'' && i > 0 && i + 1 < n &&
-                  isdigit((unsigned char)b[i - 1]) &&
-                  isdigit((unsigned char)b[i + 1]);
-        if (!sep && (b[i] == '"' || b[i] == '\'')) {
+        if ((b[i] == '"' || b[i] == '\'') && !ssr_digit_sep(b, i, n)) {
             i = ssr_skip_literal(b, i, n);
         } else if (b[i] == '/' && i + 1 < n && b[i + 1] == '*') {
             i = ssr_skip_block_comment(b, i, n);
