@@ -268,15 +268,39 @@ void boot_wallet_show_recovery_phrase_once(const char *phrase)
     fflush(stdout);
 }
 
+static int64_t boot_wallet_table_rows(sqlite3 *db, const char *table);
+
+/* True when any table that can hold a key, a viewing key or a watched
+ * address already has a row, or cannot be read: the wallet is then not
+ * brand new and a birthday could hide its old funds from a boot scan. Checked
+ * BEFORE the new keys are drawn, which write several of these tables. The
+ * mint itself is unchanged. Sprout keys have no table of their own here. */
+static bool boot_wallet_holds_other_keys(struct wallet_sqlite *ws)
+{
+    static const char *const tables[] = {
+        "wallet_keys", "wallet_keypool", "wallet_scripts", "wallet_watch_only",
+        "wallet_sapling_keys", "wallet_sapling_diversifier", "wallet_seed",
+        "wallet_key_encryption",
+    };
+    if (!ws || !ws->open)
+        return true;
+    for (size_t i = 0; i < sizeof(tables) / sizeof(tables[0]); i++)
+        if (boot_wallet_table_rows(ws->db, tables[i]) != 0)
+            return true;
+    return false;
+}
+
 /* A brand-new wallet drawn just now: nothing already mined can pay it. Only
  * when the keys are on disk (ws open), so a birthday never names a wallet that
- * is not there. A failure leaves the wallet scanning from 0, as before. */
+ * is not there, and only when no key-holding table had a row before the mint
+ * (brand_new). A failure leaves the wallet scanning from 0, as before. */
 static void boot_wallet_record_fresh_birthday(struct wallet_sqlite *ws,
                                               struct node_db *ndb,
-                                              const char *datadir)
+                                              const char *datadir,
+                                              bool brand_new)
 {
     int64_t birthday = 0;
-    if (!ws || !ws->open || !ndb || !ndb->open)
+    if (!brand_new || !ws || !ws->open || !ndb || !ndb->open)
         return;
     if (wallet_recovery_record_fresh_birthday(datadir, ndb, &birthday))
         printf("Wallet birthday recorded at height %lld.\n",
@@ -322,6 +346,8 @@ bool boot_wallet_create_new(struct wallet *w, struct wallet_sqlite *ws,
      *
      * The decision table itself is boot_wallet_phrase_plan_for(), which is
      * pure — every case is unit-tested without a boot. */
+    /* Read before any key is drawn: the mint below writes these tables. */
+    const bool brand_new = !boot_wallet_holds_other_keys(ws);
     const bool waived = boot_wallet_phrase_backup_waived();
     const enum boot_wallet_phrase_plan plan = boot_wallet_phrase_plan_for(
         boot_wallet_phrase_stdout_is_a_terminal(), action, lane, waived);
@@ -387,7 +413,7 @@ bool boot_wallet_create_new(struct wallet *w, struct wallet_sqlite *ws,
         phrase_ok = false;
     }
     wallet_key_pool_mark_persisted_through(w, pool_generation);
-    boot_wallet_record_fresh_birthday(ws, ndb, datadir);
+    boot_wallet_record_fresh_birthday(ws, ndb, datadir, brand_new);
     if (ndb && ndb->open)
         node_db_wal_checkpoint(ndb);
 

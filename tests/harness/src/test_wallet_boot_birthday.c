@@ -359,6 +359,122 @@ static int t_anchor_is_the_known_height(void)
     return failures;
 }
 
+/* Every table that can hold a key, a viewing key or a watched address. A
+ * row in any of them before the mint means the wallet is not brand new: its
+ * keys may hold old funds, so no birthday may hide them from a boot scan. */
+struct wbb_table {
+    const char *name;
+    const char *insert;
+};
+
+static const struct wbb_table wbb_tables[] = {
+    { "wallet_keys",
+      "INSERT INTO wallet_keys(pubkey_hash,pubkey,privkey,compressed,"
+      "created_at) VALUES(zeroblob(20),zeroblob(33),zeroblob(32),1,0)" },
+    { "wallet_keypool",
+      "INSERT INTO wallet_keys(pubkey_hash,pubkey,privkey,compressed,"
+      "created_at) VALUES(zeroblob(20),zeroblob(33),zeroblob(32),1,0);"
+      "INSERT INTO wallet_keypool(pubkey_hash,generation) "
+      "VALUES(zeroblob(20),0)" },
+    { "wallet_scripts",
+      "INSERT INTO wallet_scripts(script_hash,redeem_script) "
+      "VALUES(zeroblob(20),zeroblob(5))" },
+    { "wallet_watch_only",
+      "INSERT INTO wallet_watch_only(address_hash,address,created_at) "
+      "VALUES(zeroblob(20),'watched',0)" },
+    { "wallet_sapling_keys (spending or viewing)",
+      "INSERT INTO wallet_sapling_keys(ivk,xsk,xfvk,diversifier,pk_d,"
+      "child_index) VALUES(zeroblob(32),zeroblob(1),zeroblob(1),"
+      "zeroblob(11),zeroblob(32),0)" },
+    { "wallet_sapling_diversifier",
+      "INSERT INTO wallet_sapling_diversifier(ivk,next_index) "
+      "VALUES(zeroblob(32),0)" },
+    { "wallet_key_encryption",
+      "INSERT INTO wallet_key_encryption(id,wrapped_dek) "
+      "VALUES(1,zeroblob(60))" },
+};
+
+static int t_other_key_rows_get_no_birthday(void)
+{
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(wbb_tables) / sizeof(wbb_tables[0]); i++) {
+        struct wbb_fixture f;
+        char tag[32], name[160];
+        snprintf(tag, sizeof(tag), "rows%zu", i);
+        bool open = wbb_open(&f, tag, 1500);
+        bool seeded = open && sqlite3_exec(f.ndb.db, wbb_tables[i].insert,
+                                           NULL, NULL, NULL) == SQLITE_OK;
+        struct wallet *w = calloc(1, sizeof(*w));
+        if (seeded && w)
+            (void)wbb_mint(&f, w);
+        int64_t b = 0;
+        uint8_t hash[32];
+        snprintf(name, sizeof(name), "a row in %s: no birthday is recorded",
+                 wbb_tables[i].name);
+        WBB_CHECK(name, seeded && !db_wallet_birthday_get(&f.ndb, &b, hash));
+        if (w) {
+            wallet_free(w);
+            free(w);
+        }
+        wbb_close(&f);
+    }
+    return failures;
+}
+
+/* z_importkey runs wallet_rescan from its startHeight (default 0): the
+ * birthday floor boot gave the first scan must not raise that start. */
+static int t_import_after_mint_rescans_below_the_birthday(void)
+{
+    int failures = 0;
+    struct wbb_fixture f;
+    bool open = wbb_open(&f, "import", 1500);
+    struct wallet *w = calloc(1, sizeof(*w));
+    bool minted = open && w && wbb_mint(&f, w);
+    struct wbb_chain k;
+    bool made = minted && wbb_chain_make(&k, 1502, 1400, 0x09);
+    struct wallet *boot = made ? wbb_catch_up(&f.ndb, &k) : NULL;
+    WBB_CHECK("after the mint the wallet holds the floor",
+              boot && boot->initial_scan_floor == 1400);
+    struct wallet_rescan_report r;
+    memset(&r, 0, sizeof(r));
+    if (boot)
+        (void)wallet_rescan_report(boot, &k.chain, 0, -1, "/nonexistent", &r);
+    WBB_CHECK("an import's rescan from height 0 still starts at 0",
+              boot && r.start_height == 0);
+    WBB_CHECK("and indexes every block below the birthday",
+              boot && r.blocks_indexed == 1502);
+    wbb_wallet_release(boot);
+    if (made)
+        wbb_chain_free(&k);
+    if (w) {
+        if (minted)
+            wallet_free(w);
+        free(w);
+    }
+    wbb_close(&f);
+    return failures;
+}
+
+/* A stored birthday is written once. */
+static int t_existing_birthday_is_never_replaced(void)
+{
+    int failures = 0;
+    struct wbb_fixture f;
+    bool open = wbb_open(&f, "once", 1500);
+    uint8_t first[32], hash[32];
+    memset(first, 0x07, sizeof(first));
+    bool set = open && db_wallet_birthday_set(&f.ndb, 777, first);
+    int64_t out = -1, b = 0;
+    bool replaced = open && wallet_recovery_record_fresh_birthday(
+                                f.dir, &f.ndb, &out);
+    WBB_CHECK("a second record is refused", set && !replaced && out == 0);
+    WBB_CHECK("the stored birthday and floor hash are unchanged",
+              set && db_wallet_birthday_get(&f.ndb, &b, hash) && b == 777 &&
+              memcmp(hash, first, sizeof(hash)) == 0);
+    wbb_close(&f);
+    return failures;
+}
+
 int test_wallet_boot_birthday(void);
 int test_wallet_boot_birthday(void)
 {
@@ -372,6 +488,9 @@ int test_wallet_boot_birthday(void)
     failures += t_restored_wallet_keeps_full_scan();
     failures += t_wallet_with_keys_is_not_minted_over();
     failures += t_anchor_is_the_known_height();
+    failures += t_other_key_rows_get_no_birthday();
+    failures += t_import_after_mint_rescans_below_the_birthday();
+    failures += t_existing_birthday_is_never_replaced();
     checkpoints_reset_sha3_override_for_test();
     return failures;
 }
