@@ -114,6 +114,41 @@ int test_dev_batch_ledger(void)
         PASS();
     }
 
+    TEST("requeue: a dirty lane with a path longer than the message keeps its reason") {
+        char name[240], lp[900], sha[41], mod[1000];
+        (void)snprintf(name, sizeof(name), "long-%0200d", 0);
+        ASSERT(dbf_lane(&f, name, "x.c", lp, sha));
+        ASSERT(strlen(lp) > sizeof(reply.error.message));
+        (void)snprintf(mod, sizeof(mod), "%s/x.c", lp);
+        ASSERT(dbf_put(mod, "int dirty;\n"));
+        {
+            const char *pairs[] = {"worktree", lp, "note", "n", NULL};
+            dbf_call(zcl_native_handle_dev_batch_requeue, &f, pairs, NULL, &reply,
+                     dump, sizeof(dump));
+        }
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(reply.error.code, "LANE_DIRTY");
+        ASSERT(strstr(reply.error.message, "uncommitted tracked changes") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+    TEST("requeue: a missing lane with a path longer than the message keeps its reason") {
+        char gone[512];
+        (void)snprintf(gone, sizeof(gone), "/nonexistent/%0120d/%0120d/%0120d",
+                       0, 0, 0);
+        ASSERT(strlen(gone) > sizeof(reply.error.message));
+        {
+            const char *pairs[] = {"worktree", gone, "note", "n", NULL};
+            dbf_call(zcl_native_handle_dev_batch_requeue, &f, pairs, NULL, &reply,
+                     dump, sizeof(dump));
+        }
+        ASSERT_STR_EQ(reply.error.code, "NOT_A_LANE");
+        ASSERT(strstr(reply.error.message, "not a directory") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
     TEST("requeue: a missing directory, a missing or tabbed note are refused") {
         const char *gone[] = {"worktree", "/nonexistent/lane-z", "note", "n", NULL};
         const char *nonote[] = {"worktree", lb, NULL};
