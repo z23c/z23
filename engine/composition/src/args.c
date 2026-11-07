@@ -43,8 +43,7 @@ void print_usage(const char *prog)
     printf("  %s status             How the node is doing, and what to do next\n", prog);
     printf("  %s wiki               Read the built-in guides\n", prog);
     printf("  %s card               Starter tasks you can pick\n", prog);
-    printf("  %s app                Open, copy, build and share apps\n", prog);
-    printf("  %s app list           See which apps you can open\n", prog);
+    printf("  %s app list           Apps you can open, copy, build and share\n", prog);
     printf("  %s discover help      Find every command by task\n", prog);
     printf("  %s --help-all         Every command and node option\n", prog);
 }
