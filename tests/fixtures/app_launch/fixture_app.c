@@ -55,6 +55,16 @@ int main(int argc, char **argv)
         fprintf(stderr, "FIXTURE: cannot open display: no such display\n");
         return 3;
     }
+    if (strcmp(argv[1], "readydie") == 0) {
+        /* The marker, then a lost display shortly after (a game whose X
+         * connection breaks once its window is up). */
+        printf("INFO: " FIXTURE_MARKER "\n");
+        fflush(stdout);
+        struct timespec ts = {0, 100 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+        fprintf(stderr, "FIXTURE: X connection broken\n");
+        return 1;
+    }
     bool handler = strcmp(argv[1], "nohandler") != 0;
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));

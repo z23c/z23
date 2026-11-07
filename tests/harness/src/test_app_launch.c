@@ -82,6 +82,7 @@ struct al_fx {
     char bin_silent[PATH_MAX];
     char bin_quiet[PATH_MAX]; /* declares no raise, has no handler */
     char bin_liar[PATH_MAX];  /* declares raise, has no handler */
+    char bin_die[PATH_MAX];   /* prints the marker, then dies */
     struct app_launch_env env;
     struct app_launch_registry reg;
     struct app_open_result res;
@@ -147,6 +148,8 @@ static bool al_write_tsv(struct al_fx *f)
                          f->bin_quiet, "-", "nohandler", f->raised);
     at += (size_t)al_row(text + at, sizeof(text) - at, "liarapp", "-",
                          f->bin_liar, "sigusr1", "nohandler", f->raised);
+    at += (size_t)al_row(text + at, sizeof(text) - at, "dyingapp", "-",
+                         f->bin_die, "-", "readydie", f->raised);
     return at < sizeof(text) &&
            al_write_file(f->env.config_path, text, 0600);
 }
@@ -167,7 +170,8 @@ static bool al_paths(struct al_fx *f)
            al_path(f->bin_exit, sizeof(f->bin_exit), f->root, "app-exit") &&
            al_path(f->bin_silent, sizeof(f->bin_silent), f->root, "app-silent") &&
            al_path(f->bin_quiet, sizeof(f->bin_quiet), f->root, "app-quiet") &&
-           al_path(f->bin_liar, sizeof(f->bin_liar), f->root, "app-liar");
+           al_path(f->bin_liar, sizeof(f->bin_liar), f->root, "app-liar") &&
+           al_path(f->bin_die, sizeof(f->bin_die), f->root, "app-die");
 }
 
 static bool al_setup(struct al_fx *f)
@@ -185,7 +189,8 @@ static bool al_setup(struct al_fx *f)
          al_copy_exe(fixture, f->bin_exit, 0700) &&
          al_copy_exe(fixture, f->bin_silent, 0700) &&
          al_copy_exe(fixture, f->bin_quiet, 0700) &&
-         al_copy_exe(fixture, f->bin_liar, 0700) && al_write_tsv(f);
+         al_copy_exe(fixture, f->bin_liar, 0700) &&
+         al_copy_exe(fixture, f->bin_die, 0700) && al_write_tsv(f);
     if (ok)
         app_launch_registry_load(&f->env, &f->reg);
     return ok;
@@ -299,6 +304,15 @@ static int case_refusals(struct al_fx *f)
         ASSERT(f->res.exited);
         ASSERT_EQ(f->res.exit_code, 3);
         ASSERT(strstr(f->res.log_tail, "cannot open display"));
+    PASS(); }
+    TEST("an app that prints the marker then dies is not opened and says why") {
+        al_open(f, "dyingapp");
+        ASSERT(f->res.status != APP_OPEN_OPENED);
+        ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "exited_early");
+        ASSERT(f->res.exited);
+        ASSERT_EQ(f->res.exit_code, 1);
+        ASSERT(strstr(f->res.message, "X connection broken"));
+        ASSERT(strstr(f->res.message, "dyingapp.log"));
     PASS(); }
     TEST("an app with no ready marker in time is not_ready and running") {
         f->env.ready_timeout_ms = 400;
