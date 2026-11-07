@@ -4580,7 +4580,7 @@ static int test_app_open_accepts_yes(void)
 {
     int failures = 0, rc = 0;
     char wire[16384];
-    TEST_CASE("app open accepts --yes and -y as a no-op") {
+    TEST("app open accepts --yes and -y as a no-op") {
         const char *yes[] = {"open", "nosuchapp", "--yes"};
         const char *shortyes[] = {"open", "-y", "nosuchapp"};
         ASSERT(uniform_cli("app", yes, 3, wire, sizeof(wire), &rc));
@@ -4598,7 +4598,7 @@ static int test_app_list_pasteable_next(void)
 {
     int failures = 0, rc = 0;
     char wire[16384];
-    TEST_CASE("app list carries a pasteable open command with -datadir") {
+    TEST("app list carries a pasteable open command with -datadir") {
         const char *list[] = {"list"};
         struct json_value reply;
         json_init(&reply);
@@ -4623,7 +4623,7 @@ static int test_help_points_to_app_list(void)
 {
     int failures = 0;
     char wire[16384];
-    TEST_CASE("z23 --help says apps exist and points to app list") {
+    TEST("z23 --help says apps exist and points to app list") {
         ASSERT(front_door_usage_text(wire, sizeof(wire)));
         ASSERT(strstr(wire, "z23 app list") != NULL);
         PASS();
