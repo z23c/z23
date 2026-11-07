@@ -217,3 +217,10 @@ bool zcl_app_hint(char *out, size_t cap, const char *datadir, const char *fmt,
     if (!ok) out[0] = '\0';
     return ok;
 }
+
+/* STUB */
+bool zcl_app_hint_neutral(char *out, size_t cap, const char *datadir,
+                          const char *fmt, ...)
+{
+    return zcl_app_hint(out, cap, datadir, "%s", fmt);
+}

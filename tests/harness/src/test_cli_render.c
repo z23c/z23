@@ -650,6 +650,11 @@ static int test_app_hint_program_path(void)
         zcl_app_set_program("/my bin/z23");
         ASSERT(zcl_app_hint(hint, sizeof(hint), NULL, "build"));
         ASSERT_STR_EQ(hint, "/my\\ bin/z23 app build");
+        zcl_app_set_program("/abs/path/build/bin/z23");
+        ASSERT(zcl_app_hint_neutral(hint, sizeof(hint), NULL, "open %s", "X"));
+        ASSERT_STR_EQ(hint, "z23 app open X");
+        ASSERT(zcl_app_hint(hint, sizeof(hint), NULL, "open %s", "X"));
+        ASSERT_STR_EQ(hint, "/abs/path/build/bin/z23 app open X");
         zcl_app_set_program("z23");
         ASSERT(zcl_app_hint(hint, sizeof(hint), NULL, "build"));
         ASSERT_STR_EQ(hint, "z23 app build");

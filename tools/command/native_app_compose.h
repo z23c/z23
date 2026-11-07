@@ -75,6 +75,13 @@ bool zcl_app_hint(char *out, size_t cap, const char *datadir, const char *fmt,
  * unquotable input restores the plain "z23". */
 void zcl_app_set_program(const char *argv0);
 
+/* Same as zcl_app_hint but always starts with the plain "z23 ", never the
+ * recorded program path: for a command another person runs on their own
+ * machine, where the sender's path does not exist. */
+[[gnu::format(printf, 4, 5)]]
+bool zcl_app_hint_neutral(char *out, size_t cap, const char *datadir,
+                          const char *fmt, ...);
+
 /* SHA3-256(domain 0x00 || each part with its NUL): a composite plan_id
  * bound to the inner plans it will confirm. NULL parts hash as "". */
 void zcl_app_plan_id(const char *domain, const char *const *parts,
