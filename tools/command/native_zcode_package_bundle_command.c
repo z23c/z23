@@ -498,6 +498,11 @@ static bool zpb_store(struct zpb_receive *s, const struct zpb_keep *k)
         .recipe_wire = s->file.wires.recipe,
         .recipe_wire_len = s->file.wires.recipe_len,
         .has_day = day != NULL, .day = day ? json_get_int(day) : 0,
+        /* The friend runs this (AUTH_OWNER) on a file after confirming the
+         * fingerprint and root: a deliberate local step, so a second
+         * version from the same sender in one week is not throttled. No
+         * input key reaches this; network paths leave it unset. */
+        .owner_local = true,
     };
     zcl_command_reply_init(&sub, "zcl.zcode_package_publish_commit.v1");
     zcl_native_zcode_local_publication_commit(&publication, &sub);
