@@ -124,6 +124,24 @@ static bool asd_app(const struct asd_world *w, const char *name,
     return ok && chmod(sub, 0640) == 0;
 }
 
+/* The good stub and one fixture app per refusal. */
+static bool asd_apps(const struct asd_world *w)
+{
+    const char *good = "# host files the build reads\n\n"
+                       "lib/shared/extra.h host/shared/extra.h\n";
+    const char *mk = k_makefile;
+    return asd_app(w, "tiny", good, mk) &&
+           asd_app(w, "dotdot", "../outside/secret.h host/s.h\n", mk) &&
+           asd_app(w, "treedots", "lib/shared/extra.h ../s.h\n", mk) &&
+           asd_app(w, "absolute", "/etc/hostname host/h\n", mk) &&
+           asd_app(w, "linkfile", "lib/link.h host/link.h\n", mk) &&
+           asd_app(w, "linkdir", "linkdir/secret.h host/s.h\n", mk) &&
+           asd_app(w, "collide", "lib/shared/extra.h src/main.c\n", mk) &&
+           asd_app(w, "nomk", good, NULL) &&
+           asd_app(w, "notargets", good, k_makefile_no_targets) &&
+           asd_app(w, "absentinput", good, k_makefile_absent_input);
+}
+
 static bool asd_repo(struct asd_world *w)
 {
     char outside[ASD_PATH], link[ASD_PATH];
@@ -137,19 +155,7 @@ static bool asd_repo(struct asd_world *w)
     ok = ok && symlink("../../outside/secret.h", link) == 0;
     (void)snprintf(link, sizeof(link), "%s/linkdir", w->repo);
     ok = ok && symlink("../outside", link) == 0;
-    const char *good = "# host files the build reads\n\n"
-                       "lib/shared/extra.h host/shared/extra.h\n";
-    const char *mk = k_makefile;
-    return ok && asd_app(w, "tiny", good, mk) &&
-           asd_app(w, "dotdot", "../outside/secret.h host/s.h\n", mk) &&
-           asd_app(w, "treedots", "lib/shared/extra.h ../s.h\n", mk) &&
-           asd_app(w, "absolute", "/etc/hostname host/h\n", mk) &&
-           asd_app(w, "linkfile", "lib/link.h host/link.h\n", mk) &&
-           asd_app(w, "linkdir", "linkdir/secret.h host/s.h\n", mk) &&
-           asd_app(w, "collide", "lib/shared/extra.h src/main.c\n", mk) &&
-           asd_app(w, "nomk", good, NULL) &&
-           asd_app(w, "notargets", good, k_makefile_no_targets) &&
-           asd_app(w, "absentinput", good, k_makefile_absent_input);
+    return ok && asd_apps(w);
 }
 
 static bool asd_world_init(struct asd_world *w)
