@@ -54,6 +54,7 @@ int ccp_is_number(const char *s);
 const char *ccp_verdict_name(int v);
 const char *ccp_verdict_tag(int v);
 int ccp_core(const struct ccp_opts *o);
+const char *ccp_history_default(const char *env);
 void ccp_usage(FILE *out);
 int check_crypto_perf_selftest(void);
 

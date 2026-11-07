@@ -85,7 +85,7 @@ static int ccps_gate_case(const char *root, const struct ccps_gate *c,
     if (!out || !err)
         return die("z23-lint: tmpfile failed\n", "");
     struct ccp_opts o = { "", base_p, "0.20", bench_p,
-                          "docs/bench-history.csv", out, err };
+                          "build/bench-history.csv", out, err };
     int rc = ccp_core(&o);
     static char buf[CCP_RAW];
     rewind(out);
@@ -105,13 +105,31 @@ static int ccps_gate_case(const char *root, const struct ccps_gate *c,
     return 0;
 }
 
+/* The gate must never default to appending under the tracked docs/ tree. */
+static int ccps_history_cases(int *fails)
+{
+    const char *d = ccp_history_default(NULL);
+    const char *e = ccp_history_default("");
+    const char *o = ccp_history_default("x/h.csv");
+    int ok = strncmp(d, "docs/", 5) != 0 && strcmp(d, e) == 0
+             && strcmp(o, "x/h.csv") == 0;
+    if (ok)
+        printf("  OK   %-42s -> %s\n", "default history is outside docs/", d);
+    else {
+        printf("  FAIL %-42s -> %s\n", "default history is outside docs/", d);
+        (*fails)++;
+    }
+    return 0;
+}
+
 int check_crypto_perf_selftest(void)
 {
     puts("check_crypto_perf --selftest (evaluator logic, no build)");
     int fails = 0;
     int total = (int)(sizeof k_ccps_eval / sizeof k_ccps_eval[0])
-              + (int)(sizeof k_ccps_gate / sizeof k_ccps_gate[0]);
+              + (int)(sizeof k_ccps_gate / sizeof k_ccps_gate[0]) + 1;
     ccps_eval_cases(&fails);
+    ccps_history_cases(&fails);
     char root[CCP_PATH];
     int rc = lct_scratch_dir(root, sizeof root, "crypto-perf");
     if (rc)

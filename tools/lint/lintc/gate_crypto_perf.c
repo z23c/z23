@@ -410,6 +410,12 @@ int ccp_core(const struct ccp_opts *o)
     return ccp_table(o, meas, nmeas);
 }
 
+/* Where the gate's bench run appends. Never the tracked docs/ baseline. */
+const char *ccp_history_default(const char *env)
+{
+    return (env && *env) ? env : "docs/bench-history.csv";
+}
+
 int check_crypto_perf_run(int argc, char **argv)
 {
     struct ccp_opts o = {
@@ -417,7 +423,7 @@ int check_crypto_perf_run(int argc, char **argv)
         .baseline = ccp_or(getenv("ZCL_CRYPTO_PERF_BASELINE"),
                            "tools/crypto_perf_baseline.csv"),
         .margin = ccp_or(getenv("ZCL_CRYPTO_PERF_MARGIN"), "0.20"),
-        .history = ccp_or(getenv("ZCL_BENCH_HISTORY"), "docs/bench-history.csv"),
+        .history = ccp_history_default(getenv("ZCL_BENCH_HISTORY")),
         .out = stdout,
         .err = stderr,
     };
