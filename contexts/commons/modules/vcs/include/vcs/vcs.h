@@ -58,7 +58,8 @@ struct vcs_snapshot_meta {
 };
 
 /* Open (creating .zvcs/ if needed) the repo rooted at repo_root. NULL on
- * failure. */
+ * failure. A torn commits.log tail is copied to commits.log.torn-<offset>-*
+ * beside the log before it is cut (event_log_open), never silently lost. */
 struct vcs_repo *vcs_open(const char *repo_root);
 /* Open an EXISTING repo for history reads only (vcs_log): the commit log is
  * opened with event_log_open_readonly() and neither the object store nor the

@@ -13,8 +13,9 @@
  *   CRC32C after a startup self-check matches reference output.
  * - On open() the file is scanned from the tail to detect partial
  *   trailing writes (crash between header-fsync and sentinel-fsync, or
- *   sentinel write torn). Any partial event is TRUNCATED so the file
- *   only contains complete, durable events.
+ *   sentinel write torn). Any partial event is first copied to a
+ *   `<log>.torn-<offset>-<digest>` quarantine beside the log, then
+ *   TRUNCATED so the file only contains complete, durable events.
  *
  * - Mutex around append serializes writers; readers use pread and are
  *   safe under one appender + many readers because all writes are
@@ -23,6 +24,7 @@
 #include "storage/event_log.h"
 #include "storage/event_log_pending.h"
 
+#include "base/hex.h"
 #include "platform/private_file.h"
 #include "platform/time_compat.h"   /* platform_time_monotonic_us */
 #include "util/crc32c.h"
@@ -537,8 +539,120 @@ static uint64_t walk_good_records(struct platform_private_file *file,
     return cursor;
 }
 
+/* ── torn-tail quarantine ──────────────────────────────────────────────
+ *
+ * A write open never drops bytes silently. Before the file is cut back to its
+ * last whole record, the dropped span [cut, size) is copied to a sibling
+ *   <log>.torn-<cut>-<16 hex of SHA3-256(dropped bytes)>
+ * staged as <log>.torn.tmp (created exclusively), flushed, moved into place
+ * without replacing anything, and the directory flushed; only then is the log
+ * cut. The same bytes dropped at the same offset again (a crash after the
+ * quarantine, before the cut) find their quarantine present and reuse it once
+ * its bytes re-hash to the same digest. Any failure refuses the open and
+ * leaves the log untouched. event_log_open_readonly() never quarantines. */
+#define QUAR_TMP_SUFFIX ".torn.tmp"
+#define QUAR_CHUNK      65536u
+
+/* Hash [from, to) of src into digest, copying it to dst at offset 0 when dst
+ * is non-NULL. One bounded buffer, never the whole span. */
+static bool quarantine_stream(struct platform_private_file *src,
+                              uint64_t from, uint64_t to,
+                              struct platform_private_file *dst,
+                              uint8_t digest[32])
+{
+    uint8_t *buf = (uint8_t *)zcl_malloc(QUAR_CHUNK, "event_log/quarantine");
+    if (!buf)
+        return false;
+    struct sha3_256_ctx h;
+    sha3_256_init(&h);
+    bool ok = true;
+    for (uint64_t off = from; ok && off < to;) {
+        size_t n = to - off < QUAR_CHUNK ? (size_t)(to - off) : QUAR_CHUNK;
+        ok = full_pread(src, buf, n, off) == 0 &&
+             (!dst || full_pwrite(dst, buf, n, off - from) == 0);
+        sha3_256_write(&h, buf, n);
+        off += n;
+    }
+    free(buf);
+    sha3_256_finalize(&h, digest);
+    return ok;
+}
+
+/* An existing quarantine is reused only when it holds exactly `len` bytes
+ * that hash to `digest`. */
+static bool quarantine_matches(const char *dest, uint64_t len,
+                               const uint8_t digest[32])
+{
+    struct platform_private_file f;
+    platform_private_file_init(&f);
+    if (!platform_private_file_open_observation(dest, &f))
+        return false;
+    uint64_t sz = 0;
+    uint8_t got[32];
+    bool ok = platform_private_file_size(&f, &sz) && sz == len &&
+              quarantine_stream(&f, 0, len, NULL, got) &&
+              memcmp(got, digest, sizeof(got)) == 0;
+    platform_private_file_close(&f);
+    return ok;
+}
+
+/* Move the staged copy to `dest` without clobbering, or prove that the copy
+ * already there holds the same bytes and drop the staged one. */
+static bool quarantine_publish(struct platform_private_file *staged,
+                               const char *tmp, const char *dest,
+                               uint64_t len, const uint8_t digest[32])
+{
+    bool exists = false;
+    if (!platform_private_file_flush(staged) ||
+        !platform_private_file_publish_no_clobber(staged, tmp, dest, &exists))
+        return false;
+    if (!exists)
+        return true;
+    platform_private_file_close(staged);
+    (void)platform_private_file_unlink_missing_ok(tmp);
+    return quarantine_matches(dest, len, digest);
+}
+
+/* Copy [cut, size) of the log at `path` to its quarantine, durably. False
+ * (logged) when the bytes could not be kept: the caller must not cut. */
+static bool quarantine_dropped(struct platform_private_file *file,
+                               const char *path, uint64_t cut, uint64_t size)
+{
+    char tmp[1100], dest[1100], hex[17];
+    uint8_t digest[32];
+    if (!receipt_path(path, QUAR_TMP_SUFFIX, tmp, sizeof(tmp)))
+        LOG_FAIL("event_log", "quarantine path too long for %s", path);
+    /* A stale stage is this open's own earlier, unpublished copy. */
+    (void)platform_private_file_unlink_missing_ok(tmp);
+    struct platform_private_file staged;
+    platform_private_file_init(&staged);
+    if (!platform_private_file_create(tmp, &staged))
+        LOG_FAIL("event_log", "refusing to cut %s: create %s failed: %s",
+                 path, tmp, strerror(errno));
+    bool ok = quarantine_stream(file, cut, size, &staged, digest);
+    zcl_hex_encode(digest, 8, hex);
+    int n = snprintf(dest, sizeof(dest), "%s.torn-%llu-%s", path,
+                     (unsigned long long)cut, hex);
+    ok = ok && n > 0 && (size_t)n < sizeof(dest) &&
+         quarantine_publish(&staged, tmp, dest, size - cut, digest) &&
+         receipt_parent_flush(path);
+    if (!ok) {
+        platform_private_file_close(&staged);
+        (void)platform_private_file_unlink_missing_ok(tmp);
+        LOG_FAIL("event_log", "refusing to cut %s: could not quarantine the "
+                 "%llu bytes past offset %llu (size %llu)", path,
+                 (unsigned long long)(size - cut), (unsigned long long)cut,
+                 (unsigned long long)size);
+    }
+    LOG_ERROR("event_log", "%s: %llu of %llu bytes past the last whole record "
+              "at offset %llu quarantined to %s before the cut; the log needs "
+              "repair review", path, (unsigned long long)(size - cut),
+              (unsigned long long)size, (unsigned long long)cut, dest);
+    return true;
+}
+
 /* Walk forward from the start (or from a validated receipt), tracking the last
- * KNOWN-good end offset; anything past that is partial and gets truncated.
+ * KNOWN-good end offset; anything past that is quarantined, then truncated.
  * Returns false on a hard error. */
 static bool recover_truncate_partial(struct platform_private_file *file,
                                      const char *path,
@@ -587,6 +701,9 @@ static bool recover_truncate_partial(struct platform_private_file *file,
                 "[event_log] truncating partial tail: %llu -> %llu (%s)\n",
                 (unsigned long long)size,
                 (unsigned long long)last_good_end, path);
+        /* Never lose the dropped bytes: keep them beside the log first. */
+        if (!quarantine_dropped(file, path, last_good_end, size))
+            return false;
         /* The receipt must never outlive the bytes it vouches for: drop it,
          * durably, BEFORE the file shrinks. Fail closed if it cannot go. */
         if (!receipt_remove(path)) {
@@ -694,7 +811,8 @@ event_log_t *event_log_open_readonly(const char *path)
     if (!sized || rec.end != size) {
         fprintf(stderr,  // obs-ok:event-log-open-failure
                 "[event_log] read-only open refused %s: only %llu of %llu "
-                "bytes are whole records; nothing was truncated\n",
+                "bytes are whole records; nothing was truncated, the log "
+                "needs repair\n",
                 path, (unsigned long long)rec.end, (unsigned long long)size);
         platform_private_file_close(&file);
         return NULL;

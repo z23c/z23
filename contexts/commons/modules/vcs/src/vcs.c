@@ -222,7 +222,8 @@ struct vcs_repo *vcs_open_readonly(const char *repo_root)
     r->log = event_log_open_readonly(logpath);
     if (!r->log) {
         free(r);
-        LOG_NULL("vcs", "commits.log is absent, held or damaged: %s", logpath);
+        LOG_NULL("vcs", "commits.log is absent, held or damaged (left "
+                 "untouched; a damaged log needs repair): %s", logpath);
     }
     return r;
 }
