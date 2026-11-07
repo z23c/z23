@@ -633,7 +633,7 @@ else ifneq ($(filter lint lint-preflight,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # post-link toolchain-integrity check. lint-preflight shares this because
 # check-capability-closure (one of its gates) reads the same dev-obj epoch.
 ZCL_EPOCH_PROFILES := dev
-else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked ff-test-lint,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast android-snapshot-recovery-build test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked ff-test-lint,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := $(strip $(if $(filter test-parallel-fast-active-locked ff-test-lint,$(ZCL_EPOCH_SINGLE_GOAL)),dev) test-fast)
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := test-strict
@@ -2179,7 +2179,7 @@ else ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),dev-proof-bundle-prefork)
 ZCL_DEPFILE_PROFILES := dev test-fast node-c23
 else ifneq ($(filter dev-proof-bundle ff,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev test-fast
-else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked ff-test-lint,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast android-snapshot-recovery-build test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked ff-test-lint,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := $(strip $(if $(filter test-parallel-fast-active-locked ff-test-lint,$(ZCL_DEPFILE_SINGLE_GOAL)),dev) test-fast)
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := test-strict
@@ -4166,6 +4166,38 @@ $(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TE
 	trap - EXIT HUP INT TERM
 
 test_parallel_fast: $(TEST_PARALLEL_FAST_BIN)
+
+ifeq ($(ZCL_TARGET),android-arm64)
+# This exact recovery group has no external tool needs. Keep the complete
+# runner link inputs and epoch verification; omit only whole-suite tools.
+ANDROID_SNAPSHOT_RECOVERY_BIN = $(BIN_DIR)/android_snapshot_recovery
+ANDROID_SNAPSHOT_RECOVERY_CANDIDATE = $(BIN_DIR)/test-fast/epochs/$(TEST_FAST_COMPILE_EPOCH)/android_snapshot_recovery
+.PHONY: android-snapshot-recovery-build
+android-snapshot-recovery-build: $(ANDROID_SNAPSHOT_RECOVERY_BIN)
+$(ANDROID_SNAPSHOT_RECOVERY_BIN): $(ANDROID_SNAPSHOT_RECOVERY_CANDIDATE) FORCE
+	@$(BUILD_EPOCH_PUBLISH_TOOL) "$(ANDROID_SNAPSHOT_RECOVERY_CANDIDATE)" "$@" "$(TEST_FAST_SESSION)" \
+	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
+	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_PROFILE)" \
+	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
+$(ANDROID_SNAPSHOT_RECOVERY_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
+    $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS)
+	@mkdir -p $(dir $@)
+	@set -eu; \
+	tmp="$$(mktemp "$@.link.XXXXXX")"; \
+	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	$(CC) $(TEST_FAST_CFLAGS) $(TEST_FAST_LDFLAGS) -o "$$tmp" "@$(TEST_PARALLEL_FAST_LINK_RSP)" $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS); \
+	$(BUILD_EPOCH_SESSION_TOOL) verify "$(TEST_FAST_SESSION)" "$(TEST_FAST_LEASE)" \
+	  "$(TEST_FAST_OBJ_ROOT)" "$(BIN_DIR)/test-fast" "$(BUILD_EPOCH_KEEP)" \
+	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
+	  "$(TEST_FAST_COMPILE_EPOCH)" "$(TEST_FAST_PROFILE)" "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" \
+	  "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)" "$$PPID" >/dev/null; \
+	mv -f -- "$$tmp" "$@"; \
+	trap - EXIT HUP INT TERM
+else
+.PHONY: android-snapshot-recovery-build
+android-snapshot-recovery-build:
+	@echo 'android-snapshot-recovery-build requires ZCL_TARGET=android-arm64' >&2; exit 1
+endif
 
 $(TEST_PARALLEL_FAST_BIN): $(TEST_PARALLEL_FAST_CANDIDATE) FORCE
 	@$(BUILD_EPOCH_PUBLISH_TOOL) "$(TEST_PARALLEL_FAST_CANDIDATE)" "$@" "$(TEST_FAST_SESSION)" \

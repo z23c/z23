@@ -462,9 +462,5 @@ static int csi_pool_guarded_crash_case(void)
     else printf("v2 pool guarded crash: retained fixture=%s\n", root);
     return failures;
 }
-static int csi_v2_pool_crash_tests(void)
-{
-    return csi_pool_crash_case(true) + csi_pool_guarded_crash_case();
-}
 #endif
 #endif

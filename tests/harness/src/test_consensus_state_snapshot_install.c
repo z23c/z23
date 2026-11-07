@@ -3103,7 +3103,7 @@ static int rom_rung_activate_tests(const char *dir)
  * to the normal ./test-tmp path (test_make_tmpdir) otherwise. */
 static void csi_make_tmpdir(char *buf, size_t n)
 {
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__ANDROID__)
     if (access("/dev/shm", W_OK) == 0) {
         int wrote = snprintf(buf, n, "/dev/shm/consensus_state_install-%d",
                               (int)getpid());
@@ -6339,9 +6339,10 @@ static int csi_guarded_public_kill_restart(bool before_marker)
     int status = 0;
     if (child > 0) (void)waitpid(child, &status, 0);
     CSI_CHECK(before_marker ? "guarded commit pauses before marker" : "guarded install returns before kill", signalled && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    bool recovered = csi_guarded_restart_in_child(root, signalled, &witness);
     CSI_CHECK(before_marker ? "missing marker recovered with wallet preserved" :
               "completed install and wallet survive fresh restart",
-              csi_guarded_restart_in_child(root, signalled, &witness));
+              recovered);
     test_rm_rf_recursive(root);
     return failures;
 }
@@ -6461,15 +6462,26 @@ static int guarded_startup_context_test(void)
 #include "consensus_state_pool_fixture.h"
 #endif
 
+int test_snapshot_install_recovery(void)
+{
+#if !defined(_WIN32)
+    int failures = 0;
+    failures += csi_pool_crash_case(true);
+    failures += csi_pool_guarded_crash_case();
+    failures += csi_guarded_public_kill_restart(false);
+    failures += csi_guarded_public_kill_restart(true);
+    return failures;
+#else
+    return 1;
+#endif
+}
+
 int test_consensus_state_snapshot_install(void)
 {
 #if !defined(_WIN32)
-    int crash_failures = csi_v2_pool_crash_tests();
-    crash_failures += csi_v2_validation_tests();
+    int crash_failures = csi_v2_validation_tests();
     crash_failures += guarded_startup_context_test();
     crash_failures += csi_cutover_absent_and_malformed();
-    crash_failures += csi_guarded_public_kill_restart(false);
-    crash_failures += csi_guarded_public_kill_restart(true);
     crash_failures += committed_install_sigkill_test();
     int failures =
         crash_failures + test_consensus_state_snapshot_install_platform_arm();

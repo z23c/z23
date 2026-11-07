@@ -201,6 +201,14 @@ static int stl_host_route(const char *name, const struct stl_host *h)
             return STL_FATAL;
         }
     }
+    if (strcmp(name, "android_snapshot_recovery") == 0) {
+        if (stl_android_covers("Makefile") != 0) {
+            fprintf(stderr, "%s: Android recovery cross-build coverage missing\n", k_stl_gate);
+            return STL_FATAL;
+        }
+        fprintf(stderr, "[check_standalone_tools_link] Android recovery: cross-build target confirmed\n");
+        return STL_SKIP;
+    }
     const struct stl_winonly *w = stl_winonly_find(name);
     if (w && !h->windows)
         return stl_winonly_skip(w) == 0 ? STL_SKIP : STL_FATAL;

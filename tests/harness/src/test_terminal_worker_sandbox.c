@@ -35,7 +35,7 @@
 #endif
 #endif
 
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
 #include "platform/os_sandbox.h"
 
 #include <errno.h>
@@ -50,12 +50,12 @@
 #include <unistd.h>
 #endif
 
-#if !defined(__linux__)
+#if !defined(__linux__) || defined(__ANDROID__)
 
 static int test_terminal_worker_sandbox_platform_arm(void)
 {
     printf("\n=== terminal worker sandbox tests ===\n");
-    printf("terminal_worker_sandbox: Linux confinement — not applicable here\n");
+    printf("terminal_worker_sandbox: SKIP (Linux confinement backend unavailable on this platform)\n");
     return 0;
 }
 
@@ -690,7 +690,7 @@ static int test_terminal_worker_sandbox_platform_arm(void)
     return failures;
 }
 
-#endif /* __linux__ */
+#endif /* Linux confinement backend */
 
 int test_terminal_worker_sandbox(void)
 {

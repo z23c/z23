@@ -312,6 +312,45 @@ static int stl_st_catalog(const char *dir)
     return bad;
 }
 
+#define STL_ANDROID_BIND "ANDROID_SNAPSHOT_RECOVERY_BIN = $(BIN_DIR)/android_snapshot_recovery\n"
+#define STL_ANDROID_CAND "ANDROID_SNAPSHOT_RECOVERY_CANDIDATE = $(BIN_DIR)/test-fast/epochs/$(TEST_FAST_COMPILE_EPOCH)/android_snapshot_recovery\n"
+#define STL_ANDROID_TARGET "android-snapshot-recovery-build: $(ANDROID_SNAPSHOT_RECOVERY_BIN)\n"
+#define STL_ANDROID_RULE "$(ANDROID_SNAPSHOT_RECOVERY_BIN): $(ANDROID_SNAPSHOT_RECOVERY_CANDIDATE) FORCE\n"
+#define STL_ANDROID_CAND_RULE "$(ANDROID_SNAPSHOT_RECOVERY_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \\\n" "    $(TEST_PARALLEL_FAST_OBJS)\n"
+#define STL_ANDROID_ALL STL_ANDROID_BIND STL_ANDROID_CAND STL_ANDROID_TARGET STL_ANDROID_RULE STL_ANDROID_CAND_RULE
+static int stl_st_android(const char *dir)
+{
+    static const struct { const char *text; int expected; } cases[] = {
+        { ("ifeq ($(ZCL_TARGET),android-arm64)\n" STL_ANDROID_ALL "endif\n"), 0 },
+        { ("ifeq ($(ZCL_TARGET),android-arm64)\n" STL_ANDROID_BIND STL_ANDROID_CAND STL_ANDROID_RULE STL_ANDROID_CAND_RULE "endif\n"), 1 },
+        { ("ifeq ($(ZCL_TARGET),android-arm64)\n" STL_ANDROID_BIND STL_ANDROID_CAND "android-snapshot-recovery-build: $(OTHER_BIN)\n" STL_ANDROID_RULE STL_ANDROID_CAND_RULE "endif\n"), 1 },
+        { ("ifeq ($(ZCL_TARGET),android-arm64)\n  endif # closed\n" STL_ANDROID_ALL), 1 },
+        { ("ifeq ($(ZCL_TARGET),android-arm64)\n ifdef OTHER # nested\n" STL_ANDROID_ALL "endif\nendif\n"), 1 },
+        { ("ifeq (outer,yes)\nifeq ($(ZCL_TARGET),android-arm64)\n" STL_ANDROID_ALL "endif\nendif\n"), 1 },
+        { ("override\t private  define EXAMPLE\nifeq ($(ZCL_TARGET),android-arm64)\n" STL_ANDROID_ALL "endif\nendef\n"), 1 },
+        { ("define EXAMPLE\nifeq ($(ZCL_TARGET),android-arm64)\n" STL_ANDROID_ALL "endif\nendef\n"), 1 },
+        { ("ifeq ($(ZCL_TARGET),android-arm64)\n" STL_ANDROID_BIND STL_ANDROID_TARGET STL_ANDROID_RULE STL_ANDROID_CAND_RULE "endif\n"), 1 },
+        { ("ifeq ($(ZCL_TARGET),android-arm64)\n" STL_ANDROID_BIND "ANDROID_SNAPSHOT_RECOVERY_CANDIDATE = $(BIN_DIR)/wrong\n" STL_ANDROID_TARGET STL_ANDROID_RULE STL_ANDROID_CAND_RULE "endif\n"), 1 },
+        { ("ifeq ($(ZCL_TARGET),android-arm64)\n" STL_ANDROID_BIND STL_ANDROID_CAND STL_ANDROID_TARGET STL_ANDROID_RULE "endif\n"), 1 },
+        { ("ifeq ($(ZCL_TARGET),android-arm64)\nX = \\\n" STL_ANDROID_ALL "endif\n"), 1 },
+        { ("ifeq ($(ZCL_TARGET),android-arm64)\n" STL_ANDROID_ALL), -1 },
+    };
+    char p[STL_PATH];
+    if (stl_st_path(dir, "android.mk", p, sizeof p) != 0) return 1;
+    int bad = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        bad |= stl_st_put(dir, "android.mk", cases[i].text);
+        bad |= stl_st_expect("Android target binding", stl_android_covers(p), cases[i].expected);
+    }
+    return bad;
+}
+#undef STL_ANDROID_ALL
+#undef STL_ANDROID_CAND_RULE
+#undef STL_ANDROID_RULE
+#undef STL_ANDROID_TARGET
+#undef STL_ANDROID_CAND
+#undef STL_ANDROID_BIND
+
 static int stl_st_link_log(const char *dir)
 {
     int bad = stl_st_put(dir, "link.log", "ld: internal error\n");
@@ -409,6 +448,7 @@ int check_standalone_tools_link_selftest(void)
     bad |= stl_st_scan(dir);
     bad |= stl_st_fuzz(dir);
     bad |= stl_st_catalog(dir);
+    bad |= stl_st_android(dir);
     bad |= stl_st_link_log(dir);
     bad |= stl_st_nested();
     bad |= stl_st_stamp(dir);

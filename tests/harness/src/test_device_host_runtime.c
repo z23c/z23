@@ -1603,8 +1603,8 @@ static int runtime_package_types(void)
                 json_set_int(field, bad[j]); ASSERT(!zcl_command_registry_input_validate(spec, &input, why, sizeof(why)));
             }
             json_set_real(field, 1.5); ASSERT(!zcl_command_registry_input_validate(spec, &input, why, sizeof(why)));
-            json_set_real(field, NAN); ASSERT(!zcl_command_registry_input_validate(spec, &input, why, sizeof(why)));
-            json_set_real(field, INFINITY); ASSERT(!zcl_command_registry_input_validate(spec, &input, why, sizeof(why)));
+            json_set_real(field, (double)NAN); ASSERT(!zcl_command_registry_input_validate(spec, &input, why, sizeof(why)));
+            json_set_real(field, (double)INFINITY); ASSERT(!zcl_command_registry_input_validate(spec, &input, why, sizeof(why)));
             json_set_str(field, "1"); ASSERT(!zcl_command_registry_input_validate(spec, &input, why, sizeof(why)));
             json_set_int(field, 1000);
         }

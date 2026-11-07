@@ -551,8 +551,8 @@ PL_CASE(pl_node_private_reads, "private_listeners: an unauthenticated loopback c
     static const char *const requests[] = {
         "GET /api/v1/status HTTP/1.0\r\n\r\n",
         "GET / HTTP/1.0\r\n\r\n",
-        "POST / HTTP/1.0\r\nContent-Length: 44\r\n\r\n"
-        "{\"method\":\"getinfo\",\"params\":[],\"id\":1}\r\n",
+        ("POST / HTTP/1.0\r\nContent-Length: 44\r\n\r\n"
+         "{\"method\":\"getinfo\",\"params\":[],\"id\":1}\r\n"),
     };
     char reply[4096];
     for (size_t r = 0; r < 3; r++) {

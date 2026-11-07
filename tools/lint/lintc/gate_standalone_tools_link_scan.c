@@ -366,3 +366,107 @@ int stl_windows_covers(const char *catalog, const char *row, const char *src)
         return 1;
     return stl_tok_has(sources, ns, src) ? 0 : 2;
 }
+
+/* Make directive keywords and modifiers recognized outside recipes. */
+struct stl_android_word { const char *word; int op; };
+static int stl_android_word(const char *line, size_t n,
+                            const struct stl_android_word *words, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        if (strlen(words[i].word) == n && strncmp(line, words[i].word, n) == 0)
+            return words[i].op;
+    return 0;
+}
+
+static int stl_android_directive(const char *line)
+{
+    static const struct stl_android_word modifiers[] = {
+        { "override", 1 }, { "export", 1 }, { "private", 1 },
+    };
+    static const struct stl_android_word directives[] = {
+        { "ifeq", 1 }, { "ifneq", 1 }, { "ifdef", 1 }, { "ifndef", 1 },
+        { "else", 2 }, { "endif", 3 }, { "define", 4 }, { "endef", 5 },
+    };
+    if (*line == '\t') return 0;
+    while (isspace((unsigned char)*line)) line++;
+    size_t n = strcspn(line, " \t");
+    while (stl_android_word(line, n, modifiers, sizeof modifiers / sizeof modifiers[0]) &&
+           isspace((unsigned char)line[n])) {
+        line += n;
+        while (isspace((unsigned char)*line)) line++;
+        n = strcspn(line, " \t");
+    }
+    n = strcspn(line, " \t#(");
+    return stl_android_word(line, n, directives, sizeof directives / sizeof directives[0]);
+}
+
+struct stl_android_state {
+    size_t n;
+    int depth, defs, match, found, complete, continued;
+};
+
+/* Finish an Android guard branch and record a complete target binding. */
+static int stl_android_close(struct stl_android_state *s, int op)
+{
+    if (op == 3 && !s->depth) return -1;
+    if (s->match && s->depth == 1 && s->complete) s->found = 1;
+    if (op == 3) s->depth--, s->complete = 0;
+    s->match = 0;
+    return 1;
+}
+
+/* Advance Make guard/define state; -1 means an unmatched directive. */
+static int stl_android_control(struct stl_android_state *s, int op, const char *line)
+{
+    if (op == 4) { s->defs++; s->match = 0; return 1; }
+    if (op == 5) { if (!s->defs) return -1; s->defs--; return 1; }
+    if (s->defs) return 1;
+    if (op == 1) {
+        if (s->depth == 0 && strcmp(line, "ifeq ($(ZCL_TARGET),android-arm64)") == 0)
+            s->match = 1, s->n = 0, s->complete = 0;
+        else s->match = 0;
+        s->depth++;
+        return 1;
+    }
+    if (op == 2 || op == 3) return stl_android_close(s, op);
+    return 0;
+}
+
+/* Track physical-line continuations before checking Android target rules. */
+static int stl_android_line(struct stl_android_state *s, const char *line)
+{
+    static const char *const lines[] = {
+        "ANDROID_SNAPSHOT_RECOVERY_BIN = $(BIN_DIR)/android_snapshot_recovery",
+        "ANDROID_SNAPSHOT_RECOVERY_CANDIDATE = $(BIN_DIR)/test-fast/epochs/$(TEST_FAST_COMPILE_EPOCH)/android_snapshot_recovery",
+        "android-snapshot-recovery-build: $(ANDROID_SNAPSHOT_RECOVERY_BIN)",
+        "$(ANDROID_SNAPSHOT_RECOVERY_BIN): $(ANDROID_SNAPSHOT_RECOVERY_CANDIDATE) FORCE",
+        "$(ANDROID_SNAPSHOT_RECOVERY_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \\",
+    };
+    size_t len = strlen(line), slashes = 0;
+    while (slashes < len && line[len - slashes - 1] == '\\') slashes++;
+    int prior = s->continued;
+    s->continued = (int)(slashes & 1u);
+    if (prior) return 0;
+    int rc = stl_android_control(s, stl_android_directive(line), line);
+    if (rc != 0) return rc < 0 ? -1 : 0;
+    if (s->match && s->depth == 1 && s->n < sizeof lines / sizeof lines[0] &&
+        strcmp(line, lines[s->n]) == 0 && ++s->n == sizeof lines / sizeof lines[0])
+        s->complete = 1;
+    return 0;
+}
+
+/* Accept only the top-level Android guard with its connected build rules. */
+int stl_android_covers(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    struct stl_rd r = { .f = f };
+    struct stl_android_state s = {0};
+    int bad = 0;
+    while (stl_rd_next(&r)) {
+        if (r.mid || stl_android_line(&s, r.buf) != 0) { bad = 1; break; }
+    }
+    if (ferror(f) || s.depth || s.defs) bad = 1;
+    if (fclose(f) != 0) bad = 1;
+    return bad ? -1 : s.found ? 0 : 1;
+}

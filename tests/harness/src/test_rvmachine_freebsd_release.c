@@ -87,7 +87,9 @@ static enum fr_binding fr_bind(const char *path, uint64_t bytes, const char *sha
     if (!fr_stat(path, &st)) return FR_UNREADABLE;
     if (st.size != bytes) {
         FILE *f = fopen(path, "rb");
-        bool readable = f != NULL && (fgetc(f), !ferror(f));
+        int first = f != NULL ? fgetc(f) : EOF;
+        bool readable = f != NULL && !ferror(f) &&
+                        (first != EOF || feof(f));
         if (f != NULL) fclose(f);
         return readable ? FR_DIFFERENT : FR_UNREADABLE;
     }
@@ -106,6 +108,11 @@ static bool fr_binding_case(void)
     ok = ok && fr_bind(path, FR_KERNEL_BYTES, FR_KERNEL_SHA) == FR_DIFFERENT &&
          fr_bind(path, 3, FR_KERNEL_SHA) == FR_DIFFERENT &&
          fr_bind(dir, FR_KERNEL_BYTES, FR_KERNEL_SHA) == FR_UNREADABLE;
+    f = fopen(path, "wb");
+    bool empty_created = f != NULL;
+    if (f != NULL) empty_created = fclose(f) == 0 && empty_created;
+    ok = ok && empty_created &&
+         fr_bind(path, FR_KERNEL_BYTES, FR_KERNEL_SHA) == FR_DIFFERENT;
     snprintf(path, sizeof path, "%s/absent", dir);
     ok = ok && fr_bind(path, FR_KERNEL_BYTES, FR_KERNEL_SHA) == FR_UNREADABLE;
     test_cleanup_tmpdir(dir);

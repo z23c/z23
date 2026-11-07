@@ -25,6 +25,7 @@ int stl_names_add(struct stl_names *t, const char *s, size_t n);
 int stl_names_has(const struct stl_names *t, const char *s);
 int stl_scan_makefile(const char *path, struct stl_names *tools);
 int stl_load_fuzz(const char *mk, struct stl_names *fuzz);
+int stl_android_covers(const char *path);
 int stl_windows_covers(const char *catalog, const char *row, const char *src);
 
 int stl_wait(pid_t pid);

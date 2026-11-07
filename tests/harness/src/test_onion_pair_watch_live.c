@@ -156,7 +156,7 @@ static void opw_child_exec_script(const char *script_abs,
                                   const char *out_path)
 {
     setpgid(0, 0);
-    int cfd = open(out_path, O_WRONLY | O_TRUNC, 0600);
+    int cfd = open(out_path, O_WRONLY | O_TRUNC);
     if (cfd >= 0) {
         dup2(cfd, STDOUT_FILENO);
         dup2(cfd, STDERR_FILENO);

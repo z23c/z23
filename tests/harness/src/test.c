@@ -1284,6 +1284,10 @@ static void run_full_suite_foundation(int *failures)
       *failures += test_utxo_snapshot_loader(); }
     *failures += test_snapshot_apply_coins_kv();
     *failures += test_consensus_state_snapshot_install();
+#if !defined(_WIN32)
+    { extern int test_snapshot_install_recovery(void);
+      *failures += test_snapshot_install_recovery(); }
+#endif
     *failures += test_sqlite_pinned_reader();
     *failures += test_utxo_mirror_read_snapshot();
     *failures += test_checkpoint_rom_authority();

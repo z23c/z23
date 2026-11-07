@@ -80,7 +80,7 @@ static bool test_reconcile_stub(void *ctx)
     return atomic_load(&g_reconcile_converged);
 }
 
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
 /* The sink stays blocked until publication finishes or its deadline expires. */
 struct paused_sink {
     pthread_mutex_t mu;
@@ -1216,8 +1216,10 @@ int test_blocker(void)
     int failures = 0;
 
     blocker_module_init();
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
     BCK_CHECK("publication completes while diagnostic sink is paused", check_paused_diagnostic());
+#elif defined(__ANDROID__)
+    printf("blocker: SKIP (Android has no fopencookie diagnostic sink)\n");
 #endif
 
     /* ── blocker_init basic ─────────────────────────────────────── */
