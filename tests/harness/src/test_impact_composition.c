@@ -262,6 +262,7 @@ static unsigned ic_guest_host_missing(void)
 static const char *const k_ic_display_app_groups[] = {
     "test_app_launch_skycombat",
     "test_app_seed_skycombat",
+    "test_app_journey_skycombat",
 };
 
 static bool ic_display_apps_ready(void)
@@ -308,6 +309,7 @@ static bool ic_guest_groups_gated(const char *selector, const char *gated)
         {"test_guest_image_admission", "test_guest_image_admission:env:ZCL_TEST_PUBLIC_GUEST_IMAGE_KERNEL", ic_image_host_ready},
         {"test_app_launch_skycombat", "test_app_launch_skycombat:env:ZCL_TEST_DISPLAY_APPS", ic_display_apps_ready},
         {"test_app_seed_skycombat", "test_app_seed_skycombat:env:ZCL_TEST_DISPLAY_APPS", ic_display_apps_ready},
+        {"test_app_journey_skycombat", "test_app_journey_skycombat:env:ZCL_TEST_DISPLAY_APPS", ic_display_apps_ready},
     };
     for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++)
         if (ic_selector_has(selector, rows[i].group) != rows[i].ready() ||

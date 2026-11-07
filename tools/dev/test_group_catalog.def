@@ -1735,6 +1735,12 @@ ZCL_TEST_GROUP(app_front_door)
  * a private Xvfb (host-gated on ZCL_TEST_DISPLAY_APPS). */
 ZCL_TEST_GROUP(app_seed)
 ZCL_TEST_GROUP(app_seed_skycombat)
+/* The whole journey with ONE owner key in ONE ISO week, every step a front
+ * door verb: A copies (seeding), edits, saves, builds, opens and shares; B
+ * opens the share file; equal image hashes. The stub app runs everywhere;
+ * the real game is host-gated on ZCL_TEST_DISPLAY_APPS. */
+ZCL_TEST_GROUP(app_journey)
+ZCL_TEST_GROUP(app_journey_skycombat)
 ZCL_TEST_GROUP(task_document)
 ZCL_TEST_GROUP(package_local)
 /* astro lane: platform/modules/astro's exact fixed-grid arithmetic and the birth chart

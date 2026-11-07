@@ -1561,6 +1561,8 @@ struct zpyf_pkg {
     uint8_t root[32];
     char *manifest_hex;  /* malloc */
     char *recipe_hex;    /* malloc */
+    uint8_t *recipe_wire; /* malloc: the local publication takes raw wires */
+    size_t recipe_wire_len;
     uint8_t recipe_root[32];
 };
 
@@ -1570,9 +1572,11 @@ static void zpyf_pkg_free(struct zpyf_pkg *p)
     free(p->wire);
     free(p->manifest_hex);
     free(p->recipe_hex);
+    free(p->recipe_wire);
     p->wire = NULL;
     p->manifest_hex = NULL;
     p->recipe_hex = NULL;
+    p->recipe_wire = NULL;
 }
 
 /* A valid package variant (LICENSE + include/zpy.h + src/zpy.c; the
@@ -1625,7 +1629,8 @@ static bool zpyf_make_pkg(struct zpyf_pkg *p, const char *dir,
         return false;
     }
     p->recipe_hex = zpyf_hex(rwire, rwire_len);
-    free(rwire);
+    p->recipe_wire = rwire;
+    p->recipe_wire_len = rwire_len;
     return p->recipe_hex != NULL;
 }
 
@@ -1917,6 +1922,170 @@ static int t_publish_gate(void)
     zpyf_pkg_free(&g.p5);
     zpyf_pkg_free(&g.p6);
     zpy_rm_rf(g.datadir);
+    return failures;
+}
+
+/* ── 7b. the owner's own local step is not throttled by the week ──────
+ * app.seed and bundle.sign publish through the local composition with
+ * owner_local set in C. That skips only the weekly allowance check: the
+ * publish is still recorded, so a later unflagged publish in the same
+ * week is still refused, and no input key can set the flag. */
+
+/* Monday, Wednesday and Friday of one ISO week (day 20101 is a Monday). */
+#define ZPYF_MON 20101
+#define ZPYF_WED 20103
+#define ZPYF_FRI 20105
+
+/* Run the local composition (the app.seed / bundle.sign path) for one
+ * candidate at one pinned day, flagged or not. */
+static void zpyf_local(struct zpy_cmd *c, const char *datadir,
+                       const struct zpyf_pkg *pkg,
+                       const struct vcs_package_release *release,
+                       const char *pkgdir, int64_t day, bool owner_local)
+{
+    uint8_t *rwire = NULL;
+    size_t rwire_len = 0;
+    zpy_cmd_init(c, datadir);
+    if (vcs_package_release_serialize(release, &rwire, &rwire_len) !=
+        VCS_PACKAGE_RELEASE_OK)
+        rwire_len = 0; /* the composition refuses an empty release wire */
+    const struct zcl_native_local_publication p = {
+        .datadir = datadir, .source_directory = pkgdir,
+        .release_wire = rwire, .release_wire_len = rwire_len,
+        .manifest_wire = pkg->wire, .manifest_wire_len = pkg->wire_len,
+        .recipe_wire = pkg->recipe_wire,
+        .recipe_wire_len = pkg->recipe_wire_len,
+        .has_day = true, .day = day, .owner_local = owner_local,
+    };
+    zcl_native_zcode_local_publication_commit(&p, &c->reply);
+    free(rwire);
+}
+
+static bool zpyf_committed(const struct zpy_cmd *c)
+{
+    const char *r = json_get_str(json_get(&c->reply.data, "result"));
+    if (c->reply.status != ZCL_COMMAND_STATUS_PASSED)
+        printf("  [commit refused %s: %s (%s)]\n", c->reply.error.code,
+               c->reply.error.message, c->reply.error.evidence);
+    return c->reply.status == ZCL_COMMAND_STATUS_PASSED && r &&
+           strcmp(r, "committed") == 0;
+}
+
+static bool zpyf_week_limited(const struct zpy_cmd *c)
+{
+    return strcmp(c->reply.error.code, "PUBLISH_FREQUENCY_LIMIT") == 0 &&
+           strstr(c->reply.error.evidence, "allowance=1") != NULL &&
+           !c->reply.error.mutated;
+}
+
+struct zpyf_owner {
+    uint8_t pub[33];
+    char datadir[4400], zcode_dir[4400];
+    char pkg[3][4400];
+    struct zpyf_pkg p[3];
+    struct vcs_package_release r[3];
+};
+
+static int zpyf_owner_setup(struct zpyf_owner *o)
+{
+    int failures = 0;
+    struct privkey sk;
+    struct pubkey pk;
+    chain_params_select(CHAIN_MAIN);
+    snprintf(o->datadir, sizeof(o->datadir), "test-tmp/zpy_owner_%ld",
+             (long)getpid());
+    snprintf(o->zcode_dir, sizeof(o->zcode_dir), "%s/zcode", o->datadir);
+    zpy_rm_rf(o->datadir);
+    ZPY_CHECK("owner: datadir created", zpy_mkdir_p(o->zcode_dir));
+    ZPY_CHECK("owner: publisher key derives", zpyf_keypair(0x51, &sk, &pk));
+    memcpy(o->pub, pk.vch, 33);
+    bool built = true;
+    for (unsigned i = 0; i < 3; i++) {
+        char name[32];
+        snprintf(o->pkg[i], sizeof(o->pkg[i]), "%s/pkg%u", o->datadir, i + 1);
+        snprintf(name, sizeof(name), "zpy/owner%u", i + 1);
+        built = built && zpyf_make_pkg(&o->p[i], o->pkg[i], 10 + i) &&
+                zpyf_release(&o->r[i], 0x51, i + 1, name, &o->p[i]);
+    }
+    ZPY_CHECK("owner: three candidates from one key build", built);
+    return failures;
+}
+
+/* #1 unflagged and #2 flagged commit in one ISO week; #2 is recorded. */
+static int zpyf_owner_flagged_passes(struct zpyf_owner *o)
+{
+    int failures = 0;
+    struct zpy_cmd c;
+    zpyf_local(&c, o->datadir, &o->p[0], &o->r[0], o->pkg[0], ZPYF_MON,
+               false);
+    ZPY_CHECK("owner: the first (unflagged) publish of the week commits",
+              zpyf_committed(&c));
+    zpy_cmd_free(&c);
+    zpyf_local(&c, o->datadir, &o->p[1], &o->r[1], o->pkg[1], ZPYF_WED,
+               true);
+    const struct json_value *pol = json_get(&c.reply.data, "policy");
+    ZPY_CHECK("owner: a flagged 2nd publish in the same week commits",
+              zpyf_committed(&c));
+    ZPY_CHECK("owner: the flagged publish is recorded (2 this week, "
+              "allowance still 1)",
+              pol &&
+              strcmp(json_get_str(json_get(pol, "tier")), "new-user") == 0 &&
+              json_get_int(json_get(pol, "publishes_this_week")) == 2 &&
+              json_get_int(json_get(pol, "publish_per_week")) == 1 &&
+              json_get_bool(json_get(pol, "policy_recorded")));
+    zpy_cmd_free(&c);
+    return failures;
+}
+
+/* #3 unflagged, by the local composition and by the JSON leaf with an
+ * "owner_local" key, is refused; the book holds exactly #1 and #2. */
+static int zpyf_owner_unflagged_refused(struct zpyf_owner *o)
+{
+    int failures = 0;
+    struct zpy_cmd c;
+    zpyf_local(&c, o->datadir, &o->p[2], &o->r[2], o->pkg[2], ZPYF_FRI,
+               false);
+    ZPY_CHECK("owner: an unflagged 3rd publish that week is still refused",
+              zpyf_week_limited(&c) &&
+              strstr(c.reply.error.evidence, "publishes_this_week=2") !=
+                  NULL);
+    zpy_cmd_free(&c);
+    zpyf_commit(&c, o->datadir, &o->p[2], &o->r[2], o->pkg[2], ZPYF_FRI);
+    zcl_command_reply_free(&c.reply);
+    zcl_command_reply_init(&c.reply, "zcl.zcode_policy_test.v1");
+    (void)json_push_kv_bool(&c.input, "owner_local", true);
+    zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
+    ZPY_CHECK("owner: no input key sets the flag (owner_local:true in the "
+              "commit input is still refused)",
+              zpyf_week_limited(&c));
+    zpy_cmd_free(&c);
+    struct vcs_service_book *book = vcs_service_book_load(o->zcode_dir);
+    struct vcs_service_key_totals kt;
+    ZPY_CHECK("owner: the book holds both admitted publishes, not the "
+              "refused one",
+              book && vcs_service_key_totals(book, o->pub, ZPYF_FRI, &kt) &&
+              kt.publish_events == 2 && kt.publishes_this_week == 2);
+    vcs_service_book_free(book);
+    ZPY_CHECK("owner: the new-user weekly allowance is unchanged (1)",
+              VCS_POLICY_FREE_PUBLISH_PER_WEEK == 1u &&
+              vcs_policy_limits_for(VCS_POLICY_TIER_NEW_USER)
+                      ->publish_per_week == 1u);
+    return failures;
+}
+
+static int t_publish_gate_owner_local(void)
+{
+    int failures = 0;
+    struct zpyf_owner o;
+    memset(&o, 0, sizeof(o));
+    failures += zpyf_owner_setup(&o);
+    if (!failures)
+        failures += zpyf_owner_flagged_passes(&o);
+    if (!failures)
+        failures += zpyf_owner_unflagged_refused(&o);
+    for (unsigned i = 0; i < 3; i++)
+        zpyf_pkg_free(&o.p[i]);
+    zpy_rm_rf(o.datadir);
     return failures;
 }
 
@@ -2362,6 +2531,7 @@ int test_zcode_policy(void)
     failures += t_receipt_accept();
     failures += t_storage_commands();
     failures += t_publish_gate();
+    failures += t_publish_gate_owner_local();
 #if !defined(_WIN32)
     failures += zpy_nofollow_plain_link();
     failures += zpy_nofollow_trailing_sep();

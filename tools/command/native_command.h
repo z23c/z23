@@ -530,6 +530,12 @@ struct zcl_native_local_publication {
     size_t recipe_wire_len;
     bool has_day;
     int64_t day;
+    /* A deliberate local step the owner runs with the owner key (app.seed,
+     * bundle.sign): the weekly publish allowance does not throttle it. The
+     * book still loads, every other check still applies and the publish is
+     * still recorded, so a later unflagged publish that week is throttled.
+     * Set only in C at those call sites; no input key reaches it. */
+    bool owner_local;
 };
 void zcl_native_zcode_local_publication_commit(
     const struct zcl_native_local_publication *publication,

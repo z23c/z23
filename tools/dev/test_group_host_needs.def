@@ -517,6 +517,10 @@ ZCL_TEST_GROUP_BUILD_NEED("test_zcode_package_artifact", "build/bin/z23", "z23")
  * headers or the run without Xvfb prints SKIP. */
 ZCL_TEST_GROUP_NEED("test_app_seed_skycombat", ZCL_HOST_NEED_ENV,
     "ZCL_TEST_DISPLAY_APPS")
+/* app_journey_skycombat runs the whole journey on the real game (two builds,
+ * opens and QA runs on a private Xvfb): the same host need. */
+ZCL_TEST_GROUP_NEED("test_app_journey_skycombat", ZCL_HOST_NEED_ENV,
+    "ZCL_TEST_DISPLAY_APPS")
 
 /* mcp_serve drives `z23 mcp serve` over pipes against the dev binary. */
 ZCL_TEST_GROUP_BUILD_NEED("test_mcp_serve", "build/bin/z23-dev", "dev-bin")

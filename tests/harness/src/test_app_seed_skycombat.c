@@ -24,26 +24,17 @@
 
 #include "test/test_core.h"
 #include "test/app_seed_fixture.h"
-#include "test/host_tool_capture.h"
 
 #include "chain/chainparams.h"
 
 #if defined(__linux__)
-#include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
-#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
-extern char **environ;
-
 #define ASS_PATH 1200
-#define ASS_OUT 65536
 
 struct ass_world {
     char root[512];
@@ -57,61 +48,6 @@ struct ass_world {
     bool had_display;
     pid_t xvfb;
 };
-
-static const char *ass_xvfb_path(void)
-{
-    static const char *const paths[] = {"/usr/bin/Xvfb", "/usr/local/bin/Xvfb"};
-    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++)
-        if (access(paths[i], X_OK) == 0)
-            return paths[i];
-    return NULL;
-}
-
-/* Xvfb picks a free display itself (-displayfd), so parallel runs never
- * race for a number; DISPLAY is set to it. */
-static bool ass_xvfb_start(struct ass_world *w, const char *xvfb)
-{
-    int fds[2];
-    char log[ASS_PATH], display[32];
-    posix_spawn_file_actions_t fa;
-    char *argv[] = {(char *)xvfb, (char *)"-displayfd", (char *)"3",
-                    (char *)"-nolisten", (char *)"tcp", (char *)"-screen",
-                    (char *)"0", (char *)"1280x800x24", NULL};
-    (void)snprintf(log, sizeof(log), "%s/xvfb.log", w->root);
-    if (pipe(fds) != 0 || posix_spawn_file_actions_init(&fa) != 0)
-        return false;
-    bool ok =
-        posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0) == 0 &&
-        posix_spawn_file_actions_addopen(&fa, 1, log, O_WRONLY | O_CREAT |
-                                         O_TRUNC, 0600) == 0 &&
-        posix_spawn_file_actions_adddup2(&fa, 1, 2) == 0 &&
-        posix_spawn_file_actions_adddup2(&fa, fds[1], 3) == 0 &&
-        posix_spawn(&w->xvfb, xvfb, &fa, NULL, argv, environ) == 0;
-    (void)posix_spawn_file_actions_destroy(&fa);
-    close(fds[1]);
-    display[0] = ':';
-    size_t used = 1;
-    while (ok && used + 1 < sizeof(display)) {
-        struct pollfd p = {.fd = fds[0], .events = POLLIN};
-        char c;
-        if (poll(&p, 1, 15000) <= 0 || read(fds[0], &c, 1) != 1 || c == '\n')
-            break;
-        display[used++] = c;
-    }
-    close(fds[0]);
-    display[used] = '\0';
-    return ok && used > 1 && setenv("DISPLAY", display, 1) == 0;
-}
-
-static void ass_xvfb_stop(struct ass_world *w)
-{
-    int status;
-    if (w->xvfb <= 0)
-        return;
-    (void)kill(w->xvfb, SIGTERM);
-    (void)waitpid(w->xvfb, &status, 0);
-    w->xvfb = 0;
-}
 
 static bool ass_world_init(struct ass_world *w)
 {
@@ -186,40 +122,22 @@ static int ass_adopt_build(struct ass_world *w)
 static int ass_runs_qa_frames(struct ass_world *w, const char *xvfb)
 {
     int failures = 0;
-    static char out[ASS_OUT];
     TEST("app.seed skycombat: the built image runs 120 QA frames and exits "
          "0 on a private Xvfb") {
-        const char *argv[] = {w->image, "--qa-frames=120", NULL};
-        ASSERT(ass_xvfb_start(w, xvfb));
-        int rc = test_host_tool_capture(argv, out, sizeof(out), 120000);
-        ass_xvfb_stop(w);
+        ASSERT(asf_xvfb_start(xvfb, w->root, &w->xvfb));
+        int rc = asf_qa_frames(w->image);
+        asf_xvfb_stop(&w->xvfb);
         ASSERT_EQ(rc, 0);
         PASS();
     } _test_next:;
     return failures;
 }
 
-/* The window-system headers the game's raylib build reads on Linux (the
- * repo Makefile's SKYCOMBAT_PLATFORM_HEADERS). */
-static const char *ass_missing_header(void)
-{
-    static const char *const headers[] = {
-        "X11/Xlib.h", "X11/extensions/Xrandr.h", "X11/extensions/XInput2.h",
-        "X11/Xcursor/Xcursor.h", "GL/glx.h"};
-    char path[256];
-    for (size_t i = 0; i < sizeof(headers) / sizeof(headers[0]); i++) {
-        (void)snprintf(path, sizeof(path), "/usr/include/%s", headers[i]);
-        if (access(path, R_OK) != 0)
-            return headers[i];
-    }
-    return NULL;
-}
-
 int test_app_seed_skycombat(void);
 int test_app_seed_skycombat(void)
 {
     int failures = 0;
-    const char *xvfb = ass_xvfb_path(), *missing = ass_missing_header();
+    const char *xvfb = asf_xvfb_path(), *missing = asf_missing_game_header();
     struct ass_world w;
     chain_params_select(CHAIN_MAIN);
     TEST("app.seed skycombat: a temporary HOME and datadir") {
@@ -239,7 +157,7 @@ int test_app_seed_skycombat(void)
                "host)\n");
     if (!failures && !missing && xvfb)
         failures += ass_runs_qa_frames(&w, xvfb);
-    ass_xvfb_stop(&w);
+    asf_xvfb_stop(&w.xvfb);
     ass_world_restore(&w);
     if (!failures)
         (void)test_rm_rf_recursive(w.root);

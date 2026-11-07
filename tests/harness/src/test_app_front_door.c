@@ -21,6 +21,7 @@
  * The journey's command and hex-paste counts are printed at the end. */
 
 #include "test/test_core.h"
+#include "test/app_seed_fixture.h"
 
 #include "base/hex.h"
 #include "chain/chainparams.h"
@@ -31,7 +32,6 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "mcp/mcp_policy.h"
-#include "platform/resident_launch.h"
 #include "plugin/plugin_dist.h"
 #include "plugin/plugin_pack.h"
 #include "vcs/package_prepare.h"
@@ -57,7 +57,6 @@ int test_app_front_door(void)
 
 #define AFD_PATH 900
 #define AFD_SNAP (64u * 1024u)
-#define AFD_OUT (16u * 1024u)
 
 struct afd_world {
     char root[512];
@@ -318,80 +317,12 @@ static bool afd_same(const char *before, const char *home)
 
 /* ── the front door ─────────────────────────────────────────────────── */
 
-struct afd_run {
-    int rc;
-    char text[AFD_OUT];
-};
-
-static bool k_afd_said_yes;
-static char k_afd_question[512];
-
-static bool afd_answer_yes(void *ctx, const char *question)
-{
-    (void)ctx;
-    (void)snprintf(k_afd_question, sizeof(k_afd_question), "%s", question);
-    k_afd_said_yes = true;
-    return true;
-}
-
+/* The person runs each verb from their HOME. */
 static void afd_door(const char *home, const char *datadir, const char *verb,
                      const char *target, enum zcl_cli_confirm_mode mode,
-                     struct afd_run *run)
+                     struct asf_door *run)
 {
-    FILE *out = tmpfile();
-    struct zcl_app_front_door d = {
-        .verb = verb, .target = target, .datadir = datadir, .out = out,
-        .confirm = {.mode = mode, .ask = afd_answer_yes},
-    };
-    memset(run, 0, sizeof(*run));
-    run->rc = -1;
-    if (!out || setenv("HOME", home, 1) != 0 || chdir(home) != 0) {
-        if (out)
-            (void)fclose(out);
-        return;
-    }
-    run->rc = zcl_app_front_door_run(&d);
-    rewind(out);
-    size_t n = fread(run->text, 1, sizeof(run->text) - 1u, out);
-    run->text[n] = '\0';
-    (void)fclose(out);
-    if (run->rc != 0)
-        printf("  [z23 app %s %s: rc=%d]\n%s", verb, target, run->rc,
-               run->text);
-}
-
-/* "pid N" in the front door's output. */
-static long afd_pid(const char *text)
-{
-    const char *p = strstr(text, "pid ");
-    return p ? strtol(p + 4, NULL, 10) : 0;
-}
-
-/* xxxx-xxxx-xxxx-xxxx: four groups of four lowercase hex. */
-static bool afd_short_fingerprint(const char *text)
-{
-    for (const char *p = text; *p; p++) {
-        size_t i = 0;
-        for (; i < 19; i++) {
-            char c = p[i];
-            bool dash = i % 5 == 4;
-            if (dash ? c != '-'
-                     : !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
-                break;
-        }
-        if (i == 19)
-            return true;
-    }
-    return false;
-}
-
-static bool afd_alive_then_stop(long pid)
-{
-    bool alive = pid > 1 && kill((pid_t)pid, 0) == 0;
-    int status = 0;
-    bool reaped = pid > 1 &&
-                  resident_launch_kill_reap((uint64_t)pid, 2000, &status);
-    return alive && reaped;
+    asf_door_run(home, home, datadir, verb, target, mode, run);
 }
 
 /* app.run.copy plan on a copy: the build record's image_sha3. */
@@ -405,29 +336,6 @@ static bool afd_open_plan(const char *datadir, const char *copy,
 }
 
 /* ── cases ──────────────────────────────────────────────────────────── */
-
-static bool afd_mcp_refuses_owner(const char *path, const char *key,
-                                  const char *value)
-{
-    const struct zcl_command_spec *spec = afd_spec(path);
-    struct mcp_refusal why = {0};
-    struct json_value in;
-    if (!spec || spec->authority != ZCL_COMMAND_AUTH_OWNER) {
-        printf("  [%s missing or not owner authority]\n", path);
-        return false;
-    }
-    json_init(&in);
-    json_set_object(&in);
-    (void)json_push_kv_str(&in, key, value);
-    bool plan = !mcp_policy_allows(spec, zcl_command_catalog(), &in, &why) &&
-                strcmp(why.code, "MUTATION_REFUSED_OWNER_AUTHORITY") == 0;
-    (void)json_push_kv_str(&in, "plan_id", "00");
-    (void)json_push_kv_bool(&in, "confirm", true);
-    bool commit = !mcp_policy_allows(spec, zcl_command_catalog(), &in, &why) &&
-                  strcmp(why.code, "MUTATION_REFUSED_OWNER_AUTHORITY") == 0;
-    json_free(&in);
-    return plan && commit;
-}
 
 static bool afd_mcp_plan_first(const char *path)
 {
@@ -452,9 +360,9 @@ static int afd_mcp_authority(void)
     int failures = 0;
     TEST("app front door: MCP refuses copy, share and receive as owner "
          "authority; save and open-copy run plan-first") {
-        ASSERT(afd_mcp_refuses_owner("app.copy", "app", "tinyapp"));
-        ASSERT(afd_mcp_refuses_owner("app.share", "copy", "tinyapp-1"));
-        ASSERT(afd_mcp_refuses_owner("app.receive", "file", "x.z23share"));
+        ASSERT(asf_mcp_refuses_owner("app.copy", "app", "tinyapp"));
+        ASSERT(asf_mcp_refuses_owner("app.share", "copy", "tinyapp-1"));
+        ASSERT(asf_mcp_refuses_owner("app.receive", "file", "x.z23share"));
         ASSERT(afd_mcp_plan_first("app.save"));
         ASSERT(afd_mcp_plan_first("app.run.copy"));
         PASS();
@@ -493,7 +401,7 @@ static int afd_plan_only(struct afd_world *w)
     int failures = 0;
     TEST("app front door: no terminal and no --yes plans and mutates "
          "nothing") {
-        struct afd_run run;
+        struct asf_door run;
         char *before = afd_snapshot(w->a_home);
         ASSERT(before != NULL);
         afd_door(w->a_home, w->a_datadir, "copy", "tinyapp",
@@ -513,7 +421,7 @@ static int afd_a_copies_and_saves(struct afd_world *w)
     int failures = 0;
     TEST("A: copy adopts the pre-seeded release, open refuses NOT_BUILT, "
          "edit and save") {
-        struct afd_run run;
+        struct asf_door run;
         struct afd_leaf l;
         struct stat st;
         struct json_value data;
@@ -552,7 +460,7 @@ static int afd_a_builds_and_opens(struct afd_world *w)
     int failures = 0;
     TEST("A: build, then open the copy through resident_launch; a wrong "
          "image hash is refused") {
-        struct afd_run run;
+        struct asf_door run;
         struct afd_leaf l;
         afd_door(w->a_home, w->a_datadir, "build", "tinyapp-1",
                  ZCL_CLI_CONFIRM_YES, &run);
@@ -586,7 +494,7 @@ static int afd_a_builds_and_opens(struct afd_world *w)
         w->commands_a++;
         ASSERT(strstr(run.text, w->image_a) != NULL ||
                strstr(run.text, "opened") != NULL);
-        ASSERT(afd_alive_then_stop(afd_pid(run.text)));
+        ASSERT(asf_alive_then_stop(asf_door_pid(run.text)));
         PASS();
     } _test_next:;
     return failures;
@@ -598,7 +506,7 @@ static int afd_a_stale(struct afd_world *w)
     TEST("A: an unsaved edit, or a saved one not yet built, is a stale "
          "build") {
         struct afd_leaf l;
-        struct afd_run run;
+        struct asf_door run;
         ASSERT(afd_put(w->a_copy, "src/main.c", k_main_v1));
         ASSERT(afd_open_plan(w->a_datadir, "tinyapp-1", &l));
         ASSERT(afd_refused(&l, "STALE_BUILD"));
@@ -628,7 +536,7 @@ static int afd_a_shares(struct afd_world *w)
     int failures = 0;
     TEST("A: share writes NAME.z23share and prints one share line with a "
          "short fingerprint") {
-        struct afd_run run;
+        struct asf_door run;
         struct stat st;
         afd_door(w->a_home, w->a_datadir, "share", "tinyapp-1",
                  ZCL_CLI_CONFIRM_YES, &run);
@@ -636,7 +544,7 @@ static int afd_a_shares(struct afd_world *w)
         w->commands_a++;
         ASSERT(stat(w->share, &st) == 0 && S_ISREG(st.st_mode));
         ASSERT(strstr(run.text, "tinyapp-1.z23share") != NULL);
-        ASSERT(afd_short_fingerprint(run.text));
+        ASSERT(asf_short_fingerprint(run.text));
         PASS();
     } _test_next:;
     return failures;
@@ -672,7 +580,7 @@ static int afd_b_refusals(struct afd_world *w)
     int failures = 0;
     TEST("B: a tampered share file writes nothing; the public app.open never "
          "receives a share file") {
-        struct afd_run run;
+        struct asf_door run;
         struct afd_leaf l;
         char tampered[AFD_PATH];
         (void)snprintf(tampered, sizeof(tampered), "%s/tampered.z23share",
@@ -702,16 +610,15 @@ static int afd_b_receives(struct afd_world *w)
     int failures = 0;
     TEST("B: open FILE.z23share verifies, asks once, receives, builds the "
          "same image as A and opens it") {
-        struct afd_run run;
+        struct asf_door run;
         struct afd_leaf l;
-        k_afd_said_yes = false;
         afd_door(w->b_home, w->b_datadir, "open", w->share,
                  ZCL_CLI_CONFIRM_ASK, &run);
         ASSERT_EQ(run.rc, 0);
         w->commands_b++;
-        ASSERT(k_afd_said_yes);
-        ASSERT(afd_short_fingerprint(k_afd_question));
-        ASSERT(afd_alive_then_stop(afd_pid(run.text)));
+        ASSERT(run.asked);
+        ASSERT(asf_short_fingerprint(run.question));
+        ASSERT(asf_alive_then_stop(asf_door_pid(run.text)));
         ASSERT(afd_open_plan(w->b_datadir, "tinyapp-1", &l));
         ASSERT(l.out.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT(strcmp(afd_get(&l, "image_sha3"), w->image_a) == 0);
