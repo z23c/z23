@@ -4576,7 +4576,7 @@ cleanup:
 /* The front door a stranger meets: --yes is a no-op on app open, app list
  * leads with the launchable app and a pasteable -datadir next, and --help
  * says apps exist. */
-static int test_app_front_door_discovery(void)
+static int test_app_open_accepts_yes(void)
 {
     int failures = 0, rc = 0;
     char wire[16384];
@@ -4591,6 +4591,13 @@ static int test_app_front_door_discovery(void)
         ASSERT(strstr(wire, "UNKNOWN_APP") != NULL);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static int test_app_list_pasteable_next(void)
+{
+    int failures = 0, rc = 0;
+    char wire[16384];
     TEST_CASE("app list carries a pasteable open command with -datadir") {
         const char *list[] = {"list"};
         struct json_value reply;
@@ -4609,6 +4616,13 @@ static int test_app_front_door_discovery(void)
         json_free(&reply);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static int test_help_points_to_app_list(void)
+{
+    int failures = 0;
+    char wire[16384];
     TEST_CASE("z23 --help says apps exist and points to app list") {
         ASSERT(front_door_usage_text(wire, sizeof(wire)));
         ASSERT(strstr(wire, "z23 app list") != NULL);
@@ -4632,7 +4646,9 @@ int test_native_api_contract(void)
     failures += test_missing_required_input_fails_closed_structured();
     failures += test_dev_failure_native_api();
     failures += test_native_app_catalog_uses_strict_builtin_source();
-    failures += test_app_front_door_discovery();
+    failures += test_app_open_accepts_yes();
+    failures += test_app_list_pasteable_next();
+    failures += test_help_points_to_app_list();
     failures += test_regtest_mine_invalid();
     failures += test_regtest_mine_native();
     failures += test_wallet_send_amount_admission();
