@@ -36,6 +36,7 @@ numbers move.
 - Preview: run `build/bin/z23-skycombat` for a window, or
   `build/bin/z23-skycombat --qa-frames=N` to render N frames (1 to 3600,
   `SKY_COMBAT_QA_FRAMES_MAX`) and exit.
+  Add `--capture=PATH` (needs `--qa-frames`) to also save the last frame as a PNG at PATH.
 
 ## Tests
 

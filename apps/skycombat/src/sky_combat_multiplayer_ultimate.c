@@ -373,6 +373,7 @@ struct game_option_input {
     int hud_argc;
     unsigned frames;
     bool seen_frames, agent, resident_agent, seen_seed;
+    const char *capture_path;
     const char *nonce;
     uint32_t seed;
 };
@@ -410,12 +411,22 @@ static bool parse_game_transport(int argc, char **argv, int *index,
     return true;
 }
 
+/* --capture=PATH: one non-empty path; it needs --qa-frames, checked later. */
+static bool parse_game_capture(const char *argument, struct game_option_input *input)
+{
+    if (input->capture_path || !argument[10]) return false;
+    input->capture_path = argument + 10;
+    return true;
+}
+
 static bool parse_game_argument(int argc, char **argv, int *index,
                                 struct game_option_input *input)
 {
     const char *argument = argv[*index];
     if (!argument) return false;
-    if (strncmp(argument, "--qa-frames=", 12) == 0) {
+    if (strncmp(argument, "--capture=", 10) == 0) {
+        if (!parse_game_capture(argument, input)) return false;
+    } else if (strncmp(argument, "--qa-frames=", 12) == 0) {
         char *qa_argv[2] = {argv[0], argv[*index]};
         if (input->seen_frames || !sky_combat_qa_frames_parse(2, qa_argv, &input->frames))
             return false;
@@ -438,13 +449,15 @@ static bool parse_game_argument(int argc, char **argv, int *index,
  * Caller outputs change only after every option has been accepted. */
 static bool parse_game_options(int argc, char **argv,
                                struct sky_expr_option *option, unsigned *frames,
-                               bool *agent_mode, const char **nonce, uint32_t *seed)
+                               bool *agent_mode, const char **nonce, uint32_t *seed,
+                               const char **capture_path)
 {
     struct game_option_input input = {.hud_argv = {argv[0]}, .hud_argc = 1, .seed = 1};
     for (int i = 1; i < argc; ++i)
         if (!parse_game_argument(argc, argv, &i, &input)) return false;
     struct sky_expr_option candidate;
     if (input.agent && input.seen_frames) return false;
+    if (input.capture_path && (input.agent || !input.seen_frames)) return false;
     if (input.resident_agent != (input.nonce != NULL) || (input.seen_seed && !input.agent)) return false;
     if (!sky_expr_option_parse(input.hud_argc, input.hud_argv, &candidate)) return false;
     *option = candidate;
@@ -452,6 +465,7 @@ static bool parse_game_options(int argc, char **argv,
     *agent_mode = input.agent;
     *nonce = input.nonce;
     *seed = input.seed;
+    *capture_path = input.capture_path;
     return true;
 }
 
@@ -467,15 +481,49 @@ static void agent_trace_to_stderr(int level, const char *format, va_list args)
     fputc('\n', stderr);
 }
 
+/* Write the captured PNG to PATH through a temp file in the same directory,
+ * then rename, so a failure never leaves a partial PATH behind. */
+static bool game_capture_save(const char *path, const struct sky_agent_capture *shot)
+{
+    if (!shot->png || shot->size == 0) {
+        fprintf(stderr, "Sky Combat: no frame captured for %s (%s)\n", path,
+                shot->error ? shot->error : "NO_FRAME");
+        return false;
+    }
+    size_t length = strlen(path);
+    char *temp = malloc(length + 5);
+    if (!temp) {
+        fprintf(stderr, "Sky Combat: out of memory writing %s\n", path);
+        return false;
+    }
+    memcpy(temp, path, length);
+    memcpy(temp + length, ".tmp", 5);
+    FILE *file = fopen(temp, "wb");
+    bool ok = file && fwrite(shot->png, 1, shot->size, file) == shot->size;
+    if (file && fclose(file) != 0) ok = false;
+#if defined(_WIN32)
+    if (ok) (void)remove(path); /* Windows rename does not replace */
+#endif
+    ok = ok && rename(temp, path) == 0;
+    if (!ok) {
+        fprintf(stderr, "Sky Combat: cannot write %s\n", path);
+        if (file) (void)remove(temp);
+    } else printf("Sky Combat: captured %s (%zu bytes)\n", path, shot->size);
+    free(temp);
+    return ok;
+}
+
 /* Keep admission and completion checks separate from the gameplay loop. */
 static int prepare_game_window(int argc, char **argv, unsigned *qa_frames,
                                struct sky_expr_option *option, bool *agent_mode,
-                               struct sky_agent_session *session)
+                               struct sky_agent_session *session,
+                               const char **capture_path)
 {
     const char *nonce = NULL;
     uint32_t seed;
-    if (!parse_game_options(argc, argv, option, qa_frames, agent_mode, &nonce, &seed)) {
-        fprintf(stderr, "Usage: z23-skycombat [--agent-stdio | --resident <64 lower hex nonce> --agent | --qa-frames=1..%u] [--seed=UINT32] [--hud-part=<64 hex SHA-256>:<file> [--hud-pin-file=<file>]]\n",
+    if (!parse_game_options(argc, argv, option, qa_frames, agent_mode, &nonce, &seed,
+                            capture_path)) {
+        fprintf(stderr, "Usage: z23-skycombat [--agent-stdio | --resident <64 lower hex nonce> --agent | --qa-frames=1..%u [--capture=PATH, needs --qa-frames]] [--seed=UINT32] [--hud-part=<64 hex SHA-256>:<file> [--hud-pin-file=<file>]]\n",
                 SKY_COMBAT_QA_FRAMES_MAX);
         return 2;
     }
@@ -832,7 +880,9 @@ int main(int argc, char **argv) {
     struct sky_expr_option option;
     static struct sky_expr_hud part_hud;
     struct sky_expr_notice notice={0};
-    int launch = prepare_game_window(argc, argv, &qa_frames, &option, &agent_mode, &session);
+    const char *capture_path = NULL;
+    int launch = prepare_game_window(argc, argv, &qa_frames, &option, &agent_mode, &session,
+                                     &capture_path);
     if (launch) { sky_agent_close(&session); return launch; }
     
     /* Create game state */
@@ -934,12 +984,16 @@ int main(int argc, char **argv) {
                                               screen_buffer, 0, 0};
         result = sky_agent_run(&session, &context, game_agent_frame);
     } else {
+        struct sky_agent_capture shot = {0};
         while (game_frame_pending(qa_frames, rendered_frames)) {
             sky_game_raise_apply();
+            bool last = capture_path && rendered_frames + 1 == qa_frames;
             advance_ultimate_frame(&game, &option, &part_hud, &notice, screen_buffer,
-                                   &game_time, &rendered_frames, NULL, NULL);
+                                   &game_time, &rendered_frames, NULL, last ? &shot : NULL);
         }
         result = game_frame_result(qa_frames, rendered_frames);
+        if (!result && capture_path && !game_capture_save(capture_path, &shot)) result = 1;
+        free(shot.png);
     }
     
     /* Cleanup */

@@ -344,7 +344,7 @@ static int skycombat_capture_file(void)
     char output[2048] = {0}, diagnostics[513] = {0};
     TEST("capture: --qa-frames=2 --capture=PATH writes a PNG and names PATH and its size") {
         ASSERT_EQ(skycombat_agent_capture(good, output, sizeof(output), diagnostics), 0);
-        unsigned char png[65536];
+        static unsigned char png[1024u * 1024u];
         size_t size = 0;
         ASSERT(skycombat_file_read(path, png, sizeof(png), &size));
         static const unsigned char signature[8] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
