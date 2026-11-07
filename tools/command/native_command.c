@@ -18,6 +18,7 @@
 
 #define _GNU_SOURCE
 #include "command/native_command.h"
+#include "command/native_app_front_door.h"
 #include "command/native_json_input.h"
 #include "command/native_command_priv.h"
 #include "command/refold_rate_verdict.h"
@@ -4123,6 +4124,8 @@ static bool nc_main_try_intercepts(const struct zcl_command_spec *spec,
         return true;
     if (strcmp(spec->path, "ops.host.build") == 0 &&
         zcl_native_ops_host_build_try_run(words, count, consumed, rc))
+        return true;
+    if (zcl_app_front_door_try(spec, words, count, consumed, datadir, rc))
         return true;
 #ifdef ZCL_DEV_BUILD
     if (strcmp(spec->path, "dev.loop.events") == 0 &&

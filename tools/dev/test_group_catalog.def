@@ -1725,6 +1725,10 @@ ZCL_TEST_GROUP(app_image_build)
 /* app.build on an adopted or received-trusted copy: stub app package,
  * plan/confirm, cache hit with no make, refusals, Landlock containment. */
 ZCL_TEST_GROUP(app_build_copy)
+/* The `z23 app` front door journey: copy, save, build, open a copy through
+ * resident_launch, share by file, a friend's open of the file; owner
+ * authority at MCP, plan-only without a terminal, tamper refusal. */
+ZCL_TEST_GROUP(app_front_door)
 ZCL_TEST_GROUP(task_document)
 ZCL_TEST_GROUP(package_local)
 /* astro lane: platform/modules/astro's exact fixed-grid arithmetic and the birth chart
