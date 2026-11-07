@@ -2281,10 +2281,61 @@ static int rus_case(bool keep)
     if (!clean) failures++;
     return failures;
 }
+/* Deterministic real-X11 controls for the included maintained UI driver.
+ * Reuse this group's private display and exact direct-child custody. */
+static bool rud_one(struct ru_run *r, const char *mode, uint32_t expected)
+{
+    int log = ru_log(r, "driver-readiness.log");
+    const char *args[] = {r->driver_image, mode, NULL};
+    bool ok = log >= 0 && ru_spawn(&r->driver, args, log, log, log);
+    if (log >= 0) close(log);
+    uint32_t code = UINT32_MAX;
+    ok = ok && ru_wait(&r->driver, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == expected;
+    bool stopped = ru_stop(&r->driver);
+    printf("UI_DRIVER_READINESS mode=%s exit=%u expected=%u cleanup=%d\n", mode, code, expected, stopped);
+    return ok && stopped;
+}
+static bool rud_cases(struct ru_run *r)
+{
+    static const char *const modes[] = {"delayed", "unmapped", "unchanged", "unexpected", "race"};
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(modes)/sizeof(modes[0]); ++i) {
+        bool passed = rud_one(r, modes[i], i == 3 ? 77u : 0u);
+        ok = passed && ok;
+    }
+    return ok;
+}
+static int rud_readiness(void)
+{
+    int failures = 0; size_t saved = 0;
+    struct ru_env env[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL}, {"XDG_STATE_HOME", NULL},
+        {"XDG_RUNTIME_DIR", NULL}, {"XDG_CACHE_HOME", NULL}, {"XDG_DATA_HOME", NULL},
+        {"DISPLAY", NULL}, {"WAYLAND_DISPLAY", NULL}, {"XAUTHORITY", NULL},
+        {"ZCL_CLI_TEST_NO_SERVICE_LOOKUP", NULL}};
+    struct receive_fixture f = {0};
+    struct ru_run r = {.input = -1, .output = -1, .fixture = &f};
+    TEST("native UI driver waits for drawable readiness without weakening pixel assertions") {
+        ASSERT(ru_env_save(env, sizeof(env)/sizeof(env[0]), &saved));
+        ASSERT(test_mkdtemp(f.world.root, sizeof(f.world.root), "ui_driver_readiness"));
+        ASSERT(ru_environment(&f));
+        ASSERT(realpath("build/bin/native_ui_driver_readiness", r.driver_image));
+        ASSERT(ru_xvfb(&r));
+        ASSERT(rud_cases(&r));
+        PASS();
+    } _test_next:;
+    bool clean = ru_cleanup(&r);
+    if (!ru_env_restore(env, saved)) clean = false;
+    printf("UI_DRIVER_READINESS fixture=%s display=%s cleanup=%d\n", f.world.root, r.display_name, clean);
+    if (!clean) ++failures;
+    /* Retained log distinguishes driver rejection from fixture/setup failure. */
+    return failures;
+}
+
 int test_app_receive_ui(void)
 {
     if (access("/usr/bin/Xvfb", X_OK) != 0) { puts("SKIP (app_receive_ui requires Linux Xvfb)"); return 0; }
-    int failures = ru_case(false, false, false);
+    int failures = rud_readiness();
+    failures += ru_case(false, false, false);
     failures += ru_case(true, false, false);
     failures += ru_case(true, true, false);
     failures += ru_case(true, true, true);

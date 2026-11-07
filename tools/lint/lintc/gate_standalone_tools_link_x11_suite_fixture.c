@@ -28,6 +28,7 @@ const char k_stl_x11_good[] =
 
 static const char k_mk_hdr[] =
     "CC = cc\n"
+    "ZCL_HOST_OS = Linux\n"
     "ZCL_PLATFORM_CPPFLAGS = -DPR72_PLATFORM=1\n"
     "BIN_DIR = build/bin\n"
     "FUZZ_TARGETS = $(BIN_DIR)/fuzz_block $(BIN_DIR)/fuzz_script $(BIN_DIR)/fuzz_p2p "
@@ -46,7 +47,7 @@ static const char *const k_ci_names[] = {
 };
 
 static const char *const k_dirs[] = {
-    "tools/lint", "tools/agent", "vendor/x11",
+    "tools/lint", "tools/agent", "vendor/x11", "tests/fixtures",
     "platform/modules/platform/tests", "build/bin",
 };
 
@@ -55,10 +56,11 @@ static const char k_compiler[] =
     "#!/usr/bin/env bash\n"
     "set -euo pipefail\n"
     "printf '%s\\n' \"$*\" >> \"$PR72_CC_LOG\"\n"
-    "runtime=0; cover=0\n"
+    "runtime=0; cover=0; readiness=0\n"
     "for arg in \"$@\"; do\n"
     "    [[ \"$arg\" != -Wl,-l:libX11.so.6 ]] || runtime=1\n"
     "    [[ \"$arg\" != tools/native_ui_driver.c ]] || cover=1\n"
+    "    [[ \"$arg\" != tests/fixtures/native_ui_driver_readiness.c ]] || { cover=1; readiness=1; }\n"
     "done\n"
     "output=\"\"; next_output=0\n"
     "for arg in \"$@\"; do\n"
@@ -83,6 +85,8 @@ static const char k_compiler[] =
     "            printf 'partial object output' > \"$output\"\n"
     "            exit 7\n"
     "        fi ;;\n"
+    "    partial-readiness) if ((readiness)); then printf partial > \"$output\"; exit 7; fi ;;\n"
+    "    empty-readiness) if ((readiness)); then exit 0; fi ;;\n"
     "    compile) echo 'fixture compiler failure' >&2; exit 1 ;;\n"
     "    wrong-target) \"$REAL_CC\" \"$@\" -D__linux__=0 -U__linux__; exit $? ;;\n"
     "    generic-link) if ((runtime)); then echo 'ld: internal error' >&2; exit 1; fi ;;\n"
@@ -193,14 +197,20 @@ static int x11_copy_vendor(struct stl_x11_ctx *c)
     return x11_exec(av) == 0 ? 0 : 1;
 }
 
+static int x11_write_sources(struct stl_x11_ctx *c)
+{
+    char good[STL_X11_PATH], readiness[STL_X11_PATH];
+    if (ovf(snprintf(good, sizeof good, "%s/good.c", c->tmp), sizeof good) ||
+        ovf(snprintf(readiness, sizeof readiness, "%s/tests/fixtures/native_ui_driver_readiness.c",
+                     c->fixture), sizeof readiness)) return 1;
+    return csr_write(good, k_stl_x11_good) != 0 ||
+        csr_write(c->driver, k_stl_x11_good) != 0 || csr_write(readiness, k_stl_x11_good) != 0;
+}
+
 static int x11_write_tools(struct stl_x11_ctx *c)
 {
-    char good[STL_X11_PATH], rcpt[STL_X11_PATH];
-    char wa[STL_X11_PATH];
-    if (ovf(snprintf(good, sizeof good, "%s/good.c", c->tmp), sizeof good) ||
-        csr_write(good, k_stl_x11_good) != 0 ||
-        csr_write(c->driver, k_stl_x11_good) != 0)
-        return 1;
+    char rcpt[STL_X11_PATH], wa[STL_X11_PATH];
+    if (x11_write_sources(c)) return 1;
     if (ovf(snprintf(rcpt, sizeof rcpt, "%s/tools/agent/gate-receipt.sh",
                      c->fixture), sizeof rcpt) ||
         csr_write(rcpt, "#!/usr/bin/env bash\necho fixture-receipt-helper\n") != 0 ||

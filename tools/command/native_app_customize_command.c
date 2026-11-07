@@ -18,7 +18,8 @@
 #define AC_MANIFEST_BYTES (8u * 1024u * 1024u)
 #define AC_ENTRIES 16384u
 #define AC_FILE_BYTES (1024u * 1024u)
-#define AC_SLICE 512u
+#define AC_SLICE_DEFAULT 512u
+#define AC_SLICE_MAX 2048u
 #define AC_PAGE 4u
 #define AC_PATH 256u
 #define AC_CHANGE 256u
@@ -85,7 +86,7 @@ static bool ac_inputs(struct ac_read *a, const struct json_value *in)
     a->pinned = json_get(in, "expected_revision") != NULL;
     if (!ac_integer(in, "expected_revision", INT64_MAX, 0, &a->expected) ||
         !ac_integer(in, "offset", AC_FILE_BYTES, 0, &offset) ||
-        !ac_integer(in, "limit", AC_SLICE, AC_SLICE, &limit) ||
+        !ac_integer(in, "limit", AC_SLICE_MAX, AC_SLICE_DEFAULT, &limit) ||
         !ac_integer(in, "page", AC_ENTRIES, 0, &page) || !limit)
         return ac_fail(a, "BAD_INPUT", "invalid revision, offset, limit or manifest page");
     a->offset = (size_t)offset; a->limit = (size_t)limit; a->page = (size_t)page;
@@ -230,7 +231,7 @@ static bool ac_page(struct ac_read *a)
 static bool ac_bytes(struct json_value *data, const uint8_t *part, size_t count)
 {
     bool ok = true;
-    char content[AC_SLICE * 2u + 1u];
+    char content[AC_SLICE_MAX * 2u + 1u];
     bool text = !memchr(part, 0, count) && zutf8_validate_n((const char *)part, count);
     if (text) { memcpy(content, part, count); content[count] = 0; }
     else ok = zbase64_encode(part, count, content, sizeof(content));

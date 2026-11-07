@@ -9912,6 +9912,18 @@ $(NATIVE_UI_DRIVER_BIN): tools/native_ui_driver.c
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/x11/include \
 	    -o $@ $< -Wl,-l:libX11.so.6
 
+# Existing app_receive_ui build-needs selects native-ui-driver. Its deterministic
+# X11 fixture includes that exact driver source; no production test hooks.
+ifeq ($(ZCL_HOST_OS),Linux)
+NATIVE_UI_READINESS_BIN = $(BIN_DIR)/native_ui_driver_readiness
+native-ui-driver: $(NATIVE_UI_READINESS_BIN)
+$(NATIVE_UI_READINESS_BIN): tests/fixtures/native_ui_driver_readiness.c tools/native_ui_driver.c
+	@mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/x11/include \
+	    -o $@ $< -Wl,-l:libX11.so.6
+endif
+
 # Crash recovery harness: fork zclassic23, SIGKILL at random points,
 # restart, and assert data-integrity invariants. Needs a pre-seeded
 # datadir (skips trivially if none exists — see tool header). Build

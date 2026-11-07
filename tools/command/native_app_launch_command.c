@@ -493,6 +493,33 @@ static void app_list_config(const struct app_launch_env *env,
     json_free(&cfg);
 }
 
+/* Discovery is not source admission. The read validates the exact kept route
+ * and returns the revision required by subsequent source reads and edits. */
+static bool app_list_customize_hint(struct json_value *item, const char *name)
+{
+    struct json_value hint, next_args; json_init(&hint); json_init(&next_args);
+    json_set_object(&hint); json_set_object(&next_args);
+    bool ok = json_push_kv_str(&next_args, "name", name) &&
+        json_push_kv_str(&hint, "command", "app.customize") &&
+        json_push_kv(&hint, "input", &next_args) &&
+        json_push_kv_str(&hint, "validation", "required-on-read") &&
+        json_push_kv(item, "customize", &hint);
+    json_free(&next_args); json_free(&hint); return ok;
+}
+static bool app_list_kept_next(const struct json_value *list, struct zcl_command_reply *reply)
+{
+    for (size_t i = 0; i < json_size(list); ++i) {
+        const struct json_value *hint = json_get(json_at(list, i), "customize");
+        if (!hint) continue;
+        char wire[128];
+        size_t n = json_write(json_get(hint, "input"), wire, sizeof(wire));
+        return n && n < sizeof(wire) && zcl_command_reply_add_next(reply,
+            "app.customize", wire,
+            "inspect this kept version using its exact kept: name; use the returned revision for reads and edits");
+    }
+    return true;
+}
+
 static bool app_list_kept(const struct app_launch_env *env, struct json_value *list)
 {
     struct app_selection_routes routes;
@@ -505,7 +532,8 @@ static bool app_list_kept(const struct app_launch_env *env, struct json_value *l
             json_push_kv_str(&item, "raise", "unsupported") &&
             json_push_kv_str(&item, "validation", "required-on-open") &&
             json_push_kv_str(&item, "ready_basis", "alive") &&
-            app_list_open_hint(&item, routes.names[i]) && json_push_back(list, &item);
+            app_list_open_hint(&item, routes.names[i]) &&
+            app_list_customize_hint(&item, routes.names[i]) && json_push_back(list, &item);
         json_free(&item);
         if (!ok) return false;
     }
@@ -519,6 +547,8 @@ static void app_list_guide(const struct app_launch_registry *reg,
 {
     char input[128];
     (void)json_push_kv_str(&reply->data, "summary",
+                           "To change a kept version, use app.customize with its exact kept: ID from launchable, not the builtin name. "
+                           "The read validates source and returns its revision; listing is not source admission. "
                            "launchable apps open with z23 app open NAME; "
                            "z23 app adopt --name=skycombat offers a personal copy "
                            "from its installed source");
@@ -573,8 +603,12 @@ static void app_list_launchable_body(
             "KEPT_LIST_REFUSED", "list", false, false,
             "kept selections are unreadable, corrupt, or exceed the bounded list", w->env.state_dir);
     }
-    json_free(&list);
     app_list_guide(&w->reg, reply);
+    if (reply->status == ZCL_COMMAND_STATUS_PASSED && !app_list_kept_next(&list, reply))
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "KEPT_LIST_REFUSED", "list", false, false,
+            "cannot encode kept source navigation", "");
+    json_free(&list);
     app_list_config(&w->env, &w->reg, &reply->data);
     zcl_app_list_copies(zcl_native_command_datadir(), &reply->data);
     free(w);

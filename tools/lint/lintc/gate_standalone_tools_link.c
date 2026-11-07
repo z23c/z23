@@ -61,6 +61,8 @@ static const struct stl_pair k_darwin[] = {
     { "zcl-portfwd", "event loop sits on sys/epoll.h (Linux kernel API)" },
     { "z23-headless-run.exe", "Win32 PE launcher; #include <windows.h> + -municode, and its rule is inside ifeq ($(ZCL_HOST_WINDOWS),1) so it does not exist on this host" },
     { "native_ui_driver", "X11 UI transport; links -Wl,-l:libX11.so.6" },
+    { "skycombat-agent-client", "Linux-only real-display fixture; Makefile defines its binary rule only on Linux" },
+    { "native_ui_driver_readiness", "Linux-only X11 readiness fixture; binary rule is absent on Darwin" },
 };
 
 /* Windows-only tools: on a POSIX host the Makefile has NO RULE for them. An
@@ -188,8 +190,9 @@ static int stl_host_route(const char *name, const struct stl_host *h)
         fprintf(stderr, "[check_standalone_tools_link] darwin-exempt %s: %s\n", name, why);
         return STL_SKIP;
     }
-    if (h->linux_os && strcmp(name, "native_ui_driver") == 0) {
-        /* Probe only this Linux tool; inherited env cannot manufacture an exemption. */
+    if (h->linux_os && (strcmp(name, "native_ui_driver") == 0 ||
+                       strcmp(name, "native_ui_driver_readiness") == 0)) {
+        /* Probe these X11 tools; inherited env cannot manufacture an exemption. */
         int rc = stl_x11_linkable();
         if (rc == 1) {
             fprintf(stderr, "[check_standalone_tools_link] no-x11-runtime-exempt %s: "

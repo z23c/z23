@@ -757,7 +757,7 @@ static const struct cr_int_bound *cr_app_customize_bound(const char *path,
     static const struct cr_int_bound bounds[] = {
         { "expected_revision", 0, INT64_MAX },
         { "offset", 0, 1024 * 1024 },
-        { "limit", 1, 512 },
+        { "limit", 1, 2048 },
         { "page", 0, 16384 }
     };
     for (size_t i = 0; i < sizeof bounds / sizeof bounds[0]; i++)

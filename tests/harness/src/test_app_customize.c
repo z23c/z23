@@ -595,7 +595,7 @@ static bool act_bounds(void)
     }
     struct abc_leaf l;
     if (!act_call(&l, "include/boost.h", true)) return false;
-    (void)json_push_kv_int(&l.in, "limit", 513);
+    (void)json_push_kv_int(&l.in, "limit", 2049);
     ok = act_bad_input_boundaries(&l) && ok; abc_close(&l);
     if (!act_call(&l, "include/boost.h", true)) return false;
     (void)json_push_kv_int(&l.in, "offset", 999);
@@ -866,7 +866,7 @@ static bool act_next_refusals(void)
         "{\"name\":\"skycombat\",\"expected_revision\":1,\"path\":\"other.h\",\"offset\":512}",
         "{\"name\":\"skycombat\",\"path\":\"include/boost.h\",\"offset\":512}",
         "{\"name\":\"skycombat\",\"expected_revision\":1,\"path\":\"include/boost.h\",\"offset\":\"512\"}",
-        "{\"name\":\"skycombat\",\"expected_revision\":1,\"path\":\"include/boost.h\",\"offset\":512,\"limit\":513}"
+        "{\"name\":\"skycombat\",\"expected_revision\":1,\"path\":\"include/boost.h\",\"offset\":512,\"limit\":2049}"
     };
     for (size_t i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i)
         if (!act_next_case("app.customize", data, bad[i], false)) return false;
@@ -1157,6 +1157,154 @@ static int acs_edges(void)
     act_cleanup(&f); return failures;
 }
 
+/* Explicit large slices use the same verified CAS and production serializer.
+ * No fixture changes the default limit or the existing reply budgets. */
+static bool acl_setup(struct ac_fixture *f)
+{
+    if (!act_save_environment(f) || !abc_world_init(&f->world) ||
+        !act_configure_environment(f)) return false;
+    unsigned char bytes[4097]; char quoted[241]; act_quote_path(quoted);
+    memset(bytes, 'Q', sizeof(bytes));
+    if (!acs_file(f, "slice-text", bytes, sizeof(bytes), 1)) return false;
+    memset(bytes, 0, 2048);
+    if (!acs_file(f, "slice-binary", bytes, 2048, 1)) return false;
+    memset(bytes, 1, 2048); /* Each byte needs six bytes in JSON: \u0001. */
+    return acs_file(f, quoted, bytes, 2048, 1) &&
+        act_snapshot(f, "save", f->head) && act_keep(f);
+}
+
+static bool acl_request(struct abc_leaf *l, const char *path, int limit)
+{
+    return act_call(l, path, true) &&
+        (limit == 0 || json_push_kv_int(&l->in, "limit", limit));
+}
+
+static bool acl_budget(const struct json_value *doc)
+{
+    const struct json_value *data = json_get(doc, "data");
+    return json_write(doc, NULL, 0) <= 8192u &&
+        (!data || json_write(data, NULL, 0) <= 6144u);
+}
+
+static bool acl_default(void)
+{
+    struct abc_leaf l; struct json_value doc; json_init(&doc);
+    bool ok = acl_request(&l, "slice-text", 0) && act_wire(&l.in, &doc);
+    const struct json_value *d = json_get(&doc, "data");
+    ok = ok && acl_budget(&doc) && act_wire_qbytes(&doc, 512) &&
+        json_get_int(json_get(d, "bytes")) == 512 &&
+        json_get_int(json_get(d, "next_offset")) == 512 &&
+        !json_get_bool(json_get(d, "complete"));
+    abc_close(&l); json_free(&doc); return ok;
+}
+
+static bool acl_text_page(const struct json_value *doc, size_t page)
+{
+    size_t offset = page * 2048u, count = page == 2 ? 1u : 2048u;
+    const struct json_value *d = json_get(doc, "data");
+    return acl_budget(doc) && act_wire_qbytes(doc, count) &&
+        acs_string(d, "encoding", "utf8") &&
+        json_get_int(json_get(d, "bytes")) == (int64_t)count &&
+        json_get_int(json_get(d, "offset")) == (int64_t)offset &&
+        json_get_int(json_get(d, "next_offset")) == (int64_t)(offset + count) &&
+        json_get_bool(json_get(d, "complete")) == (page == 2);
+}
+
+static bool acl_next(const struct json_value *doc, struct json_value *next, size_t page)
+{
+    const struct json_value *input = act_wire_next(doc, "offset");
+    return input && acs_string(input, "name", "skycombat") &&
+        acs_string(input, "path", "slice-text") &&
+        json_get_int(json_get(input, "expected_revision")) == 1 &&
+        json_get_int(json_get(input, "offset")) == (int64_t)((page + 1u) * 2048u) &&
+        json_get_int(json_get(input, "limit")) == 2048 && act_wire(input, next);
+}
+
+static bool acl_pages(struct ac_fixture *f)
+{
+    struct abc_leaf l; struct json_value doc, next;
+    json_init(&doc); json_init(&next);
+    bool ok = acl_request(&l, "slice-text", 2048) && act_wire(&l.in, &doc);
+    for (size_t page = 0; ok && page < 3; ++page) {
+        ok = act_wire_identity(&doc, f) && acl_text_page(&doc, page);
+        if (page == 2) { ok = ok && !act_wire_next(&doc, "offset"); break; }
+        ok = ok && acl_next(&doc, &next, page);
+        if (ok) { json_free(&doc); doc = next; json_init(&next); }
+    }
+    abc_close(&l); json_free(&doc); json_free(&next); return ok;
+}
+
+static bool acl_binary(void)
+{
+    struct abc_leaf l; struct json_value doc; json_init(&doc);
+    bool ok = acl_request(&l, "slice-binary", 2048) && act_wire(&l.in, &doc);
+    const struct json_value *d = json_get(&doc, "data");
+    const char *text = json_get_str(json_get(d, "content"));
+    /* Exactly 2048 zero bytes: 2731 'A' characters and one padding '='. */
+    ok = ok && acl_budget(&doc) && acs_string(d, "encoding", "base64") &&
+        text && strlen(text) == 2732 && strspn(text, "A") == 2731 && text[2731] == '=' &&
+        json_get_int(json_get(d, "bytes")) == 2048 &&
+        json_get_int(json_get(d, "next_offset")) == 2048 &&
+        json_get_bool(json_get(d, "complete"));
+    abc_close(&l); json_free(&doc); return ok;
+}
+
+static bool acl_refusal_wire(struct abc_leaf *l)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = abc_spec("app.customize");
+    struct zcl_command_context ctx = {.registry = reg, .granted_capabilities = ~(uint64_t)0,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+    char wire[8193]; enum zcl_command_exit code;
+    size_t n = zcl_command_registry_execute_json(reg, spec, &ctx, &l->in, false,
+        spec->path, "normal", 0, 0, NULL, wire, sizeof(wire), &code);
+    struct json_value doc; json_init(&doc);
+    bool ok = n > 0 && n <= 8192u && code != ZCL_COMMAND_EXIT_OK && json_read(&doc, wire, n);
+    const struct json_value *error = json_get(&doc, "error");
+    const struct json_value *mutated = json_get(error, "mutated");
+    ok = ok && acl_budget(&doc) && acs_string(error, "code", "CONTEXT_REFUSED") &&
+        mutated && mutated->type == JSON_BOOL && !json_get_bool(mutated) &&
+        !json_get(json_get(&doc, "data"), "content") && !act_wire_next(&doc, "offset");
+    json_free(&doc); return ok;
+}
+
+static bool acl_escaped_small(const char *path)
+{
+    struct abc_leaf l; struct json_value doc; json_init(&doc);
+    bool ok = acl_request(&l, path, 512) && act_wire(&l.in, &doc);
+    const struct json_value *d = json_get(&doc, "data");
+    const char *text = json_get_str(json_get(d, "content"));
+    ok = ok && acl_budget(&doc) && text && strlen(text) == 512;
+    for (size_t i = 0; ok && i < 512; ++i) ok = (unsigned char)text[i] == 1;
+    ok = ok && acs_string(d, "encoding", "utf8") &&
+        json_get_int(json_get(d, "next_offset")) == 512 &&
+        !json_get_bool(json_get(d, "complete"));
+    abc_close(&l); json_free(&doc); return ok;
+}
+
+static bool acl_escaped(void)
+{
+    char path[241]; act_quote_path(path);
+    struct abc_leaf l;
+    bool ok = acl_request(&l, path, 2048) && acl_refusal_wire(&l);
+    abc_close(&l);
+    return acl_escaped_small(path) && ok;
+}
+
+static int acl_slices(void)
+{
+    int failures = 0; struct ac_fixture f = {0};
+    TEST("explicit 2048-byte source slices preserve default, continuation and wire budgets") {
+        ASSERT(acl_setup(&f));
+        ASSERT(acl_default());
+        ASSERT(acl_pages(&f));
+        ASSERT(acl_binary());
+        ASSERT(acl_escaped());
+        PASS();
+    } _test_next:;
+    act_cleanup(&f); return failures;
+}
+
 int test_app_customize(void)
 {
     int failures = 0;
@@ -1182,6 +1330,7 @@ int test_app_customize(void)
     } _test_next:;
     act_cleanup(&f);
     failures += acs_edges();
+    failures += acl_slices();
     return failures;
 }
 

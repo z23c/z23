@@ -97,17 +97,64 @@ static bool send_key(Display *display, Window root, Window window,
     return true;
 }
 
+/* This standalone driver is single-threaded. Scope the Xlib error hook to
+ * one exact GetImage request, draining other requests before installing it.
+ * Mapping/resize can change after GetWindowAttributes; only that request's
+ * BadMatch is a retryable missing image. All unrelated errors retain policy. */
+/* X11 core protocol request opcode; keep the driver on vendored Xlib headers. */
+enum { UI_X11_GET_IMAGE = 73 };
+static struct {
+    Display *display;
+    unsigned long serial;
+    XErrorHandler previous;
+    bool mismatch;
+} capture_request;
+
+static int capture_error(Display *display, XErrorEvent *error)
+{
+    if (display == capture_request.display &&
+        error->serial == capture_request.serial &&
+        error->request_code == UI_X11_GET_IMAGE && error->error_code == BadMatch) {
+        capture_request.mismatch = true;
+        return 0;
+    }
+    if (capture_request.previous)
+        return capture_request.previous(display, error);
+    fprintf(stderr, "native_ui_driver: unexpected X error %u request %u serial %lu\n",
+            error->error_code, error->request_code, error->serial);
+    exit(1);
+}
+
+static XImage *capture_drawable(Display *display, Window window,
+                                const XWindowAttributes *attributes)
+{
+    (void)XSync(display, False);
+    capture_request.display = display;
+    capture_request.serial = NextRequest(display);
+    capture_request.mismatch = false;
+    capture_request.previous = XSetErrorHandler(capture_error);
+    XImage *image = XGetImage(display, window, 0, 0,
+        (unsigned int)attributes->width, (unsigned int)attributes->height,
+        AllPlanes, ZPixmap);
+    (void)XSync(display, False);
+    (void)XSetErrorHandler(capture_request.previous);
+    capture_request.display = NULL;
+    if (capture_request.mismatch && image) {
+        XDestroyImage(image);
+        image = NULL;
+    }
+    return image;
+}
+
 static XImage *capture_window(Display *display, Window window)
 {
     XWindowAttributes attributes;
     if (window == None ||
         !XGetWindowAttributes(display, window, &attributes) ||
+        attributes.class != InputOutput || attributes.map_state != IsViewable ||
         attributes.width <= 0 || attributes.height <= 0)
         return NULL;
-    return XGetImage(display, window, 0, 0,
-                     (unsigned int)attributes.width,
-                     (unsigned int)attributes.height,
-                     AllPlanes, ZPixmap);
+    return capture_drawable(display, window, &attributes);
 }
 
 static bool image_differs(const XImage *before, const XImage *after)
@@ -216,14 +263,19 @@ static bool ui_driver_options_usable(const struct ui_driver_options *options)
 static void wait_for_matching_windows(Display *display, Window root,
                                       const struct ui_driver_options *options,
                                       unsigned int attempts, Window *window,
-                                      unsigned int *count)
+                                      unsigned int *count, XImage **before)
 {
     for (unsigned int i = 0; i <= attempts; i++) {
         *window = None;
         *count = matching_windows(display, root, options->title, 4u, window);
-        if ((options->expect_count_set && *count == options->expected_count) ||
-            (!options->expect_count_set && *window != None))
+        if (options->expect_count_set && *count == options->expected_count)
             break;
+        if (!options->expect_count_set && *window != None) {
+            if (options->expect_pixels_change)
+                *before = capture_window(display, *window);
+            if (!options->expect_pixels_change || *before)
+                break;
+        }
         if (i < attempts)
             sleep_20ms();
     }
@@ -300,9 +352,10 @@ int main(int argc, char **argv)
     Window root = DefaultRootWindow(display);
     Window window = None;
     unsigned int count = 0;
+    XImage *before = NULL;
     unsigned int attempts = options.timeout_ms / 20u;
     wait_for_matching_windows(display, root, &options, attempts, &window,
-                              &count);
+                              &count, &before);
     if (expect_count_set) {
         (void)XCloseDisplay(display);
         if (count != expected_count) {
@@ -317,8 +370,6 @@ int main(int argc, char **argv)
         return 0;
     }
     KeySym key_sym = ui_driver_key_symbol(key);
-    XImage *before = expect_pixels_change
-        ? capture_window(display, window) : NULL;
     bool sent = send_window_event(display, root, window, expect_pixels_change,
                                   before, key_sym);
     bool pixels_changed = pixels_changed_after_send(display, window, before,

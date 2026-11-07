@@ -1619,22 +1619,114 @@ static bool ak_preview_keep(struct ak_fixture *f)
     abc_close(&leaf);
     return ok;
 }
-static bool ak_listed(void)
+/* Exercise the emitted input through the catalog executor and serializer. */
+static bool ak_discovery_wire(const char *command, const struct json_value *input,
+    struct json_value *doc, enum zcl_command_exit *code)
 {
-    struct abc_leaf leaf; abc_open(&leaf);
-    bool ok = abc_pass("app.list", &leaf), found = false;
-    const struct json_value *list = json_get(&leaf.out.data, "launchable");
-    if (!list || list->type != JSON_ARR) ok = false;
-    for (size_t i = 0; ok && i < list->num_children; ++i) {
-        const struct json_value *entry = json_at(list, i);
-        if (!strcmp(aso_string(entry, "id"), AK_ROUTE))
-            found = !strcmp(aso_string(entry, "source"), "kept") &&
-                !strcmp(aso_string(entry, "validation"), "required-on-open") &&
-                !json_get(entry, "installed") &&
-                strstr(aso_string(entry, "open"), " app open " AK_ROUTE);
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = abc_spec(command);
+    struct zcl_command_context ctx = {.registry = reg, .granted_capabilities = ~(uint64_t)0,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+    char wire[ZCL_COMMAND_LIST_BUDGET + 1];
+    if (!spec) return false;
+    size_t n = zcl_command_registry_execute_json(reg, spec, &ctx, input, false,
+        spec->path, "normal", 0, 0, NULL, wire, sizeof(wire), code);
+    return n && n <= ZCL_COMMAND_LIST_BUDGET &&
+        (!spec->budget_bytes || (spec->budget_bytes > 0 && n <= (size_t)spec->budget_bytes)) &&
+        json_read(doc, wire, n);
+}
+static bool ak_discovery_state(const struct ak_fixture *f, uint8_t hashes[6][32])
+{
+    const char *relative[] = {".zvcs/commits.log", ".zvcs/index.kv", "src/main.c", "include/boost.h"};
+    for (size_t i = 0; i < 6; ++i) {
+        char path[APP_SELECTION_PATH_MAX + 64];
+        int n;
+        if (i < 4) n = snprintf(path, sizeof(path), "%s/%s", f->world.bob_copy, relative[i]);
+        else if (i == 4) n = snprintf(path, sizeof(path), "%s/@kept-received.selection", f->env.state_dir);
+        else n = snprintf(path, sizeof(path), "%s", f->trust);
+        uint8_t *bytes = NULL; size_t size = 0;
+        if (n <= 0 || (size_t)n >= sizeof(path) ||
+            !zcl_read_whole_file(path, 8u << 20, &bytes, &size, "kept discovery state")) return false;
+        sha3_256(bytes, size, hashes[i]); free(bytes);
     }
-    abc_close(&leaf);
-    return ok && found;
+    return true;
+}
+static bool ak_discovery_identity(const struct ak_fixture *f, const struct json_value *data)
+{
+    struct zcl_package_copy copy = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.kept_discovery.v1");
+    bool ok = zcl_package_copy_open_selected_as(f->world.bob_copy, ZCL_PACKAGE_COPY_READ,
+        &copy, &reply, "app.customize", f->build.version);
+    char tree[65]; zcl_hex_encode(copy.selected_tree, 32, tree);
+    ok = ok && !strcmp(aso_string(data, "name"), AK_ROUTE) && aso_revision_is(data, 1) &&
+        !strcmp(aso_string(data, "version"), f->build.version) &&
+        !strcmp(aso_string(data, "source_root"), tree) &&
+        !strcmp(aso_string(data, "authority"), "read-only-selected-source");
+    zcl_package_copy_close(&copy); zcl_command_reply_free(&reply); return ok;
+}
+static bool ak_discovery_hint(const struct ak_fixture *f, const struct json_value *entry)
+{
+    const struct json_value *hint = json_get(entry, "customize"), *input = json_get(hint, "input");
+    struct json_value doc; json_init(&doc); enum zcl_command_exit code;
+    bool ok = !strcmp(aso_string(hint, "command"), "app.customize") &&
+        !strcmp(aso_string(hint, "validation"), "required-on-read") &&
+        input && input->type == JSON_OBJ && input->num_children == 1 &&
+        !strcmp(aso_string(input, "name"), AK_ROUTE) &&
+        ak_discovery_wire("app.customize", input, &doc, &code) && code == ZCL_COMMAND_EXIT_OK &&
+        ak_discovery_identity(f, json_get(&doc, "data"));
+    json_free(&doc); return ok;
+}
+static bool ak_discovery_builtin(void)
+{
+    struct json_value input, doc; json_init(&input); json_init(&doc); json_set_object(&input);
+    enum zcl_command_exit code;
+    bool ok = json_push_kv_str(&input, "name", "skycombat") &&
+        ak_discovery_wire("app.customize", &input, &doc, &code) && code != ZCL_COMMAND_EXIT_OK;
+    const struct json_value *error = json_get(&doc, "error"), *mutated = json_get(error, "mutated");
+    ok = ok && !strcmp(aso_string(error, "code"), "SELECTION_REQUIRED") &&
+        mutated && mutated->type == JSON_BOOL && !json_get_bool(mutated);
+    json_free(&input); json_free(&doc); return ok;
+}
+static bool ak_discovery_next(const struct json_value *doc)
+{
+    const struct json_value *next = json_get(doc, "next");
+    size_t count = 0; bool opened = false;
+    for (size_t i = 0; i < json_size(next); ++i) {
+        const struct json_value *row = json_at(next, i), *input = json_get(row, "input");
+        if (!strcmp(aso_string(row, "command"), "app.open")) opened = true;
+        if (strcmp(aso_string(row, "command"), "app.customize")) continue;
+        if (strcmp(aso_string(input, "name"), AK_ROUTE)) return false;
+        ++count;
+    }
+    return opened && count == 1;
+}
+static bool ak_discovery_rows(const struct ak_fixture *f, const struct json_value *doc)
+{
+    const struct json_value *list = json_get(json_get(doc, "data"), "launchable");
+    if (!list || list->type != JSON_ARR) return false;
+    bool found = false, builtin = false;
+    for (size_t i = 0; i < json_size(list); ++i) {
+        const struct json_value *entry = json_at(list, i);
+        if (!strcmp(aso_string(entry, "id"), "skycombat")) builtin = true;
+        if (strcmp(aso_string(entry, "id"), AK_ROUTE)) continue;
+        found = !strcmp(aso_string(entry, "source"), "kept") &&
+            !strcmp(aso_string(entry, "validation"), "required-on-open") &&
+            !json_get(entry, "installed") && strstr(aso_string(entry, "open"), " app open " AK_ROUTE) &&
+            ak_discovery_hint(f, entry);
+    }
+    return builtin && found;
+}
+static bool ak_listed(struct ak_fixture *f)
+{
+    uint8_t before[6][32], after[6][32];
+    struct json_value input, doc; json_init(&input); json_init(&doc); json_set_object(&input);
+    enum zcl_command_exit code;
+    bool ok = ak_discovery_state(f, before) &&
+        ak_discovery_wire("app.list", &input, &doc, &code) && code == ZCL_COMMAND_EXIT_OK &&
+        strstr(aso_string(json_get(&doc, "data"), "summary"), "exact kept: ID") &&
+        ak_discovery_rows(f, &doc) && ak_discovery_next(&doc) && ak_discovery_builtin();
+    ok = ok && ak_discovery_state(f, after) && !memcmp(before, after, sizeof(before));
+    json_free(&input); json_free(&doc); return ok;
 }
 static bool ak_mcp_open(struct aso_mcp *server, struct json_value *doc)
 {
@@ -1765,7 +1857,7 @@ static int ak_acceptance(struct ak_fixture *f)
         ASSERT(ak_received(f) && ak_environment(f));
         ASSERT(ak_refused(f, "SELECTION_REQUIRED"));
         ASSERT(ak_preview_keep(f));
-        ASSERT(ak_listed() && ak_restart(f));
+        ASSERT(ak_listed(f) && ak_restart(f));
         ASSERT(ak_read_source(f, blob));
         ASSERT(ak_revoked(f) && ak_replaced(f));
         ASSERT(ak_edit_source(f, blob));

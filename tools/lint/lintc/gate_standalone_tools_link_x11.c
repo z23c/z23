@@ -1,8 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: the X11 runtime qualification of check-standalone-tools-link. A
- * missing libX11 runtime can excuse only the link of native_ui_driver, never
- * its strict compile. The probe command is derived from the actual Make rule
+ * missing libX11 runtime can excuse only the links of the two native UI
+ * driver tools, never either strict compile. The probe command is derived from the actual Make rule
  * so compiler wrappers, command-line overrides, platform flags and future rule
  * changes cannot silently drift.
  * Status of stl_x11_linkable: 0 = linkable, 1 = confirmed absent with strict
@@ -71,7 +71,7 @@ static void stl_join_continuations(char *s)
 }
 
 /* The $(CC) recipe lines of the NATIVE_UI_DRIVER_BIN rule, tabs removed. */
-static int stl_x11_recipe(char *out, size_t cap)
+static int stl_x11_recipe(const char *target, char *out, size_t cap)
 {
     FILE *f = fopen("Makefile", "r");
     if (!f)
@@ -81,7 +81,7 @@ static int stl_x11_recipe(char *out, size_t cap)
     size_t o = 0;
     out[0] = '\0';
     while (rc == 0 && stl_rd_next(&r)) {
-        if (strncmp(r.buf, "$(NATIVE_UI_DRIVER_BIN):", 24) == 0 && r.head) {
+        if (strncmp(r.buf, target, strlen(target)) == 0 && r.head) {
             rule = 1;
             continue;
         }
@@ -166,7 +166,7 @@ static int stl_x11_make(const char *dir, const char *target, const char *mk)
     return stl_wait(pid);
 }
 
-static int stl_x11_write(const char *dir, const char *flags, char *mkp, size_t cap)
+static int stl_x11_write(const char *dir, const char *flags, const char *readiness, char *mkp, size_t cap)
 {
     static char mk[STL_TEXT];
     char p[STL_PATH];
@@ -190,8 +190,11 @@ static int stl_x11_write(const char *dir, const char *flags, char *mkp, size_t c
         "zcl-x11-cover:\n"
         "\t%s -c tools/native_ui_driver.c"
         " -o \"$$z23_x11_probe_dir/native_ui_driver.o\""
-        " && printf ok >\"$$z23_x11_probe_dir/covered\" || exit 1\n",
-        flags, flags, flags), sizeof mk))
+        " && printf ok >\"$$z23_x11_probe_dir/covered\" || exit 1\n"
+        "\t%s -c tests/fixtures/native_ui_driver_readiness.c"
+        " -o \"$$z23_x11_probe_dir/native_ui_driver_readiness.o\""
+        " && printf ok >\"$$z23_x11_probe_dir/readiness-covered\" || exit 1\n",
+        flags, flags, flags, readiness), sizeof mk))
         return 2;
     return csr_write(mkp, mk) != 0 ? 2 : 0;
 }
@@ -210,15 +213,30 @@ static int stl_x11_state_present(const char *dir)
     return strcmp(v, "present") == 0;
 }
 
+static int stl_x11_flags(const char *target, char *flags, size_t cap)
+{
+    if (stl_x11_recipe(target, flags, cap) != 0 ||
+        strncmp(flags, "$(CC) ", 6) != 0 || !stl_ends_with(flags, k_suffix))
+        return 2;
+    flags[strlen(flags) - strlen(k_suffix)] = '\0';
+    return 0;
+}
+static int stl_x11_covered(const char *dir)
+{
+    return stl_in_dir_nonempty(dir, "native_ui_driver.o") &&
+        stl_in_dir_nonempty(dir, "covered") &&
+        stl_in_dir_nonempty(dir, "native_ui_driver_readiness.o") &&
+        stl_in_dir_nonempty(dir, "readiness-covered");
+}
+
 static int stl_x11_probe_dir(const char *dir)
 {
-    static char recipe[STL_LINE];
+    static char recipe[STL_LINE], readiness[STL_LINE];
     char mkp[STL_PATH];
-    if (stl_x11_recipe(recipe, sizeof recipe) != 0 ||
-        strncmp(recipe, "$(CC) ", 6) != 0 || !stl_ends_with(recipe, k_suffix))
+    if (stl_x11_flags("$(NATIVE_UI_DRIVER_BIN):", recipe, sizeof recipe) != 0 ||
+        stl_x11_flags("$(NATIVE_UI_READINESS_BIN):", readiness, sizeof readiness) != 0)
         return 2;
-    recipe[strlen(recipe) - strlen(k_suffix)] = '\0';
-    if (stl_x11_write(dir, recipe, mkp, sizeof mkp) != 0)
+    if (stl_x11_write(dir, recipe, readiness, mkp, sizeof mkp) != 0)
         return 2;
     /* Success must be recorded by each real shell command, independently of
      * make's status (MAKEFLAGS may carry -i) and of partial compiler output. */
@@ -233,8 +251,7 @@ static int stl_x11_probe_dir(const char *dir)
     if (rc != 1)
         return rc;
     rc = stl_x11_make(dir, "zcl-x11-cover", mkp);
-    return (rc == 0 && stl_in_dir_nonempty(dir, "native_ui_driver.o") &&
-            stl_in_dir_nonempty(dir, "covered")) ? 1 : 2;
+    return (rc == 0 && stl_x11_covered(dir)) ? 1 : 2;
 }
 
 int stl_x11_linkable(void)
