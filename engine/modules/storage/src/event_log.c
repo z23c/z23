@@ -575,7 +575,9 @@ static bool recover_truncate_partial(struct platform_private_file *file,
                           memory_order_relaxed);
     atomic_store_explicit(&g_last_open_receipt, out->prefix_end != 0,
                           memory_order_relaxed);
-    if (out->prefix_end) {
+    /* Informational: shown at the default floor (ALL/INFO), quiet once a
+     * one-shot command raises the floor to WARN or above. */
+    if (out->prefix_end && zcl_log_level_get() <= ZCL_LOG_INFO) {
         fprintf(stderr,  // obs-ok:event-log-lifecycle
                 "[event_log] receipt accepted: skipped %llu verified bytes, "
                 "walked %llu (%s)\n",
@@ -640,10 +642,11 @@ static event_log_t *event_log_handle_new(struct platform_private_file *file,
     atomic_init(&log->receipt_poisoned, false);
     log->read_only = read_only;
 
-    fprintf(stderr,  // obs-ok:event-log-lifecycle
-            "[event_log] opened %s (size=%llu%s)\n",
-            path, (unsigned long long)log->end_offset,
-            read_only ? ", read-only" : "");
+    if (zcl_log_level_get() <= ZCL_LOG_INFO)
+        fprintf(stderr,  // obs-ok:event-log-lifecycle
+                "[event_log] opened %s (size=%llu%s)\n",
+                path, (unsigned long long)log->end_offset,
+                read_only ? ", read-only" : "");
     return log;
 }
 

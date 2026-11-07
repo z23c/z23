@@ -13,6 +13,8 @@
 #include "command/native_zcode_package_bundle.h"
 
 #include "base/hex.h"
+#include "base/log_level.h"
+#include "util/util.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
 #include "sha3/sha3.h"
@@ -405,7 +407,16 @@ int zcl_app_front_door_run(const struct zcl_app_front_door *door)
                       door->target, r.datadir);
         return (int)ZCL_COMMAND_EXIT_INVALID;
     }
-    return fd_run_verb(&r);
+    /* A person at a terminal wants the result lines, not INFO logs: quiet
+     * the floor for this one command unless -loglevel was given, then put
+     * it back so no other caller in the process sees the change. */
+    const char *asked = GetArg("-loglevel", NULL);
+    const enum zcl_log_level prior = zcl_log_level_get();
+    const bool quiet = (!asked || !asked[0]) && prior < ZCL_LOG_WARN;
+    if (quiet) zcl_log_level_set(ZCL_LOG_WARN);
+    const int rc = fd_run_verb(&r);
+    if (quiet) zcl_log_level_set(prior);
+    return rc;
 }
 
 /* ── the argv hook ───────────────────────────────────────────────────── */
