@@ -11612,21 +11612,21 @@ bench: zclassic23
 
 # Consensus-verify microbenchmark: times the two dominant per-block verify
 # primitives (BLS12-381 Groth16 pairing + Equihash 200,9 solution check) and
-# APPENDS ns/op rows to docs/bench-history.csv. `bench-regress` then gates
+# APPENDS ns/op rows to build/bench-history.csv. `bench-regress` (reading the tracked docs/ baseline) gates
 # those rows at ±20% vs the prior recorded run (ns/op is lower-is-better).
 # Groth16 row is skipped if ~/.zcash-params is absent (VK not vendored).
 .PHONY: bench-crypto-verify
 bench-crypto-verify: zclassic23
-	@ZCL_BENCH_COMMIT="$(BUILD_COMMIT)" $(Z23_BIN) -bench-crypto-verify
+	@ZCL_BENCH_COMMIT="$(BUILD_COMMIT)" ZCL_BENCH_HISTORY=build/bench-history.csv $(Z23_BIN) -bench-crypto-verify
 
 # Crypto-vs-Rust microbenchmark: times EVERY consensus-path C crypto primitive
 # (Equihash verify, Groth16/BLS12-381 output verify, BLS12-381 pairing + Fp mul,
 # secp256k1 ECDSA verify, ed25519 verify, SHA256, SHA3-256, BLAKE2b) as a
 # flake-resistant MEDIAN ns/op, prints machine-readable CRYPTOPERF lines, and
-# APPENDS the medians to docs/bench-history.csv.
+# APPENDS the medians to build/bench-history.csv.
 .PHONY: bench-crypto-vs-rust
 bench-crypto-vs-rust: zclassic23
-	@ZCL_BENCH_COMMIT="$(BUILD_COMMIT)" $(Z23_BIN) -bench-crypto-vs-rust
+	@ZCL_BENCH_COMMIT="$(BUILD_COMMIT)" ZCL_BENCH_HISTORY=build/bench-history.csv $(Z23_BIN) -bench-crypto-vs-rust
 
 # The STANDING crypto-perf gate (docs/CRYPTO_PERF.md): measure C live and
 # enforce (a) the RATCHET — no C primitive may regress beyond the flake margin;
@@ -11638,6 +11638,7 @@ bench-crypto-vs-rust: zclassic23
 .PHONY: check-crypto-perf
 check-crypto-perf: zclassic23 $(LINTC_TOOL)
 	@ZCL_BENCH_COMMIT="$(BUILD_COMMIT)" \
+	  ZCL_BENCH_HISTORY=build/bench-history.csv \
 	  ZCL_CRYPTO_PERF_BIN=$(Z23_BIN) $(LINTC_TOOL) check-crypto-perf
 
 # The STANDING Groth16 differential parity gate (docs/CRYPTO_PERF.md

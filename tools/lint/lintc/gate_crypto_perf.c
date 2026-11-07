@@ -413,7 +413,7 @@ int ccp_core(const struct ccp_opts *o)
 /* Where the gate's bench run appends. Never the tracked docs/ baseline. */
 const char *ccp_history_default(const char *env)
 {
-    return (env && *env) ? env : "docs/bench-history.csv";
+    return (env && *env) ? env : "build/bench-history.csv";
 }
 
 int check_crypto_perf_run(int argc, char **argv)
