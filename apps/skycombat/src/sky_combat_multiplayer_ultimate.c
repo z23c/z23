@@ -67,6 +67,9 @@ typedef struct {
     /* Visual settings */
     float speed_lines_intensity;
     bool motion_blur_enabled;
+
+    /* --capture run: fixed time step and a chase view centred on the player */
+    bool capture_view;
 } multiplayer_game_t;
 
 /* Draw speed lines effect */
@@ -304,6 +307,15 @@ static void update_camera_ultimate(multiplayer_game_t* game, float dt) {
     camera_update_responsive(&game->camera, player->aircraft->position,
                            player->aircraft->yaw + game->camera_yaw,
                            cam_distance, cam_height, dt);
+    if (game->capture_view) {
+        /* A step of 0.2 s makes the camera's own smoothing (5 per second) land
+         * exactly on its chase spot; then frame the aircraft, not the point
+         * ahead of it, so the player sits at the centre of the image. */
+        camera_update_responsive(&game->camera, player->aircraft->position,
+                               player->aircraft->yaw + game->camera_yaw,
+                               cam_distance, cam_height, 0.2f);
+        game->camera.target = player->aircraft->position;
+    }
 }
 
 static void destroy_game_systems(multiplayer_game_t *game) {
@@ -508,7 +520,13 @@ static bool game_capture_save(const char *path, const struct sky_agent_capture *
     if (!ok) {
         fprintf(stderr, "Sky Combat: cannot write %s\n", path);
         if (file) (void)remove(temp);
-    } else printf("Sky Combat: captured %s (%zu bytes)\n", path, shot->size);
+    } else {
+        printf("Sky Combat: captured %s (%zu bytes)\n", path, shot->size);
+        if (shot->probe_ok)
+            printf("Sky Combat: player colour %u,%u,%u at %d,%d\n", shot->probe_rgb[0],
+                   shot->probe_rgb[1], shot->probe_rgb[2], shot->probe_out_x, shot->probe_out_y);
+        else puts("Sky Combat: player colour unavailable (aircraft not on screen)");
+    }
     free(temp);
     return ok;
 }
@@ -718,6 +736,20 @@ static void collect_aircraft_powerups(multiplayer_game_t *game)
     }
 }
 
+/* --capture only: ask the readback to sample the pixels at the player's
+ * aircraft, projected through the camera that drew this frame. */
+static void set_capture_probe(const multiplayer_game_t *game, struct sky_agent_capture *capture)
+{
+    if (!game->capture_view) return;
+    const managed_aircraft_t *player = aircraft_manager_get(game->aircraft_mgr, game->local_player_id);
+    int screen_width = GetScreenWidth(), screen_height = GetScreenHeight();
+    if (!player || !player->aircraft || screen_width < 1 || screen_height < 1) return;
+    Vector2 at = GetWorldToScreen(player->aircraft->position, game->camera);
+    capture->probe_want = true;
+    capture->probe_x = (int)(at.x * (float)GetRenderWidth() / (float)screen_width);
+    capture->probe_y = (int)(at.y * (float)GetRenderHeight() / (float)screen_height);
+}
+
 static void render_ultimate_frame(multiplayer_game_t *game,
                                   RenderTexture2D screen_buffer, float game_time,
                                   const struct sky_expr_hud *part_hud,
@@ -774,7 +806,10 @@ static void render_ultimate_frame(multiplayer_game_t *game,
                      Fade(RED, game->damage_flash * 0.3f));
     }
 
-    if (capture) sky_agent_capture_frame(capture);
+    if (capture) {
+        set_capture_probe(game, capture);
+        sky_agent_capture_frame(capture);
+    }
     EndDrawing();
 }
 
@@ -787,7 +822,8 @@ static void advance_ultimate_frame(multiplayer_game_t *game,
                                    const input_state_fast_t *external_input,
                                    struct sky_agent_capture *capture)
 {
-    float dt = external_input ? 1.0f / 60.0f : GetFrameTime();
+    /* A capture run steps a fixed 1/60 s so the captured scene repeats. */
+    float dt = external_input || game->capture_view ? 1.0f / 60.0f : GetFrameTime();
     if (external_input) {
         sky_game_runtime_tick();
         *game_time = (float)sky_game_runtime_time();
@@ -961,6 +997,7 @@ int main(int argc, char **argv) {
     
     /* Visual settings */
     game.motion_blur_enabled = true;
+    game.capture_view = capture_path != NULL;
     
     /* Generate cyberpunk world */
     cyberpunk_world_generate(game.world, 42);

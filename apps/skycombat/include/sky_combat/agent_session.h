@@ -19,6 +19,12 @@ struct sky_agent_capture {
     size_t size;
     int width, height;
     const char *error;
+    /* Optional colour probe for --capture: the caller sets probe_want and the
+     * render-pixel position (probe_x, probe_y); the frame readback then fills
+     * probe_ok, probe_rgb (3x3 average) and the position in the saved PNG. */
+    bool probe_want, probe_ok;
+    int probe_x, probe_y, probe_out_x, probe_out_y;
+    unsigned char probe_rgb[3];
 };
 
 struct sky_agent_observation {

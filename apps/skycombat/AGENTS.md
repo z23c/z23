@@ -45,4 +45,7 @@ Focused groups: `test_skycombat_models`, `test_skycombat_expr`, `test_skycombat_
 `test_skycombat_fp_contract`. Run one with
 `make t ONLY=test_skycombat_models`.
 Colour and tuning edits are not covered by a unit test: confirm them with a
-`--qa-frames` run.
+`--qa-frames` run. With `--capture=PATH` the frame is a fixed-step third-person
+view with your aircraft at the centre, and the run also prints
+`Sky Combat: player colour R,G,B at x,y` (the pixels sampled at the aircraft,
+x,y in the PNG). A `RED` aircraft prints red-dominant values, `GREEN` green-dominant.

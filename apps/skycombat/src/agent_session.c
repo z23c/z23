@@ -348,6 +348,27 @@ static void sky_agent_encode(const Image *image, struct sky_agent_capture *captu
     capture->error = NULL;
 }
 
+/* Average the 3x3 pixels around the probe point of the full-size frame. */
+static void sky_agent_probe(const Image *image, struct sky_agent_capture *capture)
+{
+    capture->probe_ok = false;
+    if (capture->probe_x < 0 || capture->probe_y < 0 ||
+        capture->probe_x >= image->width || capture->probe_y >= image->height) return;
+    unsigned sum[3] = {0, 0, 0}, count = 0;
+    const unsigned char *pixels = image->data;
+    for (int y = capture->probe_y - 1; y <= capture->probe_y + 1; ++y) {
+        for (int x = capture->probe_x - 1; x <= capture->probe_x + 1; ++x) {
+            if (x < 0 || y < 0 || x >= image->width || y >= image->height) continue;
+            const unsigned char *at = pixels + ((size_t)y * (size_t)image->width + (size_t)x) * 4;
+            for (int channel = 0; channel < 3; ++channel) sum[channel] += at[channel];
+            ++count;
+        }
+    }
+    for (int channel = 0; channel < 3; ++channel)
+        capture->probe_rgb[channel] = (unsigned char)((sum[channel] + count / 2) / count);
+    capture->probe_ok = true;
+}
+
 void sky_agent_capture_frame(struct sky_agent_capture *capture)
 {
     int width = GetRenderWidth(), height = GetRenderHeight();
@@ -361,7 +382,13 @@ void sky_agent_capture_frame(struct sky_agent_capture *capture)
     bool shape = image.width == width && image.height == height &&
         image.format == PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
     capture->error = "CAPTURE_RESIZE";
+    int full_width = image.width, full_height = image.height;
+    if (shape && capture->probe_want) sky_agent_probe(&image, capture);
     if (shape && sky_agent_resize(&image)) sky_agent_encode(&image, capture);
+    if (capture->probe_ok && !capture->error && full_width > 0 && full_height > 0) {
+        capture->probe_out_x = (int)((int64_t)capture->probe_x * capture->width / full_width);
+        capture->probe_out_y = (int)((int64_t)capture->probe_y * capture->height / full_height);
+    }
     UnloadImage(image);
     if (capture->error) { free(capture->png); capture->png = NULL; capture->size = 0; }
 }
