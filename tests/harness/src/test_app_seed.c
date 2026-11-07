@@ -22,6 +22,7 @@
 
 #include "base/hex.h"
 #include "chain/chainparams.h"
+#include "command/app_build_make.h"
 #include "command/app_seed.h"
 #include "config/command_catalog.h"
 #include "mcp/mcp_policy.h"
@@ -304,6 +305,9 @@ static int asd_seeds_and_reseeds(struct asd_world *w)
         ASSERT(strlen(asf_get(&l, "release_id")) == 64);
         ASSERT(json_get_int(json_get(&l.out.data, "file_count")) == 6);
         ASSERT(!asf_flag(&l, "existing") && l.out.error.mutated);
+        ASSERT(strcmp(asf_get(&l, "confinement"),
+                      app_build_make_confinable() ? "landlock"
+                                                  : "unconfined") == 0);
         (void)snprintf(w->release1, sizeof(w->release1), "%s",
                        asf_get(&l, "release_id"));
         asf_close(&l);
