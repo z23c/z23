@@ -16,6 +16,7 @@
 #include "config/consensus_state_install_runtime.h"
 #include "config/flysync_island.h"
 #include "config/state_offer_store.h"
+#include "config/state_offer_link_session.h"
 #include "consensus/validation.h"
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
@@ -515,6 +516,57 @@ static int fsi_case_hold_record(void)
     return failures;
 }
 
+/* A link peer that delivers part bytes and then trickles: link parts keep
+ * arriving (the per-object 30 s idle bound never fires) but no chunk
+ * completes. The hold must still end at FLYSYNC_FETCH_STALL_MS, because the
+ * island counts verified chunks, not link bytes. This pins the bound that
+ * already exists; it holds without any product change. */
+static int fsi_case_link_trickle(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    FSI_CHECK("trickle fixture opens", fsi_node_open(&n, "flysync_trickle"));
+    FSI_CHECK("link idle < island stall < running cap",
+              (int64_t)STATE_OFFER_LINK_CLIENT_IDLE_SECONDS * 1000 < FLYSYNC_FETCH_STALL_MS &&
+              STATE_OFFER_FETCH_PROGRESS_WINDOW_MS < FLYSYNC_FETCH_STALL_MS &&
+              FLYSYNC_FETCH_STALL_MS < FLYSYNC_FETCH_CAP_MS);
+    fsi_build_island(&n.is);
+    flysync_island_test_set_rung(&n.is.rung);
+    flysync_island_set_requested(true);
+    const int64_t t0 = INT64_C(11000000000);
+    flysync_island_test_set_clock_ms(t0);
+    (void)flysync_island_boot_after_index(NULL, &n.ms);
+    struct state_offer_v1 o;
+    fsi_make_offer(&o, FSI_RUNG_H, 0x52);
+    uint8_t ip[16] = {0};
+    ip[10] = 0xff; ip[11] = 0xff; ip[12] = 10; ip[15] = 36;
+    struct state_offer_record rec;
+    state_offer_store_note_first_peer(t0);
+    (void)state_offer_store_record(&o, ip, 18036, 3, t0);
+    FSI_CHECK("the rung offer is chosen",
+              state_offer_store_decide(t0 + 1000, &rec) == STATE_OFFER_DECIDE_FETCH);
+    state_offer_store_note_fetch_progress(1, 1000, UINT64_C(1) << 20, UINT64_C(1000) << 20);
+    flysync_island_test_set_clock_ms(t0 + 1000);
+    flysync_island_tick();
+    bool waiting = flysync_island_phase() == FLYSYNC_WAIT;
+    for (int64_t t = t0 + 1000 + 20000; t < t0 + 1000 + FLYSYNC_FETCH_STALL_MS; t += 20000) {
+        sol_client_test_note_part();   /* bytes of the next chunk, never complete */
+        flysync_island_test_set_clock_ms(t);
+        flysync_island_tick();
+        waiting = waiting && flysync_island_phase() == FLYSYNC_WAIT;
+    }
+    FSI_CHECK("trickling link parts keep the wait only inside the stall bound", waiting);
+    sol_client_test_note_part();
+    flysync_island_test_set_clock_ms(t0 + 1000 + FLYSYNC_FETCH_STALL_MS);
+    flysync_island_tick();
+    FSI_CHECK("link bytes without a verified chunk do not extend the hold",
+              flysync_island_phase() == FLYSYNC_FELL_BACK);
+    sol_client_shutdown();
+    fsi_release_globals();
+    fsi_node_close(&n);
+    return failures;
+}
+
 int fsi_fallback_cases(struct fsi_node *n)
 {
     int failures = 0;
@@ -533,5 +585,6 @@ int fsi_state_cases(void)
     failures += fsi_case_listonly();
     failures += fsi_case_state_fresh();
     failures += fsi_case_state_unreadable();
+    failures += fsi_case_link_trickle();
     return failures;
 }

@@ -950,8 +950,6 @@ static int fsi_case_hold_bound(void)
 }
 
 /* SHOULD 5: a chosen rung offer that never arrives ends the wait. */
-static void fsi_make_offer(struct state_offer_v1 *o, int32_t height,
-                           uint8_t tag);
 static int fsi_case_fetch_stall(void)
 {
     int failures = 0;
@@ -1089,8 +1087,7 @@ static int fsi_case_island(void)
 /* ── State-offer height filter ───────────────────────────────────────────── */
 
 /* A signed offer at `height`, built as test_stale_offers_only builds one. */
-static void fsi_make_offer(struct state_offer_v1 *o, int32_t height,
-                           uint8_t tag)
+void fsi_make_offer(struct state_offer_v1 *o, int32_t height, uint8_t tag)
 {
     memset(o, 0, sizeof(*o));
     o->version = STATE_OFFER_VERSION;

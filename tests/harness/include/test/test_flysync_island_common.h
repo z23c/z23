@@ -53,6 +53,8 @@ bool fsi_top_work_is_rung(struct fsi_node *n);
 void fsi_reload_work(struct fsi_node *n);
 bool fsi_node_seed(struct fsi_node *n);
 void fsi_release_globals(void);
+struct state_offer_v1;
+void fsi_make_offer(struct state_offer_v1 *o, int32_t height, uint8_t tag);
 
 /* test_flysync_island_fallback.c: run on the seeded island fixture, in order. */
 int fsi_fallback_cases(struct fsi_node *n);
