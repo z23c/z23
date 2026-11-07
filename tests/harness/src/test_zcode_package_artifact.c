@@ -298,6 +298,37 @@ static bool artifact_resident_roundtrip(const struct artifact_fixture *fixture, 
     if (ok) ok = artifact_resident_relative_refusal(&input);
     json_free(&input); return ok;
 }
+/* The reply names exactly one next command; every key in `want` (key, value
+ * pairs ending in NULL) is a string in its input, equal to value. */
+static bool artifact_next_is(const struct json_value *envelope, const char *command, const char *const want[])
+{
+    const struct json_value *next = json_get(envelope, "next");
+    if (!next || next->type != JSON_ARR || json_size(next) != 1) return false;
+    const struct json_value *item = json_at(next, 0);
+    const char *name = json_get_str(json_get(item, "command"));
+    if (!name || strcmp(name, command) != 0) return false;
+    for (size_t i = 0; want[i]; i += 2) {
+        const char *got = json_get_str(json_get(json_get(item, "input"), want[i]));
+        if (!got || strcmp(got, want[i + 1]) != 0) return false;
+    }
+    return true;
+}
+static bool artifact_next_after_export(const struct artifact_fixture *fixture, const struct json_value *envelope)
+{
+    const struct json_value *data = json_get(envelope, "data");
+    char body[1600]; if (!artifact_path(body, sizeof(body), fixture->output, "release-body.wire")) return false;
+    const char *const want[] = {"release_body_file", body, "release_body_sha3",
+        json_get_str(json_get(data, "release_body_sha3")), NULL};
+    return json_get_str(json_get(data, "release_body_sha3")) && artifact_next_is(envelope, "zcode.package.dev.seal", want);
+}
+static bool artifact_next_after_seal(const struct artifact_fixture *fixture, const struct json_value *envelope)
+{
+    char manifest[1600], recipe[1600];
+    if (!artifact_path(manifest, sizeof(manifest), fixture->output, "manifest.wire") ||
+        !artifact_path(recipe, sizeof(recipe), fixture->output, "recipe.wire")) return false;
+    const char *const want[] = {"mode", "plan", "manifest_file", manifest, "recipe_file", recipe, NULL};
+    return artifact_next_is(envelope, "zcode.package.dev.create", want);
+}
 static int artifact_binary_roundtrip(void)
 {
     int failures = 0; struct artifact_fixture fixture = {0}; struct json_value input = {0}, prepared = {0}, sealed = {0}, reply = {0};
@@ -316,7 +347,9 @@ static int artifact_binary_roundtrip(void)
         const struct json_value *data = json_get(&prepared, "data"); ASSERT(data != NULL);
         ASSERT(json_get_int(json_get(data, "manifest_bytes")) > 8192); ASSERT(artifact_verify_exports(&fixture, data));
         ASSERT(artifact_compare_derivation(&fixture, data));
+        ASSERT(artifact_next_after_export(&fixture, &prepared));
         ASSERT(artifact_seal_input(&input, &fixture, data)); ASSERT(artifact_native(&fixture, seal, &input, &sealed, true));
+        ASSERT(artifact_next_after_seal(&fixture, &sealed));
         ASSERT(artifact_resident_roundtrip(&fixture, data, json_get(&sealed, "data")));
         ASSERT(artifact_publish_input(&input, &fixture, data, json_get(&sealed, "data"), true));
         json_free(&reply); json_init(&reply); ASSERT(artifact_native(&fixture, plan, &input, &reply, true));
