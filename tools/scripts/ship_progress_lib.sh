@@ -1108,14 +1108,33 @@ ship_remote_sh() {
 }
 
 # ship_remote_script <arg>... — run the script on stdin on the target box.
-ship_remote_script() {
+ship_remote_script() (
     if [ -n "${ZCL_SHIP_REMOTE_EXEC:-}" ]; then
         "$ZCL_SHIP_REMOTE_EXEC" script "$@"
         return $?
     fi
+    # SSH joins command arguments before the remote login shell parses them.
+    # Single-quote each value for that shell, preserving empty arguments.
+    _ship_script_command="bash -s --"
+    for _ship_script_arg do
+        _ship_script_command="${_ship_script_command} '"
+        while :; do
+            case $_ship_script_arg in
+                *"'"*)
+                    _ship_script_prefix=${_ship_script_arg%%"'"*}
+                    _ship_script_command="${_ship_script_command}${_ship_script_prefix}'\\''"
+                    _ship_script_arg=${_ship_script_arg#*"'"}
+                    ;;
+                *)
+                    _ship_script_command="${_ship_script_command}${_ship_script_arg}'"
+                    break
+                    ;;
+            esac
+        done
+    done
     # shellcheck disable=SC2086
-    ssh $SHIP_SSH_OPTS "$SHIP_REMOTE_HOST" bash -s -- "$@"
-}
+    ssh $SHIP_SSH_OPTS "$SHIP_REMOTE_HOST" "$_ship_script_command"
+)
 
 # ship_observer_program <lib-text> <unit> <want_sha> <want_src> <want_commit>
 #                       <rpc_budget>

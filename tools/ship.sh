@@ -774,6 +774,31 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     ship_is_proof_host node3
     test_tmp="$(mktemp -d "$(ship_scratch_root)/z23-ship-selftest.XXXXXX")"
     trap 'find "$test_tmp" -depth -delete' EXIT HUP INT TERM
+    # Model OpenSSH joining command argv and the remote POSIX login shell.
+    (
+        ssh() {
+            [ "$1" = transport-fixture ] || return 1
+            shift
+            /bin/sh -c "$*"
+        }
+        SHIP_SSH_OPTS=""
+        SHIP_REMOTE_HOST=transport-fixture
+        ZCL_SHIP_REMOTE_EXEC=""
+        attack="literal ' ; touch $test_tmp/transport-injected ; # \$HOME"
+        activation="$(ship_remote_script "$attack" "" a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 "5 20 60" 1 z23-node.service <<'REMOTE_ARGS'
+printf '%s\n' "$#" "$1" "$2" "${16}" "${17}" "${18}"
+REMOTE_ARGS
+)"
+        expected="$(printf '%s\n' 18 "$attack" "" "5 20 60" 1 z23-node.service)"
+        [ "$activation" = "$expected" ]
+        rollback="$(ship_remote_script "$attack" "" a3 a4 a5 a6 a7 "5 20 60" z23-node.service <<'REMOTE_ARGS'
+printf '%s\n' "$#" "$1" "$2" "$8" "$9"
+REMOTE_ARGS
+)"
+        expected="$(printf '%s\n' 9 "$attack" "" "5 20 60" z23-node.service)"
+        [ "$rollback" = "$expected" ]
+        [ ! -e "$test_tmp/transport-injected" ]
+    )
     mkdir "$test_tmp/suite-bin"
     printf '#!/bin/sh\n[ "$1" = test-parallel ] && [ "${ZCL_DEPLOY_ALLOW_CANONICAL+x}" != x ]\n' > "$test_tmp/suite-bin/make"
     chmod 700 "$test_tmp/suite-bin/make"
@@ -2293,7 +2318,7 @@ rmdir "$lock_dir"
 lock_held=0
 echo "remote: installed, restarted, and process-qualified"
 REMOTE_SCRIPT
-    } | ssh "${SSH_OPTS[@]}" "$host" bash -s -- \
+    } | SHIP_REMOTE_HOST="$host" ship_remote_script \
         "$svc_bin" "$release_root" "$RELEASE_ID" "$ARTIFACT_SHA" \
         "$CAND_SOURCE_ID" "$DEPLOY_COMMIT" \
         "${WORKER_SHAS[0]}" "${WORKER_SHAS[1]}" "$run_id" \
@@ -2434,7 +2459,7 @@ fi
 echo "remote: CRITICAL — rollback path selection is missing" >&2
 exit 1
 ROLLBACK_SCRIPT
-        } | ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$svc_bin" "$run_id" "$prev_sha" \
+        } | SHIP_REMOTE_HOST="$host" ship_remote_script "$svc_bin" "$run_id" "$prev_sha" \
             "$SHIP_ROLLBACK_WINDOW" "$SHIP_ROLLBACK_SILENCE" \
             "$SHIP_CRASH_SAMPLES" "$SHIP_UNKNOWN_SAMPLES" "$SHIP_RPC_BUDGETS" "$REMOTE_NODE_UNIT" \
             || rollback_rc=$?
