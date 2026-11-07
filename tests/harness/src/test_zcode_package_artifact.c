@@ -543,10 +543,64 @@ static int artifact_walk_refusal(unsigned kind)
     if (fixture.home[0]) test_rm_rf(fixture.home);
     return failures;
 }
+extern bool zcl_package_seal_next_test(struct zcl_command_reply *reply, const char *body_file);
+static int artifact_seal_hint_length(size_t length)
+{
+    int failures = 0;
+    char directory[512], body[540], manifest[540], recipe[540];
+    if (length <= 1 || length >= sizeof(directory)) return 1;
+    memset(directory, 'a', length);
+    directory[0] = '/';
+    directory[length] = 0;
+    snprintf(body, sizeof(body), "%s/release-body.wire", directory);
+    snprintf(manifest, sizeof(manifest), "%s/manifest.wire", directory);
+    snprintf(recipe, sizeof(recipe), "%s/recipe.wire", directory);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "fixture");
+    struct json_value input = {0};
+    TEST_CASE("package seal: file-body hint preserves bounded path or explicitly refuses overflow") {
+        bool ok = zcl_package_seal_next_test(&reply, body);
+        if (length < 200) {
+            ASSERT(ok && reply.next_count == 1);
+            ASSERT(json_read(&input, reply.next[0].input_json, strlen(reply.next[0].input_json)));
+            ASSERT(strcmp(json_get_str(json_get(&input, "manifest_file")), manifest) == 0);
+            ASSERT(strcmp(json_get_str(json_get(&input, "recipe_file")), recipe) == 0);
+        } else ASSERT(!ok && reply.next_count == 0);
+    } TEST_END
+    json_free(&input);
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+
+
+static int artifact_seal_hint_spelling(const char *body, const char *manifest, const char *recipe)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "fixture");
+    struct json_value input = {0};
+    TEST_CASE("package seal: root, relative and hex hints name the correct directory") {
+        ASSERT(zcl_package_seal_next_test(&reply, body) && reply.next_count == 1);
+        ASSERT(json_read(&input, reply.next[0].input_json, strlen(reply.next[0].input_json)));
+        const char *actual_manifest = json_get_str(json_get(&input, "manifest_file"));
+        const char *actual_recipe = json_get_str(json_get(&input, "recipe_file"));
+        ASSERT(actual_manifest && strcmp(actual_manifest, manifest) == 0);
+        ASSERT(actual_recipe && strcmp(actual_recipe, recipe) == 0);
+    } TEST_END
+    json_free(&input);
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+
+
 int test_zcode_package_artifact(void);
 int test_zcode_package_artifact(void)
 {
-    int failures = artifact_binary_roundtrip() + artifact_export_interruption(1, false) +
+    int failures = artifact_seal_hint_spelling("release-body.wire", "./manifest.wire", "./recipe.wire") +
+        artifact_seal_hint_spelling("/release-body.wire", "/manifest.wire", "/recipe.wire") +
+        artifact_seal_hint_spelling(NULL, "<artifact_dir>/manifest.wire", "<artifact_dir>/recipe.wire") +
+        artifact_seal_hint_length(119) + artifact_seal_hint_length(120) +
+        artifact_seal_hint_length(150) + artifact_seal_hint_length(480) + artifact_binary_roundtrip() + artifact_export_interruption(1, false) +
         artifact_export_interruption(2, false) + artifact_export_interruption(0, true);
     for (unsigned i = 0; i < 3; ++i) failures += artifact_export_preflight(i);
     for (unsigned i = 0; i < 9; ++i) failures += artifact_reader_refusal(i);
