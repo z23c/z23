@@ -63,6 +63,7 @@ struct asc {
     bool prepared_live;
     size_t mapped;
     size_t closure;
+    bool unconfined;
     bool existing;
     uint64_t existing_sequence;
     uint8_t release_id[32];
@@ -142,6 +143,7 @@ static bool asc_stage(struct asc *s)
     if (app_seed_stage(s->source, s->app, s->stage, &st)) {
         s->mapped = st.mapped;
         s->closure = st.closure;
+        s->unconfined = st.unconfined;
         return true;
     }
     asc_fail(s, st.code, false, "the app could not be staged as a "
@@ -240,6 +242,8 @@ static void asc_describe(struct asc *s, const char *stage)
                            (int64_t)s->prepared.manifest.count);
     (void)json_push_kv_int(d, "mapped_files", (int64_t)s->mapped);
     (void)json_push_kv_int(d, "closure_files", (int64_t)s->closure);
+    (void)json_push_kv_str(d, "confinement",
+                           s->unconfined ? "unconfined" : "landlock");
     (void)json_push_kv_bool(d, "existing", s->existing);
     (void)json_push_kv_int(d, "publisher_sequence",
                            (int64_t)(s->existing

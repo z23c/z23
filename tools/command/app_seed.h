@@ -47,7 +47,8 @@
 struct app_seed_stage {
     size_t mapped;   /* zcode-seed.def entries staged */
     size_t closure;  /* inputs the tree's print-app-closure names */
-    char code[40];   /* the refusal code when staging fails */
+    bool unconfined; /* the closure query ran with no confinement */
+    char code[40];  /* the refusal code when staging fails */
     char why[512];   /* what was refused, naming the path */
 };
 

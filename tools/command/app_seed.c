@@ -134,6 +134,7 @@ static bool as_closure(struct as_ctx *c)
                        "name a closure the staged package holds: %s",
                        c->app_dir, why);
     c->out->closure = closure.count;
+    c->out->unconfined = !m.confine;
     app_build_closure_free(&closure);
     return true;
 }

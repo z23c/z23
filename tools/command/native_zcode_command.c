@@ -816,8 +816,8 @@ static bool zc_commit_via_resident(const struct zcl_command_request *request,
 
 /* Slice 11 policy checkpoint: publish frequency. A FRESH release is admitted
  * only within the publisher key's per-ISO-week tier allowance, unless it is
- * the owner's own local step (owner_local, set only in C by app.seed and
- * bundle.sign): that skips this one allowance check and nothing else, and
+ * the owner's own local step (owner_local, set only in C by app.seed,
+ * bundle.sign and bundle.receive; git grep owner_local tools/command): that skips this one allowance check and nothing else, and
  * the commit still records the publish. On success `*book_out` holds the
  * service book the commit records into (caller frees); on failure the reply
  * is filled and nothing is left allocated. */
