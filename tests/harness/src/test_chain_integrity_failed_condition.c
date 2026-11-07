@@ -7,6 +7,10 @@
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "services/chain_restore_integrity.h"
+#include "services/chain_state_service.h"
+#include "services/reducer_drain.h"
+#include "storage/progress_store.h"
+#include <sqlite3.h>
 #include "util/blocker.h"
 #include "util/supervisor.h"
 #include "util/util.h"
@@ -359,6 +363,63 @@ static bool cif_restore_watchdog_names_and_clears(void)
     return ok;
 }
 
+#ifdef ZCL_TESTING
+bool chain_integrity_failed_test_run_queued_worker(struct main_state *ms);
+
+static bool cif_gate_unchanged(struct main_state *ms, sqlite3 *db,
+                               const struct chain_state_view *before,
+                               size_t count, int changes)
+{
+    struct chain_state_view after;
+    csr_snapshot(csr_instance(), &after);
+    uint8_t value[1];
+    size_t len = 0;
+    bool found = false;
+    return ms->map_block_index.size == count && ms->chain_active.chain[10] == NULL &&
+        after.tip_height == before->tip_height &&
+        uint256_eq(&after.tip_hash, &before->tip_hash) &&
+        after.header_height == before->header_height &&
+        uint256_eq(&after.coins_best_block, &before->coins_best_block) &&
+        after.commits_ok == before->commits_ok && sqlite3_total_changes(db) == changes &&
+        progress_meta_get(db, "cif_gate_fixture", value, sizeof(value), &len, &found) &&
+        found && len == 1 && value[0] == 0x5a;
+}
+
+static bool cif_held_repair_paths(struct main_state *ms, const char *dir)
+{
+    struct uint256 hashes[11];
+    if (!seed_linked_chain(ms, hashes, 10) || !progress_store_open(dir)) return false;
+    sqlite3 *db = progress_store_db();
+    uint8_t sentinel = 0x5a;
+    bool ok = progress_meta_set(db, "cif_gate_fixture", &sentinel, 1);
+    ms->pindex_best_header = active_chain_tip(&ms->chain_active);
+    ms->chain_active.chain[10] = NULL;
+    csr_test_reset_singleton();
+    csr_init(csr_instance(), &ms->map_block_index, &ms->chain_active,
+             &ms->pindex_best_header, NULL, NULL, NULL);
+    struct chain_state_view before;
+    csr_snapshot(csr_instance(), &before);
+    size_t count = ms->map_block_index.size;
+    int changes = sqlite3_total_changes(db);
+    reducer_startup_gate_test_reset();
+    ok = ok && reducer_startup_gate_arm();
+    register_chain_integrity_failed();
+    chain_integrity_failed_test_set_async(true);
+    chain_integrity_failed_test_disable_spawn(true);
+    condition_engine_tick();
+    ok = ok && chain_integrity_failed_test_remedy_calls() == 0 &&
+        chain_integrity_failed_test_queue_calls() == 0 &&
+        cif_gate_unchanged(ms, db, &before, count, changes);
+    ok = ok && chain_integrity_failed_test_run_queued_worker(ms) &&
+        cif_gate_unchanged(ms, db, &before, count, changes);
+    reducer_startup_gate_test_reset();
+    csr_test_reset_singleton();
+    progress_store_close();
+    return ok;
+}
+#endif
+
+
 int test_chain_integrity_failed_condition(void)
 {
     printf("\n=== chain_integrity_failed condition tests ===\n");
@@ -375,6 +436,16 @@ int test_chain_integrity_failed_condition(void)
     test_make_tmpdir(cif_datadir, sizeof(cif_datadir),
                      "chain_integrity_failed_condition", "datadir");
     SetDataDir(cif_datadir);
+
+#ifdef ZCL_TESTING
+    {
+        struct main_state ms;
+        reset_cif(&ms);
+        bool ok = cif_held_repair_paths(&ms, cif_datadir);
+        CIF_CHECK("held gate blocks scheduled and queued restore", ok);
+        cleanup_cif(&ms);
+    }
+#endif
 
     {
         struct main_state ms;

@@ -6,6 +6,7 @@
 
 #include "services/chain_restore_integrity.h"
 #include "services/chain_restore_repair.h"
+#include "services/reducer_drain.h"
 #include "supervisors/domains.h"
 #include "util/blocker.h"
 #include "util/supervisor.h"
@@ -164,12 +165,14 @@ static void *chain_integrity_restore_worker(void *arg)
     snprintf(datadir, sizeof(datadir), "%s", g_restore_datadir);
     pthread_mutex_unlock(&g_restore_mu);
 
-    LOG_WARN("condition",
-             "[condition:chain_integrity_failed] background "
-             "chain_restore_finalize started mode=%s",
-             datadir[0] ? "disk" : "memory");
-    struct zcl_result fr = chain_restore_finalize(
-        ms, datadir[0] ? datadir : NULL);
+    bool held = reducer_startup_gate_held();
+    if (!held)
+        LOG_WARN("condition", "[condition:chain_integrity_failed] background "
+                 "chain_restore_finalize started mode=%s",
+                 datadir[0] ? "disk" : "memory");
+    struct zcl_result fr = held ?
+        ZCL_ERR(-1, "chain restore deferred during startup recovery") :
+        chain_restore_finalize(ms, datadir[0] ? datadir : NULL);
     atomic_store(&g_restore_last_ok, fr.ok ? 1 : 0);
     atomic_store(&g_restore_last_code, fr.code);
     atomic_fetch_add(&g_restore_finished, 1);
@@ -199,7 +202,7 @@ static void *chain_integrity_restore_worker(void *arg)
 static enum condition_remedy_result queue_chain_restore(struct main_state *ms,
                                                         const char *datadir)
 {
-    if (!ms)
+    if (!ms || reducer_startup_gate_held())
         return COND_REMEDY_SKIP;
 
 #ifdef ZCL_TESTING
@@ -250,6 +253,7 @@ static enum condition_remedy_result queue_chain_restore(struct main_state *ms,
 
 static enum condition_remedy_result remedy_chain_integrity_failed(void)
 {
+    if (reducer_startup_gate_held()) return COND_REMEDY_SKIP;
     struct main_state *ms = condition_engine_main_state();
     if (!ms)
         return COND_REMEDY_SKIP;
@@ -439,6 +443,22 @@ void register_chain_integrity_failed(void)
 }
 
 #ifdef ZCL_TESTING
+bool chain_integrity_failed_test_run_queued_worker(struct main_state *ms)
+{
+    pthread_mutex_lock(&g_restore_mu);
+    if (g_restore_running) { pthread_mutex_unlock(&g_restore_mu); return false; }
+    g_restore_running = true;
+    g_restore_ms = ms;
+    g_restore_datadir[0] = 0;
+    pthread_mutex_unlock(&g_restore_mu);
+    int before = atomic_load(&g_restore_finished);
+    (void)chain_integrity_restore_worker(NULL);
+    pthread_mutex_lock(&g_restore_mu);
+    bool stopped = !g_restore_running;
+    pthread_mutex_unlock(&g_restore_mu);
+    return atomic_load(&g_restore_finished) == before + 1 &&
+           atomic_load(&g_restore_last_ok) == 0 && stopped;
+}
 void chain_integrity_failed_test_reset(void)
 {
     struct condition_state *s = &c_chain_integrity_failed.state;

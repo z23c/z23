@@ -85,3 +85,9 @@ Focused synthetic database and admission tests passed 2/2. An opt-in test using
 a public full-history archive and verified bundle passed the recovery window,
 durable seed and restart request in 41.0 seconds, with no skips. It does not
 exercise the complete Android boot or prove migration of an existing wallet.
+
+A device recovery run reached the verified seed while a chain-integrity remedy
+also scheduled a background restore. The remedy and its worker now defer while
+the startup recovery hold is active. Focused condition and reducer tests passed
+2/2, including a modeled queued worker with unchanged chain and database state.
+The full device restart and interrupted-install recovery remain separate checks.
