@@ -1370,6 +1370,7 @@ static int t_lint_fast_tor_graph(void)
         "set -eu; cd \"$2\"\n"
         "mkdir -p platform/modules/platform/tests engine/composition tools/dev tools/lint home tmp\n"
         "cp \"$1/Makefile\" Makefile\n"
+        "mkdir -p apps/skycombat; cp \"$1/apps/skycombat/skycombat.mk\" apps/skycombat/\n"
         "cp \"$1/platform/modules/platform/tests/windows_acceptance.mk\" platform/modules/platform/tests/\n"
         "cp \"$1/platform/modules/platform/tests/android_acceptance.mk\" platform/modules/platform/tests/\n"
         "cp \"$1/engine/composition/lib_module_order.def\" engine/composition/\n"
