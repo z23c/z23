@@ -961,6 +961,63 @@ static int afd_quiet_logs(const struct afd_world *w)
     return failures;
 }
 
+/* A person who runs `receive` on a file that is not there is told so under
+ * the verb they typed, with what to give it. */
+static int afd_receive_missing(const struct afd_world *w)
+{
+    int failures = 0;
+    TEST("app front door: receive of a missing file says app receive and what to give") {
+        struct asf_door run;
+        afd_door(w->b_home, w->b_datadir, "receive", "nothing-here.z23share",
+                 ZCL_CLI_CONFIRM_YES, &run);
+        ASSERT(run.rc != 0);
+        ASSERT(strstr(run.text, "z23 app receive: no such file: nothing-here.z23share") != NULL);
+        ASSERT(strstr(run.text, "z23share file you were sent") != NULL);
+        ASSERT(strstr(run.text, "z23 app open") == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* `app list` runs with every log line on; the event_log receipt of each
+ * copy's history must not reach the terminal. */
+static int afd_list_quiet(const struct afd_world *w)
+{
+    int failures = 0;
+    TEST("app list: no [event_log] line reaches the terminal") {
+        struct afd_leaf l;
+        char *text = calloc(1, 65536);
+        char prior_dir[512];
+        const int prior_port = zcl_native_command_rpc_port();
+        (void)snprintf(prior_dir, sizeof(prior_dir), "%s", zcl_native_command_datadir());
+        ASSERT(text != NULL);
+        FILE *cap = tmpfile();
+        ASSERT(cap != NULL);
+        (void)fflush(stderr);
+        const int saved = dup(STDERR_FILENO);
+        ASSERT(saved >= 0 && dup2(fileno(cap), STDERR_FILENO) >= 0);
+        const enum zcl_log_level prior = zcl_log_level_get();
+        zcl_log_level_set(ZCL_LOG_ALL);
+        zcl_native_bridge_bind_rpc(w->a_datadir, prior_port);
+        afd_open_leaf(&l);
+        bool ran = afd_exec("app.list", &l);
+        afd_close_leaf(&l);
+        zcl_native_bridge_bind_rpc(prior_dir, prior_port);
+        zcl_log_level_set(prior);
+        (void)fflush(stderr);
+        (void)dup2(saved, STDERR_FILENO);
+        (void)close(saved);
+        rewind(cap);
+        TEST_DISCARD(fread(text, 1, 65535, cap));
+        (void)fclose(cap);
+        ASSERT(ran);
+        ASSERT(strstr(text, "[event_log]") == NULL);
+        free(text);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_app_front_door(void);
 int test_app_front_door(void)
 {
@@ -995,6 +1052,10 @@ int test_app_front_door(void)
         failures += afd_key_note_after_confirm(&w);
     if (!failures)
         failures += afd_quiet_logs(&w);
+    if (!failures)
+        failures += afd_receive_missing(&w);
+    if (!failures)
+        failures += afd_list_quiet(&w);
     printf("app front door journey: A %d commands, %d hex pastes; B %d "
            "commands, %d hex pastes (baseline 45 commands, 15 JSON inputs, "
            "3 hex pastes)\n", w.commands_a, w.hex_a, w.commands_b, w.hex_b);

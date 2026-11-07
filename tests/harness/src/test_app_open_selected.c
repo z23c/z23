@@ -532,7 +532,19 @@ static int aso_refusals(const struct abc_world *w, const struct aso_build *b)
     int failures = 0;
     struct json_value doc; json_init(&doc);
     const char *wrong = "0000000000000000000000000000000000000000000000000000000000000000";
-    TEST("selected app requires explicit execution consent") {
+    TEST("app keep without a preview says it is the agent step and names app save") {
+        struct abc_leaf leaf;
+        abc_open(&leaf);
+        ASSERT(json_push_kv_str(&leaf.in, "name", "tiny-ready"));
+        ASSERT(json_push_kv_str(&leaf.in, "copy", w->copy));
+        ASSERT(json_push_kv_str(&leaf.in, "datadir", w->alice_datadir));
+        ASSERT(abc_exec("app.keep", &leaf));
+        ASSERT(!strcmp(leaf.out.error.code, "EXECUTION_CONFIRMATION_REQUIRED"));
+        ASSERT(strstr(leaf.out.error.message, "after an app open preview") != NULL);
+        ASSERT(strstr(leaf.out.error.message, "app save ") != NULL);
+        abc_close(&leaf);
+        PASS();
+    } TEST("selected app requires explicit execution consent") {
         ASSERT(aso_execute(w, b, "tiny-ready", false, NULL, NULL, &doc));
         ASSERT(!strcmp(aso_string(json_get(&doc, "error"), "code"), "EXECUTION_CONFIRMATION_REQUIRED"));
         json_free(&doc);

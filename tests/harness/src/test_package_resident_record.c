@@ -498,6 +498,25 @@ static int pr_test_named_all(struct pr_test_state *t)
     failures += pr_test_named_rollback_crash(t);
     return failures;
 }
+
+/* A group/world-writable ancestor is refused with its path, mode and fix. */
+static int pr_test_ancestor_message(void)
+{
+    int failures = 0;
+    struct pr_test_state t;
+    if (!pr_test_setup(&t)) return 1;
+    struct package_resident_store store = {0};
+    bool opened_loose = chmod(t.directory, 0777) == 0;
+    struct zcl_result r = package_resident_store_open(&store, t.directory);
+    PR_CHECK("writable ancestor refuses the open", opened_loose && !r.ok);
+    PR_CHECK("refusal names the failing path", strstr(r.message, "z23-resident-record-") != NULL);
+    PR_CHECK("refusal names the mode", strstr(r.message, "0777") != NULL);
+    PR_CHECK("refusal gives the chmod fix", strstr(r.message, "chmod go-w") != NULL);
+    char child[512];
+    (void)snprintf(child, sizeof(child), "%s/zcode", t.directory);
+    PR_CHECK("ancestor test directories removed", rmdir(child) == 0 && rmdir(t.directory) == 0);
+    return failures;
+}
 #endif
 
 int test_package_resident_record(void)
@@ -516,6 +535,7 @@ int test_package_resident_record(void)
     if (!pr_test_setup(&test)) return failures + 1;
     failures += pr_test_migration(&test);
     failures += pr_test_cleanup(&test);
+    failures += pr_test_ancestor_message();
     return failures;
 #endif
 }
