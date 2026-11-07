@@ -1729,6 +1729,12 @@ ZCL_TEST_GROUP(app_build_copy)
  * resident_launch, share by file, a friend's open of the file; owner
  * authority at MCP, plan-only without a terminal, tamper refusal. */
 ZCL_TEST_GROUP(app_front_door)
+/* app.seed: an in-repo app staged with the repo files its zcode-seed.def
+ * maps and app.mk as its Makefile; deterministic root, escape refusals,
+ * owner-only. The real game seeded, adopted, built and run 120 QA frames on
+ * a private Xvfb (host-gated on ZCL_TEST_DISPLAY_APPS). */
+ZCL_TEST_GROUP(app_seed)
+ZCL_TEST_GROUP(app_seed_skycombat)
 ZCL_TEST_GROUP(task_document)
 ZCL_TEST_GROUP(package_local)
 /* astro lane: platform/modules/astro's exact fixed-grid arithmetic and the birth chart

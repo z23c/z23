@@ -256,8 +256,14 @@ static unsigned ic_guest_host_missing(void)
            !ic_release_host_ready() + !ic_image_host_ready();
 }
 
-/* The display-app group is selected only where ZCL_TEST_DISPLAY_APPS is set
- * to a non-empty value (an ENV host need: getenv non-NULL and non-empty). */
+/* The display-app groups are selected only where ZCL_TEST_DISPLAY_APPS is
+ * set to a non-empty value (an ENV host need: getenv non-NULL and
+ * non-empty). */
+static const char *const k_ic_display_app_groups[] = {
+    "test_app_launch_skycombat",
+    "test_app_seed_skycombat",
+};
+
 static bool ic_display_apps_ready(void)
 {
     const char *set = getenv("ZCL_TEST_DISPLAY_APPS");
@@ -266,13 +272,25 @@ static bool ic_display_apps_ready(void)
 
 static unsigned ic_display_apps_missing(void)
 {
-    return !ic_display_apps_ready();
+    return ic_display_apps_ready()
+               ? 0u
+               : (unsigned)(sizeof k_ic_display_app_groups /
+                            sizeof k_ic_display_app_groups[0]);
+}
+
+static bool ic_display_app_group(const char *group)
+{
+    for (size_t i = 0; i < sizeof k_ic_display_app_groups /
+                               sizeof k_ic_display_app_groups[0]; i++)
+        if (strcmp(group, k_ic_display_app_groups[i]) == 0)
+            return true;
+    return false;
 }
 
 /* A guest-fixture group the host cannot run: its environment variable is unset. */
 static bool ic_guest_group_absent(const char *group)
 {
-    return (!ic_display_apps_ready() && strcmp(group, "test_app_launch_skycombat") == 0) ||
+    return (!ic_display_apps_ready() && ic_display_app_group(group)) ||
            (!ic_geli_host_ready() && strcmp(group, "test_rvmachine_geli_volume") == 0) ||
            (!ic_ports_host_ready() && strcmp(group, "test_rvmachine_freebsd_ports") == 0) ||
            (!ic_release_host_ready() && strcmp(group, "test_rvmachine_freebsd_release") == 0) ||
@@ -289,6 +307,7 @@ static bool ic_guest_groups_gated(const char *selector, const char *gated)
         {"test_rvmachine_freebsd_release", "test_rvmachine_freebsd_release:env:ZCL_TEST_FREEBSD_RELEASE_KERNEL", ic_release_host_ready},
         {"test_guest_image_admission", "test_guest_image_admission:env:ZCL_TEST_PUBLIC_GUEST_IMAGE_KERNEL", ic_image_host_ready},
         {"test_app_launch_skycombat", "test_app_launch_skycombat:env:ZCL_TEST_DISPLAY_APPS", ic_display_apps_ready},
+        {"test_app_seed_skycombat", "test_app_seed_skycombat:env:ZCL_TEST_DISPLAY_APPS", ic_display_apps_ready},
     };
     for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++)
         if (ic_selector_has(selector, rows[i].group) != rows[i].ready() ||

@@ -478,6 +478,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_package_resident_command.c", CAP_FS_
 ZCL_MODULE_CAPABILITY("tools/command/native_package_confined_run_command.c", CAP_FS_WRITE, "runs one accepted installed binary confined in the OS sandbox and reaps it")
 ZCL_MODULE_CAPABILITY("tools/command/native_app_build_command.c", CAP_FS_READ|CAP_FS_WRITE, "reads the copy's built image and writes it, its build record and a scratch build directory under <datadir>/app_build")
 ZCL_MODULE_CAPABILITY("tools/command/app_build_make.c", CAP_FS_READ|CAP_FS_WRITE, "runs the copy's make fragment through lab_exec (or the bounded spawn where lab_exec cannot), reads the copy's declared inputs and walks the build's depfiles")
+ZCL_MODULE_CAPABILITY("tools/command/app_seed.c", CAP_FS_READ|CAP_FS_WRITE, "reads apps/<app>, its zcode-seed.def and the checkout files it maps, and copies them into the caller's staging directory")
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/package_resident_manifest.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK, "translates a run manifest into a sandbox profile, spawns the pinned image confined and waits for exit")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_add_command.c", CAP_FS_WRITE, "parses and renders the install-lifecycle JSON only; the checked-allocation failure print is this unit's direct write reach")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_package_fork_command.c", CAP_FS_READ, "checks that a copy's version log and a fork destination exist before ZVCS opens or the checkout writes them")
