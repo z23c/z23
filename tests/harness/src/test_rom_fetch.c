@@ -2432,10 +2432,19 @@ struct rf_index_peer {
     uint16_t port;
     pthread_t thread;
     _Atomic bool stop;
-    _Atomic unsigned requests[9];
+    _Atomic unsigned requests[62];
+    _Atomic unsigned manifests;
+    _Atomic unsigned unexpected;
     const char *dir;
     const struct rom_artifact *art;
 };
+
+static bool rf_index_request_valid(const struct rf_index_peer *p,
+    const uint8_t *payload, uint32_t len, uint8_t root[32], uint32_t *index)
+{
+    return fs_parse_rom_request(payload, len, root, index) &&
+        memcmp(root, p->art->chunk_root, 32) == 0 && *index < p->art->num_chunks && *index < 62;
+}
 
 static void *rf_index_serve(void *arg)
 {
@@ -2455,12 +2464,12 @@ static void *rf_index_serve(void *arg)
             fs_recv_frame_until(&session, &type, &payload, &len, deadline) && type == FS_REQUEST) {
             if (fs_parse_rom_manifest_request(payload, len, root) &&
                 memcmp(root, p->art->chunk_root, 32) == 0) {
+                atomic_fetch_add(&p->manifests, 1);
                 uint8_t blob[ROM_SEED_MANIFEST_BLOB_MAX];
                 const uint8_t tag[32] = {0x52, 0x4d, 0x46};
                 size_t n = rom_seed_manifest_blob(p->art, blob, sizeof(blob));
                 if (n) (void)fs_send_chunk_fast(&session, blob, (uint32_t)n, tag);
-            } else if (fs_parse_rom_request(payload, len, root, &index) &&
-                       memcmp(root, p->art->chunk_root, 32) == 0 && index < 9) {
+            } else if (rf_index_request_valid(p, payload, len, root, &index)) {
                 atomic_fetch_add(&p->requests[index], 1);
                 uint8_t *data = malloc(p->art->chunk_size);
                 uint32_t n = 0;
@@ -2468,7 +2477,7 @@ static void *rf_index_serve(void *arg)
                                                 p->art->chunk_size, &n))
                     (void)fs_send_chunk_fast(&session, data, n, p->art->chunk_sha3[index]);
                 free(data);
-            }
+            } else atomic_fetch_add(&p->unexpected, 1);
         }
         fs_session_cleanup(&session);
         close(fd);
@@ -2584,7 +2593,8 @@ struct rf_crash_fixture_state {
     struct rf_crash_child child[2];
     struct rom_artifact artifact;
     struct rom_fetch_manifest manifest;
-    bool marked[9];
+    bool marked[62];
+    bool real_artifact;
     char server_dir[PATH_MAX], client_dir[PATH_MAX];
     char source[1200], part[1200], journal[1264], final[1200];
 };
@@ -2604,7 +2614,41 @@ static void rf_crash_cleanup_children(struct rf_crash_child children[2])
     }
 }
 
-static bool rf_crash_prepare(struct rf_crash_fixture_state *s)
+static bool rf_copy_artifact(const char *src, const char *dst)
+{
+    int in = open(src, O_RDONLY);
+    if (in < 0) return false;
+    int out = open(dst, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (out < 0) { close(in); return false; }
+    char buf[65536];
+    bool ok = true;
+    for (;;) {
+        ssize_t n = read(in, buf, sizeof(buf));
+        if (n == 0) break;
+        if (n < 0) { if (errno == EINTR) continue; ok = false; break; }
+        for (ssize_t off = 0; off < n;) {
+            ssize_t w = write(out, buf + off, (size_t)(n - off));
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) { ok = false; break; }
+            off += w;
+        }
+        if (!ok) break;
+    }
+    if (close(out) != 0) ok = false;
+    if (close(in) != 0) ok = false;
+    return ok;
+}
+
+static bool rf_real_artifact_valid(const struct rom_artifact *a)
+{
+    uint8_t root[32], whole[32];
+    return ParseHex("307c73a99954f493af67b91964acbd6fff32a2416d5fe9bb99c063eec9637cf3", root, sizeof(root)) == 32 &&
+        ParseHex("d8ea5864b4c5c89ce2d63c162b8291204312a49c8bd46faa4508f85ebc77f692", whole, sizeof(whole)) == 32 &&
+        a->size_bytes == 519831552 && a->chunk_size == 8u * 1024u * 1024u && a->num_chunks == 62 &&
+        !memcmp(a->chunk_root, root, 32) && !memcmp(a->whole_sha3, whole, 32);
+}
+
+static bool rf_crash_prepare(struct rf_crash_fixture_state *s, const char *real_source)
 {
     const char *name = "consensus-state-bundle-crash.sqlite";
     if (!test_mkdtemp(s->server_dir, sizeof(s->server_dir), "zcl_rom_crash_srv") ||
@@ -2613,8 +2657,11 @@ static bool rf_crash_prepare(struct rf_crash_fixture_state *s)
     snprintf(s->part, sizeof(s->part), "%s/%s%s", s->client_dir, name, ROM_FETCH_PART_SUFFIX);
     snprintf(s->journal, sizeof(s->journal), "%s.journal", s->part);
     snprintf(s->final, sizeof(s->final), "%s/%s", s->client_dir, name);
-    if (!write_sparse_bundle(s->server_dir, name, 8ull * ROM_SEED_CHUNK_SIZE + 4096) ||
+    s->real_artifact = real_source != NULL;
+    if (!(real_source ? rf_copy_artifact(real_source, s->source) :
+          write_sparse_bundle(s->server_dir, name, 8ull * ROM_SEED_CHUNK_SIZE + 4096)) ||
         rom_seed_register(s->server_dir, name, NULL, &s->artifact) != ROM_REG_OK) return false;
+    if (s->real_artifact && !rf_real_artifact_valid(&s->artifact)) return false;
     manifest_from_artifact(&s->artifact, &s->manifest);
     for (int i = 0; i < 2; i++)
         if (pipe(s->child[i].start) || pipe(s->child[i].result)) return false;
@@ -2640,7 +2687,7 @@ static bool rf_crash_interrupt(struct rf_crash_fixture_state *s)
     char signal_byte = 0;
     int status = 0;
     if (!port || write(c->start[1], &port, sizeof(port)) != sizeof(port) ||
-        !rf_crash_read(c->result[0], &signal_byte, 1, 60000) || signal_byte != 0x44 ||
+        !rf_crash_read(c->result[0], &signal_byte, 1, s->real_artifact ? 600000 : 60000) || signal_byte != 0x44 ||
         access(s->final, F_OK) == 0 || kill(c->pid, SIGKILL) ||
         rf_crash_wait(c->pid, &status) != c->pid) return false;
     c->pid = -1;
@@ -2654,10 +2701,11 @@ static bool rf_crash_read_durable(struct rf_crash_fixture_state *s)
                                             m->chunk_size, m->num_chunks);
     if (!j) return false;
     uint32_t durable = rom_journal_count_done(j);
-    for (uint32_t i = 0; i < m->num_chunks && i < 9; i++)
+    for (uint32_t i = 0; i < m->num_chunks && i < 62; i++)
         s->marked[i] = rom_journal_is_done(j, i);
     rom_journal_close(j);
-    return m->num_chunks == 9 && durable && durable < m->num_chunks &&
+    if (s->real_artifact) printf("real artifact durable chunks: %u/%u\n", durable, m->num_chunks);
+    return m->num_chunks == (s->real_artifact ? 62u : 9u) && durable && durable < m->num_chunks &&
            access(s->part, F_OK) == 0 && access(s->final, F_OK) != 0;
 }
 
@@ -2668,7 +2716,7 @@ static bool rf_crash_resume(struct rf_crash_fixture_state *s)
     char signal_byte = 0;
     int status = 0;
     if (write(c->start[1], &port, sizeof(port)) != sizeof(port) ||
-        !rf_crash_read(c->result[0], &signal_byte, 1, 60000) || signal_byte != 0x53 ||
+        !rf_crash_read(c->result[0], &signal_byte, 1, s->real_artifact ? 600000 : 60000) || signal_byte != 0x53 ||
         rf_crash_wait(c->pid, &status) != c->pid) return false;
     c->pid = -1;
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
@@ -2678,6 +2726,8 @@ static bool rf_crash_verify(const struct rf_crash_fixture_state *s)
 {
     bool ok = rom_fetch_verify_file(s->final, &s->manifest) &&
               access(s->journal, F_OK) != 0 && access(s->part, F_OK) != 0;
+    if (s->real_artifact)
+        ok = ok && atomic_load(&s->index_peer.manifests) > 0 && atomic_load(&s->index_peer.unexpected) == 0;
     for (uint32_t i = 0; i < s->manifest.num_chunks; i++)
         if (atomic_load(&s->index_peer.requests[i]) != (s->marked[i] ? 0u : 1u)) ok = false;
     return ok;
@@ -2696,7 +2746,7 @@ static void rf_crash_cleanup(struct rf_crash_fixture_state *s)
     rom_peer_scoring_test_reset();
 }
 
-static bool rf_crash_fixture(void)
+static bool rf_crash_fixture(const char *real_source)
 {
     struct rf_crash_fixture_state s = {
         .child = {
@@ -2710,7 +2760,7 @@ static bool rf_crash_fixture(void)
     rom_peer_scoring_test_reset();
     rom_seed_set_peer_bps_cap(1ull << 30);
     rom_seed_set_global_bps_cap(1ull << 30);
-    if (!rf_crash_prepare(&s)) goto out;
+    if (!rf_crash_prepare(&s, real_source)) goto out;
     bool interrupted = rf_crash_interrupt(&s);
     fs_server_stop(); /* Drain old requests before accounting. */
     if (!interrupted || !rf_crash_read_durable(&s)) goto out;
@@ -2727,7 +2777,9 @@ static int test_verified_process_crash_resume(void)
 {
     int failures = 0;
     TEST("rom_fetch: SIGKILL after a durable chunk resumes in a fresh process") {
-        ASSERT(rf_crash_fixture());
+        ASSERT(rf_crash_fixture(NULL));
+        const char *real_source = getenv("ZCL_TEST_ROM_REAL_ARTIFACT");
+        if (real_source && real_source[0]) ASSERT(rf_crash_fixture(real_source));
         PASS();
     } _test_next:;
     return failures;
