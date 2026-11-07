@@ -28,6 +28,7 @@
 #include "mcp/mcp_policy.h"
 #include "plugin/plugin_dist.h"
 #include "plugin/plugin_pack.h"
+#include "sha3/sha3.h"
 #include "vcs/package_prepare.h"
 
 #include <stdio.h>
@@ -339,6 +340,74 @@ static int asd_second_owner(const struct asd_world *w)
     return failures;
 }
 
+/* sha3 of the owner key file under home; the key bytes are never shown. */
+static bool asd_key_digest(const char *home, uint8_t out[32])
+{
+    char path[ASD_PATH];
+    uint8_t buf[256];
+    (void)snprintf(path, sizeof(path), "%s/.z23/zcode_publisher.key", home);
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    size_t n = fread(buf, 1, sizeof(buf), f);
+    (void)fclose(f);
+    if (n == 0 || n == sizeof(buf))
+        return false;
+    zcl_sha3_256(buf, n, out);
+    return true;
+}
+
+static int asd_plan_writes_nothing(const struct asd_world *w)
+{
+    int failures = 0;
+    TEST("app.seed: the plan half writes no owner key; confirm makes it "
+         "0600 and a later seed reuses the same key") {
+        char home[ASD_PATH], dd1[ASD_PATH], dd2[ASD_PATH], dot[ASD_PATH + 8];
+        char plan[65];
+        uint8_t first[32], again[32];
+        struct stat st;
+        struct asf_leaf l;
+        (void)snprintf(home, sizeof(home), "%s/owner3", w->root);
+        (void)snprintf(dd1, sizeof(dd1), "%s/datadir", home);
+        (void)snprintf(dd2, sizeof(dd2), "%s/datadir2", home);
+        (void)snprintf(dot, sizeof(dot), "%s/.z23", home);
+        ASSERT(mkdir(home, 0700) == 0 && mkdir(dd1, 0700) == 0 &&
+               mkdir(dd2, 0700) == 0 && setenv("HOME", home, 1) == 0);
+        asf_open(&l);
+        (void)json_push_kv_str(&l.in, "app", "tiny");
+        (void)json_push_kv_str(&l.in, "source", w->repo);
+        (void)json_push_kv_str(&l.in, "datadir", dd1);
+        bool planned = asf_pass("app.seed", &l);
+        bool wrote = lstat(dot, &st) == 0;
+        (void)snprintf(plan, sizeof(plan), "%s", asf_get(&l, "plan_id"));
+        bool created = asf_flag(&l, "key_created");
+        asf_close(&l);
+        ASSERT(setenv("HOME", w->home1, 1) == 0);
+        ASSERT(planned && !wrote && !created && strlen(plan) == 64);
+        ASSERT(setenv("HOME", home, 1) == 0);
+        asf_open(&l);
+        (void)json_push_kv_str(&l.in, "app", "tiny");
+        (void)json_push_kv_str(&l.in, "source", w->repo);
+        (void)json_push_kv_str(&l.in, "datadir", dd1);
+        (void)json_push_kv_str(&l.in, "plan_id", plan);
+        (void)json_push_kv_bool(&l.in, "confirm", true);
+        bool confirmed = asf_pass("app.seed", &l);
+        asf_close(&l);
+        char keyp[ASD_PATH + 32];
+        (void)snprintf(keyp, sizeof(keyp), "%s/zcode_publisher.key", dot);
+        bool mode_ok = stat(keyp, &st) == 0 && (st.st_mode & 0777) == 0600;
+        bool d1 = asd_key_digest(home, first);
+        bool seeded = asf_seed(&l, "tiny", w->repo, dd2);
+        asf_close(&l);
+        bool d2 = asd_key_digest(home, again);
+        ASSERT(setenv("HOME", w->home1, 1) == 0);
+        ASSERT(confirmed && mode_ok && d1 && seeded && d2);
+        ASSERT(memcmp(first, again, sizeof(first)) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int asd_copy_builds(const struct asd_world *w)
 {
     int failures = 0;
@@ -419,6 +488,8 @@ int test_app_seed(void)
         failures += asd_seeds_and_reseeds(&w);
     if (!failures)
         failures += asd_second_owner(&w);
+    if (!failures)
+        failures += asd_plan_writes_nothing(&w);
     if (!failures)
         failures += asd_copy_builds(&w);
     if (!failures)
