@@ -317,7 +317,8 @@ static bool skycombat_file_exists(const char *path)
     return file != NULL;
 }
 
-static int skycombat_capture_refusal(const char *const args[], const char *path, const char *label)
+static int skycombat_capture_refusal(const char *const args[], const char *path,
+                                    const char *needle, const char *label)
 {
     int failures = 0;
     char output[2048] = {0}, diagnostics[513] = {0};
@@ -325,7 +326,7 @@ static int skycombat_capture_refusal(const char *const args[], const char *path,
         int rc = skycombat_agent_capture(args, output, sizeof(output), diagnostics);
         ASSERT(rc != 0);
         ASSERT(!skycombat_file_exists(path));
-        ASSERT(strstr(diagnostics, "--capture") != NULL);
+        ASSERT(strstr(diagnostics, needle) != NULL);
         PASS();
     }
 _test_next:;
@@ -358,10 +359,20 @@ static int skycombat_capture_file(void)
         PASS();
     }
 _test_next:;
-    char missing[PATH_MAX + 32], missing_flag[PATH_MAX + 48];
-    snprintf(missing, sizeof(missing), "%s/no-such-dir/p.png", dir);
-    snprintf(missing_flag, sizeof(missing_flag), "--capture=%s", missing);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int skycombat_capture_write_failures(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX], path[PATH_MAX + 16], flag[PATH_MAX + 32], missing_flag[PATH_MAX + 48];
+    test_make_tmpdir(dir, sizeof(dir), "skycapture", "c");
+    snprintf(path, sizeof(path), "%s/p.png", dir);
+    snprintf(flag, sizeof(flag), "--capture=%s", path);
+    snprintf(missing_flag, sizeof(missing_flag), "--capture=%s/no-such-dir/p.png", dir);
     const char *unwritable[] = {QA_ENTRY, "--fixture-capture-ok", "--qa-frames=1", missing_flag, NULL};
+    char output[2048] = {0}, diagnostics[513] = {0};
     TEST("capture: an unwritable PATH fails with a message that names it") {
         int rc = skycombat_agent_capture(unwritable, output, sizeof(output), diagnostics);
         ASSERT(rc != 0);
@@ -370,9 +381,8 @@ _test_next:;
     }
 _test_next:;
     const char *no_readback[] = {QA_ENTRY, "--qa-frames=1", flag, NULL};
-    (void)remove(path);
-    failures += skycombat_capture_refusal(no_readback, path,
-        "capture: a failed readback exits nonzero and leaves no file");
+    failures += skycombat_capture_refusal(no_readback, path, path,
+        "capture: a failed readback exits nonzero, names PATH and leaves no file");
     test_cleanup_tmpdir(dir);
     return failures;
 }
@@ -389,13 +399,13 @@ static int skycombat_capture_usage(void)
         "--fixture-agent={\"v\":1,\"id\":1,\"op\":\"close\"}\n", "--agent-stdio", flag, NULL};
     const char *empty[] = {QA_ENTRY, "--fixture-capture-ok", "--qa-frames=1", "--capture=", NULL};
     const char *twice[] = {QA_ENTRY, "--fixture-capture-ok", "--qa-frames=1", flag, flag, NULL};
-    failures += skycombat_capture_refusal(alone, path,
+    failures += skycombat_capture_refusal(alone, path, "--capture",
         "capture: --capture without --qa-frames is refused and writes no file");
-    failures += skycombat_capture_refusal(agent, path,
+    failures += skycombat_capture_refusal(agent, path, "--capture",
         "capture: --capture with --agent-stdio is refused and writes no file");
-    failures += skycombat_capture_refusal(empty, path,
+    failures += skycombat_capture_refusal(empty, path, "--capture",
         "capture: an empty PATH is refused");
-    failures += skycombat_capture_refusal(twice, path,
+    failures += skycombat_capture_refusal(twice, path, "--capture",
         "capture: a repeated --capture is refused and writes no file");
     test_cleanup_tmpdir(dir);
     return failures;
@@ -890,6 +900,7 @@ _test_next:;
     failures += skycombat_qa_launch("--qa-frames=1", "--fixture-window-fails", 0, 1, 1);
     failures += skycombat_capture_file();
     failures += skycombat_capture_usage();
+    failures += skycombat_capture_write_failures();
     failures += skycombat_agent_session();
     failures += skycombat_agent_refusals();
     failures += skycombat_agent_resize_failure();
