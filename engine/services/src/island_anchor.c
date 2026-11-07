@@ -479,11 +479,12 @@ struct zcl_result island_anchor_hold_recorded(struct sqlite3 *db, bool *held)
                        "output");
     *held = false;
     if (!db)
-        return ZCL_OK;   /* no progress store holds no hold (as state NONE) */
-    if (!progress_meta_get(db, IA_HOLD_KEY, buf, sizeof(buf), &len, &have))
+        return ZCL_ERR(ISLAND_ANCHOR_ERR_UNREADABLE, "FlySync hold count not read: no progress store");
+    if (!progress_meta_get_blob_exact(db, IA_HOLD_KEY, buf, sizeof(buf), &len, &have) ||
+        (have && len != sizeof(buf)))
         return ZCL_ERR(ISLAND_ANCHOR_ERR_UNREADABLE, "FlySync hold count not "
-                       "read: progress_meta read failed");
-    *held = have && len == sizeof(buf);
+                       "read: malformed or unreadable progress_meta");
+    *held = have;
     return ZCL_OK;
 }
 

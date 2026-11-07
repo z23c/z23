@@ -437,7 +437,7 @@ test-setup:
 
 WALLET_SEND_INCLUDES := -I. -I../../platform/modules/json/include -I../../platform/modules/base/include \
   -I../../contexts/commons/packages/zutf8/include \
-  -I../../contexts/wallet/controllers/include -I../../platform/modules/util/include -I../../platform/modules/sha3/include
+  -I../../contexts/wallet/controllers/include -I../../platform/modules/util/include -I../../platform/modules/sha3/include -I../../platform/domain/encoding/include
 WALLET_SEND_SOURCES := wallet_send.c payment_code.c ../../contexts/commons/packages/zutf8/src/zutf8.c
 SEND_KEY_SOURCES := send_key.c ../../platform/modules/sha3/src/sha3.c
 # The send flow: the state machine with its random event sequences, then the screen over fake node, device
@@ -447,24 +447,24 @@ test-wallet-send:
 	$(HOST_CC) $(HOST_WARNINGS) $(WALLET_SEND_INCLUDES) tests/wallet_send_test.c $(WALLET_SEND_SOURCES) \
 	  -o '$(BUILD_DIR)/wallet-send-test'
 	'$(BUILD_DIR)/wallet-send-test'
-	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_send_screen_test.c wallet_send_screen.c wallet_send_keeper.c wallet_screens.c \
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_send_screen_test.c wallet_send_screen.c wallet_send_keeper.c wallet_screens.c ../../platform/domain/encoding/src/bech32.c \
 	  secure_window.c wallet_view.c $(SEND_KEY_SOURCES) $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-send-screen-test'
 	'$(BUILD_DIR)/wallet-send-screen-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(WALLET_SEND_INCLUDES) tests/send_key_test.c $(SEND_KEY_SOURCES) payment_code.c \
 	  ../../contexts/commons/packages/zutf8/src/zutf8.c $(SPEECH_JSON) -o '$(BUILD_DIR)/send-key-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/send-key-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/send-key-test' "$$(cd "$$scratch" && pwd)"
-	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_send_node_test.c wallet_send_node.c wallet_send_screen.c wallet_screens.c \
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_send_node_test.c wallet_send_node.c wallet_send_screen.c wallet_screens.c ../../platform/domain/encoding/src/bech32.c \
 	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-send-node-test'
 	'$(BUILD_DIR)/wallet-send-node-test'
-	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_sweep_test.c wallet_sweep.c wallet_send_node.c wallet_send_screen.c wallet_screens.c \
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_sweep_test.c wallet_sweep.c wallet_send_node.c wallet_send_screen.c wallet_screens.c ../../platform/domain/encoding/src/bech32.c \
 	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-sweep-test'
 	'$(BUILD_DIR)/wallet-sweep-test'
-	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_send_device_test.c wallet_send_device.c device_key.c wallet_send_screen.c wallet_screens.c \
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_send_device_test.c wallet_send_device.c device_key.c wallet_send_screen.c wallet_screens.c ../../platform/domain/encoding/src/bech32.c \
 	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-send-device-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/wallet-send-device.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/wallet-send-device-test' "$$(cd "$$scratch" && pwd)"
-	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_reveal_test.c wallet_reveal.c wallet_send_screen.c wallet_screens.c \
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_reveal_test.c wallet_reveal.c wallet_send_screen.c wallet_screens.c ../../platform/domain/encoding/src/bech32.c \
 	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-reveal-test'
 	'$(BUILD_DIR)/wallet-reveal-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/pay_stash_test.c pay_stash.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c bridge_auth.c ../../platform/modules/sha3/src/sha3.c voice.c \

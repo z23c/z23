@@ -52,6 +52,7 @@
 #define FSI_SUBSYS "flysync"
 
 static _Atomic bool g_requested = false;
+static _Atomic bool g_auto = false;
 static _Atomic int g_phase = FLYSYNC_OFF;
 /* The tick runs from two swarm call sites; g_tick_busy admits one at a time. */
 static _Atomic int64_t g_phase_since_ms;
@@ -95,6 +96,7 @@ static void fsi_set_phase(enum flysync_phase p)
                  flysync_phase_name(p));
 }
 
+void flysync_island_set_auto(bool on) { atomic_store(&g_auto, on); }
 void flysync_island_set_requested(bool on) { atomic_store(&g_requested, on); }
 bool flysync_island_requested(void) { return atomic_load(&g_requested); }
 enum flysync_phase flysync_island_phase(void)
@@ -695,7 +697,7 @@ bool flysync_island_boot_gate(const char *datadir, struct main_state *ms,
                                                           : FLYSYNC_SEEDED);
         return true;
     }
-    if (!atomic_load(&g_requested))
+    if (!atomic_load(&g_requested) && !atomic_load(&g_auto))
         return true;
     if (st == ISLAND_ANCHOR_STATE_FELL_BACK) {
         LOG_WARN(FSI_SUBSYS, "-flysync: this datadir fell back to normal sync "
@@ -726,6 +728,11 @@ static bool fsi_gate_fresh(sqlite3 *db, struct main_state *ms, char *why,
                  "with normal sync");
         fsi_note_fallback("chain state admitted below the rung while waiting");
         fsi_set_phase(FLYSYNC_FELL_BACK);
+        return true;
+    }
+    if (fsi_datadir_has_chain_state(ms) && atomic_load(&g_auto) &&
+        !atomic_load(&g_requested)) {
+        LOG_INFO(FSI_SUBSYS, "-flysync-auto: existing chain continues normal sync");
         return true;
     }
     if (fsi_datadir_has_chain_state(ms)) {
@@ -1355,6 +1362,7 @@ void flysync_island_test_set_frozen_verifier(flysync_frozen_verify_fn fn)
 void flysync_island_test_reset(void)
 {
     atomic_store(&g_requested, false);
+    atomic_store(&g_auto, false);
     atomic_store(&g_phase, FLYSYNC_OFF);
     atomic_store(&g_test_verify, NULL);
     atomic_store(&g_test_now_ms, -1);

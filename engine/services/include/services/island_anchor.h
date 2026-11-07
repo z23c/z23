@@ -149,7 +149,7 @@ struct zcl_result island_anchor_note_installed(struct sqlite3 *db);
  * "flysync.hold_boots") and return the new total. A crash loop cannot reset
  * it, and time the process is not running never counts.
  * hold_recorded() reads only: *held true once FlySync ever held this datadir
- * (ISLAND_ANCHOR_ERR_UNREADABLE when the read fails). */
+ * (ISLAND_ANCHOR_ERR_UNREADABLE when the read fails or the record is malformed). */
 struct zcl_result island_anchor_hold_recorded(struct sqlite3 *db, bool *held);
 struct zcl_result island_anchor_hold_boot(struct sqlite3 *db, uint64_t *boots);
 

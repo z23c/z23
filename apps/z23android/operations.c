@@ -337,9 +337,9 @@ static int spawn_node(struct zapp_runtime *r)
     int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
     /* Tor only: the node dials onion peers, resolves no DNS seed and never falls back to clearnet. */
     char params[1200], roster[ZAPP_PRIVATE_PEERS_MAX * (ZAPP_ONION_PEER_MAX + 1) + 1];
-    char *argv[8 + ZAPP_PRIVATE_ARGV_MAX + ZAPP_PRIVATE_PEERS_MAX + 1] = {
-        r->executable, data, "-operator-lane=canonical", "-tor", "-onion-persist"};
-    size_t argc = 5;
+    char *argv[11 + ZAPP_PRIVATE_ARGV_MAX + ZAPP_PRIVATE_PEERS_MAX + 1] = {
+        r->executable, data, "-operator-lane=canonical", "-tor", "-onion-persist", "-flysync-auto", "-nolegacyimport", "-nolegacyutxoimport"};
+    size_t argc = 8;
     struct zapp_private_args private_mode;
     if (zapp_params_arg(r->files, params, sizeof(params))) argv[argc++] = params;
     argv[argc++] = "-private-listeners";

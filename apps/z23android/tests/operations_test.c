@@ -121,8 +121,9 @@ static int node_arguments(int argc, char **argv)
     const char *want = getenv("ZAPP_TEST_PARAMS_ARG");
     bool with_params = want && strcmp(want, "none") != 0;
     if (strcmp(argv[2], "-operator-lane=canonical") || strcmp(argv[3], "-tor") ||
-        strcmp(argv[4], "-onion-persist")) return 4;
-    int next = 5, first = with_params ? 9 : 8;
+        strcmp(argv[4], "-onion-persist") || strcmp(argv[5], "-flysync-auto") || strcmp(argv[6], "-nolegacyimport") ||
+        strcmp(argv[7], "-nolegacyutxoimport")) return 4;
+    int next = 8, first = with_params ? 12 : 11;
     if (with_params && strcmp(argv[next++], want) != 0) return 7;
     if (strcmp(argv[next++], "-private-listeners") || strcmp(argv[next++], "-observation=0")) return 5;
     if (strcmp(argv[next++], "-walletbackup=0")) return 10;
@@ -251,7 +252,7 @@ static int preload_child(int argc, char **argv)
 }
 static int basic_child(int argc, char **argv)
 {
-    if ((argc >= 10 && argc <= 12) && !strncmp(argv[1], "-datadir=", 9)) {
+    if ((argc >= 13 && argc <= 15) && !strncmp(argv[1], "-datadir=", 9)) {
         int bad = node_arguments(argc, argv);
         if (bad) return bad;
         puts("full node arguments accepted");
@@ -581,6 +582,10 @@ static void console_after(const char *directory)
 static void node_cases(struct zapp_runtime *r, const char *self, const char *directory)
 {
     char out[128];
+    char params[1200];
+    assert(snprintf(r->files, sizeof(r->files), "%s", directory) > 0);
+    assert(snprintf(params, sizeof(params), "-paramsdir=%s/params", directory) > 0);
+    assert(setenv("ZAPP_TEST_PARAMS_ARG", params, 1) == 0);
     assert(snprintf(r->directory, sizeof(r->directory), "%s", directory) > 0);
     assert(snprintf(r->state_root, sizeof(r->state_root), "%s/missing", directory) > 0);
     assert(setenv("ZAPP_TEST_STATE", r->state_root, 1) == 0);

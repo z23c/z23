@@ -449,7 +449,7 @@ static void dark_by_default(void)
 #define MARKER_ADDRESS "zs1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpq"
 #define MARKER_TXID "9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a"
 #define MARKER_SUMMARY \
-    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"spendable_zat\":123456789,\"spendable\":\"1.23456789\"," \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"wallet_readiness\":\"ready\",\"balance_available\":true,\"spendable_zat\":123456789,\"spendable\":\"1.23456789\"," \
     "\"pending_zat\":50000000,\"pending\":\"0.50000000\",\"pending_notes\":2,\"pending_min_confirmations_needed\":7," \
     "\"sending_zat\":0,\"sending\":\"0.00000000\",\"public_zat\":10000000,\"public\":\"0.10000000\",\"immature_zat\":0," \
     "\"immature\":\"0.00000000\",\"tip_height\":3000000,\"header_height\":3000000,\"scanned_through_height\":3000000," \

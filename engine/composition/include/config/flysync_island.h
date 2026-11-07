@@ -74,7 +74,8 @@ enum flysync_phase {
 
 const char *flysync_phase_name(enum flysync_phase p);
 
-/* -flysync. Set once from argv before boot. */
+/* Set before boot; auto leaves existing non-island chain state unchanged. */
+void flysync_island_set_auto(bool on);
 void flysync_island_set_requested(bool on);
 bool flysync_island_requested(void);
 enum flysync_phase flysync_island_phase(void);

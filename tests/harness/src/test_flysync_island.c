@@ -19,6 +19,7 @@
 #include "config/consensus_state_install_runtime.h"
 #include "config/flysync_island.h"
 #include "config/boot.h"
+#include "config/args.h"
 #include "config/boot_blkidx_ladder.h"
 #include "models/database.h"
 #include "jobs/block_header_emit.h"
@@ -592,12 +593,14 @@ static int fsi_case_ladder_restart(struct fsi_node *n)
               flysync_island_boot_rehydrate(&restarted) && restarted.map_block_index.size == before);
     struct app_context ctx = {0};
     ctx.datadir = n->dir;
+    ctx.no_legacy_auto_import = true;
+    ctx.no_legacy_utxo_import = true;
     struct node_db db = {0};
     struct boot_blkidx_load_ctx load = {
         .ctx = &ctx, .st = &restarted, .ndb = &db, .params = chain_params_get()
     };
     boot_blkidx_run_ladder(&load);
-    FSI_CHECK("real recovery ladder retains post-rung header",
+    FSI_CHECK("own recovery ladder retains post-rung header with legacy imports disabled",
               block_map_find(&restarted.map_block_index, &post_hash) != NULL);
     FSI_CHECK("verified window materializes after ladder", flysync_island_boot_materialize(&restarted));
     struct block_index *post = block_map_find(&restarted.map_block_index, &post_hash);
@@ -836,6 +839,10 @@ static int fsi_case_installed(void)
               flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
               flysync_island_phase() == FLYSYNC_SEEDED &&
               island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_SEEDED);
+    flysync_island_set_auto(true);
+    FSI_CHECK("-flysync-auto preserves a seeded island",
+              flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
+              flysync_island_phase() == FLYSYNC_SEEDED);
     FSI_CHECK("the rung bundle marker makes the island INSTALLED, durably",
               boot_consensus_bundle_marker_write(n.dir, FSI_RUNG_H, digest) &&
               flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
@@ -1133,10 +1140,17 @@ static int fsi_case_offer_filter(void)
     state_offer_store_reset();
     flysync_island_test_reset();
     flysync_island_set_requested(true);
-    struct main_state ms;
-    main_state_init(&ms);
+    struct fsi_node n;
+    if (!fsi_node_open(&n, "flysync_offer_filter")) {
+        FSI_CHECK("offer filter fixture opens", false);
+        fsi_node_close(&n);
+        state_offer_store_reset();
+        return failures;
+    }
+    flysync_island_set_requested(true);
     char why[160];
-    (void)flysync_island_boot_gate(NULL, &ms, why, sizeof(why));
+    FSI_CHECK("offer filter fixture starts FlySync",
+              flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)));
     state_offer_store_set_height_filter(flysync_island_wants_offer_height);
     (void)state_offer_store_record(&o, ip, 18034, 3, 1000);
     FSI_CHECK("FlySync waiting: the keystone offer is not chosen",
@@ -1150,11 +1164,30 @@ static int fsi_case_offer_filter(void)
               flysync_island_wants_offer_height(ks ? ks->height : 1));
     state_offer_store_set_height_filter(NULL);
     state_offer_store_reset();
-    main_state_free(&ms);
+    fsi_node_close(&n);
     return failures;
 }
 
 /* ── Boot gate and fall-back ─────────────────────────────────────────────── */
+
+static int fsi_case_auto_fresh(struct fsi_node *n)
+{
+    int failures = 0;
+    char why[320] = {0};
+    struct app_context parsed = {0};
+    bool metrics = false;
+    char *auto_argv[] = { (char *)"z23", (char *)"-flysync-auto",
+        (char *)"-nolegacyimport", (char *)"-nolegacyutxoimport", NULL };
+    FSI_CHECK("Android auto arguments parse with imports disabled",
+              args_parse_node_options(4, auto_argv, &parsed, &metrics) == -1 &&
+              parsed.no_legacy_auto_import && parsed.no_legacy_utxo_import);
+    FSI_CHECK("-flysync-auto on an empty datadir starts the wait",
+              flysync_island_boot_gate(n->dir, &n->ms, why, sizeof(why)) &&
+              flysync_island_phase() == FLYSYNC_WAIT &&
+              flysync_island_holds_header_sync());
+    flysync_island_test_reset();
+    return failures;
+}
 
 static int fsi_case_boot_gate(void)
 {
@@ -1167,6 +1200,7 @@ static int fsi_case_boot_gate(void)
               flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
               flysync_island_phase() == FLYSYNC_OFF &&
               !flysync_island_holds_header_sync());
+    failures += fsi_case_auto_fresh(&n);
     flysync_island_set_requested(true);
     FSI_CHECK("-flysync on an empty datadir starts the wait",
               flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
@@ -1210,6 +1244,16 @@ static int fsi_case_boot_gate(void)
               !flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
               strstr(why, "no chain state") != NULL &&
               flysync_island_phase() == FLYSYNC_OFF);
+    flysync_island_test_reset();
+    flysync_island_set_auto(true);
+    FSI_CHECK("-flysync-auto preserves an existing non-island chain",
+              flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
+              flysync_island_phase() == FLYSYNC_OFF &&
+              !flysync_island_holds_header_sync());
+    flysync_island_set_requested(true);
+    FSI_CHECK("explicit -flysync overrides auto on an existing chain",
+              !flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
+              strstr(why, "no chain state") != NULL);
     fsi_node_close(&n);
     return failures;
 }

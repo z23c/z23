@@ -147,6 +147,7 @@ void print_usage_all(const char *prog)
     printf("  -legacyoracle=off|auto  Co-located legacy oracle policy (default: auto)\n");
     printf("  -nolegacyimport     Do not auto-read/link ~/.zclassic during boot\n");
     printf("  -flysync            New empty datadir: install a rung bundle, sync only above it\n");
+    printf("  -flysync-auto       Use FlySync on an empty datadir, otherwise normal sync\n");
     printf("  -packagehost=0|1    Host ZCODE package content from <datadir>/zcode\n");
     printf("                      (default 0, hosting off; local store only)\n");
     printf("  -noisetransport        Enable authenticated Noise XX peer transport\n");
@@ -1106,6 +1107,7 @@ static int args_arm_hotswap_wallet(const char *arg,
     }
     else if (strcmp(arg, "-nolegacyimport") == 0) ctx->no_legacy_auto_import = true;
     else if (strcmp(arg, "-nolegacyutxoimport") == 0) ctx->no_legacy_utxo_import = true;
+    else if (strcmp(arg, "-flysync-auto") == 0) flysync_island_set_auto(true);
     else if (strcmp(arg, "-flysync") == 0) {
         /* FlySync island start (config/flysync_island.h): never read ~/.zclassic. */
         flysync_island_set_requested(true);

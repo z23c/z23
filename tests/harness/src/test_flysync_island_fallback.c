@@ -465,6 +465,11 @@ static int fsi_case_state_unreadable(void)
     FSI_CHECK("unreadable state: -flysync refuses to decide this start",
               !flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
               strstr(why, "unreadable") != NULL);
+    flysync_island_test_reset();
+    flysync_island_set_auto(true);
+    FSI_CHECK("unreadable state: -flysync-auto refuses to decide this start",
+              !flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)) &&
+              strstr(why, "unreadable") != NULL);
     FSI_CHECK("unreadable state: the durable fall-back is refused",
               !island_anchor_note_fallback(db, "test").ok &&
               island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_UNREADABLE);
@@ -474,6 +479,37 @@ static int fsi_case_state_unreadable(void)
     FSI_CHECK("unreadable state without fact or flag refuses startup",
               progress_meta_delete(db, "flysync.island_anchor.v1") &&
               !flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)));
+    fsi_release_globals();
+    fsi_node_close(&n);
+    return failures;
+}
+
+static int fsi_case_hold_record(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    if (!fsi_node_open(&n, "flysync_hold_record")) {
+        FSI_CHECK("hold fixture opens", false);
+        fsi_node_close(&n);
+        return failures;
+    }
+    FSI_CHECK("hold fixture opens", true);
+    sqlite3 *db = progress_store_db();
+    bool held = true;
+    FSI_CHECK("absent hold is not held", island_anchor_hold_recorded(db, &held).ok && !held);
+    uint8_t valid[8] = {1}, bad[2] = {1, 2};
+    FSI_CHECK("valid hold remains held", progress_meta_set(db, "flysync.hold_boots", valid, sizeof(valid)) &&
+              island_anchor_hold_recorded(db, &held).ok && held);
+    FSI_CHECK("malformed hold is unreadable", progress_meta_set(db, "flysync.hold_boots", bad, sizeof(bad)) &&
+              !island_anchor_hold_recorded(db, &held).ok);
+    flysync_island_set_auto(true);
+    char why[320] = {0};
+    FSI_CHECK("auto refuses malformed hold", !flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)));
+    FSI_CHECK("text hold is unreadable",
+              sqlite3_exec(db, "UPDATE progress_meta SET value='12345678' WHERE key='flysync.hold_boots'",
+                           NULL, NULL, NULL) == SQLITE_OK &&
+              !island_anchor_hold_recorded(db, &held).ok);
+    FSI_CHECK("missing progress store is unreadable", !island_anchor_hold_recorded(NULL, &held).ok);
     fsi_release_globals();
     fsi_node_close(&n);
     return failures;
@@ -492,6 +528,7 @@ int fsi_fallback_cases(struct fsi_node *n)
 int fsi_state_cases(void)
 {
     int failures = 0;
+    failures += fsi_case_hold_record();
     failures += fsi_case_relinked_stale();
     failures += fsi_case_listonly();
     failures += fsi_case_state_fresh();
