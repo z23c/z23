@@ -59,8 +59,8 @@ bool asf_pass(const char *path, struct asf_leaf *l)
     if (!asf_exec(path, l))
         return false;
     if (l->out.status != ZCL_COMMAND_STATUS_PASSED)
-        printf("  [%s refused %s: %s]\n", path, l->out.error.code,
-               l->out.error.message);
+        printf("  [%s refused %s: %s (%s)]\n", path, l->out.error.code,
+               l->out.error.message, l->out.error.evidence);
     return l->out.status == ZCL_COMMAND_STATUS_PASSED;
 }
 

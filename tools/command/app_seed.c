@@ -8,6 +8,7 @@
 
 #include "util/file_io.h"
 #include "util/file_tree_ops.h"
+#include "util/path_util.h"
 #include "vcs/package_manifest.h"
 
 #include <dirent.h>
@@ -35,12 +36,6 @@ static bool as_fail(struct app_seed_stage *o, const char *code,
     (void)vsnprintf(o->why, sizeof(o->why), fmt, ap);
     va_end(ap);
     return false;
-}
-
-static bool as_join(char *out, size_t cap, const char *a, const char *b)
-{
-    int n = snprintf(out, cap, "%s/%s", a, b);
-    return n > 0 && (size_t)n < cap;
 }
 
 bool app_seed_name_valid(const char *app)
@@ -80,8 +75,9 @@ static bool as_copy_entry(struct as_ctx *c, const char *name)
     if (!vcs_package_path_valid(name))
         return as_fail(c->out, "SEED_PATH_ESCAPE", "apps file '%s' is not a "
                        "canonical package path", name);
-    if (!as_join(src, sizeof(src), c->app_dir, name) ||
-        !as_join(dst, sizeof(dst), c->dest, name) || lstat(src, &st) != 0)
+    if (!zcl_path_join(src, sizeof(src), c->app_dir, name) ||
+        !zcl_path_join(dst, sizeof(dst), c->dest, name) ||
+        lstat(src, &st) != 0)
         return as_fail(c->out, "SEED_IO", "cannot read %s/%s", c->app_dir,
                        name);
     if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))
@@ -115,11 +111,11 @@ static bool as_copy_fragment(struct as_ctx *c)
 {
     char src[AS_PATH], dst[AS_PATH];
     struct stat st;
-    if (!as_join(src, sizeof(src), c->app_dir, APP_SEED_FRAGMENT) ||
+    if (!zcl_path_join(src, sizeof(src), c->app_dir, APP_SEED_FRAGMENT) ||
         lstat(src, &st) != 0 || !S_ISREG(st.st_mode))
         return as_fail(c->out, "NO_MAKE_FRAGMENT", "%s is not a regular file "
                        "with the print-app-closure and app targets", src);
-    if (!as_join(dst, sizeof(dst), c->dest, APP_SEED_MAKEFILE) ||
+    if (!zcl_path_join(dst, sizeof(dst), c->dest, APP_SEED_MAKEFILE) ||
         lstat(dst, &st) == 0)
         return as_fail(c->out, "SEED_COLLISION", "the app already carries a "
                        "Makefile; its make fragment is app.mk");
@@ -137,8 +133,8 @@ static bool as_repo_file(struct as_ctx *c, const char *rel, char *abs,
 {
     char walk[AS_PATH];
     struct stat st;
-    if (!as_join(abs, cap, c->repo, rel) ||
-        !as_join(walk, sizeof(walk), c->repo, rel))
+    if (!zcl_path_join(abs, cap, c->repo, rel) ||
+        !zcl_path_join(walk, sizeof(walk), c->repo, rel))
         return as_fail(c->out, "SEED_IO", "path too long: %s", rel);
     char *sep = walk + strlen(c->repo) + 1u;
     while ((sep = strchr(sep, '/')) != NULL) {
@@ -176,7 +172,8 @@ static bool as_copy_mapped(struct as_ctx *c, const char *rel,
                        "the checkout and the tree", rel, tree);
     if (!as_repo_file(c, rel, src, sizeof(src)))
         return false;
-    if (!as_join(dst, sizeof(dst), c->dest, tree) || lstat(dst, &st) == 0)
+    if (!zcl_path_join(dst, sizeof(dst), c->dest, tree) ||
+        lstat(dst, &st) == 0)
         return as_fail(c->out, "SEED_COLLISION", "zcode-seed.def maps '%s' "
                        "onto '%s', which the tree already holds", rel, tree);
     (void)snprintf(parent, sizeof(parent), "%s", dst);
@@ -217,7 +214,7 @@ static bool as_copy_def(struct as_ctx *c)
     struct stat st;
     char *text = NULL;
     size_t len = 0;
-    if (!as_join(path, sizeof(path), c->app_dir, APP_SEED_DEF))
+    if (!zcl_path_join(path, sizeof(path), c->app_dir, APP_SEED_DEF))
         return as_fail(c->out, "SEED_IO", "path too long: %s", c->app_dir);
     if (lstat(path, &st) != 0)
         return true; /* an app with no host files */
@@ -244,8 +241,8 @@ static bool as_locate(struct as_ctx *c, const char *app)
 {
     char apps[AS_PATH];
     struct stat st;
-    if (!as_join(apps, sizeof(apps), c->repo, "apps") ||
-        !as_join(c->app_dir, sizeof(c->app_dir), apps, app))
+    if (!zcl_path_join(apps, sizeof(apps), c->repo, "apps") ||
+        !zcl_path_join(c->app_dir, sizeof(c->app_dir), apps, app))
         return as_fail(c->out, "SEED_IO", "path too long: %s", c->repo);
     if (lstat(apps, &st) != 0 || !S_ISDIR(st.st_mode) ||
         lstat(c->app_dir, &st) != 0 || !S_ISDIR(st.st_mode))

@@ -43,11 +43,13 @@ Z23RAYLIB_CPPFLAGS := -DPLATFORM_DESKTOP_RGFW -DGRAPHICS_API_OPENGL_33 \
 Z23RAYLIB_CFLAGS := -std=c23 -O2 -Wall -Wextra $(REPRO_CFLAGS) \
 	$(Z23RAYLIB_CPPFLAGS)
 
+# suppression-ok: the repo game section's ZCL_WARN_STRINGOP_OVERFLOW, kept identical so a copy compiles exactly what make game compiles
+SKYCOMBAT_STRINGOP := -Wno-stringop-overflow
 SKYCOMBAT_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	$(REPRO_CFLAGS) -Wundef -Wstrict-prototypes -Wduplicated-cond \
 	-Wduplicated-branches -Wshift-overflow=2 -Wattribute-alias=2 -Walloca \
 	-Wvla -Wtrampolines -Wflex-array-member-not-at-end \
-	-Wno-stringop-overflow -D_POSIX_C_SOURCE=200809L \
+	$(SKYCOMBAT_STRINGOP) -D_POSIX_C_SOURCE=200809L \
 	-DRAYMATH_USE_SIMD_INTRINSICS=0 $(Z23RAYLIB_CPPFLAGS) \
 	-Iinclude -Ispecifications -Imodules/compile_time_gdb_proof/include \
 	-Iplatform/modules/base/include -Iplatform/modules/platform/include \

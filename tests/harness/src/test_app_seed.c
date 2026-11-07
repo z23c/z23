@@ -61,8 +61,10 @@ static const char k_app_mk[] =
     "-o $(APP_OUT)/main.o\n"
     "\tcc -o $(APP_OUT)/app $(APP_OUT)/main.o\n";
 
+/* "../include/boost.h" lands in the depfile as src/../include/boost.h,
+ * the spelling raylib's platform layer uses ("../external/RGFW/RGFW.h"). */
 static const char k_main[] =
-    "#include \"boost.h\"\n#include \"shared/extra.h\"\n"
+    "#include \"../include/boost.h\"\n#include \"shared/extra.h\"\n"
     "int main(void) { return BOOST + EXTRA - 2; }\n";
 
 static bool asd_mkdirs(const char *base, const char *const *rels, size_t n)
