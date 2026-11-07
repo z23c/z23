@@ -12,6 +12,9 @@
 #include "platform/private_directory.h"
 #include "platform/file_metadata.h"
 #include <signal.h>
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
 
 /* Reset the process-global singletons that leak across groups in the
  * single-process monolith (test_zcl); the forked runner starts clean. Call at
@@ -144,6 +147,15 @@ int test_rm_rf_recursive(const char *path)
         return test_cleanup_error(normalized, EACCES);
     if (shape != PLATFORM_FILE_SHAPE_OTHER)
         return test_cleanup_unlink(normalized);
+#if !defined(_WIN32)
+    /* A product-made directory can be non-writable (lib/gens/gen-*); entries
+     * cannot be unlinked inside it. Give the owner rwx on this directory only.
+     * The path is a real directory here (symlinks were unlinked above). */
+    struct stat dst;
+    if (lstat(normalized, &dst) == 0 && S_ISDIR(dst.st_mode) &&
+        (dst.st_mode & S_IRWXU) != S_IRWXU)
+        (void)chmod(normalized, (dst.st_mode & 07777) | S_IRWXU);
+#endif
     DIR *d = opendir(normalized);
     if (!d) {
         if (errno == ENOTDIR) return test_cleanup_unlink(normalized);
