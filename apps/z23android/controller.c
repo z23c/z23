@@ -310,6 +310,7 @@ static void observe_node(struct controller *c)
     free(output);
     bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
     bool wanted = zapp_node_wanted(&c->runtime);
+    bool installing = zapp_node_installing(&c->runtime);
     bool onion, serving;
     read_node_files(c, n.responding, &onion, &serving);
     char status[1024], line[96];
@@ -328,6 +329,7 @@ static void observe_node(struct controller *c)
     pthread_mutex_lock(&c->lock);
     c->view.node_running = n.responding;
     c->view.node_process_running = process_running;
+    c->view.node_installing = installing;
     c->view.pace = pace;
     c->view.node_wanted = wanted;
     c->view.node_stopping = stopping;

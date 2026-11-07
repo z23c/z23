@@ -101,6 +101,15 @@ make launch SDK_ROOT="$ANDROID_SDK_ROOT" ANDROID_SERIAL="$ANDROID_SERIAL"
 Run these commands from `apps/z23android`. `make install` builds the APK before
 installing it. The node stores its data in the app's private storage.
 
+### One-time state installation
+
+A private one-time complete-state install request uses `node/install-bundle.request`
+containing `install` followed by a newline and `node/install-bundle.sqlite`. Both
+must be owner-private regular files. Start consumes the request before launching
+installation. The retained `node/install-bundle.consumed` prevents another
+launch; it does not attest that installation succeeded. An interrupted or
+refused install can require recovery on the next normal start.
+
 ## Home and layouts
 
 The app can be the phone's Home. Its manifest has a second intent filter

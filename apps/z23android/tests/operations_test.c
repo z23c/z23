@@ -264,9 +264,43 @@ static int basic_child(int argc, char **argv)
     }
     return -1;
 }
+static bool install_fixed_args(int argc, char **argv, int i, bool with_params, const char *datadir)
+{
+    return argc == (with_params ? 7 : 6) && !strcmp(argv[1], datadir) &&
+        !strcmp(argv[2], "-operator-lane=canonical") && !strcmp(argv[3], "-nolegacyimport") &&
+        !strcmp(argv[4], "-nolegacyutxoimport") && i == 5;
+}
+
+static bool install_child_args(int argc, char **argv, int i)
+{
+    const char *allow = getenv("ZCL_DEPLOY_ALLOW_CANONICAL");
+    const char *params = getenv("ZAPP_TEST_PARAMS_ARG");
+    bool with_params = params && strcmp(params, "none");
+    char expected[1400], expected_data[1200];
+    const char *test_dir = getenv("ZAPP_TEST_STATE");
+    if (!test_dir || snprintf(expected_data, sizeof(expected_data), "-datadir=%s", test_dir) >= (int)sizeof(expected_data)) return false;
+    if (!install_fixed_args(argc, argv, i, with_params, expected_data)) return false;
+    return snprintf(expected, sizeof(expected), "-install-consensus-bundle=%s/install-bundle.sqlite", argv[1] + 9) < (int)sizeof(expected) &&
+        !strcmp(argv[5], expected) && (!with_params || !strcmp(argv[6], params)) && allow && !strcmp(allow, "1");
+}
+static int install_child(int argc, char **argv)
+{
+    for (int i = 1; i < argc; ++i) {
+        if (strncmp(argv[i], "-install-consensus-bundle=", 26)) continue;
+        if (!install_child_args(argc, argv, i)) return 11;
+        const char *mode = getenv("ZAPP_TEST_INSTALL");
+        if (mode && !strcmp(mode, "block")) { for (;;) pause(); }
+        return mode && !strcmp(mode, "fail") ? 1 : 0;
+    }
+    return -1;
+}
+
 static int child(int argc, char **argv)
 {
     if (!child_environment()) return 3;
+    int installer = install_child(argc, argv);
+    if (installer >= 0) return installer;
+    if (getenv("ZCL_DEPLOY_ALLOW_CANONICAL")) return 12;
     int preload = preload_child(argc, argv);
     if (preload >= 0) return preload;
     int basic = basic_child(argc, argv);
@@ -579,6 +613,125 @@ static void console_after(const char *directory)
     assert(unlink(rotated) == 0);
 }
 
+static void install_fixture_file(const char *dir, const char *name, const char *text)
+{
+    char p[1200]; snprintf(p, sizeof(p), "%s/%s", dir, name);
+    int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    assert(fd >= 0 && write(fd, text, strlen(text)) == (ssize_t)strlen(text));
+    assert(close(fd) == 0);
+}
+
+struct install_start_test { struct zapp_runtime *runtime; bool ok; char out[256]; };
+static void *install_start_thread(void *arg)
+{
+    struct install_start_test *test = arg;
+    test->ok = zapp_node_start(test->runtime, test->out, sizeof(test->out));
+    return NULL;
+}
+
+static void install_validation_cases(struct zapp_runtime *r, const char *dir)
+{
+    char out[256], path[1200];
+    uint64_t setup_ticket = 0;
+    assert(zapp_node_start_reserve(r, &setup_ticket, out, sizeof(out)));
+    assert(zapp_setup_kind_write(r->files, ZAPP_KIND_CREATE));
+    assert(!zapp_node_start_reserved(r, setup_ticket, out, sizeof(out)) && strstr(out, "cancelled"));
+    zapp_setup_kind_forget(r->files);
+    install_fixture_file(dir, "install-bundle.sqlite", "fixture");
+    install_fixture_file(dir, "install-bundle.consumed", "bad\n");
+    assert(!zapp_node_start(r, out, sizeof(out)));
+    snprintf(path, sizeof(path), "%s/install-bundle.consumed", dir);
+    assert(unlink(path) == 0 && symlink("install-bundle.sqlite", path) == 0);
+    assert(!zapp_node_start(r, out, sizeof(out)) && unlink(path) == 0);
+    install_fixture_file(dir, "install-bundle.consumed", "install\n");
+    assert(chmod(path, 0644) == 0 && !zapp_node_start(r, out, sizeof(out)));
+    assert(unlink(path) == 0);
+    install_fixture_file(dir, "install-bundle.request", "bad\n");
+    assert(!zapp_node_start(r, out, sizeof(out)) && strstr(out, "recovery"));
+}
+
+static void install_result_cases(struct zapp_runtime *r, const char *dir)
+{
+    char out[256], path[1200]; int status;
+    install_fixture_file(dir, "install-bundle.request", "install\n");
+    snprintf(path, sizeof(path), "%s/install-bundle.request", dir);
+    assert(chmod(path, 0644) == 0);
+    assert(!zapp_node_start(r, out, sizeof(out)));
+    assert(chmod(path, 0600) == 0);
+    if (geteuid() == 0) {
+        assert(chown(path, 1, (gid_t)-1) == 0);
+        assert(!zapp_node_start(r, out, sizeof(out)));
+        assert(chown(path, 0, (gid_t)-1) == 0);
+    }
+    assert(unlink(path) == 0);
+    assert(symlink("install-bundle.sqlite", path) == 0);
+    assert(!zapp_node_start(r, out, sizeof(out)) && unlink(path) == 0);
+    install_fixture_file(dir, "install-bundle.request", "install\n");
+    assert(setenv("ZAPP_TEST_INSTALL", "fail", 1) == 0);
+    assert(!zapp_node_start(r, out, sizeof(out)) && strstr(out, "recovery"));
+    assert(unsetenv("ZAPP_TEST_INSTALL") == 0);
+    assert(zapp_node_start(r, out, sizeof(out)));
+    assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    r->node = 0;
+    snprintf(path, sizeof(path), "%s/install-bundle.consumed", dir);
+    assert(unlink(path) == 0);
+    install_fixture_file(dir, "install-bundle.request", "install\n");
+    assert(zapp_node_start(r, out, sizeof(out)));
+    assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    r->node = 0;
+    snprintf(path, sizeof(path), "%s/install-bundle.consumed", dir);
+    assert(unlink(path) == 0);
+}
+
+static void install_stop_case(struct zapp_runtime *r, const char *dir)
+{
+    char out[256], path[1200]; int status;
+    install_fixture_file(dir, "install-bundle.request", "install\n");
+    assert(setenv("ZAPP_TEST_INSTALL", "block", 1) == 0);
+    struct install_start_test test = {.runtime = r}; pthread_t thread;
+    assert(pthread_create(&thread, NULL, install_start_thread, &test) == 0);
+    bool started = false;
+    for (int i = 0; i < 500 && !started; ++i) {
+        pthread_mutex_lock(&r->mutex); started = r->installer > 0; pthread_mutex_unlock(&r->mutex);
+        if (!started) { struct timespec delay = {.tv_nsec = 10000000}; nanosleep(&delay, NULL); }
+    }
+    assert(started && zapp_node_installing(r) && zapp_node_running(r) && atomic_load(&r->setup_running));
+    uint64_t other_ticket = 0;
+    assert(!zapp_node_start_reserve(r, &other_ticket, out, sizeof(out)));
+    uint64_t old_epoch = r->start_epoch;
+    assert(zapp_node_stop(r, out, sizeof(out)) && r->start_epoch != old_epoch);
+    assert(pthread_join(thread, NULL) == 0 && !test.ok && !zapp_node_installing(r));
+    assert(unsetenv("ZAPP_TEST_INSTALL") == 0);
+    assert(zapp_node_start(r, out, sizeof(out)));
+    assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    r->node = 0;
+    snprintf(path, sizeof(path), "%s/install-bundle.consumed", dir); assert(unlink(path) == 0);
+}
+
+static void install_crash_case(struct zapp_runtime *r, const char *dir)
+{
+    char out[256], path[1200]; int status;
+    snprintf(path, sizeof(path), "%s/install-bundle.consumed", dir);
+    install_fixture_file(dir, "install-bundle.request", "install\n");
+    char request[1200]; snprintf(request, sizeof(request), "%s/install-bundle.request", dir);
+    assert(link(request, path) == 0); /* interruption after durable consume, before unlink */
+    assert(setenv("ZAPP_TEST_INSTALL", "fail", 1) == 0);
+    assert(zapp_node_start(r, out, sizeof(out)));
+    assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    r->node = 0;
+    assert(unsetenv("ZAPP_TEST_INSTALL") == 0 && unlink(request) == 0 && unlink(path) == 0);
+    snprintf(path, sizeof(path), "%s/install-bundle.sqlite", dir);
+    assert(unlink(path) == 0);
+}
+
+static void install_cases(struct zapp_runtime *r, const char *dir)
+{
+    install_validation_cases(r, dir);
+    install_result_cases(r, dir);
+    install_stop_case(r, dir);
+    install_crash_case(r, dir);
+}
+
 static void node_cases(struct zapp_runtime *r, const char *self, const char *directory)
 {
     char out[128];
@@ -589,6 +742,10 @@ static void node_cases(struct zapp_runtime *r, const char *self, const char *dir
     assert(snprintf(r->directory, sizeof(r->directory), "%s", directory) > 0);
     assert(snprintf(r->state_root, sizeof(r->state_root), "%s/missing", directory) > 0);
     assert(setenv("ZAPP_TEST_STATE", r->state_root, 1) == 0);
+    const char *old_allow = getenv("ZCL_DEPLOY_ALLOW_CANONICAL");
+    char *saved_allow = old_allow ? strdup(old_allow) : NULL;
+    assert(!old_allow || saved_allow);
+    assert(setenv("ZCL_DEPLOY_ALLOW_CANONICAL", "bogus", 1) == 0);
     console_before(r, directory);
     assert(zapp_node_start(r, out, sizeof(out)) && strstr(out, "could not save") && !zapp_node_wanted(r));
     int status;
@@ -601,6 +758,11 @@ static void node_cases(struct zapp_runtime *r, const char *self, const char *dir
     assert(zapp_node_start(r, out, sizeof(out)) && zapp_node_wanted(r));
     assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     r->node = 0;
+    install_cases(r, directory);
+    assert(!strcmp(getenv("ZCL_DEPLOY_ALLOW_CANONICAL"), "bogus"));
+    if (saved_allow) assert(setenv("ZCL_DEPLOY_ALLOW_CANONICAL", saved_allow, 1) == 0);
+    else assert(unsetenv("ZCL_DEPLOY_ALLOW_CANONICAL") == 0);
+    free(saved_allow);
     params_argument_cases(r, directory);
     roster_case(r);
     preview_cases(r);
@@ -962,6 +1124,22 @@ static void preload_invalidation_case(struct zapp_runtime *r, const char *dir)
            WIFEXITED(isolation_status) && WEXITSTATUS(isolation_status) == 0);
 }
 
+static void preload_install_case(struct zapp_runtime *r, const char *dir)
+{
+    char out[256];
+    install_fixture_file(dir, "install-bundle.sqlite", "fixture");
+    install_fixture_file(dir, "install-bundle.request", "install\n");
+    assert(setenv("ZAPP_TEST_PRELOAD", "valid", 1) == 0);
+    preload_unlink(dir, "preload-started"); preload_unlink(dir, "node-spawned");
+    assert(zapp_node_start(r, out, sizeof(out)));
+    assert(preload_read_marker(dir, "preload-started") > 0);
+    preload_reap_node(r);
+    assert(!zapp_node_preload_ready(r));
+    preload_unlink(dir, "install-bundle.sqlite");
+    preload_unlink(dir, "install-bundle.consumed");
+}
+
+
 static void preload_cases(struct zapp_runtime *r, const char *dir)
 {
     char path[1200], identity[65];
@@ -971,6 +1149,7 @@ static void preload_cases(struct zapp_runtime *r, const char *dir)
     assert(zapp_setup_identity(dir, identity));
     assert(snprintf(r->files, sizeof(r->files), "%s", dir) > 0);
     r->preload_ms = 2000;
+    preload_install_case(r, dir);
     preload_reservation_cases(r);
     preload_mode_cases(r, dir);
     preload_race_cases(r, dir, path);

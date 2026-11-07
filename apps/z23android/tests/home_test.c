@@ -76,6 +76,11 @@ static void plain_node_line_states(void)
 {
     static struct zapp_view view;
     assert(node_line_is(&view, "Node stopped"));
+    view.node_installing = true;
+    assert(node_line_is(&view, "Fast sync\\nPreparing your wallet"));
+    view.node_stopping = true;
+    assert(node_line_is(&view, "Stopping…\\nYou can use Z23"));
+    view.node_installing = false; view.node_stopping = false;
     view.node_process_running = true;
     view.node_wanted = true;
     assert(node_line_is(&view, "Starting node…\\nYou can use Z23"));

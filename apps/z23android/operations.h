@@ -17,6 +17,7 @@ struct zapp_runtime {
     char temporary_root[1024];
     char executable[1024];
     pid_t node;
+    pid_t installer;
     bool stopping;
     /* The preview package never runs a node. */
     bool preview;
@@ -49,6 +50,7 @@ bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *li
 void zapp_runtime_signal_stop(struct zapp_runtime *r);
 void zapp_runtime_destroy(struct zapp_runtime *r);
 bool zapp_node_running(struct zapp_runtime *r);
+bool zapp_node_installing(struct zapp_runtime *r);
 /* Setup waits until a reserved or executing start has fully stopped. */
 bool zapp_node_start_pending(struct zapp_runtime *r);
 /* Setup's single snapshot for a node or a start in progress. */

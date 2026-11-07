@@ -81,3 +81,63 @@ index. Its process peak is not a phase-specific allocation measurement and
 cannot be compared directly with the Pixel index-only result. The larger
 peak requires a separate combined app and node measurement on the phone;
 this server result does not establish Android survival or migration latency.
+
+## Complete archive check on the Pixel
+
+On 2026-11-07, the same Pixel 3 checked 3,309,988 index rows and full
+header ancestry through height 3,309,900. The archive phase took 212,410 ms;
+the cold loader group passed 1/1 in 302.6 seconds with no skips, cached
+results or unobserved environment inputs. Android Clang 21.0.0 from NDK r30
+compiled the API 35 runner from source
+`8a75fb5bbae216f9411acec998f813929c57be9f`.
+
+| Observation | KiB |
+| --- | ---: |
+| Resident memory before archive loading | 25,240 |
+| Resident memory after archive validation | 815,248 |
+| Process peak resident memory | 1,746,624 |
+| Resident memory after main-state cleanup | 723,844 |
+
+Runner SHA256:
+`dd2a6ede14b3dd95157d6a2c10e2efc3b54b6f886485e71727fb862d8830c757`.
+Run log SHA256:
+`c6830395985f92cdeccaa9481475926ae11699bc340a268bad4f43194095c8f6`.
+The public input inventory digest was
+`900e4f1013a06f545938ee03962ac973a6c201bfafdcebae1ed3b291060e0cb2`.
+Android thermal status changed from 0 to 1. This is not a clock-rate
+measurement. An earlier attempt used the wrong working directory, failed
+relative-path fixtures, and was terminated; it is excluded from the pass.
+
+This isolated root-shell experiment did not open the installed wallet.
+Combined app memory pressure, foreground survival and wallet readiness
+remain separate acceptance requirements.
+
+## App-owned installation handoff
+
+On 2026-11-07, the full Android app host test target passed with the
+one-time installation handoff, cancellation guards and installing status.
+The same operations fixture passed on the Pixel as UID 0, including its
+wrong-owner refusal assertions. The fixture launches itself as a mock node;
+it does not install a production snapshot or prove wallet readiness.
+
+The measured app source was the base above plus patch SHA256
+`e8705a4346b3a68e107ca5085cee1f133c51a7eccdc2b975ed53d2e1f7d0fced`.
+Host log SHA256:
+`de42790257a4e9a3e8bf5e45ae3f0647ec96397bcbbe0e80da9818762771c788`.
+Pixel runner SHA256:
+`048cee9a36d14c456fc531ea3d1420d1a7be2cf108f77841f38f34e9495b1dcc`.
+Pixel log SHA256:
+`cd0b944d46dc76610503eba7685b8a4576f3eb848978d16790b57b0ba0d415d8`.
+Subsequent fixture helper extraction preserves these production bytes;
+its exact test source requires separate qualification.
+
+The extracted fixture subsequently passed on both the host and Pixel on
+2026-11-07. Its cumulative code patch SHA256 was
+`da6abb2f488f4de5981742a0a7604634f2986e00d5c4076c2b94555b08534d49`.
+Host operations log SHA256:
+`8ca82d630506013f5d14d9c934b099866cb77cbe655dc6103097faa81a28faf8`.
+Pixel runner SHA256:
+`f622112c752da3f638da1320f12b87131c1824f416b081fea2ce44f32e89d058`.
+Pixel log SHA256:
+`8da82aeaf91698c18753e673a2f5746a435b5dd936bc7cd2b3b29002674fdf7a`.
+The complexity gate also passed without changing its limits or baseline.

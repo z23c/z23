@@ -40,7 +40,6 @@ struct operation { const char *id; const char *args[4]; const char *rpc, *params
 static const struct operation operations[] = {
     {"status", {"core", "status"}, "dumpstate", "[\"status_frontdoor\"]", "state"},
 };
-
 static int64_t milliseconds(void)
 {
     struct timespec now;
@@ -53,7 +52,6 @@ static bool path(char *out, size_t cap, const char *dir, const char *name)
     int n = snprintf(out, cap, "%s/%s", dir, name);
     return n > 0 && (size_t)n < cap;
 }
-
 static bool runtime_directory(const char *name, bool private_mode)
 {
     if (mkdir(name, 0700) != 0 && errno != EEXIST) return false;
@@ -126,9 +124,14 @@ static bool child_running(struct zapp_runtime *r)
     pthread_mutex_unlock(&r->mutex);
     return live;
 }
+bool zapp_node_installing(struct zapp_runtime *r)
+{
+    pthread_mutex_lock(&r->mutex); bool installing = r->installer > 0;
+    pthread_mutex_unlock(&r->mutex); return installing;
+}
 bool zapp_node_running(struct zapp_runtime *r)
 {
-    return child_running(r) || earlier_node(r) > 0;
+    return child_running(r) || zapp_node_installing(r) || earlier_node(r) > 0;
 }
 
 bool zapp_node_start_pending(struct zapp_runtime *r)
@@ -174,7 +177,8 @@ static bool inherited_wallet_variable(const char *entry)
 }
 static bool inherited_environment(const char *entry)
 {
-    return inherited_wallet_variable(entry) && strncmp(entry, "XDG_STATE_HOME=", 15) != 0 &&
+    return inherited_wallet_variable(entry) && strncmp(entry, "ZCL_DEPLOY_ALLOW_CANONICAL=", 27) != 0 &&
+           strncmp(entry, "XDG_STATE_HOME=", 15) != 0 &&
            strncmp(entry, "TMPDIR=", 7) != 0 &&
            strncmp(entry, "ZCL_CATCHUP_DRAIN_BUDGET_MS=",
                    sizeof("ZCL_CATCHUP_DRAIN_BUDGET_MS=") - 1) != 0 &&
@@ -219,7 +223,7 @@ static void append_app_environment(char **env, size_t used, char *state,
 }
 
 static int spawn_environment(struct zapp_runtime *r, char *const argv[], pid_t *pid,
-                             posix_spawn_file_actions_t *actions, posix_spawnattr_t *attr)
+                             posix_spawn_file_actions_t *actions, posix_spawnattr_t *attr, bool installer)
 {
     char state[sizeof(r->state_root) + 16], temp[sizeof(r->temporary_root) + 8];
     char home[sizeof(r->state_root) + 8];
@@ -229,18 +233,24 @@ static int spawn_environment(struct zapp_runtime *r, char *const argv[], pid_t *
     if (!app_root_entry(state, sizeof(state), "XDG_STATE_HOME", r->state_root) ||
         !app_root_entry(temp, sizeof(temp), "TMPDIR", r->temporary_root) ||
         !app_root_entry(home, sizeof(home), "HOME", r->state_root)) return EINVAL;
-    char **env = calloc(count + 6, sizeof(*env));
+    char **env = calloc(count + 7, sizeof(*env));
     if (!env) return EINVAL;
     bool has_home = false;
     size_t used = copy_inherited_environment(env, count, &has_home);
     append_app_environment(env, used, state, temp, home, has_home);
+    if (installer) {
+        size_t end = used;
+        while (env[end]) ++end;
+        env[end++] = "ZCL_DEPLOY_ALLOW_CANONICAL=1";
+        env[end] = NULL;
+    }
     rc = posix_spawn(pid, r->executable, actions, attr, argv, env);
     free(env);
     return rc;
 }
 
-static int spawn_redirect(struct zapp_runtime *r, char *const argv[], int input,
-                          int output, pid_t *pid)
+static int spawn_redirect_mode(struct zapp_runtime *r, char *const argv[], int input,
+                          int output, pid_t *pid, bool installer)
 {
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attr;
@@ -253,7 +263,7 @@ static int spawn_redirect(struct zapp_runtime *r, char *const argv[], int input,
     if (!rc) rc = posix_spawn_file_actions_adddup2(&actions, output, STDERR_FILENO);
     if (!rc) rc = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
     if (!rc) rc = posix_spawnattr_setpgroup(&attr, 0);
-    if (!rc) rc = spawn_environment(r, argv, pid, &actions, &attr);
+    if (!rc) rc = spawn_environment(r, argv, pid, &actions, &attr, installer);
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
     return rc;
@@ -295,6 +305,11 @@ static bool write_all(int fd, const char *text, size_t length)
         text += n; length -= (size_t)n;
     }
     return true;
+}
+static int spawn_redirect(struct zapp_runtime *r, char *const argv[], int input,
+    int output, pid_t *pid)
+{
+    return spawn_redirect_mode(r, argv, input, output, pid, false);
 }
 /* Writes word to a temporary file beside final and renames it into place. */
 static bool replace_file(const char *final, const char *temporary, const char *word)
@@ -453,7 +468,112 @@ void zapp_node_start_discard(struct zapp_runtime *r, uint64_t ticket)
     }
     pthread_mutex_unlock(&r->mutex);
 }
+static bool install_private_file(int fd, struct stat *st, bool marker)
+{
+    char word[9];
+    ssize_t n = read(fd, word, sizeof(word));
+    return fstat(fd, st) == 0 && S_ISREG(st->st_mode) && st->st_uid == getuid() &&
+        !(st->st_mode & 077) && (st->st_nlink == 1 || (marker && st->st_nlink == 2)) &&
+        n == 8 && !memcmp(word, "install\n", 8);
+}
+static bool install_private_dir(int dir)
+{
+    struct stat st;
+    return fstat(dir, &st) == 0 && st.st_uid == getuid() && !(st.st_mode & 077);
+}
+static bool install_private_bundle(int dir)
+{
+    int fd = openat(dir, "install-bundle.sqlite", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return false;
+    struct stat st;
+    bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == getuid() &&
+        !(st.st_mode & 077) && st.st_nlink == 1;
+    close(fd);
+    return ok;
+}
+static bool install_consume_link(int dir, const struct stat *request)
+{
+    struct stat st;
+    return linkat(dir, "install-bundle.request", dir, "install-bundle.consumed", 0) == 0 &&
+        fstatat(dir, "install-bundle.consumed", &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+        st.st_dev == request->st_dev && st.st_ino == request->st_ino && fsync(dir) == 0 &&
+        unlinkat(dir, "install-bundle.request", 0) == 0 && fsync(dir) == 0;
+}
+/* The consumed link is only a durable at-most-once launch record. */
+static int install_request_consume(struct zapp_runtime *r)
+{
+    int dir = open(r->directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dir < 0) return -1;
+    struct stat st, request_st;
+    int result = -1;
+    int marker = openat(dir, "install-bundle.consumed", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (marker >= 0) {
+        bool valid = install_private_dir(dir) && install_private_file(marker, &st, true);
+        close(marker);
+        if (valid) result = 0;
+        goto done;
+    }
+    if (errno != ENOENT) goto done;
+    int fd = openat(dir, "install-bundle.request", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) { if (errno == ENOENT) result = 0; goto done; }
+    bool valid = install_private_dir(dir) && install_private_file(fd, &st, false);
+    if (valid) request_st = st;
+    close(fd);
+    if (!valid) goto done;
+    if (!install_private_bundle(dir) || !install_consume_link(dir, &request_st)) goto done;
+    result = 1;
+done:
+    close(dir);
+    return result;
+}
+static int spawn_installer(struct zapp_runtime *r)
+{
+    char data[1100], bundle[1200], arg[1300], log[1100], params[1200];
+    snprintf(data, sizeof(data), "-datadir=%s", r->directory);
+    if (!path(bundle, sizeof(bundle), r->directory, "install-bundle.sqlite") ||
+        snprintf(arg, sizeof(arg), "-install-consensus-bundle=%s", bundle) >= (int)sizeof(arg) ||
+        !path(log, sizeof(log), r->directory, "app-console.log")) return EINVAL;
+    int fd = open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+    int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    char *argv[10] = {r->executable, data, "-operator-lane=canonical", "-nolegacyimport",
+        "-nolegacyutxoimport", arg};
+    size_t argc = 6;
+    if (zapp_params_arg(r->files, params, sizeof(params))) argv[argc++] = params;
+    argv[argc] = NULL;
+    int rc = fd >= 0 && in >= 0 ? spawn_redirect_mode(r, argv, in, fd, &r->installer, true) : EIO;
+    if (fd >= 0) close(fd);
+    if (in >= 0) close(in);
+    return rc;
+}
+static bool node_install_allowed_locked(struct zapp_runtime *r, uint64_t ticket)
+{
+    return !r->stopping && !atomic_load(&r->start_cancel) && ticket == r->start_epoch &&
+        (!r->start_preload_allowed || zapp_setup_preload_allowed()) &&
+        (!r->start_resume_wanted || zapp_node_wanted(r)) && !node_setup_blocks_start(r) &&
+        !running_locked(r) && !earlier_node(r);
+}
 
+/* Called with the reservation mutex held; sleep occurs without that mutex. */
+static int node_install_if_requested(struct zapp_runtime *r, uint64_t ticket)
+{
+    if (!node_install_allowed_locked(r, ticket)) return 0;
+    pthread_mutex_unlock(&r->mutex);
+    int requested = install_request_consume(r);
+    pthread_mutex_lock(&r->mutex);
+    if (requested <= 0) return requested;
+    if (!node_install_allowed_locked(r, ticket)) return -1;
+    int rc = spawn_installer(r);
+    if (rc) return -1;
+    pid_t child = r->installer;
+    int status = 0; pid_t got;
+    for (;;) { got = waitpid(child, &status, WNOHANG);
+        if (got == child || (got < 0 && errno != EINTR)) break;
+        pthread_mutex_unlock(&r->mutex);
+        struct timespec pause = {.tv_nsec = 100000000}; nanosleep(&pause, NULL); pthread_mutex_lock(&r->mutex);
+    }
+    r->installer = 0;
+    return got == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 1 : -1;
+}
 static bool node_start_finish_locked(struct zapp_runtime *r, uint64_t ticket,
     const struct preload_result *preload, char *out, size_t cap)
 {
@@ -501,7 +621,15 @@ bool zapp_node_start_reserved(struct zapp_runtime *r, uint64_t ticket, char *out
     struct preload_result preload = {0};
     node_preload(r, &preload);
     pthread_mutex_lock(&r->mutex);
-    bool ok = node_start_finish_locked(r, ticket, &preload, out, cap);
+    int install = node_install_if_requested(r, ticket);
+    if (install > 0) preload.valid = false;
+    bool ok;
+    if (install < 0) {
+        r->start_pending = false; r->start_executing = false;
+        atomic_store(&r->setup_running, false);
+        snprintf(out, cap, "Bundle install stopped or refused; state may need recovery.");
+        ok = false;
+    } else ok = node_start_finish_locked(r, ticket, &preload, out, cap);
     pthread_mutex_unlock(&r->mutex);
     return ok;
 }
@@ -533,7 +661,7 @@ static bool request_stop(struct zapp_runtime *r, char *out, size_t cap, bool own
             atomic_store(&r->setup_running, false);
         }
     }
-    pid_t node = running_locked(r) ? r->node : earlier_node(r);
+    pid_t node = r->installer > 0 ? r->installer : (running_locked(r) ? r->node : earlier_node(r));
     int rc = node > 0 ? kill(node, SIGINT) : 0;
     r->stop_sent = node > 0 && rc == 0;
     bool kept = !owner_choice || remember_on(r, false);
@@ -574,6 +702,7 @@ void zapp_runtime_signal_stop(struct zapp_runtime *r)
             atomic_store(&r->setup_running, false);
         }
     }
+    if (r->installer > 0) (void)kill(r->installer, SIGINT);
     if (running_locked(r)) (void)kill(r->node, SIGINT);
     pthread_mutex_unlock(&r->mutex);
 }

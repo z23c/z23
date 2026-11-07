@@ -42,6 +42,7 @@ struct zapp_view {
     bool node_running;
     bool node_process_running;
     bool node_starting; /* Start has been reserved but has not completed. */
+    bool node_installing; /* A one-time state install is running. */
     bool node_wanted;
     bool node_stopping; /* A stop was sent to the node process that is still running. */
     bool node_serving;  /* The node's boot status says it serves (zapp_node_serving), read while it answers. */
