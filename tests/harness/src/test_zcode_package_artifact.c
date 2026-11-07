@@ -329,6 +329,41 @@ static bool artifact_next_after_seal(const struct artifact_fixture *fixture, con
     const char *const want[] = {"mode", "plan", "manifest_file", manifest, "recipe_file", recipe, NULL};
     return artifact_next_is(envelope, "zcode.package.dev.create", want);
 }
+/* A hex-body seal has no directory to read the exported files from, so the
+ * hint must still name create plan with a fill-in directory, and its input
+ * must parse back as a JSON object carrying every create plan key. */
+static bool artifact_seal_hex_hint(const struct artifact_fixture *fixture, const struct json_value *data)
+{
+    struct json_value input = {0}, sealed = {0}, file_input = {0};
+    static const char *const seal[] = {"dev", "seal", NULL};
+    uint8_t *bytes = NULL; size_t size = 0;
+    bool ok = true;
+    json_set_object(&file_input);
+    ok = ok && artifact_file_input(&file_input, fixture, data, "release_body", "release-body.wire") &&
+        zcl_native_package_artifact_read(&file_input, "unused_hex", "release_body_file", "release_body_sha3", 1048576, &bytes, &size);
+    char *hex = ok ? malloc(size * 2u + 1u) : NULL; // raw-alloc-ok:test-fixture
+    json_free(&input); json_init(&input); json_set_object(&input);
+    ok = ok && hex != NULL;
+    if (ok) {
+        zcl_hex_encode(bytes, size, hex);
+        char signature_hex[129]; uint8_t digest[32], signature[64];
+        ok = zcl_hex_decode_lower(json_get_str(json_get(data, "release_signing_digest")), digest, 32) &&
+            artifact_sign(digest, signature);
+        if (ok) { zcl_hex_encode(signature, 64, signature_hex);
+            ok = json_push_kv_str(&input, "release_body_hex", hex) &&
+                json_push_kv_str(&input, "signature_hex", signature_hex) && artifact_native(fixture, seal, &input, &sealed, true); }
+    }
+    const char *const want[] = {"mode", "plan", "manifest_file", "<artifact_dir>/manifest.wire",
+        "recipe_file", "<artifact_dir>/recipe.wire", NULL};
+    ok = ok && artifact_next_is(&sealed, "zcode.package.dev.create", want);
+    if (ok) {
+        static const char *const keys[] = {"release_hex", "manifest_sha3", "recipe_sha3", "dir"};
+        const struct json_value *item = json_at(json_get(&sealed, "next"), 0);
+        for (size_t i = 0; i < 4; ++i) ok = ok && json_get_str(json_get(json_get(item, "input"), keys[i])) != NULL;
+    }
+    free(hex); free(bytes); json_free(&input); json_free(&sealed); json_free(&file_input);
+    return ok;
+}
 static int artifact_binary_roundtrip(void)
 {
     int failures = 0; struct artifact_fixture fixture = {0}; struct json_value input = {0}, prepared = {0}, sealed = {0}, reply = {0};
@@ -350,6 +385,7 @@ static int artifact_binary_roundtrip(void)
         ASSERT(artifact_next_after_export(&fixture, &prepared));
         ASSERT(artifact_seal_input(&input, &fixture, data)); ASSERT(artifact_native(&fixture, seal, &input, &sealed, true));
         ASSERT(artifact_next_after_seal(&fixture, &sealed));
+        ASSERT(artifact_seal_hex_hint(&fixture, data));
         ASSERT(artifact_resident_roundtrip(&fixture, data, json_get(&sealed, "data")));
         ASSERT(artifact_publish_input(&input, &fixture, data, json_get(&sealed, "data"), true));
         json_free(&reply); json_init(&reply); ASSERT(artifact_native(&fixture, plan, &input, &reply, true));
@@ -395,6 +431,12 @@ static int artifact_export_interruption(unsigned stage, bool allocation)
         ASSERT(artifact_export_execute(&input, stage, allocation, &reply, &consumed)); ASSERT(consumed);
         const struct json_value *error = json_get(&reply, "error"), *facts = json_get(error, "facts");
         ASSERT(json_get_bool(json_get(error, "mutated"))); ASSERT(facts != NULL);
+        /* A reply that failed must not also suggest the seal step. */
+        const struct json_value *next = json_get(&reply, "next");
+        for (size_t n = 0; next && n < json_size(next); ++n) {
+            const char *name = json_get_str(json_get(json_at(next, n), "command"));
+            ASSERT(!name || strcmp(name, "zcode.package.dev.seal") != 0);
+        }
         ASSERT_EQ(facts->type, JSON_OBJ); ASSERT_EQ(json_size(facts), 4);
         const char *publication = json_get_str(json_get(facts, "artifact_publication")); ASSERT(publication != NULL);
         ASSERT_EQ(strcmp(publication, allocation ? "durable" : "durability_unknown"), 0);
