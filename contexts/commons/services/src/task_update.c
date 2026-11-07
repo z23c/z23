@@ -404,6 +404,7 @@ struct zcl_result task_update_open(struct task_update *update, const char *direc
     (void)snprintf(update->app, sizeof(update->app), "%s", app);
     (void)snprintf(update->verifier, sizeof(update->verifier), "%s", verifier);
     if (candidate) update->candidate = *candidate;
+    update->candidate_explicit = candidate && candidate->package_root[0];
     (void)snprintf(update->message, sizeof(update->message), "Try runs this program separately with copies of your tasks. Keep never imports preview data.");
     return ZCL_OK;
 }
@@ -455,6 +456,7 @@ struct zcl_result task_update_keep(struct task_update *update)
 void task_update_cancel(struct task_update *update)
 {
     if (!update) { LOG_ERROR("task-update", "cancel requires owner"); return; }
+    update->offer_locked = false;
     free(update->ready);
     update->ready = NULL;
     if (update->pending) {
@@ -464,6 +466,23 @@ void task_update_cancel(struct task_update *update)
         update->phase = TASK_UPDATE_CANCELLED;
         (void)snprintf(update->message, sizeof(update->message), "Preview cancelled. Working version and data retained.");
     }
+}
+
+static struct zcl_result tu_kept(struct task_update *update, const struct task_update_job *job)
+{
+    (void)snprintf(update->active, sizeof(update->active), "%s", job->view);
+    update->active_revision = job->checkpoint.document.state.revision;
+    update->active_valid = true;
+    update->phase = TASK_UPDATE_KEPT;
+    (void)snprintf(update->message, sizeof(update->message), "%s",
+        job->go_back ? "Previous program restored. Current tasks and undo preserved." : "Current program is ready. Your task data is unchanged.");
+    if (!job->keep) return ZCL_OK;
+    struct zcl_result result = task_update_acknowledge_offer(update);
+    if (!result.ok) {
+        result = ZCL_ERR(result.code, "Program kept. Update notice could not be cleared: %.150s", result.message);
+        (void)snprintf(update->message, sizeof(update->message), "%s", result.message);
+    }
+    return result;
 }
 
 struct zcl_result task_update_poll(struct task_update *update, bool *changed)
@@ -482,12 +501,7 @@ struct zcl_result task_update_poll(struct task_update *update, bool *changed)
     memcpy(update->step_us, job->step_us, sizeof(update->step_us));
     struct zcl_result result = job->result;
     if (result.ok && (job->keep || job->go_back || job->refresh)) {
-        (void)snprintf(update->active, sizeof(update->active), "%s", job->view);
-        update->active_revision = job->checkpoint.document.state.revision;
-        update->active_valid = true;
-        update->phase = TASK_UPDATE_KEPT;
-        (void)snprintf(update->message, sizeof(update->message), "%s",
-            job->go_back ? "Previous program restored. Current tasks and undo preserved." : "Current program is ready. Your task data is unchanged.");
+        result = tu_kept(update, job);
     } else if (result.ok) {
         (void)snprintf(update->preview, sizeof(update->preview), "%s", job->view);
         update->phase = TASK_UPDATE_READY;

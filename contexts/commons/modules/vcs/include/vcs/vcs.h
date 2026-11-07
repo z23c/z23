@@ -30,7 +30,9 @@ enum vcs_result {
     VCS_ERR       = -1,
     VCS_ENOTIMPL  = -2,
     VCS_REFUSED   = 3,   /* sealed-path change without a valid unseal token */
-    VCS_EPARTIAL  = 4,   /* vcs_revert: a partial, honestly-named state. Either
+    VCS_EPARTIAL  = 4,   /* snapshot_from_tree: append attempted, reconcile log
+                          * and refs before retry (see API below).
+                          * vcs_revert: a partial, honestly-named state. Either
                           * (a) the source revert + forward commit already
                           * landed (append-only, never undone) but a requested
                           * relink activation refused or failed, or (b) the
@@ -105,12 +107,33 @@ bool vcs_tree_load_bounded(const char *repo_root, const uint8_t tree_hash[32],
                            size_t maximum_bytes, size_t maximum_entries,
                            struct vcs_manifest *out);
 
+/* Same bounded structural validation, with no CAS legacy-alias recovery.
+ * Refuses symlink components and multiply-linked manifest objects untouched. */
+bool vcs_tree_load_readonly_bounded(const char *repo_root, const uint8_t tree_hash[32],
+    size_t maximum_bytes, size_t maximum_entries, struct vcs_manifest *out);
+
 /* Rebuild one captured tree from verified CAS blobs into an existing empty
  * destination. Files are created with O_EXCL and either their captured mode
  * (file_mode 0) or the caller-selected 0400/0600 mode; source paths must
  * remain canonical regular files. This is the
  * shared materializer for confined builds and candidate handoff workspaces. */
 int vcs_tree_materialize(const char *object_store_root,
+                         const uint8_t tree_hash[32],
+                         const char *destination, uint64_t maximum_bytes,
+                         uint32_t file_mode);
+/* Same materialization, but read only canonical verified source objects:
+ * no legacy-alias recovery. The private destination is still written. */
+int vcs_tree_materialize_readonly(const char *object_store_root,
+                         const uint8_t tree_hash[32],
+                         const char *destination, uint64_t maximum_bytes,
+                         uint32_t file_mode);
+
+/* Strict canonical source reads, but no destination durability barriers.
+ * ONLY for fresh caller-owned disposable scratch, reconstructed from retained
+ * CAS and consumed before cleanup. Never use for a published checkout or the
+ * sole retained copy. Same bounds, modes, exclusive writes and failure cleanup
+ * as readonly materialization; existing APIs retain their flush behavior. */
+int vcs_tree_materialize_readonly_disposable(const char *object_store_root,
                          const uint8_t tree_hash[32],
                          const char *destination, uint64_t maximum_bytes,
                          uint32_t file_mode);
@@ -121,6 +144,31 @@ int vcs_tree_materialize(const char *object_store_root,
  * VCS_REFUSED (sealed-path change), or VCS_ERR. */
 int vcs_snapshot(struct vcs_repo *r, const struct vcs_snapshot_meta *meta,
                  uint8_t out_commit_id[32]);
+
+struct vcs_snapshot_tree_limits {
+    size_t manifest_bytes;
+    size_t entries;
+    size_t blob_bytes;
+    uint64_t total_bytes;
+};
+
+/* Save an already captured tree in this repo's CAS, without reading or writing
+ * working files. The caller serializes all operations on this handle and must
+ * not hold an index transaction. The retained log writer lock excludes other
+ * repo writers. Require log tip == index HEAD == expected_head (zero for an
+ * empty history) before consuming a seal token or appending. All manifest and
+ * tagged blob bytes are verified within limits before that boundary.
+ * Parent is expected_head, not the tree's earlier edit origin. Reuses the
+ * ordinary snapshot seal/commit/ref lifecycle. VCS_REFUSED includes stale or
+ * inconsistent HEAD and sealed changes; VCS_ERR covers invalid objects/args.
+ * out_commit_id is zero before append is attempted. VCS_EPARTIAL means append
+ * was attempted: out_commit_id identifies the candidate, NOT proven success.
+ * Close/reopen does NOT rebuild refs: reconcile log/index explicitly before
+ * retrying. A matching seal token may already have been consumed on error.
+ * Windows retains the existing unavailable-snapshot refusal. */
+int vcs_snapshot_from_tree(struct vcs_repo *r, const uint8_t tree[32],
+    const uint8_t expected_head[32], const struct vcs_snapshot_meta *meta,
+    const struct vcs_snapshot_tree_limits *limits, uint8_t out_commit_id[32]);
 
 /* Report working-tree changes vs HEAD (stat-cache warm path). Fires cb per
  * differing path (may be NULL to just count) and writes the change count to

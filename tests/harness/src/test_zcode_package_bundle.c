@@ -359,23 +359,29 @@ static int zpb_alice_signs(struct zpb_world *w)
     return failures;
 }
 
-static void zpb_receive_input(struct zpb_leaf *l, const char *file,
-                              const char *datadir, const char *destination)
+static void zpb_receive_input_at_day(struct zpb_leaf *l, const char *file,
+    const char *datadir, const char *destination, int day)
 {
     zpb_open(l);
     (void)json_push_kv_str(&l->in, "file", file);
     (void)json_push_kv_str(&l->in, "destination", destination);
     (void)json_push_kv_str(&l->in, "datadir", datadir);
-    (void)json_push_kv_int(&l->in, "day", ZPB_DAY);
+    (void)json_push_kv_int(&l->in, "day", day);
+}
+
+static void zpb_receive_input(struct zpb_leaf *l, const char *file,
+                              const char *datadir, const char *destination)
+{
+    zpb_receive_input_at_day(l, file, datadir, destination, ZPB_DAY);
 }
 
 /* Confirm one receive of Bob's plan with the given trust (NULL leaves it
  * out). */
-static bool zpb_receive(struct zpb_leaf *l, const struct zpb_world *w,
+static bool zpb_receive_at_day(struct zpb_leaf *l, const struct zpb_world *w,
                         const char *plan, const char *publisher,
-                        const char *root)
+                        const char *root, int day)
 {
-    zpb_receive_input(l, w->share_file, w->bob_datadir, w->bob_copy);
+    zpb_receive_input_at_day(l, w->share_file, w->bob_datadir, w->bob_copy, day);
     (void)json_push_kv_str(&l->in, "plan_id", plan);
     (void)json_push_kv_bool(&l->in, "confirm", true);
     if (publisher)
@@ -383,6 +389,13 @@ static bool zpb_receive(struct zpb_leaf *l, const struct zpb_world *w,
     if (root)
         (void)json_push_kv_str(&l->in, "trust_root", root);
     return zpb_exec("zcode.package.bundle.receive", l);
+}
+
+static bool zpb_receive(struct zpb_leaf *l, const struct zpb_world *w,
+                        const char *plan, const char *publisher,
+                        const char *root)
+{
+    return zpb_receive_at_day(l, w, plan, publisher, root, ZPB_DAY);
 }
 
 static bool zpb_lineage_names(const struct zpb_world *w)
@@ -564,6 +577,146 @@ static int zpb_flipped_refused(const struct zpb_world *w)
     return failures;
 }
 
+static bool zpb_source_is_two(const char *copy)
+{
+    char path[800], bytes[80];
+    static const char expected[] = "/* Alice's boost: twice the speed. */\n"
+                                   "int zpb_boost(void) { return 2; }\n";
+    (void)snprintf(path, sizeof(path), "%s/src/zpb_boost.c", copy);
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    size_t count = fread(bytes, 1, sizeof(bytes), file);
+    bool ok = !ferror(file) && feof(file) && count == sizeof(expected) - 1 &&
+              memcmp(bytes, expected, sizeof(expected) - 1) == 0;
+    return fclose(file) == 0 && ok;
+}
+
+static int zpb_selected_recipient(const struct zpb_world *w, const char *file,
+    const char *root, const char *release, int day)
+{
+    int failures = 0;
+    struct zpb_world bob = *w;
+    (void)snprintf(bob.bob_home, sizeof(bob.bob_home), "%s/selected-bob", w->root);
+    (void)snprintf(bob.bob_datadir, sizeof(bob.bob_datadir), "%s/selected-bob/data", w->root);
+    (void)snprintf(bob.bob_copy, sizeof(bob.bob_copy), "%s/selected-bob/copy", w->root);
+    (void)snprintf(bob.share_file, sizeof(bob.share_file), "%s", file);
+    (void)snprintf(bob.shared_package, sizeof(bob.shared_package), "%s", root);
+    (void)snprintf(bob.shared_release, sizeof(bob.shared_release), "%s", release);
+    TEST("zcode package bundle: fresh recipient materializes selected N, not later edits") {
+        struct zpb_leaf l;
+        char plan[65], copy_root[65];
+        ASSERT(mkdir(bob.bob_home, 0700) == 0);
+        ASSERT(zpb_as(bob.bob_home));
+        zpb_receive_input_at_day(&l, bob.share_file, bob.bob_datadir, bob.bob_copy, day);
+        ASSERT(zpb_pass("zcode.package.bundle.receive", &l));
+        ASSERT(strcmp(zpb_get(&l, "package_root"), root) == 0);
+        ASSERT(strcmp(zpb_get(&l, "release_id"), release) == 0);
+        (void)snprintf(plan, sizeof(plan), "%s", zpb_get(&l, "plan_id"));
+        zpb_close(&l);
+        ASSERT(zpb_receive_at_day(&l, &bob, plan, bob.fingerprint, root, day));
+        ASSERT(l.out.status == ZCL_COMMAND_STATUS_PASSED);
+        (void)snprintf(copy_root, sizeof(copy_root), "%s", zpb_get(&l, "version"));
+        zpb_close(&l);
+        ASSERT(zpb_copy_names_release(&bob, copy_root));
+        ASSERT(zpb_lineage_names(&bob));
+        ASSERT(zpb_trust_recorded(&bob, copy_root));
+        ASSERT(zpb_source_is_two(bob.bob_copy));
+        PASS();
+    } _test_next:;
+    if (!zpb_as(w->alice_home)) failures++;
+    return failures;
+}
+
+/* Deliberately bypass registry type validation to preserve the handler's
+ * malformed-value refusal and its version-before-key validation order. */
+static bool zpb_expected_type_refused(const struct zpb_world *w,
+    const char *selected, const char *file)
+{
+    const struct zcl_command_spec *spec = zpb_spec("zcode.package.bundle.sign");
+    if (!spec || !spec->handler) return false;
+    for (unsigned i = 0; i < 2; ++i) {
+        struct zpb_leaf l; zpb_open(&l);
+        bool ok = json_push_kv_str(&l.in, "dir", w->alice_copy) &&
+            json_push_kv_str(&l.in, "datadir", w->alice_datadir) &&
+            json_push_kv_str(&l.in, "output", file) &&
+            json_push_kv_bool(&l.in, "expected_publisher_pubkey", false);
+        if (i) ok = ok && json_push_kv_str(&l.in, "version", selected);
+        if (ok) {
+            l.req.spec = spec; l.req.input = &l.in; l.req.invoked_name = spec->path;
+            spec->handler(&l.req, &l.out);
+            ok = zpb_refusal(&l, i ? "PUBLISHER_KEY_CHANGED" : "VERSION_REQUIRED") &&
+                !l.out.error.mutated;
+        }
+        zpb_close(&l);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static int zpb_selected_bundle(const struct zpb_world *w)
+{
+    int failures = 0;
+    /* Alice already published in ZPB_DAY's week. Exercise another share in
+     * the following week without bypassing the publisher's tier allowance. */
+    const int selected_day = ZPB_DAY + 7;
+    TEST("zcode package bundle: owner signs selected N after head and worktree advance") {
+        struct zpb_leaf l;
+        char selected[65], head[65], plan[65], root[65], file[800], source[800], release[65];
+        ASSERT(zpb_as(w->alice_home));
+        zpb_open(&l);
+        (void)json_push_kv_str(&l.in, "dir", w->alice_copy);
+        ASSERT(zpb_pass("zcode.package.version.list", &l));
+        (void)snprintf(selected, sizeof(selected), "%s", zpb_get(&l, "head_version"));
+        zpb_close(&l);
+        (void)snprintf(file, sizeof(file), "%s/alice/selected.z23share", w->root);
+        ASSERT(zpb_expected_type_refused(w, selected, file));
+        zpb_open(&l);
+        (void)json_push_kv_str(&l.in, "dir", w->alice_copy);
+        (void)json_push_kv_str(&l.in, "datadir", w->alice_datadir);
+        (void)json_push_kv_str(&l.in, "output", file);
+        (void)json_push_kv_str(&l.in, "version", selected);
+        (void)json_push_kv_int(&l.in, "day", selected_day);
+        ASSERT(zpb_pass("zcode.package.bundle.sign", &l));
+        ASSERT(strcmp(zpb_get(&l, "version"), selected) == 0 && strstr(zpb_get(&l, "next"), selected));
+        (void)snprintf(plan, sizeof(plan), "%s", zpb_get(&l, "plan_id"));
+        (void)snprintf(root, sizeof(root), "%s", zpb_get(&l, "package_root"));
+        zpb_close(&l);
+        (void)snprintf(source, sizeof(source), "%s/src/zpb_boost.c", w->alice_copy);
+        ASSERT(zpb_put_file(source, "int zpb_boost(void) { return 3; }\n"));
+        zpb_open(&l); (void)json_push_kv_str(&l.in, "dir", w->alice_copy);
+        ASSERT(zpb_plan_confirm("zcode.package.version.save", &l));
+        (void)snprintf(head, sizeof(head), "%s", zpb_get(&l, "version"));
+        zpb_close(&l);
+        ASSERT(strcmp(head, selected) != 0 && zpb_put_file(source, "int zpb_boost(void) { return 4; }\n"));
+        zpb_open(&l);
+        (void)json_push_kv_str(&l.in, "dir", w->alice_copy);
+        (void)json_push_kv_str(&l.in, "datadir", w->alice_datadir);
+        (void)json_push_kv_str(&l.in, "output", file);
+        (void)json_push_kv_str(&l.in, "version", selected);
+        (void)json_push_kv_int(&l.in, "day", selected_day);
+        (void)json_push_kv_str(&l.in, "plan_id", plan);
+        (void)json_push_kv_bool(&l.in, "confirm", true);
+        ASSERT(zpb_pass("zcode.package.bundle.sign", &l));
+        ASSERT(strcmp(zpb_get(&l, "version"), selected) == 0 && strcmp(zpb_get(&l, "package_root"), root) == 0);
+        (void)snprintf(release, sizeof(release), "%s", zpb_get(&l, "release_id"));
+        zpb_close(&l);
+        zpb_open(&l); (void)json_push_kv_str(&l.in, "file", file);
+        ASSERT(zpb_pass("zcode.package.bundle.verify", &l));
+        ASSERT(strcmp(zpb_get(&l, "package_root"), root) == 0);
+        zpb_close(&l);
+        failures += zpb_selected_recipient(w, file, root, release, selected_day);
+        if (failures) goto _test_next;
+        zpb_open(&l); (void)json_push_kv_str(&l.in, "dir", w->alice_copy);
+        ASSERT(zpb_pass("zcode.package.version.list", &l) && strcmp(zpb_get(&l, "head_version"), head) == 0);
+        zpb_close(&l);
+        FILE *f = fopen(source, "rb"); char bytes[80] = {0};
+        ASSERT(f != NULL); size_t n = fread(bytes, 1, sizeof(bytes) - 1, f);
+        ASSERT(fclose(f) == 0 && n > 0 && strcmp(bytes, "int zpb_boost(void) { return 4; }\n") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_zcode_package_bundle(void)
 {
     int failures = 0;
@@ -580,6 +733,7 @@ int test_zcode_package_bundle(void)
     if (!failures) {
         failures += zpb_bob_receives(&w);
         failures += zpb_flipped_refused(&w);
+        failures += zpb_selected_bundle(&w);
     }
     if (w.saved_home[0])
         (void)setenv("HOME", w.saved_home, 1);

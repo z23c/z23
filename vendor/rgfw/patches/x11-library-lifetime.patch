@@ -1,0 +1,28 @@
+--- a/vendor/rgfw/RGFW.h
++++ b/vendor/rgfw/RGFW.h
+@@ -7310,9 +7310,13 @@
+ 
+     #if !defined(RGFW_NO_X11_CURSOR_PRELOAD) && !defined(RGFW_NO_X11_CURSOR)
+         RGFW_FREE_LIBRARY(X11Cursorhandle);
++        XcursorImageLoadCursorSRC = NULL;
++        XcursorImageCreateSRC = NULL;
++        XcursorImageDestroySRC = NULL;
+     #endif
+     #if !defined(RGFW_NO_XINPUT2) && !defined(RGFW_NO_X11_XI_PRELOAD)
+         RGFW_FREE_LIBRARY(X11Xihandle);
++        XISelectEventsSRC = NULL;
+     #endif
+ 
+     #ifdef RGFW_USE_XDL
+@@ -7321,6 +7325,11 @@
+ 
+     #if !defined(RGFW_NO_X11_EXT_PRELOAD)
+         RGFW_FREE_LIBRARY(X11XEXThandle);
++        XSyncCreateCounterSRC = NULL;
++        XSyncIntToValueSRC = NULL;
++        XSyncSetCounterSRC = NULL;
++        XShapeCombineRegionSRC = NULL;
++        XShapeCombineMaskSRC = NULL;
+     #endif
+ }
+ 

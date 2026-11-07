@@ -4909,10 +4909,12 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_COMMAND(
     "zcode.package.share", "zcode.package", "",
     "Publish a copy naming its parent",
-    "dir must be a copy made by zcode package fork with no unsaved changes "
-    "and a saved version that differs from the fork. The fork's recorded "
+    "dir must be a copy made by zcode package fork. With version, share that "
+    "saved commit from its validated history even when the worktree changed. "
+    "Without version, unsaved changes are refused and the saved head is used. "
+    "The selected version must differ from the fork. The fork's recorded "
     "tree must still prepare to the parent release's package root. Without "
-    "confirm, prepares the saved head and returns the unsigned release body "
+    "confirm, prepares the selected version and returns the unsigned release body "
     "whose parent is the forked release, the signing digest and a plan_id. "
     "Sign the digest offline, or let the owner sign with their own key via "
     "zcode package bundle sign (the plan's next names that command). With that "
@@ -4923,7 +4925,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LIST_BUDGET,
     "zcode,package,share,publish,release,parent,lineage,remix",
     "zcl.zcode_package_share.input.v1", "zcl.zcode_package_share.v1",
-    "dir,datadir,publisher_pubkey,signature_hex,reward_address,day,output,plan_id,confirm",
+    "dir,datadir,publisher_pubkey,signature_hex,reward_address,day,output,plan_id,confirm,version",
     "dir,publisher_pubkey",
     "z23 zcode package share --input='{\"dir\":\"/tmp/my-skycombat\",\"publisher_pubkey\":\"<66hex>\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
@@ -4951,8 +4953,9 @@ ZCL_COMMAND_READY_COMMAND(
     "signer. Uses the release key format plugin publish --release-key reads "
     "(a 32-byte secp256k1 secret) at ~/.z23/zcode_publisher.key, creating it "
     "0600 on first use, and shows its publisher fingerprint (the 66-hex "
-    "public key the release binds). Without confirm, prepares the saved head "
-    "exactly as share does and returns the plan_id. With that plan_id and "
+    "public key the release binds). With version, selects that saved commit; "
+    "otherwise uses the clean saved head. Without confirm, returns the plan_id. "
+    "With that plan_id and "
     "confirm:true, signs the digest inside the key module, publishes through "
     "zcode.package.publish.commit and writes one .z23share file (output, "
     "default <dir>.z23share) with one share line: name, package root, "
@@ -4960,7 +4963,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LIST_BUDGET,
     "zcode,package,sign,share,publisher,key,fingerprint,file,friend,remix",
     "zcl.zcode_package_sign.input.v1", "zcl.zcode_package_sign.v1",
-    "dir,datadir,output,reward_address,day,plan_id,confirm", "dir",
+    "dir,datadir,output,reward_address,day,plan_id,confirm,version,expected_publisher_pubkey", "dir",
     "z23 zcode package bundle sign --input='{\"dir\":\"/tmp/my-skycombat\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,

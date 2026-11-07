@@ -841,13 +841,12 @@ static bool directory_fd_private(int fd)
            (s.st_mode & 077) == 0;
 }
 
-enum platform_directory_result platform_directory_transaction_open_child(struct platform_directory_transaction*p,const char*l,bool create,struct platform_directory_transaction*c){
-    if(!p||!c||!valid_leaf(l))return PLATFORM_DIRECTORY_INVALID;
-    if(create&&mkdirat(dd(p),l,0700)!=0&&errno!=EEXIST){
+static enum platform_directory_result directory_open_child_at(int parent,const char*l,bool create,struct platform_directory_transaction*c){
+    if(create&&mkdirat(parent,l,0700)!=0&&errno!=EEXIST){
         if(errno_open_refused(errno))return PLATFORM_DIRECTORY_REFUSED;
         return PLATFORM_DIRECTORY_IO;
     }
-    int fd=openat(dd(p),l,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+    int fd=openat(parent,l,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
     if(fd<0){
         if(errno==ENOENT)return PLATFORM_DIRECTORY_MISSING;
         if(errno_open_refused(errno))return PLATFORM_DIRECTORY_REFUSED;
@@ -857,6 +856,27 @@ enum platform_directory_result platform_directory_transaction_open_child(struct 
     platform_directory_transaction_close(c);
     c->native=(uintptr_t)fd;
     return PLATFORM_DIRECTORY_OK;
+}
+enum platform_directory_result platform_directory_transaction_open_child(struct platform_directory_transaction*p,const char*l,bool create,struct platform_directory_transaction*c){
+    if(!p||!c||!valid_leaf(l))return PLATFORM_DIRECTORY_INVALID;
+    return directory_open_child_at(dd(p),l,create,c);
+}
+
+/* The broader parent permission is confined to this bootstrap, never exposed
+ * as a normal owner-private directory transaction. */
+static int directory_bootstrap_parent(const char *path)
+{
+    char canonical[PATH_MAX];
+    if (!path || path[0] != '/' || !realpath(path, canonical) || strcmp(path, canonical))
+        return -1;
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    struct stat info;
+    if (fstat(fd, &info) || !S_ISDIR(info.st_mode) || info.st_uid != geteuid() ||
+        (info.st_mode & 022) != 0) {
+        close(fd); return -1;
+    }
+    return fd;
 }
 static bool child_at(struct platform_directory_transaction *d, const char *leaf,
                      int flags, struct platform_directory_child *f)
@@ -1367,3 +1387,31 @@ enum platform_directory_result platform_directory_transaction_move_directory(
 }
 
 #endif
+
+/* Single exported facade; Windows deliberately has no looser ACL fallback. */
+enum platform_directory_result platform_directory_transaction_bootstrap_child(
+    const char *canonical_parent, const char *leaf, bool create,
+    struct platform_directory_transaction *child)
+{
+    if (child) platform_directory_transaction_init(child);
+    if (!child || !canonical_parent || !valid_leaf(leaf)) return PLATFORM_DIRECTORY_INVALID;
+#if defined(_WIN32)
+    (void)create;
+    return PLATFORM_DIRECTORY_REFUSED;
+#else
+    int parent = directory_bootstrap_parent(canonical_parent);
+    if (parent < 0) return PLATFORM_DIRECTORY_REFUSED;
+    enum platform_directory_result rc = directory_open_child_at(parent, leaf, create, child);
+    /* A failed create/open may still have created a directory. Caller reports
+     * that uncertainty. Successful mutation is not returned before durability. */
+    if (rc == PLATFORM_DIRECTORY_OK && create && fsync(parent) != 0) {
+        platform_directory_transaction_close(child);
+        rc = PLATFORM_DIRECTORY_IO;
+    }
+    if (close(parent) != 0 && rc == PLATFORM_DIRECTORY_OK) {
+        platform_directory_transaction_close(child);
+        rc = PLATFORM_DIRECTORY_IO;
+    }
+    return rc;
+#endif
+}

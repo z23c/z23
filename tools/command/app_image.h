@@ -53,6 +53,12 @@
 #include "base/result.h"
 #include "platform/resident_launch.h"
 
+struct zcl_action_root_request;
+struct vcs_package_lock;
+
+/* Shared build/open identity of the sorted directly declared dependencies. */
+void app_image_dependency_root(const struct vcs_package_lock *lock, uint8_t out[32]);
+
 #define APP_IMAGE_BUILD_DOMAIN "zcl.app_build.v1"
 #define APP_IMAGE_BUILD_DOMAIN_BYTES 16u
 #define APP_IMAGE_BUILD_KEY_DOMAIN "zcl.app_build.key.v1"

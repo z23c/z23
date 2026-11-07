@@ -101,4 +101,17 @@ int vcs_object_load_raw_bounded(const char *repo_root,
                                 size_t maximum_bytes,
                                 uint8_t **out_content, size_t *out_len);
 
+/* Strict read-only variants: no alias recovery or directory creation. Open
+ * beneath the existing repo root without following component symlinks;
+ * require one link on the retained descriptor before and after the read.
+ * maximum_bytes is checked on that descriptor before allocation. Outputs
+ * remain NULL/0 on refusal; -2 means caller size bound, -1 other refusal.
+ * The raw form still requires structural-address verification by its caller. */
+int vcs_object_load_raw_readonly_bounded(const char *repo_root,
+    const uint8_t address[32], size_t maximum_bytes,
+    uint8_t **out_content, size_t *out_len);
+int vcs_object_get_readonly_bounded(const char *repo_root,
+    const uint8_t hash[32], uint8_t tag, size_t maximum_bytes,
+    uint8_t **out_content, size_t *out_len);
+
 #endif /* ZCL_VCS_OBJECT_H */

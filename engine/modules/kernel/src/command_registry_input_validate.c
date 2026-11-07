@@ -23,6 +23,12 @@
 static bool cr_input_failure(const struct zcl_command_spec *spec,
     const char *key, const struct json_value *value, char *why, size_t why_size)
 {
+    if (!strcmp(spec->path, "app.edit") && !strcmp(key, "content")) {
+        if (why && why_size) snprintf(why, why_size,
+            "app.edit content must be a UTF-8 string of at most %u bytes (empty is allowed)",
+            (unsigned)ZCL_COMMAND_APP_EDIT_CONTENT_MAX);
+        return false;
+    }
     if ((!strcmp(spec->path, "fleet.steer.wiki-write") ||
          !strcmp(spec->path, "fleet.wiki.write")) && !strcmp(key, "text")) {
         if (why && why_size) snprintf(why, why_size,

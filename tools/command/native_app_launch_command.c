@@ -8,6 +8,7 @@
  * stage with a plain message and a hint. */
 
 #include "command/native_app_launch.h"
+#include "command/app_selection.h"
 #include "command/native_app_front_door.h"
 #include "command/native_app_compose.h"
 
@@ -18,7 +19,7 @@
 #include "platform/process_lock.h"
 #include "util/log_macros.h"
 
-#define APP_LIST_HINT_MAX 640u
+#define APP_LIST_HINT_MAX (4u * APP_LAUNCH_PATH_MAX + 128u)
 
 #include <errno.h>
 #include <stdio.h>
@@ -374,6 +375,15 @@ struct app_open_work {
     struct app_open_result result;
 };
 
+static bool app_open_has_selection(const struct json_value *input)
+{
+    static const char *const keys[] = {"copy", "version", "env_root",
+        "dependency_root", "image_sha3", "record_id", "accept_execution"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i)
+        if (json_get(input, keys[i])) return true;
+    return false;
+}
+
 void zcl_native_handle_app_open(const struct zcl_command_request *request,
                                 struct zcl_command_reply *reply)
 {
@@ -386,6 +396,11 @@ void zcl_native_handle_app_open(const struct zcl_command_request *request,
                                "name the app to open, e.g. skycombat", "");
         return;
     }
+    if (app_open_has_selection(request->input)) {
+        zcl_native_handle_app_open_selected(request, reply);
+        return;
+    }
+    if (zcl_native_app_open_kept(request, reply)) return;
     struct app_open_work *w = zcl_calloc(1, sizeof(*w), "app-open/work");
     if (!w) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -412,6 +427,13 @@ void zcl_native_handle_app_open(const struct zcl_command_request *request,
 
 /* ── app.list launchable section ──────────────────────────────────────── */
 
+static bool app_list_open_hint(struct json_value *item, const char *name)
+{
+    char command[APP_LIST_HINT_MAX];
+    return zcl_app_hint(command, sizeof(command), zcl_native_command_datadir(),
+                        "open %s", name) && json_push_kv_str(item, "open", command);
+}
+
 static void app_list_entry(const struct app_launch_env *env,
                            const struct app_launch_entry *e,
                            struct json_value *item)
@@ -431,10 +453,7 @@ static void app_list_entry(const struct app_launch_env *env,
     (void)json_push_kv(item, "aliases", &aliases);
     json_free(&aliases);
     (void)json_push_kv_str(item, "kind", "desktop");
-    char open_cmd[APP_LIST_HINT_MAX];
-    if (zcl_app_hint(open_cmd, sizeof(open_cmd),
-                     zcl_native_command_datadir(), "open %s", e->id))
-        (void)json_push_kv_str(item, "open", open_cmd);
+    (void)app_list_open_hint(item, e->id);
     (void)json_push_kv_str(item, "source", e->builtin ? "builtin" : "apps.tsv");
     (void)json_push_kv_bool(item, "installed", e->installed);
     (void)json_push_kv_str(item, "raise", e->raise_sigusr1 ? "sigusr1"
@@ -466,6 +485,25 @@ static void app_list_config(const struct app_launch_env *env,
     app_push_opt_str(&cfg, "error", reg->config_error);
     (void)json_push_kv(data, "launchable_config", &cfg);
     json_free(&cfg);
+}
+
+static bool app_list_kept(const struct app_launch_env *env, struct json_value *list)
+{
+    struct app_selection_routes routes;
+    if (app_selection_routes_load(env->state_dir, &routes) != APP_SELECTION_OK) return false;
+    for (size_t i = 0; i < routes.count; ++i) {
+        struct json_value item; json_init(&item); json_set_object(&item);
+        bool ok = json_push_kv_str(&item, "id", routes.names[i]) &&
+            json_push_kv_str(&item, "source", "kept") &&
+            json_push_kv_str(&item, "kind", "desktop") &&
+            json_push_kv_str(&item, "raise", "unsupported") &&
+            json_push_kv_str(&item, "validation", "required-on-open") &&
+            json_push_kv_str(&item, "ready_basis", "alive") &&
+            app_list_open_hint(&item, routes.names[i]) && json_push_back(list, &item);
+        json_free(&item);
+        if (!ok) return false;
+    }
+    return true;
 }
 
 /* Say which entries can be opened, and offer the open and the copy of the
@@ -518,7 +556,11 @@ void zcl_native_handle_app_list_launchable(
         (void)json_push_back(&list, &item);
         json_free(&item);
     }
-    (void)json_push_kv(&reply->data, "launchable", &list);
+    if (!app_list_kept(&w->env, &list) || !json_push_kv(&reply->data, "launchable", &list)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "KEPT_LIST_REFUSED", "list", false, false,
+            "kept selections are unreadable, corrupt, or exceed the bounded list", w->env.state_dir);
+    }
     json_free(&list);
     app_list_guide(&w->reg, reply);
     app_list_config(&w->env, &w->reg, &reply->data);

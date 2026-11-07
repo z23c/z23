@@ -42,6 +42,13 @@ int vcs_tree_capture_into(const char *scan, const char *store, uint8_t out[32])
 int vcs_snapshot(struct vcs_repo *repo, const struct vcs_snapshot_meta *meta,
                  uint8_t out[32])
 { (void)repo; (void)meta; return vcs_windows_refuse_hash(out); }
+int vcs_snapshot_from_tree(struct vcs_repo *repo, const uint8_t tree[32],
+    const uint8_t expected_head[32], const struct vcs_snapshot_meta *meta,
+    const struct vcs_snapshot_tree_limits *limits, uint8_t out[32])
+{
+    (void)repo; (void)tree; (void)expected_head; (void)meta; (void)limits;
+    return vcs_windows_refuse_hash(out);
+}
 int vcs_status(struct vcs_repo *repo, vcs_diff_cb cb, void *user,
                size_t *changes)
 { (void)repo; (void)cb; (void)user; if (changes) *changes = 0; return VCS_REFUSED; }

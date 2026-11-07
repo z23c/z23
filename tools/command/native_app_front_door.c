@@ -5,6 +5,8 @@
  * own plan_id. With no terminal and no --yes it plans only. */
 
 #include "command/native_app_front_door.h"
+#include "command/app_selection.h"
+#include "command/native_app_launch.h"
 
 #include "command/native_app_compose.h"
 #include "command/native_command.h"
@@ -39,8 +41,8 @@ static const struct fd_verb k_fd_verbs[] = {
     {"copy", "app.copy", "app", false},
     {"save", "app.save", "copy", false},
     {"build", "app.build", "copy", false},
-    {"share", "app.share", "copy", false},
-    {"receive", "app.receive", "file", false},
+    {"share", "app.share-copy", "copy", false},
+    {"receive", "app.receive-copy", "file", false},
     {"open", "app.run.copy", "copy", true},
 };
 
@@ -444,6 +446,22 @@ static bool fd_words(const char *const *words, size_t count, size_t consumed,
     return *target != NULL;
 }
 
+/* The launcher owns catalog alias resolution and all unreadable-selection
+ * refusals. Only an absent selection permits the CLI copy fallback. */
+static bool fd_open_native_priority(const char *name)
+{
+    if (app_selection_route_reserved(name)) return true;
+    struct app_launch_env env; char why[256];
+    if (!app_launch_env_from_process(&env, why, sizeof(why))) return true;
+    struct app_launch_registry registry;
+    app_launch_registry_load(&env, &registry);
+    if (registry.config_error[0]) return true;
+    const struct app_launch_entry *entry = app_launch_registry_find(&registry, name);
+    if (!entry) return false;
+    struct app_selection selection;
+    return app_selection_load(env.state_dir, entry->id, &selection) != APP_SELECTION_ABSENT;
+}
+
 bool zcl_app_front_door_try(const struct zcl_command_spec *spec,
                             const char *const *words, size_t count,
                             size_t consumed, const char *datadir, int *rc)
@@ -456,6 +474,8 @@ bool zcl_app_front_door_try(const struct zcl_command_spec *spec,
     const char *dd = datadir && datadir[0] ? datadir
                                            : zcl_native_command_datadir();
     bool copy_open = strcmp(spec->path, "app.run.copy") == 0;
+    if (!copy_open && strcmp(spec->path, "app.open") == 0 &&
+        fd_open_native_priority(target)) return false;
     if (strcmp(verb, "open") == 0 && !copy_open && dd &&
         !zcl_str_has_suffix(target, ZCL_PACKAGE_BUNDLE_SUFFIX) &&
         !fd_is_copy(dd, target))

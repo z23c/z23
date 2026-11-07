@@ -186,6 +186,22 @@ QB_COLUMN(wallet_send_once, created_at)
 QB_COLUMN(wallet_send_once, updated_at)
 
 /* Task contents belong to the user, independently of the serving program. */
+QB_TABLE(task_update_offers)
+QB_COLUMN(task_update_offers, app)
+QB_COLUMN(task_update_offers, revision)
+QB_COLUMN(task_update_offers, dismissed)
+QB_COLUMN(task_update_offers, root)
+QB_COLUMN(task_update_offers, receipt)
+QB_COLUMN(task_update_offers, digest)
+QB_COLUMN(task_update_offers, program)
+QB_COLUMN(task_update_offers, config)
+#ifdef QB_SCHEMA_STATEMENT
+QB_SCHEMA_STATEMENT(task_update_offers_create,
+    "CREATE TABLE IF NOT EXISTS task_update_offers("
+    "app TEXT PRIMARY KEY NOT NULL,revision INTEGER NOT NULL,dismissed INTEGER NOT NULL,"
+    "root TEXT NOT NULL,receipt TEXT NOT NULL,digest TEXT NOT NULL,"
+    "program TEXT NOT NULL,config INTEGER NOT NULL)")
+#endif
 QB_TABLE(task_documents)
 QB_COLUMN(task_documents, app)
 QB_COLUMN(task_documents, payload)

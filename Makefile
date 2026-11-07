@@ -2327,6 +2327,7 @@ PRESENTATION_PACKAGE_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	-Iplatform/modules/util/include -Ivendor/x11/include
 PRESENTATION_PACKAGE_SRCS := \
 	contexts/explorer/modules/presentation/src/presentation.c \
+	contexts/explorer/modules/presentation/src/presentation_live_input.c \
 	contexts/explorer/modules/presentation/src/presentation_canvas_model.c \
 	contexts/explorer/modules/presentation/src/presentation_canvas_select.c \
 	contexts/explorer/modules/presentation/src/presentation_focus.c \
@@ -2343,6 +2344,7 @@ PRESENTATION_PACKAGE_SRCS := \
 	platform/modules/base/src/safe_alloc.c
 PRESENTATION_PACKAGE_OBJS := \
 	$(PRESENTATION_BUILD_DIR)/presentation.o \
+	$(PRESENTATION_BUILD_DIR)/presentation_live_input.o \
 	$(PRESENTATION_BUILD_DIR)/presentation_canvas_model.o \
 	$(PRESENTATION_BUILD_DIR)/presentation_canvas_select.o \
 	$(PRESENTATION_BUILD_DIR)/presentation_focus.o \
@@ -2404,6 +2406,8 @@ $(PRESENTATION_BUILD_DIR)/presentation.o: \
 	contexts/explorer/modules/presentation/src/presentation.c \
 	contexts/explorer/modules/presentation/src/presentation_canvas_internal.h \
 	contexts/explorer/modules/presentation/src/presentation_focus_internal.h \
+	contexts/explorer/modules/presentation/src/presentation_live_input_internal.h \
+	contexts/explorer/modules/presentation/src/presentation_live_test_internal.h \
 	contexts/explorer/modules/presentation/src/presentation_validate_internal.h \
 	contexts/explorer/modules/presentation/src/presentation_form_internal.h \
 	contexts/explorer/modules/presentation/include/presentation/presentation.h \
@@ -2415,6 +2419,14 @@ $(PRESENTATION_BUILD_DIR)/presentation.o: \
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
 	contexts/explorer/modules/presentation/src/presentation.c \
 		-o $(PRESENTATION_BUILD_DIR)/presentation.o
+
+$(PRESENTATION_BUILD_DIR)/presentation_live_input.o: \
+	contexts/explorer/modules/presentation/src/presentation_live_input.c \
+	contexts/explorer/modules/presentation/src/presentation_live_input_internal.h \
+	contexts/explorer/modules/presentation/include/presentation/presentation.h \
+	vendor/rgfw/RGFW.h $(PRESENTATION_PROVENANCE_STAMP)
+	@mkdir -p $(PRESENTATION_BUILD_DIR)
+	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c $< -o $@
 
 $(PRESENTATION_BUILD_DIR)/presentation_canvas_select.o: \
 	contexts/explorer/modules/presentation/src/presentation_canvas_select.c \
@@ -2555,6 +2567,25 @@ $(PRESENTATION_PACKAGE_ARCHIVE): $(PRESENTATION_PACKAGE_OBJS) \
 	$(AR) rcs $@ $(PRESENTATION_PACKAGE_OBJS)
 
 presentation-demo: $(PRESENTATION_DEMO_BIN)
+
+.PHONY: presentation-live-smoke
+presentation-live-smoke: $(PRESENTATION_BUILD_DIR)/live-redraw-test
+	$(PRESENTATION_BUILD_DIR)/live-redraw-test
+
+$(PRESENTATION_BUILD_DIR)/presentation-live-test.o: \
+	$(PRESENTATION_BUILD_DIR)/presentation.o \
+	contexts/explorer/modules/presentation/src/presentation_live_test_internal.h
+	@mkdir -p $(PRESENTATION_BUILD_DIR)
+	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -DZCL_TESTING -c \
+		contexts/explorer/modules/presentation/src/presentation.c -o $@
+
+$(PRESENTATION_BUILD_DIR)/live-redraw-test: \
+	contexts/explorer/modules/presentation/tests/test_live_redraw.c \
+	$(PRESENTATION_BUILD_DIR)/presentation-live-test.o $(PRESENTATION_PACKAGE_ARCHIVE)
+	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -DZCL_TESTING \
+		contexts/explorer/modules/presentation/tests/test_live_redraw.c \
+		$(PRESENTATION_BUILD_DIR)/presentation-live-test.o \
+		$(PRESENTATION_PACKAGE_ARCHIVE) $(PRESENTATION_HOST_LIBS) -o $@
 
 .PHONY: presentation-macos-smoke
 ifeq ($(PRESENTATION_HOST_OS),Darwin)

@@ -6902,14 +6902,20 @@ static int test_app_features_leaves(void)
     int failures = 0;
     const struct zcl_command_registry *reg = zcl_command_catalog();
     TEST("app feature leaves: reads bridged, finished writes READY, rest closed") {
+        const struct zcl_command_spec *features = find_spec(reg, "app.features");
+        ASSERT(features != NULL);
+        ASSERT_EQ(features->mode, ZCL_COMMAND_MODE_BRANCH);
+        ASSERT_STR_EQ(features->parent, "app");
         const char *branches[] = {
             "app.names", "app.tokens", "app.messaging", "app.market", "app.swap",
+            "app.oprindex", "app.store", "app.shop", "app.qr",
+            "app.presentation", "app.blog", "app.payments",
         };
         for (size_t i = 0; i < sizeof(branches) / sizeof(branches[0]); i++) {
             const struct zcl_command_spec *b = find_spec(reg, branches[i]);
             ASSERT(b != NULL);
             ASSERT_EQ(b->mode, ZCL_COMMAND_MODE_BRANCH);
-            ASSERT_STR_EQ(b->parent, "app");
+            ASSERT_STR_EQ(b->parent, "app.features");
         }
         const struct zcl_command_spec *content_branch =
             find_spec(reg, "app.market.content");

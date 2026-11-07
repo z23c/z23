@@ -180,6 +180,45 @@ bool mcp_policy_app_open(const struct zcl_command_spec *spec)
            spec->layer == ZCL_COMMAND_LAYER_APP;
 }
 
+bool mcp_policy_app_keep(const struct zcl_command_spec *spec)
+{
+    return spec && spec->mode != ZCL_COMMAND_MODE_BRANCH &&
+           strcmp(spec->path, "app.keep") == 0 &&
+           spec->effect == ZCL_COMMAND_EFFECT_MUTATE &&
+           spec->risk == ZCL_COMMAND_RISK_APP_WRITE &&
+           spec->authority != ZCL_COMMAND_AUTH_OWNER &&
+           spec->layer == ZCL_COMMAND_LAYER_APP;
+}
+
+bool mcp_policy_app_adopt(const struct zcl_command_spec *spec)
+{
+    return spec && spec->path && strcmp(spec->path, "app.adopt") == 0 &&
+           spec->availability == ZCL_COMMAND_READY && spec->mode == ZCL_COMMAND_MODE_SYNC &&
+           spec->effect == ZCL_COMMAND_EFFECT_MUTATE && spec->risk == ZCL_COMMAND_RISK_APP_WRITE &&
+           spec->authority == ZCL_COMMAND_AUTH_OWNER && spec->layer == ZCL_COMMAND_LAYER_APP &&
+           spec->scope == ZCL_COMMAND_SCOPE_LOCAL && spec->confirmation == ZCL_COMMAND_CONFIRM_NONE;
+}
+
+bool mcp_policy_app_receive(const struct zcl_command_spec *spec)
+{
+    return spec && spec->path && strcmp(spec->path, "app.receive") == 0 &&
+           spec->availability == ZCL_COMMAND_READY && spec->mode == ZCL_COMMAND_MODE_SYNC &&
+           spec->effect == ZCL_COMMAND_EFFECT_MUTATE && spec->risk == ZCL_COMMAND_RISK_APP_WRITE &&
+           spec->authority == ZCL_COMMAND_AUTH_OWNER && spec->layer == ZCL_COMMAND_LAYER_APP &&
+           spec->scope == ZCL_COMMAND_SCOPE_LOCAL && spec->confirmation == ZCL_COMMAND_CONFIRM_NONE &&
+           spec->transports == ZCL_COMMAND_TRANSPORT_NATIVE;
+}
+
+bool mcp_policy_app_share(const struct zcl_command_spec *spec)
+{
+    return spec && spec->path && strcmp(spec->path, "app.share") == 0 &&
+           spec->availability == ZCL_COMMAND_READY && spec->mode == ZCL_COMMAND_MODE_SYNC &&
+           spec->effect == ZCL_COMMAND_EFFECT_MUTATE && spec->risk == ZCL_COMMAND_RISK_APP_WRITE &&
+           spec->authority == ZCL_COMMAND_AUTH_OWNER && spec->layer == ZCL_COMMAND_LAYER_APP &&
+           spec->scope == ZCL_COMMAND_SCOPE_LOCAL && spec->confirmation == ZCL_COMMAND_CONFIRM_NONE &&
+           spec->transports == ZCL_COMMAND_TRANSPORT_NATIVE;
+}
+
 /* Read leaves that return wallet amounts without declaring the wallet
  * request capability: the metaverse custody reports and the agent grant and
  * spend telemetry and the store purchase history. */

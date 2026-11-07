@@ -3260,6 +3260,10 @@ i32 RGFW_init_ptr(RGFW_info* info) {
 
     RGFW_initKeycodes();
     i32 out = RGFW_initPlatform();
+    if (out < 0) {
+        RGFW_setInfo(NULL);
+        return out;
+    }
     RGFW_sendDebugInfo(RGFW_typeInfo, RGFW_infoGlobal, "global context initialized");
 
 	return out;
@@ -3285,7 +3289,9 @@ void RGFW_deinit_ptr(RGFW_info* info) {
 RGFW_window* RGFW_createWindow(const char* name, i32 x, i32 y, i32 w, i32 h, RGFW_windowFlags flags) {
 	RGFW_window* win = (RGFW_window*)RGFW_ALLOC(sizeof(RGFW_window));
 	RGFW_ASSERT(win != NULL);
-    return RGFW_createWindowPtr(name, x, y, w, h, flags, win);
+    RGFW_window* result = RGFW_createWindowPtr(name, x, y, w, h, flags, win);
+    if (result == NULL) RGFW_FREE(win);
+    return result;
 }
 
 void RGFW_window_close(RGFW_window* win) {
@@ -3297,7 +3303,7 @@ void RGFW_window_close(RGFW_window* win) {
 RGFW_window* RGFW_createWindowPtr(const char* name, i32 x, i32 y, i32 w, i32 h, RGFW_windowFlags flags, RGFW_window* win) {
 	RGFW_ASSERT(win != NULL);
 	RGFW_MEMSET(win, 0, sizeof(RGFW_window));
-	if (_RGFW == NULL) RGFW_init();
+	if (_RGFW == NULL && RGFW_init() < 0) return NULL;
     _RGFW->windowCount++;
 
 	/* rect based the requested flags */
@@ -7304,9 +7310,13 @@ void RGFW_deinitPlatform_X11(void) {
 
     #if !defined(RGFW_NO_X11_CURSOR_PRELOAD) && !defined(RGFW_NO_X11_CURSOR)
         RGFW_FREE_LIBRARY(X11Cursorhandle);
+        XcursorImageLoadCursorSRC = NULL;
+        XcursorImageCreateSRC = NULL;
+        XcursorImageDestroySRC = NULL;
     #endif
     #if !defined(RGFW_NO_XINPUT2) && !defined(RGFW_NO_X11_XI_PRELOAD)
         RGFW_FREE_LIBRARY(X11Xihandle);
+        XISelectEventsSRC = NULL;
     #endif
 
     #ifdef RGFW_USE_XDL
@@ -7315,6 +7325,11 @@ void RGFW_deinitPlatform_X11(void) {
 
     #if !defined(RGFW_NO_X11_EXT_PRELOAD)
         RGFW_FREE_LIBRARY(X11XEXThandle);
+        XSyncCreateCounterSRC = NULL;
+        XSyncIntToValueSRC = NULL;
+        XSyncSetCounterSRC = NULL;
+        XShapeCombineRegionSRC = NULL;
+        XShapeCombineMaskSRC = NULL;
     #endif
 }
 
@@ -11776,6 +11791,9 @@ void RGFW_initKeycodesPlatform(void) {
 }
 
 i32 RGFW_initPlatform(void) {
+	/* Objective-C classes live for the process, beyond RGFW deinit. */
+	static Class viewClasses[2];
+	static Class delegateClass;
 	class_addMethod(objc_getClass("NSObject"), sel_registerName("windowShouldClose:"), (IMP)(void*)RGFW_OnClose, 0);
 
 	/* NOTE(EimaMei): Fixes the 'Boop' sfx from constantly playing each time you click a key. Only a problem when running in the terminal. */
@@ -11787,9 +11805,15 @@ i32 RGFW_initPlatform(void) {
 	((void (*)(id, SEL, NSUInteger))objc_msgSend)
 		((id)_RGFW->NSApp, sel_registerName("setActivationPolicy:"), NSApplicationActivationPolicyRegular);
 
-	_RGFW->customViewClasses[0] = objc_allocateClassPair(objc_getClass("NSView"), "RGFWCustomView", 0);
-	_RGFW->customViewClasses[1] = objc_allocateClassPair(objc_getClass("NSOpenGLView"), "RGFWOpenGLCustomView", 0);
+	const char* viewNames[2] = { "RGFWCustomView", "RGFWOpenGLCustomView" };
+	const char* viewParents[2] = { "NSView", "NSOpenGLView" };
 	for (size_t i = 0; i < 2; i++) {
+		if (viewClasses[i]) {
+			_RGFW->customViewClasses[i] = viewClasses[i];
+			continue;
+		}
+		_RGFW->customViewClasses[i] = objc_allocateClassPair(objc_getClass(viewParents[i]), viewNames[i], 0);
+		if (!_RGFW->customViewClasses[i]) return -1;
 		class_addIvar((Class)_RGFW->customViewClasses[i], "RGFW_window", sizeof(RGFW_window*), sizeof(RGFW_window*), "L");
 		class_addMethod((Class)_RGFW->customViewClasses[i], sel_registerName("drawRect:"), (IMP)RGFW__osxDrawRect, "v@:{CGRect=ffff}");
 		class_addMethod((Class)_RGFW->customViewClasses[i], sel_registerName("viewDidChangeBackingProperties"), (IMP)RGFW__osxViewDidChangeBackingProperties, "v@:");
@@ -11814,8 +11838,14 @@ i32 RGFW_initPlatform(void) {
 		class_addMethod((Class)_RGFW->customViewClasses[i], sel_registerName("wantsUpdateLayer"), (IMP)RGFW__osxWantsUpdateLayer, "B@:");
 		class_addMethod((Class)_RGFW->customViewClasses[i], sel_registerName("updateLayer"), (IMP)RGFW__osxUpdateLayer, "v@:");
 		objc_registerClassPair((Class)_RGFW->customViewClasses[i]);
+		viewClasses[i] = (Class)_RGFW->customViewClasses[i];
+	}
+	if (delegateClass) {
+		_RGFW->customWindowDelegateClass = delegateClass;
+		return 0;
 	}
 	_RGFW->customWindowDelegateClass = objc_allocateClassPair(objc_getClass("NSObject"), "RGFWWindowDelegate", 0);
+	if (!_RGFW->customWindowDelegateClass) return -1;
 	class_addIvar((Class)_RGFW->customWindowDelegateClass, "RGFW_window", sizeof(RGFW_window*), sizeof(RGFW_window*), "L");
 	class_addMethod((Class)_RGFW->customWindowDelegateClass, sel_registerName("windowDidResize:"), (IMP)RGFW__osxDidWindowResize, "v@:@");
 	class_addMethod((Class)_RGFW->customWindowDelegateClass, sel_registerName("windowDidMove:"), (IMP) RGFW__osxWindowMove, "");
@@ -11830,6 +11860,7 @@ i32 RGFW_initPlatform(void) {
 	class_addMethod((Class)_RGFW->customWindowDelegateClass, sel_registerName("prepareForDragOperation:"), (IMP)RGFW__osxPrepareForDragOperation, "B@:@");
 	class_addMethod((Class)_RGFW->customWindowDelegateClass, sel_registerName("performDragOperation:"), (IMP)RGFW__osxPerformDragOperation, "B@:@");
 	objc_registerClassPair((Class)_RGFW->customWindowDelegateClass);
+	delegateClass = (Class)_RGFW->customWindowDelegateClass;
 	return 0;
 }
 

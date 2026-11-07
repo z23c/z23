@@ -83,6 +83,29 @@ program is refused, and cancellation or failed execution leaves your working
 program and data in place. Going back changes the program, never restores an
 old task snapshot.
 
+An AI can offer an installed update while the task list stays open. Read the
+current offer revision, then submit the exact installed program with that
+revision (the first revision is `0`):
+
+```bash
+z23 app tasks --input='{"action":"offer-status","datadir":"/tmp/z23-tasks-demo"}'
+z23 app tasks --input='{"action":"offer","datadir":"/tmp/z23-tasks-demo","expected_offer_revision":0,"preview_root":"ROOT","preview_receipt":"RECEIPT","preview_program":"bin/ztasks"}'
+```
+
+The offer and offer-status responses contain proposal and currently kept program
+metadata, not task contents. For sharing the version you kept, use `kept_root`
+when `has_kept_program` is true. `preview_root` may name a newer offer. Offering
+verifies the installed artifact and saves a proposal; it does not run or keep
+the program. In the open app, choose **More / Undo → Updates** to discover it,
+then **Try update → Allow preview**. A newer offer cannot replace the program
+already awaiting permission or Keep. Discarding or keeping that preview leaves
+a newer offer available. Explicit preview inputs supplied when opening the app
+take priority until discarded. Preview execution needs the installed package
+verifier; ordinary task editing does not.
+
+<!-- claim: symbol-present task_update_offer_submit contexts/commons/services/src/task_update_offer.c # inert exact installed update handoff -->
+<!-- claim: symbol-present task_update_check_offer contexts/commons/services/src/task_update_offer.c # on-demand discovery retains preview selection -->
+
 ## Choose a native app and its configuration
 
 Choose an installed artifact built for your operating system, CPU architecture

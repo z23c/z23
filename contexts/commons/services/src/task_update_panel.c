@@ -26,8 +26,8 @@ static struct zcl_result tup_ready(struct task_list *list, uint32_t action)
 {
     struct task_update *update = list->update;
         if (action == 0) return task_update_keep(update);
-        if (action == 1) task_update_cancel(update);
-        if (action == 2) list->permission = 1;
+        if (action == 1) return task_update_discard(update);
+        if (action == 2) { list->permission = 1; update->offer_locked = true; }
         if (action == 3) list->updates = false;
     return ZCL_OK;
 }
@@ -39,6 +39,7 @@ struct zcl_result task_update_panel_action(struct task_list *list, uint32_t acti
     if (list->permission) {
         unsigned permission = list->permission;
         list->permission = 0;
+        update->offer_locked = false;
         if (action == 0) return task_update_try(update, true, permission == 2);
         if (action == 2) list->updates = false;
         return ZCL_OK;
@@ -50,10 +51,14 @@ struct zcl_result task_update_panel_action(struct task_list *list, uint32_t acti
     } else if (update->ready) {
         return tup_ready(list, action);
     } else {
-        if (action == 0) list->permission = 1;
-        if (action == 1) list->permission = 2;
+        if (action == 0) {
+            if (!update->candidate.package_root[0])
+                return ZCL_ERR(-1, "No update is waiting. Ask your AI to offer an installed update, then reopen Updates.");
+            list->permission = 1; update->offer_locked = true;
+        }
+        if (action == 1) { list->permission = 2; update->offer_locked = true; }
         if (action == 2) list->updates = false;
-        if (action == 3) task_update_cancel(update);
+        if (action == 3) return task_update_discard(update);
     }
     return ZCL_OK;
 }

@@ -39,6 +39,12 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 #define VCS_OBJECT_PATH_MAX 4096
 /* Defensive cap on a single object read into RAM (256 MiB), mirroring the
@@ -481,25 +487,53 @@ bool vcs_object_put_addressed_repair(const char *repo_root,
     return ok;
 }
 
+/* Link count must come from the retained descriptor, not a pathname precheck.
+ * A strict read refuses legacy staging aliases without retiring them. */
+static bool object_single_link(const struct platform_positioned_file *file)
+{
+    intptr_t native = platform_positioned_file_native_fd(file);
+    if (native == -1) return false;
+#if defined(_WIN32)
+    BY_HANDLE_FILE_INFORMATION info;
+    return GetFileInformationByHandle((HANDLE)native, &info) && info.nNumberOfLinks == 1;
+#else
+    struct stat st;
+    return fstat((int)native, &st) == 0 && S_ISREG(st.st_mode) && st.st_nlink == 1;
+#endif
+}
+
+static bool object_open_read(struct platform_positioned_file *file,
+    const char *repo_root, const uint8_t addr[32], bool recover)
+{
+    char path[VCS_OBJECT_PATH_MAX];
+    if (recover) {
+        return object_path(repo_root, addr, path, sizeof(path)) &&
+            object_recover_legacy_alias(repo_root, path) &&
+            platform_positioned_file_open(file, path);
+    }
+    /* Empty root yields /.zvcs/objects/...; remove only that leading slash
+     * and resolve all components beneath the caller's existing repo root. */
+    return object_path("", addr, path, sizeof(path)) &&
+        platform_positioned_file_open_beneath(file, repo_root, path + 1) &&
+        object_single_link(file);
+}
+
 /* Read the whole object file at addr into *out (caller frees). No hash
  * verification here — the caller owns it. */
 static int object_read(const char *repo_root, const uint8_t addr[32],
-                       size_t maximum_bytes,
+                       size_t maximum_bytes, bool recover,
                        uint8_t **out, size_t *out_len)
 {
     *out = NULL;
     *out_len = 0;
-    char path[VCS_OBJECT_PATH_MAX];
-    if (!object_path(repo_root, addr, path, sizeof(path)))
-        LOG_ERR("vcs", "object path too long");
-    if (!object_recover_legacy_alias(repo_root, path))
-        LOG_ERR("vcs", "object has an unexplained hard link");
     struct platform_positioned_file file;
     struct platform_positioned_file_snapshot before, after;
     platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open(&file, path) ||
-        !platform_positioned_file_snapshot(&file, &before))
-        LOG_ERR("vcs", "open %s: %s", path, strerror(errno));
+    if (!object_open_read(&file, repo_root, addr, recover) ||
+        !platform_positioned_file_snapshot(&file, &before)) {
+        platform_positioned_file_close(&file);
+        LOG_ERR("vcs", "object read open or descriptor validation refused");
+    }
     if (before.size > VCS_OBJECT_MAX_BYTES) {
         platform_positioned_file_close(&file);
         LOG_ERR("vcs", "object too large: %llu",
@@ -517,10 +551,11 @@ static int object_read(const char *repo_root, const uint8_t addr[32],
         int64_t nr = platform_positioned_file_read(&file, buf, len, 0);
         if (nr != (int64_t)len) {
             free(buf); platform_positioned_file_close(&file);
-            LOG_ERR("vcs", "short read on %s", path);
+            LOG_ERR("vcs", "short object read");
         }
     }
-    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+    bool stable = (recover || object_single_link(&file)) &&
+                  platform_positioned_file_snapshot(&file, &after) &&
                   platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
     if (!stable) { free(buf); LOG_ERR("vcs", "object changed while read"); }
@@ -538,7 +573,7 @@ int vcs_object_get(const char *repo_root, const uint8_t hash[32], uint8_t tag,
         LOG_ERR("vcs", "null arg to object_get");
     uint8_t *buf = NULL;
     size_t len = 0;
-    if (object_read(repo_root, hash, VCS_OBJECT_MAX_BYTES, &buf, &len) != 0)
+    if (object_read(repo_root, hash, VCS_OBJECT_MAX_BYTES, true, &buf, &len) != 0)
         return -1;
     uint8_t recomputed[32];
     vcs_sha3_tag(tag, buf, len, recomputed);
@@ -558,7 +593,7 @@ int vcs_object_load_raw(const char *repo_root, const uint8_t address[32],
     if (out_len) *out_len = 0;
     if (!repo_root || !address || !out_content || !out_len)
         LOG_ERR("vcs", "null arg to object_load_raw");
-    return object_read(repo_root, address, VCS_OBJECT_MAX_BYTES,
+    return object_read(repo_root, address, VCS_OBJECT_MAX_BYTES, true,
                        out_content, out_len);
 }
 
@@ -571,6 +606,38 @@ int vcs_object_load_raw_bounded(const char *repo_root,
     if (out_len) *out_len = 0;
     if (!repo_root || !address || !out_content || !out_len)
         LOG_ERR("vcs", "null arg to object_load_raw_bounded");
-    return object_read(repo_root, address, maximum_bytes,
+    return object_read(repo_root, address, maximum_bytes, true,
                        out_content, out_len);
+}
+
+int vcs_object_load_raw_readonly_bounded(const char *repo_root,
+    const uint8_t address[32], size_t maximum_bytes,
+    uint8_t **out_content, size_t *out_len)
+{
+    if (out_content) *out_content = NULL;
+    if (out_len) *out_len = 0;
+    if (!repo_root || !address || !out_content || !out_len)
+        LOG_ERR("vcs", "null arg to readonly object read");
+    return object_read(repo_root, address, maximum_bytes, false, out_content, out_len);
+}
+
+int vcs_object_get_readonly_bounded(const char *repo_root,
+    const uint8_t hash[32], uint8_t tag, size_t maximum_bytes,
+    uint8_t **out_content, size_t *out_len)
+{
+    if (out_content) *out_content = NULL;
+    if (out_len) *out_len = 0;
+    if (!repo_root || !hash || !out_content || !out_len)
+        LOG_ERR("vcs", "null arg to readonly tagged object read");
+    uint8_t *bytes = NULL; size_t len = 0;
+    int result = object_read(repo_root, hash, maximum_bytes, false, &bytes, &len);
+    if (result != 0) return result;
+    uint8_t actual[32];
+    vcs_sha3_tag(tag, bytes, len, actual);
+    if (memcmp(actual, hash, 32)) {
+        free(bytes);
+        LOG_ERR("vcs", "readonly object hash mismatch");
+    }
+    *out_content = bytes; *out_len = len;
+    return 0;
 }

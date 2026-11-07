@@ -10,6 +10,7 @@
 #endif
 
 #include "command/native_app_launch.h"
+#include "command/app_selection.h"
 
 #include "platform/os_proc.h"
 #include "util/log_macros.h"
@@ -49,6 +50,15 @@ static const struct app_builtin k_app_builtins[] = {
 };
 
 #define APP_TSV_MAX_BYTES 16384u
+
+bool app_launch_kept_entry(const char *name, struct app_launch_entry *out)
+{
+    if (!out || !app_selection_route_valid(name)) return false;
+    memset(out, 0, sizeof(*out));
+    (void)snprintf(out->id, sizeof(out->id), "%s", name);
+    /* No argv, marker or signal declaration may come from the received copy. */
+    return true;
+}
 
 static bool app_copy(char *dst, size_t cap, const char *src, size_t len)
 {

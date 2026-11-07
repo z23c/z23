@@ -7,11 +7,13 @@
  * declared input_keys CSV before this runs. */
 
 #include "kernel/command_registry.h"
+#include "base/hex.h"
 
 #include "command_registry_internal.h"
 
 #include "json/json.h"
 #include "session/fleet_board_proto.h"
+#include "zutf8/zutf8.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -358,11 +360,22 @@ static bool cr_match_presentation(const char *path, const char *key,
     return false;
 }
 
+static bool cr_match_app_keep(const char *path, const char *key,
+                              const struct json_value *value, bool *type_ok)
+{
+    if ((strcmp(path, "app.keep") != 0 && strcmp(path, "app.edit") != 0) ||
+        strcmp(key, "expected_revision") != 0)
+        return false;
+    *type_ok = cr_int_range(value, 0, INT64_MAX - 1);
+    return true;
+}
+
 static bool cr_match_tasks(const char *path, const char *key,
                             const struct json_value *value, bool *type_ok)
 {
     if (strcmp(path, "app.tasks") != 0) return false;
-    if (strcmp(key, "expected_revision") == 0) {
+    if (strcmp(key, "expected_revision") == 0 ||
+        strcmp(key, "expected_offer_revision") == 0) {
         *type_ok = cr_int_range(value, 0, INT64_MAX);
         return true;
     }
@@ -733,6 +746,21 @@ static const struct cr_int_bound *cr_device_host_bound(const char *path,
 }
 /* A descriptor owns both discovery and validation for these leaf-scoped
  * integers. Unrelated leaves retain the ordinary string default. */
+static const struct cr_int_bound *cr_app_customize_bound(const char *path,
+                                                        const char *key)
+{
+    if (strcmp(path, "app.customize") != 0) return NULL;
+    static const struct cr_int_bound bounds[] = {
+        { "expected_revision", 0, INT64_MAX },
+        { "offset", 0, 1024 * 1024 },
+        { "limit", 1, 512 },
+        { "page", 0, 16384 }
+    };
+    for (size_t i = 0; i < sizeof bounds / sizeof bounds[0]; i++)
+        if (strcmp(key, bounds[i].key) == 0) return &bounds[i];
+    return NULL;
+}
+
 static const struct cr_int_bound *cr_history_bound(const char *path,
                                                    const char *key)
 {
@@ -845,6 +873,8 @@ static const struct cr_int_bound *cr_leaf_int_bound(const char *path,
     if (docs) return docs;
     const struct cr_int_bound *history = cr_history_bound(path, key);
     if (history) return history;
+    const struct cr_int_bound *customize = cr_app_customize_bound(path, key);
+    if (customize) return customize;
     const struct cr_int_bound *bound = cr_device_host_bound(path, key);
     return bound ? bound : cr_device_package_bound(path, key);
 }
@@ -934,14 +964,33 @@ static bool cr_match_canary_started_ts(const char *path, const char *key,
     return true;
 }
 
+static bool cr_match_app_adopt(const char *path, const char *key,
+                               const struct json_value *value, bool *type_ok)
+{
+    if (strcmp(path, "app.adopt") != 0 || strcmp(key, "release_root") != 0)
+        return false;
+    const char *root = json_get_str(value);
+    uint8_t decoded[32];
+    *type_ok = root && strlen(root) == 64 && zcl_hex_decode_lower(root, decoded, sizeof(decoded));
+    return true;
+}
+
+static bool cr_match_app_inputs(const char *path, const char *key,
+                                const struct json_value *value, bool *type_ok)
+{
+    return cr_match_presentation(path, key, value, type_ok) ||
+           cr_match_app_adopt(path, key, value, type_ok) ||
+           cr_match_app_keep(path, key, value, type_ok) ||
+           cr_match_tasks(path, key, value, type_ok);
+}
+
 static bool cr_match_path_special(const struct zcl_command_spec *spec,
                                   const char *key,
                                   const struct json_value *value,
                                   bool *type_ok)
 {
     const char *path = spec && spec->path ? spec->path : "";
-    if (cr_match_presentation(path, key, value, type_ok) ||
-        cr_match_tasks(path, key, value, type_ok))
+    if (cr_match_app_inputs(path, key, value, type_ok))
         return true;
     if (cr_match_fleet_steer(path, key, value, type_ok) ||
         cr_match_machine_boot(path, key, value, type_ok))
@@ -1142,6 +1191,33 @@ static bool cr_soak_descriptor(const struct zcl_command_spec *spec, const char *
     return false;
 }
 
+/* Derive discovery from the existing leaf-scoped boolean table; do not
+ * duplicate its allowed paths or make execution consent a global key. */
+static bool cr_execution_consent_descriptor(const struct zcl_command_spec *spec,
+    const char *key, struct zcl_command_input_descriptor *out)
+{
+    if (strcmp(key, "accept_execution")) return false;
+    const struct json_value probe = {.type = JSON_BOOL};
+    bool accepted = false;
+    if (!zcl_command_registry_devagent_input_ok(spec->path, key, &probe, &accepted) ||
+        !accepted) return false;
+    out->type = JSON_BOOL;
+    return true;
+}
+
+static bool cr_app_edit_content(const struct zcl_command_spec *spec, const char *key)
+{
+    return spec && spec->path && !strcmp(spec->path, "app.edit") &&
+        !strcmp(key, "content");
+}
+
+static bool cr_app_edit_text_ok(const struct json_value *value)
+{
+    const char *text = value->type == JSON_STR ? json_get_str(value) : NULL;
+    return text && strlen(text) <= ZCL_COMMAND_APP_EDIT_CONTENT_MAX &&
+        zutf8_validate(text);
+}
+
 bool zcl_command_registry_input_descriptor(
     const struct zcl_command_spec *spec, const char *key,
     struct zcl_command_input_descriptor *out)
@@ -1156,7 +1232,14 @@ bool zcl_command_registry_input_descriptor(
     memset(out, 0, sizeof(*out));
     if (!cr_descriptor_declared(spec, key))
         return false;
-    if (cr_soak_descriptor(spec, key, out)) return true;
+    if (cr_app_edit_content(spec, key)) {
+        out->type = JSON_STR;
+        out->max_bytes = ZCL_COMMAND_APP_EDIT_CONTENT_MAX;
+        out->required = true;
+        return true;
+    }
+    if (cr_soak_descriptor(spec, key, out) ||
+        cr_execution_consent_descriptor(spec, key, out)) return true;
     const struct cr_int_bound *host_bound = cr_leaf_int_bound(spec->path, key);
     if (host_bound) {
         out->type = JSON_INT;
@@ -1246,6 +1329,12 @@ bool command_registry_input_value_type_ok(const struct zcl_command_spec *spec,
     if (!type_ok || !key || !value)
         return false;
     *type_ok = false;
+    /* Empty replacement is valid (an empty saved file). Match the handler's
+     * UTF-8 and byte bound without widening any other leaf's content field. */
+    if (cr_app_edit_content(spec, key)) {
+        *type_ok = cr_app_edit_text_ok(value);
+        return true;
+    }
     struct zcl_command_input_descriptor descriptor;
     if (zcl_command_registry_input_descriptor(spec, key, &descriptor)) {
         *type_ok = cr_descriptor_value_ok(key, value, &descriptor);

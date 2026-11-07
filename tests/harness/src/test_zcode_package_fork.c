@@ -23,8 +23,12 @@
 #include "keys/key.h"
 #include "keys/pubkey.h"
 #include "mcp/mcp_policy.h"
+#include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
 #include "sha3/sha3.h"
+#include "storage/event_log.h"
 #include "vcs/package_prepare.h"
+#include "vcs/package_checkout.h"
 #include "vcs/package_release.h"
 #include "vcs/vcs.h"
 
@@ -33,6 +37,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #ifdef ZCL_TESTING
 void zcl_package_copy_test_restore_partial(bool enabled);
@@ -354,8 +361,8 @@ static bool zpf_restore(const char *dir, const char *version)
     return ok;
 }
 
-static void zpf_share_input(struct zpf_call *c, const struct zpf_world *w,
-                            const char *dir)
+static void zpf_share_input_at_day(struct zpf_call *c, const struct zpf_world *w,
+                                   const char *dir, int day)
 {
     char pubkey[67];
     zpf_begin(c);
@@ -363,7 +370,13 @@ static void zpf_share_input(struct zpf_call *c, const struct zpf_world *w,
     (void)json_push_kv_str(&c->input, "dir", dir);
     (void)json_push_kv_str(&c->input, "datadir", w->datadir);
     (void)json_push_kv_str(&c->input, "publisher_pubkey", pubkey);
-    (void)json_push_kv_int(&c->input, "day", ZPF_DAY);
+    (void)json_push_kv_int(&c->input, "day", day);
+}
+
+static void zpf_share_input(struct zpf_call *c, const struct zpf_world *w,
+                            const char *dir)
+{
+    zpf_share_input_at_day(c, w, dir, ZPF_DAY);
 }
 
 /* Share plan only; returns the refusal-or-pass reply in `c`. */
@@ -639,6 +652,166 @@ static int zpf_share_names_parent(const struct zpf_world *w,
         ASSERT(memcmp(parent, w->origin_release, 32) == 0);
         ASSERT(memcmp(package, w->origin_package, 32) != 0);
         ASSERT(zpf_lineage_names_parent(w, package_hex));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool zpf_head(const char *dir, char version[65])
+{
+    struct zpf_call c;
+    zpf_begin(&c);
+    (void)json_push_kv_str(&c.input, "dir", dir);
+    bool ok = zpf_run("zcode.package.version.list", &c) && zpf_passed(&c);
+    if (ok) (void)snprintf(version, 65, "%s", zpf_data_str(&c, "head_version"));
+    zpf_end(&c);
+    return ok;
+}
+
+static bool zpf_file_digest(const char *dir, uint8_t digest[32])
+{
+    char path[900]; unsigned char buf[4096];
+    (void)snprintf(path, sizeof(path), "%s/%s", dir, ZPF_EDITED);
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    struct sha3_256_ctx ctx; sha3_256_init(&ctx);
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), file)) != 0) sha3_256_write(&ctx, buf, n);
+    bool ok = !ferror(file);
+    if (fclose(file) != 0) ok = false;
+    if (ok) sha3_256_finalize(&ctx, digest);
+    return ok;
+}
+
+struct zpf_log_injection {
+    event_log_t *destination;
+    bool ok;
+    size_t count;
+};
+
+static bool zpf_inject_event(uint64_t offset, enum event_log_type type,
+                             const void *payload, size_t len, void *user)
+{
+    (void)offset;
+    struct zpf_log_injection *injection = user;
+    injection->ok = type == EV_VCS_COMMIT &&
+        event_log_append(injection->destination, type, payload, len) != UINT64_MAX;
+    if (injection->ok) injection->count++;
+    return injection->ok;
+}
+
+static bool zpf_inject_log(const char *source, const char *destination)
+{
+    char from[900], to[900];
+    (void)snprintf(from, sizeof(from), "%s/.zvcs/commits.log", source);
+    (void)snprintf(to, sizeof(to), "%s/.zvcs/commits.log", destination);
+    /* Reframe each foreign record at its destination offset. Raw concatenation
+     * preserves old sentinel offsets and is recovered as a torn append before
+     * the version-chain validator can observe the disconnected commits. */
+    event_log_t *in = event_log_open(from), *out = event_log_open(to);
+    struct zpf_log_injection injection = {.destination = out, .ok = true};
+    bool ok = in && out &&
+        event_log_stream(in, 0, zpf_inject_event, &injection) == 0 &&
+        injection.ok && injection.count > 0;
+    if (in) event_log_close(in);
+    if (out) event_log_close(out);
+    return ok;
+}
+
+static bool zpf_selected_plan(struct zpf_call *c, const struct zpf_world *w,
+                              const char *version)
+{
+    /* The initial head share already used this publisher's weekly allowance. */
+    zpf_share_input_at_day(c, w, w->copy, ZPF_DAY + 7);
+    (void)json_push_kv_str(&c->input, "version", version);
+    return zpf_run("zcode.package.share", c);
+}
+
+static int zpf_selected_plan_identity(const struct zpf_world *w, char n[65],
+                                       char root[65])
+{
+    int failures = 0;
+    TEST("zcode package share: same-tree versions require distinct plans") {
+        struct zpf_call c;
+        char same[65], old_plan[65];
+        uint8_t same_id[32];
+        ASSERT(zpf_append(w->copy, ZPF_EDITED, "/* selected N */\n"));
+        ASSERT(zpf_save(w->copy, n));
+        ASSERT(zpf_selected_plan(&c, w, n) && zpf_passed(&c));
+        (void)snprintf(root, 65, "%s", zpf_data_str(&c, "package_root"));
+        (void)snprintf(old_plan, sizeof(old_plan), "%s", zpf_data_str(&c, "plan_id"));
+        zpf_end(&c);
+        struct vcs_repo *repo = vcs_open(w->copy);
+        const struct vcs_snapshot_meta meta = { .phase = "same-tree" };
+        bool snapped = repo && vcs_snapshot(repo, &meta, same_id) == VCS_OK;
+        vcs_close(repo);
+        ASSERT(snapped);
+        zcl_hex_encode(same_id, 32, same);
+        ASSERT(strcmp(same, n) != 0);
+        ASSERT(zpf_selected_plan(&c, w, same) && zpf_passed(&c));
+        ASSERT(strcmp(zpf_data_str(&c, "package_root"), root) == 0 &&
+               strcmp(zpf_data_str(&c, "plan_id"), old_plan) != 0);
+        zcl_command_reply_free(&c.reply);
+        zcl_command_reply_init(&c.reply, "zcl.test.zcode_package_fork.v1");
+        (void)json_push_kv_str(&c.input, "plan_id", old_plan);
+        (void)json_push_kv_bool(&c.input, "confirm", true);
+        ASSERT(zpf_run("zcode.package.share", &c) && zpf_refused(&c, "PLAN_MISMATCH"));
+        zpf_end(&c);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int zpf_selected_share(const struct zpf_world *w, const char *fork_version)
+{
+    int failures = 0;
+    TEST("zcode package share: select saved version without touching newer dirty work") {
+        struct zpf_call c;
+        char n[65], n1[65], head[65], root[65], plan[65], signature_hex[129];
+        char other_dir[700], other_version[65], broken_dir[700];
+        uint8_t before[32], after[32], digest[32], signature[64], parent[32], package[32];
+        failures += zpf_selected_plan_identity(w, n, root);
+        if (failures) goto _test_next;
+        ASSERT(zpf_append(w->copy, ZPF_EDITED, "/* newer N+1 */\n"));
+        ASSERT(zpf_save(w->copy, n1));
+        ASSERT(zpf_append(w->copy, ZPF_EDITED, "/* unsaved working edit */\n"));
+        ASSERT(zpf_file_digest(w->copy, before));
+        ASSERT(zpf_share_plan(&c, w, w->copy) && zpf_refused(&c, "SHARE_UNSAVED_CHANGES"));
+        zpf_end(&c);
+        ASSERT(zpf_selected_plan(&c, w, "bad") && zpf_refused(&c, "VERSION_UNKNOWN"));
+        zpf_end(&c);
+        (void)snprintf(other_dir, sizeof(other_dir), "%s/other-copy", w->root);
+        ASSERT(zpf_fork(w, w->origin_package_hex, other_dir, NULL));
+        ASSERT(zpf_append(other_dir, ZPF_EDITED, "/* unrelated copy */\n"));
+        ASSERT(zpf_save(other_dir, other_version));
+        (void)snprintf(broken_dir, sizeof(broken_dir), "%s/injected-copy", w->root);
+        ASSERT(zpf_fork(w, w->origin_package_hex, broken_dir, NULL));
+        ASSERT(zpf_inject_log(other_dir, broken_dir));
+        zpf_share_input(&c, w, broken_dir);
+        (void)json_push_kv_str(&c.input, "version", other_version);
+        ASSERT(zpf_run("zcode.package.share", &c) && zpf_refused(&c, "COPY_HISTORY_INVALID"));
+        zpf_end(&c);
+        ASSERT(zpf_selected_plan(&c, w, other_version) && zpf_refused(&c, "VERSION_UNKNOWN"));
+        zpf_end(&c);
+        ASSERT(zpf_selected_plan(&c, w, fork_version) && zpf_refused(&c, "SHARE_NO_CHANGES"));
+        zpf_end(&c);
+        ASSERT(zpf_selected_plan(&c, w, n) && zpf_passed(&c));
+        ASSERT(strcmp(zpf_data_str(&c, "version"), n) == 0 && strcmp(zpf_data_str(&c, "package_root"), root) == 0);
+        (void)snprintf(plan, sizeof(plan), "%s", zpf_data_str(&c, "plan_id"));
+        ASSERT(zcl_hex_decode(zpf_data_str(&c, "signing_digest"), digest, 32) && zpf_sign(ZPF_PLAYER_SEED, digest, signature));
+        zcl_hex_encode(signature, 64, signature_hex);
+        zcl_command_reply_free(&c.reply);
+        zcl_command_reply_init(&c.reply, "zcl.test.zcode_package_fork.v1");
+        (void)json_push_kv_str(&c.input, "plan_id", plan);
+        (void)json_push_kv_str(&c.input, "signature_hex", signature_hex);
+        (void)json_push_kv_bool(&c.input, "confirm", true);
+        ASSERT(zpf_run("zcode.package.share", &c) && zpf_passed(&c));
+        ASSERT(strcmp(zpf_data_str(&c, "version"), n) == 0 && strcmp(zpf_data_str(&c, "package_root"), root) == 0);
+        ASSERT(zpf_release_parent(w, zpf_data_str(&c, "release_id"), parent, package));
+        ASSERT(zcl_hex_decode(root, digest, 32) && memcmp(package, digest, 32) == 0);
+        zpf_end(&c);
+        ASSERT(zpf_head(w->copy, head) && strcmp(head, n1) == 0);
+        ASSERT(zpf_file_digest(w->copy, after) && memcmp(before, after, 32) == 0);
         PASS();
     } _test_next:;
     return failures;
@@ -1072,6 +1245,183 @@ static int zpf_adopt_remix_plan(const struct zpf_world *w,
     return failures;
 }
 
+static bool zpf_name_pick(const char *root, const char *expected)
+{
+    char name[ZCL_PACKAGE_ADOPT_NAME_MAX + 1u], path[4400];
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.copy_name.v1");
+    bool ok = zcl_package_copy_pick_name(root, "Game", name, path, sizeof(path), &reply);
+    bool result = expected ? ok && strcmp(name, expected) == 0 :
+        !ok && strcmp(reply.error.code, "COPY_NAME_UNREADABLE") == 0;
+    zcl_command_reply_free(&reply);
+    return result;
+}
+
+static bool zpf_name_file(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    return f && fclose(f) == 0;
+}
+
+static int zpf_name_occupied(void)
+{
+    int failures = 0;
+    char root[512] = {0}, copies[600], one[650], two[650];
+    TEST("copy names: missing copies is advisory; files and directories occupy suffixes") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "copy_names"));
+        (void)snprintf(copies, sizeof(copies), "%s/copies", root);
+        ASSERT(zpf_name_pick(root, "game-1"));
+        ASSERT(platform_file_shape_read(copies) == PLATFORM_FILE_SHAPE_MISSING);
+        ASSERT(platform_directory_create(copies, 0700) == 0);
+        (void)snprintf(one, sizeof(one), "%s/game-1", copies);
+        (void)snprintf(two, sizeof(two), "%s/game-2", copies);
+        ASSERT(zpf_name_file(one));
+        ASSERT(platform_directory_create(two, 0700) == 0);
+        ASSERT(zpf_name_pick(root, "game-3"));
+        PASS();
+    } _test_next:;
+    if (root[0]) (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
+static int zpf_name_missing_ancestors(void)
+{
+    int failures = 0;
+    char root[512] = {0}, absent[600], nested[650];
+    TEST("copy names: first-use absent datadir and multiple ancestors stay absent") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "copy_names_missing"));
+        (void)snprintf(absent, sizeof(absent), "%s/absent", root);
+        (void)snprintf(nested, sizeof(nested), "%s/one/two", absent);
+        ASSERT(zpf_name_pick(absent, "game-1"));
+        ASSERT(zpf_name_pick(nested, "game-1"));
+        ASSERT(platform_file_shape_read(absent) == PLATFORM_FILE_SHAPE_MISSING);
+        ASSERT(platform_file_shape_read(nested) == PLATFORM_FILE_SHAPE_MISSING);
+        PASS();
+    } _test_next:;
+    if (root[0]) (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
+#if !defined(_WIN32)
+static bool zpf_name_advisory_or_refused(const char *root)
+{
+    char name[ZCL_PACKAGE_ADOPT_NAME_MAX + 1u], path[4400], expected[4400];
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.copy_name.v1");
+    int n = snprintf(expected, sizeof(expected), "%s/copies/game-1", root);
+    bool picked = zcl_package_copy_pick_name(root, "Game", name, path, sizeof(path), &reply);
+    bool ok = picked ? n > 0 && (size_t)n < sizeof(expected) &&
+        !strcmp(name, "game-1") && !strcmp(path, expected) :
+        reply.status != ZCL_COMMAND_STATUS_PASSED && reply.error.code[0] &&
+        reply.error.message[0] && !reply.error.mutated;
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+static bool zpf_name_blocker_unchanged(const char *path)
+{
+    static const char marker[] = "copy-name blocker must survive\n";
+    char bytes[sizeof(marker)];
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(bytes, 1, sizeof(bytes), f);
+    bool ok = n == sizeof(marker) - 1 && !memcmp(bytes, marker, n) &&
+        feof(f) && !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+static bool zpf_name_checkout_refused(const struct zpf_world *w, const char *root)
+{
+    char destination[4400];
+    int n = snprintf(destination, sizeof(destination), "%s/copies/game-1", root);
+    if (n <= 0 || (size_t)n >= sizeof(destination)) return false;
+    struct vcs_package_store *store = vcs_package_store_open(w->datadir, vcs_package_store_quota_bytes());
+    if (!store) return false;
+    struct vcs_package_checkout_metrics metrics;
+    enum vcs_package_checkout_result rc = vcs_package_checkout(
+        store, w->origin_package, destination, &metrics);
+    vcs_package_store_close(store);
+    return rc == VCS_PACKAGE_CHECKOUT_DESTINATION;
+}
+#endif
+
+/* Name selection may stay advisory or improve to an early refusal. The
+ * actual checkout must reject invalid parents without replacing their bytes. */
+static int zpf_name_invalid_parent_advisory(const struct zpf_world *w)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    char root[512] = {0}, copies[600], nested[650];
+    TEST("copy names: invalid parent never becomes an admitted checkout") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "copy_names_notdir"));
+        (void)snprintf(copies, sizeof(copies), "%s/copies", root);
+        ASSERT(zpf_write(root, "copies", "copy-name blocker must survive\n"));
+        (void)snprintf(nested, sizeof(nested), "%s/child", copies);
+        ASSERT(zpf_name_advisory_or_refused(root));
+        ASSERT(zpf_name_advisory_or_refused(nested));
+        ASSERT(zpf_name_blocker_unchanged(copies));
+        ASSERT(zpf_name_checkout_refused(w, root));
+        ASSERT(zpf_name_checkout_refused(w, nested));
+        ASSERT(zpf_name_blocker_unchanged(copies));
+        ASSERT(platform_file_shape_read(copies) == PLATFORM_FILE_SHAPE_REGULAR);
+        PASS();
+    } _test_next:;
+    if (root[0]) (void)test_rm_rf_recursive(root);
+#else
+    (void)w;
+    puts("SKIP (native package checkout is not qualified on Windows)");
+#endif
+    return failures;
+}
+
+static int zpf_name_links(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    char root[512] = {0}, copies[600], one[650];
+    TEST("copy names: dangling leaf occupies suffix without following it") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "copy_names_links"));
+        (void)snprintf(copies, sizeof(copies), "%s/copies", root);
+        ASSERT(platform_directory_create(copies, 0700) == 0);
+        (void)snprintf(one, sizeof(one), "%s/game-1", copies);
+        ASSERT(symlink("missing-target", one) == 0);
+        ASSERT(zpf_name_pick(root, "game-2"));
+        ASSERT(platform_file_shape_read(one) == PLATFORM_FILE_SHAPE_SYMLINK);
+        PASS();
+    } _test_next:;
+    if (root[0]) (void)test_rm_rf_recursive(root);
+#else
+    puts("SKIP (copy-name symlink controls require POSIX symlink fixtures)");
+#endif
+    return failures;
+}
+
+static int zpf_name_unreadable(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    char root[512] = {0}, copies[600] = {0};
+    TEST("copy names: unsearchable copies refuses instead of selecting suffix") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "copy_names_denied"));
+        (void)snprintf(copies, sizeof(copies), "%s/copies", root);
+        ASSERT(platform_directory_create(copies, 0700) == 0);
+        ASSERT(chmod(copies, 0000) == 0);
+        char leaf[650];
+        (void)snprintf(leaf, sizeof(leaf), "%s/game-1", copies);
+        if (platform_file_shape_read(leaf) != PLATFORM_FILE_SHAPE_UNREADABLE) {
+            puts("SKIP (host credentials bypass directory permission refusal)");
+        } else {
+            ASSERT(zpf_name_pick(root, NULL));
+        }
+        PASS();
+    } _test_next:;
+    if (copies[0]) (void)chmod(copies, 0700);
+    if (root[0]) (void)test_rm_rf_recursive(root);
+#else
+    puts("SKIP (copy-name permission control requires POSIX permission fixtures)");
+#endif
+    return failures;
+}
+
 int test_zcode_package_fork(void)
 {
     int failures = 0;
@@ -1085,12 +1435,18 @@ int test_zcode_package_fork(void)
     if (failures)
         return failures;
     failures += zpf_refusal_unknown_root(&w);
+    failures += zpf_name_occupied();
+    failures += zpf_name_missing_ancestors();
+    failures += zpf_name_invalid_parent_advisory(&w);
+    failures += zpf_name_links();
+    failures += zpf_name_unreadable();
     failures += zpf_mcp_confirmation(&w);
     failures += zpf_fork_records_parent(&w, fork_version);
     failures += zpf_no_change_refusals(&w);
     failures += zpf_save_and_restore(&w, fork_version);
     failures += zpf_unsaved_refusal(&w);
     failures += zpf_share_names_parent(&w, shared_release);
+    failures += zpf_selected_share(&w, fork_version);
     failures += zpf_tamper_refusals(&w, shared_release);
     failures += zpf_torn_copy_reads(&w);
     char first[700] = {0}, second[700] = {0};

@@ -8,7 +8,10 @@
  *   - the package root and dependency root of the copy's saved tree, as a
  *     publish would prepare them under the release's publisher key;
  *   - the copy's build store: <datadir>/app_build/{work/<fork>,images,
- *     records}.
+ *     records};
+ *   - carrying a build record across a change that touches no build input
+ *     (app.share's rename of the package), so the copy opens again without
+ *     a rebuild.
  * Every refusal fails the reply with one named code. */
 
 #ifndef ZCL_TOOLS_COMMAND_APP_COPY_BUILD_H
@@ -45,6 +48,34 @@ bool app_copy_build_roots(const char *datadir, const char *copy_dir,
  * PATH_TOO_LONG otherwise. */
 bool app_copy_build_store(const char *datadir, const uint8_t fork[32],
                           struct app_copy_build_store *out,
+                          struct zcl_command_reply *reply);
+
+/* The keys app.build's plan derives for a copy as it stands, read from that
+ * plan's reply: cache_hit says a record under them holds this closure and
+ * its image is stored. */
+struct app_copy_build_keys {
+    bool hit;
+    uint8_t package_root[32];
+    uint8_t closure_root[32];
+    uint8_t env_root[32];
+    uint8_t dependency_root[32];
+};
+
+/* Run app.build's plan (it writes nothing) on copy_dir. False, with the
+ * plan's refusal in `reply`, when the copy cannot be built as it stands. */
+bool app_copy_build_keys(const char *datadir, const char *copy_dir,
+                         struct app_copy_build_keys *out,
+                         struct zcl_command_reply *reply);
+
+/* Save `from`'s build record again under `to`'s package and dependency
+ * roots, after a change to the copy that left every declared build input
+ * byte-identical: `from` was a cache hit, and `to` has the same closure and
+ * env and dependency roots. The image is the one already stored; nothing is rebuilt.
+ * NOT_CARRIED when those do not hold, RECORD_INVALID or RECORD_SAVE_FAILED
+ * otherwise. */
+bool app_copy_build_carry(const char *datadir, const uint8_t fork[32],
+                          const struct app_copy_build_keys *from,
+                          const struct app_copy_build_keys *to,
                           struct zcl_command_reply *reply);
 
 #endif /* ZCL_TOOLS_COMMAND_APP_COPY_BUILD_H */

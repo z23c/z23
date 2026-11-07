@@ -1725,6 +1725,10 @@ ZCL_TEST_GROUP(app_image_build)
 /* app.build on an adopted or received-trusted copy: stub app package,
  * plan/confirm, cache hit with no make, refusals, Landlock containment. */
 ZCL_TEST_GROUP(app_build_copy)
+ZCL_TEST_GROUP(app_adopt)
+ZCL_TEST_GROUP(app_open_selected)
+/* Durable per-app kept selection: exact identity, CAS and corruption. */
+ZCL_TEST_GROUP(app_selection)
 /* The `z23 app` front door journey: copy, save, build, open a copy through
  * resident_launch, share by file, a friend's open of the file; owner
  * authority at MCP, plan-only without a terminal, tamper refusal. */
@@ -1743,6 +1747,7 @@ ZCL_TEST_GROUP(app_seed_skycombat)
 ZCL_TEST_GROUP(app_journey)
 ZCL_TEST_GROUP(app_journey_skycombat)
 ZCL_TEST_GROUP(task_document)
+ZCL_TEST_GROUP(task_update_offer)
 ZCL_TEST_GROUP(package_local)
 /* astro lane: platform/modules/astro's exact fixed-grid arithmetic and the birth chart
  * built on it. The determinism cases are the point — a chart another node
@@ -1949,3 +1954,13 @@ ZCL_TEST_GROUP(clips_record)
 ZCL_TEST_GROUP(clips_manifest)
 ZCL_TEST_GROUP(clips_rating)
 ZCL_TEST_GROUP(genesis_walk_earn_evidence)
+ZCL_TEST_GROUP(app_customize)
+
+ZCL_TEST_GROUP(app_edit)
+ZCL_TEST_GROUP(app_kept_journey)
+
+ZCL_TEST_GROUP(app_personalize)
+ZCL_TEST_GROUP(app_receive)
+
+ZCL_TEST_GROUP(app_share)
+ZCL_TEST_GROUP(app_receive_ui)

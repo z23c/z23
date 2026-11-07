@@ -4550,6 +4550,110 @@ static int test_regtest_mine_native(void)
     return failures;
 }
 
+static int test_tasks_offer_revision_input(void)
+{
+    int failures = 0;
+    TEST("app.tasks: offer revision accepts nonnegative integers only") {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.tasks", NULL);
+        static const struct { const char *body; bool valid; } cases[] = {
+            {"{\"expected_offer_revision\":0}", true},
+            {"{\"expected_offer_revision\":7}", true},
+            {"{\"expected_offer_revision\":9223372036854775807}", true},
+            {"{\"expected_offer_revision\":-1}", false},
+            {"{\"expected_offer_revision\":\"0\"}", false},
+            {"{\"expected_offer_revision\":true}", false},
+        };
+        ASSERT(spec != NULL);
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+            struct json_value input = {0}; char why[256];
+            ASSERT(json_read(&input, cases[i].body, strlen(cases[i].body)));
+            bool valid = zcl_command_registry_input_validate(spec, &input, why, sizeof(why));
+            if (valid != cases[i].valid)
+                printf("  [offer revision case %s: %s]\n", cases[i].body, why);
+            json_free(&input);
+            ASSERT(valid == cases[i].valid);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_selected_app_execution_input(void)
+{
+    int failures = 0;
+    TEST("app.open: execution acceptance is a boolean, never coerced") {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.open", NULL);
+        static const struct { const char *value; bool valid; } cases[] = {
+            {"true", true}, {"false", true}, {"\"true\"", false},
+            {"1", false}, {"null", false},
+        };
+        ASSERT(spec != NULL);
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+            char body[128], why[256]; struct json_value input = {0};
+            (void)snprintf(body, sizeof(body), "{\"name\":\"skycombat\",\"accept_execution\":%s}", cases[i].value);
+            ASSERT(json_read(&input, body, strlen(body)));
+            bool valid = zcl_command_registry_input_validate(spec, &input, why, sizeof(why));
+            json_free(&input);
+            ASSERT(valid == cases[i].valid);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_app_keep_revision_input(void)
+{
+    int failures = 0;
+    TEST("app.keep: expected revision is a nonnegative, non-exhausted integer") {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.keep", NULL);
+        static const struct { const char *value; bool valid; } cases[] = {
+            {"0", true}, {"1", true}, {"9223372036854775806", true},
+            {"9223372036854775807", false}, {"-1", false},
+            {"\"0\"", false}, {"true", false}, {"null", false},
+        };
+        ASSERT(spec != NULL);
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+            struct json_value input = {0}; char why[256], body[1024];
+            (void)snprintf(body, sizeof(body),
+                "{\"name\":\"skycombat\",\"copy\":\"/missing-copy\",\"version\":\"%064d\","
+                "\"env_root\":\"%064d\",\"dependency_root\":\"%064d\","
+                "\"image_sha3\":\"%064d\",\"record_id\":\"%064d\","
+                "\"accept_execution\":true,\"expected_revision\":%s}", 1, 1, 1, 1, 1, cases[i].value);
+            ASSERT(json_read(&input, body, strlen(body)));
+            bool valid = zcl_command_registry_input_validate(spec, &input, why, sizeof(why));
+            if (valid != cases[i].valid) printf("  [keep revision %s: %s]\n", cases[i].value, why);
+            json_free(&input);
+            ASSERT(valid == cases[i].valid);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_app_adopt_release_input(void)
+{
+    int failures = 0;
+    TEST("app.adopt: release root is exactly 64 lowercase hexadecimal characters") {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.adopt", NULL);
+        static const struct { const char *value; bool valid; } cases[] = {
+            {"\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", true},
+            {"\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"", false},
+            {"\"abc\"", false}, {"1", false}, {"true", false}, {"null", false},
+        };
+        ASSERT(spec && spec->authority == ZCL_COMMAND_AUTH_OWNER && spec->scope == ZCL_COMMAND_SCOPE_LOCAL);
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+            char body[256], why[256]; struct json_value input = {0};
+            (void)snprintf(body, sizeof(body), "{\"release_root\":%s}", cases[i].value);
+            ASSERT(json_read(&input, body, strlen(body)));
+            bool valid = zcl_command_registry_input_validate(spec, &input, why, sizeof(why));
+            json_free(&input);
+            ASSERT(valid == cases[i].valid);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* Capture what print_usage writes to stdout. */
 static bool front_door_usage_text(char *wire, size_t cap)
 {
@@ -4634,6 +4738,10 @@ static int test_help_points_to_app_list(void)
 int test_native_api_contract(void)
 {
     int failures = 0;
+    failures += test_tasks_offer_revision_input();
+    failures += test_selected_app_execution_input();
+    failures += test_app_keep_revision_input();
+    failures += test_app_adopt_release_input();
     failures += test_discover_transport_projection();
     failures += test_cli_error_recovery_next();
     failures += test_logs_local_serialization_failure();

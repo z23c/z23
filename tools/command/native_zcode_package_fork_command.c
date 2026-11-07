@@ -118,6 +118,8 @@ struct zpc_walk {
     size_t nonlocal;
     uint8_t expect[32];
     struct vcs_commit oldest;
+    uint8_t target[32];
+    bool target_valid, found;
 };
 
 static bool zpc_local_phase(const struct vcs_commit *c)
@@ -142,6 +144,11 @@ static bool zpc_walk_cb(const struct vcs_commit *c, const uint8_t id[32],
     if (copy->versions == 0) {
         memcpy(copy->head_version, id, 32);
         memcpy(copy->head_tree, c->tree_hash, 32);
+    }
+    if (w->target_valid && memcmp(w->target, id, 32) == 0) {
+        memcpy(copy->selected_version, id, 32);
+        memcpy(copy->selected_tree, c->tree_hash, 32);
+        w->found = true;
     }
     memcpy(w->expect, c->parent, 32);
     memcpy(copy->fork_version, id, 32);
@@ -183,23 +190,11 @@ static struct vcs_repo *zpc_repo_open(const char *dir,
     return vcs_open(dir);
 }
 
-bool zcl_package_copy_open(const char *dir, struct zcl_package_copy *copy,
-                           struct zcl_command_reply *reply,
-                           const char *command)
-{
-    return zcl_package_copy_open_as(dir, ZCL_PACKAGE_COPY_CHECKED, copy,
-                                    reply, command);
-}
-
-bool zcl_package_copy_open_as(const char *dir,
-                              enum zcl_package_copy_access access,
-                              struct zcl_package_copy *copy,
-                              struct zcl_command_reply *reply,
-                              const char *command)
+static bool zpc_history_present(const char *dir, struct zcl_command_reply *reply,
+                                const char *command)
 {
     char log_path[ZPC_PATH_MAX];
     struct stat st;
-    memset(copy, 0, sizeof(*copy));
     int n = snprintf(log_path, sizeof(log_path), "%s/.zvcs/commits.log",
                      dir ? dir : "");
     if (!dir || n <= 0 || (size_t)n >= sizeof(log_path) ||
@@ -210,8 +205,19 @@ bool zcl_package_copy_open_as(const char *dir,
                               dir ? dir : command);
         return false;
     }
+    return true;
+}
+
+static bool zpc_copy_open(const char *dir, enum zcl_package_copy_access access,
+                          struct zcl_package_copy *copy,
+                          struct zcl_command_reply *reply, const char *command,
+                          const char *version)
+{
+    memset(copy, 0, sizeof(*copy));
+    if (!zpc_history_present(dir, reply, command)) return false;
     copy->repo = zpc_repo_open(dir, access);
     struct zpc_walk walk = {.copy = copy};
+    walk.target_valid = version && zcl_hex_decode_lower(version, walk.target, 32);
     bool ok = copy->repo &&
               vcs_log(copy->repo, 0, zpc_walk_cb, &walk) == VCS_OK &&
               !walk.broken && copy->versions > 0 &&
@@ -224,9 +230,48 @@ bool zcl_package_copy_open_as(const char *dir,
                               "altered", dir);
         return false;
     }
+    if (version && !walk.found) {
+        zcl_package_copy_close(copy);
+        zcl_package_copy_fail(reply, "VERSION_UNKNOWN", false,
+                              "version is not in this copy's validated history", command);
+        return false;
+    }
+    if (!version) {
+        memcpy(copy->selected_version, copy->head_version, 32);
+        memcpy(copy->selected_tree, copy->head_tree, 32);
+    }
     /* The fork record itself is the one non-local commit a copy starts with. */
     copy->foreign_versions = walk.nonlocal - 1u;
     return true;
+}
+
+bool zcl_package_copy_open_as(const char *dir,
+                              enum zcl_package_copy_access access,
+                              struct zcl_package_copy *copy,
+                              struct zcl_command_reply *reply,
+                              const char *command)
+{
+    return zpc_copy_open(dir, access, copy, reply, command, NULL);
+}
+
+bool zcl_package_copy_open(const char *dir, struct zcl_package_copy *copy,
+                           struct zcl_command_reply *reply, const char *command)
+{
+    return zcl_package_copy_open_as(dir, ZCL_PACKAGE_COPY_CHECKED, copy,
+                                    reply, command);
+}
+
+bool zcl_package_copy_open_selected(const char *dir, struct zcl_package_copy *copy,
+    struct zcl_command_reply *reply, const char *command, const char *version)
+{
+    return zpc_copy_open(dir, ZCL_PACKAGE_COPY_CHECKED, copy, reply, command, version);
+}
+
+bool zcl_package_copy_open_selected_as(const char *dir,
+    enum zcl_package_copy_access access, struct zcl_package_copy *copy,
+    struct zcl_command_reply *reply, const char *command, const char *version)
+{
+    return zpc_copy_open(dir, access, copy, reply, command, version);
 }
 
 void zcl_package_copy_close(struct zcl_package_copy *copy)

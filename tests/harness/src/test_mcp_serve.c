@@ -267,6 +267,8 @@ static int case_no_checkout_instructions(const char *home)
         ASSERT(ms_call(&m, ms_init_req));
         ASSERT(has(&m, "z23_code needs --checkout=<git toplevel>"));
         ASSERT(!has(&m, "Checkout identity"));
+        ASSERT(has(&m, "Local apps need no repository checkout. Use apps_list to discover them."));
+        ASSERT(has(&m, "To change a kept app, read app.customize through z23_run"));
         ASSERT(ms_finish(&m) == 0);
     } TEST_END
     return failures;
@@ -437,6 +439,71 @@ static int case_initialize(const char *home, const char *checkout,
     return failures;
 }
 
+/* Bound cleanup even if a broken server ignores closed input. */
+static int ms_finish_long_identity(struct ms *m)
+{
+    int status = 0;
+    pid_t waited = 0;
+    close(m->to_child);
+    for (int i = 0; i < 200 && waited == 0; i++) {
+        waited = waitpid(m->pid, &status, WNOHANG);
+        if (waited < 0 && errno == EINTR)
+            waited = 0;
+        if (waited == 0)
+            poll(NULL, 0, 10); /* real-clock: waiting for an actual subprocess to exit */
+    }
+    if (waited == 0) {
+        kill(m->pid, SIGKILL);
+        do {
+            waited = waitpid(m->pid, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+    }
+    close(m->from_child);
+    return waited == m->pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int case_long_identity(const char *home)
+{
+    int failures = 0;
+    char checkout[PATH_MAX], arg[PATH_MAX + 16], err[PATH_MAX + 32];
+    char head[128];
+    struct ms m;
+    bool started = false;
+    TEST_CASE("long checkout identity retains complete editing guidance") {
+        const char *args[] = {MS_BIN, "mcp", "serve", arg, NULL};
+        snprintf(checkout, sizeof(checkout), "%s", home);
+        while (strlen(checkout) < 680) {
+            size_t n = strlen(checkout);
+            size_t len = 680 - n - 1;
+            if (len > 99)
+                len = 99;
+            ASSERT(n + len + 2 < sizeof(checkout));
+            checkout[n++] = '/';
+            memset(checkout + n, 'a', len);
+            checkout[n + len] = '\0';
+            ASSERT(mkdir(checkout, 0700) == 0);
+        }
+        ASSERT(ms_make_checkout(checkout, head, sizeof(head)));
+        snprintf(arg, sizeof(arg), "--checkout=%s", checkout);
+        snprintf(err, sizeof(err), "%s/err_long_init.txt", home);
+        ASSERT(ms_start(&m, args, home, err));
+        started = true;
+        ASSERT(ms_call(&m, ms_init_req));
+        ASSERT(has(&m, "Local apps need no repository checkout. Use apps_list to discover them."));
+        ASSERT(has(&m, "To change a kept app, read app.customize through z23_run"));
+        ASSERT(has(&m, "call z23_code sub=guide with the paths you will touch"));
+        ASSERT(has(&m, "Use select to keep replies small."));
+        int status = ms_finish_long_identity(&m);
+        started = false;
+        ASSERT(status == 0);
+    } TEST_END
+    if (started) {
+        kill(m.pid, SIGKILL);
+        (void)ms_finish_long_identity(&m);
+    }
+    return failures;
+}
+
 static int case_not_toplevel(const char *home, const char *checkout)
 {
     int failures = 0;
@@ -466,15 +533,19 @@ static int case_not_toplevel(const char *home, const char *checkout)
 static int case_list(struct ms *m)
 {
     int failures = 0;
-    TEST_CASE("tools/list holds exactly the six tools") {
+    TEST_CASE("tools/list holds exactly the ten tools") {
         size_t names = 0;
         ASSERT(ms_call(m, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":"
                           "\"tools/list\"}"));
         /* "name":" is a tool name; apps_open's schema key is "name":{. */
         for (const char *p = m->line; (p = strstr(p, "\"name\":\"")); p++)
             names++;
-        ASSERT_EQ(names, 6u);
+        ASSERT_EQ(names, 10u);
         ASSERT(has(m, "\"name\":\"apps_list\"") && has(m, "\"name\":\"apps_open\""));
+        ASSERT(has(m, "\"name\":\"apps_keep\""));
+        ASSERT(has(m, "\"name\":\"apps_adopt\""));
+        ASSERT(has(m, "\"name\":\"apps_receive\""));
+        ASSERT(has(m, "\"name\":\"apps_share\""));
         ASSERT(has(m, "\"name\":\"z23_search\""));
         ASSERT(has(m, "\"name\":\"z23_describe\""));
         ASSERT(has(m, "\"name\":\"z23_run\""));
@@ -1862,6 +1933,7 @@ int test_mcp_serve(void)
     failures += case_relative(home);
     failures += case_args_refused(home);
     failures += case_initialize(home, checkout, head);
+    failures += case_long_identity(home);
     failures += case_not_toplevel(home, checkout);
     failures += case_session(home, checkout);
     failures += case_wiki_search(home, checkout);

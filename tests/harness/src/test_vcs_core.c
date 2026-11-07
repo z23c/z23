@@ -38,6 +38,8 @@
 #include "vcs/package_content.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_recipe.h"
+#include "vcs/package_prepare.h"
+#include "util/file_tree_ops.h"
 #include "vcs/package_swarm.h"
 #include "vcs/source_bundle.h"
 #include "vcs/source_package_checkout.h"
@@ -66,6 +68,51 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#if !defined(_WIN32)
+#include <sqlite3.h>
+#endif
+
+
+#if !defined(_WIN32)
+/* Compile the maintained implementation with TU-local syscall observation.
+ * No production hook, global override or copied materialization loop. */
+static unsigned vcm_flushes, vcm_closes;
+static bool vcm_fail_flush, vcm_fail_close, vcm_fail_write;
+static int vcm_fsync(int fd)
+{
+    ++vcm_flushes;
+    if (vcm_fail_flush) { errno = EIO; return -1; }
+    return fsync(fd);
+}
+static int vcm_close(int fd)
+{
+    ++vcm_closes;
+    int rc = close(fd);
+    if (vcm_fail_close) { errno = EIO; return -1; }
+    return rc;
+}
+static ssize_t vcm_write(int fd, const void *bytes, size_t len)
+{
+    if (vcm_fail_write) { errno = ENOSPC; return -1; }
+    return write(fd, bytes, len);
+}
+#define fsync vcm_fsync
+#define close vcm_close
+#define write vcm_write
+#define vcs_tree_materialize vcm_durable
+#define vcs_tree_materialize_readonly vcm_readonly
+#define vcs_tree_materialize_readonly_disposable vcm_disposable
+int vcm_durable(const char *, const uint8_t[32], const char *, uint64_t, uint32_t);
+int vcm_readonly(const char *, const uint8_t[32], const char *, uint64_t, uint32_t);
+int vcm_disposable(const char *, const uint8_t[32], const char *, uint64_t, uint32_t);
+#include "../../../contexts/commons/modules/vcs/src/vcs_materialize.c"
+#undef vcs_tree_materialize_readonly_disposable
+#undef vcs_tree_materialize_readonly
+#undef vcs_tree_materialize
+#undef write
+#undef close
+#undef fsync
+#endif
 
 #define VC_CHECK(name, expr) do {                                     \
     if (expr) { printf("  vcs_core: %s... OK\n", (name)); }           \
@@ -950,6 +997,107 @@ static int tsb_materialize_mode_roundtrip(struct tsb_ctx *ctx)
 }
 #endif
 
+
+#if !defined(_WIN32)
+typedef int (*vcm_call)(const char *, const uint8_t *, const char *, uint64_t, uint32_t);
+static void vcm_reset(void)
+{
+    vcm_flushes = vcm_closes = 0;
+    vcm_fail_flush = vcm_fail_close = vcm_fail_write = false;
+}
+static int tsb_materialize_observed(struct tsb_ctx *ctx, vcm_call call, bool durable)
+{
+    int failures = 0; char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "materialize-observed");
+    vcm_reset();
+    mode_t saved = umask(0077);
+    int rc = call(ctx->consumer, ctx->first_root, dir,
+                  VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0);
+    (void)umask(saved);
+    VC_CHECK("materialization succeeds and closes every file", rc == VCS_OK && vcm_closes == 4);
+    VC_CHECK("only durable materialization flushes files",
+             vcm_flushes == (durable ? 4u : 0u));
+    VC_CHECK("disposable and durable preserve exact modes",
+             tsb_mode_is(dir, "LICENSE", 0644) && tsb_mode_is(dir, "src/a.c", 0644) &&
+             tsb_mode_is(dir, "run.sh", 0755));
+    uint8_t root[32];
+    VC_CHECK("materialization preserves exact tree",
+             vcs_tree_capture_path(dir, root) == VCS_OK && !memcmp(root, ctx->first_root, 32));
+    test_rm_rf_recursive(dir); vcm_reset(); return failures;
+}
+static bool vcm_package_identity(const char *dir, uint8_t package[32], uint8_t recipe[32])
+{
+    struct vcs_package_prepared p; vcs_package_prepared_init(&p);
+    bool config = false; char why[256];
+    bool ok = vcs_package_scan_layout(dir, &p, &config, why, sizeof(why)) == VCS_PACKAGE_PREPARE_OK &&
+        vcs_package_manifest_root(&p.manifest, package) &&
+        vcs_package_recipe_root(&p.recipe, recipe) == VCS_PACKAGE_RECIPE_OK;
+    vcs_package_prepared_free(&p); return ok;
+}
+static int tsb_disposable_public(struct tsb_ctx *ctx)
+{
+    int failures = 0; char dir[512]; uint8_t root[32], a[32], b[32], ar[32], br[32];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "materialize-public");
+    VC_CHECK("public disposable API materializes exact verified tree",
+        vcs_tree_materialize_readonly_disposable(ctx->consumer, ctx->first_root, dir,
+            VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) == VCS_OK &&
+        vcs_tree_capture_path(dir, root) == VCS_OK && !memcmp(root, ctx->first_root, 32));
+    VC_CHECK("package and recipe identity match durable output",
+        vcm_package_identity(ctx->materialized, a, ar) && vcm_package_identity(dir, b, br) &&
+        !memcmp(a, b, 32) && !memcmp(ar, br, 32));
+    VC_CHECK("existing files cannot be overwritten",
+        vcs_tree_materialize_readonly_disposable(ctx->consumer, ctx->first_root, dir,
+            VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) != VCS_OK);
+    test_rm_rf_recursive(dir); return failures;
+}
+static int tsb_materialize_io_failure(struct tsb_ctx *ctx, bool durable, unsigned failure)
+{
+    int failures = 0; char dir[512], file[1024];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "materialize-io");
+    vcm_reset();
+    vcm_fail_flush = failure == 0; vcm_fail_close = failure == 1; vcm_fail_write = failure == 2;
+    int rc = (durable ? vcm_readonly : vcm_disposable)(ctx->consumer, ctx->first_root,
+        dir, VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0);
+    (void)snprintf(file, sizeof(file), "%s/LICENSE", dir);
+    VC_CHECK("write flush or close error refuses and removes failed file",
+        rc == VCS_ERR && vcm_closes == 1 && access(file, F_OK) != 0);
+    VC_CHECK("failure path flush policy retained",
+        vcm_flushes == (durable && failure != 2 ? 1u : 0u));
+    vcm_reset(); test_rm_rf_recursive(dir); return failures;
+}
+static int tsb_disposable_controls(struct tsb_ctx *ctx)
+{
+    int failures = tsb_materialize_observed(ctx, vcm_durable, true);
+    failures += tsb_materialize_observed(ctx, vcm_readonly, true);
+    failures += tsb_materialize_observed(ctx, vcm_disposable, false);
+    failures += tsb_disposable_public(ctx);
+    failures += tsb_materialize_io_failure(ctx, true, 0);
+    failures += tsb_materialize_io_failure(ctx, true, 1);
+    failures += tsb_materialize_io_failure(ctx, false, 1);
+    failures += tsb_materialize_io_failure(ctx, true, 2);
+    failures += tsb_materialize_io_failure(ctx, false, 2);
+    return failures;
+}
+#else
+static int tsb_disposable_controls(struct tsb_ctx *ctx)
+{
+    (void)ctx;
+    puts("SKIP (materializer syscall and POSIX mode controls require POSIX)");
+    return 0;
+}
+#endif
+/* Called while the existing fixture's canonical blob is deliberately corrupt,
+ * before its existing verified import repair. Never recover it here. */
+static int tsb_disposable_corrupt(struct tsb_ctx *ctx)
+{
+    int failures = 0; char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "materialize-corrupt");
+    VC_CHECK("disposable materialization refuses corrupt canonical CAS",
+        vcs_tree_materialize_readonly_disposable(ctx->consumer, ctx->first_root, dir,
+            VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) != VCS_OK);
+    test_rm_rf_recursive(dir); return failures;
+}
+
 static int tsb_corrupt_object_repair(struct tsb_ctx *ctx)
 {
     int failures = 0;
@@ -961,6 +1109,7 @@ static int tsb_corrupt_object_repair(struct tsb_ctx *ctx)
         VC_CHECK("source bundle corrupt cache fixture",
                  vc_corrupt_object(ctx->consumer,
                                    first_manifest.entries[0].blob));
+        failures += tsb_disposable_corrupt(ctx);
         struct vcs_source_bundle_metrics repaired;
         VC_CHECK("source bundle verified retry repairs exact corrupt blob",
                  vcs_source_bundle_import(ctx->first_wire,
@@ -1089,6 +1238,7 @@ static int t_source_bundle(void)
     failures += tsb_corrupt_bytes_and_retry(&ctx);
     failures += tsb_materialize_and_compare(&ctx);
     failures += tsb_materialize_mode_roundtrip(&ctx);
+    failures += tsb_disposable_controls(&ctx);
     failures += tsb_corrupt_object_repair(&ctx);
 
     failures += tsb_successor_bundle(&ctx);
@@ -3064,6 +3214,242 @@ static int t_package_swarm(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+/* Saved N -> isolated edited tree; original HEAD is N+1 with dirty bytes. */
+struct vc_tree_fixture {
+    struct vcs_repo *repo;
+    char source[512];
+    uint8_t n[32], head[32], tree[32];
+};
+
+static const struct vcs_snapshot_tree_limits vc_tree_limits = {
+    .manifest_bytes = 65536, .entries = 32, .blob_bytes = 4096,
+    .total_bytes = 16384,
+};
+static const struct vcs_snapshot_meta vc_tree_meta = {.phase = "save"};
+
+static bool vc_tree_seed(const char *dir, struct vc_tree_fixture *f)
+{
+    memset(f, 0, sizeof(*f));
+    test_make_tmpdir(f->source, sizeof(f->source), "vcs_core", "tree-edit");
+    if (!vc_write(dir, ".zvcs/sealed_paths", "sealed/\n") ||
+        !vc_write(dir, "sealed/rule", "fixed\n") ||
+        !vc_write(dir, "edit.c", "N\n")) return false;
+    f->repo = vcs_open(dir);
+    if (!f->repo || vcs_snapshot(f->repo, &vc_tree_meta, f->n) != VCS_OK)
+        return false;
+    return true;
+}
+
+static bool vc_tree_setup(const char *dir, struct vc_tree_fixture *f)
+{
+    if (!vc_tree_seed(dir, f)) return false;
+    uint8_t initial[32];
+    if (vcs_tree_capture(f->repo, initial) != VCS_OK ||
+        vcs_tree_materialize(dir, initial, f->source, 16384, 0) != VCS_OK ||
+        !vc_write(f->source, "edit.c", "N-prime\n") ||
+        vcs_tree_capture_into(f->source, dir, f->tree) != VCS_OK)
+        return false;
+    return vc_write(dir, "edit.c", "N+1\n") &&
+        vcs_snapshot(f->repo, &vc_tree_meta, f->head) == VCS_OK &&
+        vc_write(dir, "edit.c", "dirty-unsaved\n");
+}
+
+static bool vc_tree_log_equal(const char *dir, const char *before, size_t len)
+{
+    size_t now_len = 0;
+    char *now = vc_read(dir, ".zvcs/commits.log", &now_len);
+    bool ok = now && now_len == len && !memcmp(before, now, len);
+    free(now);
+    return ok;
+}
+
+struct vc_tree_history { uint8_t tip[32], tree[32], parent[32]; size_t count; };
+static bool vc_tree_history_visit(const struct vcs_commit *c,
+                                  const uint8_t id[32], void *user)
+{
+    struct vc_tree_history *h = user;
+    if (!h->count) {
+        memcpy(h->tip, id, 32); memcpy(h->tree, c->tree_hash, 32);
+        memcpy(h->parent, c->parent, 32);
+    }
+    ++h->count;
+    return true;
+}
+
+static int vc_tree_saved(const char *dir, struct vc_tree_fixture *f)
+{
+    int failures = 0;
+    uint8_t out[32];
+    VC_CHECK("tree-save: save captured N-prime", vcs_snapshot_from_tree(
+        f->repo, f->tree, f->head, &vc_tree_meta, &vc_tree_limits, out) == VCS_OK);
+    struct vc_tree_history h = {0};
+    VC_CHECK("tree-save: exact tree, current parent, three commits",
+        vcs_log(f->repo, 0, vc_tree_history_visit, &h) == VCS_OK && h.count == 3 &&
+        !memcmp(out, h.tip, 32) && !memcmp(f->tree, h.tree, 32) &&
+        !memcmp(f->head, h.parent, 32));
+    uint8_t head[32]; bool found = false;
+    VC_CHECK("tree-save: HEAD is candidate", vcs_index_ref_get(
+        vcs_repo_index(f->repo), "HEAD", head, &found) && found && !memcmp(head, out, 32));
+    VC_CHECK("tree-save: dirty bytes untouched", vc_file_matches(dir, "edit.c", "dirty-unsaved\n"));
+    return failures;
+}
+
+static int vc_tree_refusals(const char *dir, struct vc_tree_fixture *f)
+{
+    int failures = 0;
+    size_t len = 0; char *before = vc_read(dir, ".zvcs/commits.log", &len);
+    if (!before) return 1;
+    uint8_t out[32], zero[32] = {0};
+    VC_CHECK("tree-save: stale expected HEAD", vcs_snapshot_from_tree(f->repo,
+        f->tree, f->n, &vc_tree_meta, &vc_tree_limits, out) == VCS_REFUSED && !memcmp(out, zero, 32));
+    struct vcs_snapshot_tree_limits small = vc_tree_limits;
+    small.manifest_bytes = 1;
+    VC_CHECK("tree-save: manifest bound", vcs_snapshot_from_tree(f->repo,
+        f->tree, f->head, &vc_tree_meta, &small, out) == VCS_ERR);
+    small = vc_tree_limits; small.blob_bytes = 1;
+    VC_CHECK("tree-save: blob bound", vcs_snapshot_from_tree(f->repo,
+        f->tree, f->head, &vc_tree_meta, &small, out) == VCS_ERR);
+    small = vc_tree_limits; small.total_bytes = 1;
+    VC_CHECK("tree-save: total bound", vcs_snapshot_from_tree(f->repo,
+        f->tree, f->head, &vc_tree_meta, &small, out) == VCS_ERR);
+    VC_CHECK("tree-save: refusals leave exact log", vc_tree_log_equal(dir, before, len));
+    free(before);
+    return failures;
+}
+
+static int vc_tree_bad_objects(const char *dir, struct vc_tree_fixture *f)
+{
+    int failures = 0;
+    struct vcs_manifest m = {0};
+    if (!vcs_tree_load(dir, f->tree, &m) || !m.count) return 1;
+    char hex[65], path[4096], saved[4096];
+    zcl_hex_encode(m.entries[0].blob, 32, hex);
+    (void)snprintf(path, sizeof(path), "%s/.zvcs/objects/%.2s/%s", dir, hex, hex + 2);
+    (void)snprintf(saved, sizeof(saved), "%s/blob-backup", f->source);
+    vcs_manifest_free(&m);
+    size_t len = 0; char *before = vc_read(dir, ".zvcs/commits.log", &len);
+    if (!before) return 1;
+    uint8_t out[32];
+    if (rename(path, saved) != 0) { free(before); return 1; }
+    VC_CHECK("tree-save: missing blob", vcs_snapshot_from_tree(f->repo,
+        f->tree, f->head, &vc_tree_meta, &vc_tree_limits, out) == VCS_ERR);
+    VC_CHECK("tree-save: inject corrupt blob", vc_write_bytes(path, (const uint8_t *)"bad", 3));
+    VC_CHECK("tree-save: corrupt blob", vcs_snapshot_from_tree(f->repo,
+        f->tree, f->head, &vc_tree_meta, &vc_tree_limits, out) == VCS_ERR);
+    (void)unlink(path);
+    VC_CHECK("tree-save: restore blob", rename(saved, path) == 0);
+    VC_CHECK("tree-save: invalid objects leave exact log", vc_tree_log_equal(dir, before, len));
+    free(before);
+    return failures;
+}
+
+static int vc_tree_sealed(const char *dir, struct vc_tree_fixture *f)
+{
+    int failures = 0;
+    uint8_t changed[32], out[32];
+    size_t len = 0; char *before = vc_read(dir, ".zvcs/commits.log", &len);
+    if (!before) return 1;
+    bool made = vc_write(f->source, "sealed/rule", "changed\n") &&
+        vcs_tree_capture_into(f->source, dir, changed) == VCS_OK;
+    VC_CHECK("tree-save: sealed change refused", made && vcs_snapshot_from_tree(
+        f->repo, changed, f->head, &vc_tree_meta, &vc_tree_limits, out) == VCS_REFUSED);
+    VC_CHECK("tree-save: seal refusal leaves exact log", vc_tree_log_equal(dir, before, len));
+    free(before);
+    return failures;
+}
+
+static int vc_tree_bad_manifest(const char *dir, struct vc_tree_fixture *f)
+{
+    int failures = 0;
+    char hex[65], path[4096], saved[4096];
+    zcl_hex_encode(f->tree, 32, hex);
+    (void)snprintf(path, sizeof(path), "%s/.zvcs/objects/%.2s/%s", dir, hex, hex + 2);
+    (void)snprintf(saved, sizeof(saved), "%s/manifest-backup", f->source);
+    size_t len = 0; char *before = vc_read(dir, ".zvcs/commits.log", &len);
+    if (!before) return 1;
+    if (rename(path, saved) != 0) { free(before); return 1; }
+    uint8_t out[32];
+    VC_CHECK("tree-save: missing manifest", vcs_snapshot_from_tree(f->repo,
+        f->tree, f->head, &vc_tree_meta, &vc_tree_limits, out) == VCS_ERR);
+    VC_CHECK("tree-save: inject corrupt manifest", vc_write_bytes(path, (const uint8_t *)"bad", 3));
+    VC_CHECK("tree-save: corrupt manifest", vcs_snapshot_from_tree(f->repo,
+        f->tree, f->head, &vc_tree_meta, &vc_tree_limits, out) == VCS_ERR);
+    (void)unlink(path);
+    VC_CHECK("tree-save: restore manifest", rename(saved, path) == 0);
+    VC_CHECK("tree-save: invalid manifests leave exact log", vc_tree_log_equal(dir, before, len));
+    free(before);
+    return failures;
+}
+
+/* A real derived-ref write failure after durable log append; no mock writer. */
+static bool vc_tree_ref_fault(const char *dir, bool enable)
+{
+    char path[4096]; (void)snprintf(path, sizeof(path), "%s/.zvcs/index.kv", dir);
+    sqlite3 *db = NULL;
+    if (sqlite3_open(path, &db) != SQLITE_OK) { sqlite3_close(db); return false; }
+    const char *sql = enable ? "CREATE TRIGGER tree_save_fail BEFORE INSERT ON refs "
+        "BEGIN SELECT RAISE(ABORT,'fixture ref failure'); END;" : "DROP TRIGGER tree_save_fail;";
+    bool ok = sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK; /* raw-sql-ok:isolated VCS ref-failure fixture */
+    return sqlite3_close(db) == SQLITE_OK && ok;
+}
+
+static int vc_tree_reconcile(const char *dir, struct vc_tree_fixture *f,
+                              const uint8_t candidate[32])
+{
+    int failures = 0;
+    vcs_close(f->repo); f->repo = NULL;
+    struct vcs_index *idx = vcs_index_open(dir);
+    VC_CHECK("tree-save: explicit rebuild without writer", idx && vcs_index_rebuild(idx, dir));
+    uint8_t head[32]; bool found = false;
+    VC_CHECK("tree-save: rebuilt candidate identity", idx && vcs_index_ref_get(idx,
+        "HEAD", head, &found) && found && !memcmp(head, candidate, 32));
+    vcs_index_close(idx);
+    f->repo = vcs_open(dir);
+    VC_CHECK("tree-save: reopen after explicit rebuild", f->repo != NULL);
+    VC_CHECK("tree-save: dirty source survived partial/reconcile", vc_file_matches(dir, "edit.c", "dirty-unsaved\n"));
+    return failures;
+}
+
+static int vc_tree_partial(const char *dir, struct vc_tree_fixture *f)
+{
+    int failures = 0;
+    uint8_t out[32], retry[32], zero[32] = {0};
+    if (!vc_tree_ref_fault(dir, true)) return 1;
+    VC_CHECK("tree-save: postappend failure reports candidate", vcs_snapshot_from_tree(
+        f->repo, f->tree, f->head, &vc_tree_meta, &vc_tree_limits, out) == VCS_EPARTIAL &&
+        memcmp(out, zero, 32));
+    VC_CHECK("tree-save: remove ref fault", vc_tree_ref_fault(dir, false));
+    vcs_close(f->repo); f->repo = vcs_open(dir);
+    size_t len = 0; char *before = vc_read(dir, ".zvcs/commits.log", &len);
+    VC_CHECK("tree-save: reopen alone refuses inconsistent log/index", f->repo &&
+        vcs_snapshot_from_tree(f->repo, f->tree, f->head, &vc_tree_meta,
+                               &vc_tree_limits, retry) == VCS_REFUSED);
+    VC_CHECK("tree-save: retry did not append", before && vc_tree_log_equal(dir, before, len));
+    free(before);
+    failures += vc_tree_reconcile(dir, f, out);
+    return failures;
+}
+
+static int t_snapshot_from_tree(const char *dir, bool partial)
+{
+    struct vc_tree_fixture f;
+    int failures = 0;
+    if (!vc_tree_setup(dir, &f)) failures = 1;
+    else if (partial) failures += vc_tree_partial(dir, &f);
+    else {
+        failures += vc_tree_refusals(dir, &f);
+        failures += vc_tree_bad_objects(dir, &f);
+        failures += vc_tree_bad_manifest(dir, &f);
+        failures += vc_tree_sealed(dir, &f);
+        failures += vc_tree_saved(dir, &f);
+    }
+    vcs_close(f.repo);
+    test_rm_rf_recursive(f.source);
+    return failures;
+}
+#endif
+
 int test_vcs_core(void)
 {
     printf("\n=== vcs_core: ZVCS v1 foundation ===\n");
@@ -3077,6 +3463,15 @@ int test_vcs_core(void)
     failures += t_commit_record();
 
     char dir[512];
+
+#if !defined(_WIN32)
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "snapshot-tree");
+    failures += t_snapshot_from_tree(dir, false);
+    test_rm_rf_recursive(dir);
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "snapshot-partial");
+    failures += t_snapshot_from_tree(dir, true);
+    test_rm_rf_recursive(dir);
+#endif
 
     test_make_tmpdir(dir, sizeof(dir), "vcs_core", "manifest_cache");
     failures += t_manifest_stat_cache_identity(dir);

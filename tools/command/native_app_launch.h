@@ -32,6 +32,13 @@
 #define APP_LAUNCH_READY_TIMEOUT_MS 15000
 #define APP_LAUNCH_SETTLE_MS 1000
 
+struct zcl_command_request;
+struct zcl_command_reply;
+bool zcl_native_app_open_kept(const struct zcl_command_request *request,
+                               struct zcl_command_reply *reply);
+void zcl_native_handle_app_open_selected(const struct zcl_command_request *request,
+                                        struct zcl_command_reply *reply);
+
 struct app_launch_entry {
     char id[APP_LAUNCH_ID_MAX + 1];
     char aliases[APP_LAUNCH_ALIASES_MAX][APP_LAUNCH_ID_MAX + 1];
@@ -45,6 +52,9 @@ struct app_launch_entry {
     bool builtin;
     bool installed;
 };
+/* Fixed descriptor only; selected-open supplies and validates the exact image.
+ * Never insert this descriptor in the ordinary executable-path launcher. */
+bool app_launch_kept_entry(const char *name, struct app_launch_entry *out);
 
 /* What a second open did to the running copy's window. */
 enum app_raise_outcome {
@@ -175,6 +185,17 @@ struct app_spawn_outcome {
 bool app_proc_spawn_and_wait(const struct app_launch_entry *entry,
                              const char *log_path, int timeout_ms,
                              int settle_ms, struct app_spawn_outcome *out);
+/* Consumes prepared on every outcome. Authorization precedes prepare. A ready
+ * or timed-out child stays running; an early exit is reaped. The receipt is
+ * retained on timeout. No pathname fallback or resident READY protocol. */
+struct resident_launch;
+struct resident_receipt;
+bool app_proc_resident_spawn_and_wait(const struct app_launch_entry *entry,
+                                     struct resident_launch *prepared,
+                                     const char *log_path, int timeout_ms,
+                                     int settle_ms, struct resident_receipt *receipt,
+                                     struct app_spawn_outcome *out,
+                                     char *error, size_t error_size);
 /* The last lines of a log file, at most out_size - 1 bytes. */
 void app_proc_log_tail(const char *path, char *out, size_t out_size);
 

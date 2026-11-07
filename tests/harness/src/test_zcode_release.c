@@ -43,6 +43,9 @@
  * through the production explorer index; nothing is broadcast.
  */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "test/test_core.h"
 
 #include "command/native_command.h"
@@ -63,6 +66,7 @@
 #include "zanc/zanc.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1346,6 +1350,131 @@ static int zr_directory_listing_case(size_t count, bool subdirectory,
     return failures + zr_listing_cleanup(path);
 }
 
+/* A 0755 owner-controlled home may bootstrap a private child, but never
+ * becomes a normal private transaction. Tests use only temporary directories. */
+#if !defined(_WIN32)
+struct zr_bootstrap_fixture { char scratch[512], parent[PATH_MAX], child[PATH_MAX]; };
+static bool zr_bootstrap_setup(struct zr_bootstrap_fixture *f)
+{
+    memset(f, 0, sizeof(*f));
+    if (!test_mkdtemp(f->scratch, sizeof(f->scratch), "zrel_bootstrap") ||
+        !realpath(f->scratch, f->parent)) return false;
+    int n = snprintf(f->child, sizeof(f->child), "%s/.z23", f->parent);
+    return n > 0 && (size_t)n < sizeof(f->child) && chmod(f->parent, 0755) == 0;
+}
+static bool zr_bootstrap_mode(const char *path, mode_t mode)
+{
+    struct stat info;
+    return lstat(path, &info) == 0 && S_ISDIR(info.st_mode) &&
+        info.st_uid == geteuid() && (info.st_mode & 0777) == mode;
+}
+static bool zr_bootstrap_absent(const char *path)
+{
+    struct stat info;
+    return lstat(path, &info) != 0 && errno == ENOENT;
+}
+static bool zr_bootstrap_call(const char *parent, const char *leaf, bool create,
+    enum platform_directory_result expected)
+{
+    struct platform_directory_transaction child;
+    platform_directory_transaction_init(&child);
+    enum platform_directory_result rc = platform_directory_transaction_bootstrap_child(parent, leaf, create, &child);
+    bool ok = rc == expected && ((rc == PLATFORM_DIRECTORY_OK) == (child.native != UINTPTR_MAX));
+    platform_directory_transaction_close(&child);
+    return ok;
+}
+static bool zr_bootstrap_positive(struct zr_bootstrap_fixture *f)
+{
+    struct platform_directory_transaction child, parent;
+    platform_directory_transaction_init(&child); platform_directory_transaction_init(&parent);
+    bool ordinary = platform_directory_transaction_open(&parent, f->parent);
+    platform_directory_transaction_close(&parent);
+    bool ok = !ordinary && zr_bootstrap_call(f->parent, ".z23", false, PLATFORM_DIRECTORY_MISSING) &&
+        zr_bootstrap_absent(f->child) && zr_bootstrap_mode(f->parent, 0755);
+    if (ok) ok = platform_directory_transaction_bootstrap_child(f->parent, ".z23", true, &child) == PLATFORM_DIRECTORY_OK;
+    if (ok) ok = zr_listing_file(&child, "retained-handle-probe") && zr_bootstrap_mode(f->child, 0700);
+    platform_directory_transaction_close(&child);
+    return ok && zr_bootstrap_mode(f->parent, 0755) &&
+        zr_bootstrap_call(f->parent, ".z23", false, PLATFORM_DIRECTORY_OK);
+}
+static bool zr_bootstrap_parent_modes(struct zr_bootstrap_fixture *f)
+{
+    static const mode_t modes[] = {0775, 0777};
+    for (size_t i = 0; i < sizeof(modes)/sizeof(modes[0]); ++i) {
+        if (chmod(f->parent, modes[i]) != 0 ||
+            !zr_bootstrap_call(f->parent, "blocked", false, PLATFORM_DIRECTORY_REFUSED) ||
+            !zr_bootstrap_call(f->parent, "blocked", true, PLATFORM_DIRECTORY_REFUSED) ||
+            !zr_bootstrap_mode(f->parent, modes[i])) return false;
+    }
+    char blocked[PATH_MAX];
+    int n = snprintf(blocked, sizeof(blocked), "%s/blocked", f->parent);
+    return n > 0 && (size_t)n < sizeof(blocked) && zr_bootstrap_absent(blocked) && chmod(f->parent, 0755) == 0;
+}
+static bool zr_bootstrap_child_modes(struct zr_bootstrap_fixture *f)
+{
+    if (chmod(f->child, 0755) != 0) return false;
+    bool ok = zr_bootstrap_call(f->parent, ".z23", false, PLATFORM_DIRECTORY_REFUSED) &&
+        zr_bootstrap_call(f->parent, ".z23", true, PLATFORM_DIRECTORY_REFUSED) &&
+        zr_bootstrap_mode(f->child, 0755);
+    return chmod(f->child, 0700) == 0 && ok;
+}
+static bool zr_bootstrap_reject_shape(const char *parent, const char *leaf)
+{
+    for (unsigned create = 0; create < 2; ++create) {
+        struct platform_directory_transaction child; platform_directory_transaction_init(&child);
+        enum platform_directory_result rc = platform_directory_transaction_bootstrap_child(parent, leaf, create != 0, &child);
+        bool ok = rc != PLATFORM_DIRECTORY_OK && rc != PLATFORM_DIRECTORY_MISSING && child.native == UINTPTR_MAX;
+        platform_directory_transaction_close(&child);
+        if (!ok) return false;
+    }
+    return true;
+}
+static bool zr_bootstrap_links(struct zr_bootstrap_fixture *f)
+{
+    char link[PATH_MAX], alias[PATH_MAX];
+    int n = snprintf(link, sizeof(link), "%s/link", f->parent);
+    int a = snprintf(alias, sizeof(alias), "%s/.", f->parent);
+    if (n <= 0 || (size_t)n >= sizeof(link) || a <= 0 || (size_t)a >= sizeof(alias)) return false;
+    if (symlink(f->child, link) != 0) return false;
+    bool ok = zr_bootstrap_reject_shape(f->parent, "link") &&
+        zr_bootstrap_reject_shape(link, "never") && zr_bootstrap_reject_shape(alias, "never");
+    struct stat st;
+    ok = ok && lstat(link, &st) == 0 && S_ISLNK(st.st_mode);
+    if (unlink(link) != 0) return false;
+    return ok && symlink("absent-target", link) == 0 &&
+        zr_bootstrap_reject_shape(f->parent, "link") && unlink(link) == 0;
+}
+static bool zr_bootstrap_bad_leaves(struct zr_bootstrap_fixture *f)
+{
+    static const char *const leaves[] = {"", ".", "..", "../outside", "a/b", "a\\b", "a:b"};
+    for (size_t i = 0; i < sizeof(leaves)/sizeof(leaves[0]); ++i)
+        if (!zr_bootstrap_call(f->parent, leaves[i], false, PLATFORM_DIRECTORY_INVALID) ||
+            !zr_bootstrap_call(f->parent, leaves[i], true, PLATFORM_DIRECTORY_INVALID)) return false;
+    return true;
+}
+#endif
+static int test_zr_directory_bootstrap(void)
+{
+#if defined(_WIN32)
+    struct platform_directory_transaction child;
+    platform_directory_transaction_init(&child);
+    enum platform_directory_result rc = platform_directory_transaction_bootstrap_child("C:\\unqualified", ".z23", true, &child);
+    return rc == PLATFORM_DIRECTORY_REFUSED && child.native == UINTPTR_MAX ? 0 : 1;
+#else
+    struct zr_bootstrap_fixture f;
+    bool ready = zr_bootstrap_setup(&f);
+    bool positive = ready && zr_bootstrap_positive(&f);
+    bool modes = positive && zr_bootstrap_parent_modes(&f) && zr_bootstrap_child_modes(&f);
+    bool shapes = modes && zr_bootstrap_links(&f) && zr_bootstrap_bad_leaves(&f);
+    printf("zcode_release directory bootstrap: 0755/planning=%d permissions=%d aliases=%d\n", positive, modes, shapes);
+    if (f.scratch[0]) {
+        (void)chmod(f.scratch, 0700);
+        (void)test_rm_rf_recursive(f.scratch);
+    }
+    return shapes ? 0 : 1;
+#endif
+}
+
 static int test_zr_directory_listing(void)
 {
     int failures = zr_directory_listing_case(0, false, "existing empty directory");
@@ -1866,6 +1995,7 @@ int test_zcode_release(void)
     failures += test_zr_batch_determinism();
     failures += test_zr_batch_load();
     failures += test_zr_directory_listing();
+    failures += test_zr_directory_bootstrap();
     failures += test_zr_verify_errors();
     failures += test_zr_prove_verify();
     failures += test_zr_mined_anchor();

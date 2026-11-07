@@ -35,17 +35,19 @@ void vcs_manifest_free(struct vcs_manifest *m)
     m->cap = 0;
 }
 
-bool vcs_tree_load_bounded(const char *repo_root, const uint8_t tree_hash[32],
+static bool tree_load_bounded(const char *repo_root, const uint8_t tree_hash[32],
                            size_t maximum_bytes, size_t maximum_entries,
-                           struct vcs_manifest *out)
+                           struct vcs_manifest *out, bool readonly)
 {
     if (out) vcs_manifest_init(out);
     if (!repo_root || !tree_hash || !out)
         LOG_FAIL("vcs", "null argument to bounded tree load");
     uint8_t *wire = NULL;
     size_t wire_len = 0;
-    if (vcs_object_load_raw_bounded(repo_root, tree_hash, maximum_bytes,
-                                   &wire, &wire_len) != 0)
+    int result = readonly
+        ? vcs_object_load_raw_readonly_bounded(repo_root, tree_hash, maximum_bytes, &wire, &wire_len)
+        : vcs_object_load_raw_bounded(repo_root, tree_hash, maximum_bytes, &wire, &wire_len);
+    if (result != 0)
         LOG_FAIL("vcs", "bounded manifest object read refused");
     if (wire_len < 9 || wire[0] != VCS_MANIFEST_VERSION ||
         vcs_rd_u64le(wire + 1) > maximum_entries) {
@@ -62,6 +64,18 @@ bool vcs_tree_load_bounded(const char *repo_root, const uint8_t tree_hash[32],
         LOG_FAIL("vcs", "bounded manifest structural root mismatch");
     }
     return true;
+}
+
+bool vcs_tree_load_bounded(const char *repo_root, const uint8_t tree_hash[32],
+    size_t maximum_bytes, size_t maximum_entries, struct vcs_manifest *out)
+{
+    return tree_load_bounded(repo_root, tree_hash, maximum_bytes, maximum_entries, out, false);
+}
+
+bool vcs_tree_load_readonly_bounded(const char *repo_root, const uint8_t tree_hash[32],
+    size_t maximum_bytes, size_t maximum_entries, struct vcs_manifest *out)
+{
+    return tree_load_bounded(repo_root, tree_hash, maximum_bytes, maximum_entries, out, true);
 }
 
 bool vcs_manifest_add(struct vcs_manifest *m, const char *path, uint32_t mode,

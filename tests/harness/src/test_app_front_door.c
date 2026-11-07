@@ -20,12 +20,18 @@
  *     (HOME and datadir snapshots are byte-for-byte unchanged).
  * The journey's command and hex-paste counts are printed at the end. */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "test/test_core.h"
 #include "test/app_seed_fixture.h"
 
 #include "base/hex.h"
 #include "chain/chainparams.h"
 #include "command/cli_confirm.h"
+#include "command/app_copy_build.h"
+#include "command/app_selection.h"
+#include "command/native_app_launch.h"
 #include "command/native_app_front_door.h"
 #include "command/native_command.h"
 #include "config/command_catalog.h"
@@ -69,6 +75,8 @@ struct afd_world {
     char hint[1024];        /* the no-TTY plan's pasted next: command */
     char b_root[65];        /* A's package_root, from bundle.verify */
     char b_fp[67]; /* A's full fingerprint, same */
+    char told_root[65];     /* the version root share told A to pass on */
+    char told_fp[96];       /* the full fingerprint share told A, same */
     char saved_home[1024];
     char saved_cwd[1024];
     int commands_a, commands_b, hex_a, hex_b;
@@ -414,6 +422,8 @@ static int afd_mcp_authority(void)
         ASSERT(asf_mcp_refuses_owner("app.copy", "app", "tinyapp"));
         ASSERT(asf_mcp_refuses_owner("app.share", "copy", "tinyapp-1"));
         ASSERT(asf_mcp_refuses_owner("app.receive", "file", "x.z23share"));
+        ASSERT(asf_mcp_refuses_owner("app.share-copy", "copy", "tinyapp-1"));
+        ASSERT(asf_mcp_refuses_owner("app.receive-copy", "file", "x.z23share"));
         ASSERT(afd_mcp_plan_first("app.save"));
         ASSERT(afd_mcp_plan_first("app.run.copy"));
         PASS();
@@ -517,6 +527,82 @@ static int afd_a_copies_and_saves(struct afd_world *w)
     return failures;
 }
 
+static bool afd_route_try(const char *leaf, const char *name, const char *datadir)
+{
+    const struct zcl_command_spec *spec = afd_spec(leaf);
+    const char *words[] = {name}; int rc = -1;
+    return spec && zcl_app_front_door_try(spec, words, 1, 0, datadir, &rc);
+}
+static bool afd_route_selection(const struct afd_world *w, const char *state)
+{
+    struct app_selection selection = {0}, saved;
+    (void)snprintf(selection.app, sizeof(selection.app), "skycombat");
+    char *copy = realpath(w->a_copy, NULL), *datadir = realpath(w->a_datadir, NULL);
+    bool paths = copy && datadir && strlen(copy) < sizeof(selection.copy) &&
+                 strlen(datadir) < sizeof(selection.datadir);
+    if (paths) { (void)snprintf(selection.copy, sizeof(selection.copy), "%s", copy);
+                 (void)snprintf(selection.datadir, sizeof(selection.datadir), "%s", datadir); }
+    free(copy); free(datadir);
+    if (!paths) return false;
+    uint8_t *roots[] = {selection.fork, selection.parent, selection.version, selection.package,
+                        selection.env, selection.dependencies, selection.record, selection.image};
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); ++i) roots[i][0] = 1;
+    return app_selection_save(state, 0, &selection, &saved) == APP_SELECTION_OK;
+}
+static bool afd_route_env_restore(const char *key, const char *value)
+{
+    return value ? setenv(key, value, 1) == 0 : unsetenv(key) == 0;
+}
+static bool afd_route_env_capture(const char *key, char **saved)
+{
+    const char *value = getenv(key);
+    *saved = value ? strdup(value) : NULL;
+    return !value || *saved != NULL;
+}
+static int afd_kept_routing(const struct afd_world *w)
+{
+    int failures = 0;
+    char *home = NULL, *state_old = NULL, *config_old = NULL;
+    bool captured = afd_route_env_capture("HOME", &home) &&
+        afd_route_env_capture("XDG_STATE_HOME", &state_old) &&
+        afd_route_env_capture("XDG_CONFIG_HOME", &config_old);
+    if (!captured) { free(home); free(state_old); free(config_old); return 1; }
+    TEST("app.open preserves kept selection priority over the CLI copy shortcut") {
+        char base[AFD_PATH], z23[AFD_PATH], state[AFD_PATH], path[AFD_PATH + 32];
+        (void)snprintf(base, sizeof(base), "%s/route-state", w->root);
+        (void)snprintf(z23, sizeof(z23), "%s/route-state/z23", w->root);
+        (void)snprintf(state, sizeof(state), "%s/route-state/z23/apps", w->root);
+        ASSERT(mkdir(base, 0700) == 0 && mkdir(z23, 0700) == 0 && mkdir(state, 0700) == 0);
+        ASSERT(setenv("HOME", w->a_home, 1) == 0 && setenv("XDG_STATE_HOME", base, 1) == 0 &&
+               setenv("XDG_CONFIG_HOME", base, 1) == 0);
+        (void)snprintf(path, sizeof(path), "%s/copies/skycombat", w->a_datadir);
+        ASSERT(mkdir(path, 0700) == 0);
+        (void)snprintf(path, sizeof(path), "%s/copies/sky", w->a_datadir);
+        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(afd_route_try("app.open", "skycombat", w->a_datadir));
+        ASSERT(afd_route_try("app.open", "sky", w->a_datadir));
+        ASSERT(!afd_route_try("app.open", "kept:skycombat", w->a_datadir));
+        PASS();
+    } TEST("app.open uses the saved catalog choice and aliases") {
+        char state[AFD_PATH];
+        (void)snprintf(state, sizeof(state), "%s/route-state/z23/apps", w->root);
+        ASSERT(afd_route_selection(w, state));
+        ASSERT(!afd_route_try("app.open", "skycombat", w->a_datadir));
+        ASSERT(!afd_route_try("app.open", "sky", w->a_datadir));
+        ASSERT(afd_route_try("app.run.copy", "skycombat", w->a_datadir));
+        ASSERT(afd_put(state, "skycombat.selection", "bad"));
+        ASSERT(!afd_route_try("app.open", "skycombat", w->a_datadir));
+        ASSERT(!afd_route_try("app.open", "sky", w->a_datadir));
+        PASS();
+    } _test_next:;
+    bool restored = afd_route_env_restore("HOME", home);
+    restored = afd_route_env_restore("XDG_STATE_HOME", state_old) && restored;
+    restored = afd_route_env_restore("XDG_CONFIG_HOME", config_old) && restored;
+    free(home); free(state_old); free(config_old);
+    if (!restored) failures++;
+    return failures;
+}
+
 static int afd_a_builds_and_opens(struct afd_world *w)
 {
     int failures = 0;
@@ -601,9 +687,10 @@ static int afd_a_stale(struct afd_world *w)
 static int afd_a_shares(struct afd_world *w)
 {
     int failures = 0;
-    TEST("A: share writes NAME.z23share and prints one share line with a "
-         "short fingerprint") {
+    TEST("A: share writes NAME.z23share, tells A the fingerprint, version "
+         "root and install the friend needs, and A's copy still opens") {
         struct asf_door run;
+        struct afd_leaf l;
         struct stat st;
         afd_door(w->a_home, w->a_datadir, "share", "tinyapp-1",
                  ZCL_CLI_CONFIRM_YES, &run);
@@ -612,18 +699,26 @@ static int afd_a_shares(struct afd_world *w)
         ASSERT(stat(w->share, &st) == 0 && S_ISREG(st.st_mode));
         ASSERT(strstr(run.text, "tinyapp-1.z23share") != NULL);
         ASSERT(asf_short_fingerprint(run.text));
-        /* Renamed under A's key: the copy must be rebuilt before it opens
-         * (app.run.copy refuses STALE_BUILD, it does not plan a build). */
-        char line[1024], want[AFD_PATH + 64];
+        ASSERT(asf_share_told(run.text, w->told_fp, sizeof(w->told_fp),
+                              w->told_root));
+        ASSERT(strstr(run.text, "Tell them these another way") != NULL);
+        char line[1024];
         (void)asf_door_line(&run, "next", line, sizeof(line));
         ASSERT(strstr(line, "your friend runs: z23 app open "
-                            "FILE.z23share") != NULL);
-        ASSERT(strstr(line, "your copy now publishes as k") != NULL);
-        (void)snprintf(want, sizeof(want),
-                       "; run z23 -datadir=%s app build tinyapp-1 before "
-                       "opening it again", w->a_datadir);
-        ASSERT(strstr(line, want) != NULL);
-        ASSERT(strstr(line, "before your next open") == NULL);
+                            "tinyapp-1.z23share") != NULL);
+        ASSERT(strstr(line, "a C compiler") != NULL);
+        ASSERT(strstr(line, "app build") == NULL);
+        /* Renamed under A's key, yet the build A made before share still
+         * opens: the rename touches no build input. */
+        ASSERT(afd_open_plan(w->a_datadir, "tinyapp-1", &l));
+        ASSERT(l.out.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strcmp(afd_get(&l, "image_sha3"), w->image_a) == 0);
+        afd_close_leaf(&l);
+        afd_door(w->a_home, w->a_datadir, "open", "tinyapp-1",
+                 ZCL_CLI_CONFIRM_YES, &run);
+        ASSERT_EQ(run.rc, 0);
+        w->commands_a++;
+        ASSERT(asf_alive_then_stop(asf_door_pid(run.text)));
         PASS();
     } _test_next:;
     return failures;
@@ -706,6 +801,9 @@ static int afd_b_plan_shows_root(struct afd_world *w)
         afd_close_leaf(&v);
         ASSERT_EQ((int)strlen(w->b_root), 64);
         ASSERT_EQ((int)strlen(w->b_fp), 66);
+        /* what share told A is what the file carries */
+        ASSERT_STR_EQ(w->told_root, w->b_root);
+        ASSERT_STR_EQ(w->told_fp, w->b_fp);
 
         afd_door(w->b_home, w->b_datadir, "open", w->share,
                  ZCL_CLI_CONFIRM_PLAN_ONLY, &run);
@@ -750,6 +848,37 @@ static int afd_b_receives(struct afd_world *w)
     return failures;
 }
 
+static int afd_changed_dependencies(struct afd_world *w)
+{
+    int failures = 0;
+    TEST("a cached build cannot be carried to another dependency identity") {
+        struct afd_leaf l;
+        struct app_copy_build_keys from, to;
+        struct zcl_package_copy copy;
+        uint8_t fork[32];
+        afd_open_leaf(&l);
+        ASSERT(app_copy_build_keys(w->a_datadir, w->a_copy, &from, &l.out));
+        ASSERT(from.hit);
+        ASSERT(zcl_package_copy_open(w->a_copy, &copy, &l.out, "app.share-copy"));
+        memcpy(fork, copy.fork_version, sizeof(fork));
+        zcl_package_copy_close(&copy);
+        to = from;
+        to.package_root[0] ^= 1;
+        to.dependency_root[0] ^= 1;
+        char *before = afd_snapshot(w->a_datadir);
+        ASSERT(before != NULL);
+        bool carried = app_copy_build_carry(w->a_datadir, fork, &from, &to, &l.out);
+        bool unchanged = afd_same(before, w->a_datadir);
+        free(before);
+        ASSERT(!carried);
+        ASSERT_STR_EQ(l.out.error.code, "NOT_CARRIED");
+        ASSERT(unchanged);
+        afd_close_leaf(&l);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_app_front_door(void);
 int test_app_front_door(void)
 {
@@ -766,12 +895,15 @@ int test_app_front_door(void)
         failures += afd_seed_absent(&w);
         failures += afd_plan_only(&w);
         failures += afd_a_copies_and_saves(&w);
+        failures += afd_kept_routing(&w);
     }
     if (!failures) {
         failures += afd_a_builds_and_opens(&w);
         failures += afd_a_stale(&w);
         failures += afd_a_shares(&w);
     }
+    if (!failures)
+        failures += afd_changed_dependencies(&w);
     if (!failures) {
         failures += afd_b_refusals(&w);
         failures += afd_b_plan_shows_root(&w);

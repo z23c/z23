@@ -451,20 +451,65 @@ static bool asf_journey_image(const char *home, const char *copy,
     return ok && strlen(sha) == 64 && path[0] == '/';
 }
 
+bool asf_share_told(const char *text, char *fp, size_t fp_cap,
+                    char root[65])
+{
+    const char *f = strstr(text, "(full ");
+    const char *r = strstr(text, "version root ");
+    fp[0] = root[0] = '\0';
+    if (!f || !r)
+        return false;
+    f += strlen("(full ");
+    r += strlen("version root ");
+    size_t nf = strcspn(f, ")\n"), nr = strspn(r, "0123456789abcdef");
+    if (nf == 0 || nf >= fp_cap || f[nf] != ')' || nr != 64)
+        return false;
+    (void)snprintf(fp, fp_cap, "%.*s", (int)nf, f);
+    (void)snprintf(root, 65, "%.64s", r);
+    return true;
+}
+
+/* A opens the copy right after share: the build from before share, with no
+ * rebuild in between. */
+static bool asf_journey_reopen(struct asf_journey *j)
+{
+    static struct asf_door run;
+    char image[80];
+    if (!asf_journey_verb(j->a_home, j->a_home, j->a_datadir, "open",
+                          j->copy, ZCL_CLI_CONFIRM_YES, &run, &j->commands_a))
+        return false;
+    (void)asf_door_line(&run, "image_sha3", image, sizeof(image));
+    bool same = strcmp(image, j->image_built) == 0;
+    bool stopped = asf_alive_then_stop(asf_door_pid(run.text));
+    if (!same || !stopped)
+        printf("  [open after share: image \"%s\" (built \"%s\"), pid "
+               "stopped=%d]\n%s", image, j->image_built, stopped, run.text);
+    return same && stopped;
+}
+
 bool asf_journey_share(struct asf_journey *j)
 {
     static struct asf_door run;
     struct stat st;
+    char friend_cmd[160];
     if (!asf_journey_verb(j->a_home, j->a_home, j->a_datadir, "share",
                           j->copy, ZCL_CLI_CONFIRM_YES, &run,
                           &j->commands_a))
         return false;
+    (void)snprintf(friend_cmd, sizeof(friend_cmd), "z23 app open %s.z23share",
+                   j->copy);
     bool file = stat(j->share, &st) == 0 && S_ISREG(st.st_mode);
     bool fingerprint = asf_short_fingerprint(run.text);
-    if (!file || !fingerprint)
-        printf("  [share: %s written=%d, fingerprint shown=%d]\n%s", j->share,
-               file, fingerprint, run.text);
-    return file && fingerprint &&
+    bool told = asf_share_told(run.text, j->share_fp, sizeof(j->share_fp),
+                               j->share_root) &&
+                strstr(run.text, "Tell them these another way") != NULL;
+    bool needs = strstr(run.text, "a C compiler") != NULL &&
+                 strstr(run.text, friend_cmd) != NULL;
+    if (!file || !fingerprint || !told || !needs)
+        printf("  [share: %s written=%d, fingerprint shown=%d, fingerprint "
+               "and root to pass on=%d, friend's needs=%d]\n%s", j->share,
+               file, fingerprint, told, needs, run.text);
+    return file && fingerprint && told && needs && asf_journey_reopen(j) &&
            asf_journey_week(j, 1u + (unsigned)++j->shares) &&
            asf_journey_image(j->a_home, j->copy, j->a_datadir,
                              j->image_shared, j->path_shared,
@@ -479,12 +524,18 @@ bool asf_journey_receive(struct asf_journey *j)
                           &j->commands_b))
         return false;
     bool asked = run.asked && asf_short_fingerprint(run.question);
+    /* B is asked about exactly the fingerprint and root A was told */
+    bool told = j->share_fp[0] && strlen(j->share_root) == 64 &&
+                strstr(run.question, j->share_fp) != NULL &&
+                strstr(run.question, j->share_root) != NULL;
     bool stopped = asf_alive_then_stop(asf_door_pid(run.text));
     (void)asf_door_line(&run, "copy", j->b_copy, sizeof(j->b_copy));
-    if (!asked || !stopped || !j->b_copy[0])
-        printf("  [receive: asked with a fingerprint=%d, pid stopped=%d, "
-               "copy \"%s\"]\n%s", asked, stopped, j->b_copy, run.text);
-    bool same = asked && stopped && j->b_copy[0] &&
+    if (!asked || !told || !stopped || !j->b_copy[0])
+        printf("  [receive: asked with a fingerprint=%d, A's fingerprint %s "
+               "and root %s=%d, pid stopped=%d, copy \"%s\"]\n%s\n  "
+               "question: %s\n", asked, j->share_fp, j->share_root, told,
+               stopped, j->b_copy, run.text, run.question);
+    bool same = asked && told && stopped && j->b_copy[0] &&
                 asf_journey_image(j->b_home, j->b_copy, j->b_datadir,
                                   j->image_b, j->path_b, sizeof(j->path_b)) &&
                 strcmp(j->image_b, j->image_shared) == 0;

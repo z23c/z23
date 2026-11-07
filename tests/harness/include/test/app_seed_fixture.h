@@ -108,6 +108,8 @@ struct asf_journey {
     char image_shared[65]; /* A's build of the shared version */
     char image_b[65];      /* B's build of the received file */
     char path_shared[1300], path_b[1300];
+    char share_fp[96];   /* the full fingerprint share told A to pass on */
+    char share_root[65]; /* the version root share told A to pass on */
     int commands_a, commands_b;
     int shares; /* shares A has made so far */
 };
@@ -118,11 +120,19 @@ bool asf_journey_init(struct asf_journey *j, const char *app,
 bool asf_journey_copy(struct asf_journey *j);
 /* A (after the caller's edit): save, build, open; the open's pid stops. */
 bool asf_journey_save_build_open(struct asf_journey *j);
-/* A: share, then the shared version's image; A's key published twice in
- * this ISO week (seed and share), both recorded. */
+/* A: share, which names the full fingerprint and version root the friend
+ * will be asked to confirm and what the friend must install; then A opens
+ * the copy again with no rebuild (the image built before share), and the
+ * shared version's image; A's key published twice in this ISO week (seed
+ * and share), both recorded. */
 bool asf_journey_share(struct asf_journey *j);
-/* B: open the share file (asked once, with the short fingerprint), which
- * receives, builds and opens; B's image equals A's shared image. */
+/* "(full F)" and "version root R" from a share's plain text; false when
+ * either is missing or the root is not 64 characters. */
+bool asf_share_told(const char *text, char *fp, size_t fp_cap,
+                    char root[65]);
+/* B: open the share file (asked once, with the short fingerprint and the
+ * exact fingerprint and version root A was told), which receives, builds
+ * and opens; B's image equals A's shared image. */
 bool asf_journey_receive(struct asf_journey *j);
 #endif
 

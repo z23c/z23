@@ -1913,9 +1913,12 @@ static void render_app_list(struct buf *b, const struct zcl_cli_render_env *e,
         const struct json_value *it = json_at(launch, i);
         const char *id = json_get_str(json_get(it, "id"));
         const char *cmd = json_get_str(json_get(it, "open"));
-        emit_kv(b, e, 10, id ? id : "?",
-                json_get_bool(json_get(it, "installed"))
-                    ? "installed" : "not installed yet");
+        const char *source = json_get_str(json_get(it, "source"));
+        const char *state = source && strcmp(source, "kept") == 0
+            ? "kept version; checked when opened"
+            : (json_get_bool(json_get(it, "installed")) ? "installed" : "not installed yet");
+        const char *label = id ? id : "?";
+        emit_kv(b, e, strlen(label), label, state);
         if (cmd && cmd[0])
             emit_kv_command(b, e, 10, "open", cmd);
     }

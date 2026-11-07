@@ -123,8 +123,21 @@ static int blit_format(RGFW_window *window, RGFW_format format)
     return retained ? 0 : 1;
 }
 
+static bool collision_then_retry(void)
+{
+    Class collision = objc_allocateClassPair(objc_getClass("NSObject"), "RGFWCustomView", 0);
+    if (!collision) return false;
+    objc_registerClassPair(collision);
+    RGFW_window *unexpected = RGFW_createWindow("collision", 0, 0, 24, 18, 0);
+    if (unexpected) RGFW_window_close(unexpected);
+    objc_disposeClassPair(collision);
+    if (unexpected) fprintf(stderr, "macOS smoke accepted foreign class\n");
+    return unexpected == NULL;
+}
+
 int main(void)
 {
+    if (!collision_then_retry()) return 1;
     RGFW_window *window = RGFW_createWindow("Z23 bitmap smoke", 0, 0, 24, 18, 0);
     if (!window) { fprintf(stderr, "macOS smoke could not create a window\n"); return 1; }
     int failures = 0;

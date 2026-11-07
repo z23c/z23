@@ -138,9 +138,65 @@ bool command_registry_push_error(struct json_value *root,
     return ok;
 }
 
+/* app.customize has revision-bound source navigation rather than the generic
+ * cursor spelling. Bind the exception to its real schema and returned data;
+ * unrelated leaves retain the existing self-link rule. This validates a next
+ * request, not execution authority or a comparison with the original input. */
+static bool source_next_text(const struct json_value *input, const char *key,
+    const struct json_value *data, const char *data_key)
+{
+    const struct json_value *a = json_get(input, key), *b = json_get(data, data_key);
+    return a && b && a->type == JSON_STR && b->type == JSON_STR &&
+        json_get_str(a)[0] && !strcmp(json_get_str(a), json_get_str(b));
+}
+static bool source_next_integer(const struct json_value *input, const char *key,
+    const struct json_value *data, const char *data_key)
+{
+    const struct json_value *a = json_get(input, key), *b = json_get(data, data_key);
+    return a && b && a->type == JSON_INT && b->type == JSON_INT &&
+        a->val.i > 0 && a->val.i == b->val.i;
+}
+static bool source_next_file(const struct json_value *input, const struct json_value *data)
+{
+    const struct json_value *file = json_get(data, "file");
+    if (file) {
+        const struct json_value *complete = json_get(data, "complete");
+        return complete && complete->type == JSON_BOOL && !json_get_bool(complete) &&
+            source_next_text(input, "path", file, "path") &&
+            source_next_integer(input, "offset", data, "next_offset");
+    }
+    /* Manifest -> listed file is a bounded navigation, including when this
+     * manifest page is complete. It must start at zero, not invent a range. */
+    if (json_get(input, "offset") || json_get(input, "page")) return false;
+    const struct json_value *files = json_get(data, "files");
+    if (!files || files->type != JSON_ARR) return false;
+    for (size_t i = 0; i < json_size(files); ++i)
+        if (source_next_text(input, "path", json_at(files, i), "path")) return true;
+    return false;
+}
+static bool source_next_schema(const struct zcl_command_spec *spec)
+{
+    return !strcmp(spec->path, "app.customize") && spec->input_schema && spec->output_schema &&
+        !strcmp(spec->input_schema, "zcl.app_customize.input.v1") &&
+        !strcmp(spec->output_schema, "zcl.app_customize.v1");
+}
+static bool source_next_valid(const struct zcl_command_spec *spec,
+    const struct json_value *input, const struct json_value *data)
+{
+    if (!source_next_schema(spec)) return false;
+    if (!source_next_text(input, "name", data, "name") ||
+        !source_next_integer(input, "expected_revision", data, "selection_revision")) return false;
+    if (json_get(input, "path")) return !json_get(input, "page") && source_next_file(input, data);
+    const struct json_value *complete = json_get(data, "complete"), *files = json_get(data, "files");
+    return !json_get(input, "offset") && files && files->type == JSON_ARR &&
+        complete && complete->type == JSON_BOOL && !json_get_bool(complete) &&
+        source_next_integer(input, "page", data, "next_page");
+}
+
 static bool push_next_item_valid(const struct zcl_command_next *next,
                                  const struct zcl_command_registry *registry,
                                  const struct zcl_command_spec *current_spec,
+                                 const struct json_value *data,
                                  struct json_value *input)
 {
     if (!json_read(input, next->input_json, strlen(next->input_json)) ||
@@ -151,11 +207,12 @@ static bool push_next_item_valid(const struct zcl_command_next *next,
     char why[160] = {0};
     if (!next_spec || command_registry_is_branch(next_spec))
         return false;
-    /* A leaf may name itself only to continue a page: the input must carry the
-     * paging key that advances it, so the entry can never repeat the call. */
+    /* Generic self-links retain their established paging-key requirement.
+     * Selected-source navigation has a schema-specific, reply-bound check;
+     * neither check claims to compare against the original request input. */
     if (current_spec && strcmp(next_spec->path, current_spec->path) == 0 &&
         !json_get(input, "cursor") && !json_get(input, "item_offset") &&
-        !json_get(input, "after"))
+        !json_get(input, "after") && !source_next_valid(current_spec, input, data))
         return false;
     return zcl_command_registry_input_validate(next_spec, input, why,
                                                sizeof(why));
@@ -164,13 +221,14 @@ static bool push_next_item_valid(const struct zcl_command_next *next,
 static bool push_next_item(struct json_value *array,
                            const struct zcl_command_next *next,
                            const struct zcl_command_registry *registry,
-                           const struct zcl_command_spec *current_spec)
+                           const struct zcl_command_spec *current_spec,
+                           const struct json_value *data)
 {
     struct json_value item, input;
     json_init(&item);
     json_init(&input);
     json_set_object(&item);
-    if (!push_next_item_valid(next, registry, current_spec, &input)) {
+    if (!push_next_item_valid(next, registry, current_spec, data, &input)) {
         json_free(&input);
         json_free(&item);
         return false;
@@ -194,7 +252,7 @@ bool command_registry_push_next_array(
     json_set_array(&array);
     bool ok = true;
     for (size_t i = 0; ok && i < reply->next_count; i++)
-        ok = push_next_item(&array, &reply->next[i], registry, current_spec);
+        ok = push_next_item(&array, &reply->next[i], registry, current_spec, &reply->data);
     ok = ok && json_push_kv(root, "next", &array);
     json_free(&array);
     return ok;
@@ -364,6 +422,14 @@ bool zcl_command_registry_test_success_budget(
         fixture->alias, UINT64_MAX, fixture->elapsed_us, fixture->budget_bytes,
         fixture->presented, &policy, wire, wire_size);
     return true;
+}
+size_t zcl_command_registry_test_reply_wire(
+    const struct zcl_command_registry *registry, const struct zcl_command_spec *spec,
+    struct zcl_command_reply *reply, char *wire, size_t wire_size)
+{
+    return command_registry_serialize_reply(registry, spec, reply, false, 0, 0,
+                                            ZCL_COMMAND_ERROR_BUDGET, false, NULL,
+                                            wire, wire_size);
 }
 #endif
 

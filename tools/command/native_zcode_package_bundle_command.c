@@ -297,7 +297,10 @@ static bool zpb_load(struct zpb_receive *s)
     return true;
 }
 
-/* Rebuild the exact saved tree from the source bundle in private scratch. */
+/* Rebuild the exact saved tree from the source bundle in private scratch.
+ * Verified import installs canonical objects before strict reconstruction.
+ * Only scratch/source is disposable; import and persistent receive keep
+ * their existing durability barriers. */
 static bool zpb_materialize(struct zpb_receive *s)
 {
     struct vcs_source_bundle_metrics metrics;
@@ -314,7 +317,7 @@ static bool zpb_materialize(struct zpb_receive *s)
          vcs_source_bundle_import(s->file.source, s->file.source_len,
                                   s->file.tree, s->store, &metrics) ==
              VCS_SOURCE_BUNDLE_OK &&
-         vcs_tree_materialize(s->store, s->file.tree, s->src,
+         vcs_tree_materialize_readonly_disposable(s->store, s->file.tree, s->src,
                               VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) == VCS_OK;
     return ok || zpb_refuse(s, "the source tree does not rebuild from the "
                                "bundle");

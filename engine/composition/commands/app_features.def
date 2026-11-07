@@ -28,16 +28,13 @@
  *
  * Consumer defines ZCL_COMMAND_*. */
 
-/* Branch summaries are deliberately terse single words: they render inside the
- * parent `app` branch menu, which is bounded by ZCL_COMMAND_BRANCH_BUDGET and
- * already carries six longer-summary children (auth/account/list/inspect/
- * protocols/invoke). Keeping these short keeps the `app` menu well under
- * budget (verified in test_native_api_contract's per-branch menu sweep). */
-ZCL_COMMAND_BRANCH("app.names", "app", "Names", ZCL_COMMAND_LAYER_APP)
-ZCL_COMMAND_BRANCH("app.oprindex", "app", "OP_RETURN catalog", ZCL_COMMAND_LAYER_APP)
-ZCL_COMMAND_BRANCH("app.tokens", "app", "Tokens", ZCL_COMMAND_LAYER_APP)
-ZCL_COMMAND_BRANCH("app.messaging", "app", "Messaging", ZCL_COMMAND_LAYER_APP)
-ZCL_COMMAND_BRANCH("app.market", "app", "Market", ZCL_COMMAND_LAYER_APP)
+/* Group specialist feature menus without changing their canonical paths. */
+ZCL_COMMAND_BRANCH("app.features", "app", "Built-in features", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.names", "app.features", "Names", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.oprindex", "app.features", "OP_RETURN catalog", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.tokens", "app.features", "Tokens", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.messaging", "app.features", "Messaging", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.market", "app.features", "Market", ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("app.market.content", "app.market", "Seller content",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("app.market.purchase", "app.market", "Buyer purchase",
@@ -50,18 +47,18 @@ ZCL_COMMAND_BRANCH("app.market.moderation.relay", "app.market.moderation",
                    "Relay rule", ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("app.market.moderation.review", "app.market.moderation",
                    "Review marks", ZCL_COMMAND_LAYER_APP)
-ZCL_COMMAND_BRANCH("app.store", "app", "Store", ZCL_COMMAND_LAYER_APP)
-ZCL_COMMAND_BRANCH("app.shop", "app", "Shop", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.store", "app.features", "Store", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.shop", "app.features", "Shop", ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("app.shop.want", "app.shop", "Buyer wants",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("app.shop.want.fulfill", "app.shop.want", "Fulfillments",
                    ZCL_COMMAND_LAYER_APP)
-ZCL_COMMAND_BRANCH("app.swap", "app", "Swaps", ZCL_COMMAND_LAYER_APP)
-ZCL_COMMAND_BRANCH("app.qr", "app", "QR", ZCL_COMMAND_LAYER_APP)
-ZCL_COMMAND_BRANCH("app.presentation", "app", "Native presentation",
+ZCL_COMMAND_BRANCH("app.swap", "app.features", "Swaps", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.qr", "app.features", "QR", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.presentation", "app.features", "Native presentation",
                    ZCL_COMMAND_LAYER_APP)
-ZCL_COMMAND_BRANCH("app.blog", "app", "Blog", ZCL_COMMAND_LAYER_APP)
-ZCL_COMMAND_BRANCH("app.payments", "app", "Payments", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.blog", "app.features", "Blog", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.payments", "app.features", "Payments", ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("app.payments.zpay", "app.payments", "ZPAY",
                    ZCL_COMMAND_LAYER_APP)
 

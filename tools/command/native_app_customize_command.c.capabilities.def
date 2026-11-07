@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_app_customize_command.c", CAP_FS_WRITE, "Allocator diagnostics use stderr; source, history and selection reads use their owning modules")

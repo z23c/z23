@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_app_open_selected.c", CAP_FS_WRITE, "Creates and removes private launch logs; saved-copy and build reads run through their owning modules")

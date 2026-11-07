@@ -27,11 +27,28 @@
 #include "platform/resident_launch.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
 #if !defined(RLC_FIXTURE_BROKEN)
+static bool rlc_clean_signals(void)
+{
+    const int signals[] = {SIGPIPE, SIGTERM, SIGINT, SIGHUP, SIGUSR1, SIGCHLD};
+    sigset_t mask;
+    if (sigprocmask(SIG_SETMASK, NULL, &mask) != 0) return false;
+    for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); ++i) {
+        struct sigaction action;
+        if (sigismember(&mask, signals[i]) != 0 ||
+            sigaction(signals[i], NULL, &action) != 0 || action.sa_handler != SIG_DFL)
+            return false;
+    }
+    return true;
+}
+
 static bool rlc_child_io(void *buffer, size_t size, bool sending)
 {
     unsigned char *bytes = buffer;
@@ -59,15 +76,19 @@ static bool rlc_child_reply(const char *nonce, const char *payload,
     return rlc_child_io(&header, sizeof(header), true) &&
            rlc_child_io((void *)payload, len, true);
 }
-#endif
-
-int main(int argc, char **argv)
+static int rlc_stdio_probe(int argc, char **argv)
 {
-#if defined(RLC_FIXTURE_BROKEN)
-    (void)argc;
-    (void)argv;
-    return 1;
-#else
+    if (argc == 3 && strcmp(argv[2], "signals") == 0 && !rlc_clean_signals()) return 8;
+    if (argc == 3 && strcmp(argv[2], "signals") != 0 &&
+        (fcntl(atoi(argv[2]), F_GETFD) != -1 || errno != EBADF)) return 7;
+    char byte;
+    if (read(0, &byte, 1) != 0 || write(1, "stdout-marker\n", 14) != 14 ||
+        write(2, "stderr-marker\n", 14) != 14) return 6;
+    for (;;) pause();
+}
+
+static int rlc_resident_probe(int argc, char **argv)
+{
     if (argc < 3 || strcmp(argv[1], "--resident") != 0)
         return 2;
     const char *nonce = argv[2];
@@ -91,5 +112,18 @@ int main(int argc, char **argv)
     if (!rlc_child_reply(nonce, payload, input.payload_len))
         return 5;
     return 0;
+}
+#endif
+
+int main(int argc, char **argv)
+{
+#if defined(RLC_FIXTURE_BROKEN)
+    (void)argc;
+    (void)argv;
+    return 1;
+#else
+    if (argc >= 2 && strcmp(argv[1], "--stdio-probe") == 0)
+        return rlc_stdio_probe(argc, argv);
+    return rlc_resident_probe(argc, argv);
 #endif
 }

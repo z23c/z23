@@ -11,10 +11,34 @@
 #include "sha3/sha3.h"
 #include "util/authority_receipt.h"
 #include "vcs/build_action.h"
+#include "vcs/package_prepare.h"
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+static int aib_root_compare(const void *a, const void *b)
+{
+    return memcmp(a, b, 32);
+}
+
+void app_image_dependency_root(const struct vcs_package_lock *lock, uint8_t out[32])
+{
+    static const char domain[] = "zcl.app_build.dependency_set.v1";
+    uint8_t roots[VCS_PACKAGE_LOCK_MAX_NODES][32];
+    size_t n = 0;
+    for (size_t i = 0; i + 1u < lock->count && n < VCS_PACKAGE_LOCK_MAX_NODES; ++i)
+        memcpy(roots[n++], lock->nodes[i].root, 32);
+    qsort(roots, n, 32, aib_root_compare);
+    uint8_t count[4] = {(uint8_t)n, (uint8_t)(n >> 8), 0, 0};
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, count, sizeof(count));
+    for (size_t i = 0; i < n; ++i) sha3_256_write(&sha, roots[i], 32);
+    sha3_256_finalize(&sha, out);
+}
 
 #define AIB_OFF_PACKAGE   APP_IMAGE_BUILD_DOMAIN_BYTES
 #define AIB_OFF_CLOSURE   (AIB_OFF_PACKAGE + 32u)

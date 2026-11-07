@@ -1216,6 +1216,55 @@ static int t_resident_execution_grant(void)
     }
     return failures;
 }
+static bool cib_consent_shape(const struct zcl_command_spec *spec,
+    const char *wire, bool expected)
+{
+    struct json_value input; json_init(&input);
+    char why[192];
+    bool ok = json_read(&input, wire, strlen(wire)) &&
+        zcl_command_registry_input_validate(spec, &input, why, sizeof(why)) == expected;
+    json_free(&input); return ok;
+}
+static int cib_consent_leaf(const char *path)
+{
+    int failures = 0;
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), path, NULL);
+    printf("  command_input_bounds: execution consent leaf=%s\n", path);
+    CIB_CHECK("declared execution consent leaf resolves", spec != NULL);
+    if (!spec) return failures;
+    struct zcl_command_input_descriptor d;
+    CIB_CHECK("execution consent discovery remains boolean",
+        zcl_command_registry_input_descriptor(spec, "accept_execution", &d) && d.type == JSON_BOOL);
+    CIB_CHECK("execution consent CLI remains boolean",
+        zcl_command_registry_input_key_is_boolean(spec, "accept_execution"));
+    const char *wires[] = {"{\"accept_execution\":true}", "{\"accept_execution\":false}",
+        "{\"accept_execution\":\"true\"}", "{\"accept_execution\":1}",
+        "{\"accept_execution\":null}", "{\"accept_execution\":[]}", "{\"accept_execution\":{}}"};
+    for (size_t i = 0; i < sizeof(wires) / sizeof(wires[0]); ++i)
+        CIB_CHECK("execution consent admits only true/false shape",
+            cib_consent_shape(spec, wires[i], i < 2));
+    return failures;
+}
+static int t_execution_consent_scopes(void)
+{
+    int failures = 0;
+    const char *paths[] = {"app.open", "app.keep", "app.invoke.package",
+        "app.run.confined", "app.run.copy", "ops.mesh.device.host.package.run"};
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i)
+        failures += cib_consent_leaf(paths[i]);
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.invoke.package", NULL);
+    if (!spec) return failures + 1;
+    struct zcl_command_spec unrelated = *spec; unrelated.path = "app.invoke.unrelated";
+    struct zcl_command_input_descriptor d;
+    CIB_CHECK("unrelated execution consent has no boolean discovery descriptor",
+        !zcl_command_registry_input_descriptor(&unrelated, "accept_execution", &d));
+    CIB_CHECK("unrelated execution consent is not a CLI boolean",
+        !zcl_command_registry_input_key_is_boolean(&unrelated, "accept_execution"));
+    CIB_CHECK("unrelated consent key retains prior ordinary-string interpretation",
+        cib_consent_shape(&unrelated, "{\"accept_execution\":\"true\"}", true));
+    return failures;
+}
+
 static int t_local_acceptance_boolean(void)
 {
     int failures = 0;
@@ -1766,6 +1815,7 @@ int test_command_input_bounds(void)
     failures += t_moved_max_lines_bounds();
     failures += t_moved_required_discovery();
     failures += t_resident_execution_grant();
+    failures += t_execution_consent_scopes();
     failures += t_local_acceptance_boolean();
     failures += t_resident_binding_types();
     failures += t_policy_fact_types();

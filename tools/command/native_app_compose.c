@@ -145,24 +145,56 @@ void zcl_app_plan_id(const char *domain, const char *const *parts,
     sha3_256_finalize(&ctx, out);
 }
 
+static bool app_hint_bytes(char **out, size_t *left, const char *text, size_t n)
+{
+    if (n >= *left) return false;
+    memcpy(*out, text, n); *out += n; *left -= n; **out = '\0';
+    return true;
+}
+
+/* Escape ASCII shell syntax bytewise, so display-inserted backslash-newline
+ * continuations stay outside quotes. UTF-8 bytes and plain words stay intact. */
+static bool app_hint_word(char **out, size_t *left, const char *text)
+{
+    static const char plain[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:@+-";
+    if (!text) return false;
+    if (!text[0]) return app_hint_bytes(out, left, "''", 2);
+    for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
+        if (*p < 32 || *p == 127) return false;
+        if (*p < 128 && !strchr(plain, *p) && !app_hint_bytes(out, left, "\\", 1)) return false;
+        if (!app_hint_bytes(out, left, (const char *)p, 1)) return false;
+    }
+    return true;
+}
+
+/* All callers use trusted literal syntax with one whole argument per %s. */
+static bool app_hint_tail(char **out, size_t *left, const char *fmt, va_list ap)
+{
+    while (*fmt) {
+        if (*fmt != '%') {
+            if (!app_hint_bytes(out, left, fmt++, 1)) return false;
+            continue;
+        }
+        if (fmt[1] != 's' || !app_hint_word(out, left, va_arg(ap, const char *))) return false;
+        fmt += 2;
+    }
+    return true;
+}
+
 bool zcl_app_hint(char *out, size_t cap, const char *datadir, const char *fmt,
                   ...)
 {
-    va_list ap;
-    int head = snprintf(out, cap, "z23 %s%s%sapp ",
-                        datadir && datadir[0] ? "-datadir=" : "",
-                        datadir && datadir[0] ? datadir : "",
-                        datadir && datadir[0] ? " " : "");
-    int tail = -1;
-    if (head > 0 && (size_t)head < cap) {
-        va_start(ap, fmt);
-        tail = vsnprintf(out + head, cap - (size_t)head, fmt, ap);
-        va_end(ap);
-    }
-    if (tail < 0 || (size_t)head + (size_t)tail >= cap) {
-        if (cap)
-            out[0] = '\0';
-        return false;
-    }
-    return true;
+    if (!out || !cap) return false;
+    out[0] = '\0';
+    char *at = out; size_t left = cap;
+    bool ok = fmt && app_hint_bytes(&at, &left, "z23 ", 4);
+    if (ok && datadir && datadir[0])
+        ok = app_hint_bytes(&at, &left, "-datadir=", 9) &&
+            app_hint_word(&at, &left, datadir) && app_hint_bytes(&at, &left, " ", 1);
+    ok = ok && app_hint_bytes(&at, &left, "app ", 4);
+    va_list ap; va_start(ap, fmt);
+    ok = ok && app_hint_tail(&at, &left, fmt, ap);
+    va_end(ap);
+    if (!ok) out[0] = '\0';
+    return ok;
 }

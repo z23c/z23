@@ -7,6 +7,7 @@
 #include "presentation/model_render.h"
 #include "presentation_canvas_internal.h"
 #include "presentation_focus_internal.h"
+#include "presentation_live_input_internal.h"
 #include "presentation_form_internal.h"
 #include "presentation_validate_internal.h"
 #include "util/png_writer.h"
@@ -591,6 +592,10 @@ static bool present_replace_surface(
                                 scaled_pixels);
 }
 
+#if defined(ZCL_TESTING)
+#include "presentation_live_test_internal.h"
+#endif
+
 static bool present_redraw(
     RGFW_window *window, const struct zcl_present_window_v1 *page,
     RGFW_surface **surface, uint8_t **scaled_pixels,
@@ -601,6 +606,9 @@ static bool present_redraw(
     uint32_t hover_index,
     bool required_invalid)
 {
+#if defined(ZCL_TESTING)
+    if (present_test_fail_redraw) { present_test_fail_redraw = false; return false; }
+#endif
     i32 width = 0, height = 0;
     (void)RGFW_window_getSize(window, &width, &height);
     if (!present_replace_surface(
@@ -612,7 +620,7 @@ static bool present_redraw(
     return true;
 }
 
-static void present_live_pump(
+static bool present_live_pump(
     const struct zcl_present_window_live_view_v1 *live, uint32_t action_count,
     RGFW_window *window, const struct zcl_present_window_v1 *page,
     RGFW_surface **surface, uint8_t **scaled_pixels,
@@ -620,79 +628,25 @@ static void present_live_pump(
     bool required_invalid, struct zcl_present_window_event_v1 *event,
     bool paint)
 {
-    if (!live) return;
+    if (!live) return true;
     bool redraw = false, close = false;
     live->owner.update(live->owner.context, event, RGFW_window_shouldClose(window),
                  &redraw, &close);
     if (redraw) RGFW_window_setName(window, page->title ? page->title : "ZClassic23");
-    if (redraw && paint)
-        (void)present_redraw(window, page, surface, scaled_pixels, action_count,
-            focus, form, NULL, NULL, UINT32_MAX, required_invalid);
+    if (redraw && paint &&
+        !present_redraw(window, page, surface, scaled_pixels, action_count,
+            focus, form, NULL, NULL, UINT32_MAX, required_invalid)) {
+        event->outcome = ZCL_PRESENT_WINDOW_DISMISSED;
+        event->action_index = UINT32_MAX;
+        RGFW_window_setShouldClose(window, RGFW_TRUE);
+        return false;
+    }
     RGFW_window_setShouldClose(window, close);
     if (!close) {
         event->outcome = ZCL_PRESENT_WINDOW_DISMISSED;
         event->action_index = UINT32_MAX;
     }
-}
-
-static enum zcl_present_input_key present_live_key(RGFW_key key)
-{
-    static const struct { RGFW_key native; enum zcl_present_input_key key; } keys[] = {
-        {RGFW_up, ZCL_PRESENT_INPUT_UP}, {RGFW_down, ZCL_PRESENT_INPUT_DOWN},
-        {RGFW_home, ZCL_PRESENT_INPUT_HOME}, {RGFW_end, ZCL_PRESENT_INPUT_END},
-        {RGFW_pageUp, ZCL_PRESENT_INPUT_PAGE_UP}, {RGFW_pageDown, ZCL_PRESENT_INPUT_PAGE_DOWN},
-        {RGFW_tab, ZCL_PRESENT_INPUT_TAB}, {RGFW_return, ZCL_PRESENT_INPUT_ENTER},
-        {RGFW_delete, ZCL_PRESENT_INPUT_DELETE}, {RGFW_backSpace, ZCL_PRESENT_INPUT_DELETE},
-        {RGFW_escape, ZCL_PRESENT_INPUT_ESCAPE},
-    };
-    for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); ++i)
-        if (keys[i].native == key) return keys[i].key;
-    return ZCL_PRESENT_INPUT_TEXT;
-}
-
-static bool present_live_event(RGFW_window *window,
-    const struct zcl_present_window_v1 *page, const RGFW_event *event,
-    struct zcl_present_input_v1 *input)
-{
-    *input = (struct zcl_present_input_v1){0};
-    if (event->type == RGFW_keyPressed) {
-        input->key = present_live_key(event->key.value);
-        input->character = event->key.sym;
-        input->shift = (event->key.mod & RGFW_modShift) != 0;
-        input->command = (event->key.mod & (RGFW_modControl | RGFW_modSuper)) != 0;
-        return true;
-    }
-    if (event->type == RGFW_mouseScroll) {
-        input->key = event->scroll.y < 0 ? ZCL_PRESENT_INPUT_DOWN : ZCL_PRESENT_INPUT_UP;
-        return event->scroll.y != 0;
-    }
-    if (event->type != RGFW_mouseButtonPressed || event->button.value != RGFW_mouseLeft)
-        return false;
-    i32 width = 0, height = 0, x = 0, y = 0;
-    (void)RGFW_window_getSize(window, &width, &height);
-    input->key = ZCL_PRESENT_INPUT_CLICK;
-    return RGFW_window_getMouse(window, &x, &y) &&
-        zcl_present_window_source_point_v1(page->width, page->height,
-            width, height, x, y, &input->x, &input->y);
-}
-
-static bool present_live_input(const struct zcl_present_window_live_view_v1 *live,
-    RGFW_window *window, const struct zcl_present_window_v1 *page,
-    const RGFW_event *event, uint32_t action_count, uint32_t *focus,
-    struct zcl_present_window_event_v1 *result)
-{
-    if (!live || !live->input) return false;
-    struct zcl_present_input_v1 input;
-    if (!present_live_event(window, page, event, &input)) return false;
-    uint32_t action = UINT32_MAX;
-    bool consumed = live->input(live->owner.context, &input, focus, &action);
-    if (*focus >= action_count) *focus = UINT32_MAX;
-    if (action < action_count) {
-        result->outcome = ZCL_PRESENT_WINDOW_ACTION;
-        result->action_index = action;
-        RGFW_window_setShouldClose(window, RGFW_TRUE);
-    }
-    return consumed;
+    return true;
 }
 
 static bool present_copy_feedback_bad_args(
@@ -787,6 +741,7 @@ struct present_pages_run {
     uint32_t hover_index;
     uint32_t focused_control;
     bool required_invalid;
+    bool redraw_failed;
 };
 
 static const char *present_pages_open(struct present_pages_run *run)
@@ -802,6 +757,8 @@ static const char *present_pages_open(struct present_pages_run *run)
     /* Keep the native window identity stable across QR, graph, Metaverse, and
      * ZCode content. Linux desktop shells match this WM_CLASS to the bundled
      * desktop entry; Win32 uses it as the grouping class. */
+    if (RGFW_init() < 0)
+        return "native window initialization failed";
     RGFW_setClassName(ZCL_PRESENT_APPLICATION_ID);
     RGFW_setXInstName(ZCL_PRESENT_APPLICATION_ID);
     RGFW_windowFlags flags = (RGFW_windowFlags)(
@@ -853,10 +810,11 @@ static bool present_pages_redraw(struct present_pages_run *run,
 
 static void present_pages_pump(struct present_pages_run *run, bool paint)
 {
-    present_live_pump(run->live, run->action_count, run->window,
+    if (!present_live_pump(run->live, run->action_count, run->window,
                       run->request, &run->surface, &run->scaled_pixels,
                       run->form, run->focused_control, run->required_invalid,
-                      run->result, paint);
+                      run->result, paint))
+        run->redraw_failed = true;
 }
 
 static void present_pages_finish(struct present_pages_run *run,
@@ -1024,13 +982,20 @@ static void present_pages_resize(struct present_pages_run *run,
         (void)RGFW_window_getSize(run->window, &resized_width,
                                   &resized_height);
         bool live_hover = present_pages_hover_live(run);
-        (void)present_replace_surface(
+        bool replaced = present_replace_surface(
             run->window, run->request, resized_width, resized_height,
             &run->surface, &run->scaled_pixels, run->action_count,
             run->focused_control, run->form, run->canvas,
             live_hover ? run->hover : NULL,
             live_hover ? run->hover_index : UINT32_MAX,
             run->required_invalid);
+        if (!replaced && run->live) {
+            run->redraw_failed = true;
+            run->result->outcome = ZCL_PRESENT_WINDOW_DISMISSED;
+            run->result->action_index = UINT32_MAX;
+            RGFW_window_setShouldClose(run->window, RGFW_TRUE);
+            return;
+        }
         RGFW_window_blitSurface(run->window, run->surface);
     } else if (event->type == RGFW_windowRefresh) {
         RGFW_window_blitSurface(run->window, run->surface);
@@ -1040,11 +1005,21 @@ static void present_pages_resize(struct present_pages_run *run,
 static bool present_pages_live_event(struct present_pages_run *run,
     RGFW_event *event)
 {
+    uint32_t previous_focus = run->focused_control;
     if (!present_live_input(run->live, run->window, run->request, event,
                             run->action_count, &run->focused_control,
                             run->result))
         return false;
     present_pages_pump(run, true);
+    /* Focus belongs to the native view, not the owner's page-update flag. */
+    if (previous_focus != run->focused_control && !run->redraw_failed &&
+        !RGFW_window_shouldClose(run->window) &&
+        !present_pages_redraw(run, run->focused_control, run->hover_index)) {
+        run->redraw_failed = true;
+        run->result->outcome = ZCL_PRESENT_WINDOW_DISMISSED;
+        run->result->action_index = UINT32_MAX;
+        RGFW_window_setShouldClose(run->window, RGFW_TRUE);
+    }
     return true;
 }
 
@@ -1278,6 +1253,7 @@ static void present_pages_event(struct present_pages_run *run,
 {
     if (present_pages_live_event(run, event)) return;
     present_pages_resize(run, event);
+    if (run->redraw_failed) return;
     present_pages_hover_pointer(run, event);
     present_pages_hover_scroll(run, event);
     present_pages_pointer(run, event);
@@ -1291,15 +1267,31 @@ static void present_pages_event(struct present_pages_run *run,
     present_pages_plain_key(run, event);
 }
 
+static bool present_pages_poll_event(RGFW_window *window, RGFW_event *event)
+{
+#if defined(ZCL_TESTING)
+    if (present_test_cursor < present_test_count) {
+        memset(event, 0, sizeof(*event));
+        event->type = RGFW_keyPressed;
+        event->key.value = RGFW_a;
+        event->key.sym = (u32)('1' + present_test_events[present_test_cursor++]);
+        return true;
+    }
+#endif
+    return RGFW_window_checkEvent(window, event);
+}
+
 static void present_pages_loop(struct present_pages_run *run)
 {
     while (!RGFW_window_shouldClose(run->window)) {
         RGFW_event event;
         bool saw_event = false;
-        while (RGFW_window_checkEvent(run->window, &event)) {
+        while (present_pages_poll_event(run->window, &event)) {
             saw_event = true;
             present_pages_event(run, &event);
+            if (run->redraw_failed || (run->live && RGFW_window_shouldClose(run->window))) break;
         }
+        if (run->redraw_failed || (run->live && RGFW_window_shouldClose(run->window))) break;
         present_pages_pump(run, true);
         if (!saw_event && !RGFW_window_shouldClose(run->window))
             RGFW_waitForEvent(100);
@@ -1362,6 +1354,11 @@ static bool present_run_pages_actions(
     RGFW_surface_free(run.surface);
     free(run.scaled_pixels);
     RGFW_window_close(run.window);
+#if defined(ZCL_TESTING)
+    present_test_final_event = *result;
+#endif
+    if (run.redraw_failed)
+        return present_error(error, error_cap, "live presentation redraw failed");
     if (error && error_cap > 0) error[0] = '\0';
     return true;
 #endif

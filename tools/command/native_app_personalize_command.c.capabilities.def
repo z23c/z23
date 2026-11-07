@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_app_personalize_command.c", CAP_FS_READ|CAP_FS_WRITE, "Probes the publisher key and writes a private metadata draft; key and copy operations use their owning modules")

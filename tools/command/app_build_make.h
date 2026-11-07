@@ -25,9 +25,12 @@
  * build-graph, harness and policy classes name this contract. It is the
  * DECLARED closure, not a per-compile zcl.action_preimage.v2 derivation:
  * make does not expose each compile's exact argv and environment. After a
- * build, every depfile prerequisite inside the copy must be declared
- * (app_build_depfiles_declared); a file outside the copy is a toolchain or
- * system input, bound by the env root. */
+ * build, every local depfile prerequisite must resolve to a declared regular
+ * input inside the copy (app_build_depfiles_declared). Relative and
+ * copy-prefixed escapes are refused. Existing externally absolute inputs
+ * remain allowed; the env root does NOT bind arbitrary external header bytes.
+ * Actual compiler-action capture and cache revalidation are still required
+ * to close that separate evidence gap. */
 #ifndef ZCL_TOOLS_COMMAND_APP_BUILD_MAKE_H
 #define ZCL_TOOLS_COMMAND_APP_BUILD_MAKE_H
 

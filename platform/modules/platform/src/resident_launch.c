@@ -45,6 +45,7 @@
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -322,6 +323,31 @@ static void resident_child_clean_signals(pid_t parent)
     if (getppid() != parent) _exit(126);
 }
 
+/* A setup failure must send an errno byte before closing the status pipe.
+ * Retry interrupted writes; if the pipe itself fails, exit distinctly. */
+static void resident_child_setup_fail(int status_fd, int failure)
+{
+    unsigned char code = (unsigned char)((failure ? failure : EIO) & 0xff);
+    ssize_t written;
+    do {
+        written = write(status_fd, &code, 1);
+    } while (written < 0 && errno == EINTR);
+    _exit(written == 1 ? 127 : 126);
+}
+
+/* Match the desktop launcher's signal environment without changing the parent. */
+static void resident_child_desktop_signals(int status_fd)
+{
+    const int signals[] = {SIGPIPE, SIGTERM, SIGINT, SIGHUP, SIGUSR1, SIGCHLD};
+    sigset_t empty;
+    struct sigaction dfl = {.sa_handler = SIG_DFL};
+    sigemptyset(&empty);
+    int rc = sigprocmask(SIG_SETMASK, &empty, NULL);
+    for (size_t i = 0; rc == 0 && i < sizeof(signals) / sizeof(signals[0]); ++i)
+        rc = sigaction(signals[i], &dfl, NULL);
+    if (rc != 0) resident_child_setup_fail(status_fd, errno);
+}
+
 /* stdin, stdout and stderr become /dev/null; runs after every slot is placed,
  * so the descriptor open() returns is a free one. */
 static void resident_child_null_stdio(void)
@@ -353,12 +379,29 @@ static void resident_child_place_fds(struct resident_child_plan *plan)
  * extra descriptors after it, the pinned image, the status pipe), then exec
  * the pinned inode. Only ever returns on exec failure; the errno byte on the status pipe is the parent's
  * synchronous exec outcome. */
-static void resident_child_exec(struct resident_child_plan plan,
-                                char *const argv[], char *const envp[])
+/* This runs only in the forked child. Report setup errors over the existing
+ * CLOEXEC status pipe so an EOF is never mistaken for a successful exec. */
+static void resident_child_log_stdio(int logfd, int status_fd)
 {
+    int nullfd = open("/dev/null", O_RDONLY);
+    bool ok = nullfd >= 0 && dup2(nullfd, 0) >= 0 &&
+        dup2(logfd, 1) >= 0 && dup2(logfd, 2) >= 0;
+    int saved = errno;
+    if (nullfd > 2) close(nullfd);
+    if (!ok) resident_child_setup_fail(status_fd, saved);
+    close(logfd);
+}
+
+static void resident_child_exec(struct resident_child_plan plan,
+                                char *const argv[], char *const envp[], int logfd, int borrowed_logfd, bool desktop_signals)
+{
+    if (borrowed_logfd >= 0 && close(borrowed_logfd) != 0)
+        resident_child_setup_fail(plan.status_write, errno);
     if (setsid() < 0) _exit(126);
     if (plan.profile) resident_child_clean_signals(plan.parent);
+    else if (desktop_signals) resident_child_desktop_signals(plan.status_write);
     resident_child_place_fds(&plan);
+    if (logfd >= 0) resident_child_log_stdio(logfd, plan.status_write);
     if (plan.profile) {
         resident_child_close_inherited(&plan);
         resident_child_arm(&plan);
@@ -583,6 +626,7 @@ static bool resident_handshake_refused(struct resident_launch *launch, pid_t pid
 
 static bool resident_spawn_fork(struct resident_child_plan plan,
                                 char *const argv[], char *const envp[],
+                                int logfd, int borrowed_logfd, bool desktop_signals,
                                 int ipc[2], int status_pipe[2], pid_t *pid_out,
                                 char *error, size_t error_size)
 {
@@ -601,7 +645,7 @@ static bool resident_spawn_fork(struct resident_child_plan plan,
          * and the parent reads EOF; a failed exec writes the errno first. */
         plan.ipc_child = ipc[1];
         plan.status_write = status_pipe[1];
-        resident_child_exec(plan, argv, envp);
+        resident_child_exec(plan, argv, envp, logfd, borrowed_logfd, desktop_signals);
         _exit(126);
     }
     *pid_out = pid;
@@ -674,7 +718,7 @@ static bool resident_extra_fds_check(const struct resident_launch *launch,
 }
 
 static bool resident_spawn_linux(struct resident_launch *launch,
-                                 char *const argv[], char *const envp[],
+                                 char *const argv[], char *const envp[], int borrowed_logfd,
                                  const struct os_sandbox_profile *profile,
                                  struct resident_receipt *receipt,
                                  char *error, size_t error_size)
@@ -714,7 +758,7 @@ static bool resident_spawn_linux(struct resident_launch *launch,
     pid_t pid = 0;
     launch->exec_state = RESIDENT_EXEC_NONE;
     launch->exec_errno = 0;
-    if (!resident_spawn_fork(plan, argv, envp, ipc, status_pipe, &pid,
+    if (!resident_spawn_fork(plan, argv, envp, launch->log_stdio ? launch->log_stdio_fd : -1, borrowed_logfd, launch->desktop_signals, ipc, status_pipe, &pid,
                              error, error_size))
         return false;
     close(ipc[1]);
@@ -769,6 +813,68 @@ static bool resident_confine_supported(const struct os_sandbox_profile *profile,
 }
 #endif /* !defined(_WIN32) */
 
+#if !defined(_WIN32)
+/* Duplicate once before allocating channels: the child gets a stable,
+ * collision-free handle without changing any parent standard descriptor. */
+static int resident_log_duplicate(const struct resident_launch *launch,
+                                  const struct os_sandbox_profile *profile,
+                                  char *error, size_t error_size)
+{
+    if (!launch->log_stdio) return -1;
+    if (profile || launch->null_stdio || launch->n_extra_fds || launch->log_stdio_fd < 3) {
+        errno = EINVAL;
+        resident_fail(error, error_size, "resident launch: log stdio requires an unconfined spawn and a separate log fd");
+        return -2;
+    }
+    const struct platform_positioned_file *file =
+        (const struct platform_positioned_file *)(const void *)launch->pinned_native;
+    int pinned_fd = (int)platform_positioned_file_native_fd(file);
+    for (int fd = 0; fd < 3; ++fd) {
+        if (fcntl(fd, F_GETFD) < 0 || pinned_fd == fd) {
+            errno = EINVAL;
+            resident_fail(error, error_size, "resident launch: log stdio requires open standard descriptors at prepare");
+            return -2;
+        }
+    }
+    if (launch->log_stdio_fd == pinned_fd) {
+        errno = EINVAL;
+        resident_fail(error, error_size, "resident launch: log descriptor aliases pinned image");
+        return -2;
+    }
+    int copy = fcntl(launch->log_stdio_fd, F_DUPFD_CLOEXEC, RESIDENT_LAUNCH_CHILD_FD + 1);
+    if (copy < 0) {
+        resident_fail(error, error_size, "resident launch: log descriptor unavailable: %s", strerror(errno));
+        return -2;
+    }
+    struct stat st;
+    int flags = fcntl(copy, F_GETFL);
+    if (flags < 0 || (flags & O_ACCMODE) == O_RDONLY || fstat(copy, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(copy);
+        errno = EINVAL;
+        resident_fail(error, error_size, "resident launch: log descriptor must be a writable regular file");
+        return -2;
+    }
+    return copy;
+}
+#endif
+
+#if !defined(_WIN32)
+static bool resident_spawn_validate(const struct resident_launch *launch,
+                                    char *const argv[], const struct resident_receipt *receipt,
+                                    char *error, size_t error_size)
+{
+    if (!launch || launch->pinned_native == (uintptr_t)-1 ||
+        launch->spawned || !argv || !argv[0] || !receipt) {
+        errno = EINVAL;
+        resident_fail(error, error_size,
+                      "resident launch: spawn needs a prepared, unspawned"
+                      " launch with an argv");
+        return false;
+    }
+    return true;
+}
+#endif
+
 static bool resident_spawn_common(struct resident_launch *launch,
                                   char *const argv[], char *const envp[],
                                   const struct os_sandbox_profile *profile,
@@ -781,32 +887,31 @@ static bool resident_spawn_common(struct resident_launch *launch,
     resident_fail(error, error_size, "%s", RESIDENT_WIN_REFUSAL);
     return false;
 #else
-    if (!launch || launch->pinned_native == (uintptr_t)-1 ||
-        launch->spawned || !argv || !argv[0] || !receipt) {
-        errno = EINVAL;
-        resident_fail(error, error_size,
-                      "resident launch: spawn needs a prepared, unspawned"
-                      " launch with an argv");
-        return false;
-    }
+    if (!resident_spawn_validate(launch, argv, receipt, error, error_size)) return false;
     if (profile && !resident_confine_supported(profile, error, error_size))
         return false;
     memset(receipt, 0, sizeof(*receipt));
+    int logfd = resident_log_duplicate(launch, profile, error, error_size);
+    if (logfd == -2) return false;
+    int caller_logfd = launch->log_stdio_fd;
+    if (logfd >= 0) launch->log_stdio_fd = logfd;
+    bool spawned;
 #if defined(__APPLE__)
     if (launch->n_extra_fds || launch->null_stdio) {
         errno = ENOTSUP;
-        resident_fail(error, error_size,
-                      "resident launch: extra descriptors are Linux-only");
-        return false;
+        resident_fail(error, error_size, "resident launch: extra descriptors are Linux-only");
+        spawned = false;
+    } else {
+        spawned = resident_spawn_darwin(launch, argv, envp, receipt, error, error_size);
     }
-    if (!resident_spawn_darwin(launch, argv, envp, receipt,
-                               error, error_size))
-        return false;
 #else
-    if (!resident_spawn_linux(launch, argv, envp, profile, receipt,
-                              error, error_size))
-        return false;
+    spawned = resident_spawn_linux(launch, argv, envp, logfd >= 0 ? caller_logfd : -1, profile, receipt, error, error_size);
 #endif
+    int spawn_errno = errno;
+    if (logfd >= 0) close(logfd);
+    launch->log_stdio_fd = caller_logfd;
+    errno = spawn_errno;
+    if (!spawned) return false;
     (void)snprintf(receipt->nonce, sizeof(receipt->nonce), "%s",
                    launch->nonce);
     (void)snprintf(receipt->image_sha3_hex, sizeof(receipt->image_sha3_hex),

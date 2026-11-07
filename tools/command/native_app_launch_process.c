@@ -13,6 +13,7 @@
 #include "command/native_app_launch.h"
 
 #include "platform/time_compat.h"
+#include "platform/resident_launch.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
@@ -233,6 +234,13 @@ static bool app_log_has(const char *path, const char *needle)
     return n > 0 && app_text_has(buf, (size_t)n, needle);
 }
 
+static bool app_log_fd_has(int fd, const char *needle)
+{
+    static char buf[APP_LOG_SCAN_MAX];
+    ssize_t n = pread(fd, buf, sizeof(buf), 0);
+    return n > 0 && app_text_has(buf, (size_t)n, needle);
+}
+
 static enum app_raise_outcome app_os_raise(long pid, char *note,
                                            size_t note_size)
 {
@@ -338,17 +346,22 @@ static int app_spawn(const struct app_launch_entry *entry, int logfd,
 
 /* One poll: exited (reaped here), ready, or neither. */
 static bool app_wait_step(pid_t pid, const struct app_launch_entry *entry,
-                          const char *log_path, int64_t elapsed, int settle_ms,
+                          const char *log_path, int logfd, int64_t elapsed, int settle_ms,
                           struct app_spawn_outcome *out)
 {
     int status = 0;
-    if (waitpid(pid, &status, WNOHANG) == pid) {
+    pid_t waited = waitpid(pid, &status, WNOHANG);
+    if (waited < 0 && errno != EINTR && logfd >= 0) {
+        out->spawn_errno = errno;
+        return true;
+    }
+    if (waited == pid) {
         out->exited = true;
         out->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
         out->term_signal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
         return true;
     }
-    if (entry->ready_marker[0] ? app_log_has(log_path, entry->ready_marker)
+    if (entry->ready_marker[0] ? (logfd >= 0 ? app_log_fd_has(logfd, entry->ready_marker) : app_log_has(log_path, entry->ready_marker))
                                : elapsed >= settle_ms) {
         out->ready = true;
         out->ready_ms = elapsed;
@@ -383,9 +396,23 @@ static bool app_os_spawn_and_wait(const struct app_launch_entry *entry,
     int64_t start = platform_time_monotonic_ms();
     for (;;) {
         int64_t elapsed = platform_time_monotonic_ms() - start;
-        if (app_wait_step(pid, entry, log_path, elapsed, settle_ms, out) ||
+        if (app_wait_step(pid, entry, log_path, -1, elapsed, settle_ms, out) ||
             elapsed >= timeout_ms)
             return true;
+        platform_sleep_ms(APP_POLL_MS);
+    }
+}
+
+static bool app_resident_wait(const struct app_launch_entry *entry,
+                              int logfd,
+                              int timeout_ms, int settle_ms,
+                              struct app_spawn_outcome *out)
+{
+    int64_t start = platform_time_monotonic_ms();
+    for (;;) {
+        int64_t elapsed = platform_time_monotonic_ms() - start;
+        if (app_wait_step((pid_t)out->pid, entry, NULL, logfd, elapsed, settle_ms, out) ||
+            elapsed >= timeout_ms) return out->spawn_errno == 0;
         platform_sleep_ms(APP_POLL_MS);
     }
 }
@@ -466,6 +493,54 @@ bool app_proc_spawn_and_wait(const struct app_launch_entry *entry,
     return false;
 #else
     return app_os_spawn_and_wait(entry, log_path, timeout_ms, settle_ms, out);
+#endif
+}
+
+bool app_proc_resident_spawn_and_wait(const struct app_launch_entry *entry,
+                                     struct resident_launch *prepared,
+                                     const char *log_path, int timeout_ms,
+                                     int settle_ms, struct resident_receipt *receipt,
+                                     struct app_spawn_outcome *out,
+                                     char *error, size_t error_size)
+{
+    if (!out) { resident_launch_close(prepared); errno = EINVAL; return false; }
+    memset(out, 0, sizeof(*out));
+    if (!entry || !prepared || !receipt || !log_path || entry->arg_count > APP_LAUNCH_ARGS_MAX) {
+        out->spawn_errno = EINVAL;
+        resident_launch_close(prepared);
+        return false;
+    }
+#if defined(_WIN32)
+    (void)entry; (void)log_path; (void)timeout_ms; (void)settle_ms;
+    (void)receipt; (void)error; (void)error_size;
+    out->spawn_errno = ENOSYS;
+    resident_launch_close(prepared);
+    return false;
+#else
+    int logfd = open(log_path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (logfd < 0) {
+        out->spawn_errno = errno;
+        resident_launch_close(prepared);
+        return false;
+    }
+    char *argv[APP_LAUNCH_ARGS_MAX + 2];
+    argv[0] = (char *)entry->executable;
+    for (unsigned i = 0; i < entry->arg_count; ++i) argv[i + 1] = (char *)entry->args[i];
+    argv[entry->arg_count + 1] = NULL;
+    prepared->desktop_signals = true;
+    prepared->log_stdio = true;
+    prepared->log_stdio_fd = logfd;
+    bool spawned = resident_launch_spawn(prepared, argv, environ, receipt, error, error_size);
+    if (spawned) {
+        out->pid = receipt->pid;
+        if (!app_resident_wait(entry, logfd, timeout_ms, settle_ms, out)) {
+            (void)resident_launch_cancel(prepared, 20, error, error_size);
+            spawned = false;
+        }
+    } else out->spawn_errno = errno;
+    close(logfd);
+    resident_launch_close(prepared);
+    return spawned;
 #endif
 }
 

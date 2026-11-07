@@ -1,249 +1,395 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: app.receive, `z23 app open FILE.z23share` (see
- * command/native_app_front_door.h). AUTH_OWNER: it runs the owner leaf
- * zcode.package.bundle.receive as an inner call, which skips MCP policy.
- *
- * Plan: zcode.package.bundle.verify, then the receive plan into the first
- * free <datadir>/copies/<name>-<n>; nothing is written. Confirm receives
- * trusting exactly the publisher and package root the verify read from the
- * file (never a value the caller typed), then builds (app.build) and opens
- * (app.run.copy) that build's exact image. A file that does not verify
- * stops at the plan and keeps nothing. */
-
-#include "command/native_command.h"
-
-#include "command/app_copy_build.h"
-#include "command/native_app_compose.h"
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: Show a verified share plan before recording owner receive trust. */
+#include "command/native_app_receive_command.h"
+#include "command/native_app_confirm.h"
 #include "command/native_zcode_package_copy.h"
-
+#include "base/hex.h"
 #include "base/safe_alloc.h"
+#include "config/command_catalog.h"
 #include "json/json.h"
-#include "util/file_tree_ops.h"
-#include "util/path_util.h"
-
+#include "platform/directory_compat.h"
+#include "platform/directory_transaction.h"
+#include "platform/file_metadata.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define ZRV_COMMAND "app.receive"
-#define ZRV_DOMAIN "zcl.app_receive.plan.v1"
-
-
-struct zrv {
-    const struct json_value *input;
-    struct zcl_command_reply *reply;
-    const char *datadir;
-    const char *file;
-    struct zcl_command_reply verify;
-    bool verify_live;
-    char name[ZCL_PACKAGE_ADOPT_NAME_MAX + 1u];
-    char dest[APP_COPY_BUILD_PATH];
-    char receive_plan[65];
-    uint8_t plan_id[32];
+#define AR_PATH 4400u
+struct receive_work {
+    struct app_confirm view;
+    struct json_value receiver_args;
+    bool default_destination, parents_may_have_changed;
+    char datadir[AR_PATH];
+    char plan[65], release[65], package[65], publisher[67];
+    char name[257], version[257], parent[65], destination[AR_PATH];
 };
-
-static bool zrv_receive_input(struct zrv *z, struct json_value *in)
+static bool ar_fail(struct zcl_command_reply *reply, const char *code, const char *why)
 {
-    const char *kv[] = {"file", z->file, "destination", z->dest,
-                        "datadir", z->datadir};
-    return zcl_app_input(in, kv, 6) && zcl_app_input_day(z->input, in);
+    zcl_package_copy_fail(reply, code, false, why, "app.receive");
+    return false;
 }
-
-
-/* Verify, name the copy, and run the receive plan. */
-static bool zrv_plan(struct zrv *z)
+static bool ar_text(char *out, size_t cap, const struct json_value *data, const char *key)
 {
-    struct json_value in;
-    struct zcl_command_reply inner;
-    const char *kv[] = {"file", z->file};
-    z->verify_live = true;
-    if (!zcl_app_inner_call_built("zcode.package.bundle.verify", &in,
-                                  zcl_app_input(&in, kv, 2),
-                  &z->verify)) {
-        zcl_app_inner_fail(z->reply, &z->verify, false);
+    const struct json_value *value = json_get(data, key);
+    const char *text = value && value->type == JSON_STR ? json_get_str(value) : NULL;
+    if (!text || !*text || strlen(text) >= cap) return false;
+    memcpy(out, text, strlen(text) + 1);
+    return true;
+}
+static bool ar_root(const char *text, size_t bytes)
+{
+    uint8_t root[33];
+    return bytes <= sizeof(root) && strlen(text) == bytes * 2 &&
+        zcl_hex_decode_lower(text, root, bytes);
+}
+static bool ar_input_keys(const struct json_value *input)
+{
+    static const char *const allowed[] = {"file", "datadir", "destination", "day"};
+    if (!input || input->type != JSON_OBJ || input->num_children < 1 || input->num_children > 4)
         return false;
+    for (size_t i = 0; i < input->num_children; ++i) {
+        bool known = false;
+        for (size_t j = 0; j < sizeof(allowed) / sizeof(allowed[0]); ++j)
+            if (!strcmp(input->keys[i], allowed[j])) known = true;
+        if (!known) return false;
+        for (size_t j = 0; j < i; ++j)
+            if (!strcmp(input->keys[i], input->keys[j])) return false;
     }
-    if (!zcl_package_copy_pick_name(z->datadir,
-                                    zcl_app_inner_str(&z->verify, "name"),
-                                    z->name, z->dest, sizeof(z->dest),
-                                    z->reply))
-        return false;
-    bool ok = zcl_app_inner_call_built("zcode.package.bundle.receive", &in,
-                       zrv_receive_input(z, &in), &inner);
-    const char *plan = ok ? zcl_app_inner_str(&inner, "plan_id") : NULL;
-    if (plan)
-        (void)snprintf(z->receive_plan, sizeof(z->receive_plan), "%s", plan);
-    else
-        zcl_app_inner_fail(z->reply, &inner, false);
-    zcl_command_reply_free(&inner);
-    const char *parts[] = {z->file, z->datadir, z->dest, z->receive_plan,
-                           zcl_app_inner_str(&z->verify,
-                                             "publisher_fingerprint"),
-                           zcl_app_inner_str(&z->verify, "package_root")};
-    zcl_app_plan_id(ZRV_DOMAIN, parts, 6, z->plan_id);
-    return plan != NULL;
+    return true;
 }
-
-static void zrv_describe(struct zrv *z, const char *stage)
+static bool ar_inputs(struct receive_work *w, const struct json_value *input)
 {
-    struct json_value *d = &z->reply->data;
-    const char *keys[] = {"name", "semver", "release_id", "package_root",
-                          "parent_release_root"};
-    (void)json_push_kv_str(d, "stage", stage);
-    (void)json_push_kv_str(d, "file", z->file);
-    (void)json_push_kv_str(d, "copy", z->name);
-    (void)json_push_kv_str(d, "destination", z->dest);
-    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
-        if (zcl_app_inner_str(&z->verify, keys[i]))
-            (void)json_push_kv_str(d, keys[i],
-                                   zcl_app_inner_str(&z->verify, keys[i]));
-    zcl_app_push_publisher(d, zcl_app_inner_str(&z->verify, "publisher_fingerprint"));
-}
-
-static bool zrv_copy_input(struct zrv *z, struct json_value *in)
-{
-    const char *kv[] = {"copy", z->name, "datadir", z->datadir};
-    return zcl_app_input(in, kv, 4);
-}
-
-/* app.run.copy plan, then its confirm accepting exactly the planned image.
- * `out` is always initialized. */
-static bool zrv_open(struct zrv *z, struct zcl_command_reply *out)
-{
-    struct json_value in;
-    bool built = zrv_copy_input(z, &in);
-    if (!built) {
-        json_free(&in);
-        zcl_command_reply_init(out, "zcl.app_receive.inner.v1");
-        zcl_package_copy_fail(out, "ALLOC", false, "inner input", z->name);
-        return false;
+    if (!ar_input_keys(input)) return false;
+    static const char *const paths[] = {"file", "datadir", "destination"};
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+        if (i && !json_get(input, paths[i])) continue;
+        char path[AR_PATH];
+        if (!ar_text(path, sizeof(path), input, paths[i]) || path[0] != '/' ||
+            !json_push_kv_str(&w->receiver_args, paths[i], path)) return false;
+        if (i == 2) memcpy(w->destination, path, strlen(path) + 1);
     }
-    bool ok = zcl_app_inner_call("app.run.copy", &in, out, NULL);
-    const char *image = ok ? zcl_app_inner_str(out, "image_sha3") : NULL;
-    const char *plan = ok ? zcl_app_inner_str(out, "plan_id") : NULL;
-    ok = image && plan && json_push_kv_str(&in, "image_sha3", image) &&
-         json_push_kv_bool(&in, "accept_execution", true) &&
-         json_push_kv_str(&in, "plan_id", plan) &&
-         json_push_kv_bool(&in, "confirm", true);
-    if (ok || out->status == ZCL_COMMAND_STATUS_PASSED) {
-        zcl_command_reply_free(out);
-        if (ok) {
-            ok = zcl_app_inner_call("app.run.copy", &in, out, NULL);
-        } else {
-            zcl_command_reply_init(out, "zcl.app_receive.inner.v1");
-            zcl_package_copy_fail(out, "OPEN_PLAN_INCOMPLETE", false,
-                                  "the open plan named no image", z->name);
-        }
+    w->default_destination = !json_get(input, "destination");
+    const struct json_value *day = json_get(input, "day");
+    return !day || (day->type == JSON_INT && day->val.i >= 0 &&
+        json_push_kv_int(&w->receiver_args, "day", day->val.i));
+}
+static bool ar_datadir(struct receive_work *w, struct zcl_command_reply *reply)
+{
+    const char *dir = zcl_package_copy_datadir(&w->receiver_args, reply, "app.receive");
+    if (!dir) return false;
+    if (dir[0] != '/' || strlen(dir) >= sizeof(w->datadir))
+        return ar_fail(reply, "BAD_INPUT", "The bound datadir must be a bounded absolute path.");
+    memcpy(w->datadir, dir, strlen(dir) + 1);
+    return json_get(&w->receiver_args, "datadir") ||
+        json_push_kv_str(&w->receiver_args, "datadir", w->datadir) ||
+        ar_fail(reply, "OUT_OF_MEMORY", "Cannot retain the resolved datadir.");
+}
+/* Find an existing canonical ancestor without writes. Missing suffixes are
+ * created relative to retained handles only after native confirmation. */
+static bool ar_parent_anchor(const char *path, char anchor[AR_PATH])
+{
+    memcpy(anchor, path, strlen(path) + 1);
+    for (;;) {
+        enum platform_directory_probe_result found = platform_directory_probe_real(anchor);
+        if (found == PLATFORM_DIRECTORY_PROBE_OK) break;
+        if (found != PLATFORM_DIRECTORY_PROBE_MISSING) return false;
+        char *slash = strrchr(anchor, '/');
+        if (!slash || slash == anchor) return false;
+        *slash = 0;
     }
-    json_free(&in);
+    char canonical[AR_PATH];
+    return platform_directory_canonical_real(anchor, canonical, sizeof(canonical)) &&
+        !strcmp(canonical, anchor);
+}
+static bool ar_parent_leaf(const char *leaf)
+{
+    size_t n = strlen(leaf);
+    return n > 0 && n <= PLATFORM_DIRECTORY_CHILD_LEAF_MAX &&
+        strcmp(leaf, ".") && strcmp(leaf, "..") && !strchr(leaf, '\\') &&
+        !strchr(leaf, ':') && leaf[n - 1] != '.' && leaf[n - 1] != ' ';
+}
+static enum platform_directory_result ar_parent_step(struct receive_work *w,
+    struct platform_directory_transaction *root, const char *leaf, bool create)
+{
+    struct platform_directory_transaction child;
+    platform_directory_transaction_init(&child);
+    enum platform_directory_result rc =
+        platform_directory_transaction_open_child(root, leaf, false, &child);
+    if (rc == PLATFORM_DIRECTORY_MISSING && create) {
+        w->parents_may_have_changed = true; /* mkdir can precede an error */
+        rc = platform_directory_transaction_open_child(root, leaf, true, &child);
+    }
+    if (rc != PLATFORM_DIRECTORY_OK) {
+        platform_directory_transaction_close(&child); return rc;
+    }
+    platform_directory_transaction_close(root);
+    *root = child; return PLATFORM_DIRECTORY_OK;
+}
+static bool ar_parent_suffix_valid(char *suffix)
+{
+    char *at = suffix;
+    while (*at) {
+        char *slash = strchr(at, '/');
+        if (slash) *slash = 0;
+        if (!ar_parent_leaf(at)) return false;
+        if (!slash) break;
+        at = slash + 1;
+        if (!*at) return false;
+    }
+    return true;
+}
+static bool ar_parent_walk(struct receive_work *w,
+    struct platform_directory_transaction *root, char *suffix, bool create)
+{
+    char check[AR_PATH]; memcpy(check, suffix, strlen(suffix) + 1);
+    if (!ar_parent_suffix_valid(check)) return false;
+    char *at = suffix;
+    while (*at) {
+        char *slash = strchr(at, '/');
+        if (slash) *slash = 0;
+        enum platform_directory_result rc = ar_parent_step(w, root, at, create);
+        if (rc == PLATFORM_DIRECTORY_MISSING && !create) return true;
+        if (rc != PLATFORM_DIRECTORY_OK) return false;
+        if (!slash) break;
+        at = slash + 1;
+    }
+    return true;
+}
+/* All suffix components are checked before this can create even the first.
+ * Bootstrap returns only the private child, never its 0755 HOME parent. */
+static bool ar_parent_bootstrap(struct receive_work *w, const char *anchor,
+    struct platform_directory_transaction *root, char *suffix, bool create)
+{
+    char check[AR_PATH]; memcpy(check, suffix, strlen(suffix) + 1);
+    if (!ar_parent_suffix_valid(check)) return false;
+    char *slash = strchr(suffix, '/');
+    if (slash) *slash = 0;
+    if (create) w->parents_may_have_changed = true;
+    enum platform_directory_result rc = platform_directory_transaction_bootstrap_child(anchor, suffix, create, root);
+    if (rc == PLATFORM_DIRECTORY_MISSING && !create) return true;
+    if (rc != PLATFORM_DIRECTORY_OK) return false;
+    return !slash || ar_parent_walk(w, root, slash + 1, create);
+}
+static bool ar_default_parent(struct receive_work *w, bool create,
+    struct zcl_command_reply *reply)
+{
+    char path[AR_PATH], anchor[AR_PATH];
+    int n = snprintf(path, sizeof(path), "%s/copies", w->datadir);
+    struct platform_directory_transaction root;
+    platform_directory_transaction_init(&root);
+    bool ok = n > 0 && (size_t)n < sizeof(path) && ar_parent_anchor(w->datadir, anchor);
+    if (ok && !strcmp(anchor, w->datadir))
+        ok = platform_directory_transaction_open(&root, anchor) &&
+            ar_parent_walk(w, &root, path + strlen(anchor) + 1, create);
+    else if (ok)
+        ok = ar_parent_bootstrap(w, anchor, &root, path + strlen(anchor) + 1, create);
+    platform_directory_transaction_close(&root);
+    return ok || ar_fail(reply, "UNSAFE_RECEIVE_PARENT",
+        "Default receive needs a canonical owner-controlled ancestor, private existing datadir and safe missing components.");
+}
+static bool ar_pick_verified(struct receive_work *w,
+    const struct json_value *data, struct zcl_command_reply *reply)
+{
+    char name[ZCL_PACKAGE_ADOPT_NAME_MAX + 1u], release_name[257];
+    if (!ar_text(release_name, sizeof(release_name), data, "name"))
+        return ar_fail(reply, "RECEIVE_PLAN_INVALID", "The verified bundle has no bounded name.");
+    if (!zcl_package_copy_pick_name(w->datadir, release_name, name,
+        w->destination, sizeof(w->destination), reply)) return false;
+    if (platform_file_shape_read(w->destination) != PLATFORM_FILE_SHAPE_MISSING)
+        return ar_fail(reply, "DESTINATION_EXISTS", "The suggested destination is not absent.");
+    return json_push_kv_str(&w->receiver_args, "destination", w->destination) ||
+        ar_fail(reply, "OUT_OF_MEMORY", "Cannot retain the selected destination.");
+}
+static bool ar_pick_destination(const struct zcl_command_request *request,
+    struct receive_work *w, struct zcl_command_reply *reply)
+{
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), "zcode.package.bundle.verify", NULL);
+    struct zcl_command_reply verified; struct json_value in;
+    zcl_command_reply_init(&verified, "zcl.zcode_package_bundle_verify.v1");
+    json_init(&in); json_set_object(&in);
+    bool ok = spec && spec->handler &&
+        json_push_kv_str(&in, "file", zcl_package_copy_str(&w->receiver_args, "file"));
+    if (ok) {
+        struct zcl_command_request call = *request;
+        call.spec = spec; call.input = &in; call.invoked_name = spec->path;
+        spec->handler(&call, &verified);
+        ok = verified.status == ZCL_COMMAND_STATUS_PASSED;
+        if (!ok) app_confirm_forward_failure(reply, &verified);
+    } else ar_fail(reply, "RECEIVE_UNAVAILABLE", "Native bundle verification is unavailable.");
+    if (ok) ok = ar_pick_verified(w, &verified.data, reply);
+    json_free(&in); zcl_command_reply_free(&verified); return ok;
+}
+static bool ar_paths(const struct zcl_command_request *request,
+    struct receive_work *w, struct zcl_command_reply *reply)
+{
+    if (!ar_datadir(w, reply)) return false;
+    if (!w->default_destination) return true;
+    return ar_default_parent(w, false, reply) && ar_pick_destination(request, w, reply);
+}
+static bool ar_call(const struct zcl_command_request *request,
+    struct receive_work *w, struct zcl_command_reply *out)
+{
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), "zcode.package.bundle.receive", NULL);
+    if (!spec || !spec->handler || spec->authority != ZCL_COMMAND_AUTH_OWNER) return false;
+    struct zcl_command_request inner = *request;
+    inner.spec = spec;
+    inner.input = &w->receiver_args;
+    inner.invoked_name = spec->path;
+    spec->handler(&inner, out);
+    return true;
+}
+static bool ar_verified(const struct json_value *data)
+{
+    const struct json_value *verified = json_get(data, "verified");
+    const struct json_value *executed = json_get(data, "executed");
+    return verified && verified->type == JSON_BOOL && json_get_bool(verified) &&
+        executed && executed->type == JSON_BOOL && !json_get_bool(executed);
+}
+static bool ar_plan_fields(struct receive_work *w, const struct json_value *data)
+{
+    if (!ar_verified(data)) return false;
+    if (!ar_text(w->plan, sizeof(w->plan), data, "plan_id") ||
+        !ar_text(w->release, sizeof(w->release), data, "release_id") ||
+        !ar_text(w->package, sizeof(w->package), data, "package_root") ||
+        !ar_text(w->publisher, sizeof(w->publisher), data, "publisher_fingerprint") ||
+        !ar_text(w->name, sizeof(w->name), data, "name") ||
+        !ar_text(w->version, sizeof(w->version), data, "semver")) return false;
+    if (json_get(data, "parent_release_root") &&
+        (!ar_text(w->parent, sizeof(w->parent), data, "parent_release_root") ||
+         !ar_root(w->parent, 32))) return false;
+    return ar_root(w->plan, 32) && ar_root(w->release, 32) &&
+        ar_root(w->package, 32) && ar_root(w->publisher, 33);
+}
+static bool ar_plan(const struct zcl_command_request *request,
+    struct receive_work *w, struct zcl_command_reply *reply)
+{
+    struct zcl_command_reply plan;
+    zcl_command_reply_init(&plan, "zcl.zcode_package_bundle_receive.v1");
+    bool called = ar_call(request, w, &plan);
+    bool ok = called && plan.status == ZCL_COMMAND_STATUS_PASSED;
+    if (!called) ar_fail(reply, "RECEIVE_UNAVAILABLE", "Native owner receive is unavailable.");
+    else if (!ok) app_confirm_forward_failure(reply, &plan);
+    else if (!(ok = ar_plan_fields(w, &plan.data)))
+        ar_fail(reply, "RECEIVE_PLAN_INVALID", "The verified receive plan cannot be displayed exactly.");
+    zcl_command_reply_free(&plan);
     return ok;
 }
-
-/* app.build plan then confirm for the received copy. */
-static bool zrv_build(struct zrv *z, struct zcl_command_reply *out)
+static bool ar_model(struct receive_work *w, char *why, size_t cap)
 {
-    struct json_value in;
-    bool ok = false;
-    if (zrv_copy_input(z, &in)) {
-        ok = zcl_app_inner_plan_confirm("app.build", &in, out);
-    } else {
-        zcl_command_reply_init(out, "zcl.app_receive.inner.v1");
-        zcl_package_copy_fail(out, "ALLOC", false, "inner input", z->name);
-    }
-    json_free(&in);
-    return ok;
+    struct zcl_present_model_v1 *m = &w->view.model;
+    zcl_present_model_init_v1(m, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(m->request_id, sizeof(m->request_id), "receive-%.12s", w->plan);
+    (void)snprintf(m->title, sizeof(m->title), "Receive this app copy?");
+    (void)snprintf(m->summary, sizeof(m->summary), "Review all pages. Nothing runs now.");
+    (void)snprintf(m->exact_root, sizeof(m->exact_root), "%s", w->plan);
+    m->action_count = 4;
+    app_confirm_action(&m->actions[0], ZCL_PRESENT_ACTION_CANCEL, "cancel", "Cancel");
+    app_confirm_action(&m->actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+    app_confirm_action(&m->actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+    app_confirm_action(&m->actions[3], ZCL_PRESENT_ACTION_CONFIRM, "receive", "Receive copy");
+    bool ok = app_confirm_field(m, "Permission: ", "Allow future requested builds and runs of this exact publisher and package. Receiving this copy runs nothing.") &&
+        app_confirm_field(m, "Name: ", w->name) && app_confirm_field(m, "Version: ", w->version) &&
+        app_confirm_field(m, "Publisher: ", w->publisher) && app_confirm_field(m, "Release: ", w->release) &&
+        app_confirm_field(m, "Package: ", w->package) && app_confirm_field(m, "Destination: ", w->destination) &&
+        app_confirm_field(m, "Parent release: ", w->parent[0] ? w->parent : "None (first release)") &&
+        app_confirm_field(m, "Changes: ", w->parent[0] ? "Unavailable: this receive plan supplies no parent comparison." : "No parent to compare") &&
+        app_confirm_field(m, "Trust: ", "Check the publisher and package root with the sender before confirming.");
+    return ok && app_confirm_prepare(&w->view, why, cap);
 }
-
-/* Receive trusting exactly what the verify read from the file. */
-static bool zrv_keep(struct zrv *z, struct zcl_command_reply *out)
+static bool ar_result_matches(const struct receive_work *w, const struct json_value *data)
 {
-    struct json_value in;
-    const char *who = zcl_app_inner_str(&z->verify, "publisher_fingerprint");
-    const char *root = zcl_app_inner_str(&z->verify, "package_root");
-    bool built = who && root && zrv_receive_input(z, &in) &&
-                 json_push_kv_str(&in, "trust_publisher", who) &&
-                 json_push_kv_str(&in, "trust_root", root) &&
-                 json_push_kv_str(&in, "plan_id", z->receive_plan) &&
-                 json_push_kv_bool(&in, "confirm", true);
-    if (!who || !root)
-        json_init(&in);
-    return zcl_app_inner_call_built("zcode.package.bundle.receive", &in, built, out);
+    const char *release = zcl_package_copy_str(data, "release_id");
+    const char *package = zcl_package_copy_str(data, "package_root");
+    const char *publisher = zcl_package_copy_str(data, "publisher_fingerprint");
+    const char *destination = zcl_package_copy_str(data, "destination");
+    const char *version = zcl_package_copy_str(data, "version");
+    const char *trust = zcl_package_copy_str(data, "trust_record");
+    return release && package && publisher && destination && version && trust &&
+        !strcmp(release, w->release) && !strcmp(package, w->package) &&
+        !strcmp(publisher, w->publisher) && !strcmp(destination, w->destination) && ar_root(version, 32);
 }
-
-static void zrv_commit(struct zrv *z)
+/* Revalidate before creating default parents, but never change the approved
+ * path or plan. The native commit independently rechecks its existing guards. */
+static bool ar_default_recheck(const struct zcl_command_request *request,
+    struct receive_work *w, struct zcl_command_reply *reply)
 {
-    struct zcl_command_reply inner;
-    char copies[APP_COPY_BUILD_PATH];
-    if (!zcl_package_copy_plan_matches(z->input, z->plan_id, z->reply,
-                                       ZRV_COMMAND))
-        return;
-    /* The copy is made beneath an existing <datadir>/copies. */
-    if (!zcl_path_join(copies, sizeof(copies), z->datadir, "copies") ||
-        !zcl_mkdir_p(copies, 0700).ok) {
-        zcl_package_copy_fail(z->reply, "COPIES_DIR_FAILED", false,
-                              "<datadir>/copies could not be made",
-                              z->datadir);
-        return;
-    }
-    bool kept = zrv_keep(z, &inner);
-    bool ok = kept;
-    if (ok) {
-        zcl_command_reply_free(&inner);
-        ok = zrv_build(z, &inner);
-    }
-    if (ok) {
-        zcl_command_reply_free(&inner);
-        ok = zrv_open(z, &inner);
-    }
-    if (!ok) {
-        zcl_app_inner_fail(z->reply, &inner, kept);
-        zcl_command_reply_free(&inner);
+    if (platform_file_shape_read(w->destination) != PLATFORM_FILE_SHAPE_MISSING)
+        return ar_fail(reply, "DESTINATION_EXISTS", "The approved destination is no longer absent.");
+    struct zcl_command_reply plan;
+    zcl_command_reply_init(&plan, "zcl.zcode_package_bundle_receive.v1");
+    bool called = ar_call(request, w, &plan);
+    const char *id = zcl_package_copy_str(&plan.data, "plan_id");
+    bool ok = called && plan.status == ZCL_COMMAND_STATUS_PASSED;
+    if (!called) ar_fail(reply, "RECEIVE_UNAVAILABLE", "Native owner receive is unavailable.");
+    else if (!ok) app_confirm_forward_failure(reply, &plan);
+    else if (!id || strcmp(id, w->plan))
+        ok = ar_fail(reply, "PLAN_MISMATCH", "The approved receive plan changed; review again.");
+    zcl_command_reply_free(&plan);
+    return ok && ar_default_parent(w, true, reply);
+}
+static void ar_commit(const struct zcl_command_request *request,
+    struct receive_work *w, struct zcl_command_reply *reply)
+{
+    if (w->default_destination && !ar_default_recheck(request, w, reply)) {
+        reply->error.mutated |= w->parents_may_have_changed;
         return;
     }
-    zrv_describe(z, "commit");
-    const struct json_value *pid = json_get(&inner.data, "pid");
-    if (pid && pid->type == JSON_INT)
-        (void)json_push_kv_int(&z->reply->data, "pid", json_get_int(pid));
-    (void)json_push_kv_str(&z->reply->data, "image_sha3",
-                           zcl_app_inner_str(&inner, "image_sha3"));
-    (void)json_push_kv_bool(&z->reply->data, "executed", true);
-    zcl_command_reply_free(&inner);
+    if (!json_push_kv_str(&w->receiver_args, "plan_id", w->plan) ||
+        !json_push_kv_str(&w->receiver_args, "trust_publisher", w->publisher) ||
+        !json_push_kv_str(&w->receiver_args, "trust_root", w->package) ||
+        !json_push_kv_bool(&w->receiver_args, "confirm", true)) {
+        (void)ar_fail(reply, "OUT_OF_MEMORY", "Cannot submit the approved receive plan.");
+        reply->error.mutated |= w->parents_may_have_changed;
+        return;
+    }
+    struct zcl_command_reply result;
+    zcl_command_reply_init(&result, "zcl.zcode_package_bundle_receive.v1");
+    bool called = ar_call(request, w, &result);
+    if (!called) ar_fail(reply, "RECEIVE_UNAVAILABLE", "Native owner receive is unavailable.");
+    else if (result.status != ZCL_COMMAND_STATUS_PASSED) app_confirm_forward_failure(reply, &result);
+    else if (!ar_result_matches(w, &result.data))
+        zcl_package_copy_fail(reply, "RECEIVE_RESULT_MISMATCH", true,
+            "The receive completed but its result did not match the displayed plan; inspect before retrying.", w->destination);
+    else {
+        json_free(&reply->data);
+        reply->data = result.data;
+        json_init(&result.data);
+        reply->error.mutated = true;
+    }
+    reply->error.mutated |= w->parents_may_have_changed;
+    zcl_command_reply_free(&result);
 }
-
+static void ar_run(const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context)
+{
+    if (!request || !reply) return;
+    struct receive_work *w = zcl_calloc(1, sizeof(*w), "app-receive");
+    if (!w) { ar_fail(reply, "OUT_OF_MEMORY", "Cannot prepare receive confirmation."); return; }
+    json_init(&w->receiver_args); json_set_object(&w->receiver_args);
+    if (!ar_inputs(w, request->input)) ar_fail(reply, "BAD_INPUT", "Provide an absolute file; datadir and destination are optional absolute paths; optional day is nonnegative.");
+    else if (ar_paths(request, w, reply) && ar_plan(request, w, reply)) {
+        char why[256] = {0};
+        if (!ar_model(w, why, sizeof(why)) || !app_confirm_show(&w->view, presenter, context, why, sizeof(why)))
+            ar_fail(reply, "CONFIRMATION_UNAVAILABLE", "The exact receive plan could not be displayed; nothing was kept.");
+        else if (w->view.confirmed) ar_commit(request, w, reply);
+        else if (!json_push_kv_str(&reply->data, "status", "canceled"))
+            ar_fail(reply, "OUT_OF_MEMORY", "Cannot describe cancellation; nothing was kept.");
+    }
+    app_confirm_free(&w->view);
+    json_free(&w->receiver_args);
+    free(w);
+}
 void zcl_native_handle_app_receive(const struct zcl_command_request *request,
-                                   struct zcl_command_reply *reply)
+    struct zcl_command_reply *reply)
 {
-    struct zrv *z = request && reply
-                        ? zcl_calloc(1, sizeof(*z), "app.receive.state")
-                        : NULL;
-    if (!z) {
-        if (reply)
-            zcl_package_copy_fail(reply, "ALLOC", false, "app.receive state",
-                                  ZRV_COMMAND);
-        return;
-    }
-    z->input = request->input;
-    z->reply = reply;
-    z->file = zcl_package_copy_str(request->input, "file");
-    z->datadir = zcl_package_copy_datadir(request->input, reply, ZRV_COMMAND);
-    if (z->datadir && !z->file)
-        zcl_package_copy_fail(reply, "BAD_FILE", false, "file names the "
-                              ".z23share file to open", "");
-    else if (z->datadir && zrv_plan(z)) {
-        if (zcl_package_copy_confirmed(request->input)) {
-            zrv_commit(z);
-        } else {
-            char next[2 * APP_COPY_BUILD_PATH + 32];
-            zrv_describe(z, "plan");
-            zcl_package_copy_push_root(&reply->data, "plan_id", z->plan_id);
-            (void)json_push_kv_bool(&reply->data, "executed", false);
-            if (zcl_app_hint(next, sizeof(next),
-                             zcl_package_copy_str(request->input, "datadir"),
-                             "open %s --yes", z->file))
-                (void)json_push_kv_str(&reply->data, "next", next);
-        }
-    }
-    if (z->verify_live)
-        zcl_command_reply_free(&z->verify);
-    free(z);
+    ar_run(request, reply, NULL, NULL);
 }
+#if defined(ZCL_TESTING)
+void zcl_test_app_receive_run(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context)
+{
+    if (presenter) ar_run(request, reply, presenter, context);
+}
+#endif

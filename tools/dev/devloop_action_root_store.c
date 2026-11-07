@@ -618,14 +618,26 @@ static bool ars_cc1_text(const char *line, const char *end)
     return false;
 }
 
-static bool ars_cc1_copy_word(const char *start, size_t n,
-                             char word[PATH_MAX])
+/* Decode one bounded argument body; the caller validates its delimiters. */
+static bool ars_cc1_decode_word(const char **cursor, const char *end,
+                                bool quoted, char word[PATH_MAX])
 {
-    if (!n || n >= PATH_MAX || memchr(start, '\\', n))
-        return false;
-    memcpy(word, start, n);
+    const char *p = *cursor;
+    size_t n = 0;
+    while (p < end && (quoted ? *p != '"' : !ars_cc1_space(*p))) {
+        char c = *p++;
+        if (c == '\\') {
+            if (!quoted || p == end || (*p != '\\' && *p != '"'))
+                return false;
+            c = *p++;
+        }
+        if (c == '\r' || n + 1 >= PATH_MAX)
+            return false;
+        word[n++] = c;
+    }
     word[n] = '\0';
-    return true;
+    *cursor = p;
+    return n != 0;
 }
 
 /* 0 means end of line, 1 a canonical word, -1 a malformed word. */
@@ -639,21 +651,9 @@ static int ars_cc1_next_word(const char **cursor, const char *end,
         return 0;
     bool quoted = *p == '"';
     p += quoted;
-    const char *start = p;
-    if (quoted) {
-        while (p < end && *p != '"' && *p != '\r')
-            p++;
-        if (p == end || *p != '"')
-            return -1;
-    } else {
-        while (p < end && !ars_cc1_space(*p))
-            p++;
-    }
-    size_t n = (size_t)(p - start);
-    if (!ars_cc1_copy_word(start, n, word))
-        return -1;
-    p += quoted;
-    if (p < end && !ars_cc1_space(*p))
+    if (!ars_cc1_decode_word(&p, end, quoted, word) ||
+        (quoted && (p == end || *p++ != '"')) ||
+        (p < end && !ars_cc1_space(*p)))
         return -1;
     *cursor = p;
     return 1;

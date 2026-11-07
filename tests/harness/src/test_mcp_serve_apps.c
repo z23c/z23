@@ -232,6 +232,9 @@ static int case_apps_tools(struct ma *m, long *app_pid)
                           "\"tools/list\"}"));
         ASSERT(ma_has(m, "\"name\":\"apps_list\""));
         ASSERT(ma_has(m, "\"name\":\"apps_open\""));
+        ASSERT(ma_has(m, "\"name\":\"apps_adopt\""));
+        ASSERT(ma_has(m, "\"name\":\"apps_receive\""));
+        ASSERT(ma_has(m, "\"name\":\"apps_share\""));
         ASSERT(ma_has(m, "\"required\":[\"name\"]"));
     PASS(); }
     TEST("apps_list returns the launchable section") {
@@ -276,6 +279,285 @@ _test_next:;
     return failures;
 }
 
+static int case_selected_forwarding(struct ma *m)
+{
+    int failures = 0;
+    TEST("apps_open forwards selection and consent instead of opening the default") {
+        ASSERT(ma_tool(m, 9, "apps_open", "{\"name\":\"fixtureapp\",\"copy\":\"/missing\",\"accept_execution\":false}"));
+        ASSERT(ma_has(m, "EXECUTION_CONFIRMATION_REQUIRED"));
+        ASSERT(ma_tool(m, 10, "apps_open", "{\"name\":\"fixtureapp\",\"copy\":\"/missing\",\"accept_execution\":true}"));
+        ASSERT(ma_has(m, "BAD_SELECTED_APP"));
+        ASSERT(ma_tool(m, 11, "apps_open", "{\"name\":\"fixtureapp\",\"image_sha3\":\"invalid\"}"));
+        ASSERT(ma_has(m, "EXECUTION_CONFIRMATION_REQUIRED"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int case_keep_forwarding(struct ma *m)
+{
+    int failures = 0;
+    char args[PATH_MAX + 1024];
+    TEST("apps_keep forwards a typed revision and cannot create copy trust") {
+        int n = snprintf(args, sizeof(args),
+            "{\"name\":\"fixtureapp\",\"copy\":\"/missing-copy\","
+            "\"version\":\"%064d\",\"env_root\":\"%064d\","
+            "\"dependency_root\":\"%064d\",\"image_sha3\":\"%064d\","
+            "\"record_id\":\"%064d\",\"accept_execution\":false,\"expected_revision\":0}",
+            1, 1, 1, 1, 1);
+        ASSERT(n > 0 && (size_t)n < sizeof(args));
+        ASSERT(ma_tool(m, 12, "apps_keep", args));
+        ASSERT(ma_has(m, "\"isError\":true"));
+        ASSERT(ma_has(m, "EXECUTION_CONFIRMATION_REQUIRED"));
+        n = snprintf(args, sizeof(args),
+            "{\"name\":\"fixtureapp\",\"copy\":\"/missing-copy\","
+            "\"version\":\"%064d\",\"env_root\":\"%064d\","
+            "\"dependency_root\":\"%064d\",\"image_sha3\":\"%064d\","
+            "\"record_id\":\"%064d\",\"accept_execution\":true,\"expected_revision\":0,"
+            "\"datadir\":\"%s\"}",
+            1, 1, 1, 1, 1, m->root);
+        ASSERT(n > 0 && (size_t)n < sizeof(args));
+        ASSERT(ma_tool(m, 13, "apps_keep", args));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "COPY_MISSING"));
+        n = snprintf(args, sizeof(args),
+            "{\"name\":\"fixtureapp\",\"copy\":\"/missing-copy\","
+            "\"version\":\"%064d\",\"env_root\":\"%064d\","
+            "\"dependency_root\":\"%064d\",\"image_sha3\":\"%064d\","
+            "\"record_id\":\"%064d\",\"accept_execution\":false,\"expected_revision\":\"0\"}",
+            1, 1, 1, 1, 1);
+        ASSERT(n > 0 && (size_t)n < sizeof(args));
+        ASSERT(ma_tool(m, 14, "apps_keep", args));
+        ASSERT(ma_has(m, "\"isError\":true") && !ma_has(m, "EXECUTION_CONFIRMATION_REQUIRED"));
+        ASSERT(ma_tool(m, 15, "z23_run", "{\"path\":\"app.keep\",\"input\":{}}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "MUTATION_NO_CONFIRMATION_FLOW"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int case_adopt_request(struct ma *m)
+{
+    int failures = 0; char args[PATH_MAX + 256];
+    TEST("apps_adopt can request only the local owner dialog") {
+        int n = snprintf(args, sizeof(args),
+            "{\"release_root\":\"%064d\",\"datadir\":\"%s\"}", 1, m->root);
+        ASSERT(n > 0 && (size_t)n < sizeof(args));
+        ASSERT(ma_tool(m, 16, "apps_adopt", args));
+        ASSERT(ma_has(m, "\"isError\":true"));
+        ASSERT(ma_has(m, "FORK_ROOT_UNKNOWN") || ma_has(m, "RELEASES_UNREADABLE"));
+        ASSERT(ma_tool(m, 17, "apps_adopt", "{\"release_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"confirm\":true}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        ASSERT(ma_tool(m, 18, "z23_run", "{\"path\":\"app.adopt\",\"input\":{}}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "MUTATION_REFUSED_OWNER_AUTHORITY"));
+        ASSERT(ma_tool(m, 19, "z23_run", "{\"path\":\"zcode.package.adopt\",\"input\":{}}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "MUTATION_REFUSED_OWNER_AUTHORITY"));
+        ASSERT(ma_tool(m, 20, "z23_run", "{\"path\":\"zcode.package.bundle.sign\",\"input\":{}}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "MUTATION_REFUSED_OWNER_AUTHORITY"));
+        ASSERT(ma_tool(m, 21, "z23_run", "{\"path\":\"zcode.package.bundle.receive\",\"input\":{}}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "MUTATION_REFUSED_OWNER_AUTHORITY"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int case_receive_request(struct ma *m)
+{
+    int failures = 0; char args[PATH_MAX * 3 + 512];
+    TEST("apps_receive forwards only paths to the local owner dialog") {
+        int n = snprintf(args, sizeof(args),
+            "{\"file\":\"%s/missing.z23share\",\"datadir\":\"%s/data\",\"destination\":\"%s/copy\"}",
+            m->root, m->root, m->root);
+        ASSERT(n > 0 && (size_t)n < sizeof(args));
+        ASSERT(ma_tool(m, 22, "apps_receive", args));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BUNDLE_UNREADABLE"));
+        ASSERT(ma_tool(m, 29, "z23_run", "{\"path\":\"app.receive\",\"input\":{}}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "MUTATION_REFUSED_OWNER_AUTHORITY"));
+        ASSERT(ma_tool(m, 30, "z23_run", "{\"path\":\"zcode.package.bundle.receive\",\"input\":{}}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "MUTATION_REFUSED_OWNER_AUTHORITY"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int case_receive_injections(struct ma *m)
+{
+    int failures = 0; char args[PATH_MAX * 3 + 512]; int n;
+    TEST("apps_receive rejects caller trust, confirmation and malformed paths") {
+        const char *const extras[] = {"\"confirm\":true", "\"trust_publisher\":\"x\"",
+                                      "\"trust_root\":\"x\"", "\"day\":1"};
+        for (size_t i = 0; i < sizeof(extras)/sizeof(extras[0]); ++i) {
+            n = snprintf(args, sizeof(args),
+                "{\"file\":\"%s/missing\",\"datadir\":\"%s/data\",\"destination\":\"%s/copy\",%s}",
+                m->root, m->root, m->root, extras[i]);
+            ASSERT(n > 0 && (size_t)n < sizeof(args));
+            ASSERT(ma_tool(m, 23 + (int)i, "apps_receive", args));
+            ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        }
+        n = snprintf(args, sizeof(args),
+            "{\"file\":\"relative\",\"datadir\":\"%s/data\",\"destination\":\"%s/copy\"}",
+            m->root, m->root);
+        ASSERT(n > 0 && (size_t)n < sizeof(args));
+        ASSERT(ma_tool(m, 28, "apps_receive", args));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        n = snprintf(args, sizeof(args),
+            "{\"file\":true,\"datadir\":\"%s/data\",\"destination\":\"%s/copy\"}",
+            m->root, m->root);
+        ASSERT(n > 0 && (size_t)n < sizeof(args));
+        ASSERT(ma_tool(m, 31, "apps_receive", args));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static bool ma_receive_schema(struct ma *m)
+{
+    struct json_value doc; json_init(&doc);
+    bool ok = json_read(&doc, m->line, strlen(m->line));
+    const struct json_value *tools = json_get(json_get(&doc, "result"), "tools");
+    bool found = false;
+    for (size_t i = 0; ok && i < json_size(tools); ++i) {
+        const struct json_value *tool = json_at(tools, i);
+        const char *name = json_get_str(json_get(tool, "name"));
+        if (!name || strcmp(name, "apps_receive")) continue;
+        const struct json_value *schema = json_get(tool, "inputSchema");
+        const struct json_value *required = json_get(schema, "required");
+        const struct json_value *extra = json_get(schema, "additionalProperties");
+        const char *first = json_get_str(json_at(required, 0));
+        found = json_size(required) == 1 && first && !strcmp(first, "file") &&
+            json_size(json_get(schema, "properties")) == 3 &&
+            extra && extra->type == JSON_BOOL && !json_get_bool(extra);
+        break;
+    }
+    json_free(&doc); return ok && found;
+}
+static int case_receive_defaults(struct ma *m)
+{
+    int failures = 0; char args[PATH_MAX * 3 + 512];
+    TEST("apps_receive advertises file-only and forwards independent optional paths") {
+        ASSERT(ma_call(m, "{\"jsonrpc\":\"2.0\",\"id\":70,\"method\":\"tools/list\"}"));
+        ASSERT(ma_receive_schema(m));
+        static const char *const keys[] = {"", "datadir", "destination"};
+        for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); ++i) {
+            char extra[PATH_MAX + 64] = {0};
+            if (i) {
+                int added = snprintf(extra, sizeof(extra), ",\"%s\":\"%s/optional\"", keys[i], m->root);
+                ASSERT(added > 0 && (size_t)added < sizeof(extra));
+            }
+            int n = snprintf(args, sizeof(args), "{\"file\":\"%s/missing.z23share\"%s}", m->root, extra);
+            ASSERT(n > 0 && (size_t)n < sizeof(args));
+            ASSERT(ma_tool(m, 71 + (int)i, "apps_receive", args));
+            ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BUNDLE_UNREADABLE"));
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int case_receive_default_refusals(struct ma *m)
+{
+    int failures = 0;
+    static const char *const bad[] = {"{}", "{\"destination\":\"/missing\"}",
+        "{\"file\":\"\"}", "{\"file\":false}", "{\"file\":\"relative\"}",
+        "{\"file\":\"/missing\",\"datadir\":null}", "{\"file\":\"/missing\",\"datadir\":\"\"}",
+        "{\"file\":\"/missing\",\"destination\":false}", "{\"file\":\"/missing\",\"destination\":\"\"}",
+        "{\"file\":\"/missing\",\"file\":\"/again\"}",
+        "{\"file\":\"/missing\",\"confirm\":true}",
+        "{\"file\":\"/missing\",\"trust_root\":\"x\"}",
+        "{\"file\":\"/missing\",\"trust_publisher\":\"x\"}",
+        "{\"file\":\"/missing\",\"day\":1}"};
+    TEST("apps_receive defaults never admit duplicate, empty, mistyped or owner authority arguments") {
+        for (size_t i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i) {
+            ASSERT(ma_tool(m, 80 + (int)i, "apps_receive", bad[i]));
+            ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int case_receive_policy(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("receive exemption is limited to native owner-local app.receive") {
+        const struct zcl_command_spec *receive = zcl_command_registry_find(reg, "app.receive", NULL);
+        const struct zcl_command_spec *adopt = zcl_command_registry_find(reg, "app.adopt", NULL);
+        ASSERT(receive && adopt && mcp_policy_app_receive(receive));
+        ASSERT(!mcp_policy_app_receive(adopt) && mcp_policy_app_adopt(adopt));
+        struct zcl_command_spec altered = *receive;
+        altered.authority = ZCL_COMMAND_AUTH_PUBLIC; ASSERT(!mcp_policy_app_receive(&altered));
+        altered = *receive; altered.scope = ZCL_COMMAND_SCOPE_NODE; ASSERT(!mcp_policy_app_receive(&altered));
+        altered = *receive; altered.transports = 0; ASSERT(!mcp_policy_app_receive(&altered));
+        altered = *receive; altered.transports |= ZCL_COMMAND_TRANSPORT_RPC; ASSERT(!mcp_policy_app_receive(&altered));
+        struct mcp_refusal why = {0}; struct json_value empty;
+        json_init(&empty); json_set_object(&empty);
+        bool allowed = mcp_policy_allows(receive, reg, &empty, &why);
+        json_free(&empty);
+        ASSERT(!allowed && !strcmp(why.code, "MUTATION_REFUSED_OWNER_AUTHORITY"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int case_share_request(struct ma *m)
+{
+    int failures = 0; char args[PATH_MAX + 256];
+    TEST("apps_share reaches the owner leaf without caller approval") {
+        int n = snprintf(args, sizeof(args), "{\"name\":\"kept:missing\",\"output\":\"%s/share.z23share\"}", m->root);
+        ASSERT(n > 0 && (size_t)n < sizeof(args));
+        ASSERT(ma_tool(m, 81, "apps_share", args));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "SELECTION_UNAVAILABLE"));
+        ASSERT(ma_tool(m, 82, "z23_run", "{\"path\":\"app.share\",\"input\":{}}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "MUTATION_REFUSED_OWNER_AUTHORITY"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int case_share_injections(struct ma *m)
+{
+    int failures = 0; char args[PATH_MAX + 512];
+    TEST("apps_share rejects caller decisions and malformed inputs") {
+        const char *const extras[] = {"\"confirm\":true", "\"trust\":true", "\"day\":1",
+                                      "\"plan_id\":\"x\"", "\"expected_publisher_pubkey\":\"x\""};
+        for (size_t i = 0; i < sizeof(extras)/sizeof(extras[0]); ++i) {
+            int n = snprintf(args, sizeof(args), "{\"name\":\"skycombat\",\"output\":\"%s/share\",%s}", m->root, extras[i]);
+            ASSERT(n > 0 && (size_t)n < sizeof(args));
+            ASSERT(ma_tool(m, 83 + (int)i, "apps_share", args));
+            ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        }
+        ASSERT(ma_tool(m, 89, "apps_share", "{\"name\":\"skycombat\",\"output\":\"relative\"}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        int n = snprintf(args, sizeof(args),
+            "{\"name\":true,\"output\":\"%s/share\"}", m->root);
+        ASSERT(n > 0 && (size_t)n < sizeof(args));
+        ASSERT(ma_tool(m, 90, "apps_share", args));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        n = snprintf(args, sizeof(args),
+            "{\"name\":\"one\",\"name\":\"two\",\"output\":\"%s/share\"}", m->root);
+        ASSERT(n > 0 && (size_t)n < sizeof(args));
+        ASSERT(ma_tool(m, 91, "apps_share", args));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int case_share_policy(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("share exemption is limited to native owner-local app.share") {
+        const struct zcl_command_spec *share = zcl_command_registry_find(reg, "app.share", NULL);
+        const struct zcl_command_spec *receive = zcl_command_registry_find(reg, "app.receive", NULL);
+        ASSERT(share && receive && mcp_policy_app_share(share));
+        ASSERT(!mcp_policy_app_share(receive) && mcp_policy_app_receive(receive));
+        struct zcl_command_spec altered = *share;
+        altered.authority = ZCL_COMMAND_AUTH_PUBLIC; ASSERT(!mcp_policy_app_share(&altered));
+        altered = *share; altered.scope = ZCL_COMMAND_SCOPE_NODE; ASSERT(!mcp_policy_app_share(&altered));
+        altered = *share; altered.transports = 0; ASSERT(!mcp_policy_app_share(&altered));
+        altered = *share; altered.transports |= ZCL_COMMAND_TRANSPORT_RPC; ASSERT(!mcp_policy_app_share(&altered));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* In process: the exemption names exactly app.open. */
 static int case_policy_exact(void)
 {
@@ -307,6 +589,19 @@ static int case_policy_exact(void)
         ASSERT_STR_EQ(why.code, "MUTATION_NO_CONFIRMATION_FLOW");
         ASSERT(!mcp_policy_allows(open, reg, &empty, &why));
         ASSERT_STR_EQ(why.code, "MUTATION_NO_CONFIRMATION_FLOW");
+        const struct zcl_command_spec *keep = zcl_command_registry_find(reg, "app.keep", NULL);
+        ASSERT(keep && mcp_policy_app_keep(keep) && !mcp_policy_app_keep(open));
+        const struct zcl_command_spec *adopt = zcl_command_registry_find(reg, "app.adopt", NULL);
+        ASSERT(adopt && mcp_policy_app_adopt(adopt) && !mcp_policy_app_adopt(open));
+        struct zcl_command_spec altered = *adopt;
+        altered.authority = ZCL_COMMAND_AUTH_PUBLIC;
+        ASSERT(!mcp_policy_app_adopt(&altered));
+        altered = *adopt; altered.scope = ZCL_COMMAND_SCOPE_NODE;
+        ASSERT(!mcp_policy_app_adopt(&altered));
+        ASSERT(!mcp_policy_allows(adopt, reg, &empty, &why));
+        ASSERT_STR_EQ(why.code, "MUTATION_REFUSED_OWNER_AUTHORITY");
+        ASSERT(!mcp_policy_allows(keep, reg, &empty, &why));
+        ASSERT_STR_EQ(why.code, "MUTATION_NO_CONFIRMATION_FLOW");
         json_free(&empty);
     PASS(); }
 _test_next:;
@@ -321,6 +616,8 @@ int test_mcp_serve_apps(void)
     long app_pid = 0;
     bool started = false;
     failures += case_policy_exact();
+    failures += case_receive_policy();
+    failures += case_share_policy();
     TEST("fixture: a temporary HOME, apps.tsv and a running server") {
         ASSERT(ma_fixture(&m));
         ASSERT(ma_spawn(&m));
@@ -328,6 +625,15 @@ int test_mcp_serve_apps(void)
         ASSERT(ma_init(&m));
     PASS(); }
     failures += case_apps_tools(&m, &app_pid);
+    failures += case_selected_forwarding(&m);
+    failures += case_keep_forwarding(&m);
+    failures += case_adopt_request(&m);
+    failures += case_receive_request(&m);
+    failures += case_receive_injections(&m);
+    failures += case_receive_defaults(&m);
+    failures += case_receive_default_refusals(&m);
+    failures += case_share_request(&m);
+    failures += case_share_injections(&m);
 _test_next:;
     ma_stop_app(app_pid);
     if (started)

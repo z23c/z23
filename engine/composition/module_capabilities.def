@@ -472,6 +472,8 @@ ZCL_MODULE_CAPABILITY("contexts/commons/services/src/task_list_window.c", CAP_FS
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/task_update.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS, "runs an explicitly permitted confined preview over copied task values and commits compatible program selection")
 ZCL_MODULE_CAPABILITY("tools/command/native_task_document_command.c", CAP_FS_READ|CAP_FS_WRITE, "locates the confined verifier and reports native task editor failures")
 ZCL_MODULE_CAPABILITY("contexts/commons/models/src/task_document.c", CAP_FS_READ|CAP_FS_WRITE, "commits canonical user task contents and undo in the isolated application store")
+ZCL_MODULE_CAPABILITY("contexts/commons/models/src/task_update_offer.c", CAP_FS_READ|CAP_FS_WRITE, "persists inert app-scoped update proposals in the isolated store")
+ZCL_MODULE_CAPABILITY("contexts/commons/services/src/task_update_offer.c", CAP_FS_WRITE, "resolves and records inert proposals and reports storage failures")
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/package_resident.c", CAP_FS_WRITE, "reads accepted artifact records through the local package store")
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/package_resident_launch.c", CAP_FS_READ|CAP_FS_WRITE, "materializes and owns the exact private launch snapshot")
 ZCL_MODULE_CAPABILITY("tools/command/native_package_resident_command.c", CAP_FS_WRITE|CAP_NETWORK, "owns local resident invocation and exchanges bounded frames over inherited IPC")

@@ -1664,6 +1664,28 @@ void zcl_ms_test_input_on_stdin(bool on);
 
 /* Inert release artifact preparation and local CAS admission. */
 
+void zcl_native_handle_app_keep(const struct zcl_command_request *request,
+                                struct zcl_command_reply *reply);
+
+void zcl_native_handle_app_share(const struct zcl_command_request *request,
+                                 struct zcl_command_reply *reply);
+void zcl_native_handle_app_receive(const struct zcl_command_request *request,
+                                   struct zcl_command_reply *reply);
+void zcl_native_handle_app_share_copy(const struct zcl_command_request *request,
+                                     struct zcl_command_reply *reply);
+void zcl_native_handle_app_receive_copy(const struct zcl_command_request *request,
+                                       struct zcl_command_reply *reply);
+
+void zcl_native_handle_app_adopt(const struct zcl_command_request *request,
+                                 struct zcl_command_reply *reply);
+
+void zcl_native_handle_app_edit(const struct zcl_command_request *request,
+                                struct zcl_command_reply *reply);
+void zcl_native_handle_app_personalize(const struct zcl_command_request *request,
+                                       struct zcl_command_reply *reply);
+void zcl_native_handle_app_customize(const struct zcl_command_request *request,
+                                     struct zcl_command_reply *reply);
+
 #ifdef __cplusplus
 }
 #endif

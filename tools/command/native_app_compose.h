@@ -58,8 +58,10 @@ bool zcl_app_input_day(const struct json_value *from, struct json_value *in);
 void zcl_app_push_publisher(struct json_value *d, const char *full);
 
 /* Render a front-door command hint that works when pasted:
- * "z23 [-datadir=DIR ]app " followed by the printf-formatted rest (verb and
- * arguments). The datadir part is present only when `datadir` is non-empty,
+ * "z23 [-datadir=DIR ]app " followed by trusted literal syntax and %s slots,
+ * each slot holding one whole argument. No other printf conversions are
+ * supported. Datadir and slots are POSIX-shell quoted; control bytes refuse.
+ * The datadir part is present only when `datadir` is non-empty,
  * so pass the request's own datadir, or NULL for a command another person
  * runs in their own datadir. False, with out emptied, when it does not fit
  * in cap. */

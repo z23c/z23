@@ -131,6 +131,7 @@ static const char k_db_anchor[] =
 static const char k_db_reg_dir[] = "engine/modules/kernel/src";
 static const char k_db_reg_prefix[] = "command_registry";
 static const char *const k_db_extra_srcs[] = {
+    "contexts/commons/packages/zutf8/src/zutf8.c",
     "platform/modules/json/src/json.c",
     "platform/modules/base/src/cleanse.c",
     "core/modules/crypto/src/sha256.c",
@@ -140,6 +141,7 @@ static const char *const k_db_extra_srcs[] = {
 };
 
 static const char *const k_db_incs[] = {
+    "-Icontexts/commons/packages/zutf8/include",
     "-Iengine/modules/kernel/include",
     "-Iplatform/modules/json/include",
     "-Icore/modules/crypto/include",

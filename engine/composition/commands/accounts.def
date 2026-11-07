@@ -4,9 +4,9 @@
  * app.account.add/role/suspend/unsuspend are the first executable mutating
  * native leaves (OWNER). Consumer defines ZCL_COMMAND_*. */
 
-ZCL_COMMAND_BRANCH("app.auth", "app", "Public-key challenge/response login",
+ZCL_COMMAND_BRANCH("app.auth", "app", "Public-key login",
                    ZCL_COMMAND_LAYER_APP)
-ZCL_COMMAND_BRANCH("app.account", "app", "Multi-user administration",
+ZCL_COMMAND_BRANCH("app.account", "app", "Account administration",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_COMMAND(

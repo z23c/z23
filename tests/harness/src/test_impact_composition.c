@@ -263,6 +263,7 @@ static const char *const k_ic_display_app_groups[] = {
     "test_app_launch_skycombat",
     "test_app_seed_skycombat",
     "test_app_journey_skycombat",
+    "test_app_receive_ui",
 };
 
 static bool ic_display_apps_ready(void)
@@ -310,6 +311,7 @@ static bool ic_guest_groups_gated(const char *selector, const char *gated)
         {"test_app_launch_skycombat", "test_app_launch_skycombat:env:ZCL_TEST_DISPLAY_APPS", ic_display_apps_ready},
         {"test_app_seed_skycombat", "test_app_seed_skycombat:env:ZCL_TEST_DISPLAY_APPS", ic_display_apps_ready},
         {"test_app_journey_skycombat", "test_app_journey_skycombat:env:ZCL_TEST_DISPLAY_APPS", ic_display_apps_ready},
+        {"test_app_receive_ui", "test_app_receive_ui:env:ZCL_TEST_DISPLAY_APPS", ic_display_apps_ready},
     };
     for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++)
         if (ic_selector_has(selector, rows[i].group) != rows[i].ready() ||
@@ -9590,8 +9592,9 @@ static bool ic_original_plan_fixture(const char *root, char local[65])
         "if test -f build/no-op; then exit 0; fi; "
         "if test -f build/change-source; then echo changed >> sample.c; fi; "
         "set -- $$(tools/dev/source-identity.sh capture-record); "
-        "sed -i \"s/^BASE_GENERATION=.*/BASE_GENERATION=$$3/\" "
-        "build/dev-loop/restart.env\n"
+        "sed \"s/^BASE_GENERATION=.*/BASE_GENERATION=$$3/\" "
+        "build/dev-loop/restart.env > build/dev-loop/restart.env.tmp && "
+        "mv build/dev-loop/restart.env.tmp build/dev-loop/restart.env\n"
         "build/hotswap/zcl_rollback_fixture_%.so:\n"
         "\t@mkdir -p build/hotswap; printf '%s\\n' '$*' > $@\n"
         "build/fixtures/rlc_child_%:\n"

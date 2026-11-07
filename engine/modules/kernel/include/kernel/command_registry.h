@@ -58,6 +58,8 @@ extern "C" {
  * (and `requested`, which shares its shape) is an ARRAY key, so its bound
  * is the two numbers below instead of one. */
 #define ZCL_COMMAND_INPUT_STR_MAX 4096u
+/* Existing app.edit replacement-file bound; not a generic string/frame cap. */
+#define ZCL_COMMAND_APP_EDIT_CONTENT_MAX (1024u * 1024u)
 #define ZCL_COMMAND_INPUT_FILES_MAX_ITEMS 256u
 #define ZCL_COMMAND_INPUT_FILES_PATH_MAX 1024u
 
@@ -404,6 +406,10 @@ bool zcl_command_registry_test_success_budget(
     const struct zcl_command_spec *spec, struct zcl_command_reply *reply,
     const struct zcl_command_budget_fixture *fixture, size_t *usable,
     char *wire, size_t wire_size, size_t *wire_bytes);
+/* Serialize with the actual registry, including validated failure next actions. */
+size_t zcl_command_registry_test_reply_wire(
+    const struct zcl_command_registry *registry, const struct zcl_command_spec *spec,
+    struct zcl_command_reply *reply, char *wire, size_t wire_size);
 #endif
 
 void zcl_command_reply_init(struct zcl_command_reply *reply,

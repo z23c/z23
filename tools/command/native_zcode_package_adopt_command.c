@@ -30,6 +30,7 @@
 #include "crypto/random_secret.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
 #include "platform/time_compat.h"
 #include "sha3/sha3.h"
 #include "util/authority_receipt.h"
@@ -331,13 +332,20 @@ void zcl_package_copy_name_base(const char *release_name,
         (void)snprintf(base, ZPA_BASE_MAX + 1u, "copy");
 }
 
+static bool zpa_copy_name_unreadable(struct zcl_command_reply *reply,
+                                      const char *path)
+{
+    zcl_package_copy_fail(reply, "COPY_NAME_UNREADABLE", false,
+        "copy destination could not be classified; no name was selected", path);
+    return false;
+}
+
 bool zcl_package_copy_pick_name(const char *datadir, const char *release_name,
                                 char name[ZCL_PACKAGE_ADOPT_NAME_MAX + 1u],
                                 char *dir, size_t cap,
                                 struct zcl_command_reply *reply)
 {
     char base[ZPA_BASE_MAX + 1u];
-    struct stat st;
     zcl_package_copy_name_base(release_name, base);
     for (unsigned n = 1; n <= ZPA_COPIES_MAX; n++) {
         (void)snprintf(name, ZCL_PACKAGE_ADOPT_NAME_MAX + 1u, "%s-%u", base,
@@ -345,7 +353,13 @@ bool zcl_package_copy_pick_name(const char *datadir, const char *release_name,
         int len = snprintf(dir, cap, "%s/copies/%s", datadir, name);
         if (len <= 0 || (size_t)len >= cap)
             break;
-        if (stat(dir, &st) != 0)
+        enum platform_file_shape shape = platform_file_shape_read(dir);
+        if (shape == PLATFORM_FILE_SHAPE_UNREADABLE)
+            return zpa_copy_name_unreadable(reply, dir);
+        /* Advisory only: missing ancestors remain allowed for first use.
+         * The platform also maps ENOTDIR to MISSING; exclusive checkout,
+         * not this pathname observation, validates the final destination. */
+        if (shape == PLATFORM_FILE_SHAPE_MISSING)
             return true;
     }
     zcl_package_copy_fail(reply, "COPIES_FULL", false,

@@ -100,9 +100,15 @@ static size_t input_member_budget(const char *key, size_t key_len)
     return key_len + 4u + value_max;
 }
 
-size_t zcl_command_registry_input_budget_bytes(
+static size_t input_special_budget(
     const struct zcl_command_spec *spec)
 {
+    /* app.edit has eight fields: bounded replacement plus seven metadata
+     * fields. Charge worst-case JSON escaping, including metadata, without
+     * changing the generic default or any transport's separate frame cap. */
+    if (spec && spec->path && !strcmp(spec->path, "app.edit"))
+        return 6u * (ZCL_COMMAND_APP_EDIT_CONTENT_MAX +
+            7u * ZCL_COMMAND_INPUT_STR_MAX) + 1024u;
     /* Both wiki-write leaves admit a signed 16KiB UTF-8 body. Each input
      * byte can become six JSON escape bytes; metadata uses the codec's
      * existing bounded fields, with slack for the credential and syntax.
@@ -111,6 +117,14 @@ size_t zcl_command_registry_input_budget_bytes(
                               !strcmp(spec->path, "fleet.wiki.write")))
         return 6u * (FLEET_BOARD_WIKI_TEXT_MAX + FLEET_BOARD_TITLE_MAX +
             FLEET_BOARD_SLUG_MAX + FLEET_BOARD_AGENT_MAX + FLEET_BOARD_RECEIPT_MAX) + 1024u;
+    return 0;
+}
+
+size_t zcl_command_registry_input_budget_bytes(
+    const struct zcl_command_spec *spec)
+{
+    size_t special = input_special_budget(spec);
+    if (special) return special;
     size_t total = 3; /* '{', '}', NUL */
     const char *csv = spec ? spec->input_keys : NULL;
     char token[128];

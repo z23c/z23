@@ -47,10 +47,21 @@ bool mcp_policy_fleet_write(const struct zcl_command_spec *spec);
 
 /* The one mutation the dedicated apps_open tool runs without a plan or
  * confirm flow: app.open, while it stays an app-layer app-write mutation
- * outside the owner authority. It starts or raises only a program this
- * binary names or the owner listed in apps.tsv, with fixed argv; the agent
- * supplies only the name. z23_run keeps the plain policy for app.open. */
+ * outside the owner authority. Named launches use this binary's or the
+ * owner's apps.tsv entry and fixed argv. A selected saved image uses the
+ * same fixed argv, but app.open must verify the persisted owner adoption or
+ * received-trust grant, reject foreign history, and bind the saved version
+ * to the requested build record and image. accept_execution requests a run;
+ * it cannot create that owner grant. z23_run keeps the plain policy. */
 bool mcp_policy_app_open(const struct zcl_command_spec *spec);
+/* Dedicated apps_keep only: rechecks persisted copy trust and exact build. */
+bool mcp_policy_app_keep(const struct zcl_command_spec *spec);
+/* Dedicated apps_adopt only: requests a local, native owner decision. */
+bool mcp_policy_app_adopt(const struct zcl_command_spec *spec);
+/* Dedicated apps_receive only: requests a local, native owner decision. */
+bool mcp_policy_app_receive(const struct zcl_command_spec *spec);
+/* Dedicated apps_share only: requests a local, native owner decision. */
+bool mcp_policy_app_share(const struct zcl_command_spec *spec);
 
 /* True when the leaf can return wallet-private data: it declares the wallet
  * request capability, or it is one of the named amount-bearing leaves that do

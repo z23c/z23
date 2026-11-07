@@ -53,6 +53,19 @@ bool platform_directory_transaction_flush(struct platform_directory_transaction 
 enum platform_directory_result platform_directory_transaction_open_child(
     struct platform_directory_transaction *parent, const char *leaf,
     bool create, struct platform_directory_transaction *child);
+/* Bootstrap one private child beneath an existing canonical owner-controlled
+ * parent (POSIX: current uid, no group/other write bits; 0755 is allowed).
+ * Never chmod the parent or an existing child. create=false does no writes
+ * and reports MISSING only after validating the parent. create=true flushes
+ * the parent before success; any failure may follow creation, so the caller
+ * must report possible mutation. child must be empty on entry and is empty
+ * on failure; only a validated private child is returned. No parent capability
+ * escapes. Reject noncanonical aliases rather than silently resolving them.
+ * Earlier ancestor replacement is not prevented by this pathname API.
+ * Windows refuses until equivalent parent ACL policy is qualified. */
+enum platform_directory_result platform_directory_transaction_bootstrap_child(
+    const char *canonical_parent, const char *leaf, bool create,
+    struct platform_directory_transaction *child);
 
 void platform_directory_child_init(struct platform_directory_child *f);
 bool platform_directory_child_open(struct platform_directory_transaction *d,

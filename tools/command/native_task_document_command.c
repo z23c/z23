@@ -80,6 +80,8 @@ static struct zcl_result ntd_task_window(const struct json_value *input,
 {
     struct package_resident_identity candidate = {0};
     ZCL_CHECK(ntd_candidate(input, &candidate));
+    struct package_resident_record record;
+    ZCL_CHECK(package_resident_record_read(store, &record));
     char executable[4096], verifier[4096];
     if (!os_proc_exe_path(executable, sizeof(executable)))
         return ZCL_ERR(-1, "tasks: cannot find the application executable");
@@ -94,12 +96,18 @@ static struct zcl_result ntd_task_window(const struct json_value *input,
         int n = snprintf(verifier, sizeof(verifier), "%s/%s", executable, names[i]);
         found = n > 0 && (size_t)n < sizeof(verifier) && access(verifier, X_OK) == 0;
     }
-    if (!found && !candidate.package_root[0]) return task_list_window_run(editor);
-    if (!found) return ZCL_ERR(-1, "tasks: install the confined package verifier before previewing");
+    if (!found && record.current.package_root[0])
+        return ZCL_ERR(-1, "tasks: install the confined package verifier to reopen your kept program; your selection and tasks are unchanged");
+    if (!found && candidate.package_root[0])
+        return ZCL_ERR(-1, "tasks: install the confined package verifier before previewing");
+    if (!found) {
+        int n = snprintf(verifier, sizeof(verifier), "%s/z23-package-verify", executable);
+        if (n < 0 || (size_t)n >= sizeof(verifier))
+            return ZCL_ERR(-1, "tasks: verifier path is too long");
+    }
     struct task_update update;
     ZCL_CHECK(task_update_open(&update, editor->directory, editor->app, verifier, &candidate));
-    struct package_resident_record record;
-    ZCL_CHECK(package_resident_record_read(store, &record));
+    ZCL_CHECK(task_update_check_offer(&update));
     if (record.current.package_root[0]) ZCL_CHECK(task_update_refresh(&update));
     return task_list_window_run_update(editor, &update);
 }
@@ -176,19 +184,63 @@ static bool ntd_render(struct json_value *data, const struct task_document *row,
     return ok;
 }
 
+static struct zcl_result ntd_offer(const struct json_value *input,
+    struct package_resident_store *store, const char *directory, struct task_update_offer *out)
+{
+    if (strcmp(ntd_string(input, "action"), "offer-status") == 0)
+        return task_update_offer_read(store, out);
+    uint64_t revision;
+    if (!ntd_integer(input, "expected_offer_revision", &revision))
+        return ZCL_ERR(-1, "tasks: read offer-status and supply expected_offer_revision");
+    struct package_resident_identity candidate = {0};
+    ZCL_CHECK(ntd_candidate(input, &candidate));
+    return task_update_offer_submit(store, directory, (int64_t)revision, &candidate, out);
+}
+
+/* Offering software does not disclose the user's task contents to the AI. */
+static bool ntd_offer_render(struct json_value *data, const struct task_update_offer *offer,
+    const char *directory, const struct package_resident_record *kept)
+{
+    json_set_object(data);
+    return json_push_kv_str(data, "data_directory", directory) &&
+        json_push_kv_bool(data, "has_kept_program", kept->generation > 0) &&
+        json_push_kv_int(data, "kept_generation", kept->generation) &&
+        json_push_kv_str(data, "kept_root", kept->current.package_root) &&
+        json_push_kv_str(data, "kept_receipt", kept->current.receipt_id) &&
+        json_push_kv_str(data, "kept_program", kept->current.program) &&
+        json_push_kv_str(data, "kept_artifact_sha3", kept->current.artifact_sha3) &&
+        json_push_kv_int(data, "kept_configuration_generation", kept->current.configuration_generation) &&
+        json_push_kv_int(data, "offer_revision", offer->revision) &&
+        json_push_kv_bool(data, "dismissed", offer->dismissed) &&
+        json_push_kv_str(data, "preview_root", offer->candidate.package_root) &&
+        json_push_kv_str(data, "preview_receipt", offer->candidate.receipt_id) &&
+        json_push_kv_str(data, "preview_program", offer->candidate.program) &&
+        json_push_kv_str(data, "artifact_sha3", offer->candidate.artifact_sha3) &&
+        json_push_kv_str(data, "next_action", "In Tasks, choose More / Undo, then Updates. Try update asks permission before running.");
+}
+
 void zcl_native_handle_task_document(const struct zcl_command_request *request,
                                      struct zcl_command_reply *reply)
 {
     int64_t began = platform_time_monotonic_us();
     struct package_resident_store store = {0};
     struct task_document row;
+    struct task_update_offer offer = {0};
+    struct package_resident_record kept = {0};
+    const char *action = ntd_string(request->input, "action");
+    bool offering = action && (strcmp(action, "offer") == 0 || strcmp(action, "offer-status") == 0);
     char directory[4096];
     struct zcl_result result = ntd_open(request->input, &store, directory);
-    if (result.ok) result = ntd_change(request->input, &store, directory, &row);
+    if (result.ok && offering) result = package_resident_record_read(&store, &kept);
+    if (result.ok) result = offering ? ntd_offer(request->input, &store, directory, &offer)
+        : ntd_change(request->input, &store, directory, &row);
     struct zcl_result closed = package_resident_store_close(&store);
     if (result.ok && !closed.ok) result = closed;
-    if (result.ok && !ntd_render(&reply->data, &row, platform_time_monotonic_us() - began, directory))
-        result = ZCL_ERR(-1, "tasks: contents committed but confirmation allocation failed; reopen to inspect");
+    if (result.ok) {
+        bool rendered = offering ? ntd_offer_render(&reply->data, &offer, directory, &kept)
+            : ntd_render(&reply->data, &row, platform_time_monotonic_us() - began, directory);
+        if (!rendered) result = ZCL_ERR(-1, "tasks: operation completed but confirmation allocation failed; read status before retrying");
+    }
     if (!result.ok) {
         LOG_ERROR("app.tasks", "%s", result.message);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,

@@ -74,6 +74,7 @@ static struct zcl_result tl_menu(struct task_list *list, uint32_t action)
     if (action == 1) return tl_write(list, TASK_DOCUMENT_DELETE);
     if (action == 2) return tl_write(list, TASK_DOCUMENT_UNDO);
     if (list->update) {
+        ZCL_CHECK(task_update_check_offer(list->update));
         list->updates = true; list->repaint = true; list->focus = 0; list->first = 0;
         return ZCL_OK;
     }

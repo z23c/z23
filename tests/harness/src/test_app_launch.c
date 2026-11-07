@@ -19,6 +19,10 @@
 #include "test/test_core.h"
 
 #include "command/native_app_launch.h"
+#include "base/hex.h"
+#include "platform/positioned_file.h"
+#include "platform/resident_launch.h"
+#include "sha3/sha3.h"
 #include "command/native_command.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
@@ -614,6 +618,111 @@ static int case_discover(void)
     return failures;
 }
 
+static bool al_accept_of(const char *path, struct resident_launch_accepted *a)
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot snap;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &snap)) {
+        platform_positioned_file_close(&file);
+        return false;
+    }
+    unsigned char digest[32];
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    unsigned char chunk[4096];
+    uint64_t offset = 0;
+    for (;;) {
+        int64_t got = platform_positioned_file_read(&file, chunk, sizeof(chunk),
+                                                    offset);
+        if (got < 0) { platform_positioned_file_close(&file); return false; }
+        if (got == 0) break;
+        sha3_256_write(&ctx, chunk, (size_t)got);
+        offset += (uint64_t)got;
+    }
+    sha3_256_finalize(&ctx, digest);
+    platform_positioned_file_close(&file);
+    zcl_hex_encode(digest, sizeof(digest), a->image_sha3_hex);
+    a->image_volume = snap.volume;
+    a->image_low = snap.file_low;
+    a->image_high = snap.file_high;
+    a->image_size = snap.size;
+    return true;
+}
+
+static int al_fd_count(void)
+{
+    int count = 0;
+    for (int fd = 3; fd < 1024; ++fd) if (fcntl(fd, F_GETFD) >= 0) ++count;
+    return count;
+}
+
+static bool al_prepared(const char *image, struct resident_launch *launch)
+{
+    struct resident_launch_accepted accepted;
+    char error[RESIDENT_LAUNCH_ERROR_MAX] = {0};
+    resident_launch_init(launch);
+    return al_accept_of(image, &accepted) &&
+        resident_launch_prepare(launch, image, &accepted, error, sizeof(error));
+}
+
+static int case_resident_app(struct al_fx *f, const char *image, const char *mode,
+                             bool expect_ready, bool expect_exit)
+{
+    int failures = 0;
+    int before = al_fd_count();
+    char log[PATH_MAX], error[RESIDENT_LAUNCH_ERROR_MAX] = {0};
+    struct app_launch_entry entry = {0};
+    struct resident_launch launch;
+    struct resident_receipt receipt = {0};
+    struct app_spawn_outcome out = {0};
+    snprintf(entry.executable, sizeof(entry.executable), "%.*s", (int)sizeof(entry.executable) - 1, image);
+    snprintf(entry.ready_marker, sizeof(entry.ready_marker), "%s", AL_MARKER);
+    snprintf(entry.args[0], sizeof(entry.args[0]), "%s", mode);
+    snprintf(entry.args[1], sizeof(entry.args[1]), "%.*s", (int)sizeof(entry.args[1]) - 1, f->raised);
+    entry.arg_count = 2;
+    TEST("prepared exact app uses marker readiness and retains receipt") {
+        ASSERT(al_path(log, sizeof(log), f->root, "resident.log"));
+        ASSERT(al_prepared(image, &launch));
+        ASSERT(app_proc_resident_spawn_and_wait(&entry, &launch, log, 500, 100,
+                                               &receipt, &out, error, sizeof(error)));
+        if (!out.exited) al_track(out.pid);
+        ASSERT(out.pid > 0 && receipt.pid == (uint64_t)out.pid && receipt.mapped_proof[0]);
+        ASSERT(out.ready == expect_ready && out.exited == expect_exit);
+        ASSERT_EQ(al_fd_count(), before);
+    PASS(); }
+_test_next:
+    return failures;
+}
+
+static int case_resident_mutation(struct al_fx *f)
+{
+    int failures = 0;
+    int before = al_fd_count();
+    char log[PATH_MAX], error[RESIDENT_LAUNCH_ERROR_MAX] = {0};
+    struct app_launch_entry entry = {0};
+    struct resident_launch launch;
+    struct resident_receipt receipt = {0};
+    struct app_spawn_outcome out = {0};
+    char image[PATH_MAX], original[PATH_MAX];
+    TEST("prepared app mutation is refused without pathname fallback") {
+        ASSERT(al_path(log, sizeof(log), f->root, "resident-mutated.log"));
+        ASSERT(al_path(image, sizeof(image), f->root, "mutation-image"));
+        ASSERT(realpath(AL_FIXTURE, original) && al_copy_exe(original, image, 0700));
+        snprintf(entry.executable, sizeof(entry.executable), "%.*s", (int)sizeof(entry.executable) - 1, image);
+        ASSERT(al_prepared(image, &launch));
+        int fd = open(image, O_WRONLY | O_APPEND);
+        ASSERT(fd >= 0 && write(fd, "x", 1) == 1 && close(fd) == 0);
+        ASSERT(!app_proc_resident_spawn_and_wait(&entry, &launch, log, 500, 100,
+                                                &receipt, &out, error, sizeof(error)));
+        ASSERT(out.pid == 0 && out.spawn_errno != 0);
+        ASSERT_EQ(al_fd_count(), before);
+    PASS(); }
+_test_next:
+    return failures;
+}
+
 int test_app_launch(void);
 int test_app_launch(void)
 {
@@ -633,6 +742,10 @@ _test_next:
     failures += case_process_env(&f);
     failures += case_handlers(&f);
     failures += case_discover();
+    failures += case_resident_app(&f, f.bin_ready, "ready", true, false);
+    failures += case_resident_app(&f, f.bin_exit, "exit", false, true);
+    failures += case_resident_app(&f, f.bin_silent, "silent", false, false);
+    failures += case_resident_mutation(&f);
     al_kill_all();
     return failures;
 }

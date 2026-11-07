@@ -12,6 +12,8 @@
  *   - restoring v1 is a cache_hit at plan and confirm, and make never ran
  *     (the make fragment's run counter is unchanged);
  *   - a dirty tree is refused UNSAVED_CHANGES;
+ *   - an explicit saved version builds exact CAS source despite poisoned live
+ *     recipe/metadata/source, preserving HEAD, history and dirty bytes;
  *   - a build that reads an input its declared closure omits is refused
  *     CLOSURE_DRIFT, a compile error is BUILD_FAILED with a bounded tail;
  *   - where Landlock confines the build, a make fragment that writes outside
@@ -23,6 +25,7 @@
 #include "base/hex.h"
 #include "chain/chainparams.h"
 #include "command/app_image.h"
+#include "command/app_build_make.h"
 #include "command/lab_exec.h"
 #include "command/native_command.h"
 #include "command/native_zcode_package_bundle.h"
@@ -33,13 +36,19 @@
 #include "mcp/mcp_policy.h"
 #include "plugin/plugin_dist.h"
 #include "plugin/plugin_pack.h"
+#include "sha3/sha3.h"
+#include "util/spawn.h"
 #include "vcs/package_prepare.h"
 #include "vcs/package_release.h"
+#include "vcs/vcs.h"
 
 #include <stdio.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define ABC_DAY 20400
@@ -441,8 +450,15 @@ static int abc_refuses_unadopted(const struct abc_world *w)
         (void)json_push_kv_str(&l.in, "destination", plain);
         (void)json_push_kv_str(&l.in, "datadir", w->alice_datadir);
         ASSERT(abc_plan_confirm("zcode.package.fork", &l));
+        char plain_version[65];
+        (void)snprintf(plain_version, sizeof(plain_version), "%s", abc_get(&l, "version"));
         abc_close(&l);
         abc_build_input(&l, plain, w->alice_datadir);
+        ASSERT(abc_exec("app.build", &l));
+        ASSERT(abc_refusal(&l, "NOT_ADOPTED"));
+        abc_close(&l);
+        abc_build_input(&l, plain, w->alice_datadir);
+        (void)json_push_kv_str(&l.in, "version", plain_version);
         ASSERT(abc_exec("app.build", &l));
         ASSERT(abc_refusal(&l, "NOT_ADOPTED"));
         abc_close(&l);
@@ -487,6 +503,9 @@ static int abc_builds_v1_then_v2(struct abc_world *w)
         ASSERT(strlen(abc_get(&l, "closure_root")) == 64);
         ASSERT(strlen(abc_get(&l, "env_root")) == 64);
         ASSERT(strlen(abc_get(&l, "dependency_root")) == 64);
+        char store[ABC_PATH + 32];
+        (void)snprintf(store, sizeof(store), "%s/app_build", w->alice_datadir);
+        ASSERT(stat(store, &st) != 0);
         ASSERT(abc_confirm("app.build", &l));
         ASSERT(l.out.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT(strcmp(abc_get(&l, "stage"), "commit") == 0);
@@ -710,6 +729,456 @@ static int abc_landlock_contains(const struct abc_world *w)
     return failures;
 }
 
+static bool abc_dep_verdict(const struct app_build_make *make, const char *out,
+    const struct app_build_closure *closure, const char *token, bool expected)
+{
+    char wire[2048], why[320];
+    int n = snprintf(wire, sizeof(wire), "main.o: %s\n", token);
+    if (n <= 0 || (size_t)n >= sizeof(wire) || !abc_put(out, "main.d", wire))
+        return false;
+    return app_build_depfiles_declared(make, out, closure, why, sizeof(why)) == expected;
+}
+
+static int abc_dep_alias_controls(const struct abc_world *w)
+{
+    int failures = 0;
+    TEST("app.build: depfile aliases stay inside declared source; escapes refuse") {
+        char copy[ABC_PATH], include[ABC_PATH], out[ABC_PATH];
+        char outside[ABC_PATH], link[ABC_PATH], absolute[2048];
+        (void)snprintf(copy, sizeof(copy), "%s/dep-copy", w->root);
+        (void)snprintf(include, sizeof(include), "%s/dep-copy/include", w->root);
+        (void)snprintf(out, sizeof(out), "%s/dep-out", w->root);
+        (void)snprintf(outside, sizeof(outside), "%s/outside.h", w->root);
+        (void)snprintf(link, sizeof(link), "%s/dep-copy/include/link.h", w->root);
+        ASSERT(mkdir(copy, 0700) == 0);
+        ASSERT(mkdir(include, 0700) == 0);
+        ASSERT(mkdir(out, 0700) == 0);
+        ASSERT(abc_put(copy, "include/boost.h", "#define BOOST 2\n"));
+        ASSERT(abc_put(copy, "include/extra.h", "#define EXTRA 1\n"));
+        ASSERT(abc_put(w->root, "outside.h", "#define OUTSIDE 1\n"));
+        ASSERT(symlink(outside, link) == 0);
+        char *paths[] = {"include/boost.h", "include/link.h"};
+        const struct app_build_closure closure = {.paths = paths, .count = 2};
+        const struct app_build_make make = {.copy_dir = copy, .work_dir = out};
+        ASSERT(abc_dep_verdict(&make, out, &closure, "include/boost.h", true));
+        ASSERT(abc_dep_verdict(&make, out, &closure, "./include/../include/boost.h", true));
+        (void)snprintf(absolute, sizeof(absolute), "%s/include/../include/boost.h", copy);
+        ASSERT(abc_dep_verdict(&make, out, &closure, absolute, true));
+        (void)snprintf(absolute, sizeof(absolute), "%s/./dep-copy/include/boost.h", w->root);
+        ASSERT(abc_dep_verdict(&make, out, &closure, absolute, true));
+        (void)snprintf(absolute, sizeof(absolute), "%s/./dep-copy/include/extra.h", w->root);
+        ASSERT(abc_dep_verdict(&make, out, &closure, absolute, false));
+        (void)snprintf(absolute, sizeof(absolute), "%s/./dep-copy/../outside.h", w->root);
+        ASSERT(abc_dep_verdict(&make, out, &closure, absolute, false));
+        ASSERT(abc_dep_verdict(&make, out, &closure, "include/../include/extra.h", false));
+        ASSERT(abc_dep_verdict(&make, out, &closure, "../outside.h", false));
+        (void)snprintf(absolute, sizeof(absolute), "%s/../outside.h", copy);
+        ASSERT(abc_dep_verdict(&make, out, &closure, absolute, false));
+        ASSERT(abc_dep_verdict(&make, out, &closure, "include/link.h", false));
+        /* Existing external-absolute policy is a separate unresolved gap. */
+        ASSERT(abc_dep_verdict(&make, out, &closure, outside, true));
+        (void)snprintf(absolute, sizeof(absolute), "%s/external-link.h", w->root);
+        ASSERT(symlink(outside, absolute) == 0);
+        ASSERT(abc_dep_verdict(&make, out, &closure, absolute, true));
+        ASSERT(unlink(absolute) == 0);
+        (void)snprintf(link, sizeof(link), "%s/include/extra.h", copy);
+        ASSERT(symlink(link, absolute) == 0);
+        ASSERT(abc_dep_verdict(&make, out, &closure, absolute, false));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int abc_dep_store_controls(const struct abc_world *w)
+{
+    int failures = 0;
+    TEST("app.build: depfiles cannot traverse excluded root stores") {
+        char copy[ABC_PATH], out[ABC_PATH], path[ABC_PATH + 32], alias[ABC_PATH + 32], token[2048];
+        (void)snprintf(copy, sizeof(copy), "%s/dep-copy", w->root);
+        (void)snprintf(out, sizeof(out), "%s/dep-out", w->root);
+        const char *stores[] = {"build", ".zvcs", ".codeindex"};
+        for (size_t i = 0; i < sizeof(stores) / sizeof(stores[0]); ++i) {
+            int n = snprintf(path, sizeof(path), "%s/%s", copy, stores[i]);
+            ASSERT(n > 0 && (size_t)n < sizeof(path));
+            ASSERT(mkdir(path, 0700) == 0);
+        }
+        (void)snprintf(path, sizeof(path), "%s/src", copy);
+        ASSERT(mkdir(path, 0700) == 0);
+        (void)snprintf(path, sizeof(path), "%s/src/build", copy);
+        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(abc_put(copy, "src/build/nested.h", "#define NESTED 1\n"));
+        (void)snprintf(alias, sizeof(alias), "%s/dep-root-alias", w->root);
+        ASSERT(symlink(copy, alias) == 0);
+        char *paths[] = {"include/boost.h", "src/build/nested.h"};
+        const struct app_build_closure closure = {.paths = paths, .count = 2};
+        const struct app_build_make make = {.copy_dir = copy, .work_dir = out};
+        ASSERT(abc_dep_verdict(&make, out, &closure, "src/../include/boost.h", true));
+        ASSERT(abc_dep_verdict(&make, out, &closure, "src/build/nested.h", true));
+        for (size_t i = 0; i < sizeof(stores) / sizeof(stores[0]); ++i) {
+            int n = snprintf(token, sizeof(token), "%s/../include/boost.h", stores[i]);
+            ASSERT(n > 0 && (size_t)n < sizeof(token));
+            ASSERT(abc_dep_verdict(&make, out, &closure, token, false));
+            n = snprintf(token, sizeof(token), "%s/%s/../include/boost.h", alias, stores[i]);
+            ASSERT(n > 0 && (size_t)n < sizeof(token));
+            ASSERT(abc_dep_verdict(&make, out, &closure, token, false));
+        }
+        ASSERT(unlink(alias) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int abc_builds_alias_include(const struct abc_world *w)
+{
+    int failures = 0;
+    TEST("app.build: real compiler depfile alias resolves to declared saved header") {
+        struct abc_leaf l;
+        ASSERT(abc_put(w->copy, "Makefile", k_makefile));
+        ASSERT(abc_put(w->copy, "src/main.c",
+            "#include \"../include/../include/boost.h\"\n"
+            "int main(void) { return BOOST - 1; }\n"));
+        ASSERT(abc_save(w->copy, NULL));
+        bool built = abc_build(&l, w->copy, w->alice_datadir);
+        bool recorded = built && abc_record_matches(&l, w->alice_datadir);
+        abc_close(&l);
+        ASSERT(built);
+        ASSERT(recorded);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static const char k_saved_main[] = "int main(void) { return 23; }\n";
+static const char k_live_main[] = "int main(void) { return 24; }\n";
+
+/* The editor is outside make's confinement. A FIFO handshake, not elapsed
+ * time, orders the live edit before make reads its compilation input. */
+static int abc_edit_on_ready(const struct abc_world *w, int ready, int go)
+{
+    struct pollfd event = {.fd = ready, .events = POLLIN};
+    char byte;
+    bool ok = poll(&event, 1, 30000) == 1 && read(ready, &byte, 1) == 1 &&
+              abc_put(w->copy, "src/main.c", k_live_main);
+    bool released = write(go, "go\n", 3) == 3;
+    return ok && released ? 0 : 1;
+}
+
+static bool abc_build_with_live_edit(const struct abc_world *w,
+                                     struct abc_leaf *l)
+{
+    char ready_path[ABC_PATH + 32], go_path[ABC_PATH + 32];
+    (void)snprintf(ready_path, sizeof(ready_path), "%s/edit-ready", w->build_dir);
+    (void)snprintf(go_path, sizeof(go_path), "%s/edit-go", w->build_dir);
+    bool setup = mkfifo(ready_path, 0600) == 0 && mkfifo(go_path, 0600) == 0;
+    int ready = setup ? open(ready_path, O_RDWR | O_NONBLOCK | O_CLOEXEC) : -1;
+    int go = setup ? open(go_path, O_RDWR | O_NONBLOCK | O_CLOEXEC) : -1;
+    pid_t child = ready >= 0 && go >= 0 ? fork() : -1;
+    if (child == 0)
+        _exit(abc_edit_on_ready(w, ready, go));
+    bool built = false;
+    int status = -1;
+    if (child > 0) {
+        built = abc_build(l, w->copy, w->alice_datadir);
+        if (waitpid(child, &status, 0) != child) status = -1;
+    }
+    if (ready >= 0) (void)close(ready);
+    if (go >= 0) (void)close(go);
+    (void)unlink(ready_path);
+    (void)unlink(go_path);
+    return built && status == 0;
+}
+
+static bool abc_saved_image(const char *path)
+{
+    const char *argv[] = {path, NULL};
+    char output[256];
+    bool timed_out = false;
+    int status = zcl_spawn_capture_merged_in_dir_observed(
+        argv, "/", output, sizeof(output), 10000, &timed_out);
+    return !timed_out && status == 23;
+}
+
+static bool abc_live_edit_preserved(const struct abc_world *w)
+{
+    char path[ABC_PATH + 32], bytes[sizeof(k_live_main)];
+    (void)snprintf(path, sizeof(path), "%s/src/main.c", w->copy);
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    size_t count = fread(bytes, 1, sizeof(bytes), file);
+    bool ok = !ferror(file) && feof(file) && count == sizeof(k_live_main) - 1 &&
+              memcmp(bytes, k_live_main, count) == 0;
+    return fclose(file) == 0 && ok;
+}
+
+static int abc_builds_saved_snapshot(const struct abc_world *w)
+{
+    int failures = 0;
+    TEST("app.build: editing the live copy during make preserves saved input and live edit") {
+        struct abc_leaf l;
+        char makefile[2048];
+        (void)snprintf(makefile, sizeof(makefile), "%s"
+            ".PHONY: before\napp: before\nbefore:\n"
+            "\t@printf ready > $(APP_OUT)/../edit-ready\n"
+            "\t@read ack < $(APP_OUT)/../edit-go\n", k_makefile);
+        ASSERT(abc_put(w->copy, "Makefile", makefile));
+        ASSERT(abc_put(w->copy, "src/main.c", k_saved_main));
+        ASSERT(abc_save(w->copy, NULL));
+        ASSERT(abc_build_with_live_edit(w, &l));
+        bool saved = abc_saved_image(abc_get(&l, "image_path"));
+        bool recorded = abc_record_matches(&l, w->alice_datadir);
+        abc_close(&l);
+        ASSERT(abc_live_edit_preserved(w));
+        ASSERT(saved);
+        ASSERT(recorded);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static const char *const abc_selected_keys[] = {
+    "version", "package_root", "closure_root", "env_root", "dependency_root", "image_sha3"
+};
+struct abc_selected {
+    char n[65], newer[65];
+    char roots[6][65];
+    uint8_t preserved[5][32];
+};
+
+static void abc_selected_input(struct abc_leaf *l, const struct abc_world *w,
+                                const char *version)
+{
+    abc_build_input(l, w->copy, w->alice_datadir);
+    (void)json_push_kv_str(&l->in, "version", version);
+}
+
+static bool abc_file_digest(const char *dir, const char *rel, uint8_t hash[32])
+{
+    char path[ABC_PATH + 128];
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, rel);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    struct sha3_256_ctx sha; sha3_256_init(&sha);
+    uint8_t buf[4096]; size_t got;
+    while ((got = fread(buf, 1, sizeof(buf), file)) != 0)
+        sha3_256_write(&sha, buf, got);
+    bool ok = !ferror(file);
+    ok = fclose(file) == 0 && ok;
+    sha3_256_finalize(&sha, hash);
+    return ok;
+}
+
+static bool abc_selected_bytes(const struct abc_world *w,
+                                struct abc_selected *s, bool compare)
+{
+    static const char *const paths[] = {"src/main.c", "include/boost.h",
+        "Makefile", "zcode-package.json", ".zvcs/commits.log"};
+    for (size_t i = 0; i < 5; ++i) {
+        uint8_t digest[32];
+        if (!abc_file_digest(w->copy, paths[i], digest)) return false;
+        if (compare && memcmp(digest, s->preserved[i], 32)) return false;
+        if (!compare) memcpy(s->preserved[i], digest, 32);
+    }
+    return true;
+}
+
+static bool abc_selected_record(const struct abc_world *w,
+                                 struct abc_selected *s, const struct abc_leaf *l)
+{
+    for (size_t i = 0; i < 6; ++i) {
+        const char *value = abc_get(l, abc_selected_keys[i]);
+        if (strlen(value) != 64) return false;
+        (void)snprintf(s->roots[i], 65, "%s", value);
+    }
+    /* Force a real rebuild after poisoning live files, not only a cache hit. */
+    return abc_saved_image(abc_get(l, "image_path")) &&
+        abc_record_matches(l, w->alice_datadir) && unlink(abc_get(l, "image_path")) == 0;
+}
+
+static bool abc_selected_seed(const struct abc_world *w, struct abc_selected *s)
+{
+    if (!abc_put(w->copy, "Makefile", k_makefile) ||
+        !abc_put(w->copy, "zcode-package.json", k_alice_meta) ||
+        !abc_put(w->copy, "src/main.c", k_saved_main) || !abc_save(w->copy, s->n))
+        return false;
+    struct abc_leaf l;
+    abc_selected_input(&l, w, s->n);
+    bool ok = abc_pass("app.build", &l);
+    char store[ABC_PATH + 32]; struct stat st;
+    (void)snprintf(store, sizeof(store), "%s/app_build", w->alice_datadir);
+    ok = ok && stat(store, &st) != 0; /* explicit plan retains no build state */
+    ok = ok && abc_confirm("app.build", &l) && l.out.status == ZCL_COMMAND_STATUS_PASSED;
+    if (ok) ok = abc_selected_record(w, s, &l);
+    abc_close(&l);
+    return ok;
+}
+
+static bool abc_selected_poison(const struct abc_world *w, struct abc_selected *s)
+{
+    return abc_put(w->copy, "src/main.c", "int main(void) { return 24; }\n") &&
+        abc_save(w->copy, s->newer) &&
+        abc_put(w->copy, "src/main.c", "#error dirty source must not compile\n") &&
+        abc_put(w->copy, "include/boost.h", "#error dirty header\n") &&
+        abc_put(w->copy, "Makefile", "$(error LIVE MAKEFILE MUST NOT RUN)\n") &&
+        abc_put(w->copy, "zcode-package.json", "not valid JSON\n") &&
+        abc_selected_bytes(w, s, false);
+}
+
+static bool abc_selected_rebuild(const struct abc_world *w, struct abc_selected *s)
+{
+    struct abc_leaf l;
+    abc_selected_input(&l, w, s->n);
+    bool ok = abc_plan_confirm("app.build", &l);
+    for (size_t i = 0; ok && i < 6; ++i)
+        ok = !strcmp(s->roots[i], abc_get(&l, abc_selected_keys[i]));
+    ok = ok && abc_flag(&l, "make_ran") && abc_saved_image(abc_get(&l, "image_path")) &&
+        abc_record_matches(&l, w->alice_datadir);
+    abc_close(&l);
+    if (!ok || !abc_selected_bytes(w, s, true)) return false;
+    abc_open(&l); (void)json_push_kv_str(&l.in, "dir", w->copy);
+    ok = abc_pass("zcode.package.version.list", &l) &&
+        !strcmp(abc_get(&l, "head_version"), s->newer);
+    abc_close(&l);
+    return ok;
+}
+
+static bool abc_selected_error(const struct abc_world *w, const char *version,
+                                const char *error)
+{
+    struct abc_leaf l;
+    abc_selected_input(&l, w, version);
+    bool ok = abc_exec("app.build", &l) && abc_refusal(&l, error);
+    abc_close(&l);
+    return ok;
+}
+
+static bool abc_selected_stale(const struct abc_world *w, const struct abc_selected *s)
+{
+    struct abc_leaf l;
+    abc_selected_input(&l, w, s->n);
+    bool ok = abc_pass("app.build", &l) && strlen(abc_get(&l, "plan_id")) == 64;
+    char plan[65];
+    (void)snprintf(plan, sizeof(plan), "%s", abc_get(&l, "plan_id"));
+    abc_close(&l);
+    abc_selected_input(&l, w, s->newer);
+    (void)json_push_kv_str(&l.in, "plan_id", plan);
+    (void)json_push_kv_bool(&l.in, "confirm", true);
+    ok = ok && abc_exec("app.build", &l) && abc_refusal(&l, "PLAN_MISMATCH");
+    abc_close(&l);
+    return ok;
+}
+
+static bool abc_selected_default_dirty(const struct abc_world *w)
+{
+    struct abc_leaf l;
+    abc_build_input(&l, w->copy, w->alice_datadir);
+    bool ok = abc_exec("app.build", &l) && abc_refusal(&l, "UNSAVED_CHANGES");
+    abc_close(&l);
+    return ok;
+}
+
+static bool abc_selected_empty_version(const struct abc_world *w)
+{
+    struct abc_leaf l;
+    abc_selected_input(&l, w, "");
+    const struct zcl_command_spec *spec = abc_spec("app.build");
+    char why[256] = "";
+    bool rejected = spec &&
+        !zcl_command_registry_input_validate(spec, &l.in, why, sizeof(why));
+    l.req.spec = spec;
+    l.req.input = &l.in;
+    l.req.invoked_name = "app.build";
+    zcl_native_handle_app_build(&l.req, &l.out);
+    bool ok = rejected && abc_refusal(&l, "BAD_VERSION");
+    abc_close(&l);
+    return ok;
+}
+
+static bool abc_selected_types(const struct abc_world *w)
+{
+    struct abc_leaf l;
+    abc_build_input(&l, w->copy, w->alice_datadir);
+    (void)json_push_kv_int(&l.in, "version", 1);
+    /* Direct boundary remains required even when registry types reject first. */
+    l.req.spec = abc_spec("app.build"); l.req.input = &l.in;
+    l.req.invoked_name = "app.build";
+    zcl_native_handle_app_build(&l.req, &l.out);
+    bool ok = abc_refusal(&l, "BAD_VERSION");
+    abc_close(&l);
+    return ok && abc_selected_empty_version(w) &&
+        abc_selected_error(w, "typo", "BAD_VERSION") &&
+        abc_selected_error(w, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                            "VERSION_UNKNOWN");
+}
+
+static bool abc_selected_cas_refusal(const struct abc_world *w, const struct abc_selected *s)
+{
+    struct zcl_package_copy copy;
+    struct abc_leaf l; abc_open(&l);
+    bool opened = zcl_package_copy_open_selected(w->copy, &copy, &l.out, "fixture", s->n);
+    char hex[65];
+    if (opened) { zcl_hex_encode(copy.selected_tree, 32, hex); zcl_package_copy_close(&copy); }
+    abc_close(&l);
+    if (!opened) return false;
+    char path[ABC_PATH + 128], saved[ABC_PATH + 128];
+    (void)snprintf(path, sizeof(path), "%s/.zvcs/objects/%.2s/%s", w->copy, hex, hex + 2);
+    (void)snprintf(saved, sizeof(saved), "%s/saved-manifest", w->root);
+    if (rename(path, saved) != 0) return false;
+    bool missing = abc_selected_error(w, s->n, "SNAPSHOT_MATERIALIZE_FAILED");
+    FILE *file = fopen(path, "wb");
+    bool wrote = false;
+    if (file) { wrote = fwrite("bad", 1, 3, file) == 3; wrote = fclose(file) == 0 && wrote; }
+    bool corrupt = wrote && abc_selected_error(w, s->n, "SNAPSHOT_MATERIALIZE_FAILED");
+    (void)unlink(path);
+    bool restored = rename(saved, path) == 0;
+    return missing && corrupt && restored;
+}
+
+static bool abc_selected_foreign(const struct abc_world *w, const struct abc_selected *s)
+{
+    struct vcs_repo *repo = vcs_open(w->copy);
+    if (!repo) return false;
+    struct vcs_snapshot_meta meta = {.phase = "foreign"}; uint8_t id[32];
+    bool saved = vcs_snapshot(repo, &meta, id) == VCS_OK;
+    vcs_close(repo);
+    return saved && abc_selected_error(w, s->n, "NOT_ADOPTED");
+}
+
+static bool abc_selected_head(const struct abc_world *w, const struct abc_selected *s)
+{
+    uint8_t want[32], head[32]; bool found = false;
+    if (!zcl_hex_decode_lower(s->newer, want, 32)) return false;
+    struct vcs_repo *repo = vcs_open(w->copy);
+    if (!repo) return false;
+    bool ok = vcs_index_ref_get(vcs_repo_index(repo), "HEAD", head, &found) &&
+        found && !memcmp(head, want, 32);
+    vcs_close(repo);
+    return ok;
+}
+
+static int abc_explicit_saved_version(void)
+{
+    int failures = 0;
+    struct abc_world w = {0}; struct abc_selected s = {0};
+    TEST("app.build: explicit N ignores poisoned newer/dirty files, binds plan and preserves history") {
+        ASSERT(abc_world_init(&w));
+        ASSERT(abc_selected_seed(&w, &s));
+        ASSERT(abc_selected_poison(&w, &s));
+        ASSERT(abc_selected_default_dirty(&w));
+        ASSERT(abc_selected_rebuild(&w, &s));
+        ASSERT(abc_selected_stale(&w, &s));
+        ASSERT(abc_selected_types(&w));
+        ASSERT(abc_selected_cas_refusal(&w, &s));
+        ASSERT(abc_selected_bytes(&w, &s, true));
+        ASSERT(abc_selected_head(&w, &s));
+        ASSERT(abc_selected_foreign(&w, &s));
+        PASS();
+    } _test_next:;
+    if (w.saved_home[0]) (void)setenv("HOME", w.saved_home, 1);
+    if (!failures) (void)test_rm_rf_recursive(w.root);
+    return failures;
+}
+
 int test_app_build_copy(void)
 {
     int failures = 0;
@@ -733,9 +1202,18 @@ int test_app_build_copy(void)
         failures += abc_refuses_bad_builds(&w);
         failures += abc_landlock_contains(&w);
     }
+    if (!failures) {
+        failures += abc_dep_alias_controls(&w);
+        failures += abc_dep_store_controls(&w);
+        failures += abc_builds_alias_include(&w);
+    }
+    if (!failures)
+        failures += abc_builds_saved_snapshot(&w);
     if (w.saved_home[0])
         (void)setenv("HOME", w.saved_home, 1);
     if (!failures)
         (void)test_rm_rf_recursive(w.root);
+    if (!failures)
+        failures += abc_explicit_saved_version();
     return failures;
 }

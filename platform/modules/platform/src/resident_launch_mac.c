@@ -153,23 +153,56 @@ static void rl_mac_reap_suspended(pid_t pid)
     while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
 }
 
+static int rl_mac_spawn_attributes(posix_spawnattr_t *attributes, bool desktop_signals)
+{
+    int rc = 0;
+    short flags = POSIX_SPAWN_START_SUSPENDED | POSIX_SPAWN_SETSID |
+                  POSIX_SPAWN_CLOEXEC_DEFAULT;
+    if (desktop_signals) {
+        const int signals[] = {SIGPIPE, SIGTERM, SIGINT, SIGHUP, SIGUSR1, SIGCHLD};
+        sigset_t defaults, empty;
+        sigemptyset(&defaults); sigemptyset(&empty);
+        for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); ++i)
+            sigaddset(&defaults, signals[i]);
+        rc = posix_spawnattr_setsigdefault(attributes, &defaults);
+        if (rc == 0) rc = posix_spawnattr_setsigmask(attributes, &empty);
+        flags |= POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
+    }
+    if (rc == 0) rc = posix_spawnattr_setflags(attributes, flags);
+    return rc;
+}
+
+static int rl_mac_spawn_actions(posix_spawn_file_actions_t *actions,
+                                int ipc_child, int logfd)
+{
+    int rc = posix_spawn_file_actions_init(actions);
+    if (rc != 0) return rc;
+    if (rc == 0 && logfd >= 0)
+        rc = posix_spawn_file_actions_addopen(actions, 0, "/dev/null", O_RDONLY, 0);
+    if (rc == 0 && logfd >= 0)
+        rc = posix_spawn_file_actions_adddup2(actions, logfd, 1);
+    if (rc == 0 && logfd >= 0)
+        rc = posix_spawn_file_actions_adddup2(actions, logfd, 2);
+    if (rc == 0)
+        rc = posix_spawn_file_actions_adddup2(actions, ipc_child,
+                                              RESIDENT_LAUNCH_CHILD_FD);
+    if (rc == 0 && ipc_child != RESIDENT_LAUNCH_CHILD_FD)
+        rc = posix_spawn_file_actions_addclose(actions, ipc_child);
+    if (rc != 0) posix_spawn_file_actions_destroy(actions);
+    return rc;
+}
+
 /* Suspended spawn of the locator path with exactly one inherited
  * descriptor: the IPC socket dup'd to the fixed child slot. CLOEXEC_DEFAULT
  * closes every other descriptor in the child. */
-static bool rl_mac_suspended_spawn(int ipc_child, const char *locator,
+static bool rl_mac_suspended_spawn(int ipc_child, int logfd, bool desktop_signals, const char *locator,
                                    char *const argv[], char *const envp[],
                                    pid_t *pid_out,
                                    char *error, size_t error_size)
 {
     posix_spawn_file_actions_t actions;
-    int rc = posix_spawn_file_actions_init(&actions);
-    if (rc == 0)
-        rc = posix_spawn_file_actions_adddup2(&actions, ipc_child,
-                                              RESIDENT_LAUNCH_CHILD_FD);
-    if (rc == 0 && ipc_child != RESIDENT_LAUNCH_CHILD_FD)
-        rc = posix_spawn_file_actions_addclose(&actions, ipc_child);
+    int rc = rl_mac_spawn_actions(&actions, ipc_child, logfd);
     if (rc != 0) {
-        posix_spawn_file_actions_destroy(&actions);
         errno = rc;
         rl_mac_fail(error, error_size, "spawn file-actions setup failed");
         return false;
@@ -182,9 +215,7 @@ static bool rl_mac_suspended_spawn(int ipc_child, const char *locator,
         rl_mac_fail(error, error_size, "suspended spawn setup failed");
         return false;
     }
-    short flags = POSIX_SPAWN_START_SUSPENDED | POSIX_SPAWN_SETSID |
-                  POSIX_SPAWN_CLOEXEC_DEFAULT;
-    rc = posix_spawnattr_setflags(&attributes, flags);
+    rc = rl_mac_spawn_attributes(&attributes, desktop_signals);
     if (rc != 0) {
         posix_spawn_file_actions_destroy(&actions);
         posix_spawnattr_destroy(&attributes);
@@ -280,7 +311,7 @@ bool resident_spawn_darwin(struct resident_launch *launch,
         return false;
     }
     pid_t pid = -1;
-    if (!rl_mac_suspended_spawn(ipc[1], locator, argv, envp, &pid,
+    if (!rl_mac_suspended_spawn(ipc[1], launch->log_stdio ? launch->log_stdio_fd : -1, launch->desktop_signals, locator, argv, envp, &pid,
                                 error, error_size)) {
         close(ipc[0]);
         close(ipc[1]);

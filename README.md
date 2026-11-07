@@ -82,14 +82,21 @@ build/bin/z23 -datadir="$HOME/.z23-apps" app open skycombat-1   # your version
 build/bin/z23 -datadir="$HOME/.z23-apps" app share skycombat-1  # one file
 ```
 
-Send the file `skycombat-1.z23share`. Your friend runs one command:
+Send the file `skycombat-1.z23share`. Share also prints the fingerprint and
+version root your friend will be asked to confirm; tell them these another
+way, over chat or voice, so they can check. Your copy keeps opening as before.
+
+Your friend builds the game from the file's source, so they need z23 from a
+clone and build (Start here above, about 3 minutes), a C compiler and, on
+Linux, the X11 and GL headers (the ones `make game` needs). Then they run one
+command:
 
 ```bash
 z23 -datadir="$HOME/.z23-apps" app open skycombat-1.z23share
 ```
 
 It checks the file, shows who signed it as a short fingerprint such as
-`833d-7ae5-d858-315d` (compare it with yours over chat or voice), asks y/N,
+`833d-7ae5-d858-315d` and the exact version root, asks y/N,
 then keeps, builds and opens the game. Each step asks y/N before it changes
 anything; `--yes` answers for scripts, and without a terminal or `--yes` a
 step only shows its plan. `z23 app list` lists your copies.

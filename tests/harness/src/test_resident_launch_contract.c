@@ -1248,6 +1248,137 @@ static int rlc_task_journey(const char *base, const struct rlc_binding *n,
     return failures;
 }
 
+static bool rlc_offer_command(const char *base, const struct rlc_binding *binding,
+                              int revision)
+{
+    char body[8192];
+    int length = snprintf(body, sizeof(body),
+        "{\"datadir\":\"%s\",\"app\":\"contract/task-offer-journey\",\"action\":\"offer\","
+        "\"expected_offer_revision\":%d,\"preview_root\":\"%s\",\"preview_receipt\":\"%s\","
+        "\"preview_program\":\"%s\"}", base, revision, binding->root_hex, binding->receipt_hex, RLC_ZTASKS_PROGRAM);
+    struct json_value input = {0};
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.tasks", NULL);
+    struct zcl_command_request request = { .spec = spec, .input = &input };
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.task_document.v1");
+    char error[256] = {0};
+    bool ok = length > 0 && (size_t)length < sizeof(body) && spec && json_read(&input, body, (size_t)length) &&
+        zcl_command_registry_input_validate(spec, &input, error, sizeof(error));
+    if (!ok) fprintf(stderr, "resident offer: registry refused: %s\n", error);
+    if (ok) spec->handler(&request, &reply);
+    const char *digest = json_get_str(json_get(&reply.data, "artifact_sha3"));
+    ok = ok && reply.exit_code == 0 && !json_get(&reply.data, "tasks") && digest &&
+        strcmp(digest, binding->sha3) == 0 && json_get_int(json_get(&reply.data, "offer_revision")) == revision + 1;
+    if (!ok) fprintf(stderr, "resident offer: reply exit=%d code=%s message=%s\n",
+                     reply.exit_code, reply.error.code, reply.error.message);
+    zcl_command_reply_free(&reply); json_free(&input);
+    return ok;
+}
+
+static bool rlc_offer_text(const struct json_value *data, const char *key, const char *expected)
+{
+    const char *value = json_get_str(json_get(data, key));
+    return value && strcmp(value, expected) == 0;
+}
+
+static bool rlc_offer_identity(const struct json_value *data, const struct rlc_binding *binding,
+                               bool kept)
+{
+    return rlc_offer_text(data, kept ? "kept_root" : "preview_root", binding->root_hex) &&
+        rlc_offer_text(data, kept ? "kept_receipt" : "preview_receipt", binding->receipt_hex) &&
+        rlc_offer_text(data, kept ? "kept_program" : "preview_program", RLC_ZTASKS_PROGRAM) &&
+        rlc_offer_text(data, kept ? "kept_artifact_sha3" : "artifact_sha3", binding->sha3);
+}
+
+static bool rlc_offer_status_data(const struct json_value *data,
+                                  const struct rlc_binding *kept, const struct rlc_binding *proposed)
+{
+    const struct json_value *has_kept = json_get(data, "has_kept_program");
+    return !json_get(data, "tasks") && has_kept && has_kept->type == JSON_BOOL && json_get_bool(has_kept) &&
+        json_get_int(json_get(data, "kept_generation")) == 1 &&
+        json_get_int(json_get(data, "kept_configuration_generation")) == 1 &&
+        json_get_int(json_get(data, "offer_revision")) == 2 &&
+        rlc_offer_identity(data, kept, true) && rlc_offer_identity(data, proposed, false);
+}
+
+static bool rlc_offer_status(const char *base, const struct rlc_binding *kept,
+                             const struct rlc_binding *proposed)
+{
+    char body[8192];
+    int length = snprintf(body, sizeof(body),
+        "{\"datadir\":\"%s\",\"app\":\"contract/task-offer-journey\",\"action\":\"offer-status\"}", base);
+    struct json_value input = {0};
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.tasks", NULL);
+    struct zcl_command_request request = { .spec = spec, .input = &input };
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.task_document.v1");
+    char error[256] = {0};
+    bool ok = length > 0 && (size_t)length < sizeof(body) && spec && json_read(&input, body, (size_t)length) &&
+        zcl_command_registry_input_validate(spec, &input, error, sizeof(error));
+    if (!ok) fprintf(stderr, "resident offer: registry refused: %s\n", error);
+    if (ok) spec->handler(&request, &reply);
+    ok = ok && reply.exit_code == 0 && rlc_offer_status_data(&reply.data, kept, proposed);
+    if (!ok) fprintf(stderr, "resident offer: reply exit=%d code=%s message=%s\n",
+                     reply.exit_code, reply.error.code, reply.error.message);
+    zcl_command_reply_free(&reply); json_free(&input);
+    return ok;
+}
+
+static int rlc_offer_consent(const char *base, const struct rlc_binding *n,
+    const struct rlc_binding *n1, struct task_list *list, struct task_update *update)
+{
+    int failures = 0;
+    RLC_CHECK("offer journey: installed offer via app.tasks", rlc_offer_command(base, n, 0));
+    RLC_CHECK("offer journey: More Updates finds pinned artifact without spawning", task_list_action(list, 3).ok &&
+        task_list_action(list, 3).ok && !update->pending && !update->ready && strcmp(update->candidate.artifact_sha3, n->sha3) == 0);
+    RLC_CHECK("offer journey: consent remains explicit", task_list_action(list, 0).ok && list->permission && !update->pending);
+    RLC_CHECK("offer journey: newer offer leaves consent pinned", rlc_offer_command(base, n1, 1) &&
+        task_update_check_offer(update).ok && strcmp(update->candidate.artifact_sha3, n->sha3) == 0 && !update->pending);
+    return failures;
+}
+
+static int rlc_offer_keep(const char *base, const struct rlc_binding *n,
+    const struct rlc_binding *n1, struct task_list *list, struct task_update *update,
+    struct package_resident_store *store, const struct task_document *document)
+{
+    int failures = 0;
+    struct task_document after = {0};
+    struct task_update_offer offer = {0};
+    struct package_resident_record current = {0};
+    RLC_CHECK("offer journey: Allow and preview", task_list_action(list, 0).ok && rlc_task_wait(update) && update->ready);
+    RLC_CHECK("offer journey: Keep exact preview", task_list_action(list, 0).ok && rlc_task_wait(update) &&
+        package_resident_record_read(store, &current).ok && strcmp(current.current.artifact_sha3, n->sha3) == 0);
+    RLC_CHECK("offer journey: newer offer and task survive Keep", task_update_offer_read(store, &offer).ok &&
+        offer.revision == 2 && !offer.dismissed && strcmp(offer.candidate.artifact_sha3, n1->sha3) == 0 &&
+        task_document_read(store, &after).ok && rlc_task_equal(document, &after));
+    RLC_CHECK("offer journey: status distinguishes exact kept program from newer offer", rlc_offer_status(base, n, n1));
+    return failures;
+}
+
+static int rlc_task_offer_journey(const char *base, const struct rlc_binding *n,
+                                  const struct rlc_binding *n1)
+{
+    int failures = 0;
+    char verifier[4096];
+    if (!realpath("build/bin/z23-package-verify-dev", verifier)) return 1;
+    struct package_resident_store store = {0};
+    struct task_document document = {0};
+    struct task_editor editor = {0};
+    struct task_update update = {0};
+    struct task_list list;
+    bool opened = package_resident_store_open_app(&store, base, "contract/task-offer-journey").ok &&
+        task_document_apply(&store, 0, TASK_DOCUMENT_ADD, 0, "Offer keeps my task", &document).ok &&
+        task_editor_open(&editor, base, store.app).ok && task_update_open(&update, base, store.app, verifier, NULL).ok;
+    RLC_CHECK("offer journey: window owner open", opened);
+    if (!opened) { (void)package_resident_store_close(&store); return failures; }
+    task_list_init(&list, &editor); list.update = &update;
+    failures += rlc_offer_consent(base, n, n1, &list, &update);
+    failures += rlc_offer_keep(base, n, n1, &list, &update, &store, &document);
+    RLC_CHECK("offer journey: finish", task_update_finish(&update).ok && task_editor_finish(&editor).ok &&
+        package_resident_store_close(&store).ok);
+    return failures;
+}
+
 static int rlc_preview_time_order(const void *a, const void *b)
 {
     int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
@@ -2667,6 +2798,7 @@ int test_resident_launch_contract(void)
             struct rlc_binding broken;
             rlc_binding_fill(&broken, parker_root, parker_receipt, parker_sha3);
             failures += rlc_task_journey(base, &n, &n1, &n2, &broken);
+            failures += rlc_task_offer_journey(base, &n, &n1);
             failures += rlc_stage_f_trap(spec, base, &n, &n1, &n2, &b);
             failures += rlc_stage_f_process_crashes(spec, base, &n, &n1, &n2);
             failures += rlc_task_preview_latency(base, zcode, &n);

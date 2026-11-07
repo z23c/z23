@@ -2849,6 +2849,12 @@ static void test_cc1_sysroot_parse(void)
         "Apple clang version 17\n"
         " \"/tool/clang\" \"-cc1\" \"-triple\" \"arm64-apple-macos\" "
         "\"-isysroot\" \"/SDK/MacOSX.sdk\" \"-x\" \"c\"\n";
+    const char *escaped =
+        " \"/tool/clang\" \"-cc1\" \"-D\" \"TEXT=\\\"hello space\\\"\" "
+        "\"-isysroot\" \"/SDK/MacOSX.sdk\"\n";
+    const char *bad_escape =
+        " \"/tool/clang\" \"-cc1\" \"-D\" \"TEXT=\\q\" "
+        "\"-isysroot\" \"/SDK/MacOSX.sdk\"\n";
     const char *missing =
         " \"/tool/clang\" \"-cc1\" \"-x\" \"c\"\n";
     const char *duplicate =
@@ -2867,6 +2873,9 @@ static void test_cc1_sysroot_parse(void)
     char sysroot[PATH_MAX];
     bool ok = zcl_action_root_parse_cc1_sysroot(valid, sysroot) &&
               strcmp(sysroot, "/SDK/MacOSX.sdk") == 0 &&
+              zcl_action_root_parse_cc1_sysroot(escaped, sysroot) &&
+              strcmp(sysroot, "/SDK/MacOSX.sdk") == 0 &&
+              !zcl_action_root_parse_cc1_sysroot(bad_escape, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(missing, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(duplicate, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(relative, sysroot) &&
@@ -2991,6 +3000,10 @@ static void observation_refusals(struct observation_fixture *fixture)
         zcl_compile_observation_close(observation);
     }
     fixture->argv[9] = saved;
+}
+
+static void observation_finish_refusals(struct observation_fixture *fixture)
+{
     struct zcl_compile_observation *observation = NULL;
     struct zcl_action_root_result result = {0};
     bool begun = observation_begin(fixture, &observation);
@@ -3024,6 +3037,11 @@ static void observation_leaf_refusals(struct observation_fixture *fixture)
         fixture->argv[slots[i]] = saved;
     }
     (void)unlink(leaf);
+}
+
+static void observation_swapped_depfile(struct observation_fixture *fixture)
+{
+    char leaf[PATH_MAX];
     struct zcl_compile_observation *observation = NULL;
     struct zcl_action_root_result result = {0};
     bool ready = observation_begin(fixture, &observation) && observation_compile(observation);
@@ -3168,6 +3186,24 @@ static void test_compile_observation(void)
     AR_CHECK("observation native compiler fixture", ready);
     if (!ready)
         return;
+    observation_refusals(&fixture);
+    observation_leaf_refusals(&fixture);
+#if defined(__APPLE__)
+    {
+        struct zcl_compile_observation *observation = NULL;
+        struct zcl_action_root_result result = {0};
+        bool begun = zcl_compile_observation_begin(fixture.root, fixture.argv,
+            fixture.argc, fixture.argv[24], &observation, &result);
+        AR_CHECK("observation refuses without running-image identity",
+                 os_proc_self_exe_identity() == OS_PROC_IMAGE_IDENTITY_RESOLVED_PATH &&
+                 !begun && !observation &&
+                 strcmp(result.miss, "harness_image_unavailable") == 0);
+        zcl_action_root_result_free(&result);
+        zcl_compile_observation_close(observation);
+        test_rm_rf_recursive(fixture.root);
+        return;
+    }
+#endif
     uint8_t baseline[32], relocated[32], changed[32];
     bool initial = observation_root(&fixture, baseline);
     AR_CHECK("observation real compile and normal derive agree with game flags", initial);
@@ -3187,8 +3223,8 @@ static void test_compile_observation(void)
              memcmp(baseline, changed, 32) != 0);
     fixture.argv[9] = "-ffp-contract=off";
     observation_separate_outputs(&fixture, baseline);
-    observation_refusals(&fixture);
-    observation_leaf_refusals(&fixture);
+    observation_finish_refusals(&fixture);
+    observation_swapped_depfile(&fixture);
     observation_window_refusals(&fixture);
     test_rm_rf_recursive(fixture.root);
 }

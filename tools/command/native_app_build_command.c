@@ -10,7 +10,9 @@
  * Building only produces bytes; running needs accept_execution for the exact
  * image_sha3, so an agent may plan and confirm this leaf.
  *
- * Plan (writes nothing): refuses a dirty tree (UNSAVED_CHANGES), derives
+ * Plan (no persistent build writes): without version refuses a dirty tree
+ * (UNSAVED_CHANGES); an explicit saved version derives from temporary verified
+ * materialization, never the live copy. Derives
  *   package_root     the release package root of the saved tree
  *                    (vcs_package_prepare over the clean copy),
  *   dependency_root  SHA3 over the sorted roots the copy's zcode-package.json
@@ -36,18 +38,24 @@
 
 #include "command/app_build_make.h"
 #include "command/app_copy_build.h"
-#include "command/app_image.h"
 #include "command/native_app_compose.h"
+#include "command/app_image.h"
 #include "command/native_zcode_package_copy.h"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
+#include "platform/temp_directory.h"
 #include "sha3/sha3.h"
 #include "util/authority_receipt.h"
 #include "util/file_io.h"
 #include "util/file_tree_ops.h"
 #include "util/path_util.h"
+#include "vcs/package_deps.h"
+#include "vcs/package_prepare.h"
+#include "vcs/package_release.h"
+#include "vcs/package_store.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,6 +64,7 @@
 #include <unistd.h>
 
 #define ZAB_PATH APP_COPY_BUILD_PATH
+#define ZAB_STORE "app_build"
 #define ZAB_PLAN_DOMAIN "zcl.app_build.plan.v1"
 #define ZAB_IMAGE_MAX (512u << 20)
 #define ZAB_COMMAND "app.build"
@@ -64,7 +73,9 @@ struct zab {
     const struct json_value *input;
     struct zcl_command_reply *reply;
     const char *datadir;
+    const char *version;
     char copy_dir[ZAB_PATH];
+    char selected_source[PLATFORM_TEMP_PATH_MAX];
     struct zcl_package_copy copy;
     bool copy_open;
     enum zcl_package_copy_adoption auth;
@@ -90,8 +101,7 @@ static void zab_fail(struct zab *z, const char *code, bool mutated,
 /* `copy` is an absolute directory, or a name under <datadir>/copies. */
 static bool zab_resolve(struct zab *z)
 {
-    return app_copy_build_dir(z->datadir,
-                              zcl_package_copy_str(z->input, "copy"),
+    return app_copy_build_dir(z->datadir, zcl_package_copy_str(z->input, "copy"),
                               z->copy_dir, sizeof(z->copy_dir), z->reply);
 }
 
@@ -127,15 +137,61 @@ static bool zab_clean(struct zab *z)
     return true;
 }
 
+static const char *zab_source(const struct zab *z)
+{
+    return z->version ? z->selected_source : z->copy_dir;
+}
+
+static bool zab_open_copy(struct zab *z)
+{
+    const struct json_value *v = json_get(z->input, "version");
+    uint8_t id[32];
+    if (v) {
+        z->version = json_get_str(v);
+        if (!z->version || strlen(z->version) != 64 ||
+            !zcl_hex_decode_lower(z->version, id, 32)) {
+            zab_fail(z, "BAD_VERSION", false,
+                     "version must be an exact lowercase saved-version root", ZAB_COMMAND);
+            return false;
+        }
+    }
+    z->copy_open = zcl_package_copy_open_selected(z->copy_dir, &z->copy,
+        z->reply, ZAB_COMMAND, z->version);
+    return z->copy_open;
+}
+
+static bool zab_selected_source(struct zab *z)
+{
+    if (!z->version) return zab_clean(z);
+    if (!platform_temp_directory_create("z23-build-selected-", z->selected_source,
+                                         sizeof(z->selected_source))) {
+        zab_fail(z, "SNAPSHOT_CREATE_FAILED", false,
+                 "could not create private selected-source scratch", ZAB_COMMAND);
+        return false;
+    }
+    if (vcs_tree_materialize(z->copy_dir, z->copy.selected_tree, z->selected_source,
+                             VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, 0) != VCS_OK) {
+        zab_fail(z, "SNAPSHOT_MATERIALIZE_FAILED", false,
+                 "selected saved source could not be verified and materialized", ZAB_COMMAND);
+        return false;
+    }
+    return true;
+}
+
 /* ── the roots ───────────────────────────────────────────────────────── */
 
 /* The package root and declared dependencies of the clean copy, prepared
  * exactly as a publish would (under the release's publisher key). */
+static bool zab_package_at(struct zab *z, const char *dir,
+                           uint8_t package_root[32], uint8_t dependency_root[32])
+{
+    return app_copy_build_roots(z->datadir, dir, &z->copy, package_root,
+                                dependency_root, z->reply);
+}
+
 static bool zab_package(struct zab *z)
 {
-    return app_copy_build_roots(z->datadir, z->copy_dir, &z->copy,
-                                z->package_root, z->dependency_root,
-                                z->reply);
+    return zab_package_at(z, zab_source(z), z->package_root, z->dependency_root);
 }
 
 static bool zab_dependencies_match(struct zab *z)
@@ -163,7 +219,7 @@ static bool zab_make_fragment(struct zab *z)
 {
     char path[ZAB_PATH];
     struct stat st;
-    if (zcl_path_join(path, sizeof(path), z->copy_dir, "Makefile") &&
+    if (zcl_path_join(path, sizeof(path), zab_source(z), "Makefile") &&
         lstat(path, &st) == 0 && S_ISREG(st.st_mode))
         return true;
     zab_fail(z, "NO_MAKE_FRAGMENT", false, "the copy has no Makefile with "
@@ -173,14 +229,13 @@ static bool zab_make_fragment(struct zab *z)
 
 static bool zab_store_paths(struct zab *z)
 {
-    return app_copy_build_store(z->datadir, z->copy.fork_version, &z->store,
-                                z->reply);
+    return app_copy_build_store(z->datadir, z->copy.fork_version, &z->store, z->reply);
 }
 
 static bool zab_closure(struct zab *z)
 {
     char why[320] = "";
-    const struct app_build_make m = {.copy_dir = z->copy_dir,
+    const struct app_build_make m = {.copy_dir = zab_source(z),
                                      .work_dir = z->store.work,
                                      .confine = z->confine};
     if (app_build_closure_query(&m, &z->closure, why, sizeof(why)))
@@ -228,7 +283,7 @@ static void zab_plan_id(struct zab *z)
     sha3_256_write(&sha, (const uint8_t *)ZAB_PLAN_DOMAIN,
                    sizeof(ZAB_PLAN_DOMAIN));
     sha3_256_write(&sha, z->copy.fork_version, 32);
-    sha3_256_write(&sha, z->copy.head_version, 32);
+    sha3_256_write(&sha, z->copy.selected_version, 32);
     sha3_256_write(&sha, z->package_root, 32);
     sha3_256_write(&sha, z->closure.root, 32);
     sha3_256_write(&sha, z->env_root, 32);
@@ -239,11 +294,9 @@ static void zab_plan_id(struct zab *z)
 /* Every check and root a plan and its confirm both derive. */
 static bool zab_derive(struct zab *z)
 {
-    if (!zab_resolve(z) ||
-        !zcl_package_copy_open(z->copy_dir, &z->copy, z->reply, ZAB_COMMAND))
+    if (!zab_resolve(z) || !zab_open_copy(z))
         return false;
-    z->copy_open = true;
-    if (!zab_authorize(z) || !zab_clean(z) || !zab_make_fragment(z) ||
+    if (!zab_authorize(z) || !zab_selected_source(z) || !zab_make_fragment(z) ||
         !zab_package(z) || !zab_dependencies_match(z) || !zab_store_paths(z))
         return false;
     struct zcl_result env = app_image_env_root(z->env_root);
@@ -268,7 +321,7 @@ static void zab_describe(struct zab *z, const char *stage, bool unconfined)
     (void)json_push_kv_str(d, "copy", z->copy_dir);
     (void)json_push_kv_str(d, "authorization",
                            zcl_package_copy_adoption_name(z->auth));
-    zcl_package_copy_push_root(d, "version", z->copy.head_version);
+    zcl_package_copy_push_root(d, "version", z->copy.selected_version);
     zcl_package_copy_push_root(d, "package_root", z->package_root);
     zcl_package_copy_push_root(d, "closure_root", z->closure.root);
     zcl_package_copy_push_root(d, "env_root", z->env_root);
@@ -296,12 +349,16 @@ static void zab_commit_reply(struct zab *z, const struct app_image_build *rec,
     (void)json_push_kv_str(d, "build_dir", z->store.work);
     (void)json_push_kv_bool(d, "make_ran", make_ran);
     (void)json_push_kv_bool(d, "executed", false);
-    char next[ZAB_PATH + 96];
-    if (zcl_app_hint(next, sizeof(next),
-                     zcl_package_copy_str(z->input, "datadir"), "open %s",
-                     zcl_package_copy_str(z->input, "copy")
-                         ? zcl_package_copy_str(z->input, "copy") : "COPY"))
-        (void)json_push_kv_str(d, "next", next);
+    if (z->version) {
+        (void)json_push_kv_str(d, "next", "app open or app playtest this "
+                               "image_sha3 with accept_execution:true");
+    } else {
+        char next[ZAB_PATH + 96];
+        if (zcl_app_hint(next, sizeof(next), zcl_package_copy_str(z->input, "datadir"),
+                         "open %s", zcl_package_copy_str(z->input, "copy")
+                                       ? zcl_package_copy_str(z->input, "copy") : "COPY"))
+            (void)json_push_kv_str(d, "next", next);
+    }
     z->reply->error.mutated = make_ran;
 }
 
@@ -325,8 +382,8 @@ static bool zab_store_image(struct zab *z, const char *built, char *final,
     zcl_hex_encode(sha, 32, hex);
     bool ok = zcl_path_join(final, cap, z->store.images, hex);
     if (ok && lstat(final, &st) != 0)
-        ok = authority_receipt_write_atomic(z->store.images, hex, bytes, len,
-                                            final, cap) &&
+        ok = authority_receipt_write_atomic(z->store.images, hex, bytes, len, final,
+                                            cap) &&
              chmod(final, 0700) == 0;
     free(bytes);
     return ok;
@@ -359,8 +416,7 @@ static bool zab_dirs(struct zab *z, char *run, size_t cap)
     bool ok = zcl_mkdir_p(z->store.work, 0700).ok &&
               zcl_mkdir_p(z->store.images, 0700).ok &&
               zcl_mkdir_p(z->store.records, 0700).ok &&
-              zcl_path_join(run, cap, z->store.work, "run-XXXXXX") &&
-              mkdtemp(run);
+              zcl_path_join(run, cap, z->store.work, "run-XXXXXX") && mkdtemp(run);
     if (!ok)
         zab_fail(z, "BUILD_DIR_FAILED", false, "the build directories could "
                  "not be created", z->store.work);
@@ -397,9 +453,80 @@ static void zab_after_make(struct zab *z, const struct app_build_make *m,
         zab_commit_reply(z, &rec, image, record, true, res->unconfined);
 }
 
+/* Source is a sibling of work/, never below make's writable ancestor.
+ * Preserve captured modes: they participate in package identity. */
+static bool zab_snapshot_create(struct zab *z, char snapshot[ZAB_PATH])
+{
+    char parent[ZAB_PATH], pattern[ZAB_PATH];
+    if (!zcl_path_join(parent, sizeof(parent), z->datadir, ZAB_STORE "/sources") ||
+        !zcl_mkdir_p(parent, 0700).ok ||
+        !zcl_path_join(pattern, sizeof(pattern), parent, "saved-XXXXXX") ||
+        !mkdtemp(pattern)) {
+        zab_fail(z, "SNAPSHOT_CREATE_FAILED", true,
+                 "could not create private saved-source directory", z->datadir);
+        return false;
+    }
+    (void)snprintf(snapshot, ZAB_PATH, "%s", pattern);
+    if (vcs_tree_materialize(z->copy_dir, z->copy.head_tree, snapshot,
+                             VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, 0) != VCS_OK) {
+        zab_fail(z, "SNAPSHOT_MATERIALIZE_FAILED", true,
+                 "could not materialize the saved head from verified objects", snapshot);
+        return false;
+    }
+    return true;
+}
+
+static bool zab_snapshot_matches(struct zab *z, const struct app_build_make *m)
+{
+    uint8_t package[32], dependencies[32];
+    struct app_build_closure closure = {0};
+    char why[320] = "";
+    if (!zab_package_at(z, m->copy_dir, package, dependencies))
+        return false;
+    bool ok = app_build_closure_query(m, &closure, why, sizeof(why));
+    if (!ok) {
+        zab_fail(z, "SNAPSHOT_CLOSURE_FAILED", true,
+                 "saved-source closure could not be derived before compilation", why);
+    } else if (memcmp(package, z->package_root, 32) != 0 ||
+               memcmp(dependencies, z->dependency_root, 32) != 0 ||
+               memcmp(closure.root, z->closure.root, 32) != 0) {
+        zab_fail(z, "SNAPSHOT_ROOT_MISMATCH", true,
+                 "saved-source package, dependencies or closure differ from the plan",
+                 m->copy_dir);
+        ok = false;
+    }
+    app_build_closure_free(&closure);
+    return ok;
+}
+
+static void zab_scratch_remove(const char *path)
+{
+    if (!path[0]) return;
+    struct zcl_result rm = zcl_tree_remove(path);
+    if (!rm.ok)
+        fprintf(stderr, "[app.build] could not remove private build scratch %s: %s\n",
+                path, rm.message);
+}
+
+static bool zab_selected_isolated(struct zab *z)
+{
+    if (!z->version) return true;
+    char source[ZAB_PATH], work[ZAB_PATH];
+    bool real = platform_directory_canonical_real(z->selected_source, source, sizeof(source)) &&
+        platform_directory_canonical_real(z->store.work, work, sizeof(work));
+    if (real) {
+        size_t len = strlen(work);
+        if (strncmp(source, work, len) || (source[len] != '/' && source[len] != '\0'))
+            return true;
+    }
+    zab_fail(z, "SNAPSHOT_NOT_ISOLATED", true,
+             "selected-source scratch must be outside the writable build directory", ZAB_COMMAND);
+    return false;
+}
+
 static void zab_build(struct zab *z)
 {
-    char run[ZAB_PATH];
+    char run[ZAB_PATH], snapshot[ZAB_PATH] = "";
     struct app_build_make_result *res =
         zcl_calloc(1, sizeof(*res), "app.build.make_result");
     if (!res) {
@@ -408,15 +535,16 @@ static void zab_build(struct zab *z)
         return;
     }
     if (zab_dirs(z, run, sizeof(run))) {
-        const struct app_build_make m = {.copy_dir = z->copy_dir,
+        const struct app_build_make m = {.copy_dir = z->version ? z->selected_source : snapshot,
                                          .work_dir = z->store.work,
                                          .confine = z->confine};
-        app_build_make_run(&m, run, res);
-        zab_after_make(z, &m, run, res);
-        struct zcl_result rm = zcl_tree_remove(run);
-        if (!rm.ok)
-            fprintf(stderr, "[app.build] could not remove %s: %s\n", run,
-                    rm.message);
+        if (zab_selected_isolated(z) && (z->version || zab_snapshot_create(z, snapshot)) &&
+            zab_snapshot_matches(z, &m)) {
+            app_build_make_run(&m, run, res);
+            zab_after_make(z, &m, run, res);
+        }
+        zab_scratch_remove(snapshot);
+        zab_scratch_remove(run);
     }
     free(res);
 }
@@ -467,6 +595,12 @@ void zcl_native_handle_app_build(const struct zcl_command_request *request,
     }
     if (z->copy_open)
         zcl_package_copy_close(&z->copy);
+    if (z->selected_source[0]) {
+        struct zcl_result rm = zcl_tree_remove(z->selected_source);
+        if (!rm.ok)
+            zab_fail(z, "SNAPSHOT_CLEANUP_FAILED", true,
+                     "private selected-source scratch cleanup failed", rm.message);
+    }
     app_build_closure_free(&z->closure);
     free(z);
 }

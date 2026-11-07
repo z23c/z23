@@ -3,6 +3,7 @@
 #ifndef ZCL_SERVICES_TASK_UPDATE_H
 #define ZCL_SERVICES_TASK_UPDATE_H
 #include "models/task_document.h"
+#include "models/task_update_offer.h"
 struct task_update_job;
 struct task_update_images;
 enum task_update_phase { TASK_UPDATE_IDLE, TASK_UPDATE_RUNNING, TASK_UPDATE_READY,
@@ -15,6 +16,8 @@ struct task_update {
 
     char directory[4096], app[256], verifier[4096];
     struct package_resident_identity candidate;
+    int64_t offer_revision;
+    bool candidate_explicit, offer_locked;
     struct task_update_job *pending, *ready;
     struct task_update_images *images;
     enum task_update_phase phase;
@@ -35,4 +38,12 @@ struct zcl_result task_update_poll(struct task_update *update, bool *changed);
 struct zcl_result task_update_finish(struct task_update *update);
 /* Previously kept program: refresh its view from current host-owned data. */
 struct zcl_result task_update_refresh(struct task_update *update);
+/* Resolve installed bytes before recording an inert proposal. Never executes. */
+struct zcl_result task_update_offer_submit(struct package_resident_store *store,
+    const char *directory, int64_t expected_revision,
+    const struct package_resident_identity *candidate, struct task_update_offer *out);
+/* On-demand discovery; consent and running/ready previews pin their selection. */
+struct zcl_result task_update_check_offer(struct task_update *update);
+struct zcl_result task_update_acknowledge_offer(struct task_update *update);
+struct zcl_result task_update_discard(struct task_update *update);
 #endif

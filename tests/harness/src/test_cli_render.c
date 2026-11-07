@@ -27,7 +27,9 @@
 
 #include "command/cli_render.h"
 #include "command/native_command.h"
+#include "command/native_app_compose.h"
 #include "json/json.h"
+#include "util/spawn.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -585,6 +587,56 @@ static int test_data_tree_render(void)
 
 /* zcode.guide is the one obvious next action a new reader is told to run,
  * so it must not answer in raw JSON on a terminal. */
+static int test_app_hint_shell_words(void)
+{
+    int failures = 0;
+    TEST("app hints preserve shell words and refuse truncated or multiline commands") {
+        const char *datadir = "/fixture/my apps/it's $(printf BAD);*";
+        const char *target = "/fixture/friend's game;$(printf BAD).z23share";
+        char hint[1024];
+        ASSERT(zcl_app_hint(hint, sizeof(hint), "/plain/data", "open %s", "kept:my-game"));
+        ASSERT_STR_EQ(hint, "z23 -datadir=/plain/data app open kept:my-game");
+        ASSERT(zcl_app_hint(hint, sizeof(hint), datadir, "open %s --yes", target));
+#if !defined(_WIN32)
+        char script[1300], output[1024], expected[1024];
+        (void)snprintf(script, sizeof(script), "z23() { printf '%%s\\n' \"$@\"; }; %s", hint);
+        (void)snprintf(expected, sizeof(expected), "-datadir=%s\napp\nopen\n%s\n--yes\n", datadir, target);
+        const char *argv[] = {"/bin/sh", "-c", script, NULL};
+        ASSERT_EQ(zcl_spawn_capture(argv, output, sizeof(output), 5000), 0);
+        ASSERT_STR_EQ(output, expected);
+        struct json_value encoded = {0};
+        char json_hint[2048], doc[3072], rendered[4096];
+        json_set_str(&encoded, hint);
+        size_t encoded_len = json_write(&encoded, json_hint, sizeof(json_hint));
+        json_free(&encoded);
+        ASSERT(encoded_len < sizeof(json_hint));
+        int doc_len = snprintf(doc, sizeof(doc),
+            "{\"schema\":\"zcl.result.v1\",\"command\":\"app.list\","
+            "\"ok\":true,\"status\":\"passed\",\"data\":{\"launchable\":[{"
+            "\"id\":\"kept:my-game\",\"source\":\"kept\",\"open\":%s}]}}", json_hint);
+        ASSERT(doc_len > 0 && (size_t)doc_len < sizeof(doc));
+        struct zcl_cli_render_env e = cr_env(40, false);
+        ASSERT(zcl_cli_render_doc(doc, (size_t)doc_len, "app.list", &e, rendered, sizeof(rendered)) > 0);
+        const char *command = strstr(rendered, "z23 ");
+        ASSERT(command != NULL && strstr(command, "\\\n") != NULL);
+        ASSERT(cr_max_line_width(rendered) <= 40);
+        (void)snprintf(script, sizeof(script), "z23() { printf '%%s\\n' \"$@\"; }; %s", command);
+        ASSERT_EQ(zcl_spawn_capture(argv, output, sizeof(output), 5000), 0);
+        ASSERT_STR_EQ(output, expected);
+#endif
+        ASSERT(!zcl_app_hint(hint, 12, datadir, "open %s", target));
+        ASSERT(hint[0] == '\0');
+        ASSERT(!zcl_app_hint(hint, sizeof(hint), "/bad\npath", "open %s", "game"));
+        ASSERT(hint[0] == '\0');
+        ASSERT(!zcl_app_hint(hint, sizeof(hint), NULL, "open %s", "bad\tname"));
+        ASSERT(hint[0] == '\0');
+        ASSERT(zcl_app_hint(hint, sizeof(hint), NULL, "open %s", ""));
+        ASSERT_STR_EQ(hint, "z23 app open ''");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_guide_tree_render(void)
 {
     int failures = 0;
@@ -633,6 +685,23 @@ static int test_guide_tree_render(void)
         ASSERT(strstr(out, "z23 -datadir=/d/z app open skycombat") != NULL);
         ASSERT(strstr(out, "social") != NULL);
         ASSERT(strstr(out, "\"schema\"") == NULL);
+        ASSERT(cr_max_line_width(out) <= 80);
+        PASS();
+    }
+    TEST("app.list shows kept versions with an open command and deferred validation") {
+        const char *doc =
+            "{\"schema\":\"zcl.result.v1\",\"command\":\"app.list\","
+            "\"ok\":true,\"status\":\"passed\",\"data\":{\"launchable\":[{"
+            "\"id\":\"kept:my-game\",\"source\":\"kept\","
+            "\"validation\":\"required-on-open\","
+            "\"open\":\"z23 -datadir=/d/z app open kept:my-game\"}]}}";
+        struct zcl_cli_render_env e = cr_env(80, false);
+        char out[4096];
+        ASSERT(zcl_cli_render_doc(doc, strlen(doc), "app.list", &e, out, sizeof(out)) > 0);
+        ASSERT(strstr(out, "kept:my-game") != NULL);
+        ASSERT(strstr(out, "kept version; checked when opened") != NULL);
+        ASSERT(strstr(out, "z23 -datadir=/d/z app open kept:my-game") != NULL);
+        ASSERT(strstr(out, "installed") == NULL);
         ASSERT(cr_max_line_width(out) <= 80);
         PASS();
     }
@@ -1522,6 +1591,7 @@ int test_cli_render(void)
     failures += test_dispatch_fallback_boundaries();
     failures += test_data_tree_render();
     failures += test_guide_tree_render();
+    failures += test_app_hint_shell_words();
     failures += test_brief_render();
     failures += test_brief_spaced_value();
     failures += test_start_hint();

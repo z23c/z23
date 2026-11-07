@@ -10,8 +10,10 @@
  *   B, in B's HOME: open tinyapp-1.z23share with the confirm injected, which
  *      receives, builds and opens.
  * Asserted: no step is refused (seed then share used to be refused
- * PUBLISH_FREQUENCY_LIMIT, the 1-per-week new-user allowance); A's key has
- * both publishes recorded in this ISO week; B's image_sha3 equals A's for
+ * PUBLISH_FREQUENCY_LIMIT, the 1-per-week new-user allowance); share tells A
+ * the full fingerprint and version root B is then asked to confirm, and what
+ * B must install; A's copy opens right after share with no rebuild; A's key
+ * has both publishes recorded in this ISO week; B's image_sha3 equals A's for
  * the shared version; MCP refuses app.copy, app.share and app.receive. The
  * commands A and B typed are printed. */
 
@@ -237,7 +239,8 @@ int test_app_journey(void)
     if (!failures)
         failures += aj_b(&w);
     printf("app journey: A typed %d commands (copy, save, build, open, "
-           "share), B typed %d (open FILE.z23share); 0 hex pastes, 0 JSON "
+           "share, open again with no rebuild), B typed %d (open "
+           "FILE.z23share); 0 hex pastes, 0 JSON "
            "inputs\n", w.j.commands_a, w.j.commands_b);
     if (!failures)
         failures += aj_update(&w);

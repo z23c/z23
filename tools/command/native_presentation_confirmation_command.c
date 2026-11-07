@@ -2,6 +2,7 @@
  * Purpose: exact, inert native confirmation for one local package plan. */
 
 #include "command/native_command.h"
+#include "command/native_app_confirm.h"
 
 #include "base/hex.h"
 #include "json/json.h"
@@ -88,14 +89,6 @@ static void npcf_item(struct zcl_present_model_v1 *model, const char *id,
     (void)snprintf(item->value, sizeof(item->value), "%s", value);
 }
 
-static void npcf_action(struct zcl_present_model_action_v1 *action,
-                        uint16_t kind, const char *id, const char *label)
-{
-    action->kind = kind;
-    (void)snprintf(action->id, sizeof(action->id), "%s", id);
-    (void)snprintf(action->label, sizeof(action->label), "%s", label);
-}
-
 bool zcl_native_presentation_publication_confirm_model_from_plan(
     const struct json_value *plan, struct zcl_present_model_v1 *model,
     char *why, size_t why_cap)
@@ -163,9 +156,9 @@ bool zcl_native_presentation_publication_confirm_model_from_plan(
     model->action_count = 2;
     /* The native action row focuses index zero. Keep the harmless decision
      * there so an accidental Enter can never confirm publication intent. */
-    npcf_action(&model->actions[0], ZCL_PRESENT_ACTION_CANCEL,
+    app_confirm_action(&model->actions[0], ZCL_PRESENT_ACTION_CANCEL,
                 "cancel", "Cancel - make no change");
-    npcf_action(&model->actions[1], ZCL_PRESENT_ACTION_CONFIRM,
+    app_confirm_action(&model->actions[1], ZCL_PRESENT_ACTION_CONFIRM,
                 "confirm", "Confirm exact local commit");
     return zcl_present_model_validate_v1(model, why, why_cap);
 }

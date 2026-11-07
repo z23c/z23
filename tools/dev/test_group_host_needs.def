@@ -532,12 +532,30 @@ ZCL_TEST_GROUP_BUILD_NEED("test_mcp_plugin_call", "build/bin/z23-dev", "dev-bin"
 #if defined(_WIN32)
 ZCL_TEST_GROUP_NEED("test_app_launch", ZCL_HOST_NEED_ENV,
     "ZCL_POSIX_DESCRIPTOR_TESTS")
+ZCL_TEST_GROUP_NEED("test_app_share", ZCL_HOST_NEED_ENV,
+    "ZCL_POSIX_DESCRIPTOR_TESTS")
+ZCL_TEST_GROUP_NEED("test_app_receive", ZCL_HOST_NEED_ENV,
+    "ZCL_POSIX_DESCRIPTOR_TESTS")
+ZCL_TEST_GROUP_NEED("test_app_adopt", ZCL_HOST_NEED_ENV,
+    "ZCL_POSIX_DESCRIPTOR_TESTS")
+ZCL_TEST_GROUP_NEED("test_app_kept_journey", ZCL_HOST_NEED_ENV,
+    "ZCL_POSIX_DESCRIPTOR_TESTS")
+ZCL_TEST_GROUP_NEED("test_app_open_selected", ZCL_HOST_NEED_ENV,
+    "ZCL_POSIX_DESCRIPTOR_TESTS")
+ZCL_TEST_GROUP_NEED("test_app_personalize", ZCL_HOST_NEED_ENV,
+    "ZCL_POSIX_DESCRIPTOR_TESTS")
+ZCL_TEST_GROUP_NEED("test_app_edit", ZCL_HOST_NEED_ENV,
+    "ZCL_POSIX_DESCRIPTOR_TESTS")
+ZCL_TEST_GROUP_NEED("test_app_selection", ZCL_HOST_NEED_ENV,
+    "ZCL_POSIX_DESCRIPTOR_TESTS")
 ZCL_TEST_GROUP_NEED("test_mcp_serve_apps", ZCL_HOST_NEED_ENV,
     "ZCL_POSIX_DESCRIPTOR_TESTS")
 #endif
 ZCL_TEST_GROUP_BUILD_NEED("test_app_launch",
     "build/bin/z23-app-launch-fixture", "app-launch-fixture")
 ZCL_TEST_GROUP_BUILD_NEED("test_mcp_serve_apps", "build/bin/z23-dev", "dev-bin")
+ZCL_TEST_GROUP_BUILD_NEED("test_app_open_selected", "build/bin/z23-dev", "dev-bin")
+ZCL_TEST_GROUP_BUILD_NEED("test_app_kept_journey", "build/bin/z23-dev", "dev-bin")
 ZCL_TEST_GROUP_BUILD_NEED("test_mcp_serve_apps",
     "build/bin/z23-app-launch-fixture", "app-launch-fixture")
 /* The real game on a private Xvfb display. `make game` needs X11/GL headers
@@ -577,3 +595,12 @@ ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_shard_05",
                           "build/bin/file_size_policy", "tools/file_size_policy")
 ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_shard_06",
                           "build/bin/file_size_policy", "tools/file_size_policy")
+
+/* Same opt-in display qualification as app_launch_skycombat; an exact
+ * selection still runs and records SKIP if Linux/Xvfb is unavailable. */
+ZCL_TEST_GROUP_NEED("test_app_receive_ui", ZCL_HOST_NEED_ENV,
+    "ZCL_TEST_DISPLAY_APPS")
+#if defined(__linux__)
+ZCL_TEST_GROUP_BUILD_NEED("test_app_receive_ui", "build/bin/z23-dev", "dev-bin")
+ZCL_TEST_GROUP_BUILD_NEED("test_app_receive_ui", "build/bin/native_ui_driver", "native-ui-driver")
+#endif

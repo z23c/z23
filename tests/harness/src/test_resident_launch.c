@@ -22,6 +22,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 
 #if !defined(_WIN32)
 #include <signal.h>
@@ -401,6 +402,219 @@ static int rl_swap_refusal_checks(const char *dir)
     return failures;
 }
 
+/* Child-only redirection is tested in a forked fixture so fd 3 can be
+ * occupied deliberately without replacing a descriptor in the harness. */
+static bool rl_stdio_unchanged(const struct stat before[3], const int flags[3])
+{
+    for (int fd = 0; fd < 3; ++fd) {
+        struct stat now;
+        if (fstat(fd, &now) != 0 || fcntl(fd, F_GETFD) != flags[fd] ||
+            now.st_dev != before[fd].st_dev || now.st_ino != before[fd].st_ino ||
+            now.st_rdev != before[fd].st_rdev) return false;
+    }
+    return true;
+}
+
+static bool rl_stdio_wait_log(int fd)
+{
+    char body[128];
+    for (unsigned i = 0; i < 500; ++i) {
+        ssize_t n = pread(fd, body, sizeof(body) - 1, 0);
+        if (n > 0) {
+            body[n] = 0;
+            if (strstr(body, "stdout-marker\n") && strstr(body, "stderr-marker\n")) return true;
+        }
+        struct timespec delay = { .tv_nsec = 10000000 };
+        nanosleep(&delay, NULL); /* real-clock: a forked OS child writes these log markers; its scheduling has no injected clock seam. */
+    }
+    return false;
+}
+
+static int rl_stdio_refusals(struct resident_launch *launch, char *const argv[], char *const envp[],
+    int logfd, const char *path)
+{
+    int failures = 0;
+    char error[RESIDENT_LAUNCH_ERROR_MAX] = {0};
+    struct resident_receipt receipt;
+    int closedfd = fcntl(logfd, F_DUPFD_CLOEXEC, 20);
+    if (closedfd >= 0) close(closedfd);
+    launch->log_stdio_fd = closedfd;
+    RL_CHECK("closed log refused before spawn", closedfd >= 0 &&
+        !resident_launch_spawn(launch, argv, envp, &receipt, error, RESIDENT_LAUNCH_ERROR_MAX) && !launch->spawned);
+    int readonly = open(path, O_RDONLY | O_CLOEXEC);
+    launch->log_stdio_fd = readonly;
+    RL_CHECK("read-only log refused before spawn", readonly >= 0 &&
+        !resident_launch_spawn(launch, argv, envp, &receipt, error, RESIDENT_LAUNCH_ERROR_MAX) && !launch->spawned);
+    if (readonly >= 0) close(readonly);
+    launch->log_stdio_fd = logfd; launch->null_stdio = true;
+    RL_CHECK("conflicting stdio policies refused", !resident_launch_spawn(launch, argv, envp, &receipt, error, RESIDENT_LAUNCH_ERROR_MAX) && !launch->spawned);
+    launch->null_stdio = false;
+    return failures;
+}
+
+static int rl_stdio_closed_standard(const char *image, int logfd, int closed_fd)
+{
+    pid_t child = fork();
+    if (child < 0) return 1;
+    if (child == 0) {
+        close(closed_fd);
+        struct resident_launch_accepted accepted;
+        struct resident_launch launch; resident_launch_init(&launch);
+        char error[RESIDENT_LAUNCH_ERROR_MAX] = {0};
+        bool prepared = rl_accept_of(image, &accepted) &&
+            resident_launch_prepare(&launch, image, &accepted, error, sizeof(error));
+        char *const argv[] = { "rlc_child_v1", "--stdio-probe", NULL };
+        char *const envp[] = { NULL };
+        struct resident_receipt receipt;
+        launch.log_stdio = true; launch.log_stdio_fd = logfd;
+        bool refused = prepared && !resident_launch_spawn(&launch, argv, envp, &receipt, error, sizeof(error)) && !launch.spawned;
+        if (prepared) resident_launch_close(&launch);
+        _exit(refused ? 0 : 1);
+    }
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) return 1;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+}
+
+static int rl_stdio_no_inherited_log(const char *image, int logfd)
+{
+    int failures = 0;
+    int borrowed = fcntl(logfd, F_DUPFD, 20);
+    RL_CHECK("non-CLOEXEC borrowed log available", borrowed >= 20 && !(fcntl(borrowed, F_GETFD) & FD_CLOEXEC));
+    if (borrowed < 0) return failures + 1;
+    char number[32], error[RESIDENT_LAUNCH_ERROR_MAX] = {0};
+    (void)snprintf(number, sizeof(number), "%d", borrowed);
+    char *const argv[] = { "rlc_child_v1", "--stdio-probe", number, NULL };
+    char *const envp[] = { NULL };
+    struct resident_launch_accepted accepted;
+    struct resident_launch launch; resident_launch_init(&launch);
+    bool prepared = rl_accept_of(image, &accepted) && resident_launch_prepare(&launch, image, &accepted, error, sizeof(error));
+    RL_CHECK("non-CLOEXEC fixture prepared", prepared);
+    if (prepared) {
+        struct resident_receipt receipt;
+        launch.log_stdio = true; launch.log_stdio_fd = borrowed;
+        RL_CHECK("clear previous output", ftruncate(logfd, 0) == 0 && lseek(logfd, 0, SEEK_SET) == 0);
+        bool spawned = resident_launch_spawn(&launch, argv, envp, &receipt, error, sizeof(error));
+        RL_CHECK("child cannot inherit original log descriptor", spawned && rl_stdio_wait_log(logfd));
+        RL_CHECK("borrowed parent fd and flags preserved", fcntl(borrowed, F_GETFD) == 0);
+        if (spawned) RL_CHECK("non-CLOEXEC child reaped", resident_launch_cancel(&launch, 20, error, sizeof(error)) && rl_wait_reaped(receipt.pid));
+        resident_launch_close(&launch);
+    }
+    close(borrowed);
+    return failures;
+}
+
+static bool rl_stdio_parent_signals_unchanged(void)
+{
+    sigset_t current;
+    struct sigaction after;
+    return sigprocmask(SIG_SETMASK, NULL, &current) == 0 &&
+        sigismember(&current, SIGTERM) == 1 &&
+        sigaction(SIGPIPE, NULL, &after) == 0 && after.sa_handler == SIG_IGN;
+}
+
+static int rl_stdio_signal_child(const char *image, int logfd)
+{
+    sigset_t blocked;
+    sigemptyset(&blocked); sigaddset(&blocked, SIGTERM);
+    struct sigaction ignored = {.sa_handler = SIG_IGN};
+    if (sigprocmask(SIG_BLOCK, &blocked, NULL) != 0 || sigaction(SIGPIPE, &ignored, NULL) != 0)
+        return 1;
+    struct resident_launch_accepted accepted;
+    struct resident_launch launch; resident_launch_init(&launch);
+    char error[RESIDENT_LAUNCH_ERROR_MAX] = {0};
+    if (!rl_accept_of(image, &accepted) || !resident_launch_prepare(&launch, image, &accepted, error, sizeof(error))) return 1;
+    char *const argv[] = { "rlc_child_v1", "--stdio-probe", "signals", NULL };
+    char *const envp[] = { NULL };
+    struct resident_receipt receipt;
+    launch.log_stdio = true; launch.log_stdio_fd = logfd; launch.desktop_signals = true;
+    bool cleared = ftruncate(logfd, 0) == 0 && lseek(logfd, 0, SEEK_SET) == 0;
+    bool spawned = cleared && resident_launch_spawn(&launch, argv, envp, &receipt, error, sizeof(error));
+    bool ok = spawned && rl_stdio_wait_log(logfd) && rl_stdio_parent_signals_unchanged();
+    if (spawned) ok = resident_launch_cancel(&launch, 20, error, sizeof(error)) && rl_wait_reaped(receipt.pid) && ok;
+    resident_launch_close(&launch);
+    return ok ? 0 : 1;
+}
+
+static int rl_stdio_signals(const char *image, int logfd)
+{
+    pid_t child = fork();
+    if (child < 0) return 1;
+    if (child == 0) _exit(rl_stdio_signal_child(image, logfd));
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) if (errno != EINTR) return 1;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+}
+
+static bool rl_stdio_capture_parent(struct stat parent[3], int flags[3])
+{
+    for (int i = 0; i < 3; ++i) {
+        flags[i] = fcntl(i, F_GETFD);
+        if (flags[i] < 0 || fstat(i, &parent[i]) != 0) return false;
+    }
+    return true;
+}
+
+static int rl_stdio_child(const char *directory)
+{
+    int failures = 0;
+    const char *image = "build/fixtures/rlc_child_v1";
+    char path[1024], error[RESIDENT_LAUNCH_ERROR_MAX] = {0};
+    (void)snprintf(path, sizeof(path), "%s/stdio.log", directory);
+    (void)close(3);
+    int logfd = open(path, O_CREAT | O_TRUNC | O_RDWR | O_CLOEXEC, 0600);
+    RL_CHECK("stdio test occupies IPC slot 3", logfd == RESIDENT_LAUNCH_CHILD_FD);
+    if (logfd != RESIDENT_LAUNCH_CHILD_FD) { if (logfd >= 0) close(logfd); return failures + 1; }
+    int fds_before = rl_open_fd_count();
+    struct stat parent[3] = {0}; int flags[3];
+    if (!rl_stdio_capture_parent(parent, flags)) { close(logfd); return failures + 1; }
+    struct resident_launch_accepted accepted;
+    struct resident_launch launch; resident_launch_init(&launch);
+    bool prepared = rl_accept_of(image, &accepted) &&
+        resident_launch_prepare(&launch, image, &accepted, error, sizeof(error));
+    RL_CHECK("stdio fixture exact image prepared", prepared);
+    if (!prepared) { close(logfd); return failures; }
+    char *const argv[] = { "rlc_child_v1", "--stdio-probe", NULL };
+    char *const envp[] = { NULL };
+    struct resident_receipt receipt;
+    launch.log_stdio = true;
+    failures += rl_stdio_refusals(&launch, argv, envp, logfd, path);
+    bool spawned = resident_launch_spawn(&launch, argv, envp, &receipt, error, sizeof(error));
+    if (!spawned) fprintf(stderr, "resident stdio spawn: %s\n", error);
+    RL_CHECK("stdio spawn retains exact image proof", spawned && receipt.pid > 0 &&
+        (strcmp(receipt.mapped_proof, "fexecve_inode") == 0 ||
+         strcmp(receipt.mapped_proof, "proc_exe_triple") == 0 ||
+         strcmp(receipt.mapped_proof, "cdhash_suspended") == 0));
+    RL_CHECK("stdout and stderr captured; stdin is EOF", spawned && rl_stdio_wait_log(logfd));
+    RL_CHECK("parent standard descriptors unchanged", rl_stdio_unchanged(parent, flags));
+    if (spawned) RL_CHECK("stdio child canceled and reaped", resident_launch_cancel(&launch, 20, error, sizeof(error)) && rl_wait_reaped(receipt.pid));
+    resident_launch_close(&launch);
+    RL_CHECK("borrowed log remains open", fcntl(logfd, F_GETFD) >= 0);
+    RL_CHECK("stdio spawn closes temporary descriptors", rl_open_fd_count() == fds_before);
+    failures += rl_stdio_no_inherited_log(image, logfd);
+    RL_CHECK("desktop child signals reset and parent unchanged", rl_stdio_signals(image, logfd) == 0);
+    for (int fd = 0; fd < 3; ++fd)
+        RL_CHECK("closed standard descriptor refused", rl_stdio_closed_standard(image, logfd, fd) == 0);
+    close(logfd);
+    RL_CHECK("stdio log removed", unlink(path) == 0);
+    return failures;
+}
+
+static int rl_stdio_checks(const char *directory)
+{
+    pid_t child = fork();
+    if (child < 0) { perror("resident stdio test fork"); return 1; }
+    if (child == 0) _exit(rl_stdio_child(directory) ? 1 : 0);
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        return 1;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+}
+
 int test_resident_launch(void)
 {
     int failures = 0;
@@ -416,6 +630,7 @@ int test_resident_launch(void)
     failures += rl_codec_checks(fixture, &accepted);
     failures += rl_swap_refusal_checks(dir);
     failures += rl_cycle_checks();
+    failures += rl_stdio_checks(dir);
     test_rm_rf(dir);
     { extern int resident_result_fragments_run(void);
       failures += resident_result_fragments_run(); }

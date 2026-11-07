@@ -126,6 +126,14 @@ struct resident_launch {
     /* Confined spawns only; set AFTER prepare(). The child's stdin, stdout and
      * stderr are /dev/null instead of the caller's. */
     bool null_stdio;
+    /* Unconfined desktop spawn only, set after prepare. Borrowed writable
+     * regular-file descriptor; child stdin is /dev/null and stdout/stderr
+     * are duplicated to it. Caller retains ownership. Incompatible with
+     * confined spawn, null_stdio and extra descriptor grants. */
+    bool log_stdio;
+    int log_stdio_fd;
+    /* Opt-in desktop spawn signal mask and dispositions, set after prepare. */
+    bool desktop_signals;
     /* Last confined handshake outcome and, for EXEC_FAILED, the child's errno. */
     enum resident_exec_state exec_state;
     int exec_errno;

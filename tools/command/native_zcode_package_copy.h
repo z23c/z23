@@ -34,6 +34,8 @@ struct zcl_package_copy {
     size_t foreign_versions;
     uint8_t head_version[32];
     uint8_t head_tree[32];
+    uint8_t selected_version[32];
+    uint8_t selected_tree[32];
     uint8_t fork_version[32];
     uint8_t fork_tree[32];
     uint8_t parent_release[32];
@@ -101,7 +103,16 @@ bool zcl_package_copy_open_as(const char *dir,
 bool zcl_package_copy_open(const char *dir, struct zcl_package_copy *copy,
                            struct zcl_command_reply *reply,
                            const char *command);
+/* CHECKED open; NULL selects HEAD, otherwise require an exact version in
+ * the fully validated history or refuse VERSION_UNKNOWN. */
+bool zcl_package_copy_open_selected(const char *dir, struct zcl_package_copy *copy,
+    struct zcl_command_reply *reply, const char *command, const char *version);
 void zcl_package_copy_close(struct zcl_package_copy *copy);
+/* Exact selection with explicit access; READ never creates or recovers
+ * history/index state. Full chain and fork validation still precedes success. */
+bool zcl_package_copy_open_selected_as(const char *dir,
+    enum zcl_package_copy_access access, struct zcl_package_copy *copy,
+    struct zcl_command_reply *reply, const char *command, const char *version);
 
 /* Resolve input `root` (a persisted release id, or a package root carried by
  * exactly one persisted release) under datadir and verify the envelope.

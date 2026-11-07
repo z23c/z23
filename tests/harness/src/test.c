@@ -1893,6 +1893,26 @@ static void run_full_suite_crypto_and_wallet(int *failures)
       *failures += test_app_image_build(); }
     { extern int test_app_build_copy(void);
       *failures += test_app_build_copy(); }
+    { extern int test_app_receive(void);
+      *failures += test_app_receive(); }
+    { extern int test_app_receive_ui(void);
+      *failures += test_app_receive_ui(); }
+    { extern int test_app_adopt(void);
+      *failures += test_app_adopt(); }
+    { extern int test_app_kept_journey(void);
+      *failures += test_app_kept_journey(); }
+    { extern int test_app_open_selected(void);
+      *failures += test_app_open_selected(); }
+    { extern int test_app_share(void);
+      *failures += test_app_share(); }
+    { extern int test_app_personalize(void);
+      *failures += test_app_personalize(); }
+    { extern int test_app_edit(void);
+      *failures += test_app_edit(); }
+    { extern int test_app_customize(void);
+      *failures += test_app_customize(); }
+    { extern int test_app_selection(void);
+      *failures += test_app_selection(); }
     { extern int test_app_front_door(void);
       *failures += test_app_front_door(); }
     { extern int test_app_seed(void);

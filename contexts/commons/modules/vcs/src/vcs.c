@@ -7,6 +7,7 @@
 #include "vcs/vcs.h"
 #include "vcs/vcs_object.h"
 #include "vcs/vcs_seal.h"
+#include "vcs/package_manifest.h"
 
 #include "vcs_priv.h"
 #include "vcs_repo_priv.h"
@@ -421,7 +422,7 @@ static int snapshot_sealset(struct vcs_repo *r, struct vcs_manifest *m,
 /* Serialize the commit, append its durable record, then store the by-id
  * object; commit_id receives the commit id. */
 static int snapshot_write_commit(struct vcs_repo *r, struct vcs_commit *c,
-                                 uint8_t commit_id[32])
+                                 uint8_t commit_id[32], bool *attempted)
 {
     uint8_t record[VCS_COMMIT_RECORD_BYTES];
     if (!vcs_commit_serialize(c, record)) {
@@ -434,6 +435,7 @@ static int snapshot_write_commit(struct vcs_repo *r, struct vcs_commit *c,
     }
 
     /* Append the durable commit record, then store the by-id object. */
+    *attempted = true;
     if (event_log_append(r->log, EV_VCS_COMMIT, record, sizeof(record)) == UINT64_MAX) {
         LOG_ERROR_IN("vcs_snapshot", "vcs", "append commits.log");
         return -1;
@@ -453,6 +455,107 @@ static int snapshot_write_commit(struct vcs_repo *r, struct vcs_commit *c,
         return -1;
     }
     return 0;
+}
+
+/* Shared commit writer; ordinary snapshot retains its historical error code. */
+static int snapshot_publish(struct vcs_repo *r, struct vcs_commit *c,
+                            uint8_t sealset[32], uint8_t out[32], bool partial)
+{
+    uint8_t id[32] = {0};
+    bool attempted = false;
+    if (snapshot_write_commit(r, c, id, &attempted) != 0) {
+        if (partial && attempted) memcpy(out, id, 32);
+        return partial && attempted ? VCS_EPARTIAL : VCS_ERR;
+    }
+    if (partial) memcpy(out, id, 32);
+    if (!vcs_index_begin(r->idx)) {
+        LOG_ERROR_IN("vcs_snapshot", "vcs", "commit appended; index begin failed");
+        return partial ? VCS_EPARTIAL : VCS_ERR;
+    }
+    if (!snapshot_advance_refs(r, c, id, sealset)) {
+        LOG_ERROR_IN("vcs_snapshot", "vcs", "commit appended; index update failed");
+        return partial ? VCS_EPARTIAL : VCS_ERR;
+    }
+    memcpy(out, id, 32);
+    return VCS_OK;
+}
+
+struct snapshot_tip {
+    uint8_t id[32];
+    bool invalid;
+};
+
+static bool snapshot_tip_visit(uint64_t offset, enum event_log_type type,
+    const void *bytes, size_t len, void *user)
+{
+    (void)offset;
+    struct snapshot_tip *tip = user;
+    if (type != EV_VCS_COMMIT) return true;
+    struct vcs_commit c;
+    bool self_ok = false;
+    if (len != VCS_COMMIT_RECORD_BYTES ||
+        !vcs_commit_deserialize(bytes, len, &c, &self_ok) || !self_ok ||
+        memcmp(c.parent, tip->id, 32) || !vcs_commit_id(&c, tip->id)) {
+        tip->invalid = true;
+        return false;
+    }
+    return true;
+}
+
+static bool snapshot_expected_parent(struct vcs_repo *r,
+    const uint8_t expected[32], struct vcs_commit *c)
+{
+    struct snapshot_tip tip = {0};
+    return event_log_stream(r->log, 0, snapshot_tip_visit, &tip) == 0 &&
+        !tip.invalid && snapshot_load_parent(r, c) &&
+        !memcmp(tip.id, c->parent, 32) && !memcmp(expected, c->parent, 32);
+}
+
+static bool snapshot_tree_blobs(struct vcs_repo *r, const struct vcs_manifest *m,
+                                const struct vcs_snapshot_tree_limits *limits)
+{
+    uint64_t total = 0;
+    for (size_t i = 0; i < m->count; ++i) {
+        const struct vcs_entry *e = &m->entries[i];
+        if (!S_ISREG(e->mode) || !vcs_package_path_valid(e->path) ||
+            e->size > limits->blob_bytes || e->size > limits->total_bytes - total)
+            return false;
+        uint8_t *bytes = NULL;
+        size_t len = 0;
+        int rc = vcs_object_get_readonly_bounded(r->root, e->blob,
+            VCS_TAG_BLOB, limits->blob_bytes, &bytes, &len);
+        free(bytes);
+        if (rc != 0 || len != e->size) return false;
+        total += e->size;
+    }
+    return true;
+}
+
+int vcs_snapshot_from_tree(struct vcs_repo *r, const uint8_t tree[32],
+    const uint8_t expected_head[32], const struct vcs_snapshot_meta *meta,
+    const struct vcs_snapshot_tree_limits *limits, uint8_t out[32])
+{
+    if (out) memset(out, 0, 32);
+    if (!snapshot_args_ok(r, meta, out) || !r->log || !tree ||
+        !expected_head || !limits) return VCS_ERR;
+    struct vcs_manifest m = {0};
+    if (!vcs_tree_load_readonly_bounded(r->root, tree, limits->manifest_bytes,
+                                       limits->entries, &m)) return VCS_ERR;
+    if (!snapshot_tree_blobs(r, &m, limits)) {
+        vcs_manifest_free(&m);
+        return VCS_ERR;
+    }
+    uint8_t sealset[32];
+    if (snapshot_sealset(r, &m, sealset) != 0) return VCS_ERR;
+    struct vcs_commit c;
+    uint8_t tree_copy[32];
+    memcpy(tree_copy, tree, 32);
+    snapshot_fill_commit(&c, meta, tree_copy, sealset);
+    if (!snapshot_expected_parent(r, expected_head, &c)) return VCS_REFUSED;
+    enum vcs_seal_result sr = vcs_seal_check(r->idx, sealset);
+    if (sr == VCS_SEAL_REFUSED) return VCS_REFUSED;
+    if (sr != VCS_SEAL_OK) return VCS_ERR;
+    return snapshot_publish(r, &c, sealset, out, true);
 }
 
 int vcs_snapshot(struct vcs_repo *r, const struct vcs_snapshot_meta *meta,
@@ -490,18 +593,7 @@ int vcs_snapshot(struct vcs_repo *r, const struct vcs_snapshot_meta *meta,
     if (!snapshot_load_parent(r, &c))
         LOG_ERR("vcs", "ref_get HEAD");
 
-    uint8_t commit_id[32];
-    if (snapshot_write_commit(r, &c, commit_id) != 0)
-        return -1;
-
-    /* Advance HEAD / anchor / seal_pin in one transaction. */
-    if (!vcs_index_begin(r->idx))
-        LOG_ERR("vcs", "index begin");
-    if (!snapshot_advance_refs(r, &c, commit_id, sealset))
-        LOG_ERR("vcs", "index update");
-
-    memcpy(out_commit_id, commit_id, 32);
-    return VCS_OK;
+    return snapshot_publish(r, &c, sealset, out_commit_id, false);
 }
 
 /* ── status ──────────────────────────────────────────────────────── */

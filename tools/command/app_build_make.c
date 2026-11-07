@@ -3,12 +3,19 @@
  * purpose: run an app copy's make fragment out of tree under lab_exec and
  *          root its declared input closure (see command/app_build_make.h). */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "command/app_build_make.h"
 
 #include "base/safe_alloc.h"
 #include "command/lab_exec.h"
+#include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
 #include "sha3/sha3.h"
 #include "util/file_io.h"
+#include "util/path_util.h"
 #include "util/spawn.h"
 #include "vcs/build_action.h"
 #include "vcs/package_manifest.h"
@@ -198,14 +205,12 @@ static bool abm_exited_ok(const struct lab_proc *p)
 
 /* ── the declared closure ────────────────────────────────────────────── */
 
-/* The root-level local stores the package root does not cover. */
-static const char *const k_abm_stores[] = {"build", ".zvcs", ".codeindex"};
-
-/* True when the n bytes at seg are one root-level store's name. */
-static bool abm_store_segment(const char *seg, size_t n)
+/* Root-level stores are not covered by the package root. */
+static bool abm_store_segment(const char *segment, size_t len)
 {
-    for (size_t i = 0; i < sizeof(k_abm_stores) / sizeof(k_abm_stores[0]); i++)
-        if (strlen(k_abm_stores[i]) == n && memcmp(seg, k_abm_stores[i], n) == 0)
+    static const char *const stores[] = {"build", ".zvcs", ".codeindex"};
+    for (size_t i = 0; i < sizeof(stores) / sizeof(stores[0]); i++)
+        if (strlen(stores[i]) == len && memcmp(segment, stores[i], len) == 0)
             return true;
     return false;
 }
@@ -436,80 +441,126 @@ void app_build_make_run(const struct app_build_make *m, const char *out_dir,
 /* ── depfile check ───────────────────────────────────────────────────── */
 
 struct abm_depcheck {
-    const struct app_build_make *m;
     const struct app_build_closure *c;
-    size_t copy_len;
+    char root[ABM_PATH];
     size_t depfiles;
     char *why;
     size_t why_cap;
 };
 
-/* Lexically fold "." and ".." segments of a copy-relative path the way the
- * compiler spelled it (a source's `#include "../x.h"` lands in a depfile
- * as "dir/sub/../x.h"). The package part of the copy holds no symlinks (it
- * prepared as a package), so the folded path names the same file. The
- * root-level stores prepare skips may hold symlinks, so a path that ever
- * enters one is never folded: "build/link/../../src/x.c" stays undeclared.
- * False when the path enters a store, climbs above the copy or does not
- * fit. */
-/* ".." drops the last folded segment; false above the copy root. */
-static bool abm_fold_up(const char *out, size_t *len)
+/* Resolve filesystem aliases before membership checks. The no-follow regular
+ * file open refuses leaf symlinks; handle-bound paths expose parent escapes. */
+static bool abm_file_path(const char *input, char canonical[ABM_PATH])
 {
-    if (*len == 0)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, input))
         return false;
-    while (*len > 0 && out[*len - 1u] != '/')
-        (*len)--;
-    *len = *len > 0 ? *len - 1u : 0;
-    return true;
+    bool resolved = platform_positioned_file_path(&file, canonical, ABM_PATH);
+    platform_positioned_file_close(&file);
+    return resolved;
 }
 
-static bool abm_fold_segment(const char *seg, size_t n, char *out, size_t cap,
-                             size_t *len)
+static bool abm_inside(const struct abm_depcheck *d, const char *path)
 {
-    if (n == 0 || (n == 1 && seg[0] == '.'))
-        return true;
-    if (*len == 0 && seg[n] == '/' && abm_store_segment(seg, n))
-        return false;
-    if (n == 2 && seg[0] == '.' && seg[1] == '.')
-        return abm_fold_up(out, len);
-    if (*len + 1u + n + 1u > cap)
-        return false;
-    if (*len)
-        out[(*len)++] = '/';
-    memcpy(out + *len, seg, n);
-    *len += n;
-    return true;
+    size_t len = strlen(d->root);
+    return strncmp(path, d->root, len) == 0 &&
+           (path[len] == '/' || path[len] == '\0');
 }
 
-static bool abm_fold(const char *rel, char *out, size_t cap)
+static bool abm_local_prereq(struct abm_depcheck *d, const char *token)
 {
-    size_t len = 0;
-    while (*rel) {
-        size_t seg = strcspn(rel, "/");
-        if (!abm_fold_segment(rel, seg, out, cap, &len))
+    char path[ABM_PATH], canonical[ABM_PATH];
+    const char *input = token;
+    if (token[0] != '/') {
+        if (!zcl_path_join(path, sizeof(path), d->root, token))
             return false;
-        rel += seg + (rel[seg] == '/' ? 1u : 0u);
+        input = path;
     }
-    out[len] = '\0';
-    return len > 0;
+    bool resolved = abm_file_path(input, canonical);
+    size_t root_len = strlen(d->root);
+    return resolved && strncmp(canonical, d->root, root_len) == 0 &&
+           canonical[root_len] == '/' &&
+           abm_declared(d->c, canonical + root_len + 1u);
 }
 
-/* One prerequisite: declared, or a system file outside the copy. */
+/* Resolve before deciding external policy. POSIX system headers may have a
+ * symlink leaf; resolution alone grants no input identity or byte coverage.
+ * Windows keeps the maintained no-reparse regular-file resolver. */
+static bool abm_absolute_path(const char *token, char canonical[ABM_PATH])
+{
+#if defined(_WIN32)
+    return abm_file_path(token, canonical);
+#else
+    char *resolved = realpath(token, NULL);
+    if (!resolved) return false;
+    int n = snprintf(canonical, ABM_PATH, "%s", resolved);
+    free(resolved);
+    return n > 0 && (size_t)n < ABM_PATH;
+#endif
+}
+
+/* An aliased spelling may enter the copy before a later .. or symlink
+ * escapes. Check original traversal prefixes, not just its final location. */
+static bool abm_traverses_copy(const struct abm_depcheck *d, const char *token)
+{
+    char prefix[ABM_PATH], resolved[ABM_PATH];
+    int n = snprintf(prefix, sizeof(prefix), "%s", token);
+    if (n <= 0 || (size_t)n >= sizeof(prefix)) return true;
+    for (char *slash = strchr(prefix + 1, '/'); slash;
+         slash = strchr(slash + 1, '/')) {
+        *slash = '\0';
+        bool inside = platform_directory_canonical_real(prefix, resolved,
+            sizeof(resolved)) && abm_inside(d, resolved);
+        *slash = '/';
+        if (inside) return true;
+    }
+    return false;
+}
+
+/* Reject paths that traverse a root-level store even if a later .. or
+ * symlink reaches a declared file. Resolve each parent so an absolute
+ * alias of the copy root is subject to the same rule. */
+static bool abm_store_traversal(const struct abm_depcheck *d, const char *token)
+{
+    char path[ABM_PATH], resolved[ABM_PATH];
+    if (token[0] == '/') {
+        int n = snprintf(path, sizeof(path), "%s", token);
+        if (n <= 0 || (size_t)n >= sizeof(path)) return true;
+    } else if (!zcl_path_join(path, sizeof(path), d->root, token)) {
+        return true;
+    }
+    for (char *slash = strchr(path + 1, '/'); slash; slash = strchr(slash + 1, '/')) {
+        const char *segment = slash + 1;
+        size_t len = strcspn(segment, "/");
+        if (segment[len] != '/' || !abm_store_segment(segment, len)) continue;
+        *slash = '\0';
+        bool at_root = platform_directory_canonical_real(path, resolved, sizeof(resolved)) &&
+                       strcmp(resolved, d->root) == 0;
+        *slash = '/';
+        if (at_root) return true;
+    }
+    return false;
+}
+
+/* The external-absolute allowance is existing policy, not capsule proof.
+ * A relative or copy-prefixed path must never escape into that allowance. */
 static bool abm_prereq_ok(struct abm_depcheck *d, const char *token)
 {
-    const char *rel = token;
-    char folded[ABM_PATH];
-    if (token[0] == '/') {
-        if (strncmp(token, d->m->copy_dir, d->copy_len) != 0 ||
-            token[d->copy_len] != '/')
-            return true;
-        rel = token + d->copy_len + 1u;
+    if (abm_store_traversal(d, token)) {
+        abm_why(d->why, d->why_cap, "the build read '%s' through an excluded local store", token);
+        return false;
     }
-    if (abm_fold(rel, folded, sizeof(folded)) &&
-        abm_declared(d->c, folded))
+    if (token[0] == '/') {
+        char canonical[ABM_PATH];
+        if (abm_absolute_path(token, canonical) && !abm_inside(d, canonical) &&
+            !abm_traverses_copy(d, token))
+            return true;
+    }
+    if (abm_local_prereq(d, token))
         return true;
-    abm_why(d->why, d->why_cap, "the build read '%s', which "
-                                "print-app-closure does not declare", rel);
+    abm_why(d->why, d->why_cap, "the build read '%s', which does not resolve "
+            "to a declared regular input inside the source copy", token);
     return false;
 }
 
@@ -573,10 +624,13 @@ bool app_build_depfiles_declared(const struct app_build_make *m,
                                  const struct app_build_closure *c, char *why,
                                  size_t why_cap)
 {
-    struct abm_depcheck d = {.m = m, .c = c, .why = why, .why_cap = why_cap};
+    struct abm_depcheck d = {.c = c, .why = why, .why_cap = why_cap};
     if (!m || !m->copy_dir || !out_dir || !c)
         return false;
-    d.copy_len = strlen(m->copy_dir);
+    if (!platform_directory_canonical_real(m->copy_dir, d.root, sizeof(d.root))) {
+        abm_why(why, why_cap, "the source copy directory cannot be resolved");
+        return false;
+    }
     if (!abm_walk(&d, out_dir, 0))
         return false;
     if (d.depfiles == 0) {
