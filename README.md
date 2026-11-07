@@ -67,13 +67,31 @@ offline. macOS, Windows and the rest are in
 ## Try an app
 
 The quickest thing to touch is Sky Combat, a split-screen flight game that
-ships in this repo. It needs no node and no network:
+ships in this repo. It needs no node and no network. Play it, make your own
+copy, change it, and give it to a friend, one plain command per step:
 
 ```bash
-make game                    # links build/bin/z23-skycombat (needs X11 + GL headers)
-build/bin/z23-skycombat      # opens the game window
+make z23 game                          # build/bin/z23 and the game (needs X11 + GL headers)
+build/bin/z23 app open skycombat       # play the game
+build/bin/z23 app copy skycombat       # your own copy, skycombat-1; it prints where it lives
+#   ...edit a file in that copy...
+build/bin/z23 app save skycombat-1     # keep your change as a version
+build/bin/z23 app build skycombat-1    # build that saved version
+build/bin/z23 app open skycombat-1     # play your version
+build/bin/z23 app share skycombat-1    # writes skycombat-1.z23share
 ```
 
+Send the file. Your friend runs one command:
+
+```bash
+z23 app open skycombat-1.z23share
+```
+
+It checks the file, shows who signed it as a short fingerprint such as
+`833d-7ae5-d858-315d` (compare it with yours over chat or voice), asks y/N,
+then keeps, builds and opens the game. Each step asks y/N before it changes
+anything; `--yes` answers for scripts, and without a terminal or `--yes` a
+step only shows its plan. `z23 app list` lists your copies.
 [Sky Combat](docs/commons/GAME.md) covers controls, checks and packaging.
 
 Bare `build/bin/z23` uses the default ports and data directory and starts
@@ -86,8 +104,7 @@ build/bin/z23 -datadir="$HOME/.zclassic-c23-dev" -port=8035 -rpcport=18234 \
 build/bin/z23 -datadir="$HOME/.zclassic-c23-dev" -rpcport=18234 stop   # when done
 ```
 
-Sharing a package with a friend means hosting it from a node. Start that
-node with `-packagehost=1` (no coins or sign-up); see the
+To publish a package for everyone rather than one friend, see the
 [Commons quickstart](docs/commons/C23_COMMONS_QUICKSTART.md).
 
 ## Run a node
