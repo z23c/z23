@@ -366,6 +366,35 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_PROCESS_EXEC, 0, zcl_native_handle_app_receive)
 
+/* AUTH_OWNER: the owner's publisher key signs the seed release, so MCP
+ * refuses it at plan and at confirm. */
+ZCL_COMMAND_READY_COMMAND(
+    "app.seed", "app", "", "Seed an in-repo app as your own package release",
+    "app names a directory under apps/ of the z23 checkout (source, default "
+    "the checkout this runs in). The package tree is apps/<app> plus every "
+    "checkout file apps/<app>/zcode-seed.def maps (one '<repo path> <tree "
+    "path>' per line; '..', absolute and symlinked paths refused) and "
+    "apps/<app>/app.mk as its Makefile, so a copy builds with app build "
+    "alone. Without confirm, returns package_root, release_id, file_count "
+    "and a plan_id. With that plan_id and confirm:true, signs with "
+    "~/.z23/zcode_publisher.key (made 0600 on first use) and publishes "
+    "through zcode.package.publish.commit. When this owner already holds a "
+    "release of the same package root, it is returned with existing:true "
+    "and nothing is written. Nothing is built or executed.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "app,seed,package,release,publish,copy,remix,game,source",
+    "zcl.app_seed.input.v1", "zcl.app_seed.v1",
+    "app,source,datadir,day,plan_id,confirm", "app",
+    "z23 app seed --input='{\"app\":\"skycombat\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_app_seed)
+
 ZCL_COMMAND_BRANCH("app.run", "app", "Run accepted installed binaries",
                    ZCL_COMMAND_LAYER_APP)
 

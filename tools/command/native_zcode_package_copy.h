@@ -137,6 +137,22 @@ enum zcl_package_copy_lookup zcl_package_copy_find_release(
     const char *datadir, const uint8_t root[32],
     struct vcs_package_release *release_out, uint8_t release_id_out[32]);
 
+/* The owner's publisher key file, ~/.z23/zcode_publisher.key (the release
+ * key format plugin publish --release-key reads), created 0600 on first
+ * use; *created says whether this call made it. Only its public key is
+ * read: signing stays inside plugin_dist_release_key_sign. Fails the reply
+ * PUBLISHER_KEY_UNAVAILABLE (no absolute HOME) or PUBLISHER_KEY_REFUSED. */
+bool zcl_package_copy_owner_key(
+    char *key_path, size_t key_path_cap,
+    uint8_t pubkey[VCS_PACKAGE_RELEASE_PUBKEY_BYTES], bool *created,
+    struct zcl_command_reply *reply, const char *command);
+
+/* The publisher sequence pubkey's next release under datadir takes (1 for
+ * a publisher with none). Fails the reply RELEASES_UNREADABLE. */
+bool zcl_package_copy_next_sequence(
+    const char *datadir, const uint8_t pubkey[VCS_PACKAGE_RELEASE_PUBKEY_BYTES],
+    uint64_t *sequence, struct zcl_command_reply *reply);
+
 /* zcode.commons.lineage support: append `releases` rows (release, name,
  * semver, sequence, parent release and parent package root) for every
  * persisted release of package_root under datadir. */

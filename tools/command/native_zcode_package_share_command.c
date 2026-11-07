@@ -295,7 +295,10 @@ static bool zps_inputs(struct zps_share *s)
 /* The owner's publisher key: the release key file plugin publish
  * --release-key reads, under ~/.z23 and made 0600 on first use the way
  * plugin dev makes its key. Only its public key is read here. */
-static bool zps_local_key(struct zps_share *s)
+bool zcl_package_copy_owner_key(
+    char *key_path, size_t key_path_cap,
+    uint8_t pubkey[VCS_PACKAGE_RELEASE_PUBKEY_BYTES], bool *created,
+    struct zcl_command_reply *reply, const char *command)
 {
     char store[ZPS_PATH_MAX], made_hex[PLUGIN_HEX_PUBLIC_KEY + 1];
     struct plugin_dist_published why;
@@ -303,27 +306,32 @@ static bool zps_local_key(struct zps_share *s)
     int n = home && home[0] == '/'
                 ? snprintf(store, sizeof(store), "%s/.z23", home) : -1;
     int m = n > 0 && (size_t)n < sizeof(store)
-                ? snprintf(s->key_path, sizeof(s->key_path), "%s/%s", store,
+                ? snprintf(key_path, key_path_cap, "%s/%s", store,
                            ZPS_KEY_LEAF)
                 : -1;
-    if (m <= 0 || (size_t)m >= sizeof(s->key_path) ||
-        !zcl_mkdir_p(store, 0700).ok) {
-        zcl_package_copy_fail(s->reply, "PUBLISHER_KEY_UNAVAILABLE", false,
+    if (m <= 0 || (size_t)m >= key_path_cap || !zcl_mkdir_p(store, 0700).ok) {
+        zcl_package_copy_fail(reply, "PUBLISHER_KEY_UNAVAILABLE", false,
                               "HOME must be an absolute directory where "
-                              "~/.z23 can hold the owner's key", s->command);
+                              "~/.z23 can hold the owner's key", command);
         return false;
     }
-    enum plugin_status made = plugin_keygen(s->key_path, made_hex);
-    s->key_created = made == PLUGIN_OK;
+    enum plugin_status made = plugin_keygen(key_path, made_hex);
+    *created = made == PLUGIN_OK;
     if ((made == PLUGIN_OK || made == PLUGIN_ERR_KEY_EXISTS) &&
-        plugin_dist_release_key_sign(s->key_path, NULL,
-                                     s->options.publisher_pubkey, NULL,
-                                     &why) == PLUGIN_DIST_OK)
+        plugin_dist_release_key_sign(key_path, NULL, pubkey, NULL, &why) ==
+            PLUGIN_DIST_OK)
         return true;
-    zcl_package_copy_fail(s->reply, "PUBLISHER_KEY_REFUSED", false,
+    zcl_package_copy_fail(reply, "PUBLISHER_KEY_REFUSED", false,
                           "the owner's publisher key must be a private "
-                          "(0600) 32-byte key file", s->key_path);
+                          "(0600) 32-byte key file", key_path);
     return false;
+}
+
+static bool zps_local_key(struct zps_share *s)
+{
+    return zcl_package_copy_owner_key(s->key_path, sizeof(s->key_path),
+                                      s->options.publisher_pubkey,
+                                      &s->key_created, s->reply, s->command);
 }
 
 /* Saved, changed, and the recorded parent is a persisted, valid release. */
@@ -372,26 +380,35 @@ static bool zps_fork_untampered(struct zps_share *s)
     return same;
 }
 
-static bool zps_next_sequence(struct zps_share *s)
+bool zcl_package_copy_next_sequence(
+    const char *datadir, const uint8_t pubkey[VCS_PACKAGE_RELEASE_PUBKEY_BYTES],
+    uint64_t *sequence, struct zcl_command_reply *reply)
 {
     char zcode_dir[ZPS_PATH_MAX];
     size_t replayed = 0;
     uint64_t latest = 0;
     uint8_t latest_id[32];
     struct vcs_package_accept *accept = vcs_package_accept_new();
-    (void)snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", s->datadir);
+    (void)snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", datadir);
     bool ok = accept && vcs_package_publish_replay(zcode_dir, accept,
                                                    &replayed);
-    if (ok && !vcs_package_accept_lookup(accept, s->options.publisher_pubkey,
-                                         &latest, latest_id))
+    if (ok && !vcs_package_accept_lookup(accept, pubkey, &latest, latest_id))
         latest = 0;
     vcs_package_accept_free(accept);
-    s->options.publisher_sequence = latest + 1u;
+    *sequence = latest + 1u;
     if (!ok)
-        zcl_package_copy_fail(s->reply, "RELEASES_UNREADABLE", false,
+        zcl_package_copy_fail(reply, "RELEASES_UNREADABLE", false,
                               "persisted releases could not be replayed",
-                              s->datadir);
+                              datadir);
     return ok;
+}
+
+static bool zps_next_sequence(struct zps_share *s)
+{
+    return zcl_package_copy_next_sequence(s->datadir,
+                                          s->options.publisher_pubkey,
+                                          &s->options.publisher_sequence,
+                                          s->reply);
 }
 
 /* Prepare the saved head and point its envelope at the forked release. */

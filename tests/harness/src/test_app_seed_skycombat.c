@@ -185,14 +185,31 @@ static int ass_runs_qa_frames(struct ass_world *w, const char *xvfb)
     return failures;
 }
 
+/* The window-system headers the game's raylib build reads on Linux (the
+ * repo Makefile's SKYCOMBAT_PLATFORM_HEADERS). */
+static const char *ass_missing_header(void)
+{
+    static const char *const headers[] = {
+        "X11/Xlib.h", "X11/extensions/Xrandr.h", "X11/extensions/XInput2.h",
+        "X11/Xcursor/Xcursor.h", "GL/glx.h"};
+    char path[256];
+    for (size_t i = 0; i < sizeof(headers) / sizeof(headers[0]); i++) {
+        (void)snprintf(path, sizeof(path), "/usr/include/%s", headers[i]);
+        if (access(path, R_OK) != 0)
+            return headers[i];
+    }
+    return NULL;
+}
+
 int test_app_seed_skycombat(void);
 int test_app_seed_skycombat(void)
 {
     int failures = 0;
-    const char *xvfb = ass_xvfb_path();
+    const char *xvfb = ass_xvfb_path(), *missing = ass_missing_header();
     struct ass_world w;
-    if (!xvfb) {
-        printf("app_seed_skycombat... SKIP (no Xvfb on this host)\n");
+    if (missing) {
+        printf("app_seed_skycombat... SKIP (no /usr/include/%s: the game "
+               "cannot build on this host)\n", missing);
         return 0;
     }
     chain_params_select(CHAIN_MAIN);
@@ -202,7 +219,10 @@ int test_app_seed_skycombat(void)
     } _test_next:;
     if (!failures)
         failures += ass_seed_adopt_build(&w);
-    if (!failures)
+    if (!failures && !xvfb)
+        printf("app.seed skycombat: 120 QA frames... SKIP (no Xvfb on this "
+               "host)\n");
+    else if (!failures)
         failures += ass_runs_qa_frames(&w, xvfb);
     ass_xvfb_stop(&w);
     ass_world_restore(&w);

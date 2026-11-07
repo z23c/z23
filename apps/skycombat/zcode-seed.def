@@ -1,0 +1,57 @@
+# Sky Combat seed: the checkout files the game build reads that live outside
+# apps/skycombat, copied byte for byte into the seeded package (app seed).
+# One "<repo path> <tree path>" per line; the tree keeps the repo layout so
+# Makefile (from app.mk) uses the same -I paths as the repo's game section.
+# Keep this list equal to the non-apps/skycombat lines of
+# `make print-game-closure`, plus raylib's license and provenance.
+
+# Trimmed raylib (vendor/raylib/SOURCE): sources, headers, license.
+vendor/raylib/LICENSE vendor/raylib/LICENSE
+vendor/raylib/SOURCE vendor/raylib/SOURCE
+vendor/raylib/SHA256SUMS vendor/raylib/SHA256SUMS
+vendor/raylib/src/config.h vendor/raylib/src/config.h
+vendor/raylib/src/external/RGFW/RGFW.h vendor/raylib/src/external/RGFW/RGFW.h
+vendor/raylib/src/external/RGFW/deps/minigamepad.h vendor/raylib/src/external/RGFW/deps/minigamepad.h
+vendor/raylib/src/external/fix_win32_compatibility.h vendor/raylib/src/external/fix_win32_compatibility.h
+vendor/raylib/src/external/glad.h vendor/raylib/src/external/glad.h
+vendor/raylib/src/external/rprand.h vendor/raylib/src/external/rprand.h
+vendor/raylib/src/external/stb_image_resize2.h vendor/raylib/src/external/stb_image_resize2.h
+vendor/raylib/src/external/stb_perlin.h vendor/raylib/src/external/stb_perlin.h
+vendor/raylib/src/external/win32_clipboard.h vendor/raylib/src/external/win32_clipboard.h
+vendor/raylib/src/platforms/rcore_desktop_rgfw.c vendor/raylib/src/platforms/rcore_desktop_rgfw.c
+vendor/raylib/src/raylib.h vendor/raylib/src/raylib.h
+vendor/raylib/src/raymath.h vendor/raylib/src/raymath.h
+vendor/raylib/src/rcamera.h vendor/raylib/src/rcamera.h
+vendor/raylib/src/rcore.c vendor/raylib/src/rcore.c
+vendor/raylib/src/rgestures.h vendor/raylib/src/rgestures.h
+vendor/raylib/src/rlgl.h vendor/raylib/src/rlgl.h
+vendor/raylib/src/rmodels.c vendor/raylib/src/rmodels.c
+vendor/raylib/src/rshapes.c vendor/raylib/src/rshapes.c
+vendor/raylib/src/rtext.c vendor/raylib/src/rtext.c
+vendor/raylib/src/rtextures.c vendor/raylib/src/rtextures.c
+
+# Standalone support: canonical reader, JSON, PNG writer, base64, SHA-256.
+contexts/commons/packages/zbase64/include/zbase64/zbase64.h contexts/commons/packages/zbase64/include/zbase64/zbase64.h
+contexts/commons/packages/zbase64/src/zbase64.c contexts/commons/packages/zbase64/src/zbase64.c
+contexts/commons/packages/zsha256/include/zsha256/zsha256.h contexts/commons/packages/zsha256/include/zsha256/zsha256.h
+contexts/commons/packages/zsha256/src/zsha256.c contexts/commons/packages/zsha256/src/zsha256.c
+platform/modules/base/include/base/cleanse.h platform/modules/base/include/base/cleanse.h
+platform/modules/base/include/base/format_attribute.h platform/modules/base/include/base/format_attribute.h
+platform/modules/base/include/base/hex.h platform/modules/base/include/base/hex.h
+platform/modules/base/include/base/result.h platform/modules/base/include/base/result.h
+platform/modules/base/include/base/safe_alloc.h platform/modules/base/include/base/safe_alloc.h
+platform/modules/base/include/base/serialize_le.h platform/modules/base/include/base/serialize_le.h
+platform/modules/base/src/cleanse.c platform/modules/base/src/cleanse.c
+platform/modules/base/src/safe_alloc.c platform/modules/base/src/safe_alloc.c
+platform/modules/json/include/json/json.h platform/modules/json/include/json/json.h
+platform/modules/json/src/json.c platform/modules/json/src/json.c
+platform/modules/platform/include/platform/os_sandbox.h platform/modules/platform/include/platform/os_sandbox.h
+platform/modules/platform/include/platform/positioned_file.h platform/modules/platform/include/platform/positioned_file.h
+platform/modules/platform/include/platform/resident_launch.h platform/modules/platform/include/platform/resident_launch.h
+platform/modules/platform/include/platform/windows_path.h platform/modules/platform/include/platform/windows_path.h
+platform/modules/platform/src/positioned_file.c platform/modules/platform/src/positioned_file.c
+platform/modules/platform/src/windows_path_internal.h platform/modules/platform/src/windows_path_internal.h
+platform/modules/util/include/util/png_writer.h platform/modules/util/include/util/png_writer.h
+platform/modules/util/include/util/result.h platform/modules/util/include/util/result.h
+platform/modules/util/include/util/safe_alloc.h platform/modules/util/include/util/safe_alloc.h
+platform/modules/util/src/png_writer.c platform/modules/util/src/png_writer.c
