@@ -31,6 +31,7 @@ static bool qa_bad_stdio;
 static float qa_stick_x, qa_stick_y;
 static bool qa_agent;
 static bool qa_resize_fails;
+static bool qa_capture_ok;
 static bool qa_broken_reply;
 static unsigned qa_close_after = 64;
 static bool qa_window_failed;
@@ -94,16 +95,16 @@ void SetWindowFocused(void) {
 void rlDrawRenderBatchActive(void) { }
 Image LoadImageFromScreen(void)
 {
-    if (!qa_resize_fails) return (Image){0};
+    if (!qa_resize_fails && !qa_capture_ok) return (Image){0};
     return (Image){.data = calloc(640u * 480u, 4), .width = 640, .height = 480,
                     .mipmaps = 1, .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
 }
 unsigned char *stbir_resize_uint8_linear([[maybe_unused]] const unsigned char *input,
     [[maybe_unused]] int input_width, [[maybe_unused]] int input_height,
     [[maybe_unused]] int input_stride, [[maybe_unused]] unsigned char *output,
-    [[maybe_unused]] int output_width, [[maybe_unused]] int output_height,
+    int output_width, int output_height,
     [[maybe_unused]] int output_stride, [[maybe_unused]] stbir_pixel_layout layout)
-{ return NULL; }
+{ return qa_capture_ok ? calloc((size_t)output_width * (size_t)output_height, 4) : NULL; }
 void UnloadImage(Image image) { free(image.data); }
 int GetRandomValue([[maybe_unused]] int min, [[maybe_unused]] int max) { ++qa_random_calls; return (int){0}; }
 Color Fade([[maybe_unused]] Color color, [[maybe_unused]] float alpha) { return (Color){0}; }
@@ -233,6 +234,7 @@ bool IsWindowReady(void) { return qa_windows > 0 && !qa_window_failed; }
 static bool qa_agent_flag(const char *arg, int *prefix)
 {
     if (strcmp(arg, "--fixture-resize-fails") == 0) qa_resize_fails = true;
+    else if (strcmp(arg, "--fixture-capture-ok") == 0) qa_capture_ok = true;
     else if (strcmp(arg, "--fixture-prefix-nul") == 0) *prefix = 0;
     else if (strcmp(arg, "--fixture-prefix-sub") == 0) *prefix = 26;
     else if (strcmp(arg, "--fixture-broken-reply") == 0) qa_broken_reply = true;

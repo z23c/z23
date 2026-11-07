@@ -300,6 +300,107 @@ _test_next:;
     return failures;
 }
 
+static bool skycombat_file_read(const char *path, unsigned char *bytes, size_t cap, size_t *size)
+{
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    *size = fread(bytes, 1, cap, file);
+    bool ok = !ferror(file);
+    fclose(file);
+    return ok;
+}
+
+static bool skycombat_file_exists(const char *path)
+{
+    FILE *file = fopen(path, "rb");
+    if (file) fclose(file);
+    return file != NULL;
+}
+
+static int skycombat_capture_refusal(const char *const args[], const char *path, const char *label)
+{
+    int failures = 0;
+    char output[2048] = {0}, diagnostics[513] = {0};
+    TEST(label) {
+        int rc = skycombat_agent_capture(args, output, sizeof(output), diagnostics);
+        ASSERT(rc != 0);
+        ASSERT(!skycombat_file_exists(path));
+        ASSERT(strstr(diagnostics, "--capture") != NULL);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int skycombat_capture_file(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX], path[PATH_MAX + 16], flag[PATH_MAX + 32];
+    test_make_tmpdir(dir, sizeof(dir), "skycapture", "a");
+    snprintf(path, sizeof(path), "%s/p.png", dir);
+    snprintf(flag, sizeof(flag), "--capture=%s", path);
+    const char *good[] = {QA_ENTRY, "--fixture-capture-ok", "--qa-frames=2", flag, NULL};
+    char output[2048] = {0}, diagnostics[513] = {0};
+    TEST("capture: --qa-frames=2 --capture=PATH writes a PNG and names PATH and its size") {
+        ASSERT_EQ(skycombat_agent_capture(good, output, sizeof(output), diagnostics), 0);
+        unsigned char png[65536];
+        size_t size = 0;
+        ASSERT(skycombat_file_read(path, png, sizeof(png), &size));
+        static const unsigned char signature[8] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+        ASSERT(size > 33 && memcmp(png, signature, 8) == 0);
+        ASSERT(memcmp(png + 12, "IHDR", 4) == 0);
+        uint32_t width = (uint32_t)png[16] << 24 | (uint32_t)png[17] << 16 | (uint32_t)png[18] << 8 | png[19];
+        uint32_t height = (uint32_t)png[20] << 24 | (uint32_t)png[21] << 16 | (uint32_t)png[22] << 8 | png[23];
+        ASSERT(width > 0 && height > 0);
+        char line[PATH_MAX + 64];
+        snprintf(line, sizeof(line), "%s (%zu bytes)", path, size);
+        ASSERT(strstr(output, line) != NULL);
+        PASS();
+    }
+_test_next:;
+    char missing[PATH_MAX + 32], missing_flag[PATH_MAX + 48];
+    snprintf(missing, sizeof(missing), "%s/no-such-dir/p.png", dir);
+    snprintf(missing_flag, sizeof(missing_flag), "--capture=%s", missing);
+    const char *unwritable[] = {QA_ENTRY, "--fixture-capture-ok", "--qa-frames=1", missing_flag, NULL};
+    TEST("capture: an unwritable PATH fails with a message that names it") {
+        int rc = skycombat_agent_capture(unwritable, output, sizeof(output), diagnostics);
+        ASSERT(rc != 0);
+        ASSERT(strstr(diagnostics, "no-such-dir") != NULL);
+        PASS();
+    }
+_test_next:;
+    const char *no_readback[] = {QA_ENTRY, "--qa-frames=1", flag, NULL};
+    (void)remove(path);
+    failures += skycombat_capture_refusal(no_readback, path,
+        "capture: a failed readback exits nonzero and leaves no file");
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int skycombat_capture_usage(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX], path[PATH_MAX + 16], flag[PATH_MAX + 32];
+    test_make_tmpdir(dir, sizeof(dir), "skycapture", "b");
+    snprintf(path, sizeof(path), "%s/p.png", dir);
+    snprintf(flag, sizeof(flag), "--capture=%s", path);
+    const char *alone[] = {QA_ENTRY, "--fixture-capture-ok", flag, NULL};
+    const char *agent[] = {QA_ENTRY, "--fixture-capture-ok",
+        "--fixture-agent={\"v\":1,\"id\":1,\"op\":\"close\"}\n", "--agent-stdio", flag, NULL};
+    const char *empty[] = {QA_ENTRY, "--fixture-capture-ok", "--qa-frames=1", "--capture=", NULL};
+    const char *twice[] = {QA_ENTRY, "--fixture-capture-ok", "--qa-frames=1", flag, flag, NULL};
+    failures += skycombat_capture_refusal(alone, path,
+        "capture: --capture without --qa-frames is refused and writes no file");
+    failures += skycombat_capture_refusal(agent, path,
+        "capture: --capture with --agent-stdio is refused and writes no file");
+    failures += skycombat_capture_refusal(empty, path,
+        "capture: an empty PATH is refused");
+    failures += skycombat_capture_refusal(twice, path,
+        "capture: a repeated --capture is refused and writes no file");
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 #if !defined(_WIN32)
 static const char sky_fixture_nonce[] =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -787,6 +888,8 @@ _test_next:;
     failures += skycombat_qa_launch(NULL, "--fixture-close=2", 2, 0, 1);
     failures += skycombat_qa_launch("--qa-frames=3", "--fixture-close=2", 2, 1, 1);
     failures += skycombat_qa_launch("--qa-frames=1", "--fixture-window-fails", 0, 1, 1);
+    failures += skycombat_capture_file();
+    failures += skycombat_capture_usage();
     failures += skycombat_agent_session();
     failures += skycombat_agent_refusals();
     failures += skycombat_agent_resize_failure();
