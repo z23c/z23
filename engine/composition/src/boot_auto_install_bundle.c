@@ -40,9 +40,22 @@
 #include "validation/chainstate.h"             /* active_chain_height */
 #include "validation/main_state.h"
 
+#include "platform/private_file.h"
+#include "platform/file_metadata.h"
+#include <pthread.h>
+#include <stdatomic.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+
+#if !defined(_WIN32)
+static pthread_mutex_t g_ibr_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
+static _Atomic uint64_t g_ibr_generation;
+#ifdef ZCL_TESTING
+static _Atomic int g_ibr_fail_flush;
+void boot_install_bundle_test_fail_flush(int which) { atomic_store(&g_ibr_fail_flush, which); }
+#endif
 
 /* The durable install-on-next-boot request file (both platform arms). */
 static void ibr_path(const char *datadir, char *out, size_t n)
@@ -375,35 +388,85 @@ static bool ibr_write(const char *datadir, const char *path, int attempts,
     return true;
 }
 
+static bool ibr_flush_file(struct platform_private_file *file)
+{
+#ifdef ZCL_TESTING
+    if (atomic_load(&g_ibr_fail_flush) == 1) return false;
+#endif
+    return platform_private_file_authority_flush(file);
+}
+static bool ibr_flush_parent(const char *datadir)
+{
+#ifdef ZCL_TESTING
+    if (atomic_load(&g_ibr_fail_flush) == 2) return false;
+#endif
+    return platform_private_parent_flush(datadir);
+}
+static bool ibr_publish_new(const char *datadir, const char *path, const char *bundle)
+{
+    char temp[PATH_MAX], wire[PATH_MAX + 32];
+    int n = snprintf(temp, sizeof(temp), "%s/.install-request-XXXXXX", datadir);
+    int len = snprintf(wire, sizeof(wire), "0\n%s\n", bundle);
+    if (n < 0 || (size_t)n >= sizeof(temp) || len < 0 || (size_t)len >= sizeof(wire)) return false;
+    int fd = mkstemp(temp);
+    if (fd < 0) return false;
+    if (close(fd) != 0) { (void)unlink(temp); return false; }
+    struct platform_private_file file; platform_private_file_init(&file);
+    bool exists = false;
+    bool ok = platform_private_file_open_locked(temp, &file) &&
+        platform_private_file_write_at(&file, wire, (size_t)len, 0) &&
+        ibr_flush_file(&file) &&
+        platform_private_file_publish_no_clobber(&file, temp, path, &exists) && !exists &&
+        ibr_flush_parent(datadir);
+    platform_private_file_close(&file);
+    (void)unlink(temp);
+    return ok;
+}
+static bool ibr_arm_path(const char *datadir, const char *bundle, char *path, size_t cap)
+{
+    if (!datadir || !datadir[0] || !bundle || !bundle[0] || strchr(bundle, '\n')) return false;
+    int n = snprintf(path, cap, "%s/install_bundle_request", datadir);
+    return n >= 0 && (size_t)n < cap;
+}
+
+static enum boot_bundle_arm_result ibr_arm_locked(const char *datadir,
+    const char *bundle_path, int *legacy)
+{
+    char path[512], current[PATH_MAX]; int attempts = 0;
+    *legacy = 0;
+    if (!ibr_arm_path(datadir, bundle_path, path, sizeof(path))) return BOOT_BUNDLE_ARM_ERROR;
+    bool have = ibr_read(path, &attempts, current, sizeof(current));
+    if (have && attempts == BOOT_INSTALL_BUNDLE_TERMINAL) {
+        *legacy = BOOT_INSTALL_BUNDLE_TERMINAL; return BOOT_BUNDLE_ARM_TERMINAL;
+    }
+    if (have && attempts >= 0) {
+        *legacy = attempts > 0 ? attempts : 1; return BOOT_BUNDLE_ARM_EXISTING;
+    }
+    enum platform_file_shape shape = platform_file_shape_read(path);
+    bool fresh = shape == PLATFORM_FILE_SHAPE_MISSING;
+    if (!fresh && shape != PLATFORM_FILE_SHAPE_REGULAR) return BOOT_BUNDLE_ARM_ERROR;
+    bool ok = fresh ? ibr_publish_new(datadir, path, bundle_path) :
+                      ibr_write(datadir, path, 0, bundle_path);
+    if (!ok) return BOOT_BUNDLE_ARM_ERROR;
+    atomic_fetch_add(&g_ibr_generation, 1);
+    *legacy = 1;
+    return fresh ? BOOT_BUNDLE_ARM_CREATED : BOOT_BUNDLE_ARM_REPAIRED;
+}
+static enum boot_bundle_arm_result ibr_arm_platform(const char *datadir,
+    const char *bundle_path, int *legacy, uint64_t *created_generation)
+{
+    pthread_mutex_lock(&g_ibr_lock);
+    enum boot_bundle_arm_result r = ibr_arm_locked(datadir, bundle_path, legacy);
+    if (created_generation) *created_generation = r == BOOT_BUNDLE_ARM_CREATED ?
+        atomic_load(&g_ibr_generation) : 0;
+    pthread_mutex_unlock(&g_ibr_lock);
+    return r;
+}
 int boot_install_bundle_request(const char *datadir, const char *bundle_path)
 {
-    if (!datadir || !datadir[0] || !bundle_path || !bundle_path[0])
-        return 0;
-    if (strchr(bundle_path, '\n')) /* one line only — the codec is line-oriented */
-        return 0;
-
-    char path[512];
-    ibr_path(datadir, path, sizeof(path));
-
-    int cur_attempts = 0;
-    char cur_bundle[PATH_MAX];
-    bool have = ibr_read(path, &cur_attempts, cur_bundle, sizeof(cur_bundle));
-
-    /* TERMINAL already written: the budget was exhausted and the operator paged.
-     * Do NOT re-arm — that is exactly the unbounded crash-loop this exists to
-     * prevent. */
-    if (have && cur_attempts == BOOT_INSTALL_BUNDLE_TERMINAL)
-        return BOOT_INSTALL_BUNDLE_TERMINAL;
-
-    /* Already armed (not terminal): leave it — attempts bump at consume time so a
-     * re-arming caller cannot inflate the budget. Report the current count. */
-    if (have && cur_attempts >= 0)
-        return cur_attempts > 0 ? cur_attempts : 1;
-
-    /* Fresh arm: attempts=0 (armed, not yet attempted by any boot). */
-    if (!ibr_write(datadir, path, 0, bundle_path))
-        return 0;
-    return 1;
+    int legacy = 0;
+    (void)ibr_arm_platform(datadir, bundle_path, &legacy, NULL);
+    return legacy;
 }
 
 bool boot_install_bundle_pending(const char *datadir)
@@ -421,7 +484,7 @@ bool boot_install_bundle_pending(const char *datadir)
     return true;
 }
 
-bool boot_install_bundle_consume(const char *datadir, char *out_path,
+static bool ibr_consume_locked(const char *datadir, char *out_path,
                                  size_t out_cap)
 {
     if (out_path && out_cap)
@@ -462,13 +525,25 @@ bool boot_install_bundle_consume(const char *datadir, char *out_path,
     return true;
 }
 
+bool boot_install_bundle_consume(const char *datadir, char *out_path, size_t out_cap)
+{
+    pthread_mutex_lock(&g_ibr_lock);
+    bool ok = ibr_consume_locked(datadir, out_path, out_cap);
+    atomic_fetch_add(&g_ibr_generation, 1);
+    pthread_mutex_unlock(&g_ibr_lock);
+    return ok;
+}
+
 void boot_install_bundle_clear(const char *datadir)
 {
     if (!datadir)
         return;
+    pthread_mutex_lock(&g_ibr_lock);
     char path[512];
     ibr_path(datadir, path, sizeof(path));
     (void)remove(path);
+    atomic_fetch_add(&g_ibr_generation, 1);
+    pthread_mutex_unlock(&g_ibr_lock);
 }
 
 /* Reuse boot_refold_body_span_contiguous: after a successful install, if the
@@ -916,4 +991,42 @@ bool boot_install_bundle_terminal(const char *datadir, int *read_errno)
                     attempts == BOOT_INSTALL_BUNDLE_TERMINAL;
     fclose(f);
     return terminal;
+}
+
+enum boot_bundle_arm_result boot_install_bundle_request_typed(
+    const char *datadir, const char *bundle_path, int *legacy_result, uint64_t *created_generation)
+{
+    int ignored = 0;
+    if (!legacy_result) legacy_result = &ignored;
+#if defined(_WIN32)
+    (void)datadir; (void)bundle_path; *legacy_result = 0;
+    if (created_generation) *created_generation = 0;
+    return BOOT_BUNDLE_ARM_ERROR;
+#else
+    return ibr_arm_platform(datadir, bundle_path, legacy_result, created_generation);
+#endif
+}
+uint64_t boot_install_bundle_request_generation(void)
+{
+    return atomic_load(&g_ibr_generation);
+}
+bool boot_install_bundle_request_matches(const char *datadir, const char *bundle_path,
+                                         uint64_t *generation)
+{
+#if defined(_WIN32)
+    (void)datadir; (void)bundle_path; (void)generation; return false;
+#else
+    if (!datadir || !bundle_path || !generation) return false;
+    char path[512], marker[1200], current[PATH_MAX]; int attempts = 0;
+    int a = snprintf(path, sizeof(path), "%s/install_bundle_request", datadir);
+    int b = snprintf(marker, sizeof(marker), "%s/%s", datadir, BOOT_CONSENSUS_BUNDLE_MARKER_NAME);
+    if (a < 0 || (size_t)a >= sizeof(path) || b < 0 || (size_t)b >= sizeof(marker)) return false;
+    pthread_mutex_lock(&g_ibr_lock);
+    bool ok = platform_file_shape_read(marker) == PLATFORM_FILE_SHAPE_MISSING &&
+        ibr_read(path, &attempts, current, sizeof(current)) && attempts == 0 &&
+        strcmp(current, bundle_path) == 0;
+    if (ok) *generation = atomic_load(&g_ibr_generation);
+    pthread_mutex_unlock(&g_ibr_lock);
+    return ok;
+#endif
 }

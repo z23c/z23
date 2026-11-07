@@ -66,10 +66,19 @@ bool zapp_node_preload_get(struct zapp_runtime *r, char *out, size_t cap,
     char identity[65], uint64_t *epoch, bool *command_ok);
 bool zapp_node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap);
 bool zapp_node_start_reserved(struct zapp_runtime *r, uint64_t ticket, char *out, size_t cap);
+struct zapp_start_gate { void *ctx; bool (*enter)(void *); void (*leave)(void *); };
+bool zapp_node_start_reserved_gated(struct zapp_runtime *r, uint64_t ticket, char *out, size_t cap,
+    const struct zapp_start_gate *gate, uint64_t *deferred_epoch);
 void zapp_node_start_discard(struct zapp_runtime *r, uint64_t ticket);
 bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap);
 bool zapp_node_resume_if_wanted(struct zapp_runtime *r, char *out, size_t cap);
 bool zapp_node_resume_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap);
+struct zapp_node_identity { pid_t pid; int pidfd; uint64_t epoch, start_token; };
+void zapp_node_identity_close(struct zapp_node_identity *id);
+bool zapp_node_identity(struct zapp_runtime *r, struct zapp_node_identity *id);
+bool zapp_node_handoff_stop(struct zapp_runtime *r, const struct zapp_node_identity *id, uint64_t *epoch);
+bool zapp_node_handoff_current(struct zapp_runtime *r, uint64_t epoch);
+bool zapp_node_handoff_resume_reserve(struct zapp_runtime *r, uint64_t epoch, uint64_t *ticket, char *out, size_t cap);
 bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap);
 /* Asks the node to exit exactly as zapp_node_stop does but leaves the marker that starts it when the app opens, so a stop made by
  * wallet setup never changes the owner's choice. */

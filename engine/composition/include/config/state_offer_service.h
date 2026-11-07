@@ -76,7 +76,22 @@ bool state_offer_service_advertising(void);
  * one download thread. It never blocks on IO. */
 void state_offer_service_tick(void);
 
+struct state_offer_restart_hint {
+    bool pending;
+    int32_t height;
+    uint8_t digest[32];
+    uint64_t bytes;
+    uint64_t request_generation;
+};
+/* Nonblocking advisory snapshot; the installer remains the authority. */
+void state_offer_service_restart_hint(struct state_offer_restart_hint *out);
+
+
+
 #ifdef ZCL_TESTING
+struct state_offer_v1;
+bool state_offer_service_test_arm_landed(const char *landed, const struct state_offer_v1 *offer);
+void state_offer_service_test_clear_restart_hint(void);
 /* Replace the bundle-manifest reader (default NULL: the real
  * consensus_state_artifact_evidence_open path) so a test can drive the
  * manifest cache with cheap fixture files. Same contract as the real reader:

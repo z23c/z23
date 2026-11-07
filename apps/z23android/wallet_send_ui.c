@@ -5,6 +5,7 @@
 #include "controller.h"
 #include "device_key.h"
 #include "home.h"
+#include "node_restart.h"
 #include "jni_util.h"
 #include "node_service.h"
 #include "scan.h"
@@ -865,7 +866,12 @@ static void set_amount(JNIEnv *env)
 static void press_flow(JNIEnv *env, int id)
 {
     if (!ui.flow || !ui.keeper.screen) return;
-    if (id == B_SEND) (void)wss_tap_send_ready(ui.keeper.screen, ui.drawn.serial, ui.drawn.can_send && gate_ready());
+    if (id == B_SEND) {
+        if (zapp_send_admission_begin()) {
+            (void)wss_tap_send_ready(ui.keeper.screen, ui.drawn.serial, ui.drawn.can_send && gate_ready());
+            zapp_send_admission_end();
+        } else say(ui.notice, "The node is restarting. Try again shortly.");
+    }
     else if (id == B_CANCEL) wss_tap_cancel(ui.keeper.screen);
     else if (id == B_RETRY) wss_tap_retry(ui.keeper.screen);
     else if (id == B_PAY_AGAIN) wss_tap_pay_again(ui.keeper.screen);

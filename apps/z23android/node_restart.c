@@ -82,3 +82,30 @@ const char *zapp_node_stop_refusal(bool send_busy)
 {
     return send_busy ? "Your payment is still being sent. Stop the node after it finishes." : NULL;
 }
+
+/* The hold blocks a new send while an automatic restart is in progress. */
+#include <pthread.h>
+static pthread_mutex_t admission_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool handoff_held;
+bool zapp_send_admission_begin(void)
+{
+    pthread_mutex_lock(&admission_lock);
+    if (!handoff_held) return true;
+    pthread_mutex_unlock(&admission_lock);
+    return false;
+}
+void zapp_send_admission_end(void) { pthread_mutex_unlock(&admission_lock); }
+bool zapp_handoff_hold_begin(bool (*busy)(void))
+{
+    pthread_mutex_lock(&admission_lock);
+    bool ok = busy && !handoff_held && !busy();
+    if (ok) handoff_held = true;
+    pthread_mutex_unlock(&admission_lock);
+    return ok;
+}
+void zapp_handoff_hold_end(void)
+{
+    pthread_mutex_lock(&admission_lock);
+    handoff_held = false;
+    pthread_mutex_unlock(&admission_lock);
+}

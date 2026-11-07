@@ -93,6 +93,8 @@ static int64_t g_snapshot_unix;
 static bool g_snapshot_valid;
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_restart_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct state_offer_restart_hint g_restart_hint;
 static pthread_t g_fetch_thread;
 static _Atomic bool g_fetch_running;
 static bool g_fetch_started;
@@ -692,6 +694,53 @@ static enum sol_receive_result sosvc_fetch_link(const struct state_offer_record 
     state_offer_peer_end(peer);
     return r;
 }
+static void sosvc_restart_clear(void)
+{
+    pthread_mutex_lock(&g_restart_lock);
+    memset(&g_restart_hint, 0, sizeof(g_restart_hint));
+    pthread_mutex_unlock(&g_restart_lock);
+}
+void state_offer_service_restart_hint(struct state_offer_restart_hint *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (pthread_mutex_trylock(&g_restart_lock) != 0) return;
+    if (g_restart_hint.pending && g_restart_hint.request_generation ==
+        boot_install_bundle_request_generation()) *out = g_restart_hint;
+    pthread_mutex_unlock(&g_restart_lock);
+}
+static void sosvc_restart_publish(const struct state_offer_v1 *offer, uint64_t generation)
+{
+    pthread_mutex_lock(&g_restart_lock);
+    if (!atomic_load(&g_fetch_stopping) && offer->content_bytes <= INT64_MAX &&
+        generation == boot_install_bundle_request_generation()) {
+        g_restart_hint.pending = true;
+        g_restart_hint.height = offer->bundle_height;
+        memcpy(g_restart_hint.digest, offer->content_digest, sizeof(g_restart_hint.digest));
+        g_restart_hint.bytes = offer->content_bytes;
+        g_restart_hint.request_generation = generation;
+    }
+    pthread_mutex_unlock(&g_restart_lock);
+}
+
+static bool sosvc_arm_landed(const char *landed, const struct state_offer_v1 *offer)
+{
+    int legacy = 0; uint64_t created = 0, observed = 0;
+    enum boot_bundle_arm_result armed = boot_install_bundle_request_typed(g_datadir, landed, &legacy, &created);
+    if (legacy <= 0) return false;
+    if (armed == BOOT_BUNDLE_ARM_CREATED &&
+        boot_install_bundle_request_matches(g_datadir, landed, &observed) && observed == created)
+        sosvc_restart_publish(offer, observed);
+    return true;
+}
+#ifdef ZCL_TESTING
+bool state_offer_service_test_arm_landed(const char *landed, const struct state_offer_v1 *offer)
+{
+    return sosvc_arm_landed(landed, offer);
+}
+void state_offer_service_test_clear_restart_hint(void) { sosvc_restart_clear(); }
+#endif
+
 static void *sosvc_fetch_main(void *arg)
 {
     (void)arg;
@@ -705,7 +754,7 @@ static void *sosvc_fetch_main(void *arg)
                 sosvc_fetch_ip(&target, &m, out_dir, landed, sizeof(landed));
     }
     if (r == SOL_RECEIVE_OK && !atomic_load(&g_fetch_stopping)) {
-        if (boot_install_bundle_request(g_datadir, landed) <= 0) {
+        if (!sosvc_arm_landed(landed, &target.offer)) {
             LOG_WARN(SOSVC_SUBSYS, "verified bundle staged but install request could not be armed");
             r = SOL_RECEIVE_LOCAL_IO;
         }
@@ -764,6 +813,7 @@ void state_offer_service_start(const char *datadir, struct node_db *ndb)
 {
     if (!datadir)
         return;
+    sosvc_restart_clear();
     snprintf(g_datadir, sizeof(g_datadir), "%s", datadir);
     g_ndb = ndb;
     g_snapshot_valid = false;
@@ -796,6 +846,7 @@ void state_offer_service_start(const char *datadir, struct node_db *ndb)
 
 void state_offer_service_shutdown(void)
 {
+    sosvc_restart_clear();
     state_offer_set_provider(NULL, NULL);
     pthread_mutex_lock(&g_lock);
     atomic_store(&g_fetch_stopping, true);
@@ -806,6 +857,7 @@ void state_offer_service_shutdown(void)
         pthread_join(g_fetch_thread, NULL);
         g_fetch_started = false;
     }
+    sosvc_restart_clear();
     pthread_mutex_lock(&g_lock);
     g_identity_gap_logged = false;
     pthread_mutex_unlock(&g_lock);

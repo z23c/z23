@@ -266,6 +266,20 @@ void boot_auto_install_clear_failed_marker(const char *bundle_path);
  * Returns 1 when freshly armed, the current attempt count when already pending,
  * BOOT_INSTALL_BUNDLE_TERMINAL if terminal, or 0 on a write/validation error
  * (empty datadir/path, an embedded newline, or an I/O failure). */
+enum boot_bundle_arm_result {
+    BOOT_BUNDLE_ARM_ERROR, BOOT_BUNDLE_ARM_CREATED, BOOT_BUNDLE_ARM_EXISTING,
+    BOOT_BUNDLE_ARM_REPAIRED, BOOT_BUNDLE_ARM_TERMINAL
+};
+/* CREATED alone certifies a newly published durable request. */
+enum boot_bundle_arm_result boot_install_bundle_request_typed(
+    const char *datadir, const char *bundle_path, int *legacy_result, uint64_t *created_generation);
+bool boot_install_bundle_request_matches(const char *datadir, const char *bundle_path,
+                                         uint64_t *generation);
+uint64_t boot_install_bundle_request_generation(void);
+#ifdef ZCL_TESTING
+void boot_install_bundle_test_fail_flush(int which);
+#endif
+
 int boot_install_bundle_request(const char *datadir, const char *bundle_path);
 
 /* True iff the request on disk is the terminal marker (budget spent). Logs

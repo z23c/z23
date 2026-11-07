@@ -58,3 +58,14 @@ Closing the received-app progress window retains the completed operation and
 stops later build, open, and Keep steps. The release deployment target selects
 its node-only build explicitly. Focused receive, receive UI, and block-index
 loader tests passed all three groups with no skips; the complexity gate passed.
+
+## Verified download handoff
+
+A verified fetch now requests a restart only when it creates a new durable
+install request and confirms that exact request remains pending. Existing,
+repaired, terminal, mismatched, or failed requests do not request a restart.
+The status hint is advisory; the installer independently validates the bundle.
+Android preserves the requested node state through the handoff and serializes
+it with wallet send admission. Focused node and Android tests and an Android
+native compile passed. A complete automatic install on a device remains to be
+verified: an isolated sparse-header run deferred at the ancestry binding gate.

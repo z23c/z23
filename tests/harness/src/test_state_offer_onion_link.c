@@ -7,6 +7,10 @@
  * same composition path a live node uses. */
 #define _POSIX_C_SOURCE 200809L
 #include "config/boot_internal.h"
+#include "controllers/status_frontdoor.h"
+#include "base/hex.h"
+#include "json/json.h"
+#include "config/consensus_state_install_runtime.h"
 #include "config/boot_zcode_swarm.h"
 #include "config/boot_zcode_swarm_membership.h"
 #include "config/state_offer_link.h"
@@ -398,8 +402,71 @@ static bool onion_lands(struct onion_fixture *f)
     struct state_offer_store_status s = {0};
     state_offer_store_status_get(&s);
     ONION_CHECK(s.fetch_bytes_done == ONION_BYTES && s.offers_rejected == 0);
+    struct state_offer_restart_hint hint;
+    state_offer_service_restart_hint(&hint);
+    ONION_CHECK(hint.pending && hint.height == ONION_RUNG && hint.bytes == ONION_BYTES &&
+                memcmp(hint.digest, f->artifact->whole_sha3, 32) == 0);
     ONION_CHECK(f->stray == 0); /* the engine-off client sent only link frames */
     ONION_CHECK(f->chunk_req[0] == 0 && f->chunk_req[1] >= 1); /* resumed from the journal */
+    return true;
+}
+
+static bool onion_restart_status(const struct state_offer_restart_hint *hint)
+{
+    struct json_value state; json_init(&state);
+    bool ok = status_frontdoor_dump_state_json(&state, NULL);
+    const struct json_value *pending = json_get(&state, "restart_pending");
+    const struct json_value *height = json_get(&state, "restart_bundle_height");
+    const struct json_value *bytes = json_get(&state, "restart_bundle_bytes");
+    const struct json_value *digest = json_get(&state, "restart_bundle_digest");
+    char hex[65]; zcl_hex_encode(hint->digest, 32, hex); hex[64] = '\0';
+    ok = ok && pending && pending->type == JSON_BOOL && json_get_bool(pending) &&
+        height && height->type == JSON_INT && json_get_int(height) == hint->height &&
+        bytes && bytes->type == JSON_INT && json_get_int(bytes) == (int64_t)hint->bytes &&
+        digest && digest->type == JSON_STR && !strcmp(json_get_str(digest), hex);
+    json_free(&state); return ok;
+}
+
+static bool onion_hint_negative_cases(struct onion_fixture *f)
+{
+    struct state_offer_restart_hint hint;
+    struct state_offer_v1 offer = {0};
+    offer.bundle_height = ONION_RUNG; offer.content_bytes = ONION_BYTES;
+    memcpy(offer.content_digest, f->artifact->whole_sha3, 32);
+    state_offer_service_test_clear_restart_hint();
+    ONION_CHECK(state_offer_service_test_arm_landed(f->landed, &offer));
+    state_offer_service_restart_hint(&hint); ONION_CHECK(!hint.pending);
+    ONION_CHECK(state_offer_service_test_arm_landed("/different/bundle", &offer));
+    state_offer_service_restart_hint(&hint); ONION_CHECK(!hint.pending);
+    boot_install_bundle_clear(f->dir);
+    char marker[512], request[512];
+    snprintf(marker, sizeof(marker), "%s/consensus-bundle-installed.marker", f->dir);
+    snprintf(request, sizeof(request), "%s/install_bundle_request", f->dir);
+    FILE *fp = fopen(marker, "w"); ONION_CHECK(fp && fclose(fp) == 0);
+    ONION_CHECK(state_offer_service_test_arm_landed(f->landed, &offer));
+    state_offer_service_restart_hint(&hint); ONION_CHECK(!hint.pending);
+    ONION_CHECK(unlink(marker) == 0);
+    boot_install_bundle_clear(f->dir);
+    fp = fopen(request, "w"); ONION_CHECK(fp && fputs("bad\n", fp) >= 0 && fclose(fp) == 0);
+    ONION_CHECK(state_offer_service_test_arm_landed(f->landed, &offer));
+    state_offer_service_restart_hint(&hint); ONION_CHECK(!hint.pending);
+    boot_install_bundle_clear(f->dir);
+    fp = fopen(request, "w");
+    ONION_CHECK(fp && fprintf(fp, "-1\n%s\n", f->landed) > 0 && fclose(fp) == 0);
+    ONION_CHECK(!state_offer_service_test_arm_landed(f->landed, &offer));
+    state_offer_service_restart_hint(&hint); ONION_CHECK(!hint.pending);
+    boot_install_bundle_clear(f->dir);
+    ONION_CHECK(state_offer_service_test_arm_landed(f->landed, &offer));
+    state_offer_service_restart_hint(&hint); ONION_CHECK(hint.pending);
+    ONION_CHECK(onion_restart_status(&hint));
+    state_offer_service_shutdown();
+    state_offer_service_restart_hint(&hint); ONION_CHECK(!hint.pending);
+    struct json_value state; json_init(&state);
+    ONION_CHECK(status_frontdoor_dump_state_json(&state, NULL));
+    const struct json_value *pending = json_get(&state, "restart_pending");
+    bool stopped = pending && pending->type == JSON_BOOL && !json_get_bool(pending) &&
+        !json_get(&state, "restart_bundle_digest");
+    json_free(&state); ONION_CHECK(stopped);
     return true;
 }
 
@@ -443,7 +510,8 @@ int test_state_offer_onion_link(void)
     struct onion_fixture f = {0};
     bool ok = onion_setup(&f) && onion_legacy_dropped() && onion_discover_and_fetch(&f) &&
               onion_serving_peer_kept(&f) && onion_slow_server_kept(&f) &&
-              onion_cut_mid_fetch(&f) && onion_reconnect_resumes(&f) && onion_lands(&f);
+              onion_cut_mid_fetch(&f) && onion_reconnect_resumes(&f) && onion_lands(&f) &&
+              onion_hint_negative_cases(&f);
     onion_cleanup(&f);
     printf("state_offer_onion_link: %s\n", ok ? "OK" : "FAIL");
     return ok ? 0 : 1;

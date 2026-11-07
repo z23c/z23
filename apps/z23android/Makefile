@@ -193,7 +193,7 @@ endif
 test-scan-cancel:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -ffunction-sections -fdata-sections $(SPEECH_INCLUDES) \
-	  tests/scan_cancel_test.c $(SCAN_CANCEL_GC) -o '$(BUILD_DIR)/scan-cancel-test'
+	  tests/scan_cancel_test.c $(SPEECH_JSON) $(SCAN_CANCEL_GC) -o '$(BUILD_DIR)/scan-cancel-test'
 	'$(BUILD_DIR)/scan-cancel-test'
 .PHONY: test-camera-access
 test-camera-access:

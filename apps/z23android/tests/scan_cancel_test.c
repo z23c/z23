@@ -1,19 +1,36 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include <stdbool.h>
+#define ZAPP_CONTROLLER_TEST
 #define ZAPP_WALLET_SEND_UI_H
 bool zapp_send_busy(void);
 #include "../controller.c"
 #include "../fleet_review_state.h"
 #include <assert.h>
 
-bool zapp_send_busy(void) { return false; }
+static bool send_busy;
+bool zapp_send_busy(void) { return send_busy; }
 const char *zapp_node_stop_refusal(bool busy) { (void)busy; return NULL; }
 void zapp_restart_stopped(struct zapp_restart *r) { (void)r; }
 bool zapp_node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap)
 { (void)r; (void)out; (void)cap; *ticket = 42; return true; }
 bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap)
 { (void)r; (void)out; (void)cap; return true; }
+bool zapp_node_handoff_resume_reserve(struct zapp_runtime *r, uint64_t epoch, uint64_t *ticket, char *out, size_t cap)
+{ (void)r; (void)epoch; (void)out; (void)cap; *ticket = 43; return true; }
+bool zapp_node_handoff_current(struct zapp_runtime *r, uint64_t epoch)
+{ (void)r; (void)epoch; return false; }
+static bool handoff_hold;
+bool zapp_handoff_hold_begin(bool (*busy)(void))
+{ if (handoff_hold || busy()) return false; handoff_hold = true; return true; }
+void zapp_handoff_hold_end(void) { handoff_hold = false; }
+enum zapp_pace zapp_node_pace(const struct zapp_runtime *r) { (void)r; return ZAPP_PACE_NORMAL; }
+static int handoff_stops;
+bool zapp_node_handoff_stop(struct zapp_runtime *r, const struct zapp_node_identity *id, uint64_t *epoch)
+{ (void)r; ++handoff_stops; *epoch = id->epoch + 1; return true; }
 
+static int discarded;
+void zapp_node_start_discard(struct zapp_runtime *r, uint64_t ticket)
+{ (void)r; assert(ticket == 42); ++discarded; }
 static int offers, clears;
 static bool fixture_paired;
 static bool held;
@@ -81,8 +98,43 @@ static void paired_notice(void)
     assert(notice && !strcmp(notice, "That laptop is already paired."));
 }
 
+static void status_cases(void)
+{
+    static const char good[] = "{\"ok\":true,\"data\":{\"provable_tip\":1,\"restart_pending\":true,\"restart_bundle_height\":42,\"restart_bundle_bytes\":100,\"restart_bundle_digest\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}";
+    struct node_reading n = read_status(good);
+    assert(n.responding && n.restart_pending && strlen(n.digest) == 64);
+    struct controller test = {0};
+    test.pace_lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    struct zapp_node_identity id = {.pid = 10, .epoch = 4};
+    handoff_offer_locked(&test, &n, &id, true, true, ZAPP_PACE_PAUSE);
+    assert(!handoff_stops);
+    send_busy = true; handoff_offer_locked(&test, &n, &id, true, true, ZAPP_PACE_NORMAL);
+    assert(!handoff_stops); send_busy = false;
+    handoff_offer_locked(&test, &n, &id, true, true, ZAPP_PACE_NORMAL);
+    assert(handoff_stops == 1 && test.handoff_wait && test.handoff_epoch == 5);
+    test.handoff_wait = false;
+    handoff_offer_locked(&test, &n, &id, true, true, ZAPP_PACE_NORMAL);
+    assert(handoff_stops == 1);
+    zapp_handoff_hold_end(); pthread_mutex_destroy(&test.pace_lock);
+    n = read_status("{\"ok\":true,\"data\":{\"provable_tip\":1,\"restart_pending\":true}}");
+    assert(n.responding && !n.restart_pending);
+    n = read_status("{\"ok\":true,\"data\":{\"provable_tip\":1,\"restart_pending\":false}}");
+    assert(n.responding && !n.restart_pending);
+    n = read_status("{bad"); assert(!n.responding && !n.restart_pending);
+}
+
+static void allocation_failure_case(void)
+{
+    handoff_hold = true; c.handoff_active = c.handoff_wait = true;
+    execute_test_fail_allocation = true;
+    assert(!execute_output(&c, "node_resume", 42));
+    execute_test_fail_allocation = false;
+    assert(discarded == 1 && !handoff_hold && !c.handoff_active && !c.handoff_wait);
+}
+
 int main(void)
 {
+    status_cases();
     assert(zapp_fleet_node_state(false, false, false, false) == ZAPP_FLEET_NODE_START);
     assert(zapp_fleet_node_state(false, false, false, true) == ZAPP_FLEET_NODE_WAIT);
     assert(zapp_fleet_node_state(false, true, true, false) == ZAPP_FLEET_NODE_WAIT);
@@ -97,6 +149,7 @@ int main(void)
     assert(!strcmp(zapp_fleet_review_message(joined, started, "join failed", "old start"), "join failed"));
     assert(!strcmp(zapp_fleet_review_message(false, false, "old join", "old start"), ""));
     assert(!pthread_mutex_init(&c.lock, NULL));
+    allocation_failure_case();
     assert(!pthread_cond_init(&c.changed, NULL));
     char join_output[ZAPP_TEXT_CAP] = "";
     assert(!join_fleet(&c, "synthetic", join_output));

@@ -17,6 +17,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#if defined(__linux__) && __has_include(<sys/pidfd.h>)
+#include <sys/pidfd.h>
+#define ZAPP_TEST_HAVE_PIDFD 1
+#endif
 #include <sys/wait.h>
 #include <time.h>
 
@@ -460,6 +464,80 @@ static void mark_wanted(const struct zapp_runtime *r)
     int fd = open(marker, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
     assert(fd >= 0 && close(fd) == 0 && zapp_node_wanted(r));
 }
+#if defined(ZAPP_TEST_HAVE_PIDFD)
+static void handoff_guard_case(struct zapp_runtime *r, const char *self, const char *directory)
+{
+    char out[128]; uint64_t epoch = 0, ticket = 0;
+    char executable[sizeof(r->executable)];
+    memcpy(executable, r->executable, sizeof(executable));
+    assert(snprintf(r->executable, sizeof(r->executable), "%s", self) > 0);
+    mark_wanted(r);
+    pid_t child = fork(); assert(child >= 0);
+    if (!child) { for (;;) pause(); }
+    r->node = child; r->stop_sent = false;
+    struct zapp_node_identity id;
+    assert(zapp_node_identity(r, &id));
+    struct zapp_node_identity stale = id; ++stale.epoch;
+    assert(!zapp_node_handoff_stop(r, &stale, &epoch));
+    stale = id; ++stale.start_token;
+    assert(!zapp_node_handoff_stop(r, &stale, &epoch));
+    stale = id; ++stale.pid;
+    assert(!zapp_node_handoff_stop(r, &stale, &epoch));
+    assert(zapp_node_handoff_stop(r, &id, &epoch));
+    assert(zapp_node_wanted(r) && !zapp_node_handoff_stop(r, &id, &epoch));
+    zapp_node_identity_close(&id);
+    for (int i = 0; i < 500 && zapp_node_running(r); ++i) {
+        struct timespec delay = {.tv_nsec = 10000000}; nanosleep(&delay, NULL);
+    }
+    if (zapp_node_running(r)) { kill(child, SIGKILL); (void)waitpid(child, NULL, 0); assert(!"handoff stop timeout"); }
+    assert(zapp_node_handoff_resume_reserve(r, epoch, &ticket, out, sizeof(out)));
+    zapp_node_start_discard(r, ticket);
+    assert(!zapp_node_handoff_resume_reserve(r, epoch, &ticket, out, sizeof(out)));
+    assert(zapp_node_stop(r, out, sizeof(out)) && !zapp_node_wanted(r));
+    assert(!zapp_node_handoff_resume_reserve(r, epoch, &ticket, out, sizeof(out)));
+    char data[300], pidfile[300];
+    assert(snprintf(data, sizeof(data), "-datadir=%s", directory) > 0);
+    assert(snprintf(pidfile, sizeof(pidfile), "%s/zclassic23.pid", directory) > 0);
+    pid_t earlier = spawn_orphan(self, data, "orphan", pidfile);
+    await_running(r); mark_wanted(r);
+    assert(zapp_node_identity(r, &id) && id.pid == earlier);
+    stale = id; ++stale.start_token;
+    assert(!zapp_node_handoff_stop(r, &stale, &epoch));
+    assert(zapp_node_handoff_stop(r, &id, &epoch));
+    zapp_node_identity_close(&id);
+    int status = 0; pid_t got = 0;
+    for (int i = 0; i < 500 && !(got = waitpid(earlier, &status, WNOHANG)); ++i) {
+        struct timespec delay = {.tv_nsec = 10000000}; nanosleep(&delay, NULL);
+    }
+    if (got != earlier) { kill(earlier, SIGKILL); (void)waitpid(earlier, NULL, 0); assert(!"earlier node stop timeout"); }
+    assert(zapp_node_wanted(r));
+    assert(zapp_node_stop(r, out, sizeof(out)) && !zapp_node_wanted(r));
+    memcpy(r->executable, executable, sizeof(executable));
+}
+
+#endif
+static bool gate_defer(void *ctx) { (void)ctx; return false; }
+static bool gate_stop(void *ctx)
+{
+    char out[128];
+    assert(zapp_node_stop(ctx, out, sizeof(out)));
+    return false;
+}
+static void gate_leave(void *ctx) { (void)ctx; assert(!"unused gate leave"); }
+static void handoff_gate_case(struct zapp_runtime *r)
+{
+    char out[128]; uint64_t ticket = 0, deferred = 0;
+    mark_wanted(r);
+    assert(zapp_node_resume_reserve(r, &ticket, out, sizeof(out)));
+    struct zapp_start_gate gate = {r, gate_defer, gate_leave};
+    assert(!zapp_node_start_reserved_gated(r, ticket, out, sizeof(out), &gate, &deferred));
+    assert(deferred && !zapp_node_start_pending(r) && zapp_node_wanted(r));
+    assert(zapp_node_handoff_resume_reserve(r, deferred, &ticket, out, sizeof(out)));
+    gate.enter = gate_stop; deferred = 0;
+    assert(!zapp_node_start_reserved_gated(r, ticket, out, sizeof(out), &gate, &deferred));
+    assert(!deferred && !zapp_node_start_pending(r) && !zapp_node_wanted(r));
+}
+
 /* Wallet setup's stop asks the node to exit and leaves the owner's choice; the owner's Stop button removes it. */
 static void setup_stop_cases(struct zapp_runtime *r, const char *self, const char *data, const char *pidfile)
 {
@@ -818,6 +896,10 @@ static void node_cases(struct zapp_runtime *r, const char *self, const char *dir
     roster_case(r);
     preview_cases(r);
     assert(zapp_node_stop(r, out, sizeof(out)) && !strcmp(out, "The local node is stopped.") && !zapp_node_wanted(r));
+#if defined(ZAPP_TEST_HAVE_PIDFD)
+    handoff_guard_case(r, self, directory);
+#endif
+    handoff_gate_case(r);
     earlier_cases(r, self, directory);
 }
 static bool pace_file_is(const char *directory, const char *word)

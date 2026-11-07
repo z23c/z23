@@ -2,6 +2,9 @@
 #include "node_restart.h"
 #include <assert.h>
 #include <string.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <unistd.h>
 
 static struct zapp_restart_seen see(bool running, bool wanted, bool held, bool ready, int64_t now)
 {
@@ -200,8 +203,35 @@ static void a_node_stop_is_refused_while_a_payment_is_sent(void)
     assert(!strcmp(zapp_node_stop_refusal(true), "Your payment is still being sent. Stop the node after it finishes."));
 }
 
+static atomic_bool test_busy, test_started;
+static bool busy_read(void) { return atomic_load(&test_busy); }
+static void *hold_attempt(void *p)
+{
+    atomic_store(&test_started, true);
+    *(bool *)p = zapp_handoff_hold_begin(busy_read);
+    return NULL;
+}
+static void admission_serializes_send_and_handoff(void)
+{
+    alarm(10);
+    assert(zapp_send_admission_begin());
+    bool held = true; pthread_t t;
+    assert(!pthread_create(&t, NULL, hold_attempt, &held));
+    while (!atomic_load(&test_started)) {}
+    atomic_store(&test_busy, true);
+    zapp_send_admission_end();
+    assert(!pthread_join(t, NULL) && !held);
+    atomic_store(&test_busy, false);
+    assert(zapp_handoff_hold_begin(busy_read));
+    assert(!zapp_send_admission_begin());
+    zapp_handoff_hold_end();
+    assert(zapp_send_admission_begin()); zapp_send_admission_end();
+    alarm(0);
+}
+
 int main(void)
 {
+    admission_serializes_send_and_handoff();
     first_exit_restarts_after_thirty_seconds();
     three_tries_then_the_start_button();
     a_healthy_run_restores_the_tries();

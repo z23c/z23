@@ -55,6 +55,7 @@ struct fake {
     void (*job)(void *);
     void *job_arg;
     int redraws;
+    bool watch_auth, auth_redraw;
     int outcomes, last_outcome;
     uint64_t rnd;
     /* the node's memory of keys that may have paid */
@@ -210,6 +211,7 @@ static void h_redraw(void *c)
 {
     struct fake *f = c;
     __atomic_fetch_add(&f->redraws, 1, __ATOMIC_RELAXED);
+    if (f->watch_auth) { struct wss_view v; wss_view(f->screen, &v); if (v.state == WS_AUTH) f->auth_redraw = true; }
     if (!f->threaded || !f->hold || pthread_equal(pthread_self(), f->main_thread)) return;
     struct wss_view v;
     wss_view(f->screen, &v);
@@ -304,6 +306,18 @@ static void tap_and_run(struct wss *s, struct fake *f)
 {
     wss_tap_send(s, view_of(s).serial);
     drain(f);
+}
+
+static void send_redraws_auth_before_return(void)
+{
+    struct fake f; fake_init(&f);
+    struct zapp_payment p = pay_of(priv, "?amount=1.5");
+    struct wss *s = reviewed(&f, &p);
+    struct wss_view v = view_of(s);
+    assert(v.can_send); f.watch_auth = true;
+    assert(wss_tap_send_ready(s, v.serial, true));
+    assert(f.auth_redraw && view_of(s).state == WS_AUTH);
+    drain(&f); wss_destroy(s);
 }
 
 static void review_shows_the_plan(void)
@@ -1674,6 +1688,7 @@ int main(void)
     memcpy(priv, "zs1", 3); memset(priv + 3, 'q', 75); priv[78] = 0;
     memcpy(priv2, "zs1", 3); memset(priv2 + 3, 'p', 75); priv2[78] = 0;
     memcpy(pub, "t1", 2); memset(pub + 2, '2', 33); pub[35] = 0;
+    send_redraws_auth_before_return();
     review_shows_the_plan();
     review_shows_the_address_and_calls_nothing_else();
     tap_runs_the_whole_send();

@@ -24,6 +24,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#if defined(__linux__) && __has_include(<sys/pidfd.h>)
+#include <sys/pidfd.h>
+#define ZAPP_HAVE_PIDFD 1
+#endif
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/wait.h>
@@ -446,12 +450,13 @@ static const char *node_start_refusal(struct zapp_runtime *r)
     return NULL;
 }
 
-static bool node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap, bool resume)
+static bool node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap, bool resume, bool guarded, uint64_t epoch)
 {
     if (!r || !ticket || !out || !cap) return false;
     pthread_mutex_lock(&r->mutex);
     if (!resume) zapp_startup_auth_reset(r->startup_auth);
-    const char *refusal = resume && !zapp_node_wanted(r) ? "Node is off." : node_start_refusal(r);
+    const char *refusal = guarded && r->start_epoch != epoch ? "Node start changed." :
+        resume && !zapp_node_wanted(r) ? "Node is off." : node_start_refusal(r);
     if (refusal) {
         snprintf(out, cap, "%s", refusal);
         pthread_mutex_unlock(&r->mutex); return false;
@@ -475,14 +480,18 @@ static bool node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *o
 
 bool zapp_node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap)
 {
-    return node_start_reserve(r, ticket, out, cap, false);
+    return node_start_reserve(r, ticket, out, cap, false, false, 0);
 }
 
 bool zapp_node_resume_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap)
 {
-    return node_start_reserve(r, ticket, out, cap, true);
+    return node_start_reserve(r, ticket, out, cap, true, false, 0);
 }
 
+bool zapp_node_handoff_resume_reserve(struct zapp_runtime *r, uint64_t epoch, uint64_t *ticket, char *out, size_t cap)
+{
+    return node_start_reserve(r, ticket, out, cap, true, true, epoch);
+}
 void zapp_node_start_discard(struct zapp_runtime *r, uint64_t ticket)
 {
     if (!r) return;
@@ -634,12 +643,33 @@ static bool node_start_finish_locked(struct zapp_runtime *r, uint64_t ticket,
     return rc == 0;
 }
 
-bool zapp_node_start_reserved(struct zapp_runtime *r, uint64_t ticket, char *out, size_t cap)
+/* Caller owns runtime mutex; acquire outer admission locks without it. */
+static bool node_start_enter_gate(struct zapp_runtime *r, uint64_t ticket,
+    const struct zapp_start_gate *gate, uint64_t *deferred_epoch)
+{
+    pthread_mutex_unlock(&r->mutex);
+    bool entered = gate->enter(gate->ctx);
+    pthread_mutex_lock(&r->mutex);
+    if (entered) return true;
+    if (r->start_executing && r->reserved_epoch == ticket) {
+        bool defer = r->start_pending && r->start_epoch == ticket && !atomic_load(&r->start_cancel);
+        r->start_pending = r->start_executing = false;
+        atomic_store(&r->setup_running, false);
+        if (defer && deferred_epoch) *deferred_epoch = ++r->start_epoch;
+    }
+    return false;
+}
+static bool node_start_ticket_current(const struct zapp_runtime *r, uint64_t ticket)
+{
+    return r->start_pending && !r->start_executing && r->reserved_epoch == ticket &&
+        r->start_epoch == ticket && !atomic_load(&r->start_cancel);
+}
+bool zapp_node_start_reserved_gated(struct zapp_runtime *r, uint64_t ticket, char *out, size_t cap,
+    const struct zapp_start_gate *gate, uint64_t *deferred_epoch)
 {
     if (!r || !out || !cap) return false;
     pthread_mutex_lock(&r->mutex);
-    if (!r->start_pending || r->start_executing || r->reserved_epoch != ticket ||
-        r->start_epoch != ticket || atomic_load(&r->start_cancel)) {
+    if (!node_start_ticket_current(r, ticket)) {
         snprintf(out, cap, "Node start cancelled.");
         pthread_mutex_unlock(&r->mutex); return false;
     }
@@ -648,8 +678,16 @@ bool zapp_node_start_reserved(struct zapp_runtime *r, uint64_t ticket, char *out
     struct preload_result preload = {0};
     node_preload(r, &preload);
     pthread_mutex_lock(&r->mutex);
-    int install = node_install_if_requested(r, ticket);
+    int install = gate ? 0 : node_install_if_requested(r, ticket);
     if (install > 0) preload.valid = false;
+    bool entered = false;
+    if (install >= 0 && gate) {
+        entered = node_start_enter_gate(r, ticket, gate, deferred_epoch);
+        if (!entered) {
+            snprintf(out, cap, "Node restart is waiting.");
+            pthread_mutex_unlock(&r->mutex); return false;
+        }
+    }
     bool ok;
     if (install < 0) {
         r->start_pending = false; r->start_executing = false;
@@ -658,7 +696,13 @@ bool zapp_node_start_reserved(struct zapp_runtime *r, uint64_t ticket, char *out
         ok = false;
     } else ok = node_start_finish_locked(r, ticket, &preload, out, cap);
     pthread_mutex_unlock(&r->mutex);
+    if (entered) gate->leave(gate->ctx);
     return ok;
+}
+
+bool zapp_node_start_reserved(struct zapp_runtime *r, uint64_t ticket, char *out, size_t cap)
+{
+    return zapp_node_start_reserved_gated(r, ticket, out, cap, NULL, NULL);
 }
 
 bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap)
@@ -698,6 +742,96 @@ static bool request_stop(struct zapp_runtime *r, char *out, size_t cap, bool own
              kept ? "" : " The app could not save this choice and may start the node when reopened.");
     pthread_mutex_unlock(&r->mutex);
     return rc == 0;
+}
+
+/* pidfd prevents PID reuse while proc checks bind UID, image and datadir. */
+#if defined(ZAPP_HAVE_PIDFD)
+static bool handoff_process_image(struct zapp_runtime *r, pid_t pid)
+{
+    char p[96]; struct stat proc, image, expected;
+    if (snprintf(p, sizeof(p), "/proc/%ld", (long)pid) <= 0 || stat(p, &proc) ||
+        proc.st_uid != getuid()) return false;
+    return snprintf(p, sizeof(p), "/proc/%ld/exe", (long)pid) > 0 &&
+        !stat(p, &image) && !stat(r->executable, &expected) &&
+        image.st_dev == expected.st_dev && image.st_ino == expected.st_ino;
+}
+static bool handoff_process_start(pid_t pid, uint64_t *token)
+{
+    char p[96], row[4096];
+    if (snprintf(p, sizeof(p), "/proc/%ld/stat", (long)pid) <= 0) return false;
+    FILE *f = fopen(p, "r"); if (!f) return false;
+    bool ok = fgets(row, sizeof(row), f) != NULL;
+    if (fclose(f)) ok = false;
+    char *s = ok ? strrchr(row, ')') : NULL;
+    if (!s || s[1] != ' ') return false;
+    s += 2;
+    for (int field = 3; field < 22; ++field) {
+        s = strchr(s, ' '); if (!s) return false; ++s;
+    }
+    char *end = NULL; errno = 0; unsigned long long v = strtoull(s, &end, 10);
+    if (errno || end == s || !v || (*end != ' ' && *end != '\n')) return false;
+    *token = (uint64_t)v; return true;
+}
+#endif
+static bool handoff_proc(struct zapp_runtime *r, pid_t pid, uint64_t *token)
+{
+#if defined(ZAPP_HAVE_PIDFD)
+    return handoff_process_image(r, pid) && handoff_process_start(pid, token);
+#else
+    (void)r; (void)pid; (void)token; return false;
+#endif
+}
+void zapp_node_identity_close(struct zapp_node_identity *id)
+{
+    if (id && id->pidfd >= 0) { close(id->pidfd); id->pidfd = -1; }
+}
+bool zapp_node_identity(struct zapp_runtime *r, struct zapp_node_identity *id)
+{
+    if (!r || !id) return false;
+    *id = (struct zapp_node_identity){.pidfd = -1};
+#if defined(ZAPP_HAVE_PIDFD)
+    pthread_mutex_lock(&r->mutex);
+    pid_t pid = running_locked(r) ? r->node : earlier_node(r);
+    int fd = pid > 1 ? pidfd_open(pid, 0) : -1;
+    uint64_t token = 0;
+    bool ok = !r->stopping && !r->stop_sent && fd >= 0 && handoff_proc(r, pid, &token) &&
+        (r->node == pid || earlier_node(r) == pid);
+    if (ok) *id = (struct zapp_node_identity){.pid = pid, .pidfd = fd,
+        .epoch = r->start_epoch, .start_token = token};
+    else if (fd >= 0) close(fd);
+    pthread_mutex_unlock(&r->mutex); return ok;
+#else
+    return false;
+#endif
+}
+
+bool zapp_node_handoff_stop(struct zapp_runtime *r, const struct zapp_node_identity *id, uint64_t *epoch)
+{
+    if (!r || !id || !epoch) return false;
+    pthread_mutex_lock(&r->mutex);
+    uint64_t token = 0;
+    bool ok = !r->stopping && !r->stop_sent && !r->start_pending && id->pidfd >= 0 &&
+        r->start_epoch == id->epoch && zapp_node_wanted(r) && handoff_proc(r, id->pid, &token) &&
+        token == id->start_token && (r->node == id->pid || earlier_node(r) == id->pid);
+#if defined(ZAPP_HAVE_PIDFD)
+    if (ok) {
+        ok = pidfd_send_signal(id->pidfd, SIGINT, NULL, 0) == 0;
+        if (ok) { r->stop_sent = true; *epoch = ++r->start_epoch; }
+    }
+#else
+    ok = false;
+#endif
+    pthread_mutex_unlock(&r->mutex);
+    return ok;
+}
+
+bool zapp_node_handoff_current(struct zapp_runtime *r, uint64_t epoch)
+{
+    if (!r) return false;
+    pthread_mutex_lock(&r->mutex);
+    bool ok = !r->stopping && r->start_epoch == epoch && zapp_node_wanted(r);
+    pthread_mutex_unlock(&r->mutex);
+    return ok;
 }
 
 /* The owner's Stop button: also forgets that the node should run when the app opens. */

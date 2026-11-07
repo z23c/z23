@@ -49,6 +49,7 @@
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
+#include <pthread.h>
 #include <limits.h>
 #include <sqlite3.h>
 #include <stdbool.h>
@@ -248,6 +249,85 @@ static int case_runtime_returns(void)
 }
 
 /* (c) The durable install-on-next-boot request round-trips + bounded budget. */
+struct csir_arm_thread {
+    const char *dir;
+    enum boot_bundle_arm_result result;
+    int legacy;
+};
+static void *csir_arm_run(void *arg)
+{
+    struct csir_arm_thread *t = arg;
+    t->result = boot_install_bundle_request_typed(t->dir, "/fixture/bundle", &t->legacy, NULL);
+    return NULL;
+}
+static int csir_arm_race(const char *dir)
+{
+    int failures = 0;
+    struct csir_arm_thread a = {.dir = dir}, b = {.dir = dir}; pthread_t ta, tb;
+    int ra = pthread_create(&ta, NULL, csir_arm_run, &a);
+    int rb = pthread_create(&tb, NULL, csir_arm_run, &b);
+    if (!ra) (void)pthread_join(ta, NULL);
+    if (!rb) (void)pthread_join(tb, NULL);
+    CSIR_CHECK("racing arms create once", !ra && !rb && a.legacy == 1 && b.legacy == 1 &&
+        ((a.result == BOOT_BUNDLE_ARM_CREATED && b.result == BOOT_BUNDLE_ARM_EXISTING) ||
+         (b.result == BOOT_BUNDLE_ARM_CREATED && a.result == BOOT_BUNDLE_ARM_EXISTING)));
+    return failures;
+}
+static int csir_arm_faults(const char *dir)
+{
+    int failures = 0, legacy = 0; uint64_t created = 99;
+    boot_install_bundle_clear(dir);
+    boot_install_bundle_test_fail_flush(1);
+    CSIR_CHECK("file flush refuses creation", boot_install_bundle_request_typed(dir, "/fixture/bundle", &legacy, &created) ==
+        BOOT_BUNDLE_ARM_ERROR && legacy == 0 && created == 0);
+    boot_install_bundle_test_fail_flush(2);
+    CSIR_CHECK("parent flush refuses creation", boot_install_bundle_request_typed(dir, "/fixture/bundle", &legacy, &created) ==
+        BOOT_BUNDLE_ARM_ERROR && legacy == 0 && created == 0);
+    boot_install_bundle_test_fail_flush(0);
+    CSIR_CHECK("post-publish failure is not fresh", boot_install_bundle_request_typed(dir, "/fixture/bundle", &legacy, &created) ==
+        BOOT_BUNDLE_ARM_EXISTING && legacy == 1 && created == 0);
+    boot_install_bundle_clear(dir);
+    return failures;
+}
+static int case_typed_request(void)
+{
+    int failures = 0, legacy = 0; uint64_t generation = 0, created = 0;
+    char dir[256], marker[512], path[512], got[512];
+    test_make_tmpdir(dir, sizeof(dir), "csir_typed", "ok");
+    CSIR_CHECK("created", boot_install_bundle_request_typed(dir, "/fixture/bundle", &legacy, &created) ==
+        BOOT_BUNDLE_ARM_CREATED && legacy == 1);
+    CSIR_CHECK("exact pending", boot_install_bundle_request_matches(dir, "/fixture/bundle", &generation));
+    CSIR_CHECK("different path refused", !boot_install_bundle_request_matches(dir, "/other", &generation));
+    boot_install_bundle_clear(dir);
+    CSIR_CHECK("recreated", boot_install_bundle_request_typed(dir, "/fixture/bundle", &legacy, NULL) ==
+        BOOT_BUNDLE_ARM_CREATED);
+    CSIR_CHECK("old generation cannot bless replacement",
+        boot_install_bundle_request_matches(dir, "/fixture/bundle", &generation) && generation != created);
+    CSIR_CHECK("existing is not created", boot_install_bundle_request_typed(dir, "/other", &legacy, NULL) ==
+        BOOT_BUNDLE_ARM_EXISTING && legacy == 1);
+    snprintf(marker, sizeof(marker), "%s/consensus-bundle-installed.marker", dir);
+    FILE *f = fopen(marker, "w");
+    CSIR_CHECK("marker created", f && fclose(f) == 0);
+    CSIR_CHECK("marker refuses", !boot_install_bundle_request_matches(dir, "/fixture/bundle", &generation));
+    (void)unlink(marker);
+    CSIR_CHECK("consume", boot_install_bundle_consume(dir, got, sizeof(got)));
+    CSIR_CHECK("consumed no longer matches", !boot_install_bundle_request_matches(dir, "/fixture/bundle", &generation));
+    boot_install_bundle_clear(dir);
+    CSIR_CHECK("clear changes generation", generation != boot_install_bundle_request_generation());
+    snprintf(path, sizeof(path), "%s/install_bundle_request", dir);
+    f = fopen(path, "w");
+    CSIR_CHECK("malformed created", f && fputs("bad\n", f) >= 0 && fclose(f) == 0);
+    CSIR_CHECK("malformed repair not fresh", boot_install_bundle_request_typed(dir, "/fixture/bundle", &legacy, NULL) ==
+        BOOT_BUNDLE_ARM_REPAIRED && legacy == 1);
+    boot_install_bundle_clear(dir);
+    failures += csir_arm_race(dir);
+    failures += csir_arm_faults(dir);
+    CSIR_CHECK("missing directory refuses", boot_install_bundle_request_typed("/nonexistent/z23/request", "/x", &legacy, NULL) ==
+        BOOT_BUNDLE_ARM_ERROR && legacy == 0);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 static int case_durable_request(void)
 {
     int failures = 0;
@@ -1553,6 +1633,7 @@ int test_consensus_state_install_runtime(void)
     failures += case_terminal_context_refusal();
     failures += case_terminal_bridge();
     failures += case_durable_request();
+    failures += case_typed_request();
     failures += case_post_install_fold_span_check();
     failures += case_post_install_drop_borrowed_have_data();
     failures += case_checkpoint_header_ready();

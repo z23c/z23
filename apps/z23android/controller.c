@@ -66,6 +66,9 @@ struct controller {
     bool pace_seen;            /* A thermal status or the startup default has set the pace file. */
     pthread_mutex_t pace_lock; /* Serializes thermal callbacks: previous pace, file write, view. */
     struct zapp_restart restart; /* Restarts of a node that exits while the app is open. Guarded by lock. */
+    bool handoff_wait, handoff_active;
+    uint64_t handoff_epoch, handoff_seen_epoch;
+    char handoff_digest[65];
 };
 static pthread_mutex_t startup_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct controller *current;
@@ -176,7 +179,26 @@ static bool invitation(struct controller *c, const char *text, bool typed)
     memory_cleanse(token, sizeof(token)); return ok;
 }
 /* Heights and peer count from a status reply; values the reply lacks stay negative. */
-struct node_reading { bool responding; int64_t height, target, peers; };
+struct node_reading { bool responding, restart_pending; int64_t height, target, peers; char digest[65]; };
+static bool restart_fields(const struct json_value *data)
+{
+    const struct json_value *pending = json_get(data, "restart_pending");
+    const struct json_value *height = json_get(data, "restart_bundle_height");
+    const struct json_value *bytes = json_get(data, "restart_bundle_bytes");
+    return pending && pending->type == JSON_BOOL && json_get_bool(pending) &&
+        height && height->type == JSON_INT && json_get_int(height) > 0 &&
+        json_get_int(height) <= INT32_MAX && bytes && bytes->type == JSON_INT && json_get_int(bytes) > 0;
+}
+static void read_restart(struct node_reading *n, const struct json_value *data)
+{
+    if (!restart_fields(data)) return;
+    const struct json_value *digest = json_get(data, "restart_bundle_digest");
+    if (!digest || digest->type != JSON_STR) return;
+    const char *s = json_get_str(digest);
+    if (s && strlen(s) == 64 && strspn(s, "0123456789abcdef") == 64) {
+        memcpy(n->digest, s, 65); n->restart_pending = true;
+    }
+}
 static struct node_reading read_status(const char *output)
 {
     struct node_reading n = {.height = -1, .target = -1, .peers = -1};
@@ -189,6 +211,7 @@ static struct node_reading read_status(const char *output)
         height->type == JSON_INT;
     if (n.responding) {
         n.height = json_get_int(height);
+        read_restart(&n, data);
         if (target && target->type == JSON_INT) n.target = json_get_int(target);
         if (peers && peers->type == JSON_INT) n.peers = json_get_int(peers);
     }
@@ -300,8 +323,28 @@ static void read_node_files(const struct controller *c, bool responding, bool *o
     *onion = responding && zapp_onion_ready(&c->runtime);
     *serving = responding && zapp_node_serving(&c->runtime);
 }
+/* Lock order: controller, pace, send admission, runtime. No RPC under these locks. */
+static void handoff_offer_locked(struct controller *c, const struct node_reading *n,
+    const struct zapp_node_identity *observed, bool managed, bool wanted, enum zapp_pace pace)
+{
+    if (!managed || !n->restart_pending || c->handoff_wait ||
+        (!strcmp(c->handoff_digest, n->digest) && c->handoff_seen_epoch == observed->epoch) ||
+        !wanted || c->hidden || c->pending || c->view.busy || pace == ZAPP_PACE_PAUSE) return;
+    pthread_mutex_lock(&c->pace_lock);
+    bool held = zapp_node_pace(&c->runtime) != ZAPP_PACE_PAUSE && zapp_handoff_hold_begin(zapp_send_busy);
+    if (held && zapp_node_handoff_stop(&c->runtime, observed, &c->handoff_epoch)) {
+        memcpy(c->handoff_digest, n->digest, sizeof(c->handoff_digest));
+        c->handoff_seen_epoch = observed->epoch;
+        c->handoff_wait = c->handoff_active = true;
+        zapp_restart_stopped(&c->restart);
+    } else if (held) zapp_handoff_hold_end();
+    pthread_mutex_unlock(&c->pace_lock);
+}
+
 static void observe_node(struct controller *c)
 {
+    struct zapp_node_identity observed = {0};
+    bool managed = zapp_node_identity(&c->runtime, &observed);
     char *output = calloc(1, ZAPP_TEXT_CAP);
     bool ran = output && zapp_operation_run(&c->runtime, "status", output, ZAPP_TEXT_CAP);
     struct node_reading n = read_status(ran ? output : NULL);
@@ -327,6 +370,8 @@ static void observe_node(struct controller *c)
     if (stopping) copy_text(status, sizeof(status), "The node is saving its data before it exits.");
     zapp_node_line(n.responding, process_running, stopping, onion, n.height, n.target, n.peers, &evidence, line, sizeof(line));
     pthread_mutex_lock(&c->lock);
+    handoff_offer_locked(c, &n, &observed, managed, wanted, pace);
+    zapp_node_identity_close(&observed);
     c->view.node_running = n.responding;
     c->view.node_process_running = process_running;
     c->view.node_installing = installing;
@@ -339,6 +384,7 @@ static void observe_node(struct controller *c)
     c->view.node_reference = chain.reference;
     snprintf(c->view.chain_doubt, sizeof(c->view.chain_doubt), "%s", chain.reason);
     record_height(&c->view, &n, process_running);
+    if (c->handoff_wait) copy_text(status, sizeof(status), "Preparing the downloaded state. Restarting the node.");
     const char *restart = zapp_restart_notice(&c->restart);
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), restart ? restart : status);
     copy_text(c->view.node_line, sizeof(c->view.node_line), line);
@@ -813,21 +859,53 @@ static void restart_event(struct controller *c, bool started)
 {
     pthread_mutex_lock(&c->lock);
     if (started) zapp_restart_started(&c->restart);
-    else zapp_restart_stopped(&c->restart);
+    else { zapp_restart_stopped(&c->restart); c->handoff_wait = c->handoff_active = false; zapp_handoff_hold_end(); }
     pthread_mutex_unlock(&c->lock);
+}
+static bool starts_node(const char *action)
+{
+    return !strcmp(action, "node_start") || !strcmp(action, "node_resume");
+}
+
+static bool handoff_start_enter(void *ctx)
+{
+    struct controller *c = ctx;
+    pthread_mutex_lock(&c->lock);
+    pthread_mutex_lock(&c->pace_lock);
+    if (c->handoff_active && !c->hidden && !zapp_send_busy() &&
+        zapp_node_pace(&c->runtime) != ZAPP_PACE_PAUSE) return true;
+    pthread_mutex_unlock(&c->pace_lock);
+    pthread_mutex_unlock(&c->lock);
+    return false;
+}
+static void handoff_start_leave(void *ctx)
+{
+    struct controller *c = ctx;
+    pthread_mutex_unlock(&c->pace_lock);
+    pthread_mutex_unlock(&c->lock);
+}
+static bool execute_start(struct controller *c, const char *action, uint64_t ticket, char *out)
+{
+    uint64_t deferred = 0;
+    const struct zapp_start_gate gate = {c, handoff_start_enter, handoff_start_leave};
+    bool resume = !strcmp(action, "node_resume");
+    bool started = resume ? zapp_node_start_reserved_gated(&c->runtime, ticket, out, ZAPP_TEXT_CAP, &gate, &deferred) :
+        zapp_node_start_reserved(&c->runtime, ticket, out, ZAPP_TEXT_CAP);
+    pthread_mutex_lock(&c->lock);
+    if (resume) {
+        if (deferred && c->handoff_active) { c->handoff_epoch = deferred; c->handoff_wait = true; }
+        else { c->handoff_active = false; zapp_handoff_hold_end(); }
+    }
+    if (started && !c->start_cancelled) zapp_restart_started(&c->restart);
+    pthread_mutex_unlock(&c->lock);
+    return started;
 }
 static bool execute_action(struct controller *c, const char *action, const char *arg,
                            uint64_t ticket, char *out)
 {
     if (!strncmp(action, "fleet_", 6)) return execute_fleet(c, action, arg, out);
     if (!strncmp(action, "ops_", 4)) return execute_ops(c, arg, out);
-    if (!strcmp(action, "node_start")) {
-        bool started = zapp_node_start_reserved(&c->runtime, ticket, out, ZAPP_TEXT_CAP);
-        pthread_mutex_lock(&c->lock);
-        if (started && !c->start_cancelled) zapp_restart_started(&c->restart);
-        pthread_mutex_unlock(&c->lock);
-        return started;
-    }
+    if (starts_node(action)) return execute_start(c, action, ticket, out);
     if (!strcmp(action, "node_stop")) {
         const char *refusal = zapp_node_stop_refusal(zapp_send_busy());
         if (refusal) {
@@ -942,11 +1020,33 @@ static void execute_result(struct controller *c, const char *action, const char 
     pthread_mutex_unlock(&c->lock);
 }
 
+static void handoff_allocation_failed(struct controller *c)
+{
+    pthread_mutex_lock(&c->lock);
+    c->handoff_wait = c->handoff_active = false;
+    zapp_handoff_hold_end();
+    pthread_mutex_unlock(&c->lock);
+}
+#ifdef ZAPP_CONTROLLER_TEST
+static bool execute_test_fail_allocation;
+#endif
+static char *execute_output(struct controller *c, const char *action, uint64_t ticket)
+{
+#ifdef ZAPP_CONTROLLER_TEST
+    char *out = execute_test_fail_allocation ? NULL : calloc(1, ZAPP_TEXT_CAP);
+#else
+    char *out = calloc(1, ZAPP_TEXT_CAP);
+#endif
+    if (!out) {
+        if (starts_node(action)) zapp_node_start_discard(&c->runtime, ticket);
+        if (!strcmp(action, "node_resume")) handoff_allocation_failed(c);
+    }
+    return out;
+}
 static void execute(struct controller *c, const char *action, const char *arg, uint64_t ticket)
 {
-    char *out = calloc(1, ZAPP_TEXT_CAP);
+    char *out = execute_output(c, action, ticket);
     if (!out) {
-        if (!strcmp(action, "node_start")) zapp_node_start_discard(&c->runtime, ticket);
         char error[] = "Not enough memory to complete that action.";
         execute_result(c, action, arg, error, false);
         return;
@@ -985,6 +1085,15 @@ static void restart_check(struct controller *c)
         .held = zapp_node_pace(&c->runtime) == ZAPP_PACE_PAUSE, .now = monotonic_secs()};
     pthread_mutex_lock(&c->lock);
     seen.running = c->view.node_process_running;
+    if (c->handoff_wait) {
+        if (!c->view.node_wanted) { c->handoff_wait = c->handoff_active = false; zapp_handoff_hold_end(); }
+        else if (!seen.running && !seen.held && !c->hidden && !c->pending &&
+                 !c->view.busy && !zapp_send_busy()) {
+            queue_action(c, "node_resume", "");
+        }
+        pthread_mutex_unlock(&c->lock);
+        return;
+    }
     seen.wanted = c->view.node_wanted;
     seen.ready = !c->hidden && !c->pending && !c->view.busy;
     bool restart = zapp_restart_observe(&c->restart, &seen) == ZAPP_RESTART_RUN;
@@ -1012,7 +1121,7 @@ static void act(struct controller *c, const char *action, const char *arg, uint6
         zapp_sync_line(false, process_running, -1, -1, -1, NULL, c->view.sync_status, sizeof(c->view.sync_status));
         zapp_node_line(false, process_running, stopping, false, -1, -1, -1, NULL, c->view.node_line, sizeof(c->view.node_line));
     }
-    if (!strcmp(action, "node_start")) c->view.node_starting = false;
+    if (!strcmp(action, "node_start") || !strcmp(action, "node_resume")) c->view.node_starting = false;
     c->view.busy = false;
     watch_now(c);
     pthread_mutex_unlock(&c->lock);
@@ -1020,7 +1129,7 @@ static void act(struct controller *c, const char *action, const char *arg, uint6
 }
 static uint64_t action_ticket(const struct controller *c, const char *action)
 {
-    return !strcmp(action, "node_start") ? c->start_ticket : c->camera_ticket;
+    return starts_node(action) ? c->start_ticket : c->camera_ticket;
 }
 /* The owner's actions, one at a time, and the laptop's fleet report while the app is shown. The node status is read by the
  * watcher, so a status command that hangs until its limit never holds back a tap. An action, or showing the app, wakes the
@@ -1231,6 +1340,17 @@ static enum zapp_refusal resolve_action(struct controller *c, const char **actio
 /* Caller holds c->lock. */
 static void queue_action(struct controller *c, const char *action, const char *arg)
 {
+    if (!strcmp(action, "node_resume")) {
+        char reason[256] = "";
+        if (!zapp_node_handoff_resume_reserve(&c->runtime, c->handoff_epoch,
+                &c->start_ticket, reason, sizeof(reason))) {
+            c->handoff_wait = zapp_node_handoff_current(&c->runtime, c->handoff_epoch);
+            if (!c->handoff_wait) { c->handoff_active = false; zapp_handoff_hold_end(); }
+            return;
+        }
+        c->handoff_wait = false;
+        c->start_cancelled = false; c->view.node_starting = true;
+    }
     if (!strcmp(action, "node_start")) {
         char reason[256] = "";
         if (!zapp_node_start_reserve(&c->runtime, &c->start_ticket, reason, sizeof(reason))) {
@@ -1273,6 +1393,7 @@ static enum zapp_refusal take_request(struct controller *c, const char *action, 
         c->start_cancelled = true;
         if (c->pending) { c->pending = false; c->view.busy = false; }
         zapp_restart_stopped(&c->restart);
+        c->handoff_wait = c->handoff_active = false; zapp_handoff_hold_end();
         char text[256];
         (void)zapp_node_stop(&c->runtime, text, sizeof(text));
         c->view.node_starting = false;

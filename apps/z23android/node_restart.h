@@ -46,4 +46,9 @@ enum zapp_restart_action zapp_restart_observe(struct zapp_restart *r, const stru
 const char *zapp_restart_notice(const struct zapp_restart *r);
 /* The notice for a node stop while a payment is being sent, or NULL when the stop may proceed. */
 const char *zapp_node_stop_refusal(bool send_busy);
+/* Serializes payment admission with automatic restart. */
+bool zapp_send_admission_begin(void);
+void zapp_send_admission_end(void);
+bool zapp_handoff_hold_begin(bool (*busy)(void));
+void zapp_handoff_hold_end(void);
 #endif

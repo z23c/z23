@@ -16,6 +16,8 @@
 #include "controllers/status_frontdoor.h"
 #include "controllers/status_native_helpers.h"
 #include "controllers/network_controller.h"
+#include "config/state_offer_service.h"
+#include "base/hex.h"
 
 #include "services/operator_peer_snapshot_service.h"
 #include "jobs/reducer_frontier.h"
@@ -162,6 +164,18 @@ bool status_frontdoor_dump_state_json(struct json_value *out, const char *key)
         json_push_kv_int(out, "sync_gap", gap > 0 ? gap : 0);
     }
     json_push_kv_bool(out, "sync_gap_known", have_peer_height);
+
+    struct state_offer_restart_hint hint;
+    state_offer_service_restart_hint(&hint);
+    json_push_kv_bool(out, "restart_pending", hint.pending);
+    if (hint.pending) {
+        char digest[65];
+        zcl_hex_encode(hint.digest, sizeof(hint.digest), digest);
+        digest[64] = '\0';
+        json_push_kv_int(out, "restart_bundle_height", hint.height);
+        json_push_kv_str(out, "restart_bundle_digest", digest);
+        json_push_kv_int(out, "restart_bundle_bytes", (int64_t)hint.bytes);
+    }
 
     /* Blockers (in-memory registry). */
     frontdoor_push_blockers(out);
