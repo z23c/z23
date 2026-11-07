@@ -579,13 +579,22 @@ static int case_handlers(struct al_fx *f)
         ASSERT_STR_EQ(reply.next[0].command, "app.list");
     PASS(); }
     TEST("app.open of blog says it is a web app the node serves") {
-        ASSERT(json_push_kv_str(&input, "name", "blog"));
+        struct json_value blog_in;
+        struct zcl_command_request blog_req = {.input = &blog_in,
+                                               .view = "normal",
+                                               .invoked_name = "app.open"};
+        json_init(&blog_in);
+        json_set_object(&blog_in);
+        ASSERT(json_push_kv_str(&blog_in, "name", "blog"));
         zcl_command_reply_init(&reply, "zcl.app_open.v1");
-        zcl_native_handle_app_open(&request, &reply);
+        zcl_native_handle_app_open(&blog_req, &reply);
+        json_free(&blog_in);
         ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
-        ASSERT(strstr(reply.error.message, "web app") != NULL);
-        ASSERT(strstr(reply.error.message, "/blog") != NULL);
-        ASSERT(strstr(reply.error.message, "skycombat") != NULL);
+        const char *msg = json_get_str(json_get(&reply.data, "message"));
+        ASSERT(msg != NULL);
+        ASSERT(strstr(msg, "web app") != NULL);
+        ASSERT(strstr(msg, "/blog") != NULL);
+        ASSERT(strstr(msg, "skycombat") != NULL);
     PASS(); }
     TEST("app.list says what can be opened and offers open and copy of the "
          "first launchable app") {

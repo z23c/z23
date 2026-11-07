@@ -1925,7 +1925,10 @@ static void render_app_list(struct buf *b, const struct zcl_cli_render_env *e,
     app_list_names(names, sizeof(names), json_get(data, "apps"), NULL);
     if (names[0]) {
         buf_putc(b, '\n');
-        emit_kv(b, e, 10, "other apps", names);
+        emit_kv(b, e, 10, "web apps", names);
+        emit_kv(b, e, 10, "", "your node serves these while it runs, at "
+                "https://127.0.0.1:8443/<name> (-httpsport sets the port); "
+                "app open and app copy are for desktop apps");
     }
     app_list_names(names, sizeof(names), json_get(data, "copies"), "name");
     if (names[0])

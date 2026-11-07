@@ -8,6 +8,7 @@
 #include "command/app_seed.h"
 
 #include "command/app_build_make.h"
+#include "framework/app_definition.h"
 #include "util/file_io.h"
 #include "util/file_tree_ops.h"
 #include "util/path_util.h"
@@ -38,6 +39,19 @@ static bool as_fail(struct app_seed_stage *o, const char *code,
     (void)vsnprintf(o->why, sizeof(o->why), fmt, ap);
     va_end(ap);
     return false;
+}
+
+/* The built-in catalog (contexts/commons/apps/<name>/app.def, each with a
+ * ZCL_APP_WEB_MOUNT) names the apps a node serves over its web port; the
+ * desktop apps are not in it. */
+bool app_seed_web_app_note(const char *app, char *out, size_t cap)
+{
+    if (!app || !out || cap == 0 || !zcl_app_definition_builtin_v1(app))
+        return false;
+    (void)snprintf(out, cap, "%.64s is a web app your node serves at /%.64s, "
+                   "not a desktop app; app open and app copy work on desktop "
+                   "apps (skycombat)", app, app);
+    return true;
 }
 
 bool app_seed_name_valid(const char *app)
@@ -260,9 +274,13 @@ static bool as_locate(struct as_ctx *c, const char *app)
         !zcl_path_join(c->app_dir, sizeof(c->app_dir), apps, app))
         return as_fail(c->out, "SEED_IO", "path too long: %s", c->repo);
     if (lstat(apps, &st) != 0 || !S_ISDIR(st.st_mode) ||
-        lstat(c->app_dir, &st) != 0 || !S_ISDIR(st.st_mode))
+        lstat(c->app_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        char note[400];
+        if (app_seed_web_app_note(app, note, sizeof(note)))
+            return as_fail(c->out, "APP_UNKNOWN", "%s", note);
         return as_fail(c->out, "APP_UNKNOWN", "%s is not an app directory "
                        "of the checkout", c->app_dir);
+    }
     return true;
 }
 

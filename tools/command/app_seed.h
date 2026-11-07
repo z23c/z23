@@ -55,6 +55,11 @@ struct app_seed_stage {
 /* An app name: 1..APP_SEED_NAME_MAX of [a-z0-9_-], starting alphanumeric. */
 bool app_seed_name_valid(const char *app);
 
+/* True when app is a node-hosted web app of the built-in app catalog (blog,
+ * social, yardsale ...), not a desktop app; writes the plain-words refusal
+ * to out (truncated to cap). */
+bool app_seed_web_app_note(const char *app, char *out, size_t cap);
+
 /* Compose the tree for apps/<app> of the checkout at repo_root into dest,
  * an existing empty directory. False with out->code and out->why on
  * refusal: BAD_APP, APP_UNKNOWN, NO_PACKAGE_ENTRYPOINT (no Makefile),

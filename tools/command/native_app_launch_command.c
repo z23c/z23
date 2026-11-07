@@ -9,6 +9,7 @@
 
 #include "command/native_app_launch.h"
 #include "command/app_selection.h"
+#include "command/app_seed.h"
 #include "command/native_app_front_door.h"
 #include "command/native_app_compose.h"
 
@@ -114,8 +115,9 @@ static bool app_open_admit(const struct app_launch_env *env,
             app_fail(out, APP_STAGE_CONFIG_REFUSED, reg->config_error, hint);
             return false;
         }
-        snprintf(text, sizeof(text), "no app is named '%.64s'",
-                 name ? name : "");
+        if (!app_seed_web_app_note(name, text, sizeof(text)))
+            snprintf(text, sizeof(text), "no app is named '%.64s'",
+                     name ? name : "");
         app_fail(out, APP_STAGE_UNKNOWN_APP, text, hint);
         return false;
     }
