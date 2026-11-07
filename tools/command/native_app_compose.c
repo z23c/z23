@@ -43,25 +43,27 @@ bool zcl_app_inner_call(const char *path, const struct json_value *input,
 bool zcl_app_inner_plan_confirm(const char *path, struct json_value *input,
                                 struct zcl_command_reply *out)
 {
-    char plan[65];
-    if (!zcl_app_inner_call(path, input, out, NULL))
-        return false;
-    const char *id = zcl_app_inner_str(out, "plan_id");
-    if (!id || strlen(id) != 64) {
-        zcl_command_reply_free(out);
-        zcl_command_reply_init(out, "zcl.command.inner.v1");
+    char id[65] = "";
+    struct zcl_command_reply plan;
+    zcl_command_reply_init(out, "zcl.command.inner.v1");
+    bool ok = zcl_app_inner_call(path, input, &plan, NULL);
+    const char *got = ok ? zcl_app_inner_str(&plan, "plan_id") : NULL;
+    if (got && strlen(got) == 64)
+        (void)snprintf(id, sizeof(id), "%s", got);
+    if (!ok)
+        zcl_app_inner_fail(out, &plan, false);
+    else if (!id[0])
         zcl_package_copy_fail(out, "PLAN_ID_MISSING", false,
                               "the plan returned no plan_id", path);
+    zcl_command_reply_free(&plan);
+    if (!id[0])
         return false;
-    }
-    (void)snprintf(plan, sizeof(plan), "%s", id);
-    zcl_command_reply_free(out);
-    if (!json_push_kv_str(input, "plan_id", plan) ||
+    if (!json_push_kv_str(input, "plan_id", id) ||
         !json_push_kv_bool(input, "confirm", true)) {
-        zcl_command_reply_init(out, "zcl.command.inner.v1");
         zcl_package_copy_fail(out, "ALLOC", false, "confirm input", path);
         return false;
     }
+    zcl_command_reply_free(out);
     return zcl_app_inner_call(path, input, out, NULL);
 }
 

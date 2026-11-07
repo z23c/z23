@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_app_run_copy_command.c", CAP_PROCESS|CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "app.run.copy: stats the build record image, opens /dev/null and the copy log under ~/.local/state/z23/apps for the child stdio, spawns the pinned image through resident_launch and polls waitpid for the bounded settle time")

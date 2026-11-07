@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/cli_confirm.c", CAP_FS_READ|CAP_FS_WRITE, "the front door y/N: checks whether stdin and stdout are a terminal, writes the question to stderr and reads one answer line from stdin")

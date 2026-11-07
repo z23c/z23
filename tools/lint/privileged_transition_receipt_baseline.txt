@@ -27,6 +27,9 @@ app.account.add           exempt: App-principal AR write, no artifact install
 app.account.role          exempt: App-principal AR write, no artifact install
 app.account.suspend       exempt: App-principal AR write, no artifact install
 app.account.unsuspend     exempt: App-principal AR write, no artifact install
+app.copy exempt: composes app.seed (when the datadir has no release of the app) and zcode.package.adopt into one owner plan/confirm; it adds a source copy under <datadir>/copies and its adopt record, builds and executes nothing, installs no artifact and changes no running binary
+app.share exempt: composes zcode.package.version.save and zcode.package.bundle.sign into one owner plan/confirm (first-use 0600 key, the package renamed under that key's namespace, one new share file); it installs and activates nothing and changes no running binary
+app.receive exempt: composes bundle.verify, bundle.receive (trusting exactly the verified file's publisher and root), app.build and app.run.copy into one owner plan/confirm; it runs the built image only after resident_launch re-proves its exact image_sha3, installs no privileged artifact and changes no running binary
 core.consensus.block.invalidate   exempt: in-memory validity mask, no state bundle install
 core.consensus.block.reconsider   exempt: in-memory validity mask, no state bundle install
 core.wallet.address.new    exempt: keystore write, guarded by wallet AR + AT_REST

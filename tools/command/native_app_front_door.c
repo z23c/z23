@@ -4,6 +4,10 @@
  * asks one y/N (or takes --yes), and runs the confirm half with the plan's
  * own plan_id. With no terminal and no --yes it plans only. */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE /* realpath */
+#endif
+
 #include "command/native_app_front_door.h"
 
 #include "command/native_app_compose.h"
@@ -14,6 +18,7 @@
 #include "json/json.h"
 #include "platform/directory_compat.h"
 #include "sha3/sha3.h"
+#include "util/str_suffix.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -175,12 +180,6 @@ static const char *fd_str(const struct fd_run *r, const char *key)
     return zcl_app_inner_str(&r->reply, key);
 }
 
-static bool fd_has_suffix(const char *s, const char *suffix)
-{
-    size_t n = strlen(s), m = strlen(suffix);
-    return n > m && strcmp(s + n - m, suffix) == 0;
-}
-
 static bool fd_is_copy(const char *datadir, const char *name)
 {
     char path[FD_PATH];
@@ -197,7 +196,7 @@ static const struct fd_verb *fd_pick(const char *verb, const char *target,
                                      const char *datadir)
 {
     if (strcmp(verb, "open") == 0 &&
-        fd_has_suffix(target, ZCL_PACKAGE_BUNDLE_SUFFIX))
+        zcl_str_has_suffix(target, ZCL_PACKAGE_BUNDLE_SUFFIX))
         verb = "receive";
     else if (strcmp(verb, "open") == 0 && !fd_is_copy(datadir, target))
         return NULL;
@@ -437,7 +436,7 @@ bool zcl_app_front_door_try(const struct zcl_command_spec *spec,
                                            : zcl_native_command_datadir();
     bool copy_open = strcmp(spec->path, "app.run.copy") == 0;
     if (strcmp(verb, "open") == 0 && !copy_open && dd &&
-        !fd_has_suffix(target, ZCL_PACKAGE_BUNDLE_SUFFIX) &&
+        !zcl_str_has_suffix(target, ZCL_PACKAGE_BUNDLE_SUFFIX) &&
         !fd_is_copy(dd, target))
         return false;
     const struct zcl_app_front_door door = {

@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_app_front_door.c", CAP_FS_READ|CAP_FS_WRITE, "z23 app front door: stats <datadir>/copies/<name>, resolves a .z23share path with realpath, lists the copies directory for app.list and prints plans and results to the terminal")

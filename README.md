@@ -68,23 +68,24 @@ offline. macOS, Windows and the rest are in
 
 The quickest thing to touch is Sky Combat, a split-screen flight game that
 ships in this repo. It needs no node and no network. Play it, make your own
-copy, change it, and give it to a friend, one plain command per step:
+copy, change it, and give it to a friend, one plain command per step. The
+examples keep your copies in their own data directory, apart from a node's:
 
 ```bash
-make z23 game                          # build/bin/z23 and the game (needs X11 + GL headers)
-build/bin/z23 app open skycombat       # play the game
-build/bin/z23 app copy skycombat       # your own copy, skycombat-1; it prints where it lives
-#   ...edit a file in that copy...
-build/bin/z23 app save skycombat-1     # keep your change as a version
-build/bin/z23 app build skycombat-1    # build that saved version
-build/bin/z23 app open skycombat-1     # play your version
-build/bin/z23 app share skycombat-1    # writes skycombat-1.z23share
+make z23 game          # build/bin/z23 and the game (needs X11 + GL headers)
+build/bin/z23 -datadir="$HOME/.z23-apps" app open skycombat     # play it
+build/bin/z23 -datadir="$HOME/.z23-apps" app copy skycombat     # skycombat-1
+#   ...edit a file in the copy it names...
+build/bin/z23 -datadir="$HOME/.z23-apps" app save skycombat-1   # keep the edit
+build/bin/z23 -datadir="$HOME/.z23-apps" app build skycombat-1
+build/bin/z23 -datadir="$HOME/.z23-apps" app open skycombat-1   # your version
+build/bin/z23 -datadir="$HOME/.z23-apps" app share skycombat-1  # one file
 ```
 
-Send the file. Your friend runs one command:
+Send the file `skycombat-1.z23share`. Your friend runs one command:
 
 ```bash
-z23 app open skycombat-1.z23share
+z23 -datadir="$HOME/.z23-apps" app open skycombat-1.z23share
 ```
 
 It checks the file, shows who signed it as a short fingerprint such as
