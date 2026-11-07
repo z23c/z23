@@ -10,12 +10,6 @@ It is the owner's own game (Apache-2.0, imported from
 repo's own-code flags. It is an application, not part of the node: it links
 nothing from `core/` or `engine/`, and the node binary links nothing from it.
 
-To play it, make your own copy, change it and send it to a friend as one
-file, follow [Try an app](../../README.md#try-an-app): `z23 app open`,
-`copy`, `save`, `build`, `open` and `share`, then `z23 app open
-FILE.z23share` on the friend's side. `z23 app open skycombat` raises an
-already open game window with SIGUSR1, which the game handles.
-
 ## Build and run
 
 ```
