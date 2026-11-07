@@ -1709,14 +1709,25 @@ static void headers_suppress_live_block_scan(int our_height,
 
 /* Emit the all-headers-rejected stall warning when the plan asks for it. */
 static void headers_warn_all_rejected(struct p2p_node *node, uint64_t count,
-                                     const struct sync_header_processing_plan *plan)
+                                     const struct sync_header_processing_plan *plan,
+                                     int our_height)
 {
     if (plan->batch.should_warn_all_rejected) {
-        /* All headers rejected — this stalls sync. Log prominently. */
         event_emitf(EV_HEADERS_REJECTED, (uint32_t)node->id,
                     "all %llu headers rejected", (unsigned long long)count);
-        printf("WARNING: Peer %s: all %llu headers rejected — sync stalled!\n",
-               node->addr_name, (unsigned long long)count);
+        if (syncsvc_all_rejected_is_stall(count, our_height,
+                                          node->starting_height)) {
+            /* All headers rejected — this stalls sync. Log prominently. */
+            printf("WARNING: Peer %s: all %llu headers rejected — sync stalled!\n",
+                   node->addr_name, (unsigned long long)count);
+        } else {
+            /* A lone tip announcement we cannot connect yet: not a stall. */
+            LOG_INFO_IN("process_headers", "headers",
+                        "peer %s: tip announcement (%llu header) not connectable "
+                        "yet, we are behind (our=%d peer=%d)",
+                        node->addr_name, (unsigned long long)count,
+                        our_height, node->starting_height);
+        }
     }
 }
 
@@ -1757,7 +1768,7 @@ static void headers_plan_block_requests(struct msg_processor *mp,
                                    hashes, heights, max_collect);
     headers_overlay_sequence_queue(acc, hashes, heights);
     headers_suppress_live_block_scan(our_height, &acc->header_plan);
-    headers_warn_all_rejected(node, count, &acc->header_plan);
+    headers_warn_all_rejected(node, count, &acc->header_plan, our_height);
 
     /* All-rejected recovery probe (the missed-intermediate-header stall):
      * a direct tip announcement (BIP 130) whose prev we do not have is

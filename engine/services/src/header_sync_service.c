@@ -116,8 +116,9 @@ void syncsvc_evaluate_header_batch(struct sync_header_batch *result,
 bool syncsvc_all_rejected_is_stall(uint64_t total_count, int our_height,
                                    int peer_height)
 {
-    (void)total_count; (void)our_height; (void)peer_height;
-    return true;
+    /* A lone header while we are behind is a BIP 130 tip announcement
+     * that cannot connect yet (bad-prevblk): normal, not a stall. */
+    return !(total_count == 1 && our_height < peer_height);
 }
 
 void syncsvc_plan_header_download(struct sync_header_download_plan *plan,
