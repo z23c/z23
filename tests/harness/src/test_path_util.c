@@ -12,6 +12,9 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
 
 
 static int pu_join(void)
@@ -70,7 +73,34 @@ static int pu_lower_hex(void)
     return failures;
 }
 
+static int pu_rm_rf_readonly(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST_CASE("path_util: test_rm_rf_recursive removes a tree holding a non-writable subdirectory") {
+        char dir[PATH_MAX], sub[PATH_MAX], file[PATH_MAX];
+        test_make_tmpdir(dir, sizeof dir, "path_util", "rdonly");
+        bool built = zcl_path_join(sub, sizeof sub, dir, "sub") &&
+                     zcl_path_join(file, sizeof file, sub, "f") &&
+                     mkdir(sub, 0700) == 0;
+        FILE *f = built ? fopen(file, "w") : NULL;
+        bool filled = f != NULL && fclose(f) == 0;
+        bool locked = filled && chmod(sub, 0555) == 0;
+        int rc = test_rm_rf_recursive(dir);
+        bool gone = !zcl_path_is_dir(dir);
+        if (!gone) {
+            (void)chmod(sub, 0700);
+            (void)test_rm_rf_recursive(dir);
+        }
+        ASSERT(locked);
+        ASSERT(rc == 0);
+        ASSERT(gone);
+    } TEST_END
+#endif
+    return failures;
+}
+
 int test_path_util(void)
 {
-    return pu_join() + pu_is_dir() + pu_lower_hex();
+    return pu_join() + pu_is_dir() + pu_lower_hex() + pu_rm_rf_readonly();
 }
