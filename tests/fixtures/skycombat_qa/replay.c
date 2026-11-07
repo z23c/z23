@@ -17,7 +17,18 @@
 #include <external/stb_image_resize2.h>
 #include "zsha256/zsha256.h"
 #define RPRAND_IMPLEMENTATION
+/* Vendored rprand.h ends without a final newline, and macOS clang reports
+ * that under -pedantic (-Wnewline-eof), which -Werror makes fatal; GCC does
+ * not. vendor/ stays as pinned, so quiet only that one check around the one
+ * vendored include. */
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnewline-eof"
+#endif
 #include <external/rprand.h>
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 #define main sky_replay_product_main
 #include "apps/skycombat/src/sky_combat_multiplayer_ultimate.c"
