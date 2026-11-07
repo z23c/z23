@@ -4,10 +4,6 @@
  * asks one y/N (or takes --yes), and runs the confirm half with the plan's
  * own plan_id. With no terminal and no --yes it plans only. */
 
-#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
-#define _DEFAULT_SOURCE /* realpath */
-#endif
-
 #include "command/native_app_front_door.h"
 
 #include "command/native_app_compose.h"
@@ -18,12 +14,14 @@
 #include "json/json.h"
 #include "platform/directory_compat.h"
 #include "sha3/sha3.h"
+#include "util/path_util.h"
 #include "util/str_suffix.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define FD_FINGERPRINT_DOMAIN "zcl.app_fingerprint.v1"
 #define FD_PATH 4400
@@ -214,11 +212,11 @@ static bool fd_target(struct fd_run *r)
         (void)snprintf(r->target, sizeof(r->target), "%s", t);
         return true;
     }
-    char *real = realpath(t, NULL);
-    bool ok = real && strlen(real) < sizeof(r->target);
-    if (ok)
-        (void)snprintf(r->target, sizeof(r->target), "%s", real);
-    free(real);
+    char cwd[FD_PATH];
+    struct stat st;
+    bool ok = getcwd(cwd, sizeof(cwd)) &&
+              zcl_path_join(r->target, sizeof(r->target), cwd, t) &&
+              stat(r->target, &st) == 0 && S_ISREG(st.st_mode);
     if (!ok)
         (void)fprintf(r->out, "z23 app open: no such file: %s\n", t);
     return ok;
