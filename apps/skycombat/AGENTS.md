@@ -37,6 +37,10 @@ numbers move.
   `build/bin/z23-skycombat --qa-frames=N` to render N frames (1 to 3600,
   `SKY_COMBAT_QA_FRAMES_MAX`) and exit.
   Add `--capture=PATH` (needs `--qa-frames`) to also save the last frame as a PNG at PATH.
+  On a host with no display (ssh, a server, a CI box), prefix either command with
+  `xvfb-run -a`, for example `xvfb-run -a build/bin/z23-skycombat --qa-frames=120`.
+  Wrap the command from the `Preview:` line that the app build step prints the same way:
+  `xvfb-run -a <that command>`.
 
 ## Tests
 

@@ -34,6 +34,13 @@ window before the requested frames complete exits 1. With no argument the
 game remains interactive. A health check still needs a working native display
 and graphics driver, and its own watchdog for a stalled driver or process.
 
+```bash
+# No display (ssh, a server, a CI box): run under a virtual display.
+xvfb-run -a build/bin/z23-skycombat --qa-frames=120
+# The Preview: line from the app build step, wrapped the same way.
+xvfb-run -a <that command>
+```
+
 Both are **opt-in**: the default build, `build-only`, the push proof and every
 lint gate ignore them, so a headless or header-less host is never blocked by
 the game. `make game` probes for the platform headers first and, if they are
