@@ -172,6 +172,10 @@ static int aj_update(struct aj_world *w)
 {
     int failures = 0;
     TEST("app journey update: A shares v2 in the same week and B opens it") {
+        char v1[sizeof(w->j.share) + 8];
+        /* a share file is never overwritten: A moves the v1 file aside */
+        (void)snprintf(v1, sizeof(v1), "%s.v1", w->j.share);
+        ASSERT(rename(w->j.share, v1) == 0);
         ASSERT(asf_replace(w->j.a_copy, "src/main.c", "boost=2", "boost=3"));
         ASSERT(asf_journey_save_build_open(&w->j));
         ASSERT(asf_journey_share(&w->j));
