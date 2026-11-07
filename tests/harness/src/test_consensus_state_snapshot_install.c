@@ -6542,6 +6542,7 @@ static int guarded_startup_context_test(void)
     return failures;
 }
 
+#include "consensus_state_real_postcommit_test.h"
 #include "consensus_state_bundle_v2_validation_test.h"
 #include "consensus_state_pool_fixture.h"
 #endif
@@ -6550,6 +6551,7 @@ int test_snapshot_install_recovery(void)
 {
 #if !defined(_WIN32)
     int failures = 0;
+    failures += csi_real_postcommit_test();
     failures += csi_pool_crash_case(true);
     failures += csi_pool_guarded_crash_case();
     failures += csi_guarded_public_kill_restart(false);

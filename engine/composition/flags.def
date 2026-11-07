@@ -2491,6 +2491,14 @@ Z23_FLAG("ZCL_TEST_TMPROOT", "env_test", "-", "-",
           "absolute private test fixture root; first use tests/harness/src/test_parallel.c:auto")
 Z23_FLAG("ZCL_TEST_PRIVATE_HOME", "env_test", "-", "-",
           "set to 1 by the test runners when a group got a private HOME instead of the real one; first use tests/harness/src/test_home_isolation.c:auto")
+Z23_FLAG("ZCL_TEST_REAL_INSTALL_BUNDLE", "env_test", "-", "-",
+          "public bundle for the opt-in post-commit interruption fixture; first use tests/harness/src/consensus_state_real_postcommit_test.h:auto")
+Z23_FLAG("ZCL_TEST_REAL_INSTALL_HISTORY", "env_test", "-", "-",
+          "public history archive copied by the opt-in post-commit interruption fixture; first use tests/harness/src/consensus_state_real_postcommit_test.h:auto")
+Z23_FLAG("ZCL_TEST_REAL_INSTALL_SCRATCH", "env_test", "-", "-",
+          "private scratch root for the opt-in post-commit interruption fixture; first use tests/harness/src/consensus_state_real_postcommit_test.h:auto")
+Z23_FLAG("ZCL_TEST_REAL_INSTALL_PARAMS", "env_test", "-", "-",
+          "verification parameter directory for the opt-in post-commit interruption fixture; first use tests/harness/src/consensus_state_real_postcommit_test.h:auto")
 Z23_FLAG("ZCL_TEST_REAL_HOME", "env_test", "-", "-",
           "explicit opt-in (1) for the few test groups that need real chain or params files: the runners then leave HOME alone while the canonical-datadir writer guard still applies; first use tests/harness/src/test_home_isolation.c:auto")
 Z23_FLAG("ZCL_TEST_ROM_REAL_ARTIFACT", "env_test", "-", "-",
