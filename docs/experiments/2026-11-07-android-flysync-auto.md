@@ -91,3 +91,8 @@ also scheduled a background restore. The remedy and its worker now defer while
 the startup recovery hold is active. Focused condition and reducer tests passed
 2/2, including a modeled queued worker with unchanged chain and database state.
 The full device restart and interrupted-install recovery remain separate checks.
+
+A terminal-install fixture restored script validity only from a matching,
+successful durable script-validation row. Focused frontier, island and app
+front-door groups passed 3/3 with no skips. The wiring test used a synthetic
+header verifier; an actual device terminal install remains required.
