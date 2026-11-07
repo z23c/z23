@@ -32,6 +32,7 @@
 #include "services/chain_tip_watchdog.h"
 #include "services/sync_monitor.h"
 #include "config/boot.h"
+#include "config/flysync_island.h"
 #include "config/runtime.h"
 #include "net/connman.h"
 #include "storage/boot_auto_reindex.h"
@@ -720,6 +721,10 @@ static enum sticky_rung_result rung_rebootstrap_default(void)
     return STICKY_RUNG_FAILED;
 }
 
+/* One plain line per FlySync hold: set when the terminal rung defers, cleared
+ * the next time it runs with the hold released. */
+static _Atomic bool g_refold_hold_logged = false;
+
 /* DEEPEST rung — runtime refold from the newest verified anchor
  * (fail-safe-architecture.md §1 rung 3 / §4 item 5). Design = ARM + supervised
  * self-respawn: the fresh boot runs the SAME boot_refold_from_anchor_reset
@@ -734,6 +739,16 @@ static enum sticky_rung_result rung_refold_from_anchor_default(void)
      * bodies. NEVER installs a borrowed value; a missing/exhausted artifact
      * names a retry-forever blocker and returns FAILED so the ladder cycles
      * (never-give-up) and emits the non-latching operator page. */
+    if (flysync_island_holds_header_sync()) {
+        /* A FlySync fetch is in flight: a respawn now would throw it away.
+         * Neither arm nor respawn; hold this rung until the hold releases. */
+        if (!atomic_exchange(&g_refold_hold_logged, true))
+            LOG_INFO("sticky_escalator",
+                     "[sticky_escalator] refold_from_anchor deferred: FlySync "
+                     "holds header sync, no arm and no respawn until it ends");
+        return STICKY_RUNG_PROGRESSING;
+    }
+    atomic_store(&g_refold_hold_logged, false);
     return arm_refold_from_anchor(/*trigger_respawn=*/true, "sticky-refold");
 }
 
@@ -1288,6 +1303,7 @@ void sticky_escalator_test_reset(void)
     atomic_store(&g_held_by_permanent, false);
     atomic_store(&g_hold_permanent_fires, 0u);
     atomic_store(&g_last_hold_warn_unix, (int64_t)0);
+    atomic_store(&g_refold_hold_logged, false);
     atomic_store(&g_test_suppress_refold_restart, false);
     atomic_store(&g_test_refold_artifact_override, -1);
     atomic_store(&g_test_widen_kicks, 0u);
