@@ -154,6 +154,11 @@ static bool zac_inner_plan(struct zac *z)
         return false;
     }
     zcl_app_inner_fail(z->reply, &z->inner, false);
+    if (!z->have_release)
+        (void)snprintf(z->reply->error.next_action,
+                       sizeof(z->reply->error.next_action),
+                       "seeding failed; open a friend's copy with z23 app "
+                       "open FILE.z23share instead");
     return false;
 }
 
