@@ -35,21 +35,18 @@
 #include "command/native_command.h"
 
 #include "command/app_build_make.h"
+#include "command/app_copy_build.h"
 #include "command/app_image.h"
 #include "command/native_zcode_package_copy.h"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
-#include "platform/directory_compat.h"
 #include "sha3/sha3.h"
 #include "util/authority_receipt.h"
 #include "util/file_io.h"
 #include "util/file_tree_ops.h"
 #include "util/path_util.h"
-#include "vcs/package_deps.h"
-#include "vcs/package_prepare.h"
-#include "vcs/package_release.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,10 +54,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define ZAB_PATH 4400
-#define ZAB_STORE "app_build"
+#define ZAB_PATH APP_COPY_BUILD_PATH
 #define ZAB_PLAN_DOMAIN "zcl.app_build.plan.v1"
-#define ZAB_DEPS_DOMAIN "zcl.app_build.dependency_set.v1"
 #define ZAB_IMAGE_MAX (512u << 20)
 #define ZAB_COMMAND "app.build"
 
@@ -77,9 +72,7 @@ struct zab {
     uint8_t dependency_root[32];
     uint8_t plan_id[32];
     struct app_build_closure closure;
-    char work[ZAB_PATH];
-    char images[ZAB_PATH];
-    char records[ZAB_PATH];
+    struct app_copy_build_store store;
     struct app_image_build cached;
     bool cache_hit;
     bool confine;
@@ -96,25 +89,9 @@ static void zab_fail(struct zab *z, const char *code, bool mutated,
 /* `copy` is an absolute directory, or a name under <datadir>/copies. */
 static bool zab_resolve(struct zab *z)
 {
-    const char *copy = zcl_package_copy_str(z->input, "copy");
-    char raw[ZAB_PATH];
-    bool named = copy && !strchr(copy, '/');
-    if (!copy || (!named && copy[0] != '/') ||
-        (named && (copy[0] == '.' ||
-                   strlen(copy) > ZCL_PACKAGE_ADOPT_NAME_MAX))) {
-        zab_fail(z, "BAD_COPY", false, "copy must be an absolute directory "
-                 "or a copy name under <datadir>/copies", copy ? copy : "");
-        return false;
-    }
-    int n = named ? snprintf(raw, sizeof(raw), "%s/copies/%s", z->datadir, copy)
-                  : snprintf(raw, sizeof(raw), "%s", copy);
-    if (n <= 0 || (size_t)n >= sizeof(raw) ||
-        !platform_directory_canonical_real(raw, z->copy_dir,
-                                           sizeof(z->copy_dir))) {
-        zab_fail(z, "COPY_MISSING", false, "no such copy directory", raw);
-        return false;
-    }
-    return true;
+    return app_copy_build_dir(z->datadir,
+                              zcl_package_copy_str(z->input, "copy"),
+                              z->copy_dir, sizeof(z->copy_dir), z->reply);
 }
 
 static bool zab_authorize(struct zab *z)
@@ -151,66 +128,13 @@ static bool zab_clean(struct zab *z)
 
 /* ── the roots ───────────────────────────────────────────────────────── */
 
-static int zab_root_cmp(const void *a, const void *b)
-{
-    return memcmp(a, b, 32);
-}
-
-/* SHA3 over the sorted directly declared dependency roots (the lock's
- * nodes other than the target, which is last). */
-static void zab_dependency_root(const struct vcs_package_lock *lock,
-                                uint8_t out[32])
-{
-    uint8_t roots[VCS_PACKAGE_LOCK_MAX_NODES][32];
-    size_t n = 0;
-    for (size_t i = 0; i + 1u < lock->count && n < VCS_PACKAGE_LOCK_MAX_NODES;
-         i++)
-        memcpy(roots[n++], lock->nodes[i].root, 32);
-    qsort(roots, n, 32, zab_root_cmp);
-    uint8_t count_le[4] = {(uint8_t)n, (uint8_t)(n >> 8), 0, 0};
-    struct sha3_256_ctx sha;
-    sha3_256_init(&sha);
-    sha3_256_write(&sha, (const uint8_t *)ZAB_DEPS_DOMAIN,
-                   sizeof(ZAB_DEPS_DOMAIN));
-    sha3_256_write(&sha, count_le, sizeof(count_le));
-    for (size_t i = 0; i < n; i++)
-        sha3_256_write(&sha, roots[i], 32);
-    sha3_256_finalize(&sha, out);
-}
-
 /* The package root and declared dependencies of the clean copy, prepared
  * exactly as a publish would (under the release's publisher key). */
 static bool zab_package(struct zab *z)
 {
-    struct vcs_package_release release;
-    uint8_t release_id[32];
-    struct vcs_package_prepared prepared;
-    char detail[256] = "";
-    if (zcl_package_copy_find_release(z->datadir, z->copy.parent_release,
-                                      &release, release_id) !=
-        ZCL_PACKAGE_COPY_FOUND) {
-        zab_fail(z, "RELEASE_UNKNOWN", false, "the release this copy came "
-                 "from is not persisted in this datadir", z->datadir);
-        return false;
-    }
-    struct vcs_package_prepare_options o = {
-        .dir = z->copy_dir, .publisher_sequence = 1, .reward_address = "",
-        .chain_id = release.chain_id,
-    };
-    memcpy(o.publisher_pubkey, release.publisher_pubkey,
-           sizeof(o.publisher_pubkey));
-    vcs_package_prepared_init(&prepared);
-    if (vcs_package_prepare(&o, &prepared, detail, sizeof(detail)) !=
-        VCS_PACKAGE_PREPARE_OK) {
-        zab_fail(z, "PACKAGE_INVALID", false, "the saved copy does not "
-                 "prepare as a package", detail);
-        vcs_package_prepared_free(&prepared);
-        return false;
-    }
-    memcpy(z->package_root, prepared.package_root, 32);
-    zab_dependency_root(&prepared.lock, z->dependency_root);
-    vcs_package_prepared_free(&prepared);
-    return true;
+    return app_copy_build_roots(z->datadir, z->copy_dir, &z->copy,
+                                z->package_root, z->dependency_root,
+                                z->reply);
 }
 
 static bool zab_dependencies_match(struct zab *z)
@@ -248,24 +172,15 @@ static bool zab_make_fragment(struct zab *z)
 
 static bool zab_store_paths(struct zab *z)
 {
-    char store[ZAB_PATH], fork[65], work[ZAB_PATH];
-    zcl_hex_encode(z->copy.fork_version, 32, fork);
-    bool ok = zcl_path_join(store, sizeof(store), z->datadir, ZAB_STORE) &&
-              zcl_path_join(work, sizeof(work), store, "work") &&
-              zcl_path_join(z->work, sizeof(z->work), work, fork) &&
-              zcl_path_join(z->images, sizeof(z->images), store, "images") &&
-              zcl_path_join(z->records, sizeof(z->records), store, "records");
-    if (!ok)
-        zab_fail(z, "PATH_TOO_LONG", false, "the datadir path is too long",
-                 z->datadir);
-    return ok;
+    return app_copy_build_store(z->datadir, z->copy.fork_version, &z->store,
+                                z->reply);
 }
 
 static bool zab_closure(struct zab *z)
 {
     char why[320] = "";
     const struct app_build_make m = {.copy_dir = z->copy_dir,
-                                     .work_dir = z->work,
+                                     .work_dir = z->store.work,
                                      .confine = z->confine};
     if (app_build_closure_query(&m, &z->closure, why, sizeof(why)))
         return true;
@@ -279,7 +194,7 @@ static bool zab_image_path(const struct zab *z, const uint8_t sha[32],
 {
     char hex[65];
     zcl_hex_encode(sha, 32, hex);
-    return zcl_path_join(out, cap, z->images, hex);
+    return zcl_path_join(out, cap, z->store.images, hex);
 }
 
 /* A record for (package, env, dependency) that holds this closure and whose
@@ -290,7 +205,7 @@ static bool zab_cache(struct zab *z)
     struct stat st;
     bool hit = false;
     struct zcl_result r = app_image_build_load(
-        z->records, z->package_root, z->env_root, z->dependency_root,
+        z->store.records, z->package_root, z->env_root, z->dependency_root,
         &z->cached, &hit);
     if (!r.ok) {
         zab_fail(z, "RECORD_INVALID", false, "a stored build record for this "
@@ -376,8 +291,8 @@ static void zab_commit_reply(struct zab *z, const struct app_image_build *rec,
     if (app_image_build_id(rec, id).ok)
         zcl_package_copy_push_root(d, "record_id", id);
     (void)json_push_kv_str(d, "record_path", record);
-    (void)json_push_kv_str(d, "record_store", z->records);
-    (void)json_push_kv_str(d, "build_dir", z->work);
+    (void)json_push_kv_str(d, "record_store", z->store.records);
+    (void)json_push_kv_str(d, "build_dir", z->store.work);
     (void)json_push_kv_bool(d, "make_ran", make_ran);
     (void)json_push_kv_bool(d, "executed", false);
     (void)json_push_kv_str(d, "next", "app open or app playtest this "
@@ -403,10 +318,10 @@ static bool zab_store_image(struct zab *z, const char *built, char *final,
     zcl_sha3_256(bytes, len, sha);
     char hex[65];
     zcl_hex_encode(sha, 32, hex);
-    bool ok = zcl_path_join(final, cap, z->images, hex);
+    bool ok = zcl_path_join(final, cap, z->store.images, hex);
     if (ok && lstat(final, &st) != 0)
-        ok = authority_receipt_write_atomic(z->images, hex, bytes, len, final,
-                                            cap) &&
+        ok = authority_receipt_write_atomic(z->store.images, hex, bytes, len,
+                                            final, cap) &&
              chmod(final, 0700) == 0;
     free(bytes);
     return ok;
@@ -427,7 +342,7 @@ static bool zab_record(struct zab *z, const char *image,
         r = ZCL_ERR(-1, "the stored image at %s is not the bytes built",
                     image);
     if (r.ok)
-        r = app_image_build_save(z->records, rec, record, cap);
+        r = app_image_build_save(z->store.records, rec, record, cap);
     if (!r.ok)
         zab_fail(z, "RECORD_SAVE_FAILED", true, "the build record could not "
                  "be saved", r.message);
@@ -436,13 +351,14 @@ static bool zab_record(struct zab *z, const char *image,
 
 static bool zab_dirs(struct zab *z, char *run, size_t cap)
 {
-    bool ok = zcl_mkdir_p(z->work, 0700).ok &&
-              zcl_mkdir_p(z->images, 0700).ok &&
-              zcl_mkdir_p(z->records, 0700).ok &&
-              zcl_path_join(run, cap, z->work, "run-XXXXXX") && mkdtemp(run);
+    bool ok = zcl_mkdir_p(z->store.work, 0700).ok &&
+              zcl_mkdir_p(z->store.images, 0700).ok &&
+              zcl_mkdir_p(z->store.records, 0700).ok &&
+              zcl_path_join(run, cap, z->store.work, "run-XXXXXX") &&
+              mkdtemp(run);
     if (!ok)
         zab_fail(z, "BUILD_DIR_FAILED", false, "the build directories could "
-                 "not be created", z->work);
+                 "not be created", z->store.work);
     return ok;
 }
 
@@ -488,7 +404,7 @@ static void zab_build(struct zab *z)
     }
     if (zab_dirs(z, run, sizeof(run))) {
         const struct app_build_make m = {.copy_dir = z->copy_dir,
-                                         .work_dir = z->work,
+                                         .work_dir = z->store.work,
                                          .confine = z->confine};
         app_build_make_run(&m, run, res);
         zab_after_make(z, &m, run, res);
@@ -513,7 +429,7 @@ static void zab_confirm(struct zab *z)
     uint8_t k[32];
     app_image_build_key(z->package_root, z->env_root, z->dependency_root, k);
     zcl_hex_encode(k, 32, key);
-    (void)snprintf(record, sizeof(record), "%s/%s%s", z->records, key,
+    (void)snprintf(record, sizeof(record), "%s/%s%s", z->store.records, key,
                    APP_IMAGE_BUILD_FILE_SUFFIX);
     (void)zab_image_path(z, z->cached.image_sha3, image, sizeof(image));
     zab_commit_reply(z, &z->cached, image, record, false, !z->confine);

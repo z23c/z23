@@ -56,7 +56,7 @@
      ZPA_NAME_FIELD)
 #define ZPA_WIRE_BYTES (ZPA_BODY_BYTES + 32u)
 /* The base of a copy name; "-<n>" (n up to 999) follows it. */
-#define ZPA_BASE_MAX 24u
+#define ZPA_BASE_MAX ZCL_PACKAGE_COPY_BASE_MAX
 #define ZPA_COPIES_MAX 999u
 #define ZPA_CHANGED_SHOWN 16u
 #define ZPA_CHANGED_BYTES 1536u
@@ -312,7 +312,8 @@ struct zpa_plan {
 };
 
 /* The last segment of the release name, lowered to [a-z0-9._-]. */
-static void zpa_name_base(const char *release_name, char base[ZPA_BASE_MAX + 1u])
+void zcl_package_copy_name_base(const char *release_name,
+                                char base[ZCL_PACKAGE_COPY_BASE_MAX + 1u])
 {
     const char *slash = strrchr(release_name, '/');
     const char *s = slash ? slash + 1 : release_name;
@@ -330,25 +331,34 @@ static void zpa_name_base(const char *release_name, char base[ZPA_BASE_MAX + 1u]
         (void)snprintf(base, ZPA_BASE_MAX + 1u, "copy");
 }
 
-/* The first absent <datadir>/copies/<base>-<n>. */
-static bool zpa_pick_copy(struct zpa_plan *p, struct zcl_command_reply *reply)
+bool zcl_package_copy_pick_name(const char *datadir, const char *release_name,
+                                char name[ZCL_PACKAGE_ADOPT_NAME_MAX + 1u],
+                                char *dir, size_t cap,
+                                struct zcl_command_reply *reply)
 {
     char base[ZPA_BASE_MAX + 1u];
     struct stat st;
-    zpa_name_base(p->release.name, base);
+    zcl_package_copy_name_base(release_name, base);
     for (unsigned n = 1; n <= ZPA_COPIES_MAX; n++) {
-        (void)snprintf(p->name, sizeof(p->name), "%s-%u", base, n);
-        int len = snprintf(p->copy, sizeof(p->copy), "%s/copies/%s",
-                           p->datadir, p->name);
-        if (len <= 0 || (size_t)len >= sizeof(p->copy))
+        (void)snprintf(name, ZCL_PACKAGE_ADOPT_NAME_MAX + 1u, "%s-%u", base,
+                       n);
+        int len = snprintf(dir, cap, "%s/copies/%s", datadir, name);
+        if (len <= 0 || (size_t)len >= cap)
             break;
-        if (stat(p->copy, &st) != 0)
+        if (stat(dir, &st) != 0)
             return true;
     }
     zcl_package_copy_fail(reply, "COPIES_FULL", false,
                           "no free copy name under <datadir>/copies; remove "
                           "an old copy first", base);
     return false;
+}
+
+/* The first absent <datadir>/copies/<base>-<n>. */
+static bool zpa_pick_copy(struct zpa_plan *p, struct zcl_command_reply *reply)
+{
+    return zcl_package_copy_pick_name(p->datadir, p->release.name, p->name,
+                                      p->copy, sizeof(p->copy), reply);
 }
 
 static void zpa_plan_id(struct zpa_plan *p)

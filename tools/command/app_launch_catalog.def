@@ -25,7 +25,8 @@
 
 /* raylib prints this from InitPlatform() once the window and GL context
  * exist (vendor/raylib/src/platforms/rcore_desktop_rgfw.c), then flushes.
- * Raise stays UNSUPPORTED until the game's own SIGUSR1 handler lands. */
+ * The game installs its SIGUSR1 handler (sky_game_raise_open) before
+ * InitWindow and restores its window from the main loop, so it declares raise. */
 ZCL_APP_LAUNCH("skycombat", "sky,sky-combat,airplane", "z23-skycombat",
                ZCL_APP_ARGV(), "DISPLAY: Device initialized successfully",
-               ZCL_APP_RAISE_UNSUPPORTED, "make game")
+               ZCL_APP_RAISE_SIGUSR1, "make game")

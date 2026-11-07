@@ -156,6 +156,20 @@ bool zcl_package_copy_lineage_releases(const char *datadir,
 
 #define ZCL_PACKAGE_ADOPT_NAME_MAX 32u
 #define ZCL_PACKAGE_ADOPT_PUBKEY_BYTES 33u
+/* The base of a copy name; "-<n>" (n up to 999) follows it. */
+#define ZCL_PACKAGE_COPY_BASE_MAX 24u
+
+/* The base of a release's copy names: the last segment of its name, lowered
+ * to [a-z0-9._-] ("skycombat/skycombat" gives "skycombat"). */
+void zcl_package_copy_name_base(const char *release_name,
+                                char base[ZCL_PACKAGE_COPY_BASE_MAX + 1u]);
+
+/* The first absent <datadir>/copies/<base>-<n> for this release name: name
+ * gets "<base>-<n>" and dir the path. COPIES_FULL otherwise. */
+bool zcl_package_copy_pick_name(const char *datadir, const char *release_name,
+                                char name[ZCL_PACKAGE_ADOPT_NAME_MAX + 1u],
+                                char *dir, size_t cap,
+                                struct zcl_command_reply *reply);
 
 struct zcl_package_adopt_record {
     uint8_t root_commit[32];   /* the copy's fork record commit */

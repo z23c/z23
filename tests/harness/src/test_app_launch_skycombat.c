@@ -5,8 +5,8 @@
  * (`make game`) on a private Xvfb display, with a temporary HOME.
  *
  *   open            -> opened, a pid, the raylib ready line seen
- *   open again      -> already_open, the same pid, raise unsupported_by_app
- *                      (the game declares no raise handler yet), still alive
+ *   open again      -> already_open, the same pid, raise delivered
+ *                      (SIGUSR1 to the game's own handler), still alive
  *   kill, open      -> opened with a new pid
  *   open nosuchapp  -> UNKNOWN_APP
  *
@@ -205,9 +205,9 @@ static int sc_run(const char *home, const char *log, long *pids)
         ASSERT_EQ(sc_open("sky", out), 0);
         ASSERT(strstr(out, "\"status\":\"already_open\""));
         ASSERT_EQ(sc_pid(out), pids[0]);
-        /* The game declares no raise handler yet: nothing is signalled, and
-         * the game is still the same live process afterwards. */
-        ASSERT(strstr(out, "\"raise\":\"unsupported_by_app\""));
+        /* The game declares raise and handles SIGUSR1: the signal is
+         * delivered, and the game is still the same live process after it. */
+        ASSERT(strstr(out, "\"raise\":\"delivered\""));
         ASSERT(!sc_gone(pids[0]));
     PASS(); }
     TEST("after the game is killed, app open starts a new pid") {
@@ -225,7 +225,7 @@ static int sc_run(const char *home, const char *log, long *pids)
         ASSERT(sky != NULL);
         ASSERT(strstr(sky, "\"kind\":\"desktop\""));
         ASSERT(strstr(sky, "\"installed\":true"));
-        ASSERT(strstr(sky, "\"raise\":\"unsupported\""));
+        ASSERT(strstr(sky, "\"raise\":\"sigusr1\""));
     PASS(); }
     TEST("app open nosuchapp is refused as unknown_app") {
         ASSERT(sc_open("nosuchapp", out) != 0);

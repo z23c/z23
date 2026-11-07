@@ -8,6 +8,7 @@
  * stage with a plain message and a hint. */
 
 #include "command/native_app_launch.h"
+#include "command/native_app_front_door.h"
 
 #include "command/native_command.h"
 #include "base/safe_alloc.h"
@@ -488,5 +489,6 @@ void zcl_native_handle_app_list_launchable(
     (void)json_push_kv(&reply->data, "launchable", &list);
     json_free(&list);
     app_list_config(&w->env, &w->reg, &reply->data);
+    zcl_app_list_copies(zcl_native_command_datadir(), &reply->data);
     free(w);
 }

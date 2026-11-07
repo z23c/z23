@@ -218,6 +218,7 @@ static bool devagent_scoped_bool(const char *path, const char *key,
         { "ops.host.legacy.status", "rpc" },
         { "app.invoke.package", "accept_execution" },
         { "app.run.confined", "accept_execution" },
+        { "app.run.copy", "accept_execution" },
         { "ops.mesh.device.host.package.run", "accept_execution" },
         { "zcode.package.add.plan", "local_only" },
         /* dev.fleet.ship (alias dev.ship): reuse a banked gate stamp, and
