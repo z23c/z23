@@ -934,7 +934,7 @@ static char *afd_capture_stderr_copies(const struct afd_world *w, int *rcs)
     char *text = calloc(1, 65536);
     if (text) {
         rewind(cap);
-        (void)fread(text, 1, 65535, cap);
+        TEST_DISCARD(fread(text, 1, 65535, cap));
     }
     (void)fclose(cap);
     return text;
