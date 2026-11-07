@@ -2881,6 +2881,7 @@ static void test_cc1_sysroot_parse(void)
 #if !defined(_WIN32)
 struct observation_fixture {
     char root[PATH_MAX];
+    const char *output_root;
     char compiler[PATH_MAX];
     char prefix_map[PATH_MAX + 64];
     const char *argv[32];
@@ -2940,8 +2941,11 @@ static bool observation_begin(struct observation_fixture *fixture,
                               struct zcl_compile_observation **observation)
 {
     struct zcl_action_root_result diagnostic = {0};
-    bool ok = zcl_compile_observation_begin(fixture->root, fixture->argv,
-        fixture->argc, fixture->argv[24], observation, &diagnostic);
+    bool ok = fixture->output_root ?
+        zcl_compile_observation_begin_outputs(fixture->root, fixture->output_root,
+            fixture->argv, fixture->argc, fixture->argv[24], observation, &diagnostic) :
+        zcl_compile_observation_begin(fixture->root, fixture->argv,
+            fixture->argc, fixture->argv[24], observation, &diagnostic);
     if (!ok)
         printf("  observation begin: %s: %s\n", diagnostic.miss, diagnostic.why);
     zcl_action_root_result_free(&diagnostic);
@@ -3072,6 +3076,91 @@ static void observation_window_refusals(struct observation_fixture *fixture)
     (void)unlink(driver);
 }
 
+static void observation_output_refusals(struct observation_fixture *fixture)
+{
+    struct zcl_compile_observation *o = NULL;
+    struct zcl_action_root_result result = {0};
+    bool ready = observation_begin(fixture, &o);
+    AR_CHECK("observation separate output stale depfile refused",
+             ready && !zcl_compile_observation_finish(o, true, &result) &&
+             strcmp(result.miss, "depfile_stale") == 0);
+    zcl_compile_observation_close(o);
+    zcl_action_root_result_free(&result);
+    const char *object = fixture->argv[22];
+    fixture->argv[22] = "escape.o";
+    o = NULL;
+    AR_CHECK("observation output outside admitted directory refused",
+             !observation_begin(fixture, &o) && !o);
+    zcl_compile_observation_close(o);
+    fixture->argv[22] = object;
+}
+
+static void observation_output_header(struct observation_fixture *fixture,
+                                       const char *output)
+{
+    struct zcl_compile_observation *o = NULL;
+    struct zcl_action_root_result result = {0};
+    AR_CHECK("observation sibling header fixture",
+             fx_write(output, "sibling.h", "#define SIBLING 1\n") &&
+             fx_write(fixture->root, "sibling.c", "#include \"sibling.h\"\nint s = SIBLING;\n"));
+    fixture->argv[16] = output;
+    fixture->argv[20] = "sibling.c";
+    bool ready = observation_begin(fixture, &o) && observation_compile(o);
+    AR_CHECK("observation output directory grants no sibling header authority",
+             ready && !zcl_compile_observation_finish(o, true, &result) &&
+             strcmp(result.miss, "dependency_outside_repo") == 0 &&
+             result.root_hex[0] == '\0');
+    zcl_compile_observation_close(o);
+    zcl_action_root_result_free(&result);
+    fixture->argv[16] = "inc";
+    fixture->argv[20] = "unit.c";
+}
+
+static void observation_output_symlink(struct observation_fixture *fixture,
+                                        const char *output)
+{
+    struct zcl_compile_observation *o = NULL;
+    struct zcl_action_root_result result = {0};
+    char target[PATH_MAX];
+    (void)snprintf(target, sizeof(target), "%s/other.d", output);
+    bool ready = observation_begin(fixture, &o) && observation_compile(o);
+    bool swapped = ready && rename(fixture->argv[24], target) == 0 &&
+                   symlink(target, fixture->argv[24]) == 0;
+    AR_CHECK("observation separate depfile symlink swap refused",
+             swapped && !zcl_compile_observation_finish(o, true, &result) &&
+             strcmp(result.miss, "depfile_stale") == 0);
+    zcl_compile_observation_close(o);
+    zcl_action_root_result_free(&result);
+}
+
+static void observation_separate_outputs(struct observation_fixture *fixture,
+                                          const uint8_t baseline[32])
+{
+    char raw[PATH_MAX], output[PATH_MAX], object[PATH_MAX], dep[PATH_MAX];
+    test_make_tmpdir(raw, sizeof(raw), "action_root", "separate_outputs");
+    bool ready = platform_directory_canonical_real(raw, output, sizeof(output));
+    AR_CHECK("observation separate output directory", ready);
+    if (!ready)
+        return;
+    (void)snprintf(object, sizeof(object), "%s/unit.o", output);
+    (void)snprintf(dep, sizeof(dep), "%s/unit.d", output);
+    const char *old_object = fixture->argv[22], *old_dep = fixture->argv[24];
+    fixture->output_root = output;
+    fixture->argv[22] = object;
+    fixture->argv[24] = dep;
+    uint8_t result_root[32];
+    AR_CHECK("observation separate output compile preserves canonical root",
+             observation_root(fixture, result_root) &&
+             memcmp(baseline, result_root, 32) == 0);
+    observation_output_refusals(fixture);
+    observation_output_header(fixture, output);
+    observation_output_symlink(fixture, output);
+    fixture->argv[22] = old_object;
+    fixture->argv[24] = old_dep;
+    fixture->output_root = NULL;
+    test_rm_rf_recursive(output);
+}
+
 static void test_compile_observation(void)
 {
     struct observation_fixture fixture = {0};
@@ -3097,6 +3186,7 @@ static void test_compile_observation(void)
              observation_root(&fixture, changed) && initial &&
              memcmp(baseline, changed, 32) != 0);
     fixture.argv[9] = "-ffp-contract=off";
+    observation_separate_outputs(&fixture, baseline);
     observation_refusals(&fixture);
     observation_leaf_refusals(&fixture);
     observation_window_refusals(&fixture);

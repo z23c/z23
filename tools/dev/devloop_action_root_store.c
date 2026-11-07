@@ -2447,6 +2447,7 @@ struct zcl_compile_observation {
     struct ars_vector arguments, flags;
     const char *argv[ARS_ARG_MAX + 1];
     char root[PATH_MAX], depfile[PATH_MAX], object[PATH_MAX], source[PATH_MAX];
+    char output_root[PATH_MAX];
     const char *outputs[2];
     const char *tokens[2];
     struct stat previous_dep;
@@ -2498,11 +2499,12 @@ static bool aco_leaf_ok(const char *path)
 #endif
 }
 
-static bool aco_path(const char *root, const char *path, char out[PATH_MAX])
+static bool aco_path(const char *cwd, const char *root, const char *path,
+                     char out[PATH_MAX])
 {
     char joined[PATH_MAX], parent[PATH_MAX], resolved[PATH_MAX];
     int n = path[0] == '/' ? snprintf(joined, sizeof(joined), "%s", path)
-                           : snprintf(joined, sizeof(joined), "%s/%s", root, path);
+                           : snprintf(joined, sizeof(joined), "%s/%s", cwd, path);
     if (n <= 0 || (size_t)n >= sizeof(joined))
         return false;
     memcpy(parent, joined, (size_t)n + 1);
@@ -2592,10 +2594,11 @@ static bool aco_bind_paths(struct zcl_compile_observation *o,
     char requested[PATH_MAX];
     if (!parsed->compile || !parsed->md || !parsed->object ||
         !parsed->dep || !parsed->source ||
-        !aco_path(o->root, parsed->object, o->object) ||
-        !aco_path(o->root, parsed->dep, o->depfile) ||
-        !aco_path(o->root, depfile, requested) || strcmp(requested, o->depfile) ||
-        !aco_path(o->root, parsed->source, o->source) ||
+        !aco_path(o->root, o->output_root, parsed->object, o->object) ||
+        !aco_path(o->root, o->output_root, parsed->dep, o->depfile) ||
+        !aco_path(o->root, o->output_root, depfile, requested) ||
+        strcmp(requested, o->depfile) ||
+        !aco_path(o->root, o->root, parsed->source, o->source) ||
         aco_collision(o->object, o->source) ||
         aco_collision(o->depfile, o->source) ||
         aco_collision(o->depfile, o->object))
@@ -2674,10 +2677,13 @@ static void aco_request(struct zcl_compile_observation *o)
 }
 
 static bool aco_copy_arguments(struct zcl_compile_observation *o,
-                               const char *root, const char *const *argv,
+                               const char *root, const char *output_root,
+                               const char *const *argv,
                                size_t argc, const char *depfile)
 {
-    bool ok = realpath(root, o->root) && strcmp(root, o->root) == 0;
+    bool ok = realpath(root, o->root) && strcmp(root, o->root) == 0 &&
+              realpath(output_root, o->output_root) &&
+              strcmp(output_root, o->output_root) == 0;
     for (size_t i = 0; ok && i < argc; i++) {
         ok = argv[i] && argv[i][0] && aco_push(&o->arguments, argv[i]);
         if (ok)
@@ -2699,11 +2705,12 @@ static bool aco_dep_before(struct zcl_compile_observation *o)
 }
 
 static bool aco_capture_before(struct zcl_compile_observation *o,
-                               const char *root, const char *const *argv,
+                               const char *root, const char *output_root,
+                               const char *const *argv,
                                size_t argc, const char *depfile, struct ars_miss *miss)
 {
     const struct ars_compile k = { .env = NULL };
-    return aco_copy_arguments(o, root, argv, argc, depfile) &&
+    return aco_copy_arguments(o, root, output_root, argv, argc, depfile) &&
            ars_hook_env(&o->hook, &k, miss) &&
            aco_facts(o, &o->hook, o->identity, miss) && aco_dep_before(o);
 }
@@ -2714,7 +2721,8 @@ static bool aco_request_complete(const char *root, const char *const *argv,
     return root && argv && argc > 0 && argc <= 256 && depfile;
 }
 
-bool zcl_compile_observation_begin(const char *root, const char *const *argv,
+bool zcl_compile_observation_begin_outputs(const char *root,
+    const char *output_root, const char *const *argv,
     size_t argc, const char *depfile, struct zcl_compile_observation **out,
     struct zcl_action_root_result *diagnostic)
 {
@@ -2724,13 +2732,13 @@ bool zcl_compile_observation_begin(const char *root, const char *const *argv,
         memset(diagnostic, 0, sizeof(*diagnostic));
     if (!diagnostic)
         return false;
-    if (!out || !aco_request_complete(root, argv, argc, depfile))
+    if (!out || !output_root || !aco_request_complete(root, argv, argc, depfile))
         return aco_miss(diagnostic, "request_incomplete", "missing compile inputs");
     struct zcl_compile_observation *o = zcl_calloc(1, sizeof(*o), "compile observation");
     if (!o)
         return aco_miss(diagnostic, "out_of_memory", "compile observation");
     struct ars_miss miss = {0};
-    bool ok = aco_capture_before(o, root, argv, argc, depfile, &miss);
+    bool ok = aco_capture_before(o, root, output_root, argv, argc, depfile, &miss);
     if (!ok) {
         free(o);
         return aco_miss(diagnostic, miss.code[0] ? miss.code : "argv_unrecognised",
@@ -2744,6 +2752,24 @@ bool zcl_compile_observation_begin(const char *root, const char *const *argv,
     zcl_action_root_t0_take(&o->hook.req.compile_t0);
     *out = o;
     return true;
+}
+
+bool zcl_compile_observation_begin(const char *source_root,
+    const char *const *argv, size_t argc,
+    const char *depfile, struct zcl_compile_observation **out,
+    struct zcl_action_root_result *diagnostic)
+{
+    return zcl_compile_observation_begin_outputs(source_root, source_root,
+        argv, argc, depfile, out, diagnostic);
+}
+
+static bool aco_outputs_bound(const struct zcl_compile_observation *o)
+{
+    char resolved[PATH_MAX];
+    return aco_path(o->root, o->output_root, o->outputs[0], resolved) &&
+           strcmp(resolved, o->object) == 0 &&
+           aco_path(o->root, o->output_root, o->outputs[1], resolved) &&
+           strcmp(resolved, o->depfile) == 0;
 }
 
 static bool aco_dep_fresh(const struct zcl_compile_observation *o)
@@ -2782,7 +2808,7 @@ bool zcl_compile_observation_finish(struct zcl_compile_observation *o,
     o->finished = true;
     if (!compile_succeeded)
         return aco_miss(result, "closure_unobserved", "compile did not succeed");
-    if (!aco_dep_fresh(o))
+    if (!aco_outputs_bound(o) || !aco_dep_fresh(o))
         return aco_miss(result, "depfile_stale", "no fresh regular -MD depfile");
     struct ars_hook *current = zcl_calloc(1, sizeof(*current), "finish driver facts");
     if (!current)

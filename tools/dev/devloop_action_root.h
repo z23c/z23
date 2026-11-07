@@ -250,6 +250,14 @@ void zcl_action_root_result_free(struct zcl_action_root_result *out);
  * and diagnostic is zeroed, then populated with a refusal when available.
  */
 struct zcl_compile_observation;
+/* As begin, with a separately admitted canonical output directory. Relative
+ * argv paths still resolve against source_root (the returned cwd). Only the
+ * object and depfile may use output_root; it grants no input authority. */
+bool zcl_compile_observation_begin_outputs(
+    const char *source_root, const char *output_root,
+    const char *const *argv, size_t argc, const char *depfile,
+    struct zcl_compile_observation **out,
+    struct zcl_action_root_result *diagnostic);
 /* Existing action grammar, restricted to valueless/joined semantic compile
  * flags. Does not admit action mode, dependency controls or linker options. */
 bool zcl_action_root_semantic_compile_flag(const char *arg);
