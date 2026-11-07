@@ -93,10 +93,27 @@ void SetWindowFocused(void) {
 #endif
 }
 void rlDrawRenderBatchActive(void) { }
+/* Capture fixture: the "framebuffer" is grey with a 9x9 patch, at the place
+ * GetWorldToScreen reports, in the colour of the first cube the game drew. */
+static Color qa_drawn_color;
+static bool qa_drawn_set;
+#define QA_PLAYER_SCREEN_X 320
+#define QA_PLAYER_SCREEN_Y 240
+Vector2 GetWorldToScreen([[maybe_unused]] Vector3 position, [[maybe_unused]] Camera3D camera)
+{ return (Vector2){QA_PLAYER_SCREEN_X, QA_PLAYER_SCREEN_Y}; }
 Image LoadImageFromScreen(void)
 {
     if (!qa_resize_fails && !qa_capture_ok) return (Image){0};
-    return (Image){.data = calloc(640u * 480u, 4), .width = 640, .height = 480,
+    unsigned char *pixels = calloc(640u * 480u, 4);
+    if (pixels && qa_capture_ok) {
+        for (size_t at = 0; at < 640u * 480u; ++at)
+            memcpy(pixels + at * 4, (unsigned char[4]){20, 20, 20, 255}, 4);
+        for (int y = QA_PLAYER_SCREEN_Y - 4; y <= QA_PLAYER_SCREEN_Y + 4; ++y)
+            for (int x = QA_PLAYER_SCREEN_X - 4; x <= QA_PLAYER_SCREEN_X + 4; ++x)
+                memcpy(pixels + ((size_t)y * 640u + (size_t)x) * 4,
+                       (unsigned char[4]){qa_drawn_color.r, qa_drawn_color.g, qa_drawn_color.b, 255}, 4);
+    }
+    return (Image){.data = pixels, .width = 640, .height = 480,
                     .mipmaps = 1, .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
 }
 unsigned char *stbir_resize_uint8_linear([[maybe_unused]] const unsigned char *input,
@@ -112,13 +129,14 @@ void DrawLineEx([[maybe_unused]] Vector2 startPos, [[maybe_unused]] Vector2 endP
 void rlPushMatrix(void) {  }
 void rlTranslatef([[maybe_unused]] float x, [[maybe_unused]] float y, [[maybe_unused]] float z) {  }
 void rlRotatef([[maybe_unused]] float angle, [[maybe_unused]] float x, [[maybe_unused]] float y, [[maybe_unused]] float z) {  }
-void DrawCube([[maybe_unused]] Vector3 position, [[maybe_unused]] float width, [[maybe_unused]] float height, [[maybe_unused]] float length, [[maybe_unused]] Color color) {  }
+void DrawCube([[maybe_unused]] Vector3 position, [[maybe_unused]] float width, [[maybe_unused]] float height, [[maybe_unused]] float length, Color color)
+{ if (!qa_drawn_set) { qa_drawn_color = color; qa_drawn_set = true; } }
 void DrawCubeWires([[maybe_unused]] Vector3 position, [[maybe_unused]] float width, [[maybe_unused]] float height, [[maybe_unused]] float length, [[maybe_unused]] Color color) {  }
 void DrawSphere([[maybe_unused]] Vector3 centerPos, [[maybe_unused]] float radius, [[maybe_unused]] Color color) {  }
 void DrawCircle3D([[maybe_unused]] Vector3 center, [[maybe_unused]] float radius, [[maybe_unused]] Vector3 rotationAxis, [[maybe_unused]] float rotationAngle, [[maybe_unused]] Color color) {  }
 void rlPopMatrix(void) {  }
 void effects_spawn_explosion([[maybe_unused]] effects_manager_t* manager, [[maybe_unused]] Vector3 pos, [[maybe_unused]] float radius, [[maybe_unused]] Color color) {  }
-managed_aircraft_t* aircraft_manager_get([[maybe_unused]] aircraft_manager_t* manager, [[maybe_unused]] int id) { return qa_agent ? &qa_player : NULL; }
+managed_aircraft_t* aircraft_manager_get([[maybe_unused]] aircraft_manager_t* manager, [[maybe_unused]] int id) { return qa_agent || qa_capture_ok ? &qa_player : NULL; }
 void DrawFPS([[maybe_unused]] int posX, [[maybe_unused]] int posY) {  }
 void DrawText([[maybe_unused]] const char *text, [[maybe_unused]] int posX, [[maybe_unused]] int posY, [[maybe_unused]] int fontSize, [[maybe_unused]] Color color) {  }
 Font GetFontDefault(void) { return (Font){0}; }
@@ -181,7 +199,17 @@ void CloseWindow(void) {
     ++qa_closed;
     if (qa_resident) puts("QA_RESIDENT close stdout");
 }
-int aircraft_manager_add_with_team([[maybe_unused]] aircraft_manager_t* manager, [[maybe_unused]] const char* name, [[maybe_unused]] Color color, [[maybe_unused]] bool is_ai, [[maybe_unused]] bool is_local, [[maybe_unused]] int team_id) { return (int){0}; }
+/* Capture runs: the local player is the one aircraft in the manager, wearing
+ * exactly the colour the game asked for. */
+int aircraft_manager_add_with_team(aircraft_manager_t* manager, [[maybe_unused]] const char* name, Color color, [[maybe_unused]] bool is_ai, bool is_local, [[maybe_unused]] int team_id)
+{
+    if (qa_capture_ok && is_local) {
+        qa_player.color = color;
+        manager->aircraft[0] = qa_player;
+        manager->aircraft_count = 1;
+    }
+    return (int){0};
+}
 void powerup_manager_add_spawn_point([[maybe_unused]] powerup_manager_t* manager, [[maybe_unused]] Vector3 position, [[maybe_unused]] powerup_type_t type, [[maybe_unused]] float respawn_time) {  }
 void cyberpunk_world_generate([[maybe_unused]] cyberpunk_world_t* world, [[maybe_unused]] int seed) {  }
 void cyberpunk_set_theme_blade_runner([[maybe_unused]] cyberpunk_world_t* world) {  }
@@ -213,7 +241,7 @@ bool powerup_manager_check_collection([[maybe_unused]] powerup_manager_t* manage
 void effects_show_achievement([[maybe_unused]] effects_manager_t* manager, [[maybe_unused]] const char* text) {  }
 void BeginTextureMode([[maybe_unused]] RenderTexture2D target) {  }
 void ClearBackground([[maybe_unused]] Color color) {  }
-void BeginMode3D([[maybe_unused]] Camera3D camera) {  }
+void BeginMode3D([[maybe_unused]] Camera3D camera) { qa_drawn_set = false; }
 void cyberpunk_world_draw([[maybe_unused]] cyberpunk_world_t* world, [[maybe_unused]] Camera3D camera) {  }
 void weapons_draw([[maybe_unused]] weapons_system_t* weapons) {  }
 void effects_draw([[maybe_unused]] effects_manager_t* manager, [[maybe_unused]] Camera3D camera) {  }

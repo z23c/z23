@@ -363,6 +363,35 @@ _test_next:;
     return failures;
 }
 
+static int skycombat_capture_colour(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX], path[PATH_MAX + 16], flag[PATH_MAX + 32];
+    test_make_tmpdir(dir, sizeof(dir), "skycapture", "d");
+    snprintf(path, sizeof(path), "%s/p.png", dir);
+    snprintf(flag, sizeof(flag), "--capture=%s", path);
+    const char *good[] = {QA_ENTRY, "--fixture-capture-ok", "--qa-frames=2", flag, NULL};
+    char output[2048] = {0}, diagnostics[513] = {0};
+    TEST("capture: prints the player colour sampled at the projected aircraft, near PLAYER 1's RED") {
+        /* RED is {230,41,55}. The fixture paints the first cube the game drew
+         * (the player's fuselage, in the colour the game gave PLAYER 1) at the
+         * point GetWorldToScreen reports; a game that never samples and prints
+         * the pixel has no such line. */
+        ASSERT_EQ(skycombat_agent_capture(good, output, sizeof(output), diagnostics), 0);
+        const char *at = strstr(output, "Sky Combat: player colour ");
+        ASSERT(at != NULL);
+        int red = -1, green = -1, blue = -1, x = -1, y = -1;
+        ASSERT_EQ(sscanf(at, "Sky Combat: player colour %d,%d,%d at %d,%d", &red, &green, &blue, &x, &y), 5);
+        ASSERT(abs(red - 230) <= 8 && abs(green - 41) <= 8 && abs(blue - 55) <= 8);
+        /* The 640x480 fixture frame, projected to (320,240), is resized to 480x360. */
+        ASSERT(abs(x - 240) <= 2 && abs(y - 180) <= 2);
+        PASS();
+    }
+_test_next:;
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static int skycombat_capture_write_failures(void)
 {
     int failures = 0;
@@ -899,6 +928,7 @@ _test_next:;
     failures += skycombat_qa_launch("--qa-frames=3", "--fixture-close=2", 2, 1, 1);
     failures += skycombat_qa_launch("--qa-frames=1", "--fixture-window-fails", 0, 1, 1);
     failures += skycombat_capture_file();
+    failures += skycombat_capture_colour();
     failures += skycombat_capture_usage();
     failures += skycombat_capture_write_failures();
     failures += skycombat_agent_session();
