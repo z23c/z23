@@ -142,6 +142,26 @@ static inline bool dbf_commit_file(const char *dir, const char *file,
            dbf_git(dir, commit);
 }
 
+/* The refusals under test name a lane path inside a 192-byte error message
+ * (struct zcl_command_error), and the lane sits about 35 bytes below the lab
+ * root. A deep checkout path (a long lane name under test-tmp) would push the
+ * text a refusal ends with past that cap, so a root longer than this moves to
+ * the harness's short /dev/shm scratch; a failure there keeps the long root. */
+#define DBF_ROOT_MAX 100
+
+static inline void dbf_shorten_root(struct dbf *f, const char *tag)
+{
+    char shm[sizeof(f->root)];
+    int n;
+    if (strlen(f->root) <= DBF_ROOT_MAX)
+        return;
+    n = snprintf(shm, sizeof(shm), "/dev/shm/dbf_%s_XXXXXX", tag);
+    if (n <= 0 || (size_t)n >= sizeof(shm) || !mkdtemp(shm))
+        return;
+    (void)rmdir(f->root);
+    (void)snprintf(f->root, sizeof(f->root), "%s", shm);
+}
+
 /* A lab: HOME/development/{z23/{main,handoff/...},lanes/z23}, a bare origin
  * whose main holds a.c and a complexity baseline naming cx_old.c. */
 static inline bool dbf_setup(struct dbf *f, const char *tag)
@@ -151,6 +171,7 @@ static inline bool dbf_setup(struct dbf *f, const char *tag)
     const char *push[] = {"push", "-q", "origin", "main", NULL};
     const char *branch[] = {"checkout", "-q", "-b", "main", NULL};
     test_make_tmpdir(f->root, sizeof(f->root), "dev_batch", tag);
+    dbf_shorten_root(f, tag);
     (void)snprintf(f->home, sizeof(f->home), "%s/home", f->root);
     (void)snprintf(f->state, sizeof(f->state), "%s/" DBF_HANDOFF, f->home);
     (void)snprintf(f->origin, sizeof(f->origin), "%s/origin.git", f->root);

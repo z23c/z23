@@ -24,7 +24,7 @@
 #endif
 
 enum { CPT_NAME = 64, CPT_MAX_PKGS = 256, CPT_MAX_SRC = 16,
-       CPT_MAX_ARGV = 160, CPT_MAX_DEPS = 24, CPT_MANIFEST_MAX = 65536,
+       CPT_MAX_ARGV = 160, CPT_ARG = 1024, CPT_MAX_DEPS = 24, CPT_MANIFEST_MAX = 65536,
        CPT_BUILD_MS = 120000, CPT_RUN_MS = 60000 };
 
 static const char k_cpt_root[] = "contexts/commons/packages";
@@ -169,17 +169,23 @@ static void cpt_deps(const char *pkg, char deps[][CPT_NAME], size_t *nd)
 
 struct cpt_argv {
     const char *v[CPT_MAX_ARGV];
-    char pool[CPT_MAX_ARGV][128];
+    char pool[CPT_MAX_ARGV][CPT_ARG];
     int n;
+    bool bad; /* an argument did not fit: the command is never run */
 };
 
+/* An argument that does not fit its slot is refused, never truncated: the
+ * output path under a deep checkout is long, and a cut `-o` path would build
+ * a binary where the run step does not look (exit 127 on the longest name). */
 static void cpt_push(struct cpt_argv *a, const char *s)
 {
-    if (a->n < CPT_MAX_ARGV - 1) {
-        (void)snprintf(a->pool[a->n], sizeof a->pool[0], "%s", s);
-        a->v[a->n] = a->pool[a->n];
-        a->n++;
+    if (a->n >= CPT_MAX_ARGV - 1 || strlen(s) >= sizeof a->pool[0]) {
+        a->bad = true;
+        return;
     }
+    (void)snprintf(a->pool[a->n], sizeof a->pool[0], "%s", s);
+    a->v[a->n] = a->pool[a->n];
+    a->n++;
 }
 
 /* -I and every source file of one package, addressed from the package under
@@ -209,6 +215,7 @@ static bool cpt_build(const char *dir, const char *pkg, const char *out)
     size_t nd = 0;
 
     a.n = 0;
+    a.bad = false;
     cpt_deps(pkg, deps, &nd);
     for (const char *f = "cc -std=c23 -O1 -Wall -Wextra -Werror -pedantic";
          *f;) {
@@ -231,6 +238,13 @@ static bool cpt_build(const char *dir, const char *pkg, const char *out)
     cpt_push(&a, "-o");
     cpt_push(&a, out);
     a.v[a.n] = NULL;
+    if (a.bad) {
+        (void)snprintf(g_cpt_why, sizeof g_cpt_why,
+                       "build argument over %d bytes or more than %d "
+                       "arguments for %.60s", CPT_ARG - 1, CPT_MAX_ARGV - 1,
+                       pkg);
+        return false;
+    }
     return cpt_run(dir, a.v, CPT_BUILD_MS, pkg, "build");
 }
 

@@ -709,7 +709,10 @@ static int test_operator_detail_small_outputs(void)
 #if !defined(_WIN32)
 static int operator_status_bind(char *dir, size_t dir_cap)
 {
-    if (!test_mkdtemp(dir, dir_cap, "a63c")) return -1;
+    /* AF_UNIX caps the bound path at sizeof(sun_path) (108): a deep checkout
+     * path alone (a long lane name under test-tmp) pushes a test-tmp socket
+     * directory past it, so the directory is short when it must be. */
+    if (!test_mksockdir(dir, dir_cap, "a63c", sizeof("s") - 1)) return -1;
     struct sockaddr_un address = { .sun_family = AF_UNIX };
     int n = snprintf(address.sun_path, sizeof(address.sun_path), "%s/s", dir);
     if (n < 0 || (size_t)n >= sizeof(address.sun_path)) return -1;
