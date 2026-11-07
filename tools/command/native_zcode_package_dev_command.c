@@ -391,6 +391,9 @@ static void zpd_next_add(struct zcl_command_reply *reply, const char *command,
     size_t length = json_write(args, rendered, sizeof(rendered));
     if (length > 0 && length < sizeof(rendered))
         (void)zcl_command_reply_add_next(reply, command, rendered, reason);
+    else
+        LOG_ERROR("zcode.package.dev", "next hint for %s omitted: arguments need %zu bytes, bound is %zu",
+                  command, length, sizeof(rendered) - 1u);
     json_free(args);
 }
 static void zpd_export_next_seal(struct zcl_command_reply *reply, const char *directory,
@@ -401,20 +404,29 @@ static void zpd_export_next_seal(struct zcl_command_reply *reply, const char *di
     zcl_hex_encode(digest, 32, body_sha3);
     zcl_hex_encode(prepared->signing_digest, 32, signing);
     int count = snprintf(path, sizeof(path), "%s/release-body.wire", directory);
-    if (count <= 0 || (size_t)count >= sizeof(path)) return;
-    if (snprintf(reason, sizeof(reason), "sign digest %s with z23-package-sign, then seal the release body", signing) >= (int)sizeof(reason)) return;
+    if (count <= 0 || (size_t)count >= sizeof(path)) {
+        LOG_ERROR("zcode.package.dev", "next hint for zcode.package.dev.seal omitted: body path needs %d bytes, bound is %zu",
+                  count, sizeof(path) - 1u);
+        return;
+    }
+    if (snprintf(reason, sizeof(reason), "sign digest %s with z23-package-sign, then seal the release body", signing) >= (int)sizeof(reason)) {
+        LOG_ERROR("zcode.package.dev", "next hint for zcode.package.dev.seal omitted: reason text exceeds %zu bytes", sizeof(reason) - 1u);
+        return;
+    }
     struct json_value args; json_init(&args); json_set_object(&args);
     bool ok = json_push_kv_str(&args, "release_body_file", path) &&
         json_push_kv_str(&args, "release_body_sha3", body_sha3) &&
         json_push_kv_str(&args, "signature_hex", "<128hex>");
-    if (!ok) { json_free(&args); return; }
+    if (!ok) {
+        LOG_ERROR("zcode.package.dev", "next hint for zcode.package.dev.seal omitted: argument allocation failed");
+        json_free(&args); return;
+    }
     zpd_next_add(reply, "zcode.package.dev.seal", &args, reason);
 }
 static bool zpd_export_reply(struct zcl_command_reply *reply, const struct vcs_package_prepared *prepared,
     const struct zpd_export_wire wires[5], const char *directory)
 {
-    zpd_export_next_seal(reply, directory, prepared);
-    return zpd_export_metadata(&reply->data, wires) &&
+    bool ok = zpd_export_metadata(&reply->data, wires) &&
         zpd_push_hex(&reply->data, "package_root", prepared->package_root, 32) &&
         zpd_push_hex(&reply->data, "recipe_root", prepared->recipe_root, 32) &&
         zpd_push_hex(&reply->data, "dependency_lock_root", prepared->lock_root, 32) &&
@@ -424,6 +436,9 @@ static bool zpd_export_reply(struct zcl_command_reply *reply, const struct vcs_p
         zpd_push_string(&reply->data, "artifact_publication", "durable") &&
         json_push_kv_bool(&reply->data, "mutation_attempted", true) &&
         json_push_kv_bool(&reply->data, "read_only", false);
+    /* Only a reply that succeeded may suggest the next step. */
+    if (ok) zpd_export_next_seal(reply, directory, prepared);
+    return ok;
 }
 #endif
 void zcl_native_handle_zcode_package_dev_prepare_export(
@@ -493,7 +508,11 @@ static void zpd_seal_next_create(struct zcl_command_reply *reply, const char *bo
         directory[slash - body_file] = 0;
     }
     if (snprintf(manifest, sizeof(manifest), "%s/manifest.wire", directory) >= (int)sizeof(manifest) ||
-        snprintf(recipe, sizeof(recipe), "%s/recipe.wire", directory) >= (int)sizeof(recipe)) return;
+        snprintf(recipe, sizeof(recipe), "%s/recipe.wire", directory) >= (int)sizeof(recipe)) {
+        LOG_ERROR("zcode.package.dev", "next hint for zcode.package.dev.create omitted: exported file paths exceed %zu bytes",
+                  sizeof(manifest) - 1u);
+        return;
+    }
     struct json_value args; json_init(&args); json_set_object(&args);
     bool ok = json_push_kv_str(&args, "mode", "plan") &&
         json_push_kv_str(&args, "release_hex", "<release_hex>") &&
@@ -502,7 +521,10 @@ static void zpd_seal_next_create(struct zcl_command_reply *reply, const char *bo
         json_push_kv_str(&args, "recipe_file", recipe) &&
         json_push_kv_str(&args, "recipe_sha3", "<recipe_sha3>") &&
         json_push_kv_str(&args, "dir", "<source-dir>");
-    if (!ok) { json_free(&args); return; }
+    if (!ok) {
+        LOG_ERROR("zcode.package.dev", "next hint for zcode.package.dev.create omitted: argument allocation failed");
+        json_free(&args); return;
+    }
     zpd_next_add(reply, "zcode.package.dev.create", &args,
         "plan the package from this release_hex; sha3 values are in the export reply; then repeat with mode commit");
 }
