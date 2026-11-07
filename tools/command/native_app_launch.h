@@ -135,6 +135,17 @@ void app_launch_registry_load(const struct app_launch_env *env,
 const struct app_launch_entry *
 app_launch_registry_find(const struct app_launch_registry *reg,
                          const char *name);
+/* A built copy's compiled-in PREVIEW run: args are the arguments after the
+ * image path, with the capture slot filled by capture_path
+ * (<dir>/<preview_file>). Only built-in rows carry one. */
+struct app_launch_preview {
+    char args[APP_LAUNCH_ARGS_MAX][APP_LAUNCH_ARG_MAX];
+    unsigned arg_count;
+    char capture_path[APP_LAUNCH_PATH_MAX];
+};
+/* False (out zeroed) when app_id has no preview row or nothing fits. */
+bool app_launch_preview(const char *app_id, const char *dir,
+                        struct app_launch_preview *out);
 /* "a, b, c" of every id; false when it does not fit. */
 bool app_launch_known_names(const struct app_launch_registry *reg, char *out,
                             size_t out_size);

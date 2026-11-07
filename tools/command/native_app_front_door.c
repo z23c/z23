@@ -321,6 +321,8 @@ static void fd_print_done(struct fd_run *r)
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
         if (fd_str(r, keys[i]))
             (void)fprintf(r->out, "  %s: %s\n", keys[i], fd_str(r, keys[i]));
+    if (fd_str(r, "preview"))
+        (void)fprintf(r->out, "  %s\n", fd_str(r, "preview"));
 }
 
 /* What a plan that stops here changed: nothing, unless the plan made the

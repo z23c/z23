@@ -3,7 +3,7 @@
  * Built-in launchable desktop programs for `z23 app open`.
  *
  * ZCL_APP_LAUNCH(id, aliases, executable, argv, ready_marker, raise,
- *                build_hint)
+ *                build_hint, preview_argv, preview_file)
  *   id            lower-case name the launcher reports
  *   aliases       comma-separated other names, "" for none
  *   executable    basename, resolved ONLY in the directory that holds the
@@ -17,6 +17,10 @@
  *                 app that does not declare it (SIGUSR1's default action
  *                 ends the process).
  *   build_hint    what to run when the executable is missing
+ *   preview_argv  ZCL_APP_ARGV(...) the PREVIEW run of a built copy's image
+ *                 (never used by `app open`); one "%s" slot takes the capture
+ *                 path, or ZCL_APP_ARGV() for no preview
+ *   preview_file  capture file name inside the copy's directory, "" for none
  *
  * Launch commands are data compiled into this binary or read from the
  * operator's own apps.tsv. They never come from the board, wiki, packages
@@ -29,4 +33,5 @@
  * InitWindow and restores its window from the main loop, so it declares raise. */
 ZCL_APP_LAUNCH("skycombat", "sky,sky-combat,airplane", "z23-skycombat",
                ZCL_APP_ARGV(), "DISPLAY: Device initialized successfully",
-               ZCL_APP_RAISE_SIGUSR1, "make game")
+               ZCL_APP_RAISE_SIGUSR1, "make game",
+               ZCL_APP_ARGV("--qa-frames=120", "--capture=%s"), "preview.png")

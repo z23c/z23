@@ -723,6 +723,27 @@ _test_next:
     return failures;
 }
 
+static int case_preview(void)
+{
+    int failures = 0;
+    struct app_launch_preview p;
+    TEST("skycombat's launch row has a preview argv with the capture path "
+         "filled from the copy directory") {
+        ASSERT(app_launch_preview("skycombat", "/copies/sky-1", &p));
+        ASSERT(p.arg_count == 2);
+        ASSERT(strcmp(p.args[0], "--qa-frames=120") == 0);
+        ASSERT(strcmp(p.args[1], "--capture=/copies/sky-1/preview.png") == 0);
+        ASSERT(strcmp(p.capture_path, "/copies/sky-1/preview.png") == 0);
+        /* no preview row, no directory, no name: no preview */
+        ASSERT(!app_launch_preview("tinyapp", "/copies/x", &p) &&
+               p.arg_count == 0);
+        ASSERT(!app_launch_preview("skycombat", "", &p));
+        ASSERT(!app_launch_preview(NULL, "/copies/x", &p));
+    PASS(); }
+_test_next:
+    return failures;
+}
+
 int test_app_launch(void);
 int test_app_launch(void)
 {
@@ -742,6 +763,7 @@ _test_next:
     failures += case_process_env(&f);
     failures += case_handlers(&f);
     failures += case_discover();
+    failures += case_preview();
     failures += case_resident_app(&f, f.bin_ready, "ready", true, false);
     failures += case_resident_app(&f, f.bin_exit, "exit", false, true);
     failures += case_resident_app(&f, f.bin_silent, "silent", false, false);

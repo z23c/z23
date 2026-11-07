@@ -37,14 +37,18 @@ struct app_builtin {
     const char *ready_marker;
     bool raise_sigusr1;
     const char *build_hint;
+    const char *const *preview_argv; /* NULL-terminated; one "%s" capture slot */
+    const char *preview_file;        /* capture file in a copy's directory */
 };
 
 #define ZCL_APP_RAISE_UNSUPPORTED false
 #define ZCL_APP_RAISE_SIGUSR1 true
 
 static const struct app_builtin k_app_builtins[] = {
-#define ZCL_APP_LAUNCH(id_, aliases_, exe_, argv_, marker_, raise_, hint_) \
-    {id_, aliases_, exe_, argv_, marker_, raise_, hint_},
+#define ZCL_APP_LAUNCH(id_, aliases_, exe_, argv_, marker_, raise_, hint_, \
+                       preview_argv_, preview_file_) \
+    {id_, aliases_, exe_, argv_, marker_, raise_, hint_, preview_argv_, \
+     preview_file_},
 #include "app_launch_catalog.def"
 #undef ZCL_APP_LAUNCH
 };
@@ -478,4 +482,51 @@ bool app_launch_known_names(const struct app_launch_registry *reg, char *out,
         at += (size_t)n;
     }
     return true;
+}
+
+/* Copy one preview argument; its "%s" (at most one) becomes the capture path. */
+static bool app_preview_arg(char *dst, size_t cap, const char *src,
+                            const char *path)
+{
+    const char *slot = strstr(src, "%s");
+    int n = slot ? snprintf(dst, cap, "%.*s%s%s", (int)(slot - src), src, path,
+                            slot + 2)
+                 : snprintf(dst, cap, "%s", src);
+    return n > 0 && (size_t)n < cap;
+}
+
+/* The compiled-in PREVIEW argv of the built-in app `app_id`, with its "%s"
+ * capture slot filled by <dir>/<preview_file>. The path comes from the
+ * caller's own copy directory, never from user input. False when the app has
+ * no preview row or anything does not fit. */
+bool app_launch_preview(const char *app_id, const char *dir,
+                        struct app_launch_preview *out)
+{
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    if (!app_id || !dir || !dir[0])
+        return false;
+    for (size_t i = 0; i < sizeof(k_app_builtins) / sizeof(k_app_builtins[0]);
+         i++) {
+        const struct app_builtin *b = &k_app_builtins[i];
+        if (strcmp(b->id, app_id) != 0 || !b->preview_argv[0] ||
+            !b->preview_file[0])
+            continue;
+        int n = snprintf(out->capture_path, sizeof(out->capture_path),
+                         "%s/%s", dir, b->preview_file);
+        if (n <= 0 || (size_t)n >= sizeof(out->capture_path))
+            return false;
+        for (unsigned a = 0; b->preview_argv[a]; a++) {
+            if (a >= APP_LAUNCH_ARGS_MAX ||
+                !app_preview_arg(out->args[a], sizeof(out->args[a]),
+                                 b->preview_argv[a], out->capture_path)) {
+                memset(out, 0, sizeof(*out));
+                return false;
+            }
+            out->arg_count = a + 1;
+        }
+        return out->arg_count > 0;
+    }
+    return false;
 }

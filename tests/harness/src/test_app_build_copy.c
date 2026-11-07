@@ -209,6 +209,15 @@ static const char k_meta[] =
     "  \"license\": \"Apache-2.0\",\n  \"include_dir\": \"include\",\n"
     "  \"source_dir\": \"src\",\n  \"dependencies\": []\n}\n";
 
+/* The same stub published under the skycombat release name, so the build
+ * reaches the compiled-in skycombat preview row. */
+static const char k_sky_meta[] =
+    "{\n  \"schema\": 1,\n  \"name\": \"skycombat/skycombat\",\n"
+    "  \"semver\": \"0.1.0\",\n  \"language\": \"c23\",\n"
+    "  \"license\": \"Apache-2.0\",\n  \"include_dir\": \"include\",\n"
+    "  \"source_dir\": \"src\",\n  \"dependencies\": []\n}\n";
+static const char *abc_stub_meta = k_meta;
+
 static const char k_alice_meta[] =
     "{\n  \"schema\": 1,\n  \"name\": \"alice/tinyapp\",\n"
     "  \"semver\": \"0.2.0\",\n  \"language\": \"c23\",\n"
@@ -239,7 +248,7 @@ static bool abc_stub_source(struct abc_world *w)
     ok = ok && mkdir(dir, 0700) == 0;
     (void)snprintf(dir, sizeof(dir), "%s/src", w->src);
     ok = ok && mkdir(dir, 0700) == 0;
-    return ok && abc_put(w->src, "zcode-package.json", k_meta) &&
+    return ok && abc_put(w->src, "zcode-package.json", abc_stub_meta) &&
            abc_put(w->src, "Makefile", k_makefile) &&
            abc_put(w->src, "include/boost.h", "#define BOOST 1\n") &&
            abc_put(w->src, "src/main.c", k_main);
@@ -517,6 +526,9 @@ static int abc_builds_v1_then_v2(struct abc_world *w)
         ASSERT(stat(abc_get(&l, "image_path"), &st) == 0 &&
                S_ISREG(st.st_mode));
         ASSERT(strstr(abc_get(&l, "image_path"), w->image_v1) != NULL);
+        /* tinyapp has no preview row: no preview hint at all */
+        ASSERT(!json_get(&l.out.data, "preview_argv") &&
+               !json_get(&l.out.data, "preview"));
         abc_close(&l);
         ASSERT_EQ(abc_make_runs(w->build_dir), 1);
 
@@ -1179,6 +1191,42 @@ static int abc_explicit_saved_version(void)
     return failures;
 }
 
+/* A successful build of a skycombat copy offers ONE preview run: the built
+ * image, --qa-frames=120 and a --capture inside the copy's own directory. */
+static int abc_preview_skycombat(void)
+{
+    int failures = 0;
+    struct abc_world w = {0};
+    TEST("app.build: a skycombat copy's reply carries the image + --qa-frames "
+         "+ --capture=<copy>/preview.png preview run") {
+        abc_stub_meta = k_sky_meta;
+        bool ready = abc_world_init(&w);
+        abc_stub_meta = k_meta;
+        ASSERT(ready);
+        struct abc_leaf l;
+        ASSERT(abc_build(&l, w.copy, w.alice_datadir));
+        const struct json_value *argv = json_get(&l.out.data, "preview_argv");
+        char want[ABC_PATH + 32], line[3 * ABC_PATH];
+        ASSERT(argv && argv->type == JSON_ARR && argv->num_children == 3);
+        ASSERT(strcmp(json_get_str(&argv->children[0]),
+                      abc_get(&l, "image_path")) == 0);
+        ASSERT(strcmp(json_get_str(&argv->children[1]),
+                      "--qa-frames=120") == 0);
+        (void)snprintf(want, sizeof(want), "--capture=%s/preview.png", w.copy);
+        ASSERT(strcmp(json_get_str(&argv->children[2]), want) == 0);
+        (void)snprintf(line, sizeof(line),
+                       "Preview: run %s --qa-frames=120 --capture=%s/preview.png "
+                       "to save %s/preview.png", abc_get(&l, "image_path"),
+                       w.copy, w.copy);
+        ASSERT(strcmp(abc_get(&l, "preview"), line) == 0);
+        abc_close(&l);
+        PASS();
+    } _test_next:;
+    if (w.saved_home[0]) (void)setenv("HOME", w.saved_home, 1);
+    if (!failures) (void)test_rm_rf_recursive(w.root);
+    return failures;
+}
+
 int test_app_build_copy(void)
 {
     int failures = 0;
@@ -1215,5 +1263,7 @@ int test_app_build_copy(void)
         (void)test_rm_rf_recursive(w.root);
     if (!failures)
         failures += abc_explicit_saved_version();
+    if (!failures)
+        failures += abc_preview_skycombat();
     return failures;
 }

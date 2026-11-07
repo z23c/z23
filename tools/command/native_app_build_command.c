@@ -39,6 +39,7 @@
 #include "command/app_build_make.h"
 #include "command/app_copy_build.h"
 #include "command/native_app_compose.h"
+#include "command/native_app_launch.h"
 #include "command/app_image.h"
 #include "command/native_zcode_package_copy.h"
 
@@ -333,6 +334,86 @@ static void zab_describe(struct zab *z, const char *stage, bool unconfined)
     zcl_package_copy_push_root(d, "plan_id", z->plan_id);
 }
 
+/* One POSIX-shell word: plain bytes stay, anything else is backslashed. */
+static bool zab_sh_word(char **at, size_t *left, const char *s)
+{
+    for (; *s; s++) {
+        bool plain = (*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+                     (*s >= '0' && *s <= '9') || strchr("_./:@+-=", *s);
+        size_t need = plain ? 1u : 2u;
+        if (*s < 32 || *s == 127 || *left <= need)
+            return false;
+        if (!plain)
+            *(*at)++ = '\\';
+        *(*at)++ = *s;
+        *left -= need;
+        **at = '\0';
+    }
+    return true;
+}
+
+/* The pasteable PREVIEW command: the built image, then its origin app's
+ * compiled-in preview arguments (a capture path inside the copy). */
+static bool zab_preview_cmd(const struct app_launch_preview *p,
+                            const char *image, char *cmd, size_t cap)
+{
+    char *at = cmd;
+    size_t left = cap;
+    cmd[0] = '\0';
+    if (!zab_sh_word(&at, &left, image))
+        return false;
+    for (unsigned i = 0; i < p->arg_count; i++) {
+        if (left < 2)
+            return false;
+        *at++ = ' ';
+        *at = '\0';
+        left--;
+        if (!zab_sh_word(&at, &left, p->args[i]))
+            return false;
+    }
+    return true;
+}
+
+/* An app whose launch row carries a preview argv gets ONE pasteable preview
+ * command after a successful build; any other app gets none. app open still
+ * takes no argv: this only prints the run for the owner to paste. */
+static void zab_preview_hint(struct zab *z, const char *image)
+{
+    struct vcs_package_release release;
+    uint8_t release_id[32];
+    char base[ZCL_PACKAGE_COPY_BASE_MAX + 1u];
+    char cmd[ZAB_PATH * 2 + 256], line[ZAB_PATH * 3 + 320];
+    struct app_launch_preview p;
+    if (zcl_package_copy_find_release(z->datadir, z->copy.parent_release,
+                                      &release, release_id) !=
+        ZCL_PACKAGE_COPY_FOUND)
+        return;
+    zcl_package_copy_name_base(release.name, base);
+    if (!app_launch_preview(base, z->copy_dir, &p) ||
+        !zab_preview_cmd(&p, image, cmd, sizeof(cmd)))
+        return;
+    struct json_value argv;
+    json_init(&argv);
+    json_set_array(&argv);
+    struct json_value item;
+    json_init(&item);
+    json_set_str(&item, image);
+    bool ok = json_push_back(&argv, &item);
+    json_free(&item);
+    for (unsigned i = 0; ok && i < p.arg_count; i++) {
+        json_init(&item);
+        json_set_str(&item, p.args[i]);
+        ok = json_push_back(&argv, &item);
+        json_free(&item);
+    }
+    if (ok && snprintf(line, sizeof(line), "Preview: run %s to save %s", cmd,
+                       p.capture_path) < (int)sizeof(line)) {
+        (void)json_push_kv(&z->reply->data, "preview_argv", &argv);
+        (void)json_push_kv_str(&z->reply->data, "preview", line);
+    }
+    json_free(&argv);
+}
+
 static void zab_commit_reply(struct zab *z, const struct app_image_build *rec,
                              const char *image, const char *record,
                              bool make_ran, bool unconfined)
@@ -359,6 +440,7 @@ static void zab_commit_reply(struct zab *z, const struct app_image_build *rec,
                                        ? zcl_package_copy_str(z->input, "copy") : "COPY"))
             (void)json_push_kv_str(d, "next", next);
     }
+    zab_preview_hint(z, image);
     z->reply->error.mutated = make_ran;
 }
 
