@@ -117,7 +117,7 @@ struct app_open_result {
     int exit_code;
     int term_signal;
     char log_tail[APP_LAUNCH_TAIL_MAX];
-    char message[384];
+    char message[1024];
     char hint[384];
 };
 
@@ -213,6 +213,9 @@ bool app_proc_resident_spawn_and_wait(const struct app_launch_entry *entry,
                                      char *error, size_t error_size);
 /* The last lines of a log file, at most out_size - 1 bytes. */
 void app_proc_log_tail(const char *path, char *out, size_t out_size);
+/* The last five lines, at most APP_LAUNCH_BRIEF_MAX bytes, for a reply. */
+#define APP_LAUNCH_BRIEF_MAX 400u
+void app_proc_log_brief(const char *path, char *out, size_t out_size);
 
 /* ── pid record (native_app_launch_record.c) ─────────────────────────── */
 

@@ -234,7 +234,7 @@ static int case_open_raise_reopen(struct al_fx *f)
     long first = 0;
     TEST("open starts the app and waits for its ready marker") {
         ASSERT(f->reg.config_error[0] == '\0');
-        ASSERT(f->reg.count == 6u);
+        ASSERT(f->reg.count == 7u);
         al_open(f, "fixtureapp");
         ASSERT_STR_EQ(app_open_status_name(f->res.status), "opened");
         ASSERT(f->res.pid > 1);

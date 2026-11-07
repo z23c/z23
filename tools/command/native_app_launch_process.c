@@ -371,6 +371,29 @@ static bool app_wait_step(pid_t pid, const struct app_launch_entry *entry,
     return false;
 }
 
+/* A marker-based ready only says the app got that far: a game prints its
+ * marker, then loses its X connection and dies. Keep polling for settle_ms
+ * after the marker (an app with no marker already waited settle_ms), and if
+ * the child exits in that window report it as exited, not ready. */
+static void app_settle_after_ready(pid_t pid, const struct app_launch_entry *entry,
+                                   const char *log_path, int logfd,
+                                   int settle_ms, struct app_spawn_outcome *out)
+{
+    if (!entry->ready_marker[0] || !out->ready)
+        return;
+    int64_t ready_ms = out->ready_ms;
+    for (int64_t waited = 0; waited < settle_ms; waited += APP_POLL_MS) {
+        platform_sleep_ms(APP_POLL_MS);
+        (void)app_wait_step(pid, entry, log_path, logfd, ready_ms + waited,
+                            settle_ms, out);
+        if (out->exited || out->spawn_errno)
+            break;
+    }
+    out->ready_ms = ready_ms;
+    if (out->exited)
+        out->ready = false;
+}
+
 static bool app_os_spawn_and_wait(const struct app_launch_entry *entry,
                                   const char *log_path, int timeout_ms,
                                   int settle_ms, struct app_spawn_outcome *out)
@@ -398,8 +421,10 @@ static bool app_os_spawn_and_wait(const struct app_launch_entry *entry,
     for (;;) {
         int64_t elapsed = platform_time_monotonic_ms() - start;
         if (app_wait_step(pid, entry, log_path, -1, elapsed, settle_ms, out) ||
-            elapsed >= timeout_ms)
+            elapsed >= timeout_ms) {
+            app_settle_after_ready(pid, entry, log_path, -1, settle_ms, out);
             return true;
+        }
         platform_sleep_ms(APP_POLL_MS);
     }
 }
@@ -413,7 +438,10 @@ static bool app_resident_wait(const struct app_launch_entry *entry,
     for (;;) {
         int64_t elapsed = platform_time_monotonic_ms() - start;
         if (app_wait_step((pid_t)out->pid, entry, NULL, logfd, elapsed, settle_ms, out) ||
-            elapsed >= timeout_ms) return out->spawn_errno == 0;
+            elapsed >= timeout_ms) {
+            app_settle_after_ready((pid_t)out->pid, entry, NULL, logfd, settle_ms, out);
+            return out->spawn_errno == 0;
+        }
         platform_sleep_ms(APP_POLL_MS);
     }
 }
@@ -554,4 +582,26 @@ void app_proc_log_tail(const char *path, char *out, size_t out_size)
 #else
     app_os_log_tail(path, out, out_size);
 #endif
+}
+
+/* At most five lines and APP_LAUNCH_BRIEF_MAX bytes of the log's end, with
+ * trailing newlines dropped, so a one-line reply can say why an app died. */
+void app_proc_log_brief(const char *path, char *out, size_t out_size)
+{
+    char tail[APP_LAUNCH_BRIEF_MAX + 1];
+    if (!out_size)
+        return;
+    out[0] = '\0';
+    app_proc_log_tail(path, tail, sizeof(tail));
+    size_t len = strlen(tail);
+    while (len > 0 && tail[len - 1] == '\n')
+        tail[--len] = '\0';
+    size_t from = len;
+    unsigned lines = 1;
+    while (from > 0) {
+        if (tail[from - 1] == '\n' && ++lines > 5)
+            break;
+        from--;
+    }
+    snprintf(out, out_size, "%s", tail + from);
 }

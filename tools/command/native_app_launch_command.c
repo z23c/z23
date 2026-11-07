@@ -191,7 +191,7 @@ static void app_open_failed_spawn(const struct app_launch_entry *entry,
                                   const struct app_spawn_outcome *sp,
                                   int timeout_ms, struct app_open_result *out)
 {
-    char text[384];
+    char text[1024];
     if (!sp->pid) {
         snprintf(text, sizeof(text), "could not start %.200s: %s",
                  entry->executable, strerror(sp->spawn_errno));
@@ -205,9 +205,11 @@ static void app_open_failed_spawn(const struct app_launch_entry *entry,
         out->exited = true;
         out->exit_code = sp->exit_code;
         out->term_signal = sp->term_signal;
+        char brief[APP_LAUNCH_BRIEF_MAX + 1];
+        app_proc_log_brief(out->log_path, brief, sizeof(brief));
         snprintf(text, sizeof(text), "%s exited before its window was ready "
-                 "(exit code %d, signal %d)", entry->id, sp->exit_code,
-                 sp->term_signal);
+                 "(exit code %d, signal %d); log %.400s:\n%s", entry->id,
+                 sp->exit_code, sp->term_signal, out->log_path, brief);
         app_fail(out, APP_STAGE_EXITED_EARLY, text,
                  "read log_tail: a display or GL error means the desktop "
                  "session is not reachable from here");

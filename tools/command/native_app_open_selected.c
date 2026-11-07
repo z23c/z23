@@ -286,9 +286,13 @@ static void as_launch(struct as_open *a)
     app_proc_log_tail(a->log, tail, sizeof(tail));
     (void)json_push_kv_str(d, "log_tail", tail);
     const char *code = a->outcome.exited ? "EXITED_EARLY" : "NOT_READY";
+    char brief[APP_LAUNCH_BRIEF_MAX + 1], why[APP_LAUNCH_BRIEF_MAX + 160];
+    app_proc_log_brief(a->log, brief, sizeof(brief));
+    (void)snprintf(why, sizeof(why), "the app exited before it was ready (exit code %d, signal %d); last log lines:\n%s",
+                   a->outcome.exit_code, a->outcome.term_signal, brief);
     zcl_command_reply_fail(a->reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
                            code, "open", false, true,
-                           a->outcome.exited ? "the app exited before it was ready" : "the app is still running but was not ready in time", a->log);
+                           a->outcome.exited ? why : "the app is still running but was not ready in time", a->log);
     as_failure_facts(a);
 }
 
