@@ -289,9 +289,10 @@ too. `z23 zcode project init plan` proposes the key when it finds
    z23 zcode create --input='{"mode":"commit","release_hex":"<same>","manifest_file":"<same>","manifest_sha3":"<same>","recipe_file":"<same>","recipe_sha3":"<same>","dir":"/absolute/path/to/package","datadir":"/tmp/z23-commons"}'
    ```
 
-   For an app that lives in this repository, `z23 app copy APP` (the
-   `app.seed` leaf) is meant to run this whole path for you once available;
-   until then follow the steps above by hand.
+   For an app that lives in this repository, one command runs this whole
+   path for you (the `app.seed` leaf seeds it as your own signed package):
+   `z23 -datadir=/tmp/z23-apps app copy APP`. The README's app section
+   walks the rest: save, build, open and share.
 
    Commit is local CAS admission, not network publication. The reply
    names `package_root`, `transport_root`, and one copy-paste
