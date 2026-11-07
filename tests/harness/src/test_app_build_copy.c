@@ -1227,6 +1227,49 @@ static int abc_preview_skycombat(void)
     return failures;
 }
 
+/* The hinted capture must never land in the copy: the game writes it, and a
+ * file inside the tracked tree is an unsaved change that blocks build/share. */
+static int abc_preview_outside_copy(void)
+{
+    int failures = 0;
+    struct abc_world w = {0};
+    TEST("app.build: the hinted preview capture is outside the copy and "
+         "writing it leaves the copy with 0 unsaved changes") {
+        abc_stub_meta = k_sky_meta;
+        bool ready = abc_world_init(&w);
+        abc_stub_meta = k_meta;
+        ASSERT(ready);
+        struct abc_leaf l;
+        ASSERT(abc_build(&l, w.copy, w.alice_datadir));
+        const struct json_value *argv = json_get(&l.out.data, "preview_argv");
+        ASSERT(argv && argv->type == JSON_ARR && argv->num_children == 3);
+        const char *arg = json_get_str(&argv->children[2]);
+        ASSERT(arg && strncmp(arg, "--capture=", 10) == 0);
+        char cap[ABC_PATH * 2];
+        (void)snprintf(cap, sizeof(cap), "%s", arg + 10);
+        abc_close(&l);
+        size_t clen = strlen(w.copy);
+        ASSERT(!(strncmp(cap, w.copy, clen) == 0 &&
+                 (cap[clen] == '/' || cap[clen] == '\0')));
+        FILE *fp = fopen(cap, "wb"); /* as the game would */
+        ASSERT(fp != NULL);
+        ASSERT(fputs("png", fp) >= 0);
+        ASSERT(fclose(fp) == 0);
+        struct zcl_package_copy copy;
+        abc_open(&l);
+        ASSERT(zcl_package_copy_open(w.copy, &copy, &l.out, "fixture"));
+        size_t changes = 99;
+        bool counted = zcl_package_copy_unsaved(&copy, &changes);
+        zcl_package_copy_close(&copy);
+        abc_close(&l);
+        ASSERT(counted && changes == 0);
+        PASS();
+    } _test_next:;
+    if (w.saved_home[0]) (void)setenv("HOME", w.saved_home, 1);
+    if (!failures) (void)test_rm_rf_recursive(w.root);
+    return failures;
+}
+
 int test_app_build_copy(void)
 {
     int failures = 0;
@@ -1265,5 +1308,7 @@ int test_app_build_copy(void)
         failures += abc_explicit_saved_version();
     if (!failures)
         failures += abc_preview_skycombat();
+    if (!failures)
+        failures += abc_preview_outside_copy();
     return failures;
 }
