@@ -109,6 +109,13 @@ static bool asc_inputs(struct asc *s)
     }
     s->options.chain_id = s->chain_id;
     s->options.reward_address = "";
+    return true;
+}
+
+/* The owner's key is made only once the app has staged, so an unknown or
+ * unstageable app leaves $HOME untouched. */
+static bool asc_owner(struct asc *s)
+{
     return zcl_package_copy_owner_key(s->key_path, sizeof(s->key_path),
                                       s->options.publisher_pubkey,
                                       &s->key_created, s->reply,
@@ -206,7 +213,7 @@ static void asc_plan_id(struct asc *s)
 
 static bool asc_derive(struct asc *s)
 {
-    if (!asc_inputs(s) || !asc_stage(s) || !asc_prepare(s) ||
+    if (!asc_inputs(s) || !asc_stage(s) || !asc_owner(s) || !asc_prepare(s) ||
         !asc_existing(s))
         return false;
     asc_plan_id(s);
