@@ -11619,29 +11619,35 @@ RGFW_bool RGFW_createSurfacePtr(u8* data, i32 w, i32 h, RGFW_format format, RGFW
 void RGFW_surface_freePtr(RGFW_surface* surface) { RGFW_UNUSED(surface); }
 
 void RGFW_window_blitSurface(RGFW_window* win, RGFW_surface* surface) {
-	RGFW_copyImageData(surface->data, surface->w, RGFW_MIN(win->h, surface->h), surface->native.format, surface->data, surface->format);
+    if (!win || !surface || !surface->data || surface->w <= 0 || surface->h <= 0 ||
+        surface->format >= RGFW_formatCount) return;
+    int minX = RGFW_MIN(win->w, surface->w);
+    int minY = RGFW_MIN(win->h, surface->h);
+    if (minX <= 0 || minY <= 0) return;
+    size_t sourceStride = (size_t)surface->w * (surface->format >= RGFW_formatRGBA8 ? 4u : 3u);
+    size_t bitmapStride = (size_t)minX * 4u;
 
-    size_t depth = (surface->format >= RGFW_formatRGBA8) ? 4 : 3;
-	id image = ((id (*)(Class, SEL))objc_msgSend)(objc_getClass("NSImage"), sel_getUid("alloc"));
-	NSSize size = (NSSize){(double)surface->w, (double)surface->h};
-	image = ((id (*)(id, SEL, NSSize))objc_msgSend)((id)image, sel_getUid("initWithSize:"), size);
+    id image = ((id (*)(Class, SEL))objc_msgSend)(objc_getClass("NSImage"), sel_getUid("alloc"));
+    NSSize size = (NSSize){(double)minX, (double)minY};
+    image = ((id (*)(id, SEL, NSSize))objc_msgSend)(image, sel_getUid("initWithSize:"), size);
+    if (!image) return;
+    id rep = NSBitmapImageRep_initWithBitmapData(NULL, minX, minY, 8, 4, true, false,
+        "NSDeviceRGBColorSpace", NSBitmapFormatAlphaNonpremultiplied, (NSInteger)bitmapStride, 32);
+    if (!rep) { NSRelease(image); return; }
+    u8* bitmap = NSBitmapImageRep_bitmapData(rep);
+    if (!bitmap) { NSRelease(rep); NSRelease(image); return; }
+    for (int y = 0; y < minY; ++y)
+        RGFW_copyImageData(bitmap + (size_t)y * bitmapStride, minX, 1,
+                           RGFW_formatRGBA8, surface->data + (size_t)y * sourceStride, surface->format);
+    ((void (*)(id, SEL, id))objc_msgSend)(image, sel_getUid("addRepresentation:"), rep);
 
-	int minX = RGFW_MIN(win->w, surface->w);
-	int minY = RGFW_MIN(win->h, surface->h);
-
-	id rep  = NSBitmapImageRep_initWithBitmapData(&surface->data, minX, minY, 8, (i32)depth, (depth == 4), false, "NSDeviceRGBColorSpace", 1 << 1, (u32)surface->w  * (u32)depth, 8 * (u32)depth);
-	RGFW_copyImageData(NSBitmapImageRep_bitmapData(rep), minX, minY , RGFW_formatRGBA8, surface->data, surface->format);
-	((void (*)(id, SEL, id))objc_msgSend)((id)image, sel_getUid("addRepresentation:"), rep);
-
-	id contentView = ((id (*)(id, SEL))objc_msgSend)((id)win->src.window, sel_getUid("contentView"));
-	((void (*)(id, SEL, BOOL))objc_msgSend)(contentView, sel_getUid("setWantsLayer:"), YES);
-	id layer = ((id (*)(id, SEL))objc_msgSend)(contentView, sel_getUid("layer"));
-
-	((void (*)(id, SEL, id))objc_msgSend)(layer, sel_getUid("setContents:"), (id)image);
-	((void (*)(id, SEL, BOOL))objc_msgSend)(contentView, sel_getUid("setNeedsDisplay:"), YES);
-
-	NSRelease(rep);
-	NSRelease(image);
+    id contentView = ((id (*)(id, SEL))objc_msgSend)((id)win->src.window, sel_getUid("contentView"));
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(contentView, sel_getUid("setWantsLayer:"), YES);
+    id layer = ((id (*)(id, SEL))objc_msgSend)(contentView, sel_getUid("layer"));
+    ((void (*)(id, SEL, id))objc_msgSend)(layer, sel_getUid("setContents:"), image);
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(contentView, sel_getUid("setNeedsDisplay:"), YES);
+    NSRelease(rep);
+    NSRelease(image);
 }
 
 void* RGFW_window_getView_OSX(RGFW_window* win) { return win->src.view; }

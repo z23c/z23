@@ -2556,6 +2556,23 @@ $(PRESENTATION_PACKAGE_ARCHIVE): $(PRESENTATION_PACKAGE_OBJS) \
 
 presentation-demo: $(PRESENTATION_DEMO_BIN)
 
+.PHONY: presentation-macos-smoke
+ifeq ($(PRESENTATION_HOST_OS),Darwin)
+presentation-macos-smoke: $(PRESENTATION_BUILD_DIR)/surface-macos-test
+	$(PRESENTATION_BUILD_DIR)/surface-macos-test
+
+$(PRESENTATION_BUILD_DIR)/surface-macos-test: \
+	contexts/explorer/modules/presentation/tests/test_surface_macos.c \
+	$(PRESENTATION_PACKAGE_ARCHIVE)
+	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -Ivendor/rgfw \
+		contexts/explorer/modules/presentation/tests/test_surface_macos.c \
+		$(PRESENTATION_PACKAGE_ARCHIVE) $(PRESENTATION_HOST_LIBS) -o $@
+else
+presentation-macos-smoke:
+	@printf '%s\n' 'presentation-macos-smoke requires a macOS window session' >&2
+	@exit 2
+endif
+
 $(PRESENTATION_DEMO_BIN): contexts/explorer/modules/presentation/examples/bitmap_demo.c \
 	$(PRESENTATION_PACKAGE_ARCHIVE)
 	@mkdir -p $(PRESENTATION_BUILD_DIR)

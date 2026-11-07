@@ -40,6 +40,8 @@ vendor/**    linguist-vendored
 # warning for only these exact vendor packages avoids rewriting authenticated
 # upstream bytes merely to satisfy this repository's house formatting.
 vendor/rgfw/**      -whitespace
+# This patch must retain the pinned header's CRLF context and replacement bytes.
+vendor/rgfw/patches/macos-owned-bitmap.patch -text
 vendor/qrcodegen/** -whitespace
 vendor/typography/stb_truetype.h -whitespace
 # Seeded-bug patches for the shadow selector corpus. A blank context line in a
