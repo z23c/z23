@@ -270,15 +270,28 @@ too. `z23 zcode project init plan` proposes the key when it finds
      --input='{"release_body_hex":"<prepare value>","signature_hex":"<128hex signature>"}'
    ```
 
-4. Pass the sealed `release_hex` and prepare's `manifest_hex` and
-   `recipe_hex` through the same command twice: inspect `mode=plan`, then
-   explicitly repeat with `mode=commit`. Commit returns the exact
-   `package_root` and transport `transport_root`.
+4. Pass the sealed `release_hex` and the exported manifest and recipe
+   files through `zcode create` twice: inspect `mode=plan`, then explicitly
+   repeat with `mode=commit`. Use the file form: `manifest_hex` and
+   `recipe_hex` are too big for a real app (Sky Combat is 215 files), and
+   `zcode package dev prepare` itself exceeds its reply budget for a
+   package that size. Run `zcode package dev prepare export` in step 2
+   instead; it writes `manifest.wire`, `recipe.wire` and `release-body.wire`
+   into a new `artifact_dir` and returns each file's `*_sha3`. Seal with
+   `release_body_file` and `release_body_sha3` in place of
+   `release_body_hex`. The export and seal replies each carry a `next`
+   entry that names the following command with the paths and digests it
+   knows filled in. Commit returns the exact `package_root` and transport
+   `transport_root`.
 
    ```bash
-   z23 zcode create --input='{"mode":"plan","release_hex":"<hex>","manifest_hex":"<hex>","recipe_hex":"<hex>","dir":"/absolute/path/to/package","datadir":"/tmp/z23-commons"}'
-   z23 zcode create --input='{"mode":"commit","release_hex":"<same>","manifest_hex":"<same>","recipe_hex":"<same>","dir":"/absolute/path/to/package","datadir":"/tmp/z23-commons"}'
+   z23 zcode create --input='{"mode":"plan","release_hex":"<hex>","manifest_file":"<artifact_dir>/manifest.wire","manifest_sha3":"<64hex>","recipe_file":"<artifact_dir>/recipe.wire","recipe_sha3":"<64hex>","dir":"/absolute/path/to/package","datadir":"/tmp/z23-commons"}'
+   z23 zcode create --input='{"mode":"commit","release_hex":"<same>","manifest_file":"<same>","manifest_sha3":"<same>","recipe_file":"<same>","recipe_sha3":"<same>","dir":"/absolute/path/to/package","datadir":"/tmp/z23-commons"}'
    ```
+
+   For an app that lives in this repository, `z23 app copy APP` (the
+   `app.seed` leaf) is meant to run this whole path for you once available;
+   until then follow the steps above by hand.
 
    Commit is local CAS admission, not network publication. The reply
    names `package_root`, `transport_root`, and one copy-paste

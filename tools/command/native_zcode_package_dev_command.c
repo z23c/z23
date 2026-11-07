@@ -382,9 +382,38 @@ static bool zpd_export_metadata(struct json_value *out, const struct zpd_export_
     }
     return true;
 }
-static bool zpd_export_reply(struct zcl_command_reply *reply, const struct vcs_package_prepared *prepared,
-    const struct zpd_export_wire wires[5])
+/* Next-command inputs are built here, outside the handlers, so the input-key
+ * scan does not count their keys as reads of the leaf. */
+static void zpd_next_add(struct zcl_command_reply *reply, const char *command,
+    struct json_value *args, const char *reason)
 {
+    char rendered[512];
+    size_t length = json_write(args, rendered, sizeof(rendered));
+    if (length > 0 && length < sizeof(rendered))
+        (void)zcl_command_reply_add_next(reply, command, rendered, reason);
+    json_free(args);
+}
+static void zpd_export_next_seal(struct zcl_command_reply *reply, const char *directory,
+    const struct vcs_package_prepared *prepared)
+{
+    uint8_t digest[32]; char body_sha3[65], signing[65], path[4200], reason[160];
+    zcl_native_package_artifact_digest(digest, prepared->release_body, prepared->release_body_len);
+    zcl_hex_encode(digest, 32, body_sha3);
+    zcl_hex_encode(prepared->signing_digest, 32, signing);
+    int count = snprintf(path, sizeof(path), "%s/release-body.wire", directory);
+    if (count <= 0 || (size_t)count >= sizeof(path)) return;
+    if (snprintf(reason, sizeof(reason), "sign digest %s with z23-package-sign, then seal the release body", signing) >= (int)sizeof(reason)) return;
+    struct json_value args; json_init(&args); json_set_object(&args);
+    bool ok = json_push_kv_str(&args, "release_body_file", path) &&
+        json_push_kv_str(&args, "release_body_sha3", body_sha3) &&
+        json_push_kv_str(&args, "signature_hex", "<128hex>");
+    if (!ok) { json_free(&args); return; }
+    zpd_next_add(reply, "zcode.package.dev.seal", &args, reason);
+}
+static bool zpd_export_reply(struct zcl_command_reply *reply, const struct vcs_package_prepared *prepared,
+    const struct zpd_export_wire wires[5], const char *directory)
+{
+    zpd_export_next_seal(reply, directory, prepared);
     return zpd_export_metadata(&reply->data, wires) &&
         zpd_push_hex(&reply->data, "package_root", prepared->package_root, 32) &&
         zpd_push_hex(&reply->data, "recipe_root", prepared->recipe_root, 32) &&
@@ -410,7 +439,7 @@ void zcl_native_handle_zcode_package_dev_prepare_export(
     if (!zpd_prepare_source(request, reply, &prepared)) return;
     struct zpd_export_wire wires[5]; zpd_export_wires(&prepared, wires);
     bool ok = zpd_export_write(&state, wires);
-    if (ok) ok = zpd_export_reply(reply, &prepared, wires);
+    if (ok) ok = zpd_export_reply(reply, &prepared, wires, state.directory);
     vcs_package_prepared_free(&prepared);
     if (!ok) zpd_export_failure(reply, &state, "PACKAGE_EXPORT_FAILED");
 #endif
@@ -453,6 +482,30 @@ static bool zpd_seal_render_reply(struct zcl_command_reply *reply,
               json_push_kv_str(&reply->data, "signature_status", "verified") &&
               json_push_kv_bool(&reply->data, "read_only", true);
 }
+/* The exported files sit beside the release body; name them when the body came
+ * from a file, else leave the directory for the caller to fill. */
+static void zpd_seal_next_create(struct zcl_command_reply *reply, const char *body_file)
+{
+    char directory[160] = "<artifact_dir>", manifest[200], recipe[200];
+    const char *slash = body_file ? strrchr(body_file, '/') : NULL;
+    if (slash && slash != body_file && (size_t)(slash - body_file) < 120) {
+        memcpy(directory, body_file, (size_t)(slash - body_file));
+        directory[slash - body_file] = 0;
+    }
+    if (snprintf(manifest, sizeof(manifest), "%s/manifest.wire", directory) >= (int)sizeof(manifest) ||
+        snprintf(recipe, sizeof(recipe), "%s/recipe.wire", directory) >= (int)sizeof(recipe)) return;
+    struct json_value args; json_init(&args); json_set_object(&args);
+    bool ok = json_push_kv_str(&args, "mode", "plan") &&
+        json_push_kv_str(&args, "release_hex", "<release_hex>") &&
+        json_push_kv_str(&args, "manifest_file", manifest) &&
+        json_push_kv_str(&args, "manifest_sha3", "<manifest_sha3>") &&
+        json_push_kv_str(&args, "recipe_file", recipe) &&
+        json_push_kv_str(&args, "recipe_sha3", "<recipe_sha3>") &&
+        json_push_kv_str(&args, "dir", "<source-dir>");
+    if (!ok) { json_free(&args); return; }
+    zpd_next_add(reply, "zcode.package.dev.create", &args,
+        "plan the package from this release_hex; sha3 values are in the export reply; then repeat with mode commit");
+}
 void zcl_native_handle_zcode_package_dev_seal(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -494,6 +547,7 @@ void zcl_native_handle_zcode_package_dev_seal(
         return;
     }
     bool ok = zpd_seal_render_reply(reply, wire, wire_len, release_id);
+    if (ok) zpd_seal_next_create(reply, zpd_str(request->input, "release_body_file"));
     free(canonical); free(wire);
     if (!ok)
         zpd_fail(reply, "PACKAGE_SEAL_OUTPUT",
