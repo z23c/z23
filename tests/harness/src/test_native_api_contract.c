@@ -23,6 +23,7 @@
 #include "chain/chainparams.h"
 #include "core/core_io.h"
 #include "config/command_catalog.h"
+#include "config/args.h"
 #include "codeindex/codeindex.h"
 #include "controllers/transaction_controller.h"
 #include "controllers/wallet_controller.h"
@@ -4549,6 +4550,73 @@ static int test_regtest_mine_native(void)
     return failures;
 }
 
+/* Capture what print_usage writes to stdout. */
+static bool front_door_usage_text(char *wire, size_t cap)
+{
+    FILE *output = tmpfile();
+    int saved = dup(fileno(stdout));
+    bool ok = false;
+    if (!output || saved < 0 || fflush(stdout) != 0 ||
+        dup2(fileno(output), fileno(stdout)) < 0)
+        goto cleanup;
+    print_usage("z23");
+    ok = fflush(stdout) == 0 && fseek(output, 0, SEEK_SET) == 0;
+    if (ok) {
+        size_t n = fread(wire, 1, cap - 1, output);
+        wire[n] = '\0';
+        ok = !ferror(output) && n < cap - 1;
+    }
+cleanup:
+    ok &= security_restore_fd(saved, stdout);
+    if (output)
+        fclose(output);
+    return ok;
+}
+
+/* The front door a stranger meets: --yes is a no-op on app open, app list
+ * leads with the launchable app and a pasteable -datadir next, and --help
+ * says apps exist. */
+static int test_app_front_door_discovery(void)
+{
+    int failures = 0, rc = 0;
+    char wire[16384];
+    TEST_CASE("app open accepts --yes and -y as a no-op") {
+        const char *yes[] = {"open", "nosuchapp", "--yes"};
+        const char *shortyes[] = {"open", "-y", "nosuchapp"};
+        ASSERT(uniform_cli("app", yes, 3, wire, sizeof(wire), &rc));
+        ASSERT(strstr(wire, "unknown input key") == NULL);
+        ASSERT(strstr(wire, "UNKNOWN_APP") != NULL);
+        ASSERT(uniform_cli("app", shortyes, 3, wire, sizeof(wire), &rc));
+        ASSERT(strstr(wire, "unknown input key") == NULL);
+        ASSERT(strstr(wire, "UNKNOWN_APP") != NULL);
+        PASS();
+    } _test_next:;
+    TEST_CASE("app list carries a pasteable open command with -datadir") {
+        const char *list[] = {"list"};
+        struct json_value reply;
+        json_init(&reply);
+        ASSERT(uniform_cli_in("app", "/front-door-datadir", list, 1, wire,
+                              sizeof(wire), &rc));
+        ASSERT(json_read(&reply, wire, strlen(wire)));
+        const struct json_value *data = json_get(&reply, "data");
+        const char *next = json_get_str(json_get(data, "next"));
+        ASSERT(next != NULL);
+        ASSERT_STR_EQ(next, "z23 -datadir=/front-door-datadir app open "
+                            "skycombat");
+        const struct json_value *first =
+            json_at(json_get(data, "launchable"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(first, "open")), next);
+        json_free(&reply);
+        PASS();
+    } _test_next:;
+    TEST_CASE("z23 --help says apps exist and points to app list") {
+        ASSERT(front_door_usage_text(wire, sizeof(wire)));
+        ASSERT(strstr(wire, "z23 app list") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_native_api_contract(void)
 {
     int failures = 0;
@@ -4564,6 +4632,7 @@ int test_native_api_contract(void)
     failures += test_missing_required_input_fails_closed_structured();
     failures += test_dev_failure_native_api();
     failures += test_native_app_catalog_uses_strict_builtin_source();
+    failures += test_app_front_door_discovery();
     failures += test_regtest_mine_invalid();
     failures += test_regtest_mine_native();
     failures += test_wallet_send_amount_admission();
