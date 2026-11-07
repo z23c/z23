@@ -26,6 +26,8 @@
 #include "models/wallet_key.h"     /* db_wallet_key_each / count */
 #include "support/cleanse.h"
 #include "util/result.h"
+#include "util/ar_step_readonly.h"
+#include "../../../engine/composition/src/boot_wallet_cutover_empty_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1008,6 +1010,159 @@ static int test_wkd1_failure_clears_reported_length(void)
     return failures;
 }
 
+static bool wse_empty_proof(struct wallet_sqlite *ws, struct wallet *w, bool loaded)
+{
+    sqlite3_mutex *mu = sqlite3_db_mutex(ws->db);
+    if (!mu) return false;
+    sqlite3_mutex_enter(mu);
+    zcl_mutex_lock(&w->sapling_keys.cs);
+    bool ok = boot_wallet_cutover_shielded_empty_locked(ws, ws->db, w, loaded);
+    zcl_mutex_unlock(&w->sapling_keys.cs);
+    sqlite3_mutex_leave(mu);
+    return ok;
+}
+
+static int wse_deny_shielded_read(void *context, int action, const char *one,
+                                  const char *two, const char *three, const char *four)
+{
+    (void)context; (void)two; (void)three; (void)four;
+    return action == SQLITE_READ && one && !strcmp(one, "wallet_sapling_notes") ?
+        SQLITE_DENY : SQLITE_OK;
+}
+
+static int test_shielded_empty_memory(struct wallet_sqlite *ws, struct wallet *w, bool loaded)
+{
+    int failures = 0;
+    TEST("wallet_sqlite_enc: shielded-empty proof requires the actual successful load") {
+        ASSERT(loaded && wse_empty_proof(ws, w, loaded));
+        ASSERT(!wse_empty_proof(ws, w, false));
+        w->sapling_keys.has_seed = true;
+        ASSERT(!wse_empty_proof(ws, w, loaded));
+        w->sapling_keys.has_seed = false;
+        w->sapling_keys.locked = true;
+        ASSERT(!wse_empty_proof(ws, w, loaded));
+        w->sapling_keys.locked = false;
+        w->sapling_keys.num_keys = 1;
+        ASSERT(!wse_empty_proof(ws, w, loaded));
+        w->sapling_keys.num_keys = 0;
+        w->sapling_keys.num_damaged = 1;
+        ASSERT(!wse_empty_proof(ws, w, loaded));
+        w->sapling_keys.num_damaged = 0;
+        w->sapling_keys.num_unscannable = 1;
+        ASSERT(!wse_empty_proof(ws, w, loaded));
+        w->sapling_keys.num_unscannable = 0;
+        ASSERT(!boot_wallet_cutover_shielded_empty_locked(ws, NULL, w, loaded));
+        sqlite3 *other = NULL;
+        ASSERT(sqlite3_open(":memory:", &other) == SQLITE_OK);
+        ASSERT(!boot_wallet_cutover_shielded_empty_locked(ws, other, w, loaded));
+        ASSERT(sqlite3_close(other) == SQLITE_OK);
+        struct wallet_sqlite closed = *ws;
+        closed.open = false;
+        ASSERT(!boot_wallet_cutover_shielded_empty_locked(&closed, ws->db, w, loaded));
+
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_shielded_empty_rows(struct wallet_sqlite *ws, struct wallet *w, bool loaded)
+{
+    int failures = 0;
+    const char *const inserts[] = {
+        "INSERT INTO wallet_sapling_keys(ivk,xsk) VALUES(X'01',X'00')",
+        "INSERT INTO wallet_sapling_keys(ivk,xsk) VALUES(X'01',X'574b5331')",
+        "INSERT INTO wallet_sapling_notes VALUES(1)",
+        "INSERT INTO wallet_seed(id,seed,next_child) VALUES(1,X'00',0)"
+    };
+    const char *const deletes[] = {
+        "DELETE FROM wallet_sapling_keys", "DELETE FROM wallet_sapling_keys",
+        "DELETE FROM wallet_sapling_notes", "DELETE FROM wallet_seed"
+    };
+    for (size_t i = 0; i < sizeof(inserts) / sizeof(inserts[0]); ++i) {
+        TEST("wallet_sqlite_enc: any shielded row refuses the empty proof") {
+            ASSERT(sqlite3_exec(ws->db, inserts[i], NULL, NULL, NULL) == SQLITE_OK);
+            int before = sqlite3_total_changes(ws->db);
+            ASSERT(!wse_empty_proof(ws, w, loaded));
+            ASSERT(sqlite3_total_changes(ws->db) == before);
+            ASSERT(sqlite3_exec(ws->db, deletes[i], NULL, NULL, NULL) == SQLITE_OK);
+            PASS();
+        } _test_next:;
+    }
+    return failures;
+}
+
+static int test_shielded_empty_encrypted_key(struct wallet_sqlite *ws, struct wallet *w, bool loaded)
+{
+    int failures = 0;
+    TEST("wallet_sqlite_enc: encrypted key refuses the empty proof") {
+        struct sapling_key_entry key = {0};
+        memset(key.ivk, 0x91, sizeof(key.ivk));
+        memset(&key.xsk, 0x92, sizeof(key.xsk));
+        memset(&key.xfvk, 0x93, sizeof(key.xfvk));
+        key.used = true;
+        set_passphrase("synthetic-cutover-pass");
+        ASSERT(wallet_sqlite_write_sapling_key(ws, 0, &key));
+        sqlite3_stmt *stmt = NULL;
+        ASSERT(sqlite3_prepare_v2(ws->db, "SELECT xsk FROM wallet_sapling_keys", -1, &stmt, NULL) == SQLITE_OK);
+        ASSERT(ar_step_checked(stmt, "encrypted key fixture", NULL) == ZCL_STEP_ROW);
+        ASSERT(sqlite3_column_bytes(stmt, 0) > 60 &&
+               memcmp(sqlite3_column_blob(stmt, 0), "WKS1", 4) == 0);
+        ASSERT(sqlite3_finalize(stmt) == SQLITE_OK);
+        set_passphrase(NULL);
+        ASSERT(!wse_empty_proof(ws, w, loaded));
+        ASSERT(sqlite3_exec(ws->db, "DELETE FROM wallet_sapling_keys", NULL, NULL, NULL) == SQLITE_OK);
+        PASS();
+    } _test_next:;
+    set_passphrase(NULL);
+    return failures;
+}
+
+
+static int test_shielded_empty_transaction(struct wallet_sqlite *ws, struct wallet *w, bool loaded)
+{
+    int failures = 0;
+    TEST("wallet_sqlite_enc: empty proof rechecks the caller transaction") {
+        ASSERT(sqlite3_exec(ws->db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(wse_empty_proof(ws, w, loaded));
+        ASSERT(!sqlite3_get_autocommit(ws->db));
+        ASSERT(sqlite3_exec(ws->db, "INSERT INTO wallet_sapling_notes VALUES(1)", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(!wse_empty_proof(ws, w, loaded));
+        ASSERT(!sqlite3_get_autocommit(ws->db));
+        ASSERT(sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(wse_empty_proof(ws, w, loaded));
+        ASSERT(sqlite3_set_authorizer(ws->db, wse_deny_shielded_read, NULL) == SQLITE_OK);
+        ASSERT(!wse_empty_proof(ws, w, loaded));
+        ASSERT(sqlite3_set_authorizer(ws->db, NULL, NULL) == SQLITE_OK);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_shielded_empty_proof(void)
+{
+    int failures = 0;
+    sqlite3 *db = open_mem_db();
+    struct wallet *w = alloc_wallet();
+    struct wallet_sqlite ws = {0};
+    if (!db || !w || !wallet_sqlite_open(&ws, db) ||
+        sqlite3_exec(db, "CREATE TABLE wallet_sapling_notes(x)", NULL, NULL, NULL) != SQLITE_OK) {
+        failures++;
+        goto done;
+    }
+    set_passphrase(NULL);
+    bool loaded = wallet_sqlite_read_sapling_keys(&ws, w);
+    failures += test_shielded_empty_memory(&ws, w, loaded);
+    failures += test_shielded_empty_rows(&ws, w, loaded);
+    failures += test_shielded_empty_encrypted_key(&ws, w, loaded);
+    failures += test_shielded_empty_transaction(&ws, w, loaded);
+done:
+    if (ws.open) wallet_sqlite_close(&ws);
+    free_wallet(w);
+    if (db) sqlite3_close(db);
+    return failures;
+}
+
+
 /* ── Entry point ─────────────────────────────────────────────── */
 
 int test_wallet_sqlite_enc(void);
@@ -1019,6 +1174,7 @@ int test_wallet_sqlite_enc(void)
     /* Start from a clean lock state; tests opt in through explicit unlock. */
     wallet_lock_reset_for_test();
 
+    failures += test_shielded_empty_proof();
     failures += test_plaintext_roundtrip();
     failures += test_encrypted_roundtrip();
     failures += test_encrypted_unreadable_without_pass();

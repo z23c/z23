@@ -205,6 +205,7 @@ static struct connman g_connman;
 static struct wallet g_wallet;
 static struct gen_context g_gen;
 static struct wallet_sqlite g_wallet_sqlite;
+static bool g_wallet_sapling_load_ok;
 static struct node_db g_node_db;
 
 bool boot_wallet_cutover_startup_node_db_matches(const struct node_db *ndb)
@@ -1298,7 +1299,7 @@ static void boot_wallet_read_persisted_state(struct app_context *ctx,
         exit(1);
     }
     wallet_rebuild_spent_set(&g_wallet);
-    wallet_sqlite_read_sapling_keys(&g_wallet_sqlite, &g_wallet);
+    g_wallet_sapling_load_ok = wallet_sqlite_read_sapling_keys(&g_wallet_sqlite, &g_wallet);
     boot_wallet_adopt_seed_if_it_governs(&g_wallet);
     wallet_sqlite_read_scripts(&g_wallet_sqlite, &g_wallet);
     wallet_sqlite_read_watch_only(&g_wallet_sqlite, &g_wallet);
@@ -3554,6 +3555,7 @@ static struct boot_cutover_env boot_cutover_environment(void)
 {
     return (struct boot_cutover_env){.state = &g_state, .node = &g_node_db,
         .wallet = &g_wallet, .wallet_db = &g_wallet_sqlite,
+        .sapling_load_ok = g_wallet_sapling_load_ok,
         .coins_view = &g_coins_read_view, .coins_tip = &g_coins_tip,
         .coins_sqlite = &g_coins_sqlite, .block_tree = &g_block_tree,
         .block_tree_open = &g_block_tree_open, .db_service = &g_db_service,

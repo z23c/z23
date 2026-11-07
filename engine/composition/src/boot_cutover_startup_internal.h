@@ -22,6 +22,7 @@ struct boot_cutover_env {
     struct node_db *node;
     struct wallet *wallet;
     struct wallet_sqlite *wallet_db;
+    bool sapling_load_ok;
     struct coins_view_kv *coins_view;
     struct coins_view_cache *coins_tip;
     struct coins_view_sqlite *coins_sqlite;
@@ -36,6 +37,11 @@ bool boot_cutover_load_chain(struct boot_cutover_env *env, struct app_context *c
     const struct chain_params *params, struct block_index **tip);
 bool boot_cutover_replay(struct boot_cutover_env *env, struct app_context *ctx,
     const struct chain_params *params);
+#ifdef ZCL_TESTING
+struct boot_cutover_replay;
+bool boot_test_pending_publish(struct boot_cutover_env *env, struct app_context *ctx,
+    const struct chain_params *params, struct boot_cutover_replay *replay);
+#endif
 bool boot_cutover_publish_readiness(struct boot_cutover_env *env, struct app_context *ctx);
 bool boot_cutover_mode_supported(const struct app_context *ctx);
 struct zcl_result boot_sandbox_enter(const struct app_context *ctx, const char *fallback_datadir);

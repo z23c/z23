@@ -1,9 +1,11 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: startup coordination of checkpoint wallet replay phases. */
 #include "config/boot_wallet_cutover_replay.h"
+#include "boot_wallet_cutover_empty_internal.h"
+#include "models/database.h"
 #include "controllers/wallet_helpers.h"
 #include "services/node_db_catchup_wallet_replay.h"
-#include "services/node_db_catchup_wallet_transparent.h"
+#include "services/node_db_catchup_wallet_transparent_startup.h"
 #include "validation/main_state.h"
 #include <limits.h>
 #include <string.h>
@@ -125,9 +127,13 @@ static bool bcr_chunk_endpoint(struct boot_cutover_replay *r, int end, uint8_t h
 
 static bool bcr_transparent(struct boot_cutover_replay *r, int end)
 {
-    struct transparent_replay_result out = node_db_catchup_wallet_transparent(
+    if (!r->transparent_filter_attempted) {
+        r->transparent_filter_attempted = true;
+        r->transparent_filter = transparent_replay_filter_new(r->ctx->wallet);
+    }
+    struct transparent_replay_result out = node_db_catchup_wallet_transparent_indexed(
         r->ctx->main_state, r->ctx->wallet, bcr_body_dir(r), r->next, end,
-        r->endpoint.height, r->endpoint.hash.data, r->identity);
+        r->endpoint.height, r->endpoint.hash.data, r->identity, r->transparent_filter);
     return out.status == TRANSPARENT_REPLAY_COMPLETE && out.start_height == r->next &&
         out.end_height == end && out.reference_height == r->endpoint.height &&
         out.last_complete == end && !memcmp(out.endpoint_hash, r->endpoint.hash.data, 32) &&
@@ -175,6 +181,39 @@ static bool bcr_witness(struct boot_cutover_replay *r)
         out.notes_total == out.witnesses_saved;
 }
 
+void boot_cutover_replay_clear(struct boot_cutover_replay *r)
+{
+    if (!r) return;
+    transparent_replay_filter_free(r->transparent_filter);
+    r->transparent_filter = NULL;
+}
+
+static bool bcr_shielded_empty(struct boot_cutover_replay *r)
+{
+    sqlite3 *db = r->ctx->node_db->db;
+    sqlite3_mutex *mu = db ? sqlite3_db_mutex(db) : NULL;
+    if (!mu || sqlite3_mutex_try(mu) != SQLITE_OK) return false;
+    bool locked = zcl_mutex_trylock(&r->ctx->wallet->sapling_keys.cs);
+    bool empty = locked && boot_wallet_cutover_shielded_empty_locked(
+        r->ctx->wallet_db, db, r->ctx->wallet, r->sapling_load_ok);
+    if (locked) zcl_mutex_unlock(&r->ctx->wallet->sapling_keys.cs);
+    sqlite3_mutex_leave(mu);
+    return empty;
+}
+
+static bool bcr_can_complete_empty(struct boot_cutover_replay *r)
+{
+    return r->phase == BOOT_CUTOVER_DISCOVER && bcr_shielded_empty(r);
+}
+
+static enum boot_cutover_replay_status bcr_complete_empty(struct boot_cutover_replay *r)
+{
+    r->shielded_empty = true;
+    if (!bcr_current(r)) { r->phase = BOOT_CUTOVER_INVALIDATED; return BOOT_CUTOVER_STALE; }
+    r->phase = BOOT_CUTOVER_DONE;
+    return BOOT_CUTOVER_COMPLETE;
+}
+
 enum boot_cutover_replay_status boot_cutover_replay_step(struct boot_cutover_replay *r)
 {
     if (!r) return BOOT_CUTOVER_INVALID;
@@ -184,6 +223,7 @@ enum boot_cutover_replay_status boot_cutover_replay_step(struct boot_cutover_rep
         r->phase = BOOT_CUTOVER_INVALIDATED; return BOOT_CUTOVER_STALE;
     }
     if (r->phase == BOOT_CUTOVER_DONE) return BOOT_CUTOVER_COMPLETE;
+    if (bcr_can_complete_empty(r)) return bcr_complete_empty(r);
     int end = r->endpoint.height - r->next >= 255 ? r->next + 255 : r->endpoint.height;
     bool ok = r->phase == BOOT_CUTOVER_TRANSPARENT ? bcr_transparent(r, end) :
         r->phase == BOOT_CUTOVER_WITNESS ? bcr_witness(r) : bcr_sapling(r, end);

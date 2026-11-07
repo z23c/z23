@@ -411,13 +411,17 @@ static bool boot_pending_replay_prepare(struct boot_cutover_env *e, struct app_c
         .coins_tip = e->coins_tip};
     struct wallet_witness_endpoint endpoint = {
         .height = tip->nHeight, .hash = *tip->phashBlock, .root = tip->hashFinalSaplingRoot};
+    bool ready;
     if (active_chain_at(&e->state->chain_active, floor))
-        return boot_cutover_replay_init(replay, rpc, e->db_service, &binding,
-                                        floor, &endpoint, identity);
-    if (!boot_pending_history_open(history, ctx, &endpoint)) return false;
-    rpc->main_state = history->state;
-    return boot_cutover_replay_init_archive(replay, rpc, e->db_service, &binding,
-        floor, &endpoint, identity, e->state, history->path);
+        ready = boot_cutover_replay_init(replay, rpc, e->db_service, &binding, floor, &endpoint, identity);
+    else {
+        if (!boot_pending_history_open(history, ctx, &endpoint)) return false;
+        rpc->main_state = history->state;
+        ready = boot_cutover_replay_init_archive(replay, rpc, e->db_service, &binding,
+            floor, &endpoint, identity, e->state, history->path);
+    }
+    if (ready) replay->sapling_load_ok = e->sapling_load_ok;
+    return ready;
 }
 
 #ifdef ZCL_TESTING
@@ -448,6 +452,8 @@ static bool boot_pending_publish(struct boot_cutover_env *e, struct app_context 
         return false;
     struct boot_svc_ctx svc;
     e->build_svc(ctx, &svc);
+    svc.runtime.db_service = e->db_service;
+    if (!e->node || boot_node_db(&svc) != e->node) return false;
     if (!boot_start_wallet_broadcast(&svc, ctx, params)) return false;
     struct db_wallet_utxo_cutover_delivery delivery = {0};
     bool published = boot_wallet_cutover_publish_guarded(replay, relay, &delivery);
@@ -458,9 +464,17 @@ static bool boot_pending_publish(struct boot_cutover_env *e, struct app_context 
     return published && delivered;
 }
 
+#ifdef ZCL_TESTING
+bool boot_test_pending_publish(struct boot_cutover_env *e, struct app_context *ctx,
+    const struct chain_params *params, struct boot_cutover_replay *replay)
+{
+    return boot_pending_publish(e, ctx, params, replay);
+}
+#endif
+
 bool boot_cutover_replay(struct boot_cutover_env *e, struct app_context *ctx, const struct chain_params *params)
 {
-    struct boot_cutover_replay replay;
+    struct boot_cutover_replay replay = {0};
     struct wallet_rpc_context rpc;
     struct boot_pending_history history = {0};
     bool ok = false;
@@ -481,6 +495,7 @@ bool boot_cutover_replay(struct boot_cutover_env *e, struct app_context *ctx, co
         }
     }
 done:
+    boot_cutover_replay_clear(&replay);
     boot_pending_history_close(&history);
     return ok;
 }
