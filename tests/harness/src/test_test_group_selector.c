@@ -1093,8 +1093,10 @@ static int test_umbrella_groups(void)
     } _test_next:;
     failures += umbrella_contract("test_zcode_swarm_net", "zcode_swarm_net",
                                   NULL);
+    static const char *const package_dev_extras[] = {
+        "test_zcode_package_dev_prepare_budget", NULL};
     failures += umbrella_contract("test_zcode_package_dev",
-                                  "zcode_package_dev", NULL);
+                                  "zcode_package_dev", package_dev_extras);
     static const char *const bf_extras[] = {"test_build_fabric_attach", NULL};
     failures += umbrella_contract("test_build_fabric", "build_fabric",
                                   bf_extras);
