@@ -226,22 +226,22 @@ static void zpd_prepare_next_export(const struct zcl_command_request *request,
 {
     static const char *const copied[] = {
         "dir", "publisher_pubkey", "reward_address", "chain_id"};
-    struct json_value input;
-    json_init(&input);
-    json_set_object(&input);
+    struct json_value args;
+    json_init(&args);
+    json_set_object(&args);
     bool ok = true;
     for (size_t i = 0; ok && i < sizeof(copied) / sizeof(copied[0]); i++) {
         const char *text = zpd_str(request->input, copied[i]);
-        if (text && text[0]) ok = json_push_kv_str(&input, copied[i], text);
+        if (text && text[0]) ok = json_push_kv_str(&args, copied[i], text);
     }
     int64_t sequence = 0;
     ok = ok && zpd_int(request->input, "publisher_sequence", &sequence) &&
-        json_push_kv_int(&input, "publisher_sequence", sequence) &&
-        json_push_kv_str(&input, "artifact_dir", "<new-empty-dir>") &&
-        json_push_kv_bool(&input, "confirm", true);
+        json_push_kv_int(&args, "publisher_sequence", sequence) &&
+        json_push_kv_str(&args, "artifact_dir", "<new-empty-dir>") &&
+        json_push_kv_bool(&args, "confirm", true);
     char rendered[512];
-    size_t length = ok ? json_write(&input, rendered, sizeof(rendered)) : 0;
-    json_free(&input);
+    size_t length = ok ? json_write(&args, rendered, sizeof(rendered)) : 0;
+    json_free(&args);
     if (length > 0 && length < sizeof(rendered))
         (void)zcl_command_reply_add_next(reply,
             "zcode.package.dev.prepare.export", rendered,
