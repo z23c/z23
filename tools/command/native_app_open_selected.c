@@ -2,6 +2,7 @@
  * Open an explicitly authorized, saved personal app image. */
 #include "command/native_command.h"
 #include "command/native_app_launch.h"
+#include "command/native_app_compose.h"
 #include "command/native_zcode_package_copy.h"
 #include "command/app_image.h"
 #include "command/app_selection.h"
@@ -78,10 +79,31 @@ static bool as_resolve_locations(struct as_open *a)
     return true;
 }
 
-static bool as_inputs(struct as_open *a)
+/* app keep is the agent step after an app open preview; a person keeps edits
+ * with app save. The reply message holds 192 bytes, so the pasted command
+ * drops the datadir when it would not fit. */
+static bool as_keep_refusal(struct as_open *a)
+{
+    const char *copy = zcl_package_copy_str(a->input, "copy");
+    const char *base = copy ? strrchr(copy, '/') : NULL;
+    base = base && base[1] ? base + 1 : "<copy>";
+    const char *datadir = zcl_package_copy_str(a->input, "datadir");
+    char hint[AS_PATH + 128], message[192];
+    bool made = zcl_app_hint(hint, sizeof(hint), datadir, "save %s", base);
+    if (!made || strlen(hint) > 88)
+        made = zcl_app_hint(hint, sizeof(hint), NULL, "save %s", base);
+    (void)snprintf(message, sizeof(message),
+        "app keep pins an image after an app open preview, for agents and tools; "
+        "to keep your edits run '%s'", made && strlen(hint) <= 88 ? hint : "z23 app save <copy>");
+    return as_fail(a, "EXECUTION_CONFIRMATION_REQUIRED", message, AS_COMMAND);
+}
+
+static bool as_inputs(struct as_open *a, bool keep)
 {
     const struct json_value *consent = json_get(a->input, "accept_execution");
-    if (!consent || consent->type != JSON_BOOL || !json_get_bool(consent))
+    bool agreed = consent && consent->type == JSON_BOOL && json_get_bool(consent);
+    if (keep && (!agreed || !json_get(a->input, "expected_revision"))) return as_keep_refusal(a);
+    if (!agreed)
         return as_fail(a, "EXECUTION_CONFIRMATION_REQUIRED", "accept execution of this exact image first", AS_COMMAND);
     if (!as_resolve_locations(a)) return false;
     return as_root(a, "env_root", a->env) && as_root(a, "dependency_root", a->deps) &&
@@ -314,7 +336,7 @@ void zcl_native_handle_app_open_selected(const struct zcl_command_request *reque
     struct as_open *a = zcl_calloc(1, sizeof(*a), "app-open-selected");
     if (!a) { zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "cannot allocate selected app state", AS_COMMAND); return; }
     a->input = request->input; a->reply = reply;
-    if (as_inputs(a) && as_catalog(a) && as_current_revision(a) &&
+    if (as_inputs(a, false) && as_catalog(a) && as_current_revision(a) &&
         as_validated(a) && as_desktop(a)) as_launch(a);
     as_cleanup(a);
 }
@@ -373,7 +395,7 @@ void zcl_native_handle_app_keep(const struct zcl_command_request *request,
     if (!a) { zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "cannot allocate app state", AS_COMMAND); return; }
     a->input = request->input; a->reply = reply;
     uint64_t expected = 0;
-    if (as_inputs(a) && as_revision(a, &expected) && as_catalog(a) && as_validated(a)) as_keep(a, expected);
+    if (as_inputs(a, true) && as_revision(a, &expected) && as_catalog(a) && as_validated(a)) as_keep(a, expected);
     as_cleanup(a);
 }
 

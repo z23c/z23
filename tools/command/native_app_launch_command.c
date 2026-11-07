@@ -14,7 +14,9 @@
 #include "command/native_app_compose.h"
 
 #include "command/native_command.h"
+#include "base/log_level.h"
 #include "base/safe_alloc.h"
+#include "util/util.h"
 #include "command/native_dev_land_remote_shared.h"
 #include "json/json.h"
 #include "platform/process_lock.h"
@@ -541,7 +543,7 @@ static void app_list_guide(const struct app_launch_registry *reg,
                                "make your own copy of it");
 }
 
-void zcl_native_handle_app_list_launchable(
+static void app_list_launchable_body(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     struct json_value list, item;
@@ -576,4 +578,18 @@ void zcl_native_handle_app_list_launchable(
     app_list_config(&w->env, &w->reg, &reply->data);
     zcl_app_list_copies(zcl_native_command_datadir(), &reply->data);
     free(w);
+}
+
+/* A person listing apps wants the list, not the event_log line each copy's
+ * history open prints: quiet the floor for this command unless -loglevel was
+ * given, then restore it. Stderr only; the reply is unchanged. */
+void zcl_native_handle_app_list_launchable(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    const char *asked = GetArg("-loglevel", NULL);
+    const enum zcl_log_level prior = zcl_log_level_get();
+    const bool quiet = (!asked || !asked[0]) && prior < ZCL_LOG_WARN;
+    if (quiet) zcl_log_level_set(ZCL_LOG_WARN);
+    app_list_launchable_body(request, reply);
+    if (quiet) zcl_log_level_set(prior);
 }

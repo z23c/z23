@@ -153,7 +153,24 @@ static struct zcl_result pr_sql(struct package_resident_store *store, const char
 }
 
 #if !defined(_WIN32)
-static bool pr_directory_controlled(char *directory)
+/* Why one ancestor is not trusted, or NULL when it is. */
+static const char *pr_ancestor_fault(const struct stat *st, char *why, size_t cap)
+{
+    if (!S_ISDIR(st->st_mode)) return "is not a directory";
+    if (st->st_uid != 0 && st->st_uid != getuid()) {
+        (void)snprintf(why, cap, "is owned by uid %u, not root or you", (unsigned)st->st_uid);
+        return why;
+    }
+    if ((st->st_mode & 0022) && !(st->st_mode & 01000)) {
+        (void)snprintf(why, cap, "has mode 0%03o, writable by group or others", (unsigned)(st->st_mode & 0777));
+        return why;
+    }
+    return NULL;
+}
+
+/* True when every ancestor is trusted; else false with the first failing
+ * prefix and the reason in fault. */
+static bool pr_directory_controlled(char *directory, char *fault, size_t cap)
 {
     size_t length = strlen(directory);
     for (size_t i = 1; i <= length; ++i) {
@@ -161,11 +178,12 @@ static bool pr_directory_controlled(char *directory)
         char saved = directory[i];
         directory[i] = 0;
         struct stat st;
-        bool ok = lstat(directory, &st) == 0 && S_ISDIR(st.st_mode) &&
-            (st.st_uid == 0 || st.st_uid == getuid()) &&
-            (!(st.st_mode & 0022) || (st.st_mode & 01000));
+        char why[64];
+        const char *bad = lstat(directory, &st) == 0 ? pr_ancestor_fault(&st, why, sizeof(why))
+                                                      : "cannot be inspected";
+        if (bad) (void)snprintf(fault, cap, "%s %s", directory, bad);
         directory[i] = saved;
-        if (!ok) return false;
+        if (bad) return false;
     }
     return true;
 }
@@ -182,8 +200,10 @@ static struct zcl_result pr_resolve_directory(const char *datadir, char director
      * then retain SQLite NOFOLLOW for the database and journal namespace. */
     if (!realpath(locator, directory))
         return ZCL_ERR(-1, "resident-store: resolve package directory: %s", strerror(errno));
-    if (!pr_directory_controlled(directory))
-        return ZCL_ERR(-1, "resident-store: ancestor ownership or write authority refused");
+    char fault[PATH_MAX + 96];
+    if (!pr_directory_controlled(directory, fault, sizeof(fault)))
+        return ZCL_ERR(-1, "resident-store: ancestor ownership or write authority refused: %s; "
+            "fix with 'chmod go-w' on that path, or use a datadir under a directory only you can write", fault);
     int fd = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     struct stat st;
     if (fd < 0) return ZCL_ERR(-1, "resident-store: open installed package directory: %s", strerror(errno));

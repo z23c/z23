@@ -222,7 +222,8 @@ static bool fd_target(struct fd_run *r)
               zcl_path_join(r->target, sizeof(r->target), cwd, t) &&
               stat(r->target, &st) == 0 && S_ISREG(st.st_mode);
     if (!ok)
-        (void)fprintf(r->out, "z23 app open: no such file: %s\n", t);
+        (void)fprintf(r->out, "z23 app %s: no such file: %s (give the path of "
+                      "the .z23share file you were sent)\n", r->door->verb, t);
     return ok;
 }
 
