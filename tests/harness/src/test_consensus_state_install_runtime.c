@@ -39,6 +39,8 @@
 #include "jobs/reducer_frontier.h"
 #include "jobs/validate_headers_stage.h"
 #include "services/chain_state_service.h"
+#include "services/chain_frontier_snapshot_service.h"
+#include "../../../engine/composition/src/consensus_state_install_terminal_internal.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
@@ -1360,6 +1362,116 @@ static int case_tip_finalize_failure_stops_boundary(void)
     return failures;
 }
 
+struct csir_bridge_fixture {
+    struct main_state archive;
+    struct block_index chain[61];
+    struct block_index window[ISLAND_ANCHOR_WINDOW];
+    struct block_index live;
+    struct icb_terminal_context terminal;
+};
+
+static void csir_bridge_init(struct csir_bridge_fixture *f, int old_height)
+{
+    memset(f, 0, sizeof(*f));
+    main_state_init(&f->archive);
+    for (int h = 0; h <= 60; ++h) {
+        block_index_init(&f->chain[h]);
+        f->chain[h].nHeight = h;
+        f->chain[h].hashBlock.data[0] = (uint8_t)(h + 1);
+        f->chain[h].phashBlock = &f->chain[h].hashBlock;
+        f->chain[h].pprev = h ? &f->chain[h - 1] : NULL;
+        if (h) block_index_build_skip(&f->chain[h]);
+    }
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; ++i) {
+        int h = 33 + i;
+        block_index_init(&f->window[i]);
+        f->window[i].nHeight = h;
+        f->window[i].hashBlock = f->chain[h].hashBlock;
+        f->window[i].phashBlock = &f->window[i].hashBlock;
+        f->window[i].pprev = i ? &f->window[i - 1] : NULL;
+        if (i) block_index_build_skip(&f->window[i]);
+    }
+    block_index_init(&f->live);
+    f->live.nHeight = old_height;
+    f->live.hashBlock = f->chain[old_height].hashBlock;
+    f->live.phashBlock = &f->live.hashBlock;
+    f->archive.pindex_best_header = &f->chain[60];
+    f->terminal.archive = &f->archive;
+}
+
+static bool csir_bridge_skip_detached(struct csir_bridge_fixture *f)
+{
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; ++i) {
+        const struct block_index *skip = f->window[i].pskip;
+        if (!skip) continue;
+        bool in_window = false;
+        for (int j = 0; j < ISLAND_ANCHOR_WINDOW; ++j)
+            if (skip == &f->window[j]) in_window = true;
+        if (!in_window) return false;
+    }
+    return true;
+}
+
+static int csir_terminal_bridge_refusals(struct csir_bridge_fixture *f)
+{
+    int failures = 0;
+    struct block_index *top = &f->window[ISLAND_ANCHOR_WINDOW - 1];
+    f->live.hashBlock.data[1] = 1;
+    CSIR_CHECK("terminal preflight refuses mismatched frontier before insertion",
+        !icb_terminal_archive_has_frontier(&f->terminal, &f->live) &&
+        !f->window[0].pprev && !f->terminal.bridge_window[0]);
+    CSIR_CHECK("terminal bridge refuses mismatched active frontier",
+        !icb_terminal_link_window(&f->terminal, top, &f->live) && !f->window[0].pprev);
+    f->live.hashBlock.data[1] = 0;
+    CSIR_CHECK("terminal preflight finds authenticated frontier",
+        icb_terminal_archive_has_frontier(&f->terminal, &f->live));
+    f->window[10].hashBlock.data[1] = 1;
+    CSIR_CHECK("terminal bridge refuses mismatched window",
+        !icb_terminal_link_window(&f->terminal, top, &f->live) && !f->window[0].pprev);
+    f->window[10].hashBlock.data[1] = 0;
+    struct block_index *saved = f->window[10].pprev;
+    f->window[10].pprev = NULL;
+    CSIR_CHECK("terminal bridge refuses missing window row",
+        !icb_terminal_link_window(&f->terminal, top, &f->live) && !f->window[0].pprev);
+    f->window[10].pprev = saved;
+    f->window[0].pprev = &f->live;
+    CSIR_CHECK("terminal bridge refuses an existing root parent",
+        !icb_terminal_link_window(&f->terminal, top, &f->live) && f->window[0].pprev == &f->live);
+    f->window[0].pprev = NULL;
+    return failures;
+}
+
+static int csir_terminal_bridge_case(int old_height)
+{
+    int failures = 0;
+    struct csir_bridge_fixture f;
+    csir_bridge_init(&f, old_height);
+    struct block_index *top = &f.window[ISLAND_ANCHOR_WINDOW - 1];
+    bool known = true;
+    CSIR_CHECK("terminal window initially has unknown lower ancestry",
+        !chain_frontier_test_ancestor_relation(&f.live, top, &known) && !known);
+    failures += csir_terminal_bridge_refusals(&f);
+    CSIR_CHECK("terminal bridge binds authenticated active frontier",
+        icb_terminal_link_window(&f.terminal, top, &f.live));
+    CSIR_CHECK("terminal bridge refuses a second attachment",
+        !icb_terminal_link_window(&f.terminal, top, &f.live));
+    known = false;
+    CSIR_CHECK("terminal bridge proves ancestry by hash",
+        chain_frontier_test_ancestor_relation(&f.live, top, &known) && known);
+    icb_terminal_unlink_window(&f.terminal);
+    known = true;
+    CSIR_CHECK("terminal bridge cleanup removes archive pointers",
+        !f.window[0].pprev && csir_bridge_skip_detached(&f) &&
+        !chain_frontier_test_ancestor_relation(&f.live, top, &known) && !known);
+    main_state_free(&f.archive);
+    return failures;
+}
+
+static int case_terminal_bridge(void)
+{
+    return csir_terminal_bridge_case(0) + csir_terminal_bridge_case(20);
+}
+
 /* An invalid startup identity must refuse before opening the bundle or touching
  * the live header map, even at the real cutover stage. */
 static void csir_terminal_context_child(void)
@@ -1439,6 +1551,7 @@ int test_consensus_state_install_runtime(void)
     failures += case_failed_marker_cleared_on_success();
     failures += case_runtime_returns();
     failures += case_terminal_context_refusal();
+    failures += case_terminal_bridge();
     failures += case_durable_request();
     failures += case_post_install_fold_span_check();
     failures += case_post_install_drop_borrowed_have_data();

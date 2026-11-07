@@ -141,3 +141,29 @@ Pixel runner SHA256:
 Pixel log SHA256:
 `8da82aeaf91698c18753e673a2f5746a435b5dd936bc7cd2b3b29002674fdf7a`.
 The complexity gate also passed without changing its limits or baseline.
+
+## Terminal installation with an authenticated history bridge
+
+On 2026-11-07, an isolated host installed the complete production-sized
+bundle at height 3,309,900 using the authenticated public history archive.
+The terminal command exited 0 and reported H*=3,309,900; the applied height <!-- stale-ok: immutable 2026-11-07 isolated installation result -->
+was 3,309,901. Wall time was 8 minutes 33.68 seconds and peak resident memory
+was 1,904,496 KiB while other work was running. This is one concurrent-load
+observation, not an isolated performance benchmark.
+
+The tested binary SHA256 was
+`0e9027b16fc4478eedc5ce73e4d9d24fb8eaef668f1efae26f34b91850cfd598`.
+Its recorded source identity was
+`58c10bb8da88f513cbf61dfa90435c054105b54f0dc2db32cb02c2d813f294e6`.
+The selected-chain binding passed with the archive-backed temporary ancestry
+bridge; the install retained the existing frontier and publication checks.
+
+A fresh boot restored the installed island and loaded a synthetic wallet with
+100 keys. History loading was still in progress at the observation; wallet
+readiness and completed replay were not established. This host experiment
+used an isolated datadir and did not exercise a real wallet. The repaired
+path has not been verified on the phone.
+
+Host: AMD Ryzen 9 7950X3D; compiler: GCC 14.2.0 (Ubuntu
+14.2.0-4ubuntu2~24.04.1). This measurement predates the subsequent helper
+extraction; that source requires its own qualification.
