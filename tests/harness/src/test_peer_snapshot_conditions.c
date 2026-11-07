@@ -8,6 +8,7 @@
 #include "config/boot_zcode_swarm_membership.h"
 #include "config/state_offer_link_session.h"
 #include "config/state_offer_peer.h"
+#include "config/state_offer_store.h"
 #include "framework/condition.h"
 #include "net/msgprocessor.h"
 #include "platform/clock.h"
@@ -412,10 +413,12 @@ static int run_sync_violation_rearms_on_cooldown_case(void)
 
 static bool peer_snapshot_hold(void) { return true; }
 
-/* Run F2 at 600 s: the lag rotation cut every outbound peer, the one
- * streaming the FlySync rung bundle included. During the header hold the tip
- * cannot move, so the streaming peer is spared and the idle one still goes. */
-static int run_sync_violation_spares_rung_server_case(void)
+/* Run F3: a fresh node held for 41 min while the rung bundle streamed fine
+ * and still paged sync_violation_lag. While the FlySync header hold is on and
+ * a peer streams the rung with bytes inside the progress window the lag is
+ * expected and not detected; when the fetch stalls past that window it is
+ * detected again and the rotation cuts every outbound peer. */
+static int run_sync_violation_quiet_during_held_fetch_case(void)
 {
     int failures = 0;
     struct fake_clock_peer_snapshot clock;
@@ -448,11 +451,57 @@ static int run_sync_violation_spares_rung_server_case(void)
     condition_engine_tick();
     fake_clock_set(&clock, 7601);  /* past SYNC_VIOLATION_SECS (600) */
     condition_engine_tick();
+    ok = ok && sync_violation_lag_test_remedy_calls() == 0;
+    ok = ok && !idle.disconnect && !server.disconnect;
+    ok = ok && condition_engine_get_active_count() == 0;
+
+    /* The fetch stalls: no byte for the whole progress window. */
+    sol_client_test_age_progress(STATE_OFFER_FETCH_PROGRESS_WINDOW_MS);
+    ok = ok && !state_offer_peer_serving_held_fetch(&server);
+    condition_engine_tick();
     ok = ok && sync_violation_lag_test_remedy_calls() == 1;
-    ok = ok && idle.disconnect && !server.disconnect;
+    ok = ok && idle.disconnect && server.disconnect;
     state_offer_peer_end(link);
     msg_processor_set_header_sync_hold(NULL);
-    PEER_SNAPSHOT_CHECK("sync violation spares the peer streaming a held rung", ok);
+    PEER_SNAPSHOT_CHECK("sync violation is quiet while a held rung fetch progresses, "
+                        "detected once it stalls", ok);
+    cleanup_peer_snapshot_conditions();
+    main_state_free(&ms);
+    return failures;
+}
+
+/* A hold with no fetch in progress (no link session) gives no exemption. */
+static int run_sync_violation_hold_without_fetch_case(void)
+{
+    int failures = 0;
+    struct fake_clock_peer_snapshot clock;
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    begin_peer_snapshot_condition_case(&clock, &cm, &dm, &ms, 8000);
+    bool ok = true;
+    register_sync_violation_lag();
+
+    struct block_index tip = {0};
+    tip.nHeight = 100;
+    ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
+    struct p2p_node peer = {0};
+    peer.id = 21;
+    peer.starting_height = 250;
+    peer.state = PEER_ACTIVE;
+    peer.services = NODE_NETWORK;
+    struct p2p_node *peers[1] = { &peer };
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = 1;
+    msg_processor_set_header_sync_hold(peer_snapshot_hold);
+
+    condition_engine_tick();
+    fake_clock_set(&clock, 8601);
+    condition_engine_tick();
+    ok = ok && sync_violation_lag_test_remedy_calls() == 1;
+    ok = ok && peer.disconnect;
+    msg_processor_set_header_sync_hold(NULL);
+    PEER_SNAPSHOT_CHECK("sync violation is detected under a hold with no fetch", ok);
     cleanup_peer_snapshot_conditions();
     main_state_free(&ms);
     return failures;
@@ -547,7 +596,8 @@ int test_peer_snapshot_conditions(void)
     failures += run_sync_violation_rotates_peers_case();
     failures += run_sync_violation_timer_resets_case();
     failures += run_sync_violation_rearms_on_cooldown_case();
-    failures += run_sync_violation_spares_rung_server_case();
+    failures += run_sync_violation_quiet_during_held_fetch_case();
+    failures += run_sync_violation_hold_without_fetch_case();
     failures += run_snapshot_offer_reasserts_receive_case();
     failures += run_snapshot_offer_ignores_at_tip_case();
 
