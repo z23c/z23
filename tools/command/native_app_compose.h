@@ -57,6 +57,16 @@ bool zcl_app_input_day(const struct json_value *from, struct json_value *in);
  * into `d`; nothing when `full` is NULL. */
 void zcl_app_push_publisher(struct json_value *d, const char *full);
 
+/* Render a front-door command hint that works when pasted:
+ * "z23 [-datadir=DIR ]app " followed by the printf-formatted rest (verb and
+ * arguments). The datadir part is present only when `datadir` is non-empty,
+ * so pass the request's own datadir, or NULL for a command another person
+ * runs in their own datadir. False, with out emptied, when it does not fit
+ * in cap. */
+[[gnu::format(printf, 4, 5)]]
+bool zcl_app_hint(char *out, size_t cap, const char *datadir, const char *fmt,
+                  ...);
+
 /* SHA3-256(domain 0x00 || each part with its NUL): a composite plan_id
  * bound to the inner plans it will confirm. NULL parts hash as "". */
 void zcl_app_plan_id(const char *domain, const char *const *parts,

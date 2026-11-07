@@ -2063,7 +2063,8 @@ size_t zcl_cli_render_start_hint(const struct zcl_cli_render_env *env,
                                  char *out, size_t cap)
 {
     static const char hint[] =
-        "start: z23 wiki \xC2\xB7 z23 lab run hello.c \xC2\xB7 z23 card\n";
+        "start: z23 wiki \xC2\xB7 z23 lab run hello.c \xC2\xB7 z23 app "
+        "\xC2\xB7 z23 card\n";
     if (!env || !out || cap == 0)
         return 0;
     out[0] = '\0';

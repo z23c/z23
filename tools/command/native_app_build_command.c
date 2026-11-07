@@ -37,6 +37,7 @@
 #include "command/app_build_make.h"
 #include "command/app_copy_build.h"
 #include "command/app_image.h"
+#include "command/native_app_compose.h"
 #include "command/native_zcode_package_copy.h"
 
 #include "base/hex.h"
@@ -295,8 +296,12 @@ static void zab_commit_reply(struct zab *z, const struct app_image_build *rec,
     (void)json_push_kv_str(d, "build_dir", z->store.work);
     (void)json_push_kv_bool(d, "make_ran", make_ran);
     (void)json_push_kv_bool(d, "executed", false);
-    (void)json_push_kv_str(d, "next", "app open or app playtest this "
-                           "image_sha3 with accept_execution:true");
+    char next[ZAB_PATH + 96];
+    if (zcl_app_hint(next, sizeof(next),
+                     zcl_package_copy_str(z->input, "datadir"), "open %s",
+                     zcl_package_copy_str(z->input, "copy")
+                         ? zcl_package_copy_str(z->input, "copy") : "COPY"))
+        (void)json_push_kv_str(d, "next", next);
     z->reply->error.mutated = make_ran;
 }
 

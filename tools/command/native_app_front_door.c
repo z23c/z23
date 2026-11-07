@@ -242,8 +242,8 @@ static int fd_refused(struct fd_run *r)
 static void fd_print_plan(struct fd_run *r)
 {
     static const char *const keys[] = {
-        "name", "semver", "publisher", "publishes_as", "copy_name", "copy",
-        "destination",
+        "name", "semver", "publisher", "publisher_fingerprint", "release_id",
+        "package_root", "publishes_as", "copy_name", "copy", "destination",
         "changes", "cache_hit", "image_sha3", "output", "saves_first",
         "makes_key", "seed"};
     (void)fprintf(r->out, "z23 app %s %s\n", r->door->verb, r->door->target);
@@ -267,9 +267,13 @@ static void fd_question(const struct fd_run *r, char *q, size_t cap)
     const char *v = r->door->verb;
     if (strcmp(r->verb->verb, "receive") == 0)
         (void)snprintf(q, cap, "Keep, build and run %s %s from publisher %s "
-                       "as %s?", name, fd_str(r, "semver") ? fd_str(r, "semver")
-                                                           : "",
-                       who, fd_str(r, "copy") ? fd_str(r, "copy") : "a copy");
+                       "(full %s), package root %s, as %s?", name,
+                       fd_str(r, "semver") ? fd_str(r, "semver") : "", who,
+                       fd_str(r, "publisher_fingerprint")
+                           ? fd_str(r, "publisher_fingerprint") : "?",
+                       fd_str(r, "package_root") ? fd_str(r, "package_root")
+                                                 : "?",
+                       fd_str(r, "copy") ? fd_str(r, "copy") : "a copy");
     else if (strcmp(r->verb->verb, "copy") == 0)
         (void)snprintf(q, cap, "Make your own copy of %s as %s?", r->target,
                        fd_str(r, "copy_name") ? fd_str(r, "copy_name")
@@ -317,21 +321,40 @@ static void fd_print_done(struct fd_run *r)
             (void)fprintf(r->out, "  %s: %s\n", keys[i], fd_str(r, keys[i]));
 }
 
+/* What a plan that stops here changed: nothing, unless the plan made the
+ * owner's signing key on first use (the package root derives from it). */
+static const char *fd_changed(const struct fd_run *r, char *buf, size_t cap)
+{
+    const struct json_value *made = json_get(&r->reply.data, "key_created");
+    if (!made || made->type != JSON_BOOL || !json_get_bool(made) ||
+        !fd_str(r, "key_path"))
+        return "nothing changed";
+    (void)snprintf(buf, cap, "made your signing key at %s (first use); "
+                   "nothing else changed", fd_str(r, "key_path"));
+    return buf;
+}
+
 /* Plan printed; now plan-only, a no, or the confirm. */
 static int fd_decide(struct fd_run *r)
 {
-    char q[512];
+    char q[1024], hint[FD_PATH + 128], note[FD_PATH + 96];
+    const char *changed = fd_changed(r, note, sizeof(note));
     if (r->door->confirm.mode == ZCL_CLI_CONFIRM_PLAN_ONLY) {
-        (void)fprintf(r->out, "nothing changed (no terminal to ask). "
-                      "next: z23 app %s %s --yes\n", r->door->verb,
-                      r->door->target);
+        if (!zcl_app_hint(hint, sizeof(hint), r->door->datadir,
+                          "%s %s --yes", r->door->verb, r->door->target))
+            hint[0] = '\0';
+        (void)fprintf(r->out, "%s (no terminal to ask). next: %s\n", changed,
+                      hint);
         return 0;
     }
     fd_question(r, q, sizeof(q));
     if (!zcl_cli_confirm_ask(&r->door->confirm, q)) {
-        (void)fprintf(r->out, "nothing changed\n");
+        (void)fprintf(r->out, "%s\n", changed);
         return 1;
     }
+    if (changed == note)
+        (void)fprintf(r->out, "made your signing key at %s (first use)\n",
+                      fd_str(r, "key_path"));
     if (!fd_confirm_input(r)) {
         (void)fprintf(r->out, "z23 app %s: the plan returned no plan_id\n",
                       r->door->verb);

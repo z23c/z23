@@ -68,7 +68,7 @@ struct afd_world {
     char image_a[65];
     char hint[1024];        /* the no-TTY plan's pasted next: command */
     char b_root[65];        /* A's package_root, from bundle.verify */
-    char b_fp[PLUGIN_HEX_PUBLIC_KEY + 1]; /* A's full fingerprint, same */
+    char b_fp[67]; /* A's full fingerprint, same */
     char saved_home[1024];
     char saved_cwd[1024];
     int commands_a, commands_b, hex_a, hex_b;
@@ -694,7 +694,7 @@ static int afd_b_plan_shows_root(struct afd_world *w)
          "exact package root, and a hint that pastes") {
         struct asf_door run;
         struct afd_leaf v;
-        char want[AFD_PATH + 64], line[PLUGIN_HEX_PUBLIC_KEY + 8];
+        char want[AFD_PATH + 64], line[96];
         afd_open_leaf(&v);
         (void)json_push_kv_str(&v.in, "file", w->share);
         ASSERT(afd_exec("zcode.package.bundle.verify", &v));
@@ -705,7 +705,7 @@ static int afd_b_plan_shows_root(struct afd_world *w)
                        afd_get(&v, "publisher_fingerprint"));
         afd_close_leaf(&v);
         ASSERT_EQ((int)strlen(w->b_root), 64);
-        ASSERT_EQ((int)strlen(w->b_fp), PLUGIN_HEX_PUBLIC_KEY);
+        ASSERT_EQ((int)strlen(w->b_fp), 66);
 
         afd_door(w->b_home, w->b_datadir, "open", w->share,
                  ZCL_CLI_CONFIRM_PLAN_ONLY, &run);

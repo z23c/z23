@@ -233,13 +233,14 @@ void zcl_native_handle_app_receive(const struct zcl_command_request *request,
         if (zcl_package_copy_confirmed(request->input)) {
             zrv_commit(z);
         } else {
-            char next[APP_COPY_BUILD_PATH + 32];
+            char next[2 * APP_COPY_BUILD_PATH + 32];
             zrv_describe(z, "plan");
             zcl_package_copy_push_root(&reply->data, "plan_id", z->plan_id);
             (void)json_push_kv_bool(&reply->data, "executed", false);
-            (void)snprintf(next, sizeof(next), "z23 app open %s --yes",
-                           z->file);
-            (void)json_push_kv_str(&reply->data, "next", next);
+            if (zcl_app_hint(next, sizeof(next),
+                             zcl_package_copy_str(request->input, "datadir"),
+                             "open %s --yes", z->file))
+                (void)json_push_kv_str(&reply->data, "next", next);
         }
     }
     if (z->verify_live)

@@ -9,7 +9,8 @@
  * name at run time, so this file builds without it) makes one; with no
  * app.seed the copy is SEED_UNAVAILABLE. Then zcode.package.adopt makes
  * <datadir>/copies/<app>-<n> and its adopt record. Plan runs only plan
- * halves (adopt plan, or app.seed plan) and writes nothing; its plan_id
+ * halves (adopt plan, or app.seed plan) and writes nothing but the owner
+ * key the seed plan makes on first use (reported as key_created); its plan_id
  * binds the inner plan id, so confirm re-plans and refuses PLAN_MISMATCH
  * when anything moved.
  *
@@ -162,6 +163,20 @@ static bool zac_inner_plan(struct zac *z)
     return false;
 }
 
+/* The seed plan makes the owner's publisher key on first use (the package
+ * root and plan_id derive from it); carry that fact to the front door. */
+static void zac_push_key(struct json_value *d,
+                         const struct zcl_command_reply *from)
+{
+    const struct json_value *made = json_get(&from->data, "key_created");
+    if (!made || made->type != JSON_BOOL)
+        return;
+    (void)json_push_kv_bool(d, "key_created", json_get_bool(made));
+    if (zcl_app_inner_str(from, "key_path"))
+        (void)json_push_kv_str(d, "key_path",
+                               zcl_app_inner_str(from, "key_path"));
+}
+
 static void zac_describe(struct zac *z, const char *stage,
                          const struct zcl_command_reply *from)
 {
@@ -179,17 +194,20 @@ static void zac_describe(struct zac *z, const char *stage,
             (void)json_push_kv_str(d, keys[i], v);
     }
     zcl_app_push_publisher(d, zcl_app_inner_str(from, "publisher"));
+    zac_push_key(d, from);
     (void)json_push_kv_bool(d, "executed", false);
 }
 
 static void zac_plan_reply(struct zac *z)
 {
-    char next[160];
+    char next[ZAC_PATH + 160];
     zac_describe(z, "plan", &z->inner);
     zcl_package_copy_push_root(&z->reply->data, "plan_id", z->plan_id);
-    (void)snprintf(next, sizeof(next), "z23 app copy %s --yes (or run it in "
-                   "a terminal and answer y)", z->app);
-    (void)json_push_kv_str(&z->reply->data, "next", next);
+    if (zcl_app_hint(next, sizeof(next),
+                     zcl_package_copy_str(z->input, "datadir"),
+                     "copy %s --yes (or run it in a terminal and answer y)",
+                     z->app))
+        (void)json_push_kv_str(&z->reply->data, "next", next);
 }
 
 /* Seed confirm, then the seeded release's adopt plan as the inner plan. */
@@ -244,13 +262,16 @@ static void zac_confirm(struct zac *z)
         zcl_app_inner_fail(z->reply, &z->inner, seeded);
         return;
     }
-    char next[ZAC_PATH + 96];
+    char hint[ZAC_PATH + 96], next[2 * ZAC_PATH + 160];
     zac_describe(z, "commit", &z->inner);
     (void)json_push_kv_bool(&z->reply->data, "seeded", seeded);
-    (void)snprintf(next, sizeof(next), "edit the files in %s, then: z23 app "
-                   "save %s", zcl_app_inner_str(&z->inner, "copy"),
-                   zcl_app_inner_str(&z->inner, "copy_name"));
-    (void)json_push_kv_str(&z->reply->data, "next", next);
+    if (zcl_app_hint(hint, sizeof(hint),
+                     zcl_package_copy_str(z->input, "datadir"), "save %s",
+                     zcl_app_inner_str(&z->inner, "copy_name")) &&
+        snprintf(next, sizeof(next), "edit the files in %s, then: %s",
+                 zcl_app_inner_str(&z->inner, "copy"), hint) <
+            (int)sizeof(next))
+        (void)json_push_kv_str(&z->reply->data, "next", next);
     z->reply->error.mutated = true;
 }
 

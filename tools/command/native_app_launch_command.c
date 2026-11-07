@@ -461,6 +461,27 @@ static void app_list_config(const struct app_launch_env *env,
     json_free(&cfg);
 }
 
+/* Say which entries can be opened, and offer the open and the copy of the
+ * first launchable app: z23 app open NAME, z23 app copy NAME. */
+static void app_list_guide(const struct app_launch_registry *reg,
+                           struct zcl_command_reply *reply)
+{
+    char input[128];
+    (void)json_push_kv_str(&reply->data, "summary",
+                           "launchable apps open with z23 app open NAME; "
+                           "z23 app copy NAME makes your own editable copy");
+    if (reg->count == 0)
+        return;
+    if (snprintf(input, sizeof(input), "{\"name\":\"%s\"}",
+                 reg->entries[0].id) < (int)sizeof(input))
+        (void)zcl_command_reply_add_next(reply, "app.open", input,
+                                         "open this launchable app");
+    if (snprintf(input, sizeof(input), "{\"app\":\"%s\"}",
+                 reg->entries[0].id) < (int)sizeof(input))
+        (void)zcl_command_reply_add_next(reply, "app.copy", input,
+                                         "make your own copy of it");
+}
+
 void zcl_native_handle_app_list_launchable(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -488,6 +509,7 @@ void zcl_native_handle_app_list_launchable(
     }
     (void)json_push_kv(&reply->data, "launchable", &list);
     json_free(&list);
+    app_list_guide(&w->reg, reply);
     app_list_config(&w->env, &w->reg, &reply->data);
     zcl_app_list_copies(zcl_native_command_datadir(), &reply->data);
     free(w);

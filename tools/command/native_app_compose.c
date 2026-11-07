@@ -10,6 +10,7 @@
 #include "kernel/command_registry.h"
 #include "sha3/sha3.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -142,4 +143,26 @@ void zcl_app_plan_id(const char *domain, const char *const *parts,
         sha3_256_write(&ctx, (const uint8_t *)p, strlen(p) + 1u);
     }
     sha3_256_finalize(&ctx, out);
+}
+
+bool zcl_app_hint(char *out, size_t cap, const char *datadir, const char *fmt,
+                  ...)
+{
+    va_list ap;
+    int head = snprintf(out, cap, "z23 %s%s%sapp ",
+                        datadir && datadir[0] ? "-datadir=" : "",
+                        datadir && datadir[0] ? datadir : "",
+                        datadir && datadir[0] ? " " : "");
+    int tail = -1;
+    if (head > 0 && (size_t)head < cap) {
+        va_start(ap, fmt);
+        tail = vsnprintf(out + head, cap - (size_t)head, fmt, ap);
+        va_end(ap);
+    }
+    if (tail < 0 || (size_t)head + (size_t)tail >= cap) {
+        if (cap)
+            out[0] = '\0';
+        return false;
+    }
+    return true;
 }

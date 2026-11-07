@@ -314,7 +314,7 @@ verbs a new agent needs:
 
 ```bash
 build/bin/z23
-# start: z23 wiki · z23 lab run hello.c · z23 card
+# start: z23 wiki · z23 lab run hello.c · z23 app · z23 card
 ```
 
 | Verb | What it does |

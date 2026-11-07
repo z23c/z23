@@ -251,7 +251,7 @@ static bool zsh_plan(struct zsh *z, struct zcl_command_reply *inner)
 static void zsh_plan_reply(struct zsh *z, const struct zcl_command_reply *in)
 {
     struct json_value *d = &z->reply->data;
-    char next[160], as[ZSH_NAME_MAX + 32];
+    char next[APP_COPY_BUILD_PATH + 160], as[ZSH_NAME_MAX + 32];
     const char *slash = strchr(z->old_name, '/');
     (void)snprintf(as, sizeof(as), "%s%s",
                    z->new_name[0] ? z->new_name : "<your new key>",
@@ -266,8 +266,10 @@ static void zsh_plan_reply(struct zsh *z, const struct zcl_command_reply *in)
     zcl_app_push_publisher(d, zcl_app_inner_str(in, "publisher_fingerprint"));
     zcl_package_copy_push_root(d, "plan_id", z->plan_id);
     (void)json_push_kv_bool(d, "executed", false);
-    (void)snprintf(next, sizeof(next), "z23 app share %s --yes", z->name);
-    (void)json_push_kv_str(d, "next", next);
+    if (zcl_app_hint(next, sizeof(next),
+                     zcl_package_copy_str(z->input, "datadir"),
+                     "share %s --yes", z->name))
+        (void)json_push_kv_str(d, "next", next);
 }
 
 /* ── confirm ─────────────────────────────────────────────────────────── */
@@ -289,11 +291,32 @@ static bool zsh_key_make(struct zsh *z)
     return z->have_key;
 }
 
+/* The friend opens the file in their own datadir, so that command carries
+ * none. A rename changes the package root, and app.run.copy refuses the old
+ * image as STALE_BUILD instead of planning a build, so the owner is told to
+ * rebuild before opening the copy again. */
+static void zsh_commit_next(const struct zsh *z, char *next, size_t cap)
+{
+    char friend_cmd[96], build[APP_COPY_BUILD_PATH + 64];
+    (void)zcl_app_hint(friend_cmd, sizeof(friend_cmd), NULL,
+                       "open FILE.z23share");
+    if (!z->rename ||
+        !zcl_app_hint(build, sizeof(build),
+                      zcl_package_copy_str(z->input, "datadir"), "build %s",
+                      z->name))
+        (void)snprintf(next, cap, "send the file; your friend runs: %s",
+                       friend_cmd);
+    else
+        (void)snprintf(next, cap, "send the file; your friend runs: %s; "
+                       "your copy now publishes as %s; run %s before opening "
+                       "it again", friend_cmd, z->new_name, build);
+}
+
 static void zsh_commit_reply(struct zsh *z, const struct zcl_command_reply *s)
 {
     struct json_value *d = &z->reply->data;
     char line[APP_COPY_BUILD_PATH + 192], brief[ZCL_APP_SHORT_FINGERPRINT_LEN];
-    char next[256];
+    char next[APP_COPY_BUILD_PATH + 512];
     const char *full = zcl_app_inner_str(s, "publisher_fingerprint");
     const char *keys[] = {"name", "semver", "release_id", "package_root",
                           "version", "share_file"};
@@ -312,11 +335,7 @@ static void zsh_commit_reply(struct zsh *z, const struct zcl_command_reply *s)
                        ? zcl_app_inner_str(s, "semver") : "",
                    brief, z->output);
     (void)json_push_kv_str(d, "share_line", line);
-    (void)snprintf(next, sizeof(next), "send the file; your friend runs: z23 "
-                   "app open FILE.z23share%s%s%s", z->rename ? ". Renamed to "
-                   : "", z->rename ? z->new_name : "",
-                   z->rename ? ": run z23 app build before your next open"
-                             : "");
+    zsh_commit_next(z, next, sizeof(next));
     (void)json_push_kv_str(d, "next", next);
     (void)json_push_kv_bool(d, "executed", false);
 }
