@@ -1156,7 +1156,7 @@ DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
 	tools/dev/devloop_early.c tools/dev/devloop_early_skip.c \
 	tools/dev/devloop_reflex_runner.c tools/dev/devloop_reflex_runner_main.c tools/dev/component_receiver.c \
-	tools/dev/devloop_action_root.c tools/dev/devloop_action_root_store.c \
+	tools/dev/devloop_action_root.c tools/dev/devloop_action_root_store.c tools/dev/devloop_app_image_closure.c \
 	tools/dev/devloop_baseline.c tools/dev/dev_failure_store.c \
 	tools/dev/dev_source_identity.c tools/dev/dev_git_tree.c tools/dev/dev_proof.c \
 	tools/dev/dev_proof_budget.c tools/dev/dev_proof_history.c \
@@ -3672,7 +3672,7 @@ TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
 	tools/dev/devloop_early.c tools/dev/devloop_early_skip.c \
 	tools/dev/devloop_reflex_runner.c tools/dev/devloop_reflex_runner_main.c \
-	tools/dev/devloop_action_root.c tools/dev/devloop_action_root_store.c \
+	tools/dev/devloop_action_root.c tools/dev/devloop_action_root_store.c tools/dev/devloop_app_image_closure.c \
 	tools/dev/dev_proof.c tools/dev/dev_proof_budget.c tools/dev/dev_proof_history.c \
 	tools/dev/dev_proof_receipt.c tools/dev/dev_proof_signer.c \
 	tools/dev/dev_proof_remote.c \

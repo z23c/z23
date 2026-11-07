@@ -53,8 +53,6 @@
 #include "base/result.h"
 #include "platform/resident_launch.h"
 
-struct zcl_action_root_request;
-
 #define APP_IMAGE_BUILD_DOMAIN "zcl.app_build.v1"
 #define APP_IMAGE_BUILD_DOMAIN_BYTES 16u
 #define APP_IMAGE_BUILD_KEY_DOMAIN "zcl.app_build.key.v1"
@@ -73,15 +71,6 @@ struct app_image_build {
     uint8_t image_sha3[32];
     uint64_t image_volume, image_low, image_high, image_size;
 };
-
-/* Closure root of the compile actions that built the image. Each request is
- * derived (zcl_action_root_derive) from its own -MD depfile; any miss
- * refuses, naming the action and the miss code. One action gives exactly
- * its vcs_build_input_closure_v1_root(); several fold their roots, in the
- * given order, under APP_IMAGE_BUILD_CLOSURE_SET_DOMAIN with the count. */
-struct zcl_result app_image_closure_root(
-    const struct zcl_action_root_request *actions, size_t count,
-    uint8_t out[32]);
 
 /* env_root: capture the toolchain capsule and root it. */
 struct zcl_result app_image_env_root(uint8_t out[32]);

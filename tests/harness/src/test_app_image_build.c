@@ -24,6 +24,7 @@
 
 #include "base/hex.h"
 #include "command/app_image.h"
+#include "devloop_app_image_closure.h"
 #include "devloop_action_root.h"
 #include "platform/directory_compat.h"
 #include "services/package_lifecycle.h"
