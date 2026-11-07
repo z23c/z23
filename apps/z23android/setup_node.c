@@ -319,3 +319,80 @@ enum sun_probe sun_wallet_probe(const struct sun *node)
     reply_free(&r);
     return probe;
 }
+
+/* The nonce is public; the generated words and passphrase stay on stdin. */
+enum sun_result sun_prepare_creation(const struct sun *node, struct zapp_words *words, char nonce[65])
+{
+    char input[SUN_INPUT_MAX], text[SUN_REPLY_MAX];
+    struct json_value doc = {0}; struct reply r;
+    memset(words, 0, sizeof(*words)); nonce[0] = 0;
+    json_set_object(&doc);
+    bool ok = json_push_kv_str(&doc, "datadir", node->datadir) && json_push_kv_bool(&doc, "prepare", true);
+    if (!ok || !write_request(&doc, input, sizeof(input))) { if (!ok) doc_wipe(&doc); return SUN_REFUSED; }
+    text[0] = 0;
+    (void)node->runner.run(node->runner.ctx, "create", input, SUN_CREATE_TIMEOUT_MS, text, sizeof(text));
+    memory_cleanse(input, sizeof(input)); reply_read(&r, text);
+    const char *id = text_of(r.data, "creation_nonce");
+    ok = r.parsed && r.ok && flag_of(r.data, "prepared") && hex_hash(id) && zapp_words_parse(text_of(r.data, "phrase"), words);
+    if (ok) memcpy(nonce, id, 65);
+    enum sun_result result = ok ? SUN_OK : r.parsed && !r.ok ? result_of(&r) : SUN_UNKNOWN;
+    if (!ok) memory_cleanse(words, sizeof(*words));
+    reply_free(&r); memory_cleanse(text, sizeof(text)); return result;
+}
+
+static bool creation_commit_request(const struct sun *node, const struct zapp_words *words,
+    const char *passphrase, const char *nonce, char input[SUN_INPUT_MAX])
+{
+    char phrase[ZAPP_WORDS_MAX * (ZAPP_WORD_LETTERS + 1)];
+    struct json_value doc = {0};
+    if (!hex_hash(nonce) || !passphrase_valid(passphrase) || !zapp_words_join(words, phrase, sizeof(phrase))) return false;
+    bool ok = request_base(&doc, node, passphrase) && json_push_kv_str(&doc, "phrase", phrase) &&
+        json_push_kv_bool(&doc, "confirm", true) && json_push_kv_bool(&doc, "shielded_only", true) &&
+        json_push_kv_str(&doc, "creation_nonce", nonce);
+    memory_cleanse(phrase, sizeof(phrase));
+    if (!ok) { doc_wipe(&doc); return false; }
+    return write_request(&doc, input, SUN_INPUT_MAX);
+}
+static bool creation_commit_reply(const struct reply *r, const char *nonce, struct sun_restored *out)
+{
+    const char *address = text_of(r->data, "first_shielded_address");
+    const char *state = text_of(r->data, "creation_state"), *reply_nonce = text_of(r->data, "creation_nonce");
+    if (!r->parsed || !r->ok || !flag_of(r->data, "recovered") || !flag_of(r->data, "committed") ||
+        !state || strcmp(state, "committed") || !reply_nonce || strcmp(reply_nonce, nonce) || !shielded_address(address)) return false;
+    snprintf(out->first_shielded_address, sizeof(out->first_shielded_address), "%s", address);
+    out->birthday_recorded = flag_of(r->data, "birthday_recorded");
+    out->birthday_rejected = flag_of(r->data, "birthday_rejected");
+    return true;
+}
+enum sun_result sun_commit_creation(const struct sun *node, const struct zapp_words *words,
+                                     const char *passphrase, const char *nonce, struct sun_restored *out)
+{
+    char input[SUN_INPUT_MAX], text[SUN_REPLY_MAX]; struct reply r;
+    memset(out, 0, sizeof(*out));
+    if (!creation_commit_request(node, words, passphrase, nonce, input)) return SUN_REFUSED;
+    text[0] = 0; (void)node->runner.run(node->runner.ctx, "restore", input, SUN_RESTORE_TIMEOUT_MS, text, sizeof(text));
+    memory_cleanse(input, sizeof(input)); reply_read(&r, text);
+    bool ok = creation_commit_reply(&r, nonce, out);
+    enum sun_result result = ok ? SUN_OK : r.parsed && !r.ok ? result_of(&r) : SUN_UNKNOWN;
+    reply_free(&r); memory_cleanse(text, sizeof(text)); return result;
+}
+
+enum sun_creation_state sun_creation_status(const struct sun *node, char nonce[65])
+{
+    char input[SUN_INPUT_MAX], text[SUN_REPLY_MAX]; struct json_value doc = {0}; struct reply r;
+    nonce[0] = 0; json_set_object(&doc);
+    bool built = json_push_kv_str(&doc, "datadir", node->datadir);
+    if (!built || !write_request(&doc, input, sizeof(input))) { if (!built) doc_wipe(&doc); return SUN_CREATION_UNKNOWN; }
+    text[0] = 0; (void)node->runner.run(node->runner.ctx, "status", input, SUN_QUERY_TIMEOUT_MS, text, sizeof(text));
+    reply_read(&r, text);
+    const struct json_value *data = r.ok ? r.data : json_get(json_get(&r.root, "error"), "facts");
+    const char *state = text_of(data, "creation_state"), *id = text_of(data, "creation_nonce");
+    enum sun_creation_state result = SUN_CREATION_UNKNOWN;
+    if (r.parsed && state && !strcmp(state, "none")) result = SUN_CREATION_NONE;
+    else if (r.parsed && state && hex_hash(id)) {
+        if (!strcmp(state, "prepared")) result = SUN_CREATION_PREPARED;
+        else if (!strcmp(state, "committed")) result = SUN_CREATION_COMMITTED;
+        if (result != SUN_CREATION_UNKNOWN) memcpy(nonce, id, 65);
+    }
+    reply_free(&r); memory_cleanse(text, sizeof(text)); return result;
+}

@@ -44,6 +44,7 @@ static void synth_rom(struct rom_state_checkpoint *rom, int32_t height)
 {
     memset(rom, 0, sizeof(*rom));
     rom->height = height;
+    rom->format_version = ROM_STATE_CHECKPOINT_V1;
     memset(rom->block_hash, 0xb1, 32);
     memset(rom->utxo_root, 0x11, 32);
     rom->utxo_count = 1354769;
@@ -65,6 +66,9 @@ static void manifest_from_rom(struct consensus_state_bundle_manifest *m,
 {
     memset(m, 0, sizeof(*m));
     m->height = rom->height;
+    m->format_version = rom->format_version;
+    m->sprout_pool_total = rom->sprout_pool_total;
+    m->sapling_pool_total = rom->sapling_pool_total;
     memcpy(m->block_hash, rom->block_hash, 32);
     m->history_complete = true;
     memcpy(m->utxo_root, rom->utxo_root, 32);
@@ -196,6 +200,58 @@ static int rung_activation_tests(const struct rom_state_checkpoint *keystone,
     checkpoints_reset_rom_state_rungs_override_for_test();
 #undef RNAME
 #undef RCHECK
+    return failures;
+}
+
+static int v2_pool_authority_tests(void)
+{
+    int failures = 0;
+    struct rom_state_checkpoint rom;
+    synth_rom(&rom, CROM_H);
+    rom.format_version = ROM_STATE_CHECKPOINT_V2;
+    rom.sprout_pool_total = 7;
+    rom.sapling_pool_total = 9;
+    struct consensus_state_bundle_manifest m;
+    manifest_from_rom(&m, &rom);
+    struct consensus_state_activate_request req = {0};
+    struct sha3_utxo_checkpoint cp = {0};
+    cp.height = m.height;
+    cp.utxo_count = m.utxo_count;
+    memcpy(cp.sha3_hash, m.utxo_root, 32);
+    req.checkpoint_sapling_root_from_validated_header = true;
+    memcpy(req.checkpoint_sapling_root, m.sapling_frontier_root, 32);
+    checkpoints_set_sha3_override_for_test(&cp);
+    checkpoints_set_rom_state_override_for_test(&rom);
+#define V2_AUTH(want) do { \
+    const char *actual = consensus_state_activate_resolve_content_authority_name_for_test(&m, &req); \
+    if (strcmp(actual, (want)) != 0) { \
+        printf("v2 authority: expected %s got %s\n", (want), actual); failures++; \
+    } \
+} while (0)
+    V2_AUTH("checkpoint_rom");
+    m.sprout_pool_total++;
+    consensus_state_bundle_artifact_digest(&m, m.artifact_digest);
+    V2_AUTH("none");
+    m.sprout_pool_total--;
+    m.sapling_pool_total++;
+    consensus_state_bundle_artifact_digest(&m, m.artifact_digest);
+    V2_AUTH("none");
+    m.sapling_pool_total--;
+    rom.format_version = ROM_STATE_CHECKPOINT_V1;
+    V2_AUTH("none");
+    rom.format_version = ROM_STATE_CHECKPOINT_V2;
+    memset(rom.rom_state_root, 0, 32);
+    V2_AUTH("none");
+    cp.height--;
+    req.assisted_tier = true;
+    req.assisted_sapling_root_from_validated_header = true;
+    memcpy(req.assisted_sapling_root, m.sapling_frontier_root, 32);
+    V2_AUTH("none");
+    m.format_version = CONSENSUS_STATE_BUNDLE_INVALID;
+    V2_AUTH("none");
+#undef V2_AUTH
+    checkpoints_reset_rom_state_override_for_test();
+    checkpoints_reset_sha3_override_for_test();
     return failures;
 }
 
@@ -349,6 +405,7 @@ int test_checkpoint_rom_authority(void)
          * checkpoint (that is the whole point — it is fresher, unbound content). */
         struct consensus_state_bundle_manifest m;
         memset(&m, 0, sizeof(m));
+        m.format_version = CONSENSUS_STATE_BUNDLE_V1;
         m.height = bundle_h;
         m.history_complete = true;
         memset(m.block_hash, 0xab, 32);
@@ -411,6 +468,7 @@ int test_checkpoint_rom_authority(void)
     /* (f) baked ladder rungs: activation at a rung height (see above). */
     checkpoints_reset_sha3_override_for_test();
     failures += rung_activation_tests(&rom, &req);
+    failures += v2_pool_authority_tests();
     checkpoints_reset_rom_state_override_for_test();
     checkpoints_reset_sha3_override_for_test();
 

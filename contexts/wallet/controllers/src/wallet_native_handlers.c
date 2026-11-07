@@ -12,6 +12,7 @@
  * shared header is included from both files. */
 
 #include "controllers/wallet_native_handlers.h"
+#include "controllers/agent_controller.h"
 #include "controllers/wallet_shielded_controller.h"
 #include "controllers/wallet_send_once.h"
 #include "controllers/wallet_spend_gate.h"
@@ -36,6 +37,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+void wnh_default_datadir(char *out, size_t cap)
+{
+    const char *ctx = agent_runtime_context_datadir();
+    if (ctx && ctx[0]) {
+        snprintf(out, cap, "%s", ctx);
+        return;
+    }
+    const char *home = getenv("HOME");
+    snprintf(out, cap, "%s/.zclassic-c23", home && home[0] ? home : ".");
+}
 
 /* ── core.wallet.* mutating native leaves ────────────────────────────────
  * Dedicated registry handlers (request -> reply) for the leaves that create

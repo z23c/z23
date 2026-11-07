@@ -544,6 +544,44 @@ static int t_floor_follows_the_highest_compiled_checkpoint(void)
     return failures;
 }
 
+static int wbb_deny_state_read(void *ctx, int action, const char *a,
+                               const char *b, const char *c, const char *d)
+{
+    (void)ctx; (void)b; (void)c; (void)d;
+    return action == SQLITE_READ && a && strcmp(a, "node_state") == 0
+        ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int t_birthday_once_preserves_state(void)
+{
+    int failures = 0;
+    struct wbb_fixture f;
+    bool open = wbb_open(&f, "birthday_once", 1500);
+    WBB_CHECK("once fixture opens", open);
+    if (!open) return failures;
+    uint8_t old_hash[32] = {1}, old_identity[32] = {2}, hash[32], identity[32];
+    int64_t height = 0;
+    WBB_CHECK("seed bound birthday", db_wallet_birthday_set_created(&f.ndb, 1400, old_hash, old_identity));
+    WBB_CHECK("existing tuple refuses replacement", !db_wallet_birthday_set_if_absent(&f.ndb, 1500, old_hash));
+    WBB_CHECK("deny tuple read", sqlite3_set_authorizer(f.ndb.db, wbb_deny_state_read, NULL) == SQLITE_OK);
+    WBB_CHECK("unreadable tuple refuses replacement", !db_wallet_birthday_set_if_absent(&f.ndb, 1500, old_hash));
+    WBB_CHECK("restore reader", sqlite3_set_authorizer(f.ndb.db, NULL, NULL) == SQLITE_OK);
+    WBB_CHECK("existing proof preserved", db_wallet_birthday_proof_get(&f.ndb, &height, hash, identity) == WALLET_BIRTHDAY_PROOF_FOUND &&
+        height == 1400 && memcmp(hash, old_hash, 32) == 0 && memcmp(identity, old_identity, 32) == 0);
+    WBB_CHECK("partial tuple fixture", node_db_state_delete(&f.ndb, "wallet_birthday_height"));
+    WBB_CHECK("partial tuple refuses replacement", !db_wallet_birthday_set_if_absent(&f.ndb, 1500, old_hash));
+    size_t len = 0;
+    WBB_CHECK("partial hash remains", node_db_state_get(&f.ndb, "wallet_birthday_hash", hash, 32, &len) && len == 32 && memcmp(hash, old_hash, 32) == 0);
+    WBB_CHECK("partial proof remains", node_db_state_get(&f.ndb, "wallet_birthday_scan_identity", identity, 32, &len) && len == 32 && memcmp(identity, old_identity, 32) == 0);
+    const uint8_t malformed = 0x55;
+    WBB_CHECK("malformed height fixture", node_db_state_set(&f.ndb, "wallet_birthday_height", &malformed, 1));
+    WBB_CHECK("malformed tuple refuses replacement", !db_wallet_birthday_set_if_absent(&f.ndb, 1500, old_hash));
+    uint8_t saved = 0;
+    WBB_CHECK("malformed height preserved", node_db_state_get(&f.ndb, "wallet_birthday_height", &saved, 1, &len) && len == 1 && saved == malformed);
+    wbb_close(&f);
+    return failures;
+}
+
 int test_wallet_boot_birthday(void);
 int test_wallet_boot_birthday(void)
 {
@@ -564,6 +602,7 @@ int test_wallet_boot_birthday(void)
     failures += t_other_key_rows_get_no_birthday();
     failures += t_import_after_mint_rescans_below_the_birthday();
     failures += t_existing_birthday_is_never_replaced();
+    failures += t_birthday_once_preserves_state();
     failures += t_floor_follows_the_highest_compiled_checkpoint();
     checkpoints_reset_sha3_override_for_test();
     checkpoints_reset_rom_state_override_for_test();

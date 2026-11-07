@@ -16,6 +16,7 @@
 
 struct wallet_rpc_context;
 struct wallet_tx;
+struct sqlite3;
 
 /* The context a wallet send runs against. In private mode it is a copy of ctx
  * in *view with the private pool as mempool and no connman, so commit,
@@ -42,6 +43,18 @@ const char *wallet_send_relay_failure_text(void);
  * sent. Callers must say so instead of "sent". */
 bool wallet_private_broadcast_is_held(const struct uint256 *txid);
 
+enum wallet_hold_proof_result {
+    WALLET_HOLD_PROOF_OK, WALLET_HOLD_PROOF_BUSY, WALLET_HOLD_PROOF_TX_ABSENT,
+    WALLET_HOLD_PROOF_ERROR, WALLET_HOLD_PROOF_CONFLICT
+};
+/* Requires an owned node.db write transaction and an active relay guard.
+ * On non-OK the caller must roll back; conservative in-memory reservations
+ * can remain until retry. Completion must call the locked validator. */
+enum wallet_hold_proof_result wallet_private_broadcast_reserve_in_open_tx(
+    struct wpr_pending_guard *guard, struct node_db *ndb, struct wallet *wallet);
+bool wallet_private_broadcast_validate_holds_locked(void *guard, struct wallet *wallet,
+                                                     struct sqlite3 *db);
+
 /* Re-reserve the shielded notes of a recorded send the wallet holds, from the
  * relay environment alone (resume runs before the shared wallet context). */
 void wallet_private_broadcast_reserve_spends(const struct wpr_env *env,
@@ -56,6 +69,9 @@ void wallet_private_broadcast_arm_env(const struct wpr_env *in,
 /* Spacing of the held-send warning, which carries a count only. */
 #define WALLET_PBCAST_HELD_WARN_S 300
 
+
+/* Set mode and admission pool without reading, relaying or expiring pending sends. */
+void wallet_private_broadcast_configure(enum wpr_mode mode, const struct wpr_env *env);
 
 /* Configure the relay, resume the pending set and start the tick thread, in
  * either mode: a send held in private mode must still expire after a restart
@@ -93,6 +109,7 @@ struct zcl_result wallet_private_broadcast_unsupported(const char *what);
 bool wallet_private_broadcast_refuse_json(const char *what,
                                           struct json_value *result);
 /* Stop the tick thread; waits briefly for it to exit. */
+bool wallet_private_broadcast_stop_checked(void);
 void wallet_private_broadcast_stop(void);
 
 void register_wallet_private_broadcast_rpc_commands(struct rpc_table *t);

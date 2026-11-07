@@ -18,6 +18,7 @@
 #include "storage/consensus_state_bundle_codec.h"
 #include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"
+#include "storage/shielded_pool_kv.h"
 
 #include <sqlite3.h>
 #include <errno.h>
@@ -380,6 +381,8 @@ static bool pr_seed_fold_rows(sqlite3 *db, uint8_t hash[2][32], uint8_t nf[32])
     if (!progress_meta_set(db, COINS_KV_MIGRATION_COMPLETE_KEY, &one, 1) ||
         !coins_kv_mark_self_folded(db) ||
         !pr_exec(db, "BEGIN IMMEDIATE") ||
+        !shielded_pool_kv_ensure_schema(db) ||
+        !shielded_pool_kv_put(db, 1, 0, 0) ||
         !coins_kv_set_applied_height_in_tx(db, 2) ||
         !pr_exec(db, "COMMIT")) {
         (void)pr_exec(db, "ROLLBACK");

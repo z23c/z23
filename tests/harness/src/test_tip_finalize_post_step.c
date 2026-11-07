@@ -577,6 +577,7 @@ static bool tp_wire_wallet(struct tp_wire *x)
     if (!x->db_open)
         return false;
     wallet_init(x->w);
+    if (!wallet_readiness_initialize(x->w, WALLET_READINESS_READY, false, 0)) return false;
     x->w->sapling_notes = zcl_calloc(2, sizeof(*x->w->sapling_notes), "tp_notes");
     if (!x->w->sapling_notes ||
         !sapling_keystore_set_seed(&x->w->sapling_keys, seed) ||
@@ -1001,6 +1002,34 @@ static int tp_birthday_live(bool match)
     return failures;
 }
 
+static bool tp_unready_wallet_reconcile(struct app_runtime_context *rt,
+                                         struct block_index *index)
+{
+    struct wallet *pending = zcl_calloc(1, sizeof(*pending), "tp_pending_wallet");
+    if (!pending) return false;
+    wallet_init(pending);
+    pending->sapling_notes = zcl_calloc(1, sizeof(*pending->sapling_notes), "tp_pending_note");
+    if (!pending->sapling_notes) { wallet_free(pending); free(pending); return false; }
+    pending->sapling_notes_cap = pending->num_sapling_notes = 1;
+    pending->sapling_notes[0].used = true;
+    memcpy(pending->sapling_notes[0].nf, rt->wallet->sapling_notes[0].nf, 32);
+    struct wallet *original = rt->wallet;
+    rt->wallet = pending;
+    bool ok = true;
+    for (int phase = 0; phase < 2; ++phase) {
+        if (phase == 1 && !wallet_readiness_initialize(pending, WALLET_READINESS_PENDING, true, 1))
+            ok = false;
+        bool reconciled = tip_finalize_run_wallet_reconcile(index);
+        if (reconciled || pending->best_block_height != 0 ||
+            pending->num_wallet_tx != 0 || pending->sapling_notes[0].spent)
+            ok = false;
+    }
+    rt->wallet = original;
+    wallet_free(pending);
+    free(pending);
+    return ok;
+}
+
 int test_tip_finalize_post_step(void)
 {
     int failures = 0;
@@ -1145,6 +1174,8 @@ int test_tip_finalize_post_step(void)
     uint64_t mmb0 = tp_mmb_leaves();
 
     /* ── Positive: body readable → all assertable effects fire ── */
+    TP_CHECK("UNKNOWN and PENDING skip wallet-only tip effects", tp_unready_wallet_reconcile(&rt, &bi));
+    TP_CHECK("positive wallet is READY", wallet_readiness_initialize(w, WALLET_READINESS_READY, false, 0));
     tip_finalize_run_post_finalize(&bi);
     TP_CHECK("mempool: confirmed tx removed",
              !tx_mempool_exists(&g_tp_pool, &blk.vtx[1].hash));

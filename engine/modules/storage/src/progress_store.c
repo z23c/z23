@@ -12,7 +12,9 @@
  * model. */
 
 #include "platform/os_proc.h"
+#include "platform/directory_transaction.h"
 #include "platform/time_compat.h"
+#include "base/serialize_le.h"
 #include "storage/progress_store.h"
 #include "progress_store_directory.h"
 
@@ -637,6 +639,171 @@ bool progress_store_open(const char *datadir)
 {
     pthread_mutex_lock(&g_lifecycle_lock);
     bool ok = !g_close_pending && progress_store_open_impl(datadir);
+    pthread_mutex_unlock(&g_lifecycle_lock);
+    return ok;
+}
+
+/* Validate without invoking schema creation or repair. */
+static bool progress_existing_valid(sqlite3 *db)
+{
+    bool candidate = false;
+    if (!progress_store_quick_check_ok(db) ||
+        !progress_store_candidate_state(db, &candidate) || candidate)
+        return false;
+    unsigned char v[4];
+    size_t n = 0;
+    bool found = false;
+    if (!progress_meta_get_blob_exact(db, CONSENSUS_DB_SCHEMA_VERSION_KEY,
+                                      v, sizeof(v), &n, &found) ||
+        !found || n != sizeof(v))
+        return false;
+    uint32_t version = zcl_read_u32_le(v);
+    bool ok = version == CONSENSUS_DB_SCHEMA_VERSION;
+    sqlite3_stmt *s = NULL;
+    const char *checks[] = {
+        "SELECT name,cursor,updated_at FROM stage_cursor LIMIT 0",
+        "SELECT kind,height,hash,payload,created_at FROM repair_marker LIMIT 0"
+    };
+    for (size_t i = 0; ok && i < sizeof(checks)/sizeof(checks[0]); i++) {
+        s = NULL;
+        ok = sqlite3_prepare_v2(db, checks[i], -1, &s, NULL) == SQLITE_OK;
+        if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    }
+    return ok;
+}
+
+static bool progress_existing_safe_leaf(uintptr_t dir)
+{
+#ifndef _WIN32
+    struct stat st;
+    return fstatat((int)dir, PROGRESS_STORE_FILENAME, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+           S_ISREG(st.st_mode) && st.st_nlink == 1;
+#else
+    struct platform_directory_transaction d = {.native = dir};
+    struct platform_directory_child child;
+    struct platform_directory_child_info info;
+    platform_directory_child_init(&child);
+    if (platform_directory_child_open_result(&d, PROGRESS_STORE_FILENAME,
+            false, false, &child, NULL) != PLATFORM_DIRECTORY_OK)
+        return false;
+    bool ok = platform_directory_child_info(&child, &info) && info.link_count == 1;
+    platform_directory_child_close(&child);
+    return ok;
+#endif
+}
+
+static sqlite3 *progress_existing_open_sqlite(const char *path, const char *vfs, int flags)
+{
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(path, &db, flags | SQLITE_OPEN_FULLMUTEX, vfs);
+    if (rc != SQLITE_OK || !progress_existing_valid(db)) {
+        fprintf(stderr, "[progress_store] existing open validation failed rc=%d: %s\n", rc, db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
+        if (db) sqlite3_close(db);
+        return NULL;
+    }
+    int moved = 1;
+    if (sqlite3_file_control(db, "main", SQLITE_FCNTL_HAS_MOVED, &moved) != SQLITE_OK || moved) {
+        sqlite3_close(db);
+        return NULL;
+    }
+    return db;
+}
+
+static sqlite3 *progress_existing_checked_open(const char *path,
+        const char *sqlite_path, const char *vfs, uintptr_t dir)
+{
+#ifndef _WIN32
+    (void)dir;
+#else
+    (void)path;
+#endif
+#ifndef _WIN32
+    struct stat before, after;
+    bool identity_ok = stat(path, &before) == 0 && S_ISREG(before.st_mode);
+#else
+    uint64_t volume_before = 0, index_before = 0, size_before = 0;
+    bool identity_ok = true;
+#endif
+    sqlite3 *db = progress_existing_open_sqlite(sqlite_path, vfs, SQLITE_OPEN_READONLY);
+    bool ok = db != NULL;
+#ifdef _WIN32
+    if (ok) identity_ok = sqlite_vfs_dir_main_file_info(db, dir, PROGRESS_STORE_FILENAME,
+                                         &volume_before, &index_before, &size_before);
+#endif
+    ok = ok && identity_ok;
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    db = NULL;
+    if (ok) {
+        db = progress_existing_open_sqlite(sqlite_path, vfs, SQLITE_OPEN_READWRITE);
+        ok = db != NULL;
+    }
+#ifdef _WIN32
+    uint64_t volume_serial = 0, file_index = 0, file_size = 0;
+    if (ok) ok = sqlite_vfs_dir_main_file_info(db, dir, PROGRESS_STORE_FILENAME,
+                                               &volume_serial, &file_index, &file_size);
+    if (ok) ok = volume_serial == volume_before && file_index == index_before;
+#else
+    if (ok) ok = stat(path, &after) == 0 && before.st_dev == after.st_dev &&
+                 before.st_ino == after.st_ino;
+#endif
+    if (!ok) {
+        if (db) sqlite3_close(db);
+        return NULL;
+    }
+    return db;
+}
+
+static bool progress_existing_open(const char *datadir)
+{
+    char path[PROGRESS_STORE_PATH_MAX], display[PROGRESS_STORE_PATH_MAX];
+    uintptr_t dir = UINTPTR_MAX;
+    if (!datadir || !datadir[0]) return false;
+    int n = snprintf(display, sizeof(display), "%s/%s", datadir, PROGRESS_STORE_FILENAME);
+    if (n <= 0 || (size_t)n >= sizeof(display) ||
+        !progress_directory_open(datadir, PROGRESS_STORE_FILENAME, path, sizeof(path), &dir))
+        return false;
+    if (!progress_existing_safe_leaf(dir)) {
+        progress_directory_close(dir);
+        return false;
+    }
+#ifdef _WIN32
+    char vfs_name[SQLITE_VFS_DIR_NAME_MAX] = {0};
+    if (!sqlite_vfs_dir_register(dir, PROGRESS_STORE_FILENAME, vfs_name)) {
+        progress_directory_close(dir);
+        return false;
+    }
+    const char *sqlite_path = PROGRESS_STORE_FILENAME, *vfs = vfs_name;
+#else
+    const char *sqlite_path = path, *vfs = NULL;
+#endif
+    sqlite3 *db = progress_existing_checked_open(path, sqlite_path, vfs, dir);
+    if (!db) {
+
+#ifdef _WIN32
+        (void)sqlite_vfs_dir_unregister(vfs_name);
+#endif
+        progress_directory_close(dir);
+        return false;
+    }
+    pthread_mutex_lock(&g_lock);
+    snprintf(g_path, sizeof(g_path), "%s", path);
+    snprintf(g_display_path, sizeof(g_display_path), "%s", display);
+    g_dir_handle = dir;
+#ifdef _WIN32
+    snprintf(g_vfs_name, sizeof(g_vfs_name), "%s", vfs_name);
+#endif
+    g_opened_at = wall_now_s();
+    atomic_fetch_add_explicit(&g_epoch, 1, memory_order_release);
+    atomic_store_explicit(&g_db, db, memory_order_release);
+    pthread_mutex_unlock(&g_lock);
+    return true;
+}
+
+bool progress_store_open_existing(const char *datadir)
+{
+    pthread_mutex_lock(&g_lifecycle_lock);
+    bool ok = !g_close_pending && !atomic_load_explicit(&g_db, memory_order_acquire) &&
+              progress_existing_open(datadir);
     pthread_mutex_unlock(&g_lifecycle_lock);
     return ok;
 }

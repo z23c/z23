@@ -31,6 +31,13 @@
 #include "services/island_anchor.h"
 #include "services/sync_monitor.h"
 #include "storage/progress_store.h"
+#include "storage/block_index_projection.h"
+#include "storage/event_log_singleton.h"
+#include "config/boot_datadir_lock.h"
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/thread_registry.h"
@@ -257,7 +264,7 @@ static bool fsi_emit_row(struct block_index *bi, const struct block_header *h)
 static struct block_index *fsi_insert_window(struct main_state *ms,
                                              const struct block_header *w,
                                              int n,
-                                             const struct island_anchor *a)
+                                             const struct island_anchor *a, bool emit)
 {
     struct block_index *prev = NULL;
     for (int i = n - 1; i >= 0; i--) {
@@ -272,12 +279,39 @@ static struct block_index *fsi_insert_window(struct main_state *ms,
                      (int)height);
             return NULL;
         }
-        if (!fsi_emit_row(bi, &w[i]))
-            LOG_WARN(FSI_SUBSYS, "island row h=%d: durable header event not "
-                     "written (event log not open?)", (int)height);
+        if (emit && !fsi_emit_row(bi, &w[i])) {
+            LOG_WARN(FSI_SUBSYS, "island header event missing at h=%d", (int)height);
+            return NULL;
+        }
         prev = bi;
     }
     return prev;
+}
+
+static bool fsi_flush_window(const struct block_header *window,
+                             const struct island_anchor *anchor)
+{
+    event_log_t *log = event_log_singleton();
+    block_index_projection_t *projection = block_index_projection_singleton();
+    if (!log || !projection || !event_log_flush(log) ||
+        block_index_projection_catch_up(projection) == UINT64_MAX)
+        return false;
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; ++i) {
+        struct uint256 hash;
+        struct disk_block_index disk;
+        block_header_get_hash(&window[i], &hash);
+        if (!block_index_projection_get_strict(projection, hash.data, &disk) ||
+            disk.nHeight != anchor->rung_height - i)
+            return false;
+    }
+    return true;
+}
+
+static bool fsi_anchor_equal(const struct island_anchor *a, const struct island_anchor *b)
+{
+    return a->root_height == b->root_height && a->rung_height == b->rung_height &&
+        uint256_eq(&a->root_hash, &b->root_hash) && uint256_eq(&a->rung_hash, &b->rung_hash) &&
+        arith_uint256_compare(&a->root_work, &b->root_work) == 0;
 }
 
 static bool fsi_work_matches_rung(const struct block_index *top,
@@ -557,34 +591,42 @@ size_t flysync_island_detach(struct main_state *ms,
     return n;
 }
 
-bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
-                         int n, const struct island_anchor *a)
+static bool fsi_save_verified_window(const struct block_header *w, int n,
+                                     const struct island_anchor *a)
 {
-    if (!ms || !w || !a || n != ISLAND_ANCHOR_WINDOW)
-        return false;
-    /* The fact goes down before any row: a crash after it leaves a fact whose
-     * rows are missing (reconcile falls back), never rows without a fact (a
-     * datadir that -flysync would refuse forever). */
+    struct island_anchor verified; char why[160];
+    if (!flysync_island_verify_window(w, n, a->rung_height, &verified, why, sizeof(why)) ||
+        !fsi_anchor_equal(a, &verified)) return false;
     struct island_anchor_rows rows;
-    for (int i = 0; i < n; i++)   /* w[0] is the rung, w[n - 1] the root */
+    for (int i = 0; i < n; i++)
         block_header_get_hash(&w[n - 1 - i], &rows.hash[i]);
-    struct zcl_result saved = island_anchor_save(progress_store_db(), a, &rows);
+    struct zcl_result saved = island_anchor_save_window(progress_store_db(), a, &rows, w);
     if (!saved.ok) {
         LOG_WARN(FSI_SUBSYS, "island seed refused: %s", saved.message);
         return false;
     }
     struct zcl_result reg = island_anchor_register(a);
-    if (!reg.ok) {
-        LOG_WARN(FSI_SUBSYS, "island seed refused: %s", reg.message);
+    if (!reg.ok) LOG_WARN(FSI_SUBSYS, "island seed refused: %s", reg.message);
+    return reg.ok;
+}
+
+bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
+                         int n, const struct island_anchor *a)
+{
+    if (!ms || !w || !a || n != ISLAND_ANCHOR_WINDOW)
         return false;
-    }
+    if (!fsi_save_verified_window(w, n, a)) return false;
     zcl_mutex_lock(&ms->cs_main);
-    struct block_index *top = fsi_insert_window(ms, w, n, a);
+    struct block_index *top = fsi_insert_window(ms, w, n, a, true);
     zcl_mutex_unlock(&ms->cs_main);
     if (!top || !fsi_work_matches_rung(top, a)) {
         LOG_WARN(FSI_SUBSYS, "island seed refused: %s (the caller falls "
                  "back and detaches the rows)",
                  top ? "rung chainwork mismatch" : "insert failed");
+        return false;
+    }
+    if (!fsi_flush_window(w, a)) {
+        LOG_ERROR(FSI_SUBSYS, "island derived storage failed; recovery required");
         return false;
     }
     bool promoted = false;
@@ -625,28 +667,11 @@ static const char *fsi_datadir(void)
 static bool fsi_gate_fresh(sqlite3 *db, struct main_state *ms, char *why,
                            size_t why_cap);
 
-/* The island state could not be read: never decide on it (a SEEDED island
- * misread as fresh would be written FELL_BACK for good). Refuse this start
- * when -flysync is set or an island fact is present. A start without the flag
- * and without a readable fact continues as a node without FlySync does: it
- * holds nothing and writes no island state (a durable fall-back refuses on an
- * unreadable state). */
+/* Never infer the absence of an island from an unreadable state. */
 static bool fsi_gate_unreadable(sqlite3 *db, char *why, size_t why_cap)
 {
-    struct island_anchor a;
-    bool found = false;
-    bool no_fact = !(island_anchor_load(db, &a, &found).ok && found);
-    if (!atomic_load(&g_requested) && no_fact) {
-        LOG_WARN(FSI_SUBSYS, "island state unreadable and no readable island "
-                 "fact: continuing without FlySync");
-        return true;
-    }
-    snprintf(why, why_cap,
-             "the FlySync island state in the progress store is unreadable, so "
-             "this start cannot tell a seeded or installed island from a fresh "
-             "or fallen-back one and decides nothing; start again, and if it "
-             "persists check the progress store (%s)",
-             no_fact ? "-flysync is set" : "an island fact is present");
+    (void)db;
+    snprintf(why, why_cap, "FlySync island state is unreadable; recovery is required");
     return false;
 }
 
@@ -760,9 +785,8 @@ bool flysync_island_boot_reconcile(struct main_state *ms)
         ISLAND_ANCHOR_STATE_INSTALLED) {
         /* Installed state stands on the bundle, not on these rows: keep the
          * registration the reorg floor and the loader rely on, and say so. */
-        LOG_ERROR(FSI_SUBSYS, "installed island: %s; the island stays "
-                  "registered (no fall-back once installed)", why);
-        return true;
+        LOG_ERROR(FSI_SUBSYS, "installed island: %s; recovery required", why);
+        return false;
     }
     LOG_WARN(FSI_SUBSYS, "island does not stand after load: %s", why);
     fsi_fall_back_at(ms, why, false);
@@ -935,7 +959,11 @@ static void fsi_tick_walk(int64_t now)
         if (flysync_island_verify_window(w, n, top_h, &a, why, sizeof(why))) {
             if (ms && flysync_island_seed(ms, w, n, &a))
                 fsi_set_phase(FLYSYNC_SEEDED);
-            else
+            else if (island_anchor_state_load(progress_store_db()) ==
+                     ISLAND_ANCHOR_STATE_SEEDED) {
+                LOG_ERROR(FSI_SUBSYS, "seed persisted but derived state failed; restarting for recovery");
+                fsi_request_respawn();
+            } else
                 fsi_fall_back("the verified header window could not be seeded");
             return;
         }
@@ -1082,13 +1110,182 @@ static void fsi_boot_count_hold(struct main_state *ms)
     fsi_fall_back_at(ms, why, false);
 }
 
-void flysync_island_boot_register(void)
+static struct block_header g_boot_window[ISLAND_ANCHOR_WINDOW];
+static bool g_boot_window_verified;
+
+static bool fsi_rows_match_window(const struct island_anchor_rows *rows,
+                                  const struct block_header *window)
 {
-    bool registered = false;
-    struct zcl_result r = island_anchor_boot_register(progress_store_db(),
-                                                      &registered);
-    if (!r.ok)
-        LOG_WARN(FSI_SUBSYS, "%s", r.message);
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; ++i) {
+        struct uint256 hash;
+        block_header_get_hash(&window[i], &hash);
+        if (!uint256_eq(&hash, &rows->hash[ISLAND_ANCHOR_WINDOW - 1 - i])) return false;
+    }
+    return true;
+}
+
+static bool fsi_disk_to_header(const struct disk_block_index *row, struct block_header *header)
+{
+    if (!row || !header || row->nSolutionSize > sizeof(header->nSolution)) return false;
+    block_header_init(header);
+    header->nVersion = row->nVersion;
+    header->hashPrevBlock = row->hashPrev;
+    header->hashMerkleRoot = row->hashMerkleRoot;
+    header->hashFinalSaplingRoot = row->hashFinalSaplingRoot;
+    header->nTime = row->nTime; header->nBits = row->nBits; header->nNonce = row->nNonce;
+    header->nSolutionSize = row->nSolutionSize;
+    memcpy(header->nSolution, row->nSolution, row->nSolutionSize);
+    return true;
+}
+
+static bool fsi_legacy_window(const char *datadir, const struct island_anchor *a,
+                              const struct island_anchor_rows *rows, struct block_header *window)
+{
+#if defined(_WIN32)
+    (void)datadir; (void)a; (void)rows; (void)window;
+    return false;
+#else
+    int fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0 || !boot_datadir_lock_matches_fd(fd)) { if (fd >= 0) close(fd); return false; }
+    struct disk_block_index *disk = zcl_calloc(ISLAND_ANCHOR_WINDOW, sizeof(*disk), "island rows");
+    bool ok = disk && block_index_projection_read_window_existing(fd,
+        (const uint8_t (*)[32])rows->hash, ISLAND_ANCHOR_WINDOW, disk);
+    close(fd);
+    for (int i = 0; ok && i < ISLAND_ANCHOR_WINDOW; ++i) {
+        int source = ISLAND_ANCHOR_WINDOW - 1 - i;
+        ok = disk[source].nHeight == a->rung_height - i && fsi_disk_to_header(&disk[source], &window[i]);
+    }
+    free(disk);
+    return ok;
+#endif
+}
+
+static bool fsi_finish_proof_read(sqlite3 *db, bool ok)
+{
+    const char *end = ok ? "COMMIT" : "ROLLBACK";
+    if (sqlite3_exec(db, end, NULL, NULL, NULL) == SQLITE_OK) return ok;
+    LOG_ERROR(FSI_SUBSYS, "island proof %s failed: %s", end, sqlite3_errmsg(db));
+    if (!sqlite3_get_autocommit(db) &&
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK)
+        LOG_ERROR(FSI_SUBSYS, "island proof rollback failed: %s", sqlite3_errmsg(db));
+    if (!sqlite3_get_autocommit(db)) abort();
+    return false;
+}
+
+static bool fsi_boot_proof(const char *datadir, struct island_anchor *fact,
+                           struct block_header *window)
+{
+    sqlite3 *db = progress_store_db();
+    struct island_anchor_rows rows; bool have_fact = false, have_rows = false, have_window = false;
+    progress_store_tx_lock();
+    bool begun = db && sqlite3_get_autocommit(db) && sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK;
+    bool ok = begun && island_anchor_load(db, fact, &have_fact).ok && have_fact &&
+        island_anchor_rows_load(db, &rows, &have_rows).ok && have_rows &&
+        island_anchor_window_load(db, window, &have_window).ok;
+    if (begun) ok = fsi_finish_proof_read(db, ok);
+    progress_store_tx_unlock();
+    if (!ok) return false;
+    if (!have_window && !fsi_legacy_window(datadir, fact, &rows, window)) return false;
+    struct island_anchor verified; char reason[192];
+    return fsi_rows_match_window(&rows, window) &&
+        flysync_island_verify_window(window, ISLAND_ANCHOR_WINDOW, fact->rung_height,
+                                     &verified, reason, sizeof(reason)) &&
+        fsi_anchor_equal(fact, &verified);
+}
+
+static bool fsi_no_orphaned_fact(sqlite3 *db)
+{
+    struct island_anchor fact;
+    struct island_anchor_rows rows;
+    struct block_header *window = zcl_calloc(ISLAND_ANCHOR_WINDOW, sizeof(*window), "island absence check");
+    bool fact_found = false, rows_found = false, window_found = false;
+    bool ok = window && island_anchor_load(db, &fact, &fact_found).ok &&
+        island_anchor_rows_load(db, &rows, &rows_found).ok &&
+        island_anchor_window_load(db, window, &window_found).ok &&
+        !fact_found && !rows_found && !window_found;
+    free(window);
+    return ok;
+}
+
+bool flysync_island_boot_register(const char *datadir)
+{
+    g_boot_window_verified = false;
+    enum island_anchor_state state = island_anchor_state_load(progress_store_db());
+    if (state == ISLAND_ANCHOR_STATE_NONE) return fsi_no_orphaned_fact(progress_store_db());
+    if (state == ISLAND_ANCHOR_STATE_FELL_BACK) return true;
+    if (state == ISLAND_ANCHOR_STATE_UNREADABLE) {
+        LOG_ERROR(FSI_SUBSYS, "island state unreadable; recovery required");
+        return false;
+    }
+    struct island_anchor fact;
+    if (!fsi_boot_proof(datadir, &fact, g_boot_window) || !island_anchor_register(&fact).ok) {
+        LOG_ERROR(FSI_SUBSYS, "island header proof unavailable or invalid; recovery required");
+        return false;
+    }
+    g_boot_window_verified = true;
+    return true;
+}
+
+static bool fsi_rebuild_window_projection(const struct island_anchor *anchor)
+{
+    event_log_t *log = event_log_singleton();
+    block_index_projection_t *projection = block_index_projection_singleton();
+    if (!log || !projection || block_index_projection_catch_up(projection) == UINT64_MAX)
+        return false;
+    struct block_index rows[ISLAND_ANCHOR_WINDOW];
+    struct uint256 hashes[ISLAND_ANCHOR_WINDOW];
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; ++i) block_index_init(&rows[i]);
+    bool ok = true;
+    struct block_index *prev = NULL;
+    for (int i = ISLAND_ANCHOR_WINDOW - 1; ok && i >= 0; --i) {
+        block_header_get_hash(&g_boot_window[i], &hashes[i]);
+        rows[i].phashBlock = &hashes[i];
+        ok = fsi_fill_row(&rows[i], &g_boot_window[i], anchor->rung_height - i,
+                          prev, &anchor->root_work);
+        struct disk_block_index disk;
+        enum bip_lookup_result state = ok ?
+            block_index_projection_lookup_strict(projection, hashes[i].data, &disk) : BIP_LOOKUP_ERROR;
+        if (state == BIP_LOOKUP_PRESENT) {
+            struct block_header recovered;
+            struct uint256 actual;
+            ok = disk.nHeight == anchor->rung_height - i && fsi_disk_to_header(&disk, &recovered);
+            if (ok) { block_header_get_hash(&recovered, &actual); ok = uint256_eq(&actual, &hashes[i]); }
+        } else if (state == BIP_LOOKUP_ABSENT) {
+            ok = fsi_emit_row(&rows[i], &g_boot_window[i]);
+        } else ok = false;
+        prev = &rows[i];
+    }
+    if (ok) ok = fsi_flush_window(g_boot_window, anchor);
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; ++i) block_index_hdrext_free(&rows[i]);
+    return ok;
+}
+
+bool flysync_island_boot_loader_allowed(bool publish_tip)
+{
+    return !publish_tip || !island_anchor_registered();
+}
+
+bool flysync_island_boot_rehydrate(struct main_state *ms)
+{
+    if (!g_boot_window_verified) return !island_anchor_registered();
+    struct island_anchor anchor;
+    return ms && island_anchor_get(&anchor) && fsi_rebuild_window_projection(&anchor);
+}
+
+bool flysync_island_boot_materialize(struct main_state *ms)
+{
+    if (!g_boot_window_verified) return !island_anchor_registered();
+    struct island_anchor anchor;
+    if (!ms || !island_anchor_get(&anchor)) return false;
+    zcl_mutex_lock(&ms->cs_main);
+    struct block_index *top = fsi_insert_window(ms, g_boot_window,
+                                                ISLAND_ANCHOR_WINDOW, &anchor, false);
+    const char *why = NULL;
+    bool ok = top && fsi_work_matches_rung(top, &anchor) &&
+              fsi_reconcile_walk(ms, &anchor, &why);
+    zcl_mutex_unlock(&ms->cs_main);
+    if (!ok) LOG_ERROR(FSI_SUBSYS, "island reconciliation failed: %s", why ? why : "rung work mismatch");
+    return ok;
 }
 
 bool flysync_island_boot_after_index(struct app_context *ctx,
@@ -1109,8 +1306,9 @@ bool flysync_island_boot_after_index(struct app_context *ctx,
         return boot_refuse_at_permanent_gate("flysync_datadir", why, next, 2,
                                              NULL);
     }
-    if (island_anchor_registered())
-        (void)flysync_island_boot_reconcile(ms);
+    if (island_anchor_registered() && !flysync_island_boot_reconcile(ms) &&
+        island_anchor_state_load(progress_store_db()) == ISLAND_ANCHOR_STATE_INSTALLED)
+        return false;
     fsi_boot_detach_fallen_back(ms);
     if (flysync_island_holds_header_sync())
         fsi_boot_count_hold(ms);

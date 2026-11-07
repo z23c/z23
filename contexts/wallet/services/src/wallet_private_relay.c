@@ -16,6 +16,8 @@
 #include "platform/clock.h"
 #include "util/authority_receipt.h"
 #include "platform/file_stream.h"
+#include "platform/directory_transaction.h"
+#include "platform/positioned_file.h"
 #include "primitives/transaction.h"
 #include "util/log_macros.h"
 #include "validation/accept_to_mempool.h"
@@ -230,6 +232,169 @@ static size_t wpr_read_pending(const struct wpr *r, struct uint256 *out,
         line = end + 1;
     }
     return n;
+}
+
+static struct platform_positioned_file_snapshot wpr_pending_file_identity_snapshot(
+    const struct platform_directory_child_info *info)
+{
+    return (struct platform_positioned_file_snapshot) {
+        .size = info->size, .volume = info->volume,
+        .file_low = info->file_low, .file_high = info->file_high,
+        .modified_seconds = info->modified_seconds,
+        .modified_nanoseconds = info->modified_nanoseconds,
+        .changed_seconds = info->changed_seconds,
+        .changed_nanoseconds = info->changed_nanoseconds,
+    };
+}
+
+static bool wpr_pending_same_file(const struct platform_directory_child_info *a,
+                                  const struct platform_directory_child_info *b)
+{
+    struct platform_positioned_file_snapshot left = wpr_pending_file_identity_snapshot(a);
+    struct platform_positioned_file_snapshot right = wpr_pending_file_identity_snapshot(b);
+    return platform_positioned_file_snapshot_equal(&left, &right);
+}
+
+static enum wpr_pending_read_status wpr_pending_read_file(const char *datadir,
+    char *buf, size_t cap, size_t *length)
+{
+    struct platform_directory_transaction dir;
+    platform_directory_transaction_init(&dir);
+    if (!platform_directory_transaction_open(&dir, datadir)) return WPR_PENDING_IO_ERROR;
+    struct platform_directory_child file;
+    platform_directory_child_init(&file);
+    enum platform_directory_result opened = platform_directory_child_open_result(
+        &dir, WPR_PENDING_FILE, false, false, &file, NULL);
+    if (opened != PLATFORM_DIRECTORY_OK) {
+        platform_directory_transaction_close(&dir);
+        return opened == PLATFORM_DIRECTORY_MISSING ? WPR_PENDING_ABSENT : WPR_PENDING_IO_ERROR;
+    }
+    struct platform_directory_child_info before, after;
+    bool ok = platform_directory_child_info(&file, &before) && before.current_user_only;
+    enum wpr_pending_read_status status = WPR_PENDING_IO_ERROR;
+    if (ok && before.size > cap) status = WPR_PENDING_OVERFLOW;
+    else if (ok && platform_directory_child_read_exact(&file, buf, (size_t)before.size, 0) &&
+             platform_directory_child_info(&file, &after) && wpr_pending_same_file(&before, &after)) {
+        *length = (size_t)before.size;
+        status = WPR_PENDING_OK;
+    }
+    platform_directory_child_close(&file);
+    platform_directory_transaction_close(&dir);
+    return status;
+}
+
+static enum wpr_pending_read_status wpr_pending_parse_line(char *line, size_t len,
+    struct wpr_pending_record *out)
+{
+    bool expired = len == 65 && line[0] == 'x';
+    bool handed = len == 65 && line[0] == 'a';
+    const char *id = expired || handed ? line + 1 : line;
+    if ((len != 64 && !expired && !handed) || !wpr_hex_line_valid(id))
+        return WPR_PENDING_MALFORMED;
+    char hex[65]; memcpy(hex, id, 64); hex[64] = '\0';
+    uint256_set_hex(&out->txid, hex);
+    out->expired = expired;
+    out->handed = handed;
+    return WPR_PENDING_OK;
+}
+
+static enum wpr_pending_read_status wpr_pending_parse(char *buf, size_t len,
+    struct wpr_pending_record *out, size_t cap, size_t *count)
+{
+    const size_t header = sizeof(WPR_PENDING_HEADER) - 1;
+    if (len < header || memcmp(buf, WPR_PENDING_HEADER, header) != 0 ||
+        memchr(buf, '\0', len)) return WPR_PENDING_MALFORMED;
+    size_t n = 0, offset = header;
+    while (offset < len) {
+        char *newline = memchr(buf + offset, '\n', len - offset);
+        if (!newline) return WPR_PENDING_MALFORMED;
+        if (n >= cap) return WPR_PENDING_OVERFLOW;
+        size_t line_len = (size_t)(newline - (buf + offset));
+        enum wpr_pending_read_status s = wpr_pending_parse_line(buf + offset, line_len, &out[n]);
+        if (s != WPR_PENDING_OK) return s;
+        for (size_t i = 0; i < n; ++i)
+            if (uint256_eq(&out[i].txid, &out[n].txid)) return WPR_PENDING_MALFORMED;
+        ++n;
+        offset += line_len + 1;
+    }
+    *count = n;
+    return WPR_PENDING_OK;
+}
+
+static enum wpr_pending_read_status wpr_pending_snapshot_locked(struct wpr *r,
+    struct wpr_pending_record *out, size_t cap, size_t *count)
+{
+    char buf[sizeof(WPR_PENDING_HEADER) + WPR_MAX_ENTRIES * 66];
+    size_t len = 0;
+    enum wpr_pending_read_status status =
+        wpr_pending_read_file(r->datadir, buf, sizeof(buf), &len);
+    return status == WPR_PENDING_OK ? wpr_pending_parse(buf, len, out, cap, count) : status;
+}
+
+enum wpr_pending_read_status wpr_pending_snapshot(struct wpr *r,
+    struct wpr_pending_record *out, size_t cap, size_t *count)
+{
+    if (count) *count = 0;
+    if (!r || !count || (!out && cap)) return WPR_PENDING_IO_ERROR;
+    zcl_mutex_lock(&r->lock);
+    enum wpr_pending_read_status status = wpr_pending_snapshot_locked(r, out, cap, count);
+    zcl_mutex_unlock(&r->lock);
+    return status;
+}
+
+static bool wpr_pending_memory_matches(const struct wpr *r,
+    const struct wpr_pending_record *rows, size_t count)
+{
+    if (r->persist_dirty) return false;
+    for (size_t i = 0; i < WPR_MAX_ENTRIES; ++i) {
+        const struct wpr_entry *entry = &r->entries[i];
+        if (!entry->used || entry->state == WPR_SEEN) continue;
+        bool found = false;
+        for (size_t j = 0; j < count; ++j) {
+            if (!uint256_eq(&entry->txid, &rows[j].txid)) continue;
+            bool expired = entry->state == WPR_EXPIRED;
+            found = rows[j].expired == expired && (expired || rows[j].handed == entry->handed);
+            break;
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+static bool wpr_pending_proof_args_valid(struct wpr *r, struct wpr_pending_guard *guard,
+    struct wpr_pending_record *out, size_t cap, size_t *count)
+{
+    return r && guard && !guard->relay && count && (out || !cap);
+}
+
+enum wpr_pending_read_status wpr_pending_proof_begin(struct wpr *r,
+    struct wpr_pending_guard *guard, struct wpr_pending_record *out, size_t cap, size_t *count)
+{
+    if (count) *count = 0;
+    if (!wpr_pending_proof_args_valid(r, guard, out, cap, count)) return WPR_PENDING_IO_ERROR;
+    if (cap > WPR_MAX_ENTRIES) cap = WPR_MAX_ENTRIES;
+    if (!zcl_mutex_trylock(&r->lock)) return WPR_PENDING_BUSY;
+    enum wpr_pending_read_status status = wpr_pending_snapshot_locked(r, out, cap, count);
+    if ((status == WPR_PENDING_OK || status == WPR_PENDING_ABSENT) &&
+        !wpr_pending_memory_matches(r, out, *count)) status = WPR_PENDING_IO_ERROR;
+    if (status == WPR_PENDING_OK || status == WPR_PENDING_ABSENT) {
+        guard->relay = r;
+        guard->count = *count;
+        if (*count) memcpy(guard->records, out, *count * sizeof(*out));
+    } else {
+        *count = 0;
+        zcl_mutex_unlock(&r->lock);
+    }
+    return status;
+}
+
+void wpr_pending_proof_end(struct wpr_pending_guard *guard)
+{
+    if (!guard || !guard->relay) return;
+    struct wpr *r = guard->relay;
+    guard->relay = NULL;
+    guard->count = 0;
+    zcl_mutex_unlock(&r->lock);
 }
 
 /* ── scheduling ─────────────────────────────────────────────────────── */

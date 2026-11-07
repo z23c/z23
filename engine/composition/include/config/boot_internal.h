@@ -39,6 +39,26 @@
 #include <stdbool.h>
 #include <sqlite3.h>
 
+/* True only for the real boot node database during pre-service cutover. */
+bool boot_wallet_cutover_startup_node_db_matches(const struct node_db *ndb);
+bool boot_wallet_cutover_recovery_context_matches(const struct node_db *ndb,
+    const struct wallet_sqlite *ws);
+bool boot_wallet_cutover_startup_context_matches(const struct node_db *ndb,
+    const struct wallet_sqlite *ws, const struct wallet *wallet,
+    const struct main_state *main);
+bool boot_wallet_allows_coin_repair(void);
+struct consensus_state_install_runtime_result;
+struct zcl_result boot_install_startup_bundle(struct node_db *ndb,
+    struct main_state *ms, const char *bundle_path, const char *datadir,
+    struct consensus_state_install_runtime_result *out);
+#ifdef ZCL_TESTING
+bool boot_wallet_cutover_preflight_test(const char *datadir, bool *pending);
+void boot_wallet_read_persisted_test(const char *datadir);
+bool boot_chain_tip_resolved_test(void);
+void boot_wallet_cutover_test_slots(struct node_db **ndb, struct wallet_sqlite **ws,
+                                    struct wallet **wallet, struct main_state **main);
+#endif
+
 /* All boot globals remain static in boot.c to avoid LTO conflicts
  * with pointer aliases in wallet_helpers.c. Functions in boot_index.c
  * and boot_services.c receive what they need via parameters. */
@@ -838,6 +858,8 @@ bool boot_projection_warmup_test_done(void);
  * (coins_view_kv) and the other per-domain projections bind, then again (no-op
  * reuse) from the phase-4 fan-out. Returns true once the log is open. */
 bool boot_ensure_event_log(const char *datadir);
+bool boot_bind_wallet_replay_event_log(void);
+bool boot_legacy_commitment_bootstrap_allowed(void);
 
 /* Idempotent open of the block_index_projection (log-derived source for the
  * event-log boot rebuild). Hoisted so boot.c can open + publish + catch
@@ -980,5 +1002,12 @@ bool boot_wallet_identity_ensure(struct node_db *ndb,
                                  const char *operator_lane);
 
 void boot_wallet_credential_register_or_die(void);
+
+#ifdef ZCL_TESTING
+/* Exercise the same checked pending runtime-store opener as startup. */
+bool boot_pending_mode_supported_test(const struct app_context *ctx);
+bool boot_test_pending_runtime_stores_open(const char *datadir, struct node_db *ndb,
+    struct coins_view_sqlite *coins, struct block_tree_db *tree);
+#endif
 
 #endif

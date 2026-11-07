@@ -44,10 +44,13 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Event-log publication is needed during replay, but recognizing old coins as
- * self-derived must wait until the pending replay has finished its epilogue. */
+static bool g_wallet_replay_log_lifetime;
+
+/* Event-log publication is needed during replay. A pending-origin log never
+ * performs legacy coins recognition during that log lifetime. */
 static void boot_rebuild_coins_without_pending_replay(void)
 {
+    if (g_wallet_replay_log_lifetime || !boot_wallet_allows_coin_repair()) return;
     sqlite3 *db = progress_store_db();
     if (!db) return;
     struct shielded_replay_session session;
@@ -69,6 +72,14 @@ static wallet_projection_t       *g_phase4_wallet_projection = NULL;
 static contacts_projection_t     *g_phase4_contacts_projection = NULL;
 static onion_ann_projection_t    *g_phase4_onion_ann_projection = NULL;
 static hodl_history_projection_t *g_phase4_hodl_history_projection = NULL;
+
+bool boot_bind_wallet_replay_event_log(void)
+{
+    event_log_t *log = event_log_singleton();
+    wallet_projection_set_event_log(log);
+    if (log) g_wallet_replay_log_lifetime = true;
+    return log != NULL;
+}
 
 /* Idempotent open of the append-only event_log. boot.c must publish this
  * handle (event_log_set_singleton non-NULL) before it builds the coins_tip
@@ -656,6 +667,7 @@ void boot_stop_projection_storage(void)
         event_log_close(g_phase4_event_log);
         g_phase4_event_log = NULL;
     }
+    g_wallet_replay_log_lifetime = false;
     t = shutdown_submark("stop.event_log_close", t);
     /* Close the Wave A2 projection handle to progress.kv (no-op if unopened).
      * progress_store's own close still owns the WAL checkpoint of the file.

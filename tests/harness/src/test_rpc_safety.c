@@ -694,6 +694,9 @@ static int t_listunspent_frees_filtered_rows(void)
     struct wallet *wallet = zcl_calloc(1, sizeof(*wallet), "rpc-safety-wallet");
     if (!wallet) { printf("FAIL (wallet allocation)\n"); return 1; }
     wallet_init(wallet);
+    if (!wallet_readiness_initialize(wallet, WALLET_READINESS_READY, false, 0)) {
+        wallet_free(wallet); free(wallet); return 1;
+    }
     struct main_state ms;
     build_unresolved_tip_state(&ms, 10);
     char datadir[PATH_MAX];
@@ -2088,6 +2091,9 @@ static int rs_case_chainstate_guard(bool *aborted)
 
 /* Shared state for the "raw-sign P2SH 2-of-2" phases. */
 struct rs_p2sh_fx {
+    char dir[PATH_MAX];
+    bool dir_created;
+    struct wallet *wallet;
     struct basic_keystore *ks;
     struct rpc_table *tbl;
     struct privkey keys[2];
@@ -2102,9 +2108,12 @@ struct rs_p2sh_fx {
 
 static void rs_p2sh_keys(struct rs_p2sh_fx *fx)
 {
-    keystore_init(fx->ks);
+    wallet_init(fx->wallet);
+    fx->ok = fx->ok && wallet_readiness_initialize(fx->wallet, WALLET_READINESS_READY, true, 1);
+    fx->ks = &fx->wallet->keystore;
+    wallet_rpc_context_set_base(fx->wallet, NULL, fx->dir, NULL, NULL, NULL);
     rpc_table_init(fx->tbl);
-    rpc_rawtx_set_state(NULL, NULL, NULL, "/tmp");
+    rpc_rawtx_set_state(NULL, NULL, NULL, fx->dir);
     rpc_rawtx_set_keystore(fx->ks);
     register_rawtransaction_rpc_commands(fx->tbl);
 
@@ -2204,21 +2213,28 @@ static int rs_case_p2sh_2of2(void)
     struct rs_p2sh_fx fx = {0};
 
     printf("rpc_safety: raw-sign P2SH 2-of-2 emits both signatures... ");
-    fx.ks = calloc(1, sizeof(*fx.ks));
+    fx.wallet = calloc(1, sizeof(*fx.wallet));
     fx.tbl = calloc(1, sizeof(*fx.tbl));
-    fx.ok = fx.ks && fx.tbl;
+    fx.ok = fx.wallet && fx.tbl;
+    if (fx.ok) {
+        fx.dir_created = test_mkdtemp(fx.dir, sizeof(fx.dir), "rpc_safety_p2sh") != NULL;
+        fx.ok = fx.dir_created;
+    }
     if (fx.ok) {
         rs_p2sh_keys(&fx);
         rs_p2sh_build_tx(&fx);
         rs_p2sh_sign(&fx);
         rs_p2sh_check_script_sig(&fx);
         rpc_rawtx_set_keystore(NULL);
-        keystore_free(fx.ks);
+        rpc_rawtx_set_state(NULL, NULL, NULL, NULL);
+        wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
+        wallet_free(fx.wallet);
     }
     for (size_t i = 0; i < 2; i++)
         memory_cleanse(fx.keys[i].vch, sizeof(fx.keys[i].vch));
-    free(fx.ks);
+    free(fx.wallet);
     free(fx.tbl);
+    if (fx.dir_created && test_rm_rf_recursive(fx.dir) != 0) fx.ok = false;
     if (fx.ok) printf("OK\n");
     else    { printf("FAIL\n"); failures++; }
     return failures;

@@ -36,6 +36,11 @@
 #include "util/safe_alloc.h"
 #include "crypto/sha3.h"
 #include "platform/file_metadata.h"
+#if !defined(_WIN32)
+#include "platform/fd_path.h"
+#include <fcntl.h>
+#include <sys/stat.h>
+#endif
 #include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
@@ -880,6 +885,111 @@ bool block_index_projection_get(block_index_projection_t *p,
     }
     pthread_mutex_unlock(&p->mu);
     return found;
+}
+
+static bool bip_strict_column(sqlite3_stmt *s, const uint8_t hash[32],
+                              struct disk_block_index *out)
+{
+    const uint8_t *blob = sqlite3_column_blob(s, 0);
+    int len = sqlite3_column_bytes(s, 0);
+    struct ev_block_header header;
+    const uint8_t *solution = NULL;
+    return blob && len > 0 && ev_block_header_parse(blob, (size_t)len, &header, &solution) &&
+        (size_t)len == ev_block_header_wire_size(header.nSolutionSize) &&
+        header.reserved[0] == 0 && header.reserved[1] == 0 &&
+        memcmp(header.hash, hash, 32) == 0 && blob_to_disk_block_index(blob, (size_t)len, out);
+}
+
+enum bip_lookup_result block_index_projection_lookup_strict(block_index_projection_t *p,
+    const uint8_t hash[32], struct disk_block_index *out)
+{
+    if (!p || !p->db || !hash || !out) return BIP_LOOKUP_ERROR;
+    pthread_mutex_lock(&p->mu);
+    sqlite3_stmt *s = NULL;
+    enum bip_lookup_result result = BIP_LOOKUP_ERROR;
+    if (sqlite3_prepare_v2(p->db, "SELECT blob FROM block_index WHERE hash = ?", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 1, hash, 32, SQLITE_TRANSIENT) == SQLITE_OK) {
+        int rc = sqlite3_step(s); // raw-sql-ok:kernel-primitive
+        if (rc == SQLITE_DONE) result = BIP_LOOKUP_ABSENT;
+        else if (rc == SQLITE_ROW) {
+            bool ok = bip_strict_column(s, hash, out) &&
+                sqlite3_step(s) == SQLITE_DONE; // raw-sql-ok:kernel-primitive
+            if (ok) result = BIP_LOOKUP_PRESENT;
+        }
+    }
+    if (s && sqlite3_finalize(s) != SQLITE_OK) result = BIP_LOOKUP_ERROR;
+    pthread_mutex_unlock(&p->mu);
+    return result;
+}
+
+bool block_index_projection_get_strict(block_index_projection_t *p,
+    const uint8_t hash[32], struct disk_block_index *out)
+{
+    return block_index_projection_lookup_strict(p, hash, out) == BIP_LOOKUP_PRESENT;
+}
+
+#if !defined(_WIN32)
+static int bip_existing_leaf(int dirfd, const char *name, struct stat *out)
+{
+    if (fstatat(dirfd, name, out, AT_SYMLINK_NOFOLLOW) == 0)
+        return S_ISREG(out->st_mode) && out->st_nlink == 1 ? 1 : -1;
+    return errno == ENOENT ? 0 : -1;
+}
+
+static bool bip_existing_layout(int dirfd, struct stat *main_file, int *wal_present)
+{
+    struct stat wal, shm, journal;
+    if (bip_existing_leaf(dirfd, "block_index_projection.db", main_file) != 1) return false;
+    int w = bip_existing_leaf(dirfd, "block_index_projection.db-wal", &wal);
+    int s = bip_existing_leaf(dirfd, "block_index_projection.db-shm", &shm);
+    if (w < 0 || s < 0 || bip_existing_leaf(dirfd, "block_index_projection.db-journal", &journal) != 0 ||
+        (w == 1 && s != 1)) return false;
+    *wal_present = w;
+    return true;
+}
+
+static sqlite3 *bip_existing_reader(int dirfd)
+{
+    struct stat main_file, after;
+    int w;
+    if (!bip_existing_layout(dirfd, &main_file, &w)) return NULL;
+    char path[4096], uri[4128];
+    if (!platform_dirfd_child_path(path, sizeof(path), dirfd, "block_index_projection.db")) return NULL;
+    int n = snprintf(uri, sizeof(uri), "file:%s%s", path, w == 0 ? "?immutable=1" : "");
+    if (n <= 0 || (size_t)n >= sizeof(uri)) return NULL;
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_URI, NULL);
+    int moved = 1;
+    bool ok = rc == SQLITE_OK && db &&
+        sqlite3_file_control(db, "main", SQLITE_FCNTL_HAS_MOVED, &moved) == SQLITE_OK && !moved &&
+        bip_existing_leaf(dirfd, "block_index_projection.db", &after) == 1 &&
+        main_file.st_dev == after.st_dev && main_file.st_ino == after.st_ino;
+    if (!ok) { if (db) sqlite3_close(db); return NULL; }
+    return db;
+}
+#endif
+
+bool block_index_projection_read_window_existing(int dirfd,
+    const uint8_t (*hashes)[32], size_t count, struct disk_block_index *out)
+{
+#if defined(_WIN32)
+    (void)dirfd; (void)hashes; (void)count; (void)out;
+    return false;
+#else
+    if (dirfd < 0 || !hashes || !out || count == 0 || count > 28) return false;
+    sqlite3 *db = bip_existing_reader(dirfd);
+    if (!db) return false;
+    struct block_index_projection p = {0}; p.db = db;
+    if (pthread_mutex_init(&p.mu, NULL) != 0) { sqlite3_close(db); return false; }
+    bool begun = sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK;
+    bool ok = begun;
+    for (size_t i = 0; ok && i < count; ++i)
+        ok = block_index_projection_get_strict(&p, hashes[i], &out[i]);
+    if (begun && sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) ok = false;
+    pthread_mutex_destroy(&p.mu);
+    if (sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+#endif
 }
 
 bool block_index_projection_get_by_height(block_index_projection_t *p,

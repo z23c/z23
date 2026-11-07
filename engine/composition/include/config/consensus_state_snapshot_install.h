@@ -294,6 +294,11 @@ struct consensus_state_activate_request {
      * inside the same progress-store transaction that performs the cutover. */
     const struct consensus_state_publication_decision_record
         *publication_decision;
+    /* Guarded wallet cutover binds the old coins generation, including
+     * the distinction between no row and an explicit generation zero. */
+    bool check_old_generation;
+    bool old_generation_present;
+    uint64_t old_generation;
     /* Retained directory capability classified by the boot adapter. It must
      * be the capability through which the singleton progress store was
      * opened; the rollback generation is created and fsynced relative to it.

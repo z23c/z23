@@ -26,7 +26,6 @@
 
 #include "controllers/wallet_native_handlers.h"
 
-#include "controllers/agent_controller.h"
 #include "controllers/rpc_params.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -60,20 +59,6 @@ static void wrn_plan_token(char out[17], const char *a, const char *b)
         h *= 1099511628211ULL;
     }
     (void)snprintf(out, 17, "%016llx", (unsigned long long)h);
-}
-
-/* The datadir a restore targets when the caller names none: the runtime's
- * own context datadir, else the stock $HOME/.zclassic-c23. Always echoed
- * back in the plan so the operator confirms the path before the commit. */
-static void wrn_default_datadir(char *out, size_t cap)
-{
-    const char *ctx = agent_runtime_context_datadir();
-    if (ctx && ctx[0]) {
-        snprintf(out, cap, "%s", ctx);
-        return;
-    }
-    const char *home = getenv("HOME");
-    snprintf(out, cap, "%s/.zclassic-c23", home && home[0] ? home : ".");
 }
 
 /* One per-table row of the restore report. */
@@ -153,7 +138,7 @@ void zcl_native_handle_wallet_restore(
     if (dd && dd[0])
         snprintf(datadir, sizeof(datadir), "%s", dd);
     else
-        wrn_default_datadir(datadir, sizeof(datadir));
+        wnh_default_datadir(datadir, sizeof(datadir));
 
     const char *password = json_get_str(json_get(request->input, "password"));
     bool confirm = json_get_bool_or(request->input, "confirm", false);

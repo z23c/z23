@@ -18,10 +18,12 @@
 #include "services/consensus_state_publication_cas.h"
 #include "services/nullifier_backfill_service.h"
 #include "storage/anchor_kv.h"
+#include "base/serialize_le.h"
 #include "storage/coins_kv.h"
 #include "storage/consensus_state_bundle_codec.h"
 #include "storage/nullifier_kv.h"
 #include "storage/shielded_pool_kv.h"
+#include "storage/coins_kv_read_snapshot.h"
 #include "storage/progress_store.h"      /* progress_store_tx_lock/unlock,
                                           * progress_meta_set/delete_in_tx */
 #include "platform/fd_path.h"
@@ -543,6 +545,60 @@ static bool activate_stamp_tier_markers(
 /* The single atomic install transaction. Assumes the progress-store tx lock is
  * held and BEGIN IMMEDIATE is open on progress_db. Returns false (with the
  * caller rolling back) on any failure. Never partially applies. */
+static bool activate_pool_install(sqlite3 *db,
+                                  const struct consensus_state_bundle_manifest *m,
+                                  struct consensus_state_activate_result *result)
+{
+    if (m->format_version == CONSENSUS_STATE_BUNDLE_V1)
+        return true;
+    if (m->format_version != CONSENSUS_STATE_BUNDLE_V2 ||
+        m->sprout_pool_total < 0 || m->sapling_pool_total < 0 ||
+        !shielded_pool_kv_put(db, m->height, m->sprout_pool_total,
+                              m->sapling_pool_total))
+        return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
+                             "installing authenticated shielded pool totals failed");
+    return true;
+}
+
+static bool activate_pool_shape(sqlite3 *db, const struct consensus_state_bundle_manifest *m)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT count(*),max(height) FROM shielded_pool_totals",
+                           -1, &st, NULL) != SQLITE_OK)
+        return false;
+    int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
+    bool ok = rc == SQLITE_ROW && sqlite3_column_type(st, 0) == SQLITE_INTEGER;
+    if (ok && m->format_version == CONSENSUS_STATE_BUNDLE_V1)
+        ok = sqlite3_column_int64(st, 0) == 0 && sqlite3_column_type(st, 1) == SQLITE_NULL;
+    else if (ok && m->format_version == CONSENSUS_STATE_BUNDLE_V2)
+        ok = sqlite3_column_int64(st, 0) == 1 && sqlite3_column_type(st, 1) == SQLITE_INTEGER &&
+             sqlite3_column_int64(st, 1) == m->height;
+    else
+        ok = false;
+    if (ok)
+        ok = sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
+    int final_rc = sqlite3_finalize(st);
+    return ok && final_rc == SQLITE_OK;
+}
+
+static bool activate_verify_pools(sqlite3 *db,
+                                 const struct consensus_state_bundle_manifest *m,
+                                 struct consensus_state_activate_result *result)
+{
+    bool ok = activate_pool_shape(db, m);
+    if (ok && m->format_version == CONSENSUS_STATE_BUNDLE_V2) {
+        int64_t sprout = 0, sapling = 0;
+        bool found = false;
+        ok = coins_kv_read_transaction_shielded_pool(db, m->height,
+                &sprout, &sapling, &found) && found &&
+             sprout == m->sprout_pool_total && sapling == m->sapling_pool_total;
+    }
+    if (!ok)
+        return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
+                             "installed shielded pool totals do not match admitted state");
+    return true;
+}
+
 static bool activate_apply_in_tx(
     sqlite3 *progress_db, sqlite3 *bundle_db,
     const struct consensus_state_bundle_manifest *m,
@@ -552,6 +608,8 @@ static bool activate_apply_in_tx(
     if (!activate_clear_derived_state(progress_db, result))
         return false; // raw-return-ok:logged-by-activate_fail
     if (!activate_reset_recovery_state(progress_db, bundle_db, m, result))
+        return false; // raw-return-ok:logged-by-activate_fail
+    if (!activate_pool_install(progress_db, m, result))
         return false; // raw-return-ok:logged-by-activate_fail
 
     struct activate_stream_counts counts = {0, 0, 0, 0};
@@ -924,11 +982,24 @@ static bool activate_cutover_reserve(
     return true;
 }
 
+static bool activate_generation_matches(sqlite3 *db, const struct consensus_state_activate_request *request)
+{
+    uint8_t raw[8]; size_t len = 0; bool present = false;
+    return progress_meta_get_blob_exact(db, COINS_KV_AUTHORITY_GENERATION_KEY,
+        raw, sizeof(raw), &len, &present) && (!present || len == sizeof(raw)) &&
+        present == request->old_generation_present &&
+        (present ? zcl_read_u64_le(raw) == request->old_generation : request->old_generation == 0);
+}
+
 static bool activate_cutover_guard(
     sqlite3 *progress_db,
+    const struct consensus_state_activate_request *request,
     const struct consensus_state_publication_decision_record *admitted_decision,
     struct consensus_state_activate_result *result)
 {
+    if (request->check_old_generation && !activate_generation_matches(progress_db, request))
+        return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
+                             "wallet cutover old generation changed");
     /* Check the durable ADMIT's compare-and-swap frontier while the same
      * BEGIN IMMEDIATE + process lock that spans the cutover is held. */
     int32_t current_frontier = -1;
@@ -986,6 +1057,8 @@ static bool activate_cutover_body(
         return activate_fail(result, CONSENSUS_INSTALL_INJECTED_FAILURE,
                            "injected post-seed cutover failure");
     if (!activate_verify_terminal_in_tx(progress_db, leased_manifest, result))
+        return false; // raw-return-ok:logged-by-activate_fail
+    if (!activate_verify_pools(progress_db, leased_manifest, result))
         return false; // raw-return-ok:logged-by-activate_fail
     if (!consensus_state_artifact_evidence_revalidate(evidence))
         return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
@@ -1064,7 +1137,7 @@ static bool activate_cutover_locked(
 {
     bool outcome_unknown = false;
     bool ok = activate_cutover_reserve(progress_db, request, result) &&
-              activate_cutover_guard(progress_db, admitted_decision, result) &&
+              activate_cutover_guard(progress_db, request, admitted_decision, result) &&
               activate_cutover_body(progress_db, bundle_db, leased_manifest,
                                     install_kind, evidence, result);
     if (ok)

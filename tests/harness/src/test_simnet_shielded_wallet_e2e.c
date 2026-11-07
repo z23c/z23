@@ -685,6 +685,17 @@ static void part_b_str_param(struct json_value *arr, const char *s)
     json_push_back(arr, &a); json_free(&a);
 }
 
+static bool part_b_unready_balance(struct rpc_table *tbl, const char *zaddr)
+{
+    struct json_value params;
+    json_init(&params);
+    part_b_str_param(&params, zaddr);
+    char message[128] = {0};
+    bool ok = we_rpc_str(tbl, "z_getbalance", &params, message, sizeof(message));
+    json_free(&params);
+    return !ok && strcmp(message, "Wallet balance unavailable during cutover") == 0;
+}
+
 /* Part B receive views: z_getbalance, z_gettotalbalance and z_listunspent. */
 static int part_b_receive_views(struct rpc_table *tbl, const char *zaddr)
 {
@@ -884,6 +895,7 @@ static int part_b_wallet_rpc(void)
     struct rpc_table tbl;          memset(&tbl, 0, sizeof(tbl));
     struct wallet *wallet = zcl_calloc(1, sizeof(*wallet), "we_wallet");
     bool wsql_open = false;
+    struct wallet_rpc_context saved_wallet_context = g_wallet_ctx;
 
     if (!wallet) { printf("  Part B: FAIL (wallet alloc)\n"); return 1; }
     wallet_init(wallet);
@@ -964,6 +976,10 @@ static int part_b_wallet_rpc(void)
         WE_CHECK("Part B: decode new z-address", false);
     }
 
+    WE_CHECK("Part B: unknown readiness refuses balance", part_b_unready_balance(&tbl, zaddr));
+    WE_CHECK("Part B: initialize pending readiness", wallet_readiness_initialize(wallet, WALLET_READINESS_PENDING, false, 0));
+    WE_CHECK("Part B: pending readiness refuses balance", part_b_unready_balance(&tbl, zaddr));
+    WE_CHECK("Part B: synthetic wallet scan is ready", wallet_readiness_complete(wallet, false, 0));
     failures += part_b_receive_views(&tbl, zaddr);
     failures += part_b_memo_check(&tbl, note_saved);
     failures += part_b_keyless_tz(&ndb, &tbl, zaddr, TIP_H);
@@ -972,9 +988,7 @@ static int part_b_wallet_rpc(void)
     if (note_saved)
         failures += part_b_spend_checks(&ndb, &tbl, zaddr, nnf);
 
-    rpc_wallet_set_node_db(NULL);
-    rpc_wallet_set_coins_tip(NULL);
-    rpc_wallet_set_state(NULL, NULL, NULL, NULL, NULL, NULL);
+    g_wallet_ctx = saved_wallet_context;
     coins_view_cache_free(&ctip);
     tx_mempool_free(&mempool);
     if (wsql_open) wallet_sqlite_close(&wsql);

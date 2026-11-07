@@ -36,7 +36,7 @@ struct zapp_runtime {
     /* A wallet setup command is running: the node is not started until it ends. */
     atomic_bool setup_running;
     atomic_bool start_cancel;
-    bool start_pending, start_executing, start_preload_allowed;
+    bool start_pending, start_executing, start_preload_allowed, start_resume_wanted;
     uint64_t start_epoch, reserved_epoch;
     unsigned preload_ms; /* 0 means 2000 ms */
     char preload_reply[8192];
@@ -64,6 +64,8 @@ bool zapp_node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out
 bool zapp_node_start_reserved(struct zapp_runtime *r, uint64_t ticket, char *out, size_t cap);
 void zapp_node_start_discard(struct zapp_runtime *r, uint64_t ticket);
 bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap);
+bool zapp_node_resume_if_wanted(struct zapp_runtime *r, char *out, size_t cap);
+bool zapp_node_resume_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap);
 bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap);
 /* Asks the node to exit exactly as zapp_node_stop does but leaves the marker that starts it when the app opens, so a stop made by
  * wallet setup never changes the owner's choice. */

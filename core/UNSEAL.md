@@ -1203,3 +1203,10 @@ later lane flips it HARD.
 - 2026-11-06T21:27:28Z — REASON: Same header-hash hardening: build the fixed-buffer stream with a designated initializer so -O2 -Werror standalone-tool builds see no read of the uninitialised stack buffer. No predicate change
   old ROOT: b67efffa980f27af3cc523848ade5dd8e0740a1bc309113f3baf3c337bbb8ec5
   by: owner unseal ritual (make core-unseal)
+- 2026-11-07T00:15:48Z — REASON: Owner approval 2026-11-06T23:45:12Z: version authenticated fast-sync checkpoints and bind shielded pool totals; preserve v1 commitments and consensus predicates
+  old ROOT: 9bded4c431f43bb20b95f43dbd3e0cbc0ce9ea1af4f0c6750d1e8aa9f2ea1ee0
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-07T00:35:28Z — REASON: Integrate approved versioned fast-sync pool commitments with reviewed upstream allocation-error handling; preserve both histories and consensus predicates
+  old ROOT: e636bb59fb98b0d0d47004afe7ce68ba7a3534e4aef52126c6664eadd107633b
+  by: owner unseal ritual (make core-unseal)

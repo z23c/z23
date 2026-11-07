@@ -151,6 +151,7 @@ void checkpoints_reset_sha3_override_for_test(void)
  * reproduced every value below byte-identically (tools/rom_two_builder_compare
  * run over both producer bundles; rom_state_root identical from both). */
 static const struct rom_state_checkpoint g_rom_state_checkpoint = {
+    .format_version = ROM_STATE_CHECKPOINT_V1,
     .height = 3056758,
     .block_hash = {
         /* 53d65b8507246622095109064837b6c14502050d14dc6cdaa9fb909097020000 */
@@ -259,6 +260,7 @@ void checkpoints_reset_rom_state_override_for_test(void)
 static const struct rom_state_rung g_rom_state_rungs[] = {
     {
         .cp = {
+            .format_version = ROM_STATE_CHECKPOINT_V1,
             .height = 3200000,
             .block_hash = {
                 /* 00000170f44ce8b3db63c39087d3ee681124fb8adc002dc1a55f7bd441004afd */

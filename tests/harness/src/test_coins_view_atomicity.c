@@ -560,6 +560,55 @@ static int t_shared_rewind_helper_direct(void)
     return failures;
 }
 
+static uint8_t cva_blob[UTXO_COMMITMENT_SERIALIZED_SIZE];
+static int cva_destroyed;
+
+static void cva_poison_blob(void *blob)
+{
+    memset(blob, 0, sizeof(cva_blob));
+    cva_destroyed++;
+}
+
+static void cva_blob_function(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+{
+    (void)argc; (void)argv;
+    memset(cva_blob, 0xa5, 32);
+    memset(cva_blob + 32, 0, 8);
+    cva_blob[32] = 7;
+    sqlite3_result_blob(ctx, cva_blob, sizeof(cva_blob), cva_poison_blob);
+}
+
+static bool cva_read_lifetime(void)
+{
+    sqlite3 *db = NULL;
+    struct coins_view_sqlite cvs = {0};
+    struct utxo_commitment expected = {0}, got;
+    memset(expected.accumulator, 0xa5, sizeof(expected.accumulator));
+    expected.count = 7;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return false;
+    cvs.db = db;
+    bool initialized = pthread_mutex_init(&cvs.mutex, NULL) == 0;
+    bool ok = initialized;
+    if (ok) ok = sqlite3_create_function(db, "cva_blob", 0, SQLITE_UTF8, NULL,
+                                         cva_blob_function, NULL, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_prepare_v2(db, "SELECT cva_blob()", -1, &cvs.stmt_commit_get, NULL) == SQLITE_OK;
+    cva_destroyed = 0;
+    if (ok) ok = coins_view_sqlite_read_commitment(&cvs, &got) && cva_destroyed == 1 &&
+                 utxo_commitment_equal(&expected, &got);
+    if (cvs.stmt_commit_get) sqlite3_finalize(cvs.stmt_commit_get);
+    if (initialized) pthread_mutex_destroy(&cvs.mutex);
+    sqlite3_close(db);
+    return ok;
+}
+
+static int t_commitment_blob_lifetime(void)
+{
+    bool ok = cva_read_lifetime();
+    printf("cva: commitment read occurs before SQLite blob destruction: %s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+
 int test_coins_view_atomicity(void);
 
 int test_coins_view_atomicity(void)
@@ -567,6 +616,7 @@ int test_coins_view_atomicity(void)
     printf("\n=== coins_view_atomicity tests ===\n");
     int failures = 0;
     mkdir_p("./test-tmp");
+    failures += t_commitment_blob_lifetime();
     failures += t_fresh_db_opens();
     failures += t_utxos_without_tip_rejected();
     failures += t_matching_tip_accepted();

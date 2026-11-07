@@ -33,6 +33,12 @@ struct zcl_result node_db_catchup_block_mapping_open_quiet(
 void node_db_catchup_block_mapping_close(
     struct node_db_catchup_block_mapping *block_mapping);
 
+struct block;
+struct uint256;
+/* Caller initializes and frees block, including on refusal. */
+struct zcl_result node_db_catchup_read_authenticated_block(const char *datadir, int file,
+    unsigned int offset, const struct uint256 *expected_hash, struct block *block);
+
 /* Sparse-prefix projection-cursor classifier. Defined in
  * node_db_catchup_sparse.c; see its doc comment for the contract. */
 int node_db_catchup_sparse_prefix_target(int indexed,
@@ -50,6 +56,17 @@ int node_db_catchup_sparse_prefix_target(int indexed,
 struct node_db;
 struct transaction;
 struct wallet;
+struct sapling_key_entry;
+struct sapling_replay_delivery;
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+void node_db_sapling_replay_test_crash_before_delivery(void);
+#endif
+
+/* Caller owns the serialized node.db transaction and supplies a validated
+ * public-key snapshot; this path preserves existing note state. */
+bool node_db_catchup_replay_sapling_decrypt(struct node_db *ndb,
+    struct transaction *tx, const struct sapling_key_entry *keys, size_t key_count,
+    int height, int *found_out, struct sapling_replay_delivery *delivery);
 
 /* Try-decrypt Sapling outputs in a transaction and save to SQLite
  * (returns notes found). Defined in node_db_catchup_decrypt.c. */

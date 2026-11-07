@@ -282,6 +282,8 @@ void boot_wallet_tx_accepted(const struct transaction *tx, void *ctx)
     if (!svc || !tx || !svc->wallet)
         return;
 
+    if (wallet_readiness_get(svc->wallet).state != WALLET_READINESS_READY)
+        return;
     wpr_note_seen(wpr_global(), &tx->hash);
     wallet_sync_transaction(svc->wallet, tx, NULL);
     if (svc->node_db)

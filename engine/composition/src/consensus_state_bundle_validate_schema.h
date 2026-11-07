@@ -9,10 +9,12 @@
 #define ZCL_CONSENSUS_STATE_BUNDLE_VALIDATE_SCHEMA_H
 
 #include "config/consensus_state_bundle_validate.h"
+#include <stdint.h>
 
 struct sqlite3;
 
 bool consensus_state_bundle_validate_canonical_schema(
-    struct sqlite3 *db, struct consensus_state_install_result *result);
+    struct sqlite3 *db, struct consensus_state_install_result *result,
+    uint8_t *version);
 
 #endif /* ZCL_CONSENSUS_STATE_BUNDLE_VALIDATE_SCHEMA_H */

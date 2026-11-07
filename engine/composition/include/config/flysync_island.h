@@ -89,12 +89,16 @@ struct app_context;
 
 /* Boot, right after the progress store opens and before the block index loads:
  * register a durable island-anchor fact (the loader's work pass reads it). */
-void flysync_island_boot_register(void);
+bool flysync_island_boot_register(const char *datadir);
 
 /* Boot, right after the block index loads: install the header-sync hold, run
  * the boot gate (false = refuse the boot with an explanatory FATAL block),
  * reconcile a registered island, and stop advertising NODE_NETWORK on an
  * island. A node without -flysync and without the fact is unchanged. */
+bool flysync_island_boot_rehydrate(struct main_state *ms);
+bool flysync_island_boot_loader_allowed(bool publish_tip);
+bool flysync_island_boot_materialize(struct main_state *ms);
+
 bool flysync_island_boot_after_index(struct app_context *ctx,
                                      struct main_state *ms);
 

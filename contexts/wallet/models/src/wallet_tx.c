@@ -20,19 +20,26 @@
 
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
+#include "util/ar_step_readonly.h"
 #include "encoding/utilstrencodings.h"
 #include "models/wallet_tx.h"
+#include "models/ar_after_commit.h"
 #include "models/wallet_tx_internal.h"
 #include "models/block.h"
 #include "models/wallet_key.h"
 #include "wallet/sapling_keys.h"
+#include "wallet/wallet.h"
+#include "wallet/wallet_sqlite.h"
+#include "script/standard.h"
 #include "chain/chainparams.h"
 #include "event/event.h"
 #include "storage/wallet_projection.h"
+#include "storage/event_log.h"
 #include "util/safe_alloc.h"
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <limits.h>
 
 static const uint8_t ZERO_HASH[32] = {0};
 
@@ -297,6 +304,28 @@ bool db_wallet_tx_save(struct node_db *ndb, const struct db_wallet_tx *t)
         AR_BIND_INT(s, 7, t->fee));
 }
 
+enum db_wallet_tx_presence db_wallet_tx_presence_checked(struct node_db *ndb,
+                                                       const uint8_t txid[32])
+{
+    if (!ndb || !ndb->open || !ndb->db || !txid) return DB_WALLET_TX_ERROR;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db, "SELECT 1 FROM wallet_transactions WHERE txid=?", -1, &s, NULL) != SQLITE_OK) {
+        LOG_WARN("wallet_tx", "transaction presence prepare failed: %s", sqlite3_errmsg(ndb->db));
+        return DB_WALLET_TX_ERROR;
+    }
+    enum db_wallet_tx_presence result = DB_WALLET_TX_ERROR;
+    if (sqlite3_bind_blob(s, 1, txid, 32, SQLITE_STATIC) == SQLITE_OK) {
+        int rc = AR_STEP_ROW_READONLY(s);
+        if (rc == SQLITE_DONE) result = DB_WALLET_TX_ABSENT;
+        else if (rc == SQLITE_ROW && AR_STEP_ROW_READONLY(s) == SQLITE_DONE)
+            result = DB_WALLET_TX_PRESENT;
+    }
+    if (sqlite3_finalize(s) != SQLITE_OK) result = DB_WALLET_TX_ERROR;
+    if (result == DB_WALLET_TX_ERROR)
+        LOG_WARN("wallet_tx", "transaction presence query failed: %s", sqlite3_errmsg(ndb->db));
+    return result;
+}
+
 bool db_wallet_tx_find(struct node_db *ndb, const uint8_t txid[32],
                        struct db_wallet_tx *out)
 {
@@ -424,6 +453,464 @@ bool db_wallet_tx_update_block_height(struct node_db *ndb,
 }
 
 /* ── WalletUTXO CRUD ─────────────────────────────────────────── */
+
+static bool db_utxo_cutover_event_room(struct db_wallet_utxo_cutover_delivery *d)
+{
+    if (!d || d->committed || ar_after_commit_depth() <= 0) return false;
+    if (d->count < d->capacity) return true;
+    size_t next = d->capacity ? d->capacity * 2 : 16;
+    if (next < d->capacity || next > SIZE_MAX / sizeof(*d->events)) return false;
+    void *p = zcl_realloc(d->events, next * sizeof(*d->events), "cutover utxo events");
+    if (!p) return false;
+    d->events = p; d->capacity = next;
+    return true;
+}
+
+static void db_utxo_cutover_committed(void *record, void *ctx)
+{
+    (void)record;
+    struct db_wallet_utxo_cutover_delivery *delivery = ctx;
+    delivery->committed = true;
+}
+
+static bool db_utxo_cutover_arm(struct db_wallet_utxo_cutover_delivery *delivery)
+{
+    if (delivery->armed) return true;
+    uint8_t token = 1;
+    if (!ar_after_commit_enqueue(db_utxo_cutover_committed, delivery, &token, sizeof(token))) return false;
+    delivery->armed = true;
+    return true;
+}
+
+static void db_utxo_cutover_event_add(struct db_wallet_utxo_cutover_delivery *d,
+                                      const struct db_wallet_utxo *u)
+{
+    struct db_wallet_utxo_cutover_event *e = &d->events[d->count++];
+    memcpy(e->txid, u->txid, 32); memcpy(e->address_hash, u->address_hash, 20);
+    e->vout = u->vout; e->value = u->value; e->height = u->height; e->is_coinbase = u->is_coinbase;
+}
+
+static bool db_utxo_cutover_bind_output(sqlite3_stmt *s, const struct db_wallet_utxo *u)
+{
+    return sqlite3_bind_blob(s, 1, u->txid, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int64(s, 2, u->vout) == SQLITE_OK && sqlite3_bind_int64(s, 3, u->value) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 4, u->address_hash, 20, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 5, u->script, (int)u->script_len, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int(s, 6, u->height) == SQLITE_OK && sqlite3_bind_int(s, 7, u->is_coinbase) == SQLITE_OK;
+}
+
+static bool db_utxo_cutover_bind_spend(sqlite3_stmt *s, const uint8_t txid[32],
+                                       uint32_t vout, const uint8_t spent_by[32], int vin)
+{
+    return sqlite3_bind_blob(s, 1, spent_by, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int(s, 2, vin) == SQLITE_OK && sqlite3_bind_blob(s, 3, txid, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int64(s, 4, vout) == SQLITE_OK && sqlite3_bind_blob(s, 5, spent_by, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int(s, 6, vin) == SQLITE_OK;
+}
+
+enum db_wallet_utxo_cutover_result db_wallet_utxo_cutover_merge(
+    struct node_db *ndb, const struct db_wallet_utxo *u,
+    struct db_wallet_utxo_cutover_delivery *delivery)
+{
+    if (!ndb || !ndb->open || !ndb->db || !u ||
+        sqlite3_txn_state(ndb->db, "main") != SQLITE_TXN_WRITE || u->is_spent ||
+        !db_utxo_cutover_event_room(delivery))
+        return DB_UTXO_CUTOVER_ERROR;
+    struct ar_callbacks callbacks;
+    ar_callbacks_init(&callbacks);
+    if (!ar_register_before_save(&callbacks, wallet_utxo_before_save)) return DB_UTXO_CUTOVER_ERROR;
+    AR_BEGIN_SAVE(&callbacks, "wallet_utxo", u, db_wallet_utxo_validate);
+    sqlite3_stmt *s = NULL;
+    const char *sql = "INSERT INTO wallet_utxos(txid,vout,value,address_hash,script,height,is_coinbase) "
+        "VALUES(?,?,?,?,?,?,?) ON CONFLICT(txid,vout) DO UPDATE SET height=excluded.height "
+        "WHERE wallet_utxos.value=excluded.value AND wallet_utxos.address_hash=excluded.address_hash "
+        "AND wallet_utxos.script=excluded.script AND wallet_utxos.is_coinbase=excluded.is_coinbase";
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL) != SQLITE_OK) return DB_UTXO_CUTOVER_ERROR;
+    bool bound = db_utxo_cutover_bind_output(s, u);
+    int rc = bound ? AR_STEP_WRITE(s) : SQLITE_ERROR;
+    int changed = sqlite3_changes(ndb->db);
+    sqlite3_finalize(s);
+    if (rc != SQLITE_DONE) return DB_UTXO_CUTOVER_ERROR;
+    if (changed != 1) return DB_UTXO_CUTOVER_CONFLICT;
+    if (!db_utxo_cutover_arm(delivery)) return DB_UTXO_CUTOVER_ERROR;
+    db_utxo_cutover_event_add(delivery, u);
+    AR_FINISH_SAVE(&callbacks, u, true);
+}
+
+enum db_wallet_utxo_cutover_result db_wallet_utxo_cutover_spend(
+    struct node_db *ndb, const uint8_t txid[32], uint32_t vout,
+    const uint8_t spent_by[32], int vin)
+{
+    if (!ndb || !ndb->open || !ndb->db || !txid || !spent_by || vin < 0 ||
+        !memcmp(spent_by, ZERO_HASH, 32) || sqlite3_txn_state(ndb->db, "main") != SQLITE_TXN_WRITE)
+        return DB_UTXO_CUTOVER_ERROR;
+    sqlite3_stmt *s = NULL;
+    const char *sql = "UPDATE wallet_utxos SET spent_txid=?,spent_vin=? WHERE txid=? AND vout=? "
+        "AND (spent_txid IS NULL OR (spent_txid=? AND spent_vin=?))";
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL) != SQLITE_OK) return DB_UTXO_CUTOVER_ERROR;
+    bool bound = db_utxo_cutover_bind_spend(s, txid, vout, spent_by, vin);
+    int rc = bound ? AR_STEP_WRITE(s) : SQLITE_ERROR;
+    int changed = sqlite3_changes(ndb->db);
+    sqlite3_finalize(s);
+    return rc != SQLITE_DONE ? DB_UTXO_CUTOVER_ERROR :
+        (changed == 1 ? DB_UTXO_CUTOVER_OK : DB_UTXO_CUTOVER_CONFLICT);
+}
+
+/* Caller holds a stable event sink and keeps wallet writes quiescent. */
+static bool db_utxo_reemit_types(sqlite3_stmt *s)
+{
+    for (int i = 0; i < 6; i++) {
+        int expected = (i == 0 || i == 3) ? SQLITE_BLOB : SQLITE_INTEGER;
+        if (sqlite3_column_type(s, i) != expected) return false;
+    }
+    return sqlite3_column_bytes(s, 0) == 32 && sqlite3_column_bytes(s, 3) == 20;
+}
+
+static bool db_utxo_reemit_ranges(sqlite3_int64 vout, sqlite3_int64 value,
+    sqlite3_int64 height, sqlite3_int64 coinbase)
+{
+    return vout >= 0 && vout <= INT_MAX && value >= 0 && value <= 2100000000000000LL &&
+        height >= 0 && height <= INT_MAX && (coinbase == 0 || coinbase == 1);
+}
+
+static bool db_utxo_reemit_row(sqlite3_stmt *s, event_log_t *log)
+{
+    if (!db_utxo_reemit_types(s)) return false;
+    sqlite3_int64 vout = sqlite3_column_int64(s, 1), value = sqlite3_column_int64(s, 2);
+    sqlite3_int64 height = sqlite3_column_int64(s, 4), coinbase = sqlite3_column_int64(s, 5);
+    if (!db_utxo_reemit_ranges(vout, value, height, coinbase)) return false;
+    const uint8_t *txid = sqlite3_column_blob(s, 0);
+    const uint8_t *address = sqlite3_column_blob(s, 3);
+    return txid && address && memcmp(txid, ZERO_HASH, 32) != 0 &&
+        wallet_projection_event_log() == log &&
+        wallet_projection_emit_utxo_seen(txid, (uint32_t)vout, value, address,
+                                         (int32_t)height, (uint8_t)coinbase);
+}
+
+static bool db_utxo_reemit_scan(sqlite3 *db, event_log_t *log)
+{
+    sqlite3_stmt *s = NULL;
+    bool ok = false;
+    if (sqlite3_prepare_v2(db, "SELECT txid,vout,value,address_hash,height,is_coinbase "
+            "FROM wallet_utxos ORDER BY txid,vout", -1, &s, NULL) != SQLITE_OK) goto done;
+    int rc;
+    while ((rc = AR_STEP_ROW_READONLY(s)) == SQLITE_ROW)
+        if (!db_utxo_reemit_row(s, log)) goto done;
+    ok = rc == SQLITE_DONE;
+done:
+    if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool db_utxo_reemit_finish(sqlite3 *db, bool ok)
+{
+    if (sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK) return ok;
+    if (!sqlite3_get_autocommit(db) && sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK &&
+        !sqlite3_get_autocommit(db)) abort();
+    return false;
+}
+
+bool db_wallet_utxo_reemit_all(struct node_db *ndb)
+{
+    event_log_t *log = wallet_projection_event_log();
+    if (!ndb || !ndb->open || !ndb->db || !log) return false;
+    sqlite3 *db = ndb->db;
+    sqlite3_mutex *mu = sqlite3_db_mutex(db);
+    if (!mu || sqlite3_mutex_try(mu) != SQLITE_OK) return false;
+    bool ok = false;
+    if (sqlite3_get_autocommit(db) && sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK)
+        ok = db_utxo_reemit_finish(db, db_utxo_reemit_scan(db, log));
+    sqlite3_mutex_leave(mu);
+    return ok && wallet_projection_event_log() == log && event_log_flush(log);
+}
+
+
+bool db_wallet_utxo_cutover_delivery_flush(struct db_wallet_utxo_cutover_delivery *delivery)
+{
+    if (!delivery || !delivery->armed || !delivery->committed) return false;
+    event_log_t *log = wallet_projection_event_log();
+    if (!log) return false;
+    for (size_t i = 0; i < delivery->count; i++) {
+        const struct db_wallet_utxo_cutover_event *e = &delivery->events[i];
+        if (wallet_projection_event_log() != log ||
+            !wallet_projection_emit_utxo_seen(e->txid, e->vout, e->value, e->address_hash, e->height, e->is_coinbase))
+            return false;
+    }
+    return wallet_projection_event_log() == log && event_log_flush(log);
+}
+
+void db_wallet_utxo_cutover_delivery_clear(struct db_wallet_utxo_cutover_delivery *delivery)
+{
+    if (!delivery) return;
+    free(delivery->events); memset(delivery, 0, sizeof(*delivery));
+}
+
+static enum db_wallet_cutover_tx_class db_cutover_tx_class(
+    const struct db_wallet_utxo_cutover_projection *projection,
+    const struct wallet_cutover_v2_entry *entry)
+{
+    if (entry->new_depth > 0) return DB_CUTOVER_TX_ACTIVE;
+    return projection->classify_unconfirmed(projection->classify_ctx, entry->txid);
+}
+
+static const struct wallet_tx *db_cutover_find_tx(struct wallet *w,
+    const struct wallet_cutover_v2_plan *plan, const uint8_t id[32],
+    const struct wallet_cutover_v2_entry **entry)
+{
+    *entry = wallet_cutover_v2_plan_find(plan, w, id);
+    if (!*entry || (*entry)->slot >= MAX_WALLET_TX) return NULL;
+    const struct wallet_tx *tx = &w->map_wallet[(*entry)->slot];
+    return tx->used && !memcmp(tx->tx.hash.data, id, 32) ? tx : NULL;
+}
+
+static bool db_cutover_owned_output(struct wallet *w, const struct tx_out *out, uint8_t address[20])
+{
+    struct tx_destination dest;
+    if (!wallet_is_mine(w, out) || wallet_is_watch_only(w, out) ||
+        !script_extract_destination(&out->script_pub_key, &dest)) return false; // raw-return-ok:ownership-predicate
+    if (dest.type == DEST_KEY_ID) memcpy(address, dest.id.key.id.data, 20);
+    else if (dest.type == DEST_SCRIPT_ID) memcpy(address, dest.id.script.hash.data, 20);
+    else return false;
+    return true;
+}
+
+static bool db_cutover_entry_height(const struct wallet_cutover_v2_plan *plan,
+                                     const struct wallet_cutover_v2_entry *entry, int *height)
+{
+    if (entry->new_depth < 0 || entry->new_depth > plan->reference_height + 1LL) return false;
+    *height = entry->new_depth ? plan->reference_height - entry->new_depth + 1 : 0;
+    return true;
+}
+
+static bool db_cutover_spender_matches(sqlite3_stmt *s, struct wallet *w,
+    const struct wallet_cutover_v2_plan *plan, const struct db_wallet_utxo_cutover_projection *projection,
+    const uint8_t source[32], uint32_t vout)
+{
+    int type = sqlite3_column_type(s, 7);
+    if (type == SQLITE_NULL) return sqlite3_column_type(s, 8) == SQLITE_NULL;
+    const uint8_t *id = sqlite3_column_blob(s, 7);
+    if (type != SQLITE_BLOB || !id || sqlite3_column_bytes(s, 7) != 32 ||
+        sqlite3_column_type(s, 8) != SQLITE_INTEGER) return false;
+    sqlite3_int64 vin = sqlite3_column_int64(s, 8);
+    const struct wallet_cutover_v2_entry *entry = NULL;
+    const struct wallet_tx *spender = db_cutover_find_tx(w, plan, id, &entry);
+    if (!spender || vin < 0 || (uint64_t)vin >= spender->tx.num_vin ||
+        db_cutover_tx_class(projection, entry) != DB_CUTOVER_TX_ACTIVE) return false;
+    const struct outpoint *prev = &spender->tx.vin[(size_t)vin].prevout;
+    return prev->n == vout && !memcmp(prev->hash.data, source, 32);
+}
+
+static bool db_cutover_existing_fields(sqlite3_stmt *s, const struct wallet_tx *tx,
+                                       const struct tx_out *out, const uint8_t address[20])
+{
+    const void *stored_address = sqlite3_column_blob(s, 3), *script = sqlite3_column_blob(s, 4);
+    return sqlite3_column_type(s, 2) == SQLITE_INTEGER && sqlite3_column_int64(s, 2) == out->value &&
+        sqlite3_column_type(s, 3) == SQLITE_BLOB && stored_address && sqlite3_column_bytes(s, 3) == 20 &&
+        !memcmp(stored_address, address, 20) && sqlite3_column_type(s, 4) == SQLITE_BLOB && script &&
+        sqlite3_column_bytes(s, 4) == (int)out->script_pub_key.size &&
+        !memcmp(script, out->script_pub_key.data, out->script_pub_key.size) &&
+        sqlite3_column_type(s, 6) == SQLITE_INTEGER &&
+        sqlite3_column_int(s, 6) == (int)transaction_is_coinbase(&tx->tx);
+}
+
+static bool db_cutover_existing_row(sqlite3_stmt *s, struct wallet *w,
+    const struct wallet_cutover_v2_plan *plan, const struct db_wallet_utxo_cutover_projection *projection)
+{
+    const uint8_t *id = sqlite3_column_blob(s, 0);
+    sqlite3_int64 vout = sqlite3_column_int64(s, 1);
+    if (sqlite3_column_type(s, 0) != SQLITE_BLOB || !id || sqlite3_column_bytes(s, 0) != 32 ||
+        sqlite3_column_type(s, 1) != SQLITE_INTEGER || vout < 0 || vout > UINT32_MAX) return false;
+    const struct wallet_cutover_v2_entry *entry = NULL;
+    const struct wallet_tx *tx = db_cutover_find_tx(w, plan, id, &entry);
+    if (!tx || (uint64_t)vout >= tx->tx.num_vout || db_cutover_tx_class(projection, entry) != DB_CUTOVER_TX_ACTIVE)
+        return false;
+    const struct tx_out *out = &tx->tx.vout[(size_t)vout];
+    uint8_t address[20];
+    if (!db_cutover_owned_output(w, out, address)) {
+        LOG_WARN("wallet_cutover", "stored output is not spendable by the current wallet");
+        return false;
+    }
+    if (!db_cutover_existing_fields(s, tx, out, address)) return false;
+    return db_cutover_spender_matches(s, w, plan, projection, id, (uint32_t)vout);
+}
+
+static bool db_cutover_validate_existing(struct node_db *ndb, struct wallet *w,
+    const struct wallet_cutover_v2_plan *plan, const struct db_wallet_utxo_cutover_projection *projection)
+{
+    sqlite3_stmt *s = NULL;
+    const char *sql = "SELECT txid,vout,value,address_hash,script,height,is_coinbase,spent_txid,spent_vin FROM wallet_utxos";
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL) != SQLITE_OK) return false;
+    int rc; bool ok = true;
+    while ((rc = AR_STEP_ROW_READONLY(s)) == SQLITE_ROW)
+        if (!db_cutover_existing_row(s, w, plan, projection)) { ok = false; break; }
+    if (rc != SQLITE_DONE) ok = false;
+    sqlite3_finalize(s);
+    return ok;
+}
+
+static bool db_cutover_add_output(struct node_db *ndb, struct wallet *w,
+    const struct wallet_cutover_v2_plan *plan, const struct wallet_cutover_v2_entry *entry,
+    const struct db_wallet_utxo_cutover_projection *projection, size_t vout)
+{
+    const struct wallet_tx *tx = &w->map_wallet[entry->slot];
+    const struct tx_out *out = &tx->tx.vout[vout];
+    uint8_t address[20];
+    if (!db_cutover_owned_output(w, out, address)) return true;
+    enum db_wallet_cutover_tx_class state = db_cutover_tx_class(projection, entry);
+    if (state == DB_CUTOVER_TX_INACTIVE) return true;
+    if (state != DB_CUTOVER_TX_ACTIVE || (transaction_is_coinbase(&tx->tx) && !entry->new_depth)) return false;
+    int height;
+    if (!db_cutover_entry_height(plan, entry, &height) || vout > UINT32_MAX) return false;
+    struct db_wallet_utxo row = {.vout = (uint32_t)vout, .value = out->value, .height = height,
+        .script = (uint8_t *)out->script_pub_key.data, .script_len = out->script_pub_key.size,
+        .is_coinbase = transaction_is_coinbase(&tx->tx)};
+    memcpy(row.txid, entry->txid, 32); memcpy(row.address_hash, address, 20);
+    return db_wallet_utxo_cutover_merge(ndb, &row, projection->delivery) == DB_UTXO_CUTOVER_OK;
+}
+
+static bool db_cutover_add_outputs(struct node_db *ndb, struct wallet *w,
+    const struct wallet_cutover_v2_plan *plan, const struct db_wallet_utxo_cutover_projection *projection)
+{
+    for (size_t i = 0; i < plan->count; i++) {
+        const struct wallet_cutover_v2_entry *entry = &plan->entries[i];
+        const struct wallet_tx *tx = &w->map_wallet[entry->slot];
+        for (size_t j = 0; j < tx->tx.num_vout; j++)
+            if (!db_cutover_add_output(ndb, w, plan, entry, projection, j)) return false;
+    }
+    return true;
+}
+
+static bool db_cutover_add_input(struct node_db *ndb, struct wallet *w,
+    const struct wallet_cutover_v2_plan *plan, const struct db_wallet_utxo_cutover_projection *projection,
+    const struct wallet_cutover_v2_entry *spender, size_t vin)
+{
+    const struct wallet_tx *tx = &w->map_wallet[spender->slot];
+    const struct outpoint *prev = &tx->tx.vin[vin].prevout;
+    const struct wallet_cutover_v2_entry *source_entry = NULL;
+    const struct wallet_tx *source = db_cutover_find_tx(w, plan, prev->hash.data, &source_entry);
+    if (!source) return true;
+    if (prev->n >= source->tx.num_vout) return false;
+    uint8_t address[20];
+    if (!db_cutover_owned_output(w, &source->tx.vout[prev->n], address)) return true;
+    enum db_wallet_cutover_tx_class state = db_cutover_tx_class(projection, spender);
+    if (state == DB_CUTOVER_TX_INACTIVE) return true;
+    if (state != DB_CUTOVER_TX_ACTIVE || db_cutover_tx_class(projection, source_entry) != DB_CUTOVER_TX_ACTIVE || vin > INT_MAX)
+        return false;
+    return db_wallet_utxo_cutover_spend(ndb, prev->hash.data, prev->n, spender->txid, (int)vin) == DB_UTXO_CUTOVER_OK;
+}
+
+static bool db_cutover_add_inputs(struct node_db *ndb, struct wallet *w,
+    const struct wallet_cutover_v2_plan *plan, const struct db_wallet_utxo_cutover_projection *projection)
+{
+    for (size_t i = 0; i < plan->count; i++) {
+        const struct wallet_cutover_v2_entry *entry = &plan->entries[i];
+        const struct wallet_tx *tx = &w->map_wallet[entry->slot];
+        for (size_t j = 0; j < tx->tx.num_vin; j++)
+            if (!db_cutover_add_input(ndb, w, plan, projection, entry, j)) return false;
+    }
+    return true;
+}
+
+static bool db_cutover_collect_input(struct wallet *w, struct wallet_cutover_v2_plan *plan,
+    const struct db_wallet_utxo_cutover_projection *projection,
+    const struct wallet_cutover_v2_entry *spender, size_t vin)
+{
+    const struct wallet_tx *tx = &w->map_wallet[spender->slot];
+    const struct outpoint *prev = &tx->tx.vin[vin].prevout;
+    const struct wallet_cutover_v2_entry *source_entry = NULL;
+    const struct wallet_tx *source = db_cutover_find_tx(w, plan, prev->hash.data, &source_entry);
+    if (!source) return true;
+    if (prev->n >= source->tx.num_vout) return false;
+    if (!wallet_is_mine(w, &source->tx.vout[prev->n])) return true;
+    enum db_wallet_cutover_tx_class state = db_cutover_tx_class(projection, spender);
+    if (state == DB_CUTOVER_TX_INACTIVE) return true;
+    if (state != DB_CUTOVER_TX_ACTIVE || db_cutover_tx_class(projection, source_entry) != DB_CUTOVER_TX_ACTIVE)
+        return false;
+    return wallet_cutover_v2_plan_mark_spent(plan, prev->hash.data, prev->n, spender->new_depth > 0);
+}
+
+static bool db_cutover_collect_spends(struct wallet *w, struct wallet_cutover_v2_plan *plan,
+                                       const struct db_wallet_utxo_cutover_projection *projection)
+{
+    for (size_t i = 0; i < plan->count; i++) {
+        const struct wallet_cutover_v2_entry *entry = &plan->entries[i];
+        const struct wallet_tx *tx = &w->map_wallet[entry->slot];
+        for (size_t j = 0; j < tx->tx.num_vin; j++)
+            if (!db_cutover_collect_input(w, plan, projection, entry, j)) return false;
+    }
+    return true;
+}
+
+static enum db_cutover_coin_verdict db_cutover_coin_for_output(
+    const struct db_wallet_utxo_cutover_projection *projection, const struct wallet_cutover_v2_plan *plan,
+    const struct wallet_cutover_v2_entry *entry, const struct wallet_tx *tx, uint32_t vout)
+{
+    int height;
+    if (!entry->new_depth || !db_cutover_entry_height(plan, entry, &height)) return DB_CUTOVER_COIN_UNKNOWN;
+    return projection->reference_coin(projection->reference_coin_ctx, entry->txid, vout,
+        &tx->tx.vout[vout], height, transaction_is_coinbase(&tx->tx));
+}
+
+static bool db_cutover_verify_reference(struct wallet *w, struct wallet_cutover_v2_plan *plan,
+                                         const struct db_wallet_utxo_cutover_projection *projection)
+{
+    for (size_t i = 0; i < plan->count; i++) {
+        const struct wallet_cutover_v2_entry *entry = &plan->entries[i];
+        if (!entry->new_depth) continue;
+        const struct wallet_tx *tx = &w->map_wallet[entry->slot];
+        for (size_t j = 0; j < tx->tx.num_vout; j++) {
+            if (!wallet_is_mine(w, &tx->tx.vout[j])) continue;
+            if (j > UINT32_MAX) {
+                LOG_WARN("wallet_cutover", "wallet output index exceeds the outpoint range");
+                return false;
+            }
+            enum db_cutover_coin_verdict verdict = db_cutover_coin_for_output(projection, plan, entry, tx, (uint32_t)j);
+            bool spent = wallet_cutover_v2_plan_has_spent(plan, entry->txid, (uint32_t)j, true);
+            if ((verdict == DB_CUTOVER_COIN_UNSPENT && !spent) ||
+                (verdict == DB_CUTOVER_COIN_SPENT && spent)) continue;
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool db_cutover_validate_old_spends(struct wallet *w, struct wallet_cutover_v2_plan *plan,
+                                          const struct db_wallet_utxo_cutover_projection *projection)
+{
+    for (size_t i = 0; i < SPENT_SET_BUCKETS; i++) {
+        const struct spent_outpoint *old = &w->spent_set[i];
+        if (!old->occupied || wallet_cutover_v2_plan_has_spent(plan, old->txid.data, old->vout, false)) continue;
+        const struct wallet_cutover_v2_entry *entry = NULL;
+        const struct wallet_tx *tx = db_cutover_find_tx(w, plan, old->txid.data, &entry);
+        if (!tx || old->vout >= tx->tx.num_vout || !wallet_is_mine(w, &tx->tx.vout[old->vout]) ||
+            db_cutover_coin_for_output(projection, plan, entry, tx, old->vout) != DB_CUTOVER_COIN_UNSPENT)
+            return false;
+    }
+    return true;
+}
+
+static bool db_cutover_projection_valid(struct node_db *ndb, struct wallet *wallet,
+    const struct wallet_cutover_v2_plan *plan, const struct db_wallet_utxo_cutover_projection *projection)
+{
+    return ndb && ndb->open && ndb->db && wallet && plan && projection &&
+        projection->delivery && projection->classify_unconfirmed && projection->reference_coin &&
+        sqlite3_txn_state(ndb->db, "main") == SQLITE_TXN_WRITE && ar_after_commit_depth() == 1;
+}
+
+bool db_wallet_utxo_cutover_project(void *ctx, struct node_db *ndb,
+    struct wallet *wallet, struct wallet_cutover_v2_plan *plan)
+{
+    const struct db_wallet_utxo_cutover_projection *projection = ctx;
+    if (!db_cutover_projection_valid(ndb, wallet, plan, projection)) return false;
+    if (!db_cutover_collect_spends(wallet, plan, projection) ||
+        !db_cutover_verify_reference(wallet, plan, projection) ||
+        !db_cutover_validate_old_spends(wallet, plan, projection) ||
+        !db_cutover_validate_existing(ndb, wallet, plan, projection) ||
+        !db_cutover_add_outputs(ndb, wallet, plan, projection) ||
+        !db_cutover_add_inputs(ndb, wallet, plan, projection)) return false;
+    wallet_cutover_v2_plan_finish_spends(plan);
+    return true;
+}
 
 bool db_wallet_utxo_save(struct node_db *ndb, const struct db_wallet_utxo *u)
 {

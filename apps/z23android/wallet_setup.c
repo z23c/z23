@@ -143,7 +143,8 @@ void wsu_view_read(struct wsu *w, struct wsu_view *out)
     out->protected = w->protected;
     out->mismatches = w->mismatches;
     out->birthday_unknown = !w->birthday.known;
-    out->may_start_over = w->kind == ZAPP_KIND_CREATE && (!w->confirmed || !w->birthday.known);
+    out->resume_creation = w->resume_creation;
+    out->may_start_over = !w->resume_creation && w->kind == ZAPP_KIND_CREATE && (!w->confirmed || !w->birthday.known);
     out->birthday_dropped = w->step == WSU_READING && !w->birthday_honoured;
     if (waiting_locked(w)) view_job_locked(w, out);
     if (w->failure == WSU_ASIDE_STUCK) memcpy(out->leftover, w->leftover, sizeof(out->leftover));
@@ -189,10 +190,11 @@ static bool wallet_may_exist(enum wsu_failure failure)
 }
 void wsu_back(struct wsu *w)
 {
-    move(w, WSU_RESTORE_FORM, WSU_CHOICE);
     pthread_mutex_lock(&w->lock);
+    if (w->step == WSU_RESTORE_FORM) { w->step = w->resume_creation ? WSU_BLOCKED : WSU_CHOICE; w->failure = WSU_NO_FAILURE; }
     /* A file that could not be moved leaves the wallet as it was: back to not knowing, where Check again reads it. */
-    if (w->step == WSU_FAILED && w->failure == WSU_ASIDE) { w->step = WSU_BLOCKED; w->failure = WSU_UNKNOWN; }
+    if (w->step == WSU_FAILED && w->resume_creation) { w->step = WSU_BLOCKED; w->failure = WSU_UNKNOWN; }
+    else if (w->step == WSU_FAILED && w->failure == WSU_ASIDE) { w->step = WSU_BLOCKED; w->failure = WSU_UNKNOWN; }
     else if (w->step == WSU_FAILED && !wallet_may_exist(w->failure)) { w->step = WSU_CHOICE; w->failure = WSU_NO_FAILURE; }
     pthread_mutex_unlock(&w->lock);
 }
@@ -301,7 +303,7 @@ void wsu_working_line(const struct wsu_view *v, char *out, size_t cap)
 static const struct { enum wsu_failure failure; const char *text; } write_failure_texts[] = {
     {WSU_NODE_BUSY, "Your node did not pause in time, so your wallet is not saved yet. Tap Try again."},
     {WSU_STORAGE, "Your node could not read its saved data, so your wallet was not saved, and saving again would fail the same way. "
-                  "Your node keeps running. Tap Check wallet."},
+                  "Your node stays paused. Tap Check wallet."},
     {WSU_NOT_RUN, "Saving your wallet could not start, so nothing was saved. Tap Try again."},
     {WSU_UNKNOWN, "Saving your wallet stopped before your node answered, so the app cannot tell whether it was saved. Tap Try again."},
 };
@@ -311,7 +313,7 @@ const char *wsu_write_failure_text(enum wsu_failure failure)
     for (size_t i = 0; i < sizeof(write_failure_texts) / sizeof(write_failure_texts[0]); ++i)
         if (write_failure_texts[i].failure == failure) return write_failure_texts[i].text;
     return "Your node refused to save your wallet, so nothing was saved, and saving again would be refused the same way. "
-           "Your node keeps running. Tap Check wallet.";
+           "Your node stays paused. Tap Check wallet.";
 }
 bool wsu_write_retryable(enum wsu_failure failure)
 {
@@ -471,10 +473,10 @@ static void create_declined(struct wsu *w)
 
 /* ---- create: the words first, the wallet written behind them ---- */
 
-/* A new phrase from the node, which needs no datadir and no stopped node. Nothing is written anywhere. */
+/* Prepare words only after the node is paused and the native binding is durable. */
 static enum wsu_failure phrase_failure(struct wsu *w, struct zapp_words *phrase)
 {
-    enum sun_result result = sun_new_phrase(&w->node, phrase);
+    enum sun_result result = sun_prepare_creation(&w->node, phrase, w->creation_nonce);
     return result == SUN_OK ? WSU_NO_FAILURE : failure_of_node(result);
 }
 /* The shown words, the phrase kept for the write and its passphrase are wiped, with the lock held. */
@@ -522,9 +524,12 @@ void wsu_create_job(struct wsu *w)
     enum wsu_failure failure = new_passphrase(w, secret, hex);
     if (failure == WSU_DECLINED) { create_declined(w); goto out; }
     if (failure != WSU_NO_FAILURE) { set_step(w, WSU_FAILED, failure); goto out; }
+    if (!zapp_setup_kind_write(w->files, ZAPP_KIND_CREATE)) { set_step(w, WSU_FAILED, WSU_STORAGE); goto out; }
+    if (!stop_node(w, WSU_PHASE_PAUSE)) { (void)start_node(w); set_step(w, WSU_BLOCKED, WSU_NODE_BUSY); goto out; }
     failure = phrase_failure(w, &phrase);
+    if (failure == WSU_NO_FAILURE && !zapp_setup_nonce_write(w->files, w->creation_nonce)) failure = WSU_UNKNOWN;
     if (failure == WSU_NO_FAILURE && !words_shown(w, &phrase, hex)) failure = WSU_NOT_RUN;
-    if (failure != WSU_NO_FAILURE) end_failed(w, failure, false, WSU_FAILED);
+    if (failure != WSU_NO_FAILURE) set_step(w, WSU_BLOCKED, failure);
 out:
     memory_cleanse(secret, sizeof(secret));
     memory_cleanse(hex, sizeof(hex));
@@ -538,7 +543,10 @@ static enum sun_result write_once(struct wsu *w, struct sun_restored *restored)
     if (!zapp_setup_kind_write(w->files, ZAPP_KIND_CREATE)) return SUN_REFUSED;
     if (!stop_node(w, WSU_PHASE_PAUSE)) return SUN_NODE_RUNNING;
     phase(w, WSU_PHASE_WRITE);
-    return sun_restore_at_tip(&w->node, &w->phrase, w->write_pass, restored);
+    char nonce[65];
+    enum sun_creation_state state = sun_creation_status(&w->node, nonce);
+    if ((state != SUN_CREATION_PREPARED && state != SUN_CREATION_COMMITTED) || strcmp(nonce, w->creation_nonce)) return SUN_UNKNOWN;
+    return sun_commit_creation(&w->node, &w->phrase, w->write_pass, w->creation_nonce, restored);
 }
 /* The write ended: kept as done, with the phrase and passphrase wiped, or as failed with its reason. A wallet found present
  * never counts as this one. */
@@ -554,6 +562,7 @@ static void write_ended(struct wsu *w, enum sun_result result, const struct sun_
         w->failure = WSU_WALLET_THERE;
     } else if (result == SUN_OK) {
         memcpy(w->first_shielded_address, restored->first_shielded_address, sizeof(w->first_shielded_address));
+        w->creation_receipt = true;
         w->birthday.known = restored->birthday_recorded && !restored->birthday_rejected;
         w->write = WSU_WRITE_DONE;
         zapp_words_cleanse(&w->phrase);
@@ -574,9 +583,8 @@ void wsu_write_job(struct wsu *w)
     if (go) { w->write = WSU_WRITE_RUNNING; work_begins_locked(w, WSU_PHASE_WRITE); }
     pthread_mutex_unlock(&w->lock);
     if (!go) return;
-    /* The end is published only once the node is started again, so a screen that offers Try again or a check never races the start. */
+    /* Keep the node paused while the prepared creation remains unresolved. */
     enum sun_result result = write_once(w, &restored);
-    (void)start_node(w);
     write_ended(w, result, &restored);
 }
 bool wsu_retry_write(struct wsu *w)
@@ -671,7 +679,8 @@ void wsu_finish_job(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
     bool go = w->confirmed && w->step == WSU_WORKING;
-    bool lacks_start = !w->restored && !w->birthday.known;
+    bool genesis = !w->restored && !w->birthday.known && w->creation_receipt;
+    bool lacks_start = !w->restored && !w->birthday.known && !w->creation_receipt;
     bool restored = w->restored;
     pthread_mutex_unlock(&w->lock);
     if (!go) return;
@@ -679,7 +688,10 @@ void wsu_finish_job(struct wsu *w)
     if (lacks_start) { set_step(w, WSU_FAILED, WSU_NO_BIRTHDAY); return; }
     bool recorded = zapp_setup_mark_done(w->files);
     if (!recorded) set_step(w, WSU_FAILED, WSU_NOT_RECORDED);
-    else set_step(w, restored ? WSU_READING : WSU_DONE, WSU_NO_FAILURE);
+    else {
+        if (!restored && w->env.resume_if_wanted) w->env.resume_if_wanted(w->env.ctx);
+        set_step(w, (restored || genesis) ? WSU_READING : WSU_DONE, WSU_NO_FAILURE);
+    }
 }
 
 bool wsu_launch_retry_write(struct wsu *w, bool (*launch)(void *), void *ctx)
@@ -771,6 +783,55 @@ static enum sun_result restore_run(struct wsu *w, const struct zapp_words *words
     return sun_restore(&w->node, words, hex, birthday, restored);
 }
 
+bool wsu_open_resume_creation(struct wsu *w)
+{
+    pthread_mutex_lock(&w->lock);
+    bool ok = w->step == WSU_BLOCKED && w->resume_creation && w->creation_nonce[0];
+    if (ok) { w->step = WSU_RESTORE_FORM; w->failure = WSU_NO_FAILURE; }
+    pthread_mutex_unlock(&w->lock); return ok;
+}
+
+static bool restore_words_valid(struct wsu *w, const char *text, struct zapp_words *words)
+{
+    if (!zapp_words_parse(text, words)) { set_step(w, WSU_RESTORE_FORM, WSU_BAD_WORDS); return false; }
+    size_t position = 0;
+    enum zapp_words_problem problem = zapp_words_check(words, &position);
+    if (problem == ZAPP_WORDS_OK) return true;
+    pthread_mutex_lock(&w->lock);
+    w->step = WSU_RESTORE_FORM;
+    w->failure = problem == ZAPP_WORDS_OFF_LIST ? WSU_BAD_WORD : WSU_BAD_PHRASE;
+    w->bad_word = position; w->refusal = WSU_NO_FAILURE;
+    pthread_mutex_unlock(&w->lock); return false;
+}
+static enum wsu_failure restore_passphrase(struct wsu *w, uint8_t secret[ZAPP_DEVKEY_SECRET],
+                                            char hex[SUN_PASSPHRASE_HEX + 1])
+{
+    if (!w->resume_creation) return new_passphrase(w, secret, hex);
+    enum zapp_devkey_status status = w->env.unwrap_existing ? w->env.unwrap_existing(w->env.ctx, secret) : ZAPP_DEVKEY_ERROR;
+    enum wsu_failure failure = status == ZAPP_DEVKEY_OK ? WSU_NO_FAILURE : failure_of_key(status);
+    if (failure == WSU_NO_FAILURE) hex_of(secret, ZAPP_DEVKEY_SECRET, hex);
+    return failure;
+}
+static bool resume_creation_ready(struct wsu *w)
+{
+    if (!w->resume_creation) return true;
+    if (!stop_node(w, WSU_PHASE_PAUSE)) { set_step(w, WSU_RESTORE_FORM, WSU_NODE_BUSY); return false; }
+    char nonce[65]; enum sun_creation_state state = sun_creation_status(&w->node, nonce);
+    if ((state == SUN_CREATION_PREPARED || state == SUN_CREATION_COMMITTED) && !strcmp(nonce, w->creation_nonce)) return true;
+    set_step(w, WSU_RESTORE_FORM, WSU_UNKNOWN); return false;
+}
+static void resume_creation_complete(struct wsu *w, const struct sun_restored *restored)
+{
+    pthread_mutex_lock(&w->lock);
+    memcpy(w->first_shielded_address, restored->first_shielded_address, sizeof(w->first_shielded_address));
+    w->creation_receipt = true;
+    w->birthday.known = restored->birthday_recorded && !restored->birthday_rejected;
+    w->confirmed = true; w->restored = false; w->step = WSU_WORKING;
+    memory_cleanse(w->form, sizeof(w->form));
+    pthread_mutex_unlock(&w->lock);
+    wsu_finish_job(w);
+}
+
 void wsu_restore_job(struct wsu *w, const char *text, int64_t birthday_height)
 {
     uint8_t secret[ZAPP_DEVKEY_SECRET];
@@ -779,35 +840,27 @@ void wsu_restore_job(struct wsu *w, const char *text, int64_t birthday_height)
     struct sun_restored restored;
     memset(&words, 0, sizeof(words));
     if (!begin_job(w, WSU_RESTORE_FORM)) return;
-    if (!zapp_words_parse(text, &words)) { set_step(w, WSU_RESTORE_FORM, WSU_BAD_WORDS); goto out; }
-    size_t position = 0;
-    enum zapp_words_problem problem = zapp_words_check(&words, &position);
-    if (problem != ZAPP_WORDS_OK) {
-        pthread_mutex_lock(&w->lock);
-        w->step = WSU_RESTORE_FORM;
-        w->failure = problem == ZAPP_WORDS_OFF_LIST ? WSU_BAD_WORD : WSU_BAD_PHRASE;
-        w->bad_word = position;
-        w->refusal = WSU_NO_FAILURE;
-        pthread_mutex_unlock(&w->lock);
-        goto out;
-    }
+    if (!restore_words_valid(w, text, &words)) goto out;
     phase(w, WSU_PHASE_KEY);
-    enum wsu_failure failure = new_passphrase(w, secret, hex);
+    enum wsu_failure failure = restore_passphrase(w, secret, hex);
     /* A refusal no retry changes leaves the form, whose Restore would only ask again. */
-    if (failure != WSU_NO_FAILURE) { set_step(w, wsu_failure_retries(failure) ? WSU_RESTORE_FORM : WSU_FAILED, failure); goto out; }
+    if (failure != WSU_NO_FAILURE) { set_step(w, (w->resume_creation || wsu_failure_retries(failure)) ? WSU_RESTORE_FORM : WSU_FAILED, failure); goto out; }
     bool was_running = w->env.node_running(w->env.ctx);
     struct sun_birthday birthday = birthday_at(w, birthday_height);
     pthread_mutex_lock(&w->lock);
     w->birthday = birthday;
     pthread_mutex_unlock(&w->lock);
-    enum sun_result result = restore_run(w, &words, hex, &birthday, &restored);
+    if (!resume_creation_ready(w)) goto out;
+    enum sun_result result = w->resume_creation ? sun_commit_creation(&w->node, &words, hex, w->creation_nonce, &restored) : restore_run(w, &words, hex, &birthday, &restored);
     if (result != SUN_OK) {
         /* A refusal wrote nothing, so the owner stays on the form with the words kept. An unknown answer goes to the check. */
         failure = failure_of_node(result);
-        end_failed(w, failure, was_running, failure == WSU_UNKNOWN ? WSU_FAILED : WSU_RESTORE_FORM);
+        if (w->resume_creation) set_step(w, WSU_RESTORE_FORM, failure);
+        else end_failed(w, failure, was_running, failure == WSU_UNKNOWN ? WSU_FAILED : WSU_RESTORE_FORM);
         goto out;
     }
-    restore_succeeded(w, &restored, false);
+    if (w->resume_creation) resume_creation_complete(w, &restored);
+    else restore_succeeded(w, &restored, false);
 out:
     memory_cleanse(secret, sizeof(secret));
     memory_cleanse(hex, sizeof(hex));
@@ -865,6 +918,39 @@ static bool offline_probe(struct wsu *w, enum zapp_setup_kind kind, enum sun_pro
     return true;
 }
 
+static bool resume_confirmed_creation(struct wsu *w, enum zapp_setup_kind kind)
+{
+    if (kind == ZAPP_KIND_CREATE && zapp_setup_confirmed(w->files) &&
+        !zapp_setup_confirmed_start(w->files) && zapp_setup_nonce_exists(w->files)) {
+        char nonce[65], saved[65];
+        if (!zapp_setup_nonce_read(w->files, saved) || !stop_node(w, WSU_PHASE_PAUSE_CHECK) ||
+            sun_creation_status(&w->node, nonce) != SUN_CREATION_COMMITTED || strcmp(saved, nonce)) {
+            set_step(w, WSU_BLOCKED, WSU_UNKNOWN); return true;
+        }
+        pthread_mutex_lock(&w->lock); w->creation_receipt = true; pthread_mutex_unlock(&w->lock);
+        confirmed_create_resumes(w); return true;
+    }
+    return false;
+}
+static bool resume_pending_creation(struct wsu *w, enum zapp_setup_kind kind)
+{
+    if (kind == ZAPP_KIND_CREATE && !zapp_setup_confirmed(w->files)) {
+        if (!stop_node(w, WSU_PHASE_PAUSE_CHECK)) { set_step(w, WSU_BLOCKED, WSU_NODE_BUSY); return true; }
+        char nonce[65], saved[65];
+        enum sun_creation_state state = sun_creation_status(&w->node, nonce);
+        bool saved_ok = zapp_setup_nonce_read(w->files, saved);
+        bool saved_absent = !zapp_setup_nonce_exists(w->files);
+        if (state != SUN_CREATION_UNKNOWN && state != SUN_CREATION_NONE && ((saved_ok && !strcmp(saved, nonce)) || saved_absent) && zapp_setup_nonce_write(w->files, nonce)) {
+            pthread_mutex_lock(&w->lock);
+            memcpy(w->creation_nonce, nonce, sizeof(nonce)); w->resume_creation = true;
+            pthread_mutex_unlock(&w->lock);
+            set_step(w, WSU_BLOCKED, WSU_NO_FAILURE); return true;
+        }
+        if (state == SUN_CREATION_UNKNOWN || state == SUN_CREATION_PREPARED || state == SUN_CREATION_COMMITTED) { set_step(w, WSU_BLOCKED, WSU_UNKNOWN); return true; }
+    }
+    return false;
+}
+
 void wsu_resume_job(struct wsu *w)
 {
     pthread_mutex_lock(&w->lock);
@@ -873,6 +959,7 @@ void wsu_resume_job(struct wsu *w)
     enum zapp_setup_kind kind = w->kind;
     pthread_mutex_unlock(&w->lock);
     if (!go) return;
+    if (resume_confirmed_creation(w, kind) || resume_pending_creation(w, kind)) return;
     enum sun_probe probe = SUN_PROBE_UNKNOWN;
     if (!running_probe(w, &probe) && !offline_probe(w, kind, &probe)) {
         set_step(w, WSU_BLOCKED, WSU_NODE_BUSY);
@@ -934,7 +1021,7 @@ static enum wsu_failure set_aside_items(struct wsu *w, const struct aside_item *
 /* The wrapped key and the setup records, under one timestamp. */
 static enum wsu_failure set_aside_key(struct wsu *w, int64_t now)
 {
-    const struct aside_item items[] = {{w->files, "wallet_key.blob"}, {w->files, "wallet_setup_kind"}, {w->files, "wallet_setup_confirmed"}};
+    const struct aside_item items[] = {{w->files, "wallet_key.blob"}, {w->files, "wallet_setup_kind"}, {w->files, "wallet_setup_confirmed"}, {w->files, "wallet_setup_nonce"}};
     return set_aside_items(w, items, sizeof(items) / sizeof(items[0]), now, NULL);
 }
 /* The whole datadir in one rename, so the database and its journal files cannot be split, then the key and records: all or none. */
@@ -945,7 +1032,7 @@ static enum wsu_failure set_aside_all(struct wsu *w, int64_t now)
     if (!slash || slash == w->node.datadir || (size_t)(slash - w->node.datadir) >= sizeof(parent)) return WSU_ASIDE;
     memcpy(parent, w->node.datadir, (size_t)(slash - w->node.datadir));
     parent[slash - w->node.datadir] = 0;
-    const struct aside_item items[] = {{parent, slash + 1}, {w->files, "wallet_key.blob"}, {w->files, "wallet_setup_kind"}, {w->files, "wallet_setup_confirmed"}};
+    const struct aside_item items[] = {{parent, slash + 1}, {w->files, "wallet_key.blob"}, {w->files, "wallet_setup_kind"}, {w->files, "wallet_setup_confirmed"}, {w->files, "wallet_setup_nonce"}};
     return set_aside_items(w, items, sizeof(items) / sizeof(items[0]), now, w->node.datadir);
 }
 
@@ -975,7 +1062,7 @@ bool wsu_ask_start_over(struct wsu *w)
     bool proved = words_proved(w);
     pthread_mutex_lock(&w->lock);
     bool blocked = w->step == WSU_BLOCKED && (w->failure == WSU_NO_FAILURE || w->failure == WSU_COULD_NOT_CHECK || w->failure == WSU_NODE_BUSY || w->failure == WSU_WALLET_THERE);
-    bool ok = blocked || (w->step == WSU_FAILED && w->failure == WSU_NO_BIRTHDAY);
+    bool ok = !w->resume_creation && (blocked || (w->step == WSU_FAILED && w->failure == WSU_NO_BIRTHDAY));
     enum wsu_failure why = kind != ZAPP_KIND_CREATE ? WSU_NOT_CREATE : proved ? WSU_ALREADY_CONFIRMED : WSU_NO_FAILURE;
     if (ok) { w->step = why == WSU_NO_FAILURE ? WSU_START_OVER : WSU_BLOCKED; w->failure = why; }
     pthread_mutex_unlock(&w->lock);

@@ -61,6 +61,8 @@ struct cache {
 /* Everything a wallet screen holds that is wiped when the owner leaves. */
 struct data {
     bool funds_loaded, fleet_loaded, funds_fresh, fleet_fresh, node_silent, summary_failed;
+    int cutover_status;
+    char cutover_sync[96];
     uint64_t summary_at, fleet_at, requested_at;
     unsigned initial_failures;
     bool initial_retry_wait, summary_validated;
@@ -386,26 +388,6 @@ static int64_t cache_minutes(const struct cache *c)
     int64_t seconds = wall_s() - c->at;
     return seconds > 0 ? seconds / 60 : 0;
 }
-/* The kept balance, never as the live one: its own heading, and under the amount how old it is and whether the app is asking the
- * node now (a reply is awaited, or the node runs and is asked again at every refresh). */
-static void cache_lines(struct wallet_screen *s, const struct data *d)
-{
-    char age[96];
-    int64_t m = cache_minutes(&d->cache);
-    bool asking = !d->funds_loaded || (st.env.node_running && st.env.node_running(st.env.ctx));
-    const char *more = asking ? ", updating" : "";
-    if (m < 1) snprintf(age, sizeof(age), "As of less than a minute ago%s", more);
-    else if (m < 120) snprintf(age, sizeof(age), "As of %lld min ago%s", (long long)m, more);
-    else if (m < 2880) snprintf(age, sizeof(age), "As of %lld h ago%s", (long long)(m / 60), more);
-    else snprintf(age, sizeof(age), "As of %lld days ago%s", (long long)(m / 1440), more);
-    line(s, "Last known balance");
-    (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, d->cache.balance);
-    line(s, age);
-    send_lines(s, d);
-    if (d->cache.pending[0]) line(s, d->cache.pending);
-    if (d->cache.public_line[0]) line(s, d->cache.public_line);
-}
-
 /* ---- the payment in flight ---- */
 #define SENDING_PREFIX "Sending "
 static bool send_finished(const char *line) { return strncmp(line, SENDING_PREFIX, strlen(SENDING_PREFIX)) != 0; }
@@ -527,8 +509,7 @@ static void silent_node_items(struct wallet_screen *s)
 }
 static bool funds_unavailable(const struct data *d)
 {
-    return d->funds_loaded && d->summary_failed && !d->view.known &&
-           !d->cache.valid && !d->node_silent;
+    return d->funds_loaded && d->summary_failed && !d->node_silent;
 }
 
 static void funds_unavailable_items(struct wallet_screen *s, const struct data *d)
@@ -541,9 +522,13 @@ static void funds_unavailable_items(struct wallet_screen *s, const struct data *
 
 static void funds_balance_items(struct wallet_screen *s, const struct data *d)
 {
-    if (!d->funds_loaded) { if (d->cache.valid) cache_lines(s, d); else { line(s, "Balance"); (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, "Loading…"); send_lines(s, d); } }
-    else if (d->summary_failed && d->view.known) { funds_lines(s, d); if (d->node_silent) silent_node_items(s); }
-    else if (d->node_silent) { if (d->cache.valid) cache_lines(s, d); else send_lines(s, d); silent_node_items(s); }
+    if (!d->funds_loaded) { line(s, "Balance"); (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, "Loading…"); send_lines(s, d); }
+    else if (d->node_silent) { send_lines(s, d); silent_node_items(s); }
+    else if (d->cutover_status) {
+        line(s, d->cutover_status == 2 ? "Updating wallet history" : "Wallet status unavailable");
+        if (d->cutover_sync[0]) line(s, d->cutover_sync);
+        send_lines(s, d);
+    }
     else if (funds_unavailable(d)) funds_unavailable_items(s, d);
     else funds_lines(s, d);
 }
@@ -553,7 +538,7 @@ static void funds_items(struct wallet_screen *s)
     const struct data *d = &st.d;
     title(s, "Wallet");
     button(s, WALLET_ACT_RECEIVE, "Receive");
-    if (!(d->summary_failed && d->view.known))
+    if (d->funds_fresh && !d->summary_failed)
         button(s, WALLET_ACT_SEND, d->scan_note[0] ? "Scan again" : "Send");
     button(s, WALLET_ACT_HISTORY, "History");
     if (d->scan_note[0]) note(s, d->scan_note);
@@ -796,9 +781,47 @@ unsigned wallet_screens_snapshot(struct wallet_screen *out)
 
 /* ---- replies ---- */
 
+/* A cached or legacy response cannot establish current cutover authority. */
+static int summary_readiness_status(const struct json_value *data)
+{
+    const struct json_value *available = data ? json_get(data, "balance_available") : NULL;
+    const char *readiness = data ? json_get_str(json_get(data, "wallet_readiness")) : NULL;
+    int status = 0;
+    if (available && available->type == JSON_BOOL && readiness) {
+        if (json_get_bool(available) && strcmp(readiness, "ready") == 0) status = 1;
+        else if (!json_get_bool(available) && strcmp(readiness, "pending") == 0) status = 2;
+        else if (!json_get_bool(available) && strcmp(readiness, "unknown") == 0) status = 3;
+    }
+    return status;
+}
+
+static void summary_format_sync(const struct json_value *data, int status,
+                                char *sync, size_t cap)
+{
+    const struct json_value *tip = data ? json_get(data, "tip_height") : NULL;
+    const struct json_value *behind = data ? json_get(data, "blocks_behind") : NULL;
+    if (status >= 2 && tip && tip->type == JSON_INT && json_get_int(tip) >= 0 &&
+        behind && behind->type == JSON_INT && json_get_int(behind) >= 0)
+        snprintf(sync, cap, "Block %lld; %lld blocks left", (long long)json_get_int(tip),
+                 (long long)json_get_int(behind));
+}
+
+static int summary_status(const char *text, char *sync, size_t cap)
+{
+    struct json_value root = {0};
+    const char *start = json_start(text);
+    bool ok = start && json_read(&root, start, strlen(start));
+    const struct json_value *data = ok ? data_of(&root) : NULL;
+    int status = summary_readiness_status(data);
+    summary_format_sync(data, status, sync, cap);
+    json_cleanse_strings(&root);
+    json_free(&root);
+    return status;
+}
+
 static bool defer_initial_summary(bool valid, bool silent, bool received)
 {
-    if (st.d.summary_validated || st.d.cache.valid || valid || silent || !received ||
+    if (st.d.summary_validated || valid || silent || !received ||
         st.d.initial_failures >= 3 || ++st.d.initial_failures >= 3) return false;
     st.d.funds_loaded = false;
     st.d.node_silent = false;
@@ -812,20 +835,24 @@ static bool defer_initial_summary(bool valid, bool silent, bool received)
 static void apply_summary(bool ok, bool silent, bool received, const char *json)
 {
     struct wallet_view next;
-    bool valid = wallet_view_from_summary(ok && json ? json : "", &next);
-    if (defer_initial_summary(valid, silent, received)) {
+    char sync[96] = {0};
+    int status = ok ? summary_status(json, sync, sizeof(sync)) : 0;
+    bool valid = status == 1 && wallet_view_from_summary(json, &next);
+    if (!valid) memset(&next, 0, sizeof(next));
+    if (defer_initial_summary(valid || status >= 2, silent, received)) {
         memory_cleanse(&next, sizeof(next));
         return;
     }
     st.d.initial_retry_wait = false;
-    bool keep = !valid && st.d.view.known && ends_in_zcl(st.d.view.balance) &&
-        (!st.d.view.encrypted || st.d.view.locked);
+    st.d.cutover_status = status >= 2 ? status : 0;
+    copy(st.d.cutover_sync, sizeof(st.d.cutover_sync), sync);
+
     st.d.funds_loaded = true;
     st.d.summary_failed = !valid;
     st.d.funds_fresh = valid;
     st.d.node_silent = !ok && silent;
     if (valid) { st.d.summary_at = now(); st.d.initial_failures = 0; st.d.summary_validated = true; }
-    if (!keep) st.d.view = next;
+    st.d.view = next;
     memory_cleanse(&next, sizeof(next));
 }
 
@@ -1611,7 +1638,7 @@ static size_t from_funds(enum wallet_action action, struct job *jobs, enum walle
     if (action == WALLET_ACT_RECEIVE) return enter(WALLET_PAGE_RECEIVE, jobs);
     if (action == WALLET_ACT_HISTORY) return enter(WALLET_PAGE_HISTORY, jobs);
     if (action == WALLET_ACT_RETRY_SUMMARY) return retry_summary(jobs);
-    if (action == WALLET_ACT_SEND && !(st.d.summary_failed && st.d.view.known)) *outcome = WALLET_SEND;
+    if (action == WALLET_ACT_SEND && st.d.funds_fresh && !st.d.summary_failed) *outcome = WALLET_SEND;
     if (action == WALLET_ACT_MAKE_PRIVATE && st.d.funds_loaded && !st.d.summary_failed && !st.d.node_silent && st.d.view.can_make_private)
         *outcome = WALLET_MAKE_PRIVATE;
     if (action == WALLET_ACT_START_NODE) *outcome = WALLET_START_NODE;

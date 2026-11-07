@@ -47,6 +47,13 @@ struct ar_callbacks *db_wallet_tx_callbacks(void);
 bool db_wallet_tx_validate(const struct db_wallet_tx *t, struct ar_errors *errors);
 
 bool db_wallet_tx_save(struct node_db *ndb, const struct db_wallet_tx *t);
+enum db_wallet_tx_presence {
+    DB_WALLET_TX_ERROR, DB_WALLET_TX_ABSENT, DB_WALLET_TX_PRESENT
+};
+/* Caller serializes this read with other users of the node connection. */
+enum db_wallet_tx_presence db_wallet_tx_presence_checked(struct node_db *ndb,
+                                                       const uint8_t txid[32]);
+
 bool db_wallet_tx_find(struct node_db *ndb, const uint8_t txid[32],
                        struct db_wallet_tx *out);
 bool db_wallet_tx_delete(struct node_db *ndb, const uint8_t txid[32]);
@@ -101,6 +108,68 @@ struct db_wallet_utxo {
 /* Validation */
 bool db_wallet_utxo_validate(const struct db_wallet_utxo *u,
                               struct ar_errors *errors);
+
+/* Cutover writes require an owned write transaction. Existing spend fields are
+ * never cleared by output replay; conflicts refuse without changing the row. */
+enum db_wallet_utxo_cutover_result {
+    DB_UTXO_CUTOVER_ERROR, DB_UTXO_CUTOVER_OK, DB_UTXO_CUTOVER_CONFLICT
+};
+struct db_wallet_utxo_cutover_event {
+    uint8_t txid[32], address_hash[20];
+    uint32_t vout;
+    int64_t value;
+    int height;
+    bool is_coinbase;
+};
+struct db_wallet_utxo_cutover_delivery {
+    struct db_wallet_utxo_cutover_event *events;
+    size_t count, capacity;
+    bool armed, committed;
+};
+enum db_wallet_utxo_cutover_result db_wallet_utxo_cutover_merge(
+    struct node_db *ndb, const struct db_wallet_utxo *u,
+    struct db_wallet_utxo_cutover_delivery *delivery);
+enum db_wallet_utxo_cutover_result db_wallet_utxo_cutover_spend(
+    struct node_db *ndb, const uint8_t txid[32], uint32_t vout,
+    const uint8_t spent_by[32], int vin);
+struct wallet;
+struct wallet_cutover_v2_plan;
+enum db_wallet_cutover_tx_class {
+    DB_CUTOVER_TX_ACTIVE, DB_CUTOVER_TX_INACTIVE, DB_CUTOVER_TX_UNKNOWN
+};
+typedef enum db_wallet_cutover_tx_class (*db_wallet_cutover_classify)(void *ctx, const uint8_t txid[32]);
+struct tx_out;
+enum db_cutover_coin_verdict {
+    DB_CUTOVER_COIN_UNSPENT, DB_CUTOVER_COIN_SPENT, DB_CUTOVER_COIN_UNKNOWN
+};
+/* UNSPENT means the pinned reference row exactly matches all expected fields;
+ * SPENT means a successful authoritative absence, UNKNOWN includes all errors
+ * and mismatches. Callback must be stable and nonblocking under caller locks. */
+typedef enum db_cutover_coin_verdict (*db_cutover_reference_coin)(void *ctx,
+    const uint8_t txid[32], uint32_t vout, const struct tx_out *expected,
+    int height, bool coinbase);
+struct db_wallet_utxo_cutover_projection {
+    struct db_wallet_utxo_cutover_delivery *delivery;
+    db_wallet_cutover_classify classify_unconfirmed;
+    void *classify_ctx;
+    db_cutover_reference_coin reference_coin;
+    void *reference_coin_ctx;
+};
+/* Caller holds the prepared plan wallet/key locks and tracked write transaction.
+ * The classifier is stable, nonblocking, read-only and covers unconfirmed txs.
+ * Unknown history or an unexplained existing output/reservation refuses. */
+bool db_wallet_utxo_cutover_project(void *ctx, struct node_db *ndb,
+    struct wallet *wallet, struct wallet_cutover_v2_plan *plan);
+
+/* The node_db transaction must be tracked by AR; keep the delivery and event
+ * sink alive through commit and flush. Flush refuses until after-commit acknowledgment.
+ * Clear only after commit or rollback. Failed delivery is retryable from
+ * committed rows and is not a spendability authority. */
+bool db_wallet_utxo_cutover_delivery_flush(struct db_wallet_utxo_cutover_delivery *delivery);
+void db_wallet_utxo_cutover_delivery_clear(struct db_wallet_utxo_cutover_delivery *delivery);
+
+/* Startup-only: re-emit historical seen rows with wallet writes quiescent and sink alive. */
+bool db_wallet_utxo_reemit_all(struct node_db *ndb);
 
 bool db_wallet_utxo_save(struct node_db *ndb, const struct db_wallet_utxo *u);
 bool db_wallet_utxo_mark_spent(struct node_db *ndb,
@@ -252,6 +321,25 @@ struct db_sapling_note {
 bool db_sapling_note_validate(const struct db_sapling_note *n,
                                struct ar_errors *errors);
 bool db_sapling_note_save(struct node_db *ndb, const struct db_sapling_note *n);
+
+/* Caller owns a tracked serialized node.db transaction and must roll it back
+ * on error. The delivery context must live through commit or rollback and be
+ * cleared afterward. Height changes require an explicit reorg unwind. */
+struct sapling_replay_event;
+struct sapling_replay_delivery {
+    struct sapling_replay_event *events;
+    size_t count, capacity, committed;
+    bool failed;
+};
+bool db_sapling_replay_delivery_flush(struct sapling_replay_delivery *delivery);
+void db_sapling_replay_delivery_clear(struct sapling_replay_delivery *delivery);
+enum sapling_replay_merge_result {
+    SAPLING_REPLAY_MERGE_ERROR, SAPLING_REPLAY_MERGE_CONFLICT,
+    SAPLING_REPLAY_MERGE_INSERTED, SAPLING_REPLAY_MERGE_EXISTING
+};
+enum sapling_replay_merge_result db_sapling_note_merge_replayed(
+    struct node_db *ndb, const struct db_sapling_note *note,
+    struct sapling_replay_delivery *delivery);
 
 /* Tri-state result for marking a sapling note spent.
  *

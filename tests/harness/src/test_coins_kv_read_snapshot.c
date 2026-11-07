@@ -2,9 +2,16 @@
  *
  * Purpose: prove coins_kv export reads one WAL generation and rejects malformed rows. */
 #include "test/test_core.h"
+#include "config/boot_wallet_cutover_coins.h"
+#include "wallet/wallet.h"
+#include "script/standard.h"
+#include "util/safe_alloc.h"
+#include <limits.h>
+#include <stdlib.h>
 
 #include "storage/coins_kv.h"
 #include "storage/coins_kv_read_snapshot.h"
+#include "storage/shielded_pool_kv.h"
 #include "storage/progress_store.h"
 
 #include <sqlite3.h>
@@ -350,9 +357,92 @@ static int ckrs_check_frontier_edges(sqlite3 *db)
     return failures;
 }
 
+#ifdef ZCL_TESTING
+void coins_kv_read_snapshot_test_authorizer(struct coins_kv_read_snapshot *,
+    int (*)(void *, int, const char *, const char *, const char *, const char *));
+static int ckrs_deny_read(void *ctx, int action, const char *a, const char *b,
+                          const char *c, const char *d)
+{
+    (void)ctx; (void)a; (void)b; (void)c; (void)d;
+    return action == SQLITE_READ ? SQLITE_DENY : SQLITE_OK;
+}
+#endif
+
+static int ckrs_point_reopen_cases(void)
+{
+    int failures = 0;
+    struct coins_kv_read_snapshot_info info;
+    struct coins_kv_read_snapshot *snap = coins_kv_read_snapshot_open(&info);
+    uint8_t key[32] = {0x33}; key[31] = 0xa5;
+    struct coins_kv_read_snapshot_row row;
+    CKRS_CHECK("new snapshot sees committed point", snap &&
+        coins_kv_read_snapshot_lookup(snap, key, 0, &row) == COINS_KV_LOOKUP_FOUND && row.value == 33);
+#ifdef ZCL_TESTING
+    if (snap) coins_kv_read_snapshot_test_authorizer(snap, ckrs_deny_read);
+    memset(&row, 0xff, sizeof(row));
+    CKRS_CHECK("database failure is error, not absent", snap &&
+        coins_kv_read_snapshot_lookup(snap, key, 0, &row) == COINS_KV_LOOKUP_ERROR && ckrs_row_cleared(&row));
+#endif
+    if (snap) coins_kv_read_snapshot_abort(snap);
+    return failures;
+}
+
+static int ckrs_point_cases(sqlite3 *db)
+{
+    int failures = 0;
+    bool seeded = ckrs_seed_boundary_rows(db);
+    struct coins_kv_read_snapshot_info info;
+    struct coins_kv_read_snapshot *snap = seeded ? coins_kv_read_snapshot_open(&info) : NULL;
+    uint8_t key[32] = {0x01}; key[31] = 0xa5;
+    struct coins_kv_read_snapshot_row row;
+    enum coins_kv_read_snapshot_lookup_result found = snap ?
+        coins_kv_read_snapshot_lookup(snap, key, UINT32_MAX, &row) : COINS_KV_LOOKUP_ERROR;
+    static const uint8_t script[2] = {0x51, 0x52};
+    CKRS_CHECK("point returns exact maximum outpoint and complete value", found == COINS_KV_LOOKUP_FOUND &&
+        ckrs_row_key_is(&row, 1, UINT32_MAX) && ckrs_row_meta_is(&row, 2100000000000000LL, 0, true, 2) &&
+        memcmp(row.script, script, 2) == 0);
+    memset(&row, 0xff, sizeof(row));
+    CKRS_CHECK("missing point is absent and clears output", snap &&
+        coins_kv_read_snapshot_lookup(snap, key, 0, &row) == COINS_KV_LOOKUP_ABSENT && ckrs_row_cleared(&row));
+    key[0] = 0x33;
+    CKRS_CHECK("writer commits new point", ckrs_add(db, 0x33, 0, 33, 3));
+    CKRS_CHECK("pinned point excludes later commit", snap &&
+        coins_kv_read_snapshot_lookup(snap, key, 0, &row) == COINS_KV_LOOKUP_ABSENT);
+    CKRS_CHECK("point lookup does not advance traversal", snap &&
+        coins_kv_read_snapshot_next(snap, &row) == COINS_KV_READ_SNAPSHOT_ROW && ckrs_row_key_is(&row, 0, 1));
+    if (snap) coins_kv_read_snapshot_abort(snap);
+    return failures + ckrs_point_reopen_cases();
+}
+
+static int ckrs_bad_point_cases(sqlite3 *db)
+{
+    static const struct ckrs_case bad[] = {
+        {"negative value", CKRS_TX("10"), "0", "-1", "1", "0", "X'51'"},
+        {"invalid height", CKRS_TX("10"), "0", "1", "21", "0", "X'51'"},
+        {"invalid coinbase", CKRS_TX("10"), "0", "1", "1", "2", "X'51'"},
+        {"oversized script", CKRS_TX("10"), "0", "1", "1", "0", "zeroblob(10001)"},
+        {"text script", CKRS_TX("10"), "0", "1", "1", "0", "'x'"}
+    };
+    int failures = 0;
+    uint8_t key[32] = {0x10}; key[31] = 0xa5;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        bool seeded = ckrs_exec(db, "DELETE FROM coins") && ckrs_put_case(db, &bad[i]);
+        struct coins_kv_read_snapshot_info info;
+        struct coins_kv_read_snapshot *snap = seeded ? coins_kv_read_snapshot_open(&info) : NULL;
+        struct coins_kv_read_snapshot_row row;
+        memset(&row, 0xff, sizeof(row));
+        CKRS_CHECK(bad[i].name, snap && coins_kv_read_snapshot_lookup(snap, key, 0, &row) ==
+            COINS_KV_LOOKUP_ERROR && ckrs_row_cleared(&row));
+        if (snap) coins_kv_read_snapshot_abort(snap);
+    }
+    return failures;
+}
+
 static int ckrs_validation_tests(sqlite3 *db)
 {
     int failures = 0;
+    failures += ckrs_point_cases(db);
+    failures += ckrs_bad_point_cases(db);
     failures += ckrs_check_boundary_rows(db);
     failures += ckrs_check_early_finish(db);
     failures += ckrs_check_bad_rows(db);
@@ -361,6 +451,282 @@ static int ckrs_validation_tests(sqlite3 *db)
 }
 
 int test_coins_kv_read_snapshot(void);
+static bool ckrs_cutover_resolve(void *ctx, const uint8_t hash[32], int *height)
+{
+    (void)ctx;
+    if (hash[0] == 0x31) *height = 5;
+    else if (hash[0] == 0x40) *height = 10;
+    else if (hash[0] == 0x41) *height = 11;
+    else return false;
+    return true;
+}
+
+static bool ckrs_cutover_setup(sqlite3 *db, struct wallet *w, struct wallet_tx *tx)
+{
+    struct key_id id = {0}; id.id.data[0] = 9;
+    if (!db || !w || !coins_kv_ensure_schema(db) || !coins_kv_mark_migration_complete(db) ||
+        !ckrs_set_frontier(db, 11) || !keystore_add_watch_only_id(&w->keystore, &id) ||
+        !transaction_alloc(&tx->tx, 0, 2)) return false;
+    struct tx_destination dest = {.type = DEST_KEY_ID, .id.key = id};
+    tx->tx.hash.data[0] = 0x22; tx->hash_block.data[0] = 0x31;
+    script_for_destination(&tx->tx.vout[0].script_pub_key, &dest);
+    tx->tx.vout[1].script_pub_key = tx->tx.vout[0].script_pub_key;
+    tx->tx.vout[0].value = 100; tx->tx.vout[1].value = 200;
+    return wallet_add_to_wallet(w, tx) && coins_kv_add(db, tx->tx.hash.data, 0, 100, 5,
+        false, tx->tx.vout[0].script_pub_key.data, tx->tx.vout[0].script_pub_key.size);
+}
+
+static bool ckrs_cutover_write_newer(sqlite3 *db, const struct wallet_tx *tx)
+{
+    progress_store_tx_lock();
+    bool ok = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK &&
+        coins_kv_add(db, tx->tx.hash.data, 1, 201, 5, false,
+                     tx->tx.vout[1].script_pub_key.data, tx->tx.vout[1].script_pub_key.size) &&
+        coins_kv_set_applied_height_in_tx(db, 12) && coins_kv_bump_authority_generation_in_tx(db) &&
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    if (!ok) (void)sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    progress_store_tx_unlock();
+    return ok;
+}
+
+static int ckrs_cutover_check_pinned(struct wallet *w, const struct wallet_tx *tx,
+    struct coins_kv_read_snapshot *snap, const struct coins_kv_read_snapshot_info *info,
+    const uint8_t identity[32])
+{
+    int failures = 0;
+    uint8_t ref[32] = {0x40};
+    struct boot_cutover_coins *cache = NULL;
+    enum boot_cutover_coins_status st = boot_cutover_coins_prepare(w, snap, info, 10, ref,
+        info->authority_generation, identity, ckrs_cutover_resolve, NULL, &cache);
+    CKRS_CHECK("watch-only outputs captured from pinned generation", st == BOOT_CUTOVER_COINS_OK && cache &&
+        boot_cutover_coins_verdict(cache, tx->tx.hash.data, 0, &tx->tx.vout[0], 5, false) == DB_CUTOVER_COIN_UNSPENT &&
+        boot_cutover_coins_verdict(cache, tx->tx.hash.data, 1, &tx->tx.vout[1], 5, false) == DB_CUTOVER_COIN_SPENT);
+    CKRS_CHECK("identity and generation bind cache", boot_cutover_coins_matches(cache, 10, ref,
+        info->authority_generation, identity) && !boot_cutover_coins_matches(cache, 10, ref,
+        info->authority_generation + 1, identity));
+    struct tx_out changed = tx->tx.vout[0]; changed.value++;
+    CKRS_CHECK("mismatched output is unknown", boot_cutover_coins_verdict(cache, tx->tx.hash.data, 0,
+        &changed, 5, false) == DB_CUTOVER_COIN_UNKNOWN);
+    boot_cutover_coins_free(cache);
+    return failures;
+}
+
+static int ckrs_cutover_check_heights(struct wallet *w, struct coins_kv_read_snapshot *snap,
+    const struct coins_kv_read_snapshot_info *info, const uint8_t identity[32])
+{
+    int failures = 0;
+    const uint8_t ref[32] = {0x40};
+    struct boot_cutover_coins *cache = NULL;
+    enum boot_cutover_coins_status st = boot_cutover_coins_prepare(w, snap, info, 11, ref,
+        info->authority_generation, identity, ckrs_cutover_resolve, NULL, &cache);
+    CKRS_CHECK("exclusive frontier rejects equal endpoint", st == BOOT_CUTOVER_COINS_INVALID && !cache);
+    st = boot_cutover_coins_prepare(w, snap, info, INT_MAX, ref,
+        info->authority_generation, identity, ckrs_cutover_resolve, NULL, &cache);
+    CKRS_CHECK("maximum endpoint refuses overflow", st == BOOT_CUTOVER_COINS_INVALID && !cache);
+    return failures;
+}
+
+static int ckrs_cutover_cache_fixture(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "cutover_coin_cache", "main");
+    bool opened = progress_store_open(dir);
+    sqlite3 *db = opened ? progress_store_db() : NULL;
+    struct wallet *w = zcl_calloc(1, sizeof(*w), "cutover cache test wallet");
+    struct wallet_tx tx = {0};
+    if (w) wallet_init(w);
+    bool ok = ckrs_cutover_setup(db, w, &tx);
+    uint8_t identity[32] = {0}, ref[32] = {0x41};
+    if (ok) ok = wallet_scan_identity(w, identity);
+    struct coins_kv_read_snapshot_info info = {0};
+    struct coins_kv_read_snapshot *snap = ok ? coins_kv_read_snapshot_open(&info) : NULL;
+    CKRS_CHECK("cutover fixture opens pinned snapshot", snap != NULL);
+    if (snap) {
+        CKRS_CHECK("newer generation commits", ckrs_cutover_write_newer(db, &tx));
+        failures += ckrs_cutover_check_pinned(w, &tx, snap, &info, identity);
+        failures += ckrs_cutover_check_heights(w, snap, &info, identity);
+        coins_kv_read_snapshot_abort(snap);
+    }
+    struct coins_kv_read_snapshot_info newer_info = {0};
+    struct coins_kv_read_snapshot *newer = ok ? coins_kv_read_snapshot_open(&newer_info) : NULL;
+    struct boot_cutover_coins *bad = NULL;
+    enum boot_cutover_coins_status st = newer ? boot_cutover_coins_prepare(w, newer, &newer_info, 11, ref,
+        newer_info.authority_generation, identity, ckrs_cutover_resolve, NULL, &bad) : BOOT_CUTOVER_COINS_ERROR;
+    CKRS_CHECK("new snapshot rejects mismatched durable row", st == BOOT_CUTOVER_COINS_INVALID && !bad);
+    boot_cutover_coins_free(bad);
+    if (newer) coins_kv_read_snapshot_abort(newer);
+    transaction_free(&tx.tx);
+    if (w) { wallet_free(w); free(w); }
+    if (opened) progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static bool ckrs_pool_expect(struct coins_kv_read_snapshot *snap, int32_t height,
+                             bool expected_found, int64_t expected_sprout,
+                             int64_t expected_sapling)
+{
+    int64_t sprout = 9, sapling = 9;
+    bool found = true;
+    return snap && coins_kv_read_snapshot_shielded_pool(snap, height, &sprout, &sapling, &found) &&
+        found == expected_found && sprout == expected_sprout && sapling == expected_sapling;
+}
+
+static bool ckrs_pool_refused(struct coins_kv_read_snapshot *snap, int32_t height)
+{
+    int64_t sprout = 9, sapling = 9;
+    bool found = true;
+    return snap && !coins_kv_read_snapshot_shielded_pool(snap, height, &sprout, &sapling, &found) &&
+        !found && sprout == 0 && sapling == 0;
+}
+
+static int ckrs_pool_pinned(sqlite3 *db)
+{
+    int failures = 0;
+    struct coins_kv_read_snapshot_info info = {0};
+    struct coins_kv_read_snapshot *snap = coins_kv_read_snapshot_open(&info);
+    CKRS_CHECK("pool snapshot opens", snap && info.applied_height == 11);
+    CKRS_CHECK("missing pool is distinct from zero",
+        ckrs_pool_expect(snap, 10, false, 0, 0));
+    CKRS_CHECK("writer inserts known zero after pin",
+        ckrs_exec(db, "INSERT INTO shielded_pool_totals VALUES(10,0,0)"));
+    CKRS_CHECK("pinned snapshot still sees missing pool",
+        ckrs_pool_expect(snap, 10, false, 0, 0));
+    if (snap) coins_kv_read_snapshot_abort(snap);
+    snap = coins_kv_read_snapshot_open(&info);
+    CKRS_CHECK("new snapshot reads known zero",
+        ckrs_pool_expect(snap, 10, true, 0, 0));
+    CKRS_CHECK("writer updates pool after pin",
+        ckrs_exec(db, "UPDATE shielded_pool_totals SET sprout=7,sapling=9 WHERE height=10"));
+    CKRS_CHECK("pinned snapshot retains earlier zero",
+        ckrs_pool_expect(snap, 10, true, 0, 0));
+    if (snap) coins_kv_read_snapshot_abort(snap);
+    snap = coins_kv_read_snapshot_open(&info);
+    CKRS_CHECK("new snapshot reads updated totals",
+        ckrs_pool_expect(snap, 10, true, 7, 9));
+    if (snap) coins_kv_read_snapshot_abort(snap);
+    return failures;
+}
+
+static int ckrs_pool_refusals(sqlite3 *db)
+{
+    int failures = 0;
+    struct coins_kv_read_snapshot_info info = {0};
+    CKRS_CHECK("malformed pool fixture", ckrs_exec(db,
+        "UPDATE shielded_pool_totals SET sprout='bad' WHERE height=10"));
+    struct coins_kv_read_snapshot *snap = coins_kv_read_snapshot_open(&info);
+    CKRS_CHECK("malformed pool poisons and clears outputs",
+        ckrs_pool_refused(snap, 10));
+    struct coins_kv_read_snapshot_row row;
+    CKRS_CHECK("poisoned pool snapshot refuses further reads",
+        snap && coins_kv_read_snapshot_next(snap, &row) == COINS_KV_READ_SNAPSHOT_ERROR);
+    if (snap) coins_kv_read_snapshot_abort(snap);
+    CKRS_CHECK("negative pool fixture", ckrs_exec(db,
+        "UPDATE shielded_pool_totals SET sprout=-1 WHERE height=10"));
+    snap = coins_kv_read_snapshot_open(&info);
+    CKRS_CHECK("negative pool is refused with cleared outputs",
+        ckrs_pool_refused(snap, 10));
+    if (snap) coins_kv_read_snapshot_abort(snap);
+    CKRS_CHECK("restore valid pool totals", ckrs_exec(db,
+        "UPDATE shielded_pool_totals SET sprout=7,sapling=9 WHERE height=10"));
+    snap = coins_kv_read_snapshot_open(&info);
+    CKRS_CHECK("valid pool reads before refusal injection", ckrs_pool_expect(snap, 10, true, 7, 9));
+    if (snap) coins_kv_read_snapshot_abort(snap);
+    snap = coins_kv_read_snapshot_open(&info);
+#ifdef ZCL_TESTING
+    if (snap) coins_kv_read_snapshot_test_authorizer(snap, ckrs_deny_read);
+    CKRS_CHECK("database refusal poisons and clears outputs",
+        ckrs_pool_refused(snap, 10));
+    if (snap) coins_kv_read_snapshot_abort(snap);
+    snap = coins_kv_read_snapshot_open(&info);
+#endif
+    CKRS_CHECK("wrong endpoint poisons and clears outputs",
+        ckrs_pool_refused(snap, 9));
+    if (snap) coins_kv_read_snapshot_abort(snap);
+    return failures;
+}
+
+static int ckrs_pool_transaction_rows(sqlite3 *db)
+{
+    int failures = 0;
+    int64_t a = -1, b = -1;
+    bool found = true;
+    CKRS_CHECK("transaction reader zero fixture",
+        ckrs_exec(db, "UPDATE shielded_pool_totals SET sprout=0,sapling=0 WHERE height=10") &&
+        coins_kv_read_transaction_shielded_pool(db, 10, &a, &b, &found) &&
+        found && a == 0 && b == 0);
+    CKRS_CHECK("transaction reader missing fixture",
+        ckrs_exec(db, "DELETE FROM shielded_pool_totals WHERE height=10") &&
+        coins_kv_read_transaction_shielded_pool(db, 10, &a, &b, &found) &&
+        !found && a == 0 && b == 0);
+    CKRS_CHECK("transaction reader malformed fixture",
+        ckrs_exec(db, "INSERT INTO shielded_pool_totals VALUES(10,'bad',0)") &&
+        !coins_kv_read_transaction_shielded_pool(db, 10, &a, &b, &found) &&
+        !found && a == 0 && b == 0);
+    CKRS_CHECK("transaction reader closes", ckrs_exec(db, "ROLLBACK"));
+    return failures;
+}
+
+static int ckrs_pool_transaction(sqlite3 *db)
+{
+    int failures = 0;
+    int64_t a = -1, b = -1;
+    bool found = true;
+    CKRS_CHECK("transaction reader refuses autocommit",
+        !coins_kv_read_transaction_shielded_pool(db, 10, &a, &b, &found) &&
+        a == 0 && b == 0 && !found);
+    CKRS_CHECK("transaction reader begins", ckrs_exec(db, "BEGIN"));
+    CKRS_CHECK("transaction reader sees exact row",
+        coins_kv_read_transaction_shielded_pool(db, 10, &a, &b, &found) &&
+        found && a == 7 && b == 9);
+    CKRS_CHECK("transaction reader refuses wrong height",
+        !coins_kv_read_transaction_shielded_pool(db, 9, &a, &b, &found) &&
+        a == 0 && b == 0 && !found);
+    failures += ckrs_pool_transaction_rows(db);
+    return failures;
+}
+
+static int ckrs_pool_transaction_pinned(sqlite3 *writer)
+{
+    int failures = 0;
+    int64_t a = -1, b = -1;
+    bool found = false;
+    sqlite3 *reader = progress_store_open_reader();
+    CKRS_CHECK("transaction reader opens", reader != NULL);
+    if (!reader) return failures;
+    CKRS_CHECK("transaction reader pins generation",
+        ckrs_exec(reader, "BEGIN") &&
+        coins_kv_read_transaction_shielded_pool(reader, 10, &a, &b, &found) &&
+        found && a == 7 && b == 9);
+    CKRS_CHECK("writer changes pool after pin",
+        ckrs_exec(writer, "UPDATE shielded_pool_totals SET sprout=12,sapling=13 WHERE height=10"));
+    CKRS_CHECK("transaction reader retains pinned pool",
+        coins_kv_read_transaction_shielded_pool(reader, 10, &a, &b, &found) &&
+        found && a == 7 && b == 9);
+    CKRS_CHECK("transaction reader ends", ckrs_exec(reader, "ROLLBACK"));
+    CKRS_CHECK("transaction reader closes", sqlite3_close(reader) == SQLITE_OK);
+    CKRS_CHECK("restore writer pool", ckrs_exec(writer,
+        "UPDATE shielded_pool_totals SET sprout=7,sapling=9 WHERE height=10"));
+    return failures;
+}
+
+static int ckrs_pool_fixture(void)
+{
+    int failures = 0; char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "pinned_shielded_pool", "main");
+    bool opened = progress_store_open(dir);
+    sqlite3 *db = opened ? progress_store_db() : NULL;
+    bool ready = db && coins_kv_ensure_schema(db) && ckrs_add(db, 0x10, 0, 100, 5) &&
+        coins_kv_mark_migration_complete(db) && ckrs_set_frontier(db, 11) &&
+        shielded_pool_kv_ensure_schema(db);
+    CKRS_CHECK("pool authority fixture ready", ready);
+    if (ready) { failures += ckrs_pool_pinned(db); failures += ckrs_pool_refusals(db); failures += ckrs_pool_transaction(db); failures += ckrs_pool_transaction_pinned(db); }
+    if (opened) progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_coins_kv_read_snapshot(void)
 {
     printf("\n=== coins_kv_read_snapshot tests ===\n");
@@ -425,5 +791,7 @@ int test_coins_kv_read_snapshot(void)
 
     progress_store_close();
     test_cleanup_tmpdir(dir);
+    failures += ckrs_cutover_cache_fixture();
+    failures += ckrs_pool_fixture();
     return failures;
 }

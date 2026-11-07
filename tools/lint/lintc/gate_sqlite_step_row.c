@@ -83,18 +83,43 @@ static size_t ssr_skip_block_comment(char *b, size_t i, size_t n)
     return i;
 }
 
-/* 1'000: a C23 digit separator, not a character literal. */
-static int ssr_digit_sep(const char *b, size_t i, size_t n)
+/* Skip one preprocessing number so C23 digit separators are not mistaken
+ * for the start of a character literal. */
+static size_t ssr_skip_number(const char *b, size_t i, size_t n)
 {
-    return b[i] == '\'' && i > 0 && i + 1 < n &&
-           isdigit((unsigned char)b[i - 1]) && isdigit((unsigned char)b[i + 1]);
+    i++;
+    while (i < n) {
+        unsigned char c = (unsigned char)b[i];
+        if (isalnum(c) || c == '_' || c == '.') {
+            i++;
+        } else if (c == 0x27 && i + 1 < n &&
+                   (isalnum((unsigned char)b[i + 1]) || b[i + 1] == '_')) {
+            i += 2;
+        } else if ((c == '+' || c == '-') &&
+                   (b[i - 1] == 'e' || b[i - 1] == 'E' ||
+                    b[i - 1] == 'p' || b[i - 1] == 'P')) {
+            i++;
+        } else {
+            break;
+        }
+    }
+    return i;
 }
 
+static int ssr_number_start(const char *b, size_t i, size_t n)
+{
+    if (i && (isalnum((unsigned char)b[i - 1]) || b[i - 1] == '_'))
+        return 0;
+    return isdigit((unsigned char)b[i]) ||
+           (b[i] == '.' && i + 1 < n && isdigit((unsigned char)b[i + 1]));
+}
 void ssr_blank(char *b, size_t n)
 {
     size_t i = 0;
     while (i < n) {
-        if ((b[i] == '"' || b[i] == '\'') && !ssr_digit_sep(b, i, n)) {
+        if (ssr_number_start(b, i, n)) {
+            i = ssr_skip_number(b, i, n);
+        } else if (b[i] == 0x22 || b[i] == 0x27) {
             i = ssr_skip_literal(b, i, n);
         } else if (b[i] == '/' && i + 1 < n && b[i + 1] == '*') {
             i = ssr_skip_block_comment(b, i, n);

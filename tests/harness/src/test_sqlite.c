@@ -4511,8 +4511,31 @@ static void check_sqlite_progress_handler_owners(int *failures)
     else { printf("FAIL\n"); (*failures)++; }
 }
 
+static int normal_mode_deny(void *ctx, int action, const char *a, const char *b,
+                            const char *c, const char *d)
+{
+    (void)a; (void)b; (void)c; (void)d;
+    return action == *(const int *)ctx ? SQLITE_DENY : SQLITE_OK;
+}
+
+static bool normal_mode_refusal_case(int action)
+{
+    struct node_db ndb = {0};
+    if (!node_db_open(&ndb, ":memory:")) return false;
+    if (action == SQLITE_CREATE_INDEX) node_db_drop_indexes(&ndb);
+    ndb.turbo_mode = true;
+    bool ok = sqlite3_set_authorizer(ndb.db, normal_mode_deny, &action) == SQLITE_OK &&
+              !node_db_normal_mode(&ndb) && ndb.turbo_mode;
+    sqlite3_set_authorizer(ndb.db, NULL, NULL);
+    ok = ok && node_db_normal_mode(&ndb) && !ndb.turbo_mode;
+    node_db_close(&ndb);
+    return ok;
+}
+
+
 int test_sqlite(void) {
     int failures = 0;
+    if (!normal_mode_refusal_case(SQLITE_PRAGMA) || !normal_mode_refusal_case(SQLITE_CREATE_INDEX)) failures++;
 
 #if defined(_WIN32)
     /* Cross-process lease tests re-exec this binary with a role instead of

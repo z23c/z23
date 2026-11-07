@@ -20,6 +20,13 @@
 #include "config/boot_msg_callbacks.h"
 #include "consensus/upgrades.h"
 #include "controllers/wallet_controller.h"
+#include "controllers/vault_intent_controller.h"
+#include "models/wallet_identity.h"
+#include "wallet/wallet_canary.h"
+#include "models/block.h"
+#include "services/wallet_backup_service.h"
+#include "services/sync_monitor.h"
+#include "sync/sync_state.h"
 #include "controllers/wallet_helpers.h"
 #include "controllers/transaction_controller.h"
 #include "controllers/wallet_private_broadcast.h"
@@ -40,6 +47,8 @@
 #include "net/protocol.h"
 #include "platform/clock.h"
 #include "platform/file_stream.h"
+#include "platform/private_file.h"
+#include "platform/private_directory.h"
 #include "platform/time_compat.h"
 #include "util/authority_receipt.h"
 #include "util/sync.h"
@@ -112,6 +121,7 @@ struct wprt_fx {
 };
 
 static struct wprt_fx *wprt_cur;
+static bool wprt_file_database;
 
 enum wprt_kind { WPRT_ONION_OUT, WPRT_ONION_IN, WPRT_CLEAR_OUT,
                  WPRT_ONION_DISCONNECT, WPRT_ONION_NO_RELAY };
@@ -131,6 +141,8 @@ static bool wprt_open(struct wprt_fx *f, enum wpr_mode mode)
     if (!f->wallet || !test_mkdtemp(f->dir, sizeof(f->dir), "wprt"))
         return false;
     wallet_init(f->wallet);
+    if (!wallet_readiness_initialize(f->wallet, WALLET_READINESS_READY, true, 42))
+        return false;
     struct node_signals sigs;
     memset(&sigs, 0, sizeof(sigs));
     if (!connman_init(&f->cm, f->params, &sigs))
@@ -529,7 +541,9 @@ static bool wprt_rpc_start(struct wprt_fx *f, bool with_db)
     if (with_db) {
         wallet_lock_reset_for_test();
         wallet_lock_note_encrypted_at_rest();
-        if (!node_db_open(&f->ndb, ":memory:"))
+        char dbpath[320];
+        snprintf(dbpath, sizeof(dbpath), "%s/node.db", f->dir);
+        if (!node_db_open(&f->ndb, wprt_file_database ? dbpath : ":memory:"))
             return false;
         f->db_open = true;
         if (!wallet_sqlite_open_r(&f->wsql, f->ndb.db).ok)
@@ -1492,6 +1506,209 @@ static int wprt_case_boot(void)
     return failures;
 }
 
+static bool wprt_write_pending_bytes(const char *dir, const char *bytes, size_t len)
+{
+    return authority_receipt_write_atomic(dir, "wallet_private_relay.pending",
+                                           (const uint8_t *)bytes, len, NULL, 0);
+}
+
+static void wprt_pending_failure_cases(struct wprt_fx *f, char *record, int n, int *failures)
+{
+    struct wpr_pending_record rows[2]; size_t count = 0;
+    record[n - 2] = 'z';
+    bool ok = wprt_write_pending_bytes(f->dir, record, (size_t)n);
+    enum wpr_pending_read_status s = wpr_pending_snapshot(wpr_global(), rows, 2, &count);
+    wprt_report("checked pending reader refuses malformed data", ok && s == WPR_PENDING_MALFORMED && count == 0, failures);
+    char path[512]; snprintf(path, sizeof(path), "%s/wallet_private_relay.pending", f->dir);
+    ok = platform_private_file_unlink_missing_ok(path) && platform_private_directory_create(path);
+    s = wpr_pending_snapshot(wpr_global(), rows, 2, &count);
+    wprt_report("checked pending reader distinguishes I/O error", ok && s == WPR_PENDING_IO_ERROR && count == 0, failures);
+    if (ok) (void)platform_private_directory_remove_empty(path);
+}
+
+static int wprt_case_invalid_pending_count(void)
+{
+    int failures = 0;
+    size_t count = 99;
+    enum wpr_pending_read_status status = wpr_pending_snapshot(NULL, NULL, 0, &count);
+    wprt_report("invalid pending snapshot clears count", status == WPR_PENDING_IO_ERROR && count == 0, &failures);
+    count = 99;
+    status = wpr_pending_proof_begin(NULL, NULL, NULL, 0, &count);
+    wprt_report("invalid pending proof clears count", status == WPR_PENDING_IO_ERROR && count == 0, &failures);
+    return failures;
+}
+
+static int wprt_case_checked_pending_reader(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_open(&f, WPR_MODE_PUBLIC);
+    if (!ok) { wprt_close(&f); return 1; }
+    struct wpr_pending_record rows[2]; size_t count = 99;
+    enum wpr_pending_read_status s = wpr_pending_snapshot(wpr_global(), rows, 2, &count);
+    wprt_report("checked pending reader distinguishes absent", s == WPR_PENDING_ABSENT && count == 0, &failures);
+    char record[128];
+    int n = snprintf(record, sizeof(record), "# wallet_private_relay v1\n%064x\n", 1);
+    ok = n > 0 && (size_t)n < sizeof(record) && wprt_write_pending_bytes(f.dir, record, (size_t)n);
+    s = wpr_pending_snapshot(wpr_global(), rows, 2, &count);
+    struct uint256 expected; uint256_set_hex(&expected, "0000000000000000000000000000000000000000000000000000000000000001");
+    wprt_report("checked pending reader preserves exact record", ok && s == WPR_PENDING_OK && count == 1 &&
+        uint256_eq(&rows[0].txid, &expected) && !rows[0].expired && !rows[0].handed, &failures);
+    s = wpr_pending_snapshot(wpr_global(), rows, 0, &count);
+    wprt_report("checked pending reader refuses bounded overflow", s == WPR_PENDING_OVERFLOW && count == 0, &failures);
+    if (n > 1) wprt_pending_failure_cases(&f, record, n, &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+static int wprt_case_pending_guard_bound(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_open(&f, WPR_MODE_PUBLIC);
+    if (!ok) { wprt_close(&f); return 1; }
+    char file[sizeof("# wallet_private_relay v1\n") + (WPR_MAX_ENTRIES + 1) * 65];
+    int first = snprintf(file, sizeof(file), "# wallet_private_relay v1\n");
+    size_t used = first > 0 ? (size_t)first : sizeof(file);
+    for (unsigned i = 0; ok && i <= WPR_MAX_ENTRIES; ++i) {
+        int n = snprintf(file + used, sizeof(file) - used, "%064x\n", i + 1);
+        ok = n == 65 && (size_t)n < sizeof(file) - used;
+        if (ok) used += (size_t)n;
+    }
+    ok = ok && wprt_write_pending_bytes(f.dir, file, used);
+    struct wpr_pending_record rows[WPR_MAX_ENTRIES + 1];
+    struct wpr_pending_guard guard = {0}; size_t count = 99;
+    enum wpr_pending_read_status status = ok ? wpr_pending_proof_begin(
+        wpr_global(), &guard, rows, WPR_MAX_ENTRIES + 1, &count) : WPR_PENDING_IO_ERROR;
+    wprt_report("held proof refuses records beyond its fixed bound", ok &&
+        status == WPR_PENDING_OVERFLOW && !guard.relay && count == 0, &failures);
+    wpr_pending_proof_end(&guard);
+    wprt_close(&f);
+    return failures;
+}
+
+struct wprt_guard_probe { enum wpr_pending_read_status status; };
+static void *wprt_guard_try(void *arg)
+{
+    struct wprt_guard_probe *probe = arg;
+    struct wpr_pending_guard guard = {0};
+    struct wpr_pending_record rows[1];
+    size_t count = 0;
+    probe->status = wpr_pending_proof_begin(wpr_global(), &guard, rows, 1, &count);
+    wpr_pending_proof_end(&guard);
+    return NULL;
+}
+
+static int wprt_case_pending_guard(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_open(&f, WPR_MODE_PUBLIC);
+    if (!ok) { wprt_close(&f); return 1; }
+    struct wpr_pending_guard guard = {0};
+    struct wpr_pending_record rows[1]; size_t count = 1;
+    enum wpr_pending_read_status status = wpr_pending_proof_begin(wpr_global(), &guard, rows, 1, &count);
+    struct wprt_guard_probe probe = {0}; pthread_t thread;
+    bool started = status == WPR_PENDING_ABSENT && guard.relay &&
+        pthread_create(&thread, NULL, wprt_guard_try, &probe) == 0;
+    if (started) (void)pthread_join(thread, NULL);
+    wprt_report("held pending proof excludes concurrent relay writer", started && probe.status == WPR_PENDING_BUSY, &failures);
+    wpr_pending_proof_end(&guard);
+    count = 1;
+    status = wpr_pending_proof_begin(wpr_global(), &guard, rows, 1, &count);
+    wprt_report("released pending proof can be reacquired", status == WPR_PENDING_ABSENT && guard.relay && count == 0, &failures);
+    wpr_pending_proof_end(&guard);
+    wpr_global()->persist_dirty = true;
+    status = wpr_pending_proof_begin(wpr_global(), &guard, rows, 1, &count);
+    wprt_report("dirty relay state refuses proof", status == WPR_PENDING_IO_ERROR && !guard.relay, &failures);
+    wpr_global()->persist_dirty = false;
+    struct uint256 id = {0}; id.data[0] = 1;
+    char path[512]; snprintf(path, sizeof(path), "%s/wallet_private_relay.pending", f.dir);
+    ok = wpr_prepare(wpr_global(), &id).ok && platform_private_file_unlink_missing_ok(path);
+    status = wpr_pending_proof_begin(wpr_global(), &guard, rows, 1, &count);
+    wprt_report("in-memory hold missing from durable file refuses proof", ok && status == WPR_PENDING_IO_ERROR && !guard.relay, &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+static bool wprt_hook_state_unchanged(const struct wprt_fx *f, const struct uint256 *id,
+                                      enum wpr_state before, bool found)
+{
+    bool after_found = false;
+    enum wpr_state after = wprt_state(id, &after_found);
+    const struct wallet_tx *stored = wallet_get_tx(f->wallet, id);
+    return found && after_found && before == after && f->wallet->num_wallet_tx == 1 &&
+        stored && stored->confirms == 8 && tx_mempool_exists(wpr_pool(wpr_global()), id);
+}
+
+static int wprt_case_unready_accepted_hook(bool pending)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 1, false);
+    struct uint256 id = {0};
+    ok = ok && wprt_rpc_send(&f, false, 10.0, &id);
+    struct wallet_tx snapshot;
+    bool copied = ok && wprt_copy_tx(&f, &id, &snapshot);
+    bool found = false;
+    enum wpr_state before = copied ? wprt_state(&id, &found) : WPR_SEEN;
+    wallet_free(f.wallet);
+    wallet_init(f.wallet);
+    if (pending) ok = ok && wallet_readiness_initialize(f.wallet, WALLET_READINESS_PENDING, true, 42);
+    if (copied) { snapshot.confirms = 8; ok = ok && wallet_add_to_wallet(f.wallet, &snapshot); }
+    struct boot_svc_ctx *svc = zcl_calloc(1, sizeof(*svc), "wprt_pending_svc");
+    if (copied && svc) {
+        svc->wallet = f.wallet;
+        boot_wallet_tx_accepted(&snapshot.tx, svc);
+    }
+    bool unchanged = wprt_hook_state_unchanged(&f, &id, before, found);
+    wprt_report(pending ? "pending tx callback leaves wallet and relay unchanged" :
+                          "unknown tx callback leaves wallet and relay unchanged",
+        ok && copied && svc && unchanged, &failures);
+    if (copied) transaction_free(&snapshot.tx);
+    free(svc);
+    wprt_close(&f);
+    return failures;
+}
+
+static bool wprt_held_record_matches(const char *dir, const char *record, size_t len)
+{
+    char path[512], actual[128] = {0};
+    snprintf(path, sizeof(path), "%s/wallet_private_relay.pending", dir);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return false;
+    size_t n = fread(actual, 1, sizeof(actual), fp);
+    bool closed = fclose(fp) == 0;
+    return closed && n == len && memcmp(actual, record, n) == 0;
+}
+
+static int wprt_case_unready_boot_configuration(bool pending)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_open(&f, WPR_MODE_PUBLIC);
+    if (!ok) { wprt_close(&f); return 1; }
+    wallet_free(f.wallet);
+    wallet_init(f.wallet);
+    if (pending)
+        ok = wallet_readiness_initialize(f.wallet, WALLET_READINESS_PENDING, true, 42);
+    char record[128];
+    int len = snprintf(record, sizeof(record), "# wallet_private_relay v1\n%064x\n", 1);
+    ok = ok && len > 0 && (size_t)len < sizeof(record) &&
+        authority_receipt_write_atomic(f.dir, "wallet_private_relay.pending",
+                                       (const uint8_t *)record, (size_t)len, NULL, 0);
+    bool configured = ok && wprt_boot_try(&f, 1, true, NULL);
+    struct wallet_tx_admission main_adm = wprt_admission(&f, &f.main_pool);
+    wprt_report(pending ? "pending boot configures private pool without resuming held sends" :
+        "unknown boot configures private pool without resuming held sends",
+        configured && wpr_get_mode(wpr_global()) == WPR_MODE_PRIVATE &&
+        !wallet_admission_pool_check(&main_adm).ok && wprt_pending() == 0 &&
+        wprt_held_record_matches(f.dir, record, (size_t)len), &failures);
+    wallet_private_broadcast_stop();
+    wprt_close(&f);
+    return failures;
+}
+
 /* ── a send the chain may already hold ──────────────────────────────── */
 
 /* The chain consumed the funding coin in a block the wallet never read. */
@@ -2070,6 +2287,174 @@ int wallet_private_relay_gate_leg(const struct wallet_private_relay_leg *l)
 /* Whichever controller authors a transaction (names, identities, anchors,
  * directories, ZSLP, vault intents, a caller added tomorrow), the wallet's
  * commit and re-admission refuse the main pool in private mode. */
+#ifdef ZCL_TESTING
+struct zcl_result zcl_test_ztic_publish(void *, const uint8_t *, size_t, const uint8_t[32]);
+struct zcl_result zcl_test_znic_publish(void *, const uint8_t *, size_t, const uint8_t[32]);
+
+static bool wprt_pending_intent_retries(struct wprt_fx *f,
+    struct wallet_rpc_context *ctx, const struct byte_stream *raw,
+    const struct wallet_tx *tx)
+{
+    struct wallet *pending = zcl_calloc(1, sizeof(*pending), "wprt_pending_wallet");
+    if (!pending) return false;
+    wallet_init(pending);
+    bool ok = wallet_readiness_initialize(pending, WALLET_READINESS_PENDING, true, 42);
+    struct wallet_rpc_context view = *ctx; view.wallet = pending;
+    struct zcl_result a = ok ? zcl_test_ztic_publish(&view, raw->data, raw->size, tx->tx.hash.data) : ZCL_ERR(-1, "setup");
+    struct zcl_result b = ok ? zcl_test_znic_publish(&view, raw->data, raw->size, tx->tx.hash.data) : ZCL_ERR(-1, "setup");
+    ok = ok && !a.ok && a.code == -5 && !b.ok && b.code == -5 && tx_mempool_size(&f->main_pool) == 0;
+    wallet_free(pending); free(pending);
+    return ok;
+}
+
+static bool wprt_ready_intent_retries(struct wprt_fx *f,
+    struct wallet_rpc_context *ctx, const struct byte_stream *raw,
+    const struct wallet_tx *tx)
+{
+    struct zcl_result a = zcl_test_ztic_publish(ctx, raw->data, raw->size, tx->tx.hash.data);
+    bool admitted = a.ok && tx_mempool_exists(&f->main_pool, &tx->tx.hash);
+    if (admitted) {
+        struct zcl_result repeat = zcl_test_ztic_publish(ctx, raw->data, raw->size, tx->tx.hash.data);
+        admitted = repeat.ok;
+        if (admitted) tx_mempool_remove(&f->main_pool, &tx->tx.hash);
+    }
+    struct zcl_result b = zcl_test_znic_publish(ctx, raw->data, raw->size, tx->tx.hash.data);
+    struct zcl_result repeat = b.ok ? zcl_test_znic_publish(ctx, raw->data, raw->size, tx->tx.hash.data) : ZCL_ERR(-1, "setup");
+    return admitted && b.ok && repeat.ok && tx_mempool_exists(&f->main_pool, &tx->tx.hash);
+}
+
+static int wprt_case_intent_retry_readiness(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PUBLIC, 1, false);
+    struct wallet_tx tx = {0};
+    ok = ok && wprt_build(&f, 0x66, NULL, 0, &tx) && wallet_add_to_wallet(f.wallet, &tx);
+    struct byte_stream raw; stream_init(&raw, 512);
+    ok = ok && transaction_serialize(&tx.tx, &raw);
+    struct wallet_rpc_context *ctx = wallet_rpc_context_current();
+    wprt_report("market and naming retry refuse pending before admission",
+                ok && wprt_pending_intent_retries(&f, ctx, &raw, &tx), &failures);
+    wprt_report("signed market and naming retries pass current-chain admission",
+                ok && wprt_ready_intent_retries(&f, ctx, &raw, &tx), &failures);
+    stream_free(&raw);
+    if (ok) transaction_free(&tx.tx);
+    wprt_close(&f);
+    return failures;
+}
+#endif
+
+static bool wprt_plan_tip(struct wprt_fx *f, struct block_index *tip)
+{
+    memset(tip, 0, sizeof(*tip));
+    tip->nHeight = 10; tip->nTime = (uint32_t)platform_time_wall_time_t();
+    memset(tip->hashBlock.data, 0x50, 32);
+    active_chain_move_window_tip(&f->ms.chain_active, tip);
+    f->wallet->best_block = tip; f->wallet->best_block_height = 10;
+    struct db_block block = {0};
+    memcpy(block.hash, tip->hashBlock.data, 32);
+    memset(block.prev_hash, 0x4f, 32); memset(block.merkle_root, 0x4d, 32);
+    memset(block.chain_work, 0x4c, 32); block.height = 10; block.time = tip->nTime;
+    block.bits = 0x1d00ffffU; block.status = 3;
+    uint8_t sol[] = {1, 2}; block.solution = sol; block.solution_len = sizeof(sol);
+    struct p2p_node *peer = wprt_add_peer(f, WPRT_CLEAR_OUT);
+    if (!peer || !db_block_save(&f->ndb, &block)) return false;
+    peer->starting_height = 10; peer->state = PEER_ACTIVE; peer->services = NODE_NETWORK;
+    sync_monitor_set_context(&f->cm, NULL, &f->ms);
+    (void)sync_set_state(SYNC_IDLE, "wallet intent fixture reset");
+    return sync_set_state(SYNC_FINDING_PEERS, "wallet intent fixture") &&
+        sync_set_state(SYNC_HEADERS_DOWNLOAD, "wallet intent fixture") &&
+        sync_set_state(SYNC_BLOCKS_DOWNLOAD, "wallet intent fixture") &&
+        sync_set_state(SYNC_CONNECTING_BLOCKS, "wallet intent fixture") &&
+        sync_set_state(SYNC_AT_TIP, "wallet intent fixture");
+}
+
+static bool wprt_plan_prepare_context(struct wprt_fx *f)
+{
+    struct wallet_identity_row identity;
+    if (!wallet_sqlite_self_test(&f->wsql).ok || wallet_canary_run(f->ndb.db, NULL) != WALLET_CANARY_OK ||
+        !wallet_sqlite_flush_r(&f->wsql, f->wallet).ok ||
+        !wallet_identity_ensure(&f->ndb, f->params->consensus.hashGenesisBlock.data, "test", &identity)) return false;
+    wallet_key_pool_mark_persisted_through(f->wallet, wallet_key_pool_generation_ceiling(f->wallet));
+    char path[320]; snprintf(path, sizeof(path), "%s/fixture-backup.enc", f->dir);
+    FILE *backup = fopen(path, "wb"); if (!backup) return false;
+    bool ok = fputs("fixture", backup) >= 0 && fclose(backup) == 0;
+    if (!ok) return false;
+    wallet_backup_seed_encrypted_authority_for_test(path, (int64_t)platform_time_wall_time_t(), (int64_t)f->wallet->keystore.num_keys);
+    return true;
+}
+
+static bool wprt_plan_call(struct wprt_fx *f, char id[65])
+{
+    char address[128]; if (!wprt_self_address(f, address, sizeof(address))) return false;
+    struct json_value params = {0}, in = {0}, effects = {0}, effect = {0}, out = {0};
+    json_set_array(&params); json_set_object(&in); json_set_array(&effects); json_set_object(&effect);
+    json_push_kv_str(&in, "wallet_scope", "test"); json_push_kv_str(&in, "route", "transparent");
+    json_push_kv_str(&in, "idempotency_key", "readiness-reopen");
+    json_push_kv_str(&effect, "asset", "ZCL"); json_push_kv_str(&effect, "to", address);
+    json_push_kv_str(&effect, "amount", "1.00000000"); json_push_back(&effects, &effect);
+    json_push_kv(&in, "effects", &effects); json_push_back(&params, &in);
+    bool ok = rpc_table_execute(&f->tbl, "vault_intent_plan", &params, &out) && json_get_bool(json_get(&out, "ok"));
+    const char *found = json_get_str(json_get(&out, "plan_id"));
+    ok = ok && found && strlen(found) == 64;
+    if (ok) snprintf(id, 65, "%s", found);
+    else printf("(plan code=%s) ", json_get_str(json_get(&out, "code")) ? json_get_str(json_get(&out, "code")) : "missing");
+    json_free(&out); json_free(&effect); json_free(&effects); json_free(&in); json_free(&params);
+    return ok;
+}
+
+static bool wprt_plan_reopen(struct wprt_fx *f, struct block_index *tip, uint64_t generation)
+{
+    char path[320]; snprintf(path, sizeof(path), "%s/node.db", f->dir);
+    wallet_sqlite_close(&f->wsql); f->wsql_open = false;
+    node_db_close(&f->ndb); f->db_open = false;
+    wallet_free(f->wallet); free(f->wallet); f->wallet = NULL;
+    if (!node_db_open(&f->ndb, path)) return false;
+    f->db_open = true;
+    if (!wallet_sqlite_open_r(&f->wsql, f->ndb.db).ok) return false;
+    f->wsql_open = true;
+    f->wallet = zcl_calloc(1, sizeof(*f->wallet), "reopened_wallet");
+    if (!f->wallet) return false;
+    wallet_init(f->wallet);
+    if (!wallet_readiness_initialize(f->wallet, WALLET_READINESS_READY, true, generation) ||
+        !wallet_sqlite_read_keys_r(&f->wsql, f->wallet).ok ||
+        !wallet_sqlite_read_keypool_r(&f->wsql, f->wallet).ok ||
+        !wallet_sqlite_read_txs(&f->wsql, f->wallet)) return false;
+    f->wallet->best_block = tip; f->wallet->best_block_height = tip->nHeight;
+    rpc_wallet_set_state(f->wallet, &f->ms, f->dir, &f->wsql, &f->main_pool, &f->cm);
+    rpc_wallet_set_node_db(&f->ndb); rpc_wallet_set_coins_tip(&f->coins);
+    return true;
+}
+
+static bool wprt_plan_commit(struct wprt_fx *f, const char *id, bool changed)
+{
+    struct json_value params = {0}, in = {0}, out = {0};
+    json_set_array(&params); json_set_object(&in);
+    json_push_kv_str(&in, "wallet_scope", "test"); json_push_kv_str(&in, "plan_id", id);
+    json_push_kv_bool(&in, "confirm", true); json_push_back(&params, &in);
+    bool called = rpc_table_execute(&f->tbl, "vault_intent_commit", &params, &out);
+    const char *code = json_get_str(json_get(&out, "code"));
+    bool ok = called && (changed ? (code && strcmp(code, "PLAN_REPLAN_REQUIRED") == 0 && tx_mempool_size(&f->main_pool) == 0)
+                                : (json_get_bool(json_get(&out, "ok")) && tx_mempool_size(&f->main_pool) == 1));
+    if (!ok) printf("(commit changed=%d code=%s) ", changed, code ? code : "missing");
+    json_free(&out); json_free(&in); json_free(&params); return ok;
+}
+
+static int wprt_case_plan_reopen(bool changed)
+{
+    int failures = 0;
+    struct wprt_fx f; struct block_index tip; char id[65] = {0};
+    wprt_file_database = true;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PUBLIC, 1, true);
+    wprt_file_database = false;
+    ok = ok && wprt_plan_tip(&f, &tip) && wprt_plan_prepare_context(&f) && wprt_plan_call(&f, id);
+    ok = ok && wprt_plan_reopen(&f, &tip, changed ? 43 : 42) && wprt_plan_commit(&f, id, changed);
+    wprt_report(changed ? "reopened public plan rejects changed generation" : "reopened public plan commits on same generation", ok, &failures);
+    sync_monitor_set_context(NULL, NULL, NULL);
+    wprt_close(&f);
+    return failures;
+}
+
 static int wprt_case_main_pool_refused(void)
 {
     int failures = 0;
@@ -2316,6 +2701,92 @@ static bool wprt_note_free(struct wprt_fx *f)
 /* The wallet holds a shielded send whose notes were never reserved: the
  * state power loss leaves between the wallet write and the reservation. A
  * resume must reserve them again, or the next send picks them a second time. */
+static int wprt_deny_select(void *ctx, int action, const char *a,
+                            const char *b, const char *c, const char *d)
+{
+    (void)ctx; (void)a; (void)b; (void)c; (void)d;
+    return action == SQLITE_SELECT ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int wprt_case_missing_hold_proof(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 1, true);
+    wallet_free(f.wallet); wallet_init(f.wallet);
+    ok = ok && wallet_readiness_initialize(f.wallet, WALLET_READINESS_PENDING, true, 42);
+    struct uint256 id = {0}; id.data[0] = 1;
+    ok = ok && wpr_prepare(wpr_global(), &id).ok;
+    wpr_global()->env.node_db = &f.ndb;
+    struct wpr_pending_guard guard = {0};
+    struct wpr_pending_record rows[WPR_MAX_ENTRIES]; size_t count = 0;
+    ok = ok && wpr_pending_proof_begin(wpr_global(), &guard, rows, WPR_MAX_ENTRIES, &count) == WPR_PENDING_OK &&
+        sqlite3_exec(f.ndb.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+    enum wallet_hold_proof_result status = ok ?
+        wallet_private_broadcast_reserve_in_open_tx(&guard, &f.ndb, f.wallet) : WALLET_HOLD_PROOF_ERROR;
+    wprt_report("absent pending tx remains unavailable instead of being presumed prepared",
+                ok && count == 1 && status == WALLET_HOLD_PROOF_TX_ABSENT, &failures);
+    bool denied = ok && sqlite3_set_authorizer(f.ndb.db, wprt_deny_select, NULL) == SQLITE_OK;
+    if (denied) status = wallet_private_broadcast_reserve_in_open_tx(&guard, &f.ndb, f.wallet);
+    (void)sqlite3_set_authorizer(f.ndb.db, NULL, NULL);
+    wprt_report("transaction lookup failure is distinct from absence",
+                denied && status == WALLET_HOLD_PROOF_ERROR, &failures);
+    if (sqlite3_get_autocommit(f.ndb.db) == 0) (void)sqlite3_exec(f.ndb.db, "ROLLBACK", NULL, NULL, NULL);
+    wpr_pending_proof_end(&guard);
+    wprt_close(&f);
+    return failures;
+}
+
+static bool wprt_setup_pending_hold(struct wprt_fx *f, struct wallet_tx *tx)
+{
+    wallet_free(f->wallet);
+    wallet_init(f->wallet);
+    return wallet_readiness_initialize(f->wallet, WALLET_READINESS_PENDING, true, 42) &&
+        wallet_add_to_wallet(f->wallet, tx) && wprt_seed_note(f, 0x79) &&
+        wallet_sqlite_flush_transactions_r(&f->wsql, f->wallet).ok &&
+        wpr_prepare(wpr_global(), &tx->tx.hash).ok;
+}
+
+static bool wprt_hold_validator_detects_loss(struct wprt_fx *f, struct wpr_pending_guard *guard)
+{
+    zcl_mutex_lock(&f->wallet->cs);
+    bool valid = wallet_private_broadcast_validate_holds_locked(guard, f->wallet, f->ndb.db);
+    f->wallet->sapling_notes[0].spent = false;
+    bool detects_loss = !wallet_private_broadcast_validate_holds_locked(guard, f->wallet, f->ndb.db);
+    f->wallet->sapling_notes[0].spent = true;
+    bool changed = sqlite3_exec(f->ndb.db, "UPDATE wallet_sapling_notes SET spent_txid=zeroblob(32)",
+                                NULL, NULL, NULL) == SQLITE_OK;
+    bool detects_conflict = changed && !wallet_private_broadcast_validate_holds_locked(guard, f->wallet, f->ndb.db);
+    zcl_mutex_unlock(&f->wallet->cs);
+    return valid && detects_loss && detects_conflict;
+}
+
+static int wprt_case_checked_hold_proof(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 1, true);
+    struct wallet_tx tx;
+    bool built = ok && wprt_zspend_tx(&f, 0x64, 0x79, &tx);
+    ok = built && wprt_setup_pending_hold(&f, &tx);
+    wpr_global()->env.node_db = &f.ndb;
+    struct wpr_pending_guard guard = {0};
+    struct wpr_pending_record rows[WPR_MAX_ENTRIES]; size_t count = 0;
+    ok = ok && wpr_pending_proof_begin(wpr_global(), &guard, rows, WPR_MAX_ENTRIES, &count) == WPR_PENDING_OK &&
+        sqlite3_exec(f.ndb.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+    enum wallet_hold_proof_result result = ok ?
+        wallet_private_broadcast_reserve_in_open_tx(&guard, &f.ndb, f.wallet) : WALLET_HOLD_PROOF_ERROR;
+    bool valid = ok && result == WALLET_HOLD_PROOF_OK &&
+        wprt_hold_validator_detects_loss(&f, &guard);
+    wprt_report("held send reservations are restored and final proof detects lost hold",
+                ok && count == 1 && result == WALLET_HOLD_PROOF_OK && valid, &failures);
+    if (sqlite3_get_autocommit(f.ndb.db) == 0) (void)sqlite3_exec(f.ndb.db, "ROLLBACK", NULL, NULL, NULL);
+    wpr_pending_proof_end(&guard);
+    if (built) transaction_free(&tx.tx);
+    wprt_close(&f);
+    return failures;
+}
+
 static int wprt_case_resume_reserves_notes(void)
 {
     int failures = 0;
@@ -3587,12 +4058,27 @@ int test_wallet_private_relay(void)
     failures += wprt_case_restart();
     failures += wprt_case_public_restart();
     failures += wprt_case_boot();
+    failures += wprt_case_checked_pending_reader();
+    failures += wprt_case_invalid_pending_count();
+    failures += wprt_case_pending_guard();
+    failures += wprt_case_pending_guard_bound();
+    failures += wprt_case_unready_accepted_hook(true);
+    failures += wprt_case_unready_accepted_hook(false);
+    failures += wprt_case_unready_boot_configuration(true);
+    failures += wprt_case_unready_boot_configuration(false);
     failures += wprt_case_chained();
+#ifdef ZCL_TESTING
+    failures += wprt_case_intent_retry_readiness();
+#endif
+    failures += wprt_case_plan_reopen(true);
+    failures += wprt_case_plan_reopen(false);
     failures += wprt_case_main_pool_refused();
     failures += wprt_case_sole_peer_handed();
     failures += wprt_case_queue_refused();
     failures += wprt_case_unknown_after_failed_rollback();
     failures += wprt_case_resume_reserves_notes();
+    failures += wprt_case_missing_hold_proof();
+    failures += wprt_case_checked_hold_proof();
     failures += wprt_case_nullifier_hold();
     failures += wprt_case_held_and_seen();
     failures += wprt_case_held_at_zero();

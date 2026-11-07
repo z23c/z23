@@ -672,7 +672,8 @@ static int znam_commit_failure_surfaces_error(void)
         wallet_get_new_address_with_key_id(&owner_w, owner_addr,
                                            sizeof(owner_addr), &kid);
     bool funded = got_addr && fund_wallet_key(&owner_w, &kid, 20000) &&
-        wallet_top_up_key_pool(&owner_w, 2);
+        wallet_top_up_key_pool(&owner_w, 2) &&
+        wallet_readiness_initialize(&owner_w, WALLET_READINESS_READY, false, 0);
     if (!funded) {
         printf("znam commit-failure fixture: FAIL (setup)\n");
         failures++;

@@ -10,6 +10,7 @@
 #include "keys/key.h"
 #include "support/cleanse.h"
 #include "wallet/wallet_sqlite.h"
+#include "storage/wallet_projection.h"
 #include <unistd.h>
 
 /* Fixture cleanup without a shell: the path is absolute and may contain
@@ -500,9 +501,232 @@ static bool wallet_projection_utxo_cache_case(void)
     return ok;
 }
 
+static int projection_interrupt(void *unused)
+{
+    (void)unused;
+    return 1;
+}
+
+static bool wallet_projection_unspent_errors(struct node_db *ndb)
+{
+    struct db_sapling_note *rows = NULL;
+    sqlite3_progress_handler(ndb->db, 1, projection_interrupt, NULL);
+    int interrupted = db_sapling_note_list_unspent_alloc(ndb, &rows);
+    sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
+    bool ok = interrupted == -1 && !rows;
+    if (sqlite3_exec(ndb->db, "DROP TABLE wallet_sapling_notes", NULL, NULL, NULL) != SQLITE_OK) return false;
+    return db_sapling_note_list_unspent_alloc(ndb, &rows) == -1 && !rows && ok;
+}
+
+static bool wallet_projection_unspent_list_case(void)
+{
+    char dir[256], path[320];
+    struct node_db ndb = {0};
+    test_make_tmpdir(dir, sizeof(dir), "wallet", "unspent_list");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool ok = node_db_open(&ndb, path);
+    if (!ok) { (void)fixture_rm_ok(dir); return false; }
+    struct db_sapling_note *rows = NULL;
+    if (ok) ok = db_sapling_note_list_unspent_alloc(&ndb, &rows) == 0 && !rows;
+    struct db_sapling_note note = {0};
+    memset(note.txid, 1, 32); memset(note.rcm, 2, 32); memset(note.ivk, 3, 32);
+    memset(note.diversifier, 4, 11); memset(note.pk_d, 5, 32);
+    memset(note.cm, 6, 32); memset(note.nullifier, 7, 32);
+    note.value = 1; note.block_height = 2;
+    if (ok) ok = db_sapling_note_save(&ndb, &note);
+    note.txid[0] = 8; note.nullifier[0] = 9; note.value = 2;
+    if (ok) ok = db_sapling_note_save(&ndb, &note);
+    int n = ok ? db_sapling_note_list_unspent_alloc(&ndb, &rows) : -1;
+    ok = ok && n == 2 && rows && rows[0].value == 2 && rows[1].value == 1;
+    free(rows); rows = NULL;
+    ok = wallet_projection_unspent_errors(&ndb) && ok;
+    node_db_close(&ndb);
+    return fixture_rm_ok(dir) && ok;
+}
+
+static bool replay_blob_is(sqlite3_stmt *s, int col, const void *data, size_t len)
+{
+    const void *p = sqlite3_column_blob(s, col);
+    return p && sqlite3_column_bytes(s, col) == (int)len && memcmp(p, data, len) == 0;
+}
+
+static bool replay_note_preserved(struct node_db *db, const struct db_sapling_note *n,
+                                  const uint8_t *nf, const uint8_t *spent,
+                                  const uint8_t *witness, size_t witness_len)
+{
+    sqlite3_stmt *s = NULL;
+    const char *sql = "SELECT nullifier,spent_txid,witness_data,witness_height,source "
+                      "FROM wallet_sapling_notes WHERE txid=? AND output_index=?";
+    if (sqlite3_prepare_v2(db->db, sql, -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_blob(s, 1, n->txid, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int64(s, 2, n->output_index) == SQLITE_OK && sqlite3_step(s) == SQLITE_ROW;
+    if (ok) ok = replay_blob_is(s, 0, nf, 32) && replay_blob_is(s, 1, spent, 32) &&
+        replay_blob_is(s, 2, witness, witness_len) &&
+        sqlite3_column_int(s, 3) == 42 && sqlite3_column_text(s, 4) &&
+        strcmp((const char *)sqlite3_column_text(s, 4), DB_SAPLING_NOTE_SOURCE_LOCAL) == 0;
+    if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool replay_note_query_failure(struct node_db *db, const struct db_sapling_note *n)
+{
+    struct sapling_replay_delivery delivery = {0};
+    return node_db_begin_immediate(db) &&
+        sqlite3_exec(db->db, "DROP TABLE wallet_sapling_notes", NULL, NULL, NULL) == SQLITE_OK &&
+        db_sapling_note_merge_replayed(db, n, &delivery) == SAPLING_REPLAY_MERGE_ERROR && node_db_rollback(db);
+}
+
+static bool wallet_projection_replay_merge_case(void)
+{
+    char dir[256], path[320];
+    struct node_db db = {0};
+    test_make_tmpdir(dir, sizeof(dir), "wallet", "replay_merge");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    if (!node_db_open(&db, path)) return false;
+    struct db_sapling_note n = {0};
+    memset(n.txid, 1, 32); memset(n.rcm, 2, 32); memset(n.ivk, 3, 32);
+    memset(n.diversifier, 4, 11); memset(n.pk_d, 5, 32);
+    memset(n.cm, 6, 32); memset(n.nullifier, 7, 32);
+    n.value = 12; n.block_height = 15; n.memo[0] = 9; n.memo_len = 1;
+    uint8_t nf[32], spent[32], witness[] = {1,2,3,4};
+    struct sapling_replay_delivery delivery = {0};
+    memset(nf, 8, sizeof(nf)); memset(spent, 9, sizeof(spent));
+    bool ok = db_sapling_note_merge_replayed(&db, &n, &delivery) == SAPLING_REPLAY_MERGE_ERROR &&
+        node_db_begin_immediate(&db) &&
+        db_sapling_note_merge_replayed(&db, &n, &delivery) == SAPLING_REPLAY_MERGE_INSERTED &&
+        db_sapling_note_save_witness_and_nullifier(&db, n.txid, n.output_index,
+                                                   witness, sizeof(witness), 42, nf) &&
+        db_sapling_note_mark_spent(&db, nf, spent) == DB_MARK_SPENT_OK && node_db_commit(&db);
+    if (ok) ok = node_db_begin_immediate(&db) &&
+        db_sapling_note_merge_replayed(&db, &n, &delivery) == SAPLING_REPLAY_MERGE_EXISTING;
+    n.cm[0] ^= 1;
+    if (ok) ok = db_sapling_note_merge_replayed(&db, &n, &delivery) == SAPLING_REPLAY_MERGE_CONFLICT;
+    n.cm[0] ^= 1; n.block_height++;
+    if (ok) ok = db_sapling_note_merge_replayed(&db, &n, &delivery) == SAPLING_REPLAY_MERGE_CONFLICT;
+    n.block_height--;
+    if (ok) ok = replay_note_preserved(&db, &n, nf, spent, witness, sizeof(witness)) && node_db_commit(&db);
+    if (ok) ok = replay_note_query_failure(&db, &n);
+    db_sapling_replay_delivery_clear(&delivery);
+    node_db_close(&db);
+    return fixture_rm_ok(dir) && ok;
+}
+
+static int wallet_presence_deny_select(void *unused, int action, const char *a,
+    const char *b, const char *c, const char *d)
+{
+    (void)unused; (void)a; (void)b; (void)c; (void)d;
+    return action == SQLITE_SELECT ? SQLITE_DENY : SQLITE_OK;
+}
+
+static bool wallet_projection_tx_presence_case(void)
+{
+    char dir[256], path[320]; struct node_db db = {0};
+    test_make_tmpdir(dir, sizeof(dir), "wallet", "presence");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool ok = node_db_open(&db, path);
+    struct db_wallet_tx tx = {0};
+    memset(tx.txid, 0x51, sizeof(tx.txid));
+    tx.raw_tx = (uint8_t *)"\x01\x02"; tx.raw_tx_len = 2; tx.time_received = 100;
+    if (ok) ok = db_wallet_tx_presence_checked(&db, tx.txid) == DB_WALLET_TX_ABSENT;
+    if (ok) ok = db_wallet_tx_save(&db, &tx);
+    if (ok) ok = db_wallet_tx_presence_checked(&db, tx.txid) == DB_WALLET_TX_PRESENT;
+    if (ok) ok = sqlite3_set_authorizer(db.db, wallet_presence_deny_select, NULL) == SQLITE_OK;
+    if (ok) ok = db_wallet_tx_presence_checked(&db, tx.txid) == DB_WALLET_TX_ERROR;
+    if (db.open) { (void)sqlite3_set_authorizer(db.db, NULL, NULL); node_db_close(&db); }
+    return fixture_rm_ok(dir) && ok;
+}
+
+static bool wallet_cutover_utxo_preserved(struct node_db *db, const struct db_wallet_utxo *u,
+                                         const uint8_t spender[32], int height)
+{
+    struct db_wallet_utxo got = {0};
+    bool ok = db_wallet_utxo_find(db, u->txid, u->vout, &got) && got.is_spent &&
+        !memcmp(got.spent_txid, spender, 32) && got.spent_vin == 2 && got.height == height;
+    db_wallet_utxo_free(&got); return ok;
+}
+
+static bool wallet_cutover_utxo_rollback_case(struct node_db *db, const struct db_wallet_utxo *u,
+    struct db_wallet_utxo_cutover_delivery *delivery, event_log_t *log)
+{
+    return node_db_begin_immediate(db) &&
+        db_wallet_utxo_cutover_merge(db, u, delivery) == DB_UTXO_CUTOVER_OK &&
+        !db_wallet_utxo_cutover_delivery_flush(delivery) && event_log_size(log) == 0 &&
+        node_db_rollback(db) && !db_wallet_utxo_cutover_delivery_flush(delivery) &&
+        node_db_begin_immediate(db) && node_db_commit(db) &&
+        !db_wallet_utxo_cutover_delivery_flush(delivery) && event_log_size(log) == 0;
+}
+
+static bool wallet_cutover_utxo_commit_case(struct node_db *db, const struct db_wallet_utxo *u,
+    struct db_wallet_utxo_cutover_delivery *delivery, event_log_t *log, const uint8_t spender[32])
+{
+    bool ok = node_db_begin_immediate(db) &&
+        db_wallet_utxo_cutover_merge(db, u, delivery) == DB_UTXO_CUTOVER_OK &&
+        db_wallet_utxo_cutover_spend(db, u->txid, u->vout, spender, 2) == DB_UTXO_CUTOVER_OK &&
+        event_log_size(log) == 0 && node_db_commit(db);
+    if (ok) {
+        wallet_projection_set_event_log(NULL);
+        ok = !db_wallet_utxo_cutover_delivery_flush(delivery);
+        wallet_projection_set_event_log(log);
+    }
+    return ok && db_wallet_utxo_cutover_delivery_flush(delivery) && event_log_size(log) > 0;
+}
+
+static bool wallet_cutover_utxo_conflict_case(struct node_db *db, struct db_wallet_utxo *u,
+    struct db_wallet_utxo_cutover_delivery *delivery, const uint8_t spender[32], const uint8_t other[32])
+{
+    if (!node_db_begin_immediate(db)) return false;
+    u->height = 11;
+    bool ok = db_wallet_utxo_cutover_merge(db, u, delivery) == DB_UTXO_CUTOVER_OK &&
+        db_wallet_utxo_cutover_spend(db, u->txid, u->vout, spender, 2) == DB_UTXO_CUTOVER_OK &&
+        db_wallet_utxo_cutover_spend(db, u->txid, u->vout, other, 2) == DB_UTXO_CUTOVER_CONFLICT;
+    u->value++;
+    if (ok) ok = db_wallet_utxo_cutover_merge(db, u, delivery) == DB_UTXO_CUTOVER_CONFLICT;
+    u->value--;
+    return ok && wallet_cutover_utxo_preserved(db, u, spender, 11) && node_db_rollback(db) &&
+        wallet_cutover_utxo_preserved(db, u, spender, 10);
+}
+
+static bool wallet_cutover_utxo_fixture(void)
+{
+    char dir[256], path[320], logpath[320];
+    test_make_tmpdir(dir, sizeof(dir), "wallet", "cutover_utxo");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    snprintf(logpath, sizeof(logpath), "%s/events.log", dir);
+    struct node_db db = {0};
+    event_log_t *log = event_log_open(logpath);
+    bool ok = log && node_db_open(&db, path);
+    if (log) wallet_projection_set_event_log(log);
+    uint8_t script[1] = {0x51}, spender[32] = {9}, other[32] = {8};
+    struct db_wallet_utxo u = {.vout = 1, .value = 12345, .height = 10,
+        .script = script, .script_len = sizeof(script)};
+    u.txid[0] = 1; u.address_hash[0] = 2;
+    struct db_wallet_utxo_cutover_delivery delivery = {0};
+    if (ok) ok = wallet_cutover_utxo_rollback_case(&db, &u, &delivery, log);
+    db_wallet_utxo_cutover_delivery_clear(&delivery);
+    if (ok) ok = wallet_cutover_utxo_commit_case(&db, &u, &delivery, log, spender);
+    db_wallet_utxo_cutover_delivery_clear(&delivery);
+    if (ok) ok = wallet_cutover_utxo_conflict_case(&db, &u, &delivery, spender, other);
+    db_wallet_utxo_cutover_delivery_clear(&delivery);
+    wallet_projection_set_event_log(NULL);
+    if (db.open) node_db_close(&db);
+    if (log) event_log_close(log);
+    return fixture_rm_ok(dir) && ok;
+}
+
 int test_model_wallet_projection(void)
 {
     int failures = 0;
+    printf("Cutover UTXO merge preserves reservations and defers events... ");
+    if (wallet_cutover_utxo_fixture()) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    printf("Wallet transaction presence distinguishes missing and I/O failure... ");
+    if (wallet_projection_tx_presence_case()) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    printf("Replay note merge preserves confirmed state... ");
+    if (wallet_projection_replay_merge_case()) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    printf("Unspent list reports complete rows and errors... ");
+    if (wallet_projection_unspent_list_case()) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
 
     printf("Wallet projection model summarizes balances and tips... ");
     if (wallet_projection_summary_case()) printf("OK\n");

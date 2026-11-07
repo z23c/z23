@@ -99,6 +99,17 @@ struct wpr_env {
     void (*reserve)(const struct wpr_env *env, const struct transaction *tx);
 };
 
+enum wpr_pending_read_status {
+    WPR_PENDING_OK, WPR_PENDING_ABSENT, WPR_PENDING_IO_ERROR,
+    WPR_PENDING_MALFORMED, WPR_PENDING_OVERFLOW, WPR_PENDING_BUSY
+};
+
+struct wpr_pending_record {
+    struct uint256 txid;
+    bool expired;
+    bool handed;
+};
+
 struct wpr_entry {
     bool used;
     bool in_pool;     /* validated into the private pool */
@@ -168,6 +179,24 @@ void wpr_init(struct wpr *r);
 void wpr_free(struct wpr *r);
 /* The process-wide relay used by the node. */
 struct wpr *wpr_global(void);
+
+/* Zero-initialize the guard. Begin retains the relay mutex only on OK or
+ * ABSENT; end releases it on the same thread. Do not call relay mutators on
+ * the guard-owning thread. While held, take chain, progress and wallet locks
+ * only with trylock. Recheck holds inside the owned node.db transaction and
+ * wallet completion lock before READY. */
+struct wpr_pending_guard {
+    struct wpr *relay;
+    size_t count;
+    struct wpr_pending_record records[WPR_MAX_ENTRIES];
+};
+enum wpr_pending_read_status wpr_pending_proof_begin(struct wpr *r,
+    struct wpr_pending_guard *guard, struct wpr_pending_record *out, size_t cap, size_t *count);
+void wpr_pending_proof_end(struct wpr_pending_guard *guard);
+
+/* Snapshot the existing pending-file format; non-OK results carry no count. */
+enum wpr_pending_read_status wpr_pending_snapshot(struct wpr *r,
+    struct wpr_pending_record *out, size_t cap, size_t *count);
 
 void wpr_configure(struct wpr *r, enum wpr_mode mode,
                    const struct wpr_env *env);

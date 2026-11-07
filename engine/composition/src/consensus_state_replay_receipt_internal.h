@@ -27,6 +27,9 @@ struct consensus_state_replay_result;
 
 /* One decoded receipt, independent of the on-disk byte order. */
 struct rr_receipt {
+    uint8_t format_version;
+    int64_t sprout_pool_total;
+    int64_t sapling_pool_total;
     uint8_t bundle_file_digest[32];
     uint8_t artifact_digest[32];
     uint8_t block_hash[32];

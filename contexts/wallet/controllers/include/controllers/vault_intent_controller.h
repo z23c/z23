@@ -22,6 +22,13 @@ bool vault_intent_context_ready(struct wallet_rpc_context *ctx,
  * `error_code` and the recovery fields make retry behavior explicit. */
 void vault_intent_error_response(struct json_value *out, const char *code,
                                  const char *message);
+struct wallet_readiness;
+bool vault_intent_generation_bind(uint8_t *plain, size_t *len, size_t cap,
+                                  const struct wallet_readiness *readiness);
+bool vault_intent_generation_check(const uint8_t *plain, size_t *len,
+                                   const struct wallet_readiness *readiness);
+bool vault_intent_generation_current(struct wallet_rpc_context *ctx,
+                                     const struct vault_intent_row *row);
 void vault_intent_digest_payload(const uint8_t *raw, size_t len,
                                  const struct vault_intent_row *row,
                                  uint8_t out[32]);

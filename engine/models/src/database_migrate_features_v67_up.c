@@ -611,6 +611,19 @@ static int db_migrate_step_87(struct node_db *ndb, int *current_ver,
     return 0;
 }
 
+static int db_migrate_step_88(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver >= 88) return 0;
+    if (!node_db_exec(ndb,
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('088')"))
+        LOG_RETURN(-1, "db", "migrate v88: migration stamp failed");
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 88, *floor_ver);
+    *current_ver = 88;
+    (*applied)++;
+    return 0;
+}
+
 static int db_migrate_finish_87(struct node_db *ndb, int *current_ver,
                                 int *floor_ver, int *applied,
                                 int *version_out, int *floor_out)
@@ -620,6 +633,8 @@ static int db_migrate_finish_87(struct node_db *ndb, int *current_ver,
     if (db_migrate_step_86(ndb, current_ver, floor_ver, applied) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     if (db_migrate_step_87(ndb, current_ver, floor_ver, applied) < 0)
+        return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
+    if (db_migrate_step_88(ndb, current_ver, floor_ver, applied) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     *version_out = *current_ver;
     *floor_out = *floor_ver;

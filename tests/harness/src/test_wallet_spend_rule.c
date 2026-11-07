@@ -119,6 +119,7 @@ static void wsr_checkpoint(struct rom_state_checkpoint *cp,
                            int frontier_height)
 {
     memset(cp, 0, sizeof(*cp));
+    cp->format_version = ROM_STATE_CHECKPOINT_V1;
     cp->height = height;
     memcpy(cp->block_hash, c->bi[height].hashBlock.data, 32);
     cp->sapling_frontier_height = frontier_height;
@@ -1162,6 +1163,8 @@ static int wsr_test_rpc_selection(void)
         return failures + 1;
     }
     wallet_init(w);
+    WSR_CHECK("ordinary wallet readiness initialized",
+              wallet_readiness_initialize(w, WALLET_READINESS_READY, false, 0));
     wallet_rpc_context_set_base(w, &ms, dir, NULL, NULL, NULL);
     wallet_rpc_context_set_node_db(&ndb);
 
@@ -1647,6 +1650,8 @@ static int wsr_test_send_e2e(void)
     if (!e.w)
         return failures + 1;
     wallet_init(e.w);
+    WSR_CHECK("ordinary wallet readiness initialized",
+              wallet_readiness_initialize(e.w, WALLET_READINESS_READY, false, 0));
     e.w->best_block_height = WSR_TIP;
     memset(seed, 0xB3, sizeof(seed));
     WSR_CHECK("real sapling key derived",

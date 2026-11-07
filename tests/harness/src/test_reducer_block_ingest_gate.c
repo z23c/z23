@@ -36,6 +36,7 @@
 #include "test/test_block_map.h"
 
 #include "bloom/merkle.h"
+#include "base/hex.h"
 #include "chain/chainparams.h"
 #include "chain/chainparamsbase.h"
 #include "chain/pow.h"
@@ -45,10 +46,13 @@
 #include "core/uint256.h"
 #include "domain/consensus/coinbase.h"
 #include "mining/miner.h"
+#include "models/database.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "script/script.h"
 #include "services/chain_activation_service.h"
+#include "services/node_db_catchup_service.h"
+#include "services/block_index_loader.h"
 #include "services/header_admit_inbox.h"
 #include "storage/disk_block_io.h"
 #include "storage/coins_kv.h"
@@ -251,6 +255,12 @@ static bool rbi_mine_admit_persist(struct rbi_ingest_ctx *c, int height,
 }
 
 int test_reducer_block_ingest_gate(void);
+static const char *rbi_producer_dir;
+
+void test_reducer_producer_target(const char *path)
+{
+    rbi_producer_dir = path;
+}
 static int rbi_context_valid_twin(struct chain_activation_controller *ctl,
     struct block *candidate, const struct block_index *parent)
 {
@@ -768,6 +778,132 @@ static int rbi_assert_known_header_catchup_bypass(
     return failures;
 }
 
+/* Regtest genesis constants follow zclassic src/chainparams.cpp,
+ * distributed under the MIT license. */
+static bool rbi_regtest_genesis(struct block *block, const struct chain_params *cp)
+{
+    static const char timestamp[] =
+        "Zclassic860413afe207aa173afee4fcfa9166dc745651c754a41ea8f155646f5aa828ac";
+    static const char pubkey_hex[] =
+        "04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb"
+        "649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f";
+    static const char solution_hex[] =
+        "05ffd6ad016271ade20cfce093959c3addb2079629f9f123c52ef920caa316531af5af3f";
+    const uint8_t difficulty[] = {0xff, 0xff, 0x00, 0x1d}, four[] = {4};
+    uint8_t pubkey[65];
+    block_init(block);
+    block->vtx = zcl_calloc(1, sizeof(*block->vtx), "regtest genesis tx");
+    if (!block->vtx) return false;
+    block->num_vtx = 1;
+    struct transaction *tx = block->vtx;
+    transaction_init(tx);
+    if (!transaction_alloc(tx, 1, 1) ||
+        !zcl_hex_decode_lower(pubkey_hex, pubkey, sizeof(pubkey)) ||
+        !zcl_hex_decode_lower(solution_hex, block->header.nSolution, 36)) return false;
+    tx->version = 1;
+    tx->vout[0].value = 0;
+    bool ok = script_push_data(&tx->vin[0].script_sig, difficulty, sizeof(difficulty)) &&
+        script_push_data(&tx->vin[0].script_sig, four, sizeof(four)) &&
+        script_push_data(&tx->vin[0].script_sig, (const uint8_t *)timestamp, sizeof(timestamp) - 1) &&
+        script_push_data(&tx->vout[0].script_pub_key, pubkey, sizeof(pubkey)) &&
+        script_push_op(&tx->vout[0].script_pub_key, OP_CHECKSIG);
+    if (!ok) return false;
+    transaction_compute_hash(tx);
+    block->header.hashMerkleRoot = tx->hash;
+    block->header.nVersion = 4;
+    block->header.nTime = 1482971059u;
+    block->header.nBits = 0x200f0f0fu;
+    block->header.nNonce.data[0] = 9;
+    block->header.nSolutionSize = 36;
+    struct uint256 hash;
+    block_get_hash(block, &hash);
+    return uint256_eq(&hash, &cp->consensus.hashGenesisBlock);
+}
+
+static bool rbi_store_body(const char *dir, const struct chain_params *cp,
+                           struct block *block, struct block_index *index)
+{
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    return index && write_block_to_disk(block, &pos, dir, cp->pchMessageStart) &&
+           block_index_set_have_data_verified(index, &pos, dir);
+}
+
+static bool rbi_bind_genesis_index(struct block_index *genesis,
+                                   struct block_index *first,
+                                   struct block_index *second,
+                                   const struct block_header *header)
+{
+    if (!genesis || !first || !second || first->pprev != genesis || second->pprev != first ||
+        !block_index_set_hdrext(genesis, &header->hashMerkleRoot, &header->nNonce,
+                                header->nSolution, header->nSolutionSize)) return false;
+    genesis->nVersion = header->nVersion;
+    genesis->hashFinalSaplingRoot = header->hashFinalSaplingRoot;
+    genesis->nTime = header->nTime;
+    genesis->nBits = header->nBits;
+    genesis->nChainWork = GetBlockProof(genesis);
+    struct arith_uint256 work = GetBlockProof(first);
+    arith_uint256_add(&first->nChainWork, &genesis->nChainWork, &work);
+    work = GetBlockProof(second);
+    arith_uint256_add(&second->nChainWork, &first->nChainWork, &work);
+    return true;
+}
+
+
+static bool rbi_prepare_paths(const char *dir, char *netdir, size_t nn,
+                              char *dbpath, size_t dn)
+{
+    char blocks[512];
+    int a = snprintf(netdir, nn, "%s/regtest", dir);
+    int b = snprintf(dbpath, dn, "%s/node.db", dir);
+    int c = snprintf(blocks, sizeof(blocks), "%s/blocks", netdir);
+    return a >= 0 && (size_t)a < nn && b >= 0 && (size_t)b < dn &&
+           c >= 0 && (size_t)c < sizeof(blocks) &&
+           mkdir(netdir, 0700) == 0 && mkdir(blocks, 0700) == 0;
+}
+
+static bool rbi_prepare_producer(const char *dir, struct main_state *ms,
+                                 const struct chain_params *cp,
+                                 struct block *first, struct block *second,
+                                 const struct uint256 *hash1,
+                                 struct block_index *bi2)
+{
+    char netdir[512], dbpath[512];
+    if (!rbi_prepare_paths(dir, netdir, sizeof(netdir), dbpath, sizeof(dbpath))) return false;
+    struct block_index *bi0 = block_map_find(&ms->map_block_index, &cp->consensus.hashGenesisBlock);
+    struct block_index *bi1 = block_map_find(&ms->map_block_index, hash1);
+    struct block genesis;
+    bool ok = rbi_regtest_genesis(&genesis, cp) &&
+        rbi_bind_genesis_index(bi0, bi1, bi2, &genesis.header) &&
+        rbi_store_body(netdir, cp, &genesis, bi0) &&
+        rbi_store_body(netdir, cp, first, bi1) &&
+        rbi_store_body(netdir, cp, second, bi2);
+    if (!ok) { block_free(&genesis); return false; }
+    struct node_db ndb = {0};
+    if (!node_db_open(&ndb, dbpath)) { block_free(&genesis); return false; }
+    ok = node_db_catchup_test_sync_block_lean(&ndb, &genesis, bi0) &&
+         node_db_catchup_test_sync_block_lean(&ndb, first, bi1) &&
+         node_db_catchup_test_sync_block_lean(&ndb, second, bi2) &&
+         save_block_index_flat_identity(dir, ms, NULL).ok;
+    block_free(&genesis);
+    node_db_close(&ndb);
+    struct node_db reopened = {0};
+    if (!node_db_open_existing_runtime(&reopened, dbpath, "regtest fixture verification")) return false;
+    return node_db_close_checked(&reopened) && ok;
+}
+
+
+static int rbi_prepare_if_requested(struct main_state *ms, const struct chain_params *cp,
+    struct block *first, struct block *second, const struct uint256 *hash1,
+    struct block_index *bi2, int prior_failures)
+{
+    if (!rbi_producer_dir || prior_failures) return 0;
+    int failures = 0;
+    RBI_CHECK("prepare real regtest producer input",
+        rbi_prepare_producer(rbi_producer_dir, ms, cp, first, second, hash1, bi2));
+    return failures;
+}
+
 int test_reducer_block_ingest_gate(void)
 {
     printf("\n=== reducer block-ingest gate "
@@ -914,6 +1050,8 @@ int test_reducer_block_ingest_gate(void)
      * bounded mailbox. It still stages/persists the body and preserves the
      * normal pending-reducer verdict. */
     failures += rbi_assert_known_header_catchup_bypass(&ctl, &blk1b);
+
+    failures += rbi_prepare_if_requested(&ms, cp, &blk1b, &blk2, &hash1, bi2, failures);
 
     /* ── (6) Teardown ───────────────────────────────────────────────────── */
     /* Both helper-built blocks were block_init'd unconditionally; block_free is

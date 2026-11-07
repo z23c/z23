@@ -22,6 +22,14 @@ bool checkpoint_rung_from_rom_checkpoint(const struct rom_state_checkpoint *cp,
                  "from_rom_checkpoint: NULL arg (cp=%p out=%p)",
                  (const void *)cp, (const void *)out);
     memset(out, 0, sizeof(*out));
+    out->format_version = cp->format_version;
+    out->sprout_pool_total = cp->sprout_pool_total;
+    out->sapling_pool_total = cp->sapling_pool_total;
+    if ((out->format_version != CHECKPOINT_RUNG_VERSION_V1 &&
+         out->format_version != CHECKPOINT_RUNG_VERSION_V2) ||
+        (out->format_version == CHECKPOINT_RUNG_VERSION_V2 &&
+         (out->sprout_pool_total < 0 || out->sapling_pool_total < 0)))
+        LOG_FAIL("checkpoint_rung", "from_rom_checkpoint: invalid version or pool totals");
     out->height = cp->height;
     memcpy(out->block_hash, cp->block_hash, 32);
     memcpy(out->utxo_root, cp->utxo_root, 32);

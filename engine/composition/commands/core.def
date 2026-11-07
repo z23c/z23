@@ -1511,6 +1511,10 @@ ZCL_COMMAND_READY_READ(
     "answers: an encrypted wallet that cannot be opened here is refused "
     "with WALLET_LOCKED and told to unlock and retry, never told it "
     "predates recovery phrases. "
+    "wallet_cutover_state is clear, pending or unknown, read under the "
+    "held datadir lock and a read-only SQLite snapshot. For WALLET_LOCKED "
+    "it is in error.facts; a missing field means unknown. This is a "
+    "point-in-time fact, not a lease after the command returns. "
     "Answering it reads and decrypts the wallet's keys, so on an "
     "encrypted-at-rest wallet this takes seconds, not milliseconds, and "
     "reports budget_exceeded. node.db is opened strictly read-only, so this "
@@ -1537,12 +1541,12 @@ ZCL_COMMAND_READY_COMMAND(
      * ZCL_COMMAND_SPEC_BUDGET; over it, the document does not render at all
      * and this warning becomes invisible. check-describe-budget holds the
      * line. Trim here — never raise the budget. */
-    "Plan or rebuild into an EMPTY datadir, required with no default. "
-    "Z23 words are not portable: a phrase from another app opens a different "
-    "empty wallet here without error. "
-    "The plan shows the first transparent and shielded addresses and writes "
-    "nothing. Commit derives keys until 20 consecutive unused addresses, "
-    "checking the datadir chain under the BIP44 gap-limit convention. With no chain, birthday_at_local_tip or "
+    "Requires an EMPTY datadir; no default. "
+    "Z23 phrases are not portable: another app's phrase silently opens a "
+    "different empty wallet. "
+    "Plan shows the first transparent/shielded addresses without writes. "
+    "Commit derives keys and checks the datadir chain per BIP44 until 20 "
+    "unused addresses in a row. With no chain, birthday_at_local_tip or "
     "shielded_only it asks nothing, derives the standard lookahead and says "
     "why; so does a scan at its 1000-per-chain ceiling. At rest: "
     "a passphrase input, or ZCL_WALLET_PASSPHRASE, encrypts the keys, or "
@@ -1562,12 +1566,15 @@ ZCL_COMMAND_READY_COMMAND(
     "built, uses its fixed mainnet anchor as the scan floor. Without an "
     "anchor it scans from genesis; coverage stays unread until verified. "
     "history_below_seed_hidden says a seeded node cannot show older funds. "
-    "Keys come back, history does "
-    "not: next_steps names the rescans.", ZCL_COMMAND_LIST_BUDGET,
+    "Keys return, not history: next_steps names rescans. "
+    "creation_nonce confirms prepared local creation: confirm:true, words "
+    "and passphrase require --input=-; no birthday override. "
+    "A matched committed retry "
+    "verifies the original seed without rewriting keys.", ZCL_COMMAND_LIST_BUDGET,
     "wallet,recovery,phrase,seed,mnemonic,restore",
     "zcl.wallet_recovery_restore.input.v1", "zcl.wallet_recovery_restore.v1",
     "phrase,datadir,confirm,passphrase,shielded_only,birthday,"
-    "birthday_at_local_tip", "",
+    "birthday_at_local_tip,creation_nonce", "",
     "z23 core wallet recovery restore "
     "--input='{\"datadir\":\"/tmp/recovered\"}'",
     ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
@@ -1604,24 +1611,25 @@ ZCL_COMMAND_READY_COMMAND(
     "core.wallet.create", "core.wallet", "",
     "Create a new private wallet and show its 24 words once",
     /* KEEP THIS UNDER BUDGET (see core.wallet.recovery.restore above). */
-    "Creates a wallet in an EMPTY datadir while no node holds it: a 24-word "
-    "BIP39 phrase drawn from the system random source derives the seed the "
-    "same way a restore does, so the same words rebuild the same shielded "
-    "addresses. Send {\"datadir\",\"passphrase\"} on standard input with "
-    "--input=- and nothing else: the passphrase (at least 12 bytes) is never "
-    "taken from arguments or the environment. The seed and Sapling keys are "
-    "encrypted under it from the first write. No transparent address is "
-    "made. The birthday is set at or below the highest of the datadir's "
-    "connected tip, the shipped anchor and its best header, never from a "
-    "height a peer claims, so an unsynced node still creates; scans start "
-    "100 blocks below it. The phrase is in this reply ONCE: it "
-    "is never stored, logged or journaled, and no command prints it again. "
-    "Refuses WALLET_ALREADY_PRESENT if the datadir holds any seed, key or "
-    "note, and DATADIR_LOCKED while a node holds it; it never overwrites or "
-    "merges. Owner authority, local scope; the MCP policy refuses it.",
+    "Create in an EMPTY datadir while no node holds it. Send datadir and "
+    "a passphrase of at least 12 bytes through --input=-. Fresh system "
+    "randomness generates 24 words and the first shielded address; keys "
+    "are encrypted from their first write. Existing seed, keys or notes "
+    "refuse; no wallet is overwritten or merged. "
+    "With prepare:true, only a durable public creation record is written. "
+    "The reply contains prepared:true, phrase and creation_nonce. Save the "
+    "words before confirming through core.wallet.recovery.restore with "
+    "creation_nonce. The original birthday is retained across retries. "
+    "With cancel_nonce and confirm:true, cancel only that unfinished, "
+    "wallet-free record; existing wallet or encryption material refuses. "
+    "Do not combine cancel_nonce and prepare. "
+    "Words appear in one reply, are never stored or logged, and cannot be "
+    "printed again. Existing recovery words must use recovery.restore. "
+    "Z23 words are not portable to other wallet software. Owner authority, "
+    "local scope; the MCP policy refuses this command.",
     0, "wallet,create,phrase,seed,mnemonic,shielded",
     "zcl.wallet_create.input.v1", "zcl.wallet_create.v1",
-    "datadir,passphrase", "",
+    "datadir,passphrase,prepare,cancel_nonce,confirm", "",
     "z23 core wallet create --input=-",
     ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,

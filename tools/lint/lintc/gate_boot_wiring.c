@@ -22,8 +22,8 @@
 /* check-sandbox-wired — port of tools/lint/lintc/gate_boot_wiring.c (now a
  * shim). The os_sandbox steady-state profile is only a defense if boot
  * actually ENTERS it: boot.c must register a SYSINIT boundary record named
- * "sandbox" on the SERVICES_RUNNING boundary, call os_sandbox_enter(), and
- * note the request via os_sandbox_note_requested(); os_sandbox_linux.c must
+ * "sandbox" on the SERVICES_RUNNING boundary and delegate to the startup file,
+ * which calls os_sandbox_enter() and os_sandbox_note_requested(); os_sandbox_linux.c must
  * install the seccomp filter with SECCOMP_FILTER_FLAG_TSYNC through the
  * seccomp(2) syscall (all-thread coverage, not just the boot thread); the
  * witness must never live-probe Landlock (a probe from a confined process is
@@ -33,7 +33,7 @@
  * resolved to exactly one git-tracked owner via git ls-files over the
  * feature-first controller rooms, floor 8 so a moved include pattern fails
  * loudly). All FAIL lines go to stderr and accumulate; a missing boot.c or
- * os_sandbox_linux.c is FATAL rc 2.
+ * startup file or os_sandbox_linux.c is FATAL rc 2.
  * Parity notes: grep -Eq is a per-line ERE predicate; the shell word-boundary
  * escape has no POSIX regex form (glibc regcomp rejects [[:<:]]), so the
  * three word-boundary IDENT( predicates are matched by sw_ident_call()
@@ -44,6 +44,8 @@
 #define SW_MAX_DEFS 128
 
 static const char k_sw_boot[] = "engine/composition/src/boot.c";
+static const char k_sw_startup[] =
+    "engine/composition/src/boot_sandbox_startup.c";
 static const char k_sw_linux[] =
     "platform/modules/platform/src/os_sandbox_linux.c";
 static const char k_sw_witness[] =
@@ -67,7 +69,7 @@ static int sw_compile(struct sw_re *r)
     static const char *const pat[] = {
         "\\.name[[:space:]]*=[[:space:]]*\"sand" "box\"",
         "\\.stage[[:space:]]*=[[:space:]]*BOOT_STAGE_" "SERVICES_RUNNING"
-            ".*\"sand" "box\"|\"sand" "box\".*BOOT_STAGE_" "SERVICES_RUNNING",
+            ".*\\.init[[:space:]]*=[[:space:]]*sr_sandbox_enter.*\"sand" "box\"",
         "syscall[[:space:]]*\\([[:space:]]*__NR_" "seccomp",
         "\"confine" "ment\"[[:space:]]*,[[:space:]]*confine"
             "ment_dump_state_json",
@@ -172,6 +174,39 @@ static int sw_file_has_ident(const char *path, const char *ident)
     return found;
 }
 
+/* Require the registered wrapper to delegate in its own body. */
+static int sw_bridge_stream(FILE *f)
+{
+    char *line = NULL;
+    size_t cap = 0;
+    int state = 0, found = 0;
+    while (getline(&line, &cap, f) >= 0) {
+        if (state == 0 && strstr(line, "static struct zcl_result sr_sandbox_enter(void *ctx)"))
+            state = 1;
+        else if (state == 1) {
+            if (strchr(line, '{')) state = 2;
+            else break;
+        } else if (state == 2) {
+            if (strstr(line, "return boot_sandbox_enter(ctx, g_datadir);")) state = 3;
+            else break;
+        } else if (state == 3) {
+            found = strchr(line, '}') != NULL;
+            break;
+        }
+    }
+    free(line);
+    return found;
+}
+
+static int sw_bridge_file(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int found = sw_bridge_stream(f);
+    fclose(f);
+    return found;
+}
+
 
 static int sw_check_confinement(regex_t *conf)
 {
@@ -196,6 +231,18 @@ static int sw_check_confinement(regex_t *conf)
     return 0;
 }
 
+static int sw_required_files(void)
+{
+    const char *const paths[] = { k_sw_boot, k_sw_startup, k_sw_linux };
+    for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
+        if (!sw_is_reg(paths[i])) {
+            fprintf(stderr, "check_sandbox_wired: FATAL — missing %s\n", paths[i]);
+            return 2;
+        }
+    }
+    return 0;
+}
+
 int check_sandbox_wired_run(int argc, char **argv)
 {
     (void)argc;
@@ -205,15 +252,10 @@ int check_sandbox_wired_run(int argc, char **argv)
     if (rc)
         return rc;
     int fail = 0;
-    if (!sw_is_reg(k_sw_boot)) {
-        fprintf(stderr, "check_sandbox_wired: FATAL — missing %s\n", k_sw_boot);
+    rc = sw_required_files();
+    if (rc) {
         sw_free(&r, 5);
-        return 2;
-    }
-    if (!sw_is_reg(k_sw_linux)) {
-        fprintf(stderr, "check_sandbox_wired: FATAL — missing %s\n", k_sw_linux);
-        sw_free(&r, 5);
-        return 2;
+        return rc;
     }
     if (!sw_file_has(k_sw_boot, &r.name)) {
         fprintf(stderr, "check_sandbox_wired: FAIL — no SYSINIT record named \"sand"
@@ -226,9 +268,13 @@ int check_sandbox_wired_run(int argc, char **argv)
                 k_sw_boot);
         fail = 1;
     }
-    if (!sw_file_has_ident(k_sw_boot, "os_sandbox_" "enter")) {
+    if (!sw_bridge_file(k_sw_boot)) {
+        fprintf(stderr, "check_sandbox_wired: FAIL — sandbox wrapper does not delegate in %s\n", k_sw_boot);
+        fail = 1;
+    }
+    if (!sw_file_has_ident(k_sw_startup, "os_sandbox_" "enter")) {
         fprintf(stderr, "check_sandbox_wired: FAIL — boot never calls os_sand"
-                "box_enter() in %s\n", k_sw_boot);
+                "box_enter() in %s\n", k_sw_startup);
         fail = 1;
     }
     if (!sw_file_has_lit(k_sw_linux, "SECCOMP_FILTER_" "FLAG_TSYNC")) {
@@ -243,10 +289,10 @@ int check_sandbox_wired_run(int argc, char **argv)
                 k_sw_linux);
         fail = 1;
     }
-    if (!sw_file_has_ident(k_sw_boot, "os_sandbox_" "note_requested")) {
+    if (!sw_file_has_ident(k_sw_startup, "os_sandbox_" "note_requested")) {
         fprintf(stderr, "check_sandbox_wired: FAIL — boot never calls os_sand"
                 "box_note_requested() in %s (a failed apply would be "
-                "indistinguishable from 'never requested')\n", k_sw_boot);
+                "indistinguishable from 'never requested')\n", k_sw_startup);
         fail = 1;
     }
     if (!sw_is_reg(k_sw_witness)) {
@@ -299,6 +345,26 @@ static int sw_want_ident(const char *tag, const char *ident, const char *s,
     return 0;
 }
 
+static int sw_bridge_selftest(void)
+{
+    static const char *const cases[] = {
+        "static struct zcl_result sr_sandbox_enter(void *ctx)\n{\n    return boot_sandbox_enter(ctx, g_datadir);\n}\n",
+        "static struct zcl_result sr_sandbox_enter(void *ctx)\n{\n    return ZCL_OK;\n}\nreturn boot_sandbox_enter(ctx, g_datadir);\n"
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        FILE *f = tmpfile();
+        if (!f) return 1;
+        if (fputs(cases[i], f) == EOF || fseek(f, 0, SEEK_SET) != 0) {
+            fclose(f);
+            return 1;
+        }
+        int found = sw_bridge_stream(f);
+        fclose(f);
+        if (found != (i == 0)) return 1;
+    }
+    return 0;
+}
+
 static int sw_owner_selftest(void)
 {
     static const struct { const char *command; int owners; } cases[] = {
@@ -332,13 +398,15 @@ int check_sandbox_wired_selftest(void)
     if (cr)
         return cr;
     regmatch_t m[2];
-    int bad = sw_owner_selftest()
+    int bad = sw_bridge_selftest() | sw_owner_selftest()
         | sw_want(t, &r.name, ".name = \"sand" "box\"", 1)
         | sw_want(t, &r.name, ".name=\"sand" "box\"", 1)
         | sw_want(t, &r.name, ".namex = \"sand" "box\"", 0)
         | sw_want(t, &r.stage,
-                  ".stage = BOOT_STAGE_" "SERVICES_RUNNING, .name = \"sand"
+                  ".stage = BOOT_STAGE_" "SERVICES_RUNNING, .init = sr_sandbox_enter, .name = \"sand"
                   "box\"", 1)
+        | sw_want(t, &r.stage,
+                  ".stage = BOOT_STAGE_" "SERVICES_RUNNING, .init = other, .name = \"sand" "box\"", 0)
         | sw_want(t, &r.stage,
                   ".name = \"sand" "box\"", 0)
         | sw_want(t, &r.stage,

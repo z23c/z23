@@ -28,11 +28,9 @@
  * read of node.db the loss of every coin in it. The words are shown once,
  * when the wallet is created, and the help text says so.
  *
- * The phrase never leaves this file's stack: it is read out of the request
- * (or ZCL_RECOVERY_PHRASE), handed to the service, and never pushed onto a
- * reply, into a plan echo, or into a log line. The commit_input a plan
- * hands back deliberately omits it, so the phrase is not sitting in a
- * response body waiting to be pasted into a chat log.
+ * Recovery input words never enter replies, plan echoes or logs. Fresh
+ * creation returns newly generated words once through its private reply.
+ * Commit plans omit words; existing wallet words cannot be reconstructed.
  *
  * Bound in engine/composition/commands/core.def.
  */
@@ -40,12 +38,13 @@
 #include "controllers/wallet_native_handlers.h"
 
 #include "chain/chainparams.h"
-#include "controllers/agent_controller.h"
 #include "base/hex.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
+#include "wallet/wallet_sqlite.h"
 #include "models/database.h"                   /* struct node_db (RO shim) */
+#include "models/wallet_key.h"
 #include "services/wallet_create_service.h"
 #include "services/wallet_recovery_service.h"
 #include "services/wallet_restore_service.h"
@@ -86,20 +85,6 @@ static void wrp_select_chain_params_if_standalone(void)
         chain_params_select(CHAIN_MAIN);
 }
 
-/* The datadir a recovery targets when the caller names none: the runtime's
- * own context datadir, else the stock $HOME/.zclassic-c23. Always echoed
- * back so the operator confirms the path before the commit. */
-static void wrp_default_datadir(char *out, size_t cap)
-{
-    const char *ctx = agent_runtime_context_datadir();
-    if (ctx && ctx[0]) {
-        snprintf(out, cap, "%s", ctx);
-        return;
-    }
-    const char *home = getenv("HOME");
-    snprintf(out, cap, "%s/.zclassic-c23", home && home[0] ? home : ".");
-}
-
 /* Every public field of a report. Nothing here is secret: addresses are
  * meant to be shown, and the phrase is not in the report at all. */
 static void wrp_push_report(struct zcl_command_reply *reply,
@@ -124,18 +109,26 @@ static void wrp_push_report(struct zcl_command_reply *reply,
                                rep->first_shielded_address);
 }
 
-/* Only this public address is safe to include in a locked error. */
+/* Locked failure facts contain only public, bounded state. */
 static void wrp_push_locked_address(struct zcl_command_reply *reply,
-                                    const struct wallet_recovery_report *rep)
+                                    const struct wallet_recovery_report *rep,
+                                    const char *cutover)
 {
-    if (!rep->persisted_shielded_address[0] && !rep->persisted_address_unavailable)
+    const char *creation = json_get_str(json_get(&reply->data, "creation_state"));
+    const char *nonce = json_get_str(json_get(&reply->data, "creation_nonce"));
+    if (!rep->inspect_persisted_address && !rep->persisted_shielded_address[0] && !rep->persisted_address_unavailable && !creation[0])
         return;
     struct json_value facts = {0};
     json_set_object(&facts);
-    bool ok = rep->persisted_shielded_address[0]
-        ? json_push_kv_str(&facts, "persisted_shielded_address", rep->persisted_shielded_address)
-        : json_push_kv_str(&facts, "receive_address_status", "unavailable");
-    if (ok) (void)json_push_kv(&reply->data, "failure_facts", &facts);
+    if (creation[0]) (void)json_push_kv_str(&facts, "creation_state", creation);
+    if (nonce[0]) (void)json_push_kv_str(&facts, "creation_nonce", nonce);
+    (void)json_push_kv_str(&facts, "wallet_cutover_state", cutover);
+    if (rep->persisted_shielded_address[0])
+        (void)json_push_kv_str(&facts, "persisted_shielded_address",
+                               rep->persisted_shielded_address);
+    else if (rep->persisted_address_unavailable)
+        (void)json_push_kv_str(&facts, "receive_address_status", "unavailable");
+    (void)json_push_kv(&reply->data, "failure_facts", &facts);
     json_free(&facts);
 }
 
@@ -208,6 +201,33 @@ static void wrp_push_scan(struct zcl_command_reply *reply,
             "derives them — but this datadir does not hold their keys yet");
 }
 
+/* This is a point-in-time fact, not a lease after this command returns. */
+static const char *wrp_cutover_state(sqlite3 *db, int pid_fd)
+{
+    if (!db || pid_fd < 0) return "unknown";
+    enum wallet_cutover_status s = wallet_sqlite_cutover_read_snapshot(db);
+    return s == WALLET_CUTOVER_ABSENT ? "clear" :
+           s == WALLET_CUTOVER_PENDING ? "pending" : "unknown";
+}
+
+static void wrp_hash_hex(const uint8_t hash[32], char hex[65]);
+
+static void wrp_push_creation_state(struct zcl_command_reply *reply,
+                                    struct node_db *ndb)
+{
+    struct wallet_create_pending pending;
+    enum wallet_birthday_proof_status status = db_wallet_create_pending_get(ndb, &pending);
+    const char *state = status == WALLET_BIRTHDAY_PROOF_FOUND
+        ? (pending.committed ? "committed" : "prepared")
+        : (status == WALLET_BIRTHDAY_PROOF_ABSENT ? "none" : "unknown");
+    (void)json_push_kv_str(&reply->data, "creation_state", state);
+    if (status == WALLET_BIRTHDAY_PROOF_FOUND) {
+        char nonce[65];
+        wrp_hash_hex(pending.nonce, nonce);
+        (void)json_push_kv_str(&reply->data, "creation_nonce", nonce);
+    }
+}
+
 void zcl_native_handle_wallet_recovery_status(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -223,7 +243,7 @@ void zcl_native_handle_wallet_recovery_status(
     if (dd && dd[0])
         snprintf(datadir, sizeof(datadir), "%s", dd);
     else
-        wrp_default_datadir(datadir, sizeof(datadir));
+        wnh_default_datadir(datadir, sizeof(datadir));
 
     struct wallet_recovery_report rep;
     struct zcl_result pre = wallet_recovery_status_preflight(datadir, &rep);
@@ -264,6 +284,12 @@ void zcl_native_handle_wallet_recovery_status(
     enum zcl_node_db_ro_status ro_st = zcl_native_node_db_open_readonly(
         datadir, &db, &ndb, ndb_path, sizeof(ndb_path));
     if (ro_st == ZCL_NODE_DB_RO_ABSENT) {
+        (void)json_push_kv_str(&reply->data, "creation_state", "none");
+        struct json_value facts = {0};
+        json_set_object(&facts);
+        (void)json_push_kv_str(&facts, "creation_state", "none");
+        (void)json_push_kv(&reply->data, "failure_facts", &facts);
+        json_free(&facts);
         wallet_restore_node_lock_release(&pid_fd);
         wrp_push_report(reply, &rep);
         (void)json_push_kv_str(&reply->data, "what_to_do",
@@ -289,6 +315,8 @@ void zcl_native_handle_wallet_recovery_status(
         return;
     }
 
+    wrp_push_creation_state(reply, &ndb);
+    const char *cutover = wrp_cutover_state(db, pid_fd);
     struct zcl_result r = wallet_recovery_status(datadir, &ndb, &rep);
     zcl_native_node_db_close_readonly(&db, &ndb);
     wallet_restore_node_lock_release(&pid_fd);
@@ -300,6 +328,7 @@ void zcl_native_handle_wallet_recovery_status(
     }
 
     wrp_push_report(reply, &rep);
+    (void)json_push_kv_str(&reply->data, "wallet_cutover_state", cutover);
     (void)json_push_kv_bool(&reply->data, "recoverable_from_phrase",
                             rep.seed_installed);
     (void)json_push_kv_str(&reply->data, "seed_state",
@@ -314,7 +343,7 @@ void zcl_native_handle_wallet_recovery_status(
      * no phrase for this wallet" are opposite answers and now read that
      * way. */
     if (rep.seed_state_before == WALLET_SEED_LOCKED) {
-        wrp_push_locked_address(reply, &rep);
+        wrp_push_locked_address(reply, &rep, cutover);
 
         (void)json_push_kv_str(&reply->data, "meaning",
             "this wallet IS seed-backed — the seed is right there in "
@@ -527,10 +556,74 @@ static const char *wrp_failure_code(int code, enum zcl_command_exit *ex)
     return "RECOVERY_REFUSED";
 }
 
+static void wrp_creation_fail(struct zcl_command_reply *reply,
+                              struct zcl_result result, const char *datadir)
+{
+    const char *code = "CREATION_FAILED";
+    enum zcl_command_exit ex = ZCL_COMMAND_EXIT_FAILED;
+    if (result.code == -61) { code = "DATADIR_LOCKED"; ex = ZCL_COMMAND_EXIT_BLOCKED; }
+    else if (result.code == -62) { code = "CREATION_REFUSED"; ex = ZCL_COMMAND_EXIT_BLOCKED; }
+    else if (result.code == -60) { code = "BAD_CREATION_REQUEST"; ex = ZCL_COMMAND_EXIT_INVALID; }
+    wnh_fail(reply, ex, code, result.message, datadir);
+}
+
+static bool wrp_creation_commit_input(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, uint8_t nonce[32], char datadir[1024])
+{
+    const struct json_value *confirm = json_get(request->input, "confirm");
+    const char *text = json_get_str(json_get(request->input, "creation_nonce"));
+    const char *phrase = json_get_str(json_get(request->input, "phrase"));
+    const char *pass = json_get_str(json_get(request->input, "passphrase"));
+    if (!zcl_native_input_was_stdin()) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_DENIED, "STDIN_REQUIRED",
+            "creation confirmation requires --input=-", "core.wallet.recovery.restore");
+        return false;
+    }
+    if (!confirm || confirm->type != JSON_BOOL || !json_get_bool(confirm) ||
+        !text || !zcl_hex_decode_lower(text, nonce, 32) || !phrase || !phrase[0] ||
+        !pass || strlen(pass) < 12 || json_get(request->input, "birthday") ||
+        json_get(request->input, "birthday_at_local_tip")) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "BAD_CREATION_REQUEST",
+            "creation confirmation needs its nonce, words and passphrase; birthday overrides are refused",
+            "core.wallet.recovery.restore");
+        return false;
+    }
+    return wrp_restore_datadir(request->input, datadir, 1024, reply,
+                                "core.wallet.recovery.restore");
+}
+
+static bool wrp_restore_creation(const struct zcl_command_request *request,
+                                  struct zcl_command_reply *reply)
+{
+    if (!json_get(request->input, "creation_nonce")) return false;
+    uint8_t nonce[32]; char datadir[1024];
+    if (!wrp_creation_commit_input(request, reply, nonce, datadir)) return true;
+    struct wallet_recovery_report report = {0};
+    struct zcl_result result = wallet_creation_commit(datadir,
+        json_get_str(json_get(request->input, "phrase")), nonce,
+        json_get_str(json_get(request->input, "passphrase")), &report);
+    if (!result.ok) {
+        wrp_creation_fail(reply, result, datadir);
+        reply->error.mutated = report.creation_write_attempted;
+        return true;
+    }
+    (void)json_push_kv_bool(&reply->data, "recovered", true);
+    (void)json_push_kv_bool(&reply->data, "committed", true);
+    (void)json_push_kv_bool(&reply->data, "creation_replayed", report.creation_replayed);
+    (void)json_push_kv_str(&reply->data, "creation_state", "committed");
+    (void)json_push_kv_str(&reply->data, "creation_nonce",
+                           json_get_str(json_get(request->input, "creation_nonce")));
+    (void)json_push_kv_str(&reply->data, "first_shielded_address", report.first_shielded_address);
+    (void)json_push_kv_bool(&reply->data, "birthday_recorded", report.birthday_recorded);
+    reply->error.mutated = !report.creation_replayed;
+    return true;
+}
+
 static void wrp_restore_body(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     wrp_select_chain_params_if_standalone();
+    if (wrp_restore_creation(request, reply)) return;
     /* argv is world-readable on this machine; the env var is the quieter
      * way in and the help text names it. */
     const char *phrase = json_get_str(json_get(request->input, "phrase"));
@@ -751,6 +844,65 @@ static bool wrp_stdout_restore(int saved)
     return ok;
 }
 
+static bool wrp_cancel_creation(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const char *datadir)
+{
+    const struct json_value *field = json_get(request->input, "cancel_nonce");
+    if (!field) return false;
+    const struct json_value *confirm = json_get(request->input, "confirm");
+    uint8_t nonce[32];
+    if (field->type != JSON_STR || !zcl_hex_decode_lower(json_get_str(field), nonce, 32) ||
+        !confirm || confirm->type != JSON_BOOL || !json_get_bool(confirm) ||
+        json_get(request->input, "prepare")) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "BAD_CREATION_REQUEST",
+            "cancel needs its exact nonce and confirm:true, without prepare",
+            "core.wallet.create");
+        return true;
+    }
+    struct zcl_result result = wallet_creation_cancel(datadir, nonce);
+    if (!result.ok) { wrp_creation_fail(reply, result, datadir); reply->error.mutated = true; return true; }
+    (void)json_push_kv_bool(&reply->data, "cancelled", true);
+    (void)json_push_kv_str(&reply->data, "creation_state", "none");
+    reply->error.mutated = true;
+    return true;
+}
+
+static bool wrp_prepare_creation(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const char *datadir)
+{
+    const struct json_value *prepare = json_get(request->input, "prepare");
+    if (!prepare) return false;
+    if (prepare->type != JSON_BOOL) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "BAD_CREATION_REQUEST",
+            "prepare must be boolean", "core.wallet.create");
+        return true;
+    }
+    if (!json_get_bool(prepare)) return false;
+    char phrase[MNEMONIC_MAX_PHRASE_SIZE], text[65]; uint8_t nonce[32];
+    struct zcl_result result = wallet_creation_prepare(datadir, phrase, sizeof(phrase), nonce);
+    if (!result.ok) {
+        memory_cleanse(phrase, sizeof(phrase));
+        wrp_creation_fail(reply, result, datadir);
+        reply->error.mutated = true;
+        return true;
+    }
+    wrp_hash_hex(nonce, text);
+    bool delivered = json_push_kv_bool(&reply->data, "prepared", true) &&
+        json_push_kv_str(&reply->data, "creation_nonce", text) &&
+        json_push_kv_str(&reply->data, "phrase", phrase);
+    memory_cleanse(phrase, sizeof(phrase));
+    reply->error.mutated = true;
+    if (!delivered) {
+        json_cleanse_strings(&reply->data);
+        json_free(&reply->data); json_init(&reply->data); json_set_object(&reply->data);
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "CREATION_REPLY_FAILED",
+            "setup was prepared but its reply could not be built; inspect creation status",
+            "core.wallet.recovery.status");
+        reply->error.mutated = true;
+    }
+    return true;
+}
+
 static void wrp_create_body(const struct zcl_command_request *request,
                             struct zcl_command_reply *reply)
 {
@@ -769,6 +921,8 @@ static void wrp_create_body(const struct zcl_command_request *request,
     const char *passphrase =
         json_get_str(json_get(request->input, "passphrase"));
 
+    if (wrp_cancel_creation(request, reply, datadir)) return;
+    if (wrp_prepare_creation(request, reply, datadir)) return;
     struct wallet_create_request req = { .datadir = datadir,
                                          .passphrase = passphrase };
     struct wallet_create_report rep;
@@ -800,6 +954,7 @@ static void wrp_create_body(const struct zcl_command_request *request,
 void zcl_native_handle_wallet_recovery_restore(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
+    wrp_disable_core_dumps();
     int saved = wrp_stdout_to_stderr();
     wrp_restore_body(request, reply);
     if (saved >= 0 && !wrp_stdout_restore(saved)) {
@@ -833,13 +988,14 @@ void zcl_native_handle_wallet_create(
     wrp_create_body(request, reply);
     /* Only a body that committed carries a phrase; a refusal is left as it is. */
     if (!wrp_stdout_restore(saved) && reply->error.mutated) {
+        json_cleanse_strings(&reply->data);
         json_free(&reply->data);
         json_init(&reply->data);
         json_set_object(&reply->data);
         wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "STDOUT_RESTORE_FAILED",
                  "standard output could not be restored, so the reply was "
-                 "withheld rather than written to the log stream. If a "
-                 "wallet was made its phrase is lost: delete the datadir",
+                 "withheld rather than written to the log stream. Inspect "
+                 "core wallet recovery status before retrying setup",
                  "core.wallet.create");
         reply->error.mutated = true;
     }

@@ -343,14 +343,14 @@ static bool index_rebuild_run(struct node_db *ndb, bool *deferred_out)
         LOG_WARN("db", "[db] index rebuild stopped by a shutdown request "
                  "after %zu of %zu indexes; the next open recreates the rest",
                  built, (size_t)NUM_DB_INDEXES);
-    return all_ok && !*deferred_out;
+    return all_ok;
 }
 
 bool node_db_rebuild_indexes(struct node_db *ndb)
 {
     if (!ndb || !ndb->open) return false;
     bool deferred = false;
-    return index_rebuild_run(ndb, &deferred);
+    return index_rebuild_run(ndb, &deferred) && !deferred;
 }
 
 static bool wal_checkpoint_run(struct node_db *ndb, struct wal_ckpt_record *out,
@@ -475,12 +475,12 @@ int node_db_synchronous_level(struct node_db *ndb)
 bool node_db_normal_mode(struct node_db *ndb)
 {
     if (!ndb || !ndb->open) return false;
-    db_exec_checked(ndb->db, "PRAGMA synchronous=NORMAL",
-                    "normal_mode synchronous");
-    node_db_restore_cache_size(ndb);
-    db_exec_checked(ndb->db, "PRAGMA wal_autocheckpoint="
+    bool ok = db_exec_checked(ndb->db, "PRAGMA synchronous=NORMAL",
+                    "normal_mode synchronous") == SQLITE_OK;
+    ok &= node_db_restore_cache_size(ndb);
+    ok &= db_exec_checked(ndb->db, "PRAGMA wal_autocheckpoint="
                     ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_WAL_AUTOCKPT_PAGES),
-                    "normal_mode wal_autocheckpoint");
+                    "normal_mode wal_autocheckpoint") == SQLITE_OK;
     /* Cap the WAL FILE size after checkpoint. wal_autocheckpoint is PASSIVE: it
      * folds WAL pages into the db but leaves the .wal file at its high-water
      * mark, so one write burst can leave a large file sitting for the entire
@@ -489,11 +489,12 @@ bool node_db_normal_mode(struct node_db *ndb)
      * checkpoint, bounding disk at the source — no reclaim thread, no deleting a
      * live WAL out from under an open handle. 64 MiB is generous headroom over
      * the ~4 MiB autocheckpoint trigger; it only caps pathological bursts. */
-    db_exec_checked(ndb->db, "PRAGMA journal_size_limit="
+    ok &= db_exec_checked(ndb->db, "PRAGMA journal_size_limit="
                     ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_JOURNAL_SIZE_LIMIT),
-                    "normal_mode journal_size_limit");
+                    "normal_mode journal_size_limit") == SQLITE_OK;
     bool deferred = false;
-    (void)index_rebuild_run(ndb, &deferred);
+    ok &= index_rebuild_run(ndb, &deferred);
+    if (!ok) return false;
     node_db_wal_checkpoint(ndb);
     node_db_note_turbo_mode(ndb, false, "normal_mode", SQLITE_OK);
     printf("db: normal mode (synchronous=NORMAL, %s)\n",

@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Canonical logical encoding for zcl.consensus_state_bundle.v1. */
+ * Canonical logical encoding for consensus state bundle v1 and v2. */
 
 #ifndef ZCL_STORAGE_CONSENSUS_STATE_BUNDLE_CODEC_H
 #define ZCL_STORAGE_CONSENSUS_STATE_BUNDLE_CODEC_H
@@ -8,7 +8,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define CONSENSUS_STATE_BUNDLE_SCHEMA "zcl.consensus_state_bundle.v1"
+#define CONSENSUS_STATE_BUNDLE_SCHEMA_V1 "zcl.consensus_state_bundle.v1"
+#define CONSENSUS_STATE_BUNDLE_SCHEMA_V2 "zcl.consensus_state_bundle.v2"
+#define CONSENSUS_STATE_BUNDLE_SCHEMA CONSENSUS_STATE_BUNDLE_SCHEMA_V1
+
+enum consensus_state_bundle_format {
+    CONSENSUS_STATE_BUNDLE_INVALID = 0,
+    CONSENSUS_STATE_BUNDLE_V1 = 1,
+    CONSENSUS_STATE_BUNDLE_V2 = 2,
+};
 #define CONSENSUS_STATE_SOURCE_RECEIPT_SCHEMA_V1 \
     "zcl.consensus_state_source_receipt.v1"
 #define CONSENSUS_STATE_SOURCE_RECEIPT_SCHEMA_V2 \
@@ -129,7 +137,13 @@ struct consensus_state_bundle_manifest {
     uint8_t proof_manifest_digest[32];
     uint8_t source_digest[32];
     uint8_t artifact_digest[32];
+    uint8_t format_version;
+    int64_t sprout_pool_total;
+    int64_t sapling_pool_total;
 };
+
+bool consensus_state_bundle_schema_version(
+    const char *schema, size_t schema_len, uint8_t *out_version);
 
 void consensus_state_bundle_anchor_digest_begin(struct sha3_256_ctx *ctx);
 void consensus_state_bundle_anchor_digest_row(

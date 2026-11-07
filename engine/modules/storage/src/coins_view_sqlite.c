@@ -1453,12 +1453,12 @@ bool coins_view_sqlite_read_commitment(struct coins_view_sqlite *cvs,
     if (AR_STEP_ROW_READONLY(cvs->stmt_commit_get) == SQLITE_ROW) {
         int len = sqlite3_column_bytes(cvs->stmt_commit_get, 0);
         const void *data = sqlite3_column_blob(cvs->stmt_commit_get, 0);
+        bool valid = data && len >= UTXO_COMMITMENT_SERIALIZED_SIZE;
+        bool ok = valid && utxo_commitment_deserialize(uc, data, (size_t)len);
         sqlite3_reset(cvs->stmt_commit_get);
         pthread_mutex_unlock(&cvs->mutex);
-        if (data && len >= UTXO_COMMITMENT_SERIALIZED_SIZE)
-            return utxo_commitment_deserialize(uc, data, (size_t)len);
-        utxo_commitment_init(uc);
-        return false;
+        if (!valid) utxo_commitment_init(uc);
+        return ok;
     }
     sqlite3_reset(cvs->stmt_commit_get);
     pthread_mutex_unlock(&cvs->mutex);

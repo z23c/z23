@@ -18,6 +18,10 @@
 #include "chain/pow.h"
 #include "config/consensus_state_install_runtime.h"
 #include "config/flysync_island.h"
+#include "config/boot.h"
+#include "config/boot_blkidx_ladder.h"
+#include "models/database.h"
+#include "jobs/block_header_emit.h"
 #include "config/state_offer_store.h"
 #include "consensus/validation.h"
 #include "core/arith_uint256.h"
@@ -28,6 +32,9 @@
 #include "services/sync_monitor.h"
 #include "config/boot_consensus_bundle_marker.h"
 #include "storage/progress_store.h"
+#include "storage/event_log_singleton.h"
+#include "storage/event_log_payloads.h"
+#include "storage/block_index_projection.h"
 #include "services/island_anchor.h"
 #include "services/utxo_recovery_service.h"
 #include "storage/progress_store.h"
@@ -51,6 +58,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 /* A deterministic header with a non-empty solution; hash returned. */
 static void fsi_build_header(struct block_header *h, int salt,
@@ -405,6 +416,9 @@ static struct block_index *fsi_add_genesis(struct main_state *ms)
     return bi;
 }
 
+static event_log_t *g_fsi_log;
+static block_index_projection_t *g_fsi_projection;
+
 bool fsi_node_open(struct fsi_node *n, const char *tag)
 {
     chain_params_select(CHAIN_MAIN);
@@ -416,7 +430,14 @@ bool fsi_node_open(struct fsi_node *n, const char *tag)
     csr_init(csr_instance(), &n->ms.map_block_index, &n->ms.chain_active,
              &n->ms.pindex_best_header, NULL, NULL, NULL);
     sync_monitor_set_context(NULL, NULL, &n->ms);
-    return fsi_add_genesis(&n->ms) && progress_store_open(n->dir);
+    char log_path[320], db_path[320];
+    snprintf(log_path, sizeof(log_path), "%s/events.log", n->dir);
+    snprintf(db_path, sizeof(db_path), "%s/block_index_projection.db", n->dir);
+    g_fsi_log = event_log_open(log_path);
+    g_fsi_projection = g_fsi_log ? block_index_projection_open(db_path, g_fsi_log) : NULL;
+    event_log_set_singleton(g_fsi_log);
+    block_index_projection_set_singleton(g_fsi_projection);
+    return g_fsi_projection && fsi_add_genesis(&n->ms) && progress_store_open(n->dir);
 }
 
 void fsi_node_close(struct fsi_node *n)
@@ -425,6 +446,11 @@ void fsi_node_close(struct fsi_node *n)
     csr_test_reset_singleton();
     flysync_island_test_reset();
     progress_store_close();
+    block_index_projection_set_singleton(NULL);
+    event_log_set_singleton(NULL);
+    if (g_fsi_projection) block_index_projection_close(g_fsi_projection);
+    if (g_fsi_log) event_log_close(g_fsi_log);
+    g_fsi_projection = NULL; g_fsi_log = NULL;
     main_state_free(&n->ms);
     ClearDataDirCache();
     test_rm_rf(n->dir);
@@ -480,6 +506,114 @@ void fsi_reload_work(struct fsi_node *n)
     block_index_forward_pass(n->rows, FSI_W);
 }
 
+static bool fsi_richer_status(const struct fsi_node *n)
+{
+    struct ev_block_status status = { .nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA,
+        .nFile = 7, .nDataPos = 123, .nUndoPos = 45, .nTx = 9 };
+    memcpy(status.hash, n->is.hash[9].data, 32);
+    uint8_t wire[EV_BLOCK_STATUS_WIRE_LEN];
+    return ev_block_status_serialize(&status, wire) &&
+        event_log_append(g_fsi_log, EV_BLOCK_STATUS, wire, sizeof(wire)) != UINT64_MAX &&
+        event_log_flush(g_fsi_log) && block_index_projection_catch_up(g_fsi_projection) != UINT64_MAX;
+}
+
+static bool fsi_remove_projection_row(const struct fsi_node *n, int i)
+{
+    char path[320];
+    snprintf(path, sizeof(path), "%s/block_index_projection.db", n->dir);
+    sqlite3 *db = NULL;
+    sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_open(path, &db) == SQLITE_OK &&
+        sqlite3_prepare_v2(db, "DELETE FROM block_index WHERE hash=?", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 1, n->is.hash[i].data, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_DONE && sqlite3_changes(db) == 1;
+    if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static int fsi_case_missing_projection_row(struct fsi_node *n)
+{
+    int failures = 0;
+    island_anchor_unregister();
+    FSI_CHECK("durable window verifies before registration", flysync_island_boot_register(n->dir));
+    FSI_CHECK("island recovery refuses early projection tip publication",
+              !flysync_island_boot_loader_allowed(true) && flysync_island_boot_loader_allowed(false));
+    FSI_CHECK("richer projection status is recorded", fsi_richer_status(n));
+    size_t before = n->ms.map_block_index.size;
+    struct disk_block_index row;
+    FSI_CHECK("missing derived row is rebuilt without publishing map entries",
+              fsi_remove_projection_row(n, 7) &&
+              block_index_projection_lookup_strict(g_fsi_projection, n->is.hash[7].data, &row) == BIP_LOOKUP_ABSENT &&
+              flysync_island_boot_rehydrate(&n->ms) &&
+              n->ms.map_block_index.size == before &&
+              block_index_projection_get_strict(g_fsi_projection, n->is.hash[7].data, &row) &&
+              row.nHeight == FSI_RUNG_H - 7);
+    FSI_CHECK("reconstruction preserves existing body metadata",
+              block_index_projection_get_strict(g_fsi_projection, n->is.hash[9].data, &row) &&
+              (row.nStatus & BLOCK_HAVE_DATA) && row.nFile == 7 &&
+              row.nDataPos == 123 && row.nUndoPos == 45 && row.nTx == 9);
+    return failures;
+}
+
+static bool fsi_append_post_rung(struct fsi_node *n, struct uint256 *hash)
+{
+    struct block_header header;
+    fsi_build_header(&header, 123, &n->is.hash[0], hash);
+    struct block_index row;
+    block_index_init(&row);
+    row.phashBlock = hash;
+    row.pprev = fsi_top(n);
+    row.nHeight = FSI_RUNG_H + 1;
+    row.nVersion = header.nVersion;
+    row.hashFinalSaplingRoot = header.hashFinalSaplingRoot;
+    row.nTime = header.nTime;
+    row.nBits = header.nBits;
+    row.nStatus = BLOCK_VALID_TREE;
+    bool ok = block_index_set_hdrext(&row, &header.hashMerkleRoot, &header.nNonce,
+                                     header.nSolution, header.nSolutionSize) &&
+        block_index_emit_header_event(&row, "flysync-test", NULL, NULL) &&
+        event_log_flush(g_fsi_log) &&
+        block_index_projection_catch_up(g_fsi_projection) != UINT64_MAX;
+    block_index_hdrext_free(&row);
+    return ok;
+}
+
+static int fsi_case_ladder_restart(struct fsi_node *n)
+{
+    int failures = 0;
+    struct uint256 post_hash;
+    FSI_CHECK("post-rung header is durable", fsi_append_post_rung(n, &post_hash));
+    struct main_state restarted;
+    main_state_init(&restarted);
+    FSI_CHECK("restart begins with genesis only", fsi_add_genesis(&restarted));
+    size_t before = restarted.map_block_index.size;
+    FSI_CHECK("derived recovery leaves loader map unchanged",
+              flysync_island_boot_rehydrate(&restarted) && restarted.map_block_index.size == before);
+    struct app_context ctx = {0};
+    ctx.datadir = n->dir;
+    struct node_db db = {0};
+    struct boot_blkidx_load_ctx load = {
+        .ctx = &ctx, .st = &restarted, .ndb = &db, .params = chain_params_get()
+    };
+    boot_blkidx_run_ladder(&load);
+    FSI_CHECK("real recovery ladder retains post-rung header",
+              block_map_find(&restarted.map_block_index, &post_hash) != NULL);
+    FSI_CHECK("verified window materializes after ladder", flysync_island_boot_materialize(&restarted));
+    struct block_index *post = block_map_find(&restarted.map_block_index, &post_hash);
+    struct block_index *rung = block_map_find(&restarted.map_block_index, &n->is.hash[0]);
+    struct arith_uint256 expected;
+    if (post && rung) {
+        struct arith_uint256 proof = GetBlockProof(post);
+        arith_uint256_add(&expected, &rung->nChainWork, &proof);
+    }
+    FSI_CHECK("post-rung height, parent and cumulative work survive recovery",
+              post && rung && post->nHeight == FSI_RUNG_H + 1 && post->pprev == rung &&
+              arith_uint256_compare(&post->nChainWork, &expected) == 0);
+    main_state_free(&restarted);
+    return failures;
+}
+
 static int fsi_case_seed_rows(struct fsi_node *n)
 {
     int failures = 0;
@@ -504,6 +638,8 @@ static int fsi_case_seed_rows(struct fsi_node *n)
               back.root_height == n->a.root_height &&
               uint256_eq(&back.root_hash, &n->a.root_hash) &&
               arith_uint256_compare(&back.root_work, &n->a.root_work) == 0);
+    failures += fsi_case_missing_projection_row(n);
+    failures += fsi_case_ladder_restart(n);
     return failures;
 }
 
@@ -707,8 +843,8 @@ static int fsi_case_installed(void)
               island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_INSTALLED);
     struct block_index *saved_prev = n.rows[5]->pprev;
     n.rows[5]->pprev = NULL;
-    FSI_CHECK("a damaged row never turns an installed island into a fall-back",
-              flysync_island_boot_reconcile(&n.ms) &&
+    FSI_CHECK("a damaged installed island refuses restart without falling back",
+              !flysync_island_boot_reconcile(&n.ms) &&
               island_anchor_registered() &&
               island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_INSTALLED &&
               flysync_island_phase() == FLYSYNC_DONE);
@@ -1078,9 +1214,71 @@ static int fsi_case_boot_gate(void)
     return failures;
 }
 
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+static bool fsi_crash_after_commit;
+static void fsi_crash_hook(bool committed)
+{
+    if (committed == fsi_crash_after_commit)
+        _exit(73);
+}
+
+static bool fsi_crash_transaction(struct fsi_node *n, bool after)
+{
+    struct island_anchor_rows rows;
+    for (int i = 0; i < FSI_W; ++i)
+        rows.hash[i] = n->is.hash[FSI_W - 1 - i];
+    progress_store_close();
+    pid_t child = fork();
+    if (child == 0) {
+        if (!progress_store_open(n->dir)) _exit(74);
+        fsi_crash_after_commit = after;
+        island_anchor_test_commit_hook(fsi_crash_hook);
+        (void)island_anchor_save_window(progress_store_db(), &n->a, &rows, n->is.w);
+        _exit(75);
+    }
+    int status = 0;
+    bool killed = child > 0 && waitpid(child, &status, 0) == child &&
+                  WIFEXITED(status) && WEXITSTATUS(status) == 73;
+    return killed && progress_store_open(n->dir);
+}
+
+static int fsi_case_window_commit_crash(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    FSI_CHECK("window crash fixture opens", fsi_node_open(&n, "flysync_window_crash"));
+    fsi_build_island(&n.is);
+    flysync_island_test_set_rung(&n.is.rung);
+    flysync_island_test_set_frozen_verifier(fsi_accept_all);
+    char why[160];
+    bool valid = flysync_island_verify_window(n.is.w, FSI_W, FSI_RUNG_H,
+                                              &n.a, why, sizeof(why));
+    FSI_CHECK("window verifies before crash", valid);
+    FSI_CHECK("crash before commit preserves absent state",
+              valid && fsi_crash_transaction(&n, false) &&
+              island_anchor_state_load(progress_store_db()) == ISLAND_ANCHOR_STATE_NONE);
+    FSI_CHECK("crash after commit preserves seeded state",
+              valid && fsi_crash_transaction(&n, true) &&
+              island_anchor_state_load(progress_store_db()) == ISLAND_ANCHOR_STATE_SEEDED);
+    struct block_header window[FSI_W];
+    bool found = false;
+    FSI_CHECK("committed window survives reopen and verifies",
+              island_anchor_window_load(progress_store_db(), window, &found).ok && found &&
+              flysync_island_verify_window(window, FSI_W, FSI_RUNG_H, &n.a, why, sizeof(why)));
+    FSI_CHECK("orphaned committed window without state is refused",
+              progress_meta_delete(progress_store_db(), "flysync.island_state") &&
+              !flysync_island_boot_register(n.dir));
+    fsi_node_close(&n);
+    return failures;
+}
+#endif
+
 int test_flysync_island(void)
 {
     int failures = 0;
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+    failures += fsi_case_window_commit_crash();
+#endif
     failures += fsi_case_window_walk();
     failures += fsi_case_window_args_and_single_mode();
     failures += fsi_case_hold_and_services();

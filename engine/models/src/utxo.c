@@ -553,9 +553,11 @@ int64_t db_utxo_each(struct node_db *ndb, db_utxo_each_fn fn, void *ctx)
     }
     AR_FINALIZE(s);
     /* A failed step ends the walk short: that is not the whole set. */
-    if (step == ZCL_STEP_ERROR)
+    if (step == ZCL_STEP_ERROR) {
         LOG_ERR("utxo", "utxo iteration stopped by a step error after %lld "
                 "rows", (long long)count);
+        return -1;
+    }
     return count;
 }
 

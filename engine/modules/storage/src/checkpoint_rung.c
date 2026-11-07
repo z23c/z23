@@ -1,11 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Checkpoint ladder rung — fold, self-digest, serialize/parse, bundle
- * derivation, and C-fragment emit. See storage/checkpoint_rung.h. The
- * rom_state_root fold here is byte-identical to
- * tools/rom_two_builder_compare.c (rtb_rom_state_root) and to the value baked
- * as g_rom_state_checkpoint.rom_state_root, so a rung that reproduces the
- * keystone fields reproduces the keystone root.
+ * derivation, and C-fragment emit. See storage/checkpoint_rung.h.
+ * V1 reproduces the existing ROM root; V2 additionally binds pool totals.
  */
 
 #include "storage/checkpoint_rung.h"
@@ -28,10 +25,13 @@
 
 #define RUNG_ROOT_DOMAIN "zcl.rom_state_checkpoint.v1/root"
 #define RUNG_SELF_DOMAIN "zcl.checkpoint_rung.v1/self"
+#define RUNG_ROOT_V2_DOMAIN "zcl.rom_state_checkpoint.v2/root"
+#define RUNG_SELF_V2_DOMAIN "zcl.checkpoint_rung.v2/self"
 #define RUNG_ANCHOR_DOMAIN "zcl.consensus_state_bundle.v1/anchors"
 #define RUNG_NULLIFIER_DOMAIN "zcl.consensus_state_bundle.v1/nullifiers"
 
 static const uint8_t RUNG_MAGIC[8] = { 'Z', 'C', 'L', 'R', 'U', 'N', 'G', '1' };
+static const uint8_t RUNG_MAGIC_V2[8] = { 'Z', 'C', 'L', 'R', 'U', 'N', 'G', '2' };
 
 /* ── little-endian scalar writers (SHA3 preimage) ─────────────────── */
 
@@ -85,13 +85,26 @@ static uint64_t get_u64le(const uint8_t *p)
 
 /* ── fold / digest ────────────────────────────────────────────────── */
 
+static bool rung_valid(const struct checkpoint_rung *r)
+{
+    return r && (r->format_version == CHECKPOINT_RUNG_VERSION_V1 ||
+        (r->format_version == CHECKPOINT_RUNG_VERSION_V2 &&
+         r->sprout_pool_total >= 0 && r->sapling_pool_total >= 0));
+}
+
 void checkpoint_rung_compute_rom_state_root(const struct checkpoint_rung *r,
                                             uint8_t out[32])
 {
+    if (!rung_valid(r)) {
+        memset(out, 0, 32);
+        return;
+    }
     struct sha3_256_ctx c;
     sha3_256_init(&c);
-    sha3_256_write(&c, (const unsigned char *)RUNG_ROOT_DOMAIN,
-                   sizeof(RUNG_ROOT_DOMAIN)); /* trailing NUL included */
+    if (r->format_version == CHECKPOINT_RUNG_VERSION_V2)
+        sha3_256_write(&c, (const unsigned char *)RUNG_ROOT_V2_DOMAIN, sizeof(RUNG_ROOT_V2_DOMAIN));
+    else
+        sha3_256_write(&c, (const unsigned char *)RUNG_ROOT_DOMAIN, sizeof(RUNG_ROOT_DOMAIN));
     sha3_u64le(&c, (uint64_t)r->height);
     sha3_256_write(&c, r->block_hash, 32);
     sha3_256_write(&c, r->utxo_root, 32);
@@ -105,6 +118,10 @@ void checkpoint_rung_compute_rom_state_root(const struct checkpoint_rung *r,
     sha3_u64le(&c, (uint64_t)r->sapling_frontier_height);
     sha3_256_write(&c, r->nullifier_digest, 32);
     sha3_u64le(&c, r->nullifier_count);
+    if (r->format_version == CHECKPOINT_RUNG_VERSION_V2) {
+        sha3_u64le(&c, (uint64_t)r->sprout_pool_total);
+        sha3_u64le(&c, (uint64_t)r->sapling_pool_total);
+    }
     sha3_256_finalize(&c, out);
 }
 
@@ -114,8 +131,8 @@ void checkpoint_rung_compute_rom_state_root(const struct checkpoint_rung *r,
 static size_t rung_serialize_body(const struct checkpoint_rung *r, uint8_t *buf)
 {
     uint8_t *p = buf;
-    memcpy(p, RUNG_MAGIC, 8);            p += 8;
-    p += put_u32le(p, CHECKPOINT_RUNG_WIRE_VERSION);
+    memcpy(p, r->format_version == CHECKPOINT_RUNG_VERSION_V2 ? RUNG_MAGIC_V2 : RUNG_MAGIC, 8); p += 8;
+    p += put_u32le(p, r->format_version);
     p += put_u32le(p, 0);                /* reserved */
     p += put_u32le(p, (uint32_t)r->height);
     memcpy(p, r->block_hash, 32);        p += 32;
@@ -130,20 +147,30 @@ static size_t rung_serialize_body(const struct checkpoint_rung *r, uint8_t *buf)
     p += put_u64le(p, (uint64_t)r->sapling_frontier_height);
     memcpy(p, r->nullifier_digest, 32);  p += 32;
     p += put_u64le(p, r->nullifier_count);
+    if (r->format_version == CHECKPOINT_RUNG_VERSION_V2) {
+        p += put_u64le(p, (uint64_t)r->sprout_pool_total);
+        p += put_u64le(p, (uint64_t)r->sapling_pool_total);
+    }
     memcpy(p, r->rom_state_root, 32);    p += 32;
     memcpy(p, r->chainwork, 32);         p += 32;
-    return (size_t)(p - buf);            /* == CHECKPOINT_RUNG_WIRE_SIZE - 32 */
+    return (size_t)(p - buf);
 }
 
 void checkpoint_rung_compute_self_digest(const struct checkpoint_rung *r,
                                          uint8_t out[32])
 {
-    uint8_t body[CHECKPOINT_RUNG_WIRE_SIZE];
+    if (!rung_valid(r)) {
+        memset(out, 0, 32);
+        return;
+    }
+    uint8_t body[CHECKPOINT_RUNG_V2_WIRE_SIZE];
     size_t body_len = rung_serialize_body(r, body);
     struct sha3_256_ctx c;
     sha3_256_init(&c);
-    sha3_256_write(&c, (const unsigned char *)RUNG_SELF_DOMAIN,
-                   sizeof(RUNG_SELF_DOMAIN)); /* trailing NUL included */
+    if (r->format_version == CHECKPOINT_RUNG_VERSION_V2)
+        sha3_256_write(&c, (const unsigned char *)RUNG_SELF_V2_DOMAIN, sizeof(RUNG_SELF_V2_DOMAIN));
+    else
+        sha3_256_write(&c, (const unsigned char *)RUNG_SELF_DOMAIN, sizeof(RUNG_SELF_DOMAIN));
     sha3_256_write(&c, body, body_len);
     sha3_256_finalize(&c, out);
 }
@@ -156,7 +183,7 @@ void checkpoint_rung_finalize(struct checkpoint_rung *r)
 
 bool checkpoint_rung_self_consistent(const struct checkpoint_rung *r)
 {
-    if (!r)
+    if (!rung_valid(r))
         return false;
     uint8_t root[32], self[32];
     checkpoint_rung_compute_rom_state_root(r, root);
@@ -167,22 +194,66 @@ bool checkpoint_rung_self_consistent(const struct checkpoint_rung *r)
 
 /* ── serialize / parse ────────────────────────────────────────────── */
 
-bool checkpoint_rung_serialize(struct checkpoint_rung *r,
-                               uint8_t buf[CHECKPOINT_RUNG_WIRE_SIZE])
+bool checkpoint_rung_serialize_sized(struct checkpoint_rung *r, uint8_t *buf,
+                                     size_t cap, size_t *written)
 {
-    if (!r || !buf)
-        LOG_FAIL(RUNG_SUBSYS, "serialize: NULL arg (r=%p buf=%p)",
-                 (const void *)r, (const void *)buf);
-    /* Zero the whole framed buffer FIRST so the reserved tail
-     * (CHECKPOINT_RUNG_WIRE_SIZE is 404; body + self_digest fill only 356) is
-     * defined. Without this the 48 trailing bytes are whatever the caller's
-     * stack held, making the on-disk artifact and any full-buffer memcmp/hash
-     * non-deterministic (surfaced intermittently by the "serialize is
-     * deterministic" test under load). */
-    memset(buf, 0, CHECKPOINT_RUNG_WIRE_SIZE);
+    if (written) *written = 0;
+    if (!rung_valid(r) || !buf || !written)
+        LOG_FAIL(RUNG_SUBSYS, "serialize: invalid argument or rung");
+    size_t len = r->format_version == CHECKPOINT_RUNG_VERSION_V2
+        ? CHECKPOINT_RUNG_V2_WIRE_SIZE : CHECKPOINT_RUNG_WIRE_SIZE;
+    if (cap < len)
+        LOG_FAIL(RUNG_SUBSYS, "serialize: insufficient capacity");
+    memset(buf, 0, len);
     checkpoint_rung_finalize(r);
     size_t body_len = rung_serialize_body(r, buf);
     memcpy(buf + body_len, r->self_digest, 32);
+    *written = len;
+    return true;
+}
+
+bool checkpoint_rung_serialize(struct checkpoint_rung *r,
+                               uint8_t buf[CHECKPOINT_RUNG_WIRE_SIZE])
+{
+    if (!r || r->format_version != CHECKPOINT_RUNG_VERSION_V1)
+        LOG_FAIL(RUNG_SUBSYS, "serialize: legacy serializer requires v1");
+    size_t written;
+    return checkpoint_rung_serialize_sized(r, buf, CHECKPOINT_RUNG_WIRE_SIZE,
+                                           &written);
+}
+
+static bool rung_v2_padding_zero(const uint8_t *buf)
+{
+    for (size_t i = 12; i < 16; i++)
+        if (buf[i] != 0) return false;
+    for (size_t i = CHECKPOINT_RUNG_V2_WIRE_SIZE - 48; i < CHECKPOINT_RUNG_V2_WIRE_SIZE; i++)
+        if (buf[i] != 0) return false;
+    return true;
+}
+
+static uint32_t rung_wire_version(const uint8_t *buf, size_t len)
+{
+    if (len != CHECKPOINT_RUNG_WIRE_SIZE && len != CHECKPOINT_RUNG_V2_WIRE_SIZE)
+        return CHECKPOINT_RUNG_VERSION_INVALID;
+    uint32_t version = get_u32le(buf + 8);
+    if (version == CHECKPOINT_RUNG_VERSION_V1 && len == CHECKPOINT_RUNG_WIRE_SIZE &&
+        memcmp(buf, RUNG_MAGIC, 8) == 0)
+        return version;
+    if (version == CHECKPOINT_RUNG_VERSION_V2 && len == CHECKPOINT_RUNG_V2_WIRE_SIZE &&
+        memcmp(buf, RUNG_MAGIC_V2, 8) == 0 && rung_v2_padding_zero(buf))
+        return version;
+    return CHECKPOINT_RUNG_VERSION_INVALID;
+}
+
+static bool rung_parse_pools(const uint8_t **cursor, struct checkpoint_rung *out)
+{
+    uint64_t sprout = get_u64le(*cursor);
+    uint64_t sapling = get_u64le(*cursor + 8);
+    if (sprout > INT64_MAX || sapling > INT64_MAX)
+        LOG_FAIL(RUNG_SUBSYS, "parse: invalid pool total");
+    out->sprout_pool_total = (int64_t)sprout;
+    out->sapling_pool_total = (int64_t)sapling;
+    *cursor += 16;
     return true;
 }
 
@@ -192,17 +263,13 @@ bool checkpoint_rung_parse(const uint8_t *buf, size_t len,
     if (!buf || !out)
         LOG_FAIL(RUNG_SUBSYS, "parse: NULL arg (buf=%p out=%p)",
                  (const void *)buf, (const void *)out);
-    if (len != CHECKPOINT_RUNG_WIRE_SIZE)
-        LOG_FAIL(RUNG_SUBSYS, "parse: bad length %zu (want %u)", len,
-                 CHECKPOINT_RUNG_WIRE_SIZE);
-    if (memcmp(buf, RUNG_MAGIC, 8) != 0)
-        LOG_FAIL(RUNG_SUBSYS, "parse: bad magic");
-    const uint8_t *p = buf + 8;
-    uint32_t version = get_u32le(p); p += 4;
-    if (version != CHECKPOINT_RUNG_WIRE_VERSION)
-        LOG_FAIL(RUNG_SUBSYS, "parse: unsupported version %u", version);
+    uint32_t version = rung_wire_version(buf, len);
+    if (version == CHECKPOINT_RUNG_VERSION_INVALID)
+        LOG_FAIL(RUNG_SUBSYS, "parse: invalid magic, version, or length");
+    const uint8_t *p = buf + 12;
     p += 4; /* reserved */
     memset(out, 0, sizeof(*out));
+    out->format_version = (uint8_t)version;
     out->height = (int32_t)get_u32le(p); p += 4;
     memcpy(out->block_hash, p, 32); p += 32;
     memcpy(out->utxo_root, p, 32); p += 32;
@@ -216,6 +283,8 @@ bool checkpoint_rung_parse(const uint8_t *buf, size_t len,
     out->sapling_frontier_height = (int64_t)get_u64le(p); p += 8;
     memcpy(out->nullifier_digest, p, 32); p += 32;
     out->nullifier_count = get_u64le(p); p += 8;
+    if (version == CHECKPOINT_RUNG_VERSION_V2 && !rung_parse_pools(&p, out))
+        return false; // raw-return-ok:logged-by-callee
     memcpy(out->rom_state_root, p, 32); p += 32;
     memcpy(out->chainwork, p, 32); p += 32;
     memcpy(out->self_digest, p, 32); p += 32;
@@ -458,41 +527,113 @@ static bool rung_derive_nullifiers(sqlite3 *db, struct checkpoint_rung *out)
     return true;
 }
 
+static bool rung_read_bundle_pools(sqlite3 *db, struct checkpoint_rung *out)
+{
+    sqlite3_stmt *st = NULL;
+    const char *sql = "SELECT sprout_pool_total,sapling_pool_total FROM bundle_meta WHERE singleton=1";
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
+        LOG_FAIL(RUNG_SUBSYS, "bundle pool totals prepare: %s", sqlite3_errmsg(db));
+    int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
+    bool ok = rc == SQLITE_ROW && sqlite3_column_type(st, 0) == SQLITE_INTEGER &&
+              sqlite3_column_type(st, 1) == SQLITE_INTEGER &&
+              sqlite3_column_int64(st, 0) >= 0 && sqlite3_column_int64(st, 1) >= 0;
+    if (ok) {
+        out->sprout_pool_total = sqlite3_column_int64(st, 0);
+        out->sapling_pool_total = sqlite3_column_int64(st, 1);
+        ok = sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
+    }
+    int final_rc = sqlite3_finalize(st);
+    if (!ok || final_rc != SQLITE_OK)
+        LOG_FAIL(RUNG_SUBSYS, "bundle pool totals missing/malformed or finalize failed");
+    return true;
+}
+
+/* Kept local because the standalone rung exporter does not link the codec. */
+static uint8_t rung_schema_version(sqlite3_stmt *st)
+{
+    static const char v1[] = "zcl.consensus_state_bundle.v1";
+    static const char v2[] = "zcl.consensus_state_bundle.v2";
+    if (sqlite3_column_type(st, 2) != SQLITE_TEXT)
+        return CHECKPOINT_RUNG_VERSION_INVALID;
+    const void *schema = sqlite3_column_text(st, 2);
+    int n = sqlite3_column_bytes(st, 2);
+    if (!schema)
+        return CHECKPOINT_RUNG_VERSION_INVALID;
+    if (n == (int)sizeof(v1) - 1 && memcmp(schema, v1, sizeof(v1) - 1) == 0)
+        return CHECKPOINT_RUNG_VERSION_V1;
+    if (n == (int)sizeof(v2) - 1 && memcmp(schema, v2, sizeof(v2) - 1) == 0)
+        return CHECKPOINT_RUNG_VERSION_V2;
+    return CHECKPOINT_RUNG_VERSION_INVALID;
+}
+
+static bool rung_meta_row(sqlite3_stmt *st, struct checkpoint_rung *out)
+{
+    if (sqlite3_column_type(st, 0) != SQLITE_INTEGER ||
+        sqlite3_column_type(st, 1) != SQLITE_BLOB || sqlite3_column_bytes(st, 1) != 32)
+        return false;
+    int64_t height = sqlite3_column_int64(st, 0);
+    const void *hash = sqlite3_column_blob(st, 1);
+    uint8_t version = rung_schema_version(st);
+    if (height < 0 || height > INT32_MAX || !hash ||
+        version == CHECKPOINT_RUNG_VERSION_INVALID)
+        return false;
+    out->height = (int32_t)height;
+    out->format_version = version;
+    memcpy(out->block_hash, hash, 32);
+    return true;
+}
+
 static bool rung_read_bundle_meta(sqlite3 *db, struct checkpoint_rung *out)
 {
-    static const char sql[] =
-        "SELECT height,block_hash FROM bundle_meta WHERE singleton=1";
+    static const char sql[] = "SELECT height,block_hash,schema FROM bundle_meta WHERE singleton=1";
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
         LOG_FAIL(RUNG_SUBSYS, "bundle_meta prepare: %s", sqlite3_errmsg(db));
     int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
-    bool ok = rc == SQLITE_ROW &&
-              sqlite3_column_type(st, 0) == SQLITE_INTEGER &&
-              sqlite3_column_type(st, 1) == SQLITE_BLOB &&
-              sqlite3_column_bytes(st, 1) == 32;
-    if (ok) {
-        out->height = (int32_t)sqlite3_column_int64(st, 0);
-        memcpy(out->block_hash, sqlite3_column_blob(st, 1), 32);
-    }
-    sqlite3_finalize(st);
-    if (!ok)
-        LOG_FAIL(RUNG_SUBSYS, "bundle_meta singleton missing/malformed");
-    return true;
+    bool ok = rc == SQLITE_ROW && rung_meta_row(st, out);
+    if (ok)
+        ok = sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
+    int final_rc = sqlite3_finalize(st);
+    if (!ok || final_rc != SQLITE_OK)
+        LOG_FAIL(RUNG_SUBSYS, "bundle_meta singleton missing/malformed or finalize failed");
+    return out->format_version != CHECKPOINT_RUNG_VERSION_V2 ||
+           rung_read_bundle_pools(db, out);
 }
 
+static bool rung_finish_transaction(sqlite3 *bundle, bool own_transaction, bool ok)
+{
+    if (own_transaction) {
+        if (ok && sqlite3_exec(bundle, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+            LOG_WARN(RUNG_SUBSYS, "derive_from_bundle: commit: %s", sqlite3_errmsg(bundle));
+            ok = false;
+        }
+        if (!ok && sqlite3_get_autocommit(bundle) == 0 &&
+            sqlite3_exec(bundle, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK)
+            LOG_WARN(RUNG_SUBSYS, "derive_from_bundle: rollback: %s", sqlite3_errmsg(bundle));
+    }
+    return ok;
+}
+
+/* Derive all fields from one SQLite snapshot, retaining a caller's transaction. */
 bool checkpoint_rung_derive_from_bundle(struct sqlite3 *bundle,
                                         const uint8_t chainwork[32],
                                         struct checkpoint_rung *out)
 {
     if (!bundle || !out)
-        LOG_FAIL(RUNG_SUBSYS, "derive_from_bundle: NULL arg (bundle=%p out=%p)",
-                 (const void *)bundle, (const void *)out);
+        LOG_FAIL(RUNG_SUBSYS, "derive_from_bundle: NULL argument");
     memset(out, 0, sizeof(*out));
-    if (!rung_read_bundle_meta(bundle, out) ||
-        !rung_derive_coins(bundle, out) ||
-        !rung_derive_anchors(bundle, out) ||
-        !rung_derive_nullifiers(bundle, out))
+    bool own_transaction = sqlite3_get_autocommit(bundle) != 0;
+    if (own_transaction && sqlite3_exec(bundle, "BEGIN", NULL, NULL, NULL) != SQLITE_OK)
+        LOG_FAIL(RUNG_SUBSYS, "derive_from_bundle: begin: %s", sqlite3_errmsg(bundle));
+    bool ok = rung_read_bundle_meta(bundle, out) &&
+              rung_derive_coins(bundle, out) &&
+              rung_derive_anchors(bundle, out) &&
+              rung_derive_nullifiers(bundle, out);
+    ok = rung_finish_transaction(bundle, own_transaction, ok);
+    if (!ok) {
+        memset(out, 0, sizeof(*out));
         return false; // raw-return-ok:logged-by-callee
+    }
     if (chainwork)
         memcpy(out->chainwork, chainwork, 32);
     checkpoint_rung_finalize(out);
@@ -575,6 +716,10 @@ int checkpoint_rung_emit_c_fragment(const struct checkpoint_rung *r,
     frag_hex_array(&fc, "nullifier_digest", r->nullifier_digest);
     frag_appendf(&fc, "    .nullifier_count = %llu,\n",
                  (unsigned long long)r->nullifier_count);
+    frag_appendf(&fc, "    .format_version = %u,\n", r->format_version);
+    if (r->format_version == CHECKPOINT_RUNG_VERSION_V2)
+        frag_appendf(&fc, "    .sprout_pool_total = %lldLL,\n    .sapling_pool_total = %lldLL,\n",
+                     (long long)r->sprout_pool_total, (long long)r->sapling_pool_total);
     frag_hex_array(&fc, "rom_state_root", r->rom_state_root);
     frag_appendf(&fc, "};\n");
     return fc.pos;

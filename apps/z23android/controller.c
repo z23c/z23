@@ -1457,6 +1457,17 @@ bool zapp_controller_node_control(bool start)
     if (start && ok) restart_event(c, true);
     return ok;
 }
+bool zapp_controller_node_resume_if_wanted(void)
+{
+    char text[256];
+    pthread_mutex_lock(&startup_lock);
+    struct controller *c = current;
+    pthread_mutex_unlock(&startup_lock);
+    if (!c) return false;
+    bool ok = zapp_node_resume_if_wanted(&c->runtime, text, sizeof(text));
+    if (ok) restart_event(c, true);
+    return ok;
+}
 bool zapp_controller_node_pause_for_setup(void)
 {
     char text[256];

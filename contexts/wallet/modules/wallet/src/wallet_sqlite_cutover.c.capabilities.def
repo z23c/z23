@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for wallet transaction persistence. */
+ZCL_MODULE_CAPABILITY("contexts/wallet/modules/wallet/src/wallet_sqlite_cutover.c", CAP_FS_READ|CAP_FS_WRITE, "reads and writes wallet transactions and cutover state in node.db")

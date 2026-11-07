@@ -1271,6 +1271,91 @@ static int service_local_need(void)
     return failures;
 }
 
+static bool test_rung_filter(int32_t height) { return height == 900000; }
+
+static int filtered_retention_at_capacity(void)
+{
+    int failures = 0;
+    TEST_CASE("eligible rung survives a full table and later higher offers") {
+        struct state_offer_v1 offer, rung;
+        struct state_offer_record chosen;
+        uint8_t ip[16]; an_ip(ip, 44);
+        state_offer_store_set_height_filter(NULL);
+        state_offer_store_reset();
+        for (unsigned i = 0; i < STATE_OFFER_STORE_MAX; i++) {
+            int32_t h = 900100 + (int32_t)i;
+            make_offer(&offer, h, h, (uint8_t)(1 + i));
+            ASSERT_EQ(state_offer_store_record(&offer, ip, 18034, (int64_t)i, 1000 + i), STATE_OFFER_STORE_KEPT);
+        }
+        state_offer_store_set_height_filter(test_rung_filter);
+        make_offer(&rung, 900000, 900000, 100);
+        ASSERT_EQ(state_offer_store_record(&rung, ip, 18034, 100, 2000), STATE_OFFER_STORE_KEPT);
+        for (unsigned i = 0; i < 2 * STATE_OFFER_STORE_MAX; i++) {
+            int32_t h = 901000 + (int32_t)i;
+            make_offer(&offer, h, h, (uint8_t)(120 + i));
+            (void)state_offer_store_record(&offer, ip, 18034, 120 + (int64_t)i, 3000 + i);
+        }
+        ASSERT_EQ(state_offer_store_decide(5000, &chosen), STATE_OFFER_DECIDE_FETCH);
+        ASSERT(memcmp(chosen.offer.content_digest, rung.content_digest, 32) == 0);
+        state_offer_store_set_height_filter(NULL);
+        ASSERT_EQ(state_offer_store_decide(5000, &chosen), STATE_OFFER_DECIDE_FETCH);
+        ASSERT(chosen.offer.bundle_height > 900000);
+    } TEST_END
+    state_offer_store_set_height_filter(NULL);
+    state_offer_store_reset();
+    return failures;
+}
+
+static int filtered_full_eligible(void)
+{
+    int failures = 0;
+    TEST_CASE("a full eligible table refuses a higher ineligible offer") {
+        struct state_offer_v1 offer;
+        struct state_offer_record chosen;
+        uint8_t ip[16]; an_ip(ip, 45);
+        state_offer_store_reset();
+        state_offer_store_set_height_filter(test_rung_filter);
+        for (unsigned i = 0; i < STATE_OFFER_STORE_MAX; i++) {
+            make_offer(&offer, 900000, 900000, (uint8_t)(1 + i));
+            ASSERT_EQ(state_offer_store_record(&offer, ip, 18034, (int64_t)i, 1000 + i), STATE_OFFER_STORE_KEPT);
+        }
+        make_offer(&offer, 901000, 901000, 120);
+        ASSERT_EQ(state_offer_store_record(&offer, ip, 18034, 120, 2000), STATE_OFFER_STORE_DROPPED_FULL);
+        ASSERT_EQ(state_offer_store_decide(3000, &chosen), STATE_OFFER_DECIDE_FETCH);
+        ASSERT(chosen.offer.bundle_height == 900000);
+        state_offer_store_set_height_filter(NULL);
+        ASSERT_EQ(state_offer_store_record(&offer, ip, 18034, 120, 2000), STATE_OFFER_STORE_KEPT);
+        ASSERT_EQ(state_offer_store_decide(3000, &chosen), STATE_OFFER_DECIDE_FETCH);
+        ASSERT(chosen.offer.bundle_height == 901000);
+    } TEST_END
+    state_offer_store_set_height_filter(NULL);
+    state_offer_store_reset();
+    return failures;
+}
+
+static int filtered_same_digest_sources(void)
+{
+    int failures = 0;
+    TEST_CASE("source rotation cannot replace the rung with an ineligible height") {
+        struct state_offer_v1 rung, higher;
+        struct state_offer_record chosen;
+        state_offer_store_reset();
+        state_offer_store_set_height_filter(test_rung_filter);
+        make_offer(&rung, 900000, 900000, 42);
+        for (int64_t peer = 0; peer < 4; peer++)
+            ASSERT_EQ(state_offer_store_record_link(&rung, peer, 1000 + peer), STATE_OFFER_STORE_KEPT);
+        make_offer(&higher, 901000, 901000, 42);
+        ASSERT_EQ(state_offer_store_record_link(&higher, 5, 2000), STATE_OFFER_STORE_DROPPED_FULL);
+        ASSERT_EQ(state_offer_store_decide(3000, &chosen), STATE_OFFER_DECIDE_FETCH);
+        ASSERT(chosen.offer.bundle_height == 900000);
+        state_offer_store_set_height_filter(NULL);
+        ASSERT_EQ(state_offer_store_record_link(&higher, 5, 2000), STATE_OFFER_STORE_KEPT);
+    } TEST_END
+    state_offer_store_set_height_filter(NULL);
+    state_offer_store_reset();
+    return failures;
+}
+
 int test_state_offer_store(void)
 {
     int failures = 0;
@@ -1283,6 +1368,9 @@ int test_state_offer_store(void)
     failures += identity_gap_warns_once();
     failures += identity_gap_rewarns_after_restart();
     failures += picks_newest_acceptable();
+    failures += filtered_retention_at_capacity();
+    failures += filtered_full_eligible();
+    failures += filtered_same_digest_sources();
     failures += stale_offer_never_chosen();
     failures += bad_bundle_discards_and_tries_next();
     failures += bounded_wait_names_the_newest_height();

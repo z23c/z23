@@ -207,6 +207,26 @@ consensus_state_baked_trust_root_for_height(int32_t height)
     return rom;
 }
 
+static bool activate_manifest_version_valid(
+    const struct consensus_state_bundle_manifest *manifest)
+{
+    return manifest->format_version == CONSENSUS_STATE_BUNDLE_V1 ||
+        (manifest->format_version == CONSENSUS_STATE_BUNDLE_V2 &&
+         manifest->sprout_pool_total >= 0 && manifest->sapling_pool_total >= 0);
+}
+
+static bool activate_rom_version_matches(
+    const struct consensus_state_bundle_manifest *manifest,
+    const struct rom_state_checkpoint *rom)
+{
+    if (!rom || !activate_manifest_version_valid(manifest) ||
+        manifest->format_version != rom->format_version)
+        return false;
+    return manifest->format_version == CONSENSUS_STATE_BUNDLE_V1 ||
+        (manifest->sprout_pool_total == rom->sprout_pool_total &&
+         manifest->sapling_pool_total == rom->sapling_pool_total);
+}
+
 static bool activate_rom_checkpoint_content_evaluate(
     const struct consensus_state_bundle_manifest *manifest)
 {
@@ -216,7 +236,7 @@ static bool activate_rom_checkpoint_content_evaluate(
      * baked commitment is bound on the activate path. */
     const struct rom_state_checkpoint *rom =
         consensus_state_baked_trust_root_for_height(manifest->height);
-    if (!rom)
+    if (!activate_rom_version_matches(manifest, rom))
         return false;
     return manifest->utxo_count == rom->utxo_count &&
            memcmp(manifest->block_hash, rom->block_hash, 32) == 0 &&
@@ -278,6 +298,13 @@ activate_resolve_content_authority(
     if (activate_rom_checkpoint_content_evaluate(manifest))
         return CONSENSUS_STATE_ACTIVATE_AUTHORITY_CHECKPOINT_ROM;
 
+    if (manifest->format_version != CONSENSUS_STATE_BUNDLE_V1) {
+        if (contained_reason && reason_cap)
+            snprintf(contained_reason, reason_cap,
+                     "v2 pool totals require a matching compiled checkpoint or independent replay receipt");
+        return CONSENSUS_STATE_ACTIVATE_AUTHORITY_NONE;
+    }
+
     switch (activate_checkpoint_content_evaluate(manifest, request)) {
     case ACTIVATE_CC_ACTIVATE:
         return CONSENSUS_STATE_ACTIVATE_AUTHORITY_CHECKPOINT_CONTENT;
@@ -317,6 +344,8 @@ consensus_state_activate_resolve_authority(
     if (contained_reason && reason_cap)
         contained_reason[0] = '\0';
     if (!evidence || !manifest || !request)
+        return CONSENSUS_STATE_ACTIVATE_AUTHORITY_NONE;
+    if (!activate_manifest_version_valid(manifest))
         return CONSENSUS_STATE_ACTIVATE_AUTHORITY_NONE;
     if (activate_receipt_authority_available(evidence, datadir_fd, manifest))
         return CONSENSUS_STATE_ACTIVATE_AUTHORITY_RECEIPT;

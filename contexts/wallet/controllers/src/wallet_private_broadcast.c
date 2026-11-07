@@ -13,6 +13,7 @@
 #include "controllers/sync_controller.h"
 #include "controllers/wallet_helpers.h"
 #include "models/database.h"
+#include "models/wallet_tx.h"
 #include "primitives/transaction.h"
 #include "services/chain_nullifier_evidence_service.h"
 #include "json/json.h"
@@ -26,6 +27,7 @@
 #include "wallet/wallet.h"
 
 #include <pthread.h>
+#include <sqlite3.h>
 #include <stdatomic.h>
 #include <string.h>
 
@@ -315,7 +317,7 @@ static pthread_mutex_t g_ticker_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t g_ticker_tid;
 static bool g_ticker_joinable;
 
-void wallet_private_broadcast_stop(void)
+bool wallet_private_broadcast_stop_checked(void)
 {
     atomic_store(&g_ticker_stop, true);
     pthread_mutex_lock(&g_ticker_mu);
@@ -330,7 +332,100 @@ void wallet_private_broadcast_stop(void)
         else
             LOG_WARN("wallet", "private broadcast ticker did not stop in time");
     }
+    bool stopped = !g_ticker_joinable;
     pthread_mutex_unlock(&g_ticker_mu);
+    return stopped;
+}
+
+void wallet_private_broadcast_stop(void)
+{
+    (void)wallet_private_broadcast_stop_checked();
+}
+
+static bool wpb_memory_note_spent(const struct wallet *wallet, const uint8_t nf[32])
+{
+    for (size_t i = 0; i < wallet->num_sapling_notes; ++i)
+        if (wallet->sapling_notes[i].used && wallet->sapling_notes[i].spent &&
+            memcmp(wallet->sapling_notes[i].nf, nf, 32) == 0) return true;
+    return false;
+}
+
+static enum wallet_hold_proof_result wpb_prove_shielded(struct node_db *ndb,
+    struct wallet *wallet, const struct transaction *tx, const struct uint256 *id, bool reserve)
+{
+    for (size_t i = 0; i < tx->num_shielded_spend; ++i) {
+        const uint8_t *nf = tx->v_shielded_spend[i].nullifier.data;
+        if (reserve) {
+            enum db_mark_spent_result marked = db_sapling_note_reserve_spend(ndb, nf, id->data);
+            if (marked == DB_MARK_SPENT_ERROR) return WALLET_HOLD_PROOF_ERROR;
+            if (marked != DB_MARK_SPENT_OK) return WALLET_HOLD_PROOF_CONFLICT;
+        }
+        enum db_sapling_note_reservation_state state = db_sapling_note_reservation_probe(ndb, nf, id->data);
+        if (state == DB_NOTE_RESERVATION_ERROR) return WALLET_HOLD_PROOF_ERROR;
+        if (state != DB_NOTE_RESERVATION_SAME_TX) return WALLET_HOLD_PROOF_CONFLICT;
+    }
+    if (reserve) wallet_mark_sapling_nullifiers_spent(wallet, tx);
+    for (size_t i = 0; i < tx->num_shielded_spend; ++i)
+        if (!wpb_memory_note_spent(wallet, tx->v_shielded_spend[i].nullifier.data))
+            return WALLET_HOLD_PROOF_CONFLICT;
+    return WALLET_HOLD_PROOF_OK;
+}
+
+static enum wallet_hold_proof_result wpb_prove_transparent(struct wallet *wallet,
+    const struct transaction *tx, bool reserve)
+{
+    for (size_t i = 0; i < tx->num_vin; ++i) {
+        const struct outpoint *input = &tx->vin[i].prevout;
+        if (reserve) wallet_mark_outpoint_spent(wallet, &input->hash, input->n);
+        if (!wallet_is_outpoint_spent(wallet, &input->hash, input->n))
+            return WALLET_HOLD_PROOF_CONFLICT;
+    }
+    return WALLET_HOLD_PROOF_OK;
+}
+
+static enum wallet_hold_proof_result wpb_prove_one(struct node_db *ndb,
+    struct wallet *wallet, const struct wpr_pending_record *record, bool reserve)
+{
+    if (record->expired) return WALLET_HOLD_PROOF_OK;
+    const struct wallet_tx *wtx = wallet_get_tx(wallet, &record->txid);
+    enum db_wallet_tx_presence disk = db_wallet_tx_presence_checked(ndb, record->txid.data);
+    if (disk == DB_WALLET_TX_ERROR) return WALLET_HOLD_PROOF_ERROR;
+    if (!wtx || disk == DB_WALLET_TX_ABSENT) return WALLET_HOLD_PROOF_TX_ABSENT;
+    const struct transaction *tx = &wtx->tx;
+    if (!uint256_eq(&tx->hash, &record->txid)) return WALLET_HOLD_PROOF_CONFLICT;
+    enum wallet_hold_proof_result r = wpb_prove_shielded(ndb, wallet, tx, &record->txid, reserve);
+    return r == WALLET_HOLD_PROOF_OK ? wpb_prove_transparent(wallet, tx, reserve) : r;
+}
+
+static enum wallet_hold_proof_result wpb_prove_all(struct wpr_pending_guard *guard,
+    struct node_db *ndb, struct wallet *wallet, sqlite3 *db, bool reserve)
+{
+    if (!guard || !guard->relay || !ndb || !ndb->open || !ndb->db || ndb->db != db ||
+        !wallet || guard->relay->env.wallet != wallet || guard->relay->env.node_db != ndb ||
+        sqlite3_txn_state(db, "main") != SQLITE_TXN_WRITE ||
+        wallet->readiness.state != WALLET_READINESS_PENDING) return WALLET_HOLD_PROOF_ERROR;
+    for (size_t i = 0; i < guard->count; ++i) {
+        enum wallet_hold_proof_result r = wpb_prove_one(ndb, wallet, &guard->records[i], reserve);
+        if (r != WALLET_HOLD_PROOF_OK) return r;
+    }
+    return WALLET_HOLD_PROOF_OK;
+}
+
+enum wallet_hold_proof_result wallet_private_broadcast_reserve_in_open_tx(
+    struct wpr_pending_guard *guard, struct node_db *ndb, struct wallet *wallet)
+{
+    if (!wallet) return WALLET_HOLD_PROOF_ERROR;
+    if (!zcl_mutex_trylock(&wallet->cs)) return WALLET_HOLD_PROOF_BUSY;
+    enum wallet_hold_proof_result r = wpb_prove_all(guard, ndb, wallet, ndb ? ndb->db : NULL, true);
+    zcl_mutex_unlock(&wallet->cs);
+    return r;
+}
+
+bool wallet_private_broadcast_validate_holds_locked(void *ctx, struct wallet *wallet, sqlite3 *db)
+{
+    struct wpr_pending_guard *guard = ctx;
+    struct node_db *ndb = guard && guard->relay ? guard->relay->env.node_db : NULL;
+    return wpb_prove_all(guard, ndb, wallet, db, false) == WALLET_HOLD_PROOF_OK;
 }
 
 void wallet_private_broadcast_reserve_spends(const struct wpr_env *env,
@@ -353,8 +448,7 @@ void wallet_private_broadcast_arm_env(const struct wpr_env *in,
         out->reserve = wallet_private_broadcast_reserve_spends;
 }
 
-bool wallet_private_broadcast_start(enum wpr_mode mode,
-                                    const struct wpr_env *env)
+void wallet_private_broadcast_configure(enum wpr_mode mode, const struct wpr_env *env)
 {
     struct wpr *relay = wpr_global();
     struct wpr_env armed;
@@ -365,6 +459,12 @@ bool wallet_private_broadcast_start(enum wpr_mode mode,
     wpr_configure(relay, mode, env);
     wallet_require_admission_pool(mode == WPR_MODE_PRIVATE ? wpr_pool(relay)
                                                            : NULL);
+}
+
+bool wallet_private_broadcast_start(enum wpr_mode mode, const struct wpr_env *env)
+{
+    wallet_private_broadcast_configure(mode, env);
+    struct wpr *relay = wpr_global();
     /* Always resume and tick: a send held in private mode must still expire
      * and release its coins after a restart in public mode. Nothing is pushed
      * unless the mode is private. */

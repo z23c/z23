@@ -25,6 +25,9 @@
 #include "config/command_catalog.h"
 #include "codeindex/codeindex.h"
 #include "controllers/transaction_controller.h"
+#include "controllers/wallet_controller.h"
+#include "controllers/wallet_helpers.h"
+#include "wallet/wallet.h"
 #include "dev_failure_store.h"
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
@@ -2543,7 +2546,9 @@ static int test_raw_native_pipeline_mines_exact_signed_bytes(void)
     memset(&sim, 0, sizeof(sim));
     bool sim_ready = false;
     struct basic_keystore *ks = NULL;
-    bool ks_ready = false;
+    struct wallet *wallet = NULL;
+    bool wallet_ready = false;
+    struct wallet_rpc_context saved_wallet_context = g_wallet_ctx;
     struct privkey funding_key = {0};
     struct privkey recipient_key = {0};
 
@@ -2551,10 +2556,12 @@ static int test_raw_native_pipeline_mines_exact_signed_bytes(void)
         ASSERT(simnet_init(&sim));
         sim_ready = true;
 
-        ks = zcl_malloc(sizeof(*ks), "raw simnet keystore");
-        ASSERT(ks != NULL);
-        keystore_init(ks);
-        ks_ready = true;
+        wallet = zcl_malloc(sizeof(*wallet), "raw simnet wallet");
+        ASSERT(wallet != NULL);
+        wallet_init(wallet);
+        wallet_ready = true;
+        ks = &wallet->keystore;
+        rpc_wallet_set_state(wallet, NULL, NULL, NULL, NULL, NULL);
 
         struct pubkey funding_pub;
         privkey_make_new(&funding_key, true);
@@ -2739,6 +2746,20 @@ static int test_raw_native_pipeline_mines_exact_signed_bytes(void)
         zcl_command_reply_init(&reply, sign_spec->output_schema);
         zcl_native_handle_wallet_raw_sign(&request, &reply);
         ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_get(&reply.data, "complete") && json_get(&reply.data, "complete")->type == JSON_BOOL);
+        ASSERT(!json_get_bool(json_get(&reply.data, "complete")));
+        zcl_command_reply_free(&reply);
+        ASSERT(wallet_readiness_initialize(wallet, WALLET_READINESS_PENDING, false, 0));
+        zcl_command_reply_init(&reply, sign_spec->output_schema);
+        zcl_native_handle_wallet_raw_sign(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_get(&reply.data, "complete") && json_get(&reply.data, "complete")->type == JSON_BOOL);
+        ASSERT(!json_get_bool(json_get(&reply.data, "complete")));
+        zcl_command_reply_free(&reply);
+        ASSERT(wallet_readiness_complete(wallet, false, 0));
+        zcl_command_reply_init(&reply, sign_spec->output_schema);
+        zcl_native_handle_wallet_raw_sign(&request, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
         ASSERT(json_get_bool(json_get(&reply.data, "complete")));
         const char *signed_raw = json_get_str(
             json_get(&reply.data, "raw_hex"));
@@ -2789,8 +2810,9 @@ static int test_raw_native_pipeline_mines_exact_signed_bytes(void)
     g_raw_simnet_bridge = NULL;
     rpc_rawtx_set_keystore(NULL);
     rpc_rawtx_set_state(NULL, NULL, NULL, NULL);
-    if (ks_ready) keystore_free(ks);
-    free(ks);
+    g_wallet_ctx = saved_wallet_context;
+    if (wallet_ready) wallet_free(wallet);
+    free(wallet);
     memory_cleanse(funding_key.vch, sizeof(funding_key.vch));
     memory_cleanse(recipient_key.vch, sizeof(recipient_key.vch));
     if (sim_ready) simnet_free(&sim);

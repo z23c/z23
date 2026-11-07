@@ -14,6 +14,15 @@
 #include "config/boot_cursor_state.h"
 #include "config/boot_datadir_lock.h"
 #include "config/boot_internal.h"
+#include "config/boot_wallet_pending_restore.h"
+#include "config/boot_wallet_cutover_replay.h"
+#include "config/boot_wallet_cutover_publish.h"
+#include "controllers/wallet_private_broadcast.h"
+#include "services/wallet_private_relay.h"
+#include "models/wallet_tx.h"
+#include "storage/wallet_projection.h"
+#include "storage/event_log_singleton.h"
+#include "controllers/wallet_helpers.h"
 #include "config/boot_projection_hole_scan.h"
 #include "config/boot_legacy_blocks.h"
 #include "config/boot_memory_guard.h"
@@ -95,6 +104,7 @@
 #include "chain/checkpoints.h"
 #include "storage/coins_view_sqlite.h"
 #include "storage/coins_view_kv.h"
+#include "base/serialize_le.h"
 #include "storage/coins_kv.h"
 #include "storage/consensus_db.h"
 #include "storage/coins_db.h"
@@ -168,6 +178,7 @@
 #include <limits.h>
 #include <sqlite3.h>
 #include "boot_steps_internal.h"
+#include "boot_cutover_startup_internal.h"
 static struct main_state g_state;
 static struct coins_view_sqlite g_coins_sqlite;
 /* Read authority for the coins_tip cache backing: a read-only coins_view over
@@ -195,6 +206,56 @@ static struct wallet g_wallet;
 static struct gen_context g_gen;
 static struct wallet_sqlite g_wallet_sqlite;
 static struct node_db g_node_db;
+
+bool boot_wallet_cutover_startup_node_db_matches(const struct node_db *ndb)
+{
+    return ndb == &g_node_db && boot_stage_is(BOOT_STAGE_BLOCK_INDEX_LOADED);
+}
+
+bool boot_wallet_cutover_recovery_context_matches(const struct node_db *ndb,
+    const struct wallet_sqlite *ws)
+{
+    return ndb == &g_node_db && ws == &g_wallet_sqlite &&
+        (boot_stage_is(BOOT_STAGE_WALLET_LOADED) ||
+         boot_stage_is(BOOT_STAGE_BLOCK_INDEX_LOADED));
+}
+
+bool boot_wallet_cutover_startup_context_matches(const struct node_db *ndb,
+    const struct wallet_sqlite *ws, const struct wallet *wallet,
+    const struct main_state *main)
+{
+    return boot_wallet_cutover_startup_node_db_matches(ndb) &&
+           ws == &g_wallet_sqlite && wallet == &g_wallet && main == &g_state;
+}
+
+bool boot_wallet_allows_coin_repair(void)
+{
+    if (!g_wallet_sqlite.db) return false;
+    struct wallet_cutover_binding binding;
+    return wallet_sqlite_cutover_read(&g_wallet_sqlite, &binding) ==
+           WALLET_CUTOVER_ABSENT;
+}
+
+struct zcl_result boot_install_startup_bundle(struct node_db *ndb,
+    struct main_state *ms, const char *bundle_path, const char *datadir,
+    struct consensus_state_install_runtime_result *out)
+{
+    bool startup = boot_wallet_cutover_startup_context_matches(
+        ndb, &g_wallet_sqlite, &g_wallet, ms);
+    struct zcl_result result = consensus_state_install_from_bundle_guarded(ndb, ms, bundle_path,
+        datadir, &g_wallet_sqlite, &g_wallet, out);
+    if (!startup && out) out->owner_gate_refused = true;
+    return result;
+}
+
+#ifdef ZCL_TESTING
+void boot_wallet_cutover_test_slots(struct node_db **ndb, struct wallet_sqlite **ws,
+                                    struct wallet **wallet, struct main_state **main)
+{
+    *ndb = &g_node_db; *ws = &g_wallet_sqlite; *wallet = &g_wallet; *main = &g_state;
+}
+#endif
+
 static struct db_service g_db_service;
 static struct app_runtime_context g_boot_runtime;
 static const char *g_datadir = NULL;
@@ -443,35 +504,31 @@ static void boot_step_build_svc_ctx(struct app_context *ctx,
         svc->want_address_backfill = (addr_done == 0);
     }
 }
-static void boot_step_finalize_chain_state(void)
+static bool boot_step_finalize_chain_state(void)
 {
-    /* Restore normal SQLite settings after any IBD replay */
-    if (g_node_db.open) {
-        if (!boot_db_restore_normal_mode())
-            fprintf(stderr, "boot: failed to restore normal mode\n");
-        if (!boot_db_set_sync_batch_size(1))
-            fprintf(stderr, "boot: failed to reset sync batch size\n");
+    if (g_node_db.open &&
+        (!boot_db_restore_normal_mode() || !boot_db_set_sync_batch_size(1))) {
+        LOG_ERROR("boot", "cannot restore normal database settings");
+        return false;
     }
-    /* Flush every 500 blocks during normal sync so crash/kill never
-     * loses more than ~500 blocks of connected coins state. */
+    /* Flush every 500 blocks during normal sync. */
     set_flush_policy(3600, 500000, 500);
     struct block_index *tip = active_chain_tip(&g_state.chain_active);
     if (tip && tip->phashBlock) {
         if (g_node_db.open &&
-            !boot_projection_finalize_cursor(&g_node_db,
-                                            &g_state.chain_active, NULL))
-            fprintf(stderr, "boot: failed to persist final chain tip\n");
+            !boot_projection_finalize_cursor(&g_node_db, &g_state.chain_active, NULL)) {
+            LOG_ERROR("boot", "cannot persist final chain tip");
+            return false;
+        }
         char hex[65];
         uint256_get_hex(tip->phashBlock, hex);
         printf("Chain tip: height=%d hash=%s\n", tip->nHeight, hex);
         boot_status_set_height(tip->nHeight);
         event_emitf(EV_BOOT_ACTIVATE, 0, "done tip=%d", tip->nHeight);
-        /* Do not auto-extend deferred proof validation at startup: chainstate
-         * came from a trusted source (import / prior run / hash-checked coins
-         * DB); only blocks received via P2P AFTER startup need new validation. */
     } else {
         printf("Chain tip: genesis\n");
     }
+    return true;
 }
 static bool boot_promote_tip_via_csr_internal(struct block_index *tip,
                                               const char *reason,
@@ -900,9 +957,8 @@ static struct zcl_result sr_wallet_loaded(void *ctx)
 static struct zcl_result sr_block_index_loaded(void *ctx)
 {
     (void)ctx;
-    /* The flat/SQLite/LevelDB loaders, projection topup, and height/pprev
-     * repair have run and the sidecar integrity gate accepted the map. A
-     * genesis-only map (size <= 1) is legitimate on a fresh datadir. */
+    /* The selected loader authenticated the index and passed the sidecar
+     * integrity gate. A genesis-only map is legitimate on a fresh datadir. */
     return ZCL_OK;
 }
 static struct zcl_result sr_chain_tip_resolved(void *ctx)
@@ -911,9 +967,16 @@ static struct zcl_result sr_chain_tip_resolved(void *ctx)
     /* Restore normal SQLite mode, persist the resolved tip, and stamp
      * boot_status — the coins/block-index reconciliation is complete by the
      * time app_init calls this. */
-    boot_step_finalize_chain_state();
+    if (!boot_step_finalize_chain_state())
+        return ZCL_ERR(-1, "chain tip finalization failed");
     return ZCL_OK;
 }
+#ifdef ZCL_TESTING
+bool boot_chain_tip_resolved_test(void)
+{
+    return sr_chain_tip_resolved(NULL).ok;
+}
+#endif
 static struct zcl_result sr_network_ready(void *ctx)
 {
     const struct boot_svc_ctx *svc = ctx;
@@ -927,180 +990,9 @@ static struct zcl_result sr_services_running(void *ctx)
     boot_step_start_maintenance_services();
     return ZCL_OK;
 }
-static void sandbox_add_home_dir_rule(struct os_sandbox_path_rule *rules, size_t cap, size_t *n,
-                                      char scratch[][PATH_MAX], size_t scratch_cap, size_t *s,
-                                      const char *home, const char *subdir, bool allow_write)
-{
-    if (!(home && home[0] && *n < cap && *s < scratch_cap)) return;
-    snprintf(scratch[*s], PATH_MAX, "%s/%s", home, subdir);
-    struct stat st;
-    if (stat(scratch[*s], &st) == 0 && S_ISDIR(st.st_mode)) {
-        rules[(*n)++] = (struct os_sandbox_path_rule){
-            .path = scratch[*s], .allow_read = true, .allow_write = allow_write };
-        (*s)++;
-    }
-}
-/* Late confinement: enter the os_sandbox node steady-state profile once every
- * thread is spawned and every late fd is open (SERVICES_RUNNING, highest
- * `order` — last record before READY). No-op unless -sandbox=steady.
- * fs grants: the datadir tree (rw, covers <datadir>/ssl + SQLite WAL/shm/tmp),
- * the agent-test status dir when present, and a read-only OS_SANDBOX_PROC_
- * SELF_STATUS_PATH grant (metrics RSS — see os_sandbox_landlock_apply_to_self
- * in platform/os_sandbox.h for the full Landlock-retrofit design/scope note).
- * Fail-closed: an applicable-but-failed confinement request FATALs boot
- * rather than run unconfined. Thread coverage (`dumpstate sandbox`): seccomp
- * installs via TSYNC (every thread, atomically); Landlock has no TSYNC
- * equivalent, so os_sandbox_landlock_apply_to_self() is the retrofit join an
- * already-running thread calls from its own loop — wired into the
- * health-sweep and metrics loops today. Deliberately NOT wired into the
- * supervisor dispatch thread (platform/modules/util/src/supervisor.c): that one thread
- * runs EVERY registered supervisor child's on_tick synchronously, so
- * confining it would confine every dispatched callback across every domain,
- * not just an audited loop — it stays the documented Landlock-unconfined
- * (still seccomp-confined) residual alongside file_service/
- * wallet_backup_service/disk_monitor/event_async. */
-/* Build the shared Landlock fs-grant set for the node confinement profiles: rw
- * under the datadir (covers <datadir>/ssl + SQLite WAL/shm/tmp), rw under the
- * agent-test status dir when present, and a read-only self-status grant. Returns
- * the count written into `rules` (capacity >= 3). `extra_ro` toggles the
- * extra read-only paths the confined node opens post-boot (Sapling params dir,
- * /etc/resolv.conf) — enabled for -confine, which uses a strict seccomp
- * allow-list and therefore benefits from the fuller path set. */
-static size_t sandbox_build_fs_rules(const char *datadir,
-                                     struct os_sandbox_path_rule *rules,
-                                     size_t cap, bool extra_ro,
-                                     char scratch[][PATH_MAX], size_t scratch_cap)
-{
-    size_t n = 0;
-    size_t s = 0;
-    if (cap == 0) return 0;
-    rules[n++] = (struct os_sandbox_path_rule){
-        .path = datadir, .allow_read = true, .allow_write = true };
-    const char *home = getenv("HOME");
-    sandbox_add_home_dir_rule(rules, cap, &n, scratch, scratch_cap, &s, home,
-                              ".zclassic-c23-agent-test-status", true);
-    if (extra_ro) {
-        /* Sapling params dir (read-only proving/verifying keys). */
-        sandbox_add_home_dir_rule(rules, cap, &n, scratch, scratch_cap, &s, home, ".zcash-params", false);
-        /* DNS resolver config (peer hostname resolution). Grant the /etc/
-         * directory read-only only if it exists (it always does on Linux). */
-        struct stat est;
-        if (n < cap && stat("/etc/resolv.conf", &est) == 0)
-            rules[n++] = (struct os_sandbox_path_rule){
-                .path = "/etc/resolv.conf", .allow_read = true };
-    }
-    /* Self-introspection only (getrusage/sysinfo already cover this ground). */
-    if (n < cap)
-        rules[n++] = (struct os_sandbox_path_rule){
-            .path = OS_SANDBOX_PROC_SELF_STATUS_PATH, .allow_read = true };
-    return n;
-}
-/* -confine / -confine=serving (strict seccomp ALLOW-list + Landlock): apply
- * once every listen socket/file/thread is up. An unexpected syscall KILLs the
- * process; actx->confine_serving picks the wider allow-set (adds the socket
- * family) so a node doing real P2P/HTTPS/onion I/O is not SIGSYS-killed at its
- * first accept()/recv()/connect(); plain -confine keeps the strict set.
- * Refuse to HALF-apply: on a partway os_sandbox_enter() failure run the node
- * UNCONFINED and raise 'confine.apply_failed' (remedy OWNER — only an operator
- * can widen the allow-list / enable Landlock and restart) rather than leave a
- * partial sandbox; Landlock degrades gracefully on an older kernel (logged,
- * skipped). Every degrade path returns ZCL_OK, so the REQUEST is noted FIRST —
- * that is the only way the `confinement` witness tells "nobody asked" apart
- * from "asked, and running wide open anyway". */
-static struct zcl_result sr_confine_enter(const struct app_context *actx)
-{
-    os_sandbox_note_requested(actx->confine_serving ? "node_confine_serving" : "node_confine");
-    const char *datadir = actx->datadir ? actx->datadir : g_datadir;
-    if (!datadir || !datadir[0]) {
-        /* No datadir to scope: cannot confine safely. Run unconfined + name it. */
-        struct blocker_record r;
-        if (blocker_init(&r, "confine.apply_failed", "sandbox",
-                         BLOCKER_PERMANENT,
-                         "-confine requested but no datadir to grant; running "
-                         "UNCONFINED (operator must fix the datadir + restart)"))
-            (void)blocker_set(&r);
-        LOG_WARN("sandbox", "-confine: no datadir to grant; running unconfined "
-                 "(blocker confine.apply_failed raised)");
-        return ZCL_OK;  /* NOT fatal: unconfined-but-loud, per the -confine contract */
-    }
-    int abi = os_sandbox_landlock_abi();
-    bool seccomp_ok = os_sandbox_seccomp_supported();
-    if (abi < 1 && !seccomp_ok) {
-        /* Neither mechanism available on this kernel/build: degrade (log+skip),
-         * do NOT raise a blocker — this is graceful degradation, not a failure
-         * of an applicable request. */
-        LOG_WARN("sandbox",
-                 "-confine: neither Landlock (abi=%d) nor seccomp available on "
-                 "this kernel/build; running unconfined (graceful degrade)", abi);
-        return ZCL_OK;
-    }
-    char scratch[4][PATH_MAX];
-    struct os_sandbox_path_rule rules[6];
-    size_t n = sandbox_build_fs_rules(datadir, rules, 6, /*extra_ro=*/true,
-                                      scratch, 4);
-    struct os_sandbox_profile prof = actx->confine_serving
-        ? os_sandbox_node_confine_serving_profile(rules, n)
-        : os_sandbox_node_confine_profile(rules, n);
-    struct zcl_result r = os_sandbox_enter(&prof);
-    if (!r.ok) {
-        /* Refuse to half-apply: run unconfined + raise the named blocker. Note:
-         * a seccomp allow-list that KILLs mid-install would have taken the
-         * process down already, so reaching here means an earlier builder
-         * (no_new_privs/Landlock) failed cleanly and nothing partial is live. */
-        struct blocker_record br;
-        char reason[512];
-        snprintf(reason, sizeof(reason),
-                 "os_sandbox_enter(%s) failed code=%d %s; running "
-                 "UNCONFINED (operator must widen the allow-list / enable "
-                 "Landlock and restart)",
-                 actx->confine_serving ? "node_confine_serving" : "node_confine",
-                 r.code, r.message[0] ? r.message : "?");
-        if (blocker_init(&br, "confine.apply_failed", "sandbox",
-                         BLOCKER_PERMANENT, reason))
-            (void)blocker_set(&br);
-        LOG_WARN("sandbox", "-confine apply failed (code=%d %s) — running "
-                 "unconfined, blocker confine.apply_failed raised",
-                 r.code, r.message);
-        return ZCL_OK;  /* NOT fatal: the -confine contract is unconfined-but-loud */
-    }
-    printf("[boot] confine: entered '%s' profile (landlock_abi=%d, %zu fs "
-           "grants, seccomp allow-list via %s)\n",
-           os_sandbox_active_profile_name() ? os_sandbox_active_profile_name() : "?",
-           abi, n, os_sandbox_seccomp_install_method());
-    return ZCL_OK;
-}
 static struct zcl_result sr_sandbox_enter(void *ctx)
 {
-    const struct app_context *actx = ctx;
-    if (!actx)
-        return ZCL_OK;
-    /* -confine: strict allow-list confinement (distinct from -sandbox=steady;
-     * main.c refuses both at once). Unconfined-but-loud on apply failure. */
-    if (actx->confine)
-        return sr_confine_enter(actx);
-    if (!actx->sandbox_steady)
-        return ZCL_OK;  /* -sandbox=off (default): no confinement requested */
-    os_sandbox_note_requested("node_steady_state");
-    const char *datadir = actx->datadir ? actx->datadir : g_datadir;
-    if (!datadir || !datadir[0])
-        return ZCL_ERR(-1, "-sandbox=steady: no datadir to grant");
-    char scratch[4][PATH_MAX];
-    struct os_sandbox_path_rule rules[3];
-    size_t n = sandbox_build_fs_rules(datadir, rules, 3, /*extra_ro=*/false,
-                                      scratch, 4);
-    struct os_sandbox_profile prof =
-        os_sandbox_node_steady_state_profile(rules, n);
-    struct zcl_result r = os_sandbox_enter(&prof);
-    if (!r.ok) {
-        fprintf(stderr,  // obs-ok:sandbox-enter-fatal-precedes-boot-fail
-            "FATAL: -sandbox=steady requested but os_sandbox_enter failed: "
-            "code=%d %s\n", r.code, r.message);
-        return r;
-    }
-    printf("[boot] sandbox: entered '%s' profile (landlock_abi=%d, %zu fs grants)\n",
-           os_sandbox_active_profile_name() ? os_sandbox_active_profile_name() : "?",
-           os_sandbox_landlock_abi(), n);
-    return ZCL_OK;
+    return boot_sandbox_enter(ctx, g_datadir);
 }
 /* The boot boundary table. One record per line so the golden lint gate can
  * parse (stage, order, name) without a C compile. `order` reserves headroom
@@ -1391,14 +1283,25 @@ static void boot_wallet_read_persisted_state(struct app_context *ctx,
         }
     }
     boot_wallet_read_keypool_or_exit(&g_wallet_sqlite, &g_wallet);
-    wallet_sqlite_read_txs(&g_wallet_sqlite, &g_wallet);
+    if (!wallet_sqlite_read_txs(&g_wallet_sqlite, &g_wallet)) {
+        boot_error_report(BOOT_ERROR_FATAL, "WALLET_TX_LOAD_FAILED", "wallet_load",
+                          "Wallet transaction metadata could not be loaded; startup stopped.",
+                          NULL, 0, "read_txs=false");
+        exit(1);
+    }
     wallet_rebuild_spent_set(&g_wallet);
     wallet_sqlite_read_sapling_keys(&g_wallet_sqlite, &g_wallet);
     boot_wallet_adopt_seed_if_it_governs(&g_wallet);
     wallet_sqlite_read_scripts(&g_wallet_sqlite, &g_wallet);
     wallet_sqlite_read_watch_only(&g_wallet_sqlite, &g_wallet);
     /* Scan height plus any retry an earlier boot catch-up left pending. */
-    (void)wallet_sqlite_read_scan_state(&g_wallet_sqlite, &g_wallet);
+    if (wallet_sqlite_read_scan_state_checked(&g_wallet_sqlite, &g_wallet) ==
+        WALLET_SCAN_STATE_ERROR) {
+        boot_error_report(BOOT_ERROR_FATAL, "WALLET_SCAN_LOAD_FAILED", "wallet_load",
+                          "Wallet scan metadata could not be loaded; startup stopped.",
+                          NULL, 0, "scan_state=error");
+        exit(1);
+    }
     printf("Wallet loaded: %zu keys, %zu sapling keys, %zu scripts, "
            "%zu watch-only, %zu txs, scan height %d, scanned through %d.\n",
            g_wallet.keystore.num_keys,
@@ -1455,6 +1358,14 @@ static void boot_wallet_read_persisted_state(struct app_context *ctx,
     boot_wallet_top_up_legacy_keypool_or_exit(
         pre_open_key_rows, &g_wallet_sqlite, &g_wallet);
 }
+
+#ifdef ZCL_TESTING
+void boot_wallet_read_persisted_test(const char *datadir)
+{
+    struct app_context ctx = {.datadir = datadir};
+    boot_wallet_read_persisted_state(&ctx, 0);
+}
+#endif
 
 /* One-time import of a legacy LevelDB wallet/ directory. */
 static void boot_wallet_migrate_from_leveldb(struct app_context *ctx)
@@ -1603,7 +1514,7 @@ static bool boot_step_open_progress_store(struct app_context *ctx)
     bool progress_open = progress_store_open(ctx->datadir);
     t = boot_submark("progress.store_open", t);
     boot_snapshot_install_gate_boot(progress_open, ctx->load_snapshot_at_own_height);
-    if (progress_open) flysync_island_boot_register(); /* before the index loads */
+    if (progress_open && !flysync_island_boot_register(ctx->datadir)) return false;
     t = boot_submark("progress.install_gate", t);
     if (progress_open) {
         /* Wave A3 flip, second half: progress_store_open() already migrated a
@@ -2013,6 +1924,10 @@ static bool boot_seq_open_coins_state(struct app_context *ctx, struct boot_seq *
         return false;
     t_sub = boot_submark("coins.bind_read_view", t_sub);
     boot_step_wire_repository(ctx);
+    if (!flysync_island_boot_rehydrate(&g_state)) {
+        LOG_ERROR("boot", "verified island reconstruction failed; recovery required");
+        return false;
+    }
     /* Block index is now cached in SQLite (load_block_index_sqlite).
      * The full index is saved on shutdown/save, enabling instant restart
      * without the 10-15s LevelDB scan. */
@@ -2224,7 +2139,15 @@ static bool boot_seq_load_block_index(struct app_context *ctx, struct boot_seq *
     /* Block index load: flat file first (mmap, <2s), then SQLite, then LevelDB.
      * Jeff Dean rule: use the fastest data structure available. */
     int64_t t_phase = boot_clock_ms();
+    if (!flysync_island_boot_loader_allowed(ctx->boot_from_log)) {
+        LOG_ERROR("boot", "projection tip publication is unavailable during island recovery");
+        return false;
+    }
     boot_step_load_block_index_ladder(ctx, s->params, s);
+    if (!flysync_island_boot_materialize(&g_state)) {
+        LOG_ERROR("boot", "verified island map materialization failed");
+        return false;
+    }
     boot_topmark("block_index_load", t_phase);
     boot_step_repair_block_index(ctx, s);
     if (!boot_step_gate_block_index_integrity(ctx, s->replay_pending))
@@ -3539,6 +3462,17 @@ static bool boot_seq_resolve_tip(struct app_context *ctx, struct boot_seq *s)
 
 /* Shielded backfill, the offline mint driver, and the runtime
  * services (mempool, P2P, RPC, Tor, wallet sync). */
+static bool boot_recover_wallet_projection(void)
+{
+    if (!g_node_db.open) return true;
+    event_log_t *log = event_log_singleton();
+    if (!log) return false;
+    wallet_projection_set_event_log(log);
+    if (db_wallet_utxo_reemit_all(&g_node_db)) return true;
+    LOG_ERROR("wallet", "public wallet view recovery failed; canonical wallet state preserved");
+    return false;
+}
+
 static bool boot_seq_start_services(struct app_context *ctx, struct boot_seq *s)
 {
     boot_step_backfill_shielded_if_needed(ctx, s->tip);
@@ -3569,6 +3503,7 @@ static bool boot_seq_start_services(struct app_context *ctx, struct boot_seq *s)
                active_chain_height(&g_state.chain_active));
         return true;
     }
+    if (!boot_recover_wallet_projection()) return false;
     /* Runtime services: mempool, P2P, RPC, Tor, wallet sync (boot_services.c) */
     struct boot_svc_ctx svc;
     boot_step_build_svc_ctx(ctx, &svc);
@@ -3607,9 +3542,67 @@ static bool boot_seq_start_services(struct app_context *ctx, struct boot_seq *s)
     }
     return svc_ok;
 }
+static struct boot_cutover_env boot_cutover_environment(void)
+{
+    return (struct boot_cutover_env){.state = &g_state, .node = &g_node_db,
+        .wallet = &g_wallet, .wallet_db = &g_wallet_sqlite,
+        .coins_view = &g_coins_read_view, .coins_tip = &g_coins_tip,
+        .coins_sqlite = &g_coins_sqlite, .block_tree = &g_block_tree,
+        .block_tree_open = &g_block_tree_open, .db_service = &g_db_service,
+        .gate_index = boot_step_gate_block_index_integrity, .build_svc = boot_step_build_svc_ctx};
+}
+static bool boot_wallet_cutover_preflight(const char *datadir, bool *pending)
+{
+    struct boot_cutover_env env = boot_cutover_environment();
+    return boot_cutover_preflight(&env, datadir, pending);
+}
+#ifdef ZCL_TESTING
+bool boot_wallet_cutover_preflight_test(const char *datadir, bool *pending)
+{ return boot_wallet_cutover_preflight(datadir, pending); }
+#endif
+static bool boot_seq_load_pending_chain(struct app_context *ctx, struct boot_seq *seq)
+{
+    struct boot_cutover_env env = boot_cutover_environment();
+    return boot_cutover_load_chain(&env, ctx, seq->params, &seq->tip);
+}
+static bool boot_pending_replay(struct app_context *ctx, const struct chain_params *params)
+{
+    struct boot_cutover_env env = boot_cutover_environment();
+    return boot_cutover_replay(&env, ctx, params);
+}
+
 /* Bring the node up: eleven ordered phases, stopping at the first failure.
  * The one-shot verbs (-backfill-nullifiers, -backfill-zslp) finish the boot
  * before services and set boot_seq::done. */
+static bool boot_wallet_publish_readiness(struct app_context *ctx)
+{
+    struct boot_cutover_env env = boot_cutover_environment();
+    return boot_cutover_publish_readiness(&env, ctx);
+}
+
+static bool boot_pending_finish(struct app_context *ctx, struct boot_seq *seq)
+{
+    seq->t_finalize_build = boot_clock_ms();
+    if (!sysinit_run_stage(BOOT_STAGE_CHAIN_TIP_RESOLVED, ctx).ok) return false;
+    reducer_frontier_provable_tip_seed_high_water(active_chain_height(&g_state.chain_active));
+    if (!boot_pending_replay(ctx, seq->params)) return false;
+    activation_boot_complete(&g_activation_ctl, "wallet_cutover_complete");
+    return boot_seq_start_services(ctx, seq);
+}
+
+static bool boot_seq_load_chain(struct app_context *ctx, struct boot_seq *seq)
+{
+    if (!boot_seq_open_coins_state(ctx, seq)) return false;
+    if (!boot_seq_load_block_index(ctx, seq)) return false;
+    if (!flysync_island_boot_after_index(ctx, &g_state)) return false;
+    if (!boot_seq_reconcile_chain_state(ctx, seq)) return false;
+    if (!boot_seq_load_sapling_tree(ctx)) return false;
+    if (!boot_seq_select_state_source(ctx)) return false;
+    if (!boot_wallet_publish_readiness(ctx)) return false;
+    if (!boot_seq_finalize_chain(ctx, seq)) return false;
+    return boot_seq_resolve_tip(ctx, seq);
+}
+
 bool app_init(struct app_context *ctx)
 {
     chain_restore_boot_snapshot_begin_boot();
@@ -3624,14 +3617,17 @@ bool app_init(struct app_context *ctx)
     if (!boot_seq_prologue(ctx, &seq)) return false;
     if (!boot_seq_open_node_db(ctx)) return false;
     if (!boot_seq_load_wallet(ctx, &seq)) return false;
-    if (!boot_seq_open_coins_state(ctx, &seq)) return false;
-    if (!boot_seq_load_block_index(ctx, &seq)) return false;
-    if (!flysync_island_boot_after_index(ctx, &g_state)) return false;
-    if (!boot_seq_reconcile_chain_state(ctx, &seq)) return false;
-    if (!boot_seq_load_sapling_tree(ctx)) return false;
-    if (!boot_seq_select_state_source(ctx)) return false;
-    if (!boot_seq_finalize_chain(ctx, &seq)) return false;
-    if (!boot_seq_resolve_tip(ctx, &seq)) return false;
+    bool cutover_pending = false;
+    if (!boot_wallet_cutover_preflight(ctx->datadir, &cutover_pending)) return false;
+    if (cutover_pending) {
+        if (!boot_cutover_mode_supported(ctx)) {
+            LOG_ERROR("wallet", "pending wallet recovery requires normal startup");
+            return false;
+        }
+        if (!boot_seq_load_pending_chain(ctx, &seq)) return false;
+        return boot_pending_finish(ctx, &seq);
+    }
+    if (!boot_seq_load_chain(ctx, &seq)) return false;
     if (seq.done) return true;
     return boot_seq_start_services(ctx, &seq);
 }

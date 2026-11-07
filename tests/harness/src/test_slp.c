@@ -695,7 +695,7 @@ static bool test_slp_wallet_seed_funded(struct wallet *w, char *address,
     funding.confirms = 10;
     ok = ok && wallet_add_to_wallet(w, &funding);
     transaction_free(&funding.tx);
-    return ok;
+    return ok && wallet_readiness_initialize(w, WALLET_READINESS_READY, false, 0);
 }
 
 static bool test_slp_wallet_send_keeps_baton(struct wallet *w,

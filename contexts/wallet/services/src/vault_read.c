@@ -33,6 +33,7 @@
 #include "script/standard.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
+#include "wallet/wallet_sqlite.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -653,7 +654,7 @@ const char *vault_evidence_name(enum vault_evidence evidence)
 
 /* ── snapshot ─────────────────────────────────────────────────────── */
 
-struct zcl_result vault_read_snapshot(struct node_db *ndb,
+static struct zcl_result vault_read_snapshot_collect(struct node_db *ndb,
                                       struct vault_snapshot *out)
 {
     struct vault_ident *ids;
@@ -710,6 +711,41 @@ struct zcl_result vault_read_snapshot(struct node_db *ndb,
     out->zcl_total = out->zcl_spendable + out->zcl_pending +
                      out->zcl_immature + out->zcl_encumbered;
     return ZCL_OK;
+}
+
+struct zcl_result vault_read_snapshot(struct node_db *ndb,
+                                      struct vault_snapshot *out)
+{
+    if (!out)
+        return ZCL_ERR(-1, "vault_read_snapshot: NULL out");
+    memset(out, 0, sizeof(*out));
+    if (!ndb || !ndb->open || !ndb->db)
+        return ZCL_ERR(-2, "vault_read_snapshot: node_db %s",
+                       ndb ? "not open" : "is NULL");
+    sqlite3_mutex *mutex = sqlite3_db_mutex(ndb->db);
+    sqlite3_mutex_enter(mutex);
+    bool initial_autocommit = sqlite3_get_autocommit(ndb->db) != 0;
+    if (sqlite3_exec(ndb->db, "SAVEPOINT vault_snapshot", NULL, NULL, NULL) != SQLITE_OK) {
+        sqlite3_mutex_leave(mutex);
+        return ZCL_ERR(-2, "vault snapshot transaction unavailable");
+    }
+    struct wallet_sqlite ws = {.db = ndb->db, .open = true};
+    struct wallet_cutover_binding binding;
+    struct zcl_result result = wallet_sqlite_cutover_read(&ws, &binding) == WALLET_CUTOVER_ABSENT
+        ? vault_read_snapshot_collect(ndb, out)
+        : ZCL_ERR(-3, "wallet history is updating; balances unavailable");
+    if (sqlite3_exec(ndb->db, "RELEASE vault_snapshot", NULL, NULL, NULL) != SQLITE_OK) {
+        int rollback = sqlite3_exec(ndb->db, "ROLLBACK TO vault_snapshot", NULL, NULL, NULL);
+        int release = sqlite3_exec(ndb->db, "RELEASE vault_snapshot", NULL, NULL, NULL);
+        if (release != SQLITE_OK && initial_autocommit)
+            release = sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL);
+        result = rollback == SQLITE_OK && release == SQLITE_OK
+            ? ZCL_ERR(-4, "vault snapshot transaction release failed; cleaned up")
+            : ZCL_ERR(-5, "vault snapshot transaction cleanup failed");
+    }
+    sqlite3_mutex_leave(mutex);
+    if (!result.ok) memset(out, 0, sizeof(*out));
+    return result;
 }
 
 /* ── json ─────────────────────────────────────────────────────────── */

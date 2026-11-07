@@ -51,6 +51,10 @@
  * caller holds progress_store_tx_lock; raw handles do not carry a lease. */
 bool progress_store_open(const char *datadir);
 
+/* Caller must hold the datadir exclusively during open and recovery. Open
+ * an existing current kernel only; never create, migrate or repair it. */
+bool progress_store_open_existing(const char *datadir);
+
 /* Verified-clean quick_check skip. Composition installs a probe (this module
  * must not depend on engine/composition) that returns true ONLY when the
  * previous clean shutdown bound this exact consensus.db file. It is consulted

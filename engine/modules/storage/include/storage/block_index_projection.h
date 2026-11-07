@@ -86,6 +86,20 @@ bool block_index_projection_get(block_index_projection_t *p,
                                 const uint8_t hash[32],
                                 struct disk_block_index *out);
 
+enum bip_lookup_result { BIP_LOOKUP_ERROR, BIP_LOOKUP_ABSENT, BIP_LOOKUP_PRESENT };
+enum bip_lookup_result block_index_projection_lookup_strict(block_index_projection_t *p,
+    const uint8_t hash[32], struct disk_block_index *out);
+
+/* Exact serialized length and embedded hash must agree with the lookup key. */
+bool block_index_projection_get_strict(block_index_projection_t *p,
+                                       const uint8_t hash[32],
+                                       struct disk_block_index *out);
+
+/* Read a bounded window from an existing projection under a retained directory.
+ * No database, WAL or shared-memory file is created; false preserves no result. */
+bool block_index_projection_read_window_existing(int dirfd,
+    const uint8_t (*hashes)[32], size_t count, struct disk_block_index *out);
+
 /* Lookup by height. If multiple entries share a height (siblings at
  * an unactivated branch), returns the lexicographically smallest hash.
  * Returns true on found. */

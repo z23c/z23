@@ -1299,6 +1299,11 @@ static int test_issued_address_balance(void)
         const char *const addr[4] = { x, y, def, stolen };
         const char *const want[4] = { "3.00000000", "0.00000000",
                                       "0.00000000", "0.00000000" };
+        char blocked[32];
+        ASSERT(!wdr_balance(&f, x, -1, blocked, sizeof(blocked)));
+        ASSERT(wallet_readiness_initialize(f.w, WALLET_READINESS_PENDING, true, 42));
+        ASSERT(!wdr_balance(&f, x, -1, blocked, sizeof(blocked)));
+        ASSERT(wallet_readiness_complete(f.w, true, 42));
         for (int mc = -1; mc <= 0; mc++) {
             for (int which = 0; which < 4; which++) {
                 char got[32];

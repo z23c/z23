@@ -422,6 +422,38 @@ static bool wa_state_load(struct wallet_rpc_context *ctx, struct wa_state *st,
     return true;
 }
 
+static void wa_summary_unavailable(struct wallet_rpc_context *ctx,
+                                   enum wallet_readiness_state readiness,
+                                   struct json_value *out)
+{
+    struct node_health_snapshot health = {0};
+    node_health_collect(&health, ctx->node_db, ctx->main_state);
+    json_set_object(out);
+    json_push_kv_str(out, "schema", "zcl.wallet_summary.v1");
+    json_push_kv_str(out, "wallet_readiness", readiness == WALLET_READINESS_PENDING ? "pending" : "unknown");
+    json_push_kv_bool(out, "balance_available", false);
+    const char *amounts[] = {"spendable_zat", "spendable", "spendable_total_zat", "spendable_total",
+        "pending_zat", "pending", "pending_notes", "pending_min_confirmations_needed", "unready_zat",
+        "unready", "unready_notes", "reconciling_notes", "sending_zat", "sending", "public_zat",
+        "public", "immature_zat", "immature"};
+    for (size_t i = 0; i < sizeof(amounts) / sizeof(amounts[0]); i++) wa_kv_null(out, amounts[i]);
+    const struct main_state *ms = ctx->main_state ? ctx->main_state : sync_monitor_main_state();
+    int header = ms && ms->pindex_best_header ? ms->pindex_best_header->nHeight : 0;
+    int ahead = wa_max_int(header, health.peer_best_height);
+    int scanned = wallet_read_scanned_through_height(ctx->wallet);
+    json_push_kv_int(out, "tip_height", health.tip_height);
+    json_push_kv_int(out, "header_height", header);
+    if (scanned >= 0) json_push_kv_int(out, "scanned_through_height", scanned);
+    else wa_kv_null(out, "scanned_through_height");
+    json_push_kv_int(out, "blocks_behind", ahead > health.tip_height ? ahead - health.tip_height : 0);
+    json_push_kv_int(out, "peer_count", health.handshaked_peer_count);
+    json_push_kv_bool(out, "current", false);
+    json_push_kv_bool(out, "locked", !wallet_lock_is_unlocked());
+    json_push_kv_bool(out, "encrypted", wallet_lock_encrypted_at_rest());
+    json_push_kv_bool(out, "send_allowed", false);
+    json_push_kv_str(out, "send_blocked_reason", "Wallet state unavailable during cutover");
+}
+
 bool rpc_walletsummary(const struct json_value *params, bool help,
                        struct json_value *result)
 {
@@ -431,6 +463,11 @@ bool rpc_walletsummary(const struct json_value *params, bool help,
     (void)params;
     if (!wa_ready(ctx, result))
         return false; // raw-return-ok:callee-logged
+    enum wallet_readiness_state readiness = wallet_readiness_get(ctx->wallet).state;
+    if (readiness != WALLET_READINESS_READY) {
+        wa_summary_unavailable(ctx, readiness, result);
+        return true;
+    }
 
     struct wa_state st;
     struct wallet_summary sum;
@@ -449,6 +486,8 @@ bool rpc_walletsummary(const struct json_value *params, bool help,
     bool allowed = wallet_send_gate(reason, sizeof(reason));
     wa_holdings(ctx, &st.view);
     wallet_summary_to_json(&sum, &st.view, allowed, reason, result);
+    json_push_kv_bool(result, "balance_available", true);
+    json_push_kv_str(result, "wallet_readiness", "ready");
     wa_state_free(&st);
     return true;
 }
@@ -661,6 +700,10 @@ bool rpc_wallethistory(const struct json_value *params, bool help,
         "\nReturns wallet transactions newest first, paged by cursor.\n");
     if (!wa_ready(ctx, result))
         return false; // raw-return-ok:callee-logged
+    if (wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY) {
+        json_set_str(result, "Wallet history unavailable during cutover");
+        return false;
+    }
     size_t limit = 0;
     const char *txid = "";
     struct wallet_history_page_key cur = {0};

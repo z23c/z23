@@ -9,11 +9,21 @@
 #include "test/snapshot_boot_fixture.h"
 
 #include "coins/utxo_commitment.h"
+#include "coins/coins_view.h"
+#include "config/boot_datadir_lock.h"
+#include "config/runtime.h"
+#include "services/seed_integrity_gate.h"
+#include "jobs/validate_headers_stage.h"
+#include "services/chain_state_service.h"
+#include "validation/chainstate.h"
 #include "chain/checkpoints.h"
 #include "chain/utxo_snapshot_loader.h"
 #include "config/boot.h"
 #include "config/boot_consensus_bundle_marker.h"
 #include "config/consensus_state_install_runtime.h"
+#include "config/boot_internal.h"
+#include "util/boot_phase.h"
+#include "wallet/wallet_sqlite.h"
 #include "config/boot_snapshot_install.h"
 #include "config/boot_snapshot_import.h"
 #include "config/consensus_state_bundle_validate.h"
@@ -38,6 +48,7 @@
 #include "json/json.h"
 #include "storage/anchor_kv.h"
 #include "storage/coins_kv.h"
+#include "storage/consensus_db.h"
 #include "storage/consensus_state_bundle_codec.h"
 #include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"
@@ -410,6 +421,7 @@ static bool bundle_codec_kat(void)
 
     struct consensus_state_bundle_manifest m;
     memset(&m, 0, sizeof(m));
+    m.format_version = CONSENSUS_STATE_BUNDLE_V1;
     m.height = 7;
     m.history_complete = true;
     m.source_clean = true;
@@ -494,6 +506,7 @@ static void fixture_artifact_digest(struct csi_fixture *f)
 {
     struct consensus_state_bundle_manifest m;
     memset(&m, 0, sizeof(m));
+    m.format_version = CONSENSUS_STATE_BUNDLE_V1;
     m.height = f->height;
     memcpy(m.block_hash, f->block_hash, 32);
     m.history_complete = f->complete;
@@ -1615,6 +1628,40 @@ static bool hs_seed_current_frontier(sqlite3 *db, int32_t h,
 /* Run after the first committed-install repair, while its real kernel and
  * derived stores are still open. Every refusal is checked after fixture setup
  * so its own UPDATE cannot masquerade as a recovery write. */
+static int wallet_binding_classification_tests(sqlite3 *db)
+{
+    int failures = 0;
+    struct node_db wrong_node = {0};
+    struct wallet_sqlite wrong_wallet = {0};
+    bool ignored_present = false; uint64_t ignored_generation = 0;
+    CSI_CHECK("wallet binding public entry refuses wrong node and stage",
+              consensus_state_wallet_install_classify(&wrong_wallet, &wrong_node, -1,
+                  &ignored_present, &ignored_generation) == WALLET_INSTALL_UNKNOWN);
+    struct consensus_state_install_runtime_result rejected = {0};
+    CSI_CHECK("guarded install rejects non-boot context",
+              !consensus_state_install_from_bundle_guarded(&wrong_node, NULL, "unused", "unused",
+                  &wrong_wallet, NULL, &rejected).ok);
+    struct consensus_state_proof_prefix prefix;
+    struct wallet_cutover_binding b = {0};
+    uint64_t gen = 0;
+    int32_t height = -1; uint8_t hash[32];
+    CSI_CHECK("wallet binding fixture authority", consensus_state_proof_prefix_load(db, &prefix) &&
+              prefix.present && coins_kv_get_authority_generation(db, &gen) && gen > 0 &&
+              consensus_state_publication_cas_capture_frontier(&height, hash));
+    b.old_generation_present = true; b.old_generation = gen;
+    b.old_height = height; memcpy(b.old_hash, hash, 32);
+    b.target_height = prefix.height; memcpy(b.target_hash, prefix.block_hash, 32);
+    memcpy(b.artifact_digest, prefix.artifact_digest, 32);
+    CSI_CHECK("wallet binding old frontier", consensus_state_wallet_install_classify_test(db, &b) == WALLET_INSTALL_OLD);
+    b.old_generation = gen - 1; b.old_height = -1;
+    CSI_CHECK("wallet binding committed exact", consensus_state_wallet_install_classify_test(db, &b) == WALLET_INSTALL_COMMITTED);
+    b.artifact_digest[0] ^= 1;
+    CSI_CHECK("wallet binding wrong artifact unknown", consensus_state_wallet_install_classify_test(db, &b) == WALLET_INSTALL_UNKNOWN);
+    b.artifact_digest[0] ^= 1; b.old_generation = gen + 1;
+    CSI_CHECK("wallet binding wrong generation unknown", consensus_state_wallet_install_classify_test(db, &b) == WALLET_INSTALL_UNKNOWN);
+    return failures;
+}
+
 static int marker_identity_tests(sqlite3 *db, struct node_db *ndb,
     const char *datadir, const struct csi_fixture *bundle)
 {
@@ -1816,7 +1863,8 @@ static int installed_marker_edge_tests(sqlite3 *db, struct node_db *ndb,
 {
     uint8_t tree_before[4096];
     size_t tree_len = 0;
-    int failures = marker_identity_tests(db, ndb, datadir, bundle);
+    int failures = wallet_binding_classification_tests(db);
+    failures += marker_identity_tests(db, ndb, datadir, bundle);
     failures += marker_legacy_tests(db, ndb, datadir);
     failures += marker_malformed_tests(db, ndb, datadir);
     failures += marker_advanced_setup(db, ndb, bundle, tree_before, &tree_len);
@@ -2309,6 +2357,7 @@ static void rom_keystone_from_fixture(const struct csi_fixture *f,
                                       struct rom_state_checkpoint *rom)
 {
     memset(rom, 0, sizeof(*rom));
+    rom->format_version = ROM_STATE_CHECKPOINT_V1;
     rom->height = f->height;
     memcpy(rom->block_hash, f->block_hash, 32);
     memcpy(rom->utxo_root, f->utxo_root, 32);
@@ -4684,6 +4733,59 @@ static int csi_activate_boundary_race_cases(struct csi_activate_scene *s)
     return failures;
 }
 
+static int csi_activate_generation_presence_cases(struct csi_activate_scene *s,
+    bool loaded, bool present, const uint8_t old[8])
+{
+    int failures = 0;
+    uint8_t zero[8] = {0};
+
+    CSI_CHECK("activate: explicit zero fixture", loaded &&
+        progress_meta_set(s->pdb, COINS_KV_AUTHORITY_GENERATION_KEY, zero, sizeof(zero)));
+    s->areq.check_old_generation = true;
+    s->areq.old_generation_present = false; s->areq.old_generation = 0;
+    CSI_CHECK("activate: explicit zero differs from expected absence",
+        !consensus_state_snapshot_install_activate(s->pdb, &s->areq, &s->ares) &&
+        strstr(s->ares.reason, "old generation changed") && coins_kv_count(s->pdb) == 1);
+    if (s->ares.prior_generation_path[0]) (void)unlink(s->ares.prior_generation_path);
+    CSI_CHECK("activate: absent generation fixture",
+        progress_meta_delete(s->pdb, COINS_KV_AUTHORITY_GENERATION_KEY));
+    s->areq.old_generation_present = true;
+    CSI_CHECK("activate: absence differs from expected explicit zero",
+        !consensus_state_snapshot_install_activate(s->pdb, &s->areq, &s->ares) &&
+        strstr(s->ares.reason, "old generation changed") && coins_kv_count(s->pdb) == 1);
+    if (s->ares.prior_generation_path[0]) (void)unlink(s->ares.prior_generation_path);
+    CSI_CHECK("activate: restore original generation before race", present ?
+        progress_meta_set(s->pdb, COINS_KV_AUTHORITY_GENERATION_KEY, old, 8) :
+        progress_meta_delete(s->pdb, COINS_KV_AUTHORITY_GENERATION_KEY));
+    return failures;
+}
+
+static int csi_activate_generation_change_cases(struct csi_activate_scene *s)
+{
+    uint8_t old[8] = {0}; size_t len = 0; bool present = false;
+    uint64_t generation = 0;
+    bool loaded = progress_meta_get_blob_exact(s->pdb, COINS_KV_AUTHORITY_GENERATION_KEY,
+        old, sizeof(old), &len, &present) && (!present || len == sizeof(old)) &&
+        coins_kv_get_authority_generation(s->pdb, &generation) && generation < UINT64_MAX;
+    int failures = csi_activate_generation_presence_cases(s, loaded, present, old);
+    s->areq.check_old_generation = true;
+    s->areq.old_generation_present = present; s->areq.old_generation = generation;
+    progress_store_tx_lock();
+    bool changed = loaded && exec_ok(s->pdb, "BEGIN IMMEDIATE") &&
+        coins_kv_bump_authority_generation_in_tx(s->pdb) && exec_ok(s->pdb, "COMMIT");
+    if (!changed) (void)exec_ok(s->pdb, "ROLLBACK");
+    progress_store_tx_unlock();
+    CSI_CHECK("activate: same frontier with changed generation refuses", changed &&
+        !consensus_state_snapshot_install_activate(s->pdb, &s->areq, &s->ares) &&
+        strstr(s->ares.reason, "old generation changed") && coins_kv_count(s->pdb) == 1);
+    if (s->ares.prior_generation_path[0]) (void)unlink(s->ares.prior_generation_path);
+    s->areq.check_old_generation = false;
+    CSI_CHECK("activate: restore generation fixture", present ?
+        progress_meta_set(s->pdb, COINS_KV_AUTHORITY_GENERATION_KEY, old, sizeof(old)) :
+        progress_meta_delete(s->pdb, COINS_KV_AUTHORITY_GENERATION_KEY));
+    return failures;
+}
+
 static int csi_activate_frontier_change_cases(struct csi_activate_scene *s)
 {
     int failures=0;
@@ -4934,6 +5036,9 @@ static int csi_activate_prefix_proof_cases(struct csi_activate_scene *s)
     return failures;
 }
 
+#include "consensus_state_replay_v2_test.h"
+static int csi_v2_pool_cases(void);
+
 static int csi_activate_replay_receipt_cases(struct csi_activate_scene *s)
 {
     int failures=0;
@@ -4988,6 +5093,7 @@ static int csi_activate_replay_receipt_cases(struct csi_activate_scene *s)
         if (rev)
             consensus_state_artifact_evidence_free(rev);
     }
+    failures += csi_replay_v2_test(s);
     return failures;
 }
 
@@ -5235,6 +5341,7 @@ static int csi_activate_cases(struct csi_fixture *b, const char *dir)
     failures += csi_activate_final_admit_wrong_dir_cases(s);
     failures += csi_activate_boundary_race_cases(s);
     failures += csi_activate_frontier_change_cases(s);
+    failures += csi_activate_generation_change_cases(s);
     failures += csi_activate_failed_seed_cases(s);
     failures += csi_activate_post_seed_failure_cases(s);
     failures += csi_activate_contained_and_prior_receipt_cases(s);
@@ -5246,6 +5353,7 @@ static int csi_activate_cases(struct csi_fixture *b, const char *dir)
     failures += csi_activate_hstar_climb_cases(s);
     failures += csi_activate_prior_generation_cases(s);
     failures += csi_activate_replay_authority_cases(s);
+    failures += csi_v2_pool_cases();
     return failures;
 }
 
@@ -5977,10 +6085,392 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
 }
 #endif
 
+#if !defined(_WIN32)
+void validate_headers_ensure_set_validator_for_test(vh_validator_fn fn, void *user);
+
+/* This fixture builds synthetic chain evidence using the existing header
+ * validator test hook; it exercises the real startup slots and guarded API. */
+static bool csi_guarded_header_pass(const struct block_index *bi,
+    const char *datadir, char *reason, size_t cap, void *user)
+{
+    (void)bi; (void)datadir; (void)reason; (void)cap; (void)user; return true;
+}
+
+static bool csi_guarded_chain(struct main_state *main, const struct csi_fixture *f)
+{
+    struct block_index *prev = NULL;
+    for (int i = 0; i <= f->height; ++i) {
+        struct uint256 hash = {0};
+        hash.data[0] = (uint8_t)i; hash.data[1] = (uint8_t)(i >> 8); hash.data[31] = 0xd1;
+        if (i == f->height) memcpy(hash.data, f->block_hash, 32);
+        struct block_index *bi = chainstate_insert_block_index((struct chainstate *)main, &hash);
+        if (!bi) return false;
+        bi->nHeight = i; bi->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+        bi->nChainWork.pn[0] = (uint32_t)i + 1; bi->pprev = prev;
+        if (i == f->height) memcpy(bi->hashFinalSaplingRoot.data, f->frontier_root[ANCHOR_POOL_SAPLING], 32);
+        block_index_build_skip(bi);
+        if (!active_chain_install_tip_slot(&main->chain_active, bi)) return false;
+        prev = bi;
+    }
+    main->pindex_best_header = prev;
+    return prev != NULL;
+}
+
+static bool csi_guarded_seed_rows(struct node_db *node, const struct csi_fixture *f)
+{
+    static const uint8_t zeros[32] = {0};
+    static const uint8_t solution[1] = {0};
+    const char *sql = "INSERT INTO blocks(hash,height,prev_hash,version,merkle_root,time,bits,nonce,solution,chain_work,status,num_tx) VALUES(?,?,?,4,?,1,0,?,?,?,3,0)";
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(node->db, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    uint8_t prev[32] = {0}; bool ok = true;
+    for (int i = 0; i <= f->height && ok; ++i) {
+        uint8_t hash[32] = {0};
+        hash[0] = (uint8_t)i; hash[1] = (uint8_t)(i >> 8); hash[31] = 0xd1;
+        if (i == f->height) memcpy(hash, f->block_hash, 32);
+        ok = sqlite3_bind_blob(st, 1, hash, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+             sqlite3_bind_int(st, 2, i) == SQLITE_OK &&
+             sqlite3_bind_blob(st, 3, prev, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+             sqlite3_bind_blob(st, 4, zeros, 32, SQLITE_STATIC) == SQLITE_OK &&
+             sqlite3_bind_blob(st, 5, zeros, 32, SQLITE_STATIC) == SQLITE_OK &&
+             sqlite3_bind_blob(st, 6, solution, 1, SQLITE_STATIC) == SQLITE_OK &&
+             sqlite3_bind_blob(st, 7, zeros, 32, SQLITE_STATIC) == SQLITE_OK &&
+             sqlite3_step(st) == SQLITE_DONE && sqlite3_reset(st) == SQLITE_OK;
+        memcpy(prev, hash, 32);
+    }
+    if (sqlite3_finalize(st) != SQLITE_OK) ok = false;
+    uint8_t digest[32]; uint64_t count = 0;
+    utxo_commitment_sha3_compute(node->db, digest, &count);
+    return ok && seed_integrity_stamp_utxo_sha3(node, f->height, digest, count);
+}
+
+static bool csi_guarded_seed_service(struct node_db *node, const struct csi_fixture *f)
+{
+    static struct db_service service;
+    static struct app_runtime_context runtime;
+    db_service_init(&service);
+    if (!db_service_attach(&service, node) || !db_service_start_test_worker(&service)) return false;
+    runtime.db_service = &service;
+    app_runtime_set_current(&runtime);
+    if (app_runtime_node_db() != node || !csi_guarded_seed_rows(node, f)) return false;
+    if (seed_integrity_gate_check(f->height + 1, f->block_hash, true)) return false;
+    seed_integrity_gate_reset_for_testing();
+    bool ok = seed_integrity_gate_check(f->height, f->block_hash, true);
+    seed_integrity_gate_reset_for_testing();
+    return ok;
+}
+
+static bool csi_guarded_child_setup(struct rung_act_ctx *c, const char *root,
+    struct node_db **node, struct wallet_sqlite **ws, struct wallet **wallet,
+    struct main_state **main, struct coins_view_cache *cache)
+{
+    static struct coins_view backing;
+    coins_view_cache_init(cache, &backing);
+    bool built = false;
+    if (rung_act_setup(c, root, &built) || !built) return false;
+    checkpoints_set_rom_state_rungs_override_for_test(&c->rung, 1);
+    if (!boot_datadir_lock_acquire(c->rdir)) return false;
+    char flip_error[256] = {0};
+    if (!consensus_db_finalize_flip(c->rdir, c->pdb, flip_error, sizeof(flip_error))) return false;
+    boot_wallet_cutover_test_slots(node, ws, wallet, main);
+    char path[512]; snprintf(path, sizeof(path), "%s/node.db", c->rdir);
+    if (!node_db_open(*node, path) || !wallet_sqlite_open_r(*ws, (*node)->db).ok ||
+        !csi_guarded_seed_service(*node, &c->kb)) return false;
+    wallet_init(*wallet); main_state_init(*main);
+    if (!csi_guarded_chain(*main, &c->kb)) return false;
+    csr_init(csr_instance(), &(*main)->map_block_index, &(*main)->chain_active,
+             &(*main)->pindex_best_header, cache, *node, NULL);
+    validate_headers_ensure_set_validator_for_test(csi_guarded_header_pass, NULL);
+    if (!validate_headers_stage_ensure_pass_record(*main, c->kb.height)) return false;
+    boot_stage_reset_for_testing();
+    for (int stage = BOOT_STAGE_DATADIR_LOCKED; stage <= BOOT_STAGE_BLOCK_INDEX_LOADED; ++stage)
+        boot_stage_advance_to((enum boot_stage)stage);
+    return true;
+}
+
+struct csi_cutover_witness {
+    struct wallet_cutover_binding binding;
+    bool generation_present;
+    uint64_t generation;
+};
+
+struct csi_commit_hook_context {
+    const char *datadir;
+    struct node_db *node;
+    struct wallet_sqlite *ws;
+    int signal_fd;
+};
+
+static void csi_guarded_commit_hook(void *opaque)
+{
+    struct csi_commit_hook_context *c = opaque;
+    struct csi_cutover_witness witness = {0};
+    int fd = open(c->datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    bool ok = fd >= 0 && !boot_consensus_bundle_marker_exists(c->datadir) &&
+        wallet_sqlite_cutover_read(c->ws, &witness.binding) == WALLET_CUTOVER_PENDING &&
+        consensus_state_wallet_install_classify(c->ws, c->node, fd, &witness.generation_present, &witness.generation) == WALLET_INSTALL_COMMITTED;
+    if (fd >= 0) close(fd);
+    if (!ok || write(c->signal_fd, &witness, sizeof(witness)) != (ssize_t)sizeof(witness)) _exit(24);
+    for (;;) pause();
+}
+
+/* Runs in an isolated child so the real boot singletons and stage cannot
+ * affect the harness process. No production identity check is bypassed. */
+static void csi_guarded_public_child(const char *root, int signal_fd, bool before_marker)
+{
+    alarm(90);
+    struct rung_act_ctx c; struct node_db *node = NULL; struct wallet_sqlite *ws = NULL;
+    struct wallet *wallet = NULL; struct main_state *main = NULL;
+    struct coins_view_cache cache;
+    if (!csi_guarded_child_setup(&c, root, &node, &ws, &wallet, &main, &cache)) _exit(20);
+    wallet->best_block_height = 10;
+    zcl_mutex_lock(&wallet->cs);
+    bool scan_saved = wallet_sqlite_write_scan_state(ws, wallet);
+    zcl_mutex_unlock(&wallet->cs);
+    bool sentinel = sqlite3_exec(node->db,
+        "INSERT INTO wallet_watch_only(address_hash,address,created_at) VALUES(zeroblob(20),'fixture',1)",
+        NULL, NULL, NULL) == SQLITE_OK;
+    struct consensus_state_install_runtime_result out = {0};
+    struct csi_commit_hook_context hook = { c.rdir, node, ws, signal_fd };
+    if (before_marker) consensus_state_install_test_after_commit(csi_guarded_commit_hook, &hook);
+    struct zcl_result r = boot_install_startup_bundle(
+        node, main, c.kb.path, c.rdir, &out);
+    if (!r.ok || !out.state_installed) {
+        fprintf(stderr, "guarded public fixture: install refused: %s\n", r.message);
+        _exit(21);
+    }
+    int dirfd = open(c.rdir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    struct wallet_cutover_binding b; bool present = false; uint64_t generation = 0;
+    struct wallet_scan_marker marker;
+    bool committed = scan_saved && sentinel && dirfd >= 0 &&
+        wallet_sqlite_cutover_read(ws, &b) == WALLET_CUTOVER_PENDING &&
+        wallet_sqlite_read_scan_marker(ws, &marker) && marker.from == 11 &&
+        consensus_state_wallet_install_classify(ws, node, dirfd, &present, &generation) == WALLET_INSTALL_COMMITTED;
+    if (!committed) _exit(22);
+    struct csi_cutover_witness witness = { .binding = b, .generation_present = present, .generation = generation };
+    if (write(signal_fd, &witness, sizeof(witness)) != (ssize_t)sizeof(witness)) _exit(23);
+    for (;;) pause();
+}
+
+static bool csi_guarded_sentinel_exists(sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    bool found = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM wallet_watch_only WHERE hex(address)='66697874757265'", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 1;
+    if (s) sqlite3_finalize(s);
+    return found;
+}
+
+static bool csi_guarded_binding_matches(const struct wallet_cutover_binding *a,
+                                        const struct wallet_cutover_binding *b)
+{
+    return a->old_generation_present == b->old_generation_present &&
+        a->old_generation == b->old_generation && a->old_height == b->old_height &&
+        a->target_height == b->target_height && memcmp(a->old_hash, b->old_hash, 32) == 0 &&
+        memcmp(a->target_hash, b->target_hash, 32) == 0 &&
+        memcmp(a->artifact_digest, b->artifact_digest, 32) == 0;
+}
+
+static bool csi_guarded_reopen_state(const char *dir, int dirfd,
+    struct node_db *node, struct wallet_sqlite *ws, const struct csi_cutover_witness *expected)
+{
+    bool present = false; uint64_t generation = 0; int floor = -1;
+    enum wallet_install_reconcile result = consensus_state_wallet_install_classify(
+        ws, node, dirfd, &present, &generation);
+    struct wallet_cutover_binding actual;
+    return result == WALLET_INSTALL_COMMITTED && present == expected->generation_present &&
+        generation == expected->generation &&
+        wallet_sqlite_cutover_read(ws, &actual) == WALLET_CUTOVER_PENDING &&
+        csi_guarded_binding_matches(&actual, &expected->binding) && csi_guarded_sentinel_exists(node->db) &&
+        boot_consensus_bundle_marker_exists(dir) &&
+        wallet_sqlite_cutover_scan_floor(ws, &floor) == WALLET_CUTOVER_FLOOR_FOUND && floor == 11;
+}
+
+static bool csi_guarded_reopen_check(const char *root, const struct csi_cutover_witness *expected)
+{
+    char dir[320], path[512];
+    snprintf(dir, sizeof(dir), "%s/ckpt-rung-act", root);
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    if (!boot_datadir_lock_acquire(dir)) return false;
+    struct node_db *node = NULL; struct wallet_sqlite *ws = NULL;
+    struct wallet *wallet = NULL; struct main_state *main = NULL;
+    boot_wallet_cutover_test_slots(&node, &ws, &wallet, &main);
+    if (!node_db_open(node, path) || !wallet_sqlite_open_r(ws, node->db).ok) return false;
+    wallet_init(wallet);
+    boot_stage_reset_for_testing();
+    for (int stage = BOOT_STAGE_DATADIR_LOCKED; stage <= BOOT_STAGE_WALLET_LOADED; ++stage)
+        boot_stage_advance_to((enum boot_stage)stage);
+    bool pending = false;
+    if (!boot_wallet_cutover_preflight_test(dir, &pending) || !pending ||
+        boot_wallet_allows_coin_repair() ||
+        wallet_readiness_get(wallet).state != WALLET_READINESS_PENDING) return false;
+    int dirfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    bool ok = csi_guarded_reopen_state(dir, dirfd, node, ws, expected);
+    if (dirfd >= 0) close(dirfd);
+    progress_store_close(); wallet_sqlite_close(ws); node_db_close(node);
+    boot_datadir_lock_release();
+    return ok;
+}
+
+static bool csi_guarded_restart_in_child(const char *root, bool signalled, const struct csi_cutover_witness *expected)
+{
+    pid_t reopened = signalled ? fork() : -1;
+    if (reopened == 0) _exit(csi_guarded_reopen_check(root, expected) ? 0 : 1);
+    int status = 0;
+    return reopened > 0 && waitpid(reopened, &status, 0) == reopened &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int csi_guarded_public_kill_restart(bool before_marker)
+{
+    int failures = 0; char root[256];
+    test_make_tmpdir(root, sizeof(root), "wallet_cutover_guarded", before_marker ? "before-marker" : "after-return");
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return 1;
+    pid_t child = fork();
+    if (child == 0) { close(pipefd[0]); csi_guarded_public_child(root, pipefd[1], before_marker); }
+    close(pipefd[1]);
+    struct pollfd p = {.fd = pipefd[0], .events = POLLIN};
+    struct csi_cutover_witness witness = {0};
+    bool signalled = child > 0 && poll(&p, 1, 90000) == 1 &&
+        read(pipefd[0], &witness, sizeof(witness)) == (ssize_t)sizeof(witness);
+    close(pipefd[0]);
+    if (signalled) (void)kill(child, SIGKILL);
+    int status = 0;
+    if (child > 0) (void)waitpid(child, &status, 0);
+    CSI_CHECK(before_marker ? "guarded commit pauses before marker" : "guarded install returns before kill", signalled && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    CSI_CHECK(before_marker ? "missing marker recovered with wallet preserved" :
+              "completed install and wallet survive fresh restart",
+              csi_guarded_restart_in_child(root, signalled, &witness));
+    test_rm_rf_recursive(root);
+    return failures;
+}
+
+static void csi_cutover_missing_authority(const char *root, struct node_db *node,
+                                          struct wallet_sqlite *ws, struct wallet *wallet)
+{
+    bool pending = false;
+    if (sqlite3_exec(node->db, "DELETE FROM node_state WHERE key='wallet_cutover_binding'",
+                     NULL, NULL, NULL) != SQLITE_OK) _exit(14);
+    struct wallet_cutover_binding binding = {.old_height = -1, .target_height = 1};
+    wallet->scan_retry.pending = true;
+    snprintf(wallet->scan_retry.blocker, sizeof(wallet->scan_retry.blocker), "pending");
+    if (!wallet_sqlite_cutover_prepare(ws, wallet, &binding)) _exit(15);
+    if (boot_wallet_cutover_preflight_test(root, &pending) || progress_store_db() ||
+        wallet_readiness_get(wallet).state != WALLET_READINESS_UNKNOWN) _exit(16);
+    char consensus[512]; snprintf(consensus, sizeof(consensus), "%s/consensus.db", root);
+    if (access(consensus, F_OK) == 0 || errno != ENOENT) _exit(17);
+}
+
+static bool csi_cutover_absence_preserves_readiness(const char *root,
+    struct wallet *wallet, bool *pending)
+{
+    return boot_wallet_cutover_preflight_test(root, pending) && !*pending &&
+        !progress_store_db() && boot_wallet_allows_coin_repair() &&
+        wallet_readiness_get(wallet).state == WALLET_READINESS_UNKNOWN;
+}
+
+static void csi_cutover_absent_child(const char *root)
+{
+    struct node_db *node = NULL; struct wallet_sqlite *ws = NULL;
+    struct wallet *wallet = NULL; struct main_state *main = NULL;
+    boot_wallet_cutover_test_slots(&node, &ws, &wallet, &main);
+    if (boot_wallet_allows_coin_repair()) _exit(18);
+    char path[512]; snprintf(path, sizeof(path), "%s/node.db", root);
+    if (!boot_datadir_lock_acquire(root) || !node_db_open(node, path) ||
+        !wallet_sqlite_open_r(ws, node->db).ok) _exit(10);
+    wallet_init(wallet);
+    boot_stage_reset_for_testing();
+    for (int stage = BOOT_STAGE_DATADIR_LOCKED; stage <= BOOT_STAGE_WALLET_LOADED; ++stage)
+        boot_stage_advance_to((enum boot_stage)stage);
+    bool pending = true;
+    if (!csi_cutover_absence_preserves_readiness(root, wallet, &pending)) _exit(11);
+    if (sqlite3_exec(node->db, "INSERT INTO node_state(key,value) VALUES('wallet_cutover_binding',x'00')",
+                     NULL, NULL, NULL) != SQLITE_OK) _exit(12);
+    if (boot_wallet_cutover_preflight_test(root, &pending) || progress_store_db() ||
+        boot_wallet_allows_coin_repair() ||
+        wallet_readiness_get(wallet).state != WALLET_READINESS_UNKNOWN) _exit(13);
+    csi_cutover_missing_authority(root, node, ws, wallet);
+    _exit(0);
+}
+
+static int csi_cutover_absent_and_malformed(void)
+{
+    int failures = 0; char root[256];
+    test_make_tmpdir(root, sizeof(root), "wallet_cutover_preflight", "absent");
+    pid_t child = fork();
+    if (child == 0) csi_cutover_absent_child(root);
+    int status = 0;
+    CSI_CHECK("ordinary absent and malformed preflight preserve readiness and authority",
+        child > 0 && waitpid(child, &status, 0) == child &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    test_rm_rf_recursive(root);
+    return failures;
+}
+
+static bool csi_early_recovery_context(struct node_db *node, struct wallet_sqlite *ws,
+                                       struct wallet *wallet, struct main_state *main)
+{
+    return boot_wallet_cutover_recovery_context_matches(node, ws) &&
+        !boot_wallet_cutover_recovery_context_matches(NULL, ws) &&
+        !boot_wallet_cutover_recovery_context_matches(node, NULL) &&
+        !boot_wallet_cutover_startup_context_matches(node, ws, wallet, main);
+}
+
+static void guarded_startup_context_child(void)
+{
+        struct node_db *node = NULL; struct wallet_sqlite *ws = NULL;
+        struct wallet *wallet = NULL; struct main_state *main = NULL;
+        boot_wallet_cutover_test_slots(&node, &ws, &wallet, &main);
+        boot_stage_reset_for_testing();
+        if (boot_wallet_cutover_startup_context_matches(node, ws, wallet, main)) _exit(10);
+        for (int stage = BOOT_STAGE_DATADIR_LOCKED; stage <= BOOT_STAGE_WALLET_LOADED; ++stage)
+            boot_stage_advance_to((enum boot_stage)stage);
+        if (!csi_early_recovery_context(node, ws, wallet, main)) _exit(15);
+        boot_stage_advance_to(BOOT_STAGE_BLOCK_INDEX_LOADED);
+        if (!boot_wallet_cutover_startup_context_matches(node, ws, wallet, main) ||
+            boot_wallet_cutover_startup_context_matches(NULL, ws, wallet, main) ||
+            boot_wallet_cutover_startup_context_matches(node, NULL, wallet, main) ||
+            boot_wallet_cutover_startup_context_matches(node, ws, NULL, main) ||
+            boot_wallet_cutover_startup_context_matches(node, ws, wallet, NULL)) _exit(11);
+        struct consensus_state_install_runtime_result out;
+        struct zcl_result wrong = consensus_state_install_from_bundle_guarded(
+            node, NULL, "unused", "unused", ws, wallet, &out);
+        if (wrong.ok || !strstr(out.reason, "startup context")) _exit(12);
+        struct zcl_result genuine = consensus_state_install_from_bundle_guarded(
+            node, main, "", "", ws, wallet, &out);
+        if (genuine.ok || !strstr(out.reason, "empty bundle path")) _exit(13);
+        boot_stage_advance_to(BOOT_STAGE_CHAIN_TIP_RESOLVED);
+        if (boot_wallet_cutover_startup_context_matches(node, ws, wallet, main)) _exit(14);
+        _exit(0);
+}
+
+static int guarded_startup_context_test(void)
+{
+    int failures = 0;
+    pid_t child = fork();
+    if (child == 0) guarded_startup_context_child();
+    int status = 0;
+    CSI_CHECK("wallet guarded entry requires exact boot context and stage",
+              child > 0 && waitpid(child, &status, 0) == child &&
+              WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    return failures;
+}
+
+#include "consensus_state_bundle_v2_validation_test.h"
+#include "consensus_state_pool_fixture.h"
+#endif
+
 int test_consensus_state_snapshot_install(void)
 {
 #if !defined(_WIN32)
-    int crash_failures = committed_install_sigkill_test();
+    int crash_failures = csi_v2_pool_crash_tests();
+    crash_failures += csi_v2_validation_tests();
+    crash_failures += guarded_startup_context_test();
+    crash_failures += csi_cutover_absent_and_malformed();
+    crash_failures += csi_guarded_public_kill_restart(false);
+    crash_failures += csi_guarded_public_kill_restart(true);
+    crash_failures += committed_install_sigkill_test();
     int failures =
         crash_failures + test_consensus_state_snapshot_install_platform_arm();
     /* Every case has ended (pass or fail); drop this run's RAM root. */

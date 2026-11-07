@@ -15,6 +15,7 @@
  * validates :xsk, :xfvk, :diversifier, :pk_d, presence: true
  * validates :address, string_present: true */
 
+#include "base/serialize_le.h"
 #include "util/log_macros.h"
 #include "models/wallet_key.h"
 #include "models/wallet_tx.h"
@@ -23,6 +24,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <limits.h>
 #include "util/safe_alloc.h"
 
 /* ── Callbacks ─────────────────────────────────────────────────── *
@@ -250,15 +252,230 @@ bool db_wallet_birthday_get(struct node_db *ndb, int64_t *height,
     return true;
 }
 
-/* Hash first: a birthday is readable only when both rows exist. */
-bool db_wallet_birthday_set(struct node_db *ndb, int64_t height,
-                            const uint8_t hash[32])
+#define WALLET_BIRTHDAY_PROOF_KEY "wallet_birthday_scan_identity"
+
+static bool birthday_write(struct node_db *ndb, int64_t height, const uint8_t hash[32],
+                           const uint8_t *identity)
 {
-    if (!ndb || !ndb->open || !hash || height < 0)
-        return false;
-    return node_db_state_set(ndb, WALLET_BIRTHDAY_HASH_KEY, hash, 32) &&
-           node_db_state_set_int(ndb, WALLET_BIRTHDAY_STATE_KEY, height);
+    if (!ndb || !ndb->open || !ndb->db || !hash || height < 0) return false;
+    if (sqlite3_exec(ndb->db, "SAVEPOINT wallet_birthday", NULL, NULL, NULL) != SQLITE_OK) return false;
+    bool ok = node_db_state_delete(ndb, WALLET_BIRTHDAY_PROOF_KEY) &&
+        node_db_state_set(ndb, WALLET_BIRTHDAY_HASH_KEY, hash, 32) &&
+        node_db_state_set_int(ndb, WALLET_BIRTHDAY_STATE_KEY, height) &&
+        (!identity || node_db_state_set(ndb, WALLET_BIRTHDAY_PROOF_KEY, identity, 32));
+    if (ok && sqlite3_exec(ndb->db, "RELEASE wallet_birthday", NULL, NULL, NULL) == SQLITE_OK) return true;
+    int rollback = sqlite3_exec(ndb->db, "ROLLBACK TO wallet_birthday", NULL, NULL, NULL);
+    int release = sqlite3_exec(ndb->db, "RELEASE wallet_birthday", NULL, NULL, NULL);
+    if (rollback != SQLITE_OK || release != SQLITE_OK) {
+        LOG_ERROR("wallet_key", "birthday savepoint cleanup failed rollback=%d release=%d", rollback, release);
+        _Exit(EXIT_FAILURE);
+    }
+    return false;
 }
+
+/* A read error and any partial tuple both refuse a new birthday. */
+static bool birthday_tuple_absent(sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_prepare_v2(db,
+        "SELECT 1 FROM node_state WHERE key IN (?1,?2,?3) LIMIT 1",
+        -1, &s, NULL) == SQLITE_OK && s &&
+        sqlite3_bind_text(s, 1, WALLET_BIRTHDAY_STATE_KEY, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_text(s, 2, WALLET_BIRTHDAY_HASH_KEY, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_text(s, 3, WALLET_BIRTHDAY_PROOF_KEY, -1, SQLITE_STATIC) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(s) == SQLITE_DONE; // raw-sql-ok:wallet-birthday-absence
+    if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+/* Store an initial birthday only when no part of the old tuple exists. */
+bool db_wallet_birthday_set_if_absent(struct node_db *ndb, int64_t height,
+                                      const uint8_t hash[32])
+{
+    if (!ndb || !ndb->open || !ndb->db || !hash || height < 0) return false;
+    sqlite3 *db = ndb->db;
+    if (sqlite3_exec(db, "SAVEPOINT wallet_birthday_once", NULL, NULL, NULL) != SQLITE_OK)
+        return false;
+    bool ok = birthday_tuple_absent(db);
+    if (ok) ok = birthday_write(ndb, height, hash, NULL);
+    if (ok && sqlite3_exec(db, "RELEASE wallet_birthday_once", NULL, NULL, NULL) == SQLITE_OK)
+        return true;
+    int rollback = sqlite3_exec(db, "ROLLBACK TO wallet_birthday_once", NULL, NULL, NULL);
+    int release = sqlite3_exec(db, "RELEASE wallet_birthday_once", NULL, NULL, NULL);
+    if (rollback != SQLITE_OK || release != SQLITE_OK) {
+        LOG_ERROR("wallet_key", "birthday absence savepoint cleanup failed rollback=%d release=%d", rollback, release);
+        _Exit(EXIT_FAILURE);
+    }
+    return false;
+}
+
+bool db_wallet_birthday_set(struct node_db *ndb, int64_t height, const uint8_t hash[32])
+{
+    return birthday_write(ndb, height, hash, NULL);
+}
+
+bool db_wallet_birthday_set_created(struct node_db *ndb, int64_t height,
+                                    const uint8_t hash[32], const uint8_t identity[32])
+{
+    return identity && birthday_write(ndb, height, hash, identity);
+}
+
+static bool birthday_proof_row(sqlite3_stmt *s, int64_t *height,
+                               uint8_t hash[32], uint8_t identity[32])
+{
+    for (int i = 0; i < 3; i++) {
+        int size = i == 1 ? 8 : 32;
+        if (sqlite3_column_type(s, i) != SQLITE_BLOB || sqlite3_column_bytes(s, i) != size ||
+            !sqlite3_column_blob(s, i)) return false;
+    }
+    memcpy(identity, sqlite3_column_blob(s, 0), 32);
+    memcpy(height, sqlite3_column_blob(s, 1), 8);
+    memcpy(hash, sqlite3_column_blob(s, 2), 32);
+    return *height >= 0;
+}
+
+
+static bool birthday_proof_query_bind(sqlite3_stmt *s)
+{
+    return sqlite3_bind_text(s, 1, WALLET_BIRTHDAY_PROOF_KEY, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_text(s, 2, WALLET_BIRTHDAY_STATE_KEY, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_text(s, 3, WALLET_BIRTHDAY_HASH_KEY, -1, SQLITE_STATIC) == SQLITE_OK;
+}
+
+static bool birthday_proof_args(struct node_db *ndb, int64_t *height,
+                                uint8_t hash[32], uint8_t identity[32])
+{
+    return ndb && ndb->open && ndb->db && height && hash && identity;
+}
+
+
+enum wallet_birthday_proof_status db_wallet_birthday_proof_get(struct node_db *ndb,
+    int64_t *height, uint8_t hash[32], uint8_t identity[32])
+{
+    if (height) *height = 0;
+    if (hash) memset(hash, 0, 32);
+    if (identity) memset(identity, 0, 32);
+    if (!birthday_proof_args(ndb, height, hash, identity)) return WALLET_BIRTHDAY_PROOF_ERROR;
+    sqlite3_stmt *s = NULL;
+    const char *sql = "SELECT value,(SELECT value FROM node_state WHERE key=?2),"
+        "(SELECT value FROM node_state WHERE key=?3) FROM node_state WHERE key=?1";
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL) != SQLITE_OK) return WALLET_BIRTHDAY_PROOF_ERROR;
+    if (!birthday_proof_query_bind(s)) {
+        sqlite3_finalize(s); return WALLET_BIRTHDAY_PROOF_ERROR;
+    }
+    int rc = sqlite3_step(s); // raw-sql-ok:read-only-introspection
+    enum wallet_birthday_proof_status status = WALLET_BIRTHDAY_PROOF_ERROR;
+    if (rc == SQLITE_DONE) status = WALLET_BIRTHDAY_PROOF_ABSENT;
+    else if (rc == SQLITE_ROW) {
+        status = birthday_proof_row(s, height, hash, identity)
+            ? WALLET_BIRTHDAY_PROOF_FOUND : WALLET_BIRTHDAY_PROOF_MALFORMED;
+        if (sqlite3_step(s) != SQLITE_DONE) status = WALLET_BIRTHDAY_PROOF_ERROR; // raw-sql-ok:read-only-introspection
+    }
+    if (sqlite3_finalize(s) != SQLITE_OK) status = WALLET_BIRTHDAY_PROOF_ERROR;
+    if (status != WALLET_BIRTHDAY_PROOF_FOUND) { *height = 0; memset(hash, 0, 32); memset(identity, 0, 32); }
+    return status;
+}
+
+/* Versioned single-row prepare record; contains only a nonce and public bindings. */
+#define WALLET_CREATE_PENDING_KEY "wallet_create_pending_v1"
+#define WALLET_CREATE_PENDING_BYTES 105u
+
+static bool wallet_create_pending_encode(const struct wallet_create_pending *p,
+                                         uint8_t out[WALLET_CREATE_PENDING_BYTES])
+{
+    if (!p || p->floor < 0) return false;
+    out[0] = p->committed ? 2 : 1;
+    memcpy(out + 1, p->nonce, 32); memcpy(out + 33, p->identity, 32);
+    uint64_t floor = (uint64_t)p->floor;
+    zcl_write_u64_le(out + 65, floor);
+    memcpy(out + 73, p->floor_hash, 32);
+    return true;
+}
+
+bool db_wallet_create_pending_insert(struct node_db *ndb, const struct wallet_create_pending *pending)
+{
+    uint8_t bytes[WALLET_CREATE_PENDING_BYTES];
+    if (!ndb || !ndb->open || !ndb->db || !wallet_create_pending_encode(pending, bytes) || pending->committed) return false;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db, "INSERT INTO node_state(key,value) VALUES(?,?)", -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_text(s, 1, WALLET_CREATE_PENDING_KEY, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 2, bytes, sizeof(bytes), SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_DONE; // raw-sql-ok:kv-state-primitive
+    return sqlite3_finalize(s) == SQLITE_OK && ok;
+}
+
+static enum wallet_birthday_proof_status wallet_create_pending_decode(sqlite3_stmt *s, struct wallet_create_pending *out)
+{
+    const uint8_t *b = sqlite3_column_blob(s, 0);
+    if (sqlite3_column_type(s, 0) != SQLITE_BLOB || sqlite3_column_bytes(s, 0) != WALLET_CREATE_PENDING_BYTES || !b || (b[0] != 1 && b[0] != 2))
+        return WALLET_BIRTHDAY_PROOF_MALFORMED;
+    uint64_t floor = zcl_read_u64_le(b + 65);
+    if (floor > INT_MAX) return WALLET_BIRTHDAY_PROOF_MALFORMED;
+    memcpy(out->nonce, b + 1, 32); memcpy(out->identity, b + 33, 32);
+    out->floor = (int)floor; out->committed = b[0] == 2; memcpy(out->floor_hash, b + 73, 32);
+    return WALLET_BIRTHDAY_PROOF_FOUND;
+}
+
+enum wallet_birthday_proof_status db_wallet_create_pending_get(struct node_db *ndb,
+                                                               struct wallet_create_pending *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!ndb || !ndb->open || !ndb->db || !out) return WALLET_BIRTHDAY_PROOF_ERROR;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db, "SELECT value FROM node_state WHERE key=?", -1, &s, NULL) != SQLITE_OK)
+        return WALLET_BIRTHDAY_PROOF_ERROR;
+    if (sqlite3_bind_text(s, 1, WALLET_CREATE_PENDING_KEY, -1, SQLITE_STATIC) != SQLITE_OK) {
+        sqlite3_finalize(s); return WALLET_BIRTHDAY_PROOF_ERROR;
+    }
+    int rc = sqlite3_step(s); // raw-sql-ok:read-only-introspection
+    enum wallet_birthday_proof_status result = WALLET_BIRTHDAY_PROOF_ERROR;
+    if (rc == SQLITE_DONE) result = WALLET_BIRTHDAY_PROOF_ABSENT;
+    else if (rc == SQLITE_ROW) {
+        result = wallet_create_pending_decode(s, out);
+        if (sqlite3_step(s) != SQLITE_DONE) result = WALLET_BIRTHDAY_PROOF_ERROR; // raw-sql-ok:read-only-introspection
+    }
+    if (sqlite3_finalize(s) != SQLITE_OK) result = WALLET_BIRTHDAY_PROOF_ERROR;
+    if (result != WALLET_BIRTHDAY_PROOF_FOUND) memset(out, 0, sizeof(*out));
+    return result;
+}
+
+static bool wallet_create_pending_replace(struct node_db *ndb, const uint8_t *old, const uint8_t *next)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db, "UPDATE node_state SET value=? WHERE key=? AND value=?", -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_blob(s, 1, next, WALLET_CREATE_PENDING_BYTES, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(s, 2, WALLET_CREATE_PENDING_KEY, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 3, old, WALLET_CREATE_PENDING_BYTES, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_DONE && sqlite3_changes(ndb->db) == 1; // raw-sql-ok:kv-state-primitive
+    return sqlite3_finalize(s) == SQLITE_OK && ok;
+}
+
+bool db_wallet_create_pending_commit(struct node_db *ndb, const struct wallet_create_pending *pending)
+{
+    uint8_t old[WALLET_CREATE_PENDING_BYTES], next[WALLET_CREATE_PENDING_BYTES];
+    if (!ndb || !ndb->open || !ndb->db || !pending || pending->committed ||
+        sqlite3_txn_state(ndb->db, "main") != SQLITE_TXN_WRITE ||
+        pending->floor > INT_MAX - WALLET_BIRTHDAY_MARGIN || !wallet_create_pending_encode(pending, old)) return false;
+    struct wallet_create_pending committed = *pending; committed.committed = true;
+    if (!wallet_create_pending_encode(&committed, next)) return false;
+    if (pending->floor > 0 && !db_wallet_birthday_set_created(ndb,
+        (int64_t)pending->floor + WALLET_BIRTHDAY_MARGIN, pending->floor_hash, pending->identity)) return false;
+    return wallet_create_pending_replace(ndb, old, next);
+}
+
+bool db_wallet_create_pending_cancel(struct node_db *ndb, const struct wallet_create_pending *pending)
+{
+    uint8_t bytes[WALLET_CREATE_PENDING_BYTES];
+    if (!ndb || !ndb->open || !ndb->db || !pending || pending->committed ||
+        !wallet_create_pending_encode(pending, bytes)) return false;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db, "DELETE FROM node_state WHERE key=? AND value=?", -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_text(s, 1, WALLET_CREATE_PENDING_KEY, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 2, bytes, sizeof(bytes), SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_DONE && sqlite3_changes(ndb->db) == 1; // raw-sql-ok:kv-state-primitive
+    return sqlite3_finalize(s) == SQLITE_OK && ok;
+}
+
 
 /* ── Wallet Seed ──────────────────────────────────────────────── *
  * There is no db_wallet_seed_save: wallet_seed has a single writer,

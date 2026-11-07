@@ -7,6 +7,8 @@
 
 #include "controllers/wallet_rescan_controller_internal.h"
 #include "services/wallet_scan_service.h"
+#include "config/db_service.h"
+#include "config/runtime.h"
 
 struct wallet_rescan_block_mapping {
     int file_num;
@@ -345,38 +347,42 @@ static int rescan_check_witness_roots(
     return witness_root_mismatches;
 }
 
-static void rescan_save_tree_state(const struct wallet_rpc_context *ctx,
+static bool rescan_save_tree_state(const struct wallet_rpc_context *ctx,
                                    const struct incremental_merkle_tree *tree,
                                    int safe_tip)
 {
-    {
-        struct byte_stream ts;
-        stream_init(&ts, 4096);
-        incremental_tree_serialize(tree, &ts);
-        /* Save to the normal key + "sapling_tree_rebuild_height" as ONE
-         * atomic pair (sapling_tree_persist_pair, lane/sapling-tree-persist)
-         * — this is the SAME height key engine/composition/src/boot.c's loader and
-         * sapling_tree_rebuild() trust to resume/fold-forward from, and the
-         * consensus check just above (rescan_result_consensus_valid) already
-         * proved final_tree_root == the real header root at safe_tip, so
-         * safe_tip is a legitimate saved-height binding. Also save to the
-         * rescan-specific key (can't be overwritten by connect_block). */
-        sapling_tree_persist_pair(ctx->node_db, ts.data, ts.size,
-                                  (int64_t)safe_tip);
+    struct byte_stream ts;
+    stream_init(&ts, 4096);
+    bool ok = incremental_tree_serialize(tree, &ts) &&
+        sapling_tree_persist_pair_in_open_tx(ctx->node_db, ts.data, ts.size,
+                                             (int64_t)safe_tip) &&
         node_db_state_set(ctx->node_db, "sapling_tree_rescan", ts.data, ts.size);
-
-        printf("rescanwitnesses: tree saved (%zu bytes, %zu cms)\n",
-               ts.size, incremental_tree_size(tree));
-        fflush(stdout);
-        stream_free(&ts);
-
-        char height_str[16];
-        snprintf(height_str, sizeof(height_str), "%d", safe_tip);
+    stream_free(&ts);
+    char height_str[16];
+    int n = snprintf(height_str, sizeof(height_str), "%d", safe_tip);
+    return ok && n > 0 && (size_t)n < sizeof(height_str) &&
         node_db_state_set(ctx->node_db, "sapling_tree_height",
-                          (uint8_t *)height_str, strlen(height_str));
+                          (const uint8_t *)height_str, (size_t)n) &&
         node_db_state_set(ctx->node_db, "sapling_tree_rescan_height",
-                          (uint8_t *)height_str, strlen(height_str));
+                          (const uint8_t *)height_str, (size_t)n);
+}
+
+static bool rescan_copy_viewing_key(struct sapling_keystore *keys,
+                                    const uint8_t ivk[32], uint8_t ak[32], uint8_t nk[32])
+{
+    bool found = false;
+    if (!zcl_mutex_trylock(&keys->cs)) return false;
+    for (size_t i = 0; i < keys->num_keys; i++) {
+        const struct sapling_key_entry *key = &keys->keys[i];
+        if (key->used && memcmp(key->ivk, ivk, 32) == 0) {
+            memcpy(ak, key->xfvk.fvk.ak, 32);
+            memcpy(nk, key->xfvk.fvk.nk, 32);
+            found = true;
+            break;
+        }
     }
+    zcl_mutex_unlock(&keys->cs);
+    return found;
 }
 
 static int rescan_save_witnesses(const struct wallet_rpc_context *ctx,
@@ -389,14 +395,11 @@ static int rescan_save_witnesses(const struct wallet_rpc_context *ctx,
     for (int ni = 0; ni < n_notes; ni++) {
         if (!witness_active[ni]) continue;
 
-        const struct sapling_key_entry *key =
-            sapling_keystore_find_by_ivk(&ctx->wallet->sapling_keys,
-                                         notes[ni].ivk);
-        if (!key || incremental_tree_size(&witnesses[ni].tree) == 0)
+        if (incremental_tree_size(&witnesses[ni].tree) == 0)
             continue;
         uint8_t ak[32], nk[32], nf[32];
-        memcpy(ak, key->xfvk.fvk.ak, sizeof(ak));
-        memcpy(nk, key->xfvk.fvk.nk, sizeof(nk));
+        if (!rescan_copy_viewing_key(&ctx->wallet->sapling_keys, notes[ni].ivk, ak, nk))
+            continue;
         uint64_t position = incremental_tree_size(&witnesses[ni].tree) - 1;
         if (!sapling_compute_nf(notes[ni].diversifier, notes[ni].pk_d,
                                 (uint64_t)notes[ni].value, notes[ni].rcm,
@@ -422,8 +425,225 @@ static int rescan_save_witnesses(const struct wallet_rpc_context *ctx,
     return saved;
 }
 
+struct rescan_commit {
+    const struct wallet_rpc_context *ctx;
+    const struct incremental_merkle_tree *tree;
+    const struct incremental_witness *witnesses;
+    const bool *active;
+    const struct db_sapling_note *notes;
+    int count, height, saved;
+    struct uint256 hash, root;
+    bool endpoint_changed, contended, ok;
+};
+
+static void rescan_fail_if_transaction_live(struct node_db *db)
+{
+    if (!sqlite3_get_autocommit(db->db)) {
+        fputs("fatal: witness recovery transaction unresolved; terminating to preserve database integrity\n", stderr);
+        _Exit(EXIT_FAILURE);
+    }
+}
+
+static void rescan_rollback(struct node_db *db)
+{
+    (void)node_db_rollback(db);
+    rescan_fail_if_transaction_live(db);
+}
+
+#ifdef ZCL_TESTING
+void rescan_test_rollback(struct node_db *db) { rescan_rollback(db); }
+#endif
+
+static sqlite3_mutex *rescan_begin_locked(struct node_db *db, struct rescan_commit *c)
+{
+    if (db != c->ctx->node_db || !db->db) return NULL;
+    sqlite3_mutex *mu = sqlite3_db_mutex(db->db);
+    if (!mu || sqlite3_mutex_try(mu) != SQLITE_OK) {
+        c->contended = true;
+        return NULL;
+    }
+    if (!db->sync_in_batch && !sqlite3_get_autocommit(db->db)) {
+        c->contended = true; sqlite3_mutex_leave(mu); return NULL;
+    }
+    bool ready = !db->sync_in_batch || node_db_sync_flush(db);
+    if (!ready) rescan_rollback(db);
+    else {
+        ready = node_db_begin_immediate(db);
+        if (!ready && !sqlite3_get_autocommit(db->db)) rescan_rollback(db);
+    }
+    if (!ready) { sqlite3_mutex_leave(mu); return NULL; }
+    if (!zcl_mutex_trylock(&c->ctx->main_state->cs_main)) {
+        c->contended = true;
+        rescan_rollback(db);
+        sqlite3_mutex_leave(mu);
+        return NULL;
+    }
+    return mu;
+}
+
+static bool rescan_finish_locked(struct node_db *db, struct rescan_commit *c,
+                                 sqlite3_mutex *mu, bool ok)
+{
+    if (ok) ok = node_db_commit(db);
+    if (!ok) rescan_rollback(db);
+    zcl_mutex_unlock(&c->ctx->main_state->cs_main);
+    sqlite3_mutex_leave(mu);
+    c->ok = ok;
+    return ok;
+}
+
+static bool rescan_same_notes(struct node_db *db, const struct rescan_commit *c)
+{
+    int count = c->count;
+    struct db_sapling_note *current = NULL;
+    int n = db_sapling_note_list_unspent_alloc(db, &current);
+    bool same = n == count;
+    for (int i = 0; same && i < n; i++) {
+        bool found = false;
+        for (int j = 0; !found && j < n; j++) {
+            const struct db_sapling_note *a = &current[i], *b = &c->notes[j];
+            found = a->output_index == b->output_index && a->value == b->value &&
+                a->block_height == b->block_height &&
+                memcmp(a->txid, b->txid, 32) == 0 && memcmp(a->cm, b->cm, 32) == 0 &&
+                memcmp(a->ivk, b->ivk, 32) == 0 && memcmp(a->rcm, b->rcm, 32) == 0 &&
+                memcmp(a->diversifier, b->diversifier, 11) == 0 && memcmp(a->pk_d, b->pk_d, 32) == 0;
+        }
+        same = found;
+    }
+    free(current);
+    return same;
+}
+
+static bool rescan_commit_write(struct node_db *db, void *opaque)
+{
+    struct rescan_commit *c = opaque;
+    sqlite3_mutex *mu = rescan_begin_locked(db, c);
+    if (!mu) return false;
+    const struct block_index *p = active_chain_at(&c->ctx->main_state->chain_active,
+                                                   c->height);
+    bool current = p && p->phashBlock && uint256_eq(p->phashBlock, &c->hash) &&
+                   uint256_eq(&p->hashFinalSaplingRoot, &c->root);
+    c->endpoint_changed = !current;
+    bool ok = current && rescan_same_notes(db, c) &&
+              rescan_save_tree_state(c->ctx, c->tree, c->height);
+    if (ok) {
+        c->saved = rescan_save_witnesses(c->ctx, c->witnesses, c->active,
+                                          c->notes, c->count, c->height);
+        ok = c->saved == c->count;
+    }
+    return rescan_finish_locked(db, c, mu, ok);
+}
+
+static bool rescan_commit_dispatch(struct rescan_commit *c, bool replay_complete,
+                                   int built, struct wallet_witness_outcome *out)
+{
+    if (!replay_complete || built != c->count) {
+        out->status = WALLET_WITNESS_INCOMPLETE;
+        return false;
+    }
+    struct db_service *svc = app_runtime_db_service();
+    bool ok = svc && db_service_is_started(svc) &&
+        db_service_node_db(svc) == c->ctx->node_db &&
+        db_service_run_write(svc, rescan_commit_write, c) && c->ok;
+    if (ok) {
+        out->witnesses_saved = c->saved;
+        out->status = WALLET_WITNESS_COMPLETE;
+    } else {
+        out->status = c->endpoint_changed ? WALLET_WITNESS_ENDPOINT_CHANGED :
+            (c->contended ? WALLET_WITNESS_BUSY : WALLET_WITNESS_PERSIST_FAILED);
+    }
+    return ok;
+}
+
+#ifdef ZCL_TESTING
+bool rescan_test_commit(const struct wallet_rpc_context *ctx,
+                        const struct incremental_merkle_tree *tree,
+                        const struct incremental_witness *witnesses,
+                        const bool *active, const struct db_sapling_note *notes,
+                        int count, int built, int height,
+                        const struct uint256 *hash, const struct uint256 *root,
+                        struct wallet_witness_outcome *out)
+{
+    struct rescan_commit c = {.ctx = ctx, .tree = tree, .witnesses = witnesses,
+        .active = active, .notes = notes, .count = count, .height = height,
+        .hash = *hash, .root = *root};
+    memset(out, 0, sizeof(*out));
+    return rescan_commit_dispatch(&c, true, built, out);
+}
+#endif
+
+static bool rescan_empty_write(struct node_db *db, void *opaque)
+{
+    struct rescan_commit *c = opaque;
+    sqlite3_mutex *mu = rescan_begin_locked(db, c);
+    if (!mu) return false;
+    const struct block_index *p = active_chain_at(&c->ctx->main_state->chain_active, c->height);
+    bool current = p && p->phashBlock && uint256_eq(p->phashBlock, &c->hash) &&
+                   uint256_eq(&p->hashFinalSaplingRoot, &c->root);
+    c->endpoint_changed = !current;
+    struct db_sapling_note *notes = NULL;
+    int n = db_sapling_note_list_unspent_alloc(db, &notes);
+    free(notes);
+    return rescan_finish_locked(db, c, mu, current && n == 0);
+}
+
+static bool rescan_expected_endpoint(const struct wallet_rpc_context *ctx,
+    const struct wallet_witness_endpoint *expected, int minimum,
+    struct rescan_commit *c, bool require_body)
+{
+    if (!expected || expected->height < minimum) return false;
+    zcl_mutex_lock(&ctx->main_state->cs_main);
+    const struct block_index *p = active_chain_at(&ctx->main_state->chain_active, expected->height);
+    bool ok = p && p->phashBlock && (!require_body || rescan_endpoint_header_addressable(p)) &&
+        uint256_eq(p->phashBlock, &expected->hash) && uint256_eq(&p->hashFinalSaplingRoot, &expected->root);
+    if (ok) { c->height = expected->height; c->hash = expected->hash; c->root = expected->root; }
+    zcl_mutex_unlock(&ctx->main_state->cs_main);
+    return ok;
+}
+
+static bool rescan_choose_endpoint(const struct wallet_rpc_context *ctx,
+    const struct wallet_witness_endpoint *expected, int minimum,
+    struct rescan_commit *c, bool require_body)
+{
+    if (expected) return rescan_expected_endpoint(ctx, expected, minimum, c, require_body);
+    zcl_mutex_lock(&ctx->main_state->cs_main);
+    int height = active_chain_height(&ctx->main_state->chain_active);
+    const struct block_index *p = require_body ?
+        rescan_find_replay_endpoint(&ctx->main_state->chain_active, minimum, &height) :
+        active_chain_at(&ctx->main_state->chain_active, height);
+    bool ok = p && p->phashBlock;
+    if (ok) { c->height = height; c->hash = *p->phashBlock; c->root = p->hashFinalSaplingRoot; }
+    zcl_mutex_unlock(&ctx->main_state->cs_main);
+    return ok;
+}
+
+static bool rescan_empty_proof(const struct wallet_rpc_context *ctx,
+                               struct wallet_witness_outcome *out,
+                               const struct wallet_witness_endpoint *expected)
+{
+    struct rescan_commit c = {.ctx = ctx};
+    bool available = rescan_choose_endpoint(ctx, expected, 0, &c, false);
+    if (!available && expected) { out->status = WALLET_WITNESS_ENDPOINT_CHANGED; return false; }
+    struct db_service *svc = app_runtime_db_service();
+    bool ok = available && svc && db_service_is_started(svc) &&
+        db_service_node_db(svc) == ctx->node_db &&
+        db_service_run_write(svc, rescan_empty_write, &c) && c.ok;
+    out->status = ok ? WALLET_WITNESS_COMPLETE :
+        (c.endpoint_changed ? WALLET_WITNESS_ENDPOINT_CHANGED :
+         (c.contended ? WALLET_WITNESS_BUSY : WALLET_WITNESS_PERSIST_FAILED));
+    if (ok) { out->endpoint_height = c.height; out->endpoint_hash = c.hash; out->endpoint_root = c.root; }
+    return ok;
+}
+
 /* One completion line per Sapling witness rescan that reached its scan:
  * heights, counts and milliseconds only. Refusals before the scan log nothing. */
+#ifdef ZCL_TESTING
+bool rescan_test_empty(const struct wallet_rpc_context *ctx, struct wallet_witness_outcome *out)
+{
+    return rescan_empty_proof(ctx, out, NULL);
+}
+#endif
+
 static void witness_rescan_log_done(int start_height, int end_height,
                                     int blocks_scanned, int items,
                                     int64_t t0_ms, bool ok)
@@ -441,6 +661,7 @@ static void witness_rescan_log_done(int start_height, int end_height,
 static const char *rescan_context_unavailable_error(
     const struct wallet_rpc_context *ctx)
 {
+    if (!ctx || !ctx->wallet) return "Wallet not available";
     if (!ctx->main_state)
         return "Main state not available";
     if (!wallet_ctx_db_ready(ctx))
@@ -477,7 +698,7 @@ static void rescan_resolve_block_datadir(const struct wallet_rpc_context *ctx,
  * witnesses: skip blocks whose header root is zero or unchanged, decode each
  * tree-changing block's durable body and append its commitments, printing
  * the checkpoint root comparison on cadence. */
-static void rescan_replay_blocks(const struct wallet_rpc_context *ctx,
+static bool rescan_replay_blocks(const struct wallet_rpc_context *ctx,
                                  const char *block_datadir,
                                  int sapling_start, int safe_tip,
                                  struct incremental_merkle_tree *tree,
@@ -494,6 +715,7 @@ static void rescan_replay_blocks(const struct wallet_rpc_context *ctx,
     *witnesses_built_out = 0;
     int blocks_scanned = 0;
     size_t total_commitments = 0;
+    bool complete = true;
     int witnesses_built = 0;
 
     /* Keep the descriptor alive with its view.  Windows file mappings do not
@@ -504,9 +726,10 @@ static void rescan_replay_blocks(const struct wallet_rpc_context *ctx,
     for (int h = sapling_start; h <= safe_tip; h++) {
         const struct block_index *pindex =
             active_chain_at(&ctx->main_state->chain_active, h);
-        if (!pindex) continue;
-        if (!rescan_block_body_mapped(pindex, &block_mapping, block_datadir))
+        if (!pindex || !pindex->phashBlock) {
+            complete = false;
             continue;
+        }
 
         /* A repeated header root proves this block did not change the Sapling
          * tree, so the body is irrelevant to witness replay. This skips the
@@ -516,9 +739,16 @@ static void rescan_replay_blocks(const struct wallet_rpc_context *ctx,
          * evidence to replay. */
         struct uint256 before_root;
         incremental_tree_root(tree, &before_root);
-        if (uint256_is_zero_local(&pindex->hashFinalSaplingRoot) ||
-            uint256_eq(&before_root, &pindex->hashFinalSaplingRoot)) {
+        if (uint256_is_zero_local(&pindex->hashFinalSaplingRoot)) {
+            complete = false;
+            continue;
+        }
+        if (uint256_eq(&before_root, &pindex->hashFinalSaplingRoot)) {
             blocks_scanned++;
+            continue;
+        }
+        if (!rescan_block_body_mapped(pindex, &block_mapping, block_datadir)) {
+            complete = false;
             continue;
         }
 
@@ -539,6 +769,7 @@ static void rescan_replay_blocks(const struct wallet_rpc_context *ctx,
             block_free(&block);
             LOG_WARN_IN("rpc_rescanwitnesses", "rescanwitnesses",
                         "durable block body decode failed at height=%d", h);
+            complete = false;
             blocks_scanned++;
             continue;
         }
@@ -564,20 +795,30 @@ static void rescan_replay_blocks(const struct wallet_rpc_context *ctx,
     *blocks_scanned_out = blocks_scanned;
     *total_commitments_out = total_commitments;
     *witnesses_built_out = witnesses_built;
+    return complete;
 }
 
-bool rpc_rescanwitnesses(const struct json_value *params, bool help,
-	                                  struct json_value *result)
+#ifdef ZCL_TESTING
+bool rescan_test_replay(const struct wallet_rpc_context *ctx, int start, int end)
 {
-    struct wallet_rpc_context *ctx = wallet_ctx();
-    (void)params;
-    RPC_HELP(help, result,
-        "rescanwitnesses\n"
-        "Rebuild Sapling Merkle witnesses for all unspent shielded notes.\n"
-        "Required before spending z→z or z→t. Replays the commitment tree\n"
-        "from the Sapling activation height to tip.");
+    struct incremental_merkle_tree tree;
+    sapling_tree_init(&tree);
+    struct incremental_witness witness = {0};
+    struct db_sapling_note note = {0};
+    bool active = false;
+    int blocks = 0, built = 0;
+    size_t commitments = 0;
+    return rescan_replay_blocks(ctx, ctx->datadir, start, end, &tree, &witness,
+                                &active, &note, 0, 0, &blocks, &commitments, &built);
+}
+#endif
 
-    ENSURE_WALLET(result);
+static bool rescan_witnesses_with_context(struct wallet_rpc_context *ctx,
+    struct json_value *result, struct wallet_witness_outcome *out,
+    const struct wallet_witness_endpoint *expected)
+{
+    memset(out, 0, sizeof(*out));
+    out->endpoint_height = -1;
     const char *context_error = rescan_context_unavailable_error(ctx);
     if (context_error) {
         json_set_str(result, context_error);
@@ -595,22 +836,29 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
     }
     if (n_notes == 0) {
         free(notes);
+        bool empty = rescan_empty_proof(ctx, out, expected);
         json_set_object(result);
         json_push_kv_int(result, "notes_updated", 0);
-        json_push_kv_str(result, "status", "no unspent notes");
-        return true;
+        json_push_kv_str(result, "status", empty ? "no unspent notes" : "unavailable");
+        return empty;
     }
 
+    out->notes_total = n_notes;
     printf("rescanwitnesses: building witnesses for %d notes...\n", n_notes);
     fflush(stdout);
 
     /* Prevent sync_controller from overwriting Sapling tree during rescan */
     extern _Atomic bool g_sapling_rescan_active;
-    atomic_store(&g_sapling_rescan_active, true);
+    if (atomic_exchange(&g_sapling_rescan_active, true)) {
+        free(notes);
+        json_set_str(result, "Witness rebuild already active");
+        return false;
+    }
 
     int sapling_start = rescan_sapling_activation_height();
     if (sapling_start < 0) {
         free(notes);
+        atomic_store(&g_sapling_rescan_active, false);
         json_set_str(result,
                      "Sapling is not active on the selected network");
         return false;
@@ -659,10 +907,9 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
      * an endpoint older than the note itself. Do not gate on BLOCK_HAVE_DATA;
      * it is a rebuildable projection. The durable coordinates select bytes,
      * and the exact hash/root snapshot below is rechecked before every save. */
-    int safe_tip = -1;
-    const struct block_index *save_block = rescan_find_replay_endpoint(
-        &ctx->main_state->chain_active, sapling_start, &safe_tip);
-    if (!save_block) {
+    struct rescan_commit selected = {.ctx = ctx};
+    if (!rescan_choose_endpoint(ctx, expected, sapling_start, &selected, true)) {
+        if (expected) out->status = WALLET_WITNESS_ENDPOINT_CHANGED;
         free(witnesses);
         free(witness_active);
         free(notes);
@@ -672,13 +919,18 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
                      "oldest unspent note");
         return false;
     }
-    struct uint256 endpoint_hash = *save_block->phashBlock;
-    struct uint256 endpoint_root = save_block->hashFinalSaplingRoot;
+    int safe_tip = selected.height;
+    struct uint256 endpoint_hash = selected.hash;
+    struct uint256 endpoint_root = selected.root;
+    out->endpoint_height = safe_tip;
+    out->endpoint_hash = endpoint_hash;
+    out->endpoint_root = endpoint_root;
 
-    rescan_replay_blocks(ctx, block_datadir, sapling_start, safe_tip, &tree,
+    bool replay_complete = rescan_replay_blocks(ctx, block_datadir, sapling_start, safe_tip, &tree,
                          witnesses, witness_active, notes, n_notes, t_start,
                          &blocks_scanned, &total_commitments, &witnesses_built);
 
+    out->witnesses_built = witnesses_built;
     /* Binary search for divergence point: check tree root at last checkpoint
      * that passed (3036968) vs block header. We know tree matches there.
      * Log our total commitment count at save height for comparison. */
@@ -701,6 +953,7 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
 
     if (!rescan_result_consensus_valid(&final_tree_root, &final_header_root,
                                        witness_root_mismatches)) {
+        out->status = replay_complete ? WALLET_WITNESS_FAILED : WALLET_WITNESS_INCOMPLETE;
         char our_hex[65], header_hex[65];
         uint256_get_hex(&final_tree_root, our_hex);
         uint256_get_hex(&final_header_root, header_hex);
@@ -728,15 +981,13 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
         return false;
     }
 
-    /* Save the authoritative tree state to node_state.
-     * This replaces any incomplete tree from catchup.
-     * Tree is saved at safe_tip height — subsequent connect_block
-     * calls will load it and extend naturally for remaining blocks. */
-    rescan_save_tree_state(ctx, &tree, safe_tip);
-
-    /* Serialize and save witnesses (BEFORE releasing the rescan lock) */
-    int saved = rescan_save_witnesses(ctx, witnesses, witness_active, notes,
-                                      n_notes, safe_tip);
+    struct rescan_commit commit = {
+        .ctx = ctx, .tree = &tree, .witnesses = witnesses,
+        .active = witness_active, .notes = notes, .count = n_notes,
+        .height = safe_tip, .hash = endpoint_hash, .root = endpoint_root
+    };
+    bool committed = rescan_commit_dispatch(&commit, replay_complete, witnesses_built, out);
+    int saved = out->witnesses_saved;
 
     free(witnesses);
     free(witness_active);
@@ -753,7 +1004,7 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
     fflush(stdout);
 
     witness_rescan_log_done(sapling_start, safe_tip, blocks_scanned, saved,
-                            t0_ms, true);
+                            t0_ms, committed);
     json_set_object(result);
     json_push_kv_str(result, "seed_source", seed_source);
     json_push_kv_int(result, "seed_height", seed_height);
@@ -763,5 +1014,56 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
     json_push_kv_int(result, "witnesses_built", witnesses_built);
     json_push_kv_int(result, "witnesses_saved", saved);
     json_push_kv_int(result, "elapsed_seconds", elapsed);
+    if (!committed) {
+        json_push_kv_str(result, "status", "incomplete");
+        return false;
+    }
     return true;
+}
+
+bool wallet_rescan_witnesses_at(struct wallet_rpc_context *ctx,
+    const struct wallet_witness_endpoint *endpoint, struct wallet_witness_outcome *out)
+{
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    out->endpoint_height = -1;
+    if (!endpoint) return false;
+    struct json_value result; json_init(&result);
+    bool ok = rescan_witnesses_with_context(ctx, &result, out, endpoint);
+    json_free(&result);
+    return ok;
+}
+
+bool wallet_rescan_witnesses_context(struct wallet_rpc_context *ctx,
+                                      struct wallet_witness_outcome *out)
+{
+    if (!out) return false;
+    struct json_value result;
+    json_init(&result);
+    bool ok = rescan_witnesses_with_context(ctx, &result, out, NULL);
+    json_free(&result);
+    return ok;
+}
+
+bool wallet_rescan_witnesses(const struct json_value *params, bool help,
+                             struct json_value *result,
+                             struct wallet_witness_outcome *out)
+{
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    out->endpoint_height = -1;
+    (void)params;
+    RPC_HELP(help, result,
+        "rescanwitnesses\n"
+        "Rebuild Sapling Merkle witnesses for all unspent shielded notes.\n"
+        "Required before spending z→z or z→t. Replays the commitment tree\n"
+        "from the Sapling activation height to tip.");
+    return rescan_witnesses_with_context(wallet_ctx(), result, out, NULL);
+}
+
+bool rpc_rescanwitnesses(const struct json_value *params, bool help,
+                         struct json_value *result)
+{
+    struct wallet_witness_outcome out;
+    return wallet_rescan_witnesses(params, help, result, &out);
 }

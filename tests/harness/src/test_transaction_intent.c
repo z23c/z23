@@ -987,7 +987,7 @@ _test_next:
 static size_t ti_vip_payload(uint8_t *out, uint8_t from_len, uint8_t to_len)
 {
     size_t n = 0;
-    memcpy(out, "VIP2", 4); n = 4;
+    memcpy(out, "VIG2", 4); n = 4;
     out[n++] = VAULT_INTENT_ROUTE_PRIVATE;
     out[n++] = from_len;
     memset(out + n, 'f', from_len); n += from_len;
@@ -1008,18 +1008,31 @@ static bool ti_vip_tampered(struct node_db *ndb, uint8_t from_len,
 {
     uint8_t plain[1024];
     size_t plain_len = ti_vip_payload(plain, from_len, to_len);
+    struct wallet *wallet = calloc(1, sizeof(*wallet));
+    if (!wallet) return false;
+    wallet_init(wallet);
+    wallet->default_fee = 0;
+    if (!wallet_readiness_initialize(wallet, WALLET_READINESS_READY, true, 42)) {
+        wallet_free(wallet); free(wallet); return false;
+    }
+    struct wallet_readiness readiness = wallet_readiness_get(wallet);
+    if (!vault_intent_generation_bind(plain, &plain_len, sizeof(plain), &readiness)) {
+        wallet_free(wallet); free(wallet); return false;
+    }
     struct vault_intent_row row;
     memset(&row, 0, sizeof(row));
     memset(row.plan_id, 0x61, 32);
     row.route = VAULT_INTENT_ROUTE_PRIVATE;
     if (!wallet_metadata_encrypt(ndb, row.plan_id, 32, plain, plain_len,
             row.encrypted_payload, sizeof(row.encrypted_payload),
-            &row.encrypted_payload_len))
-        return false;
+            &row.encrypted_payload_len)) {
+        wallet_free(wallet); free(wallet); return false;
+    }
     vault_intent_digest_payload(plain, plain_len, &row, row.digest);
     struct wallet_rpc_context ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.node_db = ndb;
+    ctx.wallet = wallet;
     struct wallet_tx wtx;
     memset(&wtx, 0, sizeof(wtx));
     struct json_value result;
@@ -1029,6 +1042,7 @@ static bool ti_vip_tampered(struct node_db *ndb, uint8_t from_len,
     bool tampered = code && strcmp(code, "PLAN_TAMPERED") == 0;
     *decoded = code && !tampered;
     json_free(&result);
+    wallet_free(wallet); free(wallet);
     return tampered;
 }
 
@@ -1058,10 +1072,95 @@ _test_next:
     return failures;
 }
 
+static int ti_generation_binding(void)
+{
+    int failures = 0;
+    TEST("intent generation binding rejects legacy and changed authority") {
+        uint8_t plain[64] = {0}; memcpy(plain, "VIG1", 4);
+        size_t len = 4;
+        struct wallet_readiness r = {.state = WALLET_READINESS_READY,
+                                      .generation_present = true, .generation = 42};
+        size_t legacy = len;
+        ASSERT(!vault_intent_generation_check(plain, &legacy, &r) && legacy == len);
+        ASSERT(vault_intent_generation_bind(plain, &len, sizeof(plain), &r));
+        size_t checked = len;
+        ASSERT(vault_intent_generation_check(plain, &checked, &r) && checked == 4);
+        memcpy(plain, "VIP1", 4); checked = len;
+        ASSERT(!vault_intent_generation_check(plain, &checked, &r));
+        memcpy(plain, "VIG1", 4);
+        r.generation = 43; checked = len;
+        ASSERT(!vault_intent_generation_check(plain, &checked, &r) && checked == len);
+        r.generation = 42; r.generation_present = false; checked = len;
+        ASSERT(!vault_intent_generation_check(plain, &checked, &r));
+        r.generation_present = true; r.state = WALLET_READINESS_PENDING; checked = len;
+        ASSERT(!vault_intent_generation_check(plain, &checked, &r));
+        r.state = WALLET_READINESS_READY; r.generation_present = false;
+        len = 4; ASSERT(vault_intent_generation_bind(plain, &len, sizeof(plain), &r));
+        checked = len; ASSERT(vault_intent_generation_check(plain, &checked, &r) && checked == 4);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ti_generation_durable(void)
+{
+    int failures = 0;
+    struct node_db ndb = {0};
+    struct wallet *w = NULL;
+    char path[256] = {0};
+    TEST("intent generation survives database reopen and rejects legacy or changed authority") {
+        int fd = test_mkstemp(path, sizeof(path), "intent-generation");
+        ASSERT(fd >= 0); close(fd);
+        ASSERT(node_db_open(&ndb, path));
+        wallet_lock_reset_for_test(); wallet_lock_note_encrypted_at_rest();
+        ASSERT(wallet_lock_unlock(NULL, NULL, "intent-generation-test").ok);
+        w = calloc(1, sizeof(*w)); ASSERT(w != NULL); wallet_init(w);
+        ASSERT(wallet_readiness_initialize(w, WALLET_READINESS_READY, true, 42));
+        struct wallet_rpc_context ctx = {.wallet = w, .node_db = &ndb};
+        struct vault_intent_row row = {0};
+        memset(row.plan_id, 7, 32); memset(row.anchor_hash, 3, 32);
+        row.state = VAULT_INTENT_PLANNED; row.route = VAULT_INTENT_ROUTE_TRANSPARENT;
+        row.created_at = 100; row.expires_at = 700; row.updated_at = 100;
+        row.anchor_height = 42; row.confirm_height = -1;
+        uint8_t plain[64] = {0}; memcpy(plain, "VIP1", 4); size_t len = 4;
+        struct wallet_readiness ready = wallet_readiness_get(w);
+        ASSERT(wallet_metadata_encrypt(&ndb, row.plan_id, 32, plain, len,
+            row.encrypted_payload, sizeof(row.encrypted_payload), &row.encrypted_payload_len));
+        vault_intent_digest_payload(plain, len, &row, row.digest);
+        ASSERT(!vault_intent_generation_current(&ctx, &row));
+        memcpy(plain, "VIG1", 4);
+        ASSERT(vault_intent_generation_bind(plain, &len, sizeof(plain), &ready));
+        vault_intent_digest_payload(plain, len, &row, row.digest);
+        ASSERT(wallet_metadata_encrypt(&ndb, row.plan_id, 32, plain, len,
+            row.encrypted_payload, sizeof(row.encrypted_payload), &row.encrypted_payload_len));
+        ASSERT(vault_intent_save(&ndb, &row));
+        struct vault_intent_row stored; ASSERT(vault_intent_find(&ndb, row.plan_id, &stored));
+        ASSERT(vault_intent_generation_current(&ctx, &stored));
+        wallet_free(w); free(w); w = NULL;
+        node_db_close(&ndb); ASSERT(node_db_open(&ndb, path));
+        w = calloc(1, sizeof(*w)); ASSERT(w != NULL); wallet_init(w);
+        ctx.wallet = w; ctx.node_db = &ndb;
+        ASSERT(vault_intent_find(&ndb, row.plan_id, &stored));
+        ASSERT(wallet_readiness_initialize(w, WALLET_READINESS_READY, true, 42));
+        ASSERT(vault_intent_generation_current(&ctx, &stored));
+        wallet_free(w); wallet_init(w);
+        ASSERT(wallet_readiness_initialize(w, WALLET_READINESS_READY, true, 43));
+        ASSERT(!vault_intent_generation_current(&ctx, &stored));
+        PASS();
+    } _test_next:;
+    if (w) { wallet_free(w); free(w); }
+    wallet_lock_reset_for_test();
+    if (ndb.open) node_db_close(&ndb);
+    if (path[0]) unlink(path);
+    return failures;
+}
+
 int test_transaction_intent(void)
 {
     int failures = 0;
     struct node_db ndb; memset(&ndb, 0, sizeof(ndb));
+    failures += ti_generation_binding();
+    failures += ti_generation_durable();
     failures += ti_private_decode_bounds();
     if (failures) goto _test_next;
     failures += vault_intent_private_cases();
@@ -1864,6 +1963,7 @@ int test_transaction_intent(void)
         struct wallet *lock_wallet = zcl_calloc(1, sizeof(*lock_wallet), "test-wallet");
         ASSERT(lock_wallet != NULL);
         wallet_init(lock_wallet);
+        ASSERT(wallet_readiness_initialize(lock_wallet, WALLET_READINESS_READY, true, 42));
         static struct tx_mempool lock_mempool;
         static struct coins_view_cache lock_cache;
         static struct main_state lock_ms;

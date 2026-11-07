@@ -48,4 +48,7 @@ bool zapp_setup_identity(const char *files, char out[65]);
 /* Whether the record says the wallet recorded a start height. */
 bool zapp_setup_confirmed_start(const char *files);
 
+bool zapp_setup_nonce_write(const char *files, const char *nonce);
+bool zapp_setup_nonce_exists(const char *files);
+bool zapp_setup_nonce_read(const char *files, char nonce[65]);
 #endif

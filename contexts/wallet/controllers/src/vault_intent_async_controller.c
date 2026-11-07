@@ -17,6 +17,7 @@
 #include "services/vault_intent_async_service.h"
 #include "services/wallet_money_service.h"
 #include "util/log_macros.h"
+#include "wallet/wallet.h"
 
 #include <string.h>
 
@@ -111,6 +112,10 @@ static bool rpc_via_submit(const struct json_value *params, bool help,
         row.state != VAULT_INTENT_PROVING) {
         via_error(result, "PLAN_NOT_SUBMITTABLE",
                   vault_intent_state_name(row.state));
+        return true;
+    }
+    if (!ctx->wallet || wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY) {
+        via_error(result, "WALLET_NOT_READY", "wallet state is unavailable during cutover");
         return true;
     }
     bool duplicate = false;

@@ -7,6 +7,28 @@
 #define ZCL_CONTROLLERS_WALLET_RESCAN_CONTROLLER_H
 
 #include "rpc/server.h"
+#include "core/uint256.h"
+#include <stdbool.h>
+
+struct wallet_rpc_context;
+
+enum wallet_witness_status {
+    WALLET_WITNESS_FAILED, WALLET_WITNESS_INCOMPLETE,
+    WALLET_WITNESS_ENDPOINT_CHANGED, WALLET_WITNESS_BUSY, WALLET_WITNESS_PERSIST_FAILED,
+    WALLET_WITNESS_COMPLETE
+};
+struct wallet_witness_endpoint {
+    int height;
+    struct uint256 hash, root;
+};
+struct wallet_witness_outcome {
+    enum wallet_witness_status status;
+    int notes_total, witnesses_built, witnesses_saved, endpoint_height;
+    struct uint256 endpoint_hash, endpoint_root;
+};
+/* Context and its wallet, database, chain and datadir must outlive this call. */
+bool wallet_rescan_witnesses_at(struct wallet_rpc_context *ctx,
+    const struct wallet_witness_endpoint *endpoint, struct wallet_witness_outcome *out);
 
 void register_wallet_rescan_rpc_commands(struct rpc_table *t);
 

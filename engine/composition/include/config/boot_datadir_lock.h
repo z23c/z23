@@ -19,6 +19,9 @@ extern "C" {
 bool boot_datadir_lock_acquire(const char *datadir);
 void boot_datadir_lock_release(void);
 
+/* True only for the directory whose exclusive lock this process holds. */
+bool boot_datadir_lock_matches_fd(int directory_fd);
+
 #ifdef __cplusplus
 }
 #endif

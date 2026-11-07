@@ -106,6 +106,13 @@ static int ssr_st_counts(void)
     n = ssr_st_count(k_ssr_good);
     if (n != 0)
         return ssr_st_fail("a legal shape was counted", n);
+    n = ssr_st_count("long n = 0xA'B; char c = 'x'; "
+                     "if (sqlite3_step(st) == SQLITE_ROW) return 1;");
+    if (n != 1)
+        return ssr_st_fail("hex separator hid a later comparison", n);
+    n = ssr_st_count("char c = 'x'; const char *s = \"sqlite3_step(st) == SQLITE_ROW\";");
+    if (n != 0)
+        return ssr_st_fail("character or string literal was not blanked", n);
     return 0;
 }
 

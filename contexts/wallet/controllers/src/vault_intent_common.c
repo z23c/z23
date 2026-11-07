@@ -12,8 +12,11 @@
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
 #include "models/vault_intent.h"
+#include "models/wallet_metadata_crypto.h"
+#include "support/cleanse.h"
 #include "util/log_macros.h"
 #include "validation/main_state.h"
+#include "wallet/wallet.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -285,6 +288,63 @@ bool vault_intent_idempotency_key_valid(const char *key)
         if (*p < 0x20 || *p > 0x7e)
             return false;
     return true;
+}
+
+#define VAULT_GENERATION_FOOTER 13u
+
+bool vault_intent_generation_bind(uint8_t *plain, size_t *len, size_t cap,
+                                  const struct wallet_readiness *readiness)
+{
+    if (!plain || !len || !readiness || readiness->state != WALLET_READINESS_READY ||
+        *len > cap || cap - *len < VAULT_GENERATION_FOOTER) return false;
+    uint8_t *footer = plain + *len;
+    memcpy(footer, "WGR1", 4);
+    footer[4] = readiness->generation_present ? 1 : 0;
+    zcl_write_u64_le(footer + 5, readiness->generation_present ? readiness->generation : 0);
+    *len += VAULT_GENERATION_FOOTER;
+    return true;
+}
+
+static bool vault_generation_inputs_valid(const uint8_t *plain, const size_t *len,
+                                          const struct wallet_readiness *readiness)
+{
+    return plain && len && readiness && readiness->state == WALLET_READINESS_READY &&
+           *len >= VAULT_GENERATION_FOOTER;
+}
+
+bool vault_intent_generation_check(const uint8_t *plain, size_t *len,
+                                   const struct wallet_readiness *readiness)
+{
+    if (!vault_generation_inputs_valid(plain, len, readiness)) return false;
+    const uint8_t *footer = plain + *len - VAULT_GENERATION_FOOTER;
+    uint8_t present = footer[4];
+    uint64_t generation = zcl_read_u64_le(footer + 5);
+    if (*len < VAULT_GENERATION_FOOTER + 4 ||
+        (memcmp(plain, "VIG1", 4) != 0 && memcmp(plain, "VIG2", 4) != 0) ||
+        memcmp(footer, "WGR1", 4) != 0 || present > 1 ||
+        (present == 0 && generation != 0) ||
+        (present != 0) != readiness->generation_present ||
+        (present && generation != readiness->generation)) return false;
+    *len -= VAULT_GENERATION_FOOTER;
+    return true;
+}
+
+bool vault_intent_generation_current(struct wallet_rpc_context *ctx,
+                                     const struct vault_intent_row *row)
+{
+    if (!ctx || !ctx->wallet || !ctx->node_db || !row) return false;
+    uint8_t plain[WALLET_METADATA_PLAINTEXT_MAX], digest[32];
+    size_t len = 0;
+    bool ok = wallet_metadata_decrypt(ctx->node_db, row->plan_id, 32,
+        row->encrypted_payload, row->encrypted_payload_len, plain, sizeof(plain), &len);
+    if (ok) {
+        vault_intent_digest_payload(plain, len, row, digest);
+        struct wallet_readiness readiness = wallet_readiness_get(ctx->wallet);
+        ok = memcmp(digest, row->digest, 32) == 0 &&
+             vault_intent_generation_check(plain, &len, &readiness);
+    }
+    memory_cleanse(plain, sizeof(plain));
+    return ok;
 }
 
 void vault_intent_digest_payload(const uint8_t *raw, size_t len,

@@ -62,7 +62,7 @@ static bool candidate_exec(sqlite3 *db, const char *sql, const char *label)
     return rc == SQLITE_OK;
 }
 
-static bool candidate_create_schema(sqlite3 *db)
+static bool candidate_create_schema(sqlite3 *db, uint8_t version)
 {
     static const char schema[] =
         "CREATE TABLE consensus_state_candidate_meta("
@@ -132,7 +132,17 @@ static bool candidate_create_schema(sqlite3 *db)
         "work_delta_high INTEGER NOT NULL,work_delta_low INTEGER NOT NULL,"
         "utxo_size_after INTEGER NOT NULL,reorg_depth INTEGER NOT NULL,"
         "finalized_at INTEGER NOT NULL,tip_hash BLOB);";
-    return candidate_exec(db, schema, "candidate closed schema");
+    if (!candidate_exec(db, schema, "candidate closed schema"))
+        return false;
+    if (version == CONSENSUS_STATE_BUNDLE_V1)
+        return true;
+    if (version != CONSENSUS_STATE_BUNDLE_V2)
+        return false;
+    return candidate_exec(db,
+        "ALTER TABLE consensus_state_candidate_meta ADD COLUMN bundle_format_version INTEGER NOT NULL;"
+        "ALTER TABLE consensus_state_candidate_meta ADD COLUMN sprout_pool_total INTEGER NOT NULL;"
+        "ALTER TABLE consensus_state_candidate_meta ADD COLUMN sapling_pool_total INTEGER NOT NULL;",
+        "candidate v2 metadata schema");
 }
 
 static bool bind_source_column(sqlite3_stmt *destination, int destination_col,
@@ -312,7 +322,12 @@ static bool candidate_write_meta_row(
     static const char meta_sql[] =
         "INSERT INTO consensus_state_candidate_meta VALUES(1,"
         "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
-    bool ok = sqlite3_prepare_v2(db, meta_sql, -1, &stmt, NULL) == SQLITE_OK;
+    static const char meta_v2_sql[] =
+        "INSERT INTO consensus_state_candidate_meta VALUES(1,"
+        "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+    const char *sql = manifest->format_version == CONSENSUS_STATE_BUNDLE_V2
+        ? meta_v2_sql : meta_sql;
+    bool ok = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK;
     int i = 1;
 #define CANDIDATE_BIND(call) do { if (ok) ok = (call) == SQLITE_OK; } while (0)
     CANDIDATE_BIND(sqlite3_bind_text(stmt, i++,
@@ -358,10 +373,15 @@ static bool candidate_write_meta_row(
                                      SQLITE_STATIC));
     CANDIDATE_BIND(sqlite3_bind_blob(stmt, i++, admission_receipt, 32,
                                      SQLITE_STATIC));
+    if (manifest->format_version == CONSENSUS_STATE_BUNDLE_V2) {
+        CANDIDATE_BIND(sqlite3_bind_int(stmt, i++, manifest->format_version));
+        CANDIDATE_BIND(sqlite3_bind_int64(stmt, i++, manifest->sprout_pool_total));
+        CANDIDATE_BIND(sqlite3_bind_int64(stmt, i++, manifest->sapling_pool_total));
+    }
     if (ok)
         ok = sqlite3_step(stmt) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
     if (stmt)
-        sqlite3_finalize(stmt);
+        ok = sqlite3_finalize(stmt) == SQLITE_OK && ok;
     return ok;
 #undef CANDIDATE_BIND
 }
@@ -463,7 +483,10 @@ static bool candidate_write_control(
 static bool candidate_manifest_complete(
     const struct consensus_state_bundle_manifest *manifest)
 {
-    return manifest->history_complete && manifest->activation_boundary == 0 &&
+    return (manifest->format_version == CONSENSUS_STATE_BUNDLE_V1 ||
+            (manifest->format_version == CONSENSUS_STATE_BUNDLE_V2 &&
+             manifest->sprout_pool_total >= 0 && manifest->sapling_pool_total >= 0)) &&
+           manifest->history_complete && manifest->activation_boundary == 0 &&
            manifest->sprout_source_cursor == 0 &&
            manifest->sapling_source_cursor == 0 &&
            manifest->nullifier_source_cursor == 0 &&
@@ -509,7 +532,7 @@ static bool candidate_build_fill(
     struct consensus_state_candidate_result *result)
 {
     bool ok = true;
-    if (ok && !candidate_create_schema(destination)) {
+    if (ok && !candidate_create_schema(destination, manifest->format_version)) {
         (void)consensus_state_candidate_fail(
             result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
             "candidate closed schema creation failed");

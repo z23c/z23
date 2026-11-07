@@ -301,6 +301,22 @@ static int fsi_case_fallback_rejoin(struct fsi_node *n)
  * carried while parentless (their own proofs): the boot's forward pass derives
  * the rung work from the parent's work and the window's proofs, then the fact
  * retires. */
+static int fsi_check_retirement_restart(struct fsi_node *n)
+{
+    int failures = 0;
+    struct block_header window[FSI_W];
+    bool have_window = true;
+    FSI_CHECK("retirement removes the saved proof window",
+              island_anchor_window_load(progress_store_db(), window, &have_window).ok && !have_window);
+    progress_store_close();
+    FSI_CHECK("retired island restarts without orphaned proof",
+              progress_store_open(n->dir) &&
+              island_anchor_state_load(progress_store_db()) == ISLAND_ANCHOR_STATE_FELL_BACK &&
+              island_anchor_window_load(progress_store_db(), window, &have_window).ok && !have_window &&
+              flysync_island_boot_register(n->dir));
+    return failures;
+}
+
 static int fsi_case_relinked_stale(void)
 {
     int failures = 0;
@@ -331,6 +347,7 @@ static int fsi_case_relinked_stale(void)
               fsi_top_work_is_rung(&n) &&
               island_anchor_load(progress_store_db(), &back, &found).ok &&
               !found);
+    failures += fsi_check_retirement_restart(&n);
     fsi_release_globals();
     fsi_node_close(&n);
     return failures;
@@ -454,9 +471,9 @@ static int fsi_case_state_unreadable(void)
     flysync_island_test_reset();
     FSI_CHECK("unreadable state with a fact: refused without the flag too",
               !flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)));
-    FSI_CHECK("no fact and no flag: the node starts as it does today",
+    FSI_CHECK("unreadable state without fact or flag refuses startup",
               progress_meta_delete(db, "flysync.island_anchor.v1") &&
-              flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)));
+              !flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why)));
     fsi_release_globals();
     fsi_node_close(&n);
     return failures;

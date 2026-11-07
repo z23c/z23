@@ -132,8 +132,20 @@ typedef bool (*wallet_coin_reservation_probe)(
 void wallet_set_coin_reservation_probe(wallet_coin_reservation_probe probe,
                                        void *ctx);
 
+enum wallet_readiness_state {
+    WALLET_READINESS_UNKNOWN = 0, WALLET_READINESS_READY, WALLET_READINESS_PENDING
+};
+
+struct wallet_readiness {
+    enum wallet_readiness_state state;
+    bool generation_present;
+    uint64_t generation;
+    uint64_t epoch;
+};
+
 struct wallet {
     zcl_mutex_t cs;
+    struct wallet_readiness readiness;
     struct basic_keystore keystore;
 
     struct wallet_tx map_wallet[MAX_WALLET_TX];
@@ -193,6 +205,23 @@ struct wallet {
 };
 
 void wallet_init(struct wallet *w);
+
+/* Public scan-set identity only; locked variant requires wallet, transparent
+ * keystore and Sapling keystore mutexes in that order. */
+bool wallet_scan_identity_locked(const struct wallet *w, uint8_t digest[32]);
+bool wallet_scan_identity(struct wallet *w, uint8_t digest[32]);
+/* Both locked completion calls require w->cs held continuously. Call complete
+ * only after can_complete returns true and durable replay has committed. */
+bool wallet_readiness_can_complete_locked(const struct wallet *w, bool generation_present,
+                                          uint64_t generation);
+void wallet_readiness_complete_locked(struct wallet *w);
+/* Initialize before services; ordinary initialize/complete acquire w->cs. */
+bool wallet_readiness_initialize(struct wallet *w, enum wallet_readiness_state state,
+                                 bool generation_present, uint64_t generation);
+bool wallet_readiness_complete(struct wallet *w, bool generation_present,
+                               uint64_t generation);
+struct wallet_readiness wallet_readiness_get(const struct wallet *w);
+struct wallet_readiness wallet_readiness_get_locked(const struct wallet *w);
 /* Like wallet_init, but skips zero-filling map_wallet and key_pool (about
  * 65 MiB). Precondition: *w is freshly zeroed storage (static bss or
  * calloc/anonymous mmap). Never call on reused or malloc storage. */

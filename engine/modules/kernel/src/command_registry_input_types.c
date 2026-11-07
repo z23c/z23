@@ -100,7 +100,7 @@ static bool cr_bool_key(const char *key)
         "runner_ok_only",    "dedupe",            "route_only",
         "route-only",        "explain",
         "shielded_only",
-        "birthday_at_local_tip",
+        "birthday_at_local_tip", "prepare",
     };
     return cr_key_in(key, keys, sizeof(keys) / sizeof(keys[0])) ||
            command_registry_devagent_input_extra_bool_key(key);
@@ -1106,6 +1106,11 @@ static const char *cr_required_discovery_key(const char *path)
 static bool cr_shape_descriptor(const char *key,
                                  struct zcl_command_input_descriptor *out)
 {
+    if (strcmp(key, "creation_nonce") == 0 || strcmp(key, "cancel_nonce") == 0) {
+        out->type = JSON_STR;
+        out->max_bytes = 64;
+        return true;
+    }
     if (cr_files_descriptor(key, out))
         return true;
     if (!cr_bool_key(key))
@@ -1215,6 +1220,13 @@ static bool cr_descriptor_value_ok(const char *key,
                                     const struct json_value *value,
                                     const struct zcl_command_input_descriptor *d)
 {
+    if (strcmp(key, "creation_nonce") == 0 || strcmp(key, "cancel_nonce") == 0) {
+        const char *s = json_get_str(value);
+        if (value->type != JSON_STR || !s || strlen(s) != 64) return false;
+        for (size_t i = 0; i < 64; i++)
+            if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return false;
+        return true;
+    }
     if (d->type == JSON_INT)
         return cr_int_range(value, d->minimum, d->maximum);
     if (d->type == JSON_BOOL)

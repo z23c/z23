@@ -29,6 +29,9 @@
 #include "conditions/checkpoint_bundle_install_ready.h"
 #include "conditions/checkpoint_header_solution_repair.h"
 #include "config/boot.h"
+#include "config/boot_internal.h"
+#include "config/boot_error.h"
+#include "config/boot_datadir_lock.h"
 #include "config/boot_consensus_bundle_marker.h"
 #include "config/consensus_state_install_runtime.h"
 #include "core/uint256.h"
@@ -39,6 +42,7 @@
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
+#include "util/boot_phase.h"
 #include "util/rpc_paths.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
@@ -51,6 +55,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define CSIR_CHECK(desc, cond)                                               \
@@ -1010,6 +1015,36 @@ static int case_fresh_canonical_cutover(void)
     return failures;
 }
 
+/* Exercise artifact refusal through the same startup identity as app_init. */
+static void csir_bad_bundle_startup_child(const char *datadir, const char *failed)
+{
+    struct node_db *node; struct wallet_sqlite *ws;
+    struct wallet *wallet; struct main_state *main;
+    boot_wallet_cutover_test_slots(&node, &ws, &wallet, &main);
+    progress_store_close();
+    char path[512];
+    int n = snprintf(path, sizeof(path), "%s/node.db", datadir);
+    if (n < 0 || (size_t)n >= sizeof(path) || !boot_datadir_lock_acquire(datadir) ||
+        !progress_store_open(datadir) || !node_db_open(node, path) ||
+        !wallet_sqlite_open_r(ws, node->db).ok) _exit(2);
+    wallet_init(wallet);
+    main_state_init(main);
+    boot_stage_reset_for_testing();
+    for (int stage = BOOT_STAGE_DATADIR_LOCKED; stage <= BOOT_STAGE_BLOCK_INDEX_LOADED; ++stage)
+        boot_stage_advance_to((enum boot_stage)stage);
+    bool installed = boot_maybe_auto_install_consensus_bundle(node, main, datadir, false);
+    _exit(!installed && access(failed, F_OK) == 0 ? 0 : 3);
+}
+
+static bool csir_bad_bundle_at_startup(const char *datadir, const char *failed)
+{
+    pid_t child = fork();
+    if (child == 0) csir_bad_bundle_startup_child(datadir, failed);
+    int status = 0;
+    return child > 0 && waitpid(child, &status, 0) == child &&
+           WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 /* A refusal by the canonical-lane owner gate says nothing about the bundle, so
  * it must leave no <name>.failed marker: a later boot with the owner
  * authorization has to find the bundle again. A genuinely unreadable bundle on
@@ -1061,9 +1096,7 @@ static int case_owner_gate_refusal_writes_nothing(void)
     free(autodetected);
     CSIR_CHECK("gate marker: clearing the state lets admission judge the bundle",
                csir_sql("DELETE FROM coins") &&
-               !boot_maybe_auto_install_consensus_bundle(&ndb, NULL, canonical,
-                                                        false) &&
-               access(failed, F_OK) == 0);
+               csir_bad_bundle_at_startup(canonical, failed));
     progress_store_close();
     node_db_close(&ndb);
     if (old_home)
@@ -1239,6 +1272,125 @@ static int case_gate_store_datadir(void)
     return failures;
 }
 
+static const char *csir_expected_wallet_read_code;
+
+static void csir_wallet_read_exit_check(void)
+{
+    if (strcmp(boot_error_first_code(), csir_expected_wallet_read_code) != 0)
+        _exit(4);
+}
+
+static void csir_wallet_read_failure_child(const char *datadir, int mode)
+{
+    struct node_db *node; struct wallet_sqlite *ws;
+    struct wallet *wallet; struct main_state *main;
+    boot_wallet_cutover_test_slots(&node, &ws, &wallet, &main);
+    char path[512];
+    int n = snprintf(path, sizeof(path), "%s/node.db", datadir);
+    if (n < 0 || (size_t)n >= sizeof(path) || !node_db_open(node, path) ||
+        !wallet_sqlite_open_r(ws, node->db).ok) _exit(2);
+    wallet_init(wallet);
+    const char *sql = mode == 0 ? "DROP TABLE wallet_transactions" :
+        "INSERT INTO node_state(key,value) VALUES('wallet_scan_height',X'00')";
+    if (mode != 2 && sqlite3_exec(node->db, sql, NULL, NULL, NULL) != SQLITE_OK)
+        _exit(2);
+    boot_error_reset_for_testing();
+    csir_expected_wallet_read_code = mode == 0 ? "WALLET_TX_LOAD_FAILED" : "WALLET_SCAN_LOAD_FAILED";
+    if (mode != 2 && atexit(csir_wallet_read_exit_check) != 0) _exit(2);
+    boot_wallet_read_persisted_test(datadir);
+    _exit(mode == 2 ? 0 : 3);
+}
+
+static int case_wallet_read_failure_stops_startup(void)
+{
+    int failures = 0;
+    const char *cases[] = {"wallet transaction read error stops startup",
+        "corrupt wallet scan metadata stops startup", "absent wallet scan metadata permits startup"};
+    for (int mode = 0; mode < 3; ++mode) {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "csir_wallet_read", "case");
+        fflush(NULL);
+        pid_t child = fork();
+        if (child == 0) csir_wallet_read_failure_child(dir, mode);
+        int status = 0;
+        CSIR_CHECK(cases[mode], child > 0 && waitpid(child, &status, 0) == child &&
+            WIFEXITED(status) && WEXITSTATUS(status) == (mode == 2 ? 0 : 1));
+        test_rm_rf_recursive(dir);
+    }
+    return failures;
+}
+
+static int csir_deny_pragmas(void *ctx, int action, const char *a,
+    const char *b, const char *c, const char *d)
+{
+    (void)ctx; (void)a; (void)b; (void)c; (void)d;
+    return action == SQLITE_PRAGMA ? SQLITE_DENY : SQLITE_OK;
+}
+
+static void csir_tip_finalize_child(const char *dir, bool deny)
+{
+    struct node_db *node; struct wallet_sqlite *ws;
+    struct wallet *wallet; struct main_state *main;
+    boot_wallet_cutover_test_slots(&node, &ws, &wallet, &main);
+    char path[512];
+    int n = snprintf(path, sizeof(path), "%s/node.db", dir);
+    if (n < 0 || (size_t)n >= sizeof(path) || !node_db_open(node, path)) _exit(2);
+    main_state_init(main);
+    if (deny && sqlite3_set_authorizer(node->db, csir_deny_pragmas, NULL) != SQLITE_OK) _exit(2);
+    bool ok = boot_chain_tip_resolved_test();
+    _exit(ok == !deny ? 0 : 3);
+}
+
+static int case_tip_finalize_failure_stops_boundary(void)
+{
+    int failures = 0;
+    const char *cases[] = {"tip boundary accepts normal database settings",
+        "tip boundary refuses failed normal database settings"};
+    for (int deny = 0; deny < 2; ++deny) {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "csir_tip_boundary", "case");
+        fflush(NULL);
+        pid_t child = fork();
+        if (child == 0) csir_tip_finalize_child(dir, deny != 0);
+        int status = 0;
+        CSIR_CHECK(cases[deny], child > 0 && waitpid(child, &status, 0) == child &&
+            WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        test_rm_rf_recursive(dir);
+    }
+    return failures;
+}
+
+extern int test_reducer_block_ingest_gate(void);
+extern void test_reducer_producer_target(const char *);
+
+static int case_regtest_producer_input(void)
+{
+    int failures = 0;
+    char dir[256];
+    const char *retained = getenv("ZCL_TEST_REGTEST_PRODUCER_DIR");
+    if (retained && retained[0]) {
+        int n = snprintf(dir, sizeof(dir), "%s", retained);
+        if (retained[0] != 0x2f || n < 0 || (size_t)n >= sizeof(dir) ||
+            mkdir(dir, 0700) != 0) return 1;
+    } else {
+        test_make_tmpdir(dir, sizeof(dir), "csir_regtest_export", "case");
+    }
+    fflush(NULL);
+    pid_t child = fork();
+    if (child == 0) {
+        if (setenv("ZCL_STRESS_TESTS", "1", 1) != 0) _exit(2);
+        test_reducer_producer_target(dir);
+        int rc = test_reducer_block_ingest_gate();
+        fflush(NULL);
+        _exit(rc == 0 ? 0 : 1);
+    }
+    int status = 0;
+    CSIR_CHECK("prepare validated regtest producer inputs", child > 0 && waitpid(child, &status, 0) == child &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    printf("regtest producer input: %s\n", dir);
+    return failures;
+}
+
 int test_consensus_state_install_runtime(void)
 {
     printf("\n=== consensus_state_install_runtime ===\n");
@@ -1260,6 +1412,9 @@ int test_consensus_state_install_runtime(void)
     failures += case_gate_applied_height();
     failures += case_gate_store_datadir();
     failures += case_owner_gate_refusal_writes_nothing();
+    failures += case_wallet_read_failure_stops_startup();
+    failures += case_tip_finalize_failure_stops_boundary();
+    failures += case_regtest_producer_input();
     printf("=== consensus_state_install_runtime: %d failure(s) ===\n", failures);
     return failures;
 }

@@ -89,7 +89,8 @@ bool wallet_rescan_reload_from_store(struct wallet *w, struct wallet_sqlite *db)
     if (!rk.ok)
         LOG_FAIL("wallet", "wallet_repair: key reload failed (code=%d): %s",
                  rk.code, rk.message);
-    wallet_sqlite_read_txs(db, w);
+    if (!wallet_sqlite_read_txs(db, w))
+        LOG_FAIL("wallet", "wallet_repair: transaction reload failed");
     wallet_sqlite_read_scripts(db, w);
     wallet_sqlite_read_watch_only(db, w);
     return true;

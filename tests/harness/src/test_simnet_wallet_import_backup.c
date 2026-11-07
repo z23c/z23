@@ -61,6 +61,7 @@
 #include "validation/txmempool.h"
 #include "coins/coins_view.h"
 #include "coins/coins.h"
+#include "bloom/merkle.h"
 
 #include "json/json.h"
 #include "rpc/server.h"
@@ -650,6 +651,7 @@ static int ib_p1_setup_wallet2(struct ib_part1 *p1)
         bool have_slot = blk.vtx != NULL;
         if (have_slot) {
             blk.vtx[0] = p1->fund_for_disk;
+            blk.header.hashMerkleRoot = compute_merkle_root(&blk.vtx[0].hash, 1);
             transaction_init(&p1->fund_for_disk); /* ownership moved into blk */
         }
         unsigned char msg_start[4] = { 0x24, 0xe9, 0x27, 0x64 };
@@ -667,8 +669,11 @@ static int ib_p1_setup_wallet2(struct ib_part1 *p1)
     p1->bi.phashBlock = NULL;
 
     wallet_init(p1->w2);
-    IB_CHECK("wallet2: wallet_sqlite_open",
-             wallet_sqlite_open(&p1->ws2, p1->ndb2.db));
+    bool wallet2_opened = wallet_sqlite_open(&p1->ws2, p1->ndb2.db);
+    IB_CHECK("wallet2: wallet_sqlite_open", wallet2_opened);
+    IB_CHECK("wallet2: loaded fixture is READY",
+             wallet2_opened && wallet_readiness_initialize(
+                 p1->w2, WALLET_READINESS_READY, false, 0));
 
     main_state_init(&p1->ms2);
     struct block_index **chain_arr =

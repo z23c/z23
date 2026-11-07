@@ -374,6 +374,27 @@ static void offline_guards_run(struct zapp_runtime *r, const char *root)
 }
 
 /* The scratch directory comes from the caller: the test makes no path of its own. */
+static void pending_start_gate_tests(struct zapp_runtime *r)
+{
+    char out[512];
+    touch_in(r->state_root, "node-on");
+    uint64_t resume_ticket = 0;
+    assert(zapp_node_resume_reserve(r, &resume_ticket, out, sizeof(out)));
+    assert(zapp_node_stop(r, out, sizeof(out)));
+    assert(!zapp_node_start_reserved(r, resume_ticket, out, sizeof(out)) && !zapp_node_wanted(r) && r->node == 0);
+    uint64_t pending_ticket = 0;
+    assert(zapp_node_start_reserve(r, &pending_ticket, out, sizeof(out)));
+    assert(zapp_setup_kind_write(r->files, ZAPP_KIND_CREATE));
+    assert(!zapp_node_start_reserved(r, pending_ticket, out, sizeof(out)) && strstr(out, "cancelled"));
+    assert(!zapp_node_start(r, out, sizeof(out)) && strstr(out, "Wallet setup is pending"));
+    zapp_setup_kind_forget(r->files);
+    touch_in(r->files, "wallet_setup_nonce");
+    assert(!zapp_node_start(r, out, sizeof(out)) && strstr(out, "Wallet setup is pending"));
+    char nonce_path[1200]; snprintf(nonce_path, sizeof(nonce_path), "%s/wallet_setup_nonce", r->files);
+    assert(unlink(nonce_path) == 0);
+
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1) return fake_node(argc, argv);
@@ -434,6 +455,7 @@ int main(int argc, char **argv)
     setup_refusals_run(&r);
     setup_node_running_run(&r);
     setup_exclusion_run(&r);
+    pending_start_gate_tests(&r);
 
     r.preview = true;
     assert(!zapp_wallet_setup_run(&r, "create", "{}", 60000, out, sizeof(out)) && strstr(out, "\"code\":\"NOT_RUN\""));

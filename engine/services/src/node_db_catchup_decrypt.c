@@ -81,6 +81,26 @@ static bool catchup_sapling_open_output_plaintext(
 
 /* True when this key opened the output. Caller stops scanning keys.
  * *found and *ok change only after the note is commitment-checked. */
+static bool catchup_replay_note_save(struct node_db *ndb,
+    const struct uint256 *txid, size_t oi, int height, uint64_t value,
+    const uint8_t rcm[32], const uint8_t memo[512], const uint8_t ivk[32],
+    const uint8_t d[11], const uint8_t pk_d[32], const uint8_t cm[32],
+    const uint8_t nf[32], struct sapling_replay_delivery *delivery)
+{
+    if (oi > UINT32_MAX || value > INT64_MAX) return false;
+    struct db_sapling_note note = {0};
+    memcpy(note.txid, txid->data, 32);
+    note.output_index = (uint32_t)oi;
+    note.value = (int64_t)value;
+    memcpy(note.rcm, rcm, 32); memcpy(note.memo, memo, 512); note.memo_len = 512;
+    memcpy(note.ivk, ivk, 32); memcpy(note.diversifier, d, 11);
+    memcpy(note.pk_d, pk_d, 32); memcpy(note.cm, cm, 32);
+    memcpy(note.nullifier, nf, 32); note.block_height = height;
+    enum sapling_replay_merge_result r = db_sapling_note_merge_replayed(ndb, &note, delivery);
+    memory_cleanse(&note, sizeof(note));
+    return r == SAPLING_REPLAY_MERGE_EXISTING || r == SAPLING_REPLAY_MERGE_INSERTED;
+}
+
 static bool catchup_sapling_output_opened_by_key(
     struct node_db *ndb,
     const struct output_description *od,
@@ -89,7 +109,7 @@ static bool catchup_sapling_output_opened_by_key(
     size_t oi,
     int height,
     int *found,
-    bool *ok)
+    bool *ok, bool replay, struct sapling_replay_delivery *delivery)
 {
     uint8_t plaintext[564];
     if (!catchup_sapling_open_output_plaintext(od, ke, plaintext))
@@ -126,13 +146,12 @@ static bool catchup_sapling_output_opened_by_key(
      * would be a WRONG nullifier, strictly worse than this non-blank
      * placeholder. See BUG #7. */
     uint8_t nf[32];
-    sapling_compute_nf(d, pk_d, value, rcm, ak, nk, 0, nf);
-
-    if (!node_db_sync_sapling_note(ndb, txid->data, (uint32_t)oi,
-                                   (int64_t)value, rcm,
-                                   plaintext + 52, 512,
-                                   ke->ivk, d, pk_d, cm, nf,
-                                   height)) {
+    bool nf_ok = sapling_compute_nf(d, pk_d, value, rcm, ak, nk, 0, nf);
+    bool saved = replay ? nf_ok && catchup_replay_note_save(ndb, txid, oi, height, value, rcm,
+                         plaintext + 52, ke->ivk, d, pk_d, cm, nf, delivery) :
+        node_db_sync_sapling_note(ndb, txid->data, (uint32_t)oi, (int64_t)value, rcm,
+                                  plaintext + 52, 512, ke->ivk, d, pk_d, cm, nf, height);
+    if (!saved) {
         *ok = false;
     } else {
         (*found)++;
@@ -171,7 +190,7 @@ int node_db_catchup_try_sapling_decrypt(struct node_db *ndb,
         for (size_t ki = 0; ki < w->sapling_keys.num_keys; ki++) {
             const struct sapling_key_entry *ke = &w->sapling_keys.keys[ki];
             if (catchup_sapling_output_opened_by_key(ndb, od, ke, &txid, oi,
-                                                     height, &found, &ok)) {
+                                                     height, &found, &ok, false, NULL)) {
                 if (!ok)
                     break;
 
@@ -185,4 +204,23 @@ int node_db_catchup_try_sapling_decrypt(struct node_db *ndb,
     if (ok_out)
         *ok_out = ok;
     return found;
+}
+
+bool node_db_catchup_replay_sapling_decrypt(struct node_db *ndb,
+    struct transaction *tx, const struct sapling_key_entry *keys, size_t key_count,
+    int height, int *found_out, struct sapling_replay_delivery *delivery)
+{
+    if (!ndb || !tx || (!keys && key_count) || !found_out || !delivery) return false;
+    int found = 0;
+    bool ok = true;
+    transaction_compute_hash(tx);
+    for (size_t oi = 0; ok && oi < tx->num_shielded_output; oi++) {
+        for (size_t ki = 0; ki < key_count; ki++) {
+            if (catchup_sapling_output_opened_by_key(ndb, &tx->v_shielded_output[oi],
+                    &keys[ki], &tx->hash, oi, height, &found, &ok, true, delivery))
+                break;
+        }
+    }
+    *found_out = found;
+    return ok;
 }

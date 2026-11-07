@@ -572,6 +572,14 @@ void zcl_native_handle_zcode_package_version_list(
     zcl_package_copy_close(&copy);
 }
 
+#ifdef ZCL_TESTING
+static bool zpc_test_restore_partial;
+void zcl_package_copy_test_restore_partial(bool enabled)
+{
+    zpc_test_restore_partial = enabled;
+}
+#endif
+
 /* ── zcode package version restore ──────────────────────────────────── */
 
 struct zpc_find {
@@ -639,9 +647,16 @@ static void zpc_restore_run(const struct zcl_command_request *request,
     if (!zcl_package_copy_plan_matches(request->input, plan_id, reply,
                                        command))
         return;
-    if (vcs_revert(copy->repo, target, NULL, version) != VCS_OK) {
-        zcl_package_copy_fail(reply, "VERSION_RESTORE_FAILED", false,
-                              "the restore was refused or failed", command);
+    int rc = vcs_revert(copy->repo, target, NULL, version);
+#ifdef ZCL_TESTING
+    bool inject_partial = zpc_test_restore_partial;
+    zpc_test_restore_partial = false;
+    if (rc == VCS_OK && inject_partial)
+        rc = VCS_EPARTIAL;
+#endif
+    if (rc != VCS_OK) {
+        zcl_package_copy_fail(reply, "VERSION_RESTORE_FAILED", true,
+                              "restore may have changed files; inspect the copy and version history before retrying", command);
         return;
     }
     (void)json_push_kv_str(&reply->data, "stage", "commit");

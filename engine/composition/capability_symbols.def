@@ -1350,6 +1350,7 @@ ZCL_CAPABILITY_SYMBOL("X509_set_pubkey", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("X509_set_version", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("X509_up_ref", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("_exit", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("_Exit", CAP_HARMLESS, "Terminates the calling process immediately.")
 ZCL_CAPABILITY_SYMBOL("_GLOBAL_OFFSET_TABLE_", CAP_HARMLESS,
     "Linker provided relocation anchor, not an entry point.")
 ZCL_CAPABILITY_SYMBOL("__assert_fail", CAP_HARMLESS, "")
@@ -1368,6 +1369,7 @@ ZCL_CAPABILITY_SYMBOL("__errno_location", CAP_HARMLESS,
 ZCL_CAPABILITY_SYMBOL("__isoc23_sscanf", CAP_HARMLESS,
     "C23 ABI alias for sscanf, which parses a buffer and touches no "
     "descriptor.")
+ZCL_CAPABILITY_SYMBOL("__isoc23_strtoimax", CAP_HARMLESS, "C23 ABI alias for parsing caller-owned text.")
 ZCL_CAPABILITY_SYMBOL("__isoc23_strtol", CAP_HARMLESS,
     "C23 ABI alias for strtol.")
 ZCL_CAPABILITY_SYMBOL("__isoc23_strtoll", CAP_HARMLESS,

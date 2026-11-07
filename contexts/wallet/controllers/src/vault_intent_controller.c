@@ -60,7 +60,7 @@ static bool vi_unhex(const char *s, uint8_t out[32])
 
 static bool vi_encode_stream(const struct vi_payload *p, struct byte_stream *s)
 {
-    bool ok = stream_write(s, "VIP1", 4) &&
+    bool ok = stream_write(s, "VIG1", 4) &&
         stream_write_u8(s, VAULT_INTENT_ROUTE_TRANSPARENT) &&
         stream_write_u8(s, (uint8_t)p->effects_len) &&
         stream_write_u16_le(s, (uint16_t)p->inputs_len) &&
@@ -145,7 +145,7 @@ static bool vi_decode_header(struct byte_stream *s, struct vi_payload *p)
 {
     uint8_t magic[4], route = 0, ne = 0;
     uint16_t ni = 0;
-    bool ok = stream_read(s, magic, 4) && memcmp(magic, "VIP1", 4) == 0 &&
+    bool ok = stream_read(s, magic, 4) && memcmp(magic, "VIG1", 4) == 0 &&
         stream_read_u8(s, &route) && route == VAULT_INTENT_ROUTE_TRANSPARENT &&
         stream_read_u8(s, &ne) && ne > 0 && ne <= VI_EFFECTS_MAX &&
         stream_read_u16_le(s, &ni) && ni > 0 && ni <= VI_INPUTS_MAX &&
@@ -233,13 +233,22 @@ static bool vi_backup_stale(const struct wallet_persistence_health *h)
         backup.last_encrypted_key_count != h->row_count;
 }
 
+static bool vi_context_present(const struct wallet_rpc_context *ctx)
+{
+    return ctx && ctx->wallet && ctx->wallet_db && ctx->node_db &&
+           ctx->mempool && ctx->coins_tip && ctx->main_state;
+}
+
 static bool vi_context_ready(struct wallet_rpc_context *ctx,
                              struct json_value *out,
                              bool require_current_backup)
 {
-    if (!ctx || !ctx->wallet || !ctx->wallet_db || !ctx->node_db ||
-        !ctx->mempool || !ctx->coins_tip || !ctx->main_state) {
+    if (!vi_context_present(ctx)) {
         vi_error(out, "WALLET_UNAVAILABLE", "wallet persistence context is incomplete");
+        return false;
+    }
+    if (wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY) {
+        vi_error(out, "WALLET_NOT_READY", "wallet state is unavailable during cutover");
         return false;
     }
     if (!wallet_lock_encrypted_at_rest()) {
@@ -378,6 +387,10 @@ static bool vi_plan_effects_fee(struct vi_plan_state *s,
                                 struct json_value *result)
 {
     if (!vi_effects(input, &s->p, result)) return false;
+    if (!s->ctx || !s->ctx->wallet || wallet_readiness_get(s->ctx->wallet).state != WALLET_READINESS_READY) {
+        vi_error(result, "WALLET_NOT_READY", "wallet state is unavailable during cutover");
+        return false;
+    }
     s->target = 0;
     for (size_t i = 0; i < s->p.effects_len; i++)
         s->target += s->p.effects[i].amount;
@@ -417,6 +430,10 @@ static bool vi_plan_render_existing(struct vi_plan_state *s,
         strcmp(existing->agent_session_id, s->agent_session) != 0) {
         vi_error(result, "POLICY_INTENT_SESSION",
                  "that idempotency key is bound to another grant");
+        return true;
+    }
+    if (!vault_intent_generation_current(s->ctx, existing)) {
+        vi_error(result, "PLAN_REPLAN_REQUIRED", "wallet authority changed or plan lacks a generation binding; create a fresh plan");
         return true;
     }
     return vi_render_idempotent(s->ctx, result, existing, s->request_digest,
@@ -513,8 +530,14 @@ static bool vi_plan_persist(struct vi_plan_state *s,
         return true;
     }
     uint8_t plain[WALLET_METADATA_PLAINTEXT_MAX]; size_t plen = 0;
+    struct wallet_readiness readiness = wallet_readiness_get(s->ctx->wallet);
     if (!vi_encode(&s->p, plain, sizeof(plain), &plen)) {
         vi_error(result, "PLAN_ENCODING_FAILED", "could not encode exact plan"); return true;
+    }
+    if (!vault_intent_generation_bind(plain, &plen, sizeof(plain), &readiness)) {
+        memory_cleanse(plain, sizeof(plain));
+        vi_error(result, "WALLET_NOT_READY", "wallet authority unavailable; create a fresh plan");
+        return true;
     }
     struct vault_intent_row row; memset(&row, 0, sizeof(row));
     if (RAND_bytes(row.plan_id, 32) != 1) {
@@ -631,15 +654,22 @@ bool vault_intent_plan_transparent_fanout_continuation(
     return rpc_vi_plan_checked(params, false, result, true);
 }
 
+static bool vi_shape_context_valid(const struct vault_intent_row *row,
+                                   const struct wallet_rpc_context *ctx,
+                                   size_t count, int64_t value)
+{
+    return row && ctx && ctx->wallet && ctx->node_db && count != 0 &&
+        count <= VI_EFFECTS_MAX && value > 0 &&
+        row->route == VAULT_INTENT_ROUTE_TRANSPARENT &&
+        strcmp(row->application_kind, VI_APP_KIND) == 0;
+}
+
 bool vault_intent_transparent_shape_matches(
     const struct vault_intent_row *row, size_t output_count,
     int64_t output_value_zat)
 {
     struct wallet_rpc_context *ctx = wallet_rpc_context_current();
-    if (!row || !ctx || !ctx->node_db || output_count == 0 ||
-        output_count > VI_EFFECTS_MAX || output_value_zat <= 0 ||
-        row->route != VAULT_INTENT_ROUTE_TRANSPARENT ||
-        strcmp(row->application_kind, VI_APP_KIND) != 0)
+    if (!vi_shape_context_valid(row, ctx, output_count, output_value_zat))
         return false; // raw-return-ok:predicate
     uint8_t plain[WALLET_METADATA_PLAINTEXT_MAX]; size_t plain_len = 0;
     if (!wallet_metadata_decrypt(ctx->node_db, row->plan_id, 32,
@@ -649,7 +679,9 @@ bool vault_intent_transparent_shape_matches(
     struct vi_payload payload;
     uint8_t digest[32];
     vault_intent_digest_payload(plain, plain_len, row, digest);
+    struct wallet_readiness readiness = wallet_readiness_get(ctx->wallet);
     bool matches = memcmp(digest, row->digest, 32) == 0 &&
+        vault_intent_generation_check(plain, &plain_len, &readiness) &&
         vi_decode(plain, plain_len, &payload) &&
         payload.effects_len == output_count;
     for (size_t i = 0; matches && i < payload.effects_len; i++)
@@ -702,7 +734,9 @@ static bool vi_build_prepared(struct wallet_rpc_context *ctx,
     uint8_t digest[32];
     vault_intent_digest_payload(plain, plen, row, digest);
     struct vi_payload p;
-    bool valid = memcmp(digest, row->digest, 32) == 0 && vi_decode(plain, plen, &p);
+    struct wallet_readiness readiness = wallet_readiness_get(ctx->wallet);
+    bool valid = memcmp(digest, row->digest, 32) == 0 &&
+        vault_intent_generation_check(plain, &plen, &readiness) && vi_decode(plain, plen, &p);
     memory_cleanse(plain, sizeof(plain));
     if (!valid) { vi_error(result, "PLAN_TAMPERED", "plan digest or payload changed"); return false; }
     struct coin_entry *avail = zcl_malloc(4096 * sizeof(*avail),
@@ -917,6 +951,10 @@ bool vault_intent_commit_input(const struct json_value *in,
         return vi_commit_replay(ctx, id, now, &row, result);
     const bool prepared_retry = vault_intent_prepared_retry_allowed(
         &row, vault_intent_has_raw(ctx->node_db, id));
+    if (!prepared_retry && !vault_intent_generation_current(ctx, &row)) {
+        vi_error(result, "PLAN_REPLAN_REQUIRED", "wallet authority changed or plan lacks a generation binding; create a fresh plan");
+        return true;
+    }
     if (!prepared_retry &&
         (row.state == VAULT_INTENT_EXPIRED || row.expires_at <= now)) {
         vi_error(result, "PLAN_EXPIRED", "the ten-minute plan lifetime elapsed"); return true;

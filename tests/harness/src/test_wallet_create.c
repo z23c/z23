@@ -90,6 +90,7 @@
 #endif
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define WCR_CHECK(name, expr) do {                                     \
@@ -772,6 +773,48 @@ static int birthday_boot_wallets(struct node_db *ndb, struct wcr_chain *same,
 
 /* The active chain against the stored birthday of the datadir `dir` (tip 1000,
  * floor block 900 hashing to 0x09). */
+static int birthday_sparse_chain(struct node_db *ndb, struct wcr_chain *same)
+{
+    int failures = 0, floor = -1;
+    struct block_index *saved = same->chain.chain[900];
+    same->chain.chain[900] = NULL;
+    WCR_CHECK("missing birthday slot is unavailable, not changed",
+              wallet_birthday_check(ndb, &same->chain, &floor) ==
+              WALLET_BIRTHDAY_UNAVAILABLE && floor == 900);
+    struct wallet *w = wcr_boot_wallet(ndb, same, 0);
+    WCR_CHECK("sparse birthday keeps the first scan pending",
+              w && w->initial_scan_floor == 900 && w->scan_retry.pending &&
+              w->scan_retry.from == 0 &&
+              strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_PENDING) == 0);
+    if (w) {
+        wallet_birthday_reconcile(w, ndb, &same->chain, active_chain_tip(&same->chain));
+        WCR_CHECK("tip notification cannot reject a missing birthday slot",
+                  w->initial_scan_floor == 900 && w->scan_retry.from == 0 &&
+                  strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_PENDING) == 0);
+    }
+    same->chain.chain[900] = saved;
+    if (w) {
+        wallet_birthday_reconcile(w, ndb, &same->chain, active_chain_tip(&same->chain));
+        WCR_CHECK("available matching birthday starts its bounded scan",
+                  w->initial_scan_floor == 900 && w->scan_retry.pending &&
+                  w->scan_retry.from == 900 &&
+                  strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_SCAN_PENDING) == 0);
+        w->initial_scan_floor = 900;
+        w->scan_retry.from = 0;
+        snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s", WALLET_BIRTHDAY_PENDING);
+        WCR_CHECK("changed persisted birthday fixture",
+                  db_wallet_birthday_set(ndb, 901 + WALLET_BIRTHDAY_MARGIN, saved->phashBlock->data));
+        wallet_birthday_reconcile(w, ndb, &same->chain, active_chain_tip(&same->chain));
+        WCR_CHECK("changed stored birthday does not wait as sparse history",
+                  w->initial_scan_floor == 0 && w->scan_retry.from == 0 &&
+                  strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_CHANGED_BLOCKER) == 0);
+        WCR_CHECK("restore persisted birthday fixture",
+                  db_wallet_birthday_set(ndb, 900 + WALLET_BIRTHDAY_MARGIN, saved->phashBlock->data));
+        wallet_free(w); free(w);
+    }
+    return failures;
+}
+
 static int birthday_chain_checks(const char *dir)
 {
     int failures = 0;
@@ -792,6 +835,7 @@ static int birthday_chain_checks(const char *dir)
               made && wallet_birthday_check(&ndb, &shorter.chain, &floor) ==
                           WALLET_BIRTHDAY_AHEAD && floor == 900);
     if (made) {
+        failures += birthday_sparse_chain(&ndb, &same);
         failures += birthday_boot_wallets(&ndb, &same, &other);
         wcr_chain_free(&same);
         wcr_chain_free(&other);
@@ -915,6 +959,10 @@ static int birthday_rewound(void)
     bool open = created && wcr_open(&ndb, dir);
     WCR_CHECK("a rewound datadir records its highest connected row as the tip",
               open && db_wallet_birthday_get(&ndb, &b, hash) && b == 5000);
+    uint8_t proof_hash[32], proof_identity[32]; int64_t proof_height = 0;
+    WCR_CHECK("local creation binds its birthday to scan identity", open &&
+        db_wallet_birthday_proof_get(&ndb, &proof_height, proof_hash, proof_identity) == WALLET_BIRTHDAY_PROOF_FOUND &&
+        proof_height == b && !memcmp(proof_hash, hash, 32));
     if (open) {
         failures += birthday_rewound_chains(&ndb);
         node_db_close(&ndb);
@@ -2967,6 +3015,11 @@ static int unsynced_short_headers(void)
               ran && run.rc == 0 && wcr_birthday_of(dir, &b, hash) &&
               b == 1100 && memcmp(hash, want, 32) == 0 &&
               wcr_unread_blocker(dir, WALLET_BIRTHDAY_PENDING));
+    struct node_db proof_db; uint8_t ph[32], pi[32]; int64_t pb = 0;
+    bool proof_open = ran && run.rc == 0 && wcr_open(&proof_db, dir);
+    WCR_CHECK("restore opt-in never creates local-origin proof", proof_open &&
+        db_wallet_birthday_proof_get(&proof_db, &pb, ph, pi) == WALLET_BIRTHDAY_PROOF_ABSENT);
+    if (proof_open) node_db_close(&proof_db);
     return failures;
 }
 
@@ -3128,12 +3181,407 @@ static int t_unsynced_create(void)
     return failures + unsynced_release_anchor() + unsynced_older_phrase();
 }
 
+static int birthday_deny_insert(void *ctx, int action, const char *a, const char *b,
+                                const char *c, const char *d)
+{
+    (void)ctx; (void)a; (void)b; (void)c; (void)d;
+    return action == SQLITE_INSERT ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int birthday_identity_change(void)
+{
+    int failures = 0;
+    struct wallet *w = calloc(1, sizeof(*w));
+    if (!w) return 1;
+    wallet_init(w);
+    uint8_t before[32], after[32];
+    struct key_id watch = {0}; watch.id.data[0] = 7;
+    bool ok = wallet_scan_identity(w, before) && keystore_add_watch_only_id(&w->keystore, &watch) &&
+        wallet_scan_identity(w, after) && memcmp(before, after, 32) != 0;
+    WCR_CHECK("watch-only import changes bound scan identity", ok);
+    struct privkey key; privkey_init(&key); privkey_make_new(&key, true);
+    memcpy(before, after, 32);
+    ok = ok && keystore_add_key(&w->keystore, &key) && wallet_scan_identity(w, after) && memcmp(before, after, 32) != 0;
+    WCR_CHECK("private-key import changes bound scan identity", ok);
+    memory_cleanse(key.vch, sizeof(key.vch));
+    wallet_free(w); free(w);
+    return failures;
+}
+
+
+static int birthday_proof_atomic(void)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    bool opened = node_db_open(&db, ":memory:");
+    uint8_t hash[32] = {1}, identity[32] = {2}, got_hash[32], got_identity[32];
+    int64_t height = 0;
+    WCR_CHECK("birthday proof fixture opens", opened);
+    if (!opened) return failures;
+    WCR_CHECK("birthday proof starts absent", db_wallet_birthday_proof_get(&db, &height, got_hash, got_identity) == WALLET_BIRTHDAY_PROOF_ABSENT);
+    WCR_CHECK("birthday and identity bind", db_wallet_birthday_set_created(&db, 200, hash, identity) &&
+        db_wallet_birthday_proof_get(&db, &height, got_hash, got_identity) == WALLET_BIRTHDAY_PROOF_FOUND &&
+        height == 200 && !memcmp(hash, got_hash, 32) && !memcmp(identity, got_identity, 32));
+    WCR_CHECK("birthday proof rolls back with outer transaction", node_db_begin(&db) &&
+        db_wallet_birthday_set(&db, 300, hash) && node_db_rollback(&db) &&
+        db_wallet_birthday_proof_get(&db, &height, got_hash, got_identity) == WALLET_BIRTHDAY_PROOF_FOUND && height == 200);
+    WCR_CHECK("birthday fault injector installs", sqlite3_set_authorizer(db.db, birthday_deny_insert, NULL) == SQLITE_OK);
+    bool refused = !db_wallet_birthday_set_created(&db, 400, hash, identity);
+    sqlite3_set_authorizer(db.db, NULL, NULL);
+    WCR_CHECK("failed write rolls back prior proof", refused &&
+        db_wallet_birthday_proof_get(&db, &height, got_hash, got_identity) == WALLET_BIRTHDAY_PROOF_FOUND && height == 200);
+    WCR_CHECK("legacy birthday rewrite invalidates proof", db_wallet_birthday_set(&db, 300, hash) &&
+        db_wallet_birthday_proof_get(&db, &height, got_hash, got_identity) == WALLET_BIRTHDAY_PROOF_ABSENT);
+    WCR_CHECK("malformed proof refuses", node_db_state_set(&db, "wallet_birthday_scan_identity", hash, 1) &&
+        db_wallet_birthday_proof_get(&db, &height, got_hash, got_identity) == WALLET_BIRTHDAY_PROOF_MALFORMED);
+    node_db_close(&db);
+    return failures;
+}
+
+
+static int birthday_fresh_ignores_supplied_phrase(void)
+{
+    int failures = 0;
+    char dir[1024], phrase[MNEMONIC_MAX_PHRASE_SIZE];
+    wcr_fixture(dir, sizeof(dir), "fresh_override");
+    struct wallet_recovery_request req = {.datadir = dir, .phrase = WCR_RESTORE_PHRASE,
+        .passphrase = WCR_PASS, .shielded_only = true, .dry_run = true,
+        .birthday_at_local_tip = true, .has_birthday = true};
+    struct wallet_recovery_report report;
+    wallet_lock_reset_for_test();
+    struct zcl_result result = wallet_recovery_create_fresh(&req, &report, phrase, sizeof(phrase));
+    WCR_CHECK("fresh entry replaces supplied phrase and conflicting birthday flags",
+        result.ok && phrase[0] && strcmp(phrase, WCR_RESTORE_PHRASE) != 0);
+    memory_cleanse(phrase, sizeof(phrase));
+    return failures;
+}
+
+
+static bool creation_reservation(const char *dir, const char *words, bool issue,
+                                 uint8_t d[11], uint8_t pk[32])
+{
+    struct node_db db;
+    if (!wcr_open(&db, dir)) return false;
+    struct wallet_sqlite ws = {0};
+    bool ok = wallet_sqlite_open_r(&ws, db.db).ok;
+    struct wallet *w = calloc(1, sizeof(*w));
+    struct sapling_key_entry acct = {0};
+    uint8_t initial_d[11], initial_pk[32];
+    if (w) {
+        wallet_init(w);
+        w->sapling_keys.follows_wallet_lock = false;
+        ok = ok && wallet_init_from_recovery_phrase(w, words) &&
+            sapling_keystore_new_address(&w->sapling_keys, initial_d, initial_pk) &&
+            sapling_keystore_copy_receive_account(&w->sapling_keys, &acct);
+        if (ok) {
+            if (issue) ok = wallet_sqlite_diversifier_reserve(&ws, &acct, d, pk);
+            else ok = wallet_sqlite_diversifier_current(&ws, &acct, d, pk) == WALLET_DIVERSIFIER_PRESENT;
+        }
+        wallet_free(w);
+        free(w);
+    } else ok = false;
+    memory_cleanse(&acct, sizeof(acct));
+    if (ws.open) wallet_sqlite_close(&ws);
+    node_db_close(&db);
+    return ok;
+}
+
+static int creation_data_version(sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    if (!db || sqlite3_prepare_v2(db, "PRAGMA data_version", -1, &s, NULL) != SQLITE_OK)
+        return -1;
+    int version = sqlite3_step(s) == SQLITE_ROW ? sqlite3_column_int(s, 0) : -1;
+    if (sqlite3_finalize(s) != SQLITE_OK) return -1;
+    return version;
+}
+
+static int creation_reserved_retry_fixture(const char *dir, const char *words,
+                                            const uint8_t nonce[32])
+{
+    int failures = 0;
+    uint8_t before_d[11], before_pk[32], after_d[11], after_pk[32];
+    bool reserved = creation_reservation(dir, words, true, before_d, before_pk);
+    WCR_CHECK("new receive address reserved", reserved);
+    char path[1400];
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    sqlite3 *observer = NULL;
+    bool observed = sqlite3_open_v2(path, &observer, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK;
+    int version = observed ? creation_data_version(observer) : -1;
+    struct wallet_recovery_report report = {0};
+    bool retry = wallet_creation_commit(dir, words, nonce, WCR_PASS, &report).ok;
+    int after_version = observed ? creation_data_version(observer) : -1;
+    if (observer) sqlite3_close(observer);
+    WCR_CHECK("committed retry does not change wallet database", version >= 0 && version == after_version);
+    WCR_CHECK("committed retry succeeds after new address without writing",
+              reserved && retry && report.creation_replayed);
+    bool read = creation_reservation(dir, words, false, after_d, after_pk);
+    WCR_CHECK("committed retry preserves current receive address",
+              read && reserved && !memcmp(before_d, after_d, sizeof(before_d)) &&
+              !memcmp(before_pk, after_pk, sizeof(before_pk)));
+    return failures;
+}
+
+static int creation_committed_fixture(const char *dir, const char *words, const uint8_t nonce[32])
+{
+    int failures = 0;
+    struct node_db db; struct wallet_create_pending p = {0};
+    bool opened = wcr_open(&db, dir);
+    WCR_CHECK("committed receipt survives reopen", opened &&
+        db_wallet_create_pending_get(&db, &p) == WALLET_BIRTHDAY_PROOF_FOUND && p.committed);
+    bool extra = opened && sqlite3_exec(db.db, "INSERT INTO wallet_watch_only(address_hash,address,created_at) VALUES(x'01','test',0)", NULL, NULL, NULL) == SQLITE_OK;
+    if (opened) node_db_close(&db);
+    WCR_CHECK("committed retry preserves later watch-only entry", extra && wallet_creation_commit(dir, words, nonce, WCR_PASS, NULL).ok);
+    WCR_CHECK("committed retry rejects wrong passphrase", !wallet_creation_commit(dir, words, nonce, "wrong-passphrase", NULL).ok);
+    opened = wcr_open(&db, dir);
+    bool damaged_key = opened && sqlite3_exec(db.db, "UPDATE wallet_sapling_keys SET xsk=zeroblob(length(xsk)) WHERE child_index=0", NULL, NULL, NULL) == SQLITE_OK;
+    if (opened) node_db_close(&db);
+    WCR_CHECK("committed retry rejects mismatched spending key", damaged_key && !wallet_creation_commit(dir, words, nonce, WCR_PASS, NULL).ok);
+    opened = wcr_open(&db, dir);
+    bool damaged = opened && sqlite3_exec(db.db, "UPDATE wallet_seed SET seed=x'01' WHERE id=1", NULL, NULL, NULL) == SQLITE_OK;
+    if (opened) node_db_close(&db);
+    WCR_CHECK("committed retry rejects malformed seed", damaged && !wallet_creation_commit(dir, words, nonce, WCR_PASS, NULL).ok);
+    return failures;
+}
+
+static int creation_prepare_fixture(void)
+{
+    int failures = 0;
+    char dir[1024], words[MNEMONIC_MAX_PHRASE_SIZE] = {0};
+    uint8_t nonce[32] = {0}, retry_nonce[32];
+    wcr_fixture(dir, sizeof(dir), "creation_prepare");
+    wallet_lock_reset_for_test();
+    struct zcl_result first = wallet_creation_prepare(dir, words, sizeof(words), nonce);
+    WCR_CHECK("creation prepare returns new words after durable record", first.ok && mnemonic_validate(words));
+    struct node_db db;
+    bool opened = first.ok && wcr_open(&db, dir);
+    struct wallet_create_pending p = {0};
+    WCR_CHECK("creation prepare survives database reopen", opened &&
+        db_wallet_create_pending_get(&db, &p) == WALLET_BIRTHDAY_PROOF_FOUND && !memcmp(nonce, p.nonce, 32));
+    if (opened) node_db_close(&db);
+    char retry[MNEMONIC_MAX_PHRASE_SIZE]; memset(retry, 0x55, sizeof(retry));
+    memset(retry_nonce, 0x55, sizeof(retry_nonce));
+    struct zcl_result second = wallet_creation_prepare(dir, retry, sizeof(retry), retry_nonce);
+    const uint8_t zero[32] = {0};
+    WCR_CHECK("second prepare refuses and clears outputs", !second.ok && retry[0] == 0 && !memcmp(retry_nonce, zero, 32));
+    uint8_t wrong_nonce[32]; memcpy(wrong_nonce, nonce, 32); wrong_nonce[0] ^= 1;
+    WCR_CHECK("wrong nonce refuses commit", !wallet_creation_commit(dir, words, wrong_nonce, WCR_PASS, NULL).ok);
+    WCR_CHECK("wrong phrase refuses commit", !wallet_creation_commit(dir, WCR_RESTORE_PHRASE, nonce, WCR_PASS, NULL).ok);
+    struct wallet_recovery_report receipt = {0};
+    WCR_CHECK("prepared phrase commits", wallet_creation_commit(dir, words, nonce, WCR_PASS, &receipt).ok && !receipt.creation_replayed);
+    WCR_CHECK("repeated commit is idempotent", wallet_creation_commit(dir, words, nonce, WCR_PASS, &receipt).ok && receipt.creation_replayed);
+    failures += creation_reserved_retry_fixture(dir, words, nonce);
+    failures += creation_committed_fixture(dir, words, nonce);
+    memory_cleanse(words, sizeof(words)); memory_cleanse(retry, sizeof(retry));
+    return failures;
+}
+
+
+static int creation_cancel_fixture(void)
+{
+    int failures = 0;
+    char dir[1024], words[MNEMONIC_MAX_PHRASE_SIZE] = {0};
+    uint8_t nonce[32] = {0}, wrong[32];
+    wcr_fixture(dir, sizeof(dir), "creation_cancel");
+    wallet_lock_reset_for_test();
+    struct zcl_result prepared = wallet_creation_prepare(dir, words, sizeof(words), nonce);
+    WCR_CHECK("cancel fixture prepared", prepared.ok);
+    memcpy(wrong, nonce, 32); wrong[0] ^= 1;
+    WCR_CHECK("wrong nonce cannot cancel", !wallet_creation_cancel(dir, wrong).ok);
+    struct node_db db;
+    bool opened = wcr_open(&db, dir);
+    bool inserted = opened && sqlite3_exec(db.db, "INSERT INTO wallet_key_encryption(id,wrapped_dek) VALUES(1,x'01')", NULL, NULL, NULL) == SQLITE_OK;
+    WCR_CHECK("orphaned DEK fixture inserted", inserted);
+    if (opened) node_db_close(&db);
+    WCR_CHECK("cancel refuses retained DEK", inserted && !wallet_creation_cancel(dir, nonce).ok);
+    opened = wcr_open(&db, dir);
+    struct wallet_create_pending p = {0};
+    WCR_CHECK("refusal preserves pending preparation", opened && db_wallet_create_pending_get(&db, &p) == WALLET_BIRTHDAY_PROOF_FOUND && !p.committed);
+    bool removed = opened && sqlite3_exec(db.db, "DELETE FROM wallet_key_encryption", NULL, NULL, NULL) == SQLITE_OK;
+    if (opened) node_db_close(&db);
+    WCR_CHECK("matching wallet-free preparation cancels", removed && wallet_creation_cancel(dir, nonce).ok);
+    memory_cleanse(words, sizeof(words));
+    return failures;
+}
+
+static bool creation_fixture_seed_absent(sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT count(*) FROM wallet_seed", -1, &s, NULL) != SQLITE_OK) return false;
+    bool absent = sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int64(s, 0) == 0 && sqlite3_step(s) == SQLITE_DONE;
+    return sqlite3_finalize(s) == SQLITE_OK && absent;
+}
+
+static int creation_atomic_failure_fixture(void)
+{
+    int failures = 0;
+    char dir[1024], words[MNEMONIC_MAX_PHRASE_SIZE] = {0};
+    uint8_t nonce[32] = {0};
+    wcr_fixture(dir, sizeof(dir), "creation_atomic_failure");
+    wallet_lock_reset_for_test();
+    struct zcl_result prepared = wallet_creation_prepare(dir, words, sizeof(words), nonce);
+    WCR_CHECK("atomic fault fixture prepared", prepared.ok);
+    struct node_db db;
+    bool opened = wcr_open(&db, dir);
+    bool armed = opened && sqlite3_exec(db.db, "CREATE TRIGGER reject_creation BEFORE UPDATE ON node_state WHEN OLD.key='wallet_create_pending_v1' BEGIN SELECT RAISE(ABORT,'injected'); END", NULL, NULL, NULL) == SQLITE_OK;
+    if (opened) node_db_close(&db);
+    WCR_CHECK("atomic commit fault refuses", armed && !wallet_creation_commit(dir, words, nonce, WCR_PASS, NULL).ok);
+    opened = wcr_open(&db, dir);
+    struct wallet_create_pending p = {0};
+    WCR_CHECK("failed commit retains preparation and no wallet seed", opened && db_wallet_create_pending_get(&db, &p) == WALLET_BIRTHDAY_PROOF_FOUND && !p.committed && db_sapling_key_count(&db) == 0 && creation_fixture_seed_absent(db.db));
+    if (opened) node_db_close(&db);
+    memory_cleanse(words, sizeof(words));
+    return failures;
+}
+
+static bool creation_cli_fact(const struct wcr_run *run, const char *key, const char *expected)
+{
+    struct json_value v; json_init(&v);
+    bool ok = json_read(&v, run->wire, strlen(run->wire));
+    const struct json_value *facts = ok ? json_get(json_get(&v, "error"), "facts") : NULL;
+    const char *value = facts ? json_get_str(json_get(facts, key)) : NULL;
+    ok = value && !strcmp(value, expected);
+    json_free(&v);
+    return ok;
+}
+
+static bool creation_cli_prepared(const struct wcr_run *run, const char *nonce)
+{
+    char state[32], found[65];
+    return wcr_field(run, "creation_state", state, sizeof(state)) && !strcmp(state, "prepared") &&
+        wcr_field(run, "creation_nonce", found, sizeof(found)) && !strcmp(found, nonce);
+}
+
+static int creation_cli_refusals(const char *dir, const char *phrase, const char *nonce)
+{
+    int failures = 0; char text[4096], wrong[65];
+    struct wcr_run run = {0};
+    const char *restore[] = {"wallet", "recovery", "restore", "--input=-", "--format=json"};
+    snprintf(wrong, sizeof(wrong), "%s", nonce);
+    wrong[0] = wrong[0] == '0' ? '1' : '0';
+    snprintf(text, sizeof(text), "{\"datadir\":\"%s\",\"phrase\":\"%s\",\"passphrase\":\"%s\",\"creation_nonce\":\"%s\",\"confirm\":true}", dir, phrase, WCR_PASS, wrong);
+    WCR_CHECK("CLI refuses wrong nonce", wcr_cli_args(restore, 5, text, &run) && run.rc != 0);
+    snprintf(text, sizeof(text), "{\"datadir\":\"%s\",\"phrase\":\"%s\",\"passphrase\":\"%s\",\"creation_nonce\":\"%s\",\"confirm\":true}", dir, WCR_RESTORE_PHRASE, WCR_PASS, nonce);
+    WCR_CHECK("CLI refuses wrong phrase", wcr_cli_args(restore, 5, text, &run) && run.rc != 0);
+    memory_cleanse(text, sizeof(text));
+    return failures;
+}
+
+static int creation_cli_fixture(void)
+{
+    int failures = 0;
+    char dir[1024], text[4096], phrase[MNEMONIC_MAX_PHRASE_SIZE] = {0}, nonce[65] = {0};
+    struct wcr_run run = {0};
+    const char *status[] = {"wallet", "recovery", "status", "--input=-", "--format=json"};
+    const char *restore[] = {"wallet", "recovery", "restore", "--input=-", "--format=json"};
+    wcr_fixture(dir, sizeof(dir), "creation_cli");
+    wallet_lock_reset_for_test();
+    snprintf(text, sizeof(text), "{\"datadir\":\"%s\",\"prepare\":true}", dir);
+    bool ok = wcr_cli(text, &run) && run.rc == 0 &&
+        wcr_field(&run, "phrase", phrase, sizeof(phrase)) &&
+        wcr_field(&run, "creation_nonce", nonce, sizeof(nonce));
+    WCR_CHECK("CLI prepares phrase and nonce", ok);
+    if (ok) failures += creation_cli_refusals(dir, phrase, nonce);
+    snprintf(text, sizeof(text), "{\"datadir\":\"%s\"}", dir);
+    bool stat = wcr_cli_args(status, 5, text, &run);
+    WCR_CHECK("CLI status sees prepared record", stat && creation_cli_prepared(&run, nonce));
+    snprintf(text, sizeof(text), "{\"datadir\":\"%s\",\"phrase\":\"%s\",\"passphrase\":\"%s\",\"creation_nonce\":\"%s\",\"confirm\":true}", dir, phrase, WCR_PASS, nonce);
+    bool commit = wcr_cli_args(restore, 5, text, &run) && run.rc == 0;
+    WCR_CHECK("CLI commits prepared phrase", ok && commit && wcr_data_bool(&run, "committed"));
+    bool retry = wcr_cli_args(restore, 5, text, &run) && run.rc == 0;
+    WCR_CHECK("CLI confirms retry without mutation", retry && wcr_data_bool(&run, "creation_replayed"));
+    snprintf(text, sizeof(text), "{\"datadir\":\"%s\"}", dir);
+    stat = wcr_cli_args(status, 5, text, &run);
+    WCR_CHECK("CLI locked status exposes committed receipt", stat && creation_cli_fact(&run, "creation_state", "committed") && creation_cli_fact(&run, "creation_nonce", nonce));
+    memory_cleanse(phrase, sizeof(phrase)); memory_cleanse(text, sizeof(text));
+    return failures;
+}
+
+static int creation_after_commit_exit(const char *dir, const char *words, const uint8_t nonce[32])
+{
+    int failures = 0, status = 0;
+    pid_t child = fork();
+    if (child == 0) {
+        struct zcl_result committed = wallet_creation_commit(dir, words, nonce, WCR_PASS, NULL);
+        _exit(committed.ok ? 0 : 1);
+    }
+    bool exited = child > 0 && waitpid(child, &status, 0) == child &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    struct wallet_recovery_report receipt = {0};
+    WCR_CHECK("committed child exit recovers receipt", exited &&
+        wallet_creation_commit(dir, words, nonce, WCR_PASS, &receipt).ok && receipt.creation_replayed);
+    return failures;
+}
+
+static int creation_exit_fixture(void)
+{
+    int failures = 0, status = 0;
+    char dir[1024], words[MNEMONIC_MAX_PHRASE_SIZE] = {0};
+    uint8_t nonce[32] = {0};
+    wcr_fixture(dir, sizeof(dir), "creation_exit");
+    wallet_lock_reset_for_test();
+    struct zcl_result prepared = wallet_creation_prepare(dir, words, sizeof(words), nonce);
+    WCR_CHECK("process-exit fixture prepared", prepared.ok);
+    pid_t interrupted = fork();
+    if (interrupted == 0) {
+        wallet_sqlite_creation_exit_before_commit_for_test();
+        (void)wallet_creation_commit(dir, words, nonce, WCR_PASS, NULL);
+        _exit(1);
+    }
+    bool crashed = interrupted > 0 && waitpid(interrupted, &status, 0) == interrupted &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 42;
+    struct node_db after; struct wallet_create_pending pending;
+    bool reopened = crashed && wcr_open(&after, dir);
+    bool rolled_back = reopened && creation_fixture_seed_absent(after.db) &&
+        db_sapling_key_count(&after) == 0 &&
+        db_wallet_create_pending_get(&after, &pending) == WALLET_BIRTHDAY_PROOF_FOUND && !pending.committed;
+    if (reopened) node_db_close(&after);
+    WCR_CHECK("uncommitted child exit rolls back wallet and receipt", rolled_back);
+    failures += creation_after_commit_exit(dir, words, nonce);
+    memory_cleanse(words, sizeof(words));
+    return failures;
+}
+
+static int creation_fresh_history_fixture(void)
+{
+    int failures = 0;
+    char dir[1024], phrase[MNEMONIC_MAX_PHRASE_SIZE] = {0};
+    struct wallet_recovery_report report;
+    struct node_db db;
+    wcr_fixture(dir, sizeof(dir), "fresh_history_only");
+    bool opened = wcr_open(&db, dir);
+    bool inserted = opened && sqlite3_exec(db.db, "INSERT INTO wallet_transactions(txid,raw_tx,time_received) VALUES(x'01',x'01',0)", NULL, NULL, NULL) == SQLITE_OK;
+    if (opened) node_db_close(&db);
+    wallet_lock_reset_for_test();
+    struct wallet_recovery_request req = {.datadir = dir, .passphrase = WCR_PASS};
+    WCR_CHECK("fresh creation refuses transaction-only wallet", inserted && !wallet_recovery_create_fresh(&req, &report, phrase, sizeof(phrase)).ok);
+    memory_cleanse(phrase, sizeof(phrase));
+    wcr_fixture(dir, sizeof(dir), "fresh_unknown_history");
+    opened = wcr_open(&db, dir);
+    bool removed = opened && sqlite3_exec(db.db, "DROP TABLE wallet_utxos", NULL, NULL, NULL) == SQLITE_OK;
+    if (opened) node_db_close(&db);
+    wallet_lock_reset_for_test();
+    req.datadir = dir;
+    WCR_CHECK("fresh creation refuses unreadable wallet history", removed && !wallet_recovery_create_fresh(&req, &report, phrase, sizeof(phrase)).ok);
+    memory_cleanse(phrase, sizeof(phrase));
+    return failures;
+}
+
 int test_wallet_create(void);
 int test_wallet_create(void)
 {
     int failures = 0;
+    failures += birthday_proof_atomic();
+    failures += birthday_identity_change();
     chain_params_select(CHAIN_MAIN);
     checkpoints_set_sha3_override_for_test(&wcr_no_anchor);
+    failures += birthday_fresh_ignores_supplied_phrase();
+    failures += creation_prepare_fixture();
+    failures += creation_cancel_fixture();
+    failures += creation_atomic_failure_fixture();
+    failures += creation_cli_fixture();
+    failures += creation_exit_fixture();
+    failures += creation_fresh_history_fixture();
     failures += t_round_trip();
     failures += t_refusals();
     failures += t_phrase_not_captured_and_encrypted();

@@ -74,8 +74,12 @@
 #include "command/native_command.h"   /* the restore leaf's handler */
 #include "config/boot_shutdown_marker.h"
 #include "config/command_catalog.h"
+#include "config/consensus_state_install_runtime.h"
+#include "models/wallet_send_once.h"
 #include "controllers/wallet_activity.h"
 #include "controllers/wallet_controller.h"
+#include "controllers/wallet_native_handlers.h"
+#include "controllers/agent_controller.h"
 #include "controllers/rpc_client.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -237,38 +241,46 @@ static void wrs_status(const char *dir, struct zcl_command_reply *reply)
     json_free(&input);
 }
 
-static bool wrs_failure_facts_match(const struct json_value *facts,
-                                    const char *address, bool unavailable)
+static bool wrs_address_reason_match(const struct json_value *facts, bool unavailable)
 {
-    if (address) {
-        const char *got = json_get_str(json_get(facts, "persisted_shielded_address"));
-        return facts && facts->type == JSON_OBJ && facts->num_children == 1 &&
-               got && !strcmp(got, address);
-    }
-    if (unavailable) {
-        const char *reason = json_get_str(json_get(facts, "receive_address_status"));
-        return facts && facts->type == JSON_OBJ && facts->num_children == 1 &&
-               reason && !strcmp(reason, "unavailable") &&
-               !json_get(facts, "persisted_shielded_address");
-    }
-    return !facts;
+    const struct json_value *reason = json_get(facts, "receive_address_status");
+    return unavailable ? reason && reason->type == JSON_STR &&
+        !strcmp(json_get_str(reason), "unavailable") : !reason;
+}
+
+static bool wrs_envelope_facts_match(const struct json_value *facts,
+    const char *address, const char *cutover, bool locked, bool unavailable)
+{
+    if (!locked) return !facts;
+    if (!facts || facts->type != JSON_OBJ ||
+        facts->num_children != ((address || unavailable) ? 3u : 2u)) return false;
+    const char *creation = json_get_str(json_get(facts, "creation_state"));
+    if (strcmp(creation, "none") || json_get(facts, "creation_nonce")) return false;
+    const char *state = json_get_str(json_get(facts, "wallet_cutover_state"));
+    if (strcmp(state, cutover ? cutover : "unknown")) return false;
+    const char *actual = json_get_str(json_get(facts, "persisted_shielded_address"));
+    if (address ? strcmp(actual, address) != 0 : json_get(facts, "persisted_shielded_address") != NULL) return false;
+    return wrs_address_reason_match(facts, unavailable);
 }
 
 static bool wrs_envelope_fields_match(const struct json_value *root,
-    enum zcl_command_exit exit_code, const char *code, const char *address, bool unavailable)
+    enum zcl_command_exit exit_code, const char *code, const char *address,
+    const char *cutover, bool unavailable)
 {
     const struct json_value *ok = json_get(root, "ok");
     const struct json_value *error = json_get(root, "error");
     const char *actual_code = json_get_str(json_get(error, "code"));
-    return exit_code == ZCL_COMMAND_EXIT_BLOCKED &&
-           ok && ok->type == JSON_BOOL && !json_get_bool(ok) &&
-           actual_code && !strcmp(actual_code, code) && !json_get(root, "data") &&
-           wrs_failure_facts_match(json_get(error, "facts"), address, unavailable);
+    const struct json_value *facts = json_get(error, "facts");
+    bool valid = exit_code == ZCL_COMMAND_EXIT_BLOCKED &&
+                 ok && ok->type == JSON_BOOL && !json_get_bool(ok) &&
+                 actual_code && !strcmp(actual_code, code) &&
+                 !json_get(root, "data");
+    return valid && wrs_envelope_facts_match(facts, address, cutover, !strcmp(code, "WALLET_LOCKED"), unavailable);
 }
 
 /* Execute through the same registry serializer as the CLI. */
 static bool wrs_status_envelope(const char *dir, const char *code,
-                                const char *address, bool unavailable)
+                                const char *address, const char *cutover, bool unavailable)
 {
     const struct zcl_command_registry *reg = zcl_command_catalog();
     const struct zcl_command_spec *spec = zcl_command_registry_find(
@@ -287,10 +299,72 @@ static bool wrs_status_envelope(const char *dir, const char *code,
         reg, spec, &ctx, &input, false, spec->path, "normal", 0, 0, NULL,
         wire, sizeof(wire), &exit_code) : 0;
     bool parsed = n > 0 && n < sizeof(wire) && json_read(&root, wire, n);
-    bool valid = parsed && wrs_envelope_fields_match(&root, exit_code, code, address, unavailable);
+    bool valid = parsed && wrs_envelope_fields_match(&root, exit_code, code, address, cutover, unavailable);
     json_free(&root);
     json_free(&input);
     return valid;
+}
+
+static int wrs_cutover_floor(void)
+{
+    int failures = 0, floor = -1;
+    sqlite3 *db = NULL;
+    WRS_CHECK("floor fixture opens", sqlite3_open(":memory:", &db) == SQLITE_OK);
+    if (!db) return failures + 1;
+    struct wallet_sqlite ws = {.db = db, .open = true};
+    WRS_CHECK("floor fixture schema", sqlite3_exec(db,
+        "CREATE TABLE node_state(key TEXT PRIMARY KEY,value)", NULL, NULL, NULL) == SQLITE_OK);
+    WRS_CHECK("missing scan cursor starts at zero",
+        wallet_sqlite_cutover_scan_floor(&ws, &floor) == WALLET_CUTOVER_FLOOR_ABSENT && floor == 0);
+    int32_t height = 10; sqlite3_stmt *s = NULL;
+    bool inserted = sqlite3_prepare_v2(db, "INSERT INTO node_state VALUES('wallet_scan_height',?)", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 1, &height, sizeof(height), SQLITE_TRANSIENT) == SQLITE_OK && sqlite3_step(s) == SQLITE_DONE;
+    if (s) sqlite3_finalize(s);
+    WRS_CHECK("floor saved cursor", inserted && wallet_sqlite_cutover_scan_floor(&ws, &floor) == WALLET_CUTOVER_FLOOR_FOUND && floor == 11);
+    WRS_CHECK("floor unread marker fixture", sqlite3_exec(db,
+        "INSERT INTO node_state VALUES('wallet_scan_incomplete','from=5 depth=10 since=0 blocker=prior')", NULL, NULL, NULL) == SQLITE_OK);
+    WRS_CHECK("floor keeps earlier unread range", wallet_sqlite_cutover_scan_floor(&ws, &floor) == WALLET_CUTOVER_FLOOR_FOUND && floor == 5);
+    WRS_CHECK("floor malformed marker fixture", sqlite3_exec(db,
+        "UPDATE node_state SET value='from=5 depth=10 since=0 blocker=prior trailing' WHERE key='wallet_scan_incomplete'", NULL, NULL, NULL) == SQLITE_OK);
+    WRS_CHECK("floor malformed marker refuses", wallet_sqlite_cutover_scan_floor(&ws, &floor) == WALLET_CUTOVER_FLOOR_MALFORMED);
+    WRS_CHECK("floor malformed cursor fixture", sqlite3_exec(db,
+        "DELETE FROM node_state WHERE key='wallet_scan_incomplete'; UPDATE node_state SET value='10' WHERE key='wallet_scan_height'", NULL, NULL, NULL) == SQLITE_OK);
+    WRS_CHECK("floor malformed cursor refuses", wallet_sqlite_cutover_scan_floor(&ws, &floor) == WALLET_CUTOVER_FLOOR_MALFORMED);
+    WRS_CHECK("floor missing table fixture", sqlite3_exec(db, "DROP TABLE node_state", NULL, NULL, NULL) == SQLITE_OK);
+    WRS_CHECK("floor storage failure distinct", wallet_sqlite_cutover_scan_floor(&ws, &floor) == WALLET_CUTOVER_FLOOR_IO_ERROR);
+    sqlite3_close(db); return failures;
+}
+
+static int wrs_deny_sync_raise(void *unused, int action, const char *name,
+                               const char *value, const char *db, const char *trigger)
+{
+    (void)unused; (void)db; (void)trigger;
+    return action == SQLITE_PRAGMA && name && value &&
+           !strcmp(name, "synchronous") && !strcmp(value, "2") ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int wrs_deny_sync_restore(void *unused, int action, const char *name,
+                                 const char *value, const char *db, const char *trigger)
+{
+    (void)unused; (void)db; (void)trigger;
+    return action == SQLITE_PRAGMA && name && value &&
+           !strcmp(name, "synchronous") && !strcmp(value, "0") ? SQLITE_DENY : SQLITE_OK;
+}
+
+static bool wrs_prepare_cutover(sqlite3 *db)
+{
+    struct wallet_sqlite ws = {0};
+    struct wallet *w = calloc(1, sizeof(*w));
+    if (!w) return false;
+    wallet_init(w);
+    bool opened = wallet_sqlite_open_r(&ws, db).ok;
+    w->scan_retry.pending = true; w->scan_retry.from = 0;
+    struct wallet_cutover_binding b = {.old_height = 0, .target_height = 1};
+    b.old_hash[0] = 1; b.target_hash[0] = 2; b.artifact_digest[0] = 3;
+    struct node_db node = {.db = db, .open = true};
+    bool ok = opened && consensus_state_wallet_commit_fence_test(&node, &ws, w, &b);
+    if (opened) wallet_sqlite_close(&ws);
+    wallet_free(w); free(w); return ok;
 }
 
 /* The native bridge calls the real RPC implementation against the fixture. */
@@ -381,9 +455,113 @@ static bool wrs_reorder_accounts(const char *path)
     return ok;
 }
 
+static int wrs_address_storage_cases(const char *dir, const char *dbpath, const char *live)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(dbpath, &db);
+    WRS_CHECK("fixture database opens", rc == SQLITE_OK);
+    if (rc == SQLITE_OK) {
+        struct node_db sync_node = {.db = db, .open = true};
+        WRS_CHECK("unsafe journal fixture", sqlite3_exec(db, "PRAGMA journal_mode=OFF", NULL, NULL, NULL) == SQLITE_OK);
+        WRS_CHECK("unsafe journal refuses fence", !wrs_prepare_cutover(db));
+        WRS_CHECK("unsafe journal leaves no fence", wrs_status_envelope(dir, "WALLET_LOCKED", live, "clear", false));
+        WRS_CHECK("restore journal fixture", sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) == SQLITE_OK);
+        WRS_CHECK("cutover fixture starts OFF", sqlite3_exec(db, "PRAGMA synchronous=OFF", NULL, NULL, NULL) == SQLITE_OK);
+        WRS_CHECK("deny FULL setup", sqlite3_set_authorizer(db, wrs_deny_sync_raise, NULL) == SQLITE_OK);
+        WRS_CHECK("cutover refuses without FULL", !wrs_prepare_cutover(db));
+        WRS_CHECK("deny FULL removed", sqlite3_set_authorizer(db, NULL, NULL) == SQLITE_OK);
+        WRS_CHECK("failed FULL leaves no fence", wrs_status_envelope(dir, "WALLET_LOCKED", live, "clear", false));
+        WRS_CHECK("cutover raises sync and restores OFF", wrs_prepare_cutover(db) && db_wallet_send_once_sync_level(&sync_node) == 0);
+        WRS_CHECK("cutover OFF fixture reset", sqlite3_exec(db,
+                  "DELETE FROM node_state WHERE key IN ('wallet_cutover_binding','wallet_scan_incomplete')", NULL, NULL, NULL) == SQLITE_OK);
+        WRS_CHECK("cutover restore failure setup", sqlite3_set_authorizer(db, wrs_deny_sync_restore, NULL) == SQLITE_OK);
+        WRS_CHECK("cutover restore failure refuses", !wrs_prepare_cutover(db));
+        WRS_CHECK("cutover restore authorizer cleared", sqlite3_set_authorizer(db, NULL, NULL) == SQLITE_OK);
+        WRS_CHECK("restore failure preserves pending fence", wrs_status_envelope(dir, "WALLET_LOCKED", live, "pending", false));
+        WRS_CHECK("cutover restore fixture reset", sqlite3_exec(db,
+                  "DELETE FROM node_state WHERE key IN ('wallet_cutover_binding','wallet_scan_incomplete'); PRAGMA synchronous=NORMAL", NULL, NULL, NULL) == SQLITE_OK);
+        WRS_CHECK("cutover fixture prepared at NORMAL", wrs_prepare_cutover(db) && db_wallet_send_once_sync_level(&sync_node) == 1);
+        WRS_CHECK("locked envelope reports pending cutover",
+                  wrs_status_envelope(dir, "WALLET_LOCKED", live, "pending", false));
+        WRS_CHECK("cutover malformed fixture", sqlite3_exec(db,
+                  "UPDATE node_state SET value=x'00' WHERE key='wallet_cutover_binding'", NULL, NULL, NULL) == SQLITE_OK);
+        WRS_CHECK("locked envelope reports malformed as unknown",
+                  wrs_status_envelope(dir, "WALLET_LOCKED", live, "unknown", false));
+        WRS_CHECK("cutover fixture removed", sqlite3_exec(db,
+                  "DELETE FROM node_state WHERE key IN ('wallet_cutover_binding','wallet_scan_incomplete')", NULL, NULL, NULL) == SQLITE_OK);
+        rc = sqlite3_exec(db,
+            "INSERT INTO wallet_sapling_diversifier(ivk,next_index) "
+            "SELECT ivk,0 FROM wallet_sapling_keys ORDER BY child_index,ivk LIMIT 1",
+            NULL, NULL, NULL);
+        WRS_CHECK("fixture plants an invalid selected counter", rc == SQLITE_OK);
+        WRS_CHECK("invalid counter exports only a constant reason",
+                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL, "clear", true));
+        WRS_CHECK("fixture removes invalid counter",
+            sqlite3_exec(db, "DELETE FROM wallet_sapling_diversifier", NULL, NULL, NULL) == SQLITE_OK);
+        rc = sqlite3_exec(db,
+            "CREATE TEMP TABLE saved AS SELECT * FROM wallet_sapling_keys;"
+            "UPDATE wallet_sapling_keys SET child_index=-1 WHERE ivk="
+            "(SELECT ivk FROM wallet_sapling_keys ORDER BY child_index DESC,ivk DESC LIMIT 1)",
+            NULL, NULL, NULL);
+        WRS_CHECK("fixture corrupts later account ordering", rc == SQLITE_OK);
+        WRS_CHECK("bad account ordering exports only a constant reason",
+                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL, "clear", true));
+        rc = sqlite3_exec(db, "DELETE FROM wallet_sapling_keys;"
+                              "INSERT INTO wallet_sapling_keys SELECT * FROM saved;"
+                              "UPDATE wallet_sapling_keys SET pk_d=zeroblob(32) WHERE ivk="
+
+                              "(SELECT ivk FROM wallet_sapling_keys ORDER BY child_index,ivk LIMIT 1)", NULL, NULL, NULL);
+        WRS_CHECK("fixture invalidates public keys", rc == SQLITE_OK);
+        wrs_status(dir, &reply);
+        WRS_CHECK("mismatched public key is not exposed", !json_get(&reply.data, "persisted_shielded_address"));
+        WRS_CHECK("unsafe leading account exports only a constant reason",
+                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL, "clear", true));
+        zcl_command_reply_free(&reply);
+        const char *const damage[] = {
+            "CAST(zeroblob(4)||substr(xsk,5) AS BLOB)",
+            "CAST(substr(xsk,1,4)||zeroblob(4)||substr(xsk,9) AS BLOB)",
+            "CAST(substr(xsk,1,8)||zeroblob(4)||substr(xsk,13) AS BLOB)",
+            "zeroblob(0)"
+        };
+        for (size_t i = 0; i < sizeof(damage) / sizeof(damage[0]); i++) {
+            char sql[512];
+            snprintf(sql, sizeof(sql), "DELETE FROM wallet_sapling_keys;"
+                     "INSERT INTO wallet_sapling_keys SELECT * FROM saved;"
+                     "UPDATE wallet_sapling_keys SET xsk=%s", damage[i]);
+            rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+            WRS_CHECK("fixture changes xsk envelope field", rc == SQLITE_OK);
+            wrs_status(dir, &reply);
+            WRS_CHECK("invalid envelope or watch-only row exposes no address",
+                      !json_get(&reply.data, "persisted_shielded_address"));
+            WRS_CHECK("invalid envelope or watch-only row exports only a reason",
+                      wrs_status_envelope(dir, "WALLET_LOCKED", NULL, "clear", true));
+            zcl_command_reply_free(&reply);
+        }
+        rc = sqlite3_exec(db, "DELETE FROM wallet_sapling_keys;"
+                              "INSERT INTO wallet_sapling_keys SELECT * FROM saved;"
+                              "UPDATE wallet_sapling_keys SET xsk=zeroblob(1)", NULL, NULL, NULL);
+        WRS_CHECK("fixture invalidates xsk rows", rc == SQLITE_OK);
+        wrs_status(dir, &reply);
+        WRS_CHECK("malformed xsk is not exposed", !json_get(&reply.data, "persisted_shielded_address"));
+        zcl_command_reply_free(&reply);
+        rc = sqlite3_exec(db, "DELETE FROM wallet_sapling_keys", NULL, NULL, NULL);
+        WRS_CHECK("fixture removes sapling rows", rc == SQLITE_OK);
+        sqlite3_close(db);
+        wrs_status(dir, &reply);
+        WRS_CHECK("missing row exposes no address", !json_get(&reply.data, "persisted_shielded_address"));
+        WRS_CHECK("missing row exports no address facts",
+                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL, "clear", false));
+        zcl_command_reply_free(&reply);
+    } else if (db) sqlite3_close(db);
+    return failures;
+}
+
 static int t_persisted_receive_address(void)
 {
     int failures = 0;
+    failures += wrs_cutover_floor();
     char dir[256], pid[300], dbpath[300];
     wrs_mkfixture(dir, sizeof(dir), "receive");
     wrs_set_at_rest("case-receive-passphrase", NULL);
@@ -397,8 +575,8 @@ static int t_persisted_receive_address(void)
     wrs_status(dir, &reply);
     WRS_CHECK("missing pidfile does not expose persisted address",
               !json_get(&reply.data, "persisted_shielded_address"));
-    WRS_CHECK("missing pidfile exports no failure facts",
-              wrs_status_envelope(dir, "WALLET_LOCKED", NULL, false));
+    WRS_CHECK("missing pidfile exports no address facts",
+              wrs_status_envelope(dir, "WALLET_LOCKED", NULL, NULL, false));
     zcl_command_reply_free(&reply);
     snprintf(pid, sizeof(pid), "%s/zclassic23.pid", dir);
     int fd = open(pid, O_CREAT | O_RDWR, 0600);
@@ -424,8 +602,8 @@ static int t_persisted_receive_address(void)
               loaded && address && !strcmp(live, address));
 
     WRS_CHECK("locked wallet remains locked", !strcmp(reply.error.code, "WALLET_LOCKED"));
-    WRS_CHECK("locked serialized reply exposes only the public address",
-              wrs_status_envelope(dir, "WALLET_LOCKED", rep.first_shielded_address, false));
+    WRS_CHECK("locked serialized reply exposes the public address and cutover state",
+              wrs_status_envelope(dir, "WALLET_LOCKED", rep.first_shielded_address, "clear", false));
     zcl_command_reply_free(&reply);
     WRS_CHECK("fixture reverses rows and ties two account indices", wrs_reorder_accounts(dbpath));
     wrs_status(dir, &reply);
@@ -439,79 +617,12 @@ static int t_persisted_receive_address(void)
     wrs_status(dir, &reply);
     WRS_CHECK("held node lock refuses status", !strcmp(reply.error.code, "DATADIR_LOCKED"));
     WRS_CHECK("held node lock exposes no address", !json_get(&reply.data, "persisted_shielded_address"));
-    WRS_CHECK("held node lock exports no failure facts",
-              wrs_status_envelope(dir, "DATADIR_LOCKED", NULL, false));
+    WRS_CHECK("held node lock exports no address facts",
+              wrs_status_envelope(dir, "DATADIR_LOCKED", NULL, NULL, false));
     zcl_command_reply_free(&reply);
     (void)flock(fd, LOCK_UN);
     snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
-    sqlite3 *db = NULL;
-    int rc = sqlite3_open(dbpath, &db);
-    WRS_CHECK("fixture database opens", rc == SQLITE_OK);
-    if (rc == SQLITE_OK) {
-        rc = sqlite3_exec(db,
-            "INSERT INTO wallet_sapling_diversifier(ivk,next_index) "
-            "SELECT ivk,0 FROM wallet_sapling_keys ORDER BY child_index,ivk LIMIT 1",
-            NULL, NULL, NULL);
-        WRS_CHECK("fixture plants an invalid selected counter", rc == SQLITE_OK);
-        WRS_CHECK("invalid counter exports only a constant reason",
-                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL, true));
-        WRS_CHECK("fixture removes invalid counter",
-            sqlite3_exec(db, "DELETE FROM wallet_sapling_diversifier", NULL, NULL, NULL) == SQLITE_OK);
-        rc = sqlite3_exec(db,
-            "CREATE TEMP TABLE saved AS SELECT * FROM wallet_sapling_keys;"
-            "UPDATE wallet_sapling_keys SET child_index=-1 WHERE ivk="
-            "(SELECT ivk FROM wallet_sapling_keys ORDER BY child_index DESC,ivk DESC LIMIT 1)",
-            NULL, NULL, NULL);
-        WRS_CHECK("fixture corrupts later account ordering", rc == SQLITE_OK);
-        WRS_CHECK("bad account ordering exports only a constant reason",
-                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL, true));
-        rc = sqlite3_exec(db, "DELETE FROM wallet_sapling_keys;"
-                              "INSERT INTO wallet_sapling_keys SELECT * FROM saved;"
-                              "UPDATE wallet_sapling_keys SET pk_d=zeroblob(32) WHERE ivk="
-
-                              "(SELECT ivk FROM wallet_sapling_keys ORDER BY child_index,ivk LIMIT 1)", NULL, NULL, NULL);
-        WRS_CHECK("fixture invalidates public keys", rc == SQLITE_OK);
-        wrs_status(dir, &reply);
-        WRS_CHECK("mismatched public key is not exposed", !json_get(&reply.data, "persisted_shielded_address"));
-        WRS_CHECK("unsafe leading account exports only a constant reason",
-                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL, true));
-        zcl_command_reply_free(&reply);
-        const char *const damage[] = {
-            "CAST(zeroblob(4)||substr(xsk,5) AS BLOB)",
-            "CAST(substr(xsk,1,4)||zeroblob(4)||substr(xsk,9) AS BLOB)",
-            "CAST(substr(xsk,1,8)||zeroblob(4)||substr(xsk,13) AS BLOB)",
-            "zeroblob(0)"
-        };
-        for (size_t i = 0; i < sizeof(damage) / sizeof(damage[0]); i++) {
-            char sql[512];
-            snprintf(sql, sizeof(sql), "DELETE FROM wallet_sapling_keys;"
-                     "INSERT INTO wallet_sapling_keys SELECT * FROM saved;"
-                     "UPDATE wallet_sapling_keys SET xsk=%s", damage[i]);
-            rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-            WRS_CHECK("fixture changes xsk envelope field", rc == SQLITE_OK);
-            wrs_status(dir, &reply);
-            WRS_CHECK("invalid envelope or watch-only row exposes no address",
-                      !json_get(&reply.data, "persisted_shielded_address"));
-            WRS_CHECK("invalid envelope or watch-only row exports only a reason",
-                      wrs_status_envelope(dir, "WALLET_LOCKED", NULL, true));
-            zcl_command_reply_free(&reply);
-        }
-        rc = sqlite3_exec(db, "DELETE FROM wallet_sapling_keys;"
-                              "INSERT INTO wallet_sapling_keys SELECT * FROM saved;"
-                              "UPDATE wallet_sapling_keys SET xsk=zeroblob(1)", NULL, NULL, NULL);
-        WRS_CHECK("fixture invalidates xsk rows", rc == SQLITE_OK);
-        wrs_status(dir, &reply);
-        WRS_CHECK("malformed xsk is not exposed", !json_get(&reply.data, "persisted_shielded_address"));
-        zcl_command_reply_free(&reply);
-        rc = sqlite3_exec(db, "DELETE FROM wallet_sapling_keys", NULL, NULL, NULL);
-        WRS_CHECK("fixture removes sapling rows", rc == SQLITE_OK);
-        sqlite3_close(db);
-        wrs_status(dir, &reply);
-        WRS_CHECK("missing row exposes no address", !json_get(&reply.data, "persisted_shielded_address"));
-        WRS_CHECK("missing row exports no failure facts",
-                  wrs_status_envelope(dir, "WALLET_LOCKED", NULL, false));
-        zcl_command_reply_free(&reply);
-    } else if (db) sqlite3_close(db);
+    failures += wrs_address_storage_cases(dir, dbpath, live);
     close(fd);
     wallet_lock_reset_for_test();
     test_rm_rf(dir);
@@ -1548,6 +1659,37 @@ static int t_node_lease_refuses_a_bound_commit(void)
 }
 #endif
 
+#if !defined(_WIN32)
+/* Environment and boot context are changed only in the child. */
+static bool wrs_default_datadir_child(void)
+{
+    char out[256];
+    rpc_agent_set_boot_context(NULL, NULL, NULL, 0, 0, 0, 0);
+    if (unsetenv("HOME") != 0) return false;
+    wnh_default_datadir(out, sizeof(out));
+    if (strcmp(out, "./.zclassic-c23") != 0 || setenv("HOME", "", 1) != 0) return false;
+    wnh_default_datadir(out, sizeof(out));
+    if (strcmp(out, "./.zclassic-c23") != 0 || setenv("HOME", "/fixture-home", 1) != 0) return false;
+    wnh_default_datadir(out, sizeof(out));
+    if (strcmp(out, "/fixture-home/.zclassic-c23") != 0) return false;
+    rpc_agent_set_boot_context(NULL, NULL, "/fixture-runtime", 0, 0, 0, 0);
+    wnh_default_datadir(out, sizeof(out));
+    return strcmp(out, "/fixture-runtime") == 0;
+}
+
+static int t_wallet_default_datadir(void)
+{
+    int failures = 0, status = 0;
+    fflush(NULL);
+    pid_t child = fork();
+    if (child == 0) _exit(wrs_default_datadir_child() ? 0 : 1);
+    WRS_CHECK("offline default datadir respects context and HOME", child > 0 &&
+        waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    return failures;
+}
+#endif
+
+
 int test_wallet_recovery_safety(void);
 int test_wallet_recovery_safety(void)
 {
@@ -1598,6 +1740,9 @@ int test_wallet_recovery_safety(void)
     setenv("ZCL_WALLET_KDF_ITERS", "10000", 1);
     wallet_lock_reset_for_test();
 
+#if !defined(_WIN32)
+    failures += t_wallet_default_datadir();
+#endif
     failures += t_damaged_db_is_refused_not_reset();
     failures += t_recovery_status_rejects_a_truncated_datadir();
 #if !defined(_WIN32)

@@ -844,10 +844,11 @@ static bool p11_4_open_wallet_fixture(char *tmpdir, size_t tmpdir_size,
         return false;
     }
     wallet_init(wallet);
-    if (!sapling_keystore_generate_seed(&wallet->sapling_keys)) {
+    if (!wallet_readiness_initialize(wallet, WALLET_READINESS_READY, false, 0) ||
+        !sapling_keystore_generate_seed(&wallet->sapling_keys)) {
         wallet_free(wallet);
         free(wallet);
-        printf("FAIL (sapling seed)\n");
+        printf("FAIL (wallet readiness or sapling seed)\n");
         reducer_frontier_provable_tip_reset();
         progress_store_close();
         if (!p11_4_cleanup_owned(tmpdir))

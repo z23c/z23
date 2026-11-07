@@ -37,6 +37,33 @@
 struct node_db;
 struct main_state;
 struct app_context;
+struct wallet_sqlite;
+struct wallet;
+struct wallet_cutover_binding;
+struct sqlite3;
+
+enum wallet_install_reconcile {
+    WALLET_INSTALL_ABSENT, WALLET_INSTALL_OLD,
+    WALLET_INSTALL_COMMITTED, WALLET_INSTALL_UNKNOWN
+};
+
+/* Check the actual boot wallet, node database and held directory before opening authority. */
+bool consensus_state_wallet_preflight_identity(struct wallet_sqlite *wallet,
+    struct node_db *node, int dir_fd);
+
+/* Read-only classification; never clears the persistent wallet fence. */
+enum wallet_install_reconcile consensus_state_wallet_install_classify(
+    struct wallet_sqlite *wallet, struct node_db *node, int datadir_fd,
+    bool *generation_present, uint64_t *generation);
+
+#ifdef ZCL_TESTING
+void consensus_state_install_test_after_commit(void (*hook)(void *), void *context);
+enum wallet_install_reconcile consensus_state_wallet_install_classify_test(
+    struct sqlite3 *db, const struct wallet_cutover_binding *binding);
+bool consensus_state_wallet_commit_fence_test(struct node_db *node,
+    struct wallet_sqlite *ws, struct wallet *wallet,
+    struct wallet_cutover_binding *binding);
+#endif
 
 /* Outcome detail for a runtime install. `status` mirrors the terminal verb's
  * activate status. `state_installed` is true once the atomic activate committed
@@ -111,6 +138,13 @@ bool consensus_state_install_restore_checkpoint_header_frontier(
 struct zcl_result consensus_state_install_from_bundle(
     struct node_db *ndb, struct main_state *ms, const char *bundle_path,
     const char *datadir, struct consensus_state_install_runtime_result *out);
+
+/* Startup-only; validates the actual boot context and holds a durable wallet
+ * fence before activation. Not wired until readiness and replay are complete. */
+struct zcl_result consensus_state_install_from_bundle_guarded(
+    struct node_db *ndb, struct main_state *ms, const char *bundle_path,
+    const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
+    struct consensus_state_install_runtime_result *out);
 
 /* Zero-flag cold-boot orchestrator (Move 1b + 1c). Consults, in order:
  *   (1) the durable install-on-next-boot request (the Move 2 self-heal), then

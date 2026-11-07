@@ -219,10 +219,18 @@ static size_t find_by_digest(const uint8_t digest[32])
     return find_offer(digest, false, 0);
 }
 
-/* The weakest slot to evict: the LOWEST bundle height, breaking ties toward the
- * oldest. A newcomer takes it only if it is strictly better, so a peer cannot
- * evict a good offer by repeating a worse one. */
-static size_t weakest_slot(void)
+/* Filter-eligible heights outrank ineligible heights; equal eligibility keeps
+ * the ordinary higher-height preference. NULL preserves ordinary ranking. */
+static int offer_priority(int32_t a, int32_t b, state_offer_height_filter_fn filter)
+{
+    bool a_wanted = !filter || filter(a);
+    bool b_wanted = !filter || filter(b);
+    if (a_wanted != b_wanted) return a_wanted ? 1 : -1;
+    return (a > b) - (a < b);
+}
+
+/* The lowest-priority non-fetching slot, with oldest breaking equal ties. */
+static size_t weakest_slot(state_offer_height_filter_fn filter)
 {
     size_t worst = STATE_OFFER_STORE_MAX;
     for (size_t i = 0; i < STATE_OFFER_STORE_MAX; i++) {
@@ -231,10 +239,9 @@ static size_t weakest_slot(void)
         if (g_offer_fetching[i]) continue;
         if (worst == STATE_OFFER_STORE_MAX)
             worst = i;
-        else if (g_offers[i].offer.bundle_height <
-                     g_offers[worst].offer.bundle_height ||
-                 (g_offers[i].offer.bundle_height ==
-                      g_offers[worst].offer.bundle_height &&
+        else if (offer_priority(g_offers[i].offer.bundle_height,
+                                g_offers[worst].offer.bundle_height, filter) < 0 ||
+                 (g_offers[i].offer.bundle_height == g_offers[worst].offer.bundle_height &&
                   g_offers[i].heard_ms < g_offers[worst].heard_ms))
             worst = i;
     }
@@ -242,15 +249,21 @@ static size_t weakest_slot(void)
 }
 
 /* Limit one digest while allowing a new peer to replace an idle source. */
-static size_t link_source_slot(const uint8_t digest[32], bool *limited)
+static size_t link_source_slot(const uint8_t digest[32], bool *limited,
+                               state_offer_height_filter_fn filter)
 {
     size_t count = 0, oldest = STATE_OFFER_STORE_MAX;
     for (size_t i = 0; i < STATE_OFFER_STORE_MAX; ++i) {
         if (!g_offer_used[i] || !g_offers[i].peer_link ||
             !digest_eq(g_offers[i].offer.content_digest, digest)) continue;
         count++;
-        if (!g_offer_fetching[i] && (oldest == STATE_OFFER_STORE_MAX ||
-            g_offers[i].heard_ms < g_offers[oldest].heard_ms)) oldest = i;
+        if (g_offer_fetching[i]) continue;
+        if (oldest == STATE_OFFER_STORE_MAX ||
+            (filter && !filter(g_offers[i].offer.bundle_height) &&
+             filter(g_offers[oldest].offer.bundle_height)) ||
+            ((!filter || filter(g_offers[i].offer.bundle_height) ==
+                         filter(g_offers[oldest].offer.bundle_height)) &&
+             g_offers[i].heard_ms < g_offers[oldest].heard_ms)) oldest = i;
     }
     *limited = count >= 4;
     return oldest;
@@ -308,12 +321,19 @@ static enum state_offer_store_result record_offer(
         return STATE_OFFER_STORE_KEPT_REPLACED;
     }
 
+    state_offer_height_filter_fn filter = atomic_load(&g_height_filter);
     bool limited = false;
-    size_t slot = peer_link ? link_source_slot(offer->content_digest, &limited) : STATE_OFFER_STORE_MAX;
-    if (!limited) slot = weakest_slot();
+    size_t slot = peer_link ? link_source_slot(offer->content_digest, &limited, filter) : STATE_OFFER_STORE_MAX;
+    if (!limited) slot = weakest_slot(filter);
     if (slot >= STATE_OFFER_STORE_MAX) return STATE_OFFER_STORE_DROPPED_FULL;
-    if (!limited && g_offer_used[slot] && offer->bundle_height <= g_offers[slot].offer.bundle_height)
-        return STATE_OFFER_STORE_DROPPED_FULL;
+    if (g_offer_used[slot]) {
+        int priority = offer_priority(offer->bundle_height,
+                                      g_offers[slot].offer.bundle_height, filter);
+        if ((!limited && priority <= 0) ||
+            (limited && filter && filter(g_offers[slot].offer.bundle_height) &&
+             !filter(offer->bundle_height)))
+            return STATE_OFFER_STORE_DROPPED_FULL;
+    }
 
     memset(&g_offers[slot], 0, sizeof(g_offers[slot]));
     g_offers[slot].offer = *offer;

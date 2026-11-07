@@ -90,7 +90,7 @@ static bool zpr_run(const char *path, struct zpr_call *c)
     const struct zcl_command_registry *reg = zcl_command_catalog();
     const struct zcl_command_spec *spec =
         reg ? zcl_command_registry_find(reg, path, NULL) : NULL;
-    char why[256];
+    char why[256] = "no handler";
     if (!spec || !spec->handler ||
         !zcl_command_registry_input_validate(spec, &c->input, why,
                                              sizeof(why))) {
@@ -205,8 +205,15 @@ static uint8_t *zpr_slurp(const char *dir, const char *rel, size_t *len)
         if (got == 0)
             break;
     }
-    if (f)
-        fclose(f);
+    if (f) {
+        bool failed = ferror(f) != 0;
+        if (fclose(f) != 0)
+            failed = true;
+        if (failed) {
+            free(buf);
+            return NULL;
+        }
+    }
     *len = used;
     return buf;
 }
@@ -330,8 +337,11 @@ static bool zpr_share(struct zpr_world *w)
     struct pubkey pk;
     zpr_begin(&c);
     bool ok = zpr_keypair(ZPR_PLAYER_SEED, &sk, &pk);
-    if (ok)
-        zcl_hex_encode(pk.vch, pk.size, pubkey);
+    if (!ok) {
+        zpr_end(&c);
+        return false;
+    }
+    zcl_hex_encode(pk.vch, pk.size, pubkey);
     (void)json_push_kv_str(&c.input, "dir", w->a_copy);
     (void)json_push_kv_str(&c.input, "datadir", w->a_dir);
     (void)json_push_kv_str(&c.input, "publisher_pubkey", pubkey);
@@ -461,8 +471,9 @@ static bool zpr_receive(struct zpr_node *a, struct zpr_node *b,
         while (vcs_swarm_engine_next_outbound(b->engine, ZPR_PEER_A, &target,
                                               frame, &len))
             zpr_exchange(a, b, frame, len, corrupt, now, stats);
-        if (!vcs_swarm_engine_download_status(b->engine, transport, &st) ||
-            st.state == VCS_SWARM_DL_COMPLETE ||
+        if (!vcs_swarm_engine_download_status(b->engine, transport, &st))
+            return false;
+        if (st.state == VCS_SWARM_DL_COMPLETE ||
             st.state == VCS_SWARM_DL_FAILED)
             return st.state == VCS_SWARM_DL_COMPLETE;
     }

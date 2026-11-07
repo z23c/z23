@@ -4,6 +4,7 @@
 #include "wallet/keystore.h"
 #include "wallet/sapling_keys.h"
 #include "wallet/wallet.h"
+#include "wallet/wallet_transparent_replay.h"
 #include "util/safe_alloc.h"
 
 /* basic_keystore is ~40MB (4096 script entries * 10KB each).
@@ -669,11 +670,72 @@ static int wallet_harness_sapling_address_rollback(void)
     return failures;
 }
 
+static bool wallet_fold_funding_checks(struct wallet *w, struct transaction *funding,
+                                       const struct uint256 *block)
+{
+    bool ok = true;
+    zcl_alloc_fault_fail_next("tx_vout");
+    if (wallet_transparent_fold_locked(w, funding, block, 3) != WALLET_TRANSPARENT_ERROR ||
+        w->num_wallet_tx != 0) ok = false;
+    zcl_alloc_fault_clear();
+    if (wallet_transparent_fold_locked(w, funding, block, 3) != WALLET_TRANSPARENT_APPLIED) ok = false;
+    struct wallet_tx *existing = &w->map_wallet[0];
+    existing->time_received = 42; existing->from_me = true;
+    if (wallet_transparent_fold_locked(w, funding, block, 4) != WALLET_TRANSPARENT_APPLIED ||
+        existing->time_received != 42 || !existing->from_me || existing->confirms != 4) ok = false;
+    return ok;
+}
+
+static bool wallet_fold_spend_checks(struct wallet *w, struct transaction *spend,
+                                     const struct uint256 *funding,
+                                     const struct uint256 *block)
+{
+    spend->vin[0].prevout.hash = *funding;
+    spend->vin[0].prevout.n = 1;
+    if (wallet_transparent_fold_locked(w, spend, block, 3) != WALLET_TRANSPARENT_NOT_OWNED ||
+        w->num_wallet_tx != 1 || w->num_spent != 0) return false;
+    spend->vin[0].prevout.n = 0;
+    if (wallet_transparent_fold_locked(w, spend, block, 3) != WALLET_TRANSPARENT_APPLIED ||
+        !wallet_is_outpoint_spent(w, funding, 0) || !w->map_wallet[1].from_me) return false;
+    return wallet_transparent_fold_locked(w, spend, block, 3) == WALLET_TRANSPARENT_APPLIED &&
+           w->num_wallet_tx == 2 && w->num_spent == 1;
+}
+
+static int wallet_harness_transparent_fold(void)
+{
+    struct wallet *w = zcl_calloc(1, sizeof(*w), "test_fold_wallet");
+    struct transaction funding, spend, unrelated;
+    struct uint256 block = {0};
+    transaction_init(&funding); transaction_init(&spend); transaction_init(&unrelated);
+    bool ok = w != NULL;
+    if (w) wallet_init(w);
+    struct privkey key; struct pubkey pub;
+    privkey_make_new(&key, true); privkey_get_pubkey(&key, &pub);
+    if (ok) ok = keystore_add_key(&w->keystore, &key);
+    if (ok) ok = transaction_alloc(&funding, 0, 2) && transaction_alloc(&spend, 1, 0);
+    if (ok) {
+        struct tx_destination dest = {.type = DEST_KEY_ID, .id.key = pubkey_get_id(&pub)};
+        script_for_destination(&funding.vout[0].script_pub_key, &dest);
+        funding.vout[0].value = 12345; funding.hash.data[0] = 1;
+        spend.hash.data[0] = 2; block.data[0] = 9;
+        zcl_mutex_lock(&w->cs); zcl_mutex_lock(&w->keystore.cs);
+        ok = wallet_transparent_fold_locked(w, &unrelated, &block, 3) == WALLET_TRANSPARENT_NOT_OWNED &&
+             wallet_fold_funding_checks(w, &funding, &block) &&
+             wallet_fold_spend_checks(w, &spend, &funding.hash, &block);
+        zcl_mutex_unlock(&w->keystore.cs); zcl_mutex_unlock(&w->cs);
+    }
+    transaction_free(&funding); transaction_free(&spend); transaction_free(&unrelated);
+    if (w) { wallet_free(w); free(w); }
+    printf("transparent fold preserves ownership, metadata and retries... %s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int test_wallet(void)
 {
     int failures = 0;
 
     failures += wallet_harness_keystore_init_zeroes();
+    failures += wallet_harness_transparent_fold();
     failures += wallet_harness_keystore_add_and_have();
     failures += wallet_harness_keystore_unknown_key();
     failures += wallet_harness_keystore_get_key();

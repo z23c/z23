@@ -351,18 +351,19 @@ static void tip_finalize_wallet_transactions(struct block_index *pindex_new,
  * visible after another authority already published this height; in that
  * case MMR/MMB must not append twice, but wallet confirmation, Sapling note,
  * nullifier, and derived wallet rows still have to observe the exact body. */
-static void tip_finalize_reconcile_wallet_body(
+static bool tip_finalize_reconcile_wallet_body(
     struct block_index *pindex_new, const struct block *blk)
 {
     if (!pindex_new || !blk ||
         atomic_load_explicit(&g_body_pull_active, memory_order_relaxed))
-        return;
+        return false;
 
     struct wallet *wallet = app_runtime_wallet();
     struct node_db *ndb = app_runtime_node_db();
     const bool regtest_on_demand = tip_finalize_regtest_on_demand();
-    if (!wallet)
-        return;
+    if (!wallet) return true;
+    if (wallet_readiness_get(wallet).state != WALLET_READINESS_READY)
+        return false;
 
     if (regtest_on_demand)
         (void)wallet_advance_confirmations(wallet, pindex_new->nHeight);
@@ -383,6 +384,7 @@ static void tip_finalize_reconcile_wallet_body(
                  "regtest projection: async connect_block enqueue failed "
                  "at height %d", pindex_new->nHeight);
     }
+    return true;
 }
 
 bool tip_finalize_run_wallet_reconcile(struct block_index *pindex_new)
@@ -405,9 +407,9 @@ bool tip_finalize_run_wallet_reconcile(struct block_index *pindex_new)
         block_free(&owned);
         return false;
     }
-    tip_finalize_reconcile_wallet_body(pindex_new, blk);
+    bool wallet_reconciled = tip_finalize_reconcile_wallet_body(pindex_new, blk);
     stage_release_block_view(&owned, &handle, borrowed);
-    return true;
+    return wallet_reconciled;
 }
 
 bool tip_finalize_run_wallet_mempool_reconcile(
@@ -436,9 +438,9 @@ bool tip_finalize_run_wallet_mempool_reconcile(
     /* Preserve the established late-visible ordering: invalidate the coins
      * cache/remove confirmed mempool entries before publishing wallet state. */
     tip_finalize_reconcile_block(pindex_new, blk);
-    tip_finalize_reconcile_wallet_body(pindex_new, blk);
+    bool wallet_reconciled = tip_finalize_reconcile_wallet_body(pindex_new, blk);
     stage_release_block_view(&owned, &handle, borrowed);
-    return true;
+    return wallet_reconciled;
 }
 
 static bool tip_finalize_coinbase_label_differs(struct block_index *pindex_new,

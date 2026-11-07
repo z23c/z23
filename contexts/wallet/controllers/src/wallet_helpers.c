@@ -179,6 +179,8 @@ struct zcl_result wallet_commit_from_context(
 {
     if (!ctx || !wtx)
         return ZCL_ERR(-1, "wallet commit context: NULL context or transaction");
+    if (!ctx->wallet || wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY)
+        return ZCL_ERR(-4, "wallet commit: wallet state unavailable during cutover");
     /* Private mode: the send is recorded durably before the wallet admits it. */
     struct zcl_result prepared =
         wallet_private_broadcast_before_commit(ctx, &wtx->tx.hash);
@@ -208,6 +210,8 @@ struct zcl_result wallet_reaccept_from_context(
     if (!ctx || !wtx)
         return ZCL_ERR(-1,
             "wallet reaccept context: NULL context or transaction");
+    if (!ctx->wallet || wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY)
+        return ZCL_ERR(-4, "wallet reaccept: wallet state unavailable during cutover");
     struct wallet_tx_admission admission = {
         .mempool = ctx->mempool,
         .coins_tip = ctx->coins_tip,

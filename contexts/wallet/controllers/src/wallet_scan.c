@@ -352,8 +352,11 @@ enum wallet_birthday_state wallet_birthday_check(
         return WALLET_BIRTHDAY_AHEAD;
     }
     const struct block_index *bi = chain ? active_chain_at(chain, at) : NULL;
-    if (!bi || !bi->phashBlock || bi->nHeight != at ||
-        memcmp(bi->phashBlock->data, hash, sizeof(hash)) != 0)
+    if (!bi || !bi->phashBlock || bi->nHeight != at) {
+        *floor = at;
+        return WALLET_BIRTHDAY_UNAVAILABLE;
+    }
+    if (memcmp(bi->phashBlock->data, hash, sizeof(hash)) != 0)
         return WALLET_BIRTHDAY_CHANGED;
     *floor = at;
     return WALLET_BIRTHDAY_VALID;
@@ -363,17 +366,18 @@ enum wallet_birthday_state wallet_birthday_check(
 static bool birthday_floor_matches_locked(struct active_chain *chain,
                                           const struct block_index *reached,
                                           int threshold, bool stored,
-                                          const uint8_t hash[32], bool *current)
+                                          const uint8_t hash[32], bool *current, bool *available)
 {
     struct block_index **slots = chain->chain;
+    *available = true;
     *current = slots && reached->nHeight <= chain->height &&
         reached->nHeight < chain->capacity && slots[reached->nHeight] == reached;
     if (!*current || !stored || threshold < 0 || threshold > chain->height ||
         threshold >= chain->capacity)
         return false;
     struct block_index *floor = slots[threshold];
-    return floor && floor->phashBlock && floor->nHeight == threshold &&
-           memcmp(floor->phashBlock->data, hash, 32) == 0;
+    *available = floor && floor->phashBlock && floor->nHeight == threshold;
+    return *available && memcmp(floor->phashBlock->data, hash, 32) == 0;
 }
 
 static void birthday_update_locked(struct wallet *w, int threshold, bool current, bool matches)
@@ -411,10 +415,10 @@ void wallet_birthday_reconcile(struct wallet *w, struct node_db *ndb,
         birthday - WALLET_BIRTHDAY_MARGIN == threshold;
     zcl_mutex_lock(&w->cs);
     zcl_mutex_lock(&chain->write_lock);
-    bool current = false;
+    bool current = false, available = false;
     bool matches = birthday_floor_matches_locked(chain, reached, threshold,
-                                                  stored, hash, &current);
-    birthday_update_locked(w, threshold, current, matches);
+                                                  stored, hash, &current, &available);
+    if (available) birthday_update_locked(w, threshold, current, matches);
     zcl_mutex_unlock(&chain->write_lock);
     zcl_mutex_unlock(&w->cs);
 }

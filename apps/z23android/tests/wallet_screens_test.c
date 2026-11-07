@@ -38,7 +38,7 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
 #define CURSOR_1 "3000000:" TXID("e")
 
 #define SUMMARY_SEND_EL(enc, locked, spendable_zat, spendable, pending_zat, pending, public_zat, public, allowed, why)  \
-    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"spendable_zat\":" spendable_zat ","  \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"wallet_readiness\":\"ready\",\"balance_available\":true,\"spendable_zat\":" spendable_zat ","  \
     "\"spendable\":\"" spendable "\",\"pending_zat\":" pending_zat ",\"pending\":\"" pending "\","      \
     "\"pending_notes\":2,\"pending_min_confirmations_needed\":7,\"sending_zat\":0,\"sending\":\"0.00000000\"," \
     "\"public_zat\":" public_zat ",\"public\":\"" public "\",\"immature_zat\":0,"                       \
@@ -51,7 +51,7 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
     SUMMARY_SEND(spendable_zat, spendable, pending_zat, pending, public_zat, public, "true", "")
 /* Summaries with one thing changed: a wallet that has scanned up to a height, immature coins, a node that is not current. */
 #define SUMMARY_SCAN(scanned)                                                                           \
-    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"spendable_zat\":123456789,"          \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"wallet_readiness\":\"ready\",\"balance_available\":true,\"spendable_zat\":123456789,"          \
     "\"spendable\":\"1.23456789\",\"pending_zat\":0,\"pending\":\"0.00000000\",\"pending_notes\":0,"     \
     "\"pending_min_confirmations_needed\":0,\"sending_zat\":0,\"sending\":\"0.00000000\","               \
     "\"public_zat\":0,\"public\":\"0.00000000\",\"immature_zat\":0,\"immature\":\"0.00000000\","         \
@@ -59,7 +59,7 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
     "\"blocks_behind\":0,\"current\":true,\"locked\":false,\"encrypted\":true,\"shielded_keys\":1,"      \
     "\"send_allowed\":true,\"send_blocked_reason\":\"\"}}"
 #define SUMMARY_IMMATURE(zat, text)                                                                     \
-    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"spendable_zat\":2500000000,"         \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"wallet_readiness\":\"ready\",\"balance_available\":true,\"spendable_zat\":2500000000,"         \
     "\"spendable\":\"25.00000000\",\"pending_zat\":0,\"pending\":\"0.00000000\",\"pending_notes\":0,"    \
     "\"pending_min_confirmations_needed\":0,\"sending_zat\":0,\"sending\":\"0.00000000\","               \
     "\"public_zat\":0,\"public\":\"0.00000000\",\"immature_zat\":" zat ",\"immature\":\"" text "\","      \
@@ -67,7 +67,7 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
     "\"blocks_behind\":0,\"current\":true,\"locked\":false,\"encrypted\":true,\"shielded_keys\":1,"      \
     "\"send_allowed\":true,\"send_blocked_reason\":\"\"}}"
 #define SUMMARY_OFFLINE                                                                                 \
-    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"spendable_zat\":123456789,"          \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"wallet_readiness\":\"ready\",\"balance_available\":true,\"spendable_zat\":123456789,"          \
     "\"spendable\":\"1.23456789\",\"pending_zat\":0,\"pending\":\"0.00000000\",\"pending_notes\":0,"     \
     "\"pending_min_confirmations_needed\":0,\"sending_zat\":0,\"sending\":\"0.00000000\","               \
     "\"public_zat\":0,\"public\":\"0.00000000\",\"immature_zat\":0,\"immature\":\"0.00000000\","         \
@@ -77,7 +77,7 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
 #define RT_ADDR "zregtestsapling1" Q70 "qqqqq"
 /* Spendable 2, 0.5 pending in two payments with 7 confirmations to the first, 0.1 public, 20 maturing. */
 #define SUMMARY_ALL                                                                                     \
-    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"spendable_zat\":200000000,"          \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"wallet_readiness\":\"ready\",\"balance_available\":true,\"spendable_zat\":200000000,"          \
     "\"spendable\":\"2.00000000\",\"pending_zat\":50000000,\"pending\":\"0.50000000\",\"pending_notes\":2," \
     "\"pending_min_confirmations_needed\":7,\"sending_zat\":0,\"sending\":\"0.00000000\","               \
     "\"public_zat\":10000000,\"public\":\"0.10000000\",\"immature_zat\":2000000000,"                     \
@@ -92,7 +92,7 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
     "\"spendable_zat\":null,\"spendable\":null,\"pending_zat\":null,\"pending\":null,\"pending_notes\":null," \
     "\"pending_min_confirmations_needed\":null,\"unready_zat\":null,\"unready\":null,"
 #define SUMMARY_STATE_L(state, locked, private_part, public_zat, public)                                  \
-    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"" state "\"," private_part \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"wallet_readiness\":\"ready\",\"balance_available\":true,\"shielded_state\":\"" state "\"," private_part \
     "\"public_zat\":" public_zat ",\"public\":\"" public "\",\"immature_zat\":0,\"immature\":\"0.00000000\"," \
     "\"tip_height\":3000000,\"header_height\":3000000,\"scanned_through_height\":3000000,\"blocks_behind\":0," \
     "\"current\":true,\"locked\":" locked ",\"encrypted\":true,\"shielded_keys\":1,\"send_allowed\":true,\"send_blocked_reason\":\"\"}}"
@@ -373,7 +373,7 @@ static long find_text(const struct wallet_screen *s, const char *text)
 }
 static const char *text_at(const struct wallet_screen *s, long i) { CHECK(i >= 0 && (size_t)i < s->count); return s->items[i].text; }
 static int count_ops(const char *op) { return fake.counts[op_slot(op)]; }
-static void tap(enum wallet_action action, unsigned arg, enum wallet_outcome want) { CHECK(wallet_screens_activate(action, arg) == want); }
+static void tap(enum wallet_action action, unsigned arg, enum wallet_outcome want) { enum wallet_outcome got = wallet_screens_activate(action, arg); if (got != want) fprintf(stderr, "tap action=%d got=%d want=%d\n", action, got, want); CHECK(got == want); }
 static bool has(const char *text) { return find_text(snap(), text) >= 0; }
 static void wait_for(bool (*done)(void))
 {
@@ -509,7 +509,7 @@ static void test_funds_replies(void)
     funds_node_stopped_or_starting();
     funds_node_answers();
     int before = fake.op_count;               /* Send opens the Send screen and starts nothing */
-    tap(WALLET_ACT_SEND, 0, WALLET_SEND);
+    tap(WALLET_ACT_SEND, 0, WALLET_STAY);
     CHECK(fake.op_count == before && snap()->page == WALLET_PAGE_FUNDS);
     tap(WALLET_ACT_BACK, 0, WALLET_LEAVE);
     wallet_screens_close();
@@ -591,6 +591,24 @@ static void test_fleet(void)
 
 static bool item_is(const char *text);
 
+static void test_cutover_summary_hides_amounts(void)
+{
+    static const char pending[] = "{\"ok\":true,\"data\":{\"wallet_readiness\":\"pending\",\"balance_available\":false,\"spendable_zat\":null,\"tip_height\":123,\"blocks_behind\":7}}";
+    static const char legacy[] = "{\"ok\":true,\"data\":{\"spendable_zat\":123456789}}";
+    start(false);
+    fake.summary = GOOD_SUMMARY_LOCKED;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && item_is("1.23456789 ZCL"));
+    fake.summary = pending; fake.now += WALLET_REFRESH_MS; wallet_screens_tick();
+    CHECK(has("Updating wallet history") && has("Block 123; 7 blocks left") && !has("1.23456789 ZCL") &&
+          find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_SEND) < 0 &&
+          find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_RECEIVE) >= 0);
+    fake.summary = legacy; fake.now += WALLET_REFRESH_MS; wallet_screens_tick();
+    CHECK(!has("1.23456789 ZCL") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_SEND) < 0);
+    fake.summary = GOOD_SUMMARY_LOCKED; fake.now += WALLET_REFRESH_MS; wallet_screens_tick();
+    CHECK(item_is("1.23456789 ZCL") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_SEND) >= 0);
+    wallet_screens_close();
+}
+
 static void test_balance_refresh_failure(void)
 {
     start(false);
@@ -601,8 +619,7 @@ static void test_balance_refresh_failure(void)
     fake.summary = OTHER_ERROR;
     fake.now += WALLET_REFRESH_MS;
     wallet_screens_tick();
-    CHECK(has("Last known balance") && item_is("1.23456789 ZCL"));
-    CHECK(has("Could not refresh") && has("Sending waits") && !has("Up to date"));
+    CHECK(has("Balance unknown") && !item_is("1.23456789 ZCL") && !has("Up to date"));
     CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_SEND) < 0);
     tap(WALLET_ACT_SEND, 0, WALLET_STAY);
     CHECK(!wallet_screens_spendable(&amount));
@@ -636,7 +653,7 @@ static void test_balance_refresh_failure(void)
     fake.summary = OTHER_ERROR;
     fake.now += WALLET_REFRESH_MS;
     wallet_screens_tick();
-    CHECK(has("Last known balance") && has("Still scanning") && has("Could not refresh"));
+    CHECK(has("Balance unknown") && !has("Last known balance"));
     wallet_screens_close();
 }
 
@@ -840,14 +857,6 @@ static void finish_waiting(void)
     wait_for(live_shown);
     wallet_screens_close();
 }
-/* The kept balance as Funds draws it: its heading, the amount and under it the age line. */
-static bool cached_shown(const struct wallet_screen *s, const char *amount, const char *age)
-{
-    long at = find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE);
-    return at >= 1 && (size_t)at + 1 < s->count && !strcmp(text_at(s, at), amount) &&
-           !strcmp(text_at(s, at - 1), "Last known balance") && !strcmp(text_at(s, at + 1), age);
-}
-
 /* The balance file is sealed: the tag of its format, then nothing of the plain body. */
 static bool sealed_only(size_t *size)
 {
@@ -885,20 +894,19 @@ static void test_cache_sealed_file(void)
     remove_dir();
 }
 
-/* Before the node answers Funds shows the kept balance with its age, and the live summary replaces all of it. */
+/* A sealed balance stays hidden until a live ready summary arrives. */
 static void test_cache_roundtrip(void)
 {
     wallet_with_balance();
     wall += 300;                                                   /* five minutes later, before the node answers */
     struct wallet_screen *s = open_waiting();
-    CHECK(find_text(s, "Loading") < 0 && !item_is("Balance") && keystore.unseals == 1);
-    CHECK(cached_shown(s, "1.23456789 ZCL", "As of 5 min ago, updating"));
-    long amount = find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE);
-    CHECK(find_text(s, "0.5 ZCL pending") > amount && find_text(s, "0.1 ZCL public") > amount);
-    CHECK(find_text(s, "Up to date") < 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SEND) >= 0);
-    wall += 600;                                                   /* the age line follows the clock */
+    CHECK(find_text(s, "Loading") >= 0 && keystore.unseals == 1);
+    CHECK(find_text(s, "1.23456789 ZCL") < 0);
+    CHECK(find_text(s, "0.5 ZCL pending") < 0 && find_text(s, "0.1 ZCL public") < 0);
+    CHECK(find_text(s, "Up to date") < 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SEND) < 0);
+    wall += 600;                                                   /* the cached amount stays hidden as time passes */
     wallet_screens_tick();
-    CHECK(cached_shown(snap(), "1.23456789 ZCL", "As of 15 min ago, updating"));
+    CHECK(!has("1.23456789 ZCL"));
     release_block();                                               /* the node answers: live data replaces it */
     wait_for(live_shown);
     CHECK(!has("Last known") && !has("As of") && item_is("Balance") && has("Up to date at block 3000000"));
@@ -978,7 +986,7 @@ static void test_cache_not_trusted(void)
     wallet_with_balance();                                          /* the plain text file of an earlier build is removed */
     put_file(PLAIN_CACHE, "z23-balance-cache-v1\nffffffffffffffff\n1700000000\n42 ZCL\n\n\n");
     struct wallet_screen *s = open_waiting();
-    CHECK(!file_exists(PLAIN_CACHE) && find_text(s, "42 ZCL") < 0 && cached_shown(s, "1.23456789 ZCL", "As of less than a minute ago, updating"));
+    CHECK(!file_exists(PLAIN_CACHE) && find_text(s, "42 ZCL") < 0 && find_text(s, "1.23456789 ZCL") < 0);
     finish_waiting();
     remove_dir();
 
@@ -1040,13 +1048,12 @@ static void test_cache_from_the_future(void)
     wallet_screens_close();
     wall = 1700000000;
     s = open_waiting();
-    CHECK(cached_shown(s, "1.23456789 ZCL", "As of less than a minute ago, updating"));
+    CHECK(find_text(s, "1.23456789 ZCL") < 0);
     finish_waiting();
     remove_dir();
 }
 
-/* A node that stops answering after it did answer shows the last balance with its age, beside the notice that it is waiting. Once
- * its process has stopped, the age line no longer says it is updating. */
+/* A silent or stopped node never displays a sealed amount. */
 static void test_cache_silent_node(void)
 {
     wallet_with_balance();
@@ -1054,13 +1061,13 @@ static void test_cache_silent_node(void)
     start(false);
     fake.summary = NODE_UNAVAILABLE_ERROR;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(cached_shown(snap(), "1.23456789 ZCL", "As of 2 min ago, updating") && has("Waiting for your node"));
+    CHECK(!has("1.23456789 ZCL") && has("Waiting for your node"));
     wallet_screens_close();
     start(false);
     fake.summary = NODE_UNAVAILABLE_ERROR;
     fake.node_up = false;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(cached_shown(snap(), "1.23456789 ZCL", "As of 2 min ago") && has("Node stopped. Start it to see your funds."));
+    CHECK(!has("1.23456789 ZCL") && has("Node stopped. Start it to see your funds."));
     wallet_screens_close();
     remove_dir();
 }
@@ -1200,7 +1207,7 @@ static void test_new_wallet_unknown(void)
     release_block();
     for (int i = 0; i < 1000 && !item_is("0 ZCL"); ++i) usleep(5000);
     s = snap();
-    CHECK(find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) == slot && item_is("0 ZCL") && !has("unknown"));
+    CHECK(find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) >= 0 && item_is("0 ZCL") && !has("unknown"));
     wallet_screens_close();
     remove_dir();
 }
@@ -1624,23 +1631,23 @@ static void test_preload_arrives_on_open_receive(void)
     wallet_screens_close();
 }
 
-static void funds_actions_first(void)
+static void funds_actions_first(bool ready)
 {
     struct wallet_screen *s = snap();
     CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_RECEIVE) == 1);
-    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SEND) == 2);
-    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_HISTORY) == 3);
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SEND) == (ready ? 2 : -1));
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_HISTORY) == (ready ? 3 : 2));
 }
 static void test_funds_action_positions(void)
 {
     start(true); set_block(); CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    funds_actions_first(); release_block(); wait_for(settled); wallet_screens_close();
+    funds_actions_first(false); release_block(); wait_for(settled); wallet_screens_close();
     start(false); fake.summary = NODE_UNAVAILABLE_ERROR; fake.node_up = false;
-    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS)); funds_actions_first(); wallet_screens_close();
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS)); funds_actions_first(false); wallet_screens_close();
     start(false); fake.summary = SUMMARY_SCAN("2999000");
-    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS)); funds_actions_first(); wallet_screens_close();
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS)); funds_actions_first(true); wallet_screens_close();
     start(false); CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    funds_actions_first(); wallet_screens_close();
+    funds_actions_first(true); wallet_screens_close();
 }
 
 static void test_receive_amount_navigation(void)
@@ -2856,6 +2863,7 @@ int main(int argc, char **argv)
     test_funds_replies();
     test_fleet();
     test_refresh_and_stale();
+    test_cutover_summary_hides_amounts();
     test_balance_refresh_failure();
     test_send_line();
     test_send_line_before_answer();

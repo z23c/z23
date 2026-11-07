@@ -126,7 +126,8 @@ static bool wrc_open(struct wrc_fx *fx, bool with_coins_view)
     if (!fx->w)
         return false;
     wallet_init(fx->w);
-    fx->ok = wrc_make_chain(fx) && wrc_make_keys(fx) &&
+    fx->ok = wallet_readiness_initialize(fx->w, WALLET_READINESS_READY, false, 0) &&
+             wrc_make_chain(fx) && wrc_make_keys(fx) &&
              test_mkdtemp(fx->datadir, sizeof(fx->datadir), "wrc") &&
              node_db_open(&fx->ndb, ":memory:");
     if (!fx->ok)

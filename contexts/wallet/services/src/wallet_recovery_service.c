@@ -4,6 +4,9 @@
  * See services/wallet_recovery_service.h. */
 
 #include "services/wallet_recovery_service.h"
+#include "wallet_recovery_internal.h"
+#include "services/wallet_create_service.h"
+#include "core/random.h"
 
 #include "chain/chainparams.h"
 #include "chain/checkpoints.h"                 /* pinned blocks */
@@ -46,7 +49,7 @@
 
 /* ── helpers ─────────────────────────────────────────────────────── */
 
-static void wrc_reset(struct wallet_recovery_report *out, const char *datadir)
+void wrc_reset(struct wallet_recovery_report *out, const char *datadir)
 {
     memset(out, 0, sizeof(*out));
     if (datadir && datadir[0]) {
@@ -117,7 +120,7 @@ static enum wallet_at_rest_policy wrc_at_rest_decision(const char *passphrase)
     return wallet_at_rest_creation_policy();
 }
 
-static struct zcl_result wrc_at_rest_gate(const char *passphrase)
+struct zcl_result wrc_at_rest_gate(const char *passphrase)
 {
     switch (wrc_at_rest_decision(passphrase)) {
     case WALLET_AT_REST_ENCRYPTED:
@@ -203,7 +206,7 @@ static struct zcl_result wrc_rebuild_transparent(
     return ZCL_OK;
 }
 
-static struct zcl_result wrc_rebuild_keys(struct wallet *w,
+struct zcl_result wrc_rebuild_keys(struct wallet *w,
                                           struct node_db *chain,
                                           bool shielded_only,
                                           struct wallet_recovery_report *out)
@@ -508,18 +511,10 @@ static void wrc_count_shielded_rows(struct node_db *ndb,
     out->notes_before = db_sapling_note_count_all(ndb);
 }
 
-/* True when the target already is a wallet in any way: a seed row (readable
- * or not), a transparent key, a Sapling key or a note. */
-static bool wrc_wallet_present(const struct wallet_recovery_report *out)
-{
-    return out->keys_before > 0 || out->seed_present_before ||
-           out->sapling_keys_before > 0 || out->notes_before > 0;
-}
-
 /* Register the caller's passphrase (or the creation-policy environment one)
  * for the flush that follows, so the seed and keys are wrapped as they are
  * written. Sets *loaded when the lock module now holds a passphrase. */
-static struct zcl_result wrc_load_passphrase(
+struct zcl_result wrc_load_passphrase(
     const struct wallet_recovery_request *req, bool *loaded)
 {
     const char *pass = req->passphrase;
@@ -554,33 +549,6 @@ static void wrc_mark_unread(const struct wallet_recovery_request *req,
              req->birthday_at_local_tip && wrc_release_floor_usable()
                  ? WALLET_BIRTHDAY_PENDING : WALLET_RESTORE_BLOCKER_UNREAD);
 }
-
-/* The birthday of a phrase made now. Nothing can pay it in a block mined
- * before it, so its first scan may start at any block that already exists.
- * Three heights are each at or below the real chain tip:
- *   (a) the highest connected block (status >= 3) in node.db, which this node
- *       validated;
- *   (b) the SHA3 UTXO anchor this release ships (mainnet only), the
- *       height the reducer never folds below and a bundle install must match,
- *       mined before this binary was built;
- *   (c) the best header in block_index.bin, the accepted header with the
- *       most chain work: a peer that sends headers past the real tip must
- *       mine them, and a chain of them outweighs the real chain only for one
- *       that out-mined it.
- * A height a peer only claims is never used. P is the highest of the three,
- * with (c) read only while (a) is below (b) + WALLET_BIRTHDAY_MARGIN
- * (wrc_best_header). The floor block is the highest block at or below P - WALLET_BIRTHDAY_MARGIN
- * whose hash is known: a connected row, an ancestor of the best header, or a
- * block this release pins (a header checkpoint or the anchor). The stored
- * birthday is the floor plus the margin, so it is never above P, and a
- * reorganisation shorter than the margin cannot replace the floor. Rows above
- * a rewound tip keep their status; that is safe because boot checks the floor
- * block, not the birthday, against the active chain. With no floor above
- * genesis the wallet records no birthday and scans from genesis. */
-struct wrc_floor {
-    int height;
-    uint8_t hash[32];
-};
 
 static void wrc_floor_offer(struct wrc_floor *f, int height,
                             const uint8_t hash[32])
@@ -682,7 +650,29 @@ static int wrc_best_header(const char *datadir, int tip, int anchor,
     return best;
 }
 
-static void wrc_birthday_floor(const char *datadir, struct node_db *ndb,
+/* The birthday of a phrase made now. Nothing can pay it in a block mined
+ * before it, so its first scan may start at any block that already exists.
+ * Three heights are each at or below the real chain tip:
+ *   (a) the highest connected block (status >= 3) in node.db, which this node
+ *       validated;
+ *   (b) the SHA3 UTXO anchor this release ships (mainnet only), the
+ *       height the reducer never folds below and a bundle install must match,
+ *       mined before this binary was built;
+ *   (c) the best header in block_index.bin, the accepted header with the
+ *       most chain work: a peer that sends headers past the real tip must
+ *       mine them, and a chain of them outweighs the real chain only for one
+ *       that out-mined it.
+ * A height a peer only claims is never used. P is the highest of the three,
+ * with (c) read only while (a) is below (b) + WALLET_BIRTHDAY_MARGIN
+ * (wrc_best_header). The floor block is the highest block at or below P - WALLET_BIRTHDAY_MARGIN
+ * whose hash is known: a connected row, an ancestor of the best header, or a
+ * block this release pins (a header checkpoint or the anchor). The stored
+ * birthday is the floor plus the margin, so it is never above P, and a
+ * reorganisation shorter than the margin cannot replace the floor. Rows above
+ * a rewound tip keep their status; that is safe because boot checks the floor
+ * block, not the birthday, against the active chain. With no floor above
+ * genesis the wallet records no birthday and scans from genesis. */
+void wrc_birthday_floor(const char *datadir, struct node_db *ndb,
                                struct wrc_floor *f)
 {
     uint8_t anchor_hash[32] = {0};
@@ -701,7 +691,7 @@ static void wrc_birthday_floor(const char *datadir, struct node_db *ndb,
 }
 
 static void wrc_record_birthday(const struct wallet_recovery_request *req,
-                                struct node_db *ndb,
+                                struct node_db *ndb, struct wallet *w, bool local_creation,
                                 struct wallet_recovery_report *out)
 {
     struct wrc_floor f;
@@ -713,9 +703,11 @@ static void wrc_record_birthday(const struct wallet_recovery_request *req,
         wrc_birthday_floor(req->datadir, ndb, &f);
     }
     int64_t birthday = (int64_t)f.height + WALLET_BIRTHDAY_MARGIN;
-    out->birthday_recorded =
-        f.height > 0 && f.height <= INT_MAX - WALLET_BIRTHDAY_MARGIN &&
-        db_wallet_birthday_set(ndb, birthday, f.hash);
+    uint8_t identity[32];
+    bool valid = f.height > 0 && f.height <= INT_MAX - WALLET_BIRTHDAY_MARGIN;
+    out->birthday_recorded = valid && (local_creation
+        ? (wallet_scan_identity(w, identity) && db_wallet_birthday_set_created(ndb, birthday, f.hash, identity))
+        : db_wallet_birthday_set(ndb, birthday, f.hash));
     out->birthday_height = out->birthday_recorded ? birthday : 0;
     if (out->birthday_recorded)
         memcpy(out->birthday_hash, f.hash, sizeof(f.hash));
@@ -749,17 +741,12 @@ bool wallet_recovery_record_fresh_birthday(const char *datadir,
                                            int64_t *birthday_out)
 {
     struct wrc_floor f;
-    int64_t have = 0;
-    uint8_t have_hash[32];
     if (birthday_out)
         *birthday_out = 0;
     if (!ndb || !ndb->open) {
         LOG_WARN(WRC_TAG, "fresh birthday not recorded: node.db is not open");
         return false;
     }
-    /* Written once, with the wallet: never replace an existing birthday. */
-    if (db_wallet_birthday_get(ndb, &have, have_hash))
-        return false;
     wrc_birthday_floor(datadir ? datadir : "", ndb, &f);
     /* Keys drawn by this running binary postdate every checkpoint compiled
      * into it, so the highest of them is a floor too, whichever is higher. */
@@ -770,7 +757,7 @@ bool wallet_recovery_record_fresh_birthday(const char *datadir,
     if (f.height <= 0 || f.height > INT_MAX - WALLET_BIRTHDAY_MARGIN)
         return false;
     int64_t birthday = (int64_t)f.height + WALLET_BIRTHDAY_MARGIN;
-    if (!db_wallet_birthday_set(ndb, birthday, f.hash)) {
+    if (!db_wallet_birthday_set_if_absent(ndb, birthday, f.hash)) {
         LOG_WARN(WRC_TAG, "fresh birthday %lld could not be stored",
                  (long long)birthday);
         return false;
@@ -877,7 +864,7 @@ static bool wrc_assess_history(const struct wallet_recovery_request *req,
  * the wallet must say so: a verified birthday is stored, and without one a
  * pending retry from height 0 keeps the wallet reading incomplete until a
  * rescan reads the range. Creation has its own birthday. */
-static void wrc_settle_birthday(const struct wallet_recovery_request *req,
+void wrc_settle_birthday(const struct wallet_recovery_request *req,
                                 struct node_db *ndb, struct wallet *w,
                                 bool seeded,
                                 struct wallet_recovery_report *out)
@@ -902,7 +889,7 @@ struct zcl_result wallet_recovery_refuse_live_process(void)
 }
 
 /* The request's own shape, refused before anything is read or written. */
-static struct zcl_result wrc_check_request(
+struct zcl_result wrc_check_request(
     const struct wallet_recovery_request *req)
 {
     if (!req->dry_run) {
@@ -961,19 +948,8 @@ static struct zcl_result wrc_target_gate(const struct wallet_recovery_report *ou
     return ZCL_OK;
 }
 
-/* Everything the run holds open between the lock and the final cleanup. */
-struct wrc_run {
-    struct node_db ndb;
-    sqlite3 *ro_db;
-    struct wallet_restore_datadir_lock wlock;
-    struct wallet_sqlite ws;
-    bool have_db;
-    bool ro_open;
-    bool have_ws;
-};
-
 /* Close whatever the run still holds, handles first, the lock last. */
-static void wrc_run_release(struct wrc_run *st)
+void wrc_run_release(struct wrc_run *st)
 {
     if (st->have_ws) wallet_sqlite_close(&st->ws);
     if (st->ro_open) zcl_native_node_db_close_readonly(&st->ro_db, &st->ndb);
@@ -983,7 +959,7 @@ static void wrc_run_release(struct wrc_run *st)
 }
 
 /* From the phrase alone: shape check, seed, addresses. */
-static struct zcl_result wrc_phrase_to_addresses(
+struct zcl_result wrc_phrase_to_addresses(
     const struct wallet_recovery_request *req,
     struct wallet_recovery_report *out)
 {
@@ -1051,7 +1027,7 @@ static struct zcl_result wrc_pre_directory_gates(
 }
 
 /* The writer's lock; a plan takes none. */
-static struct zcl_result wrc_take_writer_lock(
+struct zcl_result wrc_take_writer_lock(
     const struct wallet_recovery_request *req,
     struct wallet_recovery_report *out, struct wrc_run *st)
 {
@@ -1084,7 +1060,7 @@ static struct zcl_result wrc_take_writer_lock(
 }
 
 /* Open an existing target read-only and prove it intact. */
-static struct zcl_result wrc_open_existing_target_ro(
+struct zcl_result wrc_open_existing_target_ro(
     const struct wallet_recovery_request *req,
     struct wallet_recovery_report *out, struct wrc_run *st)
 {
@@ -1136,7 +1112,7 @@ static struct zcl_result wrc_open_existing_target_ro(
 }
 
 /* Read the existing wallet's key and seed facts through the open handle. */
-static struct zcl_result wrc_read_existing_wallet_facts(
+struct zcl_result wrc_read_existing_wallet_facts(
     struct wallet_recovery_report *out, struct wrc_run *st)
 {
     struct zcl_result wr = wallet_sqlite_open_r(&st->ws, st->ndb.db);
@@ -1162,7 +1138,7 @@ static struct zcl_result wrc_read_existing_wallet_facts(
 }
 
 /* Swap the read-only handle for the real write handle. */
-static struct zcl_result wrc_swap_to_write_handle(
+struct zcl_result wrc_swap_to_write_handle(
     struct wallet_recovery_report *out, struct wrc_run *st)
 {
     if (st->have_ws) { wallet_sqlite_close(&st->ws); st->have_ws = false; }
@@ -1226,7 +1202,7 @@ static struct node_db *wrc_history_oracle(
 /* Root the wallet on the phrase, rebuild its keys and, on a commit, flush. */
 static struct zcl_result wrc_rebuild_and_flush(
     const struct wallet_recovery_request *req, struct wrc_run *st,
-    struct wallet *w, bool seeded, bool *recovery_pass_loaded,
+    struct wallet *w, bool seeded, bool local_creation, bool *recovery_pass_loaded,
     struct wallet_recovery_report *out)
 {
     struct zcl_result rc = ZCL_OK;
@@ -1262,7 +1238,7 @@ static struct zcl_result wrc_rebuild_and_flush(
                        fr.message);
     out->keys_after = db_wallet_key_count(&st->ndb);
     out->seed_installed = true;
-    wrc_record_birthday(req, &st->ndb, out);
+    wrc_record_birthday(req, &st->ndb, w, local_creation, out);
     node_db_wal_checkpoint(&st->ndb);
     /* Again after the write: the checkpoint can recreate -wal/-shm, and
      * those hold the same key bytes as the database they front. */
@@ -1270,12 +1246,13 @@ static struct zcl_result wrc_rebuild_and_flush(
     return rc;
 }
 
+
 /* Inspect the target read-only and settle every refusal that precedes a
  * write handle; on a commit, swap in the write handle. On failure the run's
  * handles and lock are already released. */
-static struct zcl_result wrc_inspect_and_open_target(
+struct zcl_result wrc_inspect_and_open_target(
     const struct wallet_recovery_request *req,
-    struct wallet_recovery_report *out, struct wrc_run *st, bool *seeded)
+    struct wallet_recovery_report *out, struct wrc_run *st, bool *seeded, bool strict_creation)
 {
     /* ── inspect the target, READ-ONLY, on both paths ─────────────────
      *
@@ -1307,6 +1284,15 @@ static struct zcl_result wrc_inspect_and_open_target(
             return fr;
     }
 
+    if (st->have_db) {
+        struct wallet_create_pending pending;
+        enum wallet_birthday_proof_status ps = db_wallet_create_pending_get(&st->ndb, &pending);
+        if (ps != WALLET_BIRTHDAY_PROOF_ABSENT &&
+            !(ps == WALLET_BIRTHDAY_PROOF_FOUND && pending.committed)) {
+            wrc_run_release(st);
+            return ZCL_ERR(-62, "unfinished or unreadable wallet creation preparation");
+        }
+    }
     *seeded = wrc_assess_history(req, &st->ndb, out);
 
     /* Never write a second seed over a wallet that already has keys. */
@@ -1314,6 +1300,12 @@ static struct zcl_result wrc_inspect_and_open_target(
     if (!gate.ok) {
         wrc_run_release(st);
         return gate;
+    }
+
+    if (strict_creation && st->have_db && (!wrc_creation_wallet_free_r(st->ndb.db).ok ||
+        !wrc_creation_no_auxiliary_keys_r(st->ndb.db).ok)) {
+        wrc_run_release(st);
+        return ZCL_ERR(-62, "creation target is not verifiably wallet-free");
     }
 
     /* Proven readable AND wallet-free. Only NOW may a write handle exist:
@@ -1324,8 +1316,8 @@ static struct zcl_result wrc_inspect_and_open_target(
     return ZCL_OK;
 }
 
-struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
-                                      struct wallet_recovery_report *out)
+static struct zcl_result wallet_recovery_run_internal(const struct wallet_recovery_request *req,
+                                      struct wallet_recovery_report *out, bool local_creation)
 {
     if (!out)
         return ZCL_ERR(-60, "report is NULL");
@@ -1361,7 +1353,7 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
 
     bool seeded = false;
     struct zcl_result open_r = wrc_inspect_and_open_target(req, out, &st,
-                                                           &seeded);
+                                                           &seeded, local_creation);
     if (!open_r.ok)
         return open_r;
 
@@ -1379,7 +1371,7 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
     w->sapling_keys.follows_wallet_lock = false;
 
     bool recovery_pass_loaded = false;
-    struct zcl_result rc = wrc_rebuild_and_flush(req, &st, w, seeded,
+    struct zcl_result rc = wrc_rebuild_and_flush(req, &st, w, seeded, local_creation,
                                                  &recovery_pass_loaded, out);
 
     if (recovery_pass_loaded)
@@ -1388,4 +1380,19 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
     free(w);
     wrc_run_release(&st);
     return rc;
+}
+
+struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req, struct wallet_recovery_report *out)
+{
+    return wallet_recovery_run_internal(req, out, false);
+}
+
+struct zcl_result wallet_recovery_create_fresh(const struct wallet_recovery_request *req, struct wallet_recovery_report *out, char *phrase, size_t cap)
+{
+    if (!req || !phrase) return ZCL_ERR(-69, "invalid fresh wallet request");
+    struct zcl_result generated = wallet_create_phrase(phrase, cap);
+    if (!generated.ok) return generated;
+    struct wallet_recovery_request fresh = *req;
+    fresh.phrase = phrase; fresh.record_birthday = true; fresh.birthday_at_local_tip = false; fresh.has_birthday = false;
+    return wallet_recovery_run_internal(&fresh, out, true);
 }

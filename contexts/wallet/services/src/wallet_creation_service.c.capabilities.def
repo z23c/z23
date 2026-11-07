@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capabilities for offline wallet creation. */
+ZCL_MODULE_CAPABILITY("contexts/wallet/services/src/wallet_creation_service.c", CAP_FS_READ|CAP_FS_WRITE, "Reads creation target state and persists creation through the wallet storage lifecycle.")

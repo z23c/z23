@@ -85,4 +85,8 @@ enum sun_probe sun_wallet_probe(const struct sun *node);
 /* The header and block heights of the running node's active chain; false when the node does not answer. */
 bool sun_chain_tip(const struct sun *node, int64_t *headers, int64_t *blocks);
 
+enum sun_creation_state { SUN_CREATION_UNKNOWN, SUN_CREATION_NONE, SUN_CREATION_PREPARED, SUN_CREATION_COMMITTED };
+enum sun_result sun_prepare_creation(const struct sun *, struct zapp_words *, char nonce[65]);
+enum sun_result sun_commit_creation(const struct sun *, const struct zapp_words *, const char *, const char *, struct sun_restored *);
+enum sun_creation_state sun_creation_status(const struct sun *, char nonce[65]);
 #endif

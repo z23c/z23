@@ -1044,6 +1044,9 @@ static bool atm_gate_wallet_bad_sig(const struct atm_ctx *c)
     ok = ok && wallet != NULL;
     if (wallet) {
         wallet_init(wallet);
+        bool ready = wallet_readiness_initialize(wallet, WALLET_READINESS_READY,
+                                                 false, 0);
+        ok = ok && ready;
         struct wallet_tx wtx;
         memset(&wtx, 0, sizeof(wtx));
         atm_build_spend(&wtx.tx, &utxo, 50 * COIN_VALUE);
@@ -1092,6 +1095,9 @@ static bool atm_gate_wallet_valid(const struct atm_ctx *c)
     ok = ok && wallet != NULL;
     if (wallet) {
         wallet_init(wallet);
+        bool ready = wallet_readiness_initialize(wallet, WALLET_READINESS_READY,
+                                                 false, 0);
+        ok = ok && ready;
         struct wallet_tx wtx;
         memset(&wtx, 0, sizeof(wtx));
         atm_build_spend(&wtx.tx, &utxo, 50 * COIN_VALUE);

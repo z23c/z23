@@ -851,11 +851,82 @@ static int wfs_test_send_witness_gate(struct node_db *ndb)
     return failures;
 }
 
+static int wfs_readiness_absent_generation(struct wallet *w)
+{
+    int failures = 0;
+    WFS_CHECK("absent generation initializes pending",
+              wallet_readiness_initialize(w, WALLET_READINESS_PENDING, false, 99));
+    WFS_CHECK("present generation cannot complete absent authority",
+              !wallet_readiness_complete(w, true, 0));
+    WFS_CHECK("absent generation completes without matching ignored value",
+              wallet_readiness_complete(w, false, 99));
+    struct wallet_readiness absent = wallet_readiness_get(w);
+    WFS_CHECK("absent generation remains absent",
+              absent.state == WALLET_READINESS_READY && !absent.generation_present && absent.generation == 0);
+    return failures;
+}
+
+static int wfs_readiness_sign_refused(struct wallet *w, struct wallet_tx *tx,
+                                      const char *label)
+{
+    int failures = 0;
+    struct coin_entry coin = {0};
+    const char *err = NULL;
+    transaction_init(&tx->tx);
+    WFS_CHECK(label, !wallet_sign_selected_inputs(w, tx, &coin, 1, 0, &err) && err &&
+              strcmp(err, "Wallet state is unavailable during cutover") == 0);
+    return failures;
+}
+
+static int wfs_test_readiness_projection(void)
+{
+    int failures = 0;
+    struct wallet *w = calloc(1, sizeof(*w));
+    WFS_CHECK("readiness wallet allocation", w != NULL);
+    if (!w) return failures + 1;
+    wallet_init(w);
+    struct wallet_readiness a = wallet_readiness_get(w);
+    WFS_CHECK("readiness starts unknown", a.state == WALLET_READINESS_UNKNOWN && a.epoch == 0);
+    struct wallet_tx tx = {0};
+    failures += wfs_readiness_sign_refused(w, &tx, "unknown refuses wallet-key signing");
+    WFS_CHECK("initialize pending", wallet_readiness_initialize(w, WALLET_READINESS_PENDING, true, 42));
+    failures += wfs_readiness_sign_refused(w, &tx, "pending refuses wallet-key signing");
+    struct wallet_readiness b = wallet_readiness_get(w);
+    WFS_CHECK("pending binds authority", b.state == WALLET_READINESS_PENDING &&
+              b.generation_present && b.generation == 42 && b.epoch > a.epoch);
+    WFS_CHECK("wrong generation cannot complete", !wallet_readiness_complete(w, true, 43));
+    WFS_CHECK("generation presence mismatch cannot complete", !wallet_readiness_complete(w, false, 0));
+    struct tx_destination dest = {0};
+    int64_t fee = 0;
+    const char *why = NULL;
+    WFS_CHECK("pending refuses wallet transaction planning",
+              !wallet_create_transaction(w, &dest, 1, &tx, &fee, &why) && why &&
+              strcmp(why, "Wallet state is unavailable during cutover") == 0);
+    struct wallet_tx_admission admission = {0};
+    struct zcl_result refused = wallet_commit_transaction(w, &tx, &admission);
+    WFS_CHECK("pending refuses admission before chain mutation", !refused.ok && refused.code == -4);
+    WFS_CHECK("completion succeeds", wallet_readiness_complete(w, true, 42));
+    struct wallet_readiness c = wallet_readiness_get(w);
+    WFS_CHECK("completion advances epoch without changing authority", c.state == WALLET_READINESS_READY &&
+              c.generation == b.generation && c.epoch > b.epoch);
+    WFS_CHECK("ready cannot reinitialize", !wallet_readiness_initialize(w, WALLET_READINESS_PENDING, true, 43));
+    struct wallet_readiness d = wallet_readiness_get(w);
+    WFS_CHECK("rejected transition preserves ready authority", d.state == WALLET_READINESS_READY &&
+              d.generation_present && d.generation == 42 && d.epoch == c.epoch);
+    wallet_free(w);
+    wallet_init(w);
+    failures += wfs_readiness_absent_generation(w);
+    wallet_free(w);
+    free(w);
+    return failures;
+}
+
 int test_wallet_funds_safety(void);
 int test_wallet_funds_safety(void)
 {
     printf("\n=== wallet funds-safety regression gates ===\n");
     int failures = 0;
+    failures += wfs_test_readiness_projection();
 
     char dbdir[256], dbpath[320];
     test_make_tmpdir(dbdir, sizeof(dbdir), "wallet_funds_safety", "main");

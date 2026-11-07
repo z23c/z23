@@ -67,6 +67,10 @@ static bool rpc_getbalance(const struct json_value *params, bool help,
         "Returns the total available balance.");
 
     ENSURE_WALLET(result);
+    if (wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY) {
+        json_set_str(result, "Wallet balance unavailable during cutover");
+        return false;
+    }
 
     /* The in-memory wallet is updated directly from each finalized block;
      * wallet_utxos is an asynchronous durable projection and can briefly lag
@@ -89,6 +93,10 @@ static bool rpc_getunconfirmedbalance(const struct json_value *params,
         "Returns the unconfirmed balance.");
 
     ENSURE_WALLET(result);
+    if (wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY) {
+        json_set_str(result, "Wallet balance unavailable during cutover");
+        return false;
+    }
 
     int64_t balance = wallet_get_unconfirmed_balance(ctx->wallet);
     char buf[32];
@@ -107,20 +115,33 @@ static bool rpc_getwalletinfo(const struct json_value *params, bool help,
         "Returns wallet state info.");
 
     ENSURE_WALLET(result);
+    enum wallet_readiness_state readiness = wallet_readiness_get(ctx->wallet).state;
 
     json_set_object(result);
     char bal[32], ubal[32], ibal[32], fee[32];
     /* Use the finalized in-memory wallet, not its asynchronous wallet_utxos
      * projection, so the summary cannot report a stale balance immediately
      * after saying a transaction is confirmed. */
-    int64_t balance = wallet_transparent_spendable_balance(ctx);
-    format_amount(balance, bal, sizeof(bal));
-    format_amount(wallet_get_unconfirmed_balance(ctx->wallet), ubal, sizeof(ubal));
-    format_amount(wallet_get_immature_balance(ctx->wallet), ibal, sizeof(ibal));
+    if (readiness == WALLET_READINESS_READY) {
+        int64_t balance = wallet_transparent_spendable_balance(ctx);
+        format_amount(balance, bal, sizeof(bal));
+        format_amount(wallet_get_unconfirmed_balance(ctx->wallet), ubal, sizeof(ubal));
+        format_amount(wallet_get_immature_balance(ctx->wallet), ibal, sizeof(ibal));
+        json_push_kv_str(result, "balance", bal);
+        json_push_kv_str(result, "unconfirmed_balance", ubal);
+        json_push_kv_str(result, "immature_balance", ibal);
+    } else {
+        struct json_value absent = {0};
+        json_set_null(&absent);
+        json_push_kv(result, "balance", &absent);
+        json_push_kv(result, "unconfirmed_balance", &absent);
+        json_push_kv(result, "immature_balance", &absent);
+        json_free(&absent);
+    }
+    json_push_kv_bool(result, "balance_available", readiness == WALLET_READINESS_READY);
+    json_push_kv_str(result, "wallet_readiness", readiness == WALLET_READINESS_READY ? "ready" :
+                     readiness == WALLET_READINESS_PENDING ? "pending" : "unknown");
     format_amount(ctx->wallet->default_fee, fee, sizeof(fee));
-    json_push_kv_str(result, "balance", bal);
-    json_push_kv_str(result, "unconfirmed_balance", ubal);
-    json_push_kv_str(result, "immature_balance", ibal);
     json_push_kv_int(result, "txcount", (int64_t)wallet_history_count());
     json_push_kv_int(result, "keypoolsize", (int64_t)ctx->wallet->key_pool_size);
     json_push_kv_str(result, "paytxfee", fee);
@@ -473,6 +494,10 @@ static bool rpc_listunspent(const struct json_value *params, bool help,
     if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); LOG_FAIL("wallet", "listunspent: invalid params"); }
 
     ENSURE_WALLET(result);
+    if (wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY) {
+        json_set_str(result, "Wallet funds unavailable during cutover");
+        return false;
+    }
     if (ctx->coins_tip && !rpc_require_chainstate_lookup_ready(
             ctx->main_state, result, "listunspent", "Chainstate lookup"))
         return false;

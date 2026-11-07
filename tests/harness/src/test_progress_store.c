@@ -26,6 +26,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdatomic.h>
@@ -1666,6 +1667,64 @@ static int ps_test_compact_under_lock(void)
     return failures;
 }
 
+static int ps_test_existing_only(void)
+{
+    int failures = 0;
+    char dir[256], path[512];
+    test_make_tmpdir(dir, sizeof(dir), "progress_store", "existing_only");
+    snprintf(path, sizeof(path), "%s/consensus.db", dir);
+    PS_CHECK("existing-only refuses missing", !progress_store_open_existing(dir));
+    PS_CHECK("missing file not created", access(path, F_OK) != 0);
+    PS_CHECK("existing fixture create", progress_store_open(dir));
+    char err[256] = {0};
+    PS_CHECK("current marker written", consensus_db_write_schema_marker(progress_store_db(), err, sizeof(err)));
+    progress_store_close();
+    PS_CHECK("current kernel opens", progress_store_open_existing(dir));
+#ifndef _WIN32
+    int dirfd = open(dir, O_RDONLY | O_DIRECTORY);
+    PS_CHECK("retained directory matches", dirfd >= 0 && progress_store_directory_matches_fd(progress_store_db(), dirfd));
+    if (dirfd >= 0) close(dirfd);
+#endif
+    progress_store_close();
+#ifndef _WIN32
+    char linkdir[256], linkpath[512];
+    test_make_tmpdir(linkdir, sizeof(linkdir), "progress_store", "existing_link");
+    snprintf(linkpath, sizeof(linkpath), "%s/consensus.db", linkdir);
+    PS_CHECK("symlink fixture created", symlink(path, linkpath) == 0);
+    PS_CHECK("symlink kernel refused", !progress_store_open_existing(linkdir));
+    unlink(linkpath);
+    test_cleanup_tmpdir(linkdir);
+    PS_CHECK("symlink target remains valid", progress_store_open_existing(dir));
+    progress_store_close();
+#endif
+    sqlite3 *db = NULL;
+    PS_CHECK("old schema fixture open", sqlite3_open(path, &db) == SQLITE_OK);
+    const unsigned char old[4] = {0};
+    PS_CHECK("old marker write", progress_meta_set(db, CONSENSUS_DB_SCHEMA_VERSION_KEY, old, sizeof(old)));
+    if (db) sqlite3_close(db);
+    PS_CHECK("old schema refused", !progress_store_open_existing(dir));
+    db = NULL;
+    PS_CHECK("old schema still present", sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK);
+    unsigned char out[4] = {1}; size_t got = 0; bool found = false;
+    PS_CHECK("old marker preserved", db && progress_meta_get_blob_exact(db, CONSENSUS_DB_SCHEMA_VERSION_KEY, out, sizeof(out), &got, &found) && found && got == sizeof(old) && memcmp(out, old, sizeof(old)) == 0);
+    if (db) sqlite3_close(db);
+    test_cleanup_tmpdir(dir);
+    test_make_tmpdir(dir, sizeof(dir), "progress_store", "existing_corrupt");
+    snprintf(path, sizeof(path), "%s/consensus.db", dir);
+    FILE *fp = fopen(path, "wb");
+    bool wrote = fp && fwrite("broken", 1, 6, fp) == 6;
+    if (fp && fclose(fp) != 0) wrote = false;
+    PS_CHECK("corrupt fixture created", wrote);
+    PS_CHECK("corrupt kernel refused", !progress_store_open_existing(dir));
+    char bytes[7] = {0};
+    fp = fopen(path, "rb");
+    bool preserved = fp && fread(bytes, 1, 6, fp) == 6 && memcmp(bytes, "broken", 6) == 0;
+    if (fp) fclose(fp);
+    PS_CHECK("corrupt kernel preserved", preserved);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_progress_store(void)
 {
     printf("\n=== progress_store tests ===\n");
@@ -1756,6 +1815,7 @@ int test_progress_store(void)
     failures += ps_test_projection_scan_quarantine();
     failures += ps_test_projection_receipt_reader_blocked();
 
+    failures += ps_test_existing_only();
     printf("progress_store: %d failures\n", failures);
 
     return failures;

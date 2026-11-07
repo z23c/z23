@@ -248,13 +248,48 @@ done:
 
 /* ── Test 2: single_header_consumed ────────────────────────────────── */
 
+static void bip_strict_lookup_cases(block_index_projection_t *p, const char *dir,
+                                    const struct ev_block_header *h, int *failures)
+{
+    struct disk_block_index got;
+#if !defined(_WIN32)
+    int dirfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    uint8_t hashes[1][32]; memcpy(hashes[0], h->hash, 32);
+    BIP_CHECK("strict window reads existing retained projection", dirfd >= 0 &&
+        block_index_projection_read_window_existing(dirfd, (const uint8_t (*)[32])hashes, 1, &got));
+#else
+    (void)dir;
+#endif
+    BIP_CHECK("strict lookup accepts exact serialized header",
+              block_index_projection_get_strict(p, h->hash, &got) && got.nHeight == h->height);
+    bool appended = sqlite3_exec(p->db,
+        "UPDATE block_index SET blob=CAST(blob || x'00' AS BLOB)", NULL, NULL, NULL) == SQLITE_OK;
+    BIP_CHECK("strict lookup refuses trailing bytes", appended &&
+              !block_index_projection_get_strict(p, h->hash, &got));
+#if !defined(_WIN32)
+    BIP_CHECK("strict window refuses trailing bytes", dirfd >= 0 &&
+        !block_index_projection_read_window_existing(dirfd, (const uint8_t (*)[32])hashes, 1, &got));
+#endif
+    bool restored = sqlite3_exec(p->db,
+        "UPDATE block_index SET blob=substr(blob,1,length(blob)-1)", NULL, NULL, NULL) == SQLITE_OK;
+    BIP_CHECK("strict lookup accepts restored payload", restored &&
+              block_index_projection_get_strict(p, h->hash, &got));
+    bool changed = sqlite3_exec(p->db,
+        "UPDATE block_index SET blob=CAST(x'ff' || substr(blob,2) AS BLOB)", NULL, NULL, NULL) == SQLITE_OK;
+    BIP_CHECK("strict lookup refuses mismatched embedded hash", changed &&
+              !block_index_projection_get_strict(p, h->hash, &got));
+#if !defined(_WIN32)
+    if (dirfd >= 0) close(dirfd);
+#endif
+}
+
 static int run_single_header_consumed(int *failures)
 {
     int start_failures = *failures;
 
     char dir[256]; test_make_tmpdir(dir, sizeof(dir), "bip", "single");
     char el_path[320]; snprintf(el_path, sizeof(el_path), "%s/log.bin", dir);
-    char db_path[320]; snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+    char db_path[320]; snprintf(db_path, sizeof(db_path), "%s/block_index_projection.db", dir);
 
     event_log_t *log = event_log_open(el_path);
     if (!log) { *failures += 1; printf("single: event_log_open FAIL\n"); goto done; }
@@ -283,6 +318,7 @@ static int run_single_header_consumed(int *failures)
     BIP_CHECK("single: nStatus matches", got.nStatus == 0x01);
     BIP_CHECK("single: nDataPos matches",
               got.nDataPos == h.nDataPos);
+    bip_strict_lookup_cases(p, dir, &h, failures);
 
     block_index_projection_close(p);
     event_log_close(log);

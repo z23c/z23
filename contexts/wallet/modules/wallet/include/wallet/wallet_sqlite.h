@@ -192,6 +192,14 @@ struct zcl_result wallet_sqlite_delete_key_r(struct wallet_sqlite *ws,
  * BEGIN/COMMIT failure. */
 struct zcl_result wallet_sqlite_flush_r(struct wallet_sqlite *ws,
                                         struct wallet *w);
+struct node_db;
+struct wallet_create_pending;
+#ifdef ZCL_TESTING
+void wallet_sqlite_creation_exit_before_commit_for_test(void);
+#endif
+
+struct zcl_result wallet_sqlite_flush_created_r(struct wallet_sqlite *ws, struct wallet *w,
+    struct node_db *ndb, const struct wallet_create_pending *pending);
 /* Persist mutable wallet transaction rows and the scan-height cursor without
  * rewriting immutable key/seed/script material.  This is the pre-relay hot
  * path after builders have already proven any consumed change key durable;
@@ -243,6 +251,17 @@ bool wallet_sqlite_write_key(struct wallet_sqlite *ws, const struct pubkey *pk,
 ZCL_DEPRECATED("use wallet_sqlite_read_keys_r")
 bool wallet_sqlite_read_keys(struct wallet_sqlite *ws, struct wallet *w);
 
+enum wallet_height_encoding { WALLET_HEIGHT_ERROR, WALLET_HEIGHT_LEGACY, WALLET_HEIGHT_V2 };
+/* Strictly read the height encoding and its paired depth reference. */
+enum wallet_height_encoding wallet_sqlite_height_encoding(
+    struct wallet_sqlite *ws, int *reference_height);
+typedef bool (*wallet_height_resolver)(void *ctx, const uint8_t block_hash[32], int *height);
+/* Requires the caller-owned open write transaction and stable verified chain.
+ * Resolver must not acquire locks or perform writes; false refuses transition.
+ * Caller commits or rolls back, including any partial rewrites on failure. */
+bool wallet_sqlite_activate_height_v2_in_open_tx(
+    struct wallet_sqlite *ws, int reference_height, wallet_height_resolver resolve, void *ctx);
+
 bool wallet_sqlite_write_tx(struct wallet_sqlite *ws,
                               const struct wallet_tx *wtx);
 bool wallet_sqlite_read_txs(struct wallet_sqlite *ws, struct wallet *w);
@@ -267,6 +286,13 @@ struct wallet_scan_marker {
 };
 bool wallet_sqlite_write_scan_state(struct wallet_sqlite *ws,
                                     const struct wallet *w);
+enum wallet_scan_state_status { WALLET_SCAN_STATE_ABSENT, WALLET_SCAN_STATE_OK, WALLET_SCAN_STATE_ERROR };
+enum wallet_scan_state_status wallet_sqlite_validate_scan_state(struct wallet_sqlite *ws);
+/* Strict startup read; ABSENT means no cursor or marker. The helper owns
+ * a serialized read snapshot and refuses pre-existing transactions. */
+enum wallet_scan_state_status wallet_sqlite_read_scan_state_checked(
+    struct wallet_sqlite *ws, struct wallet *w);
+
 bool wallet_sqlite_read_scan_state(struct wallet_sqlite *ws, struct wallet *w);
 bool wallet_sqlite_read_scan_marker(struct wallet_sqlite *ws,
                                     struct wallet_scan_marker *out);
@@ -387,5 +413,119 @@ bool wallet_sqlite_read_watch_only(struct wallet_sqlite *ws, struct wallet *w);
 
 ZCL_DEPRECATED("use wallet_sqlite_flush_r")
 bool wallet_sqlite_flush(struct wallet_sqlite *ws, struct wallet *w);
+
+/* A pending startup cutover binds the unread wallet range to both chain
+ * authorities. The byte arrays are the existing consensus hash and artifact
+ * digest representations; generation presence is explicit. */
+struct wallet_cutover_binding {
+    bool old_generation_present;
+    uint64_t old_generation;
+    int32_t old_height;
+    uint8_t old_hash[32];
+    int32_t target_height;
+    uint8_t target_hash[32];
+    uint8_t artifact_digest[32];
+};
+/* Both bindings must be non-NULL. */
+bool wallet_cutover_binding_equal(const struct wallet_cutover_binding *a,
+                                   const struct wallet_cutover_binding *b);
+enum wallet_cutover_status {
+    WALLET_CUTOVER_ABSENT, WALLET_CUTOVER_PENDING,
+    WALLET_CUTOVER_MALFORMED, WALLET_CUTOVER_IO_ERROR
+};
+/* Read the exact persisted scan cursor and unread marker without coercion. */
+enum wallet_cutover_floor_status {
+    WALLET_CUTOVER_FLOOR_ABSENT, WALLET_CUTOVER_FLOOR_FOUND,
+    WALLET_CUTOVER_FLOOR_MALFORMED, WALLET_CUTOVER_FLOOR_IO_ERROR
+};
+enum wallet_cutover_floor_status wallet_sqlite_cutover_scan_floor(
+    struct wallet_sqlite *ws, int *floor);
+/* Caller holds w->cs; cursor read, marker and binding share one savepoint.
+ * As with prepare, an outer transaction must be durably committed by its owner. */
+bool wallet_sqlite_cutover_prepare_preserving_cursor(struct wallet_sqlite *ws,
+    struct wallet *w, const struct wallet_cutover_binding *binding);
+/* Consumes caller-owned open write transaction on the exclusively held connection.
+ * Writes transactions, keypool and completed cursor; keys and scripts are preserved
+ * and must already be durable. Caller holds stable external generation/tip authority
+ * and proves durable notes, spends and witnesses against scan_identity. Success
+ * clears the in-memory marker and publishes READY before releasing wallet locks. */
+struct zcl_result wallet_sqlite_cutover_complete_flush_in_open_tx_r(
+    struct wallet_sqlite *ws, struct wallet *w,
+    const struct wallet_cutover_binding *expected, bool generation_present,
+    uint64_t generation, int completed_height, const uint8_t scan_identity[32]);
+/* Validator runs before writes under the wallet, keystore and Sapling locks
+ * and an owned write transaction. It must not wait or acquire locks. A NULL
+ * or false validator refuses and rolls back the transaction. */
+struct zcl_result wallet_sqlite_cutover_complete_checked_in_open_tx_r(
+    struct wallet_sqlite *ws, struct wallet *w,
+    const struct wallet_cutover_binding *expected, bool generation_present,
+    uint64_t generation, int completed_height, const uint8_t scan_identity[32],
+    bool (*validator)(void *, struct wallet *, sqlite3 *), void *validator_ctx);
+struct node_db;
+struct wallet_cutover_v2_entry {
+    uint32_t slot;
+    uint8_t txid[32], block_hash[32];
+    int old_depth, new_depth;
+};
+struct wallet_cutover_v2_plan {
+    struct wallet_cutover_v2_entry *entries;
+    void *index, *slot_index, *active_spent, *confirmed_spent;
+    size_t active_spent_count;
+    uint8_t old_spent_digest[32];
+    bool spends_ready;
+    size_t capacity, count;
+    int reference_height, old_best_height;
+    uint8_t reference_hash[32], scan_identity[32];
+};
+typedef bool (*wallet_cutover_endpoint_check)(void *ctx, int height, const uint8_t hash[32]);
+typedef bool (*wallet_cutover_projection_write)(void *ctx, struct node_db *ndb,
+    struct wallet *wallet, struct wallet_cutover_v2_plan *plan);
+struct wallet_cutover_v2_request {
+    const struct wallet_cutover_binding *binding;
+    bool generation_present;
+    uint64_t generation;
+    int reference_height;
+    uint8_t reference_hash[32], scan_identity[32];
+    wallet_height_resolver resolve;
+    wallet_cutover_endpoint_check endpoint_current;
+    void *chain_ctx;
+    bool (*holds_valid)(void *ctx, struct wallet *wallet, sqlite3 *db);
+    void *holds_ctx;
+    wallet_cutover_projection_write project;
+    void *projection_ctx;
+};
+/* Reserve outside authority locks; plan contains public identifiers only. */
+bool wallet_cutover_v2_plan_init(struct wallet_cutover_v2_plan *plan, size_t capacity);
+/* Caller holds wallet lock and uses a prepared, still-validated plan. */
+const struct wallet_cutover_v2_entry *wallet_cutover_v2_plan_find(
+    const struct wallet_cutover_v2_plan *plan, const struct wallet *wallet, const uint8_t txid[32]);
+/* Projection builds these transient sets under the held wallet lock. */
+bool wallet_cutover_v2_plan_mark_spent(struct wallet_cutover_v2_plan *plan,
+    const uint8_t txid[32], uint32_t vout, bool confirmed);
+bool wallet_cutover_v2_plan_has_spent(const struct wallet_cutover_v2_plan *plan,
+    const uint8_t txid[32], uint32_t vout, bool confirmed_only);
+void wallet_cutover_v2_plan_finish_spends(struct wallet_cutover_v2_plan *plan);
+void wallet_cutover_v2_plan_free(struct wallet_cutover_v2_plan *plan);
+/* After ownership is established, consumes the tracked node_db WRITE transaction.
+ * The transaction must be fresh, with no queued AR after-commit hooks.
+ * WSQL_TXN_BEGIN_FAIL leaves it untouched; an owning caller must roll it back.
+ * Caller serializes the
+ * connection and holds stable chain authority. Callbacks must not acquire locks
+ * change transaction boundaries, mutate the wallet, or perform external delivery.
+ * All callbacks and plan storage outlive COMMIT. */
+struct zcl_result wallet_sqlite_cutover_complete_v2_in_open_tx_r(
+    struct wallet_sqlite *ws, struct node_db *ndb, struct wallet *wallet,
+    const struct wallet_cutover_v2_request *request, struct wallet_cutover_v2_plan *plan);
+
+enum wallet_cutover_status wallet_sqlite_cutover_read(
+    struct wallet_sqlite *ws, struct wallet_cutover_binding *out);
+/* Caller owns exclusive access to db and must not have an open transaction.
+ * The result describes one read snapshot, not a lease after return. */
+enum wallet_cutover_status wallet_sqlite_cutover_read_snapshot(sqlite3 *db);
+/* A successful nested savepoint only stages these rows in the caller transaction.
+ * Cross-store activation must first ensure that transaction is durably committed;
+ * success while sqlite3_get_autocommit(ws->db) is false is not durable. */
+bool wallet_sqlite_cutover_prepare(struct wallet_sqlite *ws,
+    const struct wallet *w, const struct wallet_cutover_binding *binding);
 
 #endif

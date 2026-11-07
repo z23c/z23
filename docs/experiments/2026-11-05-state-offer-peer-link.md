@@ -149,3 +149,62 @@ stale-header predicates now return false while this node holds header sync.
 Both return true again once the hold ends. Each fetch now logs one line when
 it starts and one when it ends, naming its height, peer, transport and
 result. Device activation and transfer time over Tor remain unmeasured.
+
+## Wallet integration and interruption tests of 2026-11-06
+
+The peer receiver test stops a child after its first of two chunks has been
+verified and journaled. A fresh child resumes the transfer, requests the
+remaining chunk without requesting the committed chunk again, and verifies the
+whole-file digest before reporting success. This is a local process-death
+fixture using the receiver path; it does not measure a real network transfer.
+
+The wallet storage tests deny the release of each of two read savepoints. Each
+reader reports failure without publishing partial wallet state, leaves no open
+transaction, and successfully reloads the saved state after the database is
+closed and reopened. The publisher fixture uses a synthetic transparent-only
+chain and explicitly supplies zero Sprout and Sapling pool totals at its
+height-20 reference. An earlier eleven-group run passed ten groups and failed
+the wallet flush group. The fixture lacked the pool totals required by the
+publisher; the repaired fixture checks the totals through the pinned snapshot
+before publication. The original failure log did not identify the first failed
+predicate.
+
+A subsequent focused run with warnings treated as errors passed all four
+registered groups: `wallet_flush_rollback`, `state_offer_link_receive`,
+`wallet_private_relay`, and `wallet_recovery_safety`. It reported zero skips
+and 8.2 seconds of test wall time. These results establish behavior of the
+isolated fixtures on that source; they do not establish device activation,
+mainnet migration, startup latency, or independent implementation parity.
+Full candidate gates and device testing remain required.
+
+### Integration recovery checks (2026-11-07)
+
+The wallet integration preserves an existing or partial birthday tuple and
+refuses unreadable metadata. UTXO iteration refuses a SQLite step error.
+SQLite completion checks distinguish errors from empty results in wallet
+creation, cutover, scan-state loading, install setup and island setup.
+
+Two focused runs passed five groups each with warnings treated as errors:
+`sqlite_step_errors,wallet_boot_birthday,wallet_recovery_safety,zcode_package_fork,zcode_package_receive`
+and `wallet_create,wallet_flush_rollback,node_db_catchup_service,consensus_state_install_runtime,flysync_island`.
+Both reported zero skipped, unobserved or flaky groups. The SQLite step gate
+passed after removing obsolete baseline entries; no baseline increased.
+The merged candidate still requires full release lint and queue proof.
+
+### Authenticated pool-state format (2026-11-07)
+
+Bundle format V2 binds the Sprout and Sapling pool totals to the artifact,
+compiled checkpoint and independent replay receipt. V1 retains its original
+wire bytes and cannot authenticate V2 pool values. Unsupported versions and
+negative totals are refused. Export reads the totals in the same pinned
+transaction as the FULL fold frontier; installation replaces them in the
+same transaction as the active snapshot state.
+
+Focused codec, rung, authority, export, read-snapshot and install groups
+passed after fixture migrations to explicit format versions and pool rows.
+A subsequent install and consensus-parity run passed both groups with zero
+skipped, unobserved or flaky groups. Deterministic SIGKILL tests verified
+that interruption before commit preserves the old state, and interruption
+after commit but before the completion marker recovers the new state and
+wallet binding in a fresh process. These are host fixture results, not a
+claim that the Android wallet has installed a production V2 snapshot.

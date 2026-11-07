@@ -12,12 +12,19 @@
 #include "config/boot.h"
 #include "config/boot_error.h"
 #include "config/boot_internal.h"
+#include "config/consensus_state_snapshot_install.h"
 #include "util/blocker.h"
 #include "util/boot_phase.h"
 #include "util/boot_status.h"
 #include "util/thread_registry.h"
 #include "storage/event_log_singleton.h"
+#include "storage/wallet_projection.h"
+#include "storage/coins_kv.h"
+#include "wallet/wallet_sqlite.h"
+#include "wallet/wallet.h"
+#include "models/database.h"
 #include "storage/progress_store.h"
+#include "storage/txdb.h"
 #include <sqlite3.h>
 #include "util/sd_notify.h"
 #include <stddef.h>
@@ -590,20 +597,146 @@ static int bp_legacy_snapshot_keeps_source_lock(void)
     return failures;
 }
 static int bp_test_thread_io_evidence(void);  /* end of file */
+static bool bp_event_log_binding_cycle(event_log_t *first)
+{
+    bool bound = boot_bind_wallet_replay_event_log() && wallet_projection_event_log() == first;
+    event_log_set_singleton(NULL);
+    bool cleared = !boot_bind_wallet_replay_event_log() && !wallet_projection_event_log();
+    event_log_set_singleton(first);
+    return bound && cleared && boot_bind_wallet_replay_event_log();
+}
+
 static int test_boot_event_log_lifecycle(void)
 {
     if (progress_store_db() || event_log_singleton())
         return 1;
     char dir[256];
     test_make_tmpdir(dir, sizeof(dir), "boot_phase", "event-log");
+    bool absent = !boot_bind_wallet_replay_event_log() && !wallet_projection_event_log();
     bool rejects_missing = !boot_ensure_event_log(NULL) && !boot_ensure_event_log("");
     bool opened = boot_ensure_event_log(dir);
     event_log_t *first = event_log_singleton();
     bool reused = opened && first && boot_ensure_event_log(dir) && event_log_singleton() == first;
+    bool bound = bp_event_log_binding_cycle(first);
     boot_stop_projection_storage();
     bool retired = event_log_singleton() == NULL && progress_store_db() == NULL;
     test_rm_rf(dir);
-    return !(rejects_missing && reused && retired);
+    return !(absent && rejects_missing && reused && bound && retired && !wallet_projection_event_log());
+}
+
+static bool bp_provenance_markers(sqlite3 *db, bool expected)
+{
+    uint8_t value;
+    size_t len;
+    bool migration = false, folded = false;
+    return progress_meta_get(db, COINS_KV_MIGRATION_COMPLETE_KEY, &value, 1, &len, &migration) &&
+        progress_meta_get(db, COINS_KV_SELF_FOLDED_KEY, &value, 1, &len, &folded) &&
+        migration == expected && folded == expected;
+}
+
+static bool bp_provenance_setup(struct wallet_sqlite *ws, struct wallet *w,
+    struct node_db *local_db, const char *dir)
+{
+    w->scan_retry.pending = true;
+    w->scan_retry.from = 5; w->scan_retry.since = 123; w->best_block_height = 10;
+    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "CUTOVER");
+    struct wallet_cutover_binding b = {.old_generation_present = true,
+        .old_generation = 1, .old_height = 10, .target_height = 20};
+    b.old_hash[0] = 1; b.target_hash[0] = 2; b.artifact_digest[0] = 3;
+    char path[320];
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    if (!node_db_open(local_db, path)) { fprintf(stderr, "fixture: node open failed\n"); return false; }
+    if (!wallet_sqlite_open_r(ws, local_db->db).ok) { fprintf(stderr, "fixture: wallet open failed\n"); return false; }
+    if (!wallet_sqlite_cutover_prepare(ws, w, &b)) { fprintf(stderr, "fixture: prepare failed\n"); return false; }
+    if (wallet_sqlite_cutover_read(ws, &b) != WALLET_CUTOVER_PENDING) { fprintf(stderr, "fixture: pending read failed\n"); return false; }
+    return boot_ensure_event_log(dir) && boot_bind_wallet_replay_event_log() && progress_store_open(dir);
+}
+
+static bool bp_provenance_transition(struct wallet_sqlite *ws, sqlite3 *wallet_db, const char *dir)
+{
+    sqlite3 *db = progress_store_db();
+    uint8_t txid[32] = {1}, script[] = {0x51};
+    struct wallet_cutover_binding b;
+    return db && coins_kv_ensure_schema(db) &&
+        coins_kv_add(db, txid, 0, 1, 1, false, script, sizeof(script)) &&
+        bp_provenance_markers(db, false) &&
+        sqlite3_exec(wallet_db, "DELETE FROM node_state", NULL, NULL, NULL) == SQLITE_OK &&
+        wallet_sqlite_cutover_read(ws, &b) == WALLET_CUTOVER_ABSENT &&
+        boot_ensure_event_log(dir) && bp_provenance_markers(db, false);
+}
+
+static bool bp_provenance_reopen(const char *dir)
+{
+    event_log_t *log = event_log_singleton();
+    event_log_set_singleton(NULL);
+    bool refused = !boot_bind_wallet_replay_event_log();
+    event_log_set_singleton(log);
+    bool preserved = boot_ensure_event_log(dir) &&
+        bp_provenance_markers(progress_store_db(), false);
+    boot_stop_projection_storage();
+    bool reopened = boot_ensure_event_log(dir) && progress_store_open(dir) &&
+        boot_ensure_event_log(dir) && bp_provenance_markers(progress_store_db(), true);
+    return refused && preserved && reopened;
+}
+
+static int test_boot_replay_provenance(void)
+{
+    struct node_db *ndb; struct wallet_sqlite *ws; struct wallet *wallet; struct main_state *main;
+    boot_wallet_cutover_test_slots(&ndb, &ws, &wallet, &main);
+    (void)ndb; (void)wallet; (void)main;
+    if (ws->open || ws->db || progress_store_db() || event_log_singleton()) return 1;
+    struct wallet *fixture = calloc(1, sizeof(*fixture));
+    if (!fixture) return 1;
+    wallet_init(fixture);
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_phase", "replay-provenance");
+    struct node_db local_db = {0};
+    bool ok = bp_provenance_setup(ws, fixture, &local_db, dir) &&
+        bp_provenance_transition(ws, local_db.db, dir) && bp_provenance_reopen(dir);
+    boot_stop_projection_storage();
+    progress_store_close();
+    if (ws->open) wallet_sqlite_close(ws);
+    if (local_db.db) node_db_close(&local_db);
+    wallet_free(fixture);
+    free(fixture);
+    test_rm_rf(dir);
+    return !ok;
+}
+
+static bool bp_stamp_kind(sqlite3 *db, int kind)
+{
+    struct consensus_state_install_stamp stamp = {
+        .kind = (enum consensus_state_install_stamp_kind)kind, .height = 10,
+        .coins_generation = 1,
+    };
+    return sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK &&
+        consensus_state_install_record_authority_stamp(db, &stamp) &&
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK &&
+        !boot_legacy_commitment_bootstrap_allowed();
+}
+
+static int test_boot_commitment_origin(void)
+{
+    if (progress_store_db()) return 1;
+    bool ok = !boot_legacy_commitment_bootstrap_allowed();
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "boot_phase", "commitment-origin");
+    ok = ok && progress_store_open(dir) && boot_legacy_commitment_bootstrap_allowed();
+    sqlite3 *db = progress_store_db();
+    for (int kind = CONSENSUS_INSTALL_STAMP_RECEIPT;
+         ok && kind <= CONSENSUS_INSTALL_STAMP_ASSISTED; ++kind)
+        ok = bp_stamp_kind(db, kind);
+    progress_store_close();
+    ok = ok && progress_store_open(dir) && !boot_legacy_commitment_bootstrap_allowed();
+    db = progress_store_db();
+    const uint8_t malformed = 0;
+    ok = ok && progress_meta_set(db, "consensus_state.install_authority", &malformed, 1) &&
+        !boot_legacy_commitment_bootstrap_allowed() &&
+        sqlite3_exec(db, "DROP TABLE progress_meta", NULL, NULL, NULL) == SQLITE_OK &&
+        !boot_legacy_commitment_bootstrap_allowed();
+    progress_store_close();
+    test_rm_rf(dir);
+    return !ok;
 }
 
 /* The boot_stage_name() table: pinned names, the (invalid) out-of-range
@@ -1152,6 +1285,139 @@ static int bp_test_step_evidence_probe(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+static bool bp_pending_fence(struct node_db *ndb, bool write)
+{
+    struct wallet_sqlite ws = {0};
+    if (!wallet_sqlite_open_r(&ws, ndb->db).ok) return false;
+    struct wallet_cutover_binding binding = {
+        .old_generation_present = true, .old_generation = 1,
+        .old_height = 10, .target_height = 20,
+    };
+    binding.old_hash[0] = 1; binding.target_hash[0] = 2; binding.artifact_digest[0] = 3;
+    bool ok;
+    if (write) {
+        struct wallet *w = calloc(1, sizeof(*w));
+        if (w) {
+            wallet_init(w);
+            w->scan_retry.pending = true; w->scan_retry.from = 5;
+            w->scan_retry.since = 123; w->best_block_height = 10;
+            snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "CUTOVER");
+            ok = wallet_sqlite_cutover_prepare(&ws, w, &binding);
+            wallet_free(w); free(w);
+        } else ok = false;
+    } else {
+        struct wallet_cutover_binding got;
+        ok = wallet_sqlite_cutover_read(&ws, &got) == WALLET_CUTOVER_PENDING &&
+            got.old_generation_present && got.old_generation == 1 &&
+            got.old_height == 10 && got.target_height == 20 &&
+            got.old_hash[0] == 1 && got.target_hash[0] == 2 && got.artifact_digest[0] == 3;
+    }
+    wallet_sqlite_close(&ws);
+    return ok;
+}
+
+static bool bp_pending_stores_persist(const char *dir, struct node_db *ndb,
+    struct coins_view_sqlite *coins, struct block_tree_db *tree, bool opened)
+{
+    bool value = false;
+    bool ok = opened && coins->db && tree->db.db &&
+        !boot_test_pending_runtime_stores_open(dir, ndb, coins, tree) &&
+        block_tree_db_write_flag(tree, "pending-runtime-fixture", true);
+    if (opened) {
+        block_tree_db_close(tree);
+        coins_view_sqlite_close(coins);
+    }
+    memset(tree, 0, sizeof(*tree));
+    memset(coins, 0, sizeof(*coins));
+    bool reopened = ok && boot_test_pending_runtime_stores_open(dir, ndb, coins, tree);
+    ok = reopened && block_tree_db_read_flag(tree, "pending-runtime-fixture", &value) && value;
+    if (reopened) {
+        block_tree_db_close(tree);
+        coins_view_sqlite_close(coins);
+    }
+    return ok;
+}
+
+static bool bp_pending_block_second(const char *blocks, struct node_db *ndb,
+                                    struct coins_view_sqlite *coins)
+{
+    bool ok = coins_view_sqlite_open(coins, ndb->db);
+    if (ok) coins_view_sqlite_close(coins);
+    memset(coins, 0, sizeof(*coins));
+    int fd = open(blocks, O_CREAT | O_WRONLY | O_EXCL, 0600);
+    ok = ok && fd >= 0;
+    if (fd >= 0) close(fd);
+    return ok;
+}
+
+static bool bp_pending_open_failed(bool setup, bool opened, struct node_db *ndb,
+    struct coins_view_sqlite *coins, struct block_tree_db *tree)
+{
+    bool ok = setup && !opened && !coins->db && !tree->db.db && ndb->open;
+    if (opened) {
+        block_tree_db_close(tree);
+        coins_view_sqlite_close(coins);
+    }
+    return ok;
+}
+
+static bool bp_pending_stores_case(bool block_second_open)
+{
+    char dir[256], dbpath[320], blocks[320];
+    test_make_tmpdir(dir, sizeof(dir), "boot_phase", block_second_open ? "stores-fail" : "stores-ok");
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+    snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
+    struct node_db ndb = {0};
+    struct coins_view_sqlite coins = {0};
+    struct block_tree_db tree = {0};
+    bool db_open = node_db_open(&ndb, dbpath);
+    bool setup = db_open && bp_pending_fence(&ndb, true);
+    if (setup && block_second_open)
+        setup = bp_pending_block_second(blocks, &ndb, &coins);
+    bool opened = setup && boot_test_pending_runtime_stores_open(dir, &ndb, &coins, &tree);
+    bool ok;
+    if (block_second_open) {
+        ok = bp_pending_open_failed(setup, opened, &ndb, &coins, &tree);
+    } else {
+        ok = bp_pending_stores_persist(dir, &ndb, &coins, &tree, opened);
+    }
+    ok = ok && bp_pending_fence(&ndb, false);
+    if (ndb.open) node_db_close(&ndb);
+    test_rm_rf(dir);
+    return ok;
+}
+#endif
+
+#if !defined(_WIN32)
+static bool bp_pending_modes(void)
+{
+    struct app_context ctx = {0};
+    if (!boot_pending_mode_supported_test(&ctx)) return false;
+    ctx.no_services = true;
+    if (!boot_pending_mode_supported_test(&ctx)) return false;
+    bool *modes[] = {&ctx.mint_anchor, &ctx.full_fold, &ctx.reindex_chainstate,
+        &ctx.ratify_mint_anchor, &ctx.reindex_explorer, &ctx.backfill_zslp,
+        &ctx.backfill_nullifiers, &ctx.refold_staged, &ctx.refold_from_anchor,
+        &ctx.verify_rom, &ctx.export_consensus_bundle, &ctx.reimport_utxos};
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+        *modes[i] = true;
+        bool refused = !boot_pending_mode_supported_test(&ctx);
+        *modes[i] = false;
+        if (!refused) return false;
+    }
+    const char **paths[] = {&ctx.snapshot_dir, &ctx.verify_consensus_bundle,
+                           &ctx.promote_shielded_history};
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        *paths[i] = "fixture";
+        bool refused = !boot_pending_mode_supported_test(&ctx);
+        *paths[i] = NULL;
+        if (!refused) return false;
+    }
+    return boot_pending_mode_supported_test(&ctx);
+}
+
+#endif
 int test_boot_phase(void)
 {
 #if defined(_WIN32)
@@ -1177,8 +1443,17 @@ int test_boot_phase(void)
 #endif
     printf("\n=== boot_phase tests ===\n");
     int failures = 0;
+#if !defined(_WIN32)
+    BP_CHECK("pending startup refuses maintenance modes", bp_pending_modes());
+    BP_CHECK("pending runtime stores persist and reopen", bp_pending_stores_case(false));
+    BP_CHECK("pending block-tree failure closes coins view", bp_pending_stores_case(true));
+#endif
     BP_CHECK("event log publishes once, reuses its handle and retires cleanly",
         test_boot_event_log_lifecycle() == 0);
+    BP_CHECK("replay preserves coins provenance through log lifetime",
+        test_boot_replay_provenance() == 0);
+    BP_CHECK("installed provenance refuses legacy commitment bootstrap",
+        test_boot_commitment_origin() == 0);
 
     boot_stage_reset_for_testing();
 

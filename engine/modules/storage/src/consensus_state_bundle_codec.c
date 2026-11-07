@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Canonical logical encoding for zcl.consensus_state_bundle.v1. */
+ * Canonical logical encoding for consensus state bundle v1 and v2. */
 
 #include "storage/consensus_state_bundle_codec.h"
 
@@ -7,6 +7,26 @@
 #include "crypto/sha3.h"
 
 #include <string.h>
+
+bool consensus_state_bundle_schema_version(
+    const char *schema, size_t schema_len, uint8_t *out_version)
+{
+    if (out_version)
+        *out_version = CONSENSUS_STATE_BUNDLE_INVALID;
+    if (!schema || !out_version)
+        return false;
+    if (schema_len == sizeof(CONSENSUS_STATE_BUNDLE_SCHEMA_V1) - 1 &&
+        memcmp(schema, CONSENSUS_STATE_BUNDLE_SCHEMA_V1, schema_len) == 0) {
+        *out_version = CONSENSUS_STATE_BUNDLE_V1;
+        return true;
+    }
+    if (schema_len == sizeof(CONSENSUS_STATE_BUNDLE_SCHEMA_V2) - 1 &&
+        memcmp(schema, CONSENSUS_STATE_BUNDLE_SCHEMA_V2, schema_len) == 0) {
+        *out_version = CONSENSUS_STATE_BUNDLE_V2;
+        return true;
+    }
+    return false;
+}
 
 static bool lowercase_hex(const char *text, size_t len)
 {
@@ -116,10 +136,23 @@ void consensus_state_bundle_nullifier_digest_row(
 void consensus_state_bundle_artifact_digest(
     const struct consensus_state_bundle_manifest *m, uint8_t out[32])
 {
+    if (!out)
+        return;
+    if (!m || (m->format_version != CONSENSUS_STATE_BUNDLE_V1 &&
+               m->format_version != CONSENSUS_STATE_BUNDLE_V2) ||
+        (m->format_version == CONSENSUS_STATE_BUNDLE_V2 &&
+         (m->sprout_pool_total < 0 || m->sapling_pool_total < 0))) {
+        memset(out, 0, 32);
+        return;
+    }
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
-    static const char domain[] = "zcl.consensus_state_bundle.v1/artifact";
-    sha3_256_write(&ctx, (const uint8_t *)domain, sizeof(domain));
+    static const char v1[] = "zcl.consensus_state_bundle.v1/artifact";
+    static const char v2[] = "zcl.consensus_state_bundle.v2/artifact";
+    if (m->format_version == CONSENSUS_STATE_BUNDLE_V1)
+        sha3_256_write(&ctx, (const uint8_t *)v1, sizeof(v1));
+    else
+        sha3_256_write(&ctx, (const uint8_t *)v2, sizeof(v2));
     digest_u64(&ctx, (uint64_t)m->height);
     sha3_256_write(&ctx, m->block_hash, 32);
     uint8_t complete = m->history_complete ? 1 : 0;
@@ -145,6 +178,10 @@ void consensus_state_bundle_artifact_digest(
     digest_u64(&ctx, (uint64_t)m->source_fold_cursor);
     sha3_256_write(&ctx, m->proof_manifest_digest, 32);
     sha3_256_write(&ctx, m->source_digest, 32);
+    if (m->format_version == CONSENSUS_STATE_BUNDLE_V2) {
+        digest_u64(&ctx, (uint64_t)m->sprout_pool_total);
+        digest_u64(&ctx, (uint64_t)m->sapling_pool_total);
+    }
     sha3_256_finalize(&ctx, out);
 }
 

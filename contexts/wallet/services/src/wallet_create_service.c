@@ -66,18 +66,14 @@ struct zcl_result wallet_create_run(const struct wallet_create_request *req,
             req->datadir);
 
     char phrase[MNEMONIC_MAX_PHRASE_SIZE];
-    if (!wallet_create_phrase(phrase, sizeof(phrase)).ok)
-        return ZCL_ERR(-69, "could not draw a recovery phrase. Nothing was "
-                            "written");
 
     struct wallet_recovery_request rr = {
-        .phrase = phrase,
         .datadir = req->datadir,
         .passphrase = req->passphrase,
         .shielded_only = true,
         .record_birthday = true,
     };
-    struct zcl_result r = wallet_recovery_run(&rr, &out->recovery);
+    struct zcl_result r = wallet_recovery_create_fresh(&rr, &out->recovery, phrase, sizeof(phrase));
     if (r.ok)
         memcpy(out->phrase, phrase, strlen(phrase) + 1);
     memory_cleanse(phrase, sizeof(phrase));

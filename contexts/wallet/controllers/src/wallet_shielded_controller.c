@@ -234,6 +234,39 @@ bool rpc_z_listaddresses(const struct json_value *params, bool help,
     return true;
 }
 
+static bool wallet_sapling_address_balance(struct wallet_rpc_context *ctx,
+        const uint8_t z_d[11], const uint8_t z_pkd[32], int minconf,
+        struct json_value *result)
+{
+    /* SQLite is the authoritative shielded-note store (z_gettotalbalance /
+     * z_listunspent read it). The in-memory note array is a strict subset
+     * post-restart (no load-from-DB path) and its `confirms` field is never
+     * populated, so trusting it here under-reported the balance and ignored
+     * minconf. Always derive the per-address balance from the DB with a
+     * minconf-aware query. */
+    int64_t balance = 0;
+    if (ctx->node_db) {
+        const struct sapling_key_entry *ske =
+            sapling_keystore_find_by_owned_address(&ctx->wallet->sapling_keys, z_d, z_pkd);
+        if (ske) {
+            int tip = ctx->wallet->best_block_height;
+            if (tip == 0 && ctx->main_state)
+                tip = active_chain_height(&ctx->main_state->chain_active);
+            if (tip == 0 && wallet_ctx_db_ready(ctx)) {
+                int db_h = db_block_max_height_any_status(ctx->node_db);
+                if (db_h >= 0)
+                    tip = db_h;
+            }
+            balance = db_sapling_note_balance_for_diversifier_minconf(
+                ctx->node_db, ske->ivk, z_d, tip, minconf);
+        }
+    }
+    char buf[32];
+    format_amount(balance, buf, sizeof(buf));
+    json_set_str(result, buf);
+    return true;
+}
+
 bool rpc_z_getbalance(const struct json_value *params, bool help,
                               struct json_value *result)
 {
@@ -249,37 +282,15 @@ bool rpc_z_getbalance(const struct json_value *params, bool help,
     if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); LOG_FAIL("wallet_shielded", "z_getbalance: invalid params"); }
 
     ENSURE_WALLET(result);
+    if (wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY) {
+        json_set_str(result, "Wallet balance unavailable during cutover");
+        return false;
+    }
 
     /* Check if Sapling address */
     uint8_t z_d[11], z_pkd[32];
     if (sapling_decode_payment_address(addr_str, z_d, z_pkd)) {
-        /* SQLite is the authoritative shielded-note store (z_gettotalbalance /
-         * z_listunspent read it). The in-memory note array is a strict subset
-         * post-restart (no load-from-DB path) and its `confirms` field is never
-         * populated, so trusting it here under-reported the balance and ignored
-         * minconf. Always derive the per-address balance from the DB with a
-         * minconf-aware query. */
-        int64_t balance = 0;
-        if (ctx->node_db) {
-            const struct sapling_key_entry *ske =
-                sapling_keystore_find_by_owned_address(&ctx->wallet->sapling_keys, z_d, z_pkd);
-            if (ske) {
-                int tip = ctx->wallet->best_block_height;
-                if (tip == 0 && ctx->main_state)
-                    tip = active_chain_height(&ctx->main_state->chain_active);
-                if (tip == 0 && wallet_ctx_db_ready(ctx)) {
-                    int db_h = db_block_max_height_any_status(ctx->node_db);
-                    if (db_h >= 0)
-                        tip = db_h;
-                }
-                balance = db_sapling_note_balance_for_diversifier_minconf(
-                    ctx->node_db, ske->ivk, z_d, tip, minconf);
-            }
-        }
-        char buf[32];
-        format_amount(balance, buf, sizeof(buf));
-        json_set_str(result, buf);
-        return true;
+        return wallet_sapling_address_balance(ctx, z_d, z_pkd, minconf, result);
     }
 
     /* Transparent address — sum UTXOs */
@@ -330,6 +341,10 @@ bool rpc_z_listunspent(const struct json_value *params, bool help,
     if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); LOG_FAIL("wallet_shielded", "z_listunspent: invalid params"); }
 
     ENSURE_WALLET(result);
+    if (wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY) {
+        json_set_str(result, "Wallet funds unavailable during cutover");
+        return false;
+    }
 
     json_set_array(result);
 
@@ -410,6 +425,10 @@ bool rpc_z_gettotalbalance(const struct json_value *params, bool help,
     if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); LOG_FAIL("wallet_shielded", "z_gettotalbalance: invalid params"); }
 
     ENSURE_WALLET(result);
+    if (wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY) {
+        json_set_str(result, "Wallet balance unavailable during cutover");
+        return false;
+    }
 
     /* Transparent state is finalized in the locked wallet before the
      * wallet_utxos SQLite projection runs. Reading that exact state prevents
@@ -472,6 +491,10 @@ bool rpc_z_listreceivedbyaddress(const struct json_value *params,
     if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); LOG_FAIL("wallet_shielded", "z_listreceivedbyaddress: invalid params"); }
 
     ENSURE_WALLET(result);
+    if (wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY) {
+        json_set_str(result, "Wallet funds unavailable during cutover");
+        return false;
+    }
 
     uint8_t z_d[11], z_pkd[32];
     if (!sapling_decode_payment_address(addr_str, z_d, z_pkd)) {
@@ -527,6 +550,10 @@ bool rpc_z_listallnotes(const struct json_value *params, bool help,
 
     (void)params;
     ENSURE_WALLET(result);
+    if (wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY) {
+        json_set_str(result, "Wallet funds unavailable during cutover");
+        return false;
+    }
 
     if (!ctx->node_db) {
         json_set_str(result, "Database not available");

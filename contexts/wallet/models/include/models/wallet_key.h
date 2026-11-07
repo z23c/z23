@@ -88,6 +88,22 @@ bool db_wallet_birthday_get(struct node_db *ndb, int64_t *height,
                             uint8_t floor_hash[32]);
 bool db_wallet_birthday_set(struct node_db *ndb, int64_t height,
                             const uint8_t floor_hash[32]);
+/* Refuses when any birthday tuple key exists or cannot be read. */
+bool db_wallet_birthday_set_if_absent(struct node_db *ndb, int64_t height,
+                                      const uint8_t floor_hash[32]);
+
+enum wallet_birthday_proof_status { WALLET_BIRTHDAY_PROOF_FOUND, WALLET_BIRTHDAY_PROOF_ABSENT,
+    WALLET_BIRTHDAY_PROOF_MALFORMED, WALLET_BIRTHDAY_PROOF_ERROR };
+bool db_wallet_birthday_set_created(struct node_db *ndb, int64_t height,
+                                    const uint8_t hash[32], const uint8_t identity[32]);
+enum wallet_birthday_proof_status db_wallet_birthday_proof_get(struct node_db *ndb,
+    int64_t *height, uint8_t hash[32], uint8_t identity[32]);
+
+struct wallet_create_pending { uint8_t nonce[32], identity[32], floor_hash[32]; int floor; bool committed; };
+bool db_wallet_create_pending_insert(struct node_db *ndb, const struct wallet_create_pending *pending);
+enum wallet_birthday_proof_status db_wallet_create_pending_get(struct node_db *ndb, struct wallet_create_pending *out);
+bool db_wallet_create_pending_commit(struct node_db *ndb, const struct wallet_create_pending *pending);
+bool db_wallet_create_pending_cancel(struct node_db *ndb, const struct wallet_create_pending *pending);
 
 /* Wallet seed (singleton). NOTE: no db_wallet_seed_save — single writer
  * is wallet_sqlite (wallet_sqlite_write_sapling_seed). */

@@ -63,6 +63,7 @@
 #include "validation/txmempool.h"
 #include "primitives/transaction.h"
 #include "primitives/block.h"
+#include "bloom/merkle.h"
 #include "script/standard.h"
 #include "keys/pubkey.h"
 #include "json/json.h"
@@ -223,6 +224,13 @@ static int wrc_rescan_marker(struct wallet *w, struct main_state *ms,
     WRC_CHECK("I: a whole rescan keeps it while a stored key is unscannable",
               w->scan_retry.pending && rep.blocks_scanned == WRC_NBLOCKS);
     w->sapling_keys.num_unscannable = 0;
+    WRC_CHECK("I: initialize cutover pending",
+              wallet_readiness_initialize(w, WALLET_READINESS_PENDING, false, 0));
+    (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
+    WRC_CHECK("I: complete body coverage cannot clear a cutover marker",
+              w->scan_retry.pending && rep.blocks_scanned == WRC_NBLOCKS &&
+              wallet_scanned_through_height(w) == -1);
+    WRC_CHECK("I: fixture completes cutover", wallet_readiness_complete(w, false, 0));
     (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
     WRC_CHECK("I: a whole rescan that read every body clears it",
               !w->scan_retry.pending && rep.blocks_scanned == WRC_NBLOCKS &&
@@ -533,6 +541,14 @@ static int wrc_f3_readable(struct wrc_f *f, struct wallet *w)
         f->idx[i].nStatus |= BLOCK_HAVE_DATA;
     struct wallet_rescan_report rep;
     memset(&rep, 0, sizeof(rep));
+    failures += wrc_expect("F3: initialize pending cutover",
+        wallet_readiness_initialize(w, WALLET_READINESS_PENDING, false, 0));
+    (void)boot_wallet_catch_up(w, &f->ms->chain_active, f->datadir, &rep);
+    failures += wrc_expect("F3: full boot catchup preserves cutover marker",
+        rep.blocks_scanned == WRC_F_LAST - WRC_F_PREV &&
+        w->scan_retry.pending && w->scan_retry.from == WRC_F_PREV + 1);
+    failures += wrc_expect("F3: fixture completes cutover",
+        wallet_readiness_complete(w, false, 0));
     int found = boot_wallet_catch_up(w, &f->ms->chain_active, f->datadir,
                                      &rep);
     failures += wrc_expect("F3: the retry rereads 50..199 in full",
@@ -734,6 +750,19 @@ static struct wallet *wrc_g_reboot(struct wallet *owner,
     return w;
 }
 
+static bool wrc_set_merkle(struct block *block)
+{
+    struct uint256 hashes[2];
+    if (block->num_vtx > 2) return false;
+    for (size_t i = 0; i < block->num_vtx; i++) {
+        transaction_compute_hash(&block->vtx[i]);
+        hashes[i] = block->vtx[i].hash;
+    }
+    bool mutated = false;
+    block->header.hashMerkleRoot = merkle_root_mutated_in_place(hashes, block->num_vtx, &mutated);
+    return true;
+}
+
 /* Write one coinbase-shaped tx block to disk; `pay` selects whose output. */
 static bool wrc_g_write_body(struct script *pay, struct disk_block_pos *pos,
                              const char *dir)
@@ -761,7 +790,7 @@ static bool wrc_g_write_body(struct script *pay, struct disk_block_pos *pos,
             t0->vout[0].value = WRC_G_VALUE;
             t0->vout[0].script_pub_key = *pay;
             unsigned char msg_start[4] = { 0x24, 0xe9, 0x27, 0x64 };
-            wrote = write_block_to_disk(&blk, pos, dir, msg_start);
+            wrote = wrc_set_merkle(&blk) && write_block_to_disk(&blk, pos, dir, msg_start);
         }
     }
     block_free(&blk);
@@ -1067,7 +1096,7 @@ static bool wrc_write_shared_body(const char *datadir,
             t1->num_shielded_output = 1;
 
         unsigned char msg_start[4] = { 0x24, 0xe9, 0x27, 0x64 };
-        wrote = write_block_to_disk(&blk, pos, datadir, msg_start);
+        wrote = wrc_set_merkle(&blk) && write_block_to_disk(&blk, pos, datadir, msg_start);
     }
     block_free(&blk);
     return wrote;
@@ -1081,6 +1110,146 @@ static void wrc_set_have_data(struct block_index *idx, int n, bool have)
             idx[i].nStatus |= BLOCK_HAVE_DATA;
         else
             idx[i].nStatus &= ~BLOCK_HAVE_DATA;
+}
+
+static int wrc_deny_release(void *arg, int action, const char *a,
+                            const char *b, const char *c, const char *d)
+{
+    (void)arg; (void)b; (void)c; (void)d;
+    return action == SQLITE_SAVEPOINT && a && strcmp(a, "RELEASE") == 0
+        ? SQLITE_DENY : SQLITE_OK;
+}
+static int wrc_cutover_corruption(sqlite3 *db, struct wallet_sqlite *ws,
+                                  struct wallet *w, struct wallet_cutover_binding b)
+{
+    int failures = 0;
+    struct wallet_cutover_binding out;
+    WRC_CHECK("invalid marker setup", sqlite3_exec(db, "SAVEPOINT corrupt", NULL, NULL, NULL) == SQLITE_OK &&
+        sqlite3_exec(db, "UPDATE node_state SET value='from=5 depth=10 since=0 blocker=- trailing' WHERE key='wallet_scan_incomplete'", NULL, NULL, NULL) == SQLITE_OK);
+    WRC_CHECK("invalid marker refused", wallet_sqlite_cutover_read(ws, &out) == WALLET_CUTOVER_MALFORMED &&
+        !wallet_sqlite_cutover_prepare(ws, w, &b));
+    WRC_CHECK("invalid marker rollback", sqlite3_exec(db, "ROLLBACK TO corrupt; RELEASE corrupt", NULL, NULL, NULL) == SQLITE_OK);
+    WRC_CHECK("invalid version setup", sqlite3_exec(db, "SAVEPOINT corrupt; UPDATE node_state SET value=CAST(x'02'||substr(value,2) AS BLOB) WHERE key='wallet_cutover_binding'", NULL, NULL, NULL) == SQLITE_OK);
+    WRC_CHECK("invalid version refused", wallet_sqlite_cutover_read(ws, &out) == WALLET_CUTOVER_MALFORMED);
+    WRC_CHECK("invalid version rollback", sqlite3_exec(db, "ROLLBACK TO corrupt; RELEASE corrupt", NULL, NULL, NULL) == SQLITE_OK);
+    WRC_CHECK("invalid presence setup", sqlite3_exec(db, "SAVEPOINT corrupt; UPDATE node_state SET value=CAST(substr(value,1,1)||x'02'||substr(value,3) AS BLOB) WHERE key='wallet_cutover_binding'", NULL, NULL, NULL) == SQLITE_OK);
+    WRC_CHECK("invalid presence refused", wallet_sqlite_cutover_read(ws, &out) == WALLET_CUTOVER_MALFORMED);
+    WRC_CHECK("invalid presence rollback", sqlite3_exec(db, "ROLLBACK TO corrupt; RELEASE corrupt", NULL, NULL, NULL) == SQLITE_OK);
+    WRC_CHECK("invalid height refused", (b.target_height = -1, !wallet_sqlite_cutover_prepare(ws, w, &b)));
+    b.target_height = 20;
+    b.target_hash[0] = 9;
+    WRC_CHECK("cutover mismatch refused", !wallet_sqlite_cutover_prepare(ws, w, &b) &&
+        wallet_sqlite_cutover_read(ws, &out) == WALLET_CUTOVER_PENDING && out.target_hash[0] == 2);
+    WRC_CHECK("cutover missing marker refuses", sqlite3_exec(db,
+        "DELETE FROM node_state WHERE key='wallet_scan_incomplete'", NULL, NULL, NULL) == SQLITE_OK &&
+        wallet_sqlite_cutover_read(ws, &out) == WALLET_CUTOVER_MALFORMED);
+    WRC_CHECK("cutover malformed refuses", sqlite3_exec(db,
+        "UPDATE node_state SET value=x'00' WHERE key='wallet_cutover_binding'", NULL, NULL, NULL) == SQLITE_OK &&
+        wallet_sqlite_cutover_read(ws, &out) == WALLET_CUTOVER_MALFORMED);
+    return failures;
+}
+
+static int wrc_cutover_faults(sqlite3 *db, struct wallet_sqlite *ws,
+                              struct wallet *w, const struct wallet_cutover_binding *b)
+{
+    int failures = 0;
+    struct wallet_cutover_binding out;
+    WRC_CHECK("cutover absent", wallet_sqlite_cutover_read(ws, &out) == WALLET_CUTOVER_ABSENT);
+    WRC_CHECK("cutover inject partial failure", sqlite3_exec(db,
+        "CREATE TRIGGER fail_binding BEFORE INSERT ON node_state WHEN NEW.key='wallet_cutover_binding' BEGIN SELECT RAISE(ABORT,'injected'); END", NULL, NULL, NULL) == SQLITE_OK);
+    WRC_CHECK("cutover atomic rollback", !wallet_sqlite_cutover_prepare(ws, w, b) &&
+        wallet_sqlite_cutover_read(ws, &out) == WALLET_CUTOVER_ABSENT &&
+        !wallet_sqlite_read_scan_marker(ws, &(struct wallet_scan_marker){0}));
+    WRC_CHECK("cutover remove trigger", sqlite3_exec(db, "DROP TRIGGER fail_binding", NULL, NULL, NULL) == SQLITE_OK);
+    sqlite3 *empty = NULL;
+    WRC_CHECK("empty schema open", sqlite3_open(":memory:", &empty) == SQLITE_OK);
+    struct wallet_sqlite bad = {.db = empty, .open = true};
+    WRC_CHECK("cutover schema failure is IO", wallet_sqlite_cutover_read(&bad, &out) == WALLET_CUTOVER_IO_ERROR);
+    sqlite3_close(empty);
+    WRC_CHECK("outer begin", sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK);
+    WRC_CHECK("prepare inside outer transaction", wallet_sqlite_cutover_prepare(ws, w, b));
+    WRC_CHECK("outer rollback", sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK &&
+        wallet_sqlite_cutover_read(ws, &out) == WALLET_CUTOVER_ABSENT);
+    WRC_CHECK("release fault installed", sqlite3_set_authorizer(db, wrc_deny_release, NULL) == SQLITE_OK);
+    WRC_CHECK("release fault observable", !wallet_sqlite_cutover_prepare(ws, w, b));
+    WRC_CHECK("release fault removed", sqlite3_set_authorizer(db, NULL, NULL) == SQLITE_OK);
+    WRC_CHECK("release fault rolled back", sqlite3_exec(db, "RELEASE wallet_cutover", NULL, NULL, NULL) == SQLITE_OK &&
+        wallet_sqlite_cutover_read(ws, &out) == WALLET_CUTOVER_ABSENT);
+    return failures;
+}
+
+static int wrc_cutover_binding(const char *datadir)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    struct node_db ndb = {0};
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/cutover-test.sqlite", datadir);
+    struct wallet_sqlite ws = {0};
+    struct wallet *w = zcl_calloc(1, sizeof(*w), "cutover-test");
+    struct wallet_cutover_binding b = {.old_generation_present = true,
+        .old_generation = 0, .old_height = 10, .target_height = 20};
+    struct wallet_cutover_binding out;
+    b.old_hash[0] = 1; b.target_hash[0] = 2; b.artifact_digest[0] = 3;
+    WRC_CHECK("cutover fixture open", w && node_db_open(&ndb, path) && wallet_sqlite_open_r(&ws, ndb.db).ok);
+    if (!w || !ws.open) { free(w); if (ndb.open) node_db_close(&ndb); return failures + 1; }
+    db = ndb.db; w->scan_retry.pending = true;
+    w->scan_retry.from = 5; w->best_block_height = 10;
+    failures += wrc_cutover_faults(db, &ws, w, &b);
+    WRC_CHECK("cutover persists and reloads", wallet_sqlite_cutover_prepare(&ws, w, &b) &&
+        wallet_sqlite_cutover_read(&ws, &out) == WALLET_CUTOVER_PENDING &&
+        out.old_generation_present && out.old_generation == 0 && out.target_height == 20 && out.target_hash[0] == 2);
+    wallet_sqlite_close(&ws); node_db_close(&ndb); db = NULL;
+    WRC_CHECK("cutover reopen", node_db_open(&ndb, path) && wallet_sqlite_open_r(&ws, ndb.db).ok);
+    db = ndb.db;
+    WRC_CHECK("cutover survives restart", wallet_sqlite_cutover_read(&ws, &out) == WALLET_CUTOVER_PENDING && out.target_hash[0] == 2);
+    WRC_CHECK("cutover idempotent", wallet_sqlite_cutover_prepare(&ws, w, &b));
+    failures += wrc_cutover_corruption(db, &ws, w, b);
+    wallet_sqlite_close(&ws); node_db_close(&ndb); free(w); return failures;
+}
+
+/* Keep the indexed header exact while changing its transaction data. */
+static bool wrc_write_invalid_body(const char *dir, const struct disk_block_pos *source,
+    bool duplicate, struct disk_block_pos *pos, struct uint256 *header_hash)
+{
+    struct block block;
+    block_init(&block);
+    bool ok = read_block_from_disk(&block, source, dir) && block.num_vtx == 2;
+    if (ok && duplicate) {
+        transaction_free(&block.vtx[1]);
+        transaction_init(&block.vtx[1]);
+        ok = transaction_copy(&block.vtx[1], &block.vtx[0]) && wrc_set_merkle(&block);
+    } else if (ok) {
+        block.vtx[0].vout[0].value++;
+    }
+    const unsigned char magic[4] = {0x24, 0xe9, 0x27, 0x64};
+    if (ok) {
+        block_get_hash(&block, header_hash);
+        disk_block_pos_init(pos);
+        ok = write_block_to_disk(&block, pos, dir, magic);
+    }
+    block_free(&block);
+    return ok;
+}
+
+static bool wrc_reject_invalid_body(struct wallet *wallet, const char *dir,
+    const struct disk_block_pos *source, bool duplicate)
+{
+    struct disk_block_pos pos;
+    struct uint256 hash;
+    if (!wrc_write_invalid_body(dir, source, duplicate, &pos, &hash)) return false;
+    struct block_index index;
+    block_index_init(&index);
+    index.nHeight = 0; index.nFile = pos.nFile; index.nDataPos = pos.nPos;
+    index.nStatus = BLOCK_HAVE_DATA; index.phashBlock = &hash;
+    struct block_index *slot = &index;
+    struct active_chain chain = {.chain = &slot, .height = 0, .capacity = 1};
+    size_t before = wallet->num_wallet_tx;
+    struct wallet_rescan_report report;
+    (void)wallet_rescan_report(wallet, &chain, 0, 0, dir, &report);
+    return !report.coverage_ok && report.blocks_scanned == 0 &&
+           report.blocks_read_failed == 1 && report.outputs_found == 0 &&
+           wallet->num_wallet_tx == before;
 }
 
 int test_wallet_rescan_coverage(void);
@@ -1164,6 +1333,10 @@ int test_wallet_rescan_coverage(void)
     rpc_wallet_set_coins_tip(NULL);  /* skip the chainstate-lookup gate */
 
     const int last = WRC_NBLOCKS - 1;
+    WRC_CHECK("mismatched transaction root cannot change wallet or coverage",
+              wrc_reject_invalid_body(w1, datadir, &pos, false));
+    WRC_CHECK("duplicate transaction tree cannot change wallet or coverage",
+              wrc_reject_invalid_body(w1, datadir, &pos, true));
 
     /* ── A. Full coverage, wallet owns an output in every block ──────── */
     {
@@ -1286,6 +1459,7 @@ int test_wallet_rescan_coverage(void)
 
     /* ── G. Kill-restart depth re-basing (self-contained fixture) ─────── */
     failures += wrc_g_kill_restart_baseline(w1, &kid, datadir);
+    failures += wrc_cutover_binding(datadir);
 
     /* ── teardown ────────────────────────────────────────────────────── */
     rpc_wallet_set_state(NULL, NULL, NULL, NULL, NULL, NULL);

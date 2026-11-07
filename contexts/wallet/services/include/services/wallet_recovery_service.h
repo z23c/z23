@@ -102,6 +102,8 @@ struct wallet_recovery_report {
      * as a readable seed does. */
     enum wallet_seed_state seed_state_before;
     bool    seed_installed;       /* the phrase's seed is now on disk */
+    bool    creation_replayed;    /* successful no-write creation receipt verification */
+    bool    creation_write_attempted; /* writable-open attempted; mutation possible */
     /* PUBLIC addresses the phrase reproduces — safe to print, and the one
      * thing a user can check against what they remember. */
     char    first_address[128];
@@ -197,6 +199,16 @@ struct wallet_recovery_report {
  *   -70 this process already serves a wallet (a commit refuses; a plan answers)
  *   -71 birthday and birthday_at_local_tip were both given
  */
+/* Creation-only entry: generates fresh entropy internally, ignores supplied
+ * phrase and birthday flags, and returns the new phrase to its caller. The
+ * caller must cleanse that buffer; ordinary recovery never returns a phrase. */
+struct zcl_result wallet_creation_prepare(const char *datadir, char *phrase, size_t phrase_cap, uint8_t nonce[32]);
+struct zcl_result wallet_creation_cancel(const char *datadir, const uint8_t nonce[32]);
+struct zcl_result wallet_creation_commit(const char *datadir, const char *words,
+    const uint8_t nonce[32], const char *passphrase, struct wallet_recovery_report *out);
+
+struct zcl_result wallet_recovery_create_fresh(const struct wallet_recovery_request *req, struct wallet_recovery_report *out, char *phrase, size_t cap);
+
 struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
                                       struct wallet_recovery_report *out);
 

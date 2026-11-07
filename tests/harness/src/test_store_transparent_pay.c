@@ -694,6 +694,10 @@ tstp_chain_setup_wallets_trust(int step, struct tstp_chain *c)
         c->payer_ready = true;
         wallet_init(c->merchant);
         c->merchant_ready = true;
+        bool payer_readiness = wallet_readiness_initialize(
+            c->payer, WALLET_READINESS_READY, false, 0);
+        bool merchant_readiness = wallet_readiness_initialize(
+            c->merchant, WALLET_READINESS_READY, false, 0);
         c->funding_wallet_tx.confirms = 1;
         c->funding_wallet_tx.time_received = 1;
         bool payer_seeded =
@@ -704,8 +708,10 @@ tstp_chain_setup_wallets_trust(int step, struct tstp_chain *c)
             keystore_add_key(&c->merchant->keystore, &c->merchant_key);
         c->payer->best_block_height = simnet_tip_height(&c->sim);
         return (struct tstp_chain_result){
-            .check_ok = payer_seeded && merchant_seeded,
-            .stop = !payer_seeded || !merchant_seeded,
+            .check_ok = payer_seeded && merchant_seeded &&
+                        payer_readiness && merchant_readiness,
+            .stop = !payer_seeded || !merchant_seeded ||
+                    !payer_readiness || !merchant_readiness,
         };
     }
     if (step == TSTP_CHAIN_COIN) {

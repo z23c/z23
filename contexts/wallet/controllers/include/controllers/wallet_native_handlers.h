@@ -14,6 +14,9 @@
 extern "C" {
 #endif
 
+/* Runtime datadir or the existing offline wallet fallback. */
+void wnh_default_datadir(char *out, size_t cap);
+
 /* minconf/maxconf -> listunspent. */
 char *zcl_native_listunspent_body(const struct json_value *args,
                                    struct zcl_native_body_err *err);

@@ -29,6 +29,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #ifndef _WIN32
 #include <unistd.h>
@@ -52,6 +53,11 @@
 #define RR_OFF_VERIFIER    280u
 #define RR_OFF_RECEIPT_DIG 312u
 #define RR_PAYLOAD_BYTES   344u
+#define RR_V2_OFF_VERSION 312u
+#define RR_V2_OFF_SPROUT  320u
+#define RR_V2_OFF_SAPLING 328u
+#define RR_V2_OFF_DIGEST  336u
+#define RR_V2_BYTES       368u
 _Static_assert(RR_OFF_RECEIPT_DIG + 32u == RR_PAYLOAD_BYTES,
                "replay receipt payload layout");
 bool rr_fail(struct consensus_state_replay_result *out, const char *fmt,
@@ -117,10 +123,15 @@ static void rr_receipt_digest(const struct rr_receipt *r, uint8_t out[32])
 {
     static const char domain[] =
         CONSENSUS_STATE_REPLAY_RECEIPT_SCHEMA "/binding";
+    static const char domain_v2[] =
+        CONSENSUS_STATE_REPLAY_RECEIPT_SCHEMA_V2 "/binding";
     uint8_t le[8];
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
-    sha3_256_write(&ctx, (const uint8_t *)domain, sizeof(domain));
+    if (r->format_version == CONSENSUS_STATE_BUNDLE_V2)
+        sha3_256_write(&ctx, (const uint8_t *)domain_v2, sizeof(domain_v2));
+    else
+        sha3_256_write(&ctx, (const uint8_t *)domain, sizeof(domain));
     sha3_256_write(&ctx, r->bundle_file_digest, 32);
     sha3_256_write(&ctx, r->artifact_digest, 32);
     sha3_256_write(&ctx, r->block_hash, 32);
@@ -138,13 +149,22 @@ static void rr_receipt_digest(const struct rr_receipt *r, uint8_t out[32])
     zcl_write_u64_le(le, r->nullifier_count);
     sha3_256_write(&ctx, le, 8);
     sha3_256_write(&ctx, r->verifier_binary_digest, 32);
+    if (r->format_version == CONSENSUS_STATE_BUNDLE_V2) {
+        zcl_write_u64_le(le, r->format_version);
+        sha3_256_write(&ctx, le, 8);
+        zcl_write_u64_le(le, (uint64_t)r->sprout_pool_total);
+        sha3_256_write(&ctx, le, 8);
+        zcl_write_u64_le(le, (uint64_t)r->sapling_pool_total);
+        sha3_256_write(&ctx, le, 8);
+    }
     sha3_256_finalize(&ctx, out);
 }
-static void rr_serialize(const struct rr_receipt *r, uint8_t buf[RR_PAYLOAD_BYTES])
+static void rr_serialize(const struct rr_receipt *r, uint8_t buf[RR_V2_BYTES])
 {
-    memset(buf, 0, RR_PAYLOAD_BYTES);
-    memcpy(buf + RR_OFF_SCHEMA, CONSENSUS_STATE_REPLAY_RECEIPT_SCHEMA,
-           strlen(CONSENSUS_STATE_REPLAY_RECEIPT_SCHEMA));
+    memset(buf, 0, RR_V2_BYTES);
+    const char *schema = r->format_version == CONSENSUS_STATE_BUNDLE_V2 ?
+        CONSENSUS_STATE_REPLAY_RECEIPT_SCHEMA_V2 : CONSENSUS_STATE_REPLAY_RECEIPT_SCHEMA;
+    memcpy(buf + RR_OFF_SCHEMA, schema, strlen(schema));
     memcpy(buf + RR_OFF_BUNDLE_FILE, r->bundle_file_digest, 32);
     memcpy(buf + RR_OFF_ARTIFACT, r->artifact_digest, 32);
     memcpy(buf + RR_OFF_BLOCK_HASH, r->block_hash, 32);
@@ -157,19 +177,33 @@ static void rr_serialize(const struct rr_receipt *r, uint8_t buf[RR_PAYLOAD_BYTE
     memcpy(buf + RR_OFF_NF_DIG, r->nullifier_digest, 32);
     zcl_write_u64_le(buf + RR_OFF_NF_CNT, r->nullifier_count);
     memcpy(buf + RR_OFF_VERIFIER, r->verifier_binary_digest, 32);
-    memcpy(buf + RR_OFF_RECEIPT_DIG, r->receipt_digest, 32);
+    if (r->format_version == CONSENSUS_STATE_BUNDLE_V2) {
+        zcl_write_u64_le(buf + RR_V2_OFF_VERSION, r->format_version);
+        zcl_write_u64_le(buf + RR_V2_OFF_SPROUT, (uint64_t)r->sprout_pool_total);
+        zcl_write_u64_le(buf + RR_V2_OFF_SAPLING, (uint64_t)r->sapling_pool_total);
+        memcpy(buf + RR_V2_OFF_DIGEST, r->receipt_digest, 32);
+    } else {
+        memcpy(buf + RR_OFF_RECEIPT_DIG, r->receipt_digest, 32);
+    }
 }
 /* Parse a fixed payload and verify its self-consistency: schema string and the
  * recomputed receipt_digest. Byte-level tampering fails here. */
-static bool rr_deserialize(const uint8_t buf[RR_PAYLOAD_BYTES],
-                           struct rr_receipt *r)
+static bool rr_deserialize(const uint8_t *buf, size_t len, struct rr_receipt *r)
 {
-    size_t schema_len = strlen(CONSENSUS_STATE_REPLAY_RECEIPT_SCHEMA);
+    if (len != RR_PAYLOAD_BYTES && len != RR_V2_BYTES)
+        return false;
+    bool v2 = len == RR_V2_BYTES;
+    const char *schema = v2 ? CONSENSUS_STATE_REPLAY_RECEIPT_SCHEMA_V2 :
+                              CONSENSUS_STATE_REPLAY_RECEIPT_SCHEMA;
+    size_t schema_len = strlen(schema);
     if (schema_len >= RR_SCHEMA_FIELD ||
-        memcmp(buf + RR_OFF_SCHEMA, CONSENSUS_STATE_REPLAY_RECEIPT_SCHEMA,
-               schema_len) != 0 ||
+        memcmp(buf + RR_OFF_SCHEMA, schema, schema_len) != 0 ||
         buf[RR_OFF_SCHEMA + schema_len] != 0)
         return false;
+    if (v2)
+        for (size_t i = schema_len + 1; i < RR_SCHEMA_FIELD; i++)
+            if (buf[i] != 0)
+                return false;
     memcpy(r->bundle_file_digest, buf + RR_OFF_BUNDLE_FILE, 32);
     memcpy(r->artifact_digest, buf + RR_OFF_ARTIFACT, 32);
     memcpy(r->block_hash, buf + RR_OFF_BLOCK_HASH, 32);
@@ -182,7 +216,19 @@ static bool rr_deserialize(const uint8_t buf[RR_PAYLOAD_BYTES],
     memcpy(r->nullifier_digest, buf + RR_OFF_NF_DIG, 32);
     r->nullifier_count = zcl_read_u64_le(buf + RR_OFF_NF_CNT);
     memcpy(r->verifier_binary_digest, buf + RR_OFF_VERIFIER, 32);
-    memcpy(r->receipt_digest, buf + RR_OFF_RECEIPT_DIG, 32);
+    r->format_version = v2 ? CONSENSUS_STATE_BUNDLE_V2 : CONSENSUS_STATE_BUNDLE_V1;
+    if (v2) {
+        uint64_t sprout = zcl_read_u64_le(buf + RR_V2_OFF_SPROUT);
+        uint64_t sapling = zcl_read_u64_le(buf + RR_V2_OFF_SAPLING);
+        if (zcl_read_u64_le(buf + RR_V2_OFF_VERSION) != CONSENSUS_STATE_BUNDLE_V2 ||
+            sprout > INT64_MAX || sapling > INT64_MAX)
+            return false;
+        r->sprout_pool_total = (int64_t)sprout;
+        r->sapling_pool_total = (int64_t)sapling;
+        memcpy(r->receipt_digest, buf + RR_V2_OFF_DIGEST, 32);
+    } else {
+        memcpy(r->receipt_digest, buf + RR_OFF_RECEIPT_DIG, 32);
+    }
     uint8_t recomputed[32];
     rr_receipt_digest(r, recomputed);
     return memcmp(recomputed, r->receipt_digest, 32) == 0;
@@ -200,7 +246,7 @@ static bool rr_read_file(int datadir_fd, struct rr_receipt *r)
                     O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
         return false;
-    uint8_t buf[RR_PAYLOAD_BYTES + 1];
+    uint8_t buf[RR_V2_BYTES + 1];
     size_t got = 0;
     bool ok = true;
     while (got < sizeof(buf)) {
@@ -217,9 +263,9 @@ static bool rr_read_file(int datadir_fd, struct rr_receipt *r)
     }
     (void)close(fd);
     /* Exactly RR_PAYLOAD_BYTES — a longer file is not our canonical receipt. */
-    if (!ok || got != RR_PAYLOAD_BYTES)
+    if (!ok || (got != RR_PAYLOAD_BYTES && got != RR_V2_BYTES))
         return false;
-    return rr_deserialize(buf, r);
+    return rr_deserialize(buf, got, r);
 #endif
 }
 static bool rr_read_root(const char *trusted_root, struct rr_receipt *r)
@@ -227,7 +273,7 @@ static bool rr_read_root(const char *trusted_root, struct rr_receipt *r)
     struct platform_positioned_file file;
     struct platform_positioned_file_snapshot before;
     struct platform_positioned_file_snapshot after;
-    uint8_t buf[RR_PAYLOAD_BYTES];
+    uint8_t buf[RR_V2_BYTES];
     platform_positioned_file_init(&file);
     bool ok = trusted_root && trusted_root[0] &&
               platform_positioned_file_open_beneath(
@@ -235,13 +281,13 @@ static bool rr_read_root(const char *trusted_root, struct rr_receipt *r)
                   CONSENSUS_STATE_REPLAY_RECEIPT_NAME) &&
               platform_positioned_file_is_private(&file) &&
               platform_positioned_file_snapshot(&file, &before) &&
-              before.size == sizeof(buf) &&
-              platform_positioned_file_read(&file, buf, sizeof(buf), 0) ==
-                  (int64_t)sizeof(buf) &&
+              (before.size == RR_PAYLOAD_BYTES || before.size == RR_V2_BYTES) &&
+              platform_positioned_file_read(&file, buf, (size_t)before.size, 0) ==
+                  (int64_t)before.size &&
               platform_positioned_file_snapshot(&file, &after) &&
               platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
-    return ok && rr_deserialize(buf, r);
+    return ok && rr_deserialize(buf, (size_t)before.size, r);
 }
 
 /* Compare every independently derived component to the bundle manifest. */
@@ -264,6 +310,10 @@ static bool rr_components_match(const struct consensus_state_bundle_manifest *m,
         memcmp(r->nullifier_digest, m->nullifier_digest, 32) != 0)
         return rr_fail(out, "nullifier digest/count from the local fold does "
                             "NOT match the bundle");
+    if (m->format_version == CONSENSUS_STATE_BUNDLE_V2 &&
+        (r->sprout_pool_total != m->sprout_pool_total ||
+         r->sapling_pool_total != m->sapling_pool_total))
+        return rr_fail(out, "shielded pool totals from the local fold do NOT match the bundle");
     return true;
 }
 
@@ -325,8 +375,28 @@ static bool rr_derive_and_compare(sqlite3 *progress_db,
                                   struct rr_receipt *r,
                                   struct consensus_state_replay_result *out)
 {
-    bool ok = rr_derive_from_datadir(progress_db, m, r, out) &&
-              rr_components_match(m, r, out);
+    bool ok = false;
+    if (!sqlite3_get_autocommit(progress_db)) {
+        rr_fail(out, "progress store already has a transaction");
+    } else if (sqlite3_exec(progress_db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
+        rr_fail(out, "progress store read transaction could not begin");
+        if (!sqlite3_get_autocommit(progress_db))
+            abort();
+    } else {
+        ok = rr_derive_from_datadir(progress_db, m, r, out) &&
+             rr_components_match(m, r, out);
+        if (ok && sqlite3_exec(progress_db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+            rr_fail(out, "progress store read transaction commit failed");
+            ok = false;
+        }
+        if (!ok && !sqlite3_get_autocommit(progress_db)) {
+            int rollback_rc = sqlite3_exec(progress_db, "ROLLBACK", NULL, NULL, NULL);
+            if (rollback_rc != SQLITE_OK && !sqlite3_get_autocommit(progress_db))
+                abort();
+            if (!sqlite3_get_autocommit(progress_db))
+                abort();
+        }
+    }
     consensus_state_artifact_evidence_free(evidence);
     return ok;
 }
@@ -384,6 +454,12 @@ bool consensus_state_replay_verify_and_write_receipt(
     memcpy(r.artifact_digest, m.artifact_digest, 32);
     memcpy(r.block_hash, m.block_hash, 32);
     r.height = m.height;
+    if (m.format_version != CONSENSUS_STATE_BUNDLE_V1 &&
+        m.format_version != CONSENSUS_STATE_BUNDLE_V2) {
+        consensus_state_artifact_evidence_free(evidence);
+        return rr_fail(out, "invalid bundle format");
+    }
+    r.format_version = m.format_version;
 
     if (!rr_derive_and_compare(progress_db, evidence, &m, &r, out))
         return false;
@@ -392,11 +468,11 @@ bool consensus_state_replay_verify_and_write_receipt(
     if (!rr_verifier_binary_digest(r.verifier_binary_digest))
         return rr_fail(out, "verifying-binary digest failed");
     rr_receipt_digest(&r, r.receipt_digest);
-    uint8_t buf[RR_PAYLOAD_BYTES];
+    uint8_t buf[RR_V2_BYTES];
     rr_serialize(&r, buf);
     char final_path[256] = {0};
     if (!consensus_state_replay_receipt_write(
-            datadir, buf, sizeof(buf), final_path, sizeof(final_path)))
+            datadir, buf, r.format_version == CONSENSUS_STATE_BUNDLE_V2 ? RR_V2_BYTES : RR_PAYLOAD_BYTES, final_path, sizeof(final_path)))
         return rr_fail(out, "receipt persist (fsync'd) failed");
 
     rr_publish_verified(out, &m, &r, final_path);
@@ -411,12 +487,23 @@ static bool rr_running_binary_is(const uint8_t expected[32])
            memcmp(running, expected, 32) == 0;
 }
 
+static bool rr_receipt_version_matches(const struct rr_receipt *r,
+                                       const struct consensus_state_bundle_manifest *m)
+{
+    return r->format_version == m->format_version &&
+           (r->format_version == CONSENSUS_STATE_BUNDLE_V1 ||
+            (r->format_version == CONSENSUS_STATE_BUNDLE_V2 &&
+             r->sprout_pool_total == m->sprout_pool_total &&
+             r->sapling_pool_total == m->sapling_pool_total));
+}
+
 /* True when the receipt binds THIS bundle file and every manifest component. */
 static bool rr_receipt_binds_bundle(
     const struct rr_receipt *r, const uint8_t bundle_file_digest[32],
     const struct consensus_state_bundle_manifest *manifest)
 {
-    return memcmp(r->bundle_file_digest, bundle_file_digest, 32) == 0 &&
+    return rr_receipt_version_matches(r, manifest) &&
+           memcmp(r->bundle_file_digest, bundle_file_digest, 32) == 0 &&
            memcmp(r->artifact_digest, manifest->artifact_digest, 32) == 0 &&
            r->height == manifest->height &&
            memcmp(r->block_hash, manifest->block_hash, 32) == 0 &&
@@ -537,6 +624,22 @@ bool consensus_state_replay_receipt_bundle_binding_verified_root(
 }
 
 #ifdef ZCL_TESTING
+bool consensus_state_replay_receipt_test_downgrade(const char *datadir,
+                                                   int datadir_fd)
+{
+    struct rr_receipt r;
+    memset(&r, 0, sizeof(r));
+    if (!rr_read_file(datadir_fd, &r) ||
+        r.format_version != CONSENSUS_STATE_BUNDLE_V2)
+        return false;
+    r.format_version = CONSENSUS_STATE_BUNDLE_V1;
+    rr_receipt_digest(&r, r.receipt_digest);
+    uint8_t buf[RR_V2_BYTES];
+    rr_serialize(&r, buf);
+    return consensus_state_replay_receipt_write(datadir, buf, RR_PAYLOAD_BYTES,
+                                                NULL, 0);
+}
+
 bool consensus_state_replay_receipt_write_for_test(
     const char *datadir, const uint8_t bundle_file_digest[32],
     int32_t height, uint64_t utxo_count, uint64_t anchor_count,
@@ -547,6 +650,7 @@ bool consensus_state_replay_receipt_write_for_test(
 
     struct rr_receipt r;
     memset(&r, 0, sizeof(r));
+    r.format_version = CONSENSUS_STATE_BUNDLE_V1;
     memcpy(r.bundle_file_digest, bundle_file_digest, 32);
     r.height = height;
     r.utxo_count = utxo_count;
@@ -561,9 +665,9 @@ bool consensus_state_replay_receipt_write_for_test(
     memset(r.verifier_binary_digest, 0xAB, sizeof(r.verifier_binary_digest));
 
     rr_receipt_digest(&r, r.receipt_digest);
-    uint8_t buf[RR_PAYLOAD_BYTES];
+    uint8_t buf[RR_V2_BYTES];
     rr_serialize(&r, buf);
-    return consensus_state_replay_receipt_write(datadir, buf, sizeof(buf),
+    return consensus_state_replay_receipt_write(datadir, buf, RR_PAYLOAD_BYTES,
                                                 out_path, out_cap);
 }
 #endif

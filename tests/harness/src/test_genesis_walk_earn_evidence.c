@@ -852,6 +852,7 @@ static bool gw_cp_markers_in_tx(sqlite3 *pdb, const struct gw_cp_shape *s)
 static bool gw_cp_install(const struct gw_cp_shape *s)
 {
     memset(&g_gw_rom, 0, sizeof(g_gw_rom));
+    g_gw_rom.format_version = ROM_STATE_CHECKPOINT_V1;
     g_gw_rom.height = GW_CP;
     memset(g_gw_rom.block_hash, 0x21, 32);
     memset(g_gw_rom.utxo_root, 0x22, 32);

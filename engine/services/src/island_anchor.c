@@ -13,9 +13,16 @@
 
 #include "base/serialize_le.h"
 #include "chain/chain.h"
+#include "core/serialize.h"
+#include "primitives/block.h"
+#include "util/safe_alloc.h"
+#include "util/ar_step_readonly.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdatomic.h>
@@ -34,7 +41,7 @@ static struct island_anchor g_ia;   /* guarded by g_ia_lock */
 
 static bool ia_valid(const struct island_anchor *a)
 {
-    return a && a->root_height > 0 &&
+    return a && a->root_height > 0 && a->root_height <= INT32_MAX - (ISLAND_ANCHOR_WINDOW - 1) &&
            a->rung_height == a->root_height + ISLAND_ANCHOR_WINDOW - 1 &&
            !uint256_is_null(&a->root_hash) &&
            !uint256_is_null(&a->rung_hash) &&
@@ -194,13 +201,169 @@ struct zcl_result island_anchor_save(struct sqlite3 *db,
     return ZCL_OK;
 }
 
+#define IA_WINDOW_KEY "flysync.island_window.v1"
+#define IA_WINDOW_MAX (1u + ISLAND_ANCHOR_WINDOW * (149u + MAX_SOLUTION_SIZE))
+
+static bool ia_encode_window(const struct block_header *window, struct byte_stream *out)
+{
+    if (!window) return false;
+    stream_init(out, IA_WINDOW_MAX);
+    if (!stream_write_u8(out, 1)) return false;
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; ++i)
+        if (window[i].nSolutionSize > MAX_SOLUTION_SIZE || !block_header_serialize(&window[i], out)) return false;
+    return !out->error && out->size <= IA_WINDOW_MAX;
+}
+
+static bool ia_sync_level(sqlite3 *db, int *out)
+{
+    sqlite3_stmt *s = NULL; bool ok = false;
+    if (sqlite3_prepare_v2(db, "PRAGMA synchronous", -1, &s, NULL) == SQLITE_OK &&
+        ar_step_checked(s, "island synchronous read", NULL) == ZCL_STEP_ROW) {
+        *out = sqlite3_column_int(s, 0);
+        ok = *out >= 0 && *out <= 3 && ar_step_checked(s, "island synchronous completion", NULL) == ZCL_STEP_DONE;
+    }
+    if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool ia_set_sync(sqlite3 *db, int level)
+{
+    char sql[32]; int actual = -1;
+    int n = snprintf(sql, sizeof(sql), "PRAGMA synchronous=%d", level);
+    return n > 0 && (size_t)n < sizeof(sql) && sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK &&
+        ia_sync_level(db, &actual) && actual == level;
+}
+
+static bool ia_durable_journal(sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL; bool ok = false;
+    if (sqlite3_prepare_v2(db, "PRAGMA journal_mode", -1, &s, NULL) == SQLITE_OK &&
+        ar_step_checked(s, "island journal mode read", NULL) == ZCL_STEP_ROW) {
+        const char *mode = (const char *)sqlite3_column_text(s, 0);
+        ok = mode && (!strcmp(mode, "wal") || !strcmp(mode, "delete") ||
+                      !strcmp(mode, "truncate") || !strcmp(mode, "persist"));
+        ok = ok && ar_step_checked(s, "island journal mode completion", NULL) == ZCL_STEP_DONE;
+    }
+    if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool ia_meta_equal(sqlite3 *db, const char *key, const void *expected, size_t length)
+{
+    uint8_t *copy = zcl_malloc(length, "island fact verify");
+    if (!copy) return false;
+    size_t got = 0; bool found = false;
+    bool ok = progress_meta_get_blob_exact(db, key, copy, length, &got, &found) &&
+        found && got == length && memcmp(copy, expected, length) == 0;
+    free(copy);
+    return ok;
+}
+
+#ifdef ZCL_TESTING
+static void (*g_window_commit_hook)(bool);
+void island_anchor_test_commit_hook(void (*hook)(bool)) { g_window_commit_hook = hook; }
+#endif
+
+static bool ia_write_window_records(sqlite3 *db, const uint8_t fact[IA_FACT_LEN],
+    const struct island_anchor_rows *rows, const struct byte_stream *window, const uint8_t *state)
+{
+    return progress_meta_set_in_tx(db, IA_FACT_KEY, fact, IA_FACT_LEN) &&
+        progress_meta_set_in_tx(db, IA_ROWS_KEY, rows->hash, sizeof(rows->hash)) &&
+        progress_meta_set_in_tx(db, IA_WINDOW_KEY, window->data, window->size) &&
+        progress_meta_set_in_tx(db, IA_STATE_KEY, state, 1) &&
+        ia_meta_equal(db, IA_FACT_KEY, fact, IA_FACT_LEN) &&
+        ia_meta_equal(db, IA_ROWS_KEY, rows->hash, sizeof(rows->hash)) &&
+        ia_meta_equal(db, IA_WINDOW_KEY, window->data, window->size) &&
+        ia_meta_equal(db, IA_STATE_KEY, state, 1);
+}
+
+static bool ia_save_window_tx(sqlite3 *db, const struct island_anchor *a,
+                              const struct island_anchor_rows *rows, const struct byte_stream *window)
+{
+    uint8_t fact[IA_FACT_LEN]; ia_encode(a, fact);
+    uint8_t state = (uint8_t)ISLAND_ANCHOR_STATE_SEEDED;
+    if (!ia_exec(db, "BEGIN IMMEDIATE")) return false;
+    bool wrote = ia_write_window_records(db, fact, rows, window, &state);
+#ifdef ZCL_TESTING
+    if (wrote && g_window_commit_hook) g_window_commit_hook(false);
+#endif
+    bool committed = wrote && ia_exec(db, "COMMIT");
+#ifdef ZCL_TESTING
+    if (committed && g_window_commit_hook) g_window_commit_hook(true);
+#endif
+    if (!committed && !ia_exec(db, "ROLLBACK")) {
+        LOG_ERROR(IA_SUBSYS, "island window rollback failed: %s", sqlite3_errmsg(db));
+        if (!sqlite3_get_autocommit(db)) abort();
+    }
+    return committed;
+}
+
+static bool ia_save_window_durable(sqlite3 *db, const struct island_anchor *a,
+    const struct island_anchor_rows *rows, const struct byte_stream *encoded)
+{
+    progress_store_tx_lock();
+    int previous = -1;
+    bool ready = sqlite3_get_autocommit(db) && island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_NONE &&
+        ia_durable_journal(db) && ia_sync_level(db, &previous);
+    bool raised = ready && ia_set_sync(db, previous >= 2 ? previous : 2);
+    bool saved = raised && ia_save_window_tx(db, a, rows, encoded);
+    bool restored = previous >= 0 && ia_set_sync(db, previous);
+    if (previous >= 0 && !restored) LOG_ERROR(IA_SUBSYS, "island sync restoration failed: %s", sqlite3_errmsg(db));
+    progress_store_tx_unlock();
+    return saved && restored;
+}
+
+struct zcl_result island_anchor_save_window(sqlite3 *db, const struct island_anchor *a,
+    const struct island_anchor_rows *rows, const struct block_header *window)
+{
+    if (!db || !ia_valid(a) || !ia_rows_match(a, rows) || !window)
+        return ZCL_ERR(-1, "island window save: invalid fact or headers");
+    struct byte_stream encoded;
+    if (!ia_encode_window(window, &encoded)) { stream_free(&encoded); return ZCL_ERR(-2, "island window encode failed"); }
+    bool saved = ia_save_window_durable(db, a, rows, &encoded);
+    stream_free(&encoded);
+    return saved ? ZCL_OK : ZCL_ERR(-3, "island window durable save or restoration failed");
+}
+
+static bool ia_decode_window(const uint8_t *bytes, size_t length, struct block_header *window)
+{
+    struct byte_stream input; stream_init_from_data(&input, bytes, length);
+    uint8_t version = 0;
+    bool ok = stream_read_u8(&input, &version) && version == 1;
+    for (int i = 0; ok && i < ISLAND_ANCHOR_WINDOW; ++i)
+        ok = block_header_deserialize(&window[i], &input);
+    ok = ok && !input.error && input.read_pos == input.size;
+    struct byte_stream canonical = {0};
+    if (ok) ok = ia_encode_window(window, &canonical) && canonical.size == length &&
+                 memcmp(canonical.data, bytes, length) == 0;
+    stream_free(&canonical);
+    return ok;
+}
+
+struct zcl_result island_anchor_window_load(sqlite3 *db, struct block_header *window, bool *found)
+{
+    if (found) *found = false;
+    if (!db || !window || !found) return ZCL_ERR(-1, "island window load: invalid arguments");
+    uint8_t *bytes = zcl_malloc(IA_WINDOW_MAX, "island window read");
+    if (!bytes) return ZCL_ERR(-2, "island window allocation failed");
+    size_t length = 0; bool present = false;
+    bool ok = progress_meta_get_blob_exact(db, IA_WINDOW_KEY, bytes, IA_WINDOW_MAX, &length, &present);
+    if (!ok || !present) { free(bytes); return ok ? ZCL_OK : ZCL_ERR(-3, "island window read failed"); }
+    ok = ia_decode_window(bytes, length, window);
+    free(bytes);
+    if (!ok) return ZCL_ERR(-4, "island window malformed");
+    *found = true;
+    return ZCL_OK;
+}
+
 /* Retire the fact once its rows have rejoined the chain (fall-back only). */
 struct zcl_result island_anchor_retire(struct sqlite3 *db)
 {
     if (island_anchor_state_load(db) != ISLAND_ANCHOR_STATE_FELL_BACK)
         return ZCL_ERR(-1, "island fact not retired: state is not FELL_BACK");
-    if (!progress_meta_delete(db, IA_FACT_KEY) ||
-        !progress_meta_delete(db, IA_ROWS_KEY))
+    if (!progress_meta_delete(db, IA_WINDOW_KEY) ||
+        !progress_meta_delete(db, IA_ROWS_KEY) ||
+        !progress_meta_delete(db, IA_FACT_KEY))
         return ZCL_ERR(-2, "island fact not retired: progress_meta delete "
                        "failed");
     LOG_INFO(IA_SUBSYS, "fallen-back island rejoined the chain; fact retired");

@@ -8,9 +8,15 @@
 #include "test/test_core.h"
 #include "controllers/wallet_rescan_controller_internal.h"
 #include "storage/anchor_kv.h"
+#include "config/db_service.h"
+#include "config/runtime.h"
 
 #include <sqlite3.h>
 #include <string.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+void rescan_test_rollback(struct node_db *db);
+#endif
 
 static struct uint256 test_root(uint8_t seed)
 {
@@ -117,10 +123,236 @@ static bool anchor_seeded_at_oldest_note(bool seed_ok, int replay_start,
            uint256_eq(seeded_root, anchor_root);
 }
 
+static bool rescan_changed_notes_case(const struct wallet_rpc_context *ctx,
+    const struct incremental_merkle_tree *tree, const struct incremental_witness *witness,
+    const bool *active, const struct db_sapling_note *note, const struct block_index *tip,
+    const struct uint256 *root)
+{
+    struct db_sapling_note extra = *note;
+    extra.txid[0] ^= 0x80;
+    extra.nullifier[0] ^= 0x80;
+    if (!db_sapling_note_save(ctx->node_db, &extra)) return false;
+    struct wallet_witness_outcome out;
+    bool refused = !rescan_test_commit(ctx, tree, witness, active, note, 1, 1,
+                                        1, &tip->hashBlock, root, &out) &&
+                   out.status == WALLET_WITNESS_PERSIST_FAILED;
+    return db_sapling_note_delete(ctx->node_db, extra.txid, extra.output_index) && refused;
+}
+
+static bool rescan_commit_refusals(const struct wallet_rpc_context *ctx,
+    const struct incremental_merkle_tree *tree, const struct incremental_witness *witness,
+    const bool *active, const struct db_sapling_note *note, const struct block_index *tip,
+    const struct uint256 *root)
+{
+    bool ok = true;
+    struct wallet_witness_outcome out;
+    if (ok) ok = !rescan_test_commit(ctx, tree, witness, active, note, 1, 0,
+                                      1, &tip->hashBlock, root, &out) &&
+                 out.status == WALLET_WITNESS_INCOMPLETE;
+    struct uint256 wrong = tip->hashBlock;
+    wrong.data[0] ^= 1;
+    if (ok) ok = !rescan_test_commit(ctx, tree, witness, active, note, 1, 1,
+                                      1, &wrong, root, &out) &&
+                 out.status == WALLET_WITNESS_ENDPOINT_CHANGED;
+    if (ok) ok = rescan_changed_notes_case(ctx, tree, witness, active, note, tip, root);
+    zcl_mutex_lock(&ctx->main_state->cs_main);
+    bool blocked = !rescan_test_commit(ctx, tree, witness, active, note, 1, 1,
+                                       1, &tip->hashBlock, root, &out) &&
+                   out.status == WALLET_WITNESS_BUSY;
+    zcl_mutex_unlock(&ctx->main_state->cs_main);
+    sqlite3_mutex *mu = sqlite3_db_mutex(ctx->node_db->db);
+    sqlite3_mutex_enter(mu);
+    bool db_blocked = !rescan_test_commit(ctx, tree, witness, active, note, 1, 1,
+                                          1, &tip->hashBlock, root, &out) &&
+                      out.status == WALLET_WITNESS_BUSY;
+    sqlite3_mutex_leave(mu);
+    return db_blocked && blocked && ok;
+}
+
+static bool rescan_commit_exercise(const struct wallet_rpc_context *ctx,
+    const struct incremental_merkle_tree *tree, const struct incremental_witness *witness,
+    const bool *active, const struct db_sapling_note *note, const struct block_index *tip,
+    const struct uint256 *root)
+{
+    bool ok = true;
+    struct wallet_witness_outcome out;
+    ok = rescan_commit_refusals(ctx, tree, witness, active, note, tip, root);
+    if (ok) ok = sqlite3_exec(ctx->node_db->db, "CREATE TRIGGER fail_witness BEFORE UPDATE ON wallet_sapling_notes BEGIN SELECT RAISE(ABORT,'injected'); END", NULL, NULL, NULL) == SQLITE_OK;
+    if (ok) ok = !rescan_test_commit(ctx, tree, witness, active, note, 1, 1,
+                                      1, &tip->hashBlock, root, &out) &&
+                 out.status == WALLET_WITNESS_PERSIST_FAILED;
+    uint8_t *blob = NULL; size_t len = 0; int height = -1;
+    if (ok) ok = !db_sapling_note_load_witness(ctx->node_db, note->txid, 0, &blob, &len, &height);
+    bool present = false; size_t tree_len = 0;
+    if (ok) ok = node_db_state_read(ctx->node_db, "sapling_tree", NULL, 0, &tree_len, &present) && !present;
+    free(blob); blob = NULL;
+    if (ok) ok = sqlite3_exec(ctx->node_db->db, "DROP TRIGGER fail_witness", NULL, NULL, NULL) == SQLITE_OK;
+    if (ok) ok = rescan_test_commit(ctx, tree, witness, active, note, 1, 1,
+                                     1, &tip->hashBlock, root, &out) &&
+                 out.status == WALLET_WITNESS_COMPLETE && out.witnesses_saved == 1;
+    if (ok) ok = db_sapling_note_load_witness(ctx->node_db, note->txid, 0, &blob, &len, &height) && len > 0 && height == 1;
+    free(blob);
+    return ok;
+}
+
+#ifndef _WIN32
+static int witness_deny_rollback(void *ctx, int action, const char *a,
+                                 const char *b, const char *c, const char *d)
+{
+    (void)ctx; (void)b; (void)c; (void)d;
+    return action == SQLITE_TRANSACTION && a && strcmp(a, "ROLLBACK") == 0 ? SQLITE_DENY : SQLITE_OK;
+}
+
+static bool witness_failstop_empty_db(const char *path)
+{
+    sqlite3 *db = NULL; sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_open(path, &db) == SQLITE_OK &&
+        sqlite3_prepare_v2(db, "SELECT count(*) FROM witness_fatal_test", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 0;
+    if (s) sqlite3_finalize(s);
+    if (db) sqlite3_close(db);
+    return ok;
+}
+
+static bool witness_failstop_fixture(void)
+{
+    char dir[256], path[320];
+    test_make_tmpdir(dir, sizeof(dir), "wallet", "witness_failstop");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    pid_t child = fork();
+    if (child == 0) {
+        struct node_db db = {0};
+        if (!node_db_open(&db, path) ||
+            sqlite3_exec(db.db, "CREATE TABLE witness_fatal_test(v INTEGER)", NULL, NULL, NULL) != SQLITE_OK ||
+            !node_db_begin_immediate(&db) ||
+            sqlite3_exec(db.db, "INSERT INTO witness_fatal_test VALUES(1)", NULL, NULL, NULL) != SQLITE_OK ||
+            sqlite3_set_authorizer(db.db, witness_deny_rollback, NULL) != SQLITE_OK) _exit(2);
+        rescan_test_rollback(&db);
+        _exit(3);
+    }
+    int status = 0;
+    bool ok = child > 0 && waitpid(child, &status, 0) == child &&
+        WIFEXITED(status) && WEXITSTATUS(status) == EXIT_FAILURE;
+    if (ok) ok = witness_failstop_empty_db(path);
+    (void)test_rm_rf_recursive(dir);
+    return ok;
+}
+#endif
+
+static bool rescan_fixture_empty(struct wallet_rpc_context *ctx, struct node_db *db,
+                                  const struct db_sapling_note *note)
+{
+    struct wallet_witness_outcome out = {.status = WALLET_WITNESS_COMPLETE, .endpoint_height = 1};
+    if (wallet_rescan_witnesses_at(ctx, NULL, &out) || out.status == WALLET_WITNESS_COMPLETE || out.endpoint_height != -1) return false;
+    const struct block_index *tip = active_chain_at(&ctx->main_state->chain_active, 1);
+    if (!tip || !tip->phashBlock) return false;
+    struct wallet_witness_endpoint endpoint = {.height = 1, .hash = *tip->phashBlock, .root = tip->hashFinalSaplingRoot};
+    endpoint.hash.data[0] ^= 1;
+    bool ok = !wallet_rescan_witnesses_at(ctx, &endpoint, &out) && out.status == WALLET_WITNESS_ENDPOINT_CHANGED;
+    endpoint.hash.data[0] ^= 1; endpoint.root.data[0] ^= 1;
+    if (ok) ok = !wallet_rescan_witnesses_at(ctx, &endpoint, &out) && out.status == WALLET_WITNESS_ENDPOINT_CHANGED;
+    endpoint.root.data[0] ^= 1;
+    if (ok) ok = wallet_rescan_witnesses_at(ctx, &endpoint, &out) &&
+        out.status == WALLET_WITNESS_COMPLETE && out.endpoint_height == 1;
+    return ok && db_sapling_note_save(db, note);
+}
+
+static bool rescan_fixture_note_endpoint_refusal(struct wallet_rpc_context *ctx,
+    struct node_db *db, const struct db_sapling_note *note)
+{
+    const struct block_index *tip = active_chain_at(&ctx->main_state->chain_active, 1);
+    if (!tip || !tip->phashBlock) return false;
+    struct wallet_witness_endpoint endpoint = {.height = 1, .hash = *tip->phashBlock,
+        .root = tip->hashFinalSaplingRoot};
+    endpoint.hash.data[0] ^= 1;
+    struct wallet_witness_outcome out;
+    bool ok = !wallet_rescan_witnesses_at(ctx, &endpoint, &out) &&
+        out.status == WALLET_WITNESS_ENDPOINT_CHANGED;
+    uint8_t *blob = NULL; size_t len = 0; int height = -1;
+    if (ok) ok = !db_sapling_note_load_witness(db, note->txid, note->output_index, &blob, &len, &height);
+    free(blob);
+    return ok;
+}
+
+static bool rescan_fixture_empty_and_refusal(struct wallet_rpc_context *ctx,
+    struct node_db *db, const struct db_sapling_note *note)
+{
+    return rescan_fixture_empty(ctx, db, note) &&
+           rescan_fixture_note_endpoint_refusal(ctx, db, note);
+}
+
+static bool rescan_fixture_replay(const struct wallet_rpc_context *ctx, struct block_index *tip)
+{
+    bool ok = true;
+    struct uint256 saved_root = tip->hashFinalSaplingRoot;
+    struct incremental_merkle_tree empty_tree;
+    sapling_tree_init(&empty_tree);
+    incremental_tree_root(&empty_tree, &tip->hashFinalSaplingRoot);
+    tip->nFile = -1;
+    if (ok) ok = rescan_test_replay(ctx, 1, 1);
+    tip->hashFinalSaplingRoot = saved_root;
+    if (ok) ok = !rescan_test_replay(ctx, 1, 1);
+    return ok;
+}
+
+static bool rescan_commit_fixture(void)
+{
+    char dir[256], path[320];
+    test_make_tmpdir(dir, sizeof(dir), "wallet", "witness_commit");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db db = {0};
+    if (!node_db_open(&db, path)) return false;
+    struct db_service svc;
+    db_service_init(&svc);
+    bool started = db_service_attach(&svc, &db) && db_service_start_test_worker(&svc);
+    struct app_runtime_context runtime = {.db_service = &svc};
+    app_runtime_set_current(&runtime);
+    struct main_state ms = {0};
+    main_state_init(&ms);
+    struct wallet *wallet = zcl_calloc(1, sizeof(*wallet), "witness test wallet");
+    if (wallet) wallet_init(wallet);
+    uint8_t seed[32] = {1}, diversifier[11], pk_d[32];
+    bool ok = started && wallet && sapling_keystore_set_seed(&wallet->sapling_keys, seed) &&
+        sapling_keystore_new_address(&wallet->sapling_keys, diversifier, pk_d);
+    struct db_sapling_note note = {0};
+    if (ok) {
+        memset(note.txid, 1, 32); note.nullifier[0] = 1; note.rcm[0] = 1; note.value = 10; note.block_height = 1;
+        memcpy(note.diversifier, diversifier, 11); memcpy(note.pk_d, pk_d, 32);
+        memcpy(note.ivk, wallet->sapling_keys.keys[0].ivk, 32);
+        ok = sapling_compute_cm(note.diversifier, note.pk_d, note.value, note.rcm, note.cm);
+    }
+    struct incremental_merkle_tree tree;
+    sapling_tree_init(&tree);
+    struct uint256 cm, root;
+    memcpy(cm.data, note.cm, 32);
+    incremental_tree_append(&tree, &cm);
+    incremental_tree_root(&tree, &root);
+    struct incremental_witness witness;
+    incremental_witness_init(&witness, &tree);
+    struct block_index tip;
+    block_index_init(&tip);
+    tip.nHeight = 1; tip.hashBlock = test_root(0x61); tip.phashBlock = &tip.hashBlock;
+    tip.hashFinalSaplingRoot = root;
+    ok = ok && active_chain_install_tip_slot(&ms.chain_active, &tip);
+    struct wallet_rpc_context ctx = {.wallet = wallet, .main_state = &ms, .node_db = &db, .datadir = dir};
+    if (ok) ok = rescan_fixture_replay(&ctx, &tip);
+    if (ok) ok = rescan_fixture_empty_and_refusal(&ctx, &db, &note);
+    bool active = true;
+    if (ok) ok = rescan_commit_exercise(&ctx, &tree, &witness, &active, &note, &tip, &root);
+    app_runtime_set_current(NULL);
+    if (started) db_service_stop(&svc);
+    if (wallet) { wallet_free(wallet); free(wallet); }
+    main_state_free(&ms);
+    node_db_close(&db);
+    return test_rm_rf_recursive(dir) == 0 && ok;
+}
+
 int test_rescanwitnesses_diverge_guard(void)
 {
     printf("\n=== rescanwitnesses divergence guard ===\n");
     int failures = 0;
+    check_case("partial and failed saves roll back; complete save persists",
+               rescan_commit_fixture(), true, &failures);
 
     struct uint256 root = test_root(0x11);
     struct uint256 same = root;
@@ -201,6 +433,10 @@ int test_rescanwitnesses_diverge_guard(void)
                &failures);
     active_chain_free(&endpoint_chain);
 
+#ifndef _WIN32
+    check_case("rollback failure terminates and discards uncommitted rows",
+               witness_failstop_fixture(), true, &failures);
+#endif
     check_case("consensus-decoded body appends every commitment and note",
                decoded_body_appends_all_commitments(), true, &failures);
 

@@ -1040,6 +1040,7 @@ static const struct block_index *boot_commitment_block_at(struct main_state *sta
 
 static void boot_bootstrap_commitment_mmr(struct boot_svc_ctx *svc)
 {
+    if (!boot_legacy_commitment_bootstrap_allowed()) return;
     /* Bootstrap commitment MMR if empty but chain is at height.
      * After legacy import, we have the UTXO set at tip but no
      * commitment history. Compute one commitment at current height
@@ -1275,6 +1276,10 @@ static void boot_start_runtime_or_degrade(struct boot_svc_ctx *svc);
 
 static void boot_start_catchup_and_backfill(struct boot_svc_ctx *svc, const struct app_context *ctx)
 {
+    if (wallet_readiness_get(svc->wallet).state != WALLET_READINESS_READY) {
+        printf("SQLite wallet catchup deferred until wallet recovery completes.\n");
+        return;
+    }
     /* SQLite catchup — skip when no UTXO set (P2P snapshot incoming).
      * Running catchup during snapshot receive causes DB lock contention
      * that stalls the snapshot data flow. */
@@ -1291,6 +1296,27 @@ static void boot_start_catchup_and_backfill(struct boot_svc_ctx *svc, const stru
             fprintf(stderr, "WARNING: failed to start projection backfill watcher\n");
         }
     }
+}
+
+static int64_t boot_wallet_restore_if_ready(struct boot_svc_ctx *svc,
+    struct app_context *ctx, int64_t t, bool unready)
+{
+    if (!unready && boot_node_db(svc))
+        node_db_sync_mempool_load(boot_node_db(svc), svc->mempool,
+                                  svc->coins_tip, svc->state, svc->params);
+    t = svc_init_wallet_submark(t, "svc.init_wallet.mempool_load",
+                                "svc.init_wallet.wallet_catch_up");
+    if (!unready)
+        (void)boot_wallet_boot_catch_up(svc->wallet, &svc->state->chain_active,
+                                        ctx->datadir, boot_node_db(svc));
+    t = svc_init_wallet_submark(t, "svc.init_wallet.wallet_catch_up",
+                                "svc.init_wallet.verify_utxos");
+    if (!unready) wallet_verify_utxos(svc->wallet, svc->coins_tip);
+    t = svc_init_wallet_submark(t, "svc.init_wallet.verify_utxos",
+                                "svc.init_wallet.utxo_probe");
+    if (!unready) boot_wallet_ground_truth_check(svc);
+    return svc_init_wallet_submark(t, "svc.init_wallet.utxo_probe",
+                                   "svc.init_wallet.scrub_plaintext");
 }
 
 #if defined(_WIN32) && defined(__clang__)
@@ -1345,26 +1371,15 @@ bool app_init_services(struct app_context *ctx, const struct chain_params *param
     event_observe_async(EV_TIP_UPDATED, boot_sync_state_logger, NULL);
     event_observe_async(EV_BLOCK_CONNECTED, boot_sync_state_logger, NULL);
     event_observe_async(EV_REORG_START, boot_sync_state_logger, NULL);
-    if (boot_node_db(svc))
-        node_db_sync_mempool_load(boot_node_db(svc), svc->mempool,
-                                  svc->coins_tip, svc->state, svc->params);
-    t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.mempool_load",
-                                   "svc.init_wallet.wallet_catch_up");
-    (void)boot_wallet_boot_catch_up(svc->wallet, &svc->state->chain_active, ctx->datadir, boot_node_db(svc));
-    t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.wallet_catch_up",
-                                   "svc.init_wallet.verify_utxos");
-    wallet_verify_utxos(svc->wallet, svc->coins_tip);
-    t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.verify_utxos",
-                                   "svc.init_wallet.utxo_probe");
-    boot_wallet_ground_truth_check(svc);
-    t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.utxo_probe",
-                                   "svc.init_wallet.scrub_plaintext");
+    bool wallet_unready = wallet_readiness_get(svc->wallet).state != WALLET_READINESS_READY;
+    t_iw = boot_wallet_restore_if_ready(svc, ctx, t_iw, wallet_unready);
     boot_wallet_scrub_plaintext_or_exit(svc, ctx);
     t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.scrub_plaintext", "svc.init_wallet");
     boot_wire_msg_processor(svc, ctx, params);
     boot_init_connman(svc, ctx, params);
     boot_zcode_swarm_wire_network(svc);
-    if (!boot_start_wallet_broadcast(svc, ctx, params)) return boot_step_fail("wallet_broadcast_mode");
+    if (!boot_start_wallet_broadcast(svc, ctx, params))
+        return boot_step_fail("wallet_broadcast_mode");
     /* NETWORK_READY boundary: connman and addrman ready, listeners bound just
      * below; advances the boot-stage machine via the net record in boot.c. */
     {

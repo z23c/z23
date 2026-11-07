@@ -32,6 +32,9 @@
 #include "controllers/swap_controller.h"
 #include "script/htlc.h"
 #include "services/vault_read.h"
+#include "wallet/wallet.h"
+#include "wallet/wallet_sqlite.h"
+#include <stdlib.h>
 
 #include <math.h>
 #include <stdio.h>
@@ -477,6 +480,67 @@ static int vr_check_swap_amount_conversions(void)
 int vault_read_bounds_tests(void);
 int vault_read_fields_tests(void);
 
+static int vr_deny_release_once(void *ctx, int action, const char *operation,
+                                const char *name, const char *db, const char *trigger)
+{
+    (void)name; (void)db; (void)trigger;
+    int *remaining = ctx;
+    if (action == SQLITE_SAVEPOINT && operation && strcmp(operation, "RELEASE") == 0 && *remaining > 0) {
+        --*remaining;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static int vr_check_release_failure(struct node_db *ndb)
+{
+    int failures = 0, deny = 1;
+    struct vault_snapshot snap;
+    VR_CHECK("release fault installed", sqlite3_set_authorizer(ndb->db, vr_deny_release_once, &deny) == SQLITE_OK);
+    VR_CHECK("release fault refuses and cleans own transaction", !vault_read_snapshot(ndb, &snap).ok &&
+             sqlite3_get_autocommit(ndb->db));
+    VR_CHECK("outer transaction begins", sqlite3_exec(ndb->db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK);
+    deny = 1;
+    VR_CHECK("release fault preserves caller transaction", !vault_read_snapshot(ndb, &snap).ok &&
+             !sqlite3_get_autocommit(ndb->db));
+    VR_CHECK("caller transaction remains usable", sqlite3_exec(ndb->db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK);
+    VR_CHECK("second outer transaction begins", sqlite3_exec(ndb->db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK);
+    deny = 2;
+    struct zcl_result result = vault_read_snapshot(ndb, &snap);
+    VR_CHECK("persistent release fault reports cleanup failure", !result.ok && result.code == -5 &&
+             !sqlite3_get_autocommit(ndb->db));
+    VR_CHECK("release fault removed", sqlite3_set_authorizer(ndb->db, NULL, NULL) == SQLITE_OK);
+    VR_CHECK("caller can clean nested savepoint",
+             sqlite3_exec(ndb->db, "ROLLBACK TO vault_snapshot; RELEASE vault_snapshot; COMMIT", NULL, NULL, NULL) == SQLITE_OK);
+    return failures;
+}
+
+static int vr_check_cutover_snapshot(struct node_db *ndb)
+{
+    int failures = 0;
+    struct vault_snapshot snap;
+    struct wallet_sqlite ws = {0};
+    struct wallet *w = calloc(1, sizeof(*w));
+    struct wallet_cutover_binding b = {.old_generation_present = true,
+        .old_generation = 1, .old_height = 10, .target_height = 20};
+    b.old_hash[0] = 1; b.target_hash[0] = 2; b.artifact_digest[0] = 3;
+    VR_CHECK("cutover fixture available", w && wallet_sqlite_open_r(&ws, ndb->db).ok);
+    if (!w || !ws.open) { free(w); return failures + 1; }
+    w->scan_retry.pending = true; w->scan_retry.from = 5; w->best_block_height = 10;
+    VR_CHECK("absent cutover exposes normal snapshot", vault_read_snapshot(ndb, &snap).ok);
+    VR_CHECK("pending cutover prepared", wallet_sqlite_cutover_prepare(&ws, w, &b));
+    memset(&snap, 0xff, sizeof(snap));
+    VR_CHECK("pending cutover refuses amounts", !vault_read_snapshot(ndb, &snap).ok &&
+             snap.zcl_total == 0 && snap.zcl_spendable == 0 && snap.zcl_encumbered == 0);
+    VR_CHECK("malformed cutover marker stored", node_db_state_delete(ndb, "wallet_scan_incomplete"));
+    VR_CHECK("malformed cutover refuses amounts", !vault_read_snapshot(ndb, &snap).ok && snap.zcl_total == 0);
+    VR_CHECK("fixture binding removed", node_db_state_delete(ndb, "wallet_cutover_binding"));
+    VR_CHECK("absent cutover restores normal snapshot", vault_read_snapshot(ndb, &snap).ok);
+    wallet_sqlite_close(&ws);
+    free(w);
+    return failures;
+}
+
 int test_vault_read(void)
 {
     int failures = 0;
@@ -521,6 +585,8 @@ int test_vault_read(void)
     /* ── 8. swap_list answers with a body the command bridge accepts ─ */
     failures += vr_check_swap_list_envelope();
 
+    failures += vr_check_cutover_snapshot(&ndb);
+    failures += vr_check_release_failure(&ndb);
     node_db_close(&ndb);
     test_rm_rf(dir);
 

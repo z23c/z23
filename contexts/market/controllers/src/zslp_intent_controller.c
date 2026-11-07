@@ -24,6 +24,7 @@
 #include "services/zslp_transaction_intent_service.h"
 #include "util/log_macros.h"
 #include "validation/main_state.h"
+#include "validation/accept_to_mempool.h"
 #include "wallet/wallet.h"
 
 #include <stdio.h>
@@ -182,13 +183,21 @@ static struct zcl_result ztic_prepare(
                       : ZCL_ERR(-8, "prepared ZSLP transaction is too large");
 }
 
+static bool ztic_publish_context_valid(const struct wallet_rpc_context *ctx,
+                                       const uint8_t *raw, size_t len, const uint8_t *id)
+{
+    return ctx && ctx->wallet && raw && len != 0 && id;
+}
+
 static struct zcl_result ztic_publish(
     void *opaque, const uint8_t *raw_tx, size_t raw_tx_len,
     const uint8_t expected_txid[32])
 {
     struct wallet_rpc_context *ctx = opaque;
-    if (!ctx || !ctx->wallet || !raw_tx || raw_tx_len == 0 || !expected_txid)
+    if (!ztic_publish_context_valid(ctx, raw_tx, raw_tx_len, expected_txid))
         return ZCL_ERR(-1, "ZSLP publish context is incomplete");
+    if (wallet_readiness_get(ctx->wallet).state != WALLET_READINESS_READY)
+        return ZCL_ERR(-5, "wallet state unavailable during cutover");
     struct zcl_result private_refusal = wallet_private_broadcast_unsupported("a ZSLP intent");
     if (!private_refusal.ok)
         return private_refusal;
@@ -208,6 +217,12 @@ static struct zcl_result ztic_publish(
         return ZCL_ERR(-3, "prepared ZSLP transaction identity changed");
     }
     if (wallet_get_tx(ctx->wallet, &wtx.tx.hash)) {
+        struct zcl_result accepted = wallet_reaccept_from_context(ctx, &wtx);
+        if (!accepted.ok) {
+            transaction_free(&wtx.tx);
+            if (accepted.code == -100 - (int)MEMPOOL_ACCEPT_DUPLICATE) return ZCL_OK;
+            return accepted;
+        }
         if (ctx->connman) connman_relay_transaction(ctx->connman, &wtx.tx.hash);
         transaction_free(&wtx.tx);
         return ZCL_OK;
@@ -218,6 +233,11 @@ static struct zcl_result ztic_publish(
     return published ? ZCL_OK
                      : ZCL_ERR(-4, "ZSLP publication failed: %s", error);
 }
+
+#ifdef ZCL_TESTING
+struct zcl_result zcl_test_ztic_publish(void *ctx, const uint8_t *raw, size_t len, const uint8_t id[32])
+{ return ztic_publish(ctx, raw, len, id); }
+#endif
 
 static struct zcl_result ztic_runtime(struct zslp_intent_runtime *out,
                                       struct json_value *result)

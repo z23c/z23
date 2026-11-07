@@ -134,6 +134,9 @@ void boot_datadir_lock_release(void)
 #else
 
 static int g_pidfile_fd = -1;
+static dev_t g_directory_device;
+static ino_t g_directory_inode;
+static pid_t g_lock_owner;
 
 static bool write_all(int fd, const char *buf, size_t len)
 {
@@ -520,6 +523,18 @@ bool boot_datadir_lock_acquire(const char *datadir)
         return false;
     }
 
+    struct stat dir_stat;
+    if (fstat(dir_fd, &dir_stat) != 0 || !S_ISDIR(dir_stat.st_mode)) {
+        int saved = errno;
+        (void)flock(fd, LOCK_UN); close(fd); close(dir_fd);
+        boot_error_report(BOOT_ERROR_FATAL, "BOOT_DATADIR_IDENTITY_FAILED",
+                          BDL_PHASE, "cannot verify datadir identity", NULL, 0,
+                          "datadir=%s errno=%d", datadir, saved);
+        return false;
+    }
+    g_directory_device = dir_stat.st_dev;
+    g_directory_inode = dir_stat.st_ino;
+    g_lock_owner = getpid();
     close(dir_fd);
     g_pidfile_fd = fd;
     /* Publish before the storage probes: bootwait must not observe a stale
@@ -554,6 +569,7 @@ void boot_datadir_lock_release(void)
 
     int fd = g_pidfile_fd;
     g_pidfile_fd = -1;
+    g_lock_owner = 0;
     if (flock(fd, LOCK_UN) != 0) {
         fprintf(stderr, "[boot] Cannot explicitly unlock data directory: %s\n",
                 strerror(errno));
@@ -565,3 +581,19 @@ void boot_datadir_lock_release(void)
 }
 
 #endif
+
+bool boot_datadir_lock_matches_fd(int directory_fd)
+{
+#if defined(_WIN32)
+    (void)directory_fd; return false;
+#else
+    struct stat dir, held, named;
+    return directory_fd >= 0 && g_pidfile_fd >= 0 && g_lock_owner == getpid() &&
+           fstat(directory_fd, &dir) == 0 && S_ISDIR(dir.st_mode) &&
+           dir.st_dev == g_directory_device && dir.st_ino == g_directory_inode &&
+           fstat(g_pidfile_fd, &held) == 0 && S_ISREG(held.st_mode) &&
+           held.st_nlink == 1 &&
+           fstatat(directory_fd, BDL_PIDFILE, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+           named.st_dev == held.st_dev && named.st_ino == held.st_ino;
+#endif
+}

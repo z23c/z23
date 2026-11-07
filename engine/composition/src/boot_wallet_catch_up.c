@@ -47,6 +47,17 @@ static int boot_wallet_catch_up_start(const struct wallet *w,
  * range. scan_retry keeps the lowest unread start, the blocker and when it was
  * first seen; the flush persists the scanned-through height and that marker
  * in the same transaction as the tx rows, and the next boot rescans from it. */
+static bool boot_wallet_catch_up_can_clear(const struct wallet *w,
+                                           const struct wallet_rescan_report *r)
+{
+    if (w->scan_retry.pending &&
+        (r->shielded_txs_unscanned > 0 || w->sapling_keys.num_unscannable > 0))
+        return false;
+    if (w->scan_retry.pending && r->start_height > w->scan_retry.from)
+        return false;
+    return wallet_readiness_get_locked(w).state != WALLET_READINESS_PENDING;
+}
+
 static void boot_wallet_catch_up_settle(struct wallet *w,
                                         const struct wallet_rescan_report *r)
 {
@@ -57,20 +68,11 @@ static void boot_wallet_catch_up_settle(struct wallet *w,
     const char *blocker = r->blocker[0] ? r->blocker
                                         : WALLET_RESCAN_BLOCKER_INCOMPLETE;
     zcl_mutex_lock(&w->cs);
-    if (read_all && w->scan_retry.pending &&
-        (r->shielded_txs_unscanned > 0 || w->sapling_keys.num_unscannable > 0)) {
-        /* Every body was read but some Sapling outputs were never tried for
-         * want of a key, or a stored key cannot scan while the wallet is
-         * locked: an existing marker must wait for a read that tried them. */
-        zcl_mutex_unlock(&w->cs);
-        return;
-    }
-    if (read_all && w->scan_retry.pending &&
-        r->start_height > w->scan_retry.from) {
-        zcl_mutex_unlock(&w->cs);
-        return;
-    }
     if (read_all) {
+        if (!boot_wallet_catch_up_can_clear(w, r)) {
+            zcl_mutex_unlock(&w->cs);
+            return;
+        }
         if (w->scan_retry.pending &&
             strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_PENDING) == 0)
             w->initial_scan_floor = 0;
@@ -184,7 +186,8 @@ static bool boot_wallet_birthday_await(struct wallet *w, const struct active_cha
                                        struct node_db *ndb, int *floor)
 {
     enum wallet_birthday_state st = wallet_birthday_check(ndb, chain, floor);
-    if (st == WALLET_BIRTHDAY_AHEAD || st == WALLET_BIRTHDAY_VALID)
+    if (st == WALLET_BIRTHDAY_AHEAD || st == WALLET_BIRTHDAY_VALID ||
+        st == WALLET_BIRTHDAY_UNAVAILABLE)
         w->initial_scan_floor = *floor;
     wallet_birthday_reconcile(w, ndb, (struct active_chain *)chain,
                               active_chain_tip(chain));
@@ -192,8 +195,24 @@ static bool boot_wallet_birthday_await(struct wallet *w, const struct active_cha
         strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_PENDING) == 0;
 }
 
-int boot_wallet_boot_catch_up(struct wallet *w, const struct active_chain *chain,
-                              const char *datadir, struct node_db *ndb)
+static bool boot_wallet_birthday_existing(struct wallet *w,
+                                          const struct active_chain *chain,
+                                          struct node_db *ndb, int *floor)
+{
+    enum wallet_birthday_state st = wallet_birthday_check(ndb, chain, floor);
+    if (st == WALLET_BIRTHDAY_VALID)
+        w->initial_scan_floor = *floor;
+    else if (st == WALLET_BIRTHDAY_UNAVAILABLE) {
+        w->initial_scan_floor = *floor;
+        return false;
+    } else if (st == WALLET_BIRTHDAY_CHANGED || st == WALLET_BIRTHDAY_AHEAD)
+        boot_wallet_birthday_changed(w);
+    return true;
+}
+
+static bool boot_wallet_birthday_prepare(struct wallet *w,
+                                         const struct active_chain *chain,
+                                         struct node_db *ndb)
 {
     int floor = 0;
     bool awaiting = w->scan_retry.pending &&
@@ -201,23 +220,21 @@ int boot_wallet_boot_catch_up(struct wallet *w, const struct active_chain *chain
     w->initial_scan_floor = 0;
     if (awaiting) {
         if (boot_wallet_birthday_await(w, chain, ndb, &floor))
-            return -1;
+            return false;
     } else if (w->scan_retry.pending || w->best_block_height > 0) {
-        enum wallet_birthday_state st = wallet_birthday_check(ndb, chain, &floor);
-        if (st == WALLET_BIRTHDAY_VALID)
-            w->initial_scan_floor = floor;
-        else if (st == WALLET_BIRTHDAY_CHANGED || st == WALLET_BIRTHDAY_AHEAD)
-            boot_wallet_birthday_changed(w);
+        if (!boot_wallet_birthday_existing(w, chain, ndb, &floor))
+            return false;
     } else if (w->best_block_height == 0 && !w->scan_retry.pending) {
         enum wallet_birthday_state st = wallet_birthday_check(ndb, chain,
                                                               &floor);
         /* AHEAD keeps the floor too: the catch-up start is then above the
          * tip, so nothing runs until the chain reaches the floor. */
-        bool held = st == WALLET_BIRTHDAY_VALID || st == WALLET_BIRTHDAY_AHEAD;
+        bool held = st == WALLET_BIRTHDAY_VALID || st == WALLET_BIRTHDAY_AHEAD ||
+                    st == WALLET_BIRTHDAY_UNAVAILABLE;
         w->initial_scan_floor = held ? floor : 0;
         if (st == WALLET_BIRTHDAY_CHANGED)
             boot_wallet_birthday_changed(w);
-        if (st == WALLET_BIRTHDAY_AHEAD) {
+        if (st == WALLET_BIRTHDAY_AHEAD || st == WALLET_BIRTHDAY_UNAVAILABLE) {
             zcl_mutex_lock(&w->cs);
             w->scan_retry.pending = true;
             w->scan_retry.from = 0;
@@ -225,8 +242,16 @@ int boot_wallet_boot_catch_up(struct wallet *w, const struct active_chain *chain
             snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker),
                      "%s", WALLET_BIRTHDAY_PENDING);
             zcl_mutex_unlock(&w->cs);
-            return -1;
+            return false;
         }
     }
+    return true;
+}
+
+int boot_wallet_boot_catch_up(struct wallet *w, const struct active_chain *chain,
+                              const char *datadir, struct node_db *ndb)
+{
+    if (!boot_wallet_birthday_prepare(w, chain, ndb))
+        return -1;
     return boot_wallet_catch_up(w, chain, datadir, NULL);
 }

@@ -15,6 +15,7 @@
  * like a definitive answer. Everything below keeps those two apart. */
 
 #include "wallet/wallet.h"
+#include "domain/consensus/check_block.h"
 #include "util/log_macros.h"
 #include "core/utiltime.h"
 #include "platform/time_compat.h"
@@ -61,6 +62,17 @@ static int wallet_scan_one_tx(struct wallet *w, struct transaction *tx,
     return found;
 }
 
+/* Authenticate transaction data before folding it into the wallet. */
+static bool wallet_scan_body_valid(struct block *block)
+{
+    for (size_t i = 0; i < block->num_vtx; i++)
+        transaction_compute_hash(&block->vtx[i]);
+    struct zcl_result checked = domain_consensus_check_block_merkle_root(block, NULL, 0, NULL);
+    if (!checked.ok)
+        LOG_WARN("wallet", "rescan block authentication failed: %s", checked.message);
+    return checked.ok;
+}
+
 /* One block's contribution to a rescan. `r` is optional; when present every
  * outcome — including the two distinct ways a block yields nothing — is
  * counted into it. Returns outputs + notes found in this block. */
@@ -78,9 +90,9 @@ static int wallet_scan_one_block(struct wallet *w,
 
     struct block b;
     block_init(&b);
-    if (!read_block_from_disk_index(&b, pindex, datadir)) {
-        /* Body claimed present but unreadable — a truncated or missing
-         * block file. Also not evidence of absence. */
+    if (!read_block_from_disk_index(&b, pindex, datadir) || !wallet_scan_body_valid(&b)) {
+        /* Body claimed present but unreadable or unauthenticated.
+         * Neither case is evidence that wallet funds are absent. */
         if (r) r->blocks_read_failed++;
         block_free(&b);
         return 0;
@@ -169,13 +181,16 @@ static void wallet_rescan_log_done(const struct wallet_rescan_report *r,
 /* A rescan that read every block from the marker to the tip is the read the
  * marker waits for. A partial one (starting above the marker, stopping before
  * the tip, missing a body, leaving shielded outputs untried for want of a
- * key, or holding a stored key that cannot scan while locked) proves nothing about the rest and keeps it. */
+ * key, or holding a stored key that cannot scan while locked) proves nothing
+ * about the rest and keeps it. A cutover marker waits for durable binding
+ * completion even when this scan reads the entire range. */
 static void wallet_rescan_clear_marker(struct wallet *w, int start_height,
                                        int stop_height, int tip,
                                        const struct wallet_rescan_report *r)
 {
     zcl_mutex_lock(&w->cs);
-    if (w->scan_retry.pending && start_height <= w->scan_retry.from &&
+    if (wallet_readiness_get_locked(w).state != WALLET_READINESS_PENDING &&
+        w->scan_retry.pending && start_height <= w->scan_retry.from &&
         stop_height >= tip && r->blocks_scanned == r->blocks_in_range &&
         r->shielded_txs_unscanned == 0 && w->sapling_keys.num_unscannable == 0) {
         if (strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_PENDING) == 0)

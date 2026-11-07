@@ -13,9 +13,8 @@
 
 /* First-run wallet setup: Create a new wallet, or Restore from words.
  *
- * Create asks the system for one authentication that wraps a fresh random passphrase into wallet_key.blob, stops the node
- * if it runs, has the node create a shielded-only wallet encrypted with that passphrase, starts the node, shows the 24
- * words once and then asks for three of them. Setup is finished only when the answers match. Restore takes the owner's
+ * Create wraps a fresh passphrase with one system authentication, pauses the node and prepares the recovery words.
+ * The owner writes the words and confirms them after the native wallet commit. The node stays paused until confirmation. Setup is finished only when the answers match. Restore takes the owner's
  * words and an optional birthday height, runs the same way and shows how far the node has read.
  *
  * The passphrase exists in memory only between the device key and the node's standard input and is cleansed after each
@@ -62,6 +61,8 @@ struct wsu_env {
     /* Seconds since the epoch, for the names of files set aside, the clock of each step and the two minutes a running node is
      * asked. */
     int64_t (*wall_s)(void *ctx);
+    enum zapp_devkey_status (*unwrap_existing)(void *ctx, uint8_t secret[ZAPP_DEVKEY_SECRET]);
+    void (*resume_if_wanted)(void *ctx);
 };
 
 enum wsu_step {
@@ -159,6 +160,9 @@ struct wsu {
     char write_pass[SUN_PASSPHRASE_HEX + 1];
     enum wsu_write write;
     enum wsu_failure write_failure;
+    char creation_nonce[65];
+    bool resume_creation;
+    bool creation_receipt;
     bool words_first;           /* the setup is a create whose words were shown before the wallet was written */
     char form[WSU_FORM_MAX];    /* the restore words as typed; the form shows them again after a refusal (wsu_set_form) */
 };
@@ -187,6 +191,7 @@ struct wsu_view {
     bool birthday_unknown;
     bool birthday_dropped;
     enum wsu_failure refusal;   /* with NO_BIRTHDAY: why the last Start over was refused, or none */
+    bool resume_creation;
     bool may_start_over;   /* the setup is a create whose words were not confirmed */
     size_t bad_word;       /* with BAD_WORD: the index of the word, counted from 0 */
     char leftover[WSU_LEFTOVER_MAX];
@@ -263,6 +268,7 @@ bool wsu_parse_height(const char *text, int64_t *height);
  * interrupted-setup path), where Start over and Back work. False unless the write has failed. */
 bool wsu_give_up_write(struct wsu *w);
 /* text is the typed words; birthday_height is 0 when the owner does not know it. */
+bool wsu_open_resume_creation(struct wsu *w);
 void wsu_restore_job(struct wsu *w, const char *text, int64_t birthday_height);
 /* Keeps the restore words as typed, so the form shows them again after a refusal. They are wiped when the form is left, when
  * setup finishes and when the app leaves the foreground. */

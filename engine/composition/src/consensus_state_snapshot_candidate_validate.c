@@ -17,6 +17,7 @@
 #include "services/nullifier_backfill_service.h"
 #include "storage/anchor_kv.h"
 #include "storage/consensus_state_bundle_codec.h"
+#include "util/ar_step_readonly.h"
 
 #include <limits.h>
 #include <sqlite3.h>
@@ -91,7 +92,7 @@ static bool schema_column_count(sqlite3 *db, const char *name, int expected)
     return ok;
 }
 
-static bool candidate_closed_schema(sqlite3 *db)
+static bool candidate_closed_schema(sqlite3 *db, uint8_t version)
 {
     static const struct schema_object expected[] = {
         {"index", "idx_nullifiers_height", -1},
@@ -128,7 +129,9 @@ static bool candidate_closed_schema(sqlite3 *db)
              consensus_state_sqlite_text_equal(stmt, 1, expected[i].name) &&
              sql && sqlite3_column_bytes(stmt, 2) == (int)strlen(sql) &&
              schema_column_count(db, expected[i].name,
-                                 expected[i].column_count);
+                                 expected[i].column_count +
+                                 (version == CONSENSUS_STATE_BUNDLE_V2 &&
+                                  strcmp(expected[i].name, "consensus_state_candidate_meta") == 0 ? 3 : 0));
     }
     if (ok)
         ok = sqlite3_step(stmt) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
@@ -193,6 +196,27 @@ static bool meta_provenance_matches(
            blob32_equal(stmt, 23, m->source_digest) &&
            blob32_equal(stmt, 24, m->artifact_digest) &&
            blob32_equal(stmt, 25, admission_receipt);
+}
+
+static bool candidate_v2_pools_match(sqlite3 *db,
+                                    const struct consensus_state_bundle_manifest *m)
+{
+    if (m->format_version == CONSENSUS_STATE_BUNDLE_V1)
+        return true;
+    if (m->format_version != CONSENSUS_STATE_BUNDLE_V2 ||
+        m->sprout_pool_total < 0 || m->sapling_pool_total < 0)
+        return false;
+    sqlite3_stmt *st = NULL;
+    const char *sql = "SELECT bundle_format_version,sprout_pool_total,sapling_pool_total "
+                      "FROM consensus_state_candidate_meta WHERE singleton=1";
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
+        return false;
+    bool ok = ar_step_checked(st, "candidate v2 pool row", NULL) == ZCL_STEP_ROW &&
+              int64_col_is(st, 0, CONSENSUS_STATE_BUNDLE_V2) &&
+              int64_col_is(st, 1, m->sprout_pool_total) &&
+              int64_col_is(st, 2, m->sapling_pool_total) && step_done(st);
+    int rc = sqlite3_finalize(st);
+    return ok && rc == SQLITE_OK;
 }
 
 static bool candidate_meta_matches(
@@ -864,6 +888,25 @@ static bool candidate_reducer_state(
            cand_tip_finalize_log(db, m);
 }
 
+static bool candidate_validate_header(
+    sqlite3 *candidate, const struct consensus_state_bundle_manifest *expected,
+    const uint8_t expected_admission_receipt[32],
+    struct consensus_state_candidate_result *result)
+{
+    if (expected->format_version != CONSENSUS_STATE_BUNDLE_V1 &&
+        expected->format_version != CONSENSUS_STATE_BUNDLE_V2)
+        return candidate_invalid(result, "invalid bundle version");
+    if (!candidate_integrity(candidate))
+        return candidate_invalid(result, "integrity check failed");
+    if (!candidate_closed_schema(candidate, expected->format_version))
+        return candidate_invalid(result, "schema is not the closed set");
+    if (!candidate_meta_matches(candidate, expected,
+                                expected_admission_receipt) ||
+        !candidate_v2_pools_match(candidate, expected))
+        return candidate_invalid(result, "manifest/admission receipt mismatch");
+    return true;
+}
+
 bool consensus_state_candidate_validate_reopened(
     sqlite3 *candidate,
     const struct consensus_state_bundle_manifest *expected,
@@ -873,13 +916,8 @@ bool consensus_state_candidate_validate_reopened(
     if (!candidate || !expected || !expected_admission_receipt)
         return candidate_invalid(result, "null validation input");
     struct consensus_state_source_receipt receipt;
-    if (!candidate_integrity(candidate))
-        return candidate_invalid(result, "integrity check failed");
-    if (!candidate_closed_schema(candidate))
-        return candidate_invalid(result, "schema is not the closed set");
-    if (!candidate_meta_matches(candidate, expected,
-                                expected_admission_receipt))
-        return candidate_invalid(result, "manifest/admission receipt mismatch");
+    if (!candidate_validate_header(candidate, expected, expected_admission_receipt, result))
+        return false; // raw-return-ok:logged-by-callee
     if (!candidate_source_receipt(candidate, expected, &receipt) ||
         !candidate_proofs(candidate, expected, &receipt))
         return candidate_invalid(result, "source proof provenance mismatch");

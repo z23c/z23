@@ -3,6 +3,8 @@
 
 #include "config/boot.h"
 #include "config/boot_snapshot_install.h"
+#include "config/boot_internal.h"
+#include "config/consensus_state_snapshot_install.h"
 
 #include "chain/checkpoints.h"
 #include "chain/utxo_snapshot_loader.h"
@@ -23,6 +25,18 @@
 #define SNAPSHOT_INSTALL_MARKER_VERSION 2u
 #define SNAPSHOT_INSTALL_PENDING 0u
 #define SNAPSHOT_INSTALL_COMPLETE 1u
+
+/* Installed snapshots do not authenticate the legacy cache accumulator. */
+bool boot_legacy_commitment_bootstrap_allowed(void)
+{
+    struct consensus_state_install_stamp stamp;
+    bool found = false;
+    progress_store_tx_lock();
+    sqlite3 *db = progress_store_db();
+    bool allowed = db && consensus_state_install_read_authority_stamp(db, &stamp, &found) && !found;
+    progress_store_tx_unlock();
+    return allowed;
+}
 
 static void put_u32_le(uint8_t *out, uint32_t value)
 {

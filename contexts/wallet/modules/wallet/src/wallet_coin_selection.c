@@ -600,6 +600,10 @@ bool wallet_create_transaction_selected(struct wallet *w,
     if (!wallet_tx_args_valid(w, selected, num_selected, outputs, num_outputs,
                               wtx_out, error))
         return false;
+    if (wallet_readiness_get(w).state != WALLET_READINESS_READY) {
+        *error = "Wallet state is unavailable during cutover";
+        return false;
+    }
 
     int64_t input_value = 0, output_value = 0;
     if (!wallet_sum_explicit_inputs(selected, num_selected, &input_value,

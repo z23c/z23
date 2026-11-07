@@ -34,6 +34,7 @@
 #include "core/uint256.h"
 
 struct block_index;
+struct block_header;
 struct sqlite3;
 
 /* Rows in the window: the rung and the 27 below it. 17 (nPowAveragingWindow)
@@ -69,6 +70,10 @@ enum island_anchor_err {
 
 /* In-process registration. register() refuses a malformed fact
  * (ISLAND_ANCHOR_ERR_INVALID). The bool exports are total predicates. */
+#ifdef ZCL_TESTING
+void island_anchor_test_commit_hook(void (*hook)(bool));
+#endif
+
 struct zcl_result island_anchor_register(const struct island_anchor *a);
 void island_anchor_unregister(void);
 bool island_anchor_registered(void);
@@ -106,6 +111,14 @@ struct island_anchor_rows {
 struct zcl_result island_anchor_save(struct sqlite3 *db,
                                      const struct island_anchor *a,
                                      const struct island_anchor_rows *rows);
+/* Atomically commit exact full-window proof with its anchor and SEEDED state. */
+struct zcl_result island_anchor_save_window(struct sqlite3 *db,
+    const struct island_anchor *a, const struct island_anchor_rows *rows,
+    const struct block_header *window);
+/* Missing legacy proof returns OK with found=false; malformed or I/O fails. */
+struct zcl_result island_anchor_window_load(struct sqlite3 *db,
+    struct block_header *window, bool *found);
+
 /* Loads: OK with *found false when absent; ISLAND_ANCHOR_ERR_UNREADABLE when
  * the read fails (or no store is open), ISLAND_ANCHOR_ERR_MALFORMED when the
  * stored length is wrong. Never decide "absent" on an error. */

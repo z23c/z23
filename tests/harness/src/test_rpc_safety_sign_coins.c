@@ -17,6 +17,7 @@
 #include "core/core_io.h"
 #include "json/json.h"
 #include "keys/key.h"
+#include "keys/key_io.h"
 #include "models/database.h"
 #include "models/utxo.h"
 #include "rpc/server.h"
@@ -27,6 +28,7 @@
 #include "validation/main_state.h"
 #include "validation/sighash.h"
 #include "wallet/keystore.h"
+#include "wallet/wallet.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -36,6 +38,7 @@
 #define SCS_ROW_AMOUNT 7000
 
 struct scs_spec {
+    bool pending;
     bool has_coin;
     bool has_row;
     bool row_foreign_script;
@@ -44,7 +47,7 @@ struct scs_spec {
 };
 
 struct scs_fx {
-    struct basic_keystore ks;
+    struct wallet *wallet;
     struct rpc_table tbl;
     struct privkey key;
     struct pubkey pub;
@@ -134,12 +137,15 @@ static bool scs_open_stores(struct scs_fx *fx)
     return true;
 }
 
-static bool scs_open_keys(struct scs_fx *fx)
+static bool scs_open_keys(struct scs_fx *fx, const struct scs_spec *sp)
 {
-    keystore_init(&fx->ks);
+    fx->wallet = zcl_calloc(1, sizeof(*fx->wallet), "scs_wallet");
+    if (!fx->wallet) return false;
+    wallet_init(fx->wallet);
+    if (!wallet_readiness_initialize(fx->wallet, sp->pending ? WALLET_READINESS_PENDING : WALLET_READINESS_READY, false, 0)) return false;
     privkey_make_new(&fx->key, true);
     if (!privkey_get_pubkey(&fx->key, &fx->pub) ||
-        !keystore_add_key(&fx->ks, &fx->key))
+        !keystore_add_key(&fx->wallet->keystore, &fx->key))
         return false;
     fx->kid = pubkey_get_id(&fx->pub);
     memset(&fx->foreign, 0x77, sizeof(fx->foreign));
@@ -159,9 +165,10 @@ static void scs_wire(struct scs_fx *fx, const struct scs_spec *sp)
             calloc(6, sizeof(*fx->ms.chain_active.chain));
         ms = &fx->ms;
     }
+    wallet_rpc_context_set_base(fx->wallet, ms, NULL, NULL, NULL, NULL);
     wallet_rpc_context_set_node_db(&fx->ndb);
     rpc_rawtx_set_state(ms, NULL, &fx->cache, NULL);
-    rpc_rawtx_set_keystore(&fx->ks);
+    rpc_rawtx_set_keystore(&fx->wallet->keystore);
     rpc_table_init(&fx->tbl);
     register_rawtransaction_rpc_commands(&fx->tbl);
 }
@@ -169,7 +176,7 @@ static void scs_wire(struct scs_fx *fx, const struct scs_spec *sp)
 static bool scs_open(struct scs_fx *fx, const struct scs_spec *sp)
 {
     memset(fx, 0, sizeof(*fx));
-    fx->ok = scs_open_keys(fx) && scs_open_stores(fx) && scs_build_tx(fx);
+    fx->ok = scs_open_keys(fx, sp) && scs_open_stores(fx) && scs_build_tx(fx);
     if (!fx->ok)
         return false;
     scs_wire(fx, sp);
@@ -183,6 +190,7 @@ static bool scs_open(struct scs_fx *fx, const struct scs_spec *sp)
 static void scs_close(struct scs_fx *fx, const struct scs_spec *sp)
 {
     wallet_rpc_context_set_node_db(NULL);
+    wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
     rpc_rawtx_set_state(NULL, NULL, NULL, NULL);
     rpc_rawtx_set_keystore(NULL);
     if (sp->unresolved_tip) {
@@ -192,7 +200,7 @@ static void scs_close(struct scs_fx *fx, const struct scs_spec *sp)
         fx->ms.chain_active.capacity = 0;
         main_state_free(&fx->ms);
     }
-    keystore_free(&fx->ks);
+    if (fx->wallet) { wallet_free(fx->wallet); free(fx->wallet); fx->wallet = NULL; }
     coins_view_cache_free(&fx->cache);
     if (fx->ndb.open)
         node_db_close(&fx->ndb);
@@ -202,7 +210,7 @@ static void scs_close(struct scs_fx *fx, const struct scs_spec *sp)
 
 /* Run signrawtransaction over the fixture tx with no caller-supplied
  * prevouts, so the input is resolved by the node. */
-static void scs_sign(struct scs_fx *fx)
+static void scs_sign_with_keys(struct scs_fx *fx, bool caller_key)
 {
     struct json_value params, value, result;
     json_init(&params);
@@ -211,6 +219,25 @@ static void scs_sign(struct scs_fx *fx)
     json_set_str(&value, fx->tx_hex);
     json_push_back(&params, &value);
     json_free(&value);
+    if (caller_key) {
+        struct json_value prevs = {0}, prev = {0};
+        char txid[65], script_hex[2 * MAX_SCRIPT_SIZE + 1];
+        uint256_get_hex(&fx->txid, txid);
+        zcl_hex_encode(fx->coin_script.data, fx->coin_script.size, script_hex);
+        json_set_array(&prevs); json_set_object(&prev);
+        json_push_kv_str(&prev, "txid", txid); json_push_kv_int(&prev, "vout", 0);
+        json_push_kv_str(&prev, "scriptPubKey", script_hex);
+        json_push_kv_real(&prev, "amount", (double)SCS_COIN_AMOUNT / 100000000.0);
+        json_push_back(&prevs, &prev); json_free(&prev);
+        json_push_back(&params, &prevs); json_free(&prevs);
+        char wif[128] = {0}; size_t prefix_len = 0;
+        const unsigned char *prefix = chain_params_base58_prefix(chain_params_get(), B58_SECRET_KEY, &prefix_len);
+        struct json_value keys = {0}; json_set_array(&keys);
+        if (encode_secret(&fx->key, prefix, prefix_len, wif, sizeof(wif))) {
+            json_init(&value); json_set_str(&value, wif); json_push_back(&keys, &value); json_free(&value);
+        }
+        memory_cleanse(wif, sizeof(wif)); json_push_back(&params, &keys); json_free(&keys);
+    }
     json_init(&result);
     fx->executed = rpc_table_execute(&fx->tbl, "signrawtransaction", &params,
                                      &result);
@@ -228,6 +255,8 @@ static void scs_sign(struct scs_fx *fx)
 
 /* True iff vin[0] of the returned tx carries a signature by the fixture key
  * over the signature hash for (script, amount). */
+static void scs_sign(struct scs_fx *fx) { scs_sign_with_keys(fx, false); }
+
 static bool scs_signed_over(const struct scs_fx *fx, const struct script *sc,
                             int64_t amount)
 {
@@ -372,10 +401,30 @@ static int scs_case_not_ready(void)
     return failures;
 }
 
+static int scs_case_pending_signing(void)
+{
+    int failures = 0;
+    struct scs_spec sp = { .pending = true, .has_coin = true, .has_row = true,
+                           .row_amount = SCS_COIN_AMOUNT };
+    struct scs_fx *fx = zcl_calloc(1, sizeof(*fx), "scs_fx");
+    bool ok = fx && scs_open(fx, &sp);
+    if (ok) {
+        scs_sign(fx);
+        ok = fx->executed && !fx->complete && scs_left_unsigned(fx);
+        scs_sign_with_keys(fx, true);
+        ok = ok && fx->executed && fx->complete &&
+             scs_signed_over(fx, &fx->coin_script, SCS_COIN_AMOUNT);
+    }
+    if (fx) { scs_close(fx, &sp); free(fx); }
+    scs_report("pending disables wallet keys but permits caller keys", ok, &failures);
+    return failures;
+}
+
 int scs_run_tests(void);
 int scs_run_tests(void)
 {
     int failures = 0;
+    failures += scs_case_pending_signing();
     failures += scs_case_agree();
     failures += scs_case_amount();
     failures += scs_case_script();

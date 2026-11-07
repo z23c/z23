@@ -73,6 +73,7 @@ struct cp_fixture {
 static void cp_fill_rom(struct rom_state_checkpoint *rom, int32_t height)
 {
     memset(rom, 0, sizeof(*rom));
+    rom->format_version = ROM_STATE_CHECKPOINT_V1;
     rom->height = height;
     memset(rom->block_hash, 0x21, 32);
     memset(rom->utxo_root, 0x22, 32);

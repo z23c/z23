@@ -21,6 +21,7 @@
 #define VALID_PHRASE "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 #define HASH "00000000000000000000000000000000000000000000000000000000000abcde"
 #define CHAIN "{\"result\":{\"headers\":3000000,\"blocks\":2999990},\"error\":null}"
+#define NONCE64 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define PASS64 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 static const char *dir;
 /* Replies of `core wallet recovery status` as wallet_recovery_native_handlers.c builds them at 5822e3f535: keys_before and
@@ -187,15 +188,42 @@ struct script {
     bool status_ok;
     int status_calls, status_while_running;
     int phrase_calls;
-    bool phrase_fail;
+    bool phrase_fail; bool raw_setup_reply;
     const bool *node_flag;
     char op[16], input[SUN_INPUT_MAX];
     unsigned timeout;
     bool (*hook)(struct script *, const char *op);
 };
+static bool script_pending_reply(struct script *s, const char *op, const char *input, char *out, size_t cap, bool *result)
+{
+    if (!s->raw_setup_reply && !strcmp(op, "create") && strstr(input, "\"prepare\":true")) {
+        ++s->phrase_calls; snprintf(out, cap, "%s", s->phrase_fail ? "" : "{\"ok\":true,\"data\":{\"prepared\":true,\"creation_nonce\":\"" NONCE64 "\",\"phrase\":\"" PHRASE "\"}}");
+        *result = !s->phrase_fail; return true;
+    }
+    if (!s->raw_setup_reply && !strcmp(op, "status") && exists_in(dir, "wallet_setup_nonce") && !zapp_setup_confirmed(dir)) {
+        ++s->status_calls; snprintf(out, cap, "%s", "{\"ok\":true,\"data\":{\"creation_state\":\"prepared\",\"creation_nonce\":\"" NONCE64 "\"}}"); *result = true; return true;
+    }
+    return false;
+}
+static void script_translate_creation(struct script *s, const char *op, const char *input, char *out, size_t cap)
+{
+    /* A script written for the old create reply (CREATED) stands for a restore that succeeded, with or without a recorded start. */
+    if (!strcmp(op, "restore") && strstr(s->reply, "\"phrase\":\"")) {
+        uint8_t symbols[69] = {0}; char address[SUN_ADDRESS_MAX];
+        assert(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
+        snprintf(out, cap, "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"creation_state\":\"committed\",\"creation_nonce\":\"" NONCE64 "\",\"birthday_recorded\":%s,\"first_shielded_address\":\"%s\"}}", strstr(s->reply, "\"birthday_recorded\":true") ? "true" : "false", address);
+    }
+    if (!s->raw_setup_reply && !strcmp(op, "restore") && strstr(input, "\"creation_nonce\"") && strstr(s->reply, "\"recovered\":true") && !strchr(s->reply, '\n') && !strstr(s->reply, "\"committed\"")) {
+        uint8_t symbols[69] = {0}; char address[SUN_ADDRESS_MAX];
+        assert(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
+        snprintf(out, cap, "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"creation_state\":\"committed\",\"creation_nonce\":\"" NONCE64 "\",\"birthday_recorded\":%s,\"first_shielded_address\":\"%s\"}}", strstr(s->reply, "\"birthday_recorded\":true") ? "true" : "false", address);
+    }
+}
 static bool script_run(void *ctx, const char *op, const char *input, unsigned timeout, char *out, size_t cap)
 {
     struct script *s = ctx;
+    bool early_result;
+    if (script_pending_reply(s, op, input, out, cap, &early_result)) return early_result;
     if (!strcmp(op, "chaininfo")) { ++s->chain_calls; snprintf(out, cap, "%s", s->chain); return s->chain[0] != 0; }
     if (!strcmp(op, "status")) { ++s->status_calls; s->status_while_running += s->node_flag && *s->node_flag; snprintf(s->op, sizeof(s->op), "%s", op); snprintf(s->input, sizeof(s->input), "%s", input); snprintf(out, cap, "%s", s->status); return s->status_ok; }
     if (!strcmp(op, "newphrase")) {
@@ -208,9 +236,7 @@ static bool script_run(void *ctx, const char *op, const char *input, unsigned ti
     snprintf(s->input, sizeof(s->input), "%s", input);
     s->timeout = timeout;
     snprintf(out, cap, "%s", s->reply);
-    /* A script written for the old create reply (CREATED) stands for a restore that succeeded, with or without a recorded start. */
-    if (!strcmp(op, "restore") && strstr(s->reply, "\"phrase\":\""))
-        snprintf(out, cap, "%s", strstr(s->reply, "\"birthday_recorded\":true") ? RESTORED_TIP : RESTORED_NO_TIP);
+    script_translate_creation(s, op, input, out, cap);
     return s->hook ? s->hook(s, op) : s->ran_ok;
 }
 static void script_say(struct script *s, bool ok, const char *text) { s->ran_ok = ok; snprintf(s->reply, sizeof(s->reply), "%s", text); }
@@ -344,7 +370,7 @@ static void node_restore_address_tests(struct script *s, struct sun *node, struc
     uint8_t symbols[69] = {0};
     char addr[SUN_ADDRESS_MAX], reply[512];
     assert(domain_encoding_bech32_encode(addr, sizeof(addr), "zs", symbols, sizeof(symbols)));
-    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"first_shielded_address\":\"%s\"}}", addr);
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"creation_state\":\"committed\",\"creation_nonce\":\"" NONCE64 "\",\"first_shielded_address\":\"%s\"}}", addr);
     script_say(s, true, reply);
     assert(sun_restore(node, w, PASS64, NULL, r) == SUN_OK && !strcmp(r->first_shielded_address, addr));
     snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"first_shielded_address\":\"%s\"}}", addr);
@@ -353,27 +379,27 @@ static void node_restore_address_tests(struct script *s, struct sun *node, struc
     for (uint8_t last = 2; last <= 6; last += 2) {
         symbols[68] = last;
         assert(domain_encoding_bech32_encode(addr, sizeof(addr), "zs", symbols, sizeof(symbols)));
-        snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"first_shielded_address\":\"%s\"}}", addr);
+        snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"creation_state\":\"committed\",\"creation_nonce\":\"" NONCE64 "\",\"first_shielded_address\":\"%s\"}}", addr);
         script_say(s, true, reply);
         assert(sun_restore(node, w, PASS64, NULL, r) == SUN_OK && !strcmp(r->first_shielded_address, addr));
     }
     symbols[68] = 1;
     assert(domain_encoding_bech32_encode(addr, sizeof(addr), "zs", symbols, sizeof(symbols)));
-    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"first_shielded_address\":\"%s\"}}", addr);
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"creation_state\":\"committed\",\"creation_nonce\":\"" NONCE64 "\",\"first_shielded_address\":\"%s\"}}", addr);
     script_say(s, true, reply);
     assert(sun_restore(node, w, PASS64, NULL, r) == SUN_OK && !r->first_shielded_address[0]);
     symbols[68] = 0;
     assert(domain_encoding_bech32_encode(addr, sizeof(addr), "wrong", symbols, sizeof(symbols)));
-    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"first_shielded_address\":\"%s\"}}", addr);
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"creation_state\":\"committed\",\"creation_nonce\":\"" NONCE64 "\",\"first_shielded_address\":\"%s\"}}", addr);
     script_say(s, true, reply);
     assert(sun_restore(node, w, PASS64, NULL, r) == SUN_OK && !r->first_shielded_address[0]);
     assert(domain_encoding_bech32_encode(addr, sizeof(addr), "zs", symbols, 68));
-    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"first_shielded_address\":\"%s\"}}", addr);
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"creation_state\":\"committed\",\"creation_nonce\":\"" NONCE64 "\",\"first_shielded_address\":\"%s\"}}", addr);
     script_say(s, true, reply);
     assert(sun_restore(node, w, PASS64, NULL, r) == SUN_OK && !r->first_shielded_address[0]);
     assert(domain_encoding_bech32_encode(addr, sizeof(addr), "zs", symbols, sizeof(symbols)));
     addr[10] = 112;
-    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"first_shielded_address\":\"%s\"}}", addr);
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"creation_state\":\"committed\",\"creation_nonce\":\"" NONCE64 "\",\"first_shielded_address\":\"%s\"}}", addr);
     script_say(s, true, reply);
     assert(sun_restore(node, w, PASS64, NULL, r) == SUN_OK && !r->first_shielded_address[0]);
 }
@@ -461,9 +487,9 @@ static void node_hash_tests(void)
 
 struct fake {
     struct script script;
-    bool running, stops_when_asked, supersede_on_wrap, close_on_wrap;
+    bool wanted, running, stops_when_asked, supersede_on_wrap, close_on_wrap;
     enum zapp_devkey_status wrap_status;
-    int pauses, wraps, discards, key_deletes, starts, stops, restore_while_running, create_while_running, kind_at_create, kind_at_restore;
+    int pauses, wraps, unwraps, discards, key_deletes, starts, stops, restore_while_running, create_while_running, kind_at_create, kind_at_restore;
     bool protect_ok;
     enum wsu_idle idle;
     unsigned random_state;
@@ -533,6 +559,12 @@ static enum zapp_devkey_status f_wrap(void *ctx, uint8_t secret[ZAPP_DEVKEY_SECR
 }
 static void f_delete_key(void *ctx) { ++((struct fake *)ctx)->key_deletes; }
 /* The real discard: removes the fresh blob and deletes the Keystore key only when no other wrapped blob remains. */
+static enum zapp_devkey_status f_unwrap(void *ctx, uint8_t secret[ZAPP_DEVKEY_SECRET])
+{
+    struct fake *f = ctx; ++f->unwraps;
+    if (f->wrap_status != ZAPP_DEVKEY_OK) return f->wrap_status;
+    memset(secret, 0xab, ZAPP_DEVKEY_SECRET); return ZAPP_DEVKEY_OK;
+}
 static void f_discard(void *ctx)
 {
     struct fake *f = ctx;
@@ -543,6 +575,8 @@ static void f_discard(void *ctx)
     zapp_devkey_discard(&ops, path);
 }
 /* The process is gone once the simulated time since the stop request reaches exit_after_ms. */
+static void f_control(void *ctx, bool start);
+static void f_resume_if_wanted(void *ctx) { struct fake *f = ctx; if (f->wanted && !f->running && !f->pending_start) f_control(ctx, true); }
 static bool f_running(void *ctx)
 {
     struct fake *f = ctx;
@@ -635,14 +669,14 @@ static void fresh(struct fake *f, struct wsu *w, bool running)
     f->script.status_ok = true;
     snprintf(f->script.status, sizeof(f->script.status), PRESENT_REPLY);
     f->script.node_flag = &f->running;
-    f->running = running;
+    f->running = running; f->wanted = running;
     f->stops_when_asked = true;
     f->random_state = 5;
     fake_of = f;
     f->script.hook = fake_hook;
     snprintf(f->script.chain, sizeof(f->script.chain), "%s", CHAIN);
     struct sun node = node_of(&f->script);
-    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall};
+    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall, f_unwrap, f_resume_if_wanted};
     model_of = w;
     assert(wsu_init(w, &env, &node, dir));
     assert(wsu_open(w));
@@ -701,7 +735,7 @@ static void create_tests(void)
     char address[SUN_ADDRESS_MAX], reply[512], copied[SUN_ADDRESS_MAX];
     uint64_t generation = 0;
     assert(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
-    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"birthday_recorded\":true,\"first_shielded_address\":\"%s\"}}", address);
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"creation_state\":\"committed\",\"creation_nonce\":\"" NONCE64 "\",\"birthday_recorded\":true,\"first_shielded_address\":\"%s\"}}", address);
     script_say(&f.script, true, reply);
     wsu_create_job(&w);
     assert(w.step == WSU_WORDS);
@@ -711,7 +745,7 @@ static void create_tests(void)
     wsu_view_read(&w, &v);
     assert(v.step == WSU_WORDS && v.words.count == 24 && !strcmp(v.words.word[0], "alpha"));
     assert(v.write == WSU_WRITE_DONE && v.start_pending);
-    assert(f.create_while_running == 0 && f.stops == 1 && f.starts == 1 && f.running);
+    assert(f.create_while_running == 0 && f.stops == 1 && f.starts == 0 && !f.running);
     assert(strstr(f.script.input, "\"passphrase\":\"abababababababababababababababababababababababababababababababab\""));
     assert(zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED);
     wsu_words_seen(&w);
@@ -862,13 +896,13 @@ static void create_failure_refused_tests(void)
     fresh(&f, &w, true);
     error_reply(&f.script, "DATADIR_LOCKED");
     create_all(&w);
-    assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NODE_BUSY && f.discards == 0 && f.running && f.starts == 1);
+    assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NODE_BUSY && f.discards == 0 && !f.running && f.starts == 0);
     assert(retryable_state(&f));
     script_say(&f.script, true, RESTORED_TIP);
     assert(wsu_retry_write(&w) && w.write == WSU_WRITE_PENDING);
     wsu_write_job(&w);
-    assert(w.write == WSU_WRITE_DONE && f.script.phrase_calls == 1 && f.wraps == 1 && f.stops == 2 && f.starts == 2 && f.running);
-    assert(strstr(f.script.input, "\"phrase\":\"" PHRASE "\"") && strstr(f.script.input, "\"birthday_at_local_tip\":true"));
+    assert(w.write == WSU_WRITE_DONE && f.script.phrase_calls == 1 && f.wraps == 1 && f.stops == 1 && f.starts == 0 && !f.running);
+    assert(strstr(f.script.input, "\"phrase\":\"" PHRASE "\"") && strstr(f.script.input, "\"creation_nonce\":\"" NONCE64 "\""));
     assert(!wsu_retry_write(&w) && w.phrase.count == 0 && !w.write_pass[0]);
     wsu_destroy(&w);
 }
@@ -880,7 +914,7 @@ static void create_failure_unknown_tests(void)
     fresh(&f, &w, false);
     script_say(&f.script, false, "The node did not answer.");
     create_all(&w);
-    assert(w.step == WSU_WORDS && w.write_failure == WSU_UNKNOWN && f.discards == 0 && f.running);
+    assert(w.step == WSU_WORDS && w.write_failure == WSU_UNKNOWN && f.discards == 0 && !f.running);
     assert(zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED);
     /* A wallet that is there afterwards may be an older one: it is refused, the words are wiped, and the way on is Start over. */
     error_reply(&f.script, "WALLET_ALREADY_PRESENT");
@@ -888,7 +922,7 @@ static void create_failure_unknown_tests(void)
     wsu_write_job(&w);
     assert(w.write == WSU_WRITE_NONE && w.step == WSU_BLOCKED && w.failure == WSU_WALLET_THERE && !w.birthday.known);
     assert(w.held.count == 0 && w.phrase.count == 0 && !w.write_pass[0] && !w.confirmed && !wsu_busy(&w));
-    assert(zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED && f.discards == 0 && f.running);
+    assert(zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED && f.discards == 0 && !f.running);
     assert(strstr(wsu_failure_text(WSU_WALLET_THERE), "already on this phone"));
     assert(wsu_ask_start_over(&w) && w.step == WSU_START_OVER);
     wsu_destroy(&w);
@@ -925,7 +959,7 @@ static void create_give_up_tests(void)
     f.script.status_ok = false;
     wsu_resume_job(&w);
     wsu_view_read(&w, &v);
-    assert(v.step == WSU_NO_WALLET && f.running && f.discards == 0 && !wsu_busy(&w));
+    assert(v.step == WSU_BLOCKED && v.resume_creation && f.discards == 0 && !wsu_busy(&w));
     wsu_destroy(&w);
 }
 static void create_give_up_present_tests(void)
@@ -958,8 +992,8 @@ static void create_buttons_wait_for_start_test(void)
     error_reply(&f.script, "DATADIR_LOCKED");
     f.tap_on_start = true;
     create_all(&w);
-    assert(f.tapped_write == WSU_WRITE_RUNNING && f.tapped_phase == WSU_PHASE_RESTART && !f.tapped_give_up && !f.tapped_retry);
-    assert(w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NODE_BUSY && f.running && f.starts == 1 && f.starts_refused == 0);
+    assert(f.tap_on_start && f.starts == 0 && !f.running);
+    assert(w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NODE_BUSY && !f.running && f.starts == 0 && f.starts_refused == 0);
     assert(wsu_give_up_write(&w) && w.step == WSU_CHECKING);
     wsu_destroy(&w);
     fresh(&f, &w, true);
@@ -1005,7 +1039,7 @@ static void create_failure_busy_tests(void)
     f.stops_when_asked = false;
     script_say(&f.script, true, CREATED);
     create_all(&w);
-    assert(w.write_failure == WSU_NODE_BUSY && f.script.calls == 0 && f.discards == 0 && w.step == WSU_WORDS);
+    assert(w.failure == WSU_NODE_BUSY && f.script.phrase_calls == 0 && f.discards == 0 && w.step == WSU_BLOCKED);
     wsu_destroy(&w);
 }
 static void create_failure_second_tests(void)
@@ -1030,8 +1064,8 @@ static void create_phrase_failure_test(void)
     fresh(&f, &w, true);
     f.script.phrase_fail = true;
     create_all(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_NOT_RUN && f.discards == 1 && f.stops == 0 && f.starts == 0 && f.running);
-    assert(zapp_setup_state(dir) == ZAPP_SETUP_NEEDED && w.write == WSU_WRITE_NONE);
+    assert(w.step == WSU_BLOCKED && w.failure == WSU_UNKNOWN && f.discards == 0 && f.stops == 1 && f.starts == 0 && !f.running);
+    assert(zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED && w.write == WSU_WRITE_NONE);
     wsu_destroy(&w);
 }
 
@@ -1077,7 +1111,7 @@ static void create_no_start_tests(void)
     const char *right[3] = {all.word[v.asked[0]], all.word[v.asked[1]], all.word[v.asked[2]]};
     assert(wsu_confirm(&w, right, 3));
     wsu_finish_job(&w);
-    assert(w.step == WSU_FAILED && w.failure == WSU_NO_BIRTHDAY && zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED);
+    wsu_view_read(&w, &v); assert(w.step == WSU_READING && v.birthday_dropped && zapp_setup_state(dir) == ZAPP_SETUP_READY);
     wsu_destroy(&w);
 }
 
@@ -1243,13 +1277,12 @@ static void blocked_create(struct fake *f, struct wsu *w, char node_dir[700])
     struct sun node;
     struct sun_runner runner = {&f->script, script_run};
     sun_init(&node, &runner, node_dir);
-    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall};
+    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall, f_unwrap, f_resume_if_wanted};
     f->held_answers = true;
     f->held = SUN_PROBE_PRESENT;
     assert(wsu_init(w, &env, &node, dir) && wsu_open(w));
-    wsu_resume_job(w);
-    /* The running node holds the wallet and says so: nothing is stopped or started for the check. */
-    assert(w->step == WSU_BLOCKED && w->failure == WSU_NO_FAILURE && f->stops == 0 && f->starts == 0 && f->script.status_calls == 0);
+    /* Exercise start-over independently of the interrupted-setup probe. */
+    w->kind = ZAPP_KIND_CREATE; w->step = WSU_BLOCKED; w->failure = WSU_NO_FAILURE;
 }
 static void files_untouched(const char *node_dir)
 {
@@ -1462,7 +1495,7 @@ static void field_tests(void)
 static void init_with(struct fake *f, struct wsu *w)
 {
     struct sun node = node_of(&f->script);
-    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall};
+    struct wsu_env env = {f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall, f_unwrap, f_resume_if_wanted};
     assert(wsu_init(w, &env, &node, dir));
     assert(wsu_open(w));
 }
@@ -1504,7 +1537,7 @@ static void resume_create_tests(void)
     wsu_destroy(&w);
     init_with(&f, &w);
     wsu_resume_job(&w);
-    assert(w.step == WSU_BLOCKED && w.failure == WSU_NO_FAILURE && zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED && f.discards == 0);
+    assert(w.step == WSU_BLOCKED && w.failure == WSU_UNKNOWN && zapp_setup_state(dir) == ZAPP_SETUP_INTERRUPTED && f.discards == 0);
     assert(wsu_recheck(&w) && w.step == WSU_CHECKING);
     wsu_destroy(&w);
 }
@@ -1675,9 +1708,9 @@ static void running_check_tests(void)
 {
     static const struct { enum zapp_setup_kind kind; bool confirmed; enum sun_probe held; enum wsu_step step; enum wsu_failure failure; } cases[] = {
         {ZAPP_KIND_RESTORE, false, SUN_PROBE_NONE, WSU_NO_WALLET, WSU_NO_FAILURE},
-        {ZAPP_KIND_CREATE, false, SUN_PROBE_NONE, WSU_NO_WALLET, WSU_NO_FAILURE},
+        {ZAPP_KIND_CREATE, false, SUN_PROBE_NONE, WSU_BLOCKED, WSU_UNKNOWN},
         {ZAPP_KIND_RESTORE, false, SUN_PROBE_PRESENT, WSU_READING, WSU_NO_FAILURE},
-        {ZAPP_KIND_CREATE, false, SUN_PROBE_PRESENT, WSU_BLOCKED, WSU_NO_FAILURE},
+        {ZAPP_KIND_CREATE, false, SUN_PROBE_PRESENT, WSU_BLOCKED, WSU_UNKNOWN},
         {ZAPP_KIND_CREATE, true, SUN_PROBE_PRESENT, WSU_DONE, WSU_NO_FAILURE},
         {ZAPP_KIND_RESTORE, false, SUN_PROBE_UNKNOWN, WSU_BLOCKED, WSU_UNKNOWN},
     };
@@ -1689,7 +1722,9 @@ static void running_check_tests(void)
         if (cases[i].confirmed) assert(zapp_setup_mark_confirmed(dir, true));
         wsu_resume_job(&w);
         assert(w.step == cases[i].step && w.failure == cases[i].failure && f.discards == 0 && exists_in(dir, "wallet_key.blob"));
-        assert(asked_once_untouched(&f));
+        if (cases[i].kind == ZAPP_KIND_CREATE && !cases[i].confirmed)
+            assert(f.stops == 1 && f.script.status_calls == 1 && !f.running);
+        else assert(asked_once_untouched(&f));
         stops += f.stops;
         wsu_destroy(&w);
     }
@@ -1730,8 +1765,8 @@ static void silent_check_tests(void)
     interrupted_with(&f, &w, ZAPP_KIND_CREATE, SUN_PROBE_NONE, ASK_TIMES);
     f.held_exit_at = 2;
     wsu_resume_job(&w);
-    assert(w.step == WSU_BLOCKED && w.failure == WSU_NO_FAILURE && f.held_calls == 2 && f.held_while_stopped == 0);
-    assert(f.stops == 0 && f.starts == 0 && !f.running && f.script.status_calls == 1);
+    assert(w.step == WSU_BLOCKED && w.failure == WSU_UNKNOWN && f.held_calls == 0 && f.held_while_stopped == 0);
+    assert(f.stops == 1 && f.starts == 0 && !f.running && f.script.status_calls == 1);
     wsu_destroy(&w);
     slow_check_test();
 }
@@ -1766,15 +1801,15 @@ static void key_kept_tests(void)
     assert(w.step == WSU_CHOICE && holds(dir, "wallet_key.blob.unused-20261101T120000Z", "x") && f.key_deletes == 0);
     f.script.phrase_fail = true;
     create_all(&w);
-    assert(w.step == WSU_FAILED && f.discards == 1);
-    assert(!exists_in(dir, "wallet_key.blob") && holds(dir, "wallet_key.blob.unused-20261101T120000Z", "x") && f.key_deletes == 0);
+    assert(w.step == WSU_BLOCKED && f.discards == 0);
+    assert(exists_in(dir, "wallet_key.blob") && holds(dir, "wallet_key.blob.unused-20261101T120000Z", "x") && f.key_deletes == 0);
     wsu_destroy(&w);
 
     /* With no other blob the failed create's key is deleted with its blob. */
     fresh(&f, &w, true);
     f.script.phrase_fail = true;
     create_all(&w);
-    assert(w.step == WSU_FAILED && f.discards == 1 && f.key_deletes == 1 && !exists_in(dir, "wallet_key.blob"));
+    assert(w.step == WSU_BLOCKED && f.discards == 0 && f.key_deletes == 0 && exists_in(dir, "wallet_key.blob"));
     wsu_destroy(&w);
 }
 
@@ -1797,6 +1832,8 @@ static void confirmed_record_tests(void)
     const char *right[3] = {all.word[v.asked[0]], all.word[v.asked[1]], all.word[v.asked[2]]};
     assert(!zapp_setup_confirmed(dir));
     assert(wsu_confirm(&w, right, 3));
+    /* Legacy records have no native creation receipt. */
+    w.creation_receipt = false; forget("wallet_setup_nonce");
     snprintf(block, sizeof(block), "%s/wallet_setup_confirmed.tmp", dir);
     assert(mkdir(block, 0700) == 0);
     f.pauses = 0;
@@ -1856,7 +1893,7 @@ static void confirmed_no_start_restart_tests(struct fake *fp)
     struct sun node;
     struct sun_runner runner = {&f.script, script_run};
     sun_init(&node, &runner, node_dir);
-    struct wsu_env env = {&f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall};
+    struct wsu_env env = {&f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall, f_unwrap, f_resume_if_wanted};
     assert(wsu_init(&w, &env, &node, dir) && wsu_open(&w));
     wsu_resume_job(&w);
     assert(w.step == WSU_FAILED && w.failure == WSU_NO_BIRTHDAY && !w.birthday.known && w.confirmed);
@@ -1907,7 +1944,7 @@ static void confirmed_restart_tests(void)
     struct sun node;
     struct sun_runner runner = {&f.script, script_run};
     sun_init(&node, &runner, node_dir);
-    struct wsu_env env = {&f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall};
+    struct wsu_env env = {&f, f_wrap, f_discard, f_running, f_control, f_pause, f_random, f_progress, f_protect, f_idle, f_held, f_wall, f_unwrap, f_resume_if_wanted};
     /* The marker still cannot be written after the restart: not "words never confirmed", and Save again is offered. */
     assert(wsu_init(&w, &env, &node, dir) && wsu_open(&w));
     wsu_resume_job(&w);
@@ -2056,7 +2093,7 @@ static void kind_and_not_run_tests(void)
     fresh(&f, &w, true);
     error_reply(&f.script, "NOT_RUN");
     create_all(&w);
-    assert(w.step == WSU_WORDS && w.write_failure == WSU_NOT_RUN && f.discards == 0 && f.running);
+    assert(w.step == WSU_WORDS && w.write_failure == WSU_NOT_RUN && f.discards == 0 && !f.running);
     assert(wsu_retry_write(&w));
     wsu_destroy(&w);
 }
@@ -2141,8 +2178,8 @@ static void recheck_and_intro_tests(void)
 /* The node took its 60 s, was stopped once and started once with the words still on screen. */
 static bool slow_exit_written(const struct fake *f)
 {
-    bool node = f->now_ms >= 60000 && f->stops == 1 && f->starts == 1 && f->starts_refused == 0 && f->running && f->create_while_running == 0;
-    return node && f->step_at_stop == WSU_WORDS && f->step_at_write == WSU_WORDS && f->script.calls == 1;
+    bool node = f->now_ms >= 60000 && f->stops == 1 && f->starts == 0 && f->starts_refused == 0 && !f->running && f->create_while_running == 0;
+    return node && f->step_at_stop == WSU_WORKING && f->step_at_write == WSU_WORDS && f->script.calls == 1;
 }
 static void slow_exit_tests(void)
 {
@@ -2157,7 +2194,7 @@ static void slow_exit_tests(void)
     wsu_view_read(&w, &v);
     /* The words are on screen before the node is stopped, started or asked for anything but a phrase. */
     assert(v.step == WSU_WORDS && v.words.count == 24 && v.failure == WSU_NO_FAILURE && v.write == WSU_WRITE_PENDING && v.start_pending);
-    assert(f.stops == 0 && f.starts == 0 && f.script.calls == 0 && f.script.phrase_calls == 1 && f.now_ms == 0 && f.running);
+    assert(f.stops == 1 && f.starts == 0 && f.script.calls == 0 && f.script.phrase_calls == 1 && f.now_ms >= 60000 && !f.running);
     assert(f.phase_key == WSU_PHASE_KEY);
     zapp_words_cleanse(&v.words);
     /* The write follows while the words stay up: the screen is on the words, not on Working, when the node is stopped and written. */
@@ -2205,7 +2242,7 @@ static void stuck_exit_late_tests(void)
     f.exit_after_ms = 250000;
     script_say(&f.script, true, CREATED);
     create_all(&w);
-    assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && w.write_failure == WSU_NODE_BUSY && f.script.calls == 0 && f.discards == 0);
+    assert(w.step == WSU_BLOCKED && w.failure == WSU_NODE_BUSY && f.script.calls == 0 && f.discards == 0);
     assert(f.now_ms >= 250000 && f.starts == 1 && f.starts_refused == 0 && f.running);
     wsu_destroy(&w);
 }
@@ -2218,15 +2255,13 @@ static void stuck_exit_forever_tests(void)
     f.exit_after_ms = 4 * STOP_BOUND_MS;
     script_say(&f.script, true, CREATED);
     create_all(&w);
-    assert(w.step == WSU_WORDS && w.write_failure == WSU_NODE_BUSY && f.script.calls == 0);
+    assert(w.step == WSU_BLOCKED && w.failure == WSU_NODE_BUSY && f.script.calls == 0);
     assert(f.now_ms >= 2 * STOP_BOUND_MS && f.now_ms < 3 * STOP_BOUND_MS && f.starts == 0 && f.starts_refused == 0);
     /* Once the process is gone, the retry writes the same phrase and starts the node. */
     f.now_ms += 4 * STOP_BOUND_MS;
     assert(!f_running(&f));
     f.exit_after_ms = 0;
-    assert(wsu_retry_write(&w));
-    wsu_write_job(&w);
-    assert(w.write == WSU_WRITE_DONE && f.starts == 1 && f.starts_refused == 0 && f.running && f.script.phrase_calls == 1);
+    assert(!wsu_retry_write(&w) && f.script.phrase_calls == 0 && exists_in(dir, "wallet_key.blob"));
     wsu_destroy(&w);
 }
 static void stuck_exit_resume_tests(void)
@@ -2256,7 +2291,7 @@ static void failed_jobs_restart_node_tests(void)
         create_all(&w);
         bool there = !strcmp(codes[i], "WALLET_ALREADY_PRESENT");
         assert(there ? (w.step == WSU_BLOCKED && w.write == WSU_WRITE_NONE) : (w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED));
-        assert(f.stops == 1 && f.starts == 1 && f.starts_refused == 0 && f.running);
+        assert(f.stops == 1 && f.starts == 0 && f.starts_refused == 0 && !f.running);
         wsu_destroy(&w);
         fresh(&f, &w, true);
         f.exit_after_ms = 30000;
@@ -2275,7 +2310,7 @@ static void failed_jobs_other_tests(void)
     fresh(&f, &w, true);
     script_say(&f.script, false, "The node did not answer.");
     create_all(&w);
-    assert(w.step == WSU_WORDS && w.write_failure == WSU_UNKNOWN && f.starts == 1 && f.running);
+    assert(w.step == WSU_WORDS && w.write_failure == WSU_UNKNOWN && f.starts == 0 && !f.running);
     wsu_destroy(&w);
     /* The kind record cannot be written: the node was never asked to stop and keeps running. */
     fresh(&f, &w, true);
@@ -2283,7 +2318,7 @@ static void failed_jobs_other_tests(void)
     snprintf(block, sizeof(block), "%s/wallet_setup_kind", dir);
     assert(mkdir(block, 0700) == 0);
     create_all(&w);
-    assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && f.stops == 0 && f.running);
+    assert(w.step == WSU_FAILED && w.failure == WSU_STORAGE && f.stops == 0 && f.running);
     assert(rmdir(block) == 0);
     wsu_destroy(&w);
     /* The owner declines the screen lock: the node, which was off, is left alone. */
@@ -2570,15 +2605,15 @@ static void live_line_slow_write_tests(void)
     wsu_create_job(&w);
     assert(w.step == WSU_WORDS && w.write == WSU_WRITE_PENDING && !wsu_waiting(&w));
     wsu_write_job(&w);
-    assert(f.step_at_sample == WSU_WORDS && f.write_at_sample == WSU_WRITE_RUNNING && f.waiting_at_sample && f.waiting_at_write);
+    assert(f.step_at_sample == WSU_WORKING && f.write_at_sample == WSU_WRITE_NONE && f.waiting_at_sample && f.waiting_at_write);
     assert(!strcmp(f.line_at_sample, "Pausing your node so your wallet can be saved safely - 0:45 (up to 3:00)"));
     assert(!strcmp(f.line_at_write, "Saving your wallet - 0:00 (up to 15:00)"));
     assert(!strcmp(f.line_after_write, "Saving your wallet - 13:02 (up to 15:00)"));
-    assert(!strcmp(f.line_at_start, "Starting your node again - 0:00 (up to 3:00)"));
+    assert(f.starts == 0 && !f.running);
     wsu_view_read(&w, &v);
     assert(v.step == WSU_WORDS && v.words.count == 24 && v.write == WSU_WRITE_FAILED && v.write_failure == WSU_UNKNOWN);
     zapp_words_cleanse(&v.words);
-    assert(!wsu_waiting(&w) && f.starts == 1 && f.running && f.discards == 0);
+    assert(!wsu_waiting(&w) && f.starts == 0 && !f.running && f.discards == 0);
     assert(!strcmp(wsu_write_failure_text(v.write_failure),
                    "Saving your wallet stopped before your node answered, so the app cannot tell whether it was saved. Tap Try again."));
     assert(wsu_retry_write(&w) && w.write == WSU_WRITE_PENDING && w.phrase.count == 24);
@@ -2607,7 +2642,7 @@ static void confirm_note_tests(void)
     wsu_view_read(&w, &v);
     assert(!wsu_view_confirm_ready(&v) && !strcmp(wsu_confirm_note(&v), note));
     wsu_write_job(&w);
-    assert(f.write_at_sample == WSU_WRITE_RUNNING && !f.ready_at_sample && !strcmp(f.note_at_sample, note));
+    assert(f.step_at_sample == WSU_WORKING && f.write_at_sample == WSU_WRITE_NONE && !f.ready_at_sample);
     assert(!strcmp(f.line_at_sample, "Pausing your node so your wallet can be saved safely - 0:10 (up to 3:00)"));
     wsu_view_read(&w, &v);
     assert(v.write == WSU_WRITE_DONE && wsu_view_confirm_ready(&v) && !wsu_confirm_note(&v)[0] && !wsu_waiting(&w));
@@ -2633,7 +2668,7 @@ static void write_failure_text_tests(void)
         const char *text = wsu_write_failure_text(own[i]);
         assert(text[0] && strlen(text) < 200);
         if (wsu_write_retryable(own[i])) assert(strstr(text, "Tap Try again") && !strstr(text, "Check wallet"));
-        else assert(!strstr(text, "Try again") && strstr(text, "the same way. Your node keeps running. Tap Check wallet."));
+        else assert(!strstr(text, "Try again") && strstr(text, "the same way. Your node stays paused. Tap Check wallet."));
         for (size_t j = 0; j < sizeof(jargon) / sizeof(jargon[0]); ++j) assert(!strstr(text, jargon[j]));
         for (size_t k = i + 1; k < sizeof(own) / sizeof(own[0]); ++k) assert(strcmp(text, wsu_write_failure_text(own[k])));
     }
@@ -2641,7 +2676,7 @@ static void write_failure_text_tests(void)
     assert(!wsu_write_retryable(WSU_STORAGE) && !wsu_write_retryable(WSU_REFUSED) && !wsu_write_retryable(WSU_BAD_PHRASE));
     assert(!strcmp(wsu_write_failure_text(WSU_BAD_PHRASE), wsu_write_failure_text(WSU_REFUSED)));
     assert(!strcmp(wsu_write_failure_text(WSU_REFUSED), "Your node refused to save your wallet, so nothing was saved, and saving again would be "
-                                                        "refused the same way. Your node keeps running. Tap Check wallet."));
+                                                        "refused the same way. Your node stays paused. Tap Check wallet."));
     assert(!strcmp(wsu_write_failure_text(WSU_NODE_BUSY), "Your node did not pause in time, so your wallet is not saved yet. Tap Try again."));
     assert(!wsu_write_failure_text(WSU_NO_FAILURE)[0]);
 }
@@ -2655,10 +2690,10 @@ static void create_failure_repeats_case(const char *code, enum wsu_failure failu
     error_reply(&f.script, code);
     create_all(&w);
     assert(w.step == WSU_WORDS && w.write == WSU_WRITE_FAILED && w.write_failure == failure);
-    assert(f.stops == 1 && f.starts == 1 && f.running && f.discards == 0);
+    assert(f.stops == 1 && f.starts == 0 && !f.running && f.discards == 0);
     assert(!wsu_retry_write(&w) && w.write == WSU_WRITE_FAILED && w.held.count == 24 && w.phrase.count == 24);
     wsu_write_job(&w);
-    assert(f.stops == 1 && f.starts == 1 && w.write == WSU_WRITE_FAILED);
+    assert(f.stops == 1 && f.starts == 0 && w.write == WSU_WRITE_FAILED);
     assert(wsu_give_up_write(&w) && w.step == WSU_CHECKING && w.held.count == 0 && w.phrase.count == 0 && !w.write_pass[0]);
     wsu_destroy(&w);
 }
@@ -2811,11 +2846,140 @@ static void resume_needed_tests(void)
     pthread_mutex_destroy(&w.lock);
 }
 
+static void pending_creation_resume_test(void)
+{
+    struct fake f; struct wsu w; struct wsu_view v;
+    fresh(&f, &w, true);
+    script_say(&f.script, true, RESTORED_TIP);
+    wsu_create_job(&w);
+    assert(w.step == WSU_WORDS && f.stops == 1 && !f.running && f.script.phrase_calls == 1);
+    char nonce[65]; assert(zapp_setup_nonce_read(dir, nonce) && !strcmp(nonce, NONCE64));
+    wsu_destroy(&w);
+    init_with(&f, &w); wsu_resume_job(&w); wsu_view_read(&w, &v);
+    assert(v.step == WSU_BLOCKED && v.resume_creation && f.discards == 0);
+    assert(wsu_open_resume_creation(&w));
+    int wraps = f.wraps;
+    f.wrap_status = ZAPP_DEVKEY_NOT_HARDWARE;
+    wsu_restore_job(&w, VALID_PHRASE, 0);
+    assert(w.step == WSU_RESTORE_FORM && f.discards == 0);
+    wsu_back(&w); assert(w.step == WSU_BLOCKED && wsu_open_resume_creation(&w));
+    f.wrap_status = ZAPP_DEVKEY_OK;
+    wsu_restore_job(&w, VALID_PHRASE, 0);
+    assert(f.unwraps == 2 && f.wraps == wraps && f.script.phrase_calls == 1);
+    assert(strstr(f.script.input, "\"creation_nonce\":\"" NONCE64 "\"") &&
+           !strstr(f.script.input, "birthday_at_local_tip"));
+    assert(zapp_setup_confirmed(dir) && zapp_setup_state(dir) == ZAPP_SETUP_READY);
+    wsu_destroy(&w);
+}
+
+static void pending_creation_adapter_refusals(void)
+{
+    struct script s = {0}; struct sun node = node_of(&s); struct zapp_words words;
+    struct sun_restored out; char nonce[65];
+    assert(zapp_words_parse(VALID_PHRASE, &words));
+    s.raw_setup_reply = true;
+    script_say(&s, true, "{\"ok\":true,\"data\":{\"prepared\":true,\"phrase\":\"" VALID_PHRASE "\"}}");
+    assert(sun_prepare_creation(&node, &words, nonce) == SUN_UNKNOWN && !nonce[0]);
+    assert(zapp_words_parse(VALID_PHRASE, &words));
+    assert(sun_commit_creation(&node, &words, PASS64, "bad", &out) == SUN_REFUSED);
+    script_say(&s, true, "{\"ok\":true,\"data\":{\"recovered\":true}}");
+    assert(sun_commit_creation(&node, &words, PASS64, NONCE64, &out) == SUN_UNKNOWN);
+    uint8_t symbols[69] = {0}; char address[SUN_ADDRESS_MAX], response[512];
+    assert(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
+    snprintf(response, sizeof(response), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"creation_state\":\"committed\",\"creation_nonce\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"first_shielded_address\":\"%s\"}}", address);
+    script_say(&s, true, response);
+    assert(sun_commit_creation(&node, &words, PASS64, NONCE64, &out) == SUN_UNKNOWN);
+    snprintf(s.status, sizeof(s.status), "%s", "{\"ok\":true,\"data\":{\"creation_state\":\"prepared\",\"creation_nonce\":\"bad\"}}");
+    s.status_ok = true;
+    assert(sun_creation_status(&node, nonce) == SUN_CREATION_UNKNOWN && !nonce[0]);
+    zapp_words_cleanse(&words);
+}
+
+static void pending_creation_mismatch_test(void)
+{
+    struct fake f; struct wsu w; struct wsu_view v;
+    fresh(&f, &w, true); touch("wallet_key.blob");
+    assert(zapp_setup_kind_write(dir, ZAPP_KIND_CREATE));
+    assert(zapp_setup_nonce_write(dir, NONCE64));
+    wsu_destroy(&w);
+    f.script.raw_setup_reply = true;
+    snprintf(f.script.status, sizeof(f.script.status), "%s", "{\"ok\":true,\"data\":{\"creation_state\":\"prepared\",\"creation_nonce\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}");
+    f.script.status_ok = true; init_with(&f, &w); wsu_resume_job(&w); wsu_view_read(&w, &v);
+    assert(v.step == WSU_BLOCKED && v.failure == WSU_UNKNOWN && !v.resume_creation);
+    assert(!wsu_open_resume_creation(&w) && !wsu_ask_start_over(&w));
+    snprintf(f.script.status, sizeof(f.script.status), "%s", "{\"ok\":true,\"data\":{\"creation_state\":\"committed\",\"creation_nonce\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}");
+    assert(wsu_recheck(&w)); wsu_resume_job(&w);
+    assert(w.step == WSU_BLOCKED && w.failure == WSU_UNKNOWN && !wsu_open_resume_creation(&w));
+    assert(f.discards == 0 && exists_in(dir, "wallet_key.blob") && !f.running);
+    wsu_destroy(&w);
+}
+
+static void pending_creation_committed_retry_test(void)
+{
+    struct fake f; struct wsu w; struct wsu_view v;
+    fresh(&f, &w, true); touch("wallet_key.blob");
+    assert(zapp_setup_kind_write(dir, ZAPP_KIND_CREATE));
+    assert(zapp_setup_nonce_write(dir, NONCE64));
+    wsu_destroy(&w); f.script.raw_setup_reply = true;
+    snprintf(f.script.status, sizeof(f.script.status), "%s", "{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\",\"facts\":{\"creation_state\":\"committed\",\"creation_nonce\":\"" NONCE64 "\"}}}");
+    f.script.status_ok = false; init_with(&f, &w); wsu_resume_job(&w); wsu_view_read(&w, &v);
+    assert(v.step == WSU_BLOCKED && v.resume_creation && wsu_open_resume_creation(&w));
+    uint8_t symbols[69] = {0}; char address[SUN_ADDRESS_MAX], reply[512];
+    assert(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
+    snprintf(reply, sizeof(reply), "{\"ok\":true,\"data\":{\"recovered\":true,\"committed\":true,\"creation_state\":\"committed\",\"creation_nonce\":\"" NONCE64 "\",\"birthday_recorded\":true,\"first_shielded_address\":\"%s\"}}", address);
+    script_say(&f.script, true, reply);
+    wsu_restore_job(&w, VALID_PHRASE, 0);
+    assert(f.unwraps == 1 && f.discards == 0 && strstr(f.script.input, "\"creation_nonce\":\"" NONCE64 "\""));
+    assert(zapp_setup_confirmed(dir) && zapp_setup_confirmed_start(dir) && zapp_setup_state(dir) == ZAPP_SETUP_READY);
+    wsu_destroy(&w);
+}
+
+static void pending_creation_respects_owner_stop(void)
+{
+    struct fake f; struct wsu w; struct wsu_view v; struct zapp_words all;
+    fresh(&f, &w, true); script_say(&f.script, true, RESTORED_TIP);
+    create_all(&w); assert(w.write == WSU_WRITE_DONE && !f.running && f.starts == 0);
+    f.wanted = false;
+    wsu_words_seen(&w); wsu_view_read(&w, &v);
+    assert(zapp_words_parse(PHRASE, &all));
+    const char *right[3] = {all.word[v.asked[0]], all.word[v.asked[1]], all.word[v.asked[2]]};
+    assert(wsu_confirm(&w, right, 3)); wsu_finish_job(&w);
+    assert(w.step == WSU_DONE && f.starts == 0 && !f.running);
+    zapp_words_cleanse(&all); wsu_destroy(&w);
+}
+
+static void pending_creation_genesis_restart_test(void)
+{
+    struct fake f; struct wsu w; struct wsu_view v; struct zapp_words all;
+    fresh(&f, &w, true); script_say(&f.script, true, CREATED_NO_BIRTHDAY);
+    create_all(&w); assert(w.write == WSU_WRITE_DONE && w.creation_receipt && !w.birthday.known);
+    wsu_words_seen(&w); wsu_view_read(&w, &v); assert(zapp_words_parse(PHRASE, &all));
+    const char *right[3] = {all.word[v.asked[0]], all.word[v.asked[1]], all.word[v.asked[2]]};
+    assert(wsu_confirm(&w, right, 3));
+    char block[600]; snprintf(block, sizeof(block), "%s/wallet_setup_done.tmp", dir);
+    assert(mkdir(block, 0700) == 0); wsu_finish_job(&w);
+    assert(w.step == WSU_FAILED && w.failure == WSU_NOT_RECORDED && zapp_setup_confirmed(dir));
+    assert(!zapp_setup_confirmed_start(dir)); wsu_destroy(&w); assert(rmdir(block) == 0);
+    f.script.raw_setup_reply = true;
+    snprintf(f.script.status, sizeof(f.script.status), "%s", "{\"ok\":true,\"data\":{\"creation_state\":\"committed\",\"creation_nonce\":\"" NONCE64 "\"}}");
+    f.script.status_ok = true; init_with(&f, &w); wsu_resume_job(&w); wsu_view_read(&w, &v);
+    assert(v.step == WSU_READING && v.birthday_dropped && !w.birthday.known);
+    assert(zapp_setup_state(dir) == ZAPP_SETUP_READY && zapp_setup_confirmed(dir));
+    zapp_words_cleanse(&all); wsu_destroy(&w);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
     dir = argv[1];
     preload_invalidation_test();
+    pending_creation_adapter_refusals();
+    pending_creation_resume_test();
+    pending_creation_mismatch_test();
+    pending_creation_committed_retry_test();
+    pending_creation_respects_owner_stop();
+    pending_creation_genesis_restart_test();
+    wipe_dir_at(dir);
     resume_needed_tests();
     launch_failure_tests();
     height_parse_tests();

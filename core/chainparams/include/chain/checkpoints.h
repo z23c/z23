@@ -153,6 +153,12 @@ void checkpoints_reset_sha3_override_for_test(void);
  * All 32-byte arrays are in internal byte order (same convention as
  * sha3_utxo_checkpoint.block_hash: the hex comment reads in display order,
  * the bytes are stored as hashed). */
+enum rom_state_checkpoint_version {
+    ROM_STATE_CHECKPOINT_INVALID = 0,
+    ROM_STATE_CHECKPOINT_V1 = 1,
+    ROM_STATE_CHECKPOINT_V2 = 2,
+};
+
 struct rom_state_checkpoint {
     int32_t  height;                  /* block height of the commitment */
     uint8_t  block_hash[32];          /* block hash at height (hex in source) */
@@ -168,6 +174,9 @@ struct rom_state_checkpoint {
     uint8_t  nullifier_digest[32];    /* combined nullifiers fold (see above) */
     uint64_t nullifier_count;         /* total nullifier rows, both pools */
     uint8_t  rom_state_root[32];      /* folded complete-state root (above) */
+    uint8_t format_version;          /* v1 totals are unknown */
+    int64_t sprout_pool_total;       /* authenticated only in v2 */
+    int64_t sapling_pool_total;      /* authenticated only in v2 */
 };
 
 /* Returns the compiled-in ROM state checkpoint (the shielded keystone), or

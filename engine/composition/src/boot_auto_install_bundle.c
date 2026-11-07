@@ -23,6 +23,7 @@
 #include "config/flysync_island.h"
 #include "config/consensus_state_install_runtime.h"
 
+#include "config/boot_internal.h"
 #include "config/boot.h"                       /* app_context, boot_refold_body_span_contiguous,
                                                  * boot_load_verify_snapshot_eligible, active_chain_* */
 #include "config/boot_bundle_fetch.h"          /* THE WELD: download-before-autodetect */
@@ -555,7 +556,7 @@ static bool auto_install_detected(struct node_db *ndb, struct main_state *ms,
     char *auto_bundle = boot_autodetect_consensus_bundle(datadir);
     if (auto_bundle) {
         struct consensus_state_install_runtime_result rr;
-        struct zcl_result r = consensus_state_install_from_bundle(
+        struct zcl_result r = boot_install_startup_bundle(
             ndb, ms, auto_bundle, datadir, &rr);
         if (r.ok) {
             installed = true;
@@ -625,7 +626,7 @@ bool boot_maybe_auto_install_consensus_bundle(struct node_db *ndb,
         boot_install_bundle_consume(datadir, req_path, sizeof(req_path))) {
         struct consensus_state_install_runtime_result rr;
         struct zcl_result r =
-            consensus_state_install_from_bundle(ndb, ms, req_path, datadir, &rr);
+            boot_install_startup_bundle(ndb, ms, req_path, datadir, &rr);
         if (r.ok) {
             boot_install_bundle_clear(datadir);
             boot_auto_install_clear_failed_marker(req_path);

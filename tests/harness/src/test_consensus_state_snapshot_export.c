@@ -20,6 +20,7 @@
 #include "storage/checkpoint_ladder.h"
 #include "storage/checkpoint_rung.h"
 #include "storage/coins_kv.h"
+#include "storage/shielded_pool_kv.h"
 #include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"
 #include "services/sync_trust_policy.h"
@@ -475,6 +476,22 @@ static bool cse_seed_source_pools(sqlite3 *db, uint8_t nf[32])
     return true;
 }
 
+static bool cse_seed_source_markers(sqlite3 *db)
+{
+    /* Stamp the exporter-required authority markers through the SAME production
+     * helper the -mint-anchor FULL-profile finalize path uses (config/boot.h), so
+     * a passing export here proves that finalize path yields an exporter-
+     * admissible source — not just that a hand-stamped fixture does. */
+    if (!boot_mint_anchor_stamp_sovereign_markers(db) ||
+        !cse_exec(db, "BEGIN IMMEDIATE") ||
+        !coins_kv_set_applied_height_in_tx(db, 2) ||
+        !cse_exec(db, "COMMIT")) {
+        (void)cse_exec(db, "ROLLBACK");
+        return false;
+    }
+    return true;
+}
+
 static bool cse_seed_source(sqlite3 *db, uint8_t hash[2][32], uint8_t nf[32])
 {
     static const char schema[] =
@@ -523,21 +540,12 @@ static bool cse_seed_source(sqlite3 *db, uint8_t hash[2][32], uint8_t nf[32])
         return false;
     if (!cse_seed_source_hash_rows(db, hash))
         return false;
-    if (!cse_seed_source_pools(db, nf))
+    if (!cse_seed_source_pools(db, nf) ||
+        !shielded_pool_kv_ensure_schema(db) ||
+        !shielded_pool_kv_put(db, 1, 0, 0))
         return false;
 
-    /* Stamp the exporter-required authority markers through the SAME production
-     * helper the -mint-anchor FULL-profile finalize path uses (config/boot.h), so
-     * a passing export here proves that finalize path yields an exporter-
-     * admissible source — not just that a hand-stamped fixture does. */
-    if (!boot_mint_anchor_stamp_sovereign_markers(db) ||
-        !cse_exec(db, "BEGIN IMMEDIATE") ||
-        !coins_kv_set_applied_height_in_tx(db, 2) ||
-        !cse_exec(db, "COMMIT")) {
-        (void)cse_exec(db, "ROLLBACK");
-        return false;
-    }
-    return true;
+    return cse_seed_source_markers(db);
 }
 
 /* ── checkpoint ladder rung/verifier fixtures ───────────── */
@@ -576,7 +584,7 @@ static bool cse_build_rung_bundle(const char *path)
         return false;
     const char *ddl =
         "CREATE TABLE bundle_meta(singleton INTEGER PRIMARY KEY, height INTEGER,"
-        " block_hash BLOB);"
+        " block_hash BLOB,schema TEXT);"
         "CREATE TABLE coins(txid BLOB, vout INTEGER, value INTEGER, script BLOB,"
         " height INTEGER, is_coinbase INTEGER);"
         "CREATE TABLE anchors(pool INTEGER, anchor BLOB, height INTEGER,"
@@ -588,7 +596,7 @@ static bool cse_build_rung_bundle(const char *path)
         bh[i] = (uint8_t)(0x40 + i);
     sqlite3_stmt *st = NULL;
     if (ok && sqlite3_prepare_v2(db,
-            "INSERT INTO bundle_meta VALUES(1,?,?)", -1, &st, NULL) == SQLITE_OK) {
+            "INSERT INTO bundle_meta VALUES(1,?,?,'zcl.consensus_state_bundle.v1')", -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(st, 1, 4242);
         sqlite3_bind_blob(st, 2, bh, 32, SQLITE_STATIC);
         ok = ok && sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:test-fixture
@@ -854,7 +862,7 @@ static int cse_rung_monotonic_checks(struct checkpoint_rung *out_a)
     bool any_mm = false;
     size_t n = 0;
     /* (6) monotonicity on candidate rungs away from the keystone height. */
-    struct checkpoint_rung a = {0}, b = {0};
+    struct checkpoint_rung a = {.format_version = CHECKPOINT_RUNG_VERSION_V1}, b = {.format_version = CHECKPOINT_RUNG_VERSION_V1};
     a.height = 100;
     a.chainwork[31] = 5;
     checkpoint_rung_finalize(&a);
@@ -868,7 +876,7 @@ static int cse_rung_monotonic_checks(struct checkpoint_rung *out_a)
               n == 2 && any_mm && res[0].verdict != CHECKPOINT_RUNG_MISMATCH &&
                   res[1].verdict == CHECKPOINT_RUNG_MISMATCH);
 
-    struct checkpoint_rung c = {0};
+    struct checkpoint_rung c = {.format_version = CHECKPOINT_RUNG_VERSION_V1};
     c.height = 200;
     c.chainwork[31] = 3; /* lower chainwork than a(=5) at a greater height */
     checkpoint_rung_finalize(&c);
@@ -1010,6 +1018,25 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
     *failures_ptr = failures;
 }
 
+static bool cse_v2_pool(const char *path, int64_t sprout, int64_t sapling)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(db, "SELECT schema,sprout_pool_total,sapling_pool_total FROM bundle_meta", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW &&
+        sqlite3_column_type(s, 0) == SQLITE_TEXT &&
+        sqlite3_column_text(s, 0) != NULL &&
+        strcmp((const char *)sqlite3_column_text(s, 0), CONSENSUS_STATE_BUNDLE_SCHEMA_V2) == 0 &&
+        sqlite3_column_type(s, 1) == SQLITE_INTEGER &&
+        sqlite3_column_type(s, 2) == SQLITE_INTEGER &&
+        sqlite3_column_int64(s, 1) == sprout && sqlite3_column_int64(s, 2) == sapling &&
+        sqlite3_step(s) == SQLITE_DONE;
+    if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
 /* ── Cooperative cancel (request->cancel_requested) ─────────────────────
  * The zcl_bundle_exp shutdown-hang class: the prove/copy/validate walks run
  * 30-60+ minutes on a full-history datadir, so a stop request must interrupt
@@ -1106,7 +1133,31 @@ static void cse_run_cancel_test(sqlite3 *db, const uint8_t tip_hash[32],
               consensus_state_snapshot_export(db, &request, &control_result) &&
               control_result.status == CONSENSUS_EXPORT_EXPORTED &&
               control_result.height == 1);
+    CSE_CHECK("pool: v2 metadata retains known zero", cse_v2_pool(control_output, 0, 0));
     (void)unlink(control_output);
+
+    CSE_CHECK("pool: seed distinct nonzero totals",
+              cse_exec(db, "UPDATE shielded_pool_totals SET sprout=7,sapling=9 WHERE height=1"));
+    memset(&control_result, 0, sizeof(control_result));
+    CSE_CHECK("pool: export distinct nonzero totals",
+              consensus_state_snapshot_export(db, &request, &control_result) &&
+              control_result.status == CONSENSUS_EXPORT_EXPORTED &&
+              strstr(control_result.reason, CONSENSUS_STATE_BUNDLE_SCHEMA_V2) != NULL &&
+              cse_v2_pool(control_output, 7, 9));
+    (void)unlink(control_output);
+    /* Refusal precedes publication even when the rest of the proof is valid. */
+    request.output_name = "pool-missing.bundle.db";
+    struct consensus_state_export_result pool_result;
+    memset(&pool_result, 0, sizeof(pool_result));
+    CSE_CHECK("pool: remove endpoint row",
+              cse_exec(db, "DELETE FROM shielded_pool_totals WHERE height=1"));
+    CSE_CHECK("pool: missing endpoint refuses export",
+              !consensus_state_snapshot_export(db, &request, &pool_result) &&
+              pool_result.status == CONSENSUS_EXPORT_MISSING_PROOF &&
+              faccessat(output_dir_fd, "pool-missing.bundle.db", F_OK, 0) != 0);
+    CSE_CHECK("pool: restore explicit synthetic zero",
+              shielded_pool_kv_put(db, 1, 0, 0));
+
 
     *failures_ptr = failures;
 }
@@ -2168,7 +2219,9 @@ static int cse_check_composed_suffix(struct cse_pf *pf, const uint8_t composed_h
 
     bool suffix_seeded = cse_seed_composed_suffix(db, hash, composed_hash);
     progress_store_tx_lock();
+    /* This synthetic suffix contains no shielded value transfers. */
     bool applied_advanced = suffix_seeded && cse_exec(db, "BEGIN IMMEDIATE") &&
+        shielded_pool_kv_put(db, 2, 0, 0) &&
         coins_kv_set_applied_height_in_tx(db, 3) && cse_exec(db, "COMMIT");
     if (!applied_advanced)
         (void)cse_exec(db, "ROLLBACK");

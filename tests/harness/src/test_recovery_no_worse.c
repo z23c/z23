@@ -33,8 +33,14 @@
  */
 
 #include "test/test_core.h"
+#include "validation/chain_linkage_check.h"
 
 #include "config/boot_internal.h"
+#include "config/boot_wallet_pending_restore.h"
+#include "jobs/block_header_emit.h"
+#include "services/chain_state_service.h"
+#include "storage/event_log_singleton.h"
+#include "storage/block_index_projection.h"
 #include "bloom/merkle.h"
 #include "chain/chainparams.h"
 #include "chain/pow.h"
@@ -460,6 +466,40 @@ static bool nw_migration_stamps_present(sqlite3 *db)
     return true;
 }
 
+struct nw_boot_wallet {
+    struct node_db *node;
+    struct wallet_sqlite *store;
+};
+
+static bool nw_boot_wallet_open(struct nw_boot_wallet *fixture, const char *root)
+{
+    struct wallet *wallet;
+    struct main_state *main;
+    boot_wallet_cutover_test_slots(&fixture->node, &fixture->store, &wallet, &main);
+    if (!fixture->node || !fixture->store || fixture->node->open || fixture->store->open) {
+        fixture->node = NULL;
+        fixture->store = NULL;
+        return false;
+    }
+    char path[640];
+    int n = snprintf(path, sizeof(path), "%s/node.db", root);
+    if (n <= 0 || (size_t)n >= sizeof(path) || !node_db_open(fixture->node, path))
+        return false;
+    if (!wallet_sqlite_open_r(fixture->store, fixture->node->db).ok) {
+        node_db_close(fixture->node);
+        return false;
+    }
+    struct wallet_cutover_binding binding;
+    return wallet_sqlite_cutover_read(fixture->store, &binding) == WALLET_CUTOVER_ABSENT &&
+           boot_wallet_allows_coin_repair();
+}
+
+static void nw_boot_wallet_close(struct nw_boot_wallet *fixture)
+{
+    if (fixture->store && fixture->store->open) wallet_sqlite_close(fixture->store);
+    if (fixture->node && fixture->node->open) node_db_close(fixture->node);
+}
+
 static int nw_pending_migration_case(void)
 {
     int failures = 0;
@@ -467,6 +507,10 @@ static int nw_pending_migration_case(void)
     bool ready = nw_replay_open(&f);
     NW_CHECK("pending migration fixture open", ready);
     if (!ready) { nw_replay_close(&f); return failures; }
+    struct nw_boot_wallet boot_wallet = {0};
+    bool wallet_ready = nw_boot_wallet_open(&boot_wallet, f.root);
+    NW_CHECK("global wallet has an absent cutover binding", wallet_ready);
+    if (!wallet_ready) { nw_boot_wallet_close(&boot_wallet); nw_replay_close(&f); return failures; }
     sqlite3 *db = progress_store_db();
     uint8_t txid[32] = {0x42};
     NW_CHECK("pending migration unstamped resident coins fixture",
@@ -475,20 +519,175 @@ static int nw_pending_migration_case(void)
         progress_meta_delete(db, COINS_KV_SELF_FOLDED_KEY) &&
         shielded_history_begin_full_replay(db, 3));
     NW_CHECK("pending first/already-open event log cannot stamp authority",
-        nw_event_log_preserves_authority(db, f.root));
+        boot_wallet_allows_coin_repair() && nw_event_log_preserves_authority(db, f.root));
     boot_stop_projection_storage();
     NW_CHECK("make replay session invalid", progress_meta_delete(db, SHIELDED_REPLAY_NEXT_KEY));
     NW_CHECK("invalid first/already-open event log cannot stamp authority",
-        nw_event_log_preserves_authority(db, f.root));
+        boot_wallet_allows_coin_repair() && nw_event_log_preserves_authority(db, f.root));
     boot_stop_projection_storage();
     NW_CHECK("retire replay migration fixture",
         sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK &&
         shielded_history_cancel_full_replay_in_tx(db) &&
         sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK);
     NW_CHECK("absent replay still permits ordinary authority migration",
-        boot_ensure_event_log(f.root) && nw_migration_stamps_present(db));
+        boot_wallet_allows_coin_repair() && boot_ensure_event_log(f.root) && nw_migration_stamps_present(db));
     boot_stop_projection_storage();
+    nw_boot_wallet_close(&boot_wallet);
     nw_replay_close(&f);
+    return failures;
+}
+
+struct nw_pending_restore_fixture {
+    struct nw_replay replay;
+    struct chain_state_repository csr;
+    struct event_log *log;
+    struct block_index_projection *projection;
+    struct block_index *tip;
+    struct uint256 tip_hash;
+    struct uint256 installed_hash;
+    struct incremental_merkle_tree tree;
+    bool csr_open;
+};
+
+static bool nw_pending_restore_add_header(struct nw_pending_restore_fixture *f,
+    struct block_index *parent, const struct block_header *header, struct uint256 *hash)
+{
+    block_header_get_hash(header, hash);
+    struct block_index *tip = chainstate_insert_block_index(
+        (struct chainstate *)&f->replay.ms, hash);
+    if (!tip) return false;
+    tip->nHeight = parent->nHeight + 1; tip->pprev = parent; tip->nVersion = header->nVersion;
+    tip->nTime = header->nTime; tip->nBits = header->nBits;
+    tip->hashFinalSaplingRoot = header->hashFinalSaplingRoot; tip->nStatus = BLOCK_VALID_TREE;
+    if (!block_index_set_hdrext(tip, &header->hashMerkleRoot, &header->nNonce,
+                                header->nSolution, header->nSolutionSize)) return false;
+    if (!block_index_emit_header_event(tip, "pending-restore-test", NULL, NULL)) return false;
+    f->tip = tip;
+    return true;
+}
+
+static bool nw_pending_restore_open(struct nw_pending_restore_fixture *f)
+{
+    if (!nw_replay_open(&f->replay)) return false;
+    struct nw_replay *r = &f->replay;
+    char log_path[640], projection_path[640];
+    snprintf(log_path, sizeof(log_path), "%s/events.log", r->root);
+    snprintf(projection_path, sizeof(projection_path), "%s/projection.db", r->root);
+    if (event_log_singleton() || block_index_projection_singleton()) return false;
+    f->log = event_log_open(log_path);
+    f->projection = f->log ? block_index_projection_open(projection_path, f->log) : NULL;
+    if (!f->projection) return false;
+    event_log_set_singleton(f->log);
+    block_index_projection_set_singleton(f->projection);
+    const struct chain_params *cp = chain_params_get();
+    struct block_index *genesis = chainstate_insert_block_index(
+        (struct chainstate *)&r->ms, &cp->consensus.hashGenesisBlock);
+    if (!genesis) return false;
+    genesis->nHeight = 0;
+    sapling_tree_init(&f->tree);
+    struct uint256 leaf = {0}; leaf.data[0] = 0x41;
+    incremental_tree_append(&f->tree, &leaf);
+    struct block_header header;
+    block_header_init(&header);
+    header.nVersion = 4; header.nTime = 1700000001u; header.nBits = 0x1f07ffffu;
+    header.hashPrevBlock = cp->consensus.hashGenesisBlock;
+    incremental_tree_root(&f->tree, &header.hashFinalSaplingRoot);
+    header.nSolutionSize = 1; header.nSolution[0] = 7;
+    if (!nw_pending_restore_add_header(f, genesis, &header, &f->installed_hash)) return false;
+    header.hashPrevBlock = f->installed_hash;
+    header.nTime++; header.nSolution[0]++;
+    struct block_index *installed = f->tip;
+    if (!nw_pending_restore_add_header(f, installed, &header, &f->tip_hash) ||
+        !event_log_flush(f->log) || block_index_projection_catch_up(f->projection) == UINT64_MAX)
+        return false;
+    sqlite3 *db = progress_store_db();
+    if (!anchor_kv_ensure_schema(db) || !anchor_kv_add_tree(db, ANCHOR_POOL_SAPLING, &f->tree, 0))
+        return false;
+    csr_init(&f->csr, &r->ms.map_block_index, &r->ms.chain_active,
+             &r->ms.pindex_best_header, &r->cache, &r->ndb, NULL);
+    f->csr_open = true;
+    return csr_restore_in_memory_view(&f->csr, genesis, genesis, &cp->consensus.hashGenesisBlock);
+}
+
+static void nw_pending_restore_close(struct nw_pending_restore_fixture *f)
+{
+    if (f->csr_open) csr_free(&f->csr);
+    if (block_index_projection_singleton() == f->projection) block_index_projection_set_singleton(NULL);
+    if (event_log_singleton() == f->log) event_log_set_singleton(NULL);
+    if (f->projection) block_index_projection_close(f->projection);
+    if (f->log) event_log_close(f->log);
+    nw_replay_close(&f->replay);
+}
+
+static bool nw_restore_view_is(struct nw_pending_restore_fixture *f,
+                               struct block_index *tip, bool loaded,
+                               const struct uint256 *tree_root)
+{
+    struct uint256 coins, root;
+    coins_view_cache_get_best_block(&f->replay.cache, &coins);
+    incremental_tree_root(&f->replay.ms.sapling_tree, &root);
+    return active_chain_tip(&f->replay.ms.chain_active) == tip &&
+        f->replay.ms.pindex_best_header == tip && tip && tip->phashBlock &&
+        uint256_eq(&coins, tip->phashBlock) && f->replay.ms.sapling_tree_loaded == loaded &&
+        uint256_eq(&root, tree_root);
+}
+
+static int nw_pending_restore_case(void)
+{
+    int failures = 0;
+    struct nw_pending_restore_fixture f = {0};
+    bool ready = nw_pending_restore_open(&f);
+    NW_CHECK("pending restore synthetic fixture opens", ready);
+    if (!ready) { nw_pending_restore_close(&f); return failures; }
+    struct block_index *old_tip = active_chain_tip(&f.replay.ms.chain_active);
+    struct uint256 old_root;
+    incremental_tree_root(&f.replay.ms.sapling_tree, &old_root);
+    int changes = sqlite3_total_changes(progress_store_db());
+    NW_CHECK("wrong height refuses without publishing",
+        boot_wallet_pending_restore(&f.replay.ms, &f.csr, 3, &f.tip_hash, 1, &f.installed_hash) == BOOT_PENDING_RESTORE_ANCESTRY_INVALID &&
+        nw_restore_view_is(&f, old_tip, false, &old_root));
+    struct uint256 wrong_target = f.installed_hash; wrong_target.data[0] ^= 1;
+    NW_CHECK("wrong installed target refuses without publishing",
+        boot_wallet_pending_restore(&f.replay.ms, &f.csr, 2, &f.tip_hash, 1, &wrong_target) == BOOT_PENDING_RESTORE_ANCESTRY_INVALID &&
+        nw_restore_view_is(&f, old_tip, false, &old_root));
+    block_index_projection_set_singleton(NULL);
+    NW_CHECK("missing header refuses without publishing",
+        boot_wallet_pending_restore(&f.replay.ms, &f.csr, 2, &f.tip_hash, 1, &f.installed_hash) == BOOT_PENDING_RESTORE_HEADER_UNAVAILABLE &&
+        nw_restore_view_is(&f, old_tip, false, &old_root));
+    block_index_projection_set_singleton(f.projection);
+    struct block_index *parent = f.tip->pprev;
+    f.tip->pprev = NULL;
+    NW_CHECK("broken ancestry refuses without publishing",
+        boot_wallet_pending_restore(&f.replay.ms, &f.csr, 2, &f.tip_hash, 1, &f.installed_hash) == BOOT_PENDING_RESTORE_ANCESTRY_INVALID &&
+        nw_restore_view_is(&f, old_tip, false, &old_root));
+    f.tip->pprev = parent;
+    bool removed = sqlite3_exec(progress_store_db(), "DELETE FROM sapling_anchors", NULL, NULL, NULL) == SQLITE_OK;
+    NW_CHECK("missing tree refuses without publishing",
+        removed && boot_wallet_pending_restore(&f.replay.ms, &f.csr, 2, &f.tip_hash, 1, &f.installed_hash) == BOOT_PENDING_RESTORE_TREE_UNAVAILABLE &&
+        nw_restore_view_is(&f, old_tip, false, &old_root));
+    NW_CHECK("synthetic tree restored for publication checks",
+        anchor_kv_add_tree(progress_store_db(), ANCHOR_POOL_SAPLING, &f.tree, 0));
+    changes = sqlite3_total_changes(progress_store_db());
+    chain_linkage_hold_set("pending_restore_fixture", 1, "fixture refusal");
+    NW_CHECK("CSR refusal leaves the prior view and tree intact",
+        boot_wallet_pending_restore(&f.replay.ms, &f.csr, 2, &f.tip_hash, 1, &f.installed_hash) == BOOT_PENDING_RESTORE_CSR_REFUSED &&
+        nw_restore_view_is(&f, old_tip, false, &old_root));
+    chain_linkage_hold_clear("pending_restore_fixture");
+    struct uint256 wanted_root;
+    incremental_tree_root(&f.tree, &wanted_root);
+    enum boot_pending_restore_result restored = boot_wallet_pending_restore(&f.replay.ms, &f.csr, 2, &f.tip_hash, 1, &f.installed_hash);
+    printf("pending restore result=%d progress_changes=%d expected=%d\n",
+           (int)restored, sqlite3_total_changes(progress_store_db()), changes);
+    NW_CHECK("verified snapshot restores exact in-memory view",
+        restored == BOOT_PENDING_RESTORE_OK && nw_restore_view_is(&f, f.tip, true, &wanted_root) &&
+        sqlite3_total_changes(progress_store_db()) == changes);
+    struct uint256 leaf = {0}; leaf.data[0] = 0x42;
+    incremental_tree_append(&f.tree, &leaf);
+    bool changed = anchor_kv_add_tree(progress_store_db(), ANCHOR_POOL_SAPLING, &f.tree, 2);
+    NW_CHECK("different durable tree refuses without changing restored view",
+        changed && boot_wallet_pending_restore(&f.replay.ms, &f.csr, 2, &f.tip_hash, 1, &f.installed_hash) == BOOT_PENDING_RESTORE_TREE_MISMATCH &&
+        nw_restore_view_is(&f, f.tip, true, &wanted_root));
+    nw_pending_restore_close(&f);
     return failures;
 }
 
@@ -497,6 +696,7 @@ int test_recovery_no_worse(void)
 {
     printf("\n=== recovery_no_worse: RECOVERY NEVER MAKES IT WORSE ===\n");
     int failures = 0;
+    failures += nw_pending_restore_case();
     failures += nw_canonical_replay_case(1);
     failures += nw_canonical_replay_case(0);
     failures += nw_pending_replay_case();

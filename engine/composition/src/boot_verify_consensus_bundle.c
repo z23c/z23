@@ -31,8 +31,10 @@ void boot_verify_consensus_bundle(const char *bundle_path, const char *datadir)
     }
 
     struct consensus_state_replay_result result;
+    progress_store_tx_lock();
     bool ok = consensus_state_replay_verify_and_write_receipt(
         progress_store_db(), bundle_path, datadir, &result);
+    progress_store_tx_unlock();
     if (!ok) {
         fprintf(stderr, "REFUSED: -verify-consensus-bundle: %s\n",
                 result.reason);

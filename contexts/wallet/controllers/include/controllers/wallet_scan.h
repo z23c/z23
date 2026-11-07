@@ -45,8 +45,9 @@ int wallet_scan_blocks(struct node_db *ndb,
  *           there only after the floor block is verified. Until then coverage
  *           remains unread and the catch-up walk cannot skip the prefix. A
  *           matching floor starts a pending scan from that floor.
- *   CHANGED a birthday exists but the active chain does not hold the floor
- *           block (another block at its height, or no chain loaded): nothing
+ *   UNAVAILABLE the floor cannot be checked because its active-chain slot
+ *           or hash is missing. Keep the birthday pending; do not skip history.
+ *   CHANGED a birthday is malformed or a different floor block is present: nothing
  *           about the blocks below it can be assumed, the scan is from
  *           genesis.
  * wallet_scan_blocks never applies the floor: a transparent scan, a rescan and
@@ -57,6 +58,7 @@ enum wallet_birthday_state {
     WALLET_BIRTHDAY_VALID,
     WALLET_BIRTHDAY_AHEAD,
     WALLET_BIRTHDAY_CHANGED,
+    WALLET_BIRTHDAY_UNAVAILABLE,
 };
 enum wallet_birthday_state wallet_birthday_check(
     struct node_db *ndb, const struct active_chain *chain, int *floor);

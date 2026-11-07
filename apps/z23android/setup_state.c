@@ -174,3 +174,31 @@ bool zapp_setup_identity(const char *files, char out[65])
            zapp_setup_confirmed(files) && blob_hash_hex(files, out) &&
            zapp_setup_confirmed(files);
 }
+
+static bool setup_nonce_valid(const char *nonce)
+{
+    if (!nonce || strlen(nonce) != 64) return false;
+    for (size_t i = 0; i < 64; i++)
+        if (!((nonce[i] >= '0' && nonce[i] <= '9') || (nonce[i] >= 'a' && nonce[i] <= 'f'))) return false;
+    return true;
+}
+bool zapp_setup_nonce_write(const char *files, const char *nonce)
+{
+    return setup_nonce_valid(nonce) && write_marker(files, "wallet_setup_nonce", "wallet_setup_nonce.tmp", nonce);
+}
+bool zapp_setup_nonce_read(const char *files, char nonce[65])
+{
+    char path[PATH_MAX], text[66] = {0}; nonce[0] = 0;
+    if (!path_of(files, "wallet_setup_nonce", path, sizeof(path))) return false;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    ssize_t n = read(fd, text, sizeof(text)); bool closed = close(fd) == 0;
+    if (!closed || n != 64 || !setup_nonce_valid(text)) return false;
+    memcpy(nonce, text, 65); return true;
+}
+bool zapp_setup_nonce_exists(const char *files)
+{
+    char path[PATH_MAX]; struct stat st;
+    if (!path_of(files, "wallet_setup_nonce", path, sizeof(path))) return true;
+    return lstat(path, &st) == 0 || errno != ENOENT;
+}

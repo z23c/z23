@@ -62,6 +62,7 @@ static struct consensus_state_bundle_manifest make_manifest(
 {
     struct consensus_state_bundle_manifest m;
     memset(&m, 0, sizeof(m));
+    m.format_version = CONSENSUS_STATE_BUNDLE_V1;
     m.height = height;
     m.history_complete = true;
     m.source_clean = true;

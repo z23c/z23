@@ -22,6 +22,7 @@ void wallet_init(struct wallet *w)
 void wallet_init_zeroed(struct wallet *w)
 {
     zcl_mutex_init(&w->cs);
+    memset(&w->readiness, 0, sizeof(w->readiness));
     keystore_init_zeroed(&w->keystore);
     w->num_wallet_tx = 0;
     w->key_pool_size = 0;

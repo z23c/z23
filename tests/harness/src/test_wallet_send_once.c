@@ -250,6 +250,14 @@ static bool fx_open(struct fixture *fx, const char *tag, bool fresh)
     if (!g_wallet)
         return false;
     wallet_init(g_wallet);
+    if (!wallet_readiness_initialize(g_wallet, WALLET_READINESS_READY, false, 0)) {
+        wallet_free(g_wallet);
+        free(g_wallet);
+        g_wallet = NULL;
+        node_db_close(&fx->ndb);
+        g_ndb = NULL;
+        return false;
+    }
     g_wallet->default_fee = 250;
     wallet_rpc_context_set_base(g_wallet, NULL, fx->dir, NULL, NULL, NULL);
     wallet_rpc_context_set_node_db(&fx->ndb);
@@ -1083,14 +1091,19 @@ static int case_failed_run_releases_key(void)
 }
 
 
-static void swap_wallet(const struct fixture *fx)
+static bool swap_wallet(const struct fixture *fx)
 {
     wallet_free(g_wallet);
     free(g_wallet);
     g_wallet = zcl_calloc(1, sizeof(*g_wallet), "wso_wallet");
+    if (!g_wallet)
+        return false;
     wallet_init(g_wallet);
+    if (!wallet_readiness_initialize(g_wallet, WALLET_READINESS_READY, false, 0))
+        return false;
     g_wallet->default_fee = 250;
     wallet_rpc_context_set_base(g_wallet, NULL, fx->dir, NULL, NULL, NULL);
+    return true;
 }
 
 static int case_replay_needs_wallet(void)
@@ -1104,7 +1117,12 @@ static int case_replay_needs_wallet(void)
     plan_then_commit("0.1", WSO_MEMO, WSO_KEY, &r);
     WSO_CHECK("the send commits", replied_committed(&r, false, 0xA1));
     zcl_command_reply_free(&r);
-    swap_wallet(&fx);
+    bool replacement_ready = swap_wallet(&fx);
+    WSO_CHECK("replacement wallet is ready", replacement_ready);
+    if (!replacement_ready) {
+        fx_close(&fx, true);
+        return failures;
+    }
     plan_then_commit("0.1", WSO_MEMO, WSO_KEY, &r);
     WSO_CHECK("a committed row whose wallet lost the transaction is unknown",
               replied_code(&r, "SEND_OUTCOME_UNKNOWN") &&

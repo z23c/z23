@@ -12,13 +12,17 @@
 #include "util/log_macros.h"
 #include "util/ar_step_readonly.h"
 #include "models/wallet_tx.h"
+#include "models/ar_after_commit.h"
 #include "models/wallet_tx_internal.h"
 #include "models/wallet_key.h"
 #include "wallet/sapling_keys.h"
 #include "chain/chainparams.h"
 #include "event/event.h"
 #include "storage/wallet_projection.h"
+#include "storage/event_log.h"
 #include "util/safe_alloc.h"
+#include "support/cleanse.h"
+#include <limits.h>
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
@@ -122,7 +126,72 @@ void wallet_tx_read_spent_txid(sqlite3_stmt *s, int col,
 
 /* ── SaplingNote CRUD ─────────────────────────────────────────── */
 
-bool db_sapling_note_save(struct node_db *ndb, const struct db_sapling_note *n)
+struct sapling_replay_event {
+    uint8_t txid[32], cm[32];
+    uint32_t output_index;
+    int64_t value;
+    int block_height;
+};
+
+static void sapling_replay_after_commit(void *record, void *opaque)
+{
+    (void)record;
+    struct sapling_replay_delivery *delivery = opaque;
+    delivery->committed++;
+}
+
+static bool sapling_replay_enqueue_event(const struct db_sapling_note *n,
+                                         struct sapling_replay_delivery *delivery)
+{
+    if (delivery->count == delivery->capacity) {
+        size_t next = delivery->capacity ? delivery->capacity * 2 : 8;
+        if (next < delivery->capacity || next > SIZE_MAX / sizeof(*delivery->events))
+            return false;
+        void *grown = zcl_realloc(delivery->events, next * sizeof(*delivery->events),
+                                   "sapling replay events");
+        if (!grown) return false;
+        delivery->events = grown;
+        delivery->capacity = next;
+    }
+    struct sapling_replay_event e = {.output_index = n->output_index,
+                                      .value = n->value, .block_height = n->block_height};
+    memcpy(e.txid, n->txid, 32);
+    memcpy(e.cm, n->cm, 32);
+    if (!ar_after_commit_enqueue(sapling_replay_after_commit, delivery, &e, sizeof(e))) {
+        LOG_ERROR("sapling_note", "cannot enqueue replay projection delivery");
+        return false;
+    }
+    delivery->events[delivery->count++] = e;
+    return true;
+}
+
+bool db_sapling_replay_delivery_flush(struct sapling_replay_delivery *delivery)
+{
+    if (!delivery || delivery->failed || delivery->committed != delivery->count)
+        return false;
+    event_log_t *log = wallet_projection_event_log();
+    if (!log) return false;
+    for (size_t i = 0; i < delivery->count; i++) {
+        const struct sapling_replay_event *e = &delivery->events[i];
+        if (wallet_projection_event_log() != log ||
+            !wallet_projection_emit_note_decrypted(e->txid, e->output_index,
+                                                    e->value, e->cm, e->block_height))
+            return false;
+    }
+    return wallet_projection_event_log() == log && event_log_flush(log);
+}
+
+void db_sapling_replay_delivery_clear(struct sapling_replay_delivery *delivery)
+{
+    if (!delivery) return;
+    if (delivery->events)
+        memory_cleanse(delivery->events, delivery->count * sizeof(*delivery->events));
+    free(delivery->events);
+    memset(delivery, 0, sizeof(*delivery));
+}
+
+static bool sapling_note_save_impl(struct node_db *ndb, const struct db_sapling_note *n,
+                                    bool defer_projection, struct sapling_replay_delivery *delivery)
 {
     if (!ndb->open) return false;
     struct db_sapling_note *mut = (struct db_sapling_note *)n;
@@ -173,11 +242,82 @@ bool db_sapling_note_save(struct node_db *ndb, const struct db_sapling_note *n)
     AR_BIND_TEXT(s, 14, n->source);
     bool ok = AR_STEP_DONE(s);
     AR_FINALIZE(s);
-    if (ok && !wallet_projection_emit_note_decrypted(
+    if (ok && defer_projection) {
+        ok = sapling_replay_enqueue_event(n, delivery);
+    } else if (ok && !wallet_projection_emit_note_decrypted(
             n->txid, n->output_index, n->value, n->cm, n->block_height)) {
         LOG_WARN("wallet_projection", "[wallet_projection] note decrypted projection emit failed");
     }
     AR_FINISH_SAVE(cbs, n, ok);
+}
+
+bool db_sapling_note_save(struct node_db *ndb, const struct db_sapling_note *n)
+{
+    return sapling_note_save_impl(ndb, n, false, NULL);
+}
+
+/* Replay must preserve an existing note's spent state, nullifier and witness. */
+static bool sapling_replay_blob_equal(sqlite3_stmt *s, int col,
+                                      const void *bytes, size_t len)
+{
+    if (len == 0) return sqlite3_column_type(s, col) == SQLITE_NULL;
+    if (sqlite3_column_type(s, col) != SQLITE_BLOB) return false;
+    const void *stored = sqlite3_column_blob(s, col);
+    return stored &&
+           sqlite3_column_bytes(s, col) == (int)len &&
+           memcmp(stored, bytes, len) == 0;
+}
+
+static bool sapling_replay_identity_equal(sqlite3_stmt *s,
+                                           const struct db_sapling_note *n)
+{
+    int height_type = sqlite3_column_type(s, 7);
+    bool height_ok = n->block_height == 0 ? height_type == SQLITE_NULL :
+        height_type == SQLITE_INTEGER && sqlite3_column_int64(s, 7) == n->block_height;
+    return sqlite3_column_type(s, 0) == SQLITE_INTEGER &&
+        sqlite3_column_int64(s, 0) == n->value && height_ok &&
+        sapling_replay_blob_equal(s, 1, n->rcm, 32) &&
+        sapling_replay_blob_equal(s, 2, n->memo, n->memo_len) &&
+        sapling_replay_blob_equal(s, 3, n->ivk, 32) &&
+        sapling_replay_blob_equal(s, 4, n->diversifier, 11) &&
+        sapling_replay_blob_equal(s, 5, n->pk_d, 32) &&
+        sapling_replay_blob_equal(s, 6, n->cm, 32);
+}
+
+static enum sapling_replay_merge_result sapling_replay_lookup(
+    struct node_db *ndb, const struct db_sapling_note *note)
+{
+    sqlite3_stmt *s = NULL;
+    const char *sql = "SELECT value,rcm,memo,ivk,diversifier,pk_d,cm,block_height "
+                      "FROM wallet_sapling_notes WHERE txid=? AND output_index=?";
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL) != SQLITE_OK) {
+        if (s) sqlite3_finalize(s);
+        return SAPLING_REPLAY_MERGE_ERROR;
+    }
+    bool bound = sqlite3_bind_blob(s, 1, note->txid, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+                 sqlite3_bind_int64(s, 2, note->output_index) == SQLITE_OK;
+    int rc = bound ? AR_STEP_ROW_READONLY(s) : SQLITE_ERROR;
+    bool same = rc == SQLITE_ROW && sapling_replay_identity_equal(s, note);
+    if (rc == SQLITE_ROW && AR_STEP_ROW_READONLY(s) != SQLITE_DONE) rc = SQLITE_ERROR;
+    int final_rc = sqlite3_finalize(s);
+    if (final_rc != SQLITE_OK || (rc != SQLITE_ROW && rc != SQLITE_DONE))
+        return SAPLING_REPLAY_MERGE_ERROR;
+    if (rc == SQLITE_ROW)
+        return same ? SAPLING_REPLAY_MERGE_EXISTING : SAPLING_REPLAY_MERGE_CONFLICT;
+    return SAPLING_REPLAY_MERGE_INSERTED;
+}
+
+enum sapling_replay_merge_result db_sapling_note_merge_replayed(
+    struct node_db *ndb, const struct db_sapling_note *note, struct sapling_replay_delivery *delivery)
+{
+    if (!ndb || !ndb->open || !ndb->db || !note || !delivery || note->memo_len > sizeof(note->memo) ||
+        sqlite3_get_autocommit(ndb->db) != 0 || ar_after_commit_depth() == 0)
+        return SAPLING_REPLAY_MERGE_ERROR;
+    enum sapling_replay_merge_result result = sapling_replay_lookup(ndb, note);
+    if (result == SAPLING_REPLAY_MERGE_EXISTING)
+        return sapling_replay_enqueue_event(note, delivery) ? result : SAPLING_REPLAY_MERGE_ERROR;
+    if (result != SAPLING_REPLAY_MERGE_INSERTED) return result;
+    return sapling_note_save_impl(ndb, note, true, delivery) ? SAPLING_REPLAY_MERGE_INSERTED : SAPLING_REPLAY_MERGE_ERROR;
 }
 
 enum db_mark_spent_result db_sapling_note_mark_spent(
@@ -509,29 +649,50 @@ int db_sapling_note_count_unspent_view_for_address(struct node_db *ndb,
         AR_BIND_TEXT(s, 2, address));
 }
 
+static bool sapling_note_grow(struct db_sapling_note **rows, size_t *capacity)
+{
+    size_t next = *capacity ? *capacity * 2 : 8;
+    if (next < *capacity || next > INT_MAX || next > SIZE_MAX / sizeof(**rows))
+        return false;
+    void *grown = zcl_realloc(*rows, next * sizeof(**rows), "sapling notes unspent");
+    if (!grown) return false;
+    *rows = grown;
+    *capacity = next;
+    return true;
+}
+
 int db_sapling_note_list_unspent_alloc(struct node_db *ndb,
                                        struct db_sapling_note **out)
 {
     if (!out) return -1;
     *out = NULL;
-    if (!ndb || !ndb->open) return -1;
-
-    int n = db_sapling_note_count_unspent(ndb);
-    if (n <= 0)
-        return 0;
-
-    /* Size to the live count; re-read may see a couple extra rows if a write
-     * raced, so the fixed-size load below simply stops at our allocated count
-     * (correct: AR_QUERY_LIST honors max). A short-read is also fine. */
-    struct db_sapling_note *buf =
-        zcl_calloc((size_t)n, sizeof(struct db_sapling_note),
-                   "sapling notes unspent");
-    if (!buf)
+    if (!ndb || !ndb->open || !ndb->db) return -1;
+    sqlite3_stmt *s = NULL;
+    const char *sql = "SELECT txid,output_index,value,rcm,memo,ivk,diversifier,pk_d,"
+                      "cm,nullifier,block_height,source FROM wallet_sapling_notes "
+                      "WHERE spent_txid IS NULL ORDER BY value DESC";
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL) != SQLITE_OK)
+    {
+        if (s) sqlite3_finalize(s);
         return -1;
-
-    int got = db_sapling_note_list_unspent(ndb, buf, (size_t)n);
-    *out = buf;
-    return got;
+    }
+    struct db_sapling_note *rows = NULL;
+    size_t used = 0, capacity = 0;
+    int rc;
+    while ((rc = AR_STEP_ROW_READONLY(s)) == SQLITE_ROW) {
+        if (used == capacity && !sapling_note_grow(&rows, &capacity)) {
+            rc = SQLITE_NOMEM;
+            break;
+        }
+        db_sapling_note_read_row(s, 0, &rows[used++]);
+    }
+    int final_rc = sqlite3_finalize(s);
+    if (rc != SQLITE_DONE || final_rc != SQLITE_OK) {
+        free(rows);
+        return -1;
+    }
+    *out = rows;
+    return (int)used;
 }
 
 int db_sapling_note_list_unspent_for_ivk(struct node_db *ndb,

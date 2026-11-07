@@ -18,6 +18,7 @@ static struct consensus_state_bundle_manifest valid_manifest(void)
 {
     struct consensus_state_bundle_manifest manifest;
     memset(&manifest, 0, sizeof(manifest));
+    manifest.format_version = CONSENSUS_STATE_BUNDLE_V1;
     manifest.height = 100;
     manifest.history_complete = true;
     manifest.source_clean = true;

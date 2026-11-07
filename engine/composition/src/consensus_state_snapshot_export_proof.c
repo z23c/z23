@@ -15,6 +15,7 @@
 #include "sapling/incremental_merkle_tree.h"
 #include "storage/anchor_kv.h"
 #include "storage/coins_kv.h"
+#include "storage/coins_kv_read_snapshot.h"
 #include "storage/coins_ram.h"
 #include "storage/nullifier_kv.h"
 #include "services/sync_trust_policy.h"
@@ -651,6 +652,14 @@ bool consensus_export_prove_source(
                               chain_corpus_digest, result) ||
         !export_check_generation(source, request, result))
         return false;
+
+    bool pool_found = false;
+    if (!coins_kv_read_transaction_shielded_pool(
+            source, manifest->height, &manifest->sprout_pool_total,
+            &manifest->sapling_pool_total, &pool_found) || !pool_found)
+        return consensus_export_fail(result, CONSENSUS_EXPORT_MISSING_PROOF,
+                                     "endpoint shielded pool totals unavailable");
+    manifest->format_version = CONSENSUS_STATE_BUNDLE_V2;
 
     memset(proofs, 0, sizeof(*proofs) * CONSENSUS_STATE_BUNDLE_PROOF_COUNT);
     export_header_proof_fill(&proofs[0], request, header_cursor,

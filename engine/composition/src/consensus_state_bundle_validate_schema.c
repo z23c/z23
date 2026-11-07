@@ -3,6 +3,7 @@
 
 #include "consensus_state_bundle_validate_schema.h"
 #include "consensus_state_sqlite_text.h"
+#include "storage/consensus_state_bundle_codec.h"
 #include "util/log_macros.h"
 
 #include <sqlite3.h>
@@ -63,6 +64,10 @@ static const struct canonical_column k_bundle_meta_columns[] = {
     COL("source_fold_cursor","INTEGER",0),
     COL("proof_manifest_digest","BLOB",0), COL("source_digest","BLOB",0),
     COL("artifact_digest","BLOB",0),
+};
+static const struct canonical_column k_bundle_meta_pool_columns[] = {
+    COL("sprout_pool_total","INTEGER",0),
+    COL("sapling_pool_total","INTEGER",0),
 };
 static const struct canonical_column k_source_receipt_columns[] = {
     COL("singleton","INTEGER",1), COL("schema","TEXT",0),
@@ -177,8 +182,36 @@ static bool canonical_table_present(sqlite3 *db, const char *name,
     return rc == SQLITE_DONE;
 }
 
+static bool canonical_pool_columns(sqlite3_stmt *st)
+{
+    for (size_t i = 0; i < 2; i++) {
+        int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
+        if (rc != SQLITE_ROW ||
+            !consensus_state_sqlite_text_equal(st, 0, k_bundle_meta_pool_columns[i].name) ||
+            !consensus_state_sqlite_text_equal(st, 1, k_bundle_meta_pool_columns[i].type) ||
+            sqlite3_column_type(st, 2) != SQLITE_INTEGER || sqlite3_column_int(st, 2) != 0 ||
+            sqlite3_column_type(st, 3) != SQLITE_INTEGER || sqlite3_column_int(st, 3) != 0)
+            return false;
+    }
+    return true;
+}
+
+static bool canonical_column_matches(sqlite3_stmt *st,
+                                     const struct canonical_column *want)
+{
+    int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
+    return rc == SQLITE_ROW &&
+           consensus_state_sqlite_text_equal(st, 0, want->name) &&
+           consensus_state_sqlite_text_equal(st, 1, want->type) &&
+           sqlite3_column_type(st, 2) == SQLITE_INTEGER &&
+           sqlite3_column_int(st, 2) == want->primary_key_ordinal &&
+           sqlite3_column_type(st, 3) == SQLITE_INTEGER &&
+           sqlite3_column_int(st, 3) == 0;
+}
+
 static bool canonical_table_columns(sqlite3 *db,
-                                    const struct canonical_table *table)
+                                    const struct canonical_table *table,
+                                    uint8_t version)
 {
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(
@@ -188,24 +221,19 @@ static bool canonical_table_columns(sqlite3 *db,
     sqlite3_bind_text(st, 1, table->name, -1, SQLITE_STATIC);
     bool ok = true;
     for (size_t i = 0; i < table->column_count; i++) {
-        int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
-        if (rc != SQLITE_ROW ||
-            !consensus_state_sqlite_text_equal(
-                st, 0, table->columns[i].name) ||
-            !consensus_state_sqlite_text_equal(
-                st, 1, table->columns[i].type) ||
-            sqlite3_column_type(st, 2) != SQLITE_INTEGER ||
-            sqlite3_column_int(st, 2) !=
-                table->columns[i].primary_key_ordinal ||
-            sqlite3_column_type(st, 3) != SQLITE_INTEGER ||
-            sqlite3_column_int(st, 3) != 0) {
+        if (!canonical_column_matches(st, &table->columns[i])) {
             ok = false;
             break;
         }
     }
+    if (ok && version == CONSENSUS_STATE_BUNDLE_V2 &&
+        strcmp(table->name, "bundle_meta") == 0) {
+        ok = canonical_pool_columns(st);
+    }
     if (ok)
         ok = sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
-    sqlite3_finalize(st);
+    if (sqlite3_finalize(st) != SQLITE_OK)
+        ok = false;
     return ok;
 }
 
@@ -242,7 +270,7 @@ static bool canonical_table_rowid_clause_ok(const struct canonical_table *want,
 static bool canonical_catalog_row_matches(sqlite3 *db, sqlite3_stmt *st,
                                           int rc,
                                           const struct canonical_table *want,
-                                          const char *definition)
+                                          const char *definition, uint8_t version)
 {
     return rc == SQLITE_ROW &&
            consensus_state_sqlite_text_equal(st, 0, "table") &&
@@ -251,12 +279,12 @@ static bool canonical_catalog_row_matches(sqlite3 *db, sqlite3_stmt *st,
            sqlite3_column_bytes(st, 2) == (int)strlen(definition) &&
            canonical_table_tokens_present(want, definition) &&
            canonical_table_rowid_clause_ok(want, definition) &&
-           canonical_table_columns(db, want);
+           canonical_table_columns(db, want, version);
 }
 
 static bool canonical_schema_tables_match(sqlite3 *db, sqlite3_stmt *st,
                                           const struct canonical_table *tables,
-                                          size_t table_count)
+                                          size_t table_count, uint8_t version)
 {
     bool ok = true;
     for (size_t i = 0; ok && i < table_count; i++) {
@@ -266,7 +294,7 @@ static bool canonical_schema_tables_match(sqlite3 *db, sqlite3_stmt *st,
             ? sqlite3_column_type(st, 2) : SQLITE_NULL;
         const char *definition = definition_type == SQLITE_TEXT
             ? (const char *)sqlite3_column_text(st, 2) : NULL;
-        ok = canonical_catalog_row_matches(db, st, rc, want, definition);
+        ok = canonical_catalog_row_matches(db, st, rc, want, definition, version);
     }
     if (ok)
         ok = sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
@@ -280,9 +308,25 @@ static bool canonical_bundle_meta_has_single_row(sqlite3_stmt *st)
            sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
 }
 
-bool consensus_state_bundle_validate_canonical_schema(
-    sqlite3 *db, struct consensus_state_install_result *result)
+static bool canonical_schema_version(sqlite3 *db, uint8_t *version)
 {
+    sqlite3_stmt *version_st = NULL;
+    if (!version || sqlite3_prepare_v2(db, "SELECT schema FROM bundle_meta WHERE singleton=1", -1, &version_st, NULL) != SQLITE_OK)
+        return false;
+    int vrc = sqlite3_step(version_st); // raw-sql-ok:read-only-introspection
+    const unsigned char *name = vrc == SQLITE_ROW && sqlite3_column_type(version_st, 0) == SQLITE_TEXT ? sqlite3_column_text(version_st, 0) : NULL;
+    bool version_ok = name && consensus_state_bundle_schema_version((const char *)name, (size_t)sqlite3_column_bytes(version_st, 0), version) &&
+        sqlite3_step(version_st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
+    if (sqlite3_finalize(version_st) != SQLITE_OK)
+        version_ok = false;
+    return version_ok;
+}
+
+bool consensus_state_bundle_validate_canonical_schema(
+    sqlite3 *db, struct consensus_state_install_result *result, uint8_t *version)
+{
+    if (!canonical_schema_version(db, version))
+        return schema_fail(result, "bundle schema version invalid");
     bool composite = false;
     if (!canonical_table_present(db, "proof_parent", &composite))
         return schema_fail(result, "bundle schema lineage probe failed");
@@ -295,8 +339,9 @@ bool consensus_state_bundle_validate_canonical_schema(
         "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
         return schema_fail(result, "bundle schema catalog unreadable");
-    bool ok = canonical_schema_tables_match(db, st, tables, table_count);
-    sqlite3_finalize(st);
+    bool ok = canonical_schema_tables_match(db, st, tables, table_count, *version);
+    if (sqlite3_finalize(st) != SQLITE_OK)
+        ok = false;
     if (!ok)
         return schema_fail(result,
                            "bundle schema is not the canonical closed set");
@@ -304,7 +349,8 @@ bool consensus_state_bundle_validate_canonical_schema(
                            &st, NULL) != SQLITE_OK)
         return schema_fail(result, "bundle_meta cardinality unavailable");
     ok = canonical_bundle_meta_has_single_row(st);
-    sqlite3_finalize(st);
+    if (sqlite3_finalize(st) != SQLITE_OK)
+        ok = false;
     if (!ok)
         return schema_fail(result, "bundle_meta must contain exactly one row");
     return true;

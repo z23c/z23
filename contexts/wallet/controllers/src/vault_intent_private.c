@@ -325,7 +325,7 @@ static bool vip_encode(const struct vip_payload *p, uint8_t *out, size_t cap,
     struct byte_stream s;
     stream_init(&s, 1024);
     size_t from_len = strlen(p->from);
-    bool ok = stream_write(&s, "VIP2", 4) &&
+    bool ok = stream_write(&s, "VIG2", 4) &&
         stream_write_u8(&s, (uint8_t)p->route) &&
         stream_write_u8(&s, (uint8_t)from_len) &&
         stream_write(&s, p->from, from_len) &&
@@ -354,7 +354,7 @@ static bool vip_encode(const struct vip_payload *p, uint8_t *out, size_t cap,
 static bool vip_decode_route(struct byte_stream *s, uint8_t *route)
 {
     uint8_t magic[4];
-    return stream_read(s, magic, 4) && memcmp(magic, "VIP2", 4) == 0 &&
+    return stream_read(s, magic, 4) && memcmp(magic, "VIG2", 4) == 0 &&
         stream_read_u8(s, route) && *route >= VAULT_INTENT_ROUTE_PRIVATE &&
         *route <= VAULT_INTENT_ROUTE_MIXED &&
         *route != VAULT_INTENT_ROUTE_TRANSPARENT;
@@ -583,6 +583,9 @@ static bool vip_plan_prepare(const char *agent_session, const char *scope,
         }
     }
     bool encoded = vip_encode(p, plain, plain_cap, plain_len);
+    struct wallet_rpc_context *ctx = wallet_rpc_context_current();
+    struct wallet_readiness readiness = ctx && ctx->wallet ? wallet_readiness_get(ctx->wallet) : (struct wallet_readiness){0};
+    encoded = encoded && vault_intent_generation_bind(plain, plain_len, plain_cap, &readiness);
     if (!encoded) {
         vip_error(result, "PLAN_TOO_LARGE",
                   "normalized recipients and memos exceed the encrypted plan budget");
@@ -604,6 +607,12 @@ static enum vip_replay vip_plan_replay(
         ctx->node_db, scope, VIP_APP_KIND, idem, existing);
     if (!found)
         return VIP_REPLAY_NONE;
+    if (!vault_intent_generation_current(ctx, existing)) {
+        memory_cleanse(plain, plain_cap);
+        memory_cleanse(p, sizeof(*p));
+        vip_error(result, "PLAN_REPLAN_REQUIRED", "wallet authority changed or plan lacks a generation binding; create a fresh plan");
+        return VIP_REPLAY_REFUSED;
+    }
     if (agent_session && agent_session[0] &&
         existing->agent_session_id[0] &&
         strcmp(existing->agent_session_id, agent_session) != 0) {
@@ -816,6 +825,20 @@ plan_clean:
     return true;
 }
 
+static bool vip_prepared_valid(struct wallet_rpc_context *ctx,
+                               const struct vault_intent_row *row,
+                               const uint8_t *plain, size_t *plain_len,
+                               struct vip_payload *p)
+{
+    uint8_t digest[32];
+    vault_intent_digest_payload(plain, *plain_len, row, digest);
+    struct wallet_readiness readiness = ctx && ctx->wallet ? wallet_readiness_get(ctx->wallet) : (struct wallet_readiness){0};
+    return memcmp(digest, row->digest, 32) == 0 &&
+        vault_intent_generation_check(plain, plain_len, &readiness) &&
+        vip_decode(plain, *plain_len, p) && p->route == row->route &&
+        p->fee == row->max_fee_zat && wallet_default_fee(ctx->wallet) == p->fee;
+}
+
 bool vault_intent_private_build_prepared(
     struct wallet_rpc_context *ctx, const struct vault_intent_row *row,
     struct wallet_tx *wtx, struct json_value *result)
@@ -828,13 +851,8 @@ bool vault_intent_private_build_prepared(
                   "encrypted private plan failed authentication");
         return false;
     }
-    uint8_t digest[32];
-    vault_intent_digest_payload(plain, plain_len, row, digest);
     struct vip_payload p;
-    bool valid = memcmp(digest, row->digest, 32) == 0 &&
-        vip_decode(plain, plain_len, &p) && p.route == row->route &&
-        p.fee == row->max_fee_zat &&
-        wallet_default_fee(ctx->wallet) == p.fee;
+    bool valid = vip_prepared_valid(ctx, row, plain, &plain_len, &p);
     memory_cleanse(plain, sizeof(plain));
     if (!valid) {
         memory_cleanse(&p, sizeof(p));

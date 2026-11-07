@@ -2517,6 +2517,8 @@ Z23_FLAG("ZCL_TEST_PERF_BUDGET_SEC", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_stage_crash_sweep.c:auto")
 Z23_FLAG("ZCL_TEST_PROOF_FAMILIES_SRC", "env_build", "-", "-",
           "undocumented; first use tools/dev/test_group_list.c:auto")
+Z23_FLAG("ZCL_TEST_REGTEST_PRODUCER_DIR", "env_test", "-", "-",
+          "Retain mined regtest producer inputs in a fresh absolute directory; first use tests/harness/src/test_consensus_state_install_runtime.c:auto")
 Z23_FLAG("ZCL_TEST_REGISTRY_SRC", "env_build", "-", "-",
           "undocumented; first use tools/dev/test_group_list.c:auto")
 Z23_FLAG("ZCL_TEST_RUNNER_SRC", "env_build", "-", "-",

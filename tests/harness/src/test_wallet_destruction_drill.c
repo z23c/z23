@@ -271,6 +271,8 @@ static bool dr_write_block(const char *datadir, struct transaction *tx,
     blk.vtx = calloc(1, sizeof(*blk.vtx)); /* raw-alloc-ok:test-fixture */
     bool ok = false;
     if (blk.vtx) {
+        transaction_compute_hash(tx);
+        blk.header.hashMerkleRoot = tx->hash;
         blk.vtx[0] = *tx;
         transaction_init(tx); /* ownership moved into blk */
         unsigned char msg_start[4] = { 0x24, 0xe9, 0x27, 0x64 };
@@ -388,6 +390,9 @@ static int act1_live_open(struct act1_ctx *c)
     c->live_w = zcl_calloc(1, sizeof(*c->live_w), "dr_act1_live_wallet");
     DR_CHECK("live: alloc wallet (heap)", c->live_w != NULL);
     if (c->live_w) wallet_init(c->live_w);
+    DR_CHECK("live: ordinary wallet readiness initialized",
+             c->live_w && wallet_readiness_initialize(
+                 c->live_w, WALLET_READINESS_READY, false, 0));
     DR_CHECK("live: wallet_sqlite_open",
              wallet_sqlite_open(&c->live_ws, c->live_ndb.db));
 
@@ -620,6 +625,9 @@ static int act1_rebuilt_open(struct act1_ctx *c)
     c->new_w = zcl_calloc(1, sizeof(*c->new_w), "dr_act1_new_wallet");
     DR_CHECK("rebuilt: alloc wallet (heap)", c->new_w != NULL);
     if (c->new_w) wallet_init(c->new_w);
+    DR_CHECK("rebuilt: ordinary wallet readiness initialized",
+             c->new_w && wallet_readiness_initialize(
+                 c->new_w, WALLET_READINESS_READY, false, 0));
     DR_CHECK("rebuilt: wallet_sqlite_open",
              wallet_sqlite_open(&c->new_ws, c->new_ndb.db));
 

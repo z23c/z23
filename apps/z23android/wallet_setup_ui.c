@@ -33,7 +33,7 @@ _Static_assert(ZAPP_FIELD_PRIVATE(ZAPP_FIELD_INPUT_WORDS | ZAPP_FIELD_FLAG_MULTI
 #define TYPED_MAX 640
 #define SUMMARY_MAX 8192
 
-enum button { B_CREATE, B_RESTORE_FORM, B_RESTORE, B_SEEN, B_CONFIRM, B_AGAIN, B_BACK, B_CONTINUE, B_RECHECK, B_SAVE_AGAIN, B_NEW_WALLET, B_START_OVER_ASK, B_START_OVER_GO, B_START_OVER_CANCEL, B_RETRY_WRITE, B_GIVE_UP, B_PICK };   /* B_PICK + 4 * position + slot: one of the words offered */
+enum button { B_RESUME_CREATE, B_CREATE, B_RESTORE_FORM, B_RESTORE, B_SEEN, B_CONFIRM, B_AGAIN, B_BACK, B_CONTINUE, B_RECHECK, B_SAVE_AGAIN, B_NEW_WALLET, B_START_OVER_ASK, B_START_OVER_GO, B_START_OVER_CANCEL, B_RETRY_WRITE, B_GIVE_UP, B_PICK };   /* B_PICK + 4 * position + slot: one of the words offered */
 enum job_kind { JOB_WRITE, JOB_CREATE, JOB_RESTORE, JOB_PROGRESS, JOB_FINISH, JOB_RESUME, JOB_ASIDE, JOB_START_OVER, JOB_CLOCK };
 struct job { enum job_kind kind; char text[TYPED_MAX]; int64_t height; };
 
@@ -147,11 +147,20 @@ static enum zapp_devkey_status env_wrap_new(void *ctx, uint8_t secret[ZAPP_DEVKE
     memory_cleanse(secret, ZAPP_DEVKEY_SECRET);
     return key_ops(&ops) ? zapp_devkey_wrap_new(&ops, ui.blob, secret) : ZAPP_DEVKEY_ERROR;
 }
+static enum zapp_devkey_status env_unwrap_existing(void *ctx, uint8_t secret[ZAPP_DEVKEY_SECRET])
+{
+    struct zapp_devkey_ops ops; (void)ctx;
+    return key_ops(&ops) ? zapp_devkey_unwrap(&ops, ui.blob, ZAPP_DEVKEY_PURPOSE_UNLOCK, secret) : ZAPP_DEVKEY_ERROR;
+}
 static void env_discard(void *ctx)
 {
     struct zapp_devkey_ops ops;
     (void)ctx;
     if (key_ops(&ops)) zapp_devkey_discard(&ops, ui.blob);
+}
+static void env_resume_if_wanted(void *ctx)
+{
+    (void)ctx; (void)zapp_controller_node_resume_if_wanted();
 }
 static bool env_running(void *ctx) { (void)ctx; return zapp_controller_setup_node_active(); }
 static void env_control(void *ctx, bool start)
@@ -367,6 +376,7 @@ static void draw_words(JNIEnv *env, const struct wsu_view *v)
     const struct zapp_words *words = &v->words;
     char line[320];
     (void)text_view(env, "Your recovery words", 24.0f, WHITE);
+    (void)text_view(env, "Your node is paused until your wallet is saved.", 15.0f, SOFT);
     wsu_words_intro(v, line, sizeof(line));
     (void)text_view(env, line, 15.0f, SOFT);
     (void)text_view(env, WSU_SCREEN_LOCK_NOTICE, 15.0f, AMBER);
@@ -399,14 +409,10 @@ static void draw_confirm(JNIEnv *env, const struct wsu_view *v)
     else if (wsu_confirm_note(v)[0]) (void)text_view(env, wsu_confirm_note(v), 15.0f, SOFT);
     (void)button_view(env, B_AGAIN, "Show the words again", BUTTON_COLOR);
 }
-static void draw_form(JNIEnv *env, const struct wsu_view *v)
+static void draw_form_height(JNIEnv *env, const struct wsu_view *v)
 {
-    (void)text_view(env, "Restore from words", 24.0f, WHITE);
-    (void)text_view(env, "Type your recovery words, separated by spaces.", 15.0f, SOFT);
-    (void)input_view(env, "Recovery words", ZAPP_FIELD_INPUT_WORDS | ZAPP_FIELD_FLAG_MULTI_LINE, &ui.words_input);
-    if (ui.words_input && v->form[0]) (void)zj_text(env, ui.words_input, v->form);
-    (void)text_view(env, "Leave blank to read the whole chain. This can take longer.", 14.0f, SOFT);
-    (void)input_view(env, "Start block (optional)", ZAPP_FIELD_NUMBER, &ui.height_input);
+    if (!v->resume_creation) (void)text_view(env, "Leave blank to read the whole chain. This can take longer.", 14.0f, SOFT);
+    if (!v->resume_creation) (void)input_view(env, "Start block (optional)", ZAPP_FIELD_NUMBER, &ui.height_input);
     if (ui.height_saved && ui.height_input) {
         jmethodID set = zj_method(env, ui.height_input, "setText", "(Ljava/lang/CharSequence;)V");
         if (set) (*env)->CallVoidMethod(env, ui.height_input, set, ui.height_saved);
@@ -415,12 +421,20 @@ static void draw_form(JNIEnv *env, const struct wsu_view *v)
     }
     if (ui.height_locked) (void)text_view(env, "Could not retain the start block. Go back and reopen Restore.", 15.0f, AMBER);
     else if (ui.height_bad) (void)text_view(env, "Enter a valid positive start block, or leave it blank.", 15.0f, AMBER);
+}
+static void draw_form(JNIEnv *env, const struct wsu_view *v)
+{
+    (void)text_view(env, v->resume_creation ? "Continue creating your wallet" : "Restore from words", 24.0f, WHITE);
+    (void)text_view(env, "Type your recovery words, separated by spaces.", 15.0f, SOFT);
+    (void)input_view(env, "Recovery words", ZAPP_FIELD_INPUT_WORDS | ZAPP_FIELD_FLAG_MULTI_LINE, &ui.words_input);
+    if (ui.words_input && v->form[0]) (void)zj_text(env, ui.words_input, v->form);
+    draw_form_height(env, v);
     if (v->failure == WSU_BAD_WORD) {
         char line[120];
         wsu_bad_word_text(v->bad_word, line, sizeof(line));
         (void)text_view(env, line, 15.0f, AMBER);
     } else if (v->failure) (void)text_view(env, wsu_failure_text(v->failure), 15.0f, AMBER);
-    (void)button_view(env, B_RESTORE, "Restore wallet", GO_COLOR);
+    (void)button_view(env, B_RESTORE, v->resume_creation ? "Continue" : "Restore wallet", GO_COLOR);
     (void)button_view(env, B_BACK, "Back", BUTTON_COLOR);
 }
 static void draw_reading(JNIEnv *env, const struct wsu_view *v, bool known, int64_t scanned, int64_t tip)
@@ -470,6 +484,10 @@ static void draw_interrupted(JNIEnv *env, const struct wsu_view *v)
         live_line(env, v);
         break;
     default:
+        if (v->resume_creation) {
+            (void)text_view(env, "Your node is paused while this wallet setup is pending.", 15.0f, SOFT);
+            (void)button_view(env, B_RESUME_CREATE, "Enter saved words", GO_COLOR);
+        }
         (void)text_view(env, "Setup was interrupted", 24.0f, WHITE);
         if (v->failure != WSU_WALLET_THERE && wsu_interrupted_note(v->failure)[0]) (void)text_view(env, wsu_interrupted_note(v->failure), 15.0f, AMBER);
         if (wsu_view_can_recheck(v)) (void)button_view(env, B_RECHECK, "Check again", BUTTON_COLOR);
@@ -586,7 +604,7 @@ bool zapp_setup_ui_open(JNIEnv *env)
     if (!ui.model_ready) {
         struct sun node;
         char datadir[600];
-        struct wsu_env host = {NULL, env_wrap_new, env_discard, env_running, env_control, env_pause, host_random, env_progress, env_protect, env_idle, env_held, env_wall};
+        struct wsu_env host = {NULL, env_wrap_new, env_discard, env_running, env_control, env_pause, host_random, env_progress, env_protect, env_idle, env_held, env_wall, env_unwrap_existing, env_resume_if_wanted};
         snprintf(datadir, sizeof(datadir), "%s/node", ui.activity->internalDataPath);
         sun_init(&node, &(struct sun_runner){NULL, setup_runner}, datadir);
         ui.model_ready = wsu_init(&ui.model, &host, &node, ui.activity->internalDataPath);
@@ -682,9 +700,11 @@ static void start_restore(JNIEnv *env)
     int64_t height = 0;
     if (!read_input(env, ui.words_input, typed, sizeof(typed))) typed[0] = 0;
     wsu_set_form(&ui.model, typed);
-    if (!ui.height_locked && !save_height(env)) ui.height_locked = true;
-    bool valid = !ui.height_locked && read_input(env, ui.height_input, ui.height_text, sizeof(ui.height_text)) &&
-                 wsu_parse_height(ui.height_text, &height);
+    struct wsu_view view; wsu_view_read(&ui.model, &view);
+    bool resume = view.resume_creation; memory_cleanse(&view, sizeof(view));
+    if (!resume && !ui.height_locked && !save_height(env)) ui.height_locked = true;
+    bool valid = resume || (!ui.height_locked && read_input(env, ui.height_input, ui.height_text, sizeof(ui.height_text)) &&
+                 wsu_parse_height(ui.height_text, &height));
     ui.height_bad = !valid;
     if (valid) ui.launch_failed = !spawn_job(JOB_RESTORE, typed, height);
     memory_cleanse(typed, sizeof(typed));
@@ -722,6 +742,7 @@ static void press_check(enum button id)
 static void press_model(JNIEnv *env, enum button id)
 {
     switch (id) {
+    case B_RESUME_CREATE: (void)wsu_open_resume_creation(&ui.model); break;
     case B_CREATE: ui.launch_failed = !spawn_job(JOB_CREATE, NULL, 0); break;
     case B_RESTORE_FORM:
         ui.height_bad = false; ui.height_locked = false; ui.height_text[0] = 0;

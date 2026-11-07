@@ -5,6 +5,7 @@
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
 #include "wallet/wallet.h"
+#include "wallet/wallet_transparent_replay.h"
 #include "wallet_internal.h"
 #include "wallet/bip44.h"
 #include "wallet/mnemonic.h"
@@ -724,6 +725,12 @@ bool wallet_sign_selected_inputs(struct wallet *w, struct wallet_tx *wtx_out,
     const struct chain_params *cp = chain_params_get();
 
     zcl_mutex_lock(&w->cs);
+    if (w->readiness.state != WALLET_READINESS_READY) {
+        zcl_mutex_unlock(&w->cs);
+        transaction_free(&wtx_out->tx);
+        *error = "Wallet state is unavailable during cutover";
+        return false;
+    }
     for (size_t i = 0; i < num_selected; i++) {
         struct privkey skey;
         const struct tx_out *prev_out =
@@ -829,6 +836,10 @@ bool wallet_create_transaction(struct wallet *w,
                                 int64_t *fee_out,
                                 const char **error)
 {
+    if (wallet_readiness_get(w).state != WALLET_READINESS_READY) {
+        *error = "Wallet state is unavailable during cutover";
+        return false;
+    }
     if (value <= 0) {
         *error = "Invalid amount";
         return false;
@@ -911,6 +922,24 @@ bool wallet_create_transaction(struct wallet *w,
     return true;
 }
 
+static bool wallet_multi_total(const int64_t *values, size_t num_outputs,
+                               int64_t *total, const char **error)
+{
+    if (num_outputs == 0 || num_outputs > 256) {
+        *error = "Invalid number of outputs";
+        return false;
+    }
+    *total = 0;
+    for (size_t i = 0; i < num_outputs; i++) {
+        if (values[i] <= 0) {
+            *error = "Invalid amount";
+            return false;
+        }
+        *total += values[i];
+    }
+    return true;
+}
+
 bool wallet_create_transaction_multi(struct wallet *w,
                                       const struct tx_destination *dests,
                                       const int64_t *values,
@@ -919,19 +948,13 @@ bool wallet_create_transaction_multi(struct wallet *w,
                                       int64_t *fee_out,
                                       const char **error)
 {
-    if (num_outputs == 0 || num_outputs > 256) {
-        *error = "Invalid number of outputs";
+    if (wallet_readiness_get(w).state != WALLET_READINESS_READY) {
+        *error = "Wallet state is unavailable during cutover";
         return false;
     }
-
     int64_t total_value = 0;
-    for (size_t i = 0; i < num_outputs; i++) {
-        if (values[i] <= 0) {
-            *error = "Invalid amount";
-            return false;
-        }
-        total_value += values[i];
-    }
+    if (!wallet_multi_total(values, num_outputs, &total_value, error))
+        return false;
 
     const struct chain_params *cp = chain_params_get();
     /* Snapshot default_fee under a brief w->cs hold so the read is atomic
@@ -1037,6 +1060,8 @@ struct zcl_result wallet_commit_transaction(
 {
     if (!w || !wtx || !admission)
         return ZCL_ERR(-1, "wallet commit: NULL wallet, tx, or admission context");
+    if (wallet_readiness_get(w).state != WALLET_READINESS_READY)
+        return ZCL_ERR(-4, "wallet commit: wallet state unavailable during cutover");
     struct zcl_result ctx_ok = wallet_admission_check(admission, "commit");
     if (!ctx_ok.ok)
         return ctx_ok;
@@ -1161,6 +1186,82 @@ static bool wallet_sync_tx_involves_wallet(struct wallet *w,
             MAX_WALLET_TX)
             return true;
     return false;
+}
+
+static bool wallet_replay_owned_input(const struct wallet *w,
+                                      const struct transaction *tx, size_t i)
+{
+    const struct outpoint *out = &tx->vin[i].prevout;
+    size_t idx = wallet_find_slot_internal(w, &out->hash);
+    return idx < MAX_WALLET_TX && out->n < w->map_wallet[idx].tx.num_vout &&
+           wallet_is_mine(w, &w->map_wallet[idx].tx.vout[out->n]);
+}
+
+static bool wallet_replay_involves(const struct wallet *w,
+                                   const struct transaction *tx)
+{
+    for (size_t i = 0; i < tx->num_vout; i++)
+        if (wallet_is_mine(w, &tx->vout[i])) return true;
+    for (size_t i = 0; i < tx->num_vin; i++)
+        if (wallet_replay_owned_input(w, tx, i)) return true;
+    return false;
+}
+
+static bool wallet_replay_spent_capacity(const struct wallet *w,
+                                          const struct transaction *tx)
+{
+    size_t need = 0;
+    for (size_t i = 0; i < tx->num_vin; i++) {
+        const struct outpoint *out = &tx->vin[i].prevout;
+        if (!wallet_replay_owned_input(w, tx, i) ||
+            wallet_is_outpoint_spent(w, &out->hash, out->n)) continue;
+        bool duplicate = false;
+        for (size_t j = 0; j < i; j++)
+            if (tx->vin[j].prevout.n == out->n &&
+                uint256_eq(&tx->vin[j].prevout.hash, &out->hash)) {
+                duplicate = true;
+                break;
+            }
+        if (!duplicate) need++;
+    }
+    return w->num_spent <= SPENT_SET_BUCKETS &&
+           need <= SPENT_SET_BUCKETS - w->num_spent;
+}
+
+enum wallet_transparent_fold_result wallet_transparent_fold_locked(
+    struct wallet *w, const struct transaction *tx,
+    const struct uint256 *block_hash, int depth)
+{
+    if (!w || !tx || !block_hash || depth <= 0)
+        return WALLET_TRANSPARENT_ERROR;
+    size_t idx = wallet_find_slot_internal(w, &tx->hash);
+    bool known = idx < MAX_WALLET_TX;
+    if (!known && !wallet_replay_involves(w, tx))
+        return WALLET_TRANSPARENT_NOT_OWNED;
+    if (!wallet_replay_spent_capacity(w, tx))
+        return WALLET_TRANSPARENT_ERROR;
+    struct wallet_tx copy = {0};
+    if (!known) {
+        idx = wallet_find_free_slot(w);
+        if (idx >= MAX_WALLET_TX) return WALLET_TRANSPARENT_ERROR;
+        transaction_init(&copy.tx);
+        if (!transaction_copy(&copy.tx, tx)) return WALLET_TRANSPARENT_ERROR;
+        copy.used = true;
+        copy.time_received = GetTime();
+        for (size_t i = 0; i < tx->num_vin; i++)
+            if (wallet_replay_owned_input(w, tx, i))
+                copy.from_me = true;
+        w->map_wallet[idx] = copy;
+        w->num_wallet_tx++;
+    }
+    w->map_wallet[idx].hash_block = *block_hash;
+    w->map_wallet[idx].confirms = depth;
+    wallet_mark_dirty(&w->map_wallet[idx]);
+    for (size_t i = 0; i < tx->num_vin; i++)
+        if (wallet_replay_owned_input(w, tx, i))
+            wallet_mark_outpoint_spent(w, &tx->vin[i].prevout.hash,
+                                       tx->vin[i].prevout.n);
+    return WALLET_TRANSPARENT_APPLIED;
 }
 
 bool wallet_sync_transaction(struct wallet *w, const struct transaction *tx,

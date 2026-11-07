@@ -75,7 +75,8 @@ ladder_bind_baked(const struct checkpoint_rung *r,
         get_baked_rom_state_checkpoint_at_height(r->height);
     if (!bk || keystone_is_placeholder(bk))
         return CHECKPOINT_RUNG_UNVERIFIABLE;
-    if (memcmp(r->rom_state_root, bk->rom_state_root, 32) == 0 &&
+    if (r->format_version == bk->format_version &&
+        memcmp(r->rom_state_root, bk->rom_state_root, 32) == 0 &&
         ladder_chainwork_matches_baked(r)) {
         res->bound = true;
         res->candidate_unbaked = false;
@@ -217,7 +218,7 @@ static void ladder_verify_rung(const struct checkpoint_rung *r,
     }
 
     if (verdict != CHECKPOINT_RUNG_MISMATCH && !res->bound) {
-        if (positive_witness) {
+        if (positive_witness && r->format_version == CHECKPOINT_RUNG_VERSION_V1) {
             verdict = CHECKPOINT_RUNG_VERIFIED;
             snprintf(res->detail, sizeof(res->detail),
                      "self-consistent; verified against node state "
@@ -225,7 +226,7 @@ static void ladder_verify_rung(const struct checkpoint_rung *r,
         } else {
             verdict = CHECKPOINT_RUNG_UNVERIFIABLE;
             snprintf(res->detail, sizeof(res->detail),
-                     "self-consistent; no header/rederive/baked witness "
+                     "self-consistent; no sufficient baked or v1 witness "
                      "(candidate_unbaked)");
         }
     }
@@ -305,12 +306,11 @@ size_t checkpoint_ladder_load_candidates(const char *dir,
             LOG_WARN(LADDER_SUBSYS, "candidate open failed: %s", path);
             continue;
         }
-        uint8_t buf[CHECKPOINT_RUNG_WIRE_SIZE + 1];
+        uint8_t buf[CHECKPOINT_RUNG_V2_WIRE_SIZE + 1];
         size_t rn = fread(buf, 1, sizeof(buf), f);
         fclose(f);
         struct checkpoint_rung r;
-        if (rn != CHECKPOINT_RUNG_WIRE_SIZE ||
-            !checkpoint_rung_parse(buf, rn, &r)) {
+        if (!checkpoint_rung_parse(buf, rn, &r)) {
             LOG_WARN(LADDER_SUBSYS,
                      "candidate rejected (bad size/magic/self-digest): %s",
                      path);

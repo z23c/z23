@@ -6,6 +6,7 @@
 #include "config/boot_internal.h"
 #include "controllers/wallet_private_broadcast.h"
 #include "services/wallet_private_relay.h"
+#include "wallet/wallet.h"
 
 #include "util/util.h"
 
@@ -49,8 +50,13 @@ bool boot_start_wallet_broadcast(struct boot_svc_ctx *svc,
         .node_db = boot_node_db(svc),
         .min_relay_fee = svc->mempool ? svc->mempool->min_relay_fee : 0,
     };
-    if (!wallet_private_broadcast_start(mode, &env))
+    if (wallet_readiness_get(svc->wallet).state != WALLET_READINESS_READY) {
+        if (!wallet_private_broadcast_stop_checked()) return false;
+        wallet_private_broadcast_configure(mode, &env);
+        printf("Wallet broadcast deferred until wallet recovery completes.\n");
+    } else if (!wallet_private_broadcast_start(mode, &env)) {
         fprintf(stderr, "[boot] wallet private broadcast did not start\n");
+    }
     printf("Wallet broadcast mode: %s\n", wpr_mode_name(mode));
     return true;
 }

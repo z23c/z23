@@ -61,7 +61,7 @@ static bool rig_key(struct rig *r, bool present)
     return true;
 }
 
-static bool rig_open(struct rig *r, bool with_block)
+static bool rig_open_state(struct rig *r, bool with_block, bool ready)
 {
     char path[320];
     memset(r, 0, sizeof(*r));
@@ -79,12 +79,19 @@ static bool rig_open(struct rig *r, bool with_block)
     if (!r->wallet)
         return false;
     wallet_init(r->wallet);
+    if (ready && !wallet_readiness_initialize(r->wallet, WALLET_READINESS_READY, false, 0))
+        return false;
     rig_key(r, true);
     wallet_lock_reset_for_test();
     wallet_rpc_context_set_base(r->wallet, NULL, r->dir, &r->ws, NULL, NULL);
     wallet_rpc_context_set_node_db(&r->ndb);
     reducer_frontier_provable_tip_set(TIP);
     return true;
+}
+
+static bool rig_open(struct rig *r, bool with_block)
+{
+    return rig_open_state(r, with_block, true);
 }
 
 static void rig_close(struct rig *r)
@@ -916,6 +923,44 @@ static int test_summary_holdings(void)
     return failures;
 }
 
+static int test_summary_readiness(void)
+{
+    int failures = 0;
+    TEST_CASE("walletsummary refuses unknown and pending until replay completion") {
+        struct rig r;
+        ASSERT(rig_open_state(&r, true, false));
+        struct json_value j;
+        bool ok;
+        call_summary(&j, &ok);
+        ASSERT(ok && json_is_null(json_get(&j, "spendable_zat")) &&
+               json_is_null(json_get(&j, "public_zat")) &&
+               !json_get_bool(json_get(&j, "balance_available")) &&
+               json_get(&j, "locked") && json_get(&j, "tip_height"));
+        json_free(&j);
+        call_history(&j, &ok, "", "");
+        ASSERT(!ok);
+        json_free(&j);
+        ASSERT(wallet_readiness_initialize(r.wallet, WALLET_READINESS_PENDING, true, 42));
+        call_summary(&j, &ok);
+        ASSERT(ok && json_is_null(json_get(&j, "spendable_zat")) &&
+               json_is_null(json_get(&j, "public_zat")) &&
+               !json_get_bool(json_get(&j, "balance_available")) &&
+               json_get(&j, "locked") && json_get(&j, "tip_height"));
+        json_free(&j);
+        ASSERT(wallet_readiness_complete(r.wallet, true, 42));
+        call_summary(&j, &ok);
+        ASSERT(ok && json_get(&j, "spendable_zat") &&
+               json_get_bool(json_get(&j, "balance_available")) &&
+               strcmp(json_get_str(json_get(&j, "wallet_readiness")), "ready") == 0);
+        json_free(&j);
+        call_history(&j, &ok, "", "");
+        ASSERT(ok);
+        json_free(&j);
+        rig_close(&r);
+    } TEST_END
+    return failures;
+}
+
 static int run_rig_tests(void)
 {
     struct rig r;
@@ -931,6 +976,7 @@ static int run_rig_tests(void)
     failures += test_sent_amount_from_stored_tx(&r);
     failures += test_received_privacy_from_stored_tx(&r);
     rig_close(&r);
+    failures += test_summary_readiness();
     failures += test_unknown_tip();
     failures += test_unlock_window();
     failures += test_send_skips_unready_note();

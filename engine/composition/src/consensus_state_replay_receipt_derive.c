@@ -16,6 +16,7 @@
  */
 
 #include "config/consensus_state_replay_receipt.h"
+#include "storage/coins_kv_read_snapshot.h"
 
 #include "config/consensus_state_snapshot_install.h"
 #include "base/serialize_le.h"
@@ -285,6 +286,13 @@ bool rr_derive_from_datadir(sqlite3 *db,
                             "(coins_applied=%d, want %d); re-derivation must run "
                             "against a store folded EXACTLY to the anchor",
                        applied, m->height + 1);
+    if (m->format_version == CONSENSUS_STATE_BUNDLE_V2) {
+        bool found = false;
+        if (!coins_kv_read_transaction_shielded_pool(
+                db, m->height, &r->sprout_pool_total,
+                &r->sapling_pool_total, &found) || !found)
+            return rr_fail(out, "local folded shielded pool totals unavailable");
+    }
     if (!derive_utxo(db, m->height, r->utxo_root, &r->utxo_count,
                      &r->total_supply))
         return rr_fail(out, "independent UTXO derivation from the datadir "

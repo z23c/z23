@@ -383,21 +383,33 @@ bool zapp_node_preload_get(struct zapp_runtime *r, char *out, size_t cap,
     pthread_mutex_unlock(&r->mutex);
     return ok;
 }
+/* A malformed or missing setup kind cannot prove a wrapped key is unrelated
+ * to a prepared creation. Restore is distinct only with no creation nonce. */
+static bool node_setup_blocks_start(struct zapp_runtime *r)
+{
+    if (zapp_setup_confirmed(r->files)) return false;
+    enum zapp_setup_kind kind = zapp_setup_kind_read(r->files);
+    return kind == ZAPP_KIND_CREATE || zapp_setup_nonce_exists(r->files) ||
+           (kind == ZAPP_KIND_NONE && zapp_setup_state(r->files) == ZAPP_SETUP_INTERRUPTED);
+}
+
 static const char *node_start_refusal(struct zapp_runtime *r)
 {
     if (r->preview) return "The preview app does not run a node. Use the main Z23 app.";
     if (r->stopping) return "App is closing.";
     if (r->start_pending) return "The local node is already starting.";
+    if (node_setup_blocks_start(r))
+        return "Wallet setup is pending. Finish setup before starting the node.";
     if (atomic_load(&r->setup_running)) return "Wallet setup is running. The node can start when it ends.";
     if (running_locked(r) || earlier_node(r)) return "The local node is already running.";
     return NULL;
 }
 
-bool zapp_node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap)
+static bool node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap, bool resume)
 {
     if (!r || !ticket || !out || !cap) return false;
     pthread_mutex_lock(&r->mutex);
-    const char *refusal = node_start_refusal(r);
+    const char *refusal = resume && !zapp_node_wanted(r) ? "Node is off." : node_start_refusal(r);
     if (refusal) {
         snprintf(out, cap, "%s", refusal);
         pthread_mutex_unlock(&r->mutex); return false;
@@ -409,6 +421,7 @@ bool zapp_node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out
     r->start_pending = true;
     r->start_executing = false;
     r->start_preload_allowed = zapp_setup_preload_allowed();
+    r->start_resume_wanted = resume;
     atomic_store(&r->start_cancel, false);
     r->reserved_epoch = ++r->start_epoch;
     *ticket = r->reserved_epoch;
@@ -416,6 +429,16 @@ bool zapp_node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out
     atomic_store(&r->preload_ready, false);
     pthread_mutex_unlock(&r->mutex);
     return true;
+}
+
+bool zapp_node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap)
+{
+    return node_start_reserve(r, ticket, out, cap, false);
+}
+
+bool zapp_node_resume_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap)
+{
+    return node_start_reserve(r, ticket, out, cap, true);
 }
 
 void zapp_node_start_discard(struct zapp_runtime *r, uint64_t ticket)
@@ -435,7 +458,9 @@ static bool node_start_finish_locked(struct zapp_runtime *r, uint64_t ticket,
     const struct preload_result *preload, char *out, size_t cap)
 {
     bool cancelled = r->stopping || atomic_load(&r->start_cancel) || ticket != r->start_epoch ||
-                     (r->start_preload_allowed && !zapp_setup_preload_allowed());
+                     (r->start_preload_allowed && !zapp_setup_preload_allowed()) ||
+                     (r->start_resume_wanted && !zapp_node_wanted(r)) ||
+                     (node_setup_blocks_start(r));
     r->start_pending = false;
     r->start_executing = false;
     atomic_store(&r->setup_running, false);
@@ -485,6 +510,13 @@ bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap)
 {
     uint64_t ticket;
     return zapp_node_start_reserve(r, &ticket, out, cap) &&
+           zapp_node_start_reserved(r, ticket, out, cap);
+}
+
+bool zapp_node_resume_if_wanted(struct zapp_runtime *r, char *out, size_t cap)
+{
+    uint64_t ticket;
+    return zapp_node_resume_reserve(r, &ticket, out, cap) &&
            zapp_node_start_reserved(r, ticket, out, cap);
 }
 

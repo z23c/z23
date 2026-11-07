@@ -20,6 +20,7 @@
 #include "controllers/wallet_helpers.h"
 #include "controllers/wallet_shielded_controller.h"
 #include "coins/coins_view.h"
+#include "base/hex.h"
 #include "core/amount.h"
 #include "crypto/sha3.h"
 #include "jobs/reducer_frontier.h"
@@ -156,7 +157,7 @@ static size_t vp_put_eff(uint8_t *o, size_t n, const struct vp_eff *e)
 static size_t vp_serialize(const struct vp_spec *s, uint8_t *o)
 {
     size_t n = 0;
-    memcpy(o, s->bad_magic ? "VIP1" : "VIP2", 4); n = 4;
+    memcpy(o, s->bad_magic ? "VIP1" : "VIG2", 4); n = 4;
     o[n++] = (uint8_t)s->route;
     o[n++] = (uint8_t)s->from_len;
     memset(o + n, 'f', s->from_len); n += s->from_len;
@@ -175,6 +176,8 @@ static bool vp_run(struct node_db *ndb, const struct vp_spec *s,
 {
     uint8_t plain[VP_BUF];
     size_t n = vp_serialize(s, plain);
+    struct wallet_readiness ready = {.state = WALLET_READINESS_READY, .generation_present = true, .generation = 42};
+    if (!vault_intent_generation_bind(plain, &n, sizeof(plain), &ready)) return false;
     struct vault_intent_row row;
     memset(&row, 0, sizeof(row));
     memset(row.plan_id, 0x61, 32);
@@ -192,6 +195,9 @@ static bool vp_run(struct node_db *ndb, const struct vp_spec *s,
     struct wallet *w = zcl_calloc(1, sizeof(*w), "vip_cases.wallet");
     if (!w) return false;
     wallet_init(w);
+    if (!wallet_readiness_initialize(w, WALLET_READINESS_READY, true, 42)) {
+        wallet_free(w); free(w); return false;
+    }
     w->default_fee = s->wallet_fee;
     struct wallet_rpc_context ctx;
     memset(&ctx, 0, sizeof(ctx));
@@ -347,6 +353,7 @@ static bool vp_fx_wallet(void)
     g_fx.wallet = zcl_calloc(1, sizeof(*g_fx.wallet), "vip_cases.fixture");
     if (!g_fx.wallet) return false;
     wallet_init(g_fx.wallet);
+    if (!wallet_readiness_initialize(g_fx.wallet, WALLET_READINESS_READY, true, 42)) return false;
     g_fx.wallet->default_fee = VR_FEE;
     return true;
 }
@@ -444,7 +451,7 @@ static size_t vr_plain(uint8_t *o, const char *from, unsigned route,
                        const struct vr_eff *e, size_t n)
 {
     size_t k = 0, len = strlen(from);
-    memcpy(o, "VIP2", 4); k = 4;
+    memcpy(o, "VIG2", 4); k = 4;
     o[k++] = (uint8_t)route;
     o[k++] = (uint8_t)len;
     memcpy(o + k, from, len); k += len;
@@ -482,17 +489,21 @@ static int64_t vr_target(const struct vr_case *c)
     return total;
 }
 
+static char vr_expected_digest[65];
+
 static bool vr_seed(const char *key, const uint8_t *plain, size_t n,
                     int64_t target, unsigned route)
 {
+    uint8_t bound[VP_BUF];
+    if (n > sizeof(bound)) return false;
+    memcpy(bound, plain, n);
+    struct wallet_readiness readiness = wallet_readiness_get(g_fx.wallet);
+    if (!vault_intent_generation_bind(bound, &n, sizeof(bound), &readiness)) return false;
     struct vault_intent_row row;
     memset(&row, 0, sizeof(row));
     uint8_t tag = (uint8_t)++g_fx.seq;
     memset(row.plan_id, tag, 32);
-    memset(row.digest, 0x42, 32);
     memset(row.anchor_hash, 0x43, 32);
-    memset(row.encrypted_payload, 0x44, 32);
-    row.encrypted_payload_len = 32;
     row.state = VAULT_INTENT_PLANNED;
     row.route = (enum vault_intent_route)route;
     row.created_at = (int64_t)platform_time_wall_time_t();
@@ -510,9 +521,15 @@ static bool vr_seed(const char *key, const uint8_t *plain, size_t n,
     row.reserved_zat = target + VR_FEE;
     snprintf(row.application_kind, sizeof(row.application_kind), "vault_multi");
     snprintf(row.idempotency_key, sizeof(row.idempotency_key), "%s", key);
-    vr_req_digest(plain, n, row.request_digest);
+    vr_req_digest(bound, n, row.request_digest);
     row.has_request_digest = true;
-    return vault_intent_save(&g_fx.db, &row);
+    vault_intent_digest_payload(bound, n, &row, row.digest);
+    zcl_hex_encode(row.digest, sizeof(row.digest), vr_expected_digest);
+    bool ok = wallet_metadata_encrypt(&g_fx.db, row.plan_id, 32, bound, n,
+                                      row.encrypted_payload, sizeof(row.encrypted_payload),
+                                      &row.encrypted_payload_len) && vault_intent_save(&g_fx.db, &row);
+    memory_cleanse(bound, sizeof(bound));
+    return ok;
 }
 
 static bool vp_plan_json(const char *text, struct json_value *result)
@@ -570,9 +587,6 @@ static bool vr_effects_render_ok(const struct json_value *r,
     return true;
 }
 
-/* The seeded row's digest is 32 bytes of 0x42; the plan reply must show it. */
-#define VR_SEED_DIGEST_HEX \
-    "4242424242424242424242424242424242424242424242424242424242424242"
 
 static bool vr_render_ok(const struct json_value *r, const struct vr_case *c)
 {
@@ -582,7 +596,7 @@ static bool vr_render_ok(const struct json_value *r, const struct vr_case *c)
                               is_private ? 8 : 12) == 0;
     return json_get_bool(json_get(r, "ok")) &&
         json_get_bool(json_get(r, "idempotent_plan")) &&
-        strcmp(vp_str(r, "digest"), VR_SEED_DIGEST_HEX) == 0 &&
+        strcmp(vp_str(r, "digest"), vr_expected_digest) == 0 &&
         strcmp(vp_str(r, "route"), vr_route_name(c->actual)) == 0 &&
         strcmp(vp_str(r, "from"), c->from) == 0 &&
         strcmp(vp_str(r, "fee"), "0.00010000") == 0 &&
@@ -1175,7 +1189,7 @@ static bool vp_size_edge(void)
     static struct vr_eff effs[16];
     size_t fixed = 4 + 1 + 1 + strlen(g_t) + 1 + 8;
     size_t per = 1 + strlen(g_z) + 8 + 1 + 2;
-    size_t room = WALLET_METADATA_PLAINTEXT_MAX - fixed - 16 * per;
+    size_t room = WALLET_METADATA_PLAINTEXT_MAX - 13 - fixed - 16 * per;
     if (room < 15 * 1024 + 1 || room > 16 * 1024) return false;
     size_t tail = room - 15 * 1024;
     vp_fill(full, 1024, "", 'm');

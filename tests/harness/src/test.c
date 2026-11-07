@@ -1289,6 +1289,10 @@ static void run_full_suite_foundation(int *failures)
     *failures += test_checkpoint_rom_authority();
     *failures += test_consensus_state_install_runtime();
     *failures += test_consensus_state_snapshot_export();
+    { extern int test_consensus_state_bundle_codec(void);
+      *failures += test_consensus_state_bundle_codec(); }
+    { extern int test_checkpoint_rung_v2(void);
+      *failures += test_checkpoint_rung_v2(); }
     { extern int test_ratify_mint_anchor(void);
       *failures += test_ratify_mint_anchor(); }
     { extern int test_sovereign_promotion(void);

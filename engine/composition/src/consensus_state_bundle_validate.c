@@ -221,42 +221,60 @@ static bool manifest_current_only_ok(
 /* Decodes and bounds-checks the bundle_meta row that sqlite3_step positioned
  * on; the manifest is only filled when every check passes. */
 static bool manifest_row_read(sqlite3_stmt *st,
-                              struct consensus_state_bundle_manifest *m)
+                              struct consensus_state_bundle_manifest *m,
+                              uint8_t version)
 {
     if (!(consensus_state_sqlite_text_equal(
-              st, 0, CONSENSUS_STATE_BUNDLE_SCHEMA) &&
+              st, 0, version == CONSENSUS_STATE_BUNDLE_V2 ?
+                  CONSENSUS_STATE_BUNDLE_SCHEMA_V2 : CONSENSUS_STATE_BUNDLE_SCHEMA_V1) &&
           manifest_int_columns_typed(st) && manifest_blobs_read(st, m)))
+        return false;
+    if (version == CONSENSUS_STATE_BUNDLE_V2 &&
+        (sqlite3_column_type(st, 25) != SQLITE_INTEGER ||
+         sqlite3_column_type(st, 26) != SQLITE_INTEGER ||
+         sqlite3_column_int64(st, 25) < 0 || sqlite3_column_int64(st, 26) < 0))
         return false;
     struct manifest_cols cols;
     manifest_cols_read(st, &cols);
     if (!manifest_scalars_valid(&cols) || !manifest_frontiers_valid(&cols, m))
         return false;
     manifest_fill(st, &cols, m);
+    m->format_version = version;
+    if (version == CONSENSUS_STATE_BUNDLE_V2) {
+        m->sprout_pool_total = sqlite3_column_int64(st, 25);
+        m->sapling_pool_total = sqlite3_column_int64(st, 26);
+    }
     return true;
 }
 
 static bool read_manifest(sqlite3 *db,
                           struct consensus_state_bundle_manifest *m,
-                          struct consensus_state_install_result *r)
+                          struct consensus_state_install_result *r,
+                          uint8_t version)
 {
-    static const char *const sql =
-        "SELECT schema,height,block_hash,history_complete,source_clean,"
-        "validation_profile,activation_boundary,"
-        "utxo_root,utxo_count,total_supply,anchor_digest,anchor_count,"
-        "sprout_frontier_root,sprout_frontier_height,"
-        "sapling_frontier_root,sapling_frontier_height,"
-        "nullifier_digest,nullifier_count,sprout_source_cursor,"
-        "sapling_source_cursor,nullifier_source_cursor,source_fold_cursor,"
-        "proof_manifest_digest,source_digest,artifact_digest "
-        "FROM bundle_meta WHERE singleton=1";
+#define MANIFEST_SELECT \
+        "SELECT schema,height,block_hash,history_complete,source_clean," \
+        "validation_profile,activation_boundary," \
+        "utxo_root,utxo_count,total_supply,anchor_digest,anchor_count," \
+        "sprout_frontier_root,sprout_frontier_height," \
+        "sapling_frontier_root,sapling_frontier_height," \
+        "nullifier_digest,nullifier_count,sprout_source_cursor," \
+        "sapling_source_cursor,nullifier_source_cursor,source_fold_cursor," \
+        "proof_manifest_digest,source_digest,artifact_digest"
+    static const char v1_sql[] = MANIFEST_SELECT " FROM bundle_meta WHERE singleton=1";
+    static const char v2_sql[] = MANIFEST_SELECT ",sprout_pool_total,sapling_pool_total FROM bundle_meta WHERE singleton=1";
+#undef MANIFEST_SELECT
+    const char *sql = version == CONSENSUS_STATE_BUNDLE_V2 ? v2_sql : v1_sql;
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
         return validation_fail(r, CONSENSUS_INSTALL_REFUSED,
                                "bundle_meta missing or malformed");
     memset(m, 0, sizeof(*m));
     int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
-    bool ok = rc == SQLITE_ROW && manifest_row_read(st, m);
-    sqlite3_finalize(st);
+    bool ok = rc == SQLITE_ROW && manifest_row_read(st, m, version) &&
+              sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
+    if (sqlite3_finalize(st) != SQLITE_OK)
+        ok = false;
     if (!ok || !zcl_bytes_any_set(m->block_hash, 32))
         return validation_fail(r, CONSENSUS_INSTALL_REFUSED,
                                "bundle_meta has invalid schema/types/bounds");
@@ -1080,26 +1098,11 @@ static bool rom_keystone_is_placeholder(const struct rom_state_checkpoint *rom)
  * bundle at any OTHER height is untouched. Fires only at the exact checkpoint (or
  * baked ladder rung, get_baked_rom_state_checkpoint_at_height)
  * height; same refusal shape as the other validators (loud CONSENSUS_INSTALL_REFUSED). */
-static bool validate_rom_keystone_binding(
+static bool rom_keystone_components_match(
     const struct consensus_state_bundle_manifest *m,
+    const struct rom_state_checkpoint *rom,
     struct consensus_state_install_result *r)
 {
-    /* The keystone height OR any baked ladder rung height binds; the lookup
-     * returns NULL for every other height. */
-    const struct rom_state_checkpoint *rom =
-        get_baked_rom_state_checkpoint_at_height(m->height);
-    if (!rom)
-        return true; /* not a baked-height bundle: nothing to bind */
-
-    if (rom_keystone_is_placeholder(rom))
-        return validation_fail(
-            r, CONSENSUS_INSTALL_REFUSED,
-            "REFUSED: bundle sits at the compiled checkpoint height %d but the "
-            "compiled ROM shielded keystone is a placeholder (unbaked shielded "
-            "fold) — refusing to admit checkpoint-height state that cannot be "
-            "bound to a sovereign shielded commitment",
-            rom->height);
-
     /* Transparent block anchor (same bytes the SHA3 checkpoint carries). */
     if (memcmp(m->block_hash, rom->block_hash, 32) != 0 ||
         memcmp(m->utxo_root, rom->utxo_root, 32) != 0 ||
@@ -1124,6 +1127,41 @@ static bool validate_rom_keystone_binding(
             "compiled shielded anchor keystone (anchor_digest/count or "
             "Sprout/Sapling frontier root/height mismatch)",
             rom->height);
+
+    return true;
+}
+
+static bool validate_rom_keystone_binding(
+    const struct consensus_state_bundle_manifest *m,
+    struct consensus_state_install_result *r)
+{
+    /* The keystone height OR any baked ladder rung height binds; the lookup
+     * returns NULL for every other height. */
+    const struct rom_state_checkpoint *rom =
+        get_baked_rom_state_checkpoint_at_height(m->height);
+    if (!rom)
+        return true; /* not a baked-height bundle: nothing to bind */
+
+    if (rom_keystone_is_placeholder(rom))
+        return validation_fail(
+            r, CONSENSUS_INSTALL_REFUSED,
+            "REFUSED: bundle sits at the compiled checkpoint height %d but the "
+            "compiled ROM shielded keystone is a placeholder (unbaked shielded "
+            "fold) — refusing to admit checkpoint-height state that cannot be "
+            "bound to a sovereign shielded commitment",
+            rom->height);
+
+    if (m->format_version != rom->format_version ||
+        (m->format_version == CONSENSUS_STATE_BUNDLE_V2 &&
+         (m->sprout_pool_total != rom->sprout_pool_total ||
+          m->sapling_pool_total != rom->sapling_pool_total)))
+        return validation_fail(
+            r, CONSENSUS_INSTALL_REFUSED,
+            "REFUSED: bundle at checkpoint height %d does not reproduce the "
+            "compiled format and shielded pool totals", rom->height);
+
+    if (!rom_keystone_components_match(m, rom, r))
+        return false; // raw-return-ok:logged-by-callee
 
     /* Combined nullifier history. */
     if (memcmp(m->nullifier_digest, rom->nullifier_digest, 32) != 0 ||
@@ -1151,9 +1189,10 @@ bool consensus_state_bundle_validate_ex(
     if (!db || !manifest)
         return validation_fail(result, CONSENSUS_INSTALL_REFUSED,
                                "NULL db/manifest");
+    uint8_t version = CONSENSUS_STATE_BUNDLE_INVALID;
     if ((!skip_deep_scan && !integrity_check(db)) ||
-        !consensus_state_bundle_validate_canonical_schema(db, result) ||
-        !read_manifest(db, manifest, result))
+        !consensus_state_bundle_validate_canonical_schema(db, result, &version) ||
+        !read_manifest(db, manifest, result, version))
         return false; // raw-return-ok:logged-by-callee
     uint8_t computed[32];
     consensus_state_bundle_artifact_digest(manifest, computed);

@@ -165,18 +165,18 @@ static bool snapshot_row_meta_in_range(
 }
 
 static bool snapshot_row_valid(struct coins_kv_read_snapshot *snapshot,
-                               int64_t vout, int64_t value, int script_len,
+                               sqlite3_stmt *stmt, int64_t vout, int64_t value, int script_len,
                                int64_t height, int64_t coinbase)
 {
-    const void *txid = sqlite3_column_blob(snapshot->rows, 0);
-    const void *script = sqlite3_column_blob(snapshot->rows, 3);
-    int txid_len = sqlite3_column_bytes(snapshot->rows, 0);
-    int txid_type = sqlite3_column_type(snapshot->rows, 0);
-    int script_type = sqlite3_column_type(snapshot->rows, 3);
-    bool scalar_types = sqlite3_column_type(snapshot->rows, 1) == SQLITE_INTEGER &&
-                        sqlite3_column_type(snapshot->rows, 2) == SQLITE_INTEGER &&
-                        sqlite3_column_type(snapshot->rows, 4) == SQLITE_INTEGER &&
-                        sqlite3_column_type(snapshot->rows, 5) == SQLITE_INTEGER;
+    const void *txid = sqlite3_column_blob(stmt, 0);
+    const void *script = sqlite3_column_blob(stmt, 3);
+    int txid_len = sqlite3_column_bytes(stmt, 0);
+    int txid_type = sqlite3_column_type(stmt, 0);
+    int script_type = sqlite3_column_type(stmt, 3);
+    bool scalar_types = sqlite3_column_type(stmt, 1) == SQLITE_INTEGER &&
+                        sqlite3_column_type(stmt, 2) == SQLITE_INTEGER &&
+                        sqlite3_column_type(stmt, 4) == SQLITE_INTEGER &&
+                        sqlite3_column_type(stmt, 5) == SQLITE_INTEGER;
     return snapshot_row_key_valid(txid_type, txid, txid_len, scalar_types,
                                   vout, value) &&
            snapshot_row_script_valid(script_type, script, script_len) &&
@@ -216,9 +216,16 @@ static void snapshot_row_publish(
     out_row->script_len = (size_t)script_len;
     out_row->height = (int32_t)height;
     out_row->is_coinbase = coinbase != 0;
-    memcpy(snapshot->last_txid, txid, 32);
-    snapshot->last_vout = (uint32_t)vout;
-    snapshot->have_last = true;
+}
+
+static bool snapshot_reserve_script(struct coins_kv_read_snapshot *snapshot, size_t len)
+{
+    if (len <= snapshot->script_cap) return true;
+    uint8_t *grown = zcl_realloc(snapshot->script, len, "coins_kv_read_snapshot_script");
+    if (!grown) return false;
+    snapshot->script = grown;
+    snapshot->script_cap = len;
+    return true;
 }
 
 enum coins_kv_read_snapshot_step coins_kv_read_snapshot_next(
@@ -247,7 +254,7 @@ enum coins_kv_read_snapshot_step coins_kv_read_snapshot_next(
     int script_len = sqlite3_column_bytes(snapshot->rows, 3);
     int64_t height = sqlite3_column_int64(snapshot->rows, 4);
     int64_t coinbase = sqlite3_column_int64(snapshot->rows, 5);
-    if (!snapshot_row_valid(snapshot, vout, value, script_len, height, coinbase)) {
+    if (!snapshot_row_valid(snapshot, snapshot->rows, vout, value, script_len, height, coinbase)) {
         LOG_WARN("coins_kv_read_snapshot", "next: malformed canonical coins row");
         snapshot->failed = true;
         return COINS_KV_READ_SNAPSHOT_ERROR;
@@ -259,19 +266,16 @@ enum coins_kv_read_snapshot_step coins_kv_read_snapshot_next(
         snapshot->failed = true;
         return COINS_KV_READ_SNAPSHOT_ERROR;
     }
-    if ((size_t)script_len > snapshot->script_cap) {
-        uint8_t *grown = zcl_realloc(snapshot->script, (size_t)script_len,
-                                     "coins_kv_read_snapshot_script");
-        if (!grown) {
-            snapshot->failed = true;
-            return COINS_KV_READ_SNAPSHOT_ERROR;
-        }
-        snapshot->script = grown;
-        snapshot->script_cap = (size_t)script_len;
+    if (!snapshot_reserve_script(snapshot, (size_t)script_len)) {
+        snapshot->failed = true;
+        return COINS_KV_READ_SNAPSHOT_ERROR;
     }
     const void *script = sqlite3_column_blob(snapshot->rows, 3);
     snapshot_row_publish(snapshot, out_row, txid, script, vout, value,
                          script_len, height, coinbase);
+    memcpy(snapshot->last_txid, txid, 32);
+    snapshot->last_vout = (uint32_t)vout;
+    snapshot->have_last = true;
     return COINS_KV_READ_SNAPSHOT_ROW;
 }
 
@@ -291,3 +295,140 @@ void coins_kv_read_snapshot_abort(struct coins_kv_read_snapshot *snapshot)
 {
     snapshot_release(snapshot, false);
 }
+
+static bool snapshot_point_row(struct coins_kv_read_snapshot *snapshot, sqlite3_stmt *stmt,
+    const uint8_t key[32], uint32_t index, struct coins_kv_read_snapshot_row *row)
+{
+    int64_t vout = sqlite3_column_int64(stmt, 1);
+    int64_t value = sqlite3_column_int64(stmt, 2);
+    int script_len = sqlite3_column_bytes(stmt, 3);
+    int64_t height = sqlite3_column_int64(stmt, 4);
+    int64_t coinbase = sqlite3_column_int64(stmt, 5);
+    if (!snapshot_row_valid(snapshot, stmt, vout, value, script_len, height, coinbase) ||
+        vout != index || memcmp(sqlite3_column_blob(stmt, 0), key, 32) ||
+        !snapshot_reserve_script(snapshot, (size_t)script_len)) return false;
+    snapshot_row_publish(snapshot, row, sqlite3_column_blob(stmt, 0),
+        sqlite3_column_blob(stmt, 3), vout, value, script_len, height, coinbase);
+    return true;
+}
+
+static enum coins_kv_read_snapshot_lookup_result snapshot_point_query(
+    struct coins_kv_read_snapshot *snapshot, const uint8_t key[32], uint32_t vout,
+    struct coins_kv_read_snapshot_row *out_row, int *rc_out)
+{
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(snapshot->db,
+        "SELECT txid,vout,value,script,height,is_coinbase FROM coins WHERE txid=?1 AND vout=?2",
+        -1, &stmt, NULL);
+    bool ok = rc == SQLITE_OK && sqlite3_bind_blob(stmt, 1, key, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int64(stmt, 2, (sqlite3_int64)vout) == SQLITE_OK;
+    enum coins_kv_read_snapshot_lookup_result result = COINS_KV_LOOKUP_ERROR;
+    if (ok) {
+        rc = sqlite3_step(stmt); // raw-sql-ok:progress-kv-kernel-store
+        if (rc == SQLITE_DONE) result = COINS_KV_LOOKUP_ABSENT;
+        else if (rc == SQLITE_ROW && snapshot_point_row(snapshot, stmt, key, vout, out_row) &&
+                 sqlite3_step(stmt) == SQLITE_DONE) // raw-sql-ok:progress-kv-kernel-store
+            result = COINS_KV_LOOKUP_FOUND;
+    }
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) result = COINS_KV_LOOKUP_ERROR;
+    *rc_out = rc;
+    return result;
+}
+
+static bool snapshot_pool_row(sqlite3_stmt *s, int64_t *sprout, int64_t *sapling)
+{
+    if (sqlite3_column_type(s, 0) != SQLITE_INTEGER ||
+        sqlite3_column_type(s, 1) != SQLITE_INTEGER) return false;
+    int64_t a = sqlite3_column_int64(s, 0), b = sqlite3_column_int64(s, 1);
+    if (a < 0 || b < 0) return false;
+    *sprout = a;
+    *sapling = b;
+    return true;
+}
+
+static bool snapshot_pool_query(sqlite3 *db, int32_t height,
+    int64_t *sprout, int64_t *sapling, bool *found)
+{
+    sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_prepare_v2(db,
+        "SELECT sprout,sapling FROM shielded_pool_totals WHERE height=?",
+        -1, &s, NULL) == SQLITE_OK && s &&
+        sqlite3_bind_int(s, 1, height) == SQLITE_OK;
+    int64_t a = 0, b = 0;
+    bool present = false;
+    if (ok) {
+        int rc = sqlite3_step(s); // raw-sql-ok:progress-kv-kernel-store
+        if (rc == SQLITE_ROW) {
+            present = true;
+            ok = snapshot_pool_row(s, &a, &b) &&
+                sqlite3_step(s) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
+        } else ok = rc == SQLITE_DONE;
+    }
+    if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    if (!ok) return false;
+    *sprout = a; *sapling = b; *found = present;
+    return true;
+}
+
+bool coins_kv_read_transaction_shielded_pool(sqlite3 *db, int32_t height,
+    int64_t *sprout, int64_t *sapling, bool *found)
+{
+    if (sprout) *sprout = 0;
+    if (sapling) *sapling = 0;
+    if (found) *found = false;
+    int32_t applied = -1;
+    bool applied_found = false;
+    if (!db || !sprout || !sapling || !found || height < 0 ||
+        height == INT32_MAX || sqlite3_get_autocommit(db) ||
+        !coins_kv_get_applied_height(db, &applied, &applied_found) ||
+        !applied_found || applied != height + 1) return false;
+    return snapshot_pool_query(db, height, sprout, sapling, found);
+}
+
+bool coins_kv_read_snapshot_shielded_pool(struct coins_kv_read_snapshot *snapshot,
+    int32_t height, int64_t *sprout, int64_t *sapling, bool *found)
+{
+    if (sprout) *sprout = 0;
+    if (sapling) *sapling = 0;
+    if (found) *found = false;
+    if (!snapshot || !sprout || !sapling || !found || snapshot->failed ||
+        !snapshot->transaction_open || height < 0 || height != snapshot->applied_height - 1) {
+        if (snapshot) snapshot->failed = true;
+        return false;
+    }
+    if (!snapshot_pool_query(snapshot->db, height, sprout, sapling, found)) {
+        snapshot->failed = true;
+        return false;
+    }
+    return true;
+}
+
+enum coins_kv_read_snapshot_lookup_result coins_kv_read_snapshot_lookup(
+    struct coins_kv_read_snapshot *snapshot, const uint8_t txid[32],
+    uint32_t vout, struct coins_kv_read_snapshot_row *out_row)
+{
+    uint8_t key[32];
+    if (txid) memcpy(key, txid, sizeof(key));
+    if (out_row) memset(out_row, 0, sizeof(*out_row));
+    if (!snapshot || !txid || !out_row || snapshot->failed || !snapshot->transaction_open) {
+        if (snapshot) snapshot->failed = true;
+        return COINS_KV_LOOKUP_ERROR;
+    }
+    int rc = SQLITE_OK;
+    enum coins_kv_read_snapshot_lookup_result result =
+        snapshot_point_query(snapshot, key, vout, out_row, &rc);
+    if (result == COINS_KV_LOOKUP_ERROR) {
+        LOG_WARN("coins_kv_read_snapshot", "lookup failed rc=%d: %s", rc, sqlite3_errmsg(snapshot->db));
+        snapshot->failed = true;
+        memset(out_row, 0, sizeof(*out_row));
+    }
+    return result;
+}
+
+#ifdef ZCL_TESTING
+void coins_kv_read_snapshot_test_authorizer(struct coins_kv_read_snapshot *snapshot,
+    int (*authorizer)(void *, int, const char *, const char *, const char *, const char *))
+{
+    if (snapshot) (void)sqlite3_set_authorizer(snapshot->db, authorizer, NULL);
+}
+#endif

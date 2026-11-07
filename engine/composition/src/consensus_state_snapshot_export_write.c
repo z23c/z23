@@ -36,7 +36,8 @@ static const char k_bundle_schema_sql[] =
     "nullifier_source_cursor INTEGER NOT NULL,"
     "source_fold_cursor INTEGER NOT NULL,"
     "proof_manifest_digest BLOB NOT NULL,source_digest BLOB NOT NULL,"
-    "artifact_digest BLOB NOT NULL);"
+    "artifact_digest BLOB NOT NULL,"
+    "sprout_pool_total INTEGER NOT NULL,sapling_pool_total INTEGER NOT NULL);"
     "CREATE TABLE source_receipt("
     "singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema TEXT NOT NULL,"
     "source_epoch_digest BLOB NOT NULL,source_tree_root BLOB NOT NULL,"
@@ -466,7 +467,7 @@ static bool copy_nullifiers(sqlite3 *source, sqlite3 *destination,
 static bool bind_manifest_identity(
     sqlite3_stmt *st, int *i, const struct consensus_state_bundle_manifest *m)
 {
-    return sqlite3_bind_text(st, (*i)++, CONSENSUS_STATE_BUNDLE_SCHEMA, -1,
+    return sqlite3_bind_text(st, (*i)++, CONSENSUS_STATE_BUNDLE_SCHEMA_V2, -1,
                              SQLITE_STATIC) == SQLITE_OK &&
            sqlite3_bind_int(st, (*i)++, m->height) == SQLITE_OK &&
            sqlite3_bind_blob(st, (*i)++, m->block_hash, 32,
@@ -528,6 +529,8 @@ static bool bind_manifest_cursors(
 static bool write_manifest(sqlite3 *db,
                            struct consensus_state_bundle_manifest *m)
 {
+    if (m->format_version != CONSENSUS_STATE_BUNDLE_V2 ||
+        m->sprout_pool_total < 0 || m->sapling_pool_total < 0) return false;
     consensus_state_bundle_artifact_digest(m, m->artifact_digest);
     static const char sql[] =
         "INSERT INTO bundle_meta("
@@ -538,15 +541,17 @@ static bool write_manifest(sqlite3 *db,
         "sapling_frontier_root,sapling_frontier_height,nullifier_digest,"
         "nullifier_count,sprout_source_cursor,sapling_source_cursor,"
         "nullifier_source_cursor,source_fold_cursor,proof_manifest_digest,"
-        "source_digest,artifact_digest) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
-        "?,?,?,?,?,?,?,?,?,?)";
+        "source_digest,artifact_digest,sprout_pool_total,sapling_pool_total) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+        "?,?,?,?,?,?,?,?,?,?,?,?)";
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
         return false;
     int i = 1;
     bool ok = bind_manifest_identity(st, &i, m) &&
               bind_manifest_shielded(st, &i, m) &&
-              bind_manifest_cursors(st, &i, m);
+              bind_manifest_cursors(st, &i, m) &&
+              sqlite3_bind_int64(st, i++, m->sprout_pool_total) == SQLITE_OK &&
+              sqlite3_bind_int64(st, i++, m->sapling_pool_total) == SQLITE_OK;
     if (ok)
         ok = sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:consensus-bundle-artifact
     sqlite3_finalize(st);

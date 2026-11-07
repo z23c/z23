@@ -95,6 +95,22 @@ bool rescan_seed_before_oldest_note_from_db(
     int sapling_activation_height,
     struct incremental_merkle_tree *tree_out, int *start_height_out,
     int *seed_height_out);
+bool wallet_rescan_witnesses_context(struct wallet_rpc_context *ctx,
+                                      struct wallet_witness_outcome *out);
+bool wallet_rescan_witnesses(const struct json_value *params, bool help,
+                             struct json_value *result,
+                             struct wallet_witness_outcome *out);
+#ifdef ZCL_TESTING
+bool rescan_test_replay(const struct wallet_rpc_context *ctx, int start, int end);
+bool rescan_test_empty(const struct wallet_rpc_context *ctx, struct wallet_witness_outcome *out);
+bool rescan_test_commit(const struct wallet_rpc_context *ctx,
+                        const struct incremental_merkle_tree *tree,
+                        const struct incremental_witness *witnesses,
+                        const bool *active, const struct db_sapling_note *notes,
+                        int count, int built, int height,
+                        const struct uint256 *hash, const struct uint256 *root,
+                        struct wallet_witness_outcome *out);
+#endif
 bool rpc_rescanwitnesses(const struct json_value *params, bool help,
                          struct json_value *result);
 

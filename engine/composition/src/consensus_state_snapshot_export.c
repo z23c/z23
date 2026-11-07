@@ -366,7 +366,10 @@ static bool manifests_state_equal(
     const struct consensus_state_bundle_manifest *a,
     const struct consensus_state_bundle_manifest *b)
 {
-    return a->height == b->height &&
+    return a->format_version == b->format_version &&
+           a->sprout_pool_total == b->sprout_pool_total &&
+           a->sapling_pool_total == b->sapling_pool_total &&
+           a->height == b->height &&
            a->history_complete == b->history_complete &&
            a->source_clean == b->source_clean &&
            a->validation_profile == b->validation_profile &&
@@ -662,7 +665,9 @@ void consensus_export_fill_success(
     memcpy(result->artifact_digest, manifest->artifact_digest, 32);
     snprintf(result->reason, sizeof(result->reason),
              "exported immutable %s height=%d source=%s profile=%s",
-             CONSENSUS_STATE_BUNDLE_SCHEMA, manifest->height,
+             manifest->format_version == CONSENSUS_STATE_BUNDLE_V2
+                 ? CONSENSUS_STATE_BUNDLE_SCHEMA_V2 : CONSENSUS_STATE_BUNDLE_SCHEMA_V1,
+             manifest->height,
              manifest->source_clean ? "clean" : "dirty",
              manifest->validation_profile == CONSENSUS_STATE_VALIDATION_FULL
                  ? "full" : "checkpoint_fold");

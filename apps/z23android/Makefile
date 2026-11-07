@@ -492,6 +492,17 @@ test-wallet-send:
 	@grep -q 'ui.drawn_flow && ui.keeper.screen) wss_keep_balance(ui.keeper.screen, true);' wallet_send_ui.c || { echo 'the Send page with no payment open must keep its balance reading while it is shown' >&2; exit 1; }
 	@grep -q 'wss_clip_check(&ui.clip, state, stamp, clip_text, ui.activity, ZAPP_SCAN_NETWORK);' wallet_send_ui.c || { echo 'the Send page must read each clip once, through wss_clip_check' >&2; exit 1; }
 
+# Uses an explicitly supplied host node in a disposable datadir.
+.PHONY: build-setup-native test-setup-native
+build-setup-native:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) -I../../platform/domain/encoding/include \
+	  -I../../contexts/commons/packages/zsha256/include tests/setup_native_integration_test.c setup_words.c setup_wordlist.c setup_node.c operations.c setup_state.c private.c params.c rpc.c nodelog.c \
+	  ../../platform/domain/encoding/src/bech32.c ../../platform/modules/sha3/src/sha3.c ../../contexts/commons/packages/zsha256/src/zsha256.c $(SPEECH_JSON) -o '$(BUILD_DIR)/setup-native-test'
+test-setup-native: build-setup-native
+	@test -x '$(NODE_BIN)' || { echo 'Set NODE_BIN to the reviewed host node' >&2; exit 1; }
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/setup-native.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/setup-native-test' "$$(cd "$$scratch" && pwd)" '$(abspath $(NODE_BIN))'
 .PHONY: test-game
 test-game:
 	@mkdir -p '$(BUILD_DIR)'

@@ -34,6 +34,10 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#ifdef ZCL_TESTING
+void zcl_package_copy_test_restore_partial(bool enabled);
+#endif
+
 #define ZPF_SOURCE "apps/skycombat"
 #define ZPF_EDITED "src/philosophical_test.c"
 #define ZPF_DAY 20400
@@ -497,6 +501,27 @@ static int zpf_save_and_restore(const struct zpf_world *w,
 
         ASSERT(zpf_restore(w->copy, fork_version));
         ASSERT(zpf_same_as_source(w->copy, ZPF_EDITED));
+#ifdef ZCL_TESTING
+        ASSERT(zpf_append(w->copy, ZPF_EDITED, "/* partial fixture */\n"));
+        ASSERT(zpf_save(w->copy, saved));
+        zpf_begin(&c);
+        (void)json_push_kv_str(&c.input, "dir", w->copy);
+        (void)json_push_kv_str(&c.input, "version", fork_version);
+        ASSERT(zpf_run("zcode.package.version.restore", &c) && zpf_passed(&c));
+        char plan[65];
+        (void)snprintf(plan, sizeof(plan), "%s", zpf_data_str(&c, "plan_id"));
+        zcl_command_reply_free(&c.reply);
+        zcl_command_reply_init(&c.reply, "zcl.test.zcode_package_fork.v1");
+        (void)json_push_kv_str(&c.input, "plan_id", plan);
+        (void)json_push_kv_bool(&c.input, "confirm", true);
+        zcl_package_copy_test_restore_partial(true);
+        bool ran = zpf_run("zcode.package.version.restore", &c);
+        zcl_package_copy_test_restore_partial(false);
+        ASSERT(ran);
+        ASSERT(zpf_refused(&c, "VERSION_RESTORE_FAILED"));
+        ASSERT(c.reply.error.mutated && zpf_same_as_source(w->copy, ZPF_EDITED));
+        zpf_end(&c);
+#endif
         PASS();
     } _test_next:;
     return failures;
@@ -565,7 +590,10 @@ static bool zpf_release_parent(const struct zpf_world *w,
               vcs_package_release_verify(&release) ==
                   VCS_PACKAGE_RELEASE_OK &&
               vcs_package_release_parent(&release, parent);
-    memcpy(package, release.package_root, 32);
+    if (ok)
+        memcpy(package, release.package_root, 32);
+    else
+        memset(package, 0, 32);
     return ok;
 }
 

@@ -6,8 +6,7 @@
  * derives the complete-state rung at that bundle's height (transparent utxo
  * root, sprout/sapling frontier roots, nullifier digest, rom_state_root, block
  * hash), folds in the operator-supplied cumulative chainwork, and emits BOTH:
- *   - a binary artifact  <out_dir>/rung-<height>.rung  (CHECKPOINT_RUNG_WIRE_SIZE
- *     bytes; parseable by the node's checkpoint_ladder verifier), and
+ *   - a binary artifact  <out_dir>/rung-<height>.rung  (versioned 404- or 420-byte encoding; parseable by the node's checkpoint_ladder verifier), and
  *   - a C designated-initializer fragment <out_dir>/rung-<height>.c (also on
  *     stdout) — ready to paste into the SEALED core/chainparams/src/checkpoints.c
  *     table during the owner two-builder unseal ritual.
@@ -133,15 +132,16 @@ int main(int argc, char **argv)
     }
 
     /* Binary artifact. */
-    uint8_t wire[CHECKPOINT_RUNG_WIRE_SIZE];
-    if (!checkpoint_rung_serialize(&rung, wire)) {
+    uint8_t wire[CHECKPOINT_RUNG_V2_WIRE_SIZE];
+    size_t wire_len = 0;
+    if (!checkpoint_rung_serialize_sized(&rung, wire, sizeof wire, &wire_len)) {
         fprintf(stderr, "checkpoint_rung_export: serialize failed\n");
         return 1;
     }
     char bin_path[4200];
     snprintf(bin_path, sizeof(bin_path), "%s/rung-%d.rung", out_dir,
              rung.height);
-    rc = checkpoint_rung_export_write_bytes(bin_path, "wb", wire, sizeof(wire));
+    rc = checkpoint_rung_export_write_bytes(bin_path, "wb", wire, wire_len);
     if (rc != 0)
         return rc;
 
@@ -163,10 +163,10 @@ int main(int argc, char **argv)
     fputs(frag, stdout);
     fprintf(stderr,
             "checkpoint_rung_export: wrote rung at height %d\n"
-            "  binary:   %s (%u bytes)\n"
+            "  binary:   %s (%zu bytes)\n"
             "  fragment: %s\n"
             "  candidate_unbaked — bake only under the two-builder unseal "
             "ritual.\n",
-            rung.height, bin_path, CHECKPOINT_RUNG_WIRE_SIZE, c_path);
+            rung.height, bin_path, wire_len, c_path);
     return 0;
 }

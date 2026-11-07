@@ -33,6 +33,8 @@ struct sqlite3;
 
 #define CONSENSUS_STATE_REPLAY_RECEIPT_SCHEMA \
     "zcl.consensus_state_replay_receipt.v1"
+#define CONSENSUS_STATE_REPLAY_RECEIPT_SCHEMA_V2 \
+    "zcl.consensus_state_replay_receipt.v2"
 /* Basename of the keyed receipt file written under the datadir. */
 #define CONSENSUS_STATE_REPLAY_RECEIPT_NAME \
     "consensus_state_replay_receipt.v1"
@@ -52,7 +54,9 @@ struct consensus_state_replay_result {
 
 /* Offline replay verifier (the -verify-consensus-bundle=PATH verb).
  *
- * `progress_db` is the datadir's OWN open progress store — the state produced
+ * `progress_db` is the datadir's OWN open progress store and must have no
+ * active transaction. The caller must ensure exclusive use of this handle
+ * while this function owns its read transaction. It contains the state produced
  * by this node's genesis->anchor reducer fold, parked EXACTLY at the bundle's
  * anchor height (coins_applied == height + 1). The verifier:
  *   1. admits + strictly validates the immutable bundle read-only (reusing the
@@ -118,6 +122,9 @@ bool consensus_state_replay_receipt_bundle_binding_verified_root(
     struct consensus_state_replay_receipt_binding *out);
 
 #ifdef ZCL_TESTING
+/* Rewrite a V2 fixture receipt as V1, retaining its binding fields. */
+bool consensus_state_replay_receipt_test_downgrade(const char *datadir,
+                                                   int datadir_fd);
 /* Test-only: write a self-consistent receipt binding `bundle_file_digest`
  * with the given (otherwise arbitrary) component summary fields, without
  * requiring a live datadir/progress_db fold — used by fixture-level tests of

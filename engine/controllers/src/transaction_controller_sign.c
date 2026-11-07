@@ -6,6 +6,7 @@
  * signrawtransaction RPC and per-input transparent signing helpers. */
 
 #include "controllers/transaction_controller_internal.h"
+#include "wallet/wallet.h"
 
 struct rawtx_sign_overlay {
     struct privkey *keys;
@@ -480,6 +481,11 @@ bool rpc_signrawtransaction(const struct json_value *params, bool help,
     struct json_value errors = {0};
     json_set_array(&errors);
 
+    struct basic_keystore *wallet_keys = NULL;
+    struct wallet *wallet = wallet_rpc_wallet();
+    if (wallet && ctx->keystore == &wallet->keystore &&
+        wallet_readiness_get(wallet).state == WALLET_READINESS_READY)
+        wallet_keys = ctx->keystore;
     for (unsigned int i = 0; i < tx.num_vin; i++) {
         const struct script *prev_script = NULL;
         int64_t prev_amount = 0;
@@ -518,7 +524,7 @@ bool rpc_signrawtransaction(const struct json_value *params, bool help,
 
 
         if (!sign_one_input(&tx, i, prev_script, prev_amount,
-                            branch_id, ctx->keystore, &overlay)) {
+                            branch_id, wallet_keys, &overlay)) {
             struct json_value err = {0};
             json_set_object(&err);
             json_push_kv_int(&err, "vout", (int64_t)i);

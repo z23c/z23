@@ -6,6 +6,7 @@
 #include "config/boot_error.h"
 
 #include <stdio.h>
+#include <fcntl.h>
 #include <string.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
@@ -299,7 +300,24 @@ static int bdl_check_acquire_writes_pid(void)
     BDL_CHECK("acquire writes current pid",
               ok && read_ok && strcmp(buf, want) == 0);
 
+    int dir_fd = open(dir, O_RDONLY | O_DIRECTORY);
+    int wrong_fd = open("/", O_RDONLY | O_DIRECTORY);
+    BDL_CHECK("lease matches held directory", dir_fd >= 0 && boot_datadir_lock_matches_fd(dir_fd));
+    BDL_CHECK("lease rejects another directory", wrong_fd >= 0 && !boot_datadir_lock_matches_fd(wrong_fd));
+    pid_t child = fork();
+    if (child == 0) _exit(boot_datadir_lock_matches_fd(dir_fd) ? 1 : 0);
+    int child_status = 0;
+    BDL_CHECK("inherited descriptor is not child lease", child > 0 && waitpid(child, &child_status, 0) == child &&
+              WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+    bool replaced = unlink(pid_path) == 0;
+    int replacement = open(pid_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (replacement >= 0) close(replacement);
+    BDL_CHECK("replaced pidfile invalidates lease", replaced && replacement >= 0 &&
+              !boot_datadir_lock_matches_fd(dir_fd));
     boot_datadir_lock_release();
+    BDL_CHECK("released lease refuses", !boot_datadir_lock_matches_fd(dir_fd));
+    if (dir_fd >= 0) close(dir_fd);
+    if (wrong_fd >= 0) close(wrong_fd);
     BDL_CHECK("release retains reusable lock inode",
               access(pid_path, F_OK) == 0);
     test_rm_rf_recursive(dir);
