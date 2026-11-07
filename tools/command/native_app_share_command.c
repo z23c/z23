@@ -1,19 +1,25 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: app.share and app.receive, the front door's share-by-file pair
- * (command/native_app_front_door.h). Both are AUTH_OWNER: they run owner
- * leaves as inner calls, which skip MCP policy.
+ * Purpose: app.share, `z23 app share skycombat-1` (see
+ * command/native_app_front_door.h). AUTH_OWNER: it runs the owner leaf
+ * zcode.package.bundle.sign as an inner call, which skips MCP policy.
  *
- * app.share: save if the copy has unsaved edits (zcode.package.version.save),
- * then zcode.package.bundle.sign, which writes NAME.z23share. The plan runs
- * only plan halves; it never runs the sign plan while the owner has no key
- * yet, because that plan makes the key. Its plan_id binds the copy's head,
- * the save or sign plan id and the output path.
+ * A copy keeps its release's name ("skycombat/skycombat"), whose publisher
+ * half is bound to the origin's key; the Commons refuses another key's
+ * release under it (publisher-namespace-conflict). So share publishes the
+ * copy under the namespace the owner's own key owns: "k" and 16 hex of the
+ * key's fingerprint digest (zcl_app_publisher_namespace), rewriting only
+ * the name value of zcode-package.json.
  *
- * app.receive: zcode.package.bundle.verify, then the receive plan into the
- * first free <datadir>/copies/<name>-<n>. Confirm receives trusting exactly
- * the publisher and package root the verify read from the file (never a
- * value the caller typed), then builds (app.build) and opens
- * (app.run.copy) that build's image. */
+ * Plan: only plan halves. It reads the owner's key when it exists (never
+ * makes one: the sign plan would), names the target name, runs the save
+ * plan for unsaved edits or, for a clean copy already under the owner's
+ * namespace, the sign plan. The plan_id binds the copy's head, those plan
+ * ids, the target name (or "no-key") and the output path.
+ *
+ * Confirm: makes the key if missing, renames the package if needed, saves
+ * once when there are edits or a rename, then signs and writes
+ * NAME.z23share. A rename changes the package root, so the copy's earlier
+ * build is stale until the next `z23 app build`. */
 
 #include "command/native_command.h"
 
@@ -26,7 +32,13 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "util/authority_receipt.h"
+#include "plugin/plugin_dist.h"
+#include "plugin/plugin_pack.h"
+#include "util/file_io.h"
+#include "util/file_tree_ops.h"
 #include "util/path_util.h"
+#include "vcs/package_release.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,60 +46,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define ZSH_SHARE "app.share"
-#define ZSH_RECEIVE "app.receive"
-#define ZSH_SHARE_DOMAIN "zcl.app_share.plan.v1"
-#define ZSH_RECEIVE_DOMAIN "zcl.app_receive.plan.v1"
+#define ZSH_COMMAND "app.share"
+#define ZSH_DOMAIN "zcl.app_share.plan.v1"
 #define ZSH_SAVE_LEAF "zcode.package.version.save"
 #define ZSH_SIGN_LEAF "zcode.package.bundle.sign"
-#define ZSH_KEY_LEAF ".z23/zcode_publisher.key"
-
-/* A fresh object input {k0: v0, k1: v1, ...}; NULL values are left out. */
-static bool zsh_input(struct json_value *in, const char *const *kv, size_t n)
-{
-    json_init(in);
-    json_set_object(in);
-    for (size_t i = 0; i + 1u < n; i += 2)
-        if (kv[i + 1] && !json_push_kv_str(in, kv[i], kv[i + 1]))
-            return false;
-    return true;
-}
-
-/* Run `path` on an input that was (built) or could not be built: `out` is
- * always initialized, and the input is always freed. */
-static bool zsh_call(const char *path, struct json_value *in, bool built,
-                     struct zcl_command_reply *out)
-{
-    bool ok = false;
-    if (built) {
-        ok = zcl_app_inner_call(path, in, out, NULL);
-    } else {
-        zcl_command_reply_init(out, "zcl.app_share.inner.v1");
-        zcl_package_copy_fail(out, "ALLOC", false, "inner input", path);
-    }
-    json_free(in);
-    return ok;
-}
-
-/* Copy a reply's day input (an integer) into an inner input. */
-static bool zsh_day(const struct json_value *from, struct json_value *in)
-{
-    const struct json_value *day = json_get(from, "day");
-    return !day || day->type != JSON_INT ||
-           json_push_kv_int(in, "day", json_get_int(day));
-}
-
-static void zsh_short(struct json_value *d, const char *full)
-{
-    char brief[ZCL_APP_SHORT_FINGERPRINT_LEN];
-    if (!full)
-        return;
-    (void)json_push_kv_str(d, "publisher_fingerprint", full);
-    if (zcl_app_short_fingerprint(full, brief))
-        (void)json_push_kv_str(d, "publisher", brief);
-}
-
-/* ── app.share ───────────────────────────────────────────────────────── */
+#define ZSH_META "zcode-package.json"
+#define ZSH_META_MAX (64u << 10)
+#define ZSH_NAME_MAX (VCS_PACKAGE_RELEASE_NAME_MAX + 1u)
 
 struct zsh {
     const struct json_value *input;
@@ -96,12 +61,20 @@ struct zsh {
     const char *name;
     char dir[APP_COPY_BUILD_PATH];
     char output[APP_COPY_BUILD_PATH];
+    char store[APP_COPY_BUILD_PATH];    /* ~/.z23 */
+    char key_path[APP_COPY_BUILD_PATH]; /* ~/.z23/zcode_publisher.key */
     char head[65];
     bool dirty;
     bool have_key;
+    uint8_t pubkey[VCS_PACKAGE_RELEASE_PUBKEY_BYTES];
+    char old_name[ZSH_NAME_MAX];
+    char new_name[ZSH_NAME_MAX]; /* "" until the key is known */
+    bool rename;
     char inner_plan[65];
     uint8_t plan_id[32];
 };
+
+/* ── the copy, the key and the name ──────────────────────────────────── */
 
 /* The copy, its head and whether it has unsaved edits; the copy is closed
  * again before any inner leaf opens it. */
@@ -111,7 +84,7 @@ static bool zsh_state(struct zsh *z)
     size_t changes = 0;
     if (!app_copy_build_dir(z->datadir, z->name, z->dir, sizeof(z->dir),
                             z->reply) ||
-        !zcl_package_copy_open(z->dir, &copy, z->reply, ZSH_SHARE))
+        !zcl_package_copy_open(z->dir, &copy, z->reply, ZSH_COMMAND))
         return false;
     bool ok = zcl_package_copy_unsaved(&copy, &changes);
     zcl_hex_encode(copy.head_version, 32, z->head);
@@ -149,71 +122,178 @@ static bool zsh_output(struct zsh *z)
     return true;
 }
 
-static bool zsh_key_exists(void)
+/* The key bundle.sign uses; its public half when the file exists. Reading
+ * never makes a key. */
+static bool zsh_key_read(struct zsh *z)
 {
     const char *home = getenv("HOME");
-    char path[APP_COPY_BUILD_PATH];
+    struct plugin_dist_published why;
     struct stat st;
-    return home && home[0] == '/' &&
-           zcl_path_join(path, sizeof(path), home, ZSH_KEY_LEAF) &&
-           stat(path, &st) == 0;
+    if (!home || home[0] != '/' ||
+        !zcl_path_join(z->store, sizeof(z->store), home, ".z23") ||
+        !zcl_path_join(z->key_path, sizeof(z->key_path), z->store,
+                       "zcode_publisher.key")) {
+        zcl_package_copy_fail(z->reply, "PUBLISHER_KEY_UNAVAILABLE", false,
+                              "HOME must be an absolute directory where "
+                              "~/.z23 can hold the owner's key", ZSH_COMMAND);
+        return false;
+    }
+    z->have_key = stat(z->key_path, &st) == 0 &&
+                  plugin_dist_release_key_sign(z->key_path, NULL, z->pubkey,
+                                               NULL, &why) == PLUGIN_DIST_OK;
+    return true;
 }
+
+static bool zsh_meta_path(const struct zsh *z, char *out, size_t cap)
+{
+    return zcl_path_join(out, cap, z->dir, ZSH_META);
+}
+
+/* The package name now, and the one it publishes under. */
+static bool zsh_names(struct zsh *z)
+{
+    char path[APP_COPY_BUILD_PATH], ns[ZCL_APP_NAMESPACE_LEN];
+    char *text = NULL;
+    size_t len = 0;
+    struct json_value meta;
+    json_init(&meta);
+    bool ok = zsh_meta_path(z, path, sizeof(path)) &&
+              zcl_read_whole_file_text(path, ZSH_META_MAX, &text, &len,
+                                       ZSH_COMMAND) &&
+              json_read(&meta, text, len);
+    const struct json_value *v = ok ? json_get(&meta, "name") : NULL;
+    const char *name = v && v->type == JSON_STR ? json_get_str(v) : NULL;
+    const char *slash = name ? strchr(name, '/') : NULL;
+    ok = slash && strlen(name) < sizeof(z->old_name);
+    if (ok)
+        (void)snprintf(z->old_name, sizeof(z->old_name), "%s", name);
+    if (ok && z->have_key && zcl_app_publisher_namespace(z->pubkey, ns))
+        (void)snprintf(z->new_name, sizeof(z->new_name), "%s%s", ns, slash);
+    json_free(&meta);
+    free(text);
+    if (!ok)
+        zcl_package_copy_fail(z->reply, "PACKAGE_INVALID", false, "the "
+                              "copy's zcode-package.json has no package "
+                              "name", z->dir);
+    z->rename = !z->new_name[0] || strcmp(z->new_name, z->old_name) != 0;
+    return ok;
+}
+
+/* Rewrite only the name value: the first "<old>" after the "name" key. */
+static bool zsh_rename(struct zsh *z)
+{
+    char path[APP_COPY_BUILD_PATH], quoted[ZSH_NAME_MAX + 2u];
+    char *text = NULL, *out = NULL;
+    size_t len = 0;
+    (void)snprintf(quoted, sizeof(quoted), "\"%s\"", z->old_name);
+    bool ok = zsh_meta_path(z, path, sizeof(path)) &&
+              zcl_read_whole_file_text(path, ZSH_META_MAX, &text, &len,
+                                       ZSH_COMMAND);
+    char *key = ok ? strstr(text, "\"name\"") : NULL;
+    char *at = key ? strstr(key, quoted) : NULL;
+    size_t old_len = strlen(quoted), new_len = strlen(z->new_name) + 2u;
+    if (at)
+        out = zcl_malloc(len - old_len + new_len + 1u, "app.share.meta");
+    if (out) {
+        size_t head = (size_t)(at - text);
+        memcpy(out, text, head);
+        (void)snprintf(out + head, new_len + 1u, "\"%s\"", z->new_name);
+        memcpy(out + head + new_len, at + old_len, len - head - old_len + 1u);
+        ok = authority_receipt_write_atomic(z->dir, ZSH_META,
+                                            (const uint8_t *)out,
+                                            len - old_len + new_len, NULL, 0);
+    }
+    ok = ok && out;
+    free(out);
+    free(text);
+    if (!ok)
+        zcl_package_copy_fail(z->reply, "RENAME_FAILED", false, "the package "
+                              "name in zcode-package.json could not be "
+                              "rewritten", path);
+    return ok;
+}
+
+/* ── plan ────────────────────────────────────────────────────────────── */
 
 static bool zsh_leaf_input(struct zsh *z, bool sign, struct json_value *in)
 {
-    const char *kv[] = {"dir", z->dir, "datadir", z->datadir,
+    const char *kv[] = {"dir", z->dir, "datadir", sign ? z->datadir : NULL,
                         "output", sign ? z->output : NULL};
-    return zsh_input(in, kv, 6) && (!sign || zsh_day(z->input, in));
+    return zcl_app_input(in, kv, 6) && (!sign || zcl_app_input_day(z->input, in));
 }
 
-/* The plan half of the first step (save, or sign when the key exists). */
+/* The plan half the copy allows now: the save plan for unsaved edits, or
+ * the sign plan for a clean copy already under the owner's namespace. */
 static bool zsh_plan(struct zsh *z, struct zcl_command_reply *inner)
 {
     struct json_value in;
-    const char *leaf = z->dirty ? ZSH_SAVE_LEAF : ZSH_SIGN_LEAF;
-    bool run = z->dirty || z->have_key;
+    bool save = z->dirty, sign = !z->dirty && z->have_key && !z->rename;
+    const char *leaf = save ? ZSH_SAVE_LEAF : ZSH_SIGN_LEAF;
     z->inner_plan[0] = '\0';
-    if (!run)
+    if (!save && !sign) {
         zcl_command_reply_init(inner, "zcl.app_share.inner.v1");
-    if (run) {
-        if (!zsh_call(leaf, &in, zsh_leaf_input(z, !z->dirty, &in), inner)) {
-            zcl_app_inner_fail(z->reply, inner, false);
-            zcl_command_reply_free(inner);
-            return false;
-        }
+    } else if (!zcl_app_inner_call_built(leaf, &in,
+                                         zsh_leaf_input(z, sign, &in),
+                                         inner)) {
+        zcl_app_inner_fail(z->reply, inner, false);
+        zcl_command_reply_free(inner);
+        return false;
+    } else if (zcl_app_inner_str(inner, "plan_id")) {
         (void)snprintf(z->inner_plan, sizeof(z->inner_plan), "%s",
-                       zcl_app_inner_str(inner, "plan_id")
-                           ? zcl_app_inner_str(inner, "plan_id") : "");
+                       zcl_app_inner_str(inner, "plan_id"));
     }
-    const char *parts[] = {z->dir, z->head, z->output, leaf, z->inner_plan,
-                           z->have_key ? "key" : "no-key"};
-    zcl_app_plan_id(ZSH_SHARE_DOMAIN, parts, 6, z->plan_id);
+    const char *parts[] = {z->dir, z->head, z->output, z->inner_plan,
+                           z->new_name[0] ? z->new_name : "no-key"};
+    zcl_app_plan_id(ZSH_DOMAIN, parts, 5, z->plan_id);
     return true;
 }
 
 static void zsh_plan_reply(struct zsh *z, const struct zcl_command_reply *in)
 {
     struct json_value *d = &z->reply->data;
-    char next[160];
+    char next[160], as[ZSH_NAME_MAX + 32];
+    const char *slash = strchr(z->old_name, '/');
+    (void)snprintf(as, sizeof(as), "%s%s",
+                   z->new_name[0] ? z->new_name : "<your new key>",
+                   z->new_name[0] ? "" : slash);
     (void)json_push_kv_str(d, "stage", "plan");
     (void)json_push_kv_str(d, "copy", z->name);
     (void)json_push_kv_str(d, "output", z->output);
-    (void)json_push_kv_bool(d, "saves_first", z->dirty);
+    (void)json_push_kv_str(d, "name", z->old_name);
+    (void)json_push_kv_str(d, "publishes_as", as);
+    (void)json_push_kv_bool(d, "saves_first", z->dirty || z->rename);
     (void)json_push_kv_bool(d, "makes_key", !z->have_key);
-    const char *v = zcl_app_inner_str(in, "name");
-    if (v)
-        (void)json_push_kv_str(d, "name", v);
-    zsh_short(d, zcl_app_inner_str(in, "publisher_fingerprint"));
+    zcl_app_push_publisher(d, zcl_app_inner_str(in, "publisher_fingerprint"));
     zcl_package_copy_push_root(d, "plan_id", z->plan_id);
     (void)json_push_kv_bool(d, "executed", false);
     (void)snprintf(next, sizeof(next), "z23 app share %s --yes", z->name);
     (void)json_push_kv_str(d, "next", next);
 }
 
+/* ── confirm ─────────────────────────────────────────────────────────── */
+
+/* Make the key bundle.sign would make on first use, then read it. */
+static bool zsh_key_make(struct zsh *z)
+{
+    char made[PLUGIN_HEX_PUBLIC_KEY + 1];
+    if (z->have_key)
+        return true;
+    if (zcl_mkdir_p(z->store, 0700).ok)
+        (void)plugin_keygen(z->key_path, made);
+    if (!zsh_key_read(z))
+        return false;
+    if (!z->have_key)
+        zcl_package_copy_fail(z->reply, "PUBLISHER_KEY_REFUSED", false,
+                              "the owner's publisher key must be a private "
+                              "(0600) 32-byte key file", z->key_path);
+    return z->have_key;
+}
+
 static void zsh_commit_reply(struct zsh *z, const struct zcl_command_reply *s)
 {
     struct json_value *d = &z->reply->data;
     char line[APP_COPY_BUILD_PATH + 192], brief[ZCL_APP_SHORT_FINGERPRINT_LEN];
+    char next[256];
     const char *full = zcl_app_inner_str(s, "publisher_fingerprint");
     const char *keys[] = {"name", "semver", "release_id", "package_root",
                           "version", "share_file"};
@@ -222,36 +302,63 @@ static void zsh_commit_reply(struct zsh *z, const struct zcl_command_reply *s)
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
         if (zcl_app_inner_str(s, keys[i]))
             (void)json_push_kv_str(d, keys[i], zcl_app_inner_str(s, keys[i]));
-    zsh_short(d, full);
-    (void)json_push_kv_bool(d, "saved_first", z->dirty);
+    zcl_app_push_publisher(d, full);
+    (void)json_push_kv_bool(d, "renamed", z->rename);
     if (!full || !zcl_app_short_fingerprint(full, brief))
         (void)snprintf(brief, sizeof(brief), "?");
     (void)snprintf(line, sizeof(line), "share %s %s publisher %s file %s",
-                   zcl_app_inner_str(s, "name") ? zcl_app_inner_str(s, "name")
-                                                : z->name,
+                   z->new_name,
                    zcl_app_inner_str(s, "semver")
                        ? zcl_app_inner_str(s, "semver") : "",
                    brief, z->output);
     (void)json_push_kv_str(d, "share_line", line);
-    (void)json_push_kv_str(d, "next", "send the file; your friend runs: z23 "
-                           "app open FILE.z23share");
+    (void)snprintf(next, sizeof(next), "send the file; your friend runs: z23 "
+                   "app open FILE.z23share%s%s%s", z->rename ? ". Renamed to "
+                   : "", z->rename ? z->new_name : "",
+                   z->rename ? ": run z23 app build before your next open"
+                             : "");
+    (void)json_push_kv_str(d, "next", next);
     (void)json_push_kv_bool(d, "executed", false);
+}
+
+/* One save of the edits and the rename together. */
+static bool zsh_save(struct zsh *z, struct zcl_command_reply *inner)
+{
+    struct json_value in;
+    bool ok = false;
+    if (zsh_leaf_input(z, false, &in)) {
+        ok = zcl_app_inner_plan_confirm(ZSH_SAVE_LEAF, &in, inner);
+    } else {
+        zcl_command_reply_init(inner, "zcl.app_share.inner.v1");
+        zcl_package_copy_fail(inner, "ALLOC", false, "inner input",
+                              ZSH_SAVE_LEAF);
+    }
+    json_free(&in);
+    return ok;
+}
+
+static bool zsh_prepare_name(struct zsh *z)
+{
+    bool made = !z->have_key;
+    if (!zsh_key_make(z) || !zsh_names(z) || (z->rename && !zsh_rename(z))) {
+        z->reply->error.mutated = made && z->have_key;
+        return false;
+    }
+    return true;
 }
 
 static void zsh_commit(struct zsh *z)
 {
     struct json_value in;
     struct zcl_command_reply inner;
-    bool mutated = false;
     if (!zcl_package_copy_plan_matches(z->input, z->plan_id, z->reply,
-                                       ZSH_SHARE))
+                                       ZSH_COMMAND) ||
+        !zsh_prepare_name(z))
         return;
-    if (z->dirty) {
-        bool built = zsh_leaf_input(z, false, &in) &&
-                     json_push_kv_str(&in, "plan_id", z->inner_plan) &&
-                     json_push_kv_bool(&in, "confirm", true);
-        if (!zsh_call(ZSH_SAVE_LEAF, &in, built, &inner)) {
-            zcl_app_inner_fail(z->reply, &inner, false);
+    bool mutated = z->rename;
+    if (z->dirty || z->rename) {
+        if (!zsh_save(z, &inner)) {
+            zcl_app_inner_fail(z->reply, &inner, mutated);
             zcl_command_reply_free(&inner);
             return;
         }
@@ -284,230 +391,20 @@ void zcl_native_handle_app_share(const struct zcl_command_request *request,
     if (!z) {
         if (reply)
             zcl_package_copy_fail(reply, "ALLOC", false, "app.share state",
-                                  ZSH_SHARE);
+                                  ZSH_COMMAND);
         return;
     }
     z->input = request->input;
     z->reply = reply;
     z->name = zcl_package_copy_str(request->input, "copy");
-    z->datadir = zcl_package_copy_datadir(request->input, reply, ZSH_SHARE);
-    z->have_key = zsh_key_exists();
-    if (z->datadir && zsh_state(z) && zsh_output(z) && zsh_plan(z, &inner)) {
+    z->datadir = zcl_package_copy_datadir(request->input, reply, ZSH_COMMAND);
+    if (z->datadir && zsh_state(z) && zsh_output(z) && zsh_key_read(z) &&
+        zsh_names(z) && zsh_plan(z, &inner)) {
         if (zcl_package_copy_confirmed(request->input))
             zsh_commit(z);
         else
             zsh_plan_reply(z, &inner);
         zcl_command_reply_free(&inner);
     }
-    free(z);
-}
-
-/* ── app.receive ─────────────────────────────────────────────────────── */
-
-struct zrv {
-    const struct json_value *input;
-    struct zcl_command_reply *reply;
-    const char *datadir;
-    const char *file;
-    struct zcl_command_reply verify;
-    bool verify_live;
-    char name[ZCL_PACKAGE_ADOPT_NAME_MAX + 1u];
-    char dest[APP_COPY_BUILD_PATH];
-    char receive_plan[65];
-    uint8_t plan_id[32];
-};
-
-static bool zrv_receive_input(struct zrv *z, struct json_value *in)
-{
-    const char *kv[] = {"file", z->file, "destination", z->dest,
-                        "datadir", z->datadir};
-    return zsh_input(in, kv, 6) && zsh_day(z->input, in);
-}
-
-
-/* Verify, name the copy, and run the receive plan. */
-static bool zrv_plan(struct zrv *z)
-{
-    struct json_value in;
-    struct zcl_command_reply inner;
-    const char *kv[] = {"file", z->file};
-    z->verify_live = true;
-    if (!zsh_call("zcode.package.bundle.verify", &in, zsh_input(&in, kv, 2),
-                  &z->verify)) {
-        zcl_app_inner_fail(z->reply, &z->verify, false);
-        return false;
-    }
-    if (!zcl_package_copy_pick_name(z->datadir,
-                                    zcl_app_inner_str(&z->verify, "name"),
-                                    z->name, z->dest, sizeof(z->dest),
-                                    z->reply))
-        return false;
-    bool ok = zsh_call("zcode.package.bundle.receive", &in,
-                       zrv_receive_input(z, &in), &inner);
-    const char *plan = ok ? zcl_app_inner_str(&inner, "plan_id") : NULL;
-    if (plan)
-        (void)snprintf(z->receive_plan, sizeof(z->receive_plan), "%s", plan);
-    else
-        zcl_app_inner_fail(z->reply, &inner, false);
-    zcl_command_reply_free(&inner);
-    const char *parts[] = {z->file, z->datadir, z->dest, z->receive_plan,
-                           zcl_app_inner_str(&z->verify,
-                                             "publisher_fingerprint"),
-                           zcl_app_inner_str(&z->verify, "package_root")};
-    zcl_app_plan_id(ZSH_RECEIVE_DOMAIN, parts, 6, z->plan_id);
-    return plan != NULL;
-}
-
-static void zrv_describe(struct zrv *z, const char *stage)
-{
-    struct json_value *d = &z->reply->data;
-    const char *keys[] = {"name", "semver", "release_id", "package_root",
-                          "parent_release_root"};
-    (void)json_push_kv_str(d, "stage", stage);
-    (void)json_push_kv_str(d, "file", z->file);
-    (void)json_push_kv_str(d, "copy", z->name);
-    (void)json_push_kv_str(d, "destination", z->dest);
-    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
-        if (zcl_app_inner_str(&z->verify, keys[i]))
-            (void)json_push_kv_str(d, keys[i],
-                                   zcl_app_inner_str(&z->verify, keys[i]));
-    zsh_short(d, zcl_app_inner_str(&z->verify, "publisher_fingerprint"));
-}
-
-static bool zrv_copy_input(struct zrv *z, struct json_value *in)
-{
-    const char *kv[] = {"copy", z->name, "datadir", z->datadir};
-    return zsh_input(in, kv, 4);
-}
-
-/* app.run.copy plan, then its confirm accepting exactly the planned image.
- * `out` is always initialized. */
-static bool zrv_open(struct zrv *z, struct zcl_command_reply *out)
-{
-    struct json_value in;
-    bool built = zrv_copy_input(z, &in);
-    if (!built) {
-        json_free(&in);
-        zcl_command_reply_init(out, "zcl.app_receive.inner.v1");
-        zcl_package_copy_fail(out, "ALLOC", false, "inner input", z->name);
-        return false;
-    }
-    bool ok = zcl_app_inner_call("app.run.copy", &in, out, NULL);
-    const char *image = ok ? zcl_app_inner_str(out, "image_sha3") : NULL;
-    const char *plan = ok ? zcl_app_inner_str(out, "plan_id") : NULL;
-    ok = image && plan && json_push_kv_str(&in, "image_sha3", image) &&
-         json_push_kv_bool(&in, "accept_execution", true) &&
-         json_push_kv_str(&in, "plan_id", plan) &&
-         json_push_kv_bool(&in, "confirm", true);
-    if (ok || out->status == ZCL_COMMAND_STATUS_PASSED) {
-        zcl_command_reply_free(out);
-        if (ok) {
-            ok = zcl_app_inner_call("app.run.copy", &in, out, NULL);
-        } else {
-            zcl_command_reply_init(out, "zcl.app_receive.inner.v1");
-            zcl_package_copy_fail(out, "OPEN_PLAN_INCOMPLETE", false,
-                                  "the open plan named no image", z->name);
-        }
-    }
-    json_free(&in);
-    return ok;
-}
-
-/* app.build plan then confirm for the received copy. */
-static bool zrv_build(struct zrv *z, struct zcl_command_reply *out)
-{
-    struct json_value in;
-    bool ok = false;
-    if (zrv_copy_input(z, &in)) {
-        ok = zcl_app_inner_plan_confirm("app.build", &in, out);
-    } else {
-        zcl_command_reply_init(out, "zcl.app_receive.inner.v1");
-        zcl_package_copy_fail(out, "ALLOC", false, "inner input", z->name);
-    }
-    json_free(&in);
-    return ok;
-}
-
-/* Receive trusting exactly what the verify read from the file. */
-static bool zrv_keep(struct zrv *z, struct zcl_command_reply *out)
-{
-    struct json_value in;
-    const char *who = zcl_app_inner_str(&z->verify, "publisher_fingerprint");
-    const char *root = zcl_app_inner_str(&z->verify, "package_root");
-    bool built = who && root && zrv_receive_input(z, &in) &&
-                 json_push_kv_str(&in, "trust_publisher", who) &&
-                 json_push_kv_str(&in, "trust_root", root) &&
-                 json_push_kv_str(&in, "plan_id", z->receive_plan) &&
-                 json_push_kv_bool(&in, "confirm", true);
-    if (!who || !root)
-        json_init(&in);
-    return zsh_call("zcode.package.bundle.receive", &in, built, out);
-}
-
-static void zrv_commit(struct zrv *z)
-{
-    struct zcl_command_reply inner;
-    if (!zcl_package_copy_plan_matches(z->input, z->plan_id, z->reply,
-                                       ZSH_RECEIVE))
-        return;
-    bool kept = zrv_keep(z, &inner);
-    bool ok = kept;
-    if (ok) {
-        zcl_command_reply_free(&inner);
-        ok = zrv_build(z, &inner);
-    }
-    if (ok) {
-        zcl_command_reply_free(&inner);
-        ok = zrv_open(z, &inner);
-    }
-    if (!ok) {
-        zcl_app_inner_fail(z->reply, &inner, kept);
-        zcl_command_reply_free(&inner);
-        return;
-    }
-    zrv_describe(z, "commit");
-    const struct json_value *pid = json_get(&inner.data, "pid");
-    if (pid && pid->type == JSON_INT)
-        (void)json_push_kv_int(&z->reply->data, "pid", json_get_int(pid));
-    (void)json_push_kv_str(&z->reply->data, "image_sha3",
-                           zcl_app_inner_str(&inner, "image_sha3"));
-    (void)json_push_kv_bool(&z->reply->data, "executed", true);
-    zcl_command_reply_free(&inner);
-}
-
-void zcl_native_handle_app_receive(const struct zcl_command_request *request,
-                                   struct zcl_command_reply *reply)
-{
-    struct zrv *z = request && reply
-                        ? zcl_calloc(1, sizeof(*z), "app.receive.state")
-                        : NULL;
-    if (!z) {
-        if (reply)
-            zcl_package_copy_fail(reply, "ALLOC", false, "app.receive state",
-                                  ZSH_RECEIVE);
-        return;
-    }
-    z->input = request->input;
-    z->reply = reply;
-    z->file = zcl_package_copy_str(request->input, "file");
-    z->datadir = zcl_package_copy_datadir(request->input, reply, ZSH_RECEIVE);
-    if (z->datadir && !z->file)
-        zcl_package_copy_fail(reply, "BAD_FILE", false, "file names the "
-                              ".z23share file to open", "");
-    else if (z->datadir && zrv_plan(z)) {
-        if (zcl_package_copy_confirmed(request->input)) {
-            zrv_commit(z);
-        } else {
-            char next[APP_COPY_BUILD_PATH + 32];
-            zrv_describe(z, "plan");
-            zcl_package_copy_push_root(&reply->data, "plan_id", z->plan_id);
-            (void)json_push_kv_bool(&reply->data, "executed", false);
-            (void)snprintf(next, sizeof(next), "z23 app open %s --yes",
-                           z->file);
-            (void)json_push_kv_str(&reply->data, "next", next);
-        }
-    }
-    if (z->verify_live)
-        zcl_command_reply_free(&z->verify);
     free(z);
 }

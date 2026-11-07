@@ -43,22 +43,40 @@ static const struct fd_verb k_fd_verbs[] = {
 
 /* ── the short fingerprint ───────────────────────────────────────────── */
 
+/* The first 8 bytes of SHA3-256(domain 0x00 || key) as 16 hex. */
+static void fd_key_digest_hex(const uint8_t key[33], char hex[17])
+{
+    uint8_t digest[32];
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, (const uint8_t *)FD_FINGERPRINT_DOMAIN,
+                   sizeof(FD_FINGERPRINT_DOMAIN));
+    sha3_256_write(&ctx, key, 33);
+    sha3_256_finalize(&ctx, digest);
+    zcl_hex_encode(digest, 8, hex);
+}
+
+bool zcl_app_publisher_namespace(const uint8_t key[33],
+                                 char out[ZCL_APP_NAMESPACE_LEN])
+{
+    char hex[17];
+    if (!key)
+        return false;
+    fd_key_digest_hex(key, hex);
+    (void)snprintf(out, ZCL_APP_NAMESPACE_LEN, "k%s", hex);
+    return true;
+}
+
 bool zcl_app_short_fingerprint(const char *pubkey_hex,
                                char out[ZCL_APP_SHORT_FINGERPRINT_LEN])
 {
-    uint8_t key[33], digest[32];
+    uint8_t key[33];
     char hex[17];
     out[0] = '\0';
     if (!pubkey_hex || strlen(pubkey_hex) != 66 ||
         !zcl_hex_decode(pubkey_hex, key, sizeof(key)))
         return false;
-    struct sha3_256_ctx ctx;
-    sha3_256_init(&ctx);
-    sha3_256_write(&ctx, (const uint8_t *)FD_FINGERPRINT_DOMAIN,
-                   sizeof(FD_FINGERPRINT_DOMAIN));
-    sha3_256_write(&ctx, key, sizeof(key));
-    sha3_256_finalize(&ctx, digest);
-    zcl_hex_encode(digest, 8, hex);
+    fd_key_digest_hex(key, hex);
     (void)snprintf(out, ZCL_APP_SHORT_FINGERPRINT_LEN, "%.4s-%.4s-%.4s-%.4s",
                    hex, hex + 4, hex + 8, hex + 12);
     return true;
@@ -227,7 +245,8 @@ static int fd_refused(struct fd_run *r)
 static void fd_print_plan(struct fd_run *r)
 {
     static const char *const keys[] = {
-        "name", "semver", "publisher", "copy_name", "copy", "destination",
+        "name", "semver", "publisher", "publishes_as", "copy_name", "copy",
+        "destination",
         "changes", "cache_hit", "image_sha3", "output", "saves_first",
         "makes_key", "seed"};
     (void)fprintf(r->out, "z23 app %s %s\n", r->door->verb, r->door->target);

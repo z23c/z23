@@ -75,6 +75,15 @@ bool zcl_app_front_door_try(const struct zcl_command_spec *spec,
 bool zcl_app_short_fingerprint(const char *pubkey_hex,
                                char out[ZCL_APP_SHORT_FINGERPRINT_LEN]);
 
+/* "k" and 16 hex of the same digest plus NUL. */
+#define ZCL_APP_NAMESPACE_LEN 18u
+
+/* The publisher namespace a key owns for app.share: "k" followed by the
+ * first 8 bytes of the short fingerprint's digest in lowercase hex. It
+ * always passes the release name-half grammar ([a-z0-9-], 1..63). */
+bool zcl_app_publisher_namespace(const uint8_t key[33],
+                                 char out[ZCL_APP_NAMESPACE_LEN]);
+
 /* app.list's `copies` array: each adopted copy's name and status (read with
  * the zcode.copies reader), then every other directory under
  * <datadir>/copies by name only (received copies). At most 16 rows. */

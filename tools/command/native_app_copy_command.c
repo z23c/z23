@@ -157,16 +157,6 @@ static bool zac_inner_plan(struct zac *z)
     return false;
 }
 
-static void zac_push_publisher(struct json_value *d, const char *full)
-{
-    char brief[ZCL_APP_SHORT_FINGERPRINT_LEN];
-    if (!full)
-        return;
-    (void)json_push_kv_str(d, "publisher_fingerprint", full);
-    if (zcl_app_short_fingerprint(full, brief))
-        (void)json_push_kv_str(d, "publisher", brief);
-}
-
 static void zac_describe(struct zac *z, const char *stage,
                          const struct zcl_command_reply *from)
 {
@@ -183,7 +173,7 @@ static void zac_describe(struct zac *z, const char *stage,
         if (v)
             (void)json_push_kv_str(d, keys[i], v);
     }
-    zac_push_publisher(d, zcl_app_inner_str(from, "publisher"));
+    zcl_app_push_publisher(d, zcl_app_inner_str(from, "publisher"));
     (void)json_push_kv_bool(d, "executed", false);
 }
 

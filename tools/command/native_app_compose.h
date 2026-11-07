@@ -41,6 +41,22 @@ const char *zcl_app_inner_str(const struct zcl_command_reply *r,
 void zcl_app_inner_fail(struct zcl_command_reply *reply,
                         const struct zcl_command_reply *inner, bool mutated);
 
+/* A fresh object input {kv[0]: kv[1], ...} of strings; NULL values are
+ * left out. `in` is initialized even on false (allocation). */
+bool zcl_app_input(struct json_value *in, const char *const *kv, size_t n);
+
+/* zcl_app_inner_call when `built` (the input was made), else an ALLOC
+ * refusal in `out`. `out` is always initialized and `in` always freed. */
+bool zcl_app_inner_call_built(const char *path, struct json_value *in,
+                              bool built, struct zcl_command_reply *out);
+
+/* Copy the caller's integer `day` input, when present, into `in`. */
+bool zcl_app_input_day(const struct json_value *from, struct json_value *in);
+
+/* publisher_fingerprint (the full 66 hex) and publisher (the short form)
+ * into `d`; nothing when `full` is NULL. */
+void zcl_app_push_publisher(struct json_value *d, const char *full);
+
 /* SHA3-256(domain 0x00 || each part with its NUL): a composite plan_id
  * bound to the inner plans it will confirm. NULL parts hash as "". */
 void zcl_app_plan_id(const char *domain, const char *const *parts,

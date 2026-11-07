@@ -4,6 +4,7 @@
 
 #include "command/native_app_compose.h"
 
+#include "command/native_app_front_door.h"
 #include "command/native_zcode_package_copy.h"
 #include "config/command_catalog.h"
 #include "kernel/command_registry.h"
@@ -85,6 +86,47 @@ void zcl_app_inner_fail(struct zcl_command_reply *reply,
                            "execute", inner->error.retryable,
                            mutated || inner->error.mutated,
                            inner->error.message, inner->error.evidence);
+}
+
+bool zcl_app_input(struct json_value *in, const char *const *kv, size_t n)
+{
+    json_init(in);
+    json_set_object(in);
+    for (size_t i = 0; i + 1u < n; i += 2)
+        if (kv[i + 1] && !json_push_kv_str(in, kv[i], kv[i + 1]))
+            return false;
+    return true;
+}
+
+bool zcl_app_inner_call_built(const char *path, struct json_value *in,
+                              bool built, struct zcl_command_reply *out)
+{
+    bool ok = false;
+    if (built) {
+        ok = zcl_app_inner_call(path, in, out, NULL);
+    } else {
+        zcl_command_reply_init(out, "zcl.command.inner.v1");
+        zcl_package_copy_fail(out, "ALLOC", false, "inner input", path);
+    }
+    json_free(in);
+    return ok;
+}
+
+bool zcl_app_input_day(const struct json_value *from, struct json_value *in)
+{
+    const struct json_value *day = json_get(from, "day");
+    return !day || day->type != JSON_INT ||
+           json_push_kv_int(in, "day", json_get_int(day));
+}
+
+void zcl_app_push_publisher(struct json_value *d, const char *full)
+{
+    char brief[ZCL_APP_SHORT_FINGERPRINT_LEN];
+    if (!full)
+        return;
+    (void)json_push_kv_str(d, "publisher_fingerprint", full);
+    if (zcl_app_short_fingerprint(full, brief))
+        (void)json_push_kv_str(d, "publisher", brief);
 }
 
 void zcl_app_plan_id(const char *domain, const char *const *parts,
