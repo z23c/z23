@@ -1,9 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: app.seed on a fixture checkout with a tiny stub app. Asserted:
  *   - staging the app into two different directories gives byte-identical
- *     trees with the same package root: app.mk becomes the Makefile, the
- *     repo file zcode-seed.def maps comes along and the app's root-level
- *     build/ store, app.mk and zcode-seed.def stay out;
+ *     trees with the same package root: the app's own Makefile is staged
+ *     as its package entrypoint, the repo file zcode-seed.def maps comes
+ *     along and the app's root-level build/ store and zcode-seed.def stay
+ *     out; the staged tree's print-app-closure names its four inputs;
  *   - app.seed (plan, then confirm) publishes a release whose package root
  *     is that root; seeding again returns the same release and writes
  *     nothing; a second owner (other HOME key, other datadir) seeds the same
@@ -11,7 +12,9 @@
  *   - the seeded release adopts into a copy that app.build builds, so the
  *     copy holds every input its build reads;
  *   - a '..', absolute or symlinked entry in zcode-seed.def, a collision
- *     with an app file and an app without app.mk are refused by name;
+ *     with an app file, an app without a Makefile, a Makefile without
+ *     print-app-closure and one naming an input the tree does not hold are
+ *     refused by name;
  *   - app.seed is owner authority: MCP refuses it, plan or confirm. */
 
 #include "test/test_core.h"
@@ -50,7 +53,8 @@ static const char k_meta[] =
     "  \"license\": \"Apache-2.0\",\n  \"include_dir\": \"include\",\n"
     "  \"source_dir\": \"src\",\n  \"dependencies\": []\n}\n";
 
-static const char k_app_mk[] =
+/* The stub's package entrypoint. */
+static const char k_makefile[] =
     "APP_CFLAGS = -std=c2x -O2 -Iinclude -Ihost\n"
     ".PHONY: app print-app-closure\n"
     "print-app-closure:\n"
@@ -60,6 +64,15 @@ static const char k_app_mk[] =
     "\tcc $(APP_CFLAGS) -MD -MF $(APP_OUT)/main.d -c src/main.c "
     "-o $(APP_OUT)/main.o\n"
     "\tcc -o $(APP_OUT)/app $(APP_OUT)/main.o\n";
+
+/* A Makefile with no package targets, and one whose closure names a file
+ * the staged tree does not hold. */
+static const char k_makefile_no_targets[] = "all:\n\t@true\n";
+static const char k_makefile_absent_input[] =
+    ".PHONY: app print-app-closure\n"
+    "print-app-closure:\n"
+    "\t@printf '%s\\n' Makefile src/main.c host/absent.h\n"
+    "app:\n\t@true\n";
 
 /* "../include/boost.h" lands in the depfile as src/../include/boost.h,
  * the spelling raylib's platform layer uses ("../external/RGFW/RGFW.h"). */
@@ -93,9 +106,9 @@ static bool asd_license(const char *dir)
 }
 
 /* One fixture app under repo/apps/<name> with the stub's files; def is its
- * zcode-seed.def text, NULL for none; with_mk adds app.mk. */
+ * zcode-seed.def text and mk its Makefile, NULL for none. */
 static bool asd_app(const struct asd_world *w, const char *name,
-                    const char *def, bool with_mk)
+                    const char *def, const char *mk)
 {
     char dir[ASD_PATH], sub[ASD_PATH];
     (void)snprintf(dir, sizeof(dir), "%s/apps/%s", w->repo, name);
@@ -105,7 +118,7 @@ static bool asd_app(const struct asd_world *w, const char *name,
               asf_put(dir, "include/boost.h", "#define BOOST 1\n") &&
               asf_put(dir, "src/main.c", k_main) &&
               asf_put(dir, "build/junk.o", "not package input\n") &&
-              (!with_mk || asf_put(dir, APP_SEED_FRAGMENT, k_app_mk)) &&
+              (!mk || asf_put(dir, APP_SEED_MAKEFILE, mk)) &&
               (!def || asf_put(dir, APP_SEED_DEF, def));
     (void)snprintf(sub, sizeof(sub), "%s/include/boost.h", dir);
     return ok && chmod(sub, 0640) == 0;
@@ -126,14 +139,17 @@ static bool asd_repo(struct asd_world *w)
     ok = ok && symlink("../outside", link) == 0;
     const char *good = "# host files the build reads\n\n"
                        "lib/shared/extra.h host/shared/extra.h\n";
-    return ok && asd_app(w, "tiny", good, true) &&
-           asd_app(w, "dotdot", "../outside/secret.h host/s.h\n", true) &&
-           asd_app(w, "treedots", "lib/shared/extra.h ../s.h\n", true) &&
-           asd_app(w, "absolute", "/etc/hostname host/h\n", true) &&
-           asd_app(w, "linkfile", "lib/link.h host/link.h\n", true) &&
-           asd_app(w, "linkdir", "linkdir/secret.h host/s.h\n", true) &&
-           asd_app(w, "collide", "lib/shared/extra.h src/main.c\n", true) &&
-           asd_app(w, "nomk", good, false);
+    const char *mk = k_makefile;
+    return ok && asd_app(w, "tiny", good, mk) &&
+           asd_app(w, "dotdot", "../outside/secret.h host/s.h\n", mk) &&
+           asd_app(w, "treedots", "lib/shared/extra.h ../s.h\n", mk) &&
+           asd_app(w, "absolute", "/etc/hostname host/h\n", mk) &&
+           asd_app(w, "linkfile", "lib/link.h host/link.h\n", mk) &&
+           asd_app(w, "linkdir", "linkdir/secret.h host/s.h\n", mk) &&
+           asd_app(w, "collide", "lib/shared/extra.h src/main.c\n", mk) &&
+           asd_app(w, "nomk", good, NULL) &&
+           asd_app(w, "notargets", good, k_makefile_no_targets) &&
+           asd_app(w, "absentinput", good, k_makefile_absent_input);
 }
 
 static bool asd_world_init(struct asd_world *w)
@@ -220,8 +236,9 @@ static int asd_staging_deterministic(struct asd_world *w)
         ASSERT(mkdir(deep, 0700) == 0);
         ASSERT(asd_stage(w, a, &sa) && asd_stage(w, b, &sb));
         ASSERT(sa.mapped == 1u && sb.mapped == 1u);
+        ASSERT(sa.closure == 4u && sb.closure == 4u);
         (void)snprintf(fa, sizeof(fa), "%s/Makefile", a);
-        (void)snprintf(fb, sizeof(fb), "%s/apps/tiny/app.mk", w->repo);
+        (void)snprintf(fb, sizeof(fb), "%s/apps/tiny/Makefile", w->repo);
         ASSERT(asd_same_file(fa, fb));
         (void)snprintf(fa, sizeof(fa), "%s/host/shared/extra.h", a);
         (void)snprintf(fb, sizeof(fb), "%s/host/shared/extra.h", b);
@@ -231,8 +248,6 @@ static int asd_staging_deterministic(struct asd_world *w)
                        w->repo);
         ASSERT(asd_same_file(fa, fb));
         (void)snprintf(fa, sizeof(fa), "%s/build", a);
-        ASSERT(stat(fa, &st) != 0);
-        (void)snprintf(fa, sizeof(fa), "%s/app.mk", a);
         ASSERT(stat(fa, &st) != 0);
         (void)snprintf(fa, sizeof(fa), "%s/" APP_SEED_DEF, a);
         ASSERT(stat(fa, &st) != 0);
@@ -364,10 +379,12 @@ static int asd_refusals(const struct asd_world *w)
 static int asd_refusals_app(const struct asd_world *w)
 {
     int failures = 0;
-    TEST("app.seed: a collision, a missing app.mk and an unknown app are "
-         "refused") {
+    TEST("app.seed: a collision, a missing Makefile, one without package "
+         "targets, an undelivered input and an unknown app are refused") {
         ASSERT(asd_refused(w, "collide", "SEED_COLLISION"));
-        ASSERT(asd_refused(w, "nomk", "NO_MAKE_FRAGMENT"));
+        ASSERT(asd_refused(w, "nomk", "NO_PACKAGE_ENTRYPOINT"));
+        ASSERT(asd_refused(w, "notargets", "NO_PACKAGE_TARGETS"));
+        ASSERT(asd_refused(w, "absentinput", "NO_PACKAGE_TARGETS"));
         ASSERT(asd_refused(w, "nosuchapp", "APP_UNKNOWN"));
         ASSERT(asd_refused(w, "../tiny", "BAD_APP"));
         PASS();

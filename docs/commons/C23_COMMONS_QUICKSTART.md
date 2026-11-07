@@ -291,7 +291,7 @@ too. `z23 zcode project init plan` proposes the key when it finds
 
    For an app that lives in this repository, one command runs this whole
    path for you (the `app.seed` leaf seeds it as your own signed package):
-   `z23 -datadir=/tmp/z23-apps app copy APP`. The README's app section
+   `z23 -datadir="$HOME/.z23-apps" app copy APP`. The README's app section
    walks the rest: save, build, open and share.
 
    Commit is local CAS admission, not network publication. The reply

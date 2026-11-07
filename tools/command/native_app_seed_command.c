@@ -3,12 +3,13 @@
  * release under the owner's own key, so a copy of it (and a friend's
  * received copy) holds everything its build reads.
  *
- * The tree is composed by command/app_seed.h in private scratch: apps/<app>,
- * the checkout files its zcode-seed.def maps, and app.mk as the Makefile
- * app.build runs. vcs_package_prepare derives the manifest, recipe and
- * unsigned release there, exactly as a publish does, with the owner's
- * publisher key (~/.z23/zcode_publisher.key, made 0600 on first use) at its
- * next sequence. No hex crosses any boundary: the wires go in memory to
+ * The tree is composed by command/app_seed.h in private scratch: apps/<app>
+ * with its own Makefile (the package entrypoint app.build runs) and the
+ * checkout files its zcode-seed.def maps; the tree's print-app-closure must
+ * name only files it holds. vcs_package_prepare derives the manifest,
+ * recipe and unsigned release there, exactly as a publish does, with the
+ * owner's publisher key (~/.z23/zcode_publisher.key, made 0600 on first
+ * use) at its next sequence. No hex crosses any boundary: the wires go in memory to
  * zcl_native_zcode_local_publication_commit, the lifecycle
  * zcode.package.publish.commit uses.
  *
@@ -61,6 +62,7 @@ struct asc {
     struct vcs_package_prepared prepared;
     bool prepared_live;
     size_t mapped;
+    size_t closure;
     bool existing;
     uint64_t existing_sequence;
     uint8_t release_id[32];
@@ -139,6 +141,7 @@ static bool asc_stage(struct asc *s)
     }
     if (app_seed_stage(s->source, s->app, s->stage, &st)) {
         s->mapped = st.mapped;
+        s->closure = st.closure;
         return true;
     }
     asc_fail(s, st.code, false, "the app could not be staged as a "
@@ -236,6 +239,7 @@ static void asc_describe(struct asc *s, const char *stage)
     (void)json_push_kv_int(d, "file_count",
                            (int64_t)s->prepared.manifest.count);
     (void)json_push_kv_int(d, "mapped_files", (int64_t)s->mapped);
+    (void)json_push_kv_int(d, "closure_files", (int64_t)s->closure);
     (void)json_push_kv_bool(d, "existing", s->existing);
     (void)json_push_kv_int(d, "publisher_sequence",
                            (int64_t)(s->existing

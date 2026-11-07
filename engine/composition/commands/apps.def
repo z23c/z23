@@ -373,14 +373,15 @@ ZCL_COMMAND_READY_COMMAND(
     "app names a directory under apps/ of the z23 checkout (source, default "
     "the checkout this runs in). The package tree is apps/<app> plus every "
     "checkout file apps/<app>/zcode-seed.def maps (one '<repo path> <tree "
-    "path>' per line; '..', absolute and symlinked paths refused) and "
-    "apps/<app>/app.mk as its Makefile, so a copy builds with app build "
-    "alone. Without confirm, returns package_root, release_id, file_count "
+    "path>' per line; '..', absolute and symlinked paths refused). The "
+    "app's own Makefile is its entrypoint: its print-app-closure, run "
+    "confined on the staged tree, must name only files the tree holds, so a "
+    "copy builds with app build alone. Without confirm, returns package_root, release_id, file_count "
     "and a plan_id. With that plan_id and confirm:true, signs with "
     "~/.z23/zcode_publisher.key (made 0600 on first use) and publishes "
     "through zcode.package.publish.commit. When this owner already holds a "
     "release of the same package root, it is returned with existing:true "
-    "and nothing is written. Nothing is built or executed.",
+    "and nothing is written. Nothing is built.",
     ZCL_COMMAND_LIST_BUDGET,
     "app,seed,package,release,publish,copy,remix,game,source",
     "zcl.app_seed.input.v1", "zcl.app_seed.v1",

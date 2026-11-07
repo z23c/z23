@@ -2,10 +2,12 @@
  *
  * purpose: compose the self-contained staging tree an in-repo app is seeded
  *          from (see command/app_seed.h). Copies go through the one tree
- *          walker, zcl_tree_copy, which refuses symlinks. */
+ *          walker, zcl_tree_copy, which refuses symlinks; the closure
+ *          query runs through app_build_make (lab_exec, nothing writable). */
 
 #include "command/app_seed.h"
 
+#include "command/app_build_make.h"
 #include "util/file_io.h"
 #include "util/file_tree_ops.h"
 #include "util/path_util.h"
@@ -59,9 +61,8 @@ bool app_seed_name_valid(const char *app)
  * the local stores no package root covers. */
 static bool as_skipped(const char *name)
 {
-    static const char *const skip[] = {".", "..", APP_SEED_FRAGMENT,
-                                       APP_SEED_DEF, "build", ".zvcs",
-                                       ".codeindex"};
+    static const char *const skip[] = {".", "..", APP_SEED_DEF, "build",
+                                       ".zvcs", ".codeindex"};
     for (size_t i = 0; i < sizeof(skip) / sizeof(skip[0]); i++)
         if (strcmp(name, skip[i]) == 0)
             return true;
@@ -106,22 +107,35 @@ static bool as_copy_app(struct as_ctx *c)
     return ok;
 }
 
-/* app.mk becomes the tree's Makefile. */
-static bool as_copy_fragment(struct as_ctx *c)
+/* The app's own Makefile is its package entrypoint; it is staged with the
+ * other app files. */
+static bool as_entrypoint(struct as_ctx *c)
 {
-    char src[AS_PATH], dst[AS_PATH];
+    char path[AS_PATH];
     struct stat st;
-    if (!zcl_path_join(src, sizeof(src), c->app_dir, APP_SEED_FRAGMENT) ||
-        lstat(src, &st) != 0 || !S_ISREG(st.st_mode))
-        return as_fail(c->out, "NO_MAKE_FRAGMENT", "%s is not a regular file "
-                       "with the print-app-closure and app targets", src);
-    if (!zcl_path_join(dst, sizeof(dst), c->dest, APP_SEED_MAKEFILE) ||
-        lstat(dst, &st) == 0)
-        return as_fail(c->out, "SEED_COLLISION", "the app already carries a "
-                       "Makefile; its make fragment is app.mk");
-    struct zcl_result r = zcl_tree_copy(src, dst, 0, NULL, NULL);
-    return r.ok || as_fail(c->out, "SEED_IO", "copying %s: %s", src,
-                           r.message);
+    if (zcl_path_join(path, sizeof(path), c->app_dir, APP_SEED_MAKEFILE) &&
+        lstat(path, &st) == 0 && S_ISREG(st.st_mode))
+        return true;
+    return as_fail(c->out, "NO_PACKAGE_ENTRYPOINT", "%s is not a regular "
+                   "file with the print-app-closure and app targets", path);
+}
+
+/* The staged tree answers its own `make print-app-closure` (confined,
+ * nothing writable, bounded) and holds every input it names, so a copy
+ * builds with nothing outside itself. */
+static bool as_closure(struct as_ctx *c)
+{
+    char why[320] = "";
+    struct app_build_closure closure;
+    const struct app_build_make m = {.copy_dir = c->dest,
+                                     .confine = app_build_make_confinable()};
+    if (!app_build_closure_query(&m, &closure, why, sizeof(why)))
+        return as_fail(c->out, "NO_PACKAGE_TARGETS", "%s/Makefile does not "
+                       "name a closure the staged package holds: %s",
+                       c->app_dir, why);
+    c->out->closure = closure.count;
+    app_build_closure_free(&closure);
+    return true;
 }
 
 /* ── zcode-seed.def entries ──────────────────────────────────────────── */
@@ -264,6 +278,6 @@ bool app_seed_stage(const char *repo_root, const char *app, const char *dest,
     if (!app_seed_name_valid(app))
         return as_fail(out, "BAD_APP", "app must be 1..%u of [a-z0-9_-], "
                        "starting with a letter or digit", APP_SEED_NAME_MAX);
-    return as_locate(&c, app) && as_copy_app(&c) && as_copy_fragment(&c) &&
-           as_copy_def(&c);
+    return as_locate(&c, app) && as_entrypoint(&c) && as_copy_app(&c) &&
+           as_copy_def(&c) && as_closure(&c);
 }

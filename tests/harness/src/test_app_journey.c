@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: the whole app journey with ONE owner key in ONE ISO week, every
  * step a `z23 app` front-door verb as a person types it, on a STUB in-repo
- * app (a fixture checkout whose apps/tinyapp has app.mk, one C file that
+ * app (a fixture checkout whose apps/tinyapp has a Makefile, one C file that
  * prints a line and waits for a signal). Two HOMEs and datadirs:
  *   A, in the checkout: copy tinyapp (no release yet, so app.seed publishes
  *      one signed by A's key), edit src/main.c, save, build, open (the stub
@@ -38,7 +38,8 @@ int test_app_journey(void)
 
 #define AJ_PATH 900
 
-static const char k_app_mk[] =
+/* The stub's package entrypoint. */
+static const char k_makefile[] =
     ".PHONY: app print-app-closure\n"
     "print-app-closure:\n"
     "\t@printf '%s\\n' Makefile include/tiny.h src/main.c\n"
@@ -110,7 +111,7 @@ static bool aj_checkout(struct aj_world *w)
            asf_put(app, "zcode-package.json", k_meta) &&
            asf_put(app, "include/tiny.h", "#define TINY_NAME \"tinyapp\"\n") &&
            asf_put(app, "src/main.c", k_main) &&
-           asf_put(app, "app.mk", k_app_mk);
+           asf_put(app, "Makefile", k_makefile);
 }
 
 static bool aj_world_init(struct aj_world *w)
