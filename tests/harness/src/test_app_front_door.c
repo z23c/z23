@@ -879,6 +879,32 @@ static int afd_changed_dependencies(struct afd_world *w)
     return failures;
 }
 
+/* The confirm half makes the owner's signing key on first use; the front
+ * door tells the person once, with the path, and not on the next copy. */
+static int afd_key_note_after_confirm(void)
+{
+    int failures = 0;
+    TEST("app front door: the confirm reports a first-use signing key once") {
+        struct afd_world k;
+        struct asf_door first, second;
+        char want[AFD_PATH + 64];
+        ASSERT(afd_world_init(&k));
+        afd_door(k.a_home, k.a_datadir, "copy", "tinyapp",
+                 ZCL_CLI_CONFIRM_YES, &first);
+        ASSERT_EQ(first.rc, 0);
+        (void)snprintf(want, sizeof(want), "made your signing key at %s/"
+                       ".z23/zcode_publisher.key", k.a_home);
+        ASSERT(strstr(first.text, "made your signing key at ") != NULL);
+        ASSERT(strstr(first.text, want) != NULL);
+        afd_door(k.a_home, k.a_datadir, "copy", "tinyapp",
+                 ZCL_CLI_CONFIRM_YES, &second);
+        ASSERT(strstr(second.text, "made your signing key") == NULL);
+        (void)test_rm_rf_recursive(k.root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_app_front_door(void);
 int test_app_front_door(void)
 {
@@ -909,6 +935,8 @@ int test_app_front_door(void)
         failures += afd_b_plan_shows_root(&w);
         failures += afd_b_receives(&w);
     }
+    if (!failures)
+        failures += afd_key_note_after_confirm();
     printf("app front door journey: A %d commands, %d hex pastes; B %d "
            "commands, %d hex pastes (baseline 45 commands, 15 JSON inputs, "
            "3 hex pastes)\n", w.commands_a, w.hex_a, w.commands_b, w.hex_b);
