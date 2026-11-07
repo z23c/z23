@@ -560,6 +560,32 @@ static int case_handlers(struct al_fx *f)
         ASSERT_EQ(reply.next_count, 1u);
         ASSERT_STR_EQ(reply.next[0].command, "app.list");
     PASS(); }
+    TEST("app.list says what can be opened and offers open and copy of the "
+         "first launchable app") {
+        struct json_value empty;
+        struct zcl_command_request list_request = {.input = &empty,
+                                                   .view = "normal"};
+        json_init(&empty);
+        json_set_object(&empty);
+        list_request.invoked_name = "app.list";
+        zcl_command_reply_init(&reply, "zcl.app_list.v1");
+        zcl_native_handle_app_list_launchable(&list_request, &reply);
+        const struct json_value *launchable = json_get(&reply.data,
+                                                       "launchable");
+        ASSERT(launchable && launchable->num_children >= 1);
+        /* the built-in catalog's first entry, not read back from the reply */
+        ASSERT_STR_EQ(json_get_str(json_get(&launchable->children[0], "id")),
+                      "skycombat");
+        const char *summary = json_get_str(json_get(&reply.data, "summary"));
+        ASSERT(summary && strstr(summary, "launchable") != NULL &&
+               strstr(summary, "z23 app open") != NULL);
+        ASSERT_EQ(reply.next_count, 2u);
+        ASSERT_STR_EQ(reply.next[0].command, "app.open");
+        ASSERT(strstr(reply.next[0].input_json, "\"skycombat\"") != NULL);
+        ASSERT_STR_EQ(reply.next[1].command, "app.copy");
+        ASSERT(strstr(reply.next[1].input_json, "\"skycombat\"") != NULL);
+        json_free(&empty);
+    PASS(); }
 _test_next:;
     zcl_command_reply_free(&reply);
     json_free(&input);

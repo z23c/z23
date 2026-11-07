@@ -952,6 +952,8 @@ static int test_help_start_here_block(void)
                  strstr(shortb, "z23 card") &&
                  strstr(shortb, "z23 discover help") &&
                  strstr(shortb, "--help-all"));
+    APPCTX_CHECK("--help names the app front door",
+                 strstr(shortb, "z23 app ") != NULL);
     APPCTX_CHECK("--help-all keeps the full command list and node options",
                  strstr(allb, "Agent/operator API commands") &&
                  strstr(allb, "-datadir=<dir>") &&

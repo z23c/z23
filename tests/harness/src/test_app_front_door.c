@@ -66,6 +66,9 @@ struct afd_world {
     char a_copy[AFD_PATH];
     char share[AFD_PATH];
     char image_a[65];
+    char hint[1024];        /* the no-TTY plan's pasted next: command */
+    char b_root[65];        /* A's package_root, from bundle.verify */
+    char b_fp[PLUGIN_HEX_PUBLIC_KEY + 1]; /* A's full fingerprint, same */
     char saved_home[1024];
     char saved_cwd[1024];
     int commands_a, commands_b, hex_a, hex_b;
@@ -325,6 +328,54 @@ static void afd_door(const char *home, const char *datadir, const char *verb,
     asf_door_run(home, home, datadir, verb, target, mode, run);
 }
 
+/* The command a "next:" line pastes, up to the end of its line. */
+static bool afd_hint_of(const char *text, char *out, size_t cap)
+{
+    const char *at = strstr(text, "next: z23 ");
+    size_t n;
+    if (!at)
+        return false;
+    at += strlen("next: ");
+    n = strcspn(at, "\n");
+    if (n == 0 || n >= cap)
+        return false;
+    memcpy(out, at, n);
+    out[n] = '\0';
+    return true;
+}
+
+/* The hint as a person pastes it: split on spaces into
+ * z23 -datadir=DIR app VERB TARGET [--yes], then run in `home`. The datadir
+ * comes from the pasted words, never from the world. */
+static bool afd_run_hint(const char *hint, const char *home,
+                         struct asf_door *run)
+{
+    char buf[1024], *word[8];
+    size_t n = 0;
+    char *save = NULL;
+    (void)snprintf(buf, sizeof(buf), "%s", hint);
+    for (char *w = strtok_r(buf, " ", &save); w && n < 8;
+         w = strtok_r(NULL, " ", &save))
+        word[n++] = w;
+    if (n != 6 || strcmp(word[0], "z23") != 0 ||
+        strncmp(word[1], "-datadir=", 9) != 0 ||
+        strcmp(word[2], "app") != 0 || strcmp(word[5], "--yes") != 0)
+        return false;
+    afd_door(home, word[1] + 9, word[3], word[4], ZCL_CLI_CONFIRM_YES, run);
+    return run->rc == 0;
+}
+
+/* The "  next: ..." line of a finished verb, equal to `want`. */
+static bool afd_next_is(const struct asf_door *run, const char *want)
+{
+    char line[1024];
+    (void)asf_door_line(run, "next", line, sizeof(line));
+    if (strcmp(line, want) == 0)
+        return true;
+    printf("  [next was \"%s\", wanted \"%s\"]\n", line, want);
+    return false;
+}
+
 /* app.run.copy plan on a copy: the build record's image_sha3. */
 static bool afd_open_plan(const char *datadir, const char *copy,
                           struct afd_leaf *l)
@@ -411,6 +462,13 @@ static int afd_plan_only(struct afd_world *w)
         ASSERT(strstr(run.text, "--yes") != NULL);
         ASSERT(afd_same(before, w->a_home));
         free(before);
+        /* The hint names the datadir, so it works pasted from any shell. */
+        char want[AFD_PATH + 64];
+        ASSERT(afd_hint_of(run.text, w->hint, sizeof(w->hint)));
+        (void)snprintf(want, sizeof(want),
+                       "z23 -datadir=%s app copy tinyapp --yes",
+                       w->a_datadir);
+        ASSERT_STR_EQ(w->hint, want);
         PASS();
     } _test_next:;
     return failures;
@@ -425,11 +483,15 @@ static int afd_a_copies_and_saves(struct afd_world *w)
         struct afd_leaf l;
         struct stat st;
         struct json_value data;
-        afd_door(w->a_home, w->a_datadir, "copy", "tinyapp",
-                 ZCL_CLI_CONFIRM_YES, &run);
-        ASSERT_EQ(run.rc, 0);
+        char want[AFD_PATH + 128];
+        /* the pasted hint from the plan-only run, verbatim */
+        ASSERT(afd_run_hint(w->hint, w->a_home, &run));
         w->commands_a++;
         ASSERT(stat(w->a_copy, &st) == 0 && S_ISDIR(st.st_mode));
+        (void)snprintf(want, sizeof(want),
+                       "edit the files in %s, then: z23 -datadir=%s app "
+                       "save tinyapp-1", w->a_copy, w->a_datadir);
+        ASSERT(afd_next_is(&run, want));
         json_init(&data);
         json_set_object(&data);
         zcl_app_list_copies(w->a_datadir, &data);
@@ -462,10 +524,15 @@ static int afd_a_builds_and_opens(struct afd_world *w)
          "image hash is refused") {
         struct asf_door run;
         struct afd_leaf l;
+        char want[AFD_PATH + 64];
         afd_door(w->a_home, w->a_datadir, "build", "tinyapp-1",
                  ZCL_CLI_CONFIRM_YES, &run);
         ASSERT_EQ(run.rc, 0);
         w->commands_a++;
+        (void)snprintf(want, sizeof(want),
+                       "z23 -datadir=%s app open tinyapp-1", w->a_datadir);
+        ASSERT(afd_next_is(&run, want));
+        ASSERT(strstr(run.text, "accept_execution") == NULL);
         ASSERT(afd_open_plan(w->a_datadir, "tinyapp-1", &l));
         ASSERT(l.out.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT(strlen(afd_get(&l, "image_sha3")) == 64);
@@ -545,6 +612,18 @@ static int afd_a_shares(struct afd_world *w)
         ASSERT(stat(w->share, &st) == 0 && S_ISREG(st.st_mode));
         ASSERT(strstr(run.text, "tinyapp-1.z23share") != NULL);
         ASSERT(asf_short_fingerprint(run.text));
+        /* Renamed under A's key: the copy must be rebuilt before it opens
+         * (app.run.copy refuses STALE_BUILD, it does not plan a build). */
+        char line[1024], want[AFD_PATH + 64];
+        (void)asf_door_line(&run, "next", line, sizeof(line));
+        ASSERT(strstr(line, "your friend runs: z23 app open "
+                            "FILE.z23share") != NULL);
+        ASSERT(strstr(line, "your copy now publishes as k") != NULL);
+        (void)snprintf(want, sizeof(want),
+                       "; run z23 -datadir=%s app build tinyapp-1 before "
+                       "opening it again", w->a_datadir);
+        ASSERT(strstr(line, want) != NULL);
+        ASSERT(strstr(line, "before your next open") == NULL);
         PASS();
     } _test_next:;
     return failures;
@@ -605,6 +684,47 @@ static int afd_b_refusals(struct afd_world *w)
     return failures;
 }
 
+/* What A's share file says its root and publisher are, read by the verify
+ * leaf directly: the expectation for what B must be shown, never taken from
+ * B's own front-door reply. */
+static int afd_b_plan_shows_root(struct afd_world *w)
+{
+    int failures = 0;
+    TEST("B: the open plan of a share file shows A's full fingerprint and "
+         "exact package root, and a hint that pastes") {
+        struct asf_door run;
+        struct afd_leaf v;
+        char want[AFD_PATH + 64], line[PLUGIN_HEX_PUBLIC_KEY + 8];
+        afd_open_leaf(&v);
+        (void)json_push_kv_str(&v.in, "file", w->share);
+        ASSERT(afd_exec("zcode.package.bundle.verify", &v));
+        ASSERT_EQ((int)v.out.status, (int)ZCL_COMMAND_STATUS_PASSED);
+        (void)snprintf(w->b_root, sizeof(w->b_root), "%s",
+                       afd_get(&v, "package_root"));
+        (void)snprintf(w->b_fp, sizeof(w->b_fp), "%s",
+                       afd_get(&v, "publisher_fingerprint"));
+        afd_close_leaf(&v);
+        ASSERT_EQ((int)strlen(w->b_root), 64);
+        ASSERT_EQ((int)strlen(w->b_fp), PLUGIN_HEX_PUBLIC_KEY);
+
+        afd_door(w->b_home, w->b_datadir, "open", w->share,
+                 ZCL_CLI_CONFIRM_PLAN_ONLY, &run);
+        ASSERT_EQ(run.rc, 0);
+        (void)asf_door_line(&run, "package_root", line, sizeof(line));
+        ASSERT_STR_EQ(line, w->b_root);
+        (void)asf_door_line(&run, "publisher_fingerprint", line,
+                            sizeof(line));
+        ASSERT_STR_EQ(line, w->b_fp);
+        ASSERT(afd_hint_of(run.text, w->hint, sizeof(w->hint)));
+        (void)snprintf(want, sizeof(want),
+                       "z23 -datadir=%s app open %s --yes", w->b_datadir,
+                       w->share);
+        ASSERT_STR_EQ(w->hint, want);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int afd_b_receives(struct afd_world *w)
 {
     int failures = 0;
@@ -618,6 +738,8 @@ static int afd_b_receives(struct afd_world *w)
         w->commands_b++;
         ASSERT(run.asked);
         ASSERT(asf_short_fingerprint(run.question));
+        ASSERT(strstr(run.question, w->b_fp) != NULL);
+        ASSERT(strstr(run.question, w->b_root) != NULL);
         ASSERT(asf_alive_then_stop(asf_door_pid(run.text)));
         ASSERT(afd_open_plan(w->b_datadir, "tinyapp-1", &l));
         ASSERT(l.out.status == ZCL_COMMAND_STATUS_PASSED);
@@ -652,6 +774,7 @@ int test_app_front_door(void)
     }
     if (!failures) {
         failures += afd_b_refusals(&w);
+        failures += afd_b_plan_shows_root(&w);
         failures += afd_b_receives(&w);
     }
     printf("app front door journey: A %d commands, %d hex pastes; B %d "

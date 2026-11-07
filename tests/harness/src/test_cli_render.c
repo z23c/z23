@@ -1209,7 +1209,7 @@ static int test_start_hint(void)
         ASSERT(n > 0);
         ASSERT_EQ(n, strlen(out));
         ASSERT(strcmp(out, "start: z23 wiki \xC2\xB7 z23 lab run hello.c "
-                           "\xC2\xB7 z23 card\n") == 0);
+                           "\xC2\xB7 z23 app \xC2\xB7 z23 card\n") == 0);
         ASSERT(!cr_has_esc(out));
 
         e.human = false;
@@ -1417,7 +1417,7 @@ static int test_e2e_bare_start_line(const char *home)
         (void)cr_run(argv, cr_build_envp(home, "ZCL_HUMAN=1", "NO_COLOR=1"),
                      out, sizeof(out));
         ASSERT(strstr(out, "\nstart: z23 wiki \xC2\xB7 z23 lab run hello.c "
-                           "\xC2\xB7 z23 card\n") != NULL);
+                           "\xC2\xB7 z23 app \xC2\xB7 z23 card\n") != NULL);
         (void)cr_run(argv, cr_build_envp(home, "ZCL_HUMAN=0", NULL), out,
                      sizeof(out));
         ASSERT(strstr(out, "start:") == NULL);

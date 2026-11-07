@@ -139,6 +139,39 @@ static int aj_mcp_authority(void)
     return failures;
 }
 
+/* The first copy plan in an empty HOME seeds, and the seed plan makes the
+ * owner's key (package_root and plan_id derive from it): the front door
+ * must say so instead of claiming nothing changed. */
+static int aj_first_plan(struct aj_world *w)
+{
+    int failures = 0;
+    TEST("app journey: the first copy plan in an empty HOME says it made "
+         "the signing key") {
+        static struct asf_door run;
+        char key[AJ_PATH], want[AJ_PATH + 96];
+        struct stat st;
+        (void)snprintf(key, sizeof(key), "%s/.z23/zcode_publisher.key",
+                       w->j.a_home);
+        ASSERT(stat(key, &st) != 0);
+        asf_door_run(w->j.a_home, w->j.source, w->j.a_datadir, "copy",
+                     w->j.app, ZCL_CLI_CONFIRM_PLAN_ONLY, &run);
+        ASSERT_EQ(run.rc, 0);
+        ASSERT(stat(key, &st) == 0 && S_ISREG(st.st_mode));
+        (void)snprintf(want, sizeof(want), "made your signing key at %s "
+                       "(first use); nothing else changed", key);
+        ASSERT(strstr(run.text, want) != NULL);
+        ASSERT(strstr(run.text, "nothing changed") == NULL);
+        /* the key exists now, so the second plan changes nothing at all */
+        asf_door_run(w->j.a_home, w->j.source, w->j.a_datadir, "copy",
+                     w->j.app, ZCL_CLI_CONFIRM_PLAN_ONLY, &run);
+        ASSERT_EQ(run.rc, 0);
+        ASSERT(strstr(run.text, "made your signing key") == NULL);
+        ASSERT(strstr(run.text, "nothing changed") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int aj_a(struct aj_world *w)
 {
     int failures = 0;
@@ -199,7 +232,7 @@ int test_app_journey(void)
         PASS();
     } _test_next:;
     if (!failures)
-        failures += aj_a(&w);
+        failures += aj_first_plan(&w) + aj_a(&w);
     if (!failures)
         failures += aj_b(&w);
     printf("app journey: A typed %d commands (copy, save, build, open, "
