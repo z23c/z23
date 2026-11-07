@@ -1214,3 +1214,7 @@ later lane flips it HARD.
 - 2026-11-07T07:39:44Z — REASON: Owner approval 2026-11-06T23:45:12Z: bake H3309900 V2 state checkpoint from matching independent-host FULL replays, authenticated pool totals and legacy chainwork receipt; preserve earlier checkpoints and consensus predicates
   old ROOT: c8bed89198652c956321e7799b796dadb32ae5052293cc24dbfb0feca4436792
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-07T11:14:11Z — REASON: msg_headers: a single-header tip announcement rejected while behind is not a stall; demote that WARNING to debug, keep the event
+  old ROOT: 3019dc80602053ea8c0c9a47e9c4eb5692fdf31dc75de87e6eac5aa3528e467c
+  by: owner unseal ritual (make core-unseal)

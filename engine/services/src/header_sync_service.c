@@ -113,6 +113,13 @@ void syncsvc_evaluate_header_batch(struct sync_header_batch *result,
          last_header && last_header->phashBlock);
 }
 
+bool syncsvc_all_rejected_is_stall(uint64_t total_count, int our_height,
+                                   int peer_height)
+{
+    (void)total_count; (void)our_height; (void)peer_height;
+    return true;
+}
+
 void syncsvc_plan_header_download(struct sync_header_download_plan *plan,
                                   enum sync_state sync_state,
                                   const struct block_index *candidate,

@@ -2583,9 +2583,32 @@ static int test_sync_service_periodic_tip_evaluator(void)
     return failures;
 }
 
+static int test_sync_service_all_rejected_stall_policy(void)
+{
+    int failures = 0;
+
+    TEST("sync_service: a lone rejected tip announcement while behind is not a stall") {
+        /* One header, we are behind: a BIP 130 announcement that cannot
+         * connect yet. Not a stall. */
+        ASSERT(!syncsvc_all_rejected_is_stall(1, 100, 200));
+        /* One header but we are level with or ahead of the peer: real. */
+        ASSERT(syncsvc_all_rejected_is_stall(1, 200, 200));
+        ASSERT(syncsvc_all_rejected_is_stall(1, 300, 200));
+        /* A multi-header batch is a stall even while behind. */
+        ASSERT(syncsvc_all_rejected_is_stall(2, 100, 200));
+        ASSERT(syncsvc_all_rejected_is_stall(160, 100, 200));
+        /* Empty batch is never reached; it must not crash. */
+        (void)syncsvc_all_rejected_is_stall(0, 100, 200);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 int test_sync_service(void)
 {
     int failures = 0;
+    failures += test_sync_service_all_rejected_stall_policy();
     failures += test_sync_service_begin_sync();
     failures += test_sync_service_rejects_inbound_sync();
     failures += check_sync_service_configured_inbound();

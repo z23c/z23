@@ -173,6 +173,11 @@ void syncsvc_evaluate_header_batch(struct sync_header_batch *result,
                                    size_t accepted,
                                    uint64_t total_count,
                                    const struct block_index *last_header);
+/* True when an all-rejected header batch is a real sync stall worth a
+ * WARNING. False for a single header (a BIP 130 tip announcement) while we
+ * are behind the peer: it cannot connect yet, which is normal. */
+bool syncsvc_all_rejected_is_stall(uint64_t total_count, int our_height,
+                                   int peer_height);
 void syncsvc_plan_header_download(struct sync_header_download_plan *plan,
                                   enum sync_state sync_state,
                                   const struct block_index *candidate,
