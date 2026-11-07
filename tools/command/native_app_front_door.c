@@ -325,24 +325,22 @@ static void fd_print_done(struct fd_run *r)
         (void)fprintf(r->out, "  %s\n", fd_str(r, "preview"));
 }
 
-/* What a plan that stops here changed: nothing, unless the plan made the
- * owner's signing key on first use (the package root derives from it). */
-static const char *fd_changed(const struct fd_run *r, char *buf, size_t cap)
+/* The confirm made the owner's signing key on first use: say so once. */
+static void fd_key_note(struct fd_run *r)
 {
     const struct json_value *made = json_get(&r->reply.data, "key_created");
     if (!made || made->type != JSON_BOOL || !json_get_bool(made) ||
         !fd_str(r, "key_path"))
-        return "nothing changed";
-    (void)snprintf(buf, cap, "made your signing key at %s (first use); "
-                   "nothing else changed", fd_str(r, "key_path"));
-    return buf;
+        return;
+    (void)fprintf(r->out, "made your signing key at %s (first use); it signs "
+                  "what you share, so back it up\n", fd_str(r, "key_path"));
 }
 
 /* Plan printed; now plan-only, a no, or the confirm. */
 static int fd_decide(struct fd_run *r)
 {
-    char q[1024], hint[FD_PATH + 128], note[FD_PATH + 96];
-    const char *changed = fd_changed(r, note, sizeof(note));
+    char q[1024], hint[FD_PATH + 128];
+    const char *changed = "nothing changed";
     if (r->door->confirm.mode == ZCL_CLI_CONFIRM_PLAN_ONLY) {
         if (!zcl_app_hint(hint, sizeof(hint), r->door->datadir,
                           "%s %s --yes", r->door->verb, r->door->target))
@@ -356,9 +354,6 @@ static int fd_decide(struct fd_run *r)
         (void)fprintf(r->out, "%s\n", changed);
         return 1;
     }
-    if (changed == note)
-        (void)fprintf(r->out, "made your signing key at %s (first use)\n",
-                      fd_str(r, "key_path"));
     if (!fd_confirm_input(r)) {
         (void)fprintf(r->out, "z23 app %s: the plan returned no plan_id\n",
                       r->door->verb);
@@ -367,6 +362,7 @@ static int fd_decide(struct fd_run *r)
     zcl_command_reply_free(&r->reply);
     if (!zcl_app_inner_call(r->verb->path, &r->in, &r->reply, NULL))
         return fd_refused(r);
+    fd_key_note(r);
     fd_print_done(r);
     return 0;
 }

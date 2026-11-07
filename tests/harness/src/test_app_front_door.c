@@ -886,18 +886,19 @@ static int afd_key_note_after_confirm(const struct afd_world *w)
     int failures = 0;
     TEST("app front door: the confirm reports a first-use signing key once") {
         struct asf_door first, second;
-        char want[AFD_PATH + 64], home[AFD_PATH];
-        (void)snprintf(home, sizeof(home), "%s/fresh", w->root);
-        ASSERT(mkdir(home, 0700) == 0);
-        afd_door(home, w->a_datadir, "copy", "tinyapp",
-                 ZCL_CLI_CONFIRM_YES, &first);
+        char want[AFD_PATH + 64], home[AFD_PATH], datadir[AFD_PATH];
+        (void)snprintf(home, sizeof(home), "%s/keyhome", w->root);
+        (void)snprintf(datadir, sizeof(datadir), "%s/keydata", w->root);
+        ASSERT(mkdir(home, 0700) == 0 && mkdir(datadir, 0700) == 0);
+        /* run from this checkout, so the first copy seeds apps/skycombat */
+        asf_door_run(home, w->saved_cwd, datadir, "copy", "skycombat",
+                     ZCL_CLI_CONFIRM_YES, &first);
         ASSERT_EQ(first.rc, 0);
         (void)snprintf(want, sizeof(want), "made your signing key at %s/"
                        ".z23/zcode_publisher.key", home);
-        ASSERT(strstr(first.text, "made your signing key at ") != NULL);
         ASSERT(strstr(first.text, want) != NULL);
-        afd_door(home, w->a_datadir, "copy", "tinyapp",
-                 ZCL_CLI_CONFIRM_YES, &second);
+        asf_door_run(home, w->saved_cwd, datadir, "copy", "skycombat",
+                     ZCL_CLI_CONFIRM_YES, &second);
         ASSERT(strstr(second.text, "made your signing key") == NULL);
         PASS();
     } _test_next:;

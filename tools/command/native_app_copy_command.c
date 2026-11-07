@@ -52,6 +52,8 @@ struct zac {
     struct zcl_command_reply inner; /* its plan reply */
     bool inner_live;
     char inner_plan[65];
+    bool key_made;                /* the seed confirm made the owner key */
+    char key_path[ZAC_PATH];
     uint8_t plan_id[32];
 };
 
@@ -210,6 +212,19 @@ static void zac_plan_reply(struct zac *z)
         (void)json_push_kv_str(&z->reply->data, "next", next);
 }
 
+/* The seed confirm may have made the owner's key; the adopt reply that
+ * replaces it does not say so, so keep the fact for the commit reply. */
+static void zac_note_key(struct zac *z)
+{
+    const struct json_value *made = json_get(&z->inner.data, "key_created");
+    const char *path = zcl_app_inner_str(&z->inner, "key_path");
+    if (!made || made->type != JSON_BOOL || !json_get_bool(made) || !path ||
+        snprintf(z->key_path, sizeof(z->key_path), "%s", path) >=
+            (int)sizeof(z->key_path))
+        return;
+    z->key_made = true;
+}
+
 /* Seed confirm, then the seeded release's adopt plan as the inner plan. */
 static bool zac_seed_then_plan(struct zac *z)
 {
@@ -221,6 +236,7 @@ static bool zac_seed_then_plan(struct zac *z)
         zcl_app_inner_fail(z->reply, &z->inner, false);
         return false;
     }
+    zac_note_key(z);
     const char *id = zcl_app_inner_str(&z->inner, "release_id");
     uint8_t raw[32];
     struct vcs_package_release r;
@@ -264,6 +280,10 @@ static void zac_confirm(struct zac *z)
     }
     char hint[ZAC_PATH + 96], next[2 * ZAC_PATH + 160];
     zac_describe(z, "commit", &z->inner);
+    if (z->key_made) {
+        (void)json_push_kv_bool(&z->reply->data, "key_created", true);
+        (void)json_push_kv_str(&z->reply->data, "key_path", z->key_path);
+    }
     (void)json_push_kv_bool(&z->reply->data, "seeded", seeded);
     if (zcl_app_hint(hint, sizeof(hint),
                      zcl_package_copy_str(z->input, "datadir"), "save %s",
