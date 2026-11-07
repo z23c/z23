@@ -8,12 +8,13 @@
  * checkout files its zcode-seed.def maps; the tree's print-app-closure must
  * name only files it holds. vcs_package_prepare derives the manifest,
  * recipe and unsigned release there, exactly as a publish does, with the
- * owner's publisher key (~/.z23/zcode_publisher.key, made 0600 on first
+ * owner's publisher key (~/.z23/zcode_publisher.key, made 0600 by confirm on first
  * use) at its next sequence. No hex crosses any boundary: the wires go in memory to
  * zcl_native_zcode_local_publication_commit, the lifecycle
  * zcode.package.publish.commit uses.
  *
- * Plan (writes nothing but the owner key on first use) returns the package
+ * Plan (writes nothing; a missing owner key is only announced, and made
+ * by confirm) returns the package
  * root, the file count, the release id and a plan_id. When this owner
  * already holds a release of the same package root in this datadir, that
  * release is the answer: confirm writes nothing and says existing:true, so
@@ -24,6 +25,7 @@
 #include "command/native_command.h"
 
 #include "command/app_seed.h"
+#include "command/native_app_personalize_command.h"
 #include "command/native_devagent.h"
 #include "command/native_zcode_package_copy.h"
 
@@ -57,6 +59,7 @@ struct asc {
     char stage[PLATFORM_TEMP_PATH_MAX];
     char key_path[ASC_PATH];
     bool key_created;
+    bool key_pending; /* no owner key yet: the confirm half makes it */
     char chain_id[VCS_PACKAGE_RELEASE_CHAIN_ID_MAX + 1u];
     struct vcs_package_prepare_options options;
     struct vcs_package_prepared prepared;
@@ -115,9 +118,41 @@ static bool asc_inputs(struct asc *s)
     return true;
 }
 
-/* The owner's key is made only once the app has staged, so an unknown or
- * unstageable app leaves $HOME untouched. */
-static bool asc_owner(struct asc *s)
+/* Read-only: the owner's existing key, if any. A missing key sets
+ * key_pending and stands a placeholder public key in for the plan, so the
+ * plan half creates nothing under $HOME. */
+static bool asc_owner_probe(struct asc *s)
+{
+    char hex[67];
+    bool exists = false;
+    if (!app_personalize_key_probe(s->reply, s->key_path, sizeof(s->key_path),
+                                   hex, &exists))
+        return false;
+    s->key_pending = !exists;
+    if (exists &&
+        !zcl_hex_decode_lower(hex, s->options.publisher_pubkey,
+                              sizeof(s->options.publisher_pubkey))) {
+        asc_fail(s, "PUBLISHER_KEY_REFUSED", false, "the owner's publisher "
+                 "key must be a private (0600) 32-byte key file", s->key_path);
+        return false;
+    }
+    if (!exists) {
+        memset(s->options.publisher_pubkey, 0,
+               sizeof(s->options.publisher_pubkey));
+        s->options.publisher_pubkey[0] = 0x02;
+        s->options.publisher_pubkey[sizeof(s->options.publisher_pubkey) - 1u] =
+            0x01;
+    }
+    return zcl_package_copy_next_sequence(s->datadir,
+                                          s->options.publisher_pubkey,
+                                          &s->options.publisher_sequence,
+                                          s->reply);
+}
+
+/* Confirm half only: make the owner's key (an existing one is reused
+ * unchanged), then the real public key and sequence replace the plan's
+ * placeholder. */
+static bool asc_owner_create(struct asc *s)
 {
     return zcl_package_copy_owner_key(s->key_path, sizeof(s->key_path),
                                       s->options.publisher_pubkey,
@@ -212,17 +247,29 @@ static void asc_plan_id(struct asc *s)
                    sizeof(ASC_PLAN_DOMAIN));
     sha3_256_write(&sha, (const uint8_t *)s->app, strlen(s->app) + 1u);
     sha3_256_write(&sha, s->prepared.package_root, 32);
-    sha3_256_write(&sha, s->release_id, 32);
+    /* Without a key the release id is not known yet: it is left out. */
+    if (!s->key_pending)
+        sha3_256_write(&sha, s->release_id, 32);
     sha3_256_finalize(&sha, s->plan_id);
 }
 
 static bool asc_derive(struct asc *s)
 {
-    if (!asc_inputs(s) || !asc_stage(s) || !asc_owner(s) || !asc_prepare(s) ||
-        !asc_existing(s))
+    if (!asc_inputs(s) || !asc_stage(s) || !asc_owner_probe(s) ||
+        !asc_prepare(s) || (!s->key_pending && !asc_existing(s)))
         return false;
     asc_plan_id(s);
     return true;
+}
+
+/* Confirm of a plan made before the owner had a key: the plan matched
+ * without one, so make the key now and prepare the release under it. */
+static bool asc_rederive(struct asc *s)
+{
+    vcs_package_prepared_free(&s->prepared);
+    s->prepared_live = false;
+    s->key_pending = false;
+    return asc_owner_create(s) && asc_prepare(s) && asc_existing(s);
 }
 
 /* ── replies ─────────────────────────────────────────────────────────── */
@@ -237,7 +284,10 @@ static void asc_describe(struct asc *s, const char *stage)
     (void)json_push_kv_str(d, "app", s->app);
     (void)json_push_kv_str(d, "source", s->source);
     zcl_package_copy_push_root(d, "package_root", s->prepared.package_root);
-    zcl_package_copy_push_root(d, "release_id", s->release_id);
+    if (s->key_pending)
+        (void)json_push_kv_str(d, "release_id", "");
+    else
+        zcl_package_copy_push_root(d, "release_id", s->release_id);
     (void)json_push_kv_int(d, "file_count",
                            (int64_t)s->prepared.manifest.count);
     (void)json_push_kv_int(d, "mapped_files", (int64_t)s->mapped);
@@ -249,7 +299,11 @@ static void asc_describe(struct asc *s, const char *stage)
                            (int64_t)(s->existing
                                          ? s->existing_sequence
                                          : s->options.publisher_sequence));
-    (void)json_push_kv_str(d, "publisher", fingerprint);
+    (void)json_push_kv_str(d, "publisher", s->key_pending ? "" : fingerprint);
+    if (s->key_pending)
+        (void)json_push_kv_str(d, "key_note", "a new publisher key will be "
+                               "created at the key_path, 0600, when you "
+                               "confirm; the fingerprint is shown then");
     (void)json_push_kv_str(d, "key_path", s->key_path);
     (void)json_push_kv_bool(d, "key_created", s->key_created);
     zcl_package_copy_push_root(d, "plan_id", s->plan_id);
@@ -343,6 +397,8 @@ static void asc_confirm(struct asc *s)
 {
     if (!zcl_package_copy_plan_matches(s->input, s->plan_id, s->reply,
                                        ASC_COMMAND))
+        return;
+    if (s->key_pending && !asc_rederive(s))
         return;
     if (!s->existing) {
         asc_publish(s);
