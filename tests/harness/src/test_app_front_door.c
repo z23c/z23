@@ -1052,10 +1052,10 @@ int test_app_front_door(void)
         failures += afd_key_note_after_confirm(&w);
     if (!failures)
         failures += afd_quiet_logs(&w);
-    if (!failures)
+    if (!failures) {
         failures += afd_receive_missing(&w);
-    if (!failures)
         failures += afd_list_quiet(&w);
+    }
     printf("app front door journey: A %d commands, %d hex pastes; B %d "
            "commands, %d hex pastes (baseline 45 commands, 15 JSON inputs, "
            "3 hex pastes)\n", w.commands_a, w.hex_a, w.commands_b, w.hex_b);
