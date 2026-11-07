@@ -126,6 +126,25 @@ if [ "$MODE" = "--self-test" ]; then
     [ "$(doctor_hooks_shape /checkout/elsewhere)" = no ] ||
         { echo "doctor selftest: FAIL — unknown hooks path was accepted" >&2; exit 1; }
 
+    # (6) A fresh --recurse-submodules clone has no armed hooks, no vendor
+    #     archives and no compile db, yet `make z23` builds it (vendor-ready
+    #     builds missing archives; hooks and clangd's db are not build
+    #     inputs). Such a tree must show no ACTION line for them.
+    fresh="$tmp/fresh"
+    mkdir -p "$fresh/tools/scripts"
+    cp "$TSV" "$fresh/tools/scripts/vendor_prereqs.tsv"
+    cp "$VENDOR_SH" "$fresh/tools/scripts/build_vendor.sh"
+    cp "$self" "$fresh/tools/scripts/doctor.sh"
+    out="$(GIT_CEILING_DIRECTORIES="$tmp" ZCL_DOCTOR_TSV="$fresh/tools/scripts/vendor_prereqs.tsv" \
+        bash "$fresh/tools/scripts/doctor.sh" 2>&1)"
+    if grep -Eq '^[[:space:]]*ACTION[[:space:]]+(git hooks|vendor/lib|compile db)' <<<"$out"; then
+        echo "doctor selftest: FAIL — fresh-clone state prints an ACTION that make z23 does not need" >&2
+        grep -E '^[[:space:]]*ACTION' <<<"$out" >&2
+        exit 1
+    fi
+    grep -Eq '^[[:space:]]*note[[:space:]]+vendor/lib' <<<"$out" ||
+        { echo "doctor selftest: FAIL — fresh clone lost the optional vendor note" >&2; exit 1; }
+
     echo "doctor selftest: PASS"
     exit 0
 fi
