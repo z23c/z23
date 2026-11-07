@@ -33,6 +33,24 @@ static _Atomic int64_t g_age_at_detect;
 static _Atomic int g_test_remedy_calls;
 #endif
 
+static bool live_outbound(const struct p2p_node *n);
+
+/* True while the FlySync header hold is active and an outbound peer is
+ * streaming the held rung bundle with bytes inside the shared progress window
+ * (the predicate the peer-drop rules use). The tip cannot move meanwhile, so
+ * the lag is expected and must not page; a stalled fetch, no hold, or a hold
+ * with no fetch makes this false and the lag is reported as before. */
+static bool held_fetch_progressing(struct connman *cm)
+{
+    bool progressing = false;
+    zcl_mutex_lock(&cm->manager.cs_nodes);
+    for (size_t i = 0; i < cm->manager.num_nodes && !progressing; i++)
+        progressing = live_outbound(cm->manager.nodes[i]) &&
+                      state_offer_peer_serving_held_fetch(cm->manager.nodes[i]);
+    zcl_mutex_unlock(&cm->manager.cs_nodes);
+    return progressing;
+}
+
 static bool detect_sync_violation_lag(void)
 {
     struct connman *cm = sync_monitor_connman();
@@ -66,6 +84,8 @@ static bool detect_sync_violation_lag(void)
     }
     int64_t age = now - first;
     if (age < SYNC_VIOLATION_SECS)
+        return false;
+    if (held_fetch_progressing(cm))
         return false;
 
     atomic_store(&g_local_tip_at_detect, local);

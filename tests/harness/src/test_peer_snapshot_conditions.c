@@ -458,6 +458,7 @@ static int run_sync_violation_quiet_during_held_fetch_case(void)
     /* The fetch stalls: no byte for the whole progress window. */
     sol_client_test_age_progress(STATE_OFFER_FETCH_PROGRESS_WINDOW_MS);
     ok = ok && !state_offer_peer_serving_held_fetch(&server);
+    fake_clock_set(&clock, 7610);  /* next poll (poll_secs 5) */
     condition_engine_tick();
     ok = ok && sync_violation_lag_test_remedy_calls() == 1;
     ok = ok && idle.disconnect && server.disconnect;
