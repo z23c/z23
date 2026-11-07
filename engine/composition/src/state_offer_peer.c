@@ -201,6 +201,20 @@ static bool peer_held(struct p2p_node **nodes, size_t held, uint64_t peer)
         if (boot_zcode_swarm_peer_id(nodes[i]) == peer) return true;
     return false;
 }
+/* Retained link offers are keyed by peer id - 1; drop those of peers that are
+ * no longer connected. Only called when the connection snapshot succeeded. */
+static void purge_gone_offers(struct p2p_node **nodes, size_t held)
+{
+    int64_t live[STATE_OFFER_STORE_MAX * 4u];
+    size_t n = 0;
+    for (size_t i = 0; i < held; ++i) {
+        uint64_t peer = boot_zcode_swarm_peer_id(nodes[i]);
+        if (!peer) continue;
+        if (n == sizeof(live) / sizeof(live[0])) return; /* cannot prove who is gone */
+        live[n++] = (int64_t)(peer - 1);
+    }
+    (void)state_offer_store_purge_gone_link_peers(live, n);
+}
 /* Drain every eligible connection, then release client and server state for
  * connections that are gone. A failed snapshot proves nothing is gone. */
 void state_offer_peer_pump(struct msg_processor *mp)
@@ -217,6 +231,7 @@ void state_offer_peer_pump(struct msg_processor *mp)
     bool drop_receiving = receiving && known && !peer_held(nodes, held, receiving);
     for (size_t i = 0; i < serving_count; ++i)
         if (!known || peer_held(nodes, held, serving[i])) serving[i] = 0;
+    if (known) purge_gone_offers(nodes, held);
     zcl_mutex_lock(&nm->cs_nodes);
     for (size_t i = 0; i < held; ++i)
         p2p_node_release(nodes[i]);

@@ -656,10 +656,45 @@ bool state_offer_dump_state_json(struct json_value *out, const char *key)
 
 /* ── Dead-peer purge ─────────────────────────────────────────────────── */
 
+static bool id_is_live(const int64_t *live_ids, size_t live_count, int64_t id)
+{
+    for (size_t i = 0; live_ids && i < live_count; i++)
+        if (live_ids[i] == id)
+            return true;
+    return false;
+}
+
+/* A link offer that nothing is fetching and whose peer is not live. */
+static bool slot_purgeable(size_t i, const int64_t *live_ids, size_t live_count)
+{
+    return g_offer_used[i] && g_offers[i].peer_link && !g_offer_fetching[i] &&
+           !id_is_live(live_ids, live_count, g_offers[i].peer_id);
+}
+
+/* Drop every purgeable offer of the peer in slot `first`; returns the count. */
+static uint32_t purge_peer(size_t first, const int64_t *live_ids, size_t live_count)
+{
+    int64_t peer = g_offers[first].peer_id;
+    uint32_t dropped = 0;
+    for (size_t i = first; i < STATE_OFFER_STORE_MAX; i++) {
+        if (!slot_purgeable(i, live_ids, live_count) || g_offers[i].peer_id != peer)
+            continue;
+        g_offer_used[i] = false;
+        memset(&g_offers[i], 0, sizeof(g_offers[i]));
+        dropped++;
+    }
+    LOG_INFO(SOS_SUBSYS,
+             "peer %lld is gone — purged %u retained offer(s) from it",
+             (long long)peer, (unsigned)dropped);
+    return dropped;
+}
+
 uint32_t state_offer_store_purge_gone_link_peers(const int64_t *live_ids,
                                                  size_t live_count)
 {
-    (void)live_ids;
-    (void)live_count;
-    return 0;
+    uint32_t total = 0;
+    for (size_t i = 0; i < STATE_OFFER_STORE_MAX; i++)
+        if (slot_purgeable(i, live_ids, live_count))
+            total += purge_peer(i, live_ids, live_count);
+    return total;
 }
