@@ -495,6 +495,24 @@ static bool app_preview_arg(char *dst, size_t cap, const char *src,
     return n > 0 && (size_t)n < cap;
 }
 
+/* Fill out->capture_path = <dir>/<file> and every argument of row b. */
+static bool app_preview_fill(const struct app_builtin *b, const char *dir,
+                             const char *file, struct app_launch_preview *out)
+{
+    int n = snprintf(out->capture_path, sizeof(out->capture_path), "%s/%s",
+                     dir, file);
+    if (n <= 0 || (size_t)n >= sizeof(out->capture_path))
+        return false;
+    for (unsigned a = 0; b->preview_argv[a]; a++) {
+        if (a >= APP_LAUNCH_ARGS_MAX ||
+            !app_preview_arg(out->args[a], sizeof(out->args[a]),
+                             b->preview_argv[a], out->capture_path))
+            return false;
+        out->arg_count = a + 1;
+    }
+    return true;
+}
+
 /* The compiled-in PREVIEW argv of the built-in app `app_id`, with its "%s"
  * capture slot filled by <dir>/<preview_file>. The path comes from the
  * caller's own copy directory, never from user input. False when the app has
@@ -521,18 +539,9 @@ bool app_launch_preview_as(const char *app_id, const char *dir,
         if (strcmp(b->id, app_id) != 0 || !b->preview_argv[0] ||
             !b->preview_file[0])
             continue;
-        int n = snprintf(out->capture_path, sizeof(out->capture_path),
-                         "%s/%s", dir, file ? file : b->preview_file);
-        if (n <= 0 || (size_t)n >= sizeof(out->capture_path))
+        if (!app_preview_fill(b, dir, file ? file : b->preview_file, out)) {
+            memset(out, 0, sizeof(*out));
             return false;
-        for (unsigned a = 0; b->preview_argv[a]; a++) {
-            if (a >= APP_LAUNCH_ARGS_MAX ||
-                !app_preview_arg(out->args[a], sizeof(out->args[a]),
-                                 b->preview_argv[a], out->capture_path)) {
-                memset(out, 0, sizeof(*out));
-                return false;
-            }
-            out->arg_count = a + 1;
         }
         return out->arg_count > 0;
     }
