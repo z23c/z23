@@ -33,6 +33,7 @@ extern char **environ;
 #endif
 #if defined(__APPLE__)
 #include <libproc.h>
+#include <sys/proc.h> /* SZOMB */
 #include <sys/proc_info.h>
 #endif
 
