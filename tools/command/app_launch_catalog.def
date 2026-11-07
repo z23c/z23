@@ -20,7 +20,10 @@
  *   preview_argv  ZCL_APP_ARGV(...) the PREVIEW run of a built copy's image
  *                 (never used by `app open`); one "%s" slot takes the capture
  *                 path, or ZCL_APP_ARGV() for no preview
- *   preview_file  capture file name inside the copy's directory, "" for none
+ *   preview_file  the DEFAULT capture file name app_launch_preview uses, "" for
+ *                 none; app build instead writes the capture to
+ *                 <datadir>/app_build/previews/<image sha3>.png through
+ *                 app_launch_preview_as
  *
  * Launch commands are data compiled into this binary or read from the
  * operator's own apps.tsv. They never come from the board, wiki, packages

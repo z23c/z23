@@ -740,6 +740,17 @@ static int case_preview(void)
         ASSERT(!app_launch_preview("skycombat", "", &p));
         ASSERT(!app_launch_preview(NULL, "/copies/x", &p));
     PASS(); }
+    TEST("app_launch_preview_as refuses an empty or slashed file name and "
+         "zeroes out; a plain name joins the directory") {
+        memset(&p, 0xA5, sizeof(p));
+        ASSERT(!app_launch_preview_as("skycombat", "/store/pv", "", &p));
+        ASSERT(p.arg_count == 0 && p.capture_path[0] == '\0');
+        memset(&p, 0xA5, sizeof(p));
+        ASSERT(!app_launch_preview_as("skycombat", "/store/pv", "a/b.png", &p));
+        ASSERT(p.arg_count == 0 && p.capture_path[0] == '\0');
+        ASSERT(app_launch_preview_as("skycombat", "/store/pv", "x1.png", &p));
+        ASSERT(strcmp(p.capture_path, "/store/pv/x1.png") == 0);
+    PASS(); }
 _test_next:
     return failures;
 }
