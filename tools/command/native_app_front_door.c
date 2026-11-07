@@ -467,3 +467,13 @@ bool zcl_app_front_door_try(const struct zcl_command_spec *spec,
     *rc = zcl_app_front_door_run(&door);
     return true;
 }
+
+/* ── --yes on a leaf that asks nothing ───────────────────────────────── */
+
+bool zcl_app_front_door_ignores_flag(const struct zcl_command_spec *spec,
+                                     const char *flag_key)
+{
+    return spec && flag_key && strncmp(spec->path, "app.", 4) == 0 &&
+           spec->confirmation == ZCL_COMMAND_CONFIRM_NONE &&
+           (strcmp(flag_key, "yes") == 0 || strcmp(flag_key, "y") == 0);
+}

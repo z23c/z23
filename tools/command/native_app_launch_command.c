@@ -9,6 +9,7 @@
 
 #include "command/native_app_launch.h"
 #include "command/native_app_front_door.h"
+#include "command/native_app_compose.h"
 
 #include "command/native_command.h"
 #include "base/safe_alloc.h"
@@ -16,6 +17,8 @@
 #include "json/json.h"
 #include "platform/process_lock.h"
 #include "util/log_macros.h"
+
+#define APP_LIST_HINT_MAX 640u
 
 #include <errno.h>
 #include <stdio.h>
@@ -428,6 +431,10 @@ static void app_list_entry(const struct app_launch_env *env,
     (void)json_push_kv(item, "aliases", &aliases);
     json_free(&aliases);
     (void)json_push_kv_str(item, "kind", "desktop");
+    char open_cmd[APP_LIST_HINT_MAX];
+    if (zcl_app_hint(open_cmd, sizeof(open_cmd),
+                     zcl_native_command_datadir(), "open %s", e->id))
+        (void)json_push_kv_str(item, "open", open_cmd);
     (void)json_push_kv_str(item, "source", e->builtin ? "builtin" : "apps.tsv");
     (void)json_push_kv_bool(item, "installed", e->installed);
     (void)json_push_kv_str(item, "raise", e->raise_sigusr1 ? "sigusr1"
@@ -472,6 +479,10 @@ static void app_list_guide(const struct app_launch_registry *reg,
                            "z23 app copy NAME makes your own editable copy");
     if (reg->count == 0)
         return;
+    char text[APP_LIST_HINT_MAX];
+    if (zcl_app_hint(text, sizeof(text), zcl_native_command_datadir(),
+                     "open %s", reg->entries[0].id))
+        (void)json_push_kv_str(&reply->data, "next", text);
     if (snprintf(input, sizeof(input), "{\"name\":\"%s\"}",
                  reg->entries[0].id) < (int)sizeof(input))
         (void)zcl_command_reply_add_next(reply, "app.open", input,

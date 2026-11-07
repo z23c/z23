@@ -1879,6 +1879,61 @@ static void render_lab_run(struct buf *b, const struct zcl_cli_render_env *e,
     }
 }
 
+/* z23 app list for a human: the apps `app open` can start come first, each
+ * with the command that opens it; then the manifest-only apps and the
+ * copies. The canonical JSON keeps every field. */
+static void app_list_names(char *out, size_t cap,
+                           const struct json_value *arr, const char *field)
+{
+    size_t len = 0;
+    out[0] = '\0';
+    for (size_t i = 0; arr && arr->type == JSON_ARR && i < arr->num_children;
+         i++) {
+        const struct json_value *it = json_at(arr, i);
+        const char *s = field ? json_get_str(json_get(it, field))
+                              : json_get_str(it);
+        int n = snprintf(out + len, cap - len, "%s%s", len ? ", " : "",
+                         s ? s : "");
+        if (n < 0 || (size_t)n >= cap - len)
+            break;
+        len += (size_t)n;
+    }
+}
+
+static void render_app_list(struct buf *b, const struct zcl_cli_render_env *e,
+                            const struct json_value *root)
+{
+    const struct json_value *data = json_get(root, "data");
+    const struct json_value *launch = json_get(data, "launchable");
+    char names[256];
+    emit_header(b, e, "apps you can open");
+    buf_putc(b, '\n');
+    for (size_t i = 0; launch && launch->type == JSON_ARR &&
+                       i < launch->num_children; i++) {
+        const struct json_value *it = json_at(launch, i);
+        const char *id = json_get_str(json_get(it, "id"));
+        const char *cmd = json_get_str(json_get(it, "open"));
+        emit_kv(b, e, 10, id ? id : "?",
+                json_get_bool(json_get(it, "installed"))
+                    ? "installed" : "not installed yet");
+        if (cmd && cmd[0])
+            emit_kv_command(b, e, 10, "open", cmd);
+    }
+    app_list_names(names, sizeof(names), json_get(data, "apps"), NULL);
+    if (names[0]) {
+        buf_putc(b, '\n');
+        emit_kv(b, e, 10, "other apps", names);
+    }
+    app_list_names(names, sizeof(names), json_get(data, "copies"), "name");
+    if (names[0])
+        emit_kv(b, e, 10, "your copies", names);
+    const char *next = json_get_str(json_get(data, "next"));
+    if (next && next[0]) {
+        buf_putc(b, '\n');
+        emit_kv_command(b, e, 10, "next", next);
+    }
+}
+
 /* Recipe renderers for ok=true envelopes, keyed by command path. */
 typedef void (*recipe_fn)(struct buf *, const struct zcl_cli_render_env *,
                           const struct json_value *);
@@ -1893,6 +1948,7 @@ static const struct {
     { "yardsale.guide", render_yardsale_guide },
     { "core.network.peers.list", render_peer_list },
     { "lab.run", render_lab_run },
+    { "app.list", render_app_list },
 };
 
 static recipe_fn recipe_for(const char *command_path)

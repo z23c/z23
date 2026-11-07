@@ -4479,6 +4479,9 @@ static enum nc_main_flag_result nc_main_apply_flag(
         nc_main_apply_flag_group3, nc_main_apply_flag_group1,
         nc_main_apply_flag_group4, nc_main_apply_flag_group2,
     };
+    if (!value && !nc_main_leaf_declares_key(st, flag_key) &&
+        zcl_app_front_door_ignores_flag(st->spec, flag_key))
+        return NC_FLAG_OK;
     for (size_t g = 0; g < sizeof(groups) / sizeof(groups[0]); g++) {
         enum nc_main_flag_result r = groups[g](flag_key, value, st, why,
                                                why_cap);

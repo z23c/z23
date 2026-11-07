@@ -68,6 +68,11 @@ bool zcl_app_front_door_try(const struct zcl_command_spec *spec,
                             const char *const *words, size_t count,
                             size_t consumed, const char *datadir, int *rc);
 
+/* True for --yes / -y on an app leaf that asks nothing (confirmation none),
+ * so one rule works for every app command: the flag is a no-op there. */
+bool zcl_app_front_door_ignores_flag(const struct zcl_command_spec *spec,
+                                     const char *flag_key);
+
 /* The short publisher fingerprint people compare by voice or chat: the
  * first 8 bytes of SHA3-256("zcl.app_fingerprint.v1" 0x00 || the 33-byte
  * key) as four dash-separated groups of four hex. False for a key that is
