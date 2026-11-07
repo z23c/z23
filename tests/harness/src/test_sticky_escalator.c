@@ -1281,7 +1281,7 @@ static int t11h_terminal_refold_flysync_hold(void)
     char why[320] = {0};
     flysync_island_set_requested(true);
     SE_CHECK("T11H: FlySync holds header sync",
-             flysync_island_boot_gate(fx.dir, &fx.ms, why, sizeof(why)) &&
+             flysync_island_boot_gate(fx.dir, NULL, why, sizeof(why)) &&
              flysync_island_holds_header_sync());
     SE_CHECK("T11H: held terminal rung holds and does not arm",
              sticky_escalator_test_drive(0, t + 38) ==
