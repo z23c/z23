@@ -205,7 +205,7 @@ static bool peer_held(struct p2p_node **nodes, size_t held, uint64_t peer)
  * no longer connected. Only called when the connection snapshot succeeded. */
 static void purge_gone_offers(struct p2p_node **nodes, size_t held)
 {
-    int64_t live[STATE_OFFER_STORE_MAX * 4u];
+    int64_t live[STATE_OFFER_STORE_MAX * 4u] = {0};
     size_t n = 0;
     for (size_t i = 0; i < held; ++i) {
         uint64_t peer = boot_zcode_swarm_peer_id(nodes[i]);
