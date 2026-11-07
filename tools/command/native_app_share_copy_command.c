@@ -348,8 +348,8 @@ static void zsh_commit_next(const struct zsh *z, char *next, size_t cap)
     char friend_cmd[APP_COPY_BUILD_PATH + 32];
     char build[APP_COPY_BUILD_PATH + 64];
     const char *base = strrchr(z->output, '/');
-    (void)zcl_app_hint(friend_cmd, sizeof(friend_cmd), NULL, "open %s",
-                       base ? base + 1 : z->output);
+    (void)zcl_app_hint_neutral(friend_cmd, sizeof(friend_cmd), NULL, "open %s",
+                              base ? base + 1 : z->output);
     int n = snprintf(next, cap, "send the file; your friend needs %s; your "
                      "friend runs: %s", ZSH_FRIEND_NEEDS, friend_cmd);
     if (n <= 0 || (size_t)n >= cap || z->opens_now ||

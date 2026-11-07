@@ -192,35 +192,46 @@ void zcl_app_set_program(const char *argv0)
     (void)snprintf(g_app_program, sizeof(g_app_program), "%s", argv0);
 }
 
-/* The program word, then one space: what the user ran, else plain z23. */
-static bool app_hint_program(char **out, size_t *left)
+/* The program word, then one space: what the user ran, else plain z23.
+ * `neutral` always uses plain z23 (a command for another machine). */
+static bool app_hint_program(char **out, size_t *left, bool neutral)
 {
-    bool ok = g_app_program[0] ? app_hint_word(out, left, g_app_program)
-                               : app_hint_bytes(out, left, "z23", 3);
+    bool ok = (g_app_program[0] && !neutral)
+                  ? app_hint_word(out, left, g_app_program)
+                  : app_hint_bytes(out, left, "z23", 3);
     return ok && app_hint_bytes(out, left, " ", 1);
+}
+
+static bool app_hint_v(char *out, size_t cap, bool neutral, const char *datadir,
+                       const char *fmt, va_list ap)
+{
+    if (!out || !cap) return false;
+    out[0] = '\0';
+    char *at = out; size_t left = cap;
+    bool ok = fmt && app_hint_program(&at, &left, neutral);
+    if (ok && datadir && datadir[0])
+        ok = app_hint_bytes(&at, &left, "-datadir=", 9) &&
+            app_hint_word(&at, &left, datadir) && app_hint_bytes(&at, &left, " ", 1);
+    ok = ok && app_hint_bytes(&at, &left, "app ", 4);
+    ok = ok && app_hint_tail(&at, &left, fmt, ap);
+    if (!ok) out[0] = '\0';
+    return ok;
 }
 
 bool zcl_app_hint(char *out, size_t cap, const char *datadir, const char *fmt,
                   ...)
 {
-    if (!out || !cap) return false;
-    out[0] = '\0';
-    char *at = out; size_t left = cap;
-    bool ok = fmt && app_hint_program(&at, &left);
-    if (ok && datadir && datadir[0])
-        ok = app_hint_bytes(&at, &left, "-datadir=", 9) &&
-            app_hint_word(&at, &left, datadir) && app_hint_bytes(&at, &left, " ", 1);
-    ok = ok && app_hint_bytes(&at, &left, "app ", 4);
     va_list ap; va_start(ap, fmt);
-    ok = ok && app_hint_tail(&at, &left, fmt, ap);
+    bool ok = app_hint_v(out, cap, false, datadir, fmt, ap);
     va_end(ap);
-    if (!ok) out[0] = '\0';
     return ok;
 }
 
-/* STUB */
 bool zcl_app_hint_neutral(char *out, size_t cap, const char *datadir,
                           const char *fmt, ...)
 {
-    return zcl_app_hint(out, cap, datadir, "%s", fmt);
+    va_list ap; va_start(ap, fmt);
+    bool ok = app_hint_v(out, cap, true, datadir, fmt, ap);
+    va_end(ap);
+    return ok;
 }
