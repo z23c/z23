@@ -1075,6 +1075,50 @@ static int peer_link_retry(void)
     return failures;
 }
 
+static int gone_link_peer_offers_are_purged(void)
+{
+    int failures = 0;
+    TEST_CASE("offers from a gone link peer are purged, a live peer's kept") {
+        struct state_offer_v1 gone, live, legacy;
+        struct state_offer_record sel;
+        struct state_offer_store_status st;
+        uint8_t ip[16];
+        const int64_t alive[] = {8};
+        state_offer_store_reset();
+        an_ip(ip, 3);
+        make_offer(&gone, 900000, 900000, 0x20);
+        make_offer(&live, 800000, 800000, 0x21);
+        make_offer(&legacy, 700000, 700000, 0x22);
+        ASSERT_EQ(state_offer_store_record_link(&gone, 7, 1000), STATE_OFFER_STORE_KEPT);
+        ASSERT_EQ(state_offer_store_record_link(&live, 8, 1000), STATE_OFFER_STORE_KEPT);
+        ASSERT_EQ(state_offer_store_record(&legacy, ip, 8033, 9, 1000), STATE_OFFER_STORE_KEPT);
+        state_offer_store_note_link_fetching(gone.content_digest, 7);
+        state_offer_store_note_link_retry(gone.content_digest, 7, 1000);
+        /* Peer 7 is gone; its offer is the newest and would be retried. */
+        ASSERT_EQ(state_offer_store_purge_gone_link_peers(alive, 1), 1u);
+        state_offer_store_status_get(&st);
+        ASSERT_EQ(st.offers_retained, 2u);
+        ASSERT_EQ(state_offer_store_decide(31000, &sel), STATE_OFFER_DECIDE_FETCH);
+        ASSERT(sel.peer_link && sel.peer_id == 8);
+        ASSERT_EQ(sel.offer.bundle_height, 800000);
+        /* The freed slot takes a new offer; a second purge finds nothing. */
+        ASSERT_EQ(state_offer_store_purge_gone_link_peers(alive, 1), 0u);
+        ASSERT_EQ(state_offer_store_record_link(&gone, 7, 32000), STATE_OFFER_STORE_KEPT);
+        /* An offer being fetched is never purged under the fetch. */
+        state_offer_store_note_link_fetching(gone.content_digest, 7);
+        ASSERT_EQ(state_offer_store_purge_gone_link_peers(alive, 1), 0u);
+        /* No link peers at all: the link offers go, the legacy one stays. */
+        state_offer_store_note_link_retry(gone.content_digest, 7, 32000);
+        ASSERT_EQ(state_offer_store_purge_gone_link_peers(NULL, 0), 2u);
+        state_offer_store_status_get(&st);
+        ASSERT_EQ(st.offers_retained, 1u);
+        ASSERT_EQ(state_offer_store_decide(90000, &sel), STATE_OFFER_DECIDE_FETCH);
+        ASSERT(!sel.peer_link && sel.peer_id == 9);
+    } TEST_END
+    state_offer_store_reset();
+    return failures;
+}
+
 static int peer_link_strike_eviction(void)
 {
     int failures = 0;
@@ -1380,6 +1424,7 @@ int test_state_offer_store(void)
     failures += endpoint_required();
     failures += peer_link_retry();
     failures += peer_link_strike_eviction();
+    failures += gone_link_peer_offers_are_purged();
     failures += peer_link_inflight();
     failures += peer_link_replay_rotation();
     failures += staged_bundle_prevents_repeat_fetch();

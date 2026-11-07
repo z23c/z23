@@ -165,6 +165,16 @@ void state_offer_store_note_bad(const uint8_t content_digest[32],
 bool state_offer_store_digest_is_bad(const uint8_t content_digest[32]);
 uint32_t state_offer_store_peer_strikes(int64_t peer_id);
 
+/* Drop every peer-link offer whose peer id is not in live_ids (the ids of the
+ * peer-link connections that exist right now, in the same id space the offers
+ * were recorded under). A gone link peer never returns under that id, so its
+ * offers would otherwise be retried every 30 s and hold a slot forever. Offers
+ * being fetched right now and legacy endpoint offers are left alone. One log
+ * line per purged peer. Returns the number of offers dropped. Strikes and bad
+ * digests are untouched. */
+uint32_t state_offer_store_purge_gone_link_peers(const int64_t *live_ids,
+                                                 size_t live_count);
+
 /* The decision. `out` is filled only for STATE_OFFER_DECIDE_FETCH. The plain
  * form decides for a FRESH node (no marker, height 0); the service uses _for. */
 enum state_offer_decision state_offer_store_decide(

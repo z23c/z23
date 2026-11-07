@@ -653,3 +653,13 @@ bool state_offer_dump_state_json(struct json_value *out, const char *key)
         json_push_kv_str(out, "fallback_reason", s.fallback_reason);
     return true;
 }
+
+/* ── Dead-peer purge ─────────────────────────────────────────────────── */
+
+uint32_t state_offer_store_purge_gone_link_peers(const int64_t *live_ids,
+                                                 size_t live_count)
+{
+    (void)live_ids;
+    (void)live_count;
+    return 0;
+}
