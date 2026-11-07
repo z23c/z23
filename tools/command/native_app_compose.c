@@ -187,7 +187,17 @@ void zcl_app_set_program(const char *argv0)
 {
     g_app_program[0] = '\0';
     if (!argv0 || !argv0[0] || strlen(argv0) >= sizeof(g_app_program)) return;
+    for (const unsigned char *p = (const unsigned char *)argv0; *p; ++p)
+        if (*p < 32 || *p == 127) return; /* not one pasteable shell word */
     (void)snprintf(g_app_program, sizeof(g_app_program), "%s", argv0);
+}
+
+/* The program word, then one space: what the user ran, else plain z23. */
+static bool app_hint_program(char **out, size_t *left)
+{
+    bool ok = g_app_program[0] ? app_hint_word(out, left, g_app_program)
+                               : app_hint_bytes(out, left, "z23", 3);
+    return ok && app_hint_bytes(out, left, " ", 1);
 }
 
 bool zcl_app_hint(char *out, size_t cap, const char *datadir, const char *fmt,
@@ -196,14 +206,7 @@ bool zcl_app_hint(char *out, size_t cap, const char *datadir, const char *fmt,
     if (!out || !cap) return false;
     out[0] = '\0';
     char *at = out; size_t left = cap;
-    bool ok = fmt != NULL;
-    if (ok && g_app_program[0]) {
-        /* A program name the shell cannot take as one word falls back to z23. */
-        ok = app_hint_word(&at, &left, g_app_program);
-        if (!ok) { at = out; left = cap; out[0] = '\0'; }
-    }
-    if (!g_app_program[0] || !ok) ok = fmt && app_hint_bytes(&at, &left, "z23", 3);
-    ok = ok && app_hint_bytes(&at, &left, " ", 1);
+    bool ok = fmt && app_hint_program(&at, &left);
     if (ok && datadir && datadir[0])
         ok = app_hint_bytes(&at, &left, "-datadir=", 9) &&
             app_hint_word(&at, &left, datadir) && app_hint_bytes(&at, &left, " ", 1);

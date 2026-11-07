@@ -2611,7 +2611,7 @@ int cli_main(int argc, char **argv)
     int argrc = cli_validate_client_argv(argc, argv);
     if (argrc >= 0)
         return argrc;
-    zcl_app_set_program(argc > 0 ? argv[0] : NULL);
+    zcl_app_set_program(argv[0]); /* NULL when argc is 0 */
     const char *home = getenv("HOME");
     char datadir[CLI_TARGET_DATADIR_CAP];
     const bool default_fit =
