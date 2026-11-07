@@ -10,6 +10,10 @@
 #include "chain/checkpoints.h"
 #include "chain/pow.h"
 #include "config/boot.h"
+#include "config/consensus_state_snapshot_install.h"
+#include "consensus_state_snapshot_install_internal.h"
+#include "platform/file_metadata.h"
+#include "services/reducer_drain.h"
 #include "config/boot_consensus_bundle_marker.h"
 #include "config/boot_error.h"
 #include "config/boot_internal.h"
@@ -53,6 +57,7 @@
 
 static _Atomic bool g_requested = false;
 static _Atomic bool g_auto = false;
+static _Atomic bool g_recovering = false;
 static _Atomic int g_phase = FLYSYNC_OFF;
 /* The tick runs from two swarm call sites; g_tick_busy admits one at a time. */
 static _Atomic int64_t g_phase_since_ms;
@@ -611,6 +616,9 @@ size_t flysync_island_detach(struct main_state *ms,
     return n;
 }
 
+static bool fsi_recovery_lease_and_marker(const char *datadir);
+static const char *fsi_datadir(void);
+
 static bool fsi_save_verified_window(const struct block_header *w, int n,
                                      const struct island_anchor *a)
 {
@@ -620,7 +628,11 @@ static bool fsi_save_verified_window(const struct block_header *w, int n,
     struct island_anchor_rows rows;
     for (int i = 0; i < n; i++)
         block_header_get_hash(&w[n - 1 - i], &rows.hash[i]);
-    struct zcl_result saved = island_anchor_save_window(progress_store_db(), a, &rows, w);
+    bool recover = atomic_load(&g_recovering);
+    if (recover && !fsi_recovery_lease_and_marker(fsi_datadir())) return false;
+    struct zcl_result saved = recover ?
+        island_anchor_save_window_recover(progress_store_db(), a, &rows, w) :
+        island_anchor_save_window(progress_store_db(), a, &rows, w);
     if (!saved.ok) {
         LOG_WARN(FSI_SUBSYS, "island seed refused: %s", saved.message);
         return false;
@@ -837,8 +849,7 @@ static struct main_state *fsi_main_state(void)
  * re-execs; under systemd the unit restarts it. */
 static void fsi_request_respawn(void)
 {
-    LOG_WARN(FSI_SUBSYS, "FlySync fell back: restarting so normal sync boots "
-             "as a node without -flysync");
+    LOG_WARN(FSI_SUBSYS, "FlySync restarting to apply its durable state");
 #ifdef ZCL_TESTING
     atomic_fetch_add(&g_test_respawns, 1);
 #else
@@ -911,9 +922,7 @@ static _Atomic uint32_t g_fetch_chunks_seen = 0;
 static _Atomic int64_t g_fetch_moved_ms = 0;
 static _Atomic int64_t g_fetch_started_ms = 0;   /* first sighting: FETCH start */
 
-/* True when the chosen offer's download has stalled: no new verified chunk
- * for FLYSYNC_FETCH_STALL_MS. The first sighting of a chosen offer starts the
- * clock, so a resumed download counts from this boot. */
+/* Measure verified chunk stalls from the first offer seen this boot. */
 static bool fsi_fetch_stalled(const struct state_offer_store_status *st,
                               int64_t now)
 {
@@ -926,6 +935,61 @@ static bool fsi_fetch_stalled(const struct state_offer_store_status *st,
         return false;
     }
     return now - atomic_load(&g_fetch_moved_ms) >= FLYSYNC_FETCH_STALL_MS;
+}
+
+/* Require the datadir lease and an absent sovereign marker. */
+static bool fsi_recovery_lease_and_marker(const char *datadir)
+{
+#if defined(_WIN32)
+    (void)datadir; return false;
+#else
+    if (!datadir || !datadir[0]) return false;
+    int fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    bool owned = boot_datadir_lock_matches_fd(fd);
+    close(fd);
+    char marker[1200];
+    int n = snprintf(marker, sizeof(marker), "%s/%s", datadir, BOOT_CONSENSUS_BUNDLE_MARKER_NAME);
+    return owned && n > 0 && (size_t)n < sizeof(marker) &&
+        platform_file_shape_read(marker) == PLATFORM_FILE_SHAPE_MISSING;
+#endif
+}
+static bool fsi_recovery_candidate(const char *datadir)
+{
+    char *bundle = boot_autodetect_consensus_bundle(datadir);
+    if (!bundle) return false;
+    struct consensus_state_artifact_evidence *evidence = NULL;
+    struct zcl_result opened = consensus_state_artifact_evidence_open(bundle, -1, &evidence);
+    free(bundle);
+    if (!opened.ok) return false;
+    struct consensus_state_bundle_manifest manifest;
+    struct consensus_state_activate_request request = {0};
+    char why[192];
+    bool valid = consensus_state_artifact_evidence_manifest_copy(evidence, &manifest) &&
+        fsi_rung_at(manifest.height) &&
+        consensus_state_activate_resolve_authority(evidence, -1, &manifest, &request, why, sizeof(why)) ==
+            CONSENSUS_STATE_ACTIVATE_AUTHORITY_CHECKPOINT_ROM;
+    bool closed = consensus_state_artifact_evidence_close(&evidence);
+    return valid && closed;
+}
+/* Keep FELL_BACK durable until the verified window commits. */
+enum flysync_recovery_result flysync_island_recover_staged(const char *datadir, struct main_state *ms)
+{
+    if (!ms || (!atomic_load(&g_auto) && !atomic_load(&g_requested)) ||
+        !fsi_recovery_lease_and_marker(datadir) ||
+        !island_anchor_recovery_fresh(progress_store_db()).ok)
+        return FLYSYNC_RECOVERY_NOT_APPLICABLE;
+    uint64_t boots = 0;
+    if (!fsi_recovery_candidate(datadir) || !boot_ensure_event_log(datadir) ||
+        !island_anchor_hold_boot(progress_store_db(), &boots).ok ||
+        boots > FLYSYNC_HOLD_BOOTS || !reducer_startup_gate_arm())
+        return FLYSYNC_RECOVERY_DEFER;
+    atomic_store(&g_recovering, true);
+    fsi_set_phase(FLYSYNC_WAIT);
+    msg_processor_set_header_sync_hold(flysync_island_holds_header_sync);
+    state_offer_store_set_height_filter(flysync_island_wants_offer_height);
+    net_set_advertise_full_history(false);
+    return FLYSYNC_RECOVERY_WAIT;
 }
 
 static void fsi_tick_wait_offers(int64_t now)
@@ -982,8 +1046,13 @@ static void fsi_tick_walk(int64_t now)
         char why[160];
         struct main_state *ms = fsi_main_state();
         if (flysync_island_verify_window(w, n, top_h, &a, why, sizeof(why))) {
-            if (ms && flysync_island_seed(ms, w, n, &a))
+            if (ms && flysync_island_seed(ms, w, n, &a)) {
                 fsi_set_phase(FLYSYNC_SEEDED);
+                if (atomic_load(&g_recovering)) {
+                    LOG_INFO(FSI_SUBSYS, "verified recovery seeded; restarting");
+                    fsi_request_respawn();
+                }
+            }
             else if (island_anchor_state_load(progress_store_db()) ==
                      ISLAND_ANCHOR_STATE_SEEDED) {
                 LOG_ERROR(FSI_SUBSYS, "seed persisted but derived state failed; restarting for recovery");
@@ -1381,6 +1450,7 @@ void flysync_island_test_reset(void)
 {
     atomic_store(&g_requested, false);
     atomic_store(&g_auto, false);
+    atomic_store(&g_recovering, false);
     atomic_store(&g_phase, FLYSYNC_OFF);
     atomic_store(&g_test_verify, NULL);
     atomic_store(&g_test_now_ms, -1);

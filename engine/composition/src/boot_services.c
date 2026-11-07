@@ -83,6 +83,7 @@
 #include "storage/progress_store.h"
 #include "services/block_index_loader.h"
 #include "services/reducer_ingest_service.h" /* reducer_ingest_try_seed_anchor (regtest genesis boot seed) */
+#include "services/reducer_drain.h"
 #include "jobs/tip_finalize_stage.h"         /* tip_finalize_stage_cursor + active_chain_tip */
 #include "models/block.h"
 #include "models/file_offer.h"
@@ -1356,6 +1357,7 @@ bool app_init_services(struct app_context *ctx, const struct chain_params *param
     svc->runtime.main_state = svc->state;
     svc->runtime.coins_tip = svc->coins_tip;
     app_runtime_set_current(&svc->runtime);
+    reducer_startup_gate_seal();
     boot_register_process_block_hooks(svc);
     /* Projection storage fan-out. Opens the append-only event log and the
      * reducer read-model projections used by runtime services. */

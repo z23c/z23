@@ -510,6 +510,11 @@ static void staged_stage_tick(struct liveness_contract *c)
 {
     struct staged_stage_desc *d = (struct staged_stage_desc *)c->ctx;
     if (!d || !d->ms) return;
+    if (reducer_startup_gate_held()) {
+        supervisor_progress(d->id, platform_time_monotonic_us());
+        supervisor_tick(d->id);
+        return;
+    }
 
     /* Keep progress.kv's durability mode tracking the IBD/at-tip signal.
      * Cheap: only flips the PRAGMA on an actual IBD<->at-tip transition. */

@@ -10,6 +10,18 @@
 #include "test/test_core.h"
 
 #include "util/reducer_drive_guard.h"
+#include "services/reducer_drain.h"
+#include "services/reducer_ingest_service.h"
+#include "services/chain_activation_service.h"
+#include "chain/chainparams.h"
+#include "supervisors/staged_sync_supervisor.h"
+#include "validation/main_state.h"
+#include "validation/chainstate.h"
+#include "consensus/validation.h"
+#include "net/msg_internal.h"
+#include "primitives/block.h"
+#include "storage/progress_store.h"
+#include <sqlite3.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -21,10 +33,76 @@
            failures++; }                                                  \
 } while (0)
 
+#ifdef ZCL_TESTING
+static int rdg_drain_calls;
+static int rdg_drain(int max_steps) { (void)max_steps; ++rdg_drain_calls; return 1; }
+static uint64_t rdg_cursor(void) { return 0; }
+
+static int rdg_gate_entrypoints(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "reducer_startup_gate", "held");
+    struct main_state ms;
+    main_state_init(&ms);
+    bool opened = progress_store_open(dir);
+    RDG_CHECK("isolated store opens", opened);
+    if (!opened) { main_state_free(&ms); test_rm_rf_recursive(dir); return failures; }
+    struct chain_activation_controller ctl;
+    activation_controller_init(&ctl, &ms, NULL, chain_params_get(), dir);
+    struct block block;
+    block_init(&block);
+    size_t map_before = ms.map_block_index.size;
+    int height_before = active_chain_height(&ms.chain_active);
+    int changes_before = sqlite3_total_changes(progress_store_db());
+    reducer_startup_gate_test_reset();
+    RDG_CHECK("open gate is not held", !reducer_startup_gate_held());
+    RDG_CHECK("arm enters held", reducer_startup_gate_arm() && reducer_startup_gate_held());
+    RDG_CHECK("second arm refused", !reducer_startup_gate_arm());
+    struct activation_exec_outcome outcome;
+    activation_request_connect(&ctl, ACTIVATION_SRC_NEW_BLOCK, &block, &outcome);
+    RDG_CHECK("activation skips recovery", outcome.result == ACTIVATION_EXEC_SKIPPED);
+    struct validation_state state;
+    bool staged = reducer_stage_p2p_block_for_catchup(&ctl, &block, &state);
+    RDG_CHECK("catchup intake is retryable", !staged && msg_block_validation_is_retryable(&state));
+    bool ingested = reducer_ingest_block(&ctl, &block, REDUCER_SRC_P2P, false, &state);
+    RDG_CHECK("normal intake is retryable", !ingested && msg_block_validation_is_retryable(&state));
+    RDG_CHECK("all drains and kicks held", reducer_drain_to_convergence() == 0 &&
+              reducer_drain_to_convergence_unpaced() == 0 &&
+              reducer_drain_to_convergence_unbudgeted() == 0 &&
+              reducer_kick(&ctl) == 0 && reducer_kick_unbudgeted(&ctl) == 0);
+    reducer_publish_fully_applied_at_tip(&ctl);
+    rdg_drain_calls = 0;
+    bool stalled = false;
+    (void)staged_sync_supervisor_test_run_stage_tick("rdg_gate", NULL, rdg_drain,
+                                                      rdg_cursor, NULL, &ms, &stalled, NULL);
+    RDG_CHECK("supervisor does not drain", rdg_drain_calls == 0);
+    RDG_CHECK("map frontier and database unchanged", ms.map_block_index.size == map_before &&
+              active_chain_height(&ms.chain_active) == height_before &&
+              sqlite3_total_changes(progress_store_db()) == changes_before);
+    reducer_startup_gate_seal();
+    RDG_CHECK("sealed held gate cannot rearm", reducer_startup_gate_held() && !reducer_startup_gate_arm());
+    reducer_startup_gate_test_reset();
+    reducer_startup_gate_seal();
+    RDG_CHECK("sealed open gate cannot arm", !reducer_startup_gate_held() && !reducer_startup_gate_arm());
+    reducer_startup_gate_test_reset();
+    block_free(&block);
+    activation_controller_destroy(&ctl);
+    progress_store_close();
+    main_state_free(&ms);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+#endif
+
+
 int test_reducer_drive_guard(void);
 int test_reducer_drive_guard(void)
 {
     int failures = 0;
+#ifdef ZCL_TESTING
+    failures += rdg_gate_entrypoints();
+#endif
 
     RDG_CHECK("inactive: no drive at start", !reducer_drive_active());
     RDG_CHECK("inactive: age is 0", reducer_drive_age_us() == 0);

@@ -20,6 +20,7 @@
 
 #include "services/chain_activation_service.h"
 #include "services/reducer_ingest_service.h"
+#include "services/reducer_drain.h"
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
 #include "event/event.h"
@@ -485,16 +486,23 @@ uint64_t reducer_ingest_catchup_validated_solution_skip_total(void)
     return atomic_load(&g_catchup_validated_solution_skip_total);
 }
 
+static bool reducer_intake_admitted(struct chain_activation_controller *ctl,
+                                    struct block *block, struct validation_state *out)
+{
+    if (!out) return false;
+    validation_state_init(out);
+    if (!ctl || !block) return validation_state_error(out, "reducer-null-arg");
+    if (reducer_startup_gate_held())
+        return validation_state_error(out, "p2p-block-intake-stopped");
+    return true;
+}
+
 bool reducer_stage_p2p_block_for_catchup(
     struct chain_activation_controller *ctl,
     struct block *pblock,
     struct validation_state *out)
 {
-    if (!out)
-        return false;
-    validation_state_init(out);
-    if (!ctl || !pblock)
-        return validation_state_error(out, "reducer-null-arg");
+    if (!reducer_intake_admitted(ctl, pblock, out)) return false;
 
     /* Catch-up body intake is not the consensus verdict. It is a pre-staging
      * body-shape gate: keep size/coinbase/tx-structural/sigops checks here,
@@ -577,6 +585,7 @@ static _Atomic uint64_t g_seed_anchor_reseed_failures = 0;
 void reducer_ingest_try_seed_anchor(int height, const uint8_t hash[32],
                                     const char *why)
 {
+    if (reducer_startup_gate_held()) return;
     if (tip_finalize_stage_seed_anchor(height, hash, false /* runtime re-seed */))
         return;
     atomic_fetch_add(&g_seed_anchor_reseed_failures, 1);
@@ -730,12 +739,7 @@ bool reducer_ingest_block(struct chain_activation_controller *ctl,
 {
     (void)source; /* informational; `force` carries the live semantics */
 
-    if (!out)
-        return false;
-    validation_state_init(out);
-
-    if (!ctl || !pblock)
-        return validation_state_error(out, "reducer-null-arg");
+    if (!reducer_intake_admitted(ctl, pblock, out)) return false;
 
     /* (1) Stateless gate FIRST, inline, BEFORE any log/stage mutation. A
      * garbage block is rejected with the verdict already in `out`; nothing is

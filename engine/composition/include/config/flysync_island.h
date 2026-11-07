@@ -112,6 +112,8 @@ bool flysync_island_wants_offer_height(int32_t height);
  * keystone capture, the weld and the header-seed import. False when off or
  * fallen back, so a fallen-back node boots exactly like a node without it. */
 bool flysync_island_owns_state_source(void);
+enum flysync_recovery_result { FLYSYNC_RECOVERY_NOT_APPLICABLE, FLYSYNC_RECOVERY_DEFER, FLYSYNC_RECOVERY_WAIT };
+enum flysync_recovery_result flysync_island_recover_staged(const char *datadir, struct main_state *ms);
 
 /* True while normal getheaders requests must not go out (WAIT/WALK/SEEDED). */
 bool flysync_island_holds_header_sync(void);

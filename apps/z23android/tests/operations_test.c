@@ -1143,7 +1143,10 @@ static void preload_mode_cases(struct zapp_runtime *r, const char *dir)
     for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
         assert(setenv("ZAPP_TEST_PRELOAD", modes[i], 1) == 0);
         preload_unlink(dir, "preload-started"); preload_unlink(dir, "node-spawned");
-        char start[256]; assert(zapp_node_start(r, start, sizeof(start)));
+        char start[256] = {0};
+        bool started = zapp_node_start(r, start, sizeof(start));
+        if (!started) fprintf(stderr, "preload mode %s: node start failed: %s\n", modes[i], start);
+        assert(started);
         assert(preload_read_marker(dir, "preload-started") > 0);
         preload_reap_node(r);
         assert(preload_read_marker(dir, "node-spawned") > 0);

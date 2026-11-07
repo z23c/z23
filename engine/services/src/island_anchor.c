@@ -13,6 +13,9 @@
 
 #include "base/serialize_le.h"
 #include "chain/chain.h"
+#include "chain/chainparams.h"
+#include "storage/coins_kv.h"
+#include "storage/nullifier_kv.h"
 #include "core/serialize.h"
 #include "primitives/block.h"
 #include "util/safe_alloc.h"
@@ -333,13 +336,106 @@ struct zcl_result island_anchor_install_window_in_tx(sqlite3 *db,
     return ok ? ZCL_OK : ZCL_ERR(-4, "island window in-tx write or readback failed");
 }
 
+/* Recovery is admissible only from the exact durable genesis frontier. Every
+ * read is checked; an absent table, malformed row or SQLite failure refuses. */
+static bool ia_query_zero(sqlite3 *db, const char *sql)
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK || !stmt) return false;
+    bool ok = ar_step_checked(stmt, "island fresh proof", NULL) == ZCL_STEP_ROW &&
+        sqlite3_column_type(stmt, 0) == SQLITE_INTEGER && sqlite3_column_int64(stmt, 0) == 0 &&
+        ar_step_checked(stmt, "island fresh proof end", NULL) == ZCL_STEP_DONE;
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    return ok;
+}
+static bool ia_genesis_identity(sqlite3_stmt *stmt, const struct chain_params *params)
+{
+    return sqlite3_column_type(stmt, 0) == SQLITE_INTEGER && sqlite3_column_int64(stmt, 0) == 0 &&
+        sqlite3_column_type(stmt, 1) == SQLITE_TEXT && sqlite3_column_text(stmt, 1) &&
+        sqlite3_column_bytes(stmt, 1) == 6 && memcmp(sqlite3_column_text(stmt, 1), "anchor", 6) == 0 &&
+        sqlite3_column_type(stmt, 2) == SQLITE_INTEGER && sqlite3_column_int64(stmt, 2) == 1 &&
+        sqlite3_column_type(stmt, 3) == SQLITE_BLOB && sqlite3_column_bytes(stmt, 3) == 32 && sqlite3_column_blob(stmt, 3) &&
+        memcmp(sqlite3_column_blob(stmt, 3), params->consensus.hashGenesisBlock.data, 32) == 0;
+}
+static bool ia_genesis_values(sqlite3_stmt *stmt)
+{
+    return sqlite3_column_type(stmt, 4) == SQLITE_INTEGER && sqlite3_column_int64(stmt, 4) == 0 &&
+        sqlite3_column_type(stmt, 5) == SQLITE_INTEGER && sqlite3_column_int64(stmt, 5) == 0 &&
+        sqlite3_column_type(stmt, 6) == SQLITE_INTEGER && sqlite3_column_int64(stmt, 6) == 0 &&
+        sqlite3_column_type(stmt, 7) == SQLITE_INTEGER && sqlite3_column_int64(stmt, 7) == 0;
+}
+static bool ia_genesis_anchor(sqlite3 *db)
+{
+    const struct chain_params *params = chain_params_get();
+    sqlite3_stmt *stmt = NULL;
+    if (!params || sqlite3_prepare_v2(db,
+        "SELECT height,status,ok,tip_hash,utxo_size_after,reorg_depth,work_delta_high,work_delta_low FROM tip_finalize_log", -1, &stmt, NULL) != SQLITE_OK || !stmt)
+        return false;
+    bool ok = ar_step_checked(stmt, "island genesis anchor", NULL) == ZCL_STEP_ROW &&
+        ia_genesis_identity(stmt, params) && ia_genesis_values(stmt) &&
+        ar_step_checked(stmt, "island genesis anchor end", NULL) == ZCL_STEP_DONE;
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    return ok;
+}
+static bool ia_recovery_rows_0(sqlite3 *db)
+{
+    return ia_query_zero(db, "SELECT COUNT(*) FROM coins") &&
+        ia_query_zero(db, "SELECT COUNT(*) FROM utxo_apply_delta") &&
+        ia_query_zero(db, "SELECT COUNT(*) FROM nullifiers") &&
+        ia_query_zero(db, "SELECT COUNT(*) FROM sapling_anchors") &&
+        ia_query_zero(db, "SELECT COUNT(*) FROM sprout_anchors") &&
+        ia_query_zero(db, "SELECT 1-COUNT(*) FROM anchor_state WHERE typeof(pool)='integer' AND pool=0 AND typeof(activation_cursor)='integer' AND activation_cursor=0");
+}
+static bool ia_recovery_rows_1(sqlite3 *db)
+{
+    return ia_query_zero(db, "SELECT 1-COUNT(*) FROM anchor_state WHERE typeof(pool)='integer' AND pool=1 AND typeof(activation_cursor)='integer' AND activation_cursor=0") &&
+        ia_query_zero(db, "SELECT COUNT(*) FROM anchor_state WHERE typeof(pool)!='integer' OR pool NOT IN (0,1) OR typeof(activation_cursor)!='integer' OR activation_cursor!=0") &&
+        ia_query_zero(db, "SELECT 1-COUNT(*) FROM shielded_pool_totals WHERE typeof(height)='integer' AND height=0 AND typeof(sprout)='integer' AND sprout=0 AND typeof(sapling)='integer' AND sapling=0") &&
+        ia_query_zero(db, "SELECT COUNT(*) FROM shielded_pool_totals WHERE typeof(height)!='integer' OR height!=0 OR typeof(sprout)!='integer' OR sprout!=0 OR typeof(sapling)!='integer' OR sapling!=0") &&
+        ia_query_zero(db, "SELECT 1-COUNT(*) FROM utxo_apply_log WHERE height=0 AND status='anchor' AND ok=1") &&
+        ia_query_zero(db, "SELECT COUNT(*) FROM utxo_apply_log WHERE height!=0 OR typeof(height)!='integer' OR typeof(status)!='text' OR status!='anchor' OR typeof(ok)!='integer' OR ok!=1 OR typeof(spent_count)!='integer' OR spent_count!=0 OR typeof(added_count)!='integer' OR added_count!=0 OR typeof(total_value_delta)!='integer' OR total_value_delta!=0");
+}
+static bool ia_recovery_rows_2(sqlite3 *db)
+{
+    return ia_query_zero(db, "SELECT COUNT(*) FROM progress_meta WHERE key IN ('" IA_FACT_KEY "','" IA_ROWS_KEY "','" IA_WINDOW_KEY "')") &&
+        ia_query_zero(db, "SELECT 1-COUNT(*) FROM stage_cursor WHERE name='tip_finalize' AND typeof(cursor)='integer' AND cursor=0") &&
+        ia_query_zero(db, "SELECT 1-COUNT(*) FROM stage_cursor WHERE name='utxo_apply' AND typeof(cursor)='integer' AND cursor=1") &&
+        ia_query_zero(db, "SELECT COUNT(*) FROM stage_cursor WHERE (name='tip_finalize' AND (typeof(cursor)!='integer' OR cursor!=0)) OR (name='utxo_apply' AND (typeof(cursor)!='integer' OR cursor!=1))");
+}
+static bool ia_recovery_fresh_locked(sqlite3 *db)
+{
+    int32_t applied = -1; bool found = false;
+    struct shielded_replay_session replay; bool replay_pending = false;
+    if (!db || db != progress_store_db() || island_anchor_state_load(db) != ISLAND_ANCHOR_STATE_FELL_BACK ||
+        !coins_kv_get_applied_height(db, &applied, &found) || !found || applied != 1 ||
+        !ia_genesis_anchor(db) ||
+        !shielded_history_read_full_replay(db, &replay, &replay_pending) || replay_pending) return false;
+    return ia_recovery_rows_0(db) &&
+        ia_recovery_rows_1(db) &&
+        ia_recovery_rows_2(db);
+
+}
+struct zcl_result island_anchor_recovery_fresh(sqlite3 *db)
+{
+    progress_store_tx_lock();
+    bool begun = db && db == progress_store_db() && sqlite3_get_autocommit(db) && ia_exec(db, "BEGIN");
+    bool ok = begun && ia_recovery_fresh_locked(db);
+    if (begun && !ia_exec(db, "ROLLBACK")) {
+        ok = false;
+        if (!sqlite3_get_autocommit(db)) abort();
+    }
+    progress_store_tx_unlock();
+    return ok ? ZCL_OK : ZCL_ERR(-1, "island recovery requires unchanged durable genesis");
+}
+
 static bool ia_save_window_tx(sqlite3 *db, const struct island_anchor *a,
-                              const struct island_anchor_rows *rows, const struct byte_stream *window)
+                              const struct island_anchor_rows *rows, const struct byte_stream *window, bool recover)
 {
     uint8_t fact[IA_FACT_LEN]; ia_encode(a, fact);
     uint8_t state = (uint8_t)ISLAND_ANCHOR_STATE_SEEDED;
     if (!ia_exec(db, "BEGIN IMMEDIATE")) return false;
-    bool wrote = ia_write_window_records(db, fact, rows, window, &state, ia_meta_equal);
+    bool allowed = !recover || ia_recovery_fresh_locked(db);
+    bool wrote = allowed && ia_write_window_records(db, fact, rows, window, &state, ia_meta_equal);
 #ifdef ZCL_TESTING
     if (wrote && g_window_commit_hook) g_window_commit_hook(false);
 #endif
@@ -355,14 +451,14 @@ static bool ia_save_window_tx(sqlite3 *db, const struct island_anchor *a,
 }
 
 static bool ia_save_window_durable(sqlite3 *db, const struct island_anchor *a,
-    const struct island_anchor_rows *rows, const struct byte_stream *encoded)
+    const struct island_anchor_rows *rows, const struct byte_stream *encoded, bool recover)
 {
     progress_store_tx_lock();
     int previous = -1;
-    bool ready = sqlite3_get_autocommit(db) && island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_NONE &&
+    bool ready = sqlite3_get_autocommit(db) && island_anchor_state_load(db) == (recover ? ISLAND_ANCHOR_STATE_FELL_BACK : ISLAND_ANCHOR_STATE_NONE) &&
         ia_durable_journal(db) && ia_sync_level(db, &previous);
     bool raised = ready && ia_set_sync(db, previous >= 2 ? previous : 2);
-    bool saved = raised && ia_save_window_tx(db, a, rows, encoded);
+    bool saved = raised && ia_save_window_tx(db, a, rows, encoded, recover);
     bool restored = previous >= 0 && ia_set_sync(db, previous);
     if (previous >= 0 && !restored) LOG_ERROR(IA_SUBSYS, "island sync restoration failed: %s", sqlite3_errmsg(db));
     progress_store_tx_unlock();
@@ -376,9 +472,23 @@ struct zcl_result island_anchor_save_window(sqlite3 *db, const struct island_anc
         return ZCL_ERR(-1, "island window save: invalid fact or headers");
     struct byte_stream encoded;
     if (!ia_encode_window(window, &encoded)) { stream_free(&encoded); return ZCL_ERR(-2, "island window encode failed"); }
-    bool saved = ia_save_window_durable(db, a, rows, &encoded);
+    bool saved = ia_save_window_durable(db, a, rows, &encoded, false);
     stream_free(&encoded);
     return saved ? ZCL_OK : ZCL_ERR(-3, "island window durable save or restoration failed");
+}
+
+/* Caller verified the header window against the compiled rung; the durable
+ * state transition rechecks the fresh-genesis facts under BEGIN IMMEDIATE. */
+struct zcl_result island_anchor_save_window_recover(sqlite3 *db, const struct island_anchor *a,
+    const struct island_anchor_rows *rows, const struct block_header *window)
+{
+    if (!db || !ia_valid(a) || !ia_rows_match(a, rows) || !window)
+        return ZCL_ERR(-1, "island recovery window: invalid fact or headers");
+    struct byte_stream encoded;
+    if (!ia_encode_window(window, &encoded)) { stream_free(&encoded); return ZCL_ERR(-2, "island recovery encode failed"); }
+    bool saved = ia_save_window_durable(db, a, rows, &encoded, true);
+    stream_free(&encoded);
+    return saved ? ZCL_OK : ZCL_ERR(-3, "island recovery durable save refused");
 }
 
 static bool ia_decode_window(const uint8_t *bytes, size_t length, struct block_header *window)
@@ -555,9 +665,11 @@ struct zcl_result island_anchor_hold_boot(struct sqlite3 *db, uint64_t *boots)
     size_t len = 0;
     bool have = false;
     if (!progress_meta_table_ensure(db) ||
-        !progress_meta_get(db, IA_HOLD_KEY, buf, sizeof(buf), &len, &have))
-        return ZCL_ERR(-2, "FlySync held boots not read from progress_meta");
-    uint64_t n = (have && len == sizeof(buf)) ? zcl_read_u64_le(buf) : 0;
+        !progress_meta_get_blob_exact(db, IA_HOLD_KEY, buf, sizeof(buf), &len, &have) ||
+        (have && len != sizeof(buf)))
+        return ZCL_ERR(-2, "FlySync held boots malformed or unreadable");
+    uint64_t n = have ? zcl_read_u64_le(buf) : 0;
+    if (n == UINT64_MAX) return ZCL_ERR(-2, "FlySync held boots exhausted");
     zcl_write_u64_le(buf, n + 1);
     if (!progress_meta_set(db, IA_HOLD_KEY, buf, sizeof(buf)))
         return ZCL_ERR(-3, "FlySync held boot not written to progress_meta");

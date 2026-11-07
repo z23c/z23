@@ -29,6 +29,18 @@
 
 struct chain_activation_controller;
 
+/* Startup-only admission fence. Arm before callbacks/network exist; sealing is
+ * irreversible for the process, so live callers cannot arm it later. An armed
+ * recovery keeps the fence through shutdown and exec. */
+bool reducer_startup_gate_arm(void);
+void reducer_startup_gate_seal(void);
+bool reducer_startup_gate_held(void);
+#ifdef ZCL_TESTING
+void reducer_startup_gate_test_reset(void);
+#endif
+
+
+
 /* The eight staged-Job reducer stages, in pipeline order. */
 #define REDUCER_DRAIN_NUM_STAGES 8
 

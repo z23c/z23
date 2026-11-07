@@ -19,6 +19,12 @@
 #include "config/consensus_state_install_runtime.h"
 #include "config/flysync_island.h"
 #include "config/boot.h"
+#include "config/boot_datadir_lock.h"
+#include "services/reducer_drain.h"
+#include "platform/file_clone.h"
+#include "platform/os_proc.h"
+#include <errno.h>
+#include <fcntl.h>
 #include "config/args.h"
 #include "config/boot_blkidx_ladder.h"
 #include "models/database.h"
@@ -33,6 +39,12 @@
 #include "services/sync_monitor.h"
 #include "config/boot_consensus_bundle_marker.h"
 #include "storage/progress_store.h"
+#include "storage/coins_kv.h"
+#include "jobs/reducer_frontier_schema.h"
+#include "jobs/utxo_apply_delta.h"
+#include "storage/nullifier_kv.h"
+#include "storage/anchor_kv.h"
+#include "storage/shielded_pool_kv.h"
 #include "storage/event_log_singleton.h"
 #include "storage/event_log_payloads.h"
 #include "storage/block_index_projection.h"
@@ -61,6 +73,7 @@
 #include <sys/stat.h>
 #if !defined(_WIN32)
 #include <sys/wait.h>
+#include <signal.h>
 #include <unistd.h>
 #endif
 
@@ -1469,9 +1482,368 @@ static int fsi_case_terminal_prepare(void)
     return failures;
 }
 
+/* Synthetic headers use the fixture verifier; this tests the durable gate only. */
+static bool fsi_recovery_anchor(sqlite3 *db)
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO tip_finalize_log(height,status,ok,tip_hash,utxo_size_after,reorg_depth,work_delta_high,work_delta_low,finalized_at) VALUES(0,'anchor',1,?,0,0,0,0,0)", -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+    bool ok = sqlite3_bind_blob(stmt, 1, chain_params_get()->consensus.hashGenesisBlock.data,
+                                32, SQLITE_TRANSIENT) == SQLITE_OK &&
+              sqlite3_step(stmt) == SQLITE_DONE;
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    if (!ok || sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
+        return false;
+    ok = coins_kv_set_applied_height_in_tx(db, 1);
+    if (sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK)
+        return false;
+    return ok && island_anchor_note_fallback(db, "fixture").ok;
+}
+
+static bool fsi_recovery_genesis(sqlite3 *db)
+{
+    if (!coins_kv_ensure_schema(db) || !nullifier_kv_ensure_schema(db) ||
+        !anchor_kv_initialize_history(db, 0) || !shielded_pool_kv_ensure_schema(db) ||
+        !reducer_frontier_ensure_schema(db) || !utxo_apply_ensure_delta_schema(db))
+        return false;
+    const char *sql =
+        "INSERT OR REPLACE INTO utxo_apply_log(height,status,ok,spent_count,added_count,total_value_delta,applied_at) VALUES(0,'anchor',1,0,0,0,0);"
+        "INSERT OR REPLACE INTO shielded_pool_totals VALUES(0,0,0);"
+        "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) VALUES('tip_finalize',0,0),('utxo_apply',1,0);";
+    if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) return false;
+    return fsi_recovery_anchor(db);
+}
+
+static int fsi_recovery_refusals(sqlite3 *db)
+{
+    int failures = 0;
+    static const struct { const char *change; const char *restore; } cases[] = {
+        {"DELETE FROM stage_cursor WHERE name='tip_finalize'",
+         "INSERT INTO stage_cursor(name,cursor,updated_at) VALUES('tip_finalize',0,0)"},
+        {"UPDATE tip_finalize_log SET tip_hash=zeroblob(32)",
+         "DELETE FROM tip_finalize_log"},
+        {"UPDATE tip_finalize_log SET tip_hash=NULL",
+         "DELETE FROM tip_finalize_log"},
+        {"DROP TABLE shielded_pool_totals",
+         "CREATE TABLE shielded_pool_totals(height INTEGER PRIMARY KEY,sprout INTEGER NOT NULL,sapling INTEGER NOT NULL); INSERT INTO shielded_pool_totals VALUES(0,0,0)"},
+        {"UPDATE shielded_pool_totals SET sapling=1",
+         "UPDATE shielded_pool_totals SET sapling=0"},
+        {"UPDATE anchor_state SET activation_cursor=1 WHERE pool=1",
+         "UPDATE anchor_state SET activation_cursor=0 WHERE pool=1"},
+        {"UPDATE progress_meta SET value=x'ff' WHERE key='flysync.island_state'",
+         "UPDATE progress_meta SET value=x'02' WHERE key='flysync.island_state'"},
+        {"UPDATE progress_meta SET value=x'0200000000000000' WHERE key='coins_applied_height'",
+         "UPDATE progress_meta SET value=x'0100000000000000' WHERE key='coins_applied_height'"},
+        {"INSERT INTO coins(txid,vout,value,height,is_coinbase,script) VALUES(zeroblob(32),0,1,1,0,x'')",
+         "DELETE FROM coins"},
+        {"INSERT INTO progress_meta(key,value) VALUES('flysync.island_anchor.v1',x'01')",
+         "DELETE FROM progress_meta WHERE key='flysync.island_anchor.v1'"},
+        {"INSERT INTO progress_meta(key,value) VALUES('flysync.island_rows.v1',x'01')",
+         "DELETE FROM progress_meta WHERE key='flysync.island_rows.v1'"},
+        {"INSERT INTO progress_meta(key,value) VALUES('flysync.island_window.v1',x'01')",
+         "DELETE FROM progress_meta WHERE key='flysync.island_window.v1'"},
+        {"INSERT INTO utxo_apply_delta(height,branch_hash,spent_blob,added_blob) VALUES(1,zeroblob(32),x'',x'')",
+         "DELETE FROM utxo_apply_delta"},
+        {"UPDATE utxo_apply_log SET added_count=1",
+         "UPDATE utxo_apply_log SET added_count=0"},
+        {"INSERT INTO nullifiers(nf,pool,height) VALUES(zeroblob(32),0,1)",
+         "DELETE FROM nullifiers"}
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        bool changed = sqlite3_exec(db, cases[i].change, NULL, NULL, NULL) == SQLITE_OK;
+        FSI_CHECK("changed durable genesis refuses recovery",
+                  changed && !island_anchor_recovery_fresh(db).ok);
+        bool restored = sqlite3_exec(db, cases[i].restore, NULL, NULL, NULL) == SQLITE_OK;
+        if (i == 1 || i == 2) restored = restored && fsi_recovery_genesis(db);
+        FSI_CHECK("restore durable genesis", restored && island_anchor_recovery_fresh(db).ok);
+    }
+    return failures;
+}
+
+static int fsi_case_recovery_fresh(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    if (!fsi_node_open(&n, "flysync_recovery")) return 1;
+    sqlite3 *db = progress_store_db();
+    FSI_CHECK("missing durable proof refuses", !island_anchor_recovery_fresh(db).ok);
+    bool prepared = fsi_recovery_genesis(db);
+    FSI_CHECK("durable genesis and fallback accepted",
+              prepared && island_anchor_recovery_fresh(db).ok);
+    if (prepared) failures += fsi_recovery_refusals(db);
+    fsi_build_island(&n.is);
+    flysync_island_test_set_rung(&n.is.rung);
+    flysync_island_test_set_frozen_verifier(fsi_accept_all);
+    char why[160];
+    bool valid = flysync_island_verify_window(n.is.w, FSI_W, FSI_RUNG_H, &n.a,
+                                              why, sizeof(why));
+    struct island_anchor_rows rows;
+    for (int i = 0; i < FSI_W; ++i)
+        block_header_get_hash(&n.is.w[FSI_W - 1 - i], &rows.hash[i]);
+    bool changed = sqlite3_exec(db, "UPDATE shielded_pool_totals SET sapling=1",
+                                NULL, NULL, NULL) == SQLITE_OK;
+    FSI_CHECK("save rechecks after proof", valid && changed &&
+              !island_anchor_save_window_recover(db, &n.a, &rows, n.is.w).ok &&
+              island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_FELL_BACK);
+    struct island_anchor proof; struct island_anchor_rows saved_rows;
+    struct block_header saved_window[FSI_W];
+    bool has_proof = false, has_rows = false, has_window = false;
+    FSI_CHECK("refusal leaves all island proof records absent",
+              island_anchor_load(db, &proof, &has_proof).ok && !has_proof &&
+              island_anchor_rows_load(db, &saved_rows, &has_rows).ok && !has_rows &&
+              island_anchor_window_load(db, saved_window, &has_window).ok && !has_window);
+    bool restored = sqlite3_exec(db, "UPDATE shielded_pool_totals SET sapling=0",
+                                 NULL, NULL, NULL) == SQLITE_OK;
+    FSI_CHECK("fresh recovery commits seeded window",
+              restored && island_anchor_save_window_recover(db, &n.a, &rows, n.is.w).ok &&
+              island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_SEEDED);
+    fsi_node_close(&n);
+    return failures;
+}
+
+
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+static bool fsi_recovery_crash(struct fsi_node *n, bool after)
+{
+    struct island_anchor_rows rows;
+    for (int i = 0; i < FSI_W; ++i)
+        block_header_get_hash(&n->is.w[FSI_W - 1 - i], &rows.hash[i]);
+    progress_store_close();
+    pid_t child = fork();
+    if (child == 0) {
+        if (!progress_store_open(n->dir)) _exit(74);
+        fsi_crash_after_commit = after;
+        island_anchor_test_commit_hook(fsi_crash_hook);
+        (void)island_anchor_save_window_recover(progress_store_db(), &n->a, &rows, n->is.w);
+        _exit(75);
+    }
+    int status = 0;
+    bool killed = child > 0 && waitpid(child, &status, 0) == child &&
+                  WIFEXITED(status) && WEXITSTATUS(status) == 73;
+    return killed && progress_store_open(n->dir);
+}
+
+static int fsi_case_recovery_crash(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    if (!fsi_node_open(&n, "flysync_recovery_crash")) return 1;
+    bool prepared = fsi_recovery_genesis(progress_store_db());
+    fsi_build_island(&n.is);
+    flysync_island_test_set_rung(&n.is.rung);
+    flysync_island_test_set_frozen_verifier(fsi_accept_all);
+    char why[160];
+    bool valid = flysync_island_verify_window(n.is.w, FSI_W, FSI_RUNG_H,
+                                              &n.a, why, sizeof(why));
+    FSI_CHECK("recovery crash fixture is fresh",
+              prepared && valid && island_anchor_recovery_fresh(progress_store_db()).ok);
+    FSI_CHECK("before commit preserves fallback",
+              prepared && valid && fsi_recovery_crash(&n, false) &&
+              island_anchor_state_load(progress_store_db()) == ISLAND_ANCHOR_STATE_FELL_BACK &&
+              island_anchor_recovery_fresh(progress_store_db()).ok);
+    FSI_CHECK("after commit preserves seeded window",
+              fsi_recovery_crash(&n, true) &&
+              island_anchor_state_load(progress_store_db()) == ISLAND_ANCHOR_STATE_SEEDED);
+    struct block_header window[FSI_W];
+    bool found = false;
+    FSI_CHECK("recovered window persists",
+              island_anchor_window_load(progress_store_db(), window, &found).ok && found &&
+              flysync_island_verify_window(window, FSI_W, FSI_RUNG_H, &n.a, why, sizeof(why)));
+    fsi_node_close(&n);
+    return failures;
+}
+#endif
+
+
+static bool fsi_counter_refuses(sqlite3 *db, const char *key,
+                                const uint8_t *expected, size_t size)
+{
+    uint8_t actual[8];
+    size_t len = 0;
+    bool found = false;
+    uint64_t boots = 99;
+    return !island_anchor_hold_boot(db, &boots).ok && boots == 0 &&
+        progress_meta_get(db, key, actual, sizeof(actual), &len, &found) &&
+        found && len == size && !memcmp(actual, expected, size);
+}
+
+static int fsi_case_hold_counter_refusal(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    if (!fsi_node_open(&n, "flysync_hold_counter")) return 1;
+    sqlite3 *db = progress_store_db();
+    const char *key = "flysync.hold_boots";
+    uint8_t short_value = 7;
+    uint8_t max_value[8];
+    memset(max_value, 0xff, sizeof(max_value));
+    bool set = progress_meta_set(db, key, &short_value, 1);
+    FSI_CHECK("malformed hold counter refuses without reset",
+              set && fsi_counter_refuses(db, key, &short_value, 1));
+    set = progress_meta_set(db, key, max_value, sizeof(max_value));
+    FSI_CHECK("exhausted hold counter refuses without wrap",
+              set && fsi_counter_refuses(db, key, max_value, sizeof(max_value)));
+    uint8_t one[8] = {1};
+    set = progress_meta_set(db, key, one, sizeof(one));
+    bool trigger = sqlite3_exec(db,
+        "CREATE TEMP TRIGGER fsi_hold_fail BEFORE INSERT ON progress_meta "
+        "WHEN NEW.key='flysync.hold_boots' BEGIN SELECT RAISE(ABORT,'fixture'); END",
+        NULL, NULL, NULL) == SQLITE_OK;
+    FSI_CHECK("failed hold write refuses without increment",
+              set && trigger && fsi_counter_refuses(db, key, one, sizeof(one)));
+    FSI_CHECK("remove failure trigger",
+              sqlite3_exec(db, "DROP TRIGGER fsi_hold_fail", NULL, NULL, NULL) == SQLITE_OK);
+    fsi_node_close(&n);
+    return failures;
+}
+
+
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+/* Same private clone-or-copy protocol as the real postcommit fixture. */
+static bool fsi_real_copy_bytes(int in, int out)
+{
+    char buf[65536];
+    for (;;) {
+        ssize_t n = read(in, buf, sizeof(buf));
+        if (n == 0) return true;
+        if (n < 0) { if (errno == EINTR) continue; return false; }
+        for (ssize_t off = 0; off < n;) {
+            ssize_t written = write(out, buf + off, (size_t)(n - off));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) return false;
+            off += written;
+        }
+    }
+}
+
+static bool fsi_real_copy(const char *source, const char *destination)
+{
+    int in = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (in < 0) return false;
+    struct stat st;
+    if (fstat(in, &st) || !S_ISREG(st.st_mode)) { close(in); return false; }
+    int out = open(destination, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (out < 0) { close(in); return false; }
+    enum platform_file_clone_result cloned = platform_file_clone_fd(in, out);
+    bool ok = cloned == PLATFORM_FILE_CLONE_CLONED;
+    if (cloned == PLATFORM_FILE_CLONE_UNAVAILABLE) ok = fsi_real_copy_bytes(in, out);
+    if (ok && fchmod(out, 0400)) ok = false;
+    if (close(out)) ok = false;
+    if (close(in)) ok = false;
+    return ok;
+}
+static bool fsi_real_stage(const struct fsi_node *n, const char *bundle)
+{
+    char dir[512], path[600];
+    int a = snprintf(dir, sizeof(dir), "%s/bundles", n->dir);
+    int b = snprintf(path, sizeof(path), "%s/consensus-state-bundle-3309900.sqlite", dir);
+    return a > 0 && (size_t)a < sizeof(dir) && b > 0 && (size_t)b < sizeof(path) &&
+        mkdir(dir, 0700) == 0 && fsi_real_copy(bundle, path);
+}
+
+static bool fsi_real_window(struct main_state *archive, const char *archive_dir,
+                            struct block_header *window, struct island_anchor *anchor,
+                            char *why, size_t why_size)
+{
+    const struct rom_state_rung *rung = NULL;
+    for (size_t i = 0; i < get_rom_state_rung_count(); ++i) {
+        const struct rom_state_rung *r = get_rom_state_rung_at(i);
+        if (r && r->cp.height == 3309900) rung = r;
+    }
+    bool read = rung && block_index_history_archive_open(archive, archive_dir, 3500000,
+        3309900, rung->cp.block_hash, window).ok;
+    flysync_island_test_set_frozen_verifier(NULL);
+    flysync_island_test_set_rung(NULL);
+    return read && flysync_island_verify_window(window, ISLAND_ANCHOR_WINDOW,
+        3309900, anchor, why, why_size);
+}
+
+static int fsi_real_walk(const struct block_header *window)
+{
+    int failures = 0;
+    flysync_island_tick();
+    FSI_CHECK("real recovery starts window walk", flysync_island_phase() == FLYSYNC_WALK);
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; ++i) {
+        struct uint256 hash;
+        block_header_get_hash(&window[i], &hash);
+        checkpoint_header_fetch_offer(&window[i], &hash);
+    }
+    FSI_CHECK("real recovery captures all headers",
+              checkpoint_header_fetch_window_progress() == ISLAND_ANCHOR_WINDOW);
+    flysync_island_tick();
+    FSI_CHECK("real recovery persists seed and requests restart",
+        flysync_island_phase() == FLYSYNC_SEEDED &&
+        island_anchor_state_load(progress_store_db()) == ISLAND_ANCHOR_STATE_SEEDED &&
+        flysync_island_test_respawns() == 1 && reducer_startup_gate_held());
+    return failures;
+}
+
+/* Opt-in public-artifact test; the private bundle copy is never opened for writing. */
+static int fsi_real_recovery_child(void)
+{
+    const char *archive_dir = getenv("ZCL_TEST_REAL_INSTALL_HISTORY");
+    const char *bundle = getenv("ZCL_TEST_REAL_INSTALL_BUNDLE");
+    if (!archive_dir && !bundle) return 0;
+    if (!archive_dir || !bundle) return 1;
+    int failures = 0;
+    struct fsi_node n;
+    if (!fsi_node_open(&n, "flysync_real_recovery")) return 1;
+    bool staged = fsi_real_stage(&n, bundle);
+    char why[160];
+    struct main_state archive;
+    main_state_init(&archive);
+    struct block_header w[ISLAND_ANCHOR_WINDOW];
+    struct island_anchor anchor;
+    bool valid = fsi_real_window(&archive, archive_dir, w, &anchor, why, sizeof(why));
+    bool lease = staged && boot_datadir_lock_acquire(n.dir);
+    bool ready = lease && fsi_recovery_genesis(progress_store_db());
+    flysync_island_set_requested(true);
+    ready = ready && flysync_island_boot_gate(n.dir, &n.ms, why, sizeof(why));
+    sync_monitor_set_context(NULL, NULL, &n.ms);
+    enum flysync_recovery_result result = ready ?
+        flysync_island_recover_staged(n.dir, &n.ms) : FLYSYNC_RECOVERY_NOT_APPLICABLE;
+    event_log_set_singleton(g_fsi_log);
+    FSI_CHECK("real recovery arms from durable fallback",
+        valid && result == FLYSYNC_RECOVERY_WAIT && reducer_startup_gate_held());
+    if (valid && result == FLYSYNC_RECOVERY_WAIT)
+        failures += fsi_real_walk(w);
+    if (lease) boot_datadir_lock_release();
+    reducer_startup_gate_test_reset();
+    checkpoint_header_fetch_test_reset();
+    main_state_free(&archive);
+    fsi_node_close(&n);
+    return failures;
+}
+
+static int fsi_case_real_recovery(void)
+{
+    if (!getenv("ZCL_TEST_REAL_INSTALL_HISTORY") && !getenv("ZCL_TEST_REAL_INSTALL_BUNDLE")) return 0;
+    uint64_t parent = (uint64_t)getpid();
+    pid_t child = fork();
+    if (child == 0) {
+        if (!os_proc_bind_parent_death(SIGKILL, parent)) _exit(1);
+        alarm(1800);
+        int rc = fsi_real_recovery_child();
+        fflush(NULL);
+        _exit(rc == 0 ? 0 : 1);
+    }
+    int status = 0;
+    return child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+}
+
+#endif
+
 int test_flysync_island(void)
 {
     int failures = 0;
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+    failures += fsi_case_real_recovery();
+#endif
+    failures += fsi_case_hold_counter_refusal();
+    failures += fsi_case_recovery_fresh();
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+    failures += fsi_case_recovery_crash();
+#endif
     failures += fsi_case_window_in_tx();
 #if !defined(_WIN32) && defined(ZCL_TESTING)
     failures += fsi_case_window_commit_crash();

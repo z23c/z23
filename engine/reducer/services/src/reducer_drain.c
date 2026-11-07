@@ -65,6 +65,20 @@
 #include <stdlib.h>   /* getenv, strtoll */
 #include <string.h>   /* memset */
 
+/* Bit 0 holds reducer admission; bit 1 seals startup. An arm and the seal
+ * race through one atomic word, so a live caller cannot install a late hold. */
+static _Atomic unsigned g_reducer_startup_gate;
+bool reducer_startup_gate_arm(void)
+{
+    unsigned expected = 0;
+    return atomic_compare_exchange_strong(&g_reducer_startup_gate, &expected, 1u);
+}
+void reducer_startup_gate_seal(void) { (void)atomic_fetch_or(&g_reducer_startup_gate, 2u); }
+bool reducer_startup_gate_held(void) { return (atomic_load(&g_reducer_startup_gate) & 1u) != 0; }
+#ifdef ZCL_TESTING
+void reducer_startup_gate_test_reset(void) { atomic_store(&g_reducer_startup_gate, 0u); }
+#endif
+
 bool reducer_at_tip_authority_ready(
     const struct reducer_at_tip_authority_observation *obs)
 {
@@ -631,16 +645,19 @@ static int reducer_drain_live(bool paced)
 
 int reducer_drain_to_convergence(void)
 {
+    if (reducer_startup_gate_held()) return 0;
     return reducer_drain_live(/*paced=*/true);
 }
 
 int reducer_drain_to_convergence_unpaced(void)
 {
+    if (reducer_startup_gate_held()) return 0;
     return reducer_drain_live(/*paced=*/false);
 }
 
 int reducer_drain_to_convergence_unbudgeted(void)
 {
+    if (reducer_startup_gate_held()) return 0;
     /* Drain back-to-back, NOT in 2s slices like the supervisor path — but with
      * a GENEROUS wall-clock budget so the call still returns periodically to
      * the -mint-anchor drive loop (progress logging + the stall detector run
@@ -718,6 +735,7 @@ static void reducer_publish_fully_applied_at_tip_locked(
 void reducer_publish_fully_applied_at_tip(
     struct chain_activation_controller *ctl)
 {
+    if (reducer_startup_gate_held()) return;
     if (!ctl)
         return;
     zcl_mutex_lock(&ctl->mutex);
@@ -727,6 +745,7 @@ void reducer_publish_fully_applied_at_tip(
 
 int reducer_kick(struct chain_activation_controller *ctl)
 {
+    if (reducer_startup_gate_held()) return 0;
     if (!ctl)
         return 0;
     zcl_mutex_lock(&ctl->mutex);
@@ -781,6 +800,7 @@ int reducer_kick(struct chain_activation_controller *ctl)
 
 int reducer_kick_unbudgeted(struct chain_activation_controller *ctl)
 {
+    if (reducer_startup_gate_held()) return 0;
     if (!ctl)
         return 0;
     /* The dedicated -mint-anchor driver's tight drain: same locking + drive

@@ -887,6 +887,7 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
     /* -flysync (config/flysync_island.h) walks only the rung window: no
      * keystone capture, no weld, no header-seed import below the rung. */
     const bool flysync = flysync_island_owns_state_source();
+    enum flysync_recovery_result recovery = FLYSYNC_RECOVERY_NOT_APPLICABLE;
     if (!flysync && !ctx->regtest && !ctx->testnet &&
         !boot_consensus_bundle_marker_exists(ctx->datadir))
         checkpoint_header_fetch_arm_compiled();
@@ -920,8 +921,12 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
     if (!flysync) {
         boot_bundle_fetch_arm_peer_seeds(ndb);
         (void)boot_bundle_fetch_maybe(ctx->datadir, ctx);
-        (void)boot_header_seed_import_maybe(ctx->datadir, ms);
+        recovery = flysync_island_recover_staged(ctx->datadir, ms);
+        if (recovery == FLYSYNC_RECOVERY_NOT_APPLICABLE)
+            (void)boot_header_seed_import_maybe(ctx->datadir, ms);
     }
+
+    if (recovery != FLYSYNC_RECOVERY_NOT_APPLICABLE) return;
 
     /* 1b/1c — a complete-state install (durable request OR autodetected bundle)
      * SUPERSEDES the transparent-only from-anchor reset (which leaves shielded

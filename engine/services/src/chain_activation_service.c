@@ -19,6 +19,7 @@
 // returns a count. No bare-bool strips a failure reason. Behavior unchanged.
 
 #include "services/chain_activation_service.h"
+#include "services/reducer_drain.h"
 #include "services/reducer_ingest_service.h"
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
@@ -353,6 +354,11 @@ void activation_request_connect(struct chain_activation_controller *ctl,
                                 struct activation_exec_outcome *out)
 {
     memset(out, 0, sizeof(*out));
+    if (reducer_startup_gate_held()) {
+        out->result = ACTIVATION_EXEC_SKIPPED;
+        snprintf(out->reason, sizeof(out->reason), "startup recovery holds reducer");
+        return;
+    }
 
     /* Build request from current state */
     struct activation_request req = {

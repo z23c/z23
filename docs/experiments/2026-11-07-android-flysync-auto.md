@@ -71,3 +71,17 @@ Host timing does not establish phone latency. Production snapshot commitments
 and provider availability require their separate source-bound verification.
 An existing wallet requires a guarded migration and verified scan coverage;
 a fresh-chain automatic-startup result does not establish that migration.
+
+## Late offer recovery
+
+A late verified bundle after the initial wait left a fresh node with a sparse
+header index that could not satisfy the existing installation binding. Recovery
+now requires an unchanged durable genesis, a verified compiled checkpoint
+bundle and the complete authenticated header window. Reducer entry stays held
+until a restart; the seed transaction rechecks the genesis proof. A bounded
+persistent counter limits repeated recovery boots.
+
+Focused synthetic database and admission tests passed 2/2. An opt-in test using
+a public full-history archive and verified bundle passed the recovery window,
+durable seed and restart request in 41.0 seconds, with no skips. It does not
+exercise the complete Android boot or prove migration of an existing wallet.
