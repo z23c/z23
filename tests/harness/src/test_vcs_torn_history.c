@@ -11,12 +11,15 @@
  *         (the observed 528 -> 0 case).
  * Read path (vcs_open_readonly): refused, and the log stays byte-identical
  * (size + SHA3-256) with no new file beside it.
- * Write path (vcs_open): the log keeps exactly its valid prefix and one
- * quarantine sibling commits.log.torn-<valid size>... holds exactly the
- * dropped bytes. Run from test_vcs_core (vcs_core group). */
+ * Write path (vcs_open, event_log_open_keep_torn): the log keeps exactly its
+ * valid prefix and one quarantine sibling commits.log.torn-<valid size>...
+ * holds exactly the dropped bytes.
+ * Plain event_log_open() (every node, wallet and engine log): still cuts the
+ * torn tail and writes no quarantine. Run from test_vcs_core (vcs_core). */
 
 #include "test/test_core.h"
 
+#include "storage/event_log.h"
 #include "vcs/vcs.h"
 #include "crypto/sha3.h"
 
@@ -246,10 +249,36 @@ static int vt_torn_head(const char *root)
     return failures;
 }
 
+/* The shared event_log_open() keeps main's behavior for every node, wallet
+ * and engine log: it cuts the torn tail and writes no quarantine. */
+static int vt_plain_open(const char *root)
+{
+    int failures = 0;
+    char dir[700], zvcs[800], log[900];
+    struct vt_bytes valid = {0};
+    (void)snprintf(dir, sizeof(dir), "%s/plain", root);
+    (void)snprintf(zvcs, sizeof(zvcs), "%s/.zvcs", dir);
+    bool made = vt_make_repo(dir, log, sizeof(log), &valid) &&
+                vt_write(log, k_vt_tail, sizeof(k_vt_tail) - 1u, "ab");
+    VT_CHECK("plain fixture: chosen bytes appended", made);
+    if (made) {
+        event_log_t *el = event_log_open(log);
+        VT_CHECK("plain event_log_open still opens a torn log", el != NULL);
+        event_log_close(el);
+        VT_CHECK("plain event_log_open cuts to the valid prefix and writes no "
+                 "quarantine",
+                 vt_same(log, &valid) &&
+                 vt_count(zvcs, "commits.log.torn", NULL, 0) == 0);
+    }
+    vt_bytes_free(&valid);
+    return failures;
+}
+
 int test_vcs_torn_history(const char *root)
 {
     int failures = 0;
     failures += vt_torn_tail(root);
     failures += vt_torn_head(root);
+    failures += vt_plain_open(root);
     return failures;
 }
