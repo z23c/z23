@@ -452,6 +452,17 @@ struct abm_depcheck {
  * enters one is never folded: "build/link/../../src/x.c" stays undeclared.
  * False when the path enters a store, climbs above the copy or does not
  * fit. */
+/* ".." drops the last folded segment; false above the copy root. */
+static bool abm_fold_up(const char *out, size_t *len)
+{
+    if (*len == 0)
+        return false;
+    while (*len > 0 && out[*len - 1u] != '/')
+        (*len)--;
+    *len = *len > 0 ? *len - 1u : 0;
+    return true;
+}
+
 static bool abm_fold_segment(const char *seg, size_t n, char *out, size_t cap,
                              size_t *len)
 {
@@ -459,14 +470,8 @@ static bool abm_fold_segment(const char *seg, size_t n, char *out, size_t cap,
         return true;
     if (*len == 0 && seg[n] == '/' && abm_store_segment(seg, n))
         return false;
-    if (n == 2 && seg[0] == '.' && seg[1] == '.') {
-        if (*len == 0)
-            return false;
-        while (*len > 0 && out[*len - 1u] != '/')
-            (*len)--;
-        *len = *len > 0 ? *len - 1u : 0;
-        return true;
-    }
+    if (n == 2 && seg[0] == '.' && seg[1] == '.')
+        return abm_fold_up(out, len);
     if (*len + 1u + n + 1u > cap)
         return false;
     if (*len)
