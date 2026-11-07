@@ -578,6 +578,15 @@ static int case_handlers(struct al_fx *f)
         ASSERT_EQ(reply.next_count, 1u);
         ASSERT_STR_EQ(reply.next[0].command, "app.list");
     PASS(); }
+    TEST("app.open of blog says it is a web app the node serves") {
+        ASSERT(json_push_kv_str(&input, "name", "blog"));
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_handle_app_open(&request, &reply);
+        ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
+        ASSERT(strstr(reply.error.message, "web app") != NULL);
+        ASSERT(strstr(reply.error.message, "/blog") != NULL);
+        ASSERT(strstr(reply.error.message, "skycombat") != NULL);
+    PASS(); }
     TEST("app.list says what can be opened and offers open and copy of the "
          "first launchable app") {
         struct json_value empty;

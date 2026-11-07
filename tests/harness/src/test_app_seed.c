@@ -845,6 +845,13 @@ static int asd_refusals_app(const struct asd_world *w)
         ASSERT(asd_refused(w, "absentinput", "NO_PACKAGE_TARGETS"));
         ASSERT(asd_refused(w, "nosuchapp", "APP_UNKNOWN"));
         ASSERT(asd_refused(w, "../tiny", "BAD_APP"));
+        struct app_seed_stage ws;
+        char wdest[512];
+        snprintf(wdest, sizeof(wdest), "%s/webapp-stage", w->datadir1);
+        ASSERT(mkdir(wdest, 0700) == 0);
+        ASSERT(!app_seed_stage(w->repo, "blog", wdest, &ws));
+        ASSERT_STR_EQ(ws.code, "APP_UNKNOWN");
+        ASSERT(strstr(ws.why, "web app your node serves at /blog") != NULL);
         PASS();
     } _test_next:;
     return failures;

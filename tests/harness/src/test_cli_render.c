@@ -719,6 +719,26 @@ static int test_guide_tree_render(void)
         ASSERT(cr_max_line_width(out) <= 80);
         PASS();
     }
+    TEST("app.list names blog as a web app the node serves, with its URL") {
+        const char *doc =
+            "{\"schema\":\"zcl.result.v1\",\"command\":\"app.list\","
+            "\"ok\":true,\"status\":\"passed\",\"data\":{"
+            "\"apps\":[\"blog\"],\"count\":1,"
+            "\"launchable\":[{\"id\":\"skycombat\",\"installed\":true,"
+            "\"open\":\"z23 -datadir=/d/z app open skycombat\"}],"
+            "\"copies\":[]}}";
+        struct zcl_cli_render_env e = cr_env(80, false);
+        char out[4096];
+        size_t n = zcl_cli_render_doc(doc, strlen(doc), "app.list", &e, out,
+                                      sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "web app") != NULL);
+        ASSERT(strstr(out, "your node serves") != NULL);
+        ASSERT(strstr(out, "https://127.0.0.1:8443/") != NULL);
+        ASSERT(strstr(out, "other apps") == NULL);
+        ASSERT(cr_max_line_width(out) <= 80);
+        PASS();
+    }
     TEST("app.list shows kept versions with an open command and deferred validation") {
         const char *doc =
             "{\"schema\":\"zcl.result.v1\",\"command\":\"app.list\","
