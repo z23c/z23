@@ -1954,6 +1954,7 @@ ZCL_CAPABILITY_SYMBOL("sqlite3_deserialize", CAP_HARMLESS,
     "Installs caller-owned bytes as an in-memory database image.")
 ZCL_CAPABILITY_SYMBOL("sqlite3_malloc64", CAP_HARMLESS, "Allocates process memory.")
 ZCL_CAPABILITY_SYMBOL("sscanf", CAP_HARMLESS, "Parses caller-owned memory.")
+ZCL_CAPABILITY_SYMBOL("strtoimax", CAP_HARMLESS, "Parses caller-owned text.")
 ZCL_CAPABILITY_SYMBOL("strtol", CAP_HARMLESS, "Parses caller-owned text.")
 ZCL_CAPABILITY_SYMBOL("strtoll", CAP_HARMLESS, "Parses caller-owned text.")
 ZCL_CAPABILITY_SYMBOL("strtoul", CAP_HARMLESS, "Parses caller-owned text.")

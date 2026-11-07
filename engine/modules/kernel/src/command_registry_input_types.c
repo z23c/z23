@@ -1218,6 +1218,15 @@ static bool cr_app_edit_content(const struct zcl_command_spec *spec, const char 
     return spec && spec->path && !strcmp(spec->path, "app.edit") &&
         !strcmp(key, "content");
 }
+static bool cr_app_customize_query(const struct zcl_command_spec *spec, const char *key)
+{
+    return spec && spec->path && !strcmp(spec->path, "app.customize") && !strcmp(key, "query");
+}
+static bool cr_app_customize_query_ok(const struct json_value *value)
+{
+    const char *text = value->type == JSON_STR ? json_get_str(value) : NULL;
+    return text && text[0] && strlen(text) <= 64 && zutf8_validate(text);
+}
 
 static bool cr_app_edit_text_ok(const struct json_value *value)
 {
@@ -1240,6 +1249,11 @@ bool zcl_command_registry_input_descriptor(
     memset(out, 0, sizeof(*out));
     if (!cr_descriptor_declared(spec, key))
         return false;
+    if (cr_app_customize_query(spec, key)) {
+        out->type = JSON_STR;
+        out->max_bytes = 64;
+        return true;
+    }
     if (cr_app_edit_content(spec, key)) {
         out->type = JSON_STR;
         out->max_bytes = ZCL_COMMAND_APP_EDIT_CONTENT_MAX;
@@ -1337,6 +1351,10 @@ bool command_registry_input_value_type_ok(const struct zcl_command_spec *spec,
     if (!type_ok || !key || !value)
         return false;
     *type_ok = false;
+    if (cr_app_customize_query(spec, key)) {
+        *type_ok = cr_app_customize_query_ok(value);
+        return true;
+    }
     /* Empty replacement is valid (an empty saved file). Match the handler's
      * UTF-8 and byte bound without widening any other leaf's content field. */
     if (cr_app_edit_content(spec, key)) {

@@ -374,6 +374,7 @@ static bool format_instructions(struct mcp_serve *s)
                     "server with --wallet-reads.%s Use select to keep replies small. "
                     "Local apps need no repository checkout. Use apps_list to discover them. "
                     "To personalize a received kept copy before sharing, use apps_personalize with its revision; only the native owner window can approve. To change a kept app, read app.customize through z23_run, then "
+                    "use query with expected_revision to find literal source matches. Follow query/next_page/next_offset until complete; unsearched_files reports oversized files. Read the chosen pinned file before editing. Then "
                     "plan and confirm app.edit with the returned revision, head and file blob. "
                     "Build the returned saved version with app.build, preview with apps_open, "
                     "and use apps_keep when the user chooses to keep it. Working files may "

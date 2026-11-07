@@ -902,6 +902,261 @@ static bool act_serialized_navigation(struct ac_fixture *f)
         act_next_page_refusals() && act_preserved(f, false);
 }
 
+static bool act_search_row(const struct json_value *row, struct ac_fixture *f,
+                           const char *query, size_t seen[2])
+{
+    const char *path = json_get_str(json_get(row, "path"));
+    const char *content = json_get_str(json_get(row, "content"));
+    if (!path || !content || !strstr(content, query)) return false;
+    int64_t offset = json_get_int(json_get(row, "offset"));
+    if (!strcmp(query, "BOOST 2")) {
+        char blob[65]; zcl_hex_encode(f->blob, 32, blob);
+        const char *got = json_get_str(json_get(row, "blob"));
+        ++seen[0];
+        return !strcmp(path, "include/boost.h") && offset == 8 && got && !strcmp(got, blob);
+    }
+    if (query[0] != 'Q') return false; /* A newer/dirty-only match is a failure. */
+    size_t file = path[0] == '"' ? 0u : 1u;
+    char quoted[241]; act_quote_path(quoted);
+    if (!file && strcmp(path, quoted)) return false;
+    if (file && strcmp(path, "src/sky_combat_multiplayer_ultimate.c")) return false;
+    bool ok = offset == (int64_t)(seen[file] * 64u);
+    ++seen[file];
+    return ok;
+}
+
+static bool act_search_rows(const struct json_value *rows, struct ac_fixture *f,
+                            const char *query, size_t seen[2])
+{
+    if (!rows || rows->type != JSON_ARR || json_size(rows) > 2u) return false;
+    for (size_t i = 0; i < json_size(rows); ++i)
+        if (!act_search_row(json_at(rows, i), f, query, seen)) return false;
+    return true;
+}
+
+static bool act_search_count(const char *query, const size_t seen[2], size_t want)
+{
+    if (query[0] == 'Q' && (seen[0] != 9u || seen[1] != 9u)) return false;
+    return seen[0] + seen[1] == want;
+}
+
+static bool act_search_all(struct ac_fixture *f, const char *query, size_t want)
+{
+    struct abc_leaf l; bool ok = act_call(&l, NULL, true);
+    struct json_value doc, next_doc; json_init(&doc); json_init(&next_doc);
+    size_t seen[2] = {0}, pages = 0; bool complete = false;
+    ok = ok && json_push_kv_str(&l.in, "query", query) && act_wire(&l.in, &doc);
+    while (ok && pages++ < 32u) {
+        const struct json_value *d = json_get(&doc, "data");
+        const struct json_value *rows = json_get(d, "matches");
+        ok = act_wire_identity(&doc, f) && act_search_rows(rows, f, query, seen);
+        if (json_get_bool(json_get(d, "complete"))) { complete = true; break; }
+        const struct json_value *next = act_wire_next(&doc, "query");
+        ok = ok && next && act_wire(next, &next_doc);
+        if (ok) { json_free(&doc); doc = next_doc; json_init(&next_doc); }
+    }
+    json_free(&doc); json_free(&next_doc); abc_close(&l);
+    return ok && complete && act_search_count(query, seen, want) && act_preserved(f, false);
+}
+
+static bool act_search_refusal(const char *query, int revision, const char *error)
+{
+    struct abc_leaf l; bool ok = act_call(&l, NULL, false);
+    ok = ok && json_push_kv_str(&l.in, "query", query);
+    if (revision >= 0) ok = ok && json_push_kv_int(&l.in, "expected_revision", revision);
+    ok = ok && (!strcmp(error, "BAD_INPUT") ? act_bad_input_boundaries(&l) :
+                act_result(&l, error));
+    abc_close(&l); return ok;
+}
+
+static bool act_search_next_refusals(void)
+{
+    static const char data[] = "{\"name\":\"skycombat\",\"selection_revision\":1,\"query\":\"BOOST\",\"page\":0,\"offset\":0,\"matches\":[],\"complete\":false,\"next_page\":0,\"next_offset\":128}";
+    const char *bad[] = {
+        "{\"name\":\"skycombat\",\"expected_revision\":1,\"query\":\"OTHER\",\"page\":0,\"offset\":128}",
+        "{\"name\":\"skycombat\",\"expected_revision\":1,\"query\":\"BOOST\",\"page\":0,\"offset\":127}",
+        "{\"name\":\"skycombat\",\"expected_revision\":1,\"query\":\"BOOST\",\"page\":1,\"offset\":128}",
+        "{\"name\":\"skycombat\",\"expected_revision\":2,\"query\":\"BOOST\",\"page\":0,\"offset\":128}",
+        "{\"name\":\"skycombat\",\"expected_revision\":1,\"page\":0,\"offset\":128}"
+    };
+    for (size_t i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i)
+        if (!act_next_case("app.customize", data, bad[i], false)) return false;
+    return act_next_case("app.customize", data,
+        "{\"name\":\"skycombat\",\"expected_revision\":1,\"query\":\"BOOST\",\"page\":0,\"offset\":128}", true);
+}
+
+static bool act_searches(struct ac_fixture *f)
+{
+    char repeated[65]; memset(repeated, 'Q', 64); repeated[64] = 0;
+    return act_search_all(f, "BOOST 2", 1) && act_search_all(f, "BOOST 3", 0) &&
+        act_search_all(f, "BOOST 4", 0) && act_search_all(f, repeated, 18) &&
+        act_search_refusal("BOOST", -1, "REVISION_REQUIRED") &&
+        act_search_refusal("BOOST", 2, "SELECTION_STALE") &&
+        act_search_refusal("", 1, "BAD_INPUT") && act_search_next_refusals();
+}
+
+/* Search-only edge fixtures retain real saved CAS and a readable live file. */
+static bool acs_file(struct ac_fixture *f, const char *name,
+                     const unsigned char *bytes, size_t count, size_t repeats)
+{
+    char path[1000];
+    int n = snprintf(path, sizeof(path), "%s/%s", f->world.copy, name);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < repeats; ++i)
+        ok = fwrite(bytes, 1, count, file) == count;
+    return fclose(file) == 0 && ok;
+}
+
+static bool acs_setup(struct ac_fixture *f)
+{
+    if (!act_save_environment(f) || !abc_world_init(&f->world) ||
+        !act_configure_environment(f)) return false;
+    unsigned char block[4097]; memset(block, 'Z', sizeof(block));
+    const unsigned char binary[] = {'A', 0, 0xff, 'B'};
+    /* 4097 * 256 = 1MiB + 256: deliberately over the per-file ceiling. */
+    return acs_file(f, "acs-large", block, sizeof(block), 256) &&
+        acs_file(f, "acs-binary", binary, sizeof(binary), 1) &&
+        act_snapshot(f, "save", f->head) && act_keep(f);
+}
+
+static bool acs_request(struct abc_leaf *l, const char *query, size_t page, size_t offset)
+{
+    return act_call(l, NULL, true) && json_push_kv_str(&l->in, "query", query) &&
+        json_push_kv_int(&l->in, "page", (int64_t)page) &&
+        json_push_kv_int(&l->in, "offset", (int64_t)offset);
+}
+
+static bool acs_string(const struct json_value *row, const char *key, const char *expected)
+{
+    const char *value = json_get_str(json_get(row, key));
+    return value && !strcmp(value, expected);
+}
+
+static bool acs_skip_row(const struct json_value *data, size_t page)
+{
+    const struct json_value *rows = json_get(data, "skipped");
+    const struct json_value *row = json_at(rows, 0);
+    return json_size(rows) == 1 &&
+        json_get_int(json_get(row, "page")) == (int64_t)page &&
+        json_get_int(json_get(row, "size")) == 4097 * 256 &&
+        acs_string(row, "reason", "file_exceeds_1MiB");
+}
+
+static bool acs_skipped(size_t page, size_t end)
+{
+    struct abc_leaf l; struct json_value doc; json_init(&doc);
+    bool ok = acs_request(&l, "ZZZ", page, 0) && act_wire(&l.in, &doc);
+    const struct json_value *data = json_get(&doc, "data");
+    ok = ok && acs_skip_row(data, page) &&
+        json_get_int(json_get(data, "unsearched_files")) == 1;
+    abc_close(&l); json_free(&doc); json_init(&doc);
+    bool last = acs_request(&l, "ZZZ", end, 0) && act_wire(&l.in, &doc);
+    data = json_get(&doc, "data");
+    last = last && json_get_bool(json_get(data, "complete")) &&
+        json_get_int(json_get(data, "unsearched_files")) == 1 &&
+        json_get_int(json_get(data, "scanned_files")) == 0 &&
+        json_size(json_get(data, "matches")) == 0 &&
+        json_size(json_get(data, "skipped")) == 0;
+    abc_close(&l); json_free(&doc); return ok && last;
+}
+
+static bool acs_binary_row(const struct json_value *row, const uint8_t blob[32])
+{
+    char hex[65]; zcl_hex_encode(blob, 32, hex);
+    return acs_string(row, "path", "acs-binary") && acs_string(row, "blob", hex) &&
+        acs_string(row, "encoding", "base64") && acs_string(row, "content", "QQD/Qg==") &&
+        json_get_int(json_get(row, "offset")) == 0 &&
+        json_get_int(json_get(row, "bytes")) == 4;
+}
+
+static bool acs_binary(size_t page, const uint8_t blob[32])
+{
+    struct abc_leaf l; struct json_value doc; json_init(&doc);
+    bool ok = acs_request(&l, "A", page, 0) && act_wire(&l.in, &doc);
+    const struct json_value *matches = json_get(json_get(&doc, "data"), "matches");
+    ok = ok && json_size(matches) >= 1 && acs_binary_row(json_at(matches, 0), blob);
+    abc_close(&l); json_free(&doc); return ok;
+}
+
+static bool acs_refused(size_t page, size_t offset, const char *error)
+{
+    struct abc_leaf l;
+    bool ok = acs_request(&l, "A", page, offset) && act_result(&l, error);
+    abc_close(&l); return ok;
+}
+
+static bool acs_query_bound(const char *query)
+{
+    struct abc_leaf l;
+    bool ok = acs_request(&l, query, 0, 0) && act_bad_input_boundaries(&l);
+    abc_close(&l); return ok;
+}
+
+static bool acs_bounds(size_t binary, size_t end)
+{
+    char query[66]; memset(query, 'A', 65); query[65] = 0;
+    return acs_refused(end + 1, 0, "BAD_INPUT") &&
+        acs_refused(end, 1, "BAD_INPUT") && acs_refused(binary, 5, "BLOB_RANGE") &&
+        acs_query_bound(query) && acs_query_bound("");
+}
+
+static bool acs_live_binary(struct ac_fixture *f)
+{
+    char path[1000]; uint8_t *bytes = NULL; size_t size = 0;
+    const unsigned char expected[] = {'A', 0, 0xff, 'B'};
+    int n = snprintf(path, sizeof(path), "%s/acs-binary", f->world.copy);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
+    bool ok = zcl_read_whole_file(path, 8, &bytes, &size, "search live fallback control") &&
+        size == sizeof(expected) && !memcmp(bytes, expected, sizeof(expected));
+    free(bytes); return ok;
+}
+
+static bool acs_missing_corrupt(struct ac_fixture *f, size_t page, const uint8_t blob[32])
+{
+    char path[1600], saved[1620];
+    if (!act_object_path(f, blob, path)) return false;
+    int n = snprintf(saved, sizeof(saved), "%s.acs-saved", path);
+    if (n < 0 || (size_t)n >= sizeof(saved) || rename(path, saved)) return false;
+    bool ok = acs_live_binary(f) && acs_refused(page, 0, "BLOB_UNREADABLE");
+    FILE *file = fopen(path, "wb");
+    bool written = file && fwrite("corrupt", 1, 7, file) == 7;
+    if (file && fclose(file)) written = false;
+    bool corrupt = written && acs_live_binary(f) && acs_refused(page, 0, "BLOB_UNREADABLE");
+    bool removed = unlink(path) == 0;
+    bool restored = rename(saved, path) == 0;
+    return ok && corrupt && removed && restored && acs_binary(page, blob);
+}
+
+static bool acs_manifest(struct ac_fixture *f)
+{
+    struct vcs_manifest manifest;
+    if (!vcs_tree_load(f->world.copy, f->tree, &manifest)) return false;
+    size_t binary = manifest.count, large = manifest.count;
+    for (size_t i = 0; i < manifest.count; ++i) {
+        if (!strcmp(manifest.entries[i].path, "acs-binary")) binary = i;
+        if (!strcmp(manifest.entries[i].path, "acs-large")) large = i;
+    }
+    bool ok = binary < manifest.count && large < manifest.count;
+    if (ok) ok = acs_skipped(large, manifest.count) &&
+        acs_binary(binary, manifest.entries[binary].blob) && acs_bounds(binary, manifest.count) &&
+        acs_missing_corrupt(f, binary, manifest.entries[binary].blob);
+    vcs_manifest_free(&manifest); return ok;
+}
+
+static int acs_edges(void)
+{
+    int failures = 0; struct ac_fixture f = {0};
+    TEST("selected source search reports omissions, validates cursors and refuses damaged CAS") {
+        ASSERT(acs_setup(&f));
+        ASSERT(acs_manifest(&f));
+        PASS();
+    } _test_next:;
+    act_cleanup(&f); return failures;
+}
+
 int test_app_customize(void)
 {
     int failures = 0;
@@ -911,6 +1166,7 @@ int test_app_customize(void)
         ASSERT(act_reads(&f));
         ASSERT(act_escaped_reads());
         ASSERT(act_serialized_navigation(&f));
+        ASSERT(act_searches(&f));
         ASSERT(act_refusals());
         ASSERT(act_bounds());
         ASSERT(act_blob_refusal(&f));
@@ -925,6 +1181,7 @@ int test_app_customize(void)
         PASS();
     } _test_next:;
     act_cleanup(&f);
+    failures += acs_edges();
     return failures;
 }
 

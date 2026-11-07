@@ -23,6 +23,8 @@
 #define AC_PATH 256u
 #define AC_CHANGE 256u
 #define AC_REPLY 6144u
+#define AC_QUERY 64u
+#define AC_SNIPPET 96u
 
 struct ac_read {
     struct zcl_command_reply *reply;
@@ -30,7 +32,7 @@ struct ac_read {
     struct app_selection selected;
     struct zcl_package_copy copy;
     struct vcs_manifest manifest;
-    const char *name, *change, *path;
+    const char *name, *change, *path, *query;
     size_t offset, limit, page;
     uint64_t expected;
     bool pinned;
@@ -67,7 +69,7 @@ static bool ac_integer(const struct json_value *in, const char *key,
 
 static bool ac_inputs(struct ac_read *a, const struct json_value *in)
 {
-    static const char *const keys[] = {"name", "change", "expected_revision", "path", "offset", "limit", "page"};
+    static const char *const keys[] = {"name", "change", "expected_revision", "path", "offset", "limit", "page", "query"};
     if (!in || in->type != JSON_OBJ) return ac_fail(a, "BAD_INPUT", "an object is required");
     for (size_t i = 0; i < in->num_children; ++i) {
         bool known = false;
@@ -90,8 +92,17 @@ static bool ac_inputs(struct ac_read *a, const struct json_value *in)
     return true;
 }
 
+static bool ac_search_shape(struct ac_read *a, const struct json_value *in)
+{
+    if (!a->query[0] || a->path || json_get(in, "limit"))
+        return ac_fail(a, "BAD_INPUT", "query is nonempty and excludes path and limit");
+    return a->pinned || ac_fail(a, "REVISION_REQUIRED", "search requires expected_revision from initial context");
+}
 static bool ac_shape(struct ac_read *a, const struct json_value *in)
 {
+    if (!ac_text(in, "query", AC_QUERY, &a->query, false))
+        return ac_fail(a, "BAD_INPUT", "query must be nonempty UTF-8 of at most 64 bytes");
+    if (a->query) return ac_search_shape(a, in);
     if (a->path && (!a->path[0] || a->page || json_get(in, "page")))
         return ac_fail(a, "BAD_INPUT", "file reads and manifest pages are separate requests");
     if (!a->path && (json_get(in, "offset") || json_get(in, "limit")))
@@ -216,23 +227,25 @@ static bool ac_page(struct ac_read *a)
     return true;
 }
 
-static bool ac_slice(struct ac_read *a, const uint8_t *bytes, size_t size)
+static bool ac_bytes(struct json_value *data, const uint8_t *part, size_t count)
 {
     bool ok = true;
-    size_t count = size - a->offset;
-    if (count > a->limit) count = a->limit;
     char content[AC_SLICE * 2u + 1u];
-    const uint8_t *part = size ? bytes + a->offset : (const uint8_t *)"";
     bool text = !memchr(part, 0, count) && zutf8_validate_n((const char *)part, count);
     if (text) { memcpy(content, part, count); content[count] = 0; }
     else ok = zbase64_encode(part, count, content, sizeof(content));
-    ok = ok && json_push_kv_str(&a->data, "encoding", text ? "utf8" : "base64") &&
-        json_push_kv_str(&a->data, "content", content) &&
+    return ok && json_push_kv_str(data, "encoding", text ? "utf8" : "base64") &&
+        json_push_kv_str(data, "content", content) && json_push_kv_int(data, "bytes", (int64_t)count);
+}
+static bool ac_slice(struct ac_read *a, const uint8_t *bytes, size_t size)
+{
+    size_t count = size - a->offset;
+    if (count > a->limit) count = a->limit;
+    const uint8_t *part = size ? bytes + a->offset : (const uint8_t *)"";
+    return ac_bytes(&a->data, part, count) &&
         json_push_kv_int(&a->data, "offset", (int64_t)a->offset) &&
-        json_push_kv_int(&a->data, "bytes", (int64_t)count) &&
         json_push_kv_int(&a->data, "next_offset", (int64_t)(a->offset + count)) &&
         json_push_kv_bool(&a->data, "complete", a->offset + count == size);
-    return ok;
 }
 
 static bool ac_content(struct ac_read *a, const struct vcs_entry *e)
@@ -262,6 +275,90 @@ static bool ac_file(struct ac_read *a)
     return ac_fail(a, "PATH_UNKNOWN", "path is not an exact member of the kept source manifest");
 }
 
+struct ac_search {
+    struct json_value matches, skipped;
+    size_t page, offset, scanned, bytes, found;
+};
+static bool ac_search_match(struct ac_search *s, const struct vcs_entry *e,
+    const uint8_t *bytes, size_t size, size_t offset)
+{
+    size_t count = size - offset;
+    if (count > AC_SNIPPET) count = AC_SNIPPET;
+    struct json_value row; json_init(&row);
+    bool ok = ac_row(&row, e) && json_push_kv_int(&row, "offset", (int64_t)offset) &&
+        ac_bytes(&row, bytes + offset, count) && json_push_back(&s->matches, &row);
+    json_free(&row);
+    if (ok) ++s->found;
+    return ok;
+}
+static bool ac_search_bytes(struct ac_read *a, struct ac_search *s,
+    const struct vcs_entry *e, const uint8_t *bytes, size_t size)
+{
+    size_t n = strlen(a->query);
+    while (s->offset <= size && size - s->offset >= n && s->found < 2) {
+        if (memcmp(bytes + s->offset, a->query, n)) { ++s->offset; continue; }
+        if (!ac_search_match(s, e, bytes, size, s->offset)) return false;
+        s->offset += n; /* Literal non-overlapping matches, including across replies. */
+    }
+    if (size - s->offset < n) { ++s->page; s->offset = 0; }
+    return true;
+}
+static bool ac_search_skip(struct ac_search *s, const struct vcs_entry *e)
+{
+    struct json_value row; json_init(&row); json_set_object(&row);
+    bool ok = e->size <= INT64_MAX && json_push_kv_int(&row, "page", (int64_t)s->page) &&
+        json_push_kv_int(&row, "size", (int64_t)e->size) &&
+        json_push_kv_str(&row, "reason", "file_exceeds_1MiB") && json_push_back(&s->skipped, &row);
+    json_free(&row); ++s->page; s->offset = 0;
+    return ok;
+}
+static bool ac_search_file(struct ac_read *a, struct ac_search *s)
+{
+    const struct vcs_entry *e = &a->manifest.entries[s->page];
+    if (s->offset > e->size) return ac_fail(a, "BLOB_RANGE", "search offset exceeds selected file");
+    if (e->size > AC_FILE_BYTES) return ac_search_skip(s, e);
+    uint8_t *bytes = NULL; size_t size = 0;
+    if (vcs_object_get_readonly_bounded(a->selected.copy, e->blob, VCS_TAG_BLOB,
+            AC_FILE_BYTES, &bytes, &size) != 0)
+        return ac_fail(a, "BLOB_UNREADABLE", "search blob missing or corrupt; no working-file fallback");
+    bool ok = size == e->size;
+    if (!ok) ac_fail(a, "BLOB_RANGE", "search blob length disagrees with selected manifest");
+    ++s->scanned; s->bytes += size;
+    if (ok) ok = ac_search_bytes(a, s, e, bytes, size);
+    free(bytes); return ok;
+}
+static bool ac_search_result(struct ac_read *a, const struct ac_search *s)
+{
+    size_t unsearched = 0;
+    for (size_t i = 0; i < a->manifest.count; ++i)
+        if (a->manifest.entries[i].size > AC_FILE_BYTES) ++unsearched;
+    return json_push_kv_str(&a->data, "query", a->query) &&
+        json_push_kv_int(&a->data, "page", (int64_t)a->page) &&
+        json_push_kv_int(&a->data, "offset", (int64_t)a->offset) &&
+        json_push_kv(&a->data, "matches", &s->matches) && json_push_kv(&a->data, "skipped", &s->skipped) &&
+        json_push_kv_int(&a->data, "unsearched_files", (int64_t)unsearched) &&
+        json_push_kv_str(&a->data, "coverage", "nonoverlapping-literal-from-request-cursor") &&
+        json_push_kv_int(&a->data, "scanned_files", (int64_t)s->scanned) &&
+        json_push_kv_int(&a->data, "scanned_bytes", (int64_t)s->bytes) &&
+        json_push_kv_int(&a->data, "next_page", (int64_t)s->page) &&
+        json_push_kv_int(&a->data, "next_offset", (int64_t)s->offset) &&
+        json_push_kv_bool(&a->data, "complete", s->page == a->manifest.count);
+}
+static bool ac_search(struct ac_read *a)
+{
+    if (a->page > a->manifest.count || (a->page == a->manifest.count && a->offset))
+        return ac_fail(a, "BAD_INPUT", "search cursor exceeds selected manifest");
+    struct ac_search s = {.page = a->page, .offset = a->offset};
+    json_init(&s.matches); json_set_array(&s.matches); json_init(&s.skipped); json_set_array(&s.skipped);
+    bool ok = true;
+    for (size_t visited = 0; ok && visited < AC_PAGE && s.page < a->manifest.count && s.found < 2; ++visited)
+        ok = ac_search_file(a, &s);
+    if (ok) ok = ac_search_result(a, &s);
+    json_free(&s.matches); json_free(&s.skipped);
+    if (!ok && a->reply->status == ZCL_COMMAND_STATUS_PASSED)
+        ac_fail(a, "CONTEXT_REFUSED", "search context allocation or metadata encoding failed");
+    return ok;
+}
 static bool ac_still_selected(struct ac_read *a)
 {
     struct app_selection now;
@@ -272,16 +369,23 @@ static bool ac_still_selected(struct ac_read *a)
     return true;
 }
 
+static bool ac_next_cursor(struct ac_read *a, struct json_value *next)
+{
+    if (a->query) return json_push_kv_str(next, "query", a->query) &&
+        json_push_kv_int(next, "page", json_get_int(json_get(&a->data, "next_page"))) &&
+        json_push_kv_int(next, "offset", json_get_int(json_get(&a->data, "next_offset")));
+    if (a->path) return json_push_kv_str(next, "path", a->path) &&
+        json_push_kv_int(next, "offset", json_get_int(json_get(&a->data, "next_offset"))) &&
+        json_push_kv_int(next, "limit", (int64_t)a->limit);
+    return json_push_kv_int(next, "page", json_get_int(json_get(&a->data, "next_page")));
+}
 static bool ac_next(struct ac_read *a)
 {
     if (json_get_bool(json_get(&a->data, "complete"))) return true;
     struct json_value next; json_init(&next); json_set_object(&next);
     bool ok = json_push_kv_str(&next, "name", a->selected.app) &&
         json_push_kv_int(&next, "expected_revision", (int64_t)a->selected.revision);
-    if (a->path) ok = ok && json_push_kv_str(&next, "path", a->path) &&
-        json_push_kv_int(&next, "offset", json_get_int(json_get(&a->data, "next_offset"))) &&
-        json_push_kv_int(&next, "limit", (int64_t)a->limit);
-    else ok = ok && json_push_kv_int(&next, "page", json_get_int(json_get(&a->data, "next_page")));
+    ok = ok && ac_next_cursor(a, &next);
     char wire[2048];
     size_t size = ok ? json_write(&next, wire, sizeof(wire)) : 0;
     if (size == 0) ok = false;
@@ -295,7 +399,7 @@ static bool ac_next(struct ac_read *a)
 
 static bool ac_first_file(struct ac_read *a)
 {
-    if (a->path || a->page >= a->manifest.count) return true;
+    if (a->query || a->path || a->page >= a->manifest.count) return true;
     struct json_value input; json_init(&input); json_set_object(&input);
     bool ok = json_push_kv_str(&input, "name", a->selected.app) &&
         json_push_kv_int(&input, "expected_revision", (int64_t)a->selected.revision) &&
@@ -313,7 +417,7 @@ static bool ac_read_context(struct ac_read *a, const struct json_value *input)
 {
     bool ok = ac_inputs(a, input) && ac_shape(a, input) && ac_select(a) && ac_source(a);
     if (ok && !ac_identity(a)) ok = ac_fail(a, "CONTEXT_REFUSED", "context allocation failed");
-    if (ok) ok = a->path ? ac_file(a) : ac_page(a);
+    if (ok) ok = a->query ? ac_search(a) : (a->path ? ac_file(a) : ac_page(a));
     if (ok) ok = ac_still_selected(a);
     return ok;
 }

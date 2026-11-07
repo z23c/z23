@@ -16,6 +16,35 @@ separate from node data. Configure your assistant's Z23 connection to use the
 same app-data directory so it can find your copies and kept versions. Your
 friend uses the same example path under their own home directory.
 
+### Connect your assistant once
+
+In your assistant's local MCP server settings, add a **stdio** server with
+the installed `z23` executable as the command. Use these arguments:
+
+```text
+mcp
+serve
+--datadir=/absolute/path/to/your/home/.local/share/z23-app-data
+```
+
+Replace the example with your actual absolute home path. Settings that pass
+arguments directly do not expand shell expressions such as `$HOME` or `~`.
+If the assistant cannot find `z23`, use the executable's absolute path as
+the command. This app workflow needs no Z23 source checkout; leave
+`--checkout` unset. Run the assistant in your desktop session so the native
+confirmation and preview windows can appear.
+
+Reconnect the server, then ask: “Use Z23's `apps_list` tool to show my
+installed apps.” Check that Sky Combat is installed before continuing. If
+the tool is missing, check the server's connection log and executable path;
+if the app is not installed, use an app-capable installation. The
+[MCP reference](../agent/AGENT_API.md#local-mcp-adapter) describes the adapter.
+
+<!-- claim: symbol-present parse_option tools/mcp/mcp_serve.c # local stdio datadir option -->
+<!-- claim: symbol-present apps_list tools/mcp/mcp_serve.c # installed app connection check -->
+
+### Make a change and share it
+
 Ask your assistant to make a personal copy, change it and show you a preview.
 Review the native window and choose **Make my copy**. After the assistant
 builds and previews the change, ask it to **Keep** the version you like. The

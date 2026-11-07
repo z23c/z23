@@ -1514,11 +1514,14 @@ archive bytes for the same node action.
 
 ## Local MCP adapter
 
-`z23 mcp serve [--checkout=<absolute git toplevel>] [--fleet-writes] [--wallet-reads]` is a local stdio MCP server
+`z23 mcp serve [--datadir=<absolute app-data directory>] [--checkout=<absolute git toplevel>] [--fleet-writes] [--wallet-reads]` is a local stdio MCP server
 for agent harnesses that launch their own tools (Claude Code, Codex). It
 speaks newline-delimited JSON-RPC on stdin/stdout, handles one request at a
-time and logs to stderr only. Four tools keep the MCP tool listing near 2 KB:
-`z23_search`, `z23_describe`, `z23_run` and `z23_code`.
+time and logs to stderr only. General tools are `z23_search`, `z23_describe`,
+`z23_run` and `z23_code`; dedicated `apps_*` tools expose the app journey.
+For an installed app, start with the
+[assistant setup instructions](../commons/PLUGIN_APPS.md#connect-your-assistant-once).
+Use the same persistent `--datadir` for the assistant and your app commands.
 `z23_search` takes an optional `scope`, `commands` (default) or `wiki`; the wiki
 scope is described in [WIKI.md](WIKI.md#from-an-agent-harness).
 

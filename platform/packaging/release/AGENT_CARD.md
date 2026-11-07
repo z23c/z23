@@ -14,6 +14,41 @@ that checked out. If you do not, you do not need it: `z23 discover help`
 and `z23 discover schema <path>` below are the running node describing its
 own interface live, which is the more reliable copy anyway.
 
+## Connect your AI to a local app
+
+In your AI client's MCP settings, add a **local stdio** server:
+
+| Setting | Value |
+|---|---|
+| Executable | Absolute path to your installed `z23` executable |
+| Arguments (three separate items) | `mcp`, `serve`, `--datadir=<absolute persistent app directory>` |
+
+Replace the placeholder with the same persistent directory you use for CLI
+app commands, such as the fully expanded value of `$HOME/.z23-apps`.
+The client launches the executable directly: do not enter a shell command,
+quote an entire command line, or expect `~`, `$HOME` or `$(...)` to expand.
+Keep a path containing spaces inside one argument. MCP uses `--datadir=...`;
+ordinary CLI app commands use `-datadir=...` before `app`.
+
+Local apps need no repository checkout, running node or blockchain sync.
+Do not add `--checkout`, `--wallet-reads` or `--fleet-writes` for this setup.
+The stdio server currently supports POSIX hosts (Linux and macOS), not Windows.
+Native confirmation and game windows need a graphical desktop in the client's
+session. Building a changed copy also needs GNU make and a C23-capable compiler;
+Linux needs X11/Xrandr/XInput2/Xcursor and OpenGL development headers/libraries,
+and macOS needs its SDK and command-line developer tools.
+
+Ask your AI:
+
+> Open the flight game. Help me make my own copy, change its appearance,
+> preview the saved version, keep it if I approve, and share it with a friend.
+
+The existing tools are `apps_list` for discovery, `apps_open` to play, and
+`apps_adopt` with `name: "skycombat"` to request your personal copy. Only your
+local native window can approve making that copy. The server describes the
+source-read/edit/build/preview/Keep tools to the connected AI; sharing also
+requires your local approval.
+
 ## Talk to it
 
 ```

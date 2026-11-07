@@ -66,7 +66,7 @@ offline. macOS, Windows and the rest are in
 
 ## Try an app
 
-The quickest thing to touch is Sky Combat, a split-screen flight game that
+The quickest thing to touch is Sky Combat, a single-player flight game that
 ships in this repo. It needs no node and no network. Play it, make your own
 copy, change it, and give it to a friend, one plain command per step. The
 examples keep your copies in their own data directory, apart from a node's:
@@ -114,6 +114,25 @@ build/bin/z23 -datadir="$HOME/.zclassic-c23-dev" -rpcport=18234 stop   # when do
 
 To publish a package for everyone rather than one friend, see the
 [Commons quickstart](docs/commons/C23_COMMONS_QUICKSTART.md).
+
+## Connect your AI to a local app
+
+Follow [Try, change and share an app](docs/commons/PLUGIN_APPS.md#try-change-and-share-an-app)
+to connect your AI client to the installed local stdio MCP server, using the
+same persistent app data directory as your CLI commands. Local apps need no
+repository checkout, running node or blockchain sync. The
+[shipped app guide](platform/packaging/release/AGENT_CARD.md#connect-your-ai-to-a-local-app)
+lists the graphical desktop and compiler requirements for Linux and macOS.
+
+Then ask your AI:
+
+> Open the flight game. Help me make my own copy, change its appearance,
+> preview the saved version, keep it if I approve, and share it with a friend.
+
+Making a personal copy and sharing require your local native confirmation.
+
+<!-- claim: symbol-present zcl_mcp_serve_main tools/mcp/mcp_serve.c # local stdio app adapter -->
+<!-- claim: symbol-present SKYCOMBAT_GAME_MAIN apps/skycombat/skycombat.mk # maintained game entrypoint -->
 
 ## Run a node
 

@@ -180,12 +180,40 @@ static bool source_next_schema(const struct zcl_command_spec *spec)
         !strcmp(spec->input_schema, "zcl.app_customize.input.v1") &&
         !strcmp(spec->output_schema, "zcl.app_customize.v1");
 }
+static bool source_search_coordinate(const struct json_value *input, const char *key,
+    const struct json_value *data, const char *next_key)
+{
+    const struct json_value *a = json_get(input, key), *b = json_get(data, next_key);
+    return a && b && a->type == JSON_INT && b->type == JSON_INT &&
+        a->val.i >= 0 && a->val.i == b->val.i;
+}
+static bool source_search_advance(const struct json_value *input, const struct json_value *data)
+{
+    const struct json_value *page = json_get(data, "page"), *offset = json_get(data, "offset");
+    if (!page || !offset || page->type != JSON_INT || offset->type != JSON_INT ||
+        page->val.i < 0 || offset->val.i < 0) return false;
+    int64_t next_page = json_get_int(json_get(input, "page"));
+    int64_t next_offset = json_get_int(json_get(input, "offset"));
+    return next_page > page->val.i || (next_page == page->val.i && next_offset > offset->val.i);
+}
+static bool source_next_search(const struct json_value *input, const struct json_value *data)
+{
+    const struct json_value *complete = json_get(data, "complete"), *matches = json_get(data, "matches");
+    return input->num_children == 5 && source_next_text(input, "query", data, "query") &&
+        !json_get(input, "path") && !json_get(input, "limit") &&
+        complete && complete->type == JSON_BOOL && !json_get_bool(complete) &&
+        matches && matches->type == JSON_ARR &&
+        source_search_coordinate(input, "page", data, "next_page") &&
+        source_search_coordinate(input, "offset", data, "next_offset") &&
+        source_search_advance(input, data);
+}
 static bool source_next_valid(const struct zcl_command_spec *spec,
     const struct json_value *input, const struct json_value *data)
 {
     if (!source_next_schema(spec)) return false;
     if (!source_next_text(input, "name", data, "name") ||
         !source_next_integer(input, "expected_revision", data, "selection_revision")) return false;
+    if (json_get(input, "query") || json_get(data, "query")) return source_next_search(input, data);
     if (json_get(input, "path")) return !json_get(input, "page") && source_next_file(input, data);
     const struct json_value *complete = json_get(data, "complete"), *files = json_get(data, "files");
     return !json_get(input, "offset") && files && files->type == JSON_ARR &&
