@@ -2,9 +2,10 @@
 Type=Application
 Name=Z23
 Comment=Z23 native presentation window
-Exec=z23 discover help
+Exec=z23 app receive --preview --file=%f
 Icon=org.zclassic.ZClassic23
 StartupNotify=true
 StartupWMClass=org.zclassic.ZClassic23
-Terminal=true
+Terminal=false
+MimeType=application/x-z23-share;
 NoDisplay=true

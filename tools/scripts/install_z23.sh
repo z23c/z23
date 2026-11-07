@@ -78,13 +78,13 @@ sha256_check_manifest() {
     fi
 }
 
-# Public fetch ceilings. The manifest has at most seven short checksum rows;
-# 1 KiB leaves ample format headroom. Node aliases are currently below 32 MiB,
+# Public fetch ceilings. The manifest has at most thirteen checksum rows;
+# 2 KiB leaves bounded format headroom. Node aliases are currently below 32 MiB,
 # the confined verifier below 96 MiB, and the certificate worker (a small
 # static-ish TLS client, currently ~5 MB) below 32 MiB; these limits allow
 # growth without permitting an untrusted mirror to stream without bound.
 # Deadlines apply to every HTTP transaction independently.
-REMOTE_MANIFEST_MAX_BYTES=1024
+REMOTE_MANIFEST_MAX_BYTES=2048
 REMOTE_NODE_MAX_BYTES=$((64 * 1024 * 1024))
 REMOTE_VERIFIER_MAX_BYTES=$((128 * 1024 * 1024))
 REMOTE_ACME_MAX_BYTES=$((32 * 1024 * 1024))
@@ -280,8 +280,11 @@ cleanup_install_stage() {
 # verified does not get to ship one unverified file. The set stays exact —
 # never a wildcard — because "any file the manifest names" is how an
 # attacker adds an extra.
+# The opt-in POSIX app set is exactly the current seven plus six fixed
+# game/source members. It is not accepted as an arbitrary manifest extension.
 RELEASE_MEMBERS_LEGACY="AGENT_CARD.md z23 zclassic23 zclassic23-package-verify zclassic23-acme"
 RELEASE_MEMBERS="AGENT_CARD.md z23 zclassic23 z23-package-verify zclassic23-package-verify z23-acme zclassic23-acme"
+APP_SOURCE_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire"
 REMOTE_CARD_MAX_BYTES=$((64 * 1024))
 
 payload_max_bytes() {
@@ -291,6 +294,11 @@ payload_max_bytes() {
             printf '%s\n' "$REMOTE_VERIFIER_MAX_BYTES" ;;
         z23-acme|zclassic23-acme) printf '%s\n' "$REMOTE_ACME_MAX_BYTES" ;;
         AGENT_CARD.md) printf '%s\n' "$REMOTE_CARD_MAX_BYTES" ;;
+        z23-skycombat|source.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
+        installed-source.json) printf '%s\n' 4096 ;;
+        manifest.wire) printf '%s\n' "$((1024 * 1024))" ;;
+        recipe.wire) printf '%s\n' "$((256 * 1024))" ;;
+        app-build.wire) printf '%s\n' 240 ;;
         *) return 1 ;;
     esac
 }
@@ -316,9 +324,10 @@ manifest_alias_source() {
     fi
 }
 
-# Sorted (LC_ALL=C) names of the two accepted shapes, compared literally.
+# Sorted (LC_ALL=C) names of the three accepted shapes, compared literally.
 RELEASE_NAMES_CURRENT=$'AGENT_CARD.md\nz23\nz23-acme\nz23-package-verify\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 RELEASE_NAMES_LEGACY=$'AGENT_CARD.md\nz23\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
+RELEASE_NAMES_APP=$'AGENT_CARD.md\napp-build.wire\ninstalled-source.json\nmanifest.wire\nrecipe.wire\nsource.bundle\nz23\nz23-acme\nz23-package-verify\nz23-skycombat\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 
 validate_manifest_contract() {
     local manifest="$1" bytes lines matching names dir name twin
@@ -328,12 +337,12 @@ validate_manifest_contract() {
         || die "SHA256SUMS exceeds $REMOTE_MANIFEST_MAX_BYTES bytes"
     lines="$(wc -l <"$manifest" | tr -d ' ')"
     matching="$(LC_ALL=C grep -Ec \
-        '^[0-9a-f]{64}  (AGENT_CARD\.md|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme)$' \
+        '^[0-9a-f]{64}  (AGENT_CARD\.md|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme|z23-skycombat|installed-source\.json|source\.bundle|manifest\.wire|recipe\.wire|app-build\.wire)$' \
         "$manifest" || true)"
-    { [ "$lines" -eq 7 ] || [ "$lines" -eq 5 ]; } && [ "$matching" -eq "$lines" ] \
-        || die "SHA256SUMS must contain exactly seven (current) or exactly five (legacy) strict lowercase SHA-256 rows"
+    { [ "$lines" -eq 7 ] || [ "$lines" -eq 5 ] || [ "$lines" -eq 13 ]; } && [ "$matching" -eq "$lines" ] \
+        || die "SHA256SUMS must contain exactly seven (current), exactly five (legacy), or exactly thirteen (app) strict lowercase SHA-256 rows"
     names="$(awk '{print $2}' "$manifest" | LC_ALL=C sort)"
-    [ "$names" = "$RELEASE_NAMES_CURRENT" ] || [ "$names" = "$RELEASE_NAMES_LEGACY" ] \
+    [ "$names" = "$RELEASE_NAMES_CURRENT" ] || [ "$names" = "$RELEASE_NAMES_LEGACY" ] || [ "$names" = "$RELEASE_NAMES_APP" ] \
         || die "SHA256SUMS must name each required release member exactly once"
     # z23 and zclassic23 are one program under two names, and the release
     # says so with one digest in two rows. The same holds for each helper
@@ -454,6 +463,8 @@ fetch_into() {
         *)
             [ -d "$src" ] || die "source is not a directory or http(s) URL: $src"
             [ -f "$src/SHA256SUMS" ] || die "SHA256SUMS missing in $src"
+            [ "$(wc -c <"$src/SHA256SUMS" | tr -d ' ')" -le "$REMOTE_MANIFEST_MAX_BYTES" ] \
+                || die "SHA256SUMS exceeds $REMOTE_MANIFEST_MAX_BYTES bytes before copy"
             cp -f -- "$src/SHA256SUMS" "$dest/SHA256SUMS"
             validate_manifest_contract "$dest/SHA256SUMS"
             # An independently obtained digest binds a local directory too:
@@ -471,6 +482,8 @@ fetch_into() {
             while read -r _ name; do
                 [ -z "$(manifest_alias_source "$dest" "$name")" ] || continue
                 [ -f "$src/$name" ] || die "listed file missing: $src/$name"
+                [ "$(wc -c <"$src/$name" | tr -d ' ')" -le "$(payload_max_bytes "$name")" ] \
+                    || die "$name exceeds its release ceiling before copy"
                 cp -f -- "$src/$name" "$dest/$name"
             done <"$dest/SHA256SUMS"
             materialize_aliases "$dest"
@@ -673,6 +686,14 @@ atomic_relative_link() {
     mv -fh -- "$tmp" "$link"
 }
 
+# New installer ancestors must satisfy the resolver's no-group/world-write
+# policy. Preserve stricter caller masks and every existing directory mode;
+# existing unsafe ancestors remain a resolver refusal, never silently repaired.
+install_directories() (
+    umask go-w
+    mkdir -p "$@"
+)
+
 # Installs the Markdown documentation tree (docs/**/*.md, relative paths kept,
 # nothing else) at <prefix>/share/z23/docs, where `z23 wiki` finds it for both
 # the <prefix>/bin/z23 and the <prefix>/lib/z23/generations/<sha>/z23 layouts.
@@ -688,7 +709,7 @@ install_docs() {
         say "no docs tree at $src; z23 wiki will report DOCS_UNAVAILABLE" >&2
         return 0
     fi
-    mkdir -p "$share"
+    install_directories "$share"
     [ ! -e "$share/docs" ] || [ -L "$share/docs" ] \
         || die "$share/docs exists and is not an installer-managed link"
     [ ! -L "$share/docs" ] || old="$(readlink "$share/docs")"
@@ -702,6 +723,58 @@ install_docs() {
     case "$old" in
         docs.??????) find "$share/$old" -xdev -depth -delete ;;
     esac
+}
+
+has_app_source() {
+    [ -n "$(manifest_digest_of "$1" z23-skycombat)" ]
+}
+
+# The release manifest remains the authority. No JSON projection parsing in
+# shell, new pin format, source signing, or implicit source admission here.
+install_app_members() {
+    local stage="$1" dest="$2" name
+    for name in $APP_SOURCE_MEMBERS; do
+        if [ "$name" = z23-skycombat ]; then
+            install -m 555 "$stage/$name" "$dest/$name" || die "could not install $name"
+        else
+            install -m 444 "$stage/$name" "$dest/$name" || die "could not install $name"
+        fi
+        [ "$(sha256_file "$dest/$name")" = "$(manifest_digest_of "$stage" "$name")" ] \
+            || die "installed app member differs: $name"
+    done
+}
+
+install_app_source_linux() {
+    local stage="$1" prefix="$2" root id dest incoming name
+    has_app_source "$stage" || return 0
+    root="$prefix/share/z23/apps"
+    [ ! -L "$root" ] || die "apps installation directory must not be a symlink"
+    install_directories "$root"
+    id="$(sha256_file "$stage/SHA256SUMS")"
+    dest="$root/$id"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+        [ -d "$dest" ] && [ ! -L "$dest" ] || die "app source generation is not a real directory"
+        for name in $APP_SOURCE_MEMBERS SHA256SUMS; do
+            cmp -s "$stage/$name" "$dest/$name" || die "app source generation collision: $id"
+        done
+    else
+        incoming="$(mktemp -d "$root/.incoming.XXXXXX")" || die "cannot stage app source"
+        install_app_members "$stage" "$incoming"
+        install -m 444 "$stage/SHA256SUMS" "$incoming/SHA256SUMS"
+        # Trusted installer prefix; refuse concurrent directory creation rather
+        # than merging into it. A failed staging tree is retained for diagnosis.
+        [ ! -e "$dest" ] && [ ! -L "$dest" ] || die "app source destination appeared"
+        mv -Tn -- "$incoming" "$dest" || die "cannot commit app source generation"
+        [ ! -e "$incoming" ] || die "app source destination appeared; staging retained"
+        chmod 555 "$dest"
+    fi
+    [ "$(sha256_file "$prefix/bin/z23")" = "$(manifest_digest_of "$dest" z23)" ] \
+        || die "installed node is outside the retained app release manifest"
+    [ ! -e "$root/skycombat" ] || [ -L "$root/skycombat" ] \
+        || die "skycombat source selector is not an installer-managed link"
+    atomic_relative_link ../share/z23/apps/skycombat/z23-skycombat "$prefix/bin/z23-skycombat" \
+        || die "cannot link the installed game"
+    atomic_relative_link "$id" "$root/skycombat" || die "cannot select installed app source"
 }
 
 macos_generation_matches() {
@@ -788,7 +861,7 @@ install_payload_macos_generation() {
     # recorded digest, so the directory name IS the binary's proven identity.
     MACOS_GENERATION_ID="$(manifest_digest_of "$stage" z23)"
     MACOS_GENERATION="$generations/$MACOS_GENERATION_ID"
-    mkdir -p "$generations" "$prefix/bin" "$prefix/share/z23"
+    install_directories "$generations" "$prefix/bin" "$prefix/share/z23"
 
     if [ -e "$MACOS_GENERATION" ]; then
         [ -d "$MACOS_GENERATION" ] \
@@ -807,6 +880,7 @@ install_payload_macos_generation() {
         # the installed tree alone -- no re-fetch, no rebuild -- to answer
         # whether the directory name still equals what SHA256SUMS records.
         install -m 444 "$stage/SHA256SUMS" "$MACOS_INCOMING/SHA256SUMS"
+        if has_app_source "$stage"; then install_app_members "$stage" "$MACOS_INCOMING"; fi
         ln -s z23 "$MACOS_INCOMING/zclassic23" \
             || die "could not create the macOS generation node alias"
         # APFS refuses to rename the generation after its owner-write bit is
@@ -836,13 +910,23 @@ install_payload_macos_generation() {
     atomic_relative_link ../../lib/z23/current/AGENT_CARD.md \
         "$prefix/share/z23/AGENT_CARD.md" \
         || die "could not link the current verified agent card"
+    if has_app_source "$stage"; then
+        [ ! -L "$prefix/share/z23/apps" ] || die "apps installation directory must not be a symlink"
+        install_directories "$prefix/share/z23/apps"
+        [ ! -e "$prefix/share/z23/apps/skycombat" ] || [ -L "$prefix/share/z23/apps/skycombat" ] \
+            || die "skycombat source selector is not an installer-managed link"
+        atomic_relative_link ../lib/z23/current/z23-skycombat "$prefix/bin/z23-skycombat" \
+            || die "cannot link the current macOS game"
+        atomic_relative_link ../../../lib/z23/current "$prefix/share/z23/apps/skycombat" \
+            || die "cannot link the current macOS app source"
+    fi
     install_docs "$prefix"
 }
 
 install_payload() {
     local stage="$1" prefix="$2" name
     local bindir="$prefix/bin" carddir="$prefix/share/z23"
-    mkdir -p "$bindir" "$carddir"
+    install_directories "$bindir" "$carddir"
     for name in $(manifest_members "$stage"); do
         [ -f "$stage/$name" ] || die "verified payload missing $name"
     done
@@ -863,6 +947,7 @@ install_payload() {
     # The agent card is verified payload, so it is installed like payload:
     # an assistant reading it is reading bytes SHA256SUMS covered.
     install -m 644 "$stage/AGENT_CARD.md" "$carddir/AGENT_CARD.md"
+    install_app_source_linux "$stage" "$prefix"
     install_docs "$prefix"
 }
 
@@ -1265,7 +1350,7 @@ selftest_prepare() {
     printf 'replacement-acme\n' >"$tmp/http/replaced/zclassic23-acme"
     printf '# replacement card\n' >"$tmp/http/replaced/AGENT_CARD.md"
     (cd "$tmp/http/replaced" && sha256sum $RELEASE_MEMBERS_LEGACY >SHA256SUMS)
-    dd if=/dev/zero bs=1025 count=1 2>/dev/null | tr '\0' x \
+    dd if=/dev/zero bs=2049 count=1 2>/dev/null | tr '\0' x \
         >"$tmp/http/oversized/SHA256SUMS"
     truncate -s $((REMOTE_NODE_MAX_BYTES + 1)) \
         "$tmp/http/oversized-payload/z23"
@@ -1303,7 +1388,7 @@ case "$url" in https://mirror.invalid/*) ;; *) exit 3 ;; esac
 rel="${url#https://mirror.invalid/}"
 case "$rel" in
     */SHA256SUMS)
-        [ "$maximum_seconds" = 30 ] && [ "$maximum_bytes" = 1024 ] || exit 4
+        [ "$maximum_seconds" = 30 ] && [ "$maximum_bytes" = 2048 ] || exit 4
         ;;
     */z23|*/zclassic23)
         [ "$maximum_seconds" = 300 ] && \
@@ -1588,7 +1673,7 @@ selftest_remote_pins() {
         >/dev/null 2>"$tmp/remote-wrong.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: wrong remote manifest digest must exit 1"
     [ "$(cat "$tmp/curl.log")" = \
-        "good/SHA256SUMS connect=10 time=30 bytes=1024" ] \
+        "good/SHA256SUMS connect=10 time=30 bytes=2048" ] \
         || die "selftest: wrong manifest digest fetched a payload"
     [ ! -e "$tmp/remote-wrong/bin/z23" ] \
         || die "selftest: wrong manifest digest installed z23"
@@ -1609,7 +1694,7 @@ selftest_remote_pins() {
         >/dev/null 2>"$tmp/remote-replaced.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: replaced remote release must exit 1"
     [ "$(cat "$tmp/curl.log")" = \
-        "replaced/SHA256SUMS connect=10 time=30 bytes=1024" ] \
+        "replaced/SHA256SUMS connect=10 time=30 bytes=2048" ] \
         || die "selftest: replaced manifest fetched a payload"
     [ ! -e "$tmp/remote-replaced/bin/z23" ] \
         || die "selftest: replaced remote release installed z23"
@@ -1638,7 +1723,7 @@ selftest_remote_success() {
     # NEVER requested: the third of the download that is a duplicate is not
     # transferred at all. The request log is the proof.
     [ "$(cat "$tmp/curl.log")" = \
-        $'good/SHA256SUMS connect=10 time=30 bytes=1024\ngood/AGENT_CARD.md connect=10 time=300 bytes=65536\ngood/z23 connect=10 time=300 bytes=67108864\ngood/zclassic23-package-verify connect=10 time=300 bytes=134217728\ngood/zclassic23-acme connect=10 time=300 bytes=33554432' ] \
+        $'good/SHA256SUMS connect=10 time=30 bytes=2048\ngood/AGENT_CARD.md connect=10 time=300 bytes=65536\ngood/z23 connect=10 time=300 bytes=67108864\ngood/zclassic23-package-verify connect=10 time=300 bytes=134217728\ngood/zclassic23-acme connect=10 time=300 bytes=33554432' ] \
         || die "selftest: bounded remote request sequence drifted"
     [ -L "$tmp/remote-good/bin/zclassic23" ] \
         || die "selftest: duplicate remote alias must install as a symlink"
@@ -1665,7 +1750,7 @@ selftest_remote_success() {
     grep -q 'different digests' "$tmp/remote-split.err" \
         || die "selftest: split node digests must be named"
     [ "$(cat "$tmp/curl.log")" = \
-        "split-names/SHA256SUMS connect=10 time=30 bytes=1024" ] \
+        "split-names/SHA256SUMS connect=10 time=30 bytes=2048" ] \
         || die "selftest: split node digests fetched a payload"
     [ ! -e "$tmp/remote-split/bin/z23" ] \
         || die "selftest: split node digests installed z23"
@@ -1677,7 +1762,7 @@ selftest_remote_bounds() {
 
     # The transport ceiling is enforced even when a mirror advertises no
     # useful HTTP metadata: the fake curl applies the exact --max-filesize it
-    # received and refuses the 1025-byte manifest without copying it.
+    # received and refuses the 2049-byte manifest without copying it.
     oversized_manifest_sha256="$(sha256sum "$tmp/http/oversized/SHA256SUMS" | awk '{print $1}')"
     : >"$tmp/curl.log"
     rc=0
@@ -1692,7 +1777,7 @@ selftest_remote_bounds() {
         >/dev/null 2>"$tmp/remote-oversized.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: oversized remote manifest must exit 1"
     [ "$(cat "$tmp/curl.log")" = \
-        "oversized/SHA256SUMS connect=10 time=30 bytes=1024" ] \
+        "oversized/SHA256SUMS connect=10 time=30 bytes=2048" ] \
         || die "selftest: oversized manifest request was not bounded"
     [ ! -e "$tmp/remote-oversized/bin/z23" ] \
         || die "selftest: oversized remote manifest installed z23"
@@ -1712,7 +1797,7 @@ selftest_remote_bounds() {
         >/dev/null 2>"$tmp/remote-oversized-payload.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: oversized remote payload must exit 1"
     [ "$(cat "$tmp/curl.log")" = \
-        $'oversized-payload/SHA256SUMS connect=10 time=30 bytes=1024\noversized-payload/AGENT_CARD.md connect=10 time=300 bytes=65536\noversized-payload/z23 connect=10 time=300 bytes=67108864' ] \
+        $'oversized-payload/SHA256SUMS connect=10 time=30 bytes=2048\noversized-payload/AGENT_CARD.md connect=10 time=300 bytes=65536\noversized-payload/z23 connect=10 time=300 bytes=67108864' ] \
         || die "selftest: oversized payload request was not bounded"
     [ ! -e "$tmp/remote-oversized-payload/bin/z23" ] \
         || die "selftest: oversized remote payload installed z23"
@@ -1739,7 +1824,7 @@ selftest_remote_manifest_and_signal() {
         [ "$rc" -eq 1 ] \
             || die "selftest: $invalid_kind remote manifest must exit 1"
         [ "$(cat "$tmp/curl.log")" = \
-            "$invalid_kind/SHA256SUMS connect=10 time=30 bytes=1024" ] \
+            "$invalid_kind/SHA256SUMS connect=10 time=30 bytes=2048" ] \
             || die "selftest: $invalid_kind manifest fetched a payload"
         [ ! -e "$tmp/remote-$invalid_kind/bin/z23" ] \
             || die "selftest: $invalid_kind remote manifest installed z23"
@@ -2666,6 +2751,84 @@ selftest_current_release() {
     done
 }
 
+selftest_install_directory_modes() {
+    local root="$SELFTEST_TMP/install-directory-modes" before
+    mkdir -p "$root/existing"
+    chmod 775 "$root/existing"
+    before="$(umask)"
+    (umask 002; install_directories "$root/existing/new/deep")
+    [ "$(umask)" = "$before" ] || die "selftest: installer changed caller umask"
+    [ -n "$(find "$root/existing" -prune -type d -perm 0775 -print)" ] \
+        || die "selftest: installer changed existing directory permissions"
+    [ -n "$(find "$root/existing/new" -prune -type d -perm 0755 -print)" ] \
+        || die "selftest: newly created parent is not 0755 under umask 002"
+    [ -n "$(find "$root/existing/new/deep" -prune -type d -perm 0755 -print)" ] \
+        || die "selftest: newly created leaf is not 0755 under umask 002"
+    (umask 077; install_directories "$root/private/deep")
+    [ -n "$(find "$root/private" -prune -type d -perm 0700 -print)" ] \
+        || die "selftest: installer widened a restrictive parent mask"
+    [ -n "$(find "$root/private/deep" -prune -type d -perm 0700 -print)" ] \
+        || die "selftest: installer widened a restrictive leaf mask"
+}
+
+selftest_install_ancestors() {
+    local prefix="$1" name
+    shift
+    for name in . "$@"; do
+        [ -d "$prefix/$name" ] || die "selftest: missing install ancestor $name"
+        [ -z "$(find "$prefix/$name" -prune -type d \( -perm -0020 -o -perm -0002 \) -print)" ] \
+            || die "selftest: writable install ancestor $name"
+    done
+}
+
+selftest_app_source() {
+    local tmp="$SELFTEST_TMP" app="$SELFTEST_TMP/app-release" prefix="$SELFTEST_TMP/app-prefix" name id rc
+    mkdir -p "$app"
+    cp "$tmp/good-new/"* "$app/"
+    # Inert payloads exercise installation/checksum plumbing only. They are
+    # not represented as a valid source projection or a runnable game.
+    for name in $APP_SOURCE_MEMBERS; do printf 'inert %s\n' "$name" >"$app/$name"; done
+    (cd "$app" && sha256sum $RELEASE_MEMBERS $APP_SOURCE_MEMBERS >SHA256SUMS)
+    validate_manifest_contract "$app/SHA256SUMS"
+    (umask 002; run_install "$prefix" "$tmp/units" "$app") >/dev/null || die "selftest: extended install failed"
+    id="$(sha256_file "$app/SHA256SUMS")"
+    selftest_install_ancestors "$prefix" bin share share/z23 share/z23/apps "share/z23/apps/$id"
+    [ "$(readlink "$prefix/share/z23/apps/skycombat")" = "$id" ] || die "selftest: app selector is not manifest-bound"
+    for name in $APP_SOURCE_MEMBERS SHA256SUMS; do
+        cmp -s "$app/$name" "$prefix/share/z23/apps/$id/$name" || die "selftest: retained app member differs: $name"
+    done
+    cmp -s "$app/z23-skycombat" "$prefix/bin/z23-skycombat" || die "selftest: game image bytes changed"
+    [ "$(sha256_file "$prefix/bin/z23")" = "$(manifest_digest_of "$prefix/share/z23/apps/$id" z23)" ] \
+        || die "selftest: retained manifest lost node binding"
+    run_install "$prefix" "$tmp/units" "$app" >/dev/null || die "selftest: repeated identical app install failed"
+    for name in $APP_SOURCE_MEMBERS; do
+        grep -v "  $name\$" "$app/SHA256SUMS" >"$app/missing"
+        rc=0; (validate_manifest_contract "$app/missing") >/dev/null 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] || die "selftest: missing app row accepted: $name"
+    done
+    cp "$app/SHA256SUMS" "$app/extra"
+    printf '%064d  unlisted\n' 0 >>"$app/extra"
+    rc=0; (validate_manifest_contract "$app/extra") >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: extra app row accepted"
+    printf 'tamper\n' >>"$app/source.bundle"
+    rc=0; (verify_strict "$app") >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: app bundle tamper accepted"
+    printf 'inert source.bundle\n' >"$app/source.bundle"
+    # Existing macOS generation identity remains z23's digest. A different
+    # member set under that same identity must still refuse, not merge.
+    (install_payload_macos_generation "$tmp/good-new" "$tmp/app-mac-prefix") || die "selftest: base generation failed"
+    rc=0; (install_payload_macos_generation "$app" "$tmp/app-mac-prefix") >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: same node/different app set collision accepted"
+    (umask 002; install_payload_macos_generation "$app" "$tmp/app-mac-fresh") || die "selftest: fresh app generation failed"
+    local node_id="$(manifest_digest_of "$app" z23)"
+    selftest_install_ancestors "$tmp/app-mac-fresh" bin lib lib/z23 lib/z23/generations \
+        "lib/z23/generations/$node_id" share share/z23 share/z23/apps
+    for name in $APP_SOURCE_MEMBERS SHA256SUMS; do
+        cmp -s "$app/$name" "$tmp/app-mac-fresh/lib/z23/generations/$node_id/$name" \
+            || die "selftest: macOS app generation differs: $name"
+    done
+}
+
 selftest() {
     # Ordinary fixtures use the production deadline, including cold launches
     # under parallel lint load. Only the timeout fixture shortens it to 1 s.
@@ -2681,6 +2844,8 @@ selftest() {
     selftest_remote_manifest_and_signal
     selftest_local_success
     selftest_current_release
+    selftest_install_directory_modes
+    selftest_app_source
     selftest_local_manifest_refusals
     selftest_release_pin
     selftest_macos_transaction

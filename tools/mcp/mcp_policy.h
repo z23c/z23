@@ -62,6 +62,8 @@ bool mcp_policy_app_adopt(const struct zcl_command_spec *spec);
 bool mcp_policy_app_receive(const struct zcl_command_spec *spec);
 /* Dedicated apps_share only: requests a local, native owner decision. */
 bool mcp_policy_app_share(const struct zcl_command_spec *spec);
+/* Dedicated kept-name adapter only; generic owner mutations remain refused. */
+bool mcp_policy_app_personalize(const struct zcl_command_spec *spec);
 
 /* True when the leaf can return wallet-private data: it declares the wallet
  * request capability, or it is one of the named amount-bearing leaves that do

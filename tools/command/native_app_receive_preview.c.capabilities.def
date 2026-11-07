@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_app_receive_preview.c", CAP_FS_WRITE, "Checked allocation diagnostics use stderr; read-only history, trust and selected-image checks use existing owners")

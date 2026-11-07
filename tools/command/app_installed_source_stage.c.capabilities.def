@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/app_installed_source_stage.c", CAP_NONE, "Compose private source reconstruction and content derivation through existing filesystem adapters; no direct OS calls or source execution")

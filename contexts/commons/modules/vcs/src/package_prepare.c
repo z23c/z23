@@ -643,7 +643,7 @@ static enum vcs_package_prepare_error prepare_finish_meta(
         err = prepare_finish_lock(walk, &st);
     if (err == VCS_PACKAGE_PREPARE_OK)
         err = prepare_finish_capsule(walk);
-    if (err == VCS_PACKAGE_PREPARE_OK)
+    if (err == VCS_PACKAGE_PREPARE_OK && options)
         err = prepare_finish_release(walk, options, &st.fields);
     return err;
 }
@@ -1129,89 +1129,23 @@ static HANDLE prepare_open_root(const char *dir, char *detail,
     return root;
 }
 
-enum vcs_package_prepare_error vcs_package_prepare(
-    const struct vcs_package_prepare_options *options,
-    struct vcs_package_prepared *out, char *detail, size_t detail_cap)
+static enum vcs_package_prepare_error prepare_walk_root(
+    const char *dir, struct prepare_walk *walk)
 {
-    if (!options || !options->dir || !out)
-        return VCS_PACKAGE_PREPARE_ERR_NULL;
-    vcs_package_prepared_init(out);
-    if (detail && detail_cap)
-        detail[0] = '\0';
     prepare_nt_create_file_fn create_file = NULL;
     prepare_nt_query_directory_file_fn query_directory = NULL;
-    HANDLE root = prepare_open_root(options->dir, detail, detail_cap);
+    HANDLE root = prepare_open_root(dir, walk->detail, walk->detail_cap);
     if (root == INVALID_HANDLE_VALUE)
         return VCS_PACKAGE_PREPARE_ERR_PATH;
     if (!prepare_nt_functions(&create_file, &query_directory)) {
         CloseHandle(root);
-        if (detail && detail_cap)
-            (void)snprintf(detail, detail_cap,
-                           "Windows native directory APIs unavailable");
+        prepare_detail(walk, "Windows native directory APIs unavailable");
         return VCS_PACKAGE_PREPARE_ERR_IO;
     }
-    struct prepare_walk walk = {
-        .out = out,
-        .error = VCS_PACKAGE_PREPARE_OK,
-        .detail = detail,
-        .detail_cap = detail_cap,
-    };
-    bool walked = prepare_walk_dir(&walk, root, "", create_file,
+    bool walked = prepare_walk_dir(walk, root, "", create_file,
                                    query_directory);
     CloseHandle(root);
-    enum vcs_package_prepare_error err = walked
-        ? prepare_finish(options, &walk) : walk.error;
-    free(walk.meta);
-    if (err != VCS_PACKAGE_PREPARE_OK) {
-        vcs_package_prepared_free(out);
-        vcs_package_prepared_init(out);
-    }
-    return err;
-}
-
-enum vcs_package_prepare_error vcs_package_scan_layout(
-    const char *dir, struct vcs_package_prepared *out,
-    bool *has_package_config, char *detail, size_t detail_cap)
-{
-    if (!dir || !out || !has_package_config)
-        return VCS_PACKAGE_PREPARE_ERR_NULL;
-    vcs_package_prepared_init(out);
-    *has_package_config = false;
-    if (detail && detail_cap)
-        detail[0] = '\0';
-    prepare_nt_create_file_fn create_file = NULL;
-    prepare_nt_query_directory_file_fn query_directory = NULL;
-    HANDLE root = prepare_open_root(dir, detail, detail_cap);
-    if (root == INVALID_HANDLE_VALUE)
-        return VCS_PACKAGE_PREPARE_ERR_PATH;
-    if (!prepare_nt_functions(&create_file, &query_directory)) {
-        CloseHandle(root);
-        if (detail && detail_cap)
-            (void)snprintf(detail, detail_cap,
-                           "Windows native directory APIs unavailable");
-        return VCS_PACKAGE_PREPARE_ERR_IO;
-    }
-    struct prepare_walk walk = {
-        .out = out,
-        .error = VCS_PACKAGE_PREPARE_OK,
-        .detail = detail,
-        .detail_cap = detail_cap,
-    };
-    bool walked = prepare_walk_dir(&walk, root, "", create_file,
-                                   query_directory);
-    CloseHandle(root);
-    enum vcs_package_prepare_error err = walked
-        ? VCS_PACKAGE_PREPARE_OK : walk.error;
-    *has_package_config = walk.meta != NULL;
-    free(walk.meta);
-    if (err == VCS_PACKAGE_PREPARE_OK)
-        err = prepare_scan_recipe(&walk);
-    if (err != VCS_PACKAGE_PREPARE_OK) {
-        vcs_package_prepared_free(out);
-        vcs_package_prepared_init(out);
-        *has_package_config = false;
-    }
-    return err;
+    return walked ? VCS_PACKAGE_PREPARE_OK : walk->error;
 }
 
 #else
@@ -1436,65 +1370,61 @@ static int prepare_open_root(const char *dir, char *detail, size_t cap)
     return fd;
 }
 
-enum vcs_package_prepare_error vcs_package_prepare(
-    const struct vcs_package_prepare_options *options,
-    struct vcs_package_prepared *out, char *detail, size_t detail_cap)
+static enum vcs_package_prepare_error prepare_walk_root(
+    const char *dir, struct prepare_walk *walk)
 {
-    if (!options || !options->dir || !out)
-        return VCS_PACKAGE_PREPARE_ERR_NULL;
-    vcs_package_prepared_init(out);
-    int root_fd = prepare_open_root(options->dir, detail, detail_cap);
+    int root_fd = prepare_open_root(dir, walk->detail, walk->detail_cap);
     if (root_fd < 0)
         return VCS_PACKAGE_PREPARE_ERR_PATH;
-    struct prepare_walk walk = {
-        .out = out,
-        .error = VCS_PACKAGE_PREPARE_OK,
-        .detail = detail,
-        .detail_cap = detail_cap,
-    };
-    bool walked = prepare_walk_dir(&walk, root_fd, "");
+    bool walked = prepare_walk_dir(walk, root_fd, "");
     close(root_fd);
-    enum vcs_package_prepare_error err = walked
-        ? prepare_finish(options, &walk) : walk.error;
+    return walked ? VCS_PACKAGE_PREPARE_OK : walk->error;
+}
+
+#endif
+
+/* A null release option means content-only, never synthetic signing authority.
+ * The layout query remains metadata-optional; both prepare APIs admit metadata. */
+static enum vcs_package_prepare_error prepare_run(
+    const char *dir, const struct vcs_package_prepare_options *options,
+    struct vcs_package_prepared *out, bool *layout, char *detail, size_t cap)
+{
+    if (!dir || !out) return VCS_PACKAGE_PREPARE_ERR_NULL;
+    vcs_package_prepared_init(out);
+    if (detail && cap) detail[0] = '\0';
+    if (layout) *layout = false;
+    struct prepare_walk walk = { .out = out, .error = VCS_PACKAGE_PREPARE_OK,
+        .detail = detail, .detail_cap = cap };
+    enum vcs_package_prepare_error err = prepare_walk_root(dir, &walk);
+    if (err == VCS_PACKAGE_PREPARE_OK)
+        err = layout ? prepare_scan_recipe(&walk) : prepare_finish(options, &walk);
+    if (layout) *layout = err == VCS_PACKAGE_PREPARE_OK && walk.meta != NULL;
     free(walk.meta);
     if (err != VCS_PACKAGE_PREPARE_OK) {
         vcs_package_prepared_free(out);
         vcs_package_prepared_init(out);
     }
     return err;
+}
+
+enum vcs_package_prepare_error vcs_package_prepare(
+    const struct vcs_package_prepare_options *options,
+    struct vcs_package_prepared *out, char *detail, size_t detail_cap)
+{
+    if (!options) return VCS_PACKAGE_PREPARE_ERR_NULL;
+    return prepare_run(options->dir, options, out, NULL, detail, detail_cap);
+}
+
+enum vcs_package_prepare_error vcs_package_prepare_content(
+    const char *dir, struct vcs_package_prepared *out, char *detail, size_t detail_cap)
+{
+    return prepare_run(dir, NULL, out, NULL, detail, detail_cap);
 }
 
 enum vcs_package_prepare_error vcs_package_scan_layout(
     const char *dir, struct vcs_package_prepared *out,
     bool *has_package_config, char *detail, size_t detail_cap)
 {
-    if (!dir || !out || !has_package_config)
-        return VCS_PACKAGE_PREPARE_ERR_NULL;
-    vcs_package_prepared_init(out);
-    *has_package_config = false;
-    int root_fd = prepare_open_root(dir, detail, detail_cap);
-    if (root_fd < 0)
-        return VCS_PACKAGE_PREPARE_ERR_PATH;
-    struct prepare_walk walk = {
-        .out = out,
-        .error = VCS_PACKAGE_PREPARE_OK,
-        .detail = detail,
-        .detail_cap = detail_cap,
-    };
-    bool walked = prepare_walk_dir(&walk, root_fd, "");
-    close(root_fd);
-    enum vcs_package_prepare_error err = walked
-        ? VCS_PACKAGE_PREPARE_OK : walk.error;
-    *has_package_config = walk.meta != NULL;
-    free(walk.meta);
-    if (err == VCS_PACKAGE_PREPARE_OK)
-        err = prepare_scan_recipe(&walk);
-    if (err != VCS_PACKAGE_PREPARE_OK) {
-        vcs_package_prepared_free(out);
-        vcs_package_prepared_init(out);
-        *has_package_config = false;
-    }
-    return err;
+    if (!has_package_config) return VCS_PACKAGE_PREPARE_ERR_NULL;
+    return prepare_run(dir, NULL, out, has_package_config, detail, detail_cap);
 }
-
-#endif

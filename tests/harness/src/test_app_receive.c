@@ -10,6 +10,7 @@
 #include "command/native_zcode_package_bundle.h"
 #include "command/native_zcode_package_copy.h"
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "plugin/plugin_pack.h"
@@ -26,6 +27,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
+#include <time.h>
+#include "platform/time_compat.h"
 #define ABC_PATH 900
 struct abc_world { char root[512], src[600]; };
 static bool abc_put(const char *dir, const char *rel, const char *text)
@@ -208,10 +212,26 @@ static bool rt_observe(struct rt_presenter *p, const struct zcl_present_model_v1
         rt_field(m, "Parent release: ", "None (first release)") &&
         rt_field(m, "Changes: ", "No parent to compare");
 }
+/* real-clock: existing native commit is joined by its owner; this presenter
+ * only polls its completion and never enters storage/JSON on the worker. */
+static bool rt_progress_present(const struct zcl_present_model_v1 *m,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live)
+{
+    if (strcmp(m->title, "Receiving your copy") || pages->page_count != 1 || !pages->pages[0].pixels) return false;
+    int64_t end = platform_time_monotonic_ms() + 5000;
+    do {
+        bool redraw = false, close = false;
+        live->owner.update(live->owner.context, NULL, false, &redraw, &close);
+        if (close) return true;
+        platform_sleep_ms(1); /* real-clock: poll actual native commit completion */
+    } while (platform_time_monotonic_ms() < end);
+    return false;
+}
 static bool rt_present(void *context, const struct zcl_present_model_v1 *m,
     const struct zcl_present_window_pages_v1 *pages,
     const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
 {
+    if (!strcmp(m->request_id, "receive-copy")) return rt_progress_present(m, pages, live);
     struct rt_presenter *p = context;
     uint32_t count = 0;
     p->observed = rt_observe(p, m, pages, &count, why, cap);
@@ -339,6 +359,7 @@ static bool rd_present(void *context, const struct zcl_present_model_v1 *m,
     const struct zcl_present_window_pages_v1 *pages,
     const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
 {
+    if (!strcmp(m->request_id, "receive-copy")) return rt_progress_present(m, pages, live);
     struct rd_presenter *p = context;
     if (!rt_present(&p->native, m, pages, live, why, cap)) return false;
     if (p->change == RD_COLLISION) return rd_collision(p->native.fixture);
@@ -594,6 +615,217 @@ static int rd_home_aliases(void)
     return failures;
 }
 
+/* Long escaped POSIX paths fit the filesystem and raw input limits, but their
+ * complete committed receipt must fit before optional preview can be offered. */
+static bool rpb_paths(struct receive_fixture *f)
+{
+    char parent[850], leaf[129];
+    int n = snprintf(parent, sizeof(parent), "%s", f->world.root);
+    if (n <= 0 || (size_t)n >= sizeof(parent)) return false;
+    memset(leaf, 1, sizeof(leaf) - 1); leaf[0] = 'p'; leaf[sizeof(leaf) - 1] = 0;
+    for (unsigned i = 0; i < 5; ++i) {
+        size_t at = strlen(parent);
+        n = snprintf(parent + at, sizeof(parent) - at, "/%s", leaf);
+        if (n <= 0 || (size_t)n >= sizeof(parent) - at || mkdir(parent, 0700)) return false;
+    }
+    n = snprintf(f->datadir, sizeof(f->datadir), "%s/data", parent);
+    if (n <= 0 || (size_t)n >= sizeof(f->datadir)) return false;
+    n = snprintf(f->destination, sizeof(f->destination), "%s/copy", parent);
+    return n > 0 && (size_t)n < sizeof(f->destination);
+}
+static bool rpb_no_window(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    (void)model; (void)pages; (void)live; (void)why; (void)cap;
+    ++*(unsigned *)context;
+    return false;
+}
+static bool rpb_attempt(struct receive_fixture *f, int preview)
+{
+    struct json_value input; json_init(&input);
+    bool ok = rt_input(&input, f);
+    if (ok && preview >= 0) ok = json_push_kv_bool(&input, "preview", preview != 0);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.receive", NULL);
+    char why[256] = {0}; unsigned calls = 0;
+    ok = ok && spec && zcl_command_registry_input_validate(spec, &input, why, sizeof(why));
+    if (ok) {
+        struct zcl_command_request request = {.input = &input, .spec = spec, .invoked_name = "app.receive"};
+        zcl_test_app_receive_run(&request, &reply, rpb_no_window, &calls);
+        const char *code = preview == 1 ? "PREVIEW_RECEIPT_TOO_LARGE" : "CONFIRMATION_UNAVAILABLE";
+        ok = rt_failed_with(&reply, code) && !reply.error.mutated && rt_absent(f);
+        if (preview == 1) ok = ok && calls == 0;
+    }
+    json_free(&input); zcl_command_reply_free(&reply); return ok;
+}
+static bool rpb_short_cancel(struct receive_fixture *f)
+{
+    struct json_value input; json_init(&input);
+    bool ok = rt_input(&input, f) && json_push_kv_bool(&input, "preview", true);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    struct rt_presenter p = {.fixture = f, .decision = RT_CANCEL};
+    if (ok) {
+        struct zcl_command_request request = {.input = &input};
+        zcl_test_app_receive_run(&request, &reply, rt_present, &p);
+        ok = p.observed && rt_expected_reply(&p, &reply) && !reply.error.mutated && rt_absent(f);
+    }
+    json_free(&input); zcl_command_reply_free(&reply); return ok;
+}
+static int rpb_receipt_reserve(void)
+{
+    int failures = 0; struct receive_fixture f = {0};
+    TEST("preview bounds escaped receipt before any receive write; default receive is unaffected") {
+        ASSERT(rt_setup(&f));
+        ASSERT(rpb_short_cancel(&f));
+        ASSERT(rpb_paths(&f));
+        ASSERT(rpb_attempt(&f, 1));
+        ASSERT(rpb_attempt(&f, 0));
+        ASSERT(rpb_attempt(&f, -1));
+        ASSERT(rt_absent(&f));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* real-clock: bounded conditions observe an actual commit thread; no sleep
+ * constitutes acceptance. Every presenter path releases the blocked worker. */
+enum rp_case { RP_NORMAL, RP_CLOSE, RP_UI_FAIL, RP_PARTIAL, RP_ALLOC, RP_START, RP_PREPARE };
+struct rp_fixture {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    bool entered, released, finished, observed, waited;
+    unsigned calls;
+    enum rp_case mode;
+};
+static bool rp_wait(struct rp_fixture *f, const bool *flag)
+{
+    struct timespec end;
+    if (clock_gettime(CLOCK_REALTIME, &end) != 0) return false;
+    end.tv_sec += 5;
+    while (!*flag)
+        if (pthread_cond_timedwait(&f->cond, &f->mutex, &end) != 0) return false;
+    return true;
+}
+static void rp_worker(void *context, const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    struct rp_fixture *f = context;
+    pthread_mutex_lock(&f->mutex);
+    ++f->calls; f->entered = true; pthread_cond_broadcast(&f->cond);
+    f->waited = rp_wait(f, &f->released);
+    pthread_mutex_unlock(&f->mutex);
+    void *allocation = zcl_calloc(1, 1, "receive-progress-fixture");
+    free(allocation); /* Worker-local failure counter must override PASSED. */
+    bool saved = json_push_kv_str(&reply->data, "stage", "commit") &&
+        json_push_kv_str(&reply->data, "destination", zcl_package_copy_str(request->input, "destination")) &&
+        json_push_kv_str(&reply->data, "trust_record", "/fixture/trust") &&
+        json_push_kv_bool(&reply->data, "executed", false);
+    reply->error.mutated = true;
+    if (!saved) zcl_package_copy_fail(reply, "OUT_OF_MEMORY", true, "fixture receipt", "receive progress");
+    if (f->mode == RP_PARTIAL)
+        zcl_package_copy_fail(reply, "FIXTURE_PARTIAL", true, "saved before controlled refusal", "receive progress");
+    pthread_mutex_lock(&f->mutex);
+    f->finished = true; pthread_cond_broadcast(&f->cond);
+    pthread_mutex_unlock(&f->mutex);
+}
+static bool rp_pending(struct rp_fixture *f, const struct zcl_present_model_v1 *m,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live)
+{
+    bool redraw = false, close = true;
+    live->owner.update(live->owner.context, NULL, false, &redraw, &close);
+    bool ok = !close && !redraw && !strcmp(m->title, "Receiving your copy") &&
+        pages->page_count == 1 && pages->pages[0].pixels;
+    if (f->mode == RP_CLOSE) {
+        live->owner.update(live->owner.context, NULL, true, &redraw, &close);
+        ok = ok && !close && redraw && !strcmp(m->summary, "Finishing your copy");
+    }
+    return ok;
+}
+static bool rp_present(void *context, const struct zcl_present_model_v1 *m,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    (void)why; (void)cap;
+    struct rp_fixture *f = context;
+    pthread_mutex_lock(&f->mutex);
+    bool entered = rp_wait(f, &f->entered);
+    pthread_mutex_unlock(&f->mutex);
+    bool ok = entered && rp_pending(f, m, pages, live);
+    pthread_mutex_lock(&f->mutex);
+    f->observed = ok; f->released = true; pthread_cond_broadcast(&f->cond);
+    pthread_mutex_unlock(&f->mutex);
+    return ok && f->mode != RP_UI_FAIL;
+}
+static bool rp_text(const struct json_value *data, const char *key, const char *expected)
+{
+    const char *value = zcl_package_copy_str(data, key);
+    return value && !strcmp(value, expected);
+}
+static bool rp_saved(const struct rp_fixture *f, const struct zcl_command_reply *reply)
+{
+    const struct json_value *executed = json_get(&reply->data, "executed");
+    return f->calls == 1 && f->finished && f->waited && f->observed && reply->error.mutated &&
+        rp_text(&reply->data, "destination", "/fixture/received-copy") &&
+        rp_text(&reply->data, "trust_record", "/fixture/trust") &&
+        executed && executed->type == JSON_BOOL && !json_get_bool(executed);
+}
+static bool rp_not_started(const struct rp_fixture *f, const struct zcl_command_reply *reply, bool offer)
+{
+    return !offer && !f->calls && !reply->error.mutated &&
+        reply->status != ZCL_COMMAND_STATUS_PASSED && !json_get(&reply->data, "destination");
+}
+static bool rp_retained(const struct rp_fixture *f, const struct zcl_command_reply *reply, bool offer)
+{
+    const struct json_value *executed = json_get(&reply->data, "continuation_executed");
+    const struct json_value *ui_failed = json_get(&reply->data, "receive_progress_ui_failed");
+    return !offer && rp_text(&reply->data, "continuation", "received") &&
+        executed && executed->type == JSON_BOOL && !json_get_bool(executed) &&
+        ui_failed && ui_failed->type == JSON_BOOL && json_get_bool(ui_failed) == (f->mode == RP_UI_FAIL);
+}
+static bool rp_result(const struct rp_fixture *f, const struct zcl_command_reply *reply, bool offer)
+{
+    if (f->mode == RP_START || f->mode == RP_PREPARE) return rp_not_started(f, reply, offer);
+    if (!rp_saved(f, reply)) return false;
+    if (f->mode == RP_PARTIAL) return !offer && rt_failed_with(reply, "FIXTURE_PARTIAL");
+    if (f->mode == RP_ALLOC) return !offer && rt_failed_with(reply, "OUT_OF_MEMORY");
+    if (reply->status != ZCL_COMMAND_STATUS_PASSED) return false;
+    if (f->mode == RP_NORMAL) return offer && !json_get(&reply->data, "continuation");
+    return rp_retained(f, reply, offer);
+}
+static bool rp_run(enum rp_case mode)
+{
+    struct rp_fixture f = {.mode = mode};
+    if (pthread_mutex_init(&f.mutex, NULL) != 0) return false;
+    if (pthread_cond_init(&f.cond, NULL) != 0) { pthread_mutex_destroy(&f.mutex); return false; }
+    struct json_value input; json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "destination", "/fixture/received-copy");
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    const struct app_commit_progress_test_hooks hooks = {
+        .commit = rp_worker, .context = &f, .refuse_start = mode == RP_START,
+        .worker_alloc_label = mode == RP_ALLOC ? "receive-progress-fixture" : NULL,
+    };
+    if (mode == RP_PREPARE) zcl_alloc_fault_fail_next("receive-copy/progress");
+    bool offer = ok && zcl_test_app_receive_progress(&request, &reply, rp_present, &f, &hooks);
+    zcl_alloc_fault_clear();
+    ok = ok && rp_result(&f, &reply, offer);
+    zcl_command_reply_free(&reply); json_free(&input);
+    if (pthread_cond_destroy(&f.cond) != 0) ok = false;
+    if (pthread_mutex_destroy(&f.mutex) != 0) ok = false;
+    return ok;
+}
+static int rp_cases(void)
+{
+    int failures = 0;
+    TEST("receive commit progress joins normal/close/UI-failed/partial/TLS-failed work and refuses prestart without mutation") {
+        for (int mode = RP_NORMAL; mode <= RP_PREPARE; ++mode)
+            ASSERT(rp_run((enum rp_case)mode));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_app_receive(void)
 {
     int failures = 0;
@@ -606,6 +838,8 @@ int test_app_receive(void)
         ASSERT(rt_received(&f));
         PASS();
     } _test_next:;
+    failures += rp_cases();
+    failures += rpb_receipt_reserve();
     failures += rd_defaults();
     failures += rd_overrides();
     failures += rd_inputs();
@@ -640,6 +874,7 @@ struct ru_run {
     char display_name[32], driver_image[PATH_MAX], line[65536];
     const struct receive_fixture *fixture;
     bool file_only;
+    bool cli_default;
 };
 static bool ru_pipe(int fd[2])
 {
@@ -725,6 +960,10 @@ static enum platform_process_wait_result ru_wait(struct ru_child *c, unsigned ms
 }
 static bool ru_reaped_identity_failure(struct ru_child *c)
 {
+    /* Only retained/enumerated direct children reach this fallback. Identity
+     * may disappear during exit before waitpid can reap. Observe that exact
+     * child with the existing bounded wait; never signal without identity. */
+    if (ru_wait(c, 2000, NULL) == PLATFORM_PROCESS_WAIT_EXITED) return true;
     pid_t done;
     do { done = waitpid(c->pid, NULL, WNOHANG); } while (done < 0 && errno == EINTR);
     if (done == c->pid || (done < 0 && errno == ECHILD)) { c->pid = -1; return true; }
@@ -998,37 +1237,126 @@ static bool ru_cleanup(struct ru_run *r)
     bool driver = ru_stop(&r->driver), server = ru_stop(&r->server), display = ru_stop(&r->display);
     return driver && server && display;
 }
-static int ru_case(bool file_only)
+/* Direct exec, not a shell or the positional receive/build/run shortcut.
+ * --json is only a response control; datadir is a private fixture override. */
+static bool ru_cli_option(char *out, size_t cap, const char *key, const char *value)
+{
+    int n = snprintf(out, cap, "--%s=%s", key, value);
+    return n > 0 && (size_t)n < cap;
+}
+static bool ru_cli_start(struct ru_run *r)
+{
+    int out[2]; char image[PATH_MAX];
+    char file[sizeof(r->fixture->file) + 8], datadir[sizeof(r->fixture->datadir) + 16];
+    if (!ru_cli_option(file, sizeof(file), "file", r->fixture->file) ||
+        !ru_cli_option(datadir, sizeof(datadir), "datadir", r->fixture->datadir) ||
+        !realpath("build/bin/z23-dev", image) || !ru_pipe(out)) return false;
+    int log = ru_log(r, "native-window-cli.log");
+    int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    const char *argv[] = {image, "app", "receive", file, "--json",
+        r->cli_default ? NULL : datadir, NULL};
+    bool ok = log >= 0 && input >= 0 && ru_spawn(&r->server, argv, input, out[1], log);
+    close(out[1]); if (log >= 0) close(log); if (input >= 0) close(input);
+    r->output = out[0];
+    return ok;
+}
+static bool ru_cli_no_build(const struct ru_run *r)
+{
+    char path[sizeof(r->fixture->datadir) + 16];
+    int n = snprintf(path, sizeof(path), "%s/app_build", r->fixture->datadir);
+    return n > 0 && (size_t)n < sizeof(path) && rd_absent_path(path);
+}
+static bool ru_cli_result(struct ru_run *r, bool committed)
+{
+    if (!ru_read_line(r->output, r->line, sizeof(r->line), 15000)) return false;
+    struct json_value reply; json_init(&reply);
+    bool ok = json_read(&reply, r->line, strlen(r->line)) &&
+        !strcmp(ru_string(&reply, "command"), "app.receive") &&
+        !strcmp(ru_string(&reply, "status"), "passed");
+    const struct json_value *success = json_get(&reply, "ok");
+    ok = ok && success && success->type == JSON_BOOL && json_get_bool(success);
+    const struct json_value *data = json_get(&reply, "data");
+    if (ok) ok = committed ? ru_commit_data(r, data) :
+        (!strcmp(ru_string(data, "status"), "canceled") && rt_absent(r->fixture) && ru_home_unchanged(r));
+    printf("APP_RECEIVE_UI transport=cli committed=%d result=%s\n", committed, r->line);
+    json_free(&reply);
+    uint32_t code = UINT32_MAX;
+    bool exited = ru_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    close(r->output); r->output = -1;
+    return ok && exited && ru_window(r, false) && ru_cli_no_build(r);
+}
+static bool ru_cli_filename(struct receive_fixture *f)
+{
+    char path[sizeof(f->file)];
+    int n = snprintf(path, sizeof(path), "%s/space %% \"quote\" 'single' $(touch PWNED);literal.z23share", f->world.root);
+    if (n <= 0 || (size_t)n >= sizeof(path) || rename(f->file, path) != 0) return false;
+    memcpy(f->file, path, (size_t)n + 1);
+    return true;
+}
+static bool ru_transport_start(struct ru_run *r, bool cli)
+{
+    return cli || (ru_server(r) && ru_initialize(r));
+}
+static bool ru_transport_request(struct ru_run *r, bool cli, int id)
+{
+    return cli ? ru_cli_start(r) : ru_request(r, id);
+}
+static bool ru_transport_result(struct ru_run *r, bool cli, int id, bool committed)
+{
+    return cli ? ru_cli_result(r, committed) : ru_result(r, id, committed);
+}
+
+static bool ru_cli_default_setup(struct receive_fixture *f)
+{
+    const char *home = getenv("HOME");
+    if (!home || unsetenv("ZCL_DATADIR") != 0) return false;
+    /* z23-dev startup uses ZCL_CLI_DEFAULT_DATADIR under ZCL_DEV_BUILD.
+     * This is an expectation only: no input or bridge binding is installed. */
+    int n = snprintf(f->datadir, sizeof(f->datadir), "%s/.zclassic-c23-dev", home);
+    if (n <= 0 || (size_t)n >= sizeof(f->datadir)) return false;
+    n = snprintf(f->destination, sizeof(f->destination), "%s/copies/tinyapp-1", f->datadir);
+    return n > 0 && (size_t)n < sizeof(f->destination) && rt_absent(f);
+}
+/* Preserve mode setup order; each failed setup still aborts before display
+ * or child launch and flows through ru_case cleanup. */
+static bool ru_case_modes(struct receive_fixture *f, bool file_only,
+    bool cli, bool cli_default)
+{
+    if (cli && !ru_cli_filename(f)) return false;
+    if (file_only && !ru_file_only_setup(f)) return false;
+    return !cli_default || ru_cli_default_setup(f);
+}
+static int ru_case(bool file_only, bool cli, bool cli_default)
 {
     int failures = 0; size_t saved = 0;
     struct ru_env env[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL}, {"XDG_STATE_HOME", NULL},
         {"XDG_RUNTIME_DIR", NULL}, {"XDG_CACHE_HOME", NULL}, {"XDG_DATA_HOME", NULL},
         {"DISPLAY", NULL}, {"WAYLAND_DISPLAY", NULL},
-        {"XAUTHORITY", NULL}, {"ZCL_CLI_TEST_NO_SERVICE_LOOKUP", NULL}};
+        {"XAUTHORITY", NULL}, {"ZCL_CLI_TEST_NO_SERVICE_LOOKUP", NULL}, {"ZCL_DATADIR", NULL}};
     struct receive_fixture f = {0};
-    struct ru_run r = {.input = -1, .output = -1, .fixture = &f, .file_only = file_only};
+    struct ru_run r = {.input = -1, .output = -1, .fixture = &f, .file_only = file_only, .cli_default = cli_default};
     struct sigaction old_pipe, ignore_pipe = {.sa_handler = SIG_IGN}; bool signal_saved = false;
     uint32_t pages = 0;
-    printf("APP_RECEIVE_UI request=%s\n", file_only ? "file-only" : "explicit-paths");
-    TEST("actual stdio MCP receive uses native Xvfb confirmation, cancel and exact trusted checkout") {
+    printf("APP_RECEIVE_UI transport=%s request=%s default_home=%d\n", cli ? "cli" : "mcp", file_only ? "file-only" : "explicit-paths", cli_default);
+    TEST("actual MCP or typed CLI receive uses native Xvfb confirmation, cancel and exact trusted checkout") {
         ASSERT(ru_env_save(env, sizeof(env)/sizeof(env[0]), &saved));
         ASSERT(sigemptyset(&ignore_pipe.sa_mask) == 0 && sigaction(SIGPIPE, &ignore_pipe, &old_pipe) == 0);
         signal_saved = true;
         ASSERT(rt_setup(&f));
         ASSERT(ru_environment(&f));
-        ASSERT(!file_only || ru_file_only_setup(&f));
+        ASSERT(ru_case_modes(&f, file_only, cli, cli_default));
         ASSERT(ru_home_unchanged(&r));
         ASSERT(ru_page_count(&f, &pages));
         ASSERT(ru_home_unchanged(&r));
         ASSERT(realpath("build/bin/native_ui_driver", r.driver_image));
         ASSERT(ru_xvfb(&r));
-        ASSERT(ru_server(&r) && ru_initialize(&r));
-        ASSERT(ru_request(&r, 2) && ru_window(&r, true) && ru_pending(&r));
+        ASSERT(ru_transport_start(&r, cli));
+        ASSERT(ru_transport_request(&r, cli, 2) && ru_window(&r, true) && ru_pending(&r));
         ASSERT(ru_driver(&r, "--key=enter", false)); /* initial Cancel */
-        ASSERT(ru_result(&r, 2, false));
-        ASSERT(ru_request(&r, 3) && ru_window(&r, true) && ru_pending(&r));
+        ASSERT(ru_transport_result(&r, cli, 2, false));
+        ASSERT(ru_transport_request(&r, cli, 3) && ru_window(&r, true) && ru_pending(&r));
         ASSERT(ru_pages(&r, pages));
-        ASSERT(ru_result(&r, 3, true));
+        ASSERT(ru_transport_result(&r, cli, 3, true));
         ASSERT(ru_committed_modes(&r));
         PASS();
     } _test_next:;
@@ -1040,11 +1368,873 @@ static int ru_case(bool file_only)
     if (!clean) failures++;
     return failures;
 }
+/* Reuse the real-game journey's subreaper reconciliation. Before launching
+ * CLI, require no unrelated direct children. After stopping CLI, adopted
+ * workers must match the fixed trusted CLI/make/shell images. Unknown live
+ * children are reported, never signaled. No competing fixture child reaper. */
+#include <sys/prctl.h>
+static bool ruf_children(pid_t pids[32], size_t *count)
+{
+    char path[96], text[4096]; *count = 0;
+    (void)snprintf(path, sizeof(path), "/proc/self/task/%ld/children", (long)getpid());
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    ssize_t n = read(fd, text, sizeof(text) - 1); bool closed = close(fd) == 0;
+    if (!closed || n < 0 || (size_t)n == sizeof(text) - 1) return false;
+    text[n] = 0; char *cursor = text;
+    while (*cursor) {
+        while (*cursor == ' ') ++cursor;
+        if (!*cursor) break;
+        char *end = NULL; errno = 0; long value = strtol(cursor, &end, 10);
+        if (errno || end == cursor || value <= 1 || value > INT_MAX || *count == 32) return false;
+        pids[(*count)++] = (pid_t)value; cursor = end;
+    }
+    return true;
+}
+static bool ruf_child_baseline(const struct ru_run *r)
+{
+    pid_t pids[32]; size_t count;
+    if (!ruf_children(pids, &count)) return false;
+    for (size_t i = 0; i < count; ++i)
+        if (pids[i] != r->display.pid && pids[i] != r->driver.pid) return false;
+    return true;
+}
+static bool ruf_adopted_stop(pid_t pid, const struct ru_run *r)
+{
+    struct ru_child child = {.pid = pid};
+    if (!app_proc_identity(pid, child.image, &child.token))
+        return ru_reaped_identity_failure(&child); /* enumerated direct child */
+    char make[PATH_MAX], shell[PATH_MAX];
+    if (!realpath("/usr/bin/make", make) || !realpath("/bin/sh", shell)) return false;
+    if (!child.token || (strcmp(child.image, r->server.image) &&
+        strcmp(child.image, make) && strcmp(child.image, shell))) return false;
+    return ru_stop(&child); /* Rechecks executable+token before each signal. */
+}
+static bool ruf_workers_stop(struct ru_run *r)
+{
+    /* Stopping each direct adopted owner can expose another generation.
+     * Bound scans; overflow/unknown/remaining children cannot be cleanup1. */
+    for (unsigned pass = 0; pass < 8; ++pass) {
+        pid_t pids[32]; size_t count; bool found = false;
+        if (!ruf_children(pids, &count)) return false;
+        for (size_t i = 0; i < count; ++i) {
+            if (pids[i] == r->display.pid || pids[i] == r->driver.pid) continue;
+            found = true;
+            if (!ruf_adopted_stop(pids[i], r)) {
+                char image[APP_LAUNCH_PATH_MAX] = {0}; uint64_t token = 0;
+                bool observed = app_proc_identity(pids[i], image, &token);
+                fprintf(stderr, "RECEIVE_CLEANUP unresolved pid=%ld observed=%d token=%llu image=%s\n",
+                    (long)pids[i], observed, (unsigned long long)token, image);
+                return false;
+            }
+        }
+        if (!found) return true;
+    }
+    return false;
+}
+static bool ruf_cleanup(struct ru_run *r, bool custody, int old_subreaper)
+{
+    bool server = ru_stop(&r->server);
+    bool workers = custody && server && ruf_workers_stop(r);
+    bool direct = ru_cleanup(r);
+    bool empty = custody && ruf_child_baseline(r);
+    /* If descendants remain, retain subreaper mode and report failure rather
+     * than relinquishing custody or claiming that direct-child cleanup sufficed. */
+    bool restored = !custody || (workers && empty && prctl(PR_SET_CHILD_SUBREAPER, old_subreaper) == 0);
+    fprintf(stderr, "RECEIVE_CLEANUP custody=%d server=%d workers=%d direct=%d empty=%d restored=%d\n",
+        custody, server, workers, direct, empty, restored);
+    return server && direct && (!custody || (workers && empty)) && restored;
+}
+/* Optional continuation is qualified through the shipping typed CLI and real
+ * private windows. No injected presenter authorizes these operations. */
+enum ruf_case { RUF_CLOSE, RUF_INVALID, RUF_BUILD_FAILURE, RUF_CUSTODY_FAILURE, RUF_PROGRESS_CLOSE };
+static bool ruf_driver(struct ru_run *r, const char *title, const char *action, bool pixels)
+{
+    char option[160];
+    if (!ru_cli_option(option, sizeof(option), "title", title)) return false;
+    int log = ru_log(r, "receive-flow-driver.log");
+    const char *argv[] = {r->driver_image, option, action, "--timeout-ms=5000",
+        pixels ? "--expect-pixels-change" : NULL, NULL};
+    bool ok = log >= 0 && ru_spawn(&r->driver, argv, log, log, log);
+    if (log >= 0) close(log);
+    uint32_t code = UINT32_MAX;
+    ok = ok && ru_wait(&r->driver, 7000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    bool stopped = ru_stop(&r->driver);
+    return ok && stopped;
+}
+static bool ruf_cli(struct ru_run *r, enum ruf_case which)
+{
+    int out[2]; char image[PATH_MAX];
+    char file[sizeof(r->fixture->file) + 8], datadir[sizeof(r->fixture->datadir) + 16];
+    if (!ru_cli_option(file, sizeof(file), "file", r->fixture->file) ||
+        !ru_cli_option(datadir, sizeof(datadir), "datadir", r->fixture->datadir) ||
+        !realpath("build/bin/z23-dev", image) || !ru_pipe(out)) return false;
+    int log = ru_log(r, "receive-flow-cli.log");
+    int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    const char *argv[] = {image, "app", "receive", file, datadir,
+        which == RUF_INVALID ? "--preview=not-a-boolean" : "--preview", "--json", NULL};
+    bool ok = log >= 0 && in >= 0 && ru_spawn(&r->server, argv, in, out[1], log);
+    close(out[1]); if (log >= 0) close(log); if (in >= 0) close(in);
+    r->output = out[0]; return ok;
+}
+static bool ruf_unbuildable(struct receive_fixture *f)
+{
+    char makefile[ABC_PATH];
+    int n = snprintf(makefile, sizeof(makefile), "%s/Makefile", f->world.src);
+    if (n <= 0 || (size_t)n >= sizeof(makefile) || unlink(makefile)) return false;
+    n = snprintf(f->file, sizeof(f->file), "%s/no-make.z23share", f->world.root);
+    /* Re-sign the selected source, not a post-receive mutable-copy sabotage.
+     * rt_setup's later source was return1; restore the exact k_main oracle. */
+    return n > 0 && (size_t)n < sizeof(f->file) && abc_put(f->world.src, "src/main.c", k_main) &&
+        rt_bundle(f, f->file, 1);
+}
+static bool ruf_empty_directory(const char *path)
+{
+    DIR *dir = path ? opendir(path) : NULL;
+    if (!dir) return false;
+    bool empty = true; struct dirent *entry;
+    errno = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) { empty = false; break; }
+    }
+    bool ok = empty && errno == 0;
+    return closedir(dir) == 0 && ok;
+}
+/* Derive the native choice's page count from its exact model and the actual
+ * received saved version, never from an assumed number of Tab presses. */
+static bool ruf_choice_count(const struct receive_fixture *f, uint32_t *count)
+{
+    struct zcl_package_copy copy = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.receive-flow.v1");
+    bool opened = zcl_package_copy_open_selected_as(f->destination, ZCL_PACKAGE_COPY_READ,
+        &copy, &reply, "receive-flow-test", NULL);
+    char version[65]; zcl_hex_encode(copy.selected_version, 32, version);
+    struct app_confirm *view = zcl_calloc(1, sizeof(*view), "receive-flow-test/model");
+    bool ok = opened && view;
+    if (ok) {
+        zcl_present_model_init_v1(&view->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+        (void)snprintf(view->model.request_id, sizeof(view->model.request_id), "received-app");
+        (void)snprintf(view->model.title, sizeof(view->model.title), "Your copy is ready");
+        (void)snprintf(view->model.summary, sizeof(view->model.summary),
+            "Build and run this received version to preview it. Keep remains a separate choice.");
+        view->model.action_count = 4;
+        app_confirm_action(&view->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
+        app_confirm_action(&view->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+        app_confirm_action(&view->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+        app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "continue", "Build and preview");
+        char why[128];
+        ok = app_confirm_field(&view->model, "App: ", "stub/tinyapp") &&
+            app_confirm_field(&view->model, "Saved version: ", version) &&
+            zcl_present_model_page_count_v1(&view->model, count, why, sizeof(why));
+    }
+    free(view); zcl_package_copy_close(&copy); zcl_command_reply_free(&reply);
+    return ok && *count > 0 && *count <= ZCL_PRESENT_MODEL_PAGES_MAX;
+}
+static bool ruf_choose_build(struct ru_run *r)
+{
+    static const char title[] = "Your copy is ready";
+    uint32_t count = 0;
+    if (!ruf_choice_count(r->fixture, &count)) return false;
+    /* Initially unfocused: Close -> Back -> Next. */
+    for (unsigned i = 0; i < 3; ++i)
+        if (!ruf_driver(r, title, "--key=tab", true)) return false;
+    for (uint32_t page = 1; page < count; ++page)
+        if (!ruf_driver(r, title, "--key=enter", true)) return false;
+    return ruf_driver(r, title, "--key=tab", true) && ruf_driver(r, title, "--key=enter", false);
+}
+static bool ruf_bool(const struct json_value *data, const char *key, bool expected)
+{
+    const struct json_value *v = json_get(data, key);
+    return v && v->type == JSON_BOOL && json_get_bool(v) == expected;
+}
+static bool ruf_failed_operation(const struct json_value *data)
+{
+    const struct json_value *ops = json_get(data, "operations");
+    if (!ops || ops->type != JSON_ARR || json_size(ops) != 1) return false;
+    const struct json_value *op = json_at(ops, 0);
+    const struct json_value *code = json_get(op, "exit_code");
+    return ruf_bool(op, "exit_observed", true) &&
+        code && code->type == JSON_INT && json_get_int(code) != 0 &&
+        ruf_bool(op, "stdout_complete", true) && ruf_bool(op, "stdout_truncated", false) &&
+        ruf_bool(op, "result_is_summary", true) && ruf_bool(op, "result_parsed", true) &&
+        !json_get(op, "result") && !strcmp(ru_string(op, "status"), "failed") &&
+        strstr(ru_string(op, "error_excerpt"), "Makefile") != NULL;
+}
+static bool ruf_stderr_summary(const struct json_value *data)
+{
+    const struct json_value *op = json_at(json_get(data, "operations"), 0);
+    const struct json_value *omitted = json_get(op, "stderr_bytes_omitted");
+    const struct json_value *hex = json_get(op, "stderr_tail_hex");
+    if (!omitted || omitted->type != JSON_INT || json_get_int(omitted) < 0 ||
+        !hex || hex->type != JSON_STR) return false;
+    const char *text = json_get_str(hex); size_t n = strlen(text);
+    if (n > 256 || n % 2) return false;
+    for (size_t i = 0; i < n; ++i)
+        if (!strchr("0123456789abcdef", text[i])) return false;
+    return true;
+}
+static bool ruf_no_outputs(const struct ru_run *r, enum ruf_case which)
+{
+    if (!ruf_empty_directory(getenv("XDG_STATE_HOME"))) return false;
+    if (which != RUF_BUILD_FAILURE) return ru_cli_no_build(r);
+    /* A failed plan may create and retire selected-source scratch, but must
+     * not publish a built image or record, or launch an application. */
+    char images[1024], records[1024];
+    int a = snprintf(images, sizeof(images), "%s/app_build/images", r->fixture->datadir);
+    int b = snprintf(records, sizeof(records), "%s/app_build/records", r->fixture->datadir);
+    return a > 0 && (size_t)a < sizeof(images) && b > 0 && (size_t)b < sizeof(records) &&
+        rd_absent_path(images) && rd_absent_path(records);
+}
+static bool ruf_closed_data(const struct json_value *reply, const struct json_value *data)
+{
+    const struct json_value *ops = json_get(data, "operations");
+    return ruf_bool(reply, "ok", true) && !strcmp(ru_string(reply, "status"), "passed") &&
+        !strcmp(ru_string(data, "continuation"), "received") &&
+        ruf_bool(data, "continuation_executed", false) &&
+        ops && ops->type == JSON_ARR && json_size(ops) == 0;
+}
+static bool ruf_invalid_data(const struct ru_run *r, const struct json_value *reply)
+{
+    return ruf_bool(reply, "ok", false) && strcmp(ru_string(reply, "status"), "passed") &&
+        !strcmp(ru_string(json_get(reply, "error"), "code"), "INVALID_INPUT") &&
+        strstr(ru_string(json_get(reply, "error"), "message"), "preview") &&
+        rt_absent(r->fixture) && ru_home_unchanged(r);
+}
+static bool ruf_failed_data(const struct json_value *reply, const struct json_value *data)
+{
+    const struct json_value *error = json_get(data, "continuation_error");
+    return ruf_bool(reply, "ok", true) && !strcmp(ru_string(reply, "status"), "passed") &&
+        !strcmp(ru_string(data, "continuation"), "failed") &&
+        ruf_bool(data, "continuation_executed", false) &&
+        !strcmp(ru_string(error, "code"), "PREVIEW_WORKER_FAILED") &&
+        ruf_bool(error, "received_copy_retained", true) && ruf_bool(error, "automatic_retry", false) &&
+        ruf_failed_operation(data) && ruf_stderr_summary(data);
+}
+static bool ruf_reply_data(struct ru_run *r, enum ruf_case which, const struct json_value *reply)
+{
+    const struct json_value *data = json_get(reply, "data"), *success = json_get(reply, "ok");
+    if (!success || success->type != JSON_BOOL || strcmp(ru_string(reply, "command"), "app.receive")) return false;
+    if (which == RUF_INVALID) return ruf_invalid_data(r, reply);
+    if (!ru_commit_data(r, data) || !ru_committed_modes(r)) return false;
+    if (which == RUF_BUILD_FAILURE) return ruf_failed_data(reply, data);
+    return ruf_closed_data(reply, data);
+}
+static bool ruf_result(struct ru_run *r, enum ruf_case which)
+{
+    if (!ru_read_line(r->output, r->line, sizeof(r->line), 15000)) return false;
+    struct json_value reply; json_init(&reply);
+    bool ok = json_read(&reply, r->line, strlen(r->line)) && ruf_reply_data(r, which, &reply);
+    printf("APP_RECEIVE_FLOW case=%d reply=%s\n", which, r->line);
+    json_free(&reply);
+    uint32_t code = UINT32_MAX;
+    bool exited = ru_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED &&
+        ((which != RUF_INVALID && code == 0) || (which == RUF_INVALID && code != 0));
+    close(r->output); r->output = -1;
+    return ok && exited && ru_window(r, false) &&
+        ruf_driver(r, "Your copy is ready", "--expect-count=0", false) &&
+        ruf_driver(r, "The next step did not finish", "--expect-count=0", false) &&
+        ruf_no_outputs(r, which);
+}
+static bool ruf_gate_bundle(struct receive_fixture *f)
+{
+    /* Existing app_build_copy FIFO pattern. No compilation occurs before the
+     * handshake; cleanup test intentionally interrupts this blocked recipe. */
+    char makefile[2048];
+    int n = snprintf(makefile, sizeof(makefile), "%s"
+        ".PHONY: before\napp: before\nbefore:\n"
+        "\t@printf R > $(APP_OUT)/../flow-ready\n"
+        "\t@read ack < $(APP_OUT)/../flow-go\n"
+        "\t@false\n", k_makefile);
+    if (n <= 0 || (size_t)n >= sizeof(makefile)) return false;
+    n = snprintf(f->file, sizeof(f->file), "%s/gated.z23share", f->world.root);
+    return n > 0 && (size_t)n < sizeof(f->file) &&
+        abc_put(f->world.src, "src/main.c", k_main) && abc_put(f->world.src, "Makefile", makefile) &&
+        rt_bundle(f, f->file, 1);
+}
+static bool ruf_gate_open(const struct receive_fixture *f, int gate[2])
+{
+    struct zcl_package_copy copy = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.receive-flow.v1");
+    bool ok = zcl_package_copy_open_selected_as(f->destination, ZCL_PACKAGE_COPY_READ,
+        &copy, &reply, "receive-flow-gate", NULL);
+    char hex[65], work[1100], ready[1150], go[1150];
+    zcl_hex_encode(copy.fork_version, 32, hex);
+    int n = snprintf(work, sizeof(work), "%s/app_build/work/%s", f->datadir, hex);
+    ok = ok && n > 0 && (size_t)n < sizeof(work) && zcl_mkdir_p(work, 0700).ok;
+    zcl_package_copy_close(&copy); zcl_command_reply_free(&reply);
+    if (!ok) return false;
+    (void)snprintf(ready, sizeof(ready), "%s/flow-ready", work);
+    (void)snprintf(go, sizeof(go), "%s/flow-go", work);
+    if (mkfifo(ready, 0600) || mkfifo(go, 0600)) return false;
+    gate[0] = open(ready, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    gate[1] = open(go, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    return gate[0] >= 0 && gate[1] >= 0;
+}
+static bool ruf_gate_failure(struct ru_run *r, int gate[2])
+{
+    if (!ruf_gate_open(r->fixture, gate) || !ruf_choose_build(r)) return false;
+    struct pollfd event = {.fd = gate[0], .events = POLLIN};
+    int ready; do { ready = poll(&event, 1, 30000); } while (ready < 0 && errno == EINTR);
+    char byte = 0;
+    if (ready != 1 || read(gate[0], &byte, 1) != 1 || byte != 'R') return false;
+    /* The fixture's make child is now blocked waiting for our FIFO, not a
+     * wall-clock guess. Force the driver's error branch and hand live CLI /
+     * build-worker/make/shell custody to the normal failure cleanup below. */
+    return ru_image_live(&r->server) &&
+        !ruf_driver(r, "Deliberately absent cleanup-control window", "--expect-count=1", false);
+}
+/* Close is deferred while a real make child is held by the existing FIFO.
+ * The driver's escape means WM_DELETE_WINDOW, not a physical Escape key. */
+static bool rfp_wait_ready(struct ru_run *r, int gate[2])
+{
+    if (!ruf_gate_open(r->fixture, gate) || !ruf_choose_build(r)) return false;
+    struct pollfd event = {.fd = gate[0], .events = POLLIN};
+    int ready; do { ready = poll(&event, 1, 30000); } while (ready < 0 && errno == EINTR);
+    char byte = 0;
+    return ready == 1 && read(gate[0], &byte, 1) == 1 && byte == 'R';
+}
+static bool rfp_pin_receipt(const struct receive_fixture *f, struct zcl_package_copy *pins)
+{
+    /* Only immutable identity fields survive; no live VCS handle is shared. */
+    memset(pins, 0, sizeof(*pins));
+    struct zcl_package_copy copy = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.receive-progress.v1");
+    bool opened = zcl_package_copy_open_selected_as(f->destination, ZCL_PACKAGE_COPY_READ,
+        &copy, &reply, "receive-progress", NULL);
+    bool ok = opened && rt_received_trust(f, &copy);
+    if (ok) {
+        memcpy(pins->fork_version, copy.fork_version, 32);
+        memcpy(pins->parent_release, copy.parent_release, 32);
+    }
+    if (opened) zcl_package_copy_close(&copy);
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool rfp_blocked_close(struct ru_run *r, int gate[2])
+{
+    struct zcl_package_copy pins;
+    if (!rfp_pin_receipt(r->fixture, &pins)) return false;
+    if (!rfp_wait_ready(r, gate)) return false;
+    if (!ruf_driver(r, "Building your app", "--key=escape", true) ||
+        !ruf_driver(r, "Building your app", "--expect-count=1", false)) return false;
+    struct pollfd output = {.fd = r->output, .events = POLLIN};
+    int pending; do { pending = poll(&output, 1, 0); } while (pending < 0 && errno == EINTR);
+    /* Build holds commits.log: inspect immutable trust and unchanged bytes,
+     * not a competing history handle. rfp_result/ru_commit_data reopens and
+     * validates the full receipt once the worker has completed. */
+    bool live = ru_image_live(&r->server);
+    bool trust = rt_received_trust(r->fixture, &pins);
+    bool source = rt_received_source(r->fixture, true);
+    fprintf(stderr, "RECEIVE_PROGRESS blocked pending=%d revents=%d live=%d trust=%d source=%d\n",
+        pending, output.revents, live, trust, source);
+    return pending == 0 && live && trust && source;
+}
+static bool rfp_operation(const struct json_value *op, const char *stage, bool failed)
+{
+    const struct json_value *code = json_get(op, "exit_code");
+    if (!code || code->type != JSON_INT) return false;
+    bool exit_ok = failed ? json_get_int(code) != 0 : json_get_int(code) == 0;
+    return exit_ok && !strcmp(ru_string(op, "operation"), stage) &&
+        !strcmp(ru_string(op, "status"), failed ? "failed" : "passed") &&
+        ruf_bool(op, "exit_observed", true) && ruf_bool(op, "timed_out", false) &&
+        ruf_bool(op, "stdout_complete", true) && ruf_bool(op, "stdout_truncated", false) &&
+        ruf_bool(op, "progress_displayed", true) && ruf_bool(op, "close_notice_failed", false);
+}
+static bool rfp_data(struct ru_run *r, const struct json_value *reply)
+{
+    const struct json_value *data = json_get(reply, "data"), *ops = json_get(data, "operations");
+    const struct json_value *error = json_get(data, "continuation_error");
+    return ruf_bool(reply, "ok", true) && !strcmp(ru_string(reply, "status"), "passed") &&
+        !strcmp(ru_string(reply, "command"), "app.receive") && ru_commit_data(r, data) &&
+        !strcmp(ru_string(data, "continuation"), "failed") && ruf_bool(data, "continuation_executed", false) &&
+        !strcmp(ru_string(error, "code"), "PREVIEW_WORKER_FAILED") &&
+        ruf_bool(error, "received_copy_retained", true) && ruf_bool(error, "automatic_retry", false) &&
+        ops && ops->type == JSON_ARR && json_size(ops) == 2 && !json_get(data, "kept");
+}
+static bool rfp_no_publication(const struct ru_run *r)
+{
+    static const char *const names[] = {"images", "records"};
+    if (!ruf_empty_directory(getenv("XDG_STATE_HOME"))) return false;
+    for (size_t i = 0; i < 2; ++i) {
+        char path[1024]; int n = snprintf(path, sizeof(path), "%s/app_build/%s", r->fixture->datadir, names[i]);
+        if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+        if (!rd_absent_path(path) && !ruf_empty_directory(path)) return false;
+    }
+    return true;
+}
+static bool rfp_result(struct ru_run *r)
+{
+    if (!ru_read_line(r->output, r->line, sizeof(r->line), 15000)) return false;
+    struct json_value reply; json_init(&reply);
+    bool ok = json_read(&reply, r->line, strlen(r->line)) && rfp_data(r, &reply);
+    const struct json_value *ops = json_get(json_get(&reply, "data"), "operations");
+    ok = ok && rfp_operation(json_at(ops, 0), "Checking the received version", false) &&
+        rfp_operation(json_at(ops, 1), "Building your app", true);
+    printf("APP_RECEIVE_PROGRESS_CLOSE reply=%s\n", r->line);
+    json_free(&reply);
+    uint32_t code = UINT32_MAX;
+    bool exited = ru_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    close(r->output); r->output = -1;
+    return ok && exited && ru_committed_modes(r) && rfp_no_publication(r);
+}
+static bool rfp_actions(struct ru_run *r, int gate[2])
+{
+    if (!rfp_blocked_close(r, gate)) return false;
+    /* Release exactly one blocked recipe; its maintained final false produces
+     * the visible failure. No retry, kill, cancellation or command rerun. */
+    ssize_t sent; do { sent = write(gate[1], "go\n", 3); } while (sent < 0 && errno == EINTR);
+    if (sent != 3) return false;
+    return ruf_driver(r, "The next step did not finish", "--expect-count=1", false) &&
+        ruf_driver(r, "Building your app", "--expect-count=0", false) &&
+        ruf_driver(r, "The next step did not finish", "--key=enter", false) &&
+        rfp_result(r) && ruf_driver(r, "The next step did not finish", "--expect-count=0", false);
+}
+static bool rfp_bundle(struct receive_fixture *f, enum ruf_case which)
+{
+    if (which == RUF_CUSTODY_FAILURE || which == RUF_PROGRESS_CLOSE) return ruf_gate_bundle(f);
+    return true;
+}
+static bool ruf_actions(struct ru_run *r, enum ruf_case which, uint32_t pages, int gate[2])
+{
+    if (!ruf_cli(r, which)) return false;
+    if (which == RUF_INVALID) return ruf_result(r, which);
+    if (!ru_window(r, true) || !ru_pending(r) || !ru_pages(r, pages) ||
+        !ruf_driver(r, "Your copy is ready", "--expect-count=1", false) || !rt_received(r->fixture)) return false;
+    if (which == RUF_CUSTODY_FAILURE) return ruf_gate_failure(r, gate);
+    if (which == RUF_PROGRESS_CLOSE) return rfp_actions(r, gate);
+    if (which == RUF_CLOSE) {
+        if (!ruf_driver(r, "Your copy is ready", "--key=enter", false)) return false;
+    } else {
+        if (!ruf_choose_build(r) ||
+            !ruf_driver(r, "The next step did not finish", "--expect-count=1", false) ||
+            !ruf_driver(r, "The next step did not finish", "--key=enter", false)) return false;
+    }
+    return ruf_result(r, which);
+}
+static void rfp_failure_wire(struct ru_run *r)
+{
+    if (r->output < 0) return;
+    struct pollfd p = {.fd = r->output, .events = POLLIN};
+    int ready; do { ready = poll(&p, 1, 0); } while (ready < 0 && errno == EINTR);
+    fprintf(stderr, "RECEIVE_PROGRESS failed-output ready=%d revents=%d\n", ready, p.revents);
+    if (ready <= 0 || !(p.revents & POLLIN)) return;
+    r->line[0] = 0;
+    bool complete = ru_read_line(r->output, r->line, sizeof(r->line), 250);
+    fprintf(stderr, "RECEIVE_PROGRESS failed-output complete=%d wire=%s\n",
+        complete, complete ? r->line : "<incomplete line; bounded capture expired>");
+}
+static int ruf_case_run(enum ruf_case which)
+{
+    int failures = 0; size_t saved = 0;
+    struct ru_env env[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL}, {"XDG_STATE_HOME", NULL},
+        {"XDG_RUNTIME_DIR", NULL}, {"XDG_CACHE_HOME", NULL}, {"XDG_DATA_HOME", NULL},
+        {"DISPLAY", NULL}, {"WAYLAND_DISPLAY", NULL}, {"XAUTHORITY", NULL},
+        {"ZCL_CLI_TEST_NO_SERVICE_LOOKUP", NULL}, {"ZCL_DATADIR", NULL}};
+    struct receive_fixture f = {0};
+    struct ru_run r = {.input = -1, .output = -1, .fixture = &f, .file_only = true};
+    struct sigaction old_pipe, ignore_pipe = {.sa_handler = SIG_IGN}; bool signal_saved = false;
+    int old_subreaper = 0, gate[2] = {-1, -1}; bool custody = false;
+    uint32_t pages = 0;
+    TEST("typed CLI preview opt-in preserves committed Receive on Close and visible build failure") {
+        ASSERT(ru_env_save(env, sizeof(env)/sizeof(env[0]), &saved));
+        ASSERT(sigemptyset(&ignore_pipe.sa_mask) == 0 && sigaction(SIGPIPE, &ignore_pipe, &old_pipe) == 0);
+        signal_saved = true;
+        ASSERT(rt_setup(&f));
+        ASSERT(which != RUF_BUILD_FAILURE || ruf_unbuildable(&f));
+        ASSERT(rfp_bundle(&f, which));
+        ASSERT(ru_environment(&f) && ru_file_only_setup(&f));
+        ASSERT(ru_page_count(&f, &pages) && ru_home_unchanged(&r));
+        ASSERT(realpath("build/bin/native_ui_driver", r.driver_image));
+        ASSERT(ru_xvfb(&r));
+        ASSERT(ruf_child_baseline(&r));
+        ASSERT(prctl(PR_GET_CHILD_SUBREAPER, &old_subreaper) == 0);
+        ASSERT(prctl(PR_SET_CHILD_SUBREAPER, 1) == 0);
+        custody = true;
+        ASSERT(ruf_actions(&r, which, pages, gate));
+        PASS();
+    } _test_next:;
+    if (failures) rfp_failure_wire(&r);
+    bool clean = ruf_cleanup(&r, custody, old_subreaper);
+    if (gate[0] >= 0) close(gate[0]);
+    if (gate[1] >= 0) close(gate[1]);
+    if (signal_saved && sigaction(SIGPIPE, &old_pipe, NULL) != 0) clean = false;
+    if (!ru_env_restore(env, saved)) clean = false;
+    printf("APP_RECEIVE_FLOW case=%d fixture=%s cleanup=%d\n", which, f.world.root, clean);
+    if (!clean) failures++;
+    return failures;
+}
+/* Actual tiny-app continuation. Native dialogs are real; app readiness uses
+ * the maintained kept-route alive contract, not a rendered-game claim. */
+#include "command/app_selection.h"
+#include "command/app_image.h"
+static const char rus_main[] =
+    "#define _POSIX_C_SOURCE 200809L\n#include <stdio.h>\n#include <unistd.h>\n"
+    "int main(void){puts(\"RECEIVE-FLOW-ALIVE\");fflush(stdout);for(;;)pause();}\n";
+static const char rus_dirty[] = "#error unsaved live source must never be built\n";
+struct rus_identity {
+    char version[65], route[33], image[65], record[65], image_path[PATH_MAX];
+    uint8_t fork[32];
+    struct app_launch_env env;
+    struct ru_child running;
+};
+static bool rus_bundle(struct receive_fixture *f)
+{
+    int n = snprintf(f->file, sizeof(f->file), "%s/alive.z23share", f->world.root);
+    return n > 0 && (size_t)n < sizeof(f->file) && abc_put(f->world.src, "src/main.c", rus_main) &&
+        rt_bundle(f, f->file, 1);
+}
+static bool rus_source(const struct receive_fixture *f, const char *expected)
+{
+    char path[1024], bytes[256];
+    int n = snprintf(path, sizeof(path), "%s/src/main.c", f->destination);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *file = fopen(path, "rb"); if (!file) return false;
+    size_t got = fread(bytes, 1, sizeof(bytes), file);
+    bool ok = !ferror(file) && feof(file) && got == strlen(expected) && !memcmp(bytes, expected, got);
+    return fclose(file) == 0 && ok;
+}
+static bool rus_received(struct receive_fixture *f, struct rus_identity *id, bool first)
+{
+    struct zcl_package_copy copy = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.receive-success.v1");
+    bool ok = zcl_package_copy_open_selected_as(f->destination, ZCL_PACKAGE_COPY_READ,
+        &copy, &reply, "receive-success", first ? NULL : id->version);
+    char version[65]; zcl_hex_encode(copy.head_version, 32, version);
+    if (ok && first) {
+        memcpy(id->version, version, sizeof(version)); memcpy(id->fork, copy.fork_version, 32);
+    }
+    ok = ok && !strcmp(version, id->version) && !memcmp(id->fork, copy.fork_version, 32) &&
+        rt_received_trust(f, &copy);
+    zcl_package_copy_close(&copy); zcl_command_reply_free(&reply);
+    return ok && rus_source(f, first ? rus_main : rus_dirty);
+}
+static bool rus_wait_keep_window(struct ru_run *r)
+{
+    int log = ru_log(r, "receive-success-driver.log");
+    const char *argv[] = {r->driver_image, "--title=Preview opened", "--expect-count=1",
+        "--timeout-ms=30000", NULL};
+    bool ok = log >= 0 && ru_spawn(&r->driver, argv, log, log, log);
+    if (log >= 0) close(log);
+    uint32_t code = UINT32_MAX;
+    ok = ok && ru_wait(&r->driver, 32000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    bool stopped = ru_stop(&r->driver); return ok && stopped;
+}
+static bool rus_keep_pages(const struct rus_identity *id, uint32_t *count)
+{
+    struct app_confirm *view = zcl_calloc(1, sizeof(*view), "receive-success/model");
+    if (!view) return false;
+    zcl_present_model_init_v1(&view->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(view->model.request_id, sizeof(view->model.request_id), "received-app");
+    (void)snprintf(view->model.title, sizeof(view->model.title), "Preview opened");
+    (void)snprintf(view->model.summary, sizeof(view->model.summary),
+        "Check the app before choosing Keep. Closing leaves your received copy available.");
+    view->model.action_count = 4;
+    app_confirm_action(&view->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
+    app_confirm_action(&view->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+    app_confirm_action(&view->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+    app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "continue", "Keep this version");
+    char why[128];
+    bool ok = app_confirm_field(&view->model, "App: ", "stub/tinyapp") &&
+        app_confirm_field(&view->model, "Saved version: ", id->version) &&
+        zcl_present_model_page_count_v1(&view->model, count, why, sizeof(why));
+    free(view); return ok && *count > 0 && *count <= ZCL_PRESENT_MODEL_PAGES_MAX;
+}
+static bool rus_keep_action(struct ru_run *r, const struct rus_identity *id, bool keep)
+{
+    if (!keep) return ruf_driver(r, "Preview opened", "--key=enter", false);
+    uint32_t count = 0;
+    if (!rus_keep_pages(id, &count)) return false;
+    for (unsigned i = 0; i < 3; ++i)
+        if (!ruf_driver(r, "Preview opened", "--key=tab", true)) return false;
+    for (uint32_t page = 1; page < count; ++page)
+        if (!ruf_driver(r, "Preview opened", "--key=enter", true)) return false;
+    return ruf_driver(r, "Preview opened", "--key=tab", true) &&
+        ruf_driver(r, "Preview opened", "--key=enter", false);
+}
+static bool rus_routes(const struct rus_identity *id, bool kept)
+{
+    struct app_selection_routes routes;
+    if (app_selection_routes_load(id->env.state_dir, &routes) != APP_SELECTION_OK) return false;
+    return kept ? routes.count == 1 && !strcmp(routes.names[0], id->route) : routes.count == 0;
+}
+static bool rus_read(struct ru_run *r, const char *command, struct json_value *reply)
+{
+    json_init(reply);
+    bool got = ru_read_line(r->output, r->line, sizeof(r->line), 15000);
+    uint32_t code = UINT32_MAX;
+    bool exited = ru_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    close(r->output); r->output = -1;
+    if (!got || !exited) return false;
+    printf("APP_RECEIVE_SUCCESS command=%s wire=%s\n", command, r->line);
+    return json_read(reply, r->line, strlen(r->line)) && !strcmp(ru_string(reply, "command"), command) &&
+        !strcmp(ru_string(reply, "status"), "passed") && ruf_bool(reply, "ok", true);
+}
+static bool rus_root(const struct json_value *d, const char *key, char out[65])
+{
+    const char *s = ru_string(d, key); uint8_t root[32];
+    if (strlen(s) != 64 || !zcl_hex_decode_lower(s, root, 32)) return false;
+    memcpy(out, s, 65); return true;
+}
+static bool rus_operation(const struct json_value *op, const struct receive_fixture *f,
+    const struct rus_identity *id)
+{
+    const struct json_value *code = json_get(op, "exit_code");
+    return code && code->type == JSON_INT && json_get_int(code) == 0 &&
+        ruf_bool(op, "exit_observed", true) && ruf_bool(op, "stdout_complete", true) &&
+        ruf_bool(op, "stdout_truncated", false) && ruf_bool(op, "result_parsed", true) &&
+        !strcmp(ru_string(op, "status"), "passed") &&
+        !strcmp(ru_string(op, "version"), id->version) && !strcmp(ru_string(op, "package_root"), f->package);
+}
+static bool rus_process(const struct json_value *d, struct rus_identity *id)
+{
+    const struct json_value *pid = json_get(d, "pid");
+    const char *start = ru_string(d, "start_token"); char *end = NULL; errno = 0;
+    unsigned long long token = strtoull(start, &end, 10);
+    if (!pid || pid->type != JSON_INT || json_get_int(pid) <= 1 || json_get_int(pid) > INT_MAX ||
+        errno || !*start || !end || *end || !token) return false;
+    id->running.pid = (pid_t)json_get_int(pid); id->running.token = token;
+    (void)snprintf(id->running.image, sizeof(id->running.image), "%s", id->image_path);
+    return ru_image_live(&id->running) && ruf_bool(d, "ready", true) &&
+        !strcmp(ru_string(d, "ready_basis"), "alive") && ru_string(d, "mapped_proof")[0];
+}
+static bool rus_image(const struct receive_fixture *f, struct rus_identity *id, const struct json_value *built)
+{
+    if (!rus_root(built, "image_sha3", id->image) || !rus_root(built, "record_id", id->record)) return false;
+    int n = snprintf(id->image_path, sizeof(id->image_path), "%s/app_build/images/%s", f->datadir, id->image);
+    if (n <= 0 || (size_t)n >= sizeof(id->image_path)) return false;
+    struct app_image_build captured = {0}; char hex[65];
+    if (!app_image_capture(id->image_path, &captured).ok) return false;
+    zcl_hex_encode(captured.image_sha3, 32, hex); return !strcmp(hex, id->image);
+}
+static bool rus_opened_summary(struct rus_identity *id, const struct json_value *opened)
+{
+    const char *route = ru_string(opened, "name");
+    if (!app_selection_route_valid(route) || strlen(route) >= sizeof(id->route)) return false;
+    memcpy(id->route, route, strlen(route) + 1);
+    return !strcmp(ru_string(opened, "image_sha3"), id->image) &&
+        !strcmp(ru_string(opened, "record_id"), id->record) && rus_process(opened, id);
+}
+static bool rus_kept_receipt(const struct json_value *d, const struct rus_identity *id, bool keep)
+{
+    const struct json_value *kept = json_get(d, "kept");
+    if (!keep) return !kept;
+    const struct json_value *revision = json_get(kept, "selection_revision");
+    return revision && revision->type == JSON_INT && json_get_int(revision) == 1 &&
+        !strcmp(ru_string(kept, "name"), id->route) &&
+        !strcmp(ru_string(kept, "version"), id->version) &&
+        !strcmp(ru_string(kept, "image_sha3"), id->image) &&
+        !strcmp(ru_string(kept, "record_id"), id->record);
+}
+static bool rus_receipt(struct ru_run *r, struct rus_identity *id, bool keep, const struct json_value *reply)
+{
+    const struct receive_fixture *f = r->fixture;
+    const struct json_value *d = json_get(reply, "data"), *ops = json_get(d, "operations");
+    if (!ops || ops->type != JSON_ARR || json_size(ops) != 3) return false;
+    for (size_t i = 0; i < 3; ++i) if (!rus_operation(json_at(ops, i), f, id)) return false;
+    const struct json_value *built = json_at(ops, 1), *opened = json_at(ops, 2);
+    if (!rus_image(f, id, built)) return false;
+    return !strcmp(ru_string(built, "stage"), "commit") &&
+        rus_opened_summary(id, opened) &&
+        !strcmp(ru_string(d, "continuation"), keep ? "kept" : "previewed") &&
+        ruf_bool(d, "continuation_executed", true) && !json_get(d, "continuation_error") &&
+        rus_kept_receipt(d, id, keep);
+}
+static bool rus_original_receipt(const struct receive_fixture *f, const struct rus_identity *id,
+    const struct json_value *reply)
+{
+    const struct json_value *d = json_get(reply, "data");
+    return ruf_bool(d, "executed", false) && !strcmp(ru_string(d, "stage"), "commit") &&
+        !strcmp(ru_string(d, "release_id"), f->release) && !strcmp(ru_string(d, "package_root"), f->package) &&
+        !strcmp(ru_string(d, "publisher_fingerprint"), f->publisher) &&
+        !strcmp(ru_string(d, "destination"), f->destination) &&
+        !strcmp(ru_string(d, "version"), id->version) && ru_string(d, "trust_record")[0];
+}
+static bool rus_selection_record(const struct receive_fixture *f, const struct app_selection *s)
+{
+    char store[1024]; int n = snprintf(store, sizeof(store), "%s/app_build/records", f->datadir);
+    struct app_image_build rec; bool hit = false; uint8_t root[32];
+    if (n <= 0 || (size_t)n >= sizeof(store) ||
+        !app_image_build_load(store, s->package, s->env, s->dependencies, &rec, &hit).ok || !hit) return false;
+    return app_image_build_id(&rec, root).ok && !memcmp(root, s->record, 32) &&
+        !memcmp(rec.image_sha3, s->image, 32);
+}
+static bool rus_selection(const struct receive_fixture *f, const struct rus_identity *id)
+{
+    struct app_selection s; uint8_t root[32];
+    if (app_selection_load(id->env.state_dir, id->route, &s) != APP_SELECTION_OK || s.revision != 1) return false;
+    if (strcmp(s.copy, f->destination) || strcmp(s.datadir, f->datadir) || memcmp(s.fork, id->fork, 32)) return false;
+    const char *values[] = {id->version, f->package, f->release, id->image, id->record};
+    const uint8_t *roots[] = {s.version, s.package, s.parent, s.image, s.record};
+    for (size_t i = 0; i < sizeof(values)/sizeof(values[0]); ++i)
+        if (!zcl_hex_decode_lower(values[i], root, 32) || memcmp(root, roots[i], 32)) return false;
+    return rus_selection_record(f, &s);
+}
+static bool rus_cli(struct ru_run *r, const char *verb, const char *route)
+{
+    int out[2]; char image[PATH_MAX], datadir[1024];
+    if (!realpath("build/bin/z23-dev", image) ||
+        !ru_cli_option(datadir, sizeof(datadir), "datadir", r->fixture->datadir) || !ru_pipe(out)) return false;
+    int log = ru_log(r, "receive-success-cli.log"), in = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    const char *argv[] = {image, "app", verb, datadir, "--json", route, NULL};
+    bool ok = log >= 0 && in >= 0 && ru_spawn(&r->server, argv, in, out[1], log);
+    close(out[1]); if (log >= 0) close(log); if (in >= 0) close(in);
+    r->output = out[0]; return ok;
+}
+static bool rus_list(struct ru_run *r, const struct rus_identity *id)
+{
+    struct json_value reply; json_init(&reply);
+    bool ok = rus_cli(r, "list", NULL) && rus_read(r, "app.list", &reply);
+    const struct json_value *list = json_get(json_get(&reply, "data"), "launchable");
+    size_t found = 0;
+    if (!list || list->type != JSON_ARR) ok = false;
+    else for (size_t i = 0; i < json_size(list); ++i) {
+        const struct json_value *row = json_at(list, i);
+        if (strcmp(ru_string(row, "id"), id->route)) continue;
+        ++found;
+        ok = ok && !strcmp(ru_string(row, "source"), "kept") &&
+            !strcmp(ru_string(row, "validation"), "required-on-open");
+    }
+    json_free(&reply); return ok && found == 1;
+}
+static bool rus_reopened(struct ru_run *r, struct rus_identity *id, const struct json_value *reply)
+{
+    const struct json_value *d = json_get(reply, "data");
+    return !strcmp(ru_string(d, "name"), id->route) &&
+        !strcmp(ru_string(d, "version"), id->version) &&
+        !strcmp(ru_string(d, "package_root"), r->fixture->package) &&
+        !strcmp(ru_string(d, "image_sha3"), id->image) &&
+        !strcmp(ru_string(d, "record_id"), id->record) &&
+        !strcmp(ru_string(d, "image_path"), id->image_path) && rus_process(d, id);
+}
+static bool rus_reopen(struct ru_run *r, struct rus_identity *id)
+{
+    /* End the preview first; the new CLI must resolve only the kept route. */
+    if (!ru_stop(&id->running)) return false;
+    struct json_value reply; json_init(&reply);
+    bool ok = rus_cli(r, "open", id->route) && rus_read(r, "app.open", &reply) &&
+        rus_reopened(r, id, &reply);
+    json_free(&reply);
+    bool stopped = ru_stop(&id->running); return ok && stopped;
+}
+/* Only adopted direct descendants in this isolated fixture qualify. A live
+ * image must be the fixture's content-addressed build image, checked by bytes,
+ * PID start token and executable again by ru_stop. Unknown children fail closed. */
+static bool rus_owned_image(const struct ru_run *r, const char *image)
+{
+    char prefix[1024], canonical[PATH_MAX], hex[65]; uint8_t root[32];
+    int n = snprintf(prefix, sizeof(prefix), "%s/app_build/images/", r->fixture->datadir);
+    if (n <= 0 || (size_t)n >= sizeof(prefix) || strncmp(image, prefix, (size_t)n)) return false;
+    const char *tail = image + n;
+    if (strlen(tail) != 64 || !zcl_hex_decode_lower(tail, root, 32) ||
+        !realpath(image, canonical) || strcmp(canonical, image)) return false;
+    struct app_image_build rec = {0};
+    if (!app_image_capture(image, &rec).ok) return false;
+    zcl_hex_encode(rec.image_sha3, 32, hex); return !strcmp(hex, tail);
+}
+static bool rus_adopted_stop(pid_t pid, const struct ru_run *r)
+{
+    struct ru_child child = {.pid = pid};
+    if (!app_proc_identity(pid, child.image, &child.token)) return ru_reaped_identity_failure(&child);
+    if (child.token && rus_owned_image(r, child.image)) return ru_stop(&child);
+    return ruf_adopted_stop(pid, r); /* Existing fixed CLI/make/shell custody. */
+}
+static bool rus_workers_stop(struct ru_run *r)
+{
+    for (unsigned pass = 0; pass < 8; ++pass) {
+        pid_t pids[32]; size_t count; bool found = false;
+        if (!ruf_children(pids, &count)) return false;
+        for (size_t i = 0; i < count; ++i) {
+            if (pids[i] == r->display.pid || pids[i] == r->driver.pid) continue;
+            found = true;
+            if (!rus_adopted_stop(pids[i], r)) return false;
+        }
+        if (!found) return true;
+    }
+    return false;
+}
+static bool rus_cleanup(struct ru_run *r, bool custody, int old_subreaper)
+{
+    bool server = ru_stop(&r->server);
+    bool workers = custody && server && rus_workers_stop(r);
+    bool direct = ru_cleanup(r);
+    bool empty = custody && ruf_child_baseline(r);
+    bool restored = !custody || (workers && empty && prctl(PR_SET_CHILD_SUBREAPER, old_subreaper) == 0);
+    return server && direct && (!custody || (workers && empty)) && restored;
+}
+static bool rus_start(struct ru_run *r, struct receive_fixture *f, struct rus_identity *id, uint32_t pages)
+{
+    if (!ruf_cli(r, RUF_CLOSE) || !ru_window(r, true) || !ru_pending(r) || !ru_pages(r, pages) ||
+        !ruf_driver(r, "Your copy is ready", "--expect-count=1", false)) return false;
+    char why[256];
+    return rus_received(f, id, true) && app_launch_env_from_process(&id->env, why, sizeof(why)) &&
+        rus_routes(id, false) && abc_put(f->destination, "src/main.c", rus_dirty) &&
+        ruf_choose_build(r) && rus_wait_keep_window(r);
+}
+static bool rus_after_reply(struct ru_run *r, struct receive_fixture *f, struct rus_identity *id, bool keep)
+{
+    if (!ru_committed_modes(r) || !rus_received(f, id, false) || !rus_routes(id, keep)) return false;
+    if (!ruf_driver(r, "Preview opened", "--expect-count=0", false)) return false;
+    if (!keep) return ru_stop(&id->running);
+    return rus_selection(f, id) && rus_list(r, id) && rus_reopen(r, id) &&
+        rus_selection(f, id) && rus_received(f, id, false);
+}
+static bool rus_finish(struct ru_run *r, struct receive_fixture *f, struct rus_identity *id, bool keep)
+{
+    if (!rus_routes(id, false) || !rus_keep_action(r, id, keep)) return false;
+    struct json_value reply; json_init(&reply);
+    bool ok = rus_read(r, "app.receive", &reply) && rus_original_receipt(f, id, &reply) &&
+        rus_receipt(r, id, keep, &reply);
+    json_free(&reply);
+    return ok && rus_after_reply(r, f, id, keep);
+}
+static int rus_case(bool keep)
+{
+    int failures = 0; size_t saved = 0;
+    struct ru_env env[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL}, {"XDG_STATE_HOME", NULL},
+        {"XDG_RUNTIME_DIR", NULL}, {"XDG_CACHE_HOME", NULL}, {"XDG_DATA_HOME", NULL},
+        {"DISPLAY", NULL}, {"WAYLAND_DISPLAY", NULL}, {"XAUTHORITY", NULL},
+        {"ZCL_CLI_TEST_NO_SERVICE_LOOKUP", NULL}, {"ZCL_DATADIR", NULL}};
+    struct receive_fixture f = {0}; struct rus_identity id = {0};
+    struct ru_run r = {.input = -1, .output = -1, .fixture = &f, .file_only = true};
+    struct sigaction old_pipe, ignore_pipe = {.sa_handler = SIG_IGN}; bool signal_saved = false;
+    int old_subreaper = 0; bool custody = false; uint32_t pages = 0;
+    TEST("received saved version builds and previews; Close does not Keep, explicit Keep lists and reopens") {
+        ASSERT(ru_env_save(env, sizeof(env)/sizeof(env[0]), &saved));
+        ASSERT(sigemptyset(&ignore_pipe.sa_mask) == 0 && sigaction(SIGPIPE, &ignore_pipe, &old_pipe) == 0);
+        signal_saved = true;
+        ASSERT(rt_setup(&f) && rus_bundle(&f));
+        ASSERT(ru_environment(&f) && ru_file_only_setup(&f));
+        ASSERT(ru_page_count(&f, &pages) && ru_home_unchanged(&r));
+        ASSERT(realpath("build/bin/native_ui_driver", r.driver_image));
+        ASSERT(ru_xvfb(&r) && ruf_child_baseline(&r));
+        ASSERT(prctl(PR_GET_CHILD_SUBREAPER, &old_subreaper) == 0);
+        ASSERT(prctl(PR_SET_CHILD_SUBREAPER, 1) == 0);
+        custody = true;
+        ASSERT(rus_start(&r, &f, &id, pages));
+        ASSERT(rus_finish(&r, &f, &id, keep));
+        PASS();
+    } _test_next:;
+    bool clean = rus_cleanup(&r, custody, old_subreaper);
+    if (signal_saved && sigaction(SIGPIPE, &old_pipe, NULL) != 0) clean = false;
+    if (!ru_env_restore(env, saved)) clean = false;
+    printf("APP_RECEIVE_SUCCESS keep=%d fixture=%s version=%s image=%s cleanup=%d\n",
+        keep, f.world.root, id.version, id.image, clean);
+    if (!clean) failures++;
+    return failures;
+}
 int test_app_receive_ui(void)
 {
     if (access("/usr/bin/Xvfb", X_OK) != 0) { puts("SKIP (app_receive_ui requires Linux Xvfb)"); return 0; }
-    int failures = ru_case(false);
-    return failures + ru_case(true);
+    int failures = ru_case(false, false, false);
+    failures += ru_case(true, false, false);
+    failures += ru_case(true, true, false);
+    failures += ru_case(true, true, true);
+    failures += ruf_case_run(RUF_CLOSE);
+    failures += ruf_case_run(RUF_INVALID);
+    failures += ruf_case_run(RUF_BUILD_FAILURE);
+    failures += ruf_case_run(RUF_CUSTODY_FAILURE);
+    failures += ruf_case_run(RUF_PROGRESS_CLOSE);
+    failures += rus_case(false);
+    return failures + rus_case(true);
 }
 #else
 int test_app_receive_ui(void)

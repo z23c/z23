@@ -1,8 +1,11 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
  * purpose: Show a verified share plan before recording owner receive trust. */
 #include "command/native_app_receive_command.h"
+#include "command/native_app_commit_progress.h"
+#include "command/native_app_receive_flow.h"
 #include "command/native_app_confirm.h"
 #include "command/native_zcode_package_copy.h"
+#include "command/native_zcode_package_bundle.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "config/command_catalog.h"
@@ -15,10 +18,11 @@
 #include <string.h>
 
 #define AR_PATH 4400u
+#define AR_PREVIEW_RECEIPT_MAX 8192u
 struct receive_work {
     struct app_confirm view;
     struct json_value receiver_args;
-    bool default_destination, parents_may_have_changed;
+    bool default_destination, parents_may_have_changed, preview;
     char datadir[AR_PATH];
     char plan[65], release[65], package[65], publisher[67];
     char name[257], version[257], parent[65], destination[AR_PATH];
@@ -44,8 +48,8 @@ static bool ar_root(const char *text, size_t bytes)
 }
 static bool ar_input_keys(const struct json_value *input)
 {
-    static const char *const allowed[] = {"file", "datadir", "destination", "day"};
-    if (!input || input->type != JSON_OBJ || input->num_children < 1 || input->num_children > 4)
+    static const char *const allowed[] = {"file", "datadir", "destination", "day", "preview"};
+    if (!input || input->type != JSON_OBJ || input->num_children < 1 || input->num_children > 5)
         return false;
     for (size_t i = 0; i < input->num_children; ++i) {
         bool known = false;
@@ -57,9 +61,16 @@ static bool ar_input_keys(const struct json_value *input)
     }
     return true;
 }
+static bool ar_preview_input(struct receive_work *w, const struct json_value *input)
+{
+    const struct json_value *preview = json_get(input, "preview");
+    if (preview && preview->type != JSON_BOOL) return false;
+    w->preview = preview && json_get_bool(preview);
+    return true;
+}
 static bool ar_inputs(struct receive_work *w, const struct json_value *input)
 {
-    if (!ar_input_keys(input)) return false;
+    if (!ar_input_keys(input) || !ar_preview_input(w, input)) return false;
     static const char *const paths[] = {"file", "datadir", "destination"};
     for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
         if (i && !json_get(input, paths[i])) continue;
@@ -262,6 +273,48 @@ static bool ar_plan_fields(struct receive_work *w, const struct json_value *data
     return ar_root(w->plan, 32) && ar_root(w->release, 32) &&
         ar_root(w->package, 32) && ar_root(w->publisher, 33);
 }
+/* zpb_describe's committed fields are also present in the verified plan.
+ * Retain even unknown plan additions conservatively, but replace its stage
+ * and exclude the plan-only id/instruction. No copy or trust write occurs. */
+static bool ar_receipt_common(struct json_value *out, const struct json_value *plan)
+{
+    json_init(out); json_set_object(out);
+    for (size_t i = 0; i < plan->num_children; ++i) {
+        const char *key = plan->keys[i];
+        if (!strcmp(key, "stage") || !strcmp(key, "plan_id") || !strcmp(key, "next")) continue;
+        if (!json_push_kv(out, key, &plan->children[i])) return false;
+    }
+    return json_push_kv_str(out, "stage", "commit");
+}
+/* Match zpb_keep_reply/zpb_record_write's shape. The future version is exactly
+ * 64 lowercase hex bytes, so any such placeholder has identical encoded size.
+ * next is a 512-byte producer buffer: 511 maximally escaped bytes bound every
+ * possible formatted/truncated instruction, without duplicating its prose. */
+static bool ar_receipt_commit_fields(struct json_value *out, const struct receive_work *w)
+{
+    char version[65], trust[AR_PATH], next[512];
+    memset(version, 'f', 64); version[64] = 0;
+    memset(next, 1, sizeof(next) - 1); next[sizeof(next) - 1] = 0;
+    int n = snprintf(trust, sizeof(trust), "%s/%s/%s.%s.trust", w->datadir,
+        ZCL_PACKAGE_RECEIVE_TRUST_DIR, version, w->release);
+    if (n <= 0 || (size_t)n >= sizeof(trust)) return false;
+    return json_push_kv_str(out, "destination", w->destination) &&
+        json_push_kv_str(out, "version", version) && json_push_kv_str(out, "trust_record", trust) &&
+        json_push_kv_str(out, "next", next);
+}
+static bool ar_preview_receipt_bound(const struct receive_work *w,
+    const struct json_value *plan, struct zcl_command_reply *reply)
+{
+    if (!w->preview) return true;
+    struct json_value projected; json_init(&projected);
+    bool ok = ar_receipt_common(&projected, plan) && ar_receipt_commit_fields(&projected, w);
+    size_t bytes = ok ? json_write(&projected, NULL, 0) : 0;
+    json_free(&projected);
+    if (!ok || !bytes) return ar_fail(reply, "PREVIEW_RECEIPT_PROJECTION_FAILED",
+        "Cannot reserve the complete receive receipt; nothing was received.");
+    return bytes <= AR_PREVIEW_RECEIPT_MAX || ar_fail(reply, "PREVIEW_RECEIPT_TOO_LARGE",
+        "The escaped receive receipt exceeds the preview reserve; shorten the copy or datadir path, or receive without preview.");
+}
 static bool ar_plan(const struct zcl_command_request *request,
     struct receive_work *w, struct zcl_command_reply *reply)
 {
@@ -273,6 +326,7 @@ static bool ar_plan(const struct zcl_command_request *request,
     else if (!ok) app_confirm_forward_failure(reply, &plan);
     else if (!(ok = ar_plan_fields(w, &plan.data)))
         ar_fail(reply, "RECEIVE_PLAN_INVALID", "The verified receive plan cannot be displayed exactly.");
+    if (ok) ok = ar_preview_receipt_bound(w, &plan.data, reply);
     zcl_command_reply_free(&plan);
     return ok;
 }
@@ -361,6 +415,71 @@ static void ar_commit(const struct zcl_command_request *request,
     reply->error.mutated |= w->parents_may_have_changed;
     zcl_command_reply_free(&result);
 }
+static const struct app_commit_progress_labels ar_progress_labels = {
+    .name = "receive-copy", .request_id = "receive-copy", .title = "Receiving your copy",
+    .summary = "Saving your approved received copy. Closing waits for completion; it does not undo saved changes.",
+    .finishing = "Finishing your copy", .allocation = "receive-copy/progress",
+    .unavailable = "RECEIVE_PROGRESS_UNAVAILABLE", .start_failed = "RECEIVE_THREAD_FAILED", .join_failed = "RECEIVE_JOIN_FAILED",
+};
+static void ar_commit_worker(void *work, const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    ar_commit(request, work, reply);
+}
+static bool ar_progress_receipt(struct zcl_command_reply *reply,
+    const struct app_commit_progress_outcome *out)
+{
+    bool offer = out->joined && out->ui_ok && !out->close_requested;
+    if (out->started && !offer && reply->status == ZCL_COMMAND_STATUS_PASSED) {
+        if (!json_push_kv_str(&reply->data, "continuation", "received") ||
+            !json_push_kv_bool(&reply->data, "continuation_executed", false) ||
+            !json_push_kv_bool(&reply->data, "receive_progress_ui_failed", !out->ui_ok))
+            zcl_package_copy_fail(reply, "OUT_OF_MEMORY", reply->error.mutated,
+                "Copy saved, but progress outcome could not be described; inspect retained state.", "app.receive");
+    }
+    return offer && reply->status == ZCL_COMMAND_STATUS_PASSED;
+}
+static bool ar_progress_commit(const struct zcl_command_request *request,
+    struct receive_work *w, struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context
+#ifdef ZCL_TESTING
+    , const struct app_commit_progress_test_hooks *hooks
+#endif
+)
+{
+    struct app_commit_progress_outcome out = app_commit_progress_run(
+        request, reply, ar_commit_worker, w, &ar_progress_labels, presenter, context
+#ifdef ZCL_TESTING
+        , hooks
+#endif
+    );
+    return ar_progress_receipt(reply, &out);
+}
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+bool zcl_test_app_receive_progress(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context,
+    const struct app_commit_progress_test_hooks *hooks)
+{
+    if (!request || !reply || !hooks || !hooks->commit) return false;
+    /* Only this internal fixture entry can replace commit; production never
+     * accepts hooks or skips the existing owner confirmation. */
+    return ar_progress_commit(request, NULL, reply, presenter, context, hooks);
+}
+#endif
+static void ar_commit_preview(const struct zcl_command_request *request,
+    struct receive_work *w, struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context)
+{
+    bool offer = ar_progress_commit(request, w, reply, presenter, context
+#ifdef ZCL_TESTING
+        , NULL
+#endif
+    );
+    const char *stage = zcl_package_copy_str(&reply->data, "stage");
+    if (offer && w->preview && reply->status == ZCL_COMMAND_STATUS_PASSED &&
+        reply->exit_code == 0 && stage && !strcmp(stage, "commit"))
+        app_receive_flow_run(w->datadir, reply, presenter, context);
+}
 static void ar_run(const struct zcl_command_request *request, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context)
 {
@@ -368,12 +487,12 @@ static void ar_run(const struct zcl_command_request *request, struct zcl_command
     struct receive_work *w = zcl_calloc(1, sizeof(*w), "app-receive");
     if (!w) { ar_fail(reply, "OUT_OF_MEMORY", "Cannot prepare receive confirmation."); return; }
     json_init(&w->receiver_args); json_set_object(&w->receiver_args);
-    if (!ar_inputs(w, request->input)) ar_fail(reply, "BAD_INPUT", "Provide an absolute file; datadir and destination are optional absolute paths; optional day is nonnegative.");
+    if (!ar_inputs(w, request->input)) ar_fail(reply, "BAD_INPUT", "Provide an absolute file; optional datadir/destination are absolute, day is nonnegative, and preview is boolean.");
     else if (ar_paths(request, w, reply) && ar_plan(request, w, reply)) {
         char why[256] = {0};
         if (!ar_model(w, why, sizeof(why)) || !app_confirm_show(&w->view, presenter, context, why, sizeof(why)))
             ar_fail(reply, "CONFIRMATION_UNAVAILABLE", "The exact receive plan could not be displayed; nothing was kept.");
-        else if (w->view.confirmed) ar_commit(request, w, reply);
+        else if (w->view.confirmed) ar_commit_preview(request, w, reply, presenter, context);
         else if (!json_push_kv_str(&reply->data, "status", "canceled"))
             ar_fail(reply, "OUT_OF_MEMORY", "Cannot describe cancellation; nothing was kept.");
     }

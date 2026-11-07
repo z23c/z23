@@ -5,6 +5,10 @@
 #include "presentation/presentation.h"
 struct RGFW_window;
 union RGFW_event;
+/* Translate hover keys/scroll without changing the caller's initialized
+ * absolute/next outputs for relative steps or unrelated events. */
+int32_t present_live_hover_step(const union RGFW_event *event,
+    uint32_t item_count, bool *absolute, uint32_t *next_hover);
 bool present_live_input(const struct zcl_present_window_live_view_v1 *live,
     struct RGFW_window *window, const struct zcl_present_window_v1 *page,
     const union RGFW_event *event, uint32_t action_count, uint32_t *focus,

@@ -19,6 +19,7 @@
 #include "keys/pubkey.h"
 #include "vcs/package_prepare.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -138,10 +139,123 @@ static bool zpb_reply_matches(const struct json_value *data,
         !json_get(data, "manifest_hex");
 }
 
+static bool zpb_content_fixture(char root[512])
+{
+    if (!zpb_fixture(root)) return false;
+    char path[640];
+    (void)snprintf(path, sizeof(path), "%s/app", root);
+    return mkdir(path, 0700) == 0 &&
+        zpb_write(root, "app/main.c", "int main(void) { return 0; }\n") &&
+        zpb_write(root, "zcode-package.json",
+            "{\"schema\":1,\"name\":\"zclassic23/bigfixture\",\"semver\":\"0.1.0\","
+            "\"language\":\"c23\",\"license\":\"MIT\",\"include_dir\":\"include\","
+            "\"source_dir\":\"src\",\"dependencies\":[],\"programs\":[\"app/main.c\"],"
+            "\"files\":[\"LICENSE\",\"app/main.c\",\"include/x.h\","
+            "\"src/module_000_with_a_long_name.c\",\"zcode-package.json\"]}\n");
+}
+
+static bool zpb_no_release(const struct vcs_package_prepared *p)
+{
+    static const struct vcs_package_release zero = {0};
+    static const uint8_t digest[32] = {0};
+    return !p->release_body && p->release_body_len == 0 &&
+        !memcmp(&p->release, &zero, sizeof(zero)) &&
+        !memcmp(p->signing_digest, digest, sizeof(digest));
+}
+
+static bool zpb_content_equal(const struct vcs_package_prepared *a,
+                               const struct vcs_package_prepared *b)
+{
+    const uint8_t *aw[] = {a->manifest_wire, a->recipe_wire, a->lock_wire, a->capsule_wire};
+    const uint8_t *bw[] = {b->manifest_wire, b->recipe_wire, b->lock_wire, b->capsule_wire};
+    const size_t al[] = {a->manifest_wire_len, a->recipe_wire_len, a->lock_wire_len, a->capsule_wire_len};
+    const size_t bl[] = {b->manifest_wire_len, b->recipe_wire_len, b->lock_wire_len, b->capsule_wire_len};
+    const uint8_t *ar[] = {a->package_root, a->recipe_root, a->lock_root, a->capsule_root};
+    const uint8_t *br[] = {b->package_root, b->recipe_root, b->lock_root, b->capsule_root};
+    for (size_t i = 0; i < 4; ++i)
+        if (!al[i] || al[i] != bl[i] || memcmp(aw[i], bw[i], al[i]) || memcmp(ar[i], br[i], 32))
+            return false;
+    return true;
+}
+
+/* Compare actual canonical wires, not a second implementation of prepare. */
+static bool zpb_content_parity(const char *root, const struct vcs_package_prepared *content)
+{
+    struct privkey sk; struct pubkey pk;
+    memset(sk.vch, 0x41, 32); sk.fValid = true; sk.fCompressed = true;
+    if (!privkey_get_pubkey(&sk, &pk) || pk.size != 33) return false;
+    struct vcs_package_prepare_options options = { .dir = root, .publisher_sequence = 1 };
+    memcpy(options.publisher_pubkey, pk.vch, 33);
+    struct vcs_package_prepared full;
+    char detail[256];
+    bool ok = vcs_package_prepare(&options, &full, detail, sizeof(detail)) ==
+        VCS_PACKAGE_PREPARE_OK && full.release_body && full.release_body_len &&
+        zpb_content_equal(content, &full);
+    vcs_package_prepared_free(&full);
+    memset(options.publisher_pubkey, 0, sizeof(options.publisher_pubkey));
+    if (ok) ok = vcs_package_prepare(&options, &full, detail, sizeof(detail)) ==
+        VCS_PACKAGE_PREPARE_ERR_RELEASE && zpb_no_release(&full);
+    vcs_package_prepared_free(&full);
+    return ok;
+}
+
+static bool zpb_content_refusals(const char *root)
+{
+    static const char *const invalid[] = {
+        "{", "{}", "{\"schema\":1,\"unknown\":true}"
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        if (!zpb_write(root, "zcode-package.json", invalid[i])) return false;
+        struct vcs_package_prepared p;
+        char detail[256];
+        bool ok = vcs_package_prepare_content(root, &p, detail, sizeof(detail)) ==
+            VCS_PACKAGE_PREPARE_ERR_META && zpb_no_release(&p) &&
+            !p.manifest_wire && !p.recipe_wire && !p.lock_wire && !p.capsule_wire;
+        vcs_package_prepared_free(&p);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static bool zpb_content_control(const char *root)
+{
+    struct vcs_package_prepared content;
+    char detail[256], control[640];
+    /* This call precedes even the in-memory public-key fixture derivation. */
+    bool ok = vcs_package_prepare_content(root, &content, detail, sizeof(detail)) ==
+        VCS_PACKAGE_PREPARE_OK && zpb_no_release(&content) &&
+        content.manifest.count == 5 && content.recipe.sources.count == 1 &&
+        content.recipe.programs.count == 1 && zpb_content_parity(root, &content);
+    (void)snprintf(control, sizeof(control), "%s/.zvcs", root);
+    struct stat st;
+    ok = ok && stat(control, &st) != 0 && errno == ENOENT;
+    struct vcs_package_prepared again;
+    vcs_package_prepared_init(&again);
+    if (ok) ok = vcs_package_prepare_content(root, &again, detail, sizeof(detail)) ==
+        VCS_PACKAGE_PREPARE_OK && zpb_content_equal(&content, &again);
+    vcs_package_prepared_free(&again);
+    vcs_package_prepared_free(&content);
+    return ok && zpb_content_refusals(root);
+}
+
+static int zpb_content_tests(void)
+{
+    int failures = 0;
+    TEST("package prepare content: full metadata/program parity without release authority") {
+        char root[512] = {0};
+        bool ok = zpb_content_fixture(root) && zpb_content_control(root);
+        if (root[0]) (void)test_rm_rf_recursive(root);
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_zcode_package_dev_prepare_budget(void)
 {
     int failures = 0;
     chain_params_select(CHAIN_MAIN);
+    failures += zpb_content_tests();
     TEST("zcode package dev prepare: a 220-file package fits the reply budget") {
         char root[512], artifacts[640], pubkey_hex[67];
         struct privkey sk; struct pubkey pk;

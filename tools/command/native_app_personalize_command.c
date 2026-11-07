@@ -4,6 +4,7 @@
 #define _DEFAULT_SOURCE
 #endif
 #include "command/native_app_personalize_command.h"
+#include "command/native_app_personalize_view.h"
 #include "command/native_zcode_package_copy.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
@@ -82,9 +83,25 @@ static bool ap_locations(struct ap *p, const struct json_value *in)
         return ap_fail(p, "BAD_INPUT", "absolute copy and datadir, saved version and expected head are required");
     return true;
 }
+static bool ap_legacy_keys(const struct json_value *in)
+{
+    static const char *const allowed[] = {
+        "copy", "datadir", "version", "expected_head", "plan_id", "confirm"
+    };
+    unsigned seen = 0;
+    for (size_t i = 0; i < in->num_children; ++i) {
+        unsigned bit = 0;
+        for (size_t j = 0; j < sizeof(allowed) / sizeof(allowed[0]); ++j)
+            if (!strcmp(in->keys[i], allowed[j])) bit = 1u << j;
+        if (!bit || (seen & bit)) return false;
+        seen |= bit;
+    }
+    return true;
+}
 static bool ap_inputs(struct ap *p, const struct json_value *in, char version[65])
 {
     if (!in || in->type != JSON_OBJ) return ap_fail(p, "BAD_INPUT", "input object required");
+    if (!ap_legacy_keys(in)) return ap_fail(p, "BAD_INPUT", "Duplicate or unknown personalization input");
     if (!ap_locations(p, in)) return false;
     const char *v = zcl_package_copy_str(in, "version");
     const struct json_value *confirm = json_get(in, "confirm");
@@ -392,8 +409,16 @@ static void ap_cleanup(struct ap *p)
     zcl_package_copy_close(&p->copy); free(p);
 }
 #endif
+static bool ap_native_request(const struct zcl_command_request *request)
+{
+    return request && request->input &&
+        (json_get(request->input, "name") || json_get(request->input, "expected_revision"));
+}
 void zcl_native_handle_app_personalize(const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
+    if (ap_native_request(request)) {
+        app_personalize_view_run(request, reply); return;
+    }
 #if !defined(_WIN32)
     struct ap *p = zcl_calloc(1, sizeof(*p), "app-personalize");
     if (!p) { zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "cannot allocate personalization", AP_COMMAND); return; }

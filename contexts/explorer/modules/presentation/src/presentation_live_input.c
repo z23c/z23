@@ -80,3 +80,37 @@ bool present_live_input(const struct zcl_present_window_live_view_v1 *live,
     }
     return consumed;
 }
+static int32_t present_live_hover_key_step(const RGFW_event *event,
+    uint32_t item_count, bool *absolute, uint32_t *next_hover)
+{
+    if (event->key.value == RGFW_right)
+        return 1;
+    if (event->key.value == RGFW_left)
+        return -1;
+    if (event->key.value == RGFW_down)
+        return 1;
+    if (event->key.value == RGFW_up)
+        return -1;
+    if (event->key.value == RGFW_pageDown)
+        return 7;
+    if (event->key.value == RGFW_pageUp)
+        return -7;
+    if (event->key.value == RGFW_home) {
+        *next_hover = 0;
+        *absolute = true;
+    } else if (event->key.value == RGFW_end) {
+        *next_hover = item_count - 1u;
+        *absolute = true;
+    }
+    return 0;
+}
+
+int32_t present_live_hover_step(const RGFW_event *event,
+    uint32_t item_count, bool *absolute, uint32_t *next_hover)
+{
+    if (event->type == RGFW_mouseScroll && event->scroll.y < 0) return 1;
+    if (event->type == RGFW_mouseScroll && event->scroll.y > 0) return -1;
+    if (event->type != RGFW_keyPressed) return 0;
+    return present_live_hover_key_step(event, item_count, absolute,
+                                        next_hover);
+}

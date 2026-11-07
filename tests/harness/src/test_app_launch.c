@@ -586,8 +586,8 @@ static int case_handlers(struct al_fx *f)
         ASSERT_EQ(reply.next_count, 2u);
         ASSERT_STR_EQ(reply.next[0].command, "app.open");
         ASSERT(strstr(reply.next[0].input_json, "\"skycombat\"") != NULL);
-        ASSERT_STR_EQ(reply.next[1].command, "app.copy");
-        ASSERT(strstr(reply.next[1].input_json, "\"skycombat\"") != NULL);
+        ASSERT_STR_EQ(reply.next[1].command, "app.adopt");
+        ASSERT_STR_EQ(reply.next[1].input_json, "{\"name\":\"skycombat\"}");
         json_free(&empty);
     PASS(); }
 _test_next:;

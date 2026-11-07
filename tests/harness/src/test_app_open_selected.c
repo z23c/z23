@@ -11,6 +11,7 @@
 #include "command/native_app_launch.h"
 #include "command/app_selection.h"
 #include "command/native_app_receive_command.h"
+#include "command/native_app_receive_preview.h"
 #include "command/native_app_share_command.h"
 #include "command/native_app_personalize_command.h"
 #include "vcs/vcs.h"
@@ -1181,10 +1182,27 @@ static bool aj_receive_fields(const struct zcl_present_model_v1 *model,
     const char *parent = view->parent[0] ? view->parent : "None (first release)";
     return aj_receive_field(model, "Parent release: ", parent);
 }
+/* real-clock: observe the already-consented native worker without changing
+ * the joined fixture's verified confirmation fields or authorizing new work. */
+static bool aj_receive_progress(const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live)
+{
+    if (strcmp(model->title, "Receiving your copy") || pages->page_count != 1 || !pages->pages[0].pixels) return false;
+    int64_t end = platform_time_monotonic_ms() + 5000;
+    do {
+        bool redraw = false, close = false;
+        live->owner.update(live->owner.context, NULL, false, &redraw, &close);
+        if (close) return true;
+        platform_sleep_ms(1); /* real-clock: poll native commit completion */
+    } while (platform_time_monotonic_ms() < end);
+    return false;
+}
 static bool aj_receive_present(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages,
     const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
 {
+    if (!strcmp(model->request_id, "receive-copy")) return aj_receive_progress(model, pages, live);
     struct aj_receive_view *view = context;
     uint32_t count = 0;
     view->observed = pages && pages->page_count == 1 && pages->pages->pixels &&
@@ -1746,6 +1764,204 @@ static int ak_acceptance(struct ak_fixture *f)
     } _test_next:;
     return failures;
 }
+/* Actual receive/build/open replies drive the private continuation helper.
+ * Synthetic DISPLAY exercises native alive readiness, not a visual window. */
+static bool arpt_wire(const struct abc_leaf *leaf, const char *command, struct json_value *wire)
+{
+    json_init(wire); json_set_object(wire);
+    bool passed = leaf->out.status == ZCL_COMMAND_STATUS_PASSED && leaf->out.exit_code == 0;
+    return json_push_kv_str(wire, "command", command) && json_push_kv_bool(wire, "ok", passed) &&
+        json_push_kv_str(wire, "status", passed ? "passed" : "failed") && json_push_kv(wire, "data", &leaf->out.data);
+}
+static bool arpt_received(struct ak_fixture *f, struct app_receive_preview **preview,
+    struct zcl_command_reply *failure)
+{
+    struct abc_world *w = &f->world; struct aso_build sender;
+    char version[65], personal[65], publisher[67];
+    const char *source = "#include <stdio.h>\n#include <unistd.h>\n"
+        "int main(void){puts(\"RECEIVED-PIN\");fflush(stdout);for(;;)pause();}\n";
+    if (!abc_world_init(w) || !abc_put(w->copy, "src/main.c", source) || !abc_save(w->copy, version) ||
+        !aj_personalize(w, version, personal) || !ak_build_saved_tuple(w, personal, &sender) ||
+        !ak_share_backend(w, &sender, publisher, f->release)) return false;
+    struct abc_leaf leaf; abc_open(&leaf);
+    struct aj_receive_view view = {.publisher = publisher, .package = sender.package,
+        .release = f->release, .destination = w->bob_copy};
+    bool ok = aj_receive_plan(&leaf, w, publisher, sender.package, f->release) &&
+        aj_receive_parent(&leaf.out.data, &view) && aj_receive_frontdoor(&leaf, &view) && ak_environment(f);
+    if (ok) {
+        (void)snprintf(f->build.version, sizeof(f->build.version), "%s", abc_get(&leaf, "version"));
+        ok = app_receive_preview_create(&leaf.out.data, w->bob_datadir, preview, failure);
+    }
+    abc_close(&leaf); return ok;
+}
+static bool arpt_bad_plan(struct app_receive_preview *p, const struct json_value *wire,
+    struct zcl_command_reply *failure)
+{
+    struct json_value bad, input; json_init(&bad); json_init(&input);
+    bool ok = json_copy_checked(&bad, wire);
+    struct json_value *data = (struct json_value *)json_get(&bad, "data");
+    if (ok) json_set_str((struct json_value *)json_get(data, "copy"), "/different-copy");
+    ok = ok && !app_receive_preview_confirm_input(p, &bad, &input, failure) &&
+        !strcmp(failure->error.code, "PREVIEW_PLAN_MISMATCH");
+    json_free(&input); json_free(&bad); return ok;
+}
+static bool arpt_bad_build(struct app_receive_preview *p, const struct json_value *wire,
+    struct zcl_command_reply *failure)
+{
+    struct json_value bad, input; json_init(&bad); json_init(&input);
+    bool ok = json_copy_checked(&bad, wire);
+    struct json_value *data = (struct json_value *)json_get(&bad, "data");
+    if (ok) json_set_str((struct json_value *)json_get(data, "record_id"), "invalid");
+    ok = ok && !app_receive_preview_bind_build(p, &bad, failure) &&
+        !app_receive_preview_open_input(p, &input);
+    json_free(&input); json_free(&bad); return ok;
+}
+static bool arpt_build_commit(struct ak_fixture *f, struct app_receive_preview *p,
+    const char *pinned, struct json_value *confirm, struct zcl_command_reply *failure)
+{
+    struct abc_leaf leaf; abc_open(&leaf); json_free(&leaf.in);
+    leaf.in = *confirm; json_init(confirm);
+    struct json_value wire; json_init(&wire);
+    bool ok = abc_pass("app.build", &leaf) && aso_tuple(&leaf, &f->build) &&
+        !strcmp(f->build.version, pinned) && arpt_wire(&leaf, "app.build", &wire) &&
+        arpt_bad_build(p, &wire, failure) && app_receive_preview_bind_build(p, &wire, failure);
+    json_free(&wire); abc_close(&leaf); return ok;
+}
+static bool arpt_head(const struct ak_fixture *f, const char *newer, const char *pinned,
+    struct zcl_command_reply *failure)
+{
+    struct zcl_package_copy copy = {0};
+    bool ok = zcl_package_copy_open_selected_as(f->world.bob_copy, ZCL_PACKAGE_COPY_READ,
+        &copy, failure, "preview-test", newer);
+    if (ok) {
+        char actual[65]; zcl_hex_encode(copy.head_version, 32, actual);
+        ok = !strcmp(actual, newer) && strcmp(actual, pinned);
+    }
+    zcl_package_copy_close(&copy); return ok;
+}
+static bool arpt_build(struct ak_fixture *f, struct app_receive_preview *p,
+    struct zcl_command_reply *failure)
+{
+    char newer[65], pinned[65];
+    (void)snprintf(pinned, sizeof(pinned), "%s", f->build.version);
+    if (!abc_put(f->world.bob_copy, "src/main.c", "poison live source: never compile me\n") ||
+        !abc_save(f->world.bob_copy, newer) || !strcmp(newer, f->build.version)) return false;
+    struct abc_leaf leaf; abc_open(&leaf); json_free(&leaf.in);
+    struct json_value wire, confirm; json_init(&wire); json_init(&confirm);
+    bool ok = app_receive_preview_build_input(p, &leaf.in) &&
+        !strcmp(aso_string(&leaf.in, "version"), f->build.version) && abc_pass("app.build", &leaf) &&
+        arpt_wire(&leaf, "app.build", &wire) && arpt_bad_plan(p, &wire, failure) &&
+        app_receive_preview_confirm_input(p, &wire, &confirm, failure);
+    if (ok) ok = arpt_build_commit(f, p, pinned, &confirm, failure);
+    if (ok) ok = arpt_head(f, newer, pinned, failure);
+    json_free(&wire); json_free(&confirm); abc_close(&leaf); return ok;
+}
+static bool arpt_failed_open(struct ak_fixture *f, struct app_receive_preview *p,
+    struct zcl_command_reply *failure)
+{
+    char saved[ABC_PATH + 16];
+    int n = snprintf(saved, sizeof(saved), "%s.saved", f->build.image_path);
+    if (n <= 0 || (size_t)n >= sizeof(saved) || rename(f->build.image_path, saved)) return false;
+    struct abc_leaf leaf; abc_open(&leaf); json_free(&leaf.in);
+    struct json_value wire, keep; json_init(&wire); json_init(&keep);
+    bool ok = app_receive_preview_open_input(p, &leaf.in) && abc_exec("app.open", &leaf) &&
+        !strcmp(leaf.out.error.code, "IMAGE_REFUSED") && arpt_wire(&leaf, "app.open", &wire) &&
+        !app_receive_preview_bind_preview(p, &wire, failure) &&
+        app_receive_preview_keep_input(p, &keep, failure) == APP_RECEIVE_PREVIEW_KEEP_REFUSED;
+    bool restored = rename(saved, f->build.image_path) == 0;
+    json_free(&wire); json_free(&keep); abc_close(&leaf); return ok && restored;
+}
+static bool arpt_preview(struct ak_fixture *f, struct app_receive_preview *p,
+    struct zcl_command_reply *failure)
+{
+    struct abc_leaf leaf; abc_open(&leaf); json_free(&leaf.in);
+    struct json_value wire, keep; json_init(&wire); json_init(&keep);
+    bool ok = app_receive_preview_keep_input(p, &keep, failure) == APP_RECEIVE_PREVIEW_KEEP_REFUSED &&
+        !strcmp(failure->error.code, "PREVIEW_REQUIRED");
+    json_free(&keep);
+    ok = ok && arpt_failed_open(f, p, failure) && app_receive_preview_open_input(p, &leaf.in) &&
+        abc_pass("app.open", &leaf) && arpt_wire(&leaf, "app.open", &wire);
+    aso_track_ready(&leaf.out.data, &f->build);
+    ok = ok && aj_live_identity(&leaf.out.data, &f->build) &&
+        app_receive_preview_bind_preview(p, &wire, failure);
+    json_free(&wire); abc_close(&leaf);
+    bool cleaned = aso_cleanup_children(); return ok && cleaned;
+}
+static bool arpt_keep(struct ak_fixture *f, struct app_receive_preview *p,
+    struct zcl_command_reply *failure, char route[33])
+{
+    struct abc_leaf leaf; abc_open(&leaf); json_free(&leaf.in);
+    struct json_value stale, same; json_init(&stale); json_init(&same);
+    bool ok = app_receive_preview_keep_input(p, &leaf.in, failure) == APP_RECEIVE_PREVIEW_KEEP_NEW &&
+        json_get_int(json_get(&leaf.in, "expected_revision")) == 0 && json_copy_checked(&stale, &leaf.in);
+    if (ok) {
+        (void)snprintf(route, 33, "%s", aso_string(&leaf.in, "name"));
+        ok = strlen(route) == 32 && !strncmp(route, "kept:received-", 14) && abc_pass("app.keep", &leaf);
+    }
+    if (ok) ok = app_receive_preview_keep_input(p, &same, failure) == APP_RECEIVE_PREVIEW_KEEP_SAME && same.type == JSON_NULL;
+    if (ok) {
+        abc_close(&leaf); abc_open(&leaf); json_free(&leaf.in); leaf.in = stale; json_init(&stale);
+        ok = abc_exec("app.keep", &leaf) && !strcmp(leaf.out.error.code, "SELECTION_STALE");
+    }
+    struct app_selection selected;
+    ok = ok && app_selection_load(f->env.state_dir, route, &selected) == APP_SELECTION_OK && selected.revision == 1;
+    json_free(&stale); json_free(&same); abc_close(&leaf); return ok;
+}
+static bool arpt_collision(struct ak_fixture *f, struct app_receive_preview *p,
+    struct zcl_command_reply *failure, const char *route)
+{
+    struct app_selection original, other, saved;
+    if (app_selection_load(f->env.state_dir, route, &original) != APP_SELECTION_OK) return false;
+    struct zcl_package_copy copy = {0};
+    bool opened = zcl_package_copy_open_selected_as(f->world.bob_copy, ZCL_PACKAGE_COPY_READ,
+        &copy, failure, "preview-test", NULL);
+    other = original;
+    if (opened) memcpy(other.version, copy.head_version, 32);
+    zcl_package_copy_close(&copy);
+    if (!opened || !memcmp(other.version, original.version, 32)) return false;
+    if (app_selection_save(f->env.state_dir, original.revision, &other, &saved) != APP_SELECTION_OK) return false;
+    struct json_value input; json_init(&input);
+    bool ok = app_receive_preview_keep_input(p, &input, failure) == APP_RECEIVE_PREVIEW_KEEP_REFUSED &&
+        !strcmp(failure->error.code, "PREVIEW_ROUTE_COLLISION");
+    struct app_selection after;
+    ok = ok && app_selection_load(f->env.state_dir, route, &after) == APP_SELECTION_OK &&
+        after.revision == saved.revision && !memcmp(after.version, other.version, 32);
+    json_free(&input); return ok;
+}
+static bool arpt_corrupt(struct ak_fixture *f, struct app_receive_preview *p,
+    struct zcl_command_reply *failure, const char *route)
+{
+    char path[APP_SELECTION_PATH_MAX + 64];
+    int n = snprintf(path, sizeof(path), "%s/@kept-%s.selection", f->env.state_dir, route + 5);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    int fd = open(path, O_WRONLY | O_TRUNC);
+    if (fd < 0) return false;
+    bool wrote = write(fd, "bad", 3) == 3; bool closed = close(fd) == 0;
+    struct json_value input; json_init(&input);
+    bool ok = wrote && closed && app_receive_preview_keep_input(p, &input, failure) == APP_RECEIVE_PREVIEW_KEEP_REFUSED &&
+        !strcmp(failure->error.code, "SELECTION_UNREADABLE");
+    json_free(&input); return ok;
+}
+static int arpt_acceptance(struct ak_fixture *f)
+{
+    int failures = 0; struct app_receive_preview *p = NULL; char route[33] = {0};
+    struct zcl_command_reply failure; zcl_command_reply_init(&failure, "zcl.test.preview.v1");
+    /* A later helper refusal must preserve the already committed receipt. */
+    bool seeded = json_push_kv_str(&failure.data, "receipt_marker", "received");
+    failure.error.mutated = true;
+    TEST("received preview pins saved source, rejects failed replies and never overwrites Keep") {
+        ASSERT(seeded && arpt_received(f, &p, &failure));
+        ASSERT(arpt_build(f, p, &failure));
+        ASSERT(arpt_preview(f, p, &failure));
+        ASSERT(arpt_keep(f, p, &failure, route));
+        ASSERT(arpt_collision(f, p, &failure, route));
+        ASSERT(arpt_corrupt(f, p, &failure, route));
+        ASSERT(failure.error.mutated && !strcmp(aso_string(&failure.data, "receipt_marker"), "received"));
+        PASS();
+    } _test_next:;
+    app_receive_preview_close(p); zcl_command_reply_free(&failure); return failures;
+}
+
 static int ak_routes(void)
 {
     struct aso_env env[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL}, {"XDG_STATE_HOME", NULL},
@@ -1759,6 +1975,10 @@ static int ak_routes(void)
     struct ak_fixture fixture = {0};
     if (!failures) failures += ak_acceptance(&fixture);
     if (!aso_cleanup_children()) failures++;
+    struct ak_fixture continuation = {0};
+    if (!failures) failures += arpt_acceptance(&continuation);
+    if (!aso_cleanup_children()) failures++;
+    if (continuation.world.root[0]) (void)test_rm_rf_recursive(continuation.world.root);
     aso_env_restore(env, saved);
     if (fixture.world.root[0]) (void)test_rm_rf_recursive(fixture.world.root);
     return failures;

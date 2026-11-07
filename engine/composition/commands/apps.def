@@ -76,17 +76,22 @@ ZCL_COMMAND_READY_COMMAND(
     "identity, parent, changes and destination in a native confirmation "
     "window, and make a copy only after its local owner chooses Make my copy. "
     "The owner also authorizes a local publisher identity and a personal "
-    "metadata successor; the original fork remains. Cancel creates neither "
-    "a copy nor a key. No signing, publication, build or run occurs.",
-    0, "apps,adopt,make,my,copy,customize,release",
-    "zcl.app_adopt.input.v1", "zcl.app_adopt.v1", "release_root,datadir", "release_root",
+    "metadata successor; the original fork remains. With name:skycombat instead "
+    "of release_root, verify installed source and ask before creating a local "
+    "key, release or copy, then offer Build and Preview and a separate Keep. "
+    "Cancel before copying creates neither "
+    "a copy nor a key. Installed-source confirmation signs and saves locally; "
+    "building and running require the next native choice. A later failure "
+    "retains the copy receipt with continuation:failed.",
+    16384, "apps,adopt,make,my,copy,customize,release",
+    "zcl.app_adopt.input.v1", "zcl.app_adopt.v1", "release_root,datadir,name", "release_root",
     "z23 app adopt --input=-",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
     ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
-    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    ZCL_COMMAND_CAP_PROCESS_EXEC, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_app_adopt)
 
 ZCL_COMMAND_READY_READ(
@@ -480,15 +485,15 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "app.personalize", "app", "", "Personalize",
-    "Owner plan and confirmation derive a private publisher namespace from the "
-    "local key and save a metadata-only successor of the selected version. "
-    "HEAD advances; other saved versions, working files and Keep are preserved. "
-    "No signing, publishing or execution occurs. Missing key creation requires "
-    "confirmation; a changed key or head requires a new plan.",
+    "Use name and expected_revision alone for native owner confirmation of a "
+    "kept version. Alternatively use copy, datadir, version and expected_head "
+    "for the owner plan/confirm protocol. Saves a personal metadata successor; "
+    "working files and Keep stay unchanged. Key creation requires consent; "
+    "changed head or key requires a new plan. No build, run or sharing.",
     ZCL_COMMAND_LIST_BUDGET, "app,personalize,publisher,namespace,copy",
     "zcl.app_personalize.input.v1", "zcl.app_personalize.v1",
-    "copy,datadir,version,expected_head,plan_id,confirm", "copy,datadir,version,expected_head",
-    "z23 app personalize --input='{\"copy\":\"/path/to/copy\"}'",
+    "copy,datadir,version,expected_head,plan_id,confirm,name,expected_revision", "",
+    "z23 app personalize --input='{\"name\":\"kept:my-app\",\"expected_revision\":1}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
     ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_MODERATE,
@@ -497,20 +502,21 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "app.receive", "app", "", "Receive copy",
-    "Verify a local share file, display its exact publisher, roots and destination, "
-    "defaulting to the bound datadir and a free copy name, "
-    "and receive only after native owner confirmation. No build, execution, "
-    "personalization or app registration occurs. Changes unavailable in the "
-    "receive plan are labeled unavailable. Cancel keeps no copy or trust.",
-    0, "apps,receive,share,copy", "zcl.app_receive.input.v1", "zcl.app_receive.v1",
-    "file,datadir,destination,day", "file",
+    "Receive a verified share after owner confirmation; default to the bound "
+    "datadir and a free name. preview defaults false; true offers Build and "
+    "Preview, then separate Keep. A committed receipt stays successful; inspect "
+    "continuation for later failure. Pre-receive Cancel keeps nothing. "
+    "executed describes Receive only. Unavailable changes are labeled. "
+    "No personalization or catalog registration.",
+    16384, "apps,receive,share,copy", "zcl.app_receive.input.v1", "zcl.app_receive.v1",
+    "file,datadir,destination,day,preview", "file",
     "z23 app receive --input=-",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
     ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
-    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    ZCL_COMMAND_CAP_PROCESS_EXEC, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_app_receive)
 
 ZCL_COMMAND_READY_COMMAND(
@@ -611,6 +617,53 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_MODERATE,
     ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_PROCESS_EXEC, 0, zcl_native_handle_app_receive_copy)
+
+ZCL_COMMAND_BRANCH("app.source", "app", "App source",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "app.source.verify", "app.source", "", "Check app source artifacts",
+    "Read a bounded source artifact set under artifact_dir, pinned by the caller's "
+    "independently supplied projection_sha3. Verify exact app name, source bundle, "
+    "manifest, recipe, build record and image_file bytes. No import, key creation "
+    "or execution. Reports byte and record consistency, not installer admission, "
+    "upstream authorship or independent reproduction. Source-to-package derivation "
+    "still requires consented materialization and content validation.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "app,source,verify,artifact,package,image",
+    "zcl.app_source_verify.input.v1", "zcl.app_source_verify.v1",
+    "app,artifact_dir,projection_sha3,image_file", "app,artifact_dir,projection_sha3,image_file",
+    "z23 app source verify --help",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_source_verify)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.source.export", "app.source", "", "Export installed app source",
+    "Export an already-built, adopted or owner-received copy into a new artifact_dir. "
+    "version selects exact saved history, ignoring live edits. env_root, dependency_root "
+    "and record_id select the existing build evidence; source, package, recipe and "
+    "image identities must agree. Writes the verified source bundle, package manifest, "
+    "recipe, build record, image and bounded catalog for release packaging. "
+    "Existing output is refused. Does not build, execute, sign, create keys or publish. "
+    "The exported evidence records the local build, not upstream authorship; the "
+    "installer must independently admit the complete release artifact set.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "app,source,export,package,installed,build,artifact",
+    "zcl.app_source_export.input.v1", "zcl.app_source_export.v1",
+    "app,copy,version,env_root,dependency_root,record_id,artifact_dir,datadir",
+    "app,copy,version,env_root,dependency_root,record_id,artifact_dir",
+    "z23 app source export --help",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_app_source_export)
 
 ZCL_COMMAND_READY_COMMAND(
     "app.seed", "app", "", "Seed app",

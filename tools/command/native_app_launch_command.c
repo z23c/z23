@@ -506,15 +506,16 @@ static bool app_list_kept(const struct app_launch_env *env, struct json_value *l
     return true;
 }
 
-/* Say which entries can be opened, and offer the open and the copy of the
- * first launchable app: z23 app open NAME, z23 app copy NAME. */
+/* Offer the installed-source owner flow for the built-in game. Other catalog
+ * entries retain their existing copy route. Neither hint authorizes a write. */
 static void app_list_guide(const struct app_launch_registry *reg,
                            struct zcl_command_reply *reply)
 {
     char input[128];
     (void)json_push_kv_str(&reply->data, "summary",
                            "launchable apps open with z23 app open NAME; "
-                           "z23 app copy NAME makes your own editable copy");
+                           "z23 app adopt --name=skycombat offers a personal copy "
+                           "from its installed source");
     if (reg->count == 0)
         return;
     char text[APP_LIST_HINT_MAX];
@@ -525,10 +526,15 @@ static void app_list_guide(const struct app_launch_registry *reg,
                  reg->entries[0].id) < (int)sizeof(input))
         (void)zcl_command_reply_add_next(reply, "app.open", input,
                                          "open this launchable app");
-    if (snprintf(input, sizeof(input), "{\"app\":\"%s\"}",
+    bool installed_source = reg->entries[0].builtin &&
+        !strcmp(reg->entries[0].id, "skycombat");
+    if (snprintf(input, sizeof(input), "{\"%s\":\"%s\"}",
+                 installed_source ? "name" : "app",
                  reg->entries[0].id) < (int)sizeof(input))
-        (void)zcl_command_reply_add_next(reply, "app.copy", input,
-                                         "make your own copy of it");
+        (void)zcl_command_reply_add_next(reply,
+            installed_source ? "app.adopt" : "app.copy", input,
+            installed_source ? "review Make my copy, then preview and Keep" :
+                               "make your own copy of it");
 }
 
 void zcl_native_handle_app_list_launchable(

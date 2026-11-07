@@ -102,10 +102,34 @@ static ssize_t vcm_write(int fd, const void *bytes, size_t len)
 #define vcs_tree_materialize vcm_durable
 #define vcs_tree_materialize_readonly vcm_readonly
 #define vcs_tree_materialize_readonly_disposable vcm_disposable
+#define vcs_materialize_verified_bytes_disposable vcm_bytes
 int vcm_durable(const char *, const uint8_t[32], const char *, uint64_t, uint32_t);
 int vcm_readonly(const char *, const uint8_t[32], const char *, uint64_t, uint32_t);
 int vcm_disposable(const char *, const uint8_t[32], const char *, uint64_t, uint32_t);
 #include "../../../contexts/commons/modules/vcs/src/vcs_materialize.c"
+/* Same production decoder -> shared writer under the existing local syscall
+ * observations, not a copied materialization loop or a production override. */
+#define vcs_source_bundle_result_string vcm_bundle_result
+#define vcs_source_bundle_create vcm_bundle_create
+#define vcs_source_bundle_verify vcm_bundle_verify
+#define vcs_source_bundle_import vcm_bundle_import
+#define vcs_source_bundle_materialize_disposable vcm_bundle_direct
+const char *vcm_bundle_result(enum vcs_source_bundle_result);
+enum vcs_source_bundle_result vcm_bundle_create(const char *, const uint8_t[32],
+    uint8_t **, size_t *, struct vcs_source_bundle_metrics *);
+enum vcs_source_bundle_result vcm_bundle_verify(const uint8_t *, size_t,
+    const uint8_t[32], struct vcs_source_bundle_metrics *);
+enum vcs_source_bundle_result vcm_bundle_import(const uint8_t *, size_t,
+    const uint8_t[32], const char *, struct vcs_source_bundle_metrics *);
+enum vcs_source_bundle_result vcm_bundle_direct(const uint8_t *, size_t,
+    const uint8_t[32], const char *, struct vcs_source_bundle_metrics *);
+#include "../../../contexts/commons/modules/vcs/src/source_bundle.c"
+#undef vcs_source_bundle_materialize_disposable
+#undef vcs_source_bundle_import
+#undef vcs_source_bundle_verify
+#undef vcs_source_bundle_create
+#undef vcs_source_bundle_result_string
+#undef vcs_materialize_verified_bytes_disposable
 #undef vcs_tree_materialize_readonly_disposable
 #undef vcs_tree_materialize_readonly
 #undef vcs_tree_materialize
@@ -1065,12 +1089,210 @@ static int tsb_materialize_io_failure(struct tsb_ctx *ctx, bool durable, unsigne
         vcm_flushes == (durable && failure != 2 ? 1u : 0u));
     vcm_reset(); test_rm_rf_recursive(dir); return failures;
 }
+static bool tsb_direct_empty(const char *path)
+{
+    DIR *d = opendir(path);
+    if (!d) return false;
+    bool empty = true; struct dirent *entry;
+    errno = 0;
+    while ((entry = readdir(d))) {
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) { empty = false; break; }
+    }
+    if (errno) empty = false;
+    return closedir(d) == 0 && empty;
+}
+static int tsb_direct_identity(struct tsb_ctx *ctx)
+{
+    int failures = 0; char dir[512], cas[1024]; uint8_t root[32], a[32], b[32], ar[32], br[32];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "bundle-direct");
+    struct vcs_source_bundle_metrics metrics;
+    mode_t saved = umask(0077);
+    vcm_reset();
+    int rc = vcm_bundle_direct(ctx->first_wire, ctx->first_wire_len, ctx->first_root, dir, &metrics);
+    (void)umask(saved);
+    VC_CHECK("direct verified bundle writes and closes files without flushing",
+        rc == VCS_SOURCE_BUNDLE_OK && vcm_flushes == 0 && vcm_closes == 4);
+    VC_CHECK("direct bundle preserves declared modes under restrictive umask",
+        tsb_mode_is(dir, "LICENSE", 0644) && tsb_mode_is(dir, "src/a.c", 0644) && tsb_mode_is(dir, "run.sh", 0755));
+    snprintf(cas, sizeof(cas), "%s/.zvcs", dir);
+    VC_CHECK("direct bundle creates no CAS and reports no CAS admissions",
+        access(cas, F_OK) != 0 && errno == ENOENT && metrics.new_blobs == 0 && metrics.reused_blobs == 0);
+    VC_CHECK("direct source re-captures the exact tree",
+        vcs_tree_capture_path(dir, root) == VCS_OK && !memcmp(root, ctx->first_root, 32));
+    VC_CHECK("direct package and recipe match durable source",
+        vcm_package_identity(ctx->materialized, a, ar) && vcm_package_identity(dir, b, br) &&
+        !memcmp(a, b, 32) && !memcmp(ar, br, 32));
+    VC_CHECK("direct public API refuses existing output without overwriting",
+        vcs_source_bundle_materialize_disposable(ctx->first_wire, ctx->first_wire_len,
+            ctx->first_root, dir, NULL) == VCS_SOURCE_BUNDLE_ERR_OUTPUT);
+    test_rm_rf_recursive(dir); return failures;
+}
+static int tsb_direct_public(struct tsb_ctx *ctx)
+{
+    int failures = 0; char dir[512]; uint8_t root[32];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "bundle-direct-public");
+    VC_CHECK("public direct API reconstructs the same source without import",
+        vcs_source_bundle_materialize_disposable(ctx->first_wire, ctx->first_wire_len,
+            ctx->first_root, dir, NULL) == VCS_SOURCE_BUNDLE_OK &&
+        vcs_tree_capture_path(dir, root) == VCS_OK && !memcmp(root, ctx->first_root, 32));
+    test_rm_rf_recursive(dir); return failures;
+}
+static int tsb_direct_io(struct tsb_ctx *ctx, bool close_failure)
+{
+    int failures = 0; char dir[512], file[1024];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "bundle-direct-io");
+    vcm_reset(); vcm_fail_close = close_failure; vcm_fail_write = !close_failure;
+    int rc = vcm_bundle_direct(ctx->first_wire, ctx->first_wire_len, ctx->first_root, dir, NULL);
+    snprintf(file, sizeof(file), "%s/LICENSE", dir);
+    VC_CHECK("direct output write/close failure is not success and removes failed file",
+        rc == VCS_SOURCE_BUNDLE_ERR_OUTPUT && vcm_flushes == 0 && vcm_closes == 1 && access(file, F_OK) != 0);
+    vcm_reset(); test_rm_rf_recursive(dir); return failures;
+}
+static int tsb_direct_refusals(struct tsb_ctx *ctx)
+{
+    int failures = 0; char dir[512]; uint8_t wrong[32];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "bundle-direct-refuse");
+    memcpy(wrong, ctx->first_root, 32); wrong[0] ^= 1;
+    VC_CHECK("wrong bundle root refuses before any output",
+        vcs_source_bundle_materialize_disposable(ctx->first_wire, ctx->first_wire_len,
+            wrong, dir, NULL) == VCS_SOURCE_BUNDLE_ERR_ROOT && tsb_direct_empty(dir));
+    VC_CHECK("truncated bundle refuses before any output",
+        vcs_source_bundle_materialize_disposable(ctx->first_wire, ctx->first_wire_len - 1,
+            ctx->first_root, dir, NULL) != VCS_SOURCE_BUNDLE_OK && tsb_direct_empty(dir));
+    VC_CHECK("nonprivate destination refuses before output", chmod(dir, 0755) == 0 &&
+        vcs_source_bundle_materialize_disposable(ctx->first_wire, ctx->first_wire_len,
+            ctx->first_root, dir, NULL) == VCS_SOURCE_BUNDLE_ERR_OUTPUT && tsb_direct_empty(dir));
+    VC_CHECK("restore private fixture", chmod(dir, 0700) == 0);
+    test_rm_rf_recursive(dir); return failures;
+}
+/* Recompress valid transport with one bad blob: proves hash validation, not
+ * merely zlib rejection. Production decode and output path remain actual. */
+static int tsb_direct_bad_blob(struct tsb_ctx *ctx)
+{
+    int failures = 0; char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "bundle-direct-blob");
+    struct source_bundle_decoded decoded;
+    enum vcs_source_bundle_result parsed = source_bundle_decode(ctx->first_wire,
+        ctx->first_wire_len, ctx->first_root, &decoded, NULL);
+    VC_CHECK("corruption fixture decodes", parsed == VCS_SOURCE_BUNDLE_OK);
+    if (parsed != VCS_SOURCE_BUNDLE_OK) { test_rm_rf_recursive(dir); return failures; }
+    if (decoded.payload_len <= decoded.manifest_len) {
+        source_bundle_decoded_free(&decoded); test_rm_rf_recursive(dir); return failures + 1;
+    }
+    decoded.payload[decoded.manifest_len] ^= 1;
+    uLongf compressed = compressBound((uLong)decoded.payload_len);
+    uint8_t *wire = malloc(VCS_SOURCE_BUNDLE_HEADER_BYTES + compressed);
+    bool ok = wire != NULL;
+    if (ok) {
+        memcpy(wire, ctx->first_wire, VCS_SOURCE_BUNDLE_HEADER_BYTES);
+        ok = compress2(wire + VCS_SOURCE_BUNDLE_HEADER_BYTES, &compressed,
+            decoded.payload, (uLong)decoded.payload_len, Z_BEST_COMPRESSION) == Z_OK;
+        vcs_wr_u64le(wire + 60, compressed);
+    }
+    VC_CHECK("bad blob refuses before output despite valid compression", ok &&
+        vcs_source_bundle_materialize_disposable(wire, VCS_SOURCE_BUNDLE_HEADER_BYTES + compressed,
+            ctx->first_root, dir, NULL) == VCS_SOURCE_BUNDLE_ERR_BLOB && tsb_direct_empty(dir));
+    free(wire); source_bundle_decoded_free(&decoded); test_rm_rf_recursive(dir); return failures;
+}
+static int tsb_direct_noescape(struct tsb_ctx *ctx)
+{
+    int failures = 0; char dir[512], outside[512], link[1024], sentinel[1024];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "bundle-direct-link");
+    test_make_tmpdir(outside, sizeof(outside), "vcs_core", "bundle-direct-outside");
+    snprintf(link, sizeof(link), "%s/src", dir);
+    snprintf(sentinel, sizeof(sentinel), "%s/a.c", outside);
+    FILE *f = fopen(sentinel, "wx");
+    bool saved = f != NULL;
+    if (f) { saved = fwrite("untouched", 1, 9, f) == 9; if (fclose(f) != 0) saved = false; }
+    VC_CHECK("external sentinel and intermediate symlink fixture", saved && symlink(outside, link) == 0);
+    VC_CHECK("preexisting intermediate symlink refuses without output",
+        vcs_source_bundle_materialize_disposable(ctx->first_wire, ctx->first_wire_len,
+            ctx->first_root, dir, NULL) == VCS_SOURCE_BUNDLE_ERR_OUTPUT);
+    size_t len = 0; char *bytes = vc_read(outside, "a.c", &len);
+    VC_CHECK("outside sentinel unchanged", bytes && len == 9 && !memcmp(bytes, "untouched", 9));
+    free(bytes);
+    VC_CHECK("destination symlink also refuses",
+        vcs_source_bundle_materialize_disposable(ctx->first_wire, ctx->first_wire_len,
+            ctx->first_root, link, NULL) == VCS_SOURCE_BUNDLE_ERR_OUTPUT);
+    test_rm_rf_recursive(dir); test_rm_rf_recursive(outside); return failures;
+}
+/* Build a tiny correctly hashed/encoded transport with a chosen manifest
+ * path/type. The negative must reach the maintained path/type guard, not fail
+ * merely because its expected root or compression is wrong. */
+static bool tsb_direct_wire(const char *path, uint32_t mode,
+    uint8_t **wire, size_t *length, uint8_t root[32])
+{
+    *wire = NULL; *length = 0; memset(root, 0, 32);
+    struct vcs_manifest m; vcs_manifest_init(&m);
+    uint8_t blob[32], *manifest = NULL, *payload = NULL; size_t size = 0;
+    vcs_sha3_tag(VCS_TAG_BLOB, (const uint8_t *)"x", 1, blob);
+    bool ok = vcs_manifest_add(&m, path, mode, 1, blob) &&
+        vcs_manifest_serialize(&m, &manifest, &size) && vcs_manifest_tree_hash(&m, root);
+    if (ok) { payload = malloc(size + 1); ok = payload != NULL; }
+    if (!ok) { free(manifest); vcs_manifest_free(&m); return false; }
+    memcpy(payload, manifest, size); payload[size] = 'x';
+    return source_bundle_finish_create(root, &m, manifest, size, payload, size + 1,
+        wire, length, NULL, VCS_SOURCE_BUNDLE_OK) == VCS_SOURCE_BUNDLE_OK;
+}
+static int tsb_direct_path_control(const char *path, uint32_t mode, bool accepted)
+{
+    int failures = 0; char dir[512]; uint8_t *wire = NULL, root[32]; size_t length = 0;
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "bundle-direct-path");
+    bool made = tsb_direct_wire(path, mode, &wire, &length, root);
+    VC_CHECK("path/type control has exact encoded tree identity", made);
+    if (made) {
+        int rc = vcs_source_bundle_materialize_disposable(wire, length, root, dir, NULL);
+        if (accepted) VC_CHECK("well-formed control writes", rc == VCS_SOURCE_BUNDLE_OK);
+        else VC_CHECK("escape or nonregular path refuses before any file", rc == VCS_SOURCE_BUNDLE_ERR_WIRE && tsb_direct_empty(dir));
+    }
+    free(wire); test_rm_rf_recursive(dir); return failures;
+}
+static int tsb_direct_paths(void)
+{
+    int failures = tsb_direct_path_control("safe.c", 0100644u, true);
+    failures += tsb_direct_path_control("../escape", 0100644u, false);
+    failures += tsb_direct_path_control("/absolute", 0100644u, false);
+    failures += tsb_direct_path_control("link", 0120777u, false);
+    return failures;
+}
+static int tsb_direct_occupied(struct tsb_ctx *ctx)
+{
+    int failures = 0; char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "bundle-direct-occupied");
+    VC_CHECK("occupied output fixture", vc_write(dir, "LICENSE", "occupied"));
+    VC_CHECK("nonempty output refuses", vcs_source_bundle_materialize_disposable(
+        ctx->first_wire, ctx->first_wire_len, ctx->first_root, dir, NULL) == VCS_SOURCE_BUNDLE_ERR_OUTPUT);
+    size_t length = 0; char *bytes = vc_read(dir, "LICENSE", &length);
+    VC_CHECK("existing leaf bytes never overwritten", bytes && length == 8 && !memcmp(bytes, "occupied", 8));
+    free(bytes); test_rm_rf_recursive(dir); return failures;
+}
+static int tsb_direct_limits(struct tsb_ctx *ctx)
+{
+    int failures = 0; char dir[512]; uint8_t wire[VCS_SOURCE_BUNDLE_HEADER_BYTES];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "bundle-direct-limits");
+    memcpy(wire, ctx->first_wire, sizeof(wire));
+    vcs_wr_u64le(wire + 52, VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES + 1);
+    VC_CHECK("oversized decoded payload refuses before allocation/output",
+        vcs_source_bundle_materialize_disposable(wire, sizeof(wire), ctx->first_root,
+            dir, NULL) == VCS_SOURCE_BUNDLE_ERR_LIMIT && tsb_direct_empty(dir));
+    test_rm_rf_recursive(dir); return failures;
+}
 static int tsb_disposable_controls(struct tsb_ctx *ctx)
 {
     int failures = tsb_materialize_observed(ctx, vcm_durable, true);
     failures += tsb_materialize_observed(ctx, vcm_readonly, true);
     failures += tsb_materialize_observed(ctx, vcm_disposable, false);
     failures += tsb_disposable_public(ctx);
+    failures += tsb_direct_identity(ctx);
+    failures += tsb_direct_public(ctx);
+    failures += tsb_direct_refusals(ctx);
+    failures += tsb_direct_bad_blob(ctx);
+    failures += tsb_direct_noescape(ctx);
+    failures += tsb_direct_paths();
+    failures += tsb_direct_occupied(ctx);
+    failures += tsb_direct_limits(ctx);
+    failures += tsb_direct_io(ctx, false);
+    failures += tsb_direct_io(ctx, true);
     failures += tsb_materialize_io_failure(ctx, true, 0);
     failures += tsb_materialize_io_failure(ctx, true, 1);
     failures += tsb_materialize_io_failure(ctx, false, 1);
@@ -1081,9 +1303,14 @@ static int tsb_disposable_controls(struct tsb_ctx *ctx)
 #else
 static int tsb_disposable_controls(struct tsb_ctx *ctx)
 {
-    (void)ctx;
+    int failures = 0; char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "bundle-direct-unsupported");
+    VC_CHECK("direct bundle output explicitly refuses on unqualified Windows",
+        vcs_source_bundle_materialize_disposable(ctx->first_wire, ctx->first_wire_len,
+            ctx->first_root, dir, NULL) == VCS_SOURCE_BUNDLE_ERR_OUTPUT);
+    test_rm_rf_recursive(dir);
     puts("SKIP (materializer syscall and POSIX mode controls require POSIX)");
-    return 0;
+    return failures;
 }
 #endif
 /* Called while the existing fixture's canonical blob is deliberately corrupt,

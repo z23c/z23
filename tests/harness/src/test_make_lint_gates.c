@@ -311,6 +311,268 @@ static int t_build_needs_overlap(void)
     return bad;
 }
 
+/* Exercise the maintained opt-in recipe with explicit child environments.
+ * No generated shell driver, desktop service, Z23 launch or real profile. */
+#if defined(__linux__)
+struct dti_fixture {
+    char root[PATH_MAX], home[PATH_MAX], config[PATH_MAX], state[PATH_MAX];
+    char cache[PATH_MAX], runtime[PATH_MAX], tools[PATH_MAX], data[PATH_MAX];
+};
+static bool dti_path(char out[PATH_MAX], const char *base, const char *leaf)
+{
+    int n = snprintf(out, PATH_MAX, "%s/%s", base, leaf);
+    return n > 0 && n < PATH_MAX;
+}
+static bool dti_absent(const char *path)
+{
+    struct stat st;
+    return lstat(path, &st) != 0 && errno == ENOENT;
+}
+static bool dti_root(struct dti_fixture *f)
+{
+    char fixture[PATH_MAX], cwd[PATH_MAX];
+    test_make_tmpdir(fixture, sizeof(fixture), "desktop_receive", "install");
+    if (fixture[0] == '/') {
+        memcpy(f->root, fixture, strlen(fixture) + 1);
+        return true;
+    }
+    return getcwd(cwd, sizeof(cwd)) && dti_path(f->root, cwd, fixture);
+}
+static bool dti_write(const char *path, const void *bytes, size_t size)
+{
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    bool ok = fwrite(bytes, 1, size, file) == size;
+    return fclose(file) == 0 && ok;
+}
+static bool dti_equal(const char *a, const char *b)
+{
+    char *left = NULL, *right = NULL;
+    bool ok = read_entire_file(a, &left) == 0 && read_entire_file(b, &right) == 0 &&
+              !strcmp(left, right);
+    free(left); free(right); return ok;
+}
+static bool dti_run(const struct dti_fixture *f, const char *const argv[],
+    const char *data, bool restricted, struct zcl_devloop_process_result *run)
+{
+    const char *keys[] = {"HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
+        "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "XDG_DATA_HOME", "PATH"};
+    const char *values[] = {f->home, f->config, f->state, f->cache, f->runtime,
+        data, restricted ? f->tools : "/usr/bin:/bin"};
+    char storage[7][PATH_MAX + 32]; const char *env[9];
+    for (size_t i = 0; i < 7; ++i) {
+        int n = snprintf(storage[i], sizeof(storage[i]), "%s=%s", keys[i], values[i]);
+        if (n <= 0 || (size_t)n >= sizeof(storage[i])) return false;
+        env[i] = storage[i];
+    }
+    env[7] = "LC_ALL=C"; env[8] = NULL;
+    bool ran = zcl_devloop_process_run_env(f->root, argv, env, 30000, run);
+    bool ok = ran && !run->timed_out && !run->cancelled &&
+        !run->output_truncated && run->term_signal == 0;
+    if (!ok || run->exit_code != 0)
+        fprintf(stderr, "desktop receive: argv0=%s ran=%d exit=%d signal=%d timeout=%d output=%s\n",
+                argv[0], ran, run->exit_code, run->term_signal, run->timed_out, run->output);
+    return ok;
+}
+static bool dti_recipe(const struct dti_fixture *f)
+{
+    char path[PATH_MAX], *text = NULL;
+    if (!dti_path(path, repo_root(), "Makefile") || read_entire_file(path, &text)) return false;
+    const char *start = strstr(text, "# Explicit per-user Linux packaging.");
+    const char *end = start ? strstr(start, "# Current maintainer host") : NULL;
+    bool ok = start && end && dti_path(path, f->root, "Makefile") &&
+              dti_write(path, start, (size_t)(end - start));
+    free(text); return ok;
+}
+static bool dti_inputs(const struct dti_fixture *f)
+{
+    static const char *const files[] = {"org.zclassic.ZClassic23.desktop",
+        "org.zclassic.ZClassic23.svg", "org.zclassic.ZClassic23.xml"};
+    char source[PATH_MAX], target[PATH_MAX], rel[256];
+    for (size_t i = 0; i < 3; ++i) {
+        int n = snprintf(rel, sizeof(rel), "platform/packaging/linux/%s", files[i]);
+        if (n <= 0 || (size_t)n >= sizeof(rel) ||
+            !dti_path(source, repo_root(), rel) || !dti_path(target, f->root, rel) ||
+            copy_file(source, target) != 0) return false;
+    }
+    return dti_recipe(f);
+}
+static bool dti_setup(struct dti_fixture *f)
+{
+    static const char *const dirs[] = {"config", "state", "cache", "runtime",
+        "tools", "platform", "platform/packaging", "platform/packaging/linux"};
+    char path[PATH_MAX];
+    for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); ++i)
+        if (!dti_path(path, f->root, dirs[i]) || mkdir(path, 0700) != 0) return false;
+    bool ok = dti_path(f->home, f->root, "home space ' \" `touch HOME_PWNED` $(shell touch HOME_MAKE)") &&
+        mkdir(f->home, 0700) == 0 && dti_path(f->config, f->root, "config") &&
+        dti_path(f->state, f->root, "state") && dti_path(f->cache, f->root, "cache") &&
+        dti_path(f->runtime, f->root, "runtime") && dti_path(f->tools, f->root, "tools") &&
+        dti_path(f->data, f->root, "xdg space % ' \" `touch TICK_PWNED` $(touch DOLLAR_PWNED) $(shell touch MAKE_PWNED);");
+    return ok && dti_inputs(f);
+}
+static bool dti_preferences(const struct dti_fixture *f, bool create)
+{
+    static const char text[] = "[Default Applications]\napplication/x-z23-share=fixture-other.desktop;\n";
+    char path[PATH_MAX], *read = NULL;
+    if (!dti_path(path, f->config, "mimeapps.list")) return false;
+    if (create) return dti_write(path, text, sizeof(text) - 1);
+    bool ok = read_entire_file(path, &read) == 0 && !strcmp(read, text);
+    free(read); return ok;
+}
+static bool dti_tools(const struct dti_fixture *f)
+{
+    char path[PATH_MAX];
+    if (access("/usr/bin/make", X_OK) || access("/usr/bin/install", X_OK) ||
+        access("/usr/bin/gio", X_OK) || access("/usr/bin/update-mime-database", X_OK) ||
+        access("/usr/bin/printf", X_OK) || access("/usr/bin/false", X_OK)) {
+        fputs("desktop receive fixture requires make/install/Gio/shared-mime-info/printf/false\n", stderr);
+        return false;
+    }
+    return dti_path(path, f->tools, "printf") && symlink("/usr/bin/printf", path) == 0 &&
+        dti_path(path, f->tools, "install") && symlink("/usr/bin/install", path) == 0 &&
+        dti_path(path, f->tools, "update-mime-database") &&
+        symlink("/usr/bin/update-mime-database", path) == 0;
+}
+static bool dti_no_markers(const struct dti_fixture *f)
+{
+    static const char *const names[] = {"PWNED", "TICK_PWNED", "DOLLAR_PWNED",
+        "MAKE_PWNED", "HOME_PWNED", "HOME_MAKE"};
+    char path[PATH_MAX];
+    for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); ++i)
+        if (!dti_path(path, f->root, names[i]) || !dti_absent(path)) return false;
+    return dti_preferences(f, false);
+}
+static bool dti_make(const struct dti_fixture *f, const char *data,
+    const char *override, bool success)
+{
+    const char *argv[] = {"/usr/bin/make", "--no-print-directory",
+        "presentation-desktop-install", override, NULL};
+    struct zcl_devloop_process_result run = {0};
+    if (!dti_run(f, argv, data, true, &run)) return false;
+    bool passed = run.exit_code == 0;
+    return passed == success && (success || !strstr(run.output, "identity installed")) &&
+        dti_no_markers(f);
+}
+static bool dti_installed(const struct dti_fixture *f, const char *data)
+{
+    static const char *const sources[] = {"org.zclassic.ZClassic23.desktop",
+        "org.zclassic.ZClassic23.svg", "org.zclassic.ZClassic23.xml"};
+    static const char *const destinations[] = {"applications/org.zclassic.ZClassic23.desktop",
+        "icons/hicolor/scalable/apps/org.zclassic.ZClassic23.svg",
+        "mime/packages/org.zclassic.ZClassic23.xml"};
+    char source[PATH_MAX], target[PATH_MAX], rel[256]; struct stat st;
+    for (size_t i = 0; i < 3; ++i) {
+        int n = snprintf(rel, sizeof(rel), "platform/packaging/linux/%s", sources[i]);
+        if (n <= 0 || (size_t)n >= sizeof(rel) || !dti_path(source, f->root, rel) ||
+            !dti_path(target, data, destinations[i]) || !dti_equal(source, target)) return false;
+    }
+    return dti_path(target, data, "mime/mime.cache") && stat(target, &st) == 0 && st.st_size > 0;
+}
+static bool dti_mime_one(const struct dti_fixture *f, const char *name,
+    const void *bytes, size_t size, bool share)
+{
+    char path[PATH_MAX];
+    if (!dti_path(path, f->root, name) || !dti_write(path, bytes, size)) return false;
+    const char *argv[] = {"/usr/bin/gio", "info", "-a", "standard::content-type", path, NULL};
+    struct zcl_devloop_process_result run = {0};
+    bool ok = dti_run(f, argv, f->data, false, &run) && run.exit_code == 0 &&
+        (strstr(run.output, "standard::content-type: application/x-z23-share\n") != NULL) == share;
+    if (!ok) fprintf(stderr, "desktop receive: MIME case=%s bytes=%zu expected_share=%d exit=%d output_len=%zu output=%s\n",
+                     name, size, share, run.exit_code, run.output_len, run.output);
+    return ok;
+}
+static bool dti_mime(const struct dti_fixture *f)
+{
+    static const unsigned char magic[] = {'Z','2','3','S','H','A','R','E',1,0,0,0};
+    static const unsigned char wrong[] = {'N','O','T','S','H','A','R','E',1,0,0,0};
+    static const char extension_only[] = "extension-only fixture\n";
+    return dti_mime_one(f, "magic.bin", magic, sizeof(magic), true) &&
+        dti_mime_one(f, "named.z23share", extension_only, sizeof(extension_only) - 1, true) &&
+        dti_mime_one(f, "empty.z23share", "", 0, false) &&
+        dti_mime_one(f, "not-share.bin", wrong, sizeof(wrong), false);
+}
+static bool dti_descriptor(const struct dti_fixture *f, char **text)
+{
+    char path[PATH_MAX];
+    if (!dti_path(path, f->data, "applications/org.zclassic.ZClassic23.desktop") ||
+        read_entire_file(path, text)) return false;
+    if (!strstr(*text, "\nExec=z23 app receive --preview --file=%f\n") ||
+        !strstr(*text, "\nTerminal=false\n") || !strstr(*text, "\nNoDisplay=true\n") ||
+        !strstr(*text, "\nMimeType=application/x-z23-share;\n")) return false;
+    if (access("/usr/bin/desktop-file-validate", X_OK) != 0) return true;
+    const char *argv[] = {"/usr/bin/desktop-file-validate", path, NULL};
+    struct zcl_devloop_process_result run = {0};
+    return dti_run(f, argv, f->data, false, &run) && run.exit_code == 0;
+}
+static bool dti_gio(const struct dti_fixture *f)
+{
+    char *text = NULL, *probe = NULL; char desktop[PATH_MAX], file[PATH_MAX], expected[PATH_MAX + 64];
+    bool ok = dti_descriptor(f, &text);
+    if (ok) probe = str_replace_once(text, "Exec=z23 ", "Exec=/usr/bin/printf [%%s] ");
+    ok = ok && probe && dti_path(desktop, f->root, "argv.desktop") &&
+        dti_write(desktop, probe, strlen(probe));
+    free(text); free(probe);
+    if (!ok || !dti_path(file, f->root, "space % \"quote\" 'single' $(touch PWNED);literal.z23share") ||
+        !dti_write(file, "", 0)) return false;
+    int n = snprintf(expected, sizeof(expected), "[app][receive][--preview][--file=%s]", file);
+    if (n <= 0 || (size_t)n >= sizeof(expected)) return false;
+    const char *argv[] = {"/usr/bin/gio", "launch", desktop, file, NULL};
+    struct zcl_devloop_process_result run = {0};
+    return dti_run(f, argv, f->data, false, &run) && run.exit_code == 0 &&
+        run.output_len == strlen(expected) && !memcmp(run.output, expected, run.output_len) &&
+        dti_no_markers(f);
+}
+static bool dti_failures(const struct dti_fixture *f)
+{
+    char path[PATH_MAX], output[PATH_MAX];
+    if (!dti_make(f, "relative", NULL, false) ||
+        !dti_path(path, f->root, "relative") || !dti_absent(path)) return false;
+    if (!dti_path(path, f->tools, "update-mime-database") || unlink(path) != 0 ||
+        !dti_path(output, f->root, "missing-tool") || !dti_make(f, output, NULL, false) ||
+        !dti_absent(output) || symlink("/usr/bin/false", path) != 0) return false;
+    return dti_path(output, f->root, "failed-update") && dti_make(f, output, NULL, false);
+}
+static bool dti_override(const struct dti_fixture *f)
+{
+    char override[PATH_MAX + 32], unused[PATH_MAX];
+    int n = snprintf(override, sizeof(override), "XDG_DATA_HOME=%s", f->data);
+    return n > 0 && (size_t)n < sizeof(override) && dti_path(unused, f->root, "unused-data") &&
+        dti_make(f, unused, override, true) && dti_installed(f, f->data) && dti_absent(unused);
+}
+static bool dti_cases(const struct dti_fixture *f)
+{
+    char fallback[PATH_MAX];
+    if (!dti_make(f, f->data, NULL, true) || !dti_installed(f, f->data) ||
+        !dti_path(fallback, f->home, ".local") || !dti_absent(fallback)) return false;
+    if (!dti_mime(f) || !dti_gio(f) || !dti_override(f)) return false;
+    return dti_make(f, "", NULL, true) && dti_path(fallback, f->home, ".local/share") &&
+        dti_installed(f, fallback) && dti_failures(f);
+}
+#endif
+static int t_desktop_receive_install(void)
+{
+#if !defined(__linux__)
+    puts("SKIP (desktop receive packaging fixture requires Linux)");
+    return 0;
+#else
+    struct dti_fixture f = {0};
+    if (!dti_root(&f)) return 1;
+    const char *prior = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    char *saved = prior ? strdup(prior) : NULL;
+    if (prior && !saved) return 1;
+    bool opted = setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0;
+    bool ok = opted && dti_setup(&f) && dti_preferences(&f, true) && dti_tools(&f) && dti_cases(&f);
+    int restored = prior ? setenv("ZCL_DEVLOOP_TEST_PROCESS", saved, 1) : unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+    free(saved); ok = ok && restored == 0;
+    if (!ok) {
+        fprintf(stderr, "desktop receive: failed fixture retained: %s\n", f.root);
+        return 1;
+    }
+    return test_rm_rf_recursive(f.root) != 0;
+#endif
+}
+
 /* Builds the wrapper into the fixture exactly as tools/agent/gate-receipt.sh
  * would, so the fixture needs no copy of the sources besides the shim. */
 #define RECEIPT_FIXTURE_PREAMBLE \
@@ -886,6 +1148,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     N_(t_git_hooks_quiet_env_suppresses),            /* private repo under test-tmp/ */
     N_(t_git_hooks_quiet_held_ready_notifies),       /* private repo under test-tmp/ */
     N_(t_git_hooks_bootstrap_goal_filter),           /* make -s in a test-tmp/ fixture */
+    N_(t_desktop_receive_install),                  /* isolated desktop/MIME install and Gio argv */
     S_(t_telemetry_ontology_gate),
     /* Hermetic: the script's --selftest builds its scan root and baseline in
      * its own mktemp dir and never mutates a tracked path. */

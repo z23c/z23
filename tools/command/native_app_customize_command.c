@@ -170,20 +170,14 @@ bool app_customize_source(const char *name, uint64_t revision,
     return ok;
 }
 
-static bool ac_root(struct json_value *out, const char *key, const uint8_t root[32])
-{
-    char hex[65]; zcl_hex_encode(root, 32, hex);
-    return json_push_kv_str(out, key, hex);
-}
-
 static bool ac_identity(struct ac_read *a)
 {
     struct json_value *d = &a->data;
     return json_push_kv_str(d, "name", a->selected.app) &&
         json_push_kv_int(d, "selection_revision", (int64_t)a->selected.revision) &&
-        ac_root(d, "version", a->selected.version) && ac_root(d, "head_version", a->copy.head_version) &&
-        ac_root(d, "source_root", a->copy.selected_tree) &&
-        ac_root(d, "fork", a->selected.fork) && ac_root(d, "parent_release", a->selected.parent) &&
+        zcl_package_copy_push_root(d, "version", a->selected.version) && zcl_package_copy_push_root(d, "head_version", a->copy.head_version) &&
+        zcl_package_copy_push_root(d, "source_root", a->copy.selected_tree) &&
+        zcl_package_copy_push_root(d, "fork", a->selected.fork) && zcl_package_copy_push_root(d, "parent_release", a->selected.parent) &&
         json_push_kv_str(d, "change", a->change ? a->change : "") &&
         json_push_kv_str(d, "authority", "read-only-selected-source") &&
         json_push_kv_str(d, "editing", "Working files may differ. Read pinned source here; editing, building, preview and Keep are separate owner actions.");
@@ -194,7 +188,7 @@ static bool ac_row(struct json_value *row, const struct vcs_entry *e)
     json_set_object(row);
     return e->size <= INT64_MAX && strlen(e->path) <= AC_PATH && zutf8_validate(e->path) &&
         json_push_kv_str(row, "path", e->path) && json_push_kv_int(row, "size", (int64_t)e->size) &&
-        json_push_kv_int(row, "mode", e->mode) && ac_root(row, "blob", e->blob);
+        json_push_kv_int(row, "mode", e->mode) && zcl_package_copy_push_root(row, "blob", e->blob);
 }
 
 static bool ac_page(struct ac_read *a)

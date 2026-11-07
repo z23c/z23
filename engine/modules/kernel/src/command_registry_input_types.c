@@ -749,6 +749,10 @@ static const struct cr_int_bound *cr_device_host_bound(const char *path,
 static const struct cr_int_bound *cr_app_customize_bound(const char *path,
                                                         const char *key)
 {
+    if (strcmp(path, "app.personalize") == 0 && !strcmp(key, "expected_revision")) {
+        static const struct cr_int_bound revision = { "expected_revision", 1, INT64_MAX };
+        return &revision;
+    }
     if (strcmp(path, "app.customize") != 0) return NULL;
     static const struct cr_int_bound bounds[] = {
         { "expected_revision", 0, INT64_MAX },
@@ -1193,9 +1197,13 @@ static bool cr_soak_descriptor(const struct zcl_command_spec *spec, const char *
 
 /* Derive discovery from the existing leaf-scoped boolean table; do not
  * duplicate its allowed paths or make execution consent a global key. */
-static bool cr_execution_consent_descriptor(const struct zcl_command_spec *spec,
+static bool cr_execution_choice_descriptor(const struct zcl_command_spec *spec,
     const char *key, struct zcl_command_input_descriptor *out)
 {
+    if (!strcmp(spec->path, "app.receive") && !strcmp(key, "preview")) {
+        out->type = JSON_BOOL;
+        return true;
+    }
     if (strcmp(key, "accept_execution")) return false;
     const struct json_value probe = {.type = JSON_BOOL};
     bool accepted = false;
@@ -1239,7 +1247,7 @@ bool zcl_command_registry_input_descriptor(
         return true;
     }
     if (cr_soak_descriptor(spec, key, out) ||
-        cr_execution_consent_descriptor(spec, key, out)) return true;
+        cr_execution_choice_descriptor(spec, key, out)) return true;
     const struct cr_int_bound *host_bound = cr_leaf_int_bound(spec->path, key);
     if (host_bound) {
         out->type = JSON_INT;

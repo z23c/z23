@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/app_installed_source.c", CAP_NONE, "Reads use native package artifact and directory modules; this object performs no file, process, network or clock operations directly")

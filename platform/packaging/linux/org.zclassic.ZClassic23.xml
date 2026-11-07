@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-z23-share">
+    <comment>Z23 signed app share</comment>
+    <glob pattern="*.z23share"/>
+    <magic priority="60">
+      <match type="string" offset="0" value="Z23SHARE"/>
+    </magic>
+  </mime-type>
+</mime-info>

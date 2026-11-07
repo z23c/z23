@@ -6,6 +6,9 @@
 #include "chain/chainparams.h"
 #include "command/native_app_launch.h"
 #include "command/native_app_personalize_command.h"
+#if defined(ZCL_TESTING)
+#include "command/native_app_personalize_view.h"
+#endif
 #include "command/native_app_share_command.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_object.h"
@@ -1512,6 +1515,9 @@ static bool apt_one(enum apt_kind kind)
     }
     act_cleanup(&f); return ok;
 }
+#if defined(ZCL_TESTING)
+static int apbt_cases(void);
+#endif
 int test_app_personalize(void)
 {
     int failures = 0;
@@ -1525,6 +1531,9 @@ int test_app_personalize(void)
         ASSERT(apt_one(APT_EXISTING));
         PASS();
     } _test_next:;
+#if defined(ZCL_TESTING)
+    failures += apbt_cases();
+#endif
     return failures;
 }
 
@@ -1587,6 +1596,213 @@ static bool ast_presenter(void *context, const struct zcl_present_model_v1 *mode
         if (!ast_action(live, 2, &close, &redraw) || close || !redraw) return false;
     return ast_inject(p) && ast_action(live, 3, &close, &redraw) && close;
 }
+/* Native kept-name personalization; synthetic presenter tests authority and
+ * exact saved-source composition, not a physical dialog or executable image. */
+enum apbt_mode { APBT_CANCEL, APBT_HEADLESS, APBT_EARLY, APBT_CANCEL_LATE,
+    APBT_PAINT_FAIL, APBT_SELECTION, APBT_HEAD, APBT_KEY, APBT_CONFIRM, APBT_EXISTING };
+struct apbt_present {
+    struct ac_fixture *f;
+    enum apbt_mode mode;
+    bool invoked, observed, visited, injected;
+    uint8_t key_hash[32];
+};
+static bool apbt_bool(const struct json_value *d, const char *key, bool expected)
+{
+    const struct json_value *v = json_get(d, key);
+    return v && v->type == JSON_BOOL && json_get_bool(v) == expected;
+}
+static bool apbt_fields(struct apbt_present *p, const struct zcl_present_model_v1 *m)
+{
+    char version[65], source[65], head[65], revision[32];
+    zcl_hex_encode(p->f->kept.version, 32, version); zcl_hex_encode(p->f->tree, 32, source);
+    zcl_hex_encode(p->f->head, 32, head);
+    snprintf(revision, sizeof(revision), "%llu", (unsigned long long)p->f->kept.revision);
+    return !strcmp(m->title, "Personalize this saved version?") &&
+        ast_field(m, "Kept app: ", "skycombat") && ast_field(m, "Kept revision: ", revision) &&
+        ast_field(m, "Copy: ", p->f->world.copy) && ast_field(m, "Datadir: ", p->f->world.alice_datadir) &&
+        ast_field(m, "Saved version: ", version) && ast_field(m, "Source: ", source) &&
+        ast_field(m, "Current HEAD: ", head);
+}
+static bool apbt_identity(struct apbt_present *p, const struct zcl_present_model_v1 *m)
+{
+    if (p->mode != APBT_EXISTING)
+        return apt_key_absent(p->f) && ast_field(m, "Identity: ",
+            "Create a local publishing key after confirmation; personal namespace is pending.");
+    struct zcl_command_reply r; zcl_command_reply_init(&r, "zcl.test.personalize-view.v1");
+    char path[4400], pub[67], ns[64]; bool exists = false;
+    bool ok = app_personalize_key_probe(&r, path, sizeof(path), pub, &exists) && exists &&
+        app_personalize_namespace(pub, ns, sizeof(ns)) &&
+        ast_field(m, "Publisher: ", pub) && ast_field(m, "Personal namespace: ", ns);
+    zcl_command_reply_free(&r); return ok;
+}
+static bool apbt_inject(struct apbt_present *p)
+{
+    if (p->mode == APBT_SELECTION) {
+        struct app_selection saved;
+        if (app_selection_save(p->f->env.state_dir, p->f->kept.revision, &p->f->kept, &saved) != APP_SELECTION_OK) return false;
+        p->f->kept = saved;
+    } else if (p->mode == APBT_HEAD) {
+        if (!act_snapshot(p->f, "save", p->f->head)) return false;
+    } else if (p->mode == APBT_KEY) {
+        if (!apt_external_key(p->f) || !act_hash(p->f->world.alice_home, ".z23/zcode_publisher.key", p->key_hash)) return false;
+    } else return true;
+    p->injected = true;
+    return act_preserved(p->f, true); /* Preserve the concurrent writer's new state. */
+}
+static bool apbt_visit(const struct zcl_present_window_live_view_v1 *live, uint32_t count)
+{
+    bool close = false, redraw = false;
+    for (uint32_t i = 1; i < count; ++i)
+        if (!ast_action(live, 2, &close, &redraw) || close || !redraw) return false;
+    return true;
+}
+static bool apbt_confirm_after_pages(struct apbt_present *p,
+    const struct zcl_present_window_live_view_v1 *live, bool *close, bool *redraw)
+{
+    p->visited = true;
+    if (!apbt_inject(p) || !ast_action(live, 3, close, redraw) || !*close) return false;
+    if (p->mode == APBT_PAINT_FAIL) return false;
+    if (p->mode == APBT_CANCEL_LATE) return ast_action(live, 0, close, redraw) && *close;
+    return true;
+}
+static bool apbt_presenter(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    (void)pages; struct apbt_present *p = context; uint32_t count = 0;
+    p->invoked = true;
+    p->observed = apbt_fields(p, model) && apbt_identity(p, model) &&
+        zcl_present_model_page_count_v1(model, &count, why, cap) && count > 1;
+    if (!p->observed || p->mode == APBT_HEADLESS) return false;
+    bool close = false, redraw = false;
+    if (p->mode == APBT_CANCEL) return ast_action(live, 0, &close, &redraw) && close;
+    if (!ast_action(live, 3, &close, &redraw) || close) return false;
+    if (p->mode == APBT_EARLY) return true;
+    if (!apbt_visit(live, count)) return false;
+    return apbt_confirm_after_pages(p, live, &close, &redraw);
+}
+static bool apbt_run(struct apbt_present *p, struct json_value *input, struct zcl_command_reply *reply)
+{
+    const struct zcl_command_spec *spec = abc_spec("app.personalize");
+    if (!spec) return false;
+    struct zcl_command_request request = {.spec = spec, .input = input, .invoked_name = "app.personalize"};
+    zcl_test_app_personalize_view_run(&request, reply, apbt_presenter, p);
+    return true;
+}
+static bool apbt_reply_paths(struct apbt_present *p, const struct zcl_command_reply *r)
+{
+    const char *copy = zcl_package_copy_str(&r->data, "copy");
+    const char *datadir = zcl_package_copy_str(&r->data, "datadir");
+    return copy && datadir && !strcmp(copy, p->f->world.copy) &&
+        !strcmp(datadir, p->f->world.alice_datadir);
+}
+static bool apbt_reply_identity(const struct zcl_command_reply *r, const char *name,
+    uint8_t version[32], uint8_t root[32])
+{
+    const char *v = zcl_package_copy_str(&r->data, "version"), *tree = zcl_package_copy_str(&r->data, "source_root");
+    if (!name || !v || !tree || !zcl_hex_decode_lower(v, version, 32) || !zcl_hex_decode_lower(tree, root, 32)) return false;
+    return true;
+}
+static bool apbt_success(struct apbt_present *p, struct zcl_command_reply *r)
+{
+    uint8_t version[32], root[32], key[32];
+    const char *name = zcl_package_copy_str(&r->data, "name");
+    if (!apbt_reply_identity(r, name, version, root)) return false;
+    bool key_ok = act_hash(p->f->world.alice_home, ".z23/zcode_publisher.key", key);
+    if (p->mode == APBT_EXISTING) key_ok = key_ok && !memcmp(key, p->key_hash, 32);
+    return apbt_reply_paths(p, r) && key_ok && p->visited && r->status == ZCL_COMMAND_STATUS_PASSED && r->error.mutated &&
+        apbt_bool(&r->data, "changed", true) && apbt_bool(&r->data, "key_created", p->mode != APBT_EXISTING) &&
+        apt_trees_equal(p->f, root, name) && apt_head_and_keep(p->f, version);
+}
+static bool apbt_refusal(struct apbt_present *p, struct zcl_command_reply *r)
+{
+    const char *code = NULL;
+    switch (p->mode) {
+    case APBT_HEADLESS: case APBT_PAINT_FAIL: code = "CONFIRMATION_UNAVAILABLE"; break;
+    case APBT_SELECTION: code = "SELECTION_STALE"; break;
+    case APBT_HEAD: code = "HEAD_STALE"; break;
+    case APBT_KEY: code = "PLAN_MISMATCH"; break;
+    default: break;
+    }
+    if (code) {
+        if (r->status == ZCL_COMMAND_STATUS_PASSED || strcmp(r->error.code, code)) return false;
+    } else {
+        const char *status = zcl_package_copy_str(&r->data, "status");
+        if (r->status != ZCL_COMMAND_STATUS_PASSED || !status || strcmp(status, "canceled")) return false;
+    }
+    return !r->error.mutated && act_preserved(p->f, false);
+}
+static bool apbt_key_preserved(struct apbt_present *p)
+{
+    if (p->mode != APBT_KEY) return apt_key_absent(p->f);
+    uint8_t key[32];
+    return p->injected && act_hash(p->f->world.alice_home, ".z23/zcode_publisher.key", key) &&
+        !memcmp(key, p->key_hash, 32);
+}
+static bool apbt_one(enum apbt_mode mode)
+{
+    struct ac_fixture f; bool ok = act_setup(&f, false);
+    struct apbt_present p = {.f = &f, .mode = mode};
+    struct json_value input; json_init(&input); json_set_object(&input);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_personalize.v1");
+    if (ok && mode == APBT_EXISTING) ok = apt_external_key(&f) &&
+        act_hash(f.world.alice_home, ".z23/zcode_publisher.key", p.key_hash);
+    ok = ok && act_preserved(&f, true) && json_push_kv_str(&input, "name", "skycombat") &&
+        json_push_kv_int(&input, "expected_revision", 1) && apbt_run(&p, &input, &reply) && p.observed;
+    if (ok && (mode == APBT_CONFIRM || mode == APBT_EXISTING)) ok = apbt_success(&p, &reply);
+    else if (ok) ok = apbt_refusal(&p, &reply) && apbt_key_preserved(&p);
+    if (!ok) fprintf(stderr, "personalize view mode=%d observed=%d visited=%d error=%s message=%s\n",
+        mode, p.observed, p.visited, reply.error.code, reply.error.message);
+    zcl_command_reply_free(&reply); json_free(&input); act_cleanup(&f); return ok;
+}
+static bool apbt_bad_input(unsigned kind, struct json_value *input)
+{
+    json_set_object(input);
+    if (!json_push_kv_str(input, "name", kind == 0 ? "" : "skycombat")) return false;
+    switch (kind) {
+    case 0: return json_push_kv_int(input, "expected_revision", 1);
+    case 1: return json_push_kv_str(input, "expected_revision", "1");
+    case 2: return json_push_kv_int(input, "expected_revision", 0);
+    case 3: return json_push_kv_int(input, "expected_revision", -1);
+    case 4: return json_push_kv_str(input, "name", "skycombat");
+    case 5: return json_push_kv_bool(input, "confirm", true);
+    case 6: return json_push_kv_str(input, "copy", "/not-an-authorized-copy");
+    default: return false;
+    }
+}
+static bool apbt_strict_one(struct ac_fixture *f, unsigned kind)
+{
+    struct apbt_present p = {.f = f, .mode = APBT_CONFIRM};
+    struct json_value input; json_init(&input);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_personalize.v1");
+    bool ok = apbt_bad_input(kind, &input) && apbt_run(&p, &input, &reply) &&
+        !p.invoked && reply.status != ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(reply.error.code, "BAD_INPUT") && !reply.error.mutated &&
+        apt_key_absent(f) && act_preserved(f, false);
+    zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
+static bool apbt_strict(void)
+{
+    struct ac_fixture f; bool ok = act_setup(&f, false);
+    ok = ok && act_preserved(&f, true);
+    for (unsigned i = 0; ok && i < 7; ++i) ok = apbt_strict_one(&f, i);
+    act_cleanup(&f); return ok;
+}
+static int apbt_cases(void)
+{
+    int failures = 0;
+    TEST("kept personalization native consent preserves saved selection and dirty work") {
+        ASSERT(apbt_one(APBT_CANCEL)); ASSERT(apbt_one(APBT_HEADLESS));
+        ASSERT(apbt_one(APBT_EARLY)); ASSERT(apbt_one(APBT_CANCEL_LATE));
+        ASSERT(apbt_one(APBT_PAINT_FAIL)); ASSERT(apbt_one(APBT_SELECTION));
+        ASSERT(apbt_one(APBT_HEAD)); ASSERT(apbt_one(APBT_KEY));
+        ASSERT(apbt_strict());
+        ASSERT(apbt_one(APBT_CONFIRM)); ASSERT(apbt_one(APBT_EXISTING));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static bool ast_selection_plan(struct ac_fixture *f, const char *version, char *publisher, const char *output, struct abc_leaf *leaf)
 {
     struct abc_leaf l; bool ok;

@@ -26,6 +26,7 @@
 #include "test/app_seed_fixture.h"
 
 #include "chain/chainparams.h"
+#include <stdlib.h>
 
 #if defined(__linux__)
 #include <stdio.h>
@@ -44,6 +45,7 @@ struct ass_world {
     char copy[ASS_PATH];
     char image[ASS_PATH];
     char image_sha3[65];
+    char build_keys[5][65];
     char saved_home[1024], saved_display[256];
     bool had_display;
     pid_t xvfb;
@@ -112,6 +114,9 @@ static int ass_adopt_build(struct ass_world *w)
                        asf_get(&l, "image_sha3"));
         printf("  [built skycombat copy: image_sha3 %s confinement %s]\n",
                w->image_sha3, asf_get(&l, "confinement"));
+        static const char *const keys[] = {"version", "env_root", "dependency_root", "record_id", "package_root"};
+        for (size_t i = 0; i < 5; ++i)
+            (void)snprintf(w->build_keys[i], sizeof(w->build_keys[i]), "%s", asf_get(&l, keys[i]));
         asf_close(&l);
         ASSERT(built && strlen(w->image_sha3) == 64 && w->image[0] == '/');
         PASS();
@@ -133,6 +138,678 @@ static int ass_runs_qa_frames(struct ass_world *w, const char *xvfb)
     return failures;
 }
 
+/* Explicit installed acceptance. These environment inputs belong only to the
+ * harness: production resolver still uses the running executable exclusively. */
+#include "command/app_installed_source.h"
+#include "command/native_zcode_package_copy.h"
+#include "base/hex.h"
+#include "crypto/sha256.h"
+#include "platform/process_lifecycle.h"
+#include "platform/time_compat.h"
+#include "presentation/model_render.h"
+#include "util/spawn.h"
+#include "vcs/vcs_manifest.h"
+#include <dirent.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <poll.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+extern char **environ;
+
+struct asi_run {
+    char bin[PATH_MAX], verifier[PATH_MAX], driver[PATH_MAX];
+    char export_dir[ASS_PATH], release[ASS_PATH], home[ASS_PATH];
+    char prefix[ASS_PATH], datadir[ASS_PATH], empty[ASS_PATH], tmp[ASS_PATH];
+    char installed[ASS_PATH], pin[65];
+    struct app_installed_source source;
+    struct platform_process cli, display;
+};
+static const char *const asi_env_keys[] = {
+    "HOME", "DISPLAY", "WAYLAND_DISPLAY", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+    "XDG_STATE_HOME", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_PREFIX", "TMPDIR"
+};
+struct asi_env { char *value[sizeof(asi_env_keys)/sizeof(asi_env_keys[0])]; };
+static bool asi_environment_save(struct asi_env *s)
+{
+    memset(s, 0, sizeof(*s));
+    for (size_t i = 0; i < sizeof(s->value)/sizeof(s->value[0]); ++i) {
+        const char *v = getenv(asi_env_keys[i]);
+        if (v && !(s->value[i] = strdup(v))) {
+            for (size_t j = 0; j < i; ++j) free(s->value[j]);
+            memset(s, 0, sizeof(*s)); return false;
+        }
+    }
+    return true;
+}
+static bool asi_environment_restore(struct asi_env *s)
+{
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(s->value)/sizeof(s->value[0]); ++i) {
+        int rc = s->value[i] ? setenv(asi_env_keys[i], s->value[i], 1) : unsetenv(asi_env_keys[i]);
+        if (rc != 0) ok = false;
+        free(s->value[i]);
+    }
+    return ok;
+}
+static bool asi_path(char *out, size_t cap, const char *dir, const char *leaf)
+{
+    int n = snprintf(out, cap, "%s/%s", dir, leaf);
+    return n > 0 && (size_t)n < cap;
+}
+static bool asi_executable(const char *dir, const char *leaf, char *out, size_t cap)
+{
+    return asi_path(out, cap, dir, leaf) && access(out, X_OK) == 0;
+}
+static bool asi_no_installer_hooks(void)
+{
+    for (char **at = environ; *at; ++at)
+        if (!strncmp(*at, "Z23_INSTALL_TEST_", 17)) return false;
+    return true;
+}
+static bool asi_prerequisites(struct ass_world *w, struct asi_run *r)
+{
+    const char *bins = getenv("ZCL_TEST_INSTALLED_APP_BIN_DIR");
+    char path[PATH_MAX];
+    if (!bins || bins[0] != '/' || !realpath(bins, r->bin)) return false;
+    if (!asi_no_installer_hooks()) return false;
+    static const char *const required[] = {"z23", "z23-package-verify", "z23-acme"};
+    for (size_t i = 0; i < sizeof(required)/sizeof(required[0]); ++i)
+        if (!asi_executable(r->bin, required[i], path, sizeof(path))) return false;
+    if (!asi_executable(w->source, "build/bin/z23-dev", r->verifier, sizeof(r->verifier))) return false;
+    if (!asi_executable(w->source, "build/bin/native_ui_driver", r->driver, sizeof(r->driver))) return false;
+    if (!asi_executable(w->source, "build/bin/z23-lint", path, sizeof(path))) return false;
+    if (!asf_xvfb_path() || asf_missing_game_header()) return false;
+    return access("/usr/bin/bash", X_OK) == 0 && access("/usr/bin/strip", X_OK) == 0;
+}
+static bool asi_paths(struct ass_world *w, struct asi_run *r)
+{
+    if (!asi_path(r->export_dir, sizeof(r->export_dir), w->root, "export")) return false;
+    if (!asi_path(r->release, sizeof(r->release), w->root, "release")) return false;
+    if (!asi_path(r->home, sizeof(r->home), w->root, "alice")) return false;
+    if (!asi_path(r->empty, sizeof(r->empty), w->root, "outside-checkout")) return false;
+    if (!asi_path(r->tmp, sizeof(r->tmp), w->root, "install-tmp")) return false;
+    if (!asi_path(r->prefix, sizeof(r->prefix), r->home, ".local")) return false;
+    if (!asi_path(r->datadir, sizeof(r->datadir), r->home, "apps-data")) return false;
+    return asi_path(r->installed, sizeof(r->installed), r->prefix, "bin/z23") &&
+        mkdir(r->home, 0755) == 0 && mkdir(r->empty, 0700) == 0 && mkdir(r->tmp, 0700) == 0;
+}
+static bool asi_export(struct ass_world *w, struct asi_run *r)
+{
+    static const char *const keys[] = {"version", "env_root", "dependency_root", "record_id"};
+    struct asf_leaf leaf; asf_open(&leaf);
+    bool ok = json_push_kv_str(&leaf.in, "app", "skycombat") &&
+        json_push_kv_str(&leaf.in, "copy", w->copy) &&
+        json_push_kv_str(&leaf.in, "datadir", w->datadir) &&
+        json_push_kv_str(&leaf.in, "artifact_dir", r->export_dir);
+    for (size_t i = 0; ok && i < 4; ++i)
+        ok = strlen(w->build_keys[i]) == 64 && json_push_kv_str(&leaf.in, keys[i], w->build_keys[i]);
+    if (ok) ok = asf_pass("app.source.export", &leaf);
+    if (ok) ok = strlen(asf_get(&leaf, "projection_sha3")) == 64;
+    if (ok) memcpy(r->pin, asf_get(&leaf, "projection_sha3"), 65);
+    asf_close(&leaf);
+    char image[ASS_PATH], why[256];
+    if (ok) ok = asi_path(image, sizeof(image), r->export_dir, "image") &&
+        app_installed_source_load(r->export_dir, r->pin, image, &r->source, why, sizeof(why));
+    return ok;
+}
+static bool asi_original(struct ass_world *w, struct asi_run *r)
+{
+    struct zcl_package_copy copy = {0}; struct asf_leaf leaf; asf_open(&leaf);
+    uint8_t package[32], record[32], image[32];
+    bool ok = zcl_hex_decode_lower(w->build_keys[4], package, 32) &&
+        zcl_hex_decode_lower(w->build_keys[3], record, 32) &&
+        zcl_hex_decode_lower(w->image_sha3, image, 32) &&
+        zcl_package_copy_open_selected_as(w->copy, ZCL_PACKAGE_COPY_READ, &copy,
+            &leaf.out, "app.source.export", w->build_keys[0]);
+    if (ok) ok = !memcmp(copy.selected_tree, r->source.tree_root, 32) &&
+        !memcmp(package, r->source.package_root, 32) && !memcmp(record, r->source.record_id, 32) &&
+        !memcmp(image, r->source.build.image_sha3, 32);
+    zcl_package_copy_close(&copy); asf_close(&leaf); return ok;
+}
+static bool asi_tool_log(const struct ass_world *w, const char *log,
+                         const char *text, const struct zcl_spawn_evidence *e)
+{
+    char path[ASS_PATH];
+    if (!asi_path(path, sizeof(path), w->root, log)) return false;
+    FILE *f = fopen(path, "ab"); if (!f) return false;
+    size_t n = strlen(text);
+    bool ok = fprintf(f, "exit=%d observed=%d timeout=%d truncated=%d\n",
+        e->exit_code, e->exit_observed, e->timed_out, e->stdout_truncated) > 0 &&
+        fwrite(text, 1, n, f) == n &&
+        fwrite(e->stderr_tail, 1, e->stderr_len, f) == e->stderr_len;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+static bool asi_tool(const struct ass_world *w, const char *log,
+                     const char *const *argv, int timeout)
+{
+    char text[65536]; struct zcl_spawn_evidence e;
+    int rc = zcl_spawn_capture_evidence(argv, text, sizeof(text), timeout, &e);
+    bool saved = asi_tool_log(w, log, text, &e);
+    test_note("installed tool %s exit=%d observed=%d timeout=%d truncated=%d",
+              log, rc, e.exit_observed, e.timed_out, e.stdout_truncated);
+    test_note_bytes("installed tool stderr tail", e.stderr_tail, e.stderr_len);
+    return saved && rc == 0 && e.exit_observed && !e.timed_out && !e.stdout_truncated && e.stdout_complete;
+}
+static bool asi_manifest_pin(const struct asi_run *r, char pin[65])
+{
+    char path[ASS_PATH]; unsigned char bytes[2049], hash[32];
+    if (!asi_path(path, sizeof(path), r->release, "SHA256SUMS")) return false;
+    FILE *f = fopen(path, "rb"); if (!f) return false;
+    size_t n = fread(bytes, 1, sizeof(bytes), f);
+    bool ok = n > 0 && n <= 2048 && feof(f) && !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    if (!ok) return false;
+    struct sha256_ctx h; sha256_init(&h); sha256_write(&h, bytes, n); sha256_finalize(&h, hash);
+    zcl_hex_encode(hash, 32, pin); return true;
+}
+static bool asi_package(struct ass_world *w, struct asi_run *r)
+{
+    char script[PATH_MAX];
+    if (!asi_path(script, sizeof(script), w->source, "platform/packaging/release/build_release.sh")) return false;
+    const char *argv[] = {"/usr/bin/bash", script, "--bin", r->bin, "--out", r->release,
+        "--platform", "linux-x86_64", "--app-source", r->export_dir,
+        "--app-source-sha3", r->pin, "--app-verifier", r->verifier, NULL};
+    return asi_tool(w, "installed-package.log", argv, 600000);
+}
+static bool asi_consumer_env(struct asi_run *r)
+{
+    static const char *const unset[] = {"WAYLAND_DISPLAY", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"};
+    for (size_t i = 0; i < sizeof(unset)/sizeof(unset[0]); ++i)
+        if (unsetenv(unset[i]) != 0) return false;
+    return setenv("HOME", r->home, 1) == 0 && setenv("TMPDIR", r->tmp, 1) == 0 &&
+        setenv("Z23_SKIP_SYSTEMD", "1", 1) == 0 && setenv("Z23_INSTALL_PREFIX", r->prefix, 1) == 0;
+}
+static bool asi_install(struct ass_world *w, struct asi_run *r)
+{
+    char script[PATH_MAX], pin[65];
+    if (!asi_manifest_pin(r, pin) || !asi_consumer_env(r)) return false;
+    if (!asi_path(script, sizeof(script), w->source, "tools/scripts/install_z23.sh")) return false;
+    const char *argv[] = {"/usr/bin/bash", script, "--source", r->release, "--manifest-sha256", pin, NULL};
+    return asi_tool(w, "installed-install.log", argv, 300000);
+}
+/* These are retained direct posix_spawn children, never handed to an identity
+ * helper which may reap them. No competing reaper; PID cannot be reused before
+ * this wait. Reject inherited auto-reaping SIGCHLD at preflight. */
+static bool asi_stop(struct platform_process *p)
+{
+    if (!p->pid) return true;
+    enum platform_process_wait_result state = platform_process_wait(p, 0, NULL);
+    if (state == PLATFORM_PROCESS_WAIT_EXITED) {
+        platform_process_close(p); return true;
+    }
+    if (state != PLATFORM_PROCESS_WAIT_RUNNING) return false;
+    if (!platform_process_terminate(p, 1) && errno != ESRCH) return false;
+    state = platform_process_wait(p, 5000, NULL);
+    if (state == PLATFORM_PROCESS_WAIT_RUNNING) {
+        if (kill((pid_t)p->pid, SIGKILL) != 0 && errno != ESRCH) return false;
+        state = platform_process_wait(p, 5000, NULL);
+    }
+    if (state != PLATFORM_PROCESS_WAIT_EXITED) return false;
+    platform_process_close(p); return true;
+}
+static bool asi_spawn(struct platform_process *p, const char *const *argv, int output, int error)
+{
+    posix_spawn_file_actions_t actions;
+    if (posix_spawn_file_actions_init(&actions) != 0) return false;
+    bool ok = posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0) == 0 &&
+        posix_spawn_file_actions_adddup2(&actions, output, 1) == 0 &&
+        posix_spawn_file_actions_adddup2(&actions, error, 2) == 0;
+    pid_t pid = -1;
+    if (ok) ok = posix_spawn(&pid, argv[0], &actions, NULL, (char *const *)argv, environ) == 0;
+    posix_spawn_file_actions_destroy(&actions);
+    if (ok) { p->pid = (uint64_t)pid; p->native = (uintptr_t)pid; }
+    return ok;
+}
+/* One deadline for the whole displayfd line, including interrupted/partial
+ * reads. Nonblocking input prevents a readiness race from extending it. */
+static int asi_display_poll(int fd, int64_t started, int64_t deadline)
+{
+    int64_t left = deadline - platform_time_monotonic_ms();
+    if (left <= 0) {
+        printf("installed display deadline elapsed_ms=%lld\n",
+               (long long)(platform_time_monotonic_ms() - started));
+        return -1;
+    }
+    struct pollfd p = {.fd = fd, .events = POLLIN};
+    int rc = poll(&p, 1, (int)left), error = rc < 0 ? errno : 0;
+    printf("installed display poll rc=%d revents=0x%x errno=%d elapsed_ms=%lld\n",
+           rc, (unsigned short)p.revents, error,
+           (long long)(platform_time_monotonic_ms() - started));
+    if (rc < 0 && error == EINTR) return 0;
+    if (rc <= 0 || (p.revents & POLLNVAL)) return -1;
+    /* Drain readable bytes on HUP/ERR too; read distinguishes EOF/error. */
+    return 1;
+}
+static bool asi_display_line(int fd, char *display, size_t cap, int64_t started)
+{
+    int64_t deadline = platform_time_monotonic_ms() + 15000;
+    size_t used = 1; display[0] = ':';
+    while (used + 1 < cap) {
+        int ready = asi_display_poll(fd, started, deadline);
+        if (ready < 0) return false;
+        if (!ready) continue;
+        char c;
+        ssize_t n = read(fd, &c, 1); int error = n < 0 ? errno : 0;
+        printf("installed display read n=%lld errno=%d bytes=%zu elapsed_ms=%lld\n",
+               (long long)n, error, used - 1,
+               (long long)(platform_time_monotonic_ms() - started));
+        if (n < 0 && (error == EINTR || error == EAGAIN)) continue;
+        if (n != 1) return false;
+        if (c == '\n') { display[used] = 0; return used > 1; }
+        if (c < '0' || c > '9') return false;
+        display[used++] = c;
+    }
+    printf("installed display line exceeds bound=%zu\n", cap - 2);
+    return false;
+}
+static bool asi_display(struct ass_world *w, struct asi_run *r)
+{
+    int fd[2]; char path[ASS_PATH], display[32];
+    if (!asi_path(path, sizeof(path), w->root, "installed-xvfb.log") || pipe(fd) != 0) return false;
+    int64_t started = platform_time_monotonic_ms();
+    int log = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    bool ok = log >= 0 && fcntl(fd[0], F_SETFD, FD_CLOEXEC) == 0 &&
+        fcntl(fd[1], F_SETFD, FD_CLOEXEC) == 0 && fcntl(fd[0], F_SETFL, O_NONBLOCK) == 0;
+    const char *argv[] = {asf_xvfb_path(), "-displayfd", "1", "-nolisten", "tcp", "-screen", "0", "1280x800x24", NULL};
+    if (ok) ok = asi_spawn(&r->display, argv, fd[1], log);
+    printf("installed display start ok=%d pid=%llu elapsed_ms=%lld\n", ok,
+           (unsigned long long)r->display.pid,
+           (long long)(platform_time_monotonic_ms() - started));
+    close(fd[1]); if (log >= 0) close(log);
+    if (ok) ok = asi_display_line(fd[0], display, sizeof(display), started);
+    close(fd[0]);
+    return ok && setenv("DISPLAY", display, 1) == 0;
+}
+
+static bool asi_window_wait(struct ass_world *w, struct asi_run *r,
+                           const char *title, const char *action, unsigned timeout)
+{
+    char limit[40];
+    (void)snprintf(limit, sizeof(limit), "--timeout-ms=%u", timeout);
+    const char *argv[] = {r->driver, title, action, limit, NULL};
+    return asi_tool(w, "installed-driver.log", argv, timeout + 2000u);
+}
+static bool asi_window_driver(struct ass_world *w, struct asi_run *r,
+                              const char *title, const char *action)
+{
+    return asi_window_wait(w, r, title, action, 5000);
+}
+static bool asi_driver(struct ass_world *w, struct asi_run *r, const char *action)
+{
+    return asi_window_driver(w, r, "--title=Make my copy", action);
+}
+static bool asi_json_file(const char *path, struct json_value *out)
+{
+    char wire[65537]; FILE *f = fopen(path, "rb"); if (!f) return false;
+    size_t n = fread(wire, 1, sizeof(wire)-1, f);
+    bool ok = feof(f) && !ferror(f) && n > 0;
+    if (fclose(f) != 0) ok = false;
+    return ok && json_read(out, wire, n);
+}
+static const char *asi_string(const struct json_value *v, const char *key)
+{
+    const char *s = json_get_str(json_get(v, key)); return s ? s : "";
+}
+static bool asi_passed(const struct json_value *reply)
+{
+    return json_get_bool(json_get(reply, "ok")) && !strcmp(asi_string(reply, "status"), "passed");
+}
+static bool asi_cli_start(struct ass_world *w, struct asi_run *r, const char *verb, const char *log)
+{
+    char path[ASS_PATH], errpath[ASS_PATH], data[ASS_PATH+16];
+    if (!asi_path(path, sizeof(path), w->root, log) ||
+        !asi_path(errpath, sizeof(errpath), w->root, "installed-cli.stderr")) return false;
+    int n = snprintf(data, sizeof(data), "--datadir=%s", r->datadir);
+    if (n < 0 || (size_t)n >= sizeof(data)) return false;
+    int out = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    int err = open(errpath, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    const char *argv[] = {r->installed, "app", verb, "--json", data,
+        !strcmp(verb, "adopt") ? "--name=skycombat" : NULL, NULL};
+    bool ok = out >= 0 && err >= 0 && asi_spawn(&r->cli, argv, out, err);
+    if (out >= 0) close(out);
+    if (err >= 0) close(err);
+    return ok;
+}
+static bool asi_cli_finish(struct ass_world *w, struct asi_run *r, const char *log, struct json_value *reply)
+{
+    uint32_t code = UINT32_MAX;
+    enum platform_process_wait_result state = platform_process_wait(&r->cli, 120000, &code);
+    if (state == PLATFORM_PROCESS_WAIT_EXITED) platform_process_close(&r->cli);
+    bool ok = state == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    char path[ASS_PATH];
+    return ok && asi_path(path, sizeof(path), w->root, log) && asi_json_file(path, reply) && asi_passed(reply);
+}
+static bool asi_discovery(struct ass_world *w, struct asi_run *r)
+{
+    struct json_value reply; json_init(&reply);
+    bool ok = asi_cli_start(w, r, "list", "installed-list.json") &&
+        asi_cli_finish(w, r, "installed-list.json", &reply);
+    bool found = false;
+    const struct json_value *list = json_get(json_get(&reply, "data"), "launchable");
+    if (!list || list->type != JSON_ARR) ok = false;
+    for (size_t i = 0; ok && i < json_size(list); ++i) {
+        const struct json_value *row = json_at(list, i);
+        if (!strcmp(asi_string(row, "id"), "skycombat"))
+            found = json_get_bool(json_get(row, "installed")) &&
+                !strcmp(asi_string(row, "source"), "builtin");
+    }
+    json_free(&reply); return ok && found;
+}
+static bool asi_no_consumer_state(const struct asi_run *r)
+{
+    static const char *const paths[] = {"apps-data", ".z23", ".zclassic-c23", ".zclassic-c23-dev", ".config", ".local/state"};
+    struct stat st; char path[ASS_PATH];
+    for (size_t i = 0; i < sizeof(paths)/sizeof(paths[0]); ++i) {
+        if (!asi_path(path, sizeof(path), r->home, paths[i])) return false;
+        if (lstat(path, &st) == 0 || errno != ENOENT) return false;
+    }
+    return true;
+}
+static bool asi_cancel(struct ass_world *w, struct asi_run *r)
+{
+    struct json_value reply; json_init(&reply);
+    bool ok = asi_cli_start(w, r, "adopt", "installed-cancel.json") &&
+        asi_driver(w, r, "--expect-count=1") && asi_no_consumer_state(r) &&
+        asi_driver(w, r, "--key=tab") && asi_driver(w, r, "--key=enter") &&
+        asi_cli_finish(w, r, "installed-cancel.json", &reply);
+    if (ok) ok = !strcmp(asi_string(json_get(&reply, "data"), "status"), "canceled") &&
+        asi_driver(w, r, "--expect-count=0") && asi_no_consumer_state(r);
+    json_free(&reply); return ok;
+}
+static bool asi_payload(const struct vcs_manifest *a, const struct vcs_manifest *b)
+{
+    if (a->count != b->count || !a->count) return false;
+    unsigned metadata = 0;
+    for (size_t i = 0; i < a->count; ++i) {
+        const struct vcs_entry *x = &a->entries[i], *y = &b->entries[i];
+        if (strcmp(x->path, y->path) || x->mode != y->mode) return false;
+        if (!strcmp(x->path, "zcode-package.json")) {
+            if (!memcmp(x->blob, y->blob, 32)) return false;
+            ++metadata;
+        } else if (x->size != y->size || memcmp(x->blob, y->blob, 32)) return false;
+    }
+    return metadata == 1;
+}
+static bool asi_successor(struct asi_run *r, const struct json_value *data)
+{
+    struct zcl_package_copy copy = {0}; struct asf_leaf leaf; asf_open(&leaf);
+    struct vcs_manifest original, successor; vcs_manifest_init(&original); vcs_manifest_init(&successor);
+    const char *path = asi_string(data, "copy"), *version = asi_string(data, "version");
+    uint8_t package[32];
+    bool ok = strlen(version) == 64 && !strncmp(asi_string(data, "namespace"), "p-", 2) &&
+        zcl_hex_decode_lower(asi_string(data, "package_root"), package, 32) &&
+        !memcmp(package, r->source.package_root, 32) &&
+        zcl_package_copy_open_selected_as(path, ZCL_PACKAGE_COPY_READ, &copy,
+            &leaf.out, "app.source.export", version);
+    if (ok) ok = !memcmp(copy.fork_tree, r->source.tree_root, 32) &&
+        memcmp(copy.fork_version, copy.selected_version, 32) &&
+        !memcmp(copy.selected_version, copy.head_version, 32);
+    if (ok) ok = vcs_tree_load_readonly_bounded(path, copy.fork_tree, 8u*1024u*1024u, 8192, &original) &&
+        vcs_tree_load_readonly_bounded(path, copy.selected_tree, 8u*1024u*1024u, 8192, &successor) &&
+        asi_payload(&original, &successor);
+    vcs_manifest_free(&original); vcs_manifest_free(&successor);
+    zcl_package_copy_close(&copy); asf_close(&leaf); return ok;
+}
+static bool asi_adopted_only(struct asi_run *r, const struct json_value *data)
+{
+    const struct json_value *executed = json_get(data, "continuation_executed");
+    if (!executed || executed->type != JSON_BOOL || json_get_bool(executed)) return false;
+    if (strcmp(asi_string(data, "continuation"), "adopted")) return false;
+    if (!json_get_bool(json_get(data, "adopted")) || json_get_bool(json_get(data, "executed"))) return false;
+    char path[ASS_PATH]; struct stat st;
+    if (!asi_path(path, sizeof(path), r->datadir, "app_build")) return false;
+    if (lstat(path, &st) == 0 || errno != ENOENT) return false;
+    if (!asi_path(path, sizeof(path), r->home, ".local/state")) return false;
+    return lstat(path, &st) != 0 && errno == ENOENT;
+}
+static void asi_diagnostic_tail(struct ass_world *w, const char *leaf)
+{
+    char path[ASS_PATH], bytes[4096];
+    if (!asi_path(path, sizeof(path), w->root, leaf)) return;
+    FILE *f = fopen(path, "rb");
+    if (!f) { test_note("installed diagnostic %s open errno=%d", leaf, errno); return; }
+    bool ok = fseek(f, 0, SEEK_END) == 0;
+    long size = ok ? ftell(f) : -1;
+    long start = size > (long)sizeof(bytes) ? size - (long)sizeof(bytes) : 0;
+    ok = size >= 0 && fseek(f, start, SEEK_SET) == 0;
+    size_t n = ok ? fread(bytes, 1, sizeof(bytes), f) : 0;
+    test_note("installed diagnostic %s size=%ld tail=%zu error=%d", leaf, size, n, ferror(f));
+    test_note_bytes(leaf, bytes, n);
+    (void)fclose(f);
+}
+static void asi_confirm_diagnostic(struct ass_world *w, struct asi_run *r, int64_t started)
+{
+    /* Failure is already latched. Read-only window query, no key injection.
+     * RUNNING is observed direct-child state, not a claim of forward progress. */
+    uint32_t code = UINT32_MAX;
+    enum platform_process_wait_result state = platform_process_wait(&r->cli, 0, &code);
+    test_note("installed confirm FAILED elapsed_ms=%lld child=%llu wait_state=%d exit=%u source_stage_timing=unavailable",
+        (long long)(platform_time_monotonic_ms() - started),
+        (unsigned long long)r->cli.pid, (int)state, (unsigned)code);
+    if (state == PLATFORM_PROCESS_WAIT_EXITED) platform_process_close(&r->cli);
+    const char *argv[] = {r->driver, "--title=Make my copy", "--expect-count=0", "--timeout-ms=20", NULL};
+    (void)asi_tool(w, "installed-driver.log", argv, 1000);
+    asi_diagnostic_tail(w, "installed-cli.stderr");
+    asi_diagnostic_tail(w, "installed-confirm.json");
+    test_note("installed confirm diagnostic complete; original failure retained");
+}
+
+static bool asi_copy_ready(struct ass_world *w, struct asi_run *r, int64_t started)
+{
+    /* One five-second responsiveness bound, including disappearance of the
+     * consent window. The remaining copy window is progress or continuation. */
+    bool visible = asi_driver(w, r, "--expect-count=0") &&
+        asi_window_driver(w, r, "--title=copy", "--expect-count=1");
+    int64_t feedback = platform_time_monotonic_ms() - started;
+    printf("installed copy feedback_ms=%lld\n", (long long)feedback);
+    if (!visible || feedback > 5000) return false;
+    const int64_t deadline = started + 180000;
+    while (platform_time_monotonic_ms() < deadline) {
+        if (asi_window_wait(w, r, "--title=Your copy is ready", "--expect-count=1", 1000)) {
+            printf("installed copy ready_ms=%lld\n", (long long)(platform_time_monotonic_ms() - started));
+            return platform_time_monotonic_ms() <= deadline;
+        }
+        uint32_t code;
+        if (platform_process_wait(&r->cli, 0, &code) != PLATFORM_PROCESS_WAIT_RUNNING) return false;
+    }
+    return false;
+}
+static bool asi_confirm_actions(struct ass_world *w, struct asi_run *r)
+{
+    if (!asi_cli_start(w, r, "adopt", "installed-confirm.json") ||
+        !asi_driver(w, r, "--expect-count=1") || !asi_no_consumer_state(r)) return false;
+    /* Unfocused -> Cancel -> Back -> Next. Owner refuses confirmation until
+     * all pages visited. Repeat Next up to the maintained maximum; no copied
+     * model/text or injected presenter, no per-page pixel/readability claim. */
+    for (unsigned i = 0; i < 3; ++i) if (!asi_driver(w, r, "--key=tab")) return false;
+    for (unsigned i = 1; i < ZCL_PRESENT_MODEL_PAGES_MAX; ++i)
+        if (!asi_driver(w, r, "--key=enter") || !asi_no_consumer_state(r)) return false;
+    if (!asi_driver(w, r, "--key=tab")) return false;
+    int64_t started = platform_time_monotonic_ms();
+    if (!asi_driver(w, r, "--key=enter")) return false;
+    /* Adopt now offers the same explicit continuation as Receive. Close is
+     * initially focused; do not request any build, preview, or Keep. */
+    if (!asi_copy_ready(w, r, started)) {
+        asi_confirm_diagnostic(w, r, started);
+        return false;
+    }
+    if (!asi_window_driver(w, r, "--title=Your copy is ready", "--key=enter")) return false;
+    return true;
+}
+static bool asi_confirm(struct ass_world *w, struct asi_run *r)
+{
+    if (!asi_confirm_actions(w, r)) return false;
+    struct json_value reply; json_init(&reply);
+    bool ok = asi_cli_finish(w, r, "installed-confirm.json", &reply) &&
+        asi_adopted_only(r, json_get(&reply, "data")) && asi_successor(r, json_get(&reply, "data")) &&
+        asi_driver(w, r, "--expect-count=0") &&
+        asi_window_driver(w, r, "--title=Your copy is ready", "--expect-count=0");
+    json_free(&reply); return ok;
+}
+static bool asi_copy_public(const char *from, const char *to)
+{
+    FILE *in = fopen(from, "rb"); if (!in) return false;
+    FILE *out = fopen(to, "wbx"); if (!out) { fclose(in); return false; }
+    unsigned char bytes[16384]; size_t n; bool ok = true;
+    while ((n = fread(bytes, 1, sizeof(bytes), in)) != 0)
+        if (fwrite(bytes, 1, n, out) != n) { ok = false; break; }
+    ok = ok && !ferror(in) && feof(in);
+    if (fclose(in) != 0) ok = false;
+    if (fclose(out) != 0) ok = false;
+    return ok;
+}
+static bool asi_evidence(struct ass_world *w, struct asi_run *r)
+{
+    const char *dir = getenv("ZCL_TEST_INSTALLED_APP_EVIDENCE_DIR");
+    if (!dir) return true;
+    struct stat st;
+    if (dir[0] != '/' || lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != geteuid() || (st.st_mode & 022)) return false;
+    static const char *const logs[] = {"installed-package.log", "installed-install.log",
+        "installed-list.json", "installed-cancel.json", "installed-confirm.json", "installed-xvfb.log",
+        "installed-driver.log", "installed-cli.stderr"};
+    char from[ASS_PATH], to[PATH_MAX];
+    for (size_t i = 0; i < sizeof(logs)/sizeof(logs[0]); ++i) {
+        if (!asi_path(from, sizeof(from), w->root, logs[i]) ||
+            !asi_path(to, sizeof(to), dir, logs[i]) || !asi_copy_public(from, to)) return false;
+    }
+    /* Retain the complete public release so a later fresh-recipient journey
+     * can use this exact normal-packager output without producer state. */
+    static const char *const assets[] = {"SHA256SUMS", "AGENT_CARD.md", "z23", "zclassic23",
+        "z23-package-verify", "zclassic23-package-verify", "z23-acme", "zclassic23-acme",
+        "z23-skycombat", "installed-source.json", "app-build.wire", "manifest.wire",
+        "recipe.wire", "source.bundle"};
+    for (size_t i = 0; i < sizeof(assets)/sizeof(assets[0]); ++i) {
+        if (!asi_path(from, sizeof(from), r->release, assets[i]) ||
+            !asi_path(to, sizeof(to), dir, assets[i]) || !asi_copy_public(from, to)) return false;
+    }
+    return true;
+}
+static bool asi_cleanup(struct ass_world *w, struct asi_run *r,
+                         struct asi_env *saved, bool env_saved, bool cwd_changed)
+{
+    bool cli_stopped = asi_stop(&r->cli), display_stopped = asi_stop(&r->display);
+    bool ok = cli_stopped && display_stopped;
+    if (cwd_changed && chdir(w->source) != 0) ok = false;
+    if (env_saved && !asi_environment_restore(saved)) ok = false;
+    app_installed_source_free(&r->source);
+    printf("  [installed acceptance cleanup=%d cli_pid=%llu display_pid=%llu root=%s]\n",
+        ok, (unsigned long long)r->cli.pid, (unsigned long long)r->display.pid, w->root);
+    return ok;
+}
+/* Fixture-only retirement of the single verified flat install generation.
+ * Never called after failed proof/export/process cleanup; no recursive chmod
+ * and no following the mutable skycombat selector. */
+static bool asi_cleanup_identity(int fd, const struct stat *before,
+    dev_t device, bool private)
+{
+    struct stat now;
+    if (fstat(fd, &now) != 0 || !S_ISDIR(now.st_mode) ||
+        now.st_dev != before->st_dev || now.st_ino != before->st_ino) return false;
+    if (private) return now.st_uid == geteuid() && now.st_dev == device;
+    return now.st_uid == geteuid() || now.st_uid == 0;
+}
+static int asi_cleanup_child(int parent, const char *name, dev_t device, bool private)
+{
+    struct stat before;
+    if (!name[0] || !strcmp(name, ".") || !strcmp(name, "..") || strchr(name, '/') ||
+        fstatat(parent, name, &before, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISDIR(before.st_mode)) return -1;
+    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    if (!asi_cleanup_identity(fd, &before, device, private)) { close(fd); return -1; }
+    return fd;
+}
+static int asi_cleanup_root(const char *root, dev_t *device)
+{
+    char path[ASS_PATH];
+    if (root[0] != '/' || strlen(root) >= sizeof(path)) return -1;
+    memcpy(path, root + 1, strlen(root));
+    int fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    char *at = path, *part;
+    while ((part = strsep(&at, "/")) != NULL) {
+        int child = asi_cleanup_child(fd, part, 0, false);
+        if (close(fd) != 0) { if (child >= 0) close(child); return -1; }
+        if (child < 0) return -1;
+        fd = child;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_uid != geteuid() || (st.st_mode & 022)) {
+        close(fd); return -1;
+    }
+    *device = st.st_dev;
+    return fd;
+}
+static bool asi_unseal_fixture_generation(const struct ass_world *w, const struct asi_run *r)
+{
+    char pin[65]; dev_t device;
+    if (!asi_manifest_pin(r, pin)) return false;
+    /* Installer uses all64 SHA256 characters, not the truncated cleanup log. */
+    const char *const parts[] = {"alice", ".local", "share", "z23", "apps", pin};
+    int fd = asi_cleanup_root(w->root, &device);
+    if (fd < 0) return false;
+    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); ++i) {
+        int child = asi_cleanup_child(fd, parts[i], device, true);
+        if (close(fd) != 0) { if (child >= 0) close(child); return false; }
+        if (child < 0) return false;
+        fd = child;
+    }
+    bool ok = fchmod(fd, 0700) == 0;
+    if (close(fd) != 0) ok = false;
+    printf("installed fixture generation unsealed=%d manifest=%s root=%s\n", ok, pin, w->root);
+    return ok;
+}
+static int ass_installed(struct ass_world *w)
+{
+    if (!getenv("ZCL_TEST_INSTALLED_APP_BIN_DIR")) return 0;
+    int failures = 0; struct asi_run r = {0}; struct asi_env saved;
+    app_installed_source_init(&r.source); platform_process_init(&r.cli); platform_process_init(&r.display);
+    bool env_saved = asi_environment_save(&saved), cwd_changed = false;
+    TEST("normal release/install discovers SkyCombat and native consent creates an exact-source personal copy") {
+        struct sigaction chld;
+        ASSERT(env_saved && sigaction(SIGCHLD, NULL, &chld) == 0 && chld.sa_handler == SIG_DFL && !(chld.sa_flags & SA_NOCLDWAIT));
+        ASSERT(asi_prerequisites(w, &r) && asi_paths(w, &r));
+        ASSERT(asi_export(w, &r) && asi_original(w, &r));
+        ASSERT(asi_package(w, &r) && asi_install(w, &r));
+        ASSERT(asi_display(w, &r));
+        ASSERT(chdir(r.empty) == 0); cwd_changed = true;
+        ASSERT(asi_discovery(w, &r) && asi_no_consumer_state(&r));
+        ASSERT(asi_cancel(w, &r) && asi_confirm(w, &r));
+        ASSERT(asi_evidence(w, &r));
+        PASS();
+    } _test_next:;
+    if (!asi_cleanup(w, &r, &saved, env_saved, cwd_changed)) ++failures;
+    if (!failures && !asi_unseal_fixture_generation(w, &r)) {
+        printf("installed fixture unseal refused; retained=%s\n", w->root);
+        ++failures;
+    }
+    return failures;
+}
+
+static int ass_installed_preflight(struct ass_world *w)
+{
+    if (!getenv("ZCL_TEST_INSTALLED_APP_BIN_DIR")) return 0;
+    int failures = 0;
+    struct asi_run check = {0};
+    TEST("installed opt-in requires qualified release tools, Xvfb and game headers") {
+        ASSERT(asi_prerequisites(w, &check));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ass_cleanup_success(const struct ass_world *w, int failures)
+{
+    if (!failures && test_rm_rf_recursive(w->root) != 0) {
+        printf("app.seed skycombat: filesystem cleanup failed; retained=%s\n", w->root);
+        ++failures;
+    }
+    return failures;
+}
+
 int test_app_seed_skycombat(void);
 int test_app_seed_skycombat(void)
 {
@@ -144,6 +821,8 @@ int test_app_seed_skycombat(void)
         ASSERT(ass_world_init(&w));
         PASS();
     } _test_next:;
+    if (!failures)
+        failures += ass_installed_preflight(&w);
     if (!failures)
         failures += ass_seed(&w);
     if (!failures && missing)
@@ -157,11 +836,11 @@ int test_app_seed_skycombat(void)
                "host)\n");
     if (!failures && !missing && xvfb)
         failures += ass_runs_qa_frames(&w, xvfb);
+    if (!failures)
+        failures += ass_installed(&w);
     asf_xvfb_stop(&w.xvfb);
     ass_world_restore(&w);
-    if (!failures)
-        (void)test_rm_rf_recursive(w.root);
-    return failures;
+    return ass_cleanup_success(&w, failures);
 }
 
 #else
@@ -169,6 +848,10 @@ int test_app_seed_skycombat(void)
 int test_app_seed_skycombat(void);
 int test_app_seed_skycombat(void)
 {
+    if (getenv("ZCL_TEST_INSTALLED_APP_BIN_DIR")) {
+        printf("app_seed_skycombat... FAIL (installed acceptance requires Linux/Xvfb)\n");
+        return 1;
+    }
     printf("app_seed_skycombat... SKIP (Linux only: Xvfb)\n");
     return 0;
 }

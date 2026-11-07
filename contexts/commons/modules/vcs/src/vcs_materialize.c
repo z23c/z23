@@ -2,6 +2,7 @@
  * purpose: Safely materialize immutable ZVCS trees for confined consumers. */
 
 #include "vcs/vcs.h"
+#include "vcs_materialize_internal.h"
 
 #include "util/file_tree_ops.h"
 #include "vcs/package_manifest.h"
@@ -10,6 +11,7 @@
 #if defined(_WIN32)
 #include "platform/directory_transaction.h"
 #else
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -153,6 +155,23 @@ static int vcs_tree_materialize_windows(const char *object_store_root,
     return result;
 }
 #else
+/* Shared byte writer: CAS readers and verified transport use identical path,
+ * exclusive-create, mode, write/close and durability behavior. */
+static int materialize_bytes_posix(const char *destination,
+    const struct vcs_entry *entry, const uint8_t *bytes, size_t len,
+    uint32_t file_mode, bool durable)
+{
+    char path[VCS_MATERIALIZE_PATH_MAX], parent[VCS_MATERIALIZE_PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", destination, entry->path);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return VCS_REFUSED;
+    (void)snprintf(parent, sizeof(parent), "%s", path);
+    char *slash = strrchr(parent, '/');
+    if (slash) *slash = '\0';
+    struct zcl_result made = zcl_mkdir_p(parent, 0700);
+    uint32_t mode = file_mode ? file_mode : entry->mode & 0777u;
+    return made.ok && materialize_write(path, bytes, len, mode, durable)
+               ? VCS_OK : VCS_ERR;
+}
 /* One entry of the declared tree, or VCS_REFUSED/VCS_ERR without writing
  * anything if it fails the size/path/type check for this entry alone. */
 static int materialize_entry_posix(const char *object_store_root,
@@ -172,20 +191,7 @@ static int materialize_entry_posix(const char *object_store_root,
         free(bytes);
         return VCS_ERR;
     }
-    char path[VCS_MATERIALIZE_PATH_MAX];
-    char parent[VCS_MATERIALIZE_PATH_MAX];
-    int n = snprintf(path, sizeof(path), "%s/%s", destination, entry->path);
-    if (n <= 0 || (size_t)n >= sizeof(path)) {
-        free(bytes);
-        return VCS_REFUSED;
-    }
-    (void)snprintf(parent, sizeof(parent), "%s", path);
-    char *slash = strrchr(parent, '/');
-    if (slash) *slash = '\0';
-    struct zcl_result made = zcl_mkdir_p(parent, 0700);
-    uint32_t mode = file_mode ? file_mode : entry->mode & 0777u;
-    int result = made.ok && materialize_write(path, bytes, len, mode, durable)
-                     ? VCS_OK : VCS_ERR;
+    int result = materialize_bytes_posix(destination, entry, bytes, len, file_mode, durable);
     free(bytes);
     if (result == VCS_OK) *total += entry->size;
     return result;
@@ -251,4 +257,72 @@ int vcs_tree_materialize_readonly_disposable(const char *object_store_root,
 {
     return materialize_tree(object_store_root, tree_hash, destination,
                             maximum_bytes, file_mode, true, false);
+}
+
+#if !defined(_WIN32)
+/* Root no-follow and descriptor-bound ownership/emptiness. Stop at the first
+ * entry: this is not another recursive walker. Trusted ancestors and sole
+ * ownership remain required by the shared pathname writer. */
+static DIR *materialize_empty_private(const char *destination)
+{
+    int fd = open(destination, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_uid != geteuid() || (st.st_mode & 077u)) {
+        (void)close(fd); return NULL;
+    }
+    DIR *dir = fdopendir(fd);
+    if (!dir) { (void)close(fd); return NULL; }
+    errno = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        (void)closedir(dir); return NULL;
+    }
+    if (errno) { (void)closedir(dir); return NULL; }
+    return dir;
+}
+static bool materialize_payload_valid(const struct vcs_manifest *tree,
+    size_t length, const char *destination)
+{
+    size_t total = 0, prefix = strlen(destination);
+    for (size_t i = 0; i < tree->count; ++i) {
+        const struct vcs_entry *e = &tree->entries[i];
+        if (!S_ISREG(e->mode) || !vcs_package_path_valid(e->path) ||
+            e->size > length - total) return false;
+        size_t path = strlen(e->path);
+        if (prefix >= VCS_MATERIALIZE_PATH_MAX - 1u ||
+            path >= VCS_MATERIALIZE_PATH_MAX - prefix - 1u) return false;
+        total += (size_t)e->size;
+    }
+    return total == length;
+}
+static int materialize_payload_write(const struct vcs_manifest *tree,
+    const uint8_t *bytes, const char *destination)
+{
+    size_t off = 0;
+    for (size_t i = 0; i < tree->count; ++i) {
+        const struct vcs_entry *e = &tree->entries[i];
+        int rc = materialize_bytes_posix(destination, e, bytes + off, (size_t)e->size, 0, false);
+        if (rc != VCS_OK) return rc;
+        off += (size_t)e->size;
+    }
+    return VCS_OK;
+}
+#endif
+int vcs_materialize_verified_bytes_disposable(const struct vcs_manifest *tree,
+    const uint8_t *bytes, size_t length, const char *destination)
+{
+    if (!tree || !bytes || !destination) return VCS_ERR;
+#if defined(_WIN32)
+    (void)length;
+    return VCS_REFUSED;
+#else
+    if (!materialize_payload_valid(tree, length, destination)) return VCS_REFUSED;
+    DIR *dir = materialize_empty_private(destination);
+    if (!dir) return VCS_REFUSED;
+    int rc = materialize_payload_write(tree, bytes, destination);
+    if (closedir(dir) != 0) rc = VCS_ERR;
+    return rc;
+#endif
 }

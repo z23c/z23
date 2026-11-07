@@ -533,19 +533,20 @@ static int case_not_toplevel(const char *home, const char *checkout)
 static int case_list(struct ms *m)
 {
     int failures = 0;
-    TEST_CASE("tools/list holds exactly the ten tools") {
+    TEST_CASE("tools/list holds exactly the eleven tools") {
         size_t names = 0;
         ASSERT(ms_call(m, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":"
                           "\"tools/list\"}"));
         /* "name":" is a tool name; apps_open's schema key is "name":{. */
         for (const char *p = m->line; (p = strstr(p, "\"name\":\"")); p++)
             names++;
-        ASSERT_EQ(names, 10u);
+        ASSERT_EQ(names, 11u);
         ASSERT(has(m, "\"name\":\"apps_list\"") && has(m, "\"name\":\"apps_open\""));
         ASSERT(has(m, "\"name\":\"apps_keep\""));
         ASSERT(has(m, "\"name\":\"apps_adopt\""));
         ASSERT(has(m, "\"name\":\"apps_receive\""));
         ASSERT(has(m, "\"name\":\"apps_share\""));
+        ASSERT(has(m, "\"name\":\"apps_personalize\""));
         ASSERT(has(m, "\"name\":\"z23_search\""));
         ASSERT(has(m, "\"name\":\"z23_describe\""));
         ASSERT(has(m, "\"name\":\"z23_run\""));

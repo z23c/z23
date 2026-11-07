@@ -901,41 +901,6 @@ static bool present_pages_hover_live(const struct present_pages_run *run)
            (!run->hovers_first_page_only || run->current_page == 0u);
 }
 
-static int32_t present_pages_hover_key_step(const RGFW_event *event,
-    uint32_t item_count, bool *absolute, uint32_t *next_hover)
-{
-    if (event->key.value == RGFW_right)
-        return 1;
-    if (event->key.value == RGFW_left)
-        return -1;
-    if (event->key.value == RGFW_down)
-        return 1;
-    if (event->key.value == RGFW_up)
-        return -1;
-    if (event->key.value == RGFW_pageDown)
-        return 7;
-    if (event->key.value == RGFW_pageUp)
-        return -7;
-    if (event->key.value == RGFW_home) {
-        *next_hover = 0;
-        *absolute = true;
-    } else if (event->key.value == RGFW_end) {
-        *next_hover = item_count - 1u;
-        *absolute = true;
-    }
-    return 0;
-}
-
-static int32_t present_pages_hover_step(const RGFW_event *event,
-    uint32_t item_count, bool *absolute, uint32_t *next_hover)
-{
-    if (event->type == RGFW_mouseScroll && event->scroll.y < 0) return 1;
-    if (event->type == RGFW_mouseScroll && event->scroll.y > 0) return -1;
-    if (event->type != RGFW_keyPressed) return 0;
-    return present_pages_hover_key_step(event, item_count, absolute,
-                                        next_hover);
-}
-
 static void present_pages_hover_scroll(struct present_pages_run *run,
     const RGFW_event *event)
 {
@@ -944,7 +909,7 @@ static void present_pages_hover_scroll(struct present_pages_run *run,
     if (!run->hover || run->hovers_first_page_only) return;
     if (event->type != RGFW_mouseScroll && event->type != RGFW_keyPressed)
         return;
-    int32_t step = present_pages_hover_step(event, run->hover->item_count,
+    int32_t step = present_live_hover_step(event, run->hover->item_count,
                                             &absolute, &next_hover);
     bool moved = absolute || (step != 0 &&
         zcl_present_window_hover_step_v1(
@@ -1252,6 +1217,13 @@ static void present_pages_event(struct present_pages_run *run,
     RGFW_event *event)
 {
     if (present_pages_live_event(run, event)) return;
+    /* RGFW marks native close before returning its event. Give the live
+     * owner its veto/redraw opportunity before the loop sees shouldClose.
+     * Consumed actions already pumped above and must not dispatch twice. */
+    if (run->live && RGFW_window_shouldClose(run->window)) {
+        present_pages_pump(run, true);
+        return;
+    }
     present_pages_resize(run, event);
     if (run->redraw_failed) return;
     present_pages_hover_pointer(run, event);

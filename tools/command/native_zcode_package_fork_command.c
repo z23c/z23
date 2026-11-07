@@ -97,12 +97,12 @@ bool zcl_package_copy_plan_matches(const struct json_value *input,
     return true;
 }
 
-void zcl_package_copy_push_root(struct json_value *obj, const char *key,
+bool zcl_package_copy_push_root(struct json_value *obj, const char *key,
                                 const uint8_t root[32])
 {
     char hex[65];
     zcl_hex_encode(root, 32, hex);
-    (void)json_push_kv_str(obj, key, hex);
+    return json_push_kv_str(obj, key, hex);
 }
 
 static void zpc_hash_text(struct sha3_256_ctx *ctx, const char *text)

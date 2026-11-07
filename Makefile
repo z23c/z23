@@ -2623,15 +2623,26 @@ presentation-relaunch: presentation-demo
 
 # Explicit per-user Linux packaging. The presentation library itself retains
 # no filesystem authority; installation is a developer/operator action.
+# Freeze raw caller values for this target: neither Make functions nor shell
+# metacharacters in a directory name are executable installer instructions.
+presentation-desktop-install: override export HOME := $(value HOME)
+presentation-desktop-install: override export XDG_DATA_HOME := $(value XDG_DATA_HOME)
+presentation-desktop-install: override export PRESENTATION_DESKTOP_DATA_HOME := $(if $(strip $(value XDG_DATA_HOME)),$(value XDG_DATA_HOME),$(value HOME)/.local/share)
 presentation-desktop-install:
-	@install -d "$(HOME)/.local/share/applications" \
-		"$(HOME)/.local/share/icons/hicolor/scalable/apps"
+	@case "$${PRESENTATION_DESKTOP_DATA_HOME}" in /*) ;; *) printf '%s\n' 'presentation-desktop-install: data home must be absolute' >&2; exit 2;; esac
+	@command -v update-mime-database >/dev/null 2>&1 || { printf '%s\n' 'presentation-desktop-install: install shared-mime-info first' >&2; exit 2; }
+	@install -d "$${PRESENTATION_DESKTOP_DATA_HOME}/applications" \
+		"$${PRESENTATION_DESKTOP_DATA_HOME}/icons/hicolor/scalable/apps" \
+		"$${PRESENTATION_DESKTOP_DATA_HOME}/mime/packages"
 	@install -m 0644 platform/packaging/linux/org.zclassic.ZClassic23.desktop \
-		"$(HOME)/.local/share/applications/org.zclassic.ZClassic23.desktop"
+		"$${PRESENTATION_DESKTOP_DATA_HOME}/applications/org.zclassic.ZClassic23.desktop"
 	@install -m 0644 platform/packaging/linux/org.zclassic.ZClassic23.svg \
-		"$(HOME)/.local/share/icons/hicolor/scalable/apps/org.zclassic.ZClassic23.svg"
+		"$${PRESENTATION_DESKTOP_DATA_HOME}/icons/hicolor/scalable/apps/org.zclassic.ZClassic23.svg"
+	@install -m 0644 platform/packaging/linux/org.zclassic.ZClassic23.xml \
+		"$${PRESENTATION_DESKTOP_DATA_HOME}/mime/packages/org.zclassic.ZClassic23.xml"
+	@update-mime-database "$${PRESENTATION_DESKTOP_DATA_HOME}/mime"
 	@if command -v update-desktop-database >/dev/null 2>&1; then \
-		update-desktop-database "$(HOME)/.local/share/applications"; \
+		update-desktop-database "$${PRESENTATION_DESKTOP_DATA_HOME}/applications"; \
 	fi
 	@if command -v kbuildsycoca6 >/dev/null 2>&1; then \
 		kbuildsycoca6 >/dev/null; \

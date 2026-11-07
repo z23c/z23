@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_app_source_command.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PRIVILEGE, "Read and compare retained filesystem identities, write private export staging, and set only the newly created owned image to mode 0700 with fchmod; no privilege acquisition or execution")

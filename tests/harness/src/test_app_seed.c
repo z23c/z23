@@ -23,6 +23,19 @@
 #include "base/hex.h"
 #include "chain/chainparams.h"
 #include "command/app_build_make.h"
+#include "command/app_installed_source.h"
+#include "command/native_app_seed_installed.h"
+#include "command/native_app_personalize_command.h"
+#include "command/native_app_adopt.h"
+#include "command/native_app_receive_preview.h"
+#include "command/native_app_installed_copy.h"
+#include "base/safe_alloc.h"
+#include "platform/time_compat.h"
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+#include <pthread.h>
+#include <time.h>
+#endif
+#include "command/native_zcode_package_copy.h"
 #include "command/app_seed.h"
 #include "config/command_catalog.h"
 #include "mcp/mcp_policy.h"
@@ -30,8 +43,10 @@
 #include "plugin/plugin_pack.h"
 #include "sha3/sha3.h"
 #include "vcs/package_prepare.h"
+#include "util/file_tree_ops.h"
 
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -340,6 +355,369 @@ static int asd_second_owner(const struct asd_world *w)
     return failures;
 }
 
+static bool asd_export_input(struct asf_leaf *out, const struct asf_leaf *built,
+                             const struct asd_world *w, const char *copy,
+                             const char *destination)
+{
+    static const char *const keys[] = {
+        "version", "env_root", "dependency_root", "record_id"
+    };
+    asf_open(out);
+    bool ok = json_push_kv_str(&out->in, "app", "tiny") &&
+        json_push_kv_str(&out->in, "copy", copy) &&
+        json_push_kv_str(&out->in, "datadir", w->datadir1) &&
+        json_push_kv_str(&out->in, "artifact_dir", destination);
+    for (size_t i = 0; ok && i < sizeof(keys) / sizeof(keys[0]); ++i)
+        ok = json_push_kv_str(&out->in, keys[i], asf_get(built, keys[i]));
+    return ok;
+}
+
+static bool asd_export_identity(const char *copy, const struct asf_leaf *built,
+                                 const struct app_installed_source *source)
+{
+    struct asf_leaf probe; asf_open(&probe);
+    struct zcl_package_copy history = {0};
+    uint8_t package[32], record[32];
+    bool ok = zcl_hex_decode_lower(asf_get(built, "package_root"), package, 32) &&
+        zcl_hex_decode_lower(asf_get(built, "record_id"), record, 32) &&
+        zcl_package_copy_open_selected_as(copy, ZCL_PACKAGE_COPY_READ, &history,
+            &probe.out, "app.source.export", asf_get(built, "version"));
+    if (ok) ok = !memcmp(source->tree_root, history.selected_tree, 32) &&
+        !memcmp(source->package_root, package, 32) && !memcmp(source->record_id, record, 32);
+    zcl_package_copy_close(&history);
+    asf_close(&probe);
+    return ok;
+}
+
+static bool asd_export_rejects_record(const char *destination, const char *pin,
+                                       const char *image, struct app_installed_source *source)
+{
+    char why[256];
+    return asf_put(destination, APP_INSTALLED_SOURCE_RECORD, "tampered record") &&
+        !app_installed_source_load(destination, pin, image, source, why, sizeof(why)) &&
+        !source->bundle.bytes && !source->projection.bytes && !source->record.bytes;
+}
+
+static bool asd_verify_leaf(const char *destination, const struct asf_leaf *built,
+                             const struct asf_leaf *exported, const char *app)
+{
+    struct asf_leaf check; asf_open(&check);
+    bool ok = json_push_kv_str(&check.in, "app", app) &&
+        json_push_kv_str(&check.in, "artifact_dir", destination) &&
+        json_push_kv_str(&check.in, "projection_sha3", asf_get(exported, "projection_sha3")) &&
+        json_push_kv_str(&check.in, "image_file", asf_get(built, "image_path")) &&
+        asf_exec("app.source.verify", &check);
+    if (ok && !strcmp(app, "tiny"))
+        ok = check.out.status == ZCL_COMMAND_STATUS_PASSED &&
+            asf_flag(&check, "artifact_consistent") &&
+            json_get(&check.out.data, "source_package_checked") &&
+            json_get(&check.out.data, "source_package_checked")->type == JSON_BOOL &&
+            !asf_flag(&check, "source_package_checked");
+    else if (ok) ok = asf_refusal(&check, "APP_MISMATCH") && !check.out.error.mutated;
+    asf_close(&check);
+    return ok;
+}
+
+static bool asd_retained_stage(struct app_installed_source *source, bool expected)
+{
+    char scratch[512], staged[600], why[256], path[640], bytes[sizeof(k_main)] = {0};
+    bool staged_ok = app_installed_source_stage(source, scratch, sizeof(scratch),
+        staged, sizeof(staged), why, sizeof(why));
+    bool ok = staged_ok == expected && scratch[0];
+    if (ok && expected) {
+        int n = snprintf(path, sizeof(path), "%s/src/main.c", staged);
+        FILE *f = n > 0 && (size_t)n < sizeof(path) ? fopen(path, "rb") : NULL;
+        ok = f && fread(bytes, 1, sizeof(bytes), f) == sizeof(k_main) - 1 &&
+            !ferror(f) && feof(f) && !memcmp(bytes, k_main, sizeof(k_main) - 1);
+        if (f && fclose(f) != 0) ok = false;
+    } else if (ok) ok = !staged[0];
+    if (scratch[0] && !zcl_tree_remove(scratch).ok) ok = false;
+    return ok;
+}
+
+static bool asd_retained_derives(struct app_installed_source *source)
+{
+    bool ok = asd_retained_stage(source, true);
+    /* A valid source bundle is insufficient: a claimed different package or
+     * altered canonical recipe must fail before a key or make is needed. */
+    source->package_root[0] ^= 1;
+    bool rejects_package = asd_retained_stage(source, false);
+    source->package_root[0] ^= 1;
+    if (!source->recipe.length) return false;
+    source->recipe.bytes[0] ^= 1;
+    bool rejects_recipe = asd_retained_stage(source, false);
+    source->recipe.bytes[0] ^= 1;
+    return ok && rejects_package && rejects_recipe;
+}
+
+static bool asd_installed_seed_call(const struct app_installed_source *source,
+    const char *datadir, struct asf_leaf *leaf, bool stale_owner)
+{
+    asf_open(leaf);
+    if (!json_push_kv_str(&leaf->in, "app", source->app) ||
+        !json_push_kv_str(&leaf->in, "datadir", datadir)) return false;
+    char path[4400], publisher[67]; bool exists;
+    if (!app_personalize_key_probe(&leaf->out, path, sizeof(path), publisher, &exists)) return false;
+    if (stale_owner && exists) publisher[0] = 0;
+    const struct app_seed_installed_owner owner = {
+        .key_path = path, .publisher = publisher, .exists = stale_owner ? !exists : exists,
+    };
+    struct zcl_command_request request = {.input = &leaf->in};
+    app_seed_installed_commit(&request, &leaf->out, source, &owner);
+    return true;
+}
+
+static bool asd_adopted_plan(struct app_receive_preview *preview,
+    const struct json_value *adopted, const uint8_t original_package[32])
+{
+    struct asf_leaf build; asf_open(&build);
+    json_free(&build.in);
+    bool ok = app_receive_preview_build_input(preview, &build.in) && asf_pass("app.build", &build);
+    char original[65]; zcl_hex_encode(original_package, 32, original);
+    if (ok) ok = strcmp(asf_get(&build, "package_root"), original) &&
+        !strcmp(asf_get(&build, "version"), json_get_str(json_get(adopted, "version")));
+    struct json_value wire, confirm; json_init(&wire); json_set_object(&wire); json_init(&confirm);
+    ok = ok && json_push_kv_str(&wire, "command", "app.build") &&
+        json_push_kv_str(&wire, "status", "passed") && json_push_kv_bool(&wire, "ok", true) &&
+        json_push_kv(&wire, "data", &build.out.data) &&
+        app_receive_preview_confirm_input(preview, &wire, &confirm, &build.out);
+    json_free(&wire); json_free(&confirm); asf_close(&build);
+    return ok;
+}
+
+static bool asd_unsaved_unchanged(const char *source);
+
+static bool asd_received_publisher(struct json_value *in, const char *datadir,
+    const char *release)
+{
+    struct vcs_package_release persisted; uint8_t root[32], id[32]; char publisher[67];
+    if (!zcl_hex_decode_lower(release, root, 32) ||
+        zcl_package_copy_find_release(datadir, root, &persisted, id) != ZCL_PACKAGE_COPY_FOUND ||
+        memcmp(root, id, 32)) return false;
+    zcl_hex_encode(persisted.publisher_pubkey, sizeof(persisted.publisher_pubkey), publisher);
+    return json_push_kv_str(in, "publisher_fingerprint", publisher);
+}
+
+static bool asd_adopted_not_received(const struct asf_leaf *adopted, const char *datadir)
+{
+    struct asf_leaf received; asf_open(&received);
+    bool ok = json_push_kv_str(&received.in, "destination", asf_get(adopted, "copy")) &&
+        json_push_kv_str(&received.in, "stage", "commit") &&
+        json_push_kv_bool(&received.in, "executed", false) &&
+        json_push_kv_str(&received.in, "version", asf_get(adopted, "version")) &&
+        json_push_kv_str(&received.in, "release_id", asf_get(adopted, "release_root")) &&
+        json_push_kv_str(&received.in, "package_root", asf_get(adopted, "package_root")) &&
+        asd_received_publisher(&received.in, datadir, asf_get(adopted, "release_root"));
+    struct app_receive_preview *preview = NULL;
+    if (ok) ok = !app_receive_preview_create(&received.in, datadir, &preview, &received.out) &&
+        !preview && asf_refusal(&received, "PREVIEW_COPY_REFUSED");
+    app_receive_preview_close(preview);
+    asf_close(&received);
+    return ok;
+}
+
+static bool asd_adopted_unsaved(const struct asf_leaf *adopted)
+{
+    char path[ASD_PATH + 32];
+    int n = snprintf(path, sizeof(path), "%s/src/main.c", asf_get(adopted, "copy"));
+    return n > 0 && (size_t)n < sizeof(path) && asd_unsaved_unchanged(path);
+}
+
+static bool asd_copies_absent(const char *datadir)
+{
+    char path[ASD_PATH + 32]; struct stat st;
+    int n = snprintf(path, sizeof(path), "%s/copies", datadir);
+    return n > 0 && (size_t)n < sizeof(path) && lstat(path, &st) != 0 && errno == ENOENT;
+}
+
+static bool asd_adopt_identity_refused(const struct asf_leaf *seed, const char *datadir,
+    const uint8_t package[32], bool wrong_key)
+{
+    struct asf_leaf adopted; asf_open(&adopted);
+    char publisher[67], key[4408];
+    int k = snprintf(key, sizeof(key), "%s.changed", asf_get(seed, "key_path"));
+    const char *pub = asf_get(seed, "publisher");
+    bool ok = k > 0 && (size_t)k < sizeof(key) &&
+        strlen(pub) == 66 && asd_copies_absent(datadir);
+    if (ok) {
+        memcpy(publisher, pub, sizeof(publisher));
+        publisher[65] = publisher[65] == '0' ? '1' : '0';
+        ok = json_push_kv_str(&adopted.in, "release_root", asf_get(seed, "release_id")) &&
+            json_push_kv_str(&adopted.in, "datadir", datadir);
+    }
+    if (ok) {
+        struct zcl_command_request request = {.input = &adopted.in};
+        app_adopt_installed_confirmed(&request, &adopted.out, package,
+            wrong_key ? key : asf_get(seed, "key_path"), wrong_key ? pub : publisher);
+        ok = asf_refusal(&adopted, "PUBLISHER_CHANGED") && !adopted.out.error.mutated;
+    }
+    if (ok) ok = asd_copies_absent(datadir);
+    asf_close(&adopted);
+    return ok;
+}
+
+static bool asd_adopted_preview(const char *datadir, const struct asf_leaf *seed,
+    const uint8_t original_package[32])
+{
+    struct asf_leaf adopted; asf_open(&adopted);
+    bool ok = json_push_kv_str(&adopted.in, "release_root", asf_get(seed, "release_id")) &&
+        json_push_kv_str(&adopted.in, "datadir", datadir);
+    struct zcl_command_request request = {.input = &adopted.in};
+    if (ok) app_adopt_installed_confirmed(&request, &adopted.out, original_package,
+        asf_get(seed, "key_path"), asf_get(seed, "publisher"));
+    ok = ok && adopted.out.status == ZCL_COMMAND_STATUS_PASSED &&
+        strcmp(asf_get(&adopted, "root_commit"), asf_get(&adopted, "version")) &&
+        asf_put(asf_get(&adopted, "copy"), "src/main.c", "unsaved edits must survive export\n");
+    struct app_receive_preview *preview = NULL;
+    ok = ok && app_receive_preview_create_adopted(&adopted.out.data, datadir, &preview, &adopted.out) &&
+        asd_adopted_plan(preview, &adopted.out.data, original_package);
+    app_receive_preview_close(preview);
+    /* Reach the trust check with valid received locations and roots. */
+    if (ok) ok = asd_adopted_not_received(&adopted, datadir);
+    if (ok) ok = asd_adopted_unsaved(&adopted);
+    asf_close(&adopted);
+    return ok;
+}
+
+static bool asd_installed_seed_invalid(struct app_installed_source *source,
+    const char *datadir, const char *home)
+{
+    struct asf_leaf leaf;
+    char key[900];
+    (void)snprintf(key, sizeof(key), "%s/.z23/zcode_publisher.key", home);
+    source->package_root[0] ^= 1;
+    bool ok = asd_installed_seed_call(source, datadir, &leaf, false) &&
+        asf_refusal(&leaf, "INSTALLED_SOURCE_INVALID") && !leaf.out.error.mutated &&
+        access(key, F_OK) != 0;
+    source->package_root[0] ^= 1;
+    asf_close(&leaf);
+    return ok;
+}
+
+static bool asd_installed_seed_repeated(const struct app_installed_source *source,
+    const char *datadir, const char *release)
+{
+    struct asf_leaf leaf;
+    bool ok = asd_installed_seed_call(source, datadir, &leaf, false) &&
+        leaf.out.status == ZCL_COMMAND_STATUS_PASSED && asf_flag(&leaf, "existing") &&
+        !asf_flag(&leaf, "key_created") && !leaf.out.error.mutated &&
+        !strcmp(asf_get(&leaf, "release_id"), release);
+    asf_close(&leaf);
+    if (!ok) return false;
+    /* A key appearing after consent must refuse before signing. */
+    ok = asd_installed_seed_call(source, datadir, &leaf, true) &&
+        asf_refusal(&leaf, "PUBLISHER_CHANGED") && !leaf.out.error.mutated;
+    asf_close(&leaf);
+    return ok;
+}
+
+static bool asd_installed_seed_checks(struct app_installed_source *source,
+    const char *datadir, const char *home)
+{
+    if (!asd_installed_seed_invalid(source, datadir, home)) return false;
+    struct asf_leaf leaf;
+    char release[65], package[65];
+    zcl_hex_encode(source->package_root, 32, package);
+    bool ok = asd_installed_seed_call(source, datadir, &leaf, false) &&
+        leaf.out.status == ZCL_COMMAND_STATUS_PASSED && asf_flag(&leaf, "key_created") &&
+        !strcmp(asf_get(&leaf, "package_root"), package) && strlen(asf_get(&leaf, "release_id")) == 64;
+    (void)snprintf(release, sizeof(release), "%s", asf_get(&leaf, "release_id"));
+    if (ok) ok = asd_installed_seed_repeated(source, datadir, release) &&
+        asd_adopt_identity_refused(&leaf, datadir, source->package_root, true) &&
+        asd_adopt_identity_refused(&leaf, datadir, source->package_root, false) &&
+        asd_adopted_preview(datadir, &leaf, source->package_root);
+    asf_close(&leaf);
+    return ok;
+}
+
+static bool asd_installed_seed(struct app_installed_source *source)
+{
+    char home[512], old_home[1024], datadir[600];
+    const char *old = getenv("HOME");
+    if (!old || strlen(old) >= sizeof(old_home)) return false;
+    memcpy(old_home, old, strlen(old) + 1);
+    if (!test_mkdtemp(home, sizeof(home), "installed_seed")) return false;
+    (void)snprintf(datadir, sizeof(datadir), "%s/data", home);
+    bool ok = mkdir(datadir, 0700) == 0 && setenv("HOME", home, 1) == 0 &&
+        asd_installed_seed_checks(source, datadir, home);
+    if (setenv("HOME", old_home, 1) != 0) ok = false;
+    if (!zcl_tree_remove(home).ok) ok = false;
+    return ok;
+}
+
+static bool asd_export_verifies(const char *destination, const char *copy,
+                                 const struct asf_leaf *built, const struct asf_leaf *exported)
+{
+    const char *pin = asf_get(exported, "projection_sha3");
+    const char *image = asf_get(built, "image_path");
+    if (strlen(pin) != 64 || !image[0]) return false;
+    char wrong[65], why[256];
+    memcpy(wrong, pin, sizeof(wrong));
+    wrong[0] = wrong[0] == '0' ? '1' : '0';
+    struct app_installed_source source;
+    app_installed_source_init(&source);
+    bool ok = app_installed_source_load(destination, pin, image, &source, why, sizeof(why)) &&
+        !strcmp(source.app, "tiny") && source.bundle.length > 0 &&
+        asd_export_identity(copy, built, &source) &&
+        !app_installed_source_load(destination, wrong, image, &source, why, sizeof(why)) &&
+        !source.bundle.bytes && !source.projection.bytes &&
+        app_installed_source_load(destination, pin, image, &source, why, sizeof(why));
+    if (ok) ok = asd_retained_derives(&source) && asd_installed_seed(&source) &&
+        asd_export_rejects_record(destination, pin, image, &source);
+    app_installed_source_free(&source);
+    return ok;
+}
+
+static bool asd_export_no_overwrite(const struct asd_world *w, const char *copy,
+                                    const char *destination, const struct asf_leaf *built,
+                                    const struct asf_leaf *exported)
+{
+    struct asf_leaf repeated;
+    bool ok = asd_export_input(&repeated, built, w, copy, destination) &&
+        asf_exec("app.source.export", &repeated) &&
+        asf_refusal(&repeated, "OUTPUT_EXISTS") && !repeated.out.error.mutated;
+    asf_close(&repeated);
+    struct app_installed_source preserved; app_installed_source_init(&preserved);
+    char why[256];
+    /* The unchanged independently captured projection pin rechecks every
+     * retained member's exact bytes, not just whether its path still exists. */
+    if (ok) ok = app_installed_source_load(destination, asf_get(exported, "projection_sha3"),
+        asf_get(built, "image_path"), &preserved, why, sizeof(why));
+    app_installed_source_free(&preserved);
+    return ok;
+}
+
+static bool asd_unsaved_unchanged(const char *source)
+{
+    char text[64] = {0};
+    FILE *f = fopen(source, "rb");
+    bool same = f && fgets(text, sizeof(text), f) &&
+        !strcmp(text, "unsaved edits must survive export\n") &&
+        fgetc(f) == EOF && !ferror(f);
+    if (f && fclose(f) != 0) same = false;
+    return same;
+}
+
+static bool asd_export_saved(const struct asd_world *w, const char *copy,
+                              const struct asf_leaf *built)
+{
+    char destination[ASD_PATH], source[ASD_PATH + 32];
+    if (snprintf(destination, sizeof(destination), "%s/installed-source", w->root)
+            >= (int)sizeof(destination) ||
+        snprintf(source, sizeof(source), "%s/src/main.c", copy) >= (int)sizeof(source))
+        return false;
+    if (!asf_put(copy, "src/main.c", "unsaved edits must survive export\n")) return false;
+    struct asf_leaf exported;
+    bool ok = asd_export_input(&exported, built, w, copy, destination) &&
+        asf_pass("app.source.export", &exported) &&
+        asd_export_no_overwrite(w, copy, destination, built, &exported) &&
+        asd_verify_leaf(destination, built, &exported, "tiny") &&
+        asd_verify_leaf(destination, built, &exported, "different-app") &&
+        asd_export_verifies(destination, copy, built, &exported);
+    asf_close(&exported);
+    return ok && asd_unsaved_unchanged(source);
+}
+
 /* sha3 of the owner key file under home; the key bytes are never shown. */
 static bool asd_key_digest(const char *home, uint8_t out[32])
 {
@@ -421,6 +799,7 @@ static int asd_copy_builds(const struct asd_world *w)
         ASSERT(asf_build(&l, copy, w->datadir1));
         ASSERT(strlen(asf_get(&l, "image_sha3")) == 64);
         ASSERT(strcmp(asf_get(&l, "package_root"), w->package_root) == 0);
+        ASSERT(asd_export_saved(w, copy, &l));
         asf_close(&l);
         PASS();
     } _test_next:;
@@ -471,6 +850,183 @@ static int asd_refusals_app(const struct asd_world *w)
     return failures;
 }
 
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+enum asd_progress_case { ASD_PROGRESS_NORMAL, ASD_PROGRESS_CLOSE, ASD_PROGRESS_UI_FAIL, ASD_PROGRESS_PARTIAL,
+    ASD_PROGRESS_ALLOC, ASD_PROGRESS_MAIN_ALLOC, ASD_PROGRESS_START, ASD_PROGRESS_PREPARE };
+struct asd_progress_fixture {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    bool entered, released, finished, observed, waited;
+    unsigned calls;
+    enum asd_progress_case mode;
+};
+/* real-clock: condition deadline contains a native worker lifecycle fixture;
+ * no sleep constitutes acceptance, and every path releases the worker. */
+static bool asd_progress_wait(struct asd_progress_fixture *f, const bool *flag)
+{
+    struct timespec end;
+    if (clock_gettime(CLOCK_REALTIME, &end) != 0) return false;
+    end.tv_sec += 5;
+    while (!*flag) {
+        int rc = pthread_cond_timedwait(&f->cond, &f->mutex, &end);
+        if (rc != 0) return false;
+    }
+    return true;
+}
+static void asd_progress_worker(void *context, const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    struct asd_progress_fixture *f = context;
+    pthread_mutex_lock(&f->mutex);
+    ++f->calls; f->entered = true; pthread_cond_broadcast(&f->cond);
+    f->waited = asd_progress_wait(f, &f->released);
+    pthread_mutex_unlock(&f->mutex);
+    void *allocation = zcl_calloc(1, 1, "installed-copy-fixture");
+    free(allocation); /* Deliberately leave PASSED: worker counter must catch failure. */
+    if (!json_push_kv_str(&reply->data, "copy", "/fixture/saved-copy") ||
+        !json_push_kv_str(&reply->data, "version", zcl_package_copy_str(request->input, "version")))
+        zcl_package_copy_fail(reply, "OUT_OF_MEMORY", true, "fixture receipt allocation", "progress fixture");
+    reply->error.mutated = true;
+    if (f->mode == ASD_PROGRESS_PARTIAL)
+        zcl_package_copy_fail(reply, "FIXTURE_PARTIAL", true, "saved before controlled failure", "progress fixture");
+    pthread_mutex_lock(&f->mutex); f->finished = true;
+    pthread_cond_broadcast(&f->cond); pthread_mutex_unlock(&f->mutex);
+}
+static size_t asd_progress_pixels(const struct zcl_present_window_v1 *page)
+{
+    /* Bounded before multiplication: maximum 12 MiB RGB8 fixture raster. */
+    if (!page->pixels || page->pixel_format != ZCL_PRESENT_RGB8 ||
+        !page->width || !page->height || page->width > 2048 || page->height > 2048) return 0;
+    return (size_t)page->width * (size_t)page->height * 3u;
+}
+static bool asd_progress_close_pixels(const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live)
+{
+    const struct zcl_present_window_v1 *page = &pages->pages[0];
+    size_t size = asd_progress_pixels(page);
+    void *before = size ? zcl_malloc(size, "installed-copy/pixel-fixture") : NULL;
+    if (!before) return false;
+    memcpy(before, page->pixels, size);
+    uint32_t width = page->width, height = page->height;
+    bool redraw = false, close = true;
+    live->owner.update(live->owner.context, NULL, true, &redraw, &close);
+    bool ok = !close && redraw && page->width == width && page->height == height &&
+        asd_progress_pixels(page) == size && memcmp(before, page->pixels, size) != 0 &&
+        !strcmp(model->summary, "Finishing your copy");
+    free(before);
+    return ok;
+}
+static bool asd_progress_completed(struct asd_progress_fixture *f,
+    const struct zcl_present_window_live_view_v1 *live)
+{
+    pthread_mutex_lock(&f->mutex);
+    bool finished = asd_progress_wait(f, &f->finished);
+    pthread_mutex_unlock(&f->mutex);
+    if (!finished) return false;
+    int64_t end = platform_time_monotonic_ms() + 5000;
+    bool redraw = false, close = false;
+    do {
+        live->owner.update(live->owner.context, NULL, false, &redraw, &close);
+        if (close) return !redraw;
+        platform_sleep_ms(1); /* real-clock: poll native worker's release/acquire completion */
+    } while (platform_time_monotonic_ms() < end);
+    return false;
+}
+static bool asd_progress_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    (void)why; (void)cap;
+    struct asd_progress_fixture *f = context;
+    pthread_mutex_lock(&f->mutex);
+    bool entered = asd_progress_wait(f, &f->entered);
+    pthread_mutex_unlock(&f->mutex);
+    bool ok = entered && !strcmp(model->title, "Making your copy") && pages->page_count == 1;
+    if (f->mode != ASD_PROGRESS_UI_FAIL && f->mode != ASD_PROGRESS_NORMAL)
+        ok = ok && asd_progress_close_pixels(model, pages, live);
+    pthread_mutex_lock(&f->mutex);
+    f->observed = ok; f->released = true; pthread_cond_broadcast(&f->cond);
+    pthread_mutex_unlock(&f->mutex);
+    if (f->mode == ASD_PROGRESS_NORMAL) ok = ok && asd_progress_completed(f, live);
+    /* Return immediately, including failure: production must still join.
+     * This is lifecycle coverage, not a real-window or owner-consent proof. */
+    return ok && f->mode != ASD_PROGRESS_UI_FAIL;
+}
+static bool asd_progress_saved(const struct asd_progress_fixture *f, const struct asf_leaf *leaf)
+{
+    return !strcmp(asf_get(leaf, "copy"), "/fixture/saved-copy") &&
+        !strcmp(asf_get(leaf, "version"), "fixture-version") && leaf->out.error.mutated &&
+        f->calls == 1 && f->finished && f->waited && f->observed;
+}
+static bool asd_progress_normal(const struct asd_progress_fixture *f,
+    const struct asf_leaf *leaf, bool offer)
+{
+    return offer && asd_progress_saved(f, leaf) && leaf->out.status == ZCL_COMMAND_STATUS_PASSED &&
+        !json_get(&leaf->out.data, "continuation");
+}
+static bool asd_progress_result(const struct asd_progress_fixture *f,
+    const struct asf_leaf *leaf, bool offer)
+{
+    if (f->mode == ASD_PROGRESS_NORMAL)
+        return asd_progress_normal(f, leaf, offer);
+    if (offer) return false;
+    if (f->mode == ASD_PROGRESS_START || f->mode == ASD_PROGRESS_PREPARE)
+        return f->calls == 0 && !leaf->out.error.mutated &&
+            leaf->out.status != ZCL_COMMAND_STATUS_PASSED && !json_get(&leaf->out.data, "copy");
+    if (!asd_progress_saved(f, leaf)) return false;
+    if (f->mode == ASD_PROGRESS_PARTIAL) return asf_refusal(leaf, "FIXTURE_PARTIAL");
+    if (f->mode == ASD_PROGRESS_ALLOC) return asf_refusal(leaf, "OUT_OF_MEMORY");
+    return leaf->out.status == ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(asf_get(leaf, "continuation"), "adopted") &&
+        !asf_flag(leaf, "continuation_executed") &&
+        asf_flag(leaf, "copy_progress_ui_failed") == (f->mode == ASD_PROGRESS_UI_FAIL);
+}
+static bool asd_progress_main_fault(void)
+{
+    uint64_t before = zcl_alloc_failure_count();
+    zcl_alloc_fault_fail_next("installed-copy/main-fixture");
+    void *allocation = zcl_calloc(1, 1, "installed-copy/main-fixture");
+    bool ok = !allocation && zcl_alloc_failure_count() == before + 1;
+    free(allocation);
+    zcl_alloc_fault_clear();
+    return ok;
+}
+static bool asd_progress_case(enum asd_progress_case mode)
+{
+    struct asd_progress_fixture f = {.mode = mode};
+    if (pthread_mutex_init(&f.mutex, NULL) != 0) return false;
+    if (pthread_cond_init(&f.cond, NULL) != 0) { pthread_mutex_destroy(&f.mutex); return false; }
+    struct asf_leaf leaf; asf_open(&leaf);
+    bool ok = json_push_kv_str(&leaf.in, "version", "fixture-version");
+    struct zcl_command_request request = {.input = &leaf.in};
+    const struct app_installed_copy_test_hooks hooks = {
+        .commit = asd_progress_worker, .context = &f,
+        .worker_alloc_label = mode == ASD_PROGRESS_ALLOC ? "installed-copy-fixture" : NULL,
+        .refuse_start = mode == ASD_PROGRESS_START,
+    };
+    if (mode == ASD_PROGRESS_PREPARE) zcl_alloc_fault_fail_next("installed-copy/progress");
+    if (mode == ASD_PROGRESS_MAIN_ALLOC) ok = ok && asd_progress_main_fault();
+    bool offer = ok && zcl_test_app_installed_copy_progress(&request, &leaf.out,
+        asd_progress_present, &f, &hooks);
+    zcl_alloc_fault_clear();
+    ok = ok && asd_progress_result(&f, &leaf, offer);
+    asf_close(&leaf);
+    if (pthread_cond_destroy(&f.cond) != 0) ok = false;
+    if (pthread_mutex_destroy(&f.mutex) != 0) ok = false;
+    return ok;
+}
+static int asd_progress_cases(void)
+{
+    int failures = 0;
+    TEST("installed copy progress: close, UI failure, partial receipt, worker TLS and prestart failures") {
+        for (int i = ASD_PROGRESS_NORMAL; i <= ASD_PROGRESS_PREPARE; ++i)
+            ASSERT(asd_progress_case((enum asd_progress_case)i));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
 int test_app_seed(void);
 int test_app_seed(void)
 {
@@ -482,6 +1038,9 @@ int test_app_seed(void)
         PASS();
     } _test_next:;
     failures += asd_mcp_refuses();
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+    if (!failures) failures += asd_progress_cases();
+#endif
     if (!failures)
         failures += asd_staging_deterministic(&w);
     if (!failures)

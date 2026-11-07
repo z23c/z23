@@ -235,6 +235,7 @@ static int case_apps_tools(struct ma *m, long *app_pid)
         ASSERT(ma_has(m, "\"name\":\"apps_adopt\""));
         ASSERT(ma_has(m, "\"name\":\"apps_receive\""));
         ASSERT(ma_has(m, "\"name\":\"apps_share\""));
+        ASSERT(ma_has(m, "\"name\":\"apps_personalize\""));
         ASSERT(ma_has(m, "\"required\":[\"name\"]"));
     PASS(); }
     TEST("apps_list returns the launchable section") {
@@ -347,6 +348,12 @@ static int case_adopt_request(struct ma *m)
         ASSERT(ma_has(m, "FORK_ROOT_UNKNOWN") || ma_has(m, "RELEASES_UNREADABLE"));
         ASSERT(ma_tool(m, 17, "apps_adopt", "{\"release_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"confirm\":true}"));
         ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        ASSERT(ma_tool(m, 171, "apps_adopt", "{\"name\":\"skycombat\",\"confirm\":true}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        ASSERT(ma_tool(m, 172, "apps_adopt", "{\"name\":\"skycombat\",\"release_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        ASSERT(ma_tool(m, 173, "apps_adopt", "{\"name\":\"skycombat\"}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "INSTALLED_SOURCE_UNAVAILABLE"));
         ASSERT(ma_tool(m, 18, "z23_run", "{\"path\":\"app.adopt\",\"input\":{}}"));
         ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "MUTATION_REFUSED_OWNER_AUTHORITY"));
         ASSERT(ma_tool(m, 19, "z23_run", "{\"path\":\"zcode.package.adopt\",\"input\":{}}"));
@@ -383,7 +390,8 @@ static int case_receive_injections(struct ma *m)
     int failures = 0; char args[PATH_MAX * 3 + 512]; int n;
     TEST("apps_receive rejects caller trust, confirmation and malformed paths") {
         const char *const extras[] = {"\"confirm\":true", "\"trust_publisher\":\"x\"",
-                                      "\"trust_root\":\"x\"", "\"day\":1"};
+                                      "\"trust_root\":\"x\"", "\"day\":1",
+                                      "\"preview\":true", "\"preview\":false"};
         for (size_t i = 0; i < sizeof(extras)/sizeof(extras[0]); ++i) {
             n = snprintf(args, sizeof(args),
                 "{\"file\":\"%s/missing\",\"datadir\":\"%s/data\",\"destination\":\"%s/copy\",%s}",
@@ -608,6 +616,93 @@ _test_next:;
     return failures;
 }
 
+/* These requests use the real MCP child above, not a presenter shortcut.
+ * The missing kept choice deterministically stops before a native window. */
+static bool ma_no_personalize_key(const struct ma *m)
+{
+    char path[PATH_MAX + 64]; struct stat st;
+    int n = snprintf(path, sizeof(path), "%s/.z23/zcode_publisher.key", m->root);
+    return n > 0 && (size_t)n < sizeof(path) &&
+        lstat(path, &st) != 0 && errno == ENOENT;
+}
+static int case_personalize_request(struct ma *m)
+{
+    int failures = 0;
+    TEST("apps_personalize reaches the exact native owner handler without creating identity") {
+        ASSERT(ma_no_personalize_key(m));
+        ASSERT(ma_tool(m, 200, "apps_personalize",
+            "{\"name\":\"kept:missing\",\"expected_revision\":1}"));
+        ASSERT(ma_has(m, "\"isError\":true"));
+        ASSERT(ma_has(m, "\\\"command\\\":\\\"app.personalize\\\""));
+        ASSERT(ma_has(m, "SELECTION_UNAVAILABLE"));
+        ASSERT(!ma_has(m, "MUTATION_REFUSED_OWNER_AUTHORITY"));
+        ASSERT(ma_no_personalize_key(m));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int case_personalize_refusals(struct ma *m)
+{
+    static const char *const bad[] = {
+        "{}", "{\"name\":\"kept:missing\"}", "{\"expected_revision\":1}",
+        "{\"name\":true,\"expected_revision\":1}",
+        "{\"name\":\"\",\"expected_revision\":1}",
+        "{\"name\":\"kept:missing\",\"expected_revision\":\"1\"}",
+        "{\"name\":\"kept:missing\",\"expected_revision\":true}",
+        "{\"name\":\"kept:missing\",\"expected_revision\":0}",
+        "{\"name\":\"kept:missing\",\"expected_revision\":-1}",
+        "{\"name\":\"kept:missing\",\"expected_revision\":1,\"confirm\":true}",
+        "{\"name\":\"kept:missing\",\"expected_revision\":1,\"confirm\":false}",
+        "{\"name\":\"kept:missing\",\"expected_revision\":1,\"plan_id\":\"forged\"}",
+        "{\"name\":\"kept:missing\",\"expected_revision\":1,\"copy\":\"forbidden\"}",
+        "{\"name\":\"kept:missing\",\"expected_revision\":1,\"datadir\":\"forbidden\"}",
+        "{\"name\":\"kept:missing\",\"expected_revision\":1,\"version\":\"forged\"}",
+        "{\"name\":\"kept:missing\",\"expected_revision\":1,\"expected_head\":\"forged\"}",
+        "{\"name\":\"kept:missing\",\"expected_revision\":1,\"unknown\":true}",
+        "{\"name\":\"kept:missing\",\"name\":\"kept:other\",\"expected_revision\":1}",
+        "{\"name\":\"kept:missing\",\"expected_revision\":1,\"expected_revision\":2}",
+        "{\"name\":\"kept:missing\",\"name\":\"kept:other\"}"
+    };
+    int failures = 0;
+    TEST("apps_personalize rejects malformed, mixed, duplicate and caller decision inputs") {
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+            ASSERT(ma_tool(m, 201 + (int)i, "apps_personalize", bad[i]));
+            ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+            ASSERT(!ma_has(m, "SELECTION_UNAVAILABLE"));
+        }
+        ASSERT(ma_no_personalize_key(m));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int case_personalize_rpc_shape(struct ma *m)
+{
+    int failures = 0;
+    TEST("apps_personalize non-object arguments are a protocol error before dispatch") {
+        ASSERT(ma_tool(m, 229, "apps_personalize", "[]"));
+        ASSERT(ma_has(m, "\"code\":-32602"));
+        ASSERT(ma_has(m, "arguments must be an object"));
+        ASSERT(!ma_has(m, "SELECTION_UNAVAILABLE"));
+        ASSERT(ma_no_personalize_key(m));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int case_personalize_generic_refusal(struct ma *m)
+{
+    int failures = 0;
+    TEST("z23_run cannot use the native personalization allowance") {
+        ASSERT(ma_tool(m, 230, "z23_run",
+            "{\"path\":\"app.personalize\",\"input\":{\"name\":\"kept:missing\",\"expected_revision\":1}}"));
+        ASSERT(ma_has(m, "\"isError\":true") &&
+            ma_has(m, "MUTATION_REFUSED_OWNER_AUTHORITY"));
+        ASSERT(!ma_has(m, "SELECTION_UNAVAILABLE"));
+        ASSERT(ma_no_personalize_key(m));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_mcp_serve_apps(void);
 int test_mcp_serve_apps(void)
 {
@@ -634,6 +729,10 @@ int test_mcp_serve_apps(void)
     failures += case_receive_default_refusals(&m);
     failures += case_share_request(&m);
     failures += case_share_injections(&m);
+    failures += case_personalize_request(&m);
+    failures += case_personalize_refusals(&m);
+    failures += case_personalize_rpc_shape(&m);
+    failures += case_personalize_generic_refusal(&m);
 _test_next:;
     ma_stop_app(app_pid);
     if (started)

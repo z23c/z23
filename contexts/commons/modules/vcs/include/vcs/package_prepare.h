@@ -87,6 +87,17 @@ enum vcs_package_prepare_error vcs_package_prepare(
     const struct vcs_package_prepare_options *options,
     struct vcs_package_prepared *out, char *detail, size_t detail_cap);
 
+/* Full metadata admission and canonical content derivation, without release
+ * authority. Uses the same traversal, file selection, recipe, declaration lock
+ * and capsule stages as prepare(). No public key or sequence is required.
+ * On success release, signing_digest, release_body and release_body_len remain
+ * zero. No files, keys or stores are created. As for prepare(), out must not
+ * own live allocations on entry; free it before reuse. Failures after argument
+ * validation leave an initialized empty result. */
+enum vcs_package_prepare_error vcs_package_prepare_content(
+    const char *dir, struct vcs_package_prepared *out,
+    char *detail, size_t detail_cap);
+
 /* Read-only pre-initialization scan. It applies the exact same no-follow,
  * regular-file-only traversal as prepare(), and derives the existing recipe
  * layout without requiring zcode-package.json. Only out->manifest and

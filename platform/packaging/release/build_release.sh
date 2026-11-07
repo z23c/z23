@@ -38,6 +38,9 @@
 #   platform/packaging/release/build_release.sh --print-runtime-platforms
 #   platform/packaging/release/build_release.sh --print-bootstrap-platforms
 #   platform/packaging/release/build_release.sh --selftest
+#   Normal POSIX runtime requires: --app-source DIR --app-source-sha3 HEX
+#                                [--app-verifier /absolute/host/z23-dev]
+#   Intentional legacy runtime: --node-only (also required for Windows)
 #
 # Default --bin is <repo>/build/bin; default --out is
 # <repo>/build/release/z23-<platform>. Requires every member of that
@@ -55,6 +58,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 FLOOR_GATE="$REPO_ROOT/build/bin/z23-lint"
 NODE_AUDIT="$REPO_ROOT/tools/scripts/check_c23_node_binary.sh"
+APP_SOURCE=""
+APP_SOURCE_SHA3=""
+NODE_ONLY=0
+APP_VERIFIER="$REPO_ROOT/build/bin/z23-dev"
+APP_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire"
 # shellcheck source=tools/scripts/tor_stamp_lib.sh
 . "$REPO_ROOT/tools/scripts/tor_stamp_lib.sh"
 
@@ -265,7 +273,7 @@ file_nlink() {
 }
 
 write_sha256sums() {
-    local dir="$1" platform="${2:-linux-x86_64}"
+    local dir="$1" platform="${2:-linux-x86_64}" with_app="${3:-0}"
     # AGENT_CARD.md is a manifest member, not an optional extra: the card
     # tells a coding assistant which commands to run against the node, so
     # a tampered copy is an instruction-injection path into whatever agent
@@ -281,6 +289,10 @@ write_sha256sums() {
     local members
     members="$(release_binaries "$platform")" \
         || die "no release member set for platform $platform"
+    if [ "$with_app" = 1 ]; then
+        case "$platform" in linux-x86_64|darwin-arm64) ;; *) die "app source requires a POSIX release" ;; esac
+        members="$members $APP_MEMBERS"
+    fi
     (
         cd "$dir" || exit 1
         # GNU sha256sum two-space format; sorted so the file is deterministic.
@@ -298,15 +310,12 @@ write_sha256sums() {
 # packaging refuses rather than silently shipping checksummed files and
 # an unchecked one.
 #
-# tools/scripts/install_z23.sh and tools/scripts/deploy_z23_release.sh
-# hard-require SHA256SUMS to name exactly either this set (z23, zclassic23,
-# z23-package-verify, zclassic23-package-verify, z23-acme, zclassic23-acme,
-# and AGENT_CARD.md: seven names) or the previous five-name set that carries
-# only the zclassic23-<helper> names (so a new installer still takes an old
-# release). Both are independent checks in each file. Keep all three in agreement:
-# a name added or dropped here without the same change in both of those
-# files reopens the exact "release member silently missing" bug class this
-# script's own selftest below is built to catch.
+# tools/scripts/install_z23.sh accepts the closed app-capable thirteen-name
+# set as well as the current seven and legacy five node-only sets.
+# tools/scripts/deploy_z23_release.sh still accepts only seven/five: use
+# explicit --node-only for that legacy deployment path. It must refuse the
+# thirteen-member app release; do not drop members to make deployment pass.
+# App-capable releases use the installer path, with every member checked.
 copy_agent_card() {
     local out_dir="$1"
     [ -f "$SCRIPT_DIR/AGENT_CARD.md" ] \
@@ -352,6 +361,55 @@ link_or_copy() {
 # legacy name an already-installed daemon, installer or service unit uses.
 helper_alias_of() {
     printf 'zclassic23-%s\n' "${1#z23-}"
+}
+
+verify_app_source() {
+    local dir="$1" image="$2"
+    [ -x "$APP_VERIFIER" ] || die "missing host app verifier: $APP_VERIFIER"
+    "$APP_VERIFIER" app source verify --app=skycombat \
+        "--artifact_dir=$dir" "--projection_sha3=$APP_SOURCE_SHA3" \
+        "--image_file=$image" --json </dev/null >/dev/null \
+        || die "app source byte/record verification refused: $dir"
+}
+
+app_source_options() {
+    if [ "$NODE_ONLY" -eq 1 ]; then
+        [ -z "$APP_SOURCE" ] && [ -z "$APP_SOURCE_SHA3" ] || die "--node-only conflicts with app source inputs"
+    fi
+    if [ -z "$APP_SOURCE" ] && [ -z "$APP_SOURCE_SHA3" ]; then return 0; fi
+    [ -n "$APP_SOURCE" ] && [ "${#APP_SOURCE_SHA3}" -eq 64 ] \
+        || die "--app-source and --app-source-sha3 must be supplied together"
+    case "$APP_SOURCE_SHA3" in *[!0-9a-f]*) die "app projection digest must be lowercase64 hex" ;; esac
+    [ "$FRONT_DOOR" -eq 0 ] || die "app source belongs to a runtime release, not --front-door"
+    APP_SOURCE="$(cd "$APP_SOURCE" && pwd -P)" || die "app source directory unavailable"
+}
+
+require_app_mode() {
+    case "$1" in
+        linux-x86_64|darwin-arm64)
+            [ "$NODE_ONLY" -eq 1 ] || { [ -n "$APP_SOURCE" ] && [ -n "$APP_SOURCE_SHA3" ]; } \
+                || die "normal POSIX release requires --app-source DIR --app-source-sha3 HEX; use --node-only only for an intentional non-app release"
+            ;;
+        windows-x86_64)
+            [ "$NODE_ONLY" -eq 1 ] && [ -z "$APP_SOURCE" ] \
+                || die "Windows release supports only explicit --node-only"
+            ;;
+        *) die "no app packaging policy for $1" ;;
+    esac
+}
+
+copy_app_source() {
+    local out="$1" name
+    [ -n "$APP_SOURCE" ] || return 0
+    [ "$(cd "$out" && pwd -P)" != "$APP_SOURCE" ] || die "release output must differ from app source"
+    # Exact actual-record image bytes: no strip, rebuild, or game alias.
+    cp -f -- "$APP_SOURCE/image" "$out/z23-skycombat" || die "could not copy game image"
+    chmod 755 "$out/z23-skycombat"
+    for name in installed-source.json source.bundle manifest.wire recipe.wire app-build.wire; do
+        cp -f -- "$APP_SOURCE/$name" "$out/$name" || die "could not copy $name"
+        chmod 644 "$out/$name"
+    done
+    verify_app_source "$out" "$out/z23-skycombat"
 }
 
 package_from_bin() {
@@ -420,6 +478,14 @@ package_from_bin() {
     done
 
     strip_tool="$(platform_strip "$platform")"
+    require_app_mode "$platform"
+    if [ -n "$APP_SOURCE" ]; then
+        case "$platform" in linux-x86_64|darwin-arm64) ;; *) die "app source requires a POSIX release" ;; esac
+        verify_app_source "$APP_SOURCE" "$APP_SOURCE/image"
+        [ "$(platform_of_binary "$APP_SOURCE/image")" = "$platform" ] \
+            || die "game image platform differs from node release"
+        assert_platform_minimum_os "$platform" "$APP_SOURCE/image"
+    fi
     command -v "$strip_tool" >/dev/null 2>&1 || die "$strip_tool not found"
     # The symbol-floor gate is a host tool the release targets do not build.
     [ -x "$FLOOR_GATE" ] || make -C "$REPO_ROOT" build/bin/z23-lint >&2 \
@@ -427,6 +493,11 @@ package_from_bin() {
     [ -x "$NODE_AUDIT" ] || die "missing $NODE_AUDIT"
 
     mkdir -p "$out_dir"
+    out_dir="$(cd "$out_dir" && pwd -P)" || die "cannot resolve release output"
+    if [ -n "$APP_SOURCE" ]; then
+        [ "$(cd "$out_dir" && pwd -P)" != "$APP_SOURCE" ] || die "release output must differ from app source"
+    fi
+    for member in $APP_MEMBERS; do rm -f -- "$out_dir/$member"; done
     for member in $members; do rm -f "$out_dir/$member"; done
     rm -f "$out_dir/AGENT_CARD.md" "$out_dir/SHA256SUMS"
     strip_binary "$platform" "$src" "$out_dir/z23$exe" || die "strip failed"
@@ -451,7 +522,10 @@ package_from_bin() {
         assert_platform_minimum_os "$platform" "$out_dir/$member"
     done
     copy_agent_card "$out_dir"
-    write_sha256sums "$out_dir" "$platform"
+    copy_app_source "$out_dir"
+    local with_app=0
+    [ -z "$APP_SOURCE" ] || with_app=1
+    write_sha256sums "$out_dir" "$platform" "$with_app"
 
     # The glibc/GLIBCXX symbol floor is an ELF question and has no meaning for
     # a PE. Running it on one would not fail -- it would pass having graded
@@ -656,6 +730,45 @@ package_front_door() {
     say "packed front door in $out_dir (bootstrap for$packaged, install.sh, install.ps1)"
 }
 
+selftest_app_source() {
+    local tmp="$1" name rc=0
+    mkdir -p "$tmp/app-sums"
+    cp "$tmp/sums/"* "$tmp/app-sums/"
+    for name in $APP_MEMBERS; do printf 'inert %s\n' "$name" >"$tmp/app-sums/$name"; done
+    write_sha256sums "$tmp/app-sums" linux-x86_64 1
+    [ "$(wc -l <"$tmp/app-sums/SHA256SUMS")" -eq 13 ] || die "selftest: app set must have thirteen rows"
+    (cd "$tmp/app-sums" && sha256_check SHA256SUMS >/dev/null) || die "selftest: extended checksum set failed"
+    for name in $APP_MEMBERS; do
+        mv "$tmp/app-sums/$name" "$tmp/app-sums/$name.held"
+        rc=0; (write_sha256sums "$tmp/app-sums" linux-x86_64 1) >/dev/null 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] || die "selftest: missing app member accepted: $name"
+        mv "$tmp/app-sums/$name.held" "$tmp/app-sums/$name"
+    done
+    write_sha256sums "$tmp/app-sums" linux-x86_64 1
+    printf 'tamper\n' >>"$tmp/app-sums/app-build.wire"
+    rc=0; (cd "$tmp/app-sums" && sha256_check SHA256SUMS >/dev/null 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: app record tamper accepted"
+    rc=0; (write_sha256sums "$tmp/app-sums" windows-x86_64 1) >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: app source allowed on Windows"
+    rc=0; (APP_SOURCE="$tmp/app-sums"; APP_SOURCE_SHA3=""; app_source_options) >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: app source missing pin accepted"
+    # Wrapper refusal propagation only, not a successful native verification.
+    [ -x /usr/bin/false ] || die "selftest: executable /usr/bin/false is required"
+    rc=0; (APP_VERIFIER=/usr/bin/false; verify_app_source "$tmp/app-sums" "$tmp/app-sums/z23-skycombat") \
+        >/dev/null 2>"$tmp/app-verifier.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: native verifier failure ignored"
+    grep -q 'app source byte/record verification refused' "$tmp/app-verifier.err" \
+        || die "selftest: verifier refusal did not reach the executable"
+    rc=0; (NODE_ONLY=0; APP_SOURCE=""; APP_SOURCE_SHA3=""; require_app_mode linux-x86_64) >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: default POSIX release silently omitted app source"
+    (NODE_ONLY=1; APP_SOURCE=""; APP_SOURCE_SHA3=""; app_source_options; require_app_mode linux-x86_64; require_app_mode windows-x86_64) \
+        || die "selftest: explicit node-only compatibility refused"
+    rc=0; (NODE_ONLY=0; APP_SOURCE=""; APP_SOURCE_SHA3=""; require_app_mode windows-x86_64) >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: implicit Windows node-only accepted"
+    rc=0; (NODE_ONLY=1; APP_SOURCE="$tmp/app-sums"; app_source_options) >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: conflicting node/app modes accepted"
+}
+
 selftest() {
     local tmp rc name host_fixture host_platform
     tmp="$(mktemp -d /tmp/zcl-build-release-selftest.XXXXXX)" || die "mktemp failed"
@@ -670,7 +783,7 @@ selftest() {
     # Missing binaries refuse (subshell: die() must not kill the suite).
     mkdir -p "$tmp/empty"
     rc=0
-    (package_from_bin "$tmp/empty" "$tmp/out") >/dev/null 2>"$tmp/missing.err" || rc=$?
+    (NODE_ONLY=1; package_from_bin "$tmp/empty" "$tmp/out") >/dev/null 2>"$tmp/missing.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: missing-bin must exit 1, got $rc"
     grep -q 'no z23/zclassic23' "$tmp/missing.err" \
         || die "selftest: missing-bin must name the refusal"
@@ -687,7 +800,7 @@ selftest() {
     cp -f -- "$host_fixture" "$tmp/no-verifier/z23"
     chmod 755 "$tmp/no-verifier/z23"
     rc=0
-    (package_from_bin "$tmp/no-verifier" "$tmp/out") \
+    (NODE_ONLY=1; package_from_bin "$tmp/no-verifier" "$tmp/out") \
         >/dev/null 2>"$tmp/verifier.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: missing verifier must exit 1, got $rc"
     grep -q 'no z23-package-verify' "$tmp/verifier.err" \
@@ -702,7 +815,7 @@ selftest() {
     cp -f -- "$host_fixture" "$tmp/no-acme/zclassic23-package-verify"
     chmod 755 "$tmp/no-acme/zclassic23-package-verify"
     rc=0
-    (package_from_bin "$tmp/no-acme" "$tmp/out") \
+    (NODE_ONLY=1; package_from_bin "$tmp/no-acme" "$tmp/out") \
         >/dev/null 2>"$tmp/acme.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: missing z23-acme must exit 1, got $rc"
     grep -q 'no z23-acme' "$tmp/acme.err" \
@@ -1033,6 +1146,7 @@ selftest() {
         say "selftest: Linux bootstrap cut is not eligible on $host_platform (runtime checks passed)"
     fi
 
+    selftest_app_source "$tmp"
     say "selftest PASS"
     trap - EXIT
     rm -rf "$tmp"
@@ -1047,12 +1161,16 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) selftest; exit 0 ;;
         --front-door) FRONT_DOOR=1; shift ;;
+        --node-only) NODE_ONLY=1; shift ;;
         # Queries, so a gate can ask this script what it produces instead of
         # keeping a second copy of the answer.
         --print-runtime-platforms) runtime_platforms; exit 0 ;;
         --print-bootstrap-platforms) bootstrap_platforms; exit 0 ;;
         --bin) [ $# -ge 2 ] || die "--bin needs a directory"; BIN_DIR="$2"; shift 2 ;;
         --out) [ $# -ge 2 ] || die "--out needs a directory"; OUT_DIR="$2"; shift 2 ;;
+        --app-source) [ $# -ge 2 ] || die "--app-source needs a directory"; APP_SOURCE="$2"; shift 2 ;;
+        --app-source-sha3) [ $# -ge 2 ] || die "--app-source-sha3 needs a digest"; APP_SOURCE_SHA3="$2"; shift 2 ;;
+        --app-verifier) [ $# -ge 2 ] || die "--app-verifier needs a host executable"; APP_VERIFIER="$2"; shift 2 ;;
         --platform)
             [ $# -ge 2 ] || die "--platform needs a name"
             WANT_PLATFORM="$2"
@@ -1061,12 +1179,14 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         -h|--help)
-            sed -n '2,36p' "$0"
+            sed -n '2,51p' "$0"
             exit 0
             ;;
         *) die "unknown argument: $1" ;;
     esac
 done
+
+app_source_options
 
 # The front door is one tree for every platform, not one per platform: the
 # shims are the same two files whatever machine asks, and the per-platform

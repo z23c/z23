@@ -87,7 +87,10 @@ bool zcl_package_copy_plan_matches(const struct json_value *input,
                                    struct zcl_command_reply *reply,
                                    const char *command);
 
-void zcl_package_copy_push_root(struct json_value *obj, const char *key,
+/* Append lowercase SHA3 hex; false means JSON allocation/copy failed.
+ * Checked identity/input assembly must propagate false before accepting or
+ * dispatching that value. */
+bool zcl_package_copy_push_root(struct json_value *obj, const char *key,
                                 const uint8_t root[32]);
 
 /* Open dir's EXISTING ZVCS history (never creating one) as `access` says,

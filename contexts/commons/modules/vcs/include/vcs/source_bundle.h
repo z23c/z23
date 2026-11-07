@@ -33,6 +33,7 @@ enum vcs_source_bundle_result {
     VCS_SOURCE_BUNDLE_ERR_ROOT,
     VCS_SOURCE_BUNDLE_ERR_BLOB,
     VCS_SOURCE_BUNDLE_ERR_STORE,
+    VCS_SOURCE_BUNDLE_ERR_OUTPUT,
 };
 
 struct vcs_source_bundle_metrics {
@@ -116,5 +117,16 @@ enum vcs_source_bundle_result vcs_source_bundle_import(
     const uint8_t *wire, size_t wire_len,
     const uint8_t expected_tree_root[32], const char *workspace,
     struct vcs_source_bundle_metrics *metrics);
+
+/* Fully decode/authenticate before output, then reconstruct directly into an
+ * existing empty private destination under trusted ancestors. Caller owns it
+ * exclusively until completion and removes partial output on failure. No CAS,
+ * publication or durability promise: disposable source reconstruction only.
+ * Bounds/hash/path/type validation are identical to verify/import. POSIX modes
+ * are preserved; Windows explicitly refuses pending equivalent qualification.
+ * Metrics describe verified transport; CAS new/reused counters remain zero. */
+enum vcs_source_bundle_result vcs_source_bundle_materialize_disposable(
+    const uint8_t *wire, size_t wire_len, const uint8_t expected_tree_root[32],
+    const char *destination, struct vcs_source_bundle_metrics *metrics);
 
 #endif /* ZCL_VCS_SOURCE_BUNDLE_H */

@@ -2,6 +2,16 @@
  * purpose: Declare the test-only native owner adoption presenter boundary. */
 #ifndef ZCL_COMMAND_NATIVE_APP_ADOPT_H
 #define ZCL_COMMAND_NATIVE_APP_ADOPT_H
+#include <stdint.h>
+struct zcl_command_request;
+struct zcl_command_reply;
+/* Internal continuation after native installed-source consent and successful
+ * local seeding. Rechecks the exact release package and the identity returned
+ * by seeding before adoption. This is
+ * not a command or an authorization endpoint. */
+void app_adopt_installed_confirmed(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const uint8_t package[32],
+    const char *key_path, const char *publisher);
 #if defined(ZCL_TESTING)
 #include <stdbool.h>
 #include <stddef.h>

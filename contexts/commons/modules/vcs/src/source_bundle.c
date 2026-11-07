@@ -8,6 +8,7 @@
 #include "vcs/vcs.h"
 #include "vcs/vcs_object.h"
 #include "vcs_priv.h"
+#include "vcs_materialize_internal.h"
 
 #include <limits.h>
 #include <stdlib.h>
@@ -41,6 +42,7 @@ const char *vcs_source_bundle_result_string(
     case VCS_SOURCE_BUNDLE_ERR_ROOT: return "tree-root-mismatch";
     case VCS_SOURCE_BUNDLE_ERR_BLOB: return "blob-invalid";
     case VCS_SOURCE_BUNDLE_ERR_STORE: return "object-store";
+    case VCS_SOURCE_BUNDLE_ERR_OUTPUT: return "disposable-output";
     }
     return "unknown";
 }
@@ -330,6 +332,23 @@ enum vcs_source_bundle_result vcs_source_bundle_verify(
     if (result == VCS_SOURCE_BUNDLE_OK)
         source_bundle_decoded_free(&decoded);
     return result;
+}
+
+enum vcs_source_bundle_result vcs_source_bundle_materialize_disposable(
+    const uint8_t *wire, size_t wire_len, const uint8_t expected_tree_root[32],
+    const char *destination, struct vcs_source_bundle_metrics *metrics)
+{
+    source_bundle_metrics_init(metrics);
+    if (!wire || !expected_tree_root || !destination) return VCS_SOURCE_BUNDLE_ERR_NULL;
+    struct source_bundle_decoded decoded;
+    enum vcs_source_bundle_result result = source_bundle_decode(
+        wire, wire_len, expected_tree_root, &decoded, metrics);
+    if (result != VCS_SOURCE_BUNDLE_OK) return result;
+    int rc = vcs_materialize_verified_bytes_disposable(&decoded.manifest,
+        decoded.payload + decoded.manifest_len,
+        decoded.payload_len - decoded.manifest_len, destination);
+    source_bundle_decoded_free(&decoded);
+    return rc == VCS_OK ? VCS_SOURCE_BUNDLE_OK : VCS_SOURCE_BUNDLE_ERR_OUTPUT;
 }
 
 static enum vcs_source_bundle_result source_bundle_import_blobs(

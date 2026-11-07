@@ -2,6 +2,7 @@
  * Show an owner the exact verified adoption plan before making a copy. */
 #include "command/native_command.h"
 #include "command/native_app_adopt.h"
+#include "command/native_app_installed_copy.h"
 #include "command/native_app_confirm.h"
 #include "command/native_app_personalize_command.h"
 #include "command/native_zcode_package_copy.h"
@@ -375,13 +376,41 @@ static void ac_run(const struct zcl_command_request *request,
 void zcl_native_handle_app_adopt(const struct zcl_command_request *request,
                                  struct zcl_command_reply *reply)
 {
+    if (request && json_get(request->input, "name")) {
+        app_installed_copy_run(request, reply, NULL, NULL);
+        return;
+    }
     ac_run(request, reply, NULL, NULL);
+}
+
+void app_adopt_installed_confirmed(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const uint8_t package[32],
+    const char *key_path, const char *publisher)
+{
+    if (!key_path || key_path[0] != '/' || !ac_root(publisher, 33)) {
+        ac_fail(reply, "PUBLISHER_CHANGED", "The seeded publisher identity is unavailable.", AC_COMMAND);
+        return;
+    }
+    struct ac_plan *p = zcl_calloc(1, sizeof(*p), "app-installed-adopt");
+    if (!p) { ac_fail(reply, "OUT_OF_MEMORY", "Cannot prepare the personal copy.", AC_COMMAND); return; }
+    uint8_t actual[32];
+    if (ac_plan_read(request, reply, p)) {
+        if (!zcl_hex_decode_lower(p->package, actual, sizeof(actual)) || memcmp(actual, package, 32))
+            ac_fail(reply, "PACKAGE_CHANGED", "The seeded release does not match the approved installed source.", p->release);
+        else if (!p->key_exists || strcmp(p->key_path, key_path) ||
+                 strcmp(p->local_publisher, publisher))
+            ac_fail(reply, "PUBLISHER_CHANGED", "The publisher changed after the approved source was saved.", p->release);
+        else ac_commit(request, reply, p);
+    }
+    free(p);
 }
 #if defined(ZCL_TESTING)
 void zcl_test_app_adopt_run(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, zcl_test_app_adopt_presenter presenter, void *context)
 {
-    if (presenter) ac_run(request, reply, presenter, context);
+    if (presenter && request && json_get(request->input, "name"))
+        app_installed_copy_run(request, reply, presenter, context);
+    else if (presenter) ac_run(request, reply, presenter, context);
 }
 bool zcl_test_app_adopt_model(const struct json_value *plan,
     struct zcl_present_model_v1 *model, uint32_t *page_count)

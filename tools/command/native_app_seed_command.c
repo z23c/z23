@@ -25,6 +25,7 @@
 #include "command/native_command.h"
 
 #include "command/app_seed.h"
+#include "command/native_app_seed_installed.h"
 #include "command/native_app_personalize_command.h"
 #include "command/native_devagent.h"
 #include "command/native_zcode_package_copy.h"
@@ -33,6 +34,7 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
+#include "platform/path_compat.h"
 #include "platform/temp_directory.h"
 #include "plugin/plugin_dist.h"
 #include "sha3/sha3.h"
@@ -441,5 +443,145 @@ void zcl_native_handle_app_seed(const struct zcl_command_request *request,
             fprintf(stderr, "[app.seed] could not remove %s: %s\n", s->stage,
                     rm.message);
     }
+    free(s);
+}
+
+/* The native coordinator passes only the two identities already consented. */
+static bool asc_installed_shape(const struct json_value *input)
+{
+    if (!input || input->type != JSON_OBJ || input->num_children != 2) return false;
+    unsigned seen = 0;
+    for (size_t i = 0; i < input->num_children; ++i) {
+        unsigned bit = !strcmp(input->keys[i], "app") ? 1u :
+                       !strcmp(input->keys[i], "datadir") ? 2u : 0u;
+        if (!bit || (seen & bit) || input->children[i].type != JSON_STR) return false;
+        seen |= bit;
+    }
+    return seen == 3u;
+}
+
+static bool asc_installed_inputs(struct asc *s, const struct app_installed_source *source)
+{
+    if (!source || !asc_installed_shape(s->input)) {
+        asc_fail(s, "BAD_INPUT", false, "Retained source and exactly app/datadir strings are required.", ASC_COMMAND);
+        return false;
+    }
+    s->app = zcl_package_copy_str(s->input, "app");
+    s->datadir = zcl_package_copy_str(s->input, "datadir");
+    if (!app_seed_name_valid(s->app) || strcmp(s->app, source->app) ||
+        !platform_path_is_absolute(s->datadir)) {
+        asc_fail(s, "INSTALLED_BINDING_INVALID", false,
+            "App must match retained source and datadir must be explicitly absolute.", ASC_COMMAND);
+        return false;
+    }
+    if (!vcs_package_accept_chain_id(s->chain_id, sizeof(s->chain_id))) {
+        asc_fail(s, "NO_CHAIN", false, "No active chain is selected.", ASC_COMMAND);
+        return false;
+    }
+    s->options.chain_id = s->chain_id;
+    s->options.reward_address = "";
+    s->unconfined = true; /* No build sandbox ran; do not report landlock. */
+    return true;
+}
+
+static bool asc_installed_matches(struct asc *s, const struct app_installed_source *source)
+{
+    if (!memcmp(s->prepared.package_root, source->package_root, 32) &&
+        !memcmp(s->prepared.recipe_root, source->recipe_root, 32)) return true;
+    asc_fail(s, "INSTALLED_CONTENT_CHANGED", s->key_created,
+        "Prepared package or recipe differs from consented installed source.", ASC_COMMAND);
+    return false;
+}
+
+/* Staging can take time. Recheck the native consent's identity immediately
+ * before entering the existing owner lifecycle, without creating a key. */
+static bool asc_installed_owner_before(struct asc *s,
+    const struct app_seed_installed_owner *owner)
+{
+    if (!owner || !owner->key_path || !owner->publisher) {
+        asc_fail(s, "BAD_INPUT", false, "The consented publishing identity is required.", ASC_COMMAND);
+        return false;
+    }
+    char path[ASC_PATH], publisher[67]; bool exists = false;
+    if (!app_personalize_key_probe(s->reply, path, sizeof(path), publisher, &exists)) return false;
+    if (exists == owner->exists && !strcmp(path, owner->key_path) &&
+        !strcmp(publisher, owner->publisher)) return true;
+    asc_fail(s, "PUBLISHER_CHANGED", false,
+        "The publishing identity changed during source reconstruction; review a fresh request.", ASC_COMMAND);
+    return false;
+}
+
+/* A key appearing after the absent-key probe is not the key this invocation
+ * was authorized to create. Existing keys must still be the displayed one. */
+static bool asc_installed_owner_after(struct asc *s,
+    const struct app_seed_installed_owner *owner)
+{
+    char publisher[67];
+    zcl_hex_encode(s->options.publisher_pubkey, VCS_PACKAGE_RELEASE_PUBKEY_BYTES, publisher);
+    bool same = !strcmp(s->key_path, owner->key_path) &&
+        (owner->exists ? !strcmp(publisher, owner->publisher) : s->key_created);
+    if (same) return true;
+    asc_fail(s, "PUBLISHER_CHANGED", true,
+        "The acquired publishing identity differs from consent; nothing was signed or published.", ASC_COMMAND);
+    return false;
+}
+
+static bool asc_installed_derive(struct asc *s, const struct app_installed_source *source,
+    char *scratch, size_t scratch_cap, bool *owner_attempted,
+    const struct app_seed_installed_owner *owner)
+{
+    if (!asc_installed_inputs(s, source)) return false;
+    char why[256];
+    if (!app_installed_source_stage(source, scratch, scratch_cap,
+                                    s->stage, sizeof(s->stage), why, sizeof(why))) {
+        asc_fail(s, "INSTALLED_SOURCE_INVALID", false, why, ASC_COMMAND);
+        return false;
+    }
+    memcpy(s->source, s->stage, strlen(s->stage) + 1);
+    if (!asc_installed_owner_before(s, owner)) return false;
+    *owner_attempted = true;
+    if (!asc_owner_create(s) || !asc_installed_owner_after(s, owner) ||
+        !asc_prepare(s) || !asc_installed_matches(s, source) ||
+        !asc_existing(s)) return false;
+    asc_plan_id(s);
+    return true;
+}
+
+static void asc_installed_retire(struct asc *s, const char *scratch, bool owner_attempted)
+{
+    s->reply->error.mutated |= s->key_created ||
+        (owner_attempted && s->reply->status != ZCL_COMMAND_STATUS_PASSED);
+    if (s->prepared_live) vcs_package_prepared_free(&s->prepared);
+    if (!scratch[0]) return;
+    struct zcl_result rm = zcl_tree_remove(scratch);
+    if (!rm.ok) {
+        fprintf(stderr, "[app.seed installed] retained %s: %s\n", scratch, rm.message);
+        asc_fail(s, "STAGE_CLEANUP_FAILED", true,
+            "Private installed-source scratch could not be removed; retain and inspect it.", scratch);
+    }
+}
+
+void app_seed_installed_commit(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const struct app_installed_source *source,
+    const struct app_seed_installed_owner *owner)
+{
+    if (!reply) return;
+    struct asc *s = request ? zcl_calloc(1, sizeof(*s), "app.seed.installed.state") : NULL;
+    if (!s) {
+        zcl_package_copy_fail(reply, "ALLOCATION_FAILED", false,
+            "Installed seed state could not be initialized.", ASC_COMMAND);
+        return;
+    }
+    s->input = request->input;
+    s->reply = reply;
+    char scratch[PLATFORM_TEMP_PATH_MAX] = {0};
+    bool owner_attempted = false;
+    if (asc_installed_derive(s, source, scratch, sizeof(scratch), &owner_attempted, owner)) {
+        if (s->existing) {
+            asc_describe(s, "commit");
+            asc_next(s);
+        } else asc_publish(s);
+    }
+    asc_installed_retire(s, scratch, owner_attempted);
     free(s);
 }

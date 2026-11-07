@@ -6,6 +6,8 @@
 #include "test/test_core.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
+#include "command/native_app_receive_job.h"
+#include "json/json.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -502,6 +504,98 @@ static int test_spawn_capture_in_dir_fails_closed(void)
     return failures;
 }
 
+/* Receive's worker uses real trusted native executables, never a shell. */
+static int test_receive_job_invalid(void)
+{
+    int failures = 0;
+    struct json_value input; json_init(&input); json_set_object(&input);
+    struct app_receive_job *job = NULL;
+    uint64_t before = zcl_spawn_launch_count();
+    bool bad_path = app_receive_job_start("relative", APP_RECEIVE_JOB_OPEN, &input, &job) == APP_RECEIVE_JOB_BAD_INPUT;
+    bool bad_kind = app_receive_job_start("/bin/echo", (enum app_receive_job_command)99, &input, &job) == APP_RECEIVE_JOB_BAD_INPUT;
+    bool bad_input = app_receive_job_start("/bin/echo", APP_RECEIVE_JOB_OPEN, NULL, &job) == APP_RECEIVE_JOB_BAD_INPUT;
+    struct app_receive_job_result result;
+    memset(&result, 0xff, sizeof(result));
+    bool absent = !app_receive_job_poll(NULL, &result);
+    json_free(&input);
+    TEST("receive job: invalid requests launch nothing and clear observation") {
+        ASSERT(bad_path && bad_kind && bad_input && job == NULL);
+        ASSERT(zcl_spawn_launch_count() == before);
+        ASSERT(absent && !result.transport_ok && result.stdout_json == NULL);
+        ASSERT(app_receive_job_join_free(&job));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+struct receive_job_observation {
+    bool started, joined, polled, released, transport, observed, complete;
+    bool literal_args;
+    int exit_code;
+    size_t bytes;
+};
+static struct receive_job_observation receive_job_observe(const char *image)
+{
+    struct receive_job_observation o = {0};
+    struct json_value input; json_init(&input); json_set_object(&input);
+    struct app_receive_job *job = NULL;
+    o.started = app_receive_job_start(image, APP_RECEIVE_JOB_OPEN, &input, &job) == APP_RECEIVE_JOB_STARTED;
+    json_free(&input); /* Worker must own the serialized input already. */
+    if (!o.started) return o;
+    struct app_receive_job_result r;
+    (void)app_receive_job_poll(job, &r); /* May already be complete; no timing assertion. */
+    o.joined = app_receive_job_join(job);
+    o.polled = app_receive_job_poll(job, &r);
+    if (o.polled) {
+        o.transport = r.transport_ok; o.observed = r.evidence.exit_observed;
+        o.complete = r.evidence.stdout_complete; o.exit_code = r.evidence.exit_code;
+        o.bytes = r.stdout_len;
+        o.literal_args = r.stdout_json && strcmp(r.stdout_json, "app open --input={} --json\n") == 0;
+    }
+    o.released = app_receive_job_join_free(&job) && job == NULL;
+    return o;
+}
+static bool receive_job_lifecycle_observed(const struct receive_job_observation *o)
+{
+    return o->started && o->joined && o->polled && o->released;
+}
+static int test_receive_job_observed(void)
+{
+    int failures = 0;
+    struct receive_job_observation failed = receive_job_observe("/usr/bin/false");
+    struct receive_job_observation empty = receive_job_observe("/usr/bin/true");
+    struct receive_job_observation text = receive_job_observe("/bin/echo");
+    TEST("receive job: observed failures and empty stdout cannot pass transport") {
+        ASSERT(receive_job_lifecycle_observed(&failed));
+        ASSERT(failed.observed && failed.exit_code == 1 && !failed.transport);
+        ASSERT(receive_job_lifecycle_observed(&empty));
+        ASSERT(empty.observed && empty.exit_code == 0 && empty.complete);
+        ASSERT(empty.bytes == 0 && !empty.transport);
+        ASSERT(receive_job_lifecycle_observed(&text));
+        ASSERT(text.transport && text.literal_args);
+        /* Echo is deliberately NOT a JSON result. Parent validation remains
+         * mandatory: transport_ok is not native command success. */
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int test_receive_job_unknown(void)
+{
+    int failures = 0;
+    struct sigaction old, sa = {.sa_handler = SIG_DFL, .sa_flags = SA_NOCLDWAIT};
+    bool installed = sigaction(SIGCHLD, &sa, &old) == 0;
+    struct receive_job_observation o = {0};
+    if (installed) o = receive_job_observe("/bin/echo");
+    bool restored = !installed || sigaction(SIGCHLD, &old, NULL) == 0;
+    TEST("receive job: complete stdout with unknown child exit refuses transport") {
+        ASSERT(installed && restored);
+        ASSERT(receive_job_lifecycle_observed(&o));
+        ASSERT(o.complete && o.literal_args && !o.observed && o.exit_code == -1);
+        ASSERT(!o.transport);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_spawn_platform_arm(void);
 
 static int test_spawn_binary_exact(void)
@@ -814,6 +908,9 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_evidence_unknown_status();
     failures += test_spawn_evidence_exited_buffer();
     failures += test_spawn_evidence_io_failure();
+    failures += test_receive_job_invalid();
+    failures += test_receive_job_observed();
+    failures += test_receive_job_unknown();
     failures += test_spawn_capture_in_dir();
     failures += test_spawn_capture_in_dir_fails_closed();
 

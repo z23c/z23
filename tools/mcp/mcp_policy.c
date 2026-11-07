@@ -219,6 +219,16 @@ bool mcp_policy_app_share(const struct zcl_command_spec *spec)
            spec->transports == ZCL_COMMAND_TRANSPORT_NATIVE;
 }
 
+bool mcp_policy_app_personalize(const struct zcl_command_spec *spec)
+{
+    return spec && spec->path && strcmp(spec->path, "app.personalize") == 0 &&
+           spec->availability == ZCL_COMMAND_READY && spec->mode == ZCL_COMMAND_MODE_SYNC &&
+           spec->effect == ZCL_COMMAND_EFFECT_MUTATE && spec->risk == ZCL_COMMAND_RISK_APP_WRITE &&
+           spec->authority == ZCL_COMMAND_AUTH_OWNER && spec->layer == ZCL_COMMAND_LAYER_APP &&
+           spec->scope == ZCL_COMMAND_SCOPE_LOCAL && spec->confirmation == ZCL_COMMAND_CONFIRM_PLAN_COMMIT &&
+           spec->transports == ZCL_COMMAND_TRANSPORT_NATIVE;
+}
+
 /* Read leaves that return wallet amounts without declaring the wallet
  * request capability: the metaverse custody reports and the agent grant and
  * spend telemetry and the store purchase history. */

@@ -21,6 +21,8 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "command/native_evidence_judge.h"
+#include "command/native_app_receive_flow.h"
+#include "command/native_app_receive_job.h"
 #include "session/fleet_board_proto.h"
 
 #include "fleetledger/fleet_ledger.h"
@@ -1781,10 +1783,293 @@ static int t_soak_time_contract(void)
     return failures;
 }
 
+/* Synthetic boundary inputs, real continuation summary/finish and registry
+ * serializer. This tests encoded receipts, not Receive/preview authorization. */
+static bool rfw_receipt_base(struct json_value *data)
+{
+    static const char *const pins[] = {"release_id", "package_root", "version"};
+    char pin[65]; memset(pin, 'a', 64); pin[64] = 0;
+    char publisher[67]; memset(publisher, 'b', 66); publisher[66] = 0;
+    for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i)
+        if (!json_push_kv_str(data, pins[i], pin)) return false;
+    return json_push_kv_str(data, "stage", "commit") &&
+        json_push_kv_str(data, "publisher_fingerprint", publisher) &&
+        json_push_kv_str(data, "name", "fixture/receive-wire") &&
+        json_push_kv_str(data, "trust_record", "/private/fixture/trust") &&
+        json_push_kv_bool(data, "verified", true) &&
+        json_push_kv_bool(data, "executed", false) &&
+        json_push_kv_str(data, "destination", "");
+}
+static bool rfw_receipt(struct json_value *data)
+{
+    if (!rfw_receipt_base(data)) return false;
+    size_t n = json_write(data, NULL, 0);
+    if (n >= 8192) return false;
+    /* Force actual JSON escaping, not a decoded-length estimate. */
+    size_t left = 8192 - n, used = 0;
+    char path[8193];
+    while (left >= 6) { path[used++] = 1; left -= 6; }
+    while (left >= 2) { path[used++] = '"'; left -= 2; }
+    if (left) path[used++] = 'x';
+    path[used] = 0;
+    struct json_value *destination = &data->children[data->num_children - 1];
+    json_set_str(destination, path);
+    return destination->type == JSON_STR && json_write(data, NULL, 0) == 8192;
+}
+static bool rfw_private_body(struct json_value *data)
+{
+    char *body = malloc(60001);
+    if (!body) return false;
+    memset(body, 'x', 60000); body[60000] = 0;
+    static const char marker[] = "MUST_NOT_COPY_WORKER_BODY";
+    memcpy(body, marker, sizeof(marker) - 1);
+    bool ok = json_push_kv_str(data, "private_input", body);
+    free(body);
+    return ok;
+}
+static bool rfw_worker_data(struct json_value *data)
+{
+    static const char *const keys[] = {"stage", "version", "package_root", "plan_id",
+        "record_id", "image_sha3", "name", "ready_basis", "start_token", "mapped_proof"};
+    char text[65];
+    memset(text, 'a', 64); text[64] = 0;
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i)
+        if (!json_push_kv_str(data, keys[i], text)) return false;
+    return json_push_kv_bool(data, "ready", true) &&
+        json_push_kv_bool(data, "executed", true) &&
+        json_push_kv_int(data, "pid", INT64_MAX) &&
+        json_push_kv_int(data, "selection_revision", INT64_MAX) &&
+        rfw_private_body(data);
+}
+static bool rfw_worker(struct json_value *wire, bool failed)
+{
+    struct json_value data, error;
+    json_init(&data); json_set_object(&data); json_init(&error); json_set_object(&error);
+    char diagnostic[513];
+    /* Quotes require two encoded bytes each in the retained 160-byte excerpt. */
+    memset(diagnostic, '"', 512); diagnostic[512] = 0;
+    bool ok = rfw_worker_data(&data) &&
+        json_push_kv_str(wire, "status", failed ? "failed" : "passed");
+    if (failed)
+        ok = ok && json_push_kv(&error, "facts", &data) &&
+            json_push_kv_str(&error, "message", diagnostic) && json_push_kv(wire, "error", &error);
+    else ok = ok && json_push_kv(wire, "data", &data);
+    ok = ok && json_write(wire, NULL, 0) <= APP_RECEIVE_JOB_OUTPUT_MAX;
+    json_free(&error); json_free(&data);
+    return ok;
+}
+static void rfw_evidence(struct app_receive_job_result result[3], bool failed)
+{
+    memset(result, 0, 3 * sizeof(*result));
+    for (size_t i = 0; i < 3; ++i) {
+        result[i].evidence.exit_observed = true;
+        result[i].evidence.stdout_complete = true;
+        result[i].evidence.stderr_complete = true;
+        result[i].evidence.stderr_len = sizeof(result[i].evidence.stderr_tail);
+        result[i].evidence.stderr_observed = INT64_MAX;
+        memset(result[i].evidence.stderr_tail, 0xff, sizeof(result[i].evidence.stderr_tail));
+        /* Retention must select the tail, not the initial discarded bytes. */
+        memset(result[i].evidence.stderr_tail + result[i].evidence.stderr_len - 128, 0xab, 128);
+    }
+    if (failed) {
+        result[2].capture_status = -1;
+        result[2].evidence.exit_observed = false;
+        result[2].evidence.exit_code = -1;
+        result[2].evidence.timed_out = true;
+    }
+}
+static bool rfw_original(const struct json_value *original, const struct json_value *actual)
+{
+    char before[8193], after[8193];
+    for (size_t i = 0; i < original->num_children; ++i) {
+        const struct json_value *v = json_get(actual, original->keys[i]);
+        if (!v) return false;
+        size_t a = json_write(&original->children[i], before, sizeof(before));
+        size_t b = json_write(v, after, sizeof(after));
+        if (!a || a >= sizeof(before) || a != b || memcmp(before, after, a)) return false;
+    }
+    return true;
+}
+static bool rfw_pins(const struct json_value *summary)
+{
+    static const char *const keys[] = {"stage", "version", "package_root", "plan_id",
+        "record_id", "image_sha3", "name", "ready_basis", "start_token", "mapped_proof"};
+    char expected[65]; memset(expected, 'a', 64); expected[64] = 0;
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        const char *value = json_get_str(json_get(summary, keys[i]));
+        if (!value || strcmp(value, expected)) return false;
+    }
+    return json_get_int(json_get(summary, "pid")) == INT64_MAX &&
+        json_get_int(json_get(summary, "selection_revision")) == INT64_MAX;
+}
+static bool rfw_operation_matches(const struct json_value *op,
+    const char *tail, const char *expected_stage)
+{
+    const char *hex = json_get_str(json_get(op, "stderr_tail_hex"));
+    const char *stage = json_get_str(json_get(op, "operation"));
+    return hex && !strcmp(hex, tail) &&
+        json_get_int(json_get(op, "stderr_bytes_omitted")) == INT64_MAX - 128 &&
+        json_get_bool(json_get(op, "result_is_summary")) && !json_get(op, "private_input") &&
+        rfw_pins(op) && stage && !strcmp(stage, expected_stage);
+}
+static bool rfw_diagnostics(const struct json_value *data, bool failed)
+{
+    static const char *const stages[] = {"build-plan", "build-confirm", "open"};
+    const struct json_value *ops = json_get(data, "operations");
+    if (!ops || ops->type != JSON_ARR || json_size(ops) != 3) return false;
+    char tail[257];
+    for (size_t i = 0; i < 128; ++i) { tail[2*i] = 'a'; tail[2*i+1] = 'b'; }
+    tail[256] = 0;
+    for (size_t i = 0; i < 3; ++i) {
+        if (!rfw_operation_matches(json_at(ops, i), tail, stages[i])) return false;
+    }
+    const struct json_value *last = json_at(ops, 2);
+    return json_get_bool(json_get(last, "exit_observed")) == !failed &&
+        json_get_int(json_get(last, "exit_code")) == (failed ? -1 : 0);
+}
+static bool rfw_bool(const struct json_value *object, const char *key, bool expected)
+{
+    const struct json_value *value = json_get(object, key);
+    return value && value->type == JSON_BOOL && json_get_bool(value) == expected;
+}
+static bool rfw_failed(const struct json_value *data, const struct json_value *execution)
+{
+    const struct json_value *error = json_get(data, "continuation_error");
+    const char *message = json_get_str(json_get(error, "message_excerpt"));
+    const char *code = json_get_str(json_get(error, "code"));
+    const char *worker_message = json_get_str(json_get(json_at(json_get(data, "operations"), 2), "error_excerpt"));
+    char expected[161]; memset(expected, '"', 160); expected[160] = 0;
+    return execution->type == JSON_NULL && message && !strcmp(message, expected) &&
+        code && !strcmp(code, "PREVIEW_TIMEOUT") && worker_message && !strcmp(worker_message, expected) &&
+        rfw_bool(error, "received_copy_retained", true) &&
+        rfw_bool(error, "automatic_retry", false) && !json_get(data, "kept");
+}
+static bool rfw_outcome(const struct json_value *envelope, bool failed)
+{
+    const struct json_value *data = json_get(envelope, "data");
+    const struct json_value *execution = json_get(data, "continuation_executed");
+    const char *status = json_get_str(json_get(envelope, "status"));
+    const char *continuation = json_get_str(json_get(data, "continuation"));
+    if (!json_get_bool(json_get(envelope, "ok")) || !status || strcmp(status, "passed") ||
+        !continuation || strcmp(continuation, failed ? "failed" : "kept") || !execution) return false;
+    if (!failed) return execution->type == JSON_BOOL && json_get_bool(execution) &&
+        rfw_pins(json_get(data, "kept")) && !json_get(data, "continuation_error");
+    return rfw_failed(data, execution);
+}
+static bool rfw_edge(const struct zcl_command_spec *spec, struct zcl_command_reply *reply,
+    struct zcl_command_budget_fixture fixture, size_t measured)
+{
+    char wire[16385]; size_t usable = 0, n = 0;
+    fixture.budget_bytes = measured;
+    bool ok = zcl_command_registry_test_success_budget(spec, reply, &fixture,
+        &usable, wire, sizeof(wire), &n) && n == measured;
+    fixture.budget_bytes = measured - 1;
+    return ok && zcl_command_registry_test_success_budget(spec, reply, &fixture,
+        &usable, wire, sizeof(wire), &n) && n == 0 && wire[0] == 0;
+}
+static bool rfw_report(struct zcl_command_reply *reply, bool failed)
+{
+    struct json_value success, failure;
+    json_init(&success); json_set_object(&success);
+    json_init(&failure); json_set_object(&failure);
+    struct app_receive_job_result results[3]; rfw_evidence(results, failed);
+    const struct json_value *wires[] = {&success, &success, failed ? &failure : &success};
+    bool ok = rfw_worker(&success, false) && rfw_worker(&failure, true) &&
+        app_receive_flow_test_report(reply, results, wires, failed);
+    json_free(&failure); json_free(&success);
+    return ok;
+}
+/* Synchronous fixture dispatch adds the engine's post-handler contract check,
+ * which the bounded-serializer API intentionally does not perform. */
+static bool rfw_inject_stale_error;
+static void rfw_handler(const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    (void)request;
+    reply->error.mutated = true; /* Synthetic already-committed Receive. */
+    if (!rfw_receipt(&reply->data) || !rfw_report(reply, true)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "FIXTURE_FAILED", "fixture", false, false, "Cannot prepare wire fixture", "receive-wire");
+        return;
+    }
+    if (rfw_inject_stale_error)
+        (void)snprintf(reply->error.code, sizeof(reply->error.code), "STALE_FIXTURE_ERROR");
+}
+static bool rfw_dispatch(const struct zcl_command_spec *base, bool stale)
+{
+    struct zcl_command_spec spec = *base;
+    spec.path = "fixture.receive-wire";
+    spec.input_schema = NULL; spec.input_keys = NULL; spec.handler = rfw_handler;
+    struct zcl_command_registry registry = {.commands = &spec, .count = 1};
+    struct zcl_command_context context = {.registry = zcl_command_catalog(),
+        .granted_capabilities = ~(uint64_t)0, .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+    struct json_value input, envelope;
+    json_init(&input); json_set_object(&input); json_init(&envelope);
+    char wire[16385]; enum zcl_command_exit exit_code;
+    rfw_inject_stale_error = stale;
+    size_t n = zcl_command_registry_execute_json(&registry, &spec, &context, &input,
+        false, spec.path, "normal", 0, 0, NULL, wire, sizeof(wire), &exit_code);
+    rfw_inject_stale_error = false;
+    bool ok = n > 0 && n <= 16384 && json_read(&envelope, wire, n);
+    if (stale) {
+        const char *code = json_get_str(json_get(json_get(&envelope, "error"), "code"));
+        ok = ok && exit_code == ZCL_COMMAND_EXIT_INTERNAL && code && !strcmp(code, "INTERNAL_CONTRACT");
+    } else ok = ok && exit_code == ZCL_COMMAND_EXIT_OK && rfw_outcome(&envelope, true);
+    json_free(&envelope); json_free(&input);
+    return ok;
+}
+static int rfw_case(const struct zcl_command_spec *spec, bool failed)
+{
+    int failures = 0;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, spec->output_schema);
+    reply.error.mutated = true;
+    struct json_value original, envelope;
+    json_init(&original); json_init(&envelope);
+    bool ready = rfw_receipt(&reply.data) && json_copy_checked(&original, &reply.data);
+    CIB_CHECK("receive wire: full 8192-byte escaped committed receipt and worker inputs", ready);
+    bool produced = ready && rfw_report(&reply, failed);
+    CIB_CHECK("receive wire: actual compact producer and finish retain successful receive", produced &&
+        reply.status == ZCL_COMMAND_STATUS_PASSED && reply.exit_code == 0 && !reply.error.code[0]);
+    CIB_CHECK("receive wire: committed mutation truth retained", reply.error.mutated);
+    struct zcl_command_budget_fixture fixture = {.authority_evidence = "fixture:\"\\\n",
+        .debited_zat = INT64_MAX, .remaining_zat = INT64_MAX, .elapsed_us = INT64_MAX,
+        .presented = true, .alias = true};
+    size_t n = 0, usable = 0;
+    char wire[16385];
+    bool serialized = produced && zcl_command_registry_test_success_budget(spec, &reply,
+        &fixture, &usable, wire, sizeof(wire), &n);
+    bool decoded = serialized && n > 8192 && n <= 16384 && json_read(&envelope, wire, n);
+    CIB_CHECK("receive wire: actual full envelope fits 16KiB without serialize-zero", decoded);
+    if (decoded) {
+        CIB_CHECK("receive wire: every original receipt value preserved", rfw_original(&original, json_get(&envelope, "data")));
+        CIB_CHECK("receive wire: exact tail/omission count and observed or unknown exit", rfw_diagnostics(json_get(&envelope, "data"), failed));
+        CIB_CHECK("receive wire: failure never erases receipt or claims execution false", rfw_outcome(&envelope, failed));
+        CIB_CHECK("receive wire: arbitrary worker body excluded", !strstr(wire, "MUST_NOT_COPY_WORKER_BODY"));
+        CIB_CHECK("receive wire: encoded-size exact edge passes, one byte less refuses", rfw_edge(spec, &reply, fixture, n));
+    }
+    printf("  receive wire: failed=%d encoded_bytes=%zu usable_data=%zu\n", failed, n, usable);
+    json_free(&envelope); json_free(&original);
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+static int t_receive_continuation_wire(void)
+{
+    int failures = 0;
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.receive", NULL);
+    bool ready = spec && spec->budget_bytes == 16384;
+    CIB_CHECK("receive wire: real catalog contract is 16KiB", ready);
+    if (ready) {
+        failures += rfw_case(spec, false); failures += rfw_case(spec, true);
+        CIB_CHECK("receive wire: real executor accepts nested failure after committed receipt", rfw_dispatch(spec, false));
+        CIB_CHECK("receive wire: executor still rejects PASSED with stale outer error", rfw_dispatch(spec, true));
+    }
+    return failures;
+}
+
 int test_command_input_bounds(void)
 {
     printf("\n=== command_input_bounds: per-key input length rules ===\n");
     int failures = 0;
+    failures += t_receive_continuation_wire();
     failures += t_ops_state_explain_boolean();
     failures += t_discovery_transport_shapes();
     failures += t_discovery_transport_edges();

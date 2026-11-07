@@ -164,6 +164,7 @@ ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/vcs_revert.c", CAP_NONE,
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/vcs_walk.c", CAP_DYNLOAD|CAP_FS_READ|CAP_FS_WRITE, "Resolves optional Windows directory APIs while walking retained roots.")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_science_platform.c", CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("tools/command/cli_render.c", CAP_NONE, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_app_commit_progress.c", CAP_NONE, "Windows preserves synchronous native commit; POSIX worker diagnostics and completion clock are excluded")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_activation_command.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_command.c", CAP_CLOCK|CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_claim_command.c", CAP_NONE, "")

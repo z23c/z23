@@ -243,7 +243,9 @@ struct zpb_receive {
     struct vcs_package_recipe recipe;
     bool parsed;
     char scratch[PLATFORM_TEMP_PATH_MAX];
+#ifdef _WIN32
     char store[ZPB_PATH_MAX];
+#endif
     char src[ZPB_PATH_MAX];
     struct vcs_package_publish_report report;
     char fingerprint[67];
@@ -297,28 +299,33 @@ static bool zpb_load(struct zpb_receive *s)
     return true;
 }
 
-/* Rebuild the exact saved tree from the source bundle in private scratch.
- * Verified import installs canonical objects before strict reconstruction.
- * Only scratch/source is disposable; import and persistent receive keep
- * their existing durability barriers. */
+/* Rebuild verified bytes directly into disposable private scratch on POSIX.
+ * Windows retains verified CAS import until direct reconstruction is qualified.
+ * Persistent receive keeps its separate publication durability barriers. */
 static bool zpb_materialize(struct zpb_receive *s)
 {
     struct vcs_source_bundle_metrics metrics;
-    int a = 0, b = 0;
+    int b = 0;
     bool ok = platform_temp_directory_create("z23-receive-", s->scratch,
                                              sizeof(s->scratch));
-    if (ok) {
-        a = snprintf(s->store, sizeof(s->store), "%s/store", s->scratch);
+    if (ok)
         b = snprintf(s->src, sizeof(s->src), "%s/source", s->scratch);
-    }
-    ok = ok && a > 0 && (size_t)a < sizeof(s->store) && b > 0 &&
-         (size_t)b < sizeof(s->src) && zcl_mkdir_p(s->store, 0700).ok &&
-         zcl_mkdir_p(s->src, 0700).ok &&
+    ok = ok && b > 0 && (size_t)b < sizeof(s->src) &&
+         zcl_mkdir_p(s->src, 0700).ok;
+#ifdef _WIN32
+    int a = ok ? snprintf(s->store, sizeof(s->store), "%s/store", s->scratch) : 0;
+    ok = ok && a > 0 && (size_t)a < sizeof(s->store) &&
+         zcl_mkdir_p(s->store, 0700).ok &&
          vcs_source_bundle_import(s->file.source, s->file.source_len,
                                   s->file.tree, s->store, &metrics) ==
              VCS_SOURCE_BUNDLE_OK &&
          vcs_tree_materialize_readonly_disposable(s->store, s->file.tree, s->src,
                               VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) == VCS_OK;
+#else
+    ok = ok && vcs_source_bundle_materialize_disposable(
+        s->file.source, s->file.source_len, s->file.tree, s->src, &metrics) ==
+        VCS_SOURCE_BUNDLE_OK;
+#endif
     return ok || zpb_refuse(s, "the source tree does not rebuild from the "
                                "bundle");
 }
