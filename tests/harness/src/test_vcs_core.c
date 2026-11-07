@@ -3118,6 +3118,11 @@ int test_vcs_core(void)
     failures += t_torn_commit_log(dir);
     test_rm_rf_recursive(dir);
 
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "torn_history");
+    { extern int test_vcs_torn_history(const char *root);
+      failures += test_vcs_torn_history(dir); }
+    test_rm_rf_recursive(dir);
+
     test_make_tmpdir(dir, sizeof(dir), "vcs_core", "seal");
     failures += t_seal(dir);
     test_rm_rf_recursive(dir);
