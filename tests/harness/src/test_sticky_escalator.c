@@ -1306,6 +1306,88 @@ static int t11h_terminal_refold_flysync_hold(void)
     return failures;
 }
 
+/* ── T11I: the ARMING rungs defer while FlySync holds header sync ───────────
+ * self_mint_refold and rebootstrap only arm the durable refold (no respawn),
+ * but the next boot consumes any pending arm, so an arm written during a hold
+ * would throw away what FlySync fetched. With the hold active neither writes
+ * an arm; with it released both arm exactly as before. */
+static int t11i_arming_rungs_flysync_hold(void)
+{
+    int failures = 0;
+    struct se_fixture fx;
+    SE_CHECK("T11I: setup fixture", setup_fixture(&fx, "t11i_arm_hold"));
+    sqlite3 *db = progress_store_db();
+    SE_CHECK("T11I: make rederive rung an honest no-op",
+             put_tip_log(db, A + 2, 1, &fx.hashes[2]) &&
+             put_tip_log(db, A + 3, 1, &fx.hashes[3]) &&
+             seed_coins_applied(db, A + 4) &&
+             seed_cursor(db, "tip_finalize", A + 3));
+
+    sync_monitor_set_context(NULL, NULL, &fx.ms);
+    sticky_escalator_test_reset();
+    stage_reducer_frontier_reset_detect_memo_for_testing();
+    reducer_frontier_provable_tip_reset();
+    reducer_frontier_provable_tip_set(1000);
+    sticky_escalator_set_datadir(fx.dir);
+    sticky_escalator_test_set_refold_artifact_available(1);
+    sticky_escalator_test_set_suppress_refold_restart(true);
+
+    sticky_escalator_note_stall("test_arm_hold");
+    int64_t t = (int64_t)platform_time_wall_time_t();
+    for (int i = 0; i < 4; i++)
+        (void)sticky_escalator_test_drive(0, t + 31 + i);
+    SE_CHECK("T11I: ladder reached self_mint_refold",
+             sticky_escalator_test_rung() == STICKY_RUNG_SELF_MINT_REFOLD &&
+             !boot_auto_refold_pending(fx.dir));
+
+    char why[320] = {0};
+    flysync_island_set_requested(true);
+    SE_CHECK("T11I: FlySync holds header sync",
+             flysync_island_boot_gate(fx.dir, NULL, why, sizeof(why)) &&
+             flysync_island_holds_header_sync());
+    SE_CHECK("T11I: held self_mint_refold holds and writes no arm",
+             sticky_escalator_test_drive(0, t + 35) ==
+                 STICKY_RUNG_SELF_MINT_REFOLD &&
+             !boot_auto_refold_pending(fx.dir));
+    SE_CHECK("T11I: still no arm on a second held tick",
+             sticky_escalator_test_drive(0, t + 36) ==
+                 STICKY_RUNG_SELF_MINT_REFOLD &&
+             !boot_auto_refold_pending(fx.dir));
+
+    flysync_island_test_reset();
+    SE_CHECK("T11I: released self_mint_refold arms as before",
+             sticky_escalator_test_drive(0, t + 37) ==
+                 STICKY_RUNG_WIDEN_PEERS &&
+             boot_auto_refold_pending(fx.dir));
+    SE_CHECK("T11I: widen_peers (no connman) -> rebootstrap",
+             sticky_escalator_test_drive(0, t + 38) ==
+                 STICKY_RUNG_REBOOTSTRAP);
+    boot_auto_refold_clear(fx.dir);
+    SE_CHECK("T11I: no arm going into rebootstrap",
+             !boot_auto_refold_pending(fx.dir));
+
+    flysync_island_set_requested(true);
+    SE_CHECK("T11I: FlySync holds header sync again",
+             flysync_island_boot_gate(fx.dir, NULL, why, sizeof(why)) &&
+             flysync_island_holds_header_sync());
+    SE_CHECK("T11I: held rebootstrap holds and writes no arm",
+             sticky_escalator_test_drive(0, t + 39) ==
+                 STICKY_RUNG_REBOOTSTRAP &&
+             !boot_auto_refold_pending(fx.dir));
+
+    flysync_island_test_reset();
+    SE_CHECK("T11I: released rebootstrap arms as before",
+             sticky_escalator_test_drive(0, t + 40) ==
+                 STICKY_RUNG_REFOLD_FROM_ANCHOR &&
+             boot_auto_refold_pending(fx.dir));
+
+    flysync_island_test_reset();
+    sticky_escalator_set_datadir(NULL);
+    reducer_frontier_provable_tip_reset();
+    teardown_fixture(&fx);
+    return failures;
+}
+
 /* ── T12: resnapshot detects the nearest SELF-VERIFIED rewind base ───────
  * With NO base it names the typed blocker resnapshot_no_base and advances.
  * With a ratified seal reachable AND the stage_rederive_range primitive now
@@ -1970,6 +2052,7 @@ int test_sticky_escalator(void)
     failures += t10_widen_peers_at_floor();
     failures += t11_refold_arm_and_terminal_rung();
     failures += t11h_terminal_refold_flysync_hold();
+    failures += t11i_arming_rungs_flysync_hold();
     failures += t12_resnapshot_base_selection();
     failures += t13_refold_marker_withdraw();
     failures += t14_flat_repair_churn_advances();
