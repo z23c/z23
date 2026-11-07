@@ -193,12 +193,22 @@ static int bll_basic_checks(void)
 
     /* ── 2. Missing datadir → NOT_FOUND. */
     {
-        struct block_log_legacy *h = NULL;
-        struct block_log_port port = {0};
-        struct zcl_result r = block_log_legacy_open(
-                "/tmp/zcl_no_such_legacy_dir_42424242", &h, &port);
-        BLL_CHECK("open(missing) → NOT_FOUND",
-                  !r.ok && r.code == BLOCK_LOG_ERR_NOT_FOUND);
+        /* The missing path lives under this test's own fresh temp dir, so
+         * a stale shared /tmp directory can never make it exist. */
+        char tmpl[512];
+        char *dir = test_mkdtemp(tmpl, sizeof tmpl, "zcl_bll_missing");
+        BLL_CHECK("mkdtemp missing parent", dir != NULL);
+        if (dir) {
+            char missing[600];
+            int mn = snprintf(missing, sizeof missing, "%s/no_such_dir", dir);
+            BLL_CHECK("missing path fits", mn > 0 && (size_t)mn < sizeof missing);
+            struct block_log_legacy *h = NULL;
+            struct block_log_port port = {0};
+            struct zcl_result r = block_log_legacy_open(missing, &h, &port);
+            BLL_CHECK("open(missing) → NOT_FOUND",
+                      !r.ok && r.code == BLOCK_LOG_ERR_NOT_FOUND);
+            BLL_CHECK("remove missing fixture", test_rm_rf_recursive(dir) == 0);
+        }
     }
 
     /* ── 3. Datadir with no blocks/ subdir → NOT_FOUND. */
