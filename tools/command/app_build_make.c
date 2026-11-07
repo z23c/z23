@@ -436,19 +436,59 @@ struct abm_depcheck {
     size_t why_cap;
 };
 
+/* Lexically fold "." and ".." segments of a copy-relative path the way the
+ * compiler spelled it (a source's `#include "../x.h"` lands in a depfile
+ * as "dir/sub/../x.h"). The copy holds no symlinks (it prepared as a
+ * package), so the folded path names the same file. False when the path
+ * climbs above the copy or does not fit. */
+static bool abm_fold_segment(const char *seg, size_t n, char *out, size_t cap,
+                             size_t *len)
+{
+    if (n == 0 || (n == 1 && seg[0] == '.'))
+        return true;
+    if (n == 2 && seg[0] == '.' && seg[1] == '.') {
+        if (*len == 0)
+            return false;
+        while (*len > 0 && out[*len - 1u] != '/')
+            (*len)--;
+        *len = *len > 0 ? *len - 1u : 0;
+        return true;
+    }
+    if (*len + 1u + n + 1u > cap)
+        return false;
+    if (*len)
+        out[(*len)++] = '/';
+    memcpy(out + *len, seg, n);
+    *len += n;
+    return true;
+}
+
+static bool abm_fold(const char *rel, char *out, size_t cap)
+{
+    size_t len = 0;
+    while (*rel) {
+        size_t seg = strcspn(rel, "/");
+        if (!abm_fold_segment(rel, seg, out, cap, &len))
+            return false;
+        rel += seg + (rel[seg] == '/' ? 1u : 0u);
+    }
+    out[len] = '\0';
+    return len > 0;
+}
+
 /* One prerequisite: declared, or a system file outside the copy. */
 static bool abm_prereq_ok(struct abm_depcheck *d, const char *token)
 {
     const char *rel = token;
+    char folded[ABM_PATH];
     if (token[0] == '/') {
         if (strncmp(token, d->m->copy_dir, d->copy_len) != 0 ||
             token[d->copy_len] != '/')
             return true;
         rel = token + d->copy_len + 1u;
     }
-    while (strncmp(rel, "./", 2) == 0)
-        rel += 2;
-    if (abm_declared(d->c, rel))
+    if (abm_fold(rel, folded, sizeof(folded)) &&
+        abm_declared(d->c, folded))
         return true;
     abm_why(d->why, d->why_cap, "the build read '%s', which "
                                 "print-app-closure does not declare", rel);
