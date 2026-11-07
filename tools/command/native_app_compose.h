@@ -69,6 +69,12 @@ void zcl_app_push_publisher(struct json_value *d, const char *full);
 bool zcl_app_hint(char *out, size_t cap, const char *datadir, const char *fmt,
                   ...);
 
+/* Record the program path the user ran (argv[0]) so zcl_app_hint starts
+ * every hint with it: "build/bin/z23 app ..." pastes from a fresh clone,
+ * "z23 app ..." stays when z23 was found on PATH. NULL, empty, over-long or
+ * unquotable input restores the plain "z23". */
+void zcl_app_set_program(const char *argv0);
+
 /* SHA3-256(domain 0x00 || each part with its NUL): a composite plan_id
  * bound to the inner plans it will confirm. NULL parts hash as "". */
 void zcl_app_plan_id(const char *domain, const char *const *parts,

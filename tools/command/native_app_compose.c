@@ -181,13 +181,29 @@ static bool app_hint_tail(char **out, size_t *left, const char *fmt, va_list ap)
     return true;
 }
 
+static char g_app_program[512];
+
+void zcl_app_set_program(const char *argv0)
+{
+    g_app_program[0] = '\0';
+    if (!argv0 || !argv0[0] || strlen(argv0) >= sizeof(g_app_program)) return;
+    (void)snprintf(g_app_program, sizeof(g_app_program), "%s", argv0);
+}
+
 bool zcl_app_hint(char *out, size_t cap, const char *datadir, const char *fmt,
                   ...)
 {
     if (!out || !cap) return false;
     out[0] = '\0';
     char *at = out; size_t left = cap;
-    bool ok = fmt && app_hint_bytes(&at, &left, "z23 ", 4);
+    bool ok = fmt != NULL;
+    if (ok && g_app_program[0]) {
+        /* A program name the shell cannot take as one word falls back to z23. */
+        ok = app_hint_word(&at, &left, g_app_program);
+        if (!ok) { at = out; left = cap; out[0] = '\0'; }
+    }
+    if (!g_app_program[0] || !ok) ok = fmt && app_hint_bytes(&at, &left, "z23", 3);
+    ok = ok && app_hint_bytes(&at, &left, " ", 1);
     if (ok && datadir && datadir[0])
         ok = app_hint_bytes(&at, &left, "-datadir=", 9) &&
             app_hint_word(&at, &left, datadir) && app_hint_bytes(&at, &left, " ", 1);

@@ -16,6 +16,7 @@
 #if !defined(ZCL_TESTING) || !defined(ZCL_RPC_COMPOSER_TEST)
 #include "main_cli_modes.h"
 #include "cli_compare_runtime.h"
+#include "command/native_app_compose.h"
 #include "main_cli_dispatch.h"
 #include "config/boot.h"
 #include "config/boot_cold_start.h"     /* -cold-start staged driver */
@@ -2610,6 +2611,7 @@ int cli_main(int argc, char **argv)
     int argrc = cli_validate_client_argv(argc, argv);
     if (argrc >= 0)
         return argrc;
+    zcl_app_set_program(argc > 0 ? argv[0] : NULL);
     const char *home = getenv("HOME");
     char datadir[CLI_TARGET_DATADIR_CAP];
     const bool default_fit =

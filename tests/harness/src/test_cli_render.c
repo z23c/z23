@@ -637,6 +637,32 @@ static int test_app_hint_shell_words(void)
     return failures;
 }
 
+static int test_app_hint_program_path(void)
+{
+    int failures = 0;
+    TEST("app hints start with the program path the user ran") {
+        char hint[256];
+        zcl_app_set_program("build/bin/z23");
+        ASSERT(zcl_app_hint(hint, sizeof(hint), NULL, "build"));
+        ASSERT_STR_EQ(hint, "build/bin/z23 app build");
+        ASSERT(zcl_app_hint(hint, sizeof(hint), "/d", "open %s", "x"));
+        ASSERT_STR_EQ(hint, "build/bin/z23 -datadir=/d app open x");
+        zcl_app_set_program("/my bin/z23");
+        ASSERT(zcl_app_hint(hint, sizeof(hint), NULL, "build"));
+        ASSERT_STR_EQ(hint, "/my\\ bin/z23 app build");
+        zcl_app_set_program("z23");
+        ASSERT(zcl_app_hint(hint, sizeof(hint), NULL, "build"));
+        ASSERT_STR_EQ(hint, "z23 app build");
+        zcl_app_set_program("bad\nname");
+        ASSERT(zcl_app_hint(hint, sizeof(hint), NULL, "build"));
+        ASSERT_STR_EQ(hint, "z23 app build");
+        zcl_app_set_program(NULL);
+        PASS();
+    } _test_next:;
+    zcl_app_set_program(NULL);
+    return failures;
+}
+
 static int test_guide_tree_render(void)
 {
     int failures = 0;
@@ -1592,6 +1618,7 @@ int test_cli_render(void)
     failures += test_data_tree_render();
     failures += test_guide_tree_render();
     failures += test_app_hint_shell_words();
+    failures += test_app_hint_program_path();
     failures += test_brief_render();
     failures += test_brief_spaced_value();
     failures += test_start_hint();
