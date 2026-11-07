@@ -815,10 +815,14 @@ static bool zc_commit_via_resident(const struct zcl_command_request *request,
 }
 
 /* Slice 11 policy checkpoint: publish frequency. A FRESH release is admitted
- * only within the publisher key's per-ISO-week tier allowance. On success
- * `*book_out` holds the service book the commit records into (caller frees);
- * on failure the reply is filled and nothing is left allocated. */
+ * only within the publisher key's per-ISO-week tier allowance, unless it is
+ * the owner's own local step (owner_local, set only in C by app.seed and
+ * bundle.sign): that skips this one allowance check and nothing else, and
+ * the commit still records the publish. On success `*book_out` holds the
+ * service book the commit records into (caller frees); on failure the reply
+ * is filled and nothing is left allocated. */
 static bool zc_policy_gate(bool has_day, int64_t requested_day,
+                           bool owner_local,
                            struct zcl_command_reply *reply,
                            const char *zcode_dir,
                            const struct zc_candidate *cand,
@@ -849,8 +853,9 @@ static bool zc_policy_gate(bool has_day, int64_t requested_day,
     enum vcs_policy_tier policy_tier = vcs_policy_tier_for(
         ct.earned_score, kt.verified_bytes_uploaded,
         kt.verified_bytes_downloaded);
-    struct vcs_policy_decision decision =
-        vcs_policy_check_publish(policy_tier, kt.publishes_this_week);
+    struct vcs_policy_decision decision = {.allow = true};
+    if (!owner_local)
+        decision = vcs_policy_check_publish(policy_tier, kt.publishes_this_week);
     vcs_reward_ledger_free(ledger);
     if (!decision.allow) {
         char evidence[256];
@@ -1065,6 +1070,7 @@ struct zc_commit {
     struct zcl_command_reply *reply;
     bool has_day;
     int64_t requested_day;
+    bool owner_local; /* from the C local publication only, never input */
     const char *datadir;
     const char *dir;
     char zcode_dir[4400];
@@ -1161,8 +1167,8 @@ static bool zc_commit_policy(struct zc_commit *c)
 {
     if (c->report.accept != VCS_PACKAGE_ACCEPT_OK)
         return true;
-    return zc_policy_gate(c->has_day, c->requested_day, c->reply,
-                          c->zcode_dir, &c->cand,
+    return zc_policy_gate(c->has_day, c->requested_day, c->owner_local,
+                          c->reply, c->zcode_dir, &c->cand,
                           &c->book, &c->tier, &c->day);
 }
 
@@ -1372,7 +1378,8 @@ void zcl_native_zcode_local_publication_commit(
     }
     struct zc_commit c = {.reply = reply, .datadir = p->datadir,
         .dir = p->source_directory, .has_day = p->has_day,
-        .requested_day = p->day, .tier = VCS_POLICY_TIER_NEW_USER};
+        .requested_day = p->day, .owner_local = p->owner_local,
+        .tier = VCS_POLICY_TIER_NEW_USER};
     vcs_package_publish_report_init(&c.report);
     if (!zc_local_wires_valid(p)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,

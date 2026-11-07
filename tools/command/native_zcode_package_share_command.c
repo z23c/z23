@@ -598,6 +598,9 @@ static void zps_commit(struct zps_share *s)
         .recipe_wire = s->prepared.recipe_wire,
         .recipe_wire_len = s->prepared.recipe_wire_len,
         .has_day = day != NULL, .day = day ? json_get_int(day) : 0,
+        /* Only bundle.sign (AUTH_OWNER, the owner's own key file) is the
+         * owner's local step; share with an offline signature is not. */
+        .owner_local = s->local_key,
     };
     zcl_native_zcode_local_publication_commit(&publication, s->reply);
     if (s->reply->status == ZCL_COMMAND_STATUS_PASSED) {

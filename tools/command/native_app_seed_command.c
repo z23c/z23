@@ -320,6 +320,8 @@ static void asc_publish(struct asc *s)
         .recipe_wire = s->prepared.recipe_wire,
         .recipe_wire_len = s->prepared.recipe_wire_len,
         .has_day = day != NULL, .day = day ? json_get_int(day) : 0,
+        /* AUTH_OWNER: the owner's own key, a deliberate local step. */
+        .owner_local = true,
     };
     zcl_command_reply_init(pub, "zcl.zcode_package_publish.v1");
     zcl_native_zcode_local_publication_commit(&publication, pub);
