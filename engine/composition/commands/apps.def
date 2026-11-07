@@ -1,7 +1,7 @@
 /* Dynamic application mounts. App-specific children come from app.def. */
 
 ZCL_COMMAND_READY_READ(
-    "app.list", "app", "", "List installed App manifests and launchable apps",
+    "app.list", "app", "", "List installed and launchable apps",
     "Every installed App manifest from the local App registry (apps, count), "
     "plus `launchable`: each desktop app or game `app open` can start (such "
     "as skycombat, kind desktop), built-in "
@@ -21,7 +21,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_list_launchable)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.open", "app", "", "Open a desktop app or game, such as Sky Combat",
+    "app.open", "app", "", "Open a desktop app or game",
     "Opens a desktop app or game by name or alias, e.g. skycombat, sky or "
     "airplane for the Sky Combat airplane game (see app list). Requires a "
     "desktop session, then either reports the verified running copy "
@@ -47,7 +47,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_app_open)
 
 ZCL_COMMAND_READY_READ(
-    "app.inspect", "app", "", "Inspect one App manifest and bindings",
+    "app.inspect", "app", "", "Inspect one App manifest",
     "One App's manifest, declared capabilities, and route bindings from the "
     "local registry; complete for that App as currently installed.", 0,
     "app,manifest,capabilities,bindings", "zcl.app_ref_input.v1",
@@ -76,7 +76,7 @@ ZCL_COMMAND_COMPAT_READ(
 /* Semantic chain-transaction discovery.  This is deliberately separate from
  * core.wallet.transaction.list, which lists one wallet's transaction history. */
 ZCL_COMMAND_BRANCH("app.transaction-types", "app",
-                   "Discover every semantic ZCL transaction shape and its safe workflow",
+                   "Find every ZCL transaction type",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -198,7 +198,7 @@ ZCL_COMMAND_BRANCH("app.invoke", "app", "Invoke a manifest-owned App route",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.tasks", "app", "", "Save and reopen your local tasks",
+    "app.tasks", "app", "", "Keep your local tasks",
     "Lists, adds, edits, completes, reopens, deletes or undoes task contents in "
     "an isolated private app database. Omit datadir to use private per-user app storage; "
     "an explicit datadir opens your existing task data. Headless changes require expected_revision "
@@ -253,7 +253,7 @@ ZCL_COMMAND_READY_COMMAND(
  * confirm it (AUTH_OPERATOR, plan first), on an adopted copy or a received
  * copy the owner confirmed once at bundle receive. */
 ZCL_COMMAND_READY_COMMAND(
-    "app.build", "app", "", "Build your app copy into an image",
+    "app.build", "app", "", "Build your app copy",
     "copy is an adopted copy (a name under <datadir>/copies or its absolute "
     "directory) or a received copy whose publisher and root the owner "
     "confirmed at zcode package bundle receive; anything else is "
@@ -326,7 +326,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_save)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.share", "app", "", "Share your copy as one file",
+    "app.share", "app", "", "Share your copy as a file",
     "Owner only. Saves the copy if it has unsaved edits, then signs it with "
     "the owner's key (zcode.package.bundle.sign) and writes NAME.z23share "
     "(output, default in the current directory) with one share line and a "
@@ -369,7 +369,7 @@ ZCL_COMMAND_READY_COMMAND(
 /* AUTH_OWNER: the owner's publisher key signs the seed release, so MCP
  * refuses it at plan and at confirm. */
 ZCL_COMMAND_READY_COMMAND(
-    "app.seed", "app", "", "Seed an in-repo app as your own package release",
+    "app.seed", "app", "", "Seed an in-repo app as a release",
     "app names a directory under apps/ of the z23 checkout (source, default "
     "the checkout this runs in). The package tree is apps/<app> plus every "
     "checkout file apps/<app>/zcode-seed.def maps (one '<repo path> <tree "
@@ -462,7 +462,7 @@ ZCL_COMMAND_READY_COMMAND(
  * leaves in a engine/composition/commands .def — `discover` and the generated API
  * reference then carry them with no further work. */
 ZCL_COMMAND_BRANCH("app.service", "app",
-                   "Token-gated services declared in the service catalog",
+                   "Token-gated services in the catalog",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
