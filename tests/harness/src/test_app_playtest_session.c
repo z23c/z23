@@ -43,6 +43,7 @@
 #define APS_STUB_HUGE "build/fixtures/aps_stub_huge"
 #define APS_TMP "test-tmp/app_playtest_session"
 
+#if defined(__linux__)
 static bool aps_file_sha3(const char *path, char hex[RESIDENT_LAUNCH_DIGEST_HEX + 1u])
 {
     FILE *f = fopen(path, "rb");
@@ -62,6 +63,7 @@ static bool aps_file_sha3(const char *path, char hex[RESIDENT_LAUNCH_DIGEST_HEX 
     zcl_hex_encode(digest, sizeof(digest), hex);
     return ok;
 }
+#endif
 
 static struct app_playtest_step aps_step(uint32_t id, uint32_t frames, bool capture)
 {
