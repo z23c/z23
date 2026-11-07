@@ -61,6 +61,7 @@ ZCL_WARN_EXTRA_GATES ?= -Wundef -Wstrict-prototypes -Wdouble-promotion \
 	-Wduplicated-cond -Wduplicated-branches -Wshift-overflow=2 \
 	-Wattribute-alias=2 -Walloca -Wvla -Wtrampolines \
 	-Wflex-array-member-not-at-end
+# suppression-ok: preserve the maintained root Makefile's GCC warning policy in standalone copies; this extraction adds no suppressed diagnostic class
 ZCL_WARN_STRINGOP_OVERFLOW ?= -Wno-stringop-overflow
 endif
 

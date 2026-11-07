@@ -660,14 +660,15 @@ Notes:
   imported. raylib keeps its own licence (zlib, `vendor/raylib/LICENSE`); the
   origin commit and the local-patch record live in `vendor/raylib/SOURCE` and
   `vendor/raylib/README.md`, and the file digests are pinned in
-  `vendor/raylib/SHA256SUMS`. It builds to `build/lib/libz23raylib.a` only
+  `vendor/raylib/SHA256SUMS`. The shared recipe in
+  `apps/skycombat/skycombat.mk` builds `build/lib/libz23raylib.a` only
   under the opt-in `make game` / `make game-check` targets, so the node build,
   `build-only`, the push proof and every lint gate are untouched by it.
   Vendored raylib compiles with warnings reported but not fatal;
   `apps/skycombat` — our own code — stays `-std=c23 -Werror -pedantic`.
 <!-- claim: file-present vendor/raylib/SHA256SUMS # vendored raylib digest pin -->
 <!-- claim: file-present vendor/raylib/LICENSE # raylib keeps its zlib licence -->
-<!-- claim: symbol-present libz23raylib Makefile # the opt-in raylib archive -->
+<!-- claim: symbol-present libz23raylib apps/skycombat/skycombat.mk # the opt-in raylib archive -->
 
 ### Native instruments and deterministic text
 
