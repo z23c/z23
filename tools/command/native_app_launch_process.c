@@ -225,6 +225,7 @@ static bool app_text_has(const char *text, size_t len, const char *needle)
 /* Whether the first APP_LOG_SCAN_MAX bytes of path hold needle. */
 static bool app_log_has(const char *path, const char *needle)
 {
+    if (!path) return false;
     static char buf[APP_LOG_SCAN_MAX];
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)

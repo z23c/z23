@@ -6,9 +6,23 @@
 #include "controllers/wallet_helpers.h"
 #include "services/node_db_catchup_wallet_replay.h"
 #include "services/node_db_catchup_wallet_transparent_startup.h"
+#include "util/log_macros.h"
 #include "validation/main_state.h"
 #include <limits.h>
 #include <string.h>
+
+#ifdef ZCL_TESTING
+static void (*bcr_test_after_current)(void *), (*bcr_test_before_postcheck)(void *);
+static void *bcr_test_after_current_ctx, *bcr_test_before_postcheck_ctx;
+void boot_cutover_replay_test_before_postcheck(void (*hook)(void *), void *ctx)
+{
+    bcr_test_before_postcheck = hook; bcr_test_before_postcheck_ctx = ctx;
+}
+void boot_cutover_replay_test_after_current(void (*hook)(void *), void *ctx)
+{
+    bcr_test_after_current = hook; bcr_test_after_current_ctx = ctx;
+}
+#endif
 
 static bool bcr_chain_matches(const struct boot_cutover_replay *r, struct main_state *ms, bool exact_tip)
 {
@@ -22,12 +36,13 @@ static bool bcr_chain_matches(const struct boot_cutover_replay *r, struct main_s
     return ok && (!exact_tip || active_chain_tip(&ms->chain_active) == tip);
 }
 
-static bool bcr_chain_locked(const struct boot_cutover_replay *r, struct main_state *ms, bool exact_tip)
+static enum boot_cutover_replay_status bcr_chain_locked(
+    const struct boot_cutover_replay *r, struct main_state *ms, bool exact_tip)
 {
-    if (!zcl_mutex_trylock(&ms->cs_main)) return false;
+    if (!zcl_mutex_trylock(&ms->cs_main)) return BOOT_CUTOVER_BUSY;
     bool ok = bcr_chain_matches(r, ms, exact_tip);
     zcl_mutex_unlock(&ms->cs_main);
-    return ok;
+    return ok ? BOOT_CUTOVER_PROGRESS : BOOT_CUTOVER_STALE;
 }
 
 bool boot_cutover_replay_archive_chains_current(const struct boot_cutover_replay *r)
@@ -45,20 +60,24 @@ static bool bcr_readiness_matches(const struct wallet_readiness *a,
         a->generation == b->generation;
 }
 
-static bool bcr_current(struct boot_cutover_replay *r)
+static enum boot_cutover_replay_status bcr_current(struct boot_cutover_replay *r)
 {
     struct wallet_readiness before = wallet_readiness_get(r->ctx->wallet);
     struct wallet_cutover_binding binding;
     uint8_t identity[32];
     if (!bcr_readiness_matches(&before, &r->readiness) ||
         wallet_sqlite_cutover_read(r->ctx->wallet_db, &binding) != WALLET_CUTOVER_PENDING ||
-        !wallet_cutover_binding_equal(&binding, &r->binding) || !bcr_chain_locked(r, r->ctx->main_state, r->canonical_state != NULL) ||
-        (r->canonical_state && r->canonical_state != r->ctx->main_state &&
-         !bcr_chain_locked(r, r->canonical_state, true)) ||
-        !wallet_scan_identity(r->ctx->wallet, identity) || memcmp(identity, r->identity, 32))
-        return false;
+        !wallet_cutover_binding_equal(&binding, &r->binding)) return BOOT_CUTOVER_STALE;
+    enum boot_cutover_replay_status state = bcr_chain_locked(r, r->ctx->main_state, r->canonical_state != NULL);
+    if (state != BOOT_CUTOVER_PROGRESS) return state;
+    if (r->canonical_state && r->canonical_state != r->ctx->main_state) {
+        state = bcr_chain_locked(r, r->canonical_state, true);
+        if (state != BOOT_CUTOVER_PROGRESS) return state;
+    }
+    if (!wallet_scan_identity(r->ctx->wallet, identity) || memcmp(identity, r->identity, 32))
+        return BOOT_CUTOVER_STALE;
     struct wallet_readiness after = wallet_readiness_get(r->ctx->wallet);
-    return bcr_readiness_matches(&after, &before);
+    return bcr_readiness_matches(&after, &before) ? BOOT_CUTOVER_PROGRESS : BOOT_CUTOVER_STALE;
 }
 
 static bool bcr_args_valid(struct boot_cutover_replay *r,
@@ -84,7 +103,7 @@ bool boot_cutover_replay_init(struct boot_cutover_replay *r,
     r->endpoint = *endpoint; r->floor = floor; r->next = floor;
     r->readiness = wallet_readiness_get(ctx->wallet);
     memcpy(r->identity, identity, 32);
-    if (bcr_current(r)) return true;
+    if (bcr_current(r) == BOOT_CUTOVER_PROGRESS) return true;
     r->phase = BOOT_CUTOVER_INVALIDATED;
     return false;
 }
@@ -102,7 +121,7 @@ bool boot_cutover_replay_init_archive(struct boot_cutover_replay *r,
         return false;
     r->canonical_state = canonical_state;
     memcpy(r->archive_datadir, archive_datadir, strlen(archive_datadir) + 1);
-    if (bcr_current(r)) return true;
+    if (bcr_current(r) == BOOT_CUTOVER_PROGRESS) return true;
     r->phase = BOOT_CUTOVER_INVALIDATED;
     return false;
 }
@@ -112,17 +131,17 @@ static const char *bcr_body_dir(const struct boot_cutover_replay *r)
     return r->canonical_state ? r->archive_datadir : r->ctx->datadir;
 }
 
-static bool bcr_chunk_endpoint(struct boot_cutover_replay *r, int end, uint8_t hash[32])
+static enum boot_cutover_replay_status bcr_chunk_endpoint(struct boot_cutover_replay *r, int end, uint8_t hash[32])
 {
     struct main_state *ms = r->ctx->main_state;
-    if (!zcl_mutex_trylock(&ms->cs_main)) return false;
+    if (!zcl_mutex_trylock(&ms->cs_main)) return BOOT_CUTOVER_BUSY;
     const struct block_index *ref = active_chain_at(&ms->chain_active, r->endpoint.height);
     const struct block_index *p = active_chain_at(&ms->chain_active, end);
     bool ok = ref && ref->phashBlock && p && p->phashBlock &&
         !memcmp(ref->phashBlock->data, r->endpoint.hash.data, 32);
     if (ok) memcpy(hash, p->phashBlock->data, 32);
     zcl_mutex_unlock(&ms->cs_main);
-    return ok;
+    return ok ? BOOT_CUTOVER_PROGRESS : BOOT_CUTOVER_RETRY;
 }
 
 static bool bcr_transparent(struct boot_cutover_replay *r, int end)
@@ -150,22 +169,70 @@ static bool bcr_sapling_receipt(struct boot_cutover_replay *r, int end,
         !memcmp(out->reference_hash, r->endpoint.hash.data, 32) && !memcmp(out->scan_identity, r->identity, 32);
 }
 
-static bool bcr_sapling(struct boot_cutover_replay *r, int end)
+static void bcr_sapling_receipt_warn(const struct boot_cutover_replay *r, int end,
+    enum sapling_replay_phase phase, const uint8_t hash[32], const struct sapling_replay_result *out)
+{
+    LOG_WARN("wallet", "Sapling replay receipt refused: status=%d phase=%d expected_phase=%d "
+             "start=%d end=%d last_complete=%d reference=%d expected_reference=%d "
+             "start_match=%d end_match=%d endpoint_match=%d reference_match=%d identity_match=%d",
+             (int)out->status, (int)out->phase, (int)phase, out->start_height, out->end_height,
+             out->last_complete, out->reference_height, r->endpoint.height,
+             out->start_height == r->next, out->end_height == end,
+             !memcmp(out->endpoint_hash, hash, 32), !memcmp(out->reference_hash, r->endpoint.hash.data, 32),
+             !memcmp(out->scan_identity, r->identity, 32));
+}
+
+static enum boot_cutover_replay_status bcr_sapling_busy(
+    struct boot_cutover_replay *r, int end, enum sapling_replay_phase phase,
+    const uint8_t hash[32], const struct sapling_replay_result *out)
+{
+    bool receipt = out->phase == phase && out->start_height == r->next &&
+        out->end_height == end && out->last_complete >= r->next - 1 &&
+        out->last_complete < end && out->reference_height == r->endpoint.height &&
+        !memcmp(out->endpoint_hash, hash, 32) &&
+        !memcmp(out->reference_hash, r->endpoint.hash.data, 32) &&
+        !memcmp(out->scan_identity, r->identity, 32);
+    if (!receipt) return BOOT_CUTOVER_RETRY;
+    if (phase == SAPLING_REPLAY_DISCOVER && r->next != r->floor &&
+        memcmp(r->key_digest, out->key_digest, 32)) return BOOT_CUTOVER_RETRY;
+    if (out->last_complete >= r->next) {
+        if (phase == SAPLING_REPLAY_DISCOVER) memcpy(r->key_digest, out->key_digest, 32);
+        r->next = out->last_complete + 1;
+    }
+    return BOOT_CUTOVER_BUSY;
+}
+
+static enum boot_cutover_replay_status bcr_sapling(struct boot_cutover_replay *r, int end)
 {
     uint8_t hash[32];
-    if (!bcr_chunk_endpoint(r, end, hash)) return false;
+    enum boot_cutover_replay_status endpoint = bcr_chunk_endpoint(r, end, hash);
+    if (endpoint == BOOT_CUTOVER_BUSY) return endpoint;
+    if (endpoint != BOOT_CUTOVER_PROGRESS) {
+        LOG_WARN("wallet", "Sapling replay endpoint unavailable: start=%d end=%d reference=%d",
+                 r->next, end, r->endpoint.height);
+        return BOOT_CUTOVER_RETRY;
+    }
     enum sapling_replay_phase phase = r->phase == BOOT_CUTOVER_DISCOVER ?
         SAPLING_REPLAY_DISCOVER : SAPLING_REPLAY_SPENDS;
     struct sapling_replay_result out = node_db_catchup_sapling_replay_at_reference(
         r->service, r->ctx->node_db, r->ctx->main_state, r->ctx->wallet,
         bcr_body_dir(r), r->next, end, r->endpoint.height, r->endpoint.hash.data,
         phase, hash, r->identity, phase == SAPLING_REPLAY_SPENDS ? r->key_digest : NULL);
-    if (!bcr_sapling_receipt(r, end, phase, hash, &out)) return false;
+    if (out.status == SAPLING_REPLAY_BUSY)
+        return bcr_sapling_busy(r, end, phase, hash, &out);
+    if (!bcr_sapling_receipt(r, end, phase, hash, &out)) {
+        bcr_sapling_receipt_warn(r, end, phase, hash, &out);
+        return BOOT_CUTOVER_RETRY;
+    }
     if (phase == SAPLING_REPLAY_DISCOVER) {
-        if (r->next != r->floor && memcmp(r->key_digest, out.key_digest, 32)) return false;
+        if (r->next != r->floor && memcmp(r->key_digest, out.key_digest, 32)) {
+            LOG_WARN("wallet", "Sapling replay key set changed: start=%d end=%d reference=%d",
+                     r->next, end, r->endpoint.height);
+            return BOOT_CUTOVER_RETRY;
+        }
         memcpy(r->key_digest, out.key_digest, 32);
     }
-    return true;
+    return BOOT_CUTOVER_PROGRESS;
 }
 
 static bool bcr_witness(struct boot_cutover_replay *r)
@@ -209,9 +276,39 @@ static bool bcr_can_complete_empty(struct boot_cutover_replay *r)
 static enum boot_cutover_replay_status bcr_complete_empty(struct boot_cutover_replay *r)
 {
     r->shielded_empty = true;
-    if (!bcr_current(r)) { r->phase = BOOT_CUTOVER_INVALIDATED; return BOOT_CUTOVER_STALE; }
+    enum boot_cutover_replay_status current = bcr_current(r);
+    if (current == BOOT_CUTOVER_BUSY) return current;
+    if (current != BOOT_CUTOVER_PROGRESS) { r->phase = BOOT_CUTOVER_INVALIDATED; return BOOT_CUTOVER_STALE; }
     r->phase = BOOT_CUTOVER_DONE;
     return BOOT_CUTOVER_COMPLETE;
+}
+
+static enum boot_cutover_replay_status bcr_advance(struct boot_cutover_replay *r, int end)
+{
+    if (r->phase != BOOT_CUTOVER_WITNESS && end < r->endpoint.height) r->next = end + 1;
+    else { r->phase++; r->next = r->floor; }
+    return r->phase == BOOT_CUTOVER_DONE ? BOOT_CUTOVER_COMPLETE : BOOT_CUTOVER_PROGRESS;
+}
+
+static enum boot_cutover_replay_status bcr_run_phase(struct boot_cutover_replay *r, int end)
+{
+    if (r->phase == BOOT_CUTOVER_TRANSPARENT)
+        return bcr_transparent(r, end) ? BOOT_CUTOVER_PROGRESS : BOOT_CUTOVER_RETRY;
+    if (r->phase == BOOT_CUTOVER_WITNESS)
+        return bcr_witness(r) ? BOOT_CUTOVER_PROGRESS : BOOT_CUTOVER_RETRY;
+    return bcr_sapling(r, end);
+}
+
+static enum boot_cutover_replay_status bcr_finish_phase(struct boot_cutover_replay *r,
+    int end, enum boot_cutover_replay_status step)
+{
+    enum boot_cutover_replay_status current = bcr_current(r);
+    if (current == BOOT_CUTOVER_BUSY) {
+        if (step == BOOT_CUTOVER_PROGRESS) { r->pending_complete = true; r->pending_end = end; }
+        return step == BOOT_CUTOVER_RETRY ? step : current;
+    }
+    if (current != BOOT_CUTOVER_PROGRESS) { r->phase = BOOT_CUTOVER_INVALIDATED; return BOOT_CUTOVER_STALE; }
+    return step == BOOT_CUTOVER_PROGRESS ? bcr_advance(r, end) : step;
 }
 
 enum boot_cutover_replay_status boot_cutover_replay_step(struct boot_cutover_replay *r)
@@ -219,17 +316,24 @@ enum boot_cutover_replay_status boot_cutover_replay_step(struct boot_cutover_rep
     if (!r) return BOOT_CUTOVER_INVALID;
     if (r->phase == BOOT_CUTOVER_INVALIDATED) return BOOT_CUTOVER_STALE;
     if (!r->ctx) return BOOT_CUTOVER_INVALID;
-    if (!bcr_current(r)) {
+    enum boot_cutover_replay_status current = bcr_current(r);
+    if (current == BOOT_CUTOVER_BUSY) return current;
+    if (current != BOOT_CUTOVER_PROGRESS) {
         r->phase = BOOT_CUTOVER_INVALIDATED; return BOOT_CUTOVER_STALE;
     }
     if (r->phase == BOOT_CUTOVER_DONE) return BOOT_CUTOVER_COMPLETE;
+    if (r->pending_complete) {
+        r->pending_complete = false;
+        return bcr_advance(r, r->pending_end);
+    }
     if (bcr_can_complete_empty(r)) return bcr_complete_empty(r);
+#ifdef ZCL_TESTING
+    if (bcr_test_after_current) bcr_test_after_current(bcr_test_after_current_ctx);
+#endif
     int end = r->endpoint.height - r->next >= 255 ? r->next + 255 : r->endpoint.height;
-    bool ok = r->phase == BOOT_CUTOVER_TRANSPARENT ? bcr_transparent(r, end) :
-        r->phase == BOOT_CUTOVER_WITNESS ? bcr_witness(r) : bcr_sapling(r, end);
-    if (!bcr_current(r)) { r->phase = BOOT_CUTOVER_INVALIDATED; return BOOT_CUTOVER_STALE; }
-    if (!ok) return BOOT_CUTOVER_RETRY;
-    if (r->phase != BOOT_CUTOVER_WITNESS && end < r->endpoint.height) r->next = end + 1;
-    else { r->phase++; r->next = r->floor; }
-    return r->phase == BOOT_CUTOVER_DONE ? BOOT_CUTOVER_COMPLETE : BOOT_CUTOVER_PROGRESS;
+    enum boot_cutover_replay_status step = bcr_run_phase(r, end);
+#ifdef ZCL_TESTING
+    if (bcr_test_before_postcheck) bcr_test_before_postcheck(bcr_test_before_postcheck_ctx);
+#endif
+    return bcr_finish_phase(r, end, step);
 }

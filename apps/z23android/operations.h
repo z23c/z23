@@ -8,8 +8,10 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <sys/types.h>
+struct zapp_startup_auth;
 struct zapp_runtime {
     pthread_mutex_t mutex;
+    struct zapp_startup_auth *startup_auth;
     /* The app files directory; the proving parameters are copied below it. */
     char files[1024];
     char directory[1024];

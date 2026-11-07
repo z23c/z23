@@ -40,6 +40,8 @@ enum zcl_operator_lane {
 };
 
 struct app_context {
+    bool wallet_startup_auth_present;
+    int wallet_startup_auth_fd;
     const char *datadir;
     const char *params_dir;
     bool testnet;

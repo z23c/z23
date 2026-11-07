@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the inherited startup auth stream. */
+ZCL_MODULE_CAPABILITY("platform/modules/platform/src/wallet_startup_auth.c", CAP_NETWORK, "Checks the inherited same-user Unix stream and exchanges bounded authentication frames.")

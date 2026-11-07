@@ -348,6 +348,11 @@ bool wallet_sqlite_write_sapling_key(struct wallet_sqlite *ws,
                                        const struct sapling_key_entry *entry);
 bool wallet_sqlite_read_sapling_keys(struct wallet_sqlite *ws,
                                        struct wallet *w);
+/* Fail closed unless all durable Sapling keys and seed match unlocked memory. */
+struct zcl_result wallet_sqlite_verify_startup_sapling_r(struct wallet_sqlite *ws, struct wallet *w);
+/* Caller holds the matching connection transaction and Sapling keystore lock. */
+struct zcl_result wallet_sqlite_verify_startup_sapling_in_tx_locked_r(
+    struct wallet_sqlite *ws, struct wallet *w, struct sqlite3 *db);
 /* Number of persisted Sapling key rows, loaded or not; -1 when it cannot be
  * read. Read-only. */
 int wallet_sqlite_sapling_key_count(struct wallet_sqlite *ws);

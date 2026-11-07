@@ -1,6 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: guarded publication of replayed wallet checkpoint state. */
 #include "config/boot_wallet_cutover_publish.h"
+#include "platform/time_compat.h"
+#include "wallet/wallet_lock.h"
 #include "util/log_macros.h"
 #include "boot_wallet_cutover_empty_internal.h"
 #include "config/boot_wallet_cutover_replay.h"
@@ -157,6 +159,11 @@ static bool bcp_holds(void *opaque, struct wallet *wallet, sqlite3 *db)
     struct bcp_context *ctx = opaque;
     struct wallet_readiness current = wallet_readiness_get_locked(wallet);
     const struct wallet_readiness *expected = &ctx->replay->readiness;
+    int64_t deadline = ctx->replay->auth_deadline_ms;
+    int64_t now = deadline ? platform_time_monotonic_ms() : 0;
+    if (deadline && (now <= 0 || now >= deadline || wallet_lock_is_locked())) return false;
+    if (!wallet_sqlite_verify_startup_sapling_in_tx_locked_r(
+            ctx->replay->ctx->wallet_db, wallet, db).ok) return false;
     return (!ctx->replay->shielded_empty || boot_wallet_cutover_shielded_empty_locked(
             ctx->replay->ctx->wallet_db, db, wallet, ctx->replay->sapling_load_ok)) &&
         current.state == WALLET_READINESS_PENDING && current.epoch != UINT64_MAX &&
@@ -214,13 +221,47 @@ static bool bcp_preflight(struct boot_cutover_replay *r, struct wpr_pending_guar
     return true;
 }
 
+static bool bcp_commit(struct boot_cutover_replay *r, struct wpr_pending_guard *guard,
+                       struct wallet_cutover_v2_request *request,
+                       struct wallet_cutover_v2_plan *plan, const char **stage)
+{
+    bcp_test_before_final();
+    struct node_db *db = r->ctx->node_db;
+    *stage = "connection_lock";
+    sqlite3_mutex *mu = sqlite3_db_mutex(db->db);
+    if (!mu || sqlite3_mutex_try(mu) != SQLITE_OK) return false;
+    bool ok = false;
+    *stage = "transaction_begin";
+    if (!sqlite3_get_autocommit(db->db) || !node_db_begin_immediate(db)) goto unlock;
+    *stage = "reserve_holds";
+    if (wallet_private_broadcast_reserve_in_open_tx(guard, db, r->ctx->wallet) != WALLET_HOLD_PROOF_OK) {
+        bcp_rollback(db); goto unlock;
+    }
+    *stage = "completion";
+    struct zcl_result result = wallet_sqlite_cutover_complete_v2_in_open_tx_r(
+        r->ctx->wallet_db, db, r->ctx->wallet, request, plan);
+    if (!result.ok && result.code == WSQL_TXN_BEGIN_FAIL) bcp_rollback(db);
+    ok = result.ok;
+    if (!result.ok) LOG_WARN("wallet", "cutover completion status=%d", result.code);
+unlock:
+    sqlite3_mutex_leave(mu);
+    return ok;
+}
+
+
 bool boot_wallet_cutover_publish(struct boot_cutover_replay *r,
     struct wpr_pending_guard *guard, struct coins_kv_read_snapshot *snapshot,
     const struct coins_kv_read_snapshot_info *info, struct wallet_cutover_v2_plan *plan,
     struct db_wallet_utxo_cutover_delivery *delivery)
 {
     if (!bcp_preflight(r, guard, snapshot, info, plan, delivery)) return false;
-    if (!bcp_lock_archive_chains(r)) { LOG_WARN("wallet", "cutover publication refused: chain_lock"); return false; }
+    bool auth_lease = r->auth_deadline_ms != 0;
+    if (auth_lease && !wallet_lock_startup_publication_begin(r->auth_deadline_ms)) return false;
+    if (!bcp_lock_archive_chains(r)) {
+        if (auth_lease) wallet_lock_startup_publication_end();
+        LOG_WARN("wallet", "cutover publication refused: chain_lock");
+        return false;
+    }
     struct bcp_context ctx = {.replay = r, .guard = guard};
     bool ok = false;
     const char *stage = "endpoint";
@@ -242,30 +283,13 @@ bool boot_wallet_cutover_publish(struct boot_cutover_replay *r,
         .project = db_wallet_utxo_cutover_project, .projection_ctx = &projection};
     memcpy(request.reference_hash, r->endpoint.hash.data, 32);
     memcpy(request.scan_identity, r->identity, 32);
-    bcp_test_before_final();
-    struct node_db *db = r->ctx->node_db;
-    stage = "connection_lock";
-    sqlite3_mutex *mu = sqlite3_db_mutex(db->db);
-    if (!mu || sqlite3_mutex_try(mu) != SQLITE_OK) goto done;
-    stage = "transaction_begin";
-    if (!sqlite3_get_autocommit(db->db) || !node_db_begin_immediate(db)) goto unlock;
-    stage = "reserve_holds";
-    if (wallet_private_broadcast_reserve_in_open_tx(guard, db, r->ctx->wallet) != WALLET_HOLD_PROOF_OK) {
-        bcp_rollback(db); goto unlock;
-    }
-    stage = "completion";
-    struct zcl_result result = wallet_sqlite_cutover_complete_v2_in_open_tx_r(
-        r->ctx->wallet_db, db, r->ctx->wallet, &request, plan);
-    if (!result.ok && result.code == WSQL_TXN_BEGIN_FAIL) bcp_rollback(db);
-    ok = result.ok;
-    if (!result.ok) LOG_WARN("wallet", "cutover completion status=%d", result.code);
-unlock:
-    sqlite3_mutex_leave(mu);
+    ok = bcp_commit(r, guard, &request, plan, &stage);
 done:
     if (!ok) LOG_WARN("wallet", "cutover publication refused: %s", stage);
     boot_cutover_coins_free(ctx.coins);
     free(ctx.heights);
     bcp_unlock_archive_chains(r);
+    if (auth_lease) wallet_lock_startup_publication_end();
     return ok;
 }
 

@@ -30,6 +30,13 @@ void node_db_sapling_replay_test_crash_before_delivery(void)
 #endif
 
 #ifdef ZCL_TESTING
+static void (*replay_test_before_revalidate)(void *), (*replay_test_after_revalidate)(void *);
+static void *replay_test_revalidate_ctx;
+void node_db_sapling_replay_test_revalidate_hooks(void (*before)(void *), void (*after)(void *), void *ctx)
+{
+    replay_test_before_revalidate = before; replay_test_after_revalidate = after;
+    replay_test_revalidate_ctx = ctx;
+}
 static void (*replay_test_after_read)(void *);
 static void *replay_test_after_read_ctx;
 void node_db_sapling_replay_test_after_read(void (*hook)(void *), void *ctx)
@@ -281,6 +288,19 @@ static enum sapling_replay_status replay_write_failure(bool key_ok, bool wallet_
          (!chain_ok ? SAPLING_REPLAY_CHAIN_CHANGED : SAPLING_REPLAY_DB_ERROR));
 }
 
+static enum sapling_replay_status replay_deliver(struct replay_block *job)
+{
+    if (!db_sapling_replay_delivery_flush(&job->delivery)) return SAPLING_REPLAY_EVENT_UNAVAILABLE;
+#ifdef ZCL_TESTING
+    if (replay_test_before_revalidate) replay_test_before_revalidate(replay_test_revalidate_ctx);
+#endif
+    enum sapling_replay_status status = replay_revalidate(job);
+#ifdef ZCL_TESTING
+    if (replay_test_after_revalidate) replay_test_after_revalidate(replay_test_revalidate_ctx);
+#endif
+    return status;
+}
+
 static bool replay_write(struct node_db *db, void *opaque)
 {
     struct replay_block *job = opaque;
@@ -302,9 +322,7 @@ static bool replay_write(struct node_db *db, void *opaque)
 #if defined(ZCL_TESTING) && !defined(_WIN32)
     if (ok && replay_test_crash_before_delivery) _exit(88);
 #endif
-    job->status = !ok ? replay_write_failure(key_ok, wallet_ok, chain_ok) :
-        (db_sapling_replay_delivery_flush(&job->delivery) ?
-            replay_revalidate(job) : SAPLING_REPLAY_EVENT_UNAVAILABLE);
+    job->status = !ok ? replay_write_failure(key_ok, wallet_ok, chain_ok) : replay_deliver(job);
     db_sapling_replay_delivery_clear(&job->delivery);
     return job->status == SAPLING_REPLAY_COMPLETE;
 }
@@ -369,8 +387,11 @@ static enum sapling_replay_status replay_one(struct db_service *svc,
     if (status != SAPLING_REPLAY_COMPLETE) return status;
     struct block block;
     block_init(&block);
-    bool readable = node_db_catchup_read_authenticated_block(datadir, loc.file, loc.offset, &loc.hash, &block).ok;
-    if (!readable) { block_free(&block); return SAPLING_REPLAY_INCOMPLETE; }
+    struct zcl_result read = node_db_catchup_read_authenticated_block(datadir, loc.file, loc.offset, &loc.hash, &block);
+    if (!read.ok) {
+        LOG_WARN("sapling_replay", "authenticated block unavailable: height=%d reason=%s", job->height, read.message);
+        block_free(&block); return SAPLING_REPLAY_INCOMPLETE;
+    }
 #ifdef ZCL_TESTING
     if (replay_test_after_read) replay_test_after_read(replay_test_after_read_ctx);
 #endif

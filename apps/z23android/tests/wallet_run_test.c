@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _GNU_SOURCE
 #include "operations.h"
+#include "startup_auth.h"
 #include "setup_state.h"
 #include <assert.h>
 #include <pthread.h>
@@ -405,6 +406,7 @@ int main(int argc, char **argv)
     assert(setenv("ZCL_WALLET_PASSPHRASE", "decoy", 1) == 0 && setenv("ZCL_ALLOW_PLAINTEXT_WALLET", "1", 1) == 0);
     assert(setenv("ZCL_RECOVERY_PHRASE", "decoy words", 1) == 0 && setenv("ZCL_WALLET_NO_PHRASE_BACKUP", "1", 1) == 0);
     assert(pthread_mutex_init(&r.mutex, NULL) == 0);
+    r.startup_auth = zapp_startup_auth_new(); assert(r.startup_auth);
     zapp_nodelog_init(&r.log, NULL, NULL);
     snprintf(r.executable, sizeof(r.executable), "%s", argv[0]);
     snprintf(r.directory, sizeof(r.directory), "%s", root);
@@ -468,7 +470,7 @@ int main(int argc, char **argv)
     snprintf(dir, sizeof(dir), "%s/wallet_setup_done", root); assert(unlink(dir) == 0);
     snprintf(dir, sizeof(dir), "%s/state", root); assert(rmdir(dir) == 0);
     snprintf(dir, sizeof(dir), "%s/tmp", root); assert(rmdir(dir) == 0);
-    pthread_mutex_destroy(&r.mutex);
+    zapp_startup_auth_free(r.startup_auth); pthread_mutex_destroy(&r.mutex);
     puts("wallet_run_test: ok");
     return 0;
 }

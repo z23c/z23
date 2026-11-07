@@ -56,6 +56,7 @@
 #include "util/ar_step_readonly.h"
 #include "util/blocker.h"
 #include "util/boot_phase.h"
+#include "util/thread_registry.h"
 #include "util/log_macros.h"
 #include "support/log_throttle.h"
 #include "util/safe_alloc.h"
@@ -469,9 +470,27 @@ static void bil_flat_release_rows(struct bil_flat_release *rel, uint32_t next)
         rel->mapping, rel->released, consumed);
 }
 
+#ifdef ZCL_TESTING
+static int64_t g_bil_cancel_row = -1;
+void block_index_history_test_cancel_row(int64_t row);
+void block_index_history_test_cancel_row(int64_t row)
+{
+    g_bil_cancel_row = row;
+}
+#endif
+
+static bool bil_flat_insert_cancelled(bool cancellable, uint32_t row)
+{
+    bool cancel = cancellable && (row & 0xFFFF) == 0 && thread_registry_shutdown_requested();
+#ifdef ZCL_TESTING
+    cancel = cancel || (cancellable && (int64_t)row == g_bil_cancel_row);
+#endif
+    return cancel;
+}
+
 static struct zcl_result bil_flat_insert_rows(
     struct main_state *ms, struct bil_flat_release *rel,
-    uint32_t count, struct block_index *arena)
+    uint32_t count, struct block_index *arena, bool cancellable)
 {
     /* Bulk insert directly into the hash table; loader is single-threaded. */
     const struct block_index_flat *entries = rel->entries;
@@ -487,6 +506,10 @@ static struct zcl_result bil_flat_insert_rows(
     int64_t stripped_failed = 0, demoted_failed = 0;
     int64_t flat_bad_count = 0;
     for (uint32_t i = 0; i < count; i++) {
+        if (bil_flat_insert_cancelled(cancellable, i)) {
+            bil_flat_rollback(bm, arena, count);
+            return ZCL_ERR(-5, "history archive: cancelled");
+        }
         /* Feed the supervisor_backstop liveness marker every 64K entries so
          * this single-threaded pre-serving loop over ~3.1M entries is not
          * mistaken for a frozen supervisor sweep (util/boot_phase.h). */
@@ -688,7 +711,7 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
     int64_t t_parse_ms = 0, t_fwd_ms = 0;
     struct bil_flat_release rel = {.mapping = &mapping,
                                    .entries = input.entries};
-    result = bil_flat_insert_rows(ms, &rel, count, arena);
+    result = bil_flat_insert_rows(ms, &rel, count, arena, !publish_identity);
     if (!result.ok) {
         goto finish;
     }
@@ -897,12 +920,32 @@ static bool bha_link_valid(const struct block_index *row, const struct block_hea
         uint256_eq(&header->hashPrevBlock, row->pprev->phashBlock);
 }
 
+#ifdef ZCL_TESTING
+static int32_t g_bha_cancel_height = -1;
+void block_index_history_test_cancel_height(int32_t height);
+void block_index_history_test_cancel_height(int32_t height)
+{
+    g_bha_cancel_height = height;
+}
+#endif
+
+static bool bha_cancelled(int32_t height)
+{
+#ifdef ZCL_TESTING
+    if (height == g_bha_cancel_height) return true;
+#else
+    (void)height;
+#endif
+    return thread_registry_shutdown_requested();
+}
+
 static bool bha_chain(struct main_state *state, struct blocks_mmap *reader,
                       struct block_index *tip, int32_t height, const struct uint256 *genesis,
-                      struct block_header *top_window)
+                      struct block_header *top_window, bool *cancelled)
 {
     struct block_index *row = tip;
     for (int32_t h = height; h >= 0; h--) {
+        if (bha_cancelled(h)) { *cancelled = true; return false; }
         struct block_header header;
         if (!bha_row_valid(state, reader, row, h, &header) ||
             !bha_link_valid(row, &header, h, genesis)) {
@@ -942,6 +985,7 @@ static struct zcl_result bha_open(struct main_state *state,
         return ZCL_ERR(-1, "history archive: invalid input or nonempty state");
     struct zcl_result loaded = load_block_index_flat_archive(archive_dir, state, max_entries);
     if (!loaded.ok) return loaded;
+    if (bha_cancelled(endpoint_height)) return ZCL_ERR(-5, "history archive: cancelled");
     char path[4096];
     int n = snprintf(path, sizeof(path), "%s/blocks", archive_dir);
     struct blocks_mmap *reader = NULL;
@@ -949,10 +993,12 @@ static struct zcl_result bha_open(struct main_state *state,
         return ZCL_ERR(-2, "history archive: cannot open block directory");
     struct uint256 hash; memcpy(hash.data, endpoint_hash, sizeof(hash.data));
     struct block_index *tip = block_map_find(&state->map_block_index, &hash);
-    bool valid = bha_chain(state, reader, tip, endpoint_height, genesis, top_window);
+    bool cancelled = false;
+    bool valid = bha_chain(state, reader, tip, endpoint_height, genesis, top_window, &cancelled);
     bmr_close(reader);
     if (!valid) {
         if (top_window) memset(top_window, 0, ISLAND_ANCHOR_WINDOW * sizeof(*top_window));
+        if (cancelled) return ZCL_ERR(-5, "history archive: cancelled");
         return ZCL_ERR(-3, "history archive: header ancestry invalid or unavailable");
     }
     if (!active_chain_move_window_tip(&state->chain_active, tip)) {

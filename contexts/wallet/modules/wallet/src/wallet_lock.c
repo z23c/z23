@@ -9,6 +9,7 @@
 #include "wallet/keystore.h"
 
 #include "platform/positioned_file.h"
+#include "platform/time_compat.h"
 #include "platform/private_file.h"
 #include "support/cleanse.h"
 #include "util/log_macros.h"
@@ -109,6 +110,26 @@ static void wallet_lock_wipe_memory(struct wallet *w, bool encrypted)
     wallet_hd_wipe_master(w);
 }
 
+#ifdef ZCL_TESTING
+static void (*g_timer_blocked_hook)(void *);
+static void *g_timer_blocked_ctx;
+void wallet_lock_timer_test_blocked_hook(void (*hook)(void *), void *ctx)
+{
+    g_timer_blocked_hook = hook; g_timer_blocked_ctx = ctx;
+}
+static void wlk_timer_transition_lock(void)
+{
+    if (g_timer_blocked_hook) {
+        if (pthread_mutex_trylock(&g_transition) == 0) return;
+        g_timer_blocked_hook(g_timer_blocked_ctx);
+    }
+    pthread_mutex_lock(&g_transition);
+}
+#else
+static void wlk_timer_transition_lock(void) { pthread_mutex_lock(&g_transition); }
+#endif
+
+
 static void *wallet_lock_timer_main(void *opaque)
 {
     struct wallet_lock_timer *timer = opaque;
@@ -125,7 +146,7 @@ static void *wallet_lock_timer_main(void *opaque)
     }
     bool locked_now = false;
     bool encrypted = false;
-    pthread_mutex_lock(&g_transition);
+    wlk_timer_transition_lock();
     pthread_mutex_lock(&g_mu);
     if (!thread_registry_shutdown_requested() && remaining == 0 &&
         timer->generation == g_timeout_generation) {
@@ -516,6 +537,24 @@ struct zcl_result wallet_lock_arm_timeout(struct wallet *w,
                        "unlock timer could not start; wallet re-locked");
     }
     return ZCL_OK;
+}
+
+bool wallet_lock_startup_publication_begin(int64_t deadline_ms)
+{
+    if (deadline_ms <= 0) return false;
+    pthread_mutex_lock(&g_transition);
+    int64_t now = platform_time_monotonic_ms();
+    pthread_mutex_lock(&g_mu);
+    bool ok = now > 0 && now < deadline_ms && g_encrypted_at_rest &&
+              !g_unlock_loading && effective_pass_locked() != NULL;
+    pthread_mutex_unlock(&g_mu);
+    if (!ok) pthread_mutex_unlock(&g_transition);
+    return ok;
+}
+
+void wallet_lock_startup_publication_end(void)
+{
+    pthread_mutex_unlock(&g_transition);
 }
 
 void wallet_lock_lock(struct wallet *w)

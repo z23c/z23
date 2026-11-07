@@ -8,6 +8,7 @@
 #include "shell.h"
 #include "jni_util.h"
 #include "device_key.h"
+#include "startup_auth.h"
 #ifdef ZAPP_DEVKEY_PROBE
 #include "device_key_probe.h"
 #endif
@@ -672,9 +673,30 @@ static void forward_pairing(JNIEnv *env, jobject activity)
 /* Copies the packaged proving parameters to <files>/params on a worker thread. Once per process unless the
  * last attempt failed; a running or verified copy is left alone (zapp_params_launch). */
 static bool prepare_params(void *assets, const char *files) { return zapp_params_prepare_async(assets, files); }
+static bool startup_unwrap(struct zapp_startup_auth *auth, const char *files, uint8_t secret[32])
+{
+    JavaVM *owner = atomic_load(&vm);
+    JNIEnv *env = NULL;
+    if (!owner || (*owner)->AttachCurrentThread(owner, &env, NULL) != JNI_OK) return false;
+    pthread_mutex_lock(&lock);
+    jobject activity = active ? (*env)->NewLocalRef(env, active) : NULL;
+    pthread_mutex_unlock(&lock);
+    char path[1100];
+    int n = snprintf(path, sizeof(path), "%s/wallet_key.blob", files);
+    struct zapp_devkey_jni state = {.env = env, .activity = activity, .startup_auth = auth};
+    struct zapp_devkey_ops ops;
+    zapp_devkey_jni_ops(&ops, &state);
+    bool ok = activity && n > 0 && (size_t)n < sizeof(path) &&
+        zapp_devkey_unwrap(&ops, path, ZAPP_DEVKEY_PURPOSE_UNLOCK, secret) == ZAPP_DEVKEY_OK;
+    if (activity) (*env)->DeleteLocalRef(env, activity);
+    if (!ok) memory_cleanse(secret, 32);
+    (*owner)->DetachCurrentThread(owner);
+    return ok;
+}
 /* Prepares the surface and starts the controller and the native screens, in the order the app needs them. */
 static bool start_services(JNIEnv *env, ANativeActivity *activity, const char *native_dir, bool *preview)
 {
+    zapp_startup_auth_provider(startup_unwrap);
     return release_surface(env, activity->clazz) && zapp_native_ui_package_preview(env, activity->clazz, preview) &&
            zapp_controller_start(activity->internalDataPath, native_dir, *preview, notify) &&
            zapp_native_ui_create(env, activity->clazz, action) && zapp_wallet_attach(activity, notify) &&

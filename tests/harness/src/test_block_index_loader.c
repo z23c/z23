@@ -2812,11 +2812,52 @@ static int bil_history_retained_handle_case(void)
 #endif
 
 
+void block_index_history_test_cancel_height(int32_t height);
+void block_index_history_test_cancel_row(int64_t row);
+
+static int bil_history_cancel_case(void)
+{
+    int failures = 0; char dir[PATH_MAX];
+    if (!test_mkdtemp(dir, sizeof(dir), "bil_history_cancel")) return 1;
+    struct uint256 hashes[29] = {0};
+    bool made = bil_history_make(dir, hashes, 0);
+    struct main_state archive; main_state_init(&archive);
+    struct block_header window[ISLAND_ANCHOR_WINDOW];
+    block_index_history_test_cancel_height(13);
+    struct zcl_result r = block_index_history_archive_test_open(&archive, dir, 29, 27,
+        hashes[27].data, &hashes[0], window);
+    block_index_history_test_cancel_height(-1);
+    struct block_header zero[ISLAND_ANCHOR_WINDOW] = {0};
+    BIL_CHECK("history cancellation clears partial window", !memcmp(window, zero, sizeof(window)));
+    BIL_CHECK("history cancellation refuses before publishing active chain",
+        made && !r.ok && strstr(r.message, "cancelled") &&
+        active_chain_cached_height(&archive.chain_active) < 0 && !archive.pindex_best_header);
+    main_state_free(&archive);
+    main_state_init(&archive);
+    block_index_history_test_cancel_row(10);
+    r = block_index_history_archive_test_open(&archive, dir, 29, 27,
+        hashes[27].data, &hashes[0], window);
+    block_index_history_test_cancel_row(-1);
+    BIL_CHECK("partial archive insert rolls back before arena release",
+        !r.ok && strstr(r.message, "cancelled") && archive.map_block_index.size == 0 &&
+        active_chain_cached_height(&archive.chain_active) < 0);
+    main_state_free(&archive);
+    main_state_init(&archive);
+    r = block_index_history_archive_test_open(&archive, dir, 29, 27,
+        hashes[27].data, &hashes[0], window);
+    BIL_CHECK("history succeeds after cancelled attempt cleanup",
+        r.ok && bil_history_view_matches(&archive, hashes, window));
+    main_state_free(&archive);
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
 static int bil_history_archive_cases(void)
 {
     int failures = 0;
     chain_params_select(CHAIN_REGTEST);
     for (int mode = 0; mode < 6; mode++) failures += bil_history_archive_case(mode);
+    failures += bil_history_cancel_case();
 #if defined(__linux__) && !defined(_WIN32)
     failures += bil_history_retained_handle_case();
 #endif

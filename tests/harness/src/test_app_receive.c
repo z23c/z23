@@ -1447,7 +1447,7 @@ static bool ruf_cleanup(struct ru_run *r, bool custody, int old_subreaper)
 }
 /* Optional continuation is qualified through the shipping typed CLI and real
  * private windows. No injected presenter authorizes these operations. */
-enum ruf_case { RUF_CLOSE, RUF_INVALID, RUF_BUILD_FAILURE, RUF_CUSTODY_FAILURE, RUF_PROGRESS_CLOSE };
+enum ruf_case { RUF_CLOSE, RUF_INVALID, RUF_BUILD_FAILURE, RUF_CUSTODY_FAILURE, RUF_PROGRESS_CLOSE, RUF_PROGRESS_CLOSE_OK, RUF_PLAN_CLOSE };
 static bool ruf_driver(struct ru_run *r, const char *title, const char *action, bool pixels)
 {
     char option[160];
@@ -1635,7 +1635,7 @@ static bool ruf_result(struct ru_run *r, enum ruf_case which)
         ruf_driver(r, "The next step did not finish", "--expect-count=0", false) &&
         ruf_no_outputs(r, which);
 }
-static bool ruf_gate_bundle(struct receive_fixture *f)
+static bool ruf_gate_bundle(struct receive_fixture *f, bool success)
 {
     /* Existing app_build_copy FIFO pattern. No compilation occurs before the
      * handshake; cleanup test intentionally interrupts this blocked recipe. */
@@ -1644,7 +1644,7 @@ static bool ruf_gate_bundle(struct receive_fixture *f)
         ".PHONY: before\napp: before\nbefore:\n"
         "\t@printf R > $(APP_OUT)/../flow-ready\n"
         "\t@read ack < $(APP_OUT)/../flow-go\n"
-        "\t@false\n", k_makefile);
+        "\t@%s\n", k_makefile, success ? "true" : "false");
     if (n <= 0 || (size_t)n >= sizeof(makefile)) return false;
     n = snprintf(f->file, sizeof(f->file), "%s/gated.z23share", f->world.root);
     return n > 0 && (size_t)n < sizeof(f->file) &&
@@ -1790,17 +1790,77 @@ static bool rfp_actions(struct ru_run *r, int gate[2])
 }
 static bool rfp_bundle(struct receive_fixture *f, enum ruf_case which)
 {
-    if (which == RUF_CUSTODY_FAILURE || which == RUF_PROGRESS_CLOSE) return ruf_gate_bundle(f);
+    if (which == RUF_PLAN_CLOSE) {
+        char makefile[2048];
+        int n = snprintf(makefile, sizeof(makefile), "%s\nprint-app-closure: slow-plan\n"
+            ".PHONY: slow-plan\nslow-plan:\n\t@sleep 10\n", k_makefile);
+        if (n <= 0 || (size_t)n >= sizeof(makefile)) return false;
+        n = snprintf(f->file, sizeof(f->file), "%s/slow-plan.z23share", f->world.root);
+        return n > 0 && (size_t)n < sizeof(f->file) &&
+            abc_put(f->world.src, "src/main.c", k_main) &&
+            abc_put(f->world.src, "Makefile", makefile) && rt_bundle(f, f->file, 1);
+    }
+    if (which == RUF_CUSTODY_FAILURE || which == RUF_PROGRESS_CLOSE || which == RUF_PROGRESS_CLOSE_OK)
+        return ruf_gate_bundle(f, which == RUF_PROGRESS_CLOSE_OK);
     return true;
 }
+static bool rfp_success_data(struct ru_run *r, const struct json_value *reply, size_t count)
+{
+    const struct json_value *data = json_get(reply, "data"), *ops = json_get(data, "operations");
+    bool ok = ruf_bool(reply, "ok", true) && ru_commit_data(r, data) &&
+        !strcmp(ru_string(data, "continuation"), "received") &&
+        ruf_bool(data, "continuation_executed", false) && !json_get(data, "kept") &&
+        ops && ops->type == JSON_ARR && json_size(ops) == count &&
+        rfp_operation(json_at(ops, 0), "Checking the received version", false);
+    if (ok && count == 2) ok = rfp_operation(json_at(ops, 1), "Building your app", false);
+    return ok;
+}
+static bool rfp_success_reply(struct ru_run *r, size_t count)
+{
+    if (!ru_read_line(r->output, r->line, sizeof(r->line), 30000)) return false;
+    struct json_value reply; json_init(&reply);
+    bool ok = json_read(&reply, r->line, strlen(r->line)) && rfp_success_data(r, &reply, count);
+    json_free(&reply);
+    uint32_t code = UINT32_MAX;
+    bool exited = ru_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    close(r->output); r->output = -1;
+    return ok && exited && ru_committed_modes(r);
+}
+static bool rfp_success_actions(struct ru_run *r, int gate[2])
+{
+    if (!rfp_blocked_close(r, gate)) return false;
+    ssize_t sent; do { sent = write(gate[1], "go\n", 3); } while (sent < 0 && errno == EINTR);
+    return sent == 3 && rfp_success_reply(r, 2) && ruf_empty_directory(getenv("XDG_STATE_HOME")) &&
+        ruf_driver(r, "Opening the built version", "--expect-count=0", false) &&
+        ruf_driver(r, "Preview opened", "--expect-count=0", false);
+}
+static bool rfp_plan_close(struct ru_run *r)
+{
+    if (!ruf_choose_build(r) ||
+        !ruf_driver(r, "Checking the received version", "--key=escape", true)) return false;
+    struct pollfd output = {.fd = r->output, .events = POLLIN};
+    int pending; do { pending = poll(&output, 1, 0); } while (pending < 0 && errno == EINTR);
+    return pending == 0 && ru_image_live(&r->server) && rfp_success_reply(r, 1) &&
+        rfp_no_publication(r) && ruf_driver(r, "Building your app", "--expect-count=0", false);
+}
+static bool ruf_progress_actions(struct ru_run *r, enum ruf_case which, int gate[2])
+{
+    switch (which) {
+    case RUF_CUSTODY_FAILURE: return ruf_gate_failure(r, gate);
+    case RUF_PROGRESS_CLOSE: return rfp_actions(r, gate);
+    case RUF_PROGRESS_CLOSE_OK: return rfp_success_actions(r, gate);
+    case RUF_PLAN_CLOSE: return rfp_plan_close(r);
+    default: return false;
+    }
+}
+
 static bool ruf_actions(struct ru_run *r, enum ruf_case which, uint32_t pages, int gate[2])
 {
     if (!ruf_cli(r, which)) return false;
     if (which == RUF_INVALID) return ruf_result(r, which);
     if (!ru_window(r, true) || !ru_pending(r) || !ru_pages(r, pages) ||
         !ruf_driver(r, "Your copy is ready", "--expect-count=1", false) || !rt_received(r->fixture)) return false;
-    if (which == RUF_CUSTODY_FAILURE) return ruf_gate_failure(r, gate);
-    if (which == RUF_PROGRESS_CLOSE) return rfp_actions(r, gate);
+    if (which >= RUF_CUSTODY_FAILURE) return ruf_progress_actions(r, which, gate);
     if (which == RUF_CLOSE) {
         if (!ruf_driver(r, "Your copy is ready", "--key=enter", false)) return false;
     } else {
@@ -2233,6 +2293,8 @@ int test_app_receive_ui(void)
     failures += ruf_case_run(RUF_BUILD_FAILURE);
     failures += ruf_case_run(RUF_CUSTODY_FAILURE);
     failures += ruf_case_run(RUF_PROGRESS_CLOSE);
+    failures += ruf_case_run(RUF_PROGRESS_CLOSE_OK);
+    failures += ruf_case_run(RUF_PLAN_CLOSE);
     failures += rus_case(false);
     return failures + rus_case(true);
 }

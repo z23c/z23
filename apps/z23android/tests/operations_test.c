@@ -6,6 +6,7 @@
 #include "operations.h"
 #include "params.h"
 #include "setup_state.h"
+#include "startup_auth.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -123,10 +124,11 @@ static int node_arguments(int argc, char **argv)
     if (strcmp(argv[2], "-operator-lane=canonical") || strcmp(argv[3], "-tor") ||
         strcmp(argv[4], "-onion-persist") || strcmp(argv[5], "-flysync-auto") || strcmp(argv[6], "-nolegacyimport") ||
         strcmp(argv[7], "-nolegacyutxoimport")) return 4;
-    int next = 8, first = with_params ? 12 : 11;
+    int next = 8, first = with_params ? 13 : 12;
     if (with_params && strcmp(argv[next++], want) != 0) return 7;
     if (strcmp(argv[next++], "-private-listeners") || strcmp(argv[next++], "-observation=0")) return 5;
     if (strcmp(argv[next++], "-walletbackup=0")) return 10;
+    if (strcmp(argv[next++], "-wallet-startup-auth-fd=198")) return 13;
     return private_tail(argc, argv, first, getenv("ZAPP_TEST_ADDNODE"));
 }
 
@@ -252,9 +254,14 @@ static int preload_child(int argc, char **argv)
 }
 static int basic_child(int argc, char **argv)
 {
-    if ((argc >= 13 && argc <= 15) && !strncmp(argv[1], "-datadir=", 9)) {
+    if ((argc >= 14 && argc <= 16) && !strncmp(argv[1], "-datadir=", 9)) {
         int bad = node_arguments(argc, argv);
         if (bad) return bad;
+        if (getenv("ZAPP_TEST_STARTUP_AUTH")) {
+            const char request[8] = {'Z','W','A','1',1,0,0,0};
+            if (write(198, request, sizeof(request)) != sizeof(request)) return 14;
+            for (;;) pause();
+        }
         puts("full node arguments accepted");
         return 0;
     }
@@ -622,6 +629,49 @@ static void install_fixture_file(const char *dir, const char *name, const char *
 }
 
 struct install_start_test { struct zapp_runtime *runtime; bool ok; char out[256]; };
+static pthread_mutex_t auth_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t auth_cond = PTHREAD_COND_INITIALIZER;
+static bool auth_entered, auth_cancelled;
+static void auth_cancel_test(void *ctx)
+{
+    (void)ctx;
+    pthread_mutex_lock(&auth_lock); auth_cancelled = true; pthread_cond_broadcast(&auth_cond); pthread_mutex_unlock(&auth_lock);
+}
+static bool auth_unwrap_test(struct zapp_startup_auth *auth, const char *files, uint8_t secret[32])
+{
+    (void)files; (void)secret;
+    if (!zapp_startup_auth_register_cancel(auth, auth_cancel_test, NULL)) return false;
+    pthread_mutex_lock(&auth_lock); auth_entered = true; pthread_cond_broadcast(&auth_cond);
+    struct timespec until; assert(clock_gettime(CLOCK_REALTIME, &until) == 0); until.tv_sec += 5;
+    while (!auth_cancelled) assert(pthread_cond_timedwait(&auth_cond, &auth_lock, &until) == 0);
+    pthread_mutex_unlock(&auth_lock); zapp_startup_auth_unregister_cancel(auth); return false;
+}
+static void startup_stop_case(struct zapp_runtime *r)
+{
+    char out[256];
+    auth_entered = auth_cancelled = false;
+    zapp_startup_auth_provider(auth_unwrap_test);
+    assert(setenv("ZAPP_TEST_STARTUP_AUTH", "1", 1) == 0);
+    assert(zapp_node_start(r, out, sizeof(out)));
+    pthread_mutex_lock(&auth_lock);
+    struct timespec until; assert(clock_gettime(CLOCK_REALTIME, &until) == 0); until.tv_sec += 5;
+    while (!auth_entered) assert(pthread_cond_timedwait(&auth_cond, &auth_lock, &until) == 0);
+    pthread_mutex_unlock(&auth_lock);
+    assert(zapp_node_stop(r, out, sizeof(out)));
+    pthread_mutex_lock(&auth_lock); assert(auth_cancelled); pthread_mutex_unlock(&auth_lock);
+    assert(unsetenv("ZAPP_TEST_STARTUP_AUTH") == 0);
+    int status; pid_t child = r->node, got = 0;
+    for (int i = 0; i < 500 && got == 0; i++) {
+        got = waitpid(child, &status, WNOHANG);
+        if (!got) { struct timespec delay = {.tv_nsec = 10000000}; nanosleep(&delay, NULL); }
+    }
+    if (got == 0) { (void)kill(child, SIGKILL); (void)waitpid(child, &status, 0); }
+    assert(got == child); r->node = 0;
+    for (int i = 0; !zapp_startup_auth_ready(r->startup_auth) && i < 500; i++) {
+        struct timespec delay = {.tv_nsec = 10000000}; nanosleep(&delay, NULL);
+    }
+    assert(zapp_startup_auth_ready(r->startup_auth)); zapp_startup_auth_provider(NULL);
+}
 static void *install_start_thread(void *arg)
 {
     struct install_start_test *test = arg;
@@ -759,6 +809,7 @@ static void node_cases(struct zapp_runtime *r, const char *self, const char *dir
     assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     r->node = 0;
     install_cases(r, directory);
+    startup_stop_case(r);
     assert(!strcmp(getenv("ZCL_DEPLOY_ALLOW_CANONICAL"), "bogus"));
     if (saved_allow) assert(setenv("ZCL_DEPLOY_ALLOW_CANONICAL", saved_allow, 1) == 0);
     else assert(unsetenv("ZCL_DEPLOY_ALLOW_CANONICAL") == 0);
@@ -1178,6 +1229,7 @@ int main(int argc, char **argv)
     serving_tests();
     struct zapp_runtime r = {0};
     assert(pthread_mutex_init(&r.mutex, NULL) == 0);
+    r.startup_auth = zapp_startup_auth_new(); assert(r.startup_auth);
     assert(snprintf(r.executable, sizeof(r.executable), "%s", argv[0]) > 0);
     assert(snprintf(r.directory, sizeof(r.directory), "%s", "/tmp") > 0);
     assert(snprintf(r.state_root, sizeof(r.state_root), "%s", "/tmp/private-state") > 0);
@@ -1208,6 +1260,7 @@ int main(int argc, char **argv)
     zapp_runtime_signal_stop(&r);
     assert(!zapp_operation_run(&r, "status", out, sizeof(out)));
     assert(strstr(out, "Unable to run native Z23"));
+    zapp_startup_auth_free(r.startup_auth);
     pthread_mutex_destroy(&r.mutex);
     puts("operation tests passed");
     return 0;

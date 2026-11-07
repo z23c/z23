@@ -7779,7 +7779,7 @@ release-deploy:
 	test -z "$$(git status --porcelain)" || \
 		{ echo "release-deploy: REFUSE: working tree is dirty" >&2; exit 2; }; \
 	$(MAKE) c23-portable-release; \
-	platform/packaging/release/build_release.sh; \
+	platform/packaging/release/build_release.sh --node-only; \
 	tools/scripts/deploy_z23_release.sh --hosts="$(Z23_RELEASE_HOSTS)"
 
 # Split-debug: CFLAGS carries -g, but the shipped binary stays stripped —

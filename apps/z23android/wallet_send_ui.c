@@ -136,7 +136,7 @@ static bool key_ops(void *ctx, struct zapp_devkey_ops *out)
     jobject app = ui.key_app ? (*worker_env)->NewLocalRef(worker_env, ui.key_app) : NULL;
     pthread_mutex_unlock(&ui.key_lock);
     if (!app) return false;
-    worker_key = (struct zapp_devkey_jni){worker_env, app};
+    worker_key = (struct zapp_devkey_jni){.env = worker_env, .activity = app};
     zapp_devkey_jni_ops(out, &worker_key);
     return true;
 }

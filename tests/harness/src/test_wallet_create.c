@@ -48,6 +48,10 @@
 #include "chain/checkpoints.h"
 #include "chain/pow.h"
 #include "config/boot_internal.h"
+#include "platform/wallet_startup_auth_protocol.h"
+#ifndef _WIN32
+#include <sys/socket.h>
+#endif
 #include "config/boot_wallet_phrase.h"
 #include "command/native_command.h"
 #include "config/command_catalog.h"
@@ -1862,6 +1866,144 @@ static int t_restore_inputs(void)
  * wallet_sqlite.c). Until it lands the two checks named "needs wallet-lock"
  * fail: they assert behaviour of the lock layer on a created wallet, not of
  * the create command, and nothing here edits that layer. */
+#if defined(__linux__)
+bool boot_test_pending_authenticate(struct wallet *, struct wallet_sqlite *, int, bool *, int64_t *);
+static void wcr_auth_peer(int fd, const char *pass)
+{
+    alarm(10);
+    unsigned char request[8]; size_t off = 0;
+    while (off < sizeof(request)) {
+        ssize_t n = read(fd, request + off, sizeof(request) - off);
+        if (n <= 0) _exit(2);
+        off += (size_t)n;
+    }
+    if (memcmp(request, "ZWA1", 4) || request[4] != Z23_WALLET_AUTH_REQUEST) _exit(2);
+    size_t len = strlen(pass);
+    unsigned char header[8] = {0x5a,0x57,0x41,0x31, Z23_WALLET_AUTH_SECRET, 0,
+                               (unsigned char)len, (unsigned char)(len >> 8)};
+    if (write(fd, header, sizeof(header)) != (ssize_t)sizeof(header) ||
+        write(fd, pass, len) != (ssize_t)len) _exit(3);
+    _exit(0);
+}
+static bool wcr_startup_auth_case(struct wallet *w, struct wallet_sqlite *ws,
+                                  const char *pass, bool expected)
+{
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) return false;
+    pid_t pid = fork();
+    if (pid == 0) { close(pair[0]); wcr_auth_peer(pair[1], pass); }
+    close(pair[1]);
+    if (pid < 0) { close(pair[0]); return false; }
+    bool unlocked = false; int64_t deadline = 0;
+    bool ok = boot_test_pending_authenticate(w, ws, pair[0], &unlocked, &deadline);
+    bool state = expected ? ok && unlocked && deadline > 0 && !wallet_lock_is_locked() : !ok;
+    wallet_lock_lock(w);
+    int status = 0;
+    bool child = waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    return state && wallet_lock_is_locked() && child;
+}
+static int wcr_startup_corrupt_case(struct wallet *w, struct wallet_sqlite *ws)
+{
+    int failures = 0;
+    const char *sql = "INSERT INTO wallet_sapling_keys(ivk,xsk,xfvk,diversifier,pk_d,child_index,address) "
+        "SELECT zeroblob(32), CAST(substr(xsk,1,length(xsk)-1) || "
+        "CASE WHEN hex(substr(xsk,-1))=hex(zeroblob(1)) THEN char(1) ELSE char(0) END AS BLOB), "
+        "xfvk,diversifier,pk_d,child_index,address FROM wallet_sapling_keys LIMIT 1";
+    bool inserted = sqlite3_exec(ws->db, sql, NULL, NULL, NULL) == SQLITE_OK && sqlite3_changes(ws->db) == 1;
+    WCR_CHECK("a partially corrupted WKS1 row prevents startup authentication",
+              inserted && wcr_startup_auth_case(w, ws, WCR_PASS, false));
+    WCR_CHECK("corrupt fixture row removed", sqlite3_exec(ws->db,
+        "DELETE FROM wallet_sapling_keys WHERE ivk=zeroblob(32)", NULL, NULL, NULL) == SQLITE_OK);
+    return failures;
+}
+
+static struct wallet *wcr_startup_fresh_wallet(void)
+{
+    struct wallet *w = calloc(1, sizeof(*w));
+    if (w) { wallet_init(w); wallet_lock_lock(w); }
+    return w;
+}
+
+static bool wcr_public_update(struct wallet_sqlite *ws, const uint8_t key[32],
+                              const void *value, size_t len, bool ivk)
+{
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = ivk ? "UPDATE wallet_sapling_keys SET ivk=? WHERE ivk=?" :
+                            "UPDATE wallet_sapling_keys SET xfvk=? WHERE ivk=?";
+    if (sqlite3_prepare_v2(ws->db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_blob(stmt, 1, value, (int)len, SQLITE_TRANSIENT) == SQLITE_OK &&
+              sqlite3_bind_blob(stmt, 2, key, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+              sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(ws->db) == 1;
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    return ok;
+}
+static bool wcr_public_read(struct wallet_sqlite *ws, uint8_t original[32],
+                            struct zip32_xfvk *stored)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool ready = sqlite3_prepare_v2(ws->db, "SELECT ivk,xfvk FROM wallet_sapling_keys LIMIT 1", -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_bytes(stmt, 0) == 32 &&
+        sqlite3_column_bytes(stmt, 1) == (int)sizeof(*stored);
+    if (ready) { memcpy(original, sqlite3_column_blob(stmt, 0), 32); memcpy(stored, sqlite3_column_blob(stmt, 1), sizeof(*stored)); }
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) ready = false;
+    return ready;
+}
+
+
+static int wcr_startup_public_corrupt_case(struct wallet_sqlite *ws, bool ivk)
+{
+    int failures = 0;
+    uint8_t original[32] = {0}, changed[32] = {0};
+    struct zip32_xfvk stored = {0}, corrupt = {0};
+    bool ready = wcr_public_read(ws, original, &stored);
+    if (ready) { memcpy(changed, original, 32); changed[0] ^= 1; corrupt = stored; corrupt.fvk.ak[0] ^= 1; }
+    bool changed_db = ready && wcr_public_update(ws, original,
+        ivk ? (const void *)changed : (const void *)&corrupt, ivk ? 32 : sizeof(corrupt), ivk);
+    struct wallet *w = changed_db ? wcr_startup_fresh_wallet() : NULL;
+    WCR_CHECK(ivk ? "corrupted stored IVK refuses startup" : "corrupted stored xfvk refuses startup",
+              w && wcr_startup_auth_case(w, ws, WCR_PASS, false));
+    if (w) { wallet_free(w); free(w); }
+    bool restored = changed_db && wcr_public_update(ws, ivk ? changed : original,
+        ivk ? (const void *)original : (const void *)&stored, ivk ? 32 : sizeof(stored), ivk);
+    WCR_CHECK("public-key corruption fixture restored", restored);
+    memory_cleanse(&stored, sizeof(stored)); memory_cleanse(&corrupt, sizeof(corrupt));
+    return failures;
+}
+
+
+static int wcr_startup_overcap_case(struct wallet_sqlite *ws)
+{
+    int failures = 0;
+    const char *sql = "WITH RECURSIVE i(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM i WHERE n<257) "
+        "INSERT INTO wallet_sapling_keys(ivk,xsk,xfvk,diversifier,pk_d,child_index,address) "
+        "SELECT CAST(printf(char(37,48,51,50,100),n) AS BLOB), xsk,xfvk,diversifier,pk_d,child_index,address "
+        "FROM (SELECT * FROM wallet_sapling_keys LIMIT 1), i";
+    bool inserted = sqlite3_exec(ws->db, sql, NULL, NULL, NULL) == SQLITE_OK && sqlite3_changes(ws->db) == 257;
+    struct wallet *w = inserted ? wcr_startup_fresh_wallet() : NULL;
+    WCR_CHECK("more durable keys than keystore capacity refuses startup", w &&
+              wcr_startup_auth_case(w, ws, WCR_PASS, false));
+    if (w) { wallet_free(w); free(w); }
+    const char *cleanup = "WITH RECURSIVE i(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM i WHERE n<257) "
+        "DELETE FROM wallet_sapling_keys WHERE ivk IN "
+        "(SELECT CAST(printf(char(37,48,51,50,100),n) AS BLOB) FROM i)";
+    WCR_CHECK("over-cap fixture rows removed", sqlite3_exec(ws->db, cleanup, NULL, NULL, NULL) == SQLITE_OK);
+    return failures;
+}
+
+static int wcr_startup_imported_highbit_case(struct wallet_sqlite *ws)
+{
+    int failures = 0;
+    bool changed = sqlite3_exec(ws->db, "DELETE FROM wallet_seed", NULL, NULL, NULL) == SQLITE_OK &&
+        sqlite3_exec(ws->db, "UPDATE wallet_sapling_keys SET child_index=-2147483648", NULL, NULL, NULL) == SQLITE_OK;
+    struct wallet *w = changed ? wcr_startup_fresh_wallet() : NULL;
+    WCR_CHECK("imported-only wallet accepts canonical high-bit child index", w &&
+              wcr_startup_auth_case(w, ws, WCR_PASS, true));
+    if (w) { wallet_free(w); free(w); }
+    return failures;
+}
+#endif
+
+
 static int t_locked_wallet(void)
 {
     int failures = 0;
@@ -1896,12 +2038,28 @@ static int t_locked_wallet(void)
     WCR_CHECK("needs wallet-lock: a wrong passphrase is refused for a created "
               "wallet", !bad.ok);
     wallet_lock_lock(w);
+#if defined(__linux__)
+    wallet_lock_note_encrypted_at_rest();
+    WCR_CHECK("startup auth rejects the wrong passphrase and stays locked",
+              wcr_startup_auth_case(w, &ws, "wrong-startup-pass", false));
+    WCR_CHECK("startup auth unlocks then relocks an encrypted wallet",
+              wcr_startup_auth_case(w, &ws, WCR_PASS, true));
+#endif
     WCR_CHECK("needs wallet-lock: a payment to the created address is found "
               "while the wallet is locked",
               wcr_locked_payment_found(w, &ws, address));
     wallet_lock_lock(w);
+#if defined(__linux__)
+    failures += wcr_startup_corrupt_case(w, &ws);
+#endif
     wallet_free(w);
     free(w);
+#if defined(__linux__)
+    failures += wcr_startup_public_corrupt_case(&ws, true);
+    failures += wcr_startup_public_corrupt_case(&ws, false);
+    failures += wcr_startup_overcap_case(&ws);
+    failures += wcr_startup_imported_highbit_case(&ws);
+#endif
     wallet_sqlite_close(&ws);
     node_db_close(&ndb);
     return failures;

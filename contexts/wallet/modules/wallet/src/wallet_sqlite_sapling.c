@@ -7,6 +7,7 @@
 #include "wallet_sqlite_internal.h"
 #include "wallet/wallet_keystore.h"
 #include "wallet/wallet_lock.h"
+#include "sapling/sapling.h"
 #include "wallet/wallet_sqlite_key_crypto.h"
 #include "base/serialize_le.h"
 #include "support/cleanse.h"
@@ -468,6 +469,198 @@ bool wallet_sqlite_read_sapling_keys(struct wallet_sqlite *ws,
     return st != WALLET_SEED_UNREADABLE && step_rc == SQLITE_DONE;
 }
 
+
+/* A startup replay may publish only when every durable scanning key is in RAM. */
+static bool wsql_startup_xsk_exact(sqlite3_stmt *s)
+{
+    const void *blob = sqlite3_column_blob(s, 1);
+    size_t len = (size_t)sqlite3_column_bytes(s, 1);
+    if (!blob) return false;
+    if (!wsql_is_wks1_blob(blob, len)) return len == sizeof(struct zip32_xsk);
+    uint8_t *plain = NULL; size_t plain_len = 0;
+    bool ok = wsql_sapling_xsk_decrypt(blob, len, &plain, &plain_len) &&
+              plain_len == sizeof(struct zip32_xsk);
+    wsql_wipe_free(plain, plain_len);
+    return ok;
+}
+
+static bool wsql_startup_columns_exact(sqlite3_stmt *s)
+{
+    int xtype = sqlite3_column_type(s, 2);
+    sqlite3_int64 child = sqlite3_column_int64(s, 5);
+    return sqlite3_column_type(s, 0) == SQLITE_BLOB && sqlite3_column_bytes(s, 0) == 32 &&
+        sqlite3_column_type(s, 1) == SQLITE_BLOB && wsql_startup_xsk_exact(s) &&
+        (xtype == SQLITE_NULL || (xtype == SQLITE_BLOB &&
+                                  sqlite3_column_bytes(s, 2) == (int)sizeof(struct zip32_xfvk))) &&
+        sqlite3_column_type(s, 3) == SQLITE_BLOB && sqlite3_column_bytes(s, 3) == 11 &&
+        sqlite3_column_type(s, 4) == SQLITE_BLOB && sqlite3_column_bytes(s, 4) == 32 &&
+        sqlite3_column_type(s, 5) == SQLITE_INTEGER && child >= INT32_MIN && child <= INT32_MAX;
+}
+
+static bool wsql_startup_derived_matches(const struct sapling_key_entry *row)
+{
+    struct zip32_xfvk derived = {0};
+    uint8_t ivk[32] = {0}, pk_d[32] = {0};
+    zip32_xsk_to_xfvk(&derived, &row->xsk);
+    sapling_crh_ivk(derived.fvk.ak, derived.fvk.nk, ivk);
+    bool ok = derived.depth == row->xfvk.depth &&
+        derived.parent_fvk_tag == row->xfvk.parent_fvk_tag &&
+        derived.child_index == row->xfvk.child_index &&
+        !memcmp(derived.chain_code, row->xfvk.chain_code, sizeof(derived.chain_code)) &&
+        !memcmp(&derived.fvk, &row->xfvk.fvk, sizeof(derived.fvk)) &&
+        !memcmp(derived.dk, row->xfvk.dk, sizeof(derived.dk)) &&
+        !memcmp(ivk, row->ivk, sizeof(ivk)) &&
+        sapling_ivk_to_pkd(ivk, row->diversifier, pk_d) &&
+        !memcmp(pk_d, row->pk_d, sizeof(pk_d));
+    memory_cleanse(&derived, sizeof(derived));
+    memory_cleanse(ivk, sizeof(ivk));
+    memory_cleanse(pk_d, sizeof(pk_d));
+    return ok;
+}
+
+static bool wsql_startup_row_count_bounded(sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT count(*) FROM wallet_sapling_keys", -1, &s, NULL) != SQLITE_OK) {
+        if (s) sqlite3_finalize(s);
+        return false;
+    }
+    int rc = AR_STEP_ROW_READONLY(s);
+    bool ok = rc == SQLITE_ROW && sqlite3_column_type(s, 0) == SQLITE_INTEGER &&
+              sqlite3_column_int64(s, 0) >= 0 && sqlite3_column_int64(s, 0) <= MAX_SAPLING_KEYS;
+    if (ok) ok = AR_STEP_ROW_READONLY(s) == SQLITE_DONE;
+    if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+
+static bool wsql_startup_match_row(struct sapling_keystore *sks,
+                                   const struct sapling_key_entry *row, bool seen[MAX_SAPLING_KEYS])
+{
+    for (size_t i = 0; i < sks->num_keys; i++) {
+        struct sapling_key_entry *key = &sks->keys[i];
+        if (!key->used || memcmp(key->ivk, row->ivk, 32)) continue;
+        if (seen[i] || key->secret_wiped || memcmp(&key->xsk, &row->xsk, sizeof(row->xsk)) ||
+            memcmp(&key->xfvk, &row->xfvk, sizeof(row->xfvk)) ||
+            memcmp(key->diversifier, row->diversifier, sizeof(row->diversifier)) ||
+            memcmp(key->pk_d, row->pk_d, sizeof(row->pk_d)) || key->child_index != row->child_index)
+            return false;
+        seen[i] = true;
+        return true;
+    }
+    return false;
+}
+
+static bool wsql_startup_seed_blob_matches(const void *data, int len, struct sapling_keystore *sks)
+{
+    uint8_t blob[512] = {0};
+    uint8_t *plain = NULL; size_t plain_len = 0;
+    bool ok = false;
+    if (data && len > 0 && (size_t)len <= sizeof(blob)) {
+        memcpy(blob, data, (size_t)len);
+        if (wsql_is_wks1_blob(blob, (size_t)len))
+            ok = wsql_decrypt_blob(blob, (size_t)len, &plain, &plain_len) &&
+                 plain_len == 32 && sks->has_seed && !memcmp(plain, sks->seed, 32);
+        else ok = len == 32 && sks->has_seed && !memcmp(blob, sks->seed, 32);
+    }
+    wsql_wipe_free(plain, plain_len);
+    memory_cleanse(blob, sizeof(blob));
+    return ok;
+}
+
+
+static bool wsql_startup_seed_matches(struct wallet_sqlite *ws, struct sapling_keystore *sks)
+{
+    sqlite3_stmt *s = ws->stmt_seed_read;
+    if (!s || sqlite3_reset(s) != SQLITE_OK) return false;
+    int rc = AR_STEP_ROW_READONLY(s);
+    bool ok = false;
+    if (rc == SQLITE_DONE) ok = !sks->has_seed;
+    else if (rc == SQLITE_ROW && sqlite3_column_type(s, 0) == SQLITE_BLOB) {
+        ok = wsql_startup_seed_blob_matches(sqlite3_column_blob(s, 0), sqlite3_column_bytes(s, 0), sks);
+        if (ok) ok = AR_STEP_ROW_READONLY(s) == SQLITE_DONE;
+    }
+    if (sqlite3_reset(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool wsql_verify_startup_row(sqlite3_stmt *s, struct sapling_keystore *sks,
+                                    bool seen[MAX_SAPLING_KEYS], size_t count)
+{
+    struct sapling_key_entry row = {0};
+    bool ok = count < MAX_SAPLING_KEYS && wsql_startup_columns_exact(s) &&
+        wsql_sapling_row_load(s, &row) == WSQL_ZROW_ENTRY && !row.secret_wiped &&
+        wsql_startup_derived_matches(&row) && wsql_startup_match_row(sks, &row, seen);
+    memory_cleanse(&row, sizeof(row));
+    return ok;
+}
+
+
+/* The caller owns the connection snapshot and the Sapling keystore lock. */
+static bool wsql_verify_startup_sapling_locked(struct wallet_sqlite *ws, struct wallet *w)
+{
+    struct sapling_keystore *sks = &w->sapling_keys;
+    bool seen[MAX_SAPLING_KEYS] = {0};
+    bool ok = !sks->locked && sks->num_keys <= MAX_SAPLING_KEYS &&
+              !sks->num_unscannable && !sks->num_damaged &&
+              wsql_startup_row_count_bounded(ws->db) && wsql_startup_seed_matches(ws, sks);
+    sqlite3_stmt *s = ws->stmt_zkey_read;
+    int rc = sqlite3_reset(s);
+    size_t count = 0;
+    if (rc != SQLITE_OK) ok = false;
+    while (ok && (rc = AR_STEP_ROW_READONLY(s)) == SQLITE_ROW) {
+        ok = wsql_verify_startup_row(s, sks, seen, count);
+        count++;
+    }
+    if (ok && (rc != SQLITE_DONE || count != sks->num_keys)) ok = false;
+    if (sqlite3_reset(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+struct zcl_result wallet_sqlite_verify_startup_sapling_in_tx_locked_r(
+    struct wallet_sqlite *ws, struct wallet *w, sqlite3 *db)
+{
+    if (!ws || !ws->open || !db || ws->db != db || !ws->stmt_zkey_read || !w ||
+        sqlite3_get_autocommit(db))
+        return ZCL_ERR(WSQL_TXN_BEGIN_FAIL, "startup Sapling verification requires the owned transaction");
+    return wsql_verify_startup_sapling_locked(ws, w) ? ZCL_OK :
+        ZCL_ERR(WSQL_WRITE_FAIL, "startup Sapling keys incomplete or unreadable");
+}
+
+static bool wsql_startup_snapshot_finish(sqlite3 *db, bool ok)
+{
+    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) ok = false;
+    if (!ok && !sqlite3_get_autocommit(db)) {
+        (void)sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        if (!sqlite3_get_autocommit(db)) abort();
+    }
+    return ok;
+}
+
+
+struct zcl_result wallet_sqlite_verify_startup_sapling_r(struct wallet_sqlite *ws, struct wallet *w)
+{
+    if (!ws || !ws->open || !ws->db || !ws->stmt_zkey_read || !w)
+        return ZCL_ERR(WSQL_NULL_ARG, "startup Sapling verification unavailable");
+    sqlite3_mutex *mu = sqlite3_db_mutex(ws->db);
+    if (!mu) return ZCL_ERR(WSQL_WRITE_FAIL, "startup Sapling database mutex unavailable");
+    sqlite3_mutex_enter(mu);
+    if (!sqlite3_get_autocommit(ws->db)) {
+        sqlite3_mutex_leave(mu);
+        return ZCL_ERR(WSQL_TXN_BEGIN_FAIL, "startup Sapling verification requires an idle connection");
+    }
+    if (sqlite3_exec(ws->db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
+        if (!sqlite3_get_autocommit(ws->db)) abort();
+        sqlite3_mutex_leave(mu);
+        return ZCL_ERR(WSQL_TXN_BEGIN_FAIL, "startup Sapling read snapshot unavailable");
+    }
+    zcl_mutex_lock(&w->sapling_keys.cs);
+    bool ok = wsql_verify_startup_sapling_locked(ws, w);
+    zcl_mutex_unlock(&w->sapling_keys.cs);
+    ok = wsql_startup_snapshot_finish(ws->db, ok);
+    sqlite3_mutex_leave(mu);
+    return ok ? ZCL_OK : ZCL_ERR(WSQL_WRITE_FAIL, "startup Sapling keys incomplete or unreadable");
+}
 
 /* ── Diversified receive addresses ────────────────────────────────────
  *

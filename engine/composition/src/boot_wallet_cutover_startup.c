@@ -1,6 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Pending wallet cutover startup. */
 #include "platform/socket_compat.h"
+#include "platform/wallet_startup_auth.h"
+#include "platform/wallet_startup_auth_protocol.h"
+#include "base/cleanse.h"
+#include "wallet/wallet_lock.h"
 #include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "config/boot_blkidx_ladder.h"
@@ -472,18 +476,95 @@ bool boot_test_pending_publish(struct boot_cutover_env *e, struct app_context *c
 }
 #endif
 
+/* The descriptor is a one-shot capability, never wallet authority itself. */
+static bool boot_pending_authenticate(struct boot_cutover_env *e, struct app_context *ctx,
+                                      bool *unlocked, int64_t *deadline)
+{
+    *unlocked = false;
+    *deadline = 0;
+    bool needed = wallet_lock_encrypted_at_rest() && wallet_lock_is_locked();
+    if (!needed) {
+        if (ctx->wallet_startup_auth_present) {
+            platform_wallet_startup_auth_close(ctx->wallet_startup_auth_fd);
+            ctx->wallet_startup_auth_present = false;
+        }
+        return e->sapling_load_ok && wallet_sqlite_verify_startup_sapling_r(e->wallet_db, e->wallet).ok;
+    }
+    if (!ctx->wallet_startup_auth_present || thread_registry_shutdown_requested()) return false;
+    int fd = ctx->wallet_startup_auth_fd;
+    ctx->wallet_startup_auth_present = false;
+    char secret[Z23_WALLET_AUTH_SECRET_MAX + 1] = {0};
+    bool received = platform_wallet_startup_auth_receive(fd, 120000, secret, sizeof(secret));
+    struct zcl_result result = received ? wallet_lock_unlock(e->wallet, e->wallet_db, secret)
+                                        : ZCL_ERR(-1, "startup authentication unavailable");
+    memory_cleanse(secret, sizeof(secret));
+    if (!result.ok) return false;
+    *unlocked = true;
+    if (!e->sapling_load_ok) return false;
+    int64_t now = platform_time_monotonic_ms();
+    if (now <= 0 || now > INT64_MAX - 3600000 || thread_registry_shutdown_requested()) return false;
+    result = wallet_lock_arm_timeout(e->wallet, 3600);
+    if (!result.ok) return false;
+    *deadline = now + 3600000;
+    if (!wallet_lock_startup_publication_begin(*deadline)) return false;
+    result = wallet_sqlite_verify_startup_sapling_r(e->wallet_db, e->wallet);
+    wallet_lock_startup_publication_end();
+    return result.ok;
+}
+
+
+#ifdef ZCL_TESTING
+bool boot_test_pending_authenticate(struct wallet *wallet, struct wallet_sqlite *ws, int fd,
+                                    bool *unlocked, int64_t *deadline)
+{
+    struct boot_cutover_env env = {.wallet = wallet, .wallet_db = ws, .sapling_load_ok = true};
+    struct app_context ctx = {.wallet_startup_auth_present = true, .wallet_startup_auth_fd = fd};
+    return boot_pending_authenticate(&env, &ctx, unlocked, deadline);
+}
+#endif
+
+/* Only repeated contention is retried; shutdown, lock and elapsed bounds win. */
+static bool boot_pending_busy_backoff(int64_t *since, int64_t deadline, int limit_ms)
+{
+    int64_t now = platform_time_monotonic_ms();
+    if (now <= 0 || thread_registry_shutdown_requested() ||
+        (deadline && (now >= deadline || wallet_lock_is_locked()))) return false;
+    if (!*since) *since = now;
+    if (now < *since || now - *since >= limit_ms) return false;
+    platform_sleep_ms(50);
+    return true;
+}
+#ifdef ZCL_TESTING
+bool boot_test_pending_busy_backoff(int64_t *since, int64_t deadline, int limit_ms)
+{
+    return boot_pending_busy_backoff(since, deadline, limit_ms);
+}
+#endif
+
 bool boot_cutover_replay(struct boot_cutover_env *e, struct app_context *ctx, const struct chain_params *params)
 {
     struct boot_cutover_replay replay = {0};
     struct wallet_rpc_context rpc;
     struct boot_pending_history history = {0};
-    bool ok = false;
+    bool ok = false, unlocked = false;
+    int64_t deadline = 0, busy_since = 0;
+    if (!boot_pending_authenticate(e, ctx, &unlocked, &deadline)) goto done;
     if (!boot_pending_replay_prepare(e, ctx, &replay, &rpc, &history)) {
         LOG_ERROR("wallet", "pending replay reference or scan floor unavailable");
         goto done;
     }
+    replay.auth_deadline_ms = deadline;
     while (!thread_registry_shutdown_requested()) {
+        int64_t now = deadline ? platform_time_monotonic_ms() : 0;
+        if (deadline && (now <= 0 || now >= deadline || wallet_lock_is_locked())) break;
+        int before = replay.next;
         enum boot_cutover_replay_status status = boot_cutover_replay_step(&replay);
+        if (status == BOOT_CUTOVER_BUSY) {
+            if (replay.next != before) busy_since = 0;
+            if (!boot_pending_busy_backoff(&busy_since, deadline, 30000)) break;
+            continue;
+        }
+        busy_since = 0;
         if (status == BOOT_CUTOVER_COMPLETE) {
             ok = boot_pending_publish(e, ctx, params, &replay);
             break;
@@ -495,6 +576,7 @@ bool boot_cutover_replay(struct boot_cutover_env *e, struct app_context *ctx, co
         }
     }
 done:
+    if (unlocked) wallet_lock_lock(e->wallet);
     boot_cutover_replay_clear(&replay);
     boot_pending_history_close(&history);
     return ok;
@@ -524,6 +606,10 @@ bool boot_pending_mode_supported_test(const struct app_context *ctx)
 
 bool boot_cutover_publish_readiness(struct boot_cutover_env *e, struct app_context *ctx)
 {
+    if (ctx->wallet_startup_auth_present) {
+        platform_wallet_startup_auth_close(ctx->wallet_startup_auth_fd);
+        ctx->wallet_startup_auth_present = false;
+    }
     struct wallet_cutover_binding boot_binding;
     if (wallet_sqlite_cutover_read(e->wallet_db, &boot_binding) != WALLET_CUTOVER_ABSENT) {
         LOG_ERROR("wallet", "wallet cutover needs reconciliation before services");

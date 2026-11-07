@@ -66,7 +66,7 @@ test-bridge: bridge
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/relay-test' "$$scratch"
 
 SPEECH_JSON := ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c ../../platform/modules/base/src/safe_alloc.c
-SPEECH_INCLUDES := -I. -Ibridge -I../../platform/modules/json/include -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include -I../../contexts/commons/packages/zsha256/include -I../../platform/modules/encoding/include -I../../platform/modules/sha3/include
+SPEECH_INCLUDES := -I. -Ibridge -I../../platform/modules/json/include -I../../platform/modules/platform/include -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include -I../../contexts/commons/packages/zsha256/include -I../../platform/modules/encoding/include -I../../platform/modules/sha3/include
 HOST_SOURCES := bridge_auth.c bridge/assistant.c bridge/http.c bridge/fleet_probe.c private.c bridge/host_ops.c bridge/host.c bridge/game_host.c bridge/relay.c hosts.c pairing.c voice.c \
   ../../contexts/commons/packages/zsha256/src/zsha256.c \
   ../../platform/modules/sha3/src/sha3.c \
@@ -113,19 +113,25 @@ test-voice:
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/speech-client.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/speech-client-test' "$$scratch"
 
-test: prepare-quirc test-bridge test-voice test-host test-game test-devkey test-dexgen test-watch test-scan test-qr-window test-payment test-wallet test-wallet-send test-qr-fuzz test-setup test-camera-access
+test-startup-auth:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/platform/include -I../../platform/modules/base/include \
+	  tests/startup_auth_test.c startup_auth.c ../../platform/modules/base/src/cleanse.c ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/startup-auth-test'
+	'$(BUILD_DIR)/startup-auth-test'
+
+test: prepare-quirc test-bridge test-voice test-host test-game test-devkey test-dexgen test-watch test-scan test-qr-window test-payment test-wallet test-wallet-send test-qr-fuzz test-setup test-camera-access test-startup-auth
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' $(QUIRC_FLAGS) \
 	  tests/fleet_test.c fleet.c ../../vendor/qrcodegen/qrcodegen.c $(QUIRC_SOURCES) \
 	  -lm -o '$(BUILD_DIR)/fleet-test'
 	'$(BUILD_DIR)/fleet-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/json/include \
-	  -I../../platform/modules/base/include -I../../platform/modules/sha3/include tests/operations_test.c operations.c setup_state.c private.c params.c rpc.c nodelog.c \
+	  -I../../platform/modules/platform/include -I../../platform/modules/base/include -I../../platform/modules/sha3/include tests/operations_test.c operations.c startup_auth.c setup_state.c private.c params.c rpc.c nodelog.c \
 	  ../../platform/modules/sha3/src/sha3.c ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
 	  ../../platform/modules/base/src/safe_alloc.c -Wl,--wrap=clock_gettime \
 	  -o '$(BUILD_DIR)/operations-test'
 	'$(BUILD_DIR)/operations-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/json/include \
-	  -I../../platform/modules/base/include -I../../platform/modules/sha3/include tests/direct_test.c operations.c setup_state.c private.c params.c rpc.c nodelog.c \
+	  -I../../platform/modules/platform/include -I../../platform/modules/base/include -I../../platform/modules/sha3/include tests/direct_test.c operations.c startup_auth.c setup_state.c private.c params.c rpc.c nodelog.c \
 	  ../../platform/modules/sha3/src/sha3.c ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
 	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/direct-test'
 	'$(BUILD_DIR)/direct-test'
@@ -215,7 +221,7 @@ test-wallet:
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) -I../../platform/domain/encoding/include tests/wallet_screens_test.c wallet_screens.c ../../platform/domain/encoding/src/bech32.c payment_code.c wallet_view.c \
 	  ../../contexts/commons/packages/zutf8/src/zutf8.c $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-screens-test'
 	TMPDIR="$$(cd '$(BUILD_DIR)' && pwd)" '$(BUILD_DIR)/wallet-screens-test'
-	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/wallet_run_test.c operations.c setup_state.c private.c params.c rpc.c nodelog.c \
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/wallet_run_test.c operations.c startup_auth.c setup_state.c private.c params.c rpc.c nodelog.c \
 	  ../../platform/modules/sha3/src/sha3.c $(SPEECH_JSON) -Wl,--wrap=posix_spawn -o '$(BUILD_DIR)/wallet-run-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/wallet-run.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; ZAPP_TEST_DIR="$$(cd "$$scratch" && pwd)" '$(BUILD_DIR)/wallet-run-test'
@@ -497,7 +503,7 @@ test-wallet-send:
 build-setup-native:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) -I../../platform/domain/encoding/include \
-	  -I../../contexts/commons/packages/zsha256/include tests/setup_native_integration_test.c setup_words.c setup_wordlist.c setup_node.c operations.c setup_state.c private.c params.c rpc.c nodelog.c \
+	  -I../../contexts/commons/packages/zsha256/include tests/setup_native_integration_test.c setup_words.c setup_wordlist.c setup_node.c operations.c startup_auth.c setup_state.c private.c params.c rpc.c nodelog.c \
 	  ../../platform/domain/encoding/src/bech32.c ../../platform/modules/sha3/src/sha3.c ../../contexts/commons/packages/zsha256/src/zsha256.c $(SPEECH_JSON) -o '$(BUILD_DIR)/setup-native-test'
 test-setup-native: build-setup-native
 	@test -x '$(NODE_BIN)' || { echo 'Set NODE_BIN to the reviewed host node' >&2; exit 1; }

@@ -21,7 +21,7 @@ struct receive_flow {
     void *context;
     struct json_value operations;
     const char *status;
-    bool adopted;
+    bool adopted, closed;
     int executed; /* 0: no open worker; -1: outcome uncertain; 1: validated open. */
 };
 struct receive_progress {
@@ -98,10 +98,12 @@ static void arf_tick(void *context, const struct zcl_present_window_event_v1 *ev
     struct app_receive_job_result result;
     *redraw = false;
     *allow_close = app_receive_job_poll(p->job, &result);
-    if (close_requested && !*allow_close && !p->close_seen) {
+    if (close_requested && !p->close_seen) {
         p->close_seen = true;
-        *redraw = arf_waiting_notice(p);
-        p->notice_failed = !*redraw;
+        if (!*allow_close) {
+            *redraw = arf_waiting_notice(p);
+            p->notice_failed = !*redraw;
+        }
     }
 }
 static bool arf_progress(struct receive_flow *f, struct receive_progress *p,
@@ -268,12 +270,14 @@ static bool arf_job(struct receive_flow *f, enum app_receive_job_command command
         platform_sleep_ms(1000);
     }
     app_confirm_free(&p->view);
-    bool notice_failed = p->notice_failed;
+    bool notice_failed = p->notice_failed, closed = p->close_seen;
     free(p);
     if (!ok) return false; /* Never replace a missing-evidence diagnosis. */
     if (cleanup_failed) return arf_fail(f, "PREVIEW_CLEANUP_DELAYED", "Worker cleanup required recovery; the observed operation result is retained.");
     if (notice_failed) return arf_fail(f, "PROGRESS_NOTICE_UNAVAILABLE", "The closing notice could not be displayed; the observed operation result is retained.");
-    return shown ? ok : arf_fail(f, "PROGRESS_UNAVAILABLE", "Progress could not be displayed; the operation's result must be inspected before retrying.");
+    if (!shown) return arf_fail(f, "PROGRESS_UNAVAILABLE", "Progress could not be displayed; the operation's result must be inspected before retrying.");
+    if (closed) { f->closed = true; return false; }
+    return true;
 }
 static bool arf_build(struct receive_flow *f)
 {
@@ -414,6 +418,14 @@ static bool arf_prepare(struct receive_flow *f, const char *datadir, bool *chose
         "Build and run this received version to preview it. Keep remains a separate choice.",
         "Build and preview", chosen);
 }
+static bool arf_continue(struct receive_flow *f, bool chosen)
+{
+    const char *status = f->adopted ? "adopted" : "received";
+    bool ok = chosen ? (arf_build(f) && arf_open(f) && arf_keep(f)) : arf_status(f, status);
+    if (!ok && f->closed) ok = arf_status(f, status);
+    return ok;
+}
+
 static void arf_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context, bool adopted)
 {
@@ -421,7 +433,7 @@ static void arf_run(const char *datadir, struct zcl_command_reply *reply,
     json_init(&f.operations); json_set_array(&f.operations);
     bool chosen = false;
     bool ok = arf_prepare(&f, datadir, &chosen);
-    if (ok) ok = chosen ? (arf_build(&f) && arf_open(&f) && arf_keep(&f)) : arf_status(&f, adopted ? "adopted" : "received");
+    if (ok) ok = arf_continue(&f, chosen);
     if (!json_push_kv(&reply->data, "operations", &f.operations))
         ok = arf_fail(&f, "OBSERVATION_UNAVAILABLE", "Operation evidence could not be returned; inspect the retained copy before retrying.");
     json_free(&f.operations);

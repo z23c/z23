@@ -169,6 +169,7 @@ enum zapp_devkey_status zapp_devkey_status_for_answer(enum zapp_devkey_answer an
 struct zapp_devkey_jni {
     JNIEnv *env;
     jobject activity;
+    struct zapp_startup_auth *startup_auth;
 };
 /* Fills ops with the AndroidKeyStore backend bound to state; both must outlive the calls, and env
  * must belong to the calling worker thread. */

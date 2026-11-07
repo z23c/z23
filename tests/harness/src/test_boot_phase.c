@@ -9,6 +9,8 @@
 
 #include "test/test_core.h"
 #include "platform/socket_compat.h"
+#include "platform/wallet_startup_auth.h"
+#include "platform/wallet_startup_auth_protocol.h"
 #include "config/boot.h"
 #include "config/boot_error.h"
 #include "config/boot_internal.h"
@@ -1435,6 +1437,82 @@ static bool bp_pending_modes(void)
 }
 
 #endif
+#if defined(__linux__)
+static bool bp_auth_read_request(int fd)
+{
+    unsigned char req[8]; size_t off = 0;
+    while (off < sizeof(req)) {
+        ssize_t n = read(fd, req + off, sizeof(req) - off);
+        if (n <= 0) return false;
+        off += (size_t)n;
+    }
+    const unsigned char want[8] = {0x5a,0x57,0x41,0x31, Z23_WALLET_AUTH_REQUEST, 0, 0, 0};
+    return memcmp(req, want, sizeof(req)) == 0;
+}
+static void bp_auth_peer(int fd, int mode)
+{
+    alarm(5);
+    if (!bp_auth_read_request(fd)) _exit(2);
+    unsigned char frame[11] = {0x5a,0x57,0x41,0x31, Z23_WALLET_AUTH_SECRET, 0, 3, 0, 0x61,0x62,0x63};
+    if (mode == 1) { frame[4] = Z23_WALLET_AUTH_CANCEL; frame[6] = 0; }
+    if (mode == 2) frame[0] = 0x58;
+    if (mode == 3) frame[9] = 0;
+    if (mode == 4) frame[6] = 5;
+    if (mode == 5) { sleep(1); _exit(0); }
+    if (mode == 6) { frame[6] = 1; frame[7] = 2; }
+    size_t count = mode == 1 || mode == 6 ? 8 : sizeof(frame);
+    _exit(write(fd, frame, count) == (ssize_t)count ? 0 : 3);
+}
+static bool bp_auth_case(int mode)
+{
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) return false;
+    pid_t pid = fork();
+    if (pid == 0) { close(pair[0]); bp_auth_peer(pair[1], mode); }
+    close(pair[1]);
+    if (pid < 0) { close(pair[0]); return false; }
+    char secret[Z23_WALLET_AUTH_SECRET_MAX + 1]; memset(secret, 0x5a, sizeof(secret));
+    bool received = platform_wallet_startup_auth_receive(pair[0], mode == 5 ? 50 : 3000,
+                                                          secret, sizeof(secret));
+    int status = 0;
+    bool child = waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    bool cleared = true;
+    for (size_t i = 0; i < sizeof(secret); i++) if (secret[i]) cleared = false;
+    return child && (mode == 0 ? received && !strcmp(secret, "abc") : !received && cleared);
+}
+static int bp_auth_transport_checks(void)
+{
+    int failures = 0;
+    BP_CHECK("startup auth receives a framed secret", bp_auth_case(0));
+    BP_CHECK("startup auth cancellation refuses and wipes", bp_auth_case(1));
+    BP_CHECK("startup auth malformed frame refuses and wipes", bp_auth_case(2));
+    BP_CHECK("startup auth embedded NUL refuses and wipes", bp_auth_case(3));
+    BP_CHECK("startup auth truncated frame refuses and wipes", bp_auth_case(4));
+    BP_CHECK("startup auth timeout refuses and wipes", bp_auth_case(5));
+    BP_CHECK("startup auth oversized frame refuses and wipes", bp_auth_case(6));
+    int pipefd[2]; char secret[16]; memset(secret, 0x5a, sizeof(secret));
+    bool opened = pipe(pipefd) == 0;
+    bool denied = opened && !platform_wallet_startup_auth_receive(pipefd[0], 50, secret, sizeof(secret));
+    if (opened) close(pipefd[1]);
+    BP_CHECK("startup auth rejects non-socket descriptor", denied && secret[0] == 0);
+    return failures;
+}
+#endif
+
+
+#if !defined(__linux__) && !defined(_WIN32)
+static int bp_auth_unsupported_close_checks(void)
+{
+    int failures = 0, pair[2]; char out[4] = {1};
+    bool opened = pipe(pair) == 0;
+    bool refused = opened && !platform_wallet_startup_auth_receive(pair[0], 50, out, sizeof(out));
+    bool closed = opened && fcntl(pair[0], F_GETFD) == -1 && errno == EBADF;
+    if (opened) close(pair[1]);
+    BP_CHECK("unsupported startup auth closes descriptor and wipes", refused && closed && out[0] == 0);
+    return failures;
+}
+#endif
+
 int test_boot_phase(void)
 {
 #if defined(_WIN32)
@@ -1479,6 +1557,11 @@ int test_boot_phase(void)
              "and fails closed",
         test_wallet_rebuild_probe() == 0);
 
+#if defined(__linux__)
+    failures += bp_auth_transport_checks();
+#elif !defined(_WIN32)
+    failures += bp_auth_unsupported_close_checks();
+#endif
     failures += bp_test_boot_stage_names();
     failures += bp_test_stage_predicates_and_steps();
     failures += bp_test_params_thread_failure_gating();

@@ -1106,6 +1106,15 @@ static int args_arm_hotswap_wallet(const char *arg,
          * and seeding are unaffected. Meant for the phone build; no shipped caller passes it yet. */
         sovereignty_spend_after_checkpoint_set(true);
     }
+    else if (strncmp(arg, "-wallet-startup-auth-fd=", 24) == 0) {
+        int fd;
+        if (ctx->wallet_startup_auth_present || !args_parse_port(arg + 24, false, &fd) || fd < 3) {
+            fprintf(stderr, "Invalid wallet startup authentication descriptor\n");
+            return 1;
+        }
+        ctx->wallet_startup_auth_present = true;
+        ctx->wallet_startup_auth_fd = fd;
+    }
     else if (strcmp(arg, "-nolegacyimport") == 0) ctx->no_legacy_auto_import = true;
     else if (strcmp(arg, "-nolegacyutxoimport") == 0) ctx->no_legacy_utxo_import = true;
     else if (strcmp(arg, "-flysync-auto") == 0) flysync_island_set_auto(true);

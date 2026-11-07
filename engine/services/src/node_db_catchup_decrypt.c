@@ -29,6 +29,7 @@
 #include "wallet/wallet.h"
 #include "wallet/sapling_keys.h"
 #include "sapling/sapling.h"
+#include "sapling/fr.h"
 #include "sapling/note_encryption.h"
 #include "support/cleanse.h"
 
@@ -47,17 +48,40 @@ static bool catchup_sapling_decrypt_inputs_ready(const struct node_db *ndb,
            w->sapling_keys.num_keys != 0;
 }
 
+/* The public EPK is shared by all trial keys for one output. */
+struct catchup_epk {
+    struct jub_point point;
+    bool prepared, valid;
+};
+
+static bool catchup_sapling_agree(const struct output_description *od,
+    const struct sapling_key_entry *ke, struct catchup_epk *epk, uint8_t out[32])
+{
+    if (!epk) return sapling_ka_agree(od->ephemeral_key.data, ke->ivk, out);
+    if (!epk->prepared) {
+        epk->valid = jub_from_bytes(&epk->point, od->ephemeral_key.data);
+        if (epk->valid) jub_mul_by_cofactor(&epk->point, &epk->point);
+        epk->prepared = true;
+    }
+    /* Preserve the existing malformed-point refusal and logging for every key. */
+    if (!epk->valid) return sapling_ka_agree(od->ephemeral_key.data, ke->ivk, out);
+    struct jub_point product;
+    jub_scalar_mul(&product, &epk->point, ke->ivk);
+    jub_to_bytes(out, &product);
+    return true;
+}
+
 /* True when `plaintext` holds a lead-byte 0x01 note opened by `ke`. */
 static bool catchup_sapling_open_output_plaintext(
     const struct output_description *od,
     const struct sapling_key_entry *ke,
-    uint8_t plaintext[564])
+    uint8_t plaintext[564], struct catchup_epk *epk)
 {
     if (!ke->used)
         return false; // raw-return-ok:not-mine answer, no error
 
     uint8_t dhsecret[32];
-    if (!sapling_ka_agree(od->ephemeral_key.data, ke->ivk, dhsecret))
+    if (!catchup_sapling_agree(od, ke, epk, dhsecret))
         return false; // raw-return-ok:not-mine answer, no error
 
     uint8_t dec_key[32];
@@ -109,10 +133,10 @@ static bool catchup_sapling_output_opened_by_key(
     size_t oi,
     int height,
     int *found,
-    bool *ok, bool replay, struct sapling_replay_delivery *delivery)
+    bool *ok, bool replay, struct sapling_replay_delivery *delivery, struct catchup_epk *epk)
 {
     uint8_t plaintext[564];
-    if (!catchup_sapling_open_output_plaintext(od, ke, plaintext))
+    if (!catchup_sapling_open_output_plaintext(od, ke, plaintext, epk))
         return false; // raw-return-ok:not-mine answer, no error
 
     uint8_t d[11];
@@ -190,7 +214,7 @@ int node_db_catchup_try_sapling_decrypt(struct node_db *ndb,
         for (size_t ki = 0; ki < w->sapling_keys.num_keys; ki++) {
             const struct sapling_key_entry *ke = &w->sapling_keys.keys[ki];
             if (catchup_sapling_output_opened_by_key(ndb, od, ke, &txid, oi,
-                                                     height, &found, &ok, false, NULL)) {
+                                                     height, &found, &ok, false, NULL, NULL)) {
                 if (!ok)
                     break;
 
@@ -215,9 +239,10 @@ bool node_db_catchup_replay_sapling_decrypt(struct node_db *ndb,
     bool ok = true;
     transaction_compute_hash(tx);
     for (size_t oi = 0; ok && oi < tx->num_shielded_output; oi++) {
+        struct catchup_epk epk = {0};
         for (size_t ki = 0; ki < key_count; ki++) {
             if (catchup_sapling_output_opened_by_key(ndb, &tx->v_shielded_output[oi],
-                    &keys[ki], &tx->hash, oi, height, &found, &ok, true, delivery))
+                    &keys[ki], &tx->hash, oi, height, &found, &ok, true, delivery, &epk))
                 break;
         }
     }

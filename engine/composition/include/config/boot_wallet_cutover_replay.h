@@ -17,7 +17,7 @@ enum boot_cutover_replay_phase {
 };
 enum boot_cutover_replay_status {
     BOOT_CUTOVER_PROGRESS, BOOT_CUTOVER_COMPLETE, BOOT_CUTOVER_RETRY,
-    BOOT_CUTOVER_STALE, BOOT_CUTOVER_INVALID
+    BOOT_CUTOVER_STALE, BOOT_CUTOVER_INVALID, BOOT_CUTOVER_BUSY
 };
 /* Caller serializes calls and keeps chain mutation quiescent from initialization
  * through final publication. State is not durable authority or readiness. */
@@ -28,6 +28,9 @@ struct boot_cutover_replay {
     bool transparent_filter_attempted;
     bool sapling_load_ok;
     bool shielded_empty;
+    bool pending_complete;
+    int pending_end;
+    int64_t auth_deadline_ms;  /* Zero when startup authentication was not required. */
     struct main_state *canonical_state;
     char archive_datadir[4096];
     struct wallet_cutover_binding binding;

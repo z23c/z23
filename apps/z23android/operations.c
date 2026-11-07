@@ -7,6 +7,7 @@
 #include "base/cleanse.h"
 #include "rpc.h"
 #include "setup_state.h"
+#include "startup_auth.h"
 #include "wallet_screens.h"
 #include "private.h"
 #ifdef __ANDROID__
@@ -76,6 +77,8 @@ bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *li
     r->preview = preview;
     zapp_nodelog_init(&r->log, NULL, NULL);
     if (pthread_mutex_init(&r->mutex, NULL) != 0) return false;
+    r->startup_auth = zapp_startup_auth_new();
+    if (!r->startup_auth) { pthread_mutex_destroy(&r->mutex); return false; }
     bool ok = strlen(files) < sizeof(r->files) && snprintf(r->files, sizeof(r->files), "%s", files) > 0 &&
               path(r->directory, sizeof(r->directory), files, "node") &&
               path(r->executable, sizeof(r->executable), libs, "libz23node.so") &&
@@ -83,7 +86,7 @@ bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *li
     if (ok) ok = runtime_directory(r->directory, false);
     if (ok) ok = runtime_directory(r->state_root, true);
     if (ok) ok = runtime_directory(r->temporary_root, true);
-    if (!ok) pthread_mutex_destroy(&r->mutex);
+    if (!ok) { zapp_startup_auth_free(r->startup_auth); pthread_mutex_destroy(&r->mutex); }
     return ok;
 }
 
@@ -250,7 +253,7 @@ static int spawn_environment(struct zapp_runtime *r, char *const argv[], pid_t *
 }
 
 static int spawn_redirect_mode(struct zapp_runtime *r, char *const argv[], int input,
-                          int output, pid_t *pid, bool installer)
+                          int output, pid_t *pid, bool installer, int auth_child, int auth_parent)
 {
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attr;
@@ -261,6 +264,9 @@ static int spawn_redirect_mode(struct zapp_runtime *r, char *const argv[], int i
     if (!rc) rc = posix_spawn_file_actions_adddup2(&actions, input, STDIN_FILENO);
     if (!rc) rc = posix_spawn_file_actions_adddup2(&actions, output, STDOUT_FILENO);
     if (!rc) rc = posix_spawn_file_actions_adddup2(&actions, output, STDERR_FILENO);
+    if (!rc && auth_child >= 0) rc = posix_spawn_file_actions_addclose(&actions, auth_parent);
+    if (!rc && auth_child >= 0) rc = posix_spawn_file_actions_adddup2(&actions, auth_child, 198);
+    if (!rc && auth_child >= 0) rc = posix_spawn_file_actions_addclose(&actions, auth_child);
     if (!rc) rc = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
     if (!rc) rc = posix_spawnattr_setpgroup(&attr, 0);
     if (!rc) rc = spawn_environment(r, argv, pid, &actions, &attr, installer);
@@ -282,7 +288,8 @@ static bool remember_on(const struct zapp_runtime *r, bool on)
 bool zapp_node_wanted(const struct zapp_runtime *r)
 {
     char marker[1100];
-    return !r->preview && path(marker, sizeof(marker), r->state_root, "node-on") && access(marker, F_OK) == 0;
+    return !r->preview && !zapp_startup_auth_refused(r->startup_auth) &&
+        path(marker, sizeof(marker), r->state_root, "node-on") && access(marker, F_OK) == 0;
 }
 enum zapp_pace zapp_node_pace(const struct zapp_runtime *r)
 {
@@ -309,7 +316,7 @@ static bool write_all(int fd, const char *text, size_t length)
 static int spawn_redirect(struct zapp_runtime *r, char *const argv[], int input,
     int output, pid_t *pid)
 {
-    return spawn_redirect_mode(r, argv, input, output, pid, false);
+    return spawn_redirect_mode(r, argv, input, output, pid, false, -1, -1);
 }
 /* Writes word to a temporary file beside final and renames it into place. */
 static bool replace_file(const char *final, const char *temporary, const char *word)
@@ -337,6 +344,23 @@ bool zapp_node_pace_write(struct zapp_runtime *r, enum zapp_pace pace)
     r->pace = pace; r->pace_set = true;
     return true;
 }
+static int spawn_node_with_auth(struct zapp_runtime *r, char *const argv[], int in, int fd)
+{
+    int pair[2] = {-1, -1};
+    int child = -1;
+    if (fd >= 0 && in >= 0 && socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) == 0)
+        child = fcntl(pair[1], F_DUPFD_CLOEXEC, 199);
+    if (pair[1] >= 0) close(pair[1]);
+    int rc = child >= 0 ? spawn_redirect_mode(r, argv, in, fd, &r->node, false, child, pair[0]) : EIO;
+    if (child >= 0) close(child);
+    if (!rc && !zapp_startup_auth_start(r->startup_auth, pair[0], r->files)) {
+        (void)kill(r->node, SIGKILL);
+        while (waitpid(r->node, NULL, 0) < 0 && errno == EINTR) {}
+        r->node = 0; rc = EIO;
+    } else if (!rc) pair[0] = -1;
+    if (pair[0] >= 0) close(pair[0]);
+    return rc;
+}
 /* Starts the node with its console in app-console.log and begins forwarding what it writes there. */
 static int spawn_node(struct zapp_runtime *r)
 {
@@ -352,7 +376,7 @@ static int spawn_node(struct zapp_runtime *r)
     int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
     /* Tor only: the node dials onion peers, resolves no DNS seed and never falls back to clearnet. */
     char params[1200], roster[ZAPP_PRIVATE_PEERS_MAX * (ZAPP_ONION_PEER_MAX + 1) + 1];
-    char *argv[11 + ZAPP_PRIVATE_ARGV_MAX + ZAPP_PRIVATE_PEERS_MAX + 1] = {
+    char *argv[12 + ZAPP_PRIVATE_ARGV_MAX + ZAPP_PRIVATE_PEERS_MAX + 1] = {
         r->executable, data, "-operator-lane=canonical", "-tor", "-onion-persist", "-flysync-auto", "-nolegacyimport", "-nolegacyutxoimport"};
     size_t argc = 8;
     struct zapp_private_args private_mode;
@@ -360,10 +384,11 @@ static int spawn_node(struct zapp_runtime *r)
     argv[argc++] = "-private-listeners";
     argv[argc++] = "-observation=0";
     argv[argc++] = "-walletbackup=0";
+    argv[argc++] = "-wallet-startup-auth-fd=198";
     (void)zapp_private_roster_load(r->directory, roster, sizeof(roster));
     zapp_private_args(&private_mode, roster);
     for (size_t i = 0; i < private_mode.argc; i++) argv[argc++] = private_mode.argv[i];
-    int rc = fd >= 0 && in >= 0 ? spawn_redirect(r, argv, in, fd, &r->node) : EIO;
+    int rc = spawn_node_with_auth(r, argv, in, fd);
     if (fd >= 0) close(fd);
     if (in >= 0) close(in);
     if (!rc) (void)zapp_nodelog_start(&r->log, log, offset < 0 ? 0 : offset, r->node, cap);
@@ -412,6 +437,7 @@ static const char *node_start_refusal(struct zapp_runtime *r)
 {
     if (r->preview) return "The preview app does not run a node. Use the main Z23 app.";
     if (r->stopping) return "App is closing.";
+    if (!zapp_startup_auth_ready(r->startup_auth)) return "The previous authentication is still closing.";
     if (r->start_pending) return "The local node is already starting.";
     if (node_setup_blocks_start(r))
         return "Wallet setup is pending. Finish setup before starting the node.";
@@ -424,6 +450,7 @@ static bool node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *o
 {
     if (!r || !ticket || !out || !cap) return false;
     pthread_mutex_lock(&r->mutex);
+    if (!resume) zapp_startup_auth_reset(r->startup_auth);
     const char *refusal = resume && !zapp_node_wanted(r) ? "Node is off." : node_start_refusal(r);
     if (refusal) {
         snprintf(out, cap, "%s", refusal);
@@ -540,7 +567,7 @@ static int spawn_installer(struct zapp_runtime *r)
     size_t argc = 6;
     if (zapp_params_arg(r->files, params, sizeof(params))) argv[argc++] = params;
     argv[argc] = NULL;
-    int rc = fd >= 0 && in >= 0 ? spawn_redirect_mode(r, argv, in, fd, &r->installer, true) : EIO;
+    int rc = fd >= 0 && in >= 0 ? spawn_redirect_mode(r, argv, in, fd, &r->installer, true, -1, -1) : EIO;
     if (fd >= 0) close(fd);
     if (in >= 0) close(in);
     return rc;
@@ -651,6 +678,7 @@ bool zapp_node_resume_if_wanted(struct zapp_runtime *r, char *out, size_t cap)
 static bool request_stop(struct zapp_runtime *r, char *out, size_t cap, bool owner_choice)
 {
     pthread_mutex_lock(&r->mutex);
+    zapp_startup_auth_cancel(r->startup_auth);
     ++r->start_epoch;
     r->preload_reply[0] = 0;
     atomic_store(&r->preload_ready, false);
@@ -691,6 +719,7 @@ const char *zapp_node_stage(struct zapp_runtime *r)
 void zapp_runtime_signal_stop(struct zapp_runtime *r)
 {
     pthread_mutex_lock(&r->mutex);
+    zapp_startup_auth_cancel(r->startup_auth);
     r->stopping = true;
     ++r->start_epoch;
     r->preload_reply[0] = 0;
@@ -724,6 +753,7 @@ void zapp_runtime_destroy(struct zapp_runtime *r)
     }
     pthread_mutex_unlock(&r->mutex);
     zapp_nodelog_stop(&r->log);
+    zapp_startup_auth_free(r->startup_auth);
     pthread_mutex_destroy(&r->mutex);
 }
 

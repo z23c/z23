@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _GNU_SOURCE
 #include "device_key.h"
+#include "startup_auth.h"
 #include "base/cleanse.h"
 #include "jni_util.h"
 #include <stdarg.h>
@@ -457,21 +458,45 @@ static void prompt_retire(JNIEnv *env, const struct prompt_parts *p, unsigned lo
 /* Shows one BiometricPrompt over a CryptoObject that holds the initialised cipher and waits for the
  * owner. OK means Keystore has bound this one operation to a fresh authentication; the caller then
  * runs the operation on the same cipher. Nothing the callbacks do touches key material. */
-static status_t authenticate_once(JNIEnv *env, jobject activity, jobject cipher, enum zapp_devkey_purpose purpose)
+struct startup_prompt { JavaVM *vm; unsigned long ticket; };
+static void cancel_startup_prompt(void *opaque)
+{
+    struct startup_prompt *p = opaque;
+    JNIEnv *env = NULL;
+    bool attached = false;
+    if ((*p->vm)->GetEnv(p->vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        if ((*p->vm)->AttachCurrentThread(p->vm, &env, NULL) != JNI_OK) return;
+        attached = true;
+    }
+    pthread_mutex_lock(&refs_lock);
+    jobject cancel = current_ticket == p->ticket && current_cancel ? (*env)->NewLocalRef(env, current_cancel) : NULL;
+    pthread_mutex_unlock(&refs_lock);
+    (void)zapp_devkey_wait_answer(&prompt_wait, p->ticket, ZAPP_DEVKEY_ANSWER_ABANDONED);
+    if (cancel) { (void)call_void(env, cancel, "cancel", "()V"); (*env)->DeleteLocalRef(env, cancel); }
+    (void)zj_clean(env);
+    if (attached) (*p->vm)->DetachCurrentThread(p->vm);
+}
+static status_t authenticate_once(JNIEnv *env, jobject activity, jobject cipher, enum zapp_devkey_purpose purpose,
+                                  struct zapp_startup_auth *startup)
 {
     struct prompt_parts p;
     if (!prompt_parts_new(env, activity, cipher, purpose, &p)) return ZAPP_DEVKEY_ERROR;
     unsigned long ticket = zapp_devkey_wait_begin(&prompt_wait);
     if (!ticket) { (void)call_void(env, p.executor, "shutdown", "()V"); return ZAPP_DEVKEY_ERROR; }
     prompt_publish(env, &p, ticket);
-    if (!call_void(env, p.prompt, "authenticate",
+    struct startup_prompt owned = {.ticket = ticket};
+    bool registered = !startup || ((*env)->GetJavaVM(env, &owned.vm) == JNI_OK &&
+                                   zapp_startup_auth_register_cancel(startup, cancel_startup_prompt, &owned));
+    if (registered && !call_void(env, p.prompt, "authenticate",
             "(Landroid/hardware/biometrics/BiometricPrompt$CryptoObject;Landroid/os/CancellationSignal;"
             "Ljava/util/concurrent/Executor;Landroid/hardware/biometrics/BiometricPrompt$AuthenticationCallback;)V",
             p.crypto, p.cancel, p.executor, p.callback)) {
         (void)zj_clean(env);
         (void)zapp_devkey_wait_answer(&prompt_wait, ticket, ZAPP_DEVKEY_ANSWER_FAILED);
     }
+    if (!registered) (void)zapp_devkey_wait_answer(&prompt_wait, ticket, ZAPP_DEVKEY_ANSWER_ABANDONED);
     enum zapp_devkey_answer answer = zapp_devkey_wait_end(&prompt_wait, ticket, PROMPT_TIMEOUT_MS);
+    if (startup && registered) zapp_startup_auth_unregister_cancel(startup);
     if (answer == ZAPP_DEVKEY_ANSWER_TIMED_OUT || answer == ZAPP_DEVKEY_ANSWER_ABANDONED) (void)call_void(env, p.cancel, "cancel", "()V");
     prompt_retire(env, &p, ticket);
     return zapp_devkey_status_for_answer(answer);
@@ -498,7 +523,7 @@ static status_t jni_seal(void *context, const uint8_t *plain, size_t len, uint8_
     jobject key = stored_key(env, &st);
     jobject cipher = key ? cipher_for(env, 1, key, NULL) : NULL;
     if (key && !cipher) st = failed(env);
-    if (cipher) st = authenticate_once(env, state->activity, cipher, ZAPP_DEVKEY_PURPOSE_CREATE);
+    if (cipher) st = authenticate_once(env, state->activity, cipher, ZAPP_DEVKEY_PURPOSE_CREATE, NULL);
     jbyteArray input = st == ZAPP_DEVKEY_OK ? bytes_new(env, plain, len) : NULL;
     jbyteArray output = input ? cipher_run(env, cipher, input) : NULL;
     if (input && !output) st = failed(env);
@@ -521,7 +546,7 @@ static status_t jni_open(void *context, enum zapp_devkey_purpose purpose, const 
     bytes_wipe(env, nonce);
     jobject cipher = params ? cipher_for(env, 2, key, params) : NULL;
     if (params && !cipher) st = failed(env);
-    if (cipher) st = authenticate_once(env, state->activity, cipher, purpose);
+    if (cipher) st = authenticate_once(env, state->activity, cipher, purpose, state->startup_auth);
     jbyteArray input = st == ZAPP_DEVKEY_OK ? bytes_new(env, sealed, ZAPP_DEVKEY_SEALED) : NULL;
     jbyteArray output = input ? cipher_run(env, cipher, input) : NULL;
     if (input && !output) st = failed(env);
@@ -685,7 +710,7 @@ status_t zapp_devkey_jni_misuse(struct zapp_devkey_jni *state, bool other_cipher
     jobject shown = key ? cipher_for(env, 1, key, NULL) : NULL;
     jobject used = shown && other_cipher ? cipher_for(env, 1, key, NULL) : shown;
     if (key && !used) st = failed(env);
-    if (used) st = other_cipher ? authenticate_once(env, state->activity, shown, ZAPP_DEVKEY_PURPOSE_CREATE) : ZAPP_DEVKEY_OK;
+    if (used) st = other_cipher ? authenticate_once(env, state->activity, shown, ZAPP_DEVKEY_PURPOSE_CREATE, NULL) : ZAPP_DEVKEY_OK;
     if (st == ZAPP_DEVKEY_OK) {
         result->accepted = misuse_attempt(env, used, result);
         if (other_cipher) {

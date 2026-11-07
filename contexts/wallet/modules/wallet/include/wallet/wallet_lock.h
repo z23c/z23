@@ -146,6 +146,11 @@ bool wallet_lock_timeout_valid(int64_t timeout_seconds);
 struct zcl_result wallet_lock_arm_timeout(struct wallet *w,
                                           uint32_t timeout_seconds);
 
+/* Hold the lock transition through an already authenticated publication.
+ * Admission must be before deadline; a commit already admitted may finish later. */
+bool wallet_lock_startup_publication_begin(int64_t deadline_ms);
+void wallet_lock_startup_publication_end(void);
+
 /* Runtime lock.  Secure-erase the cached passphrase, set the force-lock, and
  * cleanse the secret material held by `w` (`w` may be NULL): transparent
  * private keys always; for an encrypted wallet also the Sapling seed, master
@@ -166,6 +171,8 @@ void wallet_lock_status_json(struct json_value *out);
 void wallet_lock_reset_for_test(void);
 
 #ifdef ZCL_TESTING
+/* Reports an auto-lock timer blocked on the transition lease. */
+void wallet_lock_timer_test_blocked_hook(void (*hook)(void *), void *ctx);
 /* Test-only: after `n` further wallet_lock_is_unlocked() calls, the wallet is
  * forced locked. 0 (the production state) disables it; reset by
  * wallet_lock_reset_for_test(). Not for production call sites. */

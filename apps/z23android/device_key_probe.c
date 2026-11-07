@@ -173,7 +173,7 @@ static enum zapp_devkey_status simple(const struct zapp_devkey_ops *ops, const c
 struct job { JavaVM *vm; jobject activity; char dir[256]; char cmd[64]; };
 static enum zapp_devkey_status run(struct job *job, JNIEnv *env, char *detail, size_t cap)
 {
-    struct zapp_devkey_jni state = {env, job->activity};
+    struct zapp_devkey_jni state = {.env = env, .activity = job->activity};
     struct zapp_devkey_ops ops;
     char blob[512];
     const char *cmd = job->cmd;

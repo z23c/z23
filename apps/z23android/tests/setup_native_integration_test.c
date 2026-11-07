@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "setup_node.h"
 #include "operations.h"
+#include "startup_auth.h"
 #include "base/cleanse.h"
 #include "json/json.h"
 #include <assert.h>
@@ -23,6 +24,7 @@ static void init_runtime(struct zapp_runtime *r, const char *root, const char *b
 {
     memset(r, 0, sizeof(*r));
     assert(pthread_mutex_init(&r->mutex, NULL) == 0);
+    r->startup_auth = zapp_startup_auth_new(); assert(r->startup_auth);
     zapp_nodelog_init(&r->log, NULL, NULL);
     assert(snprintf(r->executable, sizeof(r->executable), "%s", binary) < (int)sizeof(r->executable));
     assert(snprintf(r->files, sizeof(r->files), "%s", root) < (int)sizeof(r->files));
@@ -173,7 +175,7 @@ int main(int argc, char **argv)
     struct sun_runner runner = {&runtime, run_setup}; struct sun node;
     sun_init(&node, &runner, runtime.directory);
     run_flow(&node, &runtime);
-    pthread_mutex_destroy(&runtime.mutex);
+    zapp_startup_auth_free(runtime.startup_auth); pthread_mutex_destroy(&runtime.mutex);
     puts("setup native integration: ok");
     return 0;
 }
