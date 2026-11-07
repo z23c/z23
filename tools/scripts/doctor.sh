@@ -256,17 +256,17 @@ hooks_shape="$(doctor_hooks_shape "$hooks_abs")"
 if [ "$hooks_shape" = ok ] && [ -x "$hooks_abs/pre-push" ]; then
     echo "  ok       git hooks       core.hooksPath -> $hooks"
 else
-    echo "  ACTION   git hooks       not armed — run: make setup"
+    echo "  note     git hooks       not armed (developers only; optional: make setup)"
 fi
 if [ -e "$ROOT/vendor/lib/libcrypto.a" ]; then
     echo "  ok       vendor/lib      vendored archives present"
 else
-    echo "  ACTION   vendor/lib      archives absent — run: make vendor"
+    echo "  note     vendor/lib      archives absent; make z23 builds them (optional: make vendor)"
 fi
 if [ -f "$ROOT/compile_commands.json" ]; then
     echo "  ok       compile db      compile_commands.json present (clangd/LSP)"
 else
-    echo "  ACTION   compile db      absent — run: make setup"
+    echo "  note     compile db      absent (clangd/LSP only; optional: make setup)"
 fi
 
 # --------------------------------------------------------------------------
