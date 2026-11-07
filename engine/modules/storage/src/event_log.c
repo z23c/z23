@@ -13,9 +13,8 @@
  *   CRC32C after a startup self-check matches reference output.
  * - On open() the file is scanned from the tail to detect partial
  *   trailing writes (crash between header-fsync and sentinel-fsync, or
- *   sentinel write torn). Any partial event is first copied to a
- *   `<log>.torn-<offset>-<digest>` quarantine beside the log, then
- *   TRUNCATED so the file only contains complete, durable events.
+ *   sentinel write torn). Any partial event is TRUNCATED so the file
+ *   only contains complete, durable events.
  *
  * - Mutex around append serializes writers; readers use pread and are
  *   safe under one appender + many readers because all writes are
@@ -539,17 +538,152 @@ static uint64_t walk_good_records(struct platform_private_file *file,
     return cursor;
 }
 
-/* ── torn-tail quarantine ──────────────────────────────────────────────
+/* Walk forward from the start (or from a validated receipt), tracking the last
+ * KNOWN-good end offset; anything past that is partial and gets truncated.
+ * Returns false on a hard error. */
+static bool recover_truncate_partial(struct platform_private_file *file,
+                                     const char *path,
+                                     struct recover_out *out)
+{
+    uint64_t size = 0;
+    if (!platform_private_file_size(file, &size) || size > INT64_MAX) {
+        fprintf(stderr,  // obs-ok:event-log-open-failure
+                "[event_log] fstat(%s) failed: %s\n",
+                path, strerror(errno));
+        return false;
+    }
+
+    struct walk_scratch scratch = {0};
+    uint64_t cursor = 0;
+    memset(out, 0, sizeof(*out));
+
+    struct receipt r;
+    if (receipt_try(file, path, size, &scratch, &r)) {
+        cursor = r.verified_end;
+        out->records    = r.records;
+        out->last_start = r.last_start;
+        out->last_crc   = r.last_crc;
+        out->prefix_end = r.verified_end;
+    }
+    const uint64_t walk_from = cursor;
+
+    cursor = walk_good_records(file, cursor, size, &scratch, out);
+    const uint64_t last_good_end = cursor;
+    free(scratch.buf);
+
+    atomic_store_explicit(&g_last_open_walked, cursor - walk_from,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_last_open_receipt, out->prefix_end != 0,
+                          memory_order_relaxed);
+    if (out->prefix_end) {
+        fprintf(stderr,  // obs-ok:event-log-lifecycle
+                "[event_log] receipt accepted: skipped %llu verified bytes, "
+                "walked %llu (%s)\n",
+                (unsigned long long)out->prefix_end,
+                (unsigned long long)(cursor - walk_from), path);
+    }
+
+    if (last_good_end < size) {
+        fprintf(stderr,  // obs-ok:event-log-lifecycle
+                "[event_log] truncating partial tail: %llu -> %llu (%s)\n",
+                (unsigned long long)size,
+                (unsigned long long)last_good_end, path);
+        /* The receipt must never outlive the bytes it vouches for: drop it,
+         * durably, BEFORE the file shrinks. Fail closed if it cannot go. */
+        if (!receipt_remove(path)) {
+            fprintf(stderr,  // obs-ok:event-log-open-failure
+                    "[event_log] refusing to truncate %s: receipt not removed\n",
+                    path);
+            return false;
+        }
+        if (!platform_private_file_truncate(file, last_good_end)) {
+            fprintf(stderr,  // obs-ok:event-log-open-failure
+                    "[event_log] ftruncate(%s) failed: %s\n",
+                    path, strerror(errno));
+            return false;
+        }
+        /* Make the truncation durable before publishing the handle. */
+        if (!platform_private_file_flush(file)) {
+            fprintf(stderr,  // obs-ok:event-log-open-failure
+                    "[event_log] fsync after truncate(%s) failed: %s\n",
+                    path, strerror(errno));
+            return false;
+        }
+    }
+    out->end = last_good_end;
+    return true;
+}
+
+/* Take ownership of an opened, walked file as a new handle. */
+static event_log_t *event_log_handle_new(struct platform_private_file *file,
+                                         const char *path,
+                                         const struct recover_out *rec,
+                                         bool read_only)
+{
+    event_log_t *log = (event_log_t *)zcl_malloc(sizeof(*log),
+                                                  "event_log/handle");
+    if (!log) {
+        platform_private_file_close(file);
+        return NULL;
+    }
+    log->file = *file;
+    pthread_mutex_init(&log->lock, NULL);
+    snprintf(log->path, sizeof(log->path), "%s", path);
+    log->end_offset = rec->end;
+    log->deferred_sync = false;
+    log->dirty = false;
+    log->pending = (struct event_log_pending){0};
+    log->records = rec->records;
+    log->last_start = rec->last_start;
+    log->last_crc = rec->last_crc;
+    log->open_prefix_end = rec->prefix_end;
+    atomic_init(&log->receipt_poisoned, false);
+    log->read_only = read_only;
+
+    fprintf(stderr,  // obs-ok:event-log-lifecycle
+            "[event_log] opened %s (size=%llu%s)\n",
+            path, (unsigned long long)log->end_offset,
+            read_only ? ", read-only" : "");
+    return log;
+}
+
+/* ── public API ─────────────────────────────────────────────────────── */
+
+event_log_t *event_log_open(const char *path)
+{
+    if (!path || !path[0])
+        LOG_NULL("event_log", "open: empty path");
+
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    if (!platform_private_file_open_locked_create(path, &file)) {
+        fprintf(stderr,  // obs-ok:event-log-open-failure
+                "[event_log] open(%s) failed: %s\n",
+                path, strerror(errno));
+        return NULL;
+    }
+
+    struct recover_out rec;
+    if (!recover_truncate_partial(&file, path, &rec)) {
+        platform_private_file_close(&file);
+        return NULL;
+    }
+    return event_log_handle_new(&file, path, &rec, false);
+}
+
+/* ── opt-in torn-tail quarantine (event_log_open_keep_torn) ─────────────
  *
- * A write open never drops bytes silently. Before the file is cut back to its
- * last whole record, the dropped span [cut, size) is copied to a sibling
+ * Only event_log_open_keep_torn() reaches this code; event_log_open() and
+ * event_log_open_readonly() never quarantine. Before the shared recovery
+ * cuts the file back to its last whole record, the dropped span [cut, size)
+ * is copied to a sibling
  *   <log>.torn-<cut>-<16 hex of SHA3-256(dropped bytes)>
  * staged as <log>.torn.tmp (created exclusively), flushed, moved into place
- * without replacing anything, and the directory flushed; only then is the log
- * cut. The same bytes dropped at the same offset again (a crash after the
- * quarantine, before the cut) find their quarantine present and reuse it once
- * its bytes re-hash to the same digest. Any failure refuses the open and
- * leaves the log untouched. event_log_open_readonly() never quarantines. */
+ * without replacing anything, and the directory flushed; only then does
+ * recover_truncate_partial() cut. The same bytes dropped at the same offset
+ * again (a crash after the quarantine, before the cut) find their quarantine
+ * present and reuse it once its bytes re-hash to the same digest. Any
+ * failure refuses the open and leaves the log untouched. */
 #define QUAR_TMP_SUFFIX ".torn.tmp"
 #define QUAR_CHUNK      65536u
 
@@ -644,6 +778,7 @@ static bool quarantine_dropped(struct platform_private_file *file,
                  (unsigned long long)(size - cut), (unsigned long long)cut,
                  (unsigned long long)size);
     }
+    platform_private_file_close(&staged);
     LOG_ERROR("event_log", "%s: %llu of %llu bytes past the last whole record "
               "at offset %llu quarantined to %s before the cut; the log needs "
               "repair review", path, (unsigned long long)(size - cut),
@@ -651,136 +786,49 @@ static bool quarantine_dropped(struct platform_private_file *file,
     return true;
 }
 
-/* Walk forward from the start (or from a validated receipt), tracking the last
- * KNOWN-good end offset; anything past that is quarantined, then truncated.
- * Returns false on a hard error. */
-static bool recover_truncate_partial(struct platform_private_file *file,
-                                     const char *path,
-                                     struct recover_out *out)
+/* Where recover_truncate_partial() will cut the locked `file`, computed the
+ * same way (receipt first, then the forward walk) so the two agree: the
+ * write lock is held throughout, and a receipt this call drops as stale is
+ * absent for the recovery that follows, which then walks from 0 as this did. */
+static bool keep_torn_cut(struct platform_private_file *file, const char *path,
+                          uint64_t *cut, uint64_t *size)
 {
-    uint64_t size = 0;
-    if (!platform_private_file_size(file, &size) || size > INT64_MAX) {
-        fprintf(stderr,  // obs-ok:event-log-open-failure
-                "[event_log] fstat(%s) failed: %s\n",
-                path, strerror(errno));
-        return false;
-    }
-
+    if (!platform_private_file_size(file, size) || *size > INT64_MAX)
+        LOG_FAIL("event_log", "keep_torn: size of %s failed: %s", path,
+                 strerror(errno));
     struct walk_scratch scratch = {0};
-    uint64_t cursor = 0;
-    memset(out, 0, sizeof(*out));
-
+    struct recover_out rec = {0};
     struct receipt r;
-    if (receipt_try(file, path, size, &scratch, &r)) {
-        cursor = r.verified_end;
-        out->records    = r.records;
-        out->last_start = r.last_start;
-        out->last_crc   = r.last_crc;
-        out->prefix_end = r.verified_end;
-    }
-    const uint64_t walk_from = cursor;
-
-    cursor = walk_good_records(file, cursor, size, &scratch, out);
-    const uint64_t last_good_end = cursor;
+    uint64_t from = receipt_try(file, path, *size, &scratch, &r)
+                        ? r.verified_end : 0;
+    *cut = walk_good_records(file, from, *size, &scratch, &rec);
     free(scratch.buf);
-
-    atomic_store_explicit(&g_last_open_walked, cursor - walk_from,
-                          memory_order_relaxed);
-    atomic_store_explicit(&g_last_open_receipt, out->prefix_end != 0,
-                          memory_order_relaxed);
-    if (out->prefix_end) {
-        fprintf(stderr,  // obs-ok:event-log-lifecycle
-                "[event_log] receipt accepted: skipped %llu verified bytes, "
-                "walked %llu (%s)\n",
-                (unsigned long long)out->prefix_end,
-                (unsigned long long)(cursor - walk_from), path);
-    }
-
-    if (last_good_end < size) {
-        fprintf(stderr,  // obs-ok:event-log-lifecycle
-                "[event_log] truncating partial tail: %llu -> %llu (%s)\n",
-                (unsigned long long)size,
-                (unsigned long long)last_good_end, path);
-        /* Never lose the dropped bytes: keep them beside the log first. */
-        if (!quarantine_dropped(file, path, last_good_end, size))
-            return false;
-        /* The receipt must never outlive the bytes it vouches for: drop it,
-         * durably, BEFORE the file shrinks. Fail closed if it cannot go. */
-        if (!receipt_remove(path)) {
-            fprintf(stderr,  // obs-ok:event-log-open-failure
-                    "[event_log] refusing to truncate %s: receipt not removed\n",
-                    path);
-            return false;
-        }
-        if (!platform_private_file_truncate(file, last_good_end)) {
-            fprintf(stderr,  // obs-ok:event-log-open-failure
-                    "[event_log] ftruncate(%s) failed: %s\n",
-                    path, strerror(errno));
-            return false;
-        }
-        /* Make the truncation durable before publishing the handle. */
-        if (!platform_private_file_flush(file)) {
-            fprintf(stderr,  // obs-ok:event-log-open-failure
-                    "[event_log] fsync after truncate(%s) failed: %s\n",
-                    path, strerror(errno));
-            return false;
-        }
-    }
-    out->end = last_good_end;
     return true;
 }
 
-/* Take ownership of an opened, walked file as a new handle. */
-static event_log_t *event_log_handle_new(struct platform_private_file *file,
-                                         const char *path,
-                                         const struct recover_out *rec,
-                                         bool read_only)
-{
-    event_log_t *log = (event_log_t *)zcl_malloc(sizeof(*log),
-                                                  "event_log/handle");
-    if (!log) {
-        platform_private_file_close(file);
-        return NULL;
-    }
-    log->file = *file;
-    pthread_mutex_init(&log->lock, NULL);
-    snprintf(log->path, sizeof(log->path), "%s", path);
-    log->end_offset = rec->end;
-    log->deferred_sync = false;
-    log->dirty = false;
-    log->pending = (struct event_log_pending){0};
-    log->records = rec->records;
-    log->last_start = rec->last_start;
-    log->last_crc = rec->last_crc;
-    log->open_prefix_end = rec->prefix_end;
-    atomic_init(&log->receipt_poisoned, false);
-    log->read_only = read_only;
-
-    fprintf(stderr,  // obs-ok:event-log-lifecycle
-            "[event_log] opened %s (size=%llu%s)\n",
-            path, (unsigned long long)log->end_offset,
-            read_only ? ", read-only" : "");
-    return log;
-}
-
-/* ── public API ─────────────────────────────────────────────────────── */
-
-event_log_t *event_log_open(const char *path)
+event_log_t *event_log_open_keep_torn(const char *path)
 {
     if (!path || !path[0])
-        LOG_NULL("event_log", "open: empty path");
+        LOG_NULL("event_log", "open_keep_torn: empty path");
 
     struct platform_private_file file;
     platform_private_file_init(&file);
-    if (!platform_private_file_open_locked_create(path, &file)) {
-        fprintf(stderr,  // obs-ok:event-log-open-failure
-                "[event_log] open(%s) failed: %s\n",
-                path, strerror(errno));
-        return NULL;
-    }
+    if (!platform_private_file_open_locked_create(path, &file))
+        LOG_NULL("event_log", "open_keep_torn(%s) failed: %s", path,
+                 strerror(errno));
 
+    uint64_t cut = 0, size = 0;
     struct recover_out rec;
-    if (!recover_truncate_partial(&file, path, &rec)) {
+    bool ok = keep_torn_cut(&file, path, &cut, &size) &&
+              (cut >= size || quarantine_dropped(&file, path, cut, size)) &&
+              recover_truncate_partial(&file, path, &rec);
+    if (ok && rec.end != cut) {
+        LOG_ERROR("event_log", "%s: recovery cut at %llu, quarantine planned "
+                  "%llu", path, (unsigned long long)rec.end,
+                  (unsigned long long)cut);
+        ok = false;
+    }
+    if (!ok) {
         platform_private_file_close(&file);
         return NULL;
     }
@@ -811,8 +859,7 @@ event_log_t *event_log_open_readonly(const char *path)
     if (!sized || rec.end != size) {
         fprintf(stderr,  // obs-ok:event-log-open-failure
                 "[event_log] read-only open refused %s: only %llu of %llu "
-                "bytes are whole records; nothing was truncated, the log "
-                "needs repair\n",
+                "bytes are whole records; nothing was truncated\n",
                 path, (unsigned long long)rec.end, (unsigned long long)size);
         platform_private_file_close(&file);
         return NULL;

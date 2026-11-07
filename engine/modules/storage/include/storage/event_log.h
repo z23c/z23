@@ -150,14 +150,20 @@ enum event_log_type {
 
 /* Open or create the event log at `path`. On open, the file is scanned
  * from the tail to detect and TRUNCATE any partial trailing event
- * (recovery from torn writes). Before the cut, the dropped bytes are copied
- * to a sibling `<path>.torn-<offset>-<16 hex of their SHA3-256>` (staged
- * exclusively, flushed, published without clobbering, directory flushed) and
- * logged with LOG_ERROR; if they cannot be kept the open is refused and the
- * file is left untouched. Returns NULL if `path` is NULL or empty, if the
- * file cannot be opened, if recovery or quarantine fails, or on allocation
+ * (recovery from torn writes). Returns NULL if `path` is NULL or empty,
+ * if the file cannot be opened, if recovery fails, or on allocation
  * failure. */
 event_log_t *event_log_open(const char *path);
+
+/* Opt-in variant of event_log_open() for a log whose history must never be
+ * silently lost (the ZVCS commits.log). Before a torn tail is cut, the
+ * dropped bytes are copied to a sibling
+ * `<path>.torn-<offset>-<16 hex of their SHA3-256>` (staged exclusively,
+ * flushed, published without clobbering, directory flushed) and logged with
+ * LOG_ERROR. If they cannot be kept the open is refused (NULL) and the file
+ * is left untouched. A log with no torn tail opens exactly as with
+ * event_log_open(). Node, wallet and engine logs keep event_log_open(). */
+event_log_t *event_log_open_keep_torn(const char *path);
 
 /* Open an EXISTING log for reading only. Never creates, truncates or writes
  * the file and never reads, writes or removes its `.verified` receipt: it

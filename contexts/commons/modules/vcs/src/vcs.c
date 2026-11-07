@@ -196,9 +196,11 @@ struct vcs_repo *vcs_open(const char *repo_root)
     if (ln <= 0 || (size_t)ln >= sizeof(logpath)) {
         vcs_index_close(r->idx); free(r); LOG_NULL("vcs", "log path too long");
     }
-    r->log = event_log_open(logpath);
+    r->log = event_log_open_keep_torn(logpath);
     if (!r->log) {
-        vcs_index_close(r->idx); free(r); LOG_NULL("vcs", "commits.log open failed");
+        vcs_index_close(r->idx); free(r);
+        LOG_NULL("vcs", "commits.log open failed (a torn tail that could not "
+                 "be quarantined is left uncut): %s", logpath);
     }
     return r;
 }
