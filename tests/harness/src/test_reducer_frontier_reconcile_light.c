@@ -1911,6 +1911,34 @@ static bool rfrl_stale_proof_replay_b_ok(const struct stage_reducer_frontier_rec
                count_range(db, "script_validate_log", A + 2, A + 4) == 2;
 }
 
+static int rfrl_check_terminal_script_restore(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    if (!setup_fixture(&fx, "terminal_script_restore")) return 1;
+    sqlite3 *db = progress_store_db();
+    struct block_index *bi = fx.idx[2];
+    unsigned original = BLOCK_HAVE_DATA | BLOCK_VALID_TRANSACTIONS;
+    struct uint256 wrong = fx.hashes[2];
+    wrong.data[0] ^= 1;
+    bi->nHeight = 64854;
+    bi->nStatus = original;
+    RFRL_CHECK("missing script proof refuses", delete_height(db, "script_validate_log", 64854) &&
+        !stage_reducer_frontier_restore_script(db, &fx.ms, bi) && bi->nStatus == original);
+    RFRL_CHECK("wrong hash refuses", put_script_status(db, 64854, 1, "verified", &wrong) &&
+        !stage_reducer_frontier_restore_script(db, &fx.ms, bi) && bi->nStatus == original);
+    RFRL_CHECK("failed script proof refuses", put_script_status(db, 64854, 0, "verified", &fx.hashes[2]) &&
+        !stage_reducer_frontier_restore_script(db, &fx.ms, bi) && bi->nStatus == original);
+    RFRL_CHECK("malformed script proof refuses", put_script_status(db, 64854, 1, "invalid", &fx.hashes[2]) &&
+        !stage_reducer_frontier_restore_script(db, &fx.ms, bi) && bi->nStatus == original);
+    RFRL_CHECK("exact verified script proof restores validity only",
+        put_script_status(db, 64854, 1, "verified", &fx.hashes[2]) &&
+        stage_reducer_frontier_restore_script(db, &fx.ms, bi) &&
+        bi->nStatus == (BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS));
+    teardown_fixture(&fx);
+    return failures;
+}
+
 static int rfrl_check_readable_stale_proof(void)
 {
     int failures = 0;
@@ -3040,6 +3068,7 @@ int test_reducer_frontier_reconcile_light(void)
     failures += rfrl_check_readable_stale_script();
 
     failures += rfrl_check_readable_stale_proof();
+    failures += rfrl_check_terminal_script_restore();
 
     failures += rfrl_check_stale_script_higher_split();
 

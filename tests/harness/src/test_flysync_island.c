@@ -9,6 +9,8 @@
  * armed and reports nothing while one is. */
 
 #include "test/test_core.h"
+#include "../../../engine/composition/src/consensus_state_install_terminal_internal.h"
+#include "storage/consensus_state_bundle_codec.h"
 #include "test/test_flysync_island_common.h"
 
 #include "../../../engine/services/src/chain_evidence_reconstruct.h"
@@ -1482,6 +1484,72 @@ static int fsi_case_terminal_prepare(void)
     return failures;
 }
 
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+/* Synthetic window verifier: validates terminal selection wiring, not PoW. */
+static bool fsi_terminal_script_schema(sqlite3 *db, const struct uint256 *hash)
+{
+    const char *sql =
+        "CREATE TABLE IF NOT EXISTS validate_headers_log(height INTEGER,ok INTEGER,hash BLOB);"
+        "CREATE TABLE IF NOT EXISTS script_validate_log(height INTEGER,status TEXT,ok INTEGER,block_hash BLOB);"
+        "CREATE TABLE IF NOT EXISTS body_persist_log(height INTEGER,ok INTEGER);"
+        "CREATE TABLE IF NOT EXISTS proof_validate_log(height INTEGER,status TEXT,ok INTEGER,block_hash BLOB);"
+        "CREATE TABLE IF NOT EXISTS utxo_apply_log(height INTEGER,status TEXT,ok INTEGER);"
+        "CREATE TABLE IF NOT EXISTS utxo_apply_delta(height INTEGER,branch_hash BLOB);";
+    if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) return false;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "INSERT INTO script_validate_log(height,status,ok,block_hash) VALUES(64854,?,1,?)", -1, &st, NULL) != SQLITE_OK)
+        return false;
+    bool ok = sqlite3_bind_text(st, 1, "verified", -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_blob(st, 2, hash->data, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_DONE;
+    return sqlite3_finalize(st) == SQLITE_OK && ok;
+}
+
+static int fsi_case_terminal_script_wiring(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    if (!fsi_node_open(&n, "terminal_script_wiring")) return 1;
+    fsi_build_island(&n.is);
+    n.is.rung.cp.height = 64882;
+    flysync_island_test_set_rung(&n.is.rung);
+    flysync_island_test_set_frozen_verifier(fsi_accept_all);
+    struct uint256 hash = n.is.w[FSI_W - 1].hashPrevBlock;
+    struct block_index *old = chainstate_insert_block_index((struct chainstate *)&n.ms, &hash);
+    if (!old) { fsi_node_close(&n); return 1; }
+    old->nHeight = 64854;
+    old->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_TRANSACTIONS;
+    bool ready = active_chain_install_tip_slot(&n.ms.chain_active, old) &&
+        fsi_terminal_script_schema(progress_store_db(), &hash);
+    struct main_state archive;
+    main_state_init(&archive);
+    struct block_index rows[FSI_W + 1];
+    memset(rows, 0, sizeof(rows));
+    for (int i = 0; i <= FSI_W; ++i) {
+        block_index_init(&rows[i]);
+        rows[i].nHeight = 64854 + i;
+        rows[i].hashBlock = i ? n.is.hash[FSI_W - i] : hash;
+        rows[i].phashBlock = &rows[i].hashBlock;
+        rows[i].pprev = i ? &rows[i - 1] : NULL;
+    }
+    archive.pindex_best_header = &rows[FSI_W];
+    struct icb_terminal_context terminal = {0};
+    terminal.archive = &archive;
+    memcpy(terminal.window, n.is.w, sizeof(terminal.window));
+    struct consensus_state_bundle_manifest manifest = {0};
+    manifest.height = 64882;
+    struct zcl_result r = ready ? icb_terminal_select_window_test(&terminal, &n.ms, &manifest) : ZCL_ERR(-1, "fixture");
+    FSI_CHECK("terminal selection restores exact old-tip script validity before binding",
+        ready && r.ok && (old->nStatus & BLOCK_VALID_MASK) == BLOCK_VALID_SCRIPTS &&
+        terminal.prepared && n.ms.pindex_best_header != old);
+    icb_terminal_unlink_window(&terminal);
+    main_state_free(&archive);
+    fsi_node_close(&n);
+    return failures;
+}
+
+#endif
+
 /* Synthetic headers use the fixture verifier; this tests the durable gate only. */
 static bool fsi_recovery_anchor(sqlite3 *db)
 {
@@ -1853,6 +1921,9 @@ int test_flysync_island(void)
     failures += fsi_case_hold_and_services();
     failures += fsi_case_verify_window();
     failures += fsi_case_terminal_prepare();
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+    failures += fsi_case_terminal_script_wiring();
+#endif
     failures += fsi_case_island();
     failures += fsi_case_boot_gate();
     failures += fsi_case_offer_filter();

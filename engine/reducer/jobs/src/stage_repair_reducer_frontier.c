@@ -64,6 +64,33 @@ static bool reconcile_block_flags_set(
     return changed;
 }
 
+/* Restore one live index status only from its exact verified script verdict. */
+bool stage_reducer_frontier_restore_script(sqlite3 *db, struct main_state *ms,
+                                           struct block_index *bi)
+{
+    if (!db || db != progress_store_db() || !ms || !bi)
+        return false;
+    zcl_mutex_lock(&ms->cs_main);
+    if (!progress_store_tx_trylock()) {
+        zcl_mutex_unlock(&ms->cs_main);
+        return false;
+    }
+    struct rf_evidence_stmts es;
+    bool ok = rf_evidence_stmts_prepare(db, &es);
+    if (ok) {
+        struct rf_log_evidence ev;
+        ok = rf_evidence_for_block_unlocked(&es, bi, &ev) && ev.script_ok_hash;
+        if (ok) {
+            struct stage_reducer_frontier_reconcile_result result = {0};
+            (void)reconcile_block_flags_set(bi, &ev, false, true, &result);
+        }
+        rf_evidence_stmts_finalize(&es);
+    }
+    progress_store_tx_unlock();
+    zcl_mutex_unlock(&ms->cs_main);
+    return ok;
+}
+
 /* Flag-reconcile steps for one block_index entry that clear state the evidence
  * disproves. Returns true when the entry needed a change. */
 static bool reconcile_block_flags_clear(

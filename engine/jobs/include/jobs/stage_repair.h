@@ -16,6 +16,7 @@
 
 struct sqlite3;
 struct main_state;
+struct block_index;
 
 enum stage_repair_header_solution_poison {
     STAGE_REPAIR_POISON_NONE = 0,
@@ -452,6 +453,10 @@ bool stage_repair_tipfin_refusal_is_pending_forward(
  * a deadlock, whichever way the rest of the tree happens to be nesting.
  * Cover: the "lock-order" cases and rfrl_run_lock_cycle in
  * tests/harness/src/test_reducer_frontier_reconcile_light.c. */
+/* Restore one index validity level only from its hash-bound verified script row. */
+bool stage_reducer_frontier_restore_script(struct sqlite3 *db,
+    struct main_state *ms, struct block_index *bi);
+
 bool stage_reducer_frontier_reconcile_light_needed(
     struct sqlite3 *db,
     struct main_state *ms,

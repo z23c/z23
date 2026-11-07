@@ -9,6 +9,8 @@
 #include "config/flysync_island.h"
 #include "chain/chain.h"
 #include "chain/checkpoints.h"
+#include "jobs/stage_repair.h"
+#include "storage/progress_store.h"
 #include "platform/fd_path.h"
 #include "platform/private_directory.h"
 #include "services/chain_state_service.h"
@@ -126,6 +128,7 @@ static struct zcl_result icb_terminal_select_window(struct icb_terminal_context 
     struct block_index *old_tip = active_chain_tip(&ms->chain_active);
     if (!icb_terminal_archive_has_frontier(terminal, old_tip))
         return ZCL_ERR(-1, "terminal history does not contain the active frontier");
+    (void)stage_reducer_frontier_restore_script(progress_store_db(), ms, old_tip);
     struct block_index *top = flysync_island_prepare_terminal_window(
         ms, terminal->window, ISLAND_ANCHOR_WINDOW, manifest->height);
     if (!top) return ZCL_ERR(-1, "terminal header window preparation refused");
@@ -136,6 +139,14 @@ static struct zcl_result icb_terminal_select_window(struct icb_terminal_context 
     terminal->prepared = true;
     return ZCL_OK;
 }
+
+#ifdef ZCL_TESTING
+struct zcl_result icb_terminal_select_window_test(struct icb_terminal_context *terminal,
+    struct main_state *ms, const struct consensus_state_bundle_manifest *manifest)
+{
+    return icb_terminal_select_window(terminal, ms, manifest);
+}
+#endif
 
 struct zcl_result icb_terminal_prepare(struct icb_terminal_context *terminal,
     const char *datadir, struct main_state *ms,

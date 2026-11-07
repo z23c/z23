@@ -25,6 +25,10 @@ bool icb_terminal_archive_has_frontier(const struct icb_terminal_context *termin
     const struct block_index *old_tip);
 bool icb_terminal_link_window(struct icb_terminal_context *terminal,
     struct block_index *top, struct block_index *old_tip);
+#ifdef ZCL_TESTING
+struct zcl_result icb_terminal_select_window_test(struct icb_terminal_context *,
+    struct main_state *, const struct consensus_state_bundle_manifest *);
+#endif
 void icb_terminal_unlink_window(struct icb_terminal_context *terminal);
 struct zcl_result icb_terminal_prepare(struct icb_terminal_context *terminal,
     const char *datadir, struct main_state *ms,
