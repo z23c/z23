@@ -4,6 +4,7 @@
 #include "config/state_offer_peer.h"
 #include "config/boot_internal.h"
 #include "config/boot_zcode_swarm.h"
+#include "config/boot_zcode_swarm_membership.h"
 #include "config/state_offer_link.h"
 #include "config/state_offer_link_session.h"
 #include "config/state_offer_store.h"
@@ -277,6 +278,41 @@ static bool peer_refuse_disconnect(struct peer_fixture *p)
     CHECK_PHASE(!state_offer_link_server_peers(held,STATE_OFFER_LINK_SERVER_SLOTS));
     atomic_store(&p->node->disconnect,false); return true;
 }
+/* Build a signed link offer whose bundle height and digests follow `tag`. */
+static void link_offer(struct state_offer_v1 *o, int32_t height, uint8_t tag)
+{
+    memset(o,0,sizeof(*o));
+    o->version=STATE_OFFER_VERSION; o->bundle_height=o->offerer_tip_height=height;
+    o->chunk_size=STATE_OFFER_CHUNK_SIZE_BYTES; o->content_bytes=131072; o->num_chunks=1;
+    o->kind=ROM_ARTIFACT_CONSENSUS_BUNDLE; o->issued_unix=1800000000;
+    const char *name="consensus-state-bundle-100.sqlite"; o->filename_len=(uint16_t)strlen(name);
+    memcpy(o->filename,name,o->filename_len);
+    memset(o->chunk_tree_root,0x51+tag,32); memset(o->header_hash,0x11+tag,32);
+    memset(o->content_digest,tag,32); memset(o->mmb_peaks_digest,0x71,32); memset(o->producer_receipt_id,0x91,32);
+    uint8_t seed[32]; memset(seed,7,32); (void)state_offer_v1_sign(o,seed);
+}
+/* One pump tick purges a retained link offer whose peer left the live set and
+ * keeps the offer of a peer still in it. The dead offer is the newer one, so a
+ * pump that skipped the purge would select it. */
+static bool peer_pump_purges_gone_offers(struct peer_fixture *p)
+{
+    state_offer_store_reset();
+    int64_t live=(int64_t)(boot_zcode_swarm_peer_id(p->node)-1u), gone=live+1000;
+    struct state_offer_v1 dead, alive;
+    link_offer(&dead,900000,0x20); link_offer(&alive,800000,0x21);
+    CHECK_PHASE(state_offer_store_record_link(&dead,gone,1000)==STATE_OFFER_STORE_KEPT);
+    CHECK_PHASE(state_offer_store_record_link(&alive,live,1000)==STATE_OFFER_STORE_KEPT);
+    state_offer_peer_pump(&p->mp);
+    struct state_offer_store_status st; state_offer_store_status_get(&st);
+    CHECK_PHASE(st.offers_retained==1);
+    struct state_offer_record sel;
+    CHECK_PHASE(state_offer_store_decide(31000,&sel)==STATE_OFFER_DECIDE_FETCH);
+    CHECK_PHASE(sel.peer_link && sel.peer_id==live && sel.offer.bundle_height==800000);
+    state_offer_store_reset();
+    struct state_offer_link_frame f;
+    while (frame_out(p->node,p->sentinel,&f,p->wire,STATE_OFFER_LINK_FRAME_MAX)) { }
+    return true;
+}
 /* A pending object read is cancelled when its connection disappears. */
 static bool peer_client_disconnect(struct peer_fixture *p)
 {
@@ -334,6 +370,6 @@ int test_state_offer_peer(void)
 {
     struct peer_fixture p={0};
     bool ok=peer_setup(&p) && peer_discovery(&p) && peer_transfer(&p) && peer_parallel(&p) && peer_bench(&p) &&
-        peer_refuse_disconnect(&p) && peer_client_disconnect(&p) && peer_shutdown(&p);
+        peer_refuse_disconnect(&p) && peer_pump_purges_gone_offers(&p) && peer_client_disconnect(&p) && peer_shutdown(&p);
     peer_cleanup(&p); return ok ? 0 : 1;
 }
