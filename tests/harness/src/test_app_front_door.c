@@ -60,6 +60,7 @@ int test_app_front_door(void)
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "base/log_level.h"
 
 #define AFD_PATH 900
 #define AFD_SNAP (64u * 1024u)
@@ -905,6 +906,61 @@ static int afd_key_note_after_confirm(const struct afd_world *w)
     return failures;
 }
 
+/* Run `copy skycombat` twice with fd 2 pointed at a file; the second open
+ * of the store is the one that finds a receipt. Returns the captured text. */
+static char *afd_capture_stderr_copies(const struct afd_world *w, int *rcs)
+{
+    char home[AFD_PATH], datadir[AFD_PATH];
+    struct asf_door run;
+    (void)snprintf(home, sizeof(home), "%s/quiethome", w->root);
+    (void)snprintf(datadir, sizeof(datadir), "%s/quietdata", w->root);
+    if (mkdir(home, 0700) != 0 || mkdir(datadir, 0700) != 0) return NULL;
+    FILE *cap = tmpfile();
+    if (!cap) return NULL;
+    (void)fflush(stderr);
+    const int saved = dup(STDERR_FILENO);
+    if (saved < 0 || dup2(fileno(cap), STDERR_FILENO) < 0) {
+        (void)fclose(cap);
+        return NULL;
+    }
+    for (int i = 0; i < 2; i++) {
+        asf_door_run(home, w->saved_cwd, datadir, "copy", "skycombat",
+                     ZCL_CLI_CONFIRM_YES, &run);
+        rcs[i] = run.rc;
+    }
+    (void)fflush(stderr);
+    (void)dup2(saved, STDERR_FILENO);
+    (void)close(saved);
+    char *text = calloc(1, 65536);
+    if (text) {
+        rewind(cap);
+        (void)fread(text, 1, 65535, cap);
+    }
+    (void)fclose(cap);
+    return text;
+}
+
+static int afd_quiet_logs(const struct afd_world *w)
+{
+    int failures = 0;
+    TEST("app front door: no INFO log or event_log receipt line reaches the "
+         "terminal") {
+        int rcs[2] = {-1, -1};
+        const enum zcl_log_level prior = zcl_log_level_get();
+        zcl_log_level_set(ZCL_LOG_ALL);
+        char *text = afd_capture_stderr_copies(w, rcs);
+        zcl_log_level_set(prior);
+        ASSERT(text != NULL);
+        ASSERT_EQ(rcs[0], 0);
+        ASSERT_EQ(rcs[1], 0);
+        ASSERT(strstr(text, " INFO [") == NULL);
+        ASSERT(strstr(text, "[event_log]") == NULL);
+        free(text);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_app_front_door(void);
 int test_app_front_door(void)
 {
@@ -937,6 +993,8 @@ int test_app_front_door(void)
     }
     if (!failures)
         failures += afd_key_note_after_confirm(&w);
+    if (!failures)
+        failures += afd_quiet_logs(&w);
     printf("app front door journey: A %d commands, %d hex pastes; B %d "
            "commands, %d hex pastes (baseline 45 commands, 15 JSON inputs, "
            "3 hex pastes)\n", w.commands_a, w.hex_a, w.commands_b, w.hex_b);
