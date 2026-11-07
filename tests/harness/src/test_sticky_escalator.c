@@ -28,6 +28,7 @@
 
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
+#include "config/flysync_island.h"
 #include "framework/condition.h"
 #include "jobs/reducer_frontier.h"
 #include "jobs/stage_repair.h"
@@ -1240,6 +1241,71 @@ static int t11_refold_arm_and_terminal_rung(void)
     return failures;
 }
 
+/* ── T11H: the TERMINAL refold rung defers while FlySync holds header sync ──
+ * A FlySync fetch in flight (phase WAIT/WALK/SEEDED) must not be thrown away by
+ * the self-respawn: with the hold active the rung neither arms the durable
+ * refold nor triggers the respawn, and holds. With the hold inactive it arms
+ * and triggers exactly as before. */
+static int t11h_terminal_refold_flysync_hold(void)
+{
+    int failures = 0;
+    struct se_fixture fx;
+    SE_CHECK("T11H: setup fixture", setup_fixture(&fx, "t11h_refold_hold"));
+    sqlite3 *db = progress_store_db();
+    SE_CHECK("T11H: make rederive rung an honest no-op",
+             put_tip_log(db, A + 2, 1, &fx.hashes[2]) &&
+             put_tip_log(db, A + 3, 1, &fx.hashes[3]) &&
+             seed_coins_applied(db, A + 4) &&
+             seed_cursor(db, "tip_finalize", A + 3));
+
+    sync_monitor_set_context(NULL, NULL, &fx.ms);
+    sticky_escalator_test_reset();
+    stage_reducer_frontier_reset_detect_memo_for_testing();
+    reducer_frontier_provable_tip_reset();
+    reducer_frontier_provable_tip_set(1000);
+    sticky_escalator_set_datadir(fx.dir);
+    sticky_escalator_test_set_refold_artifact_available(1);
+    sticky_escalator_test_set_suppress_refold_restart(true);
+
+    sticky_escalator_note_stall("test_refold_hold");
+    int64_t t = (int64_t)platform_time_wall_time_t();
+    for (int i = 0; i < 7; i++)
+        (void)sticky_escalator_test_drive(0, t + 31 + i);
+    SE_CHECK("T11H: ladder reached the terminal rung",
+             sticky_escalator_test_rung() == STICKY_RUNG_REFOLD_FROM_ANCHOR);
+    /* Drop the arm the shallower rungs made: the terminal rung alone decides. */
+    boot_auto_refold_clear(fx.dir);
+    SE_CHECK("T11H: no refold armed going into the terminal rung",
+             !boot_auto_refold_pending(fx.dir));
+
+    char why[320] = {0};
+    flysync_island_set_requested(true);
+    SE_CHECK("T11H: FlySync holds header sync",
+             flysync_island_boot_gate(fx.dir, &fx.ms, why, sizeof(why)) &&
+             flysync_island_holds_header_sync());
+    SE_CHECK("T11H: held terminal rung holds and does not arm",
+             sticky_escalator_test_drive(0, t + 38) ==
+                 STICKY_RUNG_REFOLD_FROM_ANCHOR &&
+             !boot_auto_refold_pending(fx.dir));
+    SE_CHECK("T11H: still no arm on a second held tick",
+             sticky_escalator_test_drive(0, t + 39) ==
+                 STICKY_RUNG_REFOLD_FROM_ANCHOR &&
+             !boot_auto_refold_pending(fx.dir));
+
+    flysync_island_test_reset();
+    SE_CHECK("T11H: hold released", !flysync_island_holds_header_sync());
+    SE_CHECK("T11H: released terminal rung arms as before",
+             sticky_escalator_test_drive(0, t + 40) ==
+                 STICKY_RUNG_REFOLD_FROM_ANCHOR &&
+             boot_auto_refold_pending(fx.dir));
+
+    flysync_island_test_reset();
+    sticky_escalator_set_datadir(NULL);
+    reducer_frontier_provable_tip_reset();
+    teardown_fixture(&fx);
+    return failures;
+}
+
 /* ── T12: resnapshot detects the nearest SELF-VERIFIED rewind base ───────
  * With NO base it names the typed blocker resnapshot_no_base and advances.
  * With a ratified seal reachable AND the stage_rederive_range primitive now
@@ -1903,6 +1969,7 @@ int test_sticky_escalator(void)
     failures += t9_widen_peers_below_floor();
     failures += t10_widen_peers_at_floor();
     failures += t11_refold_arm_and_terminal_rung();
+    failures += t11h_terminal_refold_flysync_hold();
     failures += t12_resnapshot_base_selection();
     failures += t13_refold_marker_withdraw();
     failures += t14_flat_repair_churn_advances();
