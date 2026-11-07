@@ -98,11 +98,10 @@ static bool as_keep_refusal(struct as_open *a)
     return as_fail(a, "EXECUTION_CONFIRMATION_REQUIRED", message, AS_COMMAND);
 }
 
-static bool as_inputs(struct as_open *a, bool keep)
+static bool as_inputs(struct as_open *a)
 {
     const struct json_value *consent = json_get(a->input, "accept_execution");
     bool agreed = consent && consent->type == JSON_BOOL && json_get_bool(consent);
-    if (keep && (!agreed || !json_get(a->input, "expected_revision"))) return as_keep_refusal(a);
     if (!agreed)
         return as_fail(a, "EXECUTION_CONFIRMATION_REQUIRED", "accept execution of this exact image first", AS_COMMAND);
     if (!as_resolve_locations(a)) return false;
@@ -336,7 +335,7 @@ void zcl_native_handle_app_open_selected(const struct zcl_command_request *reque
     struct as_open *a = zcl_calloc(1, sizeof(*a), "app-open-selected");
     if (!a) { zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "cannot allocate selected app state", AS_COMMAND); return; }
     a->input = request->input; a->reply = reply;
-    if (as_inputs(a, false) && as_catalog(a) && as_current_revision(a) &&
+    if (as_inputs(a) && as_catalog(a) && as_current_revision(a) &&
         as_validated(a) && as_desktop(a)) as_launch(a);
     as_cleanup(a);
 }
@@ -348,6 +347,16 @@ static bool as_revision(struct as_open *a, uint64_t *out)
         return as_fail(a, "BAD_SELECTION_REVISION", "expected_revision must be a nonnegative, non-exhausted integer", AS_COMMAND);
     *out = (uint64_t)json_get_int(value);
     return true;
+}
+
+/* app keep needs a preview's revision and consent; without them it says what
+ * the step is for and points a person at app save. */
+static bool as_keep_gate(struct as_open *a)
+{
+    const struct json_value *consent = json_get(a->input, "accept_execution");
+    bool agreed = consent && consent->type == JSON_BOOL && json_get_bool(consent);
+    if (agreed && json_get(a->input, "expected_revision")) return true;
+    return as_keep_refusal(a);
 }
 
 static bool as_make_selection(struct as_open *a, struct app_selection *s)
@@ -395,7 +404,7 @@ void zcl_native_handle_app_keep(const struct zcl_command_request *request,
     if (!a) { zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "cannot allocate app state", AS_COMMAND); return; }
     a->input = request->input; a->reply = reply;
     uint64_t expected = 0;
-    if (as_inputs(a, true) && as_revision(a, &expected) && as_catalog(a) && as_validated(a)) as_keep(a, expected);
+    if (as_keep_gate(a) && as_inputs(a) && as_revision(a, &expected) && as_catalog(a) && as_validated(a)) as_keep(a, expected);
     as_cleanup(a);
 }
 
