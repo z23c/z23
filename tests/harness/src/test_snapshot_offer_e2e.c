@@ -26,6 +26,7 @@
 #include "coins/coins_view.h"
 #include "coins/utxo_commitment.h"
 #include "config/boot_flyclient.h"
+#include "config/boot_internal.h"
 #include "config/boot_snapshot_offer.h"
 #include "config/runtime.h"
 #include "core/arith_uint256.h"
@@ -188,8 +189,11 @@ static bool e2e_seed_leaves(void)
     snprintf(path, sizeof(path), "%s/mmb_leaves.bin", g.dir);
     if (!mmb_leaf_store_open(&g_mmb_leaf_store, path))
         return false;
-    return mmb_leaf_store_rebuild(&g_mmb_leaf_store,
-                                  &g.ms_a.chain_active) == E2E_BLOCKS;
+    bool seeded = mmb_leaf_store_rebuild(&g_mmb_leaf_store, &g.ms_a.chain_active) == E2E_BLOCKS;
+    mmb_leaf_store_close(&g_mmb_leaf_store);
+    struct boot_svc_ctx svc = {.state = &g.ms_a};
+    return seeded && boot_prepare_mmb_leaf_store(&svc, g.dir, NULL) &&
+           boot_mmb_leaf_store_available(&g.ms_a.chain_active);
 }
 
 /* ── The peer: A answers with what the leaf store proves ──────────────── */

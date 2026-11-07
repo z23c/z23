@@ -5,6 +5,9 @@
 #include "config/boot_internal.h"
 #include "chain/chain.h"
 #include "chain/mmb.h"
+#include "chain/mmr.h"
+#include "storage/coins_kv.h"
+#include "storage/progress_store.h"
 #include "coins/utxo_commitment.h"
 #include "controllers/blockchain_controller.h"
 #include "models/block.h"
@@ -13,10 +16,39 @@
 #include "net/snapshot_sync_contract.h"
 #include "util/log_macros.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
 struct mmb_leaf_store g_mmb_leaf_store = {0};
+static _Atomic bool g_mmb_leaf_available;
+static zcl_once_t g_mmb_binding_once = ZCL_ONCE_INIT;
+static zcl_mutex_t g_mmb_binding_lock;
+static const struct active_chain *g_mmb_chain;
+static int g_mmb_height;
+static uint8_t g_mmb_hash[32];
+static uint64_t g_mmb_count;
+
+#ifdef ZCL_TESTING
+static void (*g_mmb_height_hook)(void);
+void boot_mmb_test_height_hook(void (*hook)(void))
+{
+    g_mmb_height_hook = hook;
+}
+#endif
+
+static int boot_mmb_authority_height(const struct active_chain *chain)
+{
+#ifdef ZCL_TESTING
+    if (g_mmb_height_hook) g_mmb_height_hook();
+#endif
+    return active_chain_height(chain);
+}
+
+static void boot_mmb_binding_init(void)
+{
+    zcl_mutex_init(&g_mmb_binding_lock);
+}
 
 bool boot_build_flyclient_proof(struct fc_response *resp,
                                 const struct fc_challenge *challenge,
@@ -33,10 +65,10 @@ bool boot_build_flyclient_proof(struct fc_response *resp,
 
     uint64_t mmb_leaves = 0;
     rpc_blockchain_mmb_snapshot(NULL, &mmb_leaves, NULL);
-    const uint8_t (*all_hashes)[32] =
-        mmb_leaf_store_all(&g_mmb_leaf_store);
-    if (mmb_leaves == 0 || !all_hashes)
+    if (!boot_mmb_leaf_store_available(chain_active) || mmb_leaves == 0)
         return false;
+    const uint8_t (*all_hashes)[32] = mmb_leaf_store_all(&g_mmb_leaf_store);
+    if (!all_hashes) return false;
 
     return snapsync_build_fc_response(resp, challenge, chain_active,
                                       &g_mmb_leaf_store).ok;
@@ -199,6 +231,46 @@ static bool boot_mmb_leaf_store_repair_prefix_legacy(
     return true;
 }
 
+/* A compacted list of sparse heights is not a height-indexed MMB prefix. */
+static bool boot_mmb_chain_dense(const struct active_chain *chain)
+{
+    if (!chain) return false;
+    int tip = boot_mmb_authority_height(chain);
+    struct active_chain *c = (struct active_chain *)chain;
+    zcl_mutex_lock(&c->write_lock);
+    const struct block_index *prev = NULL;
+    bool ok = tip >= 0;
+    for (int64_t h = 0; ok && h <= tip; h++) {
+        const struct block_index *p = active_chain_at(chain, (int)h);
+        ok = p && p->phashBlock && p->nHeight == h && (h == 0 || p->pprev == prev);
+        prev = p;
+    }
+    zcl_mutex_unlock(&c->write_lock);
+    return ok;
+}
+
+bool boot_mmb_leaf_store_available(const struct active_chain *chain)
+{
+    if (!chain || !atomic_load(&g_mmb_leaf_available) ||
+        !zcl_once_call(&g_mmb_binding_once, boot_mmb_binding_init)) return false;
+    zcl_mutex_lock(&g_mmb_binding_lock);
+    const struct active_chain *bound = g_mmb_chain;
+    int height = g_mmb_height;
+    uint64_t count = g_mmb_count;
+    uint8_t hash[32];
+    memcpy(hash, g_mmb_hash, sizeof(hash));
+    zcl_mutex_unlock(&g_mmb_binding_lock);
+    if (bound != chain) return false;
+    struct active_chain *c = (struct active_chain *)chain;
+    zcl_mutex_lock(&c->write_lock);
+    const struct block_index *tip = active_chain_at(chain, height);
+    bool ok = atomic_load(&g_mmb_leaf_available) && tip && tip->phashBlock &&
+        tip->nHeight == height && !memcmp(tip->phashBlock->data, hash, sizeof(hash)) &&
+        g_mmb_leaf_store.open && g_mmb_leaf_store.num_leaves == count;
+    zcl_mutex_unlock(&c->write_lock);
+    return ok;
+}
+
 /* A stored leaf is trusted only if the active chain reproduces it. Checks the
  * last leaf plus older samples (last-1, last-100, last-2048) when present. */
 static bool boot_mmb_leaf_store_prefix_matches(
@@ -225,7 +297,7 @@ bool boot_reconcile_mmb_leaf_store(struct mmb_leaf_store *store,
                                    uint64_t mmb_leaves)
 {
     int tip_h = active_chain_height(chain);
-    if (!store || !store->open || tip_h < 0) return false;
+    if (!store || !store->open || tip_h < 0 || !boot_mmb_chain_dense(chain)) return false;
     uint64_t chain_leaves = (uint64_t)tip_h + 1;
     uint64_t target = mmb_leaves < chain_leaves ? mmb_leaves : chain_leaves;
     uint64_t have = store->num_leaves;
@@ -262,10 +334,107 @@ bool boot_reconcile_mmb_leaf_store(struct mmb_leaf_store *store,
     return true;
 }
 
+/* A prior sparse rebuild may have compacted arbitrary holes; samples cannot
+ * prove the height-indexed prefix. Compare every leaf before offering it. */
+static bool boot_mmb_copy_leaf(const struct active_chain *chain, int height,
+                               const struct block_index **prev, struct mmb_leaf *leaf)
+{
+    struct active_chain *c = (struct active_chain *)chain;
+    zcl_mutex_lock(&c->write_lock);
+    const struct block_index *p = active_chain_at(chain, height);
+    bool ok = p && p->phashBlock && p->nHeight == height &&
+              (height == 0 || p->pprev == *prev);
+    if (ok) {
+        uint8_t zero[32] = {0};
+        mmb_leaf_from_block(leaf, p->phashBlock->data, p->nHeight, p->nTime,
+                            p->nBits, p->hashFinalSaplingRoot.data,
+                            (const uint8_t *)p->nChainWork.pn, zero);
+        *prev = p;
+    }
+    zcl_mutex_unlock(&c->write_lock);
+    return ok;
+}
+
+static bool boot_mmb_boundary_root(int64_t height, struct mmb_leaf *leaf)
+{
+    sqlite3 *db = progress_store_db();
+    if (!db || height <= 0 || height % MMR_COMMITMENT_INTERVAL != 0) return true;
+    bool found = false;
+    if (!coins_kv_boundary_root_get(db, (int32_t)height, leaf->utxo_root, &found)) return false;
+    if (!found) memset(leaf->utxo_root, 0, sizeof(leaf->utxo_root));
+    return true;
+}
+
+
+static bool boot_mmb_store_matches_chain(const struct mmb_leaf_store *store,
+                                         const struct active_chain *chain, int tip,
+                                         const uint8_t frontier[32])
+{
+    if (!store || !store->open || tip < 0 || store->num_leaves != (uint64_t)tip + 1)
+        return false;
+    const struct block_index *prev = NULL;
+    for (int64_t height = 0; height <= tip; height++) {
+        struct mmb_leaf leaf;
+        uint8_t expected[32];
+        const uint8_t *stored = mmb_leaf_store_get(store, (uint64_t)height);
+        if (!stored || !boot_mmb_copy_leaf(chain, (int)height, &prev, &leaf)) return false;
+        if (!boot_mmb_boundary_root(height, &leaf)) return false;
+        mmb_hash_leaf(&leaf, expected);
+        if (memcmp(stored, expected, sizeof(expected))) return false;
+        if (height == tip && memcmp(leaf.block_hash, frontier, 32)) return false;
+    }
+    return true;
+}
+
+static bool boot_mmb_validate_and_bind(const struct active_chain *chain)
+{
+    if (!chain || !zcl_once_call(&g_mmb_binding_once, boot_mmb_binding_init)) return false;
+    int tip = boot_mmb_authority_height(chain);
+    struct active_chain *c = (struct active_chain *)chain;
+    zcl_mutex_lock(&c->write_lock);
+    const struct block_index *p = tip >= 0 ? active_chain_at(chain, tip) : NULL;
+    uint8_t frontier[32];
+    bool ok = p && p->phashBlock && p->nHeight == tip;
+    if (ok) memcpy(frontier, p->phashBlock->data, sizeof(frontier));
+    zcl_mutex_unlock(&c->write_lock);
+    if (!ok || !boot_mmb_store_matches_chain(&g_mmb_leaf_store, chain, tip, frontier)) return false;
+    zcl_mutex_lock(&c->write_lock);
+    p = active_chain_at(chain, tip);
+    ok = p && p->phashBlock && p->nHeight == tip &&
+         !memcmp(p->phashBlock->data, frontier, sizeof(frontier));
+    if (ok) {
+        zcl_mutex_lock(&g_mmb_binding_lock);
+        g_mmb_chain = chain; g_mmb_height = tip; g_mmb_count = (uint64_t)tip + 1;
+        memcpy(g_mmb_hash, frontier, sizeof(g_mmb_hash));
+        atomic_store(&g_mmb_leaf_available, true);
+        zcl_mutex_unlock(&g_mmb_binding_lock);
+    }
+    zcl_mutex_unlock(&c->write_lock);
+    return ok;
+}
+
+#ifdef ZCL_TESTING
+bool boot_mmb_leaf_store_test_verify(const struct active_chain *chain)
+{
+    atomic_store(&g_mmb_leaf_available, false);
+    return boot_mmb_validate_and_bind(chain);
+}
+#endif
+
+static void boot_mmb_legacy_finish(int tip, boot_mmb_leaf_loader_fn loader)
+{
+    if (tip < 0 || g_mmb_leaf_store.num_leaves >= (uint64_t)tip + 1) return;
+    uint64_t count = g_mmb_leaf_store.num_leaves < 2048 ? g_mmb_leaf_store.num_leaves : 2048;
+    bool ok = count == 0 || boot_mmb_leaf_store_repair_prefix_legacy(&g_mmb_leaf_store, count, loader);
+    if (ok) boot_mmb_leaf_store_catchup_legacy(&g_mmb_leaf_store, tip, loader);
+}
+
+
 bool boot_prepare_mmb_leaf_store(struct boot_svc_ctx *svc,
                                  const char *datadir,
                                  boot_mmb_leaf_loader_fn legacy_loader)
 {
+    atomic_store(&g_mmb_leaf_available, false);
     if (!svc || !svc->state || !datadir || !*datadir)
         LOG_FAIL("boot", "MMB leaf store prepare missing svc=%p datadir=%p",
                  (void *)svc, (const void *)datadir);
@@ -282,6 +451,11 @@ bool boot_prepare_mmb_leaf_store(struct boot_svc_ctx *svc,
                  "holds %zu) for datadir '%s'", n,
                  sizeof(g_mmb_leaf_store.path) - 1, datadir);
 
+    if (!boot_mmb_chain_dense(&svc->state->chain_active)) {
+        printf("[FlyClient] MMB leaf proof unavailable: sparse active chain\n");
+        return true;
+    }
+
     if (!mmb_leaf_store_open(&g_mmb_leaf_store, leaf_path))
         LOG_FAIL("boot", "MMB leaf store open failed at '%s'", leaf_path);
     uint64_t mmb_leaves = 0;
@@ -290,18 +464,10 @@ bool boot_prepare_mmb_leaf_store(struct boot_svc_ctx *svc,
                                         &svc->state->chain_active,
                                         mmb_leaves);
 
-    int tip_h = active_chain_height(&svc->state->chain_active);
-    if (tip_h >= 0 && g_mmb_leaf_store.num_leaves < (uint64_t)tip_h + 1) {
-        uint64_t repair_count = g_mmb_leaf_store.num_leaves < 2048
-                                    ? g_mmb_leaf_store.num_leaves
-                                    : 2048;
-        boot_mmb_leaf_store_repair_prefix_legacy(&g_mmb_leaf_store,
-                                                  repair_count,
-                                                  legacy_loader);
-        boot_mmb_leaf_store_catchup_legacy(&g_mmb_leaf_store, tip_h,
-                                           legacy_loader);
-    }
-    printf("[FlyClient] MMB leaf store: %llu hashes ready\n",
-           (unsigned long long)g_mmb_leaf_store.num_leaves);
+    boot_mmb_legacy_finish(active_chain_height(&svc->state->chain_active), legacy_loader);
+    bool complete = boot_mmb_validate_and_bind(&svc->state->chain_active);
+    printf("[FlyClient] MMB leaf store: %llu hashes, proof %s\n",
+           (unsigned long long)g_mmb_leaf_store.num_leaves,
+           complete ? "available" : "unavailable");
     return g_mmb_leaf_store.open;
 }

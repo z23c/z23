@@ -24,6 +24,13 @@ typedef bool (*boot_mmb_leaf_loader_fn)(int height,
 /* The single MMB leaf-hash store for FlyClient proofs. The snapshot-offer
  * worker reads the same store to embed the MMB root in fast-sync offers. */
 extern struct mmb_leaf_store g_mmb_leaf_store;
+/* Startup prepares the store once before consumers use it; it remains open
+ * until those consumers stop. Availability is bound to the validated frontier. */
+bool boot_mmb_leaf_store_available(const struct active_chain *chain);
+#ifdef ZCL_TESTING
+bool boot_mmb_leaf_store_test_verify(const struct active_chain *chain);
+void boot_mmb_test_height_hook(void (*hook)(void));
+#endif
 
 bool boot_build_flyclient_proof(struct fc_response *resp,
                                 const struct fc_challenge *challenge,

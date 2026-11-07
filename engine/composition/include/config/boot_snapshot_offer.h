@@ -31,6 +31,7 @@ struct boot_svc_ctx;
 struct main_state;
 struct node_db;
 struct snapshot_offer;
+struct active_chain;
 
 /* Build an offer from the UTXO mirror: anchor, the MMB root over its leaves, and
  * the serialized file, which must hash to the anchor. False leaves nothing to
@@ -88,6 +89,8 @@ void boot_snapshot_offer_test_set_trust_override(int value);
  * second gate off to prove that state trust alone grants no serving authority.
  * Release builds have no such symbol. */
 void boot_snapshot_offer_test_set_publication_override(int value);
+void boot_snapshot_offer_test_embed_mmb(struct snapshot_offer *offer, const struct active_chain *chain);
+void boot_snapshot_offer_test_root_hook(void (*hook)(void));
 #endif
 
 /* Fast-sync snapshot offer + chunk/block manifest builder. */

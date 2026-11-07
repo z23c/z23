@@ -484,12 +484,20 @@ static void snapshot_offer_export_consensus_snapshot(const char *datadir,
     }
 }
 
+#ifdef ZCL_TESTING
+static void (*g_offer_root_hook)(void);
+void boot_snapshot_offer_test_root_hook(void (*hook)(void))
+{
+    g_offer_root_hook = hook;
+}
+#endif
+
 /* Embed MMB root — replayed from leaf hash store via
  * mmb_append_hash(), guaranteeing identical merge logic
  * as mmb_prove() uses internally. */
-static void snapshot_offer_embed_replayed_mmb_root(struct snapshot_offer *offer)
+static void snapshot_offer_embed_replayed_mmb_root(struct snapshot_offer *offer, const struct active_chain *chain)
 {
-    if (g_mmb_leaf_store.open && g_mmb_leaf_store.num_leaves > 0) {
+    if (boot_mmb_leaf_store_available(chain) && g_mmb_leaf_store.num_leaves > 0) {
         const uint8_t (*lh)[32] = mmb_leaf_store_all(&g_mmb_leaf_store);
         /* Replay through the snapshot anchor.  Heights are zero-based,
          * so a snapshot at height H needs H+1 MMB leaves and a
@@ -507,6 +515,13 @@ static void snapshot_offer_embed_replayed_mmb_root(struct snapshot_offer *offer)
             for (uint64_t i = 0; i < replay_count; i++)
                 mmb_append_hash(&replay, lh[i]);
             mmb_root(&replay, offer->mmb_root);
+#ifdef ZCL_TESTING
+            if (g_offer_root_hook) g_offer_root_hook();
+#endif
+            if (!boot_mmb_leaf_store_available(chain)) {
+                memset(offer->mmb_root, 0, 32);
+                return;
+            }
             printf("Fast sync: MMB root at h=%d (%llu/%llu leaves, "
                    "%u peaks)\n", offer->height,
                    (unsigned long long)replay.num_leaves,
@@ -520,6 +535,13 @@ static void snapshot_offer_embed_replayed_mmb_root(struct snapshot_offer *offer)
         printf("Fast sync: WARNING — no MMB leaf store\n");
     }
 }
+
+#ifdef ZCL_TESTING
+void boot_snapshot_offer_test_embed_mmb(struct snapshot_offer *offer, const struct active_chain *chain)
+{
+    snapshot_offer_embed_replayed_mmb_root(offer, chain);
+}
+#endif
 
 /* Pre-serializes the snapshot file through the node DB. False unless the file
  * hashes to the anchor: it is written apart from the anchor's read transaction,
@@ -588,7 +610,7 @@ bool boot_snapshot_offer_build_from_mirror(struct node_db *ndb,
         return false;
     }
     snapshot_offer_from_anchor(offer, &anchor);
-    snapshot_offer_embed_replayed_mmb_root(offer);
+    snapshot_offer_embed_replayed_mmb_root(offer, &state->chain_active);
     return snapshot_offer_prebuild_serving_snapshot(ndb, datadir, &anchor,
                                                     serving_ready);
 }

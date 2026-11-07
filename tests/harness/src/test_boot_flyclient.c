@@ -3,6 +3,9 @@
 #include "test/test_core.h"
 
 #include "config/boot_flyclient.h"
+#include "config/boot_snapshot_offer.h"
+#include "net/flyclient.h"
+#include "net/fast_sync.h"
 #include "models/database.h"
 #include "models/utxo.h"
 #include "config/boot_internal.h"
@@ -12,6 +15,12 @@
 #include "validation/chainstate.h"
 #include "test/mmb_chain_fixture.h"
 #include "crypto/sha3.h"
+#include "storage/progress_store.h"
+#ifndef _WIN32
+#include <pthread.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 #include "net/snapshot_sync_contract.h"
 
 #include <fcntl.h>
@@ -584,6 +593,110 @@ static bool gap_proof_challenge(struct fc_challenge *ch,
     return true;
 }
 
+static struct active_chain *g_offer_hook_chain;
+static struct block_index *g_offer_hook_fork;
+static bool g_offer_hook_moved;
+static void gap_offer_reorg_hook(void)
+{
+    g_offer_hook_moved = active_chain_move_window_tip(g_offer_hook_chain, g_offer_hook_fork);
+}
+
+
+static int gap_frontier_checks(struct mmb_chain_fixture *fx)
+{
+    int failures = 0;
+    struct block_index extension, fork;
+    struct uint256 extension_hash = {0}, fork_hash = {0};
+    block_index_init(&extension); block_index_init(&fork);
+    extension_hash.data[0] = 0xa1; fork_hash.data[0] = 0xa2;
+    extension.phashBlock = &extension_hash; extension.nHeight = 40;
+    extension.pprev = &fx->bi[39];
+    fork.phashBlock = &fork_hash; fork.nHeight = 39; fork.pprev = &fx->bi[38];
+    BFC_CHECK("ordinary extension preserves validated prefix",
+              active_chain_move_window_tip(&fx->chain, &extension) &&
+              boot_mmb_leaf_store_available(&fx->chain));
+    BFC_CHECK("reorg below validated frontier refuses the store",
+              active_chain_move_window_tip(&fx->chain, &fork) &&
+              !boot_mmb_leaf_store_available(&fx->chain));
+    BFC_CHECK("original frontier is restored",
+              active_chain_move_window_tip(&fx->chain, &fx->bi[39]) &&
+              boot_mmb_leaf_store_available(&fx->chain));
+    struct snapshot_offer offer = {.height = 39};
+    unsigned char zero[32] = {0};
+    g_offer_hook_chain = &fx->chain; g_offer_hook_fork = &fork; g_offer_hook_moved = false;
+    boot_snapshot_offer_test_root_hook(gap_offer_reorg_hook);
+    boot_snapshot_offer_test_embed_mmb(&offer, &fx->chain);
+    boot_snapshot_offer_test_root_hook(NULL);
+    BFC_CHECK("reorg during root construction clears the offer",
+              g_offer_hook_moved && !memcmp(offer.mmb_root, zero, sizeof(zero)));
+    BFC_CHECK("frontier restored after root reorg",
+              active_chain_move_window_tip(&fx->chain, &fx->bi[39]) &&
+              boot_mmb_leaf_store_available(&fx->chain));
+    return failures;
+}
+
+#ifndef _WIN32
+static pthread_mutex_t g_height_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_height_cond = PTHREAD_COND_INITIALIZER;
+static bool g_height_entered, g_height_continue, g_height_result;
+static void gap_height_hook(void)
+{
+    pthread_mutex_lock(&g_height_mutex);
+    g_height_entered = true;
+    pthread_cond_signal(&g_height_cond);
+    while (!g_height_continue) pthread_cond_wait(&g_height_cond, &g_height_mutex);
+    pthread_mutex_unlock(&g_height_mutex);
+}
+static void *gap_height_worker(void *arg)
+{
+    g_height_result = boot_mmb_leaf_store_test_verify(arg);
+    return NULL;
+}
+static int gap_lock_order_child(const char *dir, struct mmb_chain_fixture *fx)
+{
+    int failures = 0;
+    bool opened = progress_store_open(dir);
+    BFC_CHECK("contention fixture opens progress store", opened);
+    if (!opened) return failures;
+    g_height_entered = false; g_height_continue = false; g_height_result = false;
+    boot_mmb_test_height_hook(gap_height_hook);
+    progress_store_tx_lock();
+    pthread_t worker;
+    int rc = pthread_create(&worker, NULL, gap_height_worker, &fx->chain);
+    if (rc == 0) {
+        pthread_mutex_lock(&g_height_mutex);
+        while (!g_height_entered) pthread_cond_wait(&g_height_cond, &g_height_mutex);
+        bool got_chain = zcl_mutex_trylock(&fx->chain.write_lock);
+        if (got_chain) zcl_mutex_unlock(&fx->chain.write_lock);
+        g_height_continue = true;
+        pthread_cond_signal(&g_height_cond);
+        pthread_mutex_unlock(&g_height_mutex);
+        BFC_CHECK("progress holder can acquire chain while height waits", got_chain);
+    }
+    progress_store_tx_unlock();
+    if (rc == 0) pthread_join(worker, NULL);
+    boot_mmb_test_height_hook(NULL);
+    BFC_CHECK("height validation completes after contention", rc == 0 && g_height_result);
+    progress_store_close();
+    return failures;
+}
+static int gap_lock_order_checks(const char *dir, struct mmb_chain_fixture *fx)
+{
+    int failures = 0;
+    pid_t pid = fork();
+    if (pid == 0) {
+        alarm(10);
+        _exit(gap_lock_order_child(dir, fx) == 0 ? 0 : 1);
+    }
+    int status = 0;
+    bool ok = pid > 0 && waitpid(pid, &status, 0) == pid &&
+              WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    BFC_CHECK("lock contention child completes within ten seconds", ok);
+    return failures;
+}
+
+#endif
+
 static int gap_proof_checks(const char *dir)
 {
     int failures = 0;
@@ -596,9 +709,18 @@ static int gap_proof_checks(const char *dir)
     bool ready = fixture &&
                  mmb_seed_prefix(&g_mmb_leaf_store, dir, "g_proof.bin",
                                  &fx.chain, 40) &&
+                 boot_mmb_leaf_store_test_verify(&fx.chain) &&
                  gap_proof_challenge(&ch, &g_mmb_leaf_store);
     BFC_CHECK("proof fixture ready", ready);
     if (ready) {
+        failures += gap_frontier_checks(&fx);
+#ifndef _WIN32
+        failures += gap_lock_order_checks(dir, &fx);
+#endif
+        BFC_CHECK("invalid prepare disables previous proof availability",
+                  !boot_prepare_mmb_leaf_store(NULL, NULL, NULL) &&
+                  !boot_mmb_leaf_store_available(&fx.chain) &&
+                  boot_mmb_leaf_store_test_verify(&fx.chain));
         BFC_CHECK("proof builder answers an honest challenge",
                   boot_build_flyclient_proof(resp, &ch, &fx.chain, NULL) &&
                   resp->num_samples > 0);
@@ -606,6 +728,10 @@ static int gap_proof_checks(const char *dir)
         BFC_CHECK("proof builder refuses a challenge for another root",
                   !boot_build_flyclient_proof(resp, &ch, &fx.chain, NULL));
         ch.mmb_root[0] ^= 1;
+        BFC_CHECK("middle corruption cannot be certified by suffix samples",
+                  mmb_corrupt_leaf(&g_mmb_leaf_store, 20) &&
+                  !boot_mmb_leaf_store_test_verify(&fx.chain) &&
+                  !boot_build_flyclient_proof(resp, &ch, &fx.chain, NULL));
         mmb_leaf_store_close(&g_mmb_leaf_store);
         BFC_CHECK("proof builder refuses without an open leaf store",
                   !boot_build_flyclient_proof(resp, &ch, &fx.chain, NULL));
@@ -617,9 +743,11 @@ static int gap_proof_checks(const char *dir)
 }
 
 static int g_gap_fail_at = -1;
+static int g_gap_loader_calls;
 
 static bool gap_legacy_loader(int height, struct mmb_leaf *leaf)
 {
+    g_gap_loader_calls++;
     if (height == g_gap_fail_at)
         return false;
     memset(leaf, 0, sizeof(*leaf));
@@ -740,6 +868,24 @@ static int gap_legacy_stops(const char *dir)
     return failures;
 }
 
+static int gap_failed_prefix_checks(const char *dir)
+{
+    int failures = 0;
+    struct mmb_chain_fixture fx;
+    struct mmb_leaf_store ref;
+    int have = (int)gap_mmb_leaves();
+    g_gap_fail_at = 0;
+    g_gap_loader_calls = 0;
+    bool ok = gap_prepare(dir, &fx, &ref, have, have + 3, gap_legacy_loader);
+    BFC_CHECK("failed prefix repair never appends suffix or advertises", ok &&
+        g_gap_loader_calls == 1 && g_mmb_leaf_store.num_leaves == (uint64_t)have &&
+        !boot_mmb_leaf_store_available(&fx.chain));
+    mmb_leaf_store_close(&g_mmb_leaf_store);
+    gap_release(&fx, &ref);
+    g_gap_fail_at = -1;
+    return failures;
+}
+
 static int boot_flyclient_gap_checks(void)
 {
     int failures = 0;
@@ -751,6 +897,7 @@ static int boot_flyclient_gap_checks(void)
     failures += gap_reconcile_guards(dir);
     failures += gap_reconcile_one_block(dir);
     failures += gap_proof_checks(dir);
+    failures += gap_failed_prefix_checks(dir);
     failures += gap_legacy_catchup(dir);
     failures += gap_legacy_stops(dir);
     test_cleanup_tmpdir(dir);
@@ -793,6 +940,72 @@ static int boot_prepare_long_path_checks(const char *dir)
     return failures;
 }
 
+#ifndef _WIN32
+static int sparse_loader_calls;
+static bool sparse_legacy_loader(int height, struct mmb_leaf *leaf)
+{
+    (void)height; (void)leaf; sparse_loader_calls++;
+    return false;
+}
+
+static int sparse_refusal_checks(struct main_state *state, bool ok,
+                                 const struct stat *prior, const unsigned char before[32])
+{
+    int failures = 0;
+    struct stat now;
+    unsigned char after[32];
+    BFC_CHECK("sparse reconciliation refuses without rewriting", ok &&
+        !boot_reconcile_mmb_leaf_store(&g_mmb_leaf_store, &state->chain_active, 3309901) &&
+        fstat(g_mmb_leaf_store.fd, &now) == 0 && now.st_ino == prior->st_ino && now.st_size == prior->st_size &&
+        pread(g_mmb_leaf_store.fd, after, sizeof(after), 0) == (ssize_t)sizeof(after) &&
+        !memcmp(before, after, sizeof(after)));
+    struct fc_response response = {0};
+    struct fc_challenge challenge = {0};
+    BFC_CHECK("sparse store cannot serve FlyClient proof", ok &&
+        !boot_build_flyclient_proof(&response, &challenge, &state->chain_active, NULL));
+    struct snapshot_offer offer = {.height = 0};
+    memset(offer.mmb_root, 0xff, sizeof(offer.mmb_root));
+    boot_snapshot_offer_test_embed_mmb(&offer, &state->chain_active);
+    unsigned char zero[32] = {0};
+    BFC_CHECK("sparse store cannot provide snapshot offer root", ok && !memcmp(offer.mmb_root, zero, sizeof(zero)));
+    return failures;
+}
+
+
+static int boot_flyclient_sparse_checks(const char *dir)
+{
+    int failures = 0;
+    struct main_state *state = calloc(1, sizeof(*state));
+    struct block_index tip;
+    struct uint256 hash = {{0}};
+    char path[512];
+    unsigned char leaf[32], before[32];
+    memset(leaf, 0x5a, sizeof(leaf));
+    snprintf(path, sizeof(path), "%s/mmb_leaves.bin", dir);
+    bool ok = state != NULL;
+    if (!ok) return 1;
+    main_state_init(state);
+    block_index_init(&tip); tip.nHeight = 3309900; tip.phashBlock = &hash;
+    ok = active_chain_install_tip_slot(&state->chain_active, &tip) &&
+        mmb_leaf_store_open(&g_mmb_leaf_store, path) &&
+        mmb_leaf_store_append(&g_mmb_leaf_store, leaf) && mmb_leaf_store_remap(&g_mmb_leaf_store) &&
+        pread(g_mmb_leaf_store.fd, before, sizeof(before), 0) == (ssize_t)sizeof(before);
+    struct stat prior;
+    ok = ok && fstat(g_mmb_leaf_store.fd, &prior) == 0;
+    struct boot_svc_ctx svc = {.state = state};
+    sparse_loader_calls = 0;
+    if (ok) ok = boot_prepare_mmb_leaf_store(&svc, dir, sparse_legacy_loader);
+    BFC_CHECK("sparse chain defers MMB without legacy requests", ok && sparse_loader_calls == 0 &&
+        !boot_mmb_leaf_store_available(&state->chain_active));
+    failures += sparse_refusal_checks(state, ok, &prior, before);
+    if (g_mmb_leaf_store.open) mmb_leaf_store_close(&g_mmb_leaf_store);
+    main_state_free(state);
+    free(state);
+    unlink(path);
+    return failures;
+}
+#endif
+
 int test_boot_flyclient(void)
 {
     int failures = 0;
@@ -817,6 +1030,12 @@ int test_boot_flyclient(void)
     failures += snapshot_refusal_checks();
     failures += mmb_reconcile_checks();
     failures += boot_flyclient_gap_checks();
+#ifndef _WIN32
+    char sparse_dir[PATH_MAX];
+    test_make_tmpdir(sparse_dir, sizeof(sparse_dir), "boot_flyclient_sparse", "dir");
+    failures += boot_flyclient_sparse_checks(sparse_dir);
+    test_cleanup_tmpdir(sparse_dir);
+#endif
     char long_dir[PATH_MAX];
     test_make_tmpdir(long_dir, sizeof(long_dir), "boot_flyclient_long", "dir");
     failures += boot_prepare_long_path_checks(long_dir);
