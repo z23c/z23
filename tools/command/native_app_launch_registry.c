@@ -502,10 +502,18 @@ static bool app_preview_arg(char *dst, size_t cap, const char *src,
 bool app_launch_preview(const char *app_id, const char *dir,
                         struct app_launch_preview *out)
 {
+    return app_launch_preview_as(app_id, dir, NULL, out);
+}
+
+/* As app_launch_preview, but the capture file is `file` (a plain name, no
+ * slash) when given, so one directory can hold a capture per built image. */
+bool app_launch_preview_as(const char *app_id, const char *dir,
+                           const char *file, struct app_launch_preview *out)
+{
     if (!out)
         return false;
     memset(out, 0, sizeof(*out));
-    if (!app_id || !dir || !dir[0])
+    if (!app_id || !dir || !dir[0] || (file && (!file[0] || strchr(file, '/'))))
         return false;
     for (size_t i = 0; i < sizeof(k_app_builtins) / sizeof(k_app_builtins[0]);
          i++) {
@@ -514,7 +522,7 @@ bool app_launch_preview(const char *app_id, const char *dir,
             !b->preview_file[0])
             continue;
         int n = snprintf(out->capture_path, sizeof(out->capture_path),
-                         "%s/%s", dir, b->preview_file);
+                         "%s/%s", dir, file ? file : b->preview_file);
         if (n <= 0 || (size_t)n >= sizeof(out->capture_path))
             return false;
         for (unsigned a = 0; b->preview_argv[a]; a++) {

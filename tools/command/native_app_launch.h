@@ -146,6 +146,10 @@ struct app_launch_preview {
 /* False (out zeroed) when app_id has no preview row or nothing fits. */
 bool app_launch_preview(const char *app_id, const char *dir,
                         struct app_launch_preview *out);
+/* The same, with the capture file named by the caller (NULL keeps the row's
+ * preview_file); a name with a slash is refused. */
+bool app_launch_preview_as(const char *app_id, const char *dir,
+                           const char *file, struct app_launch_preview *out);
 /* "a, b, c" of every id; false when it does not fit. */
 bool app_launch_known_names(const struct app_launch_registry *reg, char *out,
                             size_t out_size);

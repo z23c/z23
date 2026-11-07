@@ -1192,13 +1192,13 @@ static int abc_explicit_saved_version(void)
 }
 
 /* A successful build of a skycombat copy offers ONE preview run: the built
- * image, --qa-frames=120 and a --capture inside the copy's own directory. */
+ * image, --qa-frames=120 and a --capture in the build store, outside the copy. */
 static int abc_preview_skycombat(void)
 {
     int failures = 0;
     struct abc_world w = {0};
     TEST("app.build: a skycombat copy's reply carries the image + --qa-frames "
-         "+ --capture=<copy>/preview.png preview run") {
+         "+ --capture=<datadir>/app_build/previews preview run") {
         abc_stub_meta = k_sky_meta;
         bool ready = abc_world_init(&w);
         abc_stub_meta = k_meta;
@@ -1206,18 +1206,22 @@ static int abc_preview_skycombat(void)
         struct abc_leaf l;
         ASSERT(abc_build(&l, w.copy, w.alice_datadir));
         const struct json_value *argv = json_get(&l.out.data, "preview_argv");
-        char want[ABC_PATH + 32], line[3 * ABC_PATH];
+        char want[ABC_PATH * 2 + 32], line[5 * ABC_PATH];
         ASSERT(argv && argv->type == JSON_ARR && argv->num_children == 3);
         ASSERT(strcmp(json_get_str(&argv->children[0]),
                       abc_get(&l, "image_path")) == 0);
         ASSERT(strcmp(json_get_str(&argv->children[1]),
                       "--qa-frames=120") == 0);
-        (void)snprintf(want, sizeof(want), "--capture=%s/preview.png", w.copy);
+        char cap[ABC_PATH * 2];
+        const char *img = strrchr(abc_get(&l, "image_path"), '/');
+        ASSERT(img != NULL);
+        (void)snprintf(cap, sizeof(cap), "%s/app_build/previews/%s.png",
+                       w.alice_datadir, img + 1);
+        (void)snprintf(want, sizeof(want), "--capture=%s", cap);
         ASSERT(strcmp(json_get_str(&argv->children[2]), want) == 0);
         (void)snprintf(line, sizeof(line),
-                       "Preview: run %s --qa-frames=120 --capture=%s/preview.png "
-                       "to save %s/preview.png", abc_get(&l, "image_path"),
-                       w.copy, w.copy);
+                       "Preview: run %s --qa-frames=120 --capture=%s "
+                       "to save %s", abc_get(&l, "image_path"), cap, cap);
         ASSERT(strcmp(abc_get(&l, "preview"), line) == 0);
         abc_close(&l);
         PASS();

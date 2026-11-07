@@ -352,8 +352,27 @@ static bool zab_sh_word(char **at, size_t *left, const char *s)
     return true;
 }
 
+/* The preview capture lives in the build store, never in the copy: a file
+ * inside the copy's tracked tree is an unsaved change that blocks build and
+ * share. <datadir>/app_build/previews/<image sha3>.png, created 0700 here
+ * (the confirm half only). False with PREVIEW_DIR_FAILED when it cannot be. */
+static bool zab_preview_target(struct zab *z, const char *image, char *dir,
+                               size_t dcap, char *file, size_t fcap)
+{
+    const char *hex = strrchr(image, '/');
+    hex = hex ? hex + 1 : image;
+    bool ok = hex[0] && zcl_path_join(dir, dcap, z->datadir,
+                                      "app_build/previews") &&
+              snprintf(file, fcap, "%s.png", hex) < (int)fcap &&
+              zcl_mkdir_p(dir, 0700).ok;
+    if (!ok)
+        zab_fail(z, "PREVIEW_DIR_FAILED", true, "the build succeeded but the "
+                 "preview directory could not be created", dir);
+    return ok;
+}
+
 /* The pasteable PREVIEW command: the built image, then its origin app's
- * compiled-in preview arguments (a capture path inside the copy). */
+ * compiled-in preview arguments (a capture path in the build store). */
 static bool zab_preview_cmd(const struct app_launch_preview *p,
                             const char *image, char *cmd, size_t cap)
 {
@@ -389,7 +408,13 @@ static void zab_preview_hint(struct zab *z, const char *image)
         ZCL_PACKAGE_COPY_FOUND)
         return;
     zcl_package_copy_name_base(release.name, base);
-    if (!app_launch_preview(base, z->copy_dir, &p) ||
+    char pdir[ZAB_PATH], pfile[96];
+    struct app_launch_preview probe;
+    if (!app_launch_preview(base, "/", &probe))
+        return; /* no preview row: nothing to offer, nothing to create */
+    if (!zab_preview_target(z, image, pdir, sizeof(pdir), pfile,
+                            sizeof(pfile)) ||
+        !app_launch_preview_as(base, pdir, pfile, &p) ||
         !zab_preview_cmd(&p, image, cmd, sizeof(cmd)))
         return;
     struct json_value argv;
