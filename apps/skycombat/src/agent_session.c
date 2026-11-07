@@ -369,6 +369,15 @@ static void sky_agent_probe(const Image *image, struct sky_agent_capture *captur
     capture->probe_ok = true;
 }
 
+/* Map the probe point from the full-size frame onto the encoded PNG. */
+static void sky_agent_probe_place(struct sky_agent_capture *capture, int full_width,
+                                  int full_height)
+{
+    if (!capture->probe_ok || capture->error) return;
+    capture->probe_out_x = (int)((int64_t)capture->probe_x * capture->width / full_width);
+    capture->probe_out_y = (int)((int64_t)capture->probe_y * capture->height / full_height);
+}
+
 void sky_agent_capture_frame(struct sky_agent_capture *capture)
 {
     int width = GetRenderWidth(), height = GetRenderHeight();
@@ -385,10 +394,7 @@ void sky_agent_capture_frame(struct sky_agent_capture *capture)
     int full_width = image.width, full_height = image.height;
     if (shape && capture->probe_want) sky_agent_probe(&image, capture);
     if (shape && sky_agent_resize(&image)) sky_agent_encode(&image, capture);
-    if (capture->probe_ok && !capture->error && full_width > 0 && full_height > 0) {
-        capture->probe_out_x = (int)((int64_t)capture->probe_x * capture->width / full_width);
-        capture->probe_out_y = (int)((int64_t)capture->probe_y * capture->height / full_height);
-    }
+    sky_agent_probe_place(capture, full_width, full_height);
     UnloadImage(image);
     if (capture->error) { free(capture->png); capture->png = NULL; capture->size = 0; }
 }
