@@ -164,6 +164,24 @@ static int aj_b(struct aj_world *w)
     return failures;
 }
 
+/* "A sends an update": A edits, saves and shares v2 in the same ISO week,
+ * and B (whose book already counts A's v1 publish) opens it. The receive is
+ * the friend's deliberate step on a file, so the weekly allowance does not
+ * refuse it; B ends with A's v2 image. */
+static int aj_update(struct aj_world *w)
+{
+    int failures = 0;
+    TEST("app journey update: A shares v2 in the same week and B opens it") {
+        ASSERT(asf_replace(w->j.a_copy, "src/main.c", "boost=2", "boost=3"));
+        ASSERT(asf_journey_save_build_open(&w->j));
+        ASSERT(asf_journey_share(&w->j));
+        ASSERT(strcmp(w->j.image_shared, w->j.image_b) != 0);
+        ASSERT(asf_journey_receive(&w->j));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_app_journey(void);
 int test_app_journey(void)
 {
@@ -183,6 +201,8 @@ int test_app_journey(void)
     printf("app journey: A typed %d commands (copy, save, build, open, "
            "share), B typed %d (open FILE.z23share); 0 hex pastes, 0 JSON "
            "inputs\n", w.j.commands_a, w.j.commands_b);
+    if (!failures)
+        failures += aj_update(&w);
     if (w.saved_cwd[0] && chdir(w.saved_cwd) != 0)
         printf("  [could not return to %s]\n", w.saved_cwd);
     if (w.saved_home[0])

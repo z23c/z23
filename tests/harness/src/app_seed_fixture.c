@@ -411,9 +411,10 @@ bool asf_journey_save_build_open(struct asf_journey *j)
     return strlen(j->image_built) == 64 && stopped;
 }
 
-/* A's key published exactly twice (seed and share), both in this ISO week
- * and both recorded: the day is pinned by assertion, not injected. */
-static bool asf_journey_week(const struct asf_journey *j)
+/* A's key published 1 + shares times (the seed and each share), all in
+ * this ISO week
+ * and recorded: the day is pinned by assertion, not injected. */
+static bool asf_journey_week(const struct asf_journey *j, unsigned want)
 {
     char key[800], zdir[800];
     uint8_t pub[VCS_PACKAGE_RELEASE_PUBKEY_BYTES];
@@ -428,10 +429,10 @@ static bool asf_journey_week(const struct asf_journey *j)
     bool ok = plugin_dist_release_key_sign(key, NULL, pub, NULL, &why) ==
                   PLUGIN_DIST_OK &&
               book && vcs_service_key_totals(book, pub, today, &kt) &&
-              kt.publish_events == 2u && kt.publishes_this_week == 2u;
+              kt.publish_events == want && kt.publishes_this_week == want;
     printf("  [A's key on day %lld: %u publishes this ISO week, %u in all "
-           "(want 2 and 2: seed and share)]\n", (long long)today,
-           kt.publishes_this_week, kt.publish_events);
+           "(want %u and %u: seed and each share)]\n", (long long)today,
+           kt.publishes_this_week, kt.publish_events, want, want);
     vcs_service_book_free(book);
     return ok;
 }
@@ -463,7 +464,8 @@ bool asf_journey_share(struct asf_journey *j)
     if (!file || !fingerprint)
         printf("  [share: %s written=%d, fingerprint shown=%d]\n%s", j->share,
                file, fingerprint, run.text);
-    return file && fingerprint && asf_journey_week(j) &&
+    return file && fingerprint &&
+           asf_journey_week(j, 1u + (unsigned)++j->shares) &&
            asf_journey_image(j->a_home, j->copy, j->a_datadir,
                              j->image_shared, j->path_shared,
                              sizeof(j->path_shared));

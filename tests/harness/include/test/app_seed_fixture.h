@@ -109,6 +109,7 @@ struct asf_journey {
     char image_b[65];      /* B's build of the received file */
     char path_shared[1300], path_b[1300];
     int commands_a, commands_b;
+    int shares; /* shares A has made so far */
 };
 /* root is an existing scratch directory; source the checkout A copies in. */
 bool asf_journey_init(struct asf_journey *j, const char *app,
