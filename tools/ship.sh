@@ -444,6 +444,9 @@ ship_refuse_dev_artifact() {
 # existing preflight refusal, because rebuilding it there would hide drift
 # instead of surfacing it.
 #
+# The suite must not inherit the canonical-deployment authorization.
+ship_run_test_suite() { env -u ZCL_DEPLOY_ALLOW_CANONICAL make test-parallel; }
+
 # $SHIP_MAKE is the make invocation, indirected so the selftest can substitute
 # a recording fake instead of running a real build.
 SHIP_MAKE="${SHIP_MAKE:-make -s}"
@@ -771,6 +774,11 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     ship_is_proof_host node3
     test_tmp="$(mktemp -d "$(ship_scratch_root)/z23-ship-selftest.XXXXXX")"
     trap 'find "$test_tmp" -depth -delete' EXIT HUP INT TERM
+    mkdir "$test_tmp/suite-bin"
+    printf '#!/bin/sh\n[ "$1" = test-parallel ] && [ "${ZCL_DEPLOY_ALLOW_CANONICAL+x}" != x ]\n' > "$test_tmp/suite-bin/make"
+    chmod 700 "$test_tmp/suite-bin/make"
+    ( export ZCL_DEPLOY_ALLOW_CANONICAL=1; PATH="$test_tmp/suite-bin:$PATH" ship_run_test_suite; [ "$ZCL_DEPLOY_ALLOW_CANONICAL" = 1 ] )
+
     printf '#!/bin/sh\nprintf '\''%%s\\n'\'' '\''{"data":{"values":{"tor":{"tor_build":"real_tor"}}}}'\''\n' > "$test_tmp/real"
     printf '#!/bin/sh\nprintf '\''%%s\\n'\'' '\''{"data":{"values":{"tor":{"tor_build":"stub_tor"}}}}'\''\n' > "$test_tmp/stub"
     printf '#!/bin/sh\nsed -n '\''s/.*"tor_build":"\\([^"]*\\)".*/\\1/p'\''\n' > "$test_tmp/jsonq"
@@ -1379,7 +1387,7 @@ else
     make lint >/dev/null || die "make lint failed"
     say "gate       make test-parallel"
     suite_log="$(mktemp "$(ship_scratch_root)/zclassic23.ship.suite-log.XXXXXX")"
-    make test-parallel >"$suite_log" 2>&1 || true
+    ship_run_test_suite >"$suite_log" 2>&1 || true
     # A failing gate costs ~25 minutes to produce. Deleting its log on the way
     # out spends that again on the next run: the five lines a `grep | head -5`
     # can show are rarely the ones that name the cause, and a group that dies
