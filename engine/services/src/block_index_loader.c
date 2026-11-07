@@ -13,6 +13,9 @@
 #include "platform/time_compat.h"
 #include "platform/read_mapping.h"
 #include "services/block_index_loader.h"
+#include "services/island_anchor.h"
+#include "storage/blocks_mmap_reader.h"
+#include "core/serialize.h"
 #include "block_index_flat_internal.h"
 #include "services/block_index_flat_anchor.h"
 #include "services/block_row_verify.h"
@@ -637,10 +640,11 @@ static bool bil_flat_allocation_sizes_valid(size_t count)
            count <= SIZE_MAX / sizeof(struct block_index *);
 }
 
-struct zcl_result load_block_index_flat(const char *datadir, struct main_state *ms)
+static struct zcl_result bil_flat_load(const char *datadir, struct main_state *ms,
+                                       size_t max_entries, bool publish_identity)
 {
     /* A failed or legacy load cannot inherit a verified snapshot identity. */
-    block_index_flat_identity_forget();
+    if (publish_identity) block_index_flat_identity_forget();
     int fd;
     size_t file_size;
     struct platform_read_mapping mapping;
@@ -657,6 +661,10 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
         return result;
     }
     uint32_t count = input.count;
+    if ((size_t)count > max_entries) {
+        flat_read_mapping_close(&mapping, fd);
+        return ZCL_ERR(-12, "block_index_flat: %u entries exceed budget %zu", count, max_entries);
+    }
     if (!bil_flat_allocation_sizes_valid(count)) {
         flat_read_mapping_close(&mapping, fd);
         return ZCL_ERR(-10, "block_index_flat: allocation size overflow (%u entries)",
@@ -712,11 +720,28 @@ finish:
     int64_t elapsed = (int64_t)platform_time_wall_time_t() - t0;
     LOG_INFO("block_index_flat", "Block index flat: loaded %u entries in %llds",
              count, (long long)elapsed);
-    if (input.have_identity) {
+    if (publish_identity && input.have_identity) {
         input.identity.row_count = count;
         block_index_flat_identity_remember(datadir, &input.identity);
     }
     return result;
+}
+
+struct zcl_result load_block_index_flat_bounded(const char *datadir, struct main_state *ms,
+                                                size_t max_entries)
+{
+    return bil_flat_load(datadir, ms, max_entries, true);
+}
+
+static struct zcl_result load_block_index_flat_archive(const char *datadir, struct main_state *ms,
+                                                size_t max_entries)
+{
+    return bil_flat_load(datadir, ms, max_entries, false);
+}
+
+struct zcl_result load_block_index_flat(const char *datadir, struct main_state *ms)
+{
+    return load_block_index_flat_bounded(datadir, ms, SIZE_MAX);
 }
 
 /* save_block_index_recent() / load_block_index_sqlite() — the SQLite
@@ -838,3 +863,123 @@ struct zcl_result load_block_index(struct main_state *ms,
     free(sorted);
     return ZCL_OK;
 }
+static bool bha_header(struct blocks_mmap *reader, const struct block_index *row,
+                       struct block_header *header)
+{
+    size_t len = 0;
+    if (!row || !row->phashBlock || row->nFile < 0) return false;
+    const uint8_t *payload = bmr_get_payload(reader, row->nFile, row->nDataPos, &len);
+    if (!payload) return false;
+    struct byte_stream stream;
+    stream_init_from_data(&stream, payload, len);
+    block_header_init(header);
+    if (!block_header_deserialize(header, &stream)) return false;
+    struct uint256 hash;
+    block_header_get_hash(header, &hash);
+    return uint256_eq(&hash, row->phashBlock) && header->nVersion == row->nVersion &&
+        header->nTime == row->nTime && header->nBits == row->nBits &&
+        uint256_eq(&header->hashFinalSaplingRoot, &row->hashFinalSaplingRoot);
+}
+
+static bool bha_row_valid(struct main_state *state, struct blocks_mmap *reader,
+                          struct block_index *row, int32_t height, struct block_header *header)
+{
+    return row && row->nHeight == height && row->phashBlock &&
+        block_map_find(&state->map_block_index, row->phashBlock) == row && bha_header(reader, row, header);
+}
+
+static bool bha_link_valid(const struct block_index *row, const struct block_header *header,
+                           int32_t height, const struct uint256 *genesis)
+{
+    if (height == 0)
+        return !row->pprev && uint256_eq(row->phashBlock, genesis) && uint256_is_null(&header->hashPrevBlock);
+    return row->pprev && row->pprev->phashBlock &&
+        uint256_eq(&header->hashPrevBlock, row->pprev->phashBlock);
+}
+
+static bool bha_chain(struct main_state *state, struct blocks_mmap *reader,
+                      struct block_index *tip, int32_t height, const struct uint256 *genesis,
+                      struct block_header *top_window)
+{
+    struct block_index *row = tip;
+    for (int32_t h = height; h >= 0; h--) {
+        struct block_header header;
+        if (!bha_row_valid(state, reader, row, h, &header) ||
+            !bha_link_valid(row, &header, h, genesis)) {
+            LOG_WARN("block_index_flat", "history archive header or ancestry invalid at height %d", (int)h);
+            return false;
+        }
+        if (height - h < ISLAND_ANCHOR_WINDOW) {
+            if (!block_index_set_hdrext(row, &header.hashMerkleRoot, &header.nNonce,
+                                        header.nSolution, header.nSolutionSize)) {
+                LOG_WARN("block_index_flat", "history archive header extension failed at height %d", (int)h);
+                return false;
+            }
+            if (top_window) top_window[height - h] = header;
+        }
+        if (h == 0) return true;
+        row = row->pprev;
+    }
+    return false;
+}
+
+static bool bha_input_valid(const struct main_state *state, const char *dir, size_t max_entries,
+                            int32_t height, const uint8_t *hash, const struct uint256 *genesis,
+                            const struct block_header *window)
+{
+    return state && dir && dir[0] && hash && genesis && height >= 0 && max_entries > 0 &&
+        (size_t)height < max_entries && (!window || height >= ISLAND_ANCHOR_WINDOW - 1) &&
+        !state->map_block_index.size && !state->pindex_best_header &&
+        active_chain_cached_height(&state->chain_active) < 0;
+}
+
+static struct zcl_result bha_open(struct main_state *state,
+    const char *archive_dir, size_t max_entries, int32_t endpoint_height,
+    const uint8_t endpoint_hash[32], const struct uint256 *genesis, struct block_header *top_window)
+{
+    if (top_window) memset(top_window, 0, ISLAND_ANCHOR_WINDOW * sizeof(*top_window));
+    if (!bha_input_valid(state, archive_dir, max_entries, endpoint_height, endpoint_hash, genesis, top_window))
+        return ZCL_ERR(-1, "history archive: invalid input or nonempty state");
+    struct zcl_result loaded = load_block_index_flat_archive(archive_dir, state, max_entries);
+    if (!loaded.ok) return loaded;
+    char path[4096];
+    int n = snprintf(path, sizeof(path), "%s/blocks", archive_dir);
+    struct blocks_mmap *reader = NULL;
+    if (n < 0 || (size_t)n >= sizeof(path) || !bmr_open(path, &reader))
+        return ZCL_ERR(-2, "history archive: cannot open block directory");
+    struct uint256 hash; memcpy(hash.data, endpoint_hash, sizeof(hash.data));
+    struct block_index *tip = block_map_find(&state->map_block_index, &hash);
+    bool valid = bha_chain(state, reader, tip, endpoint_height, genesis, top_window);
+    bmr_close(reader);
+    if (!valid) {
+        if (top_window) memset(top_window, 0, ISLAND_ANCHOR_WINDOW * sizeof(*top_window));
+        return ZCL_ERR(-3, "history archive: header ancestry invalid or unavailable");
+    }
+    if (!active_chain_move_window_tip(&state->chain_active, tip)) {
+        if (top_window) memset(top_window, 0, ISLAND_ANCHOR_WINDOW * sizeof(*top_window));
+        return ZCL_ERR(-4, "history archive: active-chain selection refused");
+    }
+    state->pindex_best_header = tip;
+    return ZCL_OK;
+}
+
+struct zcl_result block_index_history_archive_open(struct main_state *state,
+    const char *archive_dir, size_t max_entries, int32_t endpoint_height,
+    const uint8_t endpoint_hash[32], struct block_header *top_window)
+{
+    const struct chain_params *params = chain_params_get();
+    if (!params) {
+        if (top_window) memset(top_window, 0, ISLAND_ANCHOR_WINDOW * sizeof(*top_window));
+        return ZCL_ERR(-1, "history archive: network unavailable");
+    }
+    return bha_open(state, archive_dir, max_entries, endpoint_height, endpoint_hash,
+                    &params->consensus.hashGenesisBlock, top_window);
+}
+#ifdef ZCL_TESTING
+struct zcl_result block_index_history_archive_test_open(struct main_state *state,
+    const char *archive_dir, size_t max_entries, int32_t endpoint_height,
+    const uint8_t endpoint_hash[32], const struct uint256 *genesis, struct block_header *top_window)
+{
+    return bha_open(state, archive_dir, max_entries, endpoint_height, endpoint_hash, genesis, top_window);
+}
+#endif

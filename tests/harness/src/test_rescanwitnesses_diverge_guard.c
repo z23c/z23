@@ -8,10 +8,12 @@
 #include "test/test_core.h"
 #include "controllers/wallet_rescan_controller_internal.h"
 #include "storage/anchor_kv.h"
+#include "storage/progress_store.h"
 #include "config/db_service.h"
 #include "config/runtime.h"
 
 #include <sqlite3.h>
+#include <sys/stat.h>
 #include <string.h>
 #ifndef _WIN32
 #include <sys/wait.h>
@@ -239,6 +241,16 @@ static bool witness_failstop_fixture(void)
 }
 #endif
 
+static bool archive_empty_paths(struct wallet_rpc_context *ctx,
+    const struct wallet_witness_endpoint *endpoint, struct wallet_witness_outcome *out)
+{
+    char too_long[4096]; memset(too_long, 120, sizeof(too_long)); too_long[sizeof(too_long) - 1] = 0;
+    return !wallet_rescan_witnesses_at_archive(ctx, endpoint, NULL, out) &&
+        !wallet_rescan_witnesses_at_archive(ctx, endpoint, "", out) &&
+        !wallet_rescan_witnesses_at_archive(ctx, endpoint, too_long, out) &&
+        wallet_rescan_witnesses_at_archive(ctx, endpoint, ctx->datadir, out);
+}
+
 static bool rescan_fixture_empty(struct wallet_rpc_context *ctx, struct node_db *db,
                                   const struct db_sapling_note *note)
 {
@@ -247,6 +259,7 @@ static bool rescan_fixture_empty(struct wallet_rpc_context *ctx, struct node_db 
     const struct block_index *tip = active_chain_at(&ctx->main_state->chain_active, 1);
     if (!tip || !tip->phashBlock) return false;
     struct wallet_witness_endpoint endpoint = {.height = 1, .hash = *tip->phashBlock, .root = tip->hashFinalSaplingRoot};
+    if (!archive_empty_paths(ctx, &endpoint, &out)) return false;
     endpoint.hash.data[0] ^= 1;
     bool ok = !wallet_rescan_witnesses_at(ctx, &endpoint, &out) && out.status == WALLET_WITNESS_ENDPOINT_CHANGED;
     endpoint.hash.data[0] ^= 1; endpoint.root.data[0] ^= 1;
@@ -281,6 +294,53 @@ static bool rescan_fixture_empty_and_refusal(struct wallet_rpc_context *ctx,
            rescan_fixture_note_endpoint_refusal(ctx, db, note);
 }
 
+bool rescan_test_resolve_archive(const struct wallet_rpc_context *, const char *, char *, size_t);
+bool rescan_test_replay_archive(const struct wallet_rpc_context *, int, int, const char *, size_t *);
+
+static bool archive_fixture_write(const char *dir, const uint8_t *cm)
+{
+    char blocks[320], file[384];
+    snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
+    snprintf(file, sizeof(file), "%s/blk00000.dat", blocks);
+    struct block body;
+    build_sapling_body_with_one_commitment(&body);
+    struct byte_stream wire;
+    stream_init(&wire, 2048);
+    bool ok = body.vtx && body.vtx[0].v_shielded_output;
+    if (ok && cm) memcpy(body.vtx[0].v_shielded_output[0].cm.data, cm, 32);
+    if (ok) ok = block_serialize(&body, &wire) && mkdir(blocks, 0700) == 0;
+    FILE *f = ok ? fopen(file, "wb") : NULL;
+    if (!f) ok = false;
+    if (f) {
+        if (fwrite(wire.data, 1, wire.size, f) != wire.size) ok = false;
+        if (fclose(f) != 0) ok = false;
+    }
+    stream_free(&wire);
+    block_free(&body);
+    return ok;
+}
+
+static bool archive_body_fixture(const struct wallet_rpc_context *ctx, struct block_index *tip)
+{
+    char dir[256], selected[256];
+    test_make_tmpdir(dir, sizeof(dir), "wallet", "witness_archive");
+    bool ok = archive_fixture_write(dir, NULL);
+    struct uint256 old_root = tip->hashFinalSaplingRoot;
+    int old_file = tip->nFile;
+    unsigned int old_pos = tip->nDataPos;
+    tip->hashFinalSaplingRoot = test_root(0x91);
+    tip->nFile = 0; tip->nDataPos = 0;
+    size_t count = 0;
+    if (ok) ok = rescan_test_resolve_archive(ctx, dir, selected, sizeof(selected)) &&
+        strcmp(selected, dir) == 0 && strcmp(selected, ctx->datadir) != 0 &&
+        !rescan_test_replay_archive(ctx, 1, 1, ctx->datadir, NULL) &&
+        rescan_test_replay_archive(ctx, 1, 1, dir, &count) && count == 1;
+    tip->hashFinalSaplingRoot = old_root;
+    tip->nFile = old_file; tip->nDataPos = old_pos;
+    return test_rm_rf_recursive(dir) == 0 && ok;
+}
+
+
 static bool rescan_fixture_replay(const struct wallet_rpc_context *ctx, struct block_index *tip)
 {
     bool ok = true;
@@ -292,6 +352,83 @@ static bool rescan_fixture_replay(const struct wallet_rpc_context *ctx, struct b
     if (ok) ok = rescan_test_replay(ctx, 1, 1);
     tip->hashFinalSaplingRoot = saved_root;
     if (ok) ok = !rescan_test_replay(ctx, 1, 1);
+    return ok;
+}
+
+static bool archive_witness_loaded(struct node_db *db, const struct db_sapling_note *note,
+                                   const struct uint256 *expected)
+{
+    uint8_t *blob = NULL; size_t len = 0; int height = -1;
+    bool ok = db_sapling_note_load_witness(db, note->txid, note->output_index,
+                                           &blob, &len, &height) && blob && height == 1;
+    struct incremental_merkle_tree empty;
+    sapling_tree_init(&empty);
+    struct incremental_witness witness;
+    struct byte_stream stream;
+    if (ok) {
+        stream_init_from_data(&stream, blob, len);
+        ok = incremental_witness_deserialize(&witness, &stream,
+            SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH, empty.combine, empty.uncommitted);
+    }
+    if (ok) {
+        struct uint256 root;
+        incremental_witness_root(&witness, &root);
+        ok = uint256_eq(&root, expected);
+    }
+    free(blob);
+    return ok;
+}
+
+static bool archive_public_verify(struct wallet_rpc_context *ctx,
+    const struct wallet_witness_endpoint *endpoint, const struct db_sapling_note *note,
+    const char *dir)
+{
+    struct wallet_witness_outcome out;
+    bool ok = !wallet_rescan_witnesses_at_archive(ctx, endpoint, ctx->datadir, &out) &&
+        out.status != WALLET_WITNESS_COMPLETE;
+    uint8_t *blob = NULL; size_t len = 0; int height = -1;
+    if (ok) ok = !db_sapling_note_load_witness(ctx->node_db, note->txid, note->output_index,
+                                                &blob, &len, &height);
+    free(blob);
+    if (ok) ok = wallet_rescan_witnesses_at_archive(ctx, endpoint, dir, &out) &&
+        out.status == WALLET_WITNESS_COMPLETE && out.notes_total == 1 &&
+        out.witnesses_built == 1 && out.witnesses_saved == 1 && out.endpoint_height == 1 &&
+        archive_witness_loaded(ctx->node_db, note, &endpoint->root);
+    return ok;
+}
+
+static bool archive_public_witness_fixture(struct wallet_rpc_context *ctx,
+    struct block_index *tip, const struct db_sapling_note *note)
+{
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "wallet", "witness_public_archive");
+    bool ok = archive_fixture_write(dir, note->cm);
+    int old_file = tip->nFile; unsigned int old_pos = tip->nDataPos;
+    tip->nFile = 0; tip->nDataPos = 0;
+    struct chain_params *params = (struct chain_params *)chain_params_get();
+    int old_activation = params->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight;
+    params->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight = 1;
+    bool progress_open = progress_store_open(dir);
+    if (ok) ok = progress_open && db_sapling_note_clear_witness(ctx->node_db, note->txid, note->output_index);
+    struct wallet_witness_endpoint endpoint = {.height = 1, .hash = *tip->phashBlock,
+        .root = tip->hashFinalSaplingRoot};
+    if (ok) ok = archive_public_verify(ctx, &endpoint, note, dir);
+    if (progress_open) progress_store_close();
+    params->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight = old_activation;
+    tip->nFile = old_file; tip->nDataPos = old_pos;
+    return test_rm_rf_recursive(dir) == 0 && ok;
+}
+
+static bool rescan_fixture_cases(struct wallet_rpc_context *ctx, struct block_index *tip,
+    const struct db_sapling_note *note, const struct incremental_merkle_tree *tree,
+    const struct incremental_witness *witness, const struct uint256 *root)
+{
+    bool ok = rescan_fixture_replay(ctx, tip);
+    if (ok) ok = archive_body_fixture(ctx, tip);
+    if (ok) ok = rescan_fixture_empty_and_refusal(ctx, ctx->node_db, note);
+    bool active = true;
+    if (ok) ok = rescan_commit_exercise(ctx, tree, witness, &active, note, tip, root);
+    if (ok) ok = archive_public_witness_fixture(ctx, tip, note);
     return ok;
 }
 
@@ -335,10 +472,7 @@ static bool rescan_commit_fixture(void)
     tip.hashFinalSaplingRoot = root;
     ok = ok && active_chain_install_tip_slot(&ms.chain_active, &tip);
     struct wallet_rpc_context ctx = {.wallet = wallet, .main_state = &ms, .node_db = &db, .datadir = dir};
-    if (ok) ok = rescan_fixture_replay(&ctx, &tip);
-    if (ok) ok = rescan_fixture_empty_and_refusal(&ctx, &db, &note);
-    bool active = true;
-    if (ok) ok = rescan_commit_exercise(&ctx, &tree, &witness, &active, &note, &tip, &root);
+    if (ok) ok = rescan_fixture_cases(&ctx, &tip, &note, &tree, &witness, &root);
     app_runtime_set_current(NULL);
     if (started) db_service_stop(&svc);
     if (wallet) { wallet_free(wallet); free(wallet); }

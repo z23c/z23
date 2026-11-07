@@ -22,6 +22,7 @@
 #include "storage/coins_kv.h"
 #include "wallet/wallet_sqlite.h"
 #include "wallet/wallet.h"
+#include "controllers/wallet_rescan_controller.h"
 #include "models/database.h"
 #include "storage/progress_store.h"
 #include "storage/txdb.h"
@@ -1390,6 +1391,22 @@ static bool bp_pending_stores_case(bool block_second_open)
 #endif
 
 #if !defined(_WIN32)
+bool boot_test_pending_history_open(const struct app_context *,
+    const struct wallet_witness_endpoint *);
+
+static bool bp_pending_history_refusals(void)
+{
+    char dir[256], archive[320];
+    test_make_tmpdir(dir, sizeof(dir), "boot_phase", "pending-history");
+    snprintf(archive, sizeof(archive), "%s/wallet-history", dir);
+    struct app_context ctx = {.datadir = dir};
+    struct wallet_witness_endpoint endpoint = {.height = 28};
+    endpoint.hash.data[0] = 1;
+    bool ok = !boot_test_pending_history_open(&ctx, &endpoint) &&
+        mkdir(archive, 0700) == 0 && !boot_test_pending_history_open(&ctx, &endpoint);
+    return test_rm_rf_recursive(dir) == 0 && ok;
+}
+
 static bool bp_pending_modes(void)
 {
     struct app_context ctx = {0};
@@ -1445,6 +1462,7 @@ int test_boot_phase(void)
     int failures = 0;
 #if !defined(_WIN32)
     BP_CHECK("pending startup refuses maintenance modes", bp_pending_modes());
+    BP_CHECK("pending history rejects missing or invalid archive", bp_pending_history_refusals());
     BP_CHECK("pending runtime stores persist and reopen", bp_pending_stores_case(false));
     BP_CHECK("pending block-tree failure closes coins view", bp_pending_stores_case(true));
 #endif

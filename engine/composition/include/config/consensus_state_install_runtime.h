@@ -146,6 +146,12 @@ struct zcl_result consensus_state_install_from_bundle_guarded(
     const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
     struct consensus_state_install_runtime_result *out);
 
+/* Terminal caller must exit after this returns, including on refusal. */
+struct zcl_result consensus_state_install_from_bundle_terminal_guarded(
+    struct node_db *ndb, struct main_state *ms, const char *bundle_path,
+    const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
+    struct consensus_state_install_runtime_result *out);
+
 /* Zero-flag cold-boot orchestrator (Move 1b + 1c). Consults, in order:
  *   (1) the durable install-on-next-boot request (the Move 2 self-heal), then
  *   (2) an autodetected <datadir>/bundles/<name>.sqlite bundle,

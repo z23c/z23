@@ -17,6 +17,42 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef ZCL_TESTING
+static void (*g_bcp_before_final)(void *);
+static void *g_bcp_before_final_ctx;
+void boot_cutover_publish_test_before_final(void (*hook)(void *), void *ctx)
+{
+    g_bcp_before_final = hook;
+    g_bcp_before_final_ctx = ctx;
+}
+static void bcp_test_before_final(void)
+{
+    if (g_bcp_before_final) g_bcp_before_final(g_bcp_before_final_ctx);
+}
+#else
+static void bcp_test_before_final(void) { }
+#endif
+
+static bool bcp_lock_archive_chains(struct boot_cutover_replay *r)
+{
+    if (!r->canonical_state) return true;
+    struct main_state *archive = r->ctx->main_state;
+    if (!archive || archive == r->canonical_state ||
+        !zcl_mutex_trylock(&r->canonical_state->cs_main)) return false;
+    if (!zcl_mutex_trylock(&archive->cs_main)) {
+        zcl_mutex_unlock(&r->canonical_state->cs_main);
+        return false;
+    }
+    return true;
+}
+
+static void bcp_unlock_archive_chains(struct boot_cutover_replay *r)
+{
+    if (!r->canonical_state) return;
+    zcl_mutex_unlock(&r->ctx->main_state->cs_main);
+    zcl_mutex_unlock(&r->canonical_state->cs_main);
+}
+
 struct bcp_height { struct uint256 hash; int height; };
 struct bcp_context {
     struct boot_cutover_replay *replay;
@@ -97,6 +133,7 @@ static bool bcp_endpoint(void *opaque, int height, const uint8_t hash[32])
 {
     struct bcp_context *ctx = opaque;
     struct boot_cutover_replay *r = ctx->replay;
+    if (r->canonical_state && !boot_cutover_replay_archive_chains_current(r)) return false;
     struct block_index *tip = active_chain_tip(&r->ctx->main_state->chain_active);
     return tip && tip->phashBlock && height == r->endpoint.height && tip->nHeight == height &&
         !memcmp(hash, r->endpoint.hash.data, 32) && !memcmp(tip->phashBlock->data, hash, 32) &&
@@ -171,6 +208,7 @@ bool boot_wallet_cutover_publish(struct boot_cutover_replay *r,
 {
     if (!bcp_arguments(r, guard, snapshot, info, plan, delivery)) return false;
     if (!bcp_pool_known(snapshot, r->endpoint.height)) return false;
+    if (!bcp_lock_archive_chains(r)) return false;
     struct bcp_context ctx = {.replay = r, .guard = guard};
     bool ok = false;
     if (!bcp_endpoint(&ctx, r->endpoint.height, r->endpoint.hash.data)) goto done;
@@ -189,6 +227,7 @@ bool boot_wallet_cutover_publish(struct boot_cutover_replay *r,
         .project = db_wallet_utxo_cutover_project, .projection_ctx = &projection};
     memcpy(request.reference_hash, r->endpoint.hash.data, 32);
     memcpy(request.scan_identity, r->identity, 32);
+    bcp_test_before_final();
     struct node_db *db = r->ctx->node_db;
     sqlite3_mutex *mu = sqlite3_db_mutex(db->db);
     if (!mu || sqlite3_mutex_try(mu) != SQLITE_OK) goto done;
@@ -205,6 +244,7 @@ unlock:
 done:
     boot_cutover_coins_free(ctx.coins);
     free(ctx.heights);
+    bcp_unlock_archive_chains(r);
     return ok;
 }
 

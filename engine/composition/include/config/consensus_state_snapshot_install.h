@@ -280,7 +280,12 @@ bool consensus_state_snapshot_install(
  * COMMIT_OUTCOME_UNKNOWN terminal and points at the durable backup; it never
  * claims rollback. Returns true ONLY on a fully activated + verified install
  * (status ACTIVATED). */
+struct block_header;
+
 struct consensus_state_activate_request {
+    /* Optional borrowed top-first window, valid throughout the call. */
+    const struct block_header *island_window;
+    size_t island_window_count;
     const char *bundle_path;
     /* Mandatory exact artifact receipt from the ADMIT decision. Activation
      * reopens bundle_path, recomputes this descriptor/file/inode binding, and

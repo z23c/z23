@@ -1317,9 +1317,165 @@ static int fsi_case_window_commit_crash(void)
 }
 #endif
 
+/* The caller keeps ownership of transaction and progress-store lock. */
+static int fsi_intx_refusal_cases(struct fsi_node *n, const struct island_anchor_rows *rows)
+{
+    int failures = 0;
+    sqlite3 *db = progress_store_db(), *other = NULL;
+    FSI_CHECK("in-tx refuses autocommit", !island_anchor_install_window_in_tx(db, &n->a, rows, n->is.w).ok);
+    bool opened = sqlite3_open(":memory:", &other) == SQLITE_OK;
+    FSI_CHECK("in-tx refuses another connection", opened && sqlite3_exec(other, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK &&
+              !island_anchor_install_window_in_tx(other, &n->a, rows, n->is.w).ok);
+    if (other) { (void)sqlite3_exec(other, "ROLLBACK", NULL, NULL, NULL); sqlite3_close(other); }
+    static const char *const orphans[] = {"flysync.island_anchor.v1", "flysync.island_rows.v1", "flysync.island_window.v1", "flysync.island_state"};
+    for (size_t i = 0; i < sizeof(orphans) / sizeof(orphans[0]); i++) {
+        uint8_t junk = 0;
+        progress_store_tx_lock();
+        bool begun = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+        bool refused = begun && progress_meta_set_in_tx(db, orphans[i], &junk, 1) &&
+            !island_anchor_install_window_in_tx(db, &n->a, rows, n->is.w).ok && !sqlite3_get_autocommit(db);
+        bool rolled = begun && sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK;
+        progress_store_tx_unlock();
+        FSI_CHECK("in-tx refuses orphan or malformed state", refused && rolled);
+    }
+    return failures;
+}
+
+static int fsi_intx_rollback_case(struct fsi_node *n, const struct island_anchor_rows *rows)
+{
+    int failures = 0;
+    sqlite3 *db = progress_store_db();
+    progress_store_tx_lock();
+    bool begun = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+    bool wrote = begun && island_anchor_install_window_in_tx(db, &n->a, rows, n->is.w).ok;
+    bool retained = wrote && !sqlite3_get_autocommit(db) && !island_anchor_registered();
+    bool rolled = begun && sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK;
+    progress_store_tx_unlock();
+    FSI_CHECK("in-tx write retains transaction without RAM registration", retained);
+    struct island_anchor fact; struct island_anchor_rows reread; struct block_header window[FSI_W];
+    bool have_fact = false, have_rows = false, have_window = false;
+    FSI_CHECK("in-tx rollback removes all proof records", wrote && rolled &&
+              island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_NONE &&
+              island_anchor_load(db, &fact, &have_fact).ok && !have_fact &&
+              island_anchor_rows_load(db, &reread, &have_rows).ok && !have_rows &&
+              island_anchor_window_load(db, window, &have_window).ok && !have_window);
+    return failures;
+}
+
+static bool fsi_intx_fact_matches(const struct island_anchor *a, const struct island_anchor *b)
+{
+    return a->root_height == b->root_height && a->rung_height == b->rung_height &&
+        uint256_eq(&a->root_hash, &b->root_hash) && uint256_eq(&a->rung_hash, &b->rung_hash) &&
+        arith_uint256_compare(&a->root_work, &b->root_work) == 0;
+}
+
+static bool fsi_intx_headers_match(const struct block_header *window, const struct island_anchor_rows *rows)
+{
+    for (int i = 0; i < FSI_W; i++) {
+        struct uint256 hash;
+        block_header_get_hash(&window[i], &hash);
+        if (!uint256_eq(&hash, &rows->hash[FSI_W - 1 - i])) return false;
+    }
+    return true;
+}
+
+static bool fsi_intx_reload_proof(sqlite3 *db, struct fsi_node *n,
+                                  const struct island_anchor_rows *rows)
+{
+    struct island_anchor fact; struct island_anchor_rows reread; struct block_header window[FSI_W];
+    bool have_fact = false, have_rows = false, have_window = false;
+    bool exact = island_anchor_load(db, &fact, &have_fact).ok && have_fact &&
+        island_anchor_rows_load(db, &reread, &have_rows).ok && have_rows &&
+        island_anchor_window_load(db, window, &have_window).ok && have_window &&
+        island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_INSTALLED &&
+        !memcmp(&reread, rows, sizeof(*rows)) &&
+        fsi_intx_fact_matches(&fact, &n->a) && fsi_intx_headers_match(window, rows);
+    char why[160];
+    return exact && flysync_island_verify_window(window, FSI_W, FSI_RUNG_H, &fact, why, sizeof(why));
+}
+
+static int fsi_intx_commit_case(struct fsi_node *n, const struct island_anchor_rows *rows)
+{
+    int failures = 0;
+    sqlite3 *db = progress_store_db();
+    progress_store_tx_lock();
+    bool begun = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+    bool wrote = begun && island_anchor_install_window_in_tx(db, &n->a, rows, n->is.w).ok;
+    bool committed = wrote && sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    if (begun && !committed) (void)sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    progress_store_tx_unlock();
+    FSI_CHECK("in-tx commit reloads the full proof", committed && fsi_intx_reload_proof(db, n, rows));
+    progress_store_tx_lock();
+    begun = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+    bool existing = begun && !island_anchor_install_window_in_tx(db, &n->a, rows, n->is.w).ok;
+    bool rolled = begun && sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK;
+    progress_store_tx_unlock();
+    FSI_CHECK("in-tx refuses existing proof", existing && rolled);
+    return failures;
+}
+
+/* An activation-owned transaction either retains the whole proof or none. */
+static int fsi_case_window_in_tx(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    if (!fsi_node_open(&n, "flysync_window_in_tx")) {
+        FSI_CHECK("in-tx fixture opens", false);
+        fsi_node_close(&n);
+        return failures;
+    }
+    fsi_build_island(&n.is);
+    flysync_island_test_set_rung(&n.is.rung);
+    flysync_island_test_set_frozen_verifier(fsi_accept_all);
+    char why[160];
+    bool verified = flysync_island_verify_window(n.is.w, FSI_W, FSI_RUNG_H, &n.a, why, sizeof(why));
+    struct island_anchor_rows rows;
+    for (int i = 0; i < FSI_W; i++) block_header_get_hash(&n.is.w[FSI_W - 1 - i], &rows.hash[i]);
+    FSI_CHECK("in-tx fixture window verifies", verified);
+    if (verified) {
+        failures += fsi_intx_refusal_cases(&n, &rows);
+        failures += fsi_intx_rollback_case(&n, &rows);
+        failures += fsi_intx_commit_case(&n, &rows);
+    }
+    fsi_node_close(&n);
+    return failures;
+}
+
+static int fsi_case_terminal_prepare(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    if (!fsi_node_open(&n, "terminal_prepare")) return 1;
+    fsi_build_island(&n.is);
+    flysync_island_test_set_rung(&n.is.rung);
+    flysync_island_test_set_frozen_verifier(fsi_accept_all);
+    struct block_index *old = n.ms.pindex_best_header;
+    struct fsi_island bad = n.is;
+    bad.w[5].nNonce.data[3] ^= 0x40;
+    size_t count = n.ms.map_block_index.size;
+    FSI_CHECK("terminal preparation refuses invalid proof without insertion",
+              !flysync_island_prepare_terminal_window(&n.ms, bad.w, FSI_W, FSI_RUNG_H) &&
+              n.ms.map_block_index.size == count);
+    struct block_index *top = flysync_island_prepare_terminal_window(&n.ms, n.is.w, FSI_W, FSI_RUNG_H);
+    FSI_CHECK("terminal preparation inserts verified rows without selecting or registering",
+              top && n.ms.pindex_best_header == old && active_chain_tip(&n.ms.chain_active) == old &&
+              !island_anchor_registered());
+    struct block_index *saved_parent = top ? top->pprev : NULL;
+    count = n.ms.map_block_index.size;
+    FSI_CHECK("terminal preparation refuses existing rows without changing parent",
+              top && !flysync_island_prepare_terminal_window(&n.ms, n.is.w, FSI_W, FSI_RUNG_H) &&
+              top->pprev == saved_parent && n.ms.map_block_index.size == count);
+    struct block_header window[FSI_W]; bool found = false;
+    FSI_CHECK("terminal preparation does not persist a window",
+              island_anchor_window_load(progress_store_db(), window, &found).ok && !found);
+    fsi_node_close(&n);
+    return failures;
+}
+
 int test_flysync_island(void)
 {
     int failures = 0;
+    failures += fsi_case_window_in_tx();
 #if !defined(_WIN32) && defined(ZCL_TESTING)
     failures += fsi_case_window_commit_crash();
 #endif
@@ -1327,6 +1483,7 @@ int test_flysync_island(void)
     failures += fsi_case_window_args_and_single_mode();
     failures += fsi_case_hold_and_services();
     failures += fsi_case_verify_window();
+    failures += fsi_case_terminal_prepare();
     failures += fsi_case_island();
     failures += fsi_case_boot_gate();
     failures += fsi_case_offer_filter();

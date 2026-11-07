@@ -685,14 +685,30 @@ static int rescan_sapling_activation_height(void)
  * (<base>/regtest on regtest, ==base on mainnet). The wallet context owns
  * the base directory for backups and databases, so resolve the body root
  * explicitly instead of accidentally decoding a same-offset base file. */
-static void rescan_resolve_block_datadir(const struct wallet_rpc_context *ctx,
+static bool rescan_resolve_block_datadir(const struct wallet_rpc_context *ctx,
+                                         const char *archive_dir,
                                          char *block_datadir,
                                          size_t block_datadir_size)
 {
+    if (archive_dir) {
+        size_t len = strlen(archive_dir);
+        if (!len || len >= block_datadir_size) return false;
+        memcpy(block_datadir, archive_dir, len + 1);
+        return true;
+    }
     GetDataDir(true, block_datadir, block_datadir_size);
     if (!block_datadir[0])
         (void)snprintf(block_datadir, block_datadir_size, "%s", ctx->datadir);
+    return true;
 }
+
+#ifdef ZCL_TESTING
+bool rescan_test_resolve_archive(const struct wallet_rpc_context *ctx, const char *dir,
+                                 char *out, size_t size)
+{
+    return dir && rescan_resolve_block_datadir(ctx, dir, out, size);
+}
+#endif
 
 /* Replay blocks [sapling_start, safe_tip] into the tree and per-note
  * witnesses: skip blocks whose header root is zero or unchanged, decode each
@@ -799,7 +815,8 @@ static bool rescan_replay_blocks(const struct wallet_rpc_context *ctx,
 }
 
 #ifdef ZCL_TESTING
-bool rescan_test_replay(const struct wallet_rpc_context *ctx, int start, int end)
+bool rescan_test_replay_archive(const struct wallet_rpc_context *ctx, int start, int end,
+                                const char *archive_dir, size_t *count)
 {
     struct incremental_merkle_tree tree;
     sapling_tree_init(&tree);
@@ -808,14 +825,41 @@ bool rescan_test_replay(const struct wallet_rpc_context *ctx, int start, int end
     bool active = false;
     int blocks = 0, built = 0;
     size_t commitments = 0;
-    return rescan_replay_blocks(ctx, ctx->datadir, start, end, &tree, &witness,
-                                &active, &note, 0, 0, &blocks, &commitments, &built);
+    char path[4096];
+    if (!archive_dir || !rescan_resolve_block_datadir(ctx, archive_dir, path, sizeof(path))) return false;
+    bool ok = rescan_replay_blocks(ctx, path, start, end, &tree, &witness,
+                                   &active, &note, 0, 0, &blocks, &commitments, &built);
+    if (count) *count = commitments;
+    return ok;
+}
+
+bool rescan_test_replay(const struct wallet_rpc_context *ctx, int start, int end)
+{
+    return rescan_test_replay_archive(ctx, start, end, ctx->datadir, NULL);
 }
 #endif
 
+static bool rescan_prepare_replay_resources(struct wallet_rpc_context *ctx,
+    struct json_value *result, const char *archive_dir, int n_notes,
+    struct db_sapling_note *notes, struct incremental_witness **witnesses,
+    bool **witness_active, char *block_datadir, size_t datadir_size)
+{
+    *witnesses = zcl_calloc((size_t)n_notes, sizeof(**witnesses), "rescan witnesses");
+    *witness_active = zcl_calloc((size_t)n_notes, sizeof(**witness_active), "rescan witness active");
+    if (!*witnesses || !*witness_active) {
+        json_set_str(result, "Out of memory building witness arrays");
+    } else if (rescan_resolve_block_datadir(ctx, archive_dir, block_datadir, datadir_size)) {
+        return true;
+    }
+    free(*witnesses); free(*witness_active); free(notes);
+    extern _Atomic bool g_sapling_rescan_active;
+    atomic_store(&g_sapling_rescan_active, false);
+    return false;
+}
+
 static bool rescan_witnesses_with_context(struct wallet_rpc_context *ctx,
     struct json_value *result, struct wallet_witness_outcome *out,
-    const struct wallet_witness_endpoint *expected)
+    const struct wallet_witness_endpoint *expected, const char *archive_dir)
 {
     memset(out, 0, sizeof(*out));
     out->endpoint_height = -1;
@@ -878,24 +922,15 @@ static bool rescan_witnesses_with_context(struct wallet_rpc_context *ctx,
                  "oldest unspent note h=%d", seed_height, sapling_start);
     }
 
-    struct incremental_witness *witnesses = zcl_calloc((size_t)n_notes,
-        sizeof(struct incremental_witness), "rescan witnesses");
-    bool *witness_active = zcl_calloc((size_t)n_notes, sizeof(bool), "rescan witness active");
-    if (!witnesses || !witness_active) {
-        /* zcl_calloc already logged the OOM. Match the function's existing
-         * cleanup convention (see the diverged-tree refusal path): free all
-         * three arrays, release the global rescan latch, and fail the RPC. */
-        free(witnesses);
-        free(witness_active);
-        free(notes);
-        atomic_store(&g_sapling_rescan_active, false);
-        json_set_str(result, "Out of memory building witness arrays");
+    struct incremental_witness *witnesses = NULL;
+    bool *witness_active = NULL;
+    char block_datadir[4096];
+    if (!rescan_prepare_replay_resources(ctx, result, archive_dir, n_notes, notes,
+            &witnesses, &witness_active, block_datadir, sizeof(block_datadir))) {
+        LOG_WARN("wallet", "witness replay resources or archive path unavailable");
         return false;
     }
     int witnesses_built = 0;
-
-    char block_datadir[4096];
-    rescan_resolve_block_datadir(ctx, block_datadir, sizeof(block_datadir));
 
     int64_t t0_ms = platform_time_monotonic_ms();
     int64_t t_start = (int64_t)platform_time_wall_time_t();
@@ -1029,7 +1064,22 @@ bool wallet_rescan_witnesses_at(struct wallet_rpc_context *ctx,
     out->endpoint_height = -1;
     if (!endpoint) return false;
     struct json_value result; json_init(&result);
-    bool ok = rescan_witnesses_with_context(ctx, &result, out, endpoint);
+    bool ok = rescan_witnesses_with_context(ctx, &result, out, endpoint, NULL);
+    json_free(&result);
+    return ok;
+}
+
+bool wallet_rescan_witnesses_at_archive(struct wallet_rpc_context *ctx,
+    const struct wallet_witness_endpoint *endpoint, const char *archive_dir,
+    struct wallet_witness_outcome *out)
+{
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    out->endpoint_height = -1;
+    if (!endpoint || !archive_dir || !archive_dir[0] ||
+        strlen(archive_dir) >= 4096 - sizeof("/blocks/blk00000.dat")) return false;
+    struct json_value result; json_init(&result);
+    bool ok = rescan_witnesses_with_context(ctx, &result, out, endpoint, archive_dir);
     json_free(&result);
     return ok;
 }
@@ -1040,7 +1090,7 @@ bool wallet_rescan_witnesses_context(struct wallet_rpc_context *ctx,
     if (!out) return false;
     struct json_value result;
     json_init(&result);
-    bool ok = rescan_witnesses_with_context(ctx, &result, out, NULL);
+    bool ok = rescan_witnesses_with_context(ctx, &result, out, NULL, NULL);
     json_free(&result);
     return ok;
 }
@@ -1058,7 +1108,7 @@ bool wallet_rescan_witnesses(const struct json_value *params, bool help,
         "Rebuild Sapling Merkle witnesses for all unspent shielded notes.\n"
         "Required before spending z→z or z→t. Replays the commitment tree\n"
         "from the Sapling activation height to tip.");
-    return rescan_witnesses_with_context(wallet_ctx(), result, out, NULL);
+    return rescan_witnesses_with_context(wallet_ctx(), result, out, NULL, NULL);
 }
 
 bool rpc_rescanwitnesses(const struct json_value *params, bool help,

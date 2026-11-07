@@ -30,6 +30,11 @@ struct wallet_witness_outcome {
 bool wallet_rescan_witnesses_at(struct wallet_rpc_context *ctx,
     const struct wallet_witness_endpoint *endpoint, struct wallet_witness_outcome *out);
 
+/* Explicit immutable archive body directory; never uses the ambient datadir. */
+bool wallet_rescan_witnesses_at_archive(struct wallet_rpc_context *ctx,
+    const struct wallet_witness_endpoint *endpoint, const char *archive_dir,
+    struct wallet_witness_outcome *out);
+
 void register_wallet_rescan_rpc_commands(struct rpc_table *t);
 
 /* Serialize a rescan's coverage + yield accounting into `out` (set to an

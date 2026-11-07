@@ -264,17 +264,73 @@ static void (*g_window_commit_hook)(bool);
 void island_anchor_test_commit_hook(void (*hook)(bool)) { g_window_commit_hook = hook; }
 #endif
 
+/* Caller owns the progress-store lock and write transaction. */
+static bool ia_meta_equal_in_tx(sqlite3 *db, const char *key, const void *expected, size_t length)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool ok = sqlite3_prepare_v2(db, "SELECT value FROM progress_meta WHERE key=?1", -1, &stmt, NULL) == SQLITE_OK && stmt &&
+        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC) == SQLITE_OK &&
+        ar_step_checked(stmt, "island in-tx readback", NULL) == ZCL_STEP_ROW;
+    if (ok) {
+        bool blob = sqlite3_column_type(stmt, 0) == SQLITE_BLOB;
+        const void *bytes = blob ? sqlite3_column_blob(stmt, 0) : NULL;
+        ok = blob && bytes &&
+            (size_t)sqlite3_column_bytes(stmt, 0) == length && !memcmp(bytes, expected, length) &&
+            ar_step_checked(stmt, "island in-tx readback completion", NULL) == ZCL_STEP_DONE;
+    }
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    return ok;
+}
+
 static bool ia_write_window_records(sqlite3 *db, const uint8_t fact[IA_FACT_LEN],
-    const struct island_anchor_rows *rows, const struct byte_stream *window, const uint8_t *state)
+    const struct island_anchor_rows *rows, const struct byte_stream *window, const uint8_t *state,
+    bool (*check)(sqlite3 *, const char *, const void *, size_t))
 {
     return progress_meta_set_in_tx(db, IA_FACT_KEY, fact, IA_FACT_LEN) &&
         progress_meta_set_in_tx(db, IA_ROWS_KEY, rows->hash, sizeof(rows->hash)) &&
         progress_meta_set_in_tx(db, IA_WINDOW_KEY, window->data, window->size) &&
         progress_meta_set_in_tx(db, IA_STATE_KEY, state, 1) &&
-        ia_meta_equal(db, IA_FACT_KEY, fact, IA_FACT_LEN) &&
-        ia_meta_equal(db, IA_ROWS_KEY, rows->hash, sizeof(rows->hash)) &&
-        ia_meta_equal(db, IA_WINDOW_KEY, window->data, window->size) &&
-        ia_meta_equal(db, IA_STATE_KEY, state, 1);
+        check(db, IA_FACT_KEY, fact, IA_FACT_LEN) &&
+        check(db, IA_ROWS_KEY, rows->hash, sizeof(rows->hash)) &&
+        check(db, IA_WINDOW_KEY, window->data, window->size) &&
+        check(db, IA_STATE_KEY, state, 1);
+}
+
+/* Require complete absence, including malformed or orphaned records. */
+static bool ia_window_records_absent(sqlite3 *db)
+{
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT 1 FROM progress_meta WHERE key IN (?1,?2,?3,?4) LIMIT 1";
+    bool ok = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK && stmt &&
+        sqlite3_bind_text(stmt, 1, IA_FACT_KEY, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_text(stmt, 2, IA_ROWS_KEY, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_text(stmt, 3, IA_WINDOW_KEY, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_text(stmt, 4, IA_STATE_KEY, -1, SQLITE_STATIC) == SQLITE_OK;
+    if (ok) ok = ar_step_checked(stmt, "island records absence", NULL) == ZCL_STEP_DONE;
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+struct zcl_result island_anchor_install_window_in_tx(sqlite3 *db,
+    const struct island_anchor *a, const struct island_anchor_rows *rows,
+    const struct block_header *window)
+{
+    if (!db || db != progress_store_db() || sqlite3_get_autocommit(db) ||
+        sqlite3_txn_state(db, "main") != SQLITE_TXN_WRITE ||
+        !ia_valid(a) || !ia_rows_match(a, rows) || !window)
+        return ZCL_ERR(-1, "island window in-tx save: invalid transaction or input");
+    if (!ia_window_records_absent(db))
+        return ZCL_ERR(-2, "island window in-tx save: state exists or is unreadable");
+    struct byte_stream encoded = {0};
+    if (!ia_encode_window(window, &encoded)) {
+        stream_free(&encoded);
+        return ZCL_ERR(-3, "island window in-tx encode failed");
+    }
+    uint8_t fact[IA_FACT_LEN]; ia_encode(a, fact);
+    uint8_t state = (uint8_t)ISLAND_ANCHOR_STATE_INSTALLED;
+    bool ok = ia_write_window_records(db, fact, rows, &encoded, &state, ia_meta_equal_in_tx);
+    stream_free(&encoded);
+    return ok ? ZCL_OK : ZCL_ERR(-4, "island window in-tx write or readback failed");
 }
 
 static bool ia_save_window_tx(sqlite3 *db, const struct island_anchor *a,
@@ -283,7 +339,7 @@ static bool ia_save_window_tx(sqlite3 *db, const struct island_anchor *a,
     uint8_t fact[IA_FACT_LEN]; ia_encode(a, fact);
     uint8_t state = (uint8_t)ISLAND_ANCHOR_STATE_SEEDED;
     if (!ia_exec(db, "BEGIN IMMEDIATE")) return false;
-    bool wrote = ia_write_window_records(db, fact, rows, window, &state);
+    bool wrote = ia_write_window_records(db, fact, rows, window, &state, ia_meta_equal);
 #ifdef ZCL_TESTING
     if (wrote && g_window_commit_hook) g_window_commit_hook(false);
 #endif

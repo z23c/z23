@@ -1,3 +1,3 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Source-owned capabilities for pending wallet cutover startup. */
-ZCL_MODULE_CAPABILITY("engine/composition/src/boot_wallet_cutover_startup.c", CAP_FS_READ, "Opens the datadir to inspect checkpoint recovery state.")
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_wallet_cutover_startup.c", CAP_FS_READ|CAP_FS_WRITE, "Reads checkpoint recovery state and reports allocation failures on stderr.")

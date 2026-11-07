@@ -40,10 +40,13 @@ static void rom_test_rederive_root(const struct rom_state_checkpoint *cp,
                                    uint8_t out[32])
 {
     static const char domain[] = "zcl.rom_state_checkpoint.v1/root";
+    static const char domain_v2[] = "zcl.rom_state_checkpoint.v2/root";
     struct sha3_256_ctx c;
     sha3_256_init(&c);
-    sha3_256_write(&c, (const unsigned char *)domain,
-                   sizeof(domain)); /* trailing NUL included */
+    if (cp->format_version == ROM_STATE_CHECKPOINT_V2)
+        sha3_256_write(&c, (const unsigned char *)domain_v2, sizeof(domain_v2));
+    else
+        sha3_256_write(&c, (const unsigned char *)domain, sizeof(domain));
     rom_test_u64le(&c, (uint64_t)cp->height);
     sha3_256_write(&c, cp->block_hash, 32);
     sha3_256_write(&c, cp->utxo_root, 32);
@@ -57,6 +60,10 @@ static void rom_test_rederive_root(const struct rom_state_checkpoint *cp,
     rom_test_u64le(&c, (uint64_t)cp->sapling_frontier_height);
     sha3_256_write(&c, cp->nullifier_digest, 32);
     rom_test_u64le(&c, cp->nullifier_count);
+    if (cp->format_version == ROM_STATE_CHECKPOINT_V2) {
+        rom_test_u64le(&c, (uint64_t)cp->sprout_pool_total);
+        rom_test_u64le(&c, (uint64_t)cp->sapling_pool_total);
+    }
     sha3_256_finalize(&c, out);
 }
 
@@ -79,9 +86,9 @@ static int rom_test_rung_table_and_root(void)
         "000000000000000000000000000000000000000000000000000b33f21b074f27";
     uint8_t w[32], re[32];
     const struct rom_state_rung *rg = get_rom_state_rung_at(0);
-    RUNG_CHECK("rung table holds exactly the 3200000 rung",
-               get_rom_state_rung_count() == 1 && rg != NULL &&
-               get_rom_state_rung_at(1) == NULL && rg->cp.height == 3200000);
+    RUNG_CHECK("rung table starts with the 3200000 rung",
+               get_rom_state_rung_count() == 2 && rg != NULL &&
+               get_rom_state_rung_at(2) == NULL && rg->cp.height == 3200000);
     if (!rg)
         return failures + 1;
     rom_test_rederive_root(&rg->cp, re);
@@ -143,10 +150,77 @@ static int rom_test_rung_lookup(void)
     return failures;
 }
 
+static bool rom_test_hex_matches(const uint8_t actual[32], const char *hex)
+{
+    uint8_t expected[32];
+    return zcl_hex_decode(hex, expected, sizeof(expected)) &&
+           memcmp(actual, expected, sizeof(expected)) == 0;
+}
+
+static int rom_test_v2_scalars(const struct rom_state_rung *r)
+{
+    int failures = 0;
+    RUNG_CHECK("V2 rung scalars match exports", r->cp.format_version == ROM_STATE_CHECKPOINT_V2 &&
+        r->cp.utxo_count == 1341045 && r->cp.total_supply == 1046480137187853LL &&
+        r->cp.anchor_count == 645895 && r->cp.nullifier_count == 1510229 &&
+        r->cp.sprout_frontier_height == 2124937 && r->cp.sapling_frontier_height == 3309876 &&
+        r->cp.sprout_pool_total == 1316412375709LL && r->cp.sapling_pool_total == 3212475963678LL);
+    return failures;
+}
+
+static int rom_test_v2_hashes(const struct rom_state_rung *r)
+{
+    int failures = 0;
+    RUNG_CHECK("V2 block_hash matches exports", rom_test_hex_matches(r->cp.block_hash,
+        "df87a8bd62bb41573e036de91ebd867ef639883e330250571c99fe7bba0b0000"));
+    RUNG_CHECK("V2 utxo_root matches exports", rom_test_hex_matches(r->cp.utxo_root,
+        "d9a837177ee763afe25cb0e8181638dd5e3f66c79e59b02b4d7d8e59a2134056"));
+    RUNG_CHECK("V2 anchor_digest matches exports", rom_test_hex_matches(r->cp.anchor_digest,
+        "c85acd8f655306142cc140d1c8cdba6d38bdc9356cb02d3d3a1d873a6a6b6bf7"));
+    RUNG_CHECK("V2 sprout_frontier_root matches exports", rom_test_hex_matches(r->cp.sprout_frontier_root,
+        "fcc3621e37d169757a6e1763dbdbf5adeb9b01c824ae2f7200e980c0fe8a77f6"));
+    RUNG_CHECK("V2 sapling_frontier_root matches exports", rom_test_hex_matches(r->cp.sapling_frontier_root,
+        "ca4312925f1c62887f344159b90de10656c774d5e5a675ee3eddd6acf483543b"));
+    RUNG_CHECK("V2 nullifier_digest matches exports", rom_test_hex_matches(r->cp.nullifier_digest,
+        "1f4a970198bdb88cf48383378c90e90aba17c1f91a9bb9fb54b15526b82885b4"));
+    RUNG_CHECK("V2 rom_state_root matches exports", rom_test_hex_matches(r->cp.rom_state_root,
+        "629271f1ce0cb26c035dca76ee1d65d1cc0421628df0261b8078ea6103284ae0"));
+    RUNG_CHECK("V2 chainwork matches export", rom_test_hex_matches(r->chainwork,
+        "000000000000000000000000000000000000000000000000000b340dee819cf1"));
+    return failures;
+}
+
+static int rom_test_v2_digest(const struct rom_state_rung *r)
+{
+    int failures = 0;
+    uint8_t root[32];
+    rom_test_rederive_root(&r->cp, root);
+    RUNG_CHECK("V2 root independently re-derives", memcmp(root, r->cp.rom_state_root, 32) == 0);
+    struct checkpoint_rung artifact;
+    bool derived = checkpoint_rung_from_rom_checkpoint(&r->cp, r->chainwork, &artifact);
+    RUNG_CHECK("V2 self digest matches export", derived && checkpoint_rung_self_consistent(&artifact) &&
+        rom_test_hex_matches(artifact.self_digest,
+            "ce5b144c54bf67e5e18b46532b7956fbd78a49fd0e8026f8f49f1af0273581b5"));
+    return failures;
+}
+
+static int rom_test_v2_rung(void)
+{
+    int failures = 0;
+    const struct rom_state_rung *previous = get_rom_state_rung_at(0);
+    const struct rom_state_rung *r = get_rom_state_rung_at(1);
+    RUNG_CHECK("V2 rung exists at 3309900", previous && r && r->cp.height == 3309900 &&
+        get_baked_rom_state_checkpoint_at_height(3309900) == &r->cp &&
+        previous->cp.height < r->cp.height);
+    if (!r) return failures + 1;
+    return failures + rom_test_v2_scalars(r) + rom_test_v2_hashes(r) +
+           rom_test_v2_digest(r);
+}
+
 static int rom_test_ladder_rung(void)
 {
     return rom_test_rung_table_and_root() + rom_test_rung_scalars_and_digest() +
-           rom_test_rung_lookup();
+           rom_test_rung_lookup() + rom_test_v2_rung();
 }
 #undef RUNG_CHECK
 

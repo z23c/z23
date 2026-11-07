@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capabilities for wallet-preserving bundle installation. */
+ZCL_MODULE_CAPABILITY("engine/composition/src/consensus_state_install_terminal.c", CAP_FS_READ|CAP_FS_WRITE, "Reads private wallet history; allocation failures write diagnostics to stderr.")

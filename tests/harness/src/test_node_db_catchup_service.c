@@ -3443,15 +3443,110 @@ static bool ndc_publish_delivery_acknowledged(const struct db_wallet_utxo_cutove
         (delivery->count == 0 && !delivery->committed);
 }
 
+void boot_cutover_publish_test_before_final(void (*hook)(void *), void *ctx);
+static void ndc_archive_mutate_canonical(void *opaque)
+{
+    struct block_index *tip = opaque;
+    tip->hashFinalSaplingRoot.data[0] ^= 1;
+}
+
+struct ndc_archive_lock_holder {
+    struct main_state *state;
+    pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    bool held, release;
+};
+
+static void *ndc_archive_hold_chain(void *opaque)
+{
+    struct ndc_archive_lock_holder *holder = opaque;
+    zcl_mutex_lock(&holder->state->cs_main);
+    pthread_mutex_lock(&holder->mutex);
+    holder->held = true;
+    pthread_cond_signal(&holder->changed);
+    while (!holder->release) pthread_cond_wait(&holder->changed, &holder->mutex);
+    pthread_mutex_unlock(&holder->mutex);
+    zcl_mutex_unlock(&holder->state->cs_main);
+    return NULL;
+}
+
+static bool ndc_archive_contended_publish(struct boot_cutover_replay *replay,
+    struct ndc_publish_case *c, struct main_state *state)
+{
+    struct ndc_archive_lock_holder holder = {.state = state};
+    if (pthread_mutex_init(&holder.mutex, NULL) != 0) return false;
+    if (pthread_cond_init(&holder.changed, NULL) != 0) {
+        pthread_mutex_destroy(&holder.mutex);
+        return false;
+    }
+    pthread_t thread;
+    bool started = pthread_create(&thread, NULL, ndc_archive_hold_chain, &holder) == 0;
+    bool refused = false;
+    if (started) {
+        pthread_mutex_lock(&holder.mutex);
+        while (!holder.held) pthread_cond_wait(&holder.changed, &holder.mutex);
+        pthread_mutex_unlock(&holder.mutex);
+        refused = !boot_wallet_cutover_publish_guarded(replay, c->relay, &c->delivery);
+        pthread_mutex_lock(&holder.mutex);
+        holder.release = true;
+        pthread_cond_signal(&holder.changed);
+        pthread_mutex_unlock(&holder.mutex);
+        if (pthread_join(thread, NULL) != 0) refused = false;
+    }
+    pthread_cond_destroy(&holder.changed);
+    pthread_mutex_destroy(&holder.mutex);
+    return started && refused;
+}
+
+static bool ndc_archive_lock_refusals(struct boot_cutover_replay *replay,
+    struct wallet_sqlite *ws, struct ndc_publish_case *c)
+{
+    struct main_state *states[] = {replay->canonical_state, replay->ctx->main_state};
+    for (size_t i = 0; i < 2; i++) {
+        bool refused = ndc_archive_contended_publish(replay, c, states[i]);
+        struct wallet_cutover_binding binding;
+        if (!refused || wallet_readiness_get(replay->ctx->wallet).state != WALLET_READINESS_PENDING ||
+            wallet_sqlite_cutover_read(ws, &binding) != WALLET_CUTOVER_PENDING ||
+            c->delivery.armed || c->delivery.committed) return false;
+    }
+    return true;
+}
+
+static bool ndc_archive_canonical_drift(struct boot_cutover_replay *replay,
+    struct wallet_sqlite *ws, struct ndc_publish_case *c)
+{
+    if (!replay->canonical_state) return false;
+    struct block_index *tip = active_chain_tip(&replay->canonical_state->chain_active);
+    if (!tip) return false;
+    boot_cutover_publish_test_before_final(ndc_archive_mutate_canonical, tip);
+    struct wallet_cutover_binding binding;
+    bool refused = !boot_wallet_cutover_publish_guarded(replay, c->relay, &c->delivery) &&
+        wallet_readiness_get(replay->ctx->wallet).state == WALLET_READINESS_PENDING &&
+        wallet_sqlite_cutover_read(ws, &binding) == WALLET_CUTOVER_PENDING &&
+        !c->delivery.armed && !c->delivery.committed;
+    boot_cutover_publish_test_before_final(NULL, NULL);
+    tip->hashFinalSaplingRoot.data[0] ^= 1;
+    return refused;
+}
+
+static bool ndc_publish_wrong_generation(struct ndc_replay_fixture *f,
+    struct boot_cutover_replay *replay, struct wallet_sqlite *ws, struct ndc_publish_case *c)
+{
+    struct wallet_cutover_binding binding;
+    struct coins_kv_read_snapshot_info wrong = c->info; wrong.authority_generation++;
+    return !boot_wallet_cutover_publish(replay, &c->guard, c->snapshot, &wrong, &c->plan, &c->delivery) &&
+        wallet_readiness_get(f->wallet).state == WALLET_READINESS_PENDING &&
+        wallet_sqlite_cutover_read(ws, &binding) == WALLET_CUTOVER_PENDING;
+}
+
 static bool ndc_publish_assert(struct ndc_replay_fixture *f, struct boot_cutover_replay *replay,
     struct node_db *db, struct wallet_sqlite *ws, struct ndc_publish_case *c)
 {
     struct wallet_cutover_binding binding;
-    struct coins_kv_read_snapshot_info wrong = c->info; wrong.authority_generation++;
-    if (boot_wallet_cutover_publish(replay, &c->guard, c->snapshot, &wrong, &c->plan, &c->delivery) ||
-        wallet_readiness_get(f->wallet).state != WALLET_READINESS_PENDING ||
-        wallet_sqlite_cutover_read(ws, &binding) != WALLET_CUTOVER_PENDING) return false;
+    if (!ndc_publish_wrong_generation(f, replay, ws, c)) return false;
     if (!ndc_publish_pool(replay, ws, c)) return false;
+    if (replay->canonical_state && !ndc_archive_lock_refusals(replay, ws, c)) return false;
+    if (replay->canonical_state && !ndc_archive_canonical_drift(replay, ws, c)) return false;
     return boot_wallet_cutover_publish_guarded(replay, c->relay, &c->delivery) &&
         ndc_publish_delivery_acknowledged(&c->delivery) && ndc_publish_relay_released(c->relay) &&
         wallet_readiness_get(f->wallet).state == WALLET_READINESS_READY &&
@@ -3475,6 +3570,73 @@ static bool ndc_cutover_publish_real(struct ndc_replay_fixture *f,
     return ok;
 }
 
+static bool ndc_archive_canonical(struct ndc_replay_fixture *f,
+    struct main_state *canonical, struct block_index slots[3])
+{
+    main_state_init(canonical);
+    for (int i = 1; i < 3; i++) {
+        block_index_init(&slots[i]);
+        slots[i].nHeight = f->slots[i].nHeight;
+        slots[i].hashBlock = f->hashes[i];
+        slots[i].phashBlock = &slots[i].hashBlock;
+        slots[i].hashFinalSaplingRoot = f->slots[i].hashFinalSaplingRoot;
+        slots[i].pprev = i > 1 ? &slots[i - 1] : NULL;
+        if (!active_chain_install_tip_slot(&canonical->chain_active, &slots[i])) return false;
+    }
+    return true;
+}
+
+static bool ndc_archive_init_refusals(struct ndc_replay_fixture *f,
+    struct wallet_rpc_context *ctx, struct db_service *svc,
+    const struct wallet_cutover_binding *binding, const struct wallet_witness_endpoint *endpoint,
+    const uint8_t identity[32], struct main_state *canonical, char *archive)
+{
+    struct boot_cutover_replay bad;
+    char long_path[4096]; memset(long_path, 120, sizeof(long_path)); long_path[sizeof(long_path)-1] = 0;
+    bool ok = !boot_cutover_replay_init_archive(&bad, ctx, svc, binding, f->slots[1].nHeight, endpoint, identity, ctx->main_state, archive) &&
+        !boot_cutover_replay_init_archive(&bad, ctx, svc, binding, f->slots[1].nHeight, endpoint, identity, canonical, NULL) &&
+        !boot_cutover_replay_init_archive(&bad, ctx, svc, binding, f->slots[1].nHeight, endpoint, identity, canonical, "") &&
+        !boot_cutover_replay_init_archive(&bad, ctx, svc, binding, f->slots[1].nHeight, endpoint, identity, canonical, long_path);
+    archive[0] = 0;
+    return ok;
+}
+
+static bool ndc_replay_init_refusals(struct ndc_replay_fixture *f,
+    struct wallet_rpc_context *ctx, struct db_service *svc,
+    const struct wallet_cutover_binding *binding, const struct wallet_witness_endpoint *endpoint,
+    const uint8_t identity[32])
+{
+    uint8_t bad_identity[32];
+    memcpy(bad_identity, identity, 32); bad_identity[0] ^= 1;
+    struct boot_cutover_replay invalid;
+    if (boot_cutover_replay_init(&invalid, ctx, svc, binding, f->slots[1].nHeight, endpoint, bad_identity))
+        return false;
+    struct wallet_witness_endpoint bad_endpoint = *endpoint;
+    bad_endpoint.hash.data[0] ^= 1;
+    return !boot_cutover_replay_init(&invalid, ctx, svc, binding, f->slots[1].nHeight,
+                                      &bad_endpoint, identity);
+}
+
+static bool ndc_cutover_steps(struct ndc_replay_fixture *f,
+    struct boot_cutover_replay *r, struct wallet_rpc_context *ctx,
+    struct db_service *svc, struct node_db *db, struct wallet_sqlite *ws,
+    const struct wallet_cutover_binding *binding, const struct wallet_witness_endpoint *endpoint,
+    const uint8_t identity[32], struct main_state *canonical, char *archive, bool publish, bool ok)
+{
+    if (ok && publish) ok = ndc_archive_init_refusals(f, ctx, svc, binding, endpoint, identity, canonical, archive);
+    if (ok) ok = ndc_replay_init_refusals(f, ctx, svc, binding, endpoint, identity);
+    int saved_file = f->slots[1].nFile;
+    f->slots[1].nFile = -1;
+    if (ok) ok = boot_cutover_replay_step(r) == BOOT_CUTOVER_RETRY &&
+        r->phase == BOOT_CUTOVER_TRANSPARENT && r->next == f->slots[1].nHeight;
+    f->slots[1].nFile = saved_file;
+    if (ok) ok = ndc_cutover_complete(r, f->wallet, f->fresh_spend ? db : NULL);
+    if (ok) ok = publish ? ndc_cutover_publish_real(f, r, db, ws) :
+        ndc_cutover_invalidation(r, ctx, svc, binding, endpoint, identity);
+    return ok;
+}
+
+
 static bool ndc_cutover_coordinator(struct ndc_replay_fixture *f,
     struct db_service *svc, struct node_db *db, bool publish)
 {
@@ -3490,27 +3652,22 @@ static bool ndc_cutover_coordinator(struct ndc_replay_fixture *f,
     struct wallet_witness_endpoint endpoint = {.height = f->slots[2].nHeight, .hash = f->hashes[2], .root = f->root};
     uint8_t identity[32];
     struct boot_cutover_replay r;
-    bool ok = (!publish || wallet_sqlite_flush_r(&ws, f->wallet).ok) &&
+    struct main_state canonical = {0};
+    struct block_index canonical_slots[3];
+    bool canonical_ok = !publish || ndc_archive_canonical(f, &canonical, canonical_slots);
+    char decoy[512], archive[512];
+    snprintf(decoy, sizeof(decoy), "%s/missing", f->dir);
+    snprintf(archive, sizeof(archive), "%s", f->dir);
+    if (publish) ctx.datadir = decoy;
+    bool ok = canonical_ok && (!publish || wallet_sqlite_flush_r(&ws, f->wallet).ok) &&
         wallet_sqlite_cutover_prepare(&ws, f->wallet, &binding) &&
         wallet_scan_identity(f->wallet, identity) &&
-        boot_cutover_replay_init(&r, &ctx, svc, &binding, f->slots[1].nHeight, &endpoint, identity);
-    uint8_t bad_identity[32];
-    memcpy(bad_identity, identity, 32); bad_identity[0] ^= 1;
-    struct boot_cutover_replay invalid;
-    if (ok) ok = !boot_cutover_replay_init(&invalid, &ctx, svc, &binding, f->slots[1].nHeight,
-                                           &endpoint, bad_identity);
-    struct wallet_witness_endpoint bad_endpoint = endpoint;
-    bad_endpoint.hash.data[0] ^= 1;
-    if (ok) ok = !boot_cutover_replay_init(&invalid, &ctx, svc, &binding, f->slots[1].nHeight,
-                                           &bad_endpoint, identity);
-    int saved_file = f->slots[1].nFile;
-    f->slots[1].nFile = -1;
-    if (ok) ok = boot_cutover_replay_step(&r) == BOOT_CUTOVER_RETRY &&
-        r.phase == BOOT_CUTOVER_TRANSPARENT && r.next == f->slots[1].nHeight;
-    f->slots[1].nFile = saved_file;
-    if (ok) ok = ndc_cutover_complete(&r, f->wallet, f->fresh_spend ? db : NULL);
-    if (ok) ok = publish ? ndc_cutover_publish_real(f, &r, db, &ws) :
-        ndc_cutover_invalidation(&r, &ctx, svc, &binding, &endpoint, identity);
+        (publish ? boot_cutover_replay_init_archive(&r, &ctx, svc, &binding, f->slots[1].nHeight,
+                    &endpoint, identity, &canonical, archive) :
+                   boot_cutover_replay_init(&r, &ctx, svc, &binding, f->slots[1].nHeight, &endpoint, identity));
+    ok = ndc_cutover_steps(f, &r, &ctx, svc, db, &ws, &binding,
+                           &endpoint, identity, &canonical, archive, publish, ok);
+    if (publish) main_state_free(&canonical);
     wallet_sqlite_close(&ws);
     return ok;
 }

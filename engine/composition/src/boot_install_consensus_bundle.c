@@ -3,7 +3,7 @@
  * boot_install_consensus_bundle.c — the -install-consensus-bundle=PATH terminal
  * verb. TERMINAL — every path
  * _exit()s. The install pipeline itself is the NON-TERMINAL
- * boot_install_startup_bundle() wallet-preserving startup adapter. This wrapper
+ * boot_install_terminal_bundle() wallet-preserving terminal adapter. This wrapper
  * maps its returned result onto the verb's named terminal (INSTALLED + H*
  * reported, or a typed REFUSED) and _exit()s. Keeping the two apart lets the
  * same atomic installer run inside a live boot (the zero-flag autodetect + the
@@ -29,7 +29,7 @@ void boot_install_consensus_bundle(struct node_db *ndb, struct main_state *ms,
 {
     struct consensus_state_install_runtime_result rr;
     struct zcl_result r =
-        boot_install_startup_bundle(ndb, ms, bundle_path, datadir, &rr);
+        boot_install_terminal_bundle(ndb, ms, bundle_path, datadir, &rr);
 
     if (!r.ok) {
         /* The runtime core already LOG_WARN'd the reason with context; here we

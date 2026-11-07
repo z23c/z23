@@ -256,6 +256,16 @@ Z23_FLAG("ZCL_BLOCKER_RATE_LIMIT_MS", "env_runtime", "-", "-",
           "undocumented; first use platform/modules/util/src/blocker.c:auto")
 Z23_FLAG("ZCL_BLOCKER_REMEDY_SCAN_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_blocker_remedy.c:auto")
+Z23_FLAG("ZCL_BLOCK_INDEX_MEMORY_BYTES", "env_test", "-", "-",
+          "expected public index size for the isolated Android memory fixture; first use tests/harness/src/android_block_index_memory_fixture.h:auto")
+Z23_FLAG("ZCL_BLOCK_INDEX_MEMORY_DIR", "env_test", "-", "-",
+          "private scratch directory enabling the isolated Android index memory fixture; first use tests/harness/src/test_block_index_loader.c:auto")
+Z23_FLAG("ZCL_BLOCK_INDEX_MEMORY_HASH", "env_test", "-", "-",
+          "expected selected endpoint hash for the isolated Android index memory fixture; first use tests/harness/src/android_block_index_memory_fixture.h:auto")
+Z23_FLAG("ZCL_BLOCK_INDEX_MEMORY_HEIGHT", "env_test", "-", "-",
+          "expected selected endpoint height for the isolated Android index memory fixture; first use tests/harness/src/android_block_index_memory_fixture.h:auto")
+Z23_FLAG("ZCL_BLOCK_INDEX_MEMORY_ROWS", "env_test", "-", "-",
+          "expected public index row count for the isolated Android memory fixture; first use tests/harness/src/android_block_index_memory_fixture.h:auto")
 Z23_FLAG("ZCL_BLOCK_INDEX_PEAK_ROWS", "env_test", "140000", "-",
           "row count of the flat block-index fixture that bil_flat_boot_peak_case loads in a child process to report its peak-memory growth (default 140000); first use tests/harness/src/test_block_index_loader.c:auto")
 Z23_FLAG("ZCL_BLOCK_SCAN_WORKERS", "env_runtime", "-", "-",
@@ -1085,6 +1095,14 @@ Z23_FLAG("ZCL_HEX_CODEC_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_hex_codec_single.c:auto")
 Z23_FLAG("ZCL_HOOKS_STATUS_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/hooks_status.sh:auto")
+Z23_FLAG("ZCL_HISTORY_ARCHIVE_DIR", "env_test", "-", "-",
+          "private immutable public archive directory enabling the history archive probe; first use tests/harness/src/test_block_index_loader.c:auto")
+Z23_FLAG("ZCL_HISTORY_ARCHIVE_HASH", "env_test", "-", "-",
+          "expected endpoint hash for the history archive probe; first use tests/harness/src/test_block_index_loader.c:auto")
+Z23_FLAG("ZCL_HISTORY_ARCHIVE_HEIGHT", "env_test", "-", "-",
+          "expected endpoint height for the history archive probe; first use tests/harness/src/test_block_index_loader.c:auto")
+Z23_FLAG("ZCL_HISTORY_ARCHIVE_MAX_ROWS", "env_test", "-", "-",
+          "maximum index rows for the history archive probe; first use tests/harness/src/test_block_index_loader.c:auto")
 Z23_FLAG("ZCL_HOST_GC_BINBAK_MIN_AGE_D", "env_build", "60", "-",
           "days a ~/bin/*.bak-* quarantine backup survives; first use tools/scripts/host_gc.sh:auto")
 Z23_FLAG("ZCL_HOST_GC_CACHE_FREEZE_GB", "env_build", "100", "-",

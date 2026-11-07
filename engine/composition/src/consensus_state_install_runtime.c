@@ -45,8 +45,17 @@ struct zcl_result consensus_state_install_from_bundle_guarded(
     (void)ws; (void)wallet; (void)out;
     return ZCL_ERR(-1, "wallet cutover is not qualified on Windows");
 }
+struct zcl_result consensus_state_install_from_bundle_terminal_guarded(
+    struct node_db *ndb, struct main_state *ms, const char *bundle_path,
+    const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
+    struct consensus_state_install_runtime_result *out)
+{
+    return consensus_state_install_from_bundle_guarded(ndb, ms, bundle_path,
+                                                       datadir, ws, wallet, out);
+}
 #else
 #include "config/boot_datadir_lock.h"
+#include "consensus_state_install_terminal_internal.h"
 #include "config/boot_internal.h"
 #include "wallet/wallet_sqlite.h"
 #include "models/wallet_send_once.h"
@@ -759,7 +768,8 @@ static struct zcl_result icb_install_note_cutover_refusal(
 
 static struct zcl_result icb_install_admit_receipt(
     struct consensus_state_artifact_evidence **artifact, int dir_fd,
-    const char *bundle_path, struct main_state *ms,
+    const char *bundle_path, const char *datadir, struct main_state *ms,
+    struct icb_terminal_context *terminal,
     struct consensus_state_bundle_manifest *manifest,
     struct consensus_state_source_receipt *receipt,
     struct consensus_state_install_runtime_result *out)
@@ -772,7 +782,8 @@ static struct zcl_result icb_install_admit_receipt(
                        admitted.message);
     if (!consensus_state_artifact_evidence_manifest_copy(*artifact, manifest))
         return ZCL_ERR(-1, "artifact evidence became stale after admission");
-    struct zcl_result rc = ZCL_OK;
+    struct zcl_result rc = terminal ? icb_terminal_prepare(terminal, datadir, ms, manifest) : ZCL_OK;
+    if (!rc.ok) return rc;
     /* Every deferral path sets rc to a non-ok -2 (install_note_header_wait), so
      * returning it makes the caller take the same early exit as before. */
     if (install_defer_until_headers_ready(ms, manifest, out, &rc))
@@ -799,6 +810,7 @@ static struct zcl_result icb_install_admit_through_receipt(
     struct consensus_state_artifact_evidence **artifact,
     struct consensus_state_bundle_manifest *manifest,
     struct consensus_state_source_receipt *receipt,
+    struct icb_terminal_context *terminal,
     enum consensus_state_target_lane *lane,
     struct consensus_state_install_runtime_result *out)
 {
@@ -817,8 +829,8 @@ static struct zcl_result icb_install_admit_through_receipt(
     if (!rc.ok)
         return rc;
     *lane = icb_install_target_lane(canonical);
-    return icb_install_admit_receipt(artifact, *dir_fd, bundle_path, ms,
-                                     manifest, receipt, out);
+    return icb_install_admit_receipt(artifact, *dir_fd, bundle_path, datadir, ms,
+                                     terminal, manifest, receipt, out);
 }
 
 static void icb_install_prepare_chain_binding(
@@ -1159,6 +1171,7 @@ static struct zcl_result icb_install_activate_and_finish(
     bool used_checkpoint_authority, bool assisted_root_from_header,
     const uint8_t assisted_sapling_root[32],
     const struct wallet_cutover_binding *binding,
+    const struct icb_terminal_context *terminal,
     struct consensus_state_install_runtime_result *out)
 {
     /* (5) ADMIT — atomically install the complete state. */
@@ -1174,6 +1187,10 @@ static struct zcl_result icb_install_activate_and_finish(
         areq.check_old_generation = true;
         areq.old_generation_present = binding->old_generation_present;
         areq.old_generation = binding->old_generation;
+    }
+    if (terminal && terminal->prepared) {
+        areq.island_window = terminal->window;
+        areq.island_window_count = ISLAND_ANCHOR_WINDOW;
     }
     areq.datadir_fd = dir_fd;
     areq.datadir_display = datadir;
@@ -1232,6 +1249,7 @@ static struct zcl_result icb_install_commit_admitted(
     const struct consensus_state_publication_decision_record *decision,
     bool used_assisted_authority, bool used_checkpoint_authority,
     const struct icb_wallet_guard *guard,
+    const struct icb_terminal_context *terminal,
     struct consensus_state_install_runtime_result *out)
 {
     struct consensus_state_publication_decision_record durable_decision;
@@ -1259,7 +1277,7 @@ static struct zcl_result icb_install_commit_admitted(
             ndb, bundle_path, datadir, manifest, &durable_decision, dir_fd,
             checkpoint_root_from_header, checkpoint_sapling_root,
             used_assisted_authority, used_checkpoint_authority,
-            assisted_root_from_header, assisted_sapling_root, guard ? &binding : NULL, out);
+            assisted_root_from_header, assisted_sapling_root, guard ? &binding : NULL, terminal, out);
     }
     return rc;
 }
@@ -1273,10 +1291,11 @@ static void icb_install_release(struct consensus_state_artifact_evidence *artifa
         (void)close(dir_fd);
 }
 
-/* ── The NON-TERMINAL install core ─────────────────────────────────────────── */
+/* Shared install core; terminal preparation requires a caller that exits. */
 static struct zcl_result icb_install_from_bundle(
     struct node_db *ndb, struct main_state *ms, const char *bundle_path,
     const char *datadir, const struct icb_wallet_guard *guard,
+    struct icb_terminal_context *terminal,
     struct consensus_state_install_runtime_result *out)
 {
     struct consensus_state_install_runtime_result local;
@@ -1297,7 +1316,7 @@ static struct zcl_result icb_install_from_bundle(
     memset(&receipt, 0, sizeof(receipt));
     rc = icb_install_admit_through_receipt(
         bundle_path, datadir, ndb, ms, &dir_fd, &artifact,
-        &manifest, &receipt, &lane, out);
+        &manifest, &receipt, terminal, &lane, out);
     if (!rc.ok)
         goto done;
     /* (4) Gate through the publication CAS. Both the chain-evidence build and the
@@ -1382,7 +1401,7 @@ static struct zcl_result icb_install_from_bundle(
                  "(no checkpoint-content substitution)");
     rc = icb_install_commit_admitted(
         ndb, ms, &artifact, bundle_path, datadir, dir_fd, &manifest, &cas,
-        &decision, used_assisted_authority, used_checkpoint_authority, guard, out);
+        &decision, used_assisted_authority, used_checkpoint_authority, guard, terminal, out);
 done:
     icb_install_release(artifact, dir_fd);
     if (!rc.ok) {
@@ -1395,23 +1414,17 @@ struct zcl_result consensus_state_install_from_bundle(
     struct node_db *ndb, struct main_state *ms, const char *bundle_path,
     const char *datadir, struct consensus_state_install_runtime_result *out)
 {
-    return icb_install_from_bundle(ndb, ms, bundle_path, datadir, NULL, out);
+    return icb_install_from_bundle(ndb, ms, bundle_path, datadir, NULL, NULL, out);
 }
 
-struct zcl_result consensus_state_install_from_bundle_guarded(
+struct zcl_result icb_install_wallet_guarded(
     struct node_db *ndb, struct main_state *ms, const char *bundle_path,
     const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
+    struct icb_terminal_context *terminal,
     struct consensus_state_install_runtime_result *out)
 {
-    if (!boot_wallet_cutover_startup_context_matches(ndb, ws, wallet, ms)) {
-        if (out) {
-            memset(out, 0, sizeof(*out));
-            snprintf(out->reason, sizeof(out->reason), "wallet cutover requires the startup context");
-        }
-        return ZCL_ERR(-1, "wallet cutover requires the startup context");
-    }
     struct icb_wallet_guard guard = {.ws = ws, .wallet = wallet};
-    return icb_install_from_bundle(ndb, ms, bundle_path, datadir, &guard, out);
+    return icb_install_from_bundle(ndb, ms, bundle_path, datadir, &guard, terminal, out);
 }
 
 #ifdef ZCL_TESTING

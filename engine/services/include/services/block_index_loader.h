@@ -113,6 +113,28 @@ bool block_index_projection_bound_covers_tip(
  * Failed loads invalidate the verified flat identity. */
 struct zcl_result load_block_index_flat(const char *datadir, struct main_state *ms);
 
+/* Refuse a decoded count above max_entries before reserving the map or allocating rows. */
+struct zcl_result load_block_index_flat_bounded(const char *datadir, struct main_state *ms,
+                                                size_t max_entries);
+
+/* Caller owns an empty standalone state and keeps archive bytes immutable for
+ * this call and subsequent replay. Endpoint must already be admitted by the
+ * caller. Success proves hash-linked header ancestry, not PoW or state authority.
+ * Existing linkage guards may refuse selection and update counters. On failure
+ * discard the state; no active chain is published. When non-NULL, top_window
+ * holds 28 headers, cleared on refusal and newest first on success. */
+struct block_header;
+struct zcl_result block_index_history_archive_open(struct main_state *state,
+    const char *archive_dir, size_t max_entries, int32_t endpoint_height,
+    const uint8_t endpoint_hash[32], struct block_header *top_window);
+#ifdef ZCL_TESTING
+struct uint256;
+struct zcl_result block_index_history_archive_test_open(struct main_state *state,
+    const char *archive_dir, size_t max_entries, int32_t endpoint_height,
+    const uint8_t endpoint_hash[32], const struct uint256 *genesis, struct block_header *top_window);
+#endif
+
+
 /* Point-read one entry's block hash + sapling root straight from
  * block_index.bin WITHOUT
  * the full multi-million-entry arena load: mmap, embedded-integrity verify

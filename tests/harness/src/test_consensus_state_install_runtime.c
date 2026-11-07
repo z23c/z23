@@ -1360,6 +1360,46 @@ static int case_tip_finalize_failure_stops_boundary(void)
     return failures;
 }
 
+/* An invalid startup identity must refuse before opening the bundle or touching
+ * the live header map, even at the real cutover stage. */
+static void csir_terminal_context_child(void)
+{
+    struct node_db *node; struct wallet_sqlite *ws;
+    struct wallet *wallet; struct main_state *main;
+    boot_wallet_cutover_test_slots(&node, &ws, &wallet, &main);
+    main_state_init(main);
+    boot_stage_reset_for_testing();
+    for (int stage = BOOT_STAGE_DATADIR_LOCKED; stage <= BOOT_STAGE_BLOCK_INDEX_LOADED; ++stage)
+        boot_stage_advance_to((enum boot_stage)stage);
+    size_t before_size = main->map_block_index.size;
+    struct block_index *before_header = main->pindex_best_header;
+    struct block_index *before_tip = active_chain_tip(&main->chain_active);
+    struct consensus_state_install_runtime_result out;
+    struct zcl_result r = consensus_state_install_from_bundle_terminal_guarded(
+        node, main, "/nonexistent/bundle", "/nonexistent/datadir", ws, NULL, &out);
+    bool ok = !r.ok && out.owner_gate_refused && !out.state_installed &&
+        strstr(out.reason, "startup context") &&
+        main->map_block_index.size == before_size &&
+        main->pindex_best_header == before_header &&
+        active_chain_tip(&main->chain_active) == before_tip;
+    main_state_free(main);
+    _exit(ok ? 0 : 1);
+}
+
+static int case_terminal_context_refusal(void)
+{
+    int failures = 0;
+    fflush(NULL);
+    pid_t child = fork();
+    if (child == 0) csir_terminal_context_child();
+    int status = 0;
+    CSIR_CHECK("terminal install refuses wrong startup identity without mutation",
+        child > 0 && waitpid(child, &status, 0) == child &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    return failures;
+}
+
+
 extern int test_reducer_block_ingest_gate(void);
 extern void test_reducer_producer_target(const char *);
 
@@ -1398,6 +1438,7 @@ int test_consensus_state_install_runtime(void)
     failures += case_autodetect();
     failures += case_failed_marker_cleared_on_success();
     failures += case_runtime_returns();
+    failures += case_terminal_context_refusal();
     failures += case_durable_request();
     failures += case_post_install_fold_span_check();
     failures += case_post_install_drop_borrowed_have_data();

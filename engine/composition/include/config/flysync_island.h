@@ -125,6 +125,11 @@ bool flysync_island_verify_window(const struct block_header *w, int n,
                                   int32_t top_h, struct island_anchor *out,
                                   char *why, size_t why_cap);
 
+/* Startup-quiescent terminal install only. No selection, persistence or registration.
+ * Failure after insertion requires caller termination or discarding the map. */
+struct block_index *flysync_island_prepare_terminal_window(
+    struct main_state *ms, const struct block_header *w, int n, int32_t top_h);
+
 /* Insert a verified window as the island, persist it, record the fact. */
 bool flysync_island_seed(struct main_state *ms, const struct block_header *w,
                          int n, const struct island_anchor *a);

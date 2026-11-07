@@ -13,6 +13,7 @@
 #include "config/boot_internal.h"
 #include "config/boot_wallet_pending_restore.h"
 #include "config/boot_wallet_cutover_replay.h"
+#include "services/block_index_loader.h"
 #include "config/boot_wallet_cutover_publish.h"
 #include "controllers/wallet_private_broadcast.h"
 #include "services/wallet_private_relay.h"
@@ -324,9 +325,78 @@ bool boot_cutover_load_chain(struct boot_cutover_env *e, struct app_context *ctx
     return sysinit_run_stage(BOOT_STAGE_BLOCK_INDEX_LOADED, ctx).ok;
 }
 
+/* The archive is app-owned and its files must remain immutable while replay runs. */
+#define BOOT_WALLET_HISTORY_MAX_ROWS 3500000u
+struct boot_pending_history {
+    struct main_state *state;
+    uintptr_t directory;
+    bool directory_open;
+    char path[4096];
+};
+
+static void boot_pending_history_close(struct boot_pending_history *history)
+{
+    if (history->state) {
+        main_state_free(history->state);
+        free(history->state);
+    }
+    if (history->directory_open) platform_private_directory_close(history->directory);
+}
+
+#ifdef ZCL_TESTING
+typedef struct zcl_result (*boot_test_history_open_fn)(struct main_state *, const char *,
+    size_t, int32_t, const uint8_t[32], struct block_header *);
+static boot_test_history_open_fn g_boot_test_history_open;
+void boot_test_pending_history_set_open(boot_test_history_open_fn fn)
+{
+    g_boot_test_history_open = fn;
+}
+#endif
+
+static struct zcl_result boot_pending_history_load(struct main_state *state, const char *path,
+    const struct wallet_witness_endpoint *endpoint)
+{
+#ifdef ZCL_TESTING
+    if (g_boot_test_history_open)
+        return g_boot_test_history_open(state, path, BOOT_WALLET_HISTORY_MAX_ROWS,
+                                       endpoint->height, endpoint->hash.data, NULL);
+#endif
+    return block_index_history_archive_open(state, path, BOOT_WALLET_HISTORY_MAX_ROWS,
+                                             endpoint->height, endpoint->hash.data, NULL);
+}
+
+static bool boot_pending_history_open(struct boot_pending_history *history,
+    const struct app_context *ctx, const struct wallet_witness_endpoint *endpoint)
+{
+    if (!ctx || !ctx->datadir || !ctx->datadir[0] || !endpoint) return false;
+    int n = snprintf(history->path, sizeof(history->path), "%s/wallet-history", ctx->datadir);
+    if (n <= 0 || (size_t)n >= sizeof(history->path) - sizeof("/blocks/blk00000.dat") ||
+        !platform_private_directory_open_validated_traverse(history->path, &history->directory))
+        return false;
+    history->directory_open = true;
+    history->state = zcl_calloc(1, sizeof(*history->state), "wallet history archive state");
+    if (!history->state) return false;
+    main_state_init(history->state);
+    struct zcl_result loaded = boot_pending_history_load(history->state, history->path, endpoint);
+    if (!loaded.ok) LOG_WARN("wallet", "wallet history archive refused: %s", loaded.message);
+    return loaded.ok;
+}
+
+#ifdef ZCL_TESTING
+bool boot_test_pending_history_open(const struct app_context *ctx,
+    const struct wallet_witness_endpoint *endpoint)
+{
+    struct boot_pending_history history = {0};
+    bool ok = boot_pending_history_open(&history, ctx, endpoint);
+    boot_pending_history_close(&history);
+    return ok;
+}
+#endif
+
 /* Runs before network, reducer and wallet services can mutate the reference. */
 static bool boot_pending_replay_prepare(struct boot_cutover_env *e, struct app_context *ctx,
-    struct boot_cutover_replay *replay, struct wallet_rpc_context *rpc)
+    struct boot_cutover_replay *replay, struct wallet_rpc_context *rpc,
+    struct boot_pending_history *history)
 {
     struct block_index *tip = active_chain_tip(&e->state->chain_active);
     struct wallet_cutover_binding binding;
@@ -341,9 +411,32 @@ static bool boot_pending_replay_prepare(struct boot_cutover_env *e, struct app_c
         .coins_tip = e->coins_tip};
     struct wallet_witness_endpoint endpoint = {
         .height = tip->nHeight, .hash = *tip->phashBlock, .root = tip->hashFinalSaplingRoot};
-    return boot_cutover_replay_init(replay, rpc, e->db_service, &binding,
-                                    floor, &endpoint, identity);
+    if (active_chain_at(&e->state->chain_active, floor))
+        return boot_cutover_replay_init(replay, rpc, e->db_service, &binding,
+                                        floor, &endpoint, identity);
+    if (!boot_pending_history_open(history, ctx, &endpoint)) return false;
+    rpc->main_state = history->state;
+    return boot_cutover_replay_init_archive(replay, rpc, e->db_service, &binding,
+        floor, &endpoint, identity, e->state, history->path);
 }
+
+#ifdef ZCL_TESTING
+bool boot_test_pending_replay_prepare(struct boot_cutover_env *env, struct app_context *ctx,
+    struct boot_cutover_replay *replay, struct wallet_rpc_context *rpc, void **owned_history)
+{
+    struct boot_pending_history *history = zcl_calloc(1, sizeof(*history), "pending history test");
+    if (!history) return false;
+    bool ok = boot_pending_replay_prepare(env, ctx, replay, rpc, history);
+    if (!ok) { boot_pending_history_close(history); free(history); return false; }
+    *owned_history = history;
+    return true;
+}
+void boot_test_pending_replay_close(void *owned_history)
+{
+    struct boot_pending_history *history = owned_history;
+    if (history) { boot_pending_history_close(history); free(history); }
+}
+#endif
 
 static bool boot_pending_publish(struct boot_cutover_env *e, struct app_context *ctx,
     const struct chain_params *params, struct boot_cutover_replay *replay)
@@ -369,20 +462,27 @@ bool boot_cutover_replay(struct boot_cutover_env *e, struct app_context *ctx, co
 {
     struct boot_cutover_replay replay;
     struct wallet_rpc_context rpc;
-    if (!boot_pending_replay_prepare(e, ctx, &replay, &rpc)) {
+    struct boot_pending_history history = {0};
+    bool ok = false;
+    if (!boot_pending_replay_prepare(e, ctx, &replay, &rpc, &history)) {
         LOG_ERROR("wallet", "pending replay reference or scan floor unavailable");
-        return false;
+        goto done;
     }
     while (!thread_registry_shutdown_requested()) {
         enum boot_cutover_replay_status status = boot_cutover_replay_step(&replay);
-        if (status == BOOT_CUTOVER_COMPLETE) return boot_pending_publish(e, ctx, params, &replay);
+        if (status == BOOT_CUTOVER_COMPLETE) {
+            ok = boot_pending_publish(e, ctx, params, &replay);
+            break;
+        }
         if (status != BOOT_CUTOVER_PROGRESS) {
             LOG_WARN("wallet", "pending replay stopped: status=%d phase=%d next=%d reference=%d",
                      (int)status, (int)replay.phase, replay.next, replay.endpoint.height);
-            return false;
+            break;
         }
     }
-    return false;
+done:
+    boot_pending_history_close(&history);
+    return ok;
 }
 
 static bool boot_pending_maintenance_requested(const struct app_context *ctx)

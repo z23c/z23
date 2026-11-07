@@ -2,7 +2,7 @@
  *
  * rom_two_builder_compare — the ROM two-builder gate. Independently
  * RE-DERIVES the three consensus-state section digests from the raw rows of
- * two `zcl.consensus_state_bundle.v1` files and asserts:
+ * two V1 or V2 consensus-state bundle files and asserts:
  *
  *   (a) each bundle's recomputed digests equal its own bundle_meta manifest
  *       (the bundle is internally consistent), and
@@ -35,12 +35,13 @@
  *       1 = mismatch (details on stderr); 2 = usage/IO error.
  *
  * --rom-root prints the folded rom_state_root for ONE bundle: SHA3-256 over
- * the domain "zcl.rom_state_checkpoint.v1/root" (NUL included) followed by
+ * the versioned checkpoint root domain (NUL included) followed by
  * the chain-content fields in pinned order (height LE8 | block_hash |
  * utxo_root | utxo_count LE8 | total_supply LE8 | anchor_digest |
  * anchor_count LE8 | sprout_frontier_root | sprout_frontier_height LE8 |
  * sapling_frontier_root | sapling_frontier_height LE8 | nullifier_digest |
- * nullifier_count LE8). This is the constant baked into
+ * nullifier_count LE8), with V2 sprout and sapling pool totals appended as LE8.
+ * This is the constant baked into
  * core/chainparams/src/checkpoints.c; the parity test re-derives it
  * independently as the bake's cross-check.
  *
@@ -60,8 +61,11 @@
 #define RTB_ANCHOR_DOMAIN "zcl.consensus_state_bundle.v1/anchors"
 #define RTB_NULLIFIER_DOMAIN "zcl.consensus_state_bundle.v1/nullifiers"
 #define RTB_ROM_ROOT_DOMAIN "zcl.rom_state_checkpoint.v1/root"
+#define RTB_ROM_ROOT_V2_DOMAIN "zcl.rom_state_checkpoint.v2/root"
 
 struct rtb_manifest {
+    int format_version;
+    int64_t sprout_pool_total, sapling_pool_total;
     int64_t height;
     uint8_t block_hash[32];
     int64_t history_complete;
@@ -124,12 +128,14 @@ static void rtb_hex(const uint8_t *b, char out[65])
  * and the parity test's independent re-derivation must reproduce this exact
  * value for the bake to be admissible. */
 static void rtb_rom_state_root(const struct rtb_derived *d, int64_t height,
-                               const uint8_t block_hash[32], uint8_t out[32])
+                               const uint8_t block_hash[32], const struct rtb_manifest *m, uint8_t out[32])
 {
     struct sha3_256_ctx c;
     sha3_256_init(&c);
-    sha3_256_write(&c, (const unsigned char *)RTB_ROM_ROOT_DOMAIN,
-                   sizeof(RTB_ROM_ROOT_DOMAIN)); /* trailing NUL included */
+    if (m->format_version == 2)
+        sha3_256_write(&c, (const unsigned char *)RTB_ROM_ROOT_V2_DOMAIN, sizeof(RTB_ROM_ROOT_V2_DOMAIN));
+    else
+        sha3_256_write(&c, (const unsigned char *)RTB_ROM_ROOT_DOMAIN, sizeof(RTB_ROM_ROOT_DOMAIN));
     rtb_u64le(&c, (uint64_t)height);
     sha3_256_write(&c, block_hash, 32);
     sha3_256_write(&c, d->utxo_root, 32);
@@ -143,6 +149,10 @@ static void rtb_rom_state_root(const struct rtb_derived *d, int64_t height,
     rtb_u64le(&c, (uint64_t)d->sapling_frontier_height);
     sha3_256_write(&c, d->nullifier_digest, 32);
     rtb_u64le(&c, (uint64_t)d->nullifier_count);
+    if (m->format_version == 2) {
+        rtb_u64le(&c, (uint64_t)m->sprout_pool_total);
+        rtb_u64le(&c, (uint64_t)m->sapling_pool_total);
+    }
     sha3_256_finalize(&c, out);
 }
 
@@ -412,6 +422,58 @@ static int rtb_derive_nullifiers(sqlite3 *db, struct rtb_derived *d, char *err,
     return 1;
 }
 
+static int rtb_schema_version(const unsigned char *s, int n)
+{
+    const char v1[] = "zcl.consensus_state_bundle.v1", v2[] = "zcl.consensus_state_bundle.v2";
+    if (s && n == (int)sizeof(v1) - 1 && !memcmp(s, v1, sizeof(v1) - 1)) return 1;
+    if (s && n == (int)sizeof(v2) - 1 && !memcmp(s, v2, sizeof(v2) - 1)) return 2;
+    return 0;
+}
+
+/* Pool totals are producer commitments; this tool does not independently fold them. */
+static int rtb_read_schema(sqlite3 *db, struct rtb_manifest *m, char *err, size_t errlen)
+{
+    sqlite3_stmt *st = NULL;
+    int ok = sqlite3_prepare_v2(db, "SELECT schema FROM bundle_meta WHERE singleton=1", -1, &st, NULL) == SQLITE_OK;
+    if (ok) {
+        int step = sqlite3_step(st); // raw-sql-ok:standalone-dev-tool
+        if (step != SQLITE_ROW) {
+            snprintf(err, errlen, step == SQLITE_DONE ? "bundle schema row missing" : "bundle schema read error: %s", sqlite3_errmsg(db));
+            ok = 0;
+        } else ok = sqlite3_column_type(st, 0) == SQLITE_TEXT;
+    }
+    const unsigned char *s = ok ? sqlite3_column_text(st, 0) : NULL;
+    int n = ok ? sqlite3_column_bytes(st, 0) : 0;
+    m->format_version = rtb_schema_version(s, n);
+    if (!m->format_version) ok = 0;
+    if (ok) ok = sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:standalone-dev-tool
+    if (st && sqlite3_finalize(st) != SQLITE_OK) ok = 0;
+    if (!ok && !err[0]) snprintf(err, errlen, "bundle schema malformed or unsupported");
+    return ok;
+}
+
+static int rtb_read_pools(sqlite3 *db, struct rtb_manifest *m, char *err, size_t errlen)
+{
+    if (m->format_version == 1) return 1;
+    sqlite3_stmt *st = NULL;
+    int ok = sqlite3_prepare_v2(db, "SELECT sprout_pool_total,sapling_pool_total FROM bundle_meta WHERE singleton=1", -1, &st, NULL) == SQLITE_OK;
+    if (ok) {
+        int step = sqlite3_step(st); // raw-sql-ok:standalone-dev-tool
+        if (step != SQLITE_ROW) {
+            snprintf(err, errlen, step == SQLITE_DONE ? "bundle pool row missing" : "bundle pool read error: %s", sqlite3_errmsg(db));
+            ok = 0;
+        } else ok = sqlite3_column_type(st, 0) == SQLITE_INTEGER && sqlite3_column_type(st, 1) == SQLITE_INTEGER;
+    }
+    if (ok) {
+        m->sprout_pool_total = sqlite3_column_int64(st, 0);
+        m->sapling_pool_total = sqlite3_column_int64(st, 1);
+        ok = m->sprout_pool_total >= 0 && m->sapling_pool_total >= 0 && sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:standalone-dev-tool
+    }
+    if (st && sqlite3_finalize(st) != SQLITE_OK) ok = 0;
+    if (!ok && !err[0]) snprintf(err, errlen, "bundle pool totals malformed");
+    return ok;
+}
+
 static int rtb_read_manifest(sqlite3 *db, struct rtb_manifest *m, char *err,
                              size_t errlen)
 {
@@ -535,6 +597,11 @@ static void rtb_print_fieldi64(const char *name, int64_t v)
 static void rtb_print_sheet(const char *label, const struct rtb_manifest *m)
 {
     printf("=== %s chain content ===\n", label);
+    rtb_print_fieldi64("format_version", m->format_version);
+    if (m->format_version == 2) {
+        rtb_print_fieldi64("sprout_pool_total", m->sprout_pool_total);
+        rtb_print_fieldi64("sapling_pool_total", m->sapling_pool_total);
+    }
     rtb_print_fieldi64("height", m->height);
     rtb_print_field32("block_hash", m->block_hash);
     rtb_print_fieldi64("history_complete", m->history_complete);
@@ -571,6 +638,22 @@ static int rtb_open_ro(const char *path, sqlite3 **out, char *err,
     return 1;
 }
 
+/* Finish the owned read transaction and close the source connection. */
+static int rtb_finish_read(sqlite3 *db, int ok, char *err, size_t errlen)
+{
+    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+        snprintf(err, errlen, "commit read transaction: %s", sqlite3_errmsg(db));
+        ok = 0;
+    }
+    if (!ok && !sqlite3_get_autocommit(db))
+        (void)sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    if (sqlite3_close(db) != SQLITE_OK) {
+        if (ok) snprintf(err, errlen, "close bundle failed");
+        ok = 0;
+    }
+    return ok;
+}
+
 static int rtb_derive_all(const char *label, const char *path,
                           struct rtb_manifest *m, struct rtb_derived *d,
                           int *fails)
@@ -583,11 +666,16 @@ static int rtb_derive_all(const char *label, const char *path,
         (*fails)++;
         return 0;
     }
-    int ok = rtb_read_manifest(db, m, err, sizeof(err)) &&
+    int ok = sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK;
+    if (!ok) snprintf(err, sizeof(err), "begin read transaction: %s", sqlite3_errmsg(db));
+    ok = ok &&
+             rtb_read_schema(db, m, err, sizeof(err)) &&
+             rtb_read_pools(db, m, err, sizeof(err)) &&
+             rtb_read_manifest(db, m, err, sizeof(err)) &&
              rtb_derive_coins(db, d, err, sizeof(err)) &&
              rtb_derive_anchors(db, d, err, sizeof(err)) &&
              rtb_derive_nullifiers(db, d, err, sizeof(err));
-    sqlite3_close(db);
+    ok = rtb_finish_read(db, ok, err, sizeof(err));
     if (!ok) {
         fprintf(stderr, "  - %s: %s\n", label, err);
         (*fails)++;
@@ -610,7 +698,7 @@ int main(int argc, char **argv)
             return 1;
         }
         uint8_t root[32];
-        rtb_rom_state_root(&d, m.height, m.block_hash, root);
+        rtb_rom_state_root(&d, m.height, m.block_hash, &m, root);
         char h[65];
         rtb_hex(root, h);
         printf("rom_state_root %s\n", h);
@@ -645,6 +733,11 @@ int main(int argc, char **argv)
         rtb_print_sheet("B", &mb);
 
     if (have_a && have_b) {
+        fails += rtb_checki64("A-vs-B", "format_version", ma.format_version, mb.format_version);
+        if (ma.format_version == 2 && mb.format_version == 2) {
+            fails += rtb_checki64("A-vs-B", "sprout_pool_total", ma.sprout_pool_total, mb.sprout_pool_total);
+            fails += rtb_checki64("A-vs-B", "sapling_pool_total", ma.sapling_pool_total, mb.sapling_pool_total);
+        }
         fails += rtb_checki64("A-vs-B", "height", ma.height, mb.height);
         fails += rtb_check32("A-vs-B", "block_hash", ma.block_hash,
                              mb.block_hash);
@@ -688,6 +781,6 @@ int main(int argc, char **argv)
         return 1;
     }
     printf("\nTWO-BUILDER: PASS — chain content byte-identical; every "
-           "digest re-derived from raw rows equals its manifest\n");
+           "digest re-derived from raw rows equals its manifest; V2 pool totals compared as manifest values\n");
     return 0;
 }

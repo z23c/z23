@@ -248,6 +248,14 @@ struct zcl_result boot_install_startup_bundle(struct node_db *ndb,
     return result;
 }
 
+struct zcl_result boot_install_terminal_bundle(struct node_db *ndb,
+    struct main_state *ms, const char *bundle_path, const char *datadir,
+    struct consensus_state_install_runtime_result *out)
+{
+    return consensus_state_install_from_bundle_terminal_guarded(ndb, ms, bundle_path,
+        datadir, &g_wallet_sqlite, &g_wallet, out);
+}
+
 #ifdef ZCL_TESTING
 void boot_wallet_cutover_test_slots(struct node_db **ndb, struct wallet_sqlite **ws,
                                     struct wallet **wallet, struct main_state **main)

@@ -6,6 +6,10 @@
 #define _DEFAULT_SOURCE
 
 #include "test/test_core.h"
+#include "services/island_anchor.h"
+#include "config/flysync_island.h"
+#include "test/test_flysync_island_common.h"
+#include "primitives/block.h"
 #include "test/snapshot_boot_fixture.h"
 
 #include "coins/utxo_commitment.h"
@@ -2623,6 +2627,8 @@ static int rom_rung_binding_tests(const char *dir)
     return failures;
 }
 
+static const struct fsi_island *g_rung_act_window;
+
 struct rung_act_ctx {
     struct csi_fixture kb;
     sqlite3 *pdb;
@@ -2713,6 +2719,10 @@ static int rung_act_setup(struct rung_act_ctx *c, const char *dir, bool *built)
         CSI_CHECK("rung-activate: fixture builds", false);
         return failures;
     }
+    if (g_rung_act_window) {
+        memcpy(c->kb.block_hash, g_rung_act_window->hash[0].data, 32);
+        fixture_artifact_digest(&c->kb);
+    }
     *built = true; /* fixture exists: teardown must free it */
     c->kb.anchors[0].height = c->kb.height;
     c->kb.anchors[1].height = c->kb.height;
@@ -2735,6 +2745,8 @@ static int rung_act_setup(struct rung_act_ctx *c, const char *dir, bool *built)
     c->keystone.height = c->kb.height - 50;
     rom_keystone_from_fixture(&c->kb, &c->rung.cp);
     c->rung.chainwork[31] = 5;
+    if (g_rung_act_window)
+        memcpy(c->rung.chainwork, g_rung_act_window->rung.chainwork, 32);
     checkpoints_set_rom_state_override_for_test(&c->keystone);
     c->base_changes = sqlite3_total_changes64(c->pdb);
     c->base_backups = prior_generation_count(c->rdir);
@@ -2857,6 +2869,30 @@ static int rung_act_posture_check(struct rung_act_ctx *c)
               agent_security_posture_allows_local_ready(&p));
     reducer_frontier_provable_tip_reset();
     node_db_close(&ndb);
+    return failures;
+}
+
+static int rung_act_bad_window_tests(struct rung_act_ctx *c)
+{
+    int failures = 0;
+    struct consensus_state_activate_result result;
+    struct block_header headers[ISLAND_ANCHOR_WINDOW] = {0};
+    c->areq.island_window = NULL;
+    c->areq.island_window_count = ISLAND_ANCHOR_WINDOW;
+    bool ok = rung_act_try(c, &c->rung, &result);
+    CSI_CHECK("window: missing pointer refuses before state writes",
+              !ok && rung_act_untouched(c, &result, CONSENSUS_INSTALL_REFUSED));
+    c->areq.island_window = headers;
+    c->areq.island_window_count = 0;
+    ok = rung_act_try(c, &c->rung, &result);
+    CSI_CHECK("window: missing count refuses before state writes",
+              !ok && rung_act_untouched(c, &result, CONSENSUS_INSTALL_REFUSED));
+    c->areq.island_window_count = ISLAND_ANCHOR_WINDOW;
+    ok = rung_act_try(c, &c->rung, &result);
+    CSI_CHECK("window: unbound headers refuse before state writes",
+              !ok && rung_act_untouched(c, &result, CONSENSUS_INSTALL_REFUSED));
+    c->areq.island_window = NULL;
+    c->areq.island_window_count = 0;
     return failures;
 }
 
@@ -3078,6 +3114,52 @@ static int rung_snapshot_first_preservation_tests(struct rung_act_ctx *c)
     return failures;
 }
 
+static int rung_act_window_rollback_test(struct rung_act_ctx *c)
+{
+    int failures = 0;
+    consensus_state_snapshot_install_activate_test_fail_after_seed_once();
+    struct consensus_state_activate_result result;
+    bool ok = consensus_state_snapshot_install_activate(c->pdb, &c->areq, &result);
+    struct island_anchor anchor; bool found = false;
+    CSI_CHECK("window: injected failure rolls back installed fact and coins",
+              !ok && result.status == CONSENSUS_INSTALL_INJECTED_FAILURE &&
+              island_anchor_load(c->pdb, &anchor, &found).ok && !found &&
+              island_anchor_state_load(c->pdb) == ISLAND_ANCHOR_STATE_NONE &&
+              coins_kv_count(c->pdb) == 1);
+    if (result.prior_generation_path[0]) (void)unlink(result.prior_generation_path);
+    return failures;
+}
+
+static int rung_act_window_commit_tests(const char *dir)
+{
+    int failures = 0;
+    struct fsi_island island;
+    fsi_build_island(&island);
+    g_rung_act_window = &island;
+    struct rung_act_ctx c;
+    bool built = false;
+    failures += rung_act_setup(&c, dir, &built);
+    g_rung_act_window = NULL;
+    if (!built) return failures + 1;
+    flysync_island_test_set_frozen_verifier(fsi_accept_all);
+    c.areq.island_window = island.w;
+    c.areq.island_window_count = ISLAND_ANCHOR_WINDOW;
+    checkpoints_set_rom_state_rungs_override_for_test(&c.rung, 1);
+    failures += rung_act_window_rollback_test(&c);
+    struct consensus_state_activate_result result;
+    bool ok = consensus_state_snapshot_install_activate(c.pdb, &c.areq, &result);
+    struct island_anchor anchor; bool found = false;
+    CSI_CHECK("window: activation atomically installs exact verified island",
+              ok && result.activated && island_anchor_load(c.pdb, &anchor, &found).ok && found &&
+              island_anchor_state_load(c.pdb) == ISLAND_ANCHOR_STATE_INSTALLED &&
+              anchor.rung_height == c.kb.height &&
+              memcmp(anchor.rung_hash.data, c.kb.block_hash, 32) == 0 && active_is(c.pdb, &c.kb));
+    if (result.prior_generation_path[0]) (void)unlink(result.prior_generation_path);
+    flysync_island_test_set_frozen_verifier(NULL);
+    rung_act_teardown(&c);
+    return failures;
+}
+
 static int rom_rung_activate_tests(const char *dir)
 {
     int failures = 0;
@@ -3086,10 +3168,12 @@ static int rom_rung_activate_tests(const char *dir)
     failures += rung_act_setup(&c, dir, &built);
     if (built) {
         failures += rung_act_tamper_tests(&c);
+        failures += rung_act_bad_window_tests(&c);
         failures += rung_act_commit_tests(&c);
         failures += rung_snapshot_first_preservation_tests(&c);
         rung_act_teardown(&c);
     }
+    failures += rung_act_window_commit_tests(dir);
     return failures;
 }
 

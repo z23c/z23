@@ -51,6 +51,9 @@ struct consensus_state_install_runtime_result;
 struct zcl_result boot_install_startup_bundle(struct node_db *ndb,
     struct main_state *ms, const char *bundle_path, const char *datadir,
     struct consensus_state_install_runtime_result *out);
+struct zcl_result boot_install_terminal_bundle(struct node_db *ndb,
+    struct main_state *ms, const char *bundle_path, const char *datadir,
+    struct consensus_state_install_runtime_result *out);
 #ifdef ZCL_TESTING
 bool boot_wallet_cutover_preflight_test(const char *datadir, bool *pending);
 void boot_wallet_read_persisted_test(const char *datadir);

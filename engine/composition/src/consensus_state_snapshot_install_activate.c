@@ -5,6 +5,9 @@
  * contract: config/consensus_state_snapshot_install.h. */
 
 #include "config/consensus_state_snapshot_install.h"
+#include "config/flysync_island.h"
+#include "services/island_anchor.h"
+#include "primitives/block.h"
 #include "base/bytes.h"
 #include "consensus_state_snapshot_install_internal.h" /* lease + authority resolver */
 #include "jobs/reducer_frontier.h"       /* reducer_frontier_compute_hstar,
@@ -1124,10 +1127,52 @@ static void activate_rollback_after_failure(
     }
 }
 
+struct activate_island_window {
+    bool present;
+    struct block_header headers[ISLAND_ANCHOR_WINDOW];
+    struct island_anchor anchor;
+    struct island_anchor_rows rows;
+};
+
+static bool activate_verify_island_window(
+    const struct consensus_state_activate_request *request,
+    const struct consensus_state_bundle_manifest *manifest,
+    struct activate_island_window *window,
+    struct consensus_state_activate_result *result)
+{
+    memset(window, 0, sizeof(*window));
+    if (!request->island_window && !request->island_window_count) return true;
+    if (!request->island_window || request->island_window_count != ISLAND_ANCHOR_WINDOW)
+        return activate_fail(result, CONSENSUS_INSTALL_REFUSED, "invalid island window shape");
+    memcpy(window->headers, request->island_window, sizeof(window->headers));
+    char why[160];
+    if (!flysync_island_verify_window(window->headers, ISLAND_ANCHOR_WINDOW,
+                                      manifest->height, &window->anchor, why, sizeof(why)) ||
+        memcmp(window->anchor.rung_hash.data, manifest->block_hash, 32) != 0)
+        return activate_fail(result, CONSENSUS_INSTALL_REFUSED, "island window does not bind admitted bundle");
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; i++)
+        block_header_get_hash(&window->headers[ISLAND_ANCHOR_WINDOW - 1 - i], &window->rows.hash[i]);
+    window->present = true;
+    return true;
+}
+
+static bool activate_save_island_window(sqlite3 *db,
+    const struct activate_island_window *window,
+    struct consensus_state_activate_result *result)
+{
+    if (!window->present) return true;
+    struct zcl_result saved = island_anchor_install_window_in_tx(db, &window->anchor,
+                                                               &window->rows, window->headers);
+    if (!saved.ok)
+        return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR, "island window save failed: %s", saved.message);
+    return true;
+}
+
 /* The cutover under the progress-store tx lock: reserve, guard, install,
  * COMMIT, and roll back on any failure. */
 static bool activate_cutover_locked(
     sqlite3 *progress_db, sqlite3 *bundle_db,
+    const struct activate_island_window *window,
     const struct consensus_state_activate_request *request,
     const struct consensus_state_bundle_manifest *leased_manifest,
     const struct consensus_state_publication_decision_record *admitted_decision,
@@ -1138,6 +1183,7 @@ static bool activate_cutover_locked(
     bool outcome_unknown = false;
     bool ok = activate_cutover_reserve(progress_db, request, result) &&
               activate_cutover_guard(progress_db, request, admitted_decision, result) &&
+              activate_save_island_window(progress_db, window, result) &&
               activate_cutover_body(progress_db, bundle_db, leased_manifest,
                                     install_kind, evidence, result);
     if (ok)
@@ -1206,8 +1252,14 @@ bool consensus_state_snapshot_install_activate(
         return false; // raw-return-ok:logged-by-activate_fail
     }
 
+    struct activate_island_window window;
+    if (!activate_verify_island_window(request, &leased_manifest, &window, result)) {
+        consensus_state_artifact_evidence_candidate_lease_end(evidence);
+        consensus_state_artifact_evidence_free(evidence);
+        return false;
+    }
     progress_store_tx_lock();
-    bool ok = activate_cutover_locked(progress_db, bundle_db, request,
+    bool ok = activate_cutover_locked(progress_db, bundle_db, &window, request,
                                       &leased_manifest, &admitted_decision,
                                       install_kind, evidence, result);
     progress_store_tx_unlock();

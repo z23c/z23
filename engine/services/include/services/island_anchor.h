@@ -115,6 +115,13 @@ struct zcl_result island_anchor_save(struct sqlite3 *db,
 struct zcl_result island_anchor_save_window(struct sqlite3 *db,
     const struct island_anchor *a, const struct island_anchor_rows *rows,
     const struct block_header *window);
+
+/* Caller holds progress-store transaction lock and owns an open write transaction
+ * on the live progress DB. Caller must validate rung authority and window proof;
+ * on failure it must roll back. Writes INSTALLED; this function never commits or registers the fact. */
+struct zcl_result island_anchor_install_window_in_tx(struct sqlite3 *db,
+    const struct island_anchor *a, const struct island_anchor_rows *rows,
+    const struct block_header *window);
 /* Missing legacy proof returns OK with found=false; malformed or I/O fails. */
 struct zcl_result island_anchor_window_load(struct sqlite3 *db,
     struct block_header *window, bool *found);

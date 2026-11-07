@@ -1210,3 +1210,7 @@ later lane flips it HARD.
 - 2026-11-07T00:35:28Z — REASON: Integrate approved versioned fast-sync pool commitments with reviewed upstream allocation-error handling; preserve both histories and consensus predicates
   old ROOT: e636bb59fb98b0d0d47004afe7ce68ba7a3534e4aef52126c6664eadd107633b
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-07T07:39:44Z — REASON: Owner approval 2026-11-06T23:45:12Z: bake H3309900 V2 state checkpoint from matching independent-host FULL replays, authenticated pool totals and legacy chainwork receipt; preserve earlier checkpoints and consensus predicates
+  old ROOT: c8bed89198652c956321e7799b796dadb32ae5052293cc24dbfb0feca4436792
+  by: owner unseal ritual (make core-unseal)

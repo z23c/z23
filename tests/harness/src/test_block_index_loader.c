@@ -4,8 +4,12 @@
  * SQLite cache save/load, round-trip integrity, and edge cases.
  */
 
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
 #include "test/test_core.h"
 #include "services/block_index_loader.h"
+#include "services/island_anchor.h"
 #include "services/block_index_cache_envelope.h"
 #include "services/block_index_integrity.h"
 #include "services/chain_tip.h"
@@ -30,6 +34,7 @@
 #include "util/blocker.h"
 #include "util/boot_phase.h"
 #include "platform/read_mapping.h"
+#include "platform/private_directory.h"
 #include "support/log_throttle.h"
 #include <sqlite3.h>
 #include <stdio.h>
@@ -40,6 +45,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "test/setup_result.h"
+#include "android_block_index_memory_fixture.h"
 
 #define BIL_CHECK(name, expr) do {          \
     printf("%s... ", (name));              \
@@ -2603,10 +2609,324 @@ static int bil_release_direct_case(void)
     return failures;
 }
 
+static int bil_flat_budget_case(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX], path[PATH_MAX + 32];
+    if (!test_mkdtemp(dir, sizeof(dir), "bil_budget")) {
+        BIL_CHECK("bil: budget fixture directory", false);
+        return failures;
+    }
+    struct main_state src, dst;
+    main_state_init(&src); main_state_init(&dst);
+    build_synthetic_chain(&src, 2);
+    struct block_index_flat_identity saved, observed;
+    bool written = save_block_index_flat_identity(dir, &src, &saved).ok;
+    struct zcl_result small = load_block_index_flat_bounded(dir, &dst, 1);
+    BIL_CHECK("bil: row budget refuses before map mutation and identity",
+              written && !small.ok && dst.map_block_index.size == 0 &&
+              dst.map_block_index.capacity == 0 && !block_index_flat_verified_identity(dir, &observed));
+    bool loaded = load_block_index_flat_bounded(dir, &dst, 2).ok;
+    struct uint256 h0 = {{0}}, h1 = {{0}};
+    h0.data[3] = 0xaa; h1.data[0] = 1; h1.data[3] = 0xaa;
+    struct block_index *g = block_map_find(&dst.map_block_index, &h0);
+    struct block_index *p = block_map_find(&dst.map_block_index, &h1);
+    BIL_CHECK("bil: sufficient budget loads verified linked rows", loaded && g && p && p->pprev == g &&
+              dst.map_block_index.size == 2 && block_index_flat_verified_identity(dir, &observed));
+    main_state_free(&dst);
+    main_state_init(&dst);
+    snprintf(path, sizeof(path), "%s/block_index.bin", dir);
+    int fd = open(path, O_WRONLY | O_TRUNC);
+    bool truncated = fd >= 0 && close(fd) == 0;
+    BIL_CHECK("bil: budgeted load still refuses malformed file", truncated &&
+              !load_block_index_flat_bounded(dir, &dst, 2).ok && dst.map_block_index.size == 0 &&
+              !block_index_flat_verified_identity(dir, &observed));
+    main_state_free(&dst); main_state_free(&src);
+    unlink(path); rmdir(dir);
+    return failures;
+}
+
+/* A synthetic 29-header archive uses the real flat loader and blk framing. */
+static bool bil_history_write_header(FILE *f, const struct block_header *header, unsigned *offset)
+{
+    struct byte_stream s;
+    stream_init(&s, 2048);
+    bool ok = block_header_serialize(header, &s) && s.size <= UINT32_MAX;
+    long pos = ftell(f);
+    uint32_t len = (uint32_t)s.size;
+    const uint8_t framing[] = {0x24, 0xe9, 0x27, 0x64,
+        (uint8_t)len, (uint8_t)(len >> 8), (uint8_t)(len >> 16), (uint8_t)(len >> 24)};
+    ok = ok && pos >= 0 && (unsigned long)pos <= UINT_MAX - 8 &&
+        fwrite(framing, 1, sizeof(framing), f) == sizeof(framing) && fwrite(s.data, 1, s.size, f) == s.size;
+    if (ok) *offset = (unsigned)pos + 8;
+    stream_free(&s);
+    return ok;
+}
+
+/* The normal flat loader checks each row's target; mine easy regtest hashes. */
+static bool bil_history_mine(struct block_header *header, struct uint256 *hash)
+{
+    struct arith_uint256 target, value;
+    arith_uint256_set_compact(&target, header->nBits, NULL, NULL);
+    for (uint32_t nonce = 0; nonce < 4096; nonce++) {
+        header->nNonce.data[0] = (uint8_t)nonce;
+        header->nNonce.data[1] = (uint8_t)(nonce >> 8);
+        block_header_get_hash(header, hash);
+        uint256_to_arith(&value, hash);
+        if (arith_uint256_compare(&value, &target) <= 0) return true;
+    }
+    return false;
+}
+
+static struct block_index *bil_history_row(FILE *f, struct main_state *source,
+    const struct uint256 *prev_hash, struct block_index *prev, struct uint256 *hash, int i, int mode)
+{
+    struct block_header header; block_header_init(&header);
+    header.nVersion = 4; header.nTime = 100000 + (uint32_t)i; header.nBits = 0x200f0f0f;
+    header.nNonce.data[0] = (uint8_t)(i + 1);
+    header.nSolutionSize = 1; header.nSolution[0] = (uint8_t)i;
+    if (prev) header.hashPrevBlock = *prev_hash;
+    if (mode == 2 && i == 1) memset(header.hashPrevBlock.data, 0x55, 32);
+    if (!bil_history_mine(&header, hash)) return NULL;
+    unsigned offset = 0;
+    if (!bil_history_write_header(f, &header, &offset)) return NULL;
+    struct block_index *row = chainstate_insert_block_index((struct chainstate *)source, hash);
+    if (!row) return NULL;
+    row->pprev = prev; row->nHeight = i; row->nFile = 0; row->nDataPos = offset;
+    row->nVersion = header.nVersion; row->nTime = header.nTime;
+    row->nBits = header.nBits + (mode == 3 && i == 1);
+    row->hashFinalSaplingRoot = header.hashFinalSaplingRoot;
+    return row;
+}
+
+static bool bil_history_make(const char *dir, struct uint256 hashes[29], int mode)
+{
+    char blocks[PATH_MAX + 32], path[PATH_MAX + 64];
+    snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
+    snprintf(path, sizeof(path), "%s/blk00000.dat", blocks);
+    if (mkdir(blocks, 0700) != 0) return false;
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    struct main_state source; main_state_init(&source);
+    struct block_index *prev = NULL;
+    bool ok = true;
+    for (int i = 0; i < 29 && ok; i++) {
+        prev = bil_history_row(f, &source, i ? &hashes[i - 1] : NULL, prev, &hashes[i], i, mode);
+        ok = prev != NULL;
+    }
+    if (fclose(f) != 0) ok = false;
+    struct block_index_flat_identity saved;
+    ok = ok && save_block_index_flat_identity(dir, &source, &saved).ok;
+    main_state_free(&source);
+    if (ok && mode == 1) {
+        int fd = open(path, O_WRONLY);
+        uint8_t byte = 0;
+        ok = fd >= 0 && pwrite(fd, &byte, 1, 8) == 1 && close(fd) == 0;
+    }
+    if (ok && mode == 5) ok = unlink(path) == 0;
+    return ok;
+}
+
+#include "test_boot_wallet_history_startup.h"
+
+static bool bil_history_window_matches(const struct block_header *window, const struct uint256 hashes[29])
+{
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; i++) {
+        struct uint256 hash;
+        block_header_get_hash(&window[i], &hash);
+        if (!uint256_eq(&hash, &hashes[27 - i])) return false;
+    }
+    return true;
+}
+
+static bool bil_history_view_matches(const struct main_state *archive,
+    const struct uint256 hashes[29], const struct block_header *window)
+{
+    struct block_index *selected = active_chain_at(&archive->chain_active, 27);
+    return selected && uint256_eq(selected->phashBlock, &hashes[27]) &&
+        archive->pindex_best_header == selected && active_chain_at(&archive->chain_active, 28) == NULL &&
+        block_index_hdrext_peek(selected) != NULL && bil_history_window_matches(window, hashes);
+}
+
+static int bil_history_archive_case(int mode)
+{
+    int failures = 0;
+    char dir[PATH_MAX], sentinel[PATH_MAX];
+    if (!test_mkdtemp(dir, sizeof(dir), "bil_history")) {
+        BIL_CHECK("history archive fixture directory", false);
+        return failures;
+    }
+    if (!test_mkdtemp(sentinel, sizeof(sentinel), "bil_identity")) {
+        BIL_CHECK("history identity fixture directory", false);
+        (void)test_rm_rf_recursive(dir);
+        return failures;
+    }
+    struct uint256 hashes[29] = {0};
+    bool made = bil_history_make(dir, hashes, mode);
+    struct main_state original, archive; main_state_init(&original); main_state_init(&archive);
+    build_synthetic_chain(&original, 2);
+    struct block_index_flat_identity identity, before, after;
+    bool pinned = save_block_index_flat_identity(sentinel, &original, &identity).ok &&
+        block_index_flat_verified_identity(sentinel, &before);
+    struct block_header window[ISLAND_ANCHOR_WINDOW];
+    struct zcl_result r = block_index_history_archive_test_open(&archive, dir,
+        mode == 4 ? 28 : 29, 27, hashes[27].data, &hashes[0], window);
+    bool retained = pinned && block_index_flat_verified_identity(sentinel, &after) &&
+        !memcmp(&before, &after, sizeof(before));
+    bool view_ok = mode == 0 ? r.ok && bil_history_view_matches(&archive, hashes, window) :
+        !r.ok && active_chain_cached_height(&archive.chain_active) < 0 && !archive.pindex_best_header;
+    BIL_CHECK("history archive verifies selected ancestry and preserves identity", made && pinned && retained && view_ok);
+    main_state_free(&archive); main_state_free(&original);
+    (void)test_rm_rf_recursive(dir); (void)test_rm_rf_recursive(sentinel);
+    return failures;
+}
+
+#if defined(__linux__) && !defined(_WIN32)
+static int bil_history_retained_handle_case(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX];
+    if (!test_mkdtemp(dir, sizeof(dir), "bil_history_handle")) {
+        BIL_CHECK("history retained directory fixture", false);
+        return failures;
+    }
+    struct uint256 hashes[29] = {0};
+    bool made = bil_history_make(dir, hashes, 0);
+    uintptr_t handle = 0;
+    bool opened = made && platform_private_directory_open_validated_traverse(dir, &handle);
+    char path[64];
+    int n = opened ? snprintf(path, sizeof(path), "/proc/self/fd/%d", (int)handle) : -1;
+    struct main_state archive; main_state_init(&archive);
+    struct block_header window[ISLAND_ANCHOR_WINDOW];
+    bool valid_path = n >= 0 && (size_t)n < sizeof(path);
+    struct zcl_result r = valid_path ? block_index_history_archive_test_open(
+        &archive, path, 29, 27, hashes[27].data, &hashes[0], window) :
+        ZCL_ERR(-1, "history retained directory unavailable");
+    BIL_CHECK("history archive traverses retained private directory handle",
+        opened && valid_path && r.ok && bil_history_view_matches(&archive, hashes, window));
+    main_state_free(&archive);
+    if (opened) platform_private_directory_close(handle);
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+#endif
+
+
+static int bil_history_archive_cases(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_REGTEST);
+    for (int mode = 0; mode < 6; mode++) failures += bil_history_archive_case(mode);
+#if defined(__linux__) && !defined(_WIN32)
+    failures += bil_history_retained_handle_case();
+#endif
+    chain_params_select(CHAIN_MAIN);
+    return failures;
+}
+
+#if defined(__linux__) && !defined(_WIN32)
+/* The caller supplies a private immutable copy; this probe never writes it. */
+static bool bil_history_probe_directory(const char *dir)
+{
+    if (!dir || dir[0] != '/') return false;
+    char resolved[PATH_MAX], file[PATH_MAX + 32]; struct stat st;
+    if (!realpath(dir, resolved) || strcmp(dir, resolved)) return false;
+    if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 0022)) return false;
+    int n = snprintf(file, sizeof(file), "%s/block_index.bin", dir);
+    return n > 0 && (size_t)n < sizeof(file) && lstat(file, &st) == 0 &&
+        S_ISREG(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 0022);
+}
+
+struct bil_history_probe_input {
+    const char *dir;
+    const char *hash;
+    uint64_t maxrows;
+    uint64_t height;
+};
+
+static bool bil_history_probe_input_read(struct bil_history_probe_input *input)
+{
+    input->dir = getenv("ZCL_HISTORY_ARCHIVE_DIR");
+    input->hash = getenv("ZCL_HISTORY_ARCHIVE_HASH");
+    const char *maxarg = getenv("ZCL_HISTORY_ARCHIVE_MAX_ROWS");
+    const char *heightarg = getenv("ZCL_HISTORY_ARCHIVE_HEIGHT");
+    input->maxrows = 0;
+    input->height = 0;
+    if (!bil_history_probe_directory(input->dir) ||
+        !bil_am_decimal(maxarg, 10000000, &input->maxrows) || !input->maxrows ||
+        !bil_am_decimal(heightarg, INT_MAX, &input->height) || input->height >= input->maxrows ||
+        input->height < ISLAND_ANCHOR_WINDOW - 1 || !bil_am_hex64(input->hash)) {
+        fputs("history probe: valid ZCL_HISTORY_ARCHIVE_DIR/MAX_ROWS/HEIGHT/HASH required\n", stderr);
+        return false;
+    }
+    return true;
+}
+
+
+static int bil_history_probe_child(void)
+{
+    chain_params_select(CHAIN_MAIN);
+    struct bil_history_probe_input input;
+    if (!bil_history_probe_input_read(&input)) return 1;
+    const char *dir = input.dir;
+    uint64_t maxrows = input.maxrows, height = input.height;
+    const char *hasharg = input.hash;
+    struct uint256 hash; uint256_set_hex(&hash, hasharg);
+    struct main_state state; main_state_init(&state);
+    struct block_header window[ISLAND_ANCHOR_WINDOW];
+    struct timespec start, end; struct rusage usage;
+    long before = bil_am_rss_kib();
+    if (before < 0 || clock_gettime(CLOCK_MONOTONIC, &start) != 0) { main_state_free(&state); return 1; }
+    struct zcl_result r = block_index_history_archive_open(&state, dir, (size_t)maxrows,
+                                                           (int32_t)height, hash.data, window);
+    struct uint256 top = {0}; if (r.ok) block_header_get_hash(&window[0], &top);
+    bool ok = r.ok && uint256_eq(&top, &hash) && state.pindex_best_header &&
+        state.pindex_best_header->phashBlock && uint256_eq(state.pindex_best_header->phashBlock, &hash);
+    if (!ok || clock_gettime(CLOCK_MONOTONIC, &end) != 0 || getrusage(RUSAGE_SELF, &usage) != 0) {
+        fprintf(stderr, "history probe refused: %s\n", r.message); main_state_free(&state); return 1;
+    }
+    long rss = bil_am_rss_kib();
+    size_t rows = state.map_block_index.size;
+    main_state_free(&state);
+    long after = bil_am_rss_kib();
+    if (rss < 0 || after < 0) return 1;
+    int64_t elapsed = (int64_t)(end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000;
+    printf("{\"probe\":\"history_archive\",\"height\":%" PRIu64 ",\"rows\":%zu,\"elapsed_ms\":%" PRId64
+           ",\"before_rss_kib\":%ld,\"rss_kib\":%ld,\"peak_rss_kib\":%ld,\"after_cleanup_rss_kib\":%ld}\n",
+           height, rows, elapsed, before, rss, usage.ru_maxrss, after);
+    return 0;
+}
+
+static int bil_history_probe_case(void)
+{
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid < 0) return 1;
+    if (!pid) { int rc = bil_history_probe_child(); if (fflush(stdout) != 0) rc = 1; _exit(rc); }
+    int status; pid_t got;
+    do { got = waitpid(pid, &status, 0); } while (got < 0 && errno == EINTR);
+    return got == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+}
+#else
+static int bil_history_probe_case(void)
+{
+    fputs("history archive probe unavailable on this platform\n", stderr);
+    return 1;
+}
+#endif
+
+
 int test_block_index_loader(void)
 {
     printf("\n=== block index loader tests ===\n");
     int failures = bil_genesis_cases();
+    failures += bil_history_archive_cases();
+    failures += bil_startup_archive_case();
+    if (getenv("ZCL_HISTORY_ARCHIVE_DIR"))
+        failures += bil_history_probe_case();
+    failures += bil_flat_budget_case();
+    if (getenv("ZCL_BLOCK_INDEX_MEMORY_DIR"))
+        failures += bil_am_android_memory_case();
 
     /* ── 1. Flat file round-trip ─────────────────────────── */
 

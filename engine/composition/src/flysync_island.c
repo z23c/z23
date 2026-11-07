@@ -327,6 +327,24 @@ static bool fsi_work_matches_rung(const struct block_index *top,
     return arith_uint256_compare(&top->nChainWork, &want) == 0;
 }
 
+/* Startup is quiescent: no concurrent map insertion may race this preflight. */
+struct block_index *flysync_island_prepare_terminal_window(
+    struct main_state *ms, const struct block_header *w, int n, int32_t top_h)
+{
+    struct island_anchor anchor;
+    char why[160];
+    if (!ms || island_anchor_registered() ||
+        !flysync_island_verify_window(w, n, top_h, &anchor, why, sizeof(why)))
+        return NULL;
+    for (int i = 0; i < n; i++) {
+        struct uint256 hash;
+        block_header_get_hash(&w[i], &hash);
+        if (block_map_find(&ms->map_block_index, &hash)) return NULL;
+    }
+    struct block_index *top = fsi_insert_window(ms, w, n, &anchor, false);
+    return top && fsi_work_matches_rung(top, &anchor) ? top : NULL;
+}
+
 /* Record a fall-back durably. The in-process fall-back stands either way; an
  * unrecorded one is logged with its reason (the next boot then sees the fact
  * as SEEDED and its reconcile decides again). */
