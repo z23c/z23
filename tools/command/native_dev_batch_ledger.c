@@ -82,6 +82,16 @@ void db_refuse(struct zcl_command_reply *reply, const char *code,
                            false, message, "");
 }
 
+/* A refusal about a lane: the reason leads the message (a long path cannot
+ * cut it off) and the full path goes in the evidence field. */
+static void db_refuse_lane(struct zcl_command_reply *reply, const char *code,
+                           const char *message, const char *lane)
+{
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                           ZCL_COMMAND_EXIT_BLOCKED, code, "check", false,
+                           false, message, lane);
+}
+
 bool db_join(char *out, size_t cap, const char *a, const char *b)
 {
     int n = snprintf(out, cap, "%s/%s", a, b);
@@ -411,9 +421,9 @@ static bool db_lane_clean(const char *lane, struct zcl_command_reply *reply)
     char out[4096], msg[DB_PATH + 160];
     struct stat st;
     if (stat(lane, &st) != 0 || !S_ISDIR(st.st_mode)) {
-        (void)snprintf(msg, sizeof(msg), "requeue: %s is not a directory",
-                       lane);
-        db_refuse(reply, "NOT_A_LANE", "check", msg);
+        (void)snprintf(msg, sizeof(msg),
+                       "requeue refused: not a directory (lane %s)", lane);
+        db_refuse_lane(reply, "NOT_A_LANE", msg, lane);
         return false;
     }
     if (db_git(lane, status, out, sizeof(out)) != 0) {
@@ -424,10 +434,10 @@ static bool db_lane_clean(const char *lane, struct zcl_command_reply *reply)
     }
     if (out[0]) {
         (void)snprintf(msg, sizeof(msg),
-                       "requeue: %s has uncommitted tracked changes; commit "
-                       "or discard them, then requeue again",
+                       "requeue refused: uncommitted tracked changes; commit "
+                       "or discard them, then requeue again (lane %s)",
                        lane);
-        db_refuse(reply, "LANE_DIRTY", "check", msg);
+        db_refuse_lane(reply, "LANE_DIRTY", msg, lane);
         return false;
     }
     return true;
