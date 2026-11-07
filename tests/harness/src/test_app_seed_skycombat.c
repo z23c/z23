@@ -10,9 +10,11 @@
  *   <image> --qa-frames=120 -> exit 0 on a private Xvfb display
  *
  * HOME and the datadir are temporary, so the owner key it makes is a
- * throwaway. Needs Xvfb and the game's X11/GL headers: the host-need row
- * keeps it out of universal selection unless the operator sets
- * ZCL_TEST_DISPLAY_APPS; without Xvfb it prints SKIP.
+ * throwaway. The seed runs everywhere and prints its package root, so two
+ * hosts at one commit can compare roots. The build needs the game's X11/GL
+ * headers and the run needs Xvfb; each prints SKIP where its need is
+ * missing, and the host-need row keeps the group out of universal
+ * selection unless the operator sets ZCL_TEST_DISPLAY_APPS.
  *
  * make t-fast-exact ONLY=app_seed_skycombat ZCL_TEST_DISPLAY_APPS=1 */
 
@@ -139,10 +141,12 @@ static void ass_world_restore(const struct ass_world *w)
         (void)unsetenv("DISPLAY");
 }
 
-static int ass_seed_adopt_build(struct ass_world *w)
+/* Seeding reads no window-system header, so every host prints the package
+ * root: equal roots across hosts at one commit are the determinism claim. */
+static int ass_seed(struct ass_world *w)
 {
     int failures = 0;
-    TEST("app.seed skycombat: seed, adopt and build the copy alone") {
+    TEST("app.seed skycombat: seed the game from this checkout") {
         struct asf_leaf l;
         ASSERT(asf_seed(&l, "skycombat", w->source, w->datadir));
         (void)snprintf(w->release, sizeof(w->release), "%s",
@@ -152,6 +156,16 @@ static int ass_seed_adopt_build(struct ass_world *w)
                (long long)json_get_int(json_get(&l.out.data, "file_count")));
         asf_close(&l);
         ASSERT(strlen(w->release) == 64);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ass_adopt_build(struct ass_world *w)
+{
+    int failures = 0;
+    TEST("app.seed skycombat: adopt and build the copy alone") {
+        struct asf_leaf l;
         ASSERT(asf_adopt(w->release, w->datadir, w->copy, sizeof(w->copy)));
         bool built = asf_build(&l, w->copy, w->datadir);
         if (!built)
@@ -207,22 +221,23 @@ int test_app_seed_skycombat(void)
     int failures = 0;
     const char *xvfb = ass_xvfb_path(), *missing = ass_missing_header();
     struct ass_world w;
-    if (missing) {
-        printf("app_seed_skycombat... SKIP (no /usr/include/%s: the game "
-               "cannot build on this host)\n", missing);
-        return 0;
-    }
     chain_params_select(CHAIN_MAIN);
     TEST("app.seed skycombat: a temporary HOME and datadir") {
         ASSERT(ass_world_init(&w));
         PASS();
     } _test_next:;
     if (!failures)
-        failures += ass_seed_adopt_build(&w);
-    if (!failures && !xvfb)
+        failures += ass_seed(&w);
+    if (!failures && missing)
+        printf("app.seed skycombat: build and run... SKIP (no "
+               "/usr/include/%s: the game cannot build on this host)\n",
+               missing);
+    if (!failures && !missing)
+        failures += ass_adopt_build(&w);
+    if (!failures && !missing && !xvfb)
         printf("app.seed skycombat: 120 QA frames... SKIP (no Xvfb on this "
                "host)\n");
-    else if (!failures)
+    if (!failures && !missing && xvfb)
         failures += ass_runs_qa_frames(&w, xvfb);
     ass_xvfb_stop(&w);
     ass_world_restore(&w);

@@ -198,16 +198,24 @@ static bool abm_exited_ok(const struct lab_proc *p)
 
 /* ── the declared closure ────────────────────────────────────────────── */
 
+/* The root-level local stores the package root does not cover. */
+static const char *const k_abm_stores[] = {"build", ".zvcs", ".codeindex"};
+
+/* True when the n bytes at seg are one root-level store's name. */
+static bool abm_store_segment(const char *seg, size_t n)
+{
+    for (size_t i = 0; i < sizeof(k_abm_stores) / sizeof(k_abm_stores[0]); i++)
+        if (strlen(k_abm_stores[i]) == n && memcmp(seg, k_abm_stores[i], n) == 0)
+            return true;
+    return false;
+}
+
 /* A declared input the package root covers: canonical, not a local store. */
 static bool abm_declarable(const char *path)
 {
-    static const char *const stores[] = {"build/", ".zvcs/", ".codeindex/"};
-    if (!vcs_package_path_valid(path))
-        return false;
-    for (size_t i = 0; i < sizeof(stores) / sizeof(stores[0]); i++)
-        if (strncmp(path, stores[i], strlen(stores[i])) == 0)
-            return false;
-    return true;
+    size_t n = strcspn(path, "/");
+    return vcs_package_path_valid(path) &&
+           !(path[n] == '/' && abm_store_segment(path, n));
 }
 
 /* The first index whose path is not below `path` (the list stays sorted). */
@@ -438,14 +446,19 @@ struct abm_depcheck {
 
 /* Lexically fold "." and ".." segments of a copy-relative path the way the
  * compiler spelled it (a source's `#include "../x.h"` lands in a depfile
- * as "dir/sub/../x.h"). The copy holds no symlinks (it prepared as a
- * package), so the folded path names the same file. False when the path
- * climbs above the copy or does not fit. */
+ * as "dir/sub/../x.h"). The package part of the copy holds no symlinks (it
+ * prepared as a package), so the folded path names the same file. The
+ * root-level stores prepare skips may hold symlinks, so a path that ever
+ * enters one is never folded: "build/link/../../src/x.c" stays undeclared.
+ * False when the path enters a store, climbs above the copy or does not
+ * fit. */
 static bool abm_fold_segment(const char *seg, size_t n, char *out, size_t cap,
                              size_t *len)
 {
     if (n == 0 || (n == 1 && seg[0] == '.'))
         return true;
+    if (*len == 0 && seg[n] == '/' && abm_store_segment(seg, n))
+        return false;
     if (n == 2 && seg[0] == '.' && seg[1] == '.') {
         if (*len == 0)
             return false;
