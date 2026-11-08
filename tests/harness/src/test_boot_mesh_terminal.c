@@ -45,7 +45,7 @@
 #define KB_TERMINAL_FILL 0x44
 #define KB_PAYLOAD 100u
 
-static void kb_fill_pipe(int wfd)
+[[maybe_unused]] static void kb_fill_pipe(int wfd)
 {
     uint8_t chunk[4096];
     memset(chunk, KB_TERMINAL_FILL, sizeof(chunk));
@@ -60,7 +60,7 @@ static void kb_fill_pipe(int wfd)
     }
 }
 
-static size_t kb_drain_pipe(int rfd, uint8_t *last, size_t last_cap)
+[[maybe_unused]] static size_t kb_drain_pipe(int rfd, uint8_t *last, size_t last_cap)
 {
     uint8_t buf[4096];
     size_t total = 0;
@@ -74,7 +74,7 @@ static size_t kb_drain_pipe(int rfd, uint8_t *last, size_t last_cap)
 }
 
 /* One keyboard DATA stream message with a recognisable payload. */
-static size_t kb_message(const uint8_t terminal_id[32], uint64_t seq,
+[[maybe_unused]] static size_t kb_message(const uint8_t terminal_id[32], uint64_t seq,
                          uint8_t fill, uint8_t *msg, size_t cap)
 {
     struct mesh_terminal_data_v1 frame;
@@ -101,7 +101,36 @@ static void kb_worker(struct mesh_terminal_worker *w, int wfd)
     w->last_activity_unix = 1;
 }
 
-static int kb_stall_cases(void)
+#if !defined(__linux__)
+/* The terminal worker is the Linux confinement stack: elsewhere its input
+ * is an honest refusal (UNSUPPORTED) and no pipe can stand in for a pty, so
+ * a stalled shell cannot exist and the two stall cases below do not apply. */
+static int kb_unsupported_case(void)
+{
+    int failures = 0, fds[2] = { -1, -1 };
+    struct mesh_terminal_worker w;
+    TEST("boot mesh terminal: off Linux the worker refuses keyboard input "
+         "as unsupported, so there is no stalled shell to queue for") {
+        ASSERT(pipe(fds) == 0);
+        ASSERT(fcntl(fds[1], F_SETFL, O_NONBLOCK) == 0);
+        kb_worker(&w, fds[1]);
+        w.input_nowait = true;
+        uint8_t key = 0x71;
+        struct zcl_result r = mesh_terminal_worker_input(&w, &key, 1, 1);
+        ASSERT(!r.ok);
+        ASSERT_EQ(r.code, (int)MESH_TERMINAL_WORKER_ERR_UNSUPPORTED);
+        PASS();
+    }
+_test_next:
+    if (fds[0] >= 0)
+        close(fds[0]);
+    if (fds[1] >= 0)
+        close(fds[1]);
+    return failures;
+}
+#endif
+
+[[maybe_unused]] static int kb_stall_cases(void)
 {
     int failures = 0, fds[2] = { -1, -1 };
     uint8_t tid[32], msg[MESH_TERMINAL_MSG_MAX], last[KB_PAYLOAD];
@@ -149,7 +178,7 @@ _test_next:
     return failures;
 }
 
-static int kb_deadline_cases(void)
+[[maybe_unused]] static int kb_deadline_cases(void)
 {
     int failures = 0, fds[2] = { -1, -1 };
     uint8_t tid[32], msg[MESH_TERMINAL_MSG_MAX];
@@ -237,8 +266,12 @@ int test_boot_mesh_terminal(void)
     bool fixture_open = false;
 
 #if !defined(_WIN32)
+#if defined(__linux__)
     failures += kb_stall_cases();
     failures += kb_deadline_cases();
+#else
+    failures += kb_unsupported_case();
+#endif
     failures += kb_exited_cases();
 #endif
 
