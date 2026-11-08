@@ -541,10 +541,25 @@ static int test_refuse_unreadable_receipt_dir(void)
 static int count_open_fds(void)
 {
     DIR *d = opendir("/proc/self/fd");
-    if (!d)
-        return -1;
-    int n = 0;
     struct dirent *e;
+    if (!d) {
+        /* No /proc (macOS): count live numeric /dev/fd entries, not the
+         * directory's own descriptor. */
+        d = opendir("/dev/fd");
+        if (!d)
+            return -1;
+        int live = 0;
+        while ((e = readdir(d)) != NULL) {
+            char *end;
+            long fd = strtol(e->d_name, &end, 10);
+            if (end != e->d_name && *end == '\0' && fd >= 0 &&
+                fd != dirfd(d) && fcntl((int)fd, F_GETFD) >= 0)
+                live++;
+        }
+        closedir(d);
+        return live;
+    }
+    int n = 0;
     while ((e = readdir(d)) != NULL)
         if (e->d_name[0] != '.')
             n++;

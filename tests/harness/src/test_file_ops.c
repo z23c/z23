@@ -221,8 +221,24 @@ static bool fo_check_pattern(const char *path, size_t size)
 static int fo_fd_count(void)
 {
     DIR *d = opendir("/proc/self/fd");
-    if (!d)
-        return -1;
+    if (!d) {
+        /* No /proc (macOS): count live numeric /dev/fd entries, not the
+         * directory's own descriptor. */
+        d = opendir("/dev/fd");
+        if (!d)
+            return -1;
+        int live = 0;
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            char *end;
+            long fd = strtol(e->d_name, &end, 10);
+            if (end != e->d_name && *end == '\0' && fd >= 0 &&
+                fd != dirfd(d) && fcntl((int)fd, F_GETFD) >= 0)
+                live++;
+        }
+        closedir(d);
+        return live;
+    }
     int n = 0;
     while (readdir(d))
         n++;
