@@ -1772,6 +1772,17 @@ static void zc_verify_push_reproduction(struct zcl_command_reply *reply,
     json_free(&rj);
 }
 
+static bool zc_verify_release_binding(const struct vcs_package_release *release,
+                                      const uint8_t root[32], const char *index_id,
+                                      uint8_t release_id[32])
+{
+    char actual[65];
+    if (vcs_package_release_id(release, release_id) != VCS_PACKAGE_RELEASE_OK)
+        return false;
+    zcl_hex_encode(release_id, 32, actual);
+    return strcmp(actual, index_id) == 0 && memcmp(release->package_root, root, 32) == 0;
+}
+
 void zcl_native_handle_zcode_package_verify(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -1845,6 +1856,16 @@ void zcl_native_handle_zcode_package_verify(
     }
     free(release_wire);
 
+    uint8_t release_id[32];
+    if (!zc_verify_release_binding(&release, root, release_id_hex, release_id)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "RELEASE_READ",
+                               "execute", false, false,
+                               "the indexed release does not match its envelope",
+                               release_id_hex);
+        return;
+    }
+
     /* The approved-verifier allowlist: explicit local configuration, never
      * the network. A missing/unloadable file means NO quorum is possible —
      * a named rejection, not a silent "unverified". */
@@ -1885,7 +1906,7 @@ void zcl_native_handle_zcode_package_verify(
                                 &scan_truncated);
 
     struct vcs_verify_quorum quorum;
-    vcs_verify_evaluate(candidates, candidate_count, root,
+    vcs_verify_evaluate(candidates, candidate_count, root, release_id,
                         release.recipe_root, release.publisher_pubkey,
                         &policy, &quorum);
     free(candidates);

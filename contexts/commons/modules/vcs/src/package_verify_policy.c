@@ -71,6 +71,7 @@ const char *vcs_verify_row_rule_string(enum vcs_verify_row_rule rule)
     case VCS_VERIFY_ROW_SIGNER_NOT_APPROVED: return "signer-not-approved";
     case VCS_VERIFY_ROW_SELF_VERIFICATION: return "self-verification";
     case VCS_VERIFY_ROW_DUPLICATE_SIGNER: return "duplicate-signer";
+    case VCS_VERIFY_ROW_RELEASE_ID_MISMATCH: return "release-id-mismatch";
     }
     return "unknown-rule";
 }
@@ -242,6 +243,7 @@ static void quorum_row(struct vcs_verify_quorum *out,
 
 static enum vcs_verify_row_rule vcs_verify_candidate_rule(
     const struct vcs_package_attest *a, const uint8_t package_root[32],
+    const uint8_t release_id[32],
     const uint8_t recipe_root[32], const uint8_t publisher_pubkey[33],
     const struct vcs_verifier_policy *policy,
     uint8_t(*signer_store)[VCS_PACKAGE_ATTEST_PUBKEY_BYTES],
@@ -251,6 +253,8 @@ static enum vcs_verify_row_rule vcs_verify_candidate_rule(
         return VCS_VERIFY_ROW_ATTESTATION_INVALID;
     if (memcmp(a->package_root, package_root, 32) != 0)
         return VCS_VERIFY_ROW_PACKAGE_ROOT_MISMATCH;
+    if (memcmp(a->release_id, release_id, 32) != 0)
+        return VCS_VERIFY_ROW_RELEASE_ID_MISMATCH;
     if (memcmp(a->recipe_root, recipe_root, 32) != 0)
         return VCS_VERIFY_ROW_RECIPE_ROOT_MISMATCH;
     if (memcmp(a->verifier_pubkey, publisher_pubkey, 33) == 0)
@@ -292,13 +296,14 @@ static uint8_t vcs_verify_pick_best_class(const size_t class_counts[6],
 void vcs_verify_evaluate(const struct vcs_verify_candidate *candidates,
                          size_t candidate_count,
                          const uint8_t package_root[32],
+                         const uint8_t release_id[32],
                          const uint8_t recipe_root[32],
                          const uint8_t publisher_pubkey[33],
                          const struct vcs_verifier_policy *policy,
                          struct vcs_verify_quorum *out)
 {
     memset(out, 0, sizeof(*out));
-    if (!candidates || !package_root || !recipe_root ||
+    if (!candidates || !package_root || !release_id || !recipe_root ||
         !publisher_pubkey || !policy)
         return;
     out->candidates = (uint32_t)candidate_count;
@@ -336,7 +341,7 @@ void vcs_verify_evaluate(const struct vcs_verify_candidate *candidates,
         row.has_pubkey = true;
         row.result_class = a->result_class;
         enum vcs_verify_row_rule rule = vcs_verify_candidate_rule(
-            a, package_root, recipe_root, publisher_pubkey, policy,
+            a, package_root, release_id, recipe_root, publisher_pubkey, policy,
             signer_store, store_used);
         if (rule != VCS_VERIFY_ROW_COUNTED) {
             row.rule = rule;

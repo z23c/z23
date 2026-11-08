@@ -855,7 +855,7 @@ static int zq_two_matching(const struct zv_quorum_ctx *ctx)
                                 ctx->package_root, ctx->release_id,
                                 ctx->recipe_root, 0x23);
     struct vcs_verify_quorum q;
-    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->release_id, ctx->recipe_root,
                         ctx->publisher, &ctx->policy, &q);
     ZV_CHECK("quorum: two approved matching verify",
              cands[0].parsed && cands[1].parsed && q.verified &&
@@ -878,7 +878,7 @@ static int zq_three_matching(const struct zv_quorum_ctx *ctx)
             ctx->package_root, ctx->release_id, ctx->recipe_root,
             (uint8_t)(0x22 + i));
     struct vcs_verify_quorum q;
-    vcs_verify_evaluate(cands, 3, ctx->package_root, ctx->recipe_root,
+    vcs_verify_evaluate(cands, 3, ctx->package_root, ctx->release_id, ctx->recipe_root,
                         ctx->publisher, &ctx->policy, &q);
     ZV_CHECK("quorum: 3-of-N counts three signers",
              q.verified && q.quorum_signers == 3);
@@ -900,7 +900,7 @@ static int zq_mixed_classes(const struct zv_quorum_ctx *ctx)
                                 ctx->package_root, ctx->release_id,
                                 ctx->recipe_root, 0x23);
     struct vcs_verify_quorum q;
-    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->release_id, ctx->recipe_root,
                         ctx->publisher, &ctx->policy, &q);
     ZV_CHECK("quorum: different result classes do not verify",
              !q.verified && !q.quorum_reached &&
@@ -923,7 +923,7 @@ static int zq_unapproved_signer(const struct zv_quorum_ctx *ctx)
                                 ctx->package_root, ctx->release_id,
                                 ctx->recipe_root, 0x44); /* not listed */
     struct vcs_verify_quorum q;
-    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->release_id, ctx->recipe_root,
                         ctx->publisher, &ctx->policy, &q);
     ZV_CHECK("quorum: unapproved signer named, no quorum",
              !q.verified && q.counted == 1 &&
@@ -954,7 +954,7 @@ static int zq_self_verification(const struct zv_quorum_ctx *ctx)
                                 ctx->package_root, ctx->release_id,
                                 ctx->recipe_root, 0x22);
     struct vcs_verify_quorum q;
-    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->release_id, ctx->recipe_root,
                         ctx->publisher, &with_self, &q);
     ZV_CHECK("quorum: self-verification rejected",
              !q.verified && q.counted == 1 &&
@@ -988,7 +988,7 @@ static int zq_duplicate_signer(const struct zv_quorum_ctx *ctx)
     cands[1].parsed = cands[1].parsed &&
                       zv_sign_attest(&cands[1].attestation, &sk);
     struct vcs_verify_quorum q;
-    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->release_id, ctx->recipe_root,
                         ctx->publisher, &ctx->policy, &q);
     ZV_CHECK("quorum: duplicate signer counts once",
              !q.verified && q.counted == 1 &&
@@ -1011,7 +1011,7 @@ static int zq_fail_class(const struct zv_quorum_ctx *ctx)
                                 ctx->package_root, ctx->release_id,
                                 ctx->recipe_root, 0x23);
     struct vcs_verify_quorum q;
-    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->release_id, ctx->recipe_root,
                         ctx->publisher, &ctx->policy, &q);
     ZV_CHECK("quorum: fail-class quorum is not verified",
              !q.verified && q.quorum_reached && q.quorum_signers == 2 &&
@@ -1036,7 +1036,7 @@ static int zq_recipe_mismatch(const struct zv_quorum_ctx *ctx)
                                 ctx->package_root, ctx->release_id,
                                 other_recipe, 0x33);
     struct vcs_verify_quorum q;
-    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->recipe_root,
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->release_id, ctx->recipe_root,
                         ctx->publisher, &ctx->policy, &q);
     ZV_CHECK("quorum: recipe mismatch named, no quorum",
              !q.verified && q.counted == 1 &&
@@ -1062,7 +1062,7 @@ static int zq_invalid_named(const struct zv_quorum_ctx *ctx)
         cands[1].attestation.signature[0] ^= 0x01;
     cands[2].parsed = false;
     struct vcs_verify_quorum q;
-    vcs_verify_evaluate(cands, 3, ctx->package_root, ctx->recipe_root,
+    vcs_verify_evaluate(cands, 3, ctx->package_root, ctx->release_id, ctx->recipe_root,
                         ctx->publisher, &ctx->policy, &q);
     ZV_CHECK("quorum: invalid attestations named",
              !q.verified && q.counted == 1 &&
@@ -1073,21 +1073,79 @@ static int zq_invalid_named(const struct zv_quorum_ctx *ctx)
 }
 
 
+static int zq_selected_signer_recovery(const struct zv_quorum_ctx *ctx,
+                                        const uint8_t other[32])
+{
+    int failures = 0;
+    struct vcs_verify_candidate cands[3];
+    cands[0].parsed = zv_attest(&cands[0].attestation,
+        VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, ctx->package_root, other,
+        ctx->recipe_root, 0x22);
+    cands[1].parsed = zv_attest(&cands[1].attestation,
+        VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, ctx->package_root, ctx->release_id,
+        ctx->recipe_root, 0x23);
+    cands[2].parsed = zv_attest(&cands[2].attestation,
+        VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, ctx->package_root, ctx->release_id,
+        ctx->recipe_root, 0x22);
+    struct vcs_verify_quorum q;
+    vcs_verify_evaluate(cands, 3, ctx->package_root, ctx->release_id, ctx->recipe_root,
+                        ctx->publisher, &ctx->policy, &q);
+    ZV_CHECK("quorum: wrong release does not consume signer's valid vote",
+             cands[0].parsed && cands[1].parsed && cands[2].parsed &&
+             q.verified && q.counted == 2 &&
+             zv_row_rule_is(&q, 0, VCS_VERIFY_ROW_RELEASE_ID_MISMATCH) &&
+             zv_row_rule_is(&q, 1, VCS_VERIFY_ROW_COUNTED) &&
+             zv_row_rule_is(&q, 2, VCS_VERIFY_ROW_COUNTED));
+    return failures;
+}
+
+static int zq_selected_release(const struct zv_quorum_ctx *ctx)
+{
+    int failures = 0;
+    uint8_t other[32];
+    zv_pattern_root(0x60, other);
+    struct vcs_verify_candidate cands[3];
+    cands[0].parsed = zv_attest(&cands[0].attestation,
+        VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, ctx->package_root, ctx->release_id,
+        ctx->recipe_root, 0x22);
+    cands[1].parsed = zv_attest(&cands[1].attestation,
+        VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, ctx->package_root, other,
+        ctx->recipe_root, 0x23);
+    struct vcs_verify_quorum q;
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->release_id, ctx->recipe_root,
+                        ctx->publisher, &ctx->policy, &q);
+    ZV_CHECK("quorum: different releases do not combine",
+             cands[0].parsed && cands[1].parsed && !q.verified && q.counted == 1 &&
+             zv_row_rule_is(&q, 1, VCS_VERIFY_ROW_RELEASE_ID_MISMATCH));
+    cands[0].parsed = zv_attest(&cands[0].attestation,
+        VCS_PACKAGE_ATTEST_RESULT_TEST_PASS, ctx->package_root, other,
+        ctx->recipe_root, 0x22);
+    vcs_verify_evaluate(cands, 2, ctx->package_root, ctx->release_id, ctx->recipe_root,
+                        ctx->publisher, &ctx->policy, &q);
+    ZV_CHECK("quorum: another release cannot verify selected release",
+             cands[0].parsed && cands[1].parsed && !q.verified && q.counted == 0 &&
+             zv_row_rule_is(&q, 0, VCS_VERIFY_ROW_RELEASE_ID_MISMATCH) &&
+             zv_row_rule_is(&q, 1, VCS_VERIFY_ROW_RELEASE_ID_MISMATCH));
+    failures += zq_selected_signer_recovery(ctx, other);
+    return failures;
+}
+
 static int t_quorum(void)
 {
     int failures = 0;
     struct zv_quorum_ctx ctx;
     zv_quorum_ctx_init(&ctx);
 
-    zq_two_matching(&ctx);
-    zq_three_matching(&ctx);
-    zq_mixed_classes(&ctx);
-    zq_unapproved_signer(&ctx);
-    zq_self_verification(&ctx);
-    zq_duplicate_signer(&ctx);
-    zq_fail_class(&ctx);
-    zq_recipe_mismatch(&ctx);
-    zq_invalid_named(&ctx);
+    failures += zq_two_matching(&ctx);
+    failures += zq_three_matching(&ctx);
+    failures += zq_mixed_classes(&ctx);
+    failures += zq_unapproved_signer(&ctx);
+    failures += zq_self_verification(&ctx);
+    failures += zq_duplicate_signer(&ctx);
+    failures += zq_fail_class(&ctx);
+    failures += zq_recipe_mismatch(&ctx);
+    failures += zq_invalid_named(&ctx);
+    failures += zq_selected_release(&ctx);
     return failures;
 }
 

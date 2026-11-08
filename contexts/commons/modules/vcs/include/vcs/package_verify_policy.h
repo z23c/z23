@@ -95,6 +95,7 @@ enum vcs_verify_row_rule {
     VCS_VERIFY_ROW_SIGNER_NOT_APPROVED,  /* not on the local allowlist */
     VCS_VERIFY_ROW_SELF_VERIFICATION,    /* signer == release publisher */
     VCS_VERIFY_ROW_DUPLICATE_SIGNER,     /* this signer already counted */
+    VCS_VERIFY_ROW_RELEASE_ID_MISMATCH,  /* not the selected release */
 };
 
 const char *vcs_verify_row_rule_string(enum vcs_verify_row_rule rule);
@@ -126,7 +127,7 @@ struct vcs_verify_quorum {
 };
 
 /* Evaluate the candidates for ONE package: the target package root, the
- * recipe root the release envelope commits, and the envelope's publisher
+ * selected release id, recipe root the envelope commits, and its publisher
  * key (the self-verification reference). Candidates are expected verified
  * or not here — signature verification runs INSIDE so the invalid-
  * signature row is named uniformly. Deterministic: rows follow candidate
@@ -134,6 +135,7 @@ struct vcs_verify_quorum {
 void vcs_verify_evaluate(const struct vcs_verify_candidate *candidates,
                          size_t candidate_count,
                          const uint8_t package_root[32],
+                         const uint8_t release_id[32],
                          const uint8_t recipe_root[32],
                          const uint8_t publisher_pubkey[33],
                          const struct vcs_verifier_policy *policy,

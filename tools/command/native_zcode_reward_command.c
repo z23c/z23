@@ -114,6 +114,16 @@ static void zr_target_free(struct zr_target *t)
 /* Resolve datadir + root, build the index, find the release, and read
  * the persisted envelope and manifest wires. Returns false with the
  * error body set on any hard failure. */
+static bool zr_release_binding(struct zr_target *t, const uint8_t root[32])
+{
+    char actual[65];
+    if (vcs_package_release_id(&t->release, t->release_id) != VCS_PACKAGE_RELEASE_OK)
+        return false;
+    zcl_hex_encode(t->release_id, 32, actual);
+    return strcmp(actual, t->release_id_hex) == 0 &&
+           memcmp(t->release.package_root, root, 32) == 0;
+}
+
 static bool zr_target_load(const struct zcl_command_request *request,
                            struct zcl_command_reply *reply,
                            struct zr_target *t, const char *command)
@@ -191,7 +201,14 @@ static bool zr_target_load(const struct zcl_command_request *request,
         return false;
     }
     free(wire);
-    (void)vcs_package_release_id(&t->release, t->release_id);
+    if (!zr_release_binding(t, root)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "RELEASE_READ",
+                               "execute", false, false,
+                               "the indexed release does not match its envelope",
+                               t->release_id_hex);
+        return false;
+    }
 
     snprintf(path, sizeof(path), "%s/manifests/%s", t->zcode_dir,
              t->root_hex);
@@ -936,7 +953,7 @@ void zcl_native_handle_zcode_reward_eligible(
         uint8_t root[32];
         size_t root_len = 0;
         (void)zcl_hex_decode_n(t.root_hex, root, 32, &root_len);
-        vcs_verify_evaluate(candidates, candidate_count, root,
+        vcs_verify_evaluate(candidates, candidate_count, root, t.release_id,
                             t.release.recipe_root,
                             t.release.publisher_pubkey, &policy, &quorum);
     }
