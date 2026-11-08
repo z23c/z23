@@ -342,20 +342,37 @@ static void detect_leveldb(const char *path, char *out, size_t cap)
         set_unknown(out, cap);
 }
 
-static void detect_versions(const char *root, struct versions *v)
+static void detect_versions(const char *root, const char *target, struct versions *v)
 {
-    char path[PATH_MAX];
-    build_path(path, sizeof path, root, VENDOR_LIB_REL "/libcrypto.a");
+    char path[PATH_MAX], lib[PATH_MAX], inc[PATH_MAX];
+    int a, b;
+    if (target && target[0]) {
+        a = snprintf(lib, sizeof(lib), "vendor/cross/%s/lib", target);
+        b = snprintf(inc, sizeof(inc), "vendor/cross/%s/include", target);
+    } else {
+        a = snprintf(lib, sizeof(lib), "%s", VENDOR_LIB_REL);
+        b = snprintf(inc, sizeof(inc), "%s", VENDOR_INC_REL);
+    }
+    if (a < 0 || b < 0 || (size_t)a >= sizeof(lib) || (size_t)b >= sizeof(inc)) return;
+    char rel[PATH_MAX];
+#define AUDIT_PATH(dir, leaf) do { \
+    int n = snprintf(rel, sizeof(rel), "%s/%s", (dir), (leaf)); \
+    if (n < 0 || (size_t)n >= sizeof(rel)) return; \
+    build_path(path, sizeof(path), root, rel); \
+} while (0)
+    AUDIT_PATH(lib, "libcrypto.a");
     detect_archive(path, &PROBE_OPENSSL, v->openssl, sizeof v->openssl);
-    build_path(path, sizeof path, root, VENDOR_INC_REL "/sqlite3.h");
+    AUDIT_PATH(inc, "sqlite3.h");
     detect_sqlite(path, v->sqlite, sizeof v->sqlite);
-    build_path(path, sizeof path, root, VENDOR_LIB_REL "/libevent.a");
+    AUDIT_PATH(lib, "libevent.a");
     detect_archive(path, &PROBE_LIBEVENT, v->libevent, sizeof v->libevent);
-    build_path(path, sizeof path, root,
-               VENDOR_LIB_REL "/.provenance/libleveldb.a.stamp");
-    detect_leveldb(path, v->leveldb, sizeof v->leveldb);
-    build_path(path, sizeof path, root, VENDOR_LIB_REL "/libz.a");
+    if (!target || !target[0]) {
+        AUDIT_PATH(lib, ".provenance/libleveldb.a.stamp");
+        detect_leveldb(path, v->leveldb, sizeof v->leveldb);
+    }
+    AUDIT_PATH(lib, "libz.a");
     detect_archive(path, &PROBE_ZLIB, v->zlib, sizeof v->zlib);
+#undef AUDIT_PATH
 }
 
 /* ── version order (sort -V) ──────────────────────────────────────────── */
@@ -509,12 +526,16 @@ static void check_version(struct audit *a, const char *name, const char *cur,
     emit_row(a, &r);
 }
 
-static void check_all(struct audit *a, const struct versions *v)
+static void check_all(struct audit *a, const struct versions *v, bool cross)
 {
     check_version(a, "OpenSSL", v->openssl, OPENSSL_MIN, OPENSSL_NOTE);
     check_version(a, "SQLite", v->sqlite, SQLITE_MIN, SQLITE_NOTE);
     check_version(a, "libevent", v->libevent, LIBEVENT_MIN, LIBEVENT_NOTE);
-    check_version(a, "leveldb", v->leveldb, LEVELDB_MIN, LEVELDB_NOTE);
+    if (cross) {
+        struct row skipped = { "leveldb", "not-required", "-", false, true,
+            "not linked by cross node", "not linked by cross node" };
+        emit_row(a, &skipped);
+    } else check_version(a, "leveldb", v->leveldb, LEVELDB_MIN, LEVELDB_NOTE);
     check_version(a, "zlib", v->zlib, ZLIB_MIN, ZLIB_NOTE);
 }
 
@@ -535,8 +556,15 @@ static void emit_provenance(struct audit *a, bool current)
     emit_row(a, &r);
 }
 
-static void emit_secp(struct audit *a, bool locked)
+static void emit_secp(struct audit *a, bool locked, bool cross)
 {
+    if (cross) {
+        struct row r = { "libsecp256k1", "target", "provenance", false, locked,
+            locked ? "target archive provenance verified" : "target archive provenance mismatch",
+            locked ? "target archive provenance verified" : "target archive provenance mismatch" };
+        emit_row(a, &r);
+        return;
+    }
     const char *state = locked ? "HASH_LOCKED" : "MANIFEST_MISMATCH";
     char json[DETAIL_CAP];
     snprintf(json, sizeof json,
@@ -602,6 +630,25 @@ static bool find_repo_root(char *root, size_t cap)
     return true;
 }
 
+static bool audit_target_valid(const char *target)
+{
+    if (!target || !target[0]) return true;
+    for (const unsigned char *p = (const unsigned char *)target; *p; ++p)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '_' || *p == '-' || *p == '.')) return false;
+    return strcmp(target, ".") && strcmp(target, "..");
+}
+static const char *audit_secp_archive(const char *target, const char *selected)
+{
+    if (!selected || !selected[0]) return target && target[0] ? NULL : "libsecp256k1.a";
+    if (target && target[0] && !strcmp(selected, "libsecp256k1.a")) return NULL;
+    static const char *const allowed[] = {"libsecp256k1.a", "libsecp256k1-android.a",
+        "libsecp256k1-darwin.a", "libsecp256k1-windows.a"};
+    for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); ++i)
+        if (!strcmp(selected, allowed[i])) return selected;
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     struct audit a;
@@ -618,17 +665,22 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    const char *target = getenv("VENDOR_TARGET");
+    const char *secp = audit_secp_archive(target, getenv("NODE_SECP_ARCHIVE"));
+    if (!audit_target_valid(target) || !secp) {
+        fprintf(stderr, "dep_audit: target or archive selector missing or invalid\n"); return 1;
+    }
     bool archives_current = provenance_ok(root, NULL);
     struct versions v;
     memset(&v, 0, sizeof v);
-    detect_versions(root, &v);
-    bool secp_locked = provenance_ok(root, "libsecp256k1.a");
+    detect_versions(root, target, &v);
+    bool secp_locked = provenance_ok(root, secp);
 
     if (!a.json)
         print_header();
     emit_provenance(&a, archives_current);
-    check_all(&a, &v);
-    emit_secp(&a, secp_locked);
+    check_all(&a, &v, target && target[0]);
+    emit_secp(&a, secp_locked, strcmp(secp, "libsecp256k1.a") != 0);
     if (a.json)
         print_json(&a);
     else

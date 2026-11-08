@@ -2236,7 +2236,7 @@ vendor-provenance:
 # audit installed bytes before any binary can consume them.
 vendor-ready: $(DEP_AUDIT_BIN)
 	@VENDOR_TARGET=$(ZCL_CROSS_TRIPLE) tools/scripts/build_vendor.sh
-	@$(DEP_AUDIT_BIN)
+	@VENDOR_TARGET=$(ZCL_CROSS_TRIPLE) NODE_SECP_ARCHIVE=$(notdir $(NODE_SECP_ARCHIVE)) $(DEP_AUDIT_BIN)
 
 # Build the real embedded onion service from the pinned submodule. This
 # initializes the submodule, disables optional host-library integrations that

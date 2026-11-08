@@ -240,6 +240,40 @@ probe_bootstrap skip windows-headless-run windows-headless-run-selftest
 probe_bootstrap require z23
 probe_bootstrap require
 
+# The selected target's REQUIRED closure is checked before named provenance.
+mkdir -p "$SANDBOX/fake-ndk/build/cmake"
+: > "$SANDBOX/fake-ndk/build/cmake/android.toolchain.cmake"
+cat > "$SANDBOX/bin/fake-android-cc" <<'COMPILER'
+#!/usr/bin/env bash
+case "${1:-}" in
+    -dumpmachine) printf '%s\n' aarch64-linux-android24 ;;
+    --version) printf '%s\n' 'fixture Android compiler' ;;
+    *) cat >/dev/null ;;
+esac
+COMPILER
+chmod +x "$SANDBOX/bin/fake-android-cc"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$SANDBOX/bin/llvm-ar"
+chmod +x "$SANDBOX/bin/llvm-ar"
+
+for archive in libsecp256k1.a libsecp256k1-darwin.a; do
+    if output="$(cd "$SANDBOX" && VENDOR_TARGET=aarch64-linux-android24 \
+        PATH="$SANDBOX/bin:$PATH" ANDROID_NDK_ROOT="$SANDBOX/fake-ndk" VENDOR_CC="$SANDBOX/bin/fake-android-cc" \
+        VENDOR_AR=llvm-ar ZCL_VENDOR_OFFLINE=1 tools/scripts/build_vendor.sh \
+        --check-provenance "$archive" 2>&1)"; then
+        fail 'cross provenance accepted an archive outside REQUIRED'
+    fi
+    [[ "$output" == *'archive is not required for this target'* ]] ||
+        fail 'cross archive refusal did not reach REQUIRED check'
+done
+if output="$(cd "$SANDBOX" && VENDOR_TARGET=aarch64-linux-android24 \
+    PATH="$SANDBOX/bin:$PATH" ANDROID_NDK_ROOT="$SANDBOX/fake-ndk" VENDOR_CC="$SANDBOX/bin/fake-android-cc" \
+    VENDOR_AR=llvm-ar ZCL_VENDOR_OFFLINE=1 tools/scripts/build_vendor.sh \
+    --check-provenance libsecp256k1-android.a 2>&1)"; then
+    fail 'unstamped target archive unexpectedly passed provenance'
+fi
+[[ "$output" == *'vendor provenance verification failed'* ]] ||
+    fail 'target archive did not reach provenance verification'
+
 # A populated archive cache restores in offline mode without a downloader, and
 # the restored archive still passes the stamp check. The first run builds libz
 # from the already-downloaded pinned tarball and saves the bundle; the second

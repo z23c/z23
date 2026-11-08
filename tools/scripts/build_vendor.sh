@@ -1264,6 +1264,13 @@ check_provenance_set() {
 if [[ "${1:-}" == "--check-provenance" ]]; then
     shift
     if [[ $# -gt 0 ]]; then
+        for requested in "$@"; do
+            in_required=false
+            for required in "${REQUIRED[@]}"; do
+                if [[ "$requested" == "$required" ]]; then in_required=true; break; fi
+            done
+            $in_required || die "archive is not required for this target"
+        done
         check_provenance_set "$@" ||
             die "vendor provenance verification failed"
     else

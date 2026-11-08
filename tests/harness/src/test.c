@@ -1709,6 +1709,8 @@ static void run_full_suite_crypto_and_wallet(int *failures)
       *failures += test_wallet_persistence_cycle(); }
     { extern int test_wallet_flush_rollback(void);
       *failures += test_wallet_flush_rollback(); }
+    { extern int test_dep_audit_target(void);
+      *failures += test_dep_audit_target(); }
     { extern int test_dbquery_secret_denylist(void);
       *failures += test_dbquery_secret_denylist(); }
     *failures += test_log_json();
