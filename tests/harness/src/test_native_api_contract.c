@@ -753,6 +753,10 @@ static int test_native_app_catalog_uses_strict_builtin_source(void)
 static int test_native_app_inspect_launch_registry(void)
 {
     int failures = 0;
+    /* Restored after _test_next, so a failed check cannot leave the next
+     * test reading this fixture's XDG_CONFIG_HOME. */
+    char saved_copy[PATH_MAX] = "";
+    bool env_set = false, had_env = false;
     TEST("app.inspect answers for launch-registry Apps that app.list shows") {
         char root[PATH_MAX], tsv[PATH_MAX + 32];
         ASSERT(test_mkdtemp(root, sizeof(root), "app_inspect"));
@@ -763,11 +767,15 @@ static int test_native_app_inspect_launch_registry(void)
         ASSERT(f != NULL);
         ASSERT(fputs("skyfixture\tsf\t/bin/true\t-\t-\n", f) >= 0);
         ASSERT(fclose(f) == 0);
-        char *saved = getenv("XDG_CONFIG_HOME");
-        char saved_copy[PATH_MAX] = "";
+        /* The registry refuses a group- or world-writable apps.tsv; fopen
+         * follows the umask (0002 under the land queue), so set 0600. */
+        ASSERT(chmod(tsv, 0600) == 0);
+        const char *saved = getenv("XDG_CONFIG_HOME");
+        had_env = saved != NULL;
         if (saved)
             snprintf(saved_copy, sizeof(saved_copy), "%s", saved);
         ASSERT(setenv("XDG_CONFIG_HOME", root, 1) == 0);
+        env_set = true;
 
         struct zcl_command_request request;
         struct zcl_command_reply reply;
@@ -801,13 +809,15 @@ static int test_native_app_inspect_launch_registry(void)
             zcl_command_reply_free(&reply);
             json_free(&input);
         }
-        if (saved_copy[0])
-            (void)setenv("XDG_CONFIG_HOME", saved_copy, 1);
-        else
-            (void)unsetenv("XDG_CONFIG_HOME");
         (void)unlink(tsv);
         PASS();
     } _test_next:;
+    if (env_set) {
+        if (had_env)
+            (void)setenv("XDG_CONFIG_HOME", saved_copy, 1);
+        else
+            (void)unsetenv("XDG_CONFIG_HOME");
+    }
     return failures;
 }
 
