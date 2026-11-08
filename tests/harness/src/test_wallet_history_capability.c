@@ -197,23 +197,23 @@ static bool check_matching_paths(struct wallet_history_capability *cap, struct h
         !path(block, blocks, "blk00000.dat") || !path(linkpath, f->parent, "root-link")) return false;
     if (mkdir(f->other, 0700) || mkdir(blocks, 0700) || !put(index, "index") || !put(block, "block") ||
         symlink(f->root, linkpath)) return false;
-    return wallet_history_capability_matches_path(cap, f->root) &&
-        !wallet_history_capability_matches_path(cap, f->other) &&
-        !wallet_history_capability_matches_path(cap, linkpath) &&
-        !wallet_history_capability_matches_path(cap, NULL);
+    return wallet_history_capability_matches_path(cap, f->root).ok &&
+        !wallet_history_capability_matches_path(cap, f->other).ok &&
+        !wallet_history_capability_matches_path(cap, linkpath).ok &&
+        !wallet_history_capability_matches_path(cap, NULL).ok;
 }
 static bool binding_result(struct wallet_history_capability *cap, const uint8_t hash[32],
                            const struct zcl_result *result, bool consumed, unsigned which)
 {
     uint8_t other[32]; memcpy(other, hash, sizeof(other)); other[0] ^= 1;
-    if (which == 0) return result->ok && consumed && wallet_history_capability_matches(cap, hash) &&
-        !wallet_history_capability_matches(cap, other);
+    if (which == 0) return result->ok && consumed && wallet_history_capability_matches(cap, hash).ok &&
+        !wallet_history_capability_matches(cap, other).ok;
     return !result->ok && consumed && !wallet_history_capability_path(cap) &&
-        !wallet_history_capability_matches(cap, hash);
+        !wallet_history_capability_matches(cap, hash).ok;
 }
 static bool empty_binding(struct wallet_history_capability *cap, const uint8_t hash[32], const char *path)
 {
-    return !wallet_history_capability_matches(cap, hash) && !wallet_history_capability_matches_path(cap, path);
+    return !wallet_history_capability_matches(cap, hash).ok && !wallet_history_capability_matches_path(cap, path).ok;
 }
 static bool execute_case(struct history_fixture *f, unsigned which)
 {

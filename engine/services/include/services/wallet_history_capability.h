@@ -36,11 +36,11 @@ struct zcl_result wallet_history_capability_acquire_cancelable(
     const uint8_t expected_root[32], bool (*cancelled)(void *), void *context);
 const char *wallet_history_capability_path(const struct wallet_history_capability *cap);
 /* The capability must have been initialized and remain held. */
-bool wallet_history_capability_matches(const struct wallet_history_capability *cap,
+struct zcl_result wallet_history_capability_matches(const struct wallet_history_capability *cap,
                                        const uint8_t expected_root[32]);
 /* Check the opened private final directory against the held root identity.
  * The caller must keep all ancestors stable; intermediate links may be followed. */
-bool wallet_history_capability_matches_path(const struct wallet_history_capability *cap,
+struct zcl_result wallet_history_capability_matches_path(const struct wallet_history_capability *cap,
                                             const char *path);
 void wallet_history_capability_release(struct wallet_history_capability *cap);
 #if defined(ZCL_TESTING) && defined(__linux__)

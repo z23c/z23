@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #if defined(__linux__)
+#include "platform/fd_path.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -23,13 +24,22 @@ static bool stopped(struct history_cancel *c)
     if (c->check && c->check(c->context)) c->observed = true;
     return c->observed;
 }
+static struct platform_positioned_file_snapshot stat_snapshot(const struct stat *st)
+{
+    return (struct platform_positioned_file_snapshot){
+        .size = (uint64_t)st->st_size, .volume = (uint64_t)st->st_dev,
+        .file_low = (uint64_t)st->st_ino,
+        .modified_seconds = (int64_t)st->st_mtim.tv_sec,
+        .modified_nanoseconds = (uint32_t)st->st_mtim.tv_nsec,
+        .changed_seconds = (int64_t)st->st_ctim.tv_sec,
+        .changed_nanoseconds = (uint32_t)st->st_ctim.tv_nsec
+    };
+}
 static bool same(const struct stat *a, const struct stat *b)
 {
-    return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
-        a->st_mode == b->st_mode && a->st_uid == b->st_uid &&
-        a->st_nlink == b->st_nlink && a->st_size == b->st_size &&
-        a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
-        a->st_ctim.tv_sec == b->st_ctim.tv_sec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+    struct platform_positioned_file_snapshot left = stat_snapshot(a), right = stat_snapshot(b);
+    return a->st_uid == b->st_uid && a->st_mode == b->st_mode && a->st_nlink == b->st_nlink &&
+        platform_positioned_file_snapshot_equal(&left, &right);
 }
 static bool block_name(const char *text, unsigned count)
 {
@@ -68,8 +78,7 @@ static bool pin_file(int dir, const char *leaf, struct platform_positioned_file 
                      struct stat *saved)
 {
     char path[96];
-    int n = snprintf(path, sizeof(path), "/proc/self/fd/%d/%s", dir, leaf);
-    if (n < 0 || (size_t)n >= sizeof(path) ||
+    if (!platform_dirfd_child_path(path, sizeof(path), dir, leaf) ||
         !platform_positioned_file_open(file, path)) return false;
     int fd = (int)platform_positioned_file_native_fd(file);
     return !fstat(fd, saved) && S_ISREG(saved->st_mode) && saved->st_uid == geteuid() &&
@@ -87,7 +96,7 @@ struct history_files {
 };
 static int file_location(struct wallet_history_capability *cap, unsigned i, unsigned count, char name[16])
 {
-    if (i == count) { strcpy(name, "block_index.bin"); return (int)cap->root.native; }
+    if (i == count) { memcpy(name, "block_index.bin", sizeof("block_index.bin")); return (int)cap->root.native; }
     (void)snprintf(name, 16, "blk%05u.dat", i);
     return (int)cap->blocks.native;
 }
@@ -171,21 +180,28 @@ void wallet_history_capability_release(struct wallet_history_capability *cap)
 }
 const char *wallet_history_capability_path(const struct wallet_history_capability *cap)
 { return cap && cap->path[0] ? cap->path : NULL; }
-bool wallet_history_capability_matches(const struct wallet_history_capability *cap, const uint8_t root[32])
-{ return cap && root && cap->verified && cap->path[0] && memcmp(cap->verified_root, root, 32) == 0; }
-bool wallet_history_capability_matches_path(const struct wallet_history_capability *cap, const char *path)
+struct zcl_result wallet_history_capability_matches(const struct wallet_history_capability *cap, const uint8_t root[32])
+{
+    if (!cap || !root || !cap->verified || !cap->path[0] || memcmp(cap->verified_root, root, 32))
+        return ZCL_ERR(-1, "history capability: verified root does not match");
+    return ZCL_OK;
+}
+struct zcl_result wallet_history_capability_matches_path(const struct wallet_history_capability *cap, const char *path)
 {
 #if defined(__linux__)
-    if (!cap || !cap->verified || !cap->path[0] || !path) return false;
+    if (!cap || !cap->verified || !cap->path[0] || !path)
+        return ZCL_ERR(-1, "history capability: path check requires a held capability");
     uintptr_t handle;
-    if (!platform_private_directory_open_validated_traverse(path, &handle)) return false;
+    if (!platform_private_directory_open_validated_traverse(path, &handle))
+        return ZCL_ERR(-1, "history capability: cannot open private history path");
     struct stat held, named;
     bool ok = !fstat((int)cap->root.native, &held) && !fstat((int)handle, &named) &&
         held.st_dev == named.st_dev && held.st_ino == named.st_ino;
     platform_private_directory_close(handle);
-    return ok;
+    if (!ok) return ZCL_ERR(-1, "history capability: history path does not match retained root");
+    return ZCL_OK;
 #else
-    (void)cap; (void)path; return false;
+    (void)cap; (void)path; return ZCL_ERR(-1, "history capability: unsupported host");
 #endif
 }
 #if defined(__linux__)
@@ -225,8 +241,8 @@ static bool verify_capability(struct wallet_history_capability *cap, const char 
     if (stopped(cancel) || !lock_verified(cap, lock, &lock_stat) || !root_verified(cap, leaf, &root_stat) ||
         platform_directory_transaction_open_child(&cap->root, "blocks", false, &cap->blocks) != PLATFORM_DIRECTORY_OK)
         return false;
-    int n = snprintf(cap->path, sizeof(cap->path), "/proc/self/fd/%d", (int)cap->root.native);
-    bool ok = n >= 0 && (size_t)n < sizeof(cap->path) && verify(cap, count, root, cancel, verified) &&
+    bool ok = platform_fd_path(cap->path, sizeof(cap->path), (int)cap->root.native, NULL) &&
+        verify(cap, count, root, cancel, verified) &&
         named_same((int)cap->parent.native, leaf, &root_stat) &&
         named_same((int)cap->parent.native, lock, &lock_stat);
     if (ok) { memcpy(cap->verified_root, verified, sizeof(verified)); cap->verified = true; }
