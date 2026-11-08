@@ -40,6 +40,7 @@
 #include "platform/fd_path.h"
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 #include <errno.h>
 #include <inttypes.h>
@@ -1018,6 +1019,120 @@ static sqlite3 *bip_existing_reader(int dirfd)
     return db;
 }
 #endif
+
+#if !defined(_WIN32)
+struct bip_existing_snapshot {
+    sqlite3 *db;
+    sqlite3_stmt *lookup;
+    int dirfd;
+    struct stat files[3];
+    int present[3];
+    bool (*stop)(void *);
+    void *ctx;
+};
+static const char *const bip_snapshot_names[] = {
+    "block_index_projection.db", "block_index_projection.db-wal",
+    "block_index_projection.db-shm"
+};
+static_assert(EV_BLOCK_HEADER_MAX_SOLUTION <= sizeof(((struct disk_block_index *)0)->nSolution), "projection solution fits disk index");
+static bool bip_snapshot_identity(struct bip_existing_snapshot *r, bool capture)
+{
+    for (size_t i = 0; i < 3; ++i) {
+        struct stat s;
+        int present = bip_existing_leaf(r->dirfd, bip_snapshot_names[i], &s);
+        if (present < 0 || (i == 0 && present != 1)) return false;
+        if (capture) { r->present[i] = present; if (present) r->files[i] = s; }
+        else if (present != r->present[i] ||
+                 (present && (s.st_dev != r->files[i].st_dev || s.st_ino != r->files[i].st_ino))) return false;
+    }
+    return !r->present[1] || r->present[2];
+}
+static bool bip_snapshot_begin(struct bip_existing_snapshot *r)
+{
+    if (r->dirfd < 0 || !bip_snapshot_identity(r, true)) return false;
+    r->db = bip_existing_reader(r->dirfd);
+    return r->db && bip_snapshot_identity(r, false) &&
+        sqlite3_exec(r->db, "BEGIN; SELECT 1 FROM block_index LIMIT 1;", NULL, NULL, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(r->db, "SELECT blob FROM block_index WHERE hash = ?", -1, &r->lookup, NULL) == SQLITE_OK;
+}
+static enum bip_snapshot_lookup bip_snapshot_read(struct bip_existing_snapshot *r,
+    const uint8_t hash[32], struct disk_block_index *item)
+{
+    enum bip_snapshot_lookup result = BIP_SNAPSHOT_LOOKUP_ERROR;
+    if (sqlite3_bind_blob(r->lookup, 1, hash, 32, SQLITE_TRANSIENT) == SQLITE_OK) {
+        int rc = sqlite3_step(r->lookup); // raw-sql-ok:kernel-primitive
+        if (rc == SQLITE_DONE) result = BIP_SNAPSHOT_ABSENT;
+        else if (rc == SQLITE_ROW && bip_strict_column(r->lookup, hash, item) &&
+                 sqlite3_step(r->lookup) == SQLITE_DONE) // raw-sql-ok:kernel-primitive
+            result = BIP_SNAPSHOT_PRESENT;
+    }
+    int reset_rc = sqlite3_reset(r->lookup);
+    int clear_rc = sqlite3_clear_bindings(r->lookup);
+    if (reset_rc != SQLITE_OK || clear_rc != SQLITE_OK || !bip_snapshot_identity(r, false))
+        return BIP_SNAPSHOT_LOOKUP_ERROR;
+    return result;
+}
+#endif
+
+enum bip_snapshot_result block_index_projection_snapshot_open(
+    int dirfd, bool (*stop)(void *), void *ctx, bip_existing_snapshot_t **out)
+{
+    if (!out) return BIP_SNAPSHOT_ERROR;
+    *out = NULL;
+#if defined(_WIN32)
+    (void)dirfd; (void)stop; (void)ctx;
+    return BIP_SNAPSHOT_UNSUPPORTED;
+#else
+    if (dirfd < 0) return BIP_SNAPSHOT_ERROR;
+    if (stop && stop(ctx)) return BIP_SNAPSHOT_STOPPED;
+    struct bip_existing_snapshot *r = zcl_calloc(1, sizeof(*r), "bip snapshot");
+    if (!r) return BIP_SNAPSHOT_ERROR;
+    r->dirfd = fcntl(dirfd, F_DUPFD_CLOEXEC, 0);
+    r->stop = stop; r->ctx = ctx;
+    bool ok = bip_snapshot_begin(r);
+    if (ok && stop && stop(ctx)) {
+        if (!block_index_projection_snapshot_close(r)) return BIP_SNAPSHOT_ERROR;
+        return BIP_SNAPSHOT_STOPPED;
+    }
+    if (!ok) { (void)block_index_projection_snapshot_close(r); return BIP_SNAPSHOT_ERROR; }
+    *out = r;
+    return BIP_SNAPSHOT_OK;
+#endif
+}
+
+enum bip_snapshot_lookup block_index_projection_snapshot_lookup(
+    bip_existing_snapshot_t *r, const uint8_t hash[32], struct disk_block_index *out)
+{
+#if defined(_WIN32)
+    (void)r; (void)hash; (void)out;
+    return BIP_SNAPSHOT_LOOKUP_ERROR;
+#else
+    if (!r || !hash || !out || !bip_snapshot_identity(r, false)) return BIP_SNAPSHOT_LOOKUP_ERROR;
+    if (r->stop && r->stop(r->ctx)) return BIP_SNAPSHOT_LOOKUP_STOPPED;
+    struct disk_block_index item;
+    enum bip_snapshot_lookup result = bip_snapshot_read(r, hash, &item);
+    if (result != BIP_SNAPSHOT_LOOKUP_ERROR && r->stop && r->stop(r->ctx)) return BIP_SNAPSHOT_LOOKUP_STOPPED;
+    if (result == BIP_SNAPSHOT_PRESENT) *out = item;
+    return result;
+#endif
+}
+
+bool block_index_projection_snapshot_close(bip_existing_snapshot_t *r)
+{
+#if defined(_WIN32)
+    (void)r; return false;
+#else
+    if (!r) return false;
+    bool ok = r->dirfd >= 0 && bip_snapshot_identity(r, false);
+    if (r->lookup && sqlite3_finalize(r->lookup) != SQLITE_OK) ok = false;
+    if (r->db && sqlite3_exec(r->db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) ok = false;
+    if (r->db && sqlite3_close(r->db) != SQLITE_OK) ok = false;
+    if (r->dirfd >= 0 && !bip_snapshot_identity(r, false)) ok = false;
+    if (r->dirfd >= 0 && close(r->dirfd) != 0) ok = false;
+    free(r);
+    return ok;
+#endif
+}
 
 bool block_index_projection_read_window_existing(int dirfd,
     const uint8_t (*hashes)[32], size_t count, struct disk_block_index *out)

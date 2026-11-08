@@ -101,6 +101,21 @@ bool block_index_projection_get_strict(block_index_projection_t *p,
 bool block_index_projection_read_window_existing(int dirfd,
     const uint8_t (*hashes)[32], size_t count, struct disk_block_index *out);
 
+/* Retained read-only snapshot of an existing projection. The caller keeps the
+ * directory namespace stable; SQLite may update existing WAL shared memory.
+ * The stop callback and context must outlive the reader. Lookup leaves output
+ * unchanged unless it returns BIP_SNAPSHOT_PRESENT. */
+typedef struct bip_existing_snapshot bip_existing_snapshot_t;
+enum bip_snapshot_result { BIP_SNAPSHOT_ERROR, BIP_SNAPSHOT_STOPPED, BIP_SNAPSHOT_UNSUPPORTED, BIP_SNAPSHOT_OK };
+enum bip_snapshot_lookup { BIP_SNAPSHOT_LOOKUP_ERROR, BIP_SNAPSHOT_LOOKUP_STOPPED,
+                           BIP_SNAPSHOT_ABSENT, BIP_SNAPSHOT_PRESENT };
+enum bip_snapshot_result block_index_projection_snapshot_open(
+    int dirfd, bool (*stop)(void *), void *ctx, bip_existing_snapshot_t **out);
+enum bip_snapshot_lookup block_index_projection_snapshot_lookup(
+    bip_existing_snapshot_t *reader, const uint8_t hash[32], struct disk_block_index *out);
+/* Releases the reader even on failure. Windows is unsupported. */
+bool block_index_projection_snapshot_close(bip_existing_snapshot_t *reader);
+
 /* Lookup by height. If multiple entries share a height (siblings at
  * an unactivated branch), returns the lexicographically smallest hash.
  * Returns true on found. */

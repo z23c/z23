@@ -248,6 +248,96 @@ done:
 
 /* ── Test 2: single_header_consumed ────────────────────────────────── */
 
+#if !defined(_WIN32)
+static bool bip_test_cancel(void *ctx) { return *(bool *)ctx; }
+static void bip_snapshot_isolation(block_index_projection_t *p, int fd, const struct ev_block_header *h, bip_existing_snapshot_t *reader, int *failures)
+{
+    struct disk_block_index out;
+    bool saved = sqlite3_exec(p->db, "CREATE TEMP TABLE bip_saved AS SELECT blob FROM block_index", NULL, NULL, NULL) == SQLITE_OK;
+    bool updated = saved && sqlite3_exec(p->db, "UPDATE block_index SET blob=CAST(substr(blob,1,68)||x'78563412'||substr(blob,73) AS BLOB)", NULL, NULL, NULL) == SQLITE_OK;
+    BIP_CHECK("snapshot retains original committed row", updated && block_index_projection_snapshot_lookup(reader, h->hash, &out) == BIP_SNAPSHOT_PRESENT && out.nStatus == h->nStatus);
+    bip_existing_snapshot_t *newer = NULL;
+    bool opened_new = updated && block_index_projection_snapshot_open(fd, NULL, NULL, &newer) == BIP_SNAPSHOT_OK;
+    BIP_CHECK("new snapshot sees committed change", opened_new && block_index_projection_snapshot_lookup(newer, h->hash, &out) == BIP_SNAPSHOT_PRESENT && out.nStatus == 0x12345678u);
+    if (newer) BIP_CHECK("new snapshot closes", block_index_projection_snapshot_close(newer));
+    BIP_CHECK("restore exact original row", saved && sqlite3_exec(p->db, "UPDATE block_index SET blob=(SELECT blob FROM bip_saved); DROP TABLE bip_saved", NULL, NULL, NULL) == SQLITE_OK);
+}
+static void bip_snapshot_consistency(block_index_projection_t *p, int fd, const struct ev_block_header *h, int *failures)
+{
+    bip_existing_snapshot_t *reader = NULL;
+    bool stop = false;
+    struct disk_block_index out, before;
+    memset(&out, 0x5a, sizeof(out)); before = out;
+    BIP_CHECK("snapshot opens retained projection", fd >= 0 &&
+        block_index_projection_snapshot_open(fd, bip_test_cancel, &stop, &reader) == BIP_SNAPSHOT_OK);
+    if (reader) {
+        BIP_CHECK("snapshot returns exact row", block_index_projection_snapshot_lookup(reader, h->hash, &out) == BIP_SNAPSHOT_PRESENT && out.nHeight == h->height);
+        uint8_t missing[32]; memset(missing, 0x7e, sizeof(missing)); out = before;
+        BIP_CHECK("snapshot missing preserves output", block_index_projection_snapshot_lookup(reader, missing, &out) == BIP_SNAPSHOT_ABSENT && memcmp(&out, &before, sizeof(out)) == 0);
+        bip_snapshot_isolation(p, fd, h, reader, failures);
+        out = before;
+        bool moved = renameat(fd, "block_index_projection.db", fd, "moved.db") == 0;
+        BIP_CHECK("snapshot detects replaced namespace", moved && block_index_projection_snapshot_lookup(reader, h->hash, &out) == BIP_SNAPSHOT_LOOKUP_ERROR);
+        BIP_CHECK("snapshot restores fixture namespace", moved && renameat(fd, "moved.db", fd, "block_index_projection.db") == 0);
+        stop = true;
+        BIP_CHECK("snapshot stop preserves output", block_index_projection_snapshot_lookup(reader, h->hash, &out) == BIP_SNAPSHOT_LOOKUP_STOPPED && memcmp(&out, &before, sizeof(out)) == 0);
+        BIP_CHECK("snapshot closes", block_index_projection_snapshot_close(reader));
+    }
+}
+static void bip_snapshot_missing_shm(int fd, int *failures)
+{
+    bip_existing_snapshot_t *other = NULL;
+    struct stat ignored;
+    bool have_wal = fstatat(fd, "block_index_projection.db-wal", &ignored, AT_SYMLINK_NOFOLLOW) == 0;
+    bool moved_shm = have_wal && renameat(fd, "block_index_projection.db-shm", fd, "saved.shm") == 0;
+    other = NULL;
+    BIP_CHECK("WAL without SHM refused before open", moved_shm && block_index_projection_snapshot_open(fd, NULL, NULL, &other) == BIP_SNAPSHOT_ERROR && other == NULL && fstatat(fd, "block_index_projection.db-shm", &ignored, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
+    BIP_CHECK("restore SHM fixture", moved_shm && renameat(fd, "saved.shm", fd, "block_index_projection.db-shm") == 0);
+}
+static void bip_snapshot_namespace(int fd, int *failures)
+{
+    bip_existing_snapshot_t *moved_reader = NULL;
+    bool opened_moved = block_index_projection_snapshot_open(fd, NULL, NULL, &moved_reader) == BIP_SNAPSHOT_OK;
+    bool moved_for_close = opened_moved && renameat(fd, "block_index_projection.db", fd, "moved.db") == 0;
+    BIP_CHECK("snapshot close refuses changed identity", moved_for_close && !block_index_projection_snapshot_close(moved_reader));
+    if (opened_moved && !moved_for_close) (void)block_index_projection_snapshot_close(moved_reader);
+    BIP_CHECK("restore database name after close", moved_for_close && renameat(fd, "moved.db", fd, "block_index_projection.db") == 0);
+    bool made_wrong = mkdirat(fd, "wrong", 0700) == 0;
+    int wrong = made_wrong ? openat(fd, "wrong", O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    bip_existing_snapshot_t *other = NULL;
+    BIP_CHECK("snapshot rejects wrong namespace", wrong >= 0 && block_index_projection_snapshot_open(wrong, NULL, NULL, &other) == BIP_SNAPSHOT_ERROR && other == NULL);
+    bip_snapshot_missing_shm(fd, failures);
+    if (wrong >= 0) close(wrong);
+    if (made_wrong) (void)unlinkat(fd, "wrong", AT_REMOVEDIR);
+    bool stop = true;
+    bip_existing_snapshot_t *reader = NULL;
+    BIP_CHECK("snapshot open observes stop", block_index_projection_snapshot_open(fd, bip_test_cancel, &stop, &reader) == BIP_SNAPSHOT_STOPPED && reader == NULL);
+}
+static void bip_snapshot_cases(block_index_projection_t *p, const char *dir, const struct ev_block_header *h, int *failures)
+{
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    bip_snapshot_consistency(p, fd, h, failures);
+    bip_snapshot_namespace(fd, failures);
+    if (fd >= 0) close(fd);
+}
+#endif
+
+#if !defined(_WIN32)
+static void bip_snapshot_oversize(block_index_projection_t *p, int dirfd, const struct ev_block_header *h, int *failures)
+{
+    struct disk_block_index got;
+    char sql[256];
+    snprintf(sql, sizeof(sql), "UPDATE block_index SET blob=CAST(substr(blob,1,%u)||x'4105'||x'0000'||zeroblob(1345) AS BLOB)", (unsigned)EV_BLOCK_HEADER_FIXED_BYTES - 4);
+    bool original_saved = sqlite3_exec(p->db, "CREATE TEMP TABLE bip_oversize_saved AS SELECT blob FROM block_index", NULL, NULL, NULL) == SQLITE_OK;
+    bool oversized = original_saved && sqlite3_exec(p->db, sql, NULL, NULL, NULL) == SQLITE_OK;
+    bip_existing_snapshot_t *oversize_reader = NULL;
+    bool opened_oversize = oversized && block_index_projection_snapshot_open(dirfd, NULL, NULL, &oversize_reader) == BIP_SNAPSHOT_OK;
+    BIP_CHECK("snapshot refuses oversized solution", opened_oversize && block_index_projection_snapshot_lookup(oversize_reader, h->hash, &got) == BIP_SNAPSHOT_LOOKUP_ERROR);
+    if (oversize_reader) BIP_CHECK("oversize snapshot closes", block_index_projection_snapshot_close(oversize_reader));
+    BIP_CHECK("restore exact solution fixture", original_saved && sqlite3_exec(p->db, "UPDATE block_index SET blob=(SELECT blob FROM bip_oversize_saved); DROP TABLE bip_oversize_saved", NULL, NULL, NULL) == SQLITE_OK);
+}
+#endif
+
 static void bip_strict_lookup_cases(block_index_projection_t *p, const char *dir,
                                     const struct ev_block_header *h, int *failures)
 {
@@ -259,6 +349,8 @@ static void bip_strict_lookup_cases(block_index_projection_t *p, const char *dir
         block_index_projection_read_window_existing(dirfd, (const uint8_t (*)[32])hashes, 1, &got));
 #else
     (void)dir;
+    bip_existing_snapshot_t *unsupported = NULL;
+    BIP_CHECK("snapshot Windows unsupported", block_index_projection_snapshot_open(-1, NULL, NULL, &unsupported) == BIP_SNAPSHOT_UNSUPPORTED && unsupported == NULL);
 #endif
     BIP_CHECK("strict lookup accepts exact serialized header",
               block_index_projection_get_strict(p, h->hash, &got) && got.nHeight == h->height);
@@ -269,11 +361,18 @@ static void bip_strict_lookup_cases(block_index_projection_t *p, const char *dir
 #if !defined(_WIN32)
     BIP_CHECK("strict window refuses trailing bytes", dirfd >= 0 &&
         !block_index_projection_read_window_existing(dirfd, (const uint8_t (*)[32])hashes, 1, &got));
+    bip_existing_snapshot_t *bad_reader = NULL;
+    bool opened_bad = block_index_projection_snapshot_open(dirfd, NULL, NULL, &bad_reader) == BIP_SNAPSHOT_OK;
+    BIP_CHECK("snapshot refuses malformed row", opened_bad && block_index_projection_snapshot_lookup(bad_reader, h->hash, &got) == BIP_SNAPSHOT_LOOKUP_ERROR);
+    if (bad_reader) BIP_CHECK("malformed snapshot closes", block_index_projection_snapshot_close(bad_reader));
 #endif
     bool restored = sqlite3_exec(p->db,
         "UPDATE block_index SET blob=substr(blob,1,length(blob)-1)", NULL, NULL, NULL) == SQLITE_OK;
     BIP_CHECK("strict lookup accepts restored payload", restored &&
               block_index_projection_get_strict(p, h->hash, &got));
+#if !defined(_WIN32)
+    bip_snapshot_oversize(p, dirfd, h, failures);
+#endif
     bool changed = sqlite3_exec(p->db,
         "UPDATE block_index SET blob=CAST(x'ff' || substr(blob,2) AS BLOB)", NULL, NULL, NULL) == SQLITE_OK;
     BIP_CHECK("strict lookup refuses mismatched embedded hash", changed &&
@@ -318,6 +417,9 @@ static int run_single_header_consumed(int *failures)
     BIP_CHECK("single: nStatus matches", got.nStatus == 0x01);
     BIP_CHECK("single: nDataPos matches",
               got.nDataPos == h.nDataPos);
+#if !defined(_WIN32)
+    bip_snapshot_cases(p, dir, &h, failures);
+#endif
     bip_strict_lookup_cases(p, dir, &h, failures);
 
     block_index_projection_close(p);
