@@ -96,6 +96,14 @@ void consensus_state_artifact_evidence_free(
     (void)consensus_state_artifact_evidence_close(&evidence);
 }
 
+static bool artifact_snapshot_platform_arm(
+    const struct consensus_state_artifact_evidence *evidence,
+    struct platform_positioned_file_snapshot *out)
+{
+    (void)evidence; (void)out;
+    return false;
+}
+
 bool consensus_state_artifact_evidence_manifest_copy(
     const struct consensus_state_artifact_evidence *evidence,
     struct consensus_state_bundle_manifest *manifest)
@@ -655,6 +663,21 @@ void consensus_state_artifact_evidence_free(
     (void)consensus_state_artifact_evidence_close(&evidence);
 }
 
+static bool artifact_snapshot_platform_arm(
+    const struct consensus_state_artifact_evidence *evidence,
+    struct platform_positioned_file_snapshot *out)
+{
+    if (!evidence || !out) return false;
+    zcl_mutex_lock((zcl_mutex_t *)&evidence->mutex);
+    struct platform_positioned_file_snapshot retained_now;
+    bool ok = evidence->artifact_fd >= 0 && evidence->bundle_db &&
+        platform_positioned_file_snapshot(&evidence->artifact_file, &retained_now) &&
+        platform_positioned_file_snapshot_equal(&retained_now, &evidence->artifact_snapshot);
+    if (ok) *out = retained_now;
+    zcl_mutex_unlock((zcl_mutex_t *)&evidence->mutex);
+    return ok;
+}
+
 bool consensus_state_artifact_evidence_manifest_copy(
     const struct consensus_state_artifact_evidence *evidence,
     struct consensus_state_bundle_manifest *out)
@@ -1112,4 +1135,11 @@ bool consensus_state_artifact_evidence_copy_to_fd(
     const struct consensus_state_artifact_evidence *evidence, int destination)
 {
     return artifact_copy_platform_arm(evidence, destination);
+}
+
+bool consensus_state_artifact_evidence_snapshot(
+    const struct consensus_state_artifact_evidence *evidence,
+    struct platform_positioned_file_snapshot *out)
+{
+    return artifact_snapshot_platform_arm(evidence, out);
 }

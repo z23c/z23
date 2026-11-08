@@ -9,6 +9,7 @@
 #include "../../../engine/composition/src/boot_cutover_startup_internal.h"
 #include "../../../engine/composition/src/consensus_state_install_stage.h"
 #include "platform/os_proc.h"
+#include "platform/positioned_file.h"
 #include "util/thread_registry.h"
 #include "wallet/wallet_lock.h"
 #include "services/island_anchor.h"
@@ -3935,6 +3936,15 @@ static int csi_artifact_rename_cases(struct csi_install_scene *s)
     CSI_CHECK("changed-object iterator begins before replacement",
               changed_iterator_open);
 
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot retained, opened;
+    platform_positioned_file_init(&file);
+    CSI_CHECK("snapshot comes from admitted descriptor",
+              consensus_state_artifact_evidence_snapshot(s->artifact, &retained) &&
+              platform_positioned_file_open(&file, s->b.path) &&
+              platform_positioned_file_snapshot(&file, &opened) &&
+              platform_positioned_file_snapshot_equal(&retained, &opened));
+    platform_positioned_file_close(&file);
     char moved_path[sizeof(s->b.path) + 16];
     snprintf(moved_path, sizeof(moved_path), "%s-moved", s->b.path);
     unlink(moved_path);
@@ -3950,6 +3960,8 @@ static int csi_artifact_rename_cases(struct csi_install_scene *s)
         fputs("not the admitted artifact", replacement);
         fclose(replacement);
     }
+    CSI_CHECK("renamed retained descriptor invalidates snapshot",
+              !consensus_state_artifact_evidence_snapshot(s->artifact, &retained));
     CSI_CHECK("inode rename invalidates admitted metadata receipt",
               !consensus_state_artifact_evidence_manifest_copy(
                   s->artifact, &s->admitted_manifest));

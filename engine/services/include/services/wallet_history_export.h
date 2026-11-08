@@ -8,6 +8,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct platform_directory_transaction;
+
+/* Check visible ancestry using the retained parent. Caller keeps the source
+ * pathname identity and trusted mount namespace stable through check and use.
+ * Bind-mounted aliases of source descendants are not detected. */
+struct zcl_result wallet_history_export_parent_outside_source(
+    const char *source, const struct platform_directory_transaction *parent);
+
 struct wallet_history_export_request {
     const char *source_datadir;
     const char *private_parent;
@@ -38,6 +46,12 @@ struct wallet_history_export_result {
     enum wallet_history_export_outcome outcome;
     struct file_manifest manifest;
 };
+/* Caller independently admits the endpoint and keeps the archive namespace
+ * and bytes immutable through validation and use. The path does not retain
+ * identity. Checks selected ancestry and authenticated bodies, not the full
+ * manifest; grants no chain or proof-of-work authority. */
+struct zcl_result wallet_history_export_validate_archive(
+    const struct wallet_history_export_request *request, const char *path);
 struct zcl_result wallet_history_export_run(
     const struct wallet_history_export_request *request,
     struct wallet_history_export_result *result);

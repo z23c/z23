@@ -155,31 +155,30 @@ static bool history_copy_blocks(struct history_export *e)
     }
     return platform_directory_transaction_flush(&e->blocks);
 }
-static bool history_validate(struct history_export *e)
+static bool history_validate_archive(const struct wallet_history_export_request *request,
+    const char *path, const struct uint256 *test_genesis)
 {
-    main_state_free(e->index);
-    free(e->index);
-    e->index = NULL;
     struct main_state *verified = zcl_calloc(1, sizeof(*verified), "history export verified state");
     if (!verified) return false;
     main_state_init(verified);
 #ifdef ZCL_TESTING
-    struct zcl_result opened = e->test_genesis ?
-        block_index_history_archive_test_open(verified, e->stage_path, e->request->max_rows,
-            e->request->endpoint_height, e->request->endpoint_hash, e->test_genesis, NULL) :
-        block_index_history_archive_open(verified, e->stage_path, e->request->max_rows,
-            e->request->endpoint_height, e->request->endpoint_hash, NULL);
+    struct zcl_result opened = test_genesis ?
+        block_index_history_archive_test_open(verified, path, request->max_rows,
+            request->endpoint_height, request->endpoint_hash, test_genesis, NULL) :
+        block_index_history_archive_open(verified, path, request->max_rows,
+            request->endpoint_height, request->endpoint_hash, NULL);
 #else
-    struct zcl_result opened = block_index_history_archive_open(verified, e->stage_path,
-        e->request->max_rows, e->request->endpoint_height, e->request->endpoint_hash, NULL);
+    (void)test_genesis;
+    struct zcl_result opened = block_index_history_archive_open(verified, path,
+        request->max_rows, request->endpoint_height, request->endpoint_hash, NULL);
 #endif
     bool ok = opened.ok;
-    for (int64_t h = 0; ok && h <= e->request->endpoint_height; h++) {
+    for (int64_t h = 0; ok && h <= request->endpoint_height; h++) {
         const struct block_index *row = active_chain_at(&verified->chain_active, (int)h);
-        if (history_cancelled(e) || !row || !row->phashBlock) { ok = false; break; }
+        if ((request->cancelled && request->cancelled(request->cancel_context)) || !row || !row->phashBlock) { ok = false; break; }
         struct block block;
         block_init(&block);
-        struct zcl_result checked = node_db_catchup_read_authenticated_block(e->stage_path,
+        struct zcl_result checked = node_db_catchup_read_authenticated_block(path,
             row->nFile, row->nDataPos, row->phashBlock, &block);
         block_free(&block);
         ok = checked.ok;
@@ -187,6 +186,17 @@ static bool history_validate(struct history_export *e)
     main_state_free(verified);
     free(verified);
     return ok;
+}
+static bool history_validate(struct history_export *e)
+{
+    main_state_free(e->index);
+    free(e->index);
+    e->index = NULL;
+#ifdef ZCL_TESTING
+    return history_validate_archive(e->request, e->stage_path, e->test_genesis);
+#else
+    return history_validate_archive(e->request, e->stage_path, NULL);
+#endif
 }
 static void history_close(struct history_export *e)
 {
@@ -197,11 +207,12 @@ static void history_close(struct history_export *e)
     platform_directory_transaction_close(&e->stage);
     platform_directory_transaction_close(&e->parent);
 }
-static bool history_destination_outside_source(const struct history_export *e)
+static bool history_destination_outside_source(uintptr_t source_root,
+    const struct platform_directory_transaction *destination)
 {
     struct stat source, current, parent;
-    if (fstat((int)e->source_root, &source) != 0) return false;
-    int fd = dup((int)e->parent.native);
+    if (fstat((int)source_root, &source) != 0) return false;
+    int fd = dup((int)destination->native);
     if (fd < 0) return false;
     bool outside = false;
     for (unsigned depth = 0; depth < 1024; depth++) {
@@ -225,7 +236,7 @@ static bool history_setup(struct history_export *e)
     if (!platform_fd_path(e->source_path, sizeof(e->source_path), (int)e->source_root, ".")) return false;
     if (!platform_directory_transaction_open(&e->parent, r->private_parent) ||
         !platform_fd_path(e->parent_path, sizeof(e->parent_path), (int)e->parent.native, ".") ||
-        !history_destination_outside_source(e)) return false;
+        !history_destination_outside_source(e->source_root, &e->parent)) return false;
     if (mkdirat((int)e->parent.native, r->staging_leaf, 0700) != 0) return false;
     if (platform_directory_transaction_open_child(&e->parent, r->staging_leaf, false, &e->stage) != PLATFORM_DIRECTORY_OK)
         return false;
@@ -300,6 +311,57 @@ static struct zcl_result history_run(const struct wallet_history_export_request 
 #endif
 }
 
+struct zcl_result wallet_history_export_parent_outside_source(
+    const char *source, const struct platform_directory_transaction *parent)
+{
+#if defined(__linux__)
+    uintptr_t handle;
+    if (!source || !parent ||
+        !platform_private_directory_open_validated_traverse(source, &handle))
+        return ZCL_ERR(-1, "wallet history export: invalid source or parent");
+    bool ok = history_destination_outside_source(handle, parent);
+    platform_private_directory_close(handle);
+    if (!ok) return ZCL_ERR(-1, "wallet history export: parent ancestry refused");
+    return ZCL_OK;
+#else
+    (void)source; (void)parent;
+    return ZCL_ERR(-1, "wallet history export: ancestry check requires Linux");
+#endif
+}
+
+struct zcl_result wallet_history_export_validate_archive(
+    const struct wallet_history_export_request *request, const char *path)
+{
+#if defined(__linux__)
+    if (!request || !path || !request->max_rows || request->endpoint_height < 0 ||
+        request->endpoint_height == INT_MAX)
+        return ZCL_ERR(-1, "wallet history export: invalid archive request");
+    if (!history_validate_archive(request, path, NULL))
+        return ZCL_ERR(-1, "wallet history export: archive validation failed");
+    return ZCL_OK;
+#else
+    (void)request; (void)path;
+    return ZCL_ERR(-1, "wallet history export: archive validation requires Linux");
+#endif
+}
+#ifdef ZCL_TESTING
+struct zcl_result wallet_history_export_test_validate_archive(
+    const struct wallet_history_export_request *request, const char *path,
+    const struct uint256 *genesis)
+{
+#if defined(__linux__)
+    if (!request || !path || !genesis || !request->max_rows || request->endpoint_height < 0 ||
+        request->endpoint_height == INT_MAX)
+        return ZCL_ERR(-1, "wallet history export: invalid test archive request");
+    if (!history_validate_archive(request, path, genesis))
+        return ZCL_ERR(-1, "wallet history export: test archive validation failed");
+    return ZCL_OK;
+#else
+    (void)request; (void)path; (void)genesis;
+    return ZCL_ERR(-1, "wallet history export: archive validation requires Linux");
+#endif
+}
+#endif
 struct zcl_result wallet_history_export_run(const struct wallet_history_export_request *request,
     struct wallet_history_export_result *result)
 {

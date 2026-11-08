@@ -13,6 +13,7 @@
 
 struct sqlite3;
 struct consensus_state_artifact_evidence;
+struct platform_positioned_file_snapshot;
 struct consensus_state_publication_decision_record;
 
 /* Legacy USS v1-v3 artifacts may be converted by separate import adapters.
@@ -149,6 +150,11 @@ bool consensus_state_artifact_evidence_close(
  * must use close(&owner). It delegates without forcing BUSY/active release. */
 void consensus_state_artifact_evidence_free(
     struct consensus_state_artifact_evidence *evidence);
+/* Copy metadata from the validated retained descriptor if unchanged. This is
+ * an invalidation token, not content or pathname authority. */
+bool consensus_state_artifact_evidence_snapshot(
+    const struct consensus_state_artifact_evidence *evidence,
+    struct platform_positioned_file_snapshot *out);
 bool consensus_state_artifact_evidence_manifest_copy(
     const struct consensus_state_artifact_evidence *evidence,
     struct consensus_state_bundle_manifest *out);

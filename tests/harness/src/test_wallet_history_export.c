@@ -5,6 +5,7 @@
 #include "test/test_core.h"
 #include "services/wallet_history_export.h"
 #include "services/block_index_loader.h"
+#include "platform/directory_transaction.h"
 #include "validation/main_state.h"
 #include "chain/chainparams.h"
 #include "core/arith_uint256.h"
@@ -26,6 +27,9 @@
 
 struct zcl_result wallet_history_export_test_run(const struct wallet_history_export_request *,
     struct wallet_history_export_result *, const struct uint256 *);
+
+struct zcl_result wallet_history_export_test_validate_archive(const struct wallet_history_export_request *,
+    const char *, const struct uint256 *);
 
 static bool history_test_mine(struct block_header *header, struct uint256 *hash)
 {
@@ -124,6 +128,21 @@ static bool history_test_output(const char *source, const char *parent,
     return stat(src, &a) == 0 && history_test_same_stat(index_before, &a) &&
         history_test_equal_prefix(src, dst) && history_test_equal_prefix(dst, src);
 }
+static bool history_test_parent_guard(const char *source, const char *parent)
+{
+    char nested[512];
+    if (snprintf(nested, sizeof(nested), "%s/guard-child", source) >= (int)sizeof(nested) ||
+        mkdir(nested, 0700) != 0) return false;
+    struct platform_directory_transaction dir;
+    platform_directory_transaction_init(&dir);
+    bool ok = platform_directory_transaction_open(&dir, nested) &&
+              !wallet_history_export_parent_outside_source(source, &dir).ok;
+    platform_directory_transaction_close(&dir);
+    ok = ok && platform_directory_transaction_open(&dir, parent) &&
+         wallet_history_export_parent_outside_source(source, &dir).ok;
+    platform_directory_transaction_close(&dir);
+    return rmdir(nested) == 0 && ok;
+}
 static bool history_test_publication_refusals(struct wallet_history_export_request *r,
     const char *source, const char *parent, const struct uint256 *genesis)
 {
@@ -141,6 +160,23 @@ static bool history_test_publication_refusals(struct wallet_history_export_reque
     r->staging_leaf = "cancelled"; r->destination_leaf = "other"; r->cancelled = history_test_cancel;
     return !wallet_history_export_test_run(r, &result, genesis).ok;
 }
+static bool history_test_reopen(const struct wallet_history_export_request *request,
+                                const char *parent, const struct uint256 *genesis)
+{
+    char root[512], path[512];
+    if (snprintf(root, sizeof(root), "%s/ready", parent) >= (int)sizeof(root) ||
+        snprintf(path, sizeof(path), "%s/ready/blocks/blk00000.dat", parent) >= (int)sizeof(path) ||
+        !wallet_history_export_test_validate_archive(request, root, genesis).ok) return false;
+    FILE *f = fopen(path, "r+b");
+    if (!f) return false;
+    bool ok = fseek(f, 8, SEEK_SET) == 0;
+    int byte = ok ? fgetc(f) : EOF;
+    ok = ok && byte != EOF && fseek(f, 8, SEEK_SET) == 0 &&
+         fputc(byte ^ 1, f) != EOF;
+    if (fclose(f) != 0) ok = false;
+    if (!ok) return false;
+    return !wallet_history_export_test_validate_archive(request, root, genesis).ok;
+}
 static bool history_test_run_cases(const char *source, const char *parent, const struct uint256 hashes[3])
 {
     struct wallet_history_export_request r = {.source_datadir = source, .private_parent = parent,
@@ -156,6 +192,8 @@ static bool history_test_run_cases(const char *source, const char *parent, const
     struct zcl_result done = wallet_history_export_test_run(&r, &result, &hashes[0]);
     return done.ok && result.outcome == WALLET_HISTORY_EXPORT_PUBLISHED && result.manifest.num_chunks == 2 &&
         history_test_output(source, parent, &index_before, &block_before) &&
+        history_test_parent_guard(source, parent) &&
+        history_test_reopen(&r, parent, &hashes[0]) &&
         history_test_publication_refusals(&r, source, parent, &hashes[0]);
 }
 static bool history_test_refusals(const char *source, const char *parent, const struct uint256 hashes[3])
