@@ -36,6 +36,10 @@ static bool create_failed_marker_file(const wchar_t *failed)
 static bool refusal_contract_violated(char *root_utf8, char *failed_utf8)
 {
     char out[64] = "dirty";
+    struct boot_bound_bundle_observation observation;
+    memset(&observation, 0xa5, sizeof(observation));
+    if (boot_install_bound_bundle_read(root_utf8, &observation) != BOOT_BOUND_READ_UNSUPPORTED ||
+        boot_install_bound_bundle_consume(root_utf8, &observation) != BOOT_BOUND_CONSUME_UNSUPPORTED) return true;
     if (boot_install_bundle_request(root_utf8, failed_utf8) != 0 ||
         boot_install_bundle_pending(root_utf8) ||
         boot_install_bundle_consume(root_utf8, out, sizeof(out)) || out[0] ||

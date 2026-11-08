@@ -317,6 +317,30 @@ bool boot_install_bound_bundle_request_matches(
     const char *datadir, const struct boot_bound_bundle_request *request,
     uint64_t *generation);
 
+/* A bound observation owns its paths. Read never spends an attempt. */
+#define BOOT_BOUND_PATH_CAP 4096
+struct boot_bound_bundle_observation {
+    char bundle_path[BOOT_BOUND_PATH_CAP];
+    char private_history_path[BOOT_BOUND_PATH_CAP];
+    uint8_t snapshot_sha3[32], endpoint_hash[32], history_manifest_root[32];
+    int32_t endpoint_height;
+    int attempts;
+};
+enum boot_bound_read_result {
+    BOOT_BOUND_READ_ERROR, BOOT_BOUND_READ_ABSENT, BOOT_BOUND_READ_LEGACY,
+    BOOT_BOUND_READ_READY, BOOT_BOUND_READ_TERMINAL, BOOT_BOUND_READ_UNSUPPORTED
+};
+enum boot_bound_consume_result {
+    BOOT_BOUND_CONSUME_ERROR, BOOT_BOUND_CONSUME_STALE, BOOT_BOUND_CONSUME_TERMINAL,
+    BOOT_BOUND_CONSUME_OK, BOOT_BOUND_CONSUME_UNKNOWN, BOOT_BOUND_CONSUME_UNSUPPORTED
+};
+enum boot_bound_read_result boot_install_bound_bundle_read(
+    const char *datadir, struct boot_bound_bundle_observation *out);
+/* Re-read and compare every field including attempts under the request mutex.
+ * UNKNOWN may follow durable replacement; read again before deciding what to do. */
+enum boot_bound_consume_result boot_install_bound_bundle_consume(
+    const char *datadir, const struct boot_bound_bundle_observation *expected);
+
 /* CREATED alone certifies a newly published durable request. */
 enum boot_bundle_arm_result boot_install_bundle_request_typed(
     const char *datadir, const char *bundle_path, int *legacy_result, uint64_t *created_generation);

@@ -50,6 +50,7 @@
 #include "validation/main_state.h"
 
 #include <pthread.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <sqlite3.h>
 #include <stdbool.h>
@@ -326,6 +327,103 @@ static int case_typed_request(void)
         BOOT_BUNDLE_ARM_ERROR && legacy == 0);
     test_rm_rf_recursive(dir);
     return failures;
+}
+
+static int bound_stale_fields(const char *dir, const struct boot_bound_bundle_observation *current)
+{
+    int failures = 0;
+    for (unsigned i = 0; i < 7; i++) {
+        struct boot_bound_bundle_observation stale = *current;
+        switch (i) {
+        case 0: stale.bundle_path[1] ^= 1; break;
+        case 1: stale.private_history_path[1] ^= 1; break;
+        case 2: stale.snapshot_sha3[0] ^= 1; break;
+        case 3: stale.endpoint_hash[0] ^= 1; break;
+        case 4: stale.history_manifest_root[0] ^= 1; break;
+        case 5: stale.endpoint_height++; break;
+        case 6: stale.attempts++; break;
+        }
+        CSIR_CHECK("different bound field is stale", boot_install_bound_bundle_consume(dir, &stale) == BOOT_BOUND_CONSUME_STALE);
+    }
+    struct boot_bound_bundle_observation after;
+    CSIR_CHECK("stale consumes preserve attempt", boot_install_bound_bundle_read(dir, &after) == BOOT_BOUND_READ_READY &&
+        after.attempts == current->attempts);
+    return failures;
+}
+static int bound_budget_cases(const char *dir, struct boot_bound_bundle_observation current)
+{
+    int failures = 0; struct boot_bound_bundle_observation next;
+    for (int i = 0; i < BOOT_INSTALL_BUNDLE_MAX; i++) {
+        CSIR_CHECK("consume spends one attempt", current.attempts == i &&
+            boot_install_bound_bundle_consume(dir, &current) == BOOT_BOUND_CONSUME_OK);
+        CSIR_CHECK("old observation is stale", boot_install_bound_bundle_consume(dir, &current) == BOOT_BOUND_CONSUME_STALE);
+        CSIR_CHECK("increment durable", boot_install_bound_bundle_read(dir, &next) == BOOT_BOUND_READ_READY && next.attempts == i + 1);
+        current = next;
+    }
+    CSIR_CHECK("budget becomes terminal", boot_install_bound_bundle_consume(dir, &current) == BOOT_BOUND_CONSUME_TERMINAL);
+    CSIR_CHECK("terminal is readable", boot_install_bound_bundle_read(dir, &next) == BOOT_BOUND_READ_TERMINAL &&
+        next.attempts == BOOT_INSTALL_BUNDLE_TERMINAL);
+    CSIR_CHECK("terminal remains terminal", boot_install_bound_bundle_consume(dir, &next) == BOOT_BOUND_CONSUME_TERMINAL);
+    return failures;
+}
+static int bound_unknown_cases(const char *dir, const struct boot_bound_bundle_request *request)
+{
+    int failures = 0; struct boot_bound_bundle_observation current, after;
+    boot_install_bundle_clear(dir);
+    CSIR_CHECK("new unknown fixture", boot_install_bound_bundle_request(dir, request, NULL) == BOOT_BUNDLE_ARM_CREATED);
+    CSIR_CHECK("unknown fixture read", boot_install_bound_bundle_read(dir, &current) == BOOT_BOUND_READ_READY);
+    boot_install_bundle_test_fail_flush(1);
+    CSIR_CHECK("file flush unknown", boot_install_bound_bundle_consume(dir, &current) == BOOT_BOUND_CONSUME_UNKNOWN);
+    boot_install_bundle_test_fail_flush(0);
+    CSIR_CHECK("file flush preserves original", boot_install_bound_bundle_read(dir, &after) == BOOT_BOUND_READ_READY && after.attempts == 0);
+    boot_install_bundle_test_fail_flush(2);
+    CSIR_CHECK("parent flush unknown", boot_install_bound_bundle_consume(dir, &current) == BOOT_BOUND_CONSUME_UNKNOWN);
+    boot_install_bundle_test_fail_flush(0);
+    CSIR_CHECK("parent flush requires readback", boot_install_bound_bundle_read(dir, &after) == BOOT_BOUND_READ_READY && after.attempts == 1);
+    CSIR_CHECK("old observation cannot retry", boot_install_bound_bundle_consume(dir, &current) == BOOT_BOUND_CONSUME_STALE);
+    return failures;
+}
+static int bound_malformed_case(const char *dir)
+{
+    int failures = 0; char path[512];
+    snprintf(path, sizeof(path), "%s/install_bundle_request", dir);
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    FILE *f = fd < 0 ? NULL : fdopen(fd, "w");
+    if (!f && fd >= 0) close(fd);
+    bool written = f && fputs("Z23-HISTORY-1\ninvalid\n", f) >= 0;
+    if (f && fclose(f)) written = false;
+    struct stat st;
+    CSIR_CHECK("malformed private fixture written", written && !stat(path, &st) && (st.st_mode & 0777) == 0600);
+    struct boot_bound_bundle_observation output, zero;
+    memset(&output, 0xa5, sizeof(output)); memset(&zero, 0, sizeof(zero));
+    CSIR_CHECK("malformed read clears output", boot_install_bound_bundle_read(dir, &output) == BOOT_BOUND_READ_ERROR &&
+        !memcmp(&output, &zero, sizeof(output)));
+    boot_install_bundle_clear(dir); return failures;
+}
+static int case_bound_read_consume(void)
+{
+    int failures = 0, legacy = 0; char dir[256];
+    struct boot_bound_bundle_observation current;
+    struct boot_bound_bundle_request request = {
+        .bundle_path = "/private/snapshot", .endpoint_height = 42, .private_history_path = "/private/history",
+        .snapshot_sha3 = {1}, .endpoint_hash = {2}, .history_manifest_root = {3}
+    };
+    test_make_tmpdir(dir, sizeof(dir), "csir_bound_read", "ok");
+    CSIR_CHECK("absent read", boot_install_bound_bundle_read(dir, &current) == BOOT_BOUND_READ_ABSENT);
+    failures += bound_malformed_case(dir);
+    CSIR_CHECK("legacy fixture", boot_install_bundle_request_typed(dir, "/legacy", &legacy, NULL) == BOOT_BUNDLE_ARM_CREATED);
+    CSIR_CHECK("legacy distinguished", boot_install_bound_bundle_read(dir, &current) == BOOT_BOUND_READ_LEGACY);
+    CSIR_CHECK("legacy never consumed as bound", boot_install_bound_bundle_consume(dir, &current) == BOOT_BOUND_CONSUME_ERROR);
+    boot_install_bundle_clear(dir);
+    CSIR_CHECK("bound fixture", boot_install_bound_bundle_request(dir, &request, NULL) == BOOT_BUNDLE_ARM_CREATED);
+    CSIR_CHECK("typed read", boot_install_bound_bundle_read(dir, &current) == BOOT_BOUND_READ_READY &&
+        !strcmp(current.bundle_path, request.bundle_path) && !strcmp(current.private_history_path, request.private_history_path) &&
+        !memcmp(current.snapshot_sha3, request.snapshot_sha3, 32) && !memcmp(current.endpoint_hash, request.endpoint_hash, 32) &&
+        !memcmp(current.history_manifest_root, request.history_manifest_root, 32) && current.endpoint_height == 42 && current.attempts == 0);
+    failures += bound_stale_fields(dir, &current);
+    failures += bound_budget_cases(dir, current);
+    failures += bound_unknown_cases(dir, &request);
+    boot_install_bundle_clear(dir); test_rm_rf_recursive(dir); return failures;
 }
 
 static int case_bound_publisher(void)
@@ -1776,6 +1874,7 @@ int test_consensus_state_install_runtime(void)
     failures += case_typed_request();
     failures += case_bound_request_refusal();
     failures += case_bound_publisher();
+    failures += case_bound_read_consume();
     failures += case_post_install_fold_span_check();
     failures += case_post_install_drop_borrowed_have_data();
     failures += case_checkpoint_header_ready();

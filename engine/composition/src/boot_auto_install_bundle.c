@@ -40,6 +40,8 @@
 #include "validation/chainstate.h"             /* active_chain_height */
 #include "validation/main_state.h"
 
+#include "base/hex.h"
+#include "codec/cursor.h"
 #include "platform/private_file.h"
 #include "platform/file_metadata.h"
 #include <pthread.h>
@@ -78,27 +80,25 @@ struct ibr_request {
     char manifest_root[65], history_path[IBR_PATH_CAP];
 };
 enum ibr_status { IBR_ABSENT, IBR_INVALID, IBR_LEGACY, IBR_BOUND };
-struct ibr_cursor { const char *data; size_t len, pos; };
 
-static bool ibr_line(struct ibr_cursor *c, char *out, size_t cap, bool *ended)
+static bool ibr_line(struct zcl_codec_reader *c, char *out, size_t cap, bool *ended)
 {
     size_t n = 0;
-    while (c->pos < c->len && c->data[c->pos] != '\n') {
-        unsigned char ch = (unsigned char)c->data[c->pos++];
+    *ended = false;
+    while (zcl_codec_reader_remaining(c)) {
+        uint8_t ch;
+        if (!zcl_codec_read_u8(c, &ch)) return false;
+        if (ch == '\n') { *ended = true; break; }
         if (ch == 0 || n + 1 >= cap) return false;
         out[n++] = (char)ch;
     }
-    *ended = c->pos < c->len;
-    if (*ended) ++c->pos;
     out[n] = 0;
     return n != 0;
 }
 static bool ibr_hash(const char *s)
 {
-    if (strlen(s) != 64) return false;
-    for (; *s; ++s)
-        if (!(*s >= '0' && *s <= '9') && !(*s >= 'a' && *s <= 'f')) return false;
-    return true;
+    uint8_t digest[32];
+    return zcl_hex_decode_lower(s, digest, sizeof(digest));
 }
 static bool ibr_height(const char *s)
 {
@@ -108,12 +108,12 @@ static bool ibr_height(const char *s)
     unsigned long value = strtoul(s, &end, 10);
     return !errno && *end == 0 && value <= INT32_MAX;
 }
-static bool ibr_required_line(struct ibr_cursor *c, char *out, size_t cap)
+static bool ibr_required_line(struct zcl_codec_reader *c, char *out, size_t cap)
 {
     bool ended = false;
     return ibr_line(c, out, cap, &ended) && ended;
 }
-static bool ibr_hash_line(struct ibr_cursor *c, char out[65])
+static bool ibr_hash_line(struct zcl_codec_reader *c, char out[65])
 {
     return ibr_required_line(c, out, 65) && ibr_hash(out);
 }
@@ -126,13 +126,13 @@ static bool ibr_attempts(const char *number, int *out)
     *out = (int)value;
     return true;
 }
-static enum ibr_status ibr_legacy(struct ibr_cursor *c, struct ibr_request *req)
+static enum ibr_status ibr_legacy(struct zcl_codec_reader *c, struct ibr_request *req)
 {
     size_t len = strlen(req->bundle);
     while (len && req->bundle[len - 1] == '\r') req->bundle[--len] = 0;
-    return len && c->pos == c->len ? IBR_LEGACY : IBR_INVALID;
+    return len && zcl_codec_reader_remaining(c) == 0 ? IBR_LEGACY : IBR_INVALID;
 }
-static bool ibr_decode_bound(struct ibr_cursor *c, struct ibr_request *req, bool nl)
+static bool ibr_decode_bound(struct zcl_codec_reader *c, struct ibr_request *req, bool nl)
 {
     if (!nl || req->bundle[0] != '/' || strchr(req->bundle, '\r')) return false;
     if (!ibr_hash_line(c, req->snapshot_sha3)) return false;
@@ -140,11 +140,12 @@ static bool ibr_decode_bound(struct ibr_cursor *c, struct ibr_request *req, bool
     if (!ibr_hash_line(c, req->endpoint_hash)) return false;
     if (!ibr_hash_line(c, req->manifest_root)) return false;
     if (!ibr_required_line(c, req->history_path, sizeof(req->history_path))) return false;
-    return req->history_path[0] == '/' && !strchr(req->history_path, '\r') && c->pos == c->len;
+    return req->history_path[0] == '/' && !strchr(req->history_path, '\r') && zcl_codec_reader_remaining(c) == 0;
 }
 static enum ibr_status ibr_decode(const char *wire, size_t size, struct ibr_request *req)
 {
-    struct ibr_cursor c = { wire, size, 0 };
+    struct zcl_codec_reader c;
+    zcl_codec_reader_init(&c, wire, size);
     char number[32]; bool nl = false;
     if (!ibr_line(&c, number, sizeof(number), &nl) || !nl) return IBR_INVALID;
     bool bound = strcmp(number, "Z23-HISTORY-1") == 0;
@@ -489,15 +490,6 @@ static bool ibr_bound_path(const char *s)
     return s && s[0] == '/' && !strchr(s, '\n') && !strchr(s, '\r') &&
            strlen(s) < IBR_PATH_CAP;
 }
-static void ibr_hex(char out[65], const uint8_t bytes[32])
-{
-    static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < 32; ++i) {
-        out[i * 2] = hex[bytes[i] >> 4];
-        out[i * 2 + 1] = hex[bytes[i] & 15];
-    }
-    out[64] = 0;
-}
 static bool ibr_bound_from_public(const struct boot_bound_bundle_request *in,
                                   struct ibr_request *out)
 {
@@ -507,9 +499,9 @@ static bool ibr_bound_from_public(const struct boot_bound_bundle_request *in,
     out->bound = true;
     memcpy(out->bundle, in->bundle_path, strlen(in->bundle_path) + 1);
     memcpy(out->history_path, in->private_history_path, strlen(in->private_history_path) + 1);
-    ibr_hex(out->snapshot_sha3, in->snapshot_sha3);
-    ibr_hex(out->endpoint_hash, in->endpoint_hash);
-    ibr_hex(out->manifest_root, in->history_manifest_root);
+    zcl_hex_encode(in->snapshot_sha3, 32, out->snapshot_sha3);
+    zcl_hex_encode(in->endpoint_hash, 32, out->endpoint_hash);
+    zcl_hex_encode(in->history_manifest_root, 32, out->manifest_root);
     snprintf(out->endpoint_height, sizeof(out->endpoint_height), "%" PRId32, in->endpoint_height);
     return true;
 }
@@ -1150,6 +1142,84 @@ bool boot_install_bound_bundle_request_matches(
     if (ok) *generation = atomic_load(&g_ibr_generation);
     pthread_mutex_unlock(&g_ibr_lock);
     return ok;
+#endif
+}
+#if !defined(_WIN32)
+static bool ibr_observation(struct boot_bound_bundle_observation *out, const struct ibr_request *in)
+{
+    memset(out, 0, sizeof(*out));
+    memcpy(out->bundle_path, in->bundle, strlen(in->bundle) + 1);
+    memcpy(out->private_history_path, in->history_path, strlen(in->history_path) + 1);
+    if (!zcl_hex_decode_lower(in->snapshot_sha3, out->snapshot_sha3, 32) ||
+        !zcl_hex_decode_lower(in->endpoint_hash, out->endpoint_hash, 32) ||
+        !zcl_hex_decode_lower(in->manifest_root, out->history_manifest_root, 32)) {
+        memset(out, 0, sizeof(*out));
+        return false;
+    }
+    out->endpoint_height = (int32_t)strtol(in->endpoint_height, NULL, 10);
+    out->attempts = in->attempts;
+    return true;
+}
+static bool ibr_observation_equal(const struct boot_bound_bundle_observation *a,
+                                  const struct boot_bound_bundle_observation *b)
+{
+    return a->attempts == b->attempts && a->endpoint_height == b->endpoint_height &&
+        !strncmp(a->bundle_path, b->bundle_path, sizeof(a->bundle_path)) &&
+        !strncmp(a->private_history_path, b->private_history_path, sizeof(a->private_history_path)) &&
+        !memcmp(a->snapshot_sha3, b->snapshot_sha3, 32) &&
+        !memcmp(a->endpoint_hash, b->endpoint_hash, 32) &&
+        !memcmp(a->history_manifest_root, b->history_manifest_root, 32);
+}
+static enum boot_bound_read_result ibr_observe_locked(const char *path,
+    struct boot_bound_bundle_observation *out, struct ibr_request *req)
+{
+    enum ibr_status status = ibr_read(path, req, NULL);
+    if (status == IBR_ABSENT) return BOOT_BOUND_READ_ABSENT;
+    if (status == IBR_LEGACY) return BOOT_BOUND_READ_LEGACY;
+    if (status != IBR_BOUND) return BOOT_BOUND_READ_ERROR;
+    if (!ibr_observation(out, req)) return BOOT_BOUND_READ_ERROR;
+    return req->attempts == BOOT_INSTALL_BUNDLE_TERMINAL ? BOOT_BOUND_READ_TERMINAL : BOOT_BOUND_READ_READY;
+}
+#endif
+enum boot_bound_read_result boot_install_bound_bundle_read(
+    const char *datadir, struct boot_bound_bundle_observation *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+#if defined(_WIN32)
+    (void)datadir; return BOOT_BOUND_READ_UNSUPPORTED;
+#else
+    char path[512]; struct ibr_request req;
+    if (!out || !ibr_path(datadir, path, sizeof(path))) return BOOT_BOUND_READ_ERROR;
+    pthread_mutex_lock(&g_ibr_lock);
+    enum boot_bound_read_result result = ibr_observe_locked(path, out, &req);
+    pthread_mutex_unlock(&g_ibr_lock);
+    return result;
+#endif
+}
+enum boot_bound_consume_result boot_install_bound_bundle_consume(
+    const char *datadir, const struct boot_bound_bundle_observation *expected)
+{
+#if defined(_WIN32)
+    (void)datadir; (void)expected; return BOOT_BOUND_CONSUME_UNSUPPORTED;
+#else
+    char path[512]; struct ibr_request req; struct boot_bound_bundle_observation current;
+    if (!expected || !ibr_path(datadir, path, sizeof(path))) return BOOT_BOUND_CONSUME_ERROR;
+    pthread_mutex_lock(&g_ibr_lock);
+    enum boot_bound_read_result status = ibr_observe_locked(path, &current, &req);
+    enum boot_bound_consume_result result = BOOT_BOUND_CONSUME_ERROR;
+    if (status == BOOT_BOUND_READ_READY || status == BOOT_BOUND_READ_TERMINAL) {
+        if (!ibr_observation_equal(&current, expected)) result = BOOT_BOUND_CONSUME_STALE;
+        else if (status == BOOT_BOUND_READ_TERMINAL) result = BOOT_BOUND_CONSUME_TERMINAL;
+        else {
+            bool exhausted = req.attempts >= BOOT_INSTALL_BUNDLE_MAX;
+            req.attempts = exhausted ? BOOT_INSTALL_BUNDLE_TERMINAL : req.attempts + 1;
+            if (!ibr_write(datadir, path, &req, false)) result = BOOT_BOUND_CONSUME_UNKNOWN;
+            else result = exhausted ? BOOT_BOUND_CONSUME_TERMINAL : BOOT_BOUND_CONSUME_OK;
+            atomic_fetch_add(&g_ibr_generation, 1);
+        }
+    }
+    pthread_mutex_unlock(&g_ibr_lock);
+    return result;
 #endif
 }
 #ifdef ZCL_TESTING
