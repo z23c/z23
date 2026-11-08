@@ -148,6 +148,7 @@ bool zcl_test_group_requires_exclusive_run(const char *full_id)
     if (!full_id || !zcl_test_group_catalog_contains(full_id))
         return false;
     return strcmp(full_id, "test_command_registry_latency") == 0 ||
+           strcmp(full_id, "test_selector_exclusive_fixture") == 0 ||
            strcmp(full_id, "test_vcs_core") == 0 ||
            strcmp(full_id, "test_golden_dev_cycle") == 0 ||
            strcmp(full_id, "test_kill9_recovery") == 0 ||

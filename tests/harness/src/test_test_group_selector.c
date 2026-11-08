@@ -2539,6 +2539,13 @@ static int test_runner_dispatches_longest_first(void)
     return failures;
 }
 
+/* A deterministic exclusive child for the real runner's phase barrier test. */
+int test_selector_exclusive_fixture(void)
+{
+    puts("selector exclusive fixture executed");
+    return 0;
+}
+
 static int test_failure_priority_phase_barrier(void)
 {
     int failures = 0;
@@ -2549,7 +2556,7 @@ static int test_failure_priority_phase_barrier(void)
         ASSERT(os_proc_exe_path(exe, sizeof(exe)));
         int n = snprintf(command, sizeof(command),
             "cd '%s' && '%s' --jobs=1 --verbose --no-cache "
-            "--exact=test_hex_codec,test_command_registry_latency "
+            "--exact=test_hex_codec,test_selector_exclusive_fixture "
             "--failure-priority=test_hex_codec 2>&1", root, exe);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT(capture_command(command, out, sizeof(out)) == 0);
@@ -2557,7 +2564,9 @@ static int test_failure_priority_phase_barrier(void)
         const char *done = strstr(out, "test_parallel: exclusive pass done groups=1");
         const char *dispatch = strstr(out, "[dispatch]");
         ASSERT(exclusive && done && dispatch && exclusive < done && done < dispatch);
-        ASSERT(strstr(exclusive, "test_command_registry_latency") != NULL);
+        const char *fixture = strstr(exclusive, "test_selector_exclusive_fixture");
+        ASSERT(fixture && fixture < done);
+        ASSERT(strstr(out, "selector exclusive fixture executed") != NULL);
         ASSERT(tgs_dispatch_pos(out, "test_hex_codec") != SIZE_MAX);
         ASSERT(test_rm_rf_recursive(root) == 0);
         PASS();
