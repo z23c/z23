@@ -4,6 +4,7 @@
 #endif
 #include "test/test_core.h"
 #include "services/wallet_history_export.h"
+#include "services/wallet_history_manifest.h"
 #include "services/block_index_loader.h"
 #include "platform/directory_transaction.h"
 #include "validation/main_state.h"
@@ -20,6 +21,8 @@
 #include <time.h>
 #include <string.h>
 #if defined(__linux__)
+#include <dirent.h>
+#include <fcntl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -95,6 +98,115 @@ static bool history_test_source(const char *dir, struct uint256 hashes[3], bool 
     return ok && chmod(path, 0664) == 0;
 }
 static bool history_test_cancel(void *context) { (void)context; return true; }
+struct manifest_cancel_test { const char *path; bool damage; bool fired; };
+static bool history_manifest_fd_advanced(const struct stat *want)
+{
+    struct stat got;
+    DIR *dir = opendir("/proc/self/fd");
+    if (!dir) return false;
+    bool found = false;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        char *end = NULL;
+        long fd = strtol(entry->d_name, &end, 10);
+        if (!end || *end || end == entry->d_name || fd < 0 || fd > INT_MAX) continue;
+        if (fstat((int)fd, &got) == 0 && got.st_dev == want->st_dev && got.st_ino == want->st_ino &&
+            lseek((int)fd, 0, SEEK_CUR) >= 65536) { found = true; break; }
+    }
+    (void)closedir(dir);
+    return found;
+}
+static bool history_manifest_after_read(void *opaque)
+{
+    struct manifest_cancel_test *c = opaque;
+    if (c->fired) return true;
+    struct stat want;
+    if (stat(c->path, &want) != 0) return false;
+    c->fired = history_manifest_fd_advanced(&want);
+    if (c->fired && c->damage) { if (truncate(c->path, 0) != 0) c->fired = false; return false; }
+    return c->fired;
+}
+static int history_manifest_fds(void)
+{
+    DIR *dir = opendir("/proc/self/fd");
+    if (!dir) return -1;
+    int count = 0;
+    while (readdir(dir)) count++;
+    if (closedir(dir) != 0) return -1;
+    return count;
+}
+static bool history_manifest_file(const char *path, size_t size)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    char bytes[4096] = {1};
+    bool ok = true;
+    while (size && ok) {
+        size_t n = size < sizeof(bytes) ? size : sizeof(bytes);
+        ok = fwrite(bytes, 1, n, f) == n;
+        size -= n;
+    }
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+static bool history_manifest_equal(const struct file_manifest *a, const struct file_manifest *b)
+{
+    if (a->num_chunks != b->num_chunks || a->total_bytes != b->total_bytes ||
+        a->chain_height != b->chain_height || memcmp(a->root_hash, b->root_hash, 32) ||
+        memcmp(a->mmr_root, b->mmr_root, 32)) return false;
+    for (uint32_t i = 0; i < a->num_chunks; ++i) {
+        const struct file_chunk *x = &a->chunks[i], *y = &b->chunks[i];
+        if (x->offset != y->offset || x->size != y->size || x->file_index != y->file_index ||
+            memcmp(x->sha3, y->sha3, 32)) return false;
+    }
+    return true;
+}
+static bool history_manifest_parity(const char *dir)
+{
+    static const uint8_t expected_root[32] = {
+        0x07, 0xc5, 0x1d, 0xd8, 0x16, 0xb2, 0xc3, 0xdd,
+        0x8f, 0xc9, 0xf6, 0xce, 0x53, 0xc8, 0xb9, 0x49,
+        0x30, 0x28, 0xa6, 0xfc, 0x4b, 0xd7, 0xf6, 0x66,
+        0x30, 0x78, 0x3c, 0xf8, 0x78, 0xfd, 0x9c, 0x08
+    };
+    struct file_manifest baseline = {0}, other = {0};
+    return wallet_history_manifest_build(&baseline, dir, 1).ok &&
+        wallet_history_manifest_build_cancelable(&other, dir, 1, NULL, NULL).ok &&
+        history_manifest_equal(&baseline, &other) &&
+        memcmp(baseline.root_hash, expected_root, sizeof(expected_root)) == 0;
+}
+static bool history_manifest_stops(const char *dir, const char *block)
+{
+    struct file_manifest other, untouched;
+    memset(&untouched, 0xa5, sizeof(untouched));
+    int fds = history_manifest_fds();
+    memset(&other, 0xa5, sizeof(other));
+    struct zcl_result r = wallet_history_manifest_build_cancelable(&other, dir, 1, history_test_cancel, NULL);
+    bool ok = !r.ok && r.code == WALLET_HISTORY_MANIFEST_CANCELLED && memcmp(&other, &untouched, sizeof(other)) == 0;
+    struct manifest_cancel_test cancel = {.path = block};
+    r = wallet_history_manifest_build_cancelable(&other, dir, 1, history_manifest_after_read, &cancel);
+    ok = ok && cancel.fired && !r.ok && r.code == WALLET_HISTORY_MANIFEST_CANCELLED &&
+        memcmp(&other, &untouched, sizeof(other)) == 0;
+    struct manifest_cancel_test damage = {.path = block, .damage = true};
+    r = wallet_history_manifest_build_cancelable(&other, dir, 1, history_manifest_after_read, &damage);
+    ok = ok && damage.fired && !r.ok && r.code != WALLET_HISTORY_MANIFEST_CANCELLED &&
+        memcmp(&other, &untouched, sizeof(other)) == 0 && fds >= 0 && history_manifest_fds() == fds;
+    return ok;
+}
+static bool history_manifest_cancel_cases(void)
+{
+    char dir[512], blocks[512], block[512], index[512];
+    if (!test_mkdtemp(dir, sizeof(dir), "history_manifest_cancel")) return false;
+    int a = snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
+    int b = snprintf(block, sizeof(block), "%s/blocks/blk00000.dat", dir);
+    int c = snprintf(index, sizeof(index), "%s/block_index.bin", dir);
+    bool ok = a > 0 && (size_t)a < sizeof(blocks) && b > 0 && (size_t)b < sizeof(block) &&
+        c > 0 && (size_t)c < sizeof(index) && mkdir(blocks, 0700) == 0 &&
+        history_manifest_file(block, 262144) && history_manifest_file(index, 32) &&
+        history_manifest_parity(dir) && history_manifest_stops(dir, block);
+    (void)test_rm_rf_recursive(dir);
+    return ok;
+}
 static bool history_test_equal_prefix(const char *left, const char *right)
 {
     FILE *a = fopen(left, "rb"), *b = fopen(right, "rb");
@@ -359,6 +471,9 @@ static bool history_probe_parser_test(void)
         !history_probe_decimal("18446744073709551616", UINT64_MAX, &parsed) &&
         !history_probe_leaf("../unsafe") && !history_probe_leaf(".");
 }
+static bool history_manifest_and_probe(void)
+{ return history_manifest_cancel_cases() && history_probe_parser_test(); }
+
 int test_wallet_history_export(void)
 {
     const char *network = chain_params_get()->strNetworkID;
@@ -372,7 +487,7 @@ int test_wallet_history_export(void)
     if (!test_mkdtemp(parent, sizeof(parent), "history_export")) {
         (void)test_rm_rf_recursive(source); chain_params_select(previous); return 1;
     }
-    bool ok = history_probe_parser_test() && history_test_source(source, hashes, false) && history_test_run_cases(source, parent, hashes) &&
+    bool ok = history_manifest_and_probe() && history_test_source(source, hashes, false) && history_test_run_cases(source, parent, hashes) &&
         history_test_refusals(source, parent, hashes) && history_test_bad_merkle(parent) &&
         history_test_truncated(source, parent, hashes);
     (void)test_rm_rf_recursive(source); (void)test_rm_rf_recursive(parent);
