@@ -945,6 +945,9 @@ bool zcl_dev_proof_test_generation_checkout(const char *repo_root,
                                             size_t why_len);
 /* Actual checkout command capture/diagnostic path, with a bounded fixture
  * command and deadline. Production worktree add retains its 30000ms bound. */
+bool zcl_dev_proof_test_gitlink_command(const char *root, const char *logs,
+                                        const char *const argv[], int timeout_ms,
+                                        char *why, size_t why_len);
 bool zcl_dev_proof_test_checkout_command(const char *root, const char *logs,
                                          const char *const argv[], int timeout_ms,
                                          char *why, size_t why_len);

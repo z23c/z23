@@ -9859,6 +9859,45 @@ static bool ic_checkout_diagnostic_case(const char *root, const char *child,
         ic_checkout_diagnostic_contents(path, item);
 }
 
+static bool ic_gitlink_diagnostic_case(const char *root, const char *child,
+                                       const struct ic_checkout_case *item)
+{
+    char logs[4096], path[4608], why[128], text[ZCL_DEVLOOP_OUTPUT_MAX + 1024];
+    size_t size = 0; struct stat st;
+    if (snprintf(logs, sizeof(logs), "%s/gitlink-%s", root, item->mode) >= (int)sizeof(logs) ||
+        mkdir(logs, 0700) != 0 ||
+        snprintf(path, sizeof(path), "%s/generation-gitlink.log", logs) >= (int)sizeof(path)) return false;
+    const char *argv[] = {child, item->mode, NULL};
+    bool result = zcl_dev_proof_test_gitlink_command(".", logs, argv, 2000, why, sizeof(why));
+    if (item->success)
+        return result && why[0] == '\0' && access(path, F_OK) != 0 && errno == ENOENT;
+    if (stat(path, &st) != 0) {
+        printf("gitlink diagnostic: private retained output missing\n");
+        return false;
+    }
+    return !result &&
+        strcmp(why, "proof_generation_gitlink_checkout_failed") == 0 &&
+        (st.st_mode & 0777) == 0600 &&
+        ic_failure_record_read(path, text, sizeof(text), &size) &&
+        strstr(text, item->reason) && strstr(text, item->status) &&
+        ic_checkout_diagnostic_payload(text, item);
+}
+
+static bool ic_gitlink_diagnostic_cases(const char *root, const char *child)
+{
+    const struct ic_checkout_case cases[] = {
+        {"ok", "", "", true},
+        {"exit", "reason=git_submodule_update_exit_7", "rc=7 signal=0 timed_out=0", false},
+        {"timeout", "reason=git_submodule_update_timeout", "timed_out=1", false},
+        {"signal", "reason=git_submodule_update_signal_", "timed_out=0", false},
+        {"wide", "reason=git_submodule_update_truncated", "output_truncated=1", false},
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        ok = ic_gitlink_diagnostic_case(root, child, &cases[i]) && ok;
+    return ok;
+}
+
 static bool ic_checkout_diagnostic_fixture(void)
 {
     static const char source[] =
@@ -9901,6 +9940,7 @@ static bool ic_checkout_diagnostic_fixture(void)
     if (ok)
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
             ok = ic_checkout_diagnostic_case(root, child, &cases[i]) && ok;
+    if (ok) ok = ic_gitlink_diagnostic_cases(root, child);
     if (saved)
         (void)setenv("ZCL_DEVLOOP_TEST_PROCESS", saved, 1);
     else

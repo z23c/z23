@@ -4030,6 +4030,10 @@ static enum warm_seed_class warm_classify_rel(const char *rel, bool is_reg)
     return WARM_SEED_SKIP;
 }
 
+static bool dp_generation_gitlink_command(const struct proof_paths *paths,
+                                          const char *cwd, const char *const argv[],
+                                          int timeout_ms, char *why, size_t why_len);
+
 static bool generation_gitlink_prepare(const struct proof_paths *paths,
                                        const char *generation,
                                        char *why, size_t why_len)
@@ -4051,12 +4055,8 @@ static bool generation_gitlink_prepare(const struct proof_paths *paths,
         "git", "-c", "protocol.file.allow=always", "-c", config,
         "submodule", "update", "--init", "--no-fetch", "--", "vendor/tor",
         NULL};
-    char output[ZCL_DEVLOOP_OUTPUT_MAX];
-    if (!git_capture(generation, argv, output, sizeof(output))) {
-        proof_why(why, why_len, "proof_generation_gitlink_checkout_failed");
-        return false;
-    }
-    return true;
+    return dp_generation_gitlink_command(paths, generation, argv, 30000,
+                                         why, why_len);
 }
 
 #define PROOF_RAM_RESERVE_BYTES (6ull * 1024ull * 1024ull * 1024ull)
@@ -6929,35 +6929,40 @@ static bool dp_generation_clear_pruned(const struct proof_paths *paths,
 /* Diagnostic evidence belongs to this private attempt, before retirement
  * can remove the failed generation. Never print environment or argv here. */
 static bool dp_generation_checkout_record(const struct proof_paths *paths,
-                                           const struct zcl_devloop_process_result *result)
+                                           const struct zcl_devloop_process_result *result,
+                                           bool gitlink)
 {
-    char path[PATH_MAX], header[1024], reason[128];
-    static const char end[] = "\n--- git worktree add output end ---\n";
+    char path[PATH_MAX], header[1024], reason[128], end[128];
+    const char *operation = gitlink ? "git_submodule_update" : "git_worktree_add";
+    const char *label = gitlink ? "git submodule update" : "git worktree add";
+    const char *filename = gitlink ? "generation-gitlink.log" : "generation-checkout.log";
+    int end_len = snprintf(end, sizeof(end), "\n--- %s output end ---\n", label);
+    if (end_len < 0 || (size_t)end_len >= sizeof(end)) return false;
     const size_t cap = sizeof(result->output);
     const size_t bytes = result->output_len < cap ? result->output_len : cap;
     if (!paths->logs[0] ||
-        snprintf(path, sizeof(path), "%s/generation-checkout.log", paths->logs) >=
+        snprintf(path, sizeof(path), "%s/%s", paths->logs, filename) >=
             (int)sizeof(path))
         return false;
-    git_capture_why("git_worktree_add", result, cap, reason, sizeof(reason));
+    git_capture_why(operation, result, cap, reason, sizeof(reason));
     int n = snprintf(header, sizeof(header),
-        "operation=git_worktree_add\nattempt=%s\npair=%s\nreason=%s\n"
+        "operation=%s\nattempt=%s\npair=%s\nreason=%s\n"
         "rc=%d signal=%d timed_out=%d cancelled=%d elapsed_ms=%lld "
         "output_len=%zu captured_bytes=%zu output_truncated=%d capacity=%zu\n"
-        "--- git worktree add output begin ---\n",
-        paths->attempt_token, paths->key, reason, result->exit_code,
+        "--- %s output begin ---\n",
+        operation, paths->attempt_token, paths->key, reason, result->exit_code,
         result->term_signal, result->timed_out, result->cancelled,
         (long long)result->elapsed_ms, result->output_len, bytes,
-        result->output_truncated, cap);
+        result->output_truncated, cap, label);
     if (n < 0 || (size_t)n >= sizeof(header))
         return false;
-    size_t size = (size_t)n + bytes + sizeof(end) - 1;
+    size_t size = (size_t)n + bytes + (size_t)end_len;
     char *body = zcl_malloc(size, "proof generation checkout diagnostic");
     if (!body)
         return false;
     memcpy(body, header, (size_t)n);
     memcpy(body + n, result->output, bytes);
-    memcpy(body + n + bytes, end, sizeof(end) - 1);
+    memcpy(body + n + bytes, end, (size_t)end_len);
     bool ok = write_atomic(path, body, size, 0600);
     free(body);
     return ok;
@@ -6971,11 +6976,26 @@ static bool dp_generation_checkout_command(const struct proof_paths *paths,
     struct zcl_devloop_process_result observed = {0};
     if (!git_capture_observed(paths->root, argv, timeout_ms, output,
                               sizeof(output), &observed)) {
-        if (!dp_generation_checkout_record(paths, &observed))
+        if (!dp_generation_checkout_record(paths, &observed, false))
             fprintf(stderr, "[devproof] private generation checkout diagnostic unavailable\n");
         /* Keep the machine refusal stable: the private log distinguishes
          * causes without changing retry/recovery classification. */
         proof_why(why, why_len, "proof_generation_checkout_failed");
+        return false;
+    }
+    return true;
+}
+
+static bool dp_generation_gitlink_command(const struct proof_paths *paths,
+                                          const char *cwd, const char *const argv[],
+                                          int timeout_ms, char *why, size_t why_len)
+{
+    char output[ZCL_DEVLOOP_OUTPUT_MAX];
+    struct zcl_devloop_process_result observed = {0};
+    if (!git_capture_observed(cwd, argv, timeout_ms, output, sizeof(output), &observed)) {
+        if (!dp_generation_checkout_record(paths, &observed, true))
+            fprintf(stderr, "[devproof] private generation gitlink diagnostic unavailable\n");
+        proof_why(why, why_len, "proof_generation_gitlink_checkout_failed");
         return false;
     }
     return true;
@@ -7882,6 +7902,20 @@ bool zcl_dev_proof_test_generation_checkout(const char *repo_root,
             (int)sizeof(paths.root))
         return false;
     return dp_generation_checkout(&paths, generation, local, why, why_len);
+}
+
+bool zcl_dev_proof_test_gitlink_command(const char *root, const char *logs,
+                                        const char *const argv[], int timeout_ms,
+                                        char *why, size_t why_len)
+{
+    struct proof_paths paths = {0};
+    if (!root || !logs || !argv || !why || !why_len ||
+        snprintf(paths.root, sizeof(paths.root), "%s", root) >= (int)sizeof(paths.root) ||
+        snprintf(paths.logs, sizeof(paths.logs), "%s", logs) >= (int)sizeof(paths.logs)) return false;
+    snprintf(paths.attempt_token, sizeof(paths.attempt_token), "checkout-diagnostic-fixture");
+    snprintf(paths.key, sizeof(paths.key), "fixture-local-fixture-base");
+    why[0] = 0;
+    return dp_generation_gitlink_command(&paths, root, argv, timeout_ms, why, why_len);
 }
 
 bool zcl_dev_proof_test_checkout_command(const char *root, const char *logs,
