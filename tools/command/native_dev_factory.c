@@ -336,7 +336,7 @@ static uint64_t fac_hash(const char *s)
 
 /* Slot of `cwd` in the first-seen table, keeping the earliest (queued, idx)
  * row of each cwd. -1 when it cannot be tracked (empty, too long, table or
- * allocation full); those cases set cwd_cap_hit. */
+ * allocation full); nonempty paths that cannot be tracked set cwd_cap_hit. */
 static int64_t fac_cwd_slot(struct fac_jobs *j, const char *cwd, double queued,
                             int64_t idx)
 {
@@ -643,7 +643,8 @@ static size_t fac_collect_run(const struct fac_jobs *j, bool want_first,
     *sum = 0;
     for (size_t i = 0; i < j->n; i++) {
         const struct fac_job *jb = &j->v[i];
-        if (jb->first != want_first || (cls >= 0 && jb->cls != cls))
+        if (jb->slot < 0 || jb->first != want_first ||
+            (cls >= 0 && jb->cls != cls))
             continue;
         r[n++] = jb->run_s;
         *sum += jb->run_s;
@@ -665,7 +666,7 @@ static void fac_run_emit(struct json_value *out, const char *key,
 }
 
 /* The first job per cwd against the rest, by run time. */
-static void fac_first_report(const struct fac_jobs *j, double *r,
+static void fac_first_report(const struct fac_jobs *j, double *r, int64_t unknown,
                              struct json_value *out)
 {
     struct json_value fp;
@@ -678,6 +679,7 @@ static void fac_first_report(const struct fac_jobs *j, double *r,
     fac_run_emit(&fp, "non_first", r, n, sum);
     (void)json_push_kv_int(&fp, "tracked_cwds", (int64_t)j->ncwds);
     (void)json_push_kv_bool(&fp, "cwd_cap_hit", j->cwd_cap_hit);
+    (void)json_push_kv_int(&fp, "unknown_jobs", unknown);
     fac_attach(out, "first_job_per_cwd", &fp);
 }
 
@@ -706,17 +708,25 @@ static double fac_cold_estimate(const struct fac_jobs *j, double *r,
     return total;
 }
 
+static void fac_push_null(struct json_value *obj, const char *key);
+
 static void fac_first_section(const struct fac_jobs *j, struct json_value *out)
 {
     double *r = zcl_malloc((j->n + 1) * sizeof(*r), "dev_factory_first");
     double est;
-    int64_t unbaselined = 0;
+    int64_t unbaselined = 0, unknown = 0;
     if (!r)
         return;
-    fac_first_report(j, r, out);
+    for (size_t i = 0; i < j->n; i++)
+        if (j->v[i].slot < 0) fac_inc(&unknown);
+    fac_first_report(j, r, unknown, out);
     est = fac_cold_estimate(j, r, &unbaselined);
-    (void)json_push_kv_real(out, "cold_build_seconds_estimate", est);
-    (void)json_push_kv_str(out, "cold_build_basis", "proxy");
+    if (unknown)
+        fac_push_null(out, "cold_build_seconds_estimate");
+    else
+        (void)json_push_kv_real(out, "cold_build_seconds_estimate", est);
+    (void)json_push_kv_str(out, "cold_build_basis",
+                           unknown ? "incomplete_untracked_cwds" : "proxy");
     (void)json_push_kv_int(out, "cold_build_unbaselined_first_jobs",
                            unbaselined);
     free(r);

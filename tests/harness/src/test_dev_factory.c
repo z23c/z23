@@ -544,6 +544,7 @@ int test_dev_factory(void)
         ASSERT(dfx_near(&c, "jobs.first_job_per_cwd.non_first.run_sum_s", 500));
         ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.tracked_cwds"), 2);
         ASSERT(dfx_bool_is(&c, "jobs.first_job_per_cwd.cwd_cap_hit", false));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.unknown_jobs"), 0);
         /* build: 900 - 300 = 600; t_fast: 500 - 200 = 300 */
         ASSERT(dfx_near(&c, "jobs.cold_build_seconds_estimate", 900));
         ASSERT(dfx_str_is(&c, "jobs.cold_build_basis", "proxy"));
@@ -609,6 +610,46 @@ int test_dev_factory(void)
         ASSERT(dfx_ok(&c));
         ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.tracked_cwds"), 4096);
         ASSERT(dfx_bool_is(&c, "jobs.first_job_per_cwd.cwd_cap_hit", true));
+        dfx_end(&c);
+        dfx_env(jobs, land, att, proc);
+        PASS();
+    }
+
+    TEST("factory: untracked window cwd jobs do not become non-first") {
+        char capf[700], row[1024];
+        FILE *fp;
+        (void)snprintf(capf, sizeof(capf), "%s/jobs_unknown_cwd.jsonl", base);
+        fp = fopen(capf, "w");
+        ASSERT(fp != NULL);
+        for (int i = 0; i < 4096; i++) {
+            char cwd[64];
+            (void)snprintf(cwd, sizeof(cwd), "/cap/wt%d", i);
+            dfx_job_line(row, sizeof(row), "z23", now - 200000, now - 199990,
+                         now - 199980, 10, 10, 0, 0, "tC", "make", cwd);
+            (void)fputs(row, fp);
+        }
+        dfx_job_line(row, sizeof(row), "z23", now - 100, now - 90, now - 80,
+                     10, 10, 0, 0, "tC", "make", "/cap/wt0");
+        (void)fputs(row, fp);
+        dfx_job_line(row, sizeof(row), "z23", now - 100, now - 90, now - 80,
+                     10, 900, 0, 0, "tC", "make", "/cap/new");
+        (void)fputs(row, fp);
+        dfx_job_line(row, sizeof(row), "z23", now - 100, now - 90, now - 80,
+                     10, 800, 0, 0, "tC", "make", "");
+        (void)fputs(row, fp);
+        (void)fclose(fp);
+        (void)setenv("ZCL_DEV_FACTORY_JOBS", capf, 1);
+        dfx_run(&c, 48);
+        ASSERT(dfx_ok(&c));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.total"), 3);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.tracked_cwds"), 4096);
+        ASSERT(dfx_bool_is(&c, "jobs.first_job_per_cwd.cwd_cap_hit", true));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.first.n"), 0);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.non_first.n"), 1);
+        ASSERT(dfx_near(&c, "jobs.first_job_per_cwd.non_first.run_sum_s", 10));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.unknown_jobs"), 2);
+        ASSERT(dfx_is_null(&c, "jobs.cold_build_seconds_estimate"));
+        ASSERT(dfx_str_is(&c, "jobs.cold_build_basis", "incomplete_untracked_cwds"));
         dfx_end(&c);
         dfx_env(jobs, land, att, proc);
         PASS();
