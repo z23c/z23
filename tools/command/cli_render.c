@@ -1940,6 +1940,17 @@ static void render_app_list(struct buf *b, const struct zcl_cli_render_env *e,
     }
 }
 
+/* z23 app open for a human: the envelope's own sentence, one line. */
+static void render_app_open(struct buf *b, const struct zcl_cli_render_env *e,
+                            const struct json_value *root)
+{
+    const char *msg = json_get_str(json_get(root, "message"));
+    if (!msg || !msg[0])
+        msg = "app opened";
+    buf_puts_trunc(b, msg, (size_t)e->width);
+    buf_putc(b, '\n');
+}
+
 /* Recipe renderers for ok=true envelopes, keyed by command path. */
 typedef void (*recipe_fn)(struct buf *, const struct zcl_cli_render_env *,
                           const struct json_value *);
@@ -1955,6 +1966,7 @@ static const struct {
     { "core.network.peers.list", render_peer_list },
     { "lab.run", render_lab_run },
     { "app.list", render_app_list },
+    { "app.open", render_app_open },
 };
 
 static recipe_fn recipe_for(const char *command_path)
