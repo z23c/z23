@@ -16,6 +16,44 @@
 #include <stdlib.h>
 #include <string.h>
 
+static bool dp_binding_leaf(const char *leaf)
+{
+    size_t n = strcspn(leaf, "-");
+    if (n != 40 && n != 64) return false;
+    return strlen(leaf) == 2 * n + 8 && leaf[2 * n + 1] == '.' &&
+        strspn(leaf, "0123456789abcdef") == n &&
+        strspn(leaf + n + 1, "0123456789abcdef") == n &&
+        strspn(leaf + 2 * n + 2, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") == 6;
+}
+
+static bool dp_binding_tail(const char *tail, char attempt[144], char request[65], size_t payload)
+{
+    char decimal[32], canonical[384]; int used = 0;
+    if (sscanf(tail, "\nzcl.dev_proof_failure_binding.v1\nattempt=%143[^\n]\n"
+        "request_sha3=%64[^\n]\npayload_bytes=%31[^\n]\n%n", attempt, request, decimal, &used) != 3 ||
+        !used || tail[used] || !dp_binding_leaf(attempt)) return false;
+    if (strlen(request) != 64 || strspn(request, "0123456789abcdef") != 64 || !payload) return false;
+    int n = snprintf(canonical, sizeof(canonical), "\nzcl.dev_proof_failure_binding.v1\n"
+        "attempt=%s\nrequest_sha3=%s\npayload_bytes=%zu\n", attempt, request, payload);
+    return n > 0 && n < (int)sizeof(canonical) && strcmp(canonical, tail) == 0;
+}
+
+int zcl_dev_proof_failure_binding_decode(const char *text, size_t size,
+    char attempt[144], char request_sha3[65], size_t *payload_size)
+{
+    static const char marker[] = "\nzcl.dev_proof_failure_binding.v1\n";
+    char record[2049];
+    if (!text || !attempt || !request_sha3 || !payload_size || size > 2048 || memchr(text, 0, size)) return -1;
+    memcpy(record, text, size); record[size] = 0;
+    char *tail = strstr(record, marker);
+    if (!tail) return 0;
+    if (strstr(tail + 1, marker)) return -1;
+    size_t payload = (size_t)(tail - record);
+    if (!dp_binding_tail(tail, attempt, request_sha3, payload)) return -1;
+    *payload_size = payload;
+    return 1;
+}
+
 static bool history_priority_component_valid(const char *p, size_t n)
 {
     if (!n || (n == 1 && p[0] == '.') ||
