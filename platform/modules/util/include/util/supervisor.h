@@ -233,6 +233,8 @@ struct liveness_contract {
 
     /* status (supervisor-owned, atomic-readable from anywhere) */
     _Atomic int      stall_reason;     /* enum supervisor_stall_reason */
+    /* Protected by the supervisor's stall-transition lock; never wraps. */
+    uint64_t         stall_incarnation;
     _Atomic uint32_t ticks_run;
     /* Ticks on which the child declared itself legitimately idle. Held apart
      * from ticks_run because `ticks_run - idle_ticks` is the number of runs

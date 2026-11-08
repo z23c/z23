@@ -4,11 +4,28 @@
 #include "platform/time_compat.h"
 #include "util/supervisor.h"
 #include "supervisor_internal.h"
-
 #include "json/json.h"
 
 #include <stdatomic.h>
 #include <string.h>
+
+/* Live count excludes retired slots; the registry count is a high-water mark. */
+int supervisor_live_count_locked(void)
+{
+    int n = 0;
+    for (int i = 0; i < g_contract_count; i++)
+        if (g_contracts[i] != NULL) n++;
+    return n;
+}
+
+int supervisor_child_headroom(void)
+{
+    pthread_mutex_lock(&g_lock);
+    int used = supervisor_live_count_locked();
+    pthread_mutex_unlock(&g_lock);
+    int left = SUPERVISOR_CAP - used;
+    return left > 0 ? left : 0;
+}
 
 /* ── Introspection ─────────────────────────────────────────────────── */
 

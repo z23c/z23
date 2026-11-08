@@ -189,9 +189,6 @@ static bool stall_publish(struct liveness_contract *c,
             observed >> SUPERVISOR_STALL_TOKEN_REASON_BITS;
         if (generation ==
                 (UINT64_MAX >> SUPERVISOR_STALL_TOKEN_REASON_BITS)) {
-            fprintf(stderr,  // obs-ok:supervisor-stall-generation-exhausted
-                "[supervisor] FAIL stall delivery incarnation exhausted "
-                "for child='%s'\n", c->name);
             atomic_fetch_add(&c->stall_delivery_discarded, 1u);
             return false;
         }
@@ -213,11 +210,30 @@ static bool stall_publish(struct liveness_contract *c,
  * fixed per-contract slot; no caller callback or observer runs on the root
  * sweep. Tests that drive sweep_once without starting threads remain
  * synchronous. */
-static void note_stall_fire(struct liveness_contract *c,
-                            enum supervisor_stall_reason r)
+static void stall_raise(struct liveness_contract *c,
+                        enum supervisor_stall_reason r)
 {
-    atomic_fetch_add(&c->stall_fires, 1u);
-    if (!atomic_load(&g_running)) {
+    bool raised = false, published = false, exhausted = false, async = false;
+    pthread_mutex_lock(&g_stall_transition_lock);
+    if (!atomic_load(&c->completed) &&
+        atomic_load(&c->stall_reason) == SUPERVISOR_STALL_NONE) {
+        if (c->stall_incarnation != UINT64_MAX) ++c->stall_incarnation;
+        atomic_store(&c->stall_reason, (int)r);
+        atomic_fetch_add(&c->stall_fires, 1u);
+        raised = true;
+        async = atomic_load(&g_running);
+        if (async) {
+            published = stall_publish(c, r);
+            exhausted = !published;
+        }
+    }
+    pthread_mutex_unlock(&g_stall_transition_lock);
+    if (!raised) return;
+    if (exhausted)
+        fprintf(stderr,  // obs-ok:supervisor-stall-generation-exhausted
+                "[supervisor] FAIL stall delivery incarnation exhausted "
+                "for child='%s'\n", c->name);
+    if (!async) {
         /* Preserve the historical before-start/testing seam only when no
          * production worker can still be draining. stop() clears g_running
          * before joining the sweep, so a handle here means drop, never an
@@ -229,8 +245,7 @@ static void note_stall_fire(struct liveness_contract *c,
             atomic_fetch_add(&c->stall_delivery_discarded, 1u);
         return;
     }
-    if (stall_publish(c, r))
-        stall_wake();
+    if (published) stall_wake();
 }
 
 /* ── Tick-runner thread ────────────────────────────────────────────────
@@ -408,10 +423,12 @@ void supervisor_unregister(supervisor_child_id id)
      * above for what swap-remove broke. Retired slots are reused by
      * register, so restart cycles are allocation-stable; the count is
      * a high-water mark, and live-entry queries count non-NULL slots. */
+    pthread_mutex_lock(&g_stall_transition_lock);
     if (g_contracts[id])
         stall_cancel_pending(g_contracts[id]);
     g_contracts[id] = NULL;
     g_contract_domains[id] = NULL;
+    pthread_mutex_unlock(&g_stall_transition_lock);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -436,10 +453,13 @@ void supervisor_child_complete(supervisor_child_id id)
     atomic_store(&c->period_secs, 0);
     atomic_store(&c->deadline_secs, 0);
     atomic_store(&c->progress_max_quiet_us, 0);
+    pthread_mutex_lock(&g_stall_transition_lock);
+    if (c->stall_incarnation != UINT64_MAX) ++c->stall_incarnation;
     atomic_store(&c->stall_reason, SUPERVISOR_STALL_NONE);
     stall_cancel_pending(c);
     atomic_store(&c->last_tick_us, platform_time_monotonic_us());
     atomic_store(&c->completed, true);
+    pthread_mutex_unlock(&g_stall_transition_lock);
 }
 
 void supervisor_tick(supervisor_child_id id)
@@ -447,15 +467,10 @@ void supervisor_tick(supervisor_child_id id)
     struct liveness_contract *c = contract_for(id);
     if (!c) return;
     if (atomic_load(&c->completed)) return;
-    atomic_store(&c->last_tick_us, platform_time_monotonic_us());
-    atomic_fetch_add(&c->ticks_run, 1u);
     /* Edge-rearm: ticking clears a TIME_DEADLINE stall. NO_PROGRESS
      * is cleared by progress changes, not by ticks. */
-    int prev = atomic_load(&c->stall_reason);
-    if (prev == SUPERVISOR_STALL_TIME_DEADLINE ||
-        prev == SUPERVISOR_STALL_CHILD_REPORTED) {
-        uint64_t pending = atomic_load(&c->stall_delivery_pending);
-        atomic_store(&c->stall_reason, SUPERVISOR_STALL_NONE);
+    uint64_t pending = 0;
+    if (supervisor_stall_explicit_tick(c, &pending)) {
         stall_cancel_rearmed(c, pending);
     }
 }
@@ -470,10 +485,9 @@ void supervisor_progress(supervisor_child_id id, int64_t marker)
         atomic_store(&c->progress_marker, marker);
         atomic_store(&c->progress_changed_at_us, platform_time_monotonic_us());
         /* Progress rearm: clears NO_PROGRESS. */
-        int sr = atomic_load(&c->stall_reason);
-        if (sr == SUPERVISOR_STALL_NO_PROGRESS) {
-            uint64_t pending = atomic_load(&c->stall_delivery_pending);
-            atomic_store(&c->stall_reason, SUPERVISOR_STALL_NONE);
+        uint64_t pending = 0;
+        if (supervisor_stall_rearm(c, SUPERVISOR_STALL_NO_PROGRESS,
+                        SUPERVISOR_STALL_NO_PROGRESS, &pending)) {
             stall_cancel_rearmed(c, pending);
         }
     }
@@ -489,10 +503,9 @@ void supervisor_progress_idle(supervisor_child_id id)
      * must not be able to masquerade as work, and must not be called stuck.
      * Same rearm as real progress — a child that has caught up is healthy. */
     atomic_store(&c->progress_changed_at_us, platform_time_monotonic_us());
-    int sr = atomic_load(&c->stall_reason);
-    if (sr == SUPERVISOR_STALL_NO_PROGRESS) {
-        uint64_t pending = atomic_load(&c->stall_delivery_pending);
-        atomic_store(&c->stall_reason, SUPERVISOR_STALL_NONE);
+    uint64_t pending = 0;
+    if (supervisor_stall_rearm(c, SUPERVISOR_STALL_NO_PROGRESS,
+                    SUPERVISOR_STALL_NO_PROGRESS, &pending)) {
         stall_cancel_rearmed(c, pending);
     }
 }
@@ -504,10 +517,7 @@ void supervisor_report_stall(supervisor_child_id id,
     if (!c) return;
     if (atomic_load(&c->completed)) return;
     /* Only fire on the rising edge. */
-    int expected = SUPERVISOR_STALL_NONE;
-    if (atomic_compare_exchange_strong(&c->stall_reason, &expected, (int)r)) {
-        note_stall_fire(c, r);
-    }
+    stall_raise(c, r);
 }
 
 void supervisor_set_period(supervisor_child_id id, int64_t secs)
@@ -610,27 +620,6 @@ int supervisor_progress_undeclared_count(void)
     return n;
 }
 
-/* Live-entry count under the registry lock. g_contract_count is a
- * high-water mark (retired slots tombstone to NULL and are reused),
- * so every "how many children" query counts non-NULL slots. */
-int supervisor_live_count_locked(void)
-{
-    int n = 0;
-    for (int i = 0; i < g_contract_count; i++)
-        if (g_contracts[i] != NULL)
-            n++;
-    return n;
-}
-
-int supervisor_child_headroom(void)
-{
-    pthread_mutex_lock(&g_lock);
-    int used = supervisor_live_count_locked();
-    pthread_mutex_unlock(&g_lock);
-    int left = SUPERVISOR_CAP - used;
-    return left > 0 ? left : 0;
-}
-
 void supervisor_set_restart_policy(supervisor_child_id id,
                                    enum supervisor_restart_policy policy,
                                    int64_t intensity_max, int64_t period_secs)
@@ -707,11 +696,7 @@ static void maybe_restart(struct liveness_contract *c, int64_t now)
     int64_t cap = atomic_load(&c->restart_intensity_max);
     if (cap < 1) cap = 1;
     if ((int64_t)atomic_load(&c->restarts_in_window) >= cap) {
-        int expected = SUPERVISOR_STALL_NONE;
-        if (atomic_compare_exchange_strong(&c->stall_reason,
-                &expected, SUPERVISOR_STALL_REPEATED_RESTART)) {
-            note_stall_fire(c, SUPERVISOR_STALL_REPEATED_RESTART);
-        }
+        stall_raise(c, SUPERVISOR_STALL_REPEATED_RESTART);
         return;
     }
 
@@ -796,13 +781,17 @@ static bool stall_deliver_one(void)
         struct liveness_contract *c = g_contracts[i];
         if (!c)
             continue;
+        pthread_mutex_lock(&g_stall_transition_lock);
         uint64_t pending = atomic_load(&c->stall_delivery_pending);
         enum supervisor_stall_reason reason_pending =
             supervisor_stall_token_reason(pending);
-        if (reason_pending == SUPERVISOR_STALL_NONE)
+        if (reason_pending == SUPERVISOR_STALL_NONE) {
+            pthread_mutex_unlock(&g_stall_transition_lock);
             continue;
+        }
         if (atomic_load(&c->completed) ||
             atomic_load(&c->stall_reason) != (int)reason_pending) {
+            pthread_mutex_unlock(&g_stall_transition_lock);
             stall_cancel_stale(c, pending);
             continue;
         }
@@ -815,8 +804,10 @@ static bool stall_deliver_one(void)
             reason = reason_pending;
             snprintf(g_stall_runner_active_name,
                      sizeof(g_stall_runner_active_name), "%s", c->name);
+            pthread_mutex_unlock(&g_stall_transition_lock);
             break;
         }
+        pthread_mutex_unlock(&g_stall_transition_lock);
     }
     pthread_mutex_unlock(&g_lock);
     if (!claimed)
@@ -835,10 +826,12 @@ static bool stall_deliver_one(void)
 static void stall_discard_all(void)
 {
     pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(&g_stall_transition_lock);
     for (int i = 0; i < g_contract_count; i++) {
         if (g_contracts[i])
             stall_cancel_pending(g_contracts[i]);
     }
+    pthread_mutex_unlock(&g_stall_transition_lock);
     pthread_mutex_unlock(&g_lock);
     if (atomic_exchange(&g_runner_blocker_action,
                         RUNNER_BLOCKER_NONE) != RUNNER_BLOCKER_NONE)
@@ -932,7 +925,7 @@ static void run_due_ticks(void)
             continue;   /* not marked due */
         }
 
-        int64_t before = atomic_load(&c->last_tick_us);
+        struct supervisor_tick_snapshot before = supervisor_stall_tick_snapshot(c);
         pthread_mutex_lock(&g_lock);
         snprintf(g_runner_active_name, sizeof(g_runner_active_name), "%s",
                  c->name);
@@ -941,14 +934,11 @@ static void run_due_ticks(void)
         pthread_mutex_lock(&g_lock);
         g_runner_active_name[0] = '\0';
         pthread_mutex_unlock(&g_lock);
-        /* If on_tick didn't call supervisor_tick itself, stamp it now so we
-         * don't busy-fire — byte-identical to the old inline sweep semantics
-         * (works for on_tick==NULL period-driven children too). */
-        int64_t after = atomic_load(&c->last_tick_us);
-        if (after == before) {
-            atomic_store(&c->last_tick_us, platform_time_monotonic_us());
-            atomic_fetch_add(&c->ticks_run, 1u);
-        }
+        /* If the callback did not explicitly tick, stamp it once and recover
+         * only the same deadline incarnation observed before dispatch. */
+        uint64_t pending = 0;
+        if (supervisor_stall_implicit_tick(c, before, &pending))
+            stall_cancel_rearmed(c, pending);
         atomic_store(&c->tick_running, false);
         /* Heartbeat the runner BETWEEN children so a long batch of children
          * never trips the runner deadline — only a single wedged tick does. */
@@ -1051,11 +1041,7 @@ static void sweep_contract(struct liveness_contract *c, int64_t now,
     if (sr != SUPERVISOR_STALL_NONE) return;
 
     if (deadline_lapsed(c, now, deadl_s, queue_bound_us)) {
-        int expected = SUPERVISOR_STALL_NONE;
-        if (atomic_compare_exchange_strong(&c->stall_reason,
-                &expected, SUPERVISOR_STALL_TIME_DEADLINE)) {
-            note_stall_fire(c, SUPERVISOR_STALL_TIME_DEADLINE);
-        }
+        stall_raise(c, SUPERVISOR_STALL_TIME_DEADLINE);
         return;
     }
 
@@ -1066,11 +1052,7 @@ static void sweep_contract(struct liveness_contract *c, int64_t now,
     if (quiet_us > 0) {
         int64_t changed = atomic_load(&c->progress_changed_at_us);
         if ((now - changed) >= quiet_us) {
-            int expected = SUPERVISOR_STALL_NONE;
-            if (atomic_compare_exchange_strong(&c->stall_reason,
-                    &expected, SUPERVISOR_STALL_NO_PROGRESS)) {
-                note_stall_fire(c, SUPERVISOR_STALL_NO_PROGRESS);
-            }
+            stall_raise(c, SUPERVISOR_STALL_NO_PROGRESS);
         }
     }
 }

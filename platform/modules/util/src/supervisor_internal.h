@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Supervisor private state shared with the read-only introspection unit. */
+ * Supervisor private state shared by the introspection and stall-state units. */
 #ifndef ZCL_UTIL_SUPERVISOR_INTERNAL_H
 #define ZCL_UTIL_SUPERVISOR_INTERNAL_H
 
@@ -32,6 +32,18 @@ struct supervisor_domain {
 };
 
 extern pthread_mutex_t g_supervisor_lock;
+extern pthread_mutex_t g_supervisor_stall_transition_lock;
+struct supervisor_tick_snapshot {
+    uint32_t ticks;
+    int reason;
+    uint64_t incarnation;
+};
+bool supervisor_stall_rearm(struct liveness_contract *c, int first, int second,
+                            uint64_t *pending);
+bool supervisor_stall_explicit_tick(struct liveness_contract *c, uint64_t *pending);
+struct supervisor_tick_snapshot supervisor_stall_tick_snapshot(struct liveness_contract *c);
+bool supervisor_stall_implicit_tick(struct liveness_contract *c,
+    struct supervisor_tick_snapshot before, uint64_t *pending);
 extern struct liveness_contract *g_supervisor_contracts[SUPERVISOR_CAP];
 extern supervisor_domain_t
     *g_supervisor_contract_domains[SUPERVISOR_CAP];
@@ -58,6 +70,7 @@ int supervisor_live_count_locked(void);
 const char *supervisor_stall_active_callback_name_internal(void);
 
 #define g_lock g_supervisor_lock
+#define g_stall_transition_lock g_supervisor_stall_transition_lock
 #define g_contracts g_supervisor_contracts
 #define g_contract_domains g_supervisor_contract_domains
 #define g_contract_count g_supervisor_contract_count

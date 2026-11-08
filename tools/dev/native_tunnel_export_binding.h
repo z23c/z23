@@ -2,5 +2,5 @@
  * purpose: Generated exact tunnel descriptor binding; make native-tunnel-export-binding. */
 #ifndef ZCL_NATIVE_TUNNEL_EXPORT_BINDING_H
 #define ZCL_NATIVE_TUNNEL_EXPORT_BINDING_H
-#define TUNNEL_DESCRIPTOR_SHA256 "7d3f6a53d12c7dcbf28e1d3acfed94f420e4e39c64ff16ed5c053c0c623e16ff"
+#define TUNNEL_DESCRIPTOR_SHA256 "d50045948718e2d6db8d06b0a969d95d64f87520ad24513e33c8d759b7d4da9d"
 #endif

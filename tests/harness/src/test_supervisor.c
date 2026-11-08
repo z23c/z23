@@ -1747,6 +1747,82 @@ static int check_dispatch_delay_not_charged(void)
     return failures;
 }
 
+static supervisor_child_id g_implicit_test_id;
+
+static void implicit_same_reason_again(struct liveness_contract *self)
+{
+    (void)self;
+    supervisor_tick(g_implicit_test_id);
+    supervisor_report_stall(g_implicit_test_id, SUPERVISOR_STALL_TIME_DEADLINE);
+}
+
+static void implicit_child_report(struct liveness_contract *self)
+{
+    (void)self;
+    supervisor_report_stall(g_implicit_test_id, SUPERVISOR_STALL_CHILD_REPORTED);
+}
+
+static int check_implicit_deadline_rearm(void)
+{
+    int failures = 0;
+    static struct liveness_contract child, silent;
+    static struct dispatch_probe probe;
+    supervisor_child_id id = dispatch_fixture(&child, &probe, &silent);
+    SUP_CHECK("implicit rearm fixture registers", id >= 0);
+    atomic_store(&child.stall_reason, SUPERVISOR_STALL_TIME_DEADLINE);
+    atomic_store(&child.stall_fires, 1u);
+    atomic_store(&child.tick_pending, true);
+    supervisor_run_due_ticks_for_testing();
+    SUP_CHECK("implicit tick clears prior deadline and counts once",
+              atomic_load(&child.stall_reason) == SUPERVISOR_STALL_NONE &&
+              atomic_load(&child.ticks_run) == 1u &&
+              atomic_load(&child.stall_fires) == 1u);
+    atomic_store(&child.period_secs, 0);
+    atomic_fetch_add(&g_dispatch_now_us, INT64_C(11000000));
+    supervisor_sweep_once_for_testing();
+    SUP_CHECK("recovered deadline can fire again without losing history",
+              atomic_load(&child.stall_reason) == SUPERVISOR_STALL_TIME_DEADLINE &&
+              atomic_load(&child.stall_fires) == 2u);
+    atomic_store(&child.stall_reason, SUPERVISOR_STALL_NO_PROGRESS);
+    atomic_store(&child.tick_pending, true);
+    supervisor_run_due_ticks_for_testing();
+    SUP_CHECK("implicit tick preserves no-progress stall",
+              atomic_load(&child.stall_reason) == SUPERVISOR_STALL_NO_PROGRESS);
+    atomic_store(&child.stall_reason, SUPERVISOR_STALL_REPEATED_RESTART);
+    atomic_store(&child.tick_pending, true);
+    supervisor_run_due_ticks_for_testing();
+    SUP_CHECK("implicit tick preserves restart-storm stall",
+              atomic_load(&child.stall_reason) == SUPERVISOR_STALL_REPEATED_RESTART);
+    atomic_store(&child.stall_reason, SUPERVISOR_STALL_TIME_DEADLINE);
+    child.stall_incarnation = UINT64_MAX;
+    atomic_store(&child.tick_pending, true);
+    supervisor_run_due_ticks_for_testing();
+    SUP_CHECK("saturated incarnation retains deadline",
+              atomic_load(&child.stall_reason) == SUPERVISOR_STALL_TIME_DEADLINE);
+    dispatch_fixture_end();
+
+    id = dispatch_fixture(&child, &probe, &silent);
+    g_implicit_test_id = id;
+    child.on_tick = implicit_same_reason_again;
+    atomic_store(&child.stall_reason, SUPERVISOR_STALL_TIME_DEADLINE);
+    atomic_store(&child.tick_pending, true);
+    supervisor_run_due_ticks_for_testing();
+    SUP_CHECK("same-clock explicit tick counts once and preserves newer deadline",
+              atomic_load(&child.ticks_run) == 1u &&
+              atomic_load(&child.stall_reason) == SUPERVISOR_STALL_TIME_DEADLINE);
+    dispatch_fixture_end();
+
+    id = dispatch_fixture(&child, &probe, &silent);
+    g_implicit_test_id = id;
+    child.on_tick = implicit_child_report;
+    atomic_store(&child.tick_pending, true);
+    supervisor_run_due_ticks_for_testing();
+    SUP_CHECK("implicit tick preserves callback's new child report",
+              atomic_load(&child.stall_reason) == SUPERVISOR_STALL_CHILD_REPORTED);
+    dispatch_fixture_end();
+    return failures;
+}
+
 static int check_dispatch_stalls_still_fire(void)
 {
     int failures = 0;
@@ -1820,6 +1896,7 @@ int test_supervisor(void)
     failures += check_event_wake_tick();
     failures += check_deadline_stall_once();
     failures += check_dispatch_delay_not_charged();
+    failures += check_implicit_deadline_rearm();
     failures += check_dispatch_stalls_still_fire();
     failures += check_dispatch_queue_bounded();
     failures += check_progress_frozen_stall();

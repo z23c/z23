@@ -1719,13 +1719,13 @@ static int t_lint_fast_tor_graph(void)
         "cp \"$1/platform/modules/platform/tests/android_acceptance.mk\" platform/modules/platform/tests/\n"
         "cp \"$1/engine/composition/lib_module_order.def\" engine/composition/\n"
         "if [ -f \"$1/tools/retrieval_pair_sources.mk\" ]; then cp \"$1/tools/retrieval_pair_sources.mk\" tools/; fi\n"
-        "printf '#!/bin/sh\\nexit 0\\n' > tools/dev/check-toolchain.sh\n"
-        "printf '#!/bin/sh\\nprintf fixture\\n' > tools/dev/process-start-token.sh\n"
+        "printf '#!/bin/sh\\necho compiler >> \"$HOME/compiler-calls\"\\nexit 0\\n' > tools/dev/check-toolchain.sh\n"
+        "printf '#!/bin/sh\\necho epoch >> \"$HOME/epoch-calls\"\\nprintf fixture\\n' > tools/dev/process-start-token.sh\n"
         "printf '#!/bin/sh\\necho \"$1\" >> \"$HOME/calls\"\\nif [ \"$1\" = run ]; then printf \"%%s\\\\n\" \"$@\" > \"$HOME/args\"; fi\\n[ \"${FAIL_STAGE:-}\" != \"$1\" ]\\n' > stub-lint\n"
         "chmod +x tools/dev/check-toolchain.sh tools/dev/process-start-token.sh stub-lint\n"
         "printf '%s\\n' '.PHONY: tor-provenance-ready check-native-tunnel-export-binding' 'tor-provenance-ready:' '\t@printf called > \"$(HOME)/tor\"; exit 77' 'check-native-tunnel-export-binding:' '\t@printf binding > \"$(HOME)/binding\"' 'fixture-print-gates:' '\t@printf \"%s\\\\n\" $(LINT_FAST_GATES)' > overlay.mk\n"
         "HOME=\"$2/home\" TMPDIR=\"$2/tmp\"; export HOME TMPDIR\n"
-        "fixture_make() { make --no-print-directory -o /dev/null -o ./stub-lint -f Makefile -f overlay.mk ZCL_LINT_FAST_PRECHECK=1 ZCL_LINT_SERIAL=0 ZCL_USE_CCACHE=0 MAKE_RESTARTS=1 LIB_MODULES=platform LIB_TREE_MODULES=platform ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' EQUIHASH_FACT_TOOL=/dev/null LINTC_TOOL=./stub-lint FILE_SIZE_POLICY_BIN=/dev/null TOOLGEN_BIN=/dev/null TOR_PROVENANCE_BIN=/dev/null HOTSWAP_ACTION_PLAN=/dev/null CAPABILITY_INVENTORY_TOOL=/dev/null ZCODE_PACKAGE_REGISTRY_CHECK_BIN=/dev/null \"$@\"; }\n"
+        "fixture_make() { make --no-print-directory -o /dev/null -o ./stub-lint -f Makefile -f overlay.mk ZCL_LINT_FAST_PRECHECK=1 ZCL_LINT_SERIAL=0 ZCL_USE_CCACHE=0 MAKE_RESTARTS=1 LIB_MODULES=platform LIB_TREE_MODULES=platform ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= TEST_GROUP_LIST_BIN=/bin/echo TEST_GROUP_LIST_SRCS=/dev/null TEST_GROUP_LIST_HDRS=/dev/null TEST_GROUP_LIST_BUILD=: 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' EQUIHASH_FACT_TOOL=/dev/null LINTC_TOOL=./stub-lint FILE_SIZE_POLICY_BIN=/dev/null TOOLGEN_BIN=/dev/null TOR_PROVENANCE_BIN=/dev/null HOTSWAP_ACTION_PLAN=/dev/null CAPABILITY_INVENTORY_TOOL=/dev/null ZCODE_PACKAGE_REGISTRY_CHECK_BIN=/dev/null \"$@\"; }\n"
         "if ! fixture_make fixture-print-gates > expected 2>parse.log; then cat parse.log >&2; exit 1; fi\n"
         "if ! fixture_make lint-fast > run.log 2>&1; then cat run.log >&2; exit 1; fi\n"
         "[ ! -e \"$HOME/tor\" ]; [ -e \"$HOME/binding\" ]; [ -s \"$HOME/args\" ]\n"
@@ -1758,10 +1758,29 @@ static int t_lint_fast_tor_graph(void)
         "[ \"$(grep -c '^precheck$' \"$HOME/calls\")\" = 1 ]\n"
         "rm -f \"$HOME/calls\"; fixture_make lint-fast ZCL_LINT_SERIAL=1 LINT_FAST_GATES=fixture-fast ZCL_LINT_FAST_PRECHECK=0 > serial-optout.log 2>&1\n"
         "[ ! -e \"$HOME/calls\" ]\n";
+    static const char epoch_checks[] =
+        "rm -f \"$HOME/epoch-calls\" \"$HOME/compiler-calls\"\n"
+        "for fast in t-fast t-fast-exact; do for build in dev-bin z23-dev zclassic23-dev z23 zclassic23; do\n"
+        "  for order in first second; do\n"
+        "    if [ \"$order\" = first ]; then set -- \"$fast\" \"$build\"; else set -- \"$build\" \"$fast\"; fi\n"
+        "    if fixture_make \"$@\" ONLY=models > mixed.log 2>&1; then echo 'mixed goals accepted' >&2; exit 1; fi\n"
+        "    grep -F 'mixed fast-test and dev/node build goals cannot share one Make' mixed.log >/dev/null\n"
+        "    [ ! -e \"$HOME/epoch-calls\" ] && [ ! -e \"$HOME/compiler-calls\" ] && [ ! -e build/test-obj ] || { echo 'mixed goals entered compiler or epoch setup' >&2; exit 1; }\n"
+        "  done\n"
+        "done; done\n"
+        "printf '%s\\n' '.DEFAULT:' '\t@:' >> overlay.mk\n"
+        "for goal in t-fast t-fast-exact dev-bin z23-dev zclassic23-dev z23 zclassic23 agent-verify dev-proof-bundle-prefork; do\n"
+        "  rc=0; fixture_make -n -p -q \"$goal\" ONLY=models > single.log 2>&1 || rc=$?\n"
+        "  if [ \"$rc\" -gt 1 ] || grep -F 'mixed fast-test and dev/node build goals cannot share one Make' single.log >/dev/null; then echo \"single goal refused: $goal rc=$rc\" >&2; exit 1; fi\n"
+        "  if [ \"$goal\" = dev-proof-bundle-prefork ]; then grep '^dev-proof-bundle-prefork:' single.log >/dev/null; fi\n"
+        "done\n"
+        "rc=0; fixture_make -n -p -q dev-bin z23 > pair.log 2>&1 || rc=$?\n"
+        "if [ \"$rc\" -gt 1 ] || grep -F 'mixed fast-test and dev/node build goals cannot share one Make' pair.log >/dev/null; then echo \"direct build pair refused rc=$rc\" >&2; exit 1; fi\n"
+        "grep '^dev-bin:' pair.log >/dev/null; grep '^z23:' pair.log >/dev/null\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "lint_fast", "tor_graph");
-    char combined[sizeof(script) + sizeof(checks)];
-    int n = snprintf(combined, sizeof(combined), "%s%s", script, checks);
+    char combined[sizeof(script) + sizeof(checks) + sizeof(epoch_checks)];
+    int n = snprintf(combined, sizeof(combined), "%s%s%s", script, checks, epoch_checks);
     if (n < 0 || (size_t)n >= sizeof(combined)) return 1;
     int bad = build_needs_fixture_run(repo_root(), fixture, combined);
     if (test_rm_rf_recursive(fixture) != 0) bad = 1;

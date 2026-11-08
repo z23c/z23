@@ -1,6 +1,16 @@
 # ZClassic C23 Full Node
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 
+# The public fast-test goals recurse under the checkout lock with a fresh
+# epoch lease. A sibling dev/node build in this same Make can already hold an
+# unverified test-fast epoch, so the nested acquire must refuse that live lease.
+# Reject these known unsafe combinations before any bootstrap or source capture.
+ifneq ($(filter t-fast t-fast-exact,$(MAKECMDGOALS)),)
+ifneq ($(filter dev-bin z23-dev zclassic23-dev z23 zclassic23,$(MAKECMDGOALS)),)
+$(error mixed fast-test and dev/node build goals cannot share one Make; run devbuild --wait make <build-goals> and devbuild --wait make t-fast-exact ONLY=<groups> separately)
+endif
+endif
+
 # ── No built-in rules ─────────────────────────────────────────────────────
 
 # GNU Make ships ~90 suffix rules for languages this repository does not use
