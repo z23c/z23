@@ -4769,6 +4769,45 @@ static int test_app_open_accepts_yes(void)
     return failures;
 }
 
+/* app.protocols was a COMPAT leaf with no handler, so `z23 app protocols`
+ * failed COMMAND_COMPAT_ONLY.  It must run natively and return the same
+ * index body the REST /api/protocols route serves. */
+static int test_app_protocols_runs_native(void)
+{
+    int failures = 0;
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.application_protocols.index.v2");
+    TEST("app.protocols runs natively and returns the protocols index") {
+        const struct zcl_command_spec *spec =
+            find_spec(zcl_command_catalog(), "app.protocols");
+        ASSERT(spec != NULL);
+        ASSERT(spec->handler != NULL);
+        ASSERT_EQ(spec->availability, ZCL_COMMAND_READY);
+        ASSERT_STR_EQ(spec->output_schema,
+                      "zcl.application_protocols.index.v2");
+        struct zcl_command_request req = {
+            .spec = spec, .input = &input, .view = "normal"
+        };
+        spec->handler(&req, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "schema")),
+                      "zcl.application_protocols.index.v2");
+        const struct json_value *protocols = json_get(&reply.data, "protocols");
+        ASSERT(protocols != NULL && protocols->type == JSON_ARR);
+        ASSERT(protocols->num_children >= 1);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "protocol_count")),
+                  (int64_t)protocols->num_children);
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return failures;
+}
+
 static int test_app_list_pasteable_next(void)
 {
     int failures = 0, rc = 0;
@@ -4826,6 +4865,7 @@ int test_native_api_contract(void)
     failures += test_dev_failure_native_api();
     failures += test_native_app_catalog_uses_strict_builtin_source();
     failures += test_native_app_inspect_launch_registry();
+    failures += test_app_protocols_runs_native();
     failures += test_app_open_accepts_yes();
     failures += test_app_list_pasteable_next();
     failures += test_help_points_to_app_list();
