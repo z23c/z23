@@ -1156,6 +1156,18 @@ static void fac_phase_token(const char *tok, bool is_test,
         p->lock_ms = fac_token_int(tok + 19);
 }
 
+static bool fac_phase_is_test(const char *line)
+{
+    const char *p = line;
+    while ((p = strstr(p, "step=test")) != NULL) {
+        if ((p == line || strchr(" \t\r\n", p[-1])) &&
+            (p[9] == '\0' || strchr(" \t\r\n", p[9])))
+            return true;
+        p += 9;
+    }
+    return false;
+}
+
 static bool fac_phase_line(const char *line, size_t len, void *ctx,
                            struct fac_src *src)
 {
@@ -1167,7 +1179,7 @@ static bool fac_phase_line(const char *line, size_t len, void *ctx,
     if (!copy)
         return false;
     memcpy(copy, line, len + 1);
-    is_test = strstr(line, "step=test") != NULL;
+    is_test = fac_phase_is_test(line);
     p->saw_test = p->saw_test || is_test;
     for (char *t = strtok_r(copy, " \t\r", &save); t;
          t = strtok_r(NULL, " \t\r", &save))

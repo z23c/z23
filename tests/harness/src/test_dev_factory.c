@@ -262,7 +262,10 @@ static bool dfx_attempts_fixture(const char *root, const char *dir)
     char attempt[1400], path[1600];
     const char *real =
         "step=compile status=ok elapsed_ms=1000\n"
-        "step=test status=ok elapsed_ms=120000\n"
+        "elapsed_ms=120000 step=test status=ok\n"
+        "step=test_shadow elapsed_ms=64922\n"
+        "step=test_shadow_seed elapsed_ms=83432\n"
+        "detail=step=test elapsed_ms=19\n"
         "lint_wall_ms=5000\n"
         "proof_cpu_children_ms=3600000\n"
         "queue_lock_wait_ms=7000\n";
@@ -273,12 +276,14 @@ static bool dfx_attempts_fixture(const char *root, const char *dir)
                 "test_selection=universal reason=header_change "
                 "groups_selected=900\n", 120);
     dfx_attempt(dir, DFX_NAME_40C "-" DFX_NAME_40B ".partia",
-                "queue_lock_wait_ms=2000\n", NULL, 30);
+                "queue_lock_wait_ms=2000\nstep=test-needs elapsed_ms=200\n", NULL, 30);
     if (!zcl_dev_proof_test_failure_attempt_prepare(root, DFX_NAME_40C,
             DFX_NAME_40B, attempt, sizeof(attempt)) ||
         !zcl_dev_proof_test_failure_attempt_settle(root, DFX_NAME_40C,
             DFX_NAME_40B, attempt, "proof_generation_gitlink_checkout_failed"))
         return false;
+    (void)snprintf(path, sizeof(path), "%s/phases.txt", attempt);
+    dfx_write(path, "step=test-needs elapsed_ms=300 exit=1\n");
     if (!zcl_dev_proof_test_failure_attempt_prepare(root, DFX_NAME_40C,
             DFX_NAME_40A, attempt, sizeof(attempt))) return false;
     (void)snprintf(path, sizeof(path), "%s/logs/failure.txt", attempt);
