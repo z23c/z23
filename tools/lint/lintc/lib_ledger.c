@@ -418,3 +418,88 @@ int lint_macro_arg(const char *s, int want, int *aoff, int *alen)
     }
     return argno - 1;
 }
+
+int bln_has(const struct bln_set *s, const char *name)
+{
+    for (int i = 0; i < s->count; i++)
+        if (!strcmp(s->n[i], name))
+            return 1;
+    return 0;
+}
+
+int bln_add(struct bln_set *s, const char *name)
+{
+    size_t n = strlen(name);
+    if (bln_has(s, name))
+        return 0;
+    if (s->count >= BLN_MAX || n >= BLN_ROW)
+        return die("z23-lint: baseline-set overflow\n", "");
+    memcpy(s->n[s->count++], name, n + 1);
+    return 0;
+}
+
+int bln_load(struct bln_set *s, const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return errno == ENOENT ? 0 : die("z23-lint: cannot open %s\n", path);
+    char *line = NULL;
+    size_t cap = 0;
+    int rc = 0;
+    while (rc == 0 && getline(&line, &cap, f) >= 0) {
+        char *h = strchr(line, '#'), *p = line;
+        if (h) *h = '\0';
+        while (*p && isspace((unsigned char)*p)) p++;
+        size_t n = strlen(p);
+        while (n && isspace((unsigned char)p[n - 1])) p[--n] = '\0';
+        if (n) rc = bln_add(s, p);
+    }
+    return fin(f, line, path, rc);
+}
+
+static int bln_diff_into(const struct bln_set *have, const struct bln_set *want,
+                         struct bln_set *out)
+{
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < have->count; i++)
+        if (!bln_has(want, have->n[i]))
+            rc = bln_add(out, have->n[i]);
+    return rc;
+}
+
+static int bln_print_rows(FILE *out, const struct bln_set *rows, const char *hdr)
+{
+    if (!rows->count)
+        return 0;
+    if (fputs(hdr, out) < 0)
+        return die("z23-lint: write failed\n", "");
+    for (int i = 0; i < rows->count; i++)
+        if (fprintf(out, "  %s\n", rows->n[i]) < 0)
+            return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+int bln_diff_report(FILE *out, const char *gate, const char *baseline_path,
+                    const struct bln_set *base, const struct bln_set *found)
+{
+    struct bln_set newc = {0}, stale = {0};
+    int rc = bln_diff_into(found, base, &newc);
+    if (rc == 0)
+        rc = bln_diff_into(base, found, &stale);
+    if (rc)
+        return rc;
+    if (newc.count == 0 && stale.count == 0)
+        return 0;
+    char nh[128], sh[192];
+    if (ovf(snprintf(nh, sizeof nh, "%s: FATAL — %d NEW site(s) not in %s:\n",
+                     gate, newc.count, baseline_path), sizeof nh)
+        || ovf(snprintf(sh, sizeof sh,
+                        "%s: FATAL — %d STALE baseline row(s) no longer found "
+                        "(delete from %s — this baseline is shrink-only):\n",
+                        gate, stale.count, baseline_path), sizeof sh))
+        return die("z23-lint: message buffer overflow\n", "");
+    rc = bln_print_rows(out, &newc, nh);
+    if (rc == 0)
+        rc = bln_print_rows(out, &stale, sh);
+    return rc ? rc : 2;
+}
