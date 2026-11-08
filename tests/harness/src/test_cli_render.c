@@ -1683,6 +1683,132 @@ static int test_next_input_cleanup(const char *name, const char *input)
     return failures;
 }
 
+/* ── app menu leaves: a readable block on a terminal ───────────────── */
+
+#define CR_PLAN_ID \
+    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+
+/* Wrap a handler's data object in the result envelope and render it as the
+ * terminal form of `command`. Returns the rendered length (0 = raw JSON). */
+static size_t cr_app_render(const char *command, const char *data, char *out,
+                            size_t cap)
+{
+    char doc[8192];
+    (void)snprintf(doc, sizeof(doc),
+                   "{\"schema\":\"zcl.result.v1\",\"command\":\"%s\","
+                   "\"ok\":true,\"status\":\"passed\",\"data\":%s,"
+                   "\"next\":[]}", command, data);
+    struct zcl_cli_render_env e = cr_env(80, false);
+    return zcl_cli_render_doc(doc, strlen(doc), command, &e, out, cap);
+}
+
+static int test_app_menu_render(void)
+{
+    int failures = 0;
+    char out[4096];
+    TEST("app.inspect reads as a short block, not the raw envelope") {
+        size_t n = cr_app_render("app.inspect",
+            "{\"app_id\":\"skycombat\",\"status\":\"not-installed\","
+            "\"source\":\"builtin\",\"authority\":\"launch-registry\","
+            "\"path\":\"/h/skycombat\","
+            "\"build_hint\":\"z23 app build skycombat\"}", out, sizeof(out));
+        ASSERT(n > 0 && out[0] != '{');
+        ASSERT(strstr(out, "skycombat") != NULL);
+        ASSERT(strstr(out, "not-installed") != NULL);
+        ASSERT(strstr(out, "z23 app build skycombat") != NULL);
+        ASSERT(strstr(out, "\"schema\"") == NULL);
+        ASSERT(cr_max_line_width(out) <= 80);
+        PASS();
+    }
+    TEST("app.seed plan says what happens and the exact confirming command") {
+        size_t n = cr_app_render("app.seed",
+            "{\"stage\":\"plan\",\"app\":\"skycombat\",\"source\":\"/s\","
+            "\"package_root\":\"" CR_PLAN_ID "\",\"release_id\":\"\","
+            "\"file_count\":42,\"existing\":false,\"publisher\":\"\","
+            "\"key_path\":\"/h/.z23/zcode_publisher.key\","
+            "\"plan_id\":\"" CR_PLAN_ID "\","
+            "\"next\":\"repeat with this plan_id and confirm:true to "
+            "publish\"}", out, sizeof(out));
+        ASSERT(n > 0 && out[0] != '{');
+        ASSERT(strstr(out, "skycombat") != NULL);
+        ASSERT(strstr(out, "42") != NULL);
+        ASSERT(strstr(out, "plan_id") != NULL);
+        ASSERT(strstr(out, "z23 app seed --input='{\"app\":\"skycombat\","
+                           "\"plan_id\":\"" CR_PLAN_ID "\","
+                           "\"confirm\":true}'") != NULL);
+        ASSERT(strstr(out, "repeat with this plan_id") == NULL);
+        PASS();
+    }
+    TEST("app.share-copy plan names the copy, where it goes and the next step") {
+        size_t n = cr_app_render("app.share-copy",
+            "{\"stage\":\"plan\",\"copy\":\"skycombat-1\","
+            "\"output\":\"/h/skycombat-1.zapp\",\"name\":\"me/skycombat\","
+            "\"publishes_as\":\"me/skycombat\",\"saves_first\":false,"
+            "\"makes_key\":true,\"plan_id\":\"" CR_PLAN_ID "\","
+            "\"executed\":false,"
+            "\"next\":\"z23 app share skycombat-1 --yes\"}",
+            out, sizeof(out));
+        ASSERT(n > 0 && out[0] != '{');
+        ASSERT(strstr(out, "skycombat-1") != NULL);
+        ASSERT(strstr(out, "/h/skycombat-1.zapp") != NULL);
+        ASSERT(strstr(out, "z23 app share skycombat-1 --yes") != NULL);
+        ASSERT(strstr(out, "\"schema\"") == NULL);
+        PASS();
+    }
+    TEST("app.tasks lists each task with its done mark") {
+        size_t n = cr_app_render("app.tasks",
+            "{\"data_directory\":\"/h/apps\",\"save_state\":\"Saved\","
+            "\"revision\":3,\"can_undo\":true,\"storage_us\":900,"
+            "\"tasks\":[{\"id\":1,\"title\":\"buy milk\",\"done\":true},"
+            "{\"id\":2,\"title\":\"write tests\",\"done\":false}]}",
+            out, sizeof(out));
+        ASSERT(n > 0 && out[0] != '{');
+        ASSERT(strstr(out, "buy milk") != NULL);
+        ASSERT(strstr(out, "write tests") != NULL);
+        ASSERT(strstr(out, "Saved") != NULL);
+        ASSERT(strstr(out, "\"schema\"") == NULL);
+        n = cr_app_render("app.tasks",
+            "{\"data_directory\":\"/h/apps\",\"save_state\":\"Saved\","
+            "\"revision\":0,\"can_undo\":false,\"tasks\":[]}", out,
+            sizeof(out));
+        ASSERT(n > 0 && strstr(out, "no tasks") != NULL);
+        PASS();
+    }
+    TEST("app.service.list gives one line per service with its version") {
+        size_t n = cr_app_render("app.service.list",
+            "{\"services\":[{\"service\":\"reference\",\"display_name\":"
+            "\"Reference Service\",\"version\":\"0.1.0\",\"binding_id\":1,"
+            "\"command_prefix\":\"app.service.reference\"}],\"count\":1,"
+            "\"schema\":\"zcl.service_binding_catalog.v1\"}", out,
+            sizeof(out));
+        ASSERT(n > 0 && out[0] != '{');
+        ASSERT(strstr(out, "reference") != NULL);
+        ASSERT(strstr(out, "0.1.0") != NULL);
+        ASSERT(strstr(out, "app.service.reference") != NULL);
+        ASSERT(cr_max_line_width(out) <= 80);
+        PASS();
+    }
+    TEST("app.transaction-types.list shows counts and one row per type") {
+        size_t n = cr_app_render("app.transaction-types.list",
+            "{\"schema\":\"zcl.transaction_types.index.v2\","
+            "\"transaction_type_count\":2,\"ready_count\":1,"
+            "\"process_only_count\":1,\"transaction_types\":["
+            "{\"id\":\"coinbase_reward\",\"family\":\"base_zcl\","
+            "\"availability\":\"process_only\",\"builder_command\":\"\"},"
+            "{\"id\":\"transparent_t_to_t\",\"family\":\"base_zcl\","
+            "\"availability\":\"ready\","
+            "\"builder_command\":\"vault.intent.plan\"}]}", out,
+            sizeof(out));
+        ASSERT(n > 0 && out[0] != '{');
+        ASSERT(strstr(out, "coinbase_reward") != NULL);
+        ASSERT(strstr(out, "transparent_t_to_t") != NULL);
+        ASSERT(strstr(out, "vault.intent.plan") != NULL);
+        ASSERT(cr_max_line_width(out) <= 80);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── group entry ───────────────────────────────────────────────────── */
 
 int test_cli_render(void)
@@ -1716,6 +1842,7 @@ int test_cli_render(void)
     failures += test_brief_spaced_value();
     failures += test_start_hint();
     failures += test_lab_run_render();
+    failures += test_app_menu_render();
 
     const char *stale = NULL;
     if (!cr_bin_fresh(&stale)) {
