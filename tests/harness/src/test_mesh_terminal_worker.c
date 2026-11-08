@@ -1657,9 +1657,8 @@ static int live_resize_and_confinement(void)
                              "shell still executes after the refusal");
         }
         mesh_terminal_worker_kill(&w);
-        failures = check(failures,
-                         os_sandbox_process_group_census(w.pgid) == 0,
-                         "final kill emptied the group");
+        failures = census_check(failures, w.pgid,
+                                "final kill emptied the group");
     }
 
     return failures;
