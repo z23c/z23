@@ -700,6 +700,63 @@ static size_t fo_short_total(const char *root, size_t total)
 
 /* ---- path-length edges: scratch buffers are exactly 1024 and 4096 ---- */
 
+/* The product joins entry names into 1024-byte buffers and spells staging
+ * and quarantine names in 4096-byte buffers. Linux lets the kernel address
+ * every one of those bytes. macOS caps a path at 1023 bytes plus NUL
+ * (ENAMETOOLONG), so there:
+ *  - an entry whose joined path is 1024 bytes cannot be created or probed by
+ *    full path. The "over" cases create and probe it through the directory's
+ *    descriptor (openat/faccessat), so the kernel only sees the short name
+ *    while the product still has to refuse the 1024-byte join.
+ *  - file_copy stages "<dst>.tmp.<16 hex>" (21 bytes) and block_files_clean
+ *    retires to "<path>.z23-retire.<pid>.<seq>" (under 40 bytes), so a
+ *    destination or file at the join limit leaves the kernel no room for the
+ *    staging or quarantine name. The "fits" cases sit at the longest length
+ *    whose extra name the kernel still accepts, and the 4096-byte staging
+ *    case is checked at that kernel limit instead. */
+#if defined(__APPLE__)
+#define FO_BLOCK_DST_FITS ((size_t)989)  /* file 1002 + 21 = 1023 */
+#define FO_DIR_DST_FITS ((size_t)1000)   /* entry 1002 + 21 = 1023 */
+#define FO_CLEAN_FITS ((size_t)970)      /* file 983 + 40 = 1023 */
+#define FO_STAGE_FITS ((size_t)1002)     /* dst 1002 + 21 = 1023 */
+#define FO_STAGE_OVER ((size_t)1003)     /* staging name is 1024 */
+#else
+#define FO_BLOCK_DST_FITS ((size_t)1010)
+#define FO_DIR_DST_FITS ((size_t)1021)
+#define FO_CLEAN_FITS ((size_t)1010)
+#define FO_STAGE_FITS ((size_t)4074)
+#define FO_STAGE_OVER ((size_t)4075)
+#endif
+
+/* Create dir/name through the directory's descriptor, so the full spelling
+ * never reaches the kernel. */
+static bool fo_series_file_at(const char *dir, const char *name, size_t size)
+{
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dfd < 0)
+        return false;
+    int fd = openat(dfd, name, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    close(dfd);
+    if (fd < 0)
+        return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < size; i++) {
+        unsigned char byte = (unsigned char)((i * 31 + 7) & 0xFF);
+        ok = write(fd, &byte, 1) == 1;
+    }
+    return close(fd) == 0 && ok;
+}
+
+static bool fo_exists_at(const char *dir, const char *name)
+{
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dfd < 0)
+        return false;
+    bool found = faccessat(dfd, name, F_OK, 0) == 0;
+    close(dfd);
+    return found;
+}
+
 static bool fo_block_scenario(const char *root, const char *tag, size_t src_len,
                               size_t dst_len, int expected)
 {
@@ -708,7 +765,7 @@ static bool fo_block_scenario(const char *root, const char *tag, size_t src_len,
     snprintf(dst_tag, sizeof(dst_tag), "%sd", tag);
     if (!fo_long_dir(root, src_tag, fo_short_total(root, src_len), src, sizeof(src)) ||
         !fo_long_dir(root, dst_tag, fo_short_total(root, dst_len), dst, sizeof(dst)) ||
-        !fo_series_file(src, "blk00000.dat", 9))
+        !fo_series_file_at(src, "blk00000.dat", 9))
         return false;
     return block_files_copy(src, dst) == expected;
 }
@@ -723,7 +780,7 @@ static int test_block_files_copy_path_limits(void)
         /* dir + '/' + "blk00000.dat" (12) is 1023 for a 1010-byte dir. */
         bool src_fits = ok && fo_block_scenario(root, "a", 1010, FO_SHORT, 1);
         bool src_over = ok && fo_block_scenario(root, "b", 1011, FO_SHORT, -1);
-        bool dst_fits = ok && fo_block_scenario(root, "c", FO_SHORT, 1010, 1);
+        bool dst_fits = ok && fo_block_scenario(root, "c", FO_SHORT, FO_BLOCK_DST_FITS, 1);
         bool dst_over = ok && fo_block_scenario(root, "e", FO_SHORT, 1011, -1);
         fo_cleanup(root);
         ASSERT(ok);
@@ -746,7 +803,7 @@ static int fo_dir_scenario(const char *root, const char *tag, size_t src_len,
     snprintf(dst_tag, sizeof(dst_tag), "%sd", tag);
     if (!fo_long_dir(root, src_tag, fo_short_total(root, src_len), src, sizeof(src)) ||
         !fo_long_dir(root, dst_tag, fo_short_total(root, dst_len), dst, sizeof(dst)) ||
-        !fo_series_file(src, "f", 9))
+        !fo_series_file_at(src, "f", 9))
         return -1;
     return fo_dir_copy_captured(root, src, dst, out, err);
 }
@@ -760,7 +817,7 @@ static int test_dir_copy_path_limits(void)
         bool ok = fo_root(root, "zcl_dir_long");
         int src_fits = ok ? fo_dir_scenario(root, "a", 1021, FO_SHORT) : -1;
         int src_over = ok ? fo_dir_scenario(root, "b", 1022, FO_SHORT) : -1;
-        int dst_fits = ok ? fo_dir_scenario(root, "c", FO_SHORT, 1021) : -1;
+        int dst_fits = ok ? fo_dir_scenario(root, "c", FO_SHORT, FO_DIR_DST_FITS) : -1;
         int dst_over = ok ? fo_dir_scenario(root, "e", FO_SHORT, 1022) : -1;
         fo_cleanup(root);
         ASSERT(ok);
@@ -777,13 +834,12 @@ static int test_dir_copy_path_limits(void)
 static bool fo_clean_scenario(const char *root, const char *tag, size_t len,
                               bool expect_removed)
 {
-    char dir[PATH_MAX] = "", path[PATH_MAX];
+    char dir[PATH_MAX] = "";
     if (!fo_long_dir(root, tag, len, dir, sizeof(dir)) ||
-        !fo_series_file(dir, "blk00000.dat", 4))
+        !fo_series_file_at(dir, "blk00000.dat", 4))
         return false;
     block_files_clean(dir);
-    fo_path(path, sizeof(path), dir, "blk00000.dat");
-    return fo_exists(path) != expect_removed;
+    return fo_exists_at(dir, "blk00000.dat") != expect_removed;
 }
 
 static int test_block_files_clean_path_limits(void)
@@ -793,7 +849,7 @@ static int test_block_files_clean_path_limits(void)
     TEST("file_ops block_files_clean reaches files at 1023 bytes and leaves 1024") {
         char root[PATH_MAX] = "";
         bool ok = fo_root(root, "zcl_clean_long");
-        bool fits = ok && fo_clean_scenario(root, "a", 1010, true);
+        bool fits = ok && fo_clean_scenario(root, "a", FO_CLEAN_FITS, true);
         bool over = ok && fo_clean_scenario(root, "b", 1011, false);
         fo_cleanup(root);
         ASSERT(ok);
@@ -829,8 +885,8 @@ static int test_file_copy_staging_name_limit(void)
     TEST("file_ops file_copy fits its staging name in 4095 bytes and refuses 4096") {
         char root[PATH_MAX] = "";
         bool ok = fo_root(root, "zcl_stage_long");
-        bool fits = ok && fo_stage_scenario(root, "a", 4074, true);
-        bool over = ok && fo_stage_scenario(root, "b", 4075, false);
+        bool fits = ok && fo_stage_scenario(root, "a", FO_STAGE_FITS, true);
+        bool over = ok && fo_stage_scenario(root, "b", FO_STAGE_OVER, false);
         fo_cleanup(root);
         ASSERT(ok);
         ASSERT(fits);
