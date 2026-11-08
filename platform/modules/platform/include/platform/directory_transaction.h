@@ -153,19 +153,19 @@ bool platform_directory_transaction_remove_tree(const char *path);
  * bound recursion/enumeration. The caller retains and closes its capability. */
 bool platform_directory_transaction_remove_retained(
     struct platform_directory_transaction *directory, unsigned depth);
-/* Move the exact namespace-capable source directory to an absent leaf. Both
- * parent capabilities must be ordinary traverse-only transactions. Windows
- * may refuse a DELETE-bearing destination capability because its internal
- * relative rename open has incompatible sharing. OUTCOME_UNKNOWN means the
- * move completed but post-move identity/durability proof failed: preserve all
- * involved names and reconcile by a fresh exact observation before cleanup. */
+bool platform_directory_transaction_replace_path(const char *staging, const char *destination);
+#endif
+/* Move the retained private directory to an absent destination. The caller
+ * must first flush descendant files and directories; this call flushes the
+ * source directory and both parents only. On Windows source must be namespace-
+ * capable and both parent transactions must be ordinary traverse-only handles.
+ * UNKNOWN means the move occurred but identity or durability was not proved:
+ * preserve both names and reconcile by exact observation before cleanup. */
 enum platform_directory_result platform_directory_transaction_move_directory(
     struct platform_directory_transaction *source_parent, const char *source_leaf,
     struct platform_directory_transaction *source,
     struct platform_directory_transaction *destination_parent, const char *destination_leaf);
-bool platform_directory_transaction_replace_path(const char *staging, const char *destination);
-#endif
-#if defined(_WIN32) && defined(ZCL_TESTING)
+#ifdef ZCL_TESTING
 void platform_directory_transaction_move_directory_test_fail_durability_once(void);
 #endif
 #endif

@@ -587,6 +587,10 @@ static bool run_only_chain_services(const char *only, int *failures)
                *failures);
         return true;
     }
+    if (strcmp(only, "wallet_history_export") == 0) {
+        *failures += test_wallet_history_export();
+        return true;
+    }
     if (strcmp(only, "block_index_loader") == 0) {
         printf("[test] ZCL_TEST_ONLY=block_index_loader — running block index loader only\n");
         *failures += test_block_index_loader();
@@ -1785,6 +1789,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_utxo_apply_coinbase_maturity();
     *failures += test_key_scrub();
     *failures += test_block_index_loader();
+    *failures += test_wallet_history_export();
     *failures += test_chain_state_validator();
     *failures += test_utxo_recovery_service();
     *failures += test_utxo_reimport_flag();

@@ -538,6 +538,8 @@ ZCL_MODULE_CAPABILITY("engine/services/src/utxo_recovery_restore.c", CAP_FS_READ
 ZCL_MODULE_CAPABILITY("engine/services/src/utxo_recovery_service.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/utxo_recovery_stale_cursor.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/utxo_recovery_torn_anchor.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/services/src/wallet_history_export.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/services/src/wallet_history_manifest.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/services/src/vault_intent_async_service.c", CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/services/src/vault_read.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/services/src/wallet_backup_config.c", CAP_FS_WRITE, "")

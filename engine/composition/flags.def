@@ -1103,6 +1103,16 @@ Z23_FLAG("ZCL_HISTORY_ARCHIVE_HEIGHT", "env_test", "-", "-",
           "expected endpoint height for the history archive probe; first use tests/harness/src/test_block_index_loader.c:auto")
 Z23_FLAG("ZCL_HISTORY_ARCHIVE_MAX_ROWS", "env_test", "-", "-",
           "maximum index rows for the history archive probe; first use tests/harness/src/test_block_index_loader.c:auto")
+Z23_FLAG("ZCL_HISTORY_EXPORT_DEST", "env_test", "-", "-",
+          "new destination leaf for the private history export probe; first use tests/harness/src/test_wallet_history_export.c:auto")
+Z23_FLAG("ZCL_HISTORY_EXPORT_MAX_BYTES", "env_test", "-", "-",
+          "maximum copied bytes for the private history export probe; first use tests/harness/src/test_wallet_history_export.c:auto")
+Z23_FLAG("ZCL_HISTORY_EXPORT_MIN_FREE_BYTES", "env_test", "-", "-",
+          "minimum free bytes retained by the private history export probe; first use tests/harness/src/test_wallet_history_export.c:auto")
+Z23_FLAG("ZCL_HISTORY_EXPORT_PARENT", "env_test", "-", "-",
+          "private destination parent enabling the history export probe; first use tests/harness/src/test_wallet_history_export.c:auto")
+Z23_FLAG("ZCL_HISTORY_EXPORT_STAGE", "env_test", "-", "-",
+          "new staging leaf for the private history export probe; first use tests/harness/src/test_wallet_history_export.c:auto")
 Z23_FLAG("ZCL_HOST_GC_BINBAK_MIN_AGE_D", "env_build", "60", "-",
           "days a ~/bin/*.bak-* quarantine backup survives; first use tools/scripts/host_gc.sh:auto")
 Z23_FLAG("ZCL_HOST_GC_CACHE_FREEZE_GB", "env_build", "100", "-",

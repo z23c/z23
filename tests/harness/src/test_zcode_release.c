@@ -1983,6 +1983,110 @@ static int test_zr_fleet_pins(void)
     return failures;
 }
 
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+static bool zr_move_same_object(struct platform_directory_transaction *a,
+                                struct platform_directory_transaction *b)
+{
+    struct stat x, y;
+    return fstat((int)a->native, &x) == 0 && fstat((int)b->native, &y) == 0 &&
+           x.st_dev == y.st_dev && x.st_ino == y.st_ino;
+}
+
+struct zr_move_fixture {
+    char dir[512];
+    struct platform_directory_transaction root, from, to, source, other, named, check;
+};
+
+static void zr_move_close(struct zr_move_fixture *f, bool cleanup)
+{
+    platform_directory_transaction_close(&f->check);
+    platform_directory_transaction_close(&f->named);
+    platform_directory_transaction_close(&f->other);
+    platform_directory_transaction_close(&f->source);
+    platform_directory_transaction_close(&f->to);
+    platform_directory_transaction_close(&f->from);
+    platform_directory_transaction_close(&f->root);
+    if (cleanup && f->dir[0]) (void)test_rm_rf_recursive(f->dir);
+}
+
+static bool zr_move_setup(struct zr_move_fixture *f, int mode)
+{
+    memset(f, 0, sizeof(*f));
+    platform_directory_transaction_init(&f->root);
+    platform_directory_transaction_init(&f->from);
+    platform_directory_transaction_init(&f->to);
+    platform_directory_transaction_init(&f->source);
+    platform_directory_transaction_init(&f->other);
+    platform_directory_transaction_init(&f->named);
+    platform_directory_transaction_init(&f->check);
+    bool ok = test_mkdtemp(f->dir, sizeof(f->dir), "zrel_dirmove") &&
+        platform_directory_transaction_open(&f->root, f->dir) &&
+        platform_directory_transaction_open_child(&f->root, "from", true, &f->from) == PLATFORM_DIRECTORY_OK &&
+        platform_directory_transaction_open_child(&f->root, "to", true, &f->to) == PLATFORM_DIRECTORY_OK &&
+        platform_directory_transaction_open_child(&f->from, "source", true, &f->source) == PLATFORM_DIRECTORY_OK;
+    if (ok && mode == 2)
+        ok = platform_directory_transaction_open_child(&f->to, "dest", true, &f->other) == PLATFORM_DIRECTORY_OK;
+    if (ok && mode == 3)
+        ok = platform_directory_transaction_open_child(&f->from, "other", true, &f->other) == PLATFORM_DIRECTORY_OK;
+    return ok;
+}
+
+static bool zr_move_observe(struct zr_move_fixture *f, int mode,
+                            enum platform_directory_result result)
+{
+    struct platform_directory_transaction *parent = &f->from;
+    const char *leaf = "source";
+    if (result == PLATFORM_DIRECTORY_OK || result == PLATFORM_DIRECTORY_OUTCOME_UNKNOWN) {
+        parent = mode == 0 ? &f->from : &f->to;
+        leaf = "dest";
+    }
+    if (platform_directory_transaction_open_child(parent, leaf, false, &f->named) != PLATFORM_DIRECTORY_OK ||
+        !zr_move_same_object(&f->source, &f->named)) return false;
+    if (mode == 2)
+        return platform_directory_transaction_open_child(&f->to, "dest", false, &f->check) ==
+                   PLATFORM_DIRECTORY_OK && zr_move_same_object(&f->other, &f->check);
+    if (mode == 3)
+        return platform_directory_transaction_open_child(&f->to, "dest", false, &f->check) ==
+               PLATFORM_DIRECTORY_MISSING;
+    return true;
+}
+
+static bool zr_directory_move_case(int mode)
+{
+    struct zr_move_fixture f;
+    if (!zr_move_setup(&f, mode)) { zr_move_close(&f, false); return false; }
+    if (mode == 4) platform_directory_transaction_move_directory_test_fail_durability_once();
+    struct platform_directory_transaction *destination = mode == 0 ? &f.from : &f.to;
+    struct platform_directory_transaction *held = mode == 3 ? &f.other : &f.source;
+    enum platform_directory_result result =
+        platform_directory_transaction_move_directory(&f.from, "source", held, destination, "dest");
+    enum platform_directory_result want = mode == 2 ? PLATFORM_DIRECTORY_EXISTS :
+        mode == 3 ? PLATFORM_DIRECTORY_REFUSED :
+        mode == 4 ? PLATFORM_DIRECTORY_OUTCOME_UNKNOWN : PLATFORM_DIRECTORY_OK;
+    bool observed = zr_move_observe(&f, mode, result);
+    zr_move_close(&f, observed);
+    return result == want && observed;
+}
+
+#endif
+
+static int test_zr_directory_move(void)
+{
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+    int failures = 0;
+    const char *labels[] = {"same parent", "different parent", "no clobber",
+                            "source mismatch", "post-move unknown"};
+    for (int i = 0; i < 5; i++) {
+        bool ok = zr_directory_move_case(i);
+        printf("zcode_release directory move: %s... %s\n", labels[i], ok ? "OK" : "FAIL");
+        if (!ok) failures++;
+    }
+    return failures;
+#else
+    return 0;
+#endif
+}
+
 int test_zcode_release(void)
 {
     int failures = 0;
@@ -1996,6 +2100,7 @@ int test_zcode_release(void)
     failures += test_zr_batch_load();
     failures += test_zr_directory_listing();
     failures += test_zr_directory_bootstrap();
+    failures += test_zr_directory_move();
     failures += test_zr_verify_errors();
     failures += test_zr_prove_verify();
     failures += test_zr_mined_anchor();

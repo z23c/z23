@@ -1388,6 +1388,79 @@ enum platform_directory_result platform_directory_transaction_move_directory(
 
 #endif
 
+#if !defined(_WIN32)
+#ifdef ZCL_TESTING
+static bool g_directory_move_fail_durability;
+void platform_directory_transaction_move_directory_test_fail_durability_once(void)
+{
+    g_directory_move_fail_durability = true;
+}
+#endif
+
+static bool directory_move_identity(struct platform_directory_transaction *parent,
+                                    const char *leaf, const struct stat *expected)
+{
+    int fd = openat(dd(parent), leaf, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    struct stat actual;
+    bool ok = directory_fd_private(fd) && fstat(fd, &actual) == 0 &&
+              actual.st_dev == expected->st_dev && actual.st_ino == expected->st_ino;
+    close(fd);
+    return ok;
+}
+
+static bool directory_move_args_valid(
+    struct platform_directory_transaction *source_parent, const char *source_leaf,
+    struct platform_directory_transaction *source,
+    struct platform_directory_transaction *destination_parent, const char *destination_leaf)
+{
+    return source_parent && source && destination_parent &&
+           source_parent->native != UINTPTR_MAX && source->native != UINTPTR_MAX &&
+           destination_parent->native != UINTPTR_MAX && valid_leaf(source_leaf) &&
+           valid_leaf(destination_leaf);
+}
+
+static bool directory_move_source_valid(
+    struct platform_directory_transaction *source_parent, const char *source_leaf,
+    struct platform_directory_transaction *source,
+    struct platform_directory_transaction *destination_parent, struct stat *before)
+{
+    struct stat sp, dp;
+    return directory_fd_private(dd(source_parent)) && directory_fd_private(dd(source)) &&
+           directory_fd_private(dd(destination_parent)) && fstat(dd(source), before) == 0 &&
+           fstat(dd(source_parent), &sp) == 0 && fstat(dd(destination_parent), &dp) == 0 &&
+           before->st_dev == sp.st_dev && before->st_dev == dp.st_dev &&
+           directory_move_identity(source_parent, source_leaf, before) &&
+           platform_directory_transaction_flush(source);
+}
+
+enum platform_directory_result platform_directory_transaction_move_directory(
+    struct platform_directory_transaction *source_parent, const char *source_leaf,
+    struct platform_directory_transaction *source,
+    struct platform_directory_transaction *destination_parent, const char *destination_leaf)
+{
+    if (!directory_move_args_valid(source_parent, source_leaf, source, destination_parent, destination_leaf))
+        return PLATFORM_DIRECTORY_INVALID;
+    struct stat before;
+    if (!directory_move_source_valid(source_parent, source_leaf, source, destination_parent, &before))
+        return PLATFORM_DIRECTORY_REFUSED;
+    if (platform_renameat_noreplace(dd(source_parent), source_leaf,
+                                    dd(destination_parent), destination_leaf) != 0)
+        return move_errno_result(errno);
+#ifdef ZCL_TESTING
+    if (g_directory_move_fail_durability) {
+        g_directory_move_fail_durability = false;
+        return PLATFORM_DIRECTORY_OUTCOME_UNKNOWN;
+    }
+#endif
+    if (!directory_move_identity(destination_parent, destination_leaf, &before) ||
+        !platform_directory_transaction_flush(destination_parent) ||
+        !platform_directory_transaction_flush(source_parent))
+        return PLATFORM_DIRECTORY_OUTCOME_UNKNOWN;
+    return PLATFORM_DIRECTORY_OK;
+}
+#endif
+
 /* Single exported facade; Windows deliberately has no looser ACL fallback. */
 enum platform_directory_result platform_directory_transaction_bootstrap_child(
     const char *canonical_parent, const char *leaf, bool create,

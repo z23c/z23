@@ -862,6 +862,7 @@ int test_difficulty_adjustment_adversarial(void);
 int test_bip34_coinbase_height_parity(void);
 int test_key_scrub(void);
 int test_block_index_loader(void);
+int test_wallet_history_export(void);
 int test_chain_state_validator(void);
 int test_utxo_recovery_service(void);
 int test_utxo_reimport_flag(void);
