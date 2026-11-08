@@ -950,15 +950,7 @@ static void render_menu(struct buf *b, const struct zcl_cli_render_env *e,
     if (total > rows)
         emit_more_footer(b, total - rows);
 
-    const struct json_value *next = json_get(root, "next");
-    if (next && next->type == JSON_OBJ) {
-        char shell[512];
-        next_as_shell(next, shell, sizeof(shell));
-        if (shell[0]) {
-            buf_putc(b, '\n');
-            emit_hint_line(b, e, "next: ", shell);
-        }
-    }
+    render_menu_hints(b, e, root);
     if (is_root)
         emit_branch_hint(b, e, children, total);
 }
