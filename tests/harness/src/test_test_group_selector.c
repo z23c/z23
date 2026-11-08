@@ -3186,6 +3186,63 @@ static int test_runner_retry_evidence(void)
            tgs_retry_case("--retry-evidence-rename-failure", true);
 }
 
+static int test_runner_diagnostic_once(void)
+{
+    int failures = 0;
+    TEST("runner: diagnostic once cannot produce acceptance and does not retry") {
+        static char out[1024 * 1024];
+        char root[PATH_MAX], exe[PATH_MAX], command[8 * PATH_MAX], count_path[PATH_MAX + 32];
+        test_make_tmpdir(root, sizeof(root), "tgs_diagnostic", "once");
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        int n = snprintf(command, sizeof(command),
+            "cd '%s' && '%s' --diagnostic-once --no-cache --retry-evidence-probe --exact=test_hex_codec 2>&1", root, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 3);
+        ASSERT(strstr(out, "DIAGNOSTIC") != NULL);
+        ASSERT(strstr(out, "RETRY-EVIDENCE-FIRST") != NULL);
+        ASSERT(strstr(out, "SUITE VERDICT") == NULL);
+        ASSERT(strstr(out, "zcl.test_phase_receipt.v1") == NULL);
+        ASSERT(strstr(out, "[rerun-alone]") == NULL);
+        (void)snprintf(count_path, sizeof(count_path), "%s/retry-evidence-count", root);
+        FILE *f = fopen(count_path, "r");
+        unsigned count = 0;
+        ASSERT(f && fscanf(f, "%u", &count) == 1);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT_EQ(count, 1u);
+        n = snprintf(command, sizeof(command),
+            "cd '%s' && ZCL_TEST_CACHE=1 ZCL_TESTCACHE_STORE_ROOT='%s/cache' ZCL_TEST_TIMING_DIR='%s/timing' ZCL_DEV_OBSERVATION_STORE='%s/observations' '%s' --diagnostic-once --exact=test_hex_codec 2>&1", root, root, root, root, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 3);
+        ASSERT(strstr(out, "DIAGNOSTIC ONLY: group=test_hex_codec failed=0") != NULL);
+        ASSERT(strstr(out, "SUITE VERDICT") == NULL);
+        ASSERT(strstr(out, "zcl.test_phase_receipt.v1") == NULL);
+        const char *absent[] = {"cache", "timing", "observations", "build/test-verdict.json"};
+        for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
+            (void)snprintf(count_path, sizeof(count_path), "%s/%s", root, absent[i]);
+            ASSERT(access(count_path, F_OK) != 0);
+        }
+        n = snprintf(command, sizeof(command),
+            "cd '%s' && '%s' --diagnostic-once --activate-proof-contracts --exact=test_hex_codec 2>&1", root, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 2);
+        n = snprintf(command, sizeof(command),
+            "cd '%s' && '%s' --diagnostic-once --metaverse-agent-confined --exact=test_hex_codec 2>&1", root, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 2);
+        n = snprintf(command, sizeof(command),
+            "cd '%s' && '%s' --diagnostic-once --exact=test_hex_codec,test_codec_cursor 2>&1", root, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 2);
+        n = snprintf(command, sizeof(command),
+            "cd '%s' && '%s' --diagnostic-once --cache --exact=test_hex_codec 2>&1", root, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 2);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_runner_retry_probe_bounds(void)
 {
     int failures = 0;
@@ -3824,6 +3881,7 @@ int test_test_group_selector(void)
 #endif
     failures += test_runner_private_state();
     failures += test_runner_retry_evidence();
+    failures += test_runner_diagnostic_once();
     failures += test_runner_retry_probe_bounds();
     failures += test_runner_state_setup_refuses();
     failures += test_runner_group_home_is_private();

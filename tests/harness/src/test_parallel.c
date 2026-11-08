@@ -1177,13 +1177,13 @@ static bool retry_probe_options(int argc, char **argv)
     static const char *const allowed[] = {
         "--jobs=2", "--verbose", "--no-cache", "--exact=test_hex_codec",
         "--retry-evidence-probe", "--retry-evidence-unobserved",
-        "--retry-evidence-rename-failure"
+        "--retry-evidence-rename-failure", "--diagnostic-once"
     };
-    unsigned seen[7] = {0};
+    unsigned seen[8] = {0};
     for (int i = 1; i < argc; i++) {
         size_t j = 0;
-        while (j < 7 && strcmp(argv[i], allowed[j]) != 0) j++;
-        if (j == 7 || seen[j]++) return false;
+        while (j < 8 && strcmp(argv[i], allowed[j]) != 0) j++;
+        if (j == 8 || seen[j]++) return false;
     }
     return seen[2] == 1 && seen[3] == 1 &&
         seen[4] + seen[5] + seen[6] == 1 && !getenv("ZCL_TEST_CACHE_DUMP");
@@ -3431,6 +3431,7 @@ struct run_opts {
     bool cache_snapshot;
     const char *changed_sources[32];
     size_t changed_source_count;
+    bool diagnostic_once;
 };
 
 /* The state the stages of main hand to one another. */
@@ -3575,6 +3576,8 @@ static bool cli_parse_mode(const char *a, struct run_opts *o)
         o->selection_only = true;
     } else if (strcmp(a, "--list-build-needs") == 0) {
         o->list_build_needs = true;
+    } else if (strcmp(a, "--diagnostic-once") == 0) {
+        o->diagnostic_once = true;
     } else {
         return false;
     }
@@ -3666,6 +3669,7 @@ static void cli_usage(const char *argv0)
             "[--cache-snapshot --changed-source=PATH] "
             "[--cold-audit] [--emit-observations|--collect-observations] "
             "[--activate-proof-contracts] "
+            "[--diagnostic-once] "
             "[--cache-probe-only [--cache-seed-pass]] "
             "[--write-capsule=PATH|--use-capsule=PATH "
             "--capsule-source-id=ID --capsule-mutation-id=ID "
@@ -3693,8 +3697,41 @@ static int cli_parse(int argc, char **argv, struct run_opts *o)
     return RUN_CONTINUE;
 }
 
+static bool cli_diagnostic_arg(const char *a)
+{
+    return strncmp(a, "--exact=", 8) == 0 || strncmp(a, "--jobs=", 7) == 0 ||
+        (strncmp(a, "-j", 2) == 0 && a[2]) || strncmp(a, "--timeout=", 10) == 0 ||
+        strcmp(a, "--verbose") == 0 || strcmp(a, "-v") == 0 ||
+        strcmp(a, "--no-cache") == 0 || strcmp(a, "--list-build-needs") == 0 ||
+        strcmp(a, "--retry-evidence-probe") == 0;
+}
+
+/* Diagnostic mode admits only one exact group and a closed set of harmless
+ * execution options. It cannot create proof, cache or observation evidence.
+ * --list-build-needs is inspection only and may return success for Make. */
+static bool cli_diagnostic_options(int argc, char **argv, struct run_opts *o)
+{
+    unsigned diagnostic = 0;
+    if (!o->only_exact || !o->only || !o->only[0] || strchr(o->only, ',') ||
+        getenv("ZCL_TEST_CACHE_DUMP") || getenv("ZCL_HOTSWAP_TEST_MODULE"))
+        return false;
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (strcmp(a, "--diagnostic-once") == 0) { diagnostic++; continue; }
+        if (cli_diagnostic_arg(a))
+            continue;
+        return false;
+    }
+    o->cli_no_cache = true;
+    return diagnostic == 1;
+}
+
 static int cli_validate(int argc, char **argv, struct run_opts *o)
 {
+    if (o->diagnostic_once && !cli_diagnostic_options(argc, argv, o)) {
+        fprintf(stderr, "test_parallel: diagnostic once requires one exact group and no proof/cache/observation options\n");
+        return 2;
+    }
     if (!retry_probe_admit(argc, argv)) return 2;
     if (o->list_build_needs) return build_needs_list(o->only, o->only_exact);
     if (!cache_snapshot_selection_valid(o->cache_snapshot,
@@ -4100,8 +4137,9 @@ static int run_execute(struct run_ctx *c)
      * clean shot alone before it counts — see rerun_load_flaky_groups. This
      * runs before the pass/fail accounting below so a load-flaky group's
      * alone verdict is what gets counted, cached, and reported. */
-    rerun_load_flaky_groups(c->results, c->parent_pid, c->o.timeout_secs,
-                            c->o.verbose, c->o.activate_proof_contracts);
+    if (!c->o.diagnostic_once)
+        rerun_load_flaky_groups(c->results, c->parent_pid, c->o.timeout_secs,
+                                c->o.verbose, c->o.activate_proof_contracts);
     return RUN_CONTINUE;
 }
 
@@ -4258,6 +4296,13 @@ static int report_cache_accounting(struct run_ctx *c, int *observation_refused)
 static int run_report(struct run_ctx *c)
 {
     report_tally(c);
+    if (c->o.diagnostic_once) {
+        printf("DIAGNOSTIC ONLY: group=%s failed=%d; not acceptance evidence\n",
+               c->o.only, c->failed_groups);
+        free(c->slots);
+        free(c->results);
+        return 3;
+    }
     report_verdict_build(c);
     report_write_files(c);
     report_verdict_lines(c);
@@ -4271,6 +4316,19 @@ static int run_report(struct run_ctx *c)
 
 int main(int argc, char **argv)
 {
+    /* Refuse incompatible early-dispatch modes before they can bypass the
+     * diagnostic-only contract. Normal invocations retain their old path. */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--diagnostic-once") != 0)
+            continue;
+        struct run_opts early = {0};
+        if (cli_parse(argc, argv, &early) != RUN_CONTINUE ||
+            !cli_diagnostic_options(argc, argv, &early)) {
+            fprintf(stderr, "test_parallel: invalid diagnostic once options\n");
+            return 2;
+        }
+        break;
+    }
     extern void onion_stop_child_exit_if_requested(int, char **);
     onion_stop_child_exit_if_requested(argc, argv);
     if (!selection_inspection_valid(argc, argv)) return 2;
