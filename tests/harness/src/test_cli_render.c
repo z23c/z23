@@ -346,6 +346,59 @@ static int test_menu_row_cap(void)
         ASSERT(strstr(out, "... (6 more, pipe to JSON for full)") != NULL);
         ASSERT(cr_max_line_width(out) <= 100);
         PASS();
+    }
+    TEST("app menu leads with the person journey and hides no leaf") {
+        /* 26 children: journey verbs scattered among agent leaves. */
+        static const char *const names[26] = {
+            "adopt", "list", "invoke", "open", "keep", "copy", "edit",
+            "save", "auth", "build", "account", "share", "receive",
+            "agent1", "agent2", "agent3", "agent4", "agent5", "agent6",
+            "agent7", "agent8", "agent9", "agent10", "agent11", "agent12",
+            "agent13"
+        };
+        char doc[16384];
+        size_t len = (size_t)snprintf(
+            doc, sizeof(doc),
+            "{\"schema\":\"zcl.command_menu.v1\",\"path\":\"app\","
+            "\"summary\":\"Apps\",\"children\":[");
+        for (int i = 0; i < 26; i++)
+            len += (size_t)snprintf(
+                doc + len, sizeof(doc) - len,
+                "%s{\"path\":\"app.%s\",\"summary\":\"does %s\","
+                "\"risk\":\"read\",\"availability\":\"ready\"}",
+                i ? "," : "", names[i], names[i]);
+        len += (size_t)snprintf(
+            doc + len, sizeof(doc) - len,
+            "],\"next\":{\"command\":\"discover.describe\","
+            "\"input\":{\"path\":\"app.list\"}}}");
+        struct zcl_cli_render_env e = cr_env(60, false);
+        char out[16384];
+        size_t n = zcl_cli_render_doc(doc, len, "app", &e, out, sizeof(out));
+        ASSERT(n > 0);
+        const char *heading = strstr(out, "make and share an app");
+        const char *agents = strstr(out, "for agents and tools:");
+        ASSERT(heading != NULL);
+        ASSERT(agents != NULL);
+        ASSERT(heading < agents);
+        static const char *const journey[7] = {
+            "app.list", "app.open", "app.copy", "app.save", "app.build",
+            "app.share", "app.receive"
+        };
+        const char *prev = heading;
+        for (int i = 0; i < 7; i++) {
+            const char *p = strstr(out, journey[i]);
+            ASSERT(p != NULL);
+            ASSERT(p > prev && p < agents);
+            prev = p;
+        }
+        ASSERT(strstr(agents, "auth") != NULL);
+        ASSERT(strstr(agents, "account") != NULL);
+        ASSERT(strstr(agents, "agent13") != NULL);
+        ASSERT(strstr(agents, "adopt") != NULL);
+        ASSERT(strstr(out, "more, pipe to JSON") == NULL);
+        ASSERT(strstr(out, "next: z23 discover describe app.list") != NULL);
+        ASSERT(cr_max_line_width(out) <= 60);
+        PASS();
     } _test_next:;
     return failures;
 }
