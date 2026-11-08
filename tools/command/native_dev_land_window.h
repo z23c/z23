@@ -40,7 +40,7 @@ struct zcl_land_window_estimate {
     int64_t p90_s;
     int64_t max_s;
     int samples;   /* real proofs in the sample actually used */
-    bool measured; /* false: fewer than MIN_SAMPLES, FALLBACK used */
+    bool measured; /* false: insufficient or bounded-out history, FALLBACK */
     char shape[12]; /* "exact", "universal" or "any" */
 };
 
@@ -50,9 +50,15 @@ struct zcl_land_window_estimate {
  * `step=test` row. The newest SAMPLE by start are used, restricted to
  * `shape` ("exact" or "universal", from logs/<pair>.test-selection.log) when
  * that shape alone has MIN_SAMPLES, else every shape. Never fails: no
- * history yields measured=false and FALLBACK. */
+ * history yields measured=false and FALLBACK. More than 400 well-named
+ * attempts also yields that fallback without opening any request files. */
 void zcl_land_window_estimate(const char *proof_root, const char *shape,
                               struct zcl_land_window_estimate *out);
+
+#if defined(ZCL_TESTING)
+void zcl_land_window_test_request_reads_reset(void);
+size_t zcl_land_window_test_request_reads(void);
+#endif
 
 /* The test-selection shape of the newest attempt for (local, base), or
  * false when that attempt has not written one yet. */

@@ -46,6 +46,9 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#if defined(ZCL_TESTING)
+#include <stdatomic.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -738,7 +741,6 @@ void zcl_native_handle_dev_land_window(
  * phases.txt records a `step=test` row ran the suite: refusals and
  * superseded starts never do and stay out of the sample. */
 
-#define LW_ATTEMPT_CAP 4096u
 #define LW_ATTEMPT_SCAN 400u
 #define LW_ATTEMPT_NAME 128u
 #define LW_WALL_MAX (24 * 3600)
@@ -761,6 +763,20 @@ static bool lw_attempts_dir(const char *root, char *out, size_t cap)
     return root && n > 0 && (size_t)n < cap;
 }
 
+#if defined(ZCL_TESTING)
+static _Atomic size_t lw_test_request_reads;
+
+void zcl_land_window_test_request_reads_reset(void)
+{
+    atomic_store(&lw_test_request_reads, 0);
+}
+
+size_t zcl_land_window_test_request_reads(void)
+{
+    return atomic_load(&lw_test_request_reads);
+}
+#endif
+
 /* Line 4 of <dir>/request as a positive epoch. */
 static bool lw_request_start(const char *dir, int64_t *start)
 {
@@ -769,8 +785,12 @@ static bool lw_request_start(const char *dir, int64_t *start)
     char *end = NULL;
     int at = 0;
     FILE *f;
-    if (snprintf(path, sizeof(path), "%s/request", dir) >= (int)sizeof(path) ||
-        !(f = fopen(path, "r")))
+    if (snprintf(path, sizeof(path), "%s/request", dir) >= (int)sizeof(path))
+        return false;
+#if defined(ZCL_TESTING)
+    atomic_fetch_add(&lw_test_request_reads, 1);
+#endif
+    if (!(f = fopen(path, "r")))
         return false;
     while (at < 4 && fgets(line, sizeof(line), f))
         at++;
@@ -814,6 +834,49 @@ static size_t lw_attempts_list(const char *root, const char *prefix,
     (void)closedir(d);
     qsort(out, n, sizeof(*out), lw_attempt_newer);
     return n;
+}
+
+/* Snapshot names before opening requests. Large histories use the advisory
+ * fallback rather than reading an unbounded number of historical requests. */
+static bool lw_estimate_attempts(const char *root, struct lw_attempt *out,
+                                 size_t *count)
+{
+    char dir[4200], sub[4400];
+    struct dirent *ent;
+    size_t n = 0, kept = 0;
+    DIR *d;
+    bool ok = true;
+    if (!lw_attempts_dir(root, dir, sizeof(dir)) || !(d = opendir(dir)))
+        return false;
+    for (;;) {
+        errno = 0;
+        ent = readdir(d);
+        if (!ent) {
+            ok = errno == 0;
+            break;
+        }
+        if (!lw_attempt_name(ent->d_name))
+            continue;
+        if (n == LW_ATTEMPT_SCAN) {
+            ok = false;
+            break;
+        }
+        (void)snprintf(out[n++].name, LW_ATTEMPT_NAME, "%s", ent->d_name);
+    }
+    if (closedir(d) != 0 || !ok)
+        return false;
+    for (size_t i = 0; i < n; i++) {
+        int64_t start;
+        if (snprintf(sub, sizeof(sub), "%s/%s", dir, out[i].name) >=
+                (int)sizeof(sub) || !lw_request_start(sub, &start))
+            continue;
+        if (kept != i)
+            out[kept] = out[i];
+        out[kept++].start = start;
+    }
+    qsort(out, kept, sizeof(*out), lw_attempt_newer);
+    *count = kept;
+    return true;
 }
 
 static bool lw_attempt_path(const char *root, const struct lw_attempt *a,
@@ -943,12 +1006,15 @@ void zcl_land_window_estimate(const char *proof_root, const char *shape,
     if (shape && strcmp(shape, "exact") != 0 && strcmp(shape, "universal") != 0)
         shape = NULL;
     a = proof_root ? (struct lw_attempt *)zcl_calloc(
-                         LW_ATTEMPT_CAP, sizeof(*a), "dev_land_window.attempts")
+                         LW_ATTEMPT_SCAN, sizeof(*a), "dev_land_window.attempts")
                    : NULL;
     if (!a)
         return;
     memset(&s, 0, sizeof(s));
-    n = lw_attempts_list(proof_root, NULL, a, LW_ATTEMPT_CAP);
+    if (!lw_estimate_attempts(proof_root, a, &n)) {
+        free(a);
+        return;
+    }
     lw_sample_collect(proof_root, shape, a, n, &s);
     free(a);
     if (shape && s.nsame >= ZCL_LAND_WINDOW_MIN_SAMPLES)

@@ -262,6 +262,15 @@ static void dlw_proof_root(char *out, size_t cap, const char *tag)
     test_make_tmpdir(out, cap, "dev_land_window", tag);
 }
 
+static bool dlw_missing_attempt(const char *root, unsigned n)
+{
+    char dir[4096];
+    int len = snprintf(dir, sizeof(dir),
+        "%s/.cache/zcl-dev-proof/attempts/%040x-"
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.Ab%04u", root, n, n);
+    return len > 0 && (size_t)len < sizeof(dir) && dlw_mkdirs(dir);
+}
+
 /* Universal 20..34 min (8), exact 7..10 min (4), one long refusal without a
  * step=test row, and the attempts dir's `superseded` entry. */
 static bool dlw_history(const char *root)
@@ -325,6 +334,40 @@ static int dlw_estimate_cases(void)
         zcl_land_window_estimate(root, NULL, &e);
         ASSERT(!e.measured);
         ASSERT_EQ(e.seconds, (int64_t)ZCL_LAND_WINDOW_FALLBACK_S);
+        PASS();
+    }
+
+    TEST("land.window: large history falls back before reading requests") {
+        char local[41], shape[12];
+        dlw_proof_root(root, sizeof(root), "estimate_history_bound");
+        for (unsigned n = 1; n <= 3; n++)
+            ASSERT(dlw_attempt(root, n, DLW_T1000 - (int64_t)n * 3600,
+                               (int64_t)n * 600, "exact", true));
+        for (unsigned n = 4; n <= 400; n++)
+            ASSERT(dlw_missing_attempt(root, n));
+        zcl_land_window_test_request_reads_reset();
+        zcl_land_window_estimate(root, "exact", &e);
+        ASSERT_EQ(zcl_land_window_test_request_reads(), (size_t)400);
+        ASSERT(e.measured);
+        ASSERT_EQ(e.samples, 3);
+        ASSERT_EQ(e.seconds, (int64_t)1800);
+        ASSERT_STR_EQ(e.shape, "exact");
+        ASSERT(dlw_missing_attempt(root, 401));
+        zcl_land_window_test_request_reads_reset();
+        zcl_land_window_estimate(root, "exact", &e);
+        ASSERT_EQ(zcl_land_window_test_request_reads(), (size_t)0);
+        ASSERT(!e.measured);
+        ASSERT_EQ(e.samples, 0);
+        ASSERT_EQ(e.seconds, (int64_t)ZCL_LAND_WINDOW_FALLBACK_S);
+        ASSERT_EQ(e.p75_s, (int64_t)ZCL_LAND_WINDOW_FALLBACK_S);
+        ASSERT_EQ(e.p90_s, (int64_t)ZCL_LAND_WINDOW_FALLBACK_S);
+        ASSERT_EQ(e.max_s, (int64_t)ZCL_LAND_WINDOW_FALLBACK_S);
+        ASSERT_STR_EQ(e.shape, "any");
+        (void)snprintf(local, sizeof(local), "%040x", 1u);
+        ASSERT(zcl_land_window_attempt_shape(
+            root, local, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", shape));
+        ASSERT_STR_EQ(shape, "exact");
+        ASSERT_EQ(zcl_land_window_test_request_reads(), (size_t)1);
         PASS();
     }
 
