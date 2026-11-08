@@ -107,7 +107,7 @@ static int test_error_prose_wraps_without_placeholder(void)
             "ENDWORD\",\"next_action\":\"follow the first next command\","
             "\"phase\":\"validate\",\"retryable\":false,\"mutated\":false,"
             "\"blockers\":[]},\"next\":[{\"command\":\"app.list\"}]}";
-        struct zcl_cli_render_env e = {.width = 80};
+        struct zcl_cli_render_env e = {.human = true, .width = 80, .max_rows = 24};
         char out[4096];
         size_t n = cr_bounds_doc(doc, strlen(doc), "app.keep", &e, out,
                                  sizeof(out));
