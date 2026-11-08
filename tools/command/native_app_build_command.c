@@ -608,6 +608,37 @@ static bool zab_dirs(struct zab *z, char *run, size_t cap)
     return ok;
 }
 
+/* Leave room for the failure envelope even when every retained byte needs
+ * JSON escaping. Build output is untrusted text, never terminal controls or
+ * raw non-UTF-8 bytes. The input already names the copy; do not spend the
+ * error budget on an arbitrarily escaped copy pathname. */
+static void zab_build_failure(struct zab *z,
+                               const struct app_build_make_result *res)
+{
+    enum { TAIL_BYTES = 768 };
+    char tail[TAIL_BYTES + 1];
+    size_t len = strnlen(res->tail, APP_BUILD_TAIL_MAX);
+    size_t from = len > TAIL_BYTES ? len - TAIL_BYTES : 0;
+    for (size_t i = from; i < len; i++) {
+        unsigned char c = (unsigned char)res->tail[i];
+        tail[i - from] = (c == '\n' || c == '\t' || (c >= 32 && c < 127))
+                            ? (char)c : '?';
+    }
+    tail[len - from] = '\0';
+    zab_fail(z, "BUILD_FAILED", true, res->why, ZAB_COMMAND);
+    struct json_value facts;
+    json_init(&facts);
+    json_set_object(&facts);
+    bool ok = json_push_kv_str(&facts, "confinement",
+                               res->unconfined ? "unconfined" : "landlock") &&
+              json_push_kv_str(&facts, "log_tail", tail) &&
+              json_push_kv_bool(&facts, "log_tail_truncated", from != 0) &&
+              json_push_kv(&z->reply->data, "failure_facts", &facts);
+    json_free(&facts);
+    if (!ok)
+        fprintf(stderr, "app.build: could not attach bounded compiler failure facts\n");
+}
+
 /* make ran: refuse a failed build or an undeclared input, else store. */
 static void zab_after_make(struct zab *z, const struct app_build_make *m,
                            const char *run,
@@ -617,10 +648,7 @@ static void zab_after_make(struct zab *z, const struct app_build_make *m,
     uint8_t sha[32];
     struct app_image_build rec;
     if (!res->ok) {
-        (void)json_push_kv_str(&z->reply->data, "confinement",
-                               res->unconfined ? "unconfined" : "landlock");
-        (void)json_push_kv_str(&z->reply->data, "log_tail", res->tail);
-        zab_fail(z, "BUILD_FAILED", true, res->why, z->copy_dir);
+        zab_build_failure(z, res);
         return;
     }
     if (!app_build_depfiles_declared(m, run, &z->closure, why, sizeof(why))) {

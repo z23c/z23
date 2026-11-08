@@ -689,6 +689,123 @@ static bool abc_build_refused(const struct abc_world *w, const char *rel,
            abc_refusal(l, code);
 }
 
+/* Failure data is private unless explicitly admitted as failure_facts. */
+static const char *abc_failure_get(const struct abc_leaf *l, const char *key)
+{
+    const struct json_value *facts = json_get(&l->out.data, "failure_facts");
+    const char *value = json_get_str(json_get(facts, key));
+    return value ? value : "";
+}
+
+static bool abc_failure_tail_bytes(const char *tail)
+{
+    for (const unsigned char *p = (const unsigned char *)tail; *p; ++p)
+        if (*p != '\n' && *p != '\t' && (*p < 32 || *p >= 127)) return false;
+    return true;
+}
+
+static bool abc_failure_tail(const struct json_value *facts, const char *marker,
+                              bool truncated)
+{
+    const char *tail = json_get_str(json_get(facts, "log_tail"));
+    const char *mode = json_get_str(json_get(facts, "confinement"));
+    const struct json_value *cut = json_get(facts, "log_tail_truncated");
+    if (!tail || !mode || !cut || cut->type != JSON_BOOL) return false;
+    if (strlen(tail) > 768 || !strstr(tail, marker) || json_get_bool(cut) != truncated) return false;
+    if (truncated && (!strstr(tail, "APP_BUILD_TAIL_END") || strstr(tail, "DISCARDED_PREFIX"))) return false;
+    if (strcmp(mode, lab_sandbox_available() ? "landlock" : "unconfined")) return false;
+    return abc_failure_tail_bytes(tail);
+}
+
+static bool abc_failure_envelope(const struct json_value *doc, const char *marker,
+                                  bool truncated)
+{
+    const struct json_value *error = json_get(doc, "error");
+    const struct json_value *ok = json_get(doc, "ok"), *mutated = json_get(error, "mutated");
+    const char *status = json_get_str(json_get(doc, "status"));
+    const char *code = json_get_str(json_get(error, "code"));
+    const char *evidence = json_get_str(json_get(error, "evidence"));
+    if (!ok || ok->type != JSON_BOOL || json_get_bool(ok)) return false;
+    if (!mutated || mutated->type != JSON_BOOL || !json_get_bool(mutated)) return false;
+    if (!status || strcmp(status, "failed") || !code || strcmp(code, "BUILD_FAILED")) return false;
+    return evidence && !strcmp(evidence, "app.build") && !json_get(doc, "data") &&
+        abc_failure_tail(json_get(error, "facts"), marker, truncated);
+}
+
+/* Exercise the real producer, then plant ordinary private reply data before
+ * the real serializer. This must never become a blanket data export. */
+static void abc_failure_private_probe(const struct zcl_command_request *request,
+                                       struct zcl_command_reply *reply)
+{
+    zcl_native_handle_app_build(request, reply);
+    if (!json_push_kv_str(&reply->data, "fixture_private", "APP_BUILD_PRIVATE_SHOULD_NOT_ESCAPE"))
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+            "FIXTURE_FAILURE", "fixture", false, reply->error.mutated,
+            "could not insert private serializer probe", "app.build");
+}
+
+static bool abc_failure_wire(const struct abc_world *w, const char *marker, bool truncated)
+{
+    struct abc_leaf l;
+    abc_build_input(&l, w->copy, w->alice_datadir);
+    bool ok = abc_pass("app.build", &l);
+    char plan[65];
+    const char *id = abc_get(&l, "plan_id");
+    ok = ok && strlen(id) == 64;
+    if (ok) memcpy(plan, id, sizeof(plan));
+    ok = ok && json_push_kv_str(&l.in, "plan_id", plan) && json_push_kv_bool(&l.in, "confirm", true);
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *declared = abc_spec("app.build");
+    struct zcl_command_spec spec = {0};
+    if (declared) spec = *declared;
+    spec.handler = abc_failure_private_probe;
+    struct zcl_command_registry local = {.commands = &spec, .count = 1};
+    struct zcl_command_context ctx = {.registry = reg, .granted_capabilities = ~(uint64_t)0,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER, .dev_build = true};
+    char wire[ZCL_COMMAND_ERROR_BUDGET + 1]; enum zcl_command_exit code;
+    size_t n = ok && declared ? zcl_command_registry_execute_json(&local, &spec, &ctx, &l.in,
+        false, spec.path, "normal", 0, 0, NULL, wire, sizeof(wire), &code) : 0;
+    struct json_value doc; json_init(&doc);
+    ok = n > 0 && n <= ZCL_COMMAND_ERROR_BUDGET && code == ZCL_COMMAND_EXIT_INVALID &&
+        json_read(&doc, wire, n) && abc_failure_envelope(&doc, marker, truncated) &&
+        !strstr(wire, "APP_BUILD_PRIVATE_SHOULD_NOT_ESCAPE") && !strstr(wire, "fixture_private");
+    printf("app.build failure wire: bytes=%zu truncated=%d valid=%d\n", n, truncated, ok);
+    json_free(&doc); abc_close(&l);
+    return ok;
+}
+
+static int abc_failure_serialization(const struct abc_world *w)
+{
+    int failures = 0;
+    TEST("app.build: actual compiler sentinel survives the failure envelope") {
+        ASSERT(abc_put(w->copy, "Makefile", k_makefile));
+        ASSERT(abc_put(w->copy, "src/main.c", "#error APP_BUILD_WIRE_SENTINEL\n"));
+        ASSERT(abc_save(w->copy, NULL));
+        ASSERT(abc_failure_wire(w, "APP_BUILD_WIRE_SENTINEL", false));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int abc_failure_escaped(const struct abc_world *w)
+{
+    int failures = 0;
+    TEST("app.build: long escaped build output stays valid bounded JSON with explicit truncation") {
+        const char recipe[] =
+            ".PHONY: app print-app-closure\nprint-app-closure:\n"
+            "\t@printf '%s\\n' Makefile include/boost.h src/main.c\napp:\n"
+            "\t@exec 1>&2; printf 'DISCARDED_PREFIX\\n'; i=0; while [ $$i -lt 600 ]; do "
+            "printf '\"\\\\\\t\\001\\377'; i=$$((i+1)); done; "
+            "printf '\\nAPP_BUILD_TAIL_END\\n'; exit 2\n";
+        ASSERT(abc_put(w->copy, "Makefile", recipe));
+        ASSERT(abc_save(w->copy, NULL));
+        /* Quotes, literal backslashes and tabs survive; hostile bytes become '?'. */
+        ASSERT(abc_failure_wire(w, "\"\\\t??", true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int abc_refuses_bad_builds(const struct abc_world *w)
 {
     int failures = 0;
@@ -703,7 +820,7 @@ static int abc_refuses_bad_builds(const struct abc_world *w)
         ASSERT(abc_build_refused(w, "src/main.c",
                                  "int main(void) { return }\n",
                                  "BUILD_FAILED", &l));
-        const char *tail = abc_get(&l, "log_tail");
+        const char *tail = abc_failure_get(&l, "log_tail");
         ASSERT(strstr(tail, "error") != NULL);
         ASSERT(strlen(tail) <= 2048u);
         abc_close(&l);
@@ -739,8 +856,8 @@ static int abc_landlock_contains(const struct abc_world *w)
                        escape);
         ASSERT(abc_put(w->copy, "src/main.c", "int main(void) { return 0; }\n"));
         ASSERT(abc_build_refused(w, "Makefile", makefile, "BUILD_FAILED", &l));
-        ASSERT(strcmp(abc_get(&l, "confinement"), "landlock") == 0);
-        ASSERT(strstr(abc_get(&l, "log_tail"), "denied") != NULL);
+        ASSERT(strcmp(abc_failure_get(&l, "confinement"), "landlock") == 0);
+        ASSERT(strstr(abc_failure_get(&l, "log_tail"), "denied") != NULL);
         abc_close(&l);
         ASSERT(stat(escape, &st) != 0);
         PASS();
@@ -1556,6 +1673,8 @@ int test_app_build_copy(void)
         failures += abc_restore_is_cache_hit(&w);
         failures += abc_refuses_dirty(&w);
         failures += abc_refuses_bad_builds(&w);
+        if (!failures) failures += abc_failure_serialization(&w);
+        if (!failures) failures += abc_failure_escaped(&w);
         failures += abc_landlock_contains(&w);
     }
     if (!failures) {
