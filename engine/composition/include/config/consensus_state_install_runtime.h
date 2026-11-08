@@ -326,6 +326,14 @@ struct boot_bound_bundle_observation {
     int32_t endpoint_height;
     int attempts;
 };
+struct wallet_history_capability;
+/* The caller retains the matching capability and its lease until this call returns. */
+struct zcl_result consensus_state_install_from_bound_bundle_terminal_guarded(
+    struct node_db *ndb, struct main_state *ms, const char *datadir,
+    struct wallet_sqlite *ws, struct wallet *wallet,
+    const struct boot_bound_bundle_observation *observation,
+    const struct wallet_history_capability *history,
+    struct consensus_state_install_runtime_result *out);
 enum boot_bound_read_result {
     BOOT_BOUND_READ_ERROR, BOOT_BOUND_READ_ABSENT, BOOT_BOUND_READ_LEGACY,
     BOOT_BOUND_READ_READY, BOOT_BOUND_READ_TERMINAL, BOOT_BOUND_READ_UNSUPPORTED
@@ -340,6 +348,17 @@ enum boot_bound_read_result boot_install_bound_bundle_read(
  * UNKNOWN may follow durable replacement; read again before deciding what to do. */
 enum boot_bound_consume_result boot_install_bound_bundle_consume(
     const char *datadir, const struct boot_bound_bundle_observation *expected);
+/* Caller must first prove exact durable completion. ABSENT does not prove it.
+ * UNKNOWN may follow a namespace change; read again before deciding what to do. */
+enum boot_bound_retire_result {
+    BOOT_BOUND_RETIRE_ERROR, BOOT_BOUND_RETIRE_ABSENT, BOOT_BOUND_RETIRE_STALE,
+    BOOT_BOUND_RETIRE_DONE, BOOT_BOUND_RETIRE_UNKNOWN, BOOT_BOUND_RETIRE_UNSUPPORTED
+};
+enum boot_bound_retire_result boot_install_bound_bundle_retire(
+    const char *datadir, const struct boot_bound_bundle_observation *expected);
+#ifdef ZCL_TESTING
+void boot_install_bound_retire_test_hook(void (*hook)(const char *path), bool fail_flush);
+#endif
 
 /* CREATED alone certifies a newly published durable request. */
 enum boot_bundle_arm_result boot_install_bundle_request_typed(

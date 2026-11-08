@@ -400,6 +400,7 @@ static int bound_malformed_case(const char *dir)
         !memcmp(&output, &zero, sizeof(output)));
     boot_install_bundle_clear(dir); return failures;
 }
+#include "consensus_state_bound_retire_test.h"
 static int case_bound_read_consume(void)
 {
     int failures = 0, legacy = 0; char dir[256];
@@ -423,6 +424,7 @@ static int case_bound_read_consume(void)
     failures += bound_stale_fields(dir, &current);
     failures += bound_budget_cases(dir, current);
     failures += bound_unknown_cases(dir, &request);
+    failures += bound_retire_cases(dir, &request);
     boot_install_bundle_clear(dir); test_rm_rf_recursive(dir); return failures;
 }
 

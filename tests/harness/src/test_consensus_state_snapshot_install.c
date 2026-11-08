@@ -13,6 +13,8 @@
 #include "util/thread_registry.h"
 #include "wallet/wallet_lock.h"
 #include "services/island_anchor.h"
+#include "services/wallet_history_capability.h"
+#include "services/wallet_history_manifest.h"
 #include "config/flysync_island.h"
 #include "test/test_flysync_island_common.h"
 #include "primitives/block.h"
@@ -7068,6 +7070,7 @@ static bool csi_stage_swap_child(const char *root)
         !out.state_installed && wallet_sqlite_cutover_read(ws, &binding) == WALLET_CUTOVER_ABSENT &&
         !boot_consensus_bundle_marker_exists(c.rdir);
 }
+#include "consensus_state_bound_terminal_test.h"
 static int csi_stage_swap_case(void)
 {
     int failures = 0; char root[256];
@@ -7096,6 +7099,11 @@ int test_snapshot_install_recovery(void)
     failures += csi_real_postcommit_test();
     failures += csi_stage_test();
     failures += csi_stage_swap_case();
+#if defined(__linux__)
+    failures += csi_bound_swap_case();
+    failures += csi_bound_real_case(false);
+    failures += csi_bound_real_case(true);
+#endif
     failures += csi_old_retry_crash_case();
     failures += csi_pool_crash_case(true);
     failures += csi_pool_guarded_crash_case();

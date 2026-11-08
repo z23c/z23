@@ -157,6 +157,16 @@ static enum ibr_status ibr_decode(const char *wire, size_t size, struct ibr_requ
     req->bound = true;
     return IBR_BOUND;
 }
+static bool ibr_read_open(struct platform_private_file *file, struct ibr_request *req,
+                          enum ibr_status *status)
+{
+    char wire[IBR_WIRE_CAP]; uint64_t size = 0, size_after = 0;
+    bool ok = platform_private_file_size(file, &size) && size > 0 && size <= sizeof(wire) &&
+        platform_private_file_read_at(file, wire, (size_t)size, 0) &&
+        platform_private_file_size(file, &size_after) && size == size_after;
+    if (ok) *status = ibr_decode(wire, (size_t)size, req);
+    return ok;
+}
 static enum ibr_status ibr_read(const char *path, struct ibr_request *req, int *read_errno)
 {
     memset(req, 0, sizeof(*req));
@@ -168,13 +178,11 @@ static enum ibr_status ibr_read(const char *path, struct ibr_request *req, int *
         if (read_errno) *read_errno = error ? error : EIO;
         return IBR_INVALID;
     }
-    char wire[IBR_WIRE_CAP]; uint64_t size = 0, size_after = 0;
-    bool ok = platform_private_file_size(&file, &size) && size > 0 && size <= sizeof(wire) &&
-        platform_private_file_read_at(&file, wire, (size_t)size, 0) &&
-        platform_private_file_size(&file, &size_after) && size == size_after;
+    enum ibr_status status = IBR_INVALID;
+    bool ok = ibr_read_open(&file, req, &status);
     platform_private_file_close(&file);
-    if (!ok) { if (read_errno) *read_errno = EIO; return IBR_INVALID; }
-    return ibr_decode(wire, (size_t)size, req);
+    if (!ok && read_errno) *read_errno = EIO;
+    return status;
 }
 
 bool boot_install_bundle_request_refused(const char *datadir)
@@ -1218,6 +1226,66 @@ enum boot_bound_consume_result boot_install_bound_bundle_consume(
             atomic_fetch_add(&g_ibr_generation, 1);
         }
     }
+    pthread_mutex_unlock(&g_ibr_lock);
+    return result;
+#endif
+}
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+static void (*ibr_retire_hook)(const char *path);
+static bool ibr_retire_fail_flush;
+#endif
+#ifdef ZCL_TESTING
+void boot_install_bound_retire_test_hook(void (*hook)(const char *path), bool fail_flush)
+{
+#if defined(_WIN32)
+    (void)hook; (void)fail_flush;
+#else
+    ibr_retire_hook = hook; ibr_retire_fail_flush = fail_flush;
+#endif
+}
+#endif
+#if !defined(_WIN32)
+static enum boot_bound_retire_result ibr_retire_opened(
+    struct platform_private_file *file, const char *path, const char *datadir,
+    const struct boot_bound_bundle_observation *expected)
+{
+    struct platform_private_file_identity id;
+    struct ibr_request request = {0}; enum ibr_status status = IBR_INVALID;
+    struct boot_bound_bundle_observation current;
+    bool valid = platform_private_file_validate_owner_private(file) &&
+        platform_private_file_identity(file, &id) &&
+        ibr_read_open(file, &request, &status) && status == IBR_BOUND &&
+        ibr_observation(&current, &request);
+    if (!valid) return BOOT_BOUND_RETIRE_ERROR;
+    if (!ibr_observation_equal(&current, expected)) return BOOT_BOUND_RETIRE_STALE;
+#ifdef ZCL_TESTING
+    if (ibr_retire_hook) ibr_retire_hook(path);
+#endif
+    bool retired = platform_private_file_retire_if_identity(file, path, &id);
+    bool flushed = retired && platform_private_parent_flush(datadir);
+#ifdef ZCL_TESTING
+    if (ibr_retire_fail_flush) flushed = false;
+#endif
+    atomic_fetch_add(&g_ibr_generation, 1);
+    return retired && flushed ? BOOT_BOUND_RETIRE_DONE : BOOT_BOUND_RETIRE_UNKNOWN;
+}
+#endif
+enum boot_bound_retire_result boot_install_bound_bundle_retire(
+    const char *datadir, const struct boot_bound_bundle_observation *expected)
+{
+#if defined(_WIN32)
+    (void)datadir; (void)expected; return BOOT_BOUND_RETIRE_UNSUPPORTED;
+#else
+    char path[512];
+    if (!expected || !ibr_path(datadir, path, sizeof(path))) return BOOT_BOUND_RETIRE_ERROR;
+    pthread_mutex_lock(&g_ibr_lock);
+    enum boot_bound_retire_result result = BOOT_BOUND_RETIRE_ERROR;
+    struct platform_private_file file; platform_private_file_init(&file);
+    if (!platform_private_file_open_locked(path, &file)) {
+        if (platform_file_shape_read(path) == PLATFORM_FILE_SHAPE_MISSING)
+            result = BOOT_BOUND_RETIRE_ABSENT;
+    } else result = ibr_retire_opened(&file, path, datadir, expected);
+    platform_private_file_close(&file);
     pthread_mutex_unlock(&g_ibr_lock);
     return result;
 #endif

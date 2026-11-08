@@ -24,6 +24,8 @@
 #include "controllers/wallet_private_broadcast.h"
 #include "services/wallet_private_relay.h"
 #include "models/wallet_tx.h"
+#include "models/wallet_send_once.h"
+#include "util/ar_step_readonly.h"
 #include "storage/wallet_projection.h"
 #include "storage/event_log_singleton.h"
 #include "controllers/wallet_helpers.h"
@@ -62,6 +64,7 @@
 #include "services/utxo_recovery_service.h"
 #include "supervisors/staged_sync_supervisor.h"
 #include "storage/progress_store.h"
+#include "storage/consensus_state_bundle_codec.h"
 #include "storage/anchor_kv.h"  /* seed the verified Sapling anchor frontier at boot */
 #include "storage/nullifier_kv.h"
 #include "jobs/reducer_frontier.h"
@@ -972,6 +975,214 @@ bool consensus_state_wallet_preflight_identity(struct wallet_sqlite *wallet,
 }
 
 #if !defined(_WIN32)
+struct boot_old_height_entry { struct uint256 hash; int height; };
+/* Only journal modes with a persistent rollback log can make a FULL commit
+ * a durable fence. OFF, MEMORY and unknown modes fail closed. */
+bool boot_cutover_journal_durable(sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    if (!db || sqlite3_prepare_v2(db, "PRAGMA journal_mode", -1, &s, NULL) != SQLITE_OK || !s)
+        return false;
+    bool ok = false;
+    enum zcl_step step = ar_step_checked(s, "wallet journal mode", NULL);
+    if (step == ZCL_STEP_ROW && sqlite3_column_type(s, 0) == SQLITE_TEXT) {
+        const char *mode = (const char *)sqlite3_column_text(s, 0);
+        ok = mode && (!strcmp(mode, "wal") || !strcmp(mode, "delete") ||
+                      !strcmp(mode, "truncate") || !strcmp(mode, "persist"));
+        step = ar_step_checked(s, "wallet journal mode completion", NULL);
+        if (step != ZCL_STEP_DONE) ok = false;
+    }
+    if (sqlite3_finalize(s) != SQLITE_OK) return false;
+    return ok;
+}
+bool boot_cutover_set_sync(struct node_db *node, int level)
+{
+    char sql[32];
+    if (!node || !node->db || level < 0 || level > 3) return false;
+    int n = snprintf(sql, sizeof(sql), "PRAGMA synchronous=%d", level);
+    return n > 0 && (size_t)n < sizeof(sql) &&
+           sqlite3_exec(node->db, sql, NULL, NULL, NULL) == SQLITE_OK &&
+           db_wallet_send_once_sync_level(node) == level;
+}
+bool boot_cutover_raise_sync(struct node_db *node, int previous)
+{
+    if (previous >= 0 && boot_cutover_set_sync(node, previous >= 2 ? previous : 2)) return true;
+    if (previous >= 0 && !boot_cutover_set_sync(node, previous))
+        LOG_ERROR("install_consensus_bundle", "wallet sync-mode restoration failed");
+    return false;
+}
+static int boot_old_height_compare(const void *a, const void *b)
+{
+    return memcmp(((const struct boot_old_height_entry *)a)->hash.data,
+                  ((const struct boot_old_height_entry *)b)->hash.data, 32);
+}
+static size_t boot_old_height_mark(struct boot_old_height_map *map, const struct block_index *p)
+{
+    struct boot_old_height_entry key = {.hash = *p->phashBlock};
+    struct boot_old_height_entry *found = bsearch(&key, map->entries, map->count,
+                                                  sizeof(*map->entries), boot_old_height_compare);
+    if (!found) return 0;
+    size_t i = (size_t)(found - map->entries), marked = 0;
+    while (i && !boot_old_height_compare(&map->entries[i - 1], &key)) --i;
+    while (i < map->count && !boot_old_height_compare(&map->entries[i], &key)) {
+        if (map->entries[i].height < 0) { map->entries[i].height = p->nHeight; ++marked; }
+        ++i;
+    }
+    return marked;
+}
+static bool boot_old_height_block_valid(struct boot_old_height_map *map, struct block_index *p)
+{
+    return p->phashBlock && p->nHeight >= 0 && block_index_is_valid(p, BLOCK_VALID_TREE) &&
+        !block_is_revalidation_pending(p) &&
+        !memcmp(p->phashBlock->data, p->hashBlock.data, 32) &&
+        active_chain_at(&map->main->chain_active, p->nHeight) == p;
+}
+
+static bool boot_old_height_walk(struct boot_old_height_map *map, struct block_index *p)
+{
+    size_t remaining = map->count;
+    bool reference = false;
+    while (p && (remaining || !reference)) {
+        if (!boot_old_height_block_valid(map, p)) return false;
+        if (p->nHeight == map->reference_height) {
+            memcpy(map->reference_hash, p->phashBlock->data, 32); reference = true;
+        }
+        remaining -= boot_old_height_mark(map, p);
+        if (p->nHeight > 0 && (!p->pprev || p->pprev->nHeight != p->nHeight - 1 ||
+            active_chain_at(&map->main->chain_active, p->nHeight - 1) != p->pprev)) return false;
+        p = p->pprev;
+    }
+    return !remaining && reference;
+}
+bool boot_old_height_allocate(struct boot_old_height_map *map)
+{
+    if (!map || map->entries) return false;
+    map->entries = zcl_calloc(MAX_WALLET_TX, sizeof(*map->entries), "old wallet height map");
+    return map->entries != NULL;
+}
+static void boot_old_height_collect(struct boot_old_height_map *map, const struct wallet *wallet)
+{
+    const uint8_t zero[32] = {0};
+    for (size_t i = 0; i < MAX_WALLET_TX; ++i) {
+        if (wallet->map_wallet[i].used && memcmp(wallet->map_wallet[i].hash_block.data, zero, 32)) {
+            map->entries[map->count].hash = wallet->map_wallet[i].hash_block;
+            map->entries[map->count++].height = -1;
+        }
+    }
+}
+
+bool boot_old_height_prepare_locked(struct boot_old_height_map *map,
+    struct main_state *main, const struct wallet *wallet, const struct wallet_cutover_binding *binding)
+{
+    if (!map) return false;
+    map->ready = false;
+    if (!map->entries || !main || !wallet || !binding || wallet->best_block_height < 0) return false;
+    map->count = 0; map->main = main;
+    map->reference_height = wallet->best_block_height;
+    boot_old_height_collect(map, wallet);
+    qsort(map->entries, map->count, sizeof(*map->entries), boot_old_height_compare);
+    if (!zcl_mutex_trylock(&main->chain_active.write_lock)) return false;
+    map->tip = active_chain_cached_tip(&main->chain_active);
+    bool ok = map->tip && binding->old_height >= map->reference_height &&
+        binding->old_height <= map->tip->nHeight;
+    if (ok) map->frontier = active_chain_at(&main->chain_active, binding->old_height);
+    ok = ok && map->frontier && map->frontier->phashBlock &&
+        !memcmp(map->frontier->phashBlock->data, binding->old_hash, 32) &&
+        boot_old_height_walk(map, map->frontier);
+    zcl_mutex_unlock(&main->chain_active.write_lock);
+    map->ready = ok;
+    return ok;
+}
+bool boot_old_height_resolve(void *opaque, const unsigned char hash[32], int *height)
+{
+    struct boot_old_height_map *map = opaque;
+    if (!map || !map->ready || !hash || !height) return false;
+    if (!memcmp(hash, map->reference_hash, 32)) { *height = map->reference_height; return true; }
+    struct boot_old_height_entry key = {0}; memcpy(key.hash.data, hash, 32);
+    const struct boot_old_height_entry *found = bsearch(&key, map->entries, map->count,
+                                                         sizeof(*map->entries), boot_old_height_compare);
+    if (!found || found->height < 0) return false;
+    *height = found->height; return true;
+}
+bool boot_old_height_reference(void *opaque, int height, const unsigned char hash[32])
+{
+    struct boot_old_height_map *map = opaque;
+    return map && map->ready && hash &&
+        height == map->reference_height && !memcmp(hash, map->reference_hash, 32);
+}
+void boot_old_height_free(struct boot_old_height_map *map)
+{
+    if (!map) return;
+    free(map->entries); memset(map, 0, sizeof(*map));
+}
+static bool boot_bound_wallet_commit_locked(struct node_db *node, struct main_state *main,
+    struct wallet_sqlite *ws, struct wallet *wallet,
+    const struct consensus_state_publication_decision_record *decision,
+    const struct consensus_state_bundle_manifest *manifest,
+    const unsigned char whole[32], const unsigned char history_root[32],
+    struct wallet_cutover_binding *binding, struct boot_old_height_map *heights)
+{
+    sqlite3 *progress = progress_store_db();
+    if (!progress || !sqlite3_get_autocommit(node->db) || !boot_cutover_journal_durable(node->db)) return false;
+    memset(binding, 0, sizeof(*binding));
+    if (!icb_wallet_old_authority_locked(progress, decision, binding)) return false;
+    binding->target_height = manifest->height;
+    memcpy(binding->target_hash, manifest->block_hash, 32);
+    memcpy(binding->artifact_digest, manifest->artifact_digest, 32);
+    binding->history_identity_present = true;
+    memcpy(binding->snapshot_whole_sha3, whole, 32);
+    memcpy(binding->history_manifest_root, history_root, 32);
+    if (!boot_old_height_prepare_locked(heights, main, wallet, binding)) return false;
+    int previous_sync = db_wallet_send_once_sync_level(node);
+    bool raised = boot_cutover_raise_sync(node, previous_sync);
+    bool ok = raised && wallet_readiness_get_locked(wallet).state == WALLET_READINESS_UNKNOWN &&
+        wallet_sqlite_cutover_prepare_bound_preserving_cursor(ws, wallet, binding,
+            heights->reference_height, heights->reference_hash, boot_old_height_resolve,
+            boot_old_height_reference, heights);
+    bool restored = !raised || boot_cutover_set_sync(node, previous_sync);
+    if (!restored) LOG_ERROR("install_consensus_bundle", "wallet sync-mode restoration failed");
+    if (!ok || !restored || !sqlite3_get_autocommit(ws->db)) return false;
+    struct wallet_cutover_binding reread;
+    return wallet_sqlite_cutover_read(ws, &reread) == WALLET_CUTOVER_PENDING &&
+        wallet_cutover_binding_equal(&reread, binding);
+}
+static bool boot_bound_wallet_arguments_valid(struct node_db *node, struct main_state *main,
+    struct wallet_sqlite *ws, struct wallet *wallet,
+    const struct consensus_state_publication_decision_record *decision,
+    const struct consensus_state_bundle_manifest *manifest,
+    const unsigned char *whole, const unsigned char *history_root,
+    struct wallet_cutover_binding *binding)
+{
+    return node && node->db && main && ws && ws->db == node->db && wallet &&
+        decision && manifest && whole && history_root && binding;
+}
+
+bool boot_bound_wallet_fence(struct node_db *node, struct main_state *main,
+    struct wallet_sqlite *ws, struct wallet *wallet,
+    const struct consensus_state_publication_decision_record *decision,
+    const struct consensus_state_bundle_manifest *manifest,
+    const unsigned char whole[32], const unsigned char history_root[32],
+    struct wallet_cutover_binding *binding)
+{
+    if (!boot_bound_wallet_arguments_valid(node, main, ws, wallet, decision, manifest,
+                                           whole, history_root, binding)) return false;
+    struct boot_old_height_map heights = {0};
+    if (!boot_old_height_allocate(&heights)) return false;
+    if (!zcl_mutex_trylock(&main->cs_main)) { boot_old_height_free(&heights); return false; }
+    bool progress_held = progress_store_tx_trylock();
+    sqlite3_mutex *connection = sqlite3_db_mutex(node->db);
+    bool connection_held = progress_held && connection && sqlite3_mutex_try(connection) == SQLITE_OK;
+    bool wallet_held = connection_held && zcl_mutex_trylock(&wallet->cs);
+    bool ok = wallet_held && boot_bound_wallet_commit_locked(node, main, ws, wallet,
+                                                             decision, manifest, whole, history_root, binding, &heights);
+    if (wallet_held) zcl_mutex_unlock(&wallet->cs);
+    if (connection_held) sqlite3_mutex_leave(connection);
+    if (progress_held) progress_store_tx_unlock();
+    zcl_mutex_unlock(&main->cs_main);
+    boot_old_height_free(&heights);
+    return ok;
+}
+
 bool boot_wallet_cutover_stop_identity(struct wallet_sqlite *wallet,
     struct node_db *node, int dir_fd)
 {

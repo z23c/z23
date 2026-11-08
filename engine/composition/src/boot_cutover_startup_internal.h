@@ -4,6 +4,7 @@
 #define Z23_BOOT_CUTOVER_STARTUP_INTERNAL_H
 #include "base/result.h"
 #include <stdbool.h>
+#include <stddef.h>
 struct app_context;
 struct boot_svc_ctx;
 struct main_state;
@@ -17,6 +18,41 @@ struct block_tree_db;
 struct db_service;
 struct chain_params;
 struct block_index;
+struct wallet_cutover_binding;
+struct consensus_state_publication_decision_record;
+struct consensus_state_bundle_manifest;
+struct sqlite3;
+bool boot_cutover_journal_durable(struct sqlite3 *db);
+bool boot_cutover_set_sync(struct node_db *node, int level);
+bool boot_cutover_raise_sync(struct node_db *node, int previous);
+bool icb_wallet_old_authority_locked(struct sqlite3 *db,
+    const struct consensus_state_publication_decision_record *decision,
+    struct wallet_cutover_binding *binding);
+bool boot_bound_wallet_fence(struct node_db *node, struct main_state *main,
+    struct wallet_sqlite *ws, struct wallet *wallet,
+    const struct consensus_state_publication_decision_record *decision,
+    const struct consensus_state_bundle_manifest *manifest,
+    const unsigned char whole[32], const unsigned char history_root[32],
+    struct wallet_cutover_binding *binding);
+struct boot_old_height_entry;
+/* Caller preallocates entries and holds main-chain, progress and wallet locks
+ * through prepare, callbacks and commit, with a validated complete active map. */
+struct boot_old_height_map {
+    struct main_state *main;
+    struct block_index *tip;
+    struct block_index *frontier;
+    struct boot_old_height_entry *entries;
+    size_t count;
+    int reference_height;
+    unsigned char reference_hash[32];
+    bool ready;
+};
+bool boot_old_height_allocate(struct boot_old_height_map *map);
+bool boot_old_height_prepare_locked(struct boot_old_height_map *map,
+    struct main_state *main, const struct wallet *wallet, const struct wallet_cutover_binding *binding);
+bool boot_old_height_resolve(void *opaque, const unsigned char hash[32], int *height);
+bool boot_old_height_reference(void *opaque, int height, const unsigned char hash[32]);
+void boot_old_height_free(struct boot_old_height_map *map);
 struct boot_cutover_env {
     struct main_state *state;
     struct node_db *node;

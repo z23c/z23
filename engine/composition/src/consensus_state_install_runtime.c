@@ -76,6 +76,7 @@ struct zcl_result consensus_state_install_from_bundle_old_retry(
     return consensus_state_install_from_bundle_guarded(ndb, ms, bundle_path, datadir, ws, wallet, out);
 }
 #else
+#include "boot_cutover_startup_internal.h"
 #include "config/boot_datadir_lock.h"
 #include "consensus_state_install_terminal_internal.h"
 #include "consensus_state_install_stage.h"
@@ -981,15 +982,15 @@ static bool icb_install_assisted_sapling_root(
 
 struct icb_wallet_guard { struct wallet_sqlite *ws; struct wallet *wallet;
     const struct wallet_cutover_binding *expected;
-    const uint8_t *expected_whole; const uint8_t *expected_logical; };
+    const uint8_t *expected_whole; const uint8_t *expected_logical;
+    const struct boot_bound_bundle_observation *observation; };
 
-static bool icb_wallet_old_authority(sqlite3 *db,
+bool icb_wallet_old_authority_locked(sqlite3 *db,
     const struct consensus_state_publication_decision_record *decision,
     struct wallet_cutover_binding *binding)
 {
     bool present = false, ok = false;
     uint64_t generation = 0; int32_t height = -1; uint8_t hash[32];
-    progress_store_tx_lock();
     if (sqlite3_get_autocommit(db) &&
         sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK) {
         ok = icb_wallet_generation(db, &present, &generation) &&
@@ -1001,49 +1002,19 @@ static bool icb_wallet_old_authority(sqlite3 *db,
             ok = false;
         }
     }
-    progress_store_tx_unlock();
     if (!ok || generation == UINT64_MAX) return false;
     binding->old_generation_present = present; binding->old_generation = generation;
     binding->old_height = height; memcpy(binding->old_hash, hash, 32);
     return true;
 }
-
-/* Only journal modes with a persistent rollback log can make a FULL commit
- * a durable fence. OFF, MEMORY and unknown modes fail closed. */
-static bool icb_wallet_journal_durable(sqlite3 *db)
+static bool icb_wallet_old_authority(sqlite3 *db,
+    const struct consensus_state_publication_decision_record *decision,
+    struct wallet_cutover_binding *binding)
 {
-    sqlite3_stmt *s = NULL;
-    if (!db || sqlite3_prepare_v2(db, "PRAGMA journal_mode", -1, &s, NULL) != SQLITE_OK || !s)
-        return false;
-    bool ok = false;
-    enum zcl_step step = ar_step_checked(s, "wallet journal mode", NULL);
-    if (step == ZCL_STEP_ROW && sqlite3_column_type(s, 0) == SQLITE_TEXT) {
-        const char *mode = (const char *)sqlite3_column_text(s, 0);
-        ok = mode && (!strcmp(mode, "wal") || !strcmp(mode, "delete") ||
-                      !strcmp(mode, "truncate") || !strcmp(mode, "persist"));
-        step = ar_step_checked(s, "wallet journal mode completion", NULL);
-        if (step != ZCL_STEP_DONE) ok = false;
-    }
-    if (sqlite3_finalize(s) != SQLITE_OK) return false;
+    progress_store_tx_lock();
+    bool ok = icb_wallet_old_authority_locked(db, decision, binding);
+    progress_store_tx_unlock();
     return ok;
-}
-
-static bool icb_wallet_set_sync(struct node_db *node, int level)
-{
-    char sql[32];
-    if (!node || !node->db || level < 0 || level > 3) return false;
-    int n = snprintf(sql, sizeof(sql), "PRAGMA synchronous=%d", level);
-    return n > 0 && (size_t)n < sizeof(sql) &&
-           sqlite3_exec(node->db, sql, NULL, NULL, NULL) == SQLITE_OK &&
-           db_wallet_send_once_sync_level(node) == level;
-}
-
-static bool icb_wallet_raise_sync(struct node_db *node, int previous)
-{
-    if (previous >= 0 && icb_wallet_set_sync(node, previous >= 2 ? previous : 2)) return true;
-    if (previous >= 0 && !icb_wallet_set_sync(node, previous))
-        LOG_ERROR(ICB_SUBSYS, "wallet sync-mode restoration failed");
-    return false;
 }
 
 static bool icb_wallet_prepare_locked(const struct icb_wallet_guard *guard,
@@ -1063,11 +1034,11 @@ static bool icb_wallet_commit_fence(struct node_db *node,
 {
     if (!node || !node->db || !guard || !guard->ws || !guard->wallet ||
         guard->ws->db != node->db || !sqlite3_get_autocommit(node->db) ||
-        !icb_wallet_journal_durable(node->db)) return false;
+        !boot_cutover_journal_durable(node->db)) return false;
     int previous_sync = db_wallet_send_once_sync_level(node);
-    if (!icb_wallet_raise_sync(node, previous_sync)) return false;
+    if (!boot_cutover_raise_sync(node, previous_sync)) return false;
     bool ok = icb_wallet_prepare_locked(guard, binding);
-    bool restored = icb_wallet_set_sync(node, previous_sync);
+    bool restored = boot_cutover_set_sync(node, previous_sync);
     if (!restored) LOG_ERROR(ICB_SUBSYS, "wallet sync-mode restoration failed");
     if (!ok || !restored || !sqlite3_get_autocommit(guard->ws->db)) return false;
     struct wallet_cutover_binding reread;
@@ -1089,21 +1060,34 @@ static bool icb_wallet_old_fence_matches(const struct icb_wallet_guard *guard,
         &present, &generation) == WALLET_INSTALL_OLD;
 }
 
+static bool icb_wallet_fence_ready(struct node_db *node, struct main_state *main, int dir_fd,
+    const struct icb_wallet_guard *guard,
+    const struct consensus_state_bundle_manifest *manifest,
+    const struct consensus_state_publication_decision_record *decision)
+{
+    return guard && guard->ws && guard->wallet && manifest && decision &&
+        boot_wallet_cutover_startup_context_matches(node, guard->ws, guard->wallet, main) &&
+        icb_wallet_startup_identity(guard->ws, node, dir_fd) &&
+        sqlite3_get_autocommit(guard->ws->db);
+}
+
 static bool icb_wallet_fence(struct node_db *node, struct main_state *main, int dir_fd,
     const struct icb_wallet_guard *guard,
     const struct consensus_state_bundle_manifest *manifest,
     const struct consensus_state_publication_decision_record *decision,
     struct wallet_cutover_binding *binding)
 {
-    if (!guard || !guard->ws || !guard->wallet || !manifest || !decision ||
-        !boot_wallet_cutover_startup_context_matches(node, guard->ws, guard->wallet, main) ||
-        !icb_wallet_startup_identity(guard->ws, node, dir_fd) ||
-        !sqlite3_get_autocommit(guard->ws->db)) return false;
+    if (!icb_wallet_fence_ready(node, main, dir_fd, guard, manifest, decision)) return false;
     struct wallet_cutover_binding existing;
     enum wallet_cutover_status status = wallet_sqlite_cutover_read(guard->ws, &existing);
     if (guard->expected) {
         if (!icb_wallet_old_fence_matches(guard, node, dir_fd, status, &existing)) return false;
     } else if (status != WALLET_CUTOVER_ABSENT) return false;
+    if (guard->observation) {
+        if (guard->expected) return false;
+        return boot_bound_wallet_fence(node, main, guard->ws, guard->wallet, decision, manifest,
+            guard->observation->snapshot_sha3, guard->observation->history_manifest_root, binding);
+    }
     memset(binding, 0, sizeof(*binding));
     if (!icb_wallet_old_authority(progress_store_db(), decision, binding)) return false;
     binding->target_height = manifest->height;
@@ -1397,7 +1381,8 @@ struct zcl_result icb_install_wallet_guarded(
     struct consensus_state_install_runtime_result *out)
 {
     struct icb_wallet_guard guard = {.ws = ws, .wallet = wallet,
-        .expected_whole = whole, .expected_logical = logical};
+        .expected_whole = whole, .expected_logical = logical,
+        .observation = terminal ? terminal->observation : NULL};
     return icb_install_from_bundle(ndb, ms, bundle_path, datadir, &guard, terminal, out);
 }
 

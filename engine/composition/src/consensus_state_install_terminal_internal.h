@@ -14,12 +14,16 @@ struct wallet_sqlite;
 struct wallet;
 struct consensus_state_bundle_manifest;
 struct consensus_state_install_runtime_result;
+struct wallet_history_capability;
+struct boot_bound_bundle_observation;
 struct icb_terminal_context {
     struct main_state *archive;
     struct block_index *bridge_window[ISLAND_ANCHOR_WINDOW];
     uintptr_t history_handle;
     bool history_open;
     bool prepared;
+    const struct wallet_history_capability *history_capability;
+    const struct boot_bound_bundle_observation *observation;
     struct block_header window[ISLAND_ANCHOR_WINDOW];
 };
 bool icb_terminal_archive_has_frontier(const struct icb_terminal_context *terminal,
