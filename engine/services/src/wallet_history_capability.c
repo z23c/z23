@@ -4,6 +4,7 @@
 #include "services/wallet_history_manifest.h"
 #include "platform/positioned_file.h"
 #include "platform/private_directory.h"
+#include "util/log_macros.h"
 #include <stdio.h>
 #include <string.h>
 #if defined(__linux__)
@@ -79,7 +80,10 @@ static bool pin_file(int dir, const char *leaf, struct platform_positioned_file 
 {
     char path[96];
     if (!platform_dirfd_child_path(path, sizeof(path), dir, leaf) ||
-        !platform_positioned_file_open(file, path)) return false;
+        !platform_positioned_file_open(file, path)) {
+        LOG_WARN("wallet_history", "cannot open retained history file %s", leaf);
+        return false;
+    }
     int fd = (int)platform_positioned_file_native_fd(file);
     return !fstat(fd, saved) && S_ISREG(saved->st_mode) && saved->st_uid == geteuid() &&
         saved->st_nlink == 1 && (saved->st_mode & 077) == 0 && saved->st_size > 0 &&
