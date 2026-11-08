@@ -1690,17 +1690,19 @@ static int test_next_input_cleanup(const char *name, const char *input)
 
 /* Wrap a handler's data object in the result envelope and render it as the
  * terminal form of `command`. Returns the rendered length (0 = raw JSON). */
-static size_t cr_app_render(const char *command, const char *data, char *out,
-                            size_t cap)
+static size_t cr_app_render_w(int width, const char *command,
+                              const char *data, char *out, size_t cap)
 {
     char doc[8192];
     (void)snprintf(doc, sizeof(doc),
                    "{\"schema\":\"zcl.result.v1\",\"command\":\"%s\","
                    "\"ok\":true,\"status\":\"passed\",\"data\":%s,"
                    "\"next\":[]}", command, data);
-    struct zcl_cli_render_env e = cr_env(80, false);
+    struct zcl_cli_render_env e = cr_env(width, false);
     return zcl_cli_render_doc(doc, strlen(doc), command, &e, out, cap);
 }
+
+#define cr_app_render(...) cr_app_render_w(80, __VA_ARGS__)
 
 static int test_app_menu_render(void)
 {
@@ -1721,7 +1723,8 @@ static int test_app_menu_render(void)
         PASS();
     }
     TEST("app.seed plan says what happens and the exact confirming command") {
-        size_t n = cr_app_render("app.seed",
+        /* wide, so the pasteable command is on one line */
+        size_t n = cr_app_render_w(240, "app.seed",
             "{\"stage\":\"plan\",\"app\":\"skycombat\",\"source\":\"/s\","
             "\"package_root\":\"" CR_PLAN_ID "\",\"release_id\":\"\","
             "\"file_count\":42,\"existing\":false,\"publisher\":\"\","

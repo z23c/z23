@@ -2068,6 +2068,233 @@ static void render_app_open(struct buf *b, const struct zcl_cli_render_env *e,
     buf_putc(b, '\n');
 }
 
+/* ── app menu leaves: short readable blocks ────────────────────────── */
+
+/* One kv row when the string field is present and non-empty. */
+static void app_kv_field(struct buf *b, const struct zcl_cli_render_env *e,
+                         size_t kw, const char *key,
+                         const struct json_value *data, const char *field)
+{
+    const char *s = lab_str(json_get(data, field));
+    if (s[0])
+        emit_kv(b, e, kw, key, s);
+}
+
+static const char *app_yes_no(const struct json_value *v)
+{
+    return json_get_bool(v) ? "yes" : "no";
+}
+
+/* z23 app inspect <app>: what the registry knows, and how to build it. */
+static void render_app_inspect(struct buf *b,
+                               const struct zcl_cli_render_env *e,
+                               const struct json_value *root)
+{
+    const struct json_value *data = json_get(root, "data");
+    char head[160];
+    (void)snprintf(head, sizeof(head), "app %s", lab_str(json_get(data, "app_id")));
+    emit_header(b, e, head);
+    buf_putc(b, '\n');
+    app_kv_field(b, e, 9, "status", data, "status");
+    app_kv_field(b, e, 9, "source", data, "source");
+    app_kv_field(b, e, 9, "authority", data, "authority");
+    app_kv_field(b, e, 9, "manifest", data, "manifest");
+    app_kv_field(b, e, 9, "program", data, "path");
+    const char *hint = lab_str(json_get(data, "build_hint"));
+    if (hint[0]) {
+        buf_putc(b, '\n');
+        emit_kv_command(b, e, 9, "build", hint);
+    }
+}
+
+/* The exact command that confirms an app.seed plan: the leaf takes no
+ * --yes, so the plan_id and confirm go in --input. */
+static bool app_seed_confirm_cmd(char *out, size_t cap, const char *app,
+                                 const char *plan_id)
+{
+    if (!app[0] || !plan_id[0] || strpbrk(app, "'\"\\") ||
+        strpbrk(plan_id, "'\"\\"))
+        return false;
+    int n = snprintf(out, cap, "z23 app seed --input='{\"app\":\"%s\","
+                     "\"plan_id\":\"%s\",\"confirm\":true}'", app, plan_id);
+    return n > 0 && (size_t)n < cap;
+}
+
+static void app_seed_plan_rows(struct buf *b,
+                               const struct zcl_cli_render_env *e,
+                               const struct json_value *data)
+{
+    char line[160];
+    (void)snprintf(line, sizeof(line), "%lld files from %s",
+                   (long long)json_get_int(json_get(data, "file_count")),
+                   lab_str(json_get(data, "source")));
+    emit_kv(b, e, 9, "package", line);
+    if (json_get_bool(json_get(data, "existing")))
+        emit_kv(b, e, 9, "state", "already published by this owner; "
+                "confirming writes nothing");
+    else if (lab_str(json_get(data, "key_note"))[0])
+        emit_kv(b, e, 9, "key", "a new publisher key is made when you confirm");
+    app_kv_field(b, e, 9, "key file", data, "key_path");
+    app_kv_field(b, e, 9, "plan_id", data, "plan_id");
+}
+
+/* z23 app seed <app>: the plan says what will be published and gives the
+ * exact confirming command; a confirmed seed shows the release it made. */
+static void render_app_seed(struct buf *b, const struct zcl_cli_render_env *e,
+                            const struct json_value *root)
+{
+    const struct json_value *data = json_get(root, "data");
+    const char *app = lab_str(json_get(data, "app"));
+    bool plan = strcmp(lab_str(json_get(data, "stage")), "plan") == 0;
+    char head[160], cmd[512];
+    (void)snprintf(head, sizeof(head), plan ? "app seed %s  (plan, nothing written yet)"
+                                            : "app seed %s", app);
+    emit_header(b, e, head);
+    buf_putc(b, '\n');
+    if (plan)
+        app_seed_plan_rows(b, e, data);
+    else {
+        app_kv_field(b, e, 9, "stage", data, "stage");
+        app_kv_field(b, e, 9, "release", data, "release_id");
+        app_kv_field(b, e, 9, "publisher", data, "publisher");
+        emit_kv(b, e, 9, "existing", app_yes_no(json_get(data, "existing")));
+    }
+    if (plan && app_seed_confirm_cmd(cmd, sizeof(cmd), app,
+                                     lab_str(json_get(data, "plan_id")))) {
+        buf_putc(b, '\n');
+        emit_kv_command(b, e, 9, "publish", cmd);
+    } else if (!plan) {
+        const char *next = lab_str(json_get(data, "next"));
+        if (next[0]) {
+            buf_putc(b, '\n');
+            emit_kv(b, e, 9, "next", next);
+        }
+    }
+}
+
+/* z23 app share <copy>: what the copy publishes as and the next command. */
+static void render_app_share_copy(struct buf *b,
+                                  const struct zcl_cli_render_env *e,
+                                  const struct json_value *root)
+{
+    const struct json_value *data = json_get(root, "data");
+    bool plan = strcmp(lab_str(json_get(data, "stage")), "plan") == 0;
+    char head[160];
+    (void)snprintf(head, sizeof(head), plan ? "app share %s  (plan, nothing written yet)"
+                                            : "app share %s",
+                   lab_str(json_get(data, "copy")));
+    emit_header(b, e, head);
+    buf_putc(b, '\n');
+    app_kv_field(b, e, 12, "publishes as", data, "publishes_as");
+    app_kv_field(b, e, 12, "file", data, "output");
+    if (plan) {
+        emit_kv(b, e, 12, "saves first", app_yes_no(json_get(data, "saves_first")));
+        emit_kv(b, e, 12, "new key", app_yes_no(json_get(data, "makes_key")));
+    } else {
+        app_kv_field(b, e, 12, "stage", data, "stage");
+    }
+    const char *next = lab_str(json_get(data, "next"));
+    if (next[0]) {
+        buf_putc(b, '\n');
+        emit_kv_command(b, e, 12, "next", next);
+    }
+}
+
+/* z23 app tasks: the saved list, one line per task. */
+static void render_app_tasks(struct buf *b, const struct zcl_cli_render_env *e,
+                             const struct json_value *root)
+{
+    const struct json_value *data = json_get(root, "data");
+    const struct json_value *tasks = json_get(data, "tasks");
+    size_t n = tasks && tasks->type == JSON_ARR ? tasks->num_children : 0;
+    char line[160];
+    emit_header(b, e, "tasks");
+    buf_putc(b, '\n');
+    (void)snprintf(line, sizeof(line), "%s, revision %lld",
+                   lab_str(json_get(data, "save_state")),
+                   (long long)json_get_int(json_get(data, "revision")));
+    emit_kv(b, e, 6, "saved", line);
+    app_kv_field(b, e, 6, "folder", data, "data_directory");
+    buf_putc(b, '\n');
+    if (n == 0)
+        buf_puts(b, "  no tasks yet\n");
+    for (size_t i = 0; i < n && i < e->max_rows; i++) {
+        const struct json_value *t = json_at(tasks, i);
+        char id[24];
+        (void)snprintf(id, sizeof(id), "%lld",
+                       (long long)json_get_int(json_get(t, "id")));
+        (void)snprintf(line, sizeof(line), "[%c] %s",
+                       json_get_bool(json_get(t, "done")) ? 'x' : ' ',
+                       lab_str(json_get(t, "title")));
+        emit_kv(b, e, 3, id, line);
+    }
+    if (n > e->max_rows)
+        emit_more_footer(b, n - e->max_rows);
+}
+
+/* z23 app service list: one row per service binding. */
+static void render_app_service_list(struct buf *b,
+                                    const struct zcl_cli_render_env *e,
+                                    const struct json_value *root)
+{
+    const struct json_value *data = json_get(root, "data");
+    const struct json_value *items = json_get(data, "services");
+    size_t n = items && items->type == JSON_ARR ? items->num_children : 0;
+    size_t rows = n > e->max_rows ? e->max_rows : n;
+    const char *headers[3] = { "SERVICE", "VERSION", "COMMANDS" };
+    const char *cells[24 * 3];
+    char head[64];
+    if (rows > 24)
+        rows = 24;
+    (void)snprintf(head, sizeof(head), "app services: %zu", n);
+    emit_header(b, e, head);
+    buf_putc(b, '\n');
+    for (size_t r = 0; r < rows; r++) {
+        const struct json_value *it = json_at(items, r);
+        cells[r * 3] = lab_str(json_get(it, "service"));
+        cells[r * 3 + 1] = lab_str(json_get(it, "version"));
+        cells[r * 3 + 2] = lab_str(json_get(it, "command_prefix"));
+    }
+    if (rows > 0)
+        emit_table(b, e, 3, headers, cells, rows);
+    if (n > rows)
+        emit_more_footer(b, n - rows);
+}
+
+/* z23 app transaction-types list: the counts, then one row per type. */
+static void render_app_tx_types(struct buf *b,
+                                const struct zcl_cli_render_env *e,
+                                const struct json_value *root)
+{
+    const struct json_value *data = json_get(root, "data");
+    const struct json_value *items = json_get(data, "transaction_types");
+    size_t n = items && items->type == JSON_ARR ? items->num_children : 0;
+    size_t rows = n > e->max_rows ? e->max_rows : n;
+    const char *headers[3] = { "TYPE", "STATUS", "BUILDER" };
+    const char *cells[24 * 3];
+    char head[128];
+    if (rows > 24)
+        rows = 24;
+    (void)snprintf(head, sizeof(head),
+                   "transaction types: %lld (%lld ready, %lld process only)",
+                   (long long)json_get_int(json_get(data, "transaction_type_count")),
+                   (long long)json_get_int(json_get(data, "ready_count")),
+                   (long long)json_get_int(json_get(data, "process_only_count")));
+    emit_header(b, e, head);
+    buf_putc(b, '\n');
+    for (size_t r = 0; r < rows; r++) {
+        const struct json_value *it = json_at(items, r);
+        const char *builder = lab_str(json_get(it, "builder_command"));
+        cells[r * 3] = lab_str(json_get(it, "id"));
+        cells[r * 3 + 1] = lab_str(json_get(it, "availability"));
+        cells[r * 3 + 2] = builder[0] ? builder : "-";
+    }
+    if (rows > 0)
+        emit_table(b, e, 3, headers, cells, rows);
+    if (n > rows)
+        emit_more_footer(b, n - rows);
+}
+
 /* Recipe renderers for ok=true envelopes, keyed by command path. */
 typedef void (*recipe_fn)(struct buf *, const struct zcl_cli_render_env *,
                           const struct json_value *);
@@ -2084,6 +2311,12 @@ static const struct {
     { "lab.run", render_lab_run },
     { "app.list", render_app_list },
     { "app.open", render_app_open },
+    { "app.inspect", render_app_inspect },
+    { "app.seed", render_app_seed },
+    { "app.share-copy", render_app_share_copy },
+    { "app.tasks", render_app_tasks },
+    { "app.service.list", render_app_service_list },
+    { "app.transaction-types.list", render_app_tx_types },
 };
 
 static recipe_fn recipe_for(const char *command_path)
