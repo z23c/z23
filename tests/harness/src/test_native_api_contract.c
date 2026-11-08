@@ -747,6 +747,62 @@ static int test_native_app_catalog_uses_strict_builtin_source(void)
         json_free(&input);
         PASS();
     } _test_next:;
+
+    TEST("app.inspect answers for launch-registry Apps that app.list shows") {
+        char root[PATH_MAX], tsv[PATH_MAX + 32];
+        ASSERT(test_mkdtemp(root, sizeof(root), "app_inspect"));
+        ASSERT(snprintf(tsv, sizeof(tsv), "%s/z23", root) > 0);
+        ASSERT(mkdir(tsv, 0700) == 0);
+        ASSERT(snprintf(tsv, sizeof(tsv), "%s/z23/apps.tsv", root) > 0);
+        FILE *f = fopen(tsv, "w");
+        ASSERT(f != NULL);
+        ASSERT(fputs("skyfixture\tsf\t/bin/true\t-\t-\n", f) >= 0);
+        ASSERT(fclose(f) == 0);
+        char *saved = getenv("XDG_CONFIG_HOME");
+        char saved_copy[PATH_MAX] = "";
+        if (saved)
+            snprintf(saved_copy, sizeof(saved_copy), "%s", saved);
+        ASSERT(setenv("XDG_CONFIG_HOME", root, 1) == 0);
+
+        struct zcl_command_request request;
+        struct zcl_command_reply reply;
+        struct json_value input;
+        const char *const ids[] = {"skyfixture", "sf", "skycombat", "blog",
+                                   "nosuchapp"};
+        for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+            memset(&request, 0, sizeof(request));
+            json_init(&input);
+            json_set_object(&input);
+            (void)json_push_kv_str(&input, "app_id", ids[i]);
+            request.input = &input;
+            request.invoked_name = "app.inspect";
+            zcl_command_reply_init(&reply, "zcl.app_inspect.v1");
+            zcl_native_handle_app_inspect(&request, &reply);
+            const char *status = json_get_str(json_get(&reply.data, "status"));
+            if (i < 2) {
+                ASSERT_STR_EQ(reply.error.code, "");
+                ASSERT_STR_EQ(status, "installed");
+                ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "app_id")),
+                              "skyfixture");
+            } else if (i == 2) {
+                /* Listed by app.list as a built-in row: never UNKNOWN_APP. */
+                ASSERT(strcmp(reply.error.code, "UNKNOWN_APP") != 0);
+                ASSERT(status != NULL);
+            } else if (i == 3) {
+                ASSERT_STR_EQ(status, "checkout-only");
+            } else {
+                ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
+            }
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        }
+        if (saved_copy[0])
+            (void)setenv("XDG_CONFIG_HOME", saved_copy, 1);
+        else
+            (void)unsetenv("XDG_CONFIG_HOME");
+        (void)unlink(tsv);
+        PASS();
+    } _test_next:;
     return failures;
 }
 
