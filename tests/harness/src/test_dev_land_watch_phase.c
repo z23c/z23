@@ -1071,6 +1071,56 @@ static bool dlx_evidence_case_run(const struct dlx_evidence_case *k)
 int test_dev_land_proof_evidence_test(void)
 {
     int failures = 0;
+    TEST("land: diagnostics stay with their failing groups") {
+        const struct dlx_evidence_case k = {
+            .tag = "evidence_groups", .dimension = ZCL_DEV_PROOF_TEST,
+            .script = "printf '%s\\n' "
+                "'==================== test_onion (FAIL, 1s) ====================' "
+                "'state_offer_onion_link line 451: arm_landed' "
+                "'state_offer_onion_link: FAIL' "
+                "'==================== test_lint (FAIL, 2s) ====================' "
+                "'FAIL at tests/harness/src/lint_gate_chain_contracts.c:455 (do_from_anchor != NULL)' "
+                "'Failed groups:' '  - test_onion: exit code=1' '  - test_lint: exit code=1'\nexit 1\n",
+            .token = "child_proof_failed_exit_1",
+        };
+        char wt[PATH_MAX], local[64], base[64], path[PATH_MAX + 200], record[4096];
+        size_t len = 0;
+        dlx_isolate(k.tag);
+        ASSERT(dlx_evidence_settle(&k, wt, local, base));
+        (void)snprintf(path, sizeof(path), "%s/.cache/zcl-dev-proof/%s-%s.failed", wt, local, base);
+        ASSERT(dlx_slurp(path, record, sizeof(record) - 1, &len));
+        record[len] = '\0';
+        ASSERT(strstr(record, "test test_onion: state_offer_onion_link: FAIL") != NULL);
+        ASSERT(strstr(record, "test_lint: FAIL at tests/harness/src/lint_gate_chain_contracts.c:455") != NULL);
+        ASSERT(strstr(record, "file=state_offer_onion_link") == NULL);
+        dlx_restore();
+        PASS();
+    }
+    TEST("land: empty groups and repeated assertions keep their owners") {
+        const struct dlx_evidence_case k = {
+            .tag = "evidence_duplicate_groups", .dimension = ZCL_DEV_PROOF_TEST,
+            .script = "printf '%s\\n' "
+                "'==================== test_empty (FAIL, 1s) ====================' "
+                "'no diagnostic' "
+                "'==================== test_first (FAIL, 1s) ====================' "
+                "'FAIL at tests/same.c:12 (broken)' "
+                "'==================== test_second (FAIL, 1s) ====================' "
+                "'FAIL at tests/same.c:12 (broken)'\nexit 1\n",
+            .token = "child_proof_failed_exit_1",
+        };
+        char wt[PATH_MAX], local[64], base[64], path[PATH_MAX + 200], record[4096];
+        size_t len = 0;
+        dlx_isolate(k.tag);
+        ASSERT(dlx_evidence_settle(&k, wt, local, base));
+        (void)snprintf(path, sizeof(path), "%s/.cache/zcl-dev-proof/%s-%s.failed", wt, local, base);
+        ASSERT(dlx_slurp(path, record, sizeof(record) - 1, &len));
+        record[len] = '\0';
+        ASSERT(strstr(record, "test test_first: FAIL at tests/same.c:12 (broken)") != NULL);
+        ASSERT(strstr(record, "test_second: FAIL at tests/same.c:12 (broken)") != NULL);
+        ASSERT(strstr(record, "file=tests/same.c gate=test") != NULL);
+        dlx_restore();
+        PASS();
+    }
     TEST("land: a failed test group names its FAIL line in the outcome") {
         const struct dlx_evidence_case k = {
             .tag = "evidence_test",
@@ -1192,6 +1242,23 @@ static int dlx_evidence_lint_body(void)
 int test_dev_land_proof_evidence_compile(void)
 {
     int failures = dlx_evidence_lint_body();
+    TEST("land: generic compiler errors do not name a source file") {
+        const struct dlx_evidence_case k = {
+            .tag = "evidence_generic_error", .dimension = ZCL_DEV_PROOF_COMPILE,
+            .script = "printf '%s\\n' 'error:12 unavailable'\nexit 1\n",
+            .token = "child_proof_failed_exit_1",
+        };
+        char wt[PATH_MAX], local[64], base[64], path[PATH_MAX + 200], record[4096];
+        size_t len = 0;
+        dlx_isolate(k.tag);
+        ASSERT(dlx_evidence_settle(&k, wt, local, base));
+        (void)snprintf(path, sizeof(path), "%s/.cache/zcl-dev-proof/%s-%s.failed", wt, local, base);
+        ASSERT(dlx_slurp(path, record, sizeof(record) - 1, &len));
+        record[len] = '\0';
+        ASSERT(strstr(record, "file=error") == NULL);
+        dlx_restore();
+        PASS();
+    }
     TEST("land: compiler commands do not hide a later failing gate") {
         char detail[256];
         zcl_dev_land_test_first_actionable(

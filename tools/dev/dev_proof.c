@@ -13785,7 +13785,9 @@ struct dp_evidence {
     bool lint_step;
     const char *strip[2];
     char unit[DP_EVIDENCE_UNIT_MAX];
+    char current_unit[DP_EVIDENCE_UNIT_MAX];
     char lines[DP_EVIDENCE_LINES][DP_EVIDENCE_LINE_MAX];
+    char line_units[DP_EVIDENCE_LINES][DP_EVIDENCE_UNIT_MAX];
     size_t count;
     char fallback_unit[DP_EVIDENCE_UNIT_MAX];
     char fallback[DP_EVIDENCE_LINE_MAX];
@@ -13936,7 +13938,11 @@ static void dp_evidence_keep(struct dp_evidence *e, const char *text)
     dp_evidence_clean(e, text, clean);
     if (!clean[0]) return;
     for (size_t i = 0; i < e->count; i++)
-        if (strcmp(e->lines[i], clean) == 0) return;
+        if (strcmp(e->lines[i], clean) == 0 &&
+            strcmp(e->line_units[i], e->current_unit) == 0) return;
+    if (e->test_step && !e->unit[0])
+        (void)snprintf(e->unit, sizeof(e->unit), "%s", e->current_unit);
+    (void)snprintf(e->line_units[e->count], DP_EVIDENCE_UNIT_MAX, "%s", e->current_unit);
     (void)snprintf(e->lines[e->count++], DP_EVIDENCE_LINE_MAX, "%s", clean);
 }
 
@@ -13949,11 +13955,13 @@ static bool dp_evidence_test_frame(struct dp_evidence *e, const char *line)
     if (strncmp(line, banner, sizeof(banner) - 1) == 0) {
         const char *name = line + sizeof(banner) - 1;
         size_t n = strcspn(name, " ");
+        e->current_unit[0] = '\0';
         e->in_fail_group = strstr(name, " (FAIL") ||
                            strstr(name, " (SIGNALED") ||
                            strstr(name, " (WEDGED");
-        if (e->in_fail_group && !e->unit[0] && n < sizeof(e->unit))
-            (void)snprintf(e->unit, sizeof(e->unit), "%.*s", (int)n, name);
+        if (e->in_fail_group && n > 0 && n < sizeof(e->current_unit))
+            (void)snprintf(e->current_unit, sizeof(e->current_unit), "%.*s", (int)n, name);
+        else e->in_fail_group = false;
         return true;
     }
     if (strncmp(line, "Failed groups:", 14) == 0) {
@@ -14087,6 +14095,12 @@ static bool dp_evidence_change(const char *key, char out[41])
     return true;
 }
 
+static bool dp_evidence_compiler_location(const char *line)
+{
+    return strstr(line, ": error:") || strstr(line, ": fatal error:") ||
+           strstr(line, "undefined reference to");
+}
+
 /* A FAIL-at line or a compiler diagnostic names one repo-relative file. */
 static bool dp_evidence_file_of(const char *line, char *out, size_t cap)
 {
@@ -14094,9 +14108,10 @@ static bool dp_evidence_file_of(const char *line, char *out, size_t cap)
     const char *start = mark ? mark + 8 : line;
     const char *colon;
     size_t n;
-    if (!start || start[0] == '/' || start[0] == '\0') return false;
+    if (!start || (!mark && !dp_evidence_compiler_location(start)) ||
+        start[0] == '/' || start[0] == '\0') return false;
     colon = strchr(start, ':');
-    if (!colon || colon == start) return false;
+    if (!colon || colon == start || colon[1] < '0' || colon[1] > '9') return false;
     n = (size_t)(colon - start);
     if (n == 0 || n >= cap) return false;
     memcpy(out, start, n);
@@ -14142,8 +14157,15 @@ static void dp_evidence_render(const struct dp_evidence *e,
     (void)dp_evidence_append(out, out_len, &used, head);
     if (dp_evidence_cause(e, paths, first, cause, sizeof(cause)))
         (void)dp_evidence_append(out, out_len, &used, cause);
-    for (size_t i = 1; i < e->count; i++)
-        (void)dp_evidence_append(out, out_len, &used, e->lines[i]);
+    for (size_t i = 1; i < e->count; i++) {
+        char labelled[DP_EVIDENCE_UNIT_MAX + DP_EVIDENCE_LINE_MAX + 3];
+        const char *line = e->lines[i];
+        if (e->test_step) {
+            (void)snprintf(labelled, sizeof(labelled), "%s: %s", e->line_units[i], line);
+            line = labelled;
+        }
+        (void)dp_evidence_append(out, out_len, &used, line);
+    }
     size_t root_len = strlen(paths->root);
     const char *logs = paths->logs;
     if (strncmp(logs, paths->root, root_len) == 0 && logs[root_len] == '/')
