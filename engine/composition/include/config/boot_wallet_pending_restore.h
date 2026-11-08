@@ -8,6 +8,7 @@
 struct main_state;
 struct chain_state_repository;
 struct uint256;
+struct wallet_cutover_binding;
 
 enum boot_pending_restore_result {
     BOOT_PENDING_RESTORE_OK,
@@ -18,6 +19,15 @@ enum boot_pending_restore_result {
     BOOT_PENDING_RESTORE_TREE_MISMATCH,
     BOOT_PENDING_RESTORE_CSR_REFUSED,
 };
+
+/* Caller must cryptographically verify and register the persisted island first. */
+enum boot_pending_restore_result boot_wallet_old_partial_restore(
+    struct main_state *ms, struct chain_state_repository *csr,
+    const struct wallet_cutover_binding *binding);
+
+enum boot_pending_restore_result boot_wallet_old_genesis_restore(
+    struct main_state *ms, struct chain_state_repository *csr,
+    const struct wallet_cutover_binding *binding);
 
 /* Startup only: no reducer, RPC or background worker may run concurrently.
  * The caller has proved coins_height/hash from durable consensus authority,

@@ -19,10 +19,17 @@
 /* level is 0 for information and 1 for a warning or error. */
 typedef void (*zapp_nodelog_sink)(void *arg, int level, const char *text);
 
+enum zapp_replay_phase { ZAPP_REPLAY_NONE, ZAPP_REPLAY_TRANSPARENT, ZAPP_REPLAY_DISCOVER,
+    ZAPP_REPLAY_WITNESS, ZAPP_REPLAY_SPENDS };
+struct zapp_replay_progress { enum zapp_replay_phase phase; int64_t floor, next, reference; };
+
 struct zapp_nodelog {
     zapp_nodelog_sink sink;
     void *sink_arg;
     atomic_int stage;
+    atomic_uint replay_seq;
+    atomic_int replay_phase;
+    atomic_int_fast64_t replay_floor, replay_next, replay_reference;
     int64_t window_start;
     int window_count;
     pthread_t thread;
@@ -52,4 +59,8 @@ bool zapp_console_rotate(const char *file, off_t cap);
 void zapp_nodelog_stop(struct zapp_nodelog *l);
 /* What the node is doing after the latest boot stage it reported, as a short plain phrase. */
 const char *zapp_nodelog_stage(struct zapp_nodelog *l);
+/* Bounded coherent snapshot of the current child replay, if present. */
+bool zapp_nodelog_replay(struct zapp_nodelog *l, struct zapp_replay_progress *out);
+bool zapp_nodelog_replay_visible(bool responding, bool running, bool stopping, bool has_progress);
+void zapp_nodelog_replay_text(const struct zapp_replay_progress *p, char *out, size_t cap);
 #endif

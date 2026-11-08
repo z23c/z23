@@ -106,6 +106,19 @@ int test_boot_self_respawn(void)
     sd_notify_reset_for_testing();
     unsetenv("NOTIFY_SOCKET");
 
+#if !defined(_WIN32)
+    bsr_baseline();
+    boot_self_respawn_set_argv(fake_argv);
+    char notify_path[256];
+    test_fmt_tmpdir(notify_path, sizeof(notify_path), "boot_self_respawn", "early-notify.sock");
+    setenv("NOTIFY_SOCKET", notify_path, 1);
+    BSR_CHECK("early restart detects systemd before services",
+              boot_self_respawn_prepare_early() && sd_notify_is_active() &&
+              !boot_self_respawn_armed());
+    sd_notify_reset_for_testing();
+    unsetenv("NOTIFY_SOCKET");
+#endif
+
     /* ── exec_or_return() when NOT armed must RETURN (not exec, not abort) —
      *    the straggler guard relies on this to fall through to its _exit(0).
      *    Reaching the line after it is the proof. */

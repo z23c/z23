@@ -341,6 +341,20 @@ static void handoff_offer_locked(struct controller *c, const struct node_reading
     pthread_mutex_unlock(&c->pace_lock);
 }
 
+/* Sample the fleet reference and how long this node tip has remained still. */
+static struct zapp_chain_evidence observe_chain_evidence(struct controller *c, const struct node_reading *n)
+{
+    const int64_t now = monotonic_secs();
+    pthread_mutex_lock(&c->lock);
+    const bool fleet_current = !c->view.fleet_stale && c->fleet_height_at && now - c->fleet_height_at <= ZAPP_FLEET_MAX_AGE_SECS;
+    if (!n->responding) c->height_moved_at = 0;
+    else if (n->height != c->seen_height || !c->height_moved_at) c->height_moved_at = now;
+    struct zapp_chain_evidence evidence = {.onion_only = true, .fleet_height = fleet_current ? c->fleet_height : -1,
+        .quiet_secs = n->responding && c->height_moved_at ? now - c->height_moved_at : -1};
+    pthread_mutex_unlock(&c->lock);
+    return evidence;
+}
+
 static void observe_node(struct controller *c)
 {
     struct zapp_node_identity observed = {0};
@@ -348,6 +362,9 @@ static void observe_node(struct controller *c)
     char *output = calloc(1, ZAPP_TEXT_CAP);
     bool ran = output && zapp_operation_run(&c->runtime, "status", output, ZAPP_TEXT_CAP);
     struct node_reading n = read_status(ran ? output : NULL);
+    struct zapp_replay_progress replay = {0};
+    bool replaying = !n.responding && managed &&
+        zapp_node_replay_progress(&c->runtime, &observed, &replay);
     enum zapp_pace pace = n.responding ? read_node_pace(c) : ZAPP_PACE_NORMAL;
     observe_fleet_peers(c, n.responding);
     free(output);
@@ -357,16 +374,10 @@ static void observe_node(struct controller *c)
     bool onion, serving;
     read_node_files(c, n.responding, &onion, &serving);
     char status[1024], line[96];
-    /* Evidence outside the node: how long its tip has been still, and the fleet's height while that report is current. */
-    const int64_t now = monotonic_secs();
-    pthread_mutex_lock(&c->lock);
-    const bool fleet_current = !c->view.fleet_stale && c->fleet_height_at && now - c->fleet_height_at <= ZAPP_FLEET_MAX_AGE_SECS;
-    if (!n.responding) c->height_moved_at = 0;
-    else if (n.height != c->seen_height || !c->height_moved_at) c->height_moved_at = now;
-    struct zapp_chain_evidence evidence = {.onion_only = true, .fleet_height = fleet_current ? c->fleet_height : -1,
-        .quiet_secs = n.responding && c->height_moved_at ? now - c->height_moved_at : -1};
-    pthread_mutex_unlock(&c->lock);
+    struct zapp_chain_evidence evidence = observe_chain_evidence(c, &n);
     zapp_sync_line(n.responding, process_running, n.height, n.target, n.peers, &evidence, status, sizeof(status));
+    if (zapp_nodelog_replay_visible(n.responding, process_running, stopping, replaying))
+        zapp_nodelog_replay_text(&replay, status, sizeof(status));
     if (stopping) copy_text(status, sizeof(status), "The node is saving its data before it exits.");
     zapp_node_line(n.responding, process_running, stopping, onion, n.height, n.target, n.peers, &evidence, line, sizeof(line));
     pthread_mutex_lock(&c->lock);
@@ -375,6 +386,11 @@ static void observe_node(struct controller *c)
     c->view.node_running = n.responding;
     c->view.node_process_running = process_running;
     c->view.node_installing = installing;
+    c->view.node_wallet_replaying = !c->handoff_wait && !zapp_restart_notice(&c->restart) &&
+        zapp_nodelog_replay_visible(n.responding, process_running, stopping, replaying);
+    c->view.node_wallet_replay[0] = 0;
+    if (c->view.node_wallet_replaying)
+        zapp_nodelog_replay_text(&replay, c->view.node_wallet_replay, sizeof(c->view.node_wallet_replay));
     c->view.pace = pace;
     c->view.node_wanted = wanted;
     c->view.node_stopping = stopping;

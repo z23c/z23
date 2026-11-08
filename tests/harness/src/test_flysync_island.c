@@ -51,6 +51,8 @@
 #include "storage/event_log_payloads.h"
 #include "storage/block_index_projection.h"
 #include "services/island_anchor.h"
+#include "jobs/reducer_frontier.h"
+#include "wallet/wallet_sqlite.h"
 #include "services/utxo_recovery_service.h"
 #include "storage/progress_store.h"
 #include "validation/chainstate.h"
@@ -1628,6 +1630,96 @@ static int fsi_recovery_refusals(sqlite3 *db)
     return failures;
 }
 
+bool boot_test_old_restore_view(struct main_state *state,
+    const struct wallet_cutover_binding *binding);
+
+static int fsi_old_genesis_header_refusals(struct fsi_node *n,
+    struct wallet_cutover_binding *binding, struct block_index *genesis)
+{
+    int failures = 0;
+    genesis->nStatus |= BLOCK_FAILED_VALID;
+    FSI_CHECK("OLD startup refuses failed genesis", !boot_test_old_restore_view(&n->ms, binding));
+    genesis->nStatus &= ~BLOCK_FAILED_VALID;
+    uint32_t saved_bits = genesis->nBits;
+    genesis->nBits ^= 1;
+    FSI_CHECK("OLD startup refuses inconsistent genesis bits",
+              !boot_test_old_restore_view(&n->ms, binding) && genesis->nBits == (saved_bits ^ 1));
+    genesis->nBits = saved_bits;
+    struct arith_uint256 saved_work = genesis->nChainWork;
+    genesis->nChainWork.pn[0] ^= 1;
+    struct arith_uint256 wrong_work = genesis->nChainWork;
+    FSI_CHECK("OLD startup refuses inconsistent genesis work",
+              !boot_test_old_restore_view(&n->ms, binding) &&
+              arith_uint256_compare(&genesis->nChainWork, &wrong_work) == 0);
+    genesis->nChainWork = saved_work;
+    unsigned saved_status = genesis->nStatus;
+    genesis->nStatus = (saved_status & ~BLOCK_VALID_MASK) | 6;
+    FSI_CHECK("OLD startup refuses reserved genesis validity",
+              !boot_test_old_restore_view(&n->ms, binding) &&
+              genesis->nStatus == ((saved_status & ~BLOCK_VALID_MASK) | 6));
+    genesis->nStatus = saved_status;
+    binding->old_hash[0] ^= 1;
+    FSI_CHECK("OLD startup refuses a different genesis hash",
+              !boot_test_old_restore_view(&n->ms, binding));
+    binding->old_hash[0] ^= 1;
+    return failures;
+}
+
+static int fsi_old_genesis_restore_cases(struct fsi_node *n, sqlite3 *db)
+{
+    int failures = 0;
+    struct coins_view backing = {0};
+    struct coins_view_cache cache;
+    coins_view_cache_init(&cache, &backing);
+    csr_instance()->coins_tip = &cache;
+    struct wallet_cutover_binding binding = {.old_height = 0, .target_height = n->a.rung_height};
+    memcpy(binding.old_hash, chain_params_get()->consensus.hashGenesisBlock.data, 32);
+    memcpy(binding.target_hash, n->a.rung_hash.data, 32);
+    struct block_index *rung = chainstate_insert_block_index((struct chainstate *)&n->ms, &n->a.rung_hash);
+    bool ready = rung && island_anchor_register(&n->a).ok;
+    if (rung) rung->nHeight = n->a.rung_height;
+    struct block_index *genesis = block_map_find(&n->ms.map_block_index,
+        &chain_params_get()->consensus.hashGenesisBlock);
+    if (genesis) {
+        genesis->nStatus = 0; genesis->nBits = 0; genesis->nTx = 0; genesis->nChainTx = 0;
+        memset(&genesis->nChainWork, 0, sizeof(genesis->nChainWork));
+    }
+    ready = ready && genesis;
+    if (!ready) {
+        csr_instance()->coins_tip = NULL;
+        coins_view_cache_free(&cache);
+        return failures + 1;
+    }
+    int32_t height = -1; uint8_t hash[32]; bool found = false;
+    FSI_CHECK("empty genesis is not nonempty coins authority",
+              ready && !reducer_frontier_derive_coins_best_now(&height, hash, &found));
+    FSI_CHECK("OLD startup restores proven empty genesis",
+              ready && boot_test_old_restore_view(&n->ms, &binding));
+    FSI_CHECK("OLD startup initializes compiled genesis metadata",
+              genesis->nBits != 0 && genesis->nTx == 1 && genesis->nChainTx == 1 &&
+              (genesis->nStatus & BLOCK_VALID_MASK) == BLOCK_VALID_SCRIPTS &&
+              (genesis->nStatus & BLOCK_HAVE_DATA) && !arith_uint256_is_zero(&genesis->nChainWork));
+    failures += fsi_old_genesis_header_refusals(n, &binding, genesis);
+    const char *changes[] = {
+        "INSERT INTO coins(txid,vout,value,height,is_coinbase,script) VALUES(zeroblob(32),0,1,1,0,zeroblob(0))",
+        "INSERT INTO nullifiers(nf,pool,height) VALUES(zeroblob(32),0,1)",
+        "UPDATE anchor_state SET activation_cursor=1 WHERE pool=1"
+    };
+    const char *restores[] = {
+        "DELETE FROM coins", "DELETE FROM nullifiers",
+        "UPDATE anchor_state SET activation_cursor=0 WHERE pool=1"
+    };
+    for (size_t i = 0; i < sizeof(changes) / sizeof(changes[0]); ++i) {
+        bool changed = sqlite3_exec(db, changes[i], NULL, NULL, NULL) == SQLITE_OK;
+        FSI_CHECK("OLD startup refuses polluted genesis", changed && !boot_test_old_restore_view(&n->ms, &binding));
+        FSI_CHECK("restore genesis proof", sqlite3_exec(db, restores[i], NULL, NULL, NULL) == SQLITE_OK);
+    }
+    csr_instance()->coins_tip = NULL;
+    coins_view_cache_free(&cache);
+    return failures;
+}
+
+
 static int fsi_case_recovery_fresh(void)
 {
     int failures = 0;
@@ -1665,6 +1757,7 @@ static int fsi_case_recovery_fresh(void)
     FSI_CHECK("fresh recovery commits seeded window",
               restored && island_anchor_save_window_recover(db, &n.a, &rows, n.is.w).ok &&
               island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_SEEDED);
+    failures += fsi_old_genesis_restore_cases(&n, db);
     fsi_node_close(&n);
     return failures;
 }

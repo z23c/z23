@@ -805,6 +805,18 @@ bool zapp_node_identity(struct zapp_runtime *r, struct zapp_node_identity *id)
 #endif
 }
 
+bool zapp_node_replay_progress(struct zapp_runtime *r, const struct zapp_node_identity *id,
+    struct zapp_replay_progress *out)
+{
+    if (!r || !id || !out) return false;
+    pthread_mutex_lock(&r->mutex);
+    bool ok = !r->stopping && !r->stop_sent && r->start_epoch == id->epoch &&
+        r->node == id->pid && r->log.started && r->log.pid == id->pid && running_locked(r) &&
+        zapp_nodelog_replay(&r->log, out);
+    pthread_mutex_unlock(&r->mutex);
+    return ok;
+}
+
 bool zapp_node_handoff_stop(struct zapp_runtime *r, const struct zapp_node_identity *id, uint64_t *epoch)
 {
     if (!r || !id || !epoch) return false;

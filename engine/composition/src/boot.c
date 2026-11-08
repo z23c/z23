@@ -229,6 +229,13 @@ bool boot_wallet_cutover_startup_context_matches(const struct node_db *ndb,
            ws == &g_wallet_sqlite && wallet == &g_wallet && main == &g_state;
 }
 
+bool boot_wallet_cutover_replay_context_matches(const struct node_db *ndb,
+    const struct wallet_sqlite *ws, const struct wallet *wallet, const struct main_state *main)
+{
+    return boot_stage_is(BOOT_STAGE_CHAIN_TIP_RESOLVED) && ndb == &g_node_db &&
+        ws == &g_wallet_sqlite && wallet == &g_wallet && main == &g_state;
+}
+
 bool boot_wallet_allows_coin_repair(void)
 {
     if (!g_wallet_sqlite.db) return false;
@@ -1072,26 +1079,6 @@ bool boot_export_mode_active(void) /* boot_refuse.c's view of static g_boot_app_
 {
     return g_boot_app_ctx && g_boot_app_ctx->export_consensus_bundle;
 }
-/* Park alive-degraded until shutdown, then return false. Never true.
- * -export-consensus-bundle: one REFUSED line, latch FATAL, return (exit 1).
- * ONLY for a gate whose process still has something to offer while it waits;
- * a gate firing before the node serves anything must use
- * boot_refuse_at_permanent_gate() instead. */
-bool boot_park_until_shutdown(const char *gate_name)
-{
-    const char *name = gate_name ? gate_name : "boot_storage_gate";
-    boot_status_set_blocker(name, name);
-    if (boot_gate_export_refusal(name))
-        return false;
-    fprintf(stderr,
-        "[boot] PARKED alive-degraded at gate '%s' — bounded re-derive budget "
-        "exhausted; the operator was paged. NOT crash-looping; waiting for a "
-        "shutdown signal.\n", name);
-    while (!thread_registry_shutdown_requested())
-        sleep(2);
-    return false;
-}
-
 /* ── The node's boot sequence, as named steps ──────────────────────
  *
  * app_init used to be one 2,600-line function: every startup bug in the
@@ -2681,24 +2668,6 @@ static bool boot_scan_block_files_needed(const struct boot_index_scan *sc)
                 sc->best_header->nHeight);
 }
 
-/* True when a verified fast restart found the block files exactly as the
- * clean shutdown left them, so a scan could not find a record the index
- * lacks. Any doubt returns false and the scan runs. */
-static bool boot_scan_block_files_unchanged(const char *datadir,
-                                            bool fast_restart, int cleared)
-{
-    struct shutdown_clean_binding recorded;
-    struct boot_block_files_fingerprint now;
-    if (!fast_restart || cleared != 0 || !datadir ||
-        !boot_shutdown_marker_peek_fast_restart_binding(&recorded) ||
-        !boot_block_files_fingerprint_read(datadir, &now) ||
-        !boot_block_files_scan_may_skip(fast_restart, &recorded, &now))
-        return false;
-    printf("[boot] block-file scan skipped: fast restart taken, %u block files "
-           "unchanged since the clean shutdown\n", now.count);
-    return true;
-}
-
 /* Mark on-disk block data (flat save gated on mutation), then the ladder. */
 static void boot_step_scan_block_files(struct app_context *ctx,
                                        const struct chain_params *params,
@@ -3173,50 +3142,6 @@ static void boot_step_activate_best_via_controller(struct boot_seq *s)
     }
 }
 
-/* Rewind a placeholder (nBits==0) tip to the last real block. */
-static void boot_step_rewind_placeholder_tip(void)
-{
-    /* Rewind a placeholder tip.
-     *
-     * If a placeholder (nBits==0) ever became our active tip — e.g.,
-     * because a chain_restore anchor at h=N was promoted into the
-     * active chain before its real block data arrived — every
-     * subsequent header will be rejected with bad-diffbits since
-     * GetNextWorkRequired sees prev_bits=0. Walk pprev until we hit
-     * a real block, set THAT as the active tip, and let gap-fill
-     * resync from there. */
-    struct block_index *tip = active_chain_tip(&g_state.chain_active);
-    if (tip && tip->nBits == 0 && tip->nHeight > 0) {
-        struct block_index *walk = tip->pprev;
-        int last_h = tip->nHeight + 1;
-        int steps = 0;
-        while (walk && walk->nBits == 0 &&
-               walk->pprev && walk->pprev->nHeight < walk->nHeight &&
-               walk->nHeight < last_h && steps++ < 10000) {
-            last_h = walk->nHeight;
-            walk = walk->pprev;
-        }
-        if (walk && walk->nBits != 0) {
-            fprintf(stderr,
-                "[boot] placeholder tip at h=%d (nBits=0); rewinding "
-                "to last real block h=%d\n",
-                tip->nHeight, walk->nHeight);
-            if (boot_promote_tip_via_csr(
-                    walk, "rewind_placeholder_tip", true) &&
-                walk->phashBlock) {
-                if (g_node_db.open)
-                    (void)coins_rewind_above_tip(
-                        g_node_db.db, walk->nHeight, -1);
-            }
-        } else {
-            fprintf(stderr,
-                "[boot] placeholder tip at h=%d but no valid "
-                "ancestor found within 10000 steps; chain stuck\n",
-                tip->nHeight);
-        }
-    }
-}
-
 /* Structural corruption with no operator opt-in: drive the bounded reindex
  * ladder, or serve degraded once the budget is exhausted. */
 static bool boot_finalize_gate_unrecoverable(struct app_context *ctx, int tip_h,
@@ -3404,7 +3329,7 @@ static bool boot_seq_finalize_chain(struct app_context *ctx, struct boot_seq *s)
      * loud, continue" behavior must opt in with -allow-degraded. */
     boot_step_clamp_reducer_cursor();
     boot_step_activate_best_via_controller(s);
-    boot_step_rewind_placeholder_tip();
+    boot_step_rewind_placeholder_tip(&g_state, &g_node_db);
     reducer_frontier_provable_tip_seed_high_water(active_chain_height(&g_state.chain_active));
     if (!boot_step_finalize_post_restore(ctx, s->index_repaired))
         return false;
@@ -3561,12 +3486,12 @@ static struct boot_cutover_env boot_cutover_environment(void)
         .block_tree_open = &g_block_tree_open, .db_service = &g_db_service,
         .gate_index = boot_step_gate_block_index_integrity, .build_svc = boot_step_build_svc_ctx};
 }
+#ifdef ZCL_TESTING
 static bool boot_wallet_cutover_preflight(const char *datadir, bool *pending)
 {
     struct boot_cutover_env env = boot_cutover_environment();
     return boot_cutover_preflight(&env, datadir, pending);
 }
-#ifdef ZCL_TESTING
 bool boot_wallet_cutover_preflight_test(const char *datadir, bool *pending)
 { return boot_wallet_cutover_preflight(datadir, pending); }
 #endif
@@ -3579,6 +3504,45 @@ static bool boot_pending_replay(struct app_context *ctx, const struct chain_para
 {
     struct boot_cutover_env env = boot_cutover_environment();
     return boot_cutover_replay(&env, ctx, params);
+}
+
+static bool g_old_cutover_restart_pending;
+static struct wallet_cutover_binding g_old_cutover_restart_binding;
+
+/* OLD retry keeps the wallet fence and never enters network services. */
+static bool boot_retry_old_cutover(struct app_context *ctx, struct boot_seq *seq,
+                                   const struct wallet_cutover_binding *binding)
+{
+    struct boot_cutover_env env = boot_cutover_environment();
+    struct block_index *tip = NULL;
+    if (!boot_cutover_mode_supported(ctx) ||
+        !wallet_readiness_initialize(env.wallet, WALLET_READINESS_PENDING,
+                                     binding->old_generation_present, binding->old_generation) ||
+        !boot_cutover_load_old_chain(&env, ctx, seq->params, binding, &tip))
+        return false;
+    char *bundle = consensus_state_find_old_retry_bundle(ctx->datadir, binding);
+    if (!bundle) {
+        LOG_ERROR("wallet", "old wallet cutover artifact unavailable");
+        return false;
+    }
+    struct consensus_state_install_runtime_result result;
+    struct zcl_result installed = binding->old_height == 0 ?
+        consensus_state_install_from_bundle_old_retry(
+            env.node, env.state, bundle, ctx->datadir, env.wallet_db, env.wallet, binding, &result) :
+        consensus_state_install_from_bundle_terminal_old_retry(
+            env.node, env.state, bundle, ctx->datadir, env.wallet_db, env.wallet, binding, &result);
+    free(bundle);
+    if (!installed.ok || !result.state_installed) {
+        LOG_ERROR("wallet", "old wallet cutover retry refused: %s", installed.message);
+        return false;
+    }
+    if (!boot_cutover_verify_committed(&env, ctx->datadir, binding)) {
+        LOG_ERROR("wallet", "old wallet cutover committed but recovery verification failed");
+        return false;
+    }
+    g_old_cutover_restart_binding = *binding;
+    g_old_cutover_restart_pending = true;
+    return false;
 }
 
 /* Bring the node up: eleven ordered phases, stopping at the first failure.
@@ -3627,9 +3591,14 @@ bool app_init(struct app_context *ctx)
     if (!boot_seq_prologue(ctx, &seq)) return false;
     if (!boot_seq_open_node_db(ctx)) return false;
     if (!boot_seq_load_wallet(ctx, &seq)) return false;
-    bool cutover_pending = false;
-    if (!boot_wallet_cutover_preflight(ctx->datadir, &cutover_pending)) return false;
-    if (cutover_pending) {
+    enum boot_cutover_preflight_kind cutover_kind;
+    struct wallet_cutover_binding cutover_binding;
+    struct boot_cutover_env cutover_env = boot_cutover_environment();
+    if (!boot_cutover_preflight_classify(&cutover_env, ctx->datadir,
+                                         &cutover_kind, &cutover_binding)) return false;
+    if (cutover_kind == BOOT_CUTOVER_OLD_RETRY)
+        return boot_retry_old_cutover(ctx, &seq, &cutover_binding);
+    if (cutover_kind == BOOT_CUTOVER_COMMITTED) {
         if (!boot_cutover_mode_supported(ctx)) {
             LOG_ERROR("wallet", "pending wallet recovery requires normal startup");
             return false;
@@ -3678,7 +3647,7 @@ void app_shutdown(void)
     boot_datadir_lock_release();
     boot_stage_advance_to(BOOT_STAGE_SHUTDOWN_COMPLETE);
 }
-void app_shutdown_offline(bool output_already_durable)
+static void boot_shutdown_offline_internal(bool output_already_durable, bool preserve_pending)
 {
     bool durability_ok = true;
     boot_stage_advance_to(BOOT_STAGE_SHUTDOWN_REQUESTED);
@@ -3695,10 +3664,15 @@ void app_shutdown_offline(bool output_already_durable)
         fprintf(stderr, "[shutdown] parameter loader join failed; exiting unclean\n");
         _exit(1);
     }
+    if (preserve_pending && (!g_node_db.db || g_node_db.sync_in_batch ||
+        !sqlite3_get_autocommit(g_node_db.db))) {
+        fprintf(stderr, "[shutdown] pending wallet database is not quiescent\n");
+        _exit(1);
+    }
     coins_view_cache_free(&g_coins_tip);
     coins_view_sqlite_close(&g_coins_sqlite);
     if (g_wallet_sqlite.open) {
-        struct zcl_result r = wallet_sqlite_flush_r(&g_wallet_sqlite, &g_wallet);
+        struct zcl_result r = preserve_pending ? ZCL_OK : wallet_sqlite_flush_r(&g_wallet_sqlite, &g_wallet);
         if (!r.ok) {
             durability_ok = false;
             fprintf(stderr,
@@ -3722,5 +3696,37 @@ void app_shutdown_offline(bool output_already_durable)
     boot_datadir_lock_release();
     boot_stage_advance_to(BOOT_STAGE_SHUTDOWN_COMPLETE);
 }
+void app_shutdown_offline(bool output_already_durable)
+{
+    boot_shutdown_offline_internal(output_already_durable, false);
+}
+
+bool boot_old_cutover_restart_pending(void)
+{
+    return g_old_cutover_restart_pending;
+}
+
+#ifdef ZCL_TESTING
+void boot_old_cutover_test_arm(const struct wallet_cutover_binding *binding, const char *datadir)
+{
+    if (!binding || !datadir) return;
+    g_datadir = datadir;
+    g_old_cutover_restart_binding = *binding;
+    g_old_cutover_restart_pending = true;
+}
+#endif
+
+bool boot_old_cutover_restart_cleanup(void)
+{
+    struct boot_cutover_env env = boot_cutover_environment();
+    if (!g_old_cutover_restart_pending || !g_node_db.db || g_node_db.sync_in_batch ||
+        !sqlite3_get_autocommit(g_node_db.db) ||
+        !boot_cutover_verify_committed(&env, g_datadir, &g_old_cutover_restart_binding))
+        return false;
+    g_old_cutover_restart_pending = false;
+    boot_shutdown_offline_internal(false, true);
+    return true;
+}
+
 bool app_is_running(void) { return atomic_load(&g_running); }
 /* app_add_node, app_start_metrics, app_stop_metrics: boot_services.c */

@@ -3,6 +3,7 @@
 #include "config/boot_wallet_cutover_replay.h"
 #include "boot_wallet_cutover_empty_internal.h"
 #include "models/database.h"
+#include "wallet/wallet_lock.h"
 #include "controllers/wallet_helpers.h"
 #include "services/node_db_catchup_wallet_replay.h"
 #include "services/node_db_catchup_wallet_transparent_startup.h"
@@ -78,6 +79,19 @@ static enum boot_cutover_replay_status bcr_current(struct boot_cutover_replay *r
         return BOOT_CUTOVER_STALE;
     struct wallet_readiness after = wallet_readiness_get(r->ctx->wallet);
     return bcr_readiness_matches(&after, &before) ? BOOT_CUTOVER_PROGRESS : BOOT_CUTOVER_STALE;
+}
+
+bool boot_cutover_replay_current_locked(const struct boot_cutover_replay *r)
+{
+    if (!r || !r->ctx || !r->ctx->wallet || !r->ctx->main_state) return false;
+    struct wallet_readiness ready = wallet_readiness_get_locked(r->ctx->wallet);
+    uint8_t identity[32];
+    if (!bcr_readiness_matches(&ready, &r->readiness) ||
+        !wallet_scan_identity_locked(r->ctx->wallet, identity) ||
+        memcmp(identity, r->identity, 32) ||
+        !bcr_chain_matches(r, r->ctx->main_state, r->canonical_state != NULL)) return false;
+    return !r->canonical_state || r->canonical_state == r->ctx->main_state ||
+        bcr_chain_matches(r, r->canonical_state, true);
 }
 
 static bool bcr_args_valid(struct boot_cutover_replay *r,
@@ -202,6 +216,13 @@ static enum boot_cutover_replay_status bcr_sapling_busy(
     return BOOT_CUTOVER_BUSY;
 }
 
+static const uint8_t *bcr_expected_key_digest(const struct boot_cutover_replay *r,
+                                               enum sapling_replay_phase phase)
+{
+    return (phase == SAPLING_REPLAY_SPENDS ||
+            (phase == SAPLING_REPLAY_DISCOVER && r->next != r->floor)) ? r->key_digest : NULL;
+}
+
 static enum boot_cutover_replay_status bcr_sapling(struct boot_cutover_replay *r, int end)
 {
     uint8_t hash[32];
@@ -217,7 +238,15 @@ static enum boot_cutover_replay_status bcr_sapling(struct boot_cutover_replay *r
     struct sapling_replay_result out = node_db_catchup_sapling_replay_at_reference(
         r->service, r->ctx->node_db, r->ctx->main_state, r->ctx->wallet,
         bcr_body_dir(r), r->next, end, r->endpoint.height, r->endpoint.hash.data,
-        phase, hash, r->identity, phase == SAPLING_REPLAY_SPENDS ? r->key_digest : NULL);
+        phase, hash, r->identity,
+        bcr_expected_key_digest(r, phase));
+    if (r->checkpoint_resume && phase == SAPLING_REPLAY_DISCOVER &&
+        out.status == SAPLING_REPLAY_KEYS_UNAVAILABLE &&
+        memcmp(r->key_digest, out.key_digest, 32)) {
+        r->checkpoint_resume = false; r->next = r->floor;
+        memset(r->key_digest, 0, sizeof(r->key_digest));
+        return BOOT_CUTOVER_BUSY;
+    }
     if (out.status == SAPLING_REPLAY_BUSY)
         return bcr_sapling_busy(r, end, phase, hash, &out);
     if (!bcr_sapling_receipt(r, end, phase, hash, &out)) {
@@ -225,6 +254,7 @@ static enum boot_cutover_replay_status bcr_sapling(struct boot_cutover_replay *r
         return BOOT_CUTOVER_RETRY;
     }
     if (phase == SAPLING_REPLAY_DISCOVER) {
+        r->checkpoint_resume = false;
         if (r->next != r->floor && memcmp(r->key_digest, out.key_digest, 32)) {
             LOG_WARN("wallet", "Sapling replay key set changed: start=%d end=%d reference=%d",
                      r->next, end, r->endpoint.height);
@@ -253,6 +283,32 @@ void boot_cutover_replay_clear(struct boot_cutover_replay *r)
     if (!r) return;
     transparent_replay_filter_free(r->transparent_filter);
     r->transparent_filter = NULL;
+}
+
+static bool bcr_full_empty_proof(struct boot_cutover_replay *r)
+{
+    if (!r || r->phase != BOOT_CUTOVER_TRANSPARENT || !r->ctx || !r->ctx->node_db || !r->ctx->wallet) return false;
+    struct wallet *w = r->ctx->wallet;
+    sqlite3 *db = r->ctx->node_db->db;
+    sqlite3_mutex *mu = db ? sqlite3_db_mutex(db) : NULL;
+    if (!mu || sqlite3_mutex_try(mu) != SQLITE_OK) return false;
+    bool wallet_locked = zcl_mutex_trylock(&w->cs);
+    bool key_locked = wallet_locked && zcl_mutex_trylock(&w->keystore.cs);
+    bool sapling_locked = key_locked && zcl_mutex_trylock(&w->sapling_keys.cs);
+    bool empty = sapling_locked && boot_wallet_cutover_full_empty_locked(
+        r->ctx->wallet_db, db, w, r->sapling_load_ok);
+    if (sapling_locked) zcl_mutex_unlock(&w->sapling_keys.cs);
+    if (key_locked) zcl_mutex_unlock(&w->keystore.cs);
+    if (wallet_locked) zcl_mutex_unlock(&w->cs);
+    sqlite3_mutex_leave(mu);
+    return empty;
+}
+
+bool boot_cutover_replay_complete_full_empty(struct boot_cutover_replay *r)
+{
+    if (!bcr_full_empty_proof(r) || bcr_current(r) != BOOT_CUTOVER_PROGRESS) return false;
+    r->full_empty = true; r->shielded_empty = true; r->phase = BOOT_CUTOVER_DONE;
+    return true;
 }
 
 static bool bcr_shielded_empty(struct boot_cutover_replay *r)

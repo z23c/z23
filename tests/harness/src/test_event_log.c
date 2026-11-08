@@ -1561,6 +1561,103 @@ static int run_receipt(int *failures_out)
     return c.failures;
 }
 
+struct prefix_stop_state { unsigned calls; };
+static bool prefix_stop(void *context)
+{ return ++((struct prefix_stop_state *)context)->calls >= 2; }
+static bool prefix_zero(const uint8_t digest[32])
+{ const uint8_t zero[32] = {0}; return memcmp(digest, zero, 32) == 0; }
+static void prefix_u32le(uint8_t out[4], uint32_t v)
+{
+    for (int i = 0; i < 4; ++i) out[i] = (uint8_t)(v >> (8u * i));
+}
+static int prefix_mutation_cases(event_log_t *log, int fd, uint64_t end, const uint8_t original[32])
+{
+    int failures = 0; uint8_t digest[32], type = EV_BLOCK_BODY;
+    bool changed = pwrite(fd, &type, 1, 4) == 1;
+    EL_CHECK("prefix binds record type despite valid payload CRC",
+        changed && event_log_prefix_digest(log, end, digest, NULL, NULL) == 0 && memcmp(digest, original, 32));
+    type = EV_BLOCK_HEADER;
+    EL_CHECK("prefix restores type", pwrite(fd, &type, 1, 4) == 1);
+    uint8_t payload[3] = {1, 2, 9}, crc[4];
+    prefix_u32le(crc, event_log_crc32c_test_active(payload, sizeof(payload)));
+    bool payload_changed = pwrite(fd, payload, sizeof(payload), 16) == (ssize_t)sizeof(payload) && pwrite(fd, crc, sizeof(crc), 12) == (ssize_t)sizeof(crc);
+    EL_CHECK("prefix binds changed payload with valid CRC",
+        payload_changed && event_log_prefix_digest(log, end, digest, NULL, NULL) == 0 && memcmp(digest, original, 32));
+    payload[2] = 3;
+    memset(digest, 0xa5, sizeof(digest));
+    EL_CHECK("prefix refuses damaged CRC", pwrite(fd, payload, sizeof(payload), 16) == (ssize_t)sizeof(payload) &&
+        event_log_prefix_digest(log, end, digest, NULL, NULL) == -1 && prefix_zero(digest));
+    prefix_u32le(crc, event_log_crc32c_test_active(payload, sizeof(payload)));
+    EL_CHECK("prefix restores original bytes", pwrite(fd, crc, sizeof(crc), 12) == (ssize_t)sizeof(crc) &&
+        event_log_prefix_digest(log, end, digest, NULL, NULL) == 0 && !memcmp(digest, original, 32));
+    uint8_t bad_crc[4] = {1, 0, 0, 0}, good_crc[4] = {0};
+    memset(digest, 0xa5, sizeof(digest));
+    EL_CHECK("prefix rejects empty-frame CRC", pwrite(fd, bad_crc, 4, 47) == 4 &&
+        event_log_prefix_digest(log, end, digest, NULL, NULL) == -1 && prefix_zero(digest));
+    EL_CHECK("prefix restores empty-frame CRC", pwrite(fd, good_crc, 4, 47) == 4 &&
+        event_log_prefix_digest(log, end, digest, NULL, NULL) == 0 && !memcmp(digest, original, 32));
+    return failures;
+}
+static int prefix_boundary_cases(event_log_t *log, uint64_t end, const uint8_t original[32])
+{
+    int failures = 0; uint8_t digest[32]; struct prefix_stop_state stop = {0};
+    memset(digest, 0xa5, sizeof(digest));
+    EL_CHECK("prefix rejects non-boundary", event_log_prefix_digest(log, end - 1, digest, NULL, NULL) == -1 && prefix_zero(digest));
+    memset(digest, 0xa5, sizeof(digest));
+    EL_CHECK("prefix rejects beyond end", event_log_prefix_digest(log, end + 1, digest, NULL, NULL) == -1 && prefix_zero(digest));
+    memset(digest, 0xa5, sizeof(digest));
+    EL_CHECK("prefix honors cancellation", event_log_prefix_digest(log, end, digest, prefix_stop, &stop) == 1 &&
+        stop.calls == 2 && prefix_zero(digest));
+    EL_CHECK("prefix append follows existing boundary", event_log_append(log, EV_BLOCK_BODY, "later", 5) != UINT64_MAX);
+    EL_CHECK("prefix stable after append", event_log_prefix_digest(log, end, digest, NULL, NULL) == 0 && !memcmp(digest, original, 32));
+    return failures;
+}
+static int prefix_reopen_cases(const char *path, uint64_t end, const uint8_t original[32])
+{
+    int failures = 0; uint8_t reopened[32];
+    event_log_t *log = event_log_open(path);
+    EL_CHECK("prefix stable after reopen", log && event_log_prefix_digest(log, end, reopened, NULL, NULL) == 0 && !memcmp(original, reopened, 32));
+    if (log) {
+        int fd = open(path, O_RDWR | O_CLOEXEC);
+        bool truncated = fd >= 0 && ftruncate(fd, (off_t)(end - 1)) == 0;
+        memset(reopened, 0xa5, sizeof(reopened));
+        EL_CHECK("prefix rejects truncation", truncated && event_log_prefix_digest(log, end, reopened, NULL, NULL) == -1 && prefix_zero(reopened));
+        if (fd >= 0) close(fd);
+        event_log_close(log);
+        log = event_log_open(path);
+        memset(reopened, 0xa5, sizeof(reopened));
+        EL_CHECK("prefix truncated reopen refuses old boundary", log && event_log_prefix_digest(log, end, reopened, NULL, NULL) == -1 && prefix_zero(reopened));
+        if (log) event_log_close(log);
+    }
+    return failures;
+}
+static void run_prefix_digest(int *failures_out)
+{
+    int failures = 0; char dir[256], path[512];
+    test_fmt_tmpdir(dir, sizeof(dir), "event_log", "prefix");
+    el_mkdir_p(dir); snprintf(path, sizeof(path), "%s/events.log", dir);
+    event_log_t *log = event_log_open(path);
+    EL_CHECK("prefix opens fixture", log != NULL);
+    if (!log) { *failures_out += failures; return; }
+    uint8_t empty[32], original[32];
+    EL_CHECK("prefix supports empty boundary", event_log_prefix_digest(log, 0, empty, NULL, NULL) == 0);
+    uint8_t payload[3] = {1, 2, 3};
+    EL_CHECK("prefix writes data frame", event_log_append(log, EV_BLOCK_HEADER, payload, sizeof(payload)) == 0);
+    EL_CHECK("prefix writes empty frame", event_log_append(log, EV_BLOCK_BODY, NULL, 0) != UINT64_MAX);
+    uint64_t end = event_log_size(log);
+    bool got = event_log_prefix_digest(log, end, original, NULL, NULL) == 0;
+    EL_CHECK("prefix captures verified frames", got && memcmp(empty, original, 32));
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    EL_CHECK("prefix mutation descriptor opens", fd >= 0);
+    if (got && fd >= 0) failures += prefix_mutation_cases(log, fd, end, original);
+    if (got) failures += prefix_boundary_cases(log, end, original);
+    if (fd >= 0) close(fd);
+    event_log_close(log);
+    failures += prefix_reopen_cases(path, end, original);
+    *failures_out += failures;
+}
+
+
 static int test_event_log_platform_arm(void)
 {
     printf("\n=== event_log tests ===\n");
@@ -1570,6 +1667,7 @@ static int test_event_log_platform_arm(void)
     run_append_read_roundtrip(&failures);
     run_stream(&failures);
     run_fingerprint(&failures);
+    run_prefix_digest(&failures);
     run_edge_cases(&failures);
     run_persistence(&failures);
     run_deferred_sync(&failures);

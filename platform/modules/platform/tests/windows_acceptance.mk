@@ -664,6 +664,7 @@ ZCL_WINDOWS_ACCEPTANCE_private_directory_LIBS := -ladvapi32
 ZCL_WINDOWS_ACCEPTANCE_event_log_SOURCES := \
 	tests/harness/src/event_log_windows_acceptance.c \
 	engine/modules/storage/src/event_log.c \
+	engine/modules/storage/src/event_log_fingerprint.c \
 	engine/modules/storage/src/event_log_pending.c \
 	platform/modules/platform/src/private_file.c \
 	platform/modules/platform/src/private_acl_internal.c \

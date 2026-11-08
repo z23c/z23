@@ -37,6 +37,13 @@ void node_db_sapling_replay_test_revalidate_hooks(void (*before)(void *), void (
     replay_test_before_revalidate = before; replay_test_after_revalidate = after;
     replay_test_revalidate_ctx = ctx;
 }
+static void (*replay_test_after_keys)(void *);
+static void *replay_test_after_keys_ctx;
+void node_db_sapling_replay_test_after_keys(void (*hook)(void *), void *ctx)
+{
+    replay_test_after_keys = hook;
+    replay_test_after_keys_ctx = ctx;
+}
 static void (*replay_test_after_read)(void *);
 static void *replay_test_after_read_ctx;
 void node_db_sapling_replay_test_after_read(void (*hook)(void *), void *ctx)
@@ -45,6 +52,29 @@ void node_db_sapling_replay_test_after_read(void (*hook)(void *), void *ctx)
     replay_test_after_read_ctx = ctx;
 }
 #endif
+
+/* A range owns one immutable public scan snapshot through its synchronous jobs. */
+enum catchup_scan_snapshot_status node_db_catchup_scan_snapshot(
+    struct wallet *wallet, const uint8_t expected[32], struct wallet_scan_snapshot **out)
+{
+    if (out) *out = NULL;
+    if (!wallet || !expected || !out) return CATCHUP_SCAN_REFUSED;
+    if (!zcl_mutex_trylock(&wallet->cs)) return CATCHUP_SCAN_BUSY;
+    if (!zcl_mutex_trylock(&wallet->keystore.cs)) {
+        zcl_mutex_unlock(&wallet->cs);
+        return CATCHUP_SCAN_BUSY;
+    }
+    if (!zcl_mutex_trylock(&wallet->sapling_keys.cs)) {
+        zcl_mutex_unlock(&wallet->keystore.cs);
+        zcl_mutex_unlock(&wallet->cs);
+        return CATCHUP_SCAN_BUSY;
+    }
+    bool ok = wallet_scan_snapshot_capture_locked(wallet, expected, out);
+    zcl_mutex_unlock(&wallet->sapling_keys.cs);
+    zcl_mutex_unlock(&wallet->keystore.cs);
+    zcl_mutex_unlock(&wallet->cs);
+    return ok ? CATCHUP_SCAN_OK : CATCHUP_SCAN_REFUSED;
+}
 
 #define SAPLING_REPLAY_MAX_BLOCKS 256
 
@@ -105,6 +135,7 @@ struct replay_block {
     int height, end, found, reference_height;
     struct uint256 hash, endpoint, reference;
     const uint8_t *scan_identity;
+    const struct wallet_scan_snapshot *scan_snapshot;
     enum sapling_replay_phase phase;
     enum sapling_replay_status status;
 };
@@ -135,13 +166,38 @@ static void replay_unlock_wallet(struct replay_block *job)
     }
 }
 
+/* The strict path compares the independent range key capture under the key lock. */
+static bool replay_keys_match_locked(const struct sapling_keystore *keys,
+                                     const struct replay_keys *captured)
+{
+    if (!keys->num_keys || keys->num_keys > MAX_SAPLING_KEYS || keys->locked ||
+        keys->num_unscannable || keys->num_damaged || wallet_lock_is_locked() ||
+        keys->num_keys != captured->count || !captured->entries) return false;
+    for (size_t i = 0; i < keys->num_keys; ++i) {
+        const struct sapling_key_entry *key = &keys->keys[i];
+        const struct sapling_key_entry *old = &captured->entries[i];
+        if (!key->used || memcmp(key->ivk, old->ivk, 32) ||
+            memcmp(key->xfvk.fvk.ak, old->xfvk.fvk.ak, 32) ||
+            memcmp(key->xfvk.fvk.nk, old->xfvk.fvk.nk, 32)) return false;
+    }
+    return true;
+}
+
+static bool replay_keys_current(struct replay_block *job)
+{
+    struct sapling_keystore *keys = &job->wallet->sapling_keys;
+    if (job->scan_identity) return replay_keys_match_locked(keys, job->keys);
+    struct replay_keys current = {0};
+    return replay_keys_capture_locked(keys, &current) &&
+        current.count == job->keys->count &&
+        memcmp(current.digest, job->keys->digest, 32) == 0;
+}
+
 static bool replay_full_identity_current(struct replay_block *job)
 {
     if (!job->scan_identity) return true;
-    uint8_t identity[32];
     return wallet_readiness_get_locked(job->wallet).state == WALLET_READINESS_PENDING &&
-        wallet_scan_identity_locked(job->wallet, identity) &&
-        memcmp(identity, job->scan_identity, 32) == 0;
+        wallet_scan_snapshot_matches_locked(job->wallet, job->scan_snapshot);
 }
 
 static bool replay_reference_current(const struct replay_block *job)
@@ -202,10 +258,7 @@ static enum sapling_replay_status replay_revalidate(struct replay_block *job)
         zcl_mutex_unlock(&job->state->cs_main);
         return SAPLING_REPLAY_BUSY;
     }
-    struct replay_keys current = {0};
-    bool key_ok = replay_keys_capture_locked(&job->wallet->sapling_keys, &current) &&
-                  current.count == job->keys->count &&
-                  memcmp(current.digest, job->keys->digest, 32) == 0;
+    bool key_ok = replay_keys_current(job);
     bool wallet_ok = replay_full_identity_current(job);
     bool chain_ok = replay_chain_current(job);
     replay_unlock_wallet(job);
@@ -306,11 +359,7 @@ static bool replay_write(struct node_db *db, void *opaque)
     struct replay_block *job = opaque;
     sqlite3_mutex *mu = replay_begin(db, job);
     if (!mu) return false;
-    struct sapling_keystore *keys = &job->wallet->sapling_keys;
-    struct replay_keys current = {0};
-    bool key_ok = replay_keys_capture_locked(keys, &current) &&
-                  current.count == job->keys->count &&
-                  memcmp(current.digest, job->keys->digest, 32) == 0;
+    bool key_ok = replay_keys_current(job);
     bool wallet_ok = replay_full_identity_current(job);
     bool chain_ok = replay_chain_current(job);
     bool ok = key_ok && wallet_ok && chain_ok && replay_apply_block(job);
@@ -426,6 +475,21 @@ static bool replay_reference_valid(bool strict, int reference_height, int end,
     return !strict || (reference && identity && reference_height >= end);
 }
 
+static bool replay_capture_keys(struct wallet *wallet, const uint8_t *expected,
+    struct replay_keys *keys, struct sapling_replay_result *result)
+{
+    if (!replay_keys_snapshot(wallet, keys)) {
+        result->status = SAPLING_REPLAY_KEYS_UNAVAILABLE;
+        return false;
+    }
+    memcpy(result->key_digest, keys->digest, 32);
+    if (expected && memcmp(expected, keys->digest, 32) != 0) {
+        result->status = SAPLING_REPLAY_KEYS_UNAVAILABLE;
+        return false;
+    }
+    return true;
+}
+
 static struct sapling_replay_result replay_run(
     struct db_service *svc, struct node_db *db, struct main_state *state,
     struct wallet *wallet, const char *datadir, int start, int end,
@@ -447,18 +511,23 @@ static struct sapling_replay_result replay_run(
         memcpy(result.scan_identity, scan_identity, 32);
     }
     struct replay_keys keys = {0};
-    if (!replay_keys_snapshot(wallet, &keys)) {
-        result.status = SAPLING_REPLAY_KEYS_UNAVAILABLE;
-        goto done;
-    }
-    memcpy(result.key_digest, keys.digest, 32);
-    if (expected_key_digest && memcmp(expected_key_digest, keys.digest, 32) != 0) {
-        result.status = SAPLING_REPLAY_KEYS_UNAVAILABLE;
-        goto done;
+    struct wallet_scan_snapshot *scan_snapshot = NULL;
+    if (!replay_capture_keys(wallet, expected_key_digest, &keys, &result)) goto done;
+#ifdef ZCL_TESTING
+    if (replay_test_after_keys) replay_test_after_keys(replay_test_after_keys_ctx);
+#endif
+    if (strict) {
+        enum catchup_scan_snapshot_status captured =
+            node_db_catchup_scan_snapshot(wallet, scan_identity, &scan_snapshot);
+        if (captured != CATCHUP_SCAN_OK) {
+            result.status = captured == CATCHUP_SCAN_BUSY ? SAPLING_REPLAY_BUSY : SAPLING_REPLAY_WALLET_CHANGED;
+            goto done;
+        }
     }
     struct replay_block job = {.state = state, .wallet = wallet, .db = db,
         .keys = &keys, .end = end, .phase = phase,
-        .reference_height = reference_height, .scan_identity = scan_identity};
+        .reference_height = reference_height, .scan_identity = scan_identity,
+        .scan_snapshot = scan_snapshot};
     memcpy(job.endpoint.data, endpoint_hash, 32);
     if (strict) memcpy(job.reference.data, reference_hash, 32);
     for (int h = start;; h++) {
@@ -470,6 +539,7 @@ static struct sapling_replay_result replay_run(
         if (h == end) break;
     }
 done:
+    wallet_scan_snapshot_free(scan_snapshot);
     if (keys.entries) {
         memory_cleanse(keys.entries, keys.count * sizeof(*keys.entries));
         free(keys.entries);

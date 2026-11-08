@@ -11,6 +11,16 @@
 #include <string.h>
 #include <limits.h>
 
+#ifdef ZCL_TESTING
+static void (*transparent_test_after_read)(void *);
+static void *transparent_test_after_read_ctx;
+void node_db_transparent_replay_test_after_read(void (*hook)(void *), void *ctx)
+{
+    transparent_test_after_read = hook;
+    transparent_test_after_read_ctx = ctx;
+}
+#endif
+
 #define TRANSPARENT_REPLAY_MAX_BLOCKS 256
 /* A negative-only startup hint. Collisions merely invoke the legacy fold. */
 #define TRANSPARENT_FILTER_BYTES (1u << 17)
@@ -111,7 +121,7 @@ struct transparent_apply {
     struct block *block;
     const struct transparent_location *loc;
     const struct uint256 *endpoint;
-    const uint8_t *identity;
+    const struct wallet_scan_snapshot *scan_snapshot;
     int height, end, reference_height;
 };
 
@@ -125,11 +135,10 @@ static bool transparent_chain_current(const struct transparent_apply *a)
 
 static enum transparent_replay_status transparent_fold(const struct transparent_apply *a)
 {
-    uint8_t identity[32];
     if (wallet_readiness_get_locked(a->wallet).state != WALLET_READINESS_PENDING)
         return TRANSPARENT_REPLAY_WALLET_ERROR;
     if (!transparent_chain_current(a)) return TRANSPARENT_REPLAY_CHAIN_CHANGED;
-    if (!wallet_scan_identity_locked(a->wallet, identity) || memcmp(identity, a->identity, 32))
+    if (!wallet_scan_snapshot_matches_locked(a->wallet, a->scan_snapshot))
         return TRANSPARENT_REPLAY_KEYS_CHANGED;
     int tip = a->reference_height;
     if (tip < a->height || tip - a->height == INT_MAX) return TRANSPARENT_REPLAY_CHAIN_CHANGED;
@@ -171,9 +180,23 @@ static enum transparent_replay_status transparent_one(struct transparent_apply *
     struct zcl_result read_result = node_db_catchup_read_authenticated_block(
         datadir, loc.file, loc.offset, &loc.hash, &block);
     if (!read_result.ok) status = TRANSPARENT_REPLAY_INCOMPLETE;
-    else { a->loc = &loc; a->block = &block; status = transparent_apply_block(a); }
+    else {
+#ifdef ZCL_TESTING
+        if (transparent_test_after_read) transparent_test_after_read(transparent_test_after_read_ctx);
+#endif
+        a->loc = &loc; a->block = &block; status = transparent_apply_block(a);
+    }
     block_free(&block);
     return status;
+}
+
+static bool transparent_request_valid(struct main_state *state, struct wallet *wallet,
+    const char *datadir, int start, int end, int reference_height,
+    const uint8_t *endpoint_hash, const uint8_t *scan_identity)
+{
+    return state && wallet && datadir && datadir[0] && endpoint_hash && scan_identity &&
+        start >= 0 && end >= start && reference_height >= end &&
+        reference_height - start != INT_MAX && end - start < TRANSPARENT_REPLAY_MAX_BLOCKS;
 }
 
 struct transparent_replay_result node_db_catchup_wallet_transparent_indexed(
@@ -182,17 +205,23 @@ struct transparent_replay_result node_db_catchup_wallet_transparent_indexed(
 {
     struct transparent_replay_result result = {.status = TRANSPARENT_REPLAY_INVALID,
         .start_height = start, .end_height = end, .reference_height = reference_height, .last_complete = -1};
-    if (!state || !wallet || !datadir || !datadir[0] || !endpoint_hash || !scan_identity ||
-        start < 0 || end < start || reference_height < end || reference_height - start == INT_MAX ||
-        end - start >= TRANSPARENT_REPLAY_MAX_BLOCKS)
+    if (!transparent_request_valid(state, wallet, datadir, start, end, reference_height,
+                                   endpoint_hash, scan_identity))
         return result;
     result.last_complete = start - 1;
     memcpy(result.endpoint_hash, endpoint_hash, 32);
     memcpy(result.scan_identity, scan_identity, 32);
+    struct wallet_scan_snapshot *scan_snapshot = NULL;
+    enum catchup_scan_snapshot_status captured =
+        node_db_catchup_scan_snapshot(wallet, scan_identity, &scan_snapshot);
+    if (captured != CATCHUP_SCAN_OK) {
+        result.status = captured == CATCHUP_SCAN_BUSY ? TRANSPARENT_REPLAY_BUSY : TRANSPARENT_REPLAY_KEYS_CHANGED;
+        return result;
+    }
     struct uint256 endpoint;
     memcpy(endpoint.data, endpoint_hash, 32);
     struct transparent_apply a = {.state = state, .wallet = wallet, .end = end, .reference_height = reference_height,
-        .endpoint = &endpoint, .identity = scan_identity, .filter = filter};
+        .endpoint = &endpoint, .scan_snapshot = scan_snapshot, .filter = filter};
     for (int h = start;; h++) {
         a.height = h;
         result.status = transparent_one(&a, datadir);
@@ -200,6 +229,7 @@ struct transparent_replay_result node_db_catchup_wallet_transparent_indexed(
         result.last_complete = h;
         if (h == end) break;
     }
+    wallet_scan_snapshot_free(scan_snapshot);
     return result;
 }
 

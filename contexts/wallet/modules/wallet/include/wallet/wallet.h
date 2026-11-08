@@ -210,6 +210,14 @@ void wallet_init(struct wallet *w);
  * keystore and Sapling keystore mutexes in that order. */
 bool wallet_scan_identity_locked(const struct wallet *w, uint8_t digest[32]);
 bool wallet_scan_identity(struct wallet *w, uint8_t digest[32]);
+/* Captured public scan bytes are process-local. The caller holds wallet.cs,
+ * keystore.cs and sapling_keys.cs (in that order) for capture and match. */
+struct wallet_scan_snapshot;
+bool wallet_scan_snapshot_capture_locked(const struct wallet *w, const uint8_t expected[32],
+                                         struct wallet_scan_snapshot **out);
+bool wallet_scan_snapshot_matches_locked(const struct wallet *w, const struct wallet_scan_snapshot *snapshot);
+void wallet_scan_snapshot_free(struct wallet_scan_snapshot *snapshot);
+
 /* Both locked completion calls require w->cs held continuously. Call complete
  * only after can_complete returns true and durable replay has committed. */
 bool wallet_readiness_can_complete_locked(const struct wallet *w, bool generation_present,

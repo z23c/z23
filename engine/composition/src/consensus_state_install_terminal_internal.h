@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 struct main_state;
+struct wallet_cutover_binding;
 struct node_db;
 struct wallet_sqlite;
 struct wallet;
@@ -35,6 +36,11 @@ struct zcl_result icb_terminal_prepare(struct icb_terminal_context *terminal,
     const struct consensus_state_bundle_manifest *manifest);
 struct zcl_result icb_install_wallet_guarded(struct node_db *ndb, struct main_state *ms,
     const char *bundle_path, const char *datadir, struct wallet_sqlite *ws,
-    struct wallet *wallet, struct icb_terminal_context *terminal,
+    struct wallet *wallet, const uint8_t *whole, const uint8_t *logical,
+    struct icb_terminal_context *terminal,
     struct consensus_state_install_runtime_result *out);
+struct zcl_result icb_install_wallet_old_retry(struct node_db *ndb, struct main_state *ms,
+    const char *bundle_path, const char *datadir, struct wallet_sqlite *ws,
+    struct wallet *wallet, const struct wallet_cutover_binding *expected,
+    struct icb_terminal_context *terminal, struct consensus_state_install_runtime_result *out);
 #endif

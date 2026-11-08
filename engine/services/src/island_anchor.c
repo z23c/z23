@@ -397,16 +397,15 @@ static bool ia_recovery_rows_1(sqlite3 *db)
 }
 static bool ia_recovery_rows_2(sqlite3 *db)
 {
-    return ia_query_zero(db, "SELECT COUNT(*) FROM progress_meta WHERE key IN ('" IA_FACT_KEY "','" IA_ROWS_KEY "','" IA_WINDOW_KEY "')") &&
-        ia_query_zero(db, "SELECT 1-COUNT(*) FROM stage_cursor WHERE name='tip_finalize' AND typeof(cursor)='integer' AND cursor=0") &&
+    return ia_query_zero(db, "SELECT 1-COUNT(*) FROM stage_cursor WHERE name='tip_finalize' AND typeof(cursor)='integer' AND cursor=0") &&
         ia_query_zero(db, "SELECT 1-COUNT(*) FROM stage_cursor WHERE name='utxo_apply' AND typeof(cursor)='integer' AND cursor=1") &&
         ia_query_zero(db, "SELECT COUNT(*) FROM stage_cursor WHERE (name='tip_finalize' AND (typeof(cursor)!='integer' OR cursor!=0)) OR (name='utxo_apply' AND (typeof(cursor)!='integer' OR cursor!=1))");
 }
-static bool ia_recovery_fresh_locked(sqlite3 *db)
+static bool ia_genesis_fold_locked(sqlite3 *db)
 {
     int32_t applied = -1; bool found = false;
     struct shielded_replay_session replay; bool replay_pending = false;
-    if (!db || db != progress_store_db() || island_anchor_state_load(db) != ISLAND_ANCHOR_STATE_FELL_BACK ||
+    if (!db || db != progress_store_db() ||
         !coins_kv_get_applied_height(db, &applied, &found) || !found || applied != 1 ||
         !ia_genesis_anchor(db) ||
         !shielded_history_read_full_replay(db, &replay, &replay_pending) || replay_pending) return false;
@@ -415,6 +414,27 @@ static bool ia_recovery_fresh_locked(sqlite3 *db)
         ia_recovery_rows_2(db);
 
 }
+static bool ia_recovery_fresh_locked(sqlite3 *db)
+{
+    return db && db == progress_store_db() &&
+        island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_FELL_BACK &&
+        ia_genesis_fold_locked(db) &&
+        ia_query_zero(db, "SELECT COUNT(*) FROM progress_meta WHERE key IN ('" IA_FACT_KEY "','" IA_ROWS_KEY "','" IA_WINDOW_KEY "')");
+}
+
+struct zcl_result island_anchor_genesis_fold_proven(sqlite3 *db)
+{
+    progress_store_tx_lock();
+    bool begun = db && db == progress_store_db() && sqlite3_get_autocommit(db) && ia_exec(db, "BEGIN");
+    bool ok = begun && ia_genesis_fold_locked(db);
+    if (begun && !ia_exec(db, "ROLLBACK")) {
+        ok = false;
+        if (!sqlite3_get_autocommit(db)) abort();
+    }
+    progress_store_tx_unlock();
+    return ok ? ZCL_OK : ZCL_ERR(-1, "durable genesis fold is not proven");
+}
+
 struct zcl_result island_anchor_recovery_fresh(sqlite3 *db)
 {
     progress_store_tx_lock();

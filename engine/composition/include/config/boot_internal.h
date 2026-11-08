@@ -46,6 +46,10 @@ bool boot_wallet_cutover_recovery_context_matches(const struct node_db *ndb,
 bool boot_wallet_cutover_startup_context_matches(const struct node_db *ndb,
     const struct wallet_sqlite *ws, const struct wallet *wallet,
     const struct main_state *main);
+/* Exact stage and boot-owned identities for pending replay only. */
+bool boot_wallet_cutover_replay_context_matches(const struct node_db *ndb,
+    const struct wallet_sqlite *ws, const struct wallet *wallet,
+    const struct main_state *main);
 bool boot_wallet_allows_coin_repair(void);
 struct consensus_state_install_runtime_result;
 struct zcl_result boot_install_startup_bundle(struct node_db *ndb,

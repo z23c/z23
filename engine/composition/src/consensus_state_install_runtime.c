@@ -53,9 +53,29 @@ struct zcl_result consensus_state_install_from_bundle_terminal_guarded(
     return consensus_state_install_from_bundle_guarded(ndb, ms, bundle_path,
                                                        datadir, ws, wallet, out);
 }
+struct zcl_result consensus_state_install_from_bundle_terminal_old_retry(
+    struct node_db *ndb, struct main_state *ms, const char *bundle_path,
+    const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
+    const struct wallet_cutover_binding *expected,
+    struct consensus_state_install_runtime_result *out)
+{
+    return consensus_state_install_from_bundle_old_retry(ndb, ms, bundle_path, datadir,
+                                                         ws, wallet, expected, out);
+}
+struct zcl_result consensus_state_install_from_bundle_old_retry(
+    struct node_db *ndb, struct main_state *ms, const char *bundle_path,
+    const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
+    const struct wallet_cutover_binding *expected,
+    struct consensus_state_install_runtime_result *out)
+{
+    (void)expected;
+    return consensus_state_install_from_bundle_guarded(ndb, ms, bundle_path, datadir, ws, wallet, out);
+}
 #else
 #include "config/boot_datadir_lock.h"
 #include "consensus_state_install_terminal_internal.h"
+#include "consensus_state_install_stage.h"
+#include "consensus_state_install_source_receipt.h"
 #include "config/boot_internal.h"
 #include "wallet/wallet_sqlite.h"
 #include "models/wallet_send_once.h"
@@ -351,7 +371,7 @@ static bool icb_recovery_frontier(sqlite3 *db,
     return *advanced || icb_recovery_at_base(p, durable, hstar, served, tip_hash);
 }
 
-static bool icb_wallet_node_file_matches(sqlite3 *db, int dir_fd)
+bool consensus_state_wallet_node_file_matches(sqlite3 *db, int dir_fd)
 {
     struct stat named, opened; int moved = 1;
     const char *path = sqlite3_db_filename(db, "main");
@@ -497,94 +517,6 @@ struct zcl_result consensus_state_install_recover_committed(
              "consensus generation and state preserved", prefix.height,
              result.advanced);
     return ZCL_OK;
-}
-static bool icb_source_receipt_copy_blobs(sqlite3_stmt *st,
-                                          struct consensus_state_source_receipt *out)
-{
-    const struct { int col; uint8_t *dst; } blobs[] = {
-        {1, out->source_epoch_digest}, {2, out->source_tree_root},
-        {3, out->running_binary_digest}, {4, out->toolchain_digest},
-        {5, out->build_inputs_digest}, {6, out->chain_corpus_digest},
-        {11, out->receipt_digest},
-    };
-    bool ok = true;
-    for (size_t i = 0; ok && i < sizeof(blobs) / sizeof(blobs[0]); i++) {
-        ok = sqlite3_column_type(st, blobs[i].col) == SQLITE_BLOB &&
-             sqlite3_column_bytes(st, blobs[i].col) == 32;
-        if (ok)
-            memcpy(blobs[i].dst, sqlite3_column_blob(st, blobs[i].col), 32);
-    }
-    return ok;
-}
-
-static bool icb_source_receipt_texts_accepted(
-    uint8_t *receipt_version, const unsigned char *schema, int schema_len,
-    const unsigned char *commit, int commit_len)
-{
-    return schema && schema_len >= 0 &&
-           consensus_state_source_receipt_schema_version(
-               (const char *)schema, (size_t)schema_len,
-               receipt_version) &&
-           commit && commit_len >= 0 &&
-           consensus_state_source_receipt_commit_valid(
-               *receipt_version, (const char *)commit,
-               (size_t)commit_len);
-}
-
-static bool icb_source_receipt_integers_accepted(sqlite3_stmt *st)
-{
-    return sqlite3_column_type(st, 7) == SQLITE_INTEGER &&
-           (sqlite3_column_int(st, 7) == 0 ||
-            sqlite3_column_int(st, 7) == 1) &&
-           sqlite3_column_type(st, 8) == SQLITE_INTEGER &&
-           (sqlite3_column_int(st, 8) == CONSENSUS_STATE_VALIDATION_FULL ||
-            sqlite3_column_int(st, 8) ==
-                CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) &&
-           sqlite3_column_type(st, 10) == SQLITE_INTEGER;
-}
-
-/* Read the producer source receipt from the pinned, already-validated bundle
- * handle. The CAS re-checks the receipt's self-consistency and its binding to
- * the manifest source digest, so a misread fails closed there. */
-static bool icb_read_source_receipt(sqlite3 *bundle_db,
-                                    struct consensus_state_source_receipt *out)
-{
-    static const char sql[] =
-        "SELECT schema,source_epoch_digest,source_tree_root,running_binary_digest,"
-        "toolchain_digest,build_inputs_digest,chain_corpus_digest,source_clean,"
-        "validation_profile,producer_commit,fold_cursor,receipt_digest "
-        "FROM source_receipt WHERE singleton=1";
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(bundle_db, sql, -1, &st, NULL) != SQLITE_OK)
-        return false;
-    memset(out, 0, sizeof(*out));
-    bool ok = sqlite3_step(st) == SQLITE_ROW; // raw-sql-ok:read-only-introspection
-    if (ok)
-        ok = icb_source_receipt_copy_blobs(st, out);
-    if (ok) {
-        const unsigned char *schema =
-            sqlite3_column_type(st, 0) == SQLITE_TEXT
-                ? sqlite3_column_text(st, 0) : NULL;
-        int schema_len = schema ? sqlite3_column_bytes(st, 0) : -1;
-        const unsigned char *commit =
-            sqlite3_column_type(st, 9) == SQLITE_TEXT
-                ? sqlite3_column_text(st, 9) : NULL;
-        int commit_len = commit ? sqlite3_column_bytes(st, 9) : -1;
-        uint8_t receipt_version = CONSENSUS_STATE_SOURCE_RECEIPT_INVALID;
-        ok = icb_source_receipt_texts_accepted(
-                 &receipt_version, schema, schema_len, commit, commit_len) &&
-             icb_source_receipt_integers_accepted(st);
-        if (ok) {
-            out->schema_version = receipt_version;
-            memcpy(out->producer_commit, commit, (size_t)commit_len);
-            out->producer_commit[commit_len] = '\0';
-            out->source_clean = sqlite3_column_int(st, 7) == 1;
-            out->validation_profile = (uint8_t)sqlite3_column_int(st, 8);
-            out->fold_cursor = sqlite3_column_int64(st, 10);
-        }
-    }
-    sqlite3_finalize(st);
-    return ok;
 }
 /* True iff this node's validated header chain has reached `height` and the block
  * at that height on the selected header chain carries `block_hash`. The assisted
@@ -770,6 +702,7 @@ static struct zcl_result icb_install_admit_receipt(
     struct consensus_state_artifact_evidence **artifact, int dir_fd,
     const char *bundle_path, const char *datadir, struct main_state *ms,
     struct icb_terminal_context *terminal,
+    const uint8_t *whole, const uint8_t *logical,
     struct consensus_state_bundle_manifest *manifest,
     struct consensus_state_source_receipt *receipt,
     struct consensus_state_install_runtime_result *out)
@@ -782,6 +715,8 @@ static struct zcl_result icb_install_admit_receipt(
                        admitted.message);
     if (!consensus_state_artifact_evidence_manifest_copy(*artifact, manifest))
         return ZCL_ERR(-1, "artifact evidence became stale after admission");
+    if (whole && !consensus_state_stage_evidence_matches(*artifact, whole, logical))
+        return ZCL_ERR(-1, "retained bundle differs from the admitted source");
     struct zcl_result rc = terminal ? icb_terminal_prepare(terminal, datadir, ms, manifest) : ZCL_OK;
     if (!rc.ok) return rc;
     /* Every deferral path sets rc to a non-ok -2 (install_note_header_wait), so
@@ -811,6 +746,7 @@ static struct zcl_result icb_install_admit_through_receipt(
     struct consensus_state_bundle_manifest *manifest,
     struct consensus_state_source_receipt *receipt,
     struct icb_terminal_context *terminal,
+    const uint8_t *whole, const uint8_t *logical,
     enum consensus_state_target_lane *lane,
     struct consensus_state_install_runtime_result *out)
 {
@@ -830,7 +766,7 @@ static struct zcl_result icb_install_admit_through_receipt(
         return rc;
     *lane = icb_install_target_lane(canonical);
     return icb_install_admit_receipt(artifact, *dir_fd, bundle_path, datadir, ms,
-                                     terminal, manifest, receipt, out);
+                                     terminal, whole, logical, manifest, receipt, out);
 }
 
 static void icb_install_prepare_chain_binding(
@@ -1038,7 +974,9 @@ static bool icb_install_assisted_sapling_root(
     return icb_copy_validated_header_sapling_root(at, block_hash, root_out);
 }
 
-struct icb_wallet_guard { struct wallet_sqlite *ws; struct wallet *wallet; };
+struct icb_wallet_guard { struct wallet_sqlite *ws; struct wallet *wallet;
+    const struct wallet_cutover_binding *expected;
+    const uint8_t *expected_whole; const uint8_t *expected_logical; };
 
 static bool icb_wallet_old_authority(sqlite3 *db,
     const struct consensus_state_publication_decision_record *decision,
@@ -1132,6 +1070,20 @@ static bool icb_wallet_commit_fence(struct node_db *node,
         wallet_cutover_binding_equal(&reread, binding);
 }
 
+static bool icb_wallet_old_fence_matches(const struct icb_wallet_guard *guard,
+    struct node_db *node, int dir_fd, enum wallet_cutover_status status,
+    const struct wallet_cutover_binding *existing)
+{
+    zcl_mutex_lock(&guard->wallet->cs);
+    bool pending = wallet_readiness_get_locked(guard->wallet).state == WALLET_READINESS_PENDING;
+    zcl_mutex_unlock(&guard->wallet->cs);
+    if (!pending || status != WALLET_CUTOVER_PENDING ||
+        !wallet_cutover_binding_equal(existing, guard->expected)) return false;
+    bool present = false; uint64_t generation = 0;
+    return consensus_state_wallet_install_classify(guard->ws, node, dir_fd,
+        &present, &generation) == WALLET_INSTALL_OLD;
+}
+
 static bool icb_wallet_fence(struct node_db *node, struct main_state *main, int dir_fd,
     const struct icb_wallet_guard *guard,
     const struct consensus_state_bundle_manifest *manifest,
@@ -1143,16 +1095,27 @@ static bool icb_wallet_fence(struct node_db *node, struct main_state *main, int 
         !icb_wallet_startup_identity(guard->ws, node, dir_fd) ||
         !sqlite3_get_autocommit(guard->ws->db)) return false;
     struct wallet_cutover_binding existing;
-    if (wallet_sqlite_cutover_read(guard->ws, &existing) != WALLET_CUTOVER_ABSENT)
-        return false;
+    enum wallet_cutover_status status = wallet_sqlite_cutover_read(guard->ws, &existing);
+    if (guard->expected) {
+        if (!icb_wallet_old_fence_matches(guard, node, dir_fd, status, &existing)) return false;
+    } else if (status != WALLET_CUTOVER_ABSENT) return false;
     memset(binding, 0, sizeof(*binding));
     if (!icb_wallet_old_authority(progress_store_db(), decision, binding)) return false;
     binding->target_height = manifest->height;
     memcpy(binding->target_hash, manifest->block_hash, 32);
     memcpy(binding->artifact_digest, manifest->artifact_digest, 32);
+    if (guard->expected)
+        return wallet_cutover_binding_equal(binding, guard->expected);
     return icb_wallet_commit_fence(node, guard, binding);
 }
 #ifdef ZCL_TESTING
+static void (*icb_after_wallet_fence_hook)(void *);
+static void *icb_after_wallet_fence_context;
+void consensus_state_install_test_after_wallet_fence(void (*hook)(void *), void *context)
+{
+    icb_after_wallet_fence_hook = hook;
+    icb_after_wallet_fence_context = context;
+}
 static void (*icb_after_commit_hook)(void *);
 static void *icb_after_commit_context;
 void consensus_state_install_test_after_commit(void (*hook)(void *), void *context)
@@ -1259,6 +1222,10 @@ static struct zcl_result icb_install_commit_admitted(
     if (rc.ok && guard && !icb_wallet_fence(ndb, ms, dir_fd, guard, manifest,
                                              &durable_decision, &binding))
         return ZCL_ERR(-1, "wallet cutover fence could not be durably established");
+#ifdef ZCL_TESTING
+    if (rc.ok && guard && icb_after_wallet_fence_hook)
+        icb_after_wallet_fence_hook(icb_after_wallet_fence_context);
+#endif
     if (rc.ok) {
         /* The activate step re-opens and must reproduce the exact artifact receipt
          * bound into the ADMIT record; height/hash alone carry no state authority. */
@@ -1316,7 +1283,8 @@ static struct zcl_result icb_install_from_bundle(
     memset(&receipt, 0, sizeof(receipt));
     rc = icb_install_admit_through_receipt(
         bundle_path, datadir, ndb, ms, &dir_fd, &artifact,
-        &manifest, &receipt, terminal, &lane, out);
+        &manifest, &receipt, terminal, guard ? guard->expected_whole : NULL,
+        guard ? guard->expected_logical : NULL, &lane, out);
     if (!rc.ok)
         goto done;
     /* (4) Gate through the publication CAS. Both the chain-evidence build and the
@@ -1420,11 +1388,46 @@ struct zcl_result consensus_state_install_from_bundle(
 struct zcl_result icb_install_wallet_guarded(
     struct node_db *ndb, struct main_state *ms, const char *bundle_path,
     const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
-    struct icb_terminal_context *terminal,
+    const uint8_t *whole, const uint8_t *logical, struct icb_terminal_context *terminal,
     struct consensus_state_install_runtime_result *out)
 {
-    struct icb_wallet_guard guard = {.ws = ws, .wallet = wallet};
+    struct icb_wallet_guard guard = {.ws = ws, .wallet = wallet,
+        .expected_whole = whole, .expected_logical = logical};
     return icb_install_from_bundle(ndb, ms, bundle_path, datadir, &guard, terminal, out);
+}
+
+struct zcl_result icb_install_wallet_old_retry(
+    struct node_db *ndb, struct main_state *ms, const char *bundle_path,
+    const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
+    const struct wallet_cutover_binding *expected, struct icb_terminal_context *terminal,
+    struct consensus_state_install_runtime_result *out)
+{
+    if (!expected || !boot_wallet_cutover_startup_context_matches(ndb, ws, wallet, ms)) {
+        if (out) {
+            memset(out, 0, sizeof(*out));
+            out->owner_gate_refused = true;
+            snprintf(out->reason, sizeof(out->reason), "old cutover retry requires the startup context");
+        }
+        return ZCL_ERR(-1, "old cutover retry requires the startup context");
+    }
+    if (!consensus_state_old_artifact_matches(bundle_path, expected)) {
+        if (out) {
+            memset(out, 0, sizeof(*out));
+            snprintf(out->reason, sizeof(out->reason), "old cutover artifact does not match");
+        }
+        return ZCL_ERR(-1, "old cutover artifact does not match");
+    }
+    struct icb_wallet_guard guard = {.ws = ws, .wallet = wallet, .expected = expected};
+    return icb_install_from_bundle(ndb, ms, bundle_path, datadir, &guard, terminal, out);
+}
+struct zcl_result consensus_state_install_from_bundle_old_retry(
+    struct node_db *ndb, struct main_state *ms, const char *bundle_path,
+    const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
+    const struct wallet_cutover_binding *expected,
+    struct consensus_state_install_runtime_result *out)
+{
+    return icb_install_wallet_old_retry(ndb, ms, bundle_path, datadir, ws, wallet,
+                                        expected, NULL, out);
 }
 
 #ifdef ZCL_TESTING
@@ -1491,6 +1494,6 @@ bool consensus_state_wallet_preflight_identity(struct wallet_sqlite *wallet,
 #else
     return wallet && wallet->open && wallet->db && node && node->open &&
         wallet->db == node->db && boot_wallet_cutover_recovery_context_matches(node, wallet) &&
-        boot_datadir_lock_matches_fd(dir_fd) && icb_wallet_node_file_matches(wallet->db, dir_fd);
+        boot_datadir_lock_matches_fd(dir_fd) && consensus_state_wallet_node_file_matches(wallet->db, dir_fd);
 #endif
 }

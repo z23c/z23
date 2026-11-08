@@ -8,10 +8,25 @@
  * boot_stage_reset_for_testing() (-DZCL_TESTING) restores the global stage. */
 
 #include "test/test_core.h"
+#include "wallet/wallet_lock.h"
+#include "platform/time_compat.h"
+#include "util/ar_step_readonly.h"
+#include "crypto/sha3.h"
+#if defined(__linux__)
+#include <sys/time.h>
+#endif
+#include "../../../engine/composition/src/boot_wallet_cutover_checkpoint_internal.h"
+#include "config/boot_datadir_lock.h"
+#include "controllers/wallet_helpers.h"
+#include "validation/main_state.h"
+#include "platform/os_proc.h"
+#include "models/ar_after_commit.h"
+#include "base/serialize_le.h"
 #include "platform/socket_compat.h"
 #include "platform/wallet_startup_auth.h"
 #include "platform/wallet_startup_auth_protocol.h"
 #include "config/boot.h"
+#include "config/boot_wallet_cutover_replay.h"
 #include "config/boot_error.h"
 #include "config/boot_internal.h"
 #include "config/consensus_state_snapshot_install.h"
@@ -705,6 +720,402 @@ static int test_boot_replay_provenance(void)
     test_rm_rf(dir);
     return !ok;
 }
+
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+bool boot_test_pending_checkpoint_due(int64_t last, int64_t now);
+static bool bp_checkpoint_save(struct boot_cutover_replay *r)
+{
+    struct wallet_discover_checkpoint c;
+    return boot_wallet_discover_checkpoint_prepare(r, &c) &&
+        boot_wallet_discover_checkpoint_save(r, &c) == BOOT_DISCOVER_SAVED;
+}
+#if defined(ZCL_TESTING) && defined(__linux__)
+bool boot_test_pending_authenticate(struct wallet *, struct wallet_sqlite *, int, bool *, int64_t *);
+static const char bp_checkpoint_pass[] = "synthetic-checkpoint-credential";
+struct bp_auth_peer { int fd; bool ok; };
+static bool bp_auth_io(int fd, void *buf, size_t len, bool send_data)
+{
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = send_data ? send(fd, (const char *)buf + off, len - off, MSG_NOSIGNAL) :
+                                read(fd, (char *)buf + off, len - off);
+        if (n <= 0) return false;
+        off += (size_t)n;
+    }
+    return true;
+}
+static void *bp_auth_peer_main(void *opaque)
+{
+    struct bp_auth_peer *p = opaque; unsigned char request[8];
+    size_t len = strlen(bp_checkpoint_pass);
+    unsigned char header[8] = {'Z','W','A','1', Z23_WALLET_AUTH_SECRET, 0,
+                               (unsigned char)len, (unsigned char)(len >> 8)};
+    struct timeval timeout = {.tv_sec = 5};
+    p->ok = setsockopt(p->fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0 &&
+        bp_auth_io(p->fd, request, sizeof(request), false) &&
+        !memcmp(request, "ZWA1", 4) && request[4] == Z23_WALLET_AUTH_REQUEST &&
+        bp_auth_io(p->fd, header, sizeof(header), true) &&
+        bp_auth_io(p->fd, (void *)bp_checkpoint_pass, len, true);
+    close(p->fd); return NULL;
+}
+static bool bp_checkpoint_auth(struct wallet *w, struct wallet_sqlite *ws, int64_t *deadline)
+{
+    int fd[2]; if (socketpair(AF_UNIX, SOCK_STREAM, 0, fd) != 0) return false;
+    struct bp_auth_peer peer = {.fd = fd[1]}; pthread_t thread;
+    if (pthread_create(&thread, NULL, bp_auth_peer_main, &peer) != 0) {
+        close(fd[0]); close(fd[1]); return false;
+    }
+    bool unlocked = false;
+    bool ok = boot_test_pending_authenticate(w, ws, fd[0], &unlocked, deadline);
+    bool joined = pthread_join(thread, NULL) == 0;
+    return joined && peer.ok && ok && unlocked && *deadline > 0 && !wallet_lock_is_locked();
+}
+static bool bp_checkpoint_sealed(struct wallet_sqlite *ws)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool sealed = sqlite3_prepare_v2(ws->db, "SELECT seed,(SELECT xsk FROM wallet_sapling_keys LIMIT 1) FROM wallet_seed", -1, &stmt, NULL) == SQLITE_OK &&
+        AR_STEP_ROW_READONLY(stmt) == SQLITE_ROW && sqlite3_column_bytes(stmt, 0) > 4 &&
+        sqlite3_column_blob(stmt, 0) && !memcmp(sqlite3_column_blob(stmt, 0), "WKS1", 4) &&
+        sqlite3_column_bytes(stmt, 1) > 4 && sqlite3_column_blob(stmt, 1) &&
+        !memcmp(sqlite3_column_blob(stmt, 1), "WKS1", 4);
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) sealed = false;
+    return sealed;
+}
+static bool bp_checkpoint_seed(struct wallet_sqlite *ws, struct wallet *w, int64_t *deadline)
+{
+    uint8_t seed[32]; memset(seed, 0x51, sizeof(seed)); wallet_lock_reset_for_test();
+    uint8_t div[ZC_DIVERSIFIER_SIZE], pk_d[32];
+    if (!wallet_lock_unlock(NULL, NULL, bp_checkpoint_pass).ok ||
+        !sapling_keystore_set_seed(&w->sapling_keys, seed) ||
+        !sapling_keystore_new_address(&w->sapling_keys, div, pk_d) ||
+        !wallet_init_hd(w, seed, sizeof(seed)) ||
+        !wallet_sqlite_write_sapling_seed(ws, seed) ||
+        !wallet_sqlite_write_sapling_key(ws, 0, &w->sapling_keys.keys[0])) return false;
+    bool sealed = bp_checkpoint_sealed(ws);
+    wallet_lock_note_encrypted_at_rest(); wallet_lock_lock(w);
+    return sealed && wallet_lock_is_locked() && bp_checkpoint_auth(w, ws, deadline);
+}
+static bool bp_checkpoint_key_digest(struct wallet *w, uint8_t out[32])
+{
+    struct sha3_256_ctx hash; static const uint8_t domain[] = "z23-sapling-replay-keys-v1";
+    if (!zcl_mutex_trylock(&w->sapling_keys.cs)) return false;
+    if (w->sapling_keys.num_keys != 1 || !w->sapling_keys.keys[0].used) {
+        zcl_mutex_unlock(&w->sapling_keys.cs); return false;
+    }
+    const struct sapling_key_entry *key = &w->sapling_keys.keys[0];
+    sha3_256_init(&hash); sha3_256_write(&hash, domain, sizeof(domain) - 1);
+    sha3_256_write(&hash, key->ivk, 32); sha3_256_write(&hash, key->xfvk.fvk.ak, 32);
+    sha3_256_write(&hash, key->xfvk.fvk.nk, 32); sha3_256_finalize(&hash, out);
+    zcl_mutex_unlock(&w->sapling_keys.cs); return true;
+}
+static bool bp_checkpoint_expire(struct boot_cutover_replay *r)
+{
+    struct wallet *w = r->ctx->wallet;
+    if (!bp_checkpoint_save(r) || !wallet_lock_arm_timeout(w, 1).ok) return false;
+    for (int i = 0; i < 160 && !wallet_lock_is_locked(); ++i) (void)poll(NULL, 0, 25);
+    return wallet_lock_is_locked() && !bp_checkpoint_save(r) &&
+        boot_wallet_discover_checkpoint_resume(r) == BOOT_DISCOVER_RETRY &&
+        wallet_readiness_get(w).state == WALLET_READINESS_PENDING;
+}
+static bool bp_checkpoint_reauth(struct boot_cutover_replay *r)
+{
+    struct wallet *w = r->ctx->wallet; struct wallet_sqlite *ws = r->ctx->wallet_db;
+    uint8_t expected[32], after[32];
+    if (!bp_checkpoint_key_digest(w, expected)) return false;
+    memcpy(r->key_digest, expected, 32);
+    if (!bp_checkpoint_expire(r)) return false;
+    int64_t deadline = 0; uint8_t identity[32];
+    if (!bp_checkpoint_auth(w, ws, &deadline) ||
+        !wallet_scan_identity(w, identity) || memcmp(identity, r->identity, 32) ||
+        !bp_checkpoint_key_digest(w, after) || memcmp(after, expected, 32)) return false;
+    r->auth_deadline_ms = deadline; r->next = 0; memset(r->key_digest, 0, 32);
+    if (boot_wallet_discover_checkpoint_resume(r) != BOOT_DISCOVER_RESUMED ||
+        r->next != 10 || memcmp(r->key_digest, expected, 32)) return false;
+    thread_registry_request_shutdown(); r->next = 11;
+    bool stopped = !bp_checkpoint_save(r) && wallet_readiness_get(w).state == WALLET_READINESS_PENDING;
+    wallet_lock_lock(w); return stopped && wallet_lock_is_locked();
+}
+#endif
+static bool bp_checkpoint_bench(struct boot_cutover_replay *r, event_log_t *log)
+{
+    unsigned char payload[4096]; memset(payload, 0x5a, sizeof(payload));
+    for (int size = 0; size < 2; ++size) {
+        int blocks = size == 0 ? 4 : 2048;
+        for (int i = 0; i < blocks; ++i)
+            if (event_log_append(log, EV_BLOCK_BODY, payload, sizeof(payload)) == UINT64_MAX) return false;
+        for (int sample = 0; sample < 3; ++sample) {
+            struct wallet_discover_checkpoint cp;
+            int64_t start = platform_time_monotonic_us();
+            bool prepared = boot_wallet_discover_checkpoint_prepare(r, &cp);
+            int64_t middle = platform_time_monotonic_us();
+            bool saved = prepared && boot_wallet_discover_checkpoint_save(r, &cp) == BOOT_DISCOVER_SAVED;
+            int64_t end = platform_time_monotonic_us();
+            if (!saved || start <= 0 || middle < start || end < middle) return false;
+            printf("checkpoint-overhead bytes=%llu sample=%d prepare_us=%lld save_us=%lld\n",
+                (unsigned long long)cp.event_end, sample, (long long)(middle - start), (long long)(end - middle));
+            fflush(stdout);
+        }
+    }
+    return true;
+}
+
+static void bp_checkpoint_die(void *unused) { (void)unused; _exit(77); }
+static void bp_checkpoint_die_committed(void *unused) { (void)unused; _exit(78); }
+static void bp_checkpoint_noop(void *record, void *ctx) { (void)record; (void)ctx; }
+struct bp_checkpoint_busy { sqlite3 *db; int calls, rc; };
+static int bp_checkpoint_busy_handler(void *context, int attempts)
+{ (void)attempts; ((struct bp_checkpoint_busy *)context)->calls++; return 0; }
+static void bp_checkpoint_check_handler(void *context)
+{ struct bp_checkpoint_busy *b = context; b->rc = sqlite3_exec(b->db, "BEGIN IMMEDIATE", NULL, NULL, NULL); }
+static bool bp_checkpoint_generation(uint64_t generation)
+{
+    uint8_t bytes[8]; zcl_write_u64_le(bytes, generation);
+    return progress_meta_set(progress_store_db(), COINS_KV_AUTHORITY_GENERATION_KEY, bytes, sizeof(bytes));
+}
+static void bp_checkpoint_chain(struct main_state *ms, struct block_index blocks[21])
+{
+    for (int i = 0; i <= 20; ++i) {
+        struct block_index *p = &blocks[i]; block_index_init(p);
+        p->nHeight = i; p->hashBlock.data[0] = (uint8_t)(i + 1);
+        p->phashBlock = &p->hashBlock; if (i) p->pprev = &blocks[i - 1];
+        if (!block_map_insert(&ms->map_block_index, p->phashBlock, p) ||
+            !active_chain_install_tip_slot(&ms->chain_active, p)) _exit(12);
+    }
+}
+static event_log_t *bp_checkpoint_setup(const char *dir, const char *path,
+    struct node_db *db, struct wallet_sqlite *ws, struct wallet *w, struct main_state *ms,
+    struct block_index blocks[21], struct wallet_cutover_binding *binding)
+{
+    if (!boot_datadir_lock_acquire(dir) || !progress_store_open(dir) ||
+        !node_db_open(db, path) || !wallet_sqlite_open_r(ws, db->db).ok) _exit(11);
+    wallet_init(w); main_state_init(ms);
+    bp_checkpoint_chain(ms, blocks);
+    *binding = (struct wallet_cutover_binding){.old_generation_present = true,
+        .old_generation = 0, .old_height = 0, .target_height = 20};
+    binding->old_hash[0] = 1; binding->target_hash[0] = 21; binding->artifact_digest[0] = 3;
+    w->scan_retry.pending = true; w->scan_retry.from = 0;
+    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "CUTOVER");
+    if (!wallet_readiness_initialize(w, WALLET_READINESS_PENDING, true, 1) ||
+        !wallet_sqlite_cutover_prepare(ws, w, binding) || !bp_checkpoint_generation(1) ||
+        !boot_ensure_event_log(dir) || !boot_bind_wallet_replay_event_log()) _exit(13);
+    event_log_t *log = event_log_singleton();
+    if (!log || event_log_append(log, EV_BLOCK_HEADER, "x", 1) == UINT64_MAX) _exit(14);
+    boot_stage_reset_for_testing();
+    for (int stage = BOOT_STAGE_DATADIR_LOCKED; stage <= BOOT_STAGE_BLOCK_INDEX_LOADED; ++stage)
+        boot_stage_advance_to((enum boot_stage)stage);
+    return log;
+}
+static void bp_checkpoint_contend(struct boot_cutover_replay *r, const char *path,
+                                  struct wallet_discover_checkpoint *pending)
+{
+    sqlite3 *contender = NULL;
+    if (sqlite3_open_v2(path, &contender, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK ||
+        sqlite3_exec(contender, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK ||
+        boot_wallet_discover_checkpoint_save(r, pending) != BOOT_DISCOVER_SAVE_BUSY ||
+        sqlite3_exec(contender, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK ||
+        sqlite3_close(contender) != SQLITE_OK) _exit(26);
+}
+static void bp_checkpoint_handler(struct boot_cutover_replay *r, struct node_db *db,
+                                  struct wallet_discover_checkpoint *pending)
+{
+    struct bp_checkpoint_busy busy = {.db = db->db};
+    if (sqlite3_busy_handler(db->db, bp_checkpoint_busy_handler, &busy) != SQLITE_OK) _exit(27);
+    boot_wallet_discover_checkpoint_test_before_commit(bp_checkpoint_check_handler, &busy);
+    if (boot_wallet_discover_checkpoint_save(r, pending) != BOOT_DISCOVER_SAVED ||
+        busy.calls == 0 || (busy.rc & 0xff) != SQLITE_BUSY) _exit(28);
+    boot_wallet_discover_checkpoint_test_before_commit(NULL, NULL);
+    if (sqlite3_busy_timeout(db->db, 10000) != SQLITE_OK) _exit(29);
+}
+static void bp_checkpoint_open_faults(struct boot_cutover_replay *r,
+                                      struct node_db *db, const char *path)
+{
+    struct wallet_discover_checkpoint pending;
+    if (!boot_wallet_discover_checkpoint_prepare(r, &pending)) _exit(17);
+    boot_wallet_discover_checkpoint_test_fail_open(true);
+    if (boot_wallet_discover_checkpoint_save(r, &pending) != BOOT_DISCOVER_SAVE_RETRY) _exit(24);
+    boot_wallet_discover_checkpoint_test_fail_open(false);
+    int record = 1; ar_after_commit_note_begin();
+    if (!ar_after_commit_enqueue(bp_checkpoint_noop, NULL, &record, sizeof(record)) ||
+        boot_wallet_discover_checkpoint_save(r, &pending) != BOOT_DISCOVER_SAVE_RETRY) _exit(25);
+    ar_after_commit_note_rollback();
+    bp_checkpoint_contend(r, path, &pending);
+    bp_checkpoint_handler(r, db, &pending);
+}
+static void bp_checkpoint_corruption(struct boot_cutover_replay *r, const char *dir)
+{
+    char events[512]; snprintf(events, sizeof(events), "%s/event_log.dat", dir);
+    int fd = open(events, O_RDWR | O_CLOEXEC);
+    if (fd < 0 || pwrite(fd, "y", 1, 16) != 1 ||
+        boot_wallet_discover_checkpoint_resume(r) != BOOT_DISCOVER_RETRY ||
+        pwrite(fd, "x", 1, 16) != 1 || close(fd) != 0) _exit(21);
+}
+static void bp_checkpoint_resume_faults(struct boot_cutover_replay *r, const char *dir, int mode)
+{
+    r->next = 0; memset(r->key_digest, 0, 32);
+    if (boot_wallet_discover_checkpoint_resume(r) != BOOT_DISCOVER_RESUMED ||
+        r->next != 10 || r->key_digest[0] != 0x42) _exit(18);
+    if (!bp_checkpoint_generation(2) ||
+        boot_wallet_discover_checkpoint_resume(r) != BOOT_DISCOVER_FLOOR ||
+        !bp_checkpoint_generation(1)) _exit(19);
+    r->auth_deadline_ms = 1;
+    if (bp_checkpoint_save(r) ||
+        boot_wallet_discover_checkpoint_resume(r) != BOOT_DISCOVER_RETRY) _exit(20);
+    r->auth_deadline_ms = 0;
+    bp_checkpoint_corruption(r, dir);
+    r->next = 11;
+    if (mode == 2) boot_wallet_discover_checkpoint_test_after_commit(bp_checkpoint_die_committed, NULL);
+    else boot_wallet_discover_checkpoint_test_before_commit(bp_checkpoint_die, NULL);
+    (void)bp_checkpoint_save(r);
+    _exit(22);
+}
+static bool bp_checkpoint_stage_before(struct boot_cutover_replay *r,
+                                       struct wallet_discover_checkpoint *candidate)
+{
+    struct wallet_rpc_context *ctx = r->ctx;
+    struct wallet_discover_checkpoint stored;
+    return boot_wallet_cutover_startup_context_matches(ctx->node_db, ctx->wallet_db, ctx->wallet, ctx->main_state) &&
+        !boot_wallet_cutover_replay_context_matches(ctx->node_db, ctx->wallet_db, ctx->wallet, ctx->main_state) &&
+        boot_wallet_discover_checkpoint_prepare(r, candidate) &&
+        boot_wallet_discover_checkpoint_save(r, candidate) == BOOT_DISCOVER_SAVE_RETRY &&
+        wallet_sqlite_discover_checkpoint_read(ctx->wallet_db, &stored) == WALLET_DISCOVER_ABSENT;
+}
+static bool bp_checkpoint_stage_ready(struct boot_cutover_replay *r,
+                                      struct wallet_discover_checkpoint *candidate)
+{
+    struct wallet_rpc_context *ctx = r->ctx;
+    return !boot_wallet_cutover_startup_context_matches(ctx->node_db, ctx->wallet_db, ctx->wallet, ctx->main_state) &&
+        boot_wallet_cutover_replay_context_matches(ctx->node_db, ctx->wallet_db, ctx->wallet, ctx->main_state) &&
+        !boot_wallet_cutover_replay_context_matches(NULL, ctx->wallet_db, ctx->wallet, ctx->main_state) &&
+        boot_wallet_discover_checkpoint_save(r, candidate) == BOOT_DISCOVER_SAVED;
+}
+static bool bp_checkpoint_stage_late(struct boot_cutover_replay *r,
+                                     struct wallet_discover_checkpoint *candidate)
+{
+    struct wallet_rpc_context *ctx = r->ctx;
+    struct wallet_discover_checkpoint stored;
+    struct wallet_cutover_binding binding;
+    r->next = 11;
+    return !boot_wallet_cutover_replay_context_matches(ctx->node_db, ctx->wallet_db, ctx->wallet, ctx->main_state) &&
+        boot_wallet_discover_checkpoint_prepare(r, candidate) &&
+        boot_wallet_discover_checkpoint_save(r, candidate) == BOOT_DISCOVER_SAVE_RETRY &&
+        wallet_sqlite_discover_checkpoint_read(ctx->wallet_db, &stored) == WALLET_DISCOVER_FOUND &&
+        stored.next_height == 10 && wallet_readiness_get(ctx->wallet).state == WALLET_READINESS_PENDING &&
+        wallet_sqlite_cutover_read(ctx->wallet_db, &binding) == WALLET_CUTOVER_PENDING;
+}
+static bool bp_checkpoint_stage_cases(struct boot_cutover_replay *r)
+{
+    struct wallet_discover_checkpoint candidate;
+    if (!bp_checkpoint_stage_before(r, &candidate)) return false;
+    boot_stage_advance_to(BOOT_STAGE_CHAIN_TIP_RESOLVED);
+    if (!bp_checkpoint_stage_ready(r, &candidate)) return false;
+    boot_stage_advance_to(BOOT_STAGE_NETWORK_READY);
+    return bp_checkpoint_stage_late(r, &candidate);
+}
+
+static void bp_checkpoint_child(const char *dir, int mode)
+{
+    struct node_db *db; struct wallet_sqlite *ws; struct wallet *w; struct main_state *ms;
+    boot_wallet_cutover_test_slots(&db, &ws, &w, &ms);
+    char path[512]; snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct block_index blocks[21] = {0}; struct wallet_cutover_binding binding;
+    event_log_t *log = bp_checkpoint_setup(dir, path, db, ws, w, ms, blocks, &binding);
+    if (mode != 5) boot_stage_advance_to(BOOT_STAGE_CHAIN_TIP_RESOLVED);
+    int64_t auth_deadline = 0;
+#if defined(__linux__)
+    if (mode == 3 && !bp_checkpoint_seed(ws, w, &auth_deadline)) _exit(30);
+#endif
+    struct wallet_rpc_context ctx = {.wallet = w, .wallet_db = ws, .node_db = db,
+                                      .main_state = ms, .datadir = dir};
+    struct boot_cutover_replay r = {.ctx = &ctx, .binding = binding,
+        .readiness = wallet_readiness_get(w), .floor = 0, .next = 10,
+        .phase = BOOT_CUTOVER_DISCOVER};
+    r.endpoint.height = 20; r.endpoint.hash = blocks[20].hashBlock;
+    r.endpoint.root = blocks[20].hashFinalSaplingRoot;
+    r.key_digest[0] = 0x42; r.auth_deadline_ms = auth_deadline;
+    if (!wallet_scan_identity(w, r.identity)) _exit(15);
+    if (mode == 5) _exit(bp_checkpoint_stage_cases(&r) ? 0 : 33);
+#if defined(__linux__)
+    if (mode == 3) _exit(bp_checkpoint_reauth(&r) ? 0 : 31);
+#endif
+    if (mode == 4) _exit(bp_checkpoint_bench(&r, log) ? 0 : 32);
+    if (mode == 1) {
+        thread_registry_request_shutdown();
+        _exit(bp_checkpoint_save(&r) ? 16 : 0);
+    }
+    bp_checkpoint_open_faults(&r, db, path);
+    bp_checkpoint_resume_faults(&r, dir, mode);
+}
+static bool bp_checkpoint_wait(pid_t child, int expected)
+{
+    int status = 0;
+    for (int i = 0; i < 400; ++i) {
+        pid_t result = waitpid(child, &status, WNOHANG);
+        if (result == child) return WIFEXITED(status) && WEXITSTATUS(status) == expected;
+        if (result < 0) return false;
+        (void)poll(NULL, 0, 50);
+    }
+    (void)kill(child, SIGKILL); (void)waitpid(child, &status, 0); return false;
+}
+static bool bp_checkpoint_reopen(const char *dir, int expected, bool fixed_digest)
+{
+    char path[512]; snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db db = {0}; struct wallet_sqlite ws = {0}; struct wallet_discover_checkpoint c;
+    bool ok = node_db_open(&db, path) && wallet_sqlite_open_r(&ws, db.db).ok &&
+        wallet_sqlite_discover_checkpoint_read(&ws, &c) == WALLET_DISCOVER_FOUND &&
+        c.next_height == expected && (!fixed_digest || c.key_digest[0] == 0x42);
+    if (ws.open) wallet_sqlite_close(&ws);
+    if (db.open) node_db_close(&db);
+    return ok;
+}
+static bool bp_checkpoint_extra(int mode, const char *label)
+{
+    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "boot_phase", label);
+    pid_t parent = getpid(); pid_t child = fork();
+    if (!child) {
+        if (!os_proc_bind_parent_death(SIGKILL, (uint64_t)parent)) _exit(23);
+        bp_checkpoint_child(dir, mode);
+    }
+    bool ok = child > 0 && bp_checkpoint_wait(child, 0);
+    if (ok && mode == 3) ok = bp_checkpoint_reopen(dir, 10, false);
+    test_rm_rf(dir); return ok;
+}
+static bool bp_checkpoint_crash_case(int mode, const char *label, int exit_code, int expected)
+{
+    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "boot_phase", label);
+    pid_t parent = getpid(); pid_t child = fork();
+    if (!child) {
+        if (!os_proc_bind_parent_death(SIGKILL, (uint64_t)parent)) _exit(23);
+        bp_checkpoint_child(dir, mode);
+    }
+    bool ok = child > 0 && bp_checkpoint_wait(child, exit_code);
+    if (ok) ok = bp_checkpoint_reopen(dir, expected, true);
+    test_rm_rf(dir); return ok;
+}
+static bool bp_checkpoint_cadence(void)
+{
+    return boot_test_pending_checkpoint_due(0, 1) &&
+        !boot_test_pending_checkpoint_due(100, 30099) &&
+        boot_test_pending_checkpoint_due(100, 30100) &&
+        !boot_test_pending_checkpoint_due(100, 99) &&
+        !boot_test_pending_checkpoint_due(0, 0);
+}
+static int test_boot_discover_checkpoint(void)
+{
+    if (!bp_checkpoint_cadence()) return 1;
+    bool ok = bp_checkpoint_crash_case(0, "checkpoint", 77, 10);
+    bool committed = bp_checkpoint_crash_case(2, "checkpoint-committed", 78, 11);
+    bool stopped = bp_checkpoint_extra(1, "checkpoint-stop");
+    ok = ok && committed && stopped;
+#if defined(__linux__)
+    bool authenticated = bp_checkpoint_extra(3, "checkpoint-reauth");
+    ok = ok && authenticated;
+#endif
+    bool measured = bp_checkpoint_extra(4, "checkpoint-bench");
+    bool stages = bp_checkpoint_extra(5, "checkpoint-stage");
+    ok = ok && measured && stages;
+    return !ok;
+}
+#endif
 
 static bool bp_stamp_kind(sqlite3 *db, int kind)
 {
@@ -1513,6 +1924,28 @@ static int bp_auth_unsupported_close_checks(void)
 }
 #endif
 
+#ifdef ZCL_TESTING
+bool boot_test_replay_progress_format(const struct boot_cutover_replay *, char *, size_t);
+static int bp_replay_progress_checks(void)
+{
+    int failures = 0;
+    char line[160];
+    struct boot_cutover_replay replay = {.phase = BOOT_CUTOVER_DISCOVER, .floor = 5, .next = 9};
+    replay.endpoint.height = 20;
+    BP_CHECK("replay progress reports first incomplete height",
+        boot_test_replay_progress_format(&replay, line, sizeof(line)) &&
+        strcmp(line, "[wallet-replay] phase=discover floor=5 next=9 reference=20") == 0);
+    replay.phase = BOOT_CUTOVER_WITNESS;
+    BP_CHECK("replay witness uses its phase label", boot_test_replay_progress_format(&replay, line, sizeof(line)) &&
+        strstr(line, "phase=witness") != NULL);
+    replay.next = 22;
+    BP_CHECK("replay progress rejects beyond endpoint", !boot_test_replay_progress_format(&replay, line, sizeof(line)));
+    replay.next = 5; replay.phase = BOOT_CUTOVER_DONE;
+    BP_CHECK("replay progress never reports done as ready", !boot_test_replay_progress_format(&replay, line, sizeof(line)));
+    return failures;
+}
+#endif
+
 int test_boot_phase(void)
 {
 #if defined(_WIN32)
@@ -1538,6 +1971,9 @@ int test_boot_phase(void)
 #endif
     printf("\n=== boot_phase tests ===\n");
     int failures = 0;
+#ifdef ZCL_TESTING
+    failures += bp_replay_progress_checks();
+#endif
 #if !defined(_WIN32)
     BP_CHECK("pending startup refuses maintenance modes", bp_pending_modes());
     BP_CHECK("pending history rejects missing or invalid archive", bp_pending_history_refusals());
@@ -1548,6 +1984,9 @@ int test_boot_phase(void)
         test_boot_event_log_lifecycle() == 0);
     BP_CHECK("replay preserves coins provenance through log lifetime",
         test_boot_replay_provenance() == 0);
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+    BP_CHECK("DISCOVER checkpoint crash, expiry, prefix and stop", test_boot_discover_checkpoint() == 0);
+#endif
     BP_CHECK("installed provenance refuses legacy commitment bootstrap",
         test_boot_commitment_origin() == 0);
 

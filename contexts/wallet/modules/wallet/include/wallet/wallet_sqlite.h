@@ -431,6 +431,27 @@ struct wallet_cutover_binding {
     uint8_t target_hash[32];
     uint8_t artifact_digest[32];
 };
+/* A DISCOVER checkpoint is advisory until its caller validates all bindings. */
+struct wallet_discover_checkpoint {
+    struct wallet_cutover_binding binding;
+    bool generation_present;
+    uint64_t generation;
+    int32_t floor, next_height, endpoint_height;
+    uint8_t endpoint_hash[32], endpoint_root[32], scan_identity[32], key_digest[32];
+    uint64_t event_end;
+    uint8_t event_digest[32];
+};
+enum wallet_discover_checkpoint_status {
+    WALLET_DISCOVER_ABSENT, WALLET_DISCOVER_FOUND,
+    WALLET_DISCOVER_MALFORMED, WALLET_DISCOVER_IO_ERROR
+};
+/* Caller owns the wallet SQLite transaction. The separate durable generation
+ * must be checked under its progress lock through wallet commit by the caller. */
+bool wallet_sqlite_discover_checkpoint_save(struct wallet_sqlite *ws,
+    const struct wallet_discover_checkpoint *checkpoint);
+enum wallet_discover_checkpoint_status wallet_sqlite_discover_checkpoint_read(
+    struct wallet_sqlite *ws, struct wallet_discover_checkpoint *out);
+
 /* Both bindings must be non-NULL. */
 bool wallet_cutover_binding_equal(const struct wallet_cutover_binding *a,
                                    const struct wallet_cutover_binding *b);

@@ -42,6 +42,9 @@ struct block_index_projection;
 struct block_index;
 struct sqlite3;
 
+/* Initialize or validate the compiled genesis block index in memory. */
+bool block_index_initialize_genesis(struct block_index *genesis, const struct chain_params *params);
+
 /* Height comparator for forward-pass pointer arrays (qsort order), and
  * the linear already-sorted predicate the flat loader uses to skip the
  * qsort on writer-ordered files. Both are pure views over nHeight. */

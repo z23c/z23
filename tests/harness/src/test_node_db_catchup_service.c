@@ -30,6 +30,7 @@ struct node_db;
 void node_db_sapling_replay_test_crash_before_delivery(void);
 void node_db_sapling_replay_test_rollback(struct node_db *db);
 void node_db_sapling_replay_test_after_read(void (*hook)(void *), void *ctx);
+void node_db_sapling_replay_test_after_keys(void (*hook)(void *), void *ctx);
 void node_db_sapling_replay_test_revalidate_hooks(void (*before)(void *), void (*after)(void *), void *ctx);
 bool boot_test_pending_busy_backoff(int64_t *since, int64_t deadline, int limit_ms);
 void boot_cutover_replay_test_after_current(void (*hook)(void *), void *ctx);
@@ -3205,22 +3206,12 @@ static bool ndc_replay_child(struct ndc_replay_fixture *f)
     return ok;
 }
 
-static bool ndc_replay_refusal_cases(struct ndc_replay_fixture *f,
-    struct db_service *svc, struct node_db *db, const uint8_t digest[32])
+static bool ndc_replay_missing_cases(struct ndc_replay_fixture *f,
+    struct db_service *svc, struct node_db *db, bool ok)
 {
-    uint8_t wrong_hash[32], wrong_keys[32];
-    memcpy(wrong_hash, f->hashes[2].data, 32); wrong_hash[0] ^= 1;
-    memcpy(wrong_keys, digest, 32); wrong_keys[0] ^= 1;
-    struct sapling_replay_result r = node_db_catchup_sapling_replay(
-        svc, db, &f->state, f->wallet, f->dir, 1, 2, SAPLING_REPLAY_DISCOVER, wrong_hash, NULL);
-    bool ok = r.status == SAPLING_REPLAY_CHAIN_CHANGED && r.last_complete == 0 &&
-              r.start_height == 1 && r.end_height == 2 && r.phase == SAPLING_REPLAY_DISCOVER;
-    r = node_db_catchup_sapling_replay(svc, db, &f->state, f->wallet,
-        f->dir, 1, 2, SAPLING_REPLAY_SPENDS, f->hashes[2].data, wrong_keys);
-    ok = ok && r.status == SAPLING_REPLAY_KEYS_UNAVAILABLE && r.last_complete == 0;
     int saved_file = f->slots[1].nFile;
     f->slots[1].nFile = -1;
-    r = node_db_catchup_sapling_replay(svc, db, &f->state, f->wallet,
+    struct sapling_replay_result r = node_db_catchup_sapling_replay(svc, db, &f->state, f->wallet,
         f->dir, 1, 2, SAPLING_REPLAY_DISCOVER, f->hashes[2].data, NULL);
     f->slots[1].nFile = saved_file;
     ok = ok && r.status == SAPLING_REPLAY_INCOMPLETE && r.last_complete == 0;
@@ -3232,6 +3223,32 @@ static bool ndc_replay_refusal_cases(struct ndc_replay_fixture *f,
     ok = ok && r.status == SAPLING_REPLAY_KEYS_UNAVAILABLE;
     wallet_free(empty); free(empty);
     return ok;
+}
+
+static bool ndc_replay_refusal_cases(struct ndc_replay_fixture *f,
+    struct db_service *svc, struct node_db *db, event_log_t *log, const uint8_t digest[32])
+{
+    uint8_t wrong_hash[32], wrong_keys[32];
+    memcpy(wrong_hash, f->hashes[2].data, 32); wrong_hash[0] ^= 1;
+    memcpy(wrong_keys, digest, 32); wrong_keys[0] ^= 1;
+    int changes = sqlite3_total_changes(db->db);
+    uint64_t log_size = event_log_size(log);
+    struct sapling_replay_result r = node_db_catchup_sapling_replay(
+        svc, db, &f->state, f->wallet, f->dir, 1, 2, SAPLING_REPLAY_DISCOVER, f->hashes[2].data, wrong_keys);
+    bool ok = r.status == SAPLING_REPLAY_KEYS_UNAVAILABLE && r.last_complete == 0 &&
+              sqlite3_total_changes(db->db) == changes && event_log_size(log) == log_size;
+    r = node_db_catchup_sapling_replay(svc, db, &f->state, f->wallet,
+        f->dir, 1, 2, SAPLING_REPLAY_DISCOVER, f->hashes[2].data, digest);
+    ok = ok && r.status == SAPLING_REPLAY_COMPLETE && r.last_complete == 2 &&
+         memcmp(r.key_digest, digest, 32) == 0;
+    r = node_db_catchup_sapling_replay(
+        svc, db, &f->state, f->wallet, f->dir, 1, 2, SAPLING_REPLAY_DISCOVER, wrong_hash, NULL);
+    ok = ok && r.status == SAPLING_REPLAY_CHAIN_CHANGED && r.last_complete == 0 &&
+              r.start_height == 1 && r.end_height == 2 && r.phase == SAPLING_REPLAY_DISCOVER;
+    r = node_db_catchup_sapling_replay(svc, db, &f->state, f->wallet,
+        f->dir, 1, 2, SAPLING_REPLAY_SPENDS, f->hashes[2].data, wrong_keys);
+    ok = ok && r.status == SAPLING_REPLAY_KEYS_UNAVAILABLE && r.last_complete == 0;
+    return ndc_replay_missing_cases(f, svc, db, ok);
 }
 
 static bool ndc_replay_witness_unchanged(struct node_db *db, const uint8_t txid[32],
@@ -3370,6 +3387,270 @@ static bool ndc_replay_reference_complete(struct sapling_replay_result r,
     return r.status == SAPLING_REPLAY_COMPLETE && r.last_complete == 1 &&
         r.reference_height == 2 && memcmp(r.reference_hash, f->hashes[2].data, 32) == 0 &&
         memcmp(r.scan_identity, identity, 32) == 0;
+}
+
+/* Mutations are applied once between authenticated read and the locked check. */
+struct ndc_identity_probe { struct wallet *wallet; int which; bool fired; };
+struct ndc_identity_saved {
+    size_t keys, watching, scripts;
+    struct key_entry key;
+    struct watching_entry watch;
+    struct script_entry script;
+};
+static void ndc_identity_flip_low(struct wallet *w, int which)
+{
+    switch (which) {
+    case 0: w->has_master_key = !w->has_master_key; break;
+    case 1: w->hd_account ^= 1; break;
+    case 2: w->hd_external_counter ^= 1; break;
+    case 3: w->hd_internal_counter ^= 1; break;
+    case 4: w->keystore.num_keys ^= 1; break;
+    case 5: w->keystore.keys[0].used = !w->keystore.keys[0].used; break;
+    case 6: w->keystore.keys[0].keyid.id.data[0] ^= 1; break;
+    case 7: w->keystore.num_watching ^= 1; break;
+    case 8: w->keystore.watching[0].used = !w->keystore.watching[0].used; break;
+    case 9: w->keystore.watching[0].keyid.id.data[0] ^= 1; break;
+    }
+}
+static void ndc_identity_flip_middle(struct wallet *w, int which)
+{
+    switch (which) {
+    case 10: w->keystore.num_scripts ^= 1; break;
+    case 11: w->keystore.scripts[0].used = !w->keystore.scripts[0].used; break;
+    case 12: w->keystore.scripts[0].script_id.data[0] ^= 1; break;
+    case 13: w->keystore.scripts[0].redeem_script.size ^= 1; break;
+    case 14: w->keystore.scripts[0].redeem_script.data[0] ^= 1; break;
+    case 15: w->sapling_keys.has_seed = !w->sapling_keys.has_seed; break;
+    case 16: w->sapling_keys.next_child_index ^= 1; break;
+    case 17: w->sapling_keys.num_keys ^= 1; break;
+    case 18: w->sapling_keys.keys[0].used = !w->sapling_keys.keys[0].used; break;
+    case 19: w->sapling_keys.keys[0].child_index ^= 1; break;
+    }
+}
+static void ndc_identity_flip_high(struct wallet *w, int which)
+{
+    switch (which) {
+    case 20: w->sapling_keys.keys[0].ivk[0] ^= 1; break;
+    case 21: w->sapling_keys.keys[0].xfvk.fvk.ak[0] ^= 1; break;
+    case 22: w->sapling_keys.keys[0].xfvk.fvk.nk[0] ^= 1; break;
+    case 23: w->sapling_keys.locked = !w->sapling_keys.locked; break;
+    case 24: w->sapling_keys.num_unscannable ^= 1; break;
+    case 25: w->sapling_keys.num_damaged ^= 1; break;
+    case 26: w->keystore.scripts[0].redeem_script.size ^= (MAX_SCRIPT_SIZE + 1); break;
+    case 27: w->keystore.num_keys ^= (MAX_KEYSTORE_KEYS + 2); break;
+    case 28: w->keystore.num_watching ^= (MAX_KEYSTORE_WATCHING + 2); break;
+    case 29: w->keystore.num_scripts ^= (MAX_KEYSTORE_SCRIPTS + 2); break;
+    case 30: w->sapling_keys.num_keys ^= (MAX_SAPLING_KEYS + 2); break;
+    }
+}
+static void ndc_identity_flip(struct wallet *w, int which)
+{
+    zcl_mutex_lock(&w->cs);
+    zcl_mutex_lock(&w->keystore.cs);
+    zcl_mutex_lock(&w->sapling_keys.cs);
+    if (which < 10) ndc_identity_flip_low(w, which);
+    else if (which < 20) ndc_identity_flip_middle(w, which);
+    else ndc_identity_flip_high(w, which);
+    zcl_mutex_unlock(&w->sapling_keys.cs);
+    zcl_mutex_unlock(&w->keystore.cs);
+    zcl_mutex_unlock(&w->cs);
+}
+static void ndc_identity_mutate_once(void *opaque)
+{
+    struct ndc_identity_probe *probe = opaque;
+    if (!probe->fired) { probe->fired = true; ndc_identity_flip(probe->wallet, probe->which); }
+}
+static void ndc_identity_seed(struct wallet *w, struct ndc_identity_saved *saved)
+{
+    saved->keys = w->keystore.num_keys;
+    saved->watching = w->keystore.num_watching;
+    saved->scripts = w->keystore.num_scripts;
+    saved->key = w->keystore.keys[0];
+    saved->watch = w->keystore.watching[0];
+    saved->script = w->keystore.scripts[0];
+    w->keystore.num_keys = w->keystore.num_watching = w->keystore.num_scripts = 1;
+    w->keystore.keys[0].used = true;
+    w->keystore.watching[0].used = true;
+    w->keystore.scripts[0].used = true;
+    w->keystore.scripts[0].redeem_script.size = 2;
+}
+static void ndc_identity_unseed(struct wallet *w, const struct ndc_identity_saved *saved)
+{
+    w->keystore.num_keys = saved->keys;
+    w->keystore.num_watching = saved->watching;
+    w->keystore.num_scripts = saved->scripts;
+    w->keystore.keys[0] = saved->key;
+    w->keystore.watching[0] = saved->watch;
+    w->keystore.scripts[0] = saved->script;
+}
+static bool ndc_identity_refused(enum sapling_replay_status status)
+{
+    return status == SAPLING_REPLAY_WALLET_CHANGED || status == SAPLING_REPLAY_KEYS_UNAVAILABLE;
+}
+static bool ndc_identity_one(struct ndc_replay_fixture *f, struct db_service *svc,
+                             struct node_db *db, wallet_projection_t *projection, int which, bool after_delivery)
+{
+    uint8_t identity[32];
+    if (!wallet_scan_identity(f->wallet, identity)) return false;
+    sqlite3_int64 changes = sqlite3_total_changes64(db->db);
+    uint64_t log_size = event_log_size(wallet_projection_event_log());
+    struct ndc_identity_probe p = {.wallet = f->wallet, .which = which};
+    if (after_delivery) node_db_sapling_replay_test_revalidate_hooks(ndc_identity_mutate_once, NULL, &p);
+    else node_db_sapling_replay_test_after_read(ndc_identity_mutate_once, &p);
+    struct sapling_replay_result r = node_db_catchup_sapling_replay_at_reference(
+        svc, db, &f->state, f->wallet, f->dir, 1, 1, 2, f->hashes[2].data,
+        SAPLING_REPLAY_DISCOVER, f->hashes[1].data, identity, NULL);
+    node_db_sapling_replay_test_after_read(NULL, NULL);
+    node_db_sapling_replay_test_revalidate_hooks(NULL, NULL, NULL);
+    if (p.fired) ndc_identity_flip(f->wallet, which);
+    if (!p.fired || !ndc_identity_refused(r.status) || r.last_complete != 0 ||
+        wallet_readiness_get(f->wallet).state != WALLET_READINESS_PENDING) return false;
+    if (!after_delivery)
+        return sqlite3_total_changes64(db->db) == changes && event_log_size(wallet_projection_event_log()) == log_size;
+    if (wallet_projection_catch_up(projection) == UINT64_MAX) return false;
+    uint64_t projected = wallet_projection_note_count(projection);
+    int64_t value = wallet_projection_total_value_zat(projection);
+    int notes = db_sapling_note_count_unspent(db);
+    r = node_db_catchup_sapling_replay_at_reference(
+        svc, db, &f->state, f->wallet, f->dir, 1, 1, 2, f->hashes[2].data,
+        SAPLING_REPLAY_DISCOVER, f->hashes[1].data, identity, NULL);
+    return r.status == SAPLING_REPLAY_COMPLETE && db_sapling_note_count_unspent(db) == notes &&
+        wallet_projection_catch_up(projection) != UINT64_MAX &&
+        wallet_projection_note_count(projection) == projected &&
+        wallet_projection_total_value_zat(projection) == value;
+}
+struct ndc_capture_race {
+    struct ndc_identity_probe probe;
+    uint8_t *expected;
+    bool updated;
+};
+static void ndc_capture_mutate(void *opaque)
+{
+    struct ndc_capture_race *race = opaque;
+    ndc_identity_mutate_once(&race->probe);
+    race->updated = wallet_scan_identity(race->probe.wallet, race->expected);
+}
+static bool ndc_capture_race_one(struct ndc_replay_fixture *f, struct db_service *svc,
+                                 struct node_db *db, int which)
+{
+    uint8_t identity[32];
+    if (!wallet_scan_identity(f->wallet, identity)) return false;
+    sqlite3_int64 changes = sqlite3_total_changes64(db->db);
+    uint64_t size = event_log_size(wallet_projection_event_log());
+    struct ndc_capture_race race = {.probe = {.wallet = f->wallet, .which = which}, .expected = identity};
+    node_db_sapling_replay_test_after_keys(ndc_capture_mutate, &race);
+    struct sapling_replay_result r = node_db_catchup_sapling_replay_at_reference(
+        svc, db, &f->state, f->wallet, f->dir, 1, 1, 2, f->hashes[2].data,
+        SAPLING_REPLAY_DISCOVER, f->hashes[1].data, identity, NULL);
+    node_db_sapling_replay_test_after_keys(NULL, NULL);
+    if (race.probe.fired) ndc_identity_flip(f->wallet, which);
+    return race.probe.fired && race.updated && r.status == SAPLING_REPLAY_KEYS_UNAVAILABLE &&
+        r.last_complete == 0 && sqlite3_total_changes64(db->db) == changes &&
+        event_log_size(wallet_projection_event_log()) == size &&
+        wallet_readiness_get(f->wallet).state == WALLET_READINESS_PENDING;
+}
+static void ndc_global_lock(void *opaque)
+{
+    bool *fired = opaque;
+    *fired = true;
+    wallet_lock_note_encrypted_at_rest();
+    wallet_lock_lock(NULL);
+}
+static bool ndc_global_lock_one(struct ndc_replay_fixture *f, struct db_service *svc,
+                                struct node_db *db, bool after_delivery)
+{
+    uint8_t identity[32];
+    if (!wallet_scan_identity(f->wallet, identity)) return false;
+    sqlite3_int64 changes = sqlite3_total_changes64(db->db);
+    uint64_t size = event_log_size(wallet_projection_event_log());
+    bool fired = false;
+    if (after_delivery) node_db_sapling_replay_test_revalidate_hooks(ndc_global_lock, NULL, &fired);
+    else node_db_sapling_replay_test_after_read(ndc_global_lock, &fired);
+    struct sapling_replay_result r = node_db_catchup_sapling_replay_at_reference(
+        svc, db, &f->state, f->wallet, f->dir, 1, 1, 2, f->hashes[2].data,
+        SAPLING_REPLAY_DISCOVER, f->hashes[1].data, identity, NULL);
+    node_db_sapling_replay_test_after_read(NULL, NULL);
+    node_db_sapling_replay_test_revalidate_hooks(NULL, NULL, NULL);
+    bool locked = wallet_lock_is_locked();
+    wallet_lock_reset_for_test();
+    bool unchanged = after_delivery || (sqlite3_total_changes64(db->db) == changes &&
+        event_log_size(wallet_projection_event_log()) == size);
+    return fired && locked && unchanged && r.status == SAPLING_REPLAY_KEYS_UNAVAILABLE &&
+        r.last_complete == 0 && wallet_readiness_get(f->wallet).state == WALLET_READINESS_PENDING;
+}
+static bool ndc_non_strict_key_one(struct ndc_replay_fixture *f, struct db_service *svc,
+                                   struct node_db *db, int which, bool after_delivery)
+{
+    sqlite3_int64 changes = sqlite3_total_changes64(db->db);
+    uint64_t size = event_log_size(wallet_projection_event_log());
+    struct ndc_identity_probe p = {.wallet = f->wallet, .which = which};
+    if (after_delivery) node_db_sapling_replay_test_revalidate_hooks(ndc_identity_mutate_once, NULL, &p);
+    else node_db_sapling_replay_test_after_read(ndc_identity_mutate_once, &p);
+    struct sapling_replay_result r = node_db_catchup_sapling_replay(
+        svc, db, &f->state, f->wallet, f->dir, 1, 1, SAPLING_REPLAY_DISCOVER, f->hashes[1].data, NULL);
+    node_db_sapling_replay_test_after_read(NULL, NULL);
+    node_db_sapling_replay_test_revalidate_hooks(NULL, NULL, NULL);
+    if (p.fired) ndc_identity_flip(f->wallet, which);
+    bool unchanged = after_delivery || (sqlite3_total_changes64(db->db) == changes &&
+        event_log_size(wallet_projection_event_log()) == size);
+    return p.fired && unchanged && r.status == SAPLING_REPLAY_KEYS_UNAVAILABLE && r.last_complete == 0;
+}
+static bool ndc_non_strict_key_cases(struct ndc_replay_fixture *f, struct db_service *svc,
+                                     struct node_db *db)
+{
+    for (int which = 20; which <= 22; ++which)
+        if (!ndc_non_strict_key_one(f, svc, db, which, false) ||
+            !ndc_non_strict_key_one(f, svc, db, which, true)) return false;
+    return true;
+}
+
+static bool ndc_key_compare_cases(struct ndc_replay_fixture *f, struct db_service *svc,
+                                  struct node_db *db)
+{
+    return ndc_capture_race_one(f, svc, db, 20) &&
+        ndc_capture_race_one(f, svc, db, 21) && ndc_capture_race_one(f, svc, db, 22) &&
+        ndc_global_lock_one(f, svc, db, false) && ndc_global_lock_one(f, svc, db, true) &&
+        ndc_non_strict_key_cases(f, svc, db);
+}
+
+static bool ndc_identity_capture_once(struct ndc_replay_fixture *f, struct db_service *svc,
+                                      struct node_db *db)
+{
+    uint8_t identity[32];
+    if (!wallet_scan_identity(f->wallet, identity)) return false;
+    zcl_alloc_fault_fail_nth("wallet scan snapshot", 2);
+    struct sapling_replay_result r = node_db_catchup_sapling_replay_at_reference(
+        svc, db, &f->state, f->wallet, f->dir, 1, 2, 2, f->hashes[2].data,
+        SAPLING_REPLAY_DISCOVER, f->hashes[2].data, identity, NULL);
+    bool once = zcl_alloc_fault_armed_label() && r.status == SAPLING_REPLAY_COMPLETE;
+    zcl_alloc_fault_clear();
+    sqlite3_int64 before = sqlite3_total_changes64(db->db);
+    uint64_t log_size = event_log_size(wallet_projection_event_log());
+    zcl_alloc_fault_fail_next("wallet scan snapshot");
+    r = node_db_catchup_sapling_replay_at_reference(
+        svc, db, &f->state, f->wallet, f->dir, 1, 1, 2, f->hashes[2].data,
+        SAPLING_REPLAY_DISCOVER, f->hashes[1].data, identity, NULL);
+    zcl_alloc_fault_clear();
+    return once && r.status == SAPLING_REPLAY_WALLET_CHANGED &&
+        sqlite3_total_changes64(db->db) == before && event_log_size(wallet_projection_event_log()) == log_size;
+}
+static bool ndc_identity_replay_cases(struct ndc_replay_fixture *f, struct db_service *svc,
+    struct node_db *db, const uint8_t *witness, size_t witness_size, int witness_height)
+{
+    if (f->wallet->sapling_keys.num_keys != 1 || !f->wallet->sapling_keys.keys[0].used) return false;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/identity-projection.db", f->dir);
+    wallet_projection_t *projection = wallet_projection_open(path, wallet_projection_event_log());
+    if (!projection) return false;
+    struct ndc_identity_saved saved;
+    ndc_identity_seed(f->wallet, &saved);
+    bool ok = ndc_identity_capture_once(f, svc, db) && ndc_key_compare_cases(f, svc, db);
+    for (int which = 0; ok && which <= 30; ++which)
+        ok = ndc_identity_one(f, svc, db, projection, which, false) &&
+             ndc_identity_one(f, svc, db, projection, which, true);
+    ndc_identity_unseed(f->wallet, &saved);
+    wallet_projection_close(projection);
+    return ok && ndc_replay_witness_unchanged(db, f->note_txid.data, witness, witness_size, witness_height);
 }
 
 static bool ndc_replay_reference_cases(struct ndc_replay_fixture *f,
@@ -3554,6 +3835,31 @@ static void ndc_busy_after_read(void *opaque)
     while (!b->entered) pthread_cond_wait(&b->cond, &b->mu);
     pthread_mutex_unlock(&b->mu);
 }
+static bool ndc_cutover_resume_digest(struct boot_cutover_replay *r)
+{
+    uint8_t digest[32], zero[32] = {0};
+    memcpy(digest, r->key_digest, sizeof(digest));
+    if (!memcmp(digest, zero, sizeof(digest))) return false;
+    int next = r->next;
+    int changes = sqlite3_total_changes(r->ctx->node_db->db);
+    uint64_t size = event_log_size(wallet_projection_event_log());
+    r->key_digest[0] ^= 1;
+    enum boot_cutover_replay_status refused = boot_cutover_replay_step(r);
+    r->key_digest[0] ^= 1;
+    bool live_refused = refused == BOOT_CUTOVER_RETRY && r->next == next &&
+        !memcmp(r->key_digest, digest, sizeof(digest)) &&
+        sqlite3_total_changes(r->ctx->node_db->db) == changes &&
+        event_log_size(wallet_projection_event_log()) == size;
+    r->checkpoint_resume = true;
+    r->key_digest[0] ^= 1;
+    enum boot_cutover_replay_status fallback = boot_cutover_replay_step(r);
+    return live_refused && fallback == BOOT_CUTOVER_BUSY && !r->checkpoint_resume &&
+        r->next == r->floor && !memcmp(r->key_digest, zero, sizeof(zero)) &&
+        sqlite3_total_changes(r->ctx->node_db->db) == changes &&
+        event_log_size(wallet_projection_event_log()) == size;
+}
+
+
 static bool ndc_cutover_partial_busy(struct boot_cutover_replay *r, struct db_service *svc)
 {
     struct ndc_busy_worker b = {.svc = svc};
@@ -3572,6 +3878,7 @@ static bool ndc_cutover_partial_busy(struct boot_cutover_replay *r, struct db_se
     pthread_mutex_destroy(&b.mu);
     return b.started && b.entered && status == BOOT_CUTOVER_BUSY &&
         r->phase == BOOT_CUTOVER_DISCOVER && r->next == r->floor + 1 &&
+        ndc_cutover_resume_digest(r) &&
         boot_cutover_replay_step(r) == BOOT_CUTOVER_PROGRESS &&
         r->phase == BOOT_CUTOVER_WITNESS;
 }
@@ -3755,6 +4062,7 @@ static bool ndc_publish_delivery_acknowledged(const struct db_wallet_utxo_cutove
 }
 
 void boot_cutover_publish_test_before_final(void (*hook)(void *), void *ctx);
+unsigned boot_cutover_publish_test_empty_refusals(void);
 static void ndc_archive_mutate_canonical(void *opaque)
 {
     struct block_index *tip = opaque;
@@ -3985,16 +4293,16 @@ static bool ndc_cutover_coordinator(struct ndc_replay_fixture *f,
 }
 
 static bool ndc_replay_finish_cases(struct ndc_replay_fixture *f, struct db_service *svc,
-    struct node_db *db, const uint8_t digest[32])
+    struct node_db *db, event_log_t *log, const uint8_t digest[32])
 {
-    return ndc_replay_refusal_cases(f, svc, db, digest) &&
+    return ndc_replay_refusal_cases(f, svc, db, log, digest) &&
         ndc_cutover_coordinator(f, svc, db, false);
 }
 
 static bool ndc_replay_restart_checks(struct ndc_replay_fixture *f, struct db_service *svc,
     struct node_db *db, event_log_t *log, const uint8_t *before, size_t bn, int bh)
 {
-    bool ok = ndc_replay_reference_cases(f, svc, db);
+    bool ok = ndc_identity_replay_cases(f, svc, db, before, bn, bh) && ndc_replay_reference_cases(f, svc, db);
     struct sapling_replay_result r = {0};
     if (ok) ok = ndc_epk_matrix(f, db, before, bn, bh);
     if (ok) ok = ndc_replay_delivery_failures(f, svc, db, log);
@@ -4006,7 +4314,7 @@ static bool ndc_replay_restart_checks(struct ndc_replay_fixture *f, struct db_se
         f->dir, 1, 2, SAPLING_REPLAY_SPENDS, f->hashes[2].data, r.key_digest);
     if (ok) ok = ndc_replay_spent_result(r, db);
     if (ok) ok = ndc_epk_matrix(f, db, before, bn, bh);
-    if (ok) ok = ndc_replay_finish_cases(f, svc, db, r.key_digest);
+    if (ok) ok = ndc_replay_finish_cases(f, svc, db, log, r.key_digest);
     return ok;
 }
 static bool ndc_replay_restart(struct ndc_replay_fixture *f)
@@ -4311,8 +4619,50 @@ static bool ndc_empty_publish_cleanup(struct ndc_publish_case *c, bool ok)
     return ok;
 }
 
+struct ndc_empty_mutation { struct node_db *db; bool inserted; };
+static void ndc_empty_insert_watch(void *opaque)
+{
+    struct ndc_empty_mutation *m = opaque;
+    m->inserted = sqlite3_exec(m->db->db,
+        "INSERT INTO wallet_watch_only(address_hash,address,created_at) VALUES(zeroblob(20),char(120),0)",
+        NULL, NULL, NULL) == SQLITE_OK;
+}
+static bool ndc_empty_final_mutation(struct boot_cutover_replay *replay,
+    struct wallet_sqlite *ws, struct ndc_publish_case *c)
+{
+    struct ndc_empty_mutation m = {.db = replay->ctx->node_db};
+    struct wallet_cutover_binding binding;
+    unsigned before = boot_cutover_publish_test_empty_refusals();
+    boot_cutover_publish_test_before_final(ndc_empty_insert_watch, &m);
+    bool refused = !boot_wallet_cutover_publish_guarded(replay, c->relay, &c->delivery);
+    boot_cutover_publish_test_before_final(NULL, NULL);
+    bool pending = wallet_readiness_get(replay->ctx->wallet).state == WALLET_READINESS_PENDING &&
+        wallet_sqlite_cutover_read(ws, &binding) == WALLET_CUTOVER_PENDING &&
+        !c->delivery.armed && !c->delivery.committed;
+    bool removed = sqlite3_exec(m.db->db, "DELETE FROM wallet_watch_only", NULL, NULL, NULL) == SQLITE_OK;
+    return m.inserted && refused && pending && removed &&
+        boot_cutover_publish_test_empty_refusals() == before + 1;
+}
+
+
+static bool ndc_empty_full_reprove(struct boot_cutover_replay *replay)
+{
+    struct wallet_rpc_context *ctx = replay->ctx;
+    struct db_service *svc = replay->service;
+    struct wallet_cutover_binding binding = replay->binding;
+    struct wallet_witness_endpoint endpoint = replay->endpoint;
+    int floor = replay->floor;
+    bool loaded = replay->sapling_load_ok;
+    uint8_t identity[32];
+    boot_cutover_replay_clear(replay);
+    if (!wallet_scan_identity(ctx->wallet, identity) ||
+        !boot_cutover_replay_init(replay, ctx, svc, &binding, floor, &endpoint, identity)) return false;
+    replay->sapling_load_ok = loaded;
+    return boot_cutover_replay_complete_full_empty(replay) && replay->full_empty;
+}
+
 static bool ndc_empty_publish(struct ndc_replay_fixture *f,
-    struct boot_cutover_replay *replay, struct node_db *db, struct wallet_sqlite *ws)
+    struct boot_cutover_replay *replay, struct node_db *db, struct wallet_sqlite *ws, bool full)
 {
     struct ndc_publish_case c = {0};
     bool ok = ndc_publish_coins(f, &c) && ndc_publish_guard(f, db, &c);
@@ -4322,14 +4672,19 @@ static bool ndc_empty_publish(struct ndc_replay_fixture *f,
         c.snapshot = NULL;
     }
     if (ok) ok = shielded_pool_kv_put(progress_store_db(), replay->endpoint.height, 0, 0);
-    ok = ndc_empty_identity_refusal(f, replay, ws, &c, ok);
-    if (ok) ok = ndc_empty_seed_refusal(f, replay, db, ws, &c);
+    if (full) {
+        if (ok) ok = ndc_empty_full_reprove(replay) && ndc_empty_final_mutation(replay, ws, &c) &&
+            ndc_empty_full_reprove(replay) && replay->full_empty;
+    } else {
+        ok = ndc_empty_identity_refusal(f, replay, ws, &c, ok);
+        if (ok) ok = ndc_empty_seed_refusal(f, replay, db, ws, &c);
+    }
     if (ok) ok = ndc_empty_publish_ready(f, replay, ws, &c);
     return ndc_empty_publish_cleanup(&c, ok);
 }
 
 static bool ndc_empty_replay(struct ndc_replay_fixture *f, struct node_db *db,
-                             struct db_service *svc)
+                             struct db_service *svc, bool full)
 {
     struct wallet_sqlite ws = {0};
     if (!wallet_sqlite_open_r(&ws, db->db).ok) return false;
@@ -4354,7 +4709,7 @@ static bool ndc_empty_replay(struct ndc_replay_fixture *f, struct node_db *db,
         replay.phase == BOOT_CUTOVER_DISCOVER &&
         boot_cutover_replay_step(&replay) == BOOT_CUTOVER_COMPLETE &&
         replay.shielded_empty && replay.phase == BOOT_CUTOVER_DONE;
-    if (ok) ok = ndc_empty_publish(f, &replay, db, &ws);
+    if (ok) ok = ndc_empty_publish(f, &replay, db, &ws, full);
     boot_cutover_replay_clear(&replay);
     wallet_sqlite_close(&ws);
     return ok;
@@ -4369,7 +4724,7 @@ static bool ndc_empty_fixture_blocks(struct ndc_replay_fixture *f, bool ok)
         ndc_replay_write_fixture_block(f, 2, d, pk);
 }
 
-static bool ndc_empty_fixture_service(struct ndc_replay_fixture *f, bool ok)
+static bool ndc_empty_fixture_service(struct ndc_replay_fixture *f, bool ok, bool full)
 {
     struct node_db db = {0};
     struct db_service svc;
@@ -4379,14 +4734,14 @@ static bool ndc_empty_fixture_service(struct ndc_replay_fixture *f, bool ok)
     bool started = opened && db_service_attach(&svc, &db) && db_service_start_test_worker(&svc);
     struct app_runtime_context runtime = {.db_service = &svc};
     app_runtime_set_current(&runtime);
-    ok = started && ndc_empty_replay(f, &db, &svc);
+    ok = started && ndc_empty_replay(f, &db, &svc, full);
     app_runtime_set_current(NULL);
     if (started) db_service_stop(&svc);
     if (opened) node_db_close(&db);
     return ok;
 }
 
-static bool ndc_empty_fixture_child(const char *base)
+static bool ndc_empty_fixture_child(const char *base, bool full)
 {
     chain_params_select(CHAIN_TESTNET);
     if (!SetDataDir(base)) return false;
@@ -4407,7 +4762,7 @@ static bool ndc_empty_fixture_child(const char *base)
     f.wallet = zcl_calloc(1, sizeof(*f.wallet), "empty replay wallet");
     if (!f.wallet) { main_state_free(&f.state); return false; }
     wallet_init(f.wallet);
-    ok = ndc_empty_fixture_service(&f, ok);
+    ok = ndc_empty_fixture_service(&f, ok, full);
     main_state_free(&f.state);
     wallet_free(f.wallet);
     free(f.wallet);
@@ -4420,9 +4775,14 @@ static int ndc_check_empty_cutover(void)
     char base[256];
     test_make_tmpdir(base, sizeof(base), "node_db_catchup", "empty_cutover");
     pid_t child = fork();
-    if (child == 0) { alarm(60); _exit(ndc_empty_fixture_child(base) ? 0 : 1); }
+    if (child == 0) { alarm(60); _exit(ndc_empty_fixture_child(base, false) ? 0 : 1); }
     NDC_CHECK("empty shielded replay publishes only while the proof remains valid",
               ndc_replay_wait_child(child));
+    (void)test_rm_rf_recursive(base);
+    test_make_tmpdir(base, sizeof(base), "node_db_catchup", "full_empty_cutover");
+    child = fork();
+    if (child == 0) { alarm(60); _exit(ndc_empty_fixture_child(base, true) ? 0 : 1); }
+    NDC_CHECK("full empty proof publishes only after final revalidation", ndc_replay_wait_child(child));
     (void)test_rm_rf_recursive(base);
     return failures;
 }
@@ -4663,6 +5023,56 @@ static bool ndc_transparent_refusals(struct ndc_transparent_fixture *f,
     return r.status == TRANSPARENT_REPLAY_INCOMPLETE && ndc_transparent_tamper(f, identity);
 }
 
+static bool ndc_transparent_identity_one(struct ndc_transparent_fixture *f, int which)
+{
+    uint8_t identity[32];
+    if (!wallet_scan_identity(f->wallet, identity)) return false;
+    size_t before = f->wallet->num_wallet_tx;
+    bool spent = wallet_is_outpoint_spent(f->wallet, &f->funding, 0);
+    struct ndc_identity_probe p = {.wallet = f->wallet, .which = which};
+    node_db_transparent_replay_test_after_read(ndc_identity_mutate_once, &p);
+    struct transparent_replay_result r = node_db_catchup_wallet_transparent(
+        &f->state, f->wallet, f->dir, 1, 1, 2, f->hashes[2].data, identity);
+    node_db_transparent_replay_test_after_read(NULL, NULL);
+    if (p.fired) ndc_identity_flip(f->wallet, which);
+    return p.fired && r.status == TRANSPARENT_REPLAY_KEYS_CHANGED && r.last_complete == 0 &&
+        f->wallet->num_wallet_tx == before &&
+        wallet_is_outpoint_spent(f->wallet, &f->funding, 0) == spent &&
+        wallet_readiness_get(f->wallet).state == WALLET_READINESS_PENDING;
+}
+static bool ndc_transparent_capture_once(struct ndc_transparent_fixture *f)
+{
+    uint8_t identity[32];
+    if (!wallet_scan_identity(f->wallet, identity)) return false;
+    zcl_alloc_fault_fail_nth("wallet scan snapshot", 2);
+    struct transparent_replay_result r = node_db_catchup_wallet_transparent(
+        &f->state, f->wallet, f->dir, 1, 2, 2, f->hashes[2].data, identity);
+    bool once = zcl_alloc_fault_armed_label() && r.status == TRANSPARENT_REPLAY_COMPLETE;
+    zcl_alloc_fault_clear();
+    size_t before = f->wallet->num_wallet_tx;
+    zcl_alloc_fault_fail_next("wallet scan snapshot");
+    r = node_db_catchup_wallet_transparent(
+        &f->state, f->wallet, f->dir, 1, 1, 2, f->hashes[2].data, identity);
+    zcl_alloc_fault_clear();
+    return once && r.status == TRANSPARENT_REPLAY_KEYS_CHANGED && f->wallet->num_wallet_tx == before;
+}
+static bool ndc_transparent_identity_cases(struct ndc_transparent_fixture *f)
+{
+    struct ndc_identity_saved saved;
+    ndc_identity_seed(f->wallet, &saved);
+    struct sapling_key_entry saved_sapling = f->wallet->sapling_keys.keys[0];
+    size_t count = f->wallet->sapling_keys.num_keys;
+    f->wallet->sapling_keys.num_keys = 1;
+    f->wallet->sapling_keys.keys[0].used = true;
+    bool ok = ndc_transparent_capture_once(f);
+    for (int which = 0; ok && which <= 30; ++which)
+        ok = ndc_transparent_identity_one(f, which);
+    f->wallet->sapling_keys.keys[0] = saved_sapling;
+    f->wallet->sapling_keys.num_keys = count;
+    ndc_identity_unseed(f->wallet, &saved);
+    return ok;
+}
+
 static bool ndc_transparent_extension(struct ndc_transparent_fixture *f,
                                       const uint8_t identity[32])
 {
@@ -4753,6 +5163,7 @@ static int ndc_check_transparent_replay(void)
     uint8_t identity[32];
     if (ok) ok = ndc_transparent_filter_sparse(f.wallet) && wallet_scan_identity(f.wallet, identity) && ndc_transparent_filter_negative(&f, identity) && ndc_transparent_filter_batches(&f, identity) && ndc_transparent_refusals(&f, identity);
     if (ok) ok = ndc_transparent_extension(&f, identity);
+    if (ok) ok = ndc_transparent_identity_cases(&f);
     NDC_CHECK("transparent range rejects wrong chain, keys, missing and tampered blocks, then retries", ok);
     if (f.wallet) { wallet_free(f.wallet); free(f.wallet); }
     main_state_free(&f.state); (void)test_rm_rf_recursive(f.dir);

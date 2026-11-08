@@ -67,7 +67,6 @@ engine/composition/src/boot_steps.c 2
 engine/composition/src/boot_wallet_phrase.c 1
 engine/composition/src/boot_wallet_rebuild.c 1
 engine/composition/src/consensus_state_install_derived_state.c 1
-engine/composition/src/consensus_state_install_runtime.c 1
 engine/composition/src/consensus_state_snapshot_candidate_validate.c 2
 engine/composition/src/consensus_state_snapshot_export_live.c 1
 engine/composition/src/runtime.c 1

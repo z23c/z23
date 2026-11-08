@@ -56,8 +56,17 @@ int node_db_catchup_sparse_prefix_target(int indexed,
 struct node_db;
 struct transaction;
 struct wallet;
+struct wallet_scan_snapshot;
+enum catchup_scan_snapshot_status { CATCHUP_SCAN_OK, CATCHUP_SCAN_BUSY, CATCHUP_SCAN_REFUSED };
+/* Captures the expected public scan identity under all three wallet locks. */
+enum catchup_scan_snapshot_status node_db_catchup_scan_snapshot(
+    struct wallet *wallet, const uint8_t expected[32], struct wallet_scan_snapshot **out);
+
 struct sapling_key_entry;
 struct sapling_replay_delivery;
+#ifdef ZCL_TESTING
+void node_db_transparent_replay_test_after_read(void (*hook)(void *), void *ctx);
+#endif
 #if defined(ZCL_TESTING) && !defined(_WIN32)
 void node_db_sapling_replay_test_crash_before_delivery(void);
 #endif

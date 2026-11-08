@@ -637,6 +637,13 @@ void app_shutdown(void);
  * for every other offline one-shot (e.g. -coldstart-seed-oneshot), which
  * leaves the offline-worker-drain deadline armed exactly as before. */
 void app_shutdown_offline(bool output_already_durable);
+/* Only a verified COMMITTED pending-wallet startup may use this handoff. */
+bool boot_old_cutover_restart_pending(void);
+bool boot_old_cutover_restart_cleanup(void);
+#ifdef ZCL_TESTING
+struct wallet_cutover_binding;
+void boot_old_cutover_test_arm(const struct wallet_cutover_binding *binding, const char *datadir);
+#endif
 
 /* Legacy -refold-staged is contained before boot writes: its ordinary reducer
  * replay cannot own the bounded shielded-history completion transaction. The

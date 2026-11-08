@@ -144,6 +144,90 @@ static void level_summary(const struct header *h, char *out, size_t cap)
     if (h->domain[0] && h->function[0] && used < cap) snprintf(out + used, cap - used, " %s()", h->function);
 }
 
+/* One tail thread writes; a sequence protects readers from mixed progress fields. */
+static void replay_store(struct zapp_nodelog *l, const struct zapp_replay_progress *p)
+{
+    atomic_fetch_add(&l->replay_seq, 1);
+    atomic_store(&l->replay_phase, p->phase);
+    atomic_store(&l->replay_floor, p->floor);
+    atomic_store(&l->replay_next, p->next);
+    atomic_store(&l->replay_reference, p->reference);
+    atomic_fetch_add(&l->replay_seq, 1);
+}
+static bool replay_number(const char **s, int64_t *value)
+{
+    if (**s < 48 || **s > 57) return false;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long n = strtoull(*s, &end, 10);
+    if (errno || end == *s || n > (unsigned long long)INT32_MAX + 1) return false;
+    *s = end;
+    *value = (int64_t)n;
+    return true;
+}
+static bool replay_word(const char **s, const char *word)
+{
+    size_t n = strlen(word);
+    if (strncmp(*s, word, n)) return false;
+    *s += n;
+    return true;
+}
+static enum zapp_replay_phase replay_phase(const char **line)
+{
+    static const char *const phases[] = {"transparent", "discover", "witness", "spends"};
+    for (size_t i = 0; i < sizeof(phases) / sizeof(phases[0]); ++i) {
+        size_t n = strlen(phases[i]);
+        if (!strncmp(*line, phases[i], n) && (*line)[n] == 32) {
+            *line += n;
+            return (enum zapp_replay_phase)(i + 1);
+        }
+    }
+    return ZAPP_REPLAY_NONE;
+}
+static bool replay_heights(const char **line, struct zapp_replay_progress *p)
+{
+    return replay_word(line, " floor=") && replay_number(line, &p->floor) &&
+        replay_word(line, " next=") && replay_number(line, &p->next) &&
+        replay_word(line, " reference=") && replay_number(line, &p->reference);
+}
+static bool replay_parse(const char *line, struct zapp_replay_progress *p)
+{
+    if (!replay_word(&line, "[wallet-replay] phase=")) return false;
+    p->phase = replay_phase(&line);
+    if (!p->phase || !replay_heights(&line, p)) return false;
+    if (*line == 13) ++line;
+    if (*line == 10) ++line;
+    return !*line && p->reference <= INT32_MAX && p->floor <= p->reference &&
+        p->next >= p->floor && p->next <= p->reference + 1;
+}
+bool zapp_nodelog_replay(struct zapp_nodelog *l, struct zapp_replay_progress *out)
+{
+    if (!l || !out) return false;
+    for (int i = 0; i < 3; ++i) {
+        unsigned a = atomic_load(&l->replay_seq);
+        if (a & 1) continue;
+        struct zapp_replay_progress p = { .phase = atomic_load(&l->replay_phase),
+            .floor = atomic_load(&l->replay_floor), .next = atomic_load(&l->replay_next),
+            .reference = atomic_load(&l->replay_reference) };
+        if (a == atomic_load(&l->replay_seq)) { *out = p; return p.phase != ZAPP_REPLAY_NONE; }
+    }
+    return false;
+}
+bool zapp_nodelog_replay_visible(bool responding, bool running, bool stopping, bool has_progress)
+{
+    return !responding && running && !stopping && has_progress;
+}
+void zapp_nodelog_replay_text(const struct zapp_replay_progress *p, char *out, size_t cap)
+{
+    if (!out || !cap) return;
+    if (!p || p->phase == ZAPP_REPLAY_NONE) { out[0] = 0; return; }
+    if (p->phase == ZAPP_REPLAY_WITNESS) { snprintf(out, cap, "Preparing wallet witnesses"); return; }
+    const char *phase = p->phase == ZAPP_REPLAY_TRANSPARENT ? "Checking wallet history" :
+        p->phase == ZAPP_REPLAY_DISCOVER ? "Scanning private history" : "Checking private spends";
+    snprintf(out, cap, "%s: %lld of %lld blocks", phase,
+        (long long)(p->next - p->floor), (long long)(p->reference - p->floor + 1));
+}
+
 /* "[boot-stage] a -> b" names the stage b the node has just entered. */
 static void note_stage(struct zapp_nodelog *l, const char *line)
 {
@@ -152,6 +236,9 @@ static void note_stage(struct zapp_nodelog *l, const char *line)
     if (!to) return;
     to += 4;
     size_t n = strcspn(to, " \r\n");
+    if (n == strlen("datadir_locked") && !strncmp(to, "datadir_locked", n)) {
+        const struct zapp_replay_progress empty = {0}; replay_store(l, &empty);
+    }
     for (size_t i = 0; i < STAGES; i++)
         if (strlen(stages[i].name) == n && !strncmp(stages[i].name, to, n))
             atomic_store(&l->stage, (int)i + 1);
@@ -364,9 +451,18 @@ static bool take_slot(struct zapp_nodelog *l, int64_t now_ms)
     return l->window_count++ < ZAPP_NODELOG_PER_SECOND;
 }
 
+static bool nodelog_shutdown_timing(const char *text, bool has_header, const struct header *header,
+                                    char *timing, size_t cap)
+{
+    return (has_header && shutdown_timing(text, header, timing, cap)) ||
+        shutdown_substep(text, timing, cap) || shutdown_watchdog(text, timing, cap);
+}
+
 void zapp_nodelog_line(struct zapp_nodelog *l, const char *line, int64_t now_ms)
 {
     note_stage(l, line);
+    struct zapp_replay_progress replay;
+    if (replay_parse(line, &replay)) replay_store(l, &replay);
     char text[ZAPP_NODELOG_LINE_MAX + 1];
     snprintf(text, sizeof(text), "%s", line);
     text[strcspn(text, "\r\n")] = 0;
@@ -374,9 +470,7 @@ void zapp_nodelog_line(struct zapp_nodelog *l, const char *line, int64_t now_ms)
     struct header header;
     bool has_header = read_header(text, &header), warning = warning_level(text, has_header, &header);
     char timing[256];
-    bool stage = (has_header && shutdown_timing(text, &header, timing, sizeof(timing))) ||
-                 shutdown_substep(text, timing, sizeof(timing)) ||
-                 shutdown_watchdog(text, timing, sizeof(timing));
+    bool stage = nodelog_shutdown_timing(text, has_header, &header, timing, sizeof(timing));
     bool progress = !warning && (stage || explains_progress(text, has_header, &header));
     if (!warning && !progress) return;
     if (!take_slot(l, now_ms)) return;
@@ -400,6 +494,10 @@ static void logcat_sink(void *arg, int level, const char *text)
 void zapp_nodelog_init(struct zapp_nodelog *l, zapp_nodelog_sink sink, void *arg)
 {
     memset(l, 0, sizeof(*l));
+    atomic_init(&l->stage, 0); atomic_init(&l->stop, false);
+    atomic_init(&l->replay_seq, 0); atomic_init(&l->replay_phase, 0);
+    atomic_init(&l->replay_floor, 0); atomic_init(&l->replay_next, 0);
+    atomic_init(&l->replay_reference, 0);
     l->sink = sink ? sink : logcat_sink;
     l->sink_arg = arg;
 }
@@ -479,12 +577,14 @@ void zapp_nodelog_stop(struct zapp_nodelog *l)
     atomic_store(&l->stop, true);
     pthread_join(l->thread, NULL);
     l->started = false;
+    const struct zapp_replay_progress empty = {0}; replay_store(l, &empty);
 }
 
 bool zapp_nodelog_start(struct zapp_nodelog *l, const char *file, off_t offset, pid_t pid, off_t cap)
 {
     zapp_nodelog_stop(l);
     atomic_store(&l->stage, 0);
+    const struct zapp_replay_progress empty = {0}; replay_store(l, &empty);
     atomic_store(&l->stop, false);
     l->window_count = 0;
     l->offset = offset;

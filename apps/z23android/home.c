@@ -88,17 +88,10 @@ static void behind_line(const struct zapp_view *view, char *out, size_t cap)
     }
     snprintf(out, cap, "Catching up: %s blocks to go", zapp_grouped(behind, blocks));
 }
-/* Plain node status; up to date is shown only for the CURRENT verdict. */
-static const char *plain_node_line(const struct zapp_view *view, char *out, size_t cap)
+/* Describe a responding node using the current chain verdict. */
+static void responding_node_line(const struct zapp_view *view, char *out, size_t cap)
 {
-    if (view->node_stopping && view->node_installing) snprintf(out, cap, "Stopping…\nYou can use Z23");
-    else if (view->node_installing) snprintf(out, cap, "Fast sync\nPreparing your wallet");
-    else if (!view->node_process_running) snprintf(out, cap, "Node stopped");
-    else if (view->node_stopping) snprintf(out, cap, "Stopping…\nYou can use Z23");
-    else if (view->pace == ZAPP_PACE_PAUSE) snprintf(out, cap, "%s", ZAPP_PAUSED_LINE);
-    else if (!view->node_running) snprintf(out, cap, "%s", view->node_seen_height ?
-        "Your node is running but has not replied yet" : "Starting node…\nYou can use Z23");
-    else if (view->node_height < 0) snprintf(out, cap, "Checking the chain");
+    if (view->node_height < 0) snprintf(out, cap, "Checking the chain");
     else if (view->node_reference < 0) {
         char height[32];
         snprintf(out, cap, "Block %s, waiting for other computers", zapp_grouped(view->node_height, height));
@@ -108,6 +101,20 @@ static const char *plain_node_line(const struct zapp_view *view, char *out, size
     else if (view->chain_state == ZAPP_CHAIN_WAITING) snprintf(out, cap, "%s", view->chain_doubt);
     else if (view->chain_state == ZAPP_CHAIN_CURRENT) snprintf(out, cap, "Up to date");
     else snprintf(out, cap, "Connected, checking the chain");
+}
+
+/* Plain node status; up to date is shown only for the CURRENT verdict. */
+static const char *plain_node_line(const struct zapp_view *view, char *out, size_t cap)
+{
+    if (view->node_stopping && view->node_installing) snprintf(out, cap, "Stopping…\nYou can use Z23");
+    else if (view->node_installing) snprintf(out, cap, "Fast sync\nPreparing your wallet");
+    else if (!view->node_process_running) snprintf(out, cap, "Node stopped");
+    else if (view->node_stopping) snprintf(out, cap, "Stopping…\nYou can use Z23");
+    else if (view->node_wallet_replaying && !view->node_running) snprintf(out, cap, "%s", view->node_wallet_replay);
+    else if (view->pace == ZAPP_PACE_PAUSE) snprintf(out, cap, "%s", ZAPP_PAUSED_LINE);
+    else if (!view->node_running) snprintf(out, cap, "%s", view->node_seen_height ?
+        "Your node is running but has not replied yet" : "Starting node…\nYou can use Z23");
+    else responding_node_line(view, out, cap);
     return out;
 }
 /* The plain node line the Home card shows, copied into out; the foreground notification shows the same line. */

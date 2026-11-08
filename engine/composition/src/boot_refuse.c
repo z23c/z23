@@ -14,6 +14,8 @@
 #include "util/log_macros.h"
 
 #include <stdio.h>
+#include <unistd.h>
+#include "util/thread_registry.h"
 
 /* A one-shot -export-consensus-bundle must never wait at a boot gate: one
  * REFUSED line, latch FATAL, return false so main exits 1. Returns true when
@@ -60,5 +62,25 @@ bool boot_refuse_at_permanent_gate(const char *gate_name, const char *message,
                       next, next_count, "reason=%s%s%s", name,
                       evidence && evidence[0] ? " " : "",
                       evidence ? evidence : "");
+    return false;
+}
+
+/* Park alive-degraded until shutdown, then return false. Never true.
+ * -export-consensus-bundle: one REFUSED line, latch FATAL, return (exit 1).
+ * ONLY for a gate whose process still has something to offer while it waits;
+ * a gate firing before the node serves anything must use
+ * boot_refuse_at_permanent_gate() instead. */
+bool boot_park_until_shutdown(const char *gate_name)
+{
+    const char *name = gate_name ? gate_name : "boot_storage_gate";
+    boot_status_set_blocker(name, name);
+    if (boot_gate_export_refusal(name))
+        return false;
+    fprintf(stderr,
+        "[boot] PARKED alive-degraded at gate '%s' — bounded re-derive budget "
+        "exhausted; the operator was paged. NOT crash-looping; waiting for a "
+        "shutdown signal.\n", name);
+    while (!thread_registry_shutdown_requested())
+        sleep(2);
     return false;
 }

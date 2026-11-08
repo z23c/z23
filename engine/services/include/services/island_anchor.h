@@ -113,6 +113,8 @@ struct zcl_result island_anchor_save(struct sqlite3 *db,
                                      const struct island_anchor_rows *rows);
 /* Atomically commit exact full-window proof with its anchor and SEEDED state. */
 struct zcl_result island_anchor_recovery_fresh(struct sqlite3 *db);
+/* Prove only the durable genesis fold; caller separately validates island authority. */
+struct zcl_result island_anchor_genesis_fold_proven(struct sqlite3 *db);
 struct zcl_result island_anchor_save_window_recover(struct sqlite3 *db, const struct island_anchor *a,
     const struct island_anchor_rows *rows, const struct block_header *window);
 struct zcl_result island_anchor_save_window(struct sqlite3 *db,

@@ -3,16 +3,20 @@
 #include "config/boot_wallet_pending_restore.h"
 
 #include "chain/chainparams.h"
+#include "consensus/params.h"
 #include "core/uint256.h"
 #include "primitives/block.h"
 #include "sapling/incremental_merkle_tree.h"
 #include "services/chain_state_service.h"
 #include "services/island_anchor.h"
+#include "services/block_index_loader.h"
 #include "storage/anchor_kv.h"
 #include "storage/node_db_runtime.h"
 #include "storage/progress_store.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
+#include "wallet/wallet_sqlite.h"
+#include <string.h>
 
 static bool bpr_bound(const struct main_state *ms, const struct chain_state_repository *csr)
 {
@@ -84,6 +88,121 @@ static bool bpr_tree(int32_t height, struct incremental_merkle_tree *tree)
         anchor_kv_latest_tree(db, ANCHOR_POOL_SAPLING, tree, NULL, &anchor_height) : ANCHOR_KV_ERROR;
     progress_store_tx_unlock();
     return found == ANCHOR_KV_FOUND && anchor_height >= 0 && anchor_height <= height;
+}
+
+/* The old chain and the separately verified target window remain distinct. */
+static bool bpr_old_ancestry(struct main_state *ms, struct block_index *tip,
+                             struct block_header *tip_header)
+{
+    const struct chain_params *params = chain_params_get();
+    if (!params) return false;
+    for (struct block_index *p = tip; p; p = p->pprev) {
+        if (!p->phashBlock || p->nHeight < 0 ||
+            block_map_find(&ms->map_block_index, p->phashBlock) != p) return false;
+        if (p->nHeight == 0)
+            return !p->pprev && uint256_eq(p->phashBlock, &params->consensus.hashGenesisBlock);
+        struct block_header header;
+        if (!bpr_header(p, &header) || !p->pprev || !p->pprev->phashBlock ||
+            p->pprev->nHeight != p->nHeight - 1 ||
+            !uint256_eq(&header.hashPrevBlock, p->pprev->phashBlock)) return false;
+        if (p == tip) *tip_header = header;
+    }
+    return false;
+}
+
+static bool bpr_old_tree(int32_t height, const struct block_header *header,
+                         struct incremental_merkle_tree *tree)
+{
+    const struct chain_params *params = chain_params_get();
+    if (!params) return false;
+    progress_store_tx_lock();
+    sqlite3 *db = progress_store_db();
+    int64_t anchor_height = -1;
+    enum anchor_kv_lookup_result found = db ?
+        anchor_kv_tree_at_or_below(db, ANCHOR_POOL_SAPLING, height, tree, NULL, &anchor_height) :
+        ANCHOR_KV_ERROR;
+    progress_store_tx_unlock();
+    if (found != ANCHOR_KV_FOUND) return false;
+    if (!consensus_network_upgrade_active(&params->consensus, height, UPGRADE_SAPLING))
+        return incremental_tree_size(tree) == 0;
+    struct uint256 root;
+    incremental_tree_root(tree, &root);
+    return anchor_height >= 0 && anchor_height <= height &&
+        !uint256_is_null(&header->hashFinalSaplingRoot) &&
+        uint256_eq(&root, &header->hashFinalSaplingRoot);
+}
+
+static bool bpr_old_partial_island(const struct wallet_cutover_binding *binding,
+                                   struct island_anchor *island, bool *seeded)
+{
+    enum island_anchor_state state = island_anchor_state_load(progress_store_db());
+    *seeded = state == ISLAND_ANCHOR_STATE_SEEDED;
+    if (!*seeded) return state == ISLAND_ANCHOR_STATE_NONE && !island_anchor_registered();
+    return island_anchor_get(island) && island->rung_height == binding->target_height &&
+        memcmp(island->rung_hash.data, binding->target_hash, 32) == 0;
+}
+
+static bool bpr_old_genesis_authority(const struct wallet_cutover_binding *binding,
+                                       const struct chain_params *params,
+                                       struct island_anchor *island)
+{
+    return binding && params && binding->old_height == 0 &&
+        memcmp(binding->old_hash, params->consensus.hashGenesisBlock.data, 32) == 0 &&
+        island_anchor_state_load(progress_store_db()) == ISLAND_ANCHOR_STATE_SEEDED &&
+        island_anchor_get(island) && island->rung_height == binding->target_height &&
+        memcmp(island->rung_hash.data, binding->target_hash, 32) == 0 &&
+        island_anchor_genesis_fold_proven(progress_store_db()).ok;
+}
+
+enum boot_pending_restore_result boot_wallet_old_partial_restore(
+    struct main_state *ms, struct chain_state_repository *csr,
+    const struct wallet_cutover_binding *binding)
+{
+    if (!bpr_bound(ms, csr) || !binding || binding->old_height <= 0)
+        return BOOT_PENDING_RESTORE_INVALID_CONTEXT;
+    struct island_anchor island;
+    bool seeded;
+    if (!bpr_old_partial_island(binding, &island, &seeded))
+        return BOOT_PENDING_RESTORE_INVALID_CONTEXT;
+    struct uint256 hash;
+    memcpy(hash.data, binding->old_hash, 32);
+    struct block_index *tip = block_map_find(&ms->map_block_index, &hash);
+    struct block_index *rung = seeded ? block_map_find(&ms->map_block_index, &island.rung_hash) : tip;
+    struct block_header header;
+    if (!tip || tip->nHeight != binding->old_height || !rung ||
+        (seeded && rung->nHeight != island.rung_height) || !bpr_old_ancestry(ms, tip, &header))
+        return BOOT_PENDING_RESTORE_ANCESTRY_INVALID;
+    struct incremental_merkle_tree tree;
+    sapling_tree_init(&tree);
+    if (!bpr_old_tree(binding->old_height, &header, &tree))
+        return BOOT_PENDING_RESTORE_TREE_UNAVAILABLE;
+    if (!csr_restore_in_memory_view(csr, tip, rung, &hash))
+        return BOOT_PENDING_RESTORE_CSR_REFUSED;
+    ms->sapling_tree = tree;
+    ms->sapling_tree_loaded = true;
+    return BOOT_PENDING_RESTORE_OK;
+}
+
+enum boot_pending_restore_result boot_wallet_old_genesis_restore(
+    struct main_state *ms, struct chain_state_repository *csr,
+    const struct wallet_cutover_binding *binding)
+{
+    const struct chain_params *params = chain_params_get();
+    struct island_anchor island;
+    if (!bpr_bound(ms, csr) || !bpr_old_genesis_authority(binding, params, &island))
+        return BOOT_PENDING_RESTORE_INVALID_CONTEXT;
+    struct block_index *genesis = block_map_find(&ms->map_block_index,
+        &params->consensus.hashGenesisBlock);
+    if (!block_index_initialize_genesis(genesis, params))
+        return BOOT_PENDING_RESTORE_ANCESTRY_INVALID;
+    struct block_index *rung = block_map_find(&ms->map_block_index, &island.rung_hash);
+    if (!rung || rung->nHeight != island.rung_height)
+        return BOOT_PENDING_RESTORE_ANCESTRY_INVALID;
+    if (!csr_restore_in_memory_view(csr, genesis, rung, &params->consensus.hashGenesisBlock))
+        return BOOT_PENDING_RESTORE_CSR_REFUSED;
+    sapling_tree_init(&ms->sapling_tree);
+    ms->sapling_tree_loaded = true;
+    return BOOT_PENDING_RESTORE_OK;
 }
 
 enum boot_pending_restore_result boot_wallet_pending_restore(

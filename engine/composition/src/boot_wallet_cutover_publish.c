@@ -17,11 +17,15 @@
 #include "wallet/wallet_sqlite.h"
 #include "util/safe_alloc.h"
 #include <limits.h>
+#include <stdatomic.h>
 #include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>
 
 #ifdef ZCL_TESTING
+static _Atomic unsigned g_bcp_empty_refusals;
+unsigned boot_cutover_publish_test_empty_refusals(void)
+{ return atomic_load(&g_bcp_empty_refusals); }
 static void (*g_bcp_before_final)(void *);
 static void *g_bcp_before_final_ctx;
 void boot_cutover_publish_test_before_final(void (*hook)(void *), void *ctx)
@@ -154,6 +158,25 @@ static enum db_wallet_cutover_tx_class bcp_classify(void *opaque, const uint8_t 
     return DB_CUTOVER_TX_UNKNOWN;
 }
 
+static bool bcp_full_empty(struct bcp_context *ctx, struct wallet *wallet, sqlite3 *db)
+{
+    if (!ctx->replay->full_empty) return true;
+    bool empty = boot_wallet_cutover_full_empty_locked(
+        ctx->replay->ctx->wallet_db, db, wallet, ctx->replay->sapling_load_ok);
+#ifdef ZCL_TESTING
+    if (!empty) atomic_fetch_add(&g_bcp_empty_refusals, 1);
+#endif
+    return empty;
+}
+
+static bool bcp_readiness_matches(const struct wallet_readiness *current,
+                                  const struct wallet_readiness *expected)
+{
+    return current->state == WALLET_READINESS_PENDING && current->epoch != UINT64_MAX &&
+        current->epoch == expected->epoch && current->generation_present == expected->generation_present &&
+        current->generation == expected->generation;
+}
+
 static bool bcp_holds(void *opaque, struct wallet *wallet, sqlite3 *db)
 {
     struct bcp_context *ctx = opaque;
@@ -164,11 +187,10 @@ static bool bcp_holds(void *opaque, struct wallet *wallet, sqlite3 *db)
     if (deadline && (now <= 0 || now >= deadline || wallet_lock_is_locked())) return false;
     if (!wallet_sqlite_verify_startup_sapling_in_tx_locked_r(
             ctx->replay->ctx->wallet_db, wallet, db).ok) return false;
-    return (!ctx->replay->shielded_empty || boot_wallet_cutover_shielded_empty_locked(
+    return bcp_full_empty(ctx, wallet, db) &&
+        (!ctx->replay->shielded_empty || boot_wallet_cutover_shielded_empty_locked(
             ctx->replay->ctx->wallet_db, db, wallet, ctx->replay->sapling_load_ok)) &&
-        current.state == WALLET_READINESS_PENDING && current.epoch != UINT64_MAX &&
-        current.epoch == expected->epoch && current.generation_present == expected->generation_present &&
-        current.generation == expected->generation &&
+        bcp_readiness_matches(&current, expected) &&
         boot_cutover_coins_matches(ctx->coins, ctx->replay->endpoint.height,
             ctx->replay->endpoint.hash.data, expected->generation, ctx->replay->identity) &&
         wallet_private_broadcast_validate_holds_locked(ctx->guard, wallet, db);

@@ -75,6 +75,8 @@ bool zapp_node_resume_if_wanted(struct zapp_runtime *r, char *out, size_t cap);
 bool zapp_node_resume_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap);
 struct zapp_node_identity { pid_t pid; int pidfd; uint64_t epoch, start_token; };
 void zapp_node_identity_close(struct zapp_node_identity *id);
+bool zapp_node_replay_progress(struct zapp_runtime *r, const struct zapp_node_identity *id,
+    struct zapp_replay_progress *out);
 bool zapp_node_identity(struct zapp_runtime *r, struct zapp_node_identity *id);
 bool zapp_node_handoff_stop(struct zapp_runtime *r, const struct zapp_node_identity *id, uint64_t *epoch);
 bool zapp_node_handoff_current(struct zapp_runtime *r, uint64_t epoch);

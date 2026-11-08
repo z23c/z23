@@ -35,6 +35,8 @@
 #include "services/chain_tip.h"
 #include "validation/process_block.h"
 #include "storage/ldb_snapshot.h"
+#include "models/database.h"
+#include "storage/coins_view_sqlite.h"
 #include "util/ar_step_readonly.h"
 #include "storage/disk_block_io.h"
 #include "primitives/block.h"
@@ -1002,4 +1004,48 @@ void boot_sapling_tree_boot_load(struct app_context *ctx, struct main_state *st,
                                            &sapling_tree_saved_height);
     boot_step_verify_sapling_root(ctx, st, ndb, datadir,
                                   sapling_tree_saved_height);
+}
+
+/* Rewind a placeholder (nBits==0) tip to the last real block. */
+void boot_step_rewind_placeholder_tip(struct main_state *state, struct node_db *ndb)
+{
+    /* Rewind a placeholder tip.
+     *
+     * If a placeholder (nBits==0) ever became our active tip — e.g.,
+     * because a chain_restore anchor at h=N was promoted into the
+     * active chain before its real block data arrived — every
+     * subsequent header will be rejected with bad-diffbits since
+     * GetNextWorkRequired sees prev_bits=0. Walk pprev until we hit
+     * a real block, set THAT as the active tip, and let gap-fill
+     * resync from there. */
+    struct block_index *tip = active_chain_tip(&state->chain_active);
+    if (tip && tip->nBits == 0 && tip->nHeight > 0) {
+        struct block_index *walk = tip->pprev;
+        int last_h = tip->nHeight + 1;
+        int steps = 0;
+        while (walk && walk->nBits == 0 &&
+               walk->pprev && walk->pprev->nHeight < walk->nHeight &&
+               walk->nHeight < last_h && steps++ < 10000) {
+            last_h = walk->nHeight;
+            walk = walk->pprev;
+        }
+        if (walk && walk->nBits != 0) {
+            fprintf(stderr,
+                "[boot] placeholder tip at h=%d (nBits=0); rewinding "
+                "to last real block h=%d\n",
+                tip->nHeight, walk->nHeight);
+            if (boot_promote_tip_via_csr(
+                    walk, "rewind_placeholder_tip", true) &&
+                walk->phashBlock) {
+                if (ndb->open)
+                    (void)coins_rewind_above_tip(
+                        ndb->db, walk->nHeight, -1);
+            }
+        } else {
+            fprintf(stderr,
+                "[boot] placeholder tip at h=%d but no valid "
+                "ancestor found within 10000 steps; chain stuck\n",
+                tip->nHeight);
+        }
+    }
 }

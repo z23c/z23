@@ -18,6 +18,7 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/sync.h"
+#include "util/thread_registry.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -37,6 +38,10 @@
 #ifdef _WIN32
 
 struct consensus_state_artifact_evidence { unsigned char unavailable; };
+
+static bool artifact_copy_platform_arm(
+    const struct consensus_state_artifact_evidence *evidence, int destination)
+{ (void)evidence; (void)destination; return false; }
 
 static bool artifact_coins_begin_platform_arm(
     const struct consensus_state_artifact_evidence *evidence,
@@ -197,8 +202,8 @@ static void digest_u64(struct sha3_256_ctx *ctx, uint64_t value)
     sha3_256_write(ctx, encoded, sizeof(encoded));
 }
 
-static bool descriptor_file_digest(int fd, const struct stat *identity,
-                                   uint8_t out[32])
+static bool descriptor_file_digest_mode(int fd, const struct stat *identity,
+                                        uint8_t out[32], bool cancellable)
 {
     if (fd < 0 || !identity || !out || identity->st_size < 0)
         return false;
@@ -207,6 +212,7 @@ static bool descriptor_file_digest(int fd, const struct stat *identity,
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
     while (offset < identity->st_size) {
+        if (cancellable && thread_registry_shutdown_requested()) return false;
         size_t want = sizeof(buffer);
         off_t remaining = identity->st_size - offset;
         if (remaining < (off_t)want)
@@ -221,6 +227,65 @@ static bool descriptor_file_digest(int fd, const struct stat *identity,
     }
     sha3_256_finalize(&ctx, out);
     return descriptor_identity_unchanged(fd, identity);
+}
+
+static bool descriptor_file_digest(int fd, const struct stat *identity, uint8_t out[32])
+{ return descriptor_file_digest_mode(fd, identity, out, false); }
+
+/* The caller owns an empty private destination; the evidence owns source. */
+static bool artifact_copy_destination_ready(const struct consensus_state_artifact_evidence *evidence,
+                                            int destination, struct stat *before, uint8_t hash[32])
+{
+    int flags = fcntl(destination, F_GETFL);
+    return evidence->artifact_fd >= 0 && evidence->bundle_db &&
+        flags >= 0 && (flags & O_ACCMODE) == O_RDWR && !(flags & O_APPEND) &&
+        fstat(destination, before) == 0 && S_ISREG(before->st_mode) &&
+        before->st_uid == geteuid() && before->st_nlink == 1 && !(before->st_mode & 0077) && before->st_size == 0 &&
+        (before->st_dev != evidence->identity.st_dev || before->st_ino != evidence->identity.st_ino) &&
+        descriptor_file_digest_mode(evidence->artifact_fd, &evidence->identity, hash, true) &&
+        memcmp(hash, evidence->file_digest, 32) == 0;
+}
+static bool artifact_copy_destination_matches(const struct consensus_state_artifact_evidence *evidence,
+    int destination, const struct stat *before, uint8_t source_hash[32], uint8_t destination_hash[32])
+{
+    struct stat after;
+    return fstat(destination, &after) == 0 && S_ISREG(after.st_mode) &&
+        before->st_dev == after.st_dev && before->st_ino == after.st_ino &&
+        after.st_uid == geteuid() && after.st_nlink == 1 &&
+        after.st_size == evidence->identity.st_size &&
+        descriptor_file_digest_mode(destination, &after, destination_hash, true) &&
+        memcmp(destination_hash, evidence->file_digest, 32) == 0 &&
+        descriptor_file_digest_mode(evidence->artifact_fd, &evidence->identity, source_hash, true) &&
+        memcmp(source_hash, evidence->file_digest, 32) == 0;
+}
+static bool artifact_copy_platform_arm(
+    const struct consensus_state_artifact_evidence *evidence, int destination)
+{
+    if (!evidence || destination < 0) return false;
+    zcl_mutex_lock((zcl_mutex_t *)&evidence->mutex);
+    struct stat before;
+    uint8_t source_hash[32], destination_hash[32], buffer[65536];
+    bool ok = artifact_copy_destination_ready(evidence, destination, &before, source_hash);
+    off_t offset = 0;
+    while (ok && offset < evidence->identity.st_size) {
+        if (thread_registry_shutdown_requested()) { ok = false; break; }
+        off_t left = evidence->identity.st_size - offset;
+        size_t want = left < (off_t)sizeof(buffer) ? (size_t)left : sizeof(buffer);
+        ssize_t n = pread(evidence->artifact_fd, buffer, want, offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { ok = false; break; }
+        ssize_t written = 0;
+        while (written < n) {
+            ssize_t part = pwrite(destination, buffer + written, (size_t)(n - written), offset + written);
+            if (part < 0 && errno == EINTR) continue;
+            if (part <= 0) { ok = false; break; }
+            written += part;
+        }
+        offset += n;
+    }
+    ok = ok && artifact_copy_destination_matches(evidence, destination, &before, source_hash, destination_hash);
+    zcl_mutex_unlock((zcl_mutex_t *)&evidence->mutex);
+    return ok;
 }
 
 static void artifact_receipt_digest_build(
@@ -1041,4 +1106,10 @@ void consensus_state_artifact_coins_abort(
     struct consensus_state_artifact_coins *iterator)
 {
     artifact_coins_abort_platform_arm(iterator);
+}
+
+bool consensus_state_artifact_evidence_copy_to_fd(
+    const struct consensus_state_artifact_evidence *evidence, int destination)
+{
+    return artifact_copy_platform_arm(evidence, destination);
 }

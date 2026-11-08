@@ -730,10 +730,176 @@ static int wallet_harness_transparent_fold(void)
     return ok ? 0 : 1;
 }
 
+static void identity_fixture(struct wallet *w)
+{
+    w->sapling_keys.locked = false; w->sapling_keys.num_unscannable = 0; w->sapling_keys.num_damaged = 0;
+    w->has_master_key = true; w->hd_account = 2; w->hd_external_counter = 3; w->hd_internal_counter = 4;
+    w->keystore.num_keys = 4; w->keystore.num_watching = 4; w->keystore.num_scripts = 4;
+    for (size_t i = 0; i < 4; ++i) {
+        w->keystore.keys[i].used = i != 1; w->keystore.keys[i].keyid.id.data[0] = (uint8_t)(i + 1);
+        w->keystore.watching[i].used = i != 1; w->keystore.watching[i].keyid.id.data[0] = (uint8_t)(i + 2);
+        w->keystore.scripts[i].used = i != 1; w->keystore.scripts[i].script_id.data[0] = (uint8_t)(i + 3);
+        w->keystore.scripts[i].redeem_script.size = 2; w->keystore.scripts[i].redeem_script.data[0] = (uint8_t)i;
+    }
+    w->sapling_keys.has_seed = true; w->sapling_keys.next_child_index = 20; w->sapling_keys.num_keys = 20;
+    for (size_t i = 0; i < 20; ++i) {
+        struct sapling_key_entry *k = &w->sapling_keys.keys[i]; k->used = true; k->child_index = (uint32_t)i;
+        memset(k->ivk, (int)(i + 1), 32); memset(k->xfvk.fvk.ak, (int)(i + 2), 32); memset(k->xfvk.fvk.nk, (int)(i + 3), 32);
+    }
+}
+static void identity_mutate_group0(struct wallet *w, int which)
+{
+    switch (which) {
+    case 0: w->has_master_key = false; break;
+    case 1: ++w->hd_account; break;
+    case 2: ++w->hd_external_counter; break;
+    case 3: ++w->hd_internal_counter; break;
+    case 4: --w->keystore.num_keys; break;
+    case 5: w->keystore.keys[0].used = false; break;
+    case 6: w->keystore.keys[0].keyid.id.data[0] ^= 1; break;
+    case 7: --w->keystore.num_watching; break;
+    case 8: w->keystore.watching[0].used = false; break;
+    case 9: w->keystore.watching[0].keyid.id.data[0] ^= 1; break;
+    }
+}
+static void identity_mutate_group1(struct wallet *w, int which)
+{
+    switch (which) {
+    case 10: --w->keystore.num_scripts; break;
+    case 11: w->keystore.scripts[0].used = false; break;
+    case 12: w->keystore.scripts[0].script_id.data[0] ^= 1; break;
+    case 13: ++w->keystore.scripts[0].redeem_script.size; break;
+    case 14: w->keystore.scripts[0].redeem_script.data[0] ^= 1; break;
+    case 15: w->sapling_keys.has_seed = false; break;
+    case 16: ++w->sapling_keys.next_child_index; break;
+    case 17: --w->sapling_keys.num_keys; break;
+    case 18: w->sapling_keys.keys[0].used = false; break;
+    case 19: ++w->sapling_keys.keys[0].child_index; break;
+    }
+}
+static void identity_mutate_group2(struct wallet *w, int which)
+{
+    switch (which) {
+    case 20: w->sapling_keys.keys[0].ivk[0] ^= 1; break;
+    case 21: w->sapling_keys.keys[0].xfvk.fvk.ak[0] ^= 1; break;
+    case 22: w->sapling_keys.keys[0].xfvk.fvk.nk[0] ^= 1; break;
+    case 23: w->sapling_keys.locked = true; break;
+    case 24: ++w->sapling_keys.num_unscannable; break;
+    case 25: ++w->sapling_keys.num_damaged; break;
+    case 26: w->keystore.scripts[0].redeem_script.size = sizeof(w->keystore.scripts[0].redeem_script.data) + 1; break;
+    case 27: w->keystore.num_keys = MAX_KEYSTORE_KEYS + 1; break;
+    case 28: w->keystore.num_watching = MAX_KEYSTORE_WATCHING + 1; break;
+    case 29: w->keystore.num_scripts = MAX_KEYSTORE_SCRIPTS + 1; break;
+    case 30: w->sapling_keys.num_keys = MAX_SAPLING_KEYS + 1; break;
+    }
+}
+static void identity_mutate(struct wallet *w, int which)
+{
+    if (which < 10) identity_mutate_group0(w, which);
+    else if (which < 20) identity_mutate_group1(w, which);
+    else identity_mutate_group2(w, which);
+}
+
+static bool identity_snapshot_mutations(struct wallet *w, const uint8_t expected[32],
+                                        struct wallet_scan_snapshot *snapshot)
+{
+    uint8_t digest[32];
+    for (int i = 0; i <= 30; ++i) {
+        identity_fixture(w);
+        identity_mutate(w, i);
+        bool valid = wallet_scan_identity_locked(w, digest);
+        if (wallet_scan_snapshot_matches_locked(w, snapshot) ||
+            (valid && !memcmp(digest, expected, 32))) return false;
+    }
+    identity_fixture(w);
+    w->keystore.keys[1].keyid.id.data[0] ^= 1;
+    return wallet_scan_identity_locked(w, digest) && !memcmp(digest, expected, 32) &&
+        wallet_scan_snapshot_matches_locked(w, snapshot);
+}
+
+static bool identity_snapshot_refusals(struct wallet *w, const uint8_t expected[32],
+                                       struct wallet_scan_snapshot *snapshot)
+{
+    identity_fixture(w);
+    struct wallet_scan_snapshot *failed = snapshot;
+    uint8_t wrong[32];
+    memcpy(wrong, expected, sizeof(wrong));
+    wrong[0] ^= 1;
+    bool refused = !wallet_scan_snapshot_capture_locked(w, wrong, &failed) && !failed;
+    zcl_alloc_fault_fail_next("wallet scan snapshot");
+    failed = snapshot;
+    bool alloc_refused = !wallet_scan_snapshot_capture_locked(w, expected, &failed) && !failed;
+    zcl_alloc_fault_clear();
+    return refused && alloc_refused;
+}
+
+static bool identity_snapshot_boundaries(struct wallet *w)
+{
+    identity_fixture(w);
+    w->keystore.num_keys = 0;
+    w->keystore.num_watching = 0;
+    w->keystore.num_scripts = 0;
+    w->sapling_keys.has_seed = false;
+    w->sapling_keys.next_child_index = 0;
+    w->sapling_keys.num_keys = 0;
+    uint8_t digest[32];
+    struct wallet_scan_snapshot *snapshot = NULL;
+    bool empty = wallet_scan_identity_locked(w, digest) &&
+        wallet_scan_snapshot_capture_locked(w, digest, &snapshot) &&
+        wallet_scan_snapshot_matches_locked(w, snapshot);
+    wallet_scan_snapshot_free(snapshot);
+    identity_fixture(w);
+    struct script_entry *script = &w->keystore.scripts[0];
+    script->redeem_script.size = sizeof(script->redeem_script.data);
+    memset(script->redeem_script.data, 0x5a, script->redeem_script.size);
+    snapshot = NULL;
+    bool max_script = wallet_scan_identity_locked(w, digest) &&
+        wallet_scan_snapshot_capture_locked(w, digest, &snapshot) &&
+        wallet_scan_snapshot_matches_locked(w, snapshot);
+    script->redeem_script.data[script->redeem_script.size - 1] ^= 1;
+    max_script = max_script && !wallet_scan_snapshot_matches_locked(w, snapshot);
+    wallet_scan_snapshot_free(snapshot);
+    return empty && max_script;
+}
+
+/* Digest captured from the pre-refactor wallet_scan_identity_locked for this
+ * synthetic fixture, which contains no wallet secret material. */
+static int wallet_harness_scan_snapshot(void)
+{
+    static const uint8_t expected[32] = {
+        0x20,0xdd,0xc5,0xb3,0x09,0xf8,0xc7,0xd2,0xed,0x6e,0x97,0x18,0xe5,0xad,0xf8,0x2e,
+        0x43,0x5e,0x25,0x42,0xad,0xfe,0x02,0x7a,0x6a,0x50,0x32,0x01,0x6d,0x26,0xda,0x8e
+    };
+    struct wallet *w = zcl_calloc(1, sizeof(*w), "test identity wallet");
+    if (!w) return 1;
+    wallet_init(w);
+    zcl_mutex_lock(&w->cs);
+    zcl_mutex_lock(&w->keystore.cs);
+    zcl_mutex_lock(&w->sapling_keys.cs);
+    identity_fixture(w);
+    uint8_t digest[32];
+    struct wallet_scan_snapshot *snapshot = NULL;
+    bool ok = wallet_scan_identity_locked(w, digest) && !memcmp(digest, expected, 32) &&
+        wallet_scan_snapshot_capture_locked(w, expected, &snapshot) &&
+        wallet_scan_snapshot_matches_locked(w, snapshot);
+    if (ok) ok = identity_snapshot_mutations(w, expected, snapshot);
+    if (ok) ok = identity_snapshot_refusals(w, expected, snapshot);
+    if (ok) ok = identity_snapshot_boundaries(w);
+    wallet_scan_snapshot_free(snapshot);
+    zcl_mutex_unlock(&w->sapling_keys.cs);
+    zcl_mutex_unlock(&w->keystore.cs);
+    zcl_mutex_unlock(&w->cs);
+    wallet_free(w);
+    free(w);
+    printf("scan snapshot preserves canonical identity and detects mutations... %s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int test_wallet(void)
 {
     int failures = 0;
 
+    failures += wallet_harness_scan_snapshot();
     failures += wallet_harness_keystore_init_zeroes();
     failures += wallet_harness_transparent_fold();
     failures += wallet_harness_keystore_add_and_have();

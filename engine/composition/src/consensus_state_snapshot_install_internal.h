@@ -10,6 +10,10 @@
 #include <stddef.h>
 struct rom_state_checkpoint; /* chain/checkpoints.h */
 
+/* Copy pinned evidence into an empty caller-owned private fd; no durability implied. */
+bool consensus_state_artifact_evidence_copy_to_fd(
+    const struct consensus_state_artifact_evidence *evidence, int destination);
+
 struct consensus_state_candidate_output {
     struct consensus_export_output_binding binding;
 };

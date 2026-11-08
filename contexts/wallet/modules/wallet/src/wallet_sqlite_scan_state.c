@@ -310,6 +310,83 @@ static bool wss_decode(const uint8_t *p, int len, struct wallet_cutover_binding 
     memcpy(b->old_hash, p + 18, 32); memcpy(b->target_hash, p + 50, 32);
     memcpy(b->artifact_digest, p + 82, 32); return true;
 }
+/* The binding subrecord uses exactly the existing cutover codec. */
+#define WSS_DISCOVER_BYTES 304
+static bool wss_discover_encode(const struct wallet_discover_checkpoint *c, uint8_t *p)
+{
+    if (!c || !wss_encode(&c->binding, p + 1) ||
+        (!c->generation_present && c->generation != 0) || c->floor < 0 ||
+        c->next_height < c->floor || c->endpoint_height < c->next_height ||
+        c->endpoint_height < c->binding.target_height) return false;
+    p[0] = 1; p[115] = c->generation_present ? 1 : 0;
+    zcl_write_u64_le(p + 116, c->generation);
+    zcl_write_u32_le(p + 124, (uint32_t)c->floor);
+    zcl_write_u32_le(p + 128, (uint32_t)c->next_height);
+    zcl_write_u32_le(p + 132, (uint32_t)c->endpoint_height);
+    memcpy(p + 136, c->endpoint_hash, 32); memcpy(p + 168, c->endpoint_root, 32);
+    memcpy(p + 200, c->scan_identity, 32); memcpy(p + 232, c->key_digest, 32);
+    zcl_write_u64_le(p + 264, c->event_end); memcpy(p + 272, c->event_digest, 32);
+    return true;
+}
+static bool wss_discover_decode(const uint8_t *p, int size, struct wallet_discover_checkpoint *out)
+{
+    struct wallet_discover_checkpoint c = {0};
+    if (!p || size != WSS_DISCOVER_BYTES || p[0] != 1 || p[115] > 1 ||
+        !wss_decode(p + 1, WSS_BINDING_BYTES, &c.binding) ||
+        (!p[115] && zcl_read_u64_le(p + 116)) ||
+        zcl_read_u32_le(p + 124) > INT32_MAX || zcl_read_u32_le(p + 128) > INT32_MAX ||
+        zcl_read_u32_le(p + 132) > INT32_MAX) return false;
+    c.generation_present = p[115] != 0; c.generation = zcl_read_u64_le(p + 116);
+    c.floor = (int32_t)zcl_read_u32_le(p + 124);
+    c.next_height = (int32_t)zcl_read_u32_le(p + 128);
+    c.endpoint_height = (int32_t)zcl_read_u32_le(p + 132);
+    if (c.next_height < c.floor || c.endpoint_height < c.next_height ||
+        c.endpoint_height < c.binding.target_height) return false;
+    memcpy(c.endpoint_hash, p + 136, 32); memcpy(c.endpoint_root, p + 168, 32);
+    memcpy(c.scan_identity, p + 200, 32); memcpy(c.key_digest, p + 232, 32);
+    c.event_end = zcl_read_u64_le(p + 264); memcpy(c.event_digest, p + 272, 32);
+    *out = c; return true;
+}
+bool wallet_sqlite_discover_checkpoint_save(struct wallet_sqlite *ws,
+    const struct wallet_discover_checkpoint *checkpoint)
+{
+    uint8_t bytes[WSS_DISCOVER_BYTES]; struct wallet_cutover_binding current;
+    if (!ws || !ws->open || !ws->db || sqlite3_get_autocommit(ws->db) ||
+        !wss_discover_encode(checkpoint, bytes) ||
+        wallet_sqlite_cutover_read(ws, &current) != WALLET_CUTOVER_PENDING ||
+        !wallet_cutover_binding_equal(&current, &checkpoint->binding)) return false;
+    sqlite3_stmt *s = NULL;
+    const char *sql = "INSERT INTO node_state(key,value) VALUES('wallet_discover_checkpoint',?) "
+                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value";
+    if (sqlite3_prepare_v2(ws->db, sql, -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_blob(s, 1, bytes, sizeof(bytes), SQLITE_TRANSIENT) == SQLITE_OK &&
+              AR_STEP_WRITE(s) == SQLITE_DONE;
+    if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+enum wallet_discover_checkpoint_status wallet_sqlite_discover_checkpoint_read(
+    struct wallet_sqlite *ws, struct wallet_discover_checkpoint *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!ws || !ws->open || !ws->db || !out) return WALLET_DISCOVER_IO_ERROR;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ws->db, "SELECT value FROM node_state WHERE key='wallet_discover_checkpoint'",
+                           -1, &s, NULL) != SQLITE_OK) return WALLET_DISCOVER_IO_ERROR;
+    int rc = AR_STEP_ROW_READONLY(s);
+    enum wallet_discover_checkpoint_status status = WALLET_DISCOVER_IO_ERROR;
+    if (rc == SQLITE_DONE) status = WALLET_DISCOVER_ABSENT;
+    else if (rc == SQLITE_ROW) {
+        status = sqlite3_column_type(s, 0) == SQLITE_BLOB &&
+            wss_discover_decode(sqlite3_column_blob(s, 0), sqlite3_column_bytes(s, 0), out)
+                ? WALLET_DISCOVER_FOUND : WALLET_DISCOVER_MALFORMED;
+        if (ar_step_checked(s, "wallet discover checkpoint: read completion", NULL) != ZCL_STEP_DONE)
+            status = WALLET_DISCOVER_IO_ERROR;
+    }
+    if (sqlite3_finalize(s) != SQLITE_OK) status = WALLET_DISCOVER_IO_ERROR;
+    if (status != WALLET_DISCOVER_FOUND) memset(out, 0, sizeof(*out));
+    return status;
+}
+
 static bool wss_decimal(const char *text, int64_t min, int64_t max, int64_t *out)
 {
     char *end = NULL;

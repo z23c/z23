@@ -55,4 +55,6 @@ void boot_post_scan_anchor_ladder(struct main_state *st, struct node_db *ndb,
 void boot_sapling_tree_boot_load(struct app_context *ctx, struct main_state *st,
                                  struct node_db *ndb, const char *datadir);
 
+void boot_step_rewind_placeholder_tip(struct main_state *state, struct node_db *ndb);
+
 #endif /* ZCLASSIC_BOOT_STEPS_INTERNAL_H */

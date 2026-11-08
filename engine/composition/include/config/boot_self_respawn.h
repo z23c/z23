@@ -44,6 +44,8 @@ void boot_self_respawn_set_argv(char **argv);
  * false), and argv was captured. Reads only atomics + a cached global, so it
  * is safe to call during or after app_shutdown(). */
 bool boot_self_respawn_armed(void);
+/* Initialize supervisor detection before a pre-service restart. */
+bool boot_self_respawn_prepare_early(void);
 
 /* If armed(), re-exec /proc/self/exe with the captured argv (never returns on
  * success). Returns to the caller ONLY when NOT armed, or when execv failed

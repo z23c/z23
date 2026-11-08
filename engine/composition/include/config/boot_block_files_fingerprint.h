@@ -36,6 +36,8 @@ bool boot_block_files_scan_may_skip(
     bool fast_restart_taken, const struct shutdown_clean_binding *recorded,
     const struct boot_block_files_fingerprint *now);
 
+bool boot_scan_block_files_unchanged(const char *datadir, bool fast_restart, int cleared);
+
 #ifdef __cplusplus
 }
 #endif

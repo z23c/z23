@@ -28,7 +28,9 @@ struct boot_cutover_replay {
     bool transparent_filter_attempted;
     bool sapling_load_ok;
     bool shielded_empty;
+    bool full_empty;
     bool pending_complete;
+    bool checkpoint_resume;
     int pending_end;
     int64_t auth_deadline_ms;  /* Zero when startup authentication was not required. */
     struct main_state *canonical_state;
@@ -52,11 +54,16 @@ bool boot_cutover_replay_init_archive(struct boot_cutover_replay *replay,
     const struct wallet_witness_endpoint *endpoint, const uint8_t identity[32],
     struct main_state *canonical_state, const char *archive_datadir);
 
+/* Only a checked empty wallet may complete without historical bodies. */
+bool boot_cutover_replay_complete_full_empty(struct boot_cutover_replay *replay);
+
 /* Clear after every successful or partially run init, and before reinitializing. */
 void boot_cutover_replay_clear(struct boot_cutover_replay *replay);
 
 /* Caller must hold both distinct chain locks. */
 bool boot_cutover_replay_archive_chains_current(const struct boot_cutover_replay *replay);
+/* Caller holds chain, wallet, keystore and Sapling locks. */
+bool boot_cutover_replay_current_locked(const struct boot_cutover_replay *replay);
 /* A stale result invalidates all phases; caller must reload before retrying. */
 enum boot_cutover_replay_status boot_cutover_replay_step(struct boot_cutover_replay *replay);
 #endif

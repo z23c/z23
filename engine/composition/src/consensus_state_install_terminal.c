@@ -2,6 +2,7 @@
  * Terminal bundle preparation and guarded wallet install entrypoints. */
 #if !defined(_WIN32)
 #include "consensus_state_install_terminal_internal.h"
+#include "consensus_state_install_stage.h"
 #include "consensus_state_snapshot_install_internal.h"
 #include "config/boot_internal.h"
 #include "services/block_index_loader.h"
@@ -174,8 +175,18 @@ struct zcl_result consensus_state_install_from_bundle_guarded(
         }
         return ZCL_ERR(-1, "wallet cutover requires the startup context");
     }
-    return icb_install_wallet_guarded(ndb, ms, bundle_path, datadir, ws, wallet, NULL, out);
+    return icb_install_wallet_guarded(ndb, ms, bundle_path, datadir, ws, wallet, NULL, NULL, NULL, out);
 }
+
+#ifdef ZCL_TESTING
+static void (*icb_after_stage_hook)(void *);
+static void *icb_after_stage_context;
+void consensus_state_install_test_after_stage(void (*hook)(void *), void *context)
+{
+    icb_after_stage_hook = hook;
+    icb_after_stage_context = context;
+}
+#endif
 
 struct zcl_result consensus_state_install_from_bundle_terminal_guarded(
     struct node_db *ndb, struct main_state *ms, const char *bundle_path,
@@ -190,9 +201,46 @@ struct zcl_result consensus_state_install_from_bundle_terminal_guarded(
         }
         return ZCL_ERR(-1, "wallet cutover requires the startup context");
     }
+    struct consensus_state_artifact_evidence *source = NULL, *staged = NULL;
+    uint8_t whole[32], logical[32];
+    char retained[PATH_MAX];
+    bool ok = consensus_state_artifact_evidence_open(bundle_path, -1, &source).ok &&
+        consensus_state_artifact_evidence_file_digest(source, whole) &&
+        consensus_state_artifact_evidence_digest(source, logical) &&
+        consensus_state_install_stage(datadir, source, retained, sizeof(retained), &staged);
+    if (!consensus_state_artifact_evidence_close(&source)) ok = false;
+    if (!ok) {
+        (void)consensus_state_artifact_evidence_close(&staged);
+        if (out) { memset(out, 0, sizeof(*out)); snprintf(out->reason, sizeof(out->reason), "retained bundle staging failed"); }
+        return ZCL_ERR(-1, "retained bundle staging failed");
+    }
+#ifdef ZCL_TESTING
+    if (icb_after_stage_hook) icb_after_stage_hook(icb_after_stage_context);
+#endif
     struct icb_terminal_context terminal = {0};
     struct zcl_result rc = icb_install_wallet_guarded(
-        ndb, ms, bundle_path, datadir, ws, wallet, &terminal, out);
+        ndb, ms, retained, datadir, ws, wallet, whole, logical, &terminal, out);
+    if (!consensus_state_artifact_evidence_close(&staged) && rc.ok) {
+        rc = ZCL_ERR(-1, "retained bundle evidence close failed");
+        if (out) snprintf(out->reason, sizeof(out->reason), "%s", rc.message);
+    }
+    icb_terminal_unlink_window(&terminal);
+    if (terminal.archive) {
+        main_state_free(terminal.archive);
+        free(terminal.archive);
+    }
+    if (terminal.history_open) platform_private_directory_close(terminal.history_handle);
+    return rc;
+}
+struct zcl_result consensus_state_install_from_bundle_terminal_old_retry(
+    struct node_db *ndb, struct main_state *ms, const char *bundle_path,
+    const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
+    const struct wallet_cutover_binding *expected,
+    struct consensus_state_install_runtime_result *out)
+{
+    struct icb_terminal_context terminal = {0};
+    struct zcl_result rc = icb_install_wallet_old_retry(
+        ndb, ms, bundle_path, datadir, ws, wallet, expected, &terminal, out);
     icb_terminal_unlink_window(&terminal);
     if (terminal.archive) {
         main_state_free(terminal.archive);

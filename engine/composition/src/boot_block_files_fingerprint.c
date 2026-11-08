@@ -84,3 +84,21 @@ bool boot_block_files_scan_may_skip(
            recorded->bf_valid && now && recorded->bf_count == now->count &&
            memcmp(recorded->bf_sha3, now->sha3, sizeof(now->sha3)) == 0;
 }
+
+/* True when a verified fast restart found the block files exactly as the
+ * clean shutdown left them, so a scan could not find a record the index
+ * lacks. Any doubt returns false and the scan runs. */
+bool boot_scan_block_files_unchanged(const char *datadir,
+                                            bool fast_restart, int cleared)
+{
+    struct shutdown_clean_binding recorded;
+    struct boot_block_files_fingerprint now;
+    if (!fast_restart || cleared != 0 || !datadir ||
+        !boot_shutdown_marker_peek_fast_restart_binding(&recorded) ||
+        !boot_block_files_fingerprint_read(datadir, &now) ||
+        !boot_block_files_scan_may_skip(fast_restart, &recorded, &now))
+        return false;
+    printf("[boot] block-file scan skipped: fast restart taken, %u block files "
+           "unchanged since the clean shutdown\n", now.count);
+    return true;
+}

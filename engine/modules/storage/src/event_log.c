@@ -1324,26 +1324,47 @@ int event_log_stream(event_log_t *log, uint64_t start_offset,
     return 0;
 }
 
-struct fp_ctx { struct sha3_256_ctx h; };
-
-static bool fp_cb(uint64_t offset, enum event_log_type type,
-                  const void *payload, size_t len, void *user)
+static bool event_log_prefix_record(event_log_t *log, uint64_t end, uint64_t cursor,
+    struct walk_scratch *scratch, struct sha3_256_ctx *hash, uint64_t *next)
 {
-    (void)offset; (void)type;
-    struct fp_ctx *c = (struct fp_ctx *)user;
-    if (len > 0 && payload)
-        sha3_256_write(&c->h, (const unsigned char *)payload, len);
-    return true;
+    uint8_t before[EVT_HDR_LEN], after[EVT_HDR_LEN], encoded[8];
+    uint64_t need = 0; uint32_t crc = 0;
+    if (end - cursor < EVT_HDR_LEN + EVT_SENTINEL_LEN ||
+        full_pread(&log->file, before, sizeof(before), cursor) < 0 ||
+        !verify_record_at(&log->file, cursor, end, scratch, &need, &crc) ||
+        full_pread(&log->file, after, sizeof(after), cursor) < 0 ||
+        memcmp(before, after, sizeof(before)) != 0) return false;
+    uint32_t length = get_u32_le(before);
+    if (need != EVT_HDR_LEN + (uint64_t)length + EVT_SENTINEL_LEN ||
+        crc != get_u32_le(before + 12) || (length && (!scratch->buf || scratch->cap < length))) return false;
+    put_u64_le(encoded, cursor); sha3_256_write(hash, encoded, sizeof(encoded));
+    sha3_256_write(hash, before, sizeof(before)); if (length) sha3_256_write(hash, scratch->buf, length);
+    *next = cursor + need; return true;
 }
 
-int event_log_fingerprint(event_log_t *log, uint8_t out[32])
+/* Digest a fixed prefix without trusting the optional open-time receipt. */
+int event_log_prefix_digest(event_log_t *log, uint64_t end, uint8_t out[32],
+                            bool (*should_stop)(void *), void *context)
 {
+    if (out) memset(out, 0, 32);
     if (!log || !out) return -1;
-    struct fp_ctx c;
-    sha3_256_init(&c.h);
-    if (event_log_stream(log, 0, fp_cb, &c) < 0) return -1;
-    sha3_256_finalize(&c.h, out);
-    return 0;
+    pthread_mutex_lock(&log->lock);
+    uint64_t available = log->end_offset;
+    pthread_mutex_unlock(&log->lock);
+    if (end > available) return -1;
+    struct sha3_256_ctx hash; uint8_t encoded[8];
+    static const uint8_t domain[] = "z23.event-log.prefix.v1";
+    sha3_256_init(&hash); sha3_256_write(&hash, domain, sizeof(domain));
+    put_u64_le(encoded, end); sha3_256_write(&hash, encoded, sizeof(encoded));
+    struct walk_scratch scratch = {0}; uint64_t cursor = 0; int rc = 0;
+    while (cursor < end) {
+        if (should_stop && should_stop(context)) { rc = 1; break; }
+        if (!event_log_prefix_record(log, end, cursor, &scratch, &hash, &cursor)) { rc = -1; break; }
+    }
+    if (rc == 0 && should_stop && should_stop(context)) rc = 1;
+    if (rc == 0 && cursor == end) sha3_256_finalize(&hash, out);
+    else if (rc == 0) rc = -1;
+    free(scratch.buf); return rc;
 }
 
 uint64_t event_log_size(event_log_t *log)

@@ -39,6 +39,8 @@
 #include "config/boot_wallet_pending_restore.h"
 #include "jobs/block_header_emit.h"
 #include "services/chain_state_service.h"
+#include "services/island_anchor.h"
+#include "wallet/wallet_sqlite.h"
 #include "storage/event_log_singleton.h"
 #include "storage/block_index_projection.h"
 #include "bloom/merkle.h"
@@ -691,12 +693,107 @@ static int nw_pending_restore_case(void)
     return failures;
 }
 
+/* The seeded fact here is synthetic; the real caller verifies its window first. */
+static struct block_index *nw_old_seeded(struct nw_pending_restore_fixture *f,
+                                          struct wallet_cutover_binding *binding)
+{
+    struct island_anchor a = {0};
+    struct island_anchor_rows rows = {0};
+    a.root_height = 73;
+    a.rung_height = 100;
+    a.root_hash.data[0] = 0x61;
+    a.rung_hash.data[0] = 0x62;
+    a.root_work.pn[0] = 1;
+    rows.hash[0] = a.root_hash;
+    rows.hash[ISLAND_ANCHOR_WINDOW - 1] = a.rung_hash;
+    struct block_index *rung = chainstate_insert_block_index(
+        (struct chainstate *)&f->replay.ms, &a.rung_hash);
+    if (!rung) return NULL;
+    rung->nHeight = a.rung_height;
+    if (!island_anchor_save(progress_store_db(), &a, &rows).ok ||
+        !island_anchor_register(&a).ok) return NULL;
+    binding->target_height = a.rung_height;
+    memcpy(binding->target_hash, a.rung_hash.data, 32);
+    return rung;
+}
+
+static int nw_old_partial_tree_refusals(struct nw_pending_restore_fixture *f,
+                                         const struct wallet_cutover_binding *binding)
+{
+    int failures = 0;
+    sqlite3 *db = progress_store_db();
+    struct block_index *before = active_chain_tip(&f->replay.ms.chain_active);
+    struct uint256 root;
+    incremental_tree_root(&f->replay.ms.sapling_tree, &root);
+    NW_CHECK("old partial missing history cursor refuses",
+        sqlite3_exec(db, "DELETE FROM anchor_state WHERE pool=1", NULL, NULL, NULL) == SQLITE_OK &&
+        boot_wallet_old_partial_restore(&f->replay.ms, &f->csr, binding) == BOOT_PENDING_RESTORE_TREE_UNAVAILABLE &&
+        nw_restore_view_is(f, before, false, &root));
+    NW_CHECK("old partial nonzero history cursor refuses",
+        anchor_kv_initialize_history(db, 1) &&
+        boot_wallet_old_partial_restore(&f->replay.ms, &f->csr, binding) == BOOT_PENDING_RESTORE_TREE_UNAVAILABLE &&
+        nw_restore_view_is(f, before, false, &root));
+    NW_CHECK("old partial nonempty preactivation tree refuses",
+        sqlite3_exec(db, "UPDATE anchor_state SET activation_cursor=0 WHERE pool=1", NULL, NULL, NULL) == SQLITE_OK &&
+        anchor_kv_add_tree(db, ANCHOR_POOL_SAPLING, &f->tree, 0) &&
+        boot_wallet_old_partial_restore(&f->replay.ms, &f->csr, binding) == BOOT_PENDING_RESTORE_TREE_UNAVAILABLE &&
+        nw_restore_view_is(f, before, false, &root));
+    NW_CHECK("old partial corrupt tree refuses",
+        sqlite3_exec(db, "UPDATE sapling_anchors SET tree=zeroblob(1)", NULL, NULL, NULL) == SQLITE_OK &&
+        boot_wallet_old_partial_restore(&f->replay.ms, &f->csr, binding) == BOOT_PENDING_RESTORE_TREE_UNAVAILABLE &&
+        nw_restore_view_is(f, before, false, &root));
+    return failures;
+}
+
+static int nw_old_partial_case(void)
+{
+    int failures = 0;
+    struct nw_pending_restore_fixture f = {0};
+    bool ready = nw_pending_restore_open(&f);
+    NW_CHECK("old partial fixture opens", ready);
+    if (!ready) { nw_pending_restore_close(&f); return failures; }
+    struct wallet_cutover_binding b = {0};
+    b.old_height = 2;
+    memcpy(b.old_hash, f.tip_hash.data, 32);
+    sqlite3 *db = progress_store_db();
+    ready = sqlite3_exec(db, "DELETE FROM sapling_anchors", NULL, NULL, NULL) == SQLITE_OK &&
+        anchor_kv_initialize_history(db, 0);
+    NW_CHECK("old partial empty history setup", ready);
+    if (ready) failures += nw_old_partial_tree_refusals(&f, &b);
+    ready = sqlite3_exec(db, "DELETE FROM sapling_anchors", NULL, NULL, NULL) == SQLITE_OK;
+    struct block_index *parent = f.tip->pprev;
+    f.tip->pprev = NULL;
+    NW_CHECK("old partial broken ancestry refuses",
+        ready && boot_wallet_old_partial_restore(&f.replay.ms, &f.csr, &b) == BOOT_PENDING_RESTORE_ANCESTRY_INVALID);
+    f.tip->pprev = parent;
+    int changes = sqlite3_total_changes(db);
+    NW_CHECK("old partial no island restores implicit empty tree",
+        boot_wallet_old_partial_restore(&f.replay.ms, &f.csr, &b) == BOOT_PENDING_RESTORE_OK &&
+        active_chain_tip(&f.replay.ms.chain_active) == f.tip &&
+        f.replay.ms.pindex_best_header == f.tip && f.replay.ms.sapling_tree_loaded &&
+        incremental_tree_size(&f.replay.ms.sapling_tree) == 0 && sqlite3_total_changes(db) == changes);
+    struct block_index *rung = nw_old_seeded(&f, &b);
+    struct wallet_cutover_binding wrong = b;
+    wrong.target_hash[0] ^= 1;
+    NW_CHECK("old partial wrong island target refuses",
+        rung && boot_wallet_old_partial_restore(&f.replay.ms, &f.csr, &wrong) == BOOT_PENDING_RESTORE_INVALID_CONTEXT);
+    changes = sqlite3_total_changes(db);
+    NW_CHECK("old partial keeps verified target header",
+        rung && boot_wallet_old_partial_restore(&f.replay.ms, &f.csr, &b) == BOOT_PENDING_RESTORE_OK &&
+        active_chain_tip(&f.replay.ms.chain_active) == f.tip && f.replay.ms.pindex_best_header == rung &&
+        sqlite3_total_changes(db) == changes);
+    island_anchor_unregister();
+    nw_pending_restore_close(&f);
+    return failures;
+}
+
 int test_recovery_no_worse(void);
 int test_recovery_no_worse(void)
 {
     printf("\n=== recovery_no_worse: RECOVERY NEVER MAKES IT WORSE ===\n");
     int failures = 0;
     failures += nw_pending_restore_case();
+    failures += nw_old_partial_case();
     failures += nw_canonical_replay_case(1);
     failures += nw_canonical_replay_case(0);
     failures += nw_pending_replay_case();

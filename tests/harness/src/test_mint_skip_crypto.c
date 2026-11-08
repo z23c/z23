@@ -1398,10 +1398,10 @@ static int msc_check_offline_shutdown_wallet_order(const char *boot_src)
 {
     int failures = 0;
     const char *offline_shutdown_fn = boot_src
-        ? strstr(boot_src, "void app_shutdown_offline(bool output_already_durable)")
+        ? strstr(boot_src, "static void boot_shutdown_offline_internal(bool output_already_durable, bool preserve_pending)")
         : NULL;
     const char *wallet_flush = offline_shutdown_fn
-        ? strstr(offline_shutdown_fn, "wallet_sqlite_flush_r(&g_wallet_sqlite")
+        ? strstr(offline_shutdown_fn, "preserve_pending ? ZCL_OK : wallet_sqlite_flush_r(&g_wallet_sqlite")
         : NULL;
     const char *wallet_close = offline_shutdown_fn
         ? strstr(offline_shutdown_fn, "wallet_sqlite_close(&g_wallet_sqlite)")
@@ -1409,6 +1409,9 @@ static int msc_check_offline_shutdown_wallet_order(const char *boot_src)
     const char *wallet_free_call = offline_shutdown_fn
         ? strstr(offline_shutdown_fn, "wallet_free(&g_wallet)")
         : NULL;
+    const char *wrapper = boot_src ? strstr(boot_src, "void app_shutdown_offline(bool output_already_durable)") : NULL;
+    const char *normal_call = wrapper ? strstr(wrapper, "boot_shutdown_offline_internal(output_already_durable, false);") : NULL;
+    MSC_CHECK("offline shutdown selects ordinary wallet flushing", normal_call != NULL);
     MSC_CHECK("offline shutdown flushes wallet sqlite before wallet_free",
               wallet_flush && wallet_free_call && wallet_flush < wallet_free_call);
     MSC_CHECK("offline shutdown closes wallet sqlite before wallet_free",
@@ -1426,7 +1429,7 @@ static int msc_check_offline_drain_wiring(const char *boot_src,
 {
     int failures = 0;
     const char *offline_shutdown_fn = boot_src
-        ? strstr(boot_src, "void app_shutdown_offline(bool output_already_durable)")
+        ? strstr(boot_src, "static void boot_shutdown_offline_internal(bool output_already_durable, bool preserve_pending)")
         : NULL;
     const char *drain_arm = offline_shutdown_fn
         ? strstr(offline_shutdown_fn,

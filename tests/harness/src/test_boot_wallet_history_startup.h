@@ -108,6 +108,78 @@ static void bil_startup_fixture_close(struct bil_startup_fixture *f)
     if (f->dir[0]) (void)test_rm_rf_recursive(f->dir);
 }
 
+static bool bil_startup_empty_prepare(struct bil_startup_fixture *f)
+{
+    struct boot_cutover_env env = {.state = &f->canonical, .node = &f->node,
+        .wallet = f->wallet, .wallet_db = &f->ws, .coins_tip = &f->coins,
+        .db_service = &f->service, .sapling_load_ok = true};
+    struct app_context ctx = {.datadir = f->dbpath}; /* A file, so no history directory exists. */
+    struct boot_cutover_replay replay = {0}; struct wallet_rpc_context rpc;
+    void *history = NULL;
+    bool ok = boot_test_pending_replay_prepare(&env, &ctx, &replay, &rpc, &history);
+    bool complete = ok && replay.full_empty && replay.shielded_empty && replay.floor == 0 &&
+        replay.phase == BOOT_CUTOVER_DONE && !replay.canonical_state &&
+        rpc.main_state == &f->canonical && boot_cutover_replay_step(&replay) == BOOT_CUTOVER_COMPLETE &&
+        wallet_readiness_get(f->wallet).state == WALLET_READINESS_PENDING;
+    boot_cutover_replay_clear(&replay);
+    boot_test_pending_replay_close(history);
+    return complete;
+}
+
+static int bil_empty_deny_scripts(void *ctx, int action, const char *a, const char *b,
+                                  const char *c, const char *d)
+{
+    (void)ctx; (void)b; (void)c; (void)d;
+    return action == SQLITE_READ && a && !strcmp(a, "wallet_scripts") ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int bil_startup_empty_cases(struct bil_startup_fixture *f)
+{
+    int failures = 0;
+    bool canary = sqlite3_exec(f->node.db,
+        "INSERT OR REPLACE INTO wallet_canary(id,probe,ts) VALUES(1,zeroblob(1),1)",
+        NULL, NULL, NULL) == SQLITE_OK;
+    BIL_CHECK("empty wallet without history accepts normal canary", canary && bil_startup_empty_prepare(f));
+    f->wallet->sapling_keys.keys[0].used = true;
+    BIL_CHECK("hidden Sapling key refuses empty shortcut", !bil_startup_empty_prepare(f));
+    f->wallet->sapling_keys.keys[0].used = false;
+    f->wallet->sapling_keys.locked = true;
+    BIL_CHECK("locked Sapling wallet refuses empty shortcut", !bil_startup_empty_prepare(f));
+    f->wallet->sapling_keys.locked = false;
+    f->wallet->sapling_keys.num_damaged = 1;
+    BIL_CHECK("damaged Sapling wallet refuses empty shortcut", !bil_startup_empty_prepare(f));
+    f->wallet->sapling_keys.num_damaged = 0;
+    f->wallet->keystore.keys[0].used = true;
+    BIL_CHECK("hidden transparent key refuses empty shortcut", !bil_startup_empty_prepare(f));
+    f->wallet->keystore.keys[0].used = false;
+    f->wallet->keystore.watching[0].used = true;
+    BIL_CHECK("hidden watch entry refuses empty shortcut", !bil_startup_empty_prepare(f));
+    f->wallet->keystore.watching[0].used = false;
+    f->wallet->keystore.scripts[0].used = true;
+    BIL_CHECK("hidden script refuses empty shortcut", !bil_startup_empty_prepare(f));
+    f->wallet->keystore.scripts[0].used = false;
+    f->wallet->key_pool[0].persisted = true;
+    BIL_CHECK("hidden keypool entry refuses empty shortcut", !bil_startup_empty_prepare(f));
+    f->wallet->key_pool[0].persisted = false;
+    f->wallet->map_wallet[0].used = true;
+    BIL_CHECK("hidden transaction refuses empty shortcut", !bil_startup_empty_prepare(f));
+    f->wallet->map_wallet[0].used = false;
+    f->wallet->spent_set[0].occupied = true;
+    BIL_CHECK("hidden spent outpoint refuses empty shortcut", !bil_startup_empty_prepare(f));
+    f->wallet->spent_set[0].occupied = false;
+    bool seed = sqlite3_exec(f->node.db,
+        "INSERT INTO wallet_seed(id,seed,next_child) VALUES(1,zeroblob(32),0)",
+        NULL, NULL, NULL) == SQLITE_OK;
+    BIL_CHECK("durable seed refuses empty shortcut", seed && !bil_startup_empty_prepare(f));
+    BIL_CHECK("seed fixture cleanup", sqlite3_exec(f->node.db, "DELETE FROM wallet_seed", NULL, NULL, NULL) == SQLITE_OK);
+    bool denied = sqlite3_set_authorizer(f->node.db, bil_empty_deny_scripts, NULL) == SQLITE_OK;
+    BIL_CHECK("SQL read error refuses empty shortcut", denied && !bil_startup_empty_prepare(f));
+    BIL_CHECK("restore SQL reads", sqlite3_set_authorizer(f->node.db, NULL, NULL) == SQLITE_OK);
+    BIL_CHECK("empty proof succeeds after fixture cleanup", bil_startup_empty_prepare(f));
+    return failures;
+}
+
+
 static int bil_startup_fixture_exercise(struct bil_startup_fixture *f)
 {
     int failures = 0;
@@ -140,7 +212,8 @@ static int bil_startup_archive_case(void)
     struct bil_startup_fixture f = {0};
     chain_params_select(CHAIN_REGTEST);
     bool opened = bil_startup_fixture_open(&f);
-    int failures = bil_startup_fixture_exercise(&f);
+    int failures = opened ? bil_startup_empty_cases(&f) : 0;
+    failures += bil_startup_fixture_exercise(&f);
     if (!opened && !failures) failures++;
     bil_startup_fixture_close(&f);
     chain_params_select(CHAIN_MAIN);

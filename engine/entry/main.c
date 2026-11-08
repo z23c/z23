@@ -727,6 +727,13 @@ static int main_check_boot_guards(const struct app_context *ctx)
 static bool main_app_init_and_one_shots(struct app_context *ctx, int *rc)
 {
     if (!app_init(ctx)) {
+        if (boot_old_cutover_restart_pending()) {
+            if (boot_old_cutover_restart_cleanup()) {
+                if (boot_self_respawn_prepare_early())
+                    boot_self_respawn_exec_or_return();
+            }
+            fprintf(stderr, "FATAL: committed wallet cutover restart unavailable\n");
+        }
         report_app_init_failed(ctx);
         *rc = 1;
         return true;

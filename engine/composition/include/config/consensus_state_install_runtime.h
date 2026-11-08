@@ -41,6 +41,10 @@ struct wallet_sqlite;
 struct wallet;
 struct wallet_cutover_binding;
 struct sqlite3;
+#if !defined(_WIN32)
+/* Verifies the opened node database against the leased datadir entry. */
+bool consensus_state_wallet_node_file_matches(struct sqlite3 *db, int dir_fd);
+#endif
 
 enum wallet_install_reconcile {
     WALLET_INSTALL_ABSENT, WALLET_INSTALL_OLD,
@@ -144,6 +148,27 @@ struct zcl_result consensus_state_install_from_bundle(
 struct zcl_result consensus_state_install_from_bundle_guarded(
     struct node_db *ndb, struct main_state *ms, const char *bundle_path,
     const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
+    struct consensus_state_install_runtime_result *out);
+
+char *consensus_state_find_old_retry_bundle(const char *datadir,
+    const struct wallet_cutover_binding *expected);
+
+/* Retry only the exact durable OLD cutover under the startup context. */
+struct zcl_result consensus_state_install_from_bundle_old_retry(
+    struct node_db *ndb, struct main_state *ms, const char *bundle_path,
+    const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
+    const struct wallet_cutover_binding *expected,
+    struct consensus_state_install_runtime_result *out);
+#ifdef ZCL_TESTING
+void consensus_state_install_test_after_wallet_fence(void (*hook)(void *), void *context);
+void consensus_state_install_test_after_stage(void (*hook)(void *), void *context);
+#endif
+
+/* OLD terminal retry re-verifies the retained public history; caller must exit. */
+struct zcl_result consensus_state_install_from_bundle_terminal_old_retry(
+    struct node_db *ndb, struct main_state *ms, const char *bundle_path,
+    const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
+    const struct wallet_cutover_binding *expected,
     struct consensus_state_install_runtime_result *out);
 
 /* Terminal caller must exit after this returns, including on refusal. */

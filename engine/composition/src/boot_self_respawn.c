@@ -34,6 +34,13 @@ bool boot_self_respawn_armed(void)
     return flagged && !sd_notify_is_active() && g_respawn_argv != NULL;
 }
 
+bool boot_self_respawn_prepare_early(void)
+{
+    (void)sd_notify_init();
+    chain_tip_watchdog_request_respawn();
+    return sd_notify_is_active() || boot_self_respawn_armed();
+}
+
 void boot_self_respawn_exec_or_return(void)
 {
     if (!boot_self_respawn_armed())

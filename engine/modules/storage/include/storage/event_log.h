@@ -222,6 +222,15 @@ int event_log_stream(event_log_t *log, uint64_t start_offset,
  * Identical content → identical fingerprint. Returns 0 on success. */
 int event_log_fingerprint(event_log_t *log, uint8_t out[32]);
 
+/* SHA3-256 binds the exact complete prefix [0,end): domain (including NUL),
+ * end LE64, then each record offset LE64, 16-byte LE header and payload.
+ * Every frame, payload CRC and sentinel is verified independently of receipts.
+ * Appends after end do not change it. Caller owns log lifetime; no concurrent
+ * external mutation. 0 succeeds, 1 cancels, -1 refuses; failure zeros out.
+ * should_stop is optional and runs without the log mutex. */
+int event_log_prefix_digest(event_log_t *log, uint64_t end, uint8_t out[32],
+                            bool (*should_stop)(void *), void *context);
+
 /* Current size of the log file in bytes (post-recovery). For tests
  * and observability. */
 uint64_t event_log_size(event_log_t *log);

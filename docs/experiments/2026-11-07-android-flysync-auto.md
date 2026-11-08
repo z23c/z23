@@ -92,7 +92,27 @@ the startup recovery hold is active. Focused condition and reducer tests passed
 2/2, including a modeled queued worker with unchanged chain and database state.
 The full device restart and interrupted-install recovery remain separate checks.
 
+## Interrupted installation and replay progress
+
+An interrupted installation can leave the prior consensus authority and a
+pending wallet fence. Startup now retries only the matching authenticated
+retained bundle, rechecks the prior authority and keeps the wallet pending
+until the committed state is reopened. A terminal import retains a private,
+read-only copy before establishing the fence. Replay reports validated phase
+and height progress while wallet publication remains pending.
+
+Five focused groups passed with no skips, including a synthetic interrupted
+installation, guarded cleanup and wallet-row preservation. Android host
+progress fixtures also passed. These results do not establish complete device
+restart, wallet replay or readiness; device qualification remains pending.
+
 A terminal-install fixture restored script validity only from a matching,
 successful durable script-validation row. Focused frontier, island and app
 front-door groups passed 3/3 with no skips. The wiring test used a synthetic
 header verifier; an actual device terminal install remains required.
+
+A wallet with no scan identities or retained wallet effects can complete a
+pending cutover without a historical archive. The shortcut checks durable rows
+and loaded wallet state, then repeats that proof inside final publication.
+Focused startup and publication fixtures passed, including refusal after a
+wallet change before commit. Actual-device completion remains pending.

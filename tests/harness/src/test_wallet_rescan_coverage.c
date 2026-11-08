@@ -56,6 +56,7 @@
 #include "wallet/wallet.h"
 #include "wallet/sapling_keys.h"
 #include "util/safe_alloc.h"
+#include "util/ar_step_readonly.h"
 #include "wallet/wallet_sqlite.h"
 
 #include "storage/disk_block_io.h"
@@ -1178,6 +1179,143 @@ static int wrc_cutover_faults(sqlite3 *db, struct wallet_sqlite *ws,
     return failures;
 }
 
+static bool wrc_checkpoint_is_malformed(struct wallet_sqlite *ws)
+{
+    struct wallet_discover_checkpoint got, zero; memset(&zero, 0, sizeof(zero)); memset(&got, 0xa5, sizeof(got));
+    return wallet_sqlite_discover_checkpoint_read(ws, &got) == WALLET_DISCOVER_MALFORMED &&
+        !memcmp(&got, &zero, sizeof(got));
+}
+static bool wrc_checkpoint_mutate(sqlite3 *db, struct wallet_sqlite *ws,
+    const uint8_t valid[304], size_t offset, uint8_t value)
+{
+    uint8_t bytes[304]; memcpy(bytes, valid, sizeof(bytes)); bytes[offset] = value;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "UPDATE node_state SET value=? WHERE key='wallet_discover_checkpoint'",
+                           -1, &stmt, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_blob(stmt, 1, bytes, sizeof(bytes), SQLITE_TRANSIENT) == SQLITE_OK &&
+        AR_STEP_WRITE(stmt) == SQLITE_DONE;
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    struct wallet_discover_checkpoint got, zero; memset(&zero, 0, sizeof(zero)); memset(&got, 0xa5, sizeof(got));
+    return ok && wallet_sqlite_discover_checkpoint_read(ws, &got) == WALLET_DISCOVER_MALFORMED &&
+        !memcmp(&got, &zero, sizeof(got));
+}
+static int wrc_checkpoint_decode_mutations(sqlite3 *db, struct wallet_sqlite *ws)
+{
+    int failures = 0; uint8_t valid[304] = {0}; sqlite3_stmt *stmt = NULL;
+    bool ok = sqlite3_prepare_v2(db, "SELECT value FROM node_state WHERE key='wallet_discover_checkpoint'",
+                                -1, &stmt, NULL) == SQLITE_OK &&
+              AR_STEP_ROW_READONLY(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) == SQLITE_BLOB &&
+              sqlite3_column_bytes(stmt, 0) == (int)sizeof(valid);
+    if (ok) memcpy(valid, sqlite3_column_blob(stmt, 0), sizeof(valid));
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    WRC_CHECK("checkpoint valid mutation baseline", ok);
+    if (!ok) return failures;
+    WRC_CHECK("checkpoint bad version", wrc_checkpoint_mutate(db, ws, valid, 0, 2));
+    WRC_CHECK("checkpoint invalid generation flag", wrc_checkpoint_mutate(db, ws, valid, 115, 2));
+    WRC_CHECK("checkpoint absent nonzero generation", wrc_checkpoint_mutate(db, ws, valid, 115, 0));
+    WRC_CHECK("checkpoint floor exceeds next", wrc_checkpoint_mutate(db, ws, valid, 124, 18));
+    WRC_CHECK("checkpoint next exceeds endpoint", wrc_checkpoint_mutate(db, ws, valid, 128, 26));
+    WRC_CHECK("checkpoint endpoint before target", wrc_checkpoint_mutate(db, ws, valid, 132, 19));
+    stmt = NULL;
+    bool restored = sqlite3_prepare_v2(db, "UPDATE node_state SET value=? WHERE key='wallet_discover_checkpoint'",
+                                      -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_bind_blob(stmt, 1, valid, sizeof(valid), SQLITE_TRANSIENT) == SQLITE_OK &&
+        AR_STEP_WRITE(stmt) == SQLITE_DONE;
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) restored = false;
+    WRC_CHECK("checkpoint restore valid mutation baseline", restored);
+    sqlite3 *other = NULL;
+    bool opened = sqlite3_open(":memory:", &other) == SQLITE_OK;
+    struct wallet_sqlite isolated = {.db = other, .open = true};
+    struct wallet_discover_checkpoint got, zero; memset(&zero, 0, sizeof(zero)); memset(&got, 0xa5, sizeof(got));
+    WRC_CHECK("checkpoint sqlite read error", opened &&
+        wallet_sqlite_discover_checkpoint_read(&isolated, &got) == WALLET_DISCOVER_IO_ERROR &&
+        !memcmp(&got, &zero, sizeof(got)));
+    if (other) sqlite3_close(other);
+    return failures;
+}
+static bool wrc_checkpoint_equal(const struct wallet_discover_checkpoint *got,
+    const struct wallet_discover_checkpoint *c, const struct wallet_cutover_binding *binding)
+{
+    return wallet_cutover_binding_equal(&got->binding, binding) && got->generation_present && got->generation == 1 &&
+        got->floor == 0 && got->next_height == 17 && got->endpoint_height == 25 &&
+        !memcmp(got->endpoint_hash, c->endpoint_hash, 32) && !memcmp(got->endpoint_root, c->endpoint_root, 32) &&
+        !memcmp(got->scan_identity, c->scan_identity, 32) && !memcmp(got->key_digest, c->key_digest, 32) &&
+        got->event_end == c->event_end && !memcmp(got->event_digest, c->event_digest, 32);
+}
+static int wrc_checkpoint_persist(sqlite3 *db, struct wallet_sqlite *ws,
+    struct wallet_discover_checkpoint *c, const struct wallet_cutover_binding *binding)
+{
+    int failures = 0; struct wallet_discover_checkpoint got;
+    WRC_CHECK("checkpoint initially absent",
+        wallet_sqlite_discover_checkpoint_read(ws, &got) == WALLET_DISCOVER_ABSENT);
+    WRC_CHECK("checkpoint requires transaction", !wallet_sqlite_discover_checkpoint_save(ws, c));
+    WRC_CHECK("checkpoint save starts transaction", sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK);
+    WRC_CHECK("checkpoint saves", wallet_sqlite_discover_checkpoint_save(ws, c));
+    WRC_CHECK("checkpoint roundtrip", wallet_sqlite_discover_checkpoint_read(ws, &got) == WALLET_DISCOVER_FOUND &&
+        wrc_checkpoint_equal(&got, c, binding));
+    WRC_CHECK("checkpoint rollback", sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK &&
+        wallet_sqlite_discover_checkpoint_read(ws, &got) == WALLET_DISCOVER_ABSENT);
+    WRC_CHECK("checkpoint commit starts", sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK);
+    WRC_CHECK("checkpoint commit succeeds", wallet_sqlite_discover_checkpoint_save(ws, c) &&
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK);
+    WRC_CHECK("checkpoint unchanged after commit",
+        wallet_sqlite_discover_checkpoint_read(ws, &got) == WALLET_DISCOVER_FOUND && got.next_height == 17);
+    failures += wrc_checkpoint_decode_mutations(db, ws);
+    return failures;
+}
+static int wrc_checkpoint_refusals(sqlite3 *db, struct wallet_sqlite *ws,
+    struct wallet_discover_checkpoint *c, const struct wallet_cutover_binding *binding)
+{
+    int failures = 0;
+    WRC_CHECK("checkpoint bad binding starts", sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK);
+    c->binding.target_hash[0] ^= 1;
+    WRC_CHECK("checkpoint changed binding refused", !wallet_sqlite_discover_checkpoint_save(ws, c));
+    c->binding = *binding;
+    c->generation_present = false; c->generation = 1;
+    WRC_CHECK("checkpoint absent generation must be zero", !wallet_sqlite_discover_checkpoint_save(ws, c));
+    c->generation_present = true; c->next_height = 26;
+    WRC_CHECK("checkpoint out of range refused", !wallet_sqlite_discover_checkpoint_save(ws, c));
+    WRC_CHECK("checkpoint refusal rollback", sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK);
+    return failures;
+}
+static int wrc_checkpoint_integrity(sqlite3 *db, struct wallet_sqlite *ws, struct wallet *w,
+    enum wallet_cutover_floor_status fs, int floor_before, struct wallet_readiness ready)
+{
+    int failures = 0, floor_after = -1;
+    WRC_CHECK("checkpoint scan floor unchanged", wallet_sqlite_cutover_scan_floor(ws, &floor_after) == fs &&
+        floor_after == floor_before);
+    WRC_CHECK("checkpoint readiness unchanged", w->readiness.state == ready.state &&
+        w->readiness.epoch == ready.epoch && w->readiness.generation_present == ready.generation_present &&
+        w->readiness.generation == ready.generation);
+    WRC_CHECK("checkpoint rejects overflow height on read", sqlite3_exec(db,
+        "UPDATE node_state SET value=CAST(substr(value,1,128)||x'00000080'||substr(value,133) AS BLOB) "
+        "WHERE key='wallet_discover_checkpoint'", NULL, NULL, NULL) == SQLITE_OK &&
+        wrc_checkpoint_is_malformed(ws));
+    WRC_CHECK("checkpoint wrong SQL type", sqlite3_exec(db,
+        "UPDATE node_state SET value='text' WHERE key='wallet_discover_checkpoint'", NULL, NULL, NULL) == SQLITE_OK &&
+        wrc_checkpoint_is_malformed(ws));
+    WRC_CHECK("checkpoint wrong blob length", sqlite3_exec(db,
+        "UPDATE node_state SET value=zeroblob(303) WHERE key='wallet_discover_checkpoint'", NULL, NULL, NULL) == SQLITE_OK &&
+        wrc_checkpoint_is_malformed(ws));
+    return failures;
+}
+static int wrc_discover_checkpoint(sqlite3 *db, struct wallet_sqlite *ws,
+    struct wallet *w, const struct wallet_cutover_binding *binding)
+{
+    int failures = 0, floor_before = -1;
+    struct wallet_discover_checkpoint c = {.binding = *binding,
+        .generation_present = true, .generation = 1,
+        .floor = 0, .next_height = 17, .endpoint_height = 25, .event_end = 12345};
+    c.endpoint_hash[1] = 11; c.endpoint_root[2] = 12; c.scan_identity[3] = 13;
+    c.key_digest[4] = 14; c.event_digest[5] = 15;
+    struct wallet_readiness ready = w->readiness;
+    enum wallet_cutover_floor_status fs = wallet_sqlite_cutover_scan_floor(ws, &floor_before);
+    failures += wrc_checkpoint_persist(db, ws, &c, binding);
+    failures += wrc_checkpoint_refusals(db, ws, &c, binding);
+    failures += wrc_checkpoint_integrity(db, ws, w, fs, floor_before, ready);
+    return failures;
+}
+
 static int wrc_cutover_binding(const char *datadir)
 {
     int failures = 0;
@@ -1199,6 +1337,7 @@ static int wrc_cutover_binding(const char *datadir)
     WRC_CHECK("cutover persists and reloads", wallet_sqlite_cutover_prepare(&ws, w, &b) &&
         wallet_sqlite_cutover_read(&ws, &out) == WALLET_CUTOVER_PENDING &&
         out.old_generation_present && out.old_generation == 0 && out.target_height == 20 && out.target_hash[0] == 2);
+    failures += wrc_discover_checkpoint(db, &ws, w, &b);
     wallet_sqlite_close(&ws); node_db_close(&ndb); db = NULL;
     WRC_CHECK("cutover reopen", node_db_open(&ndb, path) && wallet_sqlite_open_r(&ws, ndb.db).ok);
     db = ndb.db;
