@@ -167,7 +167,8 @@ static void fob_begin(struct fob_call *c, const char *path,
     json_set_object(&c->input);
     (void)json_push_kv_str(&c->input, "brief", p->brief);
     (void)json_push_kv_str(&c->input, "lintc_dir", p->lintc);
-    (void)json_push_kv_str(&c->input, "baseline", p->baseline);
+    if (p->baseline[0])
+        (void)json_push_kv_str(&c->input, "baseline", p->baseline);
     (void)json_push_kv_str(&c->input, "outcomes", FOB_NOWHERE "/o.jsonl");
     (void)json_push_kv_str(&c->input, "attempts_dir", FOB_NOWHERE "/a");
     (void)json_push_kv_str(&c->input, "repo", p->repo);
@@ -820,6 +821,54 @@ _test_next:;
     return failures;
 }
 
+static int fob_case_complexity_origin(const char *root, const struct fob_paths *p)
+{
+    int failures = 0;
+    struct fob_paths q = *p;
+    struct fob_call c;
+    char baseline[800];
+    (void)snprintf(q.repo, sizeof(q.repo), "%s/complexity-origin", root);
+    (void)snprintf(baseline, sizeof(baseline), "%s/tools/lint/cyclomatic_complexity_baseline.txt", q.repo);
+    q.baseline[0] = '\0';
+    q.exclude[0] = '\0';
+    TEST("brief: default complexity uses origin baseline and pins, independent of cwd") {
+        ASSERT(mkdir(q.repo, 0700) == 0);
+        ASSERT(fob_repo_file(&q, "apps/origin.c", 1));
+        ASSERT(fob_repo_file(&q, "apps/stale.c", 1));
+        ASSERT(fob_repo_file(&q, "tools/lint/cyclomatic_complexity_baseline.txt", 1));
+        ASSERT(fob_write(baseline, "apps/origin.c:origin:21\n"));
+        ASSERT(fob_git_repo(q.repo));
+        ASSERT(fob_write(baseline, "apps/stale.c:stale:19\n"));
+        ASSERT(fob_brief(&c, &q, "functions_over_complexity_cap", true));
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "target_file")), "apps/origin.c");
+        ASSERT_EQ(json_get_int(json_get(json_get(&c.reply.data, "objective"), "value")), 1);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(json_get(&c.reply.data, "pins"), 0), "function")), "origin");
+        ASSERT_EQ(json_get_int(json_get(json_at(json_get(&c.reply.data, "pins"), 0), "m")), 21);
+        fob_end(&c);
+        ASSERT(fob_repo_file(&q, "apps/origin.c", 2));
+        ASSERT(fob_brief(&c, &q, "functions_over_complexity_cap", true));
+        ASSERT(json_get(&c.reply.data, "target_file") == NULL);
+        fob_end(&c);
+        ASSERT(fob_git(q.repo, "checkout", "--", "apps/origin.c", NULL, NULL));
+        (void)snprintf(q.baseline, sizeof(q.baseline), "%s/complexity-explicit.txt", root);
+        ASSERT(fob_write(q.baseline, "apps/stale.c:stale:19\n"));
+        ASSERT(fob_brief(&c, &q, "functions_over_complexity_cap", true));
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "target_file")), "apps/stale.c");
+        fob_end(&c);
+        q.baseline[0] = '\0';
+        ASSERT(fob_git(q.repo, "rm", "-q", "-f", "tools/lint/cyclomatic_complexity_baseline.txt", NULL));
+        ASSERT(fob_publish(q.repo));
+        ASSERT(fob_repo_file(&q, "tools/lint/cyclomatic_complexity_baseline.txt", 1));
+        ASSERT(fob_write(baseline, "apps/stale.c:stale:19\n"));
+        ASSERT(fob_brief(&c, &q, "functions_over_complexity_cap", true));
+        ASSERT(json_get(&c.reply.data, "target_file") == NULL);
+        fob_end(&c);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_fleet_objectives_brief(void);
 int test_fleet_objectives_brief(void)
 {
@@ -847,6 +896,7 @@ int test_fleet_objectives_brief(void)
         failures += fob_case_live(root, &paths);
         failures += fob_case_order(root, &paths);
         failures += fob_case_baseline_row(&paths);
+        failures += fob_case_complexity_origin(root, &paths);
     }
     (void)unsetenv("ZCL_LAND_OBJECTIVES_DATADIR");
     (void)test_rm_rf_recursive(root);

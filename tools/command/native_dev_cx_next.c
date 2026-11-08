@@ -22,6 +22,7 @@
 #include "json/json.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -68,6 +69,10 @@ struct cx_args {
     bool (*allow)(const char *file, void *ctx);
     void *allow_ctx;
     bool pin_band;
+    const char *baseline_bytes;
+    size_t baseline_len;
+    int (*count_lines)(const char *, void *);
+    void *count_lines_ctx;
 };
 
 struct cx_sets {
@@ -173,7 +178,8 @@ static enum cx_skip cx_classify(const char *root, const char *file,
     if (cx_set_has(&sets->changed, file))
         return CX_SKIP_CHANGED;
     sets->freed += cx_set_has(&sets->stale, file);
-    *lines = cx_count_lines(root, file);
+    *lines = a->count_lines ? a->count_lines(file, a->count_lines_ctx)
+                            : cx_count_lines(root, file);
     if (*lines < 0)
         return CX_SKIP_MISSING;
     return *lines >= CX_LINES_CAP ? CX_SKIP_LARGE : CX_KEEP;
@@ -207,13 +213,24 @@ static int cx_row_cmp(const void *x, const void *y)
     return c ? c : strcmp(a->fn, b->fn);
 }
 
-static struct cx_row *cx_load_rows(const char *path, size_t *count)
+static struct cx_row *cx_load_rows(const char *path, const char *bytes,
+                                   size_t bytes_len, size_t *count)
 {
     struct cx_row *rows = NULL;
     size_t n = 0, cap = 0, len = 0;
     char *text;
     *count = 0;
-    text = cx_read_file(path, &len);
+    if (bytes) {
+        if (bytes_len == SIZE_MAX)
+            return NULL;
+        text = zcl_malloc(bytes_len + 1, "dev_cx.baseline");
+        if (text) {
+            memcpy(text, bytes, bytes_len);
+            text[bytes_len] = '\0';
+        }
+    } else {
+        text = cx_read_file(path, &len);
+    }
     if (!text)
         return NULL;
     for (const char *p = text; *p;) {
@@ -418,7 +435,7 @@ static bool cx_load_inputs(const struct cx_args *a, const char *root,
         return false;
     }
     if (!cx_baseline_path(a, root, base, sizeof(base)) ||
-        (*rows = cx_load_rows(base, nrows), !*rows)) {
+        (*rows = cx_load_rows(base, a->baseline_bytes, a->baseline_len, nrows), !*rows)) {
         cx_fail(reply, "NEXT_BASELINE_UNREADABLE",
                 "the complexity baseline could not be read", root);
         return false;
@@ -520,6 +537,10 @@ int zcl_dev_cx_pick(const struct zcl_cx_pick_in *in,
     a.allow = in->allow;
     a.allow_ctx = in->allow_ctx;
     a.pin_band = in->pin_band;
+    a.baseline_bytes = in->baseline_bytes;
+    a.baseline_len = in->baseline_len;
+    a.count_lines = in->count_lines;
+    a.count_lines_ctx = in->count_lines_ctx;
     if (snprintf(a.cwd, sizeof(a.cwd), "%s", in->repo ? in->repo : "") >=
             (int)sizeof(a.cwd) ||
         (in->baseline &&

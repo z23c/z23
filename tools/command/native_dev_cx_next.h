@@ -11,6 +11,7 @@
 #include "command/native_dev_cx.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 
 struct zcl_cx_pick_in {
     const char *repo;        /* a path inside the checkout (cwd) */
@@ -24,6 +25,10 @@ struct zcl_cx_pick_in {
      * inside and outside that band alike, lowest max score, then path; the
      * function count itself does not rank. */
     bool pin_band;
+    const char *baseline_bytes; /* optional borrowed baseline snapshot */
+    size_t baseline_len;
+    int (*count_lines)(const char *file, void *ctx); /* -1 = unavailable */
+    void *count_lines_ctx;
 };
 
 struct zcl_cx_pick_out {

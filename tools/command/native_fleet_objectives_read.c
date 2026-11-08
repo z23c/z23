@@ -1683,6 +1683,10 @@ static struct zcl_objective_value obj_functions_over_complexity_cap(
 {
     if (options && options->baseline)
         return obj_count_path(options->baseline, obj_baseline_pins);
+    if (options && options->checkout_revision)
+        return zcl_objectives_count_revision(obj_repo_or_dot(options),
+            options->checkout_revision, OBJ_CYCLO_REL, obj_baseline_pins,
+            "pin row in baseline " OBJ_CYCLO_REL);
     return zcl_objectives_count_checkout(obj_repo_or_dot(options), OBJ_CYCLO_REL,
                                          obj_baseline_pins,
                                          "pin row in baseline " OBJ_CYCLO_REL);

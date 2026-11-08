@@ -180,6 +180,8 @@ struct brief_inputs {
     const char *baseline;
     const char *exclude;
     const char *revision;
+    char *complexity_bytes;
+    size_t complexity_len;
 };
 
 struct brief_file {
@@ -272,11 +274,30 @@ static bool brief_eligible(const struct brief_inputs *in, const char *owned,
 /* Chooses the one file for the complexity card by dev.cx.next's rules (live
  * worktrees, exclude, size, sealed paths), 3-6 pins first. 0 found, 1 none
  * eligible, -1 the selection could not run. */
+static int brief_origin_lines(const char *path, void *ctx)
+{
+    const struct brief_inputs *in = ctx;
+    size_t len = 0;
+    int lines = 0;
+    char *blob = zcl_objectives_checkout_blob(in->repo, in->revision, path, &len);
+    if (!blob)
+        return -1;
+    for (size_t i = 0; i < len && lines < BRIEF_FILE_LINES_MAX; i++)
+        lines += blob[i] == '\n';
+    free(blob);
+    return lines;
+}
+
 static int brief_choose(const struct brief_inputs *in, const char *owned,
                         struct brief_file *best)
 {
-    struct zcl_cx_pick_in pick = {in->repo, in->baseline, in->exclude,
-                                  brief_allowed, (void *)owned, true};
+    struct zcl_cx_pick_in pick = {
+        .repo = in->repo, .baseline = in->baseline, .exclude_csv = in->exclude,
+        .allow = brief_allowed, .allow_ctx = (void *)owned, .pin_band = true,
+        .baseline_bytes = in->complexity_bytes, .baseline_len = in->complexity_len,
+        .count_lines = in->complexity_bytes ? brief_origin_lines : NULL,
+        .count_lines_ctx = (void *)in,
+    };
     struct zcl_cx_pick_out out;
     int rc = zcl_dev_cx_pick(&pick, &out);
     if (rc != 0)
@@ -291,14 +312,16 @@ static int brief_choose(const struct brief_inputs *in, const char *owned,
 }
 
 /* Pushes `pins`: [{function, m}] for the rows of `file` in the baseline. */
-static bool brief_push_pins(struct json_value *card, const char *baseline,
+static bool brief_push_pins(struct json_value *card, const struct brief_inputs *in,
                             const char *file)
 {
     char line[1024], *path, *fn;
     struct json_value arr;
     bool ok = true;
     int m;
-    FILE *fp = fopen(baseline, "r");
+    FILE *fp = in->complexity_bytes
+        ? fmemopen(in->complexity_bytes, in->complexity_len, "r")
+        : fopen(in->baseline, "r");
     json_init(&arr);
     json_set_array(&arr);
     while (ok && fp && fgets(line, sizeof(line), fp)) {
@@ -311,6 +334,8 @@ static bool brief_push_pins(struct json_value *card, const char *baseline,
              json_push_kv_int(&pin, "m", m) && json_push_back(&arr, &pin);
         json_free(&pin);
     }
+    if (fp && ferror(fp))
+        ok = false;
     if (fp)
         (void)fclose(fp);
     ok = ok && fp && json_push_kv(card, "pins", &arr);
@@ -380,7 +405,7 @@ static bool brief_build(struct json_value *card, const struct json_value *next,
            brief_push_one(card, "stop_if", work->stop_if) &&
            brief_push_objective(card, next, work) &&
            (!tgt || (json_push_kv_str(card, "target_file", tgt->path) &&
-                     brief_push_pins(card, in->baseline, tgt->path)));
+                     brief_push_pins(card, in, tgt->path)));
 }
 
 /* The measured rows narrowed to `only_id` (when set) and to runner_ok rows
@@ -659,7 +684,16 @@ static void brief_finish(struct zcl_command_reply *reply,
         brief_finish_row(reply, next, work, bl, in);
         return;
     }
-    rc = narrow ? brief_choose(in, work->owned, &file) : 0;
+    struct brief_inputs selected = *in;
+    if (narrow && !in->baseline && in->revision[0]) {
+        selected.complexity_bytes = zcl_objectives_checkout_blob(
+            in->repo, in->revision, BRIEF_BASELINE_DEFAULT, &selected.complexity_len);
+        if (!selected.complexity_bytes) {
+            brief_fail_build(reply, work->id);
+            return;
+        }
+    }
+    rc = narrow ? brief_choose(&selected, work->owned, &file) : 0;
     if (rc > 0)
         brief_no_card(reply,
                       "no file is eligible for the complexity card: every "
@@ -667,10 +701,11 @@ static void brief_finish(struct zcl_command_reply *reply,
                       "lines, excluded or changed by a live worktree",
                       "NO_ELIGIBLE_FILE");
     else if (rc < 0 || !work ||
-             !brief_build(&reply->data, next, work, in, narrow ? &file : NULL))
+             !brief_build(&reply->data, next, work, &selected, narrow ? &file : NULL))
         brief_fail_build(reply, json_get_str(json_get(next, "id")));
     else
         brief_pass(reply);
+    free(selected.complexity_bytes);
 }
 
 /* With runner_ok_only, records the unmet objective that ranks first overall
@@ -791,10 +826,9 @@ void zcl_native_handle_fleet_objectives_brief(
                                "fleet.objectives could not measure the catalog",
                                "z23-dev fleet objectives");
     } else {
-        struct brief_inputs in = {brief_str(request, "repo", "."),
-                                  brief_str(request, "baseline",
-                                            BRIEF_BASELINE_DEFAULT),
-                                  brief_str(request, "exclude", ""), revision};
+        struct brief_inputs in = { .repo = brief_str(request, "repo", "."),
+            .baseline = brief_str(request, "baseline", NULL),
+            .exclude = brief_str(request, "exclude", ""), .revision = revision };
         brief_reply(reply, rows, id, runner_only, &in);
     }
     zcl_command_reply_free(&measured);
