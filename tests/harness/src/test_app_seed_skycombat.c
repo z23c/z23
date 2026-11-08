@@ -11,11 +11,10 @@
  *
  * HOME and the datadir are temporary, so the owner key it makes is a
  * throwaway. The seed runs everywhere and prints its package root, so two
- * hosts at one commit can compare roots. The build needs no system -dev
- * package (the seeded tree carries the vendored X11/GL headers); the run
- * needs Xvfb and prints SKIP without it, and the host-need row keeps the
- * group out of universal selection unless the operator sets
- * ZCL_TEST_DISPLAY_APPS.
+ * hosts at one commit can compare roots. The build needs no -dev package
+ * (the tree carries the vendored X11/GL headers); the run needs Xvfb and
+ * prints SKIP without it, and the host-need row keeps the group out of
+ * universal selection unless the operator sets ZCL_TEST_DISPLAY_APPS.
  *
  * make t-fast-exact ONLY=app_seed_skycombat ZCL_TEST_DISPLAY_APPS=1 */
 
