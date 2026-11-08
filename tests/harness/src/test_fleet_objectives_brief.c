@@ -770,6 +770,32 @@ static int fob_case_baseline_row(struct fob_paths *p)
         fob_end(&c);
         PASS();
     }
+    TEST("brief: baseline rows and file eligibility follow origin, not stale checkout") {
+        ASSERT(fob_repo_file(p, "apps/new.c", 10));
+        ASSERT(fob_write(file, "banned-str apps/new.c 1\n"));
+        ASSERT(fob_publish(p->repo));
+        ASSERT(fob_git(p->repo, "reset", "--hard", "HEAD^", NULL, NULL));
+        ASSERT(fob_brief(&c, p, FOB_HARD_ID, true));
+        ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "target_file")),
+                      "apps/new.c");
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "row")),
+                      "banned-str apps/new.c 1");
+        ASSERT_EQ(json_get_int(json_get(json_get(&c.reply.data, "objective"),
+                                        "value")), 1);
+        fob_end(&c);
+        ASSERT(fob_git(p->repo, "reset", "--hard", "origin/main", NULL, NULL));
+        ASSERT(fob_hard_fixture(p));
+        PASS();
+    }
+    TEST("brief: without origin the baseline and file use the worktree") {
+        ASSERT(fob_git(p->repo, "update-ref", "-d", "refs/remotes/origin/main", NULL, NULL));
+        ASSERT(fob_brief(&c, p, FOB_HARD_ID, true));
+        ASSERT(fob_hard_card_ok(&c));
+        fob_end(&c);
+        ASSERT(fob_git(p->repo, "update-ref", "refs/remotes/origin/main", "HEAD", NULL, NULL));
+        PASS();
+    }
     TEST("objectives: the banned-str producer sums the COUNT of banned-str "
          "rows only, and refuses a malformed row") {
         v = zcl_objectives_measure(&o, FOB_HARD_ID);
@@ -782,8 +808,12 @@ static int fob_case_baseline_row(struct fob_paths *p)
         ASSERT(strstr(v.reason, "malformed") != NULL);
         ASSERT_EQ(remove(file), 0);
         ASSERT(fob_publish(p->repo));
+        ASSERT(fob_write(file, "banned-str apps/aa.c 1\n"));
         v = zcl_objectives_measure(&o, FOB_HARD_ID);
         ASSERT(!v.measured);
+        ASSERT(fob_brief(&c, p, FOB_HARD_ID, true));
+        ASSERT(json_get(&c.reply.data, "target_file") == NULL);
+        fob_end(&c);
         PASS();
     }
 _test_next:;

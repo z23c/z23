@@ -77,6 +77,13 @@ static bool obj_push_next(struct json_value *data, const struct json_value *rows
 void zcl_native_handle_fleet_objectives(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
+    zcl_native_handle_fleet_objectives_revision(request, reply, NULL);
+}
+
+void zcl_native_handle_fleet_objectives_revision(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    const char *revision)
+{
     struct zcl_objectives_options options;
     struct zcl_objectives_node_cache node_cache;
     const struct zcl_objective_row *catalog;
@@ -90,6 +97,7 @@ void zcl_native_handle_fleet_objectives(
     zcl_command_reply_init(reply, ZCL_OBJECTIVES_SCHEMA);
 
     memset(&options, 0, sizeof(options));
+    options.checkout_revision = revision;
     memset(&node_cache, 0, sizeof(node_cache));
     options.outcomes = obj_input_str(request, "outcomes");
     options.attempts_dir = obj_input_str(request, "attempts_dir");

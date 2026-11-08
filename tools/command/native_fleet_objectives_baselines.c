@@ -68,7 +68,11 @@ static int64_t base_banned_sum(FILE *fp)
 struct zcl_objective_value zcl_objectives_baseline_hardening_banned_str(
     const struct zcl_objectives_options *options)
 {
-    return zcl_objectives_count_checkout(
-        options && options->repo ? options->repo : ".", BASE_HARDENING_PATH,
+    const char *repo = options && options->repo ? options->repo : ".";
+    if (options && options->checkout_revision)
+        return zcl_objectives_count_revision(
+            repo, options->checkout_revision, BASE_HARDENING_PATH,
+            base_banned_sum, "row in hardening baseline " BASE_HARDENING_PATH);
+    return zcl_objectives_count_checkout(repo, BASE_HARDENING_PATH,
         base_banned_sum, "row in hardening baseline " BASE_HARDENING_PATH);
 }

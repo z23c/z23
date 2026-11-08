@@ -1176,16 +1176,17 @@ static bool obj_origin_resolves(const char *repo)
     return zcl_spawn_capture(argv, out, sizeof(out), OBJ_SPAWN_MS) == 0;
 }
 
-/* The stored bytes of repo-relative `rel` at origin/main, in a fresh buffer of
+/* The stored bytes of repo-relative `rel` at revision, in a fresh buffer of
  * *len bytes. NULL when git cannot give the whole blob within OBJ_BLOB_MAX
  * bytes. `cat-file blob` runs no textconv or filters. */
-static char *obj_origin_blob(const char *repo, const char *rel, size_t *len)
+char *zcl_objectives_checkout_blob(const char *repo, const char *revision,
+                                   const char *rel, size_t *len)
 {
     char spec[1024];
     const char *argv[] = {"git", "-C", repo, "cat-file", "blob", spec, NULL};
     struct zcl_spawn_binary_observation seen;
     char *buf;
-    if (snprintf(spec, sizeof(spec), OBJ_ORIGIN_MAIN ":%s", rel) >=
+    if (snprintf(spec, sizeof(spec), "%s:%s", revision, rel) >=
         (int)sizeof(spec))
         return NULL;
     buf = zcl_malloc(OBJ_BLOB_MAX, "fleet_objectives_blob");
@@ -1200,6 +1201,24 @@ static char *obj_origin_blob(const char *repo, const char *rel, size_t *len)
     }
     *len = seen.output_len;
     return buf;
+}
+
+bool zcl_objectives_checkout_revision(const char *repo, char out[65])
+{
+    const char *argv[] = {"git", "-C", repo, "rev-parse", "--verify",
+                          "--quiet", OBJ_ORIGIN_MAIN "^{commit}", NULL};
+    char text[128];
+    out[0] = '\0';
+    if (!obj_origin_resolves(repo))
+        return true;
+    if (zcl_spawn_capture(argv, text, sizeof(text), OBJ_SPAWN_MS) != 0)
+        return false;
+    size_t n = strcspn(text, "\r\n");
+    if ((n != 40 && n != 64) || text[n] == '\0')
+        return false;
+    memcpy(out, text, n);
+    out[n] = '\0';
+    return true;
 }
 
 /* A read stream over an origin/main blob. fmemopen rejects an empty buffer,
@@ -1252,13 +1271,26 @@ struct zcl_objective_value zcl_objectives_count_checkout(
     const char *repo, const char *rel, zcl_objectives_stream_count count,
     const char *what)
 {
+    char revision[65];
+    if (!zcl_objectives_checkout_revision(repo, revision)) {
+        struct zcl_objective_value v = {0};
+        obj_set_reason(&v, "%s", "cannot resolve origin/main");
+        return v;
+    }
+    return zcl_objectives_count_revision(repo, revision, rel, count, what);
+}
+
+struct zcl_objective_value zcl_objectives_count_revision(
+    const char *repo, const char *revision, const char *rel,
+    zcl_objectives_stream_count count, const char *what)
+{
     struct zcl_objective_value v = {0};
     char path[1024];
     size_t len = 0;
     char *blob;
     FILE *fp;
-    if (obj_origin_resolves(repo)) {
-        blob = obj_origin_blob(repo, rel, &len);
+    if (revision[0]) {
+        blob = zcl_objectives_checkout_blob(repo, revision, rel, &len);
         if (!blob) {
             obj_set_reason(&v, "cannot read %s on origin/main", rel);
             return v;
@@ -1490,7 +1522,7 @@ static bool obj_lint_origin_file(const char *repo, const char *name,
                                  int64_t *over)
 {
     size_t len = 0;
-    char *blob = obj_origin_blob(repo, name, &len);
+    char *blob = zcl_objectives_checkout_blob(repo, OBJ_ORIGIN_MAIN, name, &len);
     if (!blob)
         return false;
     if (obj_buf_line_count(blob, len) > OBJ_LINT_CEILING_LINES)

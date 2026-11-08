@@ -87,6 +87,7 @@ struct zcl_objectives_options {
     const char *session;      /* the lead's Claude Code transcript (.jsonl);
                                * NULL takes the newest one under this
                                * checkout's Claude project directory */
+    const char *checkout_revision; /* internal: NULL auto; empty worktree */
 };
 
 /* Measures one catalog row by id. An id this file does not recognize
@@ -103,6 +104,17 @@ struct zcl_objective_value zcl_objectives_measure(
 struct zcl_objective_value zcl_objectives_count_checkout(
     const char *repo, const char *rel, zcl_objectives_stream_count count,
     const char *what);
+/* Resolve origin/main once; empty output selects the no-origin worktree. */
+bool zcl_objectives_checkout_revision(const char *repo, char out[65]);
+/* Return caller-owned blob bytes, or NULL if the selected blob cannot be read. */
+char *zcl_objectives_checkout_blob(const char *repo, const char *revision,
+                                   const char *rel, size_t *len);
+struct zcl_objective_value zcl_objectives_count_revision(
+    const char *repo, const char *revision, const char *rel,
+    zcl_objectives_stream_count count, const char *what);
+void zcl_native_handle_fleet_objectives_revision(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    const char *revision);
 
 /* The product producers (native_fleet_objectives_node.c): the running node's
  * own answers, unmeasured with a reason when it cannot give them. */

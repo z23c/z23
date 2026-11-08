@@ -179,6 +179,7 @@ struct brief_inputs {
     const char *repo;
     const char *baseline;
     const char *exclude;
+    const char *revision;
 };
 
 struct brief_file {
@@ -253,9 +254,19 @@ static bool brief_allowed(const char *path, void *owned)
 static bool brief_eligible(const struct brief_inputs *in, const char *owned,
                            const char *path)
 {
-    return brief_allowed(path, (void *)owned) &&
-           !brief_csv_has(in->exclude, path, false) &&
-           brief_file_small(in->repo, path);
+    if (!brief_allowed(path, (void *)owned) ||
+        brief_csv_has(in->exclude, path, false))
+        return false;
+    if (!in->revision[0])
+        return brief_file_small(in->repo, path);
+    size_t len = 0, lines = 0;
+    char *blob = zcl_objectives_checkout_blob(in->repo, in->revision, path, &len);
+    if (!blob)
+        return false;
+    for (size_t i = 0; i < len; i++)
+        lines += blob[i] == '\n';
+    free(blob);
+    return lines < BRIEF_FILE_LINES_MAX;
 }
 
 /* Chooses the one file for the complexity card by dev.cx.next's rules (live
@@ -531,15 +542,34 @@ static int brief_choose_row(const struct brief_inputs *in, const char *owned,
     char full[1024], line[1024];
     bool found = false;
     FILE *fp;
+    char *blob = NULL;
+    size_t len = 0;
     if (snprintf(full, sizeof(full), "%s/%s", in->repo, bl->path) >=
         (int)sizeof(full))
         return -1;
-    fp = fopen(full, "r");
-    if (!fp)
+    if (in->revision[0]) {
+        blob = zcl_objectives_checkout_blob(in->repo, in->revision, bl->path, &len);
+        if (!blob)
+            return -1;
+        if (!len) {
+            free(blob);
+            return 1;
+        }
+        fp = fmemopen(blob, len, "r");
+    } else {
+        fp = fopen(full, "r");
+    }
+    if (!fp) {
+        free(blob);
         return -1;
+    }
     while (fgets(line, sizeof(line), fp))
         brief_row_offer(in, owned, bl, line, best, &found);
+    bool read_error = ferror(fp) != 0;
     (void)fclose(fp);
+    free(blob);
+    if (read_error)
+        return -1;
     return found ? 0 : 1;
 }
 
@@ -726,6 +756,7 @@ void zcl_native_handle_fleet_objectives_brief(
                          : NULL;
     bool runner_only = brief_flag(request, "runner_ok_only");
     const struct json_value *rows;
+    char revision[65];
 
     if (reply)
         zcl_command_reply_init(reply, WORK_CARD_SCHEMA_ID);
@@ -744,8 +775,13 @@ void zcl_native_handle_fleet_objectives_brief(
                                "z23-dev fleet objectives lists every id");
         return;
     }
+    const char *repo = brief_str(request, "repo", ".");
+    if (!zcl_objectives_checkout_revision(repo, revision)) {
+        brief_fail_build(reply, "origin/main");
+        return;
+    }
     memset(&measured, 0, sizeof(measured));
-    zcl_native_handle_fleet_objectives(request, &measured);
+    zcl_native_handle_fleet_objectives_revision(request, &measured, revision);
     rows = json_get(&measured.data, "objectives");
     if (measured.status != ZCL_COMMAND_STATUS_PASSED || !rows) {
         LOG_ERROR("fleet.objectives.brief", "the objectives did not measure");
@@ -758,7 +794,7 @@ void zcl_native_handle_fleet_objectives_brief(
         struct brief_inputs in = {brief_str(request, "repo", "."),
                                   brief_str(request, "baseline",
                                             BRIEF_BASELINE_DEFAULT),
-                                  brief_str(request, "exclude", "")};
+                                  brief_str(request, "exclude", ""), revision};
         brief_reply(reply, rows, id, runner_only, &in);
     }
     zcl_command_reply_free(&measured);
