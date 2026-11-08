@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_app_offer.c", CAP_FS_WRITE, "app catalog allocation failure reports to stderr; signed post time uses the in-tree clock and board storage stays at the node")

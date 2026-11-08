@@ -1751,6 +1751,11 @@ ZCL_TEST_GROUP(app_seed_skycombat)
  * the real game is host-gated on ZCL_TEST_DISPLAY_APPS. */
 ZCL_TEST_GROUP(app_journey)
 ZCL_TEST_GROUP(app_journey_skycombat)
+/* The stranger's path with the transport stubbed: A publishes a copy (one
+ * signed zcl.app_offer.v1 post in room apps), B lists the catalog, gets by
+ * name, is refused before any prompt on a wrong sha256, root or publisher,
+ * and otherwise receives, builds and opens the exact bytes. */
+ZCL_TEST_GROUP(app_get)
 ZCL_TEST_GROUP(task_document)
 ZCL_TEST_GROUP(task_update_offer)
 ZCL_TEST_GROUP(package_local)

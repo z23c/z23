@@ -222,6 +222,79 @@ static int bundle_case_roundtrip(const char *name, const char *tag,
 }
 
 /* sha256 / size / shape / existing-out refusals against a complete store. */
+static int bundle_case_refresh_refusal(struct sw_node *n,
+                                       struct vcs_package_store *writer,
+                                       const uint8_t old_root[32], const char *path)
+{
+    int failures = 0;
+    static const uint8_t later[] = "another writer blob";
+    static const uint8_t refused[] = "new offer after missing manifest";
+    uint8_t later_root[32], refused_root[32];
+    char manifest[1200], hex[65];
+    struct zcl_fleet_bundle_outcome offered;
+    struct vcs_package_store_status status;
+    zcl_hex_encode(old_root, 32, hex);
+    (void)snprintf(manifest, sizeof(manifest), "%s/zcode/manifests/%s", n->datadir, hex);
+    bool advanced = vcs_package_store_refresh(writer) &&
+        vcs_blob_put_to(writer, later, sizeof(later) - 1, later_root) == VCS_BLOB_OK;
+    bool removed = advanced && unlink(manifest) == 0 &&
+        bundle_write_file(path, refused, sizeof(refused) - 1) &&
+        vcs_bundle_root_of(refused, sizeof(refused) - 1, refused_root) == VCS_BUNDLE_OK;
+    enum zcl_fleet_bundle_status refusal = removed
+        ? zcl_fleet_bundle_offer(n->store, n->engine, path, &offered)
+        : ZCL_FLEET_BUNDLE_DONE;
+    SW_CHECK("bundle: refresh refuses missing previously observed manifest",
+             removed && refusal == ZCL_FLEET_BUNDLE_REFUSED && offered.mutated &&
+             strcmp(offered.code, "STORE_REFRESH_REFUSED") == 0 &&
+             !vcs_package_store_package_status(n->store, refused_root, &status));
+    return failures;
+}
+
+static bool bundle_offered_verified(struct vcs_package_store *store,
+                                    const struct zcl_fleet_bundle_outcome *offered,
+                                    const uint8_t *payload, size_t size)
+{
+    struct vcs_package_store_status status;
+    uint8_t got[64];
+    size_t len = 0;
+    return size <= sizeof(got) &&
+        vcs_package_store_package_status(store, offered->root, &status) &&
+        status.complete && status.pinned &&
+        vcs_bundle_get_from(store, offered->root, got, sizeof(got), &len) == VCS_BUNDLE_OK &&
+        len == size && memcmp(got, payload, len) == 0;
+}
+
+static int bundle_case_foreign_writer(void)
+{
+    int failures = 0;
+    struct sw_node n = {0};
+    struct vcs_package_store *writer = NULL;
+    static const uint8_t old[] = "observed prior blob";
+    static const uint8_t moved[] = "other writer blob";
+    static const uint8_t payload[] = "offer after foreign write";
+    uint8_t old_root[32], moved_root[32];
+    char path[1200];
+    struct zcl_fleet_bundle_outcome offered;
+    bool ready = sw_node_open(&n, "foreign-offer", sw_score_contributor);
+    if (ready) ready = vcs_blob_put_to(n.store, old, sizeof(old) - 1, old_root) == VCS_BLOB_OK;
+    if (ready) writer = vcs_package_store_open(n.datadir, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    if (ready) ready = writer && vcs_blob_put_to(writer, moved, sizeof(moved) - 1, moved_root) == VCS_BLOB_OK;
+    bundle_make_path(path, sizeof(path), &n, "foreign.bundle");
+    if (ready) ready = bundle_write_file(path, payload, sizeof(payload) - 1);
+    enum zcl_fleet_bundle_status st = ready
+        ? zcl_fleet_bundle_offer(n.store, n.engine, path, &offered)
+        : ZCL_FLEET_BUNDLE_REFUSED;
+    SW_CHECK("bundle: immediate offer refreshes after foreign writer",
+             ready && st == ZCL_FLEET_BUNDLE_DONE &&
+             bundle_offered_verified(n.store, &offered, payload, sizeof(payload) - 1));
+    if (ready && st == ZCL_FLEET_BUNDLE_DONE)
+        failures += bundle_case_refresh_refusal(&n, writer, old_root, path);
+    vcs_package_store_close(writer);
+    sw_node_close(&n);
+    if (n.datadir[0]) test_rm_rf_recursive(n.datadir);
+    return failures;
+}
+
 static int bundle_case_refusals(void)
 {
     int failures = 0;
@@ -989,6 +1062,7 @@ int t_swarm_bundle_transfer(void)
     failures += bundle_case_roundtrip("5 MiB", "b5",
                                       (size_t)VCS_BUNDLE_MAX_BYTES);
     failures += bundle_case_refusals();
+    failures += bundle_case_foreign_writer();
     failures += bundle_case_blob_is_not_bundle();
     failures += bundle_case_blob_cap_unchanged();
     failures += bundle_case_offer_refusals();

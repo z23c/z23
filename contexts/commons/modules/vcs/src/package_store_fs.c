@@ -574,3 +574,46 @@ void store_sweep_temps(struct vcs_package_store *store,
 #endif
 }
 
+/* 1: real directory; 0: genuinely absent; -1: unreadable or not a directory.
+ * A link/reparse point is never evidence that the staging entry disappeared. */
+static int store_refresh_directory_state(const char *path)
+{
+#if defined(_WIN32)
+    wchar_t wide[STORE_PATH_MAX];
+    if (!store_wide_path(path, wide)) return -1;
+    DWORD attr = GetFileAttributesW(wide);
+    if (attr == INVALID_FILE_ATTRIBUTES)
+        return GetLastError() == ERROR_FILE_NOT_FOUND ? 0 : -1;
+    return (attr & FILE_ATTRIBUTE_DIRECTORY) && !(attr & FILE_ATTRIBUTE_REPARSE_POINT) ? 1 : -1;
+#else
+    struct stat st;
+    if (lstat(path, &st) != 0) return errno == ENOENT ? 0 : -1;
+    return S_ISDIR(st.st_mode) ? 1 : -1;
+#endif
+}
+
+/* Called under the process lock, only for the refresh's old staged records. */
+bool store_refresh_staged_manifest_absent(const struct vcs_package_store *store,
+                                                  const struct store_package *pkg)
+{
+    char base[STORE_PATH_MAX], dir[STORE_PATH_MAX], leaf[STORE_PATH_MAX];
+    int b = snprintf(base, sizeof(base), "%s/staging", store->root);
+    int d = snprintf(dir, sizeof(dir), "%s/staging/%s", store->root, pkg->root_hex);
+    int l = snprintf(leaf, sizeof(leaf), "%s/manifest", dir);
+    if (b <= 0 || (size_t)b >= sizeof(base) || d <= 0 || (size_t)d >= sizeof(dir) ||
+        l <= 0 || (size_t)l >= sizeof(leaf) || store_refresh_directory_state(base) != 1)
+        return false;
+    int state = store_refresh_directory_state(dir);
+    if (state == 0) return true;
+    if (state != 1) return false;
+#if defined(_WIN32)
+    wchar_t wide[STORE_PATH_MAX];
+    if (!store_wide_path(leaf, wide)) return false;
+    DWORD attr = GetFileAttributesW(wide);
+    return attr == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND;
+#else
+    struct stat st;
+    return lstat(leaf, &st) != 0 && errno == ENOENT;
+#endif
+}
+

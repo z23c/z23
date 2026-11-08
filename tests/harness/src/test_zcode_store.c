@@ -942,6 +942,96 @@ static int zs_refresh_missing_prior(struct vcs_package_store *a,
     return failures;
 }
 
+static bool zs_damage_promotion(const char *dd, const uint8_t root[32], int mode)
+{
+    char hex[65], committed[640], staged[640], dir[600];
+    zs_hex32(root, hex);
+    (void)snprintf(committed, sizeof(committed), "%s/zcode/manifests/%s", dd, hex);
+    (void)snprintf(dir, sizeof(dir), "%s/zcode/staging/%s", dd, hex);
+    (void)snprintf(staged, sizeof(staged), "%s/manifest", dir);
+    if (mode == 0) return unlink(committed) == 0;
+#if !defined(_WIN32)
+    if (mode == 3) return symlink(".", dir) == 0;
+#endif
+    if (mode == 2 && mkdir(dir, 0700) != 0) return false;
+    FILE *f = fopen(mode == 1 ? committed : staged, "wb");
+    if (!f) return false;
+    bool ok = fwrite("bad", 1, 3, f) == 3;
+    return fclose(f) == 0 && ok;
+}
+
+/* A promoted record is only a replacement for the exact old manifest. */
+static int zs_refresh_promotion_refusal(int mode)
+{
+    int failures = 0;
+    char dd[256];
+    struct vcs_package_store *reader = zs_open(dd, sizeof(dd), "refresh-bad-promotion", 1000000u);
+    struct vcs_package_store *writer = reader ? vcs_package_store_open(dd, 1000000u) : NULL;
+    struct zs_pkg p;
+    const char *paths[] = {"source.c"}; const size_t lengths[] = {32};
+    bool made = writer && zs_make_package(&p, 1, paths, lengths, (uint8_t)(0x50 + mode));
+    bool ready = made && vcs_package_store_put_manifest(writer, p.wire, p.wire_len, NULL) == VCS_PACKAGE_STORE_OK &&
+        vcs_package_store_refresh(reader) && zs_put_all(writer, &p) == VCS_PACKAGE_STORE_OK;
+    if (ready) ready = zs_damage_promotion(dd, p.root, mode);
+    struct vcs_package_store_status status;
+    ZS_CHECK(mode == 0 ? "refresh: missing promoted manifest refused" :
+             mode == 1 ? "refresh: corrupted promoted manifest refused" :
+             mode == 2 ? "refresh: corrupt staged manifest cannot fall back" :
+                         "refresh: linked staging directory cannot fall back",
+             ready && !vcs_package_store_refresh(reader) &&
+             vcs_package_store_package_status(reader, p.root, &status) && !status.complete);
+    if (made) zs_free_package(&p);
+    vcs_package_store_close(writer);
+    vcs_package_store_close(reader);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
+static bool zs_promoted_manifest_equal(struct vcs_package_store *reader,
+                                       const struct zs_pkg *p)
+{
+    uint8_t *wire = NULL; size_t len = 0;
+    bool same = vcs_package_store_get_manifest_wire(reader, p->root, &wire, &len) == VCS_PACKAGE_STORE_OK &&
+                len == p->wire_len && memcmp(wire, p->wire, len) == 0;
+    free(wire);
+    return same;
+}
+
+static int t_store_refresh_staged_commit(void)
+{
+    int failures = 0;
+    char dd[256];
+    struct vcs_package_store *reader = zs_open(dd, sizeof(dd), "refresh-stage", 1000000u);
+    struct vcs_package_store *writer = reader ? vcs_package_store_open(dd, 1000000u) : NULL;
+    struct zs_pkg p;
+    const char *paths[] = {"source.c"};
+    const size_t lengths[] = {32};
+    bool made = writer && zs_make_package(&p, 1, paths, lengths, 0x4a);
+    bool ready = made;
+    if (ready) ready = vcs_package_store_put_manifest(writer, p.wire, p.wire_len, NULL) == VCS_PACKAGE_STORE_OK;
+    struct vcs_package_store_status status;
+    bool saw_staged = ready && vcs_package_store_refresh(reader) &&
+        vcs_package_store_package_status(reader, p.root, &status) && !status.complete;
+    ZS_CHECK("refresh: reader observes staged manifest", saw_staged);
+    bool committed = saw_staged && zs_put_all(writer, &p) == VCS_PACKAGE_STORE_OK;
+    ZS_CHECK("refresh: foreign writer commits staged manifest", committed);
+    bool refreshed = committed && vcs_package_store_refresh(reader);
+    ZS_CHECK("refresh: staged to committed preserves same manifest identity",
+             refreshed && vcs_package_store_package_status(reader, p.root, &status) && status.complete);
+    bool same = refreshed && zs_promoted_manifest_equal(reader, &p);
+    ZS_CHECK("refresh: promoted manifest bytes unchanged", same);
+    if (made) zs_free_package(&p);
+    vcs_package_store_close(writer);
+    vcs_package_store_close(reader);
+    test_rm_rf_recursive(dd);
+    for (int mode = 0; mode < 3; mode++)
+        failures += zs_refresh_promotion_refusal(mode);
+#if !defined(_WIN32)
+    failures += zs_refresh_promotion_refusal(3);
+#endif
+    return failures;
+}
+
 static int t_store_refresh_stale_catalog(void)
 {
     int failures = 0;
@@ -1280,6 +1370,7 @@ int test_zcode_store(void)
     failures += t_store_nonempty_staging_after_commit();
     failures += t_store_stale_noop_pin();
     failures += t_store_refresh_stale_catalog();
+    failures += t_store_refresh_staged_commit();
     failures += t_store_blocked_manifest_recovery();
     failures += t_store_linked_manifest_recovery();
     failures += t_store_noop_missing_authority();

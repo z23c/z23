@@ -50,6 +50,9 @@ struct zcl_app_front_door {
     const char *verb;    /* copy, save, build, open, share or receive */
     const char *target;  /* an app, a copy name, or a .z23share file */
     const char *datadir; /* the operator datadir */
+    const char *root;    /* optional exact app.get identity */
+    const char *publisher;
+    const char *offer_id;
     struct zcl_cli_confirm confirm;
     FILE *out;           /* human lines; NULL is stdout */
 };

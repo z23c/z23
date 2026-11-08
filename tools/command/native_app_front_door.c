@@ -45,6 +45,8 @@ static const struct fd_verb k_fd_verbs[] = {
     {"build", "app.build", "copy", false},
     {"share", "app.share-copy", "copy", false},
     {"receive", "app.receive-copy", "file", false},
+    {"publish", "app.publish", "copy", false},
+    {"get", "app.get", "name", false},
     {"open", "app.run.copy", "copy", true},
 };
 
@@ -236,6 +238,11 @@ static int fd_refused(struct fd_run *r)
                   e->evidence[0] ? ")" : "");
     if (e->next_action[0])
         (void)fprintf(r->out, "next: %s\n", e->next_action);
+    const char *offer_hint = fd_str(r, "next_offer");
+    if (offer_hint) (void)fprintf(r->out, "next: %s\n", offer_hint);
+    const char *first = fd_str(r, "choice_a"), *second = fd_str(r, "choice_b");
+    if (first) (void)fprintf(r->out, "choice: %s\n", first);
+    if (second) (void)fprintf(r->out, "choice: %s\n", second);
     if (e->mutated)
         (void)fprintf(r->out, "note: an earlier step already changed "
                       "something; the message above says what is left\n");
@@ -250,7 +257,7 @@ static void fd_print_plan(struct fd_run *r)
         "name", "semver", "publisher", "publisher_fingerprint", "release_id",
         "package_root", "publishes_as", "copy_name", "copy", "destination",
         "changes", "cache_hit", "image_sha3", "output", "saves_first",
-        "makes_key", "seed"};
+        "makes_key", "seed", "room", "offer_schema"};
     (void)fprintf(r->out, "z23 app %s %s\n", r->door->verb, r->door->target);
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
         const struct json_value *v = json_get(&r->reply.data, keys[i]);
@@ -270,7 +277,8 @@ static void fd_question(const struct fd_run *r, char *q, size_t cap)
     const char *name = fd_str(r, "name") ? fd_str(r, "name") : r->target;
     const char *who = fd_str(r, "publisher") ? fd_str(r, "publisher") : "?";
     const char *v = r->door->verb;
-    if (strcmp(r->verb->verb, "receive") == 0)
+    if (strcmp(r->verb->verb, "receive") == 0 ||
+        strcmp(r->verb->verb, "get") == 0)
         (void)snprintf(q, cap, "Keep, build and run %s %s from publisher %s "
                        "(full %s), package root %s, as %s?", name,
                        fd_str(r, "semver") ? fd_str(r, "semver") : "", who,
@@ -291,28 +299,46 @@ static void fd_question(const struct fd_run *r, char *q, size_t cap)
                        r->target);
 }
 
+static bool fd_confirm_offer(struct fd_run *r, const char *offer)
+{
+    if (r->door->offer_id) return strcmp(r->door->offer_id, offer) == 0;
+    return json_push_kv_str(&r->in, "offer_id", offer);
+}
+
+static const char *fd_binding(struct fd_run *r, const char *key, size_t len)
+{
+    const char *value = fd_str(r, key);
+    return value && strlen(value) == len ? value : NULL;
+}
+
+static bool fd_confirm_binding(struct fd_run *r)
+{
+    bool published = strcmp(r->verb->verb, "publish") == 0;
+    bool getting = strcmp(r->verb->verb, "get") == 0;
+    if (!published && !getting) return true;
+    const char *token = fd_binding(r, "token", 32);
+    if (!token || !json_push_kv_str(&r->in, "token", token)) return false;
+    if (!getting) return true;
+    const char *offer = fd_binding(r, "offer_id", 64);
+    return offer && fd_confirm_offer(r, offer);
+}
+
 /* The confirm input: the plan's own plan_id, and for an open its image. */
 static bool fd_confirm_input(struct fd_run *r)
 {
-    char plan[65], image[65] = "";
-    const char *p = fd_str(r, "plan_id");
-    const char *img = fd_str(r, "image_sha3");
-    if (!p || strlen(p) != 64 || (r->verb->opens && !img))
-        return false;
-    (void)snprintf(plan, sizeof(plan), "%s", p);
-    if (img)
-        (void)snprintf(image, sizeof(image), "%s", img);
+    const char *plan = fd_str(r, "plan_id"), *image = fd_str(r, "image_sha3");
+    if (!plan || strlen(plan) != 64 || (r->verb->opens && !image)) return false;
     return json_push_kv_str(&r->in, "plan_id", plan) &&
-           json_push_kv_bool(&r->in, "confirm", true) &&
-           (!r->verb->opens ||
-            (json_push_kv_bool(&r->in, "accept_execution", true) &&
-             json_push_kv_str(&r->in, "image_sha3", image)));
+           json_push_kv_bool(&r->in, "confirm", true) && fd_confirm_binding(r) &&
+           (!r->verb->opens || (json_push_kv_bool(&r->in, "accept_execution", true) &&
+                                json_push_kv_str(&r->in, "image_sha3", image)));
 }
 
 static void fd_print_done(struct fd_run *r)
 {
     static const char *const keys[] = {
-        "copy", "share_line", "image_sha3", "image_path", "log", "next"};
+        "copy", "share_line", "publisher_fingerprint", "package_root",
+        "post_id", "image_sha3", "image_path", "log", "next"};
     const struct json_value *pid = json_get(&r->reply.data, "pid");
     if (pid && pid->type == JSON_INT)
         (void)fprintf(r->out, "opened %s pid %lld\n",
@@ -376,7 +402,10 @@ static int fd_run_verb(struct fd_run *r)
     json_set_object(&r->in);
     if (!fd_target(r) ||
         !json_push_kv_str(&r->in, r->verb->key, r->target) ||
-        !json_push_kv_str(&r->in, "datadir", r->datadir)) {
+        !json_push_kv_str(&r->in, "datadir", r->datadir) ||
+        (r->door->root && !json_push_kv_str(&r->in, "root", r->door->root)) ||
+        (r->door->publisher && !json_push_kv_str(&r->in, "publisher", r->door->publisher)) ||
+        (r->door->offer_id && !json_push_kv_str(&r->in, "offer_id", r->door->offer_id))) {
         json_free(&r->in);
         return (int)ZCL_COMMAND_EXIT_INVALID;
     }
@@ -428,6 +457,7 @@ static const char *fd_verb_of(const char *path)
         {"app.copy", "copy"},   {"app.save", "save"},
         {"app.build", "build"}, {"app.share", "share"},
         {"app.receive", "receive"}, {"app.open", "open"},
+        {"app.publish", "publish"}, {"app.get", "get"},
         {"app.run.copy", "open"}};
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
         if (strcmp(map[i][0], path) == 0)
@@ -435,25 +465,46 @@ static const char *fd_verb_of(const char *path)
     return NULL;
 }
 
+static int fd_selector_word(const char *w, const char **root,
+                            const char **publisher, const char **offer)
+{
+    const char **slot = NULL;
+    size_t n = 0;
+    if (strncmp(w, "--root=", 7) == 0) { slot = root; n = 7; }
+    else if (strncmp(w, "--publisher=", 12) == 0) { slot = publisher; n = 12; }
+    else if (strncmp(w, "--offer=", 8) == 0) { slot = offer; n = 8; }
+    if (!slot) return 0;
+    if (*slot || !w[n]) return -1;
+    *slot = w + n;
+    return 1;
+}
+
 /* Exactly one target word and at most one --yes / -y. */
 static bool fd_words(const char *const *words, size_t count, size_t consumed,
-                     const char **target, bool *yes)
+                     const char *verb, const char **target, bool *yes,
+                     const char **root, const char **publisher, const char **offer)
 {
     *target = NULL;
     *yes = false;
+    *root = NULL;
+    *publisher = NULL;
+    *offer = NULL;
     for (size_t i = consumed; i < count; i++) {
         const char *w = words[i];
         if (strcmp(w, "--yes") == 0 || strcmp(w, "-y") == 0) {
             if (*yes)
                 return false;
             *yes = true;
-        } else if (w[0] == '-' || *target) {
-            return false;
         } else {
+            int selector = strcmp(verb, "get") == 0
+                               ? fd_selector_word(w, root, publisher, offer) : 0;
+            if (selector < 0) return false;
+            if (selector > 0) continue;
+            if (w[0] == '-' || *target) return false;
             *target = w;
         }
     }
-    return *target != NULL;
+    return *target != NULL && (!!*root == !!*publisher) && (!*offer || *root);
 }
 
 /* The launcher owns catalog alias resolution and all unreadable-selection
@@ -472,26 +523,78 @@ static bool fd_open_native_priority(const char *name)
     return app_selection_load(env.state_dir, entry->id, &selection) != APP_SELECTION_ABSENT;
 }
 
+static bool fd_catalog_lines(const struct json_value *lines)
+{
+    if (!lines || lines->type != JSON_ARR) return false;
+    for (size_t i = 0; i < json_size(lines); i++)
+        if (!json_get_str(json_at(lines, i))) return false;
+    for (size_t i = 0; i < json_size(lines); i++)
+        (void)fprintf(stdout, "%s\n", json_get_str(json_at(lines, i)));
+    if (json_size(lines) == 0)
+        (void)fprintf(stdout, "No app offers held by this node.\n");
+    return true;
+}
+
+static int fd_catalog(const char *datadir)
+{
+    struct zcl_app_front_door door = {.verb = "get", .target = "", .datadir = datadir};
+    struct fd_run r = {.door = &door, .out = stdout, .datadir = datadir};
+    json_init(&r.in);
+    json_set_object(&r.in);
+    if (datadir && !json_push_kv_str(&r.in, "datadir", datadir)) {
+        json_free(&r.in);
+        return (int)ZCL_COMMAND_EXIT_INTERNAL;
+    }
+    bool ok = zcl_app_inner_call("app.get", &r.in, &r.reply, NULL);
+    int rc = 0;
+    if (!ok) rc = fd_refused(&r);
+    else {
+        const struct json_value *lines = json_get(&r.reply.data, "lines");
+        if (!fd_catalog_lines(lines)) {
+            (void)fprintf(stdout, "z23 app get: MALFORMED_INNER: catalog lines are invalid\n");
+            rc = (int)ZCL_COMMAND_EXIT_INTERNAL;
+        }
+    }
+    zcl_command_reply_free(&r.reply);
+    json_free(&r.in);
+    return rc;
+}
+
+static bool fd_open_routes(const struct zcl_command_spec *spec, const char *verb,
+                           const char *target, const char *datadir)
+{
+    bool copy_open = strcmp(spec->path, "app.run.copy") == 0;
+    if (!copy_open && strcmp(spec->path, "app.open") == 0 &&
+        fd_open_native_priority(target)) return false;
+    if (strcmp(verb, "open") == 0 && !copy_open && datadir &&
+        !zcl_str_has_suffix(target, ZCL_PACKAGE_BUNDLE_SUFFIX) &&
+        !fd_is_copy(datadir, target)) return false;
+    return true;
+}
+
 bool zcl_app_front_door_try(const struct zcl_command_spec *spec,
                             const char *const *words, size_t count,
                             size_t consumed, const char *datadir, int *rc)
 {
+    if (spec && rc && strcmp(spec->path, "app.get") == 0 && count == consumed) {
+        const char *dd = datadir && datadir[0] ? datadir : zcl_native_command_datadir();
+        *rc = fd_catalog(dd);
+        return true;
+    }
     const char *verb = spec ? fd_verb_of(spec->path) : NULL;
     const char *target = NULL;
+    const char *root = NULL, *publisher = NULL, *offer = NULL;
     bool yes = false;
-    if (!verb || !rc || !fd_words(words, count, consumed, &target, &yes))
+    if (!verb || !rc || !fd_words(words, count, consumed, verb, &target, &yes,
+                                  &root, &publisher, &offer))
         return false;
     const char *dd = datadir && datadir[0] ? datadir
                                            : zcl_native_command_datadir();
-    bool copy_open = strcmp(spec->path, "app.run.copy") == 0;
-    if (!copy_open && strcmp(spec->path, "app.open") == 0 &&
-        fd_open_native_priority(target)) return false;
-    if (strcmp(verb, "open") == 0 && !copy_open && dd &&
-        !zcl_str_has_suffix(target, ZCL_PACKAGE_BUNDLE_SUFFIX) &&
-        !fd_is_copy(dd, target))
-        return false;
+    if (!fd_open_routes(spec, verb, target, dd)) return false;
     const struct zcl_app_front_door door = {
         .verb = verb, .target = target, .datadir = dd,
+        .root = root, .publisher = publisher,
+        .offer_id = offer,
         .confirm = zcl_cli_confirm_resolve(yes), .out = stdout,
     };
     *rc = zcl_app_front_door_run(&door);

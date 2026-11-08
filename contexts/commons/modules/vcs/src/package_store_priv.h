@@ -198,6 +198,8 @@ enum vcs_package_store_result store_chunk_room(
     const uint8_t hash[32], const uint8_t package_root[32],
     bool *will_complete);
 uint8_t *store_read_file(const char *path, size_t *out_len);
+bool store_refresh_staged_manifest_absent(const struct vcs_package_store *store,
+                                          const struct store_package *pkg);
 /* Caller holds the exact-root process lock; advance before recovery mutation. */
 bool store_generation_advance(struct vcs_package_store *store);
 

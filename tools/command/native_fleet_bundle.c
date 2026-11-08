@@ -171,12 +171,25 @@ enum zcl_fleet_bundle_status zcl_fleet_bundle_offer(
     size_t len = 0;
     if (zfb_read_file(path, &buf, &len, out) != ZCL_FLEET_BUNDLE_DONE)
         return ZCL_FLEET_BUNDLE_REFUSED;
+    /* Another process may have committed a package since this resident
+     * handle opened. Reconcile its catalog before any bundle admission;
+     * later generation checks still refuse a concurrent writer. */
+    if (!vcs_package_store_refresh(store)) {
+        free(buf);
+        return zfb_refuse(out, "STORE_REFRESH_REFUSED",
+                          "the package store could not be reconciled; "
+                          "inspect the store before retrying", true, true);
+    }
     zfb_sha256(buf, len, out->sha256);
     enum vcs_bundle_result vr =
         vcs_bundle_put_to_no_evict(store, buf, len, out->root);
     free(buf);
-    if (vr != VCS_BUNDLE_OK)
-        return zfb_put_refused(out, vr);
+    if (vr != VCS_BUNDLE_OK) {
+        enum zcl_fleet_bundle_status refused = zfb_put_refused(out, vr);
+        /* Refresh may have performed recovery before this later failure. */
+        out->mutated = true;
+        return refused;
+    }
     out->size = len;
     if (vcs_package_store_pin(store, out->root, true) !=
         VCS_PACKAGE_STORE_OK)

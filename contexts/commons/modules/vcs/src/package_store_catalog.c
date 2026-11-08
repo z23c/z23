@@ -220,12 +220,28 @@ static enum vcs_package_store_page_result store_catalog_names_match(
                             : VCS_PACKAGE_STORE_PAGE_INCOMPLETE;
 }
 
+static bool store_catalog_manifest_same(const struct store_package *pkg,
+                                        const uint8_t *wire, size_t len)
+{
+    if (len != pkg->manifest_wire_len) return false;
+    if (pkg->manifest_loaded) return memcmp(wire, pkg->manifest_wire, len) == 0;
+    struct vcs_package_manifest parsed;
+    if (!vcs_package_manifest_parse(wire, len, &parsed)) return false;
+    uint8_t root[32];
+    bool same = vcs_package_manifest_root(&parsed, root) &&
+                memcmp(root, pkg->root, sizeof(root)) == 0;
+    vcs_package_manifest_free(&parsed);
+    return same;
+}
+
 static enum vcs_package_store_page_result store_catalog_validate_package(
     const struct vcs_package_store *store, const struct store_package *pkg,
-    bool check_pin)
+    bool check_pin, bool allow_staged_promotion)
 {
     char path[STORE_PATH_MAX];
-    int n = snprintf(path, sizeof(path), pkg->committed
+    bool committed = pkg->committed ||
+        (allow_staged_promotion && store_refresh_staged_manifest_absent(store, pkg));
+    int n = snprintf(path, sizeof(path), committed
                          ? "%s/manifests/%s" : "%s/staging/%s/manifest",
                          store->root, pkg->root_hex);
     if (n <= 0 || (size_t)n >= sizeof(path))
@@ -233,19 +249,7 @@ static enum vcs_package_store_page_result store_catalog_validate_package(
     size_t len = 0;
     uint8_t *wire = store_read_file(path, &len);
     if (!wire) return VCS_PACKAGE_STORE_PAGE_INCOMPLETE;
-    bool same = len == pkg->manifest_wire_len;
-    if (same && pkg->manifest_loaded)
-        same = memcmp(wire, pkg->manifest_wire, len) == 0;
-    else if (same) {
-        struct vcs_package_manifest parsed;
-        same = vcs_package_manifest_parse(wire, len, &parsed);
-        if (same) {
-            uint8_t root[32];
-            same = vcs_package_manifest_root(&parsed, root) &&
-                   memcmp(root, pkg->root, sizeof(root)) == 0;
-            vcs_package_manifest_free(&parsed);
-        }
-    }
+    bool same = store_catalog_manifest_same(pkg, wire, len);
     free(wire);
     if (!same) return VCS_PACKAGE_STORE_PAGE_STALE;
     if (check_pin) {
@@ -263,7 +267,7 @@ enum vcs_package_store_page_result store_catalog_validate_record_disk(
     const struct vcs_package_store *store, const struct store_package *pkg)
 {
     enum vcs_package_store_page_result result =
-        store_catalog_validate_package(store, pkg, false);
+        store_catalog_validate_package(store, pkg, false, false);
     if (result != VCS_PACKAGE_STORE_PAGE_OK) return result;
     for (size_t i = 0; i < pkg->chunk_count; i++) {
         const uint8_t *hash = pkg->chunks[i].hash;
@@ -364,13 +368,14 @@ static struct store_package *store_catalog_find_metadata(
 }
 
 static enum vcs_package_store_page_result store_catalog_validate_known(
-    const struct vcs_package_store *store, bool check_pin)
+    const struct vcs_package_store *store, bool check_pin, bool allow_staged_promotion)
 {
     if (!store || store->catalog_incomplete)
         return VCS_PACKAGE_STORE_PAGE_INCOMPLETE;
     for (size_t i = 0; i < store->pkg_count; i++) {
         enum vcs_package_store_page_result result =
-            store_catalog_validate_package(store, &store->pkgs[i], check_pin);
+            store_catalog_validate_package(store, &store->pkgs[i], check_pin,
+                                           allow_staged_promotion);
         if (result != VCS_PACKAGE_STORE_PAGE_OK) return result;
     }
     for (size_t i = 0; i < store->cas_count; i++) {
@@ -388,14 +393,14 @@ enum vcs_package_store_page_result store_catalog_validate_observed_disk(
     /* Pin markers may legitimately change through another locked handle.
      * The rebuild below replays those markers from disk; immutable manifests
      * and CAS bytes already observed by this handle must still exist. */
-    return store_catalog_validate_known(store, false);
+    return store_catalog_validate_known(store, false, true);
 }
 
 enum vcs_package_store_page_result store_catalog_validate_disk(
     const struct vcs_package_store *store)
 {
     enum vcs_package_store_page_result result =
-        store_catalog_validate_known(store, true);
+        store_catalog_validate_known(store, true, false);
     if (result != VCS_PACKAGE_STORE_PAGE_OK) return result;
     result = store_catalog_names_match(store, true);
     if (result != VCS_PACKAGE_STORE_PAGE_OK) return result;

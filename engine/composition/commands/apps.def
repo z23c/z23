@@ -622,6 +622,32 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_share_copy)
 
 ZCL_COMMAND_READY_COMMAND(
+    "app.publish", "app", "", "Publish an app copy",
+    "Plan and confirm publication of a signed copy to the public apps board.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "app,publish,share,catalog,board", "zcl.app_publish.input.v1",
+    "zcl.app_publish.v1", "copy,datadir,token,plan_id,confirm", "copy",
+    "z23 app publish skycombat-1", ZCL_COMMAND_LAYER_APP,
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_publish)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.get", "app", "", "Get a published app",
+    "List public offers or verify and receive an exact app identity.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "app,get,catalog,receive,board", "zcl.app_get.input.v1",
+    "zcl.app_get.v1", "name,root,publisher,offer_id,token,datadir,plan_id,confirm", "",
+    "z23 app get alice/game", ZCL_COMMAND_LAYER_APP,
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_get)
+
+ZCL_COMMAND_READY_COMMAND(
     "app.receive-copy", "app", "", "Receive copy file",
     "Owner only; `z23 app open FILE.z23share` runs it. Verifies the file "
     "(zcode.package.bundle.verify) and, without confirm, returns its name, "
