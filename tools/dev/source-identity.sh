@@ -227,6 +227,52 @@ append_prefixed_nul()
     done < "$input"
 }
 
+# Split one already-captured index stream. Both paths consume the same bytes;
+# the portable parser remains the fallback and the shadow oracle.
+portable_split_index()
+{
+    local input="$1" prefix="$2" regular="$3" nested="$4"
+    local record meta path mode stage full
+    : > "$regular"; : > "$nested"
+    while IFS= read -r -d '' record; do
+        meta="${record%%$'\t'*}"; path="${record#*$'\t'}"
+        mode="${meta%% *}"; stage="${meta##* }"
+        full="$path"; [ -n "$prefix" ] && full="$prefix/$path"
+        if [ "$stage" != 0 ]; then
+            if [ -n "$prefix" ]; then fail "unmerged gitlink index stage $stage for path: $full"; fi
+            fail "unmerged index stage $stage for path: $full"
+        fi
+        case "$mode" in
+            100644|100755|120000) printf '%s\0' "$full" >> "$regular" ;;
+            160000) printf '%s\0' "$full" >> "$nested" ;;
+            *)
+                if [ -n "$prefix" ]; then fail "unsupported gitlink index mode $mode for path: $full"; fi
+                fail "unsupported tracked index mode $mode for path: $full" ;;
+        esac
+    done < "$input"
+}
+split_source_index()
+{
+    local input="$1" prefix="$2" tag="$3" nested="$4"
+    local regular="$WORK/split-regular-$tag"
+    if [ -n "$SOURCE_IDENTITY_BATCH" ]; then
+        if [ -n "$prefix" ]; then
+            "$SOURCE_IDENTITY_BATCH" split-index "$nested" "$prefix" < "$input" > "$regular"
+        else
+            "$SOURCE_IDENTITY_BATCH" split-index "$nested" < "$input" > "$regular"
+        fi
+        if [ "${ZCL_SOURCE_IDENTITY_BATCH_SHADOW:-0}" = 1 ]; then
+            portable_split_index "$input" "$prefix" "$WORK/shadow-regular-$tag" "$WORK/shadow-nested-$tag"
+            cmp -s "$regular" "$WORK/shadow-regular-$tag" &&
+                cmp -s "$nested" "$WORK/shadow-nested-$tag" ||
+                fail "native and portable index enumeration differ: ${prefix:-root}"
+        fi
+    else
+        portable_split_index "$input" "$prefix" "$regular" "$nested"
+    fi
+    cat "$regular" >> "$WORK/tracked-source"
+}
+
 collect_gitlink()
 {
     local prefix="$1" top physical record meta relative mode stage tag path
@@ -330,62 +376,18 @@ collect_gitlink()
     git -C "$prefix" ls-files --stage -z -- \
         > "$WORK/gitlink-index-$seq" ||
         fail "gitlink tracked-source discovery failed: $prefix"
-    if [ -n "$SOURCE_IDENTITY_BATCH" ]; then
-        # Native split: regular/symlink records land on tracked-source, nested
-        # gitlinks on the queue file this loop then recurses over. The legacy
-        # loop interleaves recursion with the parse; the final tracked-source
-        # sort makes the orders equivalent.
-        "$SOURCE_IDENTITY_BATCH" split-index "$WORK/gitlink-nested-$seq" \
-            "$prefix" < "$WORK/gitlink-index-$seq" >> "$WORK/tracked-source"
-        while IFS= read -r -d '' nested; do
-            collect_gitlink "$nested"
-        done < "$WORK/gitlink-nested-$seq"
-    else
-        while IFS= read -r -d '' record; do
-            meta="${record%%$'\t'*}"
-            relative="${record#*$'\t'}"
-            mode="${meta%% *}"
-            stage="${meta##* }"
-            [ "$stage" = 0 ] ||
-                fail "unmerged gitlink index stage $stage for path: $prefix/$relative"
-            case "$mode" in
-                100644|100755|120000)
-                    printf '%s/%s\0' "$prefix" "$relative" \
-                        >> "$WORK/tracked-source"
-                    ;;
-                160000) collect_gitlink "$prefix/$relative" ;;
-                *) fail "unsupported gitlink index mode $mode for path: $prefix/$relative" ;;
-            esac
-        done < "$WORK/gitlink-index-$seq"
-    fi
+    split_source_index "$WORK/gitlink-index-$seq" "$prefix" "$seq" "$WORK/gitlink-nested-$seq"
+    while IFS= read -r -d '' nested; do
+        collect_gitlink "$nested"
+    done < "$WORK/gitlink-nested-$seq"
 }
 
 git ls-files --stage -z -- > "$WORK/tracked-index" ||
     fail "tracked source discovery failed"
-if [ -n "$SOURCE_IDENTITY_BATCH" ]; then
-    # Native split: regular/symlink records land on tracked-source, top-level
-    # gitlinks on the queue file this loop then recurses over (see
-    # collect_gitlink for why the deferred order is equivalent).
-    "$SOURCE_IDENTITY_BATCH" split-index "$WORK/gitlink-queue" \
-        < "$WORK/tracked-index" >> "$WORK/tracked-source"
-    while IFS= read -r -d '' nested; do
-        collect_gitlink "$nested"
-    done < "$WORK/gitlink-queue"
-else
-    while IFS= read -r -d '' record; do
-        meta="${record%%$'\t'*}"
-        path="${record#*$'\t'}"
-        mode="${meta%% *}"
-        stage="${meta##* }"
-        [ "$stage" = 0 ] ||
-            fail "unmerged index stage $stage for path: $path"
-        case "$mode" in
-            100644|100755|120000) printf '%s\0' "$path" >> "$WORK/tracked-source" ;;
-            160000) collect_gitlink "$path" ;;
-            *) fail "unsupported tracked index mode $mode for path: $path" ;;
-        esac
-    done < "$WORK/tracked-index"
-fi
+split_source_index "$WORK/tracked-index" "" root "$WORK/gitlink-queue"
+while IFS= read -r -d '' nested; do
+    collect_gitlink "$nested"
+done < "$WORK/gitlink-queue"
 
 # Git ignore policy is not build policy. GNU Make selects C sources with
 # wildcards and the compiler recursively opens headers/templates beneath these

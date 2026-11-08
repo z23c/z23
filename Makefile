@@ -7061,6 +7061,8 @@ LINT_PREFLIGHT_GATES := \
     check-api-reference-generated \
     check-toolgen \
     check-capability-inventory-generated \
+    check-command-input-keys \
+    check-hex-codec-single \
     check-no-wallclock-assertion \
     check-posix-ere-only
 

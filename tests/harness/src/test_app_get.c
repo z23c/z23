@@ -31,6 +31,10 @@
 #include "command/native_app_compose.h"
 #include "command/native_app_front_door.h"
 #include "command/native_app_offer.h"
+#include "command/native_app_library_command.h"
+#include "command/native_app_receive_preview.h"
+#include "command/app_selection.h"
+#include "config/command_catalog.h"
 
 #if defined(_WIN32)
 int test_app_get(void);
@@ -58,6 +62,8 @@ int test_app_get(void)
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <unistd.h>
 
 #define TAG_PATH 1400
@@ -68,6 +74,22 @@ int test_app_get(void)
 #define TAG_ENDPOINT TAG_ONION ":28133"
 #define TAG_LOCAL_HOST "1111111111111111111111111111111111111111111111111111111111111111"
 #define TAG_TEXT (ZCL_APP_OFFER_TEXT_MAX + 1u)
+
+int zcl_test_app_run_copy_poll(long pid);
+static int tag_process_observation(void)
+{
+    int failures = 0;
+    TEST("app get: resident readiness rejects an unobservable process") {
+        pid_t child = fork();
+        if (child == 0) { for (;;) pause(); }
+        int alive = child > 0 ? zcl_test_app_run_copy_poll((long)child) : -1;
+        if (child > 0) { (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0); }
+        int absent = zcl_test_app_run_copy_poll(2147483647L);
+        ASSERT(child > 0 && alive == 0 && absent == 2);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 
 /* ── the stub transport ─────────────────────────────────────────────── */
 
@@ -1256,6 +1278,193 @@ static int tag_b_get(struct tag_world *w)
     return failures;
 }
 
+struct tag_library_view { bool keep, reopen, detail; };
+static bool tag_library_present(void *context, const struct zcl_present_model_v1 *m,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    struct tag_library_view *v = context; (void)copy;
+    if (!zcl_present_model_validate_v1(m, why, cap)) return false;
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    if (!strcmp(m->request_id, "library-home")) event->action_index = v->reopen ? 0 : 1;
+    else if (!strncmp(m->request_id, "library-public-", 15)) event->action_index = 0;
+    else if (!strncmp(m->request_id, "library-", 8) && m->action_count == 4 &&
+             !strcmp(m->actions[0].id, "choose")) event->action_index = 0;
+    else if (v->reopen && m->action_count >= 3 && !strcmp(m->actions[1].id, "help") &&
+             !strcmp(m->actions[2].id, "share")) { v->detail = true; event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; }
+    else return false;
+    return true;
+}
+static bool tag_library_notice(void *context, const struct zcl_present_model_v1 *m,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    struct tag_library_view *v = context; (void)pages;
+    uint32_t count = 0;
+    if (!zcl_present_model_page_count_v1(m, &count, why, cap)) return false;
+    struct zcl_present_window_event_v1 e = {.outcome = ZCL_PRESENT_WINDOW_ACTION};
+    bool redraw = false, close = false;
+    for (uint32_t i = 1; i < count; ++i) { e.action_index = 2; live->owner.update(live->owner.context, &e, false, &redraw, &close); }
+    e.action_index = !strcmp(m->request_id, "received-app") && !v->keep ? 0 : 3;
+    live->owner.update(live->owner.context, &e, false, &redraw, &close);
+    return close;
+}
+static bool tag_library_get(void *context, const struct json_value *in, struct zcl_command_reply *out)
+{
+    (void)context; return zcl_app_inner_call("app.get", in, out, NULL);
+}
+static bool tag_bad_observation(struct app_receive_preview *preview, const struct json_value *wire,
+    const char *field, struct zcl_command_reply *why)
+{
+    struct json_value bad; json_init(&bad);
+    bool ok = json_copy_checked(&bad, wire);
+    struct json_value *data = (struct json_value *)json_get(&bad, "data");
+    struct json_value *value = (struct json_value *)json_get(data, field);
+    if (ok && value && (!strcmp(field, "settled_alive") || !strcmp(field, "executed"))) json_set_bool(value, false);
+    else if (ok && value && (!strcmp(field, "head_version") || !strcmp(field, "image_sha3")))
+        json_set_str(value, "0000000000000000000000000000000000000000000000000000000000000000");
+    else if (ok && value) json_set_str(value, "bad");
+    ok = ok && value && !app_receive_preview_bind_run_copy(preview, &bad, why);
+    json_free(&bad); return ok;
+}
+static bool tag_check_observations(const struct zcl_command_reply *reply, const char *datadir)
+{
+    const struct json_value *receive = json_get(&reply->data, "receive_observation");
+    const struct json_value *build = json_get(&reply->data, "build_observation");
+    const struct json_value *opened = json_get(&reply->data, "open_observation");
+    struct zcl_command_reply why; zcl_command_reply_init(&why, "zcl.test.preview.v1");
+    struct app_receive_preview *preview = NULL;
+    bool ok = !app_receive_preview_create(NULL, datadir, &preview, &why) && !preview &&
+        app_receive_preview_create(json_get(receive, "data"), datadir, &preview, &why) &&
+        !app_receive_preview_bind_build(preview, NULL, &why) &&
+        app_receive_preview_bind_build(preview, build, &why) &&
+        !app_receive_preview_bind_run_copy(preview, NULL, &why);
+    static const char *const fields[] = {"copy_dir", "head_version", "image_sha3", "start_token", "mapped_proof", "settled_alive", "executed"};
+    for (size_t i = 0; ok && i < sizeof(fields) / sizeof(fields[0]); ++i)
+        ok = tag_bad_observation(preview, opened, fields[i], &why);
+    ok = ok && app_receive_preview_bind_run_copy(preview, opened, &why);
+    app_receive_preview_close(preview); zcl_command_reply_free(&why); return ok;
+}
+static bool tag_library_wire(struct zcl_command_reply *reply, bool failure)
+{
+    char wire[16385];
+    const struct zcl_command_spec *spec = asf_spec("app.library");
+    size_t n = 0;
+    if (spec && failure) n = zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, reply, wire, sizeof(wire));
+    else if (spec) {
+        struct zcl_command_budget_fixture fixture = {0}; size_t usable = 0;
+        if (!zcl_command_registry_test_success_budget(spec, reply, &fixture, &usable, wire, sizeof(wire), &n)) n = 0;
+    }
+    struct json_value doc; json_init(&doc);
+    bool ok = n && json_read(&doc, wire, n);
+    if (failure) {
+        const struct json_value *facts = json_get(json_get(&doc, "error"), "facts");
+        ok = ok && json_get_str(json_get(facts, "destination")) && json_get_bool(json_get(facts, "executed"));
+    } else ok = ok && json_get(json_get(&doc, "data"), "open_observation");
+    json_free(&doc); return ok;
+}
+static int tag_recovery_serialization(void)
+{
+    int failures = 0;
+    TEST("My Apps: nested recovery facts survive bounded failure serialization") {
+        struct json_value inner, facts; json_init(&inner); json_set_object(&inner);
+        json_init(&facts); json_set_object(&facts);
+        struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        ASSERT(json_push_kv_str(&facts, "destination", "/fixture/received") &&
+            json_push_kv_bool(&facts, "executed", true) && json_push_kv(&inner, "failure_facts", &facts));
+        ASSERT(zcl_app_copy_recovery(&reply.data, &inner));
+        zcl_command_reply_fail(&reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "INNER_FAILED", "receive", false, true, "Inspect the received copy.", "fixture");
+        ASSERT(tag_library_wire(&reply, true));
+        zcl_command_reply_free(&reply); json_free(&facts); json_free(&inner); PASS();
+    } _test_next:;
+    return failures;
+}
+static int tag_recovery_limits(void)
+{
+    int failures = 0;
+    TEST("My Apps: oversized recovery refuses without inventing a partial path") {
+        char path[2001], copy[257]; memset(path, 'a', sizeof(path) - 1); path[sizeof(path) - 1] = 0;
+        memset(copy, 1, sizeof(copy) - 1); copy[sizeof(copy) - 1] = 0;
+        struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        struct json_value facts; json_init(&facts); json_set_object(&facts);
+        ASSERT(json_push_kv_str(&facts, "destination", path) && json_push_kv_str(&facts, "copy", copy) &&
+            json_push_kv_int(&facts, "pid", 123) &&
+            json_push_kv_bool(&facts, "executed", true) && json_push_kv(&reply.data, "failure_facts", &facts));
+        zcl_command_reply_fail(&reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "INNER_FAILED", "receive", false, true, "Inspect the received copy.", "fixture");
+        zcl_app_bound_committed_result(NULL, &reply, "app.library");
+        char wire[ZCL_COMMAND_ERROR_BUDGET + 1];
+        size_t n = zcl_command_registry_test_reply_wire(zcl_command_catalog(), asf_spec("app.library"), &reply, wire, sizeof(wire));
+        ASSERT(n && n <= ZCL_COMMAND_ERROR_BUDGET && strstr(wire, "INNER_FAILED") &&
+            strstr(wire, "Recovery details are unavailable") && reply.error.mutated &&
+            json_get_int(json_get(&reply.data, "pid")) == 123 && json_get_bool(json_get(&reply.data, "executed")) &&
+            !json_get(&reply.data, "copy"));
+        zcl_command_reply_free(&reply); json_free(&facts); PASS();
+    }
+    TEST("My Apps: oversized unrelated facts are removed before serialization") {
+        char extra[2001]; memset(extra, 'x', sizeof(extra) - 1); extra[sizeof(extra) - 1] = 0;
+        struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        struct json_value facts; json_init(&facts); json_set_object(&facts);
+        ASSERT(json_push_kv_str(&facts, "destination", "/fixture/received") &&
+            json_push_kv_bool(&facts, "executed", true) && json_push_kv_str(&facts, "extra", extra) &&
+            json_push_kv(&reply.data, "failure_facts", &facts));
+        zcl_command_reply_fail(&reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "INNER_FAILED", "receive", false, true, "Inspect the received copy.", "fixture");
+        zcl_app_bound_committed_result(NULL, &reply, "app.library");
+        ASSERT(tag_library_wire(&reply, true));
+        ASSERT(!json_get(json_get(&reply.data, "failure_facts"), "extra"));
+        zcl_command_reply_free(&reply); json_free(&facts); PASS();
+    } _test_next:;
+    return failures;
+}
+static int tag_library_journey(struct tag_world *w)
+{
+    int failures = 0; char why[256] = {0}; struct app_launch_env env;
+    const char *old = getenv("XDG_STATE_HOME"); char *saved = old ? strdup(old) : NULL;
+    TEST("My Apps: real get, native Keep and reopen preserve the exact received version") {
+        ASSERT(!old || saved); ASSERT(setenv("HOME", w->j.b_home, 1) == 0);
+        ASSERT(setenv("XDG_STATE_HOME", w->j.b_home, 1) == 0);
+        ASSERT(app_launch_env_from_process(&env, why, sizeof(why)));
+        for (int keep = 0; keep <= 1; ++keep) {
+            ASSERT(tag_board_variant(w, NULL, NULL, false));
+            struct tag_library_view view = {.keep = keep != 0};
+            struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+            zcl_test_app_library_public_at(&env, w->j.b_datadir, &reply, tag_library_present, &view,
+                                          tag_library_notice, NULL, tag_library_get);
+            const struct json_value *pid = json_get(&reply.data, "pid");
+            bool stopped = pid && pid->type == JSON_INT && asf_alive_then_stop((long)json_get_int(pid));
+            ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && stopped);
+            ASSERT(tag_check_observations(&reply, w->j.b_datadir));
+            ASSERT(tag_library_wire(&reply, false));
+            struct app_selection_routes routes;
+            ASSERT(app_selection_routes_load(env.state_dir, &routes) == APP_SELECTION_OK);
+            ASSERT(routes.count == (size_t)keep);
+            if (keep) {
+                struct app_selection selection; char version[65];
+                ASSERT(app_selection_load(env.state_dir, routes.names[0], &selection) == APP_SELECTION_OK);
+                zcl_hex_encode(selection.version, 32, version);
+                ASSERT(!strcmp(version, json_get_str(json_get(&reply.data, "version"))));
+                ASSERT(!strcmp(selection.copy, json_get_str(json_get(&reply.data, "destination"))));
+                view.reopen = true; zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+                zcl_test_app_library_public_at(&env, w->j.b_datadir, &reply, tag_library_present, &view,
+                                              tag_library_notice, NULL, tag_library_get);
+                ASSERT(view.detail);
+            }
+            zcl_command_reply_free(&reply);
+        }
+        PASS();
+    } _test_next:;
+    if (saved) { (void)setenv("XDG_STATE_HOME", saved, 1); free(saved); }
+    else (void)unsetenv("XDG_STATE_HOME");
+    return failures;
+}
+static int tag_b_journeys(struct tag_world *w)
+{
+    int failures = tag_b_get(w);
+    return failures ? failures : tag_library_journey(w);
+}
+
 static int tag_rebuild_outcomes(struct tag_world *w)
 {
     int failures = 0;
@@ -1448,6 +1657,9 @@ int test_app_get(void)
     static struct tag_world w;
     int failures = 0;
     printf("app get (publish to room apps, get by identity)...\n");
+    failures += tag_process_observation();
+    failures += tag_recovery_serialization();
+    failures += tag_recovery_limits();
     memset(&g_tag, 0, sizeof(g_tag));
     failures += tag_busy_onion_bridge();
     tag_board_reset();
@@ -1480,7 +1692,7 @@ int test_app_get(void)
         failures += tag_refusals(&w);
         failures += tag_b_plan(&w);
         failures += tag_failed_fetch_cleanup(&w);
-        failures += tag_b_get(&w);
+        failures += tag_b_journeys(&w);
         if (failures == 0) failures += tag_rebuild_outcomes(&w);
         if (failures == 0) failures += tag_rehost_failures(&w);
         if (failures == 0) failures += tag_rebuild_open_failure(&w);

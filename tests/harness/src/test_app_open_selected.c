@@ -13,6 +13,7 @@
 #include "command/native_app_receive_command.h"
 #include "command/native_app_receive_preview.h"
 #include "command/native_app_share_command.h"
+#include "command/native_app_library_command.h"
 #include "command/native_app_personalize_command.h"
 #include "command/native_app_personalize_view.h"
 #include "vcs/vcs.h"
@@ -611,11 +612,12 @@ static int aso_mutation(const struct abc_world *w, const struct aso_build *b)
 /* A short-lived MCP server over private pipes; DISPLAY is synthetic and the
  * fixture never opens a window. No service remains running after this test. */
 struct aso_mcp { pid_t pid; int input, output; char line[65536]; };
-static bool aso_mcp_spawn(struct aso_mcp *m)
+static bool aso_mcp_spawn_args(struct aso_mcp *m, const char *bin,
+                               const char *arg0, const char *arg1, const char *arg2)
 {
-    int in[2], out[2]; char bin[PATH_MAX];
+    int in[2], out[2];
     m->pid = -1; m->input = m->output = -1;
-    if (!realpath("build/bin/z23-dev", bin) || pipe(in) != 0) return false;
+    if (pipe(in) != 0) return false;
     if (pipe(out) != 0) { close(in[0]); close(in[1]); return false; }
     m->pid = fork();
     if (m->pid == 0) {
@@ -623,13 +625,20 @@ static bool aso_mcp_spawn(struct aso_mcp *m)
         if (dup2(in[0], 0) < 0 || dup2(out[1], 1) < 0 || nullfd < 0 || dup2(nullfd, 2) < 0) _exit(126);
         close(in[0]); close(in[1]); close(out[0]); close(out[1]); close(nullfd);
         if (setenv("ZCL_CLI_TEST_NO_SERVICE_LOOKUP", "1", 1) != 0) _exit(126);
-        execl(bin, bin, "mcp", "serve", (char *)NULL);
+        execl(bin, bin, arg0, arg1, arg2, (char *)NULL);
         _exit(127);
     }
     close(in[0]); close(out[1]);
     if (m->pid < 0) { close(in[1]); close(out[0]); return false; }
     m->input = in[1]; m->output = out[0];
     return true;
+}
+static bool aso_mcp_spawn(struct aso_mcp *m)
+{
+    char bin[PATH_MAX];
+    m->pid = -1; m->input = m->output = -1;
+    return realpath("build/bin/z23-dev", bin) &&
+        aso_mcp_spawn_args(m, bin, "mcp", "serve", NULL);
 }
 static bool aso_mcp_reap(pid_t pid, int timeout_ms)
 {
@@ -1240,8 +1249,17 @@ int test_app_open_selected(void)
 }
 
 /* Synthetic nonvisual process journey: no graphical or public-link claim. */
-static bool aj_mcp_run(struct aso_mcp *m, const char *path,
-                       const struct json_value *input, struct json_value *doc)
+static bool aj_mcp_result(const struct json_value *result, struct json_value *doc, bool *is_error)
+{
+    const struct json_value *r = json_get(result, "result");
+    const struct json_value *part = json_at(json_get(r, "content"), 0);
+    const char *text = json_get_str(json_get(part, "text"));
+    const struct json_value *flag = json_get(r, "isError");
+    if (!flag || flag->type != JSON_BOOL || !text || !json_read(doc, text, strlen(text))) return false;
+    *is_error = json_get_bool(flag); return true;
+}
+static bool aj_mcp_run_result(struct aso_mcp *m, const char *path,
+    const struct json_value *input, struct json_value *doc, bool *is_error)
 {
     struct json_value req, params, args, result;
     json_init(&req); json_init(&params); json_init(&args); json_init(&result);
@@ -1253,12 +1271,15 @@ static bool aj_mcp_run(struct aso_mcp *m, const char *path,
     char wire[8192]; size_t n = ok ? json_write(&req, wire, sizeof(wire)) : 0;
     ok = n && n < sizeof(wire) && aso_mcp_send(m, wire, true) &&
         json_read(&result, m->line, strlen(m->line));
-    const struct json_value *r = json_get(&result, "result");
-    const struct json_value *part = json_at(json_get(r, "content"), 0);
-    const char *text = json_get_str(json_get(part, "text"));
-    ok = ok && !json_get_bool(json_get(r, "isError")) && text && json_read(doc, text, strlen(text));
+    ok = ok && aj_mcp_result(&result, doc, is_error);
     json_free(&result); json_free(&args); json_free(&params); json_free(&req);
     return ok;
+}
+static bool aj_mcp_run(struct aso_mcp *m, const char *path,
+                       const struct json_value *input, struct json_value *doc)
+{
+    bool is_error = false;
+    return aj_mcp_run_result(m, path, input, doc, &is_error) && !is_error;
 }
 
 static bool aj_edit_input(struct json_value *in, const char *head, const char *blob)
@@ -2420,7 +2441,7 @@ static bool rr_start(struct rr_cycle *r)
     (void)snprintf(r->owner.alice_home, sizeof(r->owner.alice_home), "%s", r->bob.world.bob_home);
     return rr_keep_hash(&r->bob, r->keep) && rr_newer_dirty(r, "#define BOOST 3\n");
 }
-struct rr_consent { const struct rr_cycle *cycle; bool confirmed; };
+struct rr_consent { const struct rr_cycle *cycle; bool confirmed, cancel; unsigned calls; char setup[8192]; };
 static bool rr_personal_fields(const struct zcl_present_model_v1 *model, const struct rr_cycle *r)
 {
     return aj_receive_field(model, "Kept app: ", AK_ROUTE) &&
@@ -2432,6 +2453,17 @@ static bool rr_personal_fields(const struct zcl_present_model_v1 *model, const s
         aj_receive_field(model, "Identity: ",
             "Create a local publishing key after confirmation; personal namespace is pending.");
 }
+static bool rr_consent_pages(struct rr_consent *view,
+    const struct zcl_present_window_live_view_v1 *live, uint32_t count)
+{
+    bool close = false, redraw = false;
+    if (view->cancel) return aj_receive_action(live, 0, &close, &redraw) && close;
+    if (!aj_receive_action(live, 3, &close, &redraw) || close) return false;
+    for (uint32_t i = 1; i < count; ++i)
+        if (!aj_receive_action(live, 2, &close, &redraw) || close || !redraw) return false;
+    view->confirmed = aj_receive_action(live, 3, &close, &redraw) && close;
+    return view->confirmed;
+}
 static bool rr_present(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages,
     const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
@@ -2440,44 +2472,137 @@ static bool rr_present(void *context, const struct zcl_present_model_v1 *model,
     if (!pages || pages->page_count != 1 || !pages->pages->pixels ||
         !rr_personal_fields(model, view->cycle) ||
         !zcl_present_model_page_count_v1(model, &count, why, cap) || count < 2) return false;
-    bool close = false, redraw = false;
-    if (!aj_receive_action(live, 3, &close, &redraw) || close) return false;
-    for (uint32_t i = 1; i < count; ++i)
-        if (!aj_receive_action(live, 2, &close, &redraw) || close || !redraw) return false;
-    view->confirmed = aj_receive_action(live, 3, &close, &redraw) && close;
-    return view->confirmed;
+    return rr_consent_pages(view, live, count);
 }
-static bool rr_personal_identity(struct rr_cycle *r, const struct abc_leaf *leaf)
+static bool rr_library_present(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
-    char key[4400], name[128]; bool exists = false;
-    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.recipient.v1");
-    bool ok = app_personalize_key_probe(&reply, key, sizeof(key), r->publisher, &exists) && exists &&
+    (void)why; (void)cap;
+    struct rr_consent *view = context;
+    if (++view->calls > 12) return false;
+    const char *wanted = !strcmp(model->request_id, "library-home") ? "saved" :
+        copy_text ? "cancel" :
+        model->action_count && !strcmp(model->actions[0].id, "choose") ? "choose" : "help";
+    if (!strcmp(wanted, "choose")) {
+        char short_version[13]; memcpy(short_version, view->cycle->bob.build.version, 12); short_version[12] = 0;
+        const char *base = strrchr(view->cycle->owner.copy, '/');
+        if (!model->item_count || !strstr(model->items[0].value, "Saved version ") ||
+            !strstr(model->items[0].value, short_version) || !base || !strstr(model->summary, base + 1)) wanted = "next";
+    }
+    if (copy_text) (void)snprintf(view->setup, sizeof(view->setup), "%s", copy_text);
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    for (unsigned i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, wanted)) { event->action_index = i; return true; }
+    return false;
+}
+static bool rr_cancel_personalize(struct rr_cycle *r)
+{
+    struct rr_consent view = {.cycle = r, .cancel = true}; struct zcl_command_reply reply;
+    char key[4400]; bool exists = false;
+    zcl_command_reply_init(&reply, "zcl.app_library.v1");
+    zcl_test_app_library_public_at(&r->bob.env, r->owner.alice_datadir, &reply,
+        rr_library_present, &view, rr_present, NULL, NULL);
+    bool canceled = reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(aso_string(&reply.data, "status"), "canceled") && !reply.error.mutated &&
+        app_personalize_key_probe(&reply, key, sizeof(key), r->publisher, &exists) && !exists &&
+        rr_preserved(r, r->head);
+    zcl_command_reply_free(&reply);
+    return canceled;
+}
+static bool rr_setup_identity(struct rr_cycle *r, const struct rr_consent *view,
+    struct zcl_command_reply *reply, struct json_value *setup)
+{
+    char key[4400]; bool exists = false;
+    bool ok = reply->status == ZCL_COMMAND_STATUS_PASSED && view->confirmed &&
+        json_read(setup, view->setup, strlen(view->setup)) &&
+        !strcmp(aso_string(setup, "name"), AK_ROUTE) &&
+        json_get(setup, "revision") && json_get(setup, "revision")->type == JSON_INT &&
+        json_get_int(json_get(setup, "revision")) == 1 &&
+        !strcmp(aso_string(setup, "version"), r->bob.build.version);
+    (void)snprintf(r->personal, sizeof(r->personal), "%s", aso_string(setup, "source_version"));
+    return ok && strlen(r->personal) == 64 && strcmp(r->personal, r->head) &&
+        app_personalize_key_probe(reply, key, sizeof(key), r->publisher, &exists) && exists &&
         app_personalize_namespace(r->publisher, r->space, sizeof(r->space));
-    int n = snprintf(name, sizeof(name), "%s/tinyapp", r->space);
-    ok = ok && n > 0 && (size_t)n < sizeof(name) &&
-        !strcmp(abc_get(leaf, "namespace"), r->space) && !strcmp(abc_get(leaf, "name"), name);
-    const struct json_value *created = json_get(&leaf->out.data, "key_created");
-    ok = ok && created && created->type == JSON_BOOL && json_get_bool(created);
-    zcl_command_reply_free(&reply); return ok;
+}
+static bool rr_preparation_identity(struct rr_cycle *r, const struct zcl_command_reply *reply)
+{
+    const struct json_value *prepared = json_get(&reply->data, "preparation");
+    const struct json_value *created = json_get(prepared, "key_created");
+    char name[128]; int n = snprintf(name, sizeof(name), "%s/tinyapp", r->space);
+    return n > 0 && (size_t)n < sizeof(name) &&
+        !strcmp(aso_string(prepared, "version"), r->personal) &&
+        !strcmp(aso_string(prepared, "namespace"), r->space) &&
+        !strcmp(aso_string(prepared, "name"), name) && created &&
+        created->type == JSON_BOOL && json_get_bool(created);
+}
+static bool rr_library_budget(struct zcl_command_reply *reply)
+{
+    const struct zcl_command_spec *spec = abc_spec("app.library");
+    char wire[ZCL_COMMAND_LIST_BUDGET + 1];
+    struct zcl_command_budget_fixture fixture = {0}; size_t usable = 0, bytes = 0;
+    return spec && zcl_command_registry_test_success_budget(spec, reply, &fixture,
+        &usable, wire, sizeof(wire), &bytes) && bytes > 0;
+}
+static bool rr_setup_mcp_read(struct aso_mcp *m, const struct json_value *setup, int revision,
+                              bool expect_stale)
+{
+    struct json_value input = {0}, doc = {0}; bool is_error = false;
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "name", aso_string(setup, "name")) &&
+        json_push_kv_int(&input, "expected_revision", revision) &&
+        json_push_kv_str(&input, "source_version", aso_string(setup, "source_version")) &&
+        json_push_kv_str(&input, "path", "include/boost.h") &&
+        aj_mcp_run_result(m, "app.customize", &input, &doc, &is_error);
+    const struct json_value *data = json_get(&doc, "data");
+    if (expect_stale)
+        ok = ok && is_error && aso_code_is(&doc, "SELECTION_STALE");
+    else
+        ok = ok && !is_error && !strcmp(aso_string(data, "version"), aso_string(setup, "version")) &&
+            !strcmp(aso_string(data, "source_version"), aso_string(setup, "source_version")) &&
+            !strcmp(aso_string(data, "content"), "#define BOOST 1\n");
+    if (!ok) printf("copied setup MCP stale=%d is_error=%d code=%s version=%s source=%s content=%s\n",
+        expect_stale, is_error, aso_string(json_get(&doc, "error"), "code"),
+        aso_string(data, "version"), aso_string(data, "source_version"), aso_string(data, "content"));
+    json_free(&doc); json_free(&input); return ok;
+}
+static bool rr_setup_args(const struct json_value *setup, const char *expected_exe,
+                          const char *datadir, const char **a, const char **b, const char **c)
+{
+    const struct json_value *args = json_get(setup, "args"); char profile[APP_SELECTION_PATH_MAX + 16];
+    int n = snprintf(profile, sizeof(profile), "--datadir=%s", datadir);
+    if (n <= 0 || (size_t)n >= sizeof(profile) || strcmp(aso_string(setup, "command"), expected_exe) ||
+        !args || args->type != JSON_ARR || json_size(args) != 3) return false;
+    *a = json_get_str(json_at(args, 0)); *b = json_get_str(json_at(args, 1)); *c = json_get_str(json_at(args, 2));
+    return *a && *b && *c && !strcmp(*a, "mcp") && !strcmp(*b, "serve") && !strcmp(*c, profile);
+}
+static bool rr_setup_mcp(const struct json_value *setup, const char *expected_exe, const char *datadir)
+{
+    const char *a, *b, *c;
+    if (!rr_setup_args(setup, expected_exe, datadir, &a, &b, &c)) return false;
+    struct aso_mcp m = {.pid = -1, .input = -1, .output = -1};
+    bool ok = aso_mcp_spawn_args(&m, expected_exe, a, b, c) && aso_mcp_init(&m);
+    if (!ok) printf("copied setup MCP spawn/init failed: %.200s\n", m.line);
+    if (ok) ok = rr_setup_mcp_read(&m, setup, 1, false) && rr_setup_mcp_read(&m, setup, 2, true);
+    return aso_mcp_close(&m) && ok;
 }
 static bool rr_personalize(struct rr_cycle *r)
 {
-    struct abc_leaf leaf; abc_open(&leaf); struct rr_consent view = {.cycle = r};
-    const struct zcl_command_spec *spec = abc_spec("app.personalize"); char why[256];
-    bool ok = json_push_kv_str(&leaf.in, "name", AK_ROUTE) &&
-        json_push_kv_int(&leaf.in, "expected_revision", 1) && spec &&
-        zcl_command_registry_input_validate(spec, &leaf.in, why, sizeof(why));
-    if (ok) {
-        leaf.req.spec = spec; leaf.req.input = &leaf.in; leaf.req.invoked_name = spec->path;
-        zcl_test_app_personalize_view_run(&leaf.req, &leaf.out, rr_present, &view);
-        size_t bytes = json_write(&leaf.out.data, NULL, 0) + 1024u;
-        bool fits = spec->budget_bytes > 0 && bytes <= (size_t)spec->budget_bytes;
-        (void)snprintf(r->personal, sizeof(r->personal), "%s", abc_get(&leaf, "version"));
-        ok = fits && leaf.out.status == ZCL_COMMAND_STATUS_PASSED && leaf.out.exit_code == 0 && view.confirmed &&
-            strlen(r->personal) == 64 && strcmp(r->personal, r->head) && rr_personal_identity(r, &leaf);
-    }
-    if (!ok) printf("recipient personalize: %s %s\n", leaf.out.error.code, leaf.out.error.message);
-    abc_close(&leaf);
+    if (!rr_cancel_personalize(r)) return false;
+    struct rr_consent view = {.cycle = r}; struct zcl_command_reply reply;
+    struct json_value setup = {0};
+    zcl_command_reply_init(&reply, "zcl.app_library.v1");
+    char exe[PATH_MAX];
+    if (!realpath("build/bin/z23-dev", exe)) { zcl_command_reply_free(&reply); return false; }
+    zcl_test_app_library_public_at_exe(&r->bob.env, exe, r->owner.alice_datadir, &reply,
+        rr_library_present, &view, rr_present);
+    bool ok = rr_setup_identity(r, &view, &reply, &setup) &&
+        rr_preparation_identity(r, &reply) && rr_library_budget(&reply) &&
+        rr_setup_mcp(&setup, exe, r->owner.alice_datadir);
+    if (!ok) printf("recipient library prepare: %s %s calls=%u confirmed=%d setup=%zu prepared=%d\n",
+        reply.error.code, reply.error.message, view.calls, view.confirmed, strlen(view.setup),
+        json_get(&reply.data, "preparation") != NULL);
+    json_free(&setup); zcl_command_reply_free(&reply);
     return ok && aj_parent_is(&r->owner, r->personal, r->head) && rr_preserved(r, r->personal);
 }
 static bool rr_preview(struct rr_cycle *r, const char *version)
@@ -2512,6 +2637,16 @@ static bool rr_read(struct rr_cycle *r, int64_t revision, const char *content, c
             !strcmp(abc_get(&leaf, "content"), content);
     }
     abc_close(&leaf); return ok;
+}
+static bool rr_stale_change(struct rr_cycle *r)
+{
+    struct abc_leaf leaf;
+    bool ok = ak_request(&leaf, &r->bob, false) &&
+        json_push_kv_int(&leaf.in, "expected_revision", 1) &&
+        abc_exec("app.customize", &leaf) && leaf.out.status != ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(leaf.out.error.code, "SELECTION_STALE") && !leaf.out.error.mutated;
+    abc_close(&leaf);
+    return ok && rr_preserved(r, r->personal);
 }
 static bool rr_edit(struct rr_cycle *r)
 {
@@ -2600,6 +2735,7 @@ static int rr_acceptance(struct rr_cycle *r)
         ASSERT(rr_personalize(r));
         ASSERT(rr_preview(r, r->personal));
         ASSERT(rr_keep(r, 1));
+        ASSERT(rr_stale_change(r));
         ASSERT(rr_edit(r));
         ASSERT(rr_preview(r, r->edited));
         ASSERT(rr_keep(r, 2));

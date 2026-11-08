@@ -20,6 +20,44 @@
 
 #include "test/syncdiag_rpc_fixture.h"
 #include "services/chain_evidence_authority_service.h"
+#include "net/peer_lifecycle.h"
+
+static int syncdiag_peer_summary(void)
+{
+    struct json_value params = {0}, arg = {0}, result = {0};
+    json_set_array(&params);
+    json_set_str(&arg, "peer_lifecycle");
+    json_push_back(&params, &arg);
+    json_set_str(&arg, "summary");
+    json_push_back(&params, &arg);
+    peer_lifecycle_note_attempt(NULL, PEER_LIFECYCLE_SOURCE_UNKNOWN);
+    bool ok = diag_rpc_dumpstate_builtin(&params, false, &result);
+    const struct json_value *state = json_get(&result, "state");
+    const struct json_value *attempted = json_get(state, "attempted");
+    bool valid = ok && attempted && attempted->type == JSON_INT &&
+                 json_get_int(attempted) > 0 && !json_get(state, "peers") &&
+                 json_write(&result, NULL, 0) < 4096;
+    json_free(&result);
+    json_free(&params);
+    json_set_array(&params);
+    json_set_str(&arg, "peer_lifecycle");
+    json_push_back(&params, &arg);
+    ok = diag_rpc_dumpstate_builtin(&params, false, &result);
+    state = json_get(&result, "state");
+    valid = valid && ok && json_get(state, "peers") != NULL;
+    json_free(&result);
+    json_set_str(&arg, "incidents");
+    json_push_back(&params, &arg);
+    ok = diag_rpc_dumpstate_builtin(&params, false, &result);
+    state = json_get(&result, "state");
+    valid = valid && ok && json_get(state, "incident_count") != NULL;
+    if (!valid)
+        printf("FAIL: peer lifecycle summary must contain totals without peer rows\n");
+    json_free(&result);
+    json_free(&arg);
+    json_free(&params);
+    return valid ? 0 : 1;
+}
 
 int test_syncdiag_rpc(void)
 {
@@ -27,6 +65,8 @@ int test_syncdiag_rpc(void)
     agent_security_posture_test_override_review_required(0);
 
     syncdiag_reset_rpc_globals_for_test();
+
+    failures += syncdiag_peer_summary();
 
     failures += syncdiag_cases_anchorstatus();
     failures += syncdiag_cases_network();

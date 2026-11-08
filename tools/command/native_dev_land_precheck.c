@@ -15,6 +15,7 @@
 #include "platform/directory_compat.h"
 
 #include "base/safe_alloc.h"
+#include "base/hex.h"
 #include "json/json.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
@@ -374,6 +375,7 @@ struct pc_run {
     const char *ran[ZCL_LAND_PRECHECK_MAX_GATES];
     char unproven[PC_EVIDENCE_CAP];
     size_t nskipped, nran;
+    bool gate_output_available;
 };
 
 static void pc_history_unproven(struct pc_run *r, const char *reason)
@@ -549,6 +551,37 @@ static void pc_push_unproven(const struct pc_run *r,
         (void)json_push_kv_str(&reply->data, "precheck_unproven", r->unproven);
 }
 
+/* Captured text has no byte count: NUL may end this prefix early. Encode
+ * non-ASCII bytes so the failure facts are valid JSON text on any locale. */
+static void pc_timeout_facts(struct pc_run *r, const char *gate,
+                             struct zcl_command_reply *reply)
+{
+    char output[2048];
+    size_t used = 0;
+    for (const unsigned char *p = (const unsigned char *)r->out; *p; p++) {
+        unsigned char c = *p;
+        if (c >= 32 && c <= 126 && c != '\\') {
+            if (used + 1 >= sizeof(output)) break;
+            output[used++] = (char)c;
+        } else {
+            if (used + 4 >= sizeof(output)) break;
+            output[used++] = '\\'; output[used++] = 'x';
+            zcl_hex_encode(&c, 1, output + used);
+            used += 2;
+        }
+    }
+    output[used] = '\0';
+    struct json_value facts;
+    json_init(&facts);
+    json_set_object(&facts);
+    bool ok = json_push_kv_str(&facts, "gate", gate) &&
+        json_push_kv_str(&facts, "output_ascii_escaped", output) &&
+        json_push_kv_bool(&facts, "partial", true) &&
+        json_push_kv_bool(&facts, "output_may_be_truncated", true);
+    if (ok) (void)json_push_kv(&reply->data, "failure_facts", &facts);
+    json_free(&facts);
+}
+
 static void pc_gate_failed(struct pc_run *r, const char *gate, int rc,
                            struct zcl_command_reply *reply)
 {
@@ -562,6 +595,8 @@ static void pc_gate_failed(struct pc_run *r, const char *gate, int rc,
                        "the precheck ran past its %d s budget at %s; fix the "
                        "slow gate or resubmit with --precheck=skip",
                        (int)(r->budget_ms / 1000), gate);
+        if (r->gate_output_available)
+            pc_timeout_facts(r, gate, reply);
         pc_fail(reply, r->leaf, "PRECHECK_TIMEOUT", msg, gate);
         return;
     }
@@ -660,12 +695,14 @@ static int pc_size_run(struct pc_run *r)
 static int pc_gate_exec(struct pc_run *r, const char *gate, bool ship,
                         bool size)
 {
+    r->gate_output_available = false;
     if (strcmp(gate, "check-file-purpose") == 0)
         return pc_file_purpose_run(r);
     if (ship)
         return pc_ship_run(r);
     if (size)
         return pc_size_run(r);
+    r->gate_output_available = true;
     return pc_run(r->wt, r->bin, gate, r->deadline, r->out, PC_OUT_CAP);
 }
 

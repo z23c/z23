@@ -18,7 +18,7 @@
     DIAG_CHAIN("quorum_oracle", quorum_oracle_dump_state_json,
                "multi-source quorum oracle: per-source vote stats + last verdict",
                "engine/services/src/quorum_oracle_service.c", DIAG_TEST_DEFAULT),
-    DIAG_CHAIN("peer_lifecycle", peer_lifecycle_dump_state_json,
+    DIAG_CHAIN("peer_lifecycle", diagnostics_peer_lifecycle,
                "P2P peer lifecycle attempts, handshakes, timeouts, and rejects by address/source",
                "core/modules/net/src/peer_lifecycle.c",
                "tests/harness/src/test_peer_lifecycle.c"),

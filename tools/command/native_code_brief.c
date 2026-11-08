@@ -724,7 +724,7 @@ static void cb_build_next(struct cb_brief *b)
         cb_push_next(b, "build/bin/z23 code cost %s", b->paths[0]);
     cb_push_next(b, "%s", "make lint-fast");
     if (cb_needs_preflight(b))
-        cb_push_next(b, "%s", "make lint-preflight");
+        cb_push_next(b, "%s", "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-preflight");
     if (b->ntests == 1 && strcmp(b->tests[0], "make_lint_gates") == 0)
         cb_push_next(b, "%s", "build/bin/z23-lint run --list");
 }

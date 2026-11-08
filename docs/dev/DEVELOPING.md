@@ -1017,8 +1017,9 @@ A change under `tools/command/*.c`, `engine/composition/**/*.def`,
 `contexts/**/*.def`, or a new `.c` file routinely passes `lint-fast` and then
 fails only in the full `make lint`, because the gates that catch that class of
 change (capability closure, API-reference drift, the wallclock and POSIX-ERE
-ratchets) are not in `lint-fast`'s subset. Run `make lint-preflight` on that
-kind of change before submitting — it selects those gates and capability-inventory
+ratchets) are not in `lint-fast`'s subset. On a maintainer host run
+`DEVBUILD_CLASS=normal devbuild --wait sh -c 'exec make -j"$(nproc 2>/dev/null || echo 2)" lint-preflight'`
+on that kind of change before submitting — it selects those gates and capability-inventory
 freshness from the full lint umbrella.
 
 `lint-fast` also checks generated capability-inventory freshness and package

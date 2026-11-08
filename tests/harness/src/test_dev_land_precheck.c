@@ -205,6 +205,91 @@ static bool dlx_pc_deadline_one(bool reader_only)
     return ok;
 }
 
+static bool dlx_pc_timeout_output_matches(const char *output, int mode)
+{
+    if (mode == 0) return strstr(output, "stdout marker") &&
+        strstr(output, "stderr marker") && strstr(output, "\\xff");
+    if (mode == 1) return strlen(output) == 2047;
+    return output[0] == '\0';
+}
+
+static bool dlx_pc_timeout_facts(const struct json_value *doc, int mode)
+{
+    const struct json_value *error = json_get(doc, "error");
+    const struct json_value *facts = json_get(error, "facts");
+    const char *gate = json_get_str(json_get(facts, "gate"));
+    const char *output = json_get_str(json_get(facts, "output_ascii_escaped"));
+    const char *error_code = json_get_str(json_get(error, "code"));
+    bool ok = error_code && !strcmp(error_code, "PRECHECK_TIMEOUT") && gate &&
+        !strcmp(gate, "check-core-seal") && output && strlen(output) < 2048 &&
+        json_get_bool(json_get(facts, "partial")) &&
+        json_get_bool(json_get(facts, "output_may_be_truncated")) &&
+        !json_get_bool(json_get(error, "mutated"));
+    return ok && dlx_pc_timeout_output_matches(output, mode);
+}
+
+static bool dlx_pc_timeout_wire(const struct dlx_call *call, int mode)
+{
+    const struct zcl_command_spec *leaf = zcl_command_registry_find(
+        zcl_command_catalog(), "dev.land.submit", NULL);
+    if (!leaf) return false;
+    struct zcl_command_spec spec = *leaf;
+    spec.handler = dlx_captured_handler;
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool input_ok = json_push_kv(&input, "tip", json_get(&call->input, "tip")) &&
+        json_push_kv(&input, "worktree", json_get(&call->input, "worktree"));
+    if (!input_ok) { json_free(&input); return false; }
+    char wire[8192];
+    enum zcl_command_exit code;
+    g_dlx_captured_reply = &call->reply;
+    size_t len = zcl_command_registry_execute_json(zcl_command_catalog(),
+        &spec, NULL, &input, false, DLX_PATH, NULL, 0, 0, NULL,
+        wire, sizeof(wire), &code);
+    g_dlx_captured_reply = NULL;
+    json_free(&input);
+    struct json_value doc;
+    json_init(&doc);
+    bool ok = len && json_read(&doc, wire, len);
+    ok = ok && code != ZCL_COMMAND_EXIT_OK && dlx_pc_timeout_facts(&doc, mode);
+    if (!ok) fprintf(stderr, "timeout wire mode=%d code=%d len=%zu wire=%.*s\n",
+                     mode, code, len, (int)len, wire);
+    json_free(&doc);
+    return ok;
+}
+
+static bool dlx_pc_timeout_output(int mode)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char path[1400];
+    if (!dlx_pc_rig(&rig, "precheck_output", true, "check-core-seal\n"))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/build/bin/z23-lint", rig.clone);
+    const char *emit = mode == 0 ? "printf 'stdout marker\\n'; printf 'stderr marker\\n\\377' >&2\n" :
+        mode == 1 ? "printf '%03000d' 0\n" :
+        mode == 2 ? "" : "printf '\\000hidden'\n";
+    char script[1024];
+    (void)snprintf(script, sizeof(script), "#!/bin/sh\n"
+        "if [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\n"
+        "%s sleep 3; touch build/timeout-child-completed\n", emit);
+    if (!dlx_write(path, script) || chmod(path, 0755) != 0) return false;
+    zcl_dev_land_precheck_test_budget(500);
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ran = dlx_run(&c);
+    zcl_dev_land_precheck_test_budget(0);
+    bool ok = ran && !dlx_ok(&c) && dlx_queue_empty() &&
+        dlx_pc_timeout_wire(&c, mode);
+    if (!ok) fprintf(stderr, "timeout fixture mode=%d ran=%d status=%d error=%s evidence=%s\n",
+                     mode, ran, c.reply.status, c.reply.error.code, c.reply.error.evidence);
+    (void)snprintf(path, sizeof(path), "%s/build/timeout-child-completed", rig.clone);
+    ok = ok && !dlx_file_exists(path);
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
 static bool dlx_pc_unknown_gate_skipped(void)
 {
     struct dlx_rig rig;
@@ -638,6 +723,13 @@ int dlx_case_precheck(void)
     }
     TEST("land: submit refuses a lane whose precheck gate fails and queues nothing") {
         ASSERT(dlx_pc_failing_gate_refused());
+        PASS();
+    }
+    TEST("land: timeout exposes bounded partial gate output on the wire") {
+        ASSERT(dlx_pc_timeout_output(0));
+        ASSERT(dlx_pc_timeout_output(1));
+        ASSERT(dlx_pc_timeout_output(2));
+        ASSERT(dlx_pc_timeout_output(3));
         PASS();
     }
     TEST("land: precheck skips a gate that cannot decide (exit 2) and queues") {

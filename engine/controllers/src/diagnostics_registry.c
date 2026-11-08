@@ -481,6 +481,14 @@ bool diag_rpc_profile(const struct json_value *params, bool help,
                "persisted_projection_snapshot", "bounded_lookup", NULL, \
                NULL, NULL, test_, true)
 
+/* Keep the lifetime funnel bounded without changing the legacy full dump. */
+static bool diagnostics_peer_lifecycle(struct json_value *out, const char *key)
+{
+    if (key && strcmp(key, "summary") == 0)
+        return peer_lifecycle_summary_json(out);
+    return peer_lifecycle_dump_state_json(out, key);
+}
+
 /* One descriptor source drives dumpstate dispatch, the state catalog, native's
  * advisory subsystem enum, health rollup, and registry invariants. */
 static const struct diagnostics_dump_entry g_dumpers[] = {

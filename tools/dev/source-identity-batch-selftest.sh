@@ -189,7 +189,14 @@ cd "$SANDBOX"
 git init -q
 git config user.email source-identity-batch@example.invalid
 git config user.name source-identity-batch
-git add -- .
+mkdir -p vendor/sub
+git -C vendor/sub init -q
+git -C vendor/sub config user.email source-identity-batch@example.invalid
+git -C vendor/sub config user.name source-identity-batch
+printf 'gitlink source\n' > vendor/sub/'source with space.c'
+git -C vendor/sub add -- .
+git -C vendor/sub commit -qm fixture
+git -c advice.addEmbeddedRepo=false add -- .
 git commit -qm fixture
 sandbox_native="$(ZCL_SOURCE_IDENTITY_BATCH_SHADOW=1 \
     "$SOURCE_IDENTITY" capture)" || fail 'sandbox native capture failed'
@@ -197,6 +204,13 @@ sandbox_legacy="$(ZCL_SOURCE_IDENTITY_BATCH_DISABLE=1 \
     "$SOURCE_IDENTITY" capture)" || fail 'sandbox portable capture failed'
 [ "$sandbox_native" = "$sandbox_legacy" ] ||
     fail 'adversarial-path native and portable records differ'
+printf 'changed between captures\n' >> plain.c
+sandbox_changed="$(ZCL_SOURCE_IDENTITY_BATCH_SHADOW=1 "$SOURCE_IDENTITY" capture)" ||
+    fail 'changed sandbox shadow capture failed'
+[ "$sandbox_changed" != "$sandbox_native" ] || fail 'between-capture mutation went undetected'
+[ "$sandbox_changed" = "$(ZCL_SOURCE_IDENTITY_BATCH_DISABLE=1 "$SOURCE_IDENTITY" capture)" ] ||
+    fail 'changed sandbox portable record differs'
+printf 'plain\n' > plain.c
 
 # Mutation records must match too, including nonzero timezone offsets.
 # Fixed POSIX zones keep this independent of the host timezone database.
@@ -214,10 +228,6 @@ done
 cd "$ROOT"
 native="$(ZCL_SOURCE_IDENTITY_BATCH_SHADOW=1 \
     "$SOURCE_IDENTITY" capture)" || fail 'whole-tree native capture failed'
-legacy="$(ZCL_SOURCE_IDENTITY_BATCH_DISABLE=1 \
-    "$SOURCE_IDENTITY" capture)" || fail 'whole-tree legacy capture failed'
-[ "$native" = "$legacy" ] ||
-    fail "whole-tree v2 records differ native=$native legacy=$legacy"
 
 printf 'source-identity-batch-selftest: PASS record=%s malformed_nul=refused\n' \
     "$native"

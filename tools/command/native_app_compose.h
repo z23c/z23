@@ -35,6 +35,17 @@ bool zcl_app_inner_plan_confirm(const char *path, struct json_value *input,
 const char *zcl_app_inner_str(const struct zcl_command_reply *r,
                               const char *key);
 
+/* Bounded projection of an actual successful inner call. Every listed field
+ * is required and must have the given JSON type; no unlisted data is copied. */
+struct zcl_app_observation_field { const char *name; enum json_type type; };
+bool zcl_app_observation(struct json_value *out, const char *command,
+    const struct zcl_command_reply *reply,
+    const struct zcl_app_observation_field *fields, size_t count, size_t max_bytes);
+/* Refuse an oversized committed result while retaining bounded recovery facts. */
+void zcl_app_bound_committed_result(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const char *command);
+bool zcl_app_copy_recovery(struct json_value *out, const struct json_value *source);
+
 /* Fail `reply` with the inner leaf's own refusal (code, message, evidence),
  * marking it mutated when the inner leaf did or `mutated` says an earlier
  * step already did. */

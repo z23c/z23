@@ -50,8 +50,8 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_COMMAND(
     "app.library", "app", "", "My Apps",
-    "Browse installed and saved apps in a native window. Opening revalidates the displayed choice; stale choices refuse without substitution.",
-    0, "apps,library,desktop,kept",
+    "Browse installed, saved and public apps in a native window. Opening revalidates the displayed choice; stale choices refuse without substitution.",
+    16384, "apps,library,desktop,kept",
     "zcl.command.empty_input.v1", "zcl.app_open.v1", "", "", "z23 app library",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
@@ -666,7 +666,7 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_COMMAND(
     "app.get", "app", "", "Get",
     "List public offers or verify and receive an exact app identity.",
-    ZCL_COMMAND_RESULT_BUDGET,
+    16384,
     "app,get,catalog,receive,board", "zcl.app_get.input.v1",
     "zcl.app_get.v1", "name,root,publisher,offer_id,token,datadir,plan_id,confirm", "",
     "z23 app get alice/game", ZCL_COMMAND_LAYER_APP,
@@ -685,7 +685,7 @@ ZCL_COMMAND_READY_COMMAND(
     "<datadir>/copies/<name>-<n> trusting exactly the verified file's "
     "publisher and root, builds it with app.build and opens that image "
     "with app.run.copy. A file that does not verify keeps nothing.",
-    ZCL_COMMAND_RESULT_BUDGET,
+    16384,
     "app,receive,open,friend,file,z23share,trust,fingerprint",
     "zcl.app_receive_copy.input.v1", "zcl.app_receive_copy.v1",
     "file,datadir,day,plan_id,confirm", "file",

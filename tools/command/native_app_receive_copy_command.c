@@ -27,6 +27,7 @@
 
 #define ZRV_COMMAND "app.receive-copy"
 #define ZRV_DOMAIN "zcl.app_receive.plan.v1"
+#define ZRV_OBSERVATION_MAX 4096u
 
 
 struct zrv {
@@ -40,6 +41,39 @@ struct zrv {
     char dest[APP_COPY_BUILD_PATH];
     char receive_plan[65];
     uint8_t plan_id[32];
+    size_t observation_bytes;
+};
+
+static bool zrv_observe(struct zrv *z, const char *key, const char *command,
+    const struct zcl_command_reply *inner, const struct zcl_app_observation_field *fields, size_t count)
+{
+    struct json_value snapshot;
+    bool ok = zcl_app_observation(&snapshot, command, inner, fields, count, ZRV_OBSERVATION_MAX);
+    size_t n = ok ? json_write(&snapshot, NULL, 0) : 0;
+    ok = ok && n <= ZRV_OBSERVATION_MAX - z->observation_bytes &&
+        json_push_kv(&z->reply->data, key, &snapshot);
+    if (ok) z->observation_bytes += n;
+    json_free(&snapshot);
+    if (!ok) zcl_package_copy_fail(z->reply, "OBSERVATION_UNAVAILABLE", true,
+        "The operation changed local state but its bounded observation could not be retained; inspect the copy before retrying.", z->dest);
+    return ok;
+}
+
+static const struct zcl_app_observation_field zrv_receive_fields[] = {
+    {"stage", JSON_STR}, {"destination", JSON_STR}, {"version", JSON_STR},
+    {"release_id", JSON_STR}, {"package_root", JSON_STR},
+    {"publisher_fingerprint", JSON_STR}, {"executed", JSON_BOOL}
+};
+static const struct zcl_app_observation_field zrv_build_fields[] = {
+    {"stage", JSON_STR}, {"copy", JSON_STR}, {"version", JSON_STR},
+    {"package_root", JSON_STR}, {"env_root", JSON_STR}, {"dependency_root", JSON_STR},
+    {"record_id", JSON_STR}, {"image_sha3", JSON_STR}, {"executed", JSON_BOOL}
+};
+static const struct zcl_app_observation_field zrv_open_fields[] = {
+    {"stage", JSON_STR}, {"copy_dir", JSON_STR}, {"head_version", JSON_STR},
+    {"package_root", JSON_STR}, {"image_sha3", JSON_STR}, {"pid", JSON_INT},
+    {"start_token", JSON_STR}, {"mapped_proof", JSON_STR},
+    {"settled_alive", JSON_BOOL}, {"executed", JSON_BOOL}
 };
 
 static bool zrv_receive_input(struct zrv *z, struct json_value *in)
@@ -189,10 +223,44 @@ static void zrv_open_binding(struct zrv *z, const struct zcl_command_reply *buil
         !strcmp(version, head) && !strcmp(package, opened_package));
 }
 
+static void zrv_open_result(struct zrv *z, struct zcl_command_reply *inner, bool ok)
+{
+    const struct json_value *pid = json_get(&inner->data, "pid");
+    const struct json_value *executed = json_get(&inner->data, "executed");
+    if (pid && pid->type == JSON_INT) (void)json_push_kv(&z->reply->data, "pid", pid);
+    if (executed && executed->type == JSON_BOOL) (void)json_push_kv(&z->reply->data, "executed", executed);
+    if (!ok) { zcl_app_inner_fail(z->reply, inner, true); return; }
+    if (!executed || executed->type != JSON_BOOL || !json_get_bool(executed)) {
+        zcl_package_copy_fail(z->reply, "OBSERVATION_UNAVAILABLE", true,
+            "The open result did not retain a valid execution observation; inspect the copy before retrying.", z->dest);
+        return;
+    }
+    if (!zrv_observe(z, "open_observation", "app.run.copy", inner, zrv_open_fields,
+                     sizeof(zrv_open_fields) / sizeof(zrv_open_fields[0]))) return;
+    zrv_describe(z, "commit");
+    (void)json_push_kv_str(&z->reply->data, "image_sha3", zcl_app_inner_str(inner, "image_sha3"));
+}
+static void zrv_build_open(struct zrv *z)
+{
+    struct zcl_command_reply inner, build;
+    if (!zrv_build(z, &build)) {
+        zcl_app_inner_fail(z->reply, &build, true); zcl_command_reply_free(&build); return;
+    }
+    bool saved_build = json_push_kv(&z->reply->data, "build", &build.data);
+    (void)json_push_kv_bool(&z->reply->data, "build_metadata_complete", saved_build);
+    if (!zrv_observe(z, "build_observation", "app.build", &build, zrv_build_fields,
+                     sizeof(zrv_build_fields) / sizeof(zrv_build_fields[0]))) {
+        zcl_command_reply_free(&build); return;
+    }
+    (void)json_push_kv_bool(&z->reply->data, "open_attempted", true);
+    bool ok = zrv_open(z, &inner);
+    if (ok) zrv_open_binding(z, &build, &inner);
+    zcl_command_reply_free(&build);
+    zrv_open_result(z, &inner, ok); zcl_command_reply_free(&inner);
+}
 static void zrv_commit(struct zrv *z)
 {
     struct zcl_command_reply inner;
-    struct zcl_command_reply build;
     char copies[APP_COPY_BUILD_PATH];
     if (!zcl_package_copy_plan_matches(z->input, z->plan_id, z->reply,
                                        ZRV_COMMAND))
@@ -205,41 +273,20 @@ static void zrv_commit(struct zrv *z)
                               z->datadir);
         return;
     }
-    bool kept = zrv_keep(z, &inner);
-    bool ok = kept;
-    if (ok) {
-        bool described = zrv_describe_kept(z);
-        zcl_command_reply_free(&inner);
-        if (!described) {
+    if (!zrv_keep(z, &inner)) {
+        zcl_app_inner_fail(z->reply, &inner, false); zcl_command_reply_free(&inner); return;
+    }
+    bool described = zrv_describe_kept(z) && zrv_observe(z, "receive_observation",
+            "zcode.package.bundle.receive", &inner, zrv_receive_fields,
+            sizeof(zrv_receive_fields) / sizeof(zrv_receive_fields[0]));
+    zcl_command_reply_free(&inner);
+    if (!described) {
+        if (z->reply->status == ZCL_COMMAND_STATUS_PASSED)
             zcl_package_copy_fail(z->reply, "ALLOC", true,
                                   "the copy was kept but its result could not be described", z->dest);
-            return;
-        }
-        ok = zrv_build(z, &build);
-        if (!ok) {
-            zcl_app_inner_fail(z->reply, &build, true);
-            zcl_command_reply_free(&build);
-            return;
-        }
-        bool saved_build = json_push_kv(&z->reply->data, "build", &build.data);
-        (void)json_push_kv_bool(&z->reply->data, "build_metadata_complete", saved_build);
-        ok = zrv_open(z, &inner);
-        if (ok) zrv_open_binding(z, &build, &inner);
-        zcl_command_reply_free(&build);
-    }
-    if (!ok) {
-        zcl_app_inner_fail(z->reply, &inner, kept);
-        zcl_command_reply_free(&inner);
         return;
     }
-    zrv_describe(z, "commit");
-    const struct json_value *pid = json_get(&inner.data, "pid");
-    if (pid && pid->type == JSON_INT)
-        (void)json_push_kv_int(&z->reply->data, "pid", json_get_int(pid));
-    (void)json_push_kv_str(&z->reply->data, "image_sha3",
-                           zcl_app_inner_str(&inner, "image_sha3"));
-    (void)json_push_kv_bool(&z->reply->data, "executed", true);
-    zcl_command_reply_free(&inner);
+    zrv_build_open(z);
 }
 
 void zcl_native_handle_app_receive_copy(const struct zcl_command_request *request,
@@ -277,5 +324,8 @@ void zcl_native_handle_app_receive_copy(const struct zcl_command_request *reques
     }
     if (z->verify_live)
         zcl_command_reply_free(&z->verify);
+    if (zcl_package_copy_confirmed(request->input) &&
+        (reply->status == ZCL_COMMAND_STATUS_PASSED || reply->error.mutated))
+        zcl_app_bound_committed_result(request, reply, ZRV_COMMAND);
     free(z);
 }

@@ -11,6 +11,9 @@ void app_personalize_view_run(const struct zcl_command_request *request,
 /* Native Change-with-AI composition. Already personal source needs no new consent. */
 void app_personalize_view_prepare(const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* Optional per-invocation presenter; NULL selects the native owner window. */
+void app_personalize_view_prepare_present(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context);
 #if defined(ZCL_TESTING)
 /* Per-invocation presenter; no production global hook or environment override. */
 void zcl_test_app_personalize_view_run(const struct zcl_command_request *request,

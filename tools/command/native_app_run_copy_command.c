@@ -34,6 +34,7 @@
 #include "util/path_util.h"
 
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -253,15 +254,29 @@ static bool zrc_spawn(struct resident_launch *launch, char *const argv[],
 }
 
 /* Still running after the settle time? An early exit is reaped here. */
-static bool zrc_settled(long pid, int *status)
+enum zrc_settle { ZRC_ALIVE, ZRC_EXITED, ZRC_UNOBSERVED };
+static enum zrc_settle zrc_poll(long pid, int *status)
+{
+    pid_t result;
+    do result = waitpid((pid_t)pid, status, WNOHANG); while (result < 0 && errno == EINTR);
+    return result == 0 ? ZRC_ALIVE : result == (pid_t)pid ? ZRC_EXITED : ZRC_UNOBSERVED;
+}
+#ifdef ZCL_TESTING
+int zcl_test_app_run_copy_poll(long pid)
+{
+    int status = 0;
+    return (int)zrc_poll(pid, &status);
+}
+#endif
+static enum zrc_settle zrc_settled(long pid, int *status)
 {
     const struct timespec step = {0, ZRC_POLL_MS * 1000000L};
     for (int waited = 0; waited < APP_LAUNCH_SETTLE_MS; waited += ZRC_POLL_MS) {
-        if (waitpid((pid_t)pid, status, WNOHANG) == (pid_t)pid)
-            return false;
+        enum zrc_settle observed = zrc_poll(pid, status);
+        if (observed != ZRC_ALIVE) return observed;
         (void)nanosleep(&step, NULL);
     }
-    return waitpid((pid_t)pid, status, WNOHANG) != (pid_t)pid;
+    return zrc_poll(pid, status);
 }
 
 static void zrc_open(struct zrc *z)
@@ -291,19 +306,29 @@ static void zrc_open(struct zrc *z)
         return;
     }
     resident_launch_close(&launch);
-    if (!zrc_settled((long)receipt.pid, &status)) {
+    (void)json_push_kv_int(&z->reply->data, "pid", (int64_t)receipt.pid);
+    (void)json_push_kv_bool(&z->reply->data, "executed", true);
+    enum zrc_settle settled = zrc_settled((long)receipt.pid, &status);
+    if (settled != ZRC_ALIVE) {
         app_proc_log_tail(log, tail, sizeof(tail));
-        zcl_package_copy_fail(z->reply, "APP_EXITED", true, "the app exited "
-                              "right after it started; see the log tail",
+        zcl_package_copy_fail(z->reply, settled == ZRC_EXITED ? "APP_EXITED" : "PROCESS_UNOBSERVED", true,
+                              settled == ZRC_EXITED ? "the app exited right after it started; see the log tail" :
+                              "the app started but its settled state could not be observed",
                               tail);
         return;
     }
     zrc_describe(z, "commit");
-    (void)json_push_kv_int(&z->reply->data, "pid", (int64_t)receipt.pid);
+    char token[32];
+    (void)snprintf(token, sizeof(token), "%llu", (unsigned long long)receipt.start_token);
+    if (!json_push_kv_str(&z->reply->data, "start_token", token) ||
+        !json_push_kv_bool(&z->reply->data, "settled_alive", true)) {
+        zcl_package_copy_fail(z->reply, "OBSERVATION_UNAVAILABLE", true,
+                              "the app started but its process observation could not be retained", log);
+        return;
+    }
     (void)json_push_kv_str(&z->reply->data, "mapped_proof",
                            receipt.mapped_proof);
     (void)json_push_kv_str(&z->reply->data, "log", log);
-    (void)json_push_kv_bool(&z->reply->data, "executed", true);
 }
 
 #else

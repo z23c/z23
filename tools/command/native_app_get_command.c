@@ -413,6 +413,25 @@ static void ag_rehost(struct ag_one *s)
     ag_host_enable(s);
 }
 
+static bool ag_result_observations(struct ag_one *s, const struct json_value *data)
+{
+    bool ok = true;
+    const char *observations[] = {"receive_observation", "build_observation", "open_observation"};
+    size_t bytes = 0;
+    for (size_t i = 0; ok && i < sizeof(observations) / sizeof(observations[0]); ++i) {
+        const struct json_value *v = json_get(data, observations[i]);
+        size_t n = v && v->type == JSON_OBJ ? json_write(v, NULL, 0) : 0;
+        ok = n && n <= 4096u - bytes && json_push_kv(&s->reply->data, observations[i], v);
+        if (ok) bytes += n;
+    }
+    const struct json_value *receive = json_get(json_get(data, "receive_observation"), "data");
+    const struct json_value *version = json_get(receive, "version");
+    const char *name = zcl_package_copy_str(data, "name");
+    ok = ok && name && version && version->type == JSON_STR &&
+        json_push_kv_str(&s->reply->data, "name", name) &&
+        json_push_kv(&s->reply->data, "version", version);
+    return ok;
+}
 static bool ag_commit_result(struct ag_one *s, struct zcl_command_reply *inner)
 {
     const char *copy = zcl_app_inner_str(inner, "copy");
@@ -426,9 +445,10 @@ static bool ag_commit_result(struct ag_one *s, struct zcl_command_reply *inner)
         return false;
     }
     bool ok = true;
-    const char *keys[] = {"copy", "pid", "image_sha3", "executed"};
+    const char *keys[] = {"copy", "destination", "pid", "image_sha3", "executed", "open_attempted"};
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
         ok = ag_copy_data(&s->reply->data, &inner->data, keys[i]) && ok;
+    ok = ok && ag_result_observations(s, &inner->data);
     if (ok && ag_open_matches(inner))
         ag_rebuild_report(s, json_get(&inner->data, "build"), image);
     else if (ok) {
@@ -450,8 +470,13 @@ static bool ag_commit(struct ag_one *s)
     bool ok = zcl_app_inner_call_built("app.receive-copy", &in, built, &inner);
     if (!ok) {
         zcl_app_inner_fail(s->reply, &inner, false);
+        (void)zcl_app_copy_recovery(&s->reply->data, &inner.data);
         (void)ag_copy_data(&s->reply->data, &inner.data, "copy");
         (void)ag_copy_data(&s->reply->data, &inner.data, "destination");
+        (void)ag_copy_data(&s->reply->data, &inner.data, "received");
+        (void)ag_copy_data(&s->reply->data, &inner.data, "open_attempted");
+        (void)ag_copy_data(&s->reply->data, &inner.data, "executed");
+        (void)ag_copy_data(&s->reply->data, &inner.data, "pid");
         const struct json_value *build = json_get(&inner.data, "build");
         if (build) {
             (void)json_push_kv(&s->reply->data, "build", build);
@@ -651,4 +676,7 @@ void zcl_native_handle_app_get(const struct zcl_command_request *request,
         if (identity) ag_attempts(&r, identity);
     }
     free(r.rows);
+    if (zcl_package_copy_confirmed(request->input) &&
+        (reply->status == ZCL_COMMAND_STATUS_PASSED || reply->error.mutated))
+        zcl_app_bound_committed_result(request, reply, AG_COMMAND);
 }

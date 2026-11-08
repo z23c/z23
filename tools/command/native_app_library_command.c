@@ -5,6 +5,9 @@
 #endif
 #include "command/native_app_library_command.h"
 #include "command/native_app_confirm.h"
+#include "command/native_app_compose.h"
+#include "command/native_app_receive_flow.h"
+#include "command/native_app_offer.h"
 #include "command/native_app_share_command.h"
 #include "command/native_app_share_reveal.h"
 #include "command/native_app_personalize_view.h"
@@ -49,6 +52,10 @@ struct library {
     unsigned preparation_count;
     struct json_value preparation;
     struct zcl_present_model_v1 model;
+    struct zcl_app_offer_row *public_rows;
+    size_t public_count, public_index;
+    app_library_catalog catalog;
+    app_library_get get;
 };
 static bool al_fail(struct zcl_command_reply *reply, const char *code, const char *why)
 {
@@ -128,6 +135,170 @@ static void al_model(struct library *w)
     al_choice(m, "next", "Next app", w->index + 1 < w->count ? "Browse forward." : "Last app.");
     al_choice(m, "cancel", "Cancel", "Close without opening an app.");
 }
+
+static void al_home_model(struct library *w)
+{
+    struct zcl_present_model_v1 *m = &w->model;
+    zcl_present_model_init_v1(m, ZCL_PRESENT_MODEL_CHOICE);
+    (void)snprintf(m->request_id, sizeof(m->request_id), "library-home");
+    (void)snprintf(m->title, sizeof(m->title), "My Apps");
+    (void)snprintf(m->summary, sizeof(m->summary), "%s", w->count ?
+        "Open a saved app or browse public offers." : "No saved apps yet. Browse public offers.");
+    al_choice(m, "saved", "My saved apps", "Open an installed or saved app.");
+    al_choice(m, "public", "Browse public apps", "See offers observed by this node.");
+    al_choice(m, "cancel", "Close", "Nothing will be opened.");
+}
+
+static void al_public_model(struct library *w)
+{
+    struct zcl_present_model_v1 *m = &w->model;
+    zcl_present_model_init_v1(m, ZCL_PRESENT_MODEL_CHOICE);
+    (void)snprintf(m->request_id, sizeof(m->request_id), "library-public-%zu", w->public_index);
+    (void)snprintf(m->title, sizeof(m->title), "Public apps");
+    if (!w->public_count) {
+        (void)snprintf(m->summary, sizeof(m->summary), "This node has no observed public app offers.");
+        al_choice(m, "home", "Back", "Return to My Apps.");
+        return;
+    }
+    const struct zcl_app_offer_row *r = &w->public_rows[w->public_index];
+    (void)snprintf(m->summary, sizeof(m->summary), "Observed offer %zu of %zu. %.80s",
+                   w->public_index + 1, w->public_count, r->offer.name);
+    char value[ZCL_PRESENT_MODEL_VALUE_MAX + 1];
+    (void)snprintf(value, sizeof(value), "Publisher %.12s; root %.12s", r->offer.publisher, r->offer.root);
+    al_choice(m, "get", "Review this offer", value);
+    al_choice(m, "public-previous", "Previous offer", w->public_index ? "Browse back." : "First offer.");
+    al_choice(m, "public-next", "Next offer", w->public_index + 1 < w->public_count ? "Browse forward." : "Last offer.");
+    al_choice(m, "home", "Back", "Return to My Apps.");
+}
+
+static bool al_public_load(struct library *w, struct zcl_command_reply *reply)
+{
+    if (!w->public_rows) w->public_rows = zcl_calloc(ZCL_APP_OFFER_ROWS_MAX, sizeof(*w->public_rows), "app-library-public");
+    if (!w->public_rows) return al_fail(reply, "OUT_OF_MEMORY", "Cannot allocate the public catalog.");
+    struct zcl_command_reply why;
+    bool ok = w->catalog ? w->catalog(w->prepare_context, w->public_rows, ZCL_APP_OFFER_ROWS_MAX, &w->public_count, &why) :
+        zcl_app_offer_catalog(w->public_rows, ZCL_APP_OFFER_ROWS_MAX, &w->public_count, &why);
+    if (!ok) app_confirm_forward_failure(reply, &why);
+    zcl_command_reply_free(&why);
+    if (!ok) return false;
+    if (w->public_count > ZCL_APP_OFFER_ROWS_MAX) return al_fail(reply, "CATALOG_OVERFLOW", "The public catalog exceeds its limit.");
+    w->public_index = 0; w->page = 4; return true;
+}
+
+static bool al_get_call(struct library *w, const struct json_value *input,
+                        struct zcl_command_reply *out)
+{
+    return w->get ? w->get(w->prepare_context, input, out) :
+        zcl_app_inner_call("app.get", input, out, NULL);
+}
+
+static bool al_plan_flag(const struct json_value *data, const char *key, bool expected)
+{
+    const struct json_value *v = json_get(data, key);
+    return v && v->type == JSON_BOOL && json_get_bool(v) == expected;
+}
+
+static bool al_plan_identity(const struct zcl_app_offer_row *r, const struct json_value *data)
+{
+    const char *name = json_get_str(json_get(data, "name"));
+    const char *pub = json_get_str(json_get(data, "publisher_fingerprint"));
+    const char *root = json_get_str(json_get(data, "package_root"));
+    const char *sha = json_get_str(json_get(data, "sha256"));
+    const char *offer = json_get_str(json_get(data, "offer_id"));
+    return name && !strcmp(name, r->offer.name) && pub && !strcmp(pub, r->offer.publisher) &&
+        root && !strcmp(root, r->offer.root) && sha && !strcmp(sha, r->offer.sha256) &&
+        offer && !strcmp(offer, r->post_id);
+}
+
+static bool al_plan_matches(const struct zcl_app_offer_row *r, const struct json_value *data)
+{
+    const char *token = json_get_str(json_get(data, "token"));
+    const char *plan = json_get_str(json_get(data, "plan_id"));
+    const char *dest = json_get_str(json_get(data, "destination"));
+    const struct json_value *ttl = json_get(data, "hosting_ttl_seconds");
+    return al_plan_identity(r, data) && vcs_app_offer_hex_valid(token, 16) &&
+        vcs_app_offer_hex_valid(plan, 32) && dest && dest[0] && ttl && ttl->type == JSON_INT &&
+        json_get_int(ttl) == 86400 && al_plan_flag(data, "executed", false) &&
+        al_plan_flag(data, "public_build_reporting", true) && al_plan_flag(data, "pin_received_carrier", true) &&
+        al_plan_flag(data, "public_hosting_if_ready", true) && al_plan_flag(data, "recurring_hosting", true);
+}
+
+static bool al_get_view(struct app_confirm *view, const struct zcl_app_offer_row *row,
+                        const struct json_value *data, char *why, size_t cap)
+{
+    struct zcl_present_model_v1 *m = &view->model;
+    zcl_present_model_init_v1(m, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(m->request_id, sizeof(m->request_id), "library-get");
+    (void)snprintf(m->title, sizeof(m->title), "Get this public app?");
+    (void)snprintf(m->summary, sizeof(m->summary), "Review every page before confirming.");
+    m->action_count = 4;
+    app_confirm_action(&m->actions[0], ZCL_PRESENT_ACTION_CANCEL, "cancel", "Cancel");
+    app_confirm_action(&m->actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+    app_confirm_action(&m->actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+    app_confirm_action(&m->actions[3], ZCL_PRESENT_ACTION_CONFIRM, "get", "Get and run");
+    return app_confirm_field(m, "App: ", row->offer.name) &&
+        app_confirm_field(m, "Publisher: ", row->offer.publisher) &&
+        app_confirm_field(m, "Package root: ", row->offer.root) &&
+        app_confirm_field(m, "Offer: ", row->post_id) &&
+        app_confirm_field(m, "File SHA256: ", row->offer.sha256) &&
+        app_confirm_path(m, "Destination: ", json_get_str(json_get(data, "destination"))) &&
+        app_confirm_field(m, "Action: ", "Keep, build and run this app.") &&
+        app_confirm_field(m, "Public: ", "Report a fresh build publicly.") &&
+        app_confirm_field(m, "Hosting: ", "Pin the carrier and renew public offers when ready.") &&
+        app_confirm_field(m, "Stop: ", "Stopping renewal keeps the pin; existing offers expire.") &&
+        app_confirm_prepare(view, why, cap);
+}
+
+static bool al_get_input(const struct zcl_app_offer_row *row, const char *datadir,
+                         struct json_value *in)
+{
+    const char *kv[] = {"name", row->offer.name, "root", row->offer.root,
+        "publisher", row->offer.publisher, "offer_id", row->post_id, "datadir", datadir};
+    return zcl_app_input(in, kv, 10);
+}
+
+static void al_get_commit(struct library *w, struct json_value *input,
+                          const struct json_value *plan, const char *datadir,
+                          struct zcl_command_reply *reply)
+{
+    if (!json_push_kv_str(input, "token", json_get_str(json_get(plan, "token"))) ||
+        !json_push_kv_str(input, "plan_id", json_get_str(json_get(plan, "plan_id"))) ||
+        !json_push_kv_bool(input, "confirm", true)) {
+        al_fail(reply, "OUT_OF_MEMORY", "Cannot prepare confirmation."); return;
+    }
+    struct zcl_command_reply result;
+    if (!al_get_call(w, input, &result)) app_confirm_forward_failure(reply, &result);
+    else if (!json_copy_checked(&reply->data, &result.data))
+        zcl_package_copy_fail(reply, "OUT_OF_MEMORY", true, "App was received but its result could not be copied.", "app.library");
+    else app_receive_flow_keep_observed(datadir, reply, w->notice, w->prepare_context);
+    zcl_command_reply_free(&result);
+}
+
+static bool al_public_get(struct library *w, const char *datadir, struct zcl_command_reply *reply)
+{
+    if (!datadir || !datadir[0]) datadir = zcl_native_command_datadir();
+    if (!datadir || !datadir[0]) return al_fail(reply, "MISSING_DATADIR", "No app profile is bound to My Apps.");
+    const struct zcl_app_offer_row *row = &w->public_rows[w->public_index];
+    struct json_value input; struct zcl_command_reply plan;
+    bool built = al_get_input(row, datadir, &input);
+    if (!built) { json_free(&input); return al_fail(reply, "OUT_OF_MEMORY", "Cannot prepare the app request."); }
+    bool ok = al_get_call(w, &input, &plan);
+    if (!ok) { app_confirm_forward_failure(reply, &plan); goto done; }
+    if (!al_plan_matches(row, &plan.data)) { al_fail(reply, "PLAN_MISMATCH", "The verified app plan did not match this offer."); goto done; }
+    struct app_confirm *view = zcl_calloc(1, sizeof(*view), "app-library-get");
+    if (!view) { al_fail(reply, "OUT_OF_MEMORY", "Cannot prepare app confirmation."); goto done; }
+    char why[256] = {0};
+    if (!al_get_view(view, row, &plan.data, why, sizeof(why)) ||
+        !app_confirm_show(view, w->notice, w->prepare_context, why, sizeof(why))) {
+        app_confirm_free(view); free(view);
+        al_fail(reply, "PRESENTATION_FAILED", why[0] ? why : "Cannot display the full app plan."); goto done;
+    }
+    bool confirmed = view->confirmed; app_confirm_free(view); free(view);
+    if (!confirmed) { (void)json_push_kv_str(&reply->data, "status", "canceled"); goto done; }
+    al_get_commit(w, &input, &plan.data, datadir, reply);
+done:
+    zcl_command_reply_free(&plan); json_free(&input); return false;
+}
 static bool al_present(void *context, const struct zcl_present_model_v1 *model,
     const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
@@ -141,9 +312,51 @@ static bool al_present(void *context, const struct zcl_present_model_v1 *model,
     zcl_present_model_bitmap_free_v1(&bitmap);
     return ok;
 }
+static bool al_recovery_fields(struct zcl_present_model_v1 *m, const struct json_value *facts,
+    const char *copy, const char *destination)
+{
+    const struct json_value *executed = json_get(facts, "executed");
+    const char *state = executed && executed->type == JSON_BOOL ?
+        (json_get_bool(executed) ? "The app was started." : "The app was not started.") :
+        "Whether the app started is unknown.";
+    return (!copy || app_confirm_field(m, "Copy: ", copy)) &&
+        (!destination || app_confirm_path(m, "Destination: ", destination)) &&
+        app_confirm_field(m, "Execution: ", state);
+}
+static bool al_received_error_view(struct library *w, const struct zcl_command_reply *reply, void *context)
+{
+    const struct json_value *facts = json_get(&reply->data, "failure_facts");
+    if (!facts || facts->type != JSON_OBJ) facts = &reply->data;
+    const char *copy = zcl_package_copy_str(facts, "copy");
+    const char *destination = zcl_package_copy_str(facts, "destination");
+    if (reply->error.mutated && (copy || destination)) {
+        struct app_confirm *view = zcl_calloc(1, sizeof(*view), "app-library-recovery");
+        if (view) {
+            struct zcl_present_model_v1 *m = &view->model;
+            zcl_present_model_init_v1(m, ZCL_PRESENT_MODEL_STATUS_CARD);
+            (void)snprintf(m->request_id, sizeof(m->request_id), "library-recovery");
+            (void)snprintf(m->title, sizeof(m->title), "Inspect the received app");
+            (void)snprintf(m->summary, sizeof(m->summary), "%s", reply->error.message);
+            m->action_count = 4;
+            app_confirm_action(&m->actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
+            app_confirm_action(&m->actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+            app_confirm_action(&m->actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+            app_confirm_action(&m->actions[3], ZCL_PRESENT_ACTION_CONFIRM, "done", "Done");
+            bool ok = al_recovery_fields(m, facts, copy, destination);
+            char why[256] = {0};
+            if (ok && app_confirm_prepare(view, why, sizeof(why)) &&
+                app_confirm_show(view, w->notice, context, why, sizeof(why))) {
+                app_confirm_free(view); free(view); return true;
+            }
+            app_confirm_free(view); free(view);
+        }
+    }
+    return false;
+}
 static void al_error_view(struct library *w, const struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context)
 {
+    if (al_received_error_view(w, reply, context)) return;
     zcl_present_model_init_v1(&w->model, ZCL_PRESENT_MODEL_CHOICE);
     (void)snprintf(w->model.request_id, sizeof(w->model.request_id), "library-error");
     (void)snprintf(w->model.title, sizeof(w->model.title), "Could not open My Apps");
@@ -216,9 +429,9 @@ static bool al_setup_identity(struct json_value *data, const struct library_row 
         return json_push_kv_int(data, "revision", (int64_t)r->selection.revision) &&
             json_push_kv_str(data, "version", version) &&
             json_push_kv_str(data, "source_version", source_version) &&
-            json_push_kv_str(data, "request", "Connect this local MCP server using command and args as literal values. Call apps_list, then app.customize with name, expected_revision equal to revision, and source_version. Verify selection_revision, kept version, and source_version separately. Include source_version in every source read and app.edit. After each edit use its returned version as the next source_version, retaining the original revision and kept version until Keep. Ask what I want to change, preview it, then wait for explicit Keep and Share. If selection changed, use Back to refresh the app card, then open Change with your AI for fresh setup.");
+            json_push_kv_str(data, "request", "Register a local stdio MCP server using command and args as literal values. Call apps_list, then call z23_run with path=app.customize and input containing name, expected_revision equal to revision, and source_version. Verify selection_revision, kept version, and source_version separately. Include source_version in every source read and in the input to z23_run with path=app.edit. After each edit use its returned version as the next source_version, retaining the original revision and kept version until Keep. Ask what I want to change, preview it, then wait for explicit Keep and Share. If selection changed, use Back to refresh the app card, then open Change with your AI for fresh setup.");
     }
-    return json_push_kv_str(data, "request", "Connect this local MCP server using command and args as literal values. This installed Sky Combat has no saved selection. Help me open it and choose Make my copy before customization. Do not invent a saved revision or version. Ask what I want to change, preview it, and wait for my explicit Keep and Share choices.");
+    return json_push_kv_str(data, "request", "Register a local stdio MCP server using command and args as literal values. This installed Sky Combat has no saved selection. Help me open it and choose Make my copy before customization. Do not invent a saved revision or version. Ask what I want to change, preview it, and wait for my explicit Keep and Share choices.");
 }
 static bool al_setup_encode(struct library *w, const char *exe, const char *datadir,
     struct zcl_command_reply *reply)
@@ -236,14 +449,14 @@ static bool al_setup_encode(struct library *w, const char *exe, const char *data
 static void al_prepare_native(void *context, const struct app_selection *selection,
     struct zcl_command_reply *reply)
 {
-    (void)context;
+    struct library *w = context;
     struct json_value input = {0}; json_set_object(&input);
     if (!json_push_kv_str(&input, "name", selection->app) ||
         !json_push_kv_int(&input, "expected_revision", (int64_t)selection->revision))
         al_fail(reply, "OUT_OF_MEMORY", "Cannot prepare your selected app.");
     else {
         struct zcl_command_request request = {.input = &input};
-        app_personalize_view_prepare(&request, reply);
+        app_personalize_view_prepare_present(&request, reply, w->notice, w->prepare_context);
     }
     json_free(&input);
 }
@@ -254,7 +467,8 @@ static bool al_prepare_source(struct library *w, const struct app_launch_env *en
     if (!r->saved) return true;
     struct zcl_command_reply prepared;
     zcl_command_reply_init(&prepared, "zcl.app_personalize.v1");
-    (w->preparer ? w->preparer : al_prepare_native)(w->prepare_context, &r->selection, &prepared);
+    if (w->preparer) w->preparer(w->prepare_context, &r->selection, &prepared);
+    else al_prepare_native(w, &r->selection, &prepared);
     bool ok = prepared.status == ZCL_COMMAND_STATUS_PASSED;
     const char *status = zcl_package_copy_str(&prepared.data, "status");
     if (!ok) app_confirm_forward_failure(reply, &prepared);
@@ -525,10 +739,23 @@ static bool al_refresh_after_help(struct library *w, const struct app_launch_env
     }
     return al_fail(reply, "SELECTION_UNAVAILABLE", "The selected app is no longer available. Reopen My Apps.");
 }
+static bool al_public_navigate(struct library *w, const char *id, const char *datadir,
+                               struct zcl_command_reply *reply)
+{
+    if (!strcmp(id, "saved")) { w->page = 0; return true; }
+    if (!strcmp(id, "home")) { w->page = 3; return true; }
+    if (!strcmp(id, "public")) return al_public_load(w, reply);
+    if (!strcmp(id, "public-previous")) { if (w->public_index) --w->public_index; return true; }
+    if (!strcmp(id, "public-next")) { if (w->public_index + 1 < w->public_count) ++w->public_index; return true; }
+    if (!strcmp(id, "get")) return al_public_get(w, datadir, reply);
+    return true;
+}
+
 static bool al_navigate(struct library *w, unsigned action, const struct app_launch_env *env,
     const char *exe, const char *datadir, struct zcl_command_reply *reply)
 {
     const char *id = w->model.actions[action].id;
+    if (w->page >= 3) return al_public_navigate(w, id, datadir, reply);
     if (!strcmp(id, "previous")) { if (w->index) --w->index; return true; }
     if (!strcmp(id, "next")) { if (w->index + 1 < w->count) ++w->index; return true; }
     if (!strcmp(id, "choose")) { w->page = 1; return true; }
@@ -548,15 +775,18 @@ static bool al_navigate(struct library *w, unsigned action, const struct app_lau
 static void al_run(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, const char *exe, const char *datadir,
     app_library_preparer preparer, app_library_sharer sharer, app_confirm_presenter notice,
-    app_library_revealer revealer)
+    app_library_revealer revealer, app_library_catalog catalog, app_library_get get)
 {
     struct library *w = zcl_calloc(1, sizeof(*w), "app-library");
     if (!w) { al_fail(reply, "OUT_OF_MEMORY", "Cannot allocate My Apps."); return; }
     w->preparer = preparer; w->sharer = sharer; w->notice = notice; w->revealer = revealer; w->prepare_context = context;
+    w->catalog = catalog; w->get = get; w->page = 3;
     char why[256] = {0};
     bool loaded = al_load(w, env, reply);
     while (loaded) {
-        if (w->page) al_detail_model(w); else al_model(w);
+        if (w->page == 3) al_home_model(w);
+        else if (w->page == 4) al_public_model(w);
+        else if (w->page) al_detail_model(w); else al_model(w);
         struct zcl_present_window_event_v1 event = {0};
         if (!zcl_present_model_validate_v1(&w->model, why, sizeof(why)) ||
             !presenter(context, &w->model, w->setup[0] ? w->setup : NULL, &event, why, sizeof(why))) {
@@ -566,7 +796,8 @@ static void al_run(const struct app_launch_env *env, struct zcl_command_reply *r
         if (!al_event_valid(&event, w->model.action_count)) {
             al_fail(reply, "INVALID_SELECTION", "The app selection was not recognized. Nothing was opened."); break;
         }
-        if (event.outcome == ZCL_PRESENT_WINDOW_DISMISSED || !w->count || !strcmp(w->model.actions[event.action_index].id, "cancel")) {
+        if (event.outcome == ZCL_PRESENT_WINDOW_DISMISSED ||
+            !strcmp(w->model.actions[event.action_index].id, "cancel")) {
             (void)json_push_kv_str(&reply->data, "status", "canceled");
             break;
         }
@@ -575,12 +806,11 @@ static void al_run(const struct app_launch_env *env, struct zcl_command_reply *r
     al_recovery(w, reply);
     if (reply->status != ZCL_COMMAND_STATUS_PASSED && !w->error_presented) al_error_view(w, reply, presenter, context);
     json_free(&w->preparation);
-    free(w);
+    free(w->public_rows); free(w);
 }
 void zcl_native_handle_app_library(const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
-    (void)request;
     struct app_launch_env env;
     char why[256];
     if (!app_launch_env_from_process(&env, why, sizeof(why))) {
@@ -589,35 +819,51 @@ void zcl_native_handle_app_library(const struct zcl_command_request *request,
         if (w) { al_error_view(w, reply, al_present, NULL); free(w); }
         return;
     }
-    al_run(&env, reply, al_present, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+    al_run(&env, reply, al_present, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+    const struct json_value *facts = json_get(&reply->data, "failure_facts");
+    if (json_get(&reply->data, "receive_observation") || json_get(facts, "received") ||
+        json_get(facts, "open_attempted"))
+        zcl_app_bound_committed_result(request, reply, "app.library");
 }
 #if defined(ZCL_TESTING)
 void zcl_test_app_library_reveal(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_sharer sharer,
     app_confirm_presenter notice, app_library_revealer revealer)
-{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice, revealer); }
+{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice, revealer, NULL, NULL); }
 void zcl_test_app_library_refresh(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer,
     app_library_sharer sharer, app_confirm_presenter notice)
-{ al_run(env, reply, presenter, context, "/fixture/z23", "/fixture", preparer, sharer, notice, NULL); }
+{ al_run(env, reply, presenter, context, "/fixture/z23", "/fixture", preparer, sharer, notice, NULL, NULL, NULL); }
 void zcl_test_app_library_share(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_sharer sharer, app_confirm_presenter notice)
-{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice, NULL); }
+{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice, NULL, NULL, NULL); }
 void zcl_test_app_library_run(const struct app_launch_env *env,
     struct zcl_command_reply *reply, app_library_presenter presenter, void *context)
 {
-    al_run(env, reply, presenter, context, NULL, NULL, NULL, NULL, NULL, NULL);
+    al_run(env, reply, presenter, context, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 }
 void zcl_test_app_library_setup(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context)
 {
-    al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, NULL, NULL);
+    al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, NULL, NULL, NULL, NULL);
 }
 void zcl_test_app_library_setup_prepared(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer)
 {
-    al_run(env, reply, presenter, context, exe, datadir, preparer, NULL, NULL, NULL);
+    al_run(env, reply, presenter, context, exe, datadir, preparer, NULL, NULL, NULL, NULL, NULL);
 }
+void zcl_test_app_library_public(const struct app_launch_env *env, struct zcl_command_reply *reply,
+    app_library_presenter presenter, void *context, app_confirm_presenter notice,
+    app_library_catalog catalog, app_library_get get)
+{ al_run(env, reply, presenter, context, NULL, "/fixture", NULL, NULL, notice, NULL, catalog, get); }
+void zcl_test_app_library_public_at(const struct app_launch_env *env, const char *datadir,
+    struct zcl_command_reply *reply, app_library_presenter presenter, void *context,
+    app_confirm_presenter notice, app_library_catalog catalog, app_library_get get)
+{ al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, notice, NULL, catalog, get); }
+void zcl_test_app_library_public_at_exe(const struct app_launch_env *env, const char *exe,
+    const char *datadir, struct zcl_command_reply *reply, app_library_presenter presenter,
+    void *context, app_confirm_presenter notice)
+{ al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, notice, NULL, NULL, NULL); }
 #endif

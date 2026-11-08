@@ -452,6 +452,36 @@ void app_receive_flow_run(const char *datadir, struct zcl_command_reply *reply,
 {
     arf_run(datadir, reply, presenter, context, false);
 }
+static const struct json_value *arf_receive_observation(const struct json_value *wire)
+{
+    const char *command = zcl_package_copy_str(wire, "command");
+    const char *status = zcl_package_copy_str(wire, "status");
+    const struct json_value *ok = json_get(wire, "ok");
+    const struct json_value *data = json_get(wire, "data");
+    return command && !strcmp(command, "zcode.package.bundle.receive") &&
+        status && !strcmp(status, "passed") && ok && ok->type == JSON_BOOL &&
+        json_get_bool(ok) && data && data->type == JSON_OBJ ? data : NULL;
+}
+void app_receive_flow_keep_observed(const char *datadir, struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context)
+{
+    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context,
+        .status = "received", .executed = 1};
+    const struct json_value *received = json_get(&reply->data, "receive_observation");
+    const struct json_value *build = json_get(&reply->data, "build_observation");
+    const struct json_value *opened = json_get(&reply->data, "open_observation");
+    const struct json_value *data = arf_receive_observation(received);
+    bool ok = data && build && opened &&
+        app_receive_preview_create(data, datadir, &f.preview, reply) &&
+        app_receive_preview_bind_build(f.preview, build, reply) &&
+        app_receive_preview_bind_run_copy(f.preview, opened, reply) && arf_keep(&f);
+    if (!ok) {
+        reply->error.mutated = true;
+        if (reply->status == ZCL_COMMAND_STATUS_PASSED)
+            (void)arf_fail(&f, "PREVIEW_UNAVAILABLE", "The received copy and execution must be inspected; Keep was not completed.");
+    }
+    app_receive_preview_close(f.preview);
+}
 void app_adopted_flow_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context)
 {

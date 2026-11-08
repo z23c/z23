@@ -761,7 +761,7 @@ static int test_code_guide_devagent_focus(void)
             const struct json_value *next = json_get(&reply.data, "next");
             ASSERT_STR_EQ(json_get_str(json_at(next, 0)), proof);
             ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make lint-fast");
-            ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "make lint-preflight");
+            ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-preflight");
             ASSERT(brief_array_has(json_get(&reply.data, "tests"), group));
             ASSERT(brief_array_has(json_get(&reply.data, "tests"), "command_registry_catalog"));
             ASSERT(brief_array_has(json_get(&reply.data, "tests"), "make_lint_gates"));
@@ -831,7 +831,7 @@ static int test_code_guide_lint_catalog(void)
         ASSERT_EQ(json_size(next), 4u);
         ASSERT_STR_EQ(json_get_str(json_at(next, 0)), "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
         ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make lint-fast");
-        ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "make lint-preflight");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-preflight");
         ASSERT_STR_EQ(json_get_str(json_at(next, 3)), "build/bin/z23-lint run --list");
         zcl_command_reply_free(&reply);
         ASSERT(brief_run(root,

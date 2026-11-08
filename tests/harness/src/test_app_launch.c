@@ -21,6 +21,7 @@
 #include "command/native_app_launch.h"
 #include "command/native_app_share_command.h"
 #include "command/native_app_library_command.h"
+#include "command/native_app_offer.h"
 #include "command/native_app_share_reveal.h"
 #include "command/native_zcode_package_copy.h"
 #include "command/app_selection.h"
@@ -885,6 +886,10 @@ static bool al_library_present(void *context, const struct zcl_present_model_v1 
         (void)snprintf(s->error_summary, sizeof(s->error_summary), "%s", model->summary);
         return true;
     }
+    if (!strcmp(model->request_id, "library-home")) {
+        event->action_index = 0; /* Existing saved-app cases enter the saved browser. */
+        return true;
+    }
     if (s->fail_after_noop && s->calls == 4) {
         (void)snprintf(why, cap, "Fixture presentation stopped after the no-op.");
         return false;
@@ -1327,6 +1332,17 @@ static bool al_preparation_wire(struct zcl_command_reply *reply,
         strstr(visible, version) && strstr(visible, "was saved; AI setup stopped");
     json_free(&doc); return ok;
 }
+static bool al_setup_request_valid(const struct json_value *setup)
+{
+    const char *request = json_get_str(json_get(setup, "request"));
+    return request && strstr(request, "local stdio MCP server") &&
+        strstr(request, "command and args as literal values") &&
+        strstr(request, "z23_run with path=app.customize and input") &&
+        strstr(request, "z23_run with path=app.edit") &&
+        strstr(request, "returned version as the next source_version") &&
+        strstr(request, "explicit Keep and Share");
+}
+
 static int case_library_help(void)
 {
     int failures = 0;
@@ -1366,7 +1382,7 @@ static int case_library_help(void)
         uint8_t source[32]; memset(source, 2, sizeof(source)); zcl_hex_encode(source, 32, hex);
         ASSERT_STR_EQ(json_get_str(json_get(&setup, "source_version")), hex);
         ASSERT(s.preparations == 1);
-        ASSERT(strstr(json_get_str(json_get(&setup, "request")), "source_version"));
+        ASSERT(al_setup_request_valid(&setup));
         ASSERT(app_selection_load(f.env.state_dir, "fixtureapp", &after) == APP_SELECTION_OK);
         ASSERT(after.revision == saved.revision && !memcmp(after.version, saved.version, 32));
         ASSERT(!json_get(&reply.data, "pid"));
@@ -1588,6 +1604,207 @@ _test_next:;
     return failures;
 }
 
+struct al_public_test {
+    struct zcl_app_offer_row row[2];
+    unsigned page, plans, confirms, notices;
+    int mode;
+    bool valid, saw_identity, premature_blocked, saw_recovery;
+};
+
+static void al_public_row(struct zcl_app_offer_row *row, char which)
+{
+    memset(row, 0, sizeof(*row));
+    (void)snprintf(row->offer.name, sizeof(row->offer.name), "alice/game-%c", which);
+    memset(row->offer.publisher, 'a', 66); row->offer.publisher[66] = 0;
+    memset(row->offer.root, which, 64); row->offer.root[64] = 0;
+    memset(row->offer.sha256, 'c', 64); row->offer.sha256[64] = 0;
+    memset(row->offer.carrier, 'd', 64); row->offer.carrier[64] = 0;
+    memset(row->post_id, which, 64); row->post_id[64] = 0;
+    (void)snprintf(row->offer.onion, sizeof(row->offer.onion),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:29135");
+    row->offer.size = 42;
+}
+
+static bool al_public_catalog_test(void *context, struct zcl_app_offer_row *out,
+    size_t cap, size_t *count, struct zcl_command_reply *why)
+{
+    struct al_public_test *s = context;
+    zcl_command_reply_init(why, "zcl.app_catalog.test.v1");
+    if (s->mode == 3 || s->mode == 7) {
+        zcl_command_reply_fail(why, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            s->mode == 3 ? "CATALOG_UNAVAILABLE" : "CATALOG_SATURATED",
+            "read", false, false, "Catalog unavailable.", "fixture"); return false;
+    }
+    if (s->mode == 4) { *count = 0; return true; }
+    if (s->mode == 6) { *count = cap + 1; return true; }
+    if (cap < 2) return false;
+    out[0] = s->row[0]; out[1] = s->row[1]; *count = 2; return true;
+}
+
+static bool al_public_input_matches(const struct json_value *in, const struct zcl_app_offer_row *r)
+{
+    const char *name = json_get_str(json_get(in, "name")), *root = json_get_str(json_get(in, "root"));
+    const char *pub = json_get_str(json_get(in, "publisher")), *offer = json_get_str(json_get(in, "offer_id"));
+    return name && !strcmp(name, r->offer.name) && root && !strcmp(root, r->offer.root) &&
+        pub && !strcmp(pub, r->offer.publisher) && offer && !strcmp(offer, r->post_id);
+}
+
+static bool al_public_plan_test(struct al_public_test *s, struct zcl_command_reply *out)
+{
+    const struct zcl_app_offer_row *r = &s->row[1];
+    bool ok = json_push_kv_str(&out->data, "name", r->offer.name) &&
+        json_push_kv_str(&out->data, "publisher_fingerprint", r->offer.publisher) &&
+        json_push_kv_str(&out->data, "package_root", s->mode == 2 ? s->row[0].offer.root : r->offer.root) &&
+        json_push_kv_str(&out->data, "sha256", r->offer.sha256) && json_push_kv_str(&out->data, "offer_id", r->post_id) &&
+        json_push_kv_str(&out->data, "token", "11111111111111111111111111111111") &&
+        json_push_kv_str(&out->data, "plan_id", "2222222222222222222222222222222222222222222222222222222222222222") &&
+        json_push_kv_str(&out->data, "destination", "/fixture/received");
+    return ok && json_push_kv_bool(&out->data, "executed", false) &&
+        json_push_kv_bool(&out->data, "public_build_reporting", true) &&
+        json_push_kv_bool(&out->data, "pin_received_carrier", true) &&
+        json_push_kv_bool(&out->data, "public_hosting_if_ready", true) &&
+        json_push_kv_bool(&out->data, "recurring_hosting", true) &&
+        json_push_kv_int(&out->data, "hosting_ttl_seconds", 86400);
+}
+
+static bool al_public_get_test(void *context, const struct json_value *in,
+                               struct zcl_command_reply *out)
+{
+    struct al_public_test *s = context;
+    zcl_command_reply_init(out, "zcl.app_get.test.v1");
+    const char *datadir = json_get_str(json_get(in, "datadir"));
+    s->valid = s->valid && al_public_input_matches(in, &s->row[1]) && datadir && !strcmp(datadir, "/fixture");
+    if (json_get_bool(json_get(in, "confirm"))) {
+        ++s->confirms;
+        const char *token = json_get_str(json_get(in, "token")), *plan = json_get_str(json_get(in, "plan_id"));
+        s->valid = s->valid && token && !strcmp(token, "11111111111111111111111111111111") && plan &&
+            !strcmp(plan, "2222222222222222222222222222222222222222222222222222222222222222");
+        if (s->mode == 5) {
+            zcl_command_reply_fail(out, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                "PLAN_CHANGED", "confirm", false, true, "The offer changed.", "fixture");
+            struct json_value facts; json_init(&facts); json_set_object(&facts);
+            bool ok = json_push_kv_str(&facts, "copy", "saved-copy") &&
+                json_push_kv_str(&facts, "destination", "/fixture/received") &&
+                json_push_kv_bool(&facts, "executed", true) && json_push_kv(&out->data, "failure_facts", &facts);
+            json_free(&facts); s->valid = s->valid && ok; return false;
+        }
+        return json_push_kv_bool(&out->data, "executed", true);
+    }
+    ++s->plans;
+    if (s->mode == 8) {
+        zcl_command_reply_fail(out, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "OFFER_UNAVAILABLE", "plan", false, false, "Offer disappeared.", "fixture"); return false;
+    }
+    return al_public_plan_test(s, out);
+}
+
+static bool al_public_display_exact(const struct zcl_present_model_v1 *m,
+                                    const char *label, const char *expected)
+{
+    size_t prefix = strlen(label), used = 0, total = strlen(expected);
+    for (uint32_t i = 0; i < m->item_count; ++i) {
+        if (strncmp(m->items[i].value, label, prefix)) continue;
+        const char *part = m->items[i].value + prefix;
+        while (true) {
+            size_t n = strlen(part);
+            if (n > total - used || memcmp(expected + used, part, n)) return false;
+            used += n;
+            if (used == total) return true;
+            if (++i >= m->item_count || strncmp(m->items[i].value, "  ", 2)) return false;
+            part = m->items[i].value + 2;
+        }
+    }
+    return false;
+}
+
+static bool al_public_present(void *context, const struct zcl_present_model_v1 *m,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    struct al_public_test *s = context; (void)copy;
+    s->valid = s->valid && zcl_present_model_validate_v1(m, why, cap);
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    if (!strcmp(m->request_id, "library-error")) { event->action_index = 0; return true; }
+    if (!strcmp(m->request_id, "library-home")) { event->action_index = s->mode == 4 && s->page ? 2 : 1; ++s->page; return true; }
+    if (!strncmp(m->request_id, "library-public-", 15)) {
+        if (s->mode == 4) { event->action_index = 0; return true; }
+        event->action_index = s->page++ == 1 ? 2 : 0; return true;
+    }
+    return false;
+}
+
+static bool al_public_notice(void *context, const struct zcl_present_model_v1 *m,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct al_public_test *s = context; (void)pages;
+    if (!strcmp(m->request_id, "library-recovery")) {
+        s->saw_recovery = al_public_display_exact(m, "Copy: ", "saved-copy") &&
+            al_public_display_exact(m, "Destination: ", "/fixture/received") &&
+            al_public_display_exact(m, "Execution: ", "The app was started.");
+        struct zcl_present_window_event_v1 event = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = 0};
+        bool redraw = false, close = false;
+        live->owner.update(live->owner.context, &event, false, &redraw, &close);
+        return close;
+    }
+    ++s->notices; uint32_t count = 0;
+    if (!zcl_present_model_page_count_v1(m, &count, why, cap)) return false;
+    bool found_hosting = false;
+    for (uint32_t i = 0; i < m->item_count; ++i) {
+        found_hosting |= strstr(m->items[i].value, "Hosting:") != NULL;
+    }
+    s->saw_identity = al_public_display_exact(m, "App: ", s->row[1].offer.name) &&
+        al_public_display_exact(m, "Publisher: ", s->row[1].offer.publisher) &&
+        al_public_display_exact(m, "Package root: ", s->row[1].offer.root) &&
+        al_public_display_exact(m, "Offer: ", s->row[1].post_id) && found_hosting;
+    struct zcl_present_window_event_v1 event = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = 3};
+    bool redraw = false, close = false;
+    live->owner.update(live->owner.context, &event, false, &redraw, &close);
+    s->premature_blocked = count <= 1 || !close;
+    if (s->mode == 0) event.action_index = 0;
+    else for (uint32_t i = 1; i < count; ++i) {
+        event.action_index = 2; live->owner.update(live->owner.context, &event, false, &redraw, &close);
+    }
+    if (s->mode != 0) event.action_index = 3;
+    live->owner.update(live->owner.context, &event, false, &redraw, &close);
+    return close;
+}
+
+static bool al_public_failure_ok(int mode, const struct zcl_command_reply *reply, const struct al_public_test *s)
+{
+    return mode != 5 || (reply->error.mutated && s->saw_recovery && !strcmp(reply->error.code, "PLAN_CHANGED"));
+}
+static int case_library_public(void)
+{
+    int failures = 0; static struct al_fx f;
+    struct zcl_command_reply reply; struct al_public_test s;
+    TEST("My Apps public offers require exact native plan confirmation") {
+        ASSERT(al_setup(&f)); ASSERT(al_write_file(f.env.config_path, "", 0600));
+        for (int mode = 0; mode <= 8; ++mode) {
+            memset(&s, 0, sizeof(s)); s.mode = mode; s.valid = true;
+            al_public_row(&s.row[0], '1'); al_public_row(&s.row[1], '2');
+            zcl_command_reply_init(&reply, "zcl.app_open.v1");
+            zcl_test_app_library_public(&f.env, &reply, al_public_present, &s, al_public_notice,
+                                        al_public_catalog_test, al_public_get_test);
+            ASSERT(s.valid);
+            if (mode == 3) ASSERT_STR_EQ(reply.error.code, "CATALOG_UNAVAILABLE");
+            else if (mode == 4) ASSERT(s.plans == 0 && s.confirms == 0);
+            else if (mode == 6) ASSERT_STR_EQ(reply.error.code, "CATALOG_OVERFLOW");
+            else if (mode == 7) ASSERT_STR_EQ(reply.error.code, "CATALOG_SATURATED");
+            else if (mode == 8) { ASSERT_STR_EQ(reply.error.code, "OFFER_UNAVAILABLE"); ASSERT(s.confirms == 0); }
+            else if (mode == 2) { ASSERT_STR_EQ(reply.error.code, "PLAN_MISMATCH"); ASSERT(s.notices == 0 && s.confirms == 0); }
+            else { ASSERT(s.plans == 1 && s.notices == 1 && s.saw_identity && s.premature_blocked);
+                ASSERT(s.confirms == (unsigned)(mode != 0));
+                ASSERT(al_public_failure_ok(mode, &reply, &s));
+            }
+            zcl_command_reply_free(&reply);
+        }
+        PASS();
+    }
+_test_next:
+    return failures;
+}
+
 int test_app_launch(void);
 int test_app_launch(void)
 {
@@ -1620,6 +1837,7 @@ _test_next:
     failures += case_library_repeat_prepare();
     failures += case_library_builtin_help();
     failures += case_library_bounds();
+    failures += case_library_public();
     al_kill_all();
     return failures;
 }

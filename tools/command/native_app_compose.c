@@ -77,6 +77,110 @@ const char *zcl_app_inner_str(const struct zcl_command_reply *r,
     return s && s[0] ? s : NULL;
 }
 
+static bool app_observation_fields(struct json_value *data, const struct json_value *source,
+    const struct zcl_app_observation_field *fields, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        const struct json_value *v = json_get(source, fields[i].name);
+        if (!v || v->type != fields[i].type || !json_push_kv(data, fields[i].name, v)) return false;
+    }
+    return true;
+}
+bool zcl_app_observation(struct json_value *out, const char *command,
+    const struct zcl_command_reply *reply,
+    const struct zcl_app_observation_field *fields, size_t count, size_t max_bytes)
+{
+    json_init(out);
+    if (!command || !reply || reply->status != ZCL_COMMAND_STATUS_PASSED ||
+        reply->exit_code != ZCL_COMMAND_EXIT_OK || !fields) return false;
+    struct json_value data; json_init(&data); json_set_object(&data);
+    bool ok = app_observation_fields(&data, &reply->data, fields, count);
+    json_set_object(out);
+    ok = ok && json_push_kv_str(out, "command", command) &&
+        json_push_kv_str(out, "status", "passed") && json_push_kv_bool(out, "ok", true) &&
+        json_push_kv(out, "data", &data);
+    json_free(&data);
+    size_t bytes = ok ? json_write(out, NULL, 0) : 0;
+    return bytes > 0 && bytes <= max_bytes;
+}
+
+static void app_recovery_facts(struct json_value *facts, const struct json_value *source)
+{
+    static const char *const keys[] = {"copy", "destination", "received", "open_attempted", "executed", "pid"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        const struct json_value *v = json_get(source, keys[i]);
+        if (v && (v->type == JSON_STR || v->type == JSON_BOOL || v->type == JSON_INT))
+            (void)json_push_kv(facts, keys[i], v);
+    }
+}
+bool zcl_app_copy_recovery(struct json_value *out, const struct json_value *source)
+{
+    const struct json_value *nested = json_get(source, "failure_facts");
+    if (nested && nested->type == JSON_OBJ) source = nested;
+    struct json_value facts; json_init(&facts); json_set_object(&facts);
+    app_recovery_facts(&facts, source);
+    bool ok = json_push_kv(out, "failure_facts", &facts);
+    json_free(&facts); return ok;
+}
+static void app_small_recovery(struct json_value *out, const struct json_value *source, size_t cap)
+{
+    static const char *const keys[] = {"received", "open_attempted", "executed", "pid"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        const struct json_value *v = json_get(source, keys[i]);
+        enum json_type expected = !strcmp(keys[i], "pid") ? JSON_INT : JSON_BOOL;
+        if (v && v->type == expected)
+            (void)json_push_kv(out, keys[i], v);
+    }
+    const struct json_value *copy = json_get(source, "copy");
+    if (copy && copy->type == JSON_STR) {
+        struct json_value candidate; json_init(&candidate);
+        if (json_copy_checked(&candidate, out) && json_push_kv(&candidate, "copy", copy)) {
+            size_t bytes = json_write(&candidate, NULL, 0);
+            if (bytes && bytes <= cap) { json_free(out); *out = candidate; return; }
+        }
+        json_free(&candidate);
+    }
+}
+static void app_compact_recovery(struct zcl_command_reply *reply, struct json_value *facts,
+    size_t cap, bool passed)
+{
+    size_t bytes = json_write(facts, NULL, 0);
+    if (!bytes || bytes > cap) {
+        struct json_value small; json_init(&small); json_set_object(&small);
+        app_small_recovery(&small, facts, cap);
+        json_free(facts); *facts = small;
+        if (!passed) {
+            char original[sizeof(reply->error.message)];
+            (void)snprintf(original, sizeof(original), "%s", reply->error.message);
+            (void)snprintf(reply->error.message, sizeof(reply->error.message),
+                           "%.140s Recovery details are unavailable.", original);
+        }
+    }
+    json_free(&reply->data); json_init(&reply->data); json_set_object(&reply->data);
+    app_recovery_facts(&reply->data, facts);
+    size_t bounded = json_write(facts, NULL, 0);
+    if (bounded && bounded <= cap) (void)json_push_kv(&reply->data, "failure_facts", facts);
+}
+
+void zcl_app_bound_committed_result(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const char *command)
+{
+    size_t cap = request && request->success_data_budget_provided ? request->success_data_budget : 12288u;
+    bool passed = reply->status == ZCL_COMMAND_STATUS_PASSED;
+    if (!passed && cap > 1500u) cap = 1500u; /* Leave room for the error envelope. */
+    struct json_value facts; json_init(&facts); json_set_object(&facts);
+    const struct json_value *existing = json_get(&reply->data, "failure_facts");
+    const struct json_value *source = existing && existing->type == JSON_OBJ ? existing : &reply->data;
+    app_recovery_facts(&facts, source);
+    if (!passed && !existing) (void)json_push_kv(&reply->data, "failure_facts", &facts);
+    size_t bytes = json_write(passed ? &reply->data : json_get(&reply->data, "failure_facts"), NULL, 0);
+    if (bytes && bytes <= cap) { json_free(&facts); return; }
+    app_compact_recovery(reply, &facts, cap < 1500u ? cap : 1500u, passed);
+    json_free(&facts);
+    if (passed) zcl_package_copy_fail(reply, "OBSERVATION_TOO_LARGE", true,
+        "The app operation changed local state but the complete result did not fit; inspect the retained copy before retrying.", command);
+}
+
 void zcl_app_inner_fail(struct zcl_command_reply *reply,
                         const struct zcl_command_reply *inner, bool mutated)
 {

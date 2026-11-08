@@ -8,6 +8,10 @@ struct zcl_command_reply;
  * this. The original receipt remains in reply->data on every later failure. */
 void app_receive_flow_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context);
+/* Continue only from the actual retained receive/build/run.copy observations;
+ * never rebuild or reopen. Keep is still a separate native owner choice. */
+void app_receive_flow_keep_observed(const char *datadir, struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context);
 /* Only after successful native adoption AND personalization. Caller reserves
  * the original receipt plus bounded continuation evidence before mutation
  * (same 16KiB policy as Receive, including retained scratch failure evidence).
