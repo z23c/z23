@@ -102,7 +102,7 @@ Where the time went, 2026-10-28 to 2026-11-04, over 459 landings:
 
 Stack gates ran for 409 elapsed hours and land proofs for 96, and the land
 proof repeats the stack gate's full lint and tests. 60 rows failed or
-conflicted, costing 11.2 hours of proof. Items 2 to 4 remove these costs in
+conflicted, costing 11.2 hours of proof. Items 3 to 5 remove these costs in
 order of size.
 
 1. **The node restarts in seconds.** `fleet objectives` names
@@ -111,7 +111,26 @@ order of size.
    coins read view, the prologue. Fix the largest step, read the next boot
    beacon, repeat. Resident memory (`node_rss_mb`) comes next. A boot that
    refuses to start names its stage and cause; an untyped refusal is a bug.
-2. **One full proof per change.** The land proof is the only full lint and
+2. **A stranger runs a stranger's app.** Today an app travels only as a
+   `.z23share` file handed between friends. Close the chain with pieces
+   that exist:
+   - `app publish COPY` posts one signed `zcl.app_offer.v1` entry to the
+     public board room `apps` and serves the version on the swarm. Its plan
+     half writes nothing.
+   - `app get` lists that catalog. `app get NAME` fetches the version by
+     root and refuses any sha256, root or publisher mismatch before a
+     prompt. It then hands the bytes to the existing receive confirm of
+     publisher fingerprint and exact root (owner decision 2026-11-06).
+   - Trust needs no gatekeeper. Every receiver that rebuilds the same image
+     posts a signed rebuild receipt, `app get` shows how many independent
+     builds match, and any holder serves the bytes again, so the app
+     outlives its author's node.
+   - A received copy builds with z23, `cc` and `make` alone: no system
+     `-dev` package (owner rule 2026-11-08).
+
+   Lane `stranger-app-get-1108` holds the first slice. Number: stranger to
+   stranger journeys proven live between two isolated nodes. Before: 0.
+3. **One full proof per change.** The land proof is the only full lint and
    test run.
    - A lane submits after its focused groups, `lint-fast` and the cheap
      gates that fail land proofs. The pre-submit stack gate is not required.
@@ -138,7 +157,7 @@ order of size.
 
    Numbers: commit to landed median 102 min, target 45; p90 398 min, target
    90; failed or conflicted rows 60 against 459 landed, target under 5%.
-3. **The lead is not on the path.** On 2026-11-04 every lane waited for the
+4. **The lead is not on the path.** On 2026-11-04 every lane waited for the
    lead to rebase it, submit it and read its failure.
    - A recorded non-author LAND lets the author submit.
    - A failed row returns to its author with its evidence, and the author
@@ -147,14 +166,20 @@ order of size.
      labs: signature, author allowlist, scope, merge-tree, then the queue.
 
    Number: lanes the lead handles by hand per landing. Before: all of them.
-4. **The land queue proves in parallel.** One proof runs at a time, and a red
-   train re-proves each member alone.
+5. **The land queue proves in parallel and runs its newest driver.** One
+   proof runs at a time, and a red train re-proves each member alone.
    - Bisect a red train.
    - Prove the next rows speculatively on an idle host, then confirm them on
      the current main.
+   - The self-upgrade module (default off) keeps a content-addressed driver
+     slot, compares the candidate's decisions with the current driver's,
+     switches after matching rows and switches back after a failed row. Next
+     come a read-only decision verb and the post-landing hook.
 
    Number: submit to landed p90, before 85 min, target 30.
-5. **Z23 knows every line of its own code.** The inventory is an overlay on
+   Number: the landings between a driver fix landing and the driver running
+   it. Before: unbounded.
+6. **Z23 knows every line of its own code.** The inventory is an overlay on
    git trees in `cognition/modules/codeindex`, keyed by tree and blob hash,
    so it answers for any commit without a checkout. It grows the
    [Palace](../dev/palace-design.md) `purpose` line and `code room` into
@@ -186,12 +211,6 @@ order of size.
      16 of 63 before 2026-11-04, 21 after; target 90%.
 
    Number: the share of symbols with a fresh page. Before: 0.
-6. **The land queue runs the newest landed driver.** The self-upgrade module
-   (default off) keeps a content-addressed driver slot, compares the
-   candidate's decisions with the current driver's, switches after matching
-   rows and switches back after a failed row. Next come a read-only decision
-   verb and the post-landing hook. Number: the landings between a driver fix
-   landing and the driver running it. Before: unbounded.
 7. **Labs trade proofs, not trust.**
    - Signed verdict reuse follows [`separate-verifier.md`](separate-verifier.md)
      and [`verifier-install-packet.md`](verifier-install-packet.md). Read
