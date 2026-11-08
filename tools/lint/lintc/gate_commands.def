@@ -60,7 +60,7 @@ LINT_ROW("check-no-raw-sqlite-in-controllers", "ZCL_LINT_MODE=RATCHET ./build/bi
 LINT_ROW("check-model-column-drift", "./build/bin/z23-lint check-model-column-drift --selftest && ZCL_LINT_MODE=RATCHET ./build/bin/z23-lint check-model-column-drift")
 LINT_ROW("check-file-purpose", "ZCL_LINT_MODE=RATCHET ./build/bin/z23-lint check-file-purpose")
 LINT_ROW("check-group-purpose", "ZCL_LINT_MODE=FAIL ./build/bin/z23-lint check-group-purpose")
-LINT_ROW("check-retrieval-historical-evidence", "./tools/dev/retrieval-gold-corpus-check.sh --check && ./tools/dev/retrieval-gold-identifier-graph-receipt-check.sh --check && ./tools/dev/retrieval-profile-sweep.sh --check")
+LINT_ROW("check-retrieval-historical-evidence", "./tools/dev/retrieval-gold-corpus-check.sh --check && ./tools/dev/retrieval-profile-sweep.sh --check")
 LINT_ROW("check-no-orphan-placement", "ZCL_LINT_MODE=RATCHET ./build/bin/z23-lint check-no-orphan-placement")
 LINT_ROW("check-file-size-ceiling", "\"$ZCL_LINT_BIN_DIR/file_size_policy\"")
 LINT_ROW("check-operator-needed-sink", "./build/bin/z23-lint check-operator-needed-sink")

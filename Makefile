@@ -9675,11 +9675,12 @@ retrieval-gold-benchmark-scope-selftest: retrieval-transport-check-selftest
 # Frozen retrieval evidence names paths in its exact historical source epoch.
 # Replaying both joins prevents a present-tree relocation from rewriting those
 # coordinates or the historical classifier that interprets them.
+# The profile sweep validates the canonical graph receipt before replay, so a
+# separate graph receipt pass here would repeat that validation.
 .PHONY: check-retrieval-historical-evidence
 check-retrieval-historical-evidence: jsonq agent-sha3 retrieval-eval \
     retrieval-profile-sweep-check
 	@./tools/dev/retrieval-gold-corpus-check.sh --check
-	@./tools/dev/retrieval-gold-identifier-graph-receipt-check.sh --check
 
 retrieval-eval-selftest: retrieval-eval jsonq
 	@$(MAKE) --no-print-directory t-fast-exact ONLY=retrieval_eval_selftest
