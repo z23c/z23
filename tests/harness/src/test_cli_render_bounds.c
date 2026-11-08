@@ -94,8 +94,43 @@ static int test_trunc_sequence_bound(void)
     return failures;
 }
 
+static int test_error_prose_wraps_without_placeholder(void)
+{
+    int failures = 0;
+    TEST("error: long message wraps, placeholder next line is skipped") {
+        const char *doc =
+            "{\"schema\":\"zcl.result.v1\",\"command\":\"app.keep\","
+            "\"ok\":false,\"status\":\"failed\",\"error\":{\"code\":"
+            "\"INVALID_INPUT\",\"message\":\"app keep pins an image after an "
+            "app open preview, for agents and tools; to keep a preview from "
+            "the terminal use the guided path to its very last word "
+            "ENDWORD\",\"next_action\":\"follow the first next command\","
+            "\"phase\":\"validate\",\"retryable\":false,\"mutated\":false,"
+            "\"blockers\":[]},\"next\":[{\"command\":\"app.list\"}]}";
+        struct zcl_cli_render_env e = {.width = 80};
+        char out[4096];
+        size_t n = cr_bounds_doc(doc, strlen(doc), "app.keep", &e, out,
+                                 sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "run: z23 app list") != NULL);
+        ASSERT(strstr(out, "ENDWORD") != NULL);
+        ASSERT(strstr(out, "follow the first") == NULL);
+        ASSERT(strstr(out, "…") == NULL);
+        size_t cur = 0;
+        for (const char *p = out; *p; p++) {
+            if (*p == '\n')
+                cur = 0;
+            else if (((unsigned char)*p & 0xC0) != 0x80)
+                ASSERT(++cur <= 80);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int cli_render_bounds_cases(void)
 {
     return test_command_key_bound() + test_table_header_bound() +
-           test_table_column_bound() + test_trunc_sequence_bound();
+           test_table_column_bound() + test_trunc_sequence_bound() +
+           test_error_prose_wraps_without_placeholder();
 }
