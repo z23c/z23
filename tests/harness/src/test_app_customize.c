@@ -25,6 +25,7 @@
 #include "plugin/plugin_pack.h"
 #include "platform/time_compat.h"
 #include "vcs/package_prepare.h"
+#include "vcs/package_store.h"
 #include "vcs/package_release.h"
 
 #include <stdio.h>
@@ -1667,6 +1668,9 @@ static bool ae_bound_plans(struct ac_fixture *f)
     free(text); return ok;
 }
 
+#if defined(ZCL_TESTING)
+static int asb_cases(void);
+#endif
 int test_app_edit(void)
 {
     int failures = 0;
@@ -1681,6 +1685,9 @@ int test_app_edit(void)
     act_cleanup(&f);
     failures += ae_stale_case();
     failures += ae_sealed_case();
+#if defined(ZCL_TESTING)
+    failures += asb_cases();
+#endif
     return failures;
 }
 /* Source-only owner fixture; it creates no host key outside the isolated HOME. */
@@ -2225,6 +2232,271 @@ static int apbt_cases(void)
         PASS();
     } _test_next:;
     return failures;
+}
+
+/* Real owner preparation followed by source-bound edit. The presenter drives
+ * the maintained consent state machine; no rendering/build claim is made. */
+struct asb_present { struct ac_fixture *f; bool confirm, called; };
+struct asb_source { uint8_t version[32], tree[32]; char version_hex[65]; };
+static bool asb_presenter(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    (void)pages; struct asb_present *p = context; uint32_t count = 0;
+    p->called = true;
+    char kept[65]; zcl_hex_encode(p->f->kept.version, 32, kept);
+    if (strcmp(model->title, "Prepare your copy for changes?") ||
+        !ast_field(model, "Saved version: ", kept) ||
+        !zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
+    bool close = false, redraw = false;
+    if (!p->confirm) return ast_action(live, 0, &close, &redraw) && close;
+    return apbt_visit(live, count) && ast_action(live, 3, &close, &redraw) && close;
+}
+static bool asb_prepared(struct ac_fixture *f, struct abc_leaf *l, bool expect_view, struct asb_source *source)
+{
+    snprintf(source->version_hex, sizeof(source->version_hex), "%s", abc_get(l, "version"));
+    if (!zcl_hex_decode_lower(source->version_hex, source->version, 32)) return false;
+    if (!expect_view) return !l->out.error.mutated;
+    return zcl_hex_decode_lower(abc_get(l, "source_root"), source->tree, 32) &&
+        apt_trees_equal(f, source->tree, abc_get(l, "name")) && apt_head_and_keep(f, source->version);
+}
+static bool asb_prepare(struct ac_fixture *f, bool confirm, bool expect_view, struct asb_source *source)
+{
+    struct abc_leaf l; abc_open(&l);
+    const struct zcl_command_spec *spec = abc_spec("app.personalize");
+    bool ok = spec && json_push_kv_str(&l.in, "name", "skycombat") &&
+        json_push_kv_int(&l.in, "expected_revision", (int64_t)f->kept.revision);
+    struct asb_present p = {.f = f, .confirm = confirm};
+    l.req.spec = spec; l.req.input = &l.in; l.req.invoked_name = "app.personalize";
+    if (ok) zcl_test_app_personalize_prepare(&l.req, &l.out, asb_presenter, &p);
+    ok = ok && p.called == expect_view && l.out.status == ZCL_COMMAND_STATUS_PASSED;
+    if (ok && !confirm) ok = !strcmp(abc_get(&l, "status"), "canceled") && !l.out.error.mutated;
+    if (ok && confirm) ok = asb_prepared(f, &l, expect_view, source);
+    abc_close(&l); return ok;
+}
+static bool asb_read(struct ac_fixture *f, const char *source, const char *error, int revision)
+{
+    struct abc_leaf l; abc_open(&l); char kept[65]; zcl_hex_encode(f->kept.version, 32, kept);
+    bool ok = json_push_kv_str(&l.in, "name", "skycombat") &&
+        json_push_kv_int(&l.in, "expected_revision", revision) &&
+        json_push_kv_str(&l.in, "source_version", source) &&
+        json_push_kv_str(&l.in, "path", "include/boost.h") && act_result(&l, error);
+    if (ok && !error) ok = !strcmp(abc_get(&l, "version"), kept) &&
+        !strcmp(abc_get(&l, "source_version"), source) &&
+        !strcmp(abc_get(&l, "content"), "#define BOOST 2\n");
+    if (error) ok = ok && !l.out.error.mutated;
+    abc_close(&l); return ok;
+}
+static bool asb_navigation(struct ac_fixture *f, const struct asb_source *source)
+{
+    struct abc_leaf l; struct json_value doc; json_init(&doc);
+    bool ok = act_call(&l, "zcode-package.json", true) &&
+        json_push_kv_str(&l.in, "source_version", source->version_hex) &&
+        json_push_kv_int(&l.in, "limit", 16) && act_wire(&l.in, &doc);
+    const struct json_value *next = act_wire_next(&doc, "offset");
+    ok = ok && next && acs_string(next, "source_version", source->version_hex);
+    json_free(&doc); abc_close(&l);
+    return ok && act_preserved(f, false);
+}
+static bool asb_edit_request(struct abc_leaf *l, struct ac_fixture *f,
+    const char *source, const char *plan)
+{
+    char head[65], blob[65]; zcl_hex_encode(f->head, 32, head); zcl_hex_encode(f->blob, 32, blob);
+    return ae_request(l, f, "include/boost.h", "#define BOOST 9\n", head, blob, 1, plan) &&
+        json_push_kv_str(&l->in, "source_version", source);
+}
+static bool asb_plan(struct ac_fixture *f, const struct asb_source *source, char plan[65])
+{
+    struct abc_leaf l; char kept[65]; zcl_hex_encode(f->kept.version, 32, kept);
+    bool ok = asb_edit_request(&l, f, source->version_hex, NULL) && abc_pass("app.edit", &l) &&
+        !strcmp(abc_get(&l, "kept_version"), kept) && !strcmp(abc_get(&l, "source_version"), source->version_hex);
+    snprintf(plan, 65, "%s", abc_get(&l, "plan_id"));
+    ok = ok && strlen(plan) == 64;
+    abc_close(&l); return ok && act_preserved(f, false);
+}
+static bool asb_reject_edit(struct ac_fixture *f, const char *source, const char *plan, const char *error)
+{
+    struct abc_leaf l;
+    bool ok = asb_edit_request(&l, f, source, plan) && abc_exec("app.edit", &l) &&
+        l.out.status != ZCL_COMMAND_STATUS_PASSED && !strcmp(l.out.error.code, error) && !l.out.error.mutated;
+    abc_close(&l); return ok && act_preserved(f, false);
+}
+static bool asb_same_tree_successor(struct ac_fixture *f, const struct asb_source *source, uint8_t version[32])
+{
+    struct vcs_repo *repo = vcs_open(f->world.copy);
+    if (!repo) return false;
+    const struct vcs_snapshot_meta meta = {.phase = "save", .task_ref = "same tree source identity control"};
+    const struct vcs_snapshot_tree_limits limits = {8u * 1024u * 1024u, 16384u,
+        VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES};
+    bool ok = vcs_snapshot_from_tree(repo, source->tree, source->version, &meta, &limits, version) == VCS_OK;
+    vcs_close(repo); return ok && memcmp(version, source->version, 32);
+}
+static bool asb_metadata_preserved(struct ac_fixture *f, const uint8_t prepared[32], const uint8_t edited[32])
+{
+    struct vcs_manifest a = {0}, b = {0};
+    bool ok = vcs_tree_load_readonly_bounded(f->world.copy, prepared, 8u * 1024u * 1024u, 16384u, &a) &&
+        vcs_tree_load_readonly_bounded(f->world.copy, edited, 8u * 1024u * 1024u, 16384u, &b) && a.count == b.count;
+    size_t changed = 0;
+    for (size_t i = 0; ok && i < a.count; ++i) {
+        ok = !strcmp(a.entries[i].path, b.entries[i].path) && a.entries[i].mode == b.entries[i].mode;
+        if (!strcmp(a.entries[i].path, "include/boost.h")) {
+            ++changed; ok = ok && memcmp(a.entries[i].blob, b.entries[i].blob, 32);
+        } else ok = ok && a.entries[i].size == b.entries[i].size && !memcmp(a.entries[i].blob, b.entries[i].blob, 32);
+    }
+    vcs_manifest_free(&a); vcs_manifest_free(&b);
+    return ok && changed == 1 && ae_contents(f, edited);
+}
+static bool asb_commit(struct ac_fixture *f, const struct asb_source *source, const char *plan)
+{
+    struct abc_leaf l; uint8_t version[32], tree[32];
+    bool ok = asb_edit_request(&l, f, source->version_hex, plan) && abc_pass("app.edit", &l) &&
+        zcl_hex_decode_lower(abc_get(&l, "version"), version, 32) &&
+        zcl_hex_decode_lower(abc_get(&l, "source_root"), tree, 32) &&
+        !strcmp(abc_get(&l, "source_version"), source->version_hex);
+    abc_close(&l);
+    return ok && apt_head_and_keep(f, version) && asb_metadata_preserved(f, source->tree, tree);
+}
+static bool asb_plan_controls(struct ac_fixture *f, const struct asb_source *source)
+{
+    char plan[65], newer_hex[65]; uint8_t newer[32];
+    if (!asb_plan(f, source, plan) || !asb_same_tree_successor(f, source, newer) ||
+        !act_preserved(f, true) || !asb_reject_edit(f, source->version_hex, plan, "HEAD_STALE")) return false;
+    memcpy(f->head, newer, 32); zcl_hex_encode(newer, 32, newer_hex);
+    return asb_plan(f, source, plan) &&
+        asb_reject_edit(f, newer_hex, plan, "PLAN_MISMATCH") && asb_commit(f, source, plan);
+}
+static bool asb_foreign(struct ac_fixture *f, const struct asb_source *source)
+{
+    uint8_t foreign[32];
+    return act_snapshot(f, "foreign", foreign) && act_preserved(f, true) &&
+        asb_read(f, source->version_hex, "NOT_ADOPTED", 1) && act_preserved(f, false);
+}
+static bool asb_cancel_then_prepare(struct ac_fixture *f, struct asb_source *source)
+{
+    return act_preserved(f, true) && apt_key_absent(f) && asb_prepare(f, false, true, NULL) &&
+        apt_key_absent(f) && act_preserved(f, false) && asb_prepare(f, true, true, source);
+}
+static bool asb_bridge(struct ac_fixture *f)
+{
+    struct asb_source source = {0};
+    if (!asb_cancel_then_prepare(f, &source)) return false;
+    memcpy(f->head, source.version, 32);
+    if (!act_preserved(f, true) || !asb_read(f, source.version_hex, NULL, 1) || !asb_navigation(f, &source)) return false;
+    char unknown[65]; memset(unknown, 'a', 64); unknown[64] = 0;
+    return asb_read(f, source.version_hex, "SELECTION_STALE", 2) &&
+        asb_read(f, unknown, "VERSION_UNKNOWN", 1) &&
+        asb_reject_edit(f, unknown, NULL, "VERSION_UNKNOWN") &&
+        asb_plan_controls(f, &source) && asb_foreign(f, &source);
+}
+static bool asb_already_owned(struct ac_fixture *f)
+{
+    struct asb_source source = {0}, repeated = {0};
+    if (!act_preserved(f, true) || !asb_prepare(f, true, true, &source)) return false;
+    struct app_selection next = f->kept;
+    memcpy(next.version, source.version, 32);
+    if (app_selection_save(f->env.state_dir, 1, &next, &f->kept) != APP_SELECTION_OK ||
+        !act_preserved(f, true)) return false;
+    uint8_t key_before[32], key_after[32];
+    return act_hash(f->world.alice_home, ".z23/zcode_publisher.key", key_before) &&
+        asb_prepare(f, true, false, &repeated) && !memcmp(source.version, repeated.version, 32) &&
+        act_hash(f->world.alice_home, ".z23/zcode_publisher.key", key_after) &&
+        !memcmp(key_before, key_after, 32) && act_preserved(f, false);
+}
+static int asb_bridge_case(void)
+{
+    int failures = 0; struct ac_fixture f = {0};
+    TEST("prepared P source edits preserve Keep N and bind exact source independently of tree and head") {
+        ASSERT(act_setup(&f, false)); ASSERT(asb_bridge(&f)); PASS();
+    } _test_next:;
+    act_cleanup(&f); return failures;
+}
+static bool asb_draft_blob(struct ac_fixture *f, const struct asb_source *source,
+    const char *expected, char blob[65])
+{
+    struct vcs_manifest manifest = {0};
+    if (!vcs_tree_load_readonly_bounded(f->world.copy, source->tree,
+        8u * 1024u * 1024u, 16384u, &manifest)) return false;
+    bool ok = false;
+    for (size_t i = 0; i < manifest.count; ++i) {
+        const struct vcs_entry *entry = &manifest.entries[i];
+        if (strcmp(entry->path, "include/boost.h")) continue;
+        uint8_t *bytes = NULL; size_t size = 0;
+        ok = vcs_object_get_readonly_bounded(f->world.copy, entry->blob, VCS_TAG_BLOB,
+            1024, &bytes, &size) == 0 && size == strlen(expected) &&
+            !memcmp(bytes, expected, size) && entry->size == size;
+        if (ok) zcl_hex_encode(entry->blob, 32, blob);
+        free(bytes); break;
+    }
+    vcs_manifest_free(&manifest); return ok;
+}
+static bool asb_draft_reply(struct ac_fixture *f, struct abc_leaf *l,
+    const struct asb_source *source, struct asb_source *next)
+{
+    char kept[65]; zcl_hex_encode(f->kept.version, 32, kept);
+    snprintf(next->version_hex, sizeof(next->version_hex), "%s", abc_get(l, "version"));
+    return !strcmp(abc_get(l, "source_version"), source->version_hex) &&
+        !strcmp(abc_get(l, "kept_version"), kept) &&
+        zcl_hex_decode_lower(next->version_hex, next->version, 32) &&
+        zcl_hex_decode_lower(abc_get(l, "source_root"), next->tree, 32) &&
+        memcmp(next->version, source->version, 32) && apt_head_and_keep(f, next->version);
+}
+static bool asb_draft_step(struct ac_fixture *f, const struct asb_source *source,
+    const char *before, const char *after, struct asb_source *next)
+{
+    char blob[65], head[65], plan[65]; struct abc_leaf l;
+    if (!asb_draft_blob(f, source, before, blob) || !act_preserved(f, true)) return false;
+    zcl_hex_encode(f->head, 32, head);
+    bool ok = ae_request(&l, f, "include/boost.h", after, head, blob, 1, NULL) &&
+        json_push_kv_str(&l.in, "source_version", source->version_hex) && abc_pass("app.edit", &l);
+    snprintf(plan, sizeof(plan), "%s", abc_get(&l, "plan_id"));
+    abc_close(&l);
+    if (!ok || strlen(plan) != 64 || !act_preserved(f, false)) return false;
+    ok = ae_request(&l, f, "include/boost.h", after, head, blob, 1, plan) &&
+        json_push_kv_str(&l.in, "source_version", source->version_hex) && abc_pass("app.edit", &l) &&
+        asb_draft_reply(f, &l, source, next);
+    abc_close(&l); return ok;
+}
+static bool asb_draft_other_files(struct ac_fixture *f,
+    const struct asb_source *prepared, const struct asb_source *last)
+{
+    struct vcs_manifest a = {0}, b = {0}; bool metadata = false;
+    bool ok = vcs_tree_load_readonly_bounded(f->world.copy, prepared->tree, 8u * 1024u * 1024u, 16384u, &a) &&
+        vcs_tree_load_readonly_bounded(f->world.copy, last->tree, 8u * 1024u * 1024u, 16384u, &b) && a.count == b.count;
+    for (size_t i = 0; ok && i < a.count; ++i) {
+        const struct vcs_entry *x = &a.entries[i], *y = &b.entries[i];
+        ok = !strcmp(x->path, y->path) && x->mode == y->mode;
+        if (!strcmp(x->path, "include/boost.h")) continue;
+        ok = ok && x->size == y->size && !memcmp(x->blob, y->blob, 32);
+        if (!strcmp(x->path, "zcode-package.json")) metadata = true;
+    }
+    vcs_manifest_free(&a); vcs_manifest_free(&b); return ok && metadata;
+}
+static bool asb_chained_drafts(struct ac_fixture *f)
+{
+    struct asb_source prepared = {0}, first = {0}, second = {0}; char blob[65];
+    if (!act_preserved(f, true) || !asb_prepare(f, true, true, &prepared)) return false;
+    memcpy(f->head, prepared.version, 32);
+    if (!asb_draft_step(f, &prepared, "#define BOOST 2\n", "#define BOOST 9\n", &first)) return false;
+    memcpy(f->head, first.version, 32);
+    const char *both = "#define BOOST 9\n#define SECOND_EDIT 1\n";
+    return asb_draft_step(f, &first, "#define BOOST 9\n", both, &second) &&
+        asb_draft_blob(f, &second, both, blob) && asb_draft_other_files(f, &prepared, &second);
+}
+static int asb_chain_case(void)
+{
+    int failures = 0; struct ac_fixture f = {0};
+    TEST("prepared P to E1 to E2 uses returned source and preserves first edit, namespace and Keep N") {
+        ASSERT(act_setup(&f, false)); ASSERT(asb_chained_drafts(&f)); PASS();
+    } _test_next:;
+    act_cleanup(&f); return failures;
+}
+static int asb_cases(void)
+{
+    int failures = asb_bridge_case() + asb_chain_case(); struct ac_fixture f = {0};
+    TEST("already personal kept source preparation is read-only and never invokes presenter") {
+        ASSERT(act_setup(&f, false)); ASSERT(asb_already_owned(&f)); PASS();
+    } _test_next:;
+    act_cleanup(&f); return failures;
 }
 
 static bool ast_selection_plan(struct ac_fixture *f, const char *version, char *publisher, const char *output, struct abc_leaf *leaf)

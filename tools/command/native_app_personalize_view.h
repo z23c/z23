@@ -8,9 +8,14 @@ struct zcl_command_reply;
 /* Only name + expected_revision; never accepts a caller's decision. */
 void app_personalize_view_run(const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* Native Change-with-AI composition. Already personal source needs no new consent. */
+void app_personalize_view_prepare(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 #if defined(ZCL_TESTING)
 /* Per-invocation presenter; no production global hook or environment override. */
 void zcl_test_app_personalize_view_run(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context);
+void zcl_test_app_personalize_prepare(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context);
 #endif
 #endif

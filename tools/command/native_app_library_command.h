@@ -8,11 +8,17 @@
 #include "presentation/presentation.h"
 typedef bool (*app_library_presenter)(void *, const struct zcl_present_model_v1 *,
     const char *, struct zcl_present_window_event_v1 *, char *, size_t);
+struct app_selection;
+typedef void (*app_library_preparer)(void *, const struct app_selection *,
+    struct zcl_command_reply *);
 #if defined(ZCL_TESTING)
 void zcl_test_app_library_run(const struct app_launch_env *env,
     struct zcl_command_reply *reply, app_library_presenter presenter, void *context);
 void zcl_test_app_library_setup(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context);
+void zcl_test_app_library_setup_prepared(const struct app_launch_env *env, const char *exe,
+    const char *datadir, struct zcl_command_reply *reply,
+    app_library_presenter presenter, void *context, app_library_preparer preparer);
 #endif
 #endif

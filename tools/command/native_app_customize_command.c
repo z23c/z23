@@ -34,7 +34,7 @@ struct ac_read {
     struct app_selection selected;
     struct zcl_package_copy copy;
     struct vcs_manifest manifest;
-    const char *name, *change, *path, *query;
+    const char *name, *change, *path, *query, *source_version;
     size_t offset, limit, page;
     uint64_t expected;
     bool pinned;
@@ -71,7 +71,7 @@ static bool ac_integer(const struct json_value *in, const char *key,
 
 static bool ac_inputs(struct ac_read *a, const struct json_value *in)
 {
-    static const char *const keys[] = {"name", "change", "expected_revision", "path", "offset", "limit", "page", "query"};
+    static const char *const keys[] = {"name", "change", "expected_revision", "path", "offset", "limit", "page", "query", "source_version"};
     if (!in || in->type != JSON_OBJ) return ac_fail(a, "BAD_INPUT", "an object is required");
     for (size_t i = 0; i < in->num_children; ++i) {
         bool known = false;
@@ -99,6 +99,17 @@ static bool ac_search_shape(struct ac_read *a, const struct json_value *in)
     if (!a->query[0] || a->path || json_get(in, "limit"))
         return ac_fail(a, "BAD_INPUT", "query is nonempty and excludes path and limit");
     return a->pinned || ac_fail(a, "REVISION_REQUIRED", "search requires expected_revision from initial context");
+}
+static bool ac_source_input(struct ac_read *a, const struct json_value *in)
+{
+    uint8_t root[32];
+    if (!ac_text(in, "source_version", 64, &a->source_version, false) ||
+        (a->source_version && (strlen(a->source_version) != 64 ||
+         !zcl_hex_decode_lower(a->source_version, root, 32))))
+        return ac_fail(a, "BAD_INPUT", "source_version must be an exact lowercase root");
+    if (a->source_version && !a->pinned)
+        return ac_fail(a, "REVISION_REQUIRED", "source_version requires expected_revision");
+    return true;
 }
 static bool ac_shape(struct ac_read *a, const struct json_value *in)
 {
@@ -156,6 +167,30 @@ static bool ac_select(struct ac_read *a)
     return true;
 }
 
+/* Reuse the copy authority's full-chain and exact-member validation. Keep
+ * membership was checked first; do not combine observations of changed heads. */
+static bool ac_source_choice(struct ac_read *a)
+{
+    if (!a->source_version) return true;
+    uint8_t requested[32];
+    if (strlen(a->source_version) != 64 || !zcl_hex_decode_lower(a->source_version, requested, 32))
+        return ac_fail(a, "BAD_INPUT", "source_version must be an exact lowercase root");
+    if (!memcmp(requested, a->copy.selected_version, 32)) return true;
+    struct zcl_package_copy source = {0};
+    if (!zcl_package_copy_open_selected_as(a->selected.copy, ZCL_PACKAGE_COPY_READ,
+            &source, a->reply, "app.customize", a->source_version)) return false;
+    bool same = !memcmp(source.fork_version, a->copy.fork_version, 32) &&
+        !memcmp(source.parent_release, a->copy.parent_release, 32) &&
+        !memcmp(source.head_version, a->copy.head_version, 32);
+    if (!same) {
+        zcl_package_copy_close(&source);
+        return ac_fail(a, "SELECTION_MISMATCH", "copy history changed while choosing source");
+    }
+    zcl_package_copy_close(&a->copy);
+    a->copy = source;
+    return true;
+}
+
 static bool ac_source(struct ac_read *a)
 {
     char version[65];
@@ -166,6 +201,7 @@ static bool ac_source(struct ac_read *a)
         memcmp(a->copy.parent_release, a->selected.parent, 32) ||
         memcmp(a->copy.selected_version, a->selected.version, 32))
         return ac_fail(a, "SELECTION_MISMATCH", "the selected copy ancestry does not match Keep");
+    if (!ac_source_choice(a)) return false;
     enum zcl_package_copy_adoption auth = zcl_package_copy_adopted(a->selected.datadir, &a->copy, NULL);
     if (auth != ZCL_PACKAGE_COPY_ADOPTED && auth != ZCL_PACKAGE_COPY_RECEIVED_TRUSTED)
         return ac_fail(a, "NOT_ADOPTED", "the copy lacks current local adoption or trusted-receive authority");
@@ -176,12 +212,14 @@ static bool ac_source(struct ac_read *a)
 }
 
 bool app_customize_source(const char *name, uint64_t revision,
+    const char *source_version,
     struct app_selection *selection, struct zcl_package_copy *copy,
     struct zcl_command_reply *reply)
 {
     struct ac_read *a = zcl_calloc(1, sizeof(*a), "app-customize-source");
     if (!a) { zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "cannot allocate source context", "app.edit"); return false; }
     a->name = name; a->expected = revision; a->pinned = true; a->reply = reply;
+    a->source_version = source_version;
     bool ok = ac_select(a) && ac_source(a);
     if (ok) {
         *selection = a->selected;
@@ -200,6 +238,7 @@ static bool ac_identity(struct ac_read *a)
     return json_push_kv_str(d, "name", a->selected.app) &&
         json_push_kv_int(d, "selection_revision", (int64_t)a->selected.revision) &&
         zcl_package_copy_push_root(d, "version", a->selected.version) && zcl_package_copy_push_root(d, "head_version", a->copy.head_version) &&
+        zcl_package_copy_push_root(d, "source_version", a->copy.selected_version) &&
         zcl_package_copy_push_root(d, "source_root", a->copy.selected_tree) &&
         zcl_package_copy_push_root(d, "fork", a->selected.fork) && zcl_package_copy_push_root(d, "parent_release", a->selected.parent) &&
         json_push_kv_str(d, "change", a->change ? a->change : "") &&
@@ -392,12 +431,17 @@ static bool ac_next_cursor(struct ac_read *a, struct json_value *next)
         json_push_kv_int(next, "limit", (int64_t)a->limit);
     return json_push_kv_int(next, "page", json_get_int(json_get(&a->data, "next_page")));
 }
+static bool ac_next_identity(struct ac_read *a, struct json_value *next)
+{
+    return json_push_kv_str(next, "name", a->selected.app) &&
+        json_push_kv_int(next, "expected_revision", (int64_t)a->selected.revision) &&
+        (!a->source_version || zcl_package_copy_push_root(next, "source_version", a->copy.selected_version));
+}
 static bool ac_next(struct ac_read *a)
 {
     if (json_get_bool(json_get(&a->data, "complete"))) return true;
     struct json_value next; json_init(&next); json_set_object(&next);
-    bool ok = json_push_kv_str(&next, "name", a->selected.app) &&
-        json_push_kv_int(&next, "expected_revision", (int64_t)a->selected.revision);
+    bool ok = ac_next_identity(a, &next);
     ok = ok && ac_next_cursor(a, &next);
     char wire[2048];
     size_t size = ok ? json_write(&next, wire, sizeof(wire)) : 0;
@@ -414,8 +458,7 @@ static bool ac_first_file(struct ac_read *a)
 {
     if (a->query || a->path || a->page >= a->manifest.count) return true;
     struct json_value input; json_init(&input); json_set_object(&input);
-    bool ok = json_push_kv_str(&input, "name", a->selected.app) &&
-        json_push_kv_int(&input, "expected_revision", (int64_t)a->selected.revision) &&
+    bool ok = ac_next_identity(a, &input) &&
         json_push_kv_str(&input, "path", a->manifest.entries[a->page].path);
     char wire[2048];
     size_t n = ok ? json_write(&input, wire, sizeof(wire)) : 0;
@@ -428,7 +471,7 @@ static bool ac_first_file(struct ac_read *a)
 
 static bool ac_read_context(struct ac_read *a, const struct json_value *input)
 {
-    bool ok = ac_inputs(a, input) && ac_shape(a, input) && ac_select(a) && ac_source(a);
+    bool ok = ac_inputs(a, input) && ac_source_input(a, input) && ac_shape(a, input) && ac_select(a) && ac_source(a);
     if (ok && !ac_identity(a)) ok = ac_fail(a, "CONTEXT_REFUSED", "context allocation failed");
     if (ok) ok = a->query ? ac_search(a) : (a->path ? ac_file(a) : ac_page(a));
     if (ok) ok = ac_still_selected(a);

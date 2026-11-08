@@ -18,8 +18,10 @@ and installs without creating or starting a node service. It prints the
 command to open Sky Combat. A Linux app release also carries the verified
 desktop, icon and file-type assets: installation adds **Sky Combat** to your
 applications menu and registers **Open With Z23** for shared files when
-`update-mime-database` and `update-desktop-database` are available, preserving your
-default application. No source checkout is needed. If desktop registration
+`update-mime-database` is available, preserving your default application. If
+`update-desktop-database` is missing, the installer merges its handler into the
+per-user MIME cache while preserving existing associations. No source checkout
+is needed. If desktop registration
 is unavailable, use the Receive command below; the installer reports that
 fallback rather than claiming registration succeeded.
 
@@ -35,6 +37,19 @@ These examples use a persistent app-data directory under your home directory,
 separate from node data. Configure your assistant's Z23 connection to use the
 same app-data directory so it can find your copies and kept versions. Your
 friend uses the same example path under their own home directory.
+
+In **My Apps → Change with your AI**, a received copy may first need your
+approval to prepare a personal draft and local publishing identity. This saves
+a metadata successor before customization; your previous kept app remains
+selected and runnable. Cancel stops the handoff. Copies already in your own
+publishing namespace need no extra preparation.
+
+The copied setup identifies both the kept `version` and editable
+`source_version`. Your assistant passes `name`, `expected_revision` and
+`source_version` to `app.customize` and `app.edit`; source reads and edit plans
+bind the authorized copy and both identities. After editing, build and preview
+the draft, explicitly Keep it, then Share that exact kept version. Sharing does
+not rewrite the approved source to prepare a new namespace.
 
 ### Connect your assistant once
 

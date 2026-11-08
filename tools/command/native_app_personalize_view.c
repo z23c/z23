@@ -162,7 +162,7 @@ static bool apv_namespace_fields(struct apv_work *w)
         apv_plan_field(w, "Personal namespace: ", "namespace") &&
         apv_plan_field(w, "Personal name: ", "name");
 }
-static bool apv_model(struct apv_work *w, char *why, size_t cap)
+static bool apv_model(struct apv_work *w, bool prepare, char *why, size_t cap)
 {
     const char *plan = zcl_package_copy_str(&w->plan.data, "plan_id");
     uint8_t decoded[32];
@@ -172,15 +172,17 @@ static bool apv_model(struct apv_work *w, char *why, size_t cap)
     w->view.window_title = "Personalize kept app";
     zcl_present_model_init_v1(m, ZCL_PRESENT_MODEL_STATUS_CARD);
     (void)snprintf(m->request_id, sizeof(m->request_id), "personalize-%.12s", plan);
-    (void)snprintf(m->title, sizeof(m->title), "Personalize this saved version?");
+    (void)snprintf(m->title, sizeof(m->title), "%s", prepare ?
+        "Prepare your copy for changes?" : "Personalize this saved version?");
     (void)snprintf(m->summary, sizeof(m->summary), "Review every page before confirming.");
-    (void)snprintf(m->exact_root, sizeof(m->exact_root), "%s", plan);
     m->action_count = 4;
     app_confirm_action(&m->actions[0], ZCL_PRESENT_ACTION_CANCEL, "cancel", "Cancel");
     app_confirm_action(&m->actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
     app_confirm_action(&m->actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
     app_confirm_action(&m->actions[3], ZCL_PRESENT_ACTION_CONFIRM, "personalize", "Personalize");
-    return apv_identity_fields(w) && apv_namespace_fields(w) &&
+    return (!prepare || app_confirm_field(m, "Your choice: ",
+            "Prepare a personal draft for your AI so you can share the version you later Keep. Your current kept app stays available.")) &&
+        apv_identity_fields(w) && apv_namespace_fields(w) &&
         app_confirm_field(m, "Effect: ",
             "Save a metadata-only successor, or return the unchanged version if already personal. Working files and Keep stay unchanged. No build, run or share.") &&
         app_confirm_prepare(&w->view, why, cap);
@@ -226,8 +228,30 @@ static void apv_commit(const struct zcl_command_request *request,
     }
     zcl_command_reply_free(&result);
 }
+static void apv_prepared_reply(struct apv_work *w, struct zcl_command_reply *reply)
+{
+    if (!apv_still_selected(w, reply) ||
+        !json_push_kv_str(&reply->data, "version", w->version))
+        if (reply->status == ZCL_COMMAND_STATUS_PASSED)
+            apv_fail(reply, "OUT_OF_MEMORY", "Cannot describe the prepared source.");
+}
+static void apv_offer(const struct zcl_command_request *request, struct apv_work *w,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context, bool prepare)
+{
+    char why[256] = {0};
+    const struct json_value *personal = json_get(&w->plan.data, "already_personalized");
+    if (prepare && personal && personal->type == JSON_BOOL && json_get_bool(personal))
+        apv_prepared_reply(w, reply);
+    else if (!apv_model(w, prepare, why, sizeof(why)) ||
+        !app_confirm_show(&w->view, presenter, context, why, sizeof(why)))
+        apv_fail(reply, "CONFIRMATION_UNAVAILABLE", "The exact personalization plan could not be displayed.");
+    else if (w->view.confirmed) apv_commit(request, w, reply);
+    else if (!json_push_kv_str(&reply->data, "status", "canceled"))
+        apv_fail(reply, "OUT_OF_MEMORY", "Cannot describe cancellation.");
+}
 static void apv_run(const struct zcl_command_request *request,
-                    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context)
+                    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context,
+                    bool prepare)
 {
     if (!request || !reply) return;
     struct apv_work *w = zcl_calloc(1, sizeof(*w), "app-personalize-view");
@@ -236,22 +260,22 @@ static void apv_run(const struct zcl_command_request *request,
     zcl_command_reply_init(&w->plan, "zcl.app_personalize.v1");
     if (apv_inputs(w, request->input, reply) && apv_selection(w, reply) &&
         apv_source(w, reply) && apv_plan(request, w, reply) && apv_receipt_bound(request, w, reply)) {
-        char why[256] = {0};
-        if (!apv_model(w, why, sizeof(why)) ||
-            !app_confirm_show(&w->view, presenter, context, why, sizeof(why)))
-            apv_fail(reply, "CONFIRMATION_UNAVAILABLE", "The exact personalization plan could not be displayed.");
-        else if (w->view.confirmed) apv_commit(request, w, reply);
-        else if (!json_push_kv_str(&reply->data, "status", "canceled"))
-            apv_fail(reply, "OUT_OF_MEMORY", "Cannot describe cancellation.");
+        apv_offer(request, w, reply, presenter, context, prepare);
     }
     app_confirm_free(&w->view); zcl_command_reply_free(&w->plan);
     json_free(&w->input); free(w);
 }
 void app_personalize_view_run(const struct zcl_command_request *request,
                               struct zcl_command_reply *reply)
-{ apv_run(request, reply, NULL, NULL); }
+{ apv_run(request, reply, NULL, NULL, false); }
+void app_personalize_view_prepare(const struct zcl_command_request *request,
+                                  struct zcl_command_reply *reply)
+{ apv_run(request, reply, NULL, NULL, true); }
 #if defined(ZCL_TESTING)
 void zcl_test_app_personalize_view_run(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context)
-{ if (presenter) apv_run(request, reply, presenter, context); }
+{ if (presenter) apv_run(request, reply, presenter, context, false); }
+void zcl_test_app_personalize_prepare(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context)
+{ if (presenter) apv_run(request, reply, presenter, context, true); }
 #endif

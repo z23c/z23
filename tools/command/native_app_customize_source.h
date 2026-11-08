@@ -4,8 +4,11 @@
 #define ZCL_APP_CUSTOMIZE_SOURCE_H
 #include "command/app_selection.h"
 #include "command/native_zcode_package_copy.h"
-/* Snapshot-as-of-read: subsequent Keep does not change this source choice. */
+/* Snapshot-as-of-read: NULL source_version selects Keep; an explicit source
+ * must belong to the same fully validated authorized copy history.
+ * selection remains the kept identity; copy.selected_* is the source choice. */
 bool app_customize_source(const char *name, uint64_t revision,
+    const char *source_version,
     struct app_selection *selection, struct zcl_package_copy *copy,
     struct zcl_command_reply *reply);
 #endif

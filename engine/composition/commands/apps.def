@@ -465,7 +465,8 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "app.customize", "app", "", "Kept source",
-    "Verified immutable files of the locally kept version, not working files. "
+    "Verified immutable files anchored to the locally kept version. Optional "
+    "source_version selects an authorized successor in that same copy. "
     "Pages and file reads pin selection revision; changed selection refuses. "
     "No source edits, build, execution or model invocation. File slices are "
     "UTF-8 or lossless base64: default 512 bytes, explicit limit 1..2048 bytes. "
@@ -478,7 +479,7 @@ ZCL_COMMAND_READY_READ(
     "not exhaustive coverage: files over 1 MiB are explicitly unsearched.",
     ZCL_COMMAND_LIST_BUDGET,
     "app,customize,source,change,kept,context,search", "zcl.app_customize.input.v1",
-    "zcl.app_customize.v1", "name,change,expected_revision,path,offset,limit,page,query", "name",
+    "zcl.app_customize.v1", "name,change,expected_revision,source_version,path,offset,limit,page,query", "name",
     "z23 app customize skycombat",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
@@ -490,12 +491,13 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_COMMAND(
     "app.edit", "app", "", "Edit draft",
     "Plan and confirm one UTF-8 replacement against the kept source at request "
-    "start. expected_revision identifies that source; a later Keep is untouched. "
+    "start. expected_revision anchors Keep; optional source_version selects "
+    "an authorized successor source. Keep is untouched. "
     "expected_head protects the current copy history. The snapshot advances "
     "HEAD while preserving working files. Build and preview are separate.",
     ZCL_COMMAND_LIST_BUDGET,
     "app,edit,draft,source,preview", "zcl.app_edit.input.v1", "zcl.app_edit.v1",
-    "name,expected_revision,expected_head,path,expected_blob,content,plan_id,confirm",
+    "name,expected_revision,source_version,expected_head,path,expected_blob,content,plan_id,confirm",
     "name,expected_revision,expected_head,path,expected_blob,content",
     "z23 app edit --input='{\"name\":\"skycombat\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,

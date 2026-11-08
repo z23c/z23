@@ -31,7 +31,7 @@ struct edit {
     struct app_selection selection;
     struct zcl_package_copy copy;
     struct vcs_manifest manifest;
-    const char *name, *path, *content;
+    const char *name, *path, *content, *source_version;
     uint64_t revision;
     mode_t mode;
     uint8_t head[32], blob[32], tree[32], version[32], plan[32];
@@ -59,8 +59,8 @@ static const char *edit_string(const struct json_value *in, const char *key, siz
 }
 static bool edit_input_keys(struct edit *e, const struct json_value *in)
 {
-    static const char *const keys[] = {"name", "expected_revision", "expected_head", "path", "expected_blob", "content", "plan_id", "confirm"};
-    if (!in || in->type != JSON_OBJ || in->num_children < 6 || in->num_children > 8)
+    static const char *const keys[] = {"name", "expected_revision", "expected_head", "path", "expected_blob", "content", "plan_id", "confirm", "source_version"};
+    if (!in || in->type != JSON_OBJ || in->num_children < 6 || in->num_children > 9)
         return edit_fail(e, "BAD_INPUT", false, "six edit inputs and optional plan_id/confirm are required");
     for (size_t i = 0; i < in->num_children; ++i) {
         bool found = false;
@@ -69,6 +69,14 @@ static bool edit_input_keys(struct edit *e, const struct json_value *in)
         if (!found) return edit_fail(e, "BAD_INPUT", false, "unknown edit input");
     }
     return true;
+}
+static bool edit_source_input(struct edit *e, const struct json_value *in)
+{
+    if (!json_get(in, "source_version")) return true;
+    uint8_t root[32];
+    e->source_version = edit_string(in, "source_version", 64);
+    return (e->source_version && edit_hex(in, "source_version", root)) ||
+        edit_fail(e, "BAD_INPUT", false, "source_version must be an exact lowercase root");
 }
 static bool edit_inputs(struct edit *e, const struct json_value *in)
 {
@@ -86,11 +94,11 @@ static bool edit_inputs(struct edit *e, const struct json_value *in)
         return edit_fail(e, "BAD_INPUT", false, "confirm must be boolean");
     e->confirm = confirm && json_get_bool(confirm);
     e->revision = (uint64_t)rev->val.i;
-    return true;
+    return edit_source_input(e, in);
 }
 static bool edit_source(struct edit *e)
 {
-    if (!app_customize_source(e->name, e->revision, &e->selection, &e->copy, e->reply)) return false;
+    if (!app_customize_source(e->name, e->revision, e->source_version, &e->selection, &e->copy, e->reply)) return false;
     if (memcmp(e->copy.head_version, e->head, 32))
         return edit_fail(e, "HEAD_STALE", false, "the copy head changed; request fresh context");
     if (!vcs_tree_load_readonly_bounded(e->selection.copy, e->copy.selected_tree,
@@ -118,11 +126,12 @@ static void edit_plan_part(struct sha3_256_ctx *h, const char *s)
 static void edit_make_plan(struct edit *e)
 {
     struct sha3_256_ctx h; sha3_256_init(&h);
-    edit_plan_part(&h, "zcl.app_edit.plan.v1");
+    edit_plan_part(&h, "zcl.app_edit.plan.v2");
     edit_plan_part(&h, e->selection.app);
     edit_plan_part(&h, e->selection.copy);
     edit_plan_part(&h, e->selection.datadir);
     sha3_256_write(&h, e->selection.version, 32);
+    sha3_256_write(&h, e->copy.selected_version, 32);
     sha3_256_write(&h, e->copy.selected_tree, 32);
     sha3_256_write(&h, e->selection.fork, 32);
     sha3_256_write(&h, e->selection.parent, 32);
@@ -141,8 +150,8 @@ static void edit_make_plan(struct edit *e)
 static bool edit_reopen(struct edit *e)
 {
     uint8_t selected_tree[32]; memcpy(selected_tree, e->copy.selected_tree, 32);
+    char version[65]; zcl_hex_encode(e->copy.selected_version, 32, version);
     zcl_package_copy_close(&e->copy);
-    char version[65]; zcl_hex_encode(e->selection.version, 32, version);
     /* Checked writer open may create copy metadata before it can fail. */
     e->possible_persistent_mutation = true;
     if (!zcl_package_copy_open_selected(e->selection.copy, &e->copy, e->reply, EDIT_COMMAND, version)) {
@@ -218,7 +227,8 @@ static bool edit_describe_plan(struct edit *e)
     struct zcl_command_reply *reply = e->reply;
     bool ok = json_push_kv_str(&reply->data, "stage", "plan") &&
         edit_push_root(&reply->data, "plan_id", e->plan) &&
-        edit_push_root(&reply->data, "source_version", e->selection.version) &&
+        edit_push_root(&reply->data, "source_version", e->copy.selected_version) &&
+        edit_push_root(&reply->data, "kept_version", e->selection.version) &&
         edit_push_root(&reply->data, "source_root", e->copy.selected_tree) &&
         json_push_kv_int(&reply->data, "source_selection_revision", (int64_t)e->revision);
     if (!ok) edit_fail(e, "REPLY_FAILED", false, "cannot describe edit plan");
@@ -244,7 +254,8 @@ static void edit_describe_commit(struct edit *e)
     char version[65]; zcl_hex_encode(e->version, 32, version);
     bool described = edit_push_root(&reply->data, "version", e->version) &&
         edit_push_root(&reply->data, "source_root", e->tree) &&
-        edit_push_root(&reply->data, "source_version", e->selection.version) &&
+        edit_push_root(&reply->data, "source_version", e->copy.selected_version) &&
+        edit_push_root(&reply->data, "kept_version", e->selection.version) &&
         json_push_kv_int(&reply->data, "source_selection_revision", (int64_t)e->revision);
     if (!described)
         zcl_package_copy_fail(reply, "REPLY_FAILED", true,

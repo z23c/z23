@@ -795,10 +795,58 @@ struct al_library_script {
     unsigned actions[40], count, calls, errors;
     bool valid, saved_label;
     char last_summary[241];
+    char error_summary[241];
     char setup[ZCL_PRESENT_COPY_TEXT_MAX + 1];
     struct al_fx *change_fixture;
     unsigned change_at;
+    unsigned preparations;
+    bool cancel_preparation, stale_preparation;
+    unsigned second_preparation;
+    bool fail_after_noop;
 };
+/* Per-call owner preparation stand-in: these launcher unit fixtures have no
+ * source CAS. Real personalization and descendant authorization have app tests. */
+static void al_library_later_failure(struct al_library_script *s, struct zcl_command_reply *reply)
+{
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+        "FIXTURE_FAILED", "prepare", false, true, "Later preparation failed.", "fixture");
+    struct json_value facts = {0}; json_set_object(&facts);
+    s->valid = s->valid && json_push_kv_str(&facts, "later_effect", "preserve me") &&
+        json_push_kv(&reply->data, "failure_facts", &facts);
+    json_free(&facts);
+}
+static bool al_library_prepared_data(struct zcl_command_reply *reply,
+    const struct app_selection *selection, bool noop)
+{
+    uint8_t source[32]; memset(source, noop ? 3 : 2, sizeof(source));
+    char version[65]; zcl_hex_encode(source, sizeof(source), version);
+    return json_push_kv_str(&reply->data, "version", version) &&
+        json_push_kv_str(&reply->data, "copy", selection->copy) &&
+        json_push_kv_str(&reply->data, "datadir", selection->datadir) &&
+        json_push_kv_bool(&reply->data, "key_created", !noop) &&
+        json_push_kv_bool(&reply->data, "changed", !noop);
+}
+static void al_library_prepare(void *context, const struct app_selection *selection,
+    struct zcl_command_reply *reply)
+{
+    struct al_library_script *s = context;
+    ++s->preparations;
+    if (s->cancel_preparation || (s->preparations == 2 && s->second_preparation == 2)) {
+        s->valid = s->valid && json_push_kv_str(&reply->data, "status", "canceled");
+        return;
+    }
+    if (s->preparations == 2 && s->second_preparation == 3) {
+        al_library_later_failure(s, reply); return;
+    }
+    bool noop = s->preparations == 2 && s->second_preparation == 1;
+    s->valid = s->valid && al_library_prepared_data(reply, selection, noop);
+    reply->error.mutated = !noop;
+    if (s->stale_preparation && s->change_fixture) {
+        struct app_selection next;
+        s->valid = s->valid && app_selection_save(s->change_fixture->env.state_dir,
+            selection->revision, selection, &next) == APP_SELECTION_OK;
+    }
+}
 static bool al_library_present(void *context, const struct zcl_present_model_v1 *model,
     const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
@@ -809,7 +857,15 @@ static bool al_library_present(void *context, const struct zcl_present_model_v1 
     zcl_present_model_bitmap_free_v1(&bitmap);
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     event->outcome = ZCL_PRESENT_WINDOW_ACTION;
-    if (!strcmp(model->request_id, "library-error")) { ++s->errors; event->action_index = 0; return true; }
+    if (!strcmp(model->request_id, "library-error")) {
+        ++s->errors; event->action_index = 0;
+        (void)snprintf(s->error_summary, sizeof(s->error_summary), "%s", model->summary);
+        return true;
+    }
+    if (s->fail_after_noop && s->calls == 4) {
+        (void)snprintf(why, cap, "Fixture presentation stopped after the no-op.");
+        return false;
+    }
     if (copy_text) (void)snprintf(s->setup, sizeof(s->setup), "%s", copy_text);
     s->saved_label |= strstr(model->items[0].value, "Saved version") != NULL;
     s->valid = s->valid && zcl_present_canvas_text_width(model->items[0].value,
@@ -893,6 +949,42 @@ static bool al_library_catalog(struct al_fx *f, unsigned count)
     }
     return at < sizeof(text) && al_write_file(f->env.config_path, text, 0600);
 }
+/* Exercise the production envelope: failure data is only retained through
+ * failure_facts, so checking reply.data alone would miss a lost receipt. */
+static bool al_preparation_identity(const struct json_value *facts,
+    const struct app_selection *selection, const char *version)
+{
+    const char *v = json_get_str(json_get(facts, "version"));
+    const char *copy = json_get_str(json_get(facts, "copy"));
+    const char *datadir = json_get_str(json_get(facts, "datadir"));
+    return v && !strcmp(v, version) && copy && !strcmp(copy, selection->copy) &&
+        datadir && !strcmp(datadir, selection->datadir) &&
+        json_get_bool(json_get(facts, "key_created")) && json_get_bool(json_get(facts, "changed"));
+}
+static bool al_preparation_wire(struct zcl_command_reply *reply,
+    const struct app_selection *selection, const char *visible)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    bool alias = false;
+    const struct zcl_command_spec *spec = zcl_command_registry_find(reg, "app.library", &alias);
+    char wire[ZCL_COMMAND_ERROR_BUDGET + 1], version[65];
+    uint8_t source[32]; memset(source, 2, sizeof(source)); zcl_hex_encode(source, 32, version);
+    size_t n = spec ? zcl_command_registry_test_reply_wire(reg, spec, reply, wire, sizeof(wire)) : 0;
+    struct json_value doc = {0};
+    bool ok = n && json_read(&doc, wire, n);
+    const struct json_value *error = json_get(&doc, "error");
+    const struct json_value *facts = json_get(error, "facts");
+    const struct json_value *previous = json_get(facts, "library_preparation");
+    if (previous) {
+        const char *later = json_get_str(json_get(facts, "later_effect"));
+        ok = ok && later && !strcmp(later, "preserve me");
+        facts = previous;
+    }
+    ok = ok && reply->error.mutated && json_get_bool(json_get(error, "mutated")) &&
+        al_preparation_identity(facts, selection, version) &&
+        strstr(visible, version) && strstr(visible, "was saved; AI setup stopped");
+    json_free(&doc); return ok;
+}
 static int case_library_help(void)
 {
     int failures = 0;
@@ -913,7 +1005,8 @@ static int case_library_help(void)
         ASSERT(app_launch_state_dir_ready(f.env.state_dir));
         ASSERT(al_selection(&f, "fixtureapp", &saved));
         struct al_library_script s = {.actions = {0, 1, 2, 2, 3}, .count = 5, .valid = true};
-        zcl_test_app_library_setup(&f.env, exe, "/wrong-global-profile", &reply, al_library_present, &s);
+        zcl_test_app_library_setup_prepared(&f.env, exe, "/wrong-global-profile", &reply,
+            al_library_present, &s, al_library_prepare);
         ASSERT(s.valid && s.calls == 5 && !s.errors && s.setup[0]);
         ASSERT(json_read(&setup, s.setup, strlen(s.setup)));
         ASSERT_STR_EQ(json_get_str(json_get(&setup, "command")), exe);
@@ -928,9 +1021,82 @@ static int case_library_help(void)
         ASSERT(json_get_int(json_get(&setup, "revision")) == (int64_t)saved.revision);
         char hex[65]; zcl_hex_encode(saved.version, 32, hex);
         ASSERT_STR_EQ(json_get_str(json_get(&setup, "version")), hex);
+        uint8_t source[32]; memset(source, 2, sizeof(source)); zcl_hex_encode(source, 32, hex);
+        ASSERT_STR_EQ(json_get_str(json_get(&setup, "source_version")), hex);
+        ASSERT(s.preparations == 1);
+        ASSERT(strstr(json_get_str(json_get(&setup, "request")), "source_version"));
         ASSERT(app_selection_load(f.env.state_dir, "fixtureapp", &after) == APP_SELECTION_OK);
         ASSERT(after.revision == saved.revision && !memcmp(after.version, saved.version, 32));
         ASSERT(!json_get(&reply.data, "pid"));
+    PASS(); }
+_test_next:;
+    json_free(&setup); zcl_command_reply_free(&reply);
+    return failures;
+}
+static bool al_help_fixture(struct al_fx *f)
+{
+    struct app_selection saved;
+    return al_setup(f) && app_launch_state_dir_ready(f->env.state_dir) &&
+        al_selection(f, "fixtureapp", &saved);
+}
+static int case_library_prepare_stop(void)
+{
+    int failures = 0;
+    static struct al_fx f;
+    if (!al_help_fixture(&f)) return 1;
+    const char *exe = "/installed/z23";
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    TEST("Cancel during owner preparation supplies no AI setup and leaves Keep unchanged") {
+        struct app_selection before, after;
+        ASSERT(app_selection_load(f.env.state_dir, "fixtureapp", &before) == APP_SELECTION_OK);
+        struct al_library_script s = {.actions = {0, 1}, .count = 2, .valid = true,
+            .cancel_preparation = true};
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_setup_prepared(&f.env, exe, "/profile", &reply,
+            al_library_present, &s, al_library_prepare);
+        ASSERT(s.valid && s.preparations == 1 && s.calls == 2 && !s.setup[0] && !s.errors);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")), "canceled");
+        ASSERT(app_selection_load(f.env.state_dir, "fixtureapp", &after) == APP_SELECTION_OK);
+        ASSERT(after.revision == before.revision && !memcmp(after.version, before.version, 32));
+    PASS(); }
+    TEST("Keep during owner preparation refuses handoff instead of substituting a new anchor") {
+        struct app_selection before, after;
+        ASSERT(app_selection_load(f.env.state_dir, "fixtureapp", &before) == APP_SELECTION_OK);
+        struct al_library_script s = {.actions = {0, 1}, .count = 2, .valid = true,
+            .stale_preparation = true, .change_fixture = &f};
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_setup_prepared(&f.env, exe, "/profile", &reply,
+            al_library_present, &s, al_library_prepare);
+        ASSERT(s.valid && s.preparations == 1 && s.errors == 1 && !s.setup[0]);
+        ASSERT_STR_EQ(reply.error.code, "SELECTION_STALE");
+        ASSERT(al_preparation_wire(&reply, &before, s.error_summary));
+        ASSERT(app_selection_load(f.env.state_dir, "fixtureapp", &after) == APP_SELECTION_OK);
+        ASSERT(after.revision == before.revision + 1 && !memcmp(after.version, before.version, 32));
+    PASS(); }
+_test_next:;
+    zcl_command_reply_free(&reply); return failures;
+}
+static int case_library_setup_stop(void)
+{
+    int failures = 0;
+    static struct al_fx f;
+    if (!al_help_fixture(&f)) return 1;
+    const char *exe = "/installed/z23";
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    TEST("Setup overflow preserves serialized prepared-draft recovery and leaves Keep unchanged") {
+        struct app_selection before, after;
+        ASSERT(app_selection_load(f.env.state_dir, "fixtureapp", &before) == APP_SELECTION_OK);
+        char long_path[4096]; memset(long_path, '"', sizeof(long_path) - 1);
+        long_path[sizeof(long_path) - 1] = 0;
+        struct al_library_script s = {.actions = {0, 1}, .count = 2, .valid = true};
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_setup_prepared(&f.env, long_path, "/profile", &reply,
+            al_library_present, &s, al_library_prepare);
+        ASSERT(s.valid && s.preparations == 1 && s.errors == 1 && !s.setup[0]);
+        ASSERT_STR_EQ(reply.error.code, "SETUP_TOO_LARGE");
+        ASSERT(al_preparation_wire(&reply, &before, s.error_summary));
+        ASSERT(app_selection_load(f.env.state_dir, "fixtureapp", &after) == APP_SELECTION_OK);
+        ASSERT(after.revision == before.revision && !memcmp(after.version, before.version, 32));
     PASS(); }
     TEST("AI help refuses changed selection before handing off any setup") {
         struct al_library_script s = {.actions = {0, 1}, .count = 2, .valid = true,
@@ -941,7 +1107,41 @@ static int case_library_help(void)
         ASSERT_STR_EQ(reply.error.code, "SELECTION_STALE");
     PASS(); }
 _test_next:;
-    json_free(&setup); zcl_command_reply_free(&reply);
+    zcl_command_reply_free(&reply); return failures;
+}
+static int case_library_repeat_prepare(void)
+{
+    int failures = 0;
+    static struct al_fx f;
+    if (!al_help_fixture(&f)) return 1;
+    const char *exe = "/installed/z23";
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    TEST("Back and no-op or later failed preparation preserve the first mutation and later facts") {
+        struct app_selection before, after;
+        ASSERT(app_selection_load(f.env.state_dir, "fixtureapp", &before) == APP_SELECTION_OK);
+        for (unsigned kind = 1; kind <= 3; ++kind) {
+            struct al_library_script s = {.actions = {0, 1, 2, 1}, .count = 4, .valid = true,
+                .second_preparation = kind, .fail_after_noop = kind == 1};
+            zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+            zcl_test_app_library_setup_prepared(&f.env, exe, "/profile", &reply,
+                al_library_present, &s, al_library_prepare);
+            ASSERT(s.valid && s.preparations == 2 && s.calls == 4);
+            if (kind == 2) {
+                ASSERT(!s.errors && reply.error.mutated);
+                const struct json_value *p = json_get(&reply.data, "preparation");
+                ASSERT(json_get_bool(json_get(p, "key_created")));
+                ASSERT(json_get_bool(json_get(p, "changed")));
+                ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")), "canceled");
+            } else {
+                ASSERT(s.errors == 1 && al_preparation_wire(&reply, &before, s.error_summary));
+                ASSERT_STR_EQ(reply.error.code, kind == 1 ? "PRESENTATION_FAILED" : "FIXTURE_FAILED");
+            }
+            ASSERT(app_selection_load(f.env.state_dir, "fixtureapp", &after) == APP_SELECTION_OK);
+            ASSERT(after.revision == before.revision && !memcmp(after.version, before.version, 32));
+        }
+    PASS(); }
+_test_next:;
+    zcl_command_reply_free(&reply);
     return failures;
 }
 static bool al_library_fill(struct al_fx *f)
@@ -1072,6 +1272,9 @@ _test_next:
     failures += case_resident_mutation(&f);
     failures += case_library(&f);
     failures += case_library_help();
+    failures += case_library_prepare_stop();
+    failures += case_library_setup_stop();
+    failures += case_library_repeat_prepare();
     failures += case_library_builtin_help();
     failures += case_library_bounds();
     al_kill_all();
