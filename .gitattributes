@@ -45,6 +45,7 @@ vendor/rgfw/RGFW.h -text
 vendor/rgfw/patches/macos-owned-bitmap.patch -text
 vendor/rgfw/patches/macos-reuse-classes.patch -text
 vendor/rgfw/patches/x11-library-lifetime.patch -text
+vendor/rgfw/patches/x11-display-failure.patch -text
 vendor/qrcodegen/** -whitespace
 vendor/typography/stb_truetype.h -whitespace
 # Seeded-bug patches for the shadow selector corpus. A blank context line in a

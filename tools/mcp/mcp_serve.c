@@ -137,9 +137,10 @@ static const struct mcp_tool mcp_tools[] = {
      "\"accept_execution\":{\"type\":\"boolean\"}},\"required\":[\"name\"]}",
      false},
     {"apps_keep",
-     "Keep the exact saved app version and build after preview. Pass the "
-     "preview identity and selection_revision as expected_revision; the "
-     "copy must already be adopted or received and trusted.",
+     "Request native owner approval to Keep the exact previewed version. "
+     "Pass its identity and selection_revision as expected_revision. "
+     "accept_execution is not approval; only the local window can Keep. "
+     "The copy must already be adopted or received and trusted.",
      "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},"
      "\"copy\":{\"type\":\"string\"},\"datadir\":{\"type\":\"string\"},"
      "\"version\":{\"type\":\"string\"},\"env_root\":{\"type\":\"string\"},"
@@ -147,7 +148,7 @@ static const struct mcp_tool mcp_tools[] = {
      "\"record_id\":{\"type\":\"string\"},\"accept_execution\":{\"type\":\"boolean\"},"
      "\"expected_revision\":{\"type\":\"integer\",\"minimum\":0}},"
      "\"required\":[\"name\",\"copy\",\"version\",\"env_root\",\"dependency_root\","
-     "\"image_sha3\",\"record_id\",\"accept_execution\",\"expected_revision\"]}",
+     "\"image_sha3\",\"record_id\",\"accept_execution\",\"expected_revision\"],\"additionalProperties\":false}",
      false},
     {"apps_adopt",
      "Request a native owner confirmation to make a personal copy of one "
@@ -377,7 +378,7 @@ static bool format_instructions(struct mcp_serve *s)
                     "use query with expected_revision to find literal source matches. Follow query/next_page/next_offset until complete; unsearched_files reports oversized files. Read the chosen pinned file before editing. Then "
                     "plan and confirm app.edit with the returned revision, head and file blob. "
                     "Build the returned saved version with app.build, preview with apps_open, "
-                    "and use apps_keep when the user chooses to keep it. Working files may "
+                    "and request native Keep with apps_keep. Working files may "
                     "contain newer edits. Sharing and received trust remain local owner actions.",
                     lead,
                     s->fleet_writes
@@ -805,17 +806,28 @@ static bool app_personalize_args(const struct json_value *args, struct json_valu
             json_push_kv(run, "input", args)) ||
         refuse(why, "OUT_OF_MEMORY", "cannot build the personalization request");
 }
-static bool app_ordinary_run_args(const struct mcp_tool *tool,
-                                  const struct json_value *args,
-                                  struct json_value *run, struct mcp_refusal *why)
+static bool app_keep_argument_keys(const struct json_value *args, struct mcp_refusal *why)
+{
+    static const char *const keys[] = {"name", "copy", "version", "env_root",
+        "dependency_root", "image_sha3", "record_id", "accept_execution",
+        "expected_revision", "datadir"};
+    if (!args || args->type != JSON_OBJ)
+        return refuse(why, "BAD_ARGUMENT", "apps_keep requires an exact preview identity object");
+    unsigned seen = 0;
+    for (size_t i = 0; i < args->num_children; ++i) {
+        size_t j = 0;
+        while (j < sizeof(keys) / sizeof(keys[0]) && strcmp(args->keys[i], keys[j])) ++j;
+        if (j == sizeof(keys) / sizeof(keys[0]) || (seen & (1u << j)))
+            return refuse(why, "BAD_ARGUMENT", "apps_keep refuses unknown or duplicate keys and caller decisions");
+        seen |= 1u << j;
+    }
+    return (seen & 511u) == 511u ||
+        refuse(why, "BAD_ARGUMENT", "apps_keep requires every preview identity and expected_revision");
+}
+static bool app_ordinary_encode(const struct json_value *args, const char *name,
+    bool open, bool keep, struct json_value *run, struct mcp_refusal *why)
 {
     struct json_value input;
-    bool open = tool != &mcp_tools[T_APPS_LIST];
-    bool keep = tool == &mcp_tools[T_APPS_KEEP];
-    const char *name = open ? arg_str(args, "name") : NULL;
-    if (open && (!name || !name[0] || strlen(name) > 64))
-        return refuse(why, "BAD_ARGUMENT",
-                      "name must be a string of 1 to 64 bytes, e.g. skycombat");
     json_init(&input);
     json_set_object(&input);
     bool ok = json_push_kv_str(run, "path", keep ? "app.keep" : open ? "app.open" : "app.list") &&
@@ -824,6 +836,19 @@ static bool app_ordinary_run_args(const struct mcp_tool *tool,
               json_push_kv(run, "input", &input);
     json_free(&input);
     return ok || refuse(why, "OUT_OF_MEMORY", "cannot build the app call");
+}
+static bool app_ordinary_run_args(const struct mcp_tool *tool,
+                                  const struct json_value *args,
+                                  struct json_value *run, struct mcp_refusal *why)
+{
+    bool open = tool != &mcp_tools[T_APPS_LIST];
+    bool keep = tool == &mcp_tools[T_APPS_KEEP];
+    if (keep && !app_keep_argument_keys(args, why)) return false;
+    const char *name = open ? arg_str(args, "name") : NULL;
+    if (open && (!name || !name[0] || strlen(name) > 64))
+        return refuse(why, "BAD_ARGUMENT",
+                      "name must be a string of 1 to 64 bytes, e.g. skycombat");
+    return app_ordinary_encode(args, name, open, keep, run, why);
 }
 static bool app_tool_run_args(const struct mcp_tool *tool,
                               const struct json_value *args,

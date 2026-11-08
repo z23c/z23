@@ -265,6 +265,11 @@ bool mcp_policy_allows(const struct zcl_command_spec *spec,
     if (!spec || spec->mode == ZCL_COMMAND_MODE_BRANCH)
         return refuse(why, "NOT_A_LEAF",
                       "path is not a runnable command; use z23_describe", spec);
+    /* Keep is a native owner decision even if its catalog later gains a
+     * generic confirmation flow. Only apps_keep may request that window. */
+    if (spec->path && strcmp(spec->path, "app.keep") == 0)
+        return refuse(why, "KEEP_NATIVE_CONFIRMATION_REQUIRED",
+                      "use apps_keep to request the native owner confirmation window", spec);
     /* Read-effect leaves are refused on the same wallet, core-recovery and
      * owner axes as mutations, so a misclassified leaf still cannot run. */
     if (spec->effect == ZCL_COMMAND_EFFECT_READ) {

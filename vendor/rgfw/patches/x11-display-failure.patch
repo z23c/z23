@@ -1,0 +1,45 @@
+diff --git a/vendor/rgfw/RGFW.h b/vendor/rgfw/RGFW.h
+index 6ea6a34b59..b1a4b3ad13 100644
+--- a/vendor/rgfw/RGFW.h
++++ b/vendor/rgfw/RGFW.h
+@@ -7241,6 +7241,10 @@ i32 RGFW_initPlatform_X11(void) {
+ 
+     XInitThreads(); /*!< init X11 threading */
+     _RGFW->display = XOpenDisplay(0);
++    if (_RGFW->display == NULL) {
++        RGFW_deinitPlatform_X11();
++        return -1;
++    }
+ 	_RGFW->context = XUniqueContext();
+ 
+ 	XSetWindowAttributes wa;
+@@ -7289,12 +7293,14 @@ i32 RGFW_initPlatform_X11(void) {
+ void RGFW_deinitPlatform_X11(void) {
+     #define RGFW_FREE_LIBRARY(x) if (x != NULL) dlclose(x); x = NULL;
+ 	/* to save the clipboard on the x server after the window is closed */
++    if (_RGFW->display && _RGFW->helperWindow) {
+ 	RGFW_LOAD_ATOM(CLIPBOARD_MANAGER);  RGFW_LOAD_ATOM(CLIPBOARD);
+ 	RGFW_LOAD_ATOM(SAVE_TARGETS);
+ 	if (XGetSelectionOwner(_RGFW->display, CLIPBOARD) == _RGFW->helperWindow) {
+ 		XConvertSelection(_RGFW->display, CLIPBOARD_MANAGER, SAVE_TARGETS, None, _RGFW->helperWindow, CurrentTime);
+         while (RGFW_XHandleClipboardSelectionHelper());
+ 	}
++    }
+ 	if (_RGFW->clipboard) {
+ 		RGFW_FREE(_RGFW->clipboard);
+ 		_RGFW->clipboard = NULL;
+@@ -7305,8 +7311,12 @@ void RGFW_deinitPlatform_X11(void) {
+ 		_RGFW->hiddenMouse = NULL;
+ 	}
+ 
+-    XDestroyWindow(_RGFW->display, (Drawable) _RGFW->helperWindow); /*!< close the window */
+-    XCloseDisplay(_RGFW->display); /*!< kill connection to the x server */
++    if (_RGFW->display) {
++        if (_RGFW->helperWindow) XDestroyWindow(_RGFW->display, (Drawable)_RGFW->helperWindow);
++        XCloseDisplay(_RGFW->display);
++    }
++    _RGFW->display = NULL;
++    _RGFW->helperWindow = 0;
+ 
+     #if !defined(RGFW_NO_X11_CURSOR_PRELOAD) && !defined(RGFW_NO_X11_CURSOR)
+         RGFW_FREE_LIBRARY(X11Cursorhandle);

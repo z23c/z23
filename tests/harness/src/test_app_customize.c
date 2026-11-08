@@ -949,19 +949,30 @@ static bool act_search_count(const char *query, const size_t seen[2], size_t wan
     return seen[0] + seen[1] == want;
 }
 
-static bool act_search_all(struct ac_fixture *f, const char *query, size_t want)
+static bool act_search_input(struct json_value *input, const char *query, const char *source)
+{
+    return json_push_kv_str(input, "query", query) &&
+        (!source || json_push_kv_str(input, "source_version", source));
+}
+static bool act_search_continue(const struct json_value *next, const char *source,
+    struct json_value *doc)
+{
+    const char *pin = json_get_str(json_get(next, "source_version"));
+    return next && (!source || (pin && !strcmp(pin, source))) && act_wire(next, doc);
+}
+static bool act_search_all(struct ac_fixture *f, const char *query, size_t want, const char *source)
 {
     struct abc_leaf l; bool ok = act_call(&l, NULL, true);
     struct json_value doc, next_doc; json_init(&doc); json_init(&next_doc);
     size_t seen[2] = {0}, pages = 0; bool complete = false;
-    ok = ok && json_push_kv_str(&l.in, "query", query) && act_wire(&l.in, &doc);
+    ok = ok && act_search_input(&l.in, query, source) && act_wire(&l.in, &doc);
     while (ok && pages++ < 32u) {
         const struct json_value *d = json_get(&doc, "data");
         const struct json_value *rows = json_get(d, "matches");
         ok = act_wire_identity(&doc, f) && act_search_rows(rows, f, query, seen);
         if (json_get_bool(json_get(d, "complete"))) { complete = true; break; }
         const struct json_value *next = act_wire_next(&doc, "query");
-        ok = ok && next && act_wire(next, &next_doc);
+        ok = ok && act_search_continue(next, source, &next_doc);
         if (ok) { json_free(&doc); doc = next_doc; json_init(&next_doc); }
     }
     json_free(&doc); json_free(&next_doc); abc_close(&l);
@@ -994,14 +1005,68 @@ static bool act_search_next_refusals(void)
         "{\"name\":\"skycombat\",\"expected_revision\":1,\"query\":\"BOOST\",\"page\":0,\"offset\":128}", true);
 }
 
+static bool act_pinned_next_identity(struct json_value *data, struct json_value *input,
+    const char *kept, const char *draft)
+{
+    return json_push_kv_str(data, "name", "skycombat") && json_push_kv_int(data, "selection_revision", 1) &&
+        json_push_kv_str(data, "version", kept) && json_push_kv_str(data, "source_version", draft) &&
+        json_push_kv_str(input, "name", "skycombat") && json_push_kv_int(input, "expected_revision", 1);
+}
+static bool act_pinned_next_case(const char *shape, const char *cursor, unsigned kind)
+{
+    struct json_value data = {0}, input = {0}; char kept[65], draft[65];
+    memset(kept, '1', 64); kept[64] = 0;
+    memset(draft, '2', 64); draft[64] = 0;
+    bool ok = json_read(&data, shape, strlen(shape)) && json_read(&input, cursor, strlen(cursor)) &&
+        act_pinned_next_identity(&data, &input, kept, draft);
+    if (kind == 3) ok = ok && json_push_kv_int(&input, "source_version", 2);
+    else if (kind) ok = ok && json_push_kv_str(&input, "source_version", kind == 2 ? kept : draft);
+    if (kind == 4) ok = ok && json_push_kv_str(&input, "unexpected", "no");
+    char data_wire[2048], input_wire[1024];
+    ok = ok && json_write(&data, data_wire, sizeof(data_wire)) &&
+        json_write(&input, input_wire, sizeof(input_wire)) &&
+        act_next_case("app.customize", data_wire, input_wire, kind == 1);
+    json_free(&data); json_free(&input); return ok;
+}
+static bool act_pinned_next_cases(void)
+{
+    static const struct { const char *data, *input; } cases[] = {
+        {"{\"query\":\"BOOST\",\"page\":0,\"offset\":0,\"matches\":[],\"complete\":false,\"next_page\":0,\"next_offset\":128}",
+         "{\"query\":\"BOOST\",\"page\":0,\"offset\":128}"},
+        {"{\"file\":{\"path\":\"include/boost.h\"},\"complete\":false,\"next_offset\":512}",
+         "{\"path\":\"include/boost.h\",\"offset\":512}"},
+        {"{\"files\":[],\"complete\":false,\"next_page\":4}", "{\"page\":4}"}
+    };
+    for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); ++i)
+        for (unsigned kind = 0; kind < 5; ++kind)
+            if (!act_pinned_next_case(cases[i].data, cases[i].input, kind)) return false;
+    return true;
+}
+
 static bool act_searches(struct ac_fixture *f)
 {
     char repeated[65]; memset(repeated, 'Q', 64); repeated[64] = 0;
-    return act_search_all(f, "BOOST 2", 1) && act_search_all(f, "BOOST 3", 0) &&
-        act_search_all(f, "BOOST 4", 0) && act_search_all(f, repeated, 18) &&
+    return act_search_all(f, "BOOST 2", 1, NULL) && act_search_all(f, "BOOST 3", 0, NULL) &&
+        act_search_all(f, "BOOST 4", 0, NULL) && act_search_all(f, repeated, 18, NULL) &&
         act_search_refusal("BOOST", -1, "REVISION_REQUIRED") &&
         act_search_refusal("BOOST", 2, "SELECTION_STALE") &&
         act_search_refusal("", 1, "BAD_INPUT") && act_search_next_refusals();
+}
+static int act_pinned_search_case(void)
+{
+    int failures = 0; struct ac_fixture f = {0};
+    TEST("serialized pinned search advances without losing its source and refuses altered draft continuations") {
+        ASSERT(act_setup(&f, true));
+        ASSERT(act_preserved(&f, true));
+        char source[65], repeated[65]; zcl_hex_encode(f.kept.version, 32, source);
+        memset(repeated, 'Q', 64); repeated[64] = 0;
+        ASSERT(act_search_all(&f, "PLAYER1", 0, source));
+        ASSERT(act_search_all(&f, "BOOST 2", 1, source));
+        ASSERT(act_search_all(&f, repeated, 18, source));
+        ASSERT(act_pinned_next_cases());
+        PASS();
+    } _test_next:;
+    act_cleanup(&f); return failures;
 }
 
 /* Search-only edge fixtures retain real saved CAS and a readable live file. */
@@ -1340,6 +1405,7 @@ int test_app_customize(void)
     act_cleanup(&f);
     failures += acs_edges();
     failures += acl_slices();
+    failures += act_pinned_search_case();
     return failures;
 }
 

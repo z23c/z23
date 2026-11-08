@@ -1,10 +1,14 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0
  * Native live-window failure regression; built only with ZCL_TESTING. */
+#if defined(__linux__) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "presentation/presentation.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <limits.h>
+#include <stdlib.h>
 #if defined(__APPLE__)
 #include <objc/runtime.h>
 #endif
@@ -100,6 +104,33 @@ static bool initialization_failure(void)
 }
 #endif
 
+#if defined(__linux__)
+static bool failed_display(void)
+{
+    static uint8_t pixels[16 * 16 * 3];
+    struct zcl_present_window_v1 page = {
+        .struct_size = sizeof(page), .abi_version = ZCL_PRESENT_ABI_V1,
+        .title = "Unavailable display", .pixels = pixels, .width = 16, .height = 16,
+        .pixel_format = ZCL_PRESENT_RGB8,
+    };
+    struct zcl_present_window_event_v1 event = {0};
+    char error[256] = {0};
+    bool ok = zcl_present_window_run_actions_v1(&page, 1, NULL, NULL, &event, error, sizeof(error));
+    return !ok && strstr(error, "initialization failed") && zcl_present_test_x11_libraries_retired();
+}
+static bool initialization_failure(void)
+{
+    const char *display = getenv("DISPLAY");
+    char *saved = display ? strdup(display) : NULL;
+    if (!saved) return false;
+    bool ok = setenv("DISPLAY", ":invalid-display-regression", 1) == 0 &&
+        failed_display() && failed_display();
+    if (setenv("DISPLAY", saved, 1)) ok = false;
+    free(saved);
+    return ok;
+}
+#endif
+
 static bool clipboard_roundtrip(const char *text)
 {
     static uint8_t pixels[16 * 16 * 3];
@@ -122,7 +153,7 @@ static bool clipboard_roundtrip(const char *text)
 }
 int main(void)
 {
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__linux__)
     if (!initialization_failure()) return 1;
 #endif
     if (!run(1, true, false, 1, false)) return 1;

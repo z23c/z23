@@ -35,6 +35,7 @@ struct as_open {
     char copy_dir[AS_PATH], scratch[PLATFORM_TEMP_PATH_MAX];
     char image[AS_PATH], log[APP_LAUNCH_PATH_MAX], datadir_real[AS_PATH], version_hex[65];
     uint64_t selection_revision;
+    bool owner_review;
     struct app_selection kept;
     struct zcl_package_copy copy;
     uint8_t package[32], env[32], deps[32], image_sha[32], record_id[32];
@@ -111,7 +112,8 @@ static bool as_inputs(struct as_open *a)
 
 static bool as_copy(struct as_open *a)
 {
-    if (!zcl_package_copy_open_selected(a->copy_dir, &a->copy, a->reply, AS_COMMAND, a->version)) return false;
+    enum zcl_package_copy_access access = a->owner_review ? ZCL_PACKAGE_COPY_READ : ZCL_PACKAGE_COPY_CHECKED;
+    if (!zcl_package_copy_open_selected_as(a->copy_dir, access, &a->copy, a->reply, AS_COMMAND, a->version)) return false;
     enum zcl_package_copy_adoption auth = zcl_package_copy_adopted(a->datadir, &a->copy, NULL);
     if (auth == ZCL_PACKAGE_COPY_ADOPTED || auth == ZCL_PACKAGE_COPY_RECEIVED_TRUSTED) return true;
     return as_fail(a, "NOT_ADOPTED", "only an adopted or trusted received copy may run", zcl_package_copy_adoption_name(auth));
@@ -123,8 +125,12 @@ static bool as_package(struct as_open *a)
     uint8_t release_id[32], dependencies[32];
     if (zcl_package_copy_find_release(a->datadir, a->copy.parent_release, &release, release_id) != ZCL_PACKAGE_COPY_FOUND)
         return as_fail(a, "RELEASE_UNKNOWN", "the parent release is not persisted", a->datadir);
-    if (!platform_temp_directory_create("z23-open-", a->scratch, sizeof(a->scratch)) ||
-        vcs_tree_materialize_disposable(a->copy_dir, a->copy.selected_tree, a->scratch, VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, 0) != VCS_OK)
+    if (!platform_temp_directory_create("z23-open-", a->scratch, sizeof(a->scratch)))
+        return as_fail(a, "SNAPSHOT_MATERIALIZE_FAILED", "cannot allocate validation scratch", a->copy_dir);
+    int materialized = a->owner_review ?
+        vcs_tree_materialize_readonly_disposable(a->copy_dir, a->copy.selected_tree, a->scratch, VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, 0) :
+        vcs_tree_materialize_disposable(a->copy_dir, a->copy.selected_tree, a->scratch, VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, 0);
+    if (materialized != VCS_OK)
         return as_fail(a, "SNAPSHOT_MATERIALIZE_FAILED", "the selected version could not be materialized", a->copy_dir);
     struct vcs_package_prepare_options options = {.dir = a->scratch, .publisher_sequence = 1,
         .reward_address = "", .chain_id = release.chain_id};
@@ -374,12 +380,16 @@ static bool as_make_selection(struct as_open *a, struct app_selection *s)
     return true;
 }
 
-static void as_keep(struct as_open *a, uint64_t expected)
+static bool as_keep_image(struct as_open *a)
 {
     struct resident_launch launch; resident_launch_init(&launch);
     struct zcl_result r = app_image_build_prepare(&a->record, a->image, &launch);
     resident_launch_close(&launch);
-    if (!r.ok) { as_fail(a, "IMAGE_REFUSED", "the built image no longer matches its record", r.message); return; }
+    return r.ok || as_fail(a, "IMAGE_REFUSED", "the built image no longer matches its record", r.message);
+}
+static void as_keep(struct as_open *a, uint64_t expected)
+{
+    if (!as_keep_image(a)) return;
     if (!app_launch_state_dir_ready(a->env_cfg.state_dir)) { as_fail(a, "STATE_FAILED", "launcher state directory is unavailable", a->env_cfg.state_dir); return; }
     struct app_selection selection, saved;
     if (!as_make_selection(a, &selection)) return;
@@ -393,19 +403,110 @@ static void as_keep(struct as_open *a, uint64_t expected)
         return;
     }
     a->selection_revision = saved.revision;
+    a->reply->error.mutated = true;
     as_describe(a, &a->reply->data);
     (void)json_push_kv_str(&a->reply->data, "status", "kept");
 }
 
-void zcl_native_handle_app_keep(const struct zcl_command_request *request,
-                                struct zcl_command_reply *reply)
+static bool as_keep_root(struct app_confirm *view, const char *label, const uint8_t root[32])
+{
+    char hex[65]; zcl_hex_encode(root, 32, hex);
+    return app_confirm_field(&view->model, label, hex);
+}
+
+static bool as_keep_fields(struct as_open *a, struct app_confirm *view, uint64_t expected)
+{
+    char revision[32];
+    (void)snprintf(revision, sizeof(revision), "%llu", (unsigned long long)expected);
+    const char *labels[] = {"Version to keep: ", "Package: ", "Image: ",
+        "Build record: ", "Build environment: ", "Dependencies: "};
+    const uint8_t *roots[] = {a->copy.selected_version, a->package, a->image_sha,
+        a->record_id, a->env, a->deps};
+    if (!app_confirm_field(&view->model, "App: ", a->name) ||
+        !app_confirm_field(&view->model, "Current revision: ", revision)) return false;
+    if (expected && !as_keep_root(view, "Currently kept: ", a->kept.version)) return false;
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); ++i)
+        if (!as_keep_root(view, labels[i], roots[i])) return false;
+    return app_confirm_field(&view->model, "Copy: ", a->copy_dir) &&
+        app_confirm_field(&view->model, "Data directory: ", a->datadir);
+}
+
+static bool as_keep_current(struct as_open *a, uint64_t expected)
+{
+    enum app_selection_result r = app_selection_load(a->env_cfg.state_dir, a->entry.id, &a->kept);
+    if ((r == APP_SELECTION_ABSENT && expected == 0) ||
+        (r == APP_SELECTION_OK && a->kept.revision == expected)) return true;
+    if (r == APP_SELECTION_ABSENT || r == APP_SELECTION_OK)
+        return as_fail(a, "SELECTION_STALE", "kept selection changed; reload before retrying", a->entry.id);
+    return as_fail(a, "SELECTION_UNREADABLE", "kept selection cannot be read", a->entry.id);
+}
+
+static bool as_keep_owner(struct as_open *a, uint64_t expected,
+    app_confirm_presenter presenter, void *context)
+{
+    if (!as_keep_current(a, expected) || !as_keep_image(a)) return false;
+    struct app_confirm *view = zcl_calloc(1, sizeof(*view), "app-keep/confirmation");
+    if (!view) return as_fail(a, "OUT_OF_MEMORY", "cannot show Keep confirmation", a->name);
+    view->window_title = "Keep this app version";
+    zcl_present_model_init_v1(&view->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(view->model.request_id, sizeof(view->model.request_id), "keep-app");
+    (void)snprintf(view->model.title, sizeof(view->model.title), "Keep this version?");
+    (void)snprintf(view->model.summary, sizeof(view->model.summary),
+        "My Apps will open this version next time. Cancel leaves your saved choice and preview unchanged.");
+    view->model.action_count = 4;
+    app_confirm_action(&view->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "cancel", "Cancel");
+    app_confirm_action(&view->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+    app_confirm_action(&view->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+    app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "keep", "Keep this version");
+    char why[256] = {0};
+    bool ok = as_keep_fields(a, view, expected) && app_confirm_prepare(view, why, sizeof(why)) &&
+        app_confirm_show(view, presenter, context, why, sizeof(why));
+    bool confirmed = ok && view->confirmed;
+    app_confirm_free(view); free(view);
+    if (!ok) return as_fail(a, "KEEP_CONFIRMATION_UNAVAILABLE", "Keep confirmation could not be displayed; your saved choice is unchanged", why);
+    if (!confirmed) {
+        a->selection_revision = expected;
+        as_describe(a, &a->reply->data);
+        (void)json_push_kv_str(&a->reply->data, "status", "canceled");
+    }
+    return confirmed;
+}
+
+static bool as_keep_revalidate(struct as_open *a)
+{
+    struct app_selection displayed, refreshed;
+    if (!as_make_selection(a, &displayed)) return false;
+    if (a->scratch[0]) {
+        if (!zcl_tree_remove(a->scratch).ok)
+            return as_fail(a, "SNAPSHOT_CLEANUP_FAILED", "cannot refresh candidate validation", a->scratch);
+        a->scratch[0] = 0;
+    }
+    zcl_package_copy_close(&a->copy);
+    if (!as_validated(a) || !as_make_selection(a, &refreshed)) return false;
+    if (memcmp(&displayed, &refreshed, sizeof(displayed)))
+        return as_fail(a, "KEEP_CANDIDATE_CHANGED", "the displayed candidate changed; review it again", a->version);
+    return true;
+}
+
+void zcl_native_app_keep_present(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context)
 {
     struct as_open *a = zcl_calloc(1, sizeof(*a), "app-keep");
     if (!a) { zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "cannot allocate app state", AS_COMMAND); return; }
     a->input = request->input; a->reply = reply;
     uint64_t expected = 0;
-    if (as_keep_gate(a) && as_inputs(a) && as_revision(a, &expected) && as_catalog(a) && as_validated(a)) as_keep(a, expected);
+    a->owner_review = request->context && request->context->plan_first;
+    if (as_keep_gate(a) && as_inputs(a) && as_revision(a, &expected) && as_catalog(a) && as_validated(a)) {
+        if (!a->owner_review || (as_keep_owner(a, expected, presenter, context) && as_keep_revalidate(a)))
+            as_keep(a, expected);
+    }
     as_cleanup(a);
+}
+
+void zcl_native_handle_app_keep(const struct zcl_command_request *request,
+                                struct zcl_command_reply *reply)
+{
+    zcl_native_app_keep_present(request, reply, NULL, NULL);
 }
 
 static bool as_kept_input(struct as_open *a)

@@ -19,6 +19,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "command/native_app_confirm.h"
 
 #define APP_LAUNCH_ID_MAX 32u
 #define APP_LAUNCH_ALIASES_MAX 4u
@@ -34,6 +35,9 @@
 
 struct zcl_command_request;
 struct zcl_command_reply;
+/* Per-invocation native owner UI seam; never selected by command JSON. */
+void zcl_native_app_keep_present(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context);
 bool zcl_native_app_open_kept(const struct zcl_command_request *request,
                                struct zcl_command_reply *reply);
 void zcl_native_handle_app_open_selected(const struct zcl_command_request *request,

@@ -16,6 +16,7 @@
 #include "command/native_app_personalize_command.h"
 #include "command/native_app_personalize_view.h"
 #include "vcs/vcs.h"
+#include "vcs/vcs_manifest.h"
 #include <signal.h>
 #include <errno.h>
 #include "command/lab_exec.h"
@@ -664,7 +665,10 @@ static bool aso_mcp_send(struct aso_mcp *m, const char *line, bool response)
     if (!response) return true;
     for (;;) {
         struct pollfd p = {.fd = m->output, .events = POLLIN}; char c;
-        if (poll(&p, 1, 30000) <= 0 || read(m->output, &c, 1) != 1) return false;
+        if (poll(&p, 1, 30000) <= 0 || read(m->output, &c, 1) != 1) {
+            printf("MCP response interrupted errno=%d after %zu bytes\n", errno, used);
+            return false;
+        }
         if (c == '\n') { m->line[used] = 0; return true; }
         if (used + 1 >= sizeof(m->line)) return false;
         m->line[used++] = c;
@@ -714,6 +718,7 @@ static bool aso_mcp_call(struct aso_mcp *m, const struct abc_world *w,
     const char *text = json_get_str(json_get(part, "text"));
     if (!iserr || iserr->type != JSON_BOOL || !text) ok = false;
     if (ok) { *is_error = json_get_bool(iserr); ok = json_read(doc, text, strlen(text)); }
+    if (!ok) printf("MCP %s response invalid: %.1024s\n", tool, m->line);
     json_free(&result); json_free(&args); json_free(&params); json_free(&req);
     return ok;
 }
@@ -732,6 +737,151 @@ static bool aso_code_is(const struct json_value *doc, const char *code)
     return !strcmp(aso_string(json_get(doc, "error"), "code"), code);
 }
 static void aso_doc_clear(struct json_value *doc) { json_free(doc); json_init(doc); }
+
+static bool aj_receive_action(const struct zcl_present_window_live_view_v1 *live,
+    unsigned index, bool *close, bool *redraw);
+static bool aj_receive_field(const struct zcl_present_model_v1 *m, const char *label, const char *expected);
+struct aso_keep_view {
+    const struct aso_build *build;
+    unsigned mode; /* 0 approve; 1 cancel; 2 close; 3 presenter failure. */
+    bool observed;
+};
+static bool aso_keep_race(void)
+{
+    struct app_launch_env env; struct app_selection old, saved; char why[256];
+    return app_launch_env_from_process(&env, why, sizeof(why)) &&
+        app_selection_load(env.state_dir, "tiny-ready", &old) == APP_SELECTION_OK &&
+        app_selection_save(env.state_dir, old.revision, &old, &saved) == APP_SELECTION_OK;
+}
+static bool aso_keep_fields_match(struct aso_keep_view *v, const struct zcl_present_model_v1 *model)
+{
+    const char *labels[] = {"Version to keep: ", "Package: ", "Image: ", "Build record: ",
+        "Build environment: ", "Dependencies: "};
+    const char *values[] = {v->build->version, v->build->package, v->build->image,
+        v->build->record, v->build->env, v->build->deps};
+    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); ++i)
+        if (!aj_receive_field(model, labels[i], values[i])) return false;
+    return true;
+}
+static bool aso_keep_mutate(struct aso_keep_view *v)
+{
+    if (v->mode == 3) return false;
+    if (v->mode == 4 && !aso_keep_race()) return false;
+    if (v->mode == 5) {
+        int fd = open(v->build->image_path, O_WRONLY | O_APPEND);
+        if (fd < 0) return false;
+        bool changed = write(fd, "!", 1) == 1;
+        if (close(fd) || !changed) return false;
+    }
+    return true;
+}
+static bool aso_keep_choose(const struct zcl_present_window_live_view_v1 *live,
+    unsigned mode, uint32_t count)
+{
+    bool close = false, redraw = false;
+    if (mode == 1) return aj_receive_action(live, 0, &close, &redraw) && close;
+    if (mode == 2) {
+        struct zcl_present_window_event_v1 event = {0};
+        live->owner.update(live->owner.context, &event, true, &redraw, &close);
+        return close;
+    }
+    if (!aj_receive_action(live, 3, &close, &redraw) || close) return false;
+    for (uint32_t i = 1; i < count; ++i)
+        if (!aj_receive_action(live, 2, &close, &redraw) || close || !redraw) return false;
+    return aj_receive_action(live, 3, &close, &redraw) && close;
+}
+static bool aso_keep_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct aso_keep_view *v = context;
+    uint32_t count = 0;
+    if (!pages || !pages->pages[0].pixels || strcmp(model->request_id, "keep-app") ||
+        !zcl_present_model_page_count_v1(model, &count, why, cap) || count < 2 ||
+        !aso_keep_fields_match(v, model)) return false;
+    v->observed = true;
+    return aso_keep_mutate(v) && aso_keep_choose(live, v->mode, count);
+}
+
+/* Native per-invocation presenter, not a JSON approval or a GUI claim. */
+static bool aso_owner_keep(const struct abc_world *w, const struct aso_build *b,
+    int64_t revision, unsigned mode, struct json_value *doc, bool *error)
+{
+    struct json_value req, params, args, result;
+    json_init(&req); json_init(&params); json_init(&args); json_init(&result);
+    json_set_object(&req); json_set_object(&params); json_set_object(&args); json_set_object(&result);
+    bool ok = aso_mcp_request(&req, &params, &args, w, b, "apps_keep", revision);
+    const struct json_value *input = json_get(json_get(&req, "params"), "arguments");
+    struct zcl_command_context ctx = {.plan_first = true};
+    struct zcl_command_request request = {.input = input, .context = &ctx};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_keep.v1");
+    struct aso_keep_view view = {.build = b, .mode = mode};
+    if (ok) zcl_native_app_keep_present(&request, &reply, aso_keep_present, &view);
+    *error = reply.status != ZCL_COMMAND_STATUS_PASSED;
+    struct json_value failure; json_init(&failure); json_set_object(&failure);
+    ok = ok && view.observed == (mode != 6) && json_push_kv_str(&failure, "code", reply.error.code) &&
+        json_push_kv(&result, "error", &failure) && json_push_kv(&result, "data", &reply.data);
+    char wire[8192]; size_t size = ok ? json_write(&result, wire, sizeof(wire)) : 0;
+    ok = size && size < sizeof(wire) && json_read(doc, wire, size);
+    zcl_command_reply_free(&reply); json_free(&failure); json_free(&result);
+    json_free(&args); json_free(&params); json_free(&req);
+    return ok;
+}
+
+static int aso_keep_readonly(const struct abc_world *w, const struct aso_build *b)
+{
+    int failures = 0; bool moved = false, error = false;
+    char index[ABC_PATH + 32], saved[ABC_PATH + 40], wal[ABC_PATH + 40];
+    (void)snprintf(index, sizeof(index), "%s/.zvcs/index.kv", w->copy);
+    (void)snprintf(saved, sizeof(saved), "%s.keep-test", index);
+    (void)snprintf(wal, sizeof(wal), "%s-wal", index);
+    struct json_value doc; json_init(&doc);
+    TEST("Cancel validates saved history without creating a missing copy index") {
+        ASSERT(access(wal, F_OK) != 0 && errno == ENOENT);
+        ASSERT(rename(index, saved) == 0); moved = true;
+        ASSERT(aso_owner_keep(w, b, 0, 1, &doc, &error));
+        ASSERT(!error && !strcmp(aso_string(json_get(&doc, "data"), "status"), "canceled"));
+        ASSERT(access(index, F_OK) != 0 && errno == ENOENT);
+        ASSERT(access(wal, F_OK) != 0 && errno == ENOENT);
+        PASS();
+    } _test_next:;
+    if (moved && rename(saved, index)) failures++;
+    json_free(&doc); return failures;
+}
+static bool aso_blob_path(const struct abc_world *w, const struct aso_build *b, char path[ABC_PATH + 100])
+{
+    struct zcl_package_copy copy = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.keep.v1");
+    struct vcs_manifest manifest; vcs_manifest_init(&manifest);
+    bool ok = zcl_package_copy_open_selected_as(w->copy, ZCL_PACKAGE_COPY_READ,
+        &copy, &reply, "test", b->version) &&
+        vcs_tree_load_readonly_bounded(w->copy, copy.selected_tree, 1024 * 1024, 1024, &manifest) && manifest.count;
+    if (ok) {
+        char hex[65]; zcl_hex_encode(manifest.entries[0].blob, 32, hex);
+        (void)snprintf(path, ABC_PATH + 100, "%s/.zvcs/objects/%c%c/%s", w->copy, hex[0], hex[1], hex + 2);
+    }
+    vcs_manifest_free(&manifest); zcl_package_copy_close(&copy); zcl_command_reply_free(&reply);
+    return ok;
+}
+static int aso_keep_missing_alias(const struct abc_world *w, const struct aso_build *b)
+{
+    int failures = 0; bool moved = false, error = false;
+    char canonical[ABC_PATH + 100], alias[ABC_PATH + 100];
+    (void)snprintf(alias, sizeof(alias), "%s/.zvcs/objects/tmp/.put.keep-missing", w->copy);
+    struct json_value doc; json_init(&doc);
+    TEST("owner Keep refuses a missing canonical blob without repairing its alias") {
+        ASSERT(aso_blob_path(w, b, canonical));
+        ASSERT(rename(canonical, alias) == 0); moved = true;
+        ASSERT(aso_owner_keep(w, b, 0, 6, &doc, &error));
+        ASSERT(error && aso_code_is(&doc, "SNAPSHOT_MATERIALIZE_FAILED"));
+        struct stat st;
+        ASSERT(lstat(canonical, &st) != 0 && errno == ENOENT);
+        ASSERT(lstat(alias, &st) == 0 && S_ISREG(st.st_mode));
+        PASS();
+    } _test_next:;
+    if (moved && rename(alias, canonical)) failures++;
+    json_free(&doc); return failures;
+}
 
 static bool aso_plain_fork(const struct abc_world *w, struct abc_world *plain,
                            struct aso_build *selected)
@@ -783,14 +933,14 @@ static int aso_mcp_acceptance(const struct abc_world *w, const struct aso_build 
     return failures;
 }
 
-/* All calls below are MCP tools over a real short-lived stdio server; the
- * synthetic desktop flag admits a nonvisual process fixture only. */
+/* MCP preview is real stdio; Keep approval uses a per-invocation presenter.
+ * Invalid DISPLAY is a Linux-only wire failure; Cocoa ignores DISPLAY. */
 static int aso_keep_commit(const struct abc_world *w, const struct aso_build *b,
                            const struct aso_build *next, const char *head)
 {
     int failures = 0; struct aso_mcp m = {.pid = -1, .input = -1, .output = -1};
     struct json_value doc; json_init(&doc); bool error = false;
-    TEST("MCP keeps captured N and later explicit preview does not replace it") {
+    TEST("MCP cannot keep without native owner approval; later preview preserves N") {
         ASSERT(aso_mcp_spawn(&m) && aso_mcp_init(&m));
         ASSERT(aso_mcp_tool(&m, w, b, &doc, &error));
         const struct json_value *data = json_get(&doc, "data");
@@ -798,7 +948,21 @@ static int aso_keep_commit(const struct abc_world *w, const struct aso_build *b,
         ASSERT(!error && aso_build_facts_match(data, b) && aso_revision_is(data, 0));
         int64_t expected = json_get_int(json_get(data, "selection_revision"));
         aso_doc_clear(&doc);
+#if defined(__linux__)
         ASSERT(aso_mcp_call(&m, w, b, "apps_keep", expected, &doc, &error));
+        ASSERT(error && aso_code_is(&doc, "KEEP_CONFIRMATION_UNAVAILABLE"));
+        aso_doc_clear(&doc);
+#endif
+        for (unsigned mode = 1; mode <= 3; ++mode) {
+            ASSERT(aso_owner_keep(w, b, expected, mode, &doc, &error));
+            ASSERT(mode == 3 ? error && aso_code_is(&doc, "KEEP_CONFIRMATION_UNAVAILABLE") :
+                !error && !strcmp(aso_string(json_get(&doc, "data"), "status"), "canceled"));
+            struct app_launch_env env; struct app_selection kept; char why[256];
+            ASSERT(app_launch_env_from_process(&env, why, sizeof(why)));
+            ASSERT(app_selection_load(env.state_dir, "tiny-ready", &kept) == APP_SELECTION_ABSENT);
+            aso_doc_clear(&doc);
+        }
+        ASSERT(aso_owner_keep(w, b, expected, 0, &doc, &error));
         data = json_get(&doc, "data");
         ASSERT(!error && !strcmp(aso_string(data, "status"), "kept"));
         ASSERT(aso_build_facts_match(data, b) && aso_revision_is(data, 1));
@@ -833,6 +997,50 @@ static int aso_keep_restart(const struct abc_world *w, const struct aso_build *b
         PASS();
     } _test_next:;
     if (!aso_mcp_close(&m)) failures++;
+    json_free(&doc); return failures;
+}
+static int aso_owner_keep_races(const struct abc_world *w, const struct aso_build *next)
+{
+    int failures = 0;
+    struct json_value doc; json_init(&doc); bool error = false;
+    struct app_launch_env env; struct app_selection before, after; char why[256];
+    struct stat original = {0}; bool restore = false;
+    TEST("owner Keep rechecks selection CAS and image after the dialog") {
+        ASSERT(app_launch_env_from_process(&env, why, sizeof(why)));
+        ASSERT(app_selection_load(env.state_dir, "tiny-ready", &before) == APP_SELECTION_OK);
+        ASSERT(aso_owner_keep(w, next, (int64_t)before.revision, 4, &doc, &error));
+        ASSERT(error && aso_code_is(&doc, "SELECTION_STALE")); aso_doc_clear(&doc);
+        ASSERT(app_selection_load(env.state_dir, "tiny-ready", &after) == APP_SELECTION_OK);
+        ASSERT(after.revision == before.revision + 1 && !memcmp(after.version, before.version, 32));
+        ASSERT(stat(next->image_path, &original) == 0); restore = true;
+        ASSERT(aso_owner_keep(w, next, (int64_t)after.revision, 5, &doc, &error));
+        ASSERT(error && aso_code_is(&doc, "IMAGE_REFUSED"));
+        struct app_selection unchanged;
+        ASSERT(app_selection_load(env.state_dir, "tiny-ready", &unchanged) == APP_SELECTION_OK);
+        ASSERT(unchanged.revision == after.revision && !memcmp(unchanged.version, before.version, 32));
+        PASS();
+    } _test_next:;
+    if (restore && truncate(next->image_path, original.st_size)) failures++;
+    json_free(&doc); return failures;
+}
+static int aso_owner_keep_preserves(const struct abc_world *w, const struct aso_build *next)
+{
+    int failures = 0;
+    struct app_launch_env env; struct app_selection before, after; char why[256];
+    struct json_value doc; json_init(&doc); bool error = false;
+    TEST("Cancel close and presenter failure preserve the complete existing Keep") {
+        ASSERT(app_launch_env_from_process(&env, why, sizeof(why)));
+        ASSERT(app_selection_load(env.state_dir, "tiny-ready", &before) == APP_SELECTION_OK);
+        for (unsigned mode = 1; mode <= 3; ++mode) {
+            ASSERT(aso_owner_keep(w, next, (int64_t)before.revision, mode, &doc, &error));
+            ASSERT(mode == 3 ? error && aso_code_is(&doc, "KEEP_CONFIRMATION_UNAVAILABLE") :
+                !error && !strcmp(aso_string(json_get(&doc, "data"), "status"), "canceled"));
+            ASSERT(app_selection_load(env.state_dir, "tiny-ready", &after) == APP_SELECTION_OK);
+            ASSERT(!memcmp(&before, &after, sizeof(before)));
+            aso_doc_clear(&doc);
+        }
+        PASS();
+    } _test_next:;
     json_free(&doc); return failures;
 }
 static bool aso_kept_catalog_refused(void)
@@ -957,17 +1165,27 @@ static int aso_fixture_setup(struct abc_world *w, struct aso_build *b,
     return failures;
 }
 
-static int aso_journey(const struct abc_world *w, const struct aso_build *b,
-                       const struct aso_build *next, const char *head)
+static int aso_before_keep(const struct abc_world *w, const struct aso_build *b, const char *head)
 {
     int failures = 0;
     if (!failures) failures += aso_success(w, b, head);
     if (!failures) failures += aso_refusals(w, b);
     if (!failures) failures += aso_failure_cases(w, b);
     if (!failures) failures += aso_mcp_acceptance(w, b, head);
+    if (!failures) failures += aso_keep_readonly(w, b);
+    if (!failures) failures += aso_keep_missing_alias(w, b);
+    return failures;
+}
+static int aso_journey(const struct abc_world *w, const struct aso_build *b,
+                       const struct aso_build *next, const char *head)
+{
+    int failures = aso_before_keep(w, b, head);
     if (!failures) failures += aso_keep_commit(w, b, next, head);
     if (!failures) failures += aso_keep_restart(w, b, head);
     if (!failures) failures += aso_bad_catalog(w, b);
+    if (!failures) failures += aso_owner_keep_preserves(w, next);
+    if (!aso_cleanup_children()) failures++;
+    if (!failures) failures += aso_owner_keep_races(w, next);
     if (!failures) failures += aso_keep_corruption(w);
     if (!aso_cleanup_children()) failures++;
     if (!failures) failures += aso_mutation(w, b);
@@ -1491,6 +1709,19 @@ static bool aj_alice_reopen(struct abc_world *w, const struct aso_build *draft,
         aso_revision_is(json_get(doc, "data"), 2) && aj_log_has(json_get(doc, "data"), "BOOST=9") &&
         aj_history_preserved(w, head, draft->version);
 }
+static bool aj_owner_keep(struct aso_mcp *m, const struct abc_world *w,
+    const struct aso_build *build, int64_t revision, struct json_value *doc, bool *error)
+{
+#if defined(__linux__)
+    if (!aso_mcp_call(m, w, build, "apps_keep", revision, doc, error) ||
+        !*error || !aso_code_is(doc, "KEEP_CONFIRMATION_UNAVAILABLE")) return false;
+    aso_doc_clear(doc);
+#else
+    (void)m; /* Native presenter acceptance below is portable; DISPLAY is not. */
+#endif
+    return aso_owner_keep(w, build, revision, 0, doc, error) && !*error &&
+        aso_revision_is(json_get(doc, "data"), revision + 1);
+}
 static int aj_steps(struct abc_world *w, const struct aso_build *old, const char *head)
 {
     int failures = 0; struct aso_mcp m = {.pid = -1, .input = -1, .output = -1};
@@ -1501,8 +1732,7 @@ static int aj_steps(struct abc_world *w, const struct aso_build *old, const char
         ASSERT(aso_mcp_tool(&m, w, old, &doc, &error));
         aso_track_ready(json_get(&doc, "data"), old);
         ASSERT(!error && aso_build_facts_match(json_get(&doc, "data"), old)); aso_doc_clear(&doc);
-        ASSERT(aso_mcp_call(&m, w, old, "apps_keep", 0, &doc, &error));
-        ASSERT(!error && aso_revision_is(json_get(&doc, "data"), 1)); aso_doc_clear(&doc);
+        ASSERT(aj_owner_keep(&m, w, old, 0, &doc, &error)); aso_doc_clear(&doc);
         ASSERT(aj_edit(&m, head, candidate));
         ASSERT(aj_history_preserved(w, head, candidate) && aj_parent_is(w, candidate, head));
         ASSERT(aj_personalize(w, candidate, personal));
@@ -1519,8 +1749,7 @@ static int aj_steps(struct abc_world *w, const struct aso_build *old, const char
         aso_track_ready(json_get(&doc, "data"), old);
         ASSERT(!error && aso_build_facts_match(json_get(&doc, "data"), old) &&
             aj_log_has(json_get(&doc, "data"), "BOOST=2")); aso_doc_clear(&doc);
-        ASSERT(aso_mcp_call(&m, w, &draft, "apps_keep", 1, &doc, &error));
-        ASSERT(!error && aso_revision_is(json_get(&doc, "data"), 2)); aso_doc_clear(&doc);
+        ASSERT(aj_owner_keep(&m, w, &draft, 1, &doc, &error)); aso_doc_clear(&doc);
         ASSERT(aso_cleanup_children());
         ASSERT(aj_share(w, &draft, fp, release));
         ASSERT(aj_receive(w, fp, draft.package, release) && aj_bob_source(w));

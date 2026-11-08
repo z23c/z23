@@ -330,10 +330,61 @@ static int case_keep_forwarding(struct ma *m)
         ASSERT(ma_tool(m, 14, "apps_keep", args));
         ASSERT(ma_has(m, "\"isError\":true") && !ma_has(m, "EXECUTION_CONFIRMATION_REQUIRED"));
         ASSERT(ma_tool(m, 15, "z23_run", "{\"path\":\"app.keep\",\"input\":{}}"));
-        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "MUTATION_NO_CONFIRMATION_FLOW"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "KEEP_NATIVE_CONFIRMATION_REQUIRED"));
         PASS();
     } _test_next:;
     return failures;
+}
+
+static bool ma_keep_injection(struct ma *m, unsigned id, const char *extra)
+{
+    char args[2048];
+    int n = snprintf(args, sizeof(args),
+        "{\"name\":\"fixtureapp\",\"copy\":\"/missing-copy\","
+        "\"version\":\"%064d\",\"env_root\":\"%064d\",\"dependency_root\":\"%064d\","
+        "\"image_sha3\":\"%064d\",\"record_id\":\"%064d\","
+        "\"accept_execution\":true,\"expected_revision\":0,%s}", 1, 1, 1, 1, 1, extra);
+    return n > 0 && (size_t)n < sizeof(args) && ma_tool(m, (int)id, "apps_keep", args) &&
+        ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT") && !ma_has(m, "COPY_MISSING");
+}
+static int case_keep_decisions(struct ma *m)
+{
+    int failures = 0;
+    TEST("MCP Keep rejects caller decisions and duplicate identity before native dispatch") {
+        ASSERT(ma_keep_injection(m, 240, "\"confirm\":true"));
+        ASSERT(ma_keep_injection(m, 241, "\"action\":\"keep\""));
+        ASSERT(ma_keep_injection(m, 242, "\"presenter\":\"approve\""));
+        ASSERT(ma_keep_injection(m, 243, "\"expected_revision\":1"));
+        ASSERT(ma_keep_injection(m, 244, "\"name\":\"other\""));
+        ASSERT(ma_keep_injection(m, 245, "\"unknown\":true"));
+        ASSERT(ma_tool(m, 246, "z23_run",
+            "{\"path\":\"app keep\",\"input\":{\"confirm\":true,\"plan_id\":\"invented\",\"accept_execution\":true}}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "KEEP_NATIVE_CONFIRMATION_REQUIRED"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int case_keep_policy_stable(void)
+{
+    int failures = 0;
+    struct json_value input; json_init(&input); json_set_object(&input);
+    TEST("generic Keep refusal survives catalog confirmation and effect changes") {
+        const struct zcl_command_registry *reg = zcl_command_catalog();
+        const struct zcl_command_spec *keep = zcl_command_registry_find(reg, "app.keep", NULL);
+        ASSERT(keep);
+        struct zcl_command_spec altered = *keep; struct mcp_refusal why = {0};
+        ASSERT(json_push_kv_bool(&input, "confirm", true));
+        ASSERT(json_push_kv_str(&input, "plan_id", "invented"));
+        altered.confirmation = ZCL_COMMAND_CONFIRM_PLAN_COMMIT;
+        altered.input_keys = "confirm,plan_id";
+        ASSERT(!mcp_policy_allows(&altered, reg, &input, &why));
+        ASSERT_STR_EQ(why.code, "KEEP_NATIVE_CONFIRMATION_REQUIRED");
+        altered.effect = ZCL_COMMAND_EFFECT_READ;
+        ASSERT(!mcp_policy_allows(&altered, reg, &input, &why));
+        ASSERT_STR_EQ(why.code, "KEEP_NATIVE_CONFIRMATION_REQUIRED");
+        PASS();
+    } _test_next:;
+    json_free(&input); return failures;
 }
 
 static int case_adopt_request(struct ma *m)
@@ -609,7 +660,7 @@ static int case_policy_exact(void)
         ASSERT(!mcp_policy_allows(adopt, reg, &empty, &why));
         ASSERT_STR_EQ(why.code, "MUTATION_REFUSED_OWNER_AUTHORITY");
         ASSERT(!mcp_policy_allows(keep, reg, &empty, &why));
-        ASSERT_STR_EQ(why.code, "MUTATION_NO_CONFIRMATION_FLOW");
+        ASSERT_STR_EQ(why.code, "KEEP_NATIVE_CONFIRMATION_REQUIRED");
         json_free(&empty);
     PASS(); }
 _test_next:;
@@ -711,6 +762,7 @@ int test_mcp_serve_apps(void)
     long app_pid = 0;
     bool started = false;
     failures += case_policy_exact();
+    failures += case_keep_policy_stable();
     failures += case_receive_policy();
     failures += case_share_policy();
     TEST("fixture: a temporary HOME, apps.tsv and a running server") {
@@ -722,6 +774,7 @@ int test_mcp_serve_apps(void)
     failures += case_apps_tools(&m, &app_pid);
     failures += case_selected_forwarding(&m);
     failures += case_keep_forwarding(&m);
+    failures += case_keep_decisions(&m);
     failures += case_adopt_request(&m);
     failures += case_receive_request(&m);
     failures += case_receive_injections(&m);

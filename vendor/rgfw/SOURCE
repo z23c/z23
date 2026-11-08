@@ -5,4 +5,5 @@ revision=d96684e6877d3ef11c731b122b8949942ed071c9
 license=Zlib
 files=RGFW.h,XDL.h,LICENSE
 integration=private software-window backend behind lib/presentation
+local_patch_display_failure=patches/x11-display-failure.patch checks failed XOpenDisplay before display use and retires partial X11 initialization; repeated failure and subsequent window creation are regression tested
 local_patch=RGFW_NO_XINPUT2 guard; unused optional XRandR/XInput2 compile closure disabled by lib/presentation; bounded X11 custom clipboard target hook for native bitmap copy; macOS blits use an owned RGBA bitmap and preserve caller pixels (patches/macos-owned-bitmap.patch); macOS reuses process-lifetime Objective-C classes across RGFW reinitialization (patches/macos-reuse-classes.patch); Linux X11 extension unload clears cached Xcursor/Xi/Xext callables so subsequent initialization rebinds them (patches/x11-library-lifetime.patch); no crash-causality claim

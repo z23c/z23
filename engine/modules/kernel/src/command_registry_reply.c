@@ -180,6 +180,16 @@ static bool source_next_schema(const struct zcl_command_spec *spec)
         !strcmp(spec->input_schema, "zcl.app_customize.input.v1") &&
         !strcmp(spec->output_schema, "zcl.app_customize.v1");
 }
+static bool source_next_version(const struct json_value *input, const struct json_value *data)
+{
+    if (json_get(input, "source_version"))
+        return source_next_text(input, "source_version", data, "source_version");
+    /* An omitted pin means Keep. Never silently navigate from a draft back
+     * to Keep; legacy replies without a separate source identity still work. */
+    const struct json_value *source = json_get(data, "source_version");
+    if (!source) return true;
+    return source_next_text(data, "source_version", data, "version");
+}
 static bool source_search_coordinate(const struct json_value *input, const char *key,
     const struct json_value *data, const char *next_key)
 {
@@ -199,7 +209,8 @@ static bool source_search_advance(const struct json_value *input, const struct j
 static bool source_next_search(const struct json_value *input, const struct json_value *data)
 {
     const struct json_value *complete = json_get(data, "complete"), *matches = json_get(data, "matches");
-    return input->num_children == 5 && source_next_text(input, "query", data, "query") &&
+    size_t keys = json_get(input, "source_version") ? 6u : 5u;
+    return input->num_children == keys && source_next_text(input, "query", data, "query") &&
         !json_get(input, "path") && !json_get(input, "limit") &&
         complete && complete->type == JSON_BOOL && !json_get_bool(complete) &&
         matches && matches->type == JSON_ARR &&
@@ -210,7 +221,7 @@ static bool source_next_search(const struct json_value *input, const struct json
 static bool source_next_valid(const struct zcl_command_spec *spec,
     const struct json_value *input, const struct json_value *data)
 {
-    if (!source_next_schema(spec)) return false;
+    if (!source_next_schema(spec) || !source_next_version(input, data)) return false;
     if (!source_next_text(input, "name", data, "name") ||
         !source_next_integer(input, "expected_revision", data, "selection_revision")) return false;
     if (json_get(input, "query") || json_get(data, "query")) return source_next_search(input, data);
