@@ -1517,48 +1517,129 @@ static void obj_lint_over_disk(const char *dir, struct zcl_objective_value *v)
     v->value = over;
 }
 
-/* Counts one origin/main family by its blob. False when git cannot give it. */
-static bool obj_lint_origin_file(const char *repo, const char *revision,
-                                 const char *name, int64_t *over)
+#define OBJ_LINT_BATCH 64u
+
+struct obj_lint_batch {
+    char *oids[OBJ_LINT_BATCH];
+    size_t sizes[OBJ_LINT_BATCH];
+    size_t count, bytes;
+};
+
+/* git show concatenates raw blob bytes in argument order. Check the entire
+ * capture before dividing it using the sizes from the pinned tree. */
+static bool obj_lint_batch_read(const char *repo, struct obj_lint_batch *batch,
+                                int64_t *over)
 {
-    size_t len = 0;
-    char *blob = zcl_objectives_checkout_blob(repo, revision, name, &len);
-    if (!blob)
+    const char *argv[OBJ_LINT_BATCH + 9] = {
+        "git", "-C", repo, "--no-pager", "show", "--no-ext-diff",
+        "--no-textconv", "--format="
+    };
+    struct zcl_spawn_binary_observation seen = {0};
+    if (!batch->count) return true;
+    for (size_t i = 0; i < batch->count; i++) argv[8 + i] = batch->oids[i];
+    argv[8 + batch->count] = NULL;
+    char *buf = zcl_malloc(OBJ_BLOB_MAX, "fleet_objectives_lint_batch");
+    if (!buf) return false;
+    struct zcl_result result = zcl_spawn_capture_binary(
+        argv, buf, OBJ_BLOB_MAX, OBJ_SPAWN_MS, &seen);
+    bool ok = result.ok && seen.eof && !seen.overflow && seen.exit_observed &&
+              seen.exit_code == 0 && seen.output_len == batch->bytes;
+    if (ok) {
+        size_t off = 0;
+        for (size_t i = 0; i < batch->count; i++) {
+            if (obj_buf_line_count(buf + off, batch->sizes[i]) > OBJ_LINT_CEILING_LINES)
+                (*over)++;
+            off += batch->sizes[i];
+        }
+    }
+    free(buf);
+    batch->count = 0;
+    batch->bytes = 0;
+    return ok;
+}
+
+static bool obj_lint_blob_oid_valid(const char *id)
+{
+    size_t n = strlen(id);
+    if (n != 40 && n != 64) return false;
+    for (size_t i = 0; i < n; i++)
+        if (!((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f')))
+            return false;
+    return true;
+}
+
+static bool obj_lint_blob_size(const char *text, size_t *size)
+{
+    if (!text[0]) return false;
+    for (size_t i = 0; text[i]; i++)
+        if (text[i] < '0' || text[i] > '9') return false;
+    char *end;
+    errno = 0;
+    unsigned long long value = strtoull(text, &end, 10);
+    if (errno || *end || value > OBJ_BLOB_MAX) return false;
+    *size = (size_t)value;
+    return true;
+}
+
+/* The tree header precedes a tab and a NUL-framed path. */
+static bool obj_lint_tree_entry(char *line, char **oid, size_t *size,
+                                char **path)
+{
+    char mode[7], type[8], size_text[32];
+    int used = 0;
+    char *tab = strchr(line, '\t');
+    if (!tab) return false;
+    *tab = '\0';
+    char id[65];
+    if (sscanf(line, "%6s %7s %64s %31s%n", mode, type, id, size_text, &used) != 4 ||
+        line[used] != '\0' || strcmp(type, "blob") != 0 ||
+        (strcmp(mode, "100644") && strcmp(mode, "100755") && strcmp(mode, "120000")))
         return false;
-    if (obj_buf_line_count(blob, len) > OBJ_LINT_CEILING_LINES)
-        (*over)++;
-    free(blob);
+    if (!obj_lint_blob_oid_valid(id) || !obj_lint_blob_size(size_text, size)) return false;
+    char *id_start = strstr(line, id);
+    if (!id_start) return false;
+    id_start[strlen(id)] = '\0';
+    *oid = id_start;
+    *path = tab + 1;
     return true;
 }
 
 /* Git's NUL-framed names preserve newlines and reject incomplete records. */
-static bool obj_lint_origin_walk(const char *repo, const char *revision,
-                                 char *names, size_t len, int64_t *over,
+static bool obj_lint_origin_walk(const char *repo, char *names, size_t len, int64_t *over,
                                  int64_t *families)
 {
     size_t off = 0;
+    struct obj_lint_batch batch = {0};
     while (off < len) {
         char *line = names + off;
         char *end = memchr(line, '\0', len - off);
-        if (!end || end == line || strncmp(line, OBJ_LINTC_REL "/",
-                                            sizeof(OBJ_LINTC_REL)) != 0)
+        char *oid, *path = end ? memchr(line, '\t', (size_t)(end - line)) : NULL;
+        size_t size;
+        if (!end || end == line || !path ||
+            strncmp(path + 1, OBJ_LINTC_REL "/", sizeof(OBJ_LINTC_REL)) != 0)
             return false;
-        if (obj_ends_with(line, ".c")) {
+        if (obj_ends_with(path + 1, ".c")) {
+            if (!obj_lint_tree_entry(line, &oid, &size, &path)) return false;
             (*families)++;
-            if (!obj_lint_origin_file(repo, revision, line, over))
+            if ((batch.count == OBJ_LINT_BATCH || size > OBJ_BLOB_MAX - batch.bytes) &&
+                !obj_lint_batch_read(repo, &batch, over))
                 return false;
+            batch.oids[batch.count] = oid;
+            batch.sizes[batch.count++] = size;
+            batch.bytes += size;
         }
         off = (size_t)(end - names) + 1;
     }
-    return true;
+    return obj_lint_batch_read(repo, &batch, over);
 }
 
 /* Grow only after an observed overflow; the existing blob budget bounds the
- * listing too. Every incomplete, timed-out or failed capture is refused. */
+ * metadata listing too, which can conservatively refuse a very large tree.
+ * Every incomplete, timed-out or failed capture is refused. */
 static char *obj_lint_origin_names(const char *repo, const char *revision,
                                    size_t *len)
 {
-    const char *argv[] = {"git", "-C", repo, "ls-tree", "-z", "--name-only",
+    const char *argv[] = {"git", "-C", repo, "ls-tree", "-l", "-z",
                           revision, OBJ_LINTC_REL "/", NULL};
     size_t cap = OBJ_LIST_MAX;
     for (;;) {
@@ -1591,7 +1672,7 @@ static void obj_lint_over_origin(const char *repo, struct zcl_objective_value *v
         obj_set_reason(v, "cannot list %s on origin/main", OBJ_LINTC_REL);
         return;
     }
-    if (!obj_lint_origin_walk(repo, revision, names, len, &over, &families)) {
+    if (!obj_lint_origin_walk(repo, names, len, &over, &families)) {
         obj_set_reason(v, "%s", "cannot read a lint family on origin/main");
     } else if (families == 0) {
         obj_set_reason(v, "no lint family at origin/main %s", OBJ_LINTC_REL);

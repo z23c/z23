@@ -652,6 +652,14 @@ static int fox_case_git(void)
         }
         (void)snprintf(path, sizeof(path), "%s/odd\nfamily.c", lintc);
         ASSERT(fox_write_n_lines(path, 1501));
+        /* More than one batch, including duplicate object IDs and an empty
+         * blob. Each duplicate is still a separate family. */
+        for (int i = 0; i < 70; i++) {
+            (void)snprintf(path, sizeof(path), "%s/duplicate-%02d.c", lintc, i);
+            ASSERT(fox_write_n_lines(path, 1501));
+        }
+        (void)snprintf(path, sizeof(path), "%s/empty.c", lintc);
+        ASSERT(fox_write(path, ""));
         ASSERT_EQ(fox_git(tree, "add", "-A", NULL, NULL), 0);
         ASSERT_EQ(fox_git(tree, "commit", "-q", "-m", "origin"), 0);
         ASSERT_EQ(fox_git(tree, "update-ref", "refs/remotes/origin/main", "HEAD", NULL), 0);
@@ -676,7 +684,7 @@ static int fox_case_git(void)
         ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_ORIGIN);
         v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
         ASSERT(v.measured);
-        ASSERT_EQ(v.value, 2); /* big.c and the newline-named family */
+        ASSERT_EQ(v.value, 72); /* big, newline-named, and 70 duplicate blobs */
         ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_ORIGIN);
         /* With no origin/main the working tree answers, labelled as such. */
         ASSERT_EQ(fox_git(tree, "update-ref", "-d", "refs/remotes/origin/main", NULL), 0);
@@ -690,8 +698,71 @@ static int fox_case_git(void)
         ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_WORKTREE);
         v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
         ASSERT(v.measured);
-        ASSERT_EQ(v.value, 3);
+        ASSERT_EQ(v.value, 73);
         ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_WORKTREE);
+        o.repo = repo;
+        PASS();
+    }
+    TEST("objectives: batched lint blobs preserve boundaries and reject invalid inputs") {
+        char tree[1024], path[1400], lintc[1200];
+        (void)snprintf(tree, sizeof(tree), "%s/batch-tree", root);
+        ASSERT(fox_mkdir(tree));
+        ASSERT_EQ(fox_git(tree, "init", "-q", NULL, NULL), 0);
+        (void)snprintf(path, sizeof(path), "%s/tools", tree); ASSERT(fox_mkdir(path));
+        (void)snprintf(path, sizeof(path), "%s/tools/lint", tree); ASSERT(fox_mkdir(path));
+        (void)snprintf(lintc, sizeof(lintc), "%s/tools/lint/lintc", tree); ASSERT(fox_mkdir(lintc));
+        (void)snprintf(path, sizeof(path), "%s/empty.c", lintc); ASSERT(fox_write(path, ""));
+        ASSERT_EQ(fox_git(tree, "add", "-A", NULL, NULL), 0);
+        ASSERT_EQ(fox_git(tree, "commit", "-q", "-m", "empty"), 0);
+        ASSERT_EQ(fox_git(tree, "update-ref", "refs/remotes/origin/main", "HEAD", NULL), 0);
+        o.repo = tree;
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
+        ASSERT(v.measured); ASSERT_EQ(v.value, 0);
+
+        (void)snprintf(path, sizeof(path), "%s/binary.c", lintc);
+        FILE *fp = fopen(path, "wb"); ASSERT(fp != NULL);
+        for (int i = 0; i < 1500; i++) ASSERT_EQ(fwrite("x\n", 1, 2, fp), 2);
+        const char tail[] = {'x', '\0', 'y'};
+        ASSERT_EQ(fwrite(tail, 1, sizeof(tail), fp), sizeof(tail));
+        ASSERT_EQ(fclose(fp), 0);
+        (void)snprintf(path, sizeof(path), "%s/link.c", lintc);
+        ASSERT_EQ(symlink("binary.c", path), 0);
+        ASSERT_EQ(fox_git(tree, "add", "-A", NULL, NULL), 0);
+        ASSERT_EQ(fox_git(tree, "commit", "-q", "-m", "binary"), 0);
+        ASSERT_EQ(fox_git(tree, "update-ref", "refs/remotes/origin/main", "HEAD", NULL), 0);
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
+        ASSERT(v.measured); ASSERT_EQ(v.value, 1);
+
+        char block[1024]; memset(block, 'x', sizeof(block));
+        for (int i = 0; i < 2; i++) {
+            (void)snprintf(path, sizeof(path), "%s/cap-%d.c", lintc, i);
+            fp = fopen(path, "wb"); ASSERT(fp != NULL);
+            for (int j = 0; j < 1024; j++)
+                ASSERT_EQ(fwrite(block, 1, sizeof(block), fp), sizeof(block));
+            ASSERT_EQ(fclose(fp), 0);
+        }
+        ASSERT_EQ(fox_git(tree, "add", "-A", NULL, NULL), 0);
+        ASSERT_EQ(fox_git(tree, "commit", "-q", "-m", "exact-cap"), 0);
+        ASSERT_EQ(fox_git(tree, "update-ref", "refs/remotes/origin/main", "HEAD", NULL), 0);
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
+        ASSERT(v.measured); ASSERT_EQ(v.value, 1);
+
+        (void)snprintf(path, sizeof(path), "%s/nonblob.c", lintc); ASSERT(fox_mkdir(path));
+        (void)snprintf(path, sizeof(path), "%s/nonblob.c/child", lintc); ASSERT(fox_write(path, "x"));
+        ASSERT_EQ(fox_git(tree, "add", "-A", NULL, NULL), 0);
+        ASSERT_EQ(fox_git(tree, "commit", "-q", "-m", "tree"), 0);
+        ASSERT_EQ(fox_git(tree, "update-ref", "refs/remotes/origin/main", "HEAD", NULL), 0);
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling"); ASSERT(!v.measured);
+        ASSERT_EQ(fox_git(tree, "rm", "-qr", "tools/lint/lintc/nonblob.c", NULL), 0);
+
+        (void)snprintf(path, sizeof(path), "%s/oversize.c", lintc);
+        fp = fopen(path, "wb"); ASSERT(fp != NULL);
+        for (int i = 0; i < 1024 * 1024 + 1; i++) ASSERT(fputc('x', fp) != EOF);
+        ASSERT_EQ(fclose(fp), 0);
+        ASSERT_EQ(fox_git(tree, "add", "-A", NULL, NULL), 0);
+        ASSERT_EQ(fox_git(tree, "commit", "-q", "-m", "oversize"), 0);
+        ASSERT_EQ(fox_git(tree, "update-ref", "refs/remotes/origin/main", "HEAD", NULL), 0);
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling"); ASSERT(!v.measured);
         o.repo = repo;
         PASS();
     }
