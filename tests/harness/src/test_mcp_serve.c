@@ -105,6 +105,7 @@ static bool ms_start(struct ms *m, const char *const args[], const char *home,
                      const char *errfile)
 {
     memset(m, 0, sizeof(*m));
+    m->to_child = m->from_child = -1;
     m->pid = ms_spawn(args, home, errfile, &m->to_child, &m->from_child);
     return m->pid > 0;
 }
@@ -114,6 +115,7 @@ static int ms_finish(struct ms *m)
 {
     int status = 0;
     close(m->to_child);
+    m->to_child = -1;
     struct pollfd p = {.fd = m->from_child, .events = POLLIN};
     for (int i = 0; i < 100; i++) { /* drain until EOF, bounded by the poll */
         char sink[512];
@@ -121,8 +123,12 @@ static int ms_finish(struct ms *m)
             break;
     }
     close(m->from_child);
-    if (waitpid(m->pid, &status, 0) != m->pid)
+    m->from_child = -1;
+    pid_t waited;
+    do { waited = waitpid(m->pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    if (waited != m->pid)
         return -1;
+    m->pid = -1;
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
@@ -1372,19 +1378,53 @@ static bool ms_start_node(struct ms *m, const char *home, const char *checkout,
 #define MS_GUIDE_ARGS \
     "{\"sub\":\"guide\",\"input\":{\"paths\":[\"tools/mcp/mcp_rpc.c\"],\"topic\":\"lint\"}}"
 
-static int case_wiki_search(const char *home, const char *checkout)
+struct ms_cleanup_probe { pid_t stub, server; int to_child, from_child; };
+
+/* Only signal a child still owned by this process; never a recycled PID. */
+static bool ms_stop_child(pid_t *pid)
+{
+    if (*pid <= 0) return true;
+    int status;
+    pid_t r;
+    do { r = waitpid(*pid, &status, WNOHANG); } while (r < 0 && errno == EINTR);
+    if (r == 0) {
+        (void)kill(*pid, SIGKILL);
+        do { r = waitpid(*pid, &status, 0); } while (r < 0 && errno == EINTR);
+    }
+    if (r == *pid || (r < 0 && errno == ECHILD)) { *pid = -1; return true; }
+    return false;
+}
+
+static bool ms_abort_case(struct ms *m, pid_t *stub)
+{
+    if (m->to_child >= 0) { close(m->to_child); m->to_child = -1; }
+    if (m->from_child >= 0) { close(m->from_child); m->from_child = -1; }
+    bool server_stopped = ms_stop_child(&m->pid);
+    bool stub_stopped = ms_stop_child(stub);
+    return server_stopped && stub_stopped;
+}
+
+static int case_wiki_search(const char *home, const char *checkout,
+                            struct ms_cleanup_probe *probe)
 {
     int failures = 0;
+    struct ms m = {.pid = -1, .to_child = -1, .from_child = -1};
+    pid_t stub = -1;
     char dd[PATH_MAX + 16], err[PATH_MAX + 32];
     snprintf(dd, sizeof(dd), "%s/wikidd", home);
     snprintf(err, sizeof(err), "%s/err_wiki.txt", home);
     (void)mkdir(dd, 0700);
     TEST_CASE("z23_search scope=wiki returns lesson matches; bad scope and no node are typed") {
-        struct ms m;
         int port = 0, dead = 0;
-        pid_t stub = ms_stub_start(dd, &port);
+        stub = ms_stub_start(dd, &port);
+        if (probe) probe->stub = stub;
         ASSERT(stub > 0);
-        ASSERT(ms_start_node(&m, home, checkout, dd, port, err));
+        bool started = ms_start_node(&m, home, checkout, dd, port, err);
+        if (probe) {
+            *probe = (struct ms_cleanup_probe){stub, m.pid, m.to_child, m.from_child};
+        }
+        ASSERT(started);
+        if (probe) goto _test_next;
         ASSERT(ms_tool(&m, 2, "z23_search", "{\"query\":\"lint\",\"scope\":\"wiki\"}"));
         ASSERT(has(&m, "\"isError\":false"));
         ASSERT(has(&m, "zcl.wiki_search.v1"));
@@ -1438,14 +1478,12 @@ static int case_wiki_search(const char *home, const char *checkout)
         ASSERT(has(&m, "stalled\\\":true"));
         ASSERT(has(&m, "blocked_slug\\\":\\\"blk-a\\\""));
         ASSERT_EQ(ms_finish(&m), 0);
-        kill(stub, SIGKILL);
-        waitpid(stub, NULL, 0);
+        ASSERT(ms_stop_child(&stub));
 
         /* A port nothing listens on: the leaf's own typed refusal, not a crash. */
-        pid_t gone = ms_stub_start(dd, &dead);
-        ASSERT(gone > 0);
-        kill(gone, SIGKILL);
-        waitpid(gone, NULL, 0);
+        stub = ms_stub_start(dd, &dead);
+        ASSERT(stub > 0);
+        ASSERT(ms_stop_child(&stub));
         ASSERT(ms_start_node(&m, home, checkout, dd, dead, err));
         ASSERT(ms_tool(&m, 2, "z23_search", "{\"query\":\"lint\",\"scope\":\"wiki\"}"));
         ASSERT(has(&m, "\"isError\":true"));
@@ -1458,6 +1496,10 @@ static int case_wiki_search(const char *home, const char *checkout)
         ASSERT(has(&m, "make lint-fast"));
         ASSERT_EQ(ms_finish(&m), 0);
     } TEST_END
+    if (!ms_abort_case(&m, &stub)) {
+        printf("FAIL: wiki fixture child cleanup failed\n");
+        failures++;
+    }
     return failures;
 }
 
@@ -1569,9 +1611,12 @@ static int case_wallet_reads(const char *home, const char *checkout)
 /* Directory queries match broadly and must not crowd out the stem lesson; a
  * node that accepts and never answers must not hold the brief past its
  * deadline. */
-static int case_guide_lessons(const char *home, const char *checkout)
+static int case_guide_lessons(const char *home, const char *checkout,
+                              struct ms_cleanup_probe *probe)
 {
     int failures = 0;
+    struct ms m = {.pid = -1, .to_child = -1, .from_child = -1};
+    pid_t stub = -1;
     char dd[PATH_MAX + 16], err[PATH_MAX + 32];
     static const char args[] =
         "{\"sub\":\"guide\",\"input\":{\"paths\":[\"tools/command/native_command.c\"]}}";
@@ -1581,19 +1626,23 @@ static int case_guide_lessons(const char *home, const char *checkout)
     snprintf(err, sizeof(err), "%s/err_guide.txt", home);
     (void)mkdir(dd, 0700);
     TEST_CASE("code.guide keeps the stem lesson ahead of directory hits and bounds a silent node") {
-        struct ms m;
         int port = 0;
-        pid_t stub = ms_stub_start(dd, &port);
+        stub = ms_stub_start(dd, &port);
+        if (probe) probe->stub = stub;
         ASSERT(stub > 0);
-        ASSERT(ms_start_node(&m, home, checkout, dd, port, err));
+        bool started = ms_start_node(&m, home, checkout, dd, port, err);
+        if (probe) {
+            *probe = (struct ms_cleanup_probe){stub, m.pid, m.to_child, m.from_child};
+        }
+        ASSERT(started);
+        if (probe) goto _test_next;
         ASSERT(ms_tool(&m, 2, "z23_code", args));
         ASSERT(has(&m, "native-stem"));
         ASSERT(has(&m, "tools-a"));
         ASSERT(!has(&m, "tools-e"));
         ASSERT(has(&m, "lessons_capped"));
         ASSERT_EQ(ms_finish(&m), 0);
-        kill(stub, SIGKILL);
-        waitpid(stub, NULL, 0);
+        ASSERT(ms_stop_child(&stub));
 
         /* A directory query paged over three replies: the newest entry sits
          * on the last page and still beats the older ones, while the stem
@@ -1609,8 +1658,7 @@ static int case_guide_lessons(const char *home, const char *checkout)
         ASSERT(!has(&m, "dir-d"));
         ASSERT(has(&m, "lessons_capped"));
         ASSERT_EQ(ms_finish(&m), 0);
-        kill(stub, SIGKILL);
-        waitpid(stub, NULL, 0);
+        ASSERT(ms_stop_child(&stub));
 
         g_ms_stub_silent = true;
         stub = ms_stub_start(dd, &port);
@@ -1622,8 +1670,52 @@ static int case_guide_lessons(const char *home, const char *checkout)
         ASSERT(has(&m, "WIKI_DEADLINE"));
         ASSERT(has(&m, "make lint-fast"));
         ASSERT_EQ(ms_finish(&m), 0);
-        kill(stub, SIGKILL);
-        waitpid(stub, NULL, 0);
+        ASSERT(ms_stop_child(&stub));
+    } TEST_END
+    g_ms_stub_silent = false;
+    if (!ms_abort_case(&m, &stub)) {
+        printf("FAIL: guide fixture child cleanup failed\n");
+        failures++;
+    }
+    return failures;
+}
+
+/* Observe the early exit before rescuing any leaked child, so RED stays safe. */
+static bool ms_probe_reaped(pid_t pid)
+{
+    int status;
+    pid_t r;
+    do { r = waitpid(pid, &status, WNOHANG); } while (r < 0 && errno == EINTR);
+    if (r < 0 && errno == ECHILD) return true;
+    if (r == 0) {
+        (void)kill(pid, SIGKILL);
+        do { r = waitpid(pid, &status, 0); } while (r < 0 && errno == EINTR);
+    }
+    return false;
+}
+
+static int case_fixture_cleanup(const char *home, const char *checkout)
+{
+    int failures = 0;
+    struct ms_cleanup_probe probe = {-1, -1, -1, -1};
+    int wiki_result = case_wiki_search(home, checkout, &probe);
+    bool wiki_stub = probe.stub > 0 && ms_probe_reaped(probe.stub);
+    bool wiki_server = probe.server > 0 && ms_probe_reaped(probe.server);
+    if (!wiki_server) {
+        if (probe.to_child >= 0) close(probe.to_child);
+        if (probe.from_child >= 0) close(probe.from_child);
+    }
+    probe = (struct ms_cleanup_probe){-1, -1, -1, -1};
+    int guide_result = case_guide_lessons(home, checkout, &probe);
+    bool guide_stub = probe.stub > 0 && ms_probe_reaped(probe.stub);
+    bool guide_server = probe.server > 0 && ms_probe_reaped(probe.server);
+    if (!guide_server) {
+        if (probe.to_child >= 0) close(probe.to_child);
+        if (probe.from_child >= 0) close(probe.from_child);
+    }
+    TEST_CASE("early fixture exits reap stub and MCP server") {
+        ASSERT(wiki_result == 0 && guide_result == 0);
+        ASSERT(wiki_stub && wiki_server && guide_stub && guide_server);
     } TEST_END
     return failures;
 }
@@ -1937,10 +2029,11 @@ int test_mcp_serve(void)
     failures += case_long_identity(home);
     failures += case_not_toplevel(home, checkout);
     failures += case_session(home, checkout);
-    failures += case_wiki_search(home, checkout);
+    failures += case_wiki_search(home, checkout, NULL);
     failures += case_fleet_writes(home, checkout);
     failures += case_wallet_reads(home, checkout);
-    failures += case_guide_lessons(home, checkout);
+    failures += case_guide_lessons(home, checkout, NULL);
+    failures += case_fixture_cleanup(home, checkout);
     TEST_DISCARD(test_rm_rf_recursive(home));
 #endif
     printf("=== mcp_serve: %d failures ===\n", failures);
