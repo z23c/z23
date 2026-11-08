@@ -1173,17 +1173,51 @@ static void render_statecatalog(struct buf *b,
         emit_more_footer(b, total - rows);
 }
 
+/* Error prose is never cut: wrap at spaces (a word longer than the room
+ * splits), continuation lines indented under the first. */
+static void render_error_wrap(struct buf *b, const struct zcl_cli_render_env *e,
+                              const char *lead, const char *dim_lead,
+                              const char *text)
+{
+    size_t indent = strlen(lead) + strlen(dim_lead);
+    size_t room = (size_t)e->width > indent + 1 ? (size_t)e->width - indent : 1;
+    const char *s = text;
+    buf_puts(b, lead);
+    if (dim_lead[0])
+        ansi_dim(b, e, dim_lead);
+    for (;;) {
+        size_t take = strlen(s);
+        if (take > room) {
+            take = room;
+            while (take > 0 && s[take] != ' ')
+                take--;
+            if (take == 0) {
+                take = room;
+                while (take > 1 && ((unsigned char)s[take] & 0xC0) == 0x80)
+                    take--;
+            }
+        }
+        buf_putn(b, s, take);
+        buf_putc(b, '\n');
+        for (s += take; *s == ' '; s++)
+            ;
+        if (!*s)
+            break;
+        for (size_t i = 0; i < indent; i++)
+            buf_putc(b, ' ');
+    }
+}
+
 static void render_error_next_action(struct buf *b,
                                      const struct zcl_cli_render_env *e,
                                      const struct json_value *err)
 {
     const char *action = err ? json_get_str(json_get(err, "next_action")) : NULL;
-    if (!action || !action[0])
+    /* The JSON fallback text names no command; the run: line has it. */
+    if (!action || !action[0] ||
+        strcmp(action, "follow the first next command") == 0)
         return;
-    size_t room = (size_t)e->width > 6 ? (size_t)e->width - 6 : 1;
-    ansi_dim(b, e, "next: ");
-    buf_puts_trunc(b, action, room);
-    buf_putc(b, '\n');
+    render_error_wrap(b, e, "", "next: ", action);
 }
 
 static void render_error_head(struct buf *b, const struct zcl_cli_render_env *e,
@@ -1205,12 +1239,8 @@ static void render_error_message(struct buf *b,
                                  const struct zcl_cli_render_env *e,
                                  const char *message)
 {
-    if (message && message[0]) {
-        size_t room = (size_t)e->width > 2 ? (size_t)e->width - 2 : 1;
-        buf_puts(b, "  ");
-        buf_puts_trunc(b, message, room);
-        buf_putc(b, '\n');
-    }
+    if (message && message[0])
+        render_error_wrap(b, e, "  ", "", message);
 }
 
 static void render_error_evidence(struct buf *b,
