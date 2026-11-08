@@ -224,7 +224,9 @@ void zcl_dev_land_train_prepare_hook_for_test(void (*hook)(void));
 bool zcl_dev_land_prepare_lint_for_test(const struct dl_dirs *d,
     struct dl_row *row, struct zcl_command_reply *reply);
 int zcl_dev_land_lint_test(const char *const argv[], const char *log,
-                           char *detail, size_t detail_cap);
+                           char *detail, size_t detail_cap,
+                           char *dimension, size_t dimension_cap,
+                           int64_t timeout_ms);
 #endif
 bool dl_queued_precedes(const struct dl_row *row, const struct dl_row *best);
 int dl_rows_lock(const char *landdir);

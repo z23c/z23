@@ -5874,6 +5874,27 @@ static bool dl_lint_host_load(FILE *f)
     return false;
 }
 
+/* A gate's log can include expected errors from passing subtests. */
+static bool dl_lint_has_failed_gate(FILE *f)
+{
+    char line[4096], gate[256];
+    bool clipped;
+    rewind(f);
+    while (dl_lint_line(f, line, sizeof(line), &clipped))
+        if (!clipped && dl_lint_frame(line, gate, sizeof(gate))) return true;
+    return false;
+}
+
+static bool dl_lint_is_host_failure(FILE *f, int rc,
+                                    const struct zcl_dev_proof_step_report *report)
+{
+    if (rc == 0) return false;
+    if (report->cause == ZCL_DEV_PROOF_KILL_NO_PROGRESS ||
+        report->cause == ZCL_DEV_PROOF_KILL_HARD_CEILING) return true;
+    if (!f || dl_lint_has_failed_gate(f)) return false;
+    return dl_lint_host_load(f);
+}
+
 static void dl_lint_fallback(FILE *f, char *out, size_t cap)
 {
     char line[4096], fallback[1024] = "";
@@ -5890,7 +5911,8 @@ static void dl_lint_fallback(FILE *f, char *out, size_t cap)
     (void)snprintf(out, cap, "%s", fallback);
 }
 
-static int dl_lint_run(struct dl_row *row, const char *const argv[])
+static int dl_lint_run_budget(struct dl_row *row, const char *const argv[],
+                              int64_t timeout_ms)
 {
     char path[sizeof(row->log_path) + 32];
     int n = snprintf(path, sizeof(path), "%s.lint.XXXXXX", row->log_path);
@@ -5899,14 +5921,15 @@ static int dl_lint_run(struct dl_row *row, const char *const argv[])
     if (fd < 0) return -1;
     close(fd);
     const struct zcl_dev_proof_budget budget = {
-        .budget_ms = DL_LINT_TIMEOUT_MS, .ceiling_ms = DL_LINT_TIMEOUT_MS,
-        .no_progress_ms = DL_LINT_TIMEOUT_MS,
+        .budget_ms = timeout_ms, .ceiling_ms = timeout_ms,
+        .no_progress_ms = timeout_ms,
     };
-    int rc = zcl_dev_proof_run_watched(".", path, argv, &budget, NULL);
+    struct zcl_dev_proof_step_report report = {0};
+    int rc = zcl_dev_proof_run_watched(".", path, argv, &budget, &report);
     FILE *f = fopen(path, "r");
     if (rc != 0 && f && !dl_lint_body(f, row->detail, sizeof(row->detail)))
         dl_lint_fallback(f, row->detail, sizeof(row->detail));
-    bool host_load = f && rc != 0 && dl_lint_host_load(f);
+    bool host_load = dl_lint_is_host_failure(f, rc, &report);
     if (f) fclose(f);
     if (!dl_lint_copy_log(path, row->log_path)) rc = -1;
     else (void)unlink(path);
@@ -5914,6 +5937,11 @@ static int dl_lint_run(struct dl_row *row, const char *const argv[])
         (void)snprintf(row->dimension, sizeof(row->dimension), "%s",
                        host_load ? "host_load" : "lint");
     return rc;
+}
+
+static int dl_lint_run(struct dl_row *row, const char *const argv[])
+{
+    return dl_lint_run_budget(row, argv, DL_LINT_TIMEOUT_MS);
 }
 #else
 static int dl_lint_run(struct dl_row *row, const char *const argv[])
@@ -5940,12 +5968,16 @@ static int dl_lint_run(struct dl_row *row, const char *const argv[])
 
 #if defined(ZCL_TESTING) && !defined(_WIN32)
 int zcl_dev_land_lint_test(const char *const argv[], const char *log,
-                           char *detail, size_t detail_cap)
+                           char *detail, size_t detail_cap,
+                           char *dimension, size_t dimension_cap,
+                           int64_t timeout_ms)
 {
     struct dl_row row = {0};
     (void)snprintf(row.log_path, sizeof(row.log_path), "%s", log);
-    int rc = dl_lint_run(&row, argv);
+    int rc = dl_lint_run_budget(&row, argv,
+                                timeout_ms > 0 ? timeout_ms : DL_LINT_TIMEOUT_MS);
     (void)snprintf(detail, detail_cap, "%s", row.detail);
+    (void)snprintf(dimension, dimension_cap, "%s", row.dimension);
     return rc;
 }
 #endif

@@ -247,7 +247,7 @@ static int dlx_lint_failure_detail(void)
 {
     int failures = 0;
     TEST("land: lint failure detail retains the failed gate stderr body") {
-        char root[1024], log[1200], detail[1024], line[512];
+        char root[1024], log[1200], detail[1024], line[512], dimension[64];
         test_make_tmpdir(root, sizeof(root), "dev_land", "lint_failure_body");
         (void)snprintf(log, sizeof(log), "%s/attempt.log", root);
         const char *argv[] = {"/bin/sh", "-c",
@@ -255,7 +255,7 @@ static int dlx_lint_failure_detail(void)
             "printf 'PASS check-pass ──── FAIL log: check-fake ────────────────────────────\\nignored passing diagnostic\\nFAIL check-red\\n'; "
             "printf '%s\\000suffix\\n%s\\n' '──── FAIL log: check-binary ────────────────────────────' 'binary header fake body'; "
             "printf '%s\\n' '──── FAIL log: check-red ────────────────────────────' 'gate heading' 'actual diagnostic body' >&2; exit 7", NULL};
-        ASSERT(zcl_dev_land_lint_test(argv, log, detail, sizeof(detail)) == 7);
+        ASSERT(zcl_dev_land_lint_test(argv, log, detail, sizeof(detail), dimension, sizeof(dimension), 0) == 7);
         ASSERT(strstr(detail, "actual diagnostic body") != NULL);
         ASSERT(strstr(detail, "ignored passing diagnostic") == NULL);
         ASSERT(strstr(detail, "binary header fake body") == NULL);
@@ -267,13 +267,25 @@ static int dlx_lint_failure_detail(void)
         ASSERT(fclose(f) == 0);
         ASSERT(found);
         const char *empty[] = {"/bin/sh", "-c", "printf '%s\\n' 'error: earlier generic' 'FAIL check-empty' >&2; exit 3", NULL};
-        ASSERT(zcl_dev_land_lint_test(empty, log, detail, sizeof(detail)) == 3);
+        ASSERT(zcl_dev_land_lint_test(empty, log, detail, sizeof(detail), dimension, sizeof(dimension), 0) == 3);
         ASSERT(strstr(detail, "FAIL check-empty") != NULL);
         const char *long_body[] = {"/bin/sh", "-c",
             "printf '%s\\n' '──── FAIL log: check-long ────────────────────────────'; head -c 698 /dev/zero | tr '\\000' x; printf '€x\\n'; exit 4", NULL};
-        ASSERT(zcl_dev_land_lint_test(long_body, log, detail, sizeof(detail)) == 4);
+        ASSERT(zcl_dev_land_lint_test(long_body, log, detail, sizeof(detail), dimension, sizeof(dimension), 0) == 4);
         ASSERT(strstr(detail, "[detail truncated]") != NULL);
         ASSERT(zutf8_validate(detail));
+        const char *mixed[] = {"/bin/sh", "-c",
+            "printf '%s\\n' '──── FAIL log: check-vendor-provenance ────────────────────────────' '[vendor] vendor_lock_timeout: (Connection timed out)' 'vendor_lock_test: PASS' 'repro_network_policy_selftest: FAIL: unexpected output' >&2; exit 1", NULL};
+        ASSERT(zcl_dev_land_lint_test(mixed, log, detail, sizeof(detail), dimension, sizeof(dimension), 0) == 1);
+        ASSERT(strcmp(dimension, "lint") == 0);
+        ASSERT(strstr(detail, "vendor_lock_timeout") != NULL);
+        ASSERT(strstr(detail, "repro_network_policy_selftest: FAIL") != NULL);
+        const char *load[] = {"/bin/sh", "-c", "echo 'Cannot allocate memory' >&2; exit 1", NULL};
+        ASSERT(zcl_dev_land_lint_test(load, log, detail, sizeof(detail), dimension, sizeof(dimension), 0) == 1);
+        ASSERT(strcmp(dimension, "host_load") == 0);
+        const char *slow[] = {"/bin/sh", "-c", "while :; do sleep 1; done", NULL};
+        ASSERT(zcl_dev_land_lint_test(slow, log, detail, sizeof(detail), dimension, sizeof(dimension), 50) == 124);
+        ASSERT(strcmp(dimension, "host_load") == 0);
         PASS();
     } _test_next:;
     return failures;
