@@ -192,14 +192,14 @@ static bool zao_post_text(const struct json_value *post,
 
 /* The signed fields of a public offer post, from the node's rendering. */
 static bool zao_post_fields(const struct json_value *post,
-                            struct fleet_board_post *p)
+                            struct fleet_board_post *p, const char *expected_kind)
 {
     int64_t created = 0, ttl = 0, text_len = 0;
     const char *text = zao_str(post, "text");
     const char *kind = zao_str(post, "kind");
     const char *scope = zao_str(post, "scope");
     const char *room = zao_str(post, "room");
-    bool ok = kind && strcmp(kind, ZCL_APP_OFFER_KIND) == 0 && scope &&
+    bool ok = kind && strcmp(kind, expected_kind) == 0 && scope &&
               strcmp(scope, "public") == 0 && room &&
               strcmp(room, ZCL_APP_OFFER_ROOM) == 0 && text &&
               !zao_str(post, "slug") &&
@@ -239,7 +239,7 @@ bool zcl_app_offer_from_post(const struct json_value *post,
         zcl_calloc(1, sizeof(*p), "app.offer.post");
     if (!p)
         return false;
-    bool ok = zao_post_fields(post, p) && zao_post_keys(post, p) &&
+    bool ok = zao_post_fields(post, p, ZCL_APP_OFFER_KIND) && zao_post_keys(post, p) &&
               fleet_board_post_validate(p) == FLEET_BOARD_OK &&
               fleet_board_post_verify(p) == FLEET_BOARD_OK &&
               fleet_board_post_check_time(p, platform_time_wall_unix()) ==
@@ -332,6 +332,97 @@ bool zcl_app_offer_catalog(struct zcl_app_offer_row *rows, size_t cap,
     }
     if (*count > 1)
         qsort(rows, *count, sizeof(rows[0]), zao_newest_first);
+    return true;
+}
+
+static bool zar_target(const char *s)
+{
+    if (!s || !*s || strlen(s) >= sizeof(((struct zcl_app_rebuild *)0)->target)) return false;
+    for (; *s; ++s)
+        if (!((*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9') || *s == '-' || *s == '_')) return false;
+    return true;
+}
+
+static bool zar_valid(const struct zcl_app_rebuild *r)
+{
+    return r && zao_hex(r->publisher, 33) && zao_hex(r->release_root, 32) &&
+        zao_hex(r->package_root, 32) && zao_hex(r->version, 32) &&
+        zao_hex(r->image, 32) && zao_hex(r->closure, 32) &&
+        zao_hex(r->environment, 32) && zao_hex(r->dependency, 32) &&
+        zao_hex(r->record, 32) && zar_target(r->target);
+}
+
+bool zcl_app_rebuild_format(const struct zcl_app_rebuild *r, char *out, size_t cap)
+{
+    if (!out || !cap || !zar_valid(r)) return false;
+    int n = snprintf(out, cap, "{\"schema\":\"zcl.app_rebuild.v1\",\"publisher\":\"%s\","
+        "\"release_root\":\"%s\",\"package_root\":\"%s\",\"version\":\"%s\","
+        "\"image\":\"%s\",\"closure\":\"%s\",\"environment\":\"%s\","
+        "\"dependency\":\"%s\",\"record\":\"%s\",\"target\":\"%s\"}",
+        r->publisher, r->release_root, r->package_root, r->version, r->image,
+        r->closure, r->environment, r->dependency, r->record, r->target);
+    return n > 0 && (size_t)n < cap && (size_t)n <= ZCL_APP_OFFER_TEXT_MAX;
+}
+
+static bool zar_parse(const char *text, struct zcl_app_rebuild *r)
+{
+    struct json_value doc; json_init(&doc);
+    bool ok = text && json_read(&doc, text, strlen(text)) && doc.type == JSON_OBJ && doc.num_children == 11;
+    const char *keys[] = {"publisher", "release_root", "package_root", "version", "image", "closure", "environment", "dependency", "record", "target"};
+    char *dst[] = {r->publisher, r->release_root, r->package_root, r->version, r->image, r->closure, r->environment, r->dependency, r->record, r->target};
+    const size_t caps[] = {sizeof(r->publisher), sizeof(r->release_root), sizeof(r->package_root), sizeof(r->version), sizeof(r->image), sizeof(r->closure), sizeof(r->environment), sizeof(r->dependency), sizeof(r->record), sizeof(r->target)};
+    if (ok) { const char *schema = zao_str(&doc, "schema"); ok = schema && !strcmp(schema, "zcl.app_rebuild.v1"); }
+    for (size_t i = 0; ok && i < 10; ++i) {
+        const char *s = zao_str(&doc, keys[i]);
+        if (!s || strlen(s) >= caps[i]) ok = false;
+        else memcpy(dst[i], s, strlen(s) + 1);
+    }
+    if (ok) {
+        char canonical[ZCL_APP_OFFER_TEXT_MAX + 1u];
+        ok = zar_valid(r) && zcl_app_rebuild_format(r, canonical, sizeof(canonical)) && !strcmp(canonical, text);
+    }
+    json_free(&doc); return ok;
+}
+
+static int zar_post(const struct json_value *post, struct zcl_app_rebuild *r, char host[65])
+{
+    struct fleet_board_post *p = zcl_calloc(1, sizeof(*p), "app.rebuild.post");
+    if (!p) return -1;
+    bool ok = zao_post_fields(post, p, "result") && zao_post_keys(post, p) &&
+        fleet_board_post_validate(p) == FLEET_BOARD_OK && fleet_board_post_verify(p) == FLEET_BOARD_OK &&
+        fleet_board_post_check_time(p, platform_time_wall_unix()) == FLEET_BOARD_OK && zar_parse(p->text, r);
+    if (ok) fleet_board_id_to_hex(p->host_pubkey, host);
+    free(p); return ok ? 1 : 0;
+}
+
+/* Match the observed release, image and environment. Build/version details
+ * remain signed in each observation but are not claimed to identify people. */
+static bool zar_matches(const struct zcl_app_rebuild *a, const struct zcl_app_rebuild *b)
+{
+    return !strcmp(a->publisher, b->publisher) && !strcmp(a->release_root, b->release_root) &&
+        !strcmp(a->image, b->image) && !strcmp(a->target, b->target) && !strcmp(a->environment, b->environment);
+}
+
+bool zcl_app_rebuild_count(const struct zcl_app_rebuild *local, size_t *count, struct zcl_command_reply *why)
+{
+    struct json_value in; *count = 0;
+    const char *kv[] = {"room", "apps", "scope", "public", "kind", "result"};
+    bool built = zcl_app_input(&in, kv, 6) && json_push_kv_int(&in, "limit", ZCL_APP_OFFER_ROWS_MAX);
+    bool ok = built && zcl_app_offer_call(ZCL_APP_OFFER_BOARD_LIST, &in, why);
+    json_free(&in);
+    if (!built) { zcl_command_reply_init(why, "zcl.app_rebuild.list.v1"); return false; }
+    if (!ok) return false;
+    const struct json_value *posts = json_get(&why->data, "posts");
+    if (!posts || posts->type != JSON_ARR || json_size(posts) >= ZCL_APP_OFFER_ROWS_MAX) return false;
+    char hosts[ZCL_APP_OFFER_ROWS_MAX][65];
+    for (size_t i = 0; i < json_size(posts); ++i) {
+        struct zcl_app_rebuild r = {0}; char host[65];
+        int valid = zar_post(json_at(posts, i), &r, host);
+        if (valid < 0) { *count = 0; return false; }
+        if (!valid || !zar_matches(&r, local)) continue;
+        size_t j = 0; while (j < *count && strcmp(hosts[j], host)) ++j;
+        if (j == *count) { memcpy(hosts[*count], host, sizeof(host)); ++*count; }
+    }
     return true;
 }
 

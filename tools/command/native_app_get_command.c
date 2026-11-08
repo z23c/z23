@@ -6,12 +6,14 @@
 #include "command/native_app_offer.h"
 #include "command/native_dev_land_remote_shared.h"
 #include "command/native_zcode_package_copy.h"
+#include "command/app_image.h"
 #include "base/safe_alloc.h"
 #include "base/hex.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "platform/rng.h"
 #include "platform/private_directory.h"
+#include "platform/toolchain.h"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +40,10 @@ static bool ag_copy_data(struct json_value *out, const struct json_value *in,
     const struct json_value *v = json_get(in, key);
     return !v || json_push_kv(out, key, v);
 }
+
+struct ag_one;
+static bool ag_observation(const struct ag_one *s, const struct json_value *build,
+                           const char *opened, struct zcl_app_rebuild *r);
 
 static bool ag_hash(const char *path, const struct zcl_app_offer *offer)
 {
@@ -161,8 +167,8 @@ static bool ag_receive_plan(struct ag_one *s)
     const struct zcl_app_offer *o = &s->row->offer;
     const char *parts[] = {s->row->post_id, s->row->host, o->name, o->root,
                            o->publisher, o->carrier, o->sha256, o->onion,
-                           s->receive_plan, s->datadir, s->token};
-    zcl_app_plan_id("zcl.app_get.plan.v1", parts, 11, s->plan);
+                           s->receive_plan, s->datadir, s->token, "public-rebuild-report-v1"};
+    zcl_app_plan_id("zcl.app_get.plan.v1", parts, 12, s->plan);
     return true;
 }
 
@@ -175,9 +181,135 @@ static bool ag_plan_reply(struct ag_one *s)
     ok = ok && json_push_kv_str(&s->reply->data, "sha256", s->row->offer.sha256) &&
          json_push_kv_str(&s->reply->data, "offer_id", s->row->post_id) &&
          json_push_kv_str(&s->reply->data, "token", s->token) &&
+         json_push_kv_bool(&s->reply->data, "public_build_reporting", true) &&
          zcl_package_copy_push_root(&s->reply->data, "plan_id", s->plan) &&
          json_push_kv_bool(&s->reply->data, "executed", false);
     if (!ok) zcl_package_copy_fail(s->reply, "ALLOC", false, "cannot describe get plan", AG_COMMAND);
+    return ok;
+}
+
+static bool ag_record_field(const struct json_value *build, const char *key, const uint8_t expected[32])
+{
+    uint8_t value[32]; const char *s = zcl_package_copy_str(build, key);
+    return ag_hex(s, 32) && zcl_hex_decode_lower(s, value, sizeof(value)) && !memcmp(value, expected, sizeof(value));
+}
+
+static bool ag_record_keys(const struct json_value *build, uint8_t package[32],
+                           uint8_t environment[32], uint8_t dependency[32])
+{
+    if (!build || build->type != JSON_OBJ) return false;
+    const char *version = zcl_package_copy_str(build, "version");
+    const char *pkg = zcl_package_copy_str(build, "package_root"), *env = zcl_package_copy_str(build, "env_root"), *dep = zcl_package_copy_str(build, "dependency_root");
+    return ag_hex(version, 32) && ag_hex(pkg, 32) && ag_hex(env, 32) && ag_hex(dep, 32) &&
+        zcl_hex_decode_lower(pkg, package, 32) && zcl_hex_decode_lower(env, environment, 32) &&
+        zcl_hex_decode_lower(dep, dependency, 32);
+}
+
+static bool ag_load_record(const struct json_value *build, const char *opened,
+                           struct app_image_build *rec, uint8_t record[32])
+{
+    const char *store = zcl_package_copy_str(build, "record_store");
+    uint8_t package[32], environment[32], dependency[32];
+    if (!store || !ag_record_keys(build, package, environment, dependency)) return false;
+    bool hit = false;
+    if (!app_image_build_load(store, package, environment, dependency, rec, &hit).ok || !hit ||
+        !app_image_build_id(rec, record).ok || !ag_record_field(build, "record_id", record) ||
+        !ag_record_field(build, "closure_root", rec->closure_root) || !ag_record_field(build, "image_sha3", rec->image_sha3)) return false;
+    uint8_t opened_hash[32];
+    return ag_hex(opened, 32) && zcl_hex_decode_lower(opened, opened_hash, 32) && !memcmp(opened_hash, rec->image_sha3, 32);
+}
+
+static bool ag_observation(const struct ag_one *s, const struct json_value *build,
+                           const char *opened, struct zcl_app_rebuild *r)
+{
+    struct app_image_build rec; uint8_t record[32];
+    if (!ag_load_record(build, opened, &rec, record)) return false;
+    const char *version = zcl_package_copy_str(build, "version");
+    memset(r, 0, sizeof(*r));
+    (void)snprintf(r->publisher, sizeof(r->publisher), "%s", s->row->offer.publisher);
+    (void)snprintf(r->release_root, sizeof(r->release_root), "%s", s->row->offer.root);
+    (void)snprintf(r->version, sizeof(r->version), "%s", version);
+    zcl_hex_encode(rec.package_root, 32, r->package_root); zcl_hex_encode(rec.closure_root, 32, r->closure);
+    zcl_hex_encode(rec.env_root, 32, r->environment); zcl_hex_encode(rec.dependency_root, 32, r->dependency);
+    zcl_hex_encode(rec.image_sha3, 32, r->image); zcl_hex_encode(record, 32, r->record);
+    return platform_toolchain_canonical_target(r->target, sizeof(r->target));
+}
+
+static void ag_rebuild_post(struct json_value *data, const struct zcl_app_rebuild *r)
+{
+    char text[ZCL_APP_OFFER_TEXT_MAX + 1u];
+    if (!zcl_app_rebuild_format(r, text, sizeof(text))) {
+        (void)json_push_kv_str(data, "rebuild_report", "unavailable: invalid observation"); return;
+    }
+    struct json_value in; struct zcl_command_reply post;
+    const char *kv[] = {"room", "apps", "scope", "public", "kind", "result", "text", text};
+    bool built = zcl_app_input(&in, kv, 8) && json_push_kv_int(&in, "ttl", 2592000);
+    bool posted = built && zcl_app_offer_call(ZCL_APP_OFFER_BOARD_POST, &in, &post);
+    json_free(&in);
+    if (!built) zcl_command_reply_init(&post, "zcl.app_rebuild.post.v1");
+    const char *id = posted ? zcl_app_inner_str(&post, "id") : NULL;
+    if (!ag_hex(id, 32)) {
+        (void)json_push_kv_str(data, "rebuild_report", "publication unconfirmed; retry the observation");
+        (void)json_push_kv_str(data, "rebuild_retry_text", text);
+        char retry[ZCL_APP_OFFER_TEXT_MAX + 160u];
+        int n = snprintf(retry, sizeof(retry), "z23 fleet board post --kind=result --scope=public --room=apps --ttl=2592000 --text='%s'", text);
+        if (n > 0 && (size_t)n < sizeof(retry)) (void)json_push_kv_str(data, "rebuild_retry", retry);
+        zcl_command_reply_free(&post); return;
+    }
+    (void)json_push_kv_str(data, "rebuild_report", "published");
+    (void)json_push_kv_str(data, "rebuild_post_id", id);
+    zcl_command_reply_free(&post);
+}
+
+static void ag_rebuild_report(struct ag_one *s, const struct json_value *build, const char *image)
+{
+    struct zcl_app_rebuild r; struct json_value *data = &s->reply->data;
+    const struct json_value *made = json_get(build, "make_ran");
+    if (!made || made->type != JSON_BOOL || !ag_observation(s, build, image, &r)) {
+        (void)json_push_kv_str(data, "rebuild_report", "unavailable: build evidence could not be verified");
+        (void)json_push_kv_str(data, "rebuild_count_status", "incomplete: build evidence unavailable"); return;
+    }
+    if (json_get_bool(made)) ag_rebuild_post(data, &r);
+    else (void)json_push_kv_str(data, "rebuild_report", "not published: cached image");
+    struct zcl_command_reply why; size_t count = 0;
+    if (zcl_app_rebuild_count(&r, &count, &why)) {
+        (void)json_push_kv_int(data, "matching_rebuild_keys", (int64_t)count);
+        (void)json_push_kv_str(data, "rebuild_count_status", "local snapshot; global count unknown");
+    } else {
+        (void)json_push_kv_str(data, "rebuild_count_status", "incomplete: board query unavailable or capped");
+    }
+    zcl_command_reply_free(&why);
+}
+
+static bool ag_open_matches(const struct zcl_command_reply *inner)
+{
+    const struct json_value *match = json_get(&inner->data, "build_matches_open");
+    return match && match->type == JSON_BOOL && json_get_bool(match);
+}
+
+static bool ag_commit_result(struct ag_one *s, struct zcl_command_reply *inner)
+{
+    const char *copy = zcl_app_inner_str(inner, "copy");
+    const char *image = zcl_app_inner_str(inner, "image_sha3");
+    const struct json_value *executed = json_get(&inner->data, "executed");
+    const struct json_value *pid = json_get(&inner->data, "pid");
+    if (!copy || !ag_hex(image, 32) || !executed || executed->type != JSON_BOOL ||
+        !json_get_bool(executed) || (pid && pid->type != JSON_INT)) {
+        zcl_package_copy_fail(s->reply, "MALFORMED_INNER", true,
+                              "receive completed without a valid copy, image or execution result", AG_COMMAND);
+        return false;
+    }
+    bool ok = true;
+    const char *keys[] = {"copy", "pid", "image_sha3", "executed"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+        ok = ag_copy_data(&s->reply->data, &inner->data, keys[i]) && ok;
+    if (ok && ag_open_matches(inner))
+        ag_rebuild_report(s, json_get(&inner->data, "build"), image);
+    else if (ok) {
+        (void)json_push_kv_str(&s->reply->data, "rebuild_report", "unavailable: opened version differs from build");
+        (void)json_push_kv_str(&s->reply->data, "rebuild_count_status", "incomplete: build evidence unavailable");
+    }
+    if (!ok) zcl_package_copy_fail(s->reply, "ALLOC", true, "cannot describe received app", AG_COMMAND);
     return ok;
 }
 
@@ -190,24 +322,15 @@ static bool ag_commit(struct ag_one *s)
                  json_push_kv_bool(&in, "confirm", true);
     struct zcl_command_reply inner;
     bool ok = zcl_app_inner_call_built("app.receive-copy", &in, built, &inner);
-    if (!ok) zcl_app_inner_fail(s->reply, &inner, false);
-    else {
-        const char *copy = zcl_app_inner_str(&inner, "copy");
-        const char *image = zcl_app_inner_str(&inner, "image_sha3");
-        const struct json_value *executed = json_get(&inner.data, "executed");
-        const struct json_value *pid = json_get(&inner.data, "pid");
-        if (!copy || !ag_hex(image, 32) || !executed || executed->type != JSON_BOOL ||
-            !json_get_bool(executed) || (pid && pid->type != JSON_INT)) {
-            zcl_package_copy_fail(s->reply, "MALFORMED_INNER", true,
-                                  "receive completed without a valid copy, image or execution result", AG_COMMAND);
-            zcl_command_reply_free(&inner);
-            return false;
+    if (!ok) {
+        zcl_app_inner_fail(s->reply, &inner, false);
+        const struct json_value *build = json_get(&inner.data, "build");
+        if (build) {
+            (void)json_push_kv(&s->reply->data, "build", build);
+            ag_rebuild_report(s, build, zcl_package_copy_str(build, "image_sha3"));
         }
-        const char *keys[] = {"copy", "pid", "image_sha3", "executed"};
-        for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
-            ok = ag_copy_data(&s->reply->data, &inner.data, keys[i]) && ok;
-        if (!ok) zcl_package_copy_fail(s->reply, "ALLOC", true, "cannot describe received app", AG_COMMAND);
     }
+    else ok = ag_commit_result(s, &inner);
     zcl_command_reply_free(&inner); return ok;
 }
 
@@ -341,6 +464,8 @@ static bool ag_attempt(struct ag_request *r, const struct zcl_app_offer_row *row
             zcl_package_copy_fail(r->reply, "ALLOC", zcl_package_copy_confirmed(r->input), "copying result", AG_COMMAND);
     } else {
         *last = attempt.error;
+        if (zcl_package_copy_confirmed(r->input))
+            (void)json_copy_checked(&r->reply->data, &attempt.data);
     }
     zcl_command_reply_free(&attempt); return ok;
 }

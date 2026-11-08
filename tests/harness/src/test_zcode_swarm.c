@@ -597,6 +597,79 @@ static int t_swarm_linked_nonce(void)
 #endif
 
 
+static bool swarm_receipt_order_bind(struct vcs_swarm_receipt_session *up,
+                                     struct vcs_swarm_receipt_session *down)
+{
+    uint8_t ident[VCS_SWARM_RECEIPT_IDENTITY_BYTES];
+    size_t len = 0;
+    return up && down &&
+        vcs_swarm_receipt_identity_take(up, 77, ident, sizeof(ident), &len) &&
+        vcs_swarm_receipt_identity_note(down, 77, ident, len) &&
+        vcs_swarm_receipt_identity_take(down, 77, ident, sizeof(ident), &len) &&
+        vcs_swarm_receipt_identity_note(up, 77, ident, len);
+}
+
+static int swarm_receipt_order_exchange(struct vcs_swarm_receipt_session *up,
+    struct vcs_swarm_receipt_session *down, struct sw_node *up_node,
+    struct sw_node *down_node)
+{
+    int failures = 0;
+    uint8_t offer[VCS_SERVICE_RECEIPT_WIRE_BYTES];
+    size_t reply_len = 0; uint8_t *reply = NULL;
+    struct vcs_swarm_transfer sent = {0}, received = {0};
+    memset(sent.package_root, 0x53, 32);
+    memcpy(received.package_root, sent.package_root, 32);
+    sent.served = 4096; received.fetched = 106;
+    bool setup = swarm_receipt_order_bind(up, down);
+    SW_CHECK("receipt order: authenticated sessions", setup);
+    if (setup) {
+        bool early = vcs_swarm_receipt_session_offer(up, &sent, 77, SW_DAY, offer);
+        SW_CHECK("receipt order: early sender offer", early);
+        if (early) {
+            enum vcs_swarm_receipt_status status = vcs_swarm_receipt_session_handle(
+                down, down_node->book, &received, 77, SW_DAY, offer, sizeof(offer), &reply, &reply_len);
+            SW_CHECK("receipt order: excess refused without signing", status == VCS_SWARM_RECEIPT_BYTES_MISMATCH && !reply && !reply_len);
+        }
+        received.fetched = sent.served;
+        bool reverse = vcs_swarm_receipt_session_offer(down, &received, 77, SW_DAY, offer);
+        SW_CHECK("receipt order: receiver offers after verified DATA", reverse);
+        if (reverse) {
+            enum vcs_swarm_receipt_status status = vcs_swarm_receipt_session_handle(
+                up, up_node->book, &sent, 77, SW_DAY, offer, sizeof(offer), &reply, &reply_len);
+            SW_CHECK("receipt order: sender signs exact offer", status == VCS_SWARM_RECEIPT_OK && reply && reply_len == sizeof(offer));
+            if (reply) {
+                status = vcs_swarm_receipt_session_handle(down, down_node->book, &received,
+                    77, SW_DAY, reply, reply_len, NULL, NULL);
+                SW_CHECK("receipt order: both sides settle exact bytes", status == VCS_SWARM_RECEIPT_OK &&
+                    vcs_swarm_receipt_session_settled(up, 77) && vcs_swarm_receipt_session_settled(down, 77));
+            }
+        }
+    }
+    free(reply);
+    return failures;
+}
+
+/* A sender can account a reply before the receiver validates its DATA.
+ * Both peers' normal drains must still settle once the receiver catches up. */
+static int swarm_receipt_inflight_order(void)
+{
+    int failures = 0;
+    struct sw_node up_node, down_node;
+    if (!sw_node_open(&up_node, "order-up", sw_score_contributor)) return 1;
+    if (!sw_node_open(&down_node, "order-down", sw_score_contributor)) {
+        sw_node_close(&up_node); test_rm_rf_recursive(up_node.datadir); return 1;
+    }
+    uint8_t up_key[32] = {0}, down_key[32] = {0};
+    up_key[31] = 31; down_key[31] = 32;
+    struct vcs_swarm_receipt_session *up = vcs_swarm_receipt_session_open_secret(up_key);
+    struct vcs_swarm_receipt_session *down = vcs_swarm_receipt_session_open_secret(down_key);
+    failures += swarm_receipt_order_exchange(up, down, &up_node, &down_node);
+    vcs_swarm_receipt_session_free(up); vcs_swarm_receipt_session_free(down);
+    sw_node_close(&up_node); sw_node_close(&down_node);
+    test_rm_rf_recursive(up_node.datadir); test_rm_rf_recursive(down_node.datadir);
+    return failures;
+}
+
 int test_zcode_swarm(void)
 {
     int failures = 0;
@@ -616,6 +689,7 @@ int test_zcode_swarm(void)
     failures += t_swarm_serving_and_allowance();
     failures += t_swarm_receipt_exchange();
     failures += t_swarm_receipt_session();
+    failures += swarm_receipt_inflight_order();
     failures += t_swarm_disconnect_threshold();
     failures += t_swarm_blob_transfer();
     failures += t_swarm_bundle_transfer();

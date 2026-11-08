@@ -26,6 +26,7 @@
 #include "test/app_seed_fixture.h"
 
 #include "chain/chainparams.h"
+#include "plugin/plugin_pack.h"
 #include <stdlib.h>
 
 #if defined(__linux__)
@@ -530,6 +531,146 @@ static bool asi_no_consumer_state(const struct asi_run *r)
     }
     return true;
 }
+
+static bool asi_successor(struct asi_run *r, const struct json_value *data);
+
+static bool asi_terminal_spawn(struct ass_world *w, struct asi_run *r,
+    const char *log, const char *const *argv)
+{
+    char path[ASS_PATH], errpath[ASS_PATH];
+    if (!asi_path(path, sizeof(path), w->root, log) ||
+        !asi_path(errpath, sizeof(errpath), w->root, "installed-cli.stderr")) return false;
+    int out = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    int err = open(errpath, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    bool ok = out >= 0 && err >= 0 && asi_spawn(&r->cli, argv, out, err);
+    if (out >= 0) close(out);
+    if (err >= 0) close(err);
+    return ok;
+}
+
+static bool asi_terminal_refusal(struct ass_world *w, struct asi_run *r,
+    const char *data, const char *plan_arg, const char *name, const char *code_name)
+{
+    char log[ASS_PATH];
+    if (!asi_path(log, sizeof(log), w->root, name)) return false;
+    const char *argv[] = {r->installed, "app", "copy", "--json", "--app=skycombat", data,
+                          plan_arg, "--confirm=true", NULL};
+    bool ok = asi_terminal_spawn(w, r, name, argv);
+    uint32_t code = 0;
+    if (ok) {
+        enum platform_process_wait_result state = platform_process_wait(&r->cli, 120000, &code);
+        ok = state == PLATFORM_PROCESS_WAIT_EXITED && code != 0;
+        if (state == PLATFORM_PROCESS_WAIT_EXITED) platform_process_close(&r->cli);
+        else if (!asi_stop(&r->cli)) return false;
+    }
+    struct json_value reply; json_init(&reply);
+    if (ok) {
+        ok = asi_json_file(log, &reply) && !json_get_bool(json_get(&reply, "ok")) &&
+            !json_get_bool(json_get(json_get(&reply, "error"), "mutated")) &&
+            (!code_name || !strcmp(asi_string(json_get(&reply, "error"), "code"), code_name));
+    }
+    json_free(&reply);
+    return ok;
+}
+
+static bool asi_terminal_key_changed(struct ass_world *w, struct asi_run *r,
+    const char *home, const char *data, const char *plan_arg)
+{
+    char dir[ASS_PATH], key[ASS_PATH], pub[PLUGIN_HEX_PUBLIC_KEY + 1];
+    if (!asi_path(dir, sizeof(dir), home, ".z23") ||
+        !asi_path(key, sizeof(key), dir, "zcode_publisher.key") ||
+        mkdir(dir, 0700) != 0) return false;
+    bool ok = plugin_keygen(key, pub) == PLUGIN_OK &&
+        asi_terminal_refusal(w, r, data, plan_arg, "terminal-key-refused.json", "PLAN_MISMATCH");
+    if (r->cli.pid) return false; /* preserve fixture while an unreaped child may use it */
+    if (unlink(key) != 0 || rmdir(dir) != 0) ok = false;
+    return ok;
+}
+
+static bool asi_terminal_source_changed(struct ass_world *w, struct asi_run *r,
+    const char *data, const char *plan_arg)
+{
+    char selector[ASS_PATH], saved[ASS_PATH];
+    if (!asi_path(selector, sizeof(selector), r->prefix, "share/z23/apps/skycombat") ||
+        !asi_path(saved, sizeof(saved), r->prefix, "share/z23/apps/skycombat.saved-test") ||
+        rename(selector, saved) != 0) return false;
+    bool ok = symlink("missing-generation", selector) == 0 &&
+        asi_terminal_refusal(w, r, data, plan_arg, "terminal-source-refused.json", NULL);
+    if (r->cli.pid) return false; /* preserve fixture while an unreaped child may use it */
+    if (unlink(selector) != 0 && errno != ENOENT) ok = false;
+    if (rename(saved, selector) != 0) ok = false;
+    return ok;
+}
+
+static bool asi_terminal_empty(const char *datadir)
+{
+    const char *const paths[] = {"zcode", "copies"};
+    for (size_t i = 0; i < sizeof(paths)/sizeof(paths[0]); ++i) {
+        char path[ASS_PATH]; struct stat st;
+        if (!asi_path(path, sizeof(path), datadir, paths[i]) ||
+            lstat(path, &st) == 0 || errno != ENOENT) return false;
+    }
+    return true;
+}
+
+static bool asi_terminal_plan(struct ass_world *w, struct asi_run *r,
+    const char *datadir, const char *data, char plan_arg[80])
+{
+    char log[ASS_PATH];
+    if (!asi_path(log, sizeof(log), w->root, "terminal-plan.json")) return false;
+    const char *plan_argv[] = {r->installed, "app", "copy", "--json", "--app=skycombat", data, NULL};
+    bool ok = asi_terminal_spawn(w, r, "terminal-plan.json", plan_argv);
+    struct json_value plan; json_init(&plan);
+    if (ok) ok = asi_cli_finish(w, r, "terminal-plan.json", &plan);
+    const struct json_value *d = json_get(&plan, "data");
+    const char *id = asi_string(d, "plan_id"), *root = asi_string(d, "package_root");
+    char expected[65];
+    zcl_hex_encode(r->source.package_root, 32, expected);
+    ok = ok && strlen(id) == 64 && !strcmp(root, expected) &&
+         json_get_bool(json_get(d, "key_will_create")) &&
+         snprintf(plan_arg, 80, "--plan_id=%s", id) < 80;
+    if (ok) {
+        struct stat st; const char *key = asi_string(d, "key_path");
+        ok = key[0] && lstat(key, &st) != 0 && errno == ENOENT;
+        ok = ok && asi_terminal_empty(datadir);
+    }
+    json_free(&plan);
+    return ok;
+}
+
+static bool asi_terminal_confirm(struct ass_world *w, struct asi_run *r,
+    const char *data, const char *plan_arg)
+{
+    char log[ASS_PATH];
+    if (!asi_path(log, sizeof(log), w->root, "terminal-confirm.json")) return false;
+    const char *argv[] = {r->installed, "app", "copy", "--json", "--app=skycombat", data,
+                          plan_arg, "--confirm=true", NULL};
+    bool ok = asi_terminal_spawn(w, r, "terminal-confirm.json", argv);
+    struct json_value reply; json_init(&reply);
+    if (ok) ok = asi_cli_finish(w, r, "terminal-confirm.json", &reply);
+    const struct json_value *d = json_get(&reply, "data");
+    if (ok) ok = asi_successor(r, d) && json_get_bool(json_get(d, "key_created"));
+    json_free(&reply);
+    return ok;
+}
+
+/* Exercise installed terminal copy in a separate, isolated owner home. */
+static bool asi_terminal_copy(struct ass_world *w, struct asi_run *r)
+{
+    char home[ASS_PATH], datadir[ASS_PATH], data[ASS_PATH + 16], plan_arg[80];
+    if (!asi_path(home, sizeof(home), w->root, "terminal-home") ||
+        !asi_path(datadir, sizeof(datadir), w->root, "terminal-data") ||
+        mkdir(home, 0700) != 0 || mkdir(datadir, 0700) != 0 ||
+        snprintf(data, sizeof(data), "--datadir=%s", datadir) >= (int)sizeof(data)) return false;
+    if (setenv("HOME", home, 1) != 0) return false;
+    bool ok = asi_terminal_plan(w, r, datadir, data, plan_arg) &&
+        asi_terminal_key_changed(w, r, home, data, plan_arg) &&
+        asi_terminal_empty(datadir) &&
+        asi_terminal_source_changed(w, r, data, plan_arg) &&
+        asi_terminal_empty(datadir) &&
+        asi_terminal_confirm(w, r, data, plan_arg);
+    return setenv("HOME", r->home, 1) == 0 && ok;
+}
 static bool asi_cancel(struct ass_world *w, struct asi_run *r)
 {
     struct json_value reply; json_init(&reply);
@@ -1018,6 +1159,7 @@ static int ass_installed(struct ass_world *w)
         ASSERT(asi_display(w, &r));
         ASSERT(chdir(r.empty) == 0); cwd_changed = true;
         ASSERT(asi_discovery(w, &r) && asi_no_consumer_state(&r));
+        ASSERT(asi_terminal_copy(w, &r) && asi_no_consumer_state(&r));
         ASSERT(asi_cancel(w, &r) && asi_confirm(w, &r));
         ASSERT(asi_evidence(w, &r));
         PASS();

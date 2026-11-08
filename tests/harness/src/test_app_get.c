@@ -74,6 +74,7 @@ struct tag_stub {
     size_t len;
     char sha[65];
     char text[TAG_TEXT]; /* what A posted */
+    char result_text[TAG_TEXT];
     char room[40], kind[16], scope[16];
     int64_t ttl;
     struct json_value board; /* the posts B's node holds */
@@ -83,6 +84,7 @@ struct tag_stub {
     bool onion_unavailable;
     bool onion_changed;
     bool malformed_post_id;
+    bool fail_result_post;
     int fetch_failures;
     char fetch_root[65], fetch_peer[96], fetch_out[TAG_PATH];
 };
@@ -124,12 +126,15 @@ static bool tag_post_capture(const struct json_value *in,
 {
     const struct json_value *ttl = json_get(in, "ttl");
     g_tag.posts++;
-    (void)snprintf(g_tag.text, sizeof(g_tag.text), "%s", tag_in(in, "text"));
+    bool result = strcmp(tag_in(in, "kind"), "result") == 0;
+    if (result) (void)snprintf(g_tag.result_text, sizeof(g_tag.result_text), "%s", tag_in(in, "text"));
+    else (void)snprintf(g_tag.text, sizeof(g_tag.text), "%s", tag_in(in, "text"));
     (void)snprintf(g_tag.room, sizeof(g_tag.room), "%s", tag_in(in, "room"));
     (void)snprintf(g_tag.kind, sizeof(g_tag.kind), "%s", tag_in(in, "kind"));
     (void)snprintf(g_tag.scope, sizeof(g_tag.scope), "%s",
                    tag_in(in, "scope"));
     g_tag.ttl = ttl && ttl->type == JSON_INT ? json_get_int(ttl) : 0;
+    if (result && g_tag.fail_result_post) return false;
     if (g_tag.malformed_post_id) return json_push_kv_str(&out->data, "id", "bad");
     return json_push_kv_str(&out->data, "id",
                             "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d"
@@ -249,6 +254,18 @@ static bool tag_render(const struct fleet_board_post *p,
            json_push_kv_int(o, "text_len", (int64_t)p->text_len);
 }
 
+static bool tag_tamper(struct fleet_board_post *p)
+{
+    char *hex = strstr(p->text, "\"root\":\"");
+    if (!hex) {
+        hex = strstr(p->text, "\"image\":\"");
+        if (hex) hex++;
+    }
+    if (!hex) return false;
+    hex[8] = hex[8] == 'a' ? 'b' : 'a';
+    return true;
+}
+
 /* One signed post appended to the stub board. */
 static bool tag_board_add_as(const struct tag_post_spec *s, int64_t age,
                              uint8_t identity)
@@ -271,10 +288,7 @@ static bool tag_board_add_as(const struct tag_post_spec *s, int64_t age,
     }
     /* still a well-formed entry: one hex digit of the root changes, so
      * only the signature can tell */
-    char *hex = ok && s->tamper ? strstr(p->text, "\"root\":\"") : NULL;
-    if (hex)
-        hex[8] = hex[8] == 'a' ? 'b' : 'a';
-    ok = ok && (!s->tamper || hex);
+    if (ok && s->tamper) ok = tag_tamper(p);
     ok = ok && tag_render(p, &o) && json_push_back(&g_tag.board, &o);
     if (ok)
         json_free(&o);
@@ -292,6 +306,60 @@ static void tag_board_reset(void)
     json_free(&g_tag.board);
     json_init(&g_tag.board);
     json_set_array(&g_tag.board);
+}
+
+static int tag_rebuild_catalog(void)
+{
+    int failures = 0;
+    struct zcl_app_rebuild r = {0};
+    memset(r.publisher, 'a', 66); memset(r.release_root, 'b', 64);
+    memset(r.package_root, 'c', 64); memset(r.version, 'd', 64);
+    memset(r.image, 'e', 64); memset(r.closure, 'f', 64);
+    memset(r.environment, '1', 64); memset(r.dependency, '2', 64);
+    memset(r.record, '3', 64); (void)snprintf(r.target, sizeof(r.target), "linux-x86_64-v3");
+    char text[TAG_TEXT], wrong[TAG_TEXT]; size_t count = 0;
+    struct zcl_command_reply why;
+    TEST("app rebuild: signed distinct matching hosts count once and expired/mismatched posts do not") {
+        ASSERT(zcl_app_rebuild_format(&r, text, sizeof(text)));
+        r.image[0] = 'f'; ASSERT(zcl_app_rebuild_format(&r, wrong, sizeof(wrong))); r.image[0] = 'e';
+        const struct tag_post_spec match = {text, "apps", FLEET_BOARD_KIND_RESULT, false};
+        const struct tag_post_spec other = {wrong, "apps", FLEET_BOARD_KIND_RESULT, false};
+        tag_board_reset();
+        ASSERT(tag_board_add_as(&match, 50, 0x5a));
+        ASSERT(tag_board_add_as(&match, 40, 0x5a));
+        ASSERT(tag_board_add_as(&match, 30, 0x6b));
+        ASSERT(tag_board_add_as(&match, 90000, 0x6c));
+        ASSERT(tag_board_add_as(&other, 10, 0x6d));
+        ASSERT(zcl_app_rebuild_count(&r, &count, &why));
+        zcl_command_reply_free(&why);
+        ASSERT_EQ(count, 2u);
+        PASS();
+    }
+    TEST("app rebuild: tampered signatures and mismatched release, target or environment do not count") {
+        const struct tag_post_spec tampered = {text, "apps", FLEET_BOARD_KIND_RESULT, true};
+        tag_board_reset(); ASSERT(tag_board_add_as(&tampered, 5, 0x5a));
+        r.release_root[0] = 'c'; ASSERT(zcl_app_rebuild_format(&r, wrong, sizeof(wrong))); r.release_root[0] = 'b';
+        const struct tag_post_spec changed = {wrong, "apps", FLEET_BOARD_KIND_RESULT, false};
+        ASSERT(tag_board_add_as(&changed, 5, 0x6b));
+        r.environment[0] = '2'; ASSERT(zcl_app_rebuild_format(&r, wrong, sizeof(wrong))); r.environment[0] = '1';
+        ASSERT(tag_board_add_as(&changed, 5, 0x6c));
+        (void)snprintf(r.target, sizeof(r.target), "linux-aarch64");
+        ASSERT(zcl_app_rebuild_format(&r, wrong, sizeof(wrong)));
+        (void)snprintf(r.target, sizeof(r.target), "linux-x86_64-v3");
+        ASSERT(tag_board_add_as(&changed, 5, 0x6d));
+        ASSERT(zcl_app_rebuild_count(&r, &count, &why)); zcl_command_reply_free(&why);
+        ASSERT_EQ(count, 0u); PASS();
+    }
+    TEST("app rebuild: saturated result list is incomplete even with invalid rows") {
+        tag_board_reset();
+        for (size_t i = 0; i < ZCL_APP_OFFER_ROWS_MAX; ++i) {
+            struct json_value invalid; json_init(&invalid); json_set_object(&invalid);
+            bool added = json_push_back(&g_tag.board, &invalid); json_free(&invalid); ASSERT(added);
+        }
+        bool ok = zcl_app_rebuild_count(&r, &count, &why); zcl_command_reply_free(&why);
+        ASSERT(!ok); ASSERT_EQ(count, 0u); PASS();
+    } _test_next:;
+    tag_board_reset(); return failures;
 }
 
 static int tag_catalog_independent(void)
@@ -1027,11 +1095,71 @@ static int tag_b_get(struct tag_world *w)
         ASSERT(run.asked);
         ASSERT(strstr(run.question, w->offer.publisher) != NULL);
         ASSERT(strstr(run.question, w->offer.root) != NULL);
+        ASSERT(strstr(run.question, "public") != NULL);
+        ASSERT(strstr(run.text, "rebuild_report") != NULL);
+        ASSERT(strcmp(g_tag.kind, "result") == 0);
+        ASSERT(strstr(g_tag.result_text, "zcl.app_rebuild.v1") != NULL);
         ASSERT(asf_alive_then_stop(asf_door_pid(run.text)));
         (void)snprintf(copy, sizeof(copy), "%s/copies/tinyapp-1",
                        w->j.b_datadir);
         ASSERT(stat(copy, &st) == 0 && S_ISDIR(st.st_mode));
         ASSERT_EQ(tag_glob(w->j.b_datadir, ".app-get-*"), 0u);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int tag_rebuild_outcomes(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("app rebuild: a cached get counts observations but does not claim a fresh build") {
+        static struct asf_door run; int posts = g_tag.posts;
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        asf_door_run(w->j.b_home, w->j.b_home, w->j.b_datadir, "get",
+                     w->name, ZCL_CLI_CONFIRM_ASK, &run);
+        ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "cached image") != NULL);
+        ASSERT(strstr(run.text, "matching signing keys") != NULL);
+        ASSERT_EQ(g_tag.posts, posts); ASSERT(asf_alive_then_stop(asf_door_pid(run.text)));
+        PASS();
+    }
+    TEST("app rebuild: board failure preserves the opened copy and provides an exact retry") {
+        static struct asf_door run; char home[TAG_PATH], datadir[TAG_PATH];
+        ASSERT(snprintf(home, sizeof(home), "%s/fail-home", w->root) > 0);
+        ASSERT(snprintf(datadir, sizeof(datadir), "%s/datadir", home) > 0);
+        ASSERT(mkdir(home, 0700) == 0 && mkdir(datadir, 0700) == 0);
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        g_tag.fail_result_post = true;
+        asf_door_run(home, home, datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
+        g_tag.fail_result_post = false;
+        ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "publication unconfirmed") != NULL);
+        ASSERT(strstr(run.text, "fleet board post --kind=result") != NULL);
+        ASSERT(strstr(run.text, "matching signing keys") != NULL);
+        ASSERT(asf_alive_then_stop(asf_door_pid(run.text))); PASS();
+    } _test_next:;
+    g_tag.fail_result_post = false; return failures;
+}
+
+static int tag_rebuild_open_failure(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("app rebuild: open failure retains the successful build report") {
+        static struct asf_door run; char home[TAG_PATH], datadir[TAG_PATH];
+        ASSERT(asf_put(w->j.a_copy, "src/main.c", "int main(void) { return 0; }\n"));
+        asf_door_run(w->j.a_home, w->j.a_home, w->j.a_datadir, "save", w->j.copy, ZCL_CLI_CONFIRM_YES, &run);
+        ASSERT_EQ(run.rc, 0);
+        asf_door_run(w->j.a_home, w->j.a_home, w->j.a_datadir, "publish", w->j.copy, ZCL_CLI_CONFIRM_YES, &run);
+        ASSERT_EQ(run.rc, 0);
+        ASSERT(zcl_app_offer_parse(g_tag.text, strlen(g_tag.text), &w->offer));
+        (void)snprintf(w->name, sizeof(w->name), "%s", w->offer.name);
+        ASSERT(snprintf(home, sizeof(home), "%s/exit-home", w->root) > 0);
+        ASSERT(snprintf(datadir, sizeof(datadir), "%s/datadir", home) > 0);
+        ASSERT(mkdir(home, 0700) == 0 && mkdir(datadir, 0700) == 0);
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        asf_door_run(home, home, datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
+        ASSERT(run.rc != 0); ASSERT(strstr(run.text, "APP_EXITED:") != NULL);
+        ASSERT(strstr(run.text, "rebuild_report: published") != NULL);
+        ASSERT(strstr(run.text, "earlier step already changed") != NULL);
+        ASSERT(strcmp(g_tag.kind, "result") == 0);
         PASS();
     } _test_next:;
     return failures;
@@ -1057,6 +1185,7 @@ int test_app_get(void)
     memset(&g_tag, 0, sizeof(g_tag));
     tag_board_reset();
     zcl_app_offer_set_call(tag_call);
+    failures += tag_rebuild_catalog();
     failures += tag_catalog_independent();
     zcl_app_offer_set_call(NULL);
     failures += tag_mcp();
@@ -1085,6 +1214,8 @@ int test_app_get(void)
         failures += tag_b_plan(&w);
         failures += tag_failed_fetch_cleanup(&w);
         failures += tag_b_get(&w);
+        if (failures == 0) failures += tag_rebuild_outcomes(&w);
+        if (failures == 0) failures += tag_rebuild_open_failure(&w);
     }
     zcl_app_offer_set_call(NULL);
     json_free(&g_tag.board);

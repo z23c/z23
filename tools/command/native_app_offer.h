@@ -61,6 +61,18 @@ struct zcl_app_offer_row {
     int64_t created_at;
 };
 
+/* A host-signed observation, not a proof of independent execution. */
+struct zcl_app_rebuild {
+    char publisher[67], release_root[65], package_root[65], version[65];
+    char image[65], closure[65], environment[65], dependency[65], record[65];
+    char target[96];
+};
+
+bool zcl_app_rebuild_format(const struct zcl_app_rebuild *observation,
+                            char *out, size_t cap);
+bool zcl_app_rebuild_count(const struct zcl_app_rebuild *local, size_t *count,
+                           struct zcl_command_reply *why);
+
 /* Every field well formed (the same rules parse applies). */
 bool zcl_app_offer_valid(const struct zcl_app_offer *o);
 

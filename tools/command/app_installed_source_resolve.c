@@ -355,13 +355,28 @@ static bool isr_resolve(struct app_installed_source *out, char *why, size_t cap)
     if (close(dir) != 0) ok = false;
     return ok;
 }
+#if defined(__APPLE__)
+static int isr_mac_candidate(char *exe)
+{
+    size_t n = strlen(exe);
+    if (n < 5 || strcmp(exe + n - 4, "/z23")) return 0;
+    exe[n - 4] = 0;
+    char *component = strrchr(exe, '/');
+    if (!component) return 0;
+    const char suffix[] = "/lib/z23/generations";
+    size_t prefix = (size_t)(component - exe);
+    return prefix > sizeof(suffix) - 1 &&
+        !memcmp(exe + prefix - (sizeof(suffix) - 1), suffix, sizeof(suffix) - 1);
+}
+#endif
 /* Recognize the installed layout before validating it, so a broken selector
  * cannot turn a selected kit into an unselected development toolchain. */
 static int isr_toolchain_candidate(void)
 {
 #if defined(__APPLE__)
-    struct isr_layout layout;
-    return isr_layout(&layout) ? 1 : 0;
+    char exe[ISR_PATH];
+    if (!isr_exe_path(exe, sizeof(exe))) return -1;
+    return isr_mac_candidate(exe);
 #else
     char exe[ISR_PATH], prefix[ISR_PATH], path[ISR_PATH];
     if (!isr_exe_path(exe, sizeof(exe))) return -1;
@@ -484,4 +499,28 @@ bool app_installed_source_resolve(const char *app,
     (void)app_installed_source_message(why, cap, "Installed source resolution unsupported on this platform");
 #endif
     return false;
+}
+
+enum app_installed_source_status app_installed_source_select(const char *app,
+    struct app_installed_source *out, char *why, size_t cap)
+{
+    if (!out || !app || strcmp(app, "skycombat")) {
+        (void)app_installed_source_message(why, cap, "Only installed skycombat is supported");
+        return APP_INSTALLED_SOURCE_REFUSED;
+    }
+#if defined(__linux__) || defined(__APPLE__)
+    int candidate = isr_toolchain_candidate();
+    if (candidate == 0) {
+        app_installed_source_free(out);
+        return APP_INSTALLED_SOURCE_UNSELECTED;
+    }
+    if (candidate > 0 && app_installed_source_resolve(app, out, why, cap))
+        return APP_INSTALLED_SOURCE_VERIFIED;
+#else
+    app_installed_source_free(out);
+    return APP_INSTALLED_SOURCE_UNSELECTED;
+#endif
+    app_installed_source_free(out);
+    (void)app_installed_source_message(why, cap, "Installed source selection refused");
+    return APP_INSTALLED_SOURCE_REFUSED;
 }

@@ -243,6 +243,8 @@ static int fd_refused(struct fd_run *r)
     const char *first = fd_str(r, "choice_a"), *second = fd_str(r, "choice_b");
     if (first) (void)fprintf(r->out, "choice: %s\n", first);
     if (second) (void)fprintf(r->out, "choice: %s\n", second);
+    if (fd_str(r, "rebuild_report")) (void)fprintf(r->out, "rebuild_report: %s\n", fd_str(r, "rebuild_report"));
+    if (fd_str(r, "rebuild_retry")) (void)fprintf(r->out, "retry: %s\n", fd_str(r, "rebuild_retry"));
     if (e->mutated)
         (void)fprintf(r->out, "note: an earlier step already changed "
                       "something; the message above says what is left\n");
@@ -257,7 +259,8 @@ static void fd_print_plan(struct fd_run *r)
         "name", "semver", "publisher", "publisher_fingerprint", "release_id",
         "package_root", "publishes_as", "copy_name", "copy", "destination",
         "changes", "cache_hit", "image_sha3", "output", "saves_first",
-        "makes_key", "seed", "room", "offer_schema"};
+        "makes_key", "seed", "room", "offer_schema", "source",
+        "source_projection", "installed_image", "key_path", "key_will_create"};
     (void)fprintf(r->out, "z23 app %s %s\n", r->door->verb, r->door->target);
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
         const struct json_value *v = json_get(&r->reply.data, keys[i]);
@@ -280,13 +283,14 @@ static void fd_question(const struct fd_run *r, char *q, size_t cap)
     if (strcmp(r->verb->verb, "receive") == 0 ||
         strcmp(r->verb->verb, "get") == 0)
         (void)snprintf(q, cap, "Keep, build and run %s %s from publisher %s "
-                       "(full %s), package root %s, as %s?", name,
+                       "(full %s), package root %s, as %s%s?", name,
                        fd_str(r, "semver") ? fd_str(r, "semver") : "", who,
                        fd_str(r, "publisher_fingerprint")
                            ? fd_str(r, "publisher_fingerprint") : "?",
                        fd_str(r, "package_root") ? fd_str(r, "package_root")
                                                  : "?",
-                       fd_str(r, "copy") ? fd_str(r, "copy") : "a copy");
+                       fd_str(r, "copy") ? fd_str(r, "copy") : "a copy",
+                       strcmp(r->verb->verb, "get") == 0 ? "; a fresh build will be reported publicly" : "");
     else if (strcmp(r->verb->verb, "copy") == 0)
         (void)snprintf(q, cap, "Make your own copy of %s as %s?", r->target,
                        fd_str(r, "copy_name") ? fd_str(r, "copy_name")
@@ -338,7 +342,8 @@ static void fd_print_done(struct fd_run *r)
 {
     static const char *const keys[] = {
         "copy", "share_line", "publisher_fingerprint", "package_root",
-        "post_id", "image_sha3", "image_path", "log", "next"};
+        "post_id", "image_sha3", "image_path", "log", "next",
+        "rebuild_report", "rebuild_count_status", "rebuild_retry"};
     const struct json_value *pid = json_get(&r->reply.data, "pid");
     if (pid && pid->type == JSON_INT)
         (void)fprintf(r->out, "opened %s pid %lld\n",
@@ -352,6 +357,9 @@ static void fd_print_done(struct fd_run *r)
             (void)fprintf(r->out, "  %s: %s\n", keys[i], fd_str(r, keys[i]));
     if (fd_str(r, "preview"))
         (void)fprintf(r->out, "  %s\n", fd_str(r, "preview"));
+    const struct json_value *count = json_get(&r->reply.data, "matching_rebuild_keys");
+    if (count && count->type == JSON_INT)
+        (void)fprintf(r->out, "  matching signing keys: %lld (self-reported builds)\n", (long long)json_get_int(count));
 }
 
 /* The confirm made the owner's signing key on first use: say so once. */

@@ -23,6 +23,10 @@
 #include "command/native_app_compose.h"
 #include "command/native_app_front_door.h"
 #include "command/native_zcode_package_copy.h"
+#include "command/app_installed_source_resolve.h"
+#include "command/native_app_adopt.h"
+#include "command/native_app_personalize_command.h"
+#include "command/native_app_seed_installed.h"
 
 #include "base/hex.h"
 #include "config/command_catalog.h"
@@ -40,6 +44,7 @@
 #define ZAC_PATH 4400
 
 struct zac {
+    const struct zcl_command_request *request;
     const struct json_value *input;
     struct zcl_command_reply *reply;
     const char *datadir;
@@ -55,6 +60,9 @@ struct zac {
     bool key_made;                /* the seed confirm made the owner key */
     char key_path[ZAC_PATH];
     uint8_t plan_id[32];
+    struct app_installed_source source;
+    bool installed, key_exists;
+    char publisher[67];
 };
 
 static bool zac_app_valid(const char *app)
@@ -120,6 +128,111 @@ static bool zac_find(struct zac *z)
                               "same sequence; adopt one by root with "
                               "zcode package adopt", z->app);
     return ok && !z->ambiguous;
+}
+
+/* Return false only on refusal. An unselected executable keeps the existing
+ * checkout seed path; a selected but broken install never falls back. */
+static bool zac_installed_plan(struct zac *z)
+{
+    if (z->have_release || strcmp(z->app, "skycombat")) return true;
+    char why[256] = "";
+    enum app_installed_source_status status = app_installed_source_select(
+        z->app, &z->source, why, sizeof(why));
+    if (status == APP_INSTALLED_SOURCE_UNSELECTED) return true;
+    if (status != APP_INSTALLED_SOURCE_VERIFIED || z->datadir[0] != '/') {
+        zcl_package_copy_fail(z->reply, "INSTALLED_SOURCE_UNAVAILABLE", false,
+                              "Installed source could not be verified", why);
+        return false;
+    }
+    if (!app_personalize_key_probe(z->reply, z->key_path, sizeof(z->key_path),
+                                   z->publisher, &z->key_exists)) return false;
+    char projection[65], package[65], image[65];
+    zcl_hex_encode(z->source.projection_sha3, 32, projection);
+    zcl_hex_encode(z->source.package_root, 32, package);
+    zcl_hex_encode(z->source.build.image_sha3, 32, image);
+    const char *parts[] = {z->app, z->datadir, projection, package, image,
+                           z->key_path, z->key_exists ? "existing" : "new",
+                           z->publisher};
+    zcl_app_plan_id("zcl.app_copy.installed.plan.v1", parts, 8, z->plan_id);
+    z->installed = true;
+    return true;
+}
+
+static void zac_installed_reply(struct zac *z)
+{
+    struct json_value data; json_init(&data); json_set_object(&data);
+    struct json_value *d = &data;
+    char projection[65], package[65], image[65];
+    zcl_hex_encode(z->source.projection_sha3, 32, projection);
+    zcl_hex_encode(z->source.package_root, 32, package);
+    zcl_hex_encode(z->source.build.image_sha3, 32, image);
+    bool ok = json_push_kv_str(d, "stage", "plan") &&
+        json_push_kv_str(d, "app", z->app) &&
+        json_push_kv_str(d, "source", "verified installed app") &&
+        json_push_kv_str(d, "source_projection", projection) &&
+        json_push_kv_str(d, "package_root", package) &&
+        json_push_kv_str(d, "installed_image", image) &&
+        json_push_kv_str(d, "key_path", z->key_path) &&
+        json_push_kv_bool(d, "key_will_create", !z->key_exists) &&
+        (!z->key_exists || json_push_kv_str(d, "publisher_fingerprint", z->publisher)) &&
+        zcl_package_copy_push_root(d, "plan_id", z->plan_id);
+    if (!ok) {
+        json_free(&data);
+        zcl_package_copy_fail(z->reply, "ALLOC", false, "Cannot describe installed copy plan", ZAC_COMMAND);
+        return;
+    }
+    json_free(&z->reply->data);
+    z->reply->data = data;
+}
+
+static void zac_push_key(struct json_value *d, const struct zcl_command_reply *from);
+
+static void zac_installed_confirm(struct zac *z)
+{
+    if (!zcl_package_copy_plan_matches(z->input, z->plan_id, z->reply, ZAC_COMMAND)) return;
+    struct json_value in; json_init(&in); json_set_object(&in);
+    bool ok = json_push_kv_str(&in, "app", z->app) &&
+              json_push_kv_str(&in, "datadir", z->datadir);
+    if (!ok) {
+        json_free(&in);
+        zcl_package_copy_fail(z->reply, "ALLOC", false, "Cannot prepare installed seed", ZAC_COMMAND);
+        return;
+    }
+    struct zcl_command_reply seed;
+    zcl_command_reply_init(&seed, "zcl.app_seed.v1");
+    if (ok) {
+        struct zcl_command_request request = *z->request; request.input = &in;
+        const struct app_seed_installed_owner owner = {
+            .key_path = z->key_path, .publisher = z->publisher, .exists = z->key_exists
+        };
+        app_seed_installed_commit(&request, &seed, &z->source, &owner);
+        ok = seed.status == ZCL_COMMAND_STATUS_PASSED;
+    }
+    if (ok) {
+        const char *release = zcl_app_inner_str(&seed, "release_id");
+        json_free(&in); json_init(&in); json_set_object(&in);
+        ok = release && json_push_kv_str(&in, "release_root", release) &&
+             json_push_kv_str(&in, "datadir", z->datadir);
+        if (ok) {
+            struct zcl_command_request request = *z->request; request.input = &in;
+            app_adopt_installed_confirmed(&request, z->reply, z->source.package_root,
+                zcl_app_inner_str(&seed, "key_path"), zcl_app_inner_str(&seed, "publisher"));
+            z->reply->error.mutated |= seed.error.mutated;
+            if (z->reply->status == ZCL_COMMAND_STATUS_PASSED) {
+                const char *copy = zcl_app_inner_str(z->reply, "copy");
+                char hint[ZAC_PATH + 96];
+                if (copy && zcl_app_hint(hint, sizeof(hint), z->datadir, "save %s", copy))
+                    (void)json_push_kv_str(&z->reply->data, "next", hint);
+                (void)json_push_kv_bool(&z->reply->data, "seeded", true);
+                zac_push_key(&z->reply->data, &seed);
+            }
+        }
+    }
+    if (!ok) {
+        if (seed.status != ZCL_COMMAND_STATUS_PASSED) zcl_app_inner_fail(z->reply, &seed, seed.error.mutated);
+        else zcl_package_copy_fail(z->reply, "COPY_INCOMPLETE", true, "Seeded release could not be adopted", ZAC_COMMAND);
+    }
+    zcl_command_reply_free(&seed); json_free(&in);
 }
 
 /* The inner plan: adopt the found release, or seed one. */
@@ -295,6 +408,17 @@ static void zac_confirm(struct zac *z)
     z->reply->error.mutated = true;
 }
 
+static void zac_dispatch(struct zac *z)
+{
+    if (z->installed) {
+        if (zcl_package_copy_confirmed(z->input)) zac_installed_confirm(z);
+        else zac_installed_reply(z);
+    } else if (zac_inner_plan(z)) {
+        if (zcl_package_copy_confirmed(z->input)) zac_confirm(z);
+        else zac_plan_reply(z);
+    }
+}
+
 void zcl_native_handle_app_copy(const struct zcl_command_request *request,
                                 struct zcl_command_reply *reply)
 {
@@ -308,22 +432,21 @@ void zcl_native_handle_app_copy(const struct zcl_command_request *request,
         return;
     }
     z->input = request->input;
+    z->request = request;
     z->reply = reply;
     z->app = zcl_package_copy_str(request->input, "app");
     z->datadir = zcl_package_copy_datadir(request->input, reply, ZAC_COMMAND);
     if (z->datadir && !zac_app_valid(z->app))
         zcl_package_copy_fail(reply, "BAD_APP", false, "app is a lowercase "
                               "name such as skycombat", z->app ? z->app : "");
-    else if (z->datadir && zac_find(z) && zac_inner_plan(z)) {
-        if (zcl_package_copy_confirmed(request->input))
-            zac_confirm(z);
-        else
-            zac_plan_reply(z);
+    else if (z->datadir && zac_find(z) && zac_installed_plan(z)) {
+        zac_dispatch(z);
     }
     if (z->inner_live) {
         zcl_command_reply_free(&z->inner);
         json_free(&z->inner_in);
     }
+    app_installed_source_free(&z->source);
     free(z);
 }
 
