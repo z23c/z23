@@ -763,9 +763,12 @@ static int test_native_app_inspect_launch_registry(void)
         ASSERT(snprintf(tsv, sizeof(tsv), "%s/z23", root) > 0);
         ASSERT(mkdir(tsv, 0700) == 0);
         ASSERT(snprintf(tsv, sizeof(tsv), "%s/z23/apps.tsv", root) > 0);
+        /* /bin/true is absent on macOS; both supported hosts provide this
+         * system executable. Fail explicitly if the fixture is unavailable. */
+        ASSERT(access("/usr/bin/true", X_OK) == 0);
         FILE *f = fopen(tsv, "w");
         ASSERT(f != NULL);
-        ASSERT(fputs("skyfixture\tsf\t/bin/true\t-\t-\n", f) >= 0);
+        ASSERT(fputs("skyfixture\tsf\t/usr/bin/true\t-\t-\n", f) >= 0);
         ASSERT(fclose(f) == 0);
         /* The registry refuses a group- or world-writable apps.tsv; fopen
          * follows the umask (0002 under the land queue), so set 0600. */

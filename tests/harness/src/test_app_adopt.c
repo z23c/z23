@@ -259,13 +259,32 @@ static bool ad_default_enter(const struct zcl_present_window_live_view_v1 *live)
     live->owner.update(live->owner.context, &event, true, &redraw, &close);
     return close;
 }
+/* UP/DOWN are also the live backend's translated wheel events. Navigation
+ * must preserve the focused consent button without activating it. */
+static bool ad_nav(const struct zcl_present_window_live_view_v1 *live,
+                   uint32_t key, uint32_t expected, bool changed)
+{
+    struct zcl_present_input_v1 input = {.key = key};
+    uint32_t focus = 3, action = UINT32_MAX;
+    if (!live->input(live->owner.context, &input, &focus, &action) ||
+        focus != 3 || action != expected) return false;
+    struct zcl_present_window_event_v1 event = {
+        .outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = action};
+    bool close = true, redraw = false;
+    live->owner.update(live->owner.context, &event, false, &redraw, &close);
+    return !close && redraw == changed;
+}
 static bool ad_visit(const struct zcl_present_window_live_view_v1 *live, uint32_t pages)
 {
+    if (!ad_nav(live, ZCL_PRESENT_INPUT_PAGE_UP, 1, false)) return false;
     for (uint32_t i = 1; i < pages; ++i) {
-        bool close = true, redraw = false;
-        if (!ad_action(live, 2, &close, &redraw) || close || !redraw) return false;
+        if (!ad_nav(live, ZCL_PRESENT_INPUT_PAGE_DOWN, 2, true)) return false;
     }
-    return true;
+    if (!ad_nav(live, ZCL_PRESENT_INPUT_DOWN, 2, false)) return false;
+    if (!ad_nav(live, ZCL_PRESENT_INPUT_PAGE_UP, 1, true)) return false;
+    if (!ad_nav(live, ZCL_PRESENT_INPUT_DOWN, 2, true)) return false;
+    if (!ad_nav(live, ZCL_PRESENT_INPUT_UP, 1, true)) return false;
+    return ad_nav(live, ZCL_PRESENT_INPUT_PAGE_DOWN, 2, true);
 }
 static bool ad_observe(struct ad_fake *f, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *page, uint32_t *pages, char *why, size_t cap)

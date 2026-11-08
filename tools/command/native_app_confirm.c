@@ -58,6 +58,12 @@ void app_confirm_action(struct zcl_present_model_action_v1 *action,
 static bool ac_input_key(const struct zcl_present_input_v1 *input,
                          uint32_t *focus, uint32_t *action)
 {
+    if (input->key == ZCL_PRESENT_INPUT_PAGE_DOWN || input->key == ZCL_PRESENT_INPUT_DOWN) {
+        *action = 2; return true;
+    }
+    if (input->key == ZCL_PRESENT_INPUT_PAGE_UP || input->key == ZCL_PRESENT_INPUT_UP) {
+        *action = 1; return true;
+    }
     if (input->key == ZCL_PRESENT_INPUT_TAB) {
         if (*focus >= 4) *focus = 0;
         else *focus = (*focus + (input->shift ? 3u : 1u)) % 4u;
