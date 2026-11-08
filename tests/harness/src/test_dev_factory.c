@@ -573,6 +573,33 @@ int test_dev_factory(void)
                           "zcl_group_b");
         }
         dfx_end(&c);
+        /* A later red verdict cannot name an earlier failed job. The two
+         * boundaries and same-second case remain a time proxy, not a join. */
+        {
+            const int offsets[] = {1, 83, 120, 0, -120, -121};
+            const int named[] = {0, 0, 0, 1, 1, 0};
+            for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+                (void)snprintf(vtext, sizeof(vtext),
+                               "{\"ended_unix\":%ld,\"failed_groups\":[\"later_group\"]}\n",
+                               now + offsets[i]);
+                dfx_write(vpath, vtext);
+                dfx_run(&c, 48);
+                ASSERT(dfx_ok(&c));
+                ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), named[i]);
+                ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_unnamed"), 2 - named[i]);
+                ASSERT_EQ((int)json_size(dfx_at(&c, "jobs.failed_groups")), named[i]);
+                dfx_end(&c);
+            }
+        }
+        (void)snprintf(vtext, sizeof(vtext),
+                       "{\"ended_unix\":%ld,\"failed_groups\":[]}\n", now + 83);
+        dfx_write(vpath, vtext);
+        dfx_run(&c, 48);
+        ASSERT(dfx_ok(&c));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_unnamed"), 2);
+        ASSERT_EQ((int)json_size(dfx_at(&c, "jobs.failed_groups")), 0);
+        dfx_end(&c);
         /* A later run overwrites the only verdict; historical names disappear. */
         (void)snprintf(vtext, sizeof(vtext),
                        "{\"ended_unix\":%ld,\"failed_groups\":[\"later_group\"]}\n",

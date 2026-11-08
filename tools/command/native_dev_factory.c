@@ -822,14 +822,15 @@ static bool fac_verdict_read(const char *cwd, struct json_value *doc)
     return ok;
 }
 
-/* ended_unix within the skew of the run's own end time. */
+/* A time proxy: verdict ended no later than the job, within the preceding
+ * skew window. Equal seconds still do not establish an exact job join. */
 static bool fac_verdict_match(const struct json_value *doc, double ended)
 {
     double vu = 0, d;
     if (!fac_num(json_get(doc, "ended_unix"), &vu))
         return false;
     d = vu - ended;
-    return d <= FAC_VERDICT_SKEW_S && d >= -FAC_VERDICT_SKEW_S;
+    return d <= 0 && d >= -FAC_VERDICT_SKEW_S;
 }
 
 /* Note each non-empty string of failed_groups; true when there was one. */
