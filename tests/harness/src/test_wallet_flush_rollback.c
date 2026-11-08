@@ -1073,7 +1073,8 @@ static bool wfr_bound_completion_corruption(struct wfr_fixture *f)
     if (sqlite3_exec(f->db, "SAVEPOINT completed_corrupt", NULL, NULL, NULL) != SQLITE_OK) return false;
     bool ok = sqlite3_exec(f->db,
         "UPDATE node_state SET value=substr(value,1,114) WHERE key='wallet_cutover_completed'", NULL, NULL, NULL) == SQLITE_OK &&
-        wallet_sqlite_cutover_authority_read(&f->ws, &f->b, &out) == WALLET_CUTOVER_AUTH_MALFORMED;
+        wallet_sqlite_cutover_authority_read(&f->ws, &f->b, &out) == WALLET_CUTOVER_AUTH_MALFORMED &&
+        wallet_sqlite_cutover_observe_completed(&f->ws, &out) == WALLET_CUTOVER_OBS_MALFORMED;
     return sqlite3_exec(f->db, "ROLLBACK TO completed_corrupt; RELEASE completed_corrupt", NULL, NULL, NULL) == SQLITE_OK && ok;
 }
 static bool wfr_bound_completion_contradiction(struct wfr_fixture *f)
@@ -1083,7 +1084,8 @@ static bool wfr_bound_completion_contradiction(struct wfr_fixture *f)
     bool ok = sqlite3_exec(f->db,
         "INSERT INTO node_state(key,value) SELECT 'wallet_cutover_binding',value FROM node_state WHERE key='wallet_cutover_completed'",
         NULL, NULL, NULL) == SQLITE_OK &&
-        wallet_sqlite_cutover_authority_read(&f->ws, &f->b, &out) == WALLET_CUTOVER_AUTH_MALFORMED;
+        wallet_sqlite_cutover_authority_read(&f->ws, &f->b, &out) == WALLET_CUTOVER_AUTH_MALFORMED &&
+        wallet_sqlite_cutover_observe_completed(&f->ws, &out) == WALLET_CUTOVER_OBS_MALFORMED;
     return sqlite3_exec(f->db, "ROLLBACK TO completed_mixed; RELEASE completed_mixed", NULL, NULL, NULL) == SQLITE_OK && ok;
 }
 
@@ -1092,8 +1094,26 @@ static bool wfr_bound_completion_floor(struct wfr_fixture *f)
     struct wallet_cutover_binding out;
     if (sqlite3_exec(f->db, "SAVEPOINT completed_floor", NULL, NULL, NULL) != SQLITE_OK) return false;
     bool ok = sqlite3_exec(f->db, "DELETE FROM node_state WHERE key='schema_compat_floor'", NULL, NULL, NULL) == SQLITE_OK &&
-        wallet_sqlite_cutover_authority_read(&f->ws, &f->b, &out) == WALLET_CUTOVER_AUTH_MALFORMED;
+        wallet_sqlite_cutover_authority_read(&f->ws, &f->b, &out) == WALLET_CUTOVER_AUTH_MALFORMED &&
+        wallet_sqlite_cutover_observe_completed(&f->ws, &out) == WALLET_CUTOVER_OBS_MALFORMED;
     return sqlite3_exec(f->db, "ROLLBACK TO completed_floor; RELEASE completed_floor", NULL, NULL, NULL) == SQLITE_OK && ok;
+}
+
+static bool wfr_completed_restart(struct wfr_fixture *f, struct node_db *ndb)
+{
+    const uint8_t request_target[32] = {2}, request_whole[32] = {0x51}, request_history[32] = {0x62};
+    wallet_sqlite_close(&f->ws); node_db_close(ndb); f->db = NULL;
+    if (!node_db_open(ndb, f->path)) return false;
+    f->db = ndb->db;
+    if (!wallet_sqlite_open_r(&f->ws, f->db).ok) return false;
+    struct wallet_cutover_binding observed, checked;
+    return wallet_sqlite_cutover_observe_completed(&f->ws, &observed) == WALLET_CUTOVER_OBS_FOUND &&
+        observed.history_identity_present && observed.target_height == 20 &&
+        !memcmp(observed.target_hash, request_target, 32) &&
+        !memcmp(observed.snapshot_whole_sha3, request_whole, 32) &&
+        !memcmp(observed.history_manifest_root, request_history, 32) &&
+        wallet_sqlite_cutover_authority_read(&f->ws, &observed, &checked) == WALLET_CUTOVER_AUTH_COMPLETED &&
+        wallet_cutover_binding_equal(&observed, &checked);
 }
 
 static bool wfr_next_pending_rollback(struct wfr_fixture *f, const struct wallet_cutover_binding *next)
@@ -1103,6 +1123,8 @@ static bool wfr_next_pending_rollback(struct wfr_fixture *f, const struct wallet
     bool ok = (next->history_identity_present ? wallet_sqlite_cutover_prepare_bound(&f->ws, f->w, next,
         20, f->b.target_hash, wfr_tracked_resolve, wfr_tracked_reference, NULL) : wallet_sqlite_cutover_prepare(&f->ws, f->w, next)) &&
         wallet_sqlite_cutover_authority_read(&f->ws, next, &out) == WALLET_CUTOVER_AUTH_PENDING;
+    if (ok) ok = wallet_sqlite_cutover_observe_completed(&f->ws, &out) == WALLET_CUTOVER_OBS_PENDING &&
+        !out.history_identity_present;
     if (sqlite3_exec(f->db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) return false;
     return ok && wallet_sqlite_cutover_authority_read(&f->ws, &f->b, &out) == WALLET_CUTOVER_AUTH_COMPLETED;
 }
@@ -1149,7 +1171,7 @@ static bool wfr_tracked_one(int mode, bool bound)
     r.reference_hash[0] = 2; memcpy(r.scan_identity, f.scan_identity, 32);
     if (ok && bound) ok = wfr_bound_legacy_refusal(&f);
     if (ok) ok = wfr_tracked_run(&f, &ndb, &ctx, &plan, &r, mode);
-    if (ok && bound && mode == 0) ok = wfr_bound_completion_corruption(&f) && wfr_bound_completion_contradiction(&f) && wfr_bound_completion_floor(&f) && wfr_bound_next_pending(&f);
+    if (ok && bound && mode == 0) ok = wfr_completed_restart(&f, &ndb) && wfr_bound_completion_corruption(&f) && wfr_bound_completion_contradiction(&f) && wfr_bound_completion_floor(&f) && wfr_bound_next_pending(&f);
     db_wallet_utxo_cutover_delivery_clear(&ctx.delivery);
     wallet_cutover_v2_plan_free(&plan);
     if (f.ws.open) wallet_sqlite_close(&f.ws);

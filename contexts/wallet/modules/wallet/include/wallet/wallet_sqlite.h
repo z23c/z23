@@ -577,6 +577,16 @@ enum wallet_cutover_authority_status {
 enum wallet_cutover_authority_status wallet_sqlite_cutover_authority_read(
     struct wallet_sqlite *ws, const struct wallet_cutover_binding *expected,
     struct wallet_cutover_binding *out);
+/* Observation supplies a candidate for recovery, not authorization to retire
+ * a request. Caller serializes the connection and holds its read snapshot and
+ * relevant chain authority through validation and exact authority re-read. */
+enum wallet_cutover_observation_status {
+    WALLET_CUTOVER_OBS_ABSENT, WALLET_CUTOVER_OBS_PENDING,
+    WALLET_CUTOVER_OBS_FOUND, WALLET_CUTOVER_OBS_MALFORMED,
+    WALLET_CUTOVER_OBS_IO_ERROR
+};
+enum wallet_cutover_observation_status wallet_sqlite_cutover_observe_completed(
+    struct wallet_sqlite *ws, struct wallet_cutover_binding *out);
 /* Caller owns exclusive access to db and must not have an open transaction.
  * The result describes one read snapshot, not a lease after return. */
 enum wallet_cutover_status wallet_sqlite_cutover_read_snapshot(sqlite3 *db);

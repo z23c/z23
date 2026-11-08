@@ -611,7 +611,7 @@ static bool wss_authority_schema(sqlite3_stmt *s)
     return version == NODE_DB_SCHEMA_LATEST && floor >= WALLET_BOUND_CUTOVER_SCHEMA_VERSION && floor <= version;
 }
 static enum wallet_cutover_authority_status wss_authority_row(sqlite3_stmt *s,
-    const struct wallet_cutover_binding *expected, struct wallet_cutover_binding *value)
+    const struct wallet_cutover_binding *expected, struct wallet_cutover_binding *value, bool observe)
 {
     bool pending = sqlite3_column_int(s, 1) != 0;
     bool marker = sqlite3_column_int(s, 3) != 0;
@@ -624,13 +624,13 @@ static enum wallet_cutover_authority_status wss_authority_row(sqlite3_stmt *s,
         status = WALLET_CUTOVER_AUTH_COMPLETED;
     if (value->history_identity_present && !wss_authority_schema(s))
         return WALLET_CUTOVER_AUTH_MALFORMED;
-    if (wss_authority_mismatch(status, expected, value))
+    if (!observe && wss_authority_mismatch(status, expected, value))
         status = WALLET_CUTOVER_AUTH_MISMATCH;
     return status;
 }
-enum wallet_cutover_authority_status wallet_sqlite_cutover_authority_read(
+static enum wallet_cutover_authority_status wss_authority_read(
     struct wallet_sqlite *ws, const struct wallet_cutover_binding *expected,
-    struct wallet_cutover_binding *out)
+    struct wallet_cutover_binding *out, bool observe)
 {
     struct wallet_cutover_binding wanted;
     if (expected) { wanted = *expected; expected = &wanted; }
@@ -650,14 +650,35 @@ enum wallet_cutover_authority_status wallet_sqlite_cutover_authority_read(
         return WALLET_CUTOVER_AUTH_IO_ERROR;
     enum wallet_cutover_authority_status status = WALLET_CUTOVER_AUTH_IO_ERROR;
     struct wallet_cutover_binding value = {0};
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        status = wss_authority_row(s, expected, &value);
+    if (ar_step_checked(s, "wallet cutover authority: read", NULL) == ZCL_STEP_ROW) {
+        status = wss_authority_row(s, expected, &value, observe);
         if (ar_step_checked(s, "wallet cutover authority: read completion", NULL) != ZCL_STEP_DONE)
             status = WALLET_CUTOVER_AUTH_IO_ERROR;
     }
     if (sqlite3_finalize(s) != SQLITE_OK) status = WALLET_CUTOVER_AUTH_IO_ERROR;
     if (status == WALLET_CUTOVER_AUTH_PENDING || status == WALLET_CUTOVER_AUTH_COMPLETED) *out = value;
     return status;
+}
+
+enum wallet_cutover_authority_status wallet_sqlite_cutover_authority_read(
+    struct wallet_sqlite *ws, const struct wallet_cutover_binding *expected,
+    struct wallet_cutover_binding *out)
+{
+    return wss_authority_read(ws, expected, out, false);
+}
+
+enum wallet_cutover_observation_status wallet_sqlite_cutover_observe_completed(
+    struct wallet_sqlite *ws, struct wallet_cutover_binding *out)
+{
+    struct wallet_cutover_binding value = {0};
+    if (out) memset(out, 0, sizeof(*out));
+    if (!out) return WALLET_CUTOVER_OBS_IO_ERROR;
+    enum wallet_cutover_authority_status status = wss_authority_read(ws, NULL, &value, true);
+    if (status == WALLET_CUTOVER_AUTH_COMPLETED) { *out = value; return WALLET_CUTOVER_OBS_FOUND; }
+    if (status == WALLET_CUTOVER_AUTH_ABSENT) return WALLET_CUTOVER_OBS_ABSENT;
+    if (status == WALLET_CUTOVER_AUTH_PENDING) return WALLET_CUTOVER_OBS_PENDING;
+    if (status == WALLET_CUTOVER_AUTH_MALFORMED) return WALLET_CUTOVER_OBS_MALFORMED;
+    return WALLET_CUTOVER_OBS_IO_ERROR;
 }
 static bool wss_delete_completed(struct wallet_sqlite *ws)
 {
@@ -675,7 +696,7 @@ static bool wss_schema_value(struct wallet_sqlite *ws, const char *key, int32_t 
     sqlite3_stmt *s = NULL;
     if (sqlite3_prepare_v2(ws->db, "SELECT value FROM node_state WHERE key=?", -1, &s, NULL) != SQLITE_OK) return false;
     bool ok = sqlite3_bind_text(s, 1, key, -1, SQLITE_STATIC) == SQLITE_OK &&
-        AR_STEP_ROW_READONLY(s) == SQLITE_ROW && sqlite3_column_type(s, 0) == SQLITE_BLOB &&
+        ar_step_checked(s, "wallet cutover schema: read", NULL) == ZCL_STEP_ROW && sqlite3_column_type(s, 0) == SQLITE_BLOB &&
         sqlite3_column_bytes(s, 0) == (int)sizeof(*value) && sqlite3_column_blob(s, 0);
     if (ok) memcpy(value, sqlite3_column_blob(s, 0), sizeof(*value));
     if (ok) ok = ar_step_checked(s, "wallet cutover schema: read completion", NULL) == ZCL_STEP_DONE;

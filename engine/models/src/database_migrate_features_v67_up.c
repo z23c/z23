@@ -611,29 +611,18 @@ static int db_migrate_step_87(struct node_db *ndb, int *current_ver,
     return 0;
 }
 
-static int db_migrate_step_88(struct node_db *ndb, int *current_ver,
-                              int *floor_ver, int *applied)
+/* Additive wallet schema steps preserve the compatibility floor. */
+static int db_migrate_wallet_additive(struct node_db *ndb, int version, int *current_ver,
+                                      int *floor_ver, int *applied)
 {
-    if (*current_ver >= 88) return 0;
-    if (!node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('088')"))
-        LOG_RETURN(-1, "db", "migrate v88: migration stamp failed");
-    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 88, *floor_ver);
-    *current_ver = 88;
-    (*applied)++;
-    return 0;
-}
-
-/* Additive until a bound wallet fence raises the compatibility floor. */
-static int db_migrate_step_89(struct node_db *ndb, int *current_ver,
-                              int *floor_ver, int *applied)
-{
-    if (*current_ver >= 89) return 0;
-    if (!node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('089')"))
-        LOG_RETURN(-1, "db", "migrate v89: migration stamp failed");
-    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 89, *floor_ver);
-    *current_ver = 89;
+    if (*current_ver >= version) return 0;
+    const char *sql = version == 88 ?
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES('088')" :
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES('089')";
+    if (!node_db_exec(ndb, sql))
+        LOG_RETURN(-1, "db", "migrate v%d: migration stamp failed", version);
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, version, *floor_ver);
+    *current_ver = version;
     (*applied)++;
     return 0;
 }
@@ -648,9 +637,9 @@ static int db_migrate_finish_87(struct node_db *ndb, int *current_ver,
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     if (db_migrate_step_87(ndb, current_ver, floor_ver, applied) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
-    if (db_migrate_step_88(ndb, current_ver, floor_ver, applied) < 0)
+    if (db_migrate_wallet_additive(ndb, 88, current_ver, floor_ver, applied) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
-    if (db_migrate_step_89(ndb, current_ver, floor_ver, applied) < 0)
+    if (db_migrate_wallet_additive(ndb, 89, current_ver, floor_ver, applied) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     *version_out = *current_ver;
     *floor_out = *floor_ver;
