@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: Export validated public block history into private staging. */
 #include "services/wallet_history_export.h"
 #include "services/wallet_history_manifest.h"
 #include "services/block_index_loader.h"

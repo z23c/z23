@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: Declare the private wallet history export contract. */
 #ifndef ZCL_WALLET_HISTORY_EXPORT_H
 #define ZCL_WALLET_HISTORY_EXPORT_H
 #include "net/file_manifest.h"

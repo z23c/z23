@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: Declare immutable history manifest construction. */
 #ifndef ZCL_WALLET_HISTORY_MANIFEST_H
 #define ZCL_WALLET_HISTORY_MANIFEST_H
 #include "net/file_manifest.h"

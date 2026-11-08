@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: Build complete manifests for immutable history files. */
 #include "services/wallet_history_manifest.h"
 #include "crypto/sha3.h"
 #include "util/log_macros.h"
