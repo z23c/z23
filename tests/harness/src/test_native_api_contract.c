@@ -747,7 +747,12 @@ static int test_native_app_catalog_uses_strict_builtin_source(void)
         json_free(&input);
         PASS();
     } _test_next:;
+    return failures;
+}
 
+static int test_native_app_inspect_launch_registry(void)
+{
+    int failures = 0;
     TEST("app.inspect answers for launch-registry Apps that app.list shows") {
         char root[PATH_MAX], tsv[PATH_MAX + 32];
         ASSERT(test_mkdtemp(root, sizeof(root), "app_inspect"));
@@ -4810,6 +4815,7 @@ int test_native_api_contract(void)
     failures += test_missing_required_input_fails_closed_structured();
     failures += test_dev_failure_native_api();
     failures += test_native_app_catalog_uses_strict_builtin_source();
+    failures += test_native_app_inspect_launch_registry();
     failures += test_app_open_accepts_yes();
     failures += test_app_list_pasteable_next();
     failures += test_help_points_to_app_list();
