@@ -53,7 +53,10 @@ static inline bool test_tmpfs_parent_safe(const char *path)
 #endif
 
 #if defined(__linux__)
-static inline bool test_tmpfs_size(const char *path, uint64_t *bytes)
+/* Another group may delete a child between readdir and lstat/opendir; for a
+ * child (is_child) that vanished entry counts as zero bytes, not as an
+ * unavailable usage. The root itself missing is still a refusal. */
+static inline bool test_tmpfs_size_at(const char *path, uint64_t *bytes, bool is_child)
 {
     struct stat st;
     if (lstat(path, &st) != 0) return false;
@@ -64,7 +67,7 @@ static inline bool test_tmpfs_size(const char *path, uint64_t *bytes)
     }
     if (!S_ISDIR(st.st_mode)) return true;
     DIR *dir = opendir(path);
-    if (!dir) return false;
+    if (!dir) return is_child && errno == ENOENT;
     bool ok = true;
     struct dirent *entry;
     for (;;) {
@@ -74,7 +77,7 @@ static inline bool test_tmpfs_size(const char *path, uint64_t *bytes)
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         char child[PATH_MAX];
         int n = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
-        if (n < 0 || (size_t)n >= sizeof(child) || !test_tmpfs_size(child, bytes)) {
+        if (n < 0 || (size_t)n >= sizeof(child) || !test_tmpfs_size_at(child, bytes, true)) {
             ok = false;
             break;
         }
@@ -98,7 +101,7 @@ static inline void test_tmpfs_guard(void)
             limit = (uint64_t)mb * 1024 * 1024;
     }
     uint64_t bytes = 0;
-    if (!test_tmpfs_size(root, &bytes) || bytes >= limit) {
+    if (!test_tmpfs_size_at(root, &bytes, false) || bytes >= limit) {
         fprintf(stderr, "test_parallel: tmpfs limit reached or usage unavailable; using test-tmp for new fixtures\n");
         (void)unsetenv("ZCL_TEST_TMPROOT");
         (void)unsetenv("ZCL_TEST_TMPFS_ACTIVE");

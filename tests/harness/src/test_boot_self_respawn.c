@@ -34,6 +34,10 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #define BSR_CHECK(name, expr) do {                                       \
     if (expr) { printf("  boot_self_respawn: %s... OK\n", (name)); }      \
@@ -109,8 +113,15 @@ int test_boot_self_respawn(void)
 #if !defined(_WIN32)
     bsr_baseline();
     boot_self_respawn_set_argv(fake_argv);
-    char notify_path[256];
-    test_fmt_tmpdir(notify_path, sizeof(notify_path), "boot_self_respawn", "early-notify.sock");
+    /* sd_notify keeps a 108-byte sun_path. A tmpdir under a long checkout
+     * (the test-tmp fallback when the shared tmpfs root is exhausted) does
+     * not fit, so use a short per-process path; nothing binds it. */
+    char notify_path[64];
+    int notify_n = snprintf(notify_path, sizeof(notify_path),
+                            "/tmp/zcl-bsr-%d.sock", (int)getpid());
+    BSR_CHECK("early restart notify path fits sun_path (< 108 bytes)",
+              notify_n > 0 && (size_t)notify_n < sizeof(notify_path) &&
+              strlen(notify_path) < 108);
     setenv("NOTIFY_SOCKET", notify_path, 1);
     BSR_CHECK("early restart detects systemd before services",
               boot_self_respawn_prepare_early() && sd_notify_is_active() &&
