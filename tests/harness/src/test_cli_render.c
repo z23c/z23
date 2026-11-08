@@ -499,6 +499,21 @@ static int test_error_ansi_and_unknown_schema_fallback(void)
 static int test_result_dispatch_precedence(void)
 {
     int failures = 0;
+    TEST("app open prints its sentence on a terminal, nothing for a pipe") {
+        const char *doc =
+            "{\"schema\":\"zcl.result.v1\",\"command\":\"app.open\","
+            "\"ok\":true,\"message\":\"skycombat opened as pid 42 in 900 ms\"}";
+        const char *want = "skycombat opened as pid 42 in 900 ms";
+        struct zcl_cli_render_env e = cr_env(80, false);
+        char out[1024];
+        size_t n = zcl_cli_render_doc(doc, strlen(doc), "app.open", &e, out,
+                                      sizeof(out));
+        ASSERT(n > 0 && out[0] != '{' && strstr(out, want) != NULL);
+        e.human = false;
+        ASSERT(zcl_cli_render_doc(doc, strlen(doc), "app.open", &e, out,
+                                  sizeof(out)) == 0);
+        PASS();
+    }
     TEST("result dispatch preserves error, guide and wiki precedence") {
         const char *wiki =
             "{\"schema\":\"zcl.result.v1\",\"ok\":true,"
