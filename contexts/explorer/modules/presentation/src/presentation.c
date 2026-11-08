@@ -1216,10 +1216,19 @@ static void present_pages_plain_key(struct present_pages_run *run,
              * copy capacity-1 bytes; Windows needs room for its wide NUL). */
             RGFW_writeClipboard(run->request->copy_text, (u32)(copy_len + 1u));
 #if defined(ZCL_TESTING)
+#if defined(__APPLE__)
+            /* RGFW's reader reports an encoding-size upper bound on macOS.
+             * Verify the actual OS pasteboard UTF-8 bytes without that copy. */
+            const char *copied = NSPasteboard_stringForType(
+                NSPasteboard_generalPasteboard(), NSPasteboardTypeString, NULL);
+            present_test_copy_matches = copied && strlen(copied) == copy_len &&
+                !memcmp(copied, run->request->copy_text, copy_len + 1u);
+#else
             char copied[ZCL_PRESENT_COPY_TEXT_MAX + 1u] = {0};
             RGFW_ssize_t length = RGFW_readClipboardPtr(copied, sizeof(copied));
             present_test_copy_matches = length == (RGFW_ssize_t)copy_len &&
                 !memcmp(copied, run->request->copy_text, copy_len + 1u);
+#endif
 #endif
         }
     }
