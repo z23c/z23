@@ -3,6 +3,7 @@
 #ifndef ZCL_CONFIG_BOOT_WALLET_PENDING_RESTORE_H
 #define ZCL_CONFIG_BOOT_WALLET_PENDING_RESTORE_H
 
+#include "core/uint256.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -23,6 +24,16 @@ enum boot_pending_restore_result {
     BOOT_PENDING_RESTORE_AUTHORITY_UNAVAILABLE,
 };
 
+/* Caller owns the read transaction; singleton use also requires the progress
+ * lock. Output is unchanged on failure. */
+struct boot_wallet_frontier {
+    bool generation_present;
+    uint64_t generation;
+    int32_t served, coins;
+    struct uint256 served_hash, coins_hash;
+};
+bool boot_wallet_frontier_read_locked(struct sqlite3 *db, struct boot_wallet_frontier *out);
+bool boot_wallet_frontier_equal(const struct boot_wallet_frontier *a, const struct boot_wallet_frontier *b);
 /* Caller holds the progress-store lock and owns the read transaction. */
 bool boot_wallet_authority_generation(struct sqlite3 *db, bool *present, uint64_t *generation);
 

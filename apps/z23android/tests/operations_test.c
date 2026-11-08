@@ -300,7 +300,8 @@ static int install_child(int argc, char **argv)
         if (strncmp(argv[i], "-install-consensus-bundle=", 26)) continue;
         if (!install_child_args(argc, argv, i)) return 11;
         const char *mode = getenv("ZAPP_TEST_INSTALL");
-        if (mode && !strcmp(mode, "block")) { for (;;) pause(); }
+        if (mode && !strcmp(mode, "silent")) { for (;;) pause(); }
+        if (mode && !strcmp(mode, "block")) { fputs("[boot-phase] PROGRESS block_index.replay 50/100 (50%) rate=1.2MB/s eta=3s\n", stderr); fflush(stderr); for (;;) pause(); }
         return mode && !strcmp(mode, "fail") ? 1 : 0;
     }
     return -1;
@@ -824,23 +825,85 @@ static void install_result_cases(struct zapp_runtime *r, const char *dir)
     assert(unlink(path) == 0);
 }
 
-static void install_stop_case(struct zapp_runtime *r, const char *dir)
+static void install_silent_case(struct zapp_runtime *r, const char *dir)
 {
-    char out[256], path[1200]; int status;
+    char out[256], path[1200];
     install_fixture_file(dir, "install-bundle.request", "install\n");
-    assert(setenv("ZAPP_TEST_INSTALL", "block", 1) == 0);
+    assert(setenv("ZAPP_TEST_INSTALL", "silent", 1) == 0);
     struct install_start_test test = {.runtime = r}; pthread_t thread;
     assert(pthread_create(&thread, NULL, install_start_thread, &test) == 0);
+    struct zapp_replay_progress progress = {0}; bool has = false, active = false;
+    for (int i = 0; i < 500 && !active; ++i) {
+        active = zapp_installer_observe(r, &progress, &has);
+        if (!active) { struct timespec delay = {.tv_nsec = 10000000}; nanosleep(&delay, NULL); }
+    }
+    assert(active && !has);
+    assert(zapp_node_stop(r, out, sizeof(out)));
+    assert(pthread_join(thread, NULL) == 0 && !test.ok);
+    assert(!zapp_installer_observe(r, &progress, &has) && !has);
+    assert(unsetenv("ZAPP_TEST_INSTALL") == 0);
+    snprintf(path, sizeof(path), "%s/install-bundle.consumed", dir); assert(unlink(path) == 0);
+}
+static void install_identity_cases(struct zapp_runtime *r, struct zapp_replay_progress *progress, bool *has)
+{
+    pthread_mutex_lock(&r->mutex);
+    ++r->installer_epoch;
+    assert(!zapp_installer_observe_locked(r, progress, has) && !*has);
+    --r->installer_epoch;
+    bool log_started = r->installer_log.started;
+    r->installer_log.started = false;
+    assert(zapp_installer_observe_locked(r, progress, has) && !*has);
+    r->installer_log.started = log_started;
+    pid_t log_pid = r->installer_log.pid;
+    ++r->installer_log.pid;
+    assert(zapp_installer_observe_locked(r, progress, has) && !*has);
+    r->installer_log.pid = log_pid;
+    pthread_mutex_unlock(&r->mutex);
+}
+static bool install_wait_started(struct zapp_runtime *r)
+{
     bool started = false;
     for (int i = 0; i < 500 && !started; ++i) {
         pthread_mutex_lock(&r->mutex); started = r->installer > 0; pthread_mutex_unlock(&r->mutex);
         if (!started) { struct timespec delay = {.tv_nsec = 10000000}; nanosleep(&delay, NULL); }
     }
+    return started;
+}
+static void install_wait_progress(struct zapp_runtime *r, struct zapp_replay_progress *progress, bool *has)
+{
+    bool found = false;
+    for (int i = 0; i < 500 && !found; ++i) {
+        assert(zapp_installer_observe(r, progress, has));
+        found = *has;
+        if (!found) { struct timespec delay = {.tv_nsec = 10000000}; nanosleep(&delay, NULL); }
+    }
+    assert(found && progress->phase == ZAPP_REPLAY_BLOCK_INDEX && progress->next == 50);
+}
+static void install_stop_case(struct zapp_runtime *r, const char *dir)
+{
+    char out[256], path[1200]; int status;
+    snprintf(path, sizeof(path), "%s/app-console.log", dir);
+    int prior = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    assert(prior >= 0);
+    static const char stale[] = "[boot-phase] PROGRESS block_index.replay 99/100 (99%) rate=1.0MB/s eta=1s\n";
+    assert(write(prior, stale, sizeof(stale) - 1) == (ssize_t)(sizeof(stale) - 1));
+    assert(close(prior) == 0);
+    assert(zapp_nodelog_start(&r->log, path, 0, getpid(), ZAPP_CONSOLE_CAP));
+    install_fixture_file(dir, "install-bundle.request", "install\n");
+    assert(setenv("ZAPP_TEST_INSTALL", "block", 1) == 0);
+    struct install_start_test test = {.runtime = r}; pthread_t thread;
+    assert(pthread_create(&thread, NULL, install_start_thread, &test) == 0);
+    bool started = install_wait_started(r);
     assert(started && zapp_node_installing(r) && zapp_node_running(r) && atomic_load(&r->setup_running));
+    assert(!r->log.started);
+    struct zapp_replay_progress progress = {0}; bool has = false;
+    install_wait_progress(r, &progress, &has);
+    install_identity_cases(r, &progress, &has);
     uint64_t other_ticket = 0;
     assert(!zapp_node_start_reserve(r, &other_ticket, out, sizeof(out)));
     uint64_t old_epoch = r->start_epoch;
     assert(zapp_node_stop(r, out, sizeof(out)) && r->start_epoch != old_epoch);
+    assert(!zapp_installer_observe(r, &progress, &has) && !has);
     assert(pthread_join(thread, NULL) == 0 && !test.ok && !zapp_node_installing(r));
     assert(unsetenv("ZAPP_TEST_INSTALL") == 0);
     assert(zapp_node_start(r, out, sizeof(out)));
@@ -869,6 +932,7 @@ static void install_cases(struct zapp_runtime *r, const char *dir)
 {
     install_validation_cases(r, dir);
     install_result_cases(r, dir);
+    install_silent_case(r, dir);
     install_stop_case(r, dir);
     install_crash_case(r, dir);
 }

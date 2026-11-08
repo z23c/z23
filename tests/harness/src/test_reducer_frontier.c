@@ -13,6 +13,7 @@
 #include "config/db_service.h"
 #include "config/runtime.h"
 #include "jobs/reducer_frontier.h"
+#include "jobs/stage_row_itag.h"
 #include "jobs/refold_progress.h"
 #include "models/database.h"
 #include "storage/progress_store.h"
@@ -2917,10 +2918,50 @@ static int case_compute_rejects_null_arguments(void)
     return failures;
 }
 
+static bool rf_receipt_snapshot_pair(sqlite3 *db, const uint8_t hash[32])
+{
+    uint8_t got[32]; bool found = false;
+    if (sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) return false;
+    bool ok = reducer_frontier_header_receipt(db, 5) == REDUCER_HEADER_RECEIPT_PASS &&
+        reducer_frontier_log_hash_at(db, "validate_headers_log", "hash", 5, got, &found) &&
+        found && memcmp(got, hash, 32) == 0;
+    return sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK && ok;
+}
+static int case_header_receipt_snapshot(void)
+{
+    int failures = 0; sqlite3 *db = NULL; uint8_t hash[32];
+    synth_hash(hash, 5, 0);
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+    RF_CHECK("header receipt schema", build_schema(db));
+    RF_CHECK("header receipt seed", put_log_row(db, "validate_headers_log", "hash", 5, 1, hash, NULL));
+    RF_CHECK("header receipt absent", reducer_frontier_header_receipt(db, 6) == REDUCER_HEADER_RECEIPT_ABSENT);
+    RF_CHECK("header receipt legacy pass", reducer_frontier_header_receipt(db, 5) == REDUCER_HEADER_RECEIPT_PASS);
+    RF_CHECK("header receipt same snapshot hash", rf_receipt_snapshot_pair(db, hash));
+    RF_CHECK("header receipt add tag", sqlite3_exec(db, "ALTER TABLE validate_headers_log ADD COLUMN itag BLOB", NULL, NULL, NULL) == SQLITE_OK);
+    uint8_t tag[STAGE_ROW_ITAG_LEN]; stage_row_itag_compute("validate_headers_log", 5, 1, NULL, 0, tag);
+    sqlite3_stmt *st = NULL;
+    bool seeded = sqlite3_prepare_v2(db, "UPDATE validate_headers_log SET itag=? WHERE height=5", -1, &st, NULL) == SQLITE_OK;
+    if (seeded) seeded = sqlite3_bind_blob(st, 1, tag, sizeof(tag), SQLITE_STATIC) == SQLITE_OK && sqlite3_step(st) == SQLITE_DONE;
+    if (st && sqlite3_finalize(st) != SQLITE_OK) seeded = false;
+    RF_CHECK("header receipt tag seeded", seeded);
+    RF_CHECK("header receipt tagged pass", reducer_frontier_header_receipt(db, 5) == REDUCER_HEADER_RECEIPT_PASS);
+    RF_CHECK("header receipt zero verdict", sqlite3_exec(db, "UPDATE validate_headers_log SET ok=0 WHERE height=5", NULL, NULL, NULL) == SQLITE_OK &&
+        reducer_frontier_header_receipt(db, 5) == REDUCER_HEADER_RECEIPT_FAIL);
+    RF_CHECK("header receipt tag mismatch", sqlite3_exec(db, "UPDATE validate_headers_log SET ok=1,itag=zeroblob(16) WHERE height=5", NULL, NULL, NULL) == SQLITE_OK &&
+        reducer_frontier_header_receipt(db, 5) == REDUCER_HEADER_RECEIPT_FAIL);
+    RF_CHECK("header receipt legacy null tag", sqlite3_exec(db, "UPDATE validate_headers_log SET itag=NULL WHERE height=5", NULL, NULL, NULL) == SQLITE_OK &&
+        reducer_frontier_header_receipt(db, 5) == REDUCER_HEADER_RECEIPT_PASS);
+    RF_CHECK("header receipt read error", sqlite3_exec(db, "DROP TABLE validate_headers_log", NULL, NULL, NULL) == SQLITE_OK &&
+        reducer_frontier_header_receipt(db, 5) == REDUCER_HEADER_RECEIPT_ERROR);
+    if (sqlite3_close(db) != SQLITE_OK) failures++;
+    return failures;
+}
+
 int test_reducer_frontier(void)
 {
     int failures = 0;
     printf("\n--- reducer_frontier (L0 H* authority) ---\n");
+    failures += case_header_receipt_snapshot();
     failures += case_body_read_repair_note();
     failures += case_derived_stage_cursor_equivalence();
     failures += case_partial_authority_does_not_enable_compiled_floor();

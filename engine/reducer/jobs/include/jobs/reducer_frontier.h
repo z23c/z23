@@ -348,6 +348,12 @@ bool reducer_frontier_log_hash_at(
     bool *found                     /* OUT: row + non-NULL 32B hash present */
 );
 
+/* Exact header-log verdict using the canonical ok/itag policy. Caller owns a
+ * read transaction; an independent reader may be used. ERROR is never absence. */
+enum reducer_header_receipt { REDUCER_HEADER_RECEIPT_ERROR, REDUCER_HEADER_RECEIPT_ABSENT,
+    REDUCER_HEADER_RECEIPT_FAIL, REDUCER_HEADER_RECEIPT_PASS };
+enum reducer_header_receipt reducer_frontier_header_receipt(sqlite3 *progress_db, int32_t height);
+
 /* MIN(height) over a stage log — the oldest height the log still covers.
  * The stage logs are rolling WINDOWS (rows below the window get pruned /
  * were never written under an anchor seed), so a height BELOW this floor

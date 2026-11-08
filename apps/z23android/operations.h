@@ -30,6 +30,8 @@ struct zapp_runtime {
     enum zapp_pace pace;
     /* Forwards the node console log to logcat and tracks its boot stage. */
     struct zapp_nodelog log;
+    struct zapp_nodelog installer_log;
+    uint64_t installer_epoch, installer_generation;
     /* The largest app-console.log kept before it is rotated or truncated; 0 means ZAPP_CONSOLE_CAP. Tests set it small. */
     off_t console_cap;
     /* The limit of a read command in milliseconds; 0 means 15 s. Tests set it short. */
@@ -53,6 +55,9 @@ void zapp_runtime_signal_stop(struct zapp_runtime *r);
 void zapp_runtime_destroy(struct zapp_runtime *r);
 bool zapp_node_running(struct zapp_runtime *r);
 bool zapp_node_installing(struct zapp_runtime *r);
+/* A true return binds this snapshot to the active installer ticket. */
+bool zapp_installer_observe(struct zapp_runtime *r, struct zapp_replay_progress *out, bool *has_progress);
+bool zapp_installer_observe_locked(struct zapp_runtime *r, struct zapp_replay_progress *out, bool *has_progress);
 /* Setup waits until a reserved or executing start has fully stopped. */
 bool zapp_node_start_pending(struct zapp_runtime *r);
 /* Setup's single snapshot for a node or a start in progress. */

@@ -74,6 +74,49 @@ bool zapp_fleet_preview_text(const char *s, char *p, size_t n)
 const char *zapp_json_object(const char *s) { (void)s; return NULL; }
 void zapp_plain_text(char *s, size_t n) { (void)s; (void)n; }
 
+static bool fixture_progress;
+bool zapp_installer_observe_locked(struct zapp_runtime *r, struct zapp_replay_progress *out, bool *has)
+{
+    bool active = r->installer > 0 && !r->stopping && !atomic_load(&r->start_cancel) &&
+        r->installer_epoch == r->start_epoch;
+    *has = active && fixture_progress;
+    if (*has) *out = (struct zapp_replay_progress){.phase = ZAPP_REPLAY_BLOCK_INDEX, .next = 50};
+    return active;
+}
+void zapp_nodelog_replay_text(const struct zapp_replay_progress *p, char *out, size_t cap)
+{ snprintf(out, cap, "Preparing block index: %lld%%", (long long)p->next); }
+const char *zapp_suggestion(bool paired, bool responding, int64_t height, int64_t target, int64_t peers,
+                            const char *report, const char *asked, char *out, size_t cap)
+{
+    (void)paired; (void)height; (void)target; (void)peers; (void)report; (void)asked;
+    snprintf(out, cap, "%s", responding ? "current" : "checking");
+    return out;
+}
+static void installer_view_case(void)
+{
+    static struct controller test;
+    assert(!pthread_mutex_init(&test.lock, NULL));
+    assert(!pthread_mutex_init(&test.runtime.mutex, NULL));
+    test.runtime.installer = 123; test.runtime.start_epoch = test.runtime.installer_epoch = 7;
+    test.view.node_running = true; test.view.chain_state = ZAPP_CHAIN_CURRENT;
+    test.view.node_reference = 100; test.seen_responding = true;
+    snprintf(test.view.node_line, sizeof(test.view.node_line), "Node in sync");
+    fixture_progress = false;
+    assert(observe_installer(&test));
+    assert(test.view.node_installing && !test.view.node_stopping && !test.view.node_running);
+    assert(test.view.chain_state == ZAPP_CHAIN_NONE && test.view.node_reference == -1 && !test.seen_responding);
+    assert(!strcmp(test.view.node_line, "Node starting") && !test.view.node_wallet_replaying);
+    fixture_progress = true;
+    assert(observe_installer(&test));
+    assert(test.view.node_wallet_replaying && strstr(test.view.node_wallet_replay, "50%"));
+    atomic_store(&test.runtime.start_cancel, true); ++test.runtime.start_epoch;
+    assert(observe_installer(&test));
+    assert(test.view.node_installing && test.view.node_stopping && !test.view.node_wallet_replaying);
+    assert(!strcmp(test.view.node_line, "Node stopping") && test.view.node_wallet_replay[0] == 0);
+    assert(test.view.chain_state == ZAPP_CHAIN_NONE && !test.seen_responding);
+    pthread_mutex_destroy(&test.runtime.mutex); pthread_mutex_destroy(&test.lock);
+}
+
 static struct controller c;
 static pthread_mutex_t gate = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
@@ -103,7 +146,7 @@ static void status_cases(void)
     static const char good[] = "{\"ok\":true,\"data\":{\"provable_tip\":1,\"restart_pending\":true,\"restart_bundle_height\":42,\"restart_bundle_bytes\":100,\"restart_bundle_digest\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}";
     struct node_reading n = read_status(good);
     assert(n.responding && n.restart_pending && strlen(n.digest) == 64);
-    struct controller test = {0};
+    static struct controller test;
     test.pace_lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
     struct zapp_node_identity id = {.pid = 10, .epoch = 4};
     handoff_offer_locked(&test, &n, &id, true, true, ZAPP_PACE_PAUSE);
@@ -134,6 +177,17 @@ static void allocation_failure_case(void)
 
 int main(void)
 {
+    installer_view_case();
+    struct zapp_runtime delayed = {0};
+    delayed.start_epoch = 10; delayed.installer_generation = 20;
+    uint64_t epoch = delayed.start_epoch, generation = delayed.installer_generation;
+    assert(status_current_locked(&delayed, epoch, generation));
+    delayed.installer = 123; ++delayed.installer_generation;
+    assert(!status_current_locked(&delayed, epoch, generation));
+    delayed.installer = 0;
+    assert(!status_current_locked(&delayed, epoch, generation));
+    generation = delayed.installer_generation; ++delayed.start_epoch;
+    assert(!status_current_locked(&delayed, epoch, generation));
     status_cases();
     assert(zapp_fleet_node_state(false, false, false, false) == ZAPP_FLEET_NODE_START);
     assert(zapp_fleet_node_state(false, false, false, true) == ZAPP_FLEET_NODE_WAIT);

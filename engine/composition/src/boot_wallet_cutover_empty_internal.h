@@ -19,4 +19,7 @@ bool boot_wallet_cutover_full_empty_locked(struct wallet_sqlite *ws,
     sqlite3 *db, const struct wallet *wallet, bool sapling_load_ok);
 bool boot_wallet_cutover_shielded_empty_locked(struct wallet_sqlite *ws,
     sqlite3 *db, const struct wallet *wallet, bool sapling_load_ok);
+/* Caller owns an open transaction and holds the connection, wallet and both keystore locks. */
+bool boot_wallet_cutover_notes_empty_locked(struct wallet_sqlite *ws,
+    sqlite3 *db, const struct wallet *wallet, bool sapling_load_ok);
 #endif

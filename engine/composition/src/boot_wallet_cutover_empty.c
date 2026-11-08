@@ -38,6 +38,31 @@ bool boot_wallet_cutover_shielded_empty_locked(struct wallet_sqlite *ws,
     return bce_no_shielded_rows(db);
 }
 
+static bool boot_wallet_notes_empty_inputs(struct wallet_sqlite *ws,
+    sqlite3 *db, const struct wallet *wallet, bool sapling_load_ok)
+{
+    return sapling_load_ok && ws && ws->open && db && ws->db == db && !sqlite3_get_autocommit(db) && wallet &&
+        !wallet->num_sapling_notes && wallet->sapling_notes_cap <= MAX_SAPLING_NOTES &&
+        (!wallet->sapling_notes_cap || wallet->sapling_notes);
+}
+
+bool boot_wallet_cutover_notes_empty_locked(struct wallet_sqlite *ws,
+    sqlite3 *db, const struct wallet *wallet, bool sapling_load_ok)
+{
+    if (!boot_wallet_notes_empty_inputs(ws, db, wallet, sapling_load_ok)) return false;
+    for (size_t i = 0; i < wallet->sapling_notes_cap; ++i)
+        if (wallet->sapling_notes[i].used) return false;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT EXISTS(SELECT 1 FROM wallet_sapling_notes)", -1, &stmt, NULL) != SQLITE_OK || !stmt) {
+        if (stmt) sqlite3_finalize(stmt);
+        return false;
+    }
+    bool empty = ar_step_checked(stmt, "wallet notes empty proof", NULL) == ZCL_STEP_ROW &&
+        sqlite3_column_type(stmt, 0) == SQLITE_INTEGER && sqlite3_column_int(stmt, 0) == 0 &&
+        ar_step_checked(stmt, "wallet notes empty proof completion", NULL) == ZCL_STEP_DONE;
+    return sqlite3_finalize(stmt) == SQLITE_OK && empty;
+}
+
 static bool bce_no_wallet_rows(sqlite3 *db)
 {
     static const char query[] =

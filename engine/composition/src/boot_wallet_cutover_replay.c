@@ -10,6 +10,7 @@
 #include "util/log_macros.h"
 #include "validation/main_state.h"
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef ZCL_TESTING
@@ -356,6 +357,39 @@ static bool bcr_shielded_empty(struct boot_cutover_replay *r)
     return empty;
 }
 
+static bool bcr_notes_end_read(sqlite3 *db, bool opened, bool empty)
+{
+    if (opened && sqlite3_exec(db, empty ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) {
+        if (!sqlite3_get_autocommit(db) && sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK)
+            LOG_ERROR("wallet", "notes-empty proof rollback failed: %s", sqlite3_errmsg(db));
+        empty = false;
+    }
+    if (opened && !sqlite3_get_autocommit(db)) abort();
+    return empty;
+}
+
+static bool bcr_notes_empty(struct boot_cutover_replay *r)
+{
+    struct wallet *w = r->ctx->wallet;
+    sqlite3 *db = r->ctx->node_db->db;
+    sqlite3_mutex *mu = db ? sqlite3_db_mutex(db) : NULL;
+    if (!mu || sqlite3_mutex_try(mu) != SQLITE_OK) return false;
+    bool wallet_locked = zcl_mutex_trylock(&w->cs);
+    bool key_locked = wallet_locked && zcl_mutex_trylock(&w->keystore.cs);
+    bool sapling_locked = key_locked && zcl_mutex_trylock(&w->sapling_keys.cs);
+    bool opened = sapling_locked && sqlite3_get_autocommit(db) &&
+        sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK;
+    bool empty = opened && wallet_sqlite_verify_startup_sapling_in_tx_locked_r(
+        r->ctx->wallet_db, w, db).ok && boot_wallet_cutover_notes_empty_locked(
+        r->ctx->wallet_db, db, w, r->sapling_load_ok);
+    empty = bcr_notes_end_read(db, opened, empty);
+    if (sapling_locked) zcl_mutex_unlock(&w->sapling_keys.cs);
+    if (key_locked) zcl_mutex_unlock(&w->keystore.cs);
+    if (wallet_locked) zcl_mutex_unlock(&w->cs);
+    sqlite3_mutex_leave(mu);
+    return empty;
+}
+
 static bool bcr_can_complete_empty(struct boot_cutover_replay *r)
 {
     return r->phase == BOOT_CUTOVER_DISCOVER && bcr_shielded_empty(r);
@@ -408,6 +442,20 @@ static enum boot_cutover_replay_status bcr_skip_transparent(struct boot_cutover_
     return BOOT_CUTOVER_PROGRESS;
 }
 
+static enum boot_cutover_replay_status bcr_complete_empty_spends(struct boot_cutover_replay *r)
+{
+    enum boot_cutover_replay_status current = bcr_current(r);
+    if (current == BOOT_CUTOVER_BUSY) return current;
+    if (current != BOOT_CUTOVER_PROGRESS) { r->phase = BOOT_CUTOVER_INVALIDATED; return BOOT_CUTOVER_STALE; }
+    r->spends_empty = true; r->phase = BOOT_CUTOVER_DONE;
+    return BOOT_CUTOVER_COMPLETE;
+}
+
+static bool bcr_can_complete_empty_spends(struct boot_cutover_replay *r)
+{
+    return r->phase == BOOT_CUTOVER_SPENDS && r->next == r->floor && bcr_notes_empty(r);
+}
+
 enum boot_cutover_replay_status boot_cutover_replay_step(struct boot_cutover_replay *r)
 {
     if (!r) return BOOT_CUTOVER_INVALID;
@@ -424,6 +472,9 @@ enum boot_cutover_replay_status boot_cutover_replay_step(struct boot_cutover_rep
         return bcr_advance(r, r->pending_end);
     }
     if (bcr_can_complete_empty(r)) return bcr_complete_empty(r);
+    if (bcr_can_complete_empty_spends(r)) {
+        return bcr_complete_empty_spends(r);
+    }
     if (r->phase == BOOT_CUTOVER_TRANSPARENT && bcr_transparent_empty(r))
         return bcr_skip_transparent(r);
 #ifdef ZCL_TESTING

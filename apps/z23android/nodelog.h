@@ -20,7 +20,7 @@
 typedef void (*zapp_nodelog_sink)(void *arg, int level, const char *text);
 
 enum zapp_replay_phase { ZAPP_REPLAY_NONE, ZAPP_REPLAY_TRANSPARENT, ZAPP_REPLAY_DISCOVER,
-    ZAPP_REPLAY_WITNESS, ZAPP_REPLAY_SPENDS };
+    ZAPP_REPLAY_WITNESS, ZAPP_REPLAY_SPENDS, ZAPP_REPLAY_BLOCK_INDEX };
 struct zapp_replay_progress { enum zapp_replay_phase phase; int64_t floor, next, reference; };
 
 struct zapp_nodelog {

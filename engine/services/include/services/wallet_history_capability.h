@@ -5,6 +5,12 @@
 #include "platform/directory_transaction.h"
 #include "util/result.h"
 #include <stdint.h>
+struct wallet_history_names {
+    char root[140], stage[145], lock[144];
+};
+static_assert(sizeof(((struct wallet_history_names *)0)->stage) >= 145, "history stage leaf fits");
+struct zcl_result wallet_history_capability_names(const uint8_t snapshot[32], const uint8_t root[32],
+                                     struct wallet_history_names *out);
 struct wallet_history_capability {
     struct platform_directory_transaction parent, root, blocks;
     struct platform_directory_lock lease;

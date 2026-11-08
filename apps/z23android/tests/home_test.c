@@ -78,6 +78,10 @@ static void plain_node_line_states(void)
     assert(node_line_is(&view, "Node stopped"));
     view.node_installing = true;
     assert(node_line_is(&view, "Fast sync\\nPreparing your wallet"));
+    view.node_wallet_replaying = true;
+    snprintf(view.node_wallet_replay, sizeof(view.node_wallet_replay), "Preparing block index: 100%%");
+    assert(node_line_is(&view, "Fast sync\\nPreparing block index: 100%"));
+    view.node_wallet_replaying = false;
     view.node_stopping = true;
     assert(node_line_is(&view, "Stopping…\\nYou can use Z23"));
     view.node_installing = false; view.node_stopping = false;

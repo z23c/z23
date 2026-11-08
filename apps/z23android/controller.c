@@ -355,8 +355,64 @@ static struct zapp_chain_evidence observe_chain_evidence(struct controller *c, c
     return evidence;
 }
 
+/* Caller holds runtime.mutex. */
+static bool status_current_locked(const struct zapp_runtime *r, uint64_t epoch, uint64_t generation)
+{
+    return epoch == r->start_epoch && generation == r->installer_generation && r->installer <= 0;
+}
+/* Installer is a terminal child, not a responding node. */
+static bool observe_installer(struct controller *c)
+{
+    struct zapp_replay_progress progress = {0};
+    bool has_progress = false;
+    pthread_mutex_lock(&c->lock);
+    pthread_mutex_lock(&c->runtime.mutex);
+    bool active = zapp_installer_observe_locked(&c->runtime, &progress, &has_progress);
+    bool stopping = !active && c->runtime.installer > 0;
+    if (!active && !stopping) {
+        pthread_mutex_unlock(&c->runtime.mutex);
+        pthread_mutex_unlock(&c->lock);
+        return false;
+    }
+    c->view.node_running = false;
+    c->view.node_process_running = true;
+    c->view.node_installing = true;
+    c->view.node_stopping = stopping;
+    c->view.node_serving = false;
+    c->view.chain_state = ZAPP_CHAIN_NONE;
+    c->view.node_reference = -1;
+    c->view.chain_doubt[0] = 0;
+    c->view.node_height = -1;
+    c->seen_responding = false;
+    c->seen_height = c->seen_target = c->seen_peers = -1;
+    copy_text(c->view.node_line, sizeof(c->view.node_line), stopping ? "Node stopping" : "Node starting");
+    c->view.node_wallet_replaying = active && has_progress;
+    c->view.node_wallet_replay[0] = 0;
+    if (active && has_progress) zapp_nodelog_replay_text(&progress, c->view.node_wallet_replay,
+                                                sizeof(c->view.node_wallet_replay));
+    copy_text(c->view.sync_status, sizeof(c->view.sync_status), stopping ?
+              "The node is saving its data before it exits." : "Preparing your wallet.");
+    pthread_mutex_unlock(&c->runtime.mutex);
+    refresh_suggestion(c);
+    pthread_mutex_unlock(&c->lock);
+    notify_view(c);
+    return true;
+}
+static void observe_replay_status(bool responding, bool running, bool stopping, bool replaying,
+                                  const struct zapp_replay_progress *replay, char *status, size_t cap)
+{
+    if (zapp_nodelog_replay_visible(responding, running, stopping, replaying))
+        zapp_nodelog_replay_text(replay, status, cap);
+    if (stopping) copy_text(status, cap, "The node is saving its data before it exits.");
+}
 static void observe_node(struct controller *c)
 {
+    if (observe_installer(c)) return;
+    pthread_mutex_lock(&c->runtime.mutex);
+    uint64_t status_epoch = c->runtime.start_epoch, install_generation = c->runtime.installer_generation;
+    bool installing_at_capture = c->runtime.installer > 0;
+    pthread_mutex_unlock(&c->runtime.mutex);
+    if (installing_at_capture) { (void)observe_installer(c); return; }
     struct zapp_node_identity observed = {0};
     bool managed = zapp_node_identity(&c->runtime, &observed);
     char *output = calloc(1, ZAPP_TEXT_CAP);
@@ -376,13 +432,26 @@ static void observe_node(struct controller *c)
     char status[1024], line[96];
     struct zapp_chain_evidence evidence = observe_chain_evidence(c, &n);
     zapp_sync_line(n.responding, process_running, n.height, n.target, n.peers, &evidence, status, sizeof(status));
-    if (zapp_nodelog_replay_visible(n.responding, process_running, stopping, replaying))
-        zapp_nodelog_replay_text(&replay, status, sizeof(status));
-    if (stopping) copy_text(status, sizeof(status), "The node is saving its data before it exits.");
+    observe_replay_status(n.responding, process_running, stopping, replaying, &replay, status, sizeof(status));
     zapp_node_line(n.responding, process_running, stopping, onion, n.height, n.target, n.peers, &evidence, line, sizeof(line));
+    struct zapp_chain_status chain = zapp_chain_check(n.height, n.target, n.peers, &evidence);
     pthread_mutex_lock(&c->lock);
+    pthread_mutex_lock(&c->runtime.mutex);
+    bool current = status_current_locked(&c->runtime, status_epoch, install_generation);
+    pthread_mutex_unlock(&c->runtime.mutex);
+    if (!current) {
+        zapp_node_identity_close(&observed);
+        pthread_mutex_unlock(&c->lock);
+        return;
+    }
     handoff_offer_locked(c, &n, &observed, managed, wanted, pace);
     zapp_node_identity_close(&observed);
+    pthread_mutex_lock(&c->runtime.mutex);
+    if (!status_current_locked(&c->runtime, status_epoch, install_generation)) {
+        pthread_mutex_unlock(&c->runtime.mutex);
+        pthread_mutex_unlock(&c->lock);
+        return;
+    }
     c->view.node_running = n.responding;
     c->view.node_process_running = process_running;
     c->view.node_installing = installing;
@@ -395,7 +464,6 @@ static void observe_node(struct controller *c)
     c->view.node_wanted = wanted;
     c->view.node_stopping = stopping;
     c->view.node_serving = serving;
-    struct zapp_chain_status chain = zapp_chain_check(n.height, n.target, n.peers, &evidence);
     c->view.chain_state = chain.state;
     c->view.node_reference = chain.reference;
     snprintf(c->view.chain_doubt, sizeof(c->view.chain_doubt), "%s", chain.reason);
@@ -405,6 +473,7 @@ static void observe_node(struct controller *c)
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), restart ? restart : status);
     copy_text(c->view.node_line, sizeof(c->view.node_line), line);
     c->seen_responding = n.responding; c->seen_height = n.height; c->seen_target = n.target; c->seen_peers = n.peers;
+    pthread_mutex_unlock(&c->runtime.mutex);
     refresh_suggestion(c);
     pthread_mutex_unlock(&c->lock);
     notify_view(c);

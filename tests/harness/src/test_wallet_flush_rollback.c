@@ -1180,6 +1180,124 @@ static bool wfr_tracked_one(int mode, bool bound)
     return ok;
 }
 
+struct wfr_plan_commit_check { struct wallet *wallet; int old_depth; bool deny, reached, intact; };
+static int wfr_plan_commit_authorizer(void *opaque, int action, const char *a, const char *b,
+    const char *c, const char *d)
+{
+    (void)b; (void)c; (void)d;
+    struct wfr_plan_commit_check *check = opaque;
+    if (action != SQLITE_TRANSACTION || !a || strcmp(a, "COMMIT")) return SQLITE_OK;
+    check->reached = true;
+    check->intact = check->wallet->best_block_height == 10 &&
+        check->wallet->map_wallet[0].confirms == check->old_depth;
+    return check->deny ? SQLITE_DENY : SQLITE_OK;
+}
+
+static bool wfr_planned_row_matches(sqlite3_stmt *stmt, const struct uint256 *tx,
+    const struct uint256 *block, int64_t time, bool from, const unsigned char *raw, int raw_len)
+{
+    return sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 7 &&
+        sqlite3_column_bytes(stmt, 1) == 32 && !memcmp(sqlite3_column_blob(stmt, 1), tx->data, 32) &&
+        sqlite3_column_bytes(stmt, 2) == 32 && !memcmp(sqlite3_column_blob(stmt, 2), block->data, 32) &&
+        sqlite3_column_int64(stmt, 3) == time && sqlite3_column_int(stmt, 4) == (int)from &&
+        sqlite3_column_type(stmt, 5) == SQLITE_BLOB && sqlite3_column_bytes(stmt, 5) == raw_len &&
+        sqlite3_column_blob(stmt, 5) && !memcmp(sqlite3_column_blob(stmt, 5), raw, (size_t)raw_len) &&
+        sqlite3_column_type(stmt, 6) == SQLITE_INTEGER && sqlite3_column_int64(stmt, 6) == 4321 &&
+        sqlite3_step(stmt) == SQLITE_DONE;
+}
+
+static bool wfr_planned_wallet_fields_match(struct wallet *w, const struct uint256 *tx,
+    const struct uint256 *block, int64_t time, bool from)
+{
+    return !memcmp(w->map_wallet[0].tx.hash.data, tx->data, 32) &&
+        !memcmp(w->map_wallet[0].hash_block.data, block->data, 32) &&
+        w->map_wallet[0].time_received == time && w->map_wallet[0].from_me == from;
+}
+
+static bool wfr_planned_state_matches(struct wfr_fixture *f, struct wfr_tracked_ctx *ctx,
+    struct wfr_plan_commit_check *check, struct zcl_result result, bool deny_commit, int old_depth,
+    const struct uint256 *original_tx, const struct uint256 *original_block,
+    int64_t original_time, bool original_from)
+{
+    struct wallet_cutover_binding observed;
+    return check->reached && check->intact && result.ok == !deny_commit && sqlite3_get_autocommit(f->db) &&
+        wfr_planned_wallet_fields_match(f->w, original_tx, original_block, original_time, original_from) &&
+        ctx->delivery.committed == !deny_commit &&
+        f->w->map_wallet[0].confirms == (deny_commit ? old_depth : 14) &&
+        f->w->best_block_height == (deny_commit ? 10 : 20) &&
+        wallet_readiness_get(f->w).state == (deny_commit ? WALLET_READINESS_PENDING : WALLET_READINESS_READY) &&
+        wallet_sqlite_cutover_read(&f->ws, &observed) == (deny_commit ? WALLET_CUTOVER_PENDING : WALLET_CUTOVER_ABSENT);
+}
+
+static bool wfr_planned_capture_raw(sqlite3 *db, bool ok, unsigned char **raw, int *raw_len)
+{
+    sqlite3_stmt *before = NULL;
+    if (ok) ok = sqlite3_exec(db, "UPDATE wallet_transactions SET fee=4321", NULL, NULL, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(db, "SELECT raw_tx,fee FROM wallet_transactions", -1, &before, NULL) == SQLITE_OK &&
+        sqlite3_step(before) == SQLITE_ROW && sqlite3_column_type(before, 0) == SQLITE_BLOB &&
+        sqlite3_column_int64(before, 1) == 4321;
+    if (ok) {
+        *raw_len = sqlite3_column_bytes(before, 0);
+        const void *bytes = sqlite3_column_blob(before, 0);
+        *raw = *raw_len > 0 ? malloc((size_t)*raw_len) : NULL;
+        if (!*raw || !bytes) ok = false; else memcpy(*raw, bytes, (size_t)*raw_len);
+    }
+    if (before && sqlite3_finalize(before) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool wfr_planned_check_reference(struct wfr_fixture *f, bool deny_commit)
+{
+    int reference = -1;
+    return wallet_sqlite_height_encoding(&f->ws, &reference) == WALLET_HEIGHT_V2 &&
+        reference == (deny_commit ? 10 : 20) && wfr_bound_authority(&f->ws, &f->b, !deny_commit);
+}
+
+static void wfr_planned_cleanup(struct wfr_fixture *f, struct node_db *ndb,
+    struct wfr_tracked_ctx *ctx, struct wallet_cutover_v2_plan *plan, unsigned char *raw)
+{
+    free(raw);
+    db_wallet_utxo_cutover_delivery_clear(&ctx->delivery);
+    wallet_cutover_v2_plan_free(plan);
+    if (f->ws.open) wallet_sqlite_close(&f->ws);
+    if (ndb->open) node_db_close(ndb);
+    free_wallet_t(f->w); test_rm_rf(f->dir);
+}
+
+static bool wfr_planned_depth_case(bool deny_commit, int old_depth)
+{
+    struct wfr_fixture f = {0}; struct node_db ndb = {0};
+    struct wfr_tracked_ctx ctx = {.endpoint_ok = true};
+    struct wallet_cutover_v2_plan plan = {0};
+    bool ok = wfr_tracked_prepare(&f, &ndb, true) && wallet_cutover_v2_plan_init(&plan, 2);
+    struct wallet_cutover_v2_request r = {.binding = &f.b, .generation_present = true, .generation = 2,
+        .reference_height = 20, .resolve = wfr_tracked_resolve, .endpoint_current = wfr_tracked_endpoint,
+        .chain_ctx = &ctx, .holds_valid = wfr_tracked_holds, .holds_ctx = &ctx,
+        .project = wfr_tracked_project, .projection_ctx = &ctx};
+    r.reference_hash[0] = 2; memcpy(r.scan_identity, f.scan_identity, 32);
+    unsigned char *raw = NULL; int raw_len = 0;
+    ok = wfr_planned_capture_raw(f.db, ok, &raw, &raw_len);
+    if (ok) { f.w->map_wallet[0].confirms = old_depth; ok = node_db_begin_immediate(&ndb); }
+    struct wfr_plan_commit_check check = {.wallet = f.w, .old_depth = old_depth, .deny = deny_commit};
+    struct uint256 original_tx = {0}, original_block = {0};
+    int64_t original_time = 0; bool original_from = false;
+    if (ok) { original_tx = f.w->map_wallet[0].tx.hash; original_block = f.w->map_wallet[0].hash_block;
+        original_time = f.w->map_wallet[0].time_received; original_from = f.w->map_wallet[0].from_me; }
+    if (ok) ok = sqlite3_set_authorizer(f.db, wfr_plan_commit_authorizer, &check) == SQLITE_OK;
+    struct zcl_result result = {0};
+    if (ok) result = wallet_sqlite_cutover_complete_v2_in_open_tx_r(&f.ws, &ndb, f.w, &r, &plan);
+    if (f.db) (void)sqlite3_set_authorizer(f.db, NULL, NULL);
+    if (ok) ok = wfr_planned_state_matches(&f, &ctx, &check, result, deny_commit, old_depth,
+        &original_tx, &original_block, original_time, original_from);
+    if (ok) ok = wfr_planned_check_reference(&f, deny_commit);
+    sqlite3_stmt *stmt = NULL;
+    if (ok) ok = sqlite3_prepare_v2(f.db, "SELECT block_height,txid,block_hash,time_received,from_me,raw_tx,fee FROM wallet_transactions", -1, &stmt, NULL) == SQLITE_OK &&
+        wfr_planned_row_matches(stmt, &original_tx, &original_block, original_time, original_from, raw, raw_len);
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    wfr_planned_cleanup(&f, &ndb, &ctx, &plan, raw);
+    return ok;
+}
+
 static bool wfr_tracked_fixture(void)
 {
     for (int mode = 0; mode < 7; mode++) if (!wfr_tracked_one(mode, true)) { printf("bound tracked mode %d failed\n", mode); return false; }
@@ -1518,6 +1636,10 @@ static int test_cutover_flush_atomic(void)
         ASSERT(wfr_scan_checked_fixture());
         ASSERT(wfr_unscanned_cutover_roundtrip());
         ASSERT(wfr_tracked_fixture());
+        ASSERT(wfr_planned_depth_case(false, 0));
+        ASSERT(wfr_planned_depth_case(true, 0));
+        ASSERT(wfr_planned_depth_case(false, 12));
+        ASSERT(wfr_planned_depth_case(true, 12));
         ASSERT(wfr_projection_fixture());
         ASSERT(wfr_publish_fixture());
         for (int fault=0; fault <= 15; fault++) {

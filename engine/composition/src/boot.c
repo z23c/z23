@@ -3324,6 +3324,7 @@ static bool boot_seq_finalize_chain(struct app_context *ctx, struct boot_seq *s)
     return true;
 }
 
+static struct boot_cutover_env boot_cutover_environment(void);
 /* CHAIN_TIP_RESOLVED, then the one-shot backfill verbs that end
  * the boot on their own. */
 static bool boot_seq_resolve_tip(struct app_context *ctx, struct boot_seq *s)
@@ -3339,6 +3340,8 @@ static bool boot_seq_resolve_tip(struct app_context *ctx, struct boot_seq *s)
     struct zcl_result cr = sysinit_run_stage(BOOT_STAGE_CHAIN_TIP_RESOLVED, ctx);
     if (!cr.ok) return false;
     s->tip = active_chain_tip(&g_state.chain_active);
+    struct boot_cutover_env readiness_env = boot_cutover_environment();
+    if (!boot_cutover_publish_completed(&readiness_env, ctx, false)) return false;
     /* -reindex-explorer: truncate + rewind AFTER finalize re-stamped the tip
      * so the backfill re-walks genesis..tip (node.db only, boot_index.c). */
     if (ctx->reindex_explorer && g_node_db.open)
@@ -3482,16 +3485,6 @@ static bool boot_wallet_cutover_preflight(const char *datadir, bool *pending)
 bool boot_wallet_cutover_preflight_test(const char *datadir, bool *pending)
 { return boot_wallet_cutover_preflight(datadir, pending); }
 #endif
-static bool boot_seq_load_pending_chain(struct app_context *ctx, struct boot_seq *seq)
-{
-    struct boot_cutover_env env = boot_cutover_environment();
-    return boot_cutover_load_chain(&env, ctx, seq->params, &seq->tip);
-}
-static enum boot_pending_replay_result boot_pending_replay(struct app_context *ctx, const struct chain_params *params)
-{
-    struct boot_cutover_env env = boot_cutover_environment();
-    return boot_cutover_replay(&env, ctx, params);
-}
 
 enum boot_cutover_exit_action { BOOT_CUTOVER_EXIT_NONE, BOOT_CUTOVER_EXIT_RESTART, BOOT_CUTOVER_EXIT_STOP };
 static enum boot_cutover_exit_action g_cutover_exit_action;
@@ -3517,11 +3510,6 @@ static bool boot_retry_old_cutover(struct app_context *ctx, struct boot_seq *seq
 /* Bring the node up: eleven ordered phases, stopping at the first failure.
  * The one-shot verbs (-backfill-nullifiers, -backfill-zslp) finish the boot
  * before services and set boot_seq::done. */
-static bool boot_wallet_publish_readiness(struct app_context *ctx)
-{
-    struct boot_cutover_env env = boot_cutover_environment();
-    return boot_cutover_publish_readiness(&env, ctx);
-}
 
 static bool boot_pending_finish(struct app_context *ctx, struct boot_seq *seq,
                                 const struct wallet_cutover_binding *binding)
@@ -3529,7 +3517,8 @@ static bool boot_pending_finish(struct app_context *ctx, struct boot_seq *seq,
     seq->t_finalize_build = boot_clock_ms();
     if (!sysinit_run_stage(BOOT_STAGE_CHAIN_TIP_RESOLVED, ctx).ok) return false;
     reducer_frontier_provable_tip_seed_high_water(active_chain_height(&g_state.chain_active));
-    enum boot_pending_replay_result replay = boot_pending_replay(ctx, seq->params);
+    struct boot_cutover_env env = boot_cutover_environment();
+    enum boot_pending_replay_result replay = boot_cutover_replay_and_retire(&env, ctx, seq->params, binding);
     if (replay == BOOT_PENDING_STOPPED) {
         g_old_cutover_restart_binding = *binding;
         g_cutover_exit_action = BOOT_CUTOVER_EXIT_STOP;
@@ -3547,7 +3536,8 @@ static bool boot_seq_load_chain(struct app_context *ctx, struct boot_seq *seq)
     if (!boot_seq_reconcile_chain_state(ctx, seq)) return false;
     if (!boot_seq_load_sapling_tree(ctx)) return false;
     if (!boot_seq_select_state_source(ctx)) return false;
-    if (!boot_wallet_publish_readiness(ctx)) return false;
+    struct boot_cutover_env readiness_env = boot_cutover_environment();
+    if (!boot_cutover_publish_readiness(&readiness_env, ctx)) return false;
     if (!boot_seq_finalize_chain(ctx, seq)) return false;
     return boot_seq_resolve_tip(ctx, seq);
 }
@@ -3579,10 +3569,21 @@ bool app_init(struct app_context *ctx)
             LOG_ERROR("wallet", "pending wallet recovery requires normal startup");
             return false;
         }
-        if (!boot_seq_load_pending_chain(ctx, &seq)) return false;
+        if (!boot_cutover_load_chain(&cutover_env, ctx, seq.params, &seq.tip)) return false;
         return boot_pending_finish(ctx, &seq, &cutover_binding);
     }
-    if (!boot_seq_load_chain(ctx, &seq)) return false;
+    enum boot_bound_dispatch_result bound = boot_bound_dispatch(&cutover_env, ctx, seq.params, &seq.tip, &cutover_binding, &g_activation_ctl);
+    if (bound == BOOT_BOUND_DISPATCH_INSTALLED) {
+        g_old_cutover_restart_binding = cutover_binding;
+        g_cutover_exit_action = BOOT_CUTOVER_EXIT_RESTART;
+        return false;
+    }
+    if (bound == BOOT_BOUND_DISPATCH_COMPLETED) {
+        reducer_frontier_provable_tip_seed_high_water(active_chain_height(&g_state.chain_active));
+        seq.t_finalize_build = boot_clock_ms();
+        return boot_seq_start_services(ctx, &seq);
+    }
+    if (bound != BOOT_BOUND_DISPATCH_UNARMED || !boot_seq_load_chain(ctx, &seq)) return false;
     if (seq.done) return true;
     return boot_seq_start_services(ctx, &seq);
 }

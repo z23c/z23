@@ -1667,6 +1667,29 @@ static int ps_test_compact_under_lock(void)
     return failures;
 }
 
+#ifndef _WIN32
+static int ps_test_existing_other_directory(int dirfd)
+{
+    int failures = 0; char other[256];
+    test_make_tmpdir(other, sizeof(other), "progress_store", "existing_other");
+    int otherfd = open(other, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    struct stat original = {0}, different = {0};
+    bool distinct = dirfd >= 0 && otherfd >= 0 && fstat(dirfd, &original) == 0 &&
+        fstat(otherfd, &different) == 0 && S_ISDIR(original.st_mode) && S_ISDIR(different.st_mode) &&
+        different.st_uid == geteuid() && !(different.st_mode & 077) &&
+        (original.st_dev != different.st_dev || original.st_ino != different.st_ino);
+    sqlite3 *retained = progress_store_db();
+    PS_CHECK("existing-only second directory is distinct", distinct);
+    PS_CHECK("existing-only rejects different directory", distinct && retained &&
+        !progress_store_directory_matches_fd(retained, otherfd));
+    PS_CHECK("existing-only retains original singleton and directory", retained &&
+        progress_store_db() == retained && progress_store_directory_matches_fd(retained, dirfd));
+    if (otherfd >= 0) close(otherfd);
+    test_cleanup_tmpdir(other);
+    return failures;
+}
+#endif
+
 static int ps_test_existing_only(void)
 {
     int failures = 0;
@@ -1683,6 +1706,7 @@ static int ps_test_existing_only(void)
 #ifndef _WIN32
     int dirfd = open(dir, O_RDONLY | O_DIRECTORY);
     PS_CHECK("retained directory matches", dirfd >= 0 && progress_store_directory_matches_fd(progress_store_db(), dirfd));
+    failures += ps_test_existing_other_directory(dirfd);
     if (dirfd >= 0) close(dirfd);
 #endif
     progress_store_close();

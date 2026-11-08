@@ -352,6 +352,22 @@ static bool log_ok_at(sqlite3 *db, const char *log_table, int32_t height,
     return rc_ok;
 }
 
+enum reducer_header_receipt reducer_frontier_header_receipt(sqlite3 *db, int32_t height)
+{
+    if (!db || height < 0) return REDUCER_HEADER_RECEIPT_ERROR;
+    enum log_row_state row = LOG_ROW_ABSENT;
+    progress_store_tx_lock();
+    bool ok = log_ok_at(db, "validate_headers_log", height, &row);
+    progress_store_tx_unlock();
+    if (!ok) return REDUCER_HEADER_RECEIPT_ERROR;
+    switch (row) {
+        case LOG_ROW_ABSENT: return REDUCER_HEADER_RECEIPT_ABSENT;
+        case LOG_ROW_FAIL: return REDUCER_HEADER_RECEIPT_FAIL;
+        case LOG_ROW_OK: return REDUCER_HEADER_RECEIPT_PASS;
+    }
+    return REDUCER_HEADER_RECEIPT_ERROR;
+}
+
 /* Walk one success-checked log upward from TRUSTED_ANCHOR+1, returning the
  * deepest height whose [anchor+1 .. h] run is all ok=1 (the contiguous
  * prefix). A missing row, an ok=0 row, OR an integrity-tag MISMATCH terminates

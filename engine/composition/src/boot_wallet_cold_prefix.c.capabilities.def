@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_wallet_cold_prefix.c", CAP_FS_WRITE, "Reports cold-prefix transaction failures.")

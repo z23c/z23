@@ -80,6 +80,7 @@ bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *li
     memset(r, 0, sizeof(*r));
     r->preview = preview;
     zapp_nodelog_init(&r->log, NULL, NULL);
+    zapp_nodelog_init(&r->installer_log, NULL, NULL);
     if (pthread_mutex_init(&r->mutex, NULL) != 0) return false;
     r->startup_auth = zapp_startup_auth_new();
     if (!r->startup_auth) { pthread_mutex_destroy(&r->mutex); return false; }
@@ -135,6 +136,22 @@ bool zapp_node_installing(struct zapp_runtime *r)
 {
     pthread_mutex_lock(&r->mutex); bool installing = r->installer > 0;
     pthread_mutex_unlock(&r->mutex); return installing;
+}
+bool zapp_installer_observe_locked(struct zapp_runtime *r, struct zapp_replay_progress *out, bool *has_progress)
+{
+    bool active = r->installer > 0 && !r->stopping &&
+        !atomic_load(&r->start_cancel) && r->installer_epoch == r->start_epoch;
+    *has_progress = active && r->installer_log.started && r->installer_log.pid == r->installer &&
+        zapp_nodelog_replay(&r->installer_log, out);
+    return active;
+}
+bool zapp_installer_observe(struct zapp_runtime *r, struct zapp_replay_progress *out, bool *has_progress)
+{
+    if (!r || !out || !has_progress) return false;
+    pthread_mutex_lock(&r->mutex);
+    bool active = zapp_installer_observe_locked(r, out, has_progress);
+    pthread_mutex_unlock(&r->mutex);
+    return active;
 }
 bool zapp_node_running(struct zapp_runtime *r)
 {
@@ -570,6 +587,7 @@ static int spawn_installer(struct zapp_runtime *r)
         snprintf(arg, sizeof(arg), "-install-consensus-bundle=%s", bundle) >= (int)sizeof(arg) ||
         !path(log, sizeof(log), r->directory, "app-console.log")) return EINVAL;
     int fd = open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+    off_t offset = fd >= 0 ? lseek(fd, 0, SEEK_END) : -1;
     int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
     char *argv[10] = {r->executable, data, "-operator-lane=canonical", "-nolegacyimport",
         "-nolegacyutxoimport", arg};
@@ -577,6 +595,10 @@ static int spawn_installer(struct zapp_runtime *r)
     if (zapp_params_arg(r->files, params, sizeof(params))) argv[argc++] = params;
     argv[argc] = NULL;
     int rc = fd >= 0 && in >= 0 ? spawn_redirect_mode(r, argv, in, fd, &r->installer, true, -1, -1) : EIO;
+    if (!rc && offset >= 0) {
+        off_t cap = r->console_cap ? r->console_cap : ZAPP_CONSOLE_CAP;
+        (void)zapp_nodelog_start(&r->installer_log, log, offset, r->installer, cap);
+    }
     if (fd >= 0) close(fd);
     if (in >= 0) close(in);
     return rc;
@@ -594,12 +616,18 @@ static int node_install_if_requested(struct zapp_runtime *r, uint64_t ticket)
 {
     if (!node_install_allowed_locked(r, ticket)) return 0;
     pthread_mutex_unlock(&r->mutex);
+    zapp_nodelog_stop(&r->log);
+    pthread_mutex_lock(&r->mutex);
+    if (!node_install_allowed_locked(r, ticket)) return -1;
+    pthread_mutex_unlock(&r->mutex);
     int requested = install_request_consume(r);
     pthread_mutex_lock(&r->mutex);
     if (requested <= 0) return requested;
     if (!node_install_allowed_locked(r, ticket)) return -1;
+    r->installer_epoch = ticket;
     int rc = spawn_installer(r);
     if (rc) return -1;
+    ++r->installer_generation;
     pid_t child = r->installer;
     int status = 0; pid_t got;
     for (;;) { got = waitpid(child, &status, WNOHANG);
@@ -608,6 +636,9 @@ static int node_install_if_requested(struct zapp_runtime *r, uint64_t ticket)
         struct timespec pause = {.tv_nsec = 100000000}; nanosleep(&pause, NULL); pthread_mutex_lock(&r->mutex);
     }
     r->installer = 0;
+    pthread_mutex_unlock(&r->mutex);
+    zapp_nodelog_stop(&r->installer_log);
+    pthread_mutex_lock(&r->mutex);
     return got == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 1 : -1;
 }
 static bool node_start_finish_locked(struct zapp_runtime *r, uint64_t ticket,

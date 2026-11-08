@@ -37,6 +37,7 @@
 
 #include "config/boot_internal.h"
 #include "config/boot_wallet_pending_restore.h"
+#include "config/boot_wallet_cold_prefix.h"
 #include "jobs/block_header_emit.h"
 #include "services/chain_state_service.h"
 #include "services/island_anchor.h"
@@ -1089,6 +1090,123 @@ static int nw_old_partial_case(void)
     return failures;
 }
 
+struct nw_cold_fixture {
+    struct nw_replay replay;
+    event_log_t *log;
+    block_index_projection_t *projection;
+    struct block blocks[2];
+    struct block_index rows[2];
+    struct uint256 hashes[2];
+    int fd;
+};
+static bool nw_cold_projection_open(struct nw_cold_fixture *f)
+{
+    char events[640], projection[640];
+    snprintf(events, sizeof(events), "%s/cold-events.log", f->replay.root);
+    snprintf(projection, sizeof(projection), "%s/block_index_projection.db", f->replay.root);
+    if (event_log_singleton() || block_index_projection_singleton()) return false;
+    f->log = event_log_open(events);
+    f->projection = f->log ? block_index_projection_open(projection, f->log) : NULL;
+    if (!f->projection) return false;
+    event_log_set_singleton(f->log); block_index_projection_set_singleton(f->projection);
+    return true;
+}
+static bool nw_cold_open(struct nw_cold_fixture *f)
+{
+    f->fd = -1;
+    if (!nw_replay_open(&f->replay)) return false;
+    const struct chain_params *cp = chain_params_get();
+    struct block_index *g = chainstate_insert_block_index((struct chainstate *)&f->replay.ms, &cp->consensus.hashGenesisBlock);
+    if (!g || !block_index_initialize_genesis(g, cp)) return false;
+    f->replay.genesis = g;
+    if (!nw_cold_projection_open(f)) return false;
+    struct block_index *parent = g;
+    for (int i = 0; i < 2; ++i) {
+        if (!nw_build_block(&f->blocks[i], cp, i + 1, parent->phashBlock)) return false;
+        block_get_hash(&f->blocks[i], &f->hashes[i]);
+        struct block_index *p = &f->rows[i]; block_index_init(p);
+        p->hashBlock = f->hashes[i]; p->phashBlock = &p->hashBlock;
+        p->pprev = parent; p->nHeight = i + 1; p->nStatus = BLOCK_VALID_TREE;
+        p->nVersion = f->blocks[i].header.nVersion; p->nTime = f->blocks[i].header.nTime;
+        p->nBits = f->blocks[i].header.nBits; p->hashFinalSaplingRoot = f->blocks[i].header.hashFinalSaplingRoot;
+        struct arith_uint256 proof = GetBlockProof(p);
+        arith_uint256_add(&p->nChainWork, &parent->nChainWork, &proof);
+        if (!block_index_set_hdrext(p, &f->blocks[i].header.hashMerkleRoot, &f->blocks[i].header.nNonce,
+                f->blocks[i].header.nSolution, f->blocks[i].header.nSolutionSize) ||
+            !block_index_emit_header_event(p, "cold-prefix-test", NULL, NULL)) return false;
+        parent = p;
+    }
+    if (!event_log_flush(f->log) || block_index_projection_catch_up(f->projection) == UINT64_MAX) return false;
+    reducer_frontier_test_set_compiled_anchor(0);
+    if (!test_reducer_prebinding_seed(progress_store_db(), g, f->hashes[0].data, f->hashes[1].data) ||
+        !rf_prebinding_insert(progress_store_db(), "INSERT INTO validate_headers_log(height,hash,ok,validated_at) VALUES(?1,?2,1,0)", 1, f->hashes[0].data)) return false;
+    f->fd = open(f->replay.root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    return f->fd >= 0;
+}
+static void nw_cold_close(struct nw_cold_fixture *f)
+{
+    if (f->fd >= 0) close(f->fd);
+    if (block_index_projection_singleton() == f->projection) block_index_projection_set_singleton(NULL);
+    if (event_log_singleton() == f->log) event_log_set_singleton(NULL);
+    if (f->projection) block_index_projection_close(f->projection);
+    if (f->log) event_log_close(f->log);
+    for (int i = 0; i < 2; ++i) { block_index_hdrext_free(&f->rows[i]); block_free(&f->blocks[i]); }
+    reducer_frontier_test_set_compiled_anchor(-1); reducer_frontier_provable_tip_reset();
+    nw_replay_close(&f->replay);
+}
+static bool nw_cold_unchanged(struct nw_cold_fixture *f, size_t count, const struct uint256 *coins)
+{
+    struct uint256 after;
+    coins_view_cache_get_best_block(&f->replay.cache, &after);
+    return block_map_count(&f->replay.ms.map_block_index) == count &&
+        f->replay.ms.pindex_best_header == NULL &&
+        active_chain_cached_height(&f->replay.ms.chain_active) < 0 &&
+        uint256_eq(&after, coins) && !f->replay.ms.sapling_tree_loaded;
+}
+static bool nw_cold_stop(void *ctx) { return *(bool *)ctx; }
+static int nw_cold_success(struct nw_cold_fixture *f)
+{
+    int failures = 0;
+    boot_wallet_cold_prefix_t *stage = NULL;
+    size_t before = block_map_count(&f->replay.ms.map_block_index);
+    struct uint256 coins_before; coins_view_cache_get_best_block(&f->replay.cache, &coins_before);
+    enum boot_wallet_cold_result r = boot_wallet_cold_prefix_stage(&f->replay.ms, f->fd, 3, NULL, NULL, &stage);
+    const struct block_index *tip = stage ? boot_wallet_cold_prefix_tip(stage) : NULL;
+    NW_CHECK("cold stage verifies full linked prefix without map writes", r == BOOT_WALLET_COLD_READY && tip && tip->nHeight == 2 && tip->pprev && tip->pprev->pprev == f->replay.genesis && nw_cold_unchanged(f, before, &coins_before));
+    if (stage) NW_CHECK("cold stage release", boot_wallet_cold_prefix_release(stage));
+    stage = NULL; bool stop = true;
+    NW_CHECK("cold stage cancellation", boot_wallet_cold_prefix_stage(&f->replay.ms, f->fd, 3, nw_cold_stop, &stop, &stage) == BOOT_WALLET_COLD_STOPPED && !stage && nw_cold_unchanged(f, before, &coins_before));
+    return failures;
+}
+static int nw_cold_resident_pending(struct nw_cold_fixture *f, size_t before, const struct uint256 *coins_before)
+{
+    int failures = 0; boot_wallet_cold_prefix_t *stage = NULL;
+    struct block_index *resident = chainstate_insert_block_index((struct chainstate *)&f->replay.ms, &f->hashes[0]);
+    if (resident) { *resident = f->rows[0]; resident->hashBlock = f->hashes[0]; resident->phashBlock = &resident->hashBlock; resident->ext = NULL; resident->nStatus |= BLOCK_REVALIDATE_PENDING; }
+    NW_CHECK("cold stage rejects resident pending", resident && boot_wallet_cold_prefix_stage(&f->replay.ms, f->fd, 3, NULL, NULL, &stage) == BOOT_WALLET_COLD_UNAVAILABLE && !stage && nw_cold_unchanged(f, before + 1, coins_before));
+    return failures;
+}
+static int nw_cold_stage_case(void)
+{
+    int failures = 0; struct nw_cold_fixture f = {0};
+    bool ready = nw_cold_open(&f); NW_CHECK("cold stage fixture ready", ready);
+    if (!ready) { nw_cold_close(&f); return failures; }
+    failures += nw_cold_success(&f);
+    size_t before = block_map_count(&f.replay.ms.map_block_index);
+    struct uint256 coins_before; coins_view_cache_get_best_block(&f.replay.cache, &coins_before);
+    boot_wallet_cold_prefix_t *stage = NULL;
+    f.rows[1].nStatus |= BLOCK_REVALIDATE_PENDING;
+    bool emitted = block_index_emit_header_event(&f.rows[1], "cold-prefix-test", NULL, NULL) && event_log_flush(f.log) && block_index_projection_catch_up(f.projection) != UINT64_MAX;
+    NW_CHECK("cold stage rejects projection pending", emitted && boot_wallet_cold_prefix_stage(&f.replay.ms, f.fd, 3, NULL, NULL, &stage) == BOOT_WALLET_COLD_UNAVAILABLE && !stage && nw_cold_unchanged(&f, before, &coins_before));
+    f.rows[1].nStatus &= ~(unsigned)BLOCK_REVALIDATE_PENDING;
+    emitted = block_index_emit_header_event(&f.rows[1], "cold-prefix-test", NULL, NULL) && event_log_flush(f.log) && block_index_projection_catch_up(f.projection) != UINT64_MAX;
+    f.replay.genesis->nStatus |= BLOCK_REVALIDATE_PENDING;
+    NW_CHECK("cold stage rejects genesis pending", emitted && boot_wallet_cold_prefix_stage(&f.replay.ms, f.fd, 3, NULL, NULL, &stage) == BOOT_WALLET_COLD_UNAVAILABLE && !stage && nw_cold_unchanged(&f, before, &coins_before));
+    f.replay.genesis->nStatus &= ~(unsigned)BLOCK_REVALIDATE_PENDING;
+    failures += nw_cold_resident_pending(&f, before, &coins_before);
+    nw_cold_close(&f); return failures;
+}
+
 int test_recovery_no_worse(void);
 int test_recovery_no_worse(void)
 {
@@ -1096,6 +1214,7 @@ int test_recovery_no_worse(void)
     int failures = 0;
     failures += nw_pending_restore_case();
     failures += nw_prebinding_case();
+    failures += nw_cold_stage_case();
     failures += nw_old_partial_case();
     failures += nw_canonical_replay_case(1);
     failures += nw_canonical_replay_case(0);

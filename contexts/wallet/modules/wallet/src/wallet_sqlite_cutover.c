@@ -193,6 +193,12 @@ static bool wsql_height_rebase_in_open_tx(struct wallet_sqlite *ws, int referenc
 
 /* ── Transactions ──────────────────────────────────────────────── */
 
+static bool wsql_tx_reference_invalid(const struct wallet_tx *wtx, bool v2, int reference, bool confirmed)
+{
+    return v2 && ((confirmed && (wtx->confirms <= 0 || reference < wtx->confirms - 1)) ||
+                  (!confirmed && wtx->confirms != 0));
+}
+
 bool wsql_write_tx_reference(struct wallet_sqlite *ws,
                               const struct wallet_tx *wtx, bool v2, int reference)
 {
@@ -210,8 +216,7 @@ bool wsql_write_tx_reference(struct wallet_sqlite *ws,
     sqlite3_bind_blob(s, 3, wtx->hash_block.data, 32, SQLITE_STATIC);
     const uint8_t zero[32] = {0};
     bool confirmed = memcmp(wtx->hash_block.data, zero, 32) != 0;
-    if (v2 && ((confirmed && (wtx->confirms <= 0 || reference < wtx->confirms - 1)) ||
-               (!confirmed && wtx->confirms != 0))) { sqlite3_reset(s); sqlite3_clear_bindings(s); stream_free(&bs); return false; }
+    if (wsql_tx_reference_invalid(wtx, v2, reference, confirmed)) { sqlite3_reset(s); sqlite3_clear_bindings(s); stream_free(&bs); return false; }
     int stored = v2 && confirmed ? reference - (wtx->confirms - 1) :
                  (v2 ? 0 : (wtx->confirms > 0 ? wtx->confirms : 0));
     sqlite3_bind_int(s, 4, stored);
@@ -219,11 +224,13 @@ bool wsql_write_tx_reference(struct wallet_sqlite *ws,
     sqlite3_bind_int(s, 6, wtx->from_me ? 1 : 0);
 
     bool ok = AR_STEP_WRITE(s) == SQLITE_DONE;
+    char error[256] = {0};
+    if (!ok) snprintf(error, sizeof(error), "%s", sqlite3_errmsg(ws->db));
+    int reset = sqlite3_reset(s);
+    int cleared = sqlite3_clear_bindings(s);
     stream_free(&bs);
-    if (!ok)
-        LOG_FAIL("wallet_sqlite", "write_tx: step failed: %s",
-                 sqlite3_errmsg(ws->db));
-    return true;
+    if (!ok) LOG_FAIL("wallet_sqlite", "write_tx: step failed: %s", error);
+    return reset == SQLITE_OK && cleared == SQLITE_OK;
 }
 
 bool wallet_sqlite_write_tx(struct wallet_sqlite *ws, const struct wallet_tx *wtx)
@@ -983,14 +990,37 @@ static bool wsql_cutover_record_completed(struct wallet_sqlite *ws,
     return ok;
 }
 
+/* Persist verified plan depths without mutating wallet RAM before commit. */
+static bool wsql_v2_write_planned_txs(struct wallet_sqlite *ws, struct wallet *w,
+    const struct wallet_cutover_v2_request *r, const struct wallet_cutover_v2_plan *plan)
+{
+    int previous = 0;
+    enum wallet_height_encoding encoding = wallet_sqlite_height_encoding(ws, &previous);
+    if (encoding == WALLET_HEIGHT_ERROR || !wallet_sqlite_replace_keypool_locked(ws, w, false)) return false;
+    for (size_t i = 0; i < plan->count; ++i) {
+        const struct wallet_cutover_v2_entry *entry = &plan->entries[i];
+        struct wallet_tx staged = w->map_wallet[entry->slot];
+        staged.confirms = entry->new_depth;
+        if (!wsql_write_tx_reference(ws, &staged, encoding == WALLET_HEIGHT_V2,
+                                     r->reference_height)) return false;
+    }
+    return true;
+}
+
+static bool wsql_v2_projection_preflight(struct wallet_sqlite *ws, struct wallet *w,
+    const struct wallet_cutover_v2_request *r, struct wallet_cutover_v2_plan *plan)
+{
+    if (!wsql_cutover_state_matches(ws, w, r->binding, r->generation_present, r->generation, r->reference_height, false)) return false;
+    if (!wsql_used_entries_stored(ws, w, false)) return false;
+    if (!wsql_cutover_scripts_stored(ws, w)) return false;
+    if (!wsql_v2_write_planned_txs(ws, w, r, plan)) return false;
+    return wsql_v2_db_matches_plan(ws, w, plan);
+}
+
 static bool wsql_v2_write_projection(struct wallet_sqlite *ws, struct node_db *ndb, struct wallet *w,
     const struct wallet_cutover_v2_request *r, struct wallet_cutover_v2_plan *plan)
 {
-    if (!wsql_cutover_state_matches(ws, w, r->binding, r->generation_present, r->generation,
-                                   r->reference_height, false) ||
-        !wsql_used_entries_stored(ws, w, false) || !wsql_cutover_scripts_stored(ws, w)) return false;
-    struct wsql_flush_halt h = wsql_flush_write_keypool_and_tx(ws, w, true);
-    if (h.halt || !wsql_v2_db_matches_plan(ws, w, plan)) return false;
+    if (!wsql_v2_projection_preflight(ws, w, r, plan)) return false;
     int previous = -1;
     enum wallet_height_encoding encoding = wallet_sqlite_height_encoding(ws, &previous);
     bool height_ok = encoding == WALLET_HEIGHT_LEGACY ?
@@ -1002,8 +1032,12 @@ static bool wsql_v2_write_projection(struct wallet_sqlite *ws, struct node_db *n
         LOG_ERROR("wallet_sqlite", "cutover projection changed transaction ownership");
         abort();
     }
-    return projected && ar_after_commit_pending() <= 1 && wallet_sqlite_write_scan_height(ws, r->reference_height) &&
-        wsql_cutover_record_completed(ws, r->binding) && wsql_cutover_delete_fence(ws);
+    if (!projected) return false;
+    if (ar_after_commit_pending() > 1) return false;
+    if (!wallet_sqlite_write_scan_height(ws, r->reference_height)) return false;
+    if (!wsql_cutover_record_completed(ws, r->binding)) return false;
+    if (!wsql_cutover_delete_fence(ws)) return false;
+    return true;
 }
 
 static bool wsql_v2_plan_spends_valid(const struct wallet_cutover_v2_plan *plan)
@@ -1026,10 +1060,15 @@ static bool wsql_v2_plan_spends_valid(const struct wallet_cutover_v2_plan *plan)
 static bool wsql_v2_authorized_write(struct wallet_sqlite *ws, struct node_db *ndb, struct wallet *w,
     const struct wallet_cutover_v2_request *r, struct wallet_cutover_v2_plan *plan)
 {
-    return wallet_readiness_can_complete_locked(w, r->generation_present, r->generation) &&
-        r->holds_valid(r->holds_ctx, w, ws->db) && wsql_v2_plan_prepare(w, r, plan) &&
-        wsql_v2_plan_current(w, r, plan) && wsql_v2_write_projection(ws, ndb, w, r, plan) &&
-        wsql_v2_plan_spends_valid(plan) && wsql_v2_plan_current(w, r, plan) && r->holds_valid(r->holds_ctx, w, ws->db);
+    if (!wallet_readiness_can_complete_locked(w, r->generation_present, r->generation)) return false;
+    if (!r->holds_valid(r->holds_ctx, w, ws->db)) return false;
+    if (!wsql_v2_plan_prepare(w, r, plan)) return false;
+    if (!wsql_v2_plan_current(w, r, plan)) return false;
+    if (!wsql_v2_write_projection(ws, ndb, w, r, plan)) return false;
+    if (!wsql_v2_plan_spends_valid(plan)) return false;
+    if (!wsql_v2_plan_current(w, r, plan)) return false;
+    if (!r->holds_valid(r->holds_ctx, w, ws->db)) return false;
+    return true;
 }
 
 struct zcl_result wallet_sqlite_cutover_complete_v2_in_open_tx_r(

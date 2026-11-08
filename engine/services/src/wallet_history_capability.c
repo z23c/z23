@@ -2,6 +2,7 @@
  * purpose: Pin and verify a private downloaded history under a lease. */
 #include "services/wallet_history_capability.h"
 #include "services/wallet_history_manifest.h"
+#include "base/hex.h"
 #include "platform/positioned_file.h"
 #include "platform/private_directory.h"
 #include "util/log_macros.h"
@@ -160,6 +161,23 @@ static bool verify(struct wallet_history_capability *cap, unsigned count, const 
     return ok;
 }
 #endif
+struct zcl_result wallet_history_capability_names(const uint8_t snapshot[32], const uint8_t root[32],
+                                     struct wallet_history_names *out)
+{
+    if (!snapshot || !root || !out) return ZCL_ERR(-1, "history names require snapshot, root and output");
+    char identity[130];
+    zcl_hex_encode(snapshot, 32, identity);
+    identity[64] = '-';
+    zcl_hex_encode(root, 32, identity + 65);
+    int a = snprintf(out->root, sizeof(out->root), "history-%s", identity);
+    int b = snprintf(out->stage, sizeof(out->stage), ".history-%s-stage", identity);
+    int c = snprintf(out->lock, sizeof(out->lock), ".history-%s-lock", identity);
+    if (a < 0 || b < 0 || c < 0) return ZCL_ERR(-1, "history names formatting failed");
+    if ((size_t)a >= sizeof(out->root) || (size_t)b >= sizeof(out->stage) ||
+        (size_t)c >= sizeof(out->lock)) return ZCL_ERR(-1, "history names exceed output capacity");
+    return ZCL_OK;
+}
+
 void wallet_history_capability_init(struct wallet_history_capability *cap)
 {
     if (!cap) return;

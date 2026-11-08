@@ -375,6 +375,70 @@ static void shutdown_watchdog_cases(void)
     zapp_nodelog_line(&l, "[shutdown] watchdog: durability secured; forcing truthful clean exit (0)\t", 6000);
     assert(count == 2);
 }
+static void bad_index_cases(struct zapp_nodelog *l, struct zapp_replay_progress *p)
+{
+    static const char *const bad_index[] = {
+        "[boot-phase] PROGRESS block_index.replay 51/100 (50%) rate=1.2MB/s eta=3s",
+        "[boot-phase] PROGRESS block_index.replay 0/0 (0%) rate=1.2MB/s eta=3s",
+        "[boot-phase] PROGRESS block_index.replay 101/100 (100%) rate=1.2MB/s eta=3s",
+        "[boot-phase] PROGRESS block_index.replay 100/100 (101%) rate=1.2MB/s eta=3s",
+        "[boot-phase] PROGRESS block_index.replay 50/100 (50%) rate=1.22MB/s eta=3s",
+        "[boot-phase] PROGRESS block_index.replay 50/100 (50%) rate=1.MB/s eta=3s",
+        "[boot-phase] PROGRESS block_index.replay 18446744073709551616/1 (0%) rate=1.2MB/s eta=3s",
+        "[boot-phase] PROGRESS block_index.replay 50/100 (50%) rate=1.2MB/s eta=3s extra"
+    };
+    for (size_t i = 0; i < sizeof(bad_index) / sizeof(bad_index[0]); ++i) {
+        struct zapp_nodelog empty;
+        zapp_nodelog_init(&empty, sink, NULL);
+        zapp_nodelog_line(&empty, bad_index[i], 1);
+        assert(!zapp_nodelog_replay(&empty, p));
+        zapp_nodelog_line(l, bad_index[i], 1);
+        assert(zapp_nodelog_replay(l, p) && p->phase == ZAPP_REPLAY_BLOCK_INDEX && p->next == 50);
+    }
+}
+static void bad_wallet_cases(struct zapp_nodelog *l, struct zapp_replay_progress *p)
+{
+    static const char *const bad[] = {
+        "[wallet-replay] phase=bad floor=5 next=10 reference=20",
+        "[wallet-replay] phase=discover floor=5 next=4 reference=20",
+        "[wallet-replay] phase=discover floor=5 next=22 reference=20",
+        "[wallet-replay] phase=discover floor=21 next=21 reference=20",
+        "[wallet-replay] phase=discover floor=-1 next=1 reference=20",
+        "[wallet-replay] phase=discover floor=0 next=1 reference=2147483648",
+        "[wallet-replay] phase=discover floor=0 next=1 reference=20 extra=1",
+        "[wallet-replay] phase=discover floor=0 next=18446744073709551616 reference=20"
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        zapp_nodelog_line(l, bad[i], 2);
+        assert(zapp_nodelog_replay(l, p) && p->floor == 5 && p->next == 10 && p->reference == 20);
+    }
+}
+static void index_progress_cases(struct zapp_nodelog *l, struct zapp_replay_progress *p, char *text, size_t cap)
+{
+    zapp_nodelog_line(l, "[boot-phase] PROGRESS block_index.replay 0/100 (0%) rate=0.0MB/s eta=0s", 1);
+    assert(zapp_nodelog_replay(l, p) && p->phase == ZAPP_REPLAY_BLOCK_INDEX && p->next == 0);
+    zapp_nodelog_replay_text(p, text, cap);
+    assert(!strcmp(text, "Preparing block index: 0%"));
+    zapp_nodelog_line(l, "[boot-phase] PROGRESS block_index.replay 100/100 (100%) rate=1.0MB/s eta=0s", 1);
+    assert(zapp_nodelog_replay(l, p) && p->phase == ZAPP_REPLAY_BLOCK_INDEX && p->next == 100);
+    zapp_nodelog_replay_text(p, text, cap);
+    assert(!strcmp(text, "Preparing block index: 100%"));
+    zapp_nodelog_line(l, "[boot-stage] init -> datadir_locked", 1);
+    assert(!zapp_nodelog_replay(l, p));
+    zapp_nodelog_line(l, "[boot-phase] PROGRESS block_index.replay 5000000000/15000000000 (33%) rate=0.1MB/s eta=999s", 1);
+    assert(zapp_nodelog_replay(l, p) && p->phase == ZAPP_REPLAY_BLOCK_INDEX && p->next == 33);
+    zapp_nodelog_line(l, "[boot-phase] PROGRESS block_index.replay 9223372036854775808/18446744073709551615 (50%) rate=2.0MB/s eta=0s", 1);
+    assert(zapp_nodelog_replay(l, p) && p->phase == ZAPP_REPLAY_BLOCK_INDEX && p->next == 50);
+    zapp_nodelog_line(l, "[boot-phase] PROGRESS block_index.replay 50/100 (50%) rate=1.2MB/s eta=3s", 1);
+    assert(zapp_nodelog_replay(l, p) && p->phase == ZAPP_REPLAY_BLOCK_INDEX && p->next == 50);
+    zapp_nodelog_replay_text(p, text, cap);
+    assert(!strcmp(text, "Preparing block index: 50%"));
+    bad_index_cases(l, p);
+    zapp_nodelog_line(l, "[boot-phase] PROGRESS block_index.replay 49/100 (49%) rate=1.2MB/s eta=3s", 1);
+    assert(zapp_nodelog_replay(l, p) && p->next == 50);
+    zapp_nodelog_line(l, "[boot-stage] crypto_ready -> db_open", 1);
+    assert(!zapp_nodelog_replay(l, p));
+}
 static void replay_progress_cases(void)
 {
     struct zapp_nodelog l;
@@ -387,25 +451,15 @@ static void replay_progress_cases(void)
     assert(!zapp_nodelog_replay_visible(true, true, false, true));
     assert(!zapp_nodelog_replay_visible(false, false, false, true));
     assert(!zapp_nodelog_replay_visible(false, true, false, false));
+    index_progress_cases(&l, &p, text, sizeof(text));
     zapp_nodelog_line(&l, "[wallet-replay] phase=discover floor=5 next=10 reference=20", 1);
     assert(zapp_nodelog_replay(&l, &p) && p.phase == ZAPP_REPLAY_DISCOVER &&
            p.floor == 5 && p.next == 10 && p.reference == 20);
+    zapp_nodelog_line(&l, "[boot-phase] PROGRESS block_index.replay 50/100 (50%) rate=1.2MB/s eta=3s", 1);
+    assert(zapp_nodelog_replay(&l, &p) && p.phase == ZAPP_REPLAY_DISCOVER);
     zapp_nodelog_replay_text(&p, text, sizeof(text));
     assert(!strcmp(text, "Scanning private history: 5 of 16 blocks"));
-    static const char *const bad[] = {
-        "[wallet-replay] phase=bad floor=5 next=10 reference=20",
-        "[wallet-replay] phase=discover floor=5 next=4 reference=20",
-        "[wallet-replay] phase=discover floor=5 next=22 reference=20",
-        "[wallet-replay] phase=discover floor=21 next=21 reference=20",
-        "[wallet-replay] phase=discover floor=-1 next=1 reference=20",
-        "[wallet-replay] phase=discover floor=0 next=1 reference=2147483648",
-        "[wallet-replay] phase=discover floor=0 next=1 reference=20 extra=1",
-        "[wallet-replay] phase=discover floor=0 next=18446744073709551616 reference=20"
-    };
-    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
-        zapp_nodelog_line(&l, bad[i], 2);
-        assert(zapp_nodelog_replay(&l, &p) && p.floor == 5 && p.next == 10 && p.reference == 20);
-    }
+    bad_wallet_cases(&l, &p);
     zapp_nodelog_line(&l, "[wallet-replay] phase=witness floor=0 next=0 reference=2147483647", 3);
     assert(zapp_nodelog_replay(&l, &p) && p.phase == ZAPP_REPLAY_WITNESS);
     zapp_nodelog_replay_text(&p, text, sizeof(text));

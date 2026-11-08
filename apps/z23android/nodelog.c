@@ -200,6 +200,50 @@ static bool replay_parse(const char *line, struct zapp_replay_progress *p)
     return !*line && p->reference <= INT32_MAX && p->floor <= p->reference &&
         p->next >= p->floor && p->next <= p->reference + 1;
 }
+/* Parse the exact block-index byte progress record without narrowing counters. */
+static bool index_number(const char **s, uint64_t *n)
+{
+    if (**s < 48 || **s > 57) return false;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(*s, &end, 10);
+    if (errno || end == *s || v > UINT64_MAX) return false;
+    *s = end;
+    *n = (uint64_t)v;
+    return true;
+}
+static bool index_decimal_digit(const char **s)
+{
+    if (**s < 48 || **s > 57) return false;
+    ++*s;
+    return true;
+}
+static uint64_t index_threshold(uint64_t total, uint64_t pct)
+{
+    return (total / 100) * pct + ((total % 100) * pct + 99) / 100;
+}
+static bool index_prefix(const char **s, uint64_t *done, uint64_t *total, uint64_t *pct)
+{
+    return replay_word(s, "[boot-phase] PROGRESS block_index.replay ") &&
+        index_number(s, done) && replay_word(s, "/") && index_number(s, total) &&
+        replay_word(s, " (") && index_number(s, pct) && replay_word(s, "%) rate=");
+}
+static bool index_suffix(const char **s, uint64_t *rate, uint64_t *eta)
+{
+    return index_number(s, rate) && replay_word(s, ".") && index_decimal_digit(s) &&
+        replay_word(s, "MB/s eta=") && index_number(s, eta) && replay_word(s, "s");
+}
+static bool index_parse(const char *s, struct zapp_replay_progress *p)
+{
+    uint64_t done, total, pct, rate, eta;
+    if (!index_prefix(&s, &done, &total, &pct) || !index_suffix(&s, &rate, &eta)) return false;
+    if (*s == 13) ++s;
+    if (*s == 10) ++s;
+    if (*s || !total || done > total || pct > 100 || done < index_threshold(total, pct) ||
+        (pct < 100 && done >= index_threshold(total, pct + 1))) return false;
+    *p = (struct zapp_replay_progress){ .phase = ZAPP_REPLAY_BLOCK_INDEX, .next = (int64_t)pct };
+    return true;
+}
 bool zapp_nodelog_replay(struct zapp_nodelog *l, struct zapp_replay_progress *out)
 {
     if (!l || !out) return false;
@@ -221,6 +265,7 @@ void zapp_nodelog_replay_text(const struct zapp_replay_progress *p, char *out, s
 {
     if (!out || !cap) return;
     if (!p || p->phase == ZAPP_REPLAY_NONE) { out[0] = 0; return; }
+    if (p->phase == ZAPP_REPLAY_BLOCK_INDEX) { snprintf(out, cap, "Preparing block index: %lld%%", (long long)p->next); return; }
     if (p->phase == ZAPP_REPLAY_WITNESS) { snprintf(out, cap, "Preparing wallet witnesses"); return; }
     const char *phase = p->phase == ZAPP_REPLAY_TRANSPARENT ? "Checking wallet history" :
         p->phase == ZAPP_REPLAY_DISCOVER ? "Scanning private history" : "Checking private spends";
@@ -235,6 +280,10 @@ static void note_stage(struct zapp_nodelog *l, const char *line)
     const char *to = mark && !strstr(line, "FATAL") ? strstr(mark, " -> ") : NULL;
     if (!to) return;
     to += 4;
+    struct zapp_replay_progress prior;
+    if (zapp_nodelog_replay(l, &prior) && prior.phase == ZAPP_REPLAY_BLOCK_INDEX) {
+        const struct zapp_replay_progress empty = {0}; replay_store(l, &empty);
+    }
     size_t n = strcspn(to, " \r\n");
     if (n == strlen("datadir_locked") && !strncmp(to, "datadir_locked", n)) {
         const struct zapp_replay_progress empty = {0}; replay_store(l, &empty);
@@ -458,11 +507,21 @@ static bool nodelog_shutdown_timing(const char *text, bool has_header, const str
         shutdown_substep(text, timing, cap) || shutdown_watchdog(text, timing, cap);
 }
 
-void zapp_nodelog_line(struct zapp_nodelog *l, const char *line, int64_t now_ms)
+static void note_replay(struct zapp_nodelog *l, const char *line)
 {
     note_stage(l, line);
     struct zapp_replay_progress replay;
     if (replay_parse(line, &replay)) replay_store(l, &replay);
+    else if (index_parse(line, &replay)) {
+        struct zapp_replay_progress prior;
+        if (!zapp_nodelog_replay(l, &prior) ||
+            (prior.phase == ZAPP_REPLAY_BLOCK_INDEX && replay.next >= prior.next))
+            replay_store(l, &replay);
+    }
+}
+void zapp_nodelog_line(struct zapp_nodelog *l, const char *line, int64_t now_ms)
+{
+    note_replay(l, line);
     char text[ZAPP_NODELOG_LINE_MAX + 1];
     snprintf(text, sizeof(text), "%s", line);
     text[strcspn(text, "\r\n")] = 0;

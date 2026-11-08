@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #if defined(__linux__)
+#include "../../../engine/composition/src/consensus_state_install_terminal_internal.h"
 static bool csi_bound_write(const char *path, const char *text)
 {
     FILE *f = fopen(path, "wb");
@@ -67,11 +68,31 @@ static bool csi_bound_other_tree(const char *base, char path[512])
         snprintf(file, sizeof(file), "%s/blk00000.dat", blocks) < (int)sizeof(file) &&
         csi_bound_write(file, "block");
 }
+static bool csi_bound_retry_mismatch(void)
+{
+    struct boot_bound_bundle_observation obs = {0};
+    struct wallet_cutover_binding expected = {.history_identity_present = true};
+    struct consensus_state_install_runtime_result out;
+    for (unsigned i = 0; i < 4; ++i) {
+        struct boot_bound_bundle_observation bad = obs;
+        if (i == 0) bad.endpoint_height++;
+        if (i == 1) bad.endpoint_hash[0]++;
+        if (i == 2) bad.snapshot_sha3[0]++;
+        if (i == 3) bad.history_manifest_root[0]++;
+        memset(&out, 0xff, sizeof(out));
+        struct zcl_result r = consensus_state_install_from_bound_bundle_terminal_old_retry(
+            NULL, NULL, NULL, NULL, NULL, &bad, NULL, &expected, &out);
+        if (r.ok || !strstr(r.message, "does not match pending binding") ||
+            out.state_installed || !strstr(out.reason, "does not match pending binding")) return false;
+    }
+    return true;
+}
 static bool csi_bound_swap_child(const char *root)
 {
     struct rung_act_ctx c; struct node_db *node = NULL; struct wallet_sqlite *ws = NULL;
     struct wallet *wallet = NULL; struct main_state *main = NULL; struct coins_view_cache cache;
-    if (!csi_guarded_child_setup(&c, root, &node, &ws, &wallet, &main, &cache)) return false;
+    if (!csi_bound_retry_mismatch() ||
+        !csi_guarded_child_setup(&c, root, &node, &ws, &wallet, &main, &cache)) return false;
     struct wallet_history_capability cap;
     struct boot_bound_bundle_observation obs = {0}, bad;
     if (!csi_bound_capability(root, &cap, obs.private_history_path, obs.history_manifest_root)) return false;
@@ -113,6 +134,62 @@ static bool csi_bound_swap_child(const char *root)
     return ok && csi_bound_refused(node, main, c.rdir, ws, wallet, &obs, &cap,
                                    "wallet history root does not match request");
 }
+static bool csi_bound_preflight_wrong_commitment(const char *root)
+{
+    struct rung_act_ctx c; struct node_db *node = NULL; struct wallet_sqlite *ws = NULL;
+    struct wallet *wallet = NULL; struct main_state *main = NULL; struct coins_view_cache cache;
+    if (!csi_guarded_child_setup(&c, root, &node, &ws, &wallet, &main, &cache)) return false;
+    struct wallet_history_capability cap;
+    struct boot_bound_bundle_observation obs = {0};
+    if (!csi_bound_capability(root, &cap, obs.private_history_path, obs.history_manifest_root)) return false;
+    if (snprintf(obs.bundle_path, sizeof(obs.bundle_path), "%s", c.kb.path) >= (int)sizeof(obs.bundle_path)) return false;
+    struct consensus_state_artifact_evidence *e = NULL;
+    struct consensus_state_bundle_manifest manifest = {0};
+    uint8_t logical[32];
+    bool ok = consensus_state_artifact_evidence_open(c.kb.path, -1, &e).ok &&
+        consensus_state_artifact_evidence_file_digest(e, obs.snapshot_sha3) &&
+        consensus_state_artifact_evidence_digest(e, logical) &&
+        consensus_state_artifact_evidence_manifest_copy(e, &manifest);
+    obs.endpoint_height = manifest.height; memcpy(obs.endpoint_hash, manifest.block_hash, 32);
+    struct block_index *tip = active_chain_tip(&main->chain_active);
+    int32_t old_height = tip ? tip->nHeight : -1;
+    const uint8_t *old_hash = tip && tip->phashBlock ? tip->phashBlock->data : NULL;
+    ok = ok && tip && tip->phashBlock && !memcmp(logical, manifest.artifact_digest, 32) &&
+        wallet_history_capability_matches(&cap, obs.history_manifest_root).ok &&
+        wallet_history_capability_matches_path(&cap, obs.private_history_path).ok &&
+        consensus_state_rom_checkpoint_content_matches(&manifest);
+    sqlite3_int64 progress_before = sqlite3_total_changes64(c.pdb);
+    sqlite3_int64 node_before = sqlite3_total_changes64(node->db);
+    size_t map_before = main->map_block_index.size;
+    struct wallet_cutover_binding binding;
+    struct bound_history_preflight *p = NULL;
+    c.rung.cp.utxo_root[0] ^= 1;
+    bool wrong = ok && !consensus_state_rom_checkpoint_content_matches(&manifest);
+    struct zcl_result refused = bound_history_preflight_open(&p, &obs, e, &cap, old_height, old_hash);
+    wrong = wrong && !refused.ok && strstr(refused.message, "bound preflight input or authority unavailable") && !p &&
+        sqlite3_total_changes64(c.pdb) == progress_before && sqlite3_total_changes64(node->db) == node_before &&
+        main->map_block_index.size == map_before && active_chain_tip(&main->chain_active) == tip &&
+        wallet_sqlite_cutover_read(ws, &binding) == WALLET_CUTOVER_ABSENT &&
+        !boot_consensus_bundle_marker_exists(c.rdir);
+    c.rung.cp.utxo_root[0] ^= 1;
+    bool restored = consensus_state_rom_checkpoint_content_matches(&manifest);
+    struct zcl_result reaches_archive = bound_history_preflight_open(&p, &obs, e, &cap, old_height, old_hash);
+    bool control = restored && !reaches_archive.ok && !p &&
+        strstr(reaches_archive.message, "block_index_flat: file too small") &&
+        sqlite3_total_changes64(c.pdb) == progress_before && sqlite3_total_changes64(node->db) == node_before &&
+        main->map_block_index.size == map_before && active_chain_tip(&main->chain_active) == tip;
+    bound_history_preflight_close(&p);
+    wallet_history_capability_release(&cap);
+    bool closed = consensus_state_artifact_evidence_close(&e);
+    return wrong && control && closed;
+}
+static bool csi_bound_preflight_case(const char *root)
+{
+    pid_t child = fork();
+    if (!child) { alarm(90); _exit(csi_bound_preflight_wrong_commitment(root) ? 0 : 1); }
+    int status = 0;
+    return child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
 static int csi_bound_swap_case(void)
 {
     int failures = 0; char root[256];
@@ -122,6 +199,9 @@ static int csi_bound_swap_case(void)
     int status = 0;
     bool ok = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
     CSI_CHECK("bound terminal: mismatches and staged swap preserve wallet fence", ok);
+    test_rm_rf_recursive(root);
+    test_make_tmpdir(root, sizeof(root), "bound_preflight", "authority");
+    CSI_CHECK("bound preflight rejects wrong compiled commitment before archive open", csi_bound_preflight_case(root));
     test_rm_rf_recursive(root); return failures;
 }
 struct csi_bound_lock { zcl_mutex_t *mutex; int ready, release; bool handshake; };
@@ -268,11 +348,40 @@ static bool csi_bound_wallet_reload(struct wallet_sqlite *ws, const struct walle
     }
     wallet_free(copy); free(copy); return ok;
 }
+static bool csi_completed_absent_refusal(struct node_db *node, struct wallet_sqlite *ws,
+    struct wallet *wallet, struct main_state *main, const char *dir)
+{
+    struct boot_cutover_env env = {.node = node, .wallet_db = ws, .wallet = wallet, .state = main};
+    struct app_context ctx = {.datadir = dir}; struct wallet_cutover_binding binding;
+    return wallet_sqlite_cutover_observe_completed(ws, &binding) == WALLET_CUTOVER_OBS_ABSENT &&
+        wallet_readiness_get(wallet).state == WALLET_READINESS_UNKNOWN &&
+        !boot_cutover_publish_completed(&env, &ctx, true) &&
+        wallet_readiness_get(wallet).state == WALLET_READINESS_UNKNOWN &&
+        boot_cutover_publish_completed(&env, &ctx, false) &&
+        wallet_readiness_get(wallet).state == WALLET_READINESS_UNKNOWN;
+}
+static bool csi_completed_pending_refusal(struct node_db *node, struct wallet_sqlite *ws,
+    struct wallet *wallet, struct main_state *main, const char *dir)
+{
+    struct boot_cutover_env env = {.node = node, .wallet_db = ws, .wallet = wallet, .state = main};
+    struct app_context ctx = {.datadir = dir}; struct wallet_cutover_binding binding;
+    bool ok = wallet_sqlite_cutover_observe_completed(ws, &binding) == WALLET_CUTOVER_OBS_PENDING &&
+        !boot_cutover_publish_completed(&env, &ctx, true) &&
+        !boot_cutover_publish_completed(&env, &ctx, false) &&
+        wallet_readiness_get(wallet).state == WALLET_READINESS_UNKNOWN;
+    if (!ok || sqlite3_exec(node->db, "UPDATE node_state SET value='invalid' WHERE key='wallet_scan_incomplete'",
+                             NULL, NULL, NULL) != SQLITE_OK || sqlite3_changes(node->db) != 1) return false;
+    return wallet_sqlite_cutover_observe_completed(ws, &binding) == WALLET_CUTOVER_OBS_MALFORMED &&
+        !boot_cutover_publish_completed(&env, &ctx, true) &&
+        !boot_cutover_publish_completed(&env, &ctx, false) &&
+        wallet_readiness_get(wallet).state == WALLET_READINESS_UNKNOWN;
+}
 static bool csi_bound_real_child(const char *root, bool convert_first)
 {
     struct rung_act_ctx c; struct node_db *node = NULL; struct wallet_sqlite *ws = NULL;
     struct wallet *wallet = NULL; struct main_state *main = NULL; struct coins_view_cache cache;
     if (!csi_guarded_child_setup(&c, root, &node, &ws, &wallet, &main, &cache) ||
+        !csi_completed_absent_refusal(node, ws, wallet, main, c.rdir) ||
         !csi_bound_height_cases(main, wallet, c.kb.height, c.kb.block_hash)) return false;
     struct block_index *five = active_chain_at(&main->chain_active, 5);
     if (!five || !five->phashBlock) return false;
@@ -327,7 +436,7 @@ static bool csi_bound_real_child(const char *root, bool convert_first)
         wallet->scan_retry.pending && wallet->scan_retry.from == 11 &&
         csi_bound_wallet_identity(node->db, after) && !memcmp(before, after, 32) &&
         csi_bound_wallet_heights(node->db, 5, 2) && csi_bound_wallet_reload(ws, wallet);
-    return ok;
+    return ok && csi_completed_pending_refusal(node, ws, wallet, main, c.rdir);
 }
 static int csi_bound_real_case(bool convert_first)
 {

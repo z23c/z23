@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Pending wallet cutover startup. */
 #include "platform/socket_compat.h"
+#include "services/wallet_history_capability.h"
 #include "platform/wallet_startup_auth.h"
 #include "platform/wallet_startup_auth_protocol.h"
 #include "base/cleanse.h"
@@ -330,17 +331,23 @@ bool boot_test_pending_runtime_stores_open(const char *datadir, struct node_db *
 
 /* Pending wallets retain the installed authority; ordinary repair/import paths
  * must not replace it while wallet history is being reconciled. */
-static bool boot_pending_bind_storage(struct boot_cutover_env *e, struct app_context *ctx)
+bool boot_bound_memory_bind(struct boot_cutover_env *e)
 {
-    if (!progress_store_db() || !flysync_island_boot_register(ctx->datadir) ||
-        !boot_ensure_event_log(ctx->datadir) ||
-        !boot_bind_wallet_replay_event_log() ||
-        !coins_view_kv_init(e->coins_view))
-        return false;
+    if (!e || !e->coins_view || !e->coins_tip || !e->state || !e->node ||
+        !progress_store_db() || !coins_view_kv_init(e->coins_view)) return false;
     coins_view_cache_init(e->coins_tip, &e->coins_view->view);
     csr_init(csr_instance(), &e->state->map_block_index, &e->state->chain_active,
              &e->state->pindex_best_header, e->coins_tip, e->node, NULL);
     csr_set_db_service(csr_instance(), e->db_service);
+    return true;
+}
+
+static bool boot_pending_bind_storage(struct boot_cutover_env *e, struct app_context *ctx)
+{
+    if (!progress_store_db() || !flysync_island_boot_register(ctx->datadir) ||
+        !boot_ensure_event_log(ctx->datadir) ||
+        !boot_bind_wallet_replay_event_log() || !boot_bound_memory_bind(e))
+        return false;
     if (!boot_ensure_block_index_projection(ctx->datadir) ||
         !flysync_island_boot_rehydrate(e->state) ||
         !boot_pending_runtime_stores_open(ctx->datadir, e->node,
@@ -351,8 +358,9 @@ static bool boot_pending_bind_storage(struct boot_cutover_env *e, struct app_con
     return true;
 }
 
-bool boot_cutover_load_chain(struct boot_cutover_env *e, struct app_context *ctx,
-    const struct chain_params *params, struct block_index **tip)
+static bool boot_cutover_load_chain_binding(struct boot_cutover_env *e, struct app_context *ctx,
+    const struct chain_params *params, struct block_index **tip,
+    const struct wallet_cutover_binding *expected)
 {
     if (!boot_pending_bind_storage(e, ctx)) return false;
     struct zcl_result loaded = boot_try_rebuild_block_index_from_projection(
@@ -361,16 +369,18 @@ bool boot_cutover_load_chain(struct boot_cutover_env *e, struct app_context *ctx
     struct boot_derived_coins_best coins;
     if (!boot_derive_coins_best(&coins) || !coins.hash_found || coins.height < 0)
         return false;
-    struct wallet_cutover_binding binding;
-    if (wallet_sqlite_cutover_read(e->wallet_db, &binding) != WALLET_CUTOVER_PENDING)
-        return false;
+    struct wallet_cutover_binding pending;
+    if (!expected) {
+        if (wallet_sqlite_cutover_read(e->wallet_db, &pending) != WALLET_CUTOVER_PENDING) return false;
+        expected = &pending;
+    }
     struct uint256 installed_hash;
-    memcpy(installed_hash.data, binding.target_hash, sizeof(installed_hash.data));
+    memcpy(installed_hash.data, expected->target_hash, sizeof(installed_hash.data));
     struct uint256 hash;
     memcpy(hash.data, coins.hash, sizeof(hash.data));
     enum boot_pending_restore_result restored = boot_wallet_pending_restore(
         e->state, csr_instance(), coins.height, &hash,
-        binding.target_height, &installed_hash);
+        expected->target_height, &installed_hash);
     if (restored != BOOT_PENDING_RESTORE_OK) {
         LOG_ERROR("wallet", "pending wallet chain restore refused: %d", (int)restored);
         return false;
@@ -382,6 +392,14 @@ bool boot_cutover_load_chain(struct boot_cutover_env *e, struct app_context *ctx
     set_sapling_tree_for_flush(&e->state->sapling_tree);
     return sysinit_run_stage(BOOT_STAGE_BLOCK_INDEX_LOADED, ctx).ok;
 }
+
+bool boot_cutover_load_chain(struct boot_cutover_env *e, struct app_context *ctx,
+    const struct chain_params *params, struct block_index **tip)
+{ return boot_cutover_load_chain_binding(e, ctx, params, tip, NULL); }
+
+bool boot_cutover_load_completed_chain(struct boot_cutover_env *e, struct app_context *ctx,
+    const struct chain_params *params, struct block_index **tip, const struct wallet_cutover_binding *binding)
+{ return binding && boot_cutover_load_chain_binding(e, ctx, params, tip, binding); }
 
 static bool boot_old_restore_view(struct boot_cutover_env *e,
                                   const struct wallet_cutover_binding *binding)
@@ -430,6 +448,9 @@ bool boot_cutover_load_old_chain(struct boot_cutover_env *e, struct app_context 
 /* The archive is app-owned and its files must remain immutable while replay runs. */
 #define BOOT_WALLET_HISTORY_MAX_ROWS 3500000u
 struct boot_pending_history {
+    struct boot_bound_bundle_observation observation;
+    bool observation_valid;
+    struct wallet_history_capability capability;
     struct main_state *state;
     uintptr_t directory;
     bool directory_open;
@@ -443,7 +464,165 @@ static void boot_pending_history_close(struct boot_pending_history *history)
         free(history->state);
     }
     if (history->directory_open) platform_private_directory_close(history->directory);
+    wallet_history_capability_release(&history->capability);
 }
+
+static bool boot_bound_history_names(struct platform_directory_transaction *root, unsigned *count)
+{
+    struct platform_directory_transaction blocks;
+    struct platform_directory_names names = {0};
+    platform_directory_transaction_init(&blocks);
+    bool ok = platform_directory_transaction_open_child(root, "blocks", false, &blocks) == PLATFORM_DIRECTORY_OK &&
+        platform_directory_transaction_list_regular(&blocks, &names) && names.count > 0 && names.count <= 253;
+    for (size_t i = 0; ok && i < names.count; ++i) {
+        char expected[16];
+        int n = snprintf(expected, sizeof(expected), "blk%05zu.dat", i);
+        if (n != 12 || strcmp(expected, names.items[i])) ok = false;
+    }
+    if (ok) *count = (unsigned)names.count;
+    platform_directory_names_free(&names);
+    platform_directory_transaction_close(&blocks);
+    return ok;
+}
+
+static bool boot_bound_history_cancelled(void *context)
+{
+    (void)context;
+    return thread_registry_shutdown_requested();
+}
+
+bool boot_bound_observation_equal(const struct boot_bound_bundle_observation *a,
+    const struct boot_bound_bundle_observation *b)
+{
+    return a && b && memchr(a->bundle_path, 0, sizeof(a->bundle_path)) &&
+        memchr(a->private_history_path, 0, sizeof(a->private_history_path)) &&
+        memchr(b->bundle_path, 0, sizeof(b->bundle_path)) &&
+        memchr(b->private_history_path, 0, sizeof(b->private_history_path)) &&
+        a->attempts == b->attempts && a->endpoint_height == b->endpoint_height &&
+        !strcmp(a->bundle_path, b->bundle_path) && !strcmp(a->private_history_path, b->private_history_path) &&
+        !memcmp(a->snapshot_sha3, b->snapshot_sha3, 32) && !memcmp(a->endpoint_hash, b->endpoint_hash, 32) &&
+        !memcmp(a->history_manifest_root, b->history_manifest_root, 32);
+}
+static bool boot_bound_history_location(const struct boot_bound_bundle_observation *obs,
+    struct wallet_history_names *names, char parent[BOOT_BOUND_PATH_CAP])
+{
+    int n = snprintf(parent, BOOT_BOUND_PATH_CAP, "%s", obs->private_history_path);
+    if (n < 0 || (size_t)n >= BOOT_BOUND_PATH_CAP ||
+        !wallet_history_capability_names(obs->snapshot_sha3, obs->history_manifest_root, names).ok) return false;
+    char *slash = strrchr(parent, '/');
+    if (!slash || slash == parent || strcmp(slash + 1, names->root)) return false;
+    *slash = 0;
+    return true;
+}
+static bool boot_bound_history_request(const struct app_context *ctx,
+    const struct wallet_cutover_binding *binding, struct boot_bound_bundle_observation *obs,
+    struct wallet_history_names *names, char parent[BOOT_BOUND_PATH_CAP])
+{
+    enum boot_bound_read_result read = boot_install_bound_bundle_read(ctx->datadir, obs);
+    if ((read != BOOT_BOUND_READ_READY && read != BOOT_BOUND_READ_TERMINAL) ||
+        obs->endpoint_height != binding->target_height ||
+        memcmp(obs->endpoint_hash, binding->target_hash, 32) ||
+        memcmp(obs->snapshot_sha3, binding->snapshot_whole_sha3, 32) ||
+        memcmp(obs->history_manifest_root, binding->history_manifest_root, 32)) return false;
+    return boot_bound_history_location(obs, names, parent);
+}
+
+static enum boot_pending_replay_result boot_bound_history_acquire(struct wallet_history_capability *cap,
+    const struct boot_bound_bundle_observation *obs,
+    const struct wallet_history_names *names, const char *parent)
+{
+    struct platform_directory_transaction p, root;
+    struct platform_directory_lock lease;
+    platform_directory_transaction_init(&p); platform_directory_transaction_init(&root);
+    platform_directory_lock_init(&lease);
+    unsigned count = 0;
+    bool opened = platform_directory_transaction_open(&p, parent) &&
+        platform_directory_lock_acquire(&p, names->lock, false, PLATFORM_DIRECTORY_LOCK_EXCLUSIVE, &lease) == PLATFORM_DIRECTORY_OK &&
+        platform_directory_transaction_open_child(&p, names->root, false, &root) == PLATFORM_DIRECTORY_OK &&
+        boot_bound_history_names(&root, &count);
+    enum boot_pending_replay_result result = BOOT_PENDING_FAILED;
+    if (opened) {
+        struct zcl_result acquired = wallet_history_capability_acquire_cancelable(cap,
+            &p, &root, &lease, names->root, names->lock, count, obs->history_manifest_root,
+            boot_bound_history_cancelled, NULL);
+        if (acquired.code == WALLET_HISTORY_CAPABILITY_CANCELLED) result = BOOT_PENDING_STOPPED;
+        else if (acquired.ok && wallet_history_capability_matches_path(cap,
+                                                                       obs->private_history_path).ok)
+            result = BOOT_PENDING_COMPLETE;
+    }
+    platform_directory_transaction_close(&root); platform_directory_lock_release(&lease);
+    platform_directory_transaction_close(&p);
+    if (result != BOOT_PENDING_COMPLETE) wallet_history_capability_release(cap);
+    return result;
+}
+
+#ifdef ZCL_TESTING
+static void (*boot_bound_history_after_acquire)(const char *, void *);
+static void *boot_bound_history_after_acquire_context;
+void boot_bound_history_test_after_acquire(void (*hook)(const char *, void *), void *context)
+{
+    boot_bound_history_after_acquire = hook;
+    boot_bound_history_after_acquire_context = context;
+}
+#endif
+static bool boot_bound_history_capability_empty(const struct wallet_history_capability *cap)
+{
+    return cap && !cap->verified && cap->parent.native == UINTPTR_MAX && cap->root.native == UINTPTR_MAX &&
+        cap->blocks.native == UINTPTR_MAX && cap->lease.native == UINTPTR_MAX;
+}
+static bool boot_bound_history_read_expected(const char *datadir,
+    const struct boot_bound_bundle_observation *expected, bool allow_terminal,
+    struct boot_bound_bundle_observation *observed)
+{
+    enum boot_bound_read_result status = boot_install_bound_bundle_read(datadir, observed);
+    return (status == BOOT_BOUND_READ_READY || (allow_terminal && status == BOOT_BOUND_READ_TERMINAL)) &&
+        boot_bound_observation_equal(expected, observed);
+}
+enum boot_pending_replay_result boot_bound_history_acquire_observed(const char *datadir,
+    const struct boot_bound_bundle_observation *expected, bool allow_terminal,
+    struct wallet_history_capability *cap)
+{
+    if (!datadir || !datadir[0] || !expected || !boot_bound_history_capability_empty(cap))
+        return BOOT_PENDING_FAILED;
+    struct boot_bound_bundle_observation wanted = *expected, observed = {0};
+    struct wallet_history_names names; char parent[BOOT_BOUND_PATH_CAP];
+    if (!boot_bound_history_read_expected(datadir, &wanted, allow_terminal, &observed) ||
+        !boot_bound_history_location(&observed, &names, parent)) return BOOT_PENDING_FAILED;
+    enum boot_pending_replay_result result = boot_bound_history_acquire(cap, &observed, &names, parent);
+    if (result != BOOT_PENDING_COMPLETE) return result;
+#ifdef ZCL_TESTING
+    if (boot_bound_history_after_acquire) boot_bound_history_after_acquire(datadir, boot_bound_history_after_acquire_context);
+#endif
+    if (!boot_bound_history_read_expected(datadir, &wanted, allow_terminal, &observed)) {
+        wallet_history_capability_release(cap);
+        return BOOT_PENDING_FAILED;
+    }
+    return BOOT_PENDING_COMPLETE;
+}
+static enum boot_pending_replay_result boot_bound_history_open(struct boot_pending_history *history,
+    const struct app_context *ctx, const struct wallet_cutover_binding *binding)
+{
+    if (!history || !ctx || !ctx->datadir || !binding) return BOOT_PENDING_FAILED;
+    struct boot_bound_bundle_observation obs = {0};
+    struct wallet_history_names names;
+    char parent[BOOT_BOUND_PATH_CAP];
+    if (!boot_bound_history_request(ctx, binding, &obs, &names, parent)) return BOOT_PENDING_FAILED;
+    enum boot_pending_replay_result result = boot_bound_history_acquire_observed(
+        ctx->datadir, &obs, true, &history->capability);
+    if (result == BOOT_PENDING_COMPLETE) { history->observation = obs; history->observation_valid = true; }
+    return result;
+}
+#ifdef ZCL_TESTING
+enum boot_pending_replay_result boot_test_bound_history_status(const struct app_context *ctx,
+    const struct wallet_cutover_binding *binding)
+{
+    struct boot_pending_history history = {0};
+    wallet_history_capability_init(&history.capability);
+    enum boot_pending_replay_result status = boot_bound_history_open(&history, ctx, binding);
+    boot_pending_history_close(&history);
+    return status;
+}
+#endif
 
 #ifdef ZCL_TESTING
 typedef struct zcl_result (*boot_test_history_open_fn)(struct main_state *, const char *,
@@ -468,14 +647,20 @@ static struct zcl_result boot_pending_history_load(struct main_state *state, con
 }
 
 static bool boot_pending_history_open(struct boot_pending_history *history,
-    const struct app_context *ctx, const struct wallet_witness_endpoint *endpoint)
+    const struct app_context *ctx, const struct wallet_witness_endpoint *endpoint,
+    const struct wallet_cutover_binding *binding)
 {
     if (!ctx || !ctx->datadir || !ctx->datadir[0] || !endpoint) return false;
     int n = snprintf(history->path, sizeof(history->path), "%s/wallet-history", ctx->datadir);
-    if (n <= 0 || (size_t)n >= sizeof(history->path) - sizeof("/blocks/blk00000.dat") ||
-        !platform_private_directory_open_validated_traverse(history->path, &history->directory))
-        return false;
-    history->directory_open = true;
+    if (binding && binding->history_identity_present) {
+        const char *path = wallet_history_capability_path(&history->capability);
+        n = path ? snprintf(history->path, sizeof(history->path), "%s", path) : -1;
+        if (n <= 0 || (size_t)n >= sizeof(history->path) - sizeof("/blocks/blk00000.dat")) return false;
+    } else {
+        if (n <= 0 || (size_t)n >= sizeof(history->path) - sizeof("/blocks/blk00000.dat") ||
+            !platform_private_directory_open_validated_traverse(history->path, &history->directory)) return false;
+        history->directory_open = true;
+    }
     history->state = zcl_calloc(1, sizeof(*history->state), "wallet history archive state");
     if (!history->state) return false;
     main_state_init(history->state);
@@ -489,14 +674,15 @@ bool boot_test_pending_history_open(const struct app_context *ctx,
     const struct wallet_witness_endpoint *endpoint)
 {
     struct boot_pending_history history = {0};
-    bool ok = boot_pending_history_open(&history, ctx, endpoint);
+    wallet_history_capability_init(&history.capability);
+    bool ok = boot_pending_history_open(&history, ctx, endpoint, NULL);
     boot_pending_history_close(&history);
     return ok;
 }
 #endif
 
 /* Runs before network, reducer and wallet services can mutate the reference. */
-static bool boot_pending_replay_prepare(struct boot_cutover_env *e, struct app_context *ctx,
+static enum boot_pending_replay_result boot_pending_replay_prepare(struct boot_cutover_env *e, struct app_context *ctx,
     struct boot_cutover_replay *replay, struct wallet_rpc_context *rpc,
     struct boot_pending_history *history)
 {
@@ -507,7 +693,11 @@ static bool boot_pending_replay_prepare(struct boot_cutover_env *e, struct app_c
     if (!tip || !tip->phashBlock ||
         wallet_sqlite_cutover_read(e->wallet_db, &binding) != WALLET_CUTOVER_PENDING ||
         wallet_sqlite_cutover_scan_floor(e->wallet_db, &floor) != WALLET_CUTOVER_FLOOR_FOUND ||
-        !wallet_scan_identity(e->wallet, identity)) return false;
+        !wallet_scan_identity(e->wallet, identity)) return BOOT_PENDING_FAILED;
+    if (binding.history_identity_present) {
+        enum boot_pending_replay_result status = boot_bound_history_open(history, ctx, &binding);
+        if (status != BOOT_PENDING_COMPLETE) return status;
+    }
     *rpc = (struct wallet_rpc_context){.wallet = e->wallet, .wallet_db = e->wallet_db,
         .node_db = e->node, .main_state = e->state, .datadir = ctx->datadir,
         .coins_tip = e->coins_tip};
@@ -524,14 +714,14 @@ static bool boot_pending_replay_prepare(struct boot_cutover_env *e, struct app_c
             if (!ready) boot_cutover_replay_clear(replay);
         }
         if (!ready) {
-            if (!boot_pending_history_open(history, ctx, &endpoint)) return false;
+            if (!boot_pending_history_open(history, ctx, &endpoint, &binding)) return BOOT_PENDING_FAILED;
             rpc->main_state = history->state;
             ready = boot_cutover_replay_init_archive(replay, rpc, e->db_service, &binding,
                 floor, &endpoint, identity, e->state, history->path);
         }
     }
     if (ready) replay->sapling_load_ok = e->sapling_load_ok;
-    return ready;
+    return ready ? BOOT_PENDING_COMPLETE : BOOT_PENDING_FAILED;
 }
 
 #ifdef ZCL_TESTING
@@ -540,7 +730,8 @@ bool boot_test_pending_replay_prepare(struct boot_cutover_env *env, struct app_c
 {
     struct boot_pending_history *history = zcl_calloc(1, sizeof(*history), "pending history test");
     if (!history) return false;
-    bool ok = boot_pending_replay_prepare(env, ctx, replay, rpc, history);
+    wallet_history_capability_init(&history->capability);
+    bool ok = boot_pending_replay_prepare(env, ctx, replay, rpc, history) == BOOT_PENDING_COMPLETE;
     if (!ok) { boot_pending_history_close(history); free(history); return false; }
     *owned_history = history;
     return true;
@@ -839,26 +1030,86 @@ enum boot_pending_replay_result boot_test_pending_loop(struct boot_cutover_repla
 { return boot_pending_replay_loop(NULL, NULL, NULL, replay, 0); }
 #endif
 
-enum boot_pending_replay_result boot_cutover_replay(struct boot_cutover_env *e, struct app_context *ctx, const struct chain_params *params)
+static enum boot_pending_replay_result boot_cutover_replay_observed(struct boot_cutover_env *e, struct app_context *ctx, const struct chain_params *params, struct boot_bound_bundle_observation *observation)
 {
     struct boot_cutover_replay replay = {0};
     struct wallet_rpc_context rpc;
     struct boot_pending_history history = {0};
+    wallet_history_capability_init(&history.capability);
     enum boot_pending_replay_result result = BOOT_PENDING_FAILED;
     bool unlocked = false;
     int64_t deadline = 0;
     if (!boot_pending_authenticate(e, ctx, &unlocked, &deadline)) goto done;
-    if (!boot_pending_replay_prepare(e, ctx, &replay, &rpc, &history)) {
-        LOG_ERROR("wallet", "pending replay reference or scan floor unavailable");
+    result = boot_pending_replay_prepare(e, ctx, &replay, &rpc, &history);
+    if (result != BOOT_PENDING_COMPLETE) {
+        if (result == BOOT_PENDING_FAILED) LOG_ERROR("wallet", "pending replay reference or scan floor unavailable");
         goto done;
     }
     replay.auth_deadline_ms = deadline;
     result = boot_pending_replay_loop(e, ctx, params, &replay, deadline);
+    if (result == BOOT_PENDING_COMPLETE && observation && history.observation_valid)
+        *observation = history.observation;
 done:
     if (unlocked) wallet_lock_lock(e->wallet);
     boot_cutover_replay_clear(&replay);
     boot_pending_history_close(&history);
     return result;
+}
+
+enum boot_pending_replay_result boot_cutover_replay(struct boot_cutover_env *e, struct app_context *ctx, const struct chain_params *params)
+{ return boot_cutover_replay_observed(e, ctx, params, NULL); }
+
+enum boot_pending_replay_result boot_cutover_replay_and_retire(struct boot_cutover_env *env,
+    struct app_context *ctx, const struct chain_params *params, const struct wallet_cutover_binding *binding)
+{
+    if (!env || !ctx || !binding) return BOOT_PENDING_FAILED;
+    struct boot_bound_bundle_observation observation = {0};
+    enum boot_pending_replay_result result = boot_cutover_replay_observed(env, ctx, params, &observation);
+    if (result != BOOT_PENDING_COMPLETE || !binding->history_identity_present) return result;
+#if defined(_WIN32)
+    return BOOT_PENDING_FAILED;
+#else
+    uintptr_t directory = 0;
+    if (!platform_private_directory_open_validated_traverse(ctx->datadir, &directory)) {
+        LOG_ERROR("wallet", "bound completion datadir unavailable");
+        return BOOT_PENDING_FAILED;
+    }
+    enum boot_bound_completion_result retired = boot_bound_completed_retire(env->wallet_db,
+        env->node, env->wallet, env->state, ctx->datadir, (int)directory, binding, &observation);
+    platform_private_directory_close(directory);
+    if (retired != BOOT_BOUND_COMPLETION_RETIRED) {
+        LOG_ERROR("wallet", "bound completion request retirement refused: %d", (int)retired);
+        return BOOT_PENDING_FAILED;
+    }
+    return BOOT_PENDING_COMPLETE;
+#endif
+}
+
+static bool boot_cutover_retry_bound(struct boot_cutover_env *env, struct app_context *ctx,
+                                     const struct wallet_cutover_binding *binding)
+{
+    struct boot_pending_history history = {0};
+    wallet_history_capability_init(&history.capability);
+    enum boot_pending_replay_result opened = boot_bound_history_open(&history, ctx, binding);
+    struct boot_bound_bundle_observation obs = {0};
+    struct wallet_history_names names;
+    char parent[BOOT_BOUND_PATH_CAP];
+    bool valid = opened == BOOT_PENDING_COMPLETE &&
+        boot_bound_history_request(ctx, binding, &obs, &names, parent);
+    struct consensus_state_install_runtime_result result = {0};
+    struct zcl_result installed = valid ? consensus_state_install_from_bound_bundle_terminal_old_retry(
+        env->node, env->state, ctx->datadir, env->wallet_db, env->wallet, &obs,
+        &history.capability, binding, &result) : ZCL_ERR(-1, "bound old cutover history unavailable");
+    boot_pending_history_close(&history);
+    if (!installed.ok || !result.state_installed) {
+        LOG_ERROR("wallet", "bound old wallet cutover retry refused: %s", installed.message);
+        return false;
+    }
+    if (!boot_cutover_verify_committed(env, ctx->datadir, binding)) {
+        LOG_ERROR("wallet", "bound old wallet cutover committed but recovery verification failed");
+        return false;
+    }
+    return true;
 }
 
 bool boot_cutover_retry_old(struct boot_cutover_env *env, struct app_context *ctx,
@@ -868,9 +1119,12 @@ bool boot_cutover_retry_old(struct boot_cutover_env *env, struct app_context *ct
     struct block_index *tip = NULL;
     if (!boot_cutover_mode_supported(ctx) ||
         !wallet_readiness_initialize(env->wallet, WALLET_READINESS_PENDING,
-                                     binding->old_generation_present, binding->old_generation) ||
-        !boot_cutover_load_old_chain(env, ctx, params, binding, &tip))
+                                     binding->old_generation_present, binding->old_generation))
         return false;
+    if (binding->history_identity_present && binding->old_height > 0)
+        return boot_bound_old_cold_retry(env, ctx, params, binding);
+    if (!boot_cutover_load_old_chain(env, ctx, params, binding, &tip)) return false;
+    if (binding->history_identity_present) return boot_cutover_retry_bound(env, ctx, binding);
     char *bundle = consensus_state_find_old_retry_bundle(ctx->datadir, binding);
     if (!bundle) {
         LOG_ERROR("wallet", "old wallet cutover artifact unavailable");
@@ -922,6 +1176,13 @@ bool boot_cutover_publish_readiness(struct boot_cutover_env *e, struct app_conte
         platform_wallet_startup_auth_close(ctx->wallet_startup_auth_fd);
         ctx->wallet_startup_auth_present = false;
     }
+    struct wallet_cutover_binding completed;
+    enum wallet_cutover_observation_status observed = wallet_sqlite_cutover_observe_completed(e->wallet_db, &completed);
+    if (observed == WALLET_CUTOVER_OBS_FOUND) return true;
+    if (observed != WALLET_CUTOVER_OBS_ABSENT) {
+        LOG_ERROR("wallet", "wallet completion authority unavailable");
+        return false;
+    }
     struct wallet_cutover_binding boot_binding;
     if (wallet_sqlite_cutover_read(e->wallet_db, &boot_binding) != WALLET_CUTOVER_ABSENT) {
         LOG_ERROR("wallet", "wallet cutover needs reconciliation before services");
@@ -960,6 +1221,46 @@ bool boot_cutover_publish_readiness(struct boot_cutover_env *e, struct app_conte
     }
 #endif
     return true;
+}
+
+bool boot_cutover_publish_completed(struct boot_cutover_env *e, struct app_context *ctx, bool required)
+{
+    if (ctx->wallet_startup_auth_present) {
+        platform_wallet_startup_auth_close(ctx->wallet_startup_auth_fd);
+        ctx->wallet_startup_auth_present = false;
+    }
+    struct wallet_cutover_binding completed;
+    enum wallet_cutover_observation_status observed = wallet_sqlite_cutover_observe_completed(e->wallet_db, &completed);
+    if (observed == WALLET_CUTOVER_OBS_ABSENT && !required) return true;
+    if (observed != WALLET_CUTOVER_OBS_FOUND) {
+        LOG_ERROR("wallet", "completed wallet observation refused: %d", (int)observed);
+        return false;
+    }
+#if defined(_WIN32)
+    (void)ctx;
+    return false;
+#else
+    struct boot_bound_bundle_observation request = {0};
+    enum boot_bound_read_result request_status = boot_install_bound_bundle_read(ctx->datadir, &request);
+    if (request_status != BOOT_BOUND_READ_ABSENT) {
+        LOG_ERROR("wallet", "completed wallet request state refused: %d", (int)request_status);
+        return false;
+    }
+#ifdef ZCL_TESTING
+    boot_test_run_completed_before_proof(e, ctx);
+#endif
+    int fd = open(ctx->datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool present = false; uint64_t generation = 0;
+    enum boot_bound_completion_result proof = fd < 0 ? BOOT_BOUND_COMPLETION_ERROR :
+        boot_bound_completed_prove(e->wallet_db, e->node, e->wallet, e->state,
+                                   ctx->datadir, fd, &present, &generation);
+    if (fd >= 0 && close(fd) != 0) return false;
+    if (proof != BOOT_BOUND_COMPLETION_PROVEN) {
+        LOG_ERROR("wallet", "completed wallet proof refused: %d", (int)proof);
+        return false;
+    }
+    return wallet_readiness_initialize(e->wallet, WALLET_READINESS_READY, present, generation);
+#endif
 }
 
 bool consensus_state_wallet_preflight_identity(struct wallet_sqlite *wallet,

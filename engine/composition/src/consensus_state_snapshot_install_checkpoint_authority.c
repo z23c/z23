@@ -227,7 +227,7 @@ static bool activate_rom_version_matches(
          manifest->sapling_pool_total == rom->sapling_pool_total);
 }
 
-static bool activate_rom_checkpoint_content_evaluate(
+bool consensus_state_rom_checkpoint_content_matches(
     const struct consensus_state_bundle_manifest *manifest)
 {
     /* The commitment baked for THIS bundle height (keystone or ladder rung).
@@ -295,7 +295,7 @@ activate_resolve_content_authority(
     const struct consensus_state_activate_request *request,
     char *contained_reason, size_t reason_cap)
 {
-    if (activate_rom_checkpoint_content_evaluate(manifest))
+    if (consensus_state_rom_checkpoint_content_matches(manifest))
         return CONSENSUS_STATE_ACTIVATE_AUTHORITY_CHECKPOINT_ROM;
 
     if (manifest->format_version != CONSENSUS_STATE_BUNDLE_V1) {

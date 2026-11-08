@@ -105,6 +105,7 @@ enum consensus_state_activate_authority {
  * about which heights carry a compiled trust root. */
 const struct rom_state_checkpoint *
 consensus_state_baked_trust_root_for_height(int32_t height);
+bool consensus_state_rom_checkpoint_content_matches(const struct consensus_state_bundle_manifest *manifest);
 
 const char *consensus_state_activate_authority_name(
     enum consensus_state_activate_authority authority);

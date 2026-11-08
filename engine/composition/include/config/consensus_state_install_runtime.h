@@ -169,6 +169,16 @@ void consensus_state_install_test_after_stage(void (*hook)(void *), void *contex
 #endif
 
 /* OLD terminal retry re-verifies the retained public history; caller must exit. */
+struct boot_bound_bundle_observation;
+struct wallet_history_capability;
+struct zcl_result consensus_state_install_from_bound_bundle_terminal_old_retry(
+    struct node_db *ndb, struct main_state *ms, const char *datadir,
+    struct wallet_sqlite *ws, struct wallet *wallet,
+    const struct boot_bound_bundle_observation *observation,
+    const struct wallet_history_capability *history,
+    const struct wallet_cutover_binding *expected,
+    struct consensus_state_install_runtime_result *out);
+
 struct zcl_result consensus_state_install_from_bundle_terminal_old_retry(
     struct node_db *ndb, struct main_state *ms, const char *bundle_path,
     const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
@@ -301,7 +311,7 @@ enum boot_bundle_arm_result {
 };
 /* Versioned staged binding. The caller must have privately published history;
  * this codec records the path and identities but does not validate its contents.
- * The bound request is refused by boot until a typed installer is integrated. */
+ * Boot validates the bound request and retained history before installation. */
 struct boot_bound_bundle_request {
     const char *bundle_path;
     uint8_t snapshot_sha3[32];
@@ -356,6 +366,22 @@ enum boot_bound_retire_result {
 };
 enum boot_bound_retire_result boot_install_bound_bundle_retire(
     const char *datadir, const struct boot_bound_bundle_observation *expected);
+/* Caller is the serialized pre-service startup owner; expected is the exact
+ * preflight or observed completed binding. Keep the datadir lease
+ * through this call. ABSENT is not proof of completion; UNKNOWN needs readback.
+ * PROVEN is reserved internally and is never returned by the public operation. */
+enum boot_bound_completion_result {
+    BOOT_BOUND_COMPLETION_ERROR, BOOT_BOUND_COMPLETION_ABSENT, BOOT_BOUND_COMPLETION_PENDING,
+    BOOT_BOUND_COMPLETION_UNKNOWN, BOOT_BOUND_COMPLETION_PROVEN, BOOT_BOUND_COMPLETION_RETIRED
+};
+enum boot_bound_completion_result boot_bound_completed_retire(struct wallet_sqlite *wallet_db,
+    struct node_db *node, struct wallet *wallet, struct main_state *main, const char *datadir, int datadir_fd,
+    const struct wallet_cutover_binding *expected,
+    const struct boot_bound_bundle_observation *expected_request);
+/* Read-only proof; caller holds the startup lease and has resolved the chain tip. */
+enum boot_bound_completion_result boot_bound_completed_prove(struct wallet_sqlite *ws,
+    struct node_db *node, struct wallet *wallet, struct main_state *main, const char *datadir, int dir_fd,
+    bool *generation_present, uint64_t *generation);
 #ifdef ZCL_TESTING
 void boot_install_bound_retire_test_hook(void (*hook)(const char *path), bool fail_flush);
 #endif

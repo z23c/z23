@@ -32,6 +32,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #include "util/safe_alloc.h"
 
 /* ── Helpers ─────────────────────────────────────────────────── */
@@ -1030,6 +1033,123 @@ static int wse_deny_shielded_read(void *context, int action, const char *one,
         SQLITE_DENY : SQLITE_OK;
 }
 
+static bool wse_notes_proof(struct wallet_sqlite *ws, struct wallet *w, bool loaded)
+{
+    sqlite3_mutex *mu = sqlite3_db_mutex(ws->db);
+    if (!mu) return false;
+    sqlite3_mutex_enter(mu);
+    zcl_mutex_lock(&w->cs);
+    zcl_mutex_lock(&w->keystore.cs);
+    zcl_mutex_lock(&w->sapling_keys.cs);
+    bool opened = sqlite3_exec(ws->db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK;
+    bool ok = opened && boot_wallet_cutover_notes_empty_locked(ws, ws->db, w, loaded);
+    if (opened && sqlite3_exec(ws->db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) {
+        ok = false;
+        if (!sqlite3_get_autocommit(ws->db) && sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) abort();
+    }
+    if (!sqlite3_get_autocommit(ws->db)) abort();
+    zcl_mutex_unlock(&w->sapling_keys.cs);
+    zcl_mutex_unlock(&w->keystore.cs);
+    zcl_mutex_unlock(&w->cs);
+    sqlite3_mutex_leave(mu);
+    return ok;
+}
+
+#ifndef _WIN32
+static bool wse_notes_busy_open(sqlite3 **db, sqlite3 **blocker, const char *path,
+    struct wallet *w, struct wallet_sqlite *ws)
+{
+    return w && sqlite3_open(path, db) == SQLITE_OK &&
+        sqlite3_exec(*db, k_schema, NULL, NULL, NULL) == SQLITE_OK &&
+        sqlite3_exec(*db, "CREATE TABLE wallet_sapling_notes(x)", NULL, NULL, NULL) == SQLITE_OK &&
+        wallet_sqlite_open(ws, *db) && sqlite3_open(path, blocker) == SQLITE_OK &&
+        sqlite3_busy_timeout(*db, 0) == SQLITE_OK &&
+        sqlite3_exec(*blocker, "BEGIN EXCLUSIVE", NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static bool wse_notes_busy_cleanup(struct wallet_sqlite *ws, sqlite3 *blocker,
+    sqlite3 *db, struct wallet *w, const char *path, bool ok)
+{
+    if (ws->open) wallet_sqlite_close(ws);
+    if (blocker && sqlite3_close(blocker) != SQLITE_OK) ok = false;
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    if (w) free_wallet(w);
+    if (unlink(path) != 0) ok = false;
+    return ok;
+}
+
+static bool wse_notes_busy(void)
+{
+    char path[512];
+    int fd = test_mkstemp(path, sizeof(path), "wse-notes-busy");
+    if (fd < 0) return false;
+    bool ok = close(fd) == 0;
+    sqlite3 *db = NULL, *blocker = NULL;
+    struct wallet *w = alloc_wallet();
+    struct wallet_sqlite ws = {0};
+    ok = ok && wse_notes_busy_open(&db, &blocker, path, w, &ws);
+    if (ok) ok = !wse_notes_proof(&ws, w, true);
+    if (blocker && sqlite3_exec(blocker, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) ok = false;
+    if (ok) ok = wse_notes_proof(&ws, w, true);
+    return wse_notes_busy_cleanup(&ws, blocker, db, w, path, ok);
+}
+
+#endif
+
+static int test_notes_empty_proof(void)
+{
+    int failures = 0;
+    TEST("wallet_sqlite_enc: no-note proof permits a key and refuses notes and read errors") {
+#ifndef _WIN32
+        ASSERT(wse_notes_busy());
+#endif
+        sqlite3 *db = open_mem_db();
+        struct wallet *w = alloc_wallet();
+        struct wallet_sqlite ws = {0};
+        ASSERT(db && w && wallet_sqlite_open(&ws, db));
+        ASSERT(sqlite3_exec(db, "CREATE TABLE wallet_sapling_notes(x)", NULL, NULL, NULL) == SQLITE_OK);
+        set_passphrase(NULL);
+        uint8_t seed[32] = {1}, diversifier[ZC_DIVERSIFIER_SIZE], pk[32];
+        ASSERT(sapling_keystore_set_seed(&w->sapling_keys, seed));
+        ASSERT(sapling_keystore_new_address(&w->sapling_keys, diversifier, pk));
+        ASSERT(wallet_sqlite_write_sapling_seed(&ws, seed));
+        ASSERT(wallet_sqlite_write_sapling_key(&ws, 0, &w->sapling_keys.keys[0]));
+        ASSERT(!boot_wallet_cutover_notes_empty_locked(&ws, db, w, true));
+        ASSERT(wse_notes_proof(&ws, w, true));
+        ASSERT(!wse_notes_proof(&ws, w, false));
+        ASSERT(sqlite3_exec(db, "INSERT INTO wallet_sapling_notes VALUES(1)", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(!wse_notes_proof(&ws, w, true));
+        ASSERT(sqlite3_exec(db, "DELETE FROM wallet_sapling_notes", NULL, NULL, NULL) == SQLITE_OK);
+        w->sapling_notes = calloc(1, sizeof(*w->sapling_notes));
+        ASSERT(w->sapling_notes != NULL);
+        w->sapling_notes_cap = 1;
+        w->sapling_notes[0].used = true;
+        ASSERT(!wse_notes_proof(&ws, w, true));
+        w->sapling_notes[0].used = false;
+        w->sapling_notes_cap = MAX_SAPLING_NOTES + 1;
+        ASSERT(!wse_notes_proof(&ws, w, true));
+        w->sapling_notes_cap = 1;
+        void *saved_notes = w->sapling_notes;
+        w->sapling_notes = NULL;
+        ASSERT(!wse_notes_proof(&ws, w, true));
+        w->sapling_notes = saved_notes;
+        w->num_sapling_notes = 1;
+        ASSERT(!wse_notes_proof(&ws, w, true));
+        w->num_sapling_notes = 0;
+        ASSERT(sqlite3_set_authorizer(db, wse_deny_shielded_read, NULL) == SQLITE_OK);
+        ASSERT(!wse_notes_proof(&ws, w, true));
+        ASSERT(sqlite3_set_authorizer(db, NULL, NULL) == SQLITE_OK);
+        ASSERT(wse_notes_proof(&ws, w, true));
+        ASSERT(sqlite3_exec(db, "DROP TABLE wallet_sapling_notes", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(!wse_notes_proof(&ws, w, true));
+        wallet_sqlite_close(&ws);
+        free_wallet(w);
+        ASSERT(sqlite3_close(db) == SQLITE_OK);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_shielded_empty_memory(struct wallet_sqlite *ws, struct wallet *w, bool loaded)
 {
     int failures = 0;
@@ -1175,6 +1295,7 @@ int test_wallet_sqlite_enc(void)
     wallet_lock_reset_for_test();
 
     failures += test_shielded_empty_proof();
+    failures += test_notes_empty_proof();
     failures += test_plaintext_roundtrip();
     failures += test_encrypted_roundtrip();
     failures += test_encrypted_unreadable_without_pass();

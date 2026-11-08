@@ -28,6 +28,7 @@ struct boot_cutover_replay {
     bool transparent_filter_attempted;
     bool sapling_load_ok;
     bool shielded_empty;
+    bool spends_empty;
     bool full_empty;
     bool transparent_empty;
     bool pending_complete;

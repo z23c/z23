@@ -177,6 +177,15 @@ static bool bcp_readiness_matches(const struct wallet_readiness *current,
         current->generation == expected->generation;
 }
 
+static bool bcp_empty_holds(struct bcp_context *ctx, struct wallet *wallet, sqlite3 *db)
+{
+    if (ctx->replay->transparent_empty && !boot_wallet_cutover_transparent_empty_locked(ctx->replay->ctx->wallet_db, db, wallet)) return false;
+    if (!bcp_full_empty(ctx, wallet, db)) return false;
+    if (ctx->replay->shielded_empty && !boot_wallet_cutover_shielded_empty_locked(ctx->replay->ctx->wallet_db, db, wallet, ctx->replay->sapling_load_ok)) return false;
+    if (ctx->replay->spends_empty && !boot_wallet_cutover_notes_empty_locked(ctx->replay->ctx->wallet_db, db, wallet, ctx->replay->sapling_load_ok)) return false;
+    return true;
+}
+
 static bool bcp_holds(void *opaque, struct wallet *wallet, sqlite3 *db)
 {
     struct bcp_context *ctx = opaque;
@@ -187,14 +196,12 @@ static bool bcp_holds(void *opaque, struct wallet *wallet, sqlite3 *db)
     if (deadline && (now <= 0 || now >= deadline || wallet_lock_is_locked())) return false;
     if (!wallet_sqlite_verify_startup_sapling_in_tx_locked_r(
             ctx->replay->ctx->wallet_db, wallet, db).ok) return false;
-    return (!ctx->replay->transparent_empty || boot_wallet_cutover_transparent_empty_locked(
-            ctx->replay->ctx->wallet_db, db, wallet)) && bcp_full_empty(ctx, wallet, db) &&
-        (!ctx->replay->shielded_empty || boot_wallet_cutover_shielded_empty_locked(
-            ctx->replay->ctx->wallet_db, db, wallet, ctx->replay->sapling_load_ok)) &&
-        bcp_readiness_matches(&current, expected) &&
-        boot_cutover_coins_matches(ctx->coins, ctx->replay->endpoint.height,
-            ctx->replay->endpoint.hash.data, expected->generation, ctx->replay->identity) &&
-        wallet_private_broadcast_validate_holds_locked(ctx->guard, wallet, db);
+    if (!bcp_empty_holds(ctx, wallet, db)) return false;
+    if (!bcp_readiness_matches(&current, expected)) return false;
+    if (!boot_cutover_coins_matches(ctx->coins, ctx->replay->endpoint.height, ctx->replay->endpoint.hash.data, expected->generation, ctx->replay->identity)) return false;
+    if (!wallet_private_broadcast_validate_holds_locked(ctx->guard, wallet, db)) return false;
+    return true;
+
 }
 
 static void bcp_rollback(struct node_db *db)
