@@ -24,6 +24,7 @@
 #include "config/boot_consensus_bundle_marker.h"
 #include "storage/progress_store.h"
 #include "config/state_offer_peer.h"
+#include "config/boot_zcode_swarm_membership.h"
 #include "config/state_offer_link_session.h"
 #include "config/state_offer_link_receive.h"
 #include "conditions/stale_offers_only.h"
@@ -616,6 +617,73 @@ static uint32_t sosvc_provide(struct state_offer_batch_v1 *out, void *ctx)
     return sosvc_provide_from_snapshot(out, tip, peaks);
 }
 
+/* The relay callback remains registered for process lifetime. The borrowed
+ * manager is accessible only while a lease is held; shutdown closes admission
+ * and waits for existing callbacks before releasing it. */
+static pthread_mutex_t g_record_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_record_done = PTHREAD_COND_INITIALIZER;
+static struct net_manager *g_record_manager;
+static unsigned g_record_active;
+static bool g_record_enabled, g_record_registered, g_record_stopping;
+
+static struct net_manager *sosvc_record_enter(void)
+{
+    pthread_mutex_lock(&g_record_lock);
+    struct net_manager *nm = g_record_enabled ? g_record_manager : NULL;
+    if (nm) ++g_record_active;
+    pthread_mutex_unlock(&g_record_lock);
+    return nm;
+}
+static void sosvc_record_leave(void)
+{
+    pthread_mutex_lock(&g_record_lock);
+    if (--g_record_active == 0) pthread_cond_broadcast(&g_record_done);
+    pthread_mutex_unlock(&g_record_lock);
+}
+static void sosvc_record_stop(void)
+{
+    pthread_mutex_lock(&g_record_lock);
+    g_record_stopping = true;
+    g_record_enabled = false;
+    pthread_cond_broadcast(&g_record_done);
+    while (g_record_active) pthread_cond_wait(&g_record_done, &g_record_lock);
+    g_record_manager = NULL;
+    g_record_stopping = false;
+    pthread_mutex_unlock(&g_record_lock);
+}
+#ifdef ZCL_TESTING
+bool state_offer_service_test_record_enter(void)
+{ return sosvc_record_enter() != NULL; }
+void state_offer_service_test_record_leave(void)
+{ sosvc_record_leave(); }
+void state_offer_service_test_wait_record_stopped(void)
+{
+    pthread_mutex_lock(&g_record_lock);
+    while (g_record_enabled) pthread_cond_wait(&g_record_done, &g_record_lock);
+    pthread_mutex_unlock(&g_record_lock);
+}
+#endif
+
+static bool sosvc_peer_onion(struct net_manager *nm, int64_t peer_id,
+                             char hostname[NET_ADDR_STR_MAX + 1])
+{
+    struct net_addr addr; bool found = false;
+    zcl_mutex_lock(&nm->cs_nodes);
+    for (size_t i = 0; i < nm->num_nodes; ++i) {
+        struct p2p_node *node = nm->nodes[i];
+        if (!node || node->id != peer_id || node->inbound ||
+            !boot_zcode_swarm_eligible(node) ||
+            !(node->services & NODE_STATE_OFFER_LINK) || !node->addr.svc.addr.has_torv3) continue;
+        p2p_node_add_ref(node);
+        addr = node->addr.svc.addr;
+        p2p_node_release(node);
+        found = true;
+        break;
+    }
+    zcl_mutex_unlock(&nm->cs_nodes);
+    return found && net_addr_to_string(&addr, hostname, NET_ADDR_STR_MAX + 1) == NET_ADDR_STR_MAX;
+}
+
 /* The sink net calls for each verified offer that arrives. */
 static void sosvc_record(const struct state_offer_v1 *offer,
                          const uint8_t ip[16], uint16_t file_service_port,
@@ -623,12 +691,24 @@ static void sosvc_record(const struct state_offer_v1 *offer,
 {
     (void)now_unix;
     (void)ctx;
-    enum state_offer_store_result r = state_offer_store_record(
-        offer, ip, file_service_port, peer_id, sosvc_now_ms());
+    struct net_manager *nm = sosvc_record_enter();
+    if (!nm) return;
+    char hostname[NET_ADDR_STR_MAX + 1];
+    bool onion = file_service_port && sosvc_peer_onion(nm, peer_id, hostname);
+    enum state_offer_store_result r = onion ?
+        state_offer_store_record_onion(offer, hostname, file_service_port, peer_id, sosvc_now_ms()) :
+        state_offer_store_record(offer, ip, file_service_port, peer_id, sosvc_now_ms());
+    sosvc_record_leave();
     if (r != STATE_OFFER_STORE_KEPT && r != STATE_OFFER_STORE_KEPT_REPLACED)
         LOG_INFO(SOSVC_SUBSYS, "offer from peer %lld not retained (%s)",
                  (long long)peer_id, state_offer_store_result_string(r));
 }
+
+#ifdef ZCL_TESTING
+void state_offer_service_test_record_offer(const struct state_offer_v1 *offer,
+                                           const uint8_t ip[16], uint16_t port, int64_t peer)
+{ sosvc_record(offer, ip, port, peer, 0, NULL); }
+#endif
 
 static bool sosvc_progress(uint32_t chunks_done, uint32_t num_chunks,
                            uint64_t bytes_done, void *ctx)
@@ -804,9 +884,17 @@ static void sosvc_finish_fetch(void)
 }
 void state_offer_service_wire(struct msg_processor *mp)
 {
-    if (!mp)
-        return;
-    msg_processor_set_state_offer_record(mp, sosvc_record, NULL);
+    if (!mp || !mp->net_mgr) return;
+    pthread_mutex_lock(&g_record_lock);
+    if (!g_record_registered) {
+        msg_processor_set_state_offer_record(mp, sosvc_record, NULL);
+        g_record_registered = true;
+    }
+    if (!g_record_enabled && !g_record_active && !g_record_stopping) {
+        g_record_manager = mp->net_mgr;
+        g_record_enabled = true;
+    }
+    pthread_mutex_unlock(&g_record_lock);
 }
 
 void state_offer_service_start(const char *datadir, struct node_db *ndb)
@@ -846,6 +934,7 @@ void state_offer_service_start(const char *datadir, struct node_db *ndb)
 
 void state_offer_service_shutdown(void)
 {
+    sosvc_record_stop();
     sosvc_restart_clear();
     state_offer_set_provider(NULL, NULL);
     pthread_mutex_lock(&g_lock);

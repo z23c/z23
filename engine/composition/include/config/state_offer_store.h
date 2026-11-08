@@ -39,6 +39,7 @@
 #define ZCL_CONFIG_STATE_OFFER_STORE_H
 
 #include "net/state_offer.h"
+#include "net/netaddr.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -80,6 +81,8 @@ struct state_offer_record {
     uint8_t peer_ip[16];
     uint16_t file_service_port;
     bool peer_link;
+    char onion_host[NET_ADDR_STR_MAX + 1];
+    uint16_t onion_port;
     int64_t retry_after_ms;
     int64_t peer_id;
     int64_t heard_ms;
@@ -125,8 +128,10 @@ enum state_offer_store_result {
 const char *state_offer_store_result_string(enum state_offer_store_result r);
 const char *state_offer_decision_string(enum state_offer_decision d);
 
-/* Optional filter on offered bundle heights (NULL, the default, takes every
- * height). Offers it refuses are kept but never chosen. */
+/* Optional filter on offered bundle heights (NULL takes every height). Offers
+ * it refuses are kept but never chosen. It must be bounded, nonblocking and
+ * pure: it must not call store APIs or mutate the store. It runs under the
+ * store mutex. Registered functions must remain valid while installed. */
 typedef bool (*state_offer_height_filter_fn)(int32_t bundle_height);
 void state_offer_store_set_height_filter(state_offer_height_filter_fn fn);
 bool state_offer_store_height_filter_active(void);
@@ -147,6 +152,16 @@ enum state_offer_store_result state_offer_store_record(
 /* Signed offer received on the existing live peer connection; no second dial. */
 enum state_offer_store_result state_offer_store_record_link(
     const struct state_offer_v1 *offer, int64_t peer_id, int64_t now_ms);
+/* Attach the advertised file-service port to this verified offer's outbound
+ * Tor v3 peer session. The hostname is canonical and checksum-checked.
+ * Caller verifies the peer supports the existing link protocol. */
+enum state_offer_store_result state_offer_store_record_onion(
+    const struct state_offer_v1 *offer, const char *hostname, uint16_t port,
+    int64_t peer_id, int64_t now_ms);
+/* Copy only a binding for this exact digest and peer session. A caller must
+ * independently confirm the peer is still live before using the endpoint. */
+bool state_offer_store_link_endpoint(const uint8_t digest[32], int64_t peer_id,
+                                     char *hostname, size_t capacity, uint16_t *port);
 void state_offer_store_note_link_fetching(const uint8_t digest[32], int64_t peer_id);
 void state_offer_store_note_link_retry(const uint8_t digest[32], int64_t peer_id, int64_t now_ms);
 void state_offer_store_note_link_bad(const uint8_t digest[32], int64_t peer_id);

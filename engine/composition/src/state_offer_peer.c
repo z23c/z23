@@ -9,6 +9,8 @@
 #include "net/msgprocessor.h"
 #include "net/net.h"
 #include "net/state_offer.h"
+#include "net/file_service.h"
+#include "crypto/sha3.h"
 #include "platform/time_compat.h"
 #include "base/safe_alloc.h"
 #include <pthread.h>
@@ -20,7 +22,13 @@
 #define PEER_DISCOVERY_RETRY_MS 30000
 #define PEER_LINK_QUEUE_BYTES (1024u * 1024u)
 #define PEER_LINK_BURST 16u
-static struct { uint64_t peer, nonce; int64_t asked_ms; } discovery[PEER_DISCOVERY_MAX];
+static struct {
+    uint64_t peer, nonce, endpoint_generation;
+    int64_t asked_ms, advert_ms;
+    uint8_t advert_digest[32];
+    uint16_t advert_port;
+    bool advertised;
+} discovery[PEER_DISCOVERY_MAX];
 static struct { uint64_t peer; int64_t answered_ms; } replies[PEER_DISCOVERY_MAX];
 static uint8_t offer_wire[STATE_OFFER_BATCH_V1_MAX_WIRE_BYTES];
 static size_t offer_wire_size;
@@ -88,6 +96,15 @@ static bool send_frame(struct msg_processor *mp, struct p2p_node *node, const st
     uint8_t wire[STATE_OFFER_LINK_FRAME_MAX]; size_t size = 0;
     return queue_room(node) && state_offer_link_encode(f, wire, sizeof(wire), &size) && send_wire(mp, node, wire, size);
 }
+static size_t refresh_offer_wire(int64_t now)
+{
+    if (offer_wire_ms == INT64_MIN || now < offer_wire_ms || now - offer_wire_ms >= 1000) {
+        offer_wire_size = state_offer_collect_wire(offer_wire, sizeof(offer_wire));
+        offer_wire_ms = now;
+    }
+    return offer_wire_size;
+}
+
 static void discovery_reply(struct msg_processor *mp, struct p2p_node *node, uint64_t nonce)
 {
     uint64_t peer = boot_zcode_swarm_peer_id(node);
@@ -100,11 +117,7 @@ static void discovery_reply(struct msg_processor *mp, struct p2p_node *node, uin
     if (replies[slot].peer == peer && now - replies[slot].answered_ms < 5000) return;
     replies[slot].peer = peer;
     replies[slot].answered_ms = now;
-    if (now - offer_wire_ms >= 1000) {
-        offer_wire_size = state_offer_collect_wire(offer_wire, sizeof(offer_wire));
-        offer_wire_ms = now;
-    }
-    if (!offer_wire_size) return;
+    if (!refresh_offer_wire(now)) return;
     struct state_offer_link_frame f = {.kind = STATE_OFFER_LINK_OFFER_REPLY, .nonce = nonce,
         .total = (uint32_t)offer_wire_size, .size = (uint32_t)offer_wire_size, .data = offer_wire};
     (void)send_frame(mp, node, &f);
@@ -152,12 +165,90 @@ static void discover(struct msg_processor *mp, struct p2p_node *node)
         if (discovery[i].peer == peer) { slot = i; break; }
         if (!discovery[i].peer || discovery[i].asked_ms < discovery[slot].asked_ms) slot = i;
     }
-    if (discovery[slot].peer == peer && now - discovery[slot].asked_ms < PEER_DISCOVERY_RETRY_MS) return;
+    if (discovery[slot].peer == peer &&
+        discovery[slot].endpoint_generation == node->endpoint_generation &&
+        now - discovery[slot].asked_ms < PEER_DISCOVERY_RETRY_MS) return;
     if (++discovery_nonce == 0) ++discovery_nonce;
     struct state_offer_link_frame f = {.kind = STATE_OFFER_LINK_OFFER_REQUEST, .nonce = discovery_nonce};
     if (!send_frame(mp, node, &f)) return;
+    if (discovery[slot].peer != peer ||
+        discovery[slot].endpoint_generation != node->endpoint_generation)
+        memset(&discovery[slot], 0, sizeof(discovery[slot]));
     discovery[slot].peer = peer; discovery[slot].nonce = f.nonce; discovery[slot].asked_ms = now;
+    discovery[slot].endpoint_generation = node->endpoint_generation;
 }
+/* Only the message owner reads and changes discovery slots. */
+static int late_advert_slot(const struct p2p_node *node)
+{
+    uint64_t peer = boot_zcode_swarm_peer_id(node);
+    for (size_t i = 0; i < PEER_DISCOVERY_MAX; ++i)
+        if (discovery[i].peer == peer &&
+            discovery[i].endpoint_generation == node->endpoint_generation) return (int)i;
+    return -1;
+}
+
+static bool late_advert_queue_room(struct p2p_node *node, size_t payload)
+{
+    if (payload > PEER_LINK_QUEUE_BYTES - MSG_HEADER_SIZE) return false;
+    size_t total = MSG_HEADER_SIZE + payload;
+    zcl_mutex_lock(&node->cs_send);
+    size_t hard = net_send_peer_bytes_hard_cap();
+    bool room = node->send_size <= PEER_LINK_QUEUE_BYTES - total &&
+        (!node->send_size || (total <= hard && node->send_size <= hard - total));
+    zcl_mutex_unlock(&node->cs_send);
+    return room && !net_send_over_budget(node) && !atomic_load(&node->disconnect);
+}
+
+#ifdef ZCL_TESTING
+static int64_t g_late_test_offset;
+void state_offer_peer_test_advance_advert_ms(int64_t offset) { g_late_test_offset = offset; }
+void state_offer_peer_test_invalidate_wire(void) { offer_wire_ms = INT64_MIN; }
+#endif
+static int64_t late_advert_now(void)
+{
+    int64_t now = platform_time_monotonic_ms();
+#ifdef ZCL_TESTING
+    if (g_late_test_offset > 0 && now <= INT64_MAX - g_late_test_offset)
+        now += g_late_test_offset;
+#endif
+    return now;
+}
+
+/* A newly available provider batch can be observed up to one second later.
+ * Already-advertised sessions recheck at most every 30 seconds; a failed
+ * queue attempt does not update the last successful identity or time. */
+static void late_advertise(struct msg_processor *mp, struct p2p_node *node)
+{
+    int slot = late_advert_slot(node);
+    if (slot < 0) return;
+    if (!fs_server_is_running()) { discovery[slot].advertised = false; return; }
+    uint16_t port = fs_server_get_port();
+    if (!port) { discovery[slot].advertised = false; return; }
+    size_t size = refresh_offer_wire(platform_time_monotonic_ms());
+    if (!size) { discovery[slot].advertised = false; return; }
+    int64_t now = late_advert_now();
+    if (discovery[slot].advertised && now >= discovery[slot].advert_ms &&
+        now - discovery[slot].advert_ms < PEER_DISCOVERY_RETRY_MS) return;
+    const uint8_t *batch = offer_wire;
+    struct sha3_256_ctx hash; uint8_t digest[32];
+    sha3_256_init(&hash); sha3_256_write(&hash, (const uint8_t *)&port, sizeof(port));
+    sha3_256_write(&hash, batch, size); sha3_256_finalize(&hash, digest);
+    if (discovery[slot].advertised && discovery[slot].advert_port == port &&
+        memcmp(discovery[slot].advert_digest, digest, sizeof(digest)) == 0) {
+        discovery[slot].advert_ms = now;
+        return;
+    }
+    if (!late_advert_queue_room(node, sizeof(port) + size) ||
+        !p2p_node_begin_message(node, "zfileaddr", mp->params->pchMessageStart)) return;
+    p2p_node_write_message_data(node, (const uint8_t *)&port, sizeof(port));
+    p2p_node_write_message_data(node, batch, size);
+    if (!p2p_node_end_message(node)) return;
+    discovery[slot].advertised = true;
+    discovery[slot].advert_port = port;
+    discovery[slot].advert_ms = now;
+    memcpy(discovery[slot].advert_digest, digest, sizeof(digest));
+}
+
 static void drain(struct msg_processor *mp, struct p2p_node *node)
 {
     if (pthread_mutex_trylock(&drain_lock)) return;
@@ -181,6 +272,7 @@ void state_offer_peer_tick(struct msg_processor *mp, struct p2p_node *node)
 {
     if (!mp || !node || !eligible(node)) return;
     discover(mp, node);
+    late_advertise(mp, node);
     drain(mp, node);
 }
 static struct p2p_node **hold_peers(struct net_manager *nm, size_t *count, size_t *held)

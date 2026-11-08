@@ -12,10 +12,15 @@
 #include "util/log_macros.h"
 
 #include <stdatomic.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
 #define SOS_SUBSYS "state_offer"
+
+static pthread_mutex_t g_store_lock = PTHREAD_MUTEX_INITIALIZER;
+static enum state_offer_decision sos_locked_decide_for(int64_t now_ms,
+    struct state_offer_record *out, const struct state_offer_need *need);
 
 struct sos_bad {
     bool used;
@@ -47,7 +52,9 @@ static _Atomic(state_offer_height_filter_fn) g_height_filter = NULL;
 
 void state_offer_store_set_height_filter(state_offer_height_filter_fn fn)
 {
+    pthread_mutex_lock(&g_store_lock);
     atomic_store(&g_height_filter, fn);
+    pthread_mutex_unlock(&g_store_lock);
 }
 
 bool state_offer_store_height_filter_active(void)
@@ -87,7 +94,7 @@ const char *state_offer_decision_string(enum state_offer_decision d)
     return "unknown";
 }
 
-void state_offer_store_reset(void)
+static void sos_locked_reset(void)
 {
     memset(g_offers, 0, sizeof(g_offers));
     memset(g_offer_used, 0, sizeof(g_offer_used));
@@ -110,7 +117,7 @@ void state_offer_store_reset(void)
     g_fetch_chunks_done = g_fetch_chunks_total = 0;
 }
 
-void state_offer_store_note_first_peer(int64_t now_ms)
+static void sos_locked_note_first_peer(int64_t now_ms)
 {
     if (g_wait_armed)
         return; /* the window measures from the FIRST peer, not the last */
@@ -123,13 +130,13 @@ void state_offer_store_note_first_peer(int64_t now_ms)
              (long long)(STATE_OFFER_WAIT_MS / 1000));
 }
 
-bool state_offer_store_wait_armed(void)
+static bool sos_locked_wait_armed(void)
 {
     return g_wait_armed;
 }
 
 #ifdef ZCL_TESTING
-void state_offer_store_test_age_wait(int64_t ms)
+static void sos_locked_test_age_wait(int64_t ms)
 {
     if (g_wait_armed && ms > 0 && g_wait_started_ms > INT64_MIN + ms)
         g_wait_started_ms -= ms;
@@ -141,7 +148,7 @@ static bool digest_eq(const uint8_t a[32], const uint8_t b[32])
     return memcmp(a, b, 32) == 0;
 }
 
-bool state_offer_store_digest_is_bad(const uint8_t content_digest[32])
+static bool sos_locked_digest_is_bad(const uint8_t content_digest[32])
 {
     if (!content_digest)
         return false;
@@ -158,7 +165,7 @@ static uint32_t link_peer_strikes(int64_t peer_id)
     return 0;
 }
 
-uint32_t state_offer_store_peer_strikes(int64_t peer_id)
+static uint32_t sos_locked_peer_strikes(int64_t peer_id)
 {
     for (size_t i = 0; i < STATE_OFFER_STORE_BAD_MAX; i++)
         if (g_strikes[i].used && g_strikes[i].peer_id == peer_id)
@@ -293,7 +300,7 @@ static enum state_offer_store_result validate_offer(
      * teaches us the newest height a peer has) and not retained for choice. */
     if (offer->kind != (uint16_t)ROM_ARTIFACT_CONSENSUS_BUNDLE)
         return STATE_OFFER_STORE_DROPPED_KIND;
-    if ((!peer_link && state_offer_store_digest_is_bad(offer->content_digest)) ||
+    if ((!peer_link && sos_locked_digest_is_bad(offer->content_digest)) ||
         (peer_link && link_peer_strikes(peer_id)))
         return STATE_OFFER_STORE_DROPPED_BAD;
     if (!peer_link && !endpoint_dialable(peer_ip, file_service_port))
@@ -347,14 +354,14 @@ static enum state_offer_store_result record_offer(
     return STATE_OFFER_STORE_KEPT;
 }
 
-enum state_offer_store_result state_offer_store_record(
+static enum state_offer_store_result sos_locked_record(
     const struct state_offer_v1 *offer, const uint8_t peer_ip[16],
     uint16_t file_service_port, int64_t peer_id, int64_t now_ms)
 {
     return record_offer(offer, peer_ip, file_service_port, peer_id, now_ms, false);
 }
 
-enum state_offer_store_result state_offer_store_record_link(
+static enum state_offer_store_result sos_locked_record_link(
     const struct state_offer_v1 *offer, int64_t peer_id, int64_t now_ms)
 {
     static const uint8_t no_ip[16];
@@ -362,7 +369,40 @@ enum state_offer_store_result state_offer_store_record_link(
     return record_offer(offer, no_ip, 0, peer_id, now_ms, true);
 }
 
-void state_offer_store_note_retry(const uint8_t digest[32], int64_t now_ms)
+static enum state_offer_store_result sos_locked_record_onion(
+    const struct state_offer_v1 *offer, const char *hostname, uint16_t port,
+    int64_t peer, int64_t now)
+{
+    struct net_addr addr;
+    if (!offer || !hostname || peer < 0 || !port || strlen(hostname) != NET_ADDR_STR_MAX ||
+        strcmp(hostname + 56, ".onion") || !net_addr_from_onion(hostname, &addr))
+        return STATE_OFFER_STORE_DROPPED_ENDPOINT;
+    char canonical[NET_ADDR_STR_MAX + 1];
+    if (net_addr_to_string(&addr, canonical, sizeof(canonical)) != NET_ADDR_STR_MAX ||
+        strcmp(hostname, canonical)) return STATE_OFFER_STORE_DROPPED_ENDPOINT;
+    static const uint8_t zero_ip[16];
+    enum state_offer_store_result r = record_offer(offer, zero_ip, 0, peer, now, true);
+    if (r != STATE_OFFER_STORE_KEPT && r != STATE_OFFER_STORE_KEPT_REPLACED) return r;
+    size_t slot = find_offer(offer->content_digest, true, peer);
+    if (slot >= STATE_OFFER_STORE_MAX) return STATE_OFFER_STORE_DROPPED_INVALID;
+    memcpy(g_offers[slot].onion_host, canonical, sizeof(canonical));
+    g_offers[slot].onion_port = port;
+    return r;
+}
+static bool sos_locked_link_endpoint(const uint8_t digest[32], int64_t peer,
+                                     char *hostname, size_t capacity, uint16_t *port)
+{
+    if (hostname && capacity) hostname[0] = 0;
+    if (port) *port = 0;
+    if (!digest || peer < 0 || !hostname || capacity <= NET_ADDR_STR_MAX || !port) return false;
+    size_t slot = find_offer(digest, true, peer);
+    if (slot == STATE_OFFER_STORE_MAX || !g_offers[slot].onion_port) return false;
+    memcpy(hostname, g_offers[slot].onion_host, NET_ADDR_STR_MAX + 1);
+    *port = g_offers[slot].onion_port;
+    return true;
+}
+
+static void sos_locked_note_retry(const uint8_t digest[32], int64_t now_ms)
 {
     if (!digest) return;
     size_t slot = find_by_digest(digest);
@@ -371,14 +411,14 @@ void state_offer_store_note_retry(const uint8_t digest[32], int64_t now_ms)
     g_offers[slot].retry_after_ms = now_ms > INT64_MAX - 30000 ? INT64_MAX : now_ms + 30000;
 }
 
-void state_offer_store_note_link_fetching(const uint8_t digest[32], int64_t peer_id)
+static void sos_locked_note_link_fetching(const uint8_t digest[32], int64_t peer_id)
 {
     if (!digest) return;
     size_t slot = find_offer(digest, true, peer_id);
     if (slot < STATE_OFFER_STORE_MAX) g_offer_fetching[slot] = true;
 }
 
-void state_offer_store_note_link_retry(const uint8_t digest[32], int64_t peer_id, int64_t now_ms)
+static void sos_locked_note_link_retry(const uint8_t digest[32], int64_t peer_id, int64_t now_ms)
 {
     if (!digest) return;
     size_t slot = find_offer(digest, true, peer_id);
@@ -395,7 +435,7 @@ static void link_strike_peer(int64_t peer_id)
     g_link_strikes[slot] = (struct sos_peer_strike){.used = true, .peer_id = peer_id, .strikes = 1};
 }
 
-void state_offer_store_note_link_bad(const uint8_t digest[32], int64_t peer_id)
+static void sos_locked_note_link_bad(const uint8_t digest[32], int64_t peer_id)
 {
     if (!digest) return;
     size_t slot = find_offer(digest, true, peer_id);
@@ -411,7 +451,7 @@ void state_offer_store_note_link_bad(const uint8_t digest[32], int64_t peer_id)
     }
 }
 
-void state_offer_store_note_bad(const uint8_t content_digest[32],
+static void sos_locked_note_bad(const uint8_t content_digest[32],
                                 int64_t peer_id)
 {
     if (!content_digest)
@@ -451,7 +491,7 @@ void state_offer_store_note_bad(const uint8_t content_digest[32],
     g_bad[0].peer_id = peer_id;
 }
 
-void state_offer_store_note_fetching(const uint8_t content_digest[32])
+static void sos_locked_note_fetching(const uint8_t content_digest[32])
 {
     if (!content_digest)
         return;
@@ -460,7 +500,7 @@ void state_offer_store_note_fetching(const uint8_t content_digest[32])
         g_offer_fetching[slot] = true;
 }
 
-int32_t state_offer_store_newest_height_seen(void)
+static int32_t sos_locked_newest_height_seen(void)
 {
     return g_newest_height_seen;
 }
@@ -511,13 +551,13 @@ static bool still_waiting(int64_t now_ms, const struct state_offer_need *need)
            need->resume_progressing;
 }
 
-enum state_offer_decision state_offer_store_decide(
+static enum state_offer_decision sos_locked_decide(
     int64_t now_ms, struct state_offer_record *out)
 {
-    return state_offer_store_decide_for(now_ms, out, nullptr);
+    return sos_locked_decide_for(now_ms, out, nullptr);
 }
 
-enum state_offer_decision state_offer_store_decide_for(
+static enum state_offer_decision sos_locked_decide_for(
     int64_t now_ms, struct state_offer_record *out,
     const struct state_offer_need *need)
 {
@@ -569,7 +609,7 @@ enum state_offer_decision state_offer_store_decide_for(
     return STATE_OFFER_DECIDE_FALL_BACK;
 }
 
-void state_offer_store_note_fetch_progress(uint32_t chunks_done,
+static void sos_locked_note_fetch_progress(uint32_t chunks_done,
                                            uint32_t chunks_total,
                                            uint64_t bytes_done,
                                            uint64_t bytes_total)
@@ -580,7 +620,7 @@ void state_offer_store_note_fetch_progress(uint32_t chunks_done,
     g_fetch_bytes_total = bytes_total;
 }
 
-void state_offer_store_status_get(struct state_offer_store_status *out)
+static void sos_locked_status_get(struct state_offer_store_status *out)
 {
     if (!out)
         return;
@@ -689,12 +729,72 @@ static uint32_t purge_peer(size_t first, const int64_t *live_ids, size_t live_co
     return dropped;
 }
 
-uint32_t state_offer_store_purge_gone_link_peers(const int64_t *live_ids,
+static uint32_t sos_locked_purge_gone_link_peers(const int64_t *live_ids,
                                                  size_t live_count)
 {
+    for (size_t i = 0; i < STATE_OFFER_STORE_MAX; ++i) {
+        if (g_offer_used[i] && g_offers[i].peer_link &&
+            !id_is_live(live_ids, live_count, g_offers[i].peer_id)) {
+            g_offers[i].onion_host[0] = 0;
+            g_offers[i].onion_port = 0;
+        }
+    }
     uint32_t total = 0;
     for (size_t i = 0; i < STATE_OFFER_STORE_MAX; i++)
         if (slot_purgeable(i, live_ids, live_count))
             total += purge_peer(i, live_ids, live_count);
     return total;
 }
+
+/* Public operations serialize access to the bounded store. */
+void state_offer_store_reset(void)
+{ pthread_mutex_lock(&g_store_lock); sos_locked_reset(); pthread_mutex_unlock(&g_store_lock); }
+void state_offer_store_note_first_peer(int64_t now)
+{ pthread_mutex_lock(&g_store_lock); sos_locked_note_first_peer(now); pthread_mutex_unlock(&g_store_lock); }
+bool state_offer_store_wait_armed(void)
+{ pthread_mutex_lock(&g_store_lock); bool r = sos_locked_wait_armed(); pthread_mutex_unlock(&g_store_lock); return r; }
+#ifdef ZCL_TESTING
+void state_offer_store_test_age_wait(int64_t ms)
+{ pthread_mutex_lock(&g_store_lock); sos_locked_test_age_wait(ms); pthread_mutex_unlock(&g_store_lock); }
+#endif
+bool state_offer_store_digest_is_bad(const uint8_t digest[32])
+{ pthread_mutex_lock(&g_store_lock); bool r = sos_locked_digest_is_bad(digest); pthread_mutex_unlock(&g_store_lock); return r; }
+uint32_t state_offer_store_peer_strikes(int64_t peer)
+{ pthread_mutex_lock(&g_store_lock); uint32_t r = sos_locked_peer_strikes(peer); pthread_mutex_unlock(&g_store_lock); return r; }
+enum state_offer_store_result state_offer_store_record(const struct state_offer_v1 *offer,
+    const uint8_t ip[16], uint16_t port, int64_t peer, int64_t now)
+{ pthread_mutex_lock(&g_store_lock); enum state_offer_store_result r = sos_locked_record(offer, ip, port, peer, now); pthread_mutex_unlock(&g_store_lock); return r; }
+enum state_offer_store_result state_offer_store_record_link(const struct state_offer_v1 *offer,
+    int64_t peer, int64_t now)
+{ pthread_mutex_lock(&g_store_lock); enum state_offer_store_result r = sos_locked_record_link(offer, peer, now); pthread_mutex_unlock(&g_store_lock); return r; }
+void state_offer_store_note_retry(const uint8_t digest[32], int64_t now)
+{ pthread_mutex_lock(&g_store_lock); sos_locked_note_retry(digest, now); pthread_mutex_unlock(&g_store_lock); }
+void state_offer_store_note_link_fetching(const uint8_t digest[32], int64_t peer)
+{ pthread_mutex_lock(&g_store_lock); sos_locked_note_link_fetching(digest, peer); pthread_mutex_unlock(&g_store_lock); }
+void state_offer_store_note_link_retry(const uint8_t digest[32], int64_t peer, int64_t now)
+{ pthread_mutex_lock(&g_store_lock); sos_locked_note_link_retry(digest, peer, now); pthread_mutex_unlock(&g_store_lock); }
+void state_offer_store_note_link_bad(const uint8_t digest[32], int64_t peer)
+{ pthread_mutex_lock(&g_store_lock); sos_locked_note_link_bad(digest, peer); pthread_mutex_unlock(&g_store_lock); }
+void state_offer_store_note_bad(const uint8_t digest[32], int64_t peer)
+{ pthread_mutex_lock(&g_store_lock); sos_locked_note_bad(digest, peer); pthread_mutex_unlock(&g_store_lock); }
+void state_offer_store_note_fetching(const uint8_t digest[32])
+{ pthread_mutex_lock(&g_store_lock); sos_locked_note_fetching(digest); pthread_mutex_unlock(&g_store_lock); }
+int32_t state_offer_store_newest_height_seen(void)
+{ pthread_mutex_lock(&g_store_lock); int32_t r = sos_locked_newest_height_seen(); pthread_mutex_unlock(&g_store_lock); return r; }
+enum state_offer_decision state_offer_store_decide(int64_t now, struct state_offer_record *out)
+{ pthread_mutex_lock(&g_store_lock); enum state_offer_decision r = sos_locked_decide(now, out); pthread_mutex_unlock(&g_store_lock); return r; }
+enum state_offer_decision state_offer_store_decide_for(int64_t now, struct state_offer_record *out,
+    const struct state_offer_need *need)
+{ pthread_mutex_lock(&g_store_lock); enum state_offer_decision r = sos_locked_decide_for(now, out, need); pthread_mutex_unlock(&g_store_lock); return r; }
+void state_offer_store_note_fetch_progress(uint32_t done, uint32_t total, uint64_t bytes, uint64_t size)
+{ pthread_mutex_lock(&g_store_lock); sos_locked_note_fetch_progress(done, total, bytes, size); pthread_mutex_unlock(&g_store_lock); }
+void state_offer_store_status_get(struct state_offer_store_status *out)
+{ pthread_mutex_lock(&g_store_lock); sos_locked_status_get(out); pthread_mutex_unlock(&g_store_lock); }
+uint32_t state_offer_store_purge_gone_link_peers(const int64_t *ids, size_t n)
+{ pthread_mutex_lock(&g_store_lock); uint32_t r = sos_locked_purge_gone_link_peers(ids, n); pthread_mutex_unlock(&g_store_lock); return r; }
+enum state_offer_store_result state_offer_store_record_onion(const struct state_offer_v1 *offer,
+    const char *hostname, uint16_t port, int64_t peer, int64_t now)
+{ pthread_mutex_lock(&g_store_lock); enum state_offer_store_result r = sos_locked_record_onion(offer, hostname, port, peer, now); pthread_mutex_unlock(&g_store_lock); return r; }
+bool state_offer_store_link_endpoint(const uint8_t digest[32], int64_t peer,
+                                     char *hostname, size_t capacity, uint16_t *port)
+{ pthread_mutex_lock(&g_store_lock); bool r = sos_locked_link_endpoint(digest, peer, hostname, capacity, port); pthread_mutex_unlock(&g_store_lock); return r; }

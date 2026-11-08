@@ -840,6 +840,25 @@ int t_boot_progress_store_step_is_timed(void)
         ASSERT(read_entire_file(path, &buf) == 0);
         for (size_t i = 0; i < sizeof(marks) / sizeof(marks[0]); i++)
             ASSERT(strstr(buf, marks[i]) != NULL);
+        const char *seq = strstr(buf, "static bool boot_seq_select_state_source(");
+        ASSERT(seq != NULL);
+        const char *body = strchr(seq, '{');
+        ASSERT(body != NULL);
+        const char *first = body + 1 + strspn(body + 1, " \t\r\n");
+        static const char guard[] =
+            "if (boot_install_bundle_request_refused(ctx->datadir)) return false;";
+        ASSERT(strncmp(first, guard, sizeof(guard) - 1) == 0);
+        const char *end = strstr(first, "\n}\n");
+        ASSERT(end != NULL);
+        static const char *const mutations[] = {
+            "boot_step_reconcile_utxo_chain(", "boot_step_reset_for_fold_verbs(",
+            "boot_snapshot_failure_memory_prepare(", "boot_step_run_offline_terminal_verbs(",
+            "boot_step_seed_from_snapshot(", "boot_select_state_source("
+        };
+        for (size_t i = 0; i < sizeof(mutations) / sizeof(mutations[0]); ++i) {
+            const char *call = strstr(first, mutations[i]);
+            ASSERT(call != NULL && call < end);
+        }
         PASS();
     } _test_next:;
     free(buf);

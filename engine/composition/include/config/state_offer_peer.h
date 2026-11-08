@@ -18,6 +18,10 @@ bool state_offer_peer_frame(struct msg_processor *mp, struct p2p_node *node,
 void state_offer_peer_tick(struct msg_processor *mp, struct p2p_node *node);
 /* Supervisor may drain owned frames, never mutate discovery or offer state. */
 void state_offer_peer_pump(struct msg_processor *mp);
+#ifdef ZCL_TESTING
+void state_offer_peer_test_advance_advert_ms(int64_t offset);
+void state_offer_peer_test_invalidate_wire(void);
+#endif
 /* The one exemption every header-progress, lag or stall rule honours: true
  * while header sync is held (FlySync waits for its rung) AND this connection
  * streams this node's link fetch with bytes inside

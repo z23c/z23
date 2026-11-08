@@ -317,8 +317,8 @@ static int case_typed_request(void)
     snprintf(path, sizeof(path), "%s/install_bundle_request", dir);
     f = fopen(path, "w");
     CSIR_CHECK("malformed created", f && fputs("bad\n", f) >= 0 && fclose(f) == 0);
-    CSIR_CHECK("malformed repair not fresh", boot_install_bundle_request_typed(dir, "/fixture/bundle", &legacy, NULL) ==
-        BOOT_BUNDLE_ARM_REPAIRED && legacy == 1);
+    CSIR_CHECK("malformed request is retained", boot_install_bundle_request_typed(dir, "/fixture/bundle", &legacy, NULL) ==
+        BOOT_BUNDLE_ARM_ERROR && legacy == 0);
     boot_install_bundle_clear(dir);
     failures += csir_arm_race(dir);
     failures += csir_arm_faults(dir);
@@ -327,6 +327,144 @@ static int case_typed_request(void)
     test_rm_rf_recursive(dir);
     return failures;
 }
+
+static int case_bound_publisher(void)
+{
+    int failures = 0; uint64_t created = 0, generation = 0;
+    char dir[256], path[512], marker[512], out[512];
+    test_make_tmpdir(dir, sizeof(dir), "csir_bound_pub", "ok");
+    snprintf(path, sizeof(path), "%s/install_bundle_request", dir);
+    struct boot_bound_bundle_request request = {
+        .bundle_path = "/private/snapshot", .endpoint_height = 42,
+        .private_history_path = "/private/history",
+        .snapshot_sha3 = { 1 }, .endpoint_hash = { 2 }, .history_manifest_root = { 3 }
+    };
+    snprintf(marker, sizeof(marker), "%s/consensus-bundle-installed.marker", dir);
+    FILE *marker_file = fopen(marker, "w");
+    CSIR_CHECK("sovereign marker fixture", marker_file && fclose(marker_file) == 0);
+    CSIR_CHECK("marker refuses bound publication", boot_install_bound_bundle_request(dir, &request, &created) == BOOT_BUNDLE_ARM_ERROR && created == 0);
+    CSIR_CHECK("marker refusal leaves request absent", access(path, F_OK) != 0);
+    (void)unlink(marker);
+    CSIR_CHECK("bound publish", boot_install_bound_bundle_request(dir, &request, &created) ==
+        BOOT_BUNDLE_ARM_CREATED && created != 0);
+    CSIR_CHECK("bound full identity round trip", boot_install_bound_bundle_request_matches(dir, &request, &generation) &&
+        generation == created);
+    CSIR_CHECK("bound rearm is idempotent", boot_install_bound_bundle_request(dir, &request, NULL) == BOOT_BUNDLE_ARM_EXISTING);
+    marker_file = fopen(marker, "w");
+    CSIR_CHECK("existing marker fixture", marker_file && fclose(marker_file) == 0);
+    CSIR_CHECK("marker refuses existing bound request", boot_install_bound_bundle_request(dir, &request, NULL) == BOOT_BUNDLE_ARM_ERROR);
+    CSIR_CHECK("marker refuses bound match", !boot_install_bound_bundle_request_matches(dir, &request, &generation));
+    (void)unlink(marker);
+    CSIR_CHECK("existing binding survives marker", boot_install_bound_bundle_request_matches(dir, &request, &generation));
+    struct boot_bound_bundle_request other = request;
+    other.snapshot_sha3[0] ^= 1;
+    CSIR_CHECK("snapshot digest binds", !boot_install_bound_bundle_request_matches(dir, &other, &generation));
+    CSIR_CHECK("different binding cannot overwrite", boot_install_bound_bundle_request(dir, &other, NULL) == BOOT_BUNDLE_ARM_ERROR);
+    other = request; other.endpoint_hash[0] ^= 1;
+    CSIR_CHECK("endpoint hash binds", !boot_install_bound_bundle_request_matches(dir, &other, &generation));
+    other = request; other.history_manifest_root[0] ^= 1;
+    CSIR_CHECK("manifest root binds", !boot_install_bound_bundle_request_matches(dir, &other, &generation));
+    other = request; other.endpoint_height++;
+    CSIR_CHECK("height binds", !boot_install_bound_bundle_request_matches(dir, &other, &generation));
+    other = request; other.bundle_path = "/private/other";
+    CSIR_CHECK("snapshot path binds", !boot_install_bound_bundle_request_matches(dir, &other, &generation));
+    other = request; other.private_history_path = "/private/other";
+    CSIR_CHECK("history path binds", !boot_install_bound_bundle_request_matches(dir, &other, &generation));
+    other = request; other.endpoint_height = -1;
+    CSIR_CHECK("negative height refused", boot_install_bound_bundle_request(dir, &other, NULL) == BOOT_BUNDLE_ARM_ERROR);
+    boot_install_bundle_test_fail_flush(1);
+    CSIR_CHECK("failed retry retains original", !boot_install_bound_bundle_test_rewrite(dir, 1));
+    boot_install_bundle_test_fail_flush(0);
+    CSIR_CHECK("original survives failed retry", boot_install_bound_bundle_request_matches(dir, &request, &generation));
+    CSIR_CHECK("attempt rewrite", boot_install_bound_bundle_test_rewrite(dir, 1));
+    CSIR_CHECK("attempt rewrite is not fresh", !boot_install_bound_bundle_request_matches(dir, &request, &generation));
+    CSIR_CHECK("attempt restored", boot_install_bound_bundle_test_rewrite(dir, 0));
+    CSIR_CHECK("rewrite retained all binding", boot_install_bound_bundle_request_matches(dir, &request, &generation));
+    CSIR_CHECK("bound consume refused", !boot_install_bundle_consume(dir, out, sizeof(out)));
+    boot_install_bundle_clear(dir);
+    CSIR_CHECK("symlink fixture", symlink("/dev/null", path) == 0);
+    struct app_context ctx = { .datadir = dir }; struct boot_state_source_selection selection;
+    boot_select_state_source(NULL, NULL, &ctx, &selection);
+    CSIR_CHECK("symlink fences boot", selection.refused && !selection.auto_installed_bundle &&
+        !selection.consumed_auto_refold && !selection.do_from_anchor);
+    CSIR_CHECK("symlink publish refused", boot_install_bound_bundle_request(dir, &request, NULL) == BOOT_BUNDLE_ARM_ERROR);
+    (void)unlink(path);
+    CSIR_CHECK("fifo fixture", mkfifo(path, 0600) == 0);
+    boot_select_state_source(NULL, NULL, &ctx, &selection);
+    CSIR_CHECK("fifo fences boot", selection.refused && !selection.auto_installed_bundle &&
+        !selection.consumed_auto_refold && !selection.do_from_anchor);
+    CSIR_CHECK("fifo publish refused", boot_install_bound_bundle_request(dir, &request, NULL) == BOOT_BUNDLE_ARM_ERROR);
+    (void)unlink(path);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static bool csir_write_fixture(const char *path, const char *value)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = fputs(value, f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+static bool csir_truncations_refused(const char *path, const char *wire,
+                                     size_t wire_len, struct app_context *ctx)
+{
+    struct boot_state_source_selection selection;
+    for (size_t n = 0; n < wire_len; ++n) {
+        FILE *f = fopen(path, "w");
+        if (!f) return false;
+        bool wrote = fwrite(wire, 1, n, f) == n;
+        if (fclose(f) != 0 || !wrote) return false;
+        boot_select_state_source(NULL, NULL, ctx, &selection);
+        if (!selection.refused) return false;
+    }
+    return true;
+}
+
+static int case_bound_request_refusal(void)
+{
+    int failures = 0, legacy = 0, read_errno = 0;
+    char dir[256], path[512], got[512]; uint64_t generation = 0;
+    const char *hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    test_make_tmpdir(dir, sizeof(dir), "csir_bound", "ok");
+    snprintf(path, sizeof(path), "%s/install_bundle_request", dir);
+    FILE *f = fopen(path, "w");
+    CSIR_CHECK("bound fixture", f && fprintf(f, "Z23-HISTORY-1\n0\n/fixture/bundle\n%s\n42\n%s\n%s\n/private/history\n", hash, hash, hash) > 0 && fclose(f) == 0);
+    struct app_context ctx = { .datadir = dir, .refold_from_anchor = true };
+    struct boot_state_source_selection selection;
+    boot_select_state_source(NULL, NULL, &ctx, &selection);
+    CSIR_CHECK("bound entry guard refuses", boot_install_bundle_request_refused(dir));
+    CSIR_CHECK("bound fences boot", selection.refused && !selection.auto_installed_bundle && !selection.consumed_auto_refold && !selection.do_from_anchor);
+    CSIR_CHECK("bound does not match legacy", !boot_install_bundle_request_matches(dir, "/fixture/bundle", &generation));
+    CSIR_CHECK("bound cannot be consumed", !boot_install_bundle_consume(dir, got, sizeof(got)));
+    CSIR_CHECK("bound cannot be replaced", boot_install_bundle_request_typed(dir, "/other", &legacy, NULL) == BOOT_BUNDLE_ARM_ERROR);
+    char wire[1024];
+    int wire_len = snprintf(wire, sizeof(wire), "Z23-HISTORY-1\n0\n/fixture/bundle\n%s\n42\n%s\n%s\n/private/history\n", hash, hash, hash);
+    CSIR_CHECK("every truncated bound request fences boot", wire_len > 0 &&
+        (size_t)wire_len < sizeof(wire) && csir_truncations_refused(path, wire, (size_t)wire_len, &ctx));
+    f = fopen(path, "w");
+    CSIR_CHECK("restore bound fixture", f && fputs(wire, f) >= 0 && fclose(f) == 0);
+    f = fopen(path, "a");
+    CSIR_CHECK("append malformed suffix", f && fputs("extra\n", f) >= 0 && fclose(f) == 0);
+    boot_select_state_source(NULL, NULL, &ctx, &selection);
+    CSIR_CHECK("mixed request fences boot", selection.refused);
+    CSIR_CHECK("malformed terminal not trusted", !boot_install_bundle_terminal(dir, &read_errno));
+    f = fopen(path, "w");
+    CSIR_CHECK("overflow fixture", f && fprintf(f, "Z23-HISTORY-1\n0\n/fixture/bundle\n%s\n2147483648\n%s\n%s\n/private/history\n", hash, hash, hash) > 0 && fclose(f) == 0);
+    boot_select_state_source(NULL, NULL, &ctx, &selection);
+    CSIR_CHECK("height overflow fences boot", selection.refused);
+    CSIR_CHECK("negative legacy fixture", csir_write_fixture(path, "-2\n/fixture/bundle\n"));
+    boot_select_state_source(NULL, NULL, &ctx, &selection);
+    CSIR_CHECK("negative legacy fences boot", selection.refused && boot_install_bundle_request_refused(dir));
+    CSIR_CHECK("negative legacy cannot be repaired", boot_install_bundle_request_typed(dir, "/other", &legacy, NULL) == BOOT_BUNDLE_ARM_ERROR);
+    boot_select_state_source(NULL, NULL, &ctx, &selection);
+    CSIR_CHECK("negative legacy remains refused", selection.refused);
+    boot_install_bundle_clear(dir);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 
 static int case_durable_request(void)
 {
@@ -337,11 +475,13 @@ static int case_durable_request(void)
     const char *bundle = "/some/where/produced-bundle-3056758.sqlite";
 
     CSIR_CHECK("fresh: not pending", !boot_install_bundle_pending(dir));
+    CSIR_CHECK("absent request permits entry", !boot_install_bundle_request_refused(dir));
 
     /* Arm. */
     CSIR_CHECK("arm -> 1 (freshly armed)",
                boot_install_bundle_request(dir, bundle) == 1);
     CSIR_CHECK("armed -> pending", boot_install_bundle_pending(dir));
+    CSIR_CHECK("legacy request permits entry", !boot_install_bundle_request_refused(dir));
 
     /* Re-arm is idempotent while pending (attempts bump only at consume). */
     CSIR_CHECK("re-arm idempotent -> current count (1)",
@@ -1634,6 +1774,8 @@ int test_consensus_state_install_runtime(void)
     failures += case_terminal_bridge();
     failures += case_durable_request();
     failures += case_typed_request();
+    failures += case_bound_request_refusal();
+    failures += case_bound_publisher();
     failures += case_post_install_fold_span_check();
     failures += case_post_install_drop_borrowed_have_data();
     failures += case_checkpoint_header_ready();

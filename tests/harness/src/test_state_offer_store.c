@@ -24,6 +24,10 @@
 #include "vcs/zcode_dht_identity.h"
 
 #include <fcntl.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include "net/msgprocessor.h"
+#include "net/net.h"
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1035,6 +1039,170 @@ static int identity_gap_rewarns_after_restart(void)
     return failures;
 }
 
+static int onion_endpoint_binding(void)
+{
+    int failures = 0;
+    TEST_CASE("onion endpoint binds the verified offer and live peer identity") {
+        struct state_offer_v1 offer; make_offer(&offer, 900000, 900000, 0x21);
+        struct net_addr addr; net_addr_init(&addr); addr.has_torv3 = true; addr.torv3[0] = 1;
+        char hostname[NET_ADDR_STR_MAX + 1], got[NET_ADDR_STR_MAX + 1]; uint16_t port = 0;
+        ASSERT_EQ(net_addr_to_string(&addr, hostname, sizeof(hostname)), NET_ADDR_STR_MAX);
+        state_offer_store_reset();
+        ASSERT_EQ(state_offer_store_record_onion(&offer, hostname, 0, 4, 100), STATE_OFFER_STORE_DROPPED_ENDPOINT);
+        ASSERT_EQ(state_offer_store_record_onion(&offer, "invalid.onion", 22, 4, 100), STATE_OFFER_STORE_DROPPED_ENDPOINT);
+        char corrupt[NET_ADDR_STR_MAX + 1]; memcpy(corrupt, hostname, sizeof(corrupt));
+        corrupt[55] = 'a';
+        ASSERT_EQ(state_offer_store_record_onion(&offer, corrupt, 22, 4, 100), STATE_OFFER_STORE_DROPPED_ENDPOINT);
+        ASSERT_EQ(state_offer_store_record_onion(&offer, hostname, 1234, 4, 100), STATE_OFFER_STORE_KEPT);
+        ASSERT(state_offer_store_link_endpoint(offer.content_digest, 4, got, sizeof(got), &port));
+        ASSERT(port == 1234 && strcmp(got, hostname) == 0);
+        ASSERT_EQ(state_offer_store_record_link(&offer, 4, 101), STATE_OFFER_STORE_KEPT_REPLACED);
+        ASSERT(state_offer_store_link_endpoint(offer.content_digest, 4, got, sizeof(got), &port) && port == 1234);
+        ASSERT_EQ(state_offer_store_record_link(&offer, 5, 102), STATE_OFFER_STORE_KEPT);
+        ASSERT(!state_offer_store_link_endpoint(offer.content_digest, 5, got, sizeof(got), &port));
+        ASSERT_EQ(state_offer_store_record_onion(&offer, hostname, 4321, 5, 103), STATE_OFFER_STORE_KEPT_REPLACED);
+        ASSERT(state_offer_store_link_endpoint(offer.content_digest, 4, got, sizeof(got), &port) && port == 1234);
+        ASSERT(state_offer_store_link_endpoint(offer.content_digest, 5, got, sizeof(got), &port) && port == 4321);
+        state_offer_store_note_link_fetching(offer.content_digest, 4);
+        int64_t live[] = {5};
+        (void)state_offer_store_purge_gone_link_peers(live, 1);
+        ASSERT(!state_offer_store_link_endpoint(offer.content_digest, 4, got, sizeof(got), &port));
+        ASSERT(state_offer_store_link_endpoint(offer.content_digest, 5, got, sizeof(got), &port));
+    } TEST_END
+    state_offer_store_reset();
+    return failures;
+}
+
+static int callback_onion_endpoint(void)
+{
+    int failures = 0;
+    TEST_CASE("offer callback retains only a live eligible outbound onion endpoint") {
+        struct state_offer_v1 offer; make_offer(&offer, 900000, 900000, 0x29);
+        struct net_manager nm = {0}; struct p2p_node node = {0};
+        struct p2p_node *nodes[] = { &node }; struct msg_processor mp = { .net_mgr = &nm };
+        zcl_mutex_init(&nm.cs_nodes); nm.nodes = nodes; nm.num_nodes = 1;
+        node.id = 17; node.services = NODE_ZCL23 | NODE_STATE_OFFER_LINK;
+        atomic_store(&node.state, PEER_HANDSHAKE_COMPLETE);
+        node.addr.svc.addr.has_torv3 = true; node.addr.svc.addr.torv3[0] = 1;
+        char expected[NET_ADDR_STR_MAX + 1], got[NET_ADDR_STR_MAX + 1]; uint16_t port = 0;
+        uint8_t no_ip[16] = {0};
+        (void)net_addr_to_string(&node.addr.svc.addr, expected, sizeof(expected));
+        state_offer_store_reset(); state_offer_service_wire(&mp);
+        state_offer_service_test_record_offer(&offer, no_ip, 0, 17);
+        bool zero_refused = !state_offer_store_link_endpoint(offer.content_digest, 17, got, sizeof(got), &port);
+        state_offer_service_test_record_offer(&offer, no_ip, 19222, 17);
+        bool captured = state_offer_store_link_endpoint(offer.content_digest, 17, got, sizeof(got), &port) &&
+                        port == 19222 && strcmp(got, expected) == 0;
+        atomic_store(&node.disconnect, true);
+        (void)state_offer_store_purge_gone_link_peers(NULL, 0);
+        state_offer_service_test_record_offer(&offer, no_ip, 19222, 17);
+        bool gone_refused = !state_offer_store_link_endpoint(offer.content_digest, 17, got, sizeof(got), &port);
+        state_offer_service_shutdown(); zcl_mutex_destroy(&nm.cs_nodes);
+        ASSERT(zero_refused && captured && gone_refused);
+    } TEST_END
+    state_offer_store_reset();
+    return failures;
+}
+
+struct store_race_fixture {
+    struct state_offer_v1 offer;
+    pthread_mutex_t lock; pthread_cond_t ready;
+    bool go; _Atomic bool failed;
+};
+static void *store_race_worker(void *arg)
+{
+    struct store_race_fixture *f = arg;
+    pthread_mutex_lock(&f->lock);
+    while (!f->go) pthread_cond_wait(&f->ready, &f->lock);
+    pthread_mutex_unlock(&f->lock);
+    for (int i = 0; i < 64; ++i) {
+        enum state_offer_store_result r = state_offer_store_record_link(&f->offer, 44, i + 1);
+        if (r != STATE_OFFER_STORE_KEPT && r != STATE_OFFER_STORE_KEPT_REPLACED)
+            atomic_store(&f->failed, true);
+    }
+    return NULL;
+}
+static void *store_race_purge(void *arg)
+{
+    struct store_race_fixture *f = arg;
+    pthread_mutex_lock(&f->lock);
+    while (!f->go) pthread_cond_wait(&f->ready, &f->lock);
+    pthread_mutex_unlock(&f->lock);
+    for (int i = 0; i < 64; ++i) (void)state_offer_store_purge_gone_link_peers(NULL, 0);
+    return NULL;
+}
+static void *store_race_decide(void *arg)
+{
+    struct store_race_fixture *f = arg;
+    pthread_mutex_lock(&f->lock);
+    while (!f->go) pthread_cond_wait(&f->ready, &f->lock);
+    pthread_mutex_unlock(&f->lock);
+    for (int i = 0; i < 64; ++i) {
+        struct state_offer_record selected;
+        enum state_offer_decision d = state_offer_store_decide(100, &selected);
+        if (d == STATE_OFFER_DECIDE_FETCH &&
+            (selected.peer_id != 44 || !selected.peer_link ||
+             memcmp(selected.offer.content_digest, f->offer.content_digest, 32)))
+            atomic_store(&f->failed, true);
+    }
+    return NULL;
+}
+static int concurrent_store_access(void)
+{
+    int failures = 0;
+    TEST_CASE("record, purge and decide share a consistent store") {
+        struct store_race_fixture f = { .lock = PTHREAD_MUTEX_INITIALIZER,
+            .ready = PTHREAD_COND_INITIALIZER };
+        make_offer(&f.offer, 900000, 900000, 0x25); state_offer_store_reset();
+        pthread_t threads[3]; void *(*const work[])(void *) = {
+            store_race_worker, store_race_purge, store_race_decide };
+        unsigned started = 0;
+        while (started < 3 && pthread_create(&threads[started], NULL, work[started], &f) == 0) ++started;
+        pthread_mutex_lock(&f.lock); f.go = true; pthread_cond_broadcast(&f.ready); pthread_mutex_unlock(&f.lock);
+        for (unsigned i = 0; i < started; ++i) (void)pthread_join(threads[i], NULL);
+        (void)pthread_cond_destroy(&f.ready); (void)pthread_mutex_destroy(&f.lock);
+        ASSERT_EQ(started, 3u);
+        ASSERT(!atomic_load(&f.failed));
+        struct state_offer_store_status status; state_offer_store_status_get(&status);
+        ASSERT(status.offers_retained <= STATE_OFFER_STORE_MAX);
+    } TEST_END
+    state_offer_store_reset();
+    return failures;
+}
+static _Atomic bool lease_shutdown_done;
+static void *record_shutdown_worker(void *arg)
+{
+    (void)arg; state_offer_service_shutdown(); atomic_store(&lease_shutdown_done, true); return NULL;
+}
+static int record_shutdown_drains(void)
+{
+    int failures = 0;
+    TEST_CASE("shutdown drains in-flight record leases and closes admission") {
+        struct net_manager nm = {0}; struct msg_processor mp = { .net_mgr = &nm };
+        atomic_store(&lease_shutdown_done, false);
+        state_offer_service_wire(&mp);
+        bool held = state_offer_service_test_record_enter();
+        pthread_t thread; int created = held ? pthread_create(&thread, NULL, record_shutdown_worker, NULL) : -1;
+        bool blocked = false;
+        if (created == 0) {
+            state_offer_service_test_wait_record_stopped();
+            state_offer_service_wire(&mp);
+            bool reopened = state_offer_service_test_record_enter();
+            if (reopened) state_offer_service_test_record_leave();
+            blocked = !reopened && !atomic_load(&lease_shutdown_done);
+        }
+        if (held) state_offer_service_test_record_leave();
+        if (created == 0) (void)pthread_join(thread, NULL);
+        ASSERT(held && created == 0 && blocked && atomic_load(&lease_shutdown_done));
+        ASSERT(!state_offer_service_test_record_enter());
+        struct state_offer_v1 offer; make_offer(&offer, 900000, 900000, 0x2a);
+        uint8_t ip[16]; an_ip(ip, 1); state_offer_store_reset();
+        state_offer_service_test_record_offer(&offer, ip, 1234, 1);
+        struct state_offer_store_status status; state_offer_store_status_get(&status);
+        ASSERT_EQ(status.offers_seen, 0u);
+    } TEST_END
+    return failures;
+}
 static int peer_link_retry(void)
 {
     int failures = 0;
@@ -1423,6 +1591,10 @@ int test_state_offer_store(void)
     failures += resume_progress_holds_fallback();
     failures += endpoint_required();
     failures += peer_link_retry();
+    failures += onion_endpoint_binding();
+    failures += concurrent_store_access();
+    failures += callback_onion_endpoint();
+    failures += record_shutdown_drains();
     failures += peer_link_strike_eviction();
     failures += gone_link_peer_offers_are_purged();
     failures += peer_link_inflight();

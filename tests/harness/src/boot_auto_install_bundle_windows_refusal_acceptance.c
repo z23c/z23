@@ -3,11 +3,13 @@
 #if defined(_WIN32)
 
 #include "config/consensus_state_install_runtime.h"
+#include "config/boot.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <stdio.h>
+#include <string.h>
 #include <windows.h>
 
 static bool create_refusal_root(wchar_t *root, wchar_t *failed)
@@ -55,6 +57,43 @@ static int verify_refusal_aftermath(const wchar_t *root, const wchar_t *failed)
     return 0;
 }
 
+static bool request_write(const wchar_t *path, const char *wire)
+{
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0, len = (DWORD)strlen(wire);
+    bool ok = WriteFile(file, wire, len, &written, NULL) && written == len;
+    return CloseHandle(file) && ok;
+}
+
+static bool selection_refuses(const char *dir)
+{
+    struct app_context ctx = { .datadir = dir, .refold_from_anchor = true };
+    struct boot_state_source_selection selection;
+    boot_select_state_source(NULL, NULL, &ctx, &selection);
+    return selection.refused && !selection.auto_installed_bundle &&
+           !selection.consumed_auto_refold && !selection.do_from_anchor;
+}
+
+static bool request_refusals(const wchar_t *root, const char *dir)
+{
+    wchar_t request[MAX_PATH];
+    if (swprintf(request, MAX_PATH, L"%ls\\install_bundle_request", root) <= 0)
+        return false;
+    static const char bound[] =
+        "Z23-HISTORY-1\n-1\n/private/snapshot\n"
+        "0000000000000000000000000000000000000000000000000000000000000000\n"
+        "42\n"
+        "0000000000000000000000000000000000000000000000000000000000000000\n"
+        "0000000000000000000000000000000000000000000000000000000000000000\n"
+        "/private/history\n";
+    bool ok = request_write(request, "invalid\n") && selection_refuses(dir) &&
+              !boot_install_bundle_terminal(dir, NULL) && request_write(request, bound) &&
+              boot_install_bundle_terminal(dir, NULL) && selection_refuses(dir);
+    return DeleteFileW(request) && ok;
+}
+
 int main(void)
 {
     wchar_t root[MAX_PATH], failed[MAX_PATH];
@@ -71,6 +110,7 @@ int main(void)
     boot_auto_install_clear_failed_marker(failed_utf8);
     int rc = verify_refusal_aftermath(root, failed);
     if (rc != 0) return rc;
+    if (!request_refusals(root, root_utf8)) return 7;
     DeleteFileW(failed);
     RemoveDirectoryW(root);
     puts("boot_auto_install_bundle_refusal_acceptance: PASS");

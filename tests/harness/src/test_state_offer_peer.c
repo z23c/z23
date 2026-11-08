@@ -9,6 +9,7 @@
 #include "config/state_offer_link_session.h"
 #include "config/state_offer_store.h"
 #include "net/fast_sync.h"
+#include "net/file_service.h"
 #include "net/msgprocessor.h"
 #include "net/msg_internal.h"
 #include "base/serialize_le.h"
@@ -17,6 +18,11 @@
 #include "net/state_offer.h"
 #include "chain/chainparams.h"
 #include "test/test_core.h"
+#if !defined(_WIN32)
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -64,7 +70,7 @@ struct peer_fixture {
     struct rom_artifact *artifact;
     uint8_t *wire, *batch_wire;
     char dir[256], path[512], bench_path[512];
-    bool started, thread_started;
+    bool started, thread_started, fs_started;
     pthread_t thread;
     struct read_test read;
 };
@@ -161,6 +167,145 @@ static bool peer_add_nodes(struct peer_fixture *p, size_t count)
     }
     p->nm.num_nodes=1+(count<PEER_EXTRA?count:PEER_EXTRA); return true;
 }
+#if !defined(_WIN32)
+static struct state_offer_batch_v1 late_batch;
+static bool late_offer_ready;
+static uint32_t late_provider(struct state_offer_batch_v1 *out, void *ctx)
+{
+    (void)ctx;
+    if (!late_offer_ready) return 0;
+    *out = late_batch;
+    return late_batch.count;
+}
+
+/* Discovery requests may legitimately be queued on the same tick. */
+static bool late_capture_segment(const struct send_segment *seg, uint16_t port,
+                                 unsigned *advertisements)
+{
+    if (!seg || seg->size < MSG_HEADER_SIZE) return false;
+    const uint8_t *command = seg->data + MESSAGE_START_SIZE;
+    static const char advert_command[COMMAND_SIZE] = "zfileaddr";
+    static const char discovery_command[COMMAND_SIZE] = "zpkgswm";
+    const uint8_t *payload = seg->data + MSG_HEADER_SIZE;
+    size_t size = seg->size - MSG_HEADER_SIZE;
+    if (!memcmp(command, discovery_command, COMMAND_SIZE)) {
+        struct state_offer_link_frame frame;
+        return state_offer_link_decode(payload, size, &frame) &&
+            frame.kind == STATE_OFFER_LINK_OFFER_REQUEST;
+    }
+    if (memcmp(command, advert_command, COMMAND_SIZE) || size <= 2) return false;
+    uint16_t got; memcpy(&got, payload, sizeof(got));
+    struct state_offer_batch_v1 batch;
+    bool ok = got == port && state_offer_batch_v1_decode(&batch, payload + 2, size - 2) == STATE_OFFER_OK &&
+        batch.count == 1 && state_offer_v1_verify(&batch.offers[0]) == STATE_OFFER_OK &&
+        !memcmp(batch.offers[0].producer_receipt_id, late_batch.offers[0].producer_receipt_id, 32);
+    if (ok) ++*advertisements;
+    return ok;
+}
+
+static bool late_capture(struct p2p_node *node, struct send_segment *head,
+                         uint16_t port, unsigned expected)
+{
+    bool ok = true; unsigned advertisements = 0;
+    while (head->next) {
+        struct send_segment *seg = head->next;
+        if (!late_capture_segment(seg, port, &advertisements)) ok = false;
+        head->next = seg->next;
+        if (node->send_tail == seg) node->send_tail = head;
+        node->send_size -= seg->size; send_segment_free(seg);
+    }
+    return ok && advertisements == expected;
+}
+
+static bool late_wait_listener(uint16_t *port)
+{
+    char addr[128];
+    for (int i = 0; i < 1000; ++i) {
+        if (fs_server_listener_name(addr, sizeof(addr), port) && *port) return true;
+        pause_ms();
+    }
+    return false;
+}
+
+static bool late_change_port(struct peer_fixture *p, uint16_t old, uint16_t *next)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t size = sizeof(addr);
+    bool ok = bind(fd, (struct sockaddr *)&addr, size) == 0 &&
+        getsockname(fd, (struct sockaddr *)&addr, &size) == 0;
+    uint16_t port = ntohs(addr.sin_port);
+    ok = ok && port && port != old;
+    if (ok) { fs_server_stop(); p->fs_started = false; }
+    close(fd);
+    if (!ok || !fs_server_start(p->dir, port, "127.0.0.1")) return false;
+    p->fs_started = true;
+    uint16_t active = 0;
+    if (!late_wait_listener(&active) || active != port) return false;
+    *next = port; return true;
+}
+
+/* Exercise real port, signed batches, queue refusal, late changes and peer lifetime. */
+static bool peer_late_advert(struct peer_fixture *p)
+{
+    size_t batch_len = STATE_OFFER_BATCH_V1_HEADER_BYTES + STATE_OFFER_V1_WIRE_BYTES;
+    CHECK_PHASE(state_offer_batch_v1_decode(&late_batch, p->batch_wire, batch_len) == STATE_OFFER_OK);
+    state_offer_set_provider(late_provider, NULL); late_offer_ready = false;
+    state_offer_peer_tick(&p->mp, p->node);
+    CHECK_PHASE(late_capture(p->node, p->sentinel, 0, 0));
+    late_offer_ready = true; state_offer_peer_test_invalidate_wire();
+    state_offer_peer_tick(&p->mp, p->node);
+    CHECK_PHASE(late_capture(p->node, p->sentinel, 0, 0));
+    CHECK_PHASE(fs_server_start(p->dir, 0, "127.0.0.1")); p->fs_started = true;
+    uint16_t port = 0; CHECK_PHASE(late_wait_listener(&port));
+    late_offer_ready = false; state_offer_peer_test_invalidate_wire();
+    state_offer_peer_tick(&p->mp, p->node); CHECK_PHASE(late_capture(p->node, p->sentinel, 0, 0));
+    late_offer_ready = true; state_offer_peer_test_invalidate_wire();
+    size_t saved = p->node->send_size; p->node->send_size = 1024u * 1024u;
+    state_offer_peer_tick(&p->mp, p->node); CHECK_PHASE(late_capture(p->node, p->sentinel, 0, 0));
+    p->node->send_size = saved;
+    state_offer_peer_tick(&p->mp, p->node); CHECK_PHASE(late_capture(p->node, p->sentinel, port, 1));
+    state_offer_peer_tick(&p->mp, p->node); CHECK_PHASE(late_capture(p->node, p->sentinel, 0, 0));
+    late_batch.offers[0].producer_receipt_id[0] ^= 1;
+    uint8_t seed[32]; memset(seed, 7, sizeof(seed));
+    CHECK_PHASE(state_offer_v1_sign(&late_batch.offers[0], seed) == STATE_OFFER_OK);
+    state_offer_peer_test_invalidate_wire();
+    state_offer_peer_test_advance_advert_ms(30001);
+    state_offer_peer_tick(&p->mp, p->node); CHECK_PHASE(late_capture(p->node, p->sentinel, port, 1));
+    state_offer_peer_tick(&p->mp, p->node); CHECK_PHASE(late_capture(p->node, p->sentinel, 0, 0));
+    uint16_t next = 0; CHECK_PHASE(late_change_port(p, port, &next));
+    state_offer_peer_test_advance_advert_ms(60002);
+    state_offer_peer_tick(&p->mp, p->node); CHECK_PHASE(late_capture(p->node, p->sentinel, next, 1));
+    port = next;
+    CHECK_PHASE(peer_add_nodes(p, 1));
+    state_offer_peer_tick(&p->mp, p->extra[0]);
+    CHECK_PHASE(late_capture(p->extra[0], p->extra_sentinel[0], port, 1));
+    atomic_store(&p->extra[0]->disconnect, true);
+    state_offer_peer_test_advance_advert_ms(90003);
+    state_offer_peer_tick(&p->mp, p->extra[0]); CHECK_PHASE(late_capture(p->extra[0], p->extra_sentinel[0], 0, 0));
+    atomic_store(&p->extra[0]->disconnect, false);
+    p->extra[0]->services &= ~NODE_STATE_OFFER_LINK;
+    state_offer_peer_tick(&p->mp, p->extra[0]); CHECK_PHASE(late_capture(p->extra[0], p->extra_sentinel[0], 0, 0));
+    p->extra[0]->services |= NODE_STATE_OFFER_LINK;
+    p->extra[0]->endpoint_generation++;
+    state_offer_peer_tick(&p->mp, p->extra[0]);
+    CHECK_PHASE(late_capture(p->extra[0], p->extra_sentinel[0], port, 1));
+    p->list[1] = NULL; p->nm.num_nodes = 1;
+    fs_server_stop(); p->fs_started = false;
+    state_offer_set_provider(NULL, NULL); late_offer_ready = false;
+    state_offer_peer_test_advance_advert_ms(0);
+    return true;
+}
+
+#else
+static bool peer_late_advert(struct peer_fixture *p)
+{
+    (void)p; puts("state_offer_peer late advertisement: SKIP (Windows fixture)");
+    return true;
+}
+#endif
+
 /* Drain node's queue; count parts of nonce and return true on any other frame. */
 static bool peer_collect(struct peer_fixture *p, struct p2p_node *node, struct send_segment *sentinel,
                          uint64_t nonce, uint32_t *bytes)
@@ -348,6 +493,11 @@ static bool peer_shutdown(struct peer_fixture *p)
 static void peer_cleanup(struct peer_fixture *p)
 {
     if (p->started) state_offer_peer_shutdown();
+#if !defined(_WIN32)
+    if (p->fs_started) fs_server_stop();
+    state_offer_set_provider(NULL, NULL); late_offer_ready = false;
+    state_offer_peer_test_advance_advert_ms(0);
+#endif
     rom_seed_set_peer_bps_cap(ROM_SEED_DEFAULT_PEER_BPS_CAP);
     if (p->thread_started) (void)pthread_join(p->thread,NULL);
     if (p->node && p->sentinel) {
@@ -369,7 +519,7 @@ static void peer_cleanup(struct peer_fixture *p)
 int test_state_offer_peer(void)
 {
     struct peer_fixture p={0};
-    bool ok=peer_setup(&p) && peer_discovery(&p) && peer_transfer(&p) && peer_parallel(&p) && peer_bench(&p) &&
+    bool ok=peer_setup(&p) && peer_discovery(&p) && peer_transfer(&p) && peer_parallel(&p) && peer_late_advert(&p) && peer_bench(&p) &&
         peer_refuse_disconnect(&p) && peer_pump_purges_gone_offers(&p) && peer_client_disconnect(&p) && peer_shutdown(&p);
     peer_cleanup(&p); return ok ? 0 : 1;
 }

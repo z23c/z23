@@ -299,6 +299,24 @@ enum boot_bundle_arm_result {
     BOOT_BUNDLE_ARM_ERROR, BOOT_BUNDLE_ARM_CREATED, BOOT_BUNDLE_ARM_EXISTING,
     BOOT_BUNDLE_ARM_REPAIRED, BOOT_BUNDLE_ARM_TERMINAL
 };
+/* Versioned staged binding. The caller must have privately published history;
+ * this codec records the path and identities but does not validate its contents.
+ * The bound request is refused by boot until a typed installer is integrated. */
+struct boot_bound_bundle_request {
+    const char *bundle_path;
+    uint8_t snapshot_sha3[32];
+    int32_t endpoint_height;
+    uint8_t endpoint_hash[32];
+    uint8_t history_manifest_root[32];
+    const char *private_history_path;
+};
+enum boot_bundle_arm_result boot_install_bound_bundle_request(
+    const char *datadir, const struct boot_bound_bundle_request *request,
+    uint64_t *created_generation);
+bool boot_install_bound_bundle_request_matches(
+    const char *datadir, const struct boot_bound_bundle_request *request,
+    uint64_t *generation);
+
 /* CREATED alone certifies a newly published durable request. */
 enum boot_bundle_arm_result boot_install_bundle_request_typed(
     const char *datadir, const char *bundle_path, int *legacy_result, uint64_t *created_generation);
@@ -307,9 +325,13 @@ bool boot_install_bundle_request_matches(const char *datadir, const char *bundle
 uint64_t boot_install_bundle_request_generation(void);
 #ifdef ZCL_TESTING
 void boot_install_bundle_test_fail_flush(int which);
+bool boot_install_bound_bundle_test_rewrite(const char *datadir, int attempts);
 #endif
 
 int boot_install_bundle_request(const char *datadir, const char *bundle_path);
+
+/* True for malformed, unreadable or bound requests that cannot yet be installed. */
+bool boot_install_bundle_request_refused(const char *datadir);
 
 /* True iff the request on disk is the terminal marker (budget spent). Logs
  * nothing: *read_errno (may be NULL) gets the errno of a request that exists
@@ -347,6 +369,7 @@ struct boot_state_source_selection {
     bool auto_installed_bundle;
     bool consumed_auto_refold;
     bool do_from_anchor;
+    bool refused;
 };
 
 void boot_select_state_source(struct node_db *ndb, struct main_state *ms,

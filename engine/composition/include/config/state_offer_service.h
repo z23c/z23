@@ -53,8 +53,10 @@ struct state_offer_batch_v1;
 struct msg_processor;
 struct node_db;
 
-/* Register the receive-side sink on the message processor. Separate from
- * start() because the message processor is built after the datadir is known. */
+/* Register the receive-side sink before connman message workers start. A new
+ * manager may be wired only after the previous network workers have joined:
+ * shutdown drains borrowed-manager use but leaves the core callback registered.
+ * Separate from start() because the processor is built after the datadir. */
 void state_offer_service_wire(struct msg_processor *mp);
 
 /* Register the offer provider (send side) and the offer sink (receive side),
@@ -90,6 +92,11 @@ void state_offer_service_restart_hint(struct state_offer_restart_hint *out);
 
 #ifdef ZCL_TESTING
 struct state_offer_v1;
+bool state_offer_service_test_record_enter(void);
+void state_offer_service_test_record_leave(void);
+void state_offer_service_test_record_offer(const struct state_offer_v1 *offer,
+                                           const uint8_t ip[16], uint16_t port, int64_t peer);
+void state_offer_service_test_wait_record_stopped(void);
 bool state_offer_service_test_arm_landed(const char *landed, const struct state_offer_v1 *offer);
 void state_offer_service_test_clear_restart_hint(void);
 /* Replace the bundle-manifest reader (default NULL: the real

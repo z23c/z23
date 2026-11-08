@@ -2918,6 +2918,7 @@ static bool boot_step_refold_from_anchor(struct app_context *ctx,
  * selection that decides between a bundle install and a from-anchor refold. */
 static bool boot_seq_select_state_source(struct app_context *ctx)
 {
+    if (boot_install_bundle_request_refused(ctx->datadir)) return false;
     boot_step_reconcile_utxo_chain();
     boot_step_reset_for_fold_verbs(ctx);
     /* Zero-flag starter-pack bootstrap. Auto-selects a bundled seed only when
@@ -2964,11 +2965,9 @@ static bool boot_seq_select_state_source(struct app_context *ctx)
     sync_benchmark_init(ctx->datadir); /* zcl.sync_benchmark.v1: arms this boot's phase receipt right before state-source selection (mirrors the manual ops.debug.rom_fetch.bundle command's own init call; idempotent). */
     struct boot_state_source_selection ssel;
     boot_select_state_source(&g_node_db, &g_state, ctx, &ssel);
-    bool consumed_auto_refold = ssel.consumed_auto_refold;
-    bool do_from_anchor = ssel.do_from_anchor;
-    if (do_from_anchor)
-        return boot_step_refold_from_anchor(ctx, consumed_auto_refold);
-    return true;
+    if (ssel.do_from_anchor)
+        return boot_step_refold_from_anchor(ctx, ssel.consumed_auto_refold);
+    return !ssel.refused;
 }
 
 /* Reset the staged reducer to the SHA3 anchor and fold the anchor->tip delta. */
