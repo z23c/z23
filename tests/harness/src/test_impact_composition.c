@@ -1409,16 +1409,40 @@ static bool ic_capacity_note_is(const struct zcl_devloop_plan *plan, const char 
     return fclose(f) == 0 && ok;
 }
 
+static bool ic_capacity_json_is(const struct zcl_devloop_plan *plan,
+                                const char *origin, const char *cause,
+                                const char *input, const char *node)
+{
+    char body[ZCL_DEVLOOP_PLAN_WIRE_MAX + 1];
+    size_t n = zcl_devloop_plan_json_render(plan, NULL, 0, body, sizeof(body));
+    struct json_value root = {0};
+    if (!n || !json_read(&root, body, n)) return false;
+    const struct json_value *cap = json_get(&root, "capacity");
+    const struct json_value *actual_node = json_get(cap, "node");
+    bool ok = !origin ? cap && cap->type == JSON_NULL :
+        cap && cap->type == JSON_OBJ &&
+        strcmp(json_get_str(json_get(cap, "origin")), origin) == 0 &&
+        strcmp(json_get_str(json_get(cap, "cause")), cause) == 0 &&
+        strcmp(json_get_str(json_get(cap, "input")), input) == 0 &&
+        (node ? actual_node && actual_node->type == JSON_STR &&
+                    strcmp(json_get_str(actual_node), node) == 0 :
+                actual_node && actual_node->type == JSON_NULL);
+    json_free(&root);
+    return ok;
+}
+
 static int test_ic_capacity_provenance(void)
 {
     int failures = 0;
     TEST("impact composition: capacity origin survives propagation and resets with closure") {
         struct zcl_devloop_plan plan = {0};
         plan.closure_universal = true;
+        ASSERT(ic_capacity_json_is(&plan, NULL, NULL, NULL, NULL));
         ASSERT(ic_capacity_note_is(&plan, "capacity_origin=unknown capacity_cause=unknown capacity_input=unknown capacity_node=unknown\n"));
         zcl_devloop_capacity_note(&plan, "include", "file-cap", "a b%\n");
         zcl_devloop_capacity_note(&plan, "semantic", "group-cap", "batch");
         ASSERT_STR_EQ(plan.capacity_origin, "include");
+        ASSERT(ic_capacity_json_is(&plan, "include", "file-cap", "a b%\n", NULL));
         ASSERT(ic_capacity_note_is(&plan, "capacity_origin=include capacity_cause=file-cap capacity_input=a%20b%25%0A capacity_node=unknown\n"));
         struct zcl_dev_proof_range_selection selection = {0};
         zcl_dev_proof_test_select_capacity_detail(&selection, &plan);
@@ -1429,10 +1453,12 @@ static int test_ic_capacity_provenance(void)
         ASSERT(plan.capacity_node[0] == '\0');
         zcl_devloop_capacity_note(&plan, "semantic", "caller_query_saturated", "batch");
         zcl_devloop_capacity_set_node(&plan, "a b%\n");
+        ASSERT(ic_capacity_json_is(&plan, "semantic", "caller_query_saturated", "batch", "a b%\n"));
         ASSERT(ic_capacity_note_is(&plan, "capacity_origin=semantic capacity_cause=caller_query_saturated capacity_input=batch capacity_node=known:a%20b%25%0A\n"));
         zcl_dev_proof_test_select_capacity_detail(&selection, &plan);
         ASSERT_STR_EQ(selection.detail, "capacity_origin=semantic capacity_cause=caller_query_saturated capacity_input=batch capacity_node=known:a%20b%25%0A");
         zcl_devloop_capacity_set_node(&plan, "unknown");
+        ASSERT(ic_capacity_json_is(&plan, "semantic", "caller_query_saturated", "batch", "unknown"));
         zcl_devloop_capacity_note(&plan, "include", "file-cap", "other");
         zcl_dev_proof_test_select_capacity_detail(&selection, &plan);
         ASSERT(strstr(selection.detail, "capacity_input=batch capacity_node=known:unknown") != NULL);
@@ -1517,6 +1543,7 @@ static int test_ic_capacity_bound_runs_everything(void)
             if (strcmp(capped.capacity_node, ic_many_group_files[i]) == 0)
                 known_trigger = true;
         ASSERT(known_trigger);
+        ASSERT(ic_capacity_json_is(&capped, "semantic", "group-cap", "batch", capped.capacity_node));
         char capacity_note[512];
         (void)snprintf(capacity_note, sizeof(capacity_note),
                        "capacity_origin=semantic capacity_cause=group-cap "

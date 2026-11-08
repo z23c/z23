@@ -1835,6 +1835,30 @@ static bool plan_json_add_selects(const struct zcl_devloop_plan *plan,
                    zcl_devloop_plan_selects_answer(plan, selects));
 }
 
+/* No event is null; an event's missing fields are null, not a known "unknown". */
+static bool plan_json_capacity_value(char *out, size_t out_sz, size_t *pos,
+                                     const char *value)
+{
+    return value && value[0] ? append_json_string(out, out_sz, pos, value) :
+                              appendf(out, out_sz, pos, "null");
+}
+
+static bool plan_json_capacity(const struct zcl_devloop_plan *plan, char *out,
+                               size_t out_sz, size_t *pos)
+{
+    if (!appendf(out, out_sz, pos, ",\"capacity\":")) return false;
+    if (!plan->capacity_origin) return appendf(out, out_sz, pos, "null");
+    return appendf(out, out_sz, pos, "{\"origin\":") &&
+        plan_json_capacity_value(out, out_sz, pos, plan->capacity_origin) &&
+        appendf(out, out_sz, pos, ",\"cause\":") &&
+        plan_json_capacity_value(out, out_sz, pos, plan->capacity_cause) &&
+        appendf(out, out_sz, pos, ",\"input\":") &&
+        plan_json_capacity_value(out, out_sz, pos, plan->capacity_input) &&
+        appendf(out, out_sz, pos, ",\"node\":") &&
+        plan_json_capacity_value(out, out_sz, pos, plan->capacity_node) &&
+        appendf(out, out_sz, pos, "}");
+}
+
 static size_t plan_json_body(const struct zcl_devloop_plan *plan,
                              const char *const *files, size_t file_count,
                              bool include_closure, const char *selects,
@@ -1853,7 +1877,8 @@ static size_t plan_json_body(const struct zcl_devloop_plan *plan,
     if (out_sz > ZCL_DEVLOOP_PLAN_WIRE_MAX)
         out_sz = ZCL_DEVLOOP_PLAN_WIRE_MAX;
     if (!plan_json_head(plan, out, out_sz, &pos) ||
-        !plan_json_files(plan, files, file_count, out, out_sz, &pos))
+        !plan_json_files(plan, files, file_count, out, out_sz, &pos) ||
+        !plan_json_capacity(plan, out, out_sz, &pos))
         return 0;
     if (include_closure &&
         !plan_json_closure(plan, out, out_sz, &pos, &proof_admissible,
