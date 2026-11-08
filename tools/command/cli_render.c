@@ -820,6 +820,96 @@ static void emit_branch_hint(struct buf *b, const struct zcl_cli_render_env *e,
     }
 }
 
+static const char *const k_app_journey[] = {
+    "app.list", "app.open", "app.copy", "app.save", "app.build",
+    "app.share", "app.receive"
+};
+#define APP_JOURNEY_N (sizeof(k_app_journey) / sizeof(k_app_journey[0]))
+
+static int app_journey_index(const char *path)
+{
+    for (size_t i = 0; path && i < APP_JOURNEY_N; i++)
+        if (strcmp(path, k_app_journey[i]) == 0)
+            return (int)i;
+    return -1;
+}
+
+/* Wrap the non-journey child names, one blank-separated run per line. */
+static void emit_app_agent_names(struct buf *b,
+                                 const struct zcl_cli_render_env *e,
+                                 const struct json_value *children,
+                                 size_t total)
+{
+    size_t width = e->width > 4 ? (size_t)e->width : 4;
+    size_t col = 0;
+    for (size_t i = 0; i < total; i++) {
+        const char *p = json_get_str(json_get(json_at(children, i), "path"));
+        if (!p || app_journey_index(p) >= 0)
+            continue;
+        if (strncmp(p, "app.", 4) == 0)
+            p += 4;
+        size_t len = strlen(p);
+        if (col > 0 && col + 1 + len > width) {
+            buf_putc(b, '\n');
+            col = 0;
+        }
+        if (col == 0) {
+            buf_puts(b, "  ");
+            col = 2;
+        } else {
+            buf_putc(b, ' ');
+            col++;
+        }
+        size_t room = width > col ? width - col : 1;
+        col += buf_puts_trunc(b, p, room);
+    }
+    if (col > 0)
+        buf_putc(b, '\n');
+}
+
+/* The "app" menu: person journey first, every other leaf by name. */
+static void render_app_menu(struct buf *b, const struct zcl_cli_render_env *e,
+                            const struct json_value *children, size_t total)
+{
+    const char *headers[4] = { "PATH", "SUMMARY", "RISK", "AVAIL" };
+    const char *cellbuf[APP_JOURNEY_N * 4];
+    size_t rows = 0;
+    for (size_t j = 0; j < APP_JOURNEY_N; j++) {
+        for (size_t i = 0; i < total; i++) {
+            const struct json_value *ch = json_at(children, i);
+            const char *p = json_get_str(json_get(ch, "path"));
+            if (!p || strcmp(p, k_app_journey[j]) != 0)
+                continue;
+            cellbuf[rows * 4 + 0] = p;
+            cellbuf[rows * 4 + 1] = json_get_str(json_get(ch, "summary"));
+            cellbuf[rows * 4 + 2] = json_get_str(json_get(ch, "risk"));
+            cellbuf[rows * 4 + 3] = json_get_str(json_get(ch, "availability"));
+            rows++;
+            break;
+        }
+    }
+    buf_puts(b, "make and share an app\n");
+    if (rows > 0)
+        emit_table(b, e, 4, headers, cellbuf, rows);
+    buf_puts(b, "\nfor agents and tools:\n");
+    emit_app_agent_names(b, e, children, total);
+}
+
+static void render_menu_hints(struct buf *b,
+                              const struct zcl_cli_render_env *e,
+                              const struct json_value *root)
+{
+    const struct json_value *next = json_get(root, "next");
+    if (next && next->type == JSON_OBJ) {
+        char shell[512];
+        next_as_shell(next, shell, sizeof(shell));
+        if (shell[0]) {
+            buf_putc(b, '\n');
+            emit_hint_line(b, e, "next: ", shell);
+        }
+    }
+}
+
 static void render_menu(struct buf *b, const struct zcl_cli_render_env *e,
                         const struct json_value *root)
 {
@@ -837,6 +927,11 @@ static void render_menu(struct buf *b, const struct zcl_cli_render_env *e,
     size_t total = children && children->type == JSON_ARR
                        ? children->num_children
                        : 0;
+    if (path && strcmp(path, "app") == 0) {
+        render_app_menu(b, e, children, total);
+        render_menu_hints(b, e, root);
+        return;
+    }
     size_t rows = total > e->max_rows ? e->max_rows : total;
     if (rows > 24)
         rows = 24;
