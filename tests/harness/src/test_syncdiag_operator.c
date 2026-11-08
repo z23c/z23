@@ -899,9 +899,9 @@ static bool syncdiag_refold_api_fields(bool ok,
     ok = ok && strcmp(json_get_str(json_get(result, "api_version")),
                       "v1") == 0;
     ok = ok && strstr(json_get_str(json_get(result, "purpose")),
-                      "UTXO anchor rebuild") != NULL;
+                      "checkpoint-matching UTXO anchor availability") != NULL;
     ok = ok && strstr(json_get_str(json_get(result, "plain_english")),
-                      "borrowed snapshot seed") != NULL;
+                      "does not verify full block history or shielded state") != NULL;
     ok = ok && strcmp(json_get_str(json_get(result,
                                             "internal_mechanism")),
                       "-refold-from-anchor") == 0;

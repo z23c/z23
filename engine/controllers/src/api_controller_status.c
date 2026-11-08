@@ -763,11 +763,12 @@ void api_refold_status_json(struct json_value *result)
     json_push_kv_str(result, "api_version", ZCL_REST_API_VERSION);
     json_push_kv_str(result, "source", "zclassic23");
     json_push_kv_str(result, "purpose",
-                     "self-verified UTXO anchor rebuild readiness");
+                     "checkpoint-matching UTXO anchor availability");
     json_push_kv_str(result, "plain_english",
-                     "Checks whether zclassic23 has rebuilt its own verified "
-                     "UTXO anchor from local block history so it can stop "
-                     "depending on the borrowed snapshot seed.");
+                     "Checks whether a UTXO anchor snapshot matching the "
+                     "compiled checkpoint is available for refold. Transparent "
+                     "state refold is release-assisted; it does not verify "
+                     "full block history or shielded state.");
     json_push_kv_str(result, "internal_mechanism", "-refold-from-anchor");
     json_push_kv_bool(result, "ready_for_refold",
                       status_ok && st.verified);

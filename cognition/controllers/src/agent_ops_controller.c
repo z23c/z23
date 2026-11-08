@@ -63,7 +63,10 @@ bool rpc_agent_ops(const struct json_value *params, bool help,
                      "agent_contracts.def + agent_contract_registry.c");
     agent_push_contract_field_surface_json(result, "agentops.first_call");
     json_push_kv_str(result, "refold_plain_english",
-                     "Rebuild the UTXO/trust anchor from zclassic23's own verified block history, then cut over so the node no longer depends on a borrowed snapshot seed.");
+                     "Checks whether a UTXO anchor snapshot matching the "
+                     "compiled checkpoint is available for refold. Transparent "
+                     "state refold is release-assisted; it does not verify "
+                     "full block history or shielded state.");
 
     agent_push_operator_lane_json(result, "current_runtime_lane");
     agent_push_runtime_build_json(result, "runtime_build");

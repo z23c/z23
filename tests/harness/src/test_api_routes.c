@@ -361,9 +361,9 @@ static bool api_refold_status_text(const struct json_value *root)
                   "zcl.refold_status.v2") == 0
         && strcmp(json_get_str(json_get(root, "api_version")), "v1") == 0
         && strstr(json_get_str(json_get(root, "purpose")),
-                  "UTXO anchor rebuild") != NULL
+                  "checkpoint-matching UTXO anchor availability") != NULL
         && strstr(json_get_str(json_get(root, "plain_english")),
-                  "borrowed snapshot seed") != NULL
+                  "does not verify full block history or shielded state") != NULL
         && strcmp(json_get_str(json_get(root, "internal_mechanism")),
                   "-refold-from-anchor") == 0
         && !json_get_bool(json_get(root, "ready_for_refold"))

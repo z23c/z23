@@ -151,7 +151,7 @@ static bool sd_ops_fields_direct_commands_proof_bundle(const struct json_value *
                "z23 proofbundle [anchor_datadir]") == 0;
     ok = ok && strstr(json_get_str(json_get(ops,
                                             "refold_plain_english")),
-                      "borrowed snapshot seed") != NULL;
+                      "does not verify full block history or shielded state") != NULL;
     ok = ok &&
         agent_contract_work_surface_count("agentops.api_gaps") == 3;
     ok = ok &&
