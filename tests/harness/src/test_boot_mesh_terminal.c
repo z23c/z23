@@ -25,6 +25,7 @@
 #include "base/serialize_le.h"
 #include "services/mesh_pairing_service.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -49,7 +50,14 @@ static void kb_fill_pipe(int wfd)
     uint8_t chunk[4096];
     memset(chunk, KB_TERMINAL_FILL, sizeof(chunk));
     while (write(wfd, chunk, sizeof(chunk)) > 0) {}
-    while (write(wfd, chunk, 1) > 0) {}
+    /* Single bytes until the kernel itself says the pipe is full: a failed
+     * chunk write can leave room (macOS), and only EAGAIN proves it is full. */
+    for (;;) {
+        ssize_t n = write(wfd, chunk, 1);
+        if (n > 0 || (n < 0 && errno == EINTR))
+            continue;
+        break;
+    }
 }
 
 static size_t kb_drain_pipe(int rfd, uint8_t *last, size_t last_cap)
@@ -183,7 +191,13 @@ _test_next:
 static int kb_exited_cases(void)
 {
     int failures = 0;
+#if defined(__APPLE__)
+    /* macOS has no /dev/full: a read-only descriptor makes write fail with
+     * EBADF, which the worker also reports as a non-stall IO error. */
+    int fd = open("/dev/null", O_RDONLY | O_NONBLOCK);
+#else
     int fd = open("/dev/full", O_WRONLY | O_NONBLOCK);
+#endif
     uint8_t tid[32], msg[MESH_TERMINAL_MSG_MAX];
     struct mesh_stream st;
     struct mesh_terminal_worker w;
