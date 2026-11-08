@@ -1,5 +1,6 @@
 [Desktop Entry]
 Type=Application
+X-Z23-App-Library=1
 Name=Z23
 Comment=Z23 native presentation window
 Exec=z23 app receive --preview --file=%f

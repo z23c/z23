@@ -80,6 +80,12 @@ struct app_launch_registry {
     bool config_present;   /* the operator file exists */
     char config_error[256]; /* non-empty: the whole file was refused */
 };
+struct app_selection;
+/* Open the choice displayed by a local owner UI. NULL selection binds absence;
+ * neither branch re-enters name-only selection resolution. */
+void zcl_native_app_open_snapshot(const struct app_launch_env *env,
+    const struct app_launch_entry *entry, const struct app_selection *selection,
+    struct zcl_command_reply *reply);
 
 enum app_open_status {
     APP_OPEN_OPENED,

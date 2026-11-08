@@ -24,6 +24,7 @@
 # cartridge activation) lands here as `receipt:<handler_file>`.
 
 app.account.add           exempt: App-principal AR write, no artifact install
+app.library exempt: owner selects an existing local catalog app or validated adopted/trusted saved image; existing opener and resident_launch control execution; no artifact install, no grants and no running-binary replacement
 app.account.role          exempt: App-principal AR write, no artifact install
 app.account.suspend       exempt: App-principal AR write, no artifact install
 app.account.unsuspend     exempt: App-principal AR write, no artifact install

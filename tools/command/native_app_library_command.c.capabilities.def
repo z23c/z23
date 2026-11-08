@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_app_library_command.c", CAP_FS_WRITE, "Native owner presentation and existing snapshot opener manage private launch state through their owning modules")

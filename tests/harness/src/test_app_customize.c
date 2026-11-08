@@ -1956,7 +1956,7 @@ int test_app_personalize(void)
 enum ast_change { AST_UNCHANGED, AST_KEEP_CHANGED, AST_KEY_REMOVED, AST_OUTPUT_PARENT_REMOVED };
 struct ast_present {
     bool confirm, fail, observed, injected;
-    const char *version, *output, *route;
+    const char *version, *output, *route, *publisher, *package;
     struct ac_fixture *fixture;
     enum ast_change change;
     char key[900], backup[900];
@@ -1996,16 +1996,26 @@ static bool ast_inject(struct ast_present *p)
     }
     return true;
 }
+static bool ast_observe(struct ast_present *p, const struct zcl_present_model_v1 *model,
+                         uint32_t *count, char *why, size_t cap)
+{
+    return !model->exact_root[0] &&
+        ast_field(model, "Sharing: ", "Signs this saved version and creates a local share file. Nothing is sent over the network.") &&
+        ast_field(model, "Saved version: ", p->version) && ast_field(model, "Output: ", p->output) &&
+        (!p->publisher || ast_field(model, "Publisher: ", p->publisher)) &&
+        (!p->package || ast_field(model, "Package: ", p->package)) &&
+        zcl_present_model_page_count_v1(model, count, why, cap);
+}
 static bool ast_presenter(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
     char *why, size_t cap)
 {
     (void)pages; struct ast_present *p = context; uint32_t count = 0;
-    p->observed = ast_field(model, "Saved version: ", p->version) && ast_field(model, "Output: ", p->output) &&
-        zcl_present_model_page_count_v1(model, &count, why, cap);
+    p->observed = ast_observe(p, model, &count, why, cap);
     if (!p->observed || p->fail) return false;
     bool close = false, redraw = false;
     if (!p->confirm) return ast_action(live, 0, &close, &redraw) && close;
+    if (count > 1 && (!ast_action(live, 3, &close, &redraw) || close)) return false;
     for (uint32_t i = 1; i < count; ++i)
         if (!ast_action(live, 2, &close, &redraw) || close || !redraw) return false;
     return ast_inject(p) && ast_action(live, 3, &close, &redraw) && close;
@@ -2482,7 +2492,9 @@ static bool ast_journey(struct ac_fixture *f)
     if (!ast_prepare_selection(f, version, publisher, output) || !act_preserved(f, true) || !apt_key_path(f, key)) return false;
     uint8_t key_hash[32], after[32];
     if (!act_hash(f->world.alice_home, ".z23/zcode_publisher.key", key_hash)) return false;
-    struct ast_present p = {.version = version, .output = output};
+    char expected_package[65]; zcl_hex_encode(f->kept.package, 32, expected_package);
+    struct ast_present p = {.version = version, .output = output,
+                            .publisher = publisher, .package = expected_package};
     bool ok = ast_preconsent(f, &p, version, output);
     ok = ok && ast_confirm_share(&p, version, output, publisher);
     ok = ok && act_preserved(f, false) && act_hash(f->world.alice_home, ".z23/zcode_publisher.key", after) &&

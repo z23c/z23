@@ -479,3 +479,70 @@ bool zcl_native_app_open_kept(const struct zcl_command_request *request,
     as_cleanup(a);
     return state != 0;
 }
+
+static bool as_same_selection(const struct app_selection *a, const struct app_selection *b)
+{
+    return a->revision == b->revision && !strcmp(a->app, b->app) &&
+        !strcmp(a->copy, b->copy) && !strcmp(a->datadir, b->datadir) &&
+        !memcmp(a->fork, b->fork, 32) && !memcmp(a->parent, b->parent, 32) &&
+        !memcmp(a->version, b->version, 32) && !memcmp(a->package, b->package, 32) &&
+        !memcmp(a->env, b->env, 32) && !memcmp(a->dependencies, b->dependencies, 32) &&
+        !memcmp(a->record, b->record, 32) && !memcmp(a->image, b->image, 32);
+}
+
+static bool as_snapshot_catalog(struct as_open *a, const struct app_launch_entry *shown)
+{
+    if (app_selection_route_reserved(shown->id))
+        return app_launch_kept_entry(shown->id, &a->entry);
+    app_launch_registry_load(&a->env_cfg, &a->registry);
+    const struct app_launch_entry *now = app_launch_registry_find(&a->registry, shown->id);
+    if (a->registry.config_error[0] || !now ||
+        strcmp(now->executable, shown->executable) || now->arg_count != shown->arg_count ||
+        now->raise_sigusr1 != shown->raise_sigusr1 || strcmp(now->ready_marker, shown->ready_marker))
+        return as_fail(a, "CATALOG_STALE", "The app changed. Close My Apps and open it again.", shown->id);
+    for (unsigned i = 0; i < now->arg_count; ++i)
+        if (strcmp(now->args[i], shown->args[i]))
+            return as_fail(a, "CATALOG_STALE", "The app arguments changed. Open My Apps again.", shown->id);
+    a->entry = *now;
+    return true;
+}
+
+void zcl_native_app_open_snapshot(const struct app_launch_env *env,
+    const struct app_launch_entry *entry, const struct app_selection *selection,
+    struct zcl_command_reply *reply)
+{
+    struct as_open *a = zcl_calloc(1, sizeof(*a), "app-open-snapshot");
+    if (!a) { zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "Cannot allocate app state.", "app.library"); return; }
+    a->reply = reply; a->env_cfg = *env; a->name = entry->id;
+    if (selection && selection->revision > INT64_MAX) {
+        as_fail(a, "SELECTION_UNREADABLE", "Saved selection revision is out of range.", entry->id);
+        as_cleanup(a); return;
+    }
+    if (!as_snapshot_catalog(a, entry)) { as_cleanup(a); return; }
+    struct app_selection now;
+    enum app_selection_result loaded = app_selection_load(env->state_dir, entry->id, &now);
+    bool same = selection ? loaded == APP_SELECTION_OK && as_same_selection(selection, &now)
+                          : loaded == APP_SELECTION_ABSENT;
+    if (!same || (!selection && app_selection_route_reserved(entry->id))) {
+        as_fail(a, "SELECTION_STALE", "Your saved choice changed. Close My Apps and open it again.", entry->id);
+    } else if (selection) {
+        /* Keep the displayed tuple even if another Keep follows this check. */
+        a->kept = *selection;
+        as_kept_launch(a);
+    } else {
+        /* The resolved catalog is used directly: a concurrent Keep cannot
+         * cause name-only resolution to substitute an undisplayed image. */
+        struct app_open_result result;
+        app_launch_open(env, &a->registry, entry->id, &result);
+        if (result.status == APP_OPEN_FAILED)
+            as_fail(a, "APP_OPEN_FAILED", result.message, result.hint);
+        else {
+            (void)json_push_kv_str(&reply->data, "status", app_open_status_name(result.status));
+            (void)json_push_kv_str(&reply->data, "name", entry->id);
+            (void)json_push_kv_int(&reply->data, "pid", result.pid);
+            (void)json_push_kv_str(&reply->data, "executable", result.executable);
+            (void)json_push_kv_str(&reply->data, "sha256", result.sha256);
+        }
+    }
+    as_cleanup(a);
+}

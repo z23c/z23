@@ -1,0 +1,15 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: Native My Apps owner interface and bounded presenter seam. */
+#ifndef ZCL_NATIVE_APP_LIBRARY_COMMAND_H
+#define ZCL_NATIVE_APP_LIBRARY_COMMAND_H
+#include "command/native_command.h"
+#include "command/native_app_launch.h"
+#include "presentation/model.h"
+#include "presentation/presentation.h"
+typedef bool (*app_library_presenter)(void *, const struct zcl_present_model_v1 *,
+    struct zcl_present_window_event_v1 *, char *, size_t);
+#if defined(ZCL_TESTING)
+void zcl_test_app_library_run(const struct app_launch_env *env,
+    struct zcl_command_reply *reply, app_library_presenter presenter, void *context);
+#endif
+#endif

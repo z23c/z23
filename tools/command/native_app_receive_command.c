@@ -337,7 +337,6 @@ static bool ar_model(struct receive_work *w, char *why, size_t cap)
     (void)snprintf(m->request_id, sizeof(m->request_id), "receive-%.12s", w->plan);
     (void)snprintf(m->title, sizeof(m->title), "Receive this app copy?");
     (void)snprintf(m->summary, sizeof(m->summary), "Review all pages. Nothing runs now.");
-    (void)snprintf(m->exact_root, sizeof(m->exact_root), "%s", w->plan);
     m->action_count = 4;
     app_confirm_action(&m->actions[0], ZCL_PRESENT_ACTION_CANCEL, "cancel", "Cancel");
     app_confirm_action(&m->actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");

@@ -6,6 +6,7 @@
 #include "test/test_core.h"
 #include "command/native_app_receive_command.h"
 #include "command/native_app_confirm.h"
+#include "presentation/canvas.h"
 #include "command/native_command.h"
 #include "command/native_zcode_package_bundle.h"
 #include "command/native_zcode_package_copy.h"
@@ -203,7 +204,7 @@ static bool rt_finish(struct rt_presenter *p, const struct zcl_present_window_li
 static bool rt_observe(struct rt_presenter *p, const struct zcl_present_model_v1 *m,
     const struct zcl_present_window_pages_v1 *pages, uint32_t *count, char *why, size_t cap)
 {
-    return pages && pages->page_count == 1 && pages->pages->pixels &&
+    return pages && pages->page_count == 1 && pages->pages->pixels && !m->exact_root[0] &&
         zcl_present_model_page_count_v1(m, count, why, cap) && *count > 1 &&
         rt_field(m, "Publisher: ", p->fixture->publisher) &&
         rt_field(m, "Release: ", p->fixture->release) &&
@@ -826,9 +827,37 @@ static int rp_cases(void)
     return failures;
 }
 
-int test_app_receive(void)
+static bool rt_wrap_value(const char *value, bool words)
+{
+    struct zcl_present_model_v1 m;
+    zcl_present_model_init_v1(&m, ZCL_PRESENT_MODEL_STATUS_CARD);
+    if (!app_confirm_field(&m, "Text: ", value) || !rt_field(&m, "Text: ", value)) return false;
+    size_t offset = 0, total = strlen(value);
+    for (uint32_t i = 0; i < m.item_count; ++i) {
+        const char *line = m.items[i].value, *part = line + (i ? 2 : 6);
+        size_t n = strlen(part);
+        if (!n || n > 40 || zcl_present_canvas_text_width(line, strlen(line), 16u) > 636u) return false;
+        offset += n;
+        if (words && offset < total && part[n - 1] != ' ' && value[offset] != ' ') return false;
+    }
+    return offset == total;
+}
+static int rt_wrap_cases(void)
 {
     int failures = 0;
+    TEST("confirmation wrapping preserves words, spaces and every long-identifier byte") {
+        ASSERT(rt_wrap_value("Allow future requested builds and runs of this exact publisher and package. Receiving this copy runs nothing.", true));
+        ASSERT(rt_wrap_value("  A path with  repeated spaces /fixture/My games/blue plane %shared.z23share  ", true));
+        ASSERT(rt_wrap_value("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", false));
+        ASSERT(rt_wrap_value("WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", false));
+        ASSERT(rt_wrap_value("short", true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+int test_app_receive(void)
+{
+    int failures = rt_wrap_cases();
     struct receive_fixture f;
     TEST("app.receive requires all-page native confirmation and rechecks the exact signed file") {
         ASSERT(rt_setup(&f));

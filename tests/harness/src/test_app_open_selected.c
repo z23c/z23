@@ -1310,7 +1310,9 @@ static bool aj_share_fields(const struct zcl_present_model_v1 *model, const stru
     const char *values[] = {view->draft->version, view->draft->package, view->publisher, view->release, view->output};
     for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); ++i)
         if (!aj_receive_field(model, labels[i], values[i])) return false;
-    return !strcmp(model->exact_root, view->plan);
+    char request_id[32];
+    (void)snprintf(request_id, sizeof(request_id), "share-%.12s", view->plan);
+    return !model->exact_root[0] && !strcmp(model->request_id, request_id);
 }
 static bool aj_share_present(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages,
@@ -2029,6 +2031,14 @@ static bool arpt_collision(struct ak_fixture *f, struct app_receive_preview *p,
     zcl_package_copy_close(&copy);
     if (!opened || !memcmp(other.version, original.version, 32)) return false;
     if (app_selection_save(f->env.state_dir, original.revision, &other, &saved) != APP_SELECTION_OK) return false;
+    struct app_launch_entry displayed;
+    struct zcl_command_reply stale_reply; zcl_command_reply_init(&stale_reply, "zcl.app_open.v1");
+    bool stale_ok = app_launch_kept_entry(route, &displayed);
+    if (stale_ok) zcl_native_app_open_snapshot(&f->env, &displayed, &original, &stale_reply);
+    stale_ok = stale_ok && !strcmp(stale_reply.error.code, "SELECTION_STALE") &&
+        !json_get(&stale_reply.data, "pid");
+    zcl_command_reply_free(&stale_reply);
+    if (!stale_ok) return false;
     struct json_value input; json_init(&input);
     bool ok = app_receive_preview_keep_input(p, &input, failure) == APP_RECEIVE_PREVIEW_KEEP_REFUSED &&
         !strcmp(failure->error.code, "PREVIEW_ROUTE_COLLISION");

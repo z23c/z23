@@ -13,6 +13,15 @@ static bool ac_ascii(const char *value)
         if (*p < 0x20 || *p > 0x7e) return false;
     return true;
 }
+/* Keep the separating space in the emitted value. Unbroken identifiers
+ * retain the bounded split when no word boundary fits. */
+static size_t ac_word_end(const char *value, size_t take)
+{
+    if (!value[take] || value[take] == ' ') return take;
+    for (size_t i = take; i > 0; --i)
+        if (value[i - 1] == ' ') return i;
+    return take;
+}
 static bool ac_line(struct zcl_present_model_v1 *model, const char *label,
                     const char *value, size_t *used)
 {
@@ -26,6 +35,8 @@ static bool ac_line(struct zcl_present_model_v1 *model, const char *label,
         --take;
     }
     if (!take) return false;
+    take = ac_word_end(value, take);
+    (void)snprintf(line, sizeof(line), "%s%.*s", label, (int)take, value);
     struct zcl_present_model_item_v1 *item = &model->items[model->item_count];
     item->kind = ZCL_PRESENT_ITEM_TEXT;
     item->status = ZCL_PRESENT_STATUS_INFO;

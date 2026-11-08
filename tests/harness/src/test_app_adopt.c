@@ -159,7 +159,8 @@ static bool ad_plan_identity(struct json_value *plan, const char *root,
                              const char *name, const char *destination)
 {
     static const char publisher[] = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    return json_push_kv_str(plan, "plan_id", root) && json_push_kv_str(plan, "release_root", root) &&
+    static const char plan_id[] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    return json_push_kv_str(plan, "plan_id", plan_id) && json_push_kv_str(plan, "release_root", root) &&
         json_push_kv_str(plan, "package_root", root) && json_push_kv_str(plan, "publisher", publisher) &&
         json_push_kv_str(plan, "name", name) && json_push_kv_str(plan, "semver", "1.0.0") &&
         json_push_kv_str(plan, "copy", destination);
@@ -182,6 +183,25 @@ static bool ad_plan_json(struct json_value *plan, int kind, const char *name, co
          json_push_kv_bool(plan, "changed_paths_truncated", true);
     json_free(&row); json_free(&rows); return ok;
 }
+static bool ad_field_exact(const struct zcl_present_model_v1 *m,
+                           const char *label, const char *expected)
+{
+    size_t used = 0, total = strlen(expected); bool found = false;
+    for (uint32_t i = 0; i < m->item_count; ++i) {
+        const char *part = m->items[i].value;
+        if (!found) {
+            if (strncmp(part, label, strlen(label))) continue;
+            part += strlen(label); found = true;
+        } else {
+            if (strncmp(part, "  ", 2)) break;
+            part += 2;
+        }
+        size_t n = strlen(part);
+        if (n > total - used || memcmp(part, expected + used, n)) return false;
+        used += n;
+    }
+    return found && used == total;
+}
 static int ad_model_cases(void)
 {
     int failures = 0; struct json_value plan; json_init(&plan);
@@ -189,6 +209,11 @@ static int ad_model_cases(void)
     TEST("adoption model shows parent, bounded changes, truncation and unavailable") {
         ASSERT(ad_plan_json(&plan, 0, "demo/app", "/safe/copies/app"));
         ASSERT(zcl_test_app_adopt_model(&plan, &model, &pages));
+        ASSERT(!model.exact_root[0]);
+        ASSERT_STR_EQ(model.request_id, "adopt-bbbbbbbbbbbb");
+        ASSERT(ad_field_exact(&model, "Package: ", json_get_str(json_get(&plan, "package_root"))));
+        ASSERT(ad_field_exact(&model, "Release: ", json_get_str(json_get(&plan, "release_root"))));
+        ASSERT(ad_field_exact(&model, "Publisher: ", json_get_str(json_get(&plan, "publisher"))));
         ASSERT(ad_item_has(&model, "None (first release)"));
         json_free(&plan);
         ASSERT(ad_plan_json(&plan, 1, "demo/app", "/safe/copies/app"));

@@ -19,6 +19,10 @@
 #include "test/test_core.h"
 
 #include "command/native_app_launch.h"
+#include "command/native_app_library_command.h"
+#include "command/app_selection.h"
+#include "presentation/model_render.h"
+#include "presentation/canvas.h"
 #include "base/hex.h"
 #include "platform/positioned_file.h"
 #include "platform/resident_launch.h"
@@ -787,6 +791,162 @@ _test_next:
     return failures;
 }
 
+struct al_library_script {
+    unsigned actions[40], count, calls, errors;
+    bool valid, saved_label;
+    char last_summary[241];
+};
+static bool al_library_present(void *context, const struct zcl_present_model_v1 *model,
+    struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    struct al_library_script *s = context;
+    s->valid = s->valid && zcl_present_model_validate_v1(model, why, cap);
+    struct zcl_present_model_bitmap_v1 bitmap = {0};
+    s->valid = s->valid && zcl_present_model_render_v1(model, &bitmap, why, cap) && bitmap.pixels;
+    zcl_present_model_bitmap_free_v1(&bitmap);
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    if (!strcmp(model->request_id, "library-error")) { ++s->errors; event->action_index = 0; return true; }
+    s->saved_label |= strstr(model->items[0].value, "Saved version") != NULL;
+    s->valid = s->valid && zcl_present_canvas_text_width(model->items[0].value,
+        strlen(model->items[0].value), 14u) <= 296u;
+    (void)snprintf(s->last_summary, sizeof(s->last_summary), "%s", model->summary);
+    if (s->calls >= s->count) { s->valid = false; event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }
+    event->action_index = s->actions[s->calls++];
+    return true;
+}
+static bool al_selection(struct al_fx *f, const char *name, struct app_selection *saved)
+{
+    struct app_selection s = {0};
+    (void)snprintf(s.app, sizeof(s.app), "%s", name);
+    int n = snprintf(s.copy, sizeof(s.copy), "%s/My very long friendly airplane game name shared with friends and family version", f->root);
+    if (n < 0 || (size_t)n >= sizeof(s.copy) || strlen(f->root) >= sizeof(s.datadir)) return false;
+    if (mkdir(s.copy, 0700) != 0 && errno != EEXIST) return false;
+    memcpy(s.datadir, f->root, strlen(f->root) + 1);
+    uint8_t *roots[] = {s.fork, s.parent, s.version, s.package, s.env, s.dependencies, s.record, s.image};
+    for (size_t i = 0; i < 8; ++i) memset(roots[i], 1, 32);
+    return app_selection_save(f->env.state_dir, 0, &s, saved) == APP_SELECTION_OK;
+}
+static int case_library(struct al_fx *f)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    TEST("My Apps navigation and cancellation never execute; forged events refuse") {
+        struct al_library_script s = {.actions = {2, 1, 3}, .count = 3, .valid = true};
+        zcl_test_app_library_run(&f->env, &reply, al_library_present, &s);
+        ASSERT(s.valid && s.calls == 3 && s.errors == 0);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")), "canceled");
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        s = (struct al_library_script){.actions = {99}, .count = 1, .valid = true};
+        zcl_test_app_library_run(&f->env, &reply, al_library_present, &s);
+        ASSERT(s.valid && s.calls == 1 && s.errors == 1);
+        ASSERT_STR_EQ(reply.error.code, "INVALID_SELECTION");
+        ASSERT(!json_get(&reply.data, "pid"));
+    PASS(); }
+    TEST("My Apps absent snapshot refuses a concurrent Keep, including catalog IDs") {
+        struct app_selection saved;
+        const struct app_launch_entry *e = app_launch_registry_find(&f->reg, "fixtureapp");
+        ASSERT(e && al_selection(f, e->id, &saved));
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_app_open_snapshot(&f->env, e, NULL, &reply);
+        ASSERT_STR_EQ(reply.error.code, "SELECTION_STALE");
+        ASSERT(!json_get(&reply.data, "pid"));
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        struct al_library_script s = {.actions = {3}, .count = 1, .valid = true};
+        zcl_test_app_library_run(&f->env, &reply, al_library_present, &s);
+        ASSERT(s.valid && s.saved_label && !s.errors);
+        struct app_selection newer;
+        ASSERT(app_selection_save(f->env.state_dir, saved.revision, &saved, &newer) == APP_SELECTION_OK);
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_app_open_snapshot(&f->env, e, &saved, &reply);
+        ASSERT_STR_EQ(reply.error.code, "SELECTION_STALE");
+        saved.revision = (uint64_t)INT64_MAX + 1u;
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_app_open_snapshot(&f->env, e, &saved, &reply);
+        ASSERT_STR_EQ(reply.error.code, "SELECTION_UNREADABLE");
+        ASSERT(!json_get(&reply.data, "pid"));
+    PASS(); }
+_test_next:;
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+
+static bool al_library_catalog(struct al_fx *f, unsigned count)
+{
+    char text[16384], name[33]; size_t at = 0;
+    if (count > 16) return false;
+    for (unsigned i = 0; i < count; ++i) {
+        (void)snprintf(name, sizeof(name), "app-%02u", i);
+        at += (size_t)al_row(text + at, sizeof(text) - at, name, "-", f->bin_ready, "-", "ready", f->raised);
+    }
+    return at < sizeof(text) && al_write_file(f->env.config_path, text, 0600);
+}
+static bool al_library_fill(struct al_fx *f)
+{
+    char builtin[PATH_MAX], name[33];
+    if (!al_path(builtin, sizeof(builtin), f->env.bin_dir, "z23-skycombat") ||
+        !al_copy_exe(AL_FIXTURE, builtin, 0700) || !al_library_catalog(f, 15) ||
+        !app_launch_state_dir_ready(f->env.state_dir)) return false;
+    for (unsigned i = 0; i < 16; ++i) {
+        struct app_selection saved;
+        (void)snprintf(name, sizeof(name), "kept:copy-%02u", i);
+        if (!al_selection(f, name, &saved)) return false;
+    }
+    return true;
+}
+static int case_library_bounds(void)
+{
+    int failures = 0;
+    static struct al_fx f;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    TEST("My Apps empty catalog has only Close and executes nothing") {
+        ASSERT(al_setup(&f));
+        ASSERT(al_write_file(f.env.config_path, "", 0600));
+        struct al_library_script s = {.actions = {0}, .count = 1, .valid = true};
+        zcl_test_app_library_run(&f.env, &reply, al_library_present, &s);
+        ASSERT(s.valid && s.calls == 1 && !s.errors && strstr(s.last_summary, "No apps yet"));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")), "canceled");
+    PASS(); }
+    TEST("My Apps reaches all32 rows including duplicate friendly saved labels") {
+        ASSERT(al_library_fill(&f));
+        struct al_library_script s = {.count = 32, .valid = true};
+        for (unsigned i = 0; i < 31; ++i) s.actions[i] = 2;
+        s.actions[31] = 3;
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_run(&f.env, &reply, al_library_present, &s);
+        ASSERT(s.valid && s.calls == 32 && s.saved_label && !s.errors);
+        ASSERT(strstr(s.last_summary, "App 32 of 32."));
+        ASSERT(!json_get(&reply.data, "pid"));
+    PASS(); }
+    TEST("My Apps refuses selection overflow without showing partial choices") {
+        struct app_selection saved;
+        ASSERT(al_selection(&f, "kept:overflow", &saved));
+        struct al_library_script s = {.valid = true};
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_run(&f.env, &reply, al_library_present, &s);
+        ASSERT(s.valid && s.calls == 0 && s.errors == 1);
+        ASSERT_STR_EQ(reply.error.code, "SELECTIONS_REFUSED");
+    PASS(); }
+    TEST("My Apps refuses a malformed catalog before presenting any choices") {
+        ASSERT(al_library_catalog(&f, 16));
+        struct al_library_script overflow = {.valid = true};
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_run(&f.env, &reply, al_library_present, &overflow);
+        ASSERT(overflow.valid && overflow.calls == 0 && overflow.errors == 1);
+        ASSERT_STR_EQ(reply.error.code, "CATALOG_REFUSED");
+        ASSERT(al_write_file(f.env.config_path, "invalid catalog\n", 0600));
+        struct al_library_script s = {.valid = true};
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_run(&f.env, &reply, al_library_present, &s);
+        ASSERT(s.valid && s.calls == 0 && s.errors == 1);
+        ASSERT_STR_EQ(reply.error.code, "CATALOG_REFUSED");
+    PASS(); }
+_test_next:;
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+
 int test_app_launch(void);
 int test_app_launch(void)
 {
@@ -811,6 +971,8 @@ _test_next:
     failures += case_resident_app(&f, f.bin_exit, "exit", false, true);
     failures += case_resident_app(&f, f.bin_silent, "silent", false, false);
     failures += case_resident_mutation(&f);
+    failures += case_library(&f);
+    failures += case_library_bounds();
     al_kill_all();
     return failures;
 }

@@ -159,7 +159,6 @@ static bool sh_model(struct sh_work *w, char *why, size_t cap)
     (void)snprintf(m->request_id, sizeof(m->request_id), "share-%.12s", w->plan);
     (void)snprintf(m->title, sizeof(m->title), "Share this kept version?");
     (void)snprintf(m->summary, sizeof(m->summary), "Review all pages before sharing.");
-    (void)snprintf(m->exact_root, sizeof(m->exact_root), "%s", w->plan);
     m->action_count = 4;
     app_confirm_action(&m->actions[0], ZCL_PRESENT_ACTION_CANCEL, "cancel", "Cancel");
     app_confirm_action(&m->actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
@@ -169,7 +168,7 @@ static bool sh_model(struct sh_work *w, char *why, size_t cap)
         app_confirm_field(m, "Saved version: ", w->version) && app_confirm_field(m, "Package: ", w->package) &&
         app_confirm_field(m, "Publisher: ", w->publisher) && app_confirm_field(m, "Release: ", w->release) &&
         app_confirm_field(m, "Output: ", w->output) &&
-        app_confirm_field(m, "Sharing: ", "Signs and publishes this saved version and creates a local share file.");
+        app_confirm_field(m, "Sharing: ", "Signs this saved version and creates a local share file. Nothing is sent over the network.");
     return ok && app_confirm_prepare(&w->view, why, cap);
 }
 static bool sh_still_selected(struct sh_work *w, struct zcl_command_reply *reply)
@@ -209,7 +208,7 @@ static void sh_commit(const struct zcl_command_request *request, struct sh_work 
         sh_partial_facts(w, reply);
     }
     else if (!sh_result_matches(w, &result.data))
-        zcl_package_copy_fail(reply, "SHARE_RESULT_MISMATCH", true, "The share was published but its result could not be verified.", w->output);
+        zcl_package_copy_fail(reply, "SHARE_RESULT_MISMATCH", true, "The local share was created but its result could not be verified.", w->output);
     else { json_free(&reply->data); reply->data = result.data; json_init(&result.data); reply->error.mutated = true; }
     zcl_command_reply_free(&result);
 }
