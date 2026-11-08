@@ -1190,7 +1190,10 @@ static bool plan_semantic_walk(struct zcl_devloop_plan *plan,
     for (int i = 0; i < n; i++) {
         if (!plan_fold_reached_file(plan, impacted[i],
                                     ZCL_DEVLOOP_DIM_SEMANTIC)) {
+            bool first_capacity = !plan->capacity_origin;
             zcl_devloop_capacity_note(plan, "semantic", "group-cap", "batch");
+            if (first_capacity)
+                zcl_devloop_capacity_set_node(plan, impacted[i]);
             plan_go_universal(plan, ZCL_DEVLOOP_DIM_SEMANTIC);
             break;
         }

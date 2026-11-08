@@ -1512,6 +1512,17 @@ static int test_ic_capacity_bound_runs_everything(void)
         ASSERT_STR_EQ(capped.capacity_origin, "semantic");
         ASSERT_STR_EQ(capped.capacity_cause, "group-cap");
         ASSERT_STR_EQ(capped.capacity_input, "batch");
+        bool known_trigger = false;
+        for (size_t i = 0; i < n; i++)
+            if (strcmp(capped.capacity_node, ic_many_group_files[i]) == 0)
+                known_trigger = true;
+        ASSERT(known_trigger);
+        char capacity_note[512];
+        (void)snprintf(capacity_note, sizeof(capacity_note),
+                       "capacity_origin=semantic capacity_cause=group-cap "
+                       "capacity_input=batch capacity_node=known:%s\n",
+                       capped.capacity_node);
+        ASSERT(ic_capacity_note_is(&capped, capacity_note));
         ASSERT(!capped.closure_truncated);
         ASSERT(capped.dims[ZCL_DEVLOOP_DIM_SEMANTIC].status ==
                ZCL_DEVLOOP_DIM_COMPLETE);
