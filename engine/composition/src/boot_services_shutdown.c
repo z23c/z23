@@ -32,6 +32,8 @@
 #include "controllers/network_controller.h"
 #include "event/event.h"
 #include "net/msgprocessor.h"
+#include "net/tor_integration.h"
+#include "net/onion_service.h"
 #include "validation/process_block.h"
 #include "validation/process_block_invalidate.h"
 #include "validation/txmempool.h"
@@ -791,6 +793,8 @@ void app_shutdown_svc(struct boot_svc_ctx *svc)
 void boot_offline_join_workers_or_exit(const char *datadir)
 {
     (void)datadir;
+    tor_integration_stop();
+    onion_service_stop();
     /* The heartbeat sweeper only obeys its OWN lifecycle boundary
      * (health_stop), never the registry's global shutdown flag (see
      * shutdown_stop_runtime_and_drain_workers above) -- every offline one-

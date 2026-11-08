@@ -22,3 +22,14 @@ checks passed all eight projection shards and their umbrella group (9/9, zero
 skips), as well as the populated-wallet startup cleanup fixture. They cover
 committed-prefix recovery and injected SQL errors. Android Stop latency and
 reopening the existing wallet with this change remain to be measured.
+
+A later Pixel run stopped projection promptly but left the early Tor worker
+running during offline shutdown; the drain timed out and exited uncleanly.
+The projection cursor advanced durably and the wallet fingerprint remained
+unchanged. Offline shutdown now requests early Tor and onion-service shutdown
+before joining registered workers, retaining its deadline and durability checks.
+
+Focused host tests passed the snapshot recovery and Tor groups (2/2, zero
+skips). Both real linked-Tor projection Stop and error cases ran with network
+disabled and verified wallet preservation. Android Stop latency and clean exit
+with this change remain to be measured.

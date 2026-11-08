@@ -3,6 +3,9 @@
 #ifndef Z23_CONSENSUS_STATE_PROJECTION_STOP_TEST_H
 #define Z23_CONSENSUS_STATE_PROJECTION_STOP_TEST_H
 #include "storage/event_log_payloads.h"
+#include "net/tor_integration.h"
+#include "platform/time_compat.h"
+#include "util/shutdown_stagewatch.h"
 #include "models/wallet_activity.h"
 #include "models/wallet_tx.h"
 #include "util/ar_step_readonly.h"
@@ -35,8 +38,25 @@ static bool csi_projection_fingerprint(sqlite3 *db, uint8_t out[32])
 
 /* Ordinary startup stops during projection only after a populated wallet loaded. */
 static bool csi_projection_stop_seen, csi_projection_wallet_loaded;
-static bool csi_projection_error_case;
+static bool csi_projection_error_case, csi_projection_require_tor, csi_projection_tor_live;
 void boot_test_projection_opened(void (*hook)(struct block_index_projection *));
+static const char *csi_projection_tor_datadir;
+static bool csi_projection_tor_main_loop(void)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/" TOR_LOG_BASENAME, csi_projection_tor_datadir);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
+    for (int i = 0; i < 250; ++i) {
+        char text[16384]; FILE *f = fopen(path, "r");
+        if (f) {
+            size_t size = fread(text, 1, sizeof(text) - 1, f);
+            text[size] = '\0'; fclose(f);
+            if (strstr(text, "Bootstrapped 0%")) return true;
+        }
+        platform_sleep_ms(100);
+    }
+    return false;
+}
 static bool csi_projection_note_loaded(struct node_db *node)
 {
     struct db_wallet_note_fact *notes = NULL;
@@ -53,6 +73,8 @@ static void csi_projection_event_stop(uint64_t count)
     csi_projection_wallet_loaded = node && node->open && ws && ws->open && wallet &&
         wallet->keystore.num_keys > 0 && wallet->sapling_keys.num_keys > 0 && wallet->num_wallet_tx > 0 &&
         csi_projection_note_loaded(node);
+    csi_projection_tor_live = !csi_projection_require_tor ||
+        (tor_integration_is_enabled() && csi_projection_tor_main_loop());
     csi_projection_stop_seen = true;
     thread_registry_request_shutdown();
 }
@@ -105,23 +127,30 @@ static void csi_projection_boot_child(const char *dir, int proof_fd)
 {
     char datadir[PATH_MAX + 32]; snprintf(datadir, sizeof(datadir), "-datadir=%s", dir);
     char *argv[] = {"z23", datadir, "-operator-lane=dev", "-nolegacyimport", "-nolegacyutxoimport", "-no-tor", "-private-listeners", "-observation=0", "-connect=127.0.0.1:1"};
+    if (csi_projection_require_tor) {
+        csi_projection_tor_datadir = dir;
+        argv[5] = "-tor";
+        tor_integration_set_extra_torrc_for_test("DisableNetwork 1");
+    }
     int argc = (int)(sizeof(argv) / sizeof(argv[0])); struct app_context ctx; app_context_defaults(&ctx);
     ctx.datadir = dir; ParseParameters(argc, (const char *const *)argv); bool metrics = false;
     if (args_parse_node_options(argc, argv, &ctx, &metrics) != -1 || unsetenv("ZCL_DEPLOY_ALLOW_CANONICAL")) _exit(31);
     boot_stage_reset_for_testing(); ecc_verify_destroy(); ecc_stop();
     boot_test_projection_opened(csi_projection_attach);
     bool started = app_init(&ctx); boot_test_projection_opened(NULL);
-    if (started || !csi_projection_stop_seen || !csi_projection_wallet_loaded) _exit(32);
+    if (started || !csi_projection_stop_seen || !csi_projection_wallet_loaded ||
+        (csi_projection_require_tor && !csi_projection_tor_live)) _exit(32);
     if (csi_projection_error_case) {
         if (boot_projection_stop_cleanup() || write(proof_fd, "E", 1) != 1) _exit(34);
         (void)boot_projection_failure_cleanup();
         _exit(36);
     } else if (boot_error_reported() || boot_projection_failure_cleanup() ||
                !boot_projection_stop_cleanup() || boot_projection_stop_cleanup()) _exit(35);
+    if (tor_integration_is_enabled() || tor_integration_is_requested()) _exit(38);
     if (write(proof_fd, "S", 1) != 1) _exit(37);
     _exit(0);
 }
-static int csi_projection_populated_stop_case(bool fault)
+static int csi_projection_populated_stop_mode(bool fault, bool real_tor)
 {
     int failures = 0; char dir[256]; test_make_tmpdir(dir, sizeof(dir), "projection_stop", "populated");
     uint8_t fingerprint[32], digest[32]; uint64_t end = 0;
@@ -129,7 +158,7 @@ static int csi_projection_populated_stop_case(bool fault)
     int proof[2] = {-1, -1}; bool piped = seeded && pipe(proof) == 0;
     uint64_t parent = (uint64_t)getpid(); pid_t child = piped ? fork() : -1;
     if (!child) {
-        close(proof[0]); csi_projection_error_case = fault;
+        close(proof[0]); csi_projection_error_case = fault; csi_projection_require_tor = real_tor;
         if (!os_proc_bind_parent_death(SIGKILL, parent)) _exit(33);
         alarm(90); csi_projection_boot_child(dir, proof[1]);
     }
@@ -137,11 +166,23 @@ static int csi_projection_populated_stop_case(bool fault)
     int status = 0; bool waited = child > 0 && csi_real_wait_child(child, &status);
     char marker = 0; ssize_t n = proof[0] >= 0 ? read(proof[0], &marker, 1) : -1;
     if (proof[0] >= 0) close(proof[0]);
-    bool ok = waited && WIFEXITED(status) && WEXITSTATUS(status) == (fault ? 1 : 0) &&
+    char reason[SHUTDOWN_EXIT_REASON_MAX]; bool forced = true;
+    (void)shutdown_stagewatch_read_exit_reason(dir, reason, sizeof(reason), &forced);
+    bool ok = !forced && waited && WIFEXITED(status) && WEXITSTATUS(status) == (fault ? 1 : 0) &&
         n == 1 && marker == (fault ? 'E' : 'S') && csi_projection_reopen(dir, fingerprint, digest, end);
-    CSI_CHECK(fault ? "projection error takes precedence over stop and preserves wallet" :
-              "ordinary projection stop preserves loaded wallet and event prefix", ok);
+    CSI_CHECK(real_tor ? (fault ? "real Tor projection error preserves wallet" :
+                                  "real Tor projection stop preserves wallet") :
+              (fault ? "projection error takes precedence over stop and preserves wallet" :
+                       "ordinary projection stop preserves loaded wallet and event prefix"), ok);
     test_rm_rf_recursive(dir); return failures;
+}
+static int csi_projection_populated_stop_case(bool fault)
+{
+    int failures = csi_projection_populated_stop_mode(fault, false);
+    if (app_tor_real_build_linked())
+        failures += csi_projection_populated_stop_mode(fault, true);
+    else printf("projection stop: real Tor unavailable; real-Tor fixture SKIP\n");
+    return failures;
 }
 #endif
 #endif
