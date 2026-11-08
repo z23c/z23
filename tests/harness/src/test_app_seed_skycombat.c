@@ -11,10 +11,11 @@
  *
  * HOME and the datadir are temporary, so the owner key it makes is a
  * throwaway. The seed runs everywhere and prints its package root, so two
- * hosts at one commit can compare roots. The build needs the game's X11/GL
- * headers and the run needs Xvfb; each prints SKIP where its need is
- * missing, and the host-need row keeps the group out of universal
- * selection unless the operator sets ZCL_TEST_DISPLAY_APPS.
+ * hosts at one commit can compare roots. The build needs no system -dev
+ * package (the seeded tree carries the vendored X11/GL headers); the run
+ * needs Xvfb and prints SKIP without it, and the host-need row keeps the
+ * group out of universal selection unless the operator sets
+ * ZCL_TEST_DISPLAY_APPS.
  *
  * make t-fast-exact ONLY=app_seed_skycombat ZCL_TEST_DISPLAY_APPS=1 */
 
@@ -220,7 +221,7 @@ static bool asi_prerequisites(struct ass_world *w, struct asi_run *r)
     if (!asi_executable(w->source, "build/bin/z23-dev", r->verifier, sizeof(r->verifier))) return false;
     if (!asi_executable(w->source, "build/bin/native_ui_driver", r->driver, sizeof(r->driver))) return false;
     if (!asi_executable(w->source, "build/bin/z23-lint", path, sizeof(path))) return false;
-    if (!asf_xvfb_path() || asf_missing_game_header()) return false;
+    if (!asf_xvfb_path()) return false;
     return access("/usr/bin/bash", X_OK) == 0 && access("/usr/bin/strip", X_OK) == 0;
 }
 static bool asi_paths(struct ass_world *w, struct asi_run *r)
@@ -814,7 +815,7 @@ int test_app_seed_skycombat(void);
 int test_app_seed_skycombat(void)
 {
     int failures = 0;
-    const char *xvfb = asf_xvfb_path(), *missing = asf_missing_game_header();
+    const char *xvfb = asf_xvfb_path();
     struct ass_world w;
     chain_params_select(CHAIN_MAIN);
     TEST("app.seed skycombat: a temporary HOME and datadir") {
@@ -825,16 +826,14 @@ int test_app_seed_skycombat(void)
         failures += ass_installed_preflight(&w);
     if (!failures)
         failures += ass_seed(&w);
-    if (!failures && missing)
-        printf("app.seed skycombat: build and run... SKIP (no "
-               "/usr/include/%s: the game cannot build on this host)\n",
-               missing);
-    if (!failures && !missing)
+    /* The build needs no system -dev package: the seeded tree carries the
+     * vendored X11/GL headers and XDL, so it builds on every Linux host. */
+    if (!failures)
         failures += ass_adopt_build(&w);
-    if (!failures && !missing && !xvfb)
+    if (!failures && !xvfb)
         printf("app.seed skycombat: 120 QA frames... SKIP (no Xvfb on this "
                "host)\n");
-    if (!failures && !missing && xvfb)
+    if (!failures && xvfb)
         failures += ass_runs_qa_frames(&w, xvfb);
     if (!failures)
         failures += ass_installed(&w);

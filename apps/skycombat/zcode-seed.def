@@ -3,9 +3,9 @@
 # One "<repo path> <tree path>" per line; the tree keeps the repo layout so
 # the package entrypoint (Makefile, including skycombat.mk) uses the same -I
 # paths as the repo's game section. Keep this list equal to the
-# non-apps/skycombat lines of `make print-game-closure`, plus raylib's
-# license and provenance: app seed refuses a tree whose print-app-closure
-# names a file the tree does not hold.
+# non-apps/skycombat lines of `make print-game-closure`, plus the license
+# and provenance of raylib, vendor/x11 and vendor/xdl: app seed refuses a
+# tree whose print-app-closure names a file the tree does not hold.
 
 # Trimmed raylib (vendor/raylib/SOURCE): sources, headers, license.
 vendor/raylib/LICENSE vendor/raylib/LICENSE
@@ -31,6 +31,47 @@ vendor/raylib/src/rmodels.c vendor/raylib/src/rmodels.c
 vendor/raylib/src/rshapes.c vendor/raylib/src/rshapes.c
 vendor/raylib/src/rtext.c vendor/raylib/src/rtext.c
 vendor/raylib/src/rtextures.c vendor/raylib/src/rtextures.c
+
+# Linux window system (vendor/x11/SOURCE, vendor/xdl/SOURCE): the X11/GL
+# header closure and the XDL run-time loader, so no -dev package is needed.
+vendor/x11/LICENSE vendor/x11/LICENSE
+vendor/x11/SOURCE vendor/x11/SOURCE
+vendor/x11/SHA256SUMS vendor/x11/SHA256SUMS
+vendor/x11/include/GL/gl.h vendor/x11/include/GL/gl.h
+vendor/x11/include/GL/glx.h vendor/x11/include/GL/glx.h
+vendor/x11/include/GL/glxext.h vendor/x11/include/GL/glxext.h
+vendor/x11/include/X11/X.h vendor/x11/include/X11/X.h
+vendor/x11/include/X11/XKBlib.h vendor/x11/include/X11/XKBlib.h
+vendor/x11/include/X11/Xatom.h vendor/x11/include/X11/Xatom.h
+vendor/x11/include/X11/Xcursor/Xcursor.h vendor/x11/include/X11/Xcursor/Xcursor.h
+vendor/x11/include/X11/Xdefs.h vendor/x11/include/X11/Xdefs.h
+vendor/x11/include/X11/Xfuncproto.h vendor/x11/include/X11/Xfuncproto.h
+vendor/x11/include/X11/Xlib.h vendor/x11/include/X11/Xlib.h
+vendor/x11/include/X11/Xosdefs.h vendor/x11/include/X11/Xosdefs.h
+vendor/x11/include/X11/Xresource.h vendor/x11/include/X11/Xresource.h
+vendor/x11/include/X11/Xutil.h vendor/x11/include/X11/Xutil.h
+vendor/x11/include/X11/cursorfont.h vendor/x11/include/X11/cursorfont.h
+vendor/x11/include/X11/extensions/XI2.h vendor/x11/include/X11/extensions/XI2.h
+vendor/x11/include/X11/extensions/XInput2.h vendor/x11/include/X11/extensions/XInput2.h
+vendor/x11/include/X11/extensions/XKB.h vendor/x11/include/X11/extensions/XKB.h
+vendor/x11/include/X11/extensions/XKBstr.h vendor/x11/include/X11/extensions/XKBstr.h
+vendor/x11/include/X11/extensions/Xfixes.h vendor/x11/include/X11/extensions/Xfixes.h
+vendor/x11/include/X11/extensions/Xge.h vendor/x11/include/X11/extensions/Xge.h
+vendor/x11/include/X11/extensions/Xrandr.h vendor/x11/include/X11/extensions/Xrandr.h
+vendor/x11/include/X11/extensions/Xrender.h vendor/x11/include/X11/extensions/Xrender.h
+vendor/x11/include/X11/extensions/randr.h vendor/x11/include/X11/extensions/randr.h
+vendor/x11/include/X11/extensions/render.h vendor/x11/include/X11/extensions/render.h
+vendor/x11/include/X11/extensions/shape.h vendor/x11/include/X11/extensions/shape.h
+vendor/x11/include/X11/extensions/shapeconst.h vendor/x11/include/X11/extensions/shapeconst.h
+vendor/x11/include/X11/extensions/sync.h vendor/x11/include/X11/extensions/sync.h
+vendor/x11/include/X11/extensions/syncconst.h vendor/x11/include/X11/extensions/syncconst.h
+vendor/x11/include/X11/extensions/xfixeswire.h vendor/x11/include/X11/extensions/xfixeswire.h
+vendor/x11/include/X11/keysym.h vendor/x11/include/X11/keysym.h
+vendor/x11/include/X11/keysymdef.h vendor/x11/include/X11/keysymdef.h
+vendor/xdl/LICENSE vendor/xdl/LICENSE
+vendor/xdl/SOURCE vendor/xdl/SOURCE
+vendor/xdl/SHA256SUMS vendor/xdl/SHA256SUMS
+vendor/xdl/XDL.h vendor/xdl/XDL.h
 
 # Standalone support: canonical reader, JSON, PNG writer, base64, SHA-256.
 contexts/commons/packages/zbase64/include/zbase64/zbase64.h contexts/commons/packages/zbase64/include/zbase64/zbase64.h

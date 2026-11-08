@@ -647,7 +647,10 @@ Notes:
   checked by `make check-vendor-provenance`), and the build adds
   `-Ivendor/x11/include`. A headless host with **zero** X11 `-dev` packages
   therefore builds the full binary; only the runtime `libX11.so` matters, and
-  only when a window is actually opened.
+  only when a window is actually opened. The Sky Combat game (`make game`)
+  uses the same recipe: its RGFW 2.0 backend compiles with `RGFW_USE_XDL`
+  against the vendored X11/GL closure in `vendor/x11/` plus `vendor/xdl/`,
+  and links only `-ldl`.
 <!-- claim: file-present vendor/x11/SHA256SUMS # vendored X11 header pin -->
 <!-- claim: symbol-present vendor/x11/include Makefile # the include wiring -->
 - **raylib is vendored source, not an archive `make vendor` builds.** The Sky

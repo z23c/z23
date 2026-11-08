@@ -109,6 +109,26 @@ The 17 compile-time headers RGFW's Linux backend `#include`s. X11 itself is
 loaded at runtime by the vendored XDL layer — these headers exist so a
 headless host with no system `-dev` packages still builds the full binary.
 
+The Sky Combat game adds 14 more (Xcursor, XInput2, Xfixes, Xge, Xrandr,
+Xrender and their protocol headers from the matching Ubuntu 24.04 `-dev`
+packages, under the X.Org MIT license or its historical X11 permission
+form) and three OpenGL headers from libglvnd 1.7.0: `GL/gl.h` and
+`GL/glx.h` (Mesa MIT, Copyright © Brian Paul and VMware, Inc.) and
+`GL/glxext.h` (MIT, Copyright © The Khronos Group Inc.). Each notice is in
+`vendor/x11/LICENSE`; each package and its digest is in `vendor/x11/SOURCE`.
+
+## XDL (from RGFW 2.0.0-dev) — Public Domain
+
+**Repository:** https://github.com/ColleagueRiley/RGFW
+**Pinned revision:** `a649b2a40b25c7cd035a2c88c434c01b50f4b96f`
+**Vendored path:** `vendor/xdl/`
+**Attribution:** Riley Mabb (@ColleagueRiley); the repository is zlib
+(`vendor/xdl/LICENSE`)
+
+The X11 dynamic loader the game's RGFW 2.0 backend uses (`RGFW_USE_XDL`):
+it loads X11, GLX and Xrandr at run time, so the game links no X11 or GL
+library.
+
 ## QR Code generator 1.8.0 — MIT
 
 **Repository:** https://github.com/nayuki/QR-Code-generator

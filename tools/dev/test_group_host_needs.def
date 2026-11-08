@@ -510,11 +510,11 @@ ZCL_TEST_GROUP_BUILD_NEED("test_device_command", "build/bin/z23", "z23")
 ZCL_TEST_GROUP_BUILD_NEED("test_zcode_package_artifact", "build/bin/z23", "z23")
 
 /* app_seed_skycombat seeds, builds and runs the real game on a private Xvfb
- * display. The build needs the game's X11/GL headers and the run needs Xvfb,
- * which most build hosts lack, so universal selection takes this group only
- * where the operator sets ZCL_TEST_DISPLAY_APPS (a host with both). An exact
- * selection still runs it: the seed runs anywhere, and the build without the
- * headers or the run without Xvfb prints SKIP. */
+ * display. The build needs no system -dev package (the X11/GL headers are
+ * vendored); the run needs Xvfb, which most build hosts lack, so universal
+ * selection takes this group only where the operator sets
+ * ZCL_TEST_DISPLAY_APPS. An exact selection still runs it: the seed and the
+ * build run anywhere, and the run without Xvfb prints SKIP. */
 ZCL_TEST_GROUP_NEED("test_app_seed_skycombat", ZCL_HOST_NEED_ENV,
     "ZCL_TEST_DISPLAY_APPS")
 /* app_journey_skycombat runs the whole journey on the real game (two builds,
@@ -558,11 +558,12 @@ ZCL_TEST_GROUP_BUILD_NEED("test_app_open_selected", "build/bin/z23-dev", "dev-bi
 ZCL_TEST_GROUP_BUILD_NEED("test_app_kept_journey", "build/bin/z23-dev", "dev-bin")
 ZCL_TEST_GROUP_BUILD_NEED("test_mcp_serve_apps",
     "build/bin/z23-app-launch-fixture", "app-launch-fixture")
-/* The real game on a private Xvfb display. `make game` needs X11/GL headers
- * and the run needs Xvfb, which most build hosts lack, so universal selection
- * takes this group only where the operator sets ZCL_TEST_DISPLAY_APPS (a
- * host with Xvfb and the game's headers). An exact selection still runs it
- * and builds both binaries; without Xvfb it prints SKIP. */
+/* The real game on a private Xvfb display. `make game` needs no system -dev
+ * package (vendored X11/GL headers, run-time dlopen), but the run needs
+ * Xvfb, which most build hosts lack, so universal selection takes this group
+ * only where the operator sets ZCL_TEST_DISPLAY_APPS. An exact selection
+ * still runs it and builds both binaries; its build checks run on every
+ * Linux host, and without Xvfb the display cases print SKIP. */
 ZCL_TEST_GROUP_NEED("test_app_launch_skycombat", ZCL_HOST_NEED_ENV,
     "ZCL_TEST_DISPLAY_APPS")
 ZCL_TEST_GROUP_BUILD_NEED("test_app_launch_skycombat", "build/bin/z23-dev",

@@ -14,10 +14,10 @@
  *   B (own HOME)          open skycombat-1.z23share   receive, build, open
  *                         <image> --qa-frames=120 exits 0
  *
- * B's image_sha3 equals A's for the shared version. The build needs the
- * game's X11/GL headers and the runs need Xvfb; without them the group
- * prints SKIP, and the host-need row keeps it out of universal selection
- * unless the operator sets ZCL_TEST_DISPLAY_APPS.
+ * B's image_sha3 equals A's for the shared version. The build needs no
+ * system -dev package (the X11/GL headers are vendored); the runs need
+ * Xvfb. Without it the group prints SKIP, and the host-need row keeps it
+ * out of universal selection unless the operator sets ZCL_TEST_DISPLAY_APPS.
  *
  * make t-fast-exact ONLY=app_journey_skycombat ZCL_TEST_DISPLAY_APPS=1 */
 
@@ -106,13 +106,12 @@ int test_app_journey_skycombat(void);
 int test_app_journey_skycombat(void)
 {
     int failures = 0;
-    const char *xvfb = asf_xvfb_path(), *missing = asf_missing_game_header();
+    const char *xvfb = asf_xvfb_path();
     struct ajs_world w;
     chain_params_select(CHAIN_MAIN);
-    if (missing || !xvfb) {
-        printf("app journey skycombat... SKIP (%s%s: the game cannot build "
-               "and run here)\n", missing ? "no /usr/include/" : "no Xvfb",
-               missing ? missing : "");
+    if (!xvfb) {
+        printf("app journey skycombat... SKIP (no Xvfb: the game cannot run "
+               "here)\n");
         return 0;
     }
     TEST("app journey skycombat: two HOMEs and datadirs, a private Xvfb") {

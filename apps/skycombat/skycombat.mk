@@ -82,9 +82,13 @@ else ifneq ($(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),)
 SKYCOMBAT_PLATFORM_HEADERS :=
 SKYCOMBAT_HOST_LIBS := -lgdi32 -lopengl32 -lwinmm -lshell32 -lm
 else
-SKYCOMBAT_PLATFORM_HEADERS := X11/Xlib.h X11/extensions/Xrandr.h \
-	X11/extensions/XInput2.h X11/Xcursor/Xcursor.h GL/glx.h
-SKYCOMBAT_HOST_LIBS := -lX11 -lXrandr -lXi -lXcursor -lGL -lm -lpthread -ldl
+# Linux needs no system -dev package. RGFW_USE_XDL makes RGFW load X11, GLX
+# and Xrandr at run time through XDL (dlopen); RGFW itself dlopens Xcursor,
+# Xi and Xext. The compile-time header closure is vendored and pinned under
+# vendor/x11, so the only link-time library beyond libc is -ldl.
+SKYCOMBAT_PLATFORM_HEADERS :=
+SKYCOMBAT_PLATFORM_CPPFLAGS := -DRGFW_USE_XDL -Ivendor/x11/include -Ivendor/xdl
+SKYCOMBAT_HOST_LIBS := -lm -lpthread -ldl
 endif
 
 # Every SUPPORT_* knob raylib's config.h guards with #ifndef, set from here so
@@ -113,7 +117,8 @@ Z23RAYLIB_CPPFLAGS := -DPLATFORM_DESKTOP_RGFW -DGRAPHICS_API_OPENGL_33 \
 	-DSUPPORT_IMAGE_EXPORT=0 -DSUPPORT_SCREEN_CAPTURE=0 \
 	-DSUPPORT_MESH_GENERATION=0 -DSUPPORT_COMPRESSION_API=0 \
 	-I$(Z23RAYLIB_DIR)/src
-Z23RAYLIB_CFLAGS := -std=$(ZCL_C_STD) -O2 -Wall -Wextra $(REPRO_CFLAGS) $(Z23RAYLIB_CPPFLAGS)
+Z23RAYLIB_CFLAGS := -std=$(ZCL_C_STD) -O2 -Wall -Wextra $(REPRO_CFLAGS) $(Z23RAYLIB_CPPFLAGS) \
+	$(SKYCOMBAT_PLATFORM_CPPFLAGS)
 
 # RAYMATH_USE_SIMD_INTRINSICS is the one raymath.h knob the game's own -Wundef
 # would trip over, so it is spelled out rather than left undefined.
@@ -267,9 +272,21 @@ Z23RAYLIB_INCLUDE_INPUTS := $(addprefix $(Z23RAYLIB_DIR)/src/,config.h raylib.h 
 	external/RGFW/RGFW.h external/RGFW/deps/minigamepad.h external/glad.h \
 	external/rprand.h external/stb_image_resize2.h external/stb_perlin.h \
 	external/fix_win32_compatibility.h external/win32_clipboard.h)
+# The Linux window-system closure: the exact X11/GL headers `cc -M` reports
+# for rcore.c under the Linux flags, plus XDL. Named on every host, so a
+# package seeded anywhere still builds on Linux with no -dev package.
+SKYCOMBAT_X11_INPUTS := $(addprefix vendor/x11/include/X11/,X.h Xatom.h \
+	Xdefs.h Xfuncproto.h Xlib.h Xosdefs.h Xresource.h Xutil.h XKBlib.h \
+	cursorfont.h keysym.h keysymdef.h Xcursor/Xcursor.h \
+	extensions/XI2.h extensions/XInput2.h extensions/XKB.h \
+	extensions/XKBstr.h extensions/Xfixes.h extensions/Xge.h \
+	extensions/Xrandr.h extensions/Xrender.h extensions/randr.h \
+	extensions/render.h extensions/shape.h extensions/shapeconst.h \
+	extensions/sync.h extensions/syncconst.h extensions/xfixeswire.h) \
+	$(addprefix vendor/x11/include/GL/,gl.h glx.h glxext.h) vendor/xdl/XDL.h
 SKYCOMBAT_GAME_CLOSURE = $(sort $(patsubst ./%,%,$(SKYCOMBAT_GAME_SRCS) $(SKYCOMBAT_SUPPORT_SRCS) \
 	$(Z23RAYLIB_SRCS) $(SKYCOMBAT_GAME_HEADERS) $(SKYCOMBAT_SUPPORT_HEADERS) \
-	$(Z23RAYLIB_INCLUDE_INPUTS) $(SKYCOMBAT_MAKE_INPUTS)))
+	$(Z23RAYLIB_INCLUDE_INPUTS) $(SKYCOMBAT_X11_INPUTS) $(SKYCOMBAT_MAKE_INPUTS)))
 .PHONY: print-game-closure
 print-game-closure:
 	@set -eu; for input in $(SKYCOMBAT_GAME_CLOSURE); do \

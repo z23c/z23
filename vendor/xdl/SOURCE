@@ -1,0 +1,9 @@
+component=XDL (X11 dynamic loader, from the RGFW repository)
+version=RGFW 2.0.0-dev tree
+upstream=https://github.com/ColleagueRiley/RGFW
+revision=a649b2a40b25c7cd035a2c88c434c01b50f4b96f (XDL.h last changed in a70c997350ba5265deab91218b83ace09a5dc20d)
+revision_match=the upstream RGFW.h at this revision equals vendor/raylib/src/external/RGFW/RGFW.h except for line endings and one trailing blank line, so this is the XDL.h that raylib's RGFW revision was written against
+license=public domain (the dedication in XDL.h's own header); the repository's zlib License is LICENSE, verbatim from this revision
+files=XDL.h,LICENSE
+integration=-DRGFW_USE_XDL for the raylib RGFW translation unit behind `make game` (apps/skycombat/skycombat.mk, Linux): RGFW includes "XDL.h" from here and loads libX11.so.6, libGL.so.1/libGLX.so.0 and libXrandr.so.2 at run time with dlopen, so the game links no X11 or GL library; never linked into the node binary. vendor/rgfw/XDL.h (RGFW 1.8.1, presentation) is separate and lacks symbols RGFW 2.0 calls (XOpenIM, Xutf8LookupString, XRRGetCrtcGamma and others).
+local_patch=none — verbatim upstream file
