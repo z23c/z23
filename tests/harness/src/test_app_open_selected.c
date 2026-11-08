@@ -14,6 +14,7 @@
 #include "command/native_app_receive_preview.h"
 #include "command/native_app_share_command.h"
 #include "command/native_app_personalize_command.h"
+#include "command/native_app_personalize_view.h"
 #include "vcs/vcs.h"
 #include <signal.h>
 #include <errno.h>
@@ -1556,13 +1557,10 @@ static bool ak_build_saved_tuple(const struct abc_world *w, const char *version,
     abc_close(&leaf);
     return ok;
 }
-static bool ak_received(struct ak_fixture *fixture)
+static bool ak_received_source(struct ak_fixture *fixture, const char *source)
 {
     struct abc_world *w = &fixture->world;
     char version[65], personal[65], publisher[67]; struct aso_build sender;
-    const char *source = "#include <stdio.h>\n#include <unistd.h>\n"
-        "int main(int argc,char **argv){(void)argv;if(argc!=1)return 7;"
-        "puts(\"NO-ARGS\");fflush(stdout);for(;;)pause();}\n";
     if (!abc_world_init(w) || !abc_put(w->copy, "src/main.c", source) ||
         !abc_save(w->copy, version) || !aj_personalize(w, version, personal) ||
         !ak_build_saved_tuple(w, personal, &sender)) return false;
@@ -1572,6 +1570,13 @@ static bool ak_received(struct ak_fixture *fixture)
     int n = snprintf(fixture->trust, sizeof(fixture->trust), "%s/zcode/received/%s.%s.trust",
         w->bob_datadir, fixture->build.version, fixture->release);
     return n > 0 && (size_t)n < sizeof(fixture->trust);
+}
+static bool ak_received(struct ak_fixture *fixture)
+{
+    const char *source = "#include <stdio.h>\n#include <unistd.h>\n"
+        "int main(int argc,char **argv){(void)argv;if(argc!=1)return 7;"
+        "puts(\"NO-ARGS\");fflush(stdout);for(;;)pause();}\n";
+    return ak_received_source(fixture, source);
 }
 static bool ak_environment(struct ak_fixture *fixture)
 {
@@ -2087,6 +2092,266 @@ static int ak_routes(void)
     if (fixture.world.root[0]) (void)test_rm_rf_recursive(fixture.world.root);
     return failures;
 }
+/* Three people, ordinary native authorities. Presenter callbacks exercise local
+ * consent, not a human/window; the no-args child proves image identity only. */
+struct rr_cycle {
+    struct ak_fixture bob, carol;
+    struct abc_world owner;
+    char head[65], personal[65], edited[65], publisher[67], space[64];
+    uint8_t keep[32];
+};
+static bool rr_text(const char *copy, const char *path, const char *expected)
+{
+    char full[ABC_PATH]; char *text = NULL; size_t size = 0;
+    int n = snprintf(full, sizeof(full), "%s/%s", copy, path);
+    bool ok = n > 0 && (size_t)n < sizeof(full) &&
+        zcl_read_whole_file_text(full, 65536, &text, &size, "recipient cycle source") &&
+        size == strlen(expected) && !memcmp(text, expected, size);
+    free(text); return ok;
+}
+static bool rr_keep_hash(const struct ak_fixture *f, uint8_t hash[32])
+{
+    char path[APP_SELECTION_PATH_MAX + 64]; uint8_t *bytes = NULL; size_t size = 0;
+    int n = snprintf(path, sizeof(path), "%s/@kept-received.selection", f->env.state_dir);
+    bool ok = n > 0 && (size_t)n < sizeof(path) &&
+        zcl_read_whole_file(path, 65536, &bytes, &size, "recipient cycle Keep");
+    if (ok) sha3_256(bytes, size, hash);
+    free(bytes); return ok;
+}
+static bool rr_preserved(const struct rr_cycle *r, const char *head)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.recipient.v1");
+    struct zcl_package_copy copy = {0}; uint8_t expected[32], keep[32];
+    bool ok = zcl_hex_decode_lower(head, expected, 32) &&
+        zcl_package_copy_open_selected_as(r->owner.copy, ZCL_PACKAGE_COPY_READ,
+            &copy, &reply, "recipient-cycle", head) && !memcmp(copy.head_version, expected, 32);
+    zcl_package_copy_close(&copy); zcl_command_reply_free(&reply);
+    return ok && rr_text(r->owner.copy, "include/boost.h", "#define BOOST 4\n") &&
+        rr_keep_hash(&r->bob, keep) && !memcmp(keep, r->keep, sizeof(keep));
+}
+static bool rr_newer_dirty(struct rr_cycle *r, const char *saved)
+{
+    return abc_put(r->owner.copy, "include/boost.h", saved) &&
+        abc_save(r->owner.copy, r->head) &&
+        strcmp(r->head, r->bob.build.version) &&
+        abc_put(r->owner.copy, "include/boost.h", "#define BOOST 4\n") &&
+        rr_preserved(r, r->head);
+}
+static bool rr_trusted(const struct ak_fixture *f)
+{
+    struct zcl_package_copy copy = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.recipient.v1");
+    bool ok = zcl_package_copy_open_selected_as(f->world.bob_copy, ZCL_PACKAGE_COPY_READ,
+        &copy, &reply, "recipient-cycle", NULL) &&
+        zcl_package_copy_adopted(f->world.bob_datadir, &copy, NULL) == ZCL_PACKAGE_COPY_RECEIVED_TRUSTED;
+    zcl_package_copy_close(&copy); zcl_command_reply_free(&reply); return ok;
+}
+static bool rr_start(struct rr_cycle *r)
+{
+    const char *source = "#include <stdio.h>\n#include <unistd.h>\n#include \"boost.h\"\n"
+        "int main(int n,char **v){(void)v;if(n!=1)return 7;"
+        "printf(\"BOOST=%d\\n\",BOOST);fflush(stdout);for(;;)pause();}\n";
+    if (!ak_received_source(&r->bob, source) || !ak_environment(&r->bob) ||
+        !rr_trusted(&r->bob) || !ak_preview_keep(&r->bob) || !ak_restart(&r->bob)) return false;
+    r->owner = r->bob.world;
+    (void)snprintf(r->owner.copy, sizeof(r->owner.copy), "%s", r->bob.world.bob_copy);
+    (void)snprintf(r->owner.alice_datadir, sizeof(r->owner.alice_datadir), "%s", r->bob.world.bob_datadir);
+    (void)snprintf(r->owner.alice_home, sizeof(r->owner.alice_home), "%s", r->bob.world.bob_home);
+    return rr_keep_hash(&r->bob, r->keep) && rr_newer_dirty(r, "#define BOOST 3\n");
+}
+struct rr_consent { const struct rr_cycle *cycle; bool confirmed; };
+static bool rr_personal_fields(const struct zcl_present_model_v1 *model, const struct rr_cycle *r)
+{
+    return aj_receive_field(model, "Kept app: ", AK_ROUTE) &&
+        aj_receive_field(model, "Kept revision: ", "1") &&
+        aj_receive_field(model, "Copy: ", r->owner.copy) &&
+        aj_receive_field(model, "Datadir: ", r->owner.alice_datadir) &&
+        aj_receive_field(model, "Saved version: ", r->bob.build.version) &&
+        aj_receive_field(model, "Current HEAD: ", r->head) &&
+        aj_receive_field(model, "Identity: ",
+            "Create a local publishing key after confirmation; personal namespace is pending.");
+}
+static bool rr_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct rr_consent *view = context; uint32_t count = 0;
+    if (!pages || pages->page_count != 1 || !pages->pages->pixels ||
+        !rr_personal_fields(model, view->cycle) ||
+        !zcl_present_model_page_count_v1(model, &count, why, cap) || count < 2) return false;
+    bool close = false, redraw = false;
+    if (!aj_receive_action(live, 3, &close, &redraw) || close) return false;
+    for (uint32_t i = 1; i < count; ++i)
+        if (!aj_receive_action(live, 2, &close, &redraw) || close || !redraw) return false;
+    view->confirmed = aj_receive_action(live, 3, &close, &redraw) && close;
+    return view->confirmed;
+}
+static bool rr_personal_identity(struct rr_cycle *r, const struct abc_leaf *leaf)
+{
+    char key[4400], name[128]; bool exists = false;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.recipient.v1");
+    bool ok = app_personalize_key_probe(&reply, key, sizeof(key), r->publisher, &exists) && exists &&
+        app_personalize_namespace(r->publisher, r->space, sizeof(r->space));
+    int n = snprintf(name, sizeof(name), "%s/tinyapp", r->space);
+    ok = ok && n > 0 && (size_t)n < sizeof(name) &&
+        !strcmp(abc_get(leaf, "namespace"), r->space) && !strcmp(abc_get(leaf, "name"), name);
+    const struct json_value *created = json_get(&leaf->out.data, "key_created");
+    ok = ok && created && created->type == JSON_BOOL && json_get_bool(created);
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool rr_personalize(struct rr_cycle *r)
+{
+    struct abc_leaf leaf; abc_open(&leaf); struct rr_consent view = {.cycle = r};
+    const struct zcl_command_spec *spec = abc_spec("app.personalize"); char why[256];
+    bool ok = json_push_kv_str(&leaf.in, "name", AK_ROUTE) &&
+        json_push_kv_int(&leaf.in, "expected_revision", 1) && spec &&
+        zcl_command_registry_input_validate(spec, &leaf.in, why, sizeof(why));
+    if (ok) {
+        leaf.req.spec = spec; leaf.req.input = &leaf.in; leaf.req.invoked_name = spec->path;
+        zcl_test_app_personalize_view_run(&leaf.req, &leaf.out, rr_present, &view);
+        size_t bytes = json_write(&leaf.out.data, NULL, 0) + 1024u;
+        bool fits = spec->budget_bytes > 0 && bytes <= (size_t)spec->budget_bytes;
+        (void)snprintf(r->personal, sizeof(r->personal), "%s", abc_get(&leaf, "version"));
+        ok = fits && leaf.out.status == ZCL_COMMAND_STATUS_PASSED && leaf.out.exit_code == 0 && view.confirmed &&
+            strlen(r->personal) == 64 && strcmp(r->personal, r->head) && rr_personal_identity(r, &leaf);
+    }
+    if (!ok) printf("recipient personalize: %s %s\n", leaf.out.error.code, leaf.out.error.message);
+    abc_close(&leaf);
+    return ok && aj_parent_is(&r->owner, r->personal, r->head) && rr_preserved(r, r->personal);
+}
+static bool rr_preview(struct rr_cycle *r, const char *version)
+{
+    struct aso_build built = {0};
+    if (!ak_build_saved_tuple(&r->owner, version, &built) || !rr_preserved(r, version)) return false;
+    if (!strcmp(version, r->edited) && !strcmp(built.image, r->bob.build.image)) return false;
+    r->bob.build = built;
+    struct abc_leaf leaf;
+    bool ok = ak_request(&leaf, &r->bob, true) && abc_exec("app.open", &leaf) && ak_opened(&leaf, &r->bob);
+    abc_close(&leaf);
+    bool clean = aso_cleanup_children();
+    return ok && clean && rr_preserved(r, version);
+}
+static bool rr_keep(struct rr_cycle *r, int64_t revision)
+{
+    struct abc_leaf leaf;
+    bool ok = ak_request(&leaf, &r->bob, true) && json_push_kv_int(&leaf.in, "expected_revision", revision) &&
+        abc_pass("app.keep", &leaf) && aso_revision_is(&leaf.out.data, revision + 1);
+    abc_close(&leaf);
+    return ok && rr_keep_hash(&r->bob, r->keep) && ak_restart(&r->bob) &&
+        rr_preserved(r, r->bob.build.version);
+}
+static bool rr_read(struct rr_cycle *r, int64_t revision, const char *content, char blob[65])
+{
+    struct abc_leaf leaf;
+    bool ok = ak_request(&leaf, &r->bob, false) && json_push_kv_int(&leaf.in, "expected_revision", revision) &&
+        json_push_kv_str(&leaf.in, "path", "include/boost.h") && abc_pass("app.customize", &leaf);
+    if (ok) {
+        (void)snprintf(blob, 65, "%s", aso_string(json_get(&leaf.out.data, "file"), "blob"));
+        ok = strlen(blob) == 64 && !strcmp(abc_get(&leaf, "version"), r->bob.build.version) &&
+            !strcmp(abc_get(&leaf, "content"), content);
+    }
+    abc_close(&leaf); return ok;
+}
+static bool rr_edit(struct rr_cycle *r)
+{
+    char blob[65];
+    if (!rr_newer_dirty(r, "#define BOOST 6\n") ||
+        !rr_read(r, 2, "#define BOOST 1\n", blob)) return false;
+    struct abc_leaf leaf;
+    bool ok = ak_request(&leaf, &r->bob, false) && json_push_kv_int(&leaf.in, "expected_revision", 2) &&
+        json_push_kv_str(&leaf.in, "expected_head", r->head) &&
+        json_push_kv_str(&leaf.in, "path", "include/boost.h") &&
+        json_push_kv_str(&leaf.in, "expected_blob", blob) &&
+        json_push_kv_str(&leaf.in, "content", "#define BOOST 8\n") && abc_plan_confirm("app.edit", &leaf);
+    (void)snprintf(r->edited, sizeof(r->edited), "%s", abc_get(&leaf, "version"));
+    abc_close(&leaf);
+    return ok && strlen(r->edited) == 64 && strcmp(r->edited, r->personal) &&
+        aj_parent_is(&r->owner, r->edited, r->head) && rr_preserved(r, r->edited);
+}
+static bool rr_share(struct rr_cycle *r)
+{
+    int n = snprintf(r->owner.share_file, sizeof(r->owner.share_file), "%s/bob/from-bob.z23share", r->owner.root);
+    if (n <= 0 || (size_t)n >= sizeof(r->owner.share_file)) return false;
+    struct aj_share_view view = {.draft = &r->bob.build, .output = r->owner.share_file};
+    if (!aj_share_expected(&r->owner, &view) || strcmp(view.publisher, r->publisher)) return false;
+    struct abc_leaf leaf; abc_open(&leaf);
+    bool ok = json_push_kv_str(&leaf.in, "name", AK_ROUTE) &&
+        json_push_kv_str(&leaf.in, "output", r->owner.share_file) && aj_share_run(&leaf, &view);
+    if (ok) memcpy(r->carol.release, view.release, sizeof(r->carol.release));
+    abc_close(&leaf); return ok && rr_preserved(r, r->edited);
+}
+static bool rr_carol_paths(struct rr_cycle *r)
+{
+    struct abc_world *w = &r->carol.world;
+    (void)snprintf(w->bob_home, sizeof(w->bob_home), "%s/carol", r->owner.root);
+    (void)snprintf(w->bob_datadir, sizeof(w->bob_datadir), "%s/carol/datadir", r->owner.root);
+    (void)snprintf(w->bob_copy, sizeof(w->bob_copy), "%s/carol/from-bob", r->owner.root);
+    (void)snprintf(w->share_file, sizeof(w->share_file), "%s", r->owner.share_file);
+    return mkdir(w->bob_home, 0700) == 0 && abc_as(w->bob_home) && ak_environment(&r->carol);
+}
+static bool rr_carol_release(const struct rr_cycle *r)
+{
+    struct vcs_package_release release; uint8_t id[32], got[32], parent[32], publisher[33], package[32];
+    if (!zcl_hex_decode_lower(r->carol.release, id, 32) ||
+        !zcl_hex_decode_lower(r->bob.release, parent, 32) ||
+        !zcl_hex_decode_lower(r->publisher, publisher, 33) ||
+        !zcl_hex_decode_lower(r->bob.build.package, package, 32)) return false;
+    if (zcl_package_copy_find_release(r->carol.world.bob_datadir, id, &release, got) != ZCL_PACKAGE_COPY_FOUND)
+        return false;
+    char name[128]; int n = snprintf(name, sizeof(name), "%s/tinyapp", r->space);
+    return n > 0 && (size_t)n < sizeof(name) && !strcmp(release.name, name) &&
+        !memcmp(got, id, 32) && release.has_parent && !memcmp(release.parent_root, parent, 32) &&
+        !memcmp(release.publisher_pubkey, publisher, 33) && !memcmp(release.package_root, package, 32);
+}
+static bool rr_carol_source(const struct rr_cycle *r)
+{
+    struct vcs_package_prepared p; vcs_package_prepared_init(&p); char why[256]; uint8_t expected[32];
+    /* Full canonical manifest binds every received path/byte/mode, not only the edited header. */
+    bool ok = vcs_package_prepare_content(r->carol.world.bob_copy, &p, why, sizeof(why)) == VCS_PACKAGE_PREPARE_OK &&
+        zcl_hex_decode_lower(r->bob.build.package, expected, 32) && !memcmp(p.package_root, expected, 32) &&
+        rr_text(r->carol.world.bob_copy, "include/boost.h", "#define BOOST 8\n");
+    vcs_package_prepared_free(&p); return ok;
+}
+static bool rr_carol_build_open(struct rr_cycle *r)
+{
+    struct ak_fixture *c = &r->carol;
+    if (!ak_build_tuple(c->world.bob_copy, c->world.bob_datadir, &c->build) ||
+        strcmp(c->build.package, r->bob.build.package) || strcmp(c->build.image, r->bob.build.image) ||
+        !aj_distinct_images(&r->bob.build, &c->build)) return false;
+    struct abc_leaf leaf;
+    bool ok = ak_request(&leaf, c, true) && abc_exec("app.open", &leaf) && ak_opened(&leaf, c);
+    abc_close(&leaf); bool clean = aso_cleanup_children();
+    return ok && clean && rr_carol_source(r);
+}
+static bool rr_carol(struct rr_cycle *r)
+{
+    if (!rr_carol_paths(r) || !aj_receive(&r->carol.world, r->publisher, r->bob.build.package, r->carol.release) ||
+        !rr_trusted(&r->carol) || !rr_carol_release(r) || !rr_carol_source(r) || !rr_carol_build_open(r)) return false;
+    /* Bob's exact name still reopens the chosen edited image after Carol's independent build. */
+    return abc_as(r->owner.alice_home) && ak_environment(&r->bob) && ak_restart(&r->bob) &&
+        rr_preserved(r, r->edited);
+}
+static int rr_acceptance(struct rr_cycle *r)
+{
+    int failures = 0;
+    TEST("trusted Bob personalizes, edits and Keeps before native reshare to fresh Carol") {
+        ASSERT(rr_start(r));
+        ASSERT(rr_personalize(r));
+        ASSERT(rr_preview(r, r->personal));
+        ASSERT(rr_keep(r, 1));
+        ASSERT(rr_edit(r));
+        ASSERT(rr_preview(r, r->edited));
+        ASSERT(rr_keep(r, 2));
+        char blob[65]; ASSERT(rr_read(r, 3, "#define BOOST 8\n", blob));
+        ASSERT(rr_share(r));
+        ASSERT(rr_carol(r));
+        PASS();
+    } _test_next:;
+    if (!aso_cleanup_children()) failures++;
+    if (r->bob.world.root[0] && test_rm_rf_recursive(r->bob.world.root) != 0) failures++;
+    return failures;
+}
+
 int test_app_kept_journey(void)
 {
     int failures = 0;
@@ -2102,6 +2367,8 @@ int test_app_kept_journey(void)
     chain_params_select(CHAIN_MAIN);
     if (!failures) failures += aso_fixture_setup(&w, &old, &next, head);
     if (!failures) failures += aj_steps(&w, &old, head);
+    struct rr_cycle recipient = {0};
+    if (!failures) failures += rr_acceptance(&recipient);
     aso_env_restore(env, saved);
     if (w.root[0]) (void)test_rm_rf_recursive(w.root);
     return failures;
