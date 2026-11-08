@@ -1210,21 +1210,25 @@ static void bp_checkpoint_child(const char *dir, int mode)
     bp_checkpoint_open_faults(&r, db, path);
     bp_checkpoint_resume_faults(&r, dir, mode);
 }
-static bool bp_checkpoint_wait(pid_t child, int expected)
+static bool bp_checkpoint_wait(pid_t child, int expected, const char *label)
 {
     int status = 0;
     for (int i = 0; i < 400; ++i) {
         pid_t result = waitpid(child, &status, WNOHANG);
         if (result == child) {
             bool ok = WIFEXITED(status) && WEXITSTATUS(status) == expected;
-            if (!ok) fprintf(stderr, "checkpoint child: expected=%d exited=%d code=%d signaled=%d signal=%d\n",
-                expected, WIFEXITED(status), WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+            if (!ok) fprintf(stderr, "\nFAIL checkpoint %s: expected=%d exited=%d code=%d signaled=%d signal=%d\n",
+                label, expected, WIFEXITED(status), WIFEXITED(status) ? WEXITSTATUS(status) : -1,
                 WIFSIGNALED(status), WIFSIGNALED(status) ? WTERMSIG(status) : 0);
             return ok;
         }
-        if (result < 0) return false;
+        if (result < 0) {
+            fprintf(stderr, "\nFAIL checkpoint %s: waitpid errno=%d\n", label, errno);
+            return false;
+        }
         (void)poll(NULL, 0, 50);
     }
+    fprintf(stderr, "\nFAIL checkpoint %s: child timeout after 400 polls of 50 ms\n", label);
     (void)kill(child, SIGKILL); (void)waitpid(child, &status, 0); return false;
 }
 static bool bp_checkpoint_reopen(const char *dir, int expected, bool fixed_digest)
@@ -1246,8 +1250,12 @@ static bool bp_checkpoint_extra(int mode, const char *label)
         if (!os_proc_bind_parent_death(SIGKILL, (uint64_t)parent)) _exit(23);
         bp_checkpoint_child(dir, mode);
     }
-    bool ok = child > 0 && bp_checkpoint_wait(child, 0);
-    if (ok && mode == 3) ok = bp_checkpoint_reopen(dir, 10, false);
+    if (child < 0) fprintf(stderr, "\nFAIL checkpoint %s: fork errno=%d\n", label, errno);
+    bool ok = child > 0 && bp_checkpoint_wait(child, 0, label);
+    if (ok && mode == 3) {
+        ok = bp_checkpoint_reopen(dir, 10, false);
+        if (!ok) fprintf(stderr, "\nFAIL checkpoint %s: reopen expected=10 fixed_digest=0\n", label);
+    }
     test_rm_rf(dir); return ok;
 }
 static bool bp_checkpoint_crash_case(int mode, const char *label, int exit_code, int expected)
@@ -1258,8 +1266,12 @@ static bool bp_checkpoint_crash_case(int mode, const char *label, int exit_code,
         if (!os_proc_bind_parent_death(SIGKILL, (uint64_t)parent)) _exit(23);
         bp_checkpoint_child(dir, mode);
     }
-    bool ok = child > 0 && bp_checkpoint_wait(child, exit_code);
-    if (ok) ok = bp_checkpoint_reopen(dir, expected, true);
+    if (child < 0) fprintf(stderr, "\nFAIL checkpoint %s: fork errno=%d\n", label, errno);
+    bool ok = child > 0 && bp_checkpoint_wait(child, exit_code, label);
+    if (ok) {
+        ok = bp_checkpoint_reopen(dir, expected, true);
+        if (!ok) fprintf(stderr, "\nFAIL checkpoint %s: reopen expected=%d fixed_digest=1\n", label, expected);
+    }
     test_rm_rf(dir); return ok;
 }
 static bool bp_checkpoint_cadence(void)
@@ -1285,7 +1297,10 @@ static bool bp_checkpoint_stop_cases(void)
 
 static int test_boot_discover_checkpoint(void)
 {
-    if (!bp_checkpoint_cadence()) return 1;
+    if (!bp_checkpoint_cadence()) {
+        fprintf(stderr, "\nFAIL checkpoint cadence\n");
+        return 1;
+    }
     bool ok = bp_checkpoint_crash_case(0, "checkpoint", 77, 10);
     bool committed = bp_checkpoint_crash_case(2, "checkpoint-committed", 78, 11);
     bool stopped = bp_checkpoint_extra(1, "checkpoint-stop");
