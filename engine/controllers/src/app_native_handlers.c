@@ -10,6 +10,7 @@
  * lands — the wallet-send precedent (engine/composition/commands/core.def). */
 
 #include "controllers/app_native_handlers.h"
+#include "api_controller_internal.h"
 
 #include "json/json.h"
 #include "controllers/rpc_client.h"
@@ -103,6 +104,34 @@ char *zcl_native_name_list_body(const struct json_value *args,
 {
     (void)args;
     return app_native_rpc_noargs("name_list", err);
+}
+
+/* ── Application protocol catalog ───────────────────────────── */
+
+/* The same builder the REST /api/protocols route serves; no RPC and no
+ * node state, so the native leaf and the REST row cannot drift. */
+char *zcl_native_app_protocols_body(const struct json_value *args,
+                                    struct zcl_native_body_err *err)
+{
+    (void)args;
+    struct json_value doc;
+    json_init(&doc);
+    char *out = NULL;
+    if (api_app_protocols_index_json(&doc)) {
+        size_t need = json_write(&doc, NULL, 0);
+        out = zcl_malloc(need + 1, "native.app_protocols");
+        if (out)
+            (void)json_write(&doc, out, need + 1);
+    }
+    json_free(&doc);
+    if (!out) {
+        err->status = ZCL_NATIVE_BODY_INTERNAL;
+        snprintf(err->message, sizeof(err->message),
+                 "could not build or serialize the application protocols "
+                 "index");
+        LOG_NULL("native.app", "app.protocols index build failed");
+    }
+    return out;
 }
 
 /* ── Messaging (ZMSG) ───────────────────────────────────────── */

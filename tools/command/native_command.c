@@ -709,6 +709,39 @@ void zcl_native_handle_app_inspect(const struct zcl_command_request *request,
     (void)json_push_kv_str(&reply->data, "authority", "definition-only");
 }
 
+/* app.protocols returns the whole index the REST /api/protocols route
+ * serves.  It bypasses the bridge's field paging on purpose: the protocols
+ * array is larger than the result page budget, and paging it away would leave
+ * the leaf printing only the header fields.  The body is built by the one
+ * shared controller function, never rebuilt here. */
+void zcl_native_handle_app_protocols(const struct zcl_command_request *request,
+                                     struct zcl_command_reply *reply)
+{
+    (void)request;
+    struct zcl_native_body_err err = { .status = ZCL_NATIVE_BODY_OK };
+    char *body = zcl_native_app_protocols_body(NULL, &err);
+    if (!body) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "APP_PROTOCOLS_FAILED",
+                               "serialize", false, false, err.message,
+                               "app.protocols");
+        return;
+    }
+    json_free(&reply->data);
+    json_init(&reply->data);
+    if (!json_read(&reply->data, body, strlen(body))) {
+        json_free(&reply->data);
+        json_init(&reply->data);
+        json_set_object(&reply->data);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "BAD_TOOL_BODY",
+                               "serialize", false, false,
+                               "the protocols index did not parse",
+                               "app.protocols");
+    }
+    free(body);
+}
+
 /* Shared by every leaf that calls one RPC method and expects one JSON object
  * body back: bind the RPC client, dispatch, and require a parseable object.
  * Fails the reply (NODE_UNAVAILABLE / bad_body_code) and returns false

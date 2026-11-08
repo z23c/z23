@@ -108,18 +108,20 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_inspect)
 
-ZCL_COMMAND_COMPAT_READ(
+ZCL_COMMAND_READY_READ(
     "app.protocols", "app", "appprotocols", "Protocols",
     "The wire and event protocol contracts each installed App declares, read "
     "from the node; enumerates every registered App protocol at call time.",
-    ZCL_COMMAND_LIST_BUDGET,
+    ZCL_COMMAND_EXTENDED_LIST_BUDGET,
     "protocols,events,p2p,wire", "zcl.command.empty_input.v1",
-    "zcl.app_protocols.v1", "", "", "z23 app protocols",
+    "zcl.application_protocols.index.v2", "", "", "z23 app protocols",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_CHAIN_READ,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE | ZCL_COMMAND_TRANSPORT_RPC,
-    "z23 appprotocols")
+    zcl_native_handle_app_protocols)
 
 /* Semantic chain-transaction discovery.  This is deliberately separate from
  * core.wallet.transaction.list, which lists one wallet's transaction history. */

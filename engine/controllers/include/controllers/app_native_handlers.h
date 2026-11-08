@@ -34,6 +34,11 @@ char *zcl_native_name_resolve_body(const struct json_value *args,
 char *zcl_native_name_list_body(const struct json_value *args,
                                 struct zcl_native_body_err *err);
 
+/* No args -> the application protocol index (same body as GET /api/protocols;
+ * built in-process, no RPC). */
+char *zcl_native_app_protocols_body(const struct json_value *args,
+                                    struct zcl_native_body_err *err);
+
 /* No args -> msg_inbox (full inbox, newest first). */
 char *zcl_native_msg_inbox_body(const struct json_value *args,
                                 struct zcl_native_body_err *err);
