@@ -100,10 +100,12 @@ static ssize_t vcm_write(int fd, const void *bytes, size_t len)
 #define close vcm_close
 #define write vcm_write
 #define vcs_tree_materialize vcm_durable
+#define vcs_tree_materialize_disposable vcm_recovering_disposable
 #define vcs_tree_materialize_readonly vcm_readonly
 #define vcs_tree_materialize_readonly_disposable vcm_disposable
 #define vcs_materialize_verified_bytes_disposable vcm_bytes
 int vcm_durable(const char *, const uint8_t[32], const char *, uint64_t, uint32_t);
+int vcm_recovering_disposable(const char *, const uint8_t[32], const char *, uint64_t, uint32_t);
 int vcm_readonly(const char *, const uint8_t[32], const char *, uint64_t, uint32_t);
 int vcm_disposable(const char *, const uint8_t[32], const char *, uint64_t, uint32_t);
 #include "../../../contexts/commons/modules/vcs/src/vcs_materialize.c"
@@ -132,6 +134,7 @@ enum vcs_source_bundle_result vcm_bundle_direct(const uint8_t *, size_t,
 #undef vcs_materialize_verified_bytes_disposable
 #undef vcs_tree_materialize_readonly_disposable
 #undef vcs_tree_materialize_readonly
+#undef vcs_tree_materialize_disposable
 #undef vcs_tree_materialize
 #undef write
 #undef close
@@ -1034,6 +1037,7 @@ static int tsb_materialize_observed(struct tsb_ctx *ctx, vcm_call call, bool dur
     int failures = 0; char dir[512];
     test_make_tmpdir(dir, sizeof(dir), "vcs_core", "materialize-observed");
     vcm_reset();
+    vcm_fail_flush = !durable; /* Disposable succeeds even when a flush would fail. */
     mode_t saved = umask(0077);
     int rc = call(ctx->consumer, ctx->first_root, dir,
                   VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0);
@@ -1058,29 +1062,31 @@ static bool vcm_package_identity(const char *dir, uint8_t package[32], uint8_t r
         vcs_package_recipe_root(&p.recipe, recipe) == VCS_PACKAGE_RECIPE_OK;
     vcs_package_prepared_free(&p); return ok;
 }
-static int tsb_disposable_public(struct tsb_ctx *ctx)
+static int tsb_disposable_public(struct tsb_ctx *ctx, vcm_call call)
 {
     int failures = 0; char dir[512]; uint8_t root[32], a[32], b[32], ar[32], br[32];
     test_make_tmpdir(dir, sizeof(dir), "vcs_core", "materialize-public");
     VC_CHECK("public disposable API materializes exact verified tree",
-        vcs_tree_materialize_readonly_disposable(ctx->consumer, ctx->first_root, dir,
+        call(ctx->consumer, ctx->first_root, dir,
             VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) == VCS_OK &&
         vcs_tree_capture_path(dir, root) == VCS_OK && !memcmp(root, ctx->first_root, 32));
     VC_CHECK("package and recipe identity match durable output",
         vcm_package_identity(ctx->materialized, a, ar) && vcm_package_identity(dir, b, br) &&
         !memcmp(a, b, 32) && !memcmp(ar, br, 32));
     VC_CHECK("existing files cannot be overwritten",
-        vcs_tree_materialize_readonly_disposable(ctx->consumer, ctx->first_root, dir,
+        call(ctx->consumer, ctx->first_root, dir,
             VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) != VCS_OK);
+    VC_CHECK("refused overwrite preserves existing bytes and modes",
+        vcs_tree_capture_path(dir, root) == VCS_OK && !memcmp(root, ctx->first_root, 32));
     test_rm_rf_recursive(dir); return failures;
 }
-static int tsb_materialize_io_failure(struct tsb_ctx *ctx, bool durable, unsigned failure)
+static int tsb_materialize_io_failure(struct tsb_ctx *ctx, vcm_call call, bool durable, unsigned failure)
 {
     int failures = 0; char dir[512], file[1024];
     test_make_tmpdir(dir, sizeof(dir), "vcs_core", "materialize-io");
     vcm_reset();
     vcm_fail_flush = failure == 0; vcm_fail_close = failure == 1; vcm_fail_write = failure == 2;
-    int rc = (durable ? vcm_readonly : vcm_disposable)(ctx->consumer, ctx->first_root,
+    int rc = call(ctx->consumer, ctx->first_root,
         dir, VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0);
     (void)snprintf(file, sizeof(file), "%s/LICENSE", dir);
     VC_CHECK("write flush or close error refuses and removes failed file",
@@ -1100,6 +1106,15 @@ static bool tsb_direct_empty(const char *path)
     }
     if (errno) empty = false;
     return closedir(d) == 0 && empty;
+}
+static int tsb_materialize_budget(struct tsb_ctx *ctx, vcm_call call)
+{
+    int failures = 0; char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "materialize-budget");
+    VC_CHECK("byte ceiling refuses before creating first oversized file",
+        call(ctx->consumer, ctx->first_root, dir, 1, 0) != VCS_OK &&
+        tsb_direct_empty(dir));
+    test_rm_rf_recursive(dir); return failures;
 }
 static int tsb_direct_identity(struct tsb_ctx *ctx)
 {
@@ -1277,12 +1292,119 @@ static int tsb_direct_limits(struct tsb_ctx *ctx)
             dir, NULL) == VCS_SOURCE_BUNDLE_ERR_LIMIT && tsb_direct_empty(dir));
     test_rm_rf_recursive(dir); return failures;
 }
+/* Isolated stores keep fault fixtures from poisoning later bundle controls. */
+struct vcr_fixture {
+    char store[512], output[512], manifest[1024], blob[1024];
+    char manifest_alias[1024], blob_alias[1024], unknown[1024];
+};
+static bool vcr_path(char out[1024], const char *store, const uint8_t root[32])
+{
+    char hex[65]; zcl_hex_encode(root, 32, hex);
+    int n = snprintf(out, 1024, "%s/.zvcs/objects/%.2s/%s", store, hex, hex + 2);
+    return n > 0 && n < 1024;
+}
+static bool vcr_setup(struct tsb_ctx *ctx, struct vcr_fixture *f)
+{
+    test_make_tmpdir(f->store, sizeof(f->store), "vcs_core", "recovering-store");
+    test_make_tmpdir(f->output, sizeof(f->output), "vcs_core", "recovering-output");
+    if (vcs_source_bundle_import(ctx->first_wire, ctx->first_wire_len, ctx->first_root,
+            f->store, NULL) != VCS_SOURCE_BUNDLE_OK) return false;
+    struct vcs_manifest tree;
+    if (!vcs_tree_load_readonly_bounded(f->store, ctx->first_root,
+            VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 16384u, &tree)) return false;
+    bool ok = tree.count == 4 && vcr_path(f->manifest, f->store, ctx->first_root) &&
+        vcr_path(f->blob, f->store, tree.entries[0].blob);
+    vcs_manifest_free(&tree);
+    /* The bounded store path leaves ample room in these fixture-only buffers. */
+    (void)snprintf(f->manifest_alias, sizeof(f->manifest_alias), "%s/.zvcs/objects/tmp/.put.manifest-fixture", f->store);
+    (void)snprintf(f->blob_alias, sizeof(f->blob_alias), "%s/.zvcs/objects/tmp/.put.blob-fixture", f->store);
+    (void)snprintf(f->unknown, sizeof(f->unknown), "%s/unknown-hardlink", f->store);
+    return ok;
+}
+static bool vcr_absent(const char *path)
+{
+    struct stat st;
+    return lstat(path, &st) != 0 && errno == ENOENT;
+}
+static bool vcr_links(const char *path, nlink_t count)
+{
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_nlink == count;
+}
+static bool vcr_corrupt(const char *path)
+{
+    int fd = open(path, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return false;
+    uint8_t byte;
+    bool ok = pread(fd, &byte, 1, 0) == 1;
+    byte = ok ? (uint8_t)(byte ^ 0xffu) : 0;
+    ok = ok && pwrite(fd, &byte, 1, 0) == 1;
+    return close(fd) == 0 && ok;
+}
+static int vcr_legacy(struct tsb_ctx *ctx, struct vcr_fixture *f, vcm_call call)
+{
+    int failures = 0;
+    bool linked = link(f->manifest, f->manifest_alias) == 0 && link(f->blob, f->blob_alias) == 0;
+    VC_CHECK("exact manifest and blob staging aliases created", linked);
+    if (!linked) return failures;
+    VC_CHECK("strict disposable keeps legacy aliases refused and untouched",
+        vcs_tree_materialize_readonly_disposable(f->store, ctx->first_root, f->output,
+            VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) != VCS_OK &&
+        vcr_links(f->manifest, 2) && vcr_links(f->blob, 2));
+    VC_CHECK("recovering materializer retires exact aliases and succeeds",
+        call(f->store, ctx->first_root, f->output, VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) == VCS_OK &&
+        vcr_absent(f->manifest_alias) && vcr_absent(f->blob_alias) &&
+        vcr_links(f->manifest, 1) && vcr_links(f->blob, 1));
+    uint8_t root[32];
+    VC_CHECK("recovered materialization preserves full bytes and modes",
+        vcs_tree_capture_path(f->output, root) == VCS_OK && !memcmp(root, ctx->first_root, 32));
+    return failures;
+}
+static int vcr_bad(struct tsb_ctx *ctx, struct vcr_fixture *f, vcm_call call, unsigned mode)
+{
+    int failures = 0;
+    bool staged = mode == 1 ? link(f->blob, f->unknown) == 0 :
+        vcr_corrupt(mode == 2 ? f->blob : f->manifest);
+    VC_CHECK("invalid alias or corrupt canonical object fixture staged", staged);
+    if (!staged) return failures;
+    VC_CHECK("recovering materializer refuses unknown hardlink or corruption",
+        call(f->store, ctx->first_root, f->output, VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) != VCS_OK);
+    if (mode == 1) {
+        VC_CHECK("unknown alias is never retired", vcr_links(f->blob, 2) && vcr_links(f->unknown, 2));
+    }
+    return failures;
+}
+static int vcr_controls(struct tsb_ctx *ctx)
+{
+    int failures = 0;
+    const vcm_call calls[] = {vcs_tree_materialize, vcs_tree_materialize_disposable};
+    for (size_t c = 0; c < sizeof(calls)/sizeof(calls[0]); ++c) {
+        for (unsigned mode = 0; mode < 4; ++mode) {
+            struct vcr_fixture f = {0};
+            bool ready = vcr_setup(ctx, &f);
+            VC_CHECK("isolated recovering materializer store", ready);
+            if (ready) failures += mode ? vcr_bad(ctx, &f, calls[c], mode) : vcr_legacy(ctx, &f, calls[c]);
+            if (f.output[0] && test_rm_rf_recursive(f.output) != 0) ++failures;
+            if (f.store[0] && test_rm_rf_recursive(f.store) != 0) ++failures;
+        }
+    }
+    return failures;
+}
+
 static int tsb_disposable_controls(struct tsb_ctx *ctx)
 {
     int failures = tsb_materialize_observed(ctx, vcm_durable, true);
     failures += tsb_materialize_observed(ctx, vcm_readonly, true);
     failures += tsb_materialize_observed(ctx, vcm_disposable, false);
-    failures += tsb_disposable_public(ctx);
+    failures += tsb_materialize_observed(ctx, vcm_recovering_disposable, false);
+    failures += tsb_disposable_public(ctx, vcs_tree_materialize_disposable);
+    failures += vcr_controls(ctx);
+    failures += tsb_materialize_budget(ctx, vcs_tree_materialize_disposable);
+    failures += tsb_materialize_budget(ctx, vcs_tree_materialize_readonly_disposable);
+    failures += tsb_materialize_io_failure(ctx, vcm_durable, true, 0);
+    failures += tsb_materialize_io_failure(ctx, vcm_recovering_disposable, false, 1);
+    failures += tsb_materialize_io_failure(ctx, vcm_recovering_disposable, false, 2);
+    failures += tsb_disposable_public(ctx, vcs_tree_materialize_readonly_disposable);
     failures += tsb_direct_identity(ctx);
     failures += tsb_direct_public(ctx);
     failures += tsb_direct_refusals(ctx);
@@ -1293,11 +1415,11 @@ static int tsb_disposable_controls(struct tsb_ctx *ctx)
     failures += tsb_direct_limits(ctx);
     failures += tsb_direct_io(ctx, false);
     failures += tsb_direct_io(ctx, true);
-    failures += tsb_materialize_io_failure(ctx, true, 0);
-    failures += tsb_materialize_io_failure(ctx, true, 1);
-    failures += tsb_materialize_io_failure(ctx, false, 1);
-    failures += tsb_materialize_io_failure(ctx, true, 2);
-    failures += tsb_materialize_io_failure(ctx, false, 2);
+    failures += tsb_materialize_io_failure(ctx, vcm_readonly, true, 0);
+    failures += tsb_materialize_io_failure(ctx, vcm_readonly, true, 1);
+    failures += tsb_materialize_io_failure(ctx, vcm_disposable, false, 1);
+    failures += tsb_materialize_io_failure(ctx, vcm_readonly, true, 2);
+    failures += tsb_materialize_io_failure(ctx, vcm_disposable, false, 2);
     return failures;
 }
 #else

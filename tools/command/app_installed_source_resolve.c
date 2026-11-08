@@ -24,17 +24,22 @@
 #define ISR_MIB (1024u * 1024u)
 enum { ISR_CARD, ISR_RECORD, ISR_PROJECTION, ISR_PACKAGE, ISR_RECIPE,
     ISR_BUNDLE, ISR_NODE, ISR_ACME, ISR_VERIFY, ISR_GAME,
-    ISR_NODE_ALIAS, ISR_ACME_ALIAS, ISR_VERIFY_ALIAS, ISR_ROWS };
+    ISR_NODE_ALIAS, ISR_ACME_ALIAS, ISR_VERIFY_ALIAS, ISR_BASE_ROWS,
+    ISR_DESKTOP_RECEIVE = ISR_BASE_ROWS, ISR_DESKTOP_ICON, ISR_DESKTOP_MIME,
+    ISR_DESKTOP_GAME, ISR_ROWS };
 static const char *const isr_names[ISR_ROWS] = {
     "AGENT_CARD.md", "app-build.wire", "installed-source.json", // error-doc-ref-ok: generated installed release assets, not checkout documents
     "manifest.wire", "recipe.wire", "source.bundle", "z23", "z23-acme",
     "z23-package-verify", "z23-skycombat", "zclassic23", "zclassic23-acme",
-    "zclassic23-package-verify"
+    "zclassic23-package-verify", "org.zclassic.ZClassic23.desktop",
+    "org.zclassic.ZClassic23.svg", "org.zclassic.ZClassic23.xml",
+    "org.zclassic.SkyCombat.desktop"
 };
 static const size_t isr_limits[ISR_ROWS] = {
     65536, 240, 4096, ISR_MIB, 256u * 1024u, 64u * ISR_MIB,
     64u * ISR_MIB, 32u * ISR_MIB, 128u * ISR_MIB, 64u * ISR_MIB,
-    64u * ISR_MIB, 32u * ISR_MIB, 128u * ISR_MIB
+    64u * ISR_MIB, 32u * ISR_MIB, 128u * ISR_MIB,
+    65536, 65536, 65536, 65536
 };
 struct isr_manifest { char digest[ISR_ROWS][65]; };
 struct isr_layout {
@@ -192,21 +197,30 @@ static int isr_row(const char *name)
         if (!strcmp(name, isr_names[i])) return i;
     return -1;
 }
-static bool isr_parse(char *bytes, size_t length, struct isr_manifest *m)
+static bool isr_shape(const struct isr_manifest *m, bool mac)
+{
+    /* Count alone is insufficient: four optional rows cannot replace base rows. */
+    for (int row = 0; row < ISR_BASE_ROWS; ++row)
+        if (!m->digest[row][0]) return false;
+    unsigned desktop = 0;
+    for (int row = ISR_BASE_ROWS; row < ISR_ROWS; ++row)
+        if (m->digest[row][0]) ++desktop;
+    return desktop == 0 || (!mac && desktop == ISR_ROWS - ISR_BASE_ROWS);
+}
+static bool isr_parse(char *bytes, size_t length, struct isr_manifest *m, bool mac)
 {
     memset(m, 0, sizeof(*m));
     if (memchr(bytes, 0, length)) return false;
     char *at = bytes, *end = bytes + length;
-    unsigned rows = 0;
     while (at < end) {
         char *nl = memchr(at, '\n', (size_t)(end-at));
         if (!nl || nl-at < 67 || at[64] != ' ' || at[65] != ' ') return false;
         *nl = 0; at[64] = 0;
         int row = isr_row(at+66);
         if (row < 0 || m->digest[row][0] || !isr_lower_hex(at)) return false;
-        memcpy(m->digest[row], at, 65); ++rows; at = nl+1;
+        memcpy(m->digest[row], at, 65); at = nl+1;
     }
-    return rows == ISR_ROWS &&
+    return isr_shape(m, mac) &&
         !strcmp(m->digest[ISR_NODE], m->digest[ISR_NODE_ALIAS]) &&
         !strcmp(m->digest[ISR_ACME], m->digest[ISR_ACME_ALIAS]) &&
         !strcmp(m->digest[ISR_VERIFY], m->digest[ISR_VERIFY_ALIAS]);
@@ -219,7 +233,7 @@ static bool isr_manifest(int dir, const struct isr_layout *l,
             bytes, ISR_MANIFEST, &length)) return false;
     bytes[length] = 0;
     if (!l->mac && strcmp(manifest_hash, l->generation)) return false;
-    if (!isr_parse(bytes, length, m)) return false;
+    if (!isr_parse(bytes, length, m, l->mac)) return false;
     return !l->mac || !strcmp(m->digest[ISR_NODE], l->generation);
 }
 static bool isr_same_self(int named, FILE *self, const struct isr_manifest *m)
@@ -249,6 +263,28 @@ static bool isr_self(const struct isr_layout *l, const struct isr_manifest *m)
     if (close(named) != 0) ok = false;
     return ok;
 }
+static bool isr_desktop_assets(int dir, const struct isr_manifest *m)
+{
+    if (!m->digest[ISR_DESKTOP_RECEIVE][0]) return true;
+    for (int row = ISR_BASE_ROWS; row < ISR_ROWS; ++row) {
+        char hex[65]; size_t length;
+        if (!isr_member(dir, isr_names[row], isr_limits[row], hex, NULL, 0, &length) ||
+            strcmp(hex, m->digest[row])) return false;
+    }
+    return true;
+}
+#if defined(ZCL_TESTING)
+/* Component seam only: never supplies a substitute executing image/ancestor
+ * to the production resolver, and never returns admitted source authority. */
+bool zcl_test_installed_desktop_manifest(int dir, const char *wire, size_t length, bool mac);
+bool zcl_test_installed_desktop_manifest(int dir, const char *wire, size_t length, bool mac)
+{
+    if (!wire || length > ISR_MANIFEST) return false;
+    char bytes[ISR_MANIFEST + 1]; struct isr_manifest manifest;
+    memcpy(bytes, wire, length); bytes[length] = 0;
+    return isr_parse(bytes, length, &manifest, mac) && isr_desktop_assets(dir, &manifest);
+}
+#endif
 static bool isr_assets(int dir, const struct isr_manifest *m, char pin[65])
 {
     uint8_t projection[4096]; size_t length = 0;
@@ -265,7 +301,7 @@ static bool isr_assets(int dir, const struct isr_manifest *m, char pin[65])
         }
     }
     return isr_member(dir, isr_names[ISR_GAME], isr_limits[ISR_GAME],
-        hex, NULL, 0, &length) && !strcmp(hex, m->digest[ISR_GAME]);
+        hex, NULL, 0, &length) && !strcmp(hex, m->digest[ISR_GAME]) && isr_desktop_assets(dir, m);
 }
 static bool isr_retained(const struct app_installed_source *out,
     const struct isr_manifest *m)

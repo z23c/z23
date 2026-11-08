@@ -92,6 +92,8 @@ bool lint_gates_group_requires_quiet_pool(const char *group_name)
 #include "dev_proof_observation.h"
 #include "test/testcache.h"
 #include "util/spawn.h"
+#include "json/json.h"
+#include "kernel/command_registry.h"
 #include <fcntl.h>
 
 /* Builder identities distinguish independent single-goal dispatches. */
@@ -387,9 +389,10 @@ static bool dti_recipe(const struct dti_fixture *f)
 static bool dti_inputs(const struct dti_fixture *f)
 {
     static const char *const files[] = {"org.zclassic.ZClassic23.desktop",
+        "org.zclassic.SkyCombat.desktop",
         "org.zclassic.ZClassic23.svg", "org.zclassic.ZClassic23.xml"};
     char source[PATH_MAX], target[PATH_MAX], rel[256];
-    for (size_t i = 0; i < 3; ++i) {
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
         int n = snprintf(rel, sizeof(rel), "platform/packaging/linux/%s", files[i]);
         if (n <= 0 || (size_t)n >= sizeof(rel) ||
             !dti_path(source, repo_root(), rel) || !dti_path(target, f->root, rel) ||
@@ -457,12 +460,16 @@ static bool dti_make(const struct dti_fixture *f, const char *data,
 static bool dti_installed(const struct dti_fixture *f, const char *data)
 {
     static const char *const sources[] = {"org.zclassic.ZClassic23.desktop",
+        "org.zclassic.SkyCombat.desktop",
         "org.zclassic.ZClassic23.svg", "org.zclassic.ZClassic23.xml"};
     static const char *const destinations[] = {"applications/org.zclassic.ZClassic23.desktop",
+        "applications/org.zclassic.SkyCombat.desktop",
         "icons/hicolor/scalable/apps/org.zclassic.ZClassic23.svg",
         "mime/packages/org.zclassic.ZClassic23.xml"};
+    _Static_assert(sizeof(sources) / sizeof(sources[0]) ==
+                   sizeof(destinations) / sizeof(destinations[0]), "desktop install pairs");
     char source[PATH_MAX], target[PATH_MAX], rel[256]; struct stat st;
-    for (size_t i = 0; i < 3; ++i) {
+    for (size_t i = 0; i < sizeof(sources) / sizeof(sources[0]); ++i) {
         int n = snprintf(rel, sizeof(rel), "platform/packaging/linux/%s", sources[i]);
         if (n <= 0 || (size_t)n >= sizeof(rel) || !dti_path(source, f->root, rel) ||
             !dti_path(target, data, destinations[i]) || !dti_equal(source, target)) return false;
@@ -492,6 +499,13 @@ static bool dti_mime(const struct dti_fixture *f)
         dti_mime_one(f, "empty.z23share", "", 0, false) &&
         dti_mime_one(f, "not-share.bin", wrong, sizeof(wrong), false);
 }
+static bool dti_validate(const struct dti_fixture *f, const char *path)
+{
+    if (access("/usr/bin/desktop-file-validate", X_OK) != 0) return true;
+    const char *argv[] = {"/usr/bin/desktop-file-validate", path, NULL};
+    struct zcl_devloop_process_result run = {0};
+    return dti_run(f, argv, f->data, false, &run) && run.exit_code == 0;
+}
 static bool dti_descriptor(const struct dti_fixture *f, char **text)
 {
     char path[PATH_MAX];
@@ -500,10 +514,7 @@ static bool dti_descriptor(const struct dti_fixture *f, char **text)
     if (!strstr(*text, "\nExec=z23 app receive --preview --file=%f\n") ||
         !strstr(*text, "\nTerminal=false\n") || !strstr(*text, "\nNoDisplay=true\n") ||
         !strstr(*text, "\nMimeType=application/x-z23-share;\n")) return false;
-    if (access("/usr/bin/desktop-file-validate", X_OK) != 0) return true;
-    const char *argv[] = {"/usr/bin/desktop-file-validate", path, NULL};
-    struct zcl_devloop_process_result run = {0};
-    return dti_run(f, argv, f->data, false, &run) && run.exit_code == 0;
+    return dti_validate(f, path);
 }
 static bool dti_gio(const struct dti_fixture *f)
 {
@@ -523,6 +534,76 @@ static bool dti_gio(const struct dti_fixture *f)
         run.output_len == strlen(expected) && !memcmp(run.output, expected, run.output_len) &&
         dti_no_markers(f);
 }
+static bool dti_game_descriptor(const struct dti_fixture *f, char **text)
+{
+    char path[PATH_MAX];
+    if (!dti_path(path, f->data, "applications/org.zclassic.SkyCombat.desktop") ||
+        read_entire_file(path, text)) return false;
+    return strstr(*text, "\nName=Sky Combat\n") &&
+        strstr(*text, "\nExec=z23 app open skycombat\n") &&
+        strstr(*text, "\nIcon=org.zclassic.ZClassic23\n") &&
+        strstr(*text, "\nTerminal=false\n") && strstr(*text, "\nNoDisplay=false\n") &&
+        strstr(*text, "\nCategories=Game;Simulation;\n") && !strstr(*text, "TryExec=") &&
+        !strstr(*text, "MimeType=") && dti_validate(f, path);
+}
+static bool dti_game_launch(const struct dti_fixture *f, const char *desktop, const char *file)
+{
+    const char *argv[] = {"/usr/bin/gio", "launch", desktop, file, NULL};
+    char expected[PATH_MAX + 64];
+    int n = file ? snprintf(expected, sizeof(expected), "[app][open][skycombat][%s]", file)
+                 : snprintf(expected, sizeof(expected), "[app][open][skycombat]");
+    if (n <= 0 || (size_t)n >= sizeof(expected)) return false;
+    struct zcl_devloop_process_result run = {0};
+    bool ok = dti_run(f, argv, f->data, false, &run) && run.exit_code == 0 &&
+        run.output_len == (size_t)n && !memcmp(run.output, expected, (size_t)n);
+    if (!ok) fprintf(stderr, "desktop game: file=%s exit=%d output=%s\n",
+                     file ? file : "(none)", run.exit_code, run.output);
+    return ok && dti_no_markers(f);
+}
+static bool dti_game_refusal_wire(const struct zcl_devloop_process_result *run)
+{
+    struct json_value doc; json_init(&doc);
+    bool parsed = json_read(&doc, run->output, run->output_len);
+    const struct json_value *error = json_get(&doc, "error");
+    const char *code = json_get_str(json_get(error, "code"));
+    const char *phase = json_get_str(json_get(error, "phase"));
+    const struct json_value *ok = json_get(&doc, "ok"), *mutated = json_get(error, "mutated");
+    bool refused = parsed && code && phase && !strcmp(code, "TOO_MANY_ARGS") &&
+        !strcmp(phase, "normalize") && ok && ok->type == JSON_BOOL && !json_get_bool(ok) &&
+        mutated && mutated->type == JSON_BOOL && !json_get_bool(mutated);
+    json_free(&doc); return refused;
+}
+static bool dti_game_extra_refused(const struct dti_fixture *f, const char *file)
+{
+    char executable[PATH_MAX];
+    if (!dti_path(executable, repo_root(), "build/bin/z23-dev")) return false;
+    const char *argv[] = {executable, "app", "open", "skycombat", file, NULL};
+    struct zcl_devloop_process_result run = {0};
+    /* Same argv Gio emits; actual normalization must refuse before dispatch. */
+    bool ok = dti_run(f, argv, f->data, false, &run) &&
+        run.exit_code == ZCL_COMMAND_EXIT_INVALID && dti_game_refusal_wire(&run);
+    if (!ok) fprintf(stderr, "desktop game: extra-file refusal exit=%d output=%s\n",
+                     run.exit_code, run.output);
+    return ok && dti_no_markers(f);
+}
+static bool dti_game_gio(const struct dti_fixture *f)
+{
+    char *text = NULL, *probe = NULL; char desktop[PATH_MAX], file[PATH_MAX];
+    bool ok = dti_game_descriptor(f, &text);
+    /* Only replace the executable with the existing argv observer, as in the
+     * Receive probe. Gio expands the maintained descriptor; no shell/game runs. */
+    if (ok) probe = str_replace_once(text, "Exec=z23 ", "Exec=/usr/bin/printf [%%s] ");
+    ok = ok && probe && dti_path(desktop, f->root, "game-argv.desktop") &&
+        dti_write(desktop, probe, strlen(probe));
+    free(text); free(probe);
+    if (!ok || !dti_path(file, f->root, "game space % \"quote\" 'single' $(touch PWNED);literal.z23share") ||
+        !dti_write(file, "not a game argument\n", 20)) return false;
+    /* Gio appends an explicitly supplied file even without an Exec fieldcode.
+     * It stays one literal argument; the native app.open leaf rejects it. */
+    return dti_game_launch(f, desktop, NULL) && dti_game_launch(f, desktop, file) &&
+        dti_game_extra_refused(f, file);
+}
+
 static bool dti_failures(const struct dti_fixture *f)
 {
     char path[PATH_MAX], output[PATH_MAX];
@@ -545,7 +626,7 @@ static bool dti_cases(const struct dti_fixture *f)
     char fallback[PATH_MAX];
     if (!dti_make(f, f->data, NULL, true) || !dti_installed(f, f->data) ||
         !dti_path(fallback, f->home, ".local") || !dti_absent(fallback)) return false;
-    if (!dti_mime(f) || !dti_gio(f) || !dti_override(f)) return false;
+    if (!dti_mime(f) || !dti_gio(f) || !dti_game_gio(f) || !dti_override(f)) return false;
     return dti_make(f, "", NULL, true) && dti_path(fallback, f->home, ".local/share") &&
         dti_installed(f, fallback) && dti_failures(f);
 }

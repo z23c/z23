@@ -512,19 +512,22 @@ static bool have_on_path(const char *name)
     return false;
 }
 
-/* The shim forwards argv verbatim, so this is the same one-argument
- * surface install.sh had. An unknown argument is refused rather than
- * ignored: a typo that silently installs is worse than one that stops. */
-static bool parse_print_pin_request(int argc, char **argv)
+/* The shim forwards argv verbatim. Exactly one explicit mode is accepted:
+ * --apps requests installation, --print-pin only resolves provenance. Mixing
+ * them (or duplicating either) is refused before scratch or channel access. */
+enum bootstrap_mode { BOOTSTRAP_INSTALL, BOOTSTRAP_APPS, BOOTSTRAP_PRINT_PIN };
+static enum bootstrap_mode parse_bootstrap_request(int argc, char **argv)
 {
     if (argc > 2)
-        die("unsupported bootstrap arguments; use --print-pin");
+        die("unsupported bootstrap arguments; use --apps OR --print-pin");
     if (argc == 2) {
         if (strcmp(argv[1], "--print-pin") == 0)
-            return true;
-        die("unsupported bootstrap argument; use --print-pin");
+            return BOOTSTRAP_PRINT_PIN;
+        if (strcmp(argv[1], "--apps") == 0)
+            return BOOTSTRAP_APPS;
+        die("unsupported bootstrap argument; use --apps OR --print-pin");
     }
-    return false;
+    return BOOTSTRAP_INSTALL;
 }
 
 /* Die unless this machine can actually be installed onto: a published
@@ -639,7 +642,7 @@ static int run_verified_installer(const char *origin,
                                   const char triple[FD_TRIPLE_MAX],
                                   const struct fd_agreement *agreement,
                                   struct fd_attestation att[3],
-                                  const char *release_source)
+                                  const char *release_source, bool apps)
 {
     char source[TLS_CLIENT_MAX_PATH + 32];
     if (release_source && *release_source)
@@ -660,7 +663,8 @@ static int run_verified_installer(const char *origin,
     (void)snprintf(installer_path, sizeof installer_path, "%s/install_z23.sh",
                    g_work);
     char *child_argv[] = { (char *)"bash", installer_path, source, manifest,
-                           attest[0], attest[1], attest[2], NULL };
+                           attest[0], attest[1], attest[2],
+                           apps ? (char *)"--apps" : NULL, NULL };
 
     const pid_t pid = fork();
     if (pid < 0)
@@ -682,7 +686,8 @@ static int run_verified_installer(const char *origin,
 
 static int bootstrap_main(int argc, char **argv)
 {
-    const bool print_pin = parse_print_pin_request(argc, argv);
+    const enum bootstrap_mode mode = parse_bootstrap_request(argc, argv);
+    const bool print_pin = mode == BOOTSTRAP_PRINT_PIN;
 
     const char *origin = getenv("Z23_INSTALL_TEST_ORIGIN");
     const char *repo_url = getenv("Z23_INSTALL_TEST_PIN_REPO_URL");
@@ -729,7 +734,7 @@ static int bootstrap_main(int argc, char **argv)
     stage_verified_installer(origin, &agreement);
     const char *release_source = getenv("Z23_RELEASE_SOURCE");
     return run_verified_installer(origin, triple, &agreement, att,
-                                  release_source);
+                                  release_source, mode == BOOTSTRAP_APPS);
 }
 
 #endif

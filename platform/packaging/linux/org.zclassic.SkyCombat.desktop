@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Sky Combat
+Comment=Open the Sky Combat airplane game
+Exec=z23 app open skycombat
+Icon=org.zclassic.ZClassic23
+Terminal=false
+Categories=Game;Simulation;
+NoDisplay=false

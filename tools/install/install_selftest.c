@@ -514,6 +514,88 @@ static int isf_boot_with(const char *out, const char *err, const char *const *kv
     return isf_exec(isf_c.bootstrap, argv, &env, out, err);
 }
 
+/* Exercise install modes against the same pinned argv-recording installer;
+ * these modes must not introduce a new provenance or transport bypass. */
+static void isf_apps_run(const char *name, const char *const *args,
+                         const char *dns, const char *origin)
+{
+    isf_name_case(name);
+    char *tmp = isf_r(isf_fmt("tmp/%s", name));
+    isf_need(isf_rm_rf(tmp) && isf_mkdir_p(tmp), "cannot prepare %s", tmp);
+    isf_c.boottmp = tmp;
+    const char *kv[] = {
+        isf_kv("PATH", isf_r("minbin")), isf_kv("HOME", isf_c.root), isf_kv("TMPDIR", tmp),
+        isf_kv("Z23_FD_TEST_ARGV_LOG", isf_c.argv),
+        isf_kv("Z23_INSTALL_TEST_ORIGIN", isf_fmt("file://%s", origin)),
+        isf_repo_pin("RELEASE_PIN"), isf_dns(dns), isf_baked(isf_c.good_pin),
+        isf_kv("Z23_INSTALL_TEST_RESOLV_CONF", isf_r("resolv/empty.conf")),
+        "Z23_INSTALL_TEST_UNAME_S=Linux", "Z23_INSTALL_TEST_UNAME_M=x86_64", nullptr};
+    isf_c.rc = isf_boot_with(isf_c.out, isf_c.err, kv, args);
+}
+
+static void isf_apps_handoff(bool apps)
+{
+    const char *args[] = {apps ? "--apps" : nullptr, nullptr};
+    isf_apps_run(apps ? "apps-exact" : "default-exact", args, "good", isf_r("http/front"));
+    isf_rc_is(0, "agreed, verified installer must run");
+    const char *expected = isf_fmt(
+        "--source=file://%s/http/front/release/linux-x86_64\n--manifest-sha256=%s\n"
+        "--attest=baked=%s\n--attest=dns=%s\n--attest=repo=%s%s",
+        isf_c.root, ISF_MANIFEST_SHA, isf_c.good_pin, isf_c.good_pin, isf_c.good_pin,
+        apps ? "\n--apps" : "");
+    isf_need(isf_is_file(isf_c.argv) && !strcmp(isf_slurp_trim(isf_c.argv), expected),
+             "installer argv must be exact, with --apps only when requested");
+    isf_need(isf_dir_empty(isf_c.boottmp), "verified handoff leaked scratch");
+}
+
+static void isf_apps_bad_args(void)
+{
+    const char *cases[][3] = {
+        {"--apps", "--apps", nullptr}, {"--print-pin", "--print-pin", nullptr},
+        {"--apps", "--print-pin", nullptr}, {"--print-pin", "--apps", nullptr},
+        {"--apps", "SENSITIVE_BOOTSTRAP_MARKER_9f3a", nullptr},
+        {"--apps=1", nullptr, nullptr}};
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        isf_apps_run(isf_fmt("apps-invalid-%zu", i), cases[i], "good", isf_r("http/front"));
+        isf_rc_is(1, "unsupported, duplicate or conflicting modes must refuse");
+        isf_has(isf_c.err, "unsupported bootstrap argument", "argument refusal must precede provenance work");
+        isf_lacks(isf_c.err, "SENSITIVE_BOOTSTRAP_MARKER_9f3a", "extra argument must not be disclosed");
+        isf_lacks(isf_c.out, "SENSITIVE_BOOTSTRAP_MARKER_9f3a", "extra argument must not be printed");
+        isf_need(isf_dir_empty(isf_c.boottmp), "invalid mode created scratch");
+        isf_need(!isf_is_file(isf_c.argv), "invalid mode ran installer");
+    }
+}
+
+static void isf_apps_provenance(void)
+{
+    const char *apps[] = {"--apps", nullptr}, *print[] = {"--print-pin", nullptr};
+    isf_apps_run("apps-disagree", apps, "other", isf_r("http/front"));
+    isf_rc_is(1, "--apps must refuse disagreeing provenance");
+    isf_has(isf_c.err, "disagree", "--apps must retain quorum refusal");
+    isf_need(!isf_is_file(isf_c.argv), "disagreement ran installer");
+    char *swap = isf_r("http/apps-swap");
+    isf_need(isf_mkdir_p(swap) &&
+        isf_copy_file(isf_r("http/front/tampered.sh"), isf_fmt("%s/install_z23.sh", swap)),
+        "cannot stage tampered installer");
+    isf_apps_run("apps-tampered", apps, "good", swap);
+    isf_rc_is(1, "--apps must refuse unverified installer bytes");
+    isf_has(isf_c.err, "installer digest mismatch", "--apps must retain digest verification");
+    isf_need(!isf_is_file(isf_c.argv), "tampered installer ran");
+    isf_apps_run("apps-pin-only", print, "good", isf_r("http/front"));
+    isf_rc_is(0, "pin inspection must remain read-only");
+    isf_need(!strcmp(isf_slurp_trim(isf_c.out), isf_c.good_pin), "pin output changed");
+    isf_need(!isf_is_file(isf_c.argv), "pin inspection ran installer");
+}
+
+static void isf_case_boot_apps(void)
+{
+    isf_apps_handoff(false);
+    isf_apps_handoff(true);
+    isf_apps_bad_args();
+    isf_apps_provenance();
+    isf_say("PASS --apps forwards only after verified quorum; default and pin-only remain distinct");
+}
+
 static void isf_print_pin_resolves(const char *base[3])
 {
     const char *kv[] = {base[0], base[1], base[2],
@@ -712,6 +794,7 @@ static void isf_run_cases(void)
     isf_case_shim_digest();
     isf_case_cut_shim_installs();
     isf_case_boot_all_agree();
+    isf_case_boot_apps();
     isf_case_boot_print_pin();
     isf_case_boot_disagreement();
     isf_case_boot_unreachable();

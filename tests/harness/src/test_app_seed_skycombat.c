@@ -168,7 +168,9 @@ struct asi_run {
 };
 static const char *const asi_env_keys[] = {
     "HOME", "DISPLAY", "WAYLAND_DISPLAY", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
-    "XDG_STATE_HOME", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_PREFIX", "TMPDIR"
+    "XDG_STATE_HOME", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_PREFIX", "TMPDIR",
+    "Z23_UNIT_DIR", "Z23_LAUNCHD_DIR", "Z23_DATADIR", "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS", "Z23_INSTALL_TEST_PLATFORM"
 };
 struct asi_env { char *value[sizeof(asi_env_keys)/sizeof(asi_env_keys[0])]; };
 static bool asi_environment_save(struct asi_env *s)
@@ -314,21 +316,41 @@ static bool asi_package(struct ass_world *w, struct asi_run *r)
         "--app-source-sha3", r->pin, "--app-verifier", r->verifier, NULL};
     return asi_tool(w, "installed-package.log", argv, 600000);
 }
+static bool asi_service_isolation(const struct asi_run *r)
+{
+    char units[ASS_PATH], launchd[ASS_PATH], runtime[ASS_PATH];
+    if (!asi_path(units, sizeof(units), r->home, ".config/systemd/user") ||
+        !asi_path(launchd, sizeof(launchd), r->home, "Library/LaunchAgents") ||
+        !asi_path(runtime, sizeof(runtime), r->home, "runtime") || mkdir(runtime, 0700) != 0) return false;
+    return setenv("Z23_UNIT_DIR", units, 1) == 0 && setenv("Z23_LAUNCHD_DIR", launchd, 1) == 0 &&
+        setenv("XDG_RUNTIME_DIR", runtime, 1) == 0;
+}
+static bool asi_no_services(const struct asi_run *r)
+{
+    const char *const dirs[] = {".config/systemd/user", "Library/LaunchAgents"};
+    for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); ++i) {
+        char path[ASS_PATH]; struct stat st;
+        if (!asi_path(path, sizeof(path), r->home, dirs[i]) || lstat(path, &st) == 0 || errno != ENOENT)
+            return false;
+    }
+    return true;
+}
 static bool asi_consumer_env(struct asi_run *r)
 {
-    static const char *const unset[] = {"WAYLAND_DISPLAY", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"};
+    static const char *const unset[] = {"WAYLAND_DISPLAY", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+        "Z23_SKIP_SYSTEMD", "Z23_DATADIR", "DBUS_SESSION_BUS_ADDRESS", "Z23_INSTALL_TEST_PLATFORM"};
     for (size_t i = 0; i < sizeof(unset)/sizeof(unset[0]); ++i)
         if (unsetenv(unset[i]) != 0) return false;
     return setenv("HOME", r->home, 1) == 0 && setenv("TMPDIR", r->tmp, 1) == 0 &&
-        setenv("Z23_SKIP_SYSTEMD", "1", 1) == 0 && setenv("Z23_INSTALL_PREFIX", r->prefix, 1) == 0;
+        setenv("Z23_INSTALL_PREFIX", r->prefix, 1) == 0 && asi_service_isolation(r);
 }
 static bool asi_install(struct ass_world *w, struct asi_run *r)
 {
     char script[PATH_MAX], pin[65];
     if (!asi_manifest_pin(r, pin) || !asi_consumer_env(r)) return false;
     if (!asi_path(script, sizeof(script), w->source, "tools/scripts/install_z23.sh")) return false;
-    const char *argv[] = {"/usr/bin/bash", script, "--source", r->release, "--manifest-sha256", pin, NULL};
-    return asi_tool(w, "installed-install.log", argv, 300000);
+    const char *argv[] = {"/usr/bin/bash", script, "--apps", "--source", r->release, "--manifest-sha256", pin, NULL};
+    return asi_no_services(r) && asi_tool(w, "installed-install.log", argv, 300000) && asi_no_services(r);
 }
 /* These are retained direct posix_spawn children, never handed to an identity
  * helper which may reap them. No competing reaper; PID cannot be reused before
@@ -661,6 +683,173 @@ static bool asi_copy_public(const char *from, const char *to)
     if (fclose(out) != 0) ok = false;
     return ok;
 }
+static const char *const asi_desktop_names[] = {
+    "org.zclassic.ZClassic23.desktop", "org.zclassic.ZClassic23.svg",
+    "org.zclassic.ZClassic23.xml", "org.zclassic.SkyCombat.desktop"
+};
+/* Preserve optional Linux assets without silently accepting a partial set. */
+static bool asi_desktop_count(const char *dir, unsigned *count)
+{
+    *count = 0;
+    for (size_t i = 0; i < sizeof(asi_desktop_names)/sizeof(asi_desktop_names[0]); ++i) {
+        char path[ASS_PATH]; struct stat st;
+        if (!asi_path(path, sizeof(path), dir, asi_desktop_names[i])) return false;
+        if (lstat(path, &st) != 0) { if (errno == ENOENT) continue; return false; }
+        if (!S_ISREG(st.st_mode) || st.st_size < 1 || st.st_size > 65536) return false;
+        ++*count;
+    }
+    return *count == 0 || *count == 4;
+}
+static bool asi_desktop_evidence(const struct asi_run *r, const char *dir)
+{
+    unsigned count;
+    if (!asi_desktop_count(r->release, &count)) return false;
+    for (unsigned i = 0; i < count; ++i) {
+        char from[ASS_PATH], to[PATH_MAX];
+        if (!asi_path(from, sizeof(from), r->release, asi_desktop_names[i]) ||
+            !asi_path(to, sizeof(to), dir, asi_desktop_names[i]) || !asi_copy_public(from, to)) return false;
+    }
+    return true;
+}
+static bool asi_desktop_same(const char *a, const char *b)
+{
+    FILE *left = fopen(a, "rb"); if (!left) return false;
+    FILE *right = fopen(b, "rb"); if (!right) { fclose(left); return false; }
+    unsigned char x[4096], y[4096]; size_t nx, ny; bool ok = true;
+    do {
+        nx = fread(x, 1, sizeof(x), left); ny = fread(y, 1, sizeof(y), right);
+        if (nx != ny || memcmp(x, y, nx)) { ok = false; break; }
+    } while (nx == sizeof(x));
+    ok = ok && feof(left) && feof(right) && !ferror(left) && !ferror(right);
+    if (fclose(left) != 0) ok = false;
+    if (fclose(right) != 0) ok = false;
+    return ok;
+}
+static bool asi_desktop_installed(const struct asi_run *r)
+{
+    unsigned count, installed; char pin[65], generation[ASS_PATH], rel[100];
+    if (!asi_desktop_count(r->release, &count) || !asi_manifest_pin(r, pin)) return false;
+    int n = snprintf(rel, sizeof(rel), "share/z23/apps/%s", pin);
+    if (n <= 0 || (size_t)n >= sizeof(rel) || !asi_path(generation, sizeof(generation), r->prefix, rel) ||
+        !asi_desktop_count(generation, &installed) || installed != count) return false;
+    for (unsigned i = 0; i < count; ++i) {
+        char from[ASS_PATH], to[ASS_PATH];
+        if (!asi_path(from, sizeof(from), r->release, asi_desktop_names[i]) ||
+            !asi_path(to, sizeof(to), generation, asi_desktop_names[i]) || !asi_desktop_same(from, to)) return false;
+    }
+    return true;
+}
+#if defined(ZCL_TESTING)
+/* Tests production parsing and desktop reads only; does not impersonate an
+ * installed executable or grant the source authority returned by resolve(). */
+bool zcl_test_installed_desktop_manifest(int dir, const char *wire, size_t length, bool mac);
+struct isd_fixture { int fd; char directory[ASS_PATH], wire[2049], digest[65]; };
+static bool isd_wire(struct isd_fixture *f, unsigned base, unsigned desktop)
+{
+    static const char *const names[] = {"AGENT_CARD.md", "app-build.wire", "installed-source.json",
+        "manifest.wire", "recipe.wire", "source.bundle", "z23", "z23-acme", "z23-package-verify",
+        "z23-skycombat", "zclassic23", "zclassic23-acme", "zclassic23-package-verify"};
+    char base_digest[65]; memset(base_digest, '1', 64); base_digest[64] = 0;
+    size_t used = 0; f->wire[0] = 0;
+    for (unsigned i = 0; i < 17; ++i) {
+        bool present = i < 13 ? (base & (1u << i)) != 0 : (desktop & (1u << (i - 13))) != 0;
+        if (!present) continue;
+        const char *name = i < 13 ? names[i] : asi_desktop_names[i - 13];
+        const char *digest = i < 13 ? base_digest : f->digest;
+        int n = snprintf(f->wire + used, sizeof(f->wire) - used, "%s  %s\n", digest, name);
+        if (n <= 0 || (size_t)n >= sizeof(f->wire) - used) return false;
+        used += (size_t)n;
+    }
+    return true;
+}
+static bool isd_check(const struct isd_fixture *f, bool mac)
+{
+    return zcl_test_installed_desktop_manifest(f->fd, f->wire, strlen(f->wire), mac);
+}
+static bool isd_write(const struct isd_fixture *f, unsigned index, const void *data, size_t size)
+{
+    int fd = openat(f->fd, asi_desktop_names[index], O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+    if (fd < 0) return false;
+    FILE *out = fdopen(fd, "wb"); if (!out) { close(fd); return false; }
+    bool ok = fwrite(data, 1, size, out) == size;
+    if (fclose(out) != 0) ok = false;
+    return ok;
+}
+static bool isd_payload(struct isd_fixture *f, size_t size)
+{
+    unsigned char *bytes = malloc(size); if (!bytes) return false;
+    memset(bytes, 'x', size); uint8_t digest[32]; struct sha256_ctx hash;
+    sha256_init(&hash); sha256_write(&hash, bytes, size); sha256_finalize(&hash, digest);
+    zcl_hex_encode(digest, 32, f->digest);
+    bool ok = true;
+    for (unsigned i = 0; i < 4 && ok; ++i) ok = isd_write(f, i, bytes, size);
+    free(bytes); return ok;
+}
+static bool isd_missing_base(struct isd_fixture *f)
+{
+    for (unsigned row = 0; row < 13; ++row)
+        if (!isd_wire(f, 8191u ^ (1u << row), 15u) || isd_check(f, false)) return false;
+    /* Exactly thirteen rows, but four base members replaced with desktops. */
+    return isd_wire(f, 8191u ^ 15u, 15u) && !isd_check(f, false);
+}
+static bool isd_shapes(struct isd_fixture *f)
+{
+    if (!isd_wire(f, 8191u, 0) || !isd_check(f, false) || !isd_check(f, true)) return false;
+    if (!isd_wire(f, 8191u, 15u) || !isd_check(f, false) || isd_check(f, true)) return false;
+    for (unsigned mask = 1; mask < 15; ++mask)
+        if (!isd_wire(f, 8191u, mask) || isd_check(f, false)) return false;
+    return isd_missing_base(f);
+}
+static bool isd_bad_rows(struct isd_fixture *f)
+{
+    if (!isd_wire(f, 8191u, 15u)) return false;
+    char *alias = strstr(f->wire, "  zclassic23\n");
+    if (!alias) return false;
+    alias[-64] = '2';
+    if (isd_check(f, false) || !isd_wire(f, 8191u, 15u)) return false;
+    char *name = strstr(f->wire, "org.zclassic.SkyCombat.desktop");
+    if (!name) return false;
+    name[0] = 'X';
+    if (isd_check(f, false) || !isd_wire(f, 8191u, 15u)) return false;
+    size_t used = strlen(f->wire);
+    int n = snprintf(f->wire + used, sizeof(f->wire) - used, "%s  %s\n", f->digest, asi_desktop_names[0]);
+    return n > 0 && (size_t)n < sizeof(f->wire) - used && !isd_check(f, false);
+}
+static bool isd_missing_link(struct isd_fixture *f)
+{
+    if (unlinkat(f->fd, asi_desktop_names[0], 0) != 0 || isd_check(f, false)) return false;
+    if (symlinkat(asi_desktop_names[1], f->fd, asi_desktop_names[0]) != 0 || isd_check(f, false)) return false;
+    return unlinkat(f->fd, asi_desktop_names[0], 0) == 0 && isd_write(f, 0, "x", 1) && isd_check(f, false);
+}
+static bool isd_tamper(struct isd_fixture *f)
+{
+    if (!isd_payload(f, 1) || !isd_wire(f, 8191u, 15u)) return false;
+    for (unsigned i = 0; i < 4; ++i) {
+        if (!isd_write(f, i, "y", 1) || isd_check(f, false) ||
+            !isd_write(f, i, "x", 1) || !isd_check(f, false)) return false;
+    }
+    return isd_missing_link(f);
+}
+static int isd_contract(struct ass_world *w)
+{
+    int failures = 0; struct isd_fixture f = {.fd = -1};
+    TEST("installed source desktop set is exact, Linux-only, bounded and reverified") {
+        ASSERT(asi_path(f.directory, sizeof(f.directory), w->root, "desktop-contract"));
+        ASSERT(mkdir(f.directory, 0700) == 0);
+        f.fd = open(f.directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        ASSERT(f.fd >= 0 && isd_payload(&f, 1));
+        ASSERT(isd_shapes(&f));
+        ASSERT(isd_bad_rows(&f));
+        ASSERT(isd_tamper(&f));
+        ASSERT(isd_payload(&f, 65536) && isd_wire(&f, 8191u, 15u) && isd_check(&f, false));
+        ASSERT(isd_payload(&f, 65537) && isd_wire(&f, 8191u, 15u) && !isd_check(&f, false));
+        PASS();
+    } _test_next:;
+    if (f.fd >= 0 && close(f.fd) != 0) ++failures;
+    return failures;
+}
+#endif
+
 static bool asi_evidence(struct ass_world *w, struct asi_run *r)
 {
     const char *dir = getenv("ZCL_TEST_INSTALLED_APP_EVIDENCE_DIR");
@@ -686,7 +875,7 @@ static bool asi_evidence(struct ass_world *w, struct asi_run *r)
         if (!asi_path(from, sizeof(from), r->release, assets[i]) ||
             !asi_path(to, sizeof(to), dir, assets[i]) || !asi_copy_public(from, to)) return false;
     }
-    return true;
+    return asi_desktop_evidence(r, dir);
 }
 static bool asi_cleanup(struct ass_world *w, struct asi_run *r,
                          struct asi_env *saved, bool env_saved, bool cwd_changed)
@@ -700,7 +889,7 @@ static bool asi_cleanup(struct ass_world *w, struct asi_run *r,
         ok, (unsigned long long)r->cli.pid, (unsigned long long)r->display.pid, w->root);
     return ok;
 }
-/* Fixture-only retirement of the single verified flat install generation.
+/* Fixture-only retirement of the single verified flat 13- or 17-member generation.
  * Never called after failed proof/export/process cleanup; no recursive chmod
  * and no following the mutable skycombat selector. */
 static bool asi_cleanup_identity(int fd, const struct stat *before,
@@ -773,7 +962,7 @@ static int ass_installed(struct ass_world *w)
         ASSERT(env_saved && sigaction(SIGCHLD, NULL, &chld) == 0 && chld.sa_handler == SIG_DFL && !(chld.sa_flags & SA_NOCLDWAIT));
         ASSERT(asi_prerequisites(w, &r) && asi_paths(w, &r));
         ASSERT(asi_export(w, &r) && asi_original(w, &r));
-        ASSERT(asi_package(w, &r) && asi_install(w, &r));
+        ASSERT(asi_package(w, &r) && asi_install(w, &r) && asi_desktop_installed(&r));
         ASSERT(asi_display(w, &r));
         ASSERT(chdir(r.empty) == 0); cwd_changed = true;
         ASSERT(asi_discovery(w, &r) && asi_no_consumer_state(&r));
@@ -821,6 +1010,9 @@ int test_app_seed_skycombat(void)
         ASSERT(ass_world_init(&w));
         PASS();
     } _test_next:;
+#if defined(ZCL_TESTING)
+    if (!failures) failures += isd_contract(&w);
+#endif
     if (!failures)
         failures += ass_installed_preflight(&w);
     if (!failures)

@@ -124,7 +124,7 @@ static bool as_package(struct as_open *a)
     if (zcl_package_copy_find_release(a->datadir, a->copy.parent_release, &release, release_id) != ZCL_PACKAGE_COPY_FOUND)
         return as_fail(a, "RELEASE_UNKNOWN", "the parent release is not persisted", a->datadir);
     if (!platform_temp_directory_create("z23-open-", a->scratch, sizeof(a->scratch)) ||
-        vcs_tree_materialize(a->copy_dir, a->copy.selected_tree, a->scratch, VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, 0) != VCS_OK)
+        vcs_tree_materialize_disposable(a->copy_dir, a->copy.selected_tree, a->scratch, VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, 0) != VCS_OK)
         return as_fail(a, "SNAPSHOT_MATERIALIZE_FAILED", "the selected version could not be materialized", a->copy_dir);
     struct vcs_package_prepare_options options = {.dir = a->scratch, .publisher_sequence = 1,
         .reward_address = "", .chain_id = release.chain_id};

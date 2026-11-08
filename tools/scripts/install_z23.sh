@@ -29,6 +29,9 @@
 #   Z23_RELEASE_SOURCE=<url> Z23_RELEASE_MANIFEST_SHA256=<sha256> install_z23.sh
 #   Z23_RELEASE_SOURCE=<local-dir> install_z23.sh
 #   install_z23.sh --selftest
+#   install_z23.sh --apps --source=<url-or-dir> [--manifest-sha256=<pin>]
+#                        install apps without installing or starting a node
+#                        service; register Linux share files when available
 #   install_z23.sh --generation-status=<generation-dir>
 #                        macOS only: print an installed generation's
 #                        directory name, the sha256 SHA256SUMS records for
@@ -53,12 +56,13 @@ die() { printf 'install_z23: REFUSE: %s\n' "$*" >&2; exit 1; }
 say() { printf 'install_z23: %s\n' "$*" >&2; }
 
 NEXT_COMMAND="z23 status"
+APPS_ONLY=0
 
 sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{print $1}'
+        sha256sum <"$1" | awk '{print $1}'
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | awk '{print $1}'
+        shasum -a 256 <"$1" | awk '{print $1}'
     else
         die "no SHA-256 tool (sha256sum or shasum) is available"
     fi
@@ -285,6 +289,7 @@ cleanup_install_stage() {
 RELEASE_MEMBERS_LEGACY="AGENT_CARD.md z23 zclassic23 zclassic23-package-verify zclassic23-acme"
 RELEASE_MEMBERS="AGENT_CARD.md z23 zclassic23 z23-package-verify zclassic23-package-verify z23-acme zclassic23-acme"
 APP_SOURCE_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire"
+APP_DESKTOP_MEMBERS="org.zclassic.SkyCombat.desktop org.zclassic.ZClassic23.desktop org.zclassic.ZClassic23.svg org.zclassic.ZClassic23.xml"
 REMOTE_CARD_MAX_BYTES=$((64 * 1024))
 
 payload_max_bytes() {
@@ -299,6 +304,8 @@ payload_max_bytes() {
         manifest.wire) printf '%s\n' "$((1024 * 1024))" ;;
         recipe.wire) printf '%s\n' "$((256 * 1024))" ;;
         app-build.wire) printf '%s\n' 240 ;;
+        org.zclassic.SkyCombat.desktop|org.zclassic.ZClassic23.desktop|org.zclassic.ZClassic23.svg|org.zclassic.ZClassic23.xml)
+            printf '%s\n' 65536 ;;
         *) return 1 ;;
     esac
 }
@@ -324,10 +331,11 @@ manifest_alias_source() {
     fi
 }
 
-# Sorted (LC_ALL=C) names of the three accepted shapes, compared literally.
+# Sorted (LC_ALL=C) names of the four accepted shapes, compared literally.
 RELEASE_NAMES_CURRENT=$'AGENT_CARD.md\nz23\nz23-acme\nz23-package-verify\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 RELEASE_NAMES_LEGACY=$'AGENT_CARD.md\nz23\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 RELEASE_NAMES_APP=$'AGENT_CARD.md\napp-build.wire\ninstalled-source.json\nmanifest.wire\nrecipe.wire\nsource.bundle\nz23\nz23-acme\nz23-package-verify\nz23-skycombat\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
+RELEASE_NAMES_APP_DESKTOP=$'AGENT_CARD.md\napp-build.wire\ninstalled-source.json\nmanifest.wire\norg.zclassic.SkyCombat.desktop\norg.zclassic.ZClassic23.desktop\norg.zclassic.ZClassic23.svg\norg.zclassic.ZClassic23.xml\nrecipe.wire\nsource.bundle\nz23\nz23-acme\nz23-package-verify\nz23-skycombat\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 
 validate_manifest_contract() {
     local manifest="$1" bytes lines matching names dir name twin
@@ -337,12 +345,12 @@ validate_manifest_contract() {
         || die "SHA256SUMS exceeds $REMOTE_MANIFEST_MAX_BYTES bytes"
     lines="$(wc -l <"$manifest" | tr -d ' ')"
     matching="$(LC_ALL=C grep -Ec \
-        '^[0-9a-f]{64}  (AGENT_CARD\.md|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme|z23-skycombat|installed-source\.json|source\.bundle|manifest\.wire|recipe\.wire|app-build\.wire)$' \
+        '^[0-9a-f]{64}  (AGENT_CARD\.md|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme|z23-skycombat|installed-source\.json|source\.bundle|manifest\.wire|recipe\.wire|app-build\.wire|org\.zclassic\.SkyCombat\.desktop|org\.zclassic\.ZClassic23\.(desktop|svg|xml))$' \
         "$manifest" || true)"
-    { [ "$lines" -eq 7 ] || [ "$lines" -eq 5 ] || [ "$lines" -eq 13 ]; } && [ "$matching" -eq "$lines" ] \
-        || die "SHA256SUMS must contain exactly seven (current), exactly five (legacy), or exactly thirteen (app) strict lowercase SHA-256 rows"
+    { [ "$lines" -eq 7 ] || [ "$lines" -eq 5 ] || [ "$lines" -eq 13 ] || [ "$lines" -eq 17 ]; } && [ "$matching" -eq "$lines" ] \
+        || die "SHA256SUMS must contain exactly five (legacy), exactly seven (current), thirteen (app), or seventeen (Linux app desktop) strict lowercase SHA-256 rows"
     names="$(awk '{print $2}' "$manifest" | LC_ALL=C sort)"
-    [ "$names" = "$RELEASE_NAMES_CURRENT" ] || [ "$names" = "$RELEASE_NAMES_LEGACY" ] || [ "$names" = "$RELEASE_NAMES_APP" ] \
+    [ "$names" = "$RELEASE_NAMES_CURRENT" ] || [ "$names" = "$RELEASE_NAMES_LEGACY" ] || [ "$names" = "$RELEASE_NAMES_APP" ] || [ "$names" = "$RELEASE_NAMES_APP_DESKTOP" ] \
         || die "SHA256SUMS must name each required release member exactly once"
     # z23 and zclassic23 are one program under two names, and the release
     # says so with one digest in two rows. The same holds for each helper
@@ -729,11 +737,18 @@ has_app_source() {
     [ -n "$(manifest_digest_of "$1" z23-skycombat)" ]
 }
 
+app_payload_members() {
+    printf '%s\n' "$APP_SOURCE_MEMBERS"
+    if [ -n "$(manifest_digest_of "$1" org.zclassic.ZClassic23.desktop)" ]; then
+        printf '%s\n' "$APP_DESKTOP_MEMBERS"
+    fi
+}
+
 # The release manifest remains the authority. No JSON projection parsing in
 # shell, new pin format, source signing, or implicit source admission here.
 install_app_members() {
     local stage="$1" dest="$2" name
-    for name in $APP_SOURCE_MEMBERS; do
+    for name in $(app_payload_members "$stage"); do
         if [ "$name" = z23-skycombat ]; then
             install -m 555 "$stage/$name" "$dest/$name" || die "could not install $name"
         else
@@ -754,7 +769,7 @@ install_app_source_linux() {
     dest="$root/$id"
     if [ -e "$dest" ] || [ -L "$dest" ]; then
         [ -d "$dest" ] && [ ! -L "$dest" ] || die "app source generation is not a real directory"
-        for name in $APP_SOURCE_MEMBERS SHA256SUMS; do
+        for name in $(app_payload_members "$stage") SHA256SUMS; do
             cmp -s "$stage/$name" "$dest/$name" || die "app source generation collision: $id"
         done
     else
@@ -775,6 +790,85 @@ install_app_source_linux() {
     atomic_relative_link ../share/z23/apps/skycombat/z23-skycombat "$prefix/bin/z23-skycombat" \
         || die "cannot link the installed game"
     atomic_relative_link "$id" "$root/skycombat" || die "cannot select installed app source"
+}
+
+# Desktop string decoding precedes Exec argument decoding. Never evaluate an
+# installation path as shell text; %f is the only field code we introduce.
+desktop_exec_argument() {
+    case "$1" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+    printf '"'
+    printf '%s' "$1" | sed -e 's/\\/\\\\\\\\/g' -e 's/"/\\\\"/g' \
+        -e 's/`/\\\\`/g' -e 's/\$/\\\\$/g' -e 's/%/%%/g'
+    printf '"'
+}
+
+desktop_install_file() {
+    local source="$1" dest="$2" tmp
+    [ ! -L "$dest" ] && { [ ! -e "$dest" ] || [ -f "$dest" ]; } || return 1
+    tmp="$(mktemp "$dest.new.XXXXXX")" || return 1
+    if install -m 644 "$source" "$tmp" && mv -fT -- "$tmp" "$dest"; then return 0; fi
+    rm -f -- "$tmp"
+    return 1
+}
+
+install_app_desktop() {
+    local prefix="$1" data="${XDG_DATA_HOME:-$HOME/.local/share}"
+    local source="$prefix/share/z23/apps/skycombat" exe arg line desktop tmp name count
+    [ -f "$source/org.zclassic.ZClassic23.desktop" ] || {
+        say "this app release has no desktop assets; use the printed app command or app receive --file=PATH --preview"
+        return 0
+    }
+    case "$data" in /*) ;; *) return 1 ;; esac
+    case "$prefix/bin/z23" in *=*) return 1 ;; esac
+    exe="$(desktop_exec_argument "$prefix/bin/z23")" || return 1
+    # GIO checks the executable before expanding %% to %. Keep that literal
+    # path in an argument when needed; env executes it directly, never a shell.
+    case "$prefix/bin/z23" in
+        *%*)
+            [ -x /usr/bin/env ] || return 1
+            exe="/usr/bin/env -- $exe" ;;
+    esac
+    arg="$(desktop_exec_argument "--datadir=$HOME/.local/share/z23-app-data")" || return 1
+    command -v update-mime-database >/dev/null 2>&1 || {
+        say "share-file registration unavailable: install shared-mime-info; use app receive --file=PATH --preview meanwhile"
+        return 0
+    }
+    command -v update-desktop-database >/dev/null 2>&1 || {
+        say "share-file registration unavailable: install desktop-file-utils; use app receive --file=PATH --preview meanwhile"
+        return 0
+    }
+    install_directories "$data/applications" "$data/icons/hicolor/scalable/apps" "$data/mime/packages" || return 1
+    for name in org.zclassic.ZClassic23.desktop org.zclassic.SkyCombat.desktop; do
+        desktop="$data/applications/$name"
+        tmp="$(mktemp "$data/applications/.z23-desktop.XXXXXX")" || return 1
+        count=0
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                Exec=*)
+                    if [ "$name" = org.zclassic.SkyCombat.desktop ]; then
+                        printf 'Exec=%s app open skycombat %s\n' "$exe" "$arg"
+                    else
+                        printf 'Exec=%s app receive --preview %s --file=%%f\n' "$exe" "$arg"
+                    fi
+                    count=$((count + 1)) ;;
+                *) printf '%s\n' "$line" ;;
+            esac
+        done <"$source/$name" >"$tmp"
+        if [ "$count" -ne 1 ] || ! desktop_install_file "$tmp" "$desktop"; then
+            rm -f -- "$tmp"
+            return 1
+        fi
+        rm -f -- "$tmp"
+    done
+    desktop_install_file "$source/org.zclassic.ZClassic23.svg" \
+        "$data/icons/hicolor/scalable/apps/org.zclassic.ZClassic23.svg" || return 1
+    desktop_install_file "$source/org.zclassic.ZClassic23.xml" \
+        "$data/mime/packages/org.zclassic.ZClassic23.xml" || return 1
+    update-mime-database "$data/mime" || return 1
+    update-desktop-database "$data/applications" || return 1
+    # Do not write mimeapps.list or set a default handler. File managers offer
+    # the verified Z23 receiver through Open With; confirmation remains native.
+    say "Sky Combat added to your applications; share files registered for Open With Z23; your default application is unchanged"
 }
 
 macos_generation_matches() {
@@ -1242,6 +1336,12 @@ install_from_source() {
     trap 'exit 143' TERM
     fetch_into "$src" "$INSTALL_STAGE" "$expected_manifest_sha256"
     verify_strict "$INSTALL_STAGE"
+    if [ "$APPS_ONLY" = 1 ]; then
+        has_app_source "$INSTALL_STAGE" || die "--apps requires an app-capable release"
+        case "$prefix" in /*) ;; *) die "--apps requires an absolute installation prefix" ;; esac
+        printf -v NEXT_COMMAND '%q app open skycombat --datadir=%q' \
+            "$prefix/bin/z23" "$HOME/.local/share/z23-app-data"
+    fi
     local install_platform
     install_platform="${Z23_INSTALL_TEST_PLATFORM:-$(uname -s)}"
     if [ "$install_platform" = Darwin ]; then
@@ -1258,14 +1358,17 @@ install_from_source() {
     cleanup_install_stage
     trap - EXIT HUP INT TERM
     if [ "$install_platform" = Darwin ]; then
-        if [ "${Z23_SKIP_SYSTEMD:-0}" != "1" ]; then
+        if [ "$APPS_ONLY" != 1 ] && [ "${Z23_SKIP_SYSTEMD:-0}" != "1" ]; then
             activate_macos_generation "$prefix" \
                 "${Z23_DATADIR:-$HOME/.zclassic-c23}"
         else
             activate_macos_generation_without_service "$prefix"
         fi
-    elif [ "${Z23_SKIP_SYSTEMD:-0}" != "1" ]; then
+    elif [ "$APPS_ONLY" != 1 ] && [ "${Z23_SKIP_SYSTEMD:-0}" != "1" ]; then
             write_unit "$prefix" "$unit_dir"
+    fi
+    if [ "$APPS_ONLY" = 1 ] && [ "$install_platform" = Linux ]; then
+        install_app_desktop "$prefix" || say "desktop registration incomplete; use the printed app command or app receive --file=PATH --preview"
     fi
     say "installed $prefix/bin/z23"
     printf '%s\n' "$NEXT_COMMAND"
@@ -2829,6 +2932,125 @@ selftest_app_source() {
     done
 }
 
+selftest_app_mode() {
+    local tmp="$SELFTEST_TMP" app="$SELFTEST_TMP/app-desktop-release"
+    local home="$tmp/app home" data="$tmp/app home/data" mock="$tmp/app-mode-tools"
+    local prefix="$tmp/app home/quote\" apostrophe' backslash\\ dollar\$ tick\` space%literal" name platform rc desktop missing_tool
+    mkdir -p "$app" "$home" "$data/applications" "$mock"
+    cp "$tmp/app-release/"* "$app/"
+    for name in $APP_DESKTOP_MEMBERS; do
+        cp "$SCRIPT_DIR/../../platform/packaging/linux/$name" "$app/$name"
+    done
+    cat >"$app/z23" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >"$Z23_APPS_ARGV"
+printf 'z23 v0.1.0 (source 000000000000)\ntor: full\n'
+EOF
+    cp "$app/z23" "$app/zclassic23"
+    chmod 755 "$app/z23" "$app/zclassic23"
+    (cd "$app" && sha256sum $RELEASE_MEMBERS $APP_SOURCE_MEMBERS $APP_DESKTOP_MEMBERS >SHA256SUMS)
+    validate_manifest_contract "$app/SHA256SUMS"
+    for name in systemctl launchctl; do
+        cat >"$mock/$name" <<'EOF'
+#!/bin/sh
+printf 'unexpected service operation\n' >>"$Z23_APPS_SERVICE_LOG"
+exit 88
+EOF
+        chmod 755 "$mock/$name"
+    done
+    for name in update-mime-database update-desktop-database; do
+        cat >"$mock/$name" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >>"$Z23_APPS_DESKTOP_LOG"
+EOF
+        chmod 755 "$mock/$name"
+    done
+    printf '[Default Applications]\napplication/x-z23-share=other.desktop;\n' >"$data/applications/mimeapps.list"
+    cp "$data/applications/mimeapps.list" "$tmp/default-before"
+    for platform in Linux Darwin; do
+        HOME="$home" XDG_DATA_HOME="$data" PATH="$mock:$PATH" \
+            Z23_SKIP_SYSTEMD=0 Z23_INSTALL_TEST_PLATFORM="$platform" \
+            Z23_APPS_SERVICE_LOG="$tmp/app-services" Z23_APPS_DESKTOP_LOG="$tmp/app-desktop" \
+            Z23_APPS_ARGV="$tmp/app-argv" Z23_INSTALL_PREFIX="$prefix-$platform" \
+            Z23_UNIT_DIR="$home/units" Z23_LAUNCHD_DIR="$home/launchd" \
+            "$SCRIPT_DIR/install_z23.sh" --apps --source="$app" >"$tmp/app-next-$platform" \
+            || die "selftest: --apps install failed on $platform"
+        grep -F 'app open skycombat --datadir=' "$tmp/app-next-$platform" >/dev/null \
+            || die "selftest: --apps omitted the app next step"
+    done
+    [ ! -e "$tmp/app-services" ] && [ ! -e "$home/units" ] && [ ! -e "$home/launchd" ] \
+        || die "selftest: --apps touched service installation"
+    cmp -s "$tmp/default-before" "$data/applications/mimeapps.list" \
+        || die "selftest: --apps changed the default application"
+    desktop="$data/applications/org.zclassic.ZClassic23.desktop"
+    grep -F '%%literal-Linux/bin/z23" app receive --preview ' "$desktop" >/dev/null \
+        || die "selftest: desktop executable is not an escaped absolute path"
+    grep -F -- '--file=%f' "$desktop" >/dev/null || die "selftest: desktop lost its file argument"
+    cmp -s "$app/org.zclassic.ZClassic23.xml" "$data/mime/packages/org.zclassic.ZClassic23.xml" \
+        || die "selftest: installed MIME bytes changed"
+    cmp -s "$app/org.zclassic.ZClassic23.svg" "$data/icons/hicolor/scalable/apps/org.zclassic.ZClassic23.svg" \
+        || die "selftest: installed icon bytes changed"
+    [ -s "$tmp/app-desktop" ] || die "selftest: desktop databases were not updated"
+    grep -F '" app open skycombat ' "$data/applications/org.zclassic.SkyCombat.desktop" >/dev/null \
+        || die "selftest: installed app menu entry omitted native Open"
+    "$SCRIPT_DIR/install_z23.sh" --help >"$tmp/app-help"
+    grep -F -- '--apps' "$tmp/app-help" >/dev/null || die "selftest: help omitted --apps"
+    # Simulate each absent desktop tool without depending on host packages.
+    for missing_tool in update-mime-database update-desktop-database; do
+        (
+            command() {
+                if [ "$#" -eq 2 ] && [ "$1" = -v ] && [ "$2" = "$missing_tool" ]; then return 1; fi
+                builtin command "$@"
+            }
+            HOME="$home" XDG_DATA_HOME="$tmp/absent-$missing_tool" PATH="$mock:$PATH" \
+                install_app_desktop "$prefix-Linux"
+        ) >"$tmp/absent.out" 2>&1 || { cat "$tmp/absent.out" >&2; die "selftest: missing desktop tool lost CLI fallback"; }
+        grep -q 'registration unavailable' "$tmp/absent.out" \
+            || die "selftest: missing desktop tool did not report fallback"
+        if grep -q 'share files registered' "$tmp/absent.out" || [ -e "$tmp/absent-$missing_tool" ]; then
+            die "selftest: missing desktop tool claimed or changed registration"
+        fi
+    done
+    if [ "$(uname -s)" = Linux ] && command -v gio >/dev/null 2>&1; then
+        if command -v desktop-file-validate >/dev/null 2>&1; then
+            desktop-file-validate "$desktop" "$data/applications/org.zclassic.SkyCombat.desktop" \
+                || die "selftest: invalid installed desktop entry"
+        fi
+        rm -f -- "$tmp/app-argv"
+        : >"$home/received share %name.z23share"
+        Z23_APPS_ARGV="$tmp/app-argv" gio launch "$desktop" "$home/received share %name.z23share" \
+            >/dev/null || die "selftest: desktop launcher refused the installed entry"
+        local tries=0
+        while [ ! -f "$tmp/app-argv" ] && [ "$tries" -lt 50 ]; do sleep 0.02; tries=$((tries + 1)); done
+        printf '%s\n' app receive --preview "--datadir=$home/.local/share/z23-app-data" \
+            "--file=$home/received share %name.z23share" >"$tmp/app-expected-argv"
+        cmp -s "$tmp/app-expected-argv" "$tmp/app-argv" || die "selftest: desktop launcher changed argument boundaries"
+        rm -f -- "$tmp/app-argv"
+        Z23_APPS_ARGV="$tmp/app-argv" gio launch "$data/applications/org.zclassic.SkyCombat.desktop" \
+            >/dev/null || die "selftest: game launcher refused the installed entry"
+        tries=0
+        while [ ! -f "$tmp/app-argv" ] && [ "$tries" -lt 50 ]; do sleep 0.02; tries=$((tries + 1)); done
+        printf '%s\n' app open skycombat "--datadir=$home/.local/share/z23-app-data" >"$tmp/app-expected-argv"
+        cmp -s "$tmp/app-expected-argv" "$tmp/app-argv" || die "selftest: game launcher changed argument boundaries"
+    else
+        say "selftest: real Linux GIO desktop launch UNOBSERVED on this host"
+    fi
+    for name in $APP_DESKTOP_MEMBERS; do
+        grep -v "  $name\$" "$app/SHA256SUMS" >"$app/missing"
+        rc=0; (validate_manifest_contract "$app/missing") >/dev/null 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] || die "selftest: partial desktop manifest accepted"
+    done
+    printf 'tampered\n' >>"$app/org.zclassic.ZClassic23.desktop"
+    rc=0; (verify_strict "$app") >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: desktop tampering accepted"
+    rc=0
+    HOME="$home" PATH="$mock:$PATH" Z23_APPS_SERVICE_LOG="$tmp/app-services" \
+        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$tmp/app-node-refusal" \
+        "$SCRIPT_DIR/install_z23.sh" --apps --source="$tmp/good-new" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] && [ ! -e "$tmp/app-node-refusal" ] && [ ! -e "$tmp/app-services" ] \
+        || die "selftest: --apps accepted or mutated a node-only installation"
+}
+
 selftest() {
     # Ordinary fixtures use the production deadline, including cold launches
     # under parallel lint load. Only the timeout fixture shortens it to 1 s.
@@ -2846,6 +3068,7 @@ selftest() {
     selftest_current_release
     selftest_install_directory_modes
     selftest_app_source
+    selftest_app_mode
     selftest_local_manifest_refusals
     selftest_release_pin
     selftest_macos_transaction
@@ -2864,6 +3087,7 @@ EXPECTED_MANIFEST_SHA256="${Z23_RELEASE_MANIFEST_SHA256:-}"
 ATTEST_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
+        --apps) APPS_ONLY=1; shift ;;
         --selftest) selftest; exit 0 ;;
         --generation-status=*)
             generation_provenance "${1#--generation-status=}"
@@ -2900,7 +3124,7 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         -h|--help)
-            sed -n '2,22p' "$0"
+            sed -n '2,/^# Env:/p' "$0"
             exit 0
             ;;
         --*) die "unknown argument: $1" ;;

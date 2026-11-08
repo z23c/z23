@@ -244,6 +244,11 @@ int vcs_tree_materialize(const char *object_store_root, const uint8_t tree_hash[
 {
     return materialize_tree(object_store_root, tree_hash, destination, maximum_bytes, file_mode, false, true);
 }
+int vcs_tree_materialize_disposable(const char *object_store_root, const uint8_t tree_hash[32],
+                         const char *destination, uint64_t maximum_bytes, uint32_t file_mode)
+{
+    return materialize_tree(object_store_root, tree_hash, destination, maximum_bytes, file_mode, false, false);
+}
 int vcs_tree_materialize_readonly(const char *object_store_root, const uint8_t tree_hash[32],
                                   const char *destination, uint64_t maximum_bytes, uint32_t file_mode)
 {

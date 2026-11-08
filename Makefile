@@ -2636,6 +2636,8 @@ presentation-desktop-install:
 		"$${PRESENTATION_DESKTOP_DATA_HOME}/mime/packages"
 	@install -m 0644 platform/packaging/linux/org.zclassic.ZClassic23.desktop \
 		"$${PRESENTATION_DESKTOP_DATA_HOME}/applications/org.zclassic.ZClassic23.desktop"
+	@install -m 0644 platform/packaging/linux/org.zclassic.SkyCombat.desktop \
+		"$${PRESENTATION_DESKTOP_DATA_HOME}/applications/org.zclassic.SkyCombat.desktop"
 	@install -m 0644 platform/packaging/linux/org.zclassic.ZClassic23.svg \
 		"$${PRESENTATION_DESKTOP_DATA_HOME}/icons/hicolor/scalable/apps/org.zclassic.ZClassic23.svg"
 	@install -m 0644 platform/packaging/linux/org.zclassic.ZClassic23.xml \

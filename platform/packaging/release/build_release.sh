@@ -63,6 +63,7 @@ APP_SOURCE_SHA3=""
 NODE_ONLY=0
 APP_VERIFIER="$REPO_ROOT/build/bin/z23-dev"
 APP_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire"
+LINUX_DESKTOP_MEMBERS="org.zclassic.SkyCombat.desktop org.zclassic.ZClassic23.desktop org.zclassic.ZClassic23.svg org.zclassic.ZClassic23.xml"
 # shellcheck source=tools/scripts/tor_stamp_lib.sh
 . "$REPO_ROOT/tools/scripts/tor_stamp_lib.sh"
 
@@ -292,6 +293,7 @@ write_sha256sums() {
     if [ "$with_app" = 1 ]; then
         case "$platform" in linux-x86_64|darwin-arm64) ;; *) die "app source requires a POSIX release" ;; esac
         members="$members $APP_MEMBERS"
+        [ "$platform" != linux-x86_64 ] || members="$members $LINUX_DESKTOP_MEMBERS"
     fi
     (
         cd "$dir" || exit 1
@@ -310,11 +312,11 @@ write_sha256sums() {
 # packaging refuses rather than silently shipping checksummed files and
 # an unchecked one.
 #
-# tools/scripts/install_z23.sh accepts the closed app-capable thirteen-name
-# set as well as the current seven and legacy five node-only sets.
+# App-capable Linux releases contain seventeen members; Darwin retains thirteen.
+# The installer must accept both sets along with seven and five node-only sets.
 # tools/scripts/deploy_z23_release.sh still accepts only seven/five: use
 # explicit --node-only for that legacy deployment path. It must refuse the
-# thirteen-member app release; do not drop members to make deployment pass.
+# app release; do not drop members to make deployment pass.
 # App-capable releases use the installer path, with every member checked.
 copy_agent_card() {
     local out_dir="$1"
@@ -497,7 +499,7 @@ package_from_bin() {
     if [ -n "$APP_SOURCE" ]; then
         [ "$(cd "$out_dir" && pwd -P)" != "$APP_SOURCE" ] || die "release output must differ from app source"
     fi
-    for member in $APP_MEMBERS; do rm -f -- "$out_dir/$member"; done
+    for member in $APP_MEMBERS $LINUX_DESKTOP_MEMBERS; do rm -f -- "$out_dir/$member"; done
     for member in $members; do rm -f "$out_dir/$member"; done
     rm -f "$out_dir/AGENT_CARD.md" "$out_dir/SHA256SUMS"
     strip_binary "$platform" "$src" "$out_dir/z23$exe" || die "strip failed"
@@ -523,6 +525,13 @@ package_from_bin() {
     done
     copy_agent_card "$out_dir"
     copy_app_source "$out_dir"
+    if [ -n "$APP_SOURCE" ] && [ "$platform" = linux-x86_64 ]; then
+        for member in $LINUX_DESKTOP_MEMBERS; do
+            cp -f -- "$REPO_ROOT/platform/packaging/linux/$member" "$out_dir/$member" \
+                || die "could not copy $member"
+            chmod 644 "$out_dir/$member"
+        done
+    fi
     local with_app=0
     [ -z "$APP_SOURCE" ] || with_app=1
     write_sha256sums "$out_dir" "$platform" "$with_app"
@@ -734,11 +743,14 @@ selftest_app_source() {
     local tmp="$1" name rc=0
     mkdir -p "$tmp/app-sums"
     cp "$tmp/sums/"* "$tmp/app-sums/"
-    for name in $APP_MEMBERS; do printf 'inert %s\n' "$name" >"$tmp/app-sums/$name"; done
+    for name in $APP_MEMBERS $LINUX_DESKTOP_MEMBERS; do printf 'inert %s\n' "$name" >"$tmp/app-sums/$name"; done
     write_sha256sums "$tmp/app-sums" linux-x86_64 1
-    [ "$(wc -l <"$tmp/app-sums/SHA256SUMS")" -eq 13 ] || die "selftest: app set must have thirteen rows"
+    [ "$(wc -l <"$tmp/app-sums/SHA256SUMS")" -eq 17 ] || die "selftest: Linux app set must have seventeen rows"
+    write_sha256sums "$tmp/app-sums" darwin-arm64 1
+    [ "$(wc -l <"$tmp/app-sums/SHA256SUMS")" -eq 13 ] || die "selftest: Darwin app set must have thirteen rows"
+    write_sha256sums "$tmp/app-sums" linux-x86_64 1
     (cd "$tmp/app-sums" && sha256_check SHA256SUMS >/dev/null) || die "selftest: extended checksum set failed"
-    for name in $APP_MEMBERS; do
+    for name in $APP_MEMBERS $LINUX_DESKTOP_MEMBERS; do
         mv "$tmp/app-sums/$name" "$tmp/app-sums/$name.held"
         rc=0; (write_sha256sums "$tmp/app-sums" linux-x86_64 1) >/dev/null 2>&1 || rc=$?
         [ "$rc" -ne 0 ] || die "selftest: missing app member accepted: $name"

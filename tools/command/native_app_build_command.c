@@ -27,7 +27,10 @@
  *
  * Confirm re-derives the plan, then on a cache hit returns the record and
  * runs no make. Otherwise it runs `make app` out of tree in a fresh
- * APP_OUT under <datadir>/app_build/work/<copy root>, confined where the
+ * APP_OUT under <datadir>/app_build/work/<copy root>, using a private temporary
+ * alias when that path cannot be passed literally to make recipes. The
+ * temporary source and writable work remain separate; configured TMPDIR is
+ * respected and unsafe temporary paths refuse before the build. It is confined where the
  * host can (the reply says "unconfined" where not), refuses BUILD_FAILED
  * with a bounded log tail, refuses CLOSURE_DRIFT when a depfile names an
  * input the plan's closure did not declare, stores the image at
@@ -77,6 +80,7 @@ struct zab {
     const char *version;
     char copy_dir[ZAB_PATH];
     char selected_source[PLATFORM_TEMP_PATH_MAX];
+    char temporary_work[PLATFORM_TEMP_PATH_MAX];
     struct zcl_package_copy copy;
     bool copy_open;
     enum zcl_package_copy_adoption auth;
@@ -95,6 +99,50 @@ static void zab_fail(struct zab *z, const char *code, bool mutated,
                      const char *message, const char *evidence)
 {
     zcl_package_copy_fail(z->reply, code, mutated, message, evidence);
+}
+
+/* Recipes receive paths as make variables as well as argv. Keep their
+ * execution workspace independent of shell/make syntax in a user's HOME.
+ * Canonicalize existing paths so a harmless-looking alias cannot hide it. */
+static bool zab_make_path(const char *path)
+{
+    char real[ZAB_PATH];
+    static const char safe[] =
+        "/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-";
+    return path[0] && strspn(path, safe) == strlen(path) &&
+        platform_directory_canonical_real(path, real, sizeof(real)) &&
+        strspn(real, safe) == strlen(real);
+}
+
+static bool zab_private_workspace(struct zab *z, const char *prefix,
+                                   char *path, size_t cap, bool mutated)
+{
+    if (!platform_temp_directory_create(prefix, path, cap)) {
+        zab_fail(z, "BUILD_WORKSPACE_FAILED", mutated,
+                 "could not create a private build workspace in the configured temporary directory",
+                 ZAB_COMMAND);
+        return false;
+    }
+    if (zab_make_path(path)) return true;
+    zab_fail(z, "BUILD_WORKSPACE_PATH_UNSUPPORTED", mutated,
+             "set TMPDIR to a private temporary directory whose path and canonical path contain only letters, digits, slash, dot, underscore or hyphen; the app copy can remain where it is",
+             ZAB_COMMAND);
+    return false;
+}
+
+static bool zab_outside_work(struct zab *z, const char *path)
+{
+    char source[ZAB_PATH], work[ZAB_PATH];
+    if (platform_directory_canonical_real(path, source, sizeof(source)) &&
+        platform_directory_canonical_real(z->store.work, work, sizeof(work))) {
+        size_t len = strlen(work);
+        if (strncmp(source, work, len) || (source[len] != '/' && source[len] != '\0'))
+            return true;
+    }
+    zab_fail(z, "SNAPSHOT_NOT_ISOLATED", true,
+             "source and private workspace aliases must be outside the writable build directory",
+             ZAB_COMMAND);
+    return false;
 }
 
 /* ── which copy, and may it be built ─────────────────────────────────── */
@@ -164,13 +212,11 @@ static bool zab_open_copy(struct zab *z)
 static bool zab_selected_source(struct zab *z)
 {
     if (!z->version) return zab_clean(z);
-    if (!platform_temp_directory_create("z23-build-selected-", z->selected_source,
-                                         sizeof(z->selected_source))) {
-        zab_fail(z, "SNAPSHOT_CREATE_FAILED", false,
-                 "could not create private selected-source scratch", ZAB_COMMAND);
+    if (!zab_private_workspace(z, "z23-build-selected-", z->selected_source,
+                               sizeof(z->selected_source), false)) {
         return false;
     }
-    if (vcs_tree_materialize(z->copy_dir, z->copy.selected_tree, z->selected_source,
+    if (vcs_tree_materialize_disposable(z->copy_dir, z->copy.selected_tree, z->selected_source,
                              VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, 0) != VCS_OK) {
         zab_fail(z, "SNAPSHOT_MATERIALIZE_FAILED", false,
                  "selected saved source could not be verified and materialized", ZAB_COMMAND);
@@ -518,14 +564,46 @@ static bool zab_record(struct zab *z, const char *image,
     return r.ok;
 }
 
+/* The alias names existing persistent work, not a second build store. Its
+ * private parent is not writable by confined make; the sandbox and disk watcher
+ * still receive the real work directory. Removing the parent unlinks the
+ * alias and cannot descend into persistent work. */
+static bool zab_work_alias(struct zab *z, char *alias, size_t cap)
+{
+#if defined(_WIN32)
+    (void)alias; (void)cap;
+    zab_fail(z, "BUILD_WORKSPACE_UNSUPPORTED", true,
+             "this host cannot create a private make workspace alias", ZAB_COMMAND);
+    return false;
+#else
+    char target[ZAB_PATH], resolved[ZAB_PATH];
+    if (!zab_private_workspace(z, "z23-build-work-", z->temporary_work,
+                               sizeof(z->temporary_work), true)) return false;
+    if (!zab_outside_work(z, z->temporary_work)) return false;
+    bool ok = platform_directory_canonical_real(z->store.work, target, sizeof(target)) &&
+        zcl_path_join(alias, cap, z->temporary_work, "output") &&
+        symlink(target, alias) == 0 &&
+        platform_directory_canonical_real(alias, resolved, sizeof(resolved)) &&
+        strcmp(target, resolved) == 0;
+    if (!ok)
+        zab_fail(z, "BUILD_WORKSPACE_FAILED", true,
+                 "could not bind private workspace to the existing build directory", ZAB_COMMAND);
+    return ok;
+#endif
+}
+
 static bool zab_dirs(struct zab *z, char *run, size_t cap)
 {
+    char alias[ZAB_PATH];
     bool ok = zcl_mkdir_p(z->store.work, 0700).ok &&
               zcl_mkdir_p(z->store.images, 0700).ok &&
-              zcl_mkdir_p(z->store.records, 0700).ok &&
-              zcl_path_join(run, cap, z->store.work, "run-XXXXXX") && mkdtemp(run);
+              zcl_mkdir_p(z->store.records, 0700).ok;
+    if (ok && !zab_make_path(z->store.work) && !zab_work_alias(z, alias, sizeof(alias)))
+        return false;
+    const char *work = z->temporary_work[0] ? alias : z->store.work;
+    ok = ok && zcl_path_join(run, cap, work, "run-XXXXXX") && mkdtemp(run);
     if (!ok)
-        zab_fail(z, "BUILD_DIR_FAILED", false, "the build directories could "
+        zab_fail(z, "BUILD_DIR_FAILED", true, "the build directories could "
                  "not be created", z->store.work);
     return ok;
 }
@@ -565,16 +643,20 @@ static void zab_after_make(struct zab *z, const struct app_build_make *m,
 static bool zab_snapshot_create(struct zab *z, char snapshot[ZAB_PATH])
 {
     char parent[ZAB_PATH], pattern[ZAB_PATH];
-    if (!zcl_path_join(parent, sizeof(parent), z->datadir, ZAB_STORE "/sources") ||
-        !zcl_mkdir_p(parent, 0700).ok ||
-        !zcl_path_join(pattern, sizeof(pattern), parent, "saved-XXXXXX") ||
-        !mkdtemp(pattern)) {
-        zab_fail(z, "SNAPSHOT_CREATE_FAILED", true,
-                 "could not create private saved-source directory", z->datadir);
-        return false;
+    if (z->temporary_work[0]) {
+        if (!zab_private_workspace(z, "z23-build-source-", snapshot, ZAB_PATH, true)) return false;
+    } else {
+        if (!zcl_path_join(parent, sizeof(parent), z->datadir, ZAB_STORE "/sources") ||
+            !zcl_mkdir_p(parent, 0700).ok ||
+            !zcl_path_join(pattern, sizeof(pattern), parent, "saved-XXXXXX") ||
+            !mkdtemp(pattern)) {
+            zab_fail(z, "SNAPSHOT_CREATE_FAILED", true,
+                     "could not create private saved-source directory", z->datadir);
+            return false;
+        }
+        (void)snprintf(snapshot, ZAB_PATH, "%s", pattern);
     }
-    (void)snprintf(snapshot, ZAB_PATH, "%s", pattern);
-    if (vcs_tree_materialize(z->copy_dir, z->copy.head_tree, snapshot,
+    if (vcs_tree_materialize_disposable(z->copy_dir, z->copy.head_tree, snapshot,
                              VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, 0) != VCS_OK) {
         zab_fail(z, "SNAPSHOT_MATERIALIZE_FAILED", true,
                  "could not materialize the saved head from verified objects", snapshot);
@@ -615,22 +697,6 @@ static void zab_scratch_remove(const char *path)
                 path, rm.message);
 }
 
-static bool zab_selected_isolated(struct zab *z)
-{
-    if (!z->version) return true;
-    char source[ZAB_PATH], work[ZAB_PATH];
-    bool real = platform_directory_canonical_real(z->selected_source, source, sizeof(source)) &&
-        platform_directory_canonical_real(z->store.work, work, sizeof(work));
-    if (real) {
-        size_t len = strlen(work);
-        if (strncmp(source, work, len) || (source[len] != '/' && source[len] != '\0'))
-            return true;
-    }
-    zab_fail(z, "SNAPSHOT_NOT_ISOLATED", true,
-             "selected-source scratch must be outside the writable build directory", ZAB_COMMAND);
-    return false;
-}
-
 static void zab_build(struct zab *z)
 {
     char run[ZAB_PATH], snapshot[ZAB_PATH] = "";
@@ -645,7 +711,8 @@ static void zab_build(struct zab *z)
         const struct app_build_make m = {.copy_dir = z->version ? z->selected_source : snapshot,
                                          .work_dir = z->store.work,
                                          .confine = z->confine};
-        if (zab_selected_isolated(z) && (z->version || zab_snapshot_create(z, snapshot)) &&
+        if ((z->version || zab_snapshot_create(z, snapshot)) &&
+            zab_outside_work(z, m.copy_dir) &&
             zab_snapshot_matches(z, &m)) {
             app_build_make_run(&m, run, res);
             zab_after_make(z, &m, run, res);
@@ -653,6 +720,7 @@ static void zab_build(struct zab *z)
         zab_scratch_remove(snapshot);
         zab_scratch_remove(run);
     }
+    zab_scratch_remove(z->temporary_work);
     free(res);
 }
 

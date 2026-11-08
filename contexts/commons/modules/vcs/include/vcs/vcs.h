@@ -121,6 +121,16 @@ int vcs_tree_materialize(const char *object_store_root,
                          const uint8_t tree_hash[32],
                          const char *destination, uint64_t maximum_bytes,
                          uint32_t file_mode);
+/* Same verified reads and exact legacy-alias recovery as materialize, but
+ * omit destination durability barriers. ONLY for fresh caller-owned disposable
+ * scratch reconstructed from retained CAS and consumed before cleanup; never
+ * for a published checkout or sole retained copy. Bounds, modes, exclusive
+ * writes and write/close failure handling are unchanged. Source recovery keeps
+ * its existing durability. Use the readonly variant when CAS must not change. */
+int vcs_tree_materialize_disposable(const char *object_store_root,
+                         const uint8_t tree_hash[32],
+                         const char *destination, uint64_t maximum_bytes,
+                         uint32_t file_mode);
 /* Same materialization, but read only canonical verified source objects:
  * no legacy-alias recovery. The private destination is still written. */
 int vcs_tree_materialize_readonly(const char *object_store_root,

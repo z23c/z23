@@ -43,6 +43,8 @@
 #include "vcs/vcs.h"
 
 #include <stdio.h>
+#include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdlib.h>
@@ -316,7 +318,7 @@ static bool abc_adopt(struct abc_world *w)
     return ok && w->copy[0] == '/';
 }
 
-static bool abc_world_init(struct abc_world *w)
+static bool abc_world_init_named(struct abc_world *w, const char *alice)
 {
     memset(w, 0, sizeof(*w));
     const char *home = getenv("HOME");
@@ -325,20 +327,25 @@ static bool abc_world_init(struct abc_world *w)
     if (!test_mkdtemp(w->root, sizeof(w->root), "app_build_copy"))
         return false;
     (void)snprintf(w->src, sizeof(w->src), "%s/stub-src", w->root);
-    (void)snprintf(w->alice_home, sizeof(w->alice_home), "%s/alice", w->root);
+    (void)snprintf(w->alice_home, sizeof(w->alice_home), "%s/%s", w->root, alice);
     (void)snprintf(w->alice_datadir, sizeof(w->alice_datadir),
-                   "%s/alice/datadir", w->root);
+                   "%s/%s/datadir", w->root, alice);
     (void)snprintf(w->bob_home, sizeof(w->bob_home), "%s/bob", w->root);
     (void)snprintf(w->bob_datadir, sizeof(w->bob_datadir), "%s/bob/datadir",
                    w->root);
     (void)snprintf(w->bob_copy, sizeof(w->bob_copy), "%s/bob/tinyapp-from-alice",
                    w->root);
     (void)snprintf(w->share_file, sizeof(w->share_file),
-                   "%s/alice/tinyapp.z23share", w->root);
+                   "%s/%s/tinyapp.z23share", w->root, alice);
     return abc_stub_source(w) && mkdir(w->alice_home, 0700) == 0 &&
            mkdir(w->alice_datadir, 0700) == 0 &&
            mkdir(w->bob_home, 0700) == 0 && abc_as(w->alice_home) &&
            abc_publish_origin(w) && abc_adopt(w);
+}
+
+static bool abc_world_init(struct abc_world *w)
+{
+    return abc_world_init_named(w, "alice");
 }
 
 /* ── app.build helpers ──────────────────────────────────────────────── */
@@ -1274,6 +1281,260 @@ static int abc_preview_outside_copy(void)
     return failures;
 }
 
+/* A spaced personal HOME is valid; only make's execution spelling needs a
+ * syntax-safe workspace. Keep this independent of the old counter/FIFO case. */
+static bool abc_workspace_empty(const char *path)
+{
+    DIR *dir = opendir(path);
+    if (!dir) return false;
+    bool empty = true;
+    struct dirent *entry;
+    errno = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) empty = false;
+    }
+    bool ok = errno == 0;
+    return closedir(dir) == 0 && ok && empty;
+}
+
+static bool abc_workspace_prepare(const struct abc_world *w, struct abc_selected *s)
+{
+    char recipe[sizeof(k_makefile) + 350];
+    int n = snprintf(recipe, sizeof(recipe), "%s"
+        "APP_CFLAGS += -ffile-prefix-map=$(CURDIR)=/fixture\n%s", k_makefile,
+        lab_sandbox_available() ?
+        ".PHONY: readonlycheck\napp: readonlycheck\nreadonlycheck:\n"
+        "\t@if printf forbidden > src/main.c; then exit 89; fi\n" : "");
+    return n > 0 && (size_t)n < sizeof(recipe) &&
+        abc_put(w->copy, "Makefile", recipe) &&
+        abc_put(w->copy, "src/main.c", k_saved_main) && abc_save(w->copy, s->n);
+}
+
+static bool abc_workspace_result(const struct abc_world *w, const struct abc_leaf *l,
+                                  int runs)
+{
+    const char *build = abc_get(l, "build_dir");
+    size_t len = strlen(w->alice_datadir);
+    return abc_flag(l, "make_ran") && !abc_flag(l, "executed") &&
+        !strncmp(build, w->alice_datadir, len) && build[len] == '/' &&
+        abc_make_runs(build) == runs && abc_saved_image(abc_get(l, "image_path")) &&
+        abc_record_matches(l, w->alice_datadir) &&
+        !strcmp(abc_get(l, "confinement"), lab_sandbox_available() ? "landlock" : "unconfined");
+}
+
+static bool abc_workspace_head(const struct abc_world *w, struct abc_selected *s)
+{
+    struct abc_leaf l;
+    bool ok = abc_build(&l, w->copy, w->alice_datadir);
+    ok = ok && abc_workspace_result(w, &l, 1);
+    (void)snprintf(s->roots[0], sizeof(s->roots[0]), "%s", s->n);
+    for (size_t i = 1; ok && i < 6; ++i) {
+        const char *value = abc_get(&l, abc_selected_keys[i]);
+        ok = strlen(value) == 64;
+        if (ok) memcpy(s->roots[i], value, 65);
+    }
+    /* Force selected-version compilation, not an old image cache hit. */
+    if (ok) ok = unlink(abc_get(&l, "image_path")) == 0;
+    abc_close(&l);
+    return ok;
+}
+
+static bool abc_workspace_selected(const struct abc_world *w, struct abc_selected *s)
+{
+    struct abc_leaf l;
+    abc_selected_input(&l, w, s->n);
+    bool ok = abc_plan_confirm("app.build", &l) && abc_workspace_result(w, &l, 2);
+    for (size_t i = 0; ok && i < 6; ++i)
+        ok = !strcmp(s->roots[i], abc_get(&l, abc_selected_keys[i]));
+    abc_close(&l);
+    return ok && abc_selected_bytes(w, s, true) && abc_selected_head(w, s);
+}
+
+static bool abc_workspace_refused(const struct abc_world *w, const char *version)
+{
+    struct abc_leaf l;
+    abc_build_input(&l, w->copy, w->alice_datadir);
+    bool ran;
+    if (version) {
+        (void)json_push_kv_str(&l.in, "version", version);
+        ran = abc_exec("app.build", &l);
+    } else {
+        /* A head plan may query its declared closure, but no compiler runs. */
+        ran = abc_pass("app.build", &l) && abc_confirm("app.build", &l);
+    }
+    bool ok = ran && abc_refusal(&l, "BUILD_WORKSPACE_PATH_UNSUPPORTED") &&
+        strstr(l.out.error.message, "TMPDIR") != NULL &&
+        l.out.error.mutated == (version == NULL) &&
+        !abc_flag(&l, "make_ran") && !abc_flag(&l, "executed") &&
+        !abc_get(&l, "image_path")[0] && !abc_get(&l, "record_path")[0];
+    abc_close(&l);
+    return ok;
+}
+
+static bool abc_workspace_no_images(const struct abc_world *w)
+{
+    char path[ABC_PATH];
+    const char *const stores[] = {"images", "records"};
+    for (size_t i = 0; i < 2; ++i) {
+        int n = snprintf(path, sizeof(path), "%s/app_build/%s", w->alice_datadir, stores[i]);
+        if (n < 0 || (size_t)n >= sizeof(path)) return false;
+        struct stat st;
+        if (lstat(path, &st) != 0) {
+            if (errno == ENOENT) continue;
+            return false;
+        }
+        if (!S_ISDIR(st.st_mode) || !abc_workspace_empty(path)) return false;
+    }
+    return true;
+}
+
+static bool abc_workspace_dirs(const struct abc_world *w, char safe[ABC_PATH],
+                                char unsafe[ABC_PATH])
+{
+    int a = snprintf(safe, ABC_PATH, "%s/workspace-temp", w->root);
+    int b = snprintf(unsafe, ABC_PATH, "%s/workspace temp", w->root);
+    return a > 0 && a < ABC_PATH && b > 0 && b < ABC_PATH &&
+        mkdir(safe, 0700) == 0 && mkdir(unsafe, 0700) == 0;
+}
+
+static bool abc_workspace_alias_refused(const struct abc_world *w,
+                                         const struct abc_selected *s, const char *safe)
+{
+    char alias[ABC_PATH];
+    int n = snprintf(alias, sizeof(alias), "%s/spaced link", w->root);
+    return n > 0 && (size_t)n < sizeof(alias) && symlink(safe, alias) == 0 &&
+        setenv("TMPDIR", alias, 1) == 0 &&
+        abc_workspace_refused(w, NULL) && abc_workspace_empty(safe) &&
+        abc_workspace_refused(w, s->n) && abc_workspace_empty(safe);
+}
+
+static int abc_spaced_workspace(void)
+{
+    int failures = 0;
+    struct abc_world w = {0}; struct abc_selected s = {0};
+    const char *old = getenv("TMPDIR");
+    char *saved = old ? strdup(old) : NULL;
+    bool env_ready = !old || saved != NULL;
+    bool had_home = getenv("HOME") != NULL;
+    char safe[ABC_PATH] = "", unsafe[ABC_PATH] = "";
+    TEST("app.build: spaced HOME/datadir uses private safe workspace, retains persistent counters and selected source") {
+        ASSERT(env_ready);
+        ASSERT(abc_world_init_named(&w, "alice home"));
+        ASSERT(abc_workspace_dirs(&w, safe, unsafe));
+        ASSERT(abc_workspace_prepare(&w, &s));
+        ASSERT(abc_selected_bytes(&w, &s, false));
+        ASSERT(setenv("TMPDIR", unsafe, 1) == 0);
+        ASSERT(abc_workspace_refused(&w, NULL));
+        ASSERT(abc_workspace_empty(unsafe));
+        ASSERT(abc_workspace_refused(&w, s.n));
+        ASSERT(abc_workspace_empty(unsafe));
+        ASSERT(abc_workspace_alias_refused(&w, &s, safe));
+        ASSERT(abc_workspace_no_images(&w));
+        ASSERT(abc_selected_bytes(&w, &s, true));
+        ASSERT(setenv("TMPDIR", safe, 1) == 0);
+        ASSERT(abc_workspace_head(&w, &s));
+        ASSERT(abc_workspace_empty(safe));
+        ASSERT(abc_selected_poison(&w, &s));
+        ASSERT(abc_workspace_selected(&w, &s));
+        ASSERT(abc_workspace_empty(safe));
+        PASS();
+    } _test_next:;
+    if (env_ready && (saved ? setenv("TMPDIR", saved, 1) : unsetenv("TMPDIR")) != 0) ++failures;
+    free(saved);
+    if (w.saved_home[0] && setenv("HOME", w.saved_home, 1) != 0) ++failures;
+    if (!had_home && unsetenv("HOME") != 0) ++failures;
+    if (!failures && test_rm_rf_recursive(w.root) != 0) ++failures;
+    return failures;
+}
+
+/* The lexical datadir is unsafe, but its target and TMPDIR are syntax-safe.
+ * A temporary alias or source inside writable work is nevertheless forbidden. */
+static bool abc_workspace_counter_only(const char *path)
+{
+    DIR *dir = opendir(path);
+    if (!dir) return false;
+    bool ok = true; unsigned count = 0;
+    struct dirent *entry;
+    errno = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        ++count;
+        if (strcmp(entry->d_name, "make-runs")) ok = false;
+    }
+    ok = ok && errno == 0 && count == 1;
+    return closedir(dir) == 0 && ok && abc_make_runs(path) == 1;
+}
+
+static bool abc_workspace_initial_run(struct abc_world *w)
+{
+    struct abc_leaf l;
+    bool ok = abc_build(&l, w->copy, w->alice_datadir);
+    const char *work = abc_get(&l, "build_dir");
+    int n = snprintf(w->build_dir, sizeof(w->build_dir), "%s", work);
+    ok = ok && n > 0 && (size_t)n < sizeof(w->build_dir) && abc_flag(&l, "make_ran") &&
+        abc_saved_image(abc_get(&l, "image_path")) && abc_record_matches(&l, w->alice_datadir);
+    if (ok) ok = unlink(abc_get(&l, "image_path")) == 0;
+    abc_close(&l);
+    return ok && abc_workspace_counter_only(w->build_dir);
+}
+
+static bool abc_workspace_nested_refused(const struct abc_world *w, const char *version)
+{
+    struct abc_leaf l;
+    abc_build_input(&l, w->copy, w->alice_datadir);
+    if (version) (void)json_push_kv_str(&l.in, "version", version);
+    bool ok = abc_pass("app.build", &l) && abc_confirm("app.build", &l) &&
+        abc_refusal(&l, "SNAPSHOT_NOT_ISOLATED") &&
+        !abc_flag(&l, "make_ran") && !abc_flag(&l, "executed");
+    abc_close(&l);
+    return ok && abc_workspace_counter_only(w->build_dir);
+}
+
+static bool abc_workspace_datadir_alias(struct abc_world *w)
+{
+    char target[sizeof(w->alice_datadir)];
+    memcpy(target, w->alice_datadir, sizeof(target));
+    int n = snprintf(w->alice_datadir, sizeof(w->alice_datadir), "%s/datadir alias", w->root);
+    return n > 0 && (size_t)n < sizeof(w->alice_datadir) &&
+        symlink(target, w->alice_datadir) == 0 && setenv("TMPDIR", w->build_dir, 1) == 0;
+}
+
+static int abc_workspace_nested(void)
+{
+    int failures = 0;
+    struct abc_world w = {0}; struct abc_selected s = {0};
+    const char *old = getenv("TMPDIR");
+    char *saved = old ? strdup(old) : NULL;
+    bool ready = !old || saved != NULL, had_home = getenv("HOME") != NULL;
+    struct stat before, after; uint8_t digest[32], current[32];
+    TEST("app.build: safe-canonical TMPDIR inside persistent work refuses spaced datadir alias and preserves work") {
+        ASSERT(ready);
+        ASSERT(abc_world_init(&w));
+        ASSERT(abc_workspace_prepare(&w, &s));
+        ASSERT(abc_selected_bytes(&w, &s, false));
+        ASSERT(abc_workspace_initial_run(&w));
+        ASSERT(stat(w.build_dir, &before) == 0);
+        ASSERT(abc_file_digest(w.build_dir, "make-runs", digest));
+        ASSERT(setenv("TMPDIR", w.build_dir, 1) == 0);
+        ASSERT(abc_workspace_nested_refused(&w, s.n));
+        ASSERT(abc_workspace_datadir_alias(&w));
+        ASSERT(abc_workspace_nested_refused(&w, NULL));
+        ASSERT(abc_workspace_nested_refused(&w, s.n));
+        ASSERT(stat(w.build_dir, &after) == 0);
+        ASSERT(before.st_dev == after.st_dev && before.st_ino == after.st_ino);
+        ASSERT(abc_file_digest(w.build_dir, "make-runs", current));
+        ASSERT(memcmp(digest, current, sizeof(digest)) == 0);
+        ASSERT(abc_selected_bytes(&w, &s, true));
+        PASS();
+    } _test_next:;
+    if (ready && (saved ? setenv("TMPDIR", saved, 1) : unsetenv("TMPDIR")) != 0) ++failures;
+    free(saved);
+    if (w.saved_home[0] && setenv("HOME", w.saved_home, 1) != 0) ++failures;
+    if (!had_home && unsetenv("HOME") != 0) ++failures;
+    if (!failures && test_rm_rf_recursive(w.root) != 0) ++failures;
+    return failures;
+}
+
 int test_app_build_copy(void)
 {
     int failures = 0;
@@ -1314,5 +1575,9 @@ int test_app_build_copy(void)
         failures += abc_preview_skycombat();
     if (!failures)
         failures += abc_preview_outside_copy();
+    if (!failures)
+        failures += abc_spaced_workspace();
+    if (!failures)
+        failures += abc_workspace_nested();
     return failures;
 }
