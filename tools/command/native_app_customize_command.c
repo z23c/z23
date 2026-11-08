@@ -2,6 +2,7 @@
  * Read a kept app's immutable source; never open its working files. */
 #include "command/native_command.h"
 #include "command/native_app_launch.h"
+#include "command/native_app_compose.h"
 #include "command/app_selection.h"
 #include "command/native_app_customize_source.h"
 #include "command/native_zcode_package_copy.h"
@@ -127,6 +128,18 @@ static bool ac_catalog_entry(struct ac_read *a, struct app_launch_entry *selecte
     *selected = *entry;
     return true;
 }
+/* No version is kept yet: name the two commands that make one. */
+static bool ac_selection_required(struct ac_read *a)
+{
+    char copy[72], save[64], message[192];
+    bool made = zcl_app_hint(copy, sizeof(copy), NULL, "copy %s --yes", a->name) &&
+        zcl_app_hint(save, sizeof(save), NULL, "save %s", "<copy name>");
+    (void)snprintf(message, sizeof(message),
+        "no version was selected; run '%s', then '%s' to keep one",
+        made ? copy : "z23 app copy <app> --yes", made ? save : "z23 app save <copy name>");
+    return ac_fail(a, "SELECTION_REQUIRED", message);
+}
+
 static bool ac_select(struct ac_read *a)
 {
     char why[256];
@@ -135,8 +148,7 @@ static bool ac_select(struct ac_read *a)
     struct app_launch_entry entry;
     if (!ac_catalog_entry(a, &entry)) return false;
     enum app_selection_result result = app_selection_load(a->env.state_dir, entry.id, &a->selected);
-    if (result == APP_SELECTION_ABSENT)
-        return ac_fail(a, "SELECTION_REQUIRED", "Make My Copy and Keep a version before requesting its source; no version was selected");
+    if (result == APP_SELECTION_ABSENT) return ac_selection_required(a);
     if (result != APP_SELECTION_OK || a->selected.revision > INT64_MAX)
         return ac_fail(a, "SELECTION_UNREADABLE", "kept selection is invalid or unavailable");
     if (a->pinned && a->expected != a->selected.revision)
