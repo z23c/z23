@@ -6,7 +6,8 @@
  *          check_*.sh wrapper rewrite, the compiled gate table, the
  *          serial and long-pole ordering, and the artifacts it leaves.
  *          check-core-seal's pipe reaches EOF and keeps core_seal's rc.
- * NOT proven here: the real gates, or the Make wiring. */
+ * Vendor dispatch uses the real table with fixture programs; the actual
+ * vendor gates and Make wiring are not exercised here. */
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
 #endif
@@ -56,6 +57,16 @@ static int lrun_resolve(void *ctx, const char *gate, char *cmd, size_t cap)
 {
     const struct lrun_fx *fx = ctx;
     const char *r = fx->root;
+    if (strcmp(gate, "check-vendor-provenance") == 0) {
+        static struct lr_table t;
+        if (lr_table_load(&t) != 0)
+            return 1;
+        const struct lr_table_row *row = lr_table_find(&t, gate);
+        if (!row)
+            return 1;
+        int n = snprintf(cmd, cap, "%s", row->cmd);
+        return n < 0 || (size_t)n >= cap;
+    }
     if (strcmp(gate, "check-fx-pass") == 0)
         return snprintf(cmd, cap, "true") < 0;
     if (strcmp(gate, "check-fx-fail") == 0)
@@ -75,6 +86,33 @@ static int lrun_resolve(void *ctx, const char *gate, char *cmd, size_t cap)
     if (strncmp(gate, "check-fx-ord-", 13) == 0)
         return snprintf(cmd, cap, "sh -c 'echo %s >> %s/order'", gate + 13, r) < 0;
     return 1;
+}
+
+static bool lrun_vendor_setup(const char *root)
+{
+    static const char *dirs[] = {"build", "build/bin", "tools", "tools/scripts",
+                                 "vendor", "vendor/patches", "vendor/provenance",
+                                 "fakebin"};
+    static const char *programs[] = {"build/bin/z23-lint", "tools/scripts/test_vendor_provenance.sh",
+        "tools/scripts/build_vendor_offline_selftest.sh", "tools/scripts/repro_network_policy_selftest.sh",
+        "fakebin/sha256sum"};
+    static const char script[] = "#!/bin/sh\n"
+        "printf '%s %s\\n' \"$0\" \"$*\" >> trace\n"
+        "case $0 in *build_vendor_offline_selftest.sh) [ ! -f fail-offline ] || exit 7;; esac\n"
+        "case $0 in *sha256sum) [ \"$1\" = --check ] || printf 'fixture  -\\n';; esac\n";
+    char path[PATH_MAX + 128];
+    for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
+        (void)snprintf(path, sizeof path, "%s/%s", root, dirs[i]);
+        if (mkdir(path, 0700) != 0) return false;
+    }
+    for (size_t i = 0; i < sizeof programs / sizeof programs[0]; i++) {
+        (void)snprintf(path, sizeof path, "%s/%s", root, programs[i]);
+        if (!lrun_write(path, script) || chmod(path, 0700) != 0) return false;
+    }
+    (void)snprintf(path, sizeof path, "%s/vendor/patches/tor-dynhost-stream-shutdown.patch", root);
+    if (!lrun_write(path, "fixture\n")) return false;
+    (void)snprintf(path, sizeof path, "%s/vendor/provenance/tor.manifest", root);
+    return lrun_write(path, "build_time_patch_sha256=fixture\n");
 }
 
 struct lrun_cfg {
@@ -109,6 +147,23 @@ static bool lrun_plant(struct lrun_fx *fx)
 {
     memset(fx, 0, sizeof *fx);
     return test_mkdtemp(fx->root, sizeof fx->root, "lintrun") != NULL;
+}
+
+static int lrun_vendor_go(struct lrun_fx *fx)
+{
+    pid_t pid = fork();
+    int status;
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char path[PATH_MAX + 32], out[4096], err[4096];
+        char *gates[] = {(char *)"check-vendor-provenance"};
+        struct lrun_cfg c = {1, "", "", ""};
+        (void)snprintf(path, sizeof path, "%s/fakebin:/usr/bin:/bin", fx->root);
+        if (chdir(fx->root) != 0 || setenv("PATH", path, 1) != 0) _exit(99);
+        _exit(lrun_go(fx, &c, gates, 1, out, err, sizeof out));
+    }
+    if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status);
 }
 
 static int test_lrun_verdicts(void)
@@ -347,6 +402,47 @@ static int test_lrun_table(void)
     return failures;
 }
 
+static int test_lrun_vendor(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: vendor gate dispatches all provenance checks and refuses failures") {
+        struct lrun_fx fx;
+        char path[PATH_MAX + 128], trace[4096];
+        ASSERT(lrun_plant(&fx));
+        ASSERT(lrun_vendor_setup(fx.root));
+        (void)snprintf(path, sizeof path, "%s/fail-offline", fx.root);
+        ASSERT(lrun_write(path, "fail\n"));
+        ASSERT_EQ(lrun_vendor_go(&fx), 1);
+        ASSERT_EQ(unlink(path), 0);
+        (void)snprintf(path, sizeof path, "%s/trace", fx.root);
+        ASSERT(lrun_read(path, trace, sizeof trace));
+        ASSERT(strstr(trace, "build_vendor_offline_selftest.sh") != NULL);
+        ASSERT(strstr(trace, "repro_network_policy_selftest.sh") == NULL);
+        ASSERT(strstr(trace, "check-tor-provenance") == NULL);
+        ASSERT(lrun_write(path, ""));
+        ASSERT_EQ(lrun_vendor_go(&fx), 0);
+        ASSERT(lrun_read(path, trace, sizeof trace));
+        ASSERT(strstr(trace, "test_vendor_provenance.sh") != NULL);
+        ASSERT(strstr(trace, "build_vendor_offline_selftest.sh") != NULL);
+        ASSERT(strstr(trace, "repro_network_policy_selftest.sh") != NULL);
+        ASSERT(strstr(trace, "vendor/rgfw/SHA256SUMS") != NULL);
+        ASSERT(strstr(trace, "vendor/qrcodegen/SHA256SUMS") != NULL);
+        ASSERT(strstr(trace, "vendor/typography/SHA256SUMS") != NULL);
+        ASSERT(strstr(trace, "vendor/x11/SHA256SUMS") != NULL);
+        ASSERT(strstr(trace, "vendor/freebsd-sh/SHA256SUMS") != NULL);
+        ASSERT(strstr(trace, "check-tor-provenance") != NULL);
+        ASSERT(lrun_write(path, ""));
+        (void)snprintf(path, sizeof path, "%s/vendor/provenance/tor.manifest", fx.root);
+        ASSERT(lrun_write(path, "build_time_patch_sha256=wrong\n"));
+        ASSERT_EQ(lrun_vendor_go(&fx), 1);
+        (void)snprintf(path, sizeof path, "%s/trace", fx.root);
+        ASSERT(lrun_read(path, trace, sizeof trace));
+        ASSERT(strstr(trace, "check-tor-provenance") == NULL);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
 static int lrun_seal_in_dir(const char *root, const char *bin)
 {
     pid_t pid = fork();
@@ -425,6 +521,7 @@ int test_lint_run(void)
     failures += test_lrun_refuse();
     failures += test_lrun_wrapper();
     failures += test_lrun_table();
+    failures += test_lrun_vendor();
     return failures;
 }
 
