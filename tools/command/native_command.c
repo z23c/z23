@@ -19,6 +19,7 @@
 #define _GNU_SOURCE
 #include "command/native_command.h"
 #include "command/native_app_front_door.h"
+#include "command/native_app_launch.h"
 #include "command/native_json_input.h"
 #include "command/native_command_priv.h"
 #include "command/refold_rate_verdict.h"
@@ -634,6 +635,43 @@ void zcl_native_handle_app_list(const struct zcl_command_request *request,
     json_free(&apps);
 }
 
+/* app.list shows the launch registry (built-in rows plus apps.tsv), so
+ * app.inspect answers for the same rows: an id (or alias) found there is
+ * inspectable even when it has no compile-time definition. True when the
+ * reply was filled. */
+static bool app_inspect_launch_registry(const char *app_id,
+                                        struct zcl_command_reply *reply)
+{
+    struct app_launch_env env;
+    char why[256];
+    struct app_launch_registry *reg =
+        zcl_calloc(1, sizeof(*reg), "app-inspect/registry");
+    if (!reg) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "OUT_OF_MEMORY",
+                               "resolve", true, false,
+                               "cannot allocate the launch registry", app_id);
+        return true;
+    }
+    if (!app_launch_env_from_process(&env, why, sizeof(why)))
+        env.state_dir[0] = '\0';
+    app_launch_registry_load(&env, reg);
+    const struct app_launch_entry *e = app_launch_registry_find(reg, app_id);
+    if (e) {
+        (void)json_push_kv_str(&reply->data, "app_id", e->id);
+        (void)json_push_kv_str(&reply->data, "status",
+                               e->installed ? "installed" : "not-installed");
+        (void)json_push_kv_str(&reply->data, "source",
+                               e->builtin ? "builtin" : "apps.tsv");
+        (void)json_push_kv_str(&reply->data, "authority", "launch-registry");
+        (void)json_push_kv_str(&reply->data, "path", e->executable);
+        if (!e->installed)
+            (void)json_push_kv_str(&reply->data, "build_hint", e->build_hint);
+    }
+    free(reg);
+    return e != NULL;
+}
+
 void zcl_native_handle_app_inspect(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
@@ -646,6 +684,8 @@ void zcl_native_handle_app_inspect(const struct zcl_command_request *request,
         return;
     }
     if (!zcl_app_definition_builtin_v1(app_id)) {
+        if (app_inspect_launch_registry(app_id, reply))
+            return;
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
                                ZCL_COMMAND_EXIT_BLOCKED, "UNKNOWN_APP",
                                "resolve", false, false,
