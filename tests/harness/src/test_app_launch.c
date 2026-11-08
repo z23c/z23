@@ -795,9 +795,12 @@ struct al_library_script {
     unsigned actions[40], count, calls, errors;
     bool valid, saved_label;
     char last_summary[241];
+    char setup[ZCL_PRESENT_COPY_TEXT_MAX + 1];
+    struct al_fx *change_fixture;
+    unsigned change_at;
 };
 static bool al_library_present(void *context, const struct zcl_present_model_v1 *model,
-    struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+    const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
     struct al_library_script *s = context;
     s->valid = s->valid && zcl_present_model_validate_v1(model, why, cap);
@@ -807,12 +810,20 @@ static bool al_library_present(void *context, const struct zcl_present_model_v1 
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     event->outcome = ZCL_PRESENT_WINDOW_ACTION;
     if (!strcmp(model->request_id, "library-error")) { ++s->errors; event->action_index = 0; return true; }
+    if (copy_text) (void)snprintf(s->setup, sizeof(s->setup), "%s", copy_text);
     s->saved_label |= strstr(model->items[0].value, "Saved version") != NULL;
     s->valid = s->valid && zcl_present_canvas_text_width(model->items[0].value,
         strlen(model->items[0].value), 14u) <= 296u;
     (void)snprintf(s->last_summary, sizeof(s->last_summary), "%s", model->summary);
     if (s->calls >= s->count) { s->valid = false; event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }
     event->action_index = s->actions[s->calls++];
+    if (s->change_fixture && s->calls == s->change_at) {
+        struct app_selection selection, updated;
+        s->valid = s->valid && app_selection_load(s->change_fixture->env.state_dir,
+            "fixtureapp", &selection) == APP_SELECTION_OK;
+        s->valid = s->valid && app_selection_save(s->change_fixture->env.state_dir,
+            selection.revision, &selection, &updated) == APP_SELECTION_OK;
+    }
     return true;
 }
 static bool al_selection(struct al_fx *f, const char *name, struct app_selection *saved)
@@ -882,6 +893,57 @@ static bool al_library_catalog(struct al_fx *f, unsigned count)
     }
     return at < sizeof(text) && al_write_file(f->env.config_path, text, 0600);
 }
+static int case_library_help(void)
+{
+    int failures = 0;
+    static struct al_fx f;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    struct json_value setup = {0};
+    const char *exe = "/installed path/quote\" back\\tick`$()/z23";
+    TEST("AI help truthfully declines unknown catalog source and Back preserves index") {
+        ASSERT(al_setup(&f));
+        struct al_library_script s = {.actions = {0, 1, 2, 2, 3}, .count = 5, .valid = true};
+        zcl_test_app_library_setup(&f.env, exe, "/unrelated-profile", &reply, al_library_present, &s);
+        ASSERT(s.valid && s.calls == 5 && !s.errors && !s.setup[0]);
+        ASSERT(strstr(s.last_summary, "App 1 of"));
+        ASSERT(!json_get(&reply.data, "pid"));
+    PASS(); }
+    TEST("AI help JSON preserves literal executable and selected profile, full identity, no writes") {
+        struct app_selection saved, after;
+        ASSERT(app_launch_state_dir_ready(f.env.state_dir));
+        ASSERT(al_selection(&f, "fixtureapp", &saved));
+        struct al_library_script s = {.actions = {0, 1, 2, 2, 3}, .count = 5, .valid = true};
+        zcl_test_app_library_setup(&f.env, exe, "/wrong-global-profile", &reply, al_library_present, &s);
+        ASSERT(s.valid && s.calls == 5 && !s.errors && s.setup[0]);
+        ASSERT(json_read(&setup, s.setup, strlen(s.setup)));
+        ASSERT_STR_EQ(json_get_str(json_get(&setup, "command")), exe);
+        const struct json_value *args = json_get(&setup, "args");
+        ASSERT(args && args->type == JSON_ARR && args->num_children == 3);
+        ASSERT_STR_EQ(json_get_str(&args->children[0]), "mcp");
+        ASSERT_STR_EQ(json_get_str(&args->children[1]), "serve");
+        char profile_arg[APP_SELECTION_PATH_MAX + 16];
+        (void)snprintf(profile_arg, sizeof(profile_arg), "--datadir=%s", saved.datadir);
+        ASSERT_STR_EQ(json_get_str(&args->children[2]), profile_arg);
+        ASSERT_STR_EQ(json_get_str(json_get(&setup, "name")), "fixtureapp");
+        ASSERT(json_get_int(json_get(&setup, "revision")) == (int64_t)saved.revision);
+        char hex[65]; zcl_hex_encode(saved.version, 32, hex);
+        ASSERT_STR_EQ(json_get_str(json_get(&setup, "version")), hex);
+        ASSERT(app_selection_load(f.env.state_dir, "fixtureapp", &after) == APP_SELECTION_OK);
+        ASSERT(after.revision == saved.revision && !memcmp(after.version, saved.version, 32));
+        ASSERT(!json_get(&reply.data, "pid"));
+    PASS(); }
+    TEST("AI help refuses changed selection before handing off any setup") {
+        struct al_library_script s = {.actions = {0, 1}, .count = 2, .valid = true,
+            .change_fixture = &f, .change_at = 2};
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_setup(&f.env, exe, "/profile", &reply, al_library_present, &s);
+        ASSERT(s.valid && s.calls == 2 && s.errors == 1 && !s.setup[0]);
+        ASSERT_STR_EQ(reply.error.code, "SELECTION_STALE");
+    PASS(); }
+_test_next:;
+    json_free(&setup); zcl_command_reply_free(&reply);
+    return failures;
+}
 static bool al_library_fill(struct al_fx *f)
 {
     char builtin[PATH_MAX], name[33];
@@ -894,6 +956,43 @@ static bool al_library_fill(struct al_fx *f)
         if (!al_selection(f, name, &saved)) return false;
     }
     return true;
+}
+static int case_library_builtin_help(void)
+{
+    int failures = 0;
+    static struct al_fx f;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    struct json_value setup = {0};
+    TEST("Installed AI help preserves escaped profile and does not invent a selection") {
+        ASSERT(al_setup(&f));
+        char builtin[PATH_MAX];
+        ASSERT(al_path(builtin, sizeof(builtin), f.env.bin_dir, "z23-skycombat"));
+        ASSERT(al_copy_exe(AL_FIXTURE, builtin, 0700));
+        ASSERT(al_write_file(f.env.config_path, "", 0600));
+        const char *profile = "/literal profile/quote\" slash\\ newline\n $()`";
+        struct al_library_script s = {.actions = {0, 1, 3}, .count = 3, .valid = true};
+        zcl_test_app_library_setup(&f.env, "/installed/z23", profile, &reply, al_library_present, &s);
+        ASSERT(s.valid && !s.errors && s.calls == 3);
+        ASSERT(json_read(&setup, s.setup, strlen(s.setup)));
+        const struct json_value *args = json_get(&setup, "args");
+        ASSERT(args && args->num_children == 3);
+        char profile_arg[512]; (void)snprintf(profile_arg, sizeof(profile_arg), "--datadir=%s", profile);
+        ASSERT_STR_EQ(json_get_str(&args->children[2]), profile_arg);
+        ASSERT(!json_get(&setup, "revision") && !json_get(&setup, "version"));
+        ASSERT(strstr(json_get_str(json_get(&setup, "request")), "Make my copy"));
+        ASSERT(!json_get(&reply.data, "pid"));
+    PASS(); }
+    TEST("AI setup refuses clipboard overflow instead of truncating literal arguments") {
+        char long_path[4096]; memset(long_path, '"', sizeof(long_path) - 1); long_path[sizeof(long_path) - 1] = 0;
+        struct al_library_script s = {.actions = {0, 1}, .count = 2, .valid = true};
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_setup(&f.env, long_path, "/profile", &reply, al_library_present, &s);
+        ASSERT(s.valid && s.errors == 1 && !s.setup[0]);
+        ASSERT_STR_EQ(reply.error.code, "SETUP_TOO_LARGE");
+    PASS(); }
+_test_next:;
+    json_free(&setup); zcl_command_reply_free(&reply);
+    return failures;
 }
 static int case_library_bounds(void)
 {
@@ -972,6 +1071,8 @@ _test_next:
     failures += case_resident_app(&f, f.bin_silent, "silent", false, false);
     failures += case_resident_mutation(&f);
     failures += case_library(&f);
+    failures += case_library_help();
+    failures += case_library_builtin_help();
     failures += case_library_bounds();
     al_kill_all();
     return failures;

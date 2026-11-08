@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 #if defined(__APPLE__)
 #include <objc/runtime.h>
 #endif
@@ -12,6 +13,7 @@
 #endif
 void zcl_present_test_script(unsigned first, unsigned second, bool fail_redraw);
 struct zcl_present_window_event_v1 zcl_present_test_result(void);
+bool zcl_present_test_copy_matches(void);
 #if defined(__linux__)
 bool zcl_present_test_x11_libraries_retired(void);
 #endif
@@ -98,6 +100,26 @@ static bool initialization_failure(void)
 }
 #endif
 
+static bool clipboard_roundtrip(const char *text)
+{
+    static uint8_t pixels[16 * 16 * 3];
+    struct zcl_present_window_v1 page = {
+        .struct_size = sizeof(page), .abi_version = ZCL_PRESENT_ABI_V1,
+        .title = "Clipboard text regression", .pixels = pixels,
+        .width = 16, .height = 16, .pixel_format = ZCL_PRESENT_RGB8,
+        .copy_text = text,
+    };
+    struct zcl_present_window_event_v1 event = {0};
+    char error[256] = {0};
+    zcl_present_test_script(UINT_MAX, 0, false);
+    bool ok = zcl_present_window_run_actions_v1(&page, 1, NULL, NULL,
+        &event, error, sizeof(error));
+    if (!ok || !zcl_present_test_copy_matches()) {
+        fprintf(stderr, "clipboard text roundtrip failed: %s\n", error);
+        return false;
+    }
+    return true;
+}
 int main(void)
 {
 #if defined(__APPLE__)
@@ -108,6 +130,13 @@ int main(void)
     if (!run(1, false, true, 2, true)) return 1;
     if (!run(2, true, false, 1, false)) return 1;
     if (!run(2, false, true, 2, true)) return 1;
+    if (!clipboard_roundtrip("{\"value\":\"last byte stays\"}")) return 1;
+    if (!clipboard_roundtrip("")) return 1;
+    if (!clipboard_roundtrip("quoted \"path\" / caf\xc3\xa9 / \xe2\x9c\x93")) return 1;
+    char maximum[ZCL_PRESENT_COPY_TEXT_MAX + 1u];
+    memset(maximum, 'x', sizeof(maximum) - 1u); maximum[sizeof(maximum) - 1u] = 0;
+    if (!clipboard_roundtrip(maximum)) return 1;
+    puts("clipboard: JSON closing byte, empty, UTF8 and maximum text roundtrip exactly");
     puts("live redraw: failure and terminal cancel reject queued confirm; successful redraw proceeds");
     return 0;
 }

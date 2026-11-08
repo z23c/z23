@@ -7,9 +7,12 @@
 #include "presentation/model.h"
 #include "presentation/presentation.h"
 typedef bool (*app_library_presenter)(void *, const struct zcl_present_model_v1 *,
-    struct zcl_present_window_event_v1 *, char *, size_t);
+    const char *, struct zcl_present_window_event_v1 *, char *, size_t);
 #if defined(ZCL_TESTING)
 void zcl_test_app_library_run(const struct app_launch_env *env,
     struct zcl_command_reply *reply, app_library_presenter presenter, void *context);
+void zcl_test_app_library_setup(const struct app_launch_env *env, const char *exe,
+    const char *datadir, struct zcl_command_reply *reply,
+    app_library_presenter presenter, void *context);
 #endif
 #endif

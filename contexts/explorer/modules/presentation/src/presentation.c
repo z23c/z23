@@ -1197,6 +1197,11 @@ static void present_pages_number_keys(struct present_pages_run *run,
     }
 }
 
+#if defined(ZCL_TESTING)
+static bool present_test_copy_matches;
+bool zcl_present_test_copy_matches(void);
+bool zcl_present_test_copy_matches(void) { return present_test_copy_matches; }
+#endif
 static void present_pages_plain_key(struct present_pages_run *run,
     const RGFW_event *event)
 {
@@ -1207,7 +1212,15 @@ static void present_pages_plain_key(struct present_pages_run *run,
             present_pages_copy_image(run);
         } else if (run->request->copy_text) {
             size_t copy_len = strlen(run->request->copy_text);
-            RGFW_writeClipboard(run->request->copy_text, (u32)copy_len);
+            /* RGFW's text capacity includes the terminator (X11/Wayland
+             * copy capacity-1 bytes; Windows needs room for its wide NUL). */
+            RGFW_writeClipboard(run->request->copy_text, (u32)(copy_len + 1u));
+#if defined(ZCL_TESTING)
+            char copied[ZCL_PRESENT_COPY_TEXT_MAX + 1u] = {0};
+            RGFW_ssize_t length = RGFW_readClipboardPtr(copied, sizeof(copied));
+            present_test_copy_matches = length == (RGFW_ssize_t)copy_len &&
+                !memcmp(copied, run->request->copy_text, copy_len + 1u);
+#endif
         }
     }
     present_pages_number_keys(run, event);
@@ -1245,8 +1258,9 @@ static bool present_pages_poll_event(RGFW_window *window, RGFW_event *event)
     if (present_test_cursor < present_test_count) {
         memset(event, 0, sizeof(*event));
         event->type = RGFW_keyPressed;
-        event->key.value = RGFW_a;
-        event->key.sym = (u32)('1' + present_test_events[present_test_cursor++]);
+        unsigned scripted = present_test_events[present_test_cursor++];
+        event->key.value = scripted == UINT_MAX ? RGFW_c : (u8)(RGFW_1 + scripted);
+        event->key.sym = scripted == UINT_MAX ? 'c' : (u32)('1' + scripted);
         return true;
     }
 #endif
@@ -1286,6 +1300,9 @@ static bool present_run_pages_actions(
     struct zcl_present_window_event_v1 *result,
     char *error, size_t error_cap)
 {
+#if defined(ZCL_TESTING)
+    present_test_copy_matches = false;
+#endif
     if (!result || action_count > ZCL_PRESENT_WINDOW_ACTIONS_MAX)
         return present_error(error, error_cap,
                              "presentation action event is invalid");
