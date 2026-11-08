@@ -110,7 +110,7 @@ engine/models/src/store_purchase.c 3
 engine/models/src/tx_index.c 2
 engine/models/src/utxo.c 4
 engine/modules/sim/src/simnet_chaos_faults.c 1
-engine/modules/storage/src/block_index_projection.c 4
+engine/modules/storage/src/block_index_projection.c 3
 engine/modules/storage/src/block_index_projection_binding.c 3
 engine/modules/storage/src/census_read.c 11
 engine/modules/storage/src/coins_kv.c 6
