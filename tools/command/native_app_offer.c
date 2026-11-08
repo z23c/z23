@@ -21,6 +21,7 @@
 
 #define ZAO_FIELDS 8u
 #define ZAO_PARAMS 256u
+#define ZAO_ONION_STATUS_MAX (64u * 1024u)
 
 /* ── field rules ─────────────────────────────────────────────────────── */
 
@@ -54,6 +55,47 @@ static bool zao_name(const char *s)
     size_t head = (size_t)(slash - s);
     return zao_name_half(s, head) &&
            zao_name_half(slash + 1, len - head - 1u);
+}
+
+static int zao_p2p_port(const struct json_value *data)
+{
+    const struct json_value *routes = json_get(json_get(data, "port_mapping"), "routes");
+    if (!routes || routes->type != JSON_ARR) return 0;
+    int port = 0;
+    for (size_t i = 0; i < json_size(routes); ++i) {
+        const struct json_value *route = json_at(routes, i);
+        const char *name = json_get_str(json_get(route, "name"));
+        if (!name || strcmp(name, "p2p_tcp")) continue;
+        const struct json_value *value = json_get(route, "virtual_port");
+        if (port || !json_get_bool_or(route, "installed", false) || !value ||
+            value->type != JSON_INT || json_get_int(value) < 1 || json_get_int(value) > 65535) return 0;
+        port = (int)json_get_int(value);
+    }
+    return port;
+}
+
+bool zcl_app_offer_local_endpoint(char host[static 63],
+                                  char endpoint[static ZCL_APP_OFFER_ONION_MAX + 1u],
+                                  bool *status_read)
+{
+    struct json_value in; struct zcl_command_reply inner;
+    host[0] = endpoint[0] = '\0'; json_init(&in); json_set_object(&in);
+    bool ok = zcl_app_offer_call("core.network.onion.status", &in, &inner);
+    json_free(&in); if (status_read) *status_read = ok;
+    const char *address = ok ? zcl_app_inner_str(&inner, "onion_address") : NULL;
+    const char *state = ok ? zcl_app_inner_str(&inner, "bootstrap_state") : NULL;
+    int port = ok ? zao_p2p_port(&inner.data) : 0;
+    bool ready = state && !strcmp(state, "ready") &&
+        json_get_bool_or(&inner.data, "tor_ready", false) &&
+        json_get_bool_or(&inner.data, "onion_service_ready", false) &&
+        json_get_bool_or(&inner.data, "p2p_publish_ready", false) && address &&
+        strlen(address) == 62 && port && zcl_fleet_bundle_peer_is_onion(address);
+    if (ready) {
+        (void)snprintf(host, 63, "%s", address);
+        int n = snprintf(endpoint, ZCL_APP_OFFER_ONION_MAX + 1u, "%s:%d", address, port);
+        ready = n > 0 && (size_t)n <= ZCL_APP_OFFER_ONION_MAX;
+    }
+    zcl_command_reply_free(&inner); return ready;
 }
 
 bool zcl_app_offer_valid(const struct zcl_app_offer *o)
@@ -482,6 +524,32 @@ static bool zao_board_list(const struct json_value *input,
     return ok;
 }
 
+static bool zao_onion_shape(const struct json_value *body)
+{
+    const char *schema = zao_str(body, "schema");
+    const struct json_value *tor = json_get(body, "tor_ready"), *service = json_get(body, "onion_service_ready");
+    return body && body->type == JSON_OBJ && schema && !strcmp(schema, "zcl.onion_status.v1") &&
+        zao_str(body, "bootstrap_state") && zao_str(body, "onion_address") &&
+        tor && tor->type == JSON_BOOL && service && service->type == JSON_BOOL;
+}
+
+/* The normal command view can page the port map after a busy dial ledger.
+ * Read the node's bounded RPC body so readiness and its port are one snapshot. */
+static bool zao_onion_status(struct zcl_command_reply *out)
+{
+    zcl_command_reply_init(out, "zcl.onion_status.v1");
+    zcl_native_bridge_ensure_rpc();
+    char *raw = node_rpc_call("onionstatus", "[]");
+    struct json_value body; json_init(&body);
+    size_t n = raw ? strnlen(raw, ZAO_ONION_STATUS_MAX + 1u) : 0;
+    bool ok = n && n <= ZAO_ONION_STATUS_MAX && json_read(&body, raw, n) &&
+        zao_onion_shape(&body) && json_copy_checked(&out->data, &body);
+    free(raw); json_free(&body);
+    if (!ok) zcl_command_reply_fail(out, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_TRANSIENT,
+        "ONION_STATUS_UNREADABLE", "execute", true, false, "node onion status was unavailable or malformed", "onionstatus");
+    return ok;
+}
+
 static bool zao_default_call(const char *path, const struct json_value *input,
                              struct zcl_command_reply *out)
 {
@@ -489,6 +557,8 @@ static bool zao_default_call(const char *path, const struct json_value *input,
         zcl_command_reply_init(out, "zcl.app_offer.board_list.v1");
         return zao_board_list(input, out);
     }
+    if (strcmp(path, "core.network.onion.status") == 0)
+        return zao_onion_status(out);
     return zcl_app_inner_call(path, input, out, NULL);
 }
 

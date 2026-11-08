@@ -167,8 +167,9 @@ static bool ag_receive_plan(struct ag_one *s)
     const struct zcl_app_offer *o = &s->row->offer;
     const char *parts[] = {s->row->post_id, s->row->host, o->name, o->root,
                            o->publisher, o->carrier, o->sha256, o->onion,
-                           s->receive_plan, s->datadir, s->token, "public-rebuild-report-v1"};
-    zcl_app_plan_id("zcl.app_get.plan.v1", parts, 12, s->plan);
+                           s->receive_plan, s->datadir, s->token, "public-rebuild-report-v1",
+                           "pin-carrier-and-public-host-if-ready-24h-v1"};
+    zcl_app_plan_id("zcl.app_get.plan.v1", parts, 13, s->plan);
     return true;
 }
 
@@ -182,6 +183,9 @@ static bool ag_plan_reply(struct ag_one *s)
          json_push_kv_str(&s->reply->data, "offer_id", s->row->post_id) &&
          json_push_kv_str(&s->reply->data, "token", s->token) &&
          json_push_kv_bool(&s->reply->data, "public_build_reporting", true) &&
+         json_push_kv_bool(&s->reply->data, "pin_received_carrier", true) &&
+         json_push_kv_bool(&s->reply->data, "public_hosting_if_ready", true) &&
+         json_push_kv_int(&s->reply->data, "hosting_ttl_seconds", 86400) &&
          zcl_package_copy_push_root(&s->reply->data, "plan_id", s->plan) &&
          json_push_kv_bool(&s->reply->data, "executed", false);
     if (!ok) zcl_package_copy_fail(s->reply, "ALLOC", false, "cannot describe get plan", AG_COMMAND);
@@ -287,6 +291,90 @@ static bool ag_open_matches(const struct zcl_command_reply *inner)
     return match && match->type == JSON_BOOL && json_get_bool(match);
 }
 
+static bool ag_host_offer_matches(const struct zcl_command_reply *inner,
+                                  const struct zcl_app_offer *o,
+                                  const char *host, const char *endpoint)
+{
+    const char *root = zcl_app_inner_str(inner, "root"), *sha = zcl_app_inner_str(inner, "sha256");
+    const char *onion = zcl_app_inner_str(inner, "onion");
+    const struct json_value *size = json_get(&inner->data, "size");
+    const struct json_value *pinned = json_get(&inner->data, "pinned");
+    return root && sha && !strcmp(root, o->carrier) && !strcmp(sha, o->sha256) &&
+        size && size->type == JSON_INT && json_get_int(size) == o->size &&
+        pinned && pinned->type == JSON_BOOL && json_get_bool(pinned) &&
+        (!onion || !host || !strcmp(onion, host) || !strcmp(onion, endpoint));
+}
+
+static void ag_host_retry_local(struct ag_one *s)
+{
+    const struct zcl_app_offer *o = &s->row->offer;
+    char retry[600];
+    int n = snprintf(retry, sizeof(retry), "z23 fleet bundle fetch --root=%s --sha256=%s --size=%lld --out=/absolute/new.z23share", o->carrier, o->sha256, (long long)o->size);
+    if (n > 0 && (size_t)n < sizeof(retry)) (void)json_push_kv_str(&s->reply->data, "hosting_retry", retry);
+    (void)json_push_kv_str(&s->reply->data, "hosting_retry_note", "the carrier is pinned locally; after onion readiness, fetch it locally and publish an apps offer with the current endpoint");
+}
+
+static void ag_host_post(struct ag_one *s, const struct zcl_app_offer *offer)
+{
+    char text[ZCL_APP_OFFER_TEXT_MAX + 1u]; struct json_value *data = &s->reply->data;
+    if (!zcl_app_offer_format(offer, text, sizeof(text))) {
+        (void)json_push_kv_str(data, "hosting_status", "pinned; advertisement could not be formed"); return;
+    }
+    struct json_value in; struct zcl_command_reply post;
+    const char *kv[] = {"room", "apps", "scope", "public", "kind", "offer", "text", text};
+    bool built = zcl_app_input(&in, kv, 8) && json_push_kv_int(&in, "ttl", 86400);
+    bool ok = built && zcl_app_offer_call(ZCL_APP_OFFER_BOARD_POST, &in, &post);
+    json_free(&in); if (!built) zcl_command_reply_init(&post, "zcl.app_get.host.v1");
+    const char *id = ok ? zcl_app_inner_str(&post, "id") : NULL;
+    if (!ag_hex(id, 32)) {
+        (void)json_push_kv_str(data, "hosting_status", "pinned; public advertisement unconfirmed");
+        char retry[ZCL_APP_OFFER_TEXT_MAX + 160u];
+        int n = snprintf(retry, sizeof(retry), "z23 fleet board post --kind=offer --scope=public --room=apps --ttl=86400 --text='%s'", text);
+        if (n > 0 && (size_t)n < sizeof(retry)) (void)json_push_kv_str(data, "hosting_retry", retry);
+        (void)json_push_kv_str(data, "hosting_retry_note", "verify the local onion endpoint is still the one in this offer before retrying");
+    } else {
+        (void)json_push_kv_str(data, "hosting_status", "advertised for 24 hours; carrier pinned");
+        (void)json_push_kv_str(data, "hosting_post_id", id);
+    }
+    zcl_command_reply_free(&post);
+}
+
+static void ag_rehost(struct ag_one *s)
+{
+    struct json_value *data = &s->reply->data;
+    char host[63], endpoint[ZCL_APP_OFFER_ONION_MAX + 1u];
+    bool status_read = false;
+    bool ready = zcl_app_offer_local_endpoint(host, endpoint, &status_read);
+    if (!ag_hash(s->path, &s->row->offer)) {
+        (void)json_push_kv_str(data, "hosting_status", "no pin attempted: staged carrier changed"); return;
+    }
+    struct json_value in; struct zcl_command_reply inner;
+    const char *kv[] = {"file", s->path};
+    bool built = zcl_app_input(&in, kv, 2);
+    bool ok = built && zcl_app_offer_call(ZCL_APP_OFFER_BUNDLE_OFFER, &in, &inner);
+    json_free(&in); if (!built) zcl_command_reply_init(&inner, "zcl.app_get.host.v1");
+    if (!ok || !ag_host_offer_matches(&inner, &s->row->offer, ready ? host : NULL, endpoint)) {
+        (void)json_push_kv_str(data, "hosting_status", "not advertised: carrier pin was refused or unconfirmed; storage may have changed");
+        (void)json_push_kv_str(data, "hosting_retry", "check node hosting and get the app again to offer its carrier");
+        zcl_command_reply_free(&inner); return;
+    }
+    zcl_command_reply_free(&inner);
+    if (!ready) {
+        (void)json_push_kv_str(data, "hosting_status", status_read
+            ? "pinned; not advertised because the local onion is not ready"
+            : "pinned; not advertised because local onion status is unavailable");
+        ag_host_retry_local(s); return;
+    }
+    char checked_host[63], checked_endpoint[ZCL_APP_OFFER_ONION_MAX + 1u];
+    if (!zcl_app_offer_local_endpoint(checked_host, checked_endpoint, NULL) || strcmp(endpoint, checked_endpoint)) {
+        (void)json_push_kv_str(data, "hosting_status", "pinned; not advertised because the local onion changed or became unavailable");
+        ag_host_retry_local(s); return;
+    }
+    struct zcl_app_offer offer = s->row->offer;
+    (void)snprintf(offer.onion, sizeof(offer.onion), "%s", endpoint);
+    ag_host_post(s, &offer);
+}
+
 static bool ag_commit_result(struct ag_one *s, struct zcl_command_reply *inner)
 {
     const char *copy = zcl_app_inner_str(inner, "copy");
@@ -324,6 +412,8 @@ static bool ag_commit(struct ag_one *s)
     bool ok = zcl_app_inner_call_built("app.receive-copy", &in, built, &inner);
     if (!ok) {
         zcl_app_inner_fail(s->reply, &inner, false);
+        (void)ag_copy_data(&s->reply->data, &inner.data, "copy");
+        (void)ag_copy_data(&s->reply->data, &inner.data, "destination");
         const struct json_value *build = json_get(&inner.data, "build");
         if (build) {
             (void)json_push_kv(&s->reply->data, "build", build);
@@ -331,6 +421,8 @@ static bool ag_commit(struct ag_one *s)
         }
     }
     else ok = ag_commit_result(s, &inner);
+    const struct json_value *received = json_get(&inner.data, "received");
+    if (received && received->type == JSON_BOOL && json_get_bool(received)) ag_rehost(s);
     zcl_command_reply_free(&inner); return ok;
 }
 

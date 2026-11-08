@@ -73,46 +73,10 @@ static bool ap_token(struct ap_state *s)
     return true;
 }
 
-static int ap_p2p_port(const struct json_value *data)
-{
-    const struct json_value *mapping = json_get(data, "port_mapping");
-    const struct json_value *routes = json_get(mapping, "routes");
-    if (!routes || routes->type != JSON_ARR) return 0;
-    int port = 0;
-    for (size_t i = 0; i < json_size(routes); i++) {
-        const struct json_value *route = json_at(routes, i);
-        const char *name = json_get_str(json_get(route, "name"));
-        if (!name || strcmp(name, "p2p_tcp") != 0) continue;
-        const struct json_value *value = json_get(route, "virtual_port");
-        if (port || !json_get_bool_or(route, "installed", false) || !value ||
-            value->type != JSON_INT || json_get_int(value) < 1 || json_get_int(value) > 65535)
-            return 0;
-        port = (int)json_get_int(value);
-    }
-    return port;
-}
-
 static bool ap_onion(struct ap_state *s)
 {
-    struct json_value in;
-    struct zcl_command_reply inner;
-    json_init(&in);
-    json_set_object(&in);
-    bool ok = zcl_app_offer_call("core.network.onion.status", &in, &inner);
-    json_free(&in);
-    const char *address = ok ? zcl_app_inner_str(&inner, "onion_address") : NULL;
-    const char *state = ok ? zcl_app_inner_str(&inner, "bootstrap_state") : NULL;
-    int port = ok ? ap_p2p_port(&inner.data) : 0;
-    bool ready = state && strcmp(state, "ready") == 0 &&
-                 json_get_bool_or(&inner.data, "p2p_publish_ready", false) &&
-                 address && strlen(address) == 62 && port &&
-                 zcl_fleet_bundle_peer_is_onion(address);
-    if (ready) {
-        (void)snprintf(s->host, sizeof(s->host), "%s", address);
-        int n = snprintf(s->onion, sizeof(s->onion), "%s:%d", address, port);
-        ready = n > 0 && (size_t)n < sizeof(s->onion);
-    }
-    zcl_command_reply_free(&inner);
+    bool ok = false;
+    bool ready = zcl_app_offer_local_endpoint(s->host, s->onion, &ok);
     if (!ready) zcl_package_copy_fail(s->reply, "ONION_UNAVAILABLE", false,
         ok ? "node onion publication is not ready" : "node onion status is unavailable", AP_COMMAND);
     return ready;

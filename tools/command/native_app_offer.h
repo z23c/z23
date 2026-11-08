@@ -43,6 +43,11 @@
 #define ZCL_APP_OFFER_BUNDLE_OFFER "fleet.bundle.offer"
 #define ZCL_APP_OFFER_BUNDLE_FETCH "fleet.bundle.fetch"
 
+/* Read-only local onion publication status and its one installed P2P port. */
+bool zcl_app_offer_local_endpoint(char host[static 63],
+                                  char endpoint[static ZCL_APP_OFFER_ONION_MAX + 1u],
+                                  bool *status_read);
+
 struct zcl_app_offer {
     char name[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
     char root[65];      /* the signed version's package root */

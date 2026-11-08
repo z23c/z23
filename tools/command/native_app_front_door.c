@@ -229,6 +229,14 @@ static bool fd_target(struct fd_run *r)
     return ok;
 }
 
+static void fd_partial_data(struct fd_run *r)
+{
+    static const char *const keys[] = {"copy", "destination", "rebuild_report", "rebuild_retry",
+                                       "hosting_status", "hosting_retry", "hosting_retry_note"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i)
+        if (fd_str(r, keys[i])) (void)fprintf(r->out, "%s: %s\n", keys[i], fd_str(r, keys[i]));
+}
+
 static int fd_refused(struct fd_run *r)
 {
     const struct zcl_command_error *e = &r->reply.error;
@@ -243,8 +251,7 @@ static int fd_refused(struct fd_run *r)
     const char *first = fd_str(r, "choice_a"), *second = fd_str(r, "choice_b");
     if (first) (void)fprintf(r->out, "choice: %s\n", first);
     if (second) (void)fprintf(r->out, "choice: %s\n", second);
-    if (fd_str(r, "rebuild_report")) (void)fprintf(r->out, "rebuild_report: %s\n", fd_str(r, "rebuild_report"));
-    if (fd_str(r, "rebuild_retry")) (void)fprintf(r->out, "retry: %s\n", fd_str(r, "rebuild_retry"));
+    fd_partial_data(r);
     if (e->mutated)
         (void)fprintf(r->out, "note: an earlier step already changed "
                       "something; the message above says what is left\n");
@@ -290,7 +297,7 @@ static void fd_question(const struct fd_run *r, char *q, size_t cap)
                        fd_str(r, "package_root") ? fd_str(r, "package_root")
                                                  : "?",
                        fd_str(r, "copy") ? fd_str(r, "copy") : "a copy",
-                       strcmp(r->verb->verb, "get") == 0 ? "; a fresh build will be reported publicly" : "");
+                       strcmp(r->verb->verb, "get") == 0 ? "; a fresh build will be reported publicly; attempt to pin the carrier and, if your onion is ready, post a public host offer for 24 hours" : "");
     else if (strcmp(r->verb->verb, "copy") == 0)
         (void)snprintf(q, cap, "Make your own copy of %s as %s?", r->target,
                        fd_str(r, "copy_name") ? fd_str(r, "copy_name")
@@ -343,7 +350,7 @@ static void fd_print_done(struct fd_run *r)
     static const char *const keys[] = {
         "copy", "share_line", "publisher_fingerprint", "package_root",
         "post_id", "image_sha3", "image_path", "log", "next",
-        "rebuild_report", "rebuild_count_status", "rebuild_retry"};
+        "rebuild_report", "rebuild_count_status", "rebuild_retry", "hosting_status", "hosting_post_id", "hosting_retry", "hosting_retry_note"};
     const struct json_value *pid = json_get(&r->reply.data, "pid");
     if (pid && pid->type == JSON_INT)
         (void)fprintf(r->out, "opened %s pid %lld\n",

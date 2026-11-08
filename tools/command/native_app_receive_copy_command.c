@@ -91,8 +91,8 @@ static void zrv_describe(struct zrv *z, const char *stage)
                           "parent_release_root"};
     (void)json_push_kv_str(d, "stage", stage);
     (void)json_push_kv_str(d, "file", z->file);
-    (void)json_push_kv_str(d, "copy", z->name);
-    (void)json_push_kv_str(d, "destination", z->dest);
+    if (!json_get(d, "copy")) (void)json_push_kv_str(d, "copy", z->name);
+    if (!json_get(d, "destination")) (void)json_push_kv_str(d, "destination", z->dest);
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
         if (zcl_app_inner_str(&z->verify, keys[i]))
             (void)json_push_kv_str(d, keys[i],
@@ -170,6 +170,25 @@ static bool zrv_keep(struct zrv *z, struct zcl_command_reply *out)
     return zcl_app_inner_call_built("zcode.package.bundle.receive", &in, built, out);
 }
 
+static bool zrv_describe_kept(struct zrv *z)
+{
+    return json_push_kv_str(&z->reply->data, "copy", z->name) &&
+        json_push_kv_str(&z->reply->data, "destination", z->dest) &&
+        json_push_kv_bool(&z->reply->data, "received", true);
+}
+
+static void zrv_open_binding(struct zrv *z, const struct zcl_command_reply *build,
+                             const struct zcl_command_reply *opened)
+{
+    const char *version = zcl_app_inner_str(build, "version");
+    const char *head = zcl_app_inner_str(opened, "head_version");
+    const char *package = zcl_app_inner_str(build, "package_root");
+    const char *opened_package = zcl_app_inner_str(opened, "package_root");
+    (void)json_push_kv_bool(&z->reply->data, "build_matches_open",
+        version && head && package && opened_package &&
+        !strcmp(version, head) && !strcmp(package, opened_package));
+}
+
 static void zrv_commit(struct zrv *z)
 {
     struct zcl_command_reply inner;
@@ -189,7 +208,13 @@ static void zrv_commit(struct zrv *z)
     bool kept = zrv_keep(z, &inner);
     bool ok = kept;
     if (ok) {
+        bool described = zrv_describe_kept(z);
         zcl_command_reply_free(&inner);
+        if (!described) {
+            zcl_package_copy_fail(z->reply, "ALLOC", true,
+                                  "the copy was kept but its result could not be described", z->dest);
+            return;
+        }
         ok = zrv_build(z, &build);
         if (!ok) {
             zcl_app_inner_fail(z->reply, &build, true);
@@ -199,15 +224,7 @@ static void zrv_commit(struct zrv *z)
         bool saved_build = json_push_kv(&z->reply->data, "build", &build.data);
         (void)json_push_kv_bool(&z->reply->data, "build_metadata_complete", saved_build);
         ok = zrv_open(z, &inner);
-        if (ok) {
-            const char *version = zcl_app_inner_str(&build, "version");
-            const char *head = zcl_app_inner_str(&inner, "head_version");
-            const char *package = zcl_app_inner_str(&build, "package_root");
-            const char *opened_package = zcl_app_inner_str(&inner, "package_root");
-            (void)json_push_kv_bool(&z->reply->data, "build_matches_open",
-                version && head && package && opened_package &&
-                !strcmp(version, head) && !strcmp(package, opened_package));
-        }
+        if (ok) zrv_open_binding(z, &build, &inner);
         zcl_command_reply_free(&build);
     }
     if (!ok) {

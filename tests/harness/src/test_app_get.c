@@ -45,6 +45,7 @@ int test_app_get(void)
 #include "base/hex.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha256.h"
+#include "controllers/rpc_client.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "session/fleet_board_proto.h"
@@ -85,11 +86,90 @@ struct tag_stub {
     bool onion_changed;
     bool malformed_post_id;
     bool fail_result_post;
+    bool change_after_offer, bad_host_offer, fail_host_post, change_staged_after_receive;
     int fetch_failures;
     char fetch_root[65], fetch_peer[96], fetch_out[TAG_PATH];
 };
 
 static struct tag_stub g_tag;
+static int g_tag_rpc_mode;
+
+static char *tag_onion_rpc_fault(int mode)
+{
+    switch (mode) {
+    case 1: return strdup("not JSON");
+    case 2: return strdup("{\"schema\":\"zcl.onion_status.v1\",\"bootstrap_state\":\"starting\",\"tor_ready\":false,\"onion_service_ready\":false,\"onion_address\":\"\",\"p2p_publish_ready\":false,\"port_mapping\":{\"routes\":[]}}");
+    case 3: return strdup("{\"schema\":\"wrong\",\"bootstrap_state\":\"ready\",\"tor_ready\":true,\"onion_service_ready\":true,\"onion_address\":\"x\"}");
+    case 4: { char *s = malloc(65538); if (s) { memset(s, 'x', 65537); s[65537] = '\0'; } return s; }
+    case 5: return strdup("{\"schema\":\"zcl.onion_status.v1\",\"bootstrap_state\":\"ready\",\"tor_ready\":true,\"onion_service_ready\":true,\"onion_address\":\"" TAG_ONION "\",\"p2p_publish_ready\":true,\"port_mapping\":{\"routes\":[{\"name\":\"p2p_tcp\",\"virtual_port\":28133,\"installed\":true},{\"name\":\"p2p_tcp\",\"virtual_port\":28134,\"installed\":true}]}}");
+    case 7: return strdup("{\"error\":{\"message\":\"offline\"}}");
+    case 8: return strdup("{\"schema\":\"zcl.onion_status.v1\",\"bootstrap_state\":\"ready\",\"tor_ready\":true,\"onion_service_ready\":true,\"onion_address\":\"" TAG_ONION "\",\"p2p_publish_ready\":true,\"port_mapping\":{\"routes\":[{\"name\":\"p2p_tcp\",\"virtual_port\":65536,\"installed\":true}]}}");
+    case 9: return strdup("{\"schema\":\"zcl.onion_status.v1\",\"bootstrap_state\":\"ready\",\"tor_ready\":false,\"onion_service_ready\":true,\"onion_address\":\"" TAG_ONION "\",\"p2p_publish_ready\":true,\"port_mapping\":{\"routes\":[{\"name\":\"p2p_tcp\",\"virtual_port\":28133,\"installed\":true}]}}");
+    default: return NULL;
+    }
+}
+
+/* A busy node's bounded dial ledger precedes the installed port mapping in
+ * onionstatus. Exercise the real registry/CLI bridge, not the offer stub. */
+static char *tag_busy_onion_rpc(const char *method, const char *params)
+{
+    (void)params;
+    if (strcmp(method, "onionstatus")) return strdup("null");
+    if (g_tag_rpc_mode) return tag_onion_rpc_fault(g_tag_rpc_mode);
+    char wire[8192];
+    int n = snprintf(wire, sizeof(wire), "{\"schema\":\"zcl.onion_status.v1\",\"bootstrap_state\":\"ready\",\"tor_ready\":true,\"onion_service_ready\":true,\"onion_address\":\"%s\",\"p2p_publish_ready\":true,\"recent_dials\":[", TAG_ONION);
+    if (n <= 0 || (size_t)n >= sizeof(wire)) return NULL;
+    size_t used = (size_t)n;
+    for (int i = 0; i < 16; ++i) {
+        n = snprintf(wire + used, sizeof(wire) - used,
+            "%s{\"schema\":\"zcl.onion_dial_stages.v1\",\"target\":\"%s\",\"generation\":%d,\"active\":false,\"elapsed_ms\":1111,\"first_incomplete_stage\":\"complete\",\"dial_started\":1,\"stream_queued\":1,\"circuit_ready\":1,\"bridge_up\":1,\"open_refused\":0,\"circuit_timeout\":0,\"circuit_torn_down\":0,\"bridge_closed\":1,\"bytes_to_peer\":8192,\"bytes_from_peer\":1048576,\"peers_answered\":1}", i ? "," : "", TAG_ENDPOINT, i);
+        if (n <= 0 || (size_t)n >= sizeof(wire) - used) return NULL;
+        used += (size_t)n;
+    }
+    n = snprintf(wire + used, sizeof(wire) - used,
+        "],\"port_mapping\":{\"routes\":[{\"name\":\"p2p_tcp\",\"virtual_port\":28133,\"installed\":true}]}}");
+    return n > 0 && (size_t)n < sizeof(wire) - used ? strdup(wire) : NULL;
+}
+
+static int tag_busy_onion_bridge(void)
+{
+    int failures = 0;
+    TEST("app host: busy onion status retains actual ready endpoint through the CLI bridge") {
+        char host[63], endpoint[ZCL_APP_OFFER_ONION_MAX + 1u]; bool read = false;
+        node_rpc_client_set_test_hook(tag_busy_onion_rpc);
+        bool ready = zcl_app_offer_local_endpoint(host, endpoint, &read);
+        bool right_endpoint = !strcmp(host, TAG_ONION) && !strcmp(endpoint, TAG_ENDPOINT);
+        g_tag_rpc_mode = 1; bool bad_read = true;
+        bool bad_ready = zcl_app_offer_local_endpoint(host, endpoint, &bad_read);
+        g_tag_rpc_mode = 2; bool idle_read = false;
+        bool idle_ready = zcl_app_offer_local_endpoint(host, endpoint, &idle_read);
+        g_tag_rpc_mode = 3; bool schema_read = true;
+        bool schema_ready = zcl_app_offer_local_endpoint(host, endpoint, &schema_read);
+        g_tag_rpc_mode = 4; bool large_read = true;
+        bool large_ready = zcl_app_offer_local_endpoint(host, endpoint, &large_read);
+        g_tag_rpc_mode = 5; bool duplicate_read = false;
+        bool duplicate_ready = zcl_app_offer_local_endpoint(host, endpoint, &duplicate_read);
+        g_tag_rpc_mode = 6; bool null_read = true;
+        bool null_ready = zcl_app_offer_local_endpoint(host, endpoint, &null_read);
+        g_tag_rpc_mode = 7; bool error_read = true;
+        bool error_ready = zcl_app_offer_local_endpoint(host, endpoint, &error_read);
+        g_tag_rpc_mode = 8; bool port_read = false;
+        bool port_ready = zcl_app_offer_local_endpoint(host, endpoint, &port_read);
+        g_tag_rpc_mode = 9; bool contradiction_read = false;
+        bool contradiction_ready = zcl_app_offer_local_endpoint(host, endpoint, &contradiction_read);
+        g_tag_rpc_mode = 0;
+        node_rpc_client_set_test_hook(NULL);
+        ASSERT(read); ASSERT(ready); ASSERT(right_endpoint);
+        ASSERT(!bad_read && !bad_ready); ASSERT(idle_read && !idle_ready);
+        ASSERT(!schema_read && !schema_ready); ASSERT(!large_read && !large_ready);
+        ASSERT(duplicate_read && !duplicate_ready);
+        ASSERT(!null_read && !null_ready); ASSERT(!error_read && !error_ready);
+        ASSERT(port_read && !port_ready);
+        ASSERT(contradiction_read && !contradiction_ready);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 
 static void tag_sha(const uint8_t *b, size_t n, char hex[65])
 {
@@ -116,9 +196,20 @@ static bool tag_offer(const struct json_value *in, struct zcl_command_reply *out
         return false;
     tag_sha(g_tag.bytes, g_tag.len, g_tag.sha);
     g_tag.offers++;
-    return json_push_kv_str(&out->data, "root", TAG_CARRIER) &&
+    if (g_tag.change_after_offer) g_tag.onion_changed = true;
+    return json_push_kv_str(&out->data, "root", g_tag.bad_host_offer ? "bad" : TAG_CARRIER) &&
            json_push_kv_str(&out->data, "sha256", g_tag.sha) &&
-           json_push_kv_int(&out->data, "size", (int64_t)g_tag.len);
+           json_push_kv_int(&out->data, "size", (int64_t)g_tag.len) &&
+           json_push_kv_bool(&out->data, "pinned", true);
+}
+
+static bool tag_change_staged(void)
+{
+    FILE *f = fopen(g_tag.fetch_out, "r+b");
+    if (!f) return false;
+    int c = fgetc(f); bool ok = c != EOF && fseek(f, 0, SEEK_SET) == 0 && fputc(c ^ 1, f) != EOF;
+    if (fclose(f) != 0) ok = false;
+    return ok;
 }
 
 static bool tag_post_capture(const struct json_value *in,
@@ -134,7 +225,9 @@ static bool tag_post_capture(const struct json_value *in,
     (void)snprintf(g_tag.scope, sizeof(g_tag.scope), "%s",
                    tag_in(in, "scope"));
     g_tag.ttl = ttl && ttl->type == JSON_INT ? json_get_int(ttl) : 0;
+    if (result && g_tag.change_staged_after_receive && !tag_change_staged()) return false;
     if (result && g_tag.fail_result_post) return false;
+    if (!result && g_tag.fail_host_post) return false;
     if (g_tag.malformed_post_id) return json_push_kv_str(&out->data, "id", "bad");
     return json_push_kv_str(&out->data, "id",
                             "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d"
@@ -179,6 +272,8 @@ static bool tag_onion_status(struct zcl_command_reply *out)
               json_push_kv_int(&route, "virtual_port", g_tag.onion_changed ? 28134 : 28133) &&
               json_push_back(&routes, &route) && json_push_kv(&mapping, "routes", &routes) &&
               json_push_kv_str(&out->data, "bootstrap_state", g_tag.onion_unavailable ? "publishing" : "ready") &&
+              json_push_kv_bool(&out->data, "tor_ready", !g_tag.onion_unavailable) &&
+              json_push_kv_bool(&out->data, "onion_service_ready", !g_tag.onion_unavailable) &&
               json_push_kv_bool(&out->data, "p2p_publish_ready", !g_tag.onion_unavailable) &&
               json_push_kv_str(&out->data, "onion_address", TAG_ONION) &&
               json_push_kv(&out->data, "port_mapping", &mapping);
@@ -1025,6 +1120,7 @@ static int tag_b_plan(struct tag_world *w)
          "hands receive the exact bytes and keeps nothing") {
         struct asf_leaf l;
         int fetches = g_tag.fetches;
+        int offers = g_tag.offers;
         ASSERT(tag_board_variant(w, NULL, NULL, false));
         ASSERT(setenv("HOME", w->j.b_home, 1) == 0);
         asf_open(&l);
@@ -1032,6 +1128,7 @@ static int tag_b_plan(struct tag_world *w)
                json_push_kv_str(&l.in, "name", w->name));
         ASSERT(asf_pass("app.get", &l));
         ASSERT_EQ(g_tag.fetches, fetches + 1);
+        ASSERT_EQ(g_tag.offers, offers);
         ASSERT(strcmp(g_tag.fetch_root, TAG_CARRIER) == 0);
         ASSERT(strcmp(g_tag.fetch_peer, TAG_ENDPOINT) == 0);
         ASSERT(strncmp(g_tag.fetch_out, w->j.b_datadir,
@@ -1096,9 +1193,17 @@ static int tag_b_get(struct tag_world *w)
         ASSERT(strstr(run.question, w->offer.publisher) != NULL);
         ASSERT(strstr(run.question, w->offer.root) != NULL);
         ASSERT(strstr(run.question, "public") != NULL);
+        ASSERT(strstr(run.question, "pin") != NULL);
         ASSERT(strstr(run.text, "rebuild_report") != NULL);
-        ASSERT(strcmp(g_tag.kind, "result") == 0);
         ASSERT(strstr(g_tag.result_text, "zcl.app_rebuild.v1") != NULL);
+        ASSERT(strstr(run.text, "hosting_status: advertised") != NULL);
+        ASSERT(strcmp(g_tag.kind, "offer") == 0);
+        struct zcl_app_offer hosted;
+        ASSERT(zcl_app_offer_parse(g_tag.text, strlen(g_tag.text), &hosted));
+        ASSERT(!strcmp(hosted.name, w->offer.name) && !strcmp(hosted.root, w->offer.root));
+        ASSERT(!strcmp(hosted.publisher, w->offer.publisher) && !strcmp(hosted.carrier, w->offer.carrier));
+        ASSERT(!strcmp(hosted.sha256, w->offer.sha256) && hosted.size == w->offer.size);
+        ASSERT_EQ(g_tag.ttl, 86400);
         ASSERT(asf_alive_then_stop(asf_door_pid(run.text)));
         (void)snprintf(copy, sizeof(copy), "%s/copies/tinyapp-1",
                        w->j.b_datadir);
@@ -1119,7 +1224,7 @@ static int tag_rebuild_outcomes(struct tag_world *w)
                      w->name, ZCL_CLI_CONFIRM_ASK, &run);
         ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "cached image") != NULL);
         ASSERT(strstr(run.text, "matching signing keys") != NULL);
-        ASSERT_EQ(g_tag.posts, posts); ASSERT(asf_alive_then_stop(asf_door_pid(run.text)));
+        ASSERT_EQ(g_tag.posts, posts + 1); ASSERT(asf_alive_then_stop(asf_door_pid(run.text)));
         PASS();
     }
     TEST("app rebuild: board failure preserves the opened copy and provides an exact retry") {
@@ -1158,10 +1263,109 @@ static int tag_rebuild_open_failure(struct tag_world *w)
         asf_door_run(home, home, datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
         ASSERT(run.rc != 0); ASSERT(strstr(run.text, "APP_EXITED:") != NULL);
         ASSERT(strstr(run.text, "rebuild_report: published") != NULL);
+        ASSERT(strstr(run.text, "destination: ") != NULL);
         ASSERT(strstr(run.text, "earlier step already changed") != NULL);
-        ASSERT(strcmp(g_tag.kind, "result") == 0);
+        ASSERT(strcmp(g_tag.kind, "offer") == 0);
+        ASSERT(strstr(run.text, "hosting_status: advertised") != NULL);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static int tag_rehost_build_failure(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("app get: build failure keeps and hosts the verified received copy") {
+        static struct asf_door run; char home[TAG_PATH], datadir[TAG_PATH];
+        ASSERT(asf_put(w->j.a_copy, "src/main.c", "#error deliberate_build_failure\n"));
+        asf_door_run(w->j.a_home, w->j.a_home, w->j.a_datadir, "save", w->j.copy, ZCL_CLI_CONFIRM_YES, &run);
+        ASSERT_EQ(run.rc, 0);
+        asf_door_run(w->j.a_home, w->j.a_home, w->j.a_datadir, "publish", w->j.copy, ZCL_CLI_CONFIRM_YES, &run);
+        ASSERT_EQ(run.rc, 0);
+        ASSERT(zcl_app_offer_parse(g_tag.text, strlen(g_tag.text), &w->offer));
+        (void)snprintf(w->name, sizeof(w->name), "%s", w->offer.name);
+        ASSERT(snprintf(home, sizeof(home), "%s/build-fail-home", w->root) > 0);
+        ASSERT(snprintf(datadir, sizeof(datadir), "%s/datadir", home) > 0);
+        ASSERT(mkdir(home, 0700) == 0 && mkdir(datadir, 0700) == 0);
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        asf_door_run(home, home, datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
+        ASSERT(run.rc != 0); ASSERT(strstr(run.text, "BUILD_FAILED:") != NULL);
+        ASSERT(strstr(run.text, "destination: ") != NULL);
+        ASSERT(strstr(run.text, "hosting_status: advertised") != NULL);
+        ASSERT(strstr(run.text, "earlier step already changed") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int tag_rehost_failures(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("app get: host offer retains original signed identity and uses the local endpoint") {
+        static struct asf_door run; struct zcl_app_offer hosted;
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        g_tag.onion_changed = true;
+        asf_door_run(w->j.b_home, w->j.b_home, w->j.b_datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
+        g_tag.onion_changed = false;
+        ASSERT_EQ(run.rc, 0); ASSERT(zcl_app_offer_parse(g_tag.text, strlen(g_tag.text), &hosted));
+        ASSERT(!strcmp(hosted.publisher, w->offer.publisher) && !strcmp(hosted.root, w->offer.root));
+        ASSERT(!strcmp(hosted.carrier, w->offer.carrier) && !strcmp(hosted.sha256, w->offer.sha256));
+        ASSERT(!strcmp(hosted.onion, TAG_ONION ":28134"));
+        ASSERT(asf_alive_then_stop(asf_door_pid(run.text))); PASS();
+    }
+    TEST("app get: unavailable onion pins the carrier without advertisement") {
+        static struct asf_door run; int offers = g_tag.offers, posts = g_tag.posts;
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        g_tag.onion_unavailable = true;
+        asf_door_run(w->j.b_home, w->j.b_home, w->j.b_datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
+        g_tag.onion_unavailable = false;
+        ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "pinned; not advertised because the local onion is not ready") != NULL);
+        ASSERT(strstr(run.text, "fleet bundle fetch --root=") != NULL);
+        ASSERT_EQ(g_tag.offers, offers + 1); ASSERT_EQ(g_tag.posts, posts);
+        ASSERT(asf_alive_then_stop(asf_door_pid(run.text))); PASS();
+    }
+    TEST("app get: endpoint change after pin refuses advertisement") {
+        static struct asf_door run; int posts = g_tag.posts;
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        g_tag.change_after_offer = true;
+        asf_door_run(w->j.b_home, w->j.b_home, w->j.b_datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
+        g_tag.change_after_offer = false; g_tag.onion_changed = false;
+        ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "pinned; not advertised") != NULL);
+        ASSERT_EQ(g_tag.posts, posts); ASSERT(asf_alive_then_stop(asf_door_pid(run.text))); PASS();
+    }
+    TEST("app get: mismatched offered carrier is never advertised") {
+        static struct asf_door run; int posts = g_tag.posts;
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        g_tag.bad_host_offer = true;
+        asf_door_run(w->j.b_home, w->j.b_home, w->j.b_datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
+        g_tag.bad_host_offer = false;
+        ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "carrier pin was refused or unconfirmed") != NULL);
+        ASSERT_EQ(g_tag.posts, posts); ASSERT(asf_alive_then_stop(asf_door_pid(run.text))); PASS();
+    }
+    TEST("app get: failed host post keeps the pin and gives exact retry") {
+        static struct asf_door run;
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        g_tag.fail_host_post = true;
+        asf_door_run(w->j.b_home, w->j.b_home, w->j.b_datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
+        g_tag.fail_host_post = false;
+        ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "pinned; public advertisement unconfirmed") != NULL);
+        ASSERT(strstr(run.text, "fleet board post --kind=offer") != NULL);
+        ASSERT(asf_alive_then_stop(asf_door_pid(run.text))); PASS();
+    }
+    TEST("app get: changed staged bytes are never pinned") {
+        static struct asf_door run; char home[TAG_PATH], datadir[TAG_PATH]; int offers = g_tag.offers;
+        ASSERT(snprintf(home, sizeof(home), "%s/changed-home", w->root) > 0);
+        ASSERT(snprintf(datadir, sizeof(datadir), "%s/datadir", home) > 0);
+        ASSERT(mkdir(home, 0700) == 0 && mkdir(datadir, 0700) == 0);
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        g_tag.change_staged_after_receive = true;
+        asf_door_run(home, home, datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
+        g_tag.change_staged_after_receive = false;
+        ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "no pin attempted: staged carrier changed") != NULL);
+        ASSERT_EQ(g_tag.offers, offers); ASSERT(asf_alive_then_stop(asf_door_pid(run.text))); PASS();
+    } _test_next:;
+    g_tag.onion_unavailable = g_tag.onion_changed = g_tag.change_after_offer = false;
+    g_tag.bad_host_offer = g_tag.fail_host_post = g_tag.change_staged_after_receive = false;
     return failures;
 }
 
@@ -1183,6 +1387,7 @@ int test_app_get(void)
     int failures = 0;
     printf("app get (publish to room apps, get by identity)...\n");
     memset(&g_tag, 0, sizeof(g_tag));
+    failures += tag_busy_onion_bridge();
     tag_board_reset();
     zcl_app_offer_set_call(tag_call);
     failures += tag_rebuild_catalog();
@@ -1215,7 +1420,9 @@ int test_app_get(void)
         failures += tag_failed_fetch_cleanup(&w);
         failures += tag_b_get(&w);
         if (failures == 0) failures += tag_rebuild_outcomes(&w);
+        if (failures == 0) failures += tag_rehost_failures(&w);
         if (failures == 0) failures += tag_rebuild_open_failure(&w);
+        if (failures == 0) failures += tag_rehost_build_failure(&w);
     }
     zcl_app_offer_set_call(NULL);
     json_free(&g_tag.board);
