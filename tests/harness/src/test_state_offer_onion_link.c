@@ -23,20 +23,28 @@
 #include "jobs/reducer_frontier.h"
 #include "net/connman.h"
 #include "net/fast_sync.h"
+#include "net/file_service.h"
+#include "net/file_service_generation.h"
 #include "net/msg_internal.h"
 #include "net/msgprocessor.h"
 #include "net/net.h"
+#include "net/onion_stream.h"
+#include "net/rom_fetch.h"
 #include "net/rom_seed.h"
 #include "net/state_offer.h"
 #include "platform/time_compat.h"
 #include "services/sync_monitor.h"
+#include "services/wallet_history_manifest.h"
 #include "sync/sync_planner.h"
 #include "test/test_core.h"
 #include "util/util.h"
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -62,7 +70,8 @@ struct onion_fixture {
     struct send_segment *old_server_q, *old_client_q, *idle_q;
     struct rom_artifact *artifact;
     uint8_t *wire;
-    unsigned stray;               /* non-ZBND frames the client sent */
+    unsigned stray;               /* non-ZBND frames except the file-service offer */
+    unsigned zfileaddr;
     unsigned chunk_req[2];        /* chunk requests the client sent, by index */
     char dir[256], bundle[512], landed[512];
     bool started;
@@ -112,6 +121,74 @@ static bool onion_rung_only(int32_t height)
 
 static bool onion_hold(void) { return true; }
 
+struct onion_loopback {
+    onion_stream_read_fn read;
+    onion_stream_event_fn event;
+    void *ctx;
+    pthread_t thread;
+    int fd;
+    _Atomic bool stop;
+};
+
+static void *onion_loopback_main(void *arg)
+{
+    struct onion_loopback *s = arg;
+    s->event((struct onion_stream_raw *)s, ONION_STREAM_EVENT_CONNECTED, s->ctx);
+    uint8_t bytes[16384];
+    while (!atomic_load(&s->stop)) {
+        ssize_t n = recv(s->fd, bytes, sizeof(bytes), 0);
+        if (n > 0) s->read((struct onion_stream_raw *)s, bytes, (size_t)n, s->ctx);
+        else if (n == 0) break;
+    }
+    close(s->fd);
+    s->event((struct onion_stream_raw *)s, ONION_STREAM_EVENT_CLOSED, s->ctx);
+    return NULL;
+}
+
+static struct onion_stream_raw *onion_loopback_open(const char *onion, uint16_t port,
+    onion_stream_read_fn read, onion_stream_event_fn event, void *ctx, int lifetime)
+{
+    (void)onion; (void)lifetime;
+    struct onion_loopback *s = calloc(1, sizeof(*s));
+    if (!s) return NULL;
+    s->read = read; s->event = event; s->ctx = ctx;
+    s->fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons(port)};
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (s->fd < 0 || connect(s->fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
+        pthread_create(&s->thread, NULL, onion_loopback_main, s) != 0) {
+        if (s->fd >= 0) close(s->fd);
+        free(s);
+        return NULL;
+    }
+    return (struct onion_stream_raw *)s;
+}
+
+static int onion_loopback_write(struct onion_stream_raw *raw, const uint8_t *data, size_t len)
+{
+    struct onion_loopback *s = (struct onion_loopback *)raw;
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = send(s->fd, data + sent, len - sent, MSG_NOSIGNAL);
+        if (n <= 0) return -1;
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
+static void onion_loopback_close(struct onion_stream_raw *raw)
+{
+    struct onion_loopback *s = (struct onion_loopback *)raw;
+    atomic_store(&s->stop, true);
+    (void)shutdown(s->fd, SHUT_RDWR);
+    pthread_join(s->thread, NULL);
+    free(s);
+}
+
+static const struct onion_stream_backend onion_loopback_backend = {
+    .open = onion_loopback_open, .write = onion_loopback_write, .close = onion_loopback_close,
+};
+
 static struct p2p_node *onion_node(struct onion_fixture *f, struct send_segment **q, bool inbound)
 {
     struct net_address zero = {0}; /* an onion peer's IP is all zeros */
@@ -121,9 +198,49 @@ static struct p2p_node *onion_node(struct onion_fixture *f, struct send_segment 
     n->send_head = n->send_tail = *q;
     n->version = 1;
     n->services = NODE_ZCL23 | NODE_STATE_OFFER_LINK;
+    n->addr.svc.addr.has_torv3 = true;
+    memset(n->addr.svc.addr.torv3, 0x5a, sizeof(n->addr.svc.addr.torv3));
     atomic_store(&n->state, PEER_SYNCING_HEADERS); /* live state "syncing_headers" */
     n->starting_height = ONION_PEER_TIP;
     return n;
+}
+
+static bool onion_file(const char *path, const char *bytes, size_t size)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return false;
+    bool ok = write(fd, bytes, size) == (ssize_t)size;
+    return close(fd) == 0 && ok;
+}
+
+static bool onion_history(const struct onion_fixture *f)
+{
+    char dir[512], blocks[560], block[600], index[560];
+    snprintf(dir, sizeof(dir), "%s/history", f->dir);
+    snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
+    snprintf(block, sizeof(block), "%s/blk00000.dat", blocks);
+    snprintf(index, sizeof(index), "%s/block_index.bin", dir);
+    if (mkdir(dir, 0700) != 0 || mkdir(blocks, 0700) != 0 ||
+        !onion_file(block, "abc", 3) || !onion_file(index, "index", 5)) return false;
+    struct file_manifest manifest;
+    if (!wallet_history_manifest_build(&manifest, dir, 1).ok) return false;
+    manifest.chain_height = ONION_PEER_TIP;
+    uint8_t endpoint[32]; memset(endpoint, 1, sizeof(endpoint));
+    struct platform_directory_transaction root;
+    struct fs_history_generation generation;
+    platform_directory_transaction_init(&root); fs_history_generation_init(&generation);
+    bool ok = platform_directory_transaction_open(&root, dir) &&
+        fs_history_generation_take(&generation, &root, &manifest,
+            f->artifact->whole_sha3, ONION_PEER_TIP, endpoint) &&
+        fs_server_start_with_history(&generation, dir, 0, "127.0.0.1");
+    platform_directory_transaction_close(&root); fs_history_generation_close(&generation);
+    struct fs_onion_listener listener;
+    for (int i = 0; ok && i < 2000; i++) {
+        if (fs_server_onion_pin(&listener) && listener.decision == FS_ONION_AVAILABLE)
+            return fs_server_onion_publish(listener.generation);
+        platform_sleep_ms(1); /* real-clock: loopback listener startup uses kernel thread scheduling */
+    }
+    return false;
 }
 
 static bool onion_bundle(struct onion_fixture *f)
@@ -139,7 +256,8 @@ static bool onion_bundle(struct onion_fixture *f)
         ok = write(fd, page, sizeof(page)) == (ssize_t)sizeof(page);
     }
     close(fd);
-    return ok && rom_seed_register(f->dir, ONION_NAME, NULL, f->artifact) == ROM_REG_OK;
+    return ok && rom_seed_register(f->dir, ONION_NAME, NULL, f->artifact) == ROM_REG_OK &&
+        onion_history(f);
 }
 
 static bool onion_setup(struct onion_fixture *f)
@@ -163,8 +281,10 @@ static bool onion_setup(struct onion_fixture *f)
     f->nm.nodes = f->list; f->nm.num_nodes = 2;
     state_offer_store_reset(); rom_seed_reset(); rom_seed_set_enabled(true);
     ONION_CHECK(onion_bundle(f));
+    rom_fetch_set_onion_backend_for_test(&onion_loopback_backend);
     g_onion_served = f->artifact;
     state_offer_service_start(f->dir, NULL); f->started = true;
+    state_offer_service_wire(&f->mp);
     state_offer_set_provider(onion_provide, NULL);
     reducer_frontier_provable_tip_set(0);           /* fresh datadir, height known */
     state_offer_store_set_height_filter(onion_rung_only);
@@ -173,13 +293,18 @@ static bool onion_setup(struct onion_fixture *f)
 }
 
 /* Pop one queued message body from a captured send queue. */
-static bool onion_pop(struct p2p_node *node, struct send_segment *q, uint8_t *copy, size_t *len)
+static bool onion_pop(struct p2p_node *node, struct send_segment *q, uint8_t *copy, size_t *len,
+                      char command[COMMAND_SIZE + 1])
 {
     struct send_segment *seg = q->next;
     if (!seg || seg->size < MSG_HEADER_SIZE || seg->size - MSG_HEADER_SIZE > STATE_OFFER_LINK_FRAME_MAX)
         return false;
     *len = seg->size - MSG_HEADER_SIZE;
     memcpy(copy, seg->data + MSG_HEADER_SIZE, *len);
+    if (command) {
+        memcpy(command, seg->data + MESSAGE_START_SIZE, COMMAND_SIZE);
+        command[COMMAND_SIZE] = '\0';
+    }
     q->next = seg->next;
     if (node->send_tail == seg) node->send_tail = q;
     node->send_size -= seg->size;
@@ -192,9 +317,12 @@ static void onion_relay(struct onion_fixture *f, struct p2p_node *from, struct s
                         struct p2p_node *to, unsigned *stray)
 {
     size_t n = 0;
-    while (onion_pop(from, q, f->wire, &n)) {
+    char command[COMMAND_SIZE + 1];
+    while (onion_pop(from, q, f->wire, &n, command)) {
         struct state_offer_link_frame fr;
-        if (stray && (n < 4 || memcmp(f->wire, "ZBND", 4))) ++*stray;
+        bool advertised = !strcmp(command, "zfileaddr");
+        if (stray && advertised) f->zfileaddr++;
+        else if (stray && (n < 4 || memcmp(f->wire, "ZBND", 4))) ++*stray;
         else if (stray && state_offer_link_decode(f->wire, n, &fr) &&
                  fr.kind == STATE_OFFER_LINK_CHUNK_REQUEST && fr.index < 2)
             f->chunk_req[fr.index]++;
@@ -273,7 +401,7 @@ static void onion_trickle(struct onion_fixture *f)
     state_offer_peer_pump(&f->mp);
     onion_relay(f, f->to_server, f->to_server_q, f->to_client, &f->stray);
     size_t n = 0;
-    if (onion_pop(f->to_client, f->to_client_q, f->wire, &n))
+    if (onion_pop(f->to_client, f->to_client_q, f->wire, &n, NULL))
         (void)boot_zcode_swarm_frame(&f->mp, f->to_server, f->wire, n, &f->svc);
     struct timespec t = {0, 1000000};
     (void)nanosleep(&t, NULL);
@@ -406,7 +534,7 @@ static bool onion_lands(struct onion_fixture *f)
     state_offer_service_restart_hint(&hint);
     ONION_CHECK(hint.pending && hint.height == ONION_RUNG && hint.bytes == ONION_BYTES &&
                 memcmp(hint.digest, f->artifact->whole_sha3, 32) == 0);
-    ONION_CHECK(f->stray == 0); /* the engine-off client sent only link frames */
+    ONION_CHECK(f->stray == 0 && f->zfileaddr > 0); /* link traffic plus the history offer only */
     ONION_CHECK(f->chunk_req[0] == 0 && f->chunk_req[1] >= 1); /* resumed from the journal */
     return true;
 }
@@ -434,6 +562,8 @@ static bool onion_hint_negative_cases(struct onion_fixture *f)
     offer.bundle_height = ONION_RUNG; offer.content_bytes = ONION_BYTES;
     memcpy(offer.content_digest, f->artifact->whole_sha3, 32);
     state_offer_service_test_clear_restart_hint();
+    boot_install_bundle_clear(f->dir);
+    ONION_CHECK(boot_install_bundle_request(f->dir, f->landed) == 1);
     ONION_CHECK(state_offer_service_test_arm_landed(f->landed, &offer));
     state_offer_service_restart_hint(&hint); ONION_CHECK(!hint.pending);
     ONION_CHECK(state_offer_service_test_arm_landed("/different/bundle", &offer));
@@ -494,6 +624,8 @@ static void onion_cleanup(struct onion_fixture *f)
     msg_processor_set_header_sync_hold(NULL);
     state_offer_store_set_height_filter(NULL);
     if (f->started) boot_zcode_swarm_shutdown();
+    rom_fetch_set_onion_backend_for_test(NULL);
+    fs_server_stop();
     reducer_frontier_provable_tip_reset();
     g_onion_served = NULL;
     onion_drop_queue(f->to_server, f->to_server_q);

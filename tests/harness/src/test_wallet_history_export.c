@@ -28,6 +28,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+bool wallet_history_export_fixture_for_provider(const char *, const char *, struct uint256 *,
+    uint8_t[32], struct file_manifest *);
 struct zcl_result wallet_history_export_test_run(const struct wallet_history_export_request *,
     struct wallet_history_export_result *, const struct uint256 *);
 
@@ -308,6 +310,26 @@ static bool history_test_run_cases(const char *source, const char *parent, const
         history_test_reopen(&r, parent, &hashes[0]) &&
         history_test_publication_refusals(&r, source, parent, &hashes[0]);
 }
+bool wallet_history_export_fixture_for_provider(const char *source, const char *parent,
+    struct uint256 *genesis, uint8_t endpoint[32], struct file_manifest *manifest)
+{
+    struct uint256 hashes[3];
+    if (!history_test_source(source, hashes, false)) return false;
+    struct wallet_history_export_request request = {
+        .source_datadir = source, .private_parent = parent, .staging_leaf = "stage",
+        .destination_leaf = "ready", .endpoint_height = 1, .max_rows = 3,
+        .max_bytes = 1048576, .min_free_bytes = 1,
+    };
+    memcpy(request.endpoint_hash, hashes[1].data, 32);
+    struct wallet_history_export_result result;
+    if (!wallet_history_export_test_run(&request, &result, &hashes[0]).ok ||
+        result.outcome != WALLET_HISTORY_EXPORT_PUBLISHED) return false;
+    *genesis = hashes[0];
+    memcpy(endpoint, hashes[1].data, 32);
+    *manifest = result.manifest;
+    return true;
+}
+
 static bool history_test_refusals(const char *source, const char *parent, const struct uint256 hashes[3])
 {
     struct wallet_history_export_request r = {.source_datadir = source, .private_parent = parent,

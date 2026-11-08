@@ -2,6 +2,7 @@
  * File controller tests — manifest coverage and cache invalidation. */
 
 #include "crypto/sha3.h"
+#include "base/serialize_le.h"
 #include "platform/time_compat.h"
 #include "platform/file_sync.h"
 #include "test/test_core.h"
@@ -9,12 +10,18 @@
 #include "controllers/file_controller.h"
 #include "net/file_service.h"
 #include "../../net/src/file_service_worker_internal.h"
+#include "../../../core/modules/net/src/file_service_priv.h"
 #include "services/consensus_snapshot_export_service.h"
 #include <errno.h>
+#include <stdatomic.h>
 #include <sqlite3.h>
 #if !defined(_WIN32)
 #include <arpa/inet.h>
 #include <poll.h>
+#include <pthread.h>
+#include <sys/time.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <sys/socket.h>
 #endif
 #include <stdlib.h>
@@ -875,9 +882,673 @@ static int test_immutable_manifest(void)
 }
 #endif
 
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+bool fs_test_manifest_extents(const struct file_chunk *chunks, uint32_t count);
+bool fs_test_chunk_open(const char *dir, uint8_t index);
+bool fs_test_output_size(const char *dir, uint8_t index, uint64_t size, bool final);
+uint32_t fs_test_resume(const char *, const struct file_chunk *, uint32_t);
+bool fs_test_manifest_sequence(uint32_t entries, bool done);
+bool fs_test_manifest_frame_compat(void);
+bool fs_test_expected_manifest(const struct file_chunk *, uint32_t, uint64_t, const struct file_manifest *);
+bool fs_test_receive_cancel_fd(void);
+static bool fs_test_cancel_before_adoption(void);
+bool fs_test_boundary_aggregation(void);
+bool fs_test_receive_challenge_difficulty(int bits);
+bool fs_test_inventory_complete(const char *, const uint64_t [255]);
+bool fs_output_durable(const char *, const uint64_t [255]);
+void fs_test_set_fail_fsync(bool);
+static int test_fs_history_inventory(void)
+{
+    char dir[256], blocks[512], index[512], block[512], extra[512];
+    test_make_tmpdir(dir, sizeof(dir), "file_controller", "history-inventory");
+    snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
+    snprintf(index, sizeof(index), "%s/block_index.bin", dir);
+    snprintf(block, sizeof(block), "%s/blocks/blk00000.dat", dir);
+    snprintf(extra, sizeof(extra), "%s/blocks/extra", dir);
+    uint64_t lengths[255] = {0}; lengths[0] = lengths[253] = 4;
+    bool ok = mkdir(blocks, 0700) == 0;
+    test_file_write_bytes(index, 4, 1);
+    ok = ok && !fs_test_inventory_complete(dir, lengths);
+    test_file_write_bytes(block, 4, 1);
+    ok = ok && fs_test_inventory_complete(dir, lengths);
+    test_file_write_bytes(extra, 1, 1);
+    ok = ok && !fs_test_inventory_complete(dir, lengths) && unlink(extra) == 0;
+    ok = ok && unlink(block) == 0 && symlink("../block_index.bin", block) == 0 &&
+        !fs_test_inventory_complete(dir, lengths) && unlink(block) == 0;
+    test_file_write_bytes(block, 4, 1);
+    ok = ok && fs_test_inventory_complete(dir, lengths);
+    fs_test_set_fail_fsync(true);
+    ok = ok && !fs_output_durable(dir, lengths);
+    fs_test_set_fail_fsync(false);
+    ok = ok && fs_output_durable(dir, lengths);
+    cleanup_file_controller_test_dir(dir);
+    printf("file_controller: history inventory and fsync refusal... %s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+struct fs_blocked_manifest_fixture {
+    int listener, notice;
+    struct fs_receive_op *op;
+    const char *dir;
+    uint16_t port;
+    bool request_seen, probe, saw_eof;
+    int behavior;
+    struct file_manifest received;
+    enum fs_receive_result result;
+};
+
+static int fs_test_accept_timed(int listener, int timeout_ms)
+{
+    struct pollfd ready = {.fd = listener, .events = POLLIN};
+    return poll(&ready, 1, timeout_ms) == 1 ? accept(listener, NULL, NULL) : -1;
+}
+
+static void *fs_retry_server(void *arg)
+{
+    struct fs_blocked_manifest_fixture *f = arg;
+    int fd = fs_test_accept_timed(f->listener, 5000);
+    if (fd < 0) return NULL;
+    struct timeval timeout = {.tv_sec = 5};
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    struct fs_session session; fs_session_init(&session, fd);
+    const uint8_t root[32] = {0}; uint8_t type; const uint8_t *payload; uint32_t size;
+    uint8_t entry[45] = {0}; entry[32] = 1;
+    bool ok = fs_handshake(&session, root, false) &&
+        fs_recv_frame(&session, &type, &payload, &size) && type == FS_MANIFEST && size == 0 &&
+        fs_send_frame(&session, FS_MANIFEST, entry, sizeof(entry));
+    entry[36] = 253;
+    ok = ok && fs_send_frame(&session, FS_MANIFEST, entry, sizeof(entry)) &&
+        fs_send_frame(&session, FS_DONE, NULL, 0);
+    fs_session_cleanup(&session); close(fd);
+    for (int i = 0; ok && i < 2; ++i) {
+        fd = fs_test_accept_timed(f->listener, 5000);
+        if (fd < 0) ok = false; else close(fd);
+    }
+    fd = ok ? fs_test_accept_timed(f->listener, 12000) : -1;
+    if (fd < 0) return NULL;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    f->request_seen = true;
+    char marker = 'M';
+    if (write(f->notice, &marker, 1) != 1) { close(fd); return NULL; }
+    char buffer[256]; ssize_t n;
+    do { n = recv(fd, buffer, sizeof(buffer), 0); } while (n > 0);
+    f->saw_eof = n == 0;
+    close(fd);
+    return NULL;
+}
+
+static void fs_manifest_invalid_response(struct fs_blocked_manifest_fixture *f, struct fs_session *session)
+{
+    if (f->request_seen && f->behavior >= 6 && f->behavior <= 8) {
+        uint8_t entry[46] = {0}; entry[32] = 1;
+        uint8_t frame = f->behavior == 8 ? FS_REQUEST : FS_MANIFEST;
+        uint32_t size = f->behavior == 6 ? 44 : f->behavior == 7 ? 46 : 45;
+        (void)fs_send_frame(session, frame, entry, size);
+        if (f->behavior == 7) {
+            entry[36] = 253;
+            (void)fs_send_frame(session, FS_MANIFEST, entry, 45);
+            (void)fs_send_frame(session, FS_DONE, NULL, 0);
+        }
+    }
+}
+
+static void fs_manifest_server_response(struct fs_blocked_manifest_fixture *f, struct fs_session *session, int fd)
+{
+    if (f->request_seen && (f->behavior == 0 || f->behavior == 4 || f->behavior == 5 || f->behavior == 9)) {
+        char buffer[256]; ssize_t n;
+        do { n = recv(fd, buffer, sizeof(buffer), 0); } while (n > 0);
+        f->saw_eof = n == 0;
+    }
+    if (f->request_seen && f->behavior == 1) (void)fs_send_frame(session, FS_DONE, NULL, 0);
+    if (f->request_seen && f->behavior == 3) {
+        uint8_t entry[45] = {0}; entry[32] = 1;
+        bool sent = fs_send_frame(session, FS_MANIFEST, entry, sizeof(entry));
+        entry[36] = 253;
+        sent = sent && fs_send_frame(session, FS_MANIFEST, entry, sizeof(entry));
+        sent = sent && fs_send_frame(session, FS_DONE, NULL, 0);
+        if (!sent) f->request_seen = false;
+    }
+    fs_manifest_invalid_response(f, session);
+}
+
+static void *fs_blocked_manifest_server(void *arg)
+{
+    struct fs_blocked_manifest_fixture *f = arg;
+    struct pollfd ready = {.fd = f->listener, .events = POLLIN};
+    if (poll(&ready, 1, 5000) != 1) return NULL;
+    int fd = accept(f->listener, NULL, NULL);
+    if (fd < 0) return NULL;
+    struct timeval timeout = {.tv_sec = 5};
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    struct fs_session session;
+    fs_session_init(&session, fd);
+    const uint8_t root[32] = {0};
+    uint8_t type; const uint8_t *payload; uint32_t size;
+    f->request_seen = (f->behavior == 5 || f->behavior == 9) || (fs_handshake(&session, root, false) &&
+        fs_recv_frame(&session, &type, &payload, &size) && type == FS_MANIFEST && size == 0);
+    char marker = f->request_seen ? 'M' : 'E';
+    if (write(f->notice, &marker, 1) != 1) { fs_session_cleanup(&session); close(fd); return NULL; }
+    fs_manifest_server_response(f, &session, fd);
+    fs_session_cleanup(&session);
+    close(fd);
+    return NULL;
+}
+
+static void *fs_blocked_manifest_client(void *arg)
+{
+    struct fs_blocked_manifest_fixture *f = arg;
+    const uint8_t root[32] = {0};
+    f->result = f->probe ? fs_receive_probe(f->op, "127.0.0.1", f->port, root, &f->received) :
+        fs_receive_run(f->op, "127.0.0.1", f->port, f->dir, root);
+    return NULL;
+}
+
+static bool fs_manifest_notice(int fd, bool ok)
+{
+    if (ok) {
+        struct pollfd p = {.fd = fd, .events = POLLIN}; char marker = 0;
+        ok = poll(&p, 1, 15000) == 1 && read(fd, &marker, 1) == 1 && marker == 'M';
+    }
+    return ok;
+}
+
+static bool fs_manifest_verify_payload(const struct fs_blocked_manifest_fixture *f, int behavior, bool ok)
+{
+    if (behavior == 3) ok = ok && f->result == FS_RECEIVE_COMPLETE &&
+        f->received.num_chunks == 2 && f->received.total_bytes == 2 && f->received.chain_height == -1;
+    else {
+        ok = ok && f->result != FS_RECEIVE_COMPLETE;
+        if (f->probe) { const uint8_t *p = (const uint8_t *)&f->received;
+            for (size_t i = 0; i < sizeof(f->received); ++i) ok = ok && p[i] == 0; }
+    }
+    return ok;
+}
+
+static bool fs_manifest_verify(const struct fs_blocked_manifest_fixture *f, int behavior, bool ok)
+{
+    ok = ok && f->request_seen;
+    if (behavior == 0 || behavior == 4 || behavior == 5 || behavior == 9) ok = ok && f->saw_eof;
+    if (behavior == 9) ok = ok && f->result == FS_RECEIVE_ERROR;
+    ok = fs_manifest_verify_payload(f, behavior, ok);
+    return ok;
+}
+
+static void fs_manifest_retry_input(struct file_manifest *manifest, int behavior)
+{
+    if (behavior == 9) {
+        manifest->num_chunks = 2; manifest->total_bytes = 2;
+        manifest->chunks[1].size = 1; manifest->chunks[1].file_index = 253;
+        struct sha3_256_ctx hash; sha3_256_init(&hash);
+        sha3_256_write(&hash, manifest->chunks[0].sha3, 32);
+        sha3_256_write(&hash, manifest->chunks[1].sha3, 32);
+        sha3_256_finalize(&hash, manifest->root_hash);
+    }
+}
+
+static bool fs_manifest_listen(struct fs_blocked_manifest_fixture *f, int notice[2], pthread_t *server, bool *server_started)
+{
+    bool ok = f->op && pipe(notice) == 0;
+    if (ok) f->listener = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in address = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t length = sizeof(address);
+    ok = ok && f->listener >= 0 && bind(f->listener, (struct sockaddr *)&address, length) == 0 &&
+        getsockname(f->listener, (struct sockaddr *)&address, &length) == 0 && listen(f->listener, 1) == 0;
+    if (ok) { f->port = ntohs(address.sin_port); f->notice = notice[1];
+        *server_started = pthread_create(server, NULL, f->behavior == 9 ? fs_retry_server :
+                                        fs_blocked_manifest_server, f) == 0;
+        ok = *server_started; }
+    return ok;
+}
+
+static void fs_manifest_cancel(struct fs_blocked_manifest_fixture *f, int behavior, bool ok)
+{
+    if (f->op && (behavior == 0 || behavior == 4 || behavior == 5 || behavior == 9 || !ok)) fs_receive_cancel(f->op);
+}
+
+static int test_fs_manifest_case(int behavior)
+{
+    char dir[256]; int notice[2] = {-1, -1}; pthread_t server, client;
+    test_make_tmpdir(dir, sizeof(dir), "file_controller", "history-cancel");
+    struct file_manifest manifest = {.num_chunks = 1}; manifest.chunks[0].size = 1;
+    fs_manifest_retry_input(&manifest, behavior);
+    struct fs_blocked_manifest_fixture f = {.listener = -1, .notice = -1, .dir = dir,
+        .probe = behavior != 0 && behavior != 9, .behavior = behavior, .result = FS_RECEIVE_COMPLETE,
+        .op = fs_receive_create(behavior == 0 || behavior == 9 ? &manifest : NULL)};
+    bool server_started = false, client_started = false;
+    bool ok = fs_manifest_listen(&f, notice, &server, &server_started);
+    if (f.probe) memset(&f.received, 0xa5, sizeof(f.received));
+    if (ok) { client_started = pthread_create(&client, NULL, fs_blocked_manifest_client, &f) == 0;
+        ok = client_started; }
+    ok = fs_manifest_notice(notice[0], ok);
+    fs_manifest_cancel(&f, behavior, ok);
+    if (client_started) pthread_join(client, NULL);
+    if (server_started) pthread_join(server, NULL);
+    ok = fs_manifest_verify(&f, behavior, ok);
+    if (f.listener >= 0) close(f.listener);
+    if (notice[0] >= 0) close(notice[0]);
+    if (notice[1] >= 0) close(notice[1]);
+    fs_receive_destroy(f.op);
+    cleanup_file_controller_test_dir(dir);
+    printf("file_controller: manifest case %d... %s\n", behavior, ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static int test_fs_manifest_case_isolated(int behavior)
+{
+    pid_t child = fork();
+    if (child < 0) return 1;
+    if (child == 0) {
+        signal(SIGALRM, SIG_DFL);
+        alarm(30);
+        _exit(test_fs_manifest_case(behavior) == 0 ? 0 : 1);
+    }
+    int status; pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+}
+
+struct fs_test_adoption {
+    struct fs_receive_op *op;
+    int fd, ready, release;
+    bool adopted;
+};
+
+static void *fs_test_adoption_worker(void *arg)
+{
+    struct fs_test_adoption *test = arg;
+    char byte = 'R';
+    if (write(test->ready, &byte, 1) == 1 && read(test->release, &byte, 1) == 1)
+        test->adopted = fs_receive_adopt(test->op, 1, test->fd);
+    return NULL;
+}
+
+static bool fs_test_cancel_before_adoption(void)
+{
+    int pair[2] = {-1, -1}, ready[2] = {-1, -1}, release[2] = {-1, -1};
+    struct file_manifest expected = {.num_chunks = 1}; expected.chunks[0].size = 1;
+    struct fs_receive_op *op = fs_receive_create(&expected);
+    bool ok = op && socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0 &&
+        pipe(ready) == 0 && pipe(release) == 0;
+    struct fs_test_adoption test = {.op = op, .fd = pair[0],
+        .ready = ready[1], .release = release[0]};
+    pthread_t thread; bool started = false; char byte;
+    if (ok) { started = pthread_create(&thread, NULL, fs_test_adoption_worker, &test) == 0; ok = started; }
+    if (started) {
+        struct pollfd pfd = {.fd = ready[0], .events = POLLIN};
+        bool signaled = poll(&pfd, 1, 5000) == 1 && read(ready[0], &byte, 1) == 1;
+        fs_receive_cancel(op);
+        if (signaled) { byte = 'G'; ok = write(release[1], &byte, 1) == 1 && ok; }
+        else { close(release[1]); release[1] = -1; ok = false; }
+        pthread_join(thread, NULL);
+        ok = ok && !test.adopted;
+    }
+    for (int i = 0; i < 2; ++i) {
+        if (pair[i] >= 0) close(pair[i]);
+        if (ready[i] >= 0) close(ready[i]);
+        if (release[i] >= 0) close(release[i]);
+    }
+    fs_receive_destroy(op);
+    return ok;
+}
+static bool test_fs_adoption_isolated(void)
+{
+    pid_t child = fork();
+    if (child < 0) return false;
+    if (child == 0) {
+        signal(SIGALRM, SIG_DFL);
+        alarm(10);
+        _exit(fs_test_cancel_before_adoption() ? 0 : 1);
+    }
+    int status; pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+int fs_test_prefix_scan_decision(const char *, const struct file_chunk *, uint32_t,
+                                 struct fs_receive_op *, bool);
+
+enum { TEST_PREFIX_READY, TEST_PREFIX_ERROR, TEST_PREFIX_STOPPED };
+struct fs_prefix_fixture {
+    int listener;
+    uint16_t port;
+    bool retry, manifest_seen, range_seen, retry_seen, server_ok, unexpected;
+    _Atomic bool client_done;
+    struct file_manifest manifest;
+};
+
+static void fs_prefix_manifest_init(struct file_manifest *manifest)
+{
+    memset(manifest, 0, sizeof(*manifest));
+    manifest->num_chunks = 2; manifest->total_bytes = 2;
+    manifest->chunks[0].size = 1;
+    manifest->chunks[1].size = 1; manifest->chunks[1].file_index = 253;
+    sha3_256((const uint8_t *)"A", 1, manifest->chunks[0].sha3);
+    sha3_256((const uint8_t *)"B", 1, manifest->chunks[1].sha3);
+    struct sha3_256_ctx hash;
+    sha3_256_init(&hash);
+    sha3_256_write(&hash, manifest->chunks[0].sha3, 32);
+    sha3_256_write(&hash, manifest->chunks[1].sha3, 32);
+    sha3_256_finalize(&hash, manifest->root_hash);
+}
+
+static int fs_prefix_accept(struct fs_prefix_fixture *f, struct fs_session *session)
+{
+    int fd = fs_test_accept_timed(f->listener, 10000);
+    if (fd < 0) return -1;
+    struct timeval timeout = {.tv_sec = 5};
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    fs_session_init(session, fd);
+    const uint8_t salt[32] = {0};
+    if (fs_handshake(session, salt, false)) return fd;
+    fs_session_cleanup(session); close(fd);
+    return -1;
+}
+
+static void fs_prefix_close(struct fs_session *session, int fd)
+{
+    fs_session_cleanup(session);
+    close(fd);
+}
+
+static bool fs_prefix_send_manifest(struct fs_prefix_fixture *f)
+{
+    struct fs_session session;
+    int fd = fs_prefix_accept(f, &session);
+    if (fd < 0) return false;
+    uint8_t type; const uint8_t *body; uint32_t length;
+    bool ok = fs_recv_frame(&session, &type, &body, &length) && type == FS_MANIFEST && length == 0;
+    for (uint32_t i = 0; ok && i < f->manifest.num_chunks; i++) {
+        const struct file_chunk *chunk = &f->manifest.chunks[i];
+        uint8_t entry[45];
+        memcpy(entry, chunk->sha3, 32); zcl_write_u32_le(entry + 32, chunk->size);
+        entry[36] = chunk->file_index; zcl_write_u64_le(entry + 37, chunk->offset);
+        ok = fs_send_frame(&session, FS_MANIFEST, entry, sizeof(entry));
+    }
+    ok = ok && fs_send_frame(&session, FS_DONE, NULL, 0);
+    f->manifest_seen = ok;
+    fs_prefix_close(&session, fd);
+    return ok;
+}
+
+static bool fs_prefix_range_request(struct fs_prefix_fixture *f)
+{
+    struct fs_session session;
+    int fd = fs_prefix_accept(f, &session);
+    if (fd < 0) return false;
+    uint8_t type; const uint8_t *body; uint32_t length;
+    uint8_t challenge[FS_CHALLENGE_PAYLOAD_SIZE] = {0};
+    challenge[32] = PUZZLE_MIN_BITS;
+    bool ok = fs_recv_frame(&session, &type, &body, &length) && type == FS_CHALLENGE && length == 0 &&
+        fs_send_frame(&session, FS_CHALLENGE, challenge, sizeof(challenge)) &&
+        fs_recv_frame(&session, &type, &body, &length) && type == FS_REQUEST &&
+        length == FS_POW_SOLUTION_SIZE + 8 && !memcmp(body + FS_POW_SOLUTION_SIZE, "RNG", 3) &&
+        zcl_read_u16_le(body + FS_POW_SOLUTION_SIZE + 3) == 1 &&
+        zcl_read_u16_le(body + FS_POW_SOLUTION_SIZE + 5) == 2;
+    f->range_seen = ok;
+    fs_prefix_close(&session, fd);
+    return ok;
+}
+
+static bool fs_prefix_retry_request(struct fs_prefix_fixture *f)
+{
+    struct fs_session session;
+    int fd = fs_prefix_accept(f, &session);
+    if (fd < 0) return false;
+    uint8_t type; const uint8_t *body; uint32_t length;
+    bool ok = fs_recv_frame(&session, &type, &body, &length) && type == FS_REQUEST && length == 32 &&
+        memcmp(body, f->manifest.chunks[1].sha3, 32) == 0;
+    f->retry_seen = ok;
+    if (ok) ok = fs_send_chunk_fast(&session, (const uint8_t *)"B", 1, f->manifest.chunks[1].sha3);
+    fs_prefix_close(&session, fd);
+    return ok;
+}
+
+static bool fs_prefix_no_worker(struct fs_prefix_fixture *f)
+{
+    for (int i = 0; i < 100 && !atomic_load(&f->client_done); i++) {
+        int fd = fs_test_accept_timed(f->listener, 100);
+        if (fd >= 0) { close(fd); f->unexpected = true; return false; }
+    }
+    if (!atomic_load(&f->client_done)) return false;
+    int fd = fs_test_accept_timed(f->listener, 100);
+    if (fd >= 0) { close(fd); f->unexpected = true; return false; }
+    return true;
+}
+
+static void *fs_prefix_server(void *context)
+{
+    struct fs_prefix_fixture *f = context;
+    bool ok = fs_prefix_send_manifest(f);
+    if (ok) ok = f->retry ? fs_prefix_range_request(f) && fs_prefix_retry_request(f) :
+                            fs_prefix_no_worker(f);
+    f->server_ok = ok;
+    return NULL;
+}
+
+static bool fs_prefix_listen(struct fs_prefix_fixture *f)
+{
+    f->listener = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t length = sizeof(addr);
+    bool ok = f->listener >= 0 && bind(f->listener, (struct sockaddr *)&addr, length) == 0 &&
+        listen(f->listener, 4) == 0 && getsockname(f->listener, (struct sockaddr *)&addr, &length) == 0;
+    if (ok) f->port = ntohs(addr.sin_port);
+    return ok;
+}
+
+static bool fs_prefix_make_stage(const char *dir, char block[512], char index[512])
+{
+    char blocks[512];
+    if (snprintf(blocks, sizeof(blocks), "%s/blocks", dir) >= (int)sizeof(blocks) ||
+        snprintf(block, 512, "%s/blk00000.dat", blocks) >= 512 ||
+        snprintf(index, 512, "%s/block_index.bin", dir) >= 512 || mkdir(blocks, 0700) != 0) return false;
+    test_file_write_bytes(block, 1, 'A');
+    FILE *f = fopen(block, "rb");
+    if (!f) return false;
+    bool ok = fgetc(f) == 'A';
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static bool fs_prefix_decisions(const char *dir, const char *block, const struct file_manifest *manifest)
+{
+    struct fs_receive_op *op = fs_receive_create_with_prefix(manifest, 1);
+    if (!op) return false;
+    fs_receive_cancel(op);
+    bool ok = fs_test_prefix_scan_decision(dir, manifest->chunks, 2, op, false) == TEST_PREFIX_STOPPED;
+    fs_receive_destroy(op);
+    test_file_write_bytes(block, 1, 'X');
+    op = fs_receive_create(manifest);
+    if (!op) return false;
+    ok = ok && fs_test_prefix_scan_decision(dir, manifest->chunks, 2, op, false) == TEST_PREFIX_READY;
+    fs_receive_destroy(op);
+    op = fs_receive_create_with_prefix(manifest, 1);
+    if (!op) return false;
+    ok = ok && fs_test_prefix_scan_decision(dir, manifest->chunks, 2, op, true) == TEST_PREFIX_ERROR;
+    fs_receive_destroy(op);
+    test_file_write_bytes(block, 1, 'A');
+    return ok;
+}
+
+static bool fs_prefix_constructors(const struct file_manifest *manifest)
+{
+    if (fs_receive_create_with_prefix(NULL, 0) || fs_receive_create_with_prefix(manifest, 3)) return false;
+    struct fs_receive_op *zero = fs_receive_create_with_prefix(manifest, 0);
+    struct fs_receive_op *full = fs_receive_create_with_prefix(manifest, 2);
+    bool ok = zero && full;
+    fs_receive_destroy(zero); fs_receive_destroy(full);
+    return ok;
+}
+
+static bool fs_prefix_file_equals(const char *path, int expected)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    bool ok = fgetc(f) == expected && fgetc(f) == EOF;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+struct fs_prefix_case_state {
+    char dir[256], block[512], index[512];
+    struct fs_prefix_fixture server;
+    struct fs_receive_op *op;
+    enum fs_receive_result result;
+};
+
+static bool fs_prefix_case_prepare(struct fs_prefix_case_state *s, bool retry)
+{
+    test_make_tmpdir(s->dir, sizeof(s->dir), "file_controller", "history-prefix");
+    s->server.listener = -1; s->server.retry = retry;
+    fs_prefix_manifest_init(&s->server.manifest);
+    if (!fs_prefix_constructors(&s->server.manifest) || !fs_prefix_make_stage(s->dir, s->block, s->index) ||
+        !fs_prefix_decisions(s->dir, s->block, &s->server.manifest) ||
+        fs_test_resume(s->dir, s->server.manifest.chunks, 1) != 1) return false;
+    s->op = fs_receive_create_with_prefix(&s->server.manifest, 1);
+    if (!retry) test_file_write_bytes(s->block, 1, 'X');
+    return s->op && fs_prefix_listen(&s->server);
+}
+
+static bool fs_prefix_case_run(struct fs_prefix_case_state *s)
+{
+    pthread_t server;
+    if (pthread_create(&server, NULL, fs_prefix_server, &s->server) != 0) return false;
+    const uint8_t salt[32] = {0};
+    s->result = fs_receive_run(s->op, "127.0.0.1", s->server.port, s->dir, salt);
+    atomic_store(&s->server.client_done, true);
+    pthread_join(server, NULL);
+    return s->server.server_ok && s->server.manifest_seen && !s->server.unexpected;
+}
+
+static bool fs_prefix_case_verify(const struct fs_prefix_case_state *s, bool retry)
+{
+    if (retry) return s->result == FS_RECEIVE_COMPLETE && s->server.range_seen && s->server.retry_seen &&
+        fs_prefix_file_equals(s->block, 'A') && fs_prefix_file_equals(s->index, 'B');
+    return s->result == FS_RECEIVE_ERROR && !s->server.range_seen && !s->server.retry_seen &&
+        fs_prefix_file_equals(s->block, 'X') && access(s->index, F_OK) != 0;
+}
+
+static int fs_prefix_case(bool retry)
+{
+    struct fs_prefix_case_state s = {0};
+    bool ok = fs_prefix_case_prepare(&s, retry) && fs_prefix_case_run(&s) && fs_prefix_case_verify(&s, retry);
+    if (s.server.listener >= 0) close(s.server.listener);
+    fs_receive_destroy(s.op);
+    cleanup_file_controller_test_dir(s.dir);
+    printf("file_controller: verified prefix %s... %s\n", retry ? "retry" : "shortfall", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static int fs_prefix_case_isolated(bool retry)
+{
+    pid_t child = fork();
+    if (child < 0) return 1;
+    if (child == 0) { signal(SIGALRM, SIG_DFL); alarm(45); _exit(fs_prefix_case(retry)); }
+    int status; pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+}
+
+static bool fs_history_invalid(struct file_chunk chunks[3], struct file_manifest *expected, bool ok)
+{
+    expected->root_hash[0] ^= 1;
+    ok = ok && !fs_test_expected_manifest(chunks, 3, 12, expected);
+    expected->root_hash[0] ^= 1;
+    chunks[0].sha3[0] ^= 1;
+    ok = ok && !fs_test_expected_manifest(chunks, 3, 12, expected);
+    chunks[0].sha3[0] ^= 1;
+    ok = ok && !fs_test_expected_manifest(chunks, 3, 11, expected);
+    chunks[1].offset = 3; ok = ok && !fs_test_manifest_extents(chunks, 3) &&
+        !fs_test_expected_manifest(chunks, 3, 12, expected);
+    chunks[1].offset = 5; ok = ok && !fs_test_manifest_extents(chunks, 3);
+    chunks[1].offset = UINT64_MAX; ok = ok && !fs_test_manifest_extents(chunks, 3);
+    chunks[1].offset = 4; chunks[2].file_index = 255;
+    ok = ok && !fs_test_manifest_extents(chunks, 3);
+    return ok;
+}
+
+static bool fs_history_resume_cases(const char *dir, const char *link, bool ok)
+{
+    struct file_chunk resumed[2] = {0};
+    resumed[0].file_index = resumed[1].file_index = 253;
+    resumed[0].size = resumed[1].size = 4; resumed[1].offset = 4;
+    uint8_t four[4] = {1,1,1,1};
+    sha3_256(four, sizeof(four), resumed[0].sha3);
+    memcpy(resumed[1].sha3, resumed[0].sha3, 32);
+    ok = ok && fs_test_resume(dir, resumed, 2) == 2;
+    FILE *mutate = fopen(link, "r+b");
+    if (!mutate) ok = false;
+    else { bool wrote = fseek(mutate, 4, SEEK_SET) == 0 && fputc(2, mutate) != EOF;
+        if (fclose(mutate) != 0 || !wrote) ok = false; }
+    ok = ok && fs_test_resume(dir, resumed, 2) == 1;
+    return ok;
+}
+
+static bool fs_history_file_cases(bool ok)
+{
+    char dir[256], target[512], link[512];
+    test_make_tmpdir(dir, sizeof(dir), "file_controller", "history-symlink");
+    snprintf(target, sizeof(target), "%s/target", dir);
+    snprintf(link, sizeof(link), "%s/block_index.bin", dir);
+    test_file_write_bytes(target, 4, 1);
+    ok = ok && symlink("target", link) == 0 && !fs_test_chunk_open(dir, 253);
+    ok = ok && unlink(link) == 0;
+    ok = ok && mkfifo(link, 0600) == 0 && !fs_test_chunk_open(dir, 253);
+    ok = ok && unlink(link) == 0;
+    test_file_write_bytes(link, 8, 1);
+    ok = ok && !fs_test_output_size(dir, 253, 4, false) &&
+         !fs_test_output_size(dir, 253, 4, true) &&
+         fs_test_output_size(dir, 253, 8, true);
+    ok = fs_history_resume_cases(dir, link, ok);
+    cleanup_file_controller_test_dir(dir);
+    return ok;
+}
+
+static bool fs_history_basic(struct file_chunk chunks[3], struct file_manifest *expected)
+{
+    bool ok = fs_test_receive_challenge_difficulty(PUZZLE_MIN_BITS) &&
+        fs_test_receive_challenge_difficulty(PUZZLE_MAX_BITS) &&
+        !fs_test_receive_challenge_difficulty(PUZZLE_MIN_BITS - 1) &&
+        !fs_test_receive_challenge_difficulty(PUZZLE_MAX_BITS + 1) &&
+        fs_test_receive_cancel_fd() && test_fs_adoption_isolated() && fs_test_boundary_aggregation() && fs_test_expected_manifest(chunks, 3, 12, expected) &&
+        fs_test_manifest_extents(chunks, 3) &&
+        fs_test_manifest_frame_compat() && fs_test_manifest_sequence(FILE_MAX_CHUNKS, true) &&
+        !fs_test_manifest_sequence(FILE_MAX_CHUNKS + 1, true) &&
+        !fs_test_manifest_sequence(FILE_MAX_CHUNKS, false);
+    return ok;
+}
+
+static int test_fs_history_inputs(void)
+{
+    struct file_chunk chunks[3] = {0};
+    chunks[0].size = 4; chunks[1].size = 4; chunks[1].offset = 4;
+    chunks[2].file_index = 253; chunks[2].size = 4;
+    struct file_manifest expected = {.num_chunks = 3, .total_bytes = 12};
+    memcpy(expected.chunks, chunks, sizeof(chunks));
+    struct sha3_256_ctx digest;
+    sha3_256_init(&digest);
+    for (unsigned i = 0; i < 3; ++i) sha3_256_write(&digest, chunks[i].sha3, 32);
+    sha3_256_finalize(&digest, expected.root_hash);
+    bool ok = fs_history_basic(chunks, &expected);
+    ok = fs_history_invalid(chunks, &expected, ok);
+    ok = fs_history_file_cases(ok);
+    printf("file_controller: history extents and symlink refusal... %s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+#endif
+
 int test_file_controller(void)
 {
     int failures = 0;
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+    failures += test_fs_history_inputs();
+    failures += fs_prefix_case_isolated(false);
+    failures += fs_prefix_case_isolated(true);
+    failures += test_fs_history_inventory();
+    for (int behavior = 0; behavior < 10; ++behavior) failures += test_fs_manifest_case_isolated(behavior);
+#endif
 #if !defined(_WIN32)
     failures += test_immutable_manifest();
 #endif

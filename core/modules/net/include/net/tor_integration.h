@@ -324,6 +324,19 @@ typedef int (*tor_fetch_dispatch_fn)(const char *onion_address,
                                      void *ctx, int timeout_secs);
 
 #ifdef ZCL_TESTING
+int tor_integration_bootstrap_reply_for_test(const char *reply);
+int tor_integration_bootstrap_exchange_for_test(int64_t fd, int timeout_ms);
+int tor_integration_setconf_exchange_for_test(int64_t fd, int timeout_ms);
+void tor_integration_clear_readiness_for_test(void);
+bool tor_integration_monitor_bootstrap_for_test(int (*query)(void),
+                                                bool outbound, bool expected);
+void tor_integration_before_join_for_test(void (*hook)(void));
+struct fs_onion_listener;
+bool tor_integration_compose_routes_for_test(uint16_t p2p_port,
+                                             const struct fs_onion_listener *file,
+                                             char *cmd, size_t cap);
+unsigned tor_integration_observe_for_test(unsigned state, bool published,
+                                          bool bootstrap);
 /* Test seam: one claim or verification pass over a dynhost head. Returns 0
  * when serving, 1 when the slot holds the sentinel, 2 when a real service
  * occupies it (which also marks the node violated). */

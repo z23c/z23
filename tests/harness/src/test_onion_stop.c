@@ -20,10 +20,10 @@
 struct onion_stream_raw { onion_stream_event_fn event; void *ctx; };
 static struct onion_stream_raw raw;
 static atomic_int opens, closes;
-static atomic_bool done;
+static atomic_bool done, local_cancel;
 static const char *mode;
 static struct net_service service;
-static bool connected;
+static bool connected, invalid_fd;
 static int budget;
 static pthread_t terminal_thread;
 static bool terminal_started;
@@ -35,6 +35,15 @@ static struct onion_stream_raw *hold(const char *host, uint16_t port,
     (void)host; (void)port; (void)read_cb; (void)life;
     raw.event = event; raw.ctx = ctx;
     int n = atomic_fetch_add(&opens, 1) + 1;
+    if (!strcmp(mode, "cancel-open")) atomic_store(&local_cancel, true);
+    if (!strcmp(mode, "cancel-connected")) {
+        event(&raw, ONION_STREAM_EVENT_CONNECTED, ctx);
+        atomic_store(&local_cancel, true);
+    }
+    if (!strcmp(mode, "cancel-retry") && n == 1) {
+        event(&raw, ONION_STREAM_EVENT_CLOSED, ctx);
+        atomic_store(&local_cancel, true);
+    }
     if (!strcmp(mode, "open-race")) {
         thread_registry_request_shutdown();
     } else if (!strcmp(mode, "connected-race")) {
@@ -55,7 +64,7 @@ static int discard(struct onion_stream_raw *s, const uint8_t *p, size_t n)
 static void *late_terminal(void *arg)
 {
     struct onion_stream_raw *s = arg;
-    platform_sleep_ms(!strcmp(mode, "late") ? 5200 : 200);
+    platform_sleep_ms((!strcmp(mode, "late") || !strcmp(mode, "cancel-late")) ? 5200 : 200);
     s->event(s, ONION_STREAM_EVENT_CLOSED, s->ctx);
     atomic_store(&terminal_delivered, true);
     return NULL;
@@ -63,17 +72,25 @@ static void *late_terminal(void *arg)
 static void close_hold(struct onion_stream_raw *s)
 {
     atomic_fetch_add(&closes, 1);
-    if (!strcmp(mode, "delayed") || !strcmp(mode, "late")) {
+    if (!strcmp(mode, "delayed") || !strcmp(mode, "late") ||
+        !strcmp(mode, "cancel-delayed") || !strcmp(mode, "cancel-late")) {
         terminal_started = pthread_create(&terminal_thread, NULL, late_terminal, s) == 0;
     } else if (strcmp(mode, "terminal-race") &&
-               (strcmp(mode, "retry") || atomic_load(&opens) != 1))
+               (strcmp(mode, "retry") || atomic_load(&opens) != 1) &&
+               strcmp(mode, "cancel-retry"))
         s->event(s, ONION_STREAM_EVENT_CLOSED, s->ctx);
 }
 static const struct onion_stream_backend backend = { hold, discard, close_hold };
+static bool local_cancelled(void *ctx)
+{ return atomic_load((atomic_bool *)ctx); }
+static bool local_mode(void) { return !strncmp(mode, "cancel-", 7); }
 static void *dial(void *unused)
 {
     (void)unused; zcl_socket_t sock = ZCL_INVALID_SOCKET;
-    connected = onion_stream_connect_backend_for_test(&service, &sock, budget, &backend);
+    connected = local_mode() ? onion_stream_connect_backend_cancelable_for_test(
+        &service, &sock, budget, &backend, local_cancelled, &local_cancel) :
+        onion_stream_connect_backend_for_test(&service, &sock, budget, &backend);
+    invalid_fd = sock == ZCL_INVALID_SOCKET;
     if (sock != ZCL_INVALID_SOCKET) close(sock);
     atomic_store(&done, true); return NULL;
 }
@@ -85,16 +102,17 @@ static bool child_setup(const char *which)
     if (!onion_v3_address_from_pubkey(key, host) ||
         !net_addr_from_onion(host, &service.addr)) return false;
     service.port = 8033;
-    budget = !strcmp(mode, "long") || !strcmp(mode, "retry") ? 120000 : 2000;
+    budget = !strcmp(mode, "long") || !strcmp(mode, "retry") || !strcmp(mode, "cancel-retry") ? 120000 : 2000;
     if (!strcmp(mode, "pre")) thread_registry_request_shutdown();
+    if (!strcmp(mode, "cancel-pre")) atomic_store(&local_cancel, true);
     return true;
 }
 static bool child_wait_open(pthread_t worker)
 {
     int waited = 0;
-    if (strcmp(mode, "pre"))
+    if (strcmp(mode, "pre") && strcmp(mode, "cancel-pre"))
         while (!atomic_load(&opens) && waited < 3000) { platform_sleep_ms(10); waited += 10; }
-    if (strcmp(mode, "pre") && !atomic_load(&opens)) { pthread_join(worker, NULL); return false; }
+    if (strcmp(mode, "pre") && strcmp(mode, "cancel-pre") && !atomic_load(&opens)) { pthread_join(worker, NULL); return false; }
     return true;
 }
 static bool child_should_cancel(void)
@@ -105,17 +123,27 @@ static bool child_should_cancel(void)
 static int child_validate_delayed(const struct onion_stream_stages *st)
 {
     return !(terminal_started && atomic_load(&terminal_delivered) &&
-             !connected && atomic_load(&opens) == 1 &&
+             !connected && invalid_fd && atomic_load(&opens) == 1 &&
              atomic_load(&closes) == 1 && st->circuit_timeout == 0);
+}
+static bool child_is_delayed(void)
+{
+    return !strcmp(mode, "delayed") || !strcmp(mode, "late") ||
+           !strcmp(mode, "cancel-delayed") || !strcmp(mode, "cancel-late");
+}
+static int child_validate_pre(int64_t elapsed)
+{
+    return !(elapsed < 500 && !connected && invalid_fd && !atomic_load(&opens));
 }
 static int child_validate(int64_t elapsed, const struct onion_stream_stages *st)
 {
-    if (!strcmp(mode, "delayed") || !strcmp(mode, "late"))
+    if (child_is_delayed())
         return child_validate_delayed(st);
     if (!strcmp(mode, "retry")) return !(connected && atomic_load(&opens) == 2 &&
         atomic_load(&closes) == 2 && st->circuit_timeout == 0);
-    if (!strcmp(mode, "pre")) return !(elapsed < 500 && !connected && !atomic_load(&opens));
-    return !(elapsed < 500 && !connected && atomic_load(&opens) == 1 &&
+    if (!strcmp(mode, "pre") || !strcmp(mode, "cancel-pre"))
+        return child_validate_pre(elapsed);
+    return !(elapsed < 500 && !connected && invalid_fd && atomic_load(&opens) == 1 &&
              atomic_load(&closes) == 1 && st->circuit_timeout == 0);
 }
 static int child_case(const char *which)
@@ -127,7 +155,8 @@ static int child_case(const char *which)
     int64_t start = platform_time_monotonic_ms();
     if (child_should_cancel()) {
         thread_registry_request_shutdown(); connman_signal_stop(NULL);
-    }
+    } else if (!strcmp(mode, "cancel-held") || !strcmp(mode, "cancel-delayed") ||
+             !strcmp(mode, "cancel-late")) atomic_store(&local_cancel, true);
     while (!atomic_load(&done) && platform_time_monotonic_ms() - start < 3000)
         platform_sleep_ms(10);
     pthread_join(worker, NULL);
@@ -141,13 +170,25 @@ static int child_case(const char *which)
         (unsigned long long)st.circuit_timeout);
     return child_validate(elapsed, &st);
 }
+static bool onion_stop_ordinary_mode(const char *which)
+{
+    return !strcmp(which, "pre") || !strcmp(which, "short") ||
+           !strcmp(which, "long") || !strcmp(which, "connected-race") ||
+           !strcmp(which, "open-race") || !strcmp(which, "retry") ||
+           !strcmp(which, "terminal-race") || !strcmp(which, "delayed") ||
+           !strcmp(which, "late");
+}
+static bool onion_stop_cancel_mode(const char *which)
+{
+    return !strcmp(which, "cancel-pre") || !strcmp(which, "cancel-open") ||
+           !strcmp(which, "cancel-connected") || !strcmp(which, "cancel-retry") ||
+           !strcmp(which, "cancel-held") || !strcmp(which, "cancel-delayed") ||
+           !strcmp(which, "cancel-late");
+}
 void onion_stop_child_exit_if_requested(int argc, char **argv)
 {
     if (argc == 3 && !strcmp(argv[1], "--onion-stop-fixture-child") &&
-        (!strcmp(argv[2], "pre") || !strcmp(argv[2], "short") ||
-         !strcmp(argv[2], "long") || !strcmp(argv[2], "connected-race") || !strcmp(argv[2], "open-race") ||
-         !strcmp(argv[2], "retry") || !strcmp(argv[2], "terminal-race") || !strcmp(argv[2], "delayed") ||
-         !strcmp(argv[2], "late"))) {
+        (onion_stop_ordinary_mode(argv[2]) || onion_stop_cancel_mode(argv[2]))) {
         int rc = child_case(argv[2]); fflush(stdout); _exit(rc);
     }
 }
@@ -163,7 +204,7 @@ int test_onion_stop(void)
     if (setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0) {
         free(saved); close(fd); return 1;
     }
-    const char *cases[] = { "pre", "short", "long", "connected-race", "open-race", "terminal-race", "retry", "delayed", "late" };
+    const char *cases[] = { "pre", "short", "long", "connected-race", "open-race", "terminal-race", "retry", "delayed", "late", "cancel-pre", "cancel-open", "cancel-connected", "cancel-retry", "cancel-held", "cancel-delayed", "cancel-late" };
     int failures = 0;
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         const char *args[] = { "onion-stop-fixture", "--onion-stop-fixture-child", cases[i], NULL };

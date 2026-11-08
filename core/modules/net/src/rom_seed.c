@@ -118,6 +118,23 @@ static pthread_mutex_t g_reg_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* ── Background scan lifecycle ──────────────────────────────────────── */
 static pthread_t g_scan_thread;
 static bool      g_scan_started = false;
+static bool      g_scan_joining = false;
+static struct rom_seed_scan_status g_scan_status;
+static pthread_cond_t g_scan_join_cv = PTHREAD_COND_INITIALIZER;
+#ifdef ZCL_TESTING
+static _Atomic bool g_scan_test_hold, g_scan_test_fail_start;
+static _Atomic bool g_scan_test_join_hold, g_scan_test_join_entered;
+static _Atomic bool g_scan_test_join_waiting;
+void rom_seed_scan_test_hold(bool hold) { atomic_store(&g_scan_test_hold, hold); }
+void rom_seed_scan_test_fail_start(bool fail) { atomic_store(&g_scan_test_fail_start, fail); }
+void rom_seed_scan_test_hold_join(bool hold)
+{
+    atomic_store(&g_scan_test_join_entered, false);
+    atomic_store(&g_scan_test_join_hold, hold);
+}
+bool rom_seed_scan_test_join_entered(void) { return atomic_load(&g_scan_test_join_entered); }
+bool rom_seed_scan_test_join_waiting(void) { return atomic_load(&g_scan_test_join_waiting); }
+#endif
 static uint16_t  g_scan_fs_port = 0;
 static char      g_scan_datadir[1024];
 static _Atomic bool g_scan_cancel = false;
@@ -768,16 +785,30 @@ static void *rom_seed_scan_thread(void *arg)
     (void)arg;
     char dir[1024];
     uint16_t fs_port;
+    uint64_t generation;
     pthread_mutex_lock(&g_scan_mutex);
     snprintf(dir, sizeof(dir), "%s", g_scan_datadir);
     fs_port = g_scan_fs_port;
+    generation = g_scan_status.generation;
     pthread_mutex_unlock(&g_scan_mutex);
 
     int reg = 0;
-    if (rom_seed_enabled())
+#ifdef ZCL_TESTING
+    while (atomic_load(&g_scan_test_hold) && !atomic_load(&g_scan_cancel))
+        platform_sleep_ms(1);
+#endif
+    if (!atomic_load(&g_scan_cancel) && rom_seed_enabled())
         reg = rom_seed_scan_datadir(dir);
     if (reg > 0)
         rom_seed_announce_all(fs_port);
+
+    pthread_mutex_lock(&g_scan_mutex);
+    if (generation == g_scan_status.generation) {
+        g_scan_status.registered = reg;
+        g_scan_status.state = atomic_load(&g_scan_cancel) ?
+            ROM_SEED_SCAN_CANCELLED : ROM_SEED_SCAN_ENDED;
+    }
+    pthread_mutex_unlock(&g_scan_mutex);
 
     /* Single-shot worker — the scan above IS its one dispatch. */
     thread_liveness_beat(&g_scan_liveness, reg);
@@ -786,21 +817,32 @@ static void *rom_seed_scan_thread(void *arg)
 
 void rom_seed_start_scan(const char *datadir, uint16_t fs_port)
 {
-    if (!datadir || !datadir[0])
+    if (!datadir || !datadir[0] || strlen(datadir) >= sizeof(g_scan_datadir))
         return;
     pthread_mutex_lock(&g_scan_mutex);
-    if (g_scan_started) {
+    if (g_scan_started || g_scan_joining) {
         pthread_mutex_unlock(&g_scan_mutex);
         return;
     }
     atomic_store(&g_scan_cancel, false);
     snprintf(g_scan_datadir, sizeof(g_scan_datadir), "%s", datadir);
     g_scan_fs_port = fs_port;
-    if (thread_registry_spawn("zcl_romseed", rom_seed_scan_thread, NULL,
-                              &g_scan_thread) == 0) {
+    g_scan_status.generation++;
+    g_scan_status.registered = 0;
+    g_scan_status.state = ROM_SEED_SCAN_RUNNING;
+    bool spawn_ok;
+#ifdef ZCL_TESTING
+    if (atomic_exchange(&g_scan_test_fail_start, false))
+        spawn_ok = false;
+    else
+#endif
+        spawn_ok = thread_registry_spawn("zcl_romseed", rom_seed_scan_thread, NULL,
+                                         &g_scan_thread) == 0;
+    if (spawn_ok) {
         g_scan_started = true;
         thread_liveness_register(&g_scan_liveness, "zcl_romseed", 0, 0);
     } else {
+        g_scan_status.state = ROM_SEED_SCAN_START_FAILED;
         LOG_WARN(ROM_SUBSYS, "start_scan: failed to spawn scan thread");
     }
     pthread_mutex_unlock(&g_scan_mutex);
@@ -811,17 +853,50 @@ void rom_seed_stop_scan(void)
     pthread_t t;
     bool have = false;
     pthread_mutex_lock(&g_scan_mutex);
+    if (g_scan_joining) {
+#ifdef ZCL_TESTING
+        atomic_store(&g_scan_test_join_waiting, true);
+#endif
+        while (g_scan_joining)
+            pthread_cond_wait(&g_scan_join_cv, &g_scan_mutex);
+#ifdef ZCL_TESTING
+        atomic_store(&g_scan_test_join_waiting, false);
+#endif
+        pthread_mutex_unlock(&g_scan_mutex);
+        return;
+    }
     if (g_scan_started) {
         t = g_scan_thread;
         g_scan_started = false;
+        g_scan_joining = true;
         have = true;
     }
     pthread_mutex_unlock(&g_scan_mutex);
     if (!have)
         return;
     atomic_store(&g_scan_cancel, true);   /* stop between directory entries */
+#ifdef ZCL_TESTING
+    atomic_store(&g_scan_test_join_entered, true);
+    while (atomic_load(&g_scan_test_join_hold))
+        platform_sleep_ms(1);
+#endif
     pthread_join(t, NULL);
     thread_liveness_retire(&g_scan_liveness);
+    pthread_mutex_lock(&g_scan_mutex);
+    g_scan_joining = false;
+    pthread_cond_broadcast(&g_scan_join_cv);
+    pthread_mutex_unlock(&g_scan_mutex);
+}
+
+bool rom_seed_scan_status(const char *datadir, struct rom_seed_scan_status *out)
+{
+    if (!datadir || !out)
+        return false;
+    pthread_mutex_lock(&g_scan_mutex);
+    bool matches = strcmp(datadir, g_scan_datadir) == 0;
+    *out = matches ? g_scan_status : (struct rom_seed_scan_status){0};
+    pthread_mutex_unlock(&g_scan_mutex);
+    return matches;
 }
 
 /* ── WF2 artifact-protocol: per-chunk manifest serialization ──────────

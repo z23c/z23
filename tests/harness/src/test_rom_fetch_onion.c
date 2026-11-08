@@ -474,10 +474,63 @@ static bool check_onion_budgets(void)
     }
 }
 
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+int fs_test_onion_dial(unsigned site, const char *peer, uint16_t port);
+
+static struct onion_stream_raw *refuse_open(
+    const char *onion, uint16_t port, onion_stream_read_fn read_cb,
+    onion_stream_event_fn event_cb, void *ctx, int lifetime_secs)
+{
+    (void)onion; (void)port; (void)read_cb; (void)event_cb;
+    (void)ctx; (void)lifetime_secs;
+    return NULL;
+}
+
+static bool check_history_dial_sites(void)
+{
+    char host[ONION_V3_ADDRESS_LEN + 1];
+    if (!make_onion_host(host)) return false;
+    const struct onion_stream_backend refused = {
+        .open = refuse_open, .write = stub_write, .close = stub_close
+    };
+    for (unsigned site = 0; site < 3; site++) {
+        if (!stub_reset()) return false;
+        unsigned before = rom_fetch_resolve_count_for_test();
+        rom_fetch_set_onion_backend_for_test(&g_stub_backend);
+        platform_socket_t fd = fs_test_onion_dial(site, host, 39411);
+        pthread_mutex_lock(&g_mu);
+        bool ok = fd != PLATFORM_SOCKET_INVALID && g_stub.opens == 1 &&
+                  strcmp(g_stub.dialed_host, host) == 0 &&
+                  g_stub.dialed_port == 39411;
+        pthread_mutex_unlock(&g_mu);
+        if (fd != PLATFORM_SOCKET_INVALID) platform_socket_close(fd);
+        rom_fetch_set_onion_backend_for_test(NULL);
+        ok = stub_reset() && ok;
+        if (!ok || rom_fetch_resolve_count_for_test() != before) return false;
+
+        rom_fetch_set_onion_backend_for_test(&refused);
+        fd = fs_test_onion_dial(site, host, 39411);
+        rom_fetch_set_onion_backend_for_test(NULL);
+        if (fd != PLATFORM_SOCKET_INVALID) { platform_socket_close(fd); return false; }
+        if (rom_fetch_resolve_count_for_test() != before) return false;
+        fd = fs_test_onion_dial(site, "notavalidonion.onion", 39411);
+        if (fd != PLATFORM_SOCKET_INVALID) { platform_socket_close(fd); return false; }
+        if (rom_fetch_resolve_count_for_test() != before) return false;
+    }
+    return true;
+}
+#endif
+
+
 int test_rom_fetch_onion(void);
 int test_rom_fetch_onion(void)
 {
     int failures = 0;
+#if !defined(_WIN32) && defined(ZCL_TESTING)
+    printf("rom_fetch_onion: history manifest, worker and retry dials... ");
+    if (check_history_dial_sites()) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+#endif
 
     /* ── 1. an onion seeder is dialed over a circuit, not the resolver ── */
     printf("rom_fetch_onion: .onion seeder routes to the Tor stream, not "

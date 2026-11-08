@@ -7,6 +7,7 @@
 #endif
 #include "test/test_core.h"
 #include "services/wallet_history_capability.h"
+#include "base/hex.h"
 #include "crypto/sha3.h"
 #include <stdio.h>
 #if defined(__linux__)
@@ -295,9 +296,65 @@ static bool cancel_cases(void)
     return true;
 }
 
+static bool bound_name_fixture(struct history_fixture *f, const uint8_t snapshot[32],
+    uint8_t history_root[32], char root_path[PATH_MAX], char lock_path[PATH_MAX],
+    char original_root[PATH_MAX], char original_lock[PATH_MAX])
+{
+    uint8_t identity[130];
+    expected(history_root);
+    zcl_hex_encode(snapshot, 32, (char *)identity);
+    identity[64] = '-';
+    zcl_hex_encode(history_root, 32, (char *)identity + 65);
+    char root_name[160], lock_name[160];
+    snprintf(original_root, PATH_MAX, "%s", f->root);
+    snprintf(original_lock, PATH_MAX, "%s", f->lock);
+    snprintf(root_name, sizeof(root_name), "history-%s", identity);
+    snprintf(lock_name, sizeof(lock_name), ".history-%s-lock", identity);
+    bool ok = path(root_path, f->parent, root_name) && path(lock_path, f->parent, lock_name) &&
+        !rename(f->root, root_path) && !rename(f->lock, lock_path);
+    if (ok) {
+        snprintf(f->root, sizeof(f->root), "%s", root_path);
+        snprintf(f->lock, sizeof(f->lock), "%s", lock_path);
+    }
+    return ok;
+}
+
+static bool bound_case(void)
+{
+    struct history_fixture f = {0};
+    if (!fixture(&f)) { cleanup(&f); return false; }
+    uint8_t snapshot[32] = {1}, history_root[32];
+    char root_path[PATH_MAX], lock_path[PATH_MAX], original_root[PATH_MAX], original_lock[PATH_MAX];
+    bool ok = bound_name_fixture(&f, snapshot, history_root, root_path, lock_path,
+                                 original_root, original_lock);
+    struct wallet_history_capability cap;
+    wallet_history_capability_init(&cap);
+    struct zcl_result acquired_result = wallet_history_capability_acquire_bound(&cap, f.root, snapshot, history_root);
+    bool acquired = acquired_result.ok;
+    if (!acquired) printf("bound acquire refusal: %s\n", acquired_result.message);
+    bool matched = acquired && wallet_history_capability_matches(&cap, history_root).ok &&
+        wallet_history_capability_matches_path(&cap, f.root).ok;
+    wallet_history_capability_release(&cap);
+    snapshot[0] ^= 1;
+    bool snapshot_refused = !wallet_history_capability_acquire_bound(&cap, f.root, snapshot, history_root).ok;
+    snapshot[0] ^= 1; history_root[0] ^= 1;
+    bool history_refused = !wallet_history_capability_acquire_bound(&cap, f.root, snapshot, history_root).ok;
+    wallet_history_capability_release(&cap);
+    bool renamed = !rename(f.root, original_root) && !rename(f.lock, original_lock);
+    if (renamed) {
+        snprintf(f.root, sizeof(f.root), "%s", original_root);
+        snprintf(f.lock, sizeof(f.lock), "%s", original_lock);
+    }
+    bool released = free_lease(&f);
+    ok = ok && acquired && matched && snapshot_refused && history_refused && renamed && released;
+    cleanup(&f);
+    return ok;
+}
+
 int test_wallet_history_capability(void)
 {
     int failures = 0;
+    if (!bound_case()) { printf("history capability bound recovery failed\n"); failures++; }
     for (unsigned i = 0; i <= 10; i++) if (!run_case(i)) { printf("history capability case %u failed\n", i); failures++; }
     if (!cancel_cases()) { printf("history capability cancellation failed\n"); failures++; }
     struct history_fixture f = {0};

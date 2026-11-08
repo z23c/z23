@@ -18,6 +18,8 @@
 #include "encoding/utilstrencodings.h"
 #include "support/cleanse.h"
 #include "net/tor_integration.h"
+#include "tor_integration_priv.h"
+#include "net/file_service.h"
 #include "net/tor_request_state.h"
 #include "net/net.h"      /* net_set_onion_ingress_port() */
 #ifndef _WIN32
@@ -26,6 +28,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
+
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -41,11 +44,22 @@
 
 static pthread_t g_tor_thread;
 static pthread_t g_monitor_thread;
-static _Atomic bool g_tor_running = false;
+_Atomic bool g_tor_running = false;
 static _Atomic bool g_tor_ready = false;
 static _Atomic bool g_tor_dial_ready = false;
 static _Atomic bool g_tor_started = false;   /* true once tor thread spawn succeeds */
 static _Atomic bool g_monitor_started = false;
+static pthread_mutex_t g_tor_publication_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void tor_clear_readiness(void)
+{
+    pthread_mutex_lock(&g_tor_publication_mutex);
+    atomic_store(&g_tor_running, false);
+    atomic_store(&g_tor_ready, false);
+    atomic_store(&g_tor_dial_ready, false);
+    fs_server_onion_unpublish();
+    pthread_mutex_unlock(&g_tor_publication_mutex);
+}
 
 /* Supervisor liveness (root children — core/modules/net cannot include the app-side
  * supervisors/domains.h, see util/thread_liveness.h). zcl_tor is opaque
@@ -58,8 +72,8 @@ static _Atomic bool g_monitor_started = false;
  * bootstrap loop bounded by g_tor_running, and it keeps polling after the
  * address lands until onion DESCRIPTOR PUBLICATION is observed. */
 static struct thread_liveness_child g_tor_liveness = { .id = SUPERVISOR_INVALID_ID };
-static struct thread_liveness_child g_tor_monitor_liveness = { .id = SUPERVISOR_INVALID_ID };
-static _Atomic uint64_t g_tor_monitor_poll_count = 0;
+struct thread_liveness_child g_tor_monitor_liveness = { .id = SUPERVISOR_INVALID_ID };
+_Atomic uint64_t g_tor_monitor_poll_count = 0;
 static char g_onion_address[128];
 static char g_tor_datadir[512];
 /* The node's public P2P port, captured by tor_integration_start(). Used by
@@ -87,6 +101,7 @@ static _Atomic bool g_onion_rotate = false;
 /* 0 = install pending, 1 = persistent service registered with dynhost,
  * -1 = install failed (already named via LOG_ERR). */
 static _Atomic int g_persist_install_state = 0;
+static _Atomic uint64_t g_file_route_generation;
 /* Old identity's address ("<56 chars>.onion") when -onion-rotate archived
  * one this boot; printed next to the new address after install. */
 static char g_rotated_old_address[128];
@@ -248,6 +263,9 @@ static void tor_persist_announce(bool created, const char *address)
 }
 
 static int tor_try_install_persistent_identity(const char *datadir);
+int tor_bootstrap_query(void);
+static int tor_persistent_gate(bool *enabled);
+static bool tor_monitor_outbound_bootstrap(bool *announced);
 
 void tor_integration_configure_identity(bool persist, bool rotate)
 {
@@ -416,6 +434,106 @@ static void tor_report_slow_wait(int waited, bool have_addr)
                 "(bootstrap may be slow)\n", waited);
 }
 
+enum { TOR_OBS_PUBLISHED = 1, TOR_OBS_BOOTSTRAPPED = 2 };
+
+static unsigned tor_monitor_observe(unsigned state, bool published, bool bootstrap)
+{
+    return state | (published ? TOR_OBS_PUBLISHED : 0) |
+           (bootstrap ? TOR_OBS_BOOTSTRAPPED : 0);
+}
+
+#ifdef ZCL_TESTING
+unsigned tor_integration_observe_for_test(unsigned state, bool published,
+                                          bool bootstrap)
+{
+    return tor_monitor_observe(state, published, bootstrap);
+}
+#endif
+
+#ifdef ZCL_TESTING
+static int (*g_test_bootstrap_query)(void);
+#endif
+
+static bool tor_monitor_bootstrap(unsigned *observations)
+{
+    if (atomic_load(&g_tor_dial_ready))
+        return true;
+    int bootstrap;
+#ifdef ZCL_TESTING
+    if (g_test_bootstrap_query)
+        bootstrap = g_test_bootstrap_query();
+    else
+#endif
+        bootstrap = tor_bootstrap_query();
+    if (bootstrap < 0)
+        return false;
+    if (bootstrap > 0) {
+        pthread_mutex_lock(&g_tor_publication_mutex);
+        if (atomic_load(&g_tor_running)) {
+            *observations = tor_monitor_observe(*observations, false, true);
+            atomic_store(&g_tor_dial_ready, true);
+        }
+        pthread_mutex_unlock(&g_tor_publication_mutex);
+    }
+    return true;
+}
+
+static int tor_monitor_persistent_gate(bool *enabled)
+{
+    if (!atomic_load(&g_onion_persist))
+        return 1;
+    int gate = tor_persistent_gate(enabled);
+    if (gate == 0)
+        platform_sleep_ms(1);
+    return gate;
+}
+
+static void tor_monitor_publish(void)
+{
+    pthread_mutex_lock(&g_tor_publication_mutex);
+    if (!atomic_load(&g_tor_running)) {
+        pthread_mutex_unlock(&g_tor_publication_mutex);
+        return;
+    }
+    uint64_t file_generation = atomic_load(&g_file_route_generation);
+    if (file_generation)
+        (void)fs_server_onion_publish(file_generation);
+    atomic_store(&g_tor_ready, true);
+    extern void onion_service_set_address(const char *);
+    onion_service_set_address(g_onion_address);
+    pthread_mutex_unlock(&g_tor_publication_mutex);
+    printf("Tor: DESCRIPTOR PUBLICATION observed for %s\n", g_onion_address);
+    fflush(stdout);
+}
+
+#ifdef ZCL_TESTING
+void tor_integration_clear_readiness_for_test(void)
+{
+    tor_clear_readiness();
+}
+
+bool tor_integration_monitor_bootstrap_for_test(int (*query)(void),
+                                                bool outbound, bool expected)
+{
+    if (atomic_load(&g_tor_started))
+        return false;
+    bool saved_running = atomic_exchange(&g_tor_running, true);
+    bool saved = atomic_exchange(&g_tor_dial_ready, false);
+    unsigned observations = 0;
+    bool announced = false;
+    g_test_bootstrap_query = query;
+    bool result = outbound ? tor_monitor_outbound_bootstrap(&announced) :
+                             tor_monitor_bootstrap(&observations);
+    bool ok = result && atomic_load(&g_tor_dial_ready) == expected &&
+              (!outbound || announced == expected) &&
+              (outbound || observations == (expected ? TOR_OBS_BOOTSTRAPPED : 0));
+    g_test_bootstrap_query = NULL;
+    atomic_store(&g_tor_dial_ready, saved);
+    atomic_store(&g_tor_running, saved_running);
+    return ok;
+}
+#endif
+
 /* Wait for the .onion address AND onion DESCRIPTOR PUBLICATION.
 
  * Default (ephemeral) mode: parse the dynhost log for THIS start's
@@ -444,7 +562,8 @@ static bool read_onion_address(const char *datadir)
 
     int waited = 0;
     bool have_addr = false;
-    bool announced_addr = false;
+    unsigned observations = 0;
+    bool network_enabled = false;
     for (;;) {
         /* g_tor is opaque vendored code and is never beaten from inside
          * its own loop — this poll iteration is the proxy for "Tor is
@@ -456,25 +575,33 @@ static bool read_onion_address(const char *datadir)
         if (!atomic_load(&g_tor_running))
             return false;
 
+        int gate = tor_monitor_persistent_gate(&network_enabled);
+        if (gate != 1) {
+            if (gate < 0)
+                return false;
+            continue;
+        }
+
         if (!have_addr) {
             have_addr = tor_poll_onion_address_once(datadir, log_path);
-            if (have_addr && !announced_addr) {
-                /* Outbound dynhost streams can be queued now. Do not wait for
-                 * our own inbound descriptor upload: Tor will build the peer
-                 * circuit in parallel while HSDir publication completes. */
-                atomic_store(&g_tor_dial_ready, true);
+            if (have_addr) {
                 printf("Tor .onion: %s (waiting for DESCRIPTOR PUBLICATION)\n",
                        g_onion_address);
                 fflush(stdout);
-                announced_addr = true;
             }
         }
 
         /* The publication line is info-level [rend], which now has its OWN
          * destination so tor.log can stay at notice — see tor_config_log.c. */
-        if (have_addr &&
+        if (!(observations & TOR_OBS_PUBLISHED) && have_addr &&
             tor_log_has_descriptor_publication(rend_log_path,
-                                               g_tor_rend_log_scan_from))
+                                               g_tor_rend_log_scan_from)) {
+            observations = tor_monitor_observe(observations, true, false);
+            tor_monitor_publish();
+        }
+        if (!tor_monitor_bootstrap(&observations))
+            return false;
+        if (observations == (TOR_OBS_PUBLISHED | TOR_OBS_BOOTSTRAPPED))
             return true;
 
         /* Slow bootstrap is a named state, not a silent hang. */
@@ -514,70 +641,18 @@ extern int tor_run_main(const tor_main_configuration_t *);
  * closes it: by then the number may belong to another thread, and looking at a
  * number to find out touches that thread's descriptor. A process makes at most
  * TOR_MAX_STARTS_IN_PROCESS of these. */
-static platform_socket_t g_tor_control = PLATFORM_SOCKET_INVALID;
-static platform_socket_t g_tor_control_peer = PLATFORM_SOCKET_INVALID;
+platform_socket_t g_tor_control = PLATFORM_SOCKET_INVALID;
+platform_socket_t g_tor_control_peer = PLATFORM_SOCKET_INVALID;
 #if defined(ZCL_TESTING) && !defined(_WIN32)
-static struct stat g_tor_control_peer_id;
+struct stat g_tor_control_peer_id;
 #endif
 static _Atomic bool g_serve_onion = true;
-static _Atomic int64_t g_claim_ms = -1;
-static _Atomic int64_t g_network_enabled_ms = -1;
-static _Atomic unsigned g_enable_failures;
-static _Atomic int64_t g_enable_retry_ms;
+_Atomic int64_t g_claim_ms = -1;
+_Atomic int64_t g_network_enabled_ms = -1;
+_Atomic unsigned g_enable_failures;
+_Atomic int64_t g_enable_retry_ms;
 
-static int64_t tor_wall_ms(void)
-{
-    return clock_now_wall_ms();
-}
 
-/* True when a real Tor is linked; the stub has no dynhost and no control
- * connection to own. */
-static bool tor_is_linked(void)
-{
-    return dynhost_get_global_service != NULL;
-}
-
-/* Open the owning control connection, before the Tor thread exists. The tor
- * stub never reads it, so it gets none. */
-static bool tor_control_open(void)
-{
-    if (!tor_is_linked())
-        return true;
-    platform_socket_t pair[2];
-    /* A child process must not inherit either end: Tor pre-authenticates this
-     * connection. Another thread may fork and exec at any moment, so where the
-     * flag exists the pair is close-on-exec from birth. */
-#ifdef SOCK_CLOEXEC
-    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) != 0)
-        return false;
-#else
-    if (!platform_socket_pair(pair))
-        return false;
-#ifndef _WIN32
-    (void)fcntl(pair[0], F_SETFD, FD_CLOEXEC);
-    (void)fcntl(pair[1], F_SETFD, FD_CLOEXEC);
-#endif
-#endif
-#if defined(ZCL_TESTING) && !defined(_WIN32)
-    if (fstat(pair[1], &g_tor_control_peer_id) != 0) {
-        (void)platform_socket_close(pair[0]);
-        (void)platform_socket_close(pair[1]);
-        return false;
-    }
-#endif
-    g_tor_control = pair[0];
-    g_tor_control_peer = pair[1];
-    return true;
-}
-
-/* Ask Tor to exit, from any thread, any number of times. shutdown() rather
- * than close(): the number stays ours until the join, so a monitor blocked in
- * recv() wakes instead of reading a number some other thread now owns. */
-static void tor_request_exit(void)
-{
-    if (g_tor_control != PLATFORM_SOCKET_INVALID)
-        (void)platform_socket_shutdown_both(g_tor_control);
-}
 
 /* Dynhost external handler — routes .onion requests to our code */
 typedef size_t (*dynhost_external_handler_fn)(const char *, const char *,
@@ -636,9 +711,7 @@ static void *tor_thread_fn(void *arg)
     tor_main_configuration_free(cfg);
 
     /* Signal monitor to stop, then join it if it actually started. */
-    atomic_store(&g_tor_running, false);
-    atomic_store(&g_tor_ready, false);
-    atomic_store(&g_tor_dial_ready, false);
+    tor_clear_readiness();
     if (atomic_exchange(&g_monitor_started, false)) {
         tor_join_thread_bounded(g_monitor_thread, "monitor", 5);
         thread_liveness_retire(&g_tor_monitor_liveness);
@@ -726,63 +799,16 @@ static bool tor_service_verify(void *global)
 
 /* True once Tor's reply is complete: its last line has a space after the
  * status code. */
-static bool tor_control_reply_complete(const char *reply)
-{
-    for (const char *line = reply;;) {
-        const char *eol = strstr(line, "\r\n");
-        if (!eol)
-            return false;
-        if (eol - line >= 4 && line[3] == ' ')
-            return true;
-        line = eol + 2;
-    }
-}
-
-/* Send one command over the owning control connection and read Tor's whole
- * reply. Tor answers from its loop, which may not be running yet, so this waits
- * for as long as Tor runs; a stop ends the wait at once by shutting the socket
- * down. False when Tor ended, or the reply did not fit. */
-static bool tor_control_exchange(const char *cmd, char *reply, size_t reply_size)
-{
-    size_t cmd_len = strlen(cmd);
-    (void)platform_socket_set_receive_timeout(g_tor_control, 1000);
-    if ((size_t)send(g_tor_control, cmd, (int)cmd_len, 0) != cmd_len)
-        return false;
-    size_t have = 0;
-    while (atomic_load(&g_tor_running) && have + 1 < reply_size) {
-        long n = (long)recv(g_tor_control, reply + have,
-                            (int)(reply_size - 1 - have), 0);
-        if (n > 0) {
-            have += (size_t)n;
-            reply[have] = '\0';
-            if (tor_control_reply_complete(reply))
-                return true;
-            continue;
-        }
-        int error = platform_socket_last_error();
-        if (n == 0 || (!platform_socket_error_would_block(error) &&
-                       !platform_socket_error_timed_out(error) &&
-                       !platform_socket_error_interrupted(error)))
-            return false;
-        thread_liveness_beat(&g_tor_monitor_liveness,
-                             (int64_t)atomic_fetch_add(
-                                 &g_tor_monitor_poll_count, 1) + 1);
-    }
-    return false;
-}
 
 /* The ADD_ONION command for this seed. Same service as dynhost's own: virtual
  * port 80 is taken by dynhost's interception before any target is consulted,
  * so its target is a path that can never exist. Flags=Detach keeps the service
  * registered until Tor exits, whatever happens to this connection. */
 static bool tor_add_onion_compose(const uint8_t seed[32], uint16_t p2p_port,
-                                  char *cmd, size_t cmd_size)
+                                  const struct fs_onion_listener *file,
+                                  char *cmd, size_t cmd_size, bool *fs_mapped)
 {
-    uint8_t secret[64];
-    char key[96];
-    onion_identity_tor_secret_from_seed(seed, secret);
-    size_t key_len = EncodeBase64(secret, sizeof(secret), key, sizeof(key));
-    memory_cleanse(secret, sizeof(secret));
+    *fs_mapped = false;
     /* SECOND port mapping: the node's P2P port. Inbound P2P rides the
      * persistent onion identity at <onion>:<p2p_port>, forwarded to the
      * local listener by stock Tor hidden-service machinery
@@ -795,12 +821,50 @@ static bool tor_add_onion_compose(const uint8_t seed[32], uint16_t p2p_port,
     if (p2p_port > 0 && p2p_port != 80)
         snprintf(p2p, sizeof(p2p), " Port=%u,127.0.0.1:%u",
                  (unsigned)p2p_port, (unsigned)p2p_port);
+    char fs_route[160] = "";
+    if (file && file->decision == FS_ONION_AVAILABLE) {
+        if (file->port == 80 || file->port == p2p_port) {
+            LOG_WARN("tor", "file-service onion port %u conflicts with an "
+                            "existing onion route", (unsigned)file->port);
+        } else {
+            const char *host = file->address;
+            if (strcmp(host, "::") == 0)
+                host = "::1";
+            else if (strcmp(host, "0.0.0.0") == 0)
+                host = "127.0.0.1";
+            int route_len = strchr(host, ':') ?
+                snprintf(fs_route, sizeof(fs_route), " Port=%u,[%s]:%u",
+                         (unsigned)file->port, host, (unsigned)file->port) :
+                snprintf(fs_route, sizeof(fs_route), " Port=%u,%s:%u",
+                         (unsigned)file->port, host, (unsigned)file->port);
+            if (route_len < 0 || (size_t)route_len >= sizeof(fs_route))
+                return false;
+            *fs_mapped = true;
+        }
+    }
+    uint8_t secret[64];
+    char key[96];
+    onion_identity_tor_secret_from_seed(seed, secret);
+    size_t key_len = EncodeBase64(secret, sizeof(secret), key, sizeof(key));
+    memory_cleanse(secret, sizeof(secret));
     int n = snprintf(cmd, cmd_size,
                      "ADD_ONION ED25519-V3:%s Flags=Detach "
-                     "Port=80,unix:/dev/null/no-target%s\r\n", key, p2p);
+                     "Port=80,unix:/dev/null/no-target%s%s\r\n", key, p2p,
+                     fs_route);
     memory_cleanse(key, sizeof(key));
     return key_len > 0 && n > 0 && (size_t)n < cmd_size;
 }
+
+#ifdef ZCL_TESTING
+bool tor_integration_compose_routes_for_test(uint16_t p2p_port,
+                                             const struct fs_onion_listener *file,
+                                             char *cmd, size_t cap)
+{
+    uint8_t seed[32] = {0};
+    bool mapped;
+    return tor_add_onion_compose(seed, p2p_port, file, cmd, cap, &mapped);
+}
+#endif
 
 /* True when Tor accepted ADD_ONION and named this address. */
 static bool tor_add_onion_reply_names(const char *reply, const char *addr)
@@ -833,6 +897,12 @@ static int tor_try_install_persistent_identity(const char *datadir)
     if (!global)
         return 0;   /* Tor thread still in early startup; retried */
 
+    struct fs_onion_listener file;
+    if (!fs_server_onion_pin(&file))
+        return -1;
+    if (file.decision == FS_ONION_RETIRING)
+        return 0;
+
     uint8_t seed[32];
     char addr[57];
     bool created = false;
@@ -844,10 +914,12 @@ static int tor_try_install_persistent_identity(const char *datadir)
      * adds to Tor's service table and the lookup below cannot race an insert. */
     (void)tor_service_claim_step(global, false);
 
-    char cmd[256];
+    char cmd[512];
     char reply[256];
     uint16_t p2p_port = atomic_load(&g_tor_p2p_port);
-    bool composed = tor_add_onion_compose(seed, p2p_port, cmd, sizeof(cmd));
+    bool fs_mapped;
+    bool composed = tor_add_onion_compose(seed, p2p_port, &file, cmd,
+                                          sizeof(cmd), &fs_mapped);
     memory_cleanse(seed, sizeof(seed));
     bool answered = composed && tor_control_exchange(cmd, reply, sizeof(reply));
     memory_cleanse(cmd, sizeof(cmd));
@@ -872,6 +944,7 @@ static int tor_try_install_persistent_identity(const char *datadir)
     /* Become the dynhost service (see the layer-2 comment above). */
     __atomic_store_n(&((struct dynhost_service_head_compat *)global)->hs_service,
                      service, __ATOMIC_RELEASE);
+    atomic_store(&g_file_route_generation, fs_mapped ? file.generation : 0);
     /* Tor reads that slot without atomics and later frees the block holding
      * it. One more exchange orders our store before everything Tor does after
      * answering; no reply only means Tor is ending, which needs no order. */
@@ -951,58 +1024,21 @@ int tor_integration_network_gate_step_for_test(void *global, bool serve,
 }
 #endif
 
-/* Clear DisableNetwork over the owning control connection, which Tor
- * pre-authenticates. NULL only on Tor's "250 OK"; otherwise why it failed. */
-static const char *tor_control_enable(void)
-{
-#ifdef _WIN32
-    return "clearing DisableNetwork is not supported on this platform";
-#else
-    if (g_tor_control == PLATFORM_SOCKET_INVALID)
-        return "no control connection to enable the network";
-    static const char cmd[] = "SETCONF DisableNetwork=0\r\n";
-    struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
-    (void)setsockopt(g_tor_control, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    if (send(g_tor_control, cmd, sizeof(cmd) - 1, 0) !=
-        (ssize_t)(sizeof(cmd) - 1))
-        return "sending SETCONF DisableNetwork=0 failed";
-    char reply[128];
-    ssize_t n = recv(g_tor_control, reply, sizeof(reply) - 1, 0);
-    if (n < 3)
-        return "no reply to SETCONF DisableNetwork=0";
-    reply[n] = '\0';
-    if (strncmp(reply, "250", 3) != 0)
-        return "SETCONF DisableNetwork=0 was refused";
-    return NULL;
-#endif
-}
 
-/* A failed enable is retried with a doubling pause (20 ms up to about 5 s)
- * and logged on attempts 1, 2, 4, 8, ... only, so a missing control socket
- * does not spin the monitor or flood the log. */
-static bool tor_enable_network(void)
+static int tor_persistent_gate(bool *enabled)
 {
-    if (tor_wall_ms() < atomic_load(&g_enable_retry_ms))
-        return false;
-    const char *why = tor_control_enable();
-    if (why) {
-        unsigned failures = atomic_fetch_add(&g_enable_failures, 1) + 1;
-        unsigned shift = failures < 9 ? failures : 9;
-        atomic_store(&g_enable_retry_ms, tor_wall_ms() + (10LL << shift));
-        if ((failures & (failures - 1)) == 0)
-            LOG_ERROR("tor", "%s (attempt %u); the network stays disabled "
-                             "and the enable is retried", why, failures);
-        return false;
+    if (!dynhost_get_global_service)
+        return -1;
+    if (*enabled && atomic_load(&g_persist_install_state) == 1)
+        return 1;
+    enum tor_gate gate = tor_network_gate_step(dynhost_get_global_service(),
+                                                false, tor_enable_network,
+                                                enabled);
+    if (gate == TOR_GATE_CLOSED) {
+        tor_request_exit();
+        return -1;
     }
-    atomic_store(&g_enable_failures, 0);
-    atomic_store(&g_enable_retry_ms, 0);
-    int64_t now = tor_wall_ms();
-    atomic_store(&g_network_enabled_ms, now);
-    printf("Tor: claim verified at %lld ms, network enabled at %lld ms "
-           "(DisableNetwork 0)\n",
-           (long long)atomic_load(&g_claim_ms), (long long)now);
-    fflush(stdout);
-    return true;
+    return gate == TOR_GATE_OPEN ? 1 : 0;
 }
 
 #ifdef ZCL_TESTING
@@ -1043,13 +1079,25 @@ static enum tor_gate tor_monitor_gate_step(bool *enabled)
                                  tor_enable_network, enabled);
 }
 
+static bool tor_monitor_outbound_bootstrap(bool *announced)
+{
+    unsigned observations = 0;
+    if (!tor_monitor_bootstrap(&observations))
+        return false;
+    if (atomic_load(&g_tor_dial_ready)) {
+        printf("Tor: bootstrapped; outbound only, no onion service\n");
+        fflush(stdout);
+        *announced = true;
+    }
+    return true;
+}
+
 /* The monitor of a node that serves no onion: run the gate, then wait for
  * Tor to bootstrap, then keep verifying for as long as Tor runs. */
 static void tor_monitor_without_service(const char *datadir)
 {
-    char log_path[1024];
-    if (!dynhost_get_global_service ||
-        !tor_log_path(datadir, log_path, sizeof(log_path)))
+    (void)datadir;
+    if (!dynhost_get_global_service)
         return;  /* Tor stub: there is no dynhost to claim */
     bool enabled = false;
     bool announced = false;
@@ -1059,12 +1107,9 @@ static void tor_monitor_without_service(const char *datadir)
             tor_request_exit();
             return;
         }
-        if (enabled && !announced &&
-            tor_log_has_bootstrap_complete(log_path, g_tor_log_scan_from)) {
-            atomic_store(&g_tor_dial_ready, true);
-            printf("Tor: bootstrapped; outbound only, no onion service\n");
-            fflush(stdout);
-            announced = true;
+        if (enabled && !announced) {
+            if (!tor_monitor_outbound_bootstrap(&announced))
+                return;
         }
         if (!enabled || (spin & 0xFF) == 0)
             thread_liveness_beat(&g_tor_monitor_liveness,
@@ -1081,19 +1126,9 @@ static void *tor_onion_monitor(void *arg)
         tor_monitor_without_service(g_tor_datadir);
         return NULL;
     }
-    if (read_onion_address(g_tor_datadir)) {
-        atomic_store(&g_tor_ready, true);
-
-        /* Propagate address to onion service layer */
-        extern void onion_service_set_address(const char *);
-        onion_service_set_address(g_onion_address);
-
-        printf("Tor: DESCRIPTOR PUBLICATION observed for %s\n",
-               g_onion_address);
-        fflush(stdout);
-    } else {
+    if (!read_onion_address(g_tor_datadir)) {
         if (atomic_load(&g_tor_running))
-            fprintf(stderr, "Tor: timed out waiting for .onion\n");
+            fprintf(stderr, "Tor: readiness monitor stopped before completion\n");
     }
     return NULL;
 }
@@ -1172,21 +1207,28 @@ void tor_integration_set_start_window_for_test(void (*window)(void))
  * watchdog (engine/entry/main.c) covers the time before a stage is armed.
  * Once Tor runs its shutdown, its own timer asserts if the loop fails to exit
  * within 10 s, as it always has. */
+#ifdef ZCL_TESTING
+static void (*g_test_before_tor_join)(void);
+void tor_integration_before_join_for_test(void (*hook)(void))
+{
+    g_test_before_tor_join = hook;
+}
+#endif
+
 static void tor_run_end(void)
 {
     if (!atomic_exchange(&g_tor_started, false))
         return; /* Never started or already stopped */
 
-    atomic_store(&g_tor_running, false);
-    atomic_store(&g_tor_ready, false);
-    atomic_store(&g_tor_dial_ready, false);
-    /* No hidden-service route any more: loopback goes back to meaning
-     * same-host. Disarming can only ever RESTORE a trust exemption, so it
-     * belongs here, on the way down. */
-    net_set_onion_ingress_port(0);
-
+    tor_clear_readiness();
     tor_request_exit();
+#ifdef ZCL_TESTING
+    if (g_test_before_tor_join)
+        g_test_before_tor_join();
+#endif
     tor_join_thread_bounded(g_tor_thread, "main", 10);
+    /* Keep conservative ingress classification until Tor has joined. */
+    net_set_onion_ingress_port(0);
     if (g_tor_control != PLATFORM_SOCKET_INVALID)
         (void)platform_socket_close(g_tor_control);
     g_tor_control = PLATFORM_SOCKET_INVALID;
@@ -1249,6 +1291,11 @@ bool tor_integration_rotate_once_for_test(const char *datadir)
 }
 #endif
 
+static bool tor_initial_network_disabled(void)
+{
+    return !atomic_load(&g_serve_onion) || atomic_load(&g_onion_persist);
+}
+
 static bool tor_start_locked(const char *datadir, uint16_t p2p_port)
 {
     if (atomic_load(&g_tor_running))
@@ -1266,6 +1313,7 @@ static bool tor_start_locked(const char *datadir, uint16_t p2p_port)
     g_onion_address[0] = '\0';
     g_rotated_old_address[0] = '\0';
     atomic_store(&g_persist_install_state, 0);
+    atomic_store(&g_file_route_generation, 0);
 
     if (atomic_load(&g_onion_persist) && !tor_persist_symbols_available()) {
         LOG_WARN("tor", "-onion-persist requested but Tor is disabled "
@@ -1304,7 +1352,7 @@ static bool tor_start_locked(const char *datadir, uint16_t p2p_port)
 
     if (!tor_write_torrc_ex(datadir, p2p_port,
                              tor_reduced_padding_for_platform(),
-                             !atomic_load(&g_serve_onion)))
+                             tor_initial_network_disabled()))
         LOG_FAIL("tor", "failed to write torrc to %s", datadir);
 
 #ifdef ZCL_TESTING
@@ -1356,8 +1404,10 @@ static bool g_tor_stop_latched;
 bool tor_integration_start(const char *datadir, uint16_t p2p_port)
 {
     pthread_mutex_lock(&g_tor_lifecycle);
-    g_tor_stop_latched = false;
-    bool started = tor_start_locked(datadir, p2p_port);
+    bool admitted = !fs_server_onion_retiring();
+    if (admitted)
+        g_tor_stop_latched = false;
+    bool started = admitted && tor_start_locked(datadir, p2p_port);
     pthread_mutex_unlock(&g_tor_lifecycle);
     return started;
 }
@@ -1365,7 +1415,8 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
 bool tor_integration_retry_start(const char *datadir, uint16_t p2p_port)
 {
     pthread_mutex_lock(&g_tor_lifecycle);
-    bool started = !g_tor_stop_latched && tor_start_locked(datadir, p2p_port);
+    bool started = !g_tor_stop_latched && !fs_server_onion_retiring() &&
+                   tor_start_locked(datadir, p2p_port);
     pthread_mutex_unlock(&g_tor_lifecycle);
     return started;
 }

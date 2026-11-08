@@ -178,6 +178,33 @@ bool fs_server_start(const char *datadir, uint16_t port, const char *bind_addres
 /* Numeric address and port the listener is bound to; false while it is not
  * listening. */
 bool fs_server_listener_name(char *text, size_t text_size, uint16_t *port);
+enum fs_onion_decision {
+    FS_ONION_PENDING,
+    FS_ONION_DISABLED,
+    FS_ONION_DEFERRED,
+    FS_ONION_FAILED,
+    FS_ONION_AVAILABLE,
+    FS_ONION_RETIRING,
+};
+struct fs_onion_listener {
+    enum fs_onion_decision decision;
+    int64_t fd;
+    uint64_t generation;
+    uint16_t port;
+    char address[64];
+};
+void fs_server_onion_decide(enum fs_onion_decision decision);
+/* Tor lifecycle only: pin ownership until Tor has joined; not a dup or a
+ * diagnostic snapshot. Retirement stops Tor before closing the listener. */
+bool fs_server_onion_pin(struct fs_onion_listener *out);
+bool fs_server_onion_retiring(void);
+bool fs_server_onion_publish(uint64_t generation);
+void fs_server_onion_unpublish(void);
+bool fs_server_onion_published_port(uint16_t *port);
+#ifdef ZCL_TESTING
+void fs_server_onion_stop_hook_for_test(void (*hook)(void));
+void fs_server_onion_fatal_for_test(void);
+#endif
 void fs_server_stop(void);
 bool fs_server_is_running(void);
 uint16_t fs_server_get_port(void);
@@ -191,6 +218,30 @@ bool fs_server_refresh_manifest(void);
  * See CLAUDE.md "Adding state introspection". Reentrant-safe; initializes out. */
 struct json_value;
 bool file_service_dump_state_json(struct json_value *out, const char *key);
+
+#if !defined(_WIN32)
+struct file_manifest;
+struct fs_receive_op;
+enum fs_receive_result { FS_RECEIVE_COMPLETE, FS_RECEIVE_STOPPED, FS_RECEIVE_ERROR };
+/* NULL creates a probe-only operation; a transfer requires a copied manifest.
+ * The expected manifest is copied. The caller exclusively owns an owner-private
+ * staging directory for the operation. The owner unpublishes the operation
+ * under its own mutex and waits for all run/cancel users before destroy.
+ * COMPLETE proves bytes, not chain authority. */
+struct fs_receive_op *fs_receive_create(const struct file_manifest *expected);
+/* Construct a strict transfer whose actual verified leading-chunk count must
+ * be at least min_verified_chunks before any chunk writes. expected is copied;
+ * NULL, an invalid count or a minimum above that count is refused. */
+struct fs_receive_op *fs_receive_create_with_prefix(const struct file_manifest *expected,
+                                                     uint32_t min_verified_chunks);
+/* The transport manifest is untrusted and carries no chain authority. */
+enum fs_receive_result fs_receive_probe(struct fs_receive_op *op, const char *peer_addr,
+    uint16_t port, const uint8_t utxo_root[32], struct file_manifest *out);
+enum fs_receive_result fs_receive_run(struct fs_receive_op *op, const char *peer_addr,
+    uint16_t port, const char *datadir, const uint8_t utxo_root[32]);
+void fs_receive_cancel(struct fs_receive_op *op);
+void fs_receive_destroy(struct fs_receive_op *op);
+#endif
 
 /* High-level: connect to peer and download all chunks. */
 bool fs_client_sync(const char *peer_addr, uint16_t port,

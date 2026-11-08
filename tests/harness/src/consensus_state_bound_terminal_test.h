@@ -1,6 +1,9 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #if defined(__linux__)
 #include "../../../engine/composition/src/consensus_state_install_terminal_internal.h"
+#include "services/wallet_history_capability.h"
+#include "services/wallet_history_manifest.h"
+#include "base/hex.h"
 static bool csi_bound_write(const char *path, const char *text)
 {
     FILE *f = fopen(path, "wb");
@@ -448,5 +451,147 @@ static int csi_bound_real_case(bool convert_first)
     bool ok = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
     CSI_CHECK(convert_first ? "bound fence preserves WHT2 wallet" : "bound fence converts legacy wallet", ok);
     test_rm_rf_recursive(root); return failures;
+}
+static bool csi_bound_observation(const struct rung_act_ctx *c,
+    struct boot_bound_bundle_observation *observation)
+{
+    snprintf(observation->bundle_path, sizeof(observation->bundle_path), "%s", c->kb.path);
+    struct consensus_state_artifact_evidence *evidence = NULL;
+    struct consensus_state_bundle_manifest manifest = {0};
+    bool ok = consensus_state_artifact_evidence_open(c->kb.path, -1, &evidence).ok &&
+        consensus_state_artifact_evidence_file_digest(evidence, observation->snapshot_sha3) &&
+        consensus_state_artifact_evidence_manifest_copy(evidence, &manifest);
+    if (!consensus_state_artifact_evidence_close(&evidence)) ok = false;
+    observation->endpoint_height = manifest.height;
+    memcpy(observation->endpoint_hash, manifest.block_hash, 32);
+    return ok;
+}
+static bool csi_bound_received_capability(const char *base, const uint8_t snapshot[32],
+    struct wallet_history_capability *cap, char path[512], uint8_t root_hash[32])
+{
+    char parent[512], blocks[512], file[512];
+    if (snprintf(parent, sizeof(parent), "%s/cap-parent", base) >= (int)sizeof(parent) ||
+        snprintf(path, 512, "%s/history", parent) >= 512 ||
+        snprintf(blocks, sizeof(blocks), "%s/blocks", path) >= (int)sizeof(blocks) ||
+        mkdir(parent, 0700) || mkdir(path, 0700) || mkdir(blocks, 0700)) return false;
+    if (snprintf(file, sizeof(file), "%s/block_index.bin", path) >= (int)sizeof(file) ||
+        !csi_bound_write(file, "index") ||
+        snprintf(file, sizeof(file), "%s/blk00000.dat", blocks) >= (int)sizeof(file) ||
+        !csi_bound_write(file, "block") ||
+        snprintf(file, sizeof(file), "%s/lease", parent) >= (int)sizeof(file) ||
+        !csi_bound_write(file, "lease")) return false;
+    struct file_manifest *manifest = calloc(1, sizeof(*manifest));
+    if (!manifest) return false;
+    bool ok = wallet_history_manifest_build(manifest, path, 1).ok;
+    if (ok) memcpy(root_hash, manifest->root_hash, 32);
+    free(manifest);
+    char identity[130], leaf[160], lock[160], named[512], source[512];
+    zcl_hex_encode(snapshot, 32, identity);
+    identity[64] = '-';
+    zcl_hex_encode(root_hash, 32, identity + 65);
+    int length = snprintf(leaf, sizeof(leaf), "history-%s", identity);
+    ok = ok && length > 0 && (size_t)length < sizeof(leaf) &&
+        snprintf(named, sizeof(named), "%s/%s", parent, leaf) < (int)sizeof(named) &&
+        rename(path, named) == 0;
+    if (!ok) return false;
+    memcpy(path, named, strlen(named) + 1);
+    length = snprintf(lock, sizeof(lock), ".history-%s-lock", identity);
+    ok = length > 0 && (size_t)length < sizeof(lock) &&
+        snprintf(source, sizeof(source), "%s/lease", parent) < (int)sizeof(source) &&
+        snprintf(named, sizeof(named), "%s/%s", parent, lock) < (int)sizeof(named) &&
+        rename(source, named) == 0;
+    if (!ok) return false;
+    struct platform_directory_transaction p, tree;
+    struct platform_directory_lock lease;
+    platform_directory_transaction_init(&p); platform_directory_transaction_init(&tree);
+    platform_directory_lock_init(&lease); wallet_history_capability_init(cap);
+    ok = platform_directory_transaction_open(&p, parent) &&
+        platform_directory_lock_acquire(&p, lock, false, PLATFORM_DIRECTORY_LOCK_EXCLUSIVE, &lease) == PLATFORM_DIRECTORY_OK &&
+        platform_directory_transaction_open_child(&p, leaf, false, &tree) == PLATFORM_DIRECTORY_OK &&
+        wallet_history_capability_acquire(cap, &p, &tree, &lease, leaf, lock, 1, root_hash).ok;
+    platform_directory_transaction_close(&tree); platform_directory_lock_release(&lease);
+    platform_directory_transaction_close(&p);
+    return ok;
+}
+static bool csi_bound_prebinding_loader(struct boot_cutover_env *env,
+    struct app_context *ctx, const struct chain_params *params, struct block_index **tip)
+{
+    if (!env || !ctx || !params || !tip) return false;
+    *tip = active_chain_tip(&env->state->chain_active);
+    return *tip != NULL;
+}
+static bool csi_bound_success_child(const char *root)
+{
+    struct rung_act_ctx c; struct node_db *node = NULL; struct wallet_sqlite *ws = NULL;
+    struct wallet *wallet = NULL; struct main_state *main = NULL; struct coins_view_cache cache;
+    if (!csi_guarded_child_setup(&c, root, &node, &ws, &wallet, &main, &cache)) return false;
+    struct wallet_history_capability cap;
+    wallet_history_capability_init(&cap);
+    struct boot_bound_bundle_observation obs = {0};
+    bool ok = csi_bound_observation(&c, &obs) &&
+        csi_bound_received_capability(root, obs.snapshot_sha3, &cap,
+                                      obs.private_history_path, obs.history_manifest_root);
+    wallet_history_capability_release(&cap);
+    struct boot_bound_bundle_request request = {
+        .bundle_path = obs.bundle_path, .private_history_path = obs.private_history_path,
+        .endpoint_height = obs.endpoint_height,
+    };
+    memcpy(request.snapshot_sha3, obs.snapshot_sha3, 32);
+    memcpy(request.endpoint_hash, obs.endpoint_hash, 32);
+    memcpy(request.history_manifest_root, obs.history_manifest_root, 32);
+    ok = ok && boot_install_bound_bundle_request(c.rdir, &request, NULL) == BOOT_BUNDLE_ARM_CREATED;
+    struct boot_cutover_env env = {
+        .state = main, .node = node, .wallet = wallet, .wallet_db = ws,
+        .sapling_load_ok = true,
+    };
+    struct app_context ctx = {.datadir = c.rdir};
+    boot_cutover_test_set_prebinding_loader(csi_bound_prebinding_loader);
+    bool returned = boot_cutover_install_bound(&env, &ctx, chain_params_get(), &obs);
+    boot_cutover_test_set_prebinding_loader(NULL);
+    struct wallet_cutover_binding binding;
+    struct boot_bound_bundle_observation after;
+    ok = ok && !returned && boot_old_cutover_restart_pending() &&
+        wallet_sqlite_cutover_read(ws, &binding) == WALLET_CUTOVER_PENDING &&
+        binding.target_height == obs.endpoint_height &&
+        !memcmp(binding.target_hash, obs.endpoint_hash, 32) &&
+        boot_install_bound_bundle_read(c.rdir, &after) == BOOT_BOUND_READ_ABSENT &&
+        boot_consensus_bundle_marker_exists(c.rdir);
+    if (!ok) fprintf(stderr, "bound success fixture refused: pending=%d marker=%d\n",
+        (int)wallet_sqlite_cutover_read(ws, &binding),
+        (int)boot_consensus_bundle_marker_exists(c.rdir));
+    return ok;
+}
+static int csi_bound_success_case(void)
+{
+    int failures = 0; char root[256];
+    test_make_tmpdir(root, sizeof(root), "bound_success", "private");
+    pid_t child = fork();
+    if (!child) { alarm(90); _exit(csi_bound_success_child(root) ? 0 : 1); }
+    int status = 0;
+    bool ok = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    CSI_CHECK("bound terminal: successful install clears request and arms restart", ok);
+    test_rm_rf_recursive(root); return failures;
+}
+static int csi_bound_attempt_case(void)
+{
+    int failures = 0; char root[256];
+    test_make_tmpdir(root, sizeof(root), "bound_attempt", "private");
+    struct boot_bound_bundle_observation observation = {0};
+    snprintf(observation.bundle_path, sizeof(observation.bundle_path), "/private/snapshot");
+    snprintf(observation.private_history_path, sizeof(observation.private_history_path), "/nonexistent/history");
+    struct boot_bound_bundle_request request = {0};
+    request.bundle_path = observation.bundle_path;
+    request.private_history_path = observation.private_history_path;
+    CSI_CHECK("bound attempt fixture", boot_install_bound_bundle_request(root, &request, NULL) == BOOT_BUNDLE_ARM_CREATED);
+    chain_params_select(CHAIN_MAIN);
+    struct app_context ctx = {.datadir = root};
+    struct boot_cutover_env env = {0};
+    bool refused = !boot_cutover_install_bound(&env, &ctx, chain_params_get(), &observation);
+    struct boot_bound_bundle_observation after;
+    CSI_CHECK("bound acquisition failure consumes attempt", refused &&
+        boot_install_bound_bundle_read(root, &after) == BOOT_BOUND_READ_READY && after.attempts == 1);
+    boot_install_bundle_clear(root);
+    test_rm_rf_recursive(root);
+    return failures;
 }
 #endif

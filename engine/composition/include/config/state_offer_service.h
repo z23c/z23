@@ -26,11 +26,13 @@
  * UNCHANGED ROM-manifest path: the per-chunk SHA3 manifest is fetched and bound
  * to the offer's own chunk root, every chunk is content-verified BEFORE its
  * journal bit is set, the whole file is SHA3-checked before the atomic rename,
- * and the landed file is read-only exactly as an operator-seeded one is. Then
- * the UNCHANGED install path is armed through boot_install_bundle_request(), so
- * checkpoint re-derivation and Sapling-root re-derivation happen exactly as
- * they do for a bundle an operator dropped in by hand. This module adds no
- * verification of its own and removes none.
+ * and the landed file is read-only exactly as an operator-seeded one is. An
+ * untrusted history manifest probe is then pinned by the receiver, which
+ * verifies every resumed and downloaded chunk before publication. The bound
+ * install request is armed through boot_install_bound_bundle_request(), so
+ * checkpoint re-derivation, archive authentication and Sapling-root
+ * re-derivation happen exactly as they do for operator-seeded evidence. This
+ * module adds no verification of its own and removes none.
  *
  * A fetch that fails at any of those checks discards the file, strikes the
  * offering peer in the store, and lets the next offer be chosen. The peer is
@@ -78,6 +80,11 @@ bool state_offer_service_advertising(void);
  * one download thread. It never blocks on IO. */
 void state_offer_service_tick(void);
 
+/* Record a verified peer-link offer with its current onion history endpoint
+ * when the live peer and published file-service route provide one. */
+struct state_offer_v1;
+void state_offer_service_record_link(const struct state_offer_v1 *offer, int64_t peer_id);
+
 struct state_offer_restart_hint {
     bool pending;
     int32_t height;
@@ -91,13 +98,18 @@ void state_offer_service_restart_hint(struct state_offer_restart_hint *out);
 
 
 #ifdef ZCL_TESTING
-struct state_offer_v1;
 bool state_offer_service_test_record_enter(void);
 void state_offer_service_test_record_leave(void);
 void state_offer_service_test_record_offer(const struct state_offer_v1 *offer,
                                            const uint8_t ip[16], uint16_t port, int64_t peer);
 void state_offer_service_test_wait_record_stopped(void);
 bool state_offer_service_test_arm_landed(const char *landed, const struct state_offer_v1 *offer);
+struct state_offer_record;
+struct wallet_history_receive_result;
+bool state_offer_service_test_history_fetch(const struct state_offer_record *target,
+    const char *parent, struct wallet_history_receive_result *out);
+bool state_offer_service_test_arm_bound(const char *landed, const struct state_offer_v1 *offer,
+    const char *parent, const struct wallet_history_receive_result *history);
 void state_offer_service_test_clear_restart_hint(void);
 /* Replace the bundle-manifest reader (default NULL: the real
  * consensus_state_artifact_evidence_open path) so a test can drive the

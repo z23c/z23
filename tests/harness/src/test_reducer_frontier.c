@@ -6,6 +6,7 @@
  * sqlite3_exec: test scaffolding, not production reducer code. */
 
 #include "test/test_core.h"
+#include "test/reducer_prebinding_fixture.h"
 #include "json/json.h"
 
 #include "coins/utxo_commitment.h"
@@ -14,9 +15,11 @@
 #include "config/runtime.h"
 #include "jobs/reducer_frontier.h"
 #include "jobs/stage_row_itag.h"
+#include "jobs/tip_finalize_stage.h"
 #include "jobs/refold_progress.h"
 #include "models/database.h"
 #include "storage/progress_store.h"
+#include "storage/coins_kv.h"
 #include "storage/seal_kv.h"
 #include "util/blocker.h"
 
@@ -112,47 +115,6 @@ extern bool reducer_frontier_nearest_self_verified_base(
 
 /* Create the per-stage log tables and the stage_cursor / progress_meta
  * tables exactly as production does. Returns false on any SQLite error. */
-static bool build_schema(sqlite3 *db)
-{
-    static const char *const ddl =
-        "CREATE TABLE IF NOT EXISTS stage_cursor ("
-        "  name TEXT PRIMARY KEY,"
-        "  cursor INTEGER NOT NULL,"
-        "  updated_at INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS progress_meta ("
-        "  key TEXT PRIMARY KEY, value BLOB);"
-        "CREATE TABLE IF NOT EXISTS header_admit_log ("
-        "  height INTEGER PRIMARY KEY, hash BLOB NOT NULL,"
-        "  parent_hash BLOB, admitted_at INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS validate_headers_log ("
-        "  height INTEGER PRIMARY KEY, hash BLOB NOT NULL, ok INTEGER NOT NULL,"
-        "  fail_reason TEXT, validated_at INTEGER);"
-        "CREATE TABLE IF NOT EXISTS script_validate_log ("
-        "  height INTEGER PRIMARY KEY, status TEXT, ok INTEGER NOT NULL,"
-        "  block_hash BLOB);"
-        "CREATE TABLE IF NOT EXISTS body_persist_log ("
-        "  height INTEGER PRIMARY KEY, source TEXT, ok INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS proof_validate_log ("
-        "  height INTEGER PRIMARY KEY, status TEXT, ok INTEGER NOT NULL,"
-        "  block_hash BLOB);"
-        "CREATE TABLE IF NOT EXISTS utxo_apply_log ("
-        "  height INTEGER PRIMARY KEY, status TEXT, ok INTEGER NOT NULL,"
-        "  spent_count INTEGER, added_count INTEGER);"
-        "CREATE TABLE IF NOT EXISTS utxo_apply_delta ("
-        "  height INTEGER PRIMARY KEY, branch_hash BLOB NOT NULL,"
-        "  spent_blob BLOB NOT NULL, added_blob BLOB NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS tip_finalize_log ("
-        "  height INTEGER PRIMARY KEY, status TEXT, ok INTEGER NOT NULL,"
-        "  tip_hash BLOB);";
-    char *err = NULL;
-    if (sqlite3_exec(db, ddl, NULL, NULL, &err) != SQLITE_OK) {
-        fprintf(stderr, "[test_reducer_frontier] schema: %s\n",
-                err ? err : "(null)");
-        sqlite3_free(err);
-        return false;
-    }
-    return true;
-}
 
 /* Stamp coins_kv proven-authority on the fixture db. `applied_height` is the
  * NEXT height to apply, so coverage through H needs H+1. compute_hstar treats
@@ -195,21 +157,6 @@ static bool stamp_proven_authority(sqlite3 *db, int64_t applied_height)
     return ok;
 }
 
-static bool set_cursor(sqlite3 *db, const char *name, int64_t cursor)
-{
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db,
-            "INSERT INTO stage_cursor(name,cursor,updated_at) VALUES(?,?,0) "
-            "ON CONFLICT(name) DO UPDATE SET "
-            "cursor=excluded.cursor, updated_at=excluded.updated_at",
-            -1, &st, NULL) != SQLITE_OK)
-        return false;
-    sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(st, 2, cursor);
-    bool ok = sqlite3_step(st) == SQLITE_DONE;
-    sqlite3_finalize(st);
-    return ok;
-}
 
 /* Insert an ok row into a *_log table with (height, ok) plus an optional
  * 32-byte hash blob in `hash_col` (NULL => none). validate_headers_log's hash
@@ -289,24 +236,6 @@ static bool put_header_admit(sqlite3 *db, int32_t h,
     return ok;
 }
 
-static bool put_utxo_delta(sqlite3 *db, int32_t h,
-                           const uint8_t hash[32])
-{
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db,
-            "INSERT INTO utxo_apply_delta"
-            "(height,branch_hash,spent_blob,added_blob) "
-            "VALUES(?,?,x'',x'')", -1, &st, NULL) != SQLITE_OK)
-        return false;
-    sqlite3_bind_int(st, 1, h);
-    sqlite3_bind_blob(st, 2, hash, 32, SQLITE_STATIC);
-    bool ok = sqlite3_step(st) == SQLITE_DONE;
-    sqlite3_finalize(st);
-    return ok;
-}
-
-/* Write a full consistent ok=1 row across ALL stage logs at height h, with
- * validate_headers.hash and script_validate.block_hash AGREEING (tag 0). */
 static bool put_consistent_height(sqlite3 *db, int32_t h)
 {
     uint8_t hh[32];
@@ -319,7 +248,7 @@ static bool put_consistent_height(sqlite3 *db, int32_t h)
         && put_log_row(db, "proof_validate_log", "block_hash", h, 1, hh,
                        NULL)
         && put_log_row(db, "utxo_apply_log", NULL, h, 1, NULL, NULL)
-        && put_utxo_delta(db, h, hh)
+        && rf_fixture_put_utxo_delta(db, h, hh)
         && put_log_row(db, "tip_finalize_log", NULL, h, 1, NULL, "ok");
 }
 
@@ -410,13 +339,13 @@ static bool set_hash_value(sqlite3 *db, const char *table,
  * same H*. */
 static bool set_all_cursors(sqlite3 *db, int64_t c)
 {
-    return set_cursor(db, "validate_headers", c)
-        && set_cursor(db, "body_fetch", c)
-        && set_cursor(db, "body_persist", c)
-        && set_cursor(db, "proof_validate", c)
-        && set_cursor(db, "script_validate", c)
-        && set_cursor(db, "utxo_apply", c)
-        && set_cursor(db, "tip_finalize", c);
+    return rf_fixture_set_cursor(db, "validate_headers", c)
+        && rf_fixture_set_cursor(db, "body_fetch", c)
+        && rf_fixture_set_cursor(db, "body_persist", c)
+        && rf_fixture_set_cursor(db, "proof_validate", c)
+        && rf_fixture_set_cursor(db, "script_validate", c)
+        && rf_fixture_set_cursor(db, "utxo_apply", c)
+        && rf_fixture_set_cursor(db, "tip_finalize", c);
 }
 
 /* Set each of the `n` named cursors to `value`, in list order, stopping at the
@@ -425,7 +354,7 @@ static bool set_cursor_list(sqlite3 *db, const char *const *names, size_t n,
                             int64_t value)
 {
     for (size_t i = 0; i < n; i++) {
-        if (!set_cursor(db, names[i], value))
+        if (!rf_fixture_set_cursor(db, names[i], value))
             return false;
     }
     return true;
@@ -438,7 +367,7 @@ static bool set_derived_cursors(sqlite3 *db, const char *const *upstream,
                                 int64_t tip_value)
 {
     return set_cursor_list(db, upstream, n, upstream_value)
-        && set_cursor(db, "tip_finalize", tip_value);
+        && rf_fixture_set_cursor(db, "tip_finalize", tip_value);
 }
 
 /* Upstream stages the tip_finalize edge fixture sets, in fixture order. */
@@ -480,7 +409,7 @@ static int case_partial_authority_does_not_enable_compiled_floor(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-    RF_CHECK("partial-authority: schema", build_schema(db));
+    RF_CHECK("partial-authority: schema", rf_fixture_build_schema(db));
 
     const int32_t k = 3;
     RF_CHECK("partial-authority: proven only through K",
@@ -508,7 +437,7 @@ static int case_partial_authority_does_not_enable_compiled_floor(void)
      * equal to A therefore covers only through A-1 and must not enable floor A. */
     db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) return failures + 1;
-    RF_CHECK("partial-boundary: schema", build_schema(db));
+    RF_CHECK("partial-boundary: schema", rf_fixture_build_schema(db));
     RF_CHECK("partial-boundary: proven through A-1",
              stamp_proven_authority(db, A));
     RF_CHECK("partial-boundary: empty cursors", set_all_cursors(db, 0));
@@ -529,7 +458,7 @@ static int case_consistent(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
-    RF_CHECK("consistent: schema", build_schema(db));
+    RF_CHECK("consistent: schema", rf_fixture_build_schema(db));
     RF_CHECK("consistent: proven authority", stamp_proven_authority(db, A + 1));
 
     const int32_t tip = A + 5;
@@ -560,7 +489,7 @@ static int case_proof_and_utxo_fork_split(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-    RF_CHECK("proof-utxo-split: schema", build_schema(db));
+    RF_CHECK("proof-utxo-split: schema", rf_fixture_build_schema(db));
     RF_CHECK("proof-utxo-split: proven authority", stamp_proven_authority(db, A + 1));
     bool built = true;
     for (int32_t h = A + 1; h <= A + 3; h++)
@@ -608,7 +537,7 @@ static int case_validation_evidence_contained(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
-    RF_CHECK("evidence: schema", build_schema(db));
+    RF_CHECK("evidence: schema", rf_fixture_build_schema(db));
     RF_CHECK("evidence: proven authority", stamp_proven_authority(db, A + 1));
 
     const int32_t tip = A + 3;
@@ -682,13 +611,13 @@ static bool put_torn_fault_rows(sqlite3 *db)
  * at the failure. */
 static bool set_torn_cursors(sqlite3 *db)
 {
-    return set_cursor(db, "validate_headers", A + 7)
-        && set_cursor(db, "body_fetch", A + 7)
-        && set_cursor(db, "body_persist", A + 7)
-        && set_cursor(db, "proof_validate", A + 7)
-        && set_cursor(db, "script_validate", A + 5)
-        && set_cursor(db, "utxo_apply", A + 7)
-        && set_cursor(db, "tip_finalize", A + 5);
+    return rf_fixture_set_cursor(db, "validate_headers", A + 7)
+        && rf_fixture_set_cursor(db, "body_fetch", A + 7)
+        && rf_fixture_set_cursor(db, "body_persist", A + 7)
+        && rf_fixture_set_cursor(db, "proof_validate", A + 7)
+        && rf_fixture_set_cursor(db, "script_validate", A + 5)
+        && rf_fixture_set_cursor(db, "utxo_apply", A + 7)
+        && rf_fixture_set_cursor(db, "tip_finalize", A + 5);
 }
 
 static int case_torn(void)
@@ -696,7 +625,7 @@ static int case_torn(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
-    RF_CHECK("torn: schema", build_schema(db));
+    RF_CHECK("torn: schema", rf_fixture_build_schema(db));
     RF_CHECK("torn: proven authority", stamp_proven_authority(db, A + 1));
 
     /* A+1..A+3 fully consistent and finalized. */
@@ -751,7 +680,7 @@ static int case_sparse_seed_anchor(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
-    RF_CHECK("sparse-anchor: schema", build_schema(db));
+    RF_CHECK("sparse-anchor: schema", rf_fixture_build_schema(db));
     const int32_t base = A + 100;
     const int32_t stale_high = A + 200;
     const int32_t tip = base + 5;
@@ -786,7 +715,7 @@ static int case_durable_base_accepts_rowless_first(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
-    RF_CHECK("rowless-base: schema", build_schema(db));
+    RF_CHECK("rowless-base: schema", rf_fixture_build_schema(db));
 
     const int32_t base = A + 100;
     RF_CHECK("rowless-base: proven authority",
@@ -826,7 +755,7 @@ static int case_durable_base_survives_header_failure(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
-    RF_CHECK("header-fail-base: schema", build_schema(db));
+    RF_CHECK("header-fail-base: schema", rf_fixture_build_schema(db));
 
     const int32_t base = A + 100;
     RF_CHECK("header-fail-base: proven authority",
@@ -881,7 +810,7 @@ static int case_anchor_collapse_after_forward_ok0(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
-    RF_CHECK("collapse: schema", build_schema(db));
+    RF_CHECK("collapse: schema", rf_fixture_build_schema(db));
     RF_CHECK("collapse: proven authority", stamp_proven_authority(db, A + 1));
 
     const int32_t base = A + 100;   /* the cold-import terminal tip */
@@ -933,7 +862,7 @@ static int case_clamp_up(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
-    RF_CHECK("clamp: schema", build_schema(db));
+    RF_CHECK("clamp: schema", rf_fixture_build_schema(db));
     RF_CHECK("clamp: proven authority", stamp_proven_authority(db, A + 1));
 
     /* script_validate fails at anchor+1, so the prefix is the anchor.
@@ -966,7 +895,7 @@ static int case_hash_split(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
-    RF_CHECK("split: schema", build_schema(db));
+    RF_CHECK("split: schema", rf_fixture_build_schema(db));
     RF_CHECK("split: proven authority", stamp_proven_authority(db, A + 1));
 
     bool built = true;
@@ -1011,7 +940,7 @@ static int case_split_at_floor(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
-    RF_CHECK("floor: schema", build_schema(db));
+    RF_CHECK("floor: schema", rf_fixture_build_schema(db));
     RF_CHECK("floor: proven authority", stamp_proven_authority(db, A + 1));
 
     /* A+1: ok=1 everywhere but hashes disagree (tag 0 vs tag 7). */
@@ -1053,7 +982,7 @@ static int case_preflip_no_proof_block_hash(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
-    RF_CHECK("preflip: schema", build_schema(db));
+    RF_CHECK("preflip: schema", rf_fixture_build_schema(db));
     RF_CHECK("preflip: proven authority", stamp_proven_authority(db, A + 1));
 
     /* Recreate proof_validate_log without block_hash (pre-flip shape). */
@@ -1081,7 +1010,7 @@ static int case_preflip_no_proof_block_hash(void)
             && put_log_row(db, "body_persist_log", NULL, h, 1, NULL, NULL)
             && put_log_row(db, "proof_validate_log", NULL, h, 1, NULL, NULL)
             && put_log_row(db, "utxo_apply_log", NULL, h, 1, NULL, NULL)
-            && put_utxo_delta(db, h, hh)
+            && rf_fixture_put_utxo_delta(db, h, hh)
             && put_log_row(db, "tip_finalize_log", NULL, h, 1, NULL, "ok");
     }
     RF_CHECK("preflip: rows built", built);
@@ -1124,7 +1053,7 @@ static int case_dump_reports_validate_failure_owner(void)
     }
 
     sqlite3 *db = progress_store_db();
-    RF_CHECK("dump: schema", db && build_schema(db));
+    RF_CHECK("dump: schema", db && rf_fixture_build_schema(db));
     RF_CHECK("dump: proven authority", db && stamp_proven_authority(db, A + 1));
 
     const int32_t fail_h = A + 3;
@@ -1336,7 +1265,7 @@ static int case_dump_marks_run_ahead_stage_cursors(void)
     }
 
     sqlite3 *db = progress_store_db();
-    RF_CHECK("runahead: schema", db && build_schema(db));
+    RF_CHECK("runahead: schema", db && rf_fixture_build_schema(db));
     RF_CHECK("runahead: proven authority", db && stamp_proven_authority(db, A + 1));
 
     const int32_t tip = A + 3;
@@ -1344,7 +1273,7 @@ static int case_dump_marks_run_ahead_stage_cursors(void)
     RF_CHECK("runahead: rows built", built);
     RF_CHECK("runahead: log cursors", db && set_all_cursors(db, tip + 1));
     RF_CHECK("runahead: header_admit cursor",
-             db && set_cursor(db, "header_admit", tip + 1));
+             db && rf_fixture_set_cursor(db, "header_admit", tip + 1));
 
     struct json_value probe;
     json_init(&probe);
@@ -1355,9 +1284,9 @@ static int case_dump_marks_run_ahead_stage_cursors(void)
     RF_CHECK("runahead: fixture hstar known", hstar == tip);
 
     RF_CHECK("runahead: level cursor set to hstar+1",
-             db && set_cursor(db, "header_admit", hstar + 1));
+             db && rf_fixture_set_cursor(db, "header_admit", hstar + 1));
     RF_CHECK("runahead: run-ahead cursor set to hstar+8",
-             db && set_cursor(db, "body_fetch", hstar + 8));
+             db && rf_fixture_set_cursor(db, "body_fetch", hstar + 8));
 
     struct json_value out;
     json_init(&out);
@@ -1439,7 +1368,7 @@ static int case_dump_reports_hstar_log_hole(void)
     }
 
     sqlite3 *db = progress_store_db();
-    RF_CHECK("dump-hole: schema", db && build_schema(db));
+    RF_CHECK("dump-hole: schema", db && rf_fixture_build_schema(db));
     RF_CHECK("dump-hole: proven authority", db && stamp_proven_authority(db, A + 1));
 
     const int32_t hole_h = A + 3;
@@ -1525,7 +1454,7 @@ static int case_dump_reports_hstar_hash_split(void)
     }
 
     sqlite3 *db = progress_store_db();
-    RF_CHECK("dump-split: schema", db && build_schema(db));
+    RF_CHECK("dump-split: schema", db && rf_fixture_build_schema(db));
     RF_CHECK("dump-split: proven authority", db && stamp_proven_authority(db, A + 1));
 
     bool built = true;
@@ -1629,7 +1558,7 @@ static int case_dump_ignores_tip_finalize_pending_edge(void)
     }
 
     sqlite3 *db = progress_store_db();
-    RF_CHECK("dump-tipfin-edge: schema", db && build_schema(db));
+    RF_CHECK("dump-tipfin-edge: schema", db && rf_fixture_build_schema(db));
     RF_CHECK("dump-tipfin-edge: proven authority",
              db && stamp_proven_authority(db, A + 4));
 
@@ -1639,7 +1568,7 @@ static int case_dump_ignores_tip_finalize_pending_edge(void)
     RF_CHECK("dump-tipfin-edge: upstream cursors",
              set_tipfin_upstream_cursors(db, pending_h + 1));
     RF_CHECK("dump-tipfin-edge: tip_finalize cursor",
-             set_cursor(db, "tip_finalize", pending_h));
+             rf_fixture_set_cursor(db, "tip_finalize", pending_h));
 
     struct json_value out;
     json_init(&out);
@@ -1698,7 +1627,7 @@ static int case_dump_reports_tip_finalize_real_hole(void)
     }
 
     sqlite3 *db = progress_store_db();
-    RF_CHECK("dump-tipfin-hole: schema", db && build_schema(db));
+    RF_CHECK("dump-tipfin-hole: schema", db && rf_fixture_build_schema(db));
     RF_CHECK("dump-tipfin-hole: proven authority",
              db && stamp_proven_authority(db, A + 4));
 
@@ -1708,7 +1637,7 @@ static int case_dump_reports_tip_finalize_real_hole(void)
     RF_CHECK("dump-tipfin-hole: upstream cursors",
              set_tipfin_upstream_cursors(db, hole_h + 1));
     RF_CHECK("dump-tipfin-hole: tip_finalize cursor beyond hole",
-             set_cursor(db, "tip_finalize", hole_h + 1));
+             rf_fixture_set_cursor(db, "tip_finalize", hole_h + 1));
 
     struct json_value out;
     json_init(&out);
@@ -1772,7 +1701,7 @@ static int case_log_frontier_above_tip_finalize_cursor(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
-    RF_CHECK("tipfin-above: schema", build_schema(db));
+    RF_CHECK("tipfin-above: schema", rf_fixture_build_schema(db));
 
     bool built = true;
     for (int32_t h = A + 1; h <= A + 3; h++)
@@ -1780,7 +1709,7 @@ static int case_log_frontier_above_tip_finalize_cursor(void)
             put_log_row(db, "tip_finalize_log", NULL, h, 1, NULL, "ok");
     RF_CHECK("tipfin-above: rows built", built);
     RF_CHECK("tipfin-above: served-height cursor",
-             set_cursor(db, "tip_finalize", A + 3));
+             rf_fixture_set_cursor(db, "tip_finalize", A + 3));
 
     int32_t frontier = -1;
     bool ok = reducer_frontier_log_frontier_above(db, "tip_finalize_log",
@@ -1832,7 +1761,7 @@ static int case_dump_reports_rewind_bases(void)
     }
 
     sqlite3 *db = progress_store_db();
-    RF_CHECK("rewind: schema", db && build_schema(db));
+    RF_CHECK("rewind: schema", db && rf_fixture_build_schema(db));
     RF_CHECK("rewind: proven authority", db && stamp_proven_authority(db, A + 1));
     RF_CHECK("rewind: seal schema", seal_kv_ensure_schema(db));
 
@@ -1944,7 +1873,7 @@ static int case_sovereign_base_ignores_borrowed_higher_stamp(void)
     }
 
     sqlite3 *db = progress_store_db();
-    RF_CHECK("sovereign-base: schema", db && build_schema(db));
+    RF_CHECK("sovereign-base: schema", db && rf_fixture_build_schema(db));
     RF_CHECK("sovereign-base: proven authority",
              db && stamp_proven_authority(db, A + 1));
 
@@ -2316,7 +2245,7 @@ static int case_derived_stage_cursor_equivalence(void)
         sqlite3 *db = NULL;
         reducer_frontier_stage_cursor_derived_reset_memo_for_testing();
         if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-        RF_CHECK("derived-equiv: consistent schema", build_schema(db));
+        RF_CHECK("derived-equiv: consistent schema", rf_fixture_build_schema(db));
         RF_CHECK("derived-equiv: consistent proven authority",
                  stamp_proven_authority(db, A + 1));
         const int32_t tip = A + 5;
@@ -2345,7 +2274,7 @@ static int case_derived_stage_cursor_equivalence(void)
         sqlite3 *db = NULL;
         reducer_frontier_stage_cursor_derived_reset_memo_for_testing();
         if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-        RF_CHECK("derived-equiv: torn schema", build_schema(db));
+        RF_CHECK("derived-equiv: torn schema", rf_fixture_build_schema(db));
         RF_CHECK("derived-equiv: torn proven authority",
                  stamp_proven_authority(db, A + 1));
         const int32_t tip = A + 5;
@@ -2383,7 +2312,7 @@ static int case_derived_stage_cursor_equivalence(void)
         sqlite3 *db = NULL;
         reducer_frontier_stage_cursor_derived_reset_memo_for_testing();
         if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-        RF_CHECK("derived-equiv: install schema", build_schema(db));
+        RF_CHECK("derived-equiv: install schema", rf_fixture_build_schema(db));
         const int32_t base = A + 100;
         RF_CHECK("derived-equiv: install proven authority",
                  stamp_proven_authority(db, base + 1));
@@ -2411,10 +2340,10 @@ static int case_derived_stage_cursor_equivalence(void)
         sqlite3 *db = NULL;
         reducer_frontier_stage_cursor_derived_reset_memo_for_testing();
         if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-        RF_CHECK("derived-equiv: logless schema", build_schema(db));
+        RF_CHECK("derived-equiv: logless schema", rf_fixture_build_schema(db));
         RF_CHECK("derived-equiv: logless proven authority",
                  stamp_proven_authority(db, A + 1));
-        RF_CHECK("derived-equiv: logless cursor", set_cursor(db, "body_fetch",
+        RF_CHECK("derived-equiv: logless cursor", rf_fixture_set_cursor(db, "body_fetch",
                                                              A + 42));
         int64_t d = derived_stage_cursor(db, "body_fetch");
         int64_t r = raw_stage_cursor(db, "body_fetch");
@@ -2428,7 +2357,7 @@ static int case_derived_stage_cursor_equivalence(void)
         sqlite3 *db = NULL;
         reducer_frontier_stage_cursor_derived_reset_memo_for_testing();
         if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-        RF_CHECK("derived-heal: schema", build_schema(db));
+        RF_CHECK("derived-heal: schema", rf_fixture_build_schema(db));
         RF_CHECK("derived-heal: proven authority",
                  stamp_proven_authority(db, A + 1));
         const int32_t tip = A + 5;
@@ -2489,7 +2418,7 @@ static int case_unseeded_store_warnings_are_throttled(void)
     RF_CHECK("unseeded: 50 calls emit exactly one schema warning",
              reducer_frontier_schema_warn_emitted_for_test() == 1);
 
-    RF_CHECK("unseeded: schema", build_schema(db));
+    RF_CHECK("unseeded: schema", rf_fixture_build_schema(db));
     RF_CHECK("unseeded: empty cursors", set_all_cursors(db, 0));
     bool all_ok = true;
     for (int i = 0; i < 50; i++)
@@ -2660,7 +2589,7 @@ static int case_floor_one_uncovered_falls_to_genesis(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-    RF_CHECK("floor-one: schema", build_schema(db));
+    RF_CHECK("floor-one: schema", rf_fixture_build_schema(db));
     reducer_frontier_test_set_compiled_anchor(1);
     int32_t hstar = -1, served = -1;
     RF_CHECK("floor-one: compute succeeds",
@@ -2677,10 +2606,10 @@ static int case_tip_finalize_cursor_frame(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-    RF_CHECK("tipfin-frame: schema", build_schema(db));
+    RF_CHECK("tipfin-frame: schema", rf_fixture_build_schema(db));
     RF_CHECK("tipfin-frame: row at height 1", put_consistent_height(db, 1));
     RF_CHECK("tipfin-frame: upstream cursors", set_tipfin_upstream_cursors(db, 2));
-    RF_CHECK("tipfin-frame: served tip 1", set_cursor(db, "tip_finalize", 1));
+    RF_CHECK("tipfin-frame: served tip 1", rf_fixture_set_cursor(db, "tip_finalize", 1));
     int32_t hstar = -1, served = -1;
     RF_CHECK("tipfin-frame: compute succeeds",
              reducer_frontier_compute_hstar(db, &hstar, &served));
@@ -2695,14 +2624,14 @@ static int case_non_integer_ok_cell_fails(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-    RF_CHECK("ok-type: schema", build_schema(db));
+    RF_CHECK("ok-type: schema", rf_fixture_build_schema(db));
     RF_CHECK("ok-type: rows 1..3", put_consistent_range(db, 1, 3));
     RF_CHECK("ok-type: text planted in body_persist ok at 2",
              sqlite3_exec(db,
                  "UPDATE body_persist_log SET ok='bad' WHERE height=2",
                  NULL, NULL, NULL) == SQLITE_OK);
     RF_CHECK("ok-type: cursors", set_tipfin_upstream_cursors(db, 4));
-    RF_CHECK("ok-type: tip cursor", set_cursor(db, "tip_finalize", 3));
+    RF_CHECK("ok-type: tip cursor", rf_fixture_set_cursor(db, "tip_finalize", 3));
     int32_t hstar = -1, served = -1;
     RF_CHECK("ok-type: compute succeeds",
              reducer_frontier_compute_hstar(db, &hstar, &served));
@@ -2726,9 +2655,9 @@ static bool rf_cand_break(sqlite3 *db, enum rf_cand_variant v, int32_t H)
 {
     switch (v) {
     case RF_CAND_VALIDATE_CURSOR_BEHIND:
-        return set_cursor(db, "validate_headers", H);
+        return rf_fixture_set_cursor(db, "validate_headers", H);
     case RF_CAND_TIP_CURSOR_BEHIND:
-        return set_cursor(db, "tip_finalize", H - 1);
+        return rf_fixture_set_cursor(db, "tip_finalize", H - 1);
     case RF_CAND_BODY_FAIL_AT_FIRST:
         return sqlite3_exec(db, "UPDATE body_persist_log SET ok=0",
                             NULL, NULL, NULL) == SQLITE_OK;
@@ -2745,10 +2674,10 @@ static int32_t rf_cand_hstar(enum rf_cand_variant v)
     const int32_t H = 20;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) return -1;
-    bool built = build_schema(db) && stamp_proven_authority(db, H + 1) &&
+    bool built = rf_fixture_build_schema(db) && stamp_proven_authority(db, H + 1) &&
                  put_tip_anchor(db, H) && put_consistent_height(db, H + 1) &&
                  set_tipfin_upstream_cursors(db, H + 2) &&
-                 set_cursor(db, "tip_finalize", H + 1) &&
+                 rf_fixture_set_cursor(db, "tip_finalize", H + 1) &&
                  rf_cand_break(db, v, H);
     int32_t hstar = -1, served = -1;
     if (!built || !reducer_frontier_compute_hstar(db, &hstar, &served))
@@ -2780,13 +2709,13 @@ static int case_anchor_candidate_at_int32_edge(void)
     const int32_t H = INT32_MAX - 1;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-    RF_CHECK("candidate-edge: schema", build_schema(db));
+    RF_CHECK("candidate-edge: schema", rf_fixture_build_schema(db));
     RF_CHECK("candidate-edge: authority through H",
              stamp_proven_authority(db, INT32_MAX));
     RF_CHECK("candidate-edge: anchor row", put_tip_anchor(db, H));
     RF_CHECK("candidate-edge: upstream cursors",
              set_tipfin_upstream_cursors(db, INT32_MAX));
-    RF_CHECK("candidate-edge: tip cursor", set_cursor(db, "tip_finalize", H));
+    RF_CHECK("candidate-edge: tip cursor", rf_fixture_set_cursor(db, "tip_finalize", H));
     int32_t hstar = -1, served = -1;
     RF_CHECK("candidate-edge: compute succeeds",
              reducer_frontier_compute_hstar(db, &hstar, &served));
@@ -2802,7 +2731,7 @@ static int case_missing_cursor_rows_warn_per_stage(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-    RF_CHECK("cursor-warn: schema", build_schema(db));
+    RF_CHECK("cursor-warn: schema", rf_fixture_build_schema(db));
     reducer_frontier_log_throttles_reset_for_test();
     RF_CHECK("cursor-warn: counters start at zero",
              reducer_frontier_cursor_warn_emitted_for_test() +
@@ -2851,11 +2780,11 @@ static int case_cursor_warning_boundaries(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-    RF_CHECK("warn-edge: schema", build_schema(db));
+    RF_CHECK("warn-edge: schema", rf_fixture_build_schema(db));
     RF_CHECK("warn-edge: upstream cursors at anchor+1",
              set_tipfin_upstream_cursors(db, 1));
     RF_CHECK("warn-edge: tip_finalize cursor 0",
-             set_cursor(db, "tip_finalize", 0));
+             rf_fixture_set_cursor(db, "tip_finalize", 0));
     reducer_frontier_log_throttles_reset_for_test();
     int32_t hstar = -1, served = -1;
     RF_CHECK("warn-edge: compute succeeds",
@@ -2881,10 +2810,10 @@ static int case_itag_watermark_follows_hstar(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-    RF_CHECK("itag-wm: schema", build_schema(db));
+    RF_CHECK("itag-wm: schema", rf_fixture_build_schema(db));
     RF_CHECK("itag-wm: rows 1..3", put_consistent_range(db, 1, 3));
     RF_CHECK("itag-wm: cursors", set_tipfin_upstream_cursors(db, 4));
-    RF_CHECK("itag-wm: tip cursor", set_cursor(db, "tip_finalize", 3));
+    RF_CHECK("itag-wm: tip cursor", rf_fixture_set_cursor(db, "tip_finalize", 3));
     rf_tip_clean();
     int32_t hstar = -1, served = -1;
     RF_CHECK("itag-wm: compute succeeds",
@@ -2906,7 +2835,7 @@ static int case_compute_rejects_null_arguments(void)
     int failures = 0;
     sqlite3 *db = NULL;
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-    RF_CHECK("null-args: schema", build_schema(db));
+    RF_CHECK("null-args: schema", rf_fixture_build_schema(db));
     int32_t hstar = -1, served = -1;
     RF_CHECK("null-args: NULL db refused",
              !reducer_frontier_compute_hstar(NULL, &hstar, &served));
@@ -2932,7 +2861,7 @@ static int case_header_receipt_snapshot(void)
     int failures = 0; sqlite3 *db = NULL; uint8_t hash[32];
     synth_hash(hash, 5, 0);
     if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
-    RF_CHECK("header receipt schema", build_schema(db));
+    RF_CHECK("header receipt schema", rf_fixture_build_schema(db));
     RF_CHECK("header receipt seed", put_log_row(db, "validate_headers_log", "hash", 5, 1, hash, NULL));
     RF_CHECK("header receipt absent", reducer_frontier_header_receipt(db, 6) == REDUCER_HEADER_RECEIPT_ABSENT);
     RF_CHECK("header receipt legacy pass", reducer_frontier_header_receipt(db, 5) == REDUCER_HEADER_RECEIPT_PASS);

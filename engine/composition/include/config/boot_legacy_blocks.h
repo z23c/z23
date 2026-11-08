@@ -11,6 +11,9 @@
 extern "C" {
 #endif
 
+struct platform_positioned_file_snapshot;
+bool boot_file_snapshot(const char *path, struct platform_positioned_file_snapshot *out);
+
 struct boot_legacy_block_file_import_result {
     bool source_available;
     bool destination_ready;

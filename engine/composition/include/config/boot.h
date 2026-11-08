@@ -637,6 +637,9 @@ void app_shutdown(void);
  * for every other offline one-shot (e.g. -coldstart-seed-oneshot), which
  * leaves the offline-worker-drain deadline armed exactly as before. */
 void app_shutdown_offline(bool output_already_durable);
+struct wallet_cutover_binding;
+/* Arm only after a durable bound install leaves a pending wallet cutover. */
+void boot_cutover_restart_arm(const struct wallet_cutover_binding *binding);
 /* Only a verified COMMITTED pending-wallet startup may use this handoff. */
 bool boot_old_cutover_restart_pending(void);
 bool boot_old_cutover_restart_cleanup(void);

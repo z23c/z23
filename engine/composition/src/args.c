@@ -283,6 +283,8 @@ static const char *const k_extra_getarg_flags[] = {
     "-beta6-bootstrap-source", "-beta6-bootstrap-listen",
     "-pin-reducer", "-nopin-reducer",
     "-rombundlereplicadir",
+    "-history-export-parent", "-history-export-max-rows",
+    "-history-export-max-bytes", "-history-export-min-free-bytes",
     "-romseed", "-noromseed",
     "-catchup-from-seed", "-nocatchup-from-seed",
     "-netcrawl", "-nonetcrawl",

@@ -24,6 +24,7 @@
 #include "config/boot_mesh_pairing.h"
 #include "config/boot_msg_callbacks.h"
 #include "config/boot_zcode_swarm.h"
+#include "config/wallet_history_provider.h"
 #include "controllers/api_controller.h"
 #include "controllers/explorer_controller.h"
 #include "controllers/store_buyer_controller.h"
@@ -72,16 +73,31 @@ static size_t onion_request_adapter(const char *method, const char *path,
 static bool boot_file_service_start(void *ctx)
 {
     struct boot_svc_ctx *svc = ctx;
-    if (!svc || !svc->app_ctx || !boot_profile_has_file_service(svc->app_ctx))
+    if (!svc || !svc->app_ctx || !boot_profile_has_file_service(svc->app_ctx)) {
+        fs_server_onion_decide(FS_ONION_DISABLED);
         return true;
+    }
     if (svc->defer_offer_service) {
+        fs_server_onion_decide(FS_ONION_DEFERRED);
         printf("File service server deferred during fresh bootstrap receiver mode\n");
         return true;
     }
+    struct wallet_history_provider_budget budget;
+    enum wallet_history_provider_config_result config =
+        wallet_history_provider_read_budget(&budget);
+    if (config != WALLET_HISTORY_PROVIDER_DISABLED) {
+        if (config == WALLET_HISTORY_PROVIDER_INVALID || !svc->offer_thread_started) {
+            fs_server_onion_decide(FS_ONION_FAILED);
+            LOG_FAIL("file_service", "history production needs valid budgets and an offer worker");
+        }
+        return true;
+    }
     if (!fs_server_start(svc->datadir, (uint16_t)svc->app_ctx->fs_port,
-                         svc->app_ctx->p2p_bind_address))
+                         svc->app_ctx->p2p_bind_address)) {
+        fs_server_onion_decide(FS_ONION_FAILED);
         LOG_FAIL("file_service", "-bind=%s is not a listen address",
                  svc->app_ctx->p2p_bind_address);
+    }
     return true;
 }
 

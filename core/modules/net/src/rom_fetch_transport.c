@@ -154,7 +154,8 @@ bool rf_recv_exact_until(platform_socket_t fd, uint8_t *buf, size_t size,
  * SAME properties rf_connect's clearnet path returns: blocking, with recv/
  * send silence windows armed. Everything above this function -- handshake,
  * framing, MACs, digests -- cannot tell the two apart, which is the point. */
-static platform_socket_t rf_connect_onion(const char *peer_addr, uint16_t port)
+static platform_socket_t rf_connect_onion(const char *peer_addr, uint16_t port,
+                                           bool (*cancelled)(void *), void *context)
 {
     struct net_service svc;
     net_service_init(&svc);
@@ -170,12 +171,12 @@ static platform_socket_t rf_connect_onion(const char *peer_addr, uint16_t port)
     bool dialed;
 #ifdef ZCL_TESTING
     if (g_rf_onion_backend)
-        dialed = onion_stream_connect_backend_for_test(
-            &svc, &sock, RF_ONION_CONNECT_TIMEOUT_MS, g_rf_onion_backend);
+        dialed = onion_stream_connect_backend_cancelable_for_test(
+            &svc, &sock, RF_ONION_CONNECT_TIMEOUT_MS, g_rf_onion_backend, cancelled, context);
     else
 #endif
-        dialed = onion_stream_connect(&svc, &sock,
-                                      RF_ONION_CONNECT_TIMEOUT_MS);
+        dialed = onion_stream_connect_cancelable(&svc, &sock, RF_ONION_CONNECT_TIMEOUT_MS,
+                                                 cancelled, context);
     if (!dialed || sock == ZCL_INVALID_SOCKET)
         LOG_RETURN(PLATFORM_SOCKET_INVALID, RF_SUBSYS,
                    "chunk: onion circuit to %s:%u not established",
@@ -211,7 +212,7 @@ static platform_socket_t rf_connect_route(const char *peer_addr, uint16_t port)
     /* Route by address family, not by preference: an onion name has exactly
      * one route and never reaches the resolver below. */
     if (net_name_is_onion(peer_addr))
-        return rf_connect_onion(peer_addr, port);
+        return rf_connect_onion(peer_addr, port, NULL, NULL);
 
     /* -onlynet=onion: refuse before any resolve or connect. */
     if (!netbase_host_dial_allowed(peer_addr))
@@ -265,6 +266,16 @@ static platform_socket_t rf_connect_route(const char *peer_addr, uint16_t port)
     }
     (void)platform_socket_set_receive_timeout(fd, RF_IO_TIMEOUT_MS);
     (void)platform_socket_set_send_timeout(fd, RF_IO_TIMEOUT_MS);
+    return fd;
+}
+
+platform_socket_t rf_connect_onion_cancelable(const char *peer_addr, uint16_t port,
+                                               bool (*cancelled)(void *), void *context)
+{
+    if (!peer_addr || !net_name_is_onion(peer_addr)) return PLATFORM_SOCKET_INVALID;
+    platform_socket_t fd = rf_connect_onion(peer_addr, port, cancelled, context);
+    if (fd != PLATFORM_SOCKET_INVALID) RF_NOTE_DIAL();
+    else RF_NOTE_DIAL_FAIL();
     return fd;
 }
 

@@ -70,6 +70,9 @@ struct boot_cutover_env {
 };
 enum boot_cutover_preflight_kind { BOOT_CUTOVER_NONE, BOOT_CUTOVER_COMMITTED, BOOT_CUTOVER_OLD_RETRY };
 struct wallet_cutover_binding;
+struct boot_bound_bundle_observation;
+bool boot_cutover_install_bound(struct boot_cutover_env *env, struct app_context *ctx,
+    const struct chain_params *params, const struct boot_bound_bundle_observation *observation);
 bool boot_cutover_preflight_classify(struct boot_cutover_env *env, const char *datadir,
     enum boot_cutover_preflight_kind *kind, struct wallet_cutover_binding *binding);
 bool boot_cutover_preflight(struct boot_cutover_env *env, const char *datadir, bool *pending);
@@ -85,9 +88,13 @@ bool boot_cutover_load_chain(struct boot_cutover_env *env, struct app_context *c
     const struct chain_params *params, struct block_index **tip);
 bool boot_cutover_load_completed_chain(struct boot_cutover_env *env, struct app_context *ctx,
     const struct chain_params *params, struct block_index **tip, const struct wallet_cutover_binding *binding);
+bool boot_pending_bind_storage(struct boot_cutover_env *env, struct app_context *ctx);
 bool boot_cutover_load_old_chain(struct boot_cutover_env *env, struct app_context *ctx,
     const struct chain_params *params, const struct wallet_cutover_binding *binding,
     struct block_index **tip);
+/* First terminal install only: no workers or cutover binding may exist. */
+bool boot_cutover_load_prebinding_chain(struct boot_cutover_env *env, struct app_context *ctx,
+    const struct chain_params *params, struct block_index **tip);
 enum boot_pending_replay_result { BOOT_PENDING_FAILED, BOOT_PENDING_STOPPED, BOOT_PENDING_COMPLETE };
 /* Caller passes an initialized empty capability and retains it on COMPLETE.
  * The request is compared before and after acquisition, including attempts.
@@ -108,6 +115,9 @@ enum boot_pending_replay_result boot_cutover_replay_and_retire(struct boot_cutov
     struct app_context *ctx, const struct chain_params *params, const struct wallet_cutover_binding *binding);
 #ifdef ZCL_TESTING
 struct boot_cutover_replay;
+typedef bool (*boot_cutover_test_prebinding_loader_fn)(struct boot_cutover_env *env,
+    struct app_context *ctx, const struct chain_params *params, struct block_index **tip);
+void boot_cutover_test_set_prebinding_loader(boot_cutover_test_prebinding_loader_fn loader);
 bool boot_test_pending_publish(struct boot_cutover_env *env, struct app_context *ctx,
     const struct chain_params *params, struct boot_cutover_replay *replay);
 #endif

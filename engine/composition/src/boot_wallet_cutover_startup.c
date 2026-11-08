@@ -132,6 +132,7 @@
 #include "storage/block_index_projection.h"
 #include "storage/disk_block_io.h"
 #include "services/block_index_loader.h"
+#include "services/wallet_history_capability.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 #include "validation/process_block.h"
@@ -342,7 +343,7 @@ bool boot_bound_memory_bind(struct boot_cutover_env *e)
     return true;
 }
 
-static bool boot_pending_bind_storage(struct boot_cutover_env *e, struct app_context *ctx)
+bool boot_pending_bind_storage(struct boot_cutover_env *e, struct app_context *ctx)
 {
     if (!progress_store_db() || !flysync_island_boot_register(ctx->datadir) ||
         !boot_ensure_event_log(ctx->datadir) ||
@@ -426,6 +427,7 @@ bool boot_test_old_restore_view(struct main_state *state,
     struct boot_cutover_env env = {.state = state};
     return boot_old_restore_view(&env, binding);
 }
+
 #endif
 
 bool boot_cutover_load_old_chain(struct boot_cutover_env *e, struct app_context *ctx,

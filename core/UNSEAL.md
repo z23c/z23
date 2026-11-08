@@ -1218,3 +1218,11 @@ later lane flips it HARD.
 - 2026-11-07T11:14:11Z — REASON: msg_headers: a single-header tip announcement rejected while behind is not a stall; demote that WARNING to debug, keep the event
   old ROOT: 3019dc80602053ea8c0c9a47e9c4eb5692fdf31dc75de87e6eac5aa3528e467c
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-08T11:31:47Z — REASON: Owner-authorized Android Flysync immutable history transport, Tor reachability, verified resume, and snapshot-ROM coexistence; no consensus predicate change
+  old ROOT: 56597f2b93acedb91442bca00e469dce87622598b0711515eb8f03bbe485e191
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-08T15:54:16Z — REASON: Owner-authorized Flysync final candidate: complete transport, orchestration, module splits, and capability closure; no consensus predicate change
+  old ROOT: 644d15b632b29064d783ca94447ad69d68e45bc261ed20ff78de8e6cf67df3d6
+  by: owner unseal ritual (make core-unseal)

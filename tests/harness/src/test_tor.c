@@ -7,6 +7,7 @@
 #include "test/test_core.h"
 #include "base/compiler.h"
 #include "net/tor_integration.h"
+#include "net/file_service.h"
 #include "net/onion_service.h"
 #include "net/onion_stream.h"
 #include "net/onion_v3_address.h"
@@ -15,6 +16,7 @@
 #include "util/log_rotate.h"
 #include "config/boot_internal.h"
 #include "platform/time_compat.h"
+#include "platform/clock.h"
 #include "util/thread_registry.h"
 #include "util/signal_handler.h"
 #include <sys/stat.h>
@@ -26,6 +28,10 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <sys/socket.h>
+
+extern bool msg_version_file_port_for_test(const struct p2p_node *node,
+                                           uint16_t *port);
 
 /* Remove a fixture tree by delegating to the shared test_rm_rf_recursive():
  * the top argument is normalized (trailing separators stripped) and classified
@@ -1576,11 +1582,19 @@ static bool tor_log_shows_owner_close(const char *datadir)
     FILE *f = fopen(path, "r");
     if (!f)
         return false;
-    static char buf[262144];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    char buf[8192 + sizeof(TOR_OWNER_CLOSED_LINE) - 1];
+    size_t carry = 0;
+    bool found = false;
+    while (!found) {
+        size_t n = fread(buf + carry, 1, 8192, f);
+        if (!n) break;
+        buf[carry + n] = '\0';
+        found = strstr(buf, TOR_OWNER_CLOSED_LINE) != NULL;
+        carry = sizeof(TOR_OWNER_CLOSED_LINE) - 1;
+        memmove(buf, buf + n, carry);
+    }
     fclose(f);
-    buf[n] = '\0';
-    return strstr(buf, TOR_OWNER_CLOSED_LINE) != NULL;
+    return found;
 }
 
 /* Run one stop and print how long it took; the number is reported, not
@@ -1644,6 +1658,27 @@ static bool stop_handoff_sockets_any_open(const struct stop_handoff_sockets *s)
                        stop_handoff_socket_open(s, 1));
 }
 
+static uint16_t g_tor_ingress_before_join;
+
+static void stop_handoff_capture_ingress(void)
+{
+    g_tor_ingress_before_join = net_onion_ingress_port();
+}
+
+static const char *stop_handoff_ingress_window(const char *why)
+{
+    g_tor_ingress_before_join = 0;
+    net_set_onion_ingress_port(39252);
+    tor_integration_before_join_for_test(stop_handoff_capture_ingress);
+    stop_handoff_timed("running");
+    tor_integration_before_join_for_test(NULL);
+    bool ok = g_tor_ingress_before_join == 39252 && net_onion_ingress_port() == 0;
+    net_set_onion_ingress_port(0);
+    if (why || ok)
+        return why;
+    return "ingress classification was not retained until Tor join";
+}
+
 /* Stop a Tor that reached its main loop, then stop it again. */
 static const char *stop_handoff_running_case(bool real_tor)
 {
@@ -1660,7 +1695,7 @@ static const char *stop_handoff_running_case(bool real_tor)
         why = "a real Tor owns a control connection and the stub none";
     if (!why && sockets.held && !(fcntl(sockets.fd[0], F_GETFD) & FD_CLOEXEC))
         why = "a child process would inherit the control connection";
-    stop_handoff_timed("running");
+    why = stop_handoff_ingress_window(why);
     if (!why)
         why = stop_handoff_check_ended(tmpdir, real_tor);
     if (!why && stop_handoff_sockets_any_open(&sockets))
@@ -2220,7 +2255,354 @@ static int test_tor_enable_backs_off(void)
     return 0;
 }
 
-/* Tor's bootstrap line, and only it, makes a no-service node dial-ready. */
+/* Bootstrap control replies distinguish completion from progress and errors. */
+static int test_tor_bootstrap_control_reply(void)
+{
+    static const struct { const char *reply; int expected; } cases[] = {
+        {"250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY=\"Done\"\r\n250 OK\r\n", 1},
+        {"250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=80 TAG=conn SUMMARY=\"Connecting\"\r\n250 OK\r\n", 0},
+        {"250-status/bootstrap-phase=WARN BOOTSTRAP PROGRESS=80 TAG=conn SUMMARY=\"Connecting\" WARNING=\"slow\" REASON=TIMEOUT COUNT=1 RECOMMENDATION=ignore HOSTID=\"?\" HOSTADDR=\"?\"\r\n250 OK\r\n", 0},
+        {"250-status/bootstrap-phase=WARN BOOTSTRAP PROGRESS=80 TAG=conn SUMMARY=\"Connecting\" WARNING=\"trunc\r\n250 OK\r\n", 0},
+        {"250-status/bootstrap-phase=\r\n250 OK\r\n", 0},
+        {"250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=1000 TAG=done SUMMARY=\"Done\"\r\n250 OK\r\n", -1},
+        {"250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=doneish SUMMARY=\"Done\"\r\n250 OK\r\n", -1},
+        {"250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY=\"Done\"\r\n", -1},
+        {"550 error\r\n", -1},
+        {"250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY=\r\n250 OK\r\n", -1},
+        {"250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY=\"\"\r\n250 OK\r\n", -1},
+        {"250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY=\"Done\r\n250 OK\r\n", -1},
+        {"250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY=\"Done\" garbage\r\n250 OK\r\n", -1},
+        {"250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY=\"Other\"\r\n250 OK\r\n", -1},
+        {"250-status/bootstrap-phase=WARN BOOTSTRAP PROGRESS=100 TAG=done SUMMARY=\"Done\"\r\n250 OK\r\n", -1},
+        {"250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY=\"D\rone\"\r\n250 OK\r\n", -1},
+        {"250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY=\"Done\"\r\n250 OK\r\nextra", -1},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (tor_integration_bootstrap_reply_for_test(cases[i].reply) !=
+            cases[i].expected) {
+            printf("test_tor_bootstrap_control_reply: FAIL (%zu)\n", i);
+            return 1;
+        }
+    }
+    printf("test_tor_bootstrap_control_reply: OK\n");
+    return 0;
+}
+
+struct bootstrap_peer_fixture {
+    int peer;
+    int client;
+    const char *reply;
+    size_t reply_len;
+    bool fragmented;
+    bool cancel;
+    bool command_ok;
+    bool setconf;
+};
+
+static void *bootstrap_peer(void *arg)
+{
+    struct bootstrap_peer_fixture *f = arg;
+    const char *command = f->setconf ? "SETCONF DisableNetwork=0\r\n" :
+                                       "GETINFO status/bootstrap-phase\r\n";
+    size_t command_len = strlen(command);
+    char input[64];
+    size_t have = 0;
+    while (have < command_len) {
+        ssize_t n = recv(f->peer, input + have, command_len - have, 0);
+        if (n <= 0)
+            return NULL;
+        have += (size_t)n;
+    }
+    f->command_ok = memcmp(input, command, command_len) == 0;
+    if (f->cancel) {
+        (void)shutdown(f->client, SHUT_RDWR);
+    } else if (!f->reply) {
+        platform_sleep_ms(250);
+    } else if (f->fragmented) {
+        size_t first = f->reply_len / 2;
+        (void)send(f->peer, f->reply, first, 0);
+        platform_sleep_ms(10);
+        (void)send(f->peer, f->reply + first, f->reply_len - first, 0);
+    } else {
+        (void)send(f->peer, f->reply, f->reply_len, 0);
+    }
+    return NULL;
+}
+
+static bool bootstrap_exchange_case(const char *reply, size_t len,
+                                    bool fragmented, bool cancel,
+                                    int timeout_ms, int expected, bool prompt,
+                                    bool setconf)
+{
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0)
+        return false;
+    struct bootstrap_peer_fixture fixture = {
+        .peer = pair[1], .client = pair[0], .reply = reply,
+        .reply_len = len, .fragmented = fragmented, .cancel = cancel,
+        .setconf = setconf,
+    };
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, bootstrap_peer, &fixture) != 0) {
+        close(pair[0]);
+        close(pair[1]);
+        return false;
+    }
+    int64_t start = clock_now_monotonic_raw_us();
+    int result = setconf ? tor_integration_setconf_exchange_for_test(pair[0], timeout_ms) :
+                           tor_integration_bootstrap_exchange_for_test(pair[0], timeout_ms);
+    int64_t elapsed = clock_now_monotonic_raw_us() - start;
+    pthread_join(thread, NULL);
+    bool shutdown_seen = true;
+    if (expected < 0) {
+        char c;
+        shutdown_seen = recv(pair[1], &c, 1, MSG_DONTWAIT) == 0;
+    }
+    close(pair[0]);
+    close(pair[1]);
+    return fixture.command_ok && result == expected && shutdown_seen &&
+           (!prompt || elapsed < 750000);
+}
+
+static bool test_tor_setconf_exchange_cases(void)
+{
+    static const char error[] = "550 unavailable\r\n";
+    return bootstrap_exchange_case("250 OK\r\n", 8, true, false, 1000, 0, false, true) &&
+        bootstrap_exchange_case(error, sizeof(error) - 1, false, false, 1000, 1, true, true) &&
+        bootstrap_exchange_case("250", 3, false, false, 100, -1, false, true) &&
+        bootstrap_exchange_case(NULL, 0, false, true, 1000, -1, true, true);
+}
+
+static int test_tor_bootstrap_exchange(void)
+{
+    static const char done[] = "250-status/bootstrap-phase=NOTICE BOOTSTRAP "
+        "PROGRESS=100 TAG=done SUMMARY=\"Done\"\r\n250 OK\r\n";
+    static const char error[] = "550 unavailable\r\n";
+    static const char partial[] = "250-status/bootstrap-phase=NOTICE";
+    char oversized[2200];
+    memset(oversized, 'x', sizeof(oversized));
+    char large[1200];
+    static const char prefix[] = "250-status/bootstrap-phase=";
+    int head = snprintf(large, sizeof(large), "%sWARN BOOTSTRAP PROGRESS=80 "
+        "TAG=conn SUMMARY=\"Connecting\" WARNING=\"", prefix);
+    if (head < 0 || (size_t)head < sizeof(prefix) - 1)
+        return 1;
+    size_t message_head = (size_t)head - (sizeof(prefix) - 1);
+    if (message_head >= 1023 || sizeof(prefix) - 1 + 1023 + 10 > sizeof(large))
+        return 1;
+    size_t fill = 1023 - message_head;
+    memset(large + head, 'a', fill);
+    size_t large_len = (size_t)head + fill;
+    memcpy(large + large_len, "\r\n250 OK\r\n", 10);
+    large_len += 10;
+    bool ok = bootstrap_exchange_case(done, sizeof(done) - 1, false, false, 1000, 1, false, false) &&
+        bootstrap_exchange_case(done, sizeof(done) - 1, true, false, 1000, 1, false, false) &&
+        bootstrap_exchange_case(error, sizeof(error) - 1, false, false, 1000, -1, true, false) &&
+        bootstrap_exchange_case(NULL, 0, false, false, 100, -1, false, false) &&
+        bootstrap_exchange_case(partial, sizeof(partial) - 1, false, false, 100, -1, false, false) &&
+        bootstrap_exchange_case(NULL, 0, false, true, 1000, -1, true, false) &&
+        bootstrap_exchange_case(oversized, sizeof(oversized), false, false, 1000, -1, true, false) &&
+        bootstrap_exchange_case(large, large_len, true, false, 1000, 0, false, false) &&
+        test_tor_setconf_exchange_cases();
+    printf("test_tor_bootstrap_exchange: %s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static int bootstrap_done_fixture(void) { return 1; }
+static int bootstrap_stop_fixture(void)
+{
+    tor_integration_clear_readiness_for_test();
+    return 1;
+}
+
+static int test_tor_bootstrap_publication_order(void)
+{
+    unsigned descriptor = tor_integration_observe_for_test(0, true, false);
+    bool descriptor_first = descriptor == 1 &&
+        tor_integration_observe_for_test(descriptor, false, true) == 3;
+    unsigned bootstrap = tor_integration_observe_for_test(0, false, true);
+    bool bootstrap_first = bootstrap == 2 &&
+        tor_integration_observe_for_test(bootstrap, true, false) == 3;
+    bool serving = tor_integration_monitor_bootstrap_for_test(bootstrap_done_fixture, false, true);
+    bool outbound = tor_integration_monitor_bootstrap_for_test(bootstrap_done_fixture, true, true);
+    bool serving_stop = tor_integration_monitor_bootstrap_for_test(bootstrap_stop_fixture, false, false);
+    bool outbound_stop = tor_integration_monitor_bootstrap_for_test(bootstrap_stop_fixture, true, false);
+    bool ok = descriptor_first && bootstrap_first && serving && outbound && serving_stop && outbound_stop;
+    printf("test_tor_bootstrap_publication_order: %s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static _Atomic bool g_fs_fixture_stopping_tor;
+static _Atomic bool g_fs_fixture_release_tor;
+
+static void fs_fixture_stop_tor(void)
+{
+    atomic_store(&g_fs_fixture_stopping_tor, true);
+    while (!atomic_load(&g_fs_fixture_release_tor))
+        platform_sleep_ms(1);
+}
+
+static void *fs_fixture_stop_thread(void *arg)
+{
+    (void)arg;
+    fs_server_stop();
+    return NULL;
+}
+
+static bool fs_fixture_wait(_Atomic bool *flag)
+{
+    for (int i = 0; i < 2000 && !atomic_load(flag); i++)
+        platform_sleep_ms(1);
+    return atomic_load(flag);
+}
+
+static bool fs_fixture_retiring_snapshot(const struct fs_onion_listener *first)
+{
+    struct fs_onion_listener during;
+    struct sockaddr_storage address;
+    socklen_t length = sizeof(address);
+    uint16_t published_port = 0;
+    return fs_server_onion_retiring() &&
+           !fs_server_is_running() &&
+           !fs_server_onion_published_port(&published_port) &&
+           fs_server_onion_pin(&during) &&
+           during.decision == FS_ONION_RETIRING &&
+           getsockname((int)first->fd, (struct sockaddr *)&address, &length) == 0;
+}
+
+static bool fs_fixture_advertisement(bool published, uint16_t expected_port)
+{
+    struct p2p_node direct = {0}, onion = {0}, local = {0};
+    static const unsigned char direct_ip[4] = { 192, 0, 2, 1 };
+    static const unsigned char local_ip[4] = { 127, 0, 0, 1 };
+    net_addr_set_ipv4(&direct.addr.svc.addr, direct_ip);
+    net_addr_set_ipv4(&local.addr.svc.addr, local_ip);
+    onion.addr.svc.addr.has_torv3 = true;
+    local.inbound = true;
+    local.accepted_local_port = 8233;
+    uint16_t previous = net_onion_ingress_port();
+    net_set_onion_ingress_port(8233);
+    uint16_t port = 0;
+    bool direct_ok = msg_version_file_port_for_test(&direct, &port) && port == expected_port;
+    bool onion_ok = msg_version_file_port_for_test(&onion, &port) == published;
+    bool local_ok = msg_version_file_port_for_test(&local, &port) == published;
+    net_set_onion_ingress_port(previous);
+    return direct_ok && onion_ok && local_ok;
+}
+
+static bool fs_fixture_pin(struct fs_onion_listener *first)
+{
+    uint16_t port = 0;
+    if (!fs_server_onion_pin(first) || first->decision != FS_ONION_AVAILABLE ||
+        first->fd < 0 || first->port == 0 ||
+        fs_server_onion_published_port(&port) ||
+        !fs_fixture_advertisement(false, first->port) ||
+        fs_server_onion_publish(first->generation + 1) ||
+        !fs_server_onion_publish(first->generation))
+        return false;
+    return fs_server_onion_published_port(&port) && port == first->port &&
+           fs_fixture_advertisement(true, first->port);
+}
+
+static bool test_fs_onion_retirement_case(bool fatal)
+{
+    char dir[PATH_MAX];
+    if (!test_mkdtemp(dir, sizeof(dir), "zcl_test_onion_fs"))
+        return false;
+    atomic_store(&g_fs_fixture_stopping_tor, false);
+    atomic_store(&g_fs_fixture_release_tor, false);
+    fs_server_onion_stop_hook_for_test(fs_fixture_stop_tor);
+    bool ok = fs_server_start(dir, 0, "127.0.0.1");
+    for (int i = 0; i < 2000 && !fs_server_is_running(); i++)
+        platform_sleep_ms(1);
+    struct fs_onion_listener first;
+    ok = ok && fs_fixture_pin(&first);
+    pthread_t stopper;
+    bool started = false;
+    if (ok && fatal) {
+        fs_server_onion_fatal_for_test();
+        started = true;
+    } else if (ok && pthread_create(&stopper, NULL, fs_fixture_stop_thread, NULL) == 0) {
+        started = true;
+    } else {
+        ok = false;
+    }
+    if (started) {
+        ok = fs_fixture_wait(&g_fs_fixture_stopping_tor) && ok;
+        ok = fs_fixture_retiring_snapshot(&first) && ok;
+        atomic_store(&g_fs_fixture_release_tor, true);
+        if (!fatal)
+            pthread_join(stopper, NULL);
+    }
+    atomic_store(&g_fs_fixture_release_tor, true);
+    fs_server_stop();
+    fs_server_onion_stop_hook_for_test(NULL);
+    remove_tree(dir);
+    return ok;
+}
+
+static int test_fs_onion_retirement(void)
+{
+    bool stop = test_fs_onion_retirement_case(false);
+    bool fatal = test_fs_onion_retirement_case(true);
+    printf("test_fs_onion_retirement: %s\n", stop && fatal ? "OK" : "FAIL");
+    return stop && fatal ? 0 : 1;
+}
+
+static int test_fs_onion_decisions(void)
+{
+    const enum fs_onion_decision cases[] = {
+        FS_ONION_DISABLED, FS_ONION_DEFERRED, FS_ONION_FAILED,
+    };
+    bool ok = true;
+    fs_server_stop();
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct fs_onion_listener listener;
+        fs_server_onion_decide(cases[i]);
+        if (!fs_server_onion_pin(&listener) || listener.decision != cases[i] ||
+            listener.fd != -1 || listener.port != 0)
+            ok = false;
+    }
+    printf("test_fs_onion_decisions: %s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static bool test_tor_route_address(struct fs_onion_listener *file,
+                                   const char *address, const char *route)
+{
+    char cmd[512];
+    snprintf(file->address, sizeof(file->address), "%s", address);
+    return tor_integration_compose_routes_for_test(8233, file, cmd, sizeof(cmd)) &&
+           strstr(cmd, route);
+}
+
+static int test_tor_file_routes(void)
+{
+    char cmd[512];
+    struct fs_onion_listener file = {
+        .decision = FS_ONION_AVAILABLE, .fd = 17, .port = 42999,
+        .address = "127.0.0.1",
+    };
+    bool available = tor_integration_compose_routes_for_test(8233, &file, cmd, sizeof(cmd)) &&
+        strstr(cmd, "Port=80,unix:/dev/null/no-target") &&
+        strstr(cmd, "Port=8233,127.0.0.1:8233") &&
+        strstr(cmd, "Port=42999,127.0.0.1:42999");
+    file.decision = FS_ONION_FAILED;
+    bool failed = tor_integration_compose_routes_for_test(8233, &file, cmd, sizeof(cmd)) &&
+                  !strstr(cmd, "Port=42999,");
+    file.decision = FS_ONION_AVAILABLE;
+    bool ipv6_any = test_tor_route_address(&file, "::", "Port=42999,[::1]:42999");
+    bool ipv4_any = test_tor_route_address(&file, "0.0.0.0", "Port=42999,127.0.0.1:42999");
+    bool ipv6_specific = test_tor_route_address(&file, "::1", "Port=42999,[::1]:42999");
+    file.port = 8233;
+    bool collision = tor_integration_compose_routes_for_test(8233, &file, cmd, sizeof(cmd)) &&
+                     strstr(cmd, "Port=8233,127.0.0.1:8233") &&
+                     !strstr(cmd, "Port=8233,[::1]:8233");
+    bool ok = available && failed && ipv6_any && ipv4_any && ipv6_specific && collision;
+    printf("test_tor_file_routes: %s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 static int test_tor_log_has_bootstrap_complete(void)
 {
     int failures = 0;
@@ -2324,6 +2706,12 @@ int test_tor(void)
     failures += test_tor_log_last_ephemeral_address();
     failures += test_tor_log_has_descriptor_publication();
     failures += test_tor_log_has_bootstrap_complete();
+    failures += test_tor_bootstrap_control_reply();
+    failures += test_tor_bootstrap_exchange();
+    failures += test_tor_bootstrap_publication_order();
+    failures += test_fs_onion_retirement();
+    failures += test_fs_onion_decisions();
+    failures += test_tor_file_routes();
     failures += test_tor_no_service_claim();
     failures += test_tor_network_gate_order();
     failures += test_tor_enable_backs_off();

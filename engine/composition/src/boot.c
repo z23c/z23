@@ -3678,10 +3678,9 @@ void app_shutdown_offline(bool output_already_durable)
     boot_shutdown_offline_internal(output_already_durable, false, true);
 }
 
-bool boot_old_cutover_restart_pending(void)
-{
-    return g_cutover_exit_action == BOOT_CUTOVER_EXIT_RESTART;
-}
+void boot_cutover_restart_arm(const struct wallet_cutover_binding *binding)
+{ if (binding) { g_old_cutover_restart_binding = *binding; g_cutover_exit_action = BOOT_CUTOVER_EXIT_RESTART; } }
+bool boot_old_cutover_restart_pending(void) { return g_cutover_exit_action == BOOT_CUTOVER_EXIT_RESTART; }
 
 #ifdef ZCL_TESTING
 void boot_old_cutover_test_arm(const struct wallet_cutover_binding *binding, const char *datadir)

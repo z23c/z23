@@ -256,6 +256,27 @@ int rom_seed_scan_datadir(const char *datadir);
  * a no-op when seeding is disabled. Joined by rom_seed_stop_scan(). */
 void rom_seed_start_scan(const char *datadir, uint16_t fs_port);
 void rom_seed_stop_scan(void);
+enum rom_seed_scan_state {
+    ROM_SEED_SCAN_NOT_STARTED,
+    ROM_SEED_SCAN_RUNNING,
+    ROM_SEED_SCAN_ENDED,
+    ROM_SEED_SCAN_CANCELLED,
+    ROM_SEED_SCAN_START_FAILED,
+};
+struct rom_seed_scan_status {
+    enum rom_seed_scan_state state;
+    uint64_t generation;
+    int registered;
+};
+/* ENDED records a finished pass, which can be partial; it is not admission. */
+bool rom_seed_scan_status(const char *datadir, struct rom_seed_scan_status *out);
+#ifdef ZCL_TESTING
+void rom_seed_scan_test_hold(bool hold);
+void rom_seed_scan_test_fail_start(bool fail);
+void rom_seed_scan_test_hold_join(bool hold);
+bool rom_seed_scan_test_join_entered(void);
+bool rom_seed_scan_test_join_waiting(void);
+#endif
 
 /* ── Registry queries ───────────────────────────────────────────────── */
 

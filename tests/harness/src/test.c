@@ -577,22 +577,35 @@ static bool run_only_sync_conditions(const char *only, int *failures)
     return run_only_condition_and_rpc_subsets(only, failures);
 }
 
+static bool run_only_history_services(const char *only, int *failures)
+{
+    if (strcmp(only, "wallet_history_capability") == 0) {
+        *failures += test_wallet_history_capability(); return true;
+    }
+    if (strcmp(only, "wallet_history_receive") == 0) {
+        *failures += test_wallet_history_receive(); return true;
+    }
+    if (strcmp(only, "wallet_history_provider") == 0) {
+        *failures += test_wallet_history_provider(); return true;
+    }
+    if (strcmp(only, "file_service_generation") == 0) {
+        *failures += test_file_service_generation(); return true;
+    }
+    if (strcmp(only, "wallet_history_export") == 0) {
+        *failures += test_wallet_history_export(); return true;
+    }
+    return false;
+}
+
 /* ZCL_TEST_ONLY subsets: chain restore, evidence and UTXO services. */
 static bool run_only_chain_services(const char *only, int *failures)
 {
+    if (run_only_history_services(only, failures)) return true;
     if (strcmp(only, "chain_restore_planner") == 0) {
         printf("[test] ZCL_TEST_ONLY=chain_restore_planner — running chain restore planner only\n");
         *failures += test_chain_restore_planner();
         printf("\n=== chain_restore_planner subset complete: %d failure(s) ===\n",
                *failures);
-        return true;
-    }
-    if (strcmp(only, "wallet_history_capability") == 0) {
-        *failures += test_wallet_history_capability();
-        return true;
-    }
-    if (strcmp(only, "wallet_history_export") == 0) {
-        *failures += test_wallet_history_export();
         return true;
     }
     if (strcmp(only, "block_index_loader") == 0) {
@@ -1797,6 +1810,9 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_block_index_loader();
     *failures += test_wallet_history_export();
     *failures += test_wallet_history_capability();
+    *failures += test_file_service_generation();
+    *failures += test_wallet_history_provider();
+    *failures += test_wallet_history_receive();
     *failures += test_chain_state_validator();
     *failures += test_utxo_recovery_service();
     *failures += test_utxo_reimport_flag();

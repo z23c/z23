@@ -33,6 +33,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/reducer_prebinding_fixture.h"
 #include "validation/chain_linkage_check.h"
 
 #include "config/boot_internal.h"
@@ -289,6 +290,41 @@ static int nw_replay_terminal(struct nw_replay *f, int target, uint64_t prior_ge
     return failures;
 }
 
+bool boot_test_prebinding_restore_view(struct main_state *state,
+    struct chain_state_repository *csr, int datadir_fd);
+
+static int nw_prebinding_canonical_case(struct nw_replay *f)
+{
+    int failures = 0;
+    NW_CHECK("canonical replay: startup header projection opens",
+        boot_ensure_event_log(f->root) && boot_ensure_block_index_projection(f->root));
+    struct block_index *old = block_map_find(&f->ms.map_block_index, &f->hash);
+    NW_CHECK("canonical replay: actual old header enters the startup projection",
+        old && block_index_set_hdrext(old, &f->one.header.hashMerkleRoot,
+            &f->one.header.nNonce, f->one.header.nSolution, f->one.header.nSolutionSize) &&
+        block_index_emit_header_event(old, "prebinding-startup-test", NULL, NULL) &&
+        event_log_flush(event_log_singleton()) &&
+        block_index_projection_catch_up(block_index_projection_singleton()) != UINT64_MAX);
+    struct chain_state_repository csr;
+    csr_init(&csr, &f->ms.map_block_index, &f->ms.chain_active,
+             &f->ms.pindex_best_header, &f->cache, &f->ndb, NULL);
+    const struct chain_params *cp = chain_params_get();
+    f->genesis->nStatus |= BLOCK_HAVE_DATA;
+    bool genesis_view = block_index_initialize_genesis(f->genesis, cp) &&
+        csr_restore_in_memory_view(&csr, f->genesis, old,
+            &cp->consensus.hashGenesisBlock);
+    int datadir_fd = open(f->root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool restored = datadir_fd >= 0 && genesis_view &&
+        boot_test_prebinding_restore_view(&f->ms, &csr, datadir_fd);
+    int close_result = datadir_fd >= 0 ? close(datadir_fd) : -1;
+    NW_CHECK("prebinding startup restores coherent canonical old authority",
+        restored && close_result == 0 && active_chain_tip(&f->ms.chain_active) == old &&
+        f->ms.pindex_best_header == old && f->ms.sapling_tree_loaded);
+    csr_free(&csr);
+    boot_stop_projection_storage();
+    return failures;
+}
+
 static int nw_canonical_replay_case(int target)
 {
     int failures = 0;
@@ -320,6 +356,7 @@ static int nw_canonical_replay_case(int target)
     NW_CHECK("canonical replay: loaded chain is executable", boot_index_reindex_replay_executable(&f.ms, NULL, false, f.dir));
     NW_CHECK("canonical replay: actual reindex_chainstate succeeds", reindex_chainstate(&f.ms, &f.view, &f.cache, &f.ndb, f.root, f.dir));
     failures += nw_replay_terminal(&f, target, generation);
+    if (target) failures += nw_prebinding_canonical_case(&f);
     nw_replay_close(&f);
     return failures;
 }
@@ -731,123 +768,9 @@ static int nw_pending_restore_case(void)
 }
 
 void reducer_frontier_test_set_compiled_anchor(int32_t height);
-static bool nw_prebinding_set_cursor(sqlite3 *db, const char *name, int64_t cursor)
-{
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db,
-            "INSERT INTO stage_cursor(name,cursor,updated_at) VALUES(?,?,0) "
-            "ON CONFLICT(name) DO UPDATE SET "
-            "cursor=excluded.cursor, updated_at=excluded.updated_at",
-            -1, &st, NULL) != SQLITE_OK)
-        return false;
-    bool ok = sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC) == SQLITE_OK &&
-        sqlite3_bind_int64(st, 2, cursor) == SQLITE_OK && sqlite3_step(st) == SQLITE_DONE;
-    return sqlite3_finalize(st) == SQLITE_OK && ok;
-}
-static bool nw_prebinding_put_utxo_delta(sqlite3 *db, int32_t h,
-                           const uint8_t hash[32])
-{
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db,
-            "INSERT INTO utxo_apply_delta"
-            "(height,branch_hash,spent_blob,added_blob) "
-            "VALUES(?,?,x'',x'')", -1, &st, NULL) != SQLITE_OK)
-        return false;
-    bool ok = sqlite3_bind_int(st, 1, h) == SQLITE_OK &&
-        sqlite3_bind_blob(st, 2, hash, 32, SQLITE_STATIC) == SQLITE_OK &&
-        sqlite3_step(st) == SQLITE_DONE;
-    return sqlite3_finalize(st) == SQLITE_OK && ok;
-}
-
-static bool rf_prebinding_schema(sqlite3 *db)
-{
-    return sqlite3_exec(db,
-        "CREATE TABLE IF NOT EXISTS header_admit_log("
-        "height INTEGER PRIMARY KEY,hash BLOB NOT NULL,parent_hash BLOB,"
-        "admitted_at INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS validate_headers_log("
-        "height INTEGER PRIMARY KEY,hash BLOB NOT NULL,ok INTEGER NOT NULL,"
-        "fail_reason TEXT,validated_at INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS script_validate_log("
-        "height INTEGER PRIMARY KEY,status TEXT NOT NULL,ok INTEGER NOT NULL,"
-        "tx_count INTEGER NOT NULL,input_count INTEGER NOT NULL,"
-        "first_failure_txid BLOB,first_failure_vin INTEGER,"
-        "first_failure_serror INTEGER,validated_at INTEGER NOT NULL,"
-        "block_hash BLOB,source_epoch_digest BLOB);"
-        "CREATE TABLE IF NOT EXISTS body_persist_log("
-        "height INTEGER PRIMARY KEY,source TEXT NOT NULL,ok INTEGER NOT NULL,"
-        "persisted_at INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS proof_validate_log("
-        "height INTEGER PRIMARY KEY,status TEXT NOT NULL,ok INTEGER NOT NULL,"
-        "sapling_spends_total INTEGER NOT NULL,"
-        "sapling_outputs_total INTEGER NOT NULL,"
-        "sprout_joinsplits_total INTEGER NOT NULL,block_hash BLOB,"
-        "source_epoch_digest BLOB,first_failure_txid BLOB,"
-        "first_failure_proof_type TEXT,validated_at INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS utxo_apply_log("
-        "height INTEGER PRIMARY KEY,status TEXT NOT NULL,ok INTEGER NOT NULL,"
-        "spent_count INTEGER NOT NULL,added_count INTEGER NOT NULL,"
-        "total_value_delta INTEGER NOT NULL,first_failure_kind TEXT,"
-        "first_failure_detail BLOB,applied_at INTEGER NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS utxo_apply_delta("
-        "height INTEGER PRIMARY KEY,branch_hash BLOB NOT NULL,"
-        "spent_blob BLOB NOT NULL,added_blob BLOB NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS tip_finalize_log("
-        "height INTEGER PRIMARY KEY,status TEXT NOT NULL,ok INTEGER NOT NULL,"
-        "work_delta_high INTEGER NOT NULL,work_delta_low INTEGER NOT NULL,"
-        "utxo_size_after INTEGER NOT NULL,reorg_depth INTEGER NOT NULL,"
-        "finalized_at INTEGER NOT NULL,tip_hash BLOB);", NULL, NULL, NULL) == SQLITE_OK;
-}
-
-
-static bool rf_prebinding_insert(sqlite3 *db, const char *sql, int height, const uint8_t hash[32])
-{
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
-    bool ok = sqlite3_bind_int(stmt, 1, height) == SQLITE_OK;
-    if (hash) ok = ok && sqlite3_bind_blob(stmt, 2, hash, 32, SQLITE_STATIC) == SQLITE_OK;
-    ok = ok && sqlite3_step(stmt) == SQLITE_DONE; // raw-sql-ok:test-fixture-seeding
-    return sqlite3_finalize(stmt) == SQLITE_OK && ok;
-}
-static bool rf_prebinding_anchor(sqlite3 *db, const uint8_t hash[32])
-{
-    return rf_prebinding_insert(db, "INSERT INTO tip_finalize_log(height,status,ok,work_delta_high,"
-        "work_delta_low,utxo_size_after,reorg_depth,finalized_at,tip_hash) "
-        "VALUES(?1,'anchor',1,0,0,0,0,0,?2)", 1, hash);
-}
-static bool rf_prebinding_rows(sqlite3 *db, const uint8_t served[32], const uint8_t coins[32])
-{
-    return nw_prebinding_set_cursor(db, "validate_headers", 3) && nw_prebinding_set_cursor(db, "script_validate", 2) &&
-        nw_prebinding_set_cursor(db, "body_persist", 2) && nw_prebinding_set_cursor(db, "proof_validate", 2) &&
-        nw_prebinding_set_cursor(db, "utxo_apply", 3) && nw_prebinding_set_cursor(db, "tip_finalize", 1) &&
-        rf_prebinding_insert(db, "INSERT INTO validate_headers_log(height,hash,ok,validated_at) "
-            "VALUES(?1,?2,1,0)", 2, coins) &&
-        rf_prebinding_insert(db, "INSERT INTO utxo_apply_log(height,status,ok,spent_count,added_count,"
-            "total_value_delta,applied_at) VALUES(?1,'verified',1,0,0,0,0)", 2, NULL) &&
-        nw_prebinding_put_utxo_delta(db, 2, coins) && rf_prebinding_anchor(db, served);
-}
-/* Seed a private prebinding fixture: served H*=1, proven coins through 2. */
-static bool test_reducer_prebinding_seed(sqlite3 *db, struct block_index *genesis, const uint8_t served[32], const uint8_t coins[32])
-{
-    const uint8_t one = 1, txid[32] = {1}; uint8_t applied[8] = {3};
-    if (!db || !genesis || !served || !coins || !rf_prebinding_schema(db) || !coins_kv_ensure_schema(db)) return false;
-    reducer_frontier_provable_tip_reset(); tip_finalize_stage_test_reset();
-    tip_finalize_stage_warm_authority_caches(db, genesis, "prebinding-fixture");
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) return false;
-    bool ok = coins_kv_add(db, txid, 0, 1, 1, false, NULL, 0) &&
-        progress_meta_set_in_tx(db, COINS_APPLIED_HEIGHT_KEY, applied, sizeof(applied)) &&
-        progress_meta_set_in_tx(db, COINS_KV_MIGRATION_COMPLETE_KEY, &one, 1) &&
-        rf_prebinding_rows(db, served, coins);
-    if (sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) return false;
-    return ok;
-}
-
-static bool test_reducer_prebinding_anchor(sqlite3 *db, const uint8_t *hash)
-{
-    if (sqlite3_exec(db, "DELETE FROM tip_finalize_log WHERE height=1", NULL, NULL, NULL) != SQLITE_OK)
-        return false;
-    return !hash || rf_prebinding_anchor(db, hash);
-}
+bool test_reducer_prebinding_seed(sqlite3 *db, struct block_index *genesis,
+                                  const uint8_t served[32], const uint8_t coins[32]);
+bool test_reducer_prebinding_anchor(sqlite3 *db, const uint8_t *hash);
 
 struct nw_generation_change { sqlite3 *db; bool ok; };
 static void nw_change_generation(void *context)
@@ -1139,7 +1062,7 @@ static bool nw_cold_open(struct nw_cold_fixture *f)
     if (!event_log_flush(f->log) || block_index_projection_catch_up(f->projection) == UINT64_MAX) return false;
     reducer_frontier_test_set_compiled_anchor(0);
     if (!test_reducer_prebinding_seed(progress_store_db(), g, f->hashes[0].data, f->hashes[1].data) ||
-        !rf_prebinding_insert(progress_store_db(), "INSERT INTO validate_headers_log(height,hash,ok,validated_at) VALUES(?1,?2,1,0)", 1, f->hashes[0].data)) return false;
+        !rf_fixture_insert(progress_store_db(), "INSERT INTO validate_headers_log(height,hash,ok,validated_at) VALUES(?1,?2,1,0)", 1, f->hashes[0].data)) return false;
     f->fd = open(f->replay.root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     return f->fd >= 0;
 }

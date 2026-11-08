@@ -40,6 +40,12 @@ struct zcl_result wallet_history_capability_acquire_cancelable(
     struct platform_directory_transaction *retained_root, struct platform_directory_lock *lease,
     const char *root_leaf, const char *lock_leaf, unsigned block_files,
     const uint8_t expected_root[32], bool (*cancelled)(void *), void *context);
+/* Rebuild the receiver's named root and exclusive lease from a durable binding.
+ * The path must be absolute and name history-<snapshot>-<root>; the sibling
+ * lock and complete contiguous block inventory are verified before success. */
+struct zcl_result wallet_history_capability_acquire_bound(
+    struct wallet_history_capability *cap, const char *history_path,
+    const uint8_t snapshot_digest[32], const uint8_t history_root[32]);
 const char *wallet_history_capability_path(const struct wallet_history_capability *cap);
 /* The capability must have been initialized and remain held. */
 struct zcl_result wallet_history_capability_matches(const struct wallet_history_capability *cap,

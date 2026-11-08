@@ -14,6 +14,8 @@
  * connect(2). Either way the returned fd is blocking with recv/send silence
  * windows armed, so every caller above is transport-blind. */
 platform_socket_t rf_connect(const char *peer_addr, uint16_t port);
+platform_socket_t rf_connect_onion_cancelable(const char *peer_addr, uint16_t port,
+                                               bool (*cancelled)(void *), void *context);
 bool rf_recv_exact(platform_socket_t fd, uint8_t *buf, size_t size);
 bool rf_recv_exact_until(platform_socket_t fd, uint8_t *buf, size_t size,
                          int64_t deadline_ms);

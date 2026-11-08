@@ -24,6 +24,7 @@
  */
 
 #include "config/boot_internal.h"
+#include "config/wallet_history_provider.h"
 #include "config/boot_background_workers.h"
 #include "config/boot_snapshot_offer.h"
 #include "services/consensus_snapshot_export_service.h"
@@ -50,7 +51,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
-
 /* ── Supervisor liveness (Model A — MONITOR; disk_monitor.c exemplar) ─
  *
  * The snapshot-offer worker keeps its own pthread and gains an observe-only
@@ -64,7 +64,6 @@ static struct liveness_contract g_offer_contract;
 static _Atomic supervisor_child_id g_offer_sup_id = SUPERVISOR_INVALID_ID;
 
 static void *build_snapshot_offer_thread(void *arg);
-
 /* The supervisor register helper (boot_register_worker_supervisor), the
  * observe-only stall handler (worker_on_stall), and the generic thread
  * start/named-join plumbing (boot_start_thread_service /
@@ -677,6 +676,8 @@ static void *build_snapshot_offer_thread(void *arg)
 
     bool file_service_enabled =
         svc && boot_profile_has_file_service(svc->app_ctx);
+
+    wallet_history_provider_boot(svc, &checkpoint, offer_checkpoint);
 
     /* Fast-sync publishing is peer service work, not node liveness work.
      * The exporter, offer builder, pre-serialized snapshot, and manifests all

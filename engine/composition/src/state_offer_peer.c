@@ -3,6 +3,7 @@
 #include "config/state_offer_peer.h"
 #include "config/state_offer_link.h"
 #include "config/state_offer_link_session.h"
+#include "config/state_offer_service.h"
 #include "config/state_offer_store.h"
 #include "config/boot_zcode_swarm.h"
 #include "config/boot_zcode_swarm_membership.h"
@@ -133,7 +134,7 @@ static void discovery_receive(uint64_t peer, const struct state_offer_link_frame
         if (state_offer_v1_verify(&batch.offers[j]) != STATE_OFFER_OK) return;
     discovery[i].nonce = 0;
     for (uint32_t j = 0; j < batch.count; ++j)
-        (void)state_offer_store_record_link(&batch.offers[j], (int64_t)(peer - 1), platform_time_monotonic_ms());
+        state_offer_service_record_link(&batch.offers[j], (int64_t)(peer - 1));
 }
 bool state_offer_peer_frame(struct msg_processor *mp, struct p2p_node *node, const uint8_t *wire, size_t len)
 {

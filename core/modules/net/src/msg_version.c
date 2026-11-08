@@ -17,6 +17,7 @@
 #include "net/peer_identity.h"
 #include "net/p2p_message.h"
 #include "net/file_service.h"
+#include "net/netaddr.h"
 #include "net/state_offer.h"
 #include "net/peer_lifecycle.h"
 #include "net/port_policy.h"
@@ -511,12 +512,32 @@ static bool msg_version_enforce_noise(struct msg_processor *mp,
     return true;
 }
 
+static bool msg_version_file_port(const struct p2p_node *node, uint16_t *port)
+{
+    /* Inbound loopback on the Tor-forwarded port may be a local process. */
+    bool onion = net_addr_is_tor(&node->addr.svc.addr) ||
+                 net_peer_is_onion_ingress(node);
+    if (onion)
+        return fs_server_onion_published_port(port);
+    if (!fs_server_is_running())
+        return false;
+    *port = fs_server_get_port();
+    return *port != 0;
+}
+
+#ifdef ZCL_TESTING
+bool msg_version_file_port_for_test(const struct p2p_node *node, uint16_t *port)
+{
+    return msg_version_file_port(node, port);
+}
+#endif
+
 static void msg_version_push_zfileaddr(struct msg_processor *mp,
                                       struct p2p_node *node)
 {
-    if (fs_server_is_running()) {
+    uint16_t fport = 0;
+    if (msg_version_file_port(node, &fport)) {
         uint8_t faddr[2];
-        uint16_t fport = fs_server_get_port();
         memcpy(faddr, &fport, 2);
 
         struct byte_stream fs_msg;

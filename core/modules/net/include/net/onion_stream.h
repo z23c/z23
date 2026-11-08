@@ -64,6 +64,15 @@ bool onion_stream_connect(const struct net_service *svc,
                           zcl_socket_t *sock_out,
                           int connect_timeout_ms);
 
+/* The optional monotonic predicate is nonblocking, thread-safe, called only
+ * by the dialing thread and is not retained after return. Cancellation is
+ * polled at 25 ms intervals, not a wall-clock latency guarantee; terminal
+ * teardown may wait up to five seconds. The caller must synchronize socket
+ * adoption with cancellation and close an unadopted fd. */
+bool onion_stream_connect_cancelable(const struct net_service *svc,
+    zcl_socket_t *sock_out, int connect_timeout_ms,
+    bool (*cancelled)(void *), void *ctx);
+
 /* ── Raw-stream backend ──────────────────────────────────────────────────
  * The bridge talks to the circuit through this three-call interface, not
  * to dynhost_stream_* directly. Production binds the embedded Tor fork's
@@ -168,6 +177,9 @@ size_t onion_stream_connect_plan_for_test(int connect_timeout_ms,
 bool onion_stream_connect_backend_for_test(
     const struct net_service *svc, zcl_socket_t *sock_out,
     int connect_timeout_ms, const struct onion_stream_backend *backend);
+bool onion_stream_connect_backend_cancelable_for_test(
+    const struct net_service *svc, zcl_socket_t *sock_out, int connect_timeout_ms,
+    const struct onion_stream_backend *backend, bool (*cancelled)(void *), void *ctx);
 
 void onion_stream_reset_stages_for_test(void);
 #endif

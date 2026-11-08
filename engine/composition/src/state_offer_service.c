@@ -17,6 +17,10 @@
 // or stalled transfer is observable rather than a quiet gap.
 
 #include "config/state_offer_service.h"
+#include "config/wallet_history_provider.h"
+#include "services/wallet_history_receive.h"
+#include "services/disk_monitor.h"
+#include "net/file_service.h"
 
 #include "config/consensus_state_install_runtime.h"
 #include "config/consensus_state_snapshot_install.h"
@@ -105,6 +109,11 @@ static struct state_offer_record g_fetch_target;
 static _Atomic bool g_fetch_stopping;
 static enum sol_receive_result g_fetch_result;
 static struct { uint32_t done, total; uint64_t bytes, size; bool dirty; } g_fetch_progress;
+static pthread_mutex_t g_history_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct wallet_history_receiver *g_history_receiver;
+#if !defined(_WIN32)
+static struct fs_receive_op *g_history_probe;
+#endif
 
 static int64_t sosvc_now_unix(void)
 {
@@ -548,6 +557,9 @@ static uint32_t sosvc_provide_from_snapshot(struct state_offer_batch_v1 *out,
                                             int32_t tip,
                                             const uint8_t peaks[32])
 {
+    struct sosvc_artifact artifacts[STATE_OFFER_MAX_PER_PEER];
+    uint8_t signing_seed[32];
+    uint32_t artifact_count;
     pthread_mutex_lock(&g_lock);
     /* Read the identity flag under the same lock the tick sets it under: the
      * offering identity is minted on the peer-link tick (see
@@ -557,17 +569,24 @@ static uint32_t sosvc_provide_from_snapshot(struct state_offer_batch_v1 *out,
         pthread_mutex_unlock(&g_lock);
         return 0;
     }
+    artifact_count = g_artifact_count;
+    memcpy(artifacts, g_artifacts, sizeof(artifacts));
+    memcpy(signing_seed, g_online_seed, sizeof(signing_seed));
+    pthread_mutex_unlock(&g_lock);
     out->version = STATE_OFFER_VERSION;
     out->flags = STATE_OFFER_FLAGS_NONE;
     out->offerer_tip_height = tip;
     uint32_t count = 0;
-    for (uint32_t i = 0; i < g_artifact_count && count < STATE_OFFER_MAX_PER_PEER;
+    for (uint32_t i = 0; i < artifact_count && count < STATE_OFFER_MAX_PER_PEER;
          i++) {
-        const struct sosvc_artifact *s = &g_artifacts[i];
+        const struct sosvc_artifact *s = &artifacts[i];
         /* THE freshness rule, decided by the same function the parser and the
          * consumer call. A stale bundle is not offered at all — a stale offer
          * is worse than none, because it teaches the asker a wrong height. */
         if (!state_offer_height_is_fresh(s->bundle_height, tip))
+            continue;
+        if (!wallet_history_provider_offer_allowed(s->content_digest,
+                                                   s->bundle_height, s->header_hash))
             continue;
 
         struct state_offer_v1 *o = &out->offers[count];
@@ -591,13 +610,13 @@ static uint32_t sosvc_provide_from_snapshot(struct state_offer_batch_v1 *out,
         /* Signed with the tip of the moment: the freshness claim is part of
          * what we sign, so we cannot be quoted later as having vouched for a
          * staleness we did not. */
-        if (state_offer_v1_sign(o, g_online_seed) != STATE_OFFER_OK) {
+        if (state_offer_v1_sign(o, signing_seed) != STATE_OFFER_OK) {
             memset(o, 0, sizeof(*o));
             continue;
         }
         count++;
     }
-    pthread_mutex_unlock(&g_lock);
+    memory_cleanse(signing_seed, sizeof(signing_seed));
     return count;
 }
 
@@ -704,6 +723,22 @@ static void sosvc_record(const struct state_offer_v1 *offer,
                  (long long)peer_id, state_offer_store_result_string(r));
 }
 
+void state_offer_service_record_link(const struct state_offer_v1 *offer, int64_t peer_id)
+{
+    struct net_manager *nm = sosvc_record_enter();
+    char hostname[NET_ADDR_STR_MAX + 1];
+    uint16_t port = 0;
+    bool onion = nm && fs_server_onion_published_port(&port) &&
+        sosvc_peer_onion(nm, peer_id, hostname);
+    enum state_offer_store_result r = onion ?
+        state_offer_store_record_onion(offer, hostname, port, peer_id, sosvc_now_ms()) :
+        state_offer_store_record_link(offer, peer_id, sosvc_now_ms());
+    if (nm) sosvc_record_leave();
+    if (r != STATE_OFFER_STORE_KEPT && r != STATE_OFFER_STORE_KEPT_REPLACED)
+        LOG_INFO(SOSVC_SUBSYS, "link offer from peer %lld not retained (%s)",
+                 (long long)peer_id, state_offer_store_result_string(r));
+}
+
 #ifdef ZCL_TESTING
 void state_offer_service_test_record_offer(const struct state_offer_v1 *offer,
                                            const uint8_t ip[16], uint16_t port, int64_t peer)
@@ -803,6 +838,150 @@ static void sosvc_restart_publish(const struct state_offer_v1 *offer, uint64_t g
     pthread_mutex_unlock(&g_restart_lock);
 }
 
+static void sosvc_history_cancel(void)
+{
+    pthread_mutex_lock(&g_history_lock);
+    if (g_history_receiver) wallet_history_receiver_cancel(g_history_receiver);
+#if !defined(_WIN32)
+    if (g_history_probe) fs_receive_cancel(g_history_probe);
+#endif
+    pthread_mutex_unlock(&g_history_lock);
+}
+
+static void sosvc_history_receiver_publish(struct wallet_history_receiver *receiver)
+{
+    pthread_mutex_lock(&g_history_lock);
+    g_history_receiver = receiver;
+    pthread_mutex_unlock(&g_history_lock);
+}
+
+static void sosvc_history_receiver_clear(struct wallet_history_receiver *receiver)
+{
+    pthread_mutex_lock(&g_history_lock);
+    if (g_history_receiver == receiver) g_history_receiver = NULL;
+    pthread_mutex_unlock(&g_history_lock);
+}
+
+static bool sosvc_history_parent(char *out, size_t cap)
+{
+    if (snprintf(out, cap, "%s/history-inbox", g_datadir) >= (int)cap) return false;
+#if defined(_WIN32)
+    return false;
+#else
+    if (mkdir(out, 0700) && errno != EEXIST) return false;
+    struct stat st;
+    return !lstat(out, &st) && S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 0022);
+#endif
+}
+
+static bool sosvc_history_endpoint(const struct state_offer_record *target,
+    char host[NET_ADDR_STR_MAX + 1], uint16_t *port)
+{
+    if (target->onion_port) {
+        size_t length = strlen(target->onion_host);
+        if (!length || length > NET_ADDR_STR_MAX) return false;
+        memcpy(host, target->onion_host, length + 1);
+        *port = target->onion_port;
+        return true;
+    }
+    if (target->peer_link) return false;
+    struct net_addr addr;
+    net_addr_init(&addr);
+    memcpy(addr.ip, target->peer_ip, sizeof(addr.ip));
+    *port = target->file_service_port;
+    return *port && net_addr_to_string(&addr, host, NET_ADDR_STR_MAX + 1) > 0 && host[0];
+}
+
+#if !defined(_WIN32)
+static enum sol_receive_result sosvc_history_probe(const char *host, uint16_t port,
+    struct file_manifest *manifest)
+{
+    struct fs_receive_op *probe = fs_receive_create(NULL);
+    if (!probe) return SOL_RECEIVE_UNAVAILABLE;
+    pthread_mutex_lock(&g_history_lock);
+    g_history_probe = probe;
+    pthread_mutex_unlock(&g_history_lock);
+    uint8_t salt[32] = {0};
+    enum fs_receive_result received = fs_receive_probe(probe, host, port, salt, manifest);
+    pthread_mutex_lock(&g_history_lock);
+    if (g_history_probe == probe) g_history_probe = NULL;
+    pthread_mutex_unlock(&g_history_lock);
+    fs_receive_destroy(probe);
+    if (received == FS_RECEIVE_COMPLETE) return SOL_RECEIVE_OK;
+    return atomic_load(&g_fetch_stopping) ? SOL_RECEIVE_CANCELLED : SOL_RECEIVE_UNAVAILABLE;
+}
+#endif
+
+static enum sol_receive_result sosvc_history_transfer(const struct state_offer_record *target,
+    const char *host, uint16_t port, const char *parent, const struct file_manifest *manifest,
+    struct wallet_history_receive_result *out)
+{
+    struct wallet_history_receive_request request = {
+        .peer = host, .port = port, .private_parent = parent,
+        .max_bytes = (uint64_t)FILE_MAX_CHUNKS * FILE_CHUNK_SIZE,
+        .min_free_bytes = DISK_MONITOR_DEFAULT_REFUSE_BYTES,
+        .reserved_install_bytes = target->offer.content_bytes,
+    };
+    memcpy(request.snapshot_digest, target->offer.content_digest, 32);
+    memcpy(request.history_root, manifest->root_hash, 32);
+    struct wallet_history_receiver *receiver = NULL;
+    struct zcl_result created = wallet_history_receiver_create(&request, &receiver);
+    if (!created.ok) return SOL_RECEIVE_LOCAL_IO;
+    sosvc_history_receiver_publish(receiver);
+    struct zcl_result received = wallet_history_receiver_run(receiver, out);
+    sosvc_history_receiver_clear(receiver);
+    wallet_history_receiver_destroy(&receiver);
+    if (received.ok && out->outcome == WALLET_HISTORY_RECEIVE_COMPLETE) return SOL_RECEIVE_OK;
+    if (!received.ok)
+        LOG_WARN(SOSVC_SUBSYS, "history receive failed: %s", received.message);
+    return atomic_load(&g_fetch_stopping) ? SOL_RECEIVE_CANCELLED : SOL_RECEIVE_UNAVAILABLE;
+}
+
+static enum sol_receive_result sosvc_history_fetch(const struct state_offer_record *target,
+    const char *parent, struct wallet_history_receive_result *out)
+{
+#if defined(_WIN32)
+    (void)target; (void)parent; (void)out;
+    return SOL_RECEIVE_UNAVAILABLE;
+#else
+    char host[NET_ADDR_STR_MAX + 1];
+    uint16_t port = 0;
+    struct file_manifest manifest;
+    if (!sosvc_history_endpoint(target, host, &port)) return SOL_RECEIVE_UNAVAILABLE;
+    enum sol_receive_result probed = sosvc_history_probe(host, port, &manifest);
+    if (probed != SOL_RECEIVE_OK)
+        LOG_WARN(SOSVC_SUBSYS, "history manifest probe failed for snapshot height %d",
+                 (int)target->offer.bundle_height);
+    return probed == SOL_RECEIVE_OK ?
+        sosvc_history_transfer(target, host, port, parent, &manifest, out) : probed;
+#endif
+}
+
+static bool sosvc_arm_bound(const char *landed, const struct state_offer_v1 *offer,
+    const char *parent, const struct wallet_history_receive_result *history)
+{
+    char path[BOOT_BOUND_PATH_CAP];
+    int length = snprintf(path, sizeof(path), "%s/%s", parent, history->root_leaf);
+    if (length <= 0 || (size_t)length >= sizeof(path) ||
+        memcmp(history->snapshot_digest, offer->content_digest, 32) != 0 ||
+        memcmp(history->history_root, history->manifest.root_hash, 32) != 0) return false;
+    struct boot_bound_bundle_request request = {
+        .bundle_path = landed, .endpoint_height = offer->bundle_height,
+        .private_history_path = path,
+    };
+    memcpy(request.snapshot_sha3, offer->content_digest, 32);
+    memcpy(request.endpoint_hash, offer->header_hash, 32);
+    memcpy(request.history_manifest_root, history->history_root, 32);
+    uint64_t created = 0, observed = 0;
+    enum boot_bundle_arm_result armed = boot_install_bound_bundle_request(
+        g_datadir, &request, &created);
+    bool matches = boot_install_bound_bundle_request_matches(g_datadir, &request, &observed);
+    if (armed == BOOT_BUNDLE_ARM_CREATED && matches && observed == created)
+        sosvc_restart_publish(offer, observed);
+    return (armed == BOOT_BUNDLE_ARM_CREATED || armed == BOOT_BUNDLE_ARM_EXISTING) && matches;
+}
+
+#ifdef ZCL_TESTING
 static bool sosvc_arm_landed(const char *landed, const struct state_offer_v1 *offer)
 {
     int legacy = 0; uint64_t created = 0, observed = 0;
@@ -813,12 +992,21 @@ static bool sosvc_arm_landed(const char *landed, const struct state_offer_v1 *of
         sosvc_restart_publish(offer, observed);
     return true;
 }
-#ifdef ZCL_TESTING
 bool state_offer_service_test_arm_landed(const char *landed, const struct state_offer_v1 *offer)
 {
     return sosvc_arm_landed(landed, offer);
 }
 void state_offer_service_test_clear_restart_hint(void) { sosvc_restart_clear(); }
+bool state_offer_service_test_history_fetch(const struct state_offer_record *target,
+    const char *parent, struct wallet_history_receive_result *out)
+{
+    return sosvc_history_fetch(target, parent, out) == SOL_RECEIVE_OK;
+}
+bool state_offer_service_test_arm_bound(const char *landed, const struct state_offer_v1 *offer,
+    const char *parent, const struct wallet_history_receive_result *history)
+{
+    return sosvc_arm_bound(landed, offer, parent, history);
+}
 #endif
 
 static void *sosvc_fetch_main(void *arg)
@@ -834,10 +1022,17 @@ static void *sosvc_fetch_main(void *arg)
                 sosvc_fetch_ip(&target, &m, out_dir, landed, sizeof(landed));
     }
     if (r == SOL_RECEIVE_OK && !atomic_load(&g_fetch_stopping)) {
-        if (!sosvc_arm_landed(landed, &target.offer)) {
-            LOG_WARN(SOSVC_SUBSYS, "verified bundle staged but install request could not be armed");
+        char parent[1024];
+        struct wallet_history_receive_result history;
+        wallet_history_receive_result_init(&history);
+        r = sosvc_history_parent(parent, sizeof(parent)) ?
+            sosvc_history_fetch(&target, parent, &history) : SOL_RECEIVE_LOCAL_IO;
+        if (r == SOL_RECEIVE_OK && !atomic_load(&g_fetch_stopping) &&
+            !sosvc_arm_bound(landed, &target.offer, parent, &history)) {
+            LOG_WARN(SOSVC_SUBSYS, "verified history and bundle staged but bound install request could not be armed");
             r = SOL_RECEIVE_LOCAL_IO;
         }
+        wallet_history_receive_result_close(&history);
     }
     g_fetch_result = r;
     atomic_store(&g_fetch_running, false);
@@ -941,6 +1136,7 @@ void state_offer_service_shutdown(void)
     atomic_store(&g_fetch_stopping, true);
     sol_client_shutdown();
     pthread_mutex_unlock(&g_lock);
+    sosvc_history_cancel();
     state_offer_peer_shutdown();
     if (g_fetch_started) {
         pthread_join(g_fetch_thread, NULL);

@@ -25,7 +25,7 @@ static bool boot_snapshot_equal(
            a->file_high == b->file_high;
 }
 
-static bool boot_file_snapshot(const char *path,
+bool boot_file_snapshot(const char *path,
                                struct platform_positioned_file_snapshot *out)
 {
     struct platform_positioned_file file;

@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capabilities for bound chain installation. */
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_wallet_cutover_bound.c", CAP_FS_READ, "Reads authenticated chain evidence and delegates the durable bound install request to the existing installer.")

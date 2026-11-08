@@ -92,8 +92,15 @@ static int ndh_join(char *dst, size_t cap, const char *dir, const char *name)
     return ovf(snprintf(dst, cap, "%s/%s", dir, name), cap);
 }
 static int ndh_walk(const char *phys, const char *rel);
+static int ni_generated_skip(const char *rel)
+{
+    return ni_has_comp(rel, "build") || ni_has_comp(rel, "vendor") ||
+        ni_has_comp(rel, ".claude") || ni_has_comp(rel, "test-tmp") ||
+        ni_has_comp(rel, ".cache");
+}
 static int ndh_entry(const char *phys, const char *rel, const char *nm)
 {
+    if (ni_generated_skip(rel) || ni_prod_skip(rel)) return 0;
     char p2[4096], r2[NI_PATH];
     if (ndh_join(p2, sizeof p2, phys, nm) || ndh_join(r2, sizeof r2, rel, nm))
         return 2;
@@ -436,10 +443,17 @@ static int ndh_st_one(const char *root, const char *body, int want)
     if (rc == 0) rc = rest;
     return rc ? rc : (code == want ? 0 : 1);
 }
+static int ndh_st_deep_excluded(void)
+{
+    char rel[700];
+    memset(rel, 'x', sizeof(rel) - 1);
+    memcpy(rel, "test-tmp/", 9);
+    rel[sizeof(rel) - 1] = '\0';
+    return ndh_entry(".", rel, "child") == 0 ? 0 : 1;
+}
 static int ndh_st_planted(void)
 {
-    if (csr_mkdirs("test-tmp")) return 2;
-    char tmpl[] = "test-tmp/ndh_st.XXXXXX";
+    char tmpl[] = "zcl-ndh-st.XXXXXX";
     char *tmp = mkdtemp(tmpl);
     if (!tmp) return die("z23-lint: mkdir failed: %s\n", "test-tmp");
     int bad = ndh_st_one(tmp, "/* STEP-0 STATUS: contract + stub bodies */\n", 1);
@@ -455,7 +469,9 @@ int check_no_dev_history_in_contracts_run(int argc, char **argv)
 }
 int check_no_dev_history_in_contracts_selftest(void)
 {
-    int rc = ndh_st_planted();
+    int rc = ndh_st_deep_excluded();
+    if (rc) return rc;
+    rc = ndh_st_planted();
     if (rc) {
         fputs("check-no-dev-history-in-contracts: planted selftest failed\n", stderr);
         return rc;

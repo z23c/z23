@@ -16,6 +16,7 @@
 #include "net/file_service.h"
 #include "net/netbase.h"
 #include "file_service_priv.h"
+#include "rom_fetch_transport.h"
 #include "crypto/sha3.h"
 
 #include <fcntl.h>
@@ -37,7 +38,6 @@
 #include "util/log_macros.h"
 #define FS_WORKER_CONNECT_BUDGET_MS 10000LL
 #define FS_WORKER_CONNECT_POLL_MS 100
-#define FS_NWORKERS 8
 
 static int64_t fs_connect_now_ms(const struct fs_connect_ops *ops)
 {
@@ -182,7 +182,9 @@ bool range_worker_socket_publish(struct range_worker *w, int fd)
 
     pthread_mutex_lock(w->fd_mutex);
     w->fd = fd;
-    cancelled = atomic_load_explicit(&w->cancel, memory_order_acquire);
+    cancelled = atomic_load_explicit(&w->cancel, memory_order_acquire) ||
+        (w->operation && atomic_load_explicit(&w->operation->cancelled, memory_order_acquire));
+    if (!cancelled && w->operation) w->operation->fds[w->operation_slot] = fd;
     if (cancelled)
         (void)shutdown(fd, SHUT_RDWR);
     pthread_mutex_unlock(w->fd_mutex);
@@ -204,8 +206,9 @@ void range_worker_socket_close(struct range_worker *w, int fd)
         return;
 
     pthread_mutex_lock(w->fd_mutex);
-    if (w->fd == fd)
-        w->fd = -1;
+    if (w->fd == fd) w->fd = -1;
+    if (w->operation && w->operation->fds[w->operation_slot] == fd)
+        w->operation->fds[w->operation_slot] = -1;
     (void)close(fd);
     pthread_mutex_unlock(w->fd_mutex);
 }
@@ -214,7 +217,8 @@ void range_worker_socket_close(struct range_worker *w, int fd)
  * 48-byte solution bound to this session's handshake nonce. Honest peers must
  * present this before the server will commit to a large range/ALL stream. */
 static bool fs_client_solve_challenge(struct fs_session *s,
-                                      uint8_t solution[FS_POW_SOLUTION_SIZE])
+                                      uint8_t solution[FS_POW_SOLUTION_SIZE],
+                                      struct range_worker *worker)
 {
     if (!fs_send_frame(s, FS_CHALLENGE, NULL, 0))
         return false;
@@ -231,8 +235,7 @@ static bool fs_client_solve_challenge(struct fs_session *s,
     int bits = payload[32];
     int64_t ts = (int64_t)platform_time_wall_time_t();
     uint64_t nonce = 0;
-    if (!puzzle_solve(seed, s->our_nonce, ts, bits, &nonce))
-        return false;
+    if (!fs_solve_challenge_nonce(s, worker, seed, bits, ts, &nonce)) return false;
 
     memcpy(solution, s->our_nonce, 32);
     memcpy(solution + 32, &ts, 8);
@@ -268,6 +271,123 @@ static void range_worker_build_request(const struct range_worker *w,
     rng[FS_POW_SOLUTION_SIZE + 7] = 0;
 }
 
+/* Validate peer-provided extents before any output is opened. */
+bool fs_manifest_extents_ok(const struct file_chunk *chunks, uint32_t count,
+                                   uint64_t lengths[255])
+{
+    if (!chunks || !lengths || !count || count > FILE_MAX_CHUNKS) return false;
+    memset(lengths, 0, 255 * sizeof(*lengths));
+    for (uint32_t i = 0; i < count; i++) {
+        const struct file_chunk *c = &chunks[i];
+        if (c->file_index >= 255 || !c->size || c->size > 60u * 1024u * 1024u ||
+            c->offset != lengths[c->file_index] ||
+            c->offset > (uint64_t)INT64_MAX - c->size) return false;
+        lengths[c->file_index] = c->offset + c->size;
+    }
+    return true;
+}
+
+/* Open each directory component without following links. */
+int fs_open_directory(const char *path)
+{
+    if (!path || !path[0] || strlen(path) >= 4096) { errno = EINVAL; return -1; }
+    char copy[4096];
+    memcpy(copy, path, strlen(path) + 1);
+    int fd = open(path[0] == '/' ? "/" : ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -1;
+    char *save = NULL;
+    for (char *part = strtok_r(copy, "/", &save); part; part = strtok_r(NULL, "/", &save)) {
+        if (strcmp(part, ".") == 0) continue;
+        if (strcmp(part, "..") == 0) { close(fd); errno = EINVAL; return -1; }
+        int next = openat(fd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        int saved_errno = errno;
+        close(fd);
+        if (next < 0) { errno = saved_errno; return -1; }
+        fd = next;
+    }
+    return fd;
+}
+
+/* Refuse links at every directory component and output file. */
+int fs_chunk_open(const char *dir, uint8_t index, int flags)
+{
+    int root = fs_open_directory(dir);
+    if (root < 0) return -1;
+    int parent = root;
+    char name[32];
+    if (index < 253) {
+        parent = openat(root, "blocks", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (parent < 0) { close(root); return -1; }
+        (void)snprintf(name, sizeof(name), "blk%05u.dat", (unsigned)index);
+    } else if (index == 253) {
+        (void)snprintf(name, sizeof(name), "block_index.bin");
+    } else if (index == 254) {
+        (void)snprintf(name, sizeof(name), "consensus_snapshot.db");
+    } else { close(root); return -1; }
+    int fd = openat(parent, name, flags | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0644);
+    int saved_errno = errno;
+    if (parent != root) close(parent);
+    close(root);
+    errno = saved_errno;
+    if (fd >= 0) {
+        struct stat st;
+        if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { close(fd); errno = EINVAL; return -1; }
+    }
+    return fd;
+}
+
+static bool fs_ensure_blocks(const char *dir)
+{
+    int root = fs_open_directory(dir);
+    if (root < 0) return false;
+    if (mkdirat(root, "blocks", 0755) != 0 && errno != EEXIST) { close(root); return false; }
+    int blocks = openat(root, "blocks", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    close(root);
+    if (blocks < 0) return false;
+    return close(blocks) == 0;
+}
+
+static bool fs_output_preflight(const char *dir, const uint64_t lengths[255])
+{
+    for (unsigned i = 0; i < 255; i++) {
+        if (!lengths[i]) continue;
+        int fd = fs_chunk_open(dir, (uint8_t)i, O_RDONLY);
+        if (fd < 0) { if (errno == ENOENT) continue; return false; }
+        struct stat st;
+        bool ok = fstat(fd, &st) == 0 && st.st_size >= 0 &&
+                  (uint64_t)st.st_size <= lengths[i];
+        if (close(fd) != 0 || !ok) return false;
+    }
+    return true;
+}
+
+
+#ifdef ZCL_TESTING
+bool fs_test_output_size(const char *, uint8_t, uint64_t, bool);
+bool fs_test_chunk_open(const char *, uint8_t);
+bool fs_test_manifest_extents(const struct file_chunk *, uint32_t);
+bool fs_test_output_size(const char *dir, uint8_t index, uint64_t size, bool final)
+{
+    uint64_t lengths[255] = {0};
+    if (index == 255 || size == 0) return false;
+    lengths[index] = size;
+    return final ? fs_output_lengths_ok(dir, lengths) : fs_output_preflight(dir, lengths);
+}
+
+bool fs_test_chunk_open(const char *dir, uint8_t index)
+{
+    int fd = fs_chunk_open(dir, index, O_RDONLY);
+    if (fd < 0) return false;
+    return close(fd) == 0;
+}
+
+bool fs_test_manifest_extents(const struct file_chunk *chunks, uint32_t count)
+{
+    uint64_t lengths[255];
+    return fs_manifest_extents_ok(chunks, count, lengths);
+}
+#endif
+
 static void range_worker_chunk_path(const struct range_worker *w, uint32_t i,
                                     char blk_path[600])
 {
@@ -292,7 +412,7 @@ static bool range_worker_store_chunk(struct range_worker *w, uint32_t i,
 {
     char blk_path[600];
     range_worker_chunk_path(w, i, blk_path);
-    int bfd = open(blk_path, O_WRONLY | O_CREAT, 0644);
+    int bfd = fs_chunk_open(w->datadir, w->chunks[i].file_index, O_WRONLY | O_CREAT);
     if (bfd >= 0) {
         ssize_t written = pwrite(bfd, buf, sz, (off_t)w->chunks[i].offset);
         if (written != (ssize_t)sz) {
@@ -308,14 +428,21 @@ static bool range_worker_store_chunk(struct range_worker *w, uint32_t i,
             return false;
         }
         /* Sync to disk so crash can't lose this chunk */
-        platform_data_sync(bfd);
-        close(bfd);
+        int sync_rc = platform_data_sync(bfd);
+        int close_rc = close(bfd);
+        if (sync_rc != 0 || close_rc != 0) {
+            free(buf);
+            atomic_fetch_add(&w->chunks_fail, 1);
+            return false;
+        }
         atomic_fetch_add(&w->chunks_ok, 1);
     } else {
         fprintf(stderr,  // obs-ok:file-transfer-disk-failure
                 "worker %d: open %s failed: %s\n",
                 w->id, blk_path, strerror(errno));
         atomic_fetch_add(&w->chunks_fail, 1);
+        free(buf);
+        return false;
     }
     free(buf);
     return true;
@@ -443,7 +570,7 @@ static int range_worker_handshake_request(struct range_worker *w,
 
     /* Solve the server's PoW challenge before requesting the range. */
     uint8_t solution[FS_POW_SOLUTION_SIZE];
-    if (!fs_client_solve_challenge(ws, solution)) {
+    if (!fs_client_solve_challenge(ws, solution, w)) {
         LOG_ERROR_IN("range_worker_fn", "filesvc", "worker %d: PoW challenge/solve failed", w->id);
         return -1;
     }
@@ -464,7 +591,10 @@ static uint32_t range_worker_recv_range(struct range_worker *w,
                                         uint32_t next_chunk)
 {
     for (uint32_t i = w->start; i < w->end; i++) {
-        if (atomic_load_explicit(&w->cancel, memory_order_acquire)) {
+        if (atomic_load_explicit(&w->cancel, memory_order_acquire) ||
+            fs_receive_cancelled(w->operation)) {
+            if (atomic_load(&w->chunks_fail) == 0)
+                atomic_store(&w->stopped_at_boundary, true);
             LOG_WARN_IN("range_worker_fn", "filesvc", "worker %d: cancelled", w->id);
             return next_chunk;
         }
@@ -479,6 +609,12 @@ static uint32_t range_worker_recv_range(struct range_worker *w,
             return next_chunk;
         }
 
+        if (sz != w->chunks[i].size) {
+            free(buf);
+            atomic_fetch_add(&w->chunks_fail, 1);
+            next_chunk = i + 1;
+            continue;
+        }
         if (!range_worker_store_chunk(w, i, buf, sz)) {
             next_chunk = i + 1;
             continue; /* skip — don't count failed write as progress */
@@ -487,6 +623,56 @@ static uint32_t range_worker_recv_range(struct range_worker *w,
         next_chunk = i + 1;
     }
     return next_chunk;
+}
+
+static int fs_onion_dial_cancelable(const char *peer, uint16_t port, struct fs_receive_op *op)
+{
+    if (!op || !op->strict) return rf_connect(peer, port);
+    return (int)rf_connect_onion_cancelable(peer, port, fs_receive_cancelled, op);
+}
+
+static int fs_onion_manifest_dial(const char *peer, uint16_t port)
+{ return rf_connect(peer, port); }
+static int fs_onion_worker_dial(const char *peer, uint16_t port)
+{ return rf_connect(peer, port); }
+static int fs_onion_retry_dial(const char *peer, uint16_t port)
+{ return rf_connect(peer, port); }
+#ifdef ZCL_TESTING
+int fs_test_onion_dial(unsigned, const char *, uint16_t);
+int fs_test_onion_dial(unsigned site, const char *peer, uint16_t port)
+{
+    switch (site) {
+    case 0: return fs_onion_manifest_dial(peer, port);
+    case 1: return fs_onion_worker_dial(peer, port);
+    case 2: return fs_onion_retry_dial(peer, port);
+    default: return -1;
+    }
+}
+#endif
+
+static bool range_worker_connect(struct range_worker *w, int *wfd, int *socket_flags)
+{
+    if (w->onion_peer) {
+        *wfd = w->operation ? fs_onion_dial_cancelable(w->onion_peer, w->onion_port, w->operation) :
+            fs_onion_worker_dial(w->onion_peer, w->onion_port);
+        if (*wfd < 0 || !range_worker_socket_publish(w, *wfd)) return false;
+    } else {
+        if (range_worker_open_published(w, wfd, socket_flags) != 0)
+            return false;
+
+        int connect_rc = netbase_connect_guarded(
+            *wfd, (struct sockaddr *)&w->peer_sockaddr, w->peer_sockaddr_len);
+        if (connect_rc < 0 && errno != EINPROGRESS && errno != EWOULDBLOCK) {
+            LOG_ERROR("filesvc", "worker %d: connect failed: %s",
+                      w->id, strerror(errno));
+            return false;
+        }
+        if (connect_rc < 0 && range_worker_finish_connect(w, *wfd) != 0)
+            return false;
+        if (range_worker_arm_socket(w, *wfd, *socket_flags) != 0)
+            return false;
+    }
+    return true;
 }
 
 static void *range_worker_fn(void *arg)
@@ -500,22 +686,7 @@ static void *range_worker_fn(void *arg)
 
     if (w->start >= w->end)
         goto done;
-    if (range_worker_open_published(w, &wfd, &socket_flags) != 0)
-        goto done;
-
-    int connect_rc = netbase_connect_guarded(wfd, (struct sockaddr *)&w->peer_sockaddr,
-                             w->peer_sockaddr_len);
-    if (connect_rc < 0 && errno != EINPROGRESS && errno != EWOULDBLOCK) {
-        LOG_ERROR("filesvc", "worker %d: connect failed: %s",
-                  w->id, strerror(errno));
-        goto done;
-    }
-    if (connect_rc < 0) {
-        if (range_worker_finish_connect(w, wfd) != 0)
-            goto done;
-    }
-    if (range_worker_arm_socket(w, wfd, socket_flags) != 0)
-        goto done;
+    if (!range_worker_connect(w, &wfd, &socket_flags)) goto done;
 
     fs_session_init(&ws, wfd);
     session_initialized = true;
@@ -534,64 +705,6 @@ done:
     return NULL;
 }
 
-/* Resume support: how many leading chunks already sit on disk intact. */
-static uint32_t fs_sync_resume_scan(const char *datadir,
-                                    const struct file_chunk *chunks,
-                                    uint32_t num_chunks)
-{
-    uint32_t skip_chunks = 0;
-    {
-        uint32_t verified = 0, checked = 0;
-        for (uint32_t j = 0; j < num_chunks; j++) {
-            char blk_path[600];
-            if (chunks[j].file_index == 253)
-                snprintf(blk_path, 600, "%s/block_index.bin", datadir);
-            else
-                snprintf(blk_path, 600, "%s/blocks/blk%05d.dat",
-                         datadir, chunks[j].file_index);
-
-            /* Check if file is large enough for this chunk */
-            struct stat st;
-            if (stat(blk_path, &st) != 0 ||
-                (uint64_t)st.st_size < chunks[j].offset + chunks[j].size)
-                break; /* this chunk not on disk, stop skipping */
-
-            /* SHA3 verify every 20th chunk + first + last existing.
-             * Full verification would be slow on 7GB, spot-check is fast. */
-            if (j == 0 || j % 20 == 0) {
-                int fd2 = open(blk_path, O_RDONLY);
-                if (fd2 < 0) break;
-                uint8_t *vbuf = zcl_malloc(chunks[j].size, "file_verify_buf");
-                if (!vbuf) { close(fd2); break; }
-                ssize_t got = pread(fd2, vbuf, chunks[j].size,
-                                     (off_t)chunks[j].offset);
-                close(fd2);
-                if (got != (ssize_t)chunks[j].size) {
-                    free(vbuf); break;
-                }
-                uint8_t hash[32];
-                sha3_256(vbuf, chunks[j].size, hash);
-                free(vbuf);
-                if (memcmp(hash, chunks[j].sha3, 32) != 0) {
-                    fprintf(stderr,  // obs-ok:file-transfer-integrity-retry
-                            "file_service: resume SHA3 mismatch at "
-                            "chunk %u (file=%d off=%llu) — re-downloading "
-                            "from here\n", j, chunks[j].file_index,
-                            (unsigned long long)chunks[j].offset);
-                    break;
-                }
-                checked++;
-            }
-            verified++;
-        }
-        skip_chunks = verified;
-        if (skip_chunks > 0) {
-            printf("file_service: resuming — %u/%u chunks on disk "
-                   "(%u SHA3-verified)\n", skip_chunks, num_chunks, checked);
-        }
-    }
-    return skip_chunks;
-}
 
 static void fs_sync_check_stalls(struct range_worker *workers, int nworkers,
                                  uint64_t *prev_done_bytes, int *stall_counts)
@@ -619,9 +732,19 @@ static void fs_sync_check_stalls(struct range_worker *workers, int nworkers,
         }
 }
 
-static void fs_sync_monitor_workers(struct range_worker *workers,
+static bool fs_sync_workers_expired(struct range_worker *workers, int nworkers,
+                                    int64_t elapsed, int64_t max_wait)
+{
+    if (elapsed <= max_wait) return false;
+    printf("file_service: timeout after %llds, cancelling stuck workers\n", (long long)elapsed);
+    for (int w = 0; w < nworkers; w++)
+        if (!atomic_load(&workers[w].done)) range_worker_cancel(&workers[w]);
+    return true;
+}
+
+static bool fs_sync_monitor_workers(struct range_worker *workers,
                                     int nworkers, uint64_t total_bytes,
-                                    int64_t dl_start)
+                                    int64_t dl_start, struct fs_receive_op *op)
 {
     /* Monitor progress — give up after 30 min total */
     int64_t max_wait = 1800;
@@ -632,7 +755,13 @@ static void fs_sync_monitor_workers(struct range_worker *workers,
      * before stall detection kicks in. Prevents false cancellation. */
     for (int w = 0; w < FS_NWORKERS; w++) stall_counts[w] = -4;
     while (true) {
-        sleep(5);
+        for (int tick = 0; tick < 5; ++tick) {
+            if (fs_receive_cancelled(op)) {
+                for (int w = 0; w < nworkers; ++w) range_worker_cancel(&workers[w]);
+                return true;
+            }
+            sleep(1);
+        }
         uint64_t done = 0;
         bool all_done = true;
         for (int w = 0; w < nworkers; w++) {
@@ -640,16 +769,7 @@ static void fs_sync_monitor_workers(struct range_worker *workers,
             if (!atomic_load(&workers[w].done)) all_done = false;
         }
         int64_t el = (int64_t)platform_time_wall_time_t() - dl_start;
-        if (el > max_wait) {
-            printf("file_service: timeout after %llds, cancelling stuck "
-                   "workers\n", (long long)el);
-            for (int w = 0; w < nworkers; w++) {
-                if (!atomic_load(&workers[w].done)) {
-                    range_worker_cancel(&workers[w]);
-                }
-            }
-            break;
-        }
+        if (fs_sync_workers_expired(workers, nworkers, el, max_wait)) break;
         fs_sync_check_stalls(workers, nworkers, prev_done_bytes, stall_counts);
         double pct = total_bytes > 0 ? 100.0 * (double)done / (double)total_bytes : 0;
         int64_t elapsed = (int64_t)platform_time_wall_time_t() - dl_start;
@@ -664,6 +784,7 @@ static void fs_sync_monitor_workers(struct range_worker *workers,
         fflush(stdout);
         if (all_done || done >= total_bytes) break;
     }
+    return false;
 }
 
 static void fs_sync_worker_init(struct range_worker *wk, int w,
@@ -674,6 +795,8 @@ static void fs_sync_worker_init(struct range_worker *wk, int w,
                                 uint32_t we, const char *datadir,
                                 pthread_mutex_t *fd_mutex)
 {
+    wk->onion_peer = NULL;
+    wk->onion_port = 0;
     wk->peer_sockaddr = *peer;
     wk->peer_sockaddr_len = peer_len;
     wk->peer_socktype = peer_socktype;
@@ -688,6 +811,7 @@ static void fs_sync_worker_init(struct range_worker *wk, int w,
     wk->fd = -1;
     atomic_store(&wk->done, false);
     atomic_store(&wk->cancel, false);
+    atomic_store(&wk->stopped_at_boundary, false);
     atomic_store(&wk->bytes, 0);
     atomic_store(&wk->chunks_ok, 0);
     atomic_store(&wk->chunks_fail, 0);
@@ -697,25 +821,13 @@ static uint32_t fs_sync_collect_retry(const struct file_chunk *chunks,
                                       uint32_t skip_chunks,
                                       uint32_t num_chunks, const char *datadir,
                                       uint32_t total_fail,
-                                      uint32_t *retry_idx)
+                                      uint32_t *retry_idx, struct fs_receive_op *op)
 {
         uint32_t nretry = 0;
         for (uint32_t c = skip_chunks; c < num_chunks && nretry < total_fail; c++) {
-            /* Quick check: try reading the chunk back and verifying hash */
-            char blk_path[600];
-            if (chunks[c].file_index == 254)
-                snprintf(blk_path, 600, "%s/consensus_snapshot.db", datadir);
-            else if (chunks[c].file_index == 253)
-                snprintf(blk_path, 600, "%s/block_index.bin", datadir);
-            else
-                snprintf(blk_path, 600, "%s/blocks/blk%05d.dat",
-                         datadir, chunks[c].file_index);
-            int cfd = open(blk_path, O_RDONLY);
-            if (cfd < 0) { retry_idx[nretry++] = c; continue; }
-            uint8_t probe[1];
-            ssize_t rd = pread(cfd, probe, 1, (off_t)chunks[c].offset);
-            close(cfd);
-            if (rd <= 0)
+            if (fs_receive_cancelled(op)) break;
+            enum fs_resume_cause cause;
+            if (fs_sync_resume_scan(datadir, &chunks[c], 1, op, &cause) != 1)
                 retry_idx[nretry++] = c;
         }
     return nretry;
@@ -744,21 +856,14 @@ static uint32_t fs_sync_retry_fetch(struct fs_session *rs,
                 break;
             }
 
-            char blk_path[600];
-            if (chunks[ci].file_index == 254)
-                snprintf(blk_path, 600, "%s/consensus_snapshot.db", datadir);
-            else if (chunks[ci].file_index == 253)
-                snprintf(blk_path, 600, "%s/block_index.bin", datadir);
-            else
-                snprintf(blk_path, 600, "%s/blocks/blk%05d.dat",
-                         datadir, chunks[ci].file_index);
-            int bfd = open(blk_path, O_WRONLY | O_CREAT, 0644);
+            if (sz != chunks[ci].size) { free(buf); continue; }
+            int bfd = fs_chunk_open(datadir, chunks[ci].file_index, O_WRONLY | O_CREAT);
             if (bfd >= 0) {
                 ssize_t written = pwrite(bfd, buf, sz,
                                          (off_t)chunks[ci].offset);
-                platform_data_sync(bfd);
-                close(bfd);
-                if (written == (ssize_t)sz) {
+                int sync_rc = platform_data_sync(bfd);
+                int close_rc = close(bfd);
+                if (written == (ssize_t)sz && sync_rc == 0 && close_rc == 0) {
                     recovered++;
                     printf("[file] retrying chunk %u attempt %d succeeded\n",
                            ci, retry + 1);
@@ -784,13 +889,21 @@ enum {
     FS_SYNC_MUTEX = 11,
     FS_SYNC_THREAD = 12,
     FS_SYNC_FAIL_CHUNKS = 13,
-    FS_SYNC_INCOMPLETE = 14
+    FS_SYNC_INCOMPLETE = 14,
+    FS_SYNC_EXPECTED_MISMATCH = 15,
+    FS_SYNC_PREFIX_CHANGED = 16
 };
 
 /* Manifest connection plus the parallel range workers it launches. */
 struct fs_sync_state {
     const char *datadir;
+    const char *onion_peer;
+    uint16_t onion_port;
     const uint8_t *utxo_root;
+    const struct file_manifest *expected;
+    struct fs_receive_op *operation;
+    bool stopped;
+    bool stopped_at_boundary;
     int rc;
     bool complete;
     struct sockaddr_storage resolved_peer;
@@ -799,9 +912,12 @@ struct fs_sync_state {
     int resolved_peer_protocol;
     int fd;
     struct fs_session session;
+    bool session_initialized;
     struct file_chunk chunks[FILE_MAX_CHUNKS];
     struct file_chunk *bad_chunk;
     uint32_t num_chunks;
+    bool manifest_done;
+    uint64_t lengths[255];
     uint64_t total_bytes;
     int64_t dl_start;
     uint32_t skip_chunks;
@@ -821,8 +937,10 @@ struct fs_sync_state {
 /* Close the manifest session and record rc. */
 static void fs_sync_drop_session(struct fs_sync_state *st, int rc)
 {
-    fs_session_cleanup(&st->session);
-    close(st->fd);
+    if (st->session_initialized) fs_session_cleanup(&st->session);
+    st->session_initialized = false;
+    fs_receive_close(st->operation, FS_NWORKERS, st->fd);
+    st->fd = -1;
     st->rc = rc;
 }
 
@@ -830,10 +948,22 @@ static void fs_sync_drop_session(struct fs_sync_state *st, int rc)
 static void fs_sync_resolve_connect(struct fs_sync_state *st,
                                     const char *peer_addr, uint16_t port)
 {
+    if (net_name_is_onion(peer_addr)) {
+        st->onion_peer = peer_addr;
+        st->onion_port = port;
+        st->fd = st->operation ? fs_onion_dial_cancelable(peer_addr, port, st->operation) :
+            fs_onion_manifest_dial(peer_addr, port);
+        if (st->fd >= 0 && !fs_receive_adopt(st->operation, FS_NWORKERS, st->fd)) {
+            close(st->fd); st->fd = -1;
+        }
+        if (st->fd < 0) st->rc = FS_SYNC_CONNECT_FAIL;
+        return;
+    }
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
+    if (st->operation && st->operation->strict) hints.ai_flags = AI_NUMERICHOST;
 
     char port_str[8];
     snprintf(port_str, sizeof(port_str), "%d", port);
@@ -854,10 +984,13 @@ static void fs_sync_resolve_connect(struct fs_sync_state *st,
     st->resolved_peer_socktype = res->ai_socktype;
     st->resolved_peer_protocol = res->ai_protocol;
 
-    st->fd = fs_connect_resolved_until(
+    st->fd = fs_connect_with_operation(
         &st->resolved_peer, st->resolved_peer_len, st->resolved_peer_socktype,
-        st->resolved_peer_protocol, FS_WORKER_CONNECT_BUDGET_MS, NULL);
+        st->resolved_peer_protocol, FS_WORKER_CONNECT_BUDGET_MS, st->operation);
     freeaddrinfo(res);
+    if (st->fd >= 0 && !fs_receive_adopt(st->operation, FS_NWORKERS, st->fd)) {
+        close(st->fd); st->fd = -1;
+    }
     if (st->fd < 0) {
         /* Optional fast-sync seed not reachable — routine on a fresh node;
          * P2P snapshot sync remains the fallback. */
@@ -873,6 +1006,7 @@ static void fs_sync_handshake_manifest(struct fs_sync_state *st)
     if (st->rc != 0)
         return;
     fs_session_init(&st->session, st->fd);
+    st->session_initialized = true;
 
     if (!fs_handshake(&st->session, st->utxo_root, true)) {
         fs_sync_drop_session(st, FS_SYNC_HANDSHAKE);
@@ -894,12 +1028,13 @@ static void fs_sync_handshake_manifest(struct fs_sync_state *st)
         fs_sync_drop_session(st, FS_SYNC_SEND);
 }
 
+
 /* Read manifest frames into st->chunks. Stops on a rejected entry. */
 static void fs_sync_read_chunks(struct fs_sync_state *st)
 {
     if (st->rc != 0)
         return;
-    while (st->num_chunks < FILE_MAX_CHUNKS) {
+    for (;;) {
         uint8_t type;
         const uint8_t *payload;
         uint32_t plen;
@@ -907,8 +1042,10 @@ static void fs_sync_read_chunks(struct fs_sync_state *st)
         if (!fs_recv_frame(&st->session, &type, &payload, &plen))
             break;
 
-        if (type == FS_DONE) break;
-        if (type == FS_MANIFEST && plen >= 36) {
+        int frame = fs_manifest_frame(type, plen, st->num_chunks, st->operation && st->operation->strict);
+        if (frame == 0) { st->manifest_done = true; break; }
+        if (frame < 0) { fs_sync_drop_session(st, FS_SYNC_BAD_SIZE); return; }
+        {
             struct file_chunk *c = &st->chunks[st->num_chunks];
             memset(c, 0, sizeof(*c));   /* short form leaves file_index/offset
                                          * unset — zero them, not stack garbage */
@@ -941,11 +1078,34 @@ static void fs_sync_read_chunks(struct fs_sync_state *st)
     }
 }
 
+enum fs_receive_result fs_receive_probe(struct fs_receive_op *op, const char *peer_addr,
+    uint16_t port, const uint8_t utxo_root[32], struct file_manifest *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!out || !op || !op->strict || op->has_expected || !peer_addr || !utxo_root ||
+        atomic_exchange(&op->used, true)) return FS_RECEIVE_ERROR;
+    if (fs_receive_cancelled(op)) return FS_RECEIVE_STOPPED;
+    struct fs_sync_state st = {0};
+    st.operation = op; st.utxo_root = utxo_root; st.fd = -1; st.bad_chunk = st.chunks;
+    fs_sync_resolve_connect(&st, peer_addr, port);
+    fs_sync_handshake_manifest(&st);
+    fs_sync_read_chunks(&st);
+    bool valid = st.rc == FS_SYNC_OK && fs_probe_validate(st.chunks, st.num_chunks, st.manifest_done, st.lengths, out);
+    if (st.fd >= 0) fs_sync_drop_session(&st, st.rc);
+    if (!valid) { memset(out, 0, sizeof(*out)); return FS_RECEIVE_ERROR; }
+    if (fs_receive_cancelled(op)) { memset(out, 0, sizeof(*out)); return FS_RECEIVE_STOPPED; }
+    return FS_RECEIVE_COMPLETE;
+}
+
 /* Check the manifest, resume from disk, and close the manifest connection. */
 static void fs_sync_finish_manifest(struct fs_sync_state *st)
 {
     if (st->rc != 0)
         return;
+    if (!st->manifest_done || !fs_manifest_extents_ok(st->chunks, st->num_chunks, st->lengths)) {
+        fs_sync_drop_session(st, FS_SYNC_EMPTY);
+        return;
+    }
     if (st->num_chunks == 0) {
         fs_sync_drop_session(st, FS_SYNC_EMPTY);
         return;
@@ -963,22 +1123,40 @@ static void fs_sync_finish_manifest(struct fs_sync_state *st)
         fs_sync_drop_session(st, FS_SYNC_CEILING);
         return;
     }
+    if (!fs_manifest_expected(st->chunks, st->num_chunks, st->total_bytes, st->lengths, st->expected)) {
+        fs_sync_drop_session(st, FS_SYNC_EXPECTED_MISMATCH);
+        return;
+    }
     printf("file_service: manifest has %u chunks (%.1f GB), downloading...\n",
            st->num_chunks, (double)st->total_bytes / (1024.0 * 1024.0 * 1024.0));
 
     /* Create blocks directory */
-    char blocks_dir[512];
-    snprintf(blocks_dir, sizeof(blocks_dir), "%s/blocks", st->datadir);
-    mkdir(blocks_dir, 0755);
+    if (!fs_ensure_blocks(st->datadir)) {
+        fs_sync_drop_session(st, FS_SYNC_EMPTY);
+        return;
+    }
 
+    if (!fs_output_preflight(st->datadir, st->lengths)) {
+        fs_sync_drop_session(st, FS_SYNC_INCOMPLETE);
+        return;
+    }
     st->dl_start = (int64_t)platform_time_wall_time_t();
 
     /* Check if previous partial download exists — verify and resume.
      * We spot-check existing chunks with SHA3 to detect corruption. */
-    st->skip_chunks = fs_sync_resume_scan(st->datadir, st->chunks, st->num_chunks);
+    enum fs_resume_cause cause;
+    st->skip_chunks = fs_sync_resume_scan(st->datadir, st->chunks, st->num_chunks,
+                                          st->operation, &cause);
 
-    /* Close manifest connection — we'll open parallel ones */
+    /* Close manifest connection before opening range sessions. */
     fs_sync_drop_session(st, FS_SYNC_OK);
+    enum fs_prefix_decision decision = fs_prefix_decide(cause, st->skip_chunks,
+        st->operation ? st->operation->min_verified_chunks : 0, fs_receive_cancelled(st->operation));
+    if (decision == FS_PREFIX_ERROR) {
+        st->rc = FS_SYNC_PREFIX_CHANGED;
+        return;
+    }
+    if (decision == FS_PREFIX_STOPPED) { st->stopped = st->stopped_at_boundary = true; return; }
 
     st->remaining = st->num_chunks - st->skip_chunks;
     if (st->remaining == 0) {
@@ -991,12 +1169,12 @@ static void fs_sync_finish_manifest(struct fs_sync_state *st)
 /* Launch the parallel range workers for the chunks still missing. */
 static void fs_sync_launch(struct fs_sync_state *st)
 {
-    if (st->rc != 0 || st->complete)
+    if (st->rc != 0 || st->complete || st->stopped)
         return;
     /* Launch 8 parallel workers, each downloads a range of chunks */
     st->per = (st->remaining + FS_NWORKERS - 1) / FS_NWORKERS;
     st->nworkers = 0;
-    st->worker_mutex_rc = pthread_mutex_init(&st->worker_fd_mutex, NULL);
+    st->worker_mutex_rc = st->operation ? 0 : pthread_mutex_init(&st->worker_fd_mutex, NULL);
     if (st->worker_mutex_rc != 0) {
         st->rc = FS_SYNC_MUTEX;
         return;
@@ -1011,7 +1189,11 @@ static void fs_sync_launch(struct fs_sync_state *st)
         fs_sync_worker_init(&st->workers[st->nworkers], st->w, &st->resolved_peer,
                             st->resolved_peer_len, st->resolved_peer_socktype,
                             st->resolved_peer_protocol, st->utxo_root, st->chunks,
-                            ws, we, st->datadir, &st->worker_fd_mutex);
+                            ws, we, st->datadir, st->operation ? &st->operation->mutex : &st->worker_fd_mutex);
+        st->workers[st->nworkers].operation = st->operation;
+        st->workers[st->nworkers].operation_slot = (size_t)st->nworkers;
+        st->workers[st->nworkers].onion_peer = st->onion_peer;
+        st->workers[st->nworkers].onion_port = st->onion_port;
         /* raw-pthread-ok: short-burst-joined-immediately (per-download workers) */
         if (pthread_create(&st->wthreads[st->nworkers], NULL,
                            range_worker_fn, &st->workers[st->nworkers]) != 0) {
@@ -1020,7 +1202,7 @@ static void fs_sync_launch(struct fs_sync_state *st)
             }
             for (int j = 0; j < st->nworkers; j++)
                 pthread_join(st->wthreads[j], NULL);
-            pthread_mutex_destroy(&st->worker_fd_mutex);
+            if (!st->operation) pthread_mutex_destroy(&st->worker_fd_mutex);
             st->rc = FS_SYNC_THREAD;
             return;
         }
@@ -1033,18 +1215,19 @@ static void fs_sync_launch(struct fs_sync_state *st)
 /* Wait for the workers, then tally bytes and chunk counts. */
 static void fs_sync_finish_workers(struct fs_sync_state *st)
 {
-    if (st->rc != 0 || st->complete)
+    if (st->rc != 0 || st->complete || st->stopped)
         return;
-    fs_sync_monitor_workers(st->workers, st->nworkers, st->total_bytes,
-                            st->dl_start);
+    st->stopped = fs_sync_monitor_workers(st->workers, st->nworkers, st->total_bytes,
+                            st->dl_start, st->operation);
 
     for (int w = 0; w < st->nworkers; w++)
         pthread_join(st->wthreads[w], NULL);
-    pthread_mutex_destroy(&st->worker_fd_mutex);
+    if (!st->operation) pthread_mutex_destroy(&st->worker_fd_mutex);
 
     st->bytes_done = 0;
     st->total_ok = 0;
     st->total_fail = 0;
+    st->stopped_at_boundary = fs_workers_clean_stop(st->workers, st->nworkers, st->stopped);
     for (int w = 0; w < st->nworkers; w++) {
         st->bytes_done += atomic_load(&st->workers[w].bytes);
         st->total_ok += atomic_load(&st->workers[w].chunks_ok);
@@ -1061,12 +1244,43 @@ static void fs_sync_finish_workers(struct fs_sync_state *st)
 }
 
 /* Retry chunks the workers failed, up to three fresh connections. */
+static int fs_retry_connect(struct fs_sync_state *st)
+{
+    int fd = st->onion_peer ? (st->operation ?
+        fs_onion_dial_cancelable(st->onion_peer, st->onion_port, st->operation) :
+        fs_onion_retry_dial(st->onion_peer, st->onion_port)) :
+        fs_connect_with_operation(&st->resolved_peer, st->resolved_peer_len,
+            st->resolved_peer_socktype, st->resolved_peer_protocol,
+            FS_WORKER_CONNECT_BUDGET_MS, st->operation);
+    if (fd >= 0 && !fs_receive_adopt(st->operation, FS_NWORKERS + 1, fd)) {
+        close(fd); return -1;
+    }
+    return fd;
+}
+
+static bool fs_retry_handshake(struct fs_sync_state *st, int fd, int retry,
+                               struct fs_session *session)
+{
+    struct timeval timeout = {.tv_sec = 120, .tv_usec = 0};
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0 ||
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+        LOG_ERROR_IN("fs_client_sync", "filesvc", "retry %d: socket timeout setup failed: %s",
+                     retry + 1, strerror(errno));
+        return false;
+    }
+    fs_session_init(session, fd);
+    if (fs_handshake(session, st->utxo_root, true)) return true;
+    fs_session_cleanup(session);
+    return false;
+}
+
 static void fs_sync_retry_failed(struct fs_sync_state *st)
 {
-    if (st->rc != 0 || st->complete)
+    if (st->rc != 0 || st->complete || st->stopped)
         return;
     /* Retry failed chunks — up to 3 attempts with fresh connections */
     for (int retry = 0; retry < 3 && st->total_fail > 0; retry++) {
+        if (fs_receive_cancelled(st->operation)) { st->stopped = true; break; }
         printf("[file] retrying %u failed chunks, attempt %d/3\n",
                st->total_fail, retry + 1);
 
@@ -1076,35 +1290,23 @@ static void fs_sync_retry_failed(struct fs_sync_state *st)
         if (!retry_idx) break;
         uint32_t nretry = fs_sync_collect_retry(st->chunks, st->skip_chunks,
                                                 st->num_chunks, st->datadir,
-                                                st->total_fail, retry_idx);
+                                                st->total_fail, retry_idx, st->operation);
+        if (fs_receive_cancelled(st->operation)) { free(retry_idx); st->stopped = true; break; }
 
         if (nretry == 0) { free(retry_idx); break; }
 
         /* Reuse the address that completed the manifest connection.  Retry
          * never re-enters DNS and every dial has the same absolute 10s cap. */
-        int rfd = fs_connect_resolved_until(
-            &st->resolved_peer, st->resolved_peer_len, st->resolved_peer_socktype,
-            st->resolved_peer_protocol, FS_WORKER_CONNECT_BUDGET_MS, NULL);
+        int rfd = fs_retry_connect(st);
         if (rfd < 0) {
             free(retry_idx);
-            continue;
-        }
-
-        struct timeval rtv = { .tv_sec = 120, .tv_usec = 0 };
-        if (setsockopt(rfd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv)) < 0 ||
-            setsockopt(rfd, SOL_SOCKET, SO_SNDTIMEO, &rtv, sizeof(rtv)) < 0) {
-            LOG_ERROR_IN("fs_client_sync", "filesvc", "retry %d: socket timeout setup failed: %s",
-                      retry + 1, strerror(errno));
-            close(rfd);
-            free(retry_idx);
+            if (fs_receive_cancelled(st->operation)) { st->rc = FS_SYNC_CONNECT_FAIL; break; }
             continue;
         }
 
         struct fs_session rs;
-        fs_session_init(&rs, rfd);
-        if (!fs_handshake(&rs, st->utxo_root, true)) {
-            fs_session_cleanup(&rs);
-            close(rfd);
+        if (!fs_retry_handshake(st, rfd, retry, &rs)) {
+            fs_receive_close(st->operation, FS_NWORKERS + 1, rfd);
             free(retry_idx);
             continue;
         }
@@ -1113,7 +1315,7 @@ static void fs_sync_retry_failed(struct fs_sync_state *st)
                                                  retry_idx, nretry, retry);
 
         fs_session_cleanup(&rs);
-        close(rfd);
+        fs_receive_close(st->operation, FS_NWORKERS + 1, rfd);
         free(retry_idx);
         st->total_fail = (recovered >= st->total_fail) ? 0 : st->total_fail - recovered;
         st->total_ok += recovered;
@@ -1125,7 +1327,7 @@ static void fs_sync_retry_failed(struct fs_sync_state *st)
 /* Record a chunk-count failure after retries. */
 static void fs_sync_verdict(struct fs_sync_state *st)
 {
-    if (st->rc != 0 || st->complete)
+    if (st->rc != 0 || st->complete || st->stopped_at_boundary)
         return;
     if (st->total_fail > 0)
         st->rc = FS_SYNC_FAIL_CHUNKS;
@@ -1135,8 +1337,23 @@ static void fs_sync_verdict(struct fs_sync_state *st)
 
 /* ── Client ────────────────────────────────────────────────────── */
 
-bool fs_client_sync(const char *peer_addr, uint16_t port,
-                     const char *datadir, const uint8_t utxo_root[32])
+static bool fs_sync_report(struct fs_sync_state *st, const char *peer_addr, uint16_t port);
+
+static void fs_sync_complete_outputs(struct fs_sync_state *st)
+{
+    if (st->rc != FS_SYNC_OK) return;
+    if (!fs_output_lengths_ok(st->datadir, st->lengths)) {
+        st->rc = FS_SYNC_INCOMPLETE;
+        return;
+    }
+    if (st->operation && st->operation->has_expected &&
+        (!fs_output_inventory(st->datadir, st->lengths) ||
+         !fs_output_durable(st->datadir, st->lengths))) st->rc = FS_SYNC_INCOMPLETE;
+}
+
+static bool fs_client_sync_impl(const char *peer_addr, uint16_t port,
+                                const char *datadir, const uint8_t utxo_root[32],
+                                struct fs_receive_op *operation, bool *stopped)
 {
     printf("file_service: connecting to %s:%d...\n", peer_addr, port);
 
@@ -1144,9 +1361,12 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
     memset(&st, 0, sizeof(st));
     st.datadir = datadir;
     st.utxo_root = utxo_root;
+    st.operation = operation;
+    st.expected = operation && operation->has_expected ? &operation->expected : NULL;
     st.fd = -1;
     st.bad_chunk = &st.chunks[0];
 
+    if (fs_receive_cancelled(operation)) { *stopped = true; return false; }
     fs_sync_resolve_connect(&st, peer_addr, port);
     fs_sync_handshake_manifest(&st);
     fs_sync_read_chunks(&st);
@@ -1155,17 +1375,49 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
     fs_sync_finish_workers(&st);
     fs_sync_retry_failed(&st);
     fs_sync_verdict(&st);
+    if (st.rc == FS_SYNC_OK && fs_receive_cancelled(operation)) st.stopped = true;
+    if (st.stopped && st.rc == FS_SYNC_OK) { *stopped = true; return false; }
+    fs_sync_complete_outputs(&st);
+    if (st.rc == FS_SYNC_OK && fs_receive_cancelled(operation)) { *stopped = true; return false; }
 
-    uint32_t num_chunks = st.num_chunks;
-    uint64_t total_bytes = st.total_bytes;
-    int worker_mutex_rc = st.worker_mutex_rc;
-    int w = st.w;
-    uint32_t total_fail = st.total_fail;
-    uint32_t total_ok = st.total_ok;
-    uint32_t remaining = st.remaining;
-    struct file_chunk *c = st.bad_chunk;
+    return fs_sync_report(&st, peer_addr, port);
+}
 
-    switch (st.rc) {
+
+static bool fs_sync_manifest_report(const struct fs_sync_state *st)
+{
+    uint32_t num_chunks = st->num_chunks;
+    uint64_t total_bytes = st->total_bytes;
+    struct file_chunk *c = st->bad_chunk;
+    switch (st->rc) {
+    case FS_SYNC_BAD_SIZE:
+        LOG_FAIL("filesvc", "client_sync: manifest chunk %u has invalid "
+                 "size=%u (peer-supplied) — rejecting manifest", num_chunks, c->size);
+    case FS_SYNC_BAD_INDEX:
+        LOG_FAIL("filesvc", "client_sync: manifest chunk %u has invalid "
+                 "file_index=%u — rejecting manifest", num_chunks, (unsigned)c->file_index);
+    case FS_SYNC_EMPTY:
+        LOG_FAIL("filesvc", "client_sync: manifest empty (server still building)");
+    case FS_SYNC_CEILING:
+        LOG_FAIL("filesvc", "client_sync: manifest total %llu bytes exceeds "
+                 "ceiling — rejecting manifest", (unsigned long long)total_bytes);
+    case FS_SYNC_EXPECTED_MISMATCH:
+        LOG_FAIL("filesvc", "client_sync: received manifest differs from expected history");
+    case FS_SYNC_PREFIX_CHANGED:
+        LOG_FAIL("filesvc", "client_sync: verified history prefix became unavailable");
+    default:
+        return st->rc == FS_SYNC_OK;
+    }
+}
+
+static bool fs_sync_report(struct fs_sync_state *st, const char *peer_addr, uint16_t port)
+{
+    int worker_mutex_rc = st->worker_mutex_rc;
+    int w = st->w;
+    uint32_t total_fail = st->total_fail;
+    uint32_t total_ok = st->total_ok;
+    uint32_t remaining = st->remaining;
+    switch (st->rc) {
     case FS_SYNC_RESOLVE:
         LOG_FAIL("filesvc", "client_sync: resolve failed for %s", peer_addr);
     case FS_SYNC_ADDR:
@@ -1177,20 +1429,6 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
                  strerror(errno));
     case FS_SYNC_SEND:
         LOG_FAIL("filesvc", "client_sync: manifest request send failed to %s:%d", peer_addr, port);
-    case FS_SYNC_BAD_SIZE:
-        LOG_FAIL("filesvc", "client_sync: manifest chunk %u has invalid "
-                 "size=%u (peer-supplied) — rejecting manifest",
-                 num_chunks, c->size);
-    case FS_SYNC_BAD_INDEX:
-        LOG_FAIL("filesvc", "client_sync: manifest chunk %u has invalid "
-                 "file_index=%u — rejecting manifest",
-                 num_chunks, (unsigned)c->file_index);
-    case FS_SYNC_EMPTY:
-        LOG_FAIL("filesvc", "client_sync: manifest empty (server still building)");
-    case FS_SYNC_CEILING:
-        LOG_FAIL("filesvc", "client_sync: manifest total %llu bytes exceeds "
-                 "ceiling — rejecting manifest",
-                 (unsigned long long)total_bytes);
     case FS_SYNC_MUTEX:
         LOG_FAIL("filesvc", "client_sync: worker fd mutex init failed: %s",
                  strerror(worker_mutex_rc));
@@ -1201,9 +1439,29 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
     case FS_SYNC_INCOMPLETE:
         LOG_FAIL("filesvc", "client_sync: only %u/%u chunks received — incomplete", total_ok, remaining);
     default:
-        return st.rc == FS_SYNC_OK;
+        return fs_sync_manifest_report(st);
     }
 }
 
+enum fs_receive_result fs_receive_run(struct fs_receive_op *op, const char *peer_addr,
+    uint16_t port, const char *datadir, const uint8_t utxo_root[32])
+{
+    if (!op || !op->has_expected || !peer_addr || !datadir || !utxo_root || atomic_exchange(&op->used, true))
+        return FS_RECEIVE_ERROR;
+    bool stopped = false;
+    bool ok = fs_client_sync_impl(peer_addr, port, datadir, utxo_root, op, &stopped);
+    return stopped ? FS_RECEIVE_STOPPED : ok ? FS_RECEIVE_COMPLETE : FS_RECEIVE_ERROR;
+}
+
+bool fs_client_sync(const char *peer_addr, uint16_t port,
+                    const char *datadir, const uint8_t utxo_root[32])
+{
+    struct fs_receive_op *op = fs_receive_create_internal(NULL);
+    if (!op) return false;
+    bool stopped = false;
+    bool ok = fs_client_sync_impl(peer_addr, port, datadir, utxo_root, op, &stopped);
+    fs_receive_destroy(op);
+    return ok;
+}
 
 #endif /* !_WIN32 */

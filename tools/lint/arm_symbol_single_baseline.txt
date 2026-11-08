@@ -6,7 +6,7 @@
 # check_arm_symbol_single baseline — <path>\t<function> pairs where a non-static
 # function is DEFINED more than once in one translation unit
 # (necessarily in disjoint preprocessor arms — see the header
-# comment in tools/lint/lintc/gate_arm_symbol_single.c for the defect class and its
+# comment in build/bin/z23-lint check-arm-symbol-single for the defect class and its
 # limits). One pair per line, tab-separated. THE LIST MAY ONLY
 # SHRINK.
 #
@@ -36,12 +36,6 @@ contexts/wallet/views/src/wallet_gui.c	wallet_gui_main
 core/modules/crypto/src/keccak_x4.c	keccak_x4_available
 core/modules/crypto/src/sha3_256_x4.c	sha3_256_x4_avx512
 core/modules/net/src/file_service.c	file_service_dump_state_json
-core/modules/net/src/file_service.c	fs_conn_budget_ok
-core/modules/net/src/file_service.c	fs_ip_bytes_charge
-core/modules/net/src/file_service.c	fs_ip_serve_acquire
-core/modules/net/src/file_service.c	fs_ip_serve_release
-core/modules/net/src/file_service.c	fs_parse_serve_request
-core/modules/net/src/file_service.c	fs_pow_reset_state
 core/modules/net/src/file_service.c	fs_server_get_port
 core/modules/net/src/file_service.c	fs_server_is_running
 core/modules/net/src/file_service.c	fs_server_refresh_manifest

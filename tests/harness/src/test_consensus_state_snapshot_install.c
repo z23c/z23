@@ -7100,6 +7100,8 @@ int test_snapshot_install_recovery(void)
     failures += csi_stage_test();
     failures += csi_stage_swap_case();
 #if defined(__linux__)
+    failures += csi_bound_attempt_case();
+    failures += csi_bound_success_case();
     failures += csi_bound_swap_case();
     failures += csi_bound_real_case(false);
     failures += csi_bound_real_case(true);

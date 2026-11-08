@@ -294,6 +294,9 @@ AGENT_IMPACT_RULE("platform/modules/base/src/safe_alloc.c|platform/modules/base/
  * seven allocation labels has a hand-rolled multi-pointer unwind. */
 AGENT_IMPACT_RULE("core/modules/crypto/src/equihash.c|core/modules/crypto/include/crypto/equihash.h|tests/harness/src/test_equihash_oom.c", "equihash_oom crypto make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/base/src/result.c|platform/modules/base/include/base/result.h|platform/modules/util/include/util/result.h", "zcl_result make_lint_gates")
+AGENT_IMPACT_RULE("engine/services/src/wallet_history_receive.c|engine/services/include/services/wallet_history_receive.h|tests/harness/src/test_wallet_history_receive.c", "wallet_history_receive make_lint_gates")
+AGENT_IMPACT_RULE("engine/composition/src/wallet_history_provider.c|engine/composition/include/config/wallet_history_provider.h|tests/harness/src/test_wallet_history_provider.c", "wallet_history_provider")
+AGENT_IMPACT_RULE("core/modules/net/src/file_service_generation.c|core/modules/net/include/net/file_service_generation.h|tests/harness/src/test_file_service_generation.c", "file_service_generation")
 AGENT_IMPACT_RULE("core/modules/net/src/file_service.c|core/modules/net/src/file_service_transport.c|core/modules/net/src/file_service_handshake.c|core/modules/net/src/file_service_worker_internal.h|core/modules/net/include/net/file_service.h|engine/controllers/src/file_controller.c|engine/controllers/include/controllers/file_controller.h|tests/harness/src/test_file_controller.c", "file_controller file_service_pow_gate file_market rom_manifest api hkdf_sha3_256 make_lint_gates")
 /* Fast-sync implementation splits retain one proof lane. The family pattern
  * keeps a newly extracted C23 policy/helper from becoming push-time-only

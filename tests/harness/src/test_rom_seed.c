@@ -18,6 +18,7 @@
 #include "net/rom_seed.h"
 #include "net/file_market.h"
 #include "crypto/sha3.h"
+#include "platform/time_compat.h"
 
 #include <fcntl.h>
 #include <stdint.h>
@@ -25,6 +26,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 /* Deterministic content: SQLite magic in the first 16 bytes (or 0xEE garbage
  * when !magic_ok), then a fixed byte pattern. */
@@ -572,6 +575,84 @@ static int test_background_scan_worker_stack(void)
     return failures;
 }
 
+static _Atomic bool g_scan_stop_second_done;
+static void *scan_fixture_stop(void *arg)
+{
+    rom_seed_stop_scan();
+    if (arg)
+        atomic_store(&g_scan_stop_second_done, true);
+    return NULL;
+}
+
+static bool test_scan_join_barrier(const char *dir)
+{
+    rom_seed_scan_test_hold(true);
+    rom_seed_scan_test_hold_join(true);
+    atomic_store(&g_scan_stop_second_done, false);
+    rom_seed_start_scan(dir, 0);
+    pthread_t first, second;
+    bool first_started = pthread_create(&first, NULL, scan_fixture_stop, NULL) == 0;
+    bool second_started = false;
+    for (int i = 0; first_started && i < 2000 && !rom_seed_scan_test_join_entered(); i++)
+        platform_sleep_ms(1);
+    if (first_started && rom_seed_scan_test_join_entered())
+        second_started = pthread_create(&second, NULL, scan_fixture_stop, &g_scan_stop_second_done) == 0;
+    for (int i = 0; second_started && i < 2000 && !rom_seed_scan_test_join_waiting(); i++)
+        platform_sleep_ms(1);
+    bool ok = first_started && second_started && rom_seed_scan_test_join_waiting() &&
+              !atomic_load(&g_scan_stop_second_done);
+    rom_seed_scan_test_hold_join(false);
+    if (first_started) pthread_join(first, NULL);
+    if (second_started) pthread_join(second, NULL);
+    rom_seed_scan_test_hold(false);
+    return ok && atomic_load(&g_scan_stop_second_done);
+}
+
+static int test_background_scan_status(void)
+{
+    int failures = 0;
+    TEST("rom_seed: background scan exposes lifecycle status") {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "romseed_status", "ok");
+        rom_seed_stop_scan();
+        rom_seed_set_enabled(true);
+        struct rom_seed_scan_status status;
+        rom_seed_scan_test_fail_start(true);
+        rom_seed_start_scan(dir, 0);
+        ASSERT(rom_seed_scan_status(dir, &status));
+        ASSERT(status.state == ROM_SEED_SCAN_START_FAILED);
+        uint64_t failed_generation = status.generation;
+        char too_long[1200];
+        memset(too_long, 'x', sizeof(too_long) - 1);
+        too_long[sizeof(too_long) - 1] = '\0';
+        rom_seed_start_scan(too_long, 0);
+        ASSERT(rom_seed_scan_status(dir, &status) && status.generation == failed_generation &&
+               status.state == ROM_SEED_SCAN_START_FAILED);
+        rom_seed_scan_test_hold(true);
+        rom_seed_start_scan(dir, 0);
+        ASSERT(rom_seed_scan_status(dir, &status));
+        ASSERT(status.state == ROM_SEED_SCAN_RUNNING && status.generation > failed_generation);
+        rom_seed_stop_scan();
+        rom_seed_scan_test_hold(false);
+        ASSERT(rom_seed_scan_status(dir, &status));
+        ASSERT(status.state == ROM_SEED_SCAN_CANCELLED);
+        rom_seed_start_scan(dir, 0);
+        for (int i = 0; i < 2000; i++) {
+            ASSERT(rom_seed_scan_status(dir, &status));
+            if (status.state != ROM_SEED_SCAN_RUNNING) break;
+            platform_sleep_ms(1); /* real-clock: ROM scanner completion uses kernel worker scheduling */
+        }
+        ASSERT(status.state == ROM_SEED_SCAN_ENDED);
+        rom_seed_stop_scan();
+        ASSERT(test_scan_join_barrier(dir));
+        test_rm_rf_recursive(dir);
+        PASS();
+    } _test_next:;
+    rom_seed_scan_test_hold(false);
+    rom_seed_stop_scan();
+    return failures;
+}
+
 int test_rom_seed(void)
 {
     int failures = 0;
@@ -584,5 +665,6 @@ int test_rom_seed(void)
     failures += test_bundles_subdir_scan();
     failures += test_bundles_path_shape_refused();
     failures += test_background_scan_worker_stack();
+    failures += test_background_scan_status();
     return failures;
 }

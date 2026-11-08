@@ -523,13 +523,18 @@ size_t onion_stream_connect_plan_for_test(int connect_timeout_ms,
 }
 #endif
 
+static bool onion_dial_cancelled(bool (*cancelled)(void *), void *ctx)
+{
+    return thread_registry_shutdown_requested() || (cancelled && cancelled(ctx));
+}
+
 /* Polls until the bridge reaches CONNECTED, goes terminal, or the budget
  * runs out. Returns the milliseconds waited. */
 static int onion_bridge_wait_circuit(struct onion_bridge *b,
-                                     int connect_timeout_ms)
+    int connect_timeout_ms, bool (*cancelled)(void *), void *ctx)
 {
     int waited_ms = 0;
-    while (!thread_registry_shutdown_requested() &&
+    while (!onion_dial_cancelled(cancelled, ctx) &&
            atomic_load(&b->phase) != BRIDGE_CONNECTED &&
            !atomic_load(&b->terminal_seen) &&
            waited_ms < connect_timeout_ms) {
@@ -559,10 +564,11 @@ static bool onion_stream_connect_once(const struct net_service *svc,
                                       zcl_socket_t *sock_out,
                                       int connect_timeout_ms,
                                       const struct onion_stream_backend *be,
-                                      struct onion_stream_dial_record *record)
+                                      struct onion_stream_dial_record *record,
+                                      bool (*cancelled)(void *), void *ctx)
 {
     *sock_out = ZCL_INVALID_SOCKET;
-    if (thread_registry_shutdown_requested()) return false;
+    if (onion_dial_cancelled(cancelled, ctx)) return false;
 
     char host[ONION_V3_ADDRESS_LEN + 1];
     if (!onion_v3_address_from_pubkey(svc->addr.torv3, host))
@@ -603,7 +609,7 @@ static bool onion_stream_connect_once(const struct net_service *svc,
     snprintf(b->desc, sizeof(b->desc), "%s:%u", host, svc->port);
 
     int64_t started_ms = platform_time_monotonic_ms();
-    if (thread_registry_shutdown_requested()) {
+    if (onion_dial_cancelled(cancelled, ctx)) {
         pthread_mutex_destroy(&b->mu);
         free(b->rxq);
         free(b);
@@ -629,9 +635,9 @@ static bool onion_stream_connect_once(const struct net_service *svc,
 
     /* Wait for the circuit: CONNECTED wins, a terminal event or the
      * connect budget ends the attempt. */
-    int waited_ms = onion_bridge_wait_circuit(b, connect_timeout_ms);
+    int waited_ms = onion_bridge_wait_circuit(b, connect_timeout_ms, cancelled, ctx);
 
-    if (thread_registry_shutdown_requested()) {
+    if (onion_dial_cancelled(cancelled, ctx)) {
         onion_bridge_teardown(b, &app_fd);
         return false;
     }
@@ -645,6 +651,11 @@ static bool onion_stream_connect_once(const struct net_service *svc,
      * the retry budget on a fresh one. */
     if (onion_bridge_circuit_failed(b, record, &app_fd, waited_ms))
         return false;
+
+    if (onion_dial_cancelled(cancelled, ctx)) {
+        onion_bridge_teardown(b, &app_fd);
+        return false;
+    }
 
     onion_stream_dial_bump(record, ONION_DIAL_CIRCUIT_READY, 1);
     LOG_INFO("onion", "onion stage=circuit_ready target=%s build_ms=%lld",
@@ -667,15 +678,16 @@ static bool onion_stream_connect_once(const struct net_service *svc,
 static bool onion_stream_connect_backend(const struct net_service *svc,
                                          zcl_socket_t *sock_out,
                                          int connect_timeout_ms,
-                                         const struct onion_stream_backend *be)
+                                         const struct onion_stream_backend *be,
+                                         bool (*cancelled)(void *), void *ctx)
 {
     struct onion_stream_dial_record *record = onion_stream_dial_begin(svc);
     int budgets[2];
     size_t attempts = onion_stream_connect_plan(connect_timeout_ms, budgets);
-    for (size_t i = 0; i < attempts && !thread_registry_shutdown_requested(); i++) {
-        if (onion_stream_connect_once(svc, sock_out, budgets[i], be, record))
+    for (size_t i = 0; i < attempts && !onion_dial_cancelled(cancelled, ctx); i++) {
+        if (onion_stream_connect_once(svc, sock_out, budgets[i], be, record, cancelled, ctx))
             return true;
-        if (i + 1 < attempts && !thread_registry_shutdown_requested())
+        if (i + 1 < attempts && !onion_dial_cancelled(cancelled, ctx))
             LOG_WARN("onion", "first onion circuit attempt failed; "
                               "retrying once with a fresh stream "
                               "(remaining_budget_ms=%d)", budgets[i + 1]);
@@ -685,9 +697,10 @@ static bool onion_stream_connect_backend(const struct net_service *svc,
 }
 
 #ifdef ZCL_TESTING
-bool onion_stream_connect_backend_for_test(
+bool onion_stream_connect_backend_cancelable_for_test(
     const struct net_service *svc, zcl_socket_t *sock_out,
-    int connect_timeout_ms, const struct onion_stream_backend *backend)
+    int connect_timeout_ms, const struct onion_stream_backend *backend,
+    bool (*cancelled)(void *), void *ctx)
 {
     if (!sock_out)
         LOG_FAIL("onion", "onion_stream_connect: NULL sock_out");
@@ -697,7 +710,14 @@ bool onion_stream_connect_backend_for_test(
         LOG_FAIL("onion", "onion_stream_connect: incomplete test backend");
 
     return onion_stream_connect_backend(svc, sock_out, connect_timeout_ms,
-                                        backend);
+                                        backend, cancelled, ctx);
+}
+bool onion_stream_connect_backend_for_test(
+    const struct net_service *svc, zcl_socket_t *sock_out,
+    int connect_timeout_ms, const struct onion_stream_backend *backend)
+{
+    return onion_stream_connect_backend_cancelable_for_test(svc, sock_out,
+        connect_timeout_ms, backend, NULL, NULL);
 }
 #endif
 
@@ -718,9 +738,9 @@ static void note_last_dial_svc(const struct net_service *svc,
     onion_stream_note_last_dial(target[0] ? target : NULL, result);
 }
 
-bool onion_stream_connect(const struct net_service *svc,
-                          zcl_socket_t *sock_out,
-                          int connect_timeout_ms)
+bool onion_stream_connect_cancelable(const struct net_service *svc,
+    zcl_socket_t *sock_out, int connect_timeout_ms,
+    bool (*cancelled)(void *), void *ctx)
 {
     if (!sock_out)
         LOG_FAIL("onion", "onion_stream_connect: NULL sock_out");
@@ -745,5 +765,11 @@ bool onion_stream_connect(const struct net_service *svc,
     }
 
     return onion_stream_connect_backend(svc, sock_out, connect_timeout_ms,
-                                        &g_dynhost_backend);
+                                        &g_dynhost_backend, cancelled, ctx);
+}
+
+bool onion_stream_connect(const struct net_service *svc, zcl_socket_t *sock_out,
+                          int connect_timeout_ms)
+{
+    return onion_stream_connect_cancelable(svc, sock_out, connect_timeout_ms, NULL, NULL);
 }

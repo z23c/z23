@@ -13,6 +13,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -79,13 +80,12 @@ static bool named_same(int dir, const char *name, const struct stat *expected)
 static bool pin_file(int dir, const char *leaf, struct platform_positioned_file *file,
                      struct stat *saved)
 {
-    char path[96];
-    if (!platform_dirfd_child_path(path, sizeof(path), dir, leaf) ||
-        !platform_positioned_file_open(file, path)) {
-        LOG_WARN("wallet_history", "cannot open retained history file %s", leaf);
+    int fd = openat(dir, leaf, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+    if (fd < 0) {
+        LOG_WARN("wallet_history", "cannot open retained history file %s: %s", leaf, strerror(errno));
         return false;
     }
-    int fd = (int)platform_positioned_file_native_fd(file);
+    file->native = (uintptr_t)fd;
     return !fstat(fd, saved) && S_ISREG(saved->st_mode) && saved->st_uid == geteuid() &&
         saved->st_nlink == 1 && (saved->st_mode & 077) == 0 && saved->st_size > 0 &&
         named_same(dir, leaf, saved);
@@ -300,3 +300,104 @@ struct zcl_result wallet_history_capability_acquire(struct wallet_history_capabi
     return wallet_history_capability_acquire_cancelable(cap, parent, retained_root, lease, leaf, lock, count,
                                                          root, NULL, NULL);
 }
+
+#if defined(__linux__)
+static bool bound_names(const char *path, const uint8_t snapshot[32], const uint8_t history[32],
+    char parent[PATH_MAX], char root[160], char lock[160])
+{
+    if (!path || path[0] != '/' || !snapshot || !history) return false;
+    const char *slash = strrchr(path, '/');
+    if (!slash || slash == path || !slash[1]) return false;
+    size_t length = (size_t)(slash - path);
+    if (length >= PATH_MAX) return false;
+    char identity[130];
+    zcl_hex_encode(snapshot, 32, identity);
+    identity[64] = '-';
+    zcl_hex_encode(history, 32, identity + 65);
+    int root_length = snprintf(root, 160, "history-%s", identity);
+    int lock_length = snprintf(lock, 160, ".history-%s-lock", identity);
+    if (root_length <= 0 || root_length >= 160 || lock_length <= 0 || lock_length >= 160 ||
+        strcmp(slash + 1, root)) return false;
+    memcpy(parent, path, length);
+    parent[length] = 0;
+    return true;
+}
+
+static bool bound_entry_index(const char *name, unsigned seen, unsigned *index)
+{
+    if (block_name(name, 253) && sscanf(name, "blk%5u.dat", index) == 1 &&
+        *index < 253 && seen < 253) return true;
+    LOG_WARN("wallet_history", "bound inventory entry refused: %s", name);
+    return false;
+}
+
+static bool bound_block_count(int fd, unsigned *count)
+{
+    int copy = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    DIR *dir = copy < 0 ? NULL : fdopendir(copy);
+    if (!dir) { if (copy >= 0) close(copy); return false; }
+    unsigned seen = 0, highest = 0;
+    bool ok = true;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) { if (errno) ok = false; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        unsigned index;
+        if (!bound_entry_index(entry->d_name, seen, &index)) { ok = false; break; }
+        if (index > highest) highest = index;
+        seen++;
+    }
+    if (closedir(dir)) ok = false;
+    if (ok && seen && seen == highest + 1) { *count = seen; return true; }
+    LOG_WARN("wallet_history", "bound inventory refused: seen=%u highest=%u ok=%d", seen, highest, ok);
+    return false;
+}
+
+struct zcl_result wallet_history_capability_acquire_bound(
+    struct wallet_history_capability *cap, const char *history_path,
+    const uint8_t snapshot_digest[32], const uint8_t history_root[32])
+{
+    char parent_path[PATH_MAX], root_leaf[160], lock_leaf[160];
+    if (!bound_names(history_path, snapshot_digest, history_root,
+                     parent_path, root_leaf, lock_leaf))
+        return ZCL_ERR(-1, "history capability: invalid bound path");
+    struct platform_directory_transaction parent, root, blocks;
+    struct platform_directory_lock lease;
+    platform_directory_transaction_init(&parent);
+    platform_directory_transaction_init(&root);
+    platform_directory_transaction_init(&blocks);
+    platform_directory_lock_init(&lease);
+    bool parent_open = platform_directory_transaction_open(&parent, parent_path);
+    enum platform_directory_result root_open = parent_open ?
+        platform_directory_transaction_open_child(&parent, root_leaf, false, &root) : PLATFORM_DIRECTORY_REFUSED;
+    enum platform_directory_result lock_open = root_open == PLATFORM_DIRECTORY_OK ?
+        platform_directory_lock_acquire(&parent, lock_leaf, false,
+            PLATFORM_DIRECTORY_LOCK_EXCLUSIVE, &lease) : PLATFORM_DIRECTORY_REFUSED;
+    enum platform_directory_result blocks_open = lock_open == PLATFORM_DIRECTORY_OK ?
+        platform_directory_transaction_open_child(&root, "blocks", false, &blocks) : PLATFORM_DIRECTORY_REFUSED;
+    unsigned count = 0;
+    bool counted = blocks_open == PLATFORM_DIRECTORY_OK && bound_block_count((int)blocks.native, &count);
+    bool opened = parent_open && root_open == PLATFORM_DIRECTORY_OK &&
+        lock_open == PLATFORM_DIRECTORY_OK && counted;
+    if (!opened)
+        LOG_WARN("wallet_history", "bound open refused: parent=%d root=%d lock=%d inventory=%d",
+                 parent_open, (int)root_open, (int)lock_open, counted);
+    struct zcl_result result = opened ?
+        wallet_history_capability_acquire(cap, &parent, &root, &lease, root_leaf, lock_leaf, count, history_root) :
+        ZCL_ERR(-1, "history capability: bound root, lease or inventory refused");
+    platform_directory_transaction_close(&blocks);
+    platform_directory_transaction_close(&root);
+    platform_directory_lock_release(&lease);
+    platform_directory_transaction_close(&parent);
+    return result;
+}
+#else
+struct zcl_result wallet_history_capability_acquire_bound(
+    struct wallet_history_capability *cap, const char *history_path,
+    const uint8_t snapshot_digest[32], const uint8_t history_root[32])
+{
+    (void)cap; (void)history_path; (void)snapshot_digest; (void)history_root;
+    return ZCL_ERR(-1, "history capability: unsupported host");
+}
+#endif
