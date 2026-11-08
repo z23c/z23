@@ -7,6 +7,7 @@
 #include "config/boot_fleet_roster.h"
 #include "config/boot_internal.h"
 #include "config/runtime.h"
+#include "base/cleanse.h"
 
 #include "util/fleet_role_check.h"
 #include "models/fleet_board_post.h"
@@ -17,6 +18,7 @@
 #include "util/log_macros.h"
 #include "util/sync.h"
 #include "vcs/zcode_dht_identity.h"
+#include "vcs/app_offer.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -192,6 +194,41 @@ bool boot_fleet_board_public_identity(uint8_t pubkey_out[32])
         memcpy(pubkey_out, s_pubkey, sizeof(s_pubkey));
     zcl_mutex_unlock(&s_lock);
     return ready;
+}
+
+bool boot_fleet_board_datadir_matches(const char *datadir)
+{
+    if (!datadir || !datadir[0]) return false;
+    fleet_board_lock();
+    bool matches = s_svc && s_svc->datadir && !strcmp(datadir, s_svc->datadir);
+    zcl_mutex_unlock(&s_lock);
+    return matches;
+}
+
+bool boot_fleet_board_load_existing_identity(uint8_t pubkey_out[32])
+{
+    if (!pubkey_out) return false;
+    if (boot_fleet_board_public_identity(pubkey_out)) return true;
+    char datadir[4096], why[256];
+    fleet_board_lock();
+    const char *path = s_svc ? s_svc->datadir : NULL;
+    int n = path ? snprintf(datadir, sizeof(datadir), "%s", path) : 0;
+    zcl_mutex_unlock(&s_lock);
+    if (n <= 0 || (size_t)n >= sizeof(datadir)) return false;
+    uint8_t seed[32] = {0}, pubkey[32];
+    bool ok = vcs_zcode_dht_online_key_load(datadir, seed, pubkey, why, sizeof(why));
+    if (ok) {
+        fleet_board_lock();
+        if (!s_identity_ready) {
+            memcpy(s_seed, seed, sizeof(s_seed));
+            memcpy(s_pubkey, pubkey, sizeof(s_pubkey));
+            s_identity_ready = true;
+        }
+        memcpy(pubkey_out, s_pubkey, 32);
+        zcl_mutex_unlock(&s_lock);
+    }
+    memory_cleanse(seed, sizeof(seed));
+    return ok;
 }
 
 /* Caller holds the lock. */
@@ -704,6 +741,41 @@ static enum fleet_board_result fleet_board_review_publish(
 /* Longest a local publish waits for the node's own open transaction or write
  * lock to clear before it reports BOARD_BUSY. Peer ingest never waits. */
 #define FLEET_BOARD_PUBLISH_WAIT_MS 100
+
+static bool fleet_board_is_app_offer(const struct fleet_board_post *post)
+{
+    struct zcl_app_offer offer;
+    return post && post->kind == FLEET_BOARD_KIND_OFFER &&
+           post->scope == FLEET_BOARD_SCOPE_PUBLIC &&
+           strcmp(post->room, "apps") == 0 &&
+           zcl_app_offer_parse(post->text, post->text_len, &offer);
+}
+
+enum fleet_board_result boot_fleet_board_sign_app_offer(struct fleet_board_post *post)
+{
+    if (!fleet_board_is_app_offer(post)) return FLEET_BOARD_ERR_ARGS;
+    return fleet_board_sign_local(post);
+}
+
+bool boot_fleet_board_validate_app_offer(const struct fleet_board_post *post,
+                                         const uint8_t local_host[32])
+{
+    return local_host && fleet_board_is_app_offer(post) &&
+           memcmp(local_host, post->host_pubkey, 32) == 0 &&
+           fleet_board_post_verify(post) == FLEET_BOARD_OK;
+}
+
+enum fleet_board_result boot_fleet_board_append_app_offer_nowait(
+    struct node_db *writer, struct fleet_board_post *post,
+    const uint8_t local_host[32], int64_t now, bool *stored)
+{
+    if (stored) *stored = false;
+    if (!post || !local_host || post->kind != FLEET_BOARD_KIND_OFFER ||
+        post->scope != FLEET_BOARD_SCOPE_PUBLIC || strcmp(post->room, "apps") ||
+        memcmp(local_host, post->host_pubkey, 32) != 0)
+        return FLEET_BOARD_ERR_ARGS;
+    return db_fleet_board_post_ingest_nowait(writer, post, now, stored);
+}
 
 enum fleet_board_result boot_fleet_board_publish(
     struct fleet_board_post *post, int64_t now)

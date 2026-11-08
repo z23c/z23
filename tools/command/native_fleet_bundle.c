@@ -5,6 +5,7 @@
  *          sha256, which the fetching side recomputes. */
 
 #include "command/native_fleet_bundle.h"
+#include "vcs/app_offer.h"
 
 #include "base/safe_alloc.h"
 #include "crypto/sha256.h"
@@ -44,6 +45,11 @@ static enum zcl_fleet_bundle_status zfb_refuse(
     return ZCL_FLEET_BUNDLE_REFUSED;
 }
 
+bool zcl_fleet_bundle_peer_is_onion(const char *peer)
+{
+    return vcs_app_offer_peer_is_onion(peer);
+}
+
 static void zfb_sha256(const uint8_t *bytes, size_t len, uint8_t out[32])
 {
     struct sha256_ctx ctx;
@@ -52,38 +58,6 @@ static void zfb_sha256(const uint8_t *bytes, size_t len, uint8_t out[32])
     sha256_finalize(&ctx, out);
 }
 
-static bool zfb_onion_label(const char *peer)
-{
-    for (size_t i = 0; i < ZFB_ONION_LABEL; i++) {
-        char c = peer[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= '2' && c <= '7')))
-            return false;
-    }
-    return strncmp(peer + ZFB_ONION_LABEL, ".onion", 6) == 0;
-}
-
-static bool zfb_onion_port(const char *port)
-{
-    if (*port == '\0')
-        return true;
-    if (*port != ':' || port[1] == '\0' || strlen(port + 1) > 5u)
-        return false;
-    uint32_t value = 0;
-    for (const char *p = port + 1; *p; p++) {
-        if (*p < '0' || *p > '9')
-            return false;
-        value = value * 10u + (uint32_t)(*p - '0');
-    }
-    return value >= 1u && value <= 65535u;
-}
-
-bool zcl_fleet_bundle_peer_is_onion(const char *peer)
-{
-    if (!peer || strlen(peer) < ZFB_ONION_LABEL + 6u)
-        return false;
-    return zfb_onion_label(peer) &&
-           zfb_onion_port(peer + ZFB_ONION_LABEL + 6);
-}
 
 /* ── offer ───────────────────────────────────────────────────────── */
 

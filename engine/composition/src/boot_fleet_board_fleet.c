@@ -15,6 +15,8 @@
 // wire. Failure logging happens here, with the refusal named.
 
 #include "config/boot_fleet_board.h"
+#include "config/boot_app_host.h"
+#include "vcs/package_store.h"
 #include "config/boot_fleet_roster.h"
 
 #include "config/boot_internal.h"
@@ -1287,6 +1289,8 @@ static void board_tick(struct liveness_contract *contract)
     board_lock();
     g_last_pull = now;
     board_unlock();
+    struct vcs_package_store *host_store = vcs_package_store_global();
+    if (host_store) (void)boot_app_host_tick(ndb, host_store, now);
     board_publish_roster_due(ndb, now);
     board_pull_paired_peers(now);
     (void)board_pull_roster_peers(svc, ndb, now);

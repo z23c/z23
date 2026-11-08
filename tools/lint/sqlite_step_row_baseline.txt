@@ -95,7 +95,7 @@ engine/models/src/build_fabric.c 4
 engine/models/src/build_proof_event.c 5
 engine/models/src/database_modes.c 2
 engine/models/src/file_offer.c 3
-engine/models/src/fleet_board_post.c 10
+engine/models/src/fleet_board_post.c 9
 engine/models/src/fleet_board_post_mutation.c 4
 engine/models/src/fleet_board_post_scan.c 5
 engine/models/src/fleet_board_post_wiki.c 7

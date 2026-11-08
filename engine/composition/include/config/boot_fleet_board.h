@@ -108,6 +108,10 @@ bool boot_fleet_board_identity(uint8_t seed_out[32], uint8_t pubkey_out[32],
  * exposing the seed. Read-only status uses this so observation never creates
  * a host key. */
 bool boot_fleet_board_public_identity(uint8_t pubkey_out[32]);
+/* Load an existing online identity without creating one; for resuming a
+ * previously authorized local task after restart. */
+bool boot_fleet_board_load_existing_identity(uint8_t pubkey_out[32]);
+bool boot_fleet_board_datadir_matches(const char *datadir);
 
 #ifdef ZCL_TESTING
 /* Deterministic rate-limit seams for adversarial churn tests. */
@@ -125,6 +129,19 @@ bool boot_fleet_board_inventory_cursor_commit_for_testing(
 enum fleet_board_result boot_fleet_board_publish(
     struct fleet_board_post *post, int64_t now);
 
+/* Internal app-host renewal: persist the canonical signed wire before the
+ * guarded append. The caller provides its exclusive zero-busy-timeout runtime
+ * writer, and announces only after releasing the package-store guard. Obtain
+ * local_host from boot_fleet_board_public_identity and validate the immutable
+ * post before entering that guard. */
+struct node_db;
+enum fleet_board_result boot_fleet_board_sign_app_offer(struct fleet_board_post *post);
+bool boot_fleet_board_validate_app_offer(const struct fleet_board_post *post,
+                                         const uint8_t local_host[32]);
+enum fleet_board_result boot_fleet_board_append_app_offer_nowait(
+    struct node_db *writer, struct fleet_board_post *post,
+    const uint8_t local_host[32], int64_t now, bool *stored);
+
 /* Receiver-local atomic wiki append. Sign with this host's existing identity,
  * store through the canonical board writer, and announce only committed new
  * objects. A retained replay returns the original signed revision. */
@@ -140,6 +157,11 @@ struct rpc_table;
 /* Register the `fleet_board` RPC method — the node-side half of every board
  * and wiki command leaf. */
 void boot_fleet_board_register_rpc(struct rpc_table *table);
+/* Owner app-host operations dispatched by the resident board RPC. */
+struct json_value;
+bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
+                                const struct json_value *in,
+                                struct json_value *result, int64_t now);
 
 /* ── FLEET-scope carriage: the "board" mesh stream service ────────────────
  * (engine/composition/src/boot_fleet_board_fleet.c)

@@ -138,6 +138,15 @@ struct fleet_board_status {
 
 struct ar_callbacks *db_fleet_board_post_callbacks(void);
 
+enum fleet_board_lookup_status {
+    FLEET_BOARD_LOOKUP_FOUND, FLEET_BOARD_LOOKUP_ABSENT,
+    FLEET_BOARD_LOOKUP_ERROR
+};
+/* Unlike the convenience boolean lookup, unreadable or corrupt state is
+ * distinguishable from an authoritative absence. */
+enum fleet_board_lookup_status db_fleet_board_post_lookup_checked(
+    struct node_db *ndb, const uint8_t id[32], struct db_fleet_board_post *out);
+
 bool db_fleet_board_post_validate(const struct db_fleet_board_post *record,
                                   struct ar_errors *errors);
 
@@ -155,6 +164,15 @@ bool db_fleet_board_post_validate(const struct db_fleet_board_post *record,
  * process with no role checker installed: a good signature says who wrote
  * the post, never that this box agreed to keep it. */
 enum fleet_board_result db_fleet_board_post_ingest(
+    struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
+    bool *stored_out);
+
+/* The caller supplies its exclusive, already-open runtime connection with
+ * SQLite busy timeout set to zero. Refuses board-writer contention instead
+ * of waiting; uses the same validation, quotas and append as normal ingest.
+ * Storage I/O itself is not subject to a wall-clock deadline. */
+void db_fleet_board_post_prepare_nowait(void);
+enum fleet_board_result db_fleet_board_post_ingest_nowait(
     struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
     bool *stored_out);
 

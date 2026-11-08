@@ -14,6 +14,7 @@
 #include "session/fleet_wiki_entry.h"
 
 #include "util/fleet_role_check.h"
+#include "util/ar_step_readonly.h"
 #include "base/safe_alloc.h"
 #include "config/runtime.h"
 #include "json/json.h"
@@ -27,6 +28,7 @@
 #include "util/log_macros.h"
 
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -35,10 +37,17 @@ DEFINE_MODEL_CALLBACKS(fleet_board_post)
 static const uint8_t k_zero32[32] = {0};
 static zcl_mutex_t s_board_write_lock;
 static zcl_once_t s_board_write_once = ZCL_ONCE_INIT;
+static atomic_bool s_board_write_ready;
 
 static void board_write_lock_init(void)
 {
     zcl_mutex_init(&s_board_write_lock);
+    atomic_store_explicit(&s_board_write_ready, true, memory_order_release);
+}
+
+void db_fleet_board_post_prepare_nowait(void)
+{
+    (void)zcl_once_call(&s_board_write_once, board_write_lock_init);
 }
 
 void fleet_board_write_lock(void)
@@ -679,9 +688,9 @@ static enum fleet_board_result board_append_locked(
     return r;
 }
 
-enum fleet_board_result db_fleet_board_post_ingest(
+static enum fleet_board_result board_ingest(
     struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
-    bool *stored_out)
+    bool *stored_out, bool nowait)
 {
     if (stored_out)
         *stored_out = false;
@@ -701,7 +710,13 @@ enum fleet_board_result db_fleet_board_post_ingest(
     node_db_get_status(ndb, &db_status);
     if (db_status.tx_open)
         return FLEET_BOARD_ERR_BUSY;
-    fleet_board_write_lock();
+    if (nowait) {
+        if (!atomic_load_explicit(&s_board_write_ready, memory_order_acquire) ||
+            !zcl_mutex_trylock(&s_board_write_lock))
+            return FLEET_BOARD_ERR_BUSY;
+    } else {
+        fleet_board_write_lock();
+    }
     node_db_get_status(ndb, &db_status);
     if (db_status.tx_open) {
         zcl_mutex_unlock(&s_board_write_lock);
@@ -717,6 +732,20 @@ enum fleet_board_result db_fleet_board_post_ingest(
     if (r == FLEET_BOARD_OK && stored_out)
         *stored_out = true;
     return r;
+}
+
+enum fleet_board_result db_fleet_board_post_ingest(
+    struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
+    bool *stored_out)
+{
+    return board_ingest(ndb, post, now, stored_out, false);
+}
+
+enum fleet_board_result db_fleet_board_post_ingest_nowait(
+    struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
+    bool *stored_out)
+{
+    return board_ingest(ndb, post, now, stored_out, true);
 }
 
 #define FLEET_BOARD_WAIT_STEP_MS 5
@@ -1098,11 +1127,12 @@ enum fleet_board_reclaim db_fleet_board_reclaim_expired(
     return FLEET_BOARD_RECLAIM_DONE;
 }
 
-bool db_fleet_board_post_find(struct node_db *ndb, const uint8_t id[32],
-                              struct db_fleet_board_post *out)
+enum fleet_board_lookup_status db_fleet_board_post_lookup_checked(
+    struct node_db *ndb, const uint8_t id[32], struct db_fleet_board_post *out)
 {
     if (!ndb || !ndb->open || !id || !out)
-        return false;
+        return FLEET_BOARD_LOOKUP_ERROR;
+    memset(out, 0, sizeof(*out));
     struct qb q;
     qb_select(&q, QB_T_fleet_board_posts);
     qb_select_columns(&q, k_board_cols, BOARD_NCOLS);
@@ -1111,11 +1141,22 @@ bool db_fleet_board_post_find(struct node_db *ndb, const uint8_t id[32],
     if (!QB_PREPARE(ndb, &q, s)) {
         LOG_WARN("fleet.board", "post lookup prepare failed: %s",
                  qb_error(&q));
-        return false;
+        return FLEET_BOARD_LOOKUP_ERROR;
     }
-    bool found = AR_STEP_ROW(s) && fleet_board_row_read(s, out);
-    sqlite3_finalize(s);
-    return found;
+    enum zcl_step step = ar_step_checked(s, "fleet.board checked lookup", NULL);
+    enum fleet_board_lookup_status result = step == ZCL_STEP_DONE
+        ? FLEET_BOARD_LOOKUP_ABSENT : FLEET_BOARD_LOOKUP_ERROR;
+    if (step == ZCL_STEP_ROW && fleet_board_row_read(s, out))
+        result = FLEET_BOARD_LOOKUP_FOUND;
+    if (sqlite3_finalize(s) != SQLITE_OK) result = FLEET_BOARD_LOOKUP_ERROR;
+    if (result != FLEET_BOARD_LOOKUP_FOUND) memset(out, 0, sizeof(*out));
+    return result;
+}
+
+bool db_fleet_board_post_find(struct node_db *ndb, const uint8_t id[32],
+                              struct db_fleet_board_post *out)
+{
+    return db_fleet_board_post_lookup_checked(ndb, id, out) == FLEET_BOARD_LOOKUP_FOUND;
 }
 
 /* The `--open` predicate as a subquery: the set of ids that some claim or

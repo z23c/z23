@@ -14,6 +14,7 @@
 
 #include "config/boot_fleet_board.h"
 #include "boot_fleet_board_wiki_scope_internal.h"
+#include "boot_fleet_board_rpc_internal.h"
 
 #include "config/runtime.h"
 #include "base/hex.h"
@@ -38,15 +39,6 @@ static const struct json_value *fb_input(const struct json_value *params)
     return first && first->type == JSON_OBJ ? first : NULL;
 }
 
-static void fb_error(struct json_value *result, const char *code,
-                     const char *message)
-{
-    json_set_object(result);
-    json_push_kv_bool(result, "ok", false);
-    json_push_kv_str(result, "code", code);
-    json_push_kv_str(result, "message", message);
-}
-
 static void fb_refuse(struct json_value *result, enum fleet_board_result r)
 {
     fb_error(result, r == FLEET_BOARD_ERR_BUSY ? "BOARD_BUSY" : "BOARD_REFUSED",
@@ -58,28 +50,6 @@ static void fb_refuse_write(struct json_value *result, enum fleet_board_result r
     char message[640];
     fb_error(result, r == FLEET_BOARD_ERR_BUSY ? "BOARD_BUSY" : "BOARD_REFUSED",
              boot_fleet_board_write_message(r, message, sizeof(message)));
-}
-
-static const char *fb_str(const struct json_value *in, const char *key,
-                          const char *fallback)
-{
-    /* json_get_str renders a missing key as "", never NULL: without the
-     * emptiness check the fallback would never fire. */
-    const char *v = json_get_str(json_get(in, key));
-    return v[0] ? v : fallback;
-}
-
-static int64_t fb_int(const struct json_value *in, const char *key,
-                      int64_t fallback)
-{
-    const struct json_value *v = json_get(in, key);
-    return v && v->type == JSON_INT ? json_get_int(v) : fallback;
-}
-
-static bool fb_bool(const struct json_value *in, const char *key)
-{
-    const struct json_value *v = json_get(in, key);
-    return v && v->type == JSON_BOOL && json_get_bool(v);
 }
 
 /* The scope option of a wiki read: public (default) or fleet. */
@@ -1446,8 +1416,7 @@ static bool fb_dispatch_wiki(struct node_db *ndb, const char *op,
         fb_op_wiki_find(ndb, in, result);
     else if (strcmp(op, "wiki_history") == 0)
         fb_op_wiki_history(ndb, in, result);
-    else
-        return false;
+    else return false;
     return true;
 }
 
@@ -1478,6 +1447,7 @@ static bool rpc_fleet_board(const struct json_value *params, bool help,
     }
     int64_t now = (int64_t)platform_time_wall_time_t();
 
+    if (boot_app_host_rpc_dispatch(ndb, op, in, result, now)) return true;
     if (strcmp(op, "post") == 0)            fb_op_post(ndb, in, result, now);
     else if (strcmp(op, "wiki_write") == 0) fb_op_wiki_write(ndb, in, result, now);
     else if (strcmp(op, "list") == 0)       fb_op_list(ndb, in, result, now);

@@ -1,5 +1,34 @@
 /* Dynamic application mounts. App-specific children come from app.def. */
 
+ZCL_COMMAND_BRANCH("app.host", "app",
+    "Hosting", ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "app.host.status", "app.host", "", "Hosting status",
+    "Read the selected node's exact host-key and carrier hosting intent, including its consent generation.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "app,hosting,status", "zcl.app_host_status.input.v1", "zcl.app_host_status.v1",
+    "host,carrier", "host,carrier", "z23 app host status --host=KEY --carrier=ROOT",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_host_status)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.host.stop", "app.host", "", "Stop hosting",
+    "Plan and confirm stopping future renewals for an exact host, carrier and consent generation. "
+    "Does not change the carrier pin; existing public offers can remain until expiry.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "app,hosting,stop", "zcl.app_host_stop.input.v1", "zcl.app_host_stop.v1",
+    "host,carrier,generation,plan_id,confirm", "host,carrier,generation",
+    "z23 app host stop --host=KEY --carrier=ROOT --generation=1",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_host_stop)
+
 ZCL_COMMAND_READY_READ(
     "app.list", "app", "", "List apps",
     "Every installed App manifest from the local App registry (apps, count), "
@@ -33,7 +62,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_app_library)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.open", "app", "", "Open app/game",
+    "app.open", "app", "", "Open app",
     "Opens a desktop app or game by name or alias, e.g. skycombat, sky or "
     "airplane for the Sky Combat airplane game (see app list). Requires a "
     "desktop session, then either reports the verified running copy "
@@ -108,7 +137,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_app_adopt)
 
 ZCL_COMMAND_READY_READ(
-    "app.inspect", "app", "", "App manifest",
+    "app.inspect", "app", "", "Manifest",
     "One App's manifest, declared capabilities, and route bindings from the "
     "local registry; complete for that App as currently installed.", 0,
     "app,manifest,capabilities,bindings", "zcl.app_ref_input.v1",
@@ -390,7 +419,7 @@ ZCL_COMMAND_READY_COMMAND(
  * leaves in a engine/composition/commands .def — `discover` and the generated API
  * reference then carry them with no further work. */
 ZCL_COMMAND_BRANCH("app.service", "app",
-                   "Token-gated services",
+                   "Services",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -464,7 +493,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_service_status)
 
 ZCL_COMMAND_READY_READ(
-    "app.customize", "app", "", "Kept source",
+    "app.customize", "app", "", "Source",
     "Verified immutable files anchored to the locally kept version. Optional "
     "source_version selects an authorized successor in that same copy. "
     "Pages and file reads pin selection revision; changed selection refuses. "
@@ -602,7 +631,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_save)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.share-copy", "app", "", "Share copy file",
+    "app.share-copy", "app", "", "Share",
     "Owner only. Saves the copy if it has unsaved edits, then signs it with "
     "the owner's key (zcode.package.bundle.sign) and writes NAME.z23share "
     "(output, default in the current directory) with one share line and a "
@@ -622,7 +651,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_share_copy)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.publish", "app", "", "Publish an app copy",
+    "app.publish", "app", "", "Publish",
     "Plan and confirm publication of a signed copy to the public apps board.",
     ZCL_COMMAND_RESULT_BUDGET,
     "app,publish,share,catalog,board", "zcl.app_publish.input.v1",
@@ -635,7 +664,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_publish)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.get", "app", "", "Get a published app",
+    "app.get", "app", "", "Get",
     "List public offers or verify and receive an exact app identity.",
     ZCL_COMMAND_RESULT_BUDGET,
     "app,get,catalog,receive,board", "zcl.app_get.input.v1",
@@ -648,7 +677,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_get)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.receive-copy", "app", "", "Receive copy file",
+    "app.receive-copy", "app", "", "Receive",
     "Owner only; `z23 app open FILE.z23share` runs it. Verifies the file "
     "(zcode.package.bundle.verify) and, without confirm, returns its name, "
     "version, parent and short publisher fingerprint and a plan_id; it "

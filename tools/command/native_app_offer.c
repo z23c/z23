@@ -19,60 +19,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define ZAO_FIELDS 8u
 #define ZAO_PARAMS 256u
 #define ZAO_ONION_STATUS_MAX (64u * 1024u)
-
-/* ── field rules ─────────────────────────────────────────────────────── */
-
-static bool zao_hex(const char *s, size_t bytes)
-{
-    uint8_t buf[64];
-    return s && bytes <= sizeof(buf) && strlen(s) == 2u * bytes &&
-           zcl_hex_decode_lower(s, buf, bytes);
-}
-
-static bool zao_name_half(const char *s, size_t len)
-{
-    if (len == 0 || len > VCS_PACKAGE_RELEASE_NAME_HALF_MAX || s[0] == '-' ||
-        s[len - 1u] == '-')
-        return false;
-    for (size_t i = 0; i < len; i++) {
-        char c = s[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'))
-            return false;
-    }
-    return true;
-}
-
-/* publisher/package, each half [a-z0-9-], as a release name. */
-static bool zao_name(const char *s)
-{
-    const char *slash = s ? strchr(s, '/') : NULL;
-    size_t len = s ? strlen(s) : 0;
-    if (!slash || len > VCS_PACKAGE_RELEASE_NAME_MAX)
-        return false;
-    size_t head = (size_t)(slash - s);
-    return zao_name_half(s, head) &&
-           zao_name_half(slash + 1, len - head - 1u);
-}
-
-static int zao_p2p_port(const struct json_value *data)
-{
-    const struct json_value *routes = json_get(json_get(data, "port_mapping"), "routes");
-    if (!routes || routes->type != JSON_ARR) return 0;
-    int port = 0;
-    for (size_t i = 0; i < json_size(routes); ++i) {
-        const struct json_value *route = json_at(routes, i);
-        const char *name = json_get_str(json_get(route, "name"));
-        if (!name || strcmp(name, "p2p_tcp")) continue;
-        const struct json_value *value = json_get(route, "virtual_port");
-        if (port || !json_get_bool_or(route, "installed", false) || !value ||
-            value->type != JSON_INT || json_get_int(value) < 1 || json_get_int(value) > 65535) return 0;
-        port = (int)json_get_int(value);
-    }
-    return port;
-}
 
 bool zcl_app_offer_local_endpoint(char host[static 63],
                                   char endpoint[static ZCL_APP_OFFER_ONION_MAX + 1u],
@@ -82,115 +30,8 @@ bool zcl_app_offer_local_endpoint(char host[static 63],
     host[0] = endpoint[0] = '\0'; json_init(&in); json_set_object(&in);
     bool ok = zcl_app_offer_call("core.network.onion.status", &in, &inner);
     json_free(&in); if (status_read) *status_read = ok;
-    const char *address = ok ? zcl_app_inner_str(&inner, "onion_address") : NULL;
-    const char *state = ok ? zcl_app_inner_str(&inner, "bootstrap_state") : NULL;
-    int port = ok ? zao_p2p_port(&inner.data) : 0;
-    bool ready = state && !strcmp(state, "ready") &&
-        json_get_bool_or(&inner.data, "tor_ready", false) &&
-        json_get_bool_or(&inner.data, "onion_service_ready", false) &&
-        json_get_bool_or(&inner.data, "p2p_publish_ready", false) && address &&
-        strlen(address) == 62 && port && zcl_fleet_bundle_peer_is_onion(address);
-    if (ready) {
-        (void)snprintf(host, 63, "%s", address);
-        int n = snprintf(endpoint, ZCL_APP_OFFER_ONION_MAX + 1u, "%s:%d", address, port);
-        ready = n > 0 && (size_t)n <= ZCL_APP_OFFER_ONION_MAX;
-    }
+    bool ready = ok && vcs_app_offer_endpoint(&inner.data, host, endpoint);
     zcl_command_reply_free(&inner); return ready;
-}
-
-bool zcl_app_offer_valid(const struct zcl_app_offer *o)
-{
-    return o && zao_name(o->name) && zao_hex(o->root, 32) &&
-           zao_hex(o->publisher, 33) && zao_hex(o->carrier, 32) &&
-           zao_hex(o->sha256, 32) && o->size >= 1 &&
-           o->size <= (int64_t)ZCL_APP_OFFER_SIZE_MAX &&
-           strlen(o->onion) <= ZCL_APP_OFFER_ONION_MAX &&
-           zcl_fleet_bundle_peer_is_onion(o->onion);
-}
-
-bool zcl_app_offer_format(const struct zcl_app_offer *o, char *out,
-                          size_t cap)
-{
-    if (!out || cap == 0)
-        return false;
-    out[0] = '\0';
-    if (!zcl_app_offer_valid(o))
-        return false;
-    int n = snprintf(out, cap,
-                     "{\"schema\":\"" ZCL_APP_OFFER_SCHEMA "\",\"name\":\"%s\","
-                     "\"root\":\"%s\",\"publisher\":\"%s\",\"carrier\":\"%s\","
-                     "\"sha256\":\"%s\",\"size\":%lld,\"onion\":\"%s\"}",
-                     o->name, o->root, o->publisher, o->carrier, o->sha256,
-                     (long long)o->size, o->onion);
-    bool ok = n > 0 && (size_t)n < cap && (size_t)n <= ZCL_APP_OFFER_TEXT_MAX;
-    if (!ok)
-        out[0] = '\0';
-    return ok;
-}
-
-/* ── strict parse ────────────────────────────────────────────────────── */
-
-static bool zao_copy(char *dst, size_t cap, const struct json_value *v)
-{
-    const char *s = v && v->type == JSON_STR ? json_get_str(v) : NULL;
-    if (!s || strlen(s) >= cap)
-        return false;
-    (void)snprintf(dst, cap, "%s", s);
-    return true;
-}
-
-/* One key of the entry into its field; false for an unknown key, a wrong
- * type or an over-long value. */
-static bool zao_field(struct zcl_app_offer *o, const char *key,
-                      const struct json_value *v, unsigned *seen)
-{
-    static const char *const keys[ZAO_FIELDS] = {
-        "schema", "name", "root", "publisher", "carrier", "sha256", "size",
-        "onion"};
-    char schema[32];
-    char *dst[ZAO_FIELDS] = {schema, o->name, o->root, o->publisher,
-                             o->carrier, o->sha256, NULL, o->onion};
-    size_t cap[ZAO_FIELDS] = {sizeof(schema), sizeof(o->name),
-                              sizeof(o->root), sizeof(o->publisher),
-                              sizeof(o->carrier), sizeof(o->sha256), 0,
-                              sizeof(o->onion)};
-    for (unsigned i = 0; key && i < ZAO_FIELDS; i++) {
-        if (strcmp(key, keys[i]) != 0)
-            continue;
-        if (*seen & (1u << i))
-            return false;
-        *seen |= 1u << i;
-        if (!dst[i]) {
-            o->size = v->type == JSON_INT ? json_get_int(v) : 0;
-            return v->type == JSON_INT;
-        }
-        return zao_copy(dst[i], cap[i], v) &&
-               (i != 0 || strcmp(schema, ZCL_APP_OFFER_SCHEMA) == 0);
-    }
-    return false;
-}
-
-bool zcl_app_offer_parse(const char *text, size_t len,
-                         struct zcl_app_offer *o)
-{
-    struct json_value doc;
-    unsigned seen = 0;
-    if (!o)
-        return false;
-    memset(o, 0, sizeof(*o));
-    if (!text || len == 0 || len > ZCL_APP_OFFER_TEXT_MAX ||
-        memchr(text, '\0', len))
-        return false;
-    json_init(&doc);
-    bool ok = json_read(&doc, text, len) && doc.type == JSON_OBJ &&
-              doc.num_children == ZAO_FIELDS && doc.keys;
-    for (size_t i = 0; ok && i < doc.num_children; i++)
-        ok = zao_field(o, doc.keys[i], &doc.children[i], &seen);
-    json_free(&doc);
-    ok = ok && seen == (1u << ZAO_FIELDS) - 1u && zcl_app_offer_valid(o);
-    if (!ok)
-        memset(o, 0, sizeof(*o));
-    return ok;
 }
 
 /* ── one post, re-verified here ──────────────────────────────────────── */
@@ -387,11 +228,11 @@ static bool zar_target(const char *s)
 
 static bool zar_valid(const struct zcl_app_rebuild *r)
 {
-    return r && zao_hex(r->publisher, 33) && zao_hex(r->release_root, 32) &&
-        zao_hex(r->package_root, 32) && zao_hex(r->version, 32) &&
-        zao_hex(r->image, 32) && zao_hex(r->closure, 32) &&
-        zao_hex(r->environment, 32) && zao_hex(r->dependency, 32) &&
-        zao_hex(r->record, 32) && zar_target(r->target);
+    return r && vcs_app_offer_hex_valid(r->publisher, 33) && vcs_app_offer_hex_valid(r->release_root, 32) &&
+        vcs_app_offer_hex_valid(r->package_root, 32) && vcs_app_offer_hex_valid(r->version, 32) &&
+        vcs_app_offer_hex_valid(r->image, 32) && vcs_app_offer_hex_valid(r->closure, 32) &&
+        vcs_app_offer_hex_valid(r->environment, 32) && vcs_app_offer_hex_valid(r->dependency, 32) &&
+        vcs_app_offer_hex_valid(r->record, 32) && zar_target(r->target);
 }
 
 bool zcl_app_rebuild_format(const struct zcl_app_rebuild *r, char *out, size_t cap)
@@ -559,6 +400,20 @@ static bool zao_default_call(const char *path, const struct json_value *input,
     }
     if (strcmp(path, "core.network.onion.status") == 0)
         return zao_onion_status(out);
+    if (strcmp(path, ZCL_APP_HOST_ENABLE) == 0) {
+        struct json_value in, body;
+        json_init(&in); json_init(&body);
+        zcl_command_reply_init(out, "zcl.app_host_enable.v1");
+        bool built = json_copy_checked(&in, input) && json_push_kv_str(&in, "op", "app_host_enable");
+        bool called = built && zcl_native_fleet_board_call(&in, &body, out);
+        bool ok = called && json_copy_checked(&out->data, &body);
+        if (!built || (called && !ok))
+            zcl_command_reply_fail(out, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                "ALLOC", "execute", false, called, "cannot prepare or copy hosting request", "app.host.enable");
+        else if (!called) out->error.mutated = true;
+        json_free(&in); json_free(&body);
+        return ok;
+    }
     return zcl_app_inner_call(path, input, out, NULL);
 }
 

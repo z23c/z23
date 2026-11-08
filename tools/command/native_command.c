@@ -2950,6 +2950,20 @@ static bool nc_set_typed_value(struct json_value *obj, const char *key,
     return json_push_kv_str(obj, key, value);
 }
 
+/* Hosting identities are strings even when all their hex digits happen
+ * to be decimal. Reuse this leaf's represented schema before inference. */
+static bool nc_set_host_value(const struct zcl_command_spec *spec,
+                               struct json_value *obj, const char *key,
+                               const char *value)
+{
+    struct zcl_command_input_descriptor descriptor;
+    if (value && spec && spec->path && !strncmp(spec->path, "app.host.", 9) &&
+        zcl_command_registry_input_descriptor(spec, key, &descriptor) &&
+        descriptor.type == JSON_STR)
+        return json_push_kv_str(obj, key, value);
+    return nc_set_typed_value(obj, key, value);
+}
+
 static bool nc_parse_size_control(const char *value, size_t minimum,
                                   size_t maximum, size_t *out)
 {
@@ -4567,7 +4581,7 @@ static enum nc_main_flag_result nc_main_apply_flag(
                        flag_key, flag_key);
         return NC_FLAG_BAD;
     }
-    if (!nc_set_typed_value(&st->flags, flag_key, value)) {
+    if (!nc_set_host_value(st->spec, &st->flags, flag_key, value)) {
         (void)snprintf(why, why_cap,
                        "malformed, duplicate, or out-of-range --%s value",
                        flag_key);
@@ -4933,7 +4947,7 @@ static bool nc_main_map_positionals(struct nc_main_state *st, int *rc)
         }
         memcpy(key, at, klen);
         key[klen] = 0;
-        if (!nc_set_typed_value(&st->input, key, st->positional[i])) {
+        if (!nc_set_host_value(st->spec, &st->input, key, st->positional[i])) {
             json_free(&st->input);
             nc_print_error(st->spec->path, "BAD_INPUT", "normalize",
                            "could not set positional argument", key, "",

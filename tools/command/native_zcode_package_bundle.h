@@ -40,13 +40,12 @@
 #define ZCL_NATIVE_ZCODE_PACKAGE_BUNDLE_H
 
 #include "command/native_command.h"
+#include "vcs/package_share.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#define ZCL_PACKAGE_BUNDLE_MAGIC "Z23SHARE"
-#define ZCL_PACKAGE_BUNDLE_VERSION 1u
 #define ZCL_PACKAGE_BUNDLE_SUFFIX ".z23share"
 #define ZCL_PACKAGE_RECEIVE_TRUST_DIR "zcode/received"
 #define ZCL_PACKAGE_RECEIVE_TRUST_SCHEMA "zcl.zcode_package_receive_trust.v1"
@@ -61,15 +60,6 @@ struct zcl_package_receive_trust {
 };
 
 /* The wires one share file carries; borrowed, never freed here. */
-struct zcl_package_bundle_wires {
-    const uint8_t *release;
-    size_t release_len;
-    const uint8_t *manifest;
-    size_t manifest_len;
-    const uint8_t *recipe;
-    size_t recipe_len;
-};
-
 /* Write one share file at output (exclusive create; an existing path is
  * refused): the wires plus the saved tree of the ZVCS store in copy_dir.
  * Fails the reply with SHARE_FILE_* and returns false on refusal. */

@@ -18,6 +18,8 @@
 #include "command/native_zcode_package_bundle.h"
 #include "command/native_zcode_package_copy.h"
 #include "config/command_catalog.h"
+#include "config/boot_app_host.h"
+#include "crypto/sha256.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "mcp/mcp_policy.h"
@@ -25,6 +27,8 @@
 #include "plugin/plugin_pack.h"
 #include "vcs/package_prepare.h"
 #include "vcs/package_release.h"
+#include "vcs/bundle_carry.h"
+#include "vcs/package_store.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -359,6 +363,52 @@ static int zpb_alice_signs(struct zpb_world *w)
     return failures;
 }
 
+static bool zpb_fixture_offer(const uint8_t *bytes, size_t len, struct zcl_app_offer *offer)
+{
+    struct vcs_package_share share = {0}; const char *reason = NULL;
+    uint8_t carrier[32], digest[32]; struct sha256_ctx hash;
+    bool ok = vcs_bundle_root_of(bytes, len, carrier) == VCS_BUNDLE_OK &&
+         vcs_package_share_load(&share, bytes, len, &reason) &&
+         vcs_package_share_check_source(&share, &reason);
+    if (ok) {
+        memset(offer, 0, sizeof(*offer));
+        sha256_init(&hash); sha256_write(&hash, bytes, len); sha256_finalize(&hash, digest);
+        zcl_hex_encode(carrier, 32, offer->carrier); zcl_hex_encode(digest, 32, offer->sha256);
+        (void)snprintf(offer->name, sizeof(offer->name), "%s", share.release.name);
+        zcl_hex_encode(share.release.package_root, 32, offer->root);
+        zcl_hex_encode(share.release.publisher_pubkey, 33, offer->publisher);
+        (void)snprintf(offer->onion, sizeof(offer->onion), "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion");
+        offer->size = (int64_t)len;
+    }
+    vcs_package_share_cleanup(&share);
+    return ok;
+}
+
+/* Reuse the real saved-copy/signing journey for isolated host lifecycle tests.
+ * On success the caller owns fixture_root and removes it after use. */
+bool test_app_host_fixture_create(char *fixture_root, size_t root_cap,
+                                  char *share_path, size_t share_cap,
+                                  struct zcl_app_offer *offer)
+{
+    struct zpb_world w = {0};
+    size_t len = 0;
+    uint8_t *bytes = NULL;
+    chain_params_select(CHAIN_MAIN);
+    bool ok = fixture_root && share_path && offer && zpb_world_init(&w) &&
+              zpb_alice_signs(&w) == 0 && strlen(w.root) < root_cap &&
+              strlen(w.share_file) < share_cap;
+    if (ok) bytes = zcl_native_source_bundle_read(w.share_file, &len);
+    ok = ok && bytes && zpb_fixture_offer(bytes, len, offer);
+    if (ok) {
+        (void)snprintf(fixture_root, root_cap, "%s", w.root);
+        (void)snprintf(share_path, share_cap, "%s", w.share_file);
+    }
+    free(bytes);
+    if (w.saved_home[0]) (void)setenv("HOME", w.saved_home, 1);
+    if (!ok && w.root[0]) (void)test_rm_rf_recursive(w.root);
+    return ok;
+}
+
 static void zpb_receive_input_at_day(struct zpb_leaf *l, const char *file,
     const char *datadir, const char *destination, int day)
 {
@@ -461,6 +511,103 @@ static bool zpb_trust_recorded(const struct zpb_world *w,
            memcmp(trust.package_root, package, 32) == 0;
 }
 
+/* The reusable verifier must agree with the command on the signed identity
+ * and must refuse a forged publisher even if the rest of the file is intact. */
+static bool zpb_shared_equivalence(const struct zpb_world *w)
+{
+    size_t len = 0;
+    uint8_t *bytes = zcl_native_source_bundle_read(w->share_file, &len);
+    struct vcs_package_share share = {0};
+    const char *reason = NULL;
+    char publisher[67], root[65], release[65];
+    memset(&share, 0xa5, sizeof(share));
+    bool ok = !vcs_package_share_load(&share, NULL, 0, NULL);
+    vcs_package_share_cleanup(&share);
+    ok = ok && bytes && vcs_package_share_load(&share, bytes, len, &reason) &&
+         vcs_package_share_check_source(&share, &reason) &&
+         !vcs_package_share_check_source(&share, &reason);
+    if (ok) {
+        zcl_hex_encode(share.release.publisher_pubkey, 33, publisher);
+        zcl_hex_encode(share.release.package_root, 32, root);
+        zcl_hex_encode(share.release_id, 32, release);
+        ok = strcmp(publisher, w->fingerprint) == 0 &&
+             strcmp(root, w->shared_package) == 0 &&
+             strcmp(release, w->shared_release) == 0;
+    }
+    size_t at = 0, manifest_at = 0;
+    if (ok) {
+        manifest_at = (size_t)(share.wires.manifest - bytes);
+        for (; at + 33 <= len; at++)
+            if (memcmp(bytes + at, share.release.publisher_pubkey, 33) == 0) break;
+        ok = at + 33 <= len;
+    }
+    vcs_package_share_cleanup(&share);
+    if (ok) {
+        uint8_t original = bytes[manifest_at];
+        bytes[manifest_at] ^= 0xffu;
+        ok = !vcs_package_share_load(&share, bytes, len, &reason) &&
+             !vcs_package_share_check_source(&share, &reason);
+        vcs_package_share_cleanup(&share);
+        bytes[manifest_at] = original;
+    }
+    if (ok) {
+        bytes[at + 1] ^= 1u;
+        ok = !vcs_package_share_load(&share, bytes, len, &reason);
+        vcs_package_share_cleanup(&share);
+    }
+    free(bytes);
+    return ok;
+}
+
+static bool zpb_host_negatives(struct vcs_package_store *store, struct zcl_app_offer *offer,
+                               const uint8_t carrier[32], const char *publisher)
+{
+    uint64_t generation = 0;
+    bool ok = boot_app_host_verify_carrier(store, offer, &generation) && generation != 0;
+    char original = offer->sha256[0];
+    offer->sha256[0] = original == '0' ? '1' : '0';
+    ok = ok && !boot_app_host_verify_carrier(store, offer, &generation);
+    offer->sha256[0] = original;
+    original = offer->root[0];
+    offer->root[0] = original == '0' ? '1' : '0';
+    ok = ok && !boot_app_host_verify_carrier(store, offer, &generation);
+    offer->root[0] = original;
+    offer->publisher[3] = offer->publisher[3] == '0' ? '1' : '0';
+    ok = ok && !boot_app_host_verify_carrier(store, offer, &generation);
+    (void)snprintf(offer->publisher, sizeof(offer->publisher), "%s", publisher);
+    return ok && vcs_package_store_pin(store, carrier, false) == VCS_PACKAGE_STORE_OK &&
+           !boot_app_host_verify_carrier(store, offer, &generation);
+}
+
+static bool zpb_host_carrier(const struct zpb_world *w)
+{
+    char datadir[800];
+    (void)snprintf(datadir, sizeof(datadir), "%s/host-store", w->root);
+    struct vcs_package_store *store = vcs_package_store_open(datadir, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    size_t len = 0;
+    uint8_t *bytes = zcl_native_source_bundle_read(w->share_file, &len);
+    uint8_t carrier[32], digest[32];
+    struct zcl_app_offer offer = {0}; struct sha256_ctx hash;
+    struct vcs_package_share share = {0}; const char *reason = NULL;
+    bool ok = store && bytes && vcs_bundle_put_to_no_evict(store, bytes, len, carrier) == VCS_BUNDLE_OK &&
+              vcs_package_store_pin(store, carrier, true) == VCS_PACKAGE_STORE_OK &&
+              vcs_package_share_load(&share, bytes, len, &reason);
+    if (ok) {
+        sha256_init(&hash); sha256_write(&hash, bytes, len); sha256_finalize(&hash, digest);
+        zcl_hex_encode(carrier, 32, offer.carrier); zcl_hex_encode(digest, 32, offer.sha256);
+        (void)snprintf(offer.name, sizeof(offer.name), "%s", share.release.name);
+        (void)snprintf(offer.root, sizeof(offer.root), "%s", w->shared_package);
+        (void)snprintf(offer.publisher, sizeof(offer.publisher), "%s", w->fingerprint);
+        (void)snprintf(offer.onion, sizeof(offer.onion), "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion");
+        offer.size = (int64_t)len;
+        ok = zpb_host_negatives(store, &offer, carrier, w->fingerprint);
+    }
+    vcs_package_share_cleanup(&share);
+    if (store) vcs_package_store_close(store);
+    free(bytes);
+    return ok;
+}
+
 static int zpb_bob_receives(const struct zpb_world *w)
 {
     int failures = 0;
@@ -469,6 +616,8 @@ static int zpb_bob_receives(const struct zpb_world *w)
         struct zpb_leaf l;
         struct stat st;
         ASSERT(zpb_as(w->bob_home));
+        ASSERT(zpb_shared_equivalence(w));
+        ASSERT(zpb_host_carrier(w));
         zpb_open(&l);
         (void)json_push_kv_str(&l.in, "file", w->share_file);
         ASSERT(zpb_pass("zcode.package.bundle.verify", &l));

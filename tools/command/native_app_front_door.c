@@ -229,12 +229,26 @@ static bool fd_target(struct fd_run *r)
     return ok;
 }
 
+static void fd_print_host_generation(struct fd_run *r, const char *prefix)
+{
+    const struct json_value *generation = json_get(&r->reply.data, "hosting_generation");
+    if (generation && generation->type == JSON_INT)
+        (void)fprintf(r->out, "%shosting_generation: %lld\n", prefix, (long long)json_get_int(generation));
+}
+
 static void fd_partial_data(struct fd_run *r)
 {
     static const char *const keys[] = {"copy", "destination", "rebuild_report", "rebuild_retry",
-                                       "hosting_status", "hosting_retry", "hosting_retry_note"};
+                                       "hosting_status", "hosting_host", "hosting_carrier",
+                                       "hosting_status_command", "hosting_stop_command", "hosting_retry", "hosting_retry_note"};
+    const struct json_value *pid = json_get(&r->reply.data, "pid");
+    if (pid && pid->type == JSON_INT && json_get_int(pid) > 0)
+        (void)fprintf(r->out, "opened %s pid %lld\n",
+                      fd_str(r, "copy") ? fd_str(r, "copy") : r->target,
+                      (long long)json_get_int(pid));
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i)
         if (fd_str(r, keys[i])) (void)fprintf(r->out, "%s: %s\n", keys[i], fd_str(r, keys[i]));
+    fd_print_host_generation(r, "");
 }
 
 static int fd_refused(struct fd_run *r)
@@ -297,7 +311,7 @@ static void fd_question(const struct fd_run *r, char *q, size_t cap)
                        fd_str(r, "package_root") ? fd_str(r, "package_root")
                                                  : "?",
                        fd_str(r, "copy") ? fd_str(r, "copy") : "a copy",
-                       strcmp(r->verb->verb, "get") == 0 ? "; a fresh build will be reported publicly; attempt to pin the carrier and, if your onion is ready, post a public host offer for 24 hours" : "");
+                       strcmp(r->verb->verb, "get") == 0 ? "; a fresh build will be reported publicly; pin the carrier and renew public offers while this node runs; stopping hosting leaves the pin and existing offers until expiry" : "");
     else if (strcmp(r->verb->verb, "copy") == 0)
         (void)snprintf(q, cap, "Make your own copy of %s as %s?", r->target,
                        fd_str(r, "copy_name") ? fd_str(r, "copy_name")
@@ -350,7 +364,8 @@ static void fd_print_done(struct fd_run *r)
     static const char *const keys[] = {
         "copy", "share_line", "publisher_fingerprint", "package_root",
         "post_id", "image_sha3", "image_path", "log", "next",
-        "rebuild_report", "rebuild_count_status", "rebuild_retry", "hosting_status", "hosting_post_id", "hosting_retry", "hosting_retry_note"};
+        "rebuild_report", "rebuild_count_status", "rebuild_retry", "hosting_status", "hosting_host",
+        "hosting_carrier", "hosting_status_command", "hosting_stop_command", "hosting_retry", "hosting_retry_note"};
     const struct json_value *pid = json_get(&r->reply.data, "pid");
     if (pid && pid->type == JSON_INT)
         (void)fprintf(r->out, "opened %s pid %lld\n",
@@ -362,6 +377,7 @@ static void fd_print_done(struct fd_run *r)
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
         if (fd_str(r, keys[i]))
             (void)fprintf(r->out, "  %s: %s\n", keys[i], fd_str(r, keys[i]));
+    fd_print_host_generation(r, "  ");
     if (fd_str(r, "preview"))
         (void)fprintf(r->out, "  %s\n", fd_str(r, "preview"));
     const struct json_value *count = json_get(&r->reply.data, "matching_rebuild_keys");

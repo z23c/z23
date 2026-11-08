@@ -9,6 +9,7 @@
 #include "config/command_catalog.h"
 #include "kernel/command_registry.h"
 #include "sha3/sha3.h"
+#include "vcs/app_offer.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -135,14 +136,7 @@ void zcl_app_push_publisher(struct json_value *d, const char *full)
 void zcl_app_plan_id(const char *domain, const char *const *parts,
                      size_t count, uint8_t out[32])
 {
-    struct sha3_256_ctx ctx;
-    sha3_256_init(&ctx);
-    sha3_256_write(&ctx, (const uint8_t *)domain, strlen(domain) + 1u);
-    for (size_t i = 0; i < count; i++) {
-        const char *p = parts[i] ? parts[i] : "";
-        sha3_256_write(&ctx, (const uint8_t *)p, strlen(p) + 1u);
-    }
-    sha3_256_finalize(&ctx, out);
+    vcs_app_plan_hash(domain, parts, count, out);
 }
 
 static bool app_hint_bytes(char **out, size_t *left, const char *text, size_t n)

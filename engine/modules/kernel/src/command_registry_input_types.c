@@ -1235,7 +1235,27 @@ static bool cr_app_edit_text_ok(const struct json_value *value)
         zutf8_validate(text);
 }
 
-bool zcl_command_registry_input_descriptor(
+static bool cr_app_host_descriptor(const struct zcl_command_spec *spec,
+                                    const char *key,
+                                    struct zcl_command_input_descriptor *out)
+{
+    bool stop = !strcmp(spec->path, "app.host.stop");
+    if (!stop && strcmp(spec->path, "app.host.status")) return false;
+    if (stop && !strcmp(key, "generation")) {
+        out->type = JSON_INT;
+        out->minimum = 1;
+        out->maximum = INT64_MAX - 1;
+        return true;
+    }
+    if (strcmp(key, "host") && strcmp(key, "carrier") && strcmp(key, "plan_id"))
+        return false;
+    out->type = JSON_STR;
+    /* The handler additionally requires exact hexadecimal identities. */
+    out->max_bytes = zcl_command_registry_input_str_max(key);
+    return true;
+}
+
+static bool cr_general_descriptor(
     const struct zcl_command_spec *spec, const char *key,
     struct zcl_command_input_descriptor *out)
 {
@@ -1244,24 +1264,6 @@ bool zcl_command_registry_input_descriptor(
         "after", "after_epoch", "timeout_ms", "heartbeat_ms",
         "before_seq", "after_seq"
     };
-    if (!out)
-        return false;
-    memset(out, 0, sizeof(*out));
-    if (!cr_descriptor_declared(spec, key))
-        return false;
-    if (cr_app_customize_query(spec, key)) {
-        out->type = JSON_STR;
-        out->max_bytes = 64;
-        return true;
-    }
-    if (cr_app_edit_content(spec, key)) {
-        out->type = JSON_STR;
-        out->max_bytes = ZCL_COMMAND_APP_EDIT_CONTENT_MAX;
-        out->required = true;
-        return true;
-    }
-    if (cr_soak_descriptor(spec, key, out) ||
-        cr_execution_choice_descriptor(spec, key, out)) return true;
     const struct cr_int_bound *host_bound = cr_leaf_int_bound(spec->path, key);
     if (host_bound) {
         out->type = JSON_INT;
@@ -1286,6 +1288,25 @@ bool zcl_command_registry_input_descriptor(
     const char *required = cr_required_discovery_key(spec->path);
     out->required = required && strcmp(required, key) == 0;
     return true;
+}
+
+bool zcl_command_registry_input_descriptor(
+    const struct zcl_command_spec *spec, const char *key,
+    struct zcl_command_input_descriptor *out)
+{
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    if (!cr_descriptor_declared(spec, key)) return false;
+    if (cr_app_customize_query(spec, key)) {
+        out->type = JSON_STR; out->max_bytes = 64; return true;
+    }
+    if (cr_app_edit_content(spec, key)) {
+        out->type = JSON_STR; out->max_bytes = ZCL_COMMAND_APP_EDIT_CONTENT_MAX;
+        out->required = true; return true;
+    }
+    if (cr_app_host_descriptor(spec, key, out) || cr_soak_descriptor(spec, key, out) ||
+        cr_execution_choice_descriptor(spec, key, out)) return true;
+    return cr_general_descriptor(spec, key, out);
 }
 
 bool command_registry_input_required_discovery(

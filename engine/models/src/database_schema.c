@@ -399,6 +399,28 @@ static const char *SCHEMA[] = {
     "CREATE INDEX IF NOT EXISTS idx_wallet_send_once_created"
     " ON wallet_send_once(created_at)",
 
+    /* Owner-consented local hosting state. Pending signed bytes are durable
+     * before publication; this table is not a board or network authority. */
+    "CREATE TABLE IF NOT EXISTS app_host_intents ("
+    "local_host BLOB NOT NULL CHECK(length(local_host)=32),"
+    "carrier_root TEXT NOT NULL CHECK(length(carrier_root)=64),"
+    "name TEXT NOT NULL, publisher TEXT NOT NULL, release_root TEXT NOT NULL,"
+    "sha256 TEXT NOT NULL, size INTEGER NOT NULL CHECK(size>0 AND size<=5242880),"
+    "recurring INTEGER NOT NULL CHECK(recurring=1),"
+    "enabled INTEGER NOT NULL CHECK(enabled IN(0,1)),"
+    "generation INTEGER NOT NULL CHECK(generation>0), due_at INTEGER NOT NULL CHECK(due_at>=0),"
+    "renewal_slot INTEGER NOT NULL CHECK(renewal_slot>=0),"
+    "retry_count INTEGER NOT NULL CHECK(retry_count BETWEEN 0 AND 31),"
+    "replacement_count INTEGER NOT NULL CHECK(replacement_count BETWEEN 0 AND 1),"
+    "slot_endpoint TEXT NOT NULL, slot_post_id BLOB NOT NULL CHECK(length(slot_post_id)=32),"
+    "pending INTEGER NOT NULL CHECK(pending IN(0,1)), pending_wire BLOB NOT NULL,"
+    "pending_id BLOB NOT NULL CHECK(length(pending_id)=32),"
+    "pending_created_at INTEGER NOT NULL CHECK(pending_created_at>=0),"
+    "pending_generation INTEGER NOT NULL CHECK(pending_generation>=0),"
+    "PRIMARY KEY(local_host,carrier_root))",
+    "CREATE INDEX IF NOT EXISTS idx_app_host_intents_due "
+    "ON app_host_intents(enabled,due_at,local_host,carrier_root)",
+
     /* Node state */
     "CREATE TABLE IF NOT EXISTS node_state ("
     "key TEXT PRIMARY KEY,value BLOB)",

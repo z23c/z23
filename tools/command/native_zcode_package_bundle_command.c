@@ -166,39 +166,6 @@ static bool zpb_encode(const struct zcl_package_bundle_wires *wires,
            zcl_codec_writer_finish(&w, &written) && written == total;
 }
 
-static bool zpb_take_wire(struct zcl_codec_reader *r, size_t cap,
-                          const uint8_t **out, size_t *len)
-{
-    uint32_t n = 0;
-    if (!zcl_codec_read_u32le(r, &n) || n == 0 || n > cap)
-        return false;
-    *out = zcl_codec_take(r, n);
-    *len = n;
-    return *out != NULL;
-}
-
-static bool zpb_decode(struct zpb_file *f)
-{
-    struct zcl_codec_reader r;
-    uint8_t magic[ZPB_MAGIC_BYTES];
-    uint32_t version = 0;
-    zcl_codec_reader_init(&r, f->bytes, f->len);
-    return zcl_codec_read_bytes(&r, magic, sizeof(magic)) &&
-           memcmp(magic, ZCL_PACKAGE_BUNDLE_MAGIC, sizeof(magic)) == 0 &&
-           zcl_codec_read_u32le(&r, &version) &&
-           version == ZCL_PACKAGE_BUNDLE_VERSION &&
-           zpb_take_wire(&r, VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES,
-                         &f->wires.release, &f->wires.release_len) &&
-           zpb_take_wire(&r, VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES,
-                         &f->wires.manifest, &f->wires.manifest_len) &&
-           zpb_take_wire(&r, VCS_PACKAGE_RECIPE_MAX_WIRE_BYTES,
-                         &f->wires.recipe, &f->wires.recipe_len) &&
-           zcl_codec_read_bytes(&r, f->tree, 32) &&
-           zpb_take_wire(&r, VCS_SOURCE_BUNDLE_MAX_WIRE_BYTES, &f->source,
-                         &f->source_len) &&
-           zcl_codec_reader_finish(&r);
-}
-
 bool zcl_package_bundle_write(const char *output, const char *copy_dir,
                               const uint8_t tree[32],
                               const struct zcl_package_bundle_wires *wires,
@@ -237,17 +204,7 @@ struct zpb_receive {
     struct zcl_command_reply *reply;
     const char *path;
     struct zpb_file file;
-    struct vcs_package_release release;
-    uint8_t release_id[32];
-    struct vcs_package_manifest manifest;
-    struct vcs_package_recipe recipe;
-    bool parsed;
-    char scratch[PLATFORM_TEMP_PATH_MAX];
-#ifdef _WIN32
-    char store[ZPB_PATH_MAX];
-#endif
-    char src[ZPB_PATH_MAX];
-    struct vcs_package_publish_report report;
+    struct vcs_package_share share;
     char fingerprint[67];
     char package_hex[65];
     char release_hex[65];
@@ -263,109 +220,30 @@ static bool zpb_refuse(struct zpb_receive *s, const char *why)
 
 static bool zpb_load(struct zpb_receive *s)
 {
+    const char *reason = NULL;
     s->path = zcl_package_copy_str(s->input, "file");
-    s->file.bytes = s->path ? zcl_native_source_bundle_read(s->path,
-                                                            &s->file.len)
-                            : NULL;
+    s->file.bytes = s->path ? zcl_native_source_bundle_read(s->path, &s->file.len) : NULL;
     if (!s->file.bytes) {
-        zcl_package_copy_fail(s->reply, "BUNDLE_UNREADABLE", false,
-                              "file must name a readable share file of at "
-                              "most 64 MiB", s->path ? s->path : k_zpb_verify);
+        zcl_package_copy_fail(s->reply, "BUNDLE_UNREADABLE", false, "file must name a readable share file of at most 64 MiB", s->path ? s->path : k_zpb_verify);
         return false;
     }
-    if (!zpb_decode(&s->file))
-        return zpb_refuse(s, "not a version 1 .z23share file");
-    if (vcs_package_release_parse(s->file.wires.release,
-                                  s->file.wires.release_len, &s->release) !=
-            VCS_PACKAGE_RELEASE_OK ||
-        vcs_package_release_id(&s->release, s->release_id) !=
-            VCS_PACKAGE_RELEASE_OK ||
-        vcs_package_release_verify(&s->release) != VCS_PACKAGE_RELEASE_OK)
-        return zpb_refuse(s, "the signed release envelope does not verify");
-    zcl_hex_encode(s->release.publisher_pubkey,
-                   VCS_PACKAGE_RELEASE_PUBKEY_BYTES, s->fingerprint);
-    zcl_hex_encode(s->release.package_root, 32, s->package_hex);
-    zcl_hex_encode(s->release_id, 32, s->release_hex);
-    vcs_package_manifest_init(&s->manifest);
-    vcs_package_recipe_init(&s->recipe);
-    s->parsed = true;
-    if (!vcs_package_manifest_parse(s->file.wires.manifest,
-                                    s->file.wires.manifest_len,
-                                    &s->manifest) ||
-        vcs_package_recipe_parse(s->file.wires.recipe,
-                                 s->file.wires.recipe_len, &s->recipe) !=
-            VCS_PACKAGE_RECIPE_OK)
-        return zpb_refuse(s, "the manifest or recipe wire does not parse");
+    if (!vcs_package_share_load(&s->share, s->file.bytes, s->file.len, &reason)) return zpb_refuse(s, reason);
+    zcl_hex_encode(s->share.release.publisher_pubkey, VCS_PACKAGE_RELEASE_PUBKEY_BYTES, s->fingerprint);
+    zcl_hex_encode(s->share.release.package_root, 32, s->package_hex);
+    zcl_hex_encode(s->share.release_id, 32, s->release_hex);
     return true;
 }
-
-/* Rebuild verified bytes directly into disposable private scratch on POSIX.
- * Windows retains verified CAS import until direct reconstruction is qualified.
- * Persistent receive keeps its separate publication durability barriers. */
-static bool zpb_materialize(struct zpb_receive *s)
-{
-    struct vcs_source_bundle_metrics metrics;
-    int b = 0;
-    bool ok = platform_temp_directory_create("z23-receive-", s->scratch,
-                                             sizeof(s->scratch));
-    if (ok)
-        b = snprintf(s->src, sizeof(s->src), "%s/source", s->scratch);
-    ok = ok && b > 0 && (size_t)b < sizeof(s->src) &&
-         zcl_mkdir_p(s->src, 0700).ok;
-#ifdef _WIN32
-    int a = ok ? snprintf(s->store, sizeof(s->store), "%s/store", s->scratch) : 0;
-    ok = ok && a > 0 && (size_t)a < sizeof(s->store) &&
-         zcl_mkdir_p(s->store, 0700).ok &&
-         vcs_source_bundle_import(s->file.source, s->file.source_len,
-                                  s->file.tree, s->store, &metrics) ==
-             VCS_SOURCE_BUNDLE_OK &&
-         vcs_tree_materialize_readonly_disposable(s->store, s->file.tree, s->src,
-                              VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) == VCS_OK;
-#else
-    ok = ok && vcs_source_bundle_materialize_disposable(
-        s->file.source, s->file.source_len, s->file.tree, s->src, &metrics) ==
-        VCS_SOURCE_BUNDLE_OK;
-#endif
-    return ok || zpb_refuse(s, "the source tree does not rebuild from the "
-                               "bundle");
-}
-
-/* The publication rules publish.commit applies, without keeping anything:
- * signature, manifest root, recipe root and every chunk of every file. */
-static bool zpb_validate(struct zpb_receive *s)
-{
-    vcs_package_publish_report_init(&s->report);
-    vcs_package_publish_validate(&s->release, &s->manifest, &s->report);
-    vcs_package_publish_validate_recipe(&s->release, &s->manifest,
-                                        &s->recipe, &s->report);
-    vcs_package_publish_verify_chunks(&s->manifest, s->src, &s->report);
-    if (s->report.failure_count > 0 || !s->report.release_ok ||
-        !s->report.manifest_ok || !s->report.recipe_ok)
-        return zpb_refuse(s, s->report.failure_count
-                                 ? vcs_package_publish_rule_string(
-                                       s->report.failures[0].rule)
-                                 : "publication rules");
-    return true;
-}
-
-/* The source half of the check, after the cheap envelope half (zpb_load). */
 static bool zpb_check_source(struct zpb_receive *s)
 {
-    return zpb_materialize(s) && zpb_validate(s);
+    const char *reason = NULL;
+    return vcs_package_share_check_source(&s->share, &reason) || zpb_refuse(s, reason);
 }
-
 static void zpb_free(struct zpb_receive *s)
 {
-    if (s->scratch[0])
-        (void)zcl_tree_remove(s->scratch);
-    if (s->parsed) {
-        vcs_package_manifest_free(&s->manifest);
-        vcs_package_recipe_free(&s->recipe);
-    }
+    vcs_package_share_cleanup(&s->share);
     free(s->file.bytes);
     free(s);
 }
-
 static struct zpb_receive *zpb_new(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply,
                                    const char *command)
@@ -386,18 +264,18 @@ static void zpb_describe(struct zpb_receive *s, const char *stage)
 {
     struct json_value *d = &s->reply->data;
     (void)json_push_kv_str(d, "stage", stage);
-    (void)json_push_kv_str(d, "name", s->release.name);
-    (void)json_push_kv_str(d, "semver", s->release.semver);
+    (void)json_push_kv_str(d, "name", s->share.release.name);
+    (void)json_push_kv_str(d, "semver", s->share.release.semver);
     (void)json_push_kv_str(d, "release_id", s->release_hex);
     (void)json_push_kv_str(d, "package_root", s->package_hex);
     (void)json_push_kv_str(d, "publisher_fingerprint", s->fingerprint);
     (void)json_push_kv_int(d, "publisher_sequence",
-                           (int64_t)s->release.publisher_sequence);
-    if (s->release.has_parent)
+                           (int64_t)s->share.release.publisher_sequence);
+    if (s->share.release.has_parent)
         zcl_package_copy_push_root(d, "parent_release_root",
-                                   s->release.parent_root);
-    (void)json_push_kv_int(d, "files", (int64_t)s->report.file_count);
-    (void)json_push_kv_int(d, "bytes", (int64_t)s->report.total_bytes);
+                                   s->share.release.parent_root);
+    (void)json_push_kv_int(d, "files", (int64_t)s->share.report.file_count);
+    (void)json_push_kv_int(d, "bytes", (int64_t)s->share.report.total_bytes);
     (void)json_push_kv_bool(d, "verified", true);
     (void)json_push_kv_bool(d, "executed", false);
 }
@@ -441,8 +319,8 @@ static void zpb_plan_id(const struct zpb_receive *s, struct zpb_keep *k)
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
     sha3_256_write(&ctx, (const unsigned char *)domain, sizeof(domain));
-    sha3_256_write(&ctx, s->release_id, 32);
-    sha3_256_write(&ctx, s->file.tree, 32);
+    sha3_256_write(&ctx, s->share.release_id, 32);
+    sha3_256_write(&ctx, s->share.tree, 32);
     for (size_t i = 0; i < 2; i++)
         sha3_256_write(&ctx, (const unsigned char *)texts[i],
                        strlen(texts[i]) + 1u);
@@ -500,13 +378,13 @@ static bool zpb_store(struct zpb_receive *s, const struct zpb_keep *k)
     struct zcl_command_reply sub;
     const struct json_value *day = json_get(s->input, "day");
     const struct zcl_native_local_publication publication = {
-        .datadir = k->datadir, .source_directory = s->src,
-        .release_wire = s->file.wires.release,
-        .release_wire_len = s->file.wires.release_len,
-        .manifest_wire = s->file.wires.manifest,
-        .manifest_wire_len = s->file.wires.manifest_len,
-        .recipe_wire = s->file.wires.recipe,
-        .recipe_wire_len = s->file.wires.recipe_len,
+        .datadir = k->datadir, .source_directory = s->share.src,
+        .release_wire = s->share.wires.release,
+        .release_wire_len = s->share.wires.release_len,
+        .manifest_wire = s->share.wires.manifest,
+        .manifest_wire_len = s->share.wires.manifest_len,
+        .recipe_wire = s->share.wires.recipe,
+        .recipe_wire_len = s->share.wires.recipe_len,
         .has_day = day != NULL, .day = day ? json_get_int(day) : 0,
         /* The friend runs this (AUTH_OWNER) on a file after confirming the
          * fingerprint and root: a deliberate local step, so a second
@@ -575,18 +453,18 @@ static bool zpb_fork(struct zpb_receive *s, struct zpb_keep *k)
 
 static bool zpb_record_write(struct zpb_receive *s, struct zpb_keep *k)
 {
-    struct zcl_package_receive_trust t = {.has_parent = s->release.has_parent};
+    struct zcl_package_receive_trust t = {.has_parent = s->share.release.has_parent};
     char dir[ZPB_PATH_MAX], name[160], text[ZPB_RECORD_MAX];
     memcpy(t.copy_root, k->version, 32);
-    memcpy(t.release_id, s->release_id, 32);
-    memcpy(t.publisher, s->release.publisher_pubkey, 33);
-    memcpy(t.package_root, s->release.package_root, 32);
+    memcpy(t.release_id, s->share.release_id, 32);
+    memcpy(t.publisher, s->share.release.publisher_pubkey, 33);
+    memcpy(t.package_root, s->share.release.package_root, 32);
     if (t.has_parent)
-        memcpy(t.parent_release, s->release.parent_root, 32);
+        memcpy(t.parent_release, s->share.release.parent_root, 32);
     int n = snprintf(dir, sizeof(dir), "%s/%s", k->datadir,
                      ZCL_PACKAGE_RECEIVE_TRUST_DIR);
     bool ok = n > 0 && (size_t)n < sizeof(dir) &&
-              zpb_record_name(k->version, s->release_id, name,
+              zpb_record_name(k->version, s->share.release_id, name,
                               sizeof(name)) &&
               zpb_record_render(&t, text, sizeof(text)) &&
               zcl_mkdir_p(dir, 0700).ok &&

@@ -1,0 +1,24 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * The checked reader and QB projection derive their identical order here. */
+#define APP_HOST_INTENT_FIELDS \
+    ZCL_MODEL_BLOB(local_host,         binding.local_host, 32), \
+    ZCL_MODEL_TEXT(carrier_root,       binding.carrier_root), \
+    ZCL_MODEL_TEXT(name,               binding.name), \
+    ZCL_MODEL_TEXT(publisher,          binding.publisher), \
+    ZCL_MODEL_TEXT(release_root,       binding.release_root), \
+    ZCL_MODEL_TEXT(sha256,             binding.sha256), \
+    ZCL_MODEL_I64 (size,               binding.size), \
+    ZCL_MODEL_BOOL(recurring,          binding.recurring), \
+    ZCL_MODEL_BOOL(enabled,            enabled), \
+    ZCL_MODEL_I64 (generation,         generation), \
+    ZCL_MODEL_I64 (due_at,             due_at), \
+    ZCL_MODEL_I64 (renewal_slot,       renewal_slot), \
+    ZCL_MODEL_U32 (retry_count,        retry_count), \
+    ZCL_MODEL_U32 (replacement_count,  replacement_count), \
+    ZCL_MODEL_TEXT(slot_endpoint,      slot_endpoint), \
+    ZCL_MODEL_BLOB(slot_post_id,       slot_post_id, 32), \
+    ZCL_MODEL_BOOL(pending,            pending), \
+    ZCL_MODEL_BLOB(pending_wire,       pending_wire, APP_HOST_WIRE_MAX), \
+    ZCL_MODEL_BLOB(pending_id,         pending_id, 32), \
+    ZCL_MODEL_U64 (pending_created_at, pending_created_at), \
+    ZCL_MODEL_I64 (pending_generation, pending_generation)

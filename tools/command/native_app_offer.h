@@ -23,18 +23,14 @@
 
 #include "command/native_command.h"
 #include "json/json.h"
-#include "vcs/package_release.h"
+#include "vcs/app_offer.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#define ZCL_APP_OFFER_SCHEMA "zcl.app_offer.v1"
 #define ZCL_APP_OFFER_ROOM "apps"
 #define ZCL_APP_OFFER_KIND "offer"
-#define ZCL_APP_OFFER_TEXT_MAX 2048u
-#define ZCL_APP_OFFER_SIZE_MAX (5u * 1024u * 1024u)
-#define ZCL_APP_OFFER_ONION_MAX 72u
 #define ZCL_APP_OFFER_ROWS_MAX 256u
 /* The board path every inner call names, and the node method a catalog
  * read uses directly (the leaf's reply budget would page it). */
@@ -42,21 +38,12 @@
 #define ZCL_APP_OFFER_BOARD_POST "fleet.board.post"
 #define ZCL_APP_OFFER_BUNDLE_OFFER "fleet.bundle.offer"
 #define ZCL_APP_OFFER_BUNDLE_FETCH "fleet.bundle.fetch"
+#define ZCL_APP_HOST_ENABLE "app.host.enable"
 
 /* Read-only local onion publication status and its one installed P2P port. */
 bool zcl_app_offer_local_endpoint(char host[static 63],
                                   char endpoint[static ZCL_APP_OFFER_ONION_MAX + 1u],
                                   bool *status_read);
-
-struct zcl_app_offer {
-    char name[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
-    char root[65];      /* the signed version's package root */
-    char publisher[67]; /* full publisher fingerprint, 66 hex */
-    char carrier[65];   /* the bundle package root that carries the file */
-    char sha256[65];    /* of the .z23share bytes */
-    int64_t size;       /* of the .z23share bytes */
-    char onion[ZCL_APP_OFFER_ONION_MAX + 1u];
-};
 
 /* One catalog row: a verified entry and the post that carried it. */
 struct zcl_app_offer_row {

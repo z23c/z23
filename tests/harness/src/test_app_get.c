@@ -43,6 +43,7 @@ int test_app_get(void)
 #else
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha256.h"
 #include "controllers/rpc_client.h"
@@ -65,17 +66,19 @@ int test_app_get(void)
 #define TAG_ONION \
     "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion"
 #define TAG_ENDPOINT TAG_ONION ":28133"
+#define TAG_LOCAL_HOST "1111111111111111111111111111111111111111111111111111111111111111"
 #define TAG_TEXT (ZCL_APP_OFFER_TEXT_MAX + 1u)
 
 /* ── the stub transport ─────────────────────────────────────────────── */
 
 struct tag_stub {
-    int offers, posts, lists, fetches;
+    int offers, posts, lists, fetches, enables;
     uint8_t *bytes; /* what A's node was handed to offer */
     size_t len;
     char sha[65];
     char text[TAG_TEXT]; /* what A posted */
     char result_text[TAG_TEXT];
+    char enable_text[TAG_TEXT];
     char room[40], kind[16], scope[16];
     int64_t ttl;
     struct json_value board; /* the posts B's node holds */
@@ -87,12 +90,28 @@ struct tag_stub {
     bool malformed_post_id;
     bool fail_result_post;
     bool change_after_offer, bad_host_offer, fail_host_post, change_staged_after_receive;
+    bool fail_host_output_alloc;
     int fetch_failures;
     char fetch_root[65], fetch_peer[96], fetch_out[TAG_PATH];
 };
 
 static struct tag_stub g_tag;
 static int g_tag_rpc_mode;
+
+extern bool zcl_app_get_host_reply_valid_for_testing(const struct json_value *, const char *);
+
+static bool tag_host_reply_case(const char *ok_field, const char *host,
+                                const char *carrier, const char *generation)
+{
+    char wire[600];
+    int n = snprintf(wire, sizeof(wire), "{%s\"host\":\"%s\",\"carrier\":\"%s\",\"enabled\":true,\"generation\":%s}",
+                     ok_field, host, carrier, generation);
+    struct json_value body; json_init(&body);
+    bool valid = n > 0 && (size_t)n < sizeof(wire) && json_read(&body, wire, (size_t)n) &&
+                 zcl_app_get_host_reply_valid_for_testing(&body, TAG_CARRIER);
+    json_free(&body);
+    return valid;
+}
 
 static char *tag_onion_rpc_fault(int mode)
 {
@@ -281,6 +300,25 @@ static bool tag_onion_status(struct zcl_command_reply *out)
     return ok;
 }
 
+static bool tag_host_enable(const struct json_value *in, struct zcl_command_reply *out)
+{
+    struct zcl_app_offer offer;
+    const char *text = tag_in(in, "offer");
+    g_tag.enables++;
+    bool ok = !g_tag.fail_host_post && text &&
+         zcl_app_offer_parse(text, strlen(text), &offer) &&
+         json_get_bool(json_get(in, "confirm")) &&
+         strlen(tag_in(in, "plan_id")) == 64 && strlen(tag_in(in, "token")) == 32 &&
+         json_push_kv_bool(&out->data, "ok", true) &&
+         json_push_kv_str(&out->data, "host", TAG_LOCAL_HOST) &&
+         json_push_kv_str(&out->data, "carrier", offer.carrier) &&
+         json_push_kv_int(&out->data, "generation", 1) &&
+         json_push_kv_bool(&out->data, "enabled", true);
+    if (ok) (void)snprintf(g_tag.enable_text, sizeof(g_tag.enable_text), "%s", text);
+    if (ok && g_tag.fail_host_output_alloc) zcl_alloc_fault_fail_next("json_push_kv_key");
+    return ok;
+}
+
 static bool tag_call(const char *path, const struct json_value *in,
                      struct zcl_command_reply *out)
 {
@@ -297,6 +335,8 @@ static bool tag_call(const char *path, const struct json_value *in,
              json_push_kv(&out->data, "posts", &g_tag.board));
     else if (strcmp(path, "core.network.onion.status") == 0)
         ok = tag_onion_status(out);
+    else if (strcmp(path, ZCL_APP_HOST_ENABLE) == 0)
+        ok = tag_host_enable(in, out);
     else {
         zcl_command_reply_free(out);
         return zcl_app_inner_call(path, in, out, NULL);
@@ -1188,6 +1228,7 @@ static int tag_b_get(struct tag_world *w)
         ASSERT(tag_board_variant(w, NULL, NULL, false));
         asf_door_run(w->j.b_home, w->j.b_home, w->j.b_datadir, "get",
                      w->name, ZCL_CLI_CONFIRM_ASK, &run);
+        bool stopped = asf_alive_then_stop(asf_door_pid(run.text));
         ASSERT_EQ(run.rc, 0);
         ASSERT(run.asked);
         ASSERT(strstr(run.question, w->offer.publisher) != NULL);
@@ -1196,15 +1237,16 @@ static int tag_b_get(struct tag_world *w)
         ASSERT(strstr(run.question, "pin") != NULL);
         ASSERT(strstr(run.text, "rebuild_report") != NULL);
         ASSERT(strstr(g_tag.result_text, "zcl.app_rebuild.v1") != NULL);
-        ASSERT(strstr(run.text, "hosting_status: advertised") != NULL);
-        ASSERT(strcmp(g_tag.kind, "offer") == 0);
+        ASSERT(strstr(run.text, "hosting_status: recurring hosting enabled") != NULL);
+        ASSERT(strstr(run.text, "\n  hosting_generation: 1\n") != NULL);
+        ASSERT(strstr(run.text, "app host status") != NULL && strstr(run.text, TAG_LOCAL_HOST));
+        ASSERT(strstr(run.text, "app host stop") != NULL && strstr(run.text, w->j.b_datadir));
         struct zcl_app_offer hosted;
-        ASSERT(zcl_app_offer_parse(g_tag.text, strlen(g_tag.text), &hosted));
+        ASSERT(zcl_app_offer_parse(g_tag.enable_text, strlen(g_tag.enable_text), &hosted));
         ASSERT(!strcmp(hosted.name, w->offer.name) && !strcmp(hosted.root, w->offer.root));
         ASSERT(!strcmp(hosted.publisher, w->offer.publisher) && !strcmp(hosted.carrier, w->offer.carrier));
         ASSERT(!strcmp(hosted.sha256, w->offer.sha256) && hosted.size == w->offer.size);
-        ASSERT_EQ(g_tag.ttl, 86400);
-        ASSERT(asf_alive_then_stop(asf_door_pid(run.text)));
+        ASSERT(stopped);
         (void)snprintf(copy, sizeof(copy), "%s/copies/tinyapp-1",
                        w->j.b_datadir);
         ASSERT(stat(copy, &st) == 0 && S_ISDIR(st.st_mode));
@@ -1224,7 +1266,7 @@ static int tag_rebuild_outcomes(struct tag_world *w)
                      w->name, ZCL_CLI_CONFIRM_ASK, &run);
         ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "cached image") != NULL);
         ASSERT(strstr(run.text, "matching signing keys") != NULL);
-        ASSERT_EQ(g_tag.posts, posts + 1); ASSERT(asf_alive_then_stop(asf_door_pid(run.text)));
+        ASSERT_EQ(g_tag.posts, posts); ASSERT(asf_alive_then_stop(asf_door_pid(run.text)));
         PASS();
     }
     TEST("app rebuild: board failure preserves the opened copy and provides an exact retry") {
@@ -1265,8 +1307,7 @@ static int tag_rebuild_open_failure(struct tag_world *w)
         ASSERT(strstr(run.text, "rebuild_report: published") != NULL);
         ASSERT(strstr(run.text, "destination: ") != NULL);
         ASSERT(strstr(run.text, "earlier step already changed") != NULL);
-        ASSERT(strcmp(g_tag.kind, "offer") == 0);
-        ASSERT(strstr(run.text, "hosting_status: advertised") != NULL);
+        ASSERT(strstr(run.text, "hosting_status: recurring hosting enabled") != NULL);
         PASS();
     } _test_next:;
     return failures;
@@ -1291,7 +1332,7 @@ static int tag_rehost_build_failure(struct tag_world *w)
         asf_door_run(home, home, datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
         ASSERT(run.rc != 0); ASSERT(strstr(run.text, "BUILD_FAILED:") != NULL);
         ASSERT(strstr(run.text, "destination: ") != NULL);
-        ASSERT(strstr(run.text, "hosting_status: advertised") != NULL);
+        ASSERT(strstr(run.text, "hosting_status: recurring hosting enabled") != NULL);
         ASSERT(strstr(run.text, "earlier step already changed") != NULL);
         PASS();
     } _test_next:;
@@ -1301,36 +1342,45 @@ static int tag_rehost_build_failure(struct tag_world *w)
 static int tag_rehost_failures(struct tag_world *w)
 {
     int failures = 0;
-    TEST("app get: host offer retains original signed identity and uses the local endpoint") {
+    TEST("app get: host enable reply requires explicit success and exact typed identity") {
+        ASSERT(tag_host_reply_case("\"ok\":true,", TAG_LOCAL_HOST, TAG_CARRIER, "1"));
+        ASSERT(!tag_host_reply_case("", TAG_LOCAL_HOST, TAG_CARRIER, "1"));
+        ASSERT(!tag_host_reply_case("\"ok\":false,", TAG_LOCAL_HOST, TAG_CARRIER, "1"));
+        ASSERT(!tag_host_reply_case("\"ok\":true,", "bad", TAG_CARRIER, "1"));
+        ASSERT(!tag_host_reply_case("\"ok\":true,", TAG_LOCAL_HOST, "bad", "1"));
+        ASSERT(!tag_host_reply_case("\"ok\":true,", TAG_LOCAL_HOST, TAG_CARRIER, "\"1\""));
+        ASSERT(!tag_host_reply_case("\"ok\":true,", TAG_LOCAL_HOST, TAG_CARRIER, "0"));
+        PASS();
+    }
+    TEST("app get: recurring intent retains the original signed offer identity") {
         static struct asf_door run; struct zcl_app_offer hosted;
         ASSERT(tag_board_variant(w, NULL, NULL, false));
         g_tag.onion_changed = true;
         asf_door_run(w->j.b_home, w->j.b_home, w->j.b_datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
         g_tag.onion_changed = false;
-        ASSERT_EQ(run.rc, 0); ASSERT(zcl_app_offer_parse(g_tag.text, strlen(g_tag.text), &hosted));
+        ASSERT_EQ(run.rc, 0); ASSERT(zcl_app_offer_parse(g_tag.enable_text, strlen(g_tag.enable_text), &hosted));
         ASSERT(!strcmp(hosted.publisher, w->offer.publisher) && !strcmp(hosted.root, w->offer.root));
         ASSERT(!strcmp(hosted.carrier, w->offer.carrier) && !strcmp(hosted.sha256, w->offer.sha256));
-        ASSERT(!strcmp(hosted.onion, TAG_ONION ":28134"));
+        ASSERT(!strcmp(hosted.onion, w->offer.onion));
         ASSERT(asf_alive_then_stop(asf_door_pid(run.text))); PASS();
     }
-    TEST("app get: unavailable onion pins the carrier without advertisement") {
+    TEST("app get: unavailable onion still records recurring hosting intent") {
         static struct asf_door run; int offers = g_tag.offers, posts = g_tag.posts;
         ASSERT(tag_board_variant(w, NULL, NULL, false));
         g_tag.onion_unavailable = true;
         asf_door_run(w->j.b_home, w->j.b_home, w->j.b_datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
         g_tag.onion_unavailable = false;
-        ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "pinned; not advertised because the local onion is not ready") != NULL);
-        ASSERT(strstr(run.text, "fleet bundle fetch --root=") != NULL);
+        ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "recurring hosting enabled") != NULL);
         ASSERT_EQ(g_tag.offers, offers + 1); ASSERT_EQ(g_tag.posts, posts);
         ASSERT(asf_alive_then_stop(asf_door_pid(run.text))); PASS();
     }
-    TEST("app get: endpoint change after pin refuses advertisement") {
+    TEST("app get: endpoint change after pin retains recurring intent") {
         static struct asf_door run; int posts = g_tag.posts;
         ASSERT(tag_board_variant(w, NULL, NULL, false));
         g_tag.change_after_offer = true;
         asf_door_run(w->j.b_home, w->j.b_home, w->j.b_datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
         g_tag.change_after_offer = false; g_tag.onion_changed = false;
-        ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "pinned; not advertised") != NULL);
+        ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "recurring hosting enabled") != NULL);
         ASSERT_EQ(g_tag.posts, posts); ASSERT(asf_alive_then_stop(asf_door_pid(run.text))); PASS();
     }
     TEST("app get: mismatched offered carrier is never advertised") {
@@ -1342,15 +1392,27 @@ static int tag_rehost_failures(struct tag_world *w)
         ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "carrier pin was refused or unconfirmed") != NULL);
         ASSERT_EQ(g_tag.posts, posts); ASSERT(asf_alive_then_stop(asf_door_pid(run.text))); PASS();
     }
-    TEST("app get: failed host post keeps the pin and gives exact retry") {
+    TEST("app get: unconfirmed host enable keeps the pin and gives retry") {
         static struct asf_door run;
         ASSERT(tag_board_variant(w, NULL, NULL, false));
         g_tag.fail_host_post = true;
         asf_door_run(w->j.b_home, w->j.b_home, w->j.b_datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
         g_tag.fail_host_post = false;
-        ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "pinned; public advertisement unconfirmed") != NULL);
-        ASSERT(strstr(run.text, "fleet board post --kind=offer") != NULL);
+        ASSERT_EQ(run.rc, 0); ASSERT(strstr(run.text, "carrier pinned; recurring hosting unconfirmed") != NULL);
+        ASSERT(strstr(run.text, "app get ") != NULL && strstr(run.text, w->j.b_datadir));
         ASSERT(asf_alive_then_stop(asf_door_pid(run.text))); PASS();
+    }
+    TEST("app get: failed hosting report preserves the started copy and mutation") {
+        static struct asf_door run;
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        g_tag.fail_host_output_alloc = true;
+        asf_door_run(w->j.b_home, w->j.b_home, w->j.b_datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
+        g_tag.fail_host_output_alloc = false;
+        zcl_alloc_fault_clear();
+        bool stopped = asf_alive_then_stop(asf_door_pid(run.text));
+        ASSERT(run.rc != 0 && strstr(run.text, "HOSTING_RESULT_UNAVAILABLE") != NULL);
+        ASSERT(strstr(run.text, "copy:") && strstr(run.text, "earlier step already changed"));
+        ASSERT(stopped); PASS();
     }
     TEST("app get: changed staged bytes are never pinned") {
         static struct asf_door run; char home[TAG_PATH], datadir[TAG_PATH]; int offers = g_tag.offers;

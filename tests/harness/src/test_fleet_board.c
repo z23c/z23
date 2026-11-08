@@ -31,6 +31,7 @@
 #include "crypto/ed25519.h"
 #include "models/database.h"
 #include "models/fleet_board_post.h"
+#include "models/fleet_board_post_internal.h"
 #include "command/native_command.h"
 #include "command/native_fleet.h"
 #include "controllers/rpc_client.h"
@@ -1981,6 +1982,27 @@ static int test_fleet_board_native_busy(void)
 
 static struct node_db *s_wait_writer;
 
+struct fb_nowait_case {
+    struct node_db *db;
+    struct fleet_board_post *post;
+    enum fleet_board_result result;
+    bool stored;
+};
+
+static void *fb_nowait_thread(void *arg)
+{
+    struct fb_nowait_case *s = arg;
+    s->result = db_fleet_board_post_ingest_nowait(s->db, s->post, 100, &s->stored);
+    return NULL;
+}
+
+static int fb_deny_read(void *ctx, int action, const char *a, const char *b,
+                        const char *db, const char *trigger)
+{
+    (void)ctx; (void)a; (void)b; (void)db; (void)trigger;
+    return action == SQLITE_READ ? SQLITE_DENY : SQLITE_OK;
+}
+
 static void fb_wait_release_writer(void)
 {
     db_fleet_board_test_set_wait_hook(NULL);
@@ -1990,10 +2012,11 @@ static void fb_wait_release_writer(void)
 static int test_fleet_board_ingest_wait_bounded(void)
 {
     int failures = 0;
-    struct node_db writer, board;
+    struct node_db writer, board, fast;
     bool opened = false;
     memset(&writer, 0, sizeof(writer));
     memset(&board, 0, sizeof(board));
+    memset(&fast, 0, sizeof(fast));
     TEST("fleet board: a local write waits out a short lock and gives up on a long one") {
         char dbdir[256];
         char dbpath[320];
@@ -2002,6 +2025,9 @@ static int test_fleet_board_ingest_wait_bounded(void)
         ASSERT(node_db_open(&board, dbpath));
         opened = true;
         ASSERT(node_db_open(&writer, dbpath));
+        ASSERT(node_db_open_existing_runtime(&fast, dbpath, "fleet_board.nowait_test"));
+        ASSERT_EQ(sqlite3_busy_timeout(fast.db, 0), SQLITE_OK);
+        db_fleet_board_post_prepare_nowait();
         (void)sqlite3_busy_timeout(board.db, 0);
         db_fleet_board_test_clear_quarantine();
 
@@ -2031,18 +2057,42 @@ static int test_fleet_board_ingest_wait_bounded(void)
          * stored, and the call really waited for the bound. */
         ASSERT(node_db_begin_immediate(&writer));
         stored = true;
+        r = db_fleet_board_post_ingest_nowait(&fast, &held, 100, &stored);
+        ASSERT_EQ(r, FLEET_BOARD_ERR_BUSY);
+        ASSERT(!stored && !db_fleet_board_have(&board, held.id));
+        ASSERT(node_db_rollback(&writer));
+        struct fb_nowait_case attempt = { .db = &fast, .post = &held, .stored = true };
+        pthread_t thread;
+        fleet_board_write_lock();
+        int spawned = pthread_create(&thread, NULL, fb_nowait_thread, &attempt);
+        int joined = spawned == 0 ? pthread_join(thread, NULL) : -1;
+        fleet_board_write_unlock();
+        ASSERT(spawned == 0 && joined == 0);
+        ASSERT_EQ(attempt.result, FLEET_BOARD_ERR_BUSY);
+        ASSERT(!attempt.stored);
+        ASSERT(node_db_begin_immediate(&writer));
         int64_t t0 = platform_time_monotonic_ms();
         r = db_fleet_board_post_ingest_wait(&board, &held, 100, 30, &stored);
         int64_t waited_ms = platform_time_monotonic_ms() - t0;
         ASSERT_EQ(r, FLEET_BOARD_ERR_BUSY);
         ASSERT(!stored && !db_fleet_board_have(&board, held.id) && waited_ms >= 30);
         ASSERT(node_db_rollback(&writer));
-        ASSERT_EQ(db_fleet_board_post_ingest_wait(&board, &held, 100, 30, &stored),
+        ASSERT_EQ(db_fleet_board_post_ingest_nowait(&fast, &held, 100, &stored),
                   FLEET_BOARD_OK);
         ASSERT(stored);
+        struct db_fleet_board_post found;
+        uint8_t missing[32] = {0};
+        ASSERT_EQ(db_fleet_board_post_lookup_checked(&fast, held.id, &found), FLEET_BOARD_LOOKUP_FOUND);
+        ASSERT_EQ(db_fleet_board_post_lookup_checked(&fast, missing, &found), FLEET_BOARD_LOOKUP_ABSENT);
+        ASSERT_EQ(sqlite3_set_authorizer(fast.db, fb_deny_read, NULL), SQLITE_OK);
+        enum fleet_board_lookup_status denied = db_fleet_board_post_lookup_checked(&fast, held.id, &found);
+        int restored = sqlite3_set_authorizer(fast.db, NULL, NULL);
+        ASSERT_EQ(restored, SQLITE_OK);
+        ASSERT_EQ(denied, FLEET_BOARD_LOOKUP_ERROR);
         PASS();
     } _test_next:;
     if (opened) node_db_close(&board);
+    node_db_close(&fast);
     node_db_close(&writer);
     return failures;
 }
