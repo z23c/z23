@@ -451,23 +451,29 @@ int t_refold_from_anchor_explicit_span_gate_contract(void)
         char path[PATH_MAX];
         ASSERT(repo_path(path, sizeof(path), "engine/composition/src/boot.c") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
-        char *do_from_anchor = strstr(buf, "if (do_from_anchor)");
+        char *do_from_anchor = strstr(buf, "if (ssel.do_from_anchor)\n        return boot_step_refold_from_anchor(ctx, ssel.consumed_auto_refold);");
         ASSERT(do_from_anchor != NULL);
+        char *body = strstr(do_from_anchor, "static bool boot_step_refold_from_anchor(struct app_context *ctx,");
+        ASSERT(body != NULL);
+        char *end = strstr(body, "\n}\n");
+        ASSERT(end != NULL);
         char *resume =
-            strstr(do_from_anchor, "active_chain_height(&g_state.chain_active)");
-        char *span = strstr(do_from_anchor, "boot_refold_body_span_contiguous");
+            strstr(body, "active_chain_height(&g_state.chain_active)");
+        char *span = strstr(body, "boot_refold_body_span_contiguous");
         char *reset =
-            strstr(do_from_anchor, "boot_refold_from_anchor_reset(&g_node_db)");
+            strstr(body, "boot_refold_from_anchor_reset(&g_node_db)");
         char *mark =
-            strstr(do_from_anchor, "refold_progress_mark_started_from_anchor");
+            strstr(body, "refold_progress_mark_started_from_anchor");
         ASSERT(resume != NULL);
         ASSERT(span != NULL);
         ASSERT(reset != NULL);
         ASSERT(mark != NULL);
-        ASSERT(do_from_anchor < resume);
+        ASSERT(do_from_anchor < body);
+        ASSERT(body < resume);
         ASSERT(resume < span);
         ASSERT(span < reset);
         ASSERT(reset < mark);
+        ASSERT(mark < end);
         ASSERT(strstr(buf, "refold_from_anchor body_gap") != NULL);
         ASSERT(strstr(buf, "first_missing") != NULL);
         PASS();
