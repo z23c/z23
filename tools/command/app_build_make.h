@@ -50,7 +50,9 @@ struct app_build_closure {
 
 void app_build_closure_free(struct app_build_closure *c);
 
+struct app_toolchain;
 struct app_build_make {
+    const struct app_toolchain *kit; /* authenticated, sealed selected kit, or NULL */
     const char *copy_dir; /* canonical absolute copy directory */
     const char *work_dir; /* the copy's writable build directory */
     bool confine;         /* apply lab_exec confinement */

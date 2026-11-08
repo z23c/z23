@@ -114,6 +114,7 @@ int vcm_disposable(const char *, const uint8_t[32], const char *, uint64_t, uint
 #define vcs_source_bundle_result_string vcm_bundle_result
 #define vcs_source_bundle_create vcm_bundle_create
 #define vcs_source_bundle_verify vcm_bundle_verify
+#define vcs_source_bundle_visit_verified vcm_bundle_visit
 #define vcs_source_bundle_import vcm_bundle_import
 #define vcs_source_bundle_materialize_disposable vcm_bundle_direct
 const char *vcm_bundle_result(enum vcs_source_bundle_result);
@@ -121,6 +122,10 @@ enum vcs_source_bundle_result vcm_bundle_create(const char *, const uint8_t[32],
     uint8_t **, size_t *, struct vcs_source_bundle_metrics *);
 enum vcs_source_bundle_result vcm_bundle_verify(const uint8_t *, size_t,
     const uint8_t[32], struct vcs_source_bundle_metrics *);
+enum vcs_source_bundle_result vcm_bundle_visit(const uint8_t *, size_t,
+    const uint8_t[32],
+    bool (*)(void *, const struct vcs_entry *, const uint8_t *, size_t),
+    void *, struct vcs_source_bundle_metrics *);
 enum vcs_source_bundle_result vcm_bundle_import(const uint8_t *, size_t,
     const uint8_t[32], const char *, struct vcs_source_bundle_metrics *);
 enum vcs_source_bundle_result vcm_bundle_direct(const uint8_t *, size_t,
@@ -129,6 +134,7 @@ enum vcs_source_bundle_result vcm_bundle_direct(const uint8_t *, size_t,
 #undef vcs_source_bundle_materialize_disposable
 #undef vcs_source_bundle_import
 #undef vcs_source_bundle_verify
+#undef vcs_source_bundle_visit_verified
 #undef vcs_source_bundle_create
 #undef vcs_source_bundle_result_string
 #undef vcs_materialize_verified_bytes_disposable
@@ -1180,6 +1186,94 @@ static int tsb_direct_refusals(struct tsb_ctx *ctx)
     VC_CHECK("restore private fixture", chmod(dir, 0700) == 0);
     test_rm_rf_recursive(dir); return failures;
 }
+struct tsbv_state {
+    const char *source;
+    size_t calls;
+    uint64_t bytes;
+    bool valid, refuse;
+};
+
+static bool tsbv_visit(void *context, const struct vcs_entry *entry,
+                       const uint8_t *bytes, size_t length)
+{
+    struct tsbv_state *state = context;
+    ++state->calls;
+    state->bytes += length;
+    uint8_t hash[32];
+    vcs_sha3_tag(VCS_TAG_BLOB, bytes, length, hash);
+    size_t original_len = 0;
+    char *original = vc_read(state->source, entry->path, &original_len);
+    bool same = original && original_len == length &&
+        memcmp(original, bytes, length) == 0;
+    state->valid = state->valid && same && length == entry->size &&
+        memcmp(hash, entry->blob, sizeof(hash)) == 0;
+    free(original);
+    return !state->refuse;
+}
+
+static int tsbv_controls(struct tsb_ctx *ctx)
+{
+    int failures = 0;
+    struct tsbv_state state = {.source = ctx->source, .valid = true};
+    struct vcs_source_bundle_metrics metrics;
+    uint8_t wrong[32]; memcpy(wrong, ctx->first_root, sizeof(wrong)); wrong[0] ^= 1;
+    VC_CHECK("visitor wrong root has zero callbacks",
+        vcs_source_bundle_visit_verified(ctx->first_wire, ctx->first_wire_len,
+            wrong, tsbv_visit, &state, &metrics) == VCS_SOURCE_BUNDLE_ERR_ROOT && state.calls == 0);
+    VC_CHECK("visitor truncated wire has zero callbacks",
+        vcs_source_bundle_visit_verified(ctx->first_wire, ctx->first_wire_len - 1,
+            ctx->first_root, tsbv_visit, &state, NULL) != VCS_SOURCE_BUNDLE_OK && state.calls == 0);
+    VC_CHECK("visitor required",
+        vcs_source_bundle_visit_verified(ctx->first_wire, ctx->first_wire_len,
+            ctx->first_root, NULL, NULL, &metrics) == VCS_SOURCE_BUNDLE_ERR_NULL);
+    state.refuse = true;
+    VC_CHECK("visitor refusal stops after first callback",
+        vcs_source_bundle_visit_verified(ctx->first_wire, ctx->first_wire_len,
+            ctx->first_root, tsbv_visit, &state, &metrics) == VCS_SOURCE_BUNDLE_ERR_OUTPUT &&
+        state.calls == 1 && state.valid);
+    VC_CHECK("verify succeeds after visitor refusal",
+        vcs_source_bundle_verify(ctx->first_wire, ctx->first_wire_len,
+            ctx->first_root, NULL) == VCS_SOURCE_BUNDLE_OK);
+    state = (struct tsbv_state){.source = ctx->source, .valid = true};
+    VC_CHECK("visitor returns every exact authenticated file",
+        vcs_source_bundle_visit_verified(ctx->first_wire, ctx->first_wire_len,
+            ctx->first_root, tsbv_visit, &state, &metrics) == VCS_SOURCE_BUNDLE_OK &&
+        state.valid && state.calls == ctx->created.file_count &&
+        state.bytes == ctx->created.source_bytes);
+    return failures;
+}
+
+static int tsbv_late_corruption(struct tsb_ctx *ctx)
+{
+    int failures = 0;
+    struct source_bundle_decoded decoded;
+    enum vcs_source_bundle_result parsed = source_bundle_decode(ctx->first_wire,
+        ctx->first_wire_len, ctx->first_root, &decoded, NULL);
+    bool ready = parsed == VCS_SOURCE_BUNDLE_OK && decoded.manifest.count > 1;
+    if (ready) ready = decoded.manifest.entries[decoded.manifest.count - 1].size > 0;
+    VC_CHECK("late visitor corruption fixture has preceding valid blobs", ready);
+    if (!ready) { source_bundle_decoded_free(&decoded); return failures; }
+    decoded.payload[decoded.payload_len - 1] ^= 1;
+    uLongf compressed = compressBound((uLong)decoded.payload_len);
+    uint8_t *wire = malloc(VCS_SOURCE_BUNDLE_HEADER_BYTES + compressed);
+    bool ok = wire != NULL;
+    if (ok) {
+        memcpy(wire, ctx->first_wire, VCS_SOURCE_BUNDLE_HEADER_BYTES);
+        ok = compress2(wire + VCS_SOURCE_BUNDLE_HEADER_BYTES, &compressed,
+            decoded.payload, (uLong)decoded.payload_len, Z_BEST_COMPRESSION) == Z_OK;
+        vcs_wr_u64le(wire + 60, compressed);
+    }
+    struct tsbv_state state = {.source = ctx->source, .valid = true};
+    VC_CHECK("late blob corruption refuses before ANY visitor callback", ok &&
+        vcs_source_bundle_visit_verified(wire, VCS_SOURCE_BUNDLE_HEADER_BYTES + compressed,
+            ctx->first_root, tsbv_visit, &state, NULL) == VCS_SOURCE_BUNDLE_ERR_BLOB && state.calls == 0);
+    free(wire); source_bundle_decoded_free(&decoded);
+    VC_CHECK("verify succeeds after late blob refusal",
+        vcs_source_bundle_verify(ctx->first_wire, ctx->first_wire_len,
+            ctx->first_root, NULL) == VCS_SOURCE_BUNDLE_OK);
+    return failures;
+}
+
 /* Recompress valid transport with one bad blob: proves hash validation, not
  * merely zlib rejection. Production decode and output path remain actual. */
 static int tsb_direct_bad_blob(struct tsb_ctx *ctx)
@@ -1394,6 +1488,8 @@ static int vcr_controls(struct tsb_ctx *ctx)
 static int tsb_disposable_controls(struct tsb_ctx *ctx)
 {
     int failures = tsb_materialize_observed(ctx, vcm_durable, true);
+    failures += tsbv_controls(ctx);
+    failures += tsbv_late_corruption(ctx);
     failures += tsb_materialize_observed(ctx, vcm_readonly, true);
     failures += tsb_materialize_observed(ctx, vcm_disposable, false);
     failures += tsb_materialize_observed(ctx, vcm_recovering_disposable, false);

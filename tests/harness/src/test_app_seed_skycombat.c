@@ -743,6 +743,7 @@ static bool asi_desktop_installed(const struct asi_run *r)
 /* Tests production parsing and desktop reads only; does not impersonate an
  * installed executable or grant the source authority returned by resolve(). */
 bool zcl_test_installed_desktop_manifest(int dir, const char *wire, size_t length, bool mac);
+bool zcl_test_installed_toolchain_manifest(int dir, const char *wire, size_t length, bool mac);
 struct isd_fixture { int fd; char directory[ASS_PATH], wire[2049], digest[65]; };
 static bool isd_wire(struct isd_fixture *f, unsigned base, unsigned desktop)
 {
@@ -766,14 +767,18 @@ static bool isd_check(const struct isd_fixture *f, bool mac)
 {
     return zcl_test_installed_desktop_manifest(f->fd, f->wire, strlen(f->wire), mac);
 }
-static bool isd_write(const struct isd_fixture *f, unsigned index, const void *data, size_t size)
+static bool isd_write_name(const struct isd_fixture *f, const char *name, const void *data, size_t size)
 {
-    int fd = openat(f->fd, asi_desktop_names[index], O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+    int fd = openat(f->fd, name, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
     if (fd < 0) return false;
     FILE *out = fdopen(fd, "wb"); if (!out) { close(fd); return false; }
     bool ok = fwrite(data, 1, size, out) == size;
     if (fclose(out) != 0) ok = false;
     return ok;
+}
+static bool isd_write(const struct isd_fixture *f, unsigned index, const void *data, size_t size)
+{
+    return isd_write_name(f, asi_desktop_names[index], data, size);
 }
 static bool isd_payload(struct isd_fixture *f, size_t size)
 {
@@ -830,6 +835,50 @@ static bool isd_tamper(struct isd_fixture *f)
     }
     return isd_missing_link(f);
 }
+static bool isd_kit_wire(struct isd_fixture *f, unsigned desktop, unsigned kit)
+{
+    if (!isd_wire(f, 8191u, desktop)) return false;
+    static const char *const names[] = {"app-toolchain.json", "app-toolchain.bundle"};
+    for (unsigned i = 0; i < 2; ++i) {
+        if (!(kit & (1u << i))) continue;
+        size_t used = strlen(f->wire);
+        int n = snprintf(f->wire + used, sizeof(f->wire) - used, "%s  %s\n", f->digest, names[i]);
+        if (n <= 0 || (size_t)n >= sizeof(f->wire) - used) return false;
+    }
+    return true;
+}
+static bool isd_kit_shapes(struct isd_fixture *f)
+{
+    if (!isd_payload(f, 1) || !isd_write_name(f, "app-toolchain.json", "x", 1) ||
+        !isd_write_name(f, "app-toolchain.bundle", "x", 1)) return false;
+    for (unsigned mask = 1; mask < 3; ++mask)
+        if (!isd_kit_wire(f, 15u, mask) || isd_check(f, false)) return false;
+    if (!isd_kit_wire(f, 0, 3) || isd_check(f, false) ||
+        !isd_kit_wire(f, 15u, 3) || !isd_check(f, false) || isd_check(f, true)) return false;
+    return zcl_test_installed_toolchain_manifest(f->fd, f->wire, strlen(f->wire), false);
+}
+static bool isd_kit_members(struct isd_fixture *f)
+{
+    if (!isd_write_name(f, "app-toolchain.bundle", "y", 1) || !isd_check(f, false) ||
+        zcl_test_installed_toolchain_manifest(f->fd, f->wire, strlen(f->wire), false) ||
+        unlinkat(f->fd, "app-toolchain.bundle", 0) != 0 || !isd_check(f, false) ||
+        zcl_test_installed_toolchain_manifest(f->fd, f->wire, strlen(f->wire), false) ||
+        symlinkat("app-toolchain.json", f->fd, "app-toolchain.bundle") != 0 ||
+        zcl_test_installed_toolchain_manifest(f->fd, f->wire, strlen(f->wire), false) ||
+        unlinkat(f->fd, "app-toolchain.bundle", 0) != 0) return false;
+    return true;
+}
+static bool isd_kit_bounds(struct isd_fixture *f)
+{
+    char bytes[4097]; memset(bytes, 'x', sizeof(bytes));
+    for (size_t size = 4096; size <= sizeof(bytes); ++size) {
+        if (!isd_payload(f, size) || !isd_write_name(f, "app-toolchain.json", bytes, size) ||
+            !isd_write_name(f, "app-toolchain.bundle", bytes, size) ||
+            !isd_kit_wire(f, 15u, 3) || !isd_check(f, false) ||
+            zcl_test_installed_toolchain_manifest(f->fd, f->wire, strlen(f->wire), false) != (size == 4096)) return false;
+    }
+    return true;
+}
 static int isd_contract(struct ass_world *w)
 {
     int failures = 0; struct isd_fixture f = {.fd = -1};
@@ -843,6 +892,9 @@ static int isd_contract(struct ass_world *w)
         ASSERT(isd_tamper(&f));
         ASSERT(isd_payload(&f, 65536) && isd_wire(&f, 8191u, 15u) && isd_check(&f, false));
         ASSERT(isd_payload(&f, 65537) && isd_wire(&f, 8191u, 15u) && !isd_check(&f, false));
+        ASSERT(isd_kit_shapes(&f));
+        ASSERT(isd_kit_members(&f));
+        ASSERT(isd_kit_bounds(&f));
         PASS();
     } _test_next:;
     if (f.fd >= 0 && close(f.fd) != 0) ++failures;

@@ -27,6 +27,7 @@ enum lab_launch {
 };
 
 struct lab_spawn {
+    const struct os_sandbox_kit_root *kit_root; /* optional verified compiler root */
     enum lab_profile profile;
     bool confine;                 /* apply Landlock and seccomp in the child */
     const char *const *argv;      /* NULL-terminated; argv[0] is absolute */

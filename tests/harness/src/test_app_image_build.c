@@ -24,6 +24,11 @@
 
 #include "base/hex.h"
 #include "command/app_image.h"
+#include "command/app_toolchain.h"
+#include "base/serialize_le.h"
+#include "vcs/vcs.h"
+#include "vcs/source_bundle.h"
+#include <zlib.h>
 #include "devloop_app_image_closure.h"
 #include "devloop_action_root.h"
 #include "platform/directory_compat.h"
@@ -583,6 +588,172 @@ static int test_aib_records(const uint8_t env_root[32])
     return failures;
 }
 
+#if !defined(_WIN32)
+/* Inert regular files: semantic admission never invokes these pretend tools. */
+struct akt_fixture {
+    char root[PATH_MAX];
+    uint8_t tree[32], *wire;
+    size_t length;
+};
+static bool akt_capture(struct akt_fixture *f)
+{
+    free(f->wire); f->wire = NULL; f->length = 0;
+    return vcs_tree_capture_path(f->root, f->tree) == VCS_OK &&
+        vcs_source_bundle_create(f->root, f->tree, &f->wire, &f->length, NULL) == VCS_SOURCE_BUNDLE_OK;
+}
+static bool akt_file(struct akt_fixture *f, const char *rel, unsigned mode)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", f->root, rel);
+    return n > 0 && (size_t)n < sizeof(path) &&
+        aib_write(f->root, rel, "inert kit fixture\n") && chmod(path, mode) == 0;
+}
+static bool akt_init(struct akt_fixture *f)
+{
+    static const char *const dirs[] = {"rootfs", "rootfs/bin", "rootfs/usr", "rootfs/usr/bin"};
+    test_make_tmpdir(f->root, sizeof(f->root), "app_image_build", "kit-semantic");
+    for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); ++i) {
+        char path[PATH_MAX]; int n = snprintf(path, sizeof(path), "%s/%s", f->root, dirs[i]);
+        if (n <= 0 || (size_t)n >= sizeof(path) || mkdir(path, 0700)) return false;
+    }
+    return akt_file(f, "rootfs/bin/sh", 0755) && akt_file(f, "rootfs/usr/bin/cc", 0755) &&
+        akt_file(f, "rootfs/usr/bin/make", 0755) && akt_capture(f);
+}
+/* Each negative changes one field while retaining compact canonical JSON. */
+static bool akt_descriptor(const struct akt_fixture *f, unsigned change, char out[1024])
+{
+    uint8_t digest[32], tree[32]; char hash[65], root[65];
+    struct sha3_256_ctx h; sha3_256_init(&h);
+    sha3_256_write(&h, f->wire, f->length); sha3_256_finalize(&h, digest);
+    memcpy(tree, f->tree, sizeof(tree));
+    if (change == 5) tree[0] ^= 1;
+    zcl_hex_encode(digest, 32, hash); zcl_hex_encode(tree, 32, root);
+    int n = snprintf(out, 1024,
+        "{\"schema\":\"%s\",\"bundle_file\":\"%s\",\"bundle_sha3\":\"%s\","
+        "\"tree_root\":\"%s\",\"target\":\"%s\",\"%s\":\"%s\"}",
+        APP_TOOLCHAIN_SCHEMA, APP_TOOLCHAIN_BUNDLE, hash, root,
+        change == 3 ? "foreign-target" : "linux-x86_64-v3",
+        change == 1 ? "target" : change == 2 ? "unknown" : "policy",
+        change == 4 ? "foreign-policy" : APP_TOOLCHAIN_POLICY);
+    return n > 0 && n < 1024;
+}
+static bool akt_verify(struct akt_fixture *f, unsigned change, struct app_toolchain *kit)
+{
+    char text[1024], why[256];
+    return akt_descriptor(f, change, text) && app_toolchain_verify(kit,
+        (const uint8_t *)text, strlen(text), f->wire, f->length, why, sizeof(why));
+}
+static bool akt_cleared(const struct app_toolchain *kit)
+{
+    const uint8_t zero[32] = {0};
+    return !kit->selected && !kit->bundle && !kit->files && !kit->manifest.count &&
+        !memcmp(kit->env, zero, sizeof(zero));
+}
+static int akt_descriptors(struct akt_fixture *f)
+{
+    int failures = 0;
+    struct app_toolchain kit = {0};
+    TEST("app_image_build: authenticated kit env stable; malformed descriptors clear state") {
+        uint8_t env[32]; char text[1024], why[256];
+        ASSERT(akt_verify(f, 0, &kit));
+        ASSERT(kit.selected && kit.manifest.count == 3 && !memcmp(kit.tree, f->tree, 32));
+        memcpy(env, kit.env, sizeof(env));
+        ASSERT(akt_verify(f, 0, &kit) && !memcmp(env, kit.env, sizeof(env)));
+        for (unsigned change = 1; change <= 5; ++change) {
+            ASSERT(akt_verify(f, 0, &kit));
+            ASSERT(!akt_verify(f, change, &kit) && akt_cleared(&kit));
+        }
+        ASSERT(akt_verify(f, 0, &kit));
+        ASSERT(akt_descriptor(f, 0, text));
+        ASSERT(!app_toolchain_verify(&kit, (const uint8_t *)text, strlen(text) - 1,
+            f->wire, f->length, why, sizeof(why)) && akt_cleared(&kit));
+        PASS();
+    } _test_next:;
+    app_toolchain_free(&kit);
+    return failures;
+}
+static int akt_required_tools(struct akt_fixture *f)
+{
+    int failures = 0;
+    struct app_toolchain kit = {0};
+    TEST("app_image_build: each required kit tool must exist and be executable") {
+        static const char *const tools[] = {"rootfs/bin/sh", "rootfs/usr/bin/cc", "rootfs/usr/bin/make"};
+        for (size_t i = 0; i < sizeof(tools)/sizeof(tools[0]); ++i) {
+            char path[PATH_MAX]; int n = snprintf(path, sizeof(path), "%s/%s", f->root, tools[i]);
+            ASSERT(n > 0 && (size_t)n < sizeof(path));
+            ASSERT(unlink(path) == 0 && akt_capture(f));
+            ASSERT(!akt_verify(f, 0, &kit) && akt_cleared(&kit));
+            ASSERT(akt_file(f, tools[i], 0644) && akt_capture(f));
+            ASSERT(!akt_verify(f, 0, &kit) && akt_cleared(&kit));
+            ASSERT(akt_file(f, tools[i], 0755) && akt_capture(f));
+            ASSERT(akt_verify(f, 0, &kit));
+        }
+        PASS();
+    } _test_next:;
+    app_toolchain_free(&kit);
+    return failures;
+}
+/* Recompress a bad FINAL blob and repin its transport digest in the descriptor:
+ * compression and the outer digest are valid, but full authentication must fail. */
+static bool akt_corrupt_blob(struct akt_fixture *f)
+{
+    if (f->length < VCS_SOURCE_BUNDLE_HEADER_BYTES) return false;
+    uint64_t size = zcl_read_u64_le(f->wire + 52);
+    if (!size || size > 4096) return false;
+    uint8_t payload[4096]; uLongf length = (uLongf)size;
+    if (uncompress(payload, &length, f->wire + VCS_SOURCE_BUNDLE_HEADER_BYTES,
+        (uLong)(f->length - VCS_SOURCE_BUNDLE_HEADER_BYTES)) != Z_OK || length != size) return false;
+    payload[length - 1] ^= 1;
+    uLongf compressed = compressBound(length);
+    uint8_t *wire = malloc(VCS_SOURCE_BUNDLE_HEADER_BYTES + compressed);
+    if (!wire) return false;
+    memcpy(wire, f->wire, VCS_SOURCE_BUNDLE_HEADER_BYTES);
+    bool ok = compress2(wire + VCS_SOURCE_BUNDLE_HEADER_BYTES, &compressed,
+        payload, length, Z_BEST_COMPRESSION) == Z_OK;
+    if (!ok) { free(wire); return false; }
+    zcl_write_u64_le(wire + 60, compressed);
+    free(f->wire); f->wire = wire;
+    f->length = VCS_SOURCE_BUNDLE_HEADER_BYTES + compressed;
+    return true;
+}
+static int akt_authentication(struct akt_fixture *f)
+{
+    int failures = 0;
+    struct app_toolchain kit = {0};
+    TEST("app_image_build: kit authenticates every blob even with repinned transport") {
+        ASSERT(akt_capture(f) && akt_verify(f, 0, &kit));
+        uint8_t env[32]; memcpy(env, kit.env, sizeof(env));
+        ASSERT(aib_write(f->root, "rootfs/usr/bin/cc", "different inert bytes\n"));
+        ASSERT(akt_capture(f) && akt_verify(f, 0, &kit));
+        ASSERT(memcmp(env, kit.env, sizeof(env)) != 0);
+        ASSERT(akt_corrupt_blob(f));
+        ASSERT(vcs_source_bundle_verify(f->wire, f->length, f->tree, NULL) == VCS_SOURCE_BUNDLE_ERR_BLOB);
+        ASSERT(!akt_verify(f, 0, &kit) && akt_cleared(&kit));
+        ASSERT(akt_capture(f) && akt_verify(f, 0, &kit));
+        PASS();
+    } _test_next:;
+    app_toolchain_free(&kit);
+    return failures;
+}
+static int test_aib_kit_semantics(void)
+{
+    int failures = 0;
+    struct akt_fixture f = {0};
+    TEST("app_image_build: isolated inert authenticated compiler kit fixture") {
+        ASSERT(akt_init(&f));
+        PASS();
+    } _test_next:;
+    if (!failures) {
+        failures += akt_descriptors(&f);
+        failures += akt_required_tools(&f);
+        failures += akt_authentication(&f);
+    }
+    free(f.wire);
+    if (f.root[0]) test_rm_rf(f.root);
+    return failures;
+}
+#endif
+
 int test_app_image_build(void)
 {
     int failures = 0;
@@ -590,5 +761,8 @@ int test_app_image_build(void)
     failures += test_aib_env(env_root);
     failures += test_aib_closure(env_root);
     failures += test_aib_records(env_root);
+#if !defined(_WIN32)
+    failures += test_aib_kit_semantics();
+#endif
     return failures;
 }

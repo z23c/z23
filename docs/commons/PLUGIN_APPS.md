@@ -26,7 +26,7 @@ fallback rather than claiming registration succeeded.
 <!-- claim: symbol-present install_app_desktop tools/scripts/install_z23.sh # verified per-user app desktop registration -->
 <!-- claim: symbol-present BOOTSTRAP_APPS tools/install/z23_bootstrap.c # native bootstrap forwards explicit app-only installation -->
 
-Start with an app-capable Z23 installation, a local desktop and compiler, and
+Start with an app-capable Z23 installation, a local desktop and an available compiler (host or bundled kit), and
 an AI assistant connected to Z23 through MCP. `z23 app list --datadir="$HOME/.local/share/z23-app-data"` shows available
 apps and kept choices; `z23 app open skycombat --datadir="$HOME/.local/share/z23-app-data"` opens Sky Combat when it is
 installed.
@@ -218,3 +218,30 @@ z23 discover search game   # finds app.open (also: airplane, skycombat)
 <!-- claim: symbol-present as_kept_load tools/command/native_app_open_selected.c # absent kept selection refuses without fallback -->
 <!-- claim: symbol-present zcl_native_handle_app_share tools/command/native_app_share_command.c # local owner confirmation for the exact kept version -->
 <!-- claim: symbol-present apps_share tools/mcp/mcp_serve.c # dedicated MCP share request -->
+
+### Bundled Linux compiler identity
+
+A selected installed compiler kit binds the existing `env_root` to its complete
+verified source-bundle tree, canonical target and sealed-root policy. The digest
+is SHA3-256 over `zcl.app_build.kit_env.v1` plus NUL, the 32-byte tree root,
+target plus NUL, and `zcl.app_toolchain.linux_sealed.v1` plus NUL. Host builds
+retain their existing capsule identity; the build-record wire and cache-key
+format remain unchanged.
+
+Kit builds mount captured, rehashed and sealed regular files into a private
+Linux root. Source is read-only, build output has its own writable mapping,
+networking is isolated, and `/proc` is empty. Existing resource limits,
+Landlock, seccomp and descriptor closure still apply. A failed kit check or
+sandbox setup refuses the build without falling back to host tools. This path
+requires kernel support for the namespaces, sealing and descriptor closure.
+
+`app toolchain verify` accepts `artifact_dir` and an independently supplied
+`descriptor_sha3`. It checks the fixed descriptor and whole bundle without
+materializing, selecting or executing it. The installer owns selection; source
+content cannot select a compiler. Removing or corrupting a selected kit refuses
+new builds and current-environment cache lookup. Opening an already accepted,
+exact selected image remains independent of current compiler availability;
+source and image integrity checks still apply.
+
+<!-- claim: symbol-present app_toolchain_verify tools/command/app_toolchain.c # inert semantic verifier -->
+<!-- claim: symbol-present os_sandbox_kit_enter platform/modules/platform/src/os_sandbox_kit_root.c # sealed private root -->

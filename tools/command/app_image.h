@@ -11,6 +11,10 @@
  *                    rooted by vcs_build_input_closure_v1_root()
  *   env_root         vcs_toolchain_capsule_v1_root() of the captured
  *                    toolchain capsule (vcs_toolchain_capsule_v1_capture)
+ *                    for host builds; selected compiler kits use SHA3-256 of
+ *                    "zcl.app_build.kit_env.v1" NUL, full tree root, target NUL,
+ *                    and "zcl.app_toolchain.linux_sealed.v1" NUL. The opaque
+ *                    32-byte field and record/key codec remain unchanged.
  *   dependency_root  the pinned dependency set the build linked against
  *   image_sha3       SHA3-256 of the image bytes
  *   image triple     the positioned-file identity (volume, low, high,
@@ -78,7 +82,9 @@ struct app_image_build {
     uint64_t image_volume, image_low, image_high, image_size;
 };
 
-/* env_root: capture the toolchain capsule and root it. */
+/* Host-mode env_root only: capture the toolchain capsule and root it.
+ * Build/current-environment lookup resolve installed kits separately. Exact
+ * selected-image launch never requires the current compiler to be available. */
 struct zcl_result app_image_env_root(uint8_t out[32]);
 
 /* Hash the image at `image_path` and capture its positioned-file triple,

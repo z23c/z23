@@ -8,6 +8,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct vcs_entry;
+
 #define VCS_SOURCE_BUNDLE_VERSION 1u
 #define VCS_SOURCE_BUNDLE_CODEC_ZLIB 1u
 #define VCS_SOURCE_BUNDLE_HEADER_BYTES 68u
@@ -109,6 +111,17 @@ enum vcs_source_bundle_result vcs_source_bundle_verify(
     const uint8_t *wire, size_t wire_len,
     const uint8_t expected_tree_root[32],
     struct vcs_source_bundle_metrics *metrics);
+
+/* Authenticate the complete manifest and ALL blobs before the first callback.
+ * Visits manifest order without CAS writes. Entry and bytes are borrowed,
+ * read-only and valid only during the callback; copy anything retained.
+ * A false callback stops visitation with ERR_OUTPUT (earlier callback effects
+ * are not rolled back). Metrics describe the verified bundle, even on callback
+ * refusal. NULL visitor is ERR_NULL; context may be NULL. */
+enum vcs_source_bundle_result vcs_source_bundle_visit_verified(
+    const uint8_t *wire, size_t wire_len, const uint8_t expected_tree_root[32],
+    bool (*visitor)(void *, const struct vcs_entry *, const uint8_t *, size_t),
+    void *context, struct vcs_source_bundle_metrics *metrics);
 
 /* Verify the complete bundle first, then admit its blobs and manifest into the
  * existing ZVCS CAS. Existing valid objects are reused; corrupt objects at the

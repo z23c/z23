@@ -21,4 +21,27 @@
  */
 bool app_installed_source_resolve(const char *app,
     struct app_installed_source *out, char *why, size_t cap);
+
+enum app_installed_toolchain_status {
+    APP_INSTALLED_TOOLCHAIN_REFUSED = -1,
+    APP_INSTALLED_TOOLCHAIN_UNSELECTED = 0,
+    APP_INSTALLED_TOOLCHAIN_VERIFIED = 1
+};
+struct app_installed_toolchain {
+    struct app_installed_source_bytes descriptor, bundle;
+};
+/* Initialize out to zero before first use. Resolution frees prior contents.
+ * VERIFIED means retained bytes match the installer manifest and running image;
+ * the caller must still verify descriptor semantics, bundle/tree and policy.
+ * UNSELECTED means a development executable or a verified legacy installation.
+ * A recognized but broken installation is REFUSED, never host-tool fallback.
+ * Selection is the current trusted installer state, not an ever-installed
+ * ledger. Authorized removal of all installer locators is indistinguishable
+ * from an unselected executable; whole-install replacement remains outside
+ * the ownership threat model above. Missing kit members do not deselect it.
+ * This read-only operation grants neither compiler execution nor app authority.
+ * Kept-image launch does not depend on the current compiler installation. */
+enum app_installed_toolchain_status app_installed_toolchain_resolve(
+    struct app_installed_toolchain *out, char *why, size_t cap);
+void app_installed_toolchain_free(struct app_installed_toolchain *out);
 #endif

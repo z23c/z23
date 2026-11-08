@@ -40,6 +40,7 @@
 #   platform/packaging/release/build_release.sh --selftest
 #   Normal POSIX runtime requires: --app-source DIR --app-source-sha3 HEX
 #                                [--app-verifier /absolute/host/z23-dev]
+#   Bundled Linux compiler: --app-toolchain DIR --app-toolchain-sha3 HEX
 #   Intentional legacy runtime: --node-only (also required for Windows)
 #
 # Default --bin is <repo>/build/bin; default --out is
@@ -60,9 +61,12 @@ FLOOR_GATE="$REPO_ROOT/build/bin/z23-lint"
 NODE_AUDIT="$REPO_ROOT/tools/scripts/check_c23_node_binary.sh"
 APP_SOURCE=""
 APP_SOURCE_SHA3=""
+APP_TOOLCHAIN=""
+APP_TOOLCHAIN_SHA3=""
 NODE_ONLY=0
 APP_VERIFIER="$REPO_ROOT/build/bin/z23-dev"
 APP_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire"
+APP_TOOLCHAIN_MEMBERS="app-toolchain.json app-toolchain.bundle"
 LINUX_DESKTOP_MEMBERS="org.zclassic.SkyCombat.desktop org.zclassic.ZClassic23.desktop org.zclassic.ZClassic23.svg org.zclassic.ZClassic23.xml"
 # shellcheck source=tools/scripts/tor_stamp_lib.sh
 . "$REPO_ROOT/tools/scripts/tor_stamp_lib.sh"
@@ -274,7 +278,7 @@ file_nlink() {
 }
 
 write_sha256sums() {
-    local dir="$1" platform="${2:-linux-x86_64}" with_app="${3:-0}"
+    local dir="$1" platform="${2:-linux-x86_64}" with_app="${3:-0}" with_kit="${4:-0}"
     # AGENT_CARD.md is a manifest member, not an optional extra: the card
     # tells a coding assistant which commands to run against the node, so
     # a tampered copy is an instruction-injection path into whatever agent
@@ -294,6 +298,11 @@ write_sha256sums() {
         case "$platform" in linux-x86_64|darwin-arm64) ;; *) die "app source requires a POSIX release" ;; esac
         members="$members $APP_MEMBERS"
         [ "$platform" != linux-x86_64 ] || members="$members $LINUX_DESKTOP_MEMBERS"
+    fi
+    if [ "$with_kit" = 1 ]; then
+        [ "$with_app" = 1 ] && [ "$platform" = linux-x86_64 ] \
+            || die "app toolchain requires the Linux app release"
+        members="$members $APP_TOOLCHAIN_MEMBERS"
     fi
     (
         cd "$dir" || exit 1
@@ -400,6 +409,39 @@ require_app_mode() {
     esac
 }
 
+verify_app_toolchain() {
+    local dir="$1" name maximum bytes
+    for name in $APP_TOOLCHAIN_MEMBERS; do
+        [ -f "$dir/$name" ] && [ ! -L "$dir/$name" ] || die "missing regular toolchain member: $name"
+        maximum=67108864
+        [ "$name" != app-toolchain.json ] || maximum=4096
+        bytes="$(wc -c <"$dir/$name" | tr -d ' ')"
+        [ "$bytes" -gt 0 ] && [ "$bytes" -le "$maximum" ] || die "toolchain member exceeds its bounds: $name"
+    done
+    [ -x "$APP_VERIFIER" ] || die "missing host app verifier: $APP_VERIFIER"
+    "$APP_VERIFIER" app toolchain verify "--artifact_dir=$dir" "--descriptor_sha3=$APP_TOOLCHAIN_SHA3" \
+        --json </dev/null >/dev/null || die "app toolchain byte/tree verification refused"
+}
+
+app_toolchain_options() {
+    if [ -z "$APP_TOOLCHAIN" ] && [ -z "$APP_TOOLCHAIN_SHA3" ]; then return 0; fi
+    [ "$NODE_ONLY" -eq 0 ] && [ -n "$APP_SOURCE" ] || die "app toolchain requires app source"
+    [ -n "$APP_TOOLCHAIN" ] && [ "${#APP_TOOLCHAIN_SHA3}" -eq 64 ] || die "app toolchain requires a directory and descriptor digest"
+    case "$APP_TOOLCHAIN_SHA3" in *[!0-9a-f]*) die "toolchain descriptor digest must be lowercase64 hex" ;; esac
+    APP_TOOLCHAIN="$(cd "$APP_TOOLCHAIN" && pwd -P)" || die "app toolchain directory unavailable"
+}
+
+copy_app_toolchain() {
+    local out="$1" name
+    [ -n "$APP_TOOLCHAIN" ] || return 0
+    [ "$(cd "$out" && pwd -P)" != "$APP_TOOLCHAIN" ] || die "release output must differ from toolchain input"
+    for name in $APP_TOOLCHAIN_MEMBERS; do
+        cp -f -- "$APP_TOOLCHAIN/$name" "$out/$name" || die "could not copy $name"
+        chmod 444 "$out/$name"
+    done
+    verify_app_toolchain "$out"
+}
+
 copy_app_source() {
     local out="$1" name
     [ -n "$APP_SOURCE" ] || return 0
@@ -488,6 +530,10 @@ package_from_bin() {
             || die "game image platform differs from node release"
         assert_platform_minimum_os "$platform" "$APP_SOURCE/image"
     fi
+    if [ -n "$APP_TOOLCHAIN" ]; then
+        [ "$platform" = linux-x86_64 ] || die "app toolchain requires the Linux app release"
+        verify_app_toolchain "$APP_TOOLCHAIN"
+    fi
     command -v "$strip_tool" >/dev/null 2>&1 || die "$strip_tool not found"
     # The symbol-floor gate is a host tool the release targets do not build.
     [ -x "$FLOOR_GATE" ] || make -C "$REPO_ROOT" build/bin/z23-lint >&2 \
@@ -499,7 +545,8 @@ package_from_bin() {
     if [ -n "$APP_SOURCE" ]; then
         [ "$(cd "$out_dir" && pwd -P)" != "$APP_SOURCE" ] || die "release output must differ from app source"
     fi
-    for member in $APP_MEMBERS $LINUX_DESKTOP_MEMBERS; do rm -f -- "$out_dir/$member"; done
+    [ -z "$APP_TOOLCHAIN" ] || [ "$out_dir" != "$APP_TOOLCHAIN" ] || die "release output must differ from toolchain input"
+    for member in $APP_MEMBERS $LINUX_DESKTOP_MEMBERS $APP_TOOLCHAIN_MEMBERS; do rm -f -- "$out_dir/$member"; done
     for member in $members; do rm -f "$out_dir/$member"; done
     rm -f "$out_dir/AGENT_CARD.md" "$out_dir/SHA256SUMS"
     strip_binary "$platform" "$src" "$out_dir/z23$exe" || die "strip failed"
@@ -525,6 +572,7 @@ package_from_bin() {
     done
     copy_agent_card "$out_dir"
     copy_app_source "$out_dir"
+    copy_app_toolchain "$out_dir"
     if [ -n "$APP_SOURCE" ] && [ "$platform" = linux-x86_64 ]; then
         for member in $LINUX_DESKTOP_MEMBERS; do
             cp -f -- "$REPO_ROOT/platform/packaging/linux/$member" "$out_dir/$member" \
@@ -532,9 +580,10 @@ package_from_bin() {
             chmod 644 "$out_dir/$member"
         done
     fi
-    local with_app=0
+    local with_app=0 with_kit=0
     [ -z "$APP_SOURCE" ] || with_app=1
-    write_sha256sums "$out_dir" "$platform" "$with_app"
+    [ -z "$APP_TOOLCHAIN" ] || with_kit=1
+    write_sha256sums "$out_dir" "$platform" "$with_app" "$with_kit"
 
     # The glibc/GLIBCXX symbol floor is an ELF question and has no meaning for
     # a PE. Running it on one would not fail -- it would pass having graded
@@ -779,6 +828,35 @@ selftest_app_source() {
     [ "$rc" -ne 0 ] || die "selftest: implicit Windows node-only accepted"
     rc=0; (NODE_ONLY=1; APP_SOURCE="$tmp/app-sums"; app_source_options) >/dev/null 2>&1 || rc=$?
     [ "$rc" -ne 0 ] || die "selftest: conflicting node/app modes accepted"
+}
+
+selftest_app_toolchain() {
+    local tmp="$1" name rc
+    mkdir -p "$tmp/kit-sums"
+    cp "$tmp/app-sums/"* "$tmp/kit-sums/"
+    for name in $APP_TOOLCHAIN_MEMBERS; do printf 'inert %s\n' "$name" >"$tmp/kit-sums/$name"; done
+    write_sha256sums "$tmp/kit-sums" linux-x86_64 1 1
+    [ "$(wc -l <"$tmp/kit-sums/SHA256SUMS")" -eq 19 ] || die "selftest: kit release must have nineteen rows"
+    (cd "$tmp/kit-sums" && sha256_check SHA256SUMS >/dev/null) || die "selftest: kit checksums failed"
+    for name in $APP_TOOLCHAIN_MEMBERS; do
+        mv "$tmp/kit-sums/$name" "$tmp/kit-sums/$name.held"
+        rc=0; (write_sha256sums "$tmp/kit-sums" linux-x86_64 1 1) >/dev/null 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] || die "selftest: incomplete kit packaged"
+        mv "$tmp/kit-sums/$name.held" "$tmp/kit-sums/$name"
+    done
+    rc=0; (write_sha256sums "$tmp/kit-sums" darwin-arm64 1 1) >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: unsupported kit platform accepted"
+    rc=0; (write_sha256sums "$tmp/kit-sums" linux-x86_64 0 1) >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: kit without app source accepted"
+    rc=0; (APP_TOOLCHAIN="$tmp/kit-sums"; APP_TOOLCHAIN_SHA3=""; app_toolchain_options) >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: unpinned kit accepted"
+    rc=0; (APP_VERIFIER=/usr/bin/false; verify_app_toolchain "$tmp/kit-sums") >"$tmp/kit-verify.out" 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] && grep -q 'byte/tree verification refused' "$tmp/kit-verify.out" \
+        || die "selftest: native kit verifier refusal ignored"
+    awk 'BEGIN { for (i=0; i<4097; i++) printf "x" }' >"$tmp/kit-sums/app-toolchain.json"
+    rc=0; (verify_app_toolchain "$tmp/kit-sums") >"$tmp/kit-bound.out" 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] && grep -q 'exceeds its bounds' "$tmp/kit-bound.out" \
+        || die "selftest: oversized kit descriptor accepted"
 }
 
 selftest() {
@@ -1159,6 +1237,7 @@ selftest() {
     fi
 
     selftest_app_source "$tmp"
+    selftest_app_toolchain "$tmp"
     say "selftest PASS"
     trap - EXIT
     rm -rf "$tmp"
@@ -1182,6 +1261,8 @@ while [ $# -gt 0 ]; do
         --out) [ $# -ge 2 ] || die "--out needs a directory"; OUT_DIR="$2"; shift 2 ;;
         --app-source) [ $# -ge 2 ] || die "--app-source needs a directory"; APP_SOURCE="$2"; shift 2 ;;
         --app-source-sha3) [ $# -ge 2 ] || die "--app-source-sha3 needs a digest"; APP_SOURCE_SHA3="$2"; shift 2 ;;
+        --app-toolchain) [ $# -ge 2 ] || die "--app-toolchain needs a directory"; APP_TOOLCHAIN="$2"; shift 2 ;;
+        --app-toolchain-sha3) [ $# -ge 2 ] || die "--app-toolchain-sha3 needs a digest"; APP_TOOLCHAIN_SHA3="$2"; shift 2 ;;
         --app-verifier) [ $# -ge 2 ] || die "--app-verifier needs a host executable"; APP_VERIFIER="$2"; shift 2 ;;
         --platform)
             [ $# -ge 2 ] || die "--platform needs a name"
@@ -1199,6 +1280,7 @@ while [ $# -gt 0 ]; do
 done
 
 app_source_options
+app_toolchain_options
 
 # The front door is one tree for every platform, not one per platform: the
 # shims are the same two files whatever machine asks, and the per-platform

@@ -738,3 +738,19 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_LOW,
     ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_PROCESS_EXEC, 0, zcl_native_handle_app_run_copy)
+
+ZCL_COMMAND_BRANCH("app.toolchain", "app", "App compiler kit",
+    ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "app.toolchain.verify", "app.toolchain", "", "Check compiler kit artifacts",
+    "Verify an independently pinned compiler descriptor and authenticated rootfs bundle. "
+    "Read-only: does not materialize, execute or select a toolchain, and grants no trust.",
+    0, "app,toolchain,verify,compiler,kit",
+    "zcl.app_toolchain_verify.input.v1", "zcl.app_toolchain_verify.v1",
+    "artifact_dir,descriptor_sha3", "artifact_dir,descriptor_sha3", "z23 app toolchain verify --help",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_MAINTENANCE,
+    ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_toolchain_verify)

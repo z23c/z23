@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <sched.h>
 #include <signal.h>
@@ -267,11 +268,97 @@ static bool pidns_arm_parent_death(int lifeline_rd)
     return true;
 }
 
-int os_sandbox_pidns_enter(int close_fd)
+/* The tiny standalone adapter runner also links this module, without os_proc.
+ * Clean wrappers require close_range; no procfs or descriptor-census fallback.
+ * Retain the setup report until failure-prone cleanup and its barrier finish. */
+#if defined(ZCL_TESTING)
+static unsigned pidns_fail_stage;
+void os_sandbox_test_kit_wrapper_failure(unsigned stage) { pidns_fail_stage = stage; }
+#endif
+static bool pidns_clean(int status_fd, int gate_fd, int report_fd, unsigned stage)
+{
+#if defined(ZCL_TESTING)
+    if (pidns_fail_stage == stage) { errno = ENOSYS; return false; }
+#else
+    (void)stage;
+#endif
+#if defined(SYS_close_range)
+    int keep[] = {status_fd, gate_fd, report_fd};
+    for (size_t i = 0; i < 3; ++i)
+        for (size_t j = i + 1; j < 3; ++j)
+            if (keep[j] < keep[i]) { int swap = keep[i]; keep[i] = keep[j]; keep[j] = swap; }
+    unsigned next = 0;
+    for (size_t i = 0; i < 3; ++i) {
+        if (keep[i] < 0 || (unsigned)keep[i] < next) continue;
+        if ((unsigned)keep[i] > next && syscall(SYS_close_range, next, (unsigned)keep[i] - 1u, 0u)) return false;
+        next = (unsigned)keep[i] + 1u;
+    }
+    return syscall(SYS_close_range, next, UINT_MAX, 0u) == 0;
+#else
+    (void)status_fd; (void)gate_fd; (void)report_fd; errno = ENOSYS; return false;
+#endif
+}
+
+static bool pidns_ack(int fd, bool send)
+{
+    char byte = 'k'; ssize_t n;
+    do { n = send ? write(fd, &byte, 1) : read(fd, &byte, 1); } while (n < 0 && errno == EINTR);
+    return n == 1 && byte == 'k';
+}
+
+[[noreturn]] static void pidns_setup_fail(int report, pid_t child)
+{
+    static const char message[] = "kit PID wrapper cleanup or handshake failed";
+    if (report >= 0) {
+        ssize_t n;
+        do { n = write(report, message, sizeof(message) - 1); } while (n < 0 && errno == EINTR);
+    }
+    if (child > 0) (void)kill(child, SIGKILL);
+    _exit(127);
+}
+
+[[noreturn]] static void pidns_outer_start(pid_t init, int report, bool clean,
+    const int sp[2], const int lp[2])
+{
+    if (!clean && report >= 0) close(report);
+    close(sp[1]); close(lp[0]);
+    if (clean) {
+        if (!pidns_clean(sp[0], lp[1], report, 1) || !pidns_ack(lp[1], true))
+            pidns_setup_fail(report, init);
+        if (report >= 0) close(report);
+    }
+    pidns_outer(init, sp[0]);
+}
+
+static void pidns_init_prepare(int report, bool clean, const int lp[2])
+{
+    close(lp[1]);
+    if (clean && !pidns_ack(lp[0], false)) pidns_setup_fail(report, 0);
+    if (!pidns_unblock_signals() || !pidns_arm_parent_death(lp[0])) {
+        if (clean) pidns_setup_fail(report, 0);
+        _exit(1);
+    }
+    close(lp[0]);
+}
+
+[[noreturn]] static void pidns_init_start(pid_t shell, int report, bool clean,
+    const int sp[2], const int gate[2])
+{
+    if (!clean && report >= 0) close(report);
+    if (clean) {
+        if (!pidns_clean(sp[1], gate[1], report, 2) || !pidns_ack(gate[1], true))
+            pidns_setup_fail(report, shell);
+        close(gate[1]);
+        if (report >= 0) close(report);
+    }
+    pidns_init(shell, sp[1]);
+}
+
+static int pidns_enter(int close_fd, bool clean)
 {
     uid_t uid = getuid();
     gid_t gid = getgid();
-    int sp[2], lp[2];
+    int sp[2], lp[2], gate[2] = {-1, -1};
     if (pipe2(sp, O_CLOEXEC) != 0)
         return -1;
     if (pipe2(lp, O_CLOEXEC) != 0) {
@@ -284,29 +371,21 @@ int os_sandbox_pidns_enter(int close_fd)
     pid_t init = fork();
     if (init < 0)
         goto fail;
-    if (init > 0) {
-        if (close_fd >= 0)
-            close(close_fd);
-        close(sp[1]);
-        close(lp[0]); /* lp[1] stays open until this process exits */
-        pidns_outer(init, sp[0]);
-    }
-    close(lp[1]);
-    if (!pidns_unblock_signals())
-        _exit(1);
-    if (!pidns_arm_parent_death(lp[0]))
-        _exit(1);
-    close(lp[0]);
+    if (init > 0) pidns_outer_start(init, close_fd, clean, sp, lp);
+    pidns_init_prepare(close_fd, clean, lp);
+    if (clean && pipe2(gate, O_CLOEXEC)) goto fail;
     pid_t shell = fork();
     if (shell < 0)
         goto fail;
-    if (shell > 0) {
-        if (close_fd >= 0)
-            close(close_fd);
-        pidns_init(shell, sp[1]);
-    }
+    if (shell > 0) pidns_init_start(shell, close_fd, clean, sp, gate);
     close(sp[0]);
     close(sp[1]);
+    if (clean) {
+        close(gate[1]);
+        bool ready = pidns_ack(gate[0], false);
+        close(gate[0]);
+        if (!ready) { errno = EIO; return -1; }
+    }
     return 0;
 fail:;
     int saved = errno;
@@ -314,6 +393,17 @@ fail:;
     close(sp[1]);
     close(lp[0]);
     close(lp[1]);
+    close(gate[0]); close(gate[1]);
     errno = saved;
     return -1;
+}
+
+int os_sandbox_pidns_enter(int close_fd)
+{
+    return pidns_enter(close_fd, false);
+}
+
+int os_sandbox_pidns_enter_clean(int close_fd)
+{
+    return pidns_enter(close_fd, true);
 }

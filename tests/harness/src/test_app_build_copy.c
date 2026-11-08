@@ -26,6 +26,7 @@
 #include "chain/chainparams.h"
 #include "command/app_image.h"
 #include "command/app_build_make.h"
+#include "command/app_toolchain.h"
 #include "command/lab_exec.h"
 #include "command/native_command.h"
 #include "command/native_zcode_package_bundle.h"
@@ -904,6 +905,18 @@ static int abc_dep_alias_controls(const struct abc_world *w)
         ASSERT(abc_dep_verdict(&make, out, &closure, absolute, true));
         (void)snprintf(absolute, sizeof(absolute), "%s/./dep-copy/include/extra.h", w->root);
         ASSERT(abc_dep_verdict(&make, out, &closure, absolute, false));
+        struct vcs_entry compiler = {.path = "rootfs/usr/include/kit.h"};
+        struct app_toolchain kit = {.selected = true,
+            .manifest = {.entries = &compiler, .count = 1}};
+        struct app_build_make sealed = make; sealed.kit = &kit;
+        ASSERT(abc_dep_verdict(&sealed, out, &closure, "/source/include/boost.h", true));
+        ASSERT(abc_dep_verdict(&sealed, out, &closure, "/source/include/extra.h", false));
+        ASSERT(abc_dep_verdict(&sealed, out, &closure, "/source/include/link.h", false));
+        ASSERT(abc_dep_verdict(&sealed, out, &closure, "/source/../usr/include/kit.h", false));
+        ASSERT(abc_dep_verdict(&sealed, out, &closure, "/usr/include/kit.h", true));
+        ASSERT(abc_dep_verdict(&sealed, out, &closure, "/usr/bin/../include/kit.h", true));
+        ASSERT(abc_dep_verdict(&sealed, out, &closure, "/usr/include/stdio.h", false));
+        ASSERT(abc_dep_verdict(&sealed, out, &closure, outside, false));
         (void)snprintf(absolute, sizeof(absolute), "%s/./dep-copy/../outside.h", w->root);
         ASSERT(abc_dep_verdict(&make, out, &closure, absolute, false));
         ASSERT(abc_dep_verdict(&make, out, &closure, "include/../include/extra.h", false));

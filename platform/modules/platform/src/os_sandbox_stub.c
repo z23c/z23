@@ -746,3 +746,11 @@ int os_sandbox_pidns_enter(int close_fd)
     errno = ENOSYS;
     return -1;
 }
+
+int os_sandbox_pidns_enter_clean(int close_fd)
+{
+    return os_sandbox_pidns_enter(close_fd);
+}
+#if defined(ZCL_TESTING)
+void os_sandbox_test_kit_wrapper_failure(unsigned stage) { (void)stage; }
+#endif

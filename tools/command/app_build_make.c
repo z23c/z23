@@ -8,11 +8,13 @@
 #endif
 
 #include "command/app_build_make.h"
+#include "command/app_toolchain.h"
 
 #include "base/safe_alloc.h"
 #include "command/lab_exec.h"
 #include "platform/directory_compat.h"
 #include "platform/positioned_file.h"
+#include "platform/temp_directory.h"
 #include "sha3/sha3.h"
 #include "util/file_io.h"
 #include "util/path_util.h"
@@ -111,14 +113,57 @@ struct abm_child {
     char out_arg[ABM_PATH + 16];
     char tmpdir[ABM_PATH + 16];
     char home[ABM_PATH + 16];
+    char kit_out[ABM_PATH];
 };
+
+static size_t abm_kit_rules(const struct app_toolchain *kit, bool writable,
+    struct os_sandbox_path_rule rules[10])
+{
+    static const char *const dirs[] = {"/usr", "/lib", "/lib64", "/bin"};
+    size_t count = 0;
+    for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); ++i) {
+        size_t n = strlen(dirs[i]);
+        for (size_t j = 0; j < kit->manifest.count; ++j) {
+            const char *path = kit->manifest.entries[j].path + 6;
+            if (strncmp(path, dirs[i], n) || path[n] != '/') continue;
+            rules[count++] = (struct os_sandbox_path_rule){.path = dirs[i],
+                .allow_read = true, .allow_execute = true};
+            break;
+        }
+    }
+    if (app_toolchain_member(kit, "/etc/ld.so.cache"))
+        rules[count++] = (struct os_sandbox_path_rule){.path = "/etc/ld.so.cache", .allow_read = true};
+    rules[count++] = (struct os_sandbox_path_rule){.path = "/dev/null", .allow_read = true, .allow_write = true};
+    rules[count++] = (struct os_sandbox_path_rule){.path = "/source", .allow_read = true};
+    if (writable) rules[count++] = (struct os_sandbox_path_rule){.path = "/work",
+        .allow_read = true, .allow_write = true, .allow_create = true};
+    return count;
+}
+
+static bool abm_kit_output(struct abm_child *c, const struct app_build_make *m,
+                           const char *out_dir)
+{
+    char work[ABM_PATH], output[ABM_PATH];
+    if (!platform_directory_canonical_real(m->work_dir, work, sizeof(work)) ||
+        !platform_directory_canonical_real(out_dir, output, sizeof(output))) return false;
+    size_t n = strlen(work);
+    if (strncmp(output, work, n) || output[n] != '/' ||
+        !vcs_package_path_valid(output + n + 1)) return false;
+    int written = snprintf(c->kit_out, sizeof(c->kit_out), "/work/%s", output + n + 1);
+    return written > 0 && (size_t)written < sizeof(c->kit_out);
+}
 
 static bool abm_child_init(struct abm_child *c, const struct app_build_make *m,
                            const char *target, const char *out_dir)
 {
-    const char *make = abm_make_path();
+    bool kit = m->kit && m->kit->selected;
+    const char *make = kit ? "/usr/bin/make" : abm_make_path();
     const char *scratch = out_dir ? out_dir : "/nonexistent";
     memset(c, 0, sizeof(*c));
+    if (kit && out_dir) {
+        if (!abm_kit_output(c, m, out_dir)) return false;
+        out_dir = c->kit_out; scratch = out_dir;
+    }
     if (!make)
         return false;
     (void)snprintf(c->tmpdir, sizeof(c->tmpdir), "TMPDIR=%s", scratch);
@@ -127,7 +172,7 @@ static bool abm_child_init(struct abm_child *c, const struct app_build_make *m,
     c->argv[a++] = make;
     c->argv[a++] = "--no-print-directory";
     c->argv[a++] = "-C";
-    c->argv[a++] = m->copy_dir;
+    c->argv[a++] = kit ? "/source" : m->copy_dir;
     if (out_dir) {
         int n = snprintf(c->out_arg, sizeof(c->out_arg), "APP_OUT=%s",
                          out_dir);
@@ -158,6 +203,34 @@ static void abm_run_plain(const struct abm_child *c, const char *cwd,
     p->out_len = strnlen(p->out, LAB_CAPTURE_MAX);
 }
 
+static bool abm_kit_root_prepare(const struct app_build_make *m, bool writable,
+    char mount_dir[PLATFORM_TEMP_PATH_MAX], struct os_sandbox_kit_root *root,
+    char *why, size_t why_cap)
+{
+    *root = (struct os_sandbox_kit_root){0};
+    if (!m->confine || !m->kit->files ||
+        m->kit->file_count != m->kit->manifest.count ||
+        !platform_temp_directory_create("z23-kit-root-", mount_dir, PLATFORM_TEMP_PATH_MAX)) {
+        abm_why(why, why_cap, "selected kit requires sealed files and a private confined root");
+        return false;
+    }
+    *root = (struct os_sandbox_kit_root){.files = m->kit->files,
+        .count = m->kit->file_count, .mount_dir = mount_dir,
+        .source_dir = m->copy_dir, .work_dir = writable ? m->work_dir : NULL};
+    return true;
+}
+
+static bool abm_launch_result(const struct lab_proc *p, bool kit,
+    const char *target, char *why, size_t why_cap)
+{
+    if (p->launch == LAB_LAUNCHED) return true;
+    abm_why(why, why_cap, "make %s did not start: %s", target,
+            !kit && p->launch == LAB_LAUNCH_UNCONFINED
+                ? "the confinement could not be applied, so it never ran"
+                : p->detail);
+    return false;
+}
+
 /* Run one make target; true when it launched (p holds its outcome).
  * *unconfined reports a run with no confinement applied. */
 static bool abm_spawn(const struct app_build_make *m, const char *target,
@@ -166,15 +239,23 @@ static bool abm_spawn(const struct app_build_make *m, const char *target,
 {
     struct abm_child c;
     struct os_sandbox_path_rule rules[10];
+    bool kit = m->kit && m->kit->selected;
+    char mount_dir[PLATFORM_TEMP_PATH_MAX] = "";
+    struct os_sandbox_kit_root root = {0};
     if (!abm_child_init(&c, m, target, out_dir)) {
         abm_why(why, why_cap, "no make program at /usr/bin, /bin or "
                               "/usr/local/bin, or the output path is too long");
         return false;
     }
+    size_t n_rules;
+    if (kit) {
+        if (!abm_kit_root_prepare(m, out_dir != NULL, mount_dir, &root, why, why_cap)) return false;
+        n_rules = abm_kit_rules(m->kit, out_dir != NULL, rules);
+    } else n_rules = abm_rules(m->copy_dir, out_dir ? m->work_dir : NULL, rules);
     struct lab_spawn spawn = {
         .profile = LAB_PROFILE_COMPILE, .confine = m->confine,
-        .argv = c.argv, .env = c.env, .cwd = m->copy_dir, .rules = rules,
-        .n_rules = abm_rules(m->copy_dir, out_dir ? m->work_dir : NULL, rules),
+        .argv = c.argv, .env = c.env, .cwd = kit ? "/source" : m->copy_dir, .rules = rules,
+        .n_rules = n_rules, .kit_root = kit ? &root : NULL,
         .timeout_ms = out_dir ? ABM_BUILD_TIMEOUT_MS : ABM_QUERY_TIMEOUT_MS,
         .as_bytes = OS_SANDBOX_RLIMIT_KEEP, .fsize_bytes = 1024u << 20,
         .nofile = 512, .watch_dir = out_dir ? m->work_dir : NULL,
@@ -182,19 +263,16 @@ static bool abm_spawn(const struct app_build_make *m, const char *target,
     };
     *unconfined = !m->confine;
     lab_spawn_run(&spawn, p);
-    if (p->launch == LAB_LAUNCH_UNSUPPORTED) {
+    if (mount_dir[0] && rmdir(mount_dir) != 0) {
+        abm_why(why, why_cap, "private compiler mount directory cleanup failed");
+        return false;
+    }
+    if (!kit && p->launch == LAB_LAUNCH_UNSUPPORTED) {
         lab_proc_reset(p);
         *unconfined = true;
         abm_run_plain(&c, m->copy_dir, spawn.timeout_ms, p);
     }
-    if (p->launch != LAB_LAUNCHED) {
-        abm_why(why, why_cap, "make %s did not start: %s", target,
-                p->launch == LAB_LAUNCH_UNCONFINED
-                    ? "the confinement could not be applied, so it never ran"
-                    : p->detail);
-        return false;
-    }
-    return true;
+    return abm_launch_result(p, kit, target, why, why_cap);
 }
 
 static bool abm_exited_ok(const struct lab_proc *p)
@@ -441,6 +519,7 @@ void app_build_make_run(const struct app_build_make *m, const char *out_dir,
 /* ── depfile check ───────────────────────────────────────────────────── */
 
 struct abm_depcheck {
+    const struct app_toolchain *kit;
     const struct app_build_closure *c;
     char root[ABM_PATH];
     size_t depfiles;
@@ -543,10 +622,47 @@ static bool abm_store_traversal(const struct abm_depcheck *d, const char *token)
     return false;
 }
 
+/* Resolve lexical compiler paths inside the sealed namespace, never through
+ * the host's realpath or its external-header allowance. */
+static bool abm_kit_prereq_path(const char *token, char path[ABM_PATH])
+{
+    size_t used = 0;
+    path[0] = 0;
+    const char *part = token + 1;
+    while (*part) {
+        size_t n = strcspn(part, "/");
+        if (n == 2 && !memcmp(part, "..", 2)) {
+            if (!used || !strcmp(path, "/source")) return false;
+            while (used && path[used - 1] != '/') --used;
+            if (used) --used;
+            path[used] = 0;
+        } else if (n && !(n == 1 && *part == '.')) {
+            if (used + n + 1 >= ABM_PATH) return false;
+            path[used++] = '/'; memcpy(path + used, part, n); used += n; path[used] = 0;
+        }
+        part += n; if (*part) ++part;
+    }
+    return used != 0;
+}
+
+static bool abm_kit_prereq_ok(struct abm_depcheck *d, const char *token)
+{
+    if (!strncmp(token, "/source/", 8)) {
+        if (!abm_store_traversal(d, token + 8) && abm_local_prereq(d, token + 8)) return true;
+        abm_why(d->why, d->why_cap, "kit source prerequisite is undeclared or escapes: %s", token);
+        return false;
+    }
+    char path[ABM_PATH];
+    if (abm_kit_prereq_path(token, path) && app_toolchain_member(d->kit, path)) return true;
+    abm_why(d->why, d->why_cap, "kit build read an undeclared source or compiler input: %s", token);
+    return false;
+}
+
 /* The external-absolute allowance is existing policy, not capsule proof.
  * A relative or copy-prefixed path must never escape into that allowance. */
 static bool abm_prereq_ok(struct abm_depcheck *d, const char *token)
 {
+    if (d->kit && d->kit->selected && token[0] == '/') return abm_kit_prereq_ok(d, token);
     if (abm_store_traversal(d, token)) {
         abm_why(d->why, d->why_cap, "the build read '%s' through an excluded local store", token);
         return false;
@@ -627,6 +743,7 @@ bool app_build_depfiles_declared(const struct app_build_make *m,
     struct abm_depcheck d = {.c = c, .why = why, .why_cap = why_cap};
     if (!m || !m->copy_dir || !out_dir || !c)
         return false;
+    d.kit = m->kit;
     if (!platform_directory_canonical_real(m->copy_dir, d.root, sizeof(d.root))) {
         abm_why(why, why_cap, "the source copy directory cannot be resolved");
         return false;

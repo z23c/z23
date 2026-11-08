@@ -6,6 +6,7 @@
 #include "command/app_installed_source_resolve.h"
 #include "command/native_package_artifact.h"
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "crypto/sha256.h"
 #include "platform/os_proc.h"
 #include "platform/positioned_file.h"
@@ -13,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #if defined(__linux__) || defined(__APPLE__)
 #include <fcntl.h>
 #include <limits.h>
@@ -26,20 +28,21 @@ enum { ISR_CARD, ISR_RECORD, ISR_PROJECTION, ISR_PACKAGE, ISR_RECIPE,
     ISR_BUNDLE, ISR_NODE, ISR_ACME, ISR_VERIFY, ISR_GAME,
     ISR_NODE_ALIAS, ISR_ACME_ALIAS, ISR_VERIFY_ALIAS, ISR_BASE_ROWS,
     ISR_DESKTOP_RECEIVE = ISR_BASE_ROWS, ISR_DESKTOP_ICON, ISR_DESKTOP_MIME,
-    ISR_DESKTOP_GAME, ISR_ROWS };
+    ISR_DESKTOP_GAME, ISR_DESKTOP_END, ISR_KIT_DESCRIPTOR = ISR_DESKTOP_END,
+    ISR_KIT_BUNDLE, ISR_ROWS };
 static const char *const isr_names[ISR_ROWS] = {
     "AGENT_CARD.md", "app-build.wire", "installed-source.json", // error-doc-ref-ok: generated installed release assets, not checkout documents
     "manifest.wire", "recipe.wire", "source.bundle", "z23", "z23-acme",
     "z23-package-verify", "z23-skycombat", "zclassic23", "zclassic23-acme",
     "zclassic23-package-verify", "org.zclassic.ZClassic23.desktop",
     "org.zclassic.ZClassic23.svg", "org.zclassic.ZClassic23.xml",
-    "org.zclassic.SkyCombat.desktop"
+    "org.zclassic.SkyCombat.desktop", "app-toolchain.json", "app-toolchain.bundle"
 };
 static const size_t isr_limits[ISR_ROWS] = {
     65536, 240, 4096, ISR_MIB, 256u * 1024u, 64u * ISR_MIB,
     64u * ISR_MIB, 32u * ISR_MIB, 128u * ISR_MIB, 64u * ISR_MIB,
     64u * ISR_MIB, 32u * ISR_MIB, 128u * ISR_MIB,
-    65536, 65536, 65536, 65536
+    65536, 65536, 65536, 65536, 4096, 64u * ISR_MIB
 };
 struct isr_manifest { char digest[ISR_ROWS][65]; };
 struct isr_layout {
@@ -203,9 +206,12 @@ static bool isr_shape(const struct isr_manifest *m, bool mac)
     for (int row = 0; row < ISR_BASE_ROWS; ++row)
         if (!m->digest[row][0]) return false;
     unsigned desktop = 0;
-    for (int row = ISR_BASE_ROWS; row < ISR_ROWS; ++row)
+    for (int row = ISR_BASE_ROWS; row < ISR_DESKTOP_END; ++row)
         if (m->digest[row][0]) ++desktop;
-    return desktop == 0 || (!mac && desktop == ISR_ROWS - ISR_BASE_ROWS);
+    unsigned kit = (m->digest[ISR_KIT_DESCRIPTOR][0] != 0) +
+        (m->digest[ISR_KIT_BUNDLE][0] != 0);
+    if (kit && (kit != 2 || mac || desktop != ISR_DESKTOP_END - ISR_BASE_ROWS)) return false;
+    return desktop == 0 || (!mac && desktop == ISR_DESKTOP_END - ISR_BASE_ROWS);
 }
 static bool isr_parse(char *bytes, size_t length, struct isr_manifest *m, bool mac)
 {
@@ -266,7 +272,7 @@ static bool isr_self(const struct isr_layout *l, const struct isr_manifest *m)
 static bool isr_desktop_assets(int dir, const struct isr_manifest *m)
 {
     if (!m->digest[ISR_DESKTOP_RECEIVE][0]) return true;
-    for (int row = ISR_BASE_ROWS; row < ISR_ROWS; ++row) {
+    for (int row = ISR_BASE_ROWS; row < ISR_DESKTOP_END; ++row) {
         char hex[65]; size_t length;
         if (!isr_member(dir, isr_names[row], isr_limits[row], hex, NULL, 0, &length) ||
             strcmp(hex, m->digest[row])) return false;
@@ -317,15 +323,19 @@ static bool isr_retained(const struct app_installed_source *out,
     }
     return !strcmp(out->app, "skycombat");
 }
+static bool isr_binding_matches(int dir, const struct isr_layout *l, const char *mh)
+{
+    struct isr_layout again; struct isr_manifest final; char final_hash[65];
+    return isr_layout(&again) && !strcmp(l->exe, again.exe) && !strcmp(l->dir, again.dir) &&
+        isr_manifest(dir, l, &final, final_hash) && !strcmp(mh, final_hash);
+}
 static bool isr_recheck(int dir, const struct isr_layout *l,
     const struct isr_manifest *manifest, const char *mh, const char *pin)
 {
     /* Recheck selector, manifest and member bytes after loader pathname reads;
      * authorized whole-install replacement remains outside this threat model. */
-    struct isr_layout again; struct isr_manifest final;
-    char final_hash[65], final_pin[65];
-    if (!isr_layout(&again) || strcmp(l->exe, again.exe) || strcmp(l->dir, again.dir)) return false;
-    if (!isr_manifest(dir, l, &final, final_hash) || strcmp(mh, final_hash)) return false;
+    char final_pin[65];
+    if (!isr_binding_matches(dir, l, mh)) return false;
     if (!isr_assets(dir, manifest, final_pin) || strcmp(pin, final_pin)) return false;
     return isr_self(l, manifest);
 }
@@ -345,7 +355,111 @@ static bool isr_resolve(struct app_installed_source *out, char *why, size_t cap)
     if (close(dir) != 0) ok = false;
     return ok;
 }
+/* Recognize the installed layout before validating it, so a broken selector
+ * cannot turn a selected kit into an unselected development toolchain. */
+static int isr_toolchain_candidate(void)
+{
+#if defined(__APPLE__)
+    struct isr_layout layout;
+    return isr_layout(&layout) ? 1 : 0;
+#else
+    char exe[ISR_PATH], prefix[ISR_PATH], path[ISR_PATH];
+    if (!isr_exe_path(exe, sizeof(exe))) return -1;
+    size_t n = strlen(exe);
+    if (n <= 8 || strcmp(exe + n - 8, "/bin/z23")) return 0;
+    memcpy(prefix, exe, n - 8); prefix[n - 8] = 0;
+    if (!zcl_path_join(path, sizeof(path), prefix, "share/z23/apps")) return -1;
+    struct stat st;
+    if (lstat(path, &st) == 0) return 1;
+    if (errno != ENOENT) return -1;
+    if (!zcl_path_join(path, sizeof(path), prefix, "bin/z23-skycombat")) return -1;
+    if (lstat(path, &st) == 0) return S_ISLNK(st.st_mode) ? 1 : 0;
+    return errno == ENOENT ? 0 : -1;
 #endif
+}
+static bool isr_kit_bytes(int dir, int row, const struct isr_manifest *manifest,
+    struct app_installed_source_bytes *out)
+{
+    int fd = openat(dir, isr_names[row], O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return false;
+    struct platform_positioned_file_snapshot before;
+    bool ok = isr_readable(fd, isr_limits[row], &before);
+    if (ok) {
+        out->bytes = zcl_malloc((size_t)before.size, "installed.toolchain.member");
+        ok = out->bytes != NULL;
+    }
+    if (ok) {
+        char digest[65];
+        ok = isr_stream(fd, isr_limits[row], digest, out->bytes,
+            (size_t)before.size, &out->length) &&
+            !strcmp(digest, manifest->digest[row]);
+    }
+    if (close(fd) != 0) ok = false;
+    return ok;
+}
+#if defined(ZCL_TESTING)
+/* Exercise retained member verification, without impersonating an installed
+ * executable or granting production toolchain selection authority. */
+bool zcl_test_installed_toolchain_manifest(int dir, const char *wire, size_t length, bool mac);
+bool zcl_test_installed_toolchain_manifest(int dir, const char *wire, size_t length, bool mac)
+{
+    if (!wire || length > ISR_MANIFEST) return false;
+    char bytes[ISR_MANIFEST + 1]; struct isr_manifest manifest;
+    memcpy(bytes, wire, length); bytes[length] = 0;
+    struct app_installed_toolchain kit = {0};
+    bool ok = isr_parse(bytes, length, &manifest, mac) &&
+        manifest.digest[ISR_KIT_DESCRIPTOR][0] &&
+        isr_kit_bytes(dir, ISR_KIT_DESCRIPTOR, &manifest, &kit.descriptor) &&
+        isr_kit_bytes(dir, ISR_KIT_BUNDLE, &manifest, &kit.bundle);
+    app_installed_toolchain_free(&kit);
+    return ok;
+}
+#endif
+static enum app_installed_toolchain_status isr_toolchain(
+    struct app_installed_toolchain *out)
+{
+    int candidate = isr_toolchain_candidate();
+    if (candidate == 0) return APP_INSTALLED_TOOLCHAIN_UNSELECTED;
+    struct isr_layout layout;
+    if (candidate < 0 || !isr_layout(&layout)) return APP_INSTALLED_TOOLCHAIN_REFUSED;
+    int dir = isr_directory(layout.dir);
+    if (dir < 0) return APP_INSTALLED_TOOLCHAIN_REFUSED;
+    struct isr_manifest manifest; char hash[65];
+    bool ok = isr_manifest(dir, &layout, &manifest, hash) && isr_self(&layout, &manifest);
+    bool selected = ok && manifest.digest[ISR_KIT_DESCRIPTOR][0];
+    if (selected) ok = isr_kit_bytes(dir, ISR_KIT_DESCRIPTOR, &manifest, &out->descriptor) &&
+        isr_kit_bytes(dir, ISR_KIT_BUNDLE, &manifest, &out->bundle);
+    if (ok) ok = isr_binding_matches(dir, &layout, hash) && isr_self(&layout, &manifest);
+    if (close(dir) != 0) ok = false;
+    return !ok ? APP_INSTALLED_TOOLCHAIN_REFUSED : selected ?
+        APP_INSTALLED_TOOLCHAIN_VERIFIED : APP_INSTALLED_TOOLCHAIN_UNSELECTED;
+}
+#endif
+void app_installed_toolchain_free(struct app_installed_toolchain *out)
+{
+    if (!out) return;
+    free(out->descriptor.bytes); free(out->bundle.bytes);
+    memset(out, 0, sizeof(*out));
+}
+enum app_installed_toolchain_status app_installed_toolchain_resolve(
+    struct app_installed_toolchain *out, char *why, size_t cap)
+{
+    if (!out) {
+        (void)app_installed_source_message(why, cap, "Toolchain resolution needs an output");
+        return APP_INSTALLED_TOOLCHAIN_REFUSED;
+    }
+    app_installed_toolchain_free(out);
+    enum app_installed_toolchain_status status = APP_INSTALLED_TOOLCHAIN_UNSELECTED;
+#if defined(__linux__) || defined(__APPLE__)
+    status = isr_toolchain(out);
+#endif
+    if (status != APP_INSTALLED_TOOLCHAIN_VERIFIED) app_installed_toolchain_free(out);
+    (void)app_installed_source_message(why, cap,
+        status == APP_INSTALLED_TOOLCHAIN_VERIFIED ? "Retained kit bytes match the installer manifest; semantic verification required" :
+        status == APP_INSTALLED_TOOLCHAIN_UNSELECTED ? "No installed compiler kit selected" :
+        "Installed compiler kit refused: layout, owner/mode, manifest, running image or member mismatch");
+    return status;
+}
 bool app_installed_source_resolve(const char *app,
     struct app_installed_source *out, char *why, size_t cap)
 {

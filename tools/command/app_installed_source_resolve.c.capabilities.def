@@ -1,2 +1,2 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
-ZCL_MODULE_CAPABILITY("tools/command/app_installed_source_resolve.c", CAP_FS_READ, "Read-only descriptor ownership, retained installer manifest and self-image verification; no writes, grants or execution")
+ZCL_MODULE_CAPABILITY("tools/command/app_installed_source_resolve.c", CAP_FS_READ|CAP_FS_WRITE, "Verify descriptor ownership, retained installer manifest and running image; checked allocation writes failure diagnostics, without source writes, grants or execution")

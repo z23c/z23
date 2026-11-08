@@ -13,8 +13,15 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "util/file_tree_ops.h"
+#include "platform/os_sandbox.h"
+#include "platform/resident_launch.h"
+#include "platform/process_lifecycle.h"
+#include "command/lab_exec.h"
+#include "sha3/sha3.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -861,6 +868,146 @@ static int test_lab_writerless_case_file(void)
 }
 #endif
 
+#if defined(__linux__)
+static int test_lab_kit_handles(void)
+{
+    int failures = 0, fd = -1;
+    TEST("lab: compiler capture seals exact bytes against writes and truncation") {
+        const uint8_t wire[] = {0x20, 'k', 'i', 't'};
+        uint8_t blob[32]; struct sha3_256_ctx hash;
+        sha3_256_init(&hash); sha3_256_write(&hash, wire, sizeof(wire));
+        sha3_256_finalize(&hash, blob);
+        ASSERT(os_sandbox_kit_capture(wire + 1, 3, S_IFREG | 0755, blob, &fd).ok);
+        ASSERT(pwrite(fd, "x", 1, 0) < 0 && ftruncate(fd, 0) < 0);
+        char bytes[3]; ASSERT(pread(fd, bytes, sizeof(bytes), 0) == 3 && !memcmp(bytes, "kit", 3));
+        ASSERT(close(fd) == 0); fd = -1; blob[0] ^= 1;
+        ASSERT(!os_sandbox_kit_capture(wire + 1, 3, S_IFREG | 0755, blob, &fd).ok && fd == -1);
+        ASSERT(!os_sandbox_kit_capture(wire + 1, 3, S_IFLNK | 0755, blob, &fd).ok && fd == -1);
+        PASS();
+    } _test_next:;
+    if (fd >= 0) close(fd);
+    return failures;
+}
+[[noreturn]] static void lt_clean_reaper_child(const int sentinel[2],
+    const int release[2], const int ready[2])
+{
+    (void)setpgid(0, 0);
+    close(sentinel[0]); close(release[1]); close(ready[0]);
+    if (prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) || os_sandbox_pidns_enter_clean(-1)) _exit(99);
+    close(sentinel[1]);
+    if (write(ready[1], "r", 1) != 1) _exit(98);
+    char byte;
+    while (read(release[0], &byte, 1) < 0 && errno == EINTR) {}
+    _exit(0);
+}
+
+static bool lt_reaper_ready(int fd)
+{
+    struct pollfd acknowledged = {.fd = fd, .events = POLLIN};
+    int signal = poll(&acknowledged, 1, 1000); char byte = 0;
+    return signal == 1 && (acknowledged.revents & POLLIN) && read(fd, &byte, 1) == 1 && byte == 'r';
+}
+
+static int test_lab_clean_reapers(void)
+{
+    int failures = 0;
+    if (!lab_pidns_available()) {
+        printf("lab: clean PID wrapper fixture unavailable (namespace admission refused)\n");
+        return 0;
+    }
+    TEST("lab: PID namespace wrappers do not retain unrelated pipe authority") {
+        int sentinel[2], release[2], ready[2];
+        ASSERT(pipe(sentinel) == 0);
+        if (pipe(release)) {
+            close(sentinel[0]); close(sentinel[1]); ASSERT(false);
+        }
+        if (pipe(ready)) {
+            close(sentinel[0]); close(sentinel[1]); close(release[0]); close(release[1]); ASSERT(false);
+        }
+        pid_t child = fork();
+        if (child == 0) lt_clean_reaper_child(sentinel, release, ready);
+        close(sentinel[1]); close(release[0]); close(ready[1]);
+        bool entered = lt_reaper_ready(ready[0]);
+        struct pollfd watch = {.fd = sentinel[0], .events = POLLIN};
+        int polled = poll(&watch, 1, 700);
+        /* The execution child cannot exit before release, even if the parent
+         * is descheduled. Custody cleanup is bounded on every verdict. */
+        close(sentinel[0]); close(ready[0]); close(release[1]);
+        struct platform_process process = {.native = (uintptr_t)child, .pid = (uint64_t)child};
+        uint32_t code = 999;
+        enum platform_process_wait_result waited = child > 0
+            ? platform_process_wait(&process, 1000, &code) : PLATFORM_PROCESS_WAIT_FAILED;
+        if (child > 0 && waited != PLATFORM_PROCESS_WAIT_EXITED)
+            (void)resident_launch_kill_reap((uint64_t)child, 1000, NULL);
+        ASSERT(entered && polled == 1 && (watch.revents & POLLHUP));
+        ASSERT(waited == PLATFORM_PROCESS_WAIT_EXITED && code == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static bool lt_wrapper_marker(unsigned stage, const char *path)
+{
+    os_sandbox_test_kit_wrapper_failure(stage);
+    pid_t child = fork();
+    if (child == 0) {
+        (void)setpgid(0, 0);
+        if (prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) || os_sandbox_pidns_enter_clean(-1)) _exit(99);
+        int fd = open(path, O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, 0600);
+        if (fd < 0 || write(fd, "released", 8) != 8 || close(fd)) _exit(98);
+        _exit(0);
+    }
+    os_sandbox_test_kit_wrapper_failure(0);
+    if (child < 0) return false;
+    struct platform_process process = {.native = (uintptr_t)child, .pid = (uint64_t)child};
+    uint32_t code = 999;
+    enum platform_process_wait_result waited = platform_process_wait(&process, 2000, &code);
+    if (waited != PLATFORM_PROCESS_WAIT_EXITED)
+        (void)resident_launch_kill_reap((uint64_t)child, 1000, NULL);
+    struct stat st; bool marker = lstat(path, &st) == 0;
+    bool removed = !marker || unlink(path) == 0;
+    return waited == PLATFORM_PROCESS_WAIT_EXITED && code == (stage ? 127u : 0u) &&
+        marker == (stage == 0) && removed;
+}
+
+static int test_lab_wrapper_failure(void)
+{
+    int failures = 0;
+    if (!lab_pidns_available()) return 0;
+    TEST("lab: wrapper cleanup failure reports setup refusal before execution") {
+        struct lab_proc proc;
+        ASSERT(lab_proc_init(&proc));
+        const struct os_sandbox_kit_file file = {.path = "bin/sh", .fd = -1};
+        const struct os_sandbox_kit_root root = {.files = &file, .count = 1,
+            .mount_dir = "/z23-kit-failure-fixture", .source_dir = "/"};
+        const char *argv[] = {"/usr/bin/printf", "KIT_EXEC_MARKER", NULL};
+        const struct lab_spawn spawn = {.kit_root = &root,
+            .profile = LAB_PROFILE_COMPILE, .confine = true, .argv = argv,
+            .timeout_ms = 2000, .as_bytes = OS_SANDBOX_RLIMIT_KEEP,
+            .fsize_bytes = 1048576, .nofile = 512};
+        bool refused = true;
+        for (unsigned stage = 1; stage <= 2; ++stage) {
+            os_sandbox_test_kit_wrapper_failure(stage);
+            lab_spawn_run(&spawn, &proc);
+            os_sandbox_test_kit_wrapper_failure(0);
+            refused = refused && proc.launch == LAB_LAUNCH_UNCONFINED &&
+                strstr(proc.detail, "kit PID wrapper cleanup or handshake failed") &&
+                !proc.timed_out && proc.out_len == 0;
+            lab_proc_reset(&proc);
+        }
+        lab_proc_free(&proc);
+        ASSERT(refused);
+        char marker[600];
+        int n = snprintf(marker, sizeof(marker), "%s/kit-released", g_lt_dir);
+        ASSERT(n > 0 && (size_t)n < sizeof(marker));
+        ASSERT(lt_wrapper_marker(0, marker));
+        ASSERT(lt_wrapper_marker(1, marker));
+        ASSERT(lt_wrapper_marker(2, marker));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 int test_lab(void)
 {
     int failures = 0;
@@ -874,6 +1021,11 @@ int test_lab(void)
         return failures;
     }
     failures += test_lab_hello();
+#if defined(__linux__)
+    failures += test_lab_kit_handles();
+    failures += test_lab_clean_reapers();
+    failures += test_lab_wrapper_failure();
+#endif
     failures += test_lab_compile_error();
     failures += test_lab_exit_and_stderr();
     failures += test_lab_crash();

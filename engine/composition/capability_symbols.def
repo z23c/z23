@@ -722,6 +722,10 @@ ZCL_CAPABILITY_SYMBOL("unlockpt", CAP_PRIVILEGE,
 ZCL_CAPABILITY_SYMBOL("unshare", CAP_PRIVILEGE,
     "Creates new namespaces, which is authority over what the process "
     "can see.")
+ZCL_CAPABILITY_SYMBOL("mount", CAP_PRIVILEGE,
+    "Changes filesystem mount topology and access flags in the caller's namespace.")
+ZCL_CAPABILITY_SYMBOL("umount2", CAP_PRIVILEGE,
+    "Detaches a filesystem mount from the caller's namespace.")
 
 /* ---- CAP_HARMLESS ---- */
 ZCL_CAPABILITY_SYMBOL("__clear_cache", CAP_HARMLESS,

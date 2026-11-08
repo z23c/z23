@@ -82,7 +82,7 @@ sha256_check_manifest() {
     fi
 }
 
-# Public fetch ceilings. The manifest has at most thirteen checksum rows;
+# Public fetch ceilings. The manifest has at most nineteen checksum rows;
 # 2 KiB leaves bounded format headroom. Node aliases are currently below 32 MiB,
 # the confined verifier below 96 MiB, and the certificate worker (a small
 # static-ish TLS client, currently ~5 MB) below 32 MiB; these limits allow
@@ -290,6 +290,7 @@ RELEASE_MEMBERS_LEGACY="AGENT_CARD.md z23 zclassic23 zclassic23-package-verify z
 RELEASE_MEMBERS="AGENT_CARD.md z23 zclassic23 z23-package-verify zclassic23-package-verify z23-acme zclassic23-acme"
 APP_SOURCE_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire"
 APP_DESKTOP_MEMBERS="org.zclassic.SkyCombat.desktop org.zclassic.ZClassic23.desktop org.zclassic.ZClassic23.svg org.zclassic.ZClassic23.xml"
+APP_TOOLCHAIN_MEMBERS="app-toolchain.json app-toolchain.bundle"
 REMOTE_CARD_MAX_BYTES=$((64 * 1024))
 
 payload_max_bytes() {
@@ -301,6 +302,8 @@ payload_max_bytes() {
         AGENT_CARD.md) printf '%s\n' "$REMOTE_CARD_MAX_BYTES" ;;
         z23-skycombat|source.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
         installed-source.json) printf '%s\n' 4096 ;;
+        app-toolchain.json) printf '%s\n' 4096 ;;
+        app-toolchain.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
         manifest.wire) printf '%s\n' "$((1024 * 1024))" ;;
         recipe.wire) printf '%s\n' "$((256 * 1024))" ;;
         app-build.wire) printf '%s\n' 240 ;;
@@ -337,6 +340,8 @@ RELEASE_NAMES_LEGACY=$'AGENT_CARD.md\nz23\nzclassic23\nzclassic23-acme\nzclassic
 RELEASE_NAMES_APP=$'AGENT_CARD.md\napp-build.wire\ninstalled-source.json\nmanifest.wire\nrecipe.wire\nsource.bundle\nz23\nz23-acme\nz23-package-verify\nz23-skycombat\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 RELEASE_NAMES_APP_DESKTOP=$'AGENT_CARD.md\napp-build.wire\ninstalled-source.json\nmanifest.wire\norg.zclassic.SkyCombat.desktop\norg.zclassic.ZClassic23.desktop\norg.zclassic.ZClassic23.svg\norg.zclassic.ZClassic23.xml\nrecipe.wire\nsource.bundle\nz23\nz23-acme\nz23-package-verify\nz23-skycombat\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 
+RELEASE_NAMES_APP_TOOLCHAIN="$(printf '%s\n' "$RELEASE_NAMES_APP_DESKTOP" app-toolchain.json app-toolchain.bundle | LC_ALL=C sort)"
+
 validate_manifest_contract() {
     local manifest="$1" bytes lines matching names dir name twin
     [ -f "$manifest" ] || die "SHA256SUMS missing after fetch"
@@ -345,12 +350,12 @@ validate_manifest_contract() {
         || die "SHA256SUMS exceeds $REMOTE_MANIFEST_MAX_BYTES bytes"
     lines="$(wc -l <"$manifest" | tr -d ' ')"
     matching="$(LC_ALL=C grep -Ec \
-        '^[0-9a-f]{64}  (AGENT_CARD\.md|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme|z23-skycombat|installed-source\.json|source\.bundle|manifest\.wire|recipe\.wire|app-build\.wire|org\.zclassic\.SkyCombat\.desktop|org\.zclassic\.ZClassic23\.(desktop|svg|xml))$' \
+        '^[0-9a-f]{64}  (AGENT_CARD\.md|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme|z23-skycombat|installed-source\.json|source\.bundle|manifest\.wire|recipe\.wire|app-build\.wire|app-toolchain\.(json|bundle)|org\.zclassic\.SkyCombat\.desktop|org\.zclassic\.ZClassic23\.(desktop|svg|xml))$' \
         "$manifest" || true)"
-    { [ "$lines" -eq 7 ] || [ "$lines" -eq 5 ] || [ "$lines" -eq 13 ] || [ "$lines" -eq 17 ]; } && [ "$matching" -eq "$lines" ] \
-        || die "SHA256SUMS must contain exactly five (legacy), exactly seven (current), thirteen (app), or seventeen (Linux app desktop) strict lowercase SHA-256 rows"
+    { [ "$lines" -eq 7 ] || [ "$lines" -eq 5 ] || [ "$lines" -eq 13 ] || [ "$lines" -eq 17 ] || [ "$lines" -eq 19 ]; } && [ "$matching" -eq "$lines" ] \
+        || die "SHA256SUMS must contain exactly five (legacy), seven (current), thirteen (app), seventeen (Linux app desktop), or nineteen (Linux app toolchain) strict lowercase SHA-256 rows"
     names="$(awk '{print $2}' "$manifest" | LC_ALL=C sort)"
-    [ "$names" = "$RELEASE_NAMES_CURRENT" ] || [ "$names" = "$RELEASE_NAMES_LEGACY" ] || [ "$names" = "$RELEASE_NAMES_APP" ] || [ "$names" = "$RELEASE_NAMES_APP_DESKTOP" ] \
+    [ "$names" = "$RELEASE_NAMES_CURRENT" ] || [ "$names" = "$RELEASE_NAMES_LEGACY" ] || [ "$names" = "$RELEASE_NAMES_APP" ] || [ "$names" = "$RELEASE_NAMES_APP_DESKTOP" ] || [ "$names" = "$RELEASE_NAMES_APP_TOOLCHAIN" ] \
         || die "SHA256SUMS must name each required release member exactly once"
     # z23 and zclassic23 are one program under two names, and the release
     # says so with one digest in two rows. The same holds for each helper
@@ -742,6 +747,9 @@ app_payload_members() {
     if [ -n "$(manifest_digest_of "$1" org.zclassic.ZClassic23.desktop)" ]; then
         printf '%s\n' "$APP_DESKTOP_MEMBERS"
     fi
+    if [ -n "$(manifest_digest_of "$1" app-toolchain.json)" ]; then
+        printf '%s\n' "$APP_TOOLCHAIN_MEMBERS"
+    fi
 }
 
 # The release manifest remains the authority. No JSON projection parsing in
@@ -815,6 +823,46 @@ app_library_desktop_text() {
     printf '[Desktop Entry]\nType=Application\nName=My Apps\nComment=Open your installed and saved apps\nExec=%s app library %s\nIcon=org.zclassic.ZClassic23\nTerminal=false\nStartupNotify=true\nX-Z23-Generated-App-Library=1\n' "$1" "$2"
 }
 
+# Merge the one fixed handler without touching defaults or other associations.
+# Reject ambiguous caches rather than rewriting content we cannot preserve.
+app_mime_cache_merge() {
+    local dir="$1" cache="$1/mimeinfo.cache" tmp before
+    [ ! -L "$cache" ] && { [ ! -e "$cache" ] || [ -f "$cache" ]; } || return 1
+    tmp="$(mktemp "$dir/.z23-mime-cache.XXXXXX")" || return 1
+    before="$(mktemp "$dir/.z23-mime-before.XXXXXX")" || { rm -f -- "$tmp"; return 1; }
+    if [ -e "$cache" ]; then
+        [ "$(wc -c <"$cache")" -le 1048576 ] && [ "$(tail -c 1 "$cache" | od -An -tx1 | tr -d " \n")" = 0a ] && cat "$cache" >"$before" || { rm -f -- "$tmp" "$before"; return 1; }
+    else
+        printf '[MIME Cache]\n' >"$before"
+    fi
+    if ! LC_ALL=C awk '
+      BEGIN { section=0; target=0; bad=0 }
+      /^\[MIME Cache\]$/ { if (++section != 1) bad=1; print; next }
+      /^$/ { print; next }
+      /^#/ { print; next }
+      {
+        if (section != 1 || $0 !~ /^[^=[:cntrl:] \t]+\/[^=\/[:cntrl:] \t]+=[^=[:cntrl:]]*$/) { bad=1; next }
+        split($0,a,"="); if (seen[a[1]]++) bad=1
+        if (a[1] == "application/x-z23-share") {
+          target=1; n=split(a[2],v,";"); found=0
+          for (i=1;i<=n;i++) if (v[i] == "org.zclassic.ZClassic23.desktop") found=1
+          if (a[2] != "" && substr(a[2],length(a[2]),1) != ";") { bad=1; next }
+          if (!found) $0=$0 "org.zclassic.ZClassic23.desktop;"
+        }
+        print
+      }
+      END { if (section != 1 || bad) exit 1; if (!target) print "application/x-z23-share=org.zclassic.ZClassic23.desktop;" }
+    ' "$before" >"$tmp"; then rm -f -- "$tmp" "$before"; return 1; fi
+    # Snapshot comparison detects prior edits, but cannot lock noncooperating writers.
+    if [ -e "$cache" ]; then
+        [ ! -L "$cache" ] && cmp -s "$before" "$cache" || { rm -f -- "$tmp" "$before"; return 1; }
+    else
+        [ ! -L "$cache" ] && [ ! -e "$cache" ] || { rm -f -- "$tmp" "$before"; return 1; }
+    fi
+    chmod 644 "$tmp" && mv -fT -- "$tmp" "$cache" || { rm -f -- "$tmp" "$before"; return 1; }
+    rm -f -- "$before"
+}
+
 install_app_desktop() {
     local prefix="$1" data="${XDG_DATA_HOME:-$HOME/.local/share}"
     local source="$prefix/share/z23/apps/skycombat" exe arg line desktop tmp name count
@@ -843,10 +891,6 @@ install_app_desktop() {
     }
     command -v update-mime-database >/dev/null 2>&1 || {
         say "share-file registration unavailable: install shared-mime-info; use app receive --file=PATH --preview meanwhile"
-        return 0
-    }
-    command -v update-desktop-database >/dev/null 2>&1 || {
-        say "share-file registration unavailable: install desktop-file-utils; use app receive --file=PATH --preview meanwhile"
         return 0
     }
     install_directories "$data/applications" "$data/icons/hicolor/scalable/apps" "$data/mime/packages" || return 1
@@ -888,7 +932,11 @@ install_app_desktop() {
     desktop_install_file "$source/org.zclassic.ZClassic23.xml" \
         "$data/mime/packages/org.zclassic.ZClassic23.xml" || return 1
     update-mime-database "$data/mime" || return 1
-    update-desktop-database "$data/applications" || return 1
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$data/applications" || return 1
+    else
+        app_mime_cache_merge "$data/applications" || return 1
+    fi
     # Do not write mimeapps.list or set a default handler. File managers offer
     # the verified Z23 receiver through Open With; confirmation remains native.
     say "Sky Combat added to your applications; share files registered for Open With Z23; your default application is unchanged"
@@ -965,6 +1013,8 @@ MACOS_ACTIVATION_PENDING=0
 
 install_payload_macos_generation() {
     local stage="$1" prefix="$2" root generations name helper
+    [ -z "$(manifest_digest_of "$stage" app-toolchain.json)" ] \
+        || die "the bundled app compiler is supported only by the Linux release"
     root="$prefix/lib/z23"
     generations="$root/generations"
     MACOS_GENERATIONS="$generations"
@@ -2955,6 +3005,39 @@ selftest_app_source() {
     done
 }
 
+selftest_app_toolchain() {
+    local tmp="$SELFTEST_TMP" app="$SELFTEST_TMP/kit-release" prefix="$SELFTEST_TMP/kit-prefix" name id rc
+    mkdir -p "$app"
+    cp "$tmp/app-release/"* "$app/"
+    for name in $APP_DESKTOP_MEMBERS $APP_TOOLCHAIN_MEMBERS; do
+        printf 'inert %s\n' "$name" >"$app/$name"
+    done
+    (cd "$app" && sha256sum $RELEASE_MEMBERS $APP_SOURCE_MEMBERS $APP_DESKTOP_MEMBERS $APP_TOOLCHAIN_MEMBERS >SHA256SUMS)
+    validate_manifest_contract "$app/SHA256SUMS"
+    verify_strict "$app"
+    run_install "$prefix" "$tmp/kit-units" "$app" >/dev/null || die "selftest: kit payload install failed"
+    id="$(sha256_file "$app/SHA256SUMS")"
+    for name in $APP_TOOLCHAIN_MEMBERS; do
+        cmp -s "$app/$name" "$prefix/share/z23/apps/$id/$name" || die "selftest: retained kit bytes differ"
+        [ ! -x "$prefix/share/z23/apps/$id/$name" ] || die "selftest: inert kit member is executable"
+        grep -v "  $name\$" "$app/SHA256SUMS" >"$app/missing"
+        rc=0; (validate_manifest_contract "$app/missing") >/dev/null 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] || die "selftest: partial toolchain set accepted"
+    done
+    rc=0; (install_payload_macos_generation "$app" "$tmp/kit-mac-refusal") >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] && [ ! -e "$tmp/kit-mac-refusal" ] || die "selftest: unsupported kit mutated a Mac install"
+    printf 'tamper\n' >>"$app/app-toolchain.bundle"
+    rc=0; (verify_strict "$app") >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: toolchain tampering accepted"
+    awk 'BEGIN { for (i=0; i<4097; i++) printf "x" }' >"$app/app-toolchain.json"
+    rc=0; (validate_payload_sizes "$app") >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: oversized toolchain descriptor accepted"
+    printf 'inert app-toolchain.json\n' >"$app/app-toolchain.json"
+    dd if=/dev/zero of="$app/app-toolchain.bundle" bs=1 count=0 seek=67108865 2>/dev/null
+    rc=0; (validate_payload_sizes "$app") >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || die "selftest: oversized toolchain bundle accepted"
+}
+
 selftest_app_mode() {
     local tmp="$SELFTEST_TMP" app="$SELFTEST_TMP/app-desktop-release"
     local home="$tmp/app home" data="$tmp/app home/data" mock="$tmp/app-mode-tools"
@@ -3019,7 +3102,7 @@ EOF
     "$SCRIPT_DIR/install_z23.sh" --help >"$tmp/app-help"
     grep -F -- '--apps' "$tmp/app-help" >/dev/null || die "selftest: help omitted --apps"
     # Simulate each absent desktop tool without depending on host packages.
-    for missing_tool in update-mime-database update-desktop-database; do
+    for missing_tool in update-mime-database; do
         (
             command() {
                 if [ "$#" -eq 2 ] && [ "$1" = -v ] && [ "$2" = "$missing_tool" ]; then return 1; fi
@@ -3034,6 +3117,32 @@ EOF
             die "selftest: missing desktop tool claimed or changed registration"
         fi
     done
+    # No desktop database helper: preserve foreign associations and defaults.
+    local cache_dir="$tmp/cache-test" cache="$tmp/cache-test/mimeinfo.cache"
+    mkdir -p "$cache_dir"
+    printf '%s\n' '[MIME Cache]' 'application/x-weird!#$&^=Friendly Unicode é.desktop;' 'application/x-other=other.desktop;' 'application/x-z23-share=friend desktop.desktop;' >"$cache"
+    app_mime_cache_merge "$cache_dir" || die "selftest: cache merge refused valid input"
+    grep -Fqx 'application/x-weird!#$&^=Friendly Unicode é.desktop;' "$cache" || die "selftest: foreign MIME or desktop ID changed"
+    grep -qx 'application/x-other=other.desktop;' "$cache" || die "selftest: other association changed"
+    grep -qx 'application/x-z23-share=friend desktop.desktop;org.zclassic.ZClassic23.desktop;' "$cache" || die "selftest: foreign handler lost"
+    cp "$cache" "$tmp/cache-once"
+    app_mime_cache_merge "$cache_dir" && cmp -s "$cache" "$tmp/cache-once" || die "selftest: cache merge not idempotent"
+    printf '[MIME Cache]\napplication/x-z23-share=a.desktop;\napplication/x-z23-share=b.desktop;\n' >"$cache"
+    cp "$cache" "$tmp/cache-bad"
+    if app_mime_cache_merge "$cache_dir" || ! cmp -s "$cache" "$tmp/cache-bad"; then die "selftest: ambiguous cache changed"; fi
+    rm "$cache"; ln -s "$tmp/cache-bad" "$cache"
+    if app_mime_cache_merge "$cache_dir" || [ ! -L "$cache" ]; then die "selftest: cache symlink accepted"; fi
+    rm "$cache"
+    (
+        command() {
+            if [ "$#" -eq 2 ] && [ "$1" = -v ] && [ "$2" = update-desktop-database ]; then return 1; fi
+            builtin command "$@"
+        }
+        HOME="$home" XDG_DATA_HOME="$tmp/no-desktop-db" PATH="$mock:$PATH" Z23_APPS_DESKTOP_LOG="$tmp/app-desktop" install_app_desktop "$prefix-Linux"
+    ) >"$tmp/no-desktop-db.out" 2>&1 || die "selftest: no desktop database helper"
+    grep -qx 'application/x-z23-share=org.zclassic.ZClassic23.desktop;' "$tmp/no-desktop-db/applications/mimeinfo.cache" || die "selftest: missing fallback cache"
+    [ -f "$tmp/no-desktop-db/applications/org.zclassic.SkyCombat.desktop" ] || die "selftest: app entry missing"
+    [ ! -e "$tmp/no-desktop-db/applications/mimeapps.list" ] || die "selftest: default file created"
     if [ "$(uname -s)" = Linux ] && command -v gio >/dev/null 2>&1; then
         if command -v desktop-file-validate >/dev/null 2>&1; then
             desktop-file-validate "$desktop" "$data/applications/org.zclassic.SkyCombat.desktop" \
@@ -3103,7 +3212,7 @@ EOF
                 if [ "$#" -eq 2 ] && [ "$1" = -v ] && [ "$2" = "$missing_tool" ]; then return 1; fi
                 builtin command "$@"
             }
-            HOME="$home" XDG_DATA_HOME="$data" PATH="$mock:$PATH" install_app_desktop "$prefix-Linux"
+            HOME="$home" XDG_DATA_HOME="$data" PATH="$mock:$PATH" Z23_APPS_DESKTOP_LOG="$tmp/app-desktop" install_app_desktop "$prefix-Linux"
         ) >"$tmp/legacy-missing-tool.out" 2>&1 || die "selftest: missing-tool downgrade refused"
         [ ! -e "$data/applications/org.zclassic.ZClassic23.Library.desktop" ] \
             || die "selftest: missing-tool downgrade retained unsupported library entry"
@@ -3141,6 +3250,7 @@ selftest() {
     selftest_current_release
     selftest_install_directory_modes
     selftest_app_source
+    selftest_app_toolchain
     selftest_app_mode
     selftest_local_manifest_refusals
     selftest_release_pin

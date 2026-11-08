@@ -265,6 +265,12 @@ static _Noreturn void lab_child_main(const struct lab_spawn *s,
     (void)setpgid(0, 0);
     (void)sigprocmask(SIG_SETMASK, mask, NULL);
     (void)signal(SIGPIPE, SIG_DFL);
+    if (s->kit_root) {
+        if (!s->confine || s->profile != LAB_PROFILE_COMPILE)
+            lab_child_fail(report, "kit root requires compile confinement");
+        struct zcl_result root = os_sandbox_kit_enter(s->kit_root, report);
+        if (!root.ok) lab_child_fail(report, root.message);
+    }
     lab_child_stdio(p->fd[LAB_P_IN][0], p->fd[LAB_P_OUT][1],
                     p->fd[LAB_P_ERR][1], report);
     if (s->cwd && chdir(s->cwd) != 0)

@@ -61,6 +61,21 @@
 #include <stdint.h>
 #include <sys/types.h>  /* pid_t */
 
+/* Verified immutable regular files for a private compiler root. Capture never
+ * executes bytes. Enter is forked-child-only, before fd scrub/seccomp. */
+struct os_sandbox_kit_file { const char *path; int fd; uint8_t blob[32]; };
+struct os_sandbox_kit_root {
+    const struct os_sandbox_kit_file *files;
+    size_t count;
+    const char *mount_dir; /* fresh empty parent-owned directory */
+    const char *source_dir; /* verified snapshot, mounted at /source */
+    const char *work_dir;   /* private output, mounted at /work, or NULL */
+};
+struct zcl_result os_sandbox_kit_capture(const void *bytes, size_t length,
+    uint32_t mode, const uint8_t blob[32], int *fd);
+struct zcl_result os_sandbox_kit_enter(const struct os_sandbox_kit_root *root,
+    int report_fd);
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -379,6 +394,12 @@ const int *os_sandbox_terminal_worker_denied_syscalls(size_t *count_out);
  * user namespaces disabled): the caller must fail closed, there is no
  * unconfined fallback. */
 int os_sandbox_pidns_enter(int close_fd);
+/* Same lifecycle, but reaper wrappers retain only their status/lifeline pipes.
+ * The returning execution child keeps its descriptors for caller setup/scrub. */
+int os_sandbox_pidns_enter_clean(int close_fd);
+#if defined(ZCL_TESTING)
+void os_sandbox_test_kit_wrapper_failure(unsigned stage);
+#endif
 
 /* Linux only, call in a throwaway forked child: unshare(CLONE_NEWUSER) and
  * write the identity uid/gid maps. False where the host refuses the maps (e.g.

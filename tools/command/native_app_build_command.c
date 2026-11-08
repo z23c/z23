@@ -44,6 +44,7 @@
 #include "command/native_app_compose.h"
 #include "command/native_app_launch.h"
 #include "command/app_image.h"
+#include "command/app_toolchain.h"
 #include "command/native_zcode_package_copy.h"
 
 #include "base/hex.h"
@@ -89,6 +90,7 @@ struct zab {
     uint8_t dependency_root[32];
     uint8_t plan_id[32];
     struct app_build_closure closure;
+    struct app_toolchain kit;
     struct app_copy_build_store store;
     struct app_image_build cached;
     bool cache_hit;
@@ -284,7 +286,7 @@ static bool zab_closure(struct zab *z)
     char why[320] = "";
     const struct app_build_make m = {.copy_dir = zab_source(z),
                                      .work_dir = z->store.work,
-                                     .confine = z->confine};
+                                     .confine = z->confine, .kit = &z->kit};
     if (app_build_closure_query(&m, &z->closure, why, sizeof(why)))
         return true;
     zab_fail(z, "CLOSURE_INVALID", false, "the make fragment's declared "
@@ -338,20 +340,33 @@ static void zab_plan_id(struct zab *z)
     sha3_256_finalize(&sha, z->plan_id);
 }
 
+static bool zab_environment(struct zab *z)
+{
+    char kit_why[256] = "";
+    if (!app_toolchain_resolve(&z->kit, kit_why, sizeof(kit_why)) ||
+        (z->kit.selected && !app_toolchain_seal(&z->kit, kit_why, sizeof(kit_why)))) {
+        zab_fail(z, "ENV_UNAVAILABLE", false, "the selected compiler kit is unavailable", kit_why);
+        return false;
+    }
+    struct zcl_result env = ZCL_OK;
+    if (z->kit.selected) memcpy(z->env_root, z->kit.env, 32);
+    else env = app_image_env_root(z->env_root);
+    if (!env.ok) {
+        zab_fail(z, "ENV_UNAVAILABLE", false, "the toolchain capsule could "
+                 "not be captured", env.message);
+        return false;
+    }
+    return true;
+}
+
 /* Every check and root a plan and its confirm both derive. */
 static bool zab_derive(struct zab *z)
 {
     if (!zab_resolve(z) || !zab_open_copy(z))
         return false;
     if (!zab_authorize(z) || !zab_selected_source(z) || !zab_make_fragment(z) ||
-        !zab_package(z) || !zab_dependencies_match(z) || !zab_store_paths(z))
-        return false;
-    struct zcl_result env = app_image_env_root(z->env_root);
-    if (!env.ok) {
-        zab_fail(z, "ENV_UNAVAILABLE", false, "the toolchain capsule could "
-                 "not be captured", env.message);
-        return false;
-    }
+        !zab_package(z) || !zab_dependencies_match(z) || !zab_store_paths(z) ||
+        !zab_environment(z)) return false;
     z->confine = app_build_make_confinable();
     if (!zab_closure(z) || !zab_cache(z))
         return false;
@@ -738,7 +753,7 @@ static void zab_build(struct zab *z)
     if (zab_dirs(z, run, sizeof(run))) {
         const struct app_build_make m = {.copy_dir = z->version ? z->selected_source : snapshot,
                                          .work_dir = z->store.work,
-                                         .confine = z->confine};
+                                         .confine = z->confine, .kit = &z->kit};
         if ((z->version || zab_snapshot_create(z, snapshot)) &&
             zab_outside_work(z, m.copy_dir) &&
             zab_snapshot_matches(z, &m)) {
@@ -805,5 +820,6 @@ void zcl_native_handle_app_build(const struct zcl_command_request *request,
                      "private selected-source scratch cleanup failed", rm.message);
     }
     app_build_closure_free(&z->closure);
+    app_toolchain_free(&z->kit);
     free(z);
 }

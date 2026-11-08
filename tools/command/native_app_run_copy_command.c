@@ -22,6 +22,7 @@
 
 #include "command/app_copy_build.h"
 #include "command/app_image.h"
+#include "command/app_toolchain.h"
 #include "command/native_app_compose.h"
 #include "command/native_app_launch.h"
 #include "command/native_zcode_package_copy.h"
@@ -106,7 +107,16 @@ static bool zrc_record(struct zrc *z)
 {
     struct stat st;
     bool hit = false;
-    struct zcl_result env = app_image_env_root(z->env_root);
+    struct app_toolchain kit = {0}; char why[256] = "";
+    bool resolved = app_toolchain_resolve(&kit, why, sizeof(why));
+    struct zcl_result env = ZCL_OK;
+    if (resolved && kit.selected) memcpy(z->env_root, kit.env, 32);
+    else if (resolved) env = app_image_env_root(z->env_root);
+    app_toolchain_free(&kit);
+    if (!resolved) {
+        zrc_fail(z, "ENV_UNAVAILABLE", "the selected compiler kit is unavailable", why);
+        return false;
+    }
     if (!env.ok) {
         zrc_fail(z, "ENV_UNAVAILABLE", "the toolchain capsule could not be "
                  "captured", env.message);
