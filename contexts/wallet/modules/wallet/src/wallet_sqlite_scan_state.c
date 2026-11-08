@@ -13,6 +13,7 @@
  * that does not know it reads the lower scan height and rescans from there. */
 
 #include "base/serialize_le.h"
+#include "models/database.h"
 #include "wallet/wallet_sqlite.h"
 #include "wallet_sqlite_internal.h"
 #include "wallet/wallet.h"
@@ -283,24 +284,35 @@ bool wallet_sqlite_read_scan_state(struct wallet_sqlite *ws, struct wallet *w)
     return have_height;
 }
 
-/* Version 1: version, presence, little-endian generation and heights,
- * followed by three fixed-width consensus identifiers. */
-#define WSS_BINDING_BYTES 114
+/* Version 1 is the original 114-byte binding. Version 2 appends the whole
+ * snapshot digest and history-manifest root without changing the prefix. */
+#define WSS_BINDING_V1_BYTES 114
+#define WSS_BINDING_BYTES 178
+static size_t wss_binding_size(const struct wallet_cutover_binding *b)
+{ return b->history_identity_present ? WSS_BINDING_BYTES : WSS_BINDING_V1_BYTES; }
 static bool wss_encode(const struct wallet_cutover_binding *b, uint8_t *p)
 {
+    static const uint8_t zero[32];
     if (!b || b->old_height < -1 || b->target_height < 0 ||
-        (!b->old_generation_present && b->old_generation != 0)) return false;
-    p[0] = 1; p[1] = b->old_generation_present ? 1 : 0;
+        (!b->old_generation_present && b->old_generation != 0) ||
+        (!b->history_identity_present && (memcmp(b->snapshot_whole_sha3, zero, 32) ||
+                                          memcmp(b->history_manifest_root, zero, 32)))) return false;
+    p[0] = b->history_identity_present ? 2 : 1; p[1] = b->old_generation_present ? 1 : 0;
     zcl_write_u64_le(p + 2, b->old_generation);
     zcl_write_u32_le(p + 10, (uint32_t)b->old_height);
     zcl_write_u32_le(p + 14, (uint32_t)b->target_height);
     memcpy(p + 18, b->old_hash, 32); memcpy(p + 50, b->target_hash, 32);
     memcpy(p + 82, b->artifact_digest, 32);
+    if (b->history_identity_present) {
+        memcpy(p + 114, b->snapshot_whole_sha3, 32);
+        memcpy(p + 146, b->history_manifest_root, 32);
+    }
     return true;
 }
 static bool wss_decode(const uint8_t *p, int len, struct wallet_cutover_binding *b)
 {
-    if (!p || len != WSS_BINDING_BYTES || p[0] != 1 || p[1] > 1 ||
+    if (!p || !b || !((len == WSS_BINDING_V1_BYTES && p[0] == 1) ||
+                       (len == WSS_BINDING_BYTES && p[0] == 2)) || p[1] > 1 ||
         (zcl_read_u32_le(p + 10) > INT32_MAX && zcl_read_u32_le(p + 10) != UINT32_MAX) || zcl_read_u32_le(p + 14) > INT32_MAX ||
         (!p[1] && zcl_read_u64_le(p + 2) != 0)) return false;
     memset(b, 0, sizeof(*b)); b->old_generation_present = p[1] != 0;
@@ -308,58 +320,77 @@ static bool wss_decode(const uint8_t *p, int len, struct wallet_cutover_binding 
     b->old_height = zcl_read_u32_le(p + 10) == UINT32_MAX ? -1 : (int32_t)zcl_read_u32_le(p + 10);
     b->target_height = (int32_t)zcl_read_u32_le(p + 14);
     memcpy(b->old_hash, p + 18, 32); memcpy(b->target_hash, p + 50, 32);
-    memcpy(b->artifact_digest, p + 82, 32); return true;
+    memcpy(b->artifact_digest, p + 82, 32);
+    b->history_identity_present = p[0] == 2;
+    if (b->history_identity_present) {
+        memcpy(b->snapshot_whole_sha3, p + 114, 32);
+        memcpy(b->history_manifest_root, p + 146, 32);
+    }
+    return true;
 }
-/* The binding subrecord uses exactly the existing cutover codec. */
-#define WSS_DISCOVER_BYTES 304
-static bool wss_discover_encode(const struct wallet_discover_checkpoint *c, uint8_t *p)
+/* DISCOVER version 2 extends its binding and shifts later fields by 64. */
+#define WSS_DISCOVER_V1_BYTES 304
+#define WSS_DISCOVER_BYTES 368
+static bool wss_discover_encode(const struct wallet_discover_checkpoint *c, uint8_t *p, size_t *size)
 {
     if (!c || !wss_encode(&c->binding, p + 1) ||
         (!c->generation_present && c->generation != 0) || c->floor < 0 ||
         c->next_height < c->floor || c->endpoint_height < c->next_height ||
         c->endpoint_height < c->binding.target_height) return false;
-    p[0] = 1; p[115] = c->generation_present ? 1 : 0;
-    zcl_write_u64_le(p + 116, c->generation);
-    zcl_write_u32_le(p + 124, (uint32_t)c->floor);
-    zcl_write_u32_le(p + 128, (uint32_t)c->next_height);
-    zcl_write_u32_le(p + 132, (uint32_t)c->endpoint_height);
-    memcpy(p + 136, c->endpoint_hash, 32); memcpy(p + 168, c->endpoint_root, 32);
-    memcpy(p + 200, c->scan_identity, 32); memcpy(p + 232, c->key_digest, 32);
-    zcl_write_u64_le(p + 264, c->event_end); memcpy(p + 272, c->event_digest, 32);
+    size_t d = c->binding.history_identity_present ? 64 : 0;
+    *size = WSS_DISCOVER_V1_BYTES + d;
+    p[0] = d ? 2 : 1; p[115 + d] = c->generation_present ? 1 : 0;
+    zcl_write_u64_le(p + 116 + d, c->generation);
+    zcl_write_u32_le(p + 124 + d, (uint32_t)c->floor);
+    zcl_write_u32_le(p + 128 + d, (uint32_t)c->next_height);
+    zcl_write_u32_le(p + 132 + d, (uint32_t)c->endpoint_height);
+    memcpy(p + 136 + d, c->endpoint_hash, 32); memcpy(p + 168 + d, c->endpoint_root, 32);
+    memcpy(p + 200 + d, c->scan_identity, 32); memcpy(p + 232 + d, c->key_digest, 32);
+    zcl_write_u64_le(p + 264 + d, c->event_end); memcpy(p + 272 + d, c->event_digest, 32);
     return true;
+}
+static bool wss_discover_header(const uint8_t *p, int size, size_t *delta,
+                                struct wallet_cutover_binding *binding)
+{
+    if (!p || !((size == WSS_DISCOVER_V1_BYTES && p[0] == 1) ||
+                (size == WSS_DISCOVER_BYTES && p[0] == 2))) return false;
+    *delta = p[0] == 2 ? 64 : 0;
+    return wss_decode(p + 1, (int)(WSS_BINDING_V1_BYTES + *delta), binding) &&
+           binding->history_identity_present == (*delta != 0);
 }
 static bool wss_discover_decode(const uint8_t *p, int size, struct wallet_discover_checkpoint *out)
 {
     struct wallet_discover_checkpoint c = {0};
-    if (!p || size != WSS_DISCOVER_BYTES || p[0] != 1 || p[115] > 1 ||
-        !wss_decode(p + 1, WSS_BINDING_BYTES, &c.binding) ||
-        (!p[115] && zcl_read_u64_le(p + 116)) ||
-        zcl_read_u32_le(p + 124) > INT32_MAX || zcl_read_u32_le(p + 128) > INT32_MAX ||
-        zcl_read_u32_le(p + 132) > INT32_MAX) return false;
-    c.generation_present = p[115] != 0; c.generation = zcl_read_u64_le(p + 116);
-    c.floor = (int32_t)zcl_read_u32_le(p + 124);
-    c.next_height = (int32_t)zcl_read_u32_le(p + 128);
-    c.endpoint_height = (int32_t)zcl_read_u32_le(p + 132);
+    size_t d = 0;
+    if (!wss_discover_header(p, size, &d, &c.binding)) return false;
+    if (p[115 + d] > 1 ||
+        (!p[115 + d] && zcl_read_u64_le(p + 116 + d)) ||
+        zcl_read_u32_le(p + 124 + d) > INT32_MAX || zcl_read_u32_le(p + 128 + d) > INT32_MAX ||
+        zcl_read_u32_le(p + 132 + d) > INT32_MAX) return false;
+    c.generation_present = p[115 + d] != 0; c.generation = zcl_read_u64_le(p + 116 + d);
+    c.floor = (int32_t)zcl_read_u32_le(p + 124 + d);
+    c.next_height = (int32_t)zcl_read_u32_le(p + 128 + d);
+    c.endpoint_height = (int32_t)zcl_read_u32_le(p + 132 + d);
     if (c.next_height < c.floor || c.endpoint_height < c.next_height ||
         c.endpoint_height < c.binding.target_height) return false;
-    memcpy(c.endpoint_hash, p + 136, 32); memcpy(c.endpoint_root, p + 168, 32);
-    memcpy(c.scan_identity, p + 200, 32); memcpy(c.key_digest, p + 232, 32);
-    c.event_end = zcl_read_u64_le(p + 264); memcpy(c.event_digest, p + 272, 32);
+    memcpy(c.endpoint_hash, p + 136 + d, 32); memcpy(c.endpoint_root, p + 168 + d, 32);
+    memcpy(c.scan_identity, p + 200 + d, 32); memcpy(c.key_digest, p + 232 + d, 32);
+    c.event_end = zcl_read_u64_le(p + 264 + d); memcpy(c.event_digest, p + 272 + d, 32);
     *out = c; return true;
 }
 bool wallet_sqlite_discover_checkpoint_save(struct wallet_sqlite *ws,
     const struct wallet_discover_checkpoint *checkpoint)
 {
-    uint8_t bytes[WSS_DISCOVER_BYTES]; struct wallet_cutover_binding current;
+    uint8_t bytes[WSS_DISCOVER_BYTES]; size_t encoded = 0; struct wallet_cutover_binding current;
     if (!ws || !ws->open || !ws->db || sqlite3_get_autocommit(ws->db) ||
-        !wss_discover_encode(checkpoint, bytes) ||
+        !wss_discover_encode(checkpoint, bytes, &encoded) ||
         wallet_sqlite_cutover_read(ws, &current) != WALLET_CUTOVER_PENDING ||
         !wallet_cutover_binding_equal(&current, &checkpoint->binding)) return false;
     sqlite3_stmt *s = NULL;
     const char *sql = "INSERT INTO node_state(key,value) VALUES('wallet_discover_checkpoint',?) "
                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value";
     if (sqlite3_prepare_v2(ws->db, sql, -1, &s, NULL) != SQLITE_OK) return false;
-    bool ok = sqlite3_bind_blob(s, 1, bytes, sizeof(bytes), SQLITE_TRANSIENT) == SQLITE_OK &&
+    bool ok = sqlite3_bind_blob(s, 1, bytes, (int)encoded, SQLITE_TRANSIENT) == SQLITE_OK &&
               AR_STEP_WRITE(s) == SQLITE_DONE;
     if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
     return ok;
@@ -503,7 +534,11 @@ bool wallet_cutover_binding_equal(const struct wallet_cutover_binding *a,
         a->target_height == b->target_height &&
         memcmp(a->old_hash, b->old_hash, 32) == 0 &&
         memcmp(a->target_hash, b->target_hash, 32) == 0 &&
-        memcmp(a->artifact_digest, b->artifact_digest, 32) == 0;
+        memcmp(a->artifact_digest, b->artifact_digest, 32) == 0 &&
+        a->history_identity_present == b->history_identity_present &&
+        (!a->history_identity_present ||
+         (!memcmp(a->snapshot_whole_sha3, b->snapshot_whole_sha3, 32) &&
+          !memcmp(a->history_manifest_root, b->history_manifest_root, 32)));
 }
 
 
@@ -546,13 +581,132 @@ enum wallet_cutover_status wallet_sqlite_cutover_read_snapshot(sqlite3 *db)
     return status;
 }
 
-static bool wss_binding_insert(struct wallet_sqlite *ws, const struct wallet *w,
-                               const uint8_t bytes[WSS_BINDING_BYTES])
+static bool wss_authority_pending(sqlite3_stmt *s, struct wallet_cutover_binding *value)
+{
+    return sqlite3_column_type(s, 0) == SQLITE_BLOB && sqlite3_column_type(s, 2) == SQLITE_TEXT &&
+        wss_marker_valid(sqlite3_column_text(s, 2), sqlite3_column_bytes(s, 2)) &&
+        wss_decode(sqlite3_column_blob(s, 0), sqlite3_column_bytes(s, 0), value);
+}
+static bool wss_authority_completed(sqlite3_stmt *s, struct wallet_cutover_binding *value)
+{
+    return sqlite3_column_type(s, 4) == SQLITE_BLOB &&
+        wss_decode(sqlite3_column_blob(s, 4), sqlite3_column_bytes(s, 4), value) &&
+        value->history_identity_present;
+}
+static bool wss_authority_mismatch(enum wallet_cutover_authority_status status,
+    const struct wallet_cutover_binding *expected, const struct wallet_cutover_binding *value)
+{
+    if (status != WALLET_CUTOVER_AUTH_PENDING && status != WALLET_CUTOVER_AUTH_COMPLETED) return false;
+    if (!expected) return status == WALLET_CUTOVER_AUTH_COMPLETED;
+    return !wallet_cutover_binding_equal(expected, value);
+}
+static bool wss_authority_schema(sqlite3_stmt *s)
+{
+    int32_t version = 0, floor = 0;
+    if (sqlite3_column_type(s, 6) != SQLITE_BLOB || sqlite3_column_bytes(s, 6) != (int)sizeof(version) ||
+        sqlite3_column_type(s, 7) != SQLITE_BLOB || sqlite3_column_bytes(s, 7) != (int)sizeof(floor) ||
+        !sqlite3_column_blob(s, 6) || !sqlite3_column_blob(s, 7)) return false;
+    memcpy(&version, sqlite3_column_blob(s, 6), sizeof(version));
+    memcpy(&floor, sqlite3_column_blob(s, 7), sizeof(floor));
+    return version == NODE_DB_SCHEMA_LATEST && floor >= WALLET_BOUND_CUTOVER_SCHEMA_VERSION && floor <= version;
+}
+static enum wallet_cutover_authority_status wss_authority_row(sqlite3_stmt *s,
+    const struct wallet_cutover_binding *expected, struct wallet_cutover_binding *value)
+{
+    bool pending = sqlite3_column_int(s, 1) != 0;
+    bool marker = sqlite3_column_int(s, 3) != 0;
+    bool completed = sqlite3_column_int(s, 5) != 0;
+    enum wallet_cutover_authority_status status = WALLET_CUTOVER_AUTH_MALFORMED;
+    if (!pending && !completed) return WALLET_CUTOVER_AUTH_ABSENT;
+    if (pending && !completed && marker && wss_authority_pending(s, value))
+        status = WALLET_CUTOVER_AUTH_PENDING;
+    else if (completed && !pending && !marker && wss_authority_completed(s, value))
+        status = WALLET_CUTOVER_AUTH_COMPLETED;
+    if (value->history_identity_present && !wss_authority_schema(s))
+        return WALLET_CUTOVER_AUTH_MALFORMED;
+    if (wss_authority_mismatch(status, expected, value))
+        status = WALLET_CUTOVER_AUTH_MISMATCH;
+    return status;
+}
+enum wallet_cutover_authority_status wallet_sqlite_cutover_authority_read(
+    struct wallet_sqlite *ws, const struct wallet_cutover_binding *expected,
+    struct wallet_cutover_binding *out)
+{
+    struct wallet_cutover_binding wanted;
+    if (expected) { wanted = *expected; expected = &wanted; }
+    if (out) memset(out, 0, sizeof(*out));
+    if (!ws || !ws->open || !ws->db || !out) return WALLET_CUTOVER_AUTH_IO_ERROR;
+    static const char sql[] =
+        "SELECT (SELECT value FROM node_state WHERE key='wallet_cutover_binding'),"
+        "EXISTS(SELECT 1 FROM node_state WHERE key='wallet_cutover_binding'),"
+        "(SELECT value FROM node_state WHERE key='wallet_scan_incomplete'),"
+        "EXISTS(SELECT 1 FROM node_state WHERE key='wallet_scan_incomplete'),"
+        "(SELECT value FROM node_state WHERE key='wallet_cutover_completed'),"
+        "EXISTS(SELECT 1 FROM node_state WHERE key='wallet_cutover_completed'),"
+        "(SELECT value FROM node_state WHERE key='schema_version'),"
+        "(SELECT value FROM node_state WHERE key='schema_compat_floor')";
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ws->db, sql, -1, &s, NULL) != SQLITE_OK)
+        return WALLET_CUTOVER_AUTH_IO_ERROR;
+    enum wallet_cutover_authority_status status = WALLET_CUTOVER_AUTH_IO_ERROR;
+    struct wallet_cutover_binding value = {0};
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+        status = wss_authority_row(s, expected, &value);
+        if (ar_step_checked(s, "wallet cutover authority: read completion", NULL) != ZCL_STEP_DONE)
+            status = WALLET_CUTOVER_AUTH_IO_ERROR;
+    }
+    if (sqlite3_finalize(s) != SQLITE_OK) status = WALLET_CUTOVER_AUTH_IO_ERROR;
+    if (status == WALLET_CUTOVER_AUTH_PENDING || status == WALLET_CUTOVER_AUTH_COMPLETED) *out = value;
+    return status;
+}
+static bool wss_delete_completed(struct wallet_sqlite *ws)
 {
     sqlite3_stmt *s = NULL;
-    bool ok = wallet_sqlite_write_scan_state(ws, w) &&
+    if (sqlite3_prepare_v2(ws->db, "DELETE FROM node_state WHERE key='wallet_cutover_completed'", -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = AR_STEP_WRITE(s) == SQLITE_DONE;
+    if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+/* The caller owns the cutover savepoint. The compatibility floor must rise in
+ * that same transaction before any bound binding becomes visible. */
+static bool wss_schema_value(struct wallet_sqlite *ws, const char *key, int32_t *value)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ws->db, "SELECT value FROM node_state WHERE key=?", -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_text(s, 1, key, -1, SQLITE_STATIC) == SQLITE_OK &&
+        AR_STEP_ROW_READONLY(s) == SQLITE_ROW && sqlite3_column_type(s, 0) == SQLITE_BLOB &&
+        sqlite3_column_bytes(s, 0) == (int)sizeof(*value) && sqlite3_column_blob(s, 0);
+    if (ok) memcpy(value, sqlite3_column_blob(s, 0), sizeof(*value));
+    if (ok) ok = ar_step_checked(s, "wallet cutover schema: read completion", NULL) == ZCL_STEP_DONE;
+    if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+static bool wss_bound_floor(struct wallet_sqlite *ws)
+{
+    int32_t version = 0, floor = 0;
+    if (!wss_schema_value(ws, "schema_version", &version) ||
+        !wss_schema_value(ws, "schema_compat_floor", &floor) ||
+        version != NODE_DB_SCHEMA_LATEST || version < WALLET_BOUND_CUTOVER_SCHEMA_VERSION ||
+        floor < 0 || floor > version) return false;
+    if (floor >= WALLET_BOUND_CUTOVER_SCHEMA_VERSION) return true;
+    int32_t next = WALLET_BOUND_CUTOVER_SCHEMA_VERSION;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ws->db, "UPDATE node_state SET value=? WHERE key='schema_compat_floor'", -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_blob(s, 1, &next, sizeof(next), SQLITE_TRANSIENT) == SQLITE_OK &&
+              AR_STEP_WRITE(s) == SQLITE_DONE && sqlite3_changes(ws->db) == 1;
+    if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool wss_binding_insert(struct wallet_sqlite *ws, const struct wallet *w,
+                               const uint8_t bytes[WSS_BINDING_BYTES], size_t size)
+{
+    sqlite3_stmt *s = NULL;
+    bool ok = (size != WSS_BINDING_BYTES || wss_bound_floor(ws)) &&
+        wallet_sqlite_write_scan_state(ws, w) && wss_delete_completed(ws) &&
         sqlite3_prepare_v2(ws->db, "INSERT INTO node_state(key,value) VALUES('wallet_cutover_binding',?)", -1, &s, NULL) == SQLITE_OK &&
-        sqlite3_bind_blob(s, 1, bytes, WSS_BINDING_BYTES, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 1, bytes, (int)size, SQLITE_TRANSIENT) == SQLITE_OK &&
         AR_STEP_WRITE(s) == SQLITE_DONE;
     if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
     return ok;
@@ -571,15 +725,13 @@ static bool wss_binding_matches_scan(struct wallet_sqlite *ws, const struct wall
 }
 
 static bool wss_binding_compatible(enum wallet_cutover_status status,
-    const struct wallet_cutover_binding *old, const uint8_t bytes[WSS_BINDING_BYTES])
+    const struct wallet_cutover_binding *old, const struct wallet_cutover_binding *binding)
 {
-    uint8_t previous[WSS_BINDING_BYTES];
     return status == WALLET_CUTOVER_ABSENT ||
-        (status == WALLET_CUTOVER_PENDING && wss_encode(old, previous) &&
-         memcmp(bytes, previous, sizeof(previous)) == 0);
+        (status == WALLET_CUTOVER_PENDING && wallet_cutover_binding_equal(old, binding));
 }
 
-bool wallet_sqlite_cutover_prepare(struct wallet_sqlite *ws,
+static bool wss_cutover_prepare(struct wallet_sqlite *ws,
     const struct wallet *w, const struct wallet_cutover_binding *binding)
 {
     uint8_t bytes[WSS_BINDING_BYTES];
@@ -591,9 +743,9 @@ bool wallet_sqlite_cutover_prepare(struct wallet_sqlite *ws,
         return false;
     }
     enum wallet_cutover_status status = wallet_sqlite_cutover_read(ws, &old);
-    bool ok = wss_binding_compatible(status, &old, bytes);
+    bool ok = wss_binding_compatible(status, &old, binding);
     if (ok && status == WALLET_CUTOVER_ABSENT)
-        ok = wss_binding_insert(ws, w, bytes);
+        ok = wss_binding_insert(ws, w, bytes, wss_binding_size(binding));
     if (ok) ok = wss_binding_matches_scan(ws, w);
     if (ok) {
         if (sqlite3_exec(ws->db, "RELEASE wallet_cutover", NULL, NULL, NULL) == SQLITE_OK)
@@ -605,4 +757,79 @@ bool wallet_sqlite_cutover_prepare(struct wallet_sqlite *ws,
     if (sqlite3_exec(ws->db, "RELEASE wallet_cutover", NULL, NULL, NULL) != SQLITE_OK)
         LOG_ERROR("wallet_sqlite", "cutover savepoint release failed: %s", sqlite3_errmsg(ws->db));
     return false;
+}
+
+bool wallet_sqlite_cutover_prepare(struct wallet_sqlite *ws,
+    const struct wallet *w, const struct wallet_cutover_binding *binding)
+{
+    return binding && !binding->history_identity_present && wss_cutover_prepare(ws, w, binding);
+}
+
+static bool wss_bound_finish(sqlite3 *db, bool own, bool ok)
+{
+    if (ok) ok = sqlite3_exec(db, "RELEASE wallet_bound_prepare", NULL, NULL, NULL) == SQLITE_OK;
+    if (!ok) {
+        if (sqlite3_exec(db, "ROLLBACK TO wallet_bound_prepare", NULL, NULL, NULL) != SQLITE_OK)
+            LOG_ERROR("wallet_sqlite", "bound cutover savepoint rollback failed: %s", sqlite3_errmsg(db));
+        if (sqlite3_exec(db, "RELEASE wallet_bound_prepare", NULL, NULL, NULL) != SQLITE_OK)
+            LOG_ERROR("wallet_sqlite", "bound cutover savepoint release failed: %s", sqlite3_errmsg(db));
+    }
+    if (own) {
+        if (ok) ok = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+        if (!ok && sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK)
+            LOG_ERROR("wallet_sqlite", "bound cutover transaction rollback failed: %s", sqlite3_errmsg(db));
+    }
+    return ok;
+}
+
+static bool wss_bound_input_valid(struct wallet_sqlite *ws, const struct wallet *w,
+    const struct wallet_cutover_binding *binding, const uint8_t hash[32],
+    wallet_height_resolver resolve, wallet_cutover_endpoint_check current)
+{
+    return ws && ws->open && ws->db && w && binding && binding->history_identity_present &&
+        hash && resolve && current;
+}
+
+bool wallet_sqlite_cutover_prepare_bound(struct wallet_sqlite *ws, const struct wallet *w,
+    const struct wallet_cutover_binding *binding, int reference, const uint8_t hash[32],
+    wallet_height_resolver resolve, wallet_cutover_endpoint_check endpoint_current, void *ctx)
+{
+    if (!wss_bound_input_valid(ws, w, binding, hash, resolve, endpoint_current) ||
+        !endpoint_current(ctx, reference, hash)) return false;
+    bool own = sqlite3_get_autocommit(ws->db) != 0;
+    if (own && sqlite3_exec(ws->db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) return false;
+    if (!own && sqlite3_txn_state(ws->db, "main") != SQLITE_TXN_WRITE) return false;
+    if (sqlite3_exec(ws->db, "SAVEPOINT wallet_bound_prepare", NULL, NULL, NULL) != SQLITE_OK) {
+        if (own && sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK)
+            LOG_ERROR("wallet_sqlite", "bound cutover transaction rollback failed: %s", sqlite3_errmsg(ws->db));
+        return false;
+    }
+    bool ok = wallet_sqlite_cutover_height_prepare_in_open_tx(ws, w, reference, hash, resolve, ctx) &&
+        wss_cutover_prepare(ws, w, binding) && endpoint_current(ctx, reference, hash);
+    return wss_bound_finish(ws->db, own, ok);
+}
+
+bool wallet_sqlite_cutover_prepare_bound_preserving_cursor(struct wallet_sqlite *ws,
+    struct wallet *w, const struct wallet_cutover_binding *binding, int reference,
+    const uint8_t hash[32], wallet_height_resolver resolve,
+    wallet_cutover_endpoint_check endpoint_current, void *ctx)
+{
+    if (!wss_bound_input_valid(ws, w, binding, hash, resolve, endpoint_current) ||
+        !sqlite3_get_autocommit(ws->db) ||
+        sqlite3_exec(ws->db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) return false;
+    typeof(w->scan_retry) saved = w->scan_retry;
+    int floor = 0;
+    enum wallet_cutover_floor_status status = wallet_sqlite_cutover_scan_floor(ws, &floor);
+    bool ok = status == WALLET_CUTOVER_FLOOR_FOUND || status == WALLET_CUTOVER_FLOOR_ABSENT;
+    if (ok) {
+        wss_set_pending_floor(w, floor);
+        ok = wallet_sqlite_cutover_prepare_bound(ws, w, binding, reference, hash, resolve, endpoint_current, ctx);
+    }
+    if (ok) ok = sqlite3_exec(ws->db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    if (!ok) {
+        if (sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK)
+            LOG_ERROR("wallet_sqlite", "bound cursor transaction rollback failed: %s", sqlite3_errmsg(ws->db));
+        w->scan_retry = saved;
+    }
+    return ok;
 }

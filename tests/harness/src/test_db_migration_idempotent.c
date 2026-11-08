@@ -892,12 +892,44 @@ static int t_v88_height_encoding_stamp_retry(void)
         ASSERT_EQ(node_db_schema_version(&db), 87);
         ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='088'"), 0);
         ASSERT(node_db_migrate(&db, NULL) > 0);
-        ASSERT_EQ(node_db_schema_version(&db), 88);
+        ASSERT_EQ(node_db_schema_version(&db), NODE_DB_SCHEMA_LATEST);
         ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='088'"), 1);
         ASSERT_EQ(node_db_migrate(&db, NULL), 0);
         PASS();
     } _test_next:;
     if (opened) { (void)sqlite3_set_authorizer(db.db, NULL, NULL); db_mig_close_raw_handle(&db); }
+    test_cleanup_tmpdir(dir); return failures;
+}
+
+static int t_v89_bound_cutover_additive(void)
+{
+    int failures = 0; char dir[256], path[512];
+    db_mig_path(dir, sizeof(dir), "v89_bound_cutover"); mkdir_p(dir);
+    (void)snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db db = {0}; bool opened = false, raw_open = false;
+    TEST("db_mig: v89 migration preserves data and existing compatibility floor") {
+        ASSERT(node_db_open(&db, path)); node_db_close(&db);
+        sqlite3 *raw = NULL; ASSERT(sqlite3_open(path, &raw) == SQLITE_OK);
+        ASSERT(db_mig_stamp_schema(raw, 88));
+        ASSERT(db_mig_stamp_floor(raw, 79));
+        ASSERT(db_mig_exec_raw(raw, "DELETE FROM schema_migrations WHERE version='089'"));
+        ASSERT(db_mig_exec_raw(raw, "INSERT INTO node_state(key,value) VALUES('v89_preserved',x'1234')"));
+        sqlite3_close(raw);
+        ASSERT(db_mig_open_raw_handle(&db, path)); raw_open = true;
+        ASSERT(node_db_migrate(&db, NULL) > 0);
+        ASSERT_EQ(node_db_schema_version(&db), 89);
+        ASSERT_EQ(node_db_schema_compat_floor(&db), 79);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM node_state WHERE key='v89_preserved' AND value=x'1234'"), 1);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='089'"), 1);
+        ASSERT_EQ(node_db_migrate(&db, NULL), 0);
+        db_mig_close_raw_handle(&db); raw_open = false;
+        ASSERT(node_db_open(&db, path)); opened = true;
+        ASSERT_EQ(node_db_schema_version(&db), 89);
+        ASSERT_EQ(node_db_schema_compat_floor(&db), 79);
+        PASS();
+    } _test_next:;
+    if (raw_open) db_mig_close_raw_handle(&db);
+    if (opened) node_db_close(&db);
     test_cleanup_tmpdir(dir); return failures;
 }
 
@@ -2276,6 +2308,7 @@ int test_db_migration_idempotent(void)
     failures += t_v85_missing_worker_table_refuses();
     failures += t_v87_wiki_index_refuses_without_stamp();
     failures += t_v88_height_encoding_stamp_retry();
+    failures += t_v89_bound_cutover_additive();
     failures += t_v20_wallet_notes_upgrade_adds_source();
     failures += t_reopen_is_idempotent();
     failures += t_market_content_registry_schema();

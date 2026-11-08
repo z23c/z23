@@ -256,11 +256,16 @@ enum wallet_height_encoding { WALLET_HEIGHT_ERROR, WALLET_HEIGHT_LEGACY, WALLET_
 enum wallet_height_encoding wallet_sqlite_height_encoding(
     struct wallet_sqlite *ws, int *reference_height);
 typedef bool (*wallet_height_resolver)(void *ctx, const uint8_t block_hash[32], int *height);
+typedef bool (*wallet_cutover_endpoint_check)(void *ctx, int height, const uint8_t hash[32]);
 /* Requires the caller-owned open write transaction and stable verified chain.
  * Resolver must not acquire locks or perform writes; false refuses transition.
  * Caller commits or rolls back, including any partial rewrites on failure. */
 bool wallet_sqlite_activate_height_v2_in_open_tx(
     struct wallet_sqlite *ws, int reference_height, wallet_height_resolver resolve, void *ctx);
+/* Caller holds the wallet lock and a stable validated old-chain reference. */
+bool wallet_sqlite_cutover_height_prepare_in_open_tx(struct wallet_sqlite *ws,
+    const struct wallet *w, int reference_height, const uint8_t reference_hash[32],
+    wallet_height_resolver resolve, void *ctx);
 
 bool wallet_sqlite_write_tx(struct wallet_sqlite *ws,
                               const struct wallet_tx *wtx);
@@ -419,6 +424,8 @@ bool wallet_sqlite_read_watch_only(struct wallet_sqlite *ws, struct wallet *w);
 ZCL_DEPRECATED("use wallet_sqlite_flush_r")
 bool wallet_sqlite_flush(struct wallet_sqlite *ws, struct wallet *w);
 
+#define WALLET_BOUND_CUTOVER_SCHEMA_VERSION 89
+
 /* A pending startup cutover binds the unread wallet range to both chain
  * authorities. The byte arrays are the existing consensus hash and artifact
  * digest representations; generation presence is explicit. */
@@ -430,6 +437,8 @@ struct wallet_cutover_binding {
     int32_t target_height;
     uint8_t target_hash[32];
     uint8_t artifact_digest[32];
+    bool history_identity_present;
+    uint8_t snapshot_whole_sha3[32], history_manifest_root[32];
 };
 /* A DISCOVER checkpoint is advisory until its caller validates all bindings. */
 struct wallet_discover_checkpoint {
@@ -470,6 +479,20 @@ enum wallet_cutover_floor_status wallet_sqlite_cutover_scan_floor(
  * As with prepare, an outer transaction must be durably committed by its owner. */
 bool wallet_sqlite_cutover_prepare_preserving_cursor(struct wallet_sqlite *ws,
     struct wallet *w, const struct wallet_cutover_binding *binding);
+/* Caller holds w->cs and stable old-chain authority through durable commit.
+ * Callbacks do not acquire locks or mutate state. An outer WRITE transaction
+ * remains caller-owned; its owner must commit or roll it back. */
+bool wallet_sqlite_cutover_prepare_bound(struct wallet_sqlite *ws, const struct wallet *w,
+    const struct wallet_cutover_binding *binding, int reference_height,
+    const uint8_t reference_hash[32], wallet_height_resolver resolve,
+    wallet_cutover_endpoint_check endpoint_current, void *ctx);
+/* As above, with w->cs held; owns the autocommit connection and restores the
+ * in-memory cursor on refusal. Caller configures a durable journal and
+ * synchronous FULL or stronger before calling; success commits the fence. */
+bool wallet_sqlite_cutover_prepare_bound_preserving_cursor(struct wallet_sqlite *ws,
+    struct wallet *w, const struct wallet_cutover_binding *binding, int reference_height,
+    const uint8_t reference_hash[32], wallet_height_resolver resolve,
+    wallet_cutover_endpoint_check endpoint_current, void *ctx);
 /* Consumes caller-owned open write transaction on the exclusively held connection.
  * Writes transactions, keypool and completed cursor; keys and scripts are preserved
  * and must already be durable. Caller holds stable external generation/tip authority
@@ -503,7 +526,6 @@ struct wallet_cutover_v2_plan {
     int reference_height, old_best_height;
     uint8_t reference_hash[32], scan_identity[32];
 };
-typedef bool (*wallet_cutover_endpoint_check)(void *ctx, int height, const uint8_t hash[32]);
 typedef bool (*wallet_cutover_projection_write)(void *ctx, struct node_db *ndb,
     struct wallet *wallet, struct wallet_cutover_v2_plan *plan);
 struct wallet_cutover_v2_request {
@@ -545,6 +567,16 @@ struct zcl_result wallet_sqlite_cutover_complete_v2_in_open_tx_r(
 
 enum wallet_cutover_status wallet_sqlite_cutover_read(
     struct wallet_sqlite *ws, struct wallet_cutover_binding *out);
+
+/* Completed is returned only for a validated bound record equal to expected. */
+enum wallet_cutover_authority_status {
+    WALLET_CUTOVER_AUTH_ABSENT, WALLET_CUTOVER_AUTH_PENDING,
+    WALLET_CUTOVER_AUTH_COMPLETED, WALLET_CUTOVER_AUTH_MISMATCH,
+    WALLET_CUTOVER_AUTH_MALFORMED, WALLET_CUTOVER_AUTH_IO_ERROR
+};
+enum wallet_cutover_authority_status wallet_sqlite_cutover_authority_read(
+    struct wallet_sqlite *ws, const struct wallet_cutover_binding *expected,
+    struct wallet_cutover_binding *out);
 /* Caller owns exclusive access to db and must not have an open transaction.
  * The result describes one read snapshot, not a lease after return. */
 enum wallet_cutover_status wallet_sqlite_cutover_read_snapshot(sqlite3 *db);

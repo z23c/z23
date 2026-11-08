@@ -1150,17 +1150,47 @@ static int wrc_cutover_corruption(sqlite3 *db, struct wallet_sqlite *ws,
     return failures;
 }
 
+static bool wrc_schema_floor(sqlite3 *db, int32_t *out)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT value FROM node_state WHERE key='schema_compat_floor'", -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = AR_STEP_ROW_READONLY(s) == SQLITE_ROW && sqlite3_column_type(s, 0) == SQLITE_BLOB &&
+        sqlite3_column_bytes(s, 0) == (int)sizeof(*out) && sqlite3_column_blob(s, 0);
+    if (ok) memcpy(out, sqlite3_column_blob(s, 0), sizeof(*out));
+    if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool wrc_bound_resolve(void *ctx, const uint8_t hash[32], int *height)
+{
+    (void)ctx;
+    if (hash[0] != 1) return false;
+    *height = 10;
+    return true;
+}
+static bool wrc_bound_reference(void *ctx, int height, const uint8_t hash[32])
+{
+    (void)ctx;
+    return height == 10 && hash[0] == 1;
+}
+
 static int wrc_cutover_faults(sqlite3 *db, struct wallet_sqlite *ws,
                               struct wallet *w, const struct wallet_cutover_binding *b)
 {
     int failures = 0;
     struct wallet_cutover_binding out;
     WRC_CHECK("cutover absent", wallet_sqlite_cutover_read(ws, &out) == WALLET_CUTOVER_ABSENT);
+    WRC_CHECK("absence never proves completion", wallet_sqlite_cutover_authority_read(ws, b, &out) == WALLET_CUTOVER_AUTH_ABSENT);
     WRC_CHECK("cutover inject partial failure", sqlite3_exec(db,
         "CREATE TRIGGER fail_binding BEFORE INSERT ON node_state WHEN NEW.key='wallet_cutover_binding' BEGIN SELECT RAISE(ABORT,'injected'); END", NULL, NULL, NULL) == SQLITE_OK);
     WRC_CHECK("cutover atomic rollback", !wallet_sqlite_cutover_prepare(ws, w, b) &&
         wallet_sqlite_cutover_read(ws, &out) == WALLET_CUTOVER_ABSENT &&
         !wallet_sqlite_read_scan_marker(ws, &(struct wallet_scan_marker){0}));
+    int32_t before = -1, after = -1; struct wallet_cutover_binding bound = *b;
+    bound.history_identity_present = true; bound.snapshot_whole_sha3[0] = 1; bound.history_manifest_root[0] = 2;
+    WRC_CHECK("bound fence failure preserves floor", wrc_schema_floor(db, &before) &&
+        !wallet_sqlite_cutover_prepare_bound(ws, w, &bound, 10, bound.old_hash, wrc_bound_resolve, wrc_bound_reference, NULL) &&
+        wrc_schema_floor(db, &after) && before == after);
     WRC_CHECK("cutover remove trigger", sqlite3_exec(db, "DROP TRIGGER fail_binding", NULL, NULL, NULL) == SQLITE_OK);
     sqlite3 *empty = NULL;
     WRC_CHECK("empty schema open", sqlite3_open(":memory:", &empty) == SQLITE_OK);
@@ -1316,6 +1346,40 @@ static int wrc_discover_checkpoint(sqlite3 *db, struct wallet_sqlite *ws,
     return failures;
 }
 
+static int wrc_bound_checkpoint(sqlite3 *db, struct wallet_sqlite *ws, struct wallet *w,
+                                struct wallet_cutover_binding binding)
+{
+    int failures = 0;
+    int32_t floor_before = -1, floor_now = -1;
+    WRC_CHECK("bound initial compatibility floor", wrc_schema_floor(db, &floor_before));
+    binding.history_identity_present = true;
+    binding.snapshot_whole_sha3[0] = 0x51; binding.history_manifest_root[0] = 0x62;
+    WRC_CHECK("bound checkpoint sandbox", sqlite3_exec(db,
+        "SAVEPOINT bound; DELETE FROM node_state WHERE key IN ('wallet_cutover_binding','wallet_scan_incomplete','wallet_discover_checkpoint')",
+        NULL, NULL, NULL) == SQLITE_OK);
+    struct wallet_cutover_binding observed;
+    WRC_CHECK("bound fence roundtrip", wallet_sqlite_cutover_prepare_bound(ws, w, &binding,
+        10, binding.old_hash, wrc_bound_resolve, wrc_bound_reference, NULL) &&
+        wallet_sqlite_cutover_read(ws, &observed) == WALLET_CUTOVER_PENDING &&
+        wallet_cutover_binding_equal(&binding, &observed));
+    WRC_CHECK("bound fence raises compatibility floor", wrc_schema_floor(db, &floor_now) &&
+        floor_now >= WALLET_BOUND_CUTOVER_SCHEMA_VERSION);
+    struct wallet_discover_checkpoint c = {.binding = binding, .generation_present = true,
+        .generation = 1, .floor = 0, .next_height = 17, .endpoint_height = 25};
+    struct wallet_discover_checkpoint got;
+    WRC_CHECK("bound discover roundtrip", wallet_sqlite_discover_checkpoint_save(ws, &c) &&
+        wallet_sqlite_discover_checkpoint_read(ws, &got) == WALLET_DISCOVER_FOUND &&
+        wallet_cutover_binding_equal(&got.binding, &binding));
+    c.binding.history_manifest_root[0] ^= 1;
+    WRC_CHECK("bound checkpoint wrong root refuses", !wallet_sqlite_discover_checkpoint_save(ws, &c));
+    WRC_CHECK("mixed bound checkpoint version", sqlite3_exec(db,
+        "UPDATE node_state SET value=CAST(x'01'||substr(value,2) AS BLOB) WHERE key='wallet_discover_checkpoint'",
+        NULL, NULL, NULL) == SQLITE_OK && wrc_checkpoint_is_malformed(ws));
+    WRC_CHECK("bound checkpoint rollback", sqlite3_exec(db, "ROLLBACK TO bound; RELEASE bound", NULL, NULL, NULL) == SQLITE_OK);
+    WRC_CHECK("bound rollback restores compatibility floor", wrc_schema_floor(db, &floor_now) && floor_now == floor_before);
+    return failures;
+}
+
 static int wrc_cutover_binding(const char *datadir)
 {
     int failures = 0;
@@ -1338,6 +1402,7 @@ static int wrc_cutover_binding(const char *datadir)
         wallet_sqlite_cutover_read(&ws, &out) == WALLET_CUTOVER_PENDING &&
         out.old_generation_present && out.old_generation == 0 && out.target_height == 20 && out.target_hash[0] == 2);
     failures += wrc_discover_checkpoint(db, &ws, w, &b);
+    failures += wrc_bound_checkpoint(db, &ws, w, b);
     wallet_sqlite_close(&ws); node_db_close(&ndb); db = NULL;
     WRC_CHECK("cutover reopen", node_db_open(&ndb, path) && wallet_sqlite_open_r(&ws, ndb.db).ok);
     db = ndb.db;

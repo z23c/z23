@@ -181,6 +181,16 @@ bool wallet_sqlite_activate_height_v2_in_open_tx(
         wsql_height_raise_floor(ws) && wsql_write_height_encoding(ws, reference_height);
 }
 
+static bool wsql_height_rebase_in_open_tx(struct wallet_sqlite *ws, int reference,
+    wallet_height_resolver resolve, void *ctx)
+{
+    int previous = -1;
+    return ws && ws->db && resolve && reference >= 0 &&
+        sqlite3_txn_state(ws->db, "main") == SQLITE_TXN_WRITE &&
+        wallet_sqlite_height_encoding(ws, &previous) == WALLET_HEIGHT_V2 &&
+        wsql_height_resolve_rows(ws, reference, resolve, ctx) && wsql_write_height_encoding(ws, reference);
+}
+
 /* ── Transactions ──────────────────────────────────────────────── */
 
 bool wsql_write_tx_reference(struct wallet_sqlite *ws,
@@ -384,6 +394,56 @@ static bool wsql_stage_plan(const struct wallet *w, const struct wsql_tx_stage *
         slots[i] = e->slot_plus - 1u;
     }
     return true;
+}
+
+static bool wsql_height_row_matches(const struct wallet_tx *a, const struct wallet_tx *b,
+    int reference, wallet_height_resolver resolve, void *ctx)
+{
+    const uint8_t zero[32] = {0}; int height = 0;
+    if (!b->used || !uint256_eq(&a->tx.hash, &b->tx.hash) ||
+        memcmp(a->hash_block.data, b->hash_block.data, 32) || a->confirms != b->confirms) return false;
+    return !memcmp(a->hash_block.data, zero, 32) ||
+        (resolve(ctx, a->hash_block.data, &height) && height >= 0 && height <= reference &&
+         reference - height < INT_MAX && a->confirms == reference - height + 1);
+}
+
+static bool wsql_height_rows_match_wallet(struct wallet_sqlite *ws, const struct wallet *w,
+    int reference, wallet_height_resolver resolve, void *ctx)
+{
+    struct wsql_tx_stage stage = {0};
+    struct wsql_stage_entry *index = zcl_calloc(WSQL_STAGE_INDEX_SIZE, sizeof(*index), "wallet height index");
+    uint32_t *slots = zcl_malloc(MAX_WALLET_TX * sizeof(*slots), "wallet height slots");
+    bool ok = index && slots && wsql_stage_read(ws, reference, true, &stage) &&
+        wsql_stage_plan(w, &stage, index, slots, reference, true);
+    size_t used = 0;
+    for (size_t i = 0; i < MAX_WALLET_TX; ++i) if (w->map_wallet[i].used) used++;
+    if (ok && used != stage.count) ok = false;
+    for (size_t i = 0; ok && i < stage.count; ++i) {
+        ok = wsql_height_row_matches(&stage.rows[i], &w->map_wallet[slots[i]], reference, resolve, ctx);
+    }
+    free(slots); free(index); wsql_stage_free(&stage);
+    return ok;
+}
+
+static bool wsql_height_prepare_encoding(struct wallet_sqlite *ws, int reference,
+    wallet_height_resolver resolve, void *ctx)
+{
+    int previous = -1;
+    enum wallet_height_encoding encoding = wallet_sqlite_height_encoding(ws, &previous);
+    if (encoding == WALLET_HEIGHT_LEGACY)
+        return wallet_sqlite_activate_height_v2_in_open_tx(ws, reference, resolve, ctx);
+    return encoding == WALLET_HEIGHT_V2 && previous == reference;
+}
+
+bool wallet_sqlite_cutover_height_prepare_in_open_tx(struct wallet_sqlite *ws,
+    const struct wallet *w, int reference, const uint8_t hash[32], wallet_height_resolver resolve, void *ctx)
+{
+    int resolved = -1;
+    if (!ws || !ws->db || !w || !hash || !resolve || reference < 0 || w->best_block_height != reference ||
+        sqlite3_txn_state(ws->db, "main") != SQLITE_TXN_WRITE || !resolve(ctx, hash, &resolved) || resolved != reference) return false;
+    return wsql_height_prepare_encoding(ws, reference, resolve, ctx) &&
+        wsql_height_rows_match_wallet(ws, w, reference, resolve, ctx) &&
+        resolve(ctx, hash, &resolved) && resolved == reference;
 }
 
 static void wsql_stage_transfer(struct wallet *w, struct wsql_tx_stage *stage, const uint32_t *slots)
@@ -598,7 +658,7 @@ static bool wsql_cutover_tx_valid(struct wallet_sqlite *ws, struct wallet *w,
     const struct wallet_cutover_binding *expected, const uint8_t *identity, int height)
 {
     return sqlite3_txn_state(ws->db, "main") == SQLITE_TXN_WRITE &&
-           w && expected && identity && height >= 0;
+           w && expected && !expected->history_identity_present && identity && height >= 0;
 }
 
 static struct zcl_result wsql_cutover_complete_impl(
@@ -906,6 +966,23 @@ static bool wsql_v2_request_valid(struct wallet *w, const struct wallet_cutover_
         r->holds_valid && r->project && r->reference_height >= 0;
 }
 
+static bool wsql_cutover_record_completed(struct wallet_sqlite *ws,
+                                          const struct wallet_cutover_binding *binding)
+{
+    if (!binding->history_identity_present) return true;
+    int32_t version = 0, floor = 0;
+    if (!wsql_height_int_state(ws, "schema_version", &version) ||
+        !wsql_height_int_state(ws, "schema_compat_floor", &floor) ||
+        version != NODE_DB_SCHEMA_LATEST || floor < WALLET_BOUND_CUTOVER_SCHEMA_VERSION || floor > version) return false;
+    sqlite3_stmt *s = NULL;
+    const char *sql = "INSERT INTO node_state(key,value) SELECT 'wallet_cutover_completed',value "
+        "FROM node_state WHERE key='wallet_cutover_binding' AND length(value)=178 AND substr(value,1,1)=x'02'";
+    if (sqlite3_prepare_v2(ws->db, sql, -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = AR_STEP_WRITE(s) == SQLITE_DONE && sqlite3_changes(ws->db) == 1;
+    if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok;
+}
+
 static bool wsql_v2_write_projection(struct wallet_sqlite *ws, struct node_db *ndb, struct wallet *w,
     const struct wallet_cutover_v2_request *r, struct wallet_cutover_v2_plan *plan)
 {
@@ -913,15 +990,20 @@ static bool wsql_v2_write_projection(struct wallet_sqlite *ws, struct node_db *n
                                    r->reference_height, false) ||
         !wsql_used_entries_stored(ws, w, false) || !wsql_cutover_scripts_stored(ws, w)) return false;
     struct wsql_flush_halt h = wsql_flush_write_keypool_and_tx(ws, w, true);
-    if (h.halt || !wsql_v2_db_matches_plan(ws, w, plan) ||
-        !wallet_sqlite_activate_height_v2_in_open_tx(ws, r->reference_height, r->resolve, r->chain_ctx)) return false;
+    if (h.halt || !wsql_v2_db_matches_plan(ws, w, plan)) return false;
+    int previous = -1;
+    enum wallet_height_encoding encoding = wallet_sqlite_height_encoding(ws, &previous);
+    bool height_ok = encoding == WALLET_HEIGHT_LEGACY ?
+        wallet_sqlite_activate_height_v2_in_open_tx(ws, r->reference_height, r->resolve, r->chain_ctx) :
+        encoding == WALLET_HEIGHT_V2 && wsql_height_rebase_in_open_tx(ws, r->reference_height, r->resolve, r->chain_ctx);
+    if (!height_ok) return false;
     bool projected = r->project(r->projection_ctx, ndb, w, plan);
     if (sqlite3_txn_state(ws->db, "main") != SQLITE_TXN_WRITE || ar_after_commit_depth() != 1) {
         LOG_ERROR("wallet_sqlite", "cutover projection changed transaction ownership");
         abort();
     }
     return projected && ar_after_commit_pending() <= 1 && wallet_sqlite_write_scan_height(ws, r->reference_height) &&
-        wsql_cutover_delete_fence(ws);
+        wsql_cutover_record_completed(ws, r->binding) && wsql_cutover_delete_fence(ws);
 }
 
 static bool wsql_v2_plan_spends_valid(const struct wallet_cutover_v2_plan *plan)
