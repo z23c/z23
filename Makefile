@@ -6966,7 +6966,7 @@ lint-fast: $(LINT_FAST_GATES) $(LINTC_TOOL)
 else
 lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(TOR_PROVENANCE_BIN) \
 		$(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL) $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
-	@rc=0; ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES) || rc=1; \
+	@rc=0; ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES) || { echo "lint-fast: precheck skipped after fast subset failure"; exit 1; }; \
 	$(LINT_FAST_PRECHECK_RUN) || rc=1; \
 	[ "$$rc" = 0 ] || exit 1
 	@echo "lint-fast: OK"

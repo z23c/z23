@@ -1721,11 +1721,11 @@ static int t_lint_fast_tor_graph(void)
         "if [ -f \"$1/tools/retrieval_pair_sources.mk\" ]; then cp \"$1/tools/retrieval_pair_sources.mk\" tools/; fi\n"
         "printf '#!/bin/sh\\nexit 0\\n' > tools/dev/check-toolchain.sh\n"
         "printf '#!/bin/sh\\nprintf fixture\\n' > tools/dev/process-start-token.sh\n"
-        "printf '#!/bin/sh\\n[ \"$1\" = run ] || exit 0\\nprintf \"%%s\\\\n\" \"$@\" > \"$HOME/args\"\\n' > stub-lint\n"
+        "printf '#!/bin/sh\\necho \"$1\" >> \"$HOME/calls\"\\nif [ \"$1\" = run ]; then printf \"%%s\\\\n\" \"$@\" > \"$HOME/args\"; fi\\n[ \"${FAIL_STAGE:-}\" != \"$1\" ]\\n' > stub-lint\n"
         "chmod +x tools/dev/check-toolchain.sh tools/dev/process-start-token.sh stub-lint\n"
         "printf '%s\\n' '.PHONY: tor-provenance-ready check-native-tunnel-export-binding' 'tor-provenance-ready:' '\t@printf called > \"$(HOME)/tor\"; exit 77' 'check-native-tunnel-export-binding:' '\t@printf binding > \"$(HOME)/binding\"' 'fixture-print-gates:' '\t@printf \"%s\\\\n\" $(LINT_FAST_GATES)' > overlay.mk\n"
         "HOME=\"$2/home\" TMPDIR=\"$2/tmp\"; export HOME TMPDIR\n"
-        "fixture_make() { make --no-print-directory -o /dev/null -o ./stub-lint -f Makefile -f overlay.mk ZCL_USE_CCACHE=0 MAKE_RESTARTS=1 LIB_MODULES=platform LIB_TREE_MODULES=platform ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' EQUIHASH_FACT_TOOL=/dev/null LINTC_TOOL=./stub-lint FILE_SIZE_POLICY_BIN=/dev/null TOOLGEN_BIN=/dev/null TOR_PROVENANCE_BIN=/dev/null HOTSWAP_ACTION_PLAN=/dev/null CAPABILITY_INVENTORY_TOOL=/dev/null ZCODE_PACKAGE_REGISTRY_CHECK_BIN=/dev/null \"$@\"; }\n"
+        "fixture_make() { make --no-print-directory -o /dev/null -o ./stub-lint -f Makefile -f overlay.mk ZCL_LINT_FAST_PRECHECK=1 ZCL_LINT_SERIAL=0 ZCL_USE_CCACHE=0 MAKE_RESTARTS=1 LIB_MODULES=platform LIB_TREE_MODULES=platform ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' EQUIHASH_FACT_TOOL=/dev/null LINTC_TOOL=./stub-lint FILE_SIZE_POLICY_BIN=/dev/null TOOLGEN_BIN=/dev/null TOR_PROVENANCE_BIN=/dev/null HOTSWAP_ACTION_PLAN=/dev/null CAPABILITY_INVENTORY_TOOL=/dev/null ZCODE_PACKAGE_REGISTRY_CHECK_BIN=/dev/null \"$@\"; }\n"
         "if ! fixture_make fixture-print-gates > expected 2>parse.log; then cat parse.log >&2; exit 1; fi\n"
         "if ! fixture_make lint-fast > run.log 2>&1; then cat run.log >&2; exit 1; fi\n"
         "[ ! -e \"$HOME/tor\" ]; [ -e \"$HOME/binding\" ]; [ -s \"$HOME/args\" ]\n"
@@ -1738,9 +1738,32 @@ static int t_lint_fast_tor_graph(void)
         "grep -E '^lint: .*check-tor-provenance' serial.db >/dev/null\n"
         "fixture_make -n -p lint-land > land.db 2>&1 || :\n"
         "grep -E '^lint-land: .*tor-provenance-ready' land.db >/dev/null\n";
+    static const char checks[] =
+        "printf '%s\\n' '.PHONY: fixture-fast' 'fixture-fast:' '\t@test \"$(FAIL_GATE)\" != 1' >> overlay.mk\n"
+        "rm -f \"$HOME/calls\"\n"
+        "if FAIL_STAGE=run fixture_make lint-fast > fail.log 2>&1; then echo 'fast failure accepted' >&2; exit 1; fi\n"
+        "[ \"$(grep -c '^precheck$' \"$HOME/calls\" || :)\" = 0 ] || { echo 'precheck ran after fast failure' >&2; exit 1; }\n"
+        "grep -F 'lint-fast: precheck skipped after fast subset failure' fail.log >/dev/null\n"
+        "rm -f \"$HOME/calls\"; fixture_make lint-fast > pass.log 2>&1\n"
+        "[ \"$(grep -c '^precheck$' \"$HOME/calls\")\" = 1 ]\n"
+        "rm -f \"$HOME/calls\"; if FAIL_STAGE=precheck fixture_make lint-fast > precheck-fail.log 2>&1; then exit 1; fi\n"
+        "[ \"$(grep -c '^precheck$' \"$HOME/calls\")\" = 1 ]\n"
+        "rm -f \"$HOME/calls\"; fixture_make lint-fast ZCL_LINT_FAST_PRECHECK=0 > optout.log 2>&1\n"
+        "[ \"$(grep -c '^precheck$' \"$HOME/calls\" || :)\" = 0 ]\n"
+        "rm -f \"$HOME/calls\"; if fixture_make lint-fast ZCL_LINT_SERIAL=1 LINT_FAST_GATES=fixture-fast FAIL_GATE=1 > serial-fail.log 2>&1; then exit 1; fi\n"
+        "[ ! -e \"$HOME/calls\" ]\n"
+        "fixture_make lint-fast ZCL_LINT_SERIAL=1 LINT_FAST_GATES=fixture-fast > serial-pass.log 2>&1\n"
+        "[ \"$(grep -c '^precheck$' \"$HOME/calls\")\" = 1 ]\n"
+        "rm -f \"$HOME/calls\"; if FAIL_STAGE=precheck fixture_make lint-fast ZCL_LINT_SERIAL=1 LINT_FAST_GATES=fixture-fast > serial-precheck-fail.log 2>&1; then exit 1; fi\n"
+        "[ \"$(grep -c '^precheck$' \"$HOME/calls\")\" = 1 ]\n"
+        "rm -f \"$HOME/calls\"; fixture_make lint-fast ZCL_LINT_SERIAL=1 LINT_FAST_GATES=fixture-fast ZCL_LINT_FAST_PRECHECK=0 > serial-optout.log 2>&1\n"
+        "[ ! -e \"$HOME/calls\" ]\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "lint_fast", "tor_graph");
-    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    char combined[sizeof(script) + sizeof(checks)];
+    int n = snprintf(combined, sizeof(combined), "%s%s", script, checks);
+    if (n < 0 || (size_t)n >= sizeof(combined)) return 1;
+    int bad = build_needs_fixture_run(repo_root(), fixture, combined);
     if (test_rm_rf_recursive(fixture) != 0) bad = 1;
     return bad;
 }
