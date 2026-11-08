@@ -455,6 +455,76 @@ static int pcs_case_source_owned(const char *base, int *fails)
                          "OK — every manifest", d, fails);
 }
 
+static int pcs_bad_expressions(const char *d, const char *p, int *fails)
+{
+    char row[512];
+    const char *bad[] = { "", " \t", "CAP_FS_ READ", "CAP_FS_READ||CAP_FS_WRITE", "|CAP_FS_READ", "CAP_FS_READ|", NULL };
+    for (size_t i = 0; bad[i]; i++) {
+        snprintf(row, sizeof row, "ZCL_MODULE_CAPABILITY(\"lib/owned/src/one.c\", %s, \"\")\n", bad[i]);
+        if (csr_write(p, row) || pcs_expect_rc("invalid union refuses", 2, NULL, d, fails)) return 2;
+    }
+    return 0;
+}
+
+static int pcs_good_expressions(const char *d, const char *p, int *fails)
+{
+    char row[512];
+    const char *exprs[] = { "CAP_FS_READ | CAP_FS_WRITE", "CAP_FS_READ\t|\tCAP_FS_WRITE",
+                            "CAP_FS_READ |\n CAP_FS_WRITE", NULL };
+    for (size_t i = 0; exprs[i]; i++) {
+        snprintf(row, sizeof row, "ZCL_MODULE_CAPABILITY(\"lib/owned/src/one.c\", %s, \"\")\n", exprs[i]);
+        if (csr_write(p, row) || pcs_expect_rc("spaced union preserves both package grants", 0, NULL, d, fails)) return 2;
+    }
+    return 0;
+}
+
+static int pcs_case_spaced_expression(const char *base, int *fails)
+{
+    char d[4096], p[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/spaced", base), sizeof d) ||
+        csr_mkdirs(d) || pcs_fixture_base(d)) return 2;
+    const char *srcs[] = { "src/one.c", NULL };
+    if (pcs_fixture_pkg(d, "fx/owned", "lib/owned", "\"CAP_FS_READ\", \"CAP_FS_WRITE\"", srcs) ||
+        ovf(snprintf(p, sizeof p, "%s/lib/owned/src/one.c.capabilities.def", d), sizeof p)) return 2;
+    if (pcs_good_expressions(d, p, fails)) return 2;
+    if (pcs_bad_expressions(d, p, fails)) return 2;
+    if (csr_write(p, "ZCL_MODULE_CAPABILITY(\"lib/owned/src/one.c\", CAP_UNKNOWN, \"\")\n") ||
+        pcs_expect_rc("unknown capability refuses", 1, NULL, d, fails)) return 2;
+    if (csr_write(p, "ZCL_MODULE_CAPABILITY(\"lib/owned/src/one.c\", CAP_FS_READ|CAP_FS_WRITE, \"\")\n")) return 2;
+    if (ovf(snprintf(p, sizeof p, "%s/engine/composition/module_capabilities.def", d), sizeof p) ||
+        csr_write(p, "ZCL_MODULE_CAPABILITY(\"other.c\", CAP_FS_READ, \"\")\n"
+                     "ZCL_MODULE_CAPABILITY(\"bad.c\", CAP_FS_READ |, \"\")\n") ||
+        pcs_expect_rc("malformed central row after valid row refuses", 2, NULL, d, fails)) return 2;
+    return 0;
+}
+
+static int pcs_case_comma_path(const char *base, int *fails)
+{
+    char d[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/comma_path", base), sizeof d) ||
+        csr_mkdirs(d) || pcs_fixture_base(d)) return 2;
+    const char *srcs[] = { "src/one,two.c", NULL };
+    const char *rows[] = { "lib/owned/src/one,two.c CAP_FS_READ | CAP_FS_WRITE", NULL };
+    if (pcs_fixture_pkg(d, "fx/owned", "lib/owned", "\"CAP_FS_READ\", \"CAP_FS_WRITE\"", srcs) ||
+        pcs_fixture_rows(d, rows)) return 2;
+    return pcs_expect_rc("comma in source path retains both grants", 0, NULL, d, fails);
+}
+
+static int pcs_case_module_read_failure(const char *base, int *fails)
+{
+    char d[4096], p[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/module_read", base), sizeof d) ||
+        csr_mkdirs(d) || pcs_fixture_base(d)) return 2;
+    const char *srcs[] = { "src/one.c", NULL };
+    const char *rows[] = { "lib/owned/src/one.c CAP_FS_READ", NULL };
+    if (pcs_fixture_pkg(d, "fx/owned", "lib/owned", "\"CAP_FS_READ\"", srcs) ||
+        pcs_fixture_rows(d, rows) ||
+        pcs_expect_rc("missing optional module table is allowed", 0, NULL, d, fails) ||
+        ovf(snprintf(p, sizeof p, "%s/engine/composition/module_capabilities_windows.def", d), sizeof p) ||
+        csr_mkdirs(p)) return 2;
+    return pcs_expect_rc("unreadable module table after valid table refuses", 2, NULL, d, fails);
+}
+
 static int pcs_case_source_owned_duplicate(const char *base, int *fails)
 {
     char d[4096], p[4096];
@@ -523,7 +593,7 @@ static const pcs_case_fn k_pcs_cases[] = {
     pcs_case_a, pcs_case_b, pcs_case_c, pcs_case_c2, pcs_case_c3, pcs_case_d,
     pcs_case_e, pcs_case_e2, pcs_case_e3, pcs_case_f1, pcs_case_f2, pcs_case_g1,
     pcs_case_g2, pcs_case_h, pcs_case_i, pcs_case_j,
-    pcs_case_source_owned, pcs_case_source_owned_duplicate,
+    pcs_case_source_owned, pcs_case_spaced_expression, pcs_case_comma_path, pcs_case_module_read_failure, pcs_case_source_owned_duplicate,
     pcs_case_source_owned_misplaced, pcs_case_long_glob,
 };
 

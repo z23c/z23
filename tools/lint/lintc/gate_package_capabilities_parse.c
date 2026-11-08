@@ -19,6 +19,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include "gate_package_capabilities_priv.h"
+#include "gate_capability_closure_priv.h"
 
 int pc_capset_has(const struct pc_capset *s, const char *name)
 {
@@ -111,64 +112,26 @@ static int pc_extract_first_string(const char *line, char *out, size_t cap,
     *after = q2 + 1;
     return 0;
 }
-static int pc_row_classes(const char *rest, struct pc_capset *toks)
+struct pc_module_ctx { struct pc_modtable *out; int *rows; };
+
+static int pc_module_row(void *opaque, const char *path, const char *classes)
 {
-    const char *m = strstr(rest, "CAP_");
-    if (!m)
-        return 0;
-    const char *q = m;
-    while (*q && (isalnum((unsigned char)*q) || *q == '_' || *q == '|'))
-        q++;
-    const char *p = m;
-    while (p < q) {
-        const char *bar = memchr(p, '|', (size_t)(q - p));
-        size_t tl = bar ? (size_t)(bar - p) : (size_t)(q - p);
-        char tok[PC_ARRLEN];
-        if (tl > 0 && tl < sizeof tok) {
-            memcpy(tok, p, tl);
-            tok[tl] = '\0';
-            if (strcmp(tok, "CAP_NONE") != 0 && pc_capset_add(toks, tok))
-                return 2;
-        }
-        p += tl + 1;
-    }
-    return 0;
+    struct pc_module_ctx *c = opaque;
+    struct pc_pathcaps *row = pc_modtable_touch(c->out, path);
+    char *copy = strdup(classes), *save = NULL;
+    if (!row || !copy) { free(copy); return 2; }
+    int rc = 0;
+    for (char *tok = strtok_r(copy, "|", &save); tok; tok = strtok_r(NULL, "|", &save))
+        if (strcmp(tok, "CAP_NONE") != 0 && pc_capset_add(&row->caps, tok)) { rc = 2; break; }
+    free(copy);
+    if (!rc) (*c->rows)++;
+    return rc;
 }
 static int pc_load_module_file(const char *path, struct pc_modtable *out, int *n_rows)
 {
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return -1;
-    char *line = NULL;
-    size_t cap = 0;
-    ssize_t n;
-    int rc = 0;
-    while (rc == 0 && (n = getline(&line, &cap, f)) >= 0) {
-        (void)n;
-        if (!strstr(line, "ZCL_MODULE_CAPABILITY("))
-            continue;
-        char rpath[PC_PATHLEN];
-        const char *after = NULL;
-        if (pc_extract_first_string(line, rpath, sizeof rpath, &after) != 0)
-            continue;
-        struct pc_capset toks = { .n = 0 };
-        if (pc_row_classes(after, &toks) == 2) {
-            rc = 2;
-            break;
-        }
-        struct pc_pathcaps *row = pc_modtable_touch(out, rpath);
-        if (!row) {
-            rc = die("z23-lint: package-capabilities module-table overflow\n", "");
-            break;
-        }
-        for (int i = 0; i < toks.n; i++)
-            if (pc_capset_add(&row->caps, toks.v[i])) {
-                rc = 2;
-                break;
-            }
-        (*n_rows)++;
-    }
-    return fin(f, line, path, rc);
+    struct pc_module_ctx c = { out, n_rows };
+    int rc = ccd_module_each(path, pc_module_row, &c);
+    return rc == 1 ? -1 : rc == 0 ? 0 : 2;
 }
 int pc_load_module_rows(const char *const *paths, int npaths, struct pc_modtable *out,
                         int *n_rows)

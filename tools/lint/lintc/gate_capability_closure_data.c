@@ -283,8 +283,11 @@ static char *ccd_slurp(const char *path)
         free(p);
         p = NULL;
     }
-    if (f)
-        fclose(f);
+    if (f) {
+        int failed = ferror(f);
+        if (fclose(f) != 0) failed = 1;
+        if (failed) { free(p); p = NULL; }
+    }
     return p;
 }
 
@@ -385,43 +388,107 @@ static char *ccd_class_end(const char *c, char *end)
     return end;
 }
 
-static int ccd_record(const regex_t *re, char *buf, ccd_rec_fn fn, void *ctx)
+static bool ccd_class_compact(char *s)
+{
+    char *p = s, *out = s;
+    for (;;) {
+        while (isspace((unsigned char)*p)) p++;
+        if (strncmp(p, "CAP_", 4) != 0) return false;
+        for (int i = 0; i < 4; i++) *out++ = *p++;
+        char *start = p;
+        while (isupper((unsigned char)*p) || isdigit((unsigned char)*p) || *p == '_') *out++ = *p++;
+        if (p == start) return false;
+        while (isspace((unsigned char)*p)) p++;
+        if (!*p) { *out = '\0'; return true; }
+        if (*p++ != '|') return false;
+        *out++ = '|';
+    }
+}
+
+static bool ccd_record_match(const regex_t *re, const char *buf, regmatch_t *match, bool modules)
+{
+    return regexec(re, buf, 1, match, 0) == 0 && (!modules || match->rm_so == 0);
+}
+
+static int ccd_record(const regex_t *re, char *buf, ccd_rec_fn fn, void *ctx, bool modules)
 {
     regmatch_t m;
-    if (regexec(re, buf, 1, &m, 0) != 0)
-        return 0;
-    char *s = buf + m.rm_so, *end = buf + m.rm_eo, *q = strchr(s, '"'), *e = q + 1, *c = strchr(s, ',');
+    if (!ccd_record_match(re, buf, &m, modules))
+        return modules ? -1 : 0;
+    char *s = buf + m.rm_so, *end = buf + m.rm_eo, *q = strchr(s, '"'), *e = q + 1;
     while (*e != '"')
         e += *e == '\\' ? 2 : 1;
+    char *c = strchr(e + 1, ',');
     if (!c || c >= end || e == q + 1)
-        return 0;
+        return modules ? -1 : 0;
     for (c++; c < end && isspace((unsigned char)*c); c++)
         ;
     end = ccd_class_end(c, end);
     if (end == c)
-        return 0;
+        return modules ? -1 : 0;
     *e = '\0';
     *end = '\0';
+    if (modules && !ccd_class_compact(c)) return -1;
     return fn(ctx, q + 1, c);
+}
+
+static const char *ccd_skip_quote(const char *p)
+{
+    char quote = *p++;
+    while (*p && *p != quote) { if (*p == '\\' && p[1]) p++; p++; }
+    return p;
+}
+
+/* Only a leading code token is a row; comments and macro templates are not. */
+static bool ccd_module_start(const char *line, const char *marker, bool *block,
+                             const char **start_at)
+{
+    bool leading = true, found = false;
+    for (const char *p = line; *p; p++) {
+        if (*block) {
+            if (p[0] == '*' && p[1] == '/') { *block = false; p++; }
+            continue;
+        }
+        if (p[0] == '/' && p[1] == '*') { *block = true; p++; continue; }
+        if (p[0] == '/' && p[1] == '/') break;
+        if (leading && isspace((unsigned char)*p)) continue;
+        if (leading) { *start_at = p; found = strncmp(p, marker, strlen(marker)) == 0; }
+        leading = false;
+        if (*p == '"' || *p == '\'') {
+            p = ccd_skip_quote(p);
+            if (!*p) break;
+        }
+    }
+    return found;
+}
+
+static bool ccd_scan_start(const char *line, const char *marker, bool modules,
+                           bool *block, const char **start_at)
+{
+    if (!line) return false;
+    return modules ? ccd_module_start(line, marker, block, start_at) : strstr(line, marker) != NULL;
 }
 
 /* Each marker line plus the lines up to the next marker is one record, so a
  * call wrapped across lines still parses. */
-static int ccd_scan(char *text, const char *marker, const regex_t *re, ccd_rec_fn fn, void *ctx)
+static int ccd_scan(char *text, const char *marker, const regex_t *re, ccd_rec_fn fn, void *ctx, bool modules)
 {
     char *buf = NULL, *save = NULL;
     size_t len = 0, cap = 0;
     int rc = 0;
+    bool block = false;
     for (char *l = strtok_r(text, "\n", &save);; l = strtok_r(NULL, "\n", &save)) {
-        int start = l && strstr(l, marker);
+        const char *start_at = NULL;
+        int start = ccd_scan_start(l, marker, modules, &block, &start_at);
         if ((start || !l) && len) {
-            rc = ccd_record(re, buf, fn, ctx);
+            rc = ccd_record(re, buf, fn, ctx, modules);
             len = 0;
         }
         if (!l || rc != 0)
             break;
         if (!start && !len)
             continue;
+        if (start && modules) l = (char *)start_at;
         size_t ln = strlen(l);
         char *nb = len + ln + 2 > cap ? ccd_grow(buf, &cap, len + ln + 2, 1) : buf;
         if (!nb) {
@@ -440,7 +507,7 @@ static int ccd_scan(char *text, const char *marker, const regex_t *re, ccd_rec_f
 static const char k_ccd_sym_re[] = "ZCL_CAPABILITY_SYMBOL\\([[:space:]]*\"([^\"\\\\]|\\\\.)*\""
                                    "[[:space:]]*,[[:space:]]*CAP_[A-Z_]+";
 static const char k_ccd_mod_re[] = "ZCL_MODULE_CAPABILITY\\([[:space:]]*\"([^\"\\\\]|\\\\.)*\""
-                                   "[[:space:]]*,[[:space:]]*[A-Z_|]+[[:space:]]*,";
+                                   "[[:space:]]*,[[:space:]]*[A-Za-z0-9_|[:space:]]+[[:space:]]*,";
 
 /* 0 after fn saw every record, 1 when the file cannot be read, else fn's or -1. */
 static int ccd_def_each(const char *file, int modules, ccd_rec_fn fn, void *ctx)
@@ -451,11 +518,20 @@ static int ccd_def_each(const char *file, int modules, ccd_rec_fn fn, void *ctx)
         return 1;
     int rc = regcomp(&re, modules ? k_ccd_mod_re : k_ccd_sym_re, REG_EXTENDED) ? -1 : 0;
     if (rc == 0) {
-        rc = ccd_scan(text, modules ? "ZCL_MODULE_CAPABILITY(" : "ZCL_CAPABILITY_SYMBOL(", &re, fn, ctx);
+        rc = ccd_scan(text, modules ? "ZCL_MODULE_CAPABILITY(" : "ZCL_CAPABILITY_SYMBOL(", &re, fn, ctx, modules != 0);
         regfree(&re);
     }
     free(text);
     return rc;
+}
+
+int ccd_module_each(const char *file, int (*fn)(void *, const char *, const char *), void *ctx)
+{
+    struct stat st;
+    if (stat(file, &st) != 0) return errno == ENOENT ? 1 : -1;
+    if (!S_ISREG(st.st_mode)) return -1;
+    int rc = ccd_def_each(file, 1, fn, ctx);
+    return rc == 1 ? -1 : rc;
 }
 
 struct ccd_symctx { struct ccd_map *map; size_t count; int aliases; };

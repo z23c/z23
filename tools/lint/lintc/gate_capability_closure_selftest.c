@@ -262,6 +262,67 @@ static int ccs_case_sidecar(const struct ccs_fx *fx)
                            " (duplicate central row)", 1);
 }
 
+static int ccs_case_expression(const struct ccs_fx *fx)
+{
+    char cent[CCD_PATH], root[CCD_PATH], row[512];
+    const char *side = "expr/contexts/commons/modules/vcs/src/owned.c.capabilities.def";
+    const char *bad[] = { "", " \t", "CAP_NET WORK", "CAP_NETWORK||CAP_PROCESS", "|CAP_NETWORK",
+                          "CAP_NETWORK|", NULL };
+    int failures = ccs_put(fx, "expr/engine/composition/module_capabilities.def", "") != 0;
+    ccs_path(fx, "expr/engine/composition/module_capabilities.def", cent);
+    ccs_path(fx, "expr", root);
+    snprintf(row, sizeof row, "ZCL_MODULE_CAPABILITY(\"%s\", CAP_NETWORK \t|\n CAP_PROCESS, \"x\")\n", k_own);
+    failures += ccs_put(fx, side, row) != 0;
+    struct ccd_mods m = {0};
+    int rc = ccd_modules_load(cent, NULL, root, &m);
+    failures += ccs_say(rc == 0 && ccs_eq(&m.uni, k_own, "CAP_NETWORK|CAP_PROCESS"),
+                        "sidecar: whitespace-delimited union retains both grants");
+    ccd_mods_free(&m);
+    for (size_t i = 0; bad[i]; i++) {
+        snprintf(row, sizeof row, "ZCL_MODULE_CAPABILITY(\"%s\", %s, \"x\")\n", k_own, bad[i]);
+        failures += ccs_put(fx, side, row) != 0;
+        rc = ccd_modules_load(cent, NULL, root, &m);
+        failures += ccs_say(rc != 0, "sidecar: malformed or unknown expression refuses");
+        ccd_mods_free(&m);
+    }
+    failures += ccs_put(fx, side, "ZCL_MODULE_CAPABILITY(\"contexts/commons/modules/vcs/src/owned.c\", CAP_NETWORK, \"x\")\n") != 0;
+    failures += ccs_put(fx, "expr/engine/composition/module_capabilities.def",
+        "/*\nZCL_MODULE_CAPABILITY(\"example.c\", CAP_NETWORK |, \"x\")\n*/\n"
+        "#define ZCL_MODULE_CAPABILITY(path, caps, why)\n"
+        "\vZCL_MODULE_CAPABILITY(\"valid,part.c\", CAP_NETWORK | CAP_PROCESS, \"x\")\n") != 0;
+    rc = ccd_modules_load(cent, NULL, root, &m);
+    failures += ccs_say(rc == 0 && ccs_eq(&m.raw, "valid,part.c", "CAP_NETWORK|CAP_PROCESS"),
+                        "central: comments ignored and comma path with spaced union survives");
+    ccd_mods_free(&m);
+    failures += ccs_put(fx, "expr/engine/composition/module_capabilities.def",
+        "/* ZCL_MODULE_CAPABILITY(\"fake.c\", CAP_PROCESS, \"x\") */ "
+        "ZCL_MODULE_CAPABILITY(\"real.c\", CAP_NETWORK | CAP_PROCESS, \"x\")\n") != 0;
+    rc = ccd_modules_load(cent, NULL, root, &m);
+    failures += ccs_say(rc == 0 && !ccd_map_get(&m.raw, "fake.c") &&
+                        ccs_eq(&m.raw, "real.c", "CAP_NETWORK|CAP_PROCESS"),
+                        "central: leading comment cannot replace real row");
+    ccd_mods_free(&m);
+    failures += ccs_put(fx, "expr/engine/composition/module_capabilities.def",
+        "ZCL_MODULE_CAPABILITY(\"bad.c\", CAP_NETWORK |, \"x\")\n"
+        "/* ZCL_MODULE_CAPABILITY(\"fake.c\", CAP_NETWORK, \"x\") */\n") != 0;
+    rc = ccd_modules_load(cent, NULL, root, &m);
+    failures += ccs_say(rc != 0, "central: later comment cannot hide malformed row");
+    ccd_mods_free(&m);
+    failures += ccs_put(fx, "expr/engine/composition/module_capabilities.def",
+        "ZCL_MODULE_CAPABILITY(\"valid.c\", CAP_NETWORK, \"x\")\n"
+        "ZCL_MODULE_CAPABILITY(\"bad.c\", CAP_NETWORK |, \"x\")\n") != 0;
+    rc = ccd_modules_load(cent, NULL, root, &m);
+    failures += ccs_say(rc != 0, "central: malformed row after valid row refuses");
+    ccd_mods_free(&m);
+    failures += ccs_put(fx, "expr/engine/composition/module_capabilities.def",
+        "ZCL_MODULE_CAPABILITY(\"valid.c\", CAP_NETWORK, \"x\")\n"
+        "ZCL_MODULE_CAPABILITY(\"empty.c\",  , \"x\")\n") != 0;
+    rc = ccd_modules_load(cent, NULL, root, &m);
+    failures += ccs_say(rc != 0, "central: empty row after valid row refuses");
+    ccd_mods_free(&m);
+    return failures;
+}
+
 /* Repeated valid tokens make the exact declaration exceed the old buffer;
  * the distinct final grant must survive both raw storage and normalized union. */
 static int ccs_case_long_class(const struct ccs_fx *fx)
@@ -435,7 +496,7 @@ int capability_closure_data_selftest(void)
         return 2;
     }
     int fails = ccs_case_parse() + ccs_case_nm(&fx) + ccs_case_symbols(&fx) + ccs_case_platform(&fx)
-              + ccs_case_scan(&fx) + ccs_case_sidecar(&fx) + ccs_case_long_class(&fx) + ccs_case_sets() + ccs_case_coverage() + ccs_case_epoch(&fx)
+              + ccs_case_scan(&fx) + ccs_case_sidecar(&fx) + ccs_case_expression(&fx) + ccs_case_long_class(&fx) + ccs_case_sets() + ccs_case_coverage() + ccs_case_epoch(&fx)
               + ccs_case_epoch_refusal(&fx) + ccs_case_epoch_unreadable(&fx);
     lsc_unblock();
     rap_rm_rf(fx.base);

@@ -58,6 +58,9 @@ void ccd_nm_free(struct ccd_nm *nm);
  * windows adds the __imp_, __imp__ and __mingw_ aliases. 1 when unreadable. */
 int ccd_symbols_load(const char *file, int windows, struct ccd_map *sym, size_t *count);
 
+/* Shared module-row reader: 0 success, 1 absent, -1 unreadable/malformed/OOM, or callback error. */
+int ccd_module_each(const char *file, int (*fn)(void *, const char *, const char *), void *ctx);
+
 /* module_capabilities.def, source-owned sidecars and the platform supplement.
  * raw is the active-target class per source, uni the union of all rows; error
  * holds the exact sidecar_error text when the load returns 1. */

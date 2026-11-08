@@ -19,7 +19,7 @@
 #include "lintc_proc.h"
 #include "lintc_sig.h"
 
-enum { CGS_CASES = 25, CGS_FILLER = 500 };
+enum { CGS_CASES = 26, CGS_FILLER = 500 };
 
 static const char k_fx0[] = "build/dev-obj/epochs/fx0";
 
@@ -655,13 +655,30 @@ static int cgs_case_u(const struct ccs_fx *fx)
     return 0;
 }
 
+static int cgs_case_spaced(const struct ccs_fx *fx)
+{
+    struct ccg_cfg cfg;
+    cgs_cfg(&cfg);
+    if (cgs_base(fx, "space", "ZCL_MODULE_CAPABILITY(\"fixture_src/spaced.c\", CAP_NETWORK |\n CAP_PROCESS, \"x\")\n") ||
+        ccs_put(fx, "space/engine/composition/capability_symbols.def",
+                "ZCL_CAPABILITY_SYMBOL(\"connect\", CAP_NETWORK, \"\")\nZCL_CAPABILITY_SYMBOL(\"fork\", CAP_PROCESS, \"\")\n") ||
+        cgs_unit(fx, "space", "fixture_src/spaced.c",
+                 "extern int connect(int,int,int); extern int fork(void); int use_it(void) { return connect(1,2,3)+fork(); }\n", NULL))
+        return ccs_say(0, "spaced: fixture");
+    int failures = cgs_check(fx, "space", &cfg, 0, NULL, "spaced union closes both actual reaches");
+    if (ccs_put(fx, "space/engine/composition/module_capabilities.def",
+                "ZCL_MODULE_CAPABILITY(\"fixture_src/spaced.c\", CAP_NETWORK | CAP_UNKNOWN, \"x\")\n"))
+        return failures + 1;
+    return failures + cgs_check(fx, "space", &cfg, -1, NULL, "unknown capability does not close actual reaches");
+}
+
 static int cgs_cases(const struct ccs_fx *fx)
 {
     return cgs_case_a(fx) + cgs_case_b(fx) + cgs_case_c(fx) + cgs_case_d(fx) + cgs_case_e(fx) + cgs_case_f(fx) +
            cgs_case_g(fx) + cgs_case_h() + cgs_case_i(fx) + cgs_case_j(fx) + cgs_case_k(fx) + cgs_case_l() +
            cgs_case_m(fx) + cgs_case_n1(fx) + cgs_case_n2(fx) + cgs_case_o(fx) + cgs_case_p(fx) + cgs_case_q(fx) +
            cgs_case_r(fx) + cgs_case_s(fx) + cgs_case_t(fx) + cgs_case_u(fx) + cgs_case_v(fx) + cgs_case_w(fx) +
-           cgs_case_x(fx);
+           cgs_case_x(fx) + cgs_case_spaced(fx);
 }
 
 int check_capability_closure_selftest(void)

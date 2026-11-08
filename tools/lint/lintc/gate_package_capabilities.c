@@ -24,6 +24,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -110,6 +111,8 @@ static int pc_open_modules(const char *root, struct pc_modtable *mods, FILE *out
         struct stat st;
         if (stat(paths[i], &st) == 0)
             present[npresent++] = paths[i];
+        else if (errno != ENOENT)
+            return 2;
     }
     if (npresent == 0) {
         fprintf(out, "check_package_capabilities: UNPROVEN — cannot read %s\n",
