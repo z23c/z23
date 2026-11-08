@@ -110,6 +110,21 @@ int test_boot_self_respawn(void)
     sd_notify_reset_for_testing();
     unsetenv("NOTIFY_SOCKET");
 
+#if defined(__linux__)
+    {
+        /* A child that vanished between readdir and lstat counts as zero
+         * bytes; the root itself missing is still a refusal. */
+        char gone[64];
+        int gone_n = snprintf(gone, sizeof(gone), "/var/tmp/zcl-bsr-gone-%d", (int)getpid());
+        uint64_t used = 0;
+        BSR_CHECK("tmpfs size: vanished child (lstat ENOENT) is skipped",
+                  gone_n > 0 && (size_t)gone_n < sizeof(gone) &&
+                  test_tmpfs_size_at(gone, &used, true) && used == 0);
+        BSR_CHECK("tmpfs size: missing root is still refused",
+                  !test_tmpfs_size_at(gone, &used, false));
+    }
+#endif
+
 #if !defined(_WIN32)
     bsr_baseline();
     boot_self_respawn_set_argv(fake_argv);

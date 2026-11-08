@@ -59,7 +59,7 @@ static inline bool test_tmpfs_parent_safe(const char *path)
 static inline bool test_tmpfs_size_at(const char *path, uint64_t *bytes, bool is_child)
 {
     struct stat st;
-    if (lstat(path, &st) != 0) return false;
+    if (lstat(path, &st) != 0) return is_child && errno == ENOENT;
     if (st.st_blocks > 0) {
         uint64_t blocks = (uint64_t)st.st_blocks;
         if (blocks > (UINT64_MAX - *bytes) / 512) return false;
