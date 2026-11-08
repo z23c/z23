@@ -168,7 +168,11 @@ static bool cis_ready(const char *dir, struct codeindex **ci)
 static bool cis_verdict(struct codeindex *ci, bool want_stale)
 {
     bool stale = !want_stale;
-    return codeindex_is_stale(ci, &stale) && stale == want_stale;
+    bool ok = codeindex_is_stale(ci, &stale);
+    if (!ok || stale != want_stale)
+        fprintf(stderr, "codeindex stale: verdict ok=%d stale=%d expected=%d\n",
+                ok, stale, want_stale);
+    return ok && stale == want_stale;
 }
 
 static int test_cis_memo_second_open_skips_walk(void)

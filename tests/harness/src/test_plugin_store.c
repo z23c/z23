@@ -22,6 +22,7 @@
 #include "test/plugin_dev_cases.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
@@ -2136,13 +2137,37 @@ static void pst_gate_foreign_child(const char *gatepath, int up_fd, int hold_fd)
  * vacuously. Returns 0 when the answers are as expected, 1 on a wrong
  * answer, 2 on setup failure, 3 when /proc/locks is unreadable (nothing to
  * test). */
+static int pst_gate_observe(const struct stat *st, int fd, pid_t pid)
+{
+    bool known_foreign = false, known_ours = false, known_mine = false;
+    bool foreign = pst_gate_has_reader(st, pid, &known_foreign);
+    bool as_ours = pst_gate_has_reader(st, getpid(), &known_ours);
+    int lock_rc = flock(fd, LOCK_SH);
+    int lock_errno = lock_rc == 0 ? 0 : errno;
+    bool mine = lock_rc == 0 && pst_gate_has_reader(st, getpid(), &known_mine);
+    int rc;
+    if (lock_rc != 0)
+        rc = 2;
+    else if (!known_foreign || !known_ours || !known_mine)
+        rc = 3;
+    else
+        rc = (foreign && !as_ours && mine) ? 0 : 1;
+    if (rc != 0)
+        fprintf(stderr, "plugin gate observer: rc=%d foreign=%d/%d as_ours=%d/%d mine=%d/%d flock=%d errno=%d\n",
+                rc, foreign, known_foreign, as_ours, known_ours,
+                mine, known_mine, lock_rc, lock_errno);
+    return rc;
+}
+
 static int pst_gate_owner_probe(const char *gatepath)
 {
     int fd = open(gatepath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     struct stat st;
     int hold[2], up[2], rc = 2;
-    if (fd < 0 || fstat(fd, &st) != 0 || pipe(hold) != 0 || pipe(up) != 0)
+    if (fd < 0 || fstat(fd, &st) != 0 || pipe(hold) != 0 || pipe(up) != 0) {
+        fprintf(stderr, "plugin gate observer: setup failed errno=%d\n", errno);
         return 2;
+    }
     pid_t pid = fork();
     if (pid == 0) {
         close(fd);
@@ -2154,12 +2179,7 @@ static int pst_gate_owner_probe(const char *gatepath)
     close(up[1]);
     char c;
     if (pid > 0 && read(up[0], &c, 1) == 1) { /* the child holds the gate now */
-        bool known = false;
-        bool foreign = pst_gate_has_reader(&st, pid, &known);
-        bool as_ours = pst_gate_has_reader(&st, getpid(), &known);
-        flock(fd, LOCK_SH);
-        bool mine = pst_gate_has_reader(&st, getpid(), &known);
-        rc = !known ? 3 : (foreign && !as_ours && mine) ? 0 : 1;
+        rc = pst_gate_observe(&st, fd, pid);
     }
     close(hold[1]);
     if (pid > 0)
@@ -2180,6 +2200,7 @@ static int pst_case_gate_owner(void)
         ASSERT(pst_plug_path(&fx, ".lock.q", gatepath, sizeof(gatepath)));
         int rc = pst_gate_owner_probe(gatepath);
         pst_fx_close(&fx);
+        if (rc != 0) fprintf(stderr, "plugin gate observer: final rc=%d\n", rc);
         ASSERT(rc == 0 || rc == 3); /* 3: no /proc/locks, the observer's fallback applies */
     } TEST_END
     return failures;
