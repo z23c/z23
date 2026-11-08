@@ -1192,9 +1192,9 @@ char *zcl_objectives_checkout_blob(const char *repo, const char *revision,
     buf = zcl_malloc(OBJ_BLOB_MAX, "fleet_objectives_blob");
     if (!buf)
         return NULL;
-    (void)zcl_spawn_capture_binary(argv, buf, OBJ_BLOB_MAX, OBJ_SPAWN_MS,
-                                   &seen);
-    if (!seen.eof || seen.overflow || !seen.exit_observed ||
+    struct zcl_result result = zcl_spawn_capture_binary(
+        argv, buf, OBJ_BLOB_MAX, OBJ_SPAWN_MS, &seen);
+    if (!result.ok || !seen.eof || seen.overflow || !seen.exit_observed ||
         seen.exit_code != 0) {
         free(buf);
         return NULL;
@@ -1518,11 +1518,11 @@ static void obj_lint_over_disk(const char *dir, struct zcl_objective_value *v)
 }
 
 /* Counts one origin/main family by its blob. False when git cannot give it. */
-static bool obj_lint_origin_file(const char *repo, const char *name,
-                                 int64_t *over)
+static bool obj_lint_origin_file(const char *repo, const char *revision,
+                                 const char *name, int64_t *over)
 {
     size_t len = 0;
-    char *blob = zcl_objectives_checkout_blob(repo, OBJ_ORIGIN_MAIN, name, &len);
+    char *blob = zcl_objectives_checkout_blob(repo, revision, name, &len);
     if (!blob)
         return false;
     if (obj_buf_line_count(blob, len) > OBJ_LINT_CEILING_LINES)
@@ -1531,43 +1531,67 @@ static bool obj_lint_origin_file(const char *repo, const char *name,
     return true;
 }
 
-/* Walks the newline-separated names of the .c families and counts each one's
- * oversized blob. False when a family cannot be read at origin/main. */
-static bool obj_lint_origin_walk(const char *repo, char *names, int64_t *over,
+/* Git's NUL-framed names preserve newlines and reject incomplete records. */
+static bool obj_lint_origin_walk(const char *repo, const char *revision,
+                                 char *names, size_t len, int64_t *over,
                                  int64_t *families)
 {
-    char *line = names;
-    while (*line) {
-        char *nl = strchr(line, '\n');
-        if (nl)
-            *nl = '\0';
+    size_t off = 0;
+    while (off < len) {
+        char *line = names + off;
+        char *end = memchr(line, '\0', len - off);
+        if (!end || end == line || strncmp(line, OBJ_LINTC_REL "/",
+                                            sizeof(OBJ_LINTC_REL)) != 0)
+            return false;
         if (obj_ends_with(line, ".c")) {
             (*families)++;
-            if (!obj_lint_origin_file(repo, line, over))
+            if (!obj_lint_origin_file(repo, revision, line, over))
                 return false;
         }
-        if (!nl)
-            break;
-        line = nl + 1;
+        off = (size_t)(end - names) + 1;
     }
     return true;
+}
+
+/* Grow only after an observed overflow; the existing blob budget bounds the
+ * listing too. Every incomplete, timed-out or failed capture is refused. */
+static char *obj_lint_origin_names(const char *repo, const char *revision,
+                                   size_t *len)
+{
+    const char *argv[] = {"git", "-C", repo, "ls-tree", "-z", "--name-only",
+                          revision, OBJ_LINTC_REL "/", NULL};
+    size_t cap = OBJ_LIST_MAX;
+    for (;;) {
+        struct zcl_spawn_binary_observation seen = {0};
+        char *names = zcl_malloc(cap, "fleet_objectives_lintc");
+        if (!names) return NULL;
+        struct zcl_result result = zcl_spawn_capture_binary(
+            argv, names, cap, OBJ_SPAWN_MS, &seen);
+        if (result.ok && seen.eof && !seen.overflow && seen.exit_observed && seen.exit_code == 0) {
+            *len = seen.output_len;
+            return names;
+        }
+        free(names);
+        if (!seen.overflow || seen.timed_out || cap >= OBJ_BLOB_MAX)
+            return NULL;
+        cap *= 2;
+        if (cap > OBJ_BLOB_MAX) cap = OBJ_BLOB_MAX;
+    }
 }
 
 /* Counts the oversized .c families of tools/lint/lintc at origin/main. */
 static void obj_lint_over_origin(const char *repo, struct zcl_objective_value *v)
 {
-    const char *argv[] = {"git", "-C", repo, "ls-tree", "--name-only",
-                          OBJ_ORIGIN_MAIN, OBJ_LINTC_REL "/", NULL};
-    char *names = zcl_malloc(OBJ_LIST_MAX, "fleet_objectives_lintc");
+    char revision[65];
+    size_t len = 0;
+    char *names;
     int64_t over = 0, families = 0;
-    if (!names ||
-        zcl_spawn_capture(argv, names, OBJ_LIST_MAX, OBJ_SPAWN_MS) != 0 ||
-        strlen(names) >= OBJ_LIST_MAX - 1u) {
-        free(names);
+    if (!zcl_objectives_checkout_revision(repo, revision) || !revision[0] ||
+        !(names = obj_lint_origin_names(repo, revision, &len))) {
         obj_set_reason(v, "cannot list %s on origin/main", OBJ_LINTC_REL);
         return;
     }
-    if (!obj_lint_origin_walk(repo, names, &over, &families)) {
+    if (!obj_lint_origin_walk(repo, revision, names, len, &over, &families)) {
         obj_set_reason(v, "%s", "cannot read a lint family on origin/main");
     } else if (families == 0) {
         obj_set_reason(v, "no lint family at origin/main %s", OBJ_LINTC_REL);

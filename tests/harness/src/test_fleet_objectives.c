@@ -601,6 +601,8 @@ static int fox_case_git(void)
         ASSERT(fox_commit(repo, "contexts/c.c", FOX_NOW - 3600, 7));
         ASSERT(fox_commit(repo, "docs/API_REFERENCE.md", FOX_NOW - 3500, 8));
         ASSERT_EQ(fox_git(repo, "update-ref", "refs/remotes/origin/main", "HEAD", NULL), 0);
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
+        ASSERT(!v.measured); /* origin has no lint tree; do not invent zero */
         /* One commit that exists only on HEAD, after origin/main. */
         ASSERT(fox_commit(repo, "apps/d.c", FOX_NOW - 1800, 9));
 
@@ -642,6 +644,14 @@ static int fox_case_git(void)
         ASSERT(fox_write_n_lines(path, 1501));
         (void)snprintf(path, sizeof(path), "%s/small.c", lintc);
         ASSERT(fox_write_n_lines(path, 10));
+        /* Exceed the old 16 KiB listing without spawning hundreds of blob
+         * reads, and require NUL framing for an unusual tracked filename. */
+        for (int i = 0; i < 400; i++) {
+            (void)snprintf(path, sizeof(path), "%s/fixture-%04d-long-non-c-entry-name.txt", lintc, i);
+            ASSERT(fox_write(path, "fixture\n"));
+        }
+        (void)snprintf(path, sizeof(path), "%s/odd\nfamily.c", lintc);
+        ASSERT(fox_write_n_lines(path, 1501));
         ASSERT_EQ(fox_git(tree, "add", "-A", NULL, NULL), 0);
         ASSERT_EQ(fox_git(tree, "commit", "-q", "-m", "origin"), 0);
         ASSERT_EQ(fox_git(tree, "update-ref", "refs/remotes/origin/main", "HEAD", NULL), 0);
@@ -666,7 +676,7 @@ static int fox_case_git(void)
         ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_ORIGIN);
         v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
         ASSERT(v.measured);
-        ASSERT_EQ(v.value, 1); /* big.c only; the working tree's small.c is not on origin/main */
+        ASSERT_EQ(v.value, 2); /* big.c and the newline-named family */
         ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_ORIGIN);
         /* With no origin/main the working tree answers, labelled as such. */
         ASSERT_EQ(fox_git(tree, "update-ref", "-d", "refs/remotes/origin/main", NULL), 0);
@@ -680,7 +690,7 @@ static int fox_case_git(void)
         ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_WORKTREE);
         v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
         ASSERT(v.measured);
-        ASSERT_EQ(v.value, 2);
+        ASSERT_EQ(v.value, 3);
         ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_WORKTREE);
         o.repo = repo;
         PASS();
