@@ -592,7 +592,7 @@ bool bip_replay_after_event(struct catch_up_ctx *c)
 void bip_replay_finish(struct catch_up_ctx *c)
 {
     replay_wal_limit(c->p, -1);
-    if (!c->error)
+    if (!c->error && !c->stopped)
         replay_report(c, mono_now_ms(), true);
     boot_status_set_progress("", 0, 0);
 }
@@ -602,37 +602,47 @@ void bip_replay_finish(struct catch_up_ctx *c)
  * file-size ceiling. It shares struct catch_up_ctx + batch_begin/commit via
  * block_index_projection_internal.h. */
 
-/* The event_log_stream callback. Returns false to stop on any error. */
-static bool catch_up_cb(uint64_t offset, enum event_log_type type,
-                        const void *payload, size_t len, void *user)
+static bool bip_header_exists(struct catch_up_ctx *c, const uint8_t hash[32], bool *present)
 {
-    struct catch_up_ctx *c = (struct catch_up_ctx *)user;
-
-    /* Always advance the cursor past this event, regardless of type —
-     * irrelevant types are simply skipped. */
-    uint64_t event_end = offset + EVENT_LOG_FRAME_OVERHEAD + (uint64_t)len;  /* hdr + payload + sentinel */
-    c->last_offset_after = event_end;
-    bip_replay_before_event(c);
-
-    if (type == EV_BLOCK_STATUS)
-        return catch_up_apply_status(c, payload, len) &&
-               bip_replay_after_event(c);
-
-    if (type != EV_BLOCK_HEADER) {
-        /* Not for us. Don't count it toward the batch (cursor still
-         * advances; the cadence may still persist it). */
-        return bip_replay_after_event(c);
-    }
-
-    struct ev_block_header h;
-    const uint8_t *solution = NULL;
-    if (!ev_block_header_parse((const uint8_t *)payload, len, &h, &solution)) {
-        fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
-                "[block_index_projection] parse failed at offset=%" PRIu64
-                " (len=%zu)\n", offset, len);
+    *present = false;
+    /* Did this hash exist before? (Used for replace_collisions metric.)
+     * Statement is prepared once for the whole catch_up (see
+     * block_index_projection_catch_up()) and reset+rebound here, mirroring
+     * the ins_stmt lifecycle below. */
+    sqlite3_reset(c->exists_stmt);
+    sqlite3_clear_bindings(c->exists_stmt);
+    sqlite3_bind_blob(c->exists_stmt, 1, hash, 32, SQLITE_TRANSIENT);
+    int exists_rc = sqlite3_step(c->exists_stmt); // raw-sql-ok:kernel-primitive
+    if (exists_rc == SQLITE_ROW) *present = true;
+    else if (exists_rc != SQLITE_DONE) {
+        fprintf(stderr, "[block_index_projection] header exists SELECT rc=%d (%s)\n",
+                exists_rc, sqlite3_errstr(exists_rc));
+        sqlite3_exec(c->p->db, "ROLLBACK", NULL, NULL, NULL);
+        c->batch_count = 0;
+        c->collisions = 0;
         c->error = true;
         return false;
     }
+    return true;
+}
+
+static bool bip_parse_header(struct catch_up_ctx *c, uint64_t offset,
+                             const void *payload, size_t len, struct ev_block_header *header)
+{
+    const uint8_t *solution = NULL;
+    if (ev_block_header_parse(payload, len, header, &solution)) return true;
+    fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
+            "[block_index_projection] parse failed at offset=%" PRIu64
+            " (len=%zu)\n", offset, len);
+    c->error = true;
+    return false;
+}
+
+static bool bip_apply_header(struct catch_up_ctx *c, uint64_t offset,
+                             const void *payload, size_t len)
+{
+    struct ev_block_header h;
+    if (!bip_parse_header(c, offset, payload, len, &h)) return false;
 
     /* First event in the batch — open a transaction. */
     if (c->batch_count == 0) {
@@ -642,16 +652,8 @@ static bool catch_up_cb(uint64_t offset, enum event_log_type type,
         }
     }
 
-    /* Did this hash exist before? (Used for replace_collisions metric.)
-     * Statement is prepared once for the whole catch_up (see
-     * block_index_projection_catch_up()) and reset+rebound here, mirroring
-     * the ins_stmt lifecycle below. */
     bool was_present = false;
-    sqlite3_reset(c->exists_stmt);
-    sqlite3_clear_bindings(c->exists_stmt);
-    sqlite3_bind_blob(c->exists_stmt, 1, h.hash, 32, SQLITE_TRANSIENT);
-    if (sqlite3_step(c->exists_stmt) == SQLITE_ROW)  // raw-sql-ok:kernel-primitive
-        was_present = true;
+    if (!bip_header_exists(c, h.hash, &was_present)) return false;
 
     /* INSERT OR REPLACE. */
     sqlite3_reset(c->ins_stmt);
@@ -696,6 +698,28 @@ static bool catch_up_cb(uint64_t offset, enum event_log_type type,
      * the delta — so this counter tracks new headers, not chain length. A
      * regression that replays from offset 0 on a warm boot balloons it. */
     boot_scan_bump(c->scan_ctr);
+    return true;
+}
+
+/* The event_log_stream callback. Returns false to stop on any error. */
+static bool catch_up_cb(uint64_t offset, enum event_log_type type,
+                        const void *payload, size_t len, void *user)
+{
+    struct catch_up_ctx *c = (struct catch_up_ctx *)user;
+
+    if (c->stop && c->stop(c->stop_ctx)) {
+        c->stopped = true;
+        return false;
+    }
+
+    /* Always advance the cursor past this event, regardless of type —
+     * irrelevant types are simply skipped. */
+    uint64_t event_end = offset + EVENT_LOG_FRAME_OVERHEAD + (uint64_t)len;  /* hdr + payload + sentinel */
+    c->last_offset_after = event_end;
+    bip_replay_before_event(c);
+
+    if (type == EV_BLOCK_STATUS && !catch_up_apply_status(c, payload, len)) return false;
+    if (type == EV_BLOCK_HEADER && !bip_apply_header(c, offset, payload, len)) return false;
 
     /* Commit on the replay cadence (events / log bytes / wall time). */
     return bip_replay_after_event(c);
@@ -733,7 +757,60 @@ static void catch_up_checkpoint_wal(struct catch_up_ctx *c, int rc)
         checkpoint_wal(c->p->db, "after catch-up");
 }
 
-uint64_t block_index_projection_catch_up(block_index_projection_t *p)
+static bool bip_prepare_statements(struct catch_up_ctx *c)
+{
+    /* Prepare the INSERT statement once for the whole catch_up. */
+    if (sqlite3_prepare_v2(c->p->db,
+            "INSERT OR REPLACE INTO block_index"
+            "(hash, height, n_status, n_file, n_data_pos, n_undo_pos,"
+            " n_time, n_bits, n_version, n_tx, blob) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            -1, &c->ins_stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
+                "[block_index_projection] prepare INSERT failed: %s\n",
+                sqlite3_errmsg(c->p->db));
+        return false;
+    }
+
+    /* Prepare the exists-check SELECT once for the whole catch_up, same
+     * lifecycle as ins_stmt above (reset+rebound per event in
+     * catch_up_cb(), finalized once below). */
+    if (sqlite3_prepare_v2(c->p->db,
+            "SELECT 1 FROM block_index WHERE hash = ? LIMIT 1",
+            -1, &c->exists_stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
+                "[block_index_projection] prepare SELECT failed: %s\n",
+                sqlite3_errmsg(c->p->db));
+        sqlite3_finalize(c->ins_stmt);
+        return false;
+    }
+
+    /* Prepare the blob-fetch SELECT once for the whole catch_up — used only
+     * by EV_BLOCK_STATUS application (catch_up_apply_status) to read back
+     * the prior EV_BLOCK_HEADER row it patches. Same reset+rebound lifecycle,
+     * finalized once below. */
+    if (sqlite3_prepare_v2(c->p->db,
+            "SELECT blob FROM block_index WHERE hash = ?",
+            -1, &c->blob_stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
+                "[block_index_projection] prepare blob SELECT failed: %s\n",
+                sqlite3_errmsg(c->p->db));
+        sqlite3_finalize(c->ins_stmt);
+        sqlite3_finalize(c->exists_stmt);
+        return false;
+    }
+
+    if (!block_index_projection_prepare_dirty(c)) {
+        sqlite3_finalize(c->ins_stmt);
+        sqlite3_finalize(c->exists_stmt);
+        sqlite3_finalize(c->blob_stmt);
+        return false;
+    }
+    return true;
+}
+
+static uint64_t bip_catch_up(block_index_projection_t *p, bool (*stop)(void *),
+                             void *stop_ctx, bool *stopped)
 {
     if (!p || !p->db || !p->log) {
         return (uint64_t)-1;
@@ -743,64 +820,21 @@ uint64_t block_index_projection_catch_up(block_index_projection_t *p)
 
     struct catch_up_ctx c = {0};
     c.p = p;
+    c.stop = stop;
+    c.stop_ctx = stop_ctx;
     c.last_offset_after = p->last_consumed_offset;
     c.scan_ctr = boot_scan_counter("block_index_projection.catch_up_events");
     bip_replay_begin(&c);
 
-    /* Prepare the INSERT statement once for the whole catch_up. */
-    if (sqlite3_prepare_v2(p->db,
-            "INSERT OR REPLACE INTO block_index"
-            "(hash, height, n_status, n_file, n_data_pos, n_undo_pos,"
-            " n_time, n_bits, n_version, n_tx, blob) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            -1, &c.ins_stmt, NULL) != SQLITE_OK) {
-        fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
-                "[block_index_projection] prepare INSERT failed: %s\n",
-                sqlite3_errmsg(p->db));
-        pthread_mutex_unlock(&p->mu);
-        return (uint64_t)-1;
-    }
-
-    /* Prepare the exists-check SELECT once for the whole catch_up, same
-     * lifecycle as ins_stmt above (reset+rebound per event in
-     * catch_up_cb(), finalized once below). */
-    if (sqlite3_prepare_v2(p->db,
-            "SELECT 1 FROM block_index WHERE hash = ? LIMIT 1",
-            -1, &c.exists_stmt, NULL) != SQLITE_OK) {
-        fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
-                "[block_index_projection] prepare SELECT failed: %s\n",
-                sqlite3_errmsg(p->db));
-        sqlite3_finalize(c.ins_stmt);
-        pthread_mutex_unlock(&p->mu);
-        return (uint64_t)-1;
-    }
-
-    /* Prepare the blob-fetch SELECT once for the whole catch_up — used only
-     * by EV_BLOCK_STATUS application (catch_up_apply_status) to read back
-     * the prior EV_BLOCK_HEADER row it patches. Same reset+rebound lifecycle,
-     * finalized once below. */
-    if (sqlite3_prepare_v2(p->db,
-            "SELECT blob FROM block_index WHERE hash = ?",
-            -1, &c.blob_stmt, NULL) != SQLITE_OK) {
-        fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
-                "[block_index_projection] prepare blob SELECT failed: %s\n",
-                sqlite3_errmsg(p->db));
-        sqlite3_finalize(c.ins_stmt);
-        sqlite3_finalize(c.exists_stmt);
-        pthread_mutex_unlock(&p->mu);
-        return (uint64_t)-1;
-    }
-
-    if (!block_index_projection_prepare_dirty(&c)) {
-        sqlite3_finalize(c.ins_stmt);
-        sqlite3_finalize(c.exists_stmt);
-        sqlite3_finalize(c.blob_stmt);
+    if (!bip_prepare_statements(&c)) {
         pthread_mutex_unlock(&p->mu);
         return (uint64_t)-1;
     }
 
     int rc = event_log_stream(p->log, p->last_consumed_offset,
                               catch_up_cb, &c);
+    if (rc >= 0 && !c.error && !c.stopped && c.stop && c.stop(c.stop_ctx))
+        c.stopped = true;
     catch_up_flush_trailing(&c);
     bip_replay_finish(&c);
     sqlite3_finalize(c.ins_stmt);
@@ -823,7 +857,23 @@ uint64_t block_index_projection_catch_up(block_index_projection_t *p)
 
     if (rc < 0 || c.error)
         return (uint64_t)-1;
+    if (stopped) *stopped = c.stopped;
     return p->last_consumed_offset;
+}
+
+enum bip_catch_up_status block_index_projection_catch_up_until(
+    block_index_projection_t *p, bool (*stop)(void *), void *ctx, uint64_t *offset)
+{
+    bool stopped = false;
+    uint64_t result = bip_catch_up(p, stop, ctx, &stopped);
+    if (result == UINT64_MAX) return BIP_CATCH_UP_ERROR;
+    if (offset) *offset = result;
+    return stopped ? BIP_CATCH_UP_STOPPED : BIP_CATCH_UP_COMPLETE;
+}
+
+uint64_t block_index_projection_catch_up(block_index_projection_t *p)
+{
+    return bip_catch_up(p, NULL, NULL, NULL);
 }
 
 /* ── readers ───────────────────────────────────────────────────────── */

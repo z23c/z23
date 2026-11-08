@@ -51,9 +51,18 @@ bool catch_up_apply_status(struct catch_up_ctx *c,
     sqlite3_clear_bindings(c->blob_stmt);
     sqlite3_bind_blob(c->blob_stmt, 1, st.hash, 32, SQLITE_TRANSIENT);
     int sel_rc = sqlite3_step(c->blob_stmt);  // raw-sql-ok:kernel-primitive
-    if (sel_rc != SQLITE_ROW) {
+    if (sel_rc == SQLITE_DONE) {
         c->status_orphans++;
         return true;
+    }
+    if (sel_rc != SQLITE_ROW) {
+        fprintf(stderr, "[block_index_projection] status SELECT rc=%d (%s)\n",
+                sel_rc, sqlite3_errstr(sel_rc));
+        sqlite3_exec(c->p->db, "ROLLBACK", NULL, NULL, NULL);
+        c->batch_count = 0;
+        c->collisions = 0;
+        c->error = true;
+        return false;
     }
     const void *blob = sqlite3_column_blob(c->blob_stmt, 0);
     int blob_len = sqlite3_column_bytes(c->blob_stmt, 0);

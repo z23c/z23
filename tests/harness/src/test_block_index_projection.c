@@ -1447,6 +1447,264 @@ static void bip_check_byte_cadence(event_log_t *log, const char *db, int n, int 
     block_index_projection_close(p);
 }
 
+static int bip_dirty_count(block_index_projection_t *p)
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(p->db, "SELECT COUNT(*) FROM block_index_dirty", -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    int count = sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int(stmt, 0) : -1;
+    if (sqlite3_finalize(stmt) != SQLITE_OK) return -1;
+    return count;
+}
+
+static bool g_bip_stop_on_event;
+static uint64_t g_bip_stop_at_event = 1;
+static bool bip_stop_flag(void *ctx)
+{
+    (void)ctx;
+    return g_bip_stop_on_event;
+}
+static void bip_request_stop_on_event(uint64_t n)
+{
+    if (n == g_bip_stop_at_event) g_bip_stop_on_event = true;
+}
+
+static int run_stoppable_sql_failure(int *failures)
+{
+    int before = *failures;
+    char dir[256], log_path[320], db_path[320];
+    test_make_tmpdir(dir, sizeof(dir), "bip", "stop_sql");
+    snprintf(log_path, sizeof(log_path), "%s/log.bin", dir);
+    snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *p = NULL;
+    if (!log || !emit_n_headers(log, 0xE000u, 1)) {
+        (*failures)++;
+        goto done;
+    }
+    p = block_index_projection_open(db_path, log);
+    if (!p) {
+        (*failures)++;
+        goto done;
+    }
+    bool trigger = sqlite3_exec(p->db,
+        "CREATE TRIGGER stop_fail BEFORE INSERT ON block_index_dirty "
+        "BEGIN SELECT RAISE(FAIL, 'injected'); END", NULL, NULL, NULL) == SQLITE_OK;
+    g_bip_stop_on_event = false;
+    g_bip_stop_at_event = 1;
+    p->event_hook = bip_request_stop_on_event;
+    BIP_CHECK("stop: simultaneous SQL failure wins", trigger &&
+        block_index_projection_catch_up_until(p, bip_stop_flag, NULL, NULL) == BIP_CATCH_UP_ERROR &&
+        g_bip_stop_on_event && p->last_consumed_offset == 0 && block_index_projection_count(p) == 0);
+    p->event_hook = NULL;
+    block_index_projection_close(p);
+done:
+    if (log) event_log_close(log);
+    bip_cleanup_dir(dir);
+    return *failures - before;
+}
+
+static bool g_bip_sql_interrupted;
+static int bip_interrupt_read(void *ctx)
+{
+    (void)ctx;
+    if (!g_bip_stop_on_event || g_bip_sql_interrupted) return 0;
+    g_bip_sql_interrupted = true;
+    return 1;
+}
+
+static void bip_check_read_interruption(block_index_projection_t *p, bool status_case, int *failures)
+{
+    uint64_t offset = p->last_consumed_offset;
+    g_bip_stop_on_event = false;
+    g_bip_sql_interrupted = false;
+    g_bip_stop_at_event = status_case ? 1 : 2;
+    p->event_hook = bip_request_stop_on_event;
+    sqlite3_progress_handler(p->db, 1, bip_interrupt_read, NULL);
+    enum bip_catch_up_status result = block_index_projection_catch_up_until(p, bip_stop_flag, NULL, NULL);
+    sqlite3_progress_handler(p->db, 0, NULL, NULL);
+    p->event_hook = NULL;
+    BIP_CHECK("stop: interrupted read fails without cursor advance", result == BIP_CATCH_UP_ERROR &&
+        g_bip_stop_on_event && g_bip_sql_interrupted && p->last_consumed_offset == offset &&
+        block_index_projection_count(p) == (status_case ? 1u : 0u));
+}
+
+static int bip_stoppable_read_failure(int *failures, bool status_case)
+{
+    int before = *failures;
+    char dir[256], log_path[320], db_path[320];
+    test_make_tmpdir(dir, sizeof(dir), "bip", "stop_read");
+    snprintf(log_path, sizeof(log_path), "%s/log.bin", dir);
+    snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *p = NULL;
+    if (!log) { (*failures)++; goto done; }
+    struct ev_block_header h;
+    uint8_t sol[8] = {0};
+    make_header(&h, sol, sizeof(sol), 0xE100u, 42, 1);
+    if (!emit_header(log, &h, sol)) { (*failures)++; goto done; }
+    p = block_index_projection_open(db_path, log);
+    if (!p || (status_case && (block_index_projection_catch_up(p) == UINT64_MAX || !emit_status(log, &h))) ||
+        (!status_case && !emit_header(log, &h, sol))) {
+        (*failures)++;
+        goto done;
+    }
+    bip_check_read_interruption(p, status_case, failures);
+done:
+    if (p) block_index_projection_close(p);
+    if (log) event_log_close(log);
+    bip_cleanup_dir(dir);
+    return *failures - before;
+}
+
+static int run_stoppable_read_failure(int *failures)
+{
+    int before = *failures;
+    (void)bip_stoppable_read_failure(failures, false);
+    (void)bip_stoppable_read_failure(failures, true);
+    return *failures - before;
+}
+
+static bool bip_stop_now(void *ctx)
+{
+    (void)ctx;
+    return true;
+}
+
+static int run_stoppable_corruption(int *failures)
+{
+    int before = *failures;
+    char dir[256], log_path[320], db_path[320];
+    test_make_tmpdir(dir, sizeof(dir), "bip", "stop_corrupt");
+    snprintf(log_path, sizeof(log_path), "%s/log.bin", dir);
+    snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *p = NULL;
+    if (!log || !emit_n_headers(log, 0xF000u, 1)) {
+        (*failures)++;
+        goto done;
+    }
+    p = block_index_projection_open(db_path, log);
+    if (!p) {
+        (*failures)++;
+        goto done;
+    }
+    int fd = open(log_path, O_WRONLY);
+    unsigned char invalid = 0xff;
+    uint64_t size = event_log_size(log);
+    bool damaged = fd >= 0 && size > 0 && pwrite(fd, &invalid, 1, (off_t)(size - 1)) == 1;
+    if (fd >= 0) close(fd);
+    BIP_CHECK("stop: corrupted frame is failure", damaged &&
+        block_index_projection_catch_up_until(p, bip_stop_now, NULL, NULL) == BIP_CATCH_UP_ERROR &&
+        p->last_consumed_offset == 0 && block_index_projection_count(p) == 0);
+    block_index_projection_close(p);
+done:
+    if (log) event_log_close(log);
+    bip_cleanup_dir(dir);
+    return *failures - before;
+}
+
+static bool bip_stop_after(void *ctx)
+{
+    unsigned *calls = ctx;
+    return ++*calls == 6;
+}
+
+static int run_stoppable_prefix(int *failures)
+{
+    int before = *failures;
+    char dir[256], log_path[320], db_path[320];
+    test_make_tmpdir(dir, sizeof(dir), "bip", "stop");
+    snprintf(log_path, sizeof(log_path), "%s/log.bin", dir);
+    snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *p = NULL;
+    if (!log || !emit_n_headers(log, 0xD000u, 10)) {
+        (*failures)++;
+        goto done;
+    }
+    p = block_index_projection_open(db_path, log);
+    if (!p) {
+        (*failures)++;
+        goto done;
+    }
+    unsigned calls = 0;
+    uint64_t offset = 0;
+    BIP_CHECK("stop: committed prefix", block_index_projection_catch_up_until(
+        p, bip_stop_after, &calls, &offset) == BIP_CATCH_UP_STOPPED &&
+        block_index_projection_count(p) == 5 && offset > 0 && offset < event_log_size(log));
+    block_index_projection_close(p);
+    p = block_index_projection_open(db_path, log);
+    BIP_CHECK("stop: cursor and rows survive reopen", p &&
+        p->last_consumed_offset == offset && block_index_projection_count(p) == 5 &&
+        bip_dirty_count(p) == 5);
+    if (p) {
+        BIP_CHECK("stop: resume consumes suffix", block_index_projection_catch_up(p) != UINT64_MAX &&
+            block_index_projection_count(p) == 10);
+        block_index_projection_close(p);
+    }
+done:
+    if (log) event_log_close(log);
+    bip_cleanup_dir(dir);
+    return *failures - before;
+}
+
+#ifndef _WIN32
+static void bip_stop_crash_child(const char *log_path, const char *db_path, int fd)
+{
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *p = log ? block_index_projection_open(db_path, log) : NULL;
+    unsigned calls = 0;
+    uint64_t offset = 0;
+    if (!p || block_index_projection_catch_up_until(p, bip_stop_after, &calls, &offset) !=
+                  BIP_CATCH_UP_STOPPED || write(fd, &offset, sizeof(offset)) != (ssize_t)sizeof(offset))
+        _exit(1);
+    _exit(0); /* Simulated crash: no projection or event-log close. */
+}
+
+static void bip_stop_crash_verify(const char *log_path, const char *db_path,
+                                  bool exited, ssize_t bytes, uint64_t offset, int *failures)
+{
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *p = log ? block_index_projection_open(db_path, log) : NULL;
+    BIP_CHECK("stop crash: prefix rows, dirty set and cursor", exited && bytes == (ssize_t)sizeof(offset) && p &&
+        p->last_consumed_offset == offset && block_index_projection_count(p) == 5 && bip_dirty_count(p) == 5);
+    if (p) {
+        BIP_CHECK("stop crash: resume", block_index_projection_catch_up(p) != UINT64_MAX &&
+            block_index_projection_count(p) == 10);
+        block_index_projection_close(p);
+    }
+    if (log) event_log_close(log);
+}
+
+static int run_stoppable_crash(int *failures)
+{
+    int before = *failures;
+    char dir[256], log_path[320], db_path[320];
+    test_make_tmpdir(dir, sizeof(dir), "bip", "stop_crash");
+    snprintf(log_path, sizeof(log_path), "%s/log.bin", dir);
+    snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+    event_log_t *log = event_log_open(log_path);
+    bool seeded = log && emit_n_headers(log, 0xD100u, 10);
+    if (log) event_log_close(log);
+    int fds[2];
+    if (!seeded || pipe(fds) != 0) { (*failures)++; goto done; }
+    pid_t child = fork();
+    if (child == 0) { close(fds[0]); bip_stop_crash_child(log_path, db_path, fds[1]); }
+    close(fds[1]);
+    uint64_t offset = 0;
+    ssize_t bytes = read(fds[0], &offset, sizeof(offset));
+    close(fds[0]);
+    int status = 0;
+    bool exited = child > 0 && waitpid(child, &status, 0) == child &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    bip_stop_crash_verify(log_path, db_path, exited, bytes, offset, failures);
+done:
+    bip_cleanup_dir(dir);
+    return *failures - before;
+}
+#endif
+
 static int run_replay_resume_after_kill(int *failures)
 {
     int start_failures = *failures;
@@ -1566,6 +1824,13 @@ static const struct bip_case g_bip_cases[] = {
     {"catch_up_wal_budget", run_catch_up_wal_budget, 7},
     {"passive_checkpoint_then_close", run_passive_checkpoint_then_close, 6},
     {"catch_up_wal_reader", run_catch_up_wal_reader, 0},
+    {"stoppable_sql_failure", run_stoppable_sql_failure, 1},
+    {"stoppable_read_failure", run_stoppable_read_failure, 1},
+    {"stoppable_corruption", run_stoppable_corruption, 1},
+    {"stoppable_prefix", run_stoppable_prefix, 1},
+#ifndef _WIN32
+    {"stoppable_crash", run_stoppable_crash, 1},
+#endif
     {"replay_resume_after_kill", run_replay_resume_after_kill, 1},
     {"replay_wal_bound", run_replay_wal_bound, 2},
 };
@@ -1679,8 +1944,13 @@ int test_block_index_projection(void)
     }
     size_t owned = 0;
     for (unsigned i = 0; i < BIP_SHARD_COUNT; i++) owned += counts[i];
-    BIP_CHECK("partition: all 20 cases have one owner",
-              BIP_CASE_COUNT == 20u && owned == BIP_CASE_COUNT && unique);
+#ifdef _WIN32
+    const size_t expected_cases = 24;
+#else
+    const size_t expected_cases = 25;
+#endif
+    BIP_CHECK("partition: all cases have one owner",
+              BIP_CASE_COUNT == expected_cases && owned == BIP_CASE_COUNT && unique);
     bool nonempty = true;
     for (unsigned i = 0; i < BIP_SHARD_COUNT; i++) nonempty &= counts[i] > 0;
     BIP_CHECK("partition: every shard carries work", nonempty);

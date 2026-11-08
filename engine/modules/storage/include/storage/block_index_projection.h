@@ -72,11 +72,12 @@ void block_index_projection_close(block_index_projection_t *p);
  * (SQLITE_BUSY is benign), or SQLITE_MISUSE for a NULL or closed handle. */
 int block_index_projection_checkpoint_passive(block_index_projection_t *p);
 
-/* Consume events from `last_consumed_offset` to the end of the log.
- * Idempotent. Returns the new last_consumed_offset on success or
- * (uint64_t)-1 on error. INSERT OR REPLACE semantics — a header whose
- * hash already exists overwrites the prior row (a reorg or a status
- * upgrade). */
+/* A stopped replay commits the last completed record and its dirty rows.
+ * An observed read, SQL or commit error always returns ERROR. */
+enum bip_catch_up_status { BIP_CATCH_UP_COMPLETE, BIP_CATCH_UP_STOPPED, BIP_CATCH_UP_ERROR };
+enum bip_catch_up_status block_index_projection_catch_up_until(
+    block_index_projection_t *p, bool (*stop)(void *), void *ctx, uint64_t *offset);
+/* Complete replay; returns the committed offset or UINT64_MAX on error. */
 uint64_t block_index_projection_catch_up(block_index_projection_t *p);
 
 /* Lookup by block hash. Returns true if present; fills `out` (incl.

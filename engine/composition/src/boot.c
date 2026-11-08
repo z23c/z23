@@ -1834,7 +1834,7 @@ static bool boot_step_bind_coins_read_view(struct app_context *ctx)
 }
 
 /* Wire the process-lifetime chain_state_repository and the UTXO commitment. */
-static void boot_step_wire_repository(struct app_context *ctx)
+static bool boot_step_wire_repository(struct app_context *ctx)
 {
     int64_t t_wire = boot_clock_ms();
     coins_view_cache_init(&g_coins_tip, &g_coins_read_view.view);
@@ -1846,7 +1846,10 @@ static void boot_step_wire_repository(struct app_context *ctx)
      * boot_start_projection_storage is a no-op reuse (first opener wins).
      * Non-fatal if it cannot open: -rebuildfromlog simply falls through to
      * the legacy loaders. */
-    (void)boot_ensure_block_index_projection(ctx->datadir);
+    enum boot_projection_result projection_status = BOOT_PROJECTION_UNAVAILABLE;
+    (void)boot_ensure_block_index_projection_stoppable(ctx->datadir, &projection_status);
+    if (projection_status == BOOT_PROJECTION_STOPPED ||
+        projection_status == BOOT_PROJECTION_ERROR) return false;
     t_wire = boot_submark("coins.wire_blkidx_projection", t_wire);
     /* Wire the process-lifetime chain_state_repository singleton now
      * that g_coins_tip is alive. From this point on, call-site
@@ -1870,6 +1873,7 @@ static void boot_step_wire_repository(struct app_context *ctx)
                (unsigned long long)g_coins_tip.commitment.count);
     }
     /* skip_activate removed — activation controller is the authority */
+    return true;
 }
 
 /* Progress store, snapshots, block tree, coins view and the
@@ -1903,7 +1907,7 @@ static bool boot_seq_open_coins_state(struct app_context *ctx, struct boot_seq *
     if (!boot_step_bind_coins_read_view(ctx))
         return false;
     t_sub = boot_submark("coins.bind_read_view", t_sub);
-    boot_step_wire_repository(ctx);
+    if (!boot_step_wire_repository(ctx)) return false;
     if (!flysync_island_boot_rehydrate(&g_state)) {
         LOG_ERROR("boot", "verified island reconstruction failed; recovery required");
         return false;
@@ -3551,6 +3555,7 @@ static bool boot_seq_load_chain(struct app_context *ctx, struct boot_seq *seq)
 
 bool app_init(struct app_context *ctx)
 {
+    boot_projection_startup_reset();
     chain_restore_boot_snapshot_begin_boot();
     g_boot_app_ctx = ctx;
     /* -onlynet=onion must bind BEFORE the first fetch or dial (the boot bundle
@@ -3619,9 +3624,9 @@ void app_shutdown(void)
     boot_datadir_lock_release();
     boot_stage_advance_to(BOOT_STAGE_SHUTDOWN_COMPLETE);
 }
-static void boot_shutdown_offline_internal(bool output_already_durable, bool preserve_pending)
+static void boot_shutdown_offline_internal(bool output_already_durable, bool preserve_pending, bool clean_allowed)
 {
-    bool durability_ok = true;
+    bool durability_ok = clean_allowed;
     boot_stage_advance_to(BOOT_STAGE_SHUTDOWN_REQUESTED);
     boot_shutdown_deadline_handler_install();
     shutdown_stagewatch_begin(g_datadir);
@@ -3670,7 +3675,7 @@ static void boot_shutdown_offline_internal(bool output_already_durable, bool pre
 }
 void app_shutdown_offline(bool output_already_durable)
 {
-    boot_shutdown_offline_internal(output_already_durable, false);
+    boot_shutdown_offline_internal(output_already_durable, false, true);
 }
 
 bool boot_old_cutover_restart_pending(void)
@@ -3704,7 +3709,7 @@ static bool boot_cutover_exit_cleanup(enum boot_cutover_exit_action action)
           boot_cutover_verify_committed(&env, g_datadir, &g_old_cutover_restart_binding)))
         return false;
     g_cutover_exit_action = BOOT_CUTOVER_EXIT_NONE;
-    boot_shutdown_offline_internal(false, true);
+    boot_shutdown_offline_internal(false, true, true);
     return true;
 }
 
@@ -3716,6 +3721,11 @@ bool boot_old_cutover_restart_cleanup(void)
 bool boot_pending_stop_cleanup(void)
 {
     return boot_cutover_exit_cleanup(BOOT_CUTOVER_EXIT_STOP);
+}
+
+void app_shutdown_offline_unclean(void)
+{
+    boot_shutdown_offline_internal(false, false, false);
 }
 
 bool app_is_running(void) { return atomic_load(&g_running); }

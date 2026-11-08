@@ -727,10 +727,12 @@ static int main_check_boot_guards(const struct app_context *ctx)
 static bool main_app_init_and_one_shots(struct app_context *ctx, int *rc)
 {
     if (!app_init(ctx)) {
-        if (g_shutdown_requested && !boot_error_reported() && boot_pending_stop_cleanup()) {
+        if (g_shutdown_requested && !boot_error_reported() &&
+            (boot_pending_stop_cleanup() || boot_projection_stop_cleanup())) {
             *rc = 0;
             return true;
         }
+        (void)boot_projection_failure_cleanup();
         if (boot_old_cutover_restart_pending()) {
             if (boot_old_cutover_restart_cleanup()) {
                 if (boot_self_respawn_prepare_early())

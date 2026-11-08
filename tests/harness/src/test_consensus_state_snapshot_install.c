@@ -7073,10 +7073,14 @@ static int csi_stage_swap_case(void)
 }
 #endif
 
+#include "consensus_state_projection_stop_test.h"
+
 int test_snapshot_install_recovery(void)
 {
 #if !defined(_WIN32)
     int failures = 0;
+    failures += csi_projection_populated_stop_case(false);
+    failures += csi_projection_populated_stop_case(true);
     failures += csi_real_postcommit_test();
     failures += csi_stage_test();
     failures += csi_stage_swap_case();

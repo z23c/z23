@@ -641,6 +641,10 @@ void app_shutdown_offline(bool output_already_durable);
 bool boot_old_cutover_restart_pending(void);
 bool boot_old_cutover_restart_cleanup(void);
 bool boot_pending_stop_cleanup(void);
+void boot_projection_startup_reset(void);
+void app_shutdown_offline_unclean(void);
+bool boot_projection_stop_cleanup(void);
+bool boot_projection_failure_cleanup(void);
 #ifdef ZCL_TESTING
 struct wallet_cutover_binding;
 void boot_old_cutover_test_arm(const struct wallet_cutover_binding *binding, const char *datadir);

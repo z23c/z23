@@ -1192,8 +1192,7 @@ static int test_tor_write_torrc_reports_write_failure(void)
 static volatile sig_atomic_t g_node_term_seen;
 static void node_term_handler(int sig)
 {
-    (void)sig;
-    g_node_term_seen = 1;
+    g_node_term_seen = sig;
 }
 
 /* Poll tor.log until Tor's main loop has run handle_signals(): the
@@ -1217,7 +1216,7 @@ static bool wait_tor_main_loop(const char *datadir, int seconds)
 }
 
 /* The real thing: start embedded Tor in this process with the torrc the node
- * writes, install the node's termination handler, deliver SIGTERM, and
+ * writes, install the node's termination handler, deliver SIGTERM and SIGINT, and
  * require that the NODE's handler saw it and Tor did not take it and exit on
  * its own. With Tor's signal handlers enabled, libevent replaces the node's
  * SIGTERM disposition, Tor logs "Catching signal TERM" and its thread ends
@@ -1258,8 +1257,16 @@ static int test_tor_leaves_sigterm_to_the_node(void)
         for (int i = 0; i < 30 && !g_node_term_seen; i++)
             platform_sleep_ms(100); /* real-clock: signal delivery to this process */
         platform_sleep_ms(1000); /* real-clock: give a rogue Tor handler time to end its thread */
-        if (!g_node_term_seen) { fails = 1; why = "node handler never saw SIGTERM"; }
+        if (g_node_term_seen != SIGTERM) { fails = 1; why = "node handler never saw SIGTERM"; }
         else if (!tor_integration_is_enabled()) { fails = 1; why = "Tor exited on its own"; }
+        if (!fails) {
+            g_node_term_seen = 0;
+            kill(getpid(), SIGINT);
+            for (int i = 0; i < 30 && !g_node_term_seen; i++)
+                platform_sleep_ms(100); /* real-clock: signal delivery to this process */
+            if (g_node_term_seen != SIGINT) { fails = 1; why = "node handler never saw SIGINT"; }
+            else if (!tor_integration_is_enabled()) { fails = 1; why = "Tor exited on SIGINT"; }
+        }
     }
 
     tor_integration_stop();

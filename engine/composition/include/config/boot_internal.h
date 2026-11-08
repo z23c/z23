@@ -882,6 +882,13 @@ bool boot_legacy_commitment_bootstrap_allowed(void);
 struct block_index_projection;
 struct block_index_projection *boot_ensure_block_index_projection(
     const char *datadir);
+#ifdef ZCL_TESTING
+void boot_test_projection_opened(void (*hook)(struct block_index_projection *));
+#endif
+enum boot_projection_result { BOOT_PROJECTION_UNAVAILABLE, BOOT_PROJECTION_COMPLETE,
+                              BOOT_PROJECTION_STOPPED, BOOT_PROJECTION_ERROR };
+struct block_index_projection *boot_ensure_block_index_projection_stoppable(
+    const char *datadir, enum boot_projection_result *result);
 
 /* Shutdown phase order:
  * 1. stop externally visible services

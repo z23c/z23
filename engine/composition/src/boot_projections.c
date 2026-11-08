@@ -143,15 +143,48 @@ bool boot_ensure_event_log(const char *datadir)
  * First opener wins — one handle, no split-brain. Requires the event log
  * to already be published (boot_ensure_event_log first).
  * Returns the published projection or NULL. */
-block_index_projection_t *boot_ensure_block_index_projection(const char *datadir)
+#ifdef ZCL_TESTING
+static void (*g_test_projection_opened)(block_index_projection_t *);
+void boot_test_projection_opened(void (*hook)(block_index_projection_t *))
 {
-    block_index_projection_t *existing = block_index_projection_singleton();
-    if (existing)
-        return existing;
+    g_test_projection_opened = hook;
+}
+#endif
+
+static enum boot_projection_result g_projection_startup_result;
+void boot_projection_startup_reset(void)
+{
+    g_projection_startup_result = BOOT_PROJECTION_UNAVAILABLE;
+}
+
+bool boot_projection_stop_cleanup(void)
+{
+    if (g_projection_startup_result != BOOT_PROJECTION_STOPPED) return false;
+    boot_projection_startup_reset();
+    app_shutdown_offline(false);
+    return true;
+}
+
+bool boot_projection_failure_cleanup(void)
+{
+    if (g_projection_startup_result != BOOT_PROJECTION_ERROR) return false;
+    boot_projection_startup_reset();
+    app_shutdown_offline_unclean();
+    return true;
+}
+
+static bool boot_projection_stop(void *ctx)
+{
+    (void)ctx;
+    return thread_registry_shutdown_requested();
+}
+
+static bool boot_projection_open(const char *datadir)
+{
     if (!datadir || !datadir[0])
-        return NULL;
+        return false;
     if (!g_phase4_event_log)
-        return NULL;  /* event log must be published first */
+        return false;  /* event log must be published first */
 
     char bip_path[PATH_MAX];
     int n5 = snprintf(bip_path, sizeof(bip_path),
@@ -159,18 +192,51 @@ block_index_projection_t *boot_ensure_block_index_projection(const char *datadir
     if (n5 <= 0 || (size_t)n5 >= sizeof(bip_path)) {
         fprintf(stderr,  // obs-ok:phase4-storage
                 "[phase4] block_index_projection path too long\n");
-        return NULL;
+        return false;
     }
     g_phase4_block_index_projection =
         block_index_projection_open(bip_path, g_phase4_event_log);
     if (!g_phase4_block_index_projection) {
         fprintf(stderr,  // obs-ok:phase4-storage
                 "[phase4] block_index_projection unavailable\n");
+        return false;
+    }
+    return true;
+}
+
+block_index_projection_t *boot_ensure_block_index_projection_stoppable(const char *datadir, enum boot_projection_result *status)
+{
+    if (status) *status = BOOT_PROJECTION_UNAVAILABLE;
+    block_index_projection_t *existing = block_index_projection_singleton();
+    if (existing) {
+        if (status) *status = BOOT_PROJECTION_COMPLETE;
+        return existing;
+    }
+    if (!boot_projection_open(datadir)) return NULL;
+#ifdef ZCL_TESTING
+    if (g_test_projection_opened) g_test_projection_opened(g_phase4_block_index_projection);
+#endif
+    enum bip_catch_up_status result = status ?
+        block_index_projection_catch_up_until(g_phase4_block_index_projection, boot_projection_stop, NULL, NULL) :
+        (block_index_projection_catch_up(g_phase4_block_index_projection) == UINT64_MAX ?
+            BIP_CATCH_UP_ERROR : BIP_CATCH_UP_COMPLETE);
+    if (status) {
+        *status = result == BIP_CATCH_UP_STOPPED ? BOOT_PROJECTION_STOPPED :
+            result == BIP_CATCH_UP_ERROR ? BOOT_PROJECTION_ERROR : BOOT_PROJECTION_COMPLETE;
+        g_projection_startup_result = *status;
+    }
+    if (status && result != BIP_CATCH_UP_COMPLETE) {
+        block_index_projection_close(g_phase4_block_index_projection);
+        g_phase4_block_index_projection = NULL;
         return NULL;
     }
     block_index_projection_set_singleton(g_phase4_block_index_projection);
-    (void)block_index_projection_catch_up(g_phase4_block_index_projection);
     return g_phase4_block_index_projection;
+}
+
+block_index_projection_t *boot_ensure_block_index_projection(const char *datadir)
+{
+    return boot_ensure_block_index_projection_stoppable(datadir, NULL);
 }
 
 /* Should THIS boot defer progress.kv's integrity scan to the background?

@@ -138,6 +138,9 @@ struct catch_up_ctx {
     atomic_uint_least64_t *scan_ctr; /* boot O(delta) witness (util/boot_scan.h) */
     double   wal_amp;              /* WAL bytes written per log byte, learned per commit */
     bool     error;
+    bool     stopped;
+    bool     (*stop)(void *);
+    void     *stop_ctx;
 };
 
 /* Defined in block_index_projection.c (the catch_up driver owns the
