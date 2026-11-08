@@ -101,7 +101,7 @@ static int test_error_prose_wraps_without_placeholder(void)
         const char *doc =
             "{\"schema\":\"zcl.result.v1\",\"command\":\"app.keep\","
             "\"ok\":false,\"status\":\"failed\",\"error\":{\"code\":"
-            "\"INVALID_INPUT\",\"message\":\"app keep pins an image after an "
+            "\"APP_NOT_KEPT\",\"message\":\"app keep pins an image after an "
             "app open preview, for agents and tools; to keep a preview from "
             "the terminal use the guided path to its very last word "
             "ENDWORD\",\"next_action\":\"follow the first next command\","
