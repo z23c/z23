@@ -1661,14 +1661,13 @@ static char *obj_lint_origin_names(const char *repo, const char *revision,
 }
 
 /* Counts the oversized .c families of tools/lint/lintc at origin/main. */
-static void obj_lint_over_origin(const char *repo, struct zcl_objective_value *v)
+static void obj_lint_over_origin(const char *repo, const char *revision,
+                                 struct zcl_objective_value *v)
 {
-    char revision[65];
     size_t len = 0;
     char *names;
     int64_t over = 0, families = 0;
-    if (!zcl_objectives_checkout_revision(repo, revision) || !revision[0] ||
-        !(names = obj_lint_origin_names(repo, revision, &len))) {
+    if (!(names = obj_lint_origin_names(repo, revision, &len))) {
         obj_set_reason(v, "cannot list %s on origin/main", OBJ_LINTC_REL);
         return;
     }
@@ -1683,21 +1682,41 @@ static void obj_lint_over_origin(const char *repo, struct zcl_objective_value *v
     free(names);
 }
 
-/* The oversized .c families. An explicit lintc_dir is read on disk; otherwise
- * origin/main is read by blob, and the working tree only when origin/main
- * does not resolve. */
+static bool obj_lint_revision_is_commit(const char *repo, const char *revision)
+{
+    const char *argv[] = {"git", "-C", repo, "cat-file", "-t", "--", revision, NULL};
+    char type[32];
+    return zcl_spawn_capture(argv, type, sizeof(type), OBJ_SPAWN_MS) == 0 &&
+           strcmp(type, "commit\n") == 0;
+}
+
+/* The oversized .c families. An explicit lintc_dir wins; otherwise use a
+ * supplied commit or forced worktree, or resolve origin/main automatically
+ * with worktree fallback when no origin exists. */
 static struct zcl_objective_value obj_lint_families_over_ceiling(
     const struct zcl_objectives_options *options)
 {
     struct zcl_objective_value v = {0};
     const char *repo = obj_repo_or_dot(options);
+    const char *revision = options ? options->checkout_revision : NULL;
+    char resolved[65];
     char dir[1024];
     if (options && options->lintc_dir) {
         obj_lint_over_disk(options->lintc_dir, &v);
         return v;
     }
-    if (obj_origin_resolves(repo)) {
-        obj_lint_over_origin(repo, &v);
+    if (!revision) {
+        if (!zcl_objectives_checkout_revision(repo, resolved)) {
+            obj_set_reason(&v, "%s", "cannot resolve origin/main commit");
+            return v;
+        }
+        revision = resolved;
+    } else if (revision[0] && !obj_lint_revision_is_commit(repo, revision)) {
+        obj_set_reason(&v, "%s", "cannot resolve selected commit");
+        return v;
+    }
+    if (revision[0]) {
+        obj_lint_over_origin(repo, revision, &v);
         (void)snprintf(v.note, sizeof(v.note), "%s", ZCL_OBJECTIVES_NOTE_ORIGIN);
         return v;
     }

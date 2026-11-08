@@ -686,6 +686,37 @@ static int fox_case_git(void)
         ASSERT(v.measured);
         ASSERT_EQ(v.value, 72); /* big, newline-named, and 70 duplicate blobs */
         ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_ORIGIN);
+        char pinned[65];
+        ASSERT(zcl_objectives_checkout_revision(tree, pinned));
+        ASSERT(pinned[0]);
+        ASSERT_EQ(fox_git(tree, "add", "-A", NULL, NULL), 0);
+        ASSERT_EQ(fox_git(tree, "commit", "-q", "-m", "moved"), 0);
+        ASSERT_EQ(fox_git(tree, "update-ref", "refs/remotes/origin/main", "HEAD", NULL), 0);
+        /* Origin now counts 73; the captured revision and worktree count 72. */
+        (void)snprintf(path, sizeof(path), "%s/small.c", lintc);
+        ASSERT(fox_write_n_lines(path, 10));
+        o.checkout_revision = pinned;
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
+        ASSERT(v.measured); ASSERT_EQ(v.value, 72);
+        ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_ORIGIN);
+        o.checkout_revision = "";
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
+        ASSERT(v.measured); ASSERT_EQ(v.value, 72);
+        ASSERT_STR_EQ(v.note, ZCL_OBJECTIVES_NOTE_WORKTREE);
+        o.checkout_revision = "HEAD:tools/lint/lintc/small.c";
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
+        ASSERT(!v.measured);
+        o.checkout_revision = "HEAD^{tree}";
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
+        ASSERT(!v.measured);
+        o.lintc_dir = lintc;
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
+        ASSERT(v.measured); ASSERT_EQ(v.value, 72);
+        o.lintc_dir = NULL;
+        o.checkout_revision = NULL;
+        v = zcl_objectives_measure(&o, "lint_families_over_ceiling");
+        ASSERT(v.measured); ASSERT_EQ(v.value, 73);
+        ASSERT(fox_write_n_lines(path, 1501));
         /* With no origin/main the working tree answers, labelled as such. */
         ASSERT_EQ(fox_git(tree, "update-ref", "-d", "refs/remotes/origin/main", NULL), 0);
         v = zcl_objectives_measure(&o, "functions_over_complexity_cap");
