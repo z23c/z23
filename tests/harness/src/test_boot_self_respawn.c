@@ -118,7 +118,7 @@ int test_boot_self_respawn(void)
      * not fit, so use a short per-process path; nothing binds it. */
     char notify_path[64];
     int notify_n = snprintf(notify_path, sizeof(notify_path),
-                            "/tmp/zcl-bsr-%d.sock", (int)getpid());
+                            "/var/tmp/zcl-bsr-%d.sock", (int)getpid());
     BSR_CHECK("early restart notify path fits sun_path (< 108 bytes)",
               notify_n > 0 && (size_t)notify_n < sizeof(notify_path) &&
               strlen(notify_path) < 108);
