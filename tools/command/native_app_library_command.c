@@ -6,6 +6,7 @@
 #include "command/native_app_library_command.h"
 #include "command/native_app_confirm.h"
 #include "command/native_app_share_command.h"
+#include "command/native_app_share_reveal.h"
 #include "command/native_app_personalize_view.h"
 #include "command/native_zcode_package_copy.h"
 #include "command/app_selection.h"
@@ -39,10 +40,12 @@ struct library {
     char shared_path[ZCL_PRESENT_COPY_TEXT_MAX + 1];
     app_confirm_presenter notice;
     app_library_sharer sharer;
+    app_library_revealer revealer;
     char prepared_version[65];
     app_library_preparer preparer;
     void *prepare_context;
     bool prepared_mutated;
+    bool error_presented;
     unsigned preparation_count;
     struct json_value preparation;
     struct zcl_present_model_v1 model;
@@ -373,9 +376,10 @@ static bool al_share_path(struct library *w, const struct library_row *row, stru
     (void)w; (void)row; return al_fail(reply, "PLATFORM_UNAVAILABLE", "Sharing is unavailable on this platform.");
 #endif
 }
-static void al_share_display_failure(struct library *w, struct zcl_command_reply *reply)
+static void al_share_notice_failure(struct library *w, struct zcl_command_reply *reply,
+    const char *code, const char *message)
 {
-    zcl_package_copy_fail(reply, "PRESENTATION_FAILED", true, "Share file created; its location is in evidence.", w->shared_path);
+    zcl_package_copy_fail(reply, code, true, message, w->shared_path);
     struct json_value facts; json_init(&facts); json_set_object(&facts);
     if (json_push_kv_str(&facts, "output", w->shared_path)) (void)json_push_kv(&reply->data, "failure_facts", &facts);
     json_free(&facts);
@@ -392,10 +396,46 @@ static bool al_share_notice(struct app_confirm *view, const char *path, char *wh
     app_confirm_action(&view->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
     app_confirm_action(&view->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
     app_confirm_action(&view->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+    #if defined(__APPLE__)
+    app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "show", "Show file");
+#elif defined(__linux__)
+    app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "show", "Open folder");
+#else
     app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "done", "Done");
+#endif
     return app_confirm_path(&view->model, "Path (escaped): ", path) && app_confirm_prepare(view, why, cap);
 }
 
+static bool al_reveal_enabled(const struct app_confirm *notice)
+{
+#if defined(__APPLE__) || defined(__linux__)
+    return notice->confirmed;
+#else
+    (void)notice; return false;
+#endif
+}
+static bool al_reveal_native(void *context, const char *path)
+{
+    (void)context; return app_share_reveal(path);
+}
+static bool al_reveal_failure_notice(struct library *w)
+{
+    struct app_confirm *notice = zcl_calloc(1, sizeof(*notice), "library-reveal-failure");
+    if (!notice) return false;
+    bool shown = false;
+    char why[256] = {0};
+    if (al_share_notice(notice, w->shared_path, why, sizeof(why))) {
+        (void)snprintf(notice->model.title, sizeof(notice->model.title), "Could not confirm opening");
+        (void)snprintf(notice->model.summary, sizeof(notice->model.summary),
+            "Your share file is ready. Copy its location and find it in your files.");
+        app_confirm_action(&notice->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "done", "Done");
+        app_confirm_free(notice); memset(notice->bitmaps, 0, sizeof(notice->bitmaps));
+        if (app_confirm_prepare(notice, why, sizeof(why)))
+            shown = app_confirm_show(notice, w->notice, w->prepare_context, why, sizeof(why));
+    }
+    app_confirm_free(notice); free(notice);
+    return shown;
+}
 static bool al_share_result(struct library *w, struct app_confirm *notice,
     struct zcl_command_reply *reply, char *why, size_t cap)
 {
@@ -409,7 +449,12 @@ static bool al_share_result(struct library *w, struct app_confirm *notice,
     if (!file || strcmp(file, w->shared_path))
         zcl_package_copy_fail(reply, "SHARE_RESULT_MISMATCH", true, "Share completed but its file location could not be verified.", w->shared_path);
     else if (!app_confirm_show(notice, w->notice, w->prepare_context, why, cap))
-        al_share_display_failure(w, reply);
+        al_share_notice_failure(w, reply, "PRESENTATION_FAILED", "Share file created; its location is in evidence.");
+    else if (al_reveal_enabled(notice) && !(w->revealer ? w->revealer : al_reveal_native)(w->prepare_context, w->shared_path)) {
+        al_share_notice_failure(w, reply, "REVEAL_FAILED",
+            "The share file was created, but opening its location could not be confirmed.");
+        w->error_presented = al_reveal_failure_notice(w);
+    }
     return false;
 }
 
@@ -502,11 +547,12 @@ static bool al_navigate(struct library *w, unsigned action, const struct app_lau
 }
 static void al_run(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, const char *exe, const char *datadir,
-    app_library_preparer preparer, app_library_sharer sharer, app_confirm_presenter notice)
+    app_library_preparer preparer, app_library_sharer sharer, app_confirm_presenter notice,
+    app_library_revealer revealer)
 {
     struct library *w = zcl_calloc(1, sizeof(*w), "app-library");
     if (!w) { al_fail(reply, "OUT_OF_MEMORY", "Cannot allocate My Apps."); return; }
-    w->preparer = preparer; w->sharer = sharer; w->notice = notice; w->prepare_context = context;
+    w->preparer = preparer; w->sharer = sharer; w->notice = notice; w->revealer = revealer; w->prepare_context = context;
     char why[256] = {0};
     bool loaded = al_load(w, env, reply);
     while (loaded) {
@@ -527,7 +573,7 @@ static void al_run(const struct app_launch_env *env, struct zcl_command_reply *r
         if (!al_navigate(w, event.action_index, env, exe, datadir, reply)) break;
     }
     al_recovery(w, reply);
-    if (reply->status != ZCL_COMMAND_STATUS_PASSED) al_error_view(w, reply, presenter, context);
+    if (reply->status != ZCL_COMMAND_STATUS_PASSED && !w->error_presented) al_error_view(w, reply, presenter, context);
     json_free(&w->preparation);
     free(w);
 }
@@ -543,31 +589,35 @@ void zcl_native_handle_app_library(const struct zcl_command_request *request,
         if (w) { al_error_view(w, reply, al_present, NULL); free(w); }
         return;
     }
-    al_run(&env, reply, al_present, NULL, NULL, NULL, NULL, NULL, NULL);
+    al_run(&env, reply, al_present, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 }
 #if defined(ZCL_TESTING)
+void zcl_test_app_library_reveal(const struct app_launch_env *env, struct zcl_command_reply *reply,
+    app_library_presenter presenter, void *context, app_library_sharer sharer,
+    app_confirm_presenter notice, app_library_revealer revealer)
+{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice, revealer); }
 void zcl_test_app_library_refresh(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer,
     app_library_sharer sharer, app_confirm_presenter notice)
-{ al_run(env, reply, presenter, context, "/fixture/z23", "/fixture", preparer, sharer, notice); }
+{ al_run(env, reply, presenter, context, "/fixture/z23", "/fixture", preparer, sharer, notice, NULL); }
 void zcl_test_app_library_share(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_sharer sharer, app_confirm_presenter notice)
-{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice); }
+{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice, NULL); }
 void zcl_test_app_library_run(const struct app_launch_env *env,
     struct zcl_command_reply *reply, app_library_presenter presenter, void *context)
 {
-    al_run(env, reply, presenter, context, NULL, NULL, NULL, NULL, NULL);
+    al_run(env, reply, presenter, context, NULL, NULL, NULL, NULL, NULL, NULL);
 }
 void zcl_test_app_library_setup(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context)
 {
-    al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, NULL);
+    al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, NULL, NULL);
 }
 void zcl_test_app_library_setup_prepared(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer)
 {
-    al_run(env, reply, presenter, context, exe, datadir, preparer, NULL, NULL);
+    al_run(env, reply, presenter, context, exe, datadir, preparer, NULL, NULL, NULL);
 }
 #endif

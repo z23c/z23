@@ -21,6 +21,7 @@
 #include "command/native_app_launch.h"
 #include "command/native_app_share_command.h"
 #include "command/native_app_library_command.h"
+#include "command/native_app_share_reveal.h"
 #include "command/native_zcode_package_copy.h"
 #include "command/app_selection.h"
 #include "presentation/model_render.h"
@@ -806,6 +807,7 @@ struct al_library_script {
     bool cancel_preparation, stale_preparation;
     unsigned second_preparation;
     bool fail_after_noop;
+    bool reveal_request, reveal_fail, fail_reveal_notice; unsigned reveal_calls, notice_calls; char revealed[ZCL_PRESENT_COPY_TEXT_MAX + 1];
     uint64_t shared_revision; bool refresh_changed, refreshed_card; unsigned break_selection;
 };
 /* Per-call owner preparation stand-in: these launcher unit fixtures have no
@@ -946,6 +948,10 @@ static bool al_notice_path_matches(const struct zcl_present_model_v1 *model, con
     return *raw == 0;
 }
 
+static bool al_notice_refused(const struct al_library_script *s)
+{
+    return s->fail_share_result || (s->fail_reveal_notice && s->notice_calls == 2);
+}
 /* The notice runs the real paginated model with an injected native boundary. */
 static bool al_library_notice(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages,
@@ -953,14 +959,28 @@ static bool al_library_notice(void *context, const struct zcl_present_model_v1 *
 {
     struct al_library_script *s = context;
     (void)why; (void)cap;
-    if (s->fail_share_result) return false;
+    ++s->notice_calls;
+    if (al_notice_refused(s)) return false;
     if (!pages || !pages->pages || !pages->pages[0].copy_text ||
         strcmp(pages->pages[0].copy_text, s->shared) ||
         strcmp(model->request_id, "library-share-result") || !al_notice_path_matches(model, s->shared)) return false;
     (void)snprintf(s->setup, sizeof(s->setup), "%s", pages->pages[0].copy_text);
     bool redraw = false, close = false;
     struct zcl_present_window_event_v1 event = {0};
-    live->owner.update(live->owner.context, &event, true, &redraw, &close);
+    if (s->reveal_request && s->notice_calls == 1) {
+        uint32_t count = 0;
+        if (!zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
+        event.outcome = ZCL_PRESENT_WINDOW_ACTION;
+        event.action_index = 3;
+        live->owner.update(live->owner.context, &event, false, &redraw, &close);
+        if (count > 1 && close) return false;
+        for (uint32_t i = 1; i < count; ++i) {
+            event.action_index = 2;
+            live->owner.update(live->owner.context, &event, false, &redraw, &close);
+        }
+        event.action_index = 3;
+        live->owner.update(live->owner.context, &event, false, &redraw, &close);
+    } else live->owner.update(live->owner.context, &event, true, &redraw, &close);
     return close;
 }
 
@@ -976,6 +996,68 @@ static void al_library_share(void *context, const struct app_selection *selectio
     s->valid = s->valid && json_push_kv_str(&reply->data, "share_file", path);
     reply->error.mutated = true;
 }
+static bool al_fake_reveal(void *context, const char *path)
+{
+    struct al_library_script *s = context; ++s->reveal_calls;
+    (void)snprintf(s->revealed, sizeof(s->revealed), "%s", path);
+    return !s->reveal_fail;
+}
+#if defined(__APPLE__) || defined(__linux__)
+static bool al_check_reveal_argv(void *context, const char *image, const char *const *argv)
+{
+    const char *path = context;
+#if defined(__APPLE__)
+    return !strcmp(image, "/usr/bin/open") && !strcmp(argv[1], "-R") &&
+        !strcmp(argv[2], path) && !argv[3];
+#else
+    return !strcmp(image, "/usr/bin/gio") && !strcmp(argv[1], "open") &&
+        !strcmp(argv[2], "/fixture/space \x27\xC3\xA9") && !argv[3] &&
+        !strcmp(path, "/fixture/space \x27\xC3\xA9/file.z23share");
+#endif
+}
+#endif
+static int al_reveal_tests(struct al_fx *f, struct zcl_command_reply *reply)
+{
+    int failures = 0;
+#if defined(__APPLE__) || defined(__linux__)
+    TEST("Reveal uses one exact fixed-opener argument and refuses relative paths") {
+        const char *path = "/fixture/space \x27\xC3\xA9/file.z23share";
+        ASSERT(zcl_test_app_share_reveal(path, al_check_reveal_argv, (void *)path));
+        ASSERT(!zcl_test_app_share_reveal("relative/file", al_check_reveal_argv, (void *)path));
+        PASS();
+    }
+    TEST("Unavailable and failing opener processes report failure") {
+        const char *missing[] = {"/missing-z23-opener", NULL};
+        const char *failed[] = {"/usr/bin/false", NULL};
+        ASSERT(!zcl_test_app_share_reveal_run(missing[0], missing));
+        ASSERT(!zcl_test_app_share_reveal_run(failed[0], failed));
+        PASS();
+    }
+    TEST("Only the final notice action reveals; failed reveal retains file and facts") {
+        for (unsigned mode = 0; mode < 4; ++mode) {
+            zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+            struct al_library_script s = {.actions = {0, 2}, .count = 2, .valid = true,
+                .reveal_request = mode != 0, .reveal_fail = mode >= 2, .fail_reveal_notice = mode == 3};
+            zcl_test_app_library_reveal(&f->env, reply, al_library_present, &s,
+                al_library_share, al_library_notice, al_fake_reveal);
+            ASSERT(s.valid && s.share_calls == 1 && s.reveal_calls == (mode ? 1u : 0u));
+            ASSERT(access(s.shared, F_OK) == 0 && reply->error.mutated);
+            if (mode) ASSERT(!strcmp(s.shared, s.revealed));
+            if (mode >= 2) {
+                ASSERT(!strcmp(reply->error.code, "REVEAL_FAILED") && s.notice_calls == 2);
+                ASSERT(s.errors == (mode == 3 ? 1u : 0u));
+                ASSERT(!strcmp(zcl_package_copy_str(json_get(&reply->data, "failure_facts"), "output"), s.shared));
+            }
+            ASSERT(unlink(s.shared) == 0);
+        }
+        PASS();
+    } _test_next:;
+#else
+    (void)f; (void)reply;
+#endif
+    return failures;
+}
+
 static int case_library(struct al_fx *f)
 {
     int failures = 0;
@@ -1159,6 +1241,7 @@ static int al_refresh_checks(struct al_fx *f, struct zcl_command_reply *reply, c
     zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
     int failures = al_refresh_share_test(f, reply, home);
     if (!failures) failures += al_refresh_refusal_test(f, reply);
+    if (!failures) failures += al_reveal_tests(f, reply);
     return failures;
 }
 
