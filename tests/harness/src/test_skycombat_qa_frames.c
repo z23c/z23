@@ -522,10 +522,15 @@ static bool sky_resident_start_config(struct sky_resident_fixture *f, bool windo
         return false;
     }
 #endif
+#if defined(__APPLE__)
+    /* XNU: shutdown(SHUT_RD) does not make the peer's write fail, so close our end. */
+    if (endpoint == 2) { close(sockets[0]); sockets[0] = -1; }
+#else
     if (endpoint == 2 && shutdown(sockets[0], SHUT_RD) != 0) {
         close(sockets[0]); close(sockets[1]); close(diagnostics[0]); close(diagnostics[1]);
         close(standard_output[0]); close(standard_output[1]); return false;
     }
+#endif
     char closed_option[40];
     snprintf(closed_option, sizeof(closed_option), "--fixture-closed-stdio=%u", closed_mask);
     pid_t pid = fork();
@@ -670,6 +675,22 @@ static struct resident_result_header sky_resident_end_header(unsigned mode)
     return header;
 }
 
+/* Send one request, then make the child's reply write fail. Linux: shutdown(SHUT_RD)
+ * first. macOS does not fail the peer's write on SHUT_RD, so stop the child, send the
+ * request, close our end and continue the child; its reply then hits a closed peer. */
+static bool sky_resident_request_peer_gone(struct sky_resident_fixture *f, const char *request)
+{
+#if defined(__APPLE__)
+    if (kill(f->pid, SIGSTOP) != 0) return false;
+    bool sent = sky_resident_request(f, request, false);
+    close(f->socket); f->socket = -1;
+    bool resumed = kill(f->pid, SIGCONT) == 0;
+    return sent && resumed;
+#else
+    return shutdown(f->socket, SHUT_RD) == 0 && sky_resident_request(f, request, false);
+#endif
+}
+
 static bool sky_resident_send_end(struct sky_resident_fixture *f, unsigned mode)
 {
     struct resident_result_header header = sky_resident_end_header(mode);
@@ -684,8 +705,7 @@ static bool sky_resident_send_end(struct sky_resident_fixture *f, unsigned mode)
     if (mode == 4) return sky_resident_io(f->socket, &header, sizeof(header), true);
     if (mode == 5 || mode == 6) return sky_resident_io(f->socket, &header, prefix, true);
     if (mode == 8)
-        return shutdown(f->socket, SHUT_RD) == 0 &&
-               sky_resident_request(f, "{\"v\":1,\"id\":1,\"op\":\"observe\"}", false);
+        return sky_resident_request_peer_gone(f, "{\"v\":1,\"id\":1,\"op\":\"observe\"}");
     return true;
 }
 
@@ -721,8 +741,10 @@ static int skycombat_resident_closed_stdio(unsigned mask, unsigned mode)
         ASSERT(sky_resident_start_config(&f, mode == 2, mask, mode >= 3 ? mode - 2 : 0, true));
         if (mode < 3) ASSERT(sky_resident_receive(&f, payload) && !strcmp(payload, "READY"));
         if (mode <= 1) {
-            if (mode == 1) ASSERT_EQ(shutdown(f.socket, SHUT_RD), 0);
-            ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":1,\"op\":\"observe\"}", false));
+            if (mode == 1)
+                ASSERT(sky_resident_request_peer_gone(&f, "{\"v\":1,\"id\":1,\"op\":\"observe\"}"));
+            else
+                ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":1,\"op\":\"observe\"}", false));
             if (!mode) {
                 ASSERT(sky_resident_json(&f, 0, 1, 1, NULL));
                 ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":2,\"op\":\"close\"}", false));
