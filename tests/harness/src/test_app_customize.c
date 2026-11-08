@@ -695,7 +695,15 @@ static bool act_selection_refusal(struct ac_fixture *f)
     if (rename(path, saved)) return false;
     struct abc_leaf l;
     bool ok = act_call(&l, NULL, false);
-    if (ok) { ok = act_result(&l, "SELECTION_REQUIRED"); abc_close(&l); }
+    if (ok) {
+        ok = act_result(&l, "SELECTION_REQUIRED");
+        if (ok && (!strstr(l.out.error.message, "app copy skycombat --yes") ||
+                   !strstr(l.out.error.message, "app save"))) {
+            printf("selection refusal does not name the commands: %s\n", l.out.error.message);
+            ok = false;
+        }
+        abc_close(&l);
+    }
     FILE *file = fopen(path, "wb");
     bool wrote = file && fputs("corrupt selection", file) >= 0;
     if (file && fclose(file)) wrote = false;
