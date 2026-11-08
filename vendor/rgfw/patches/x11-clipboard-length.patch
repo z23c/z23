@@ -1,0 +1,22 @@
+diff --git a/vendor/rgfw/RGFW.h b/vendor/rgfw/RGFW.h
+index b1a4b3ad13..0726b2a235 100644
+--- a/vendor/rgfw/RGFW.h
++++ b/vendor/rgfw/RGFW.h
+@@ -5528,7 +5528,7 @@ void RGFW_XHandleClipboardSelection(XEvent* event) { RGFW_UNUSED(event);
+ 		for (i = 0; i < (u32)count; i += 2) {
+ 			if (targets[i] == UTF8_STRING || targets[i] == XA_STRING)
+ 				XChangeProperty(_RGFW->display, request->requestor, targets[i + 1], targets[i],
+-					8, PropModeReplace, (const unsigned char *)_RGFW->clipboard, (i32)_RGFW->clipboard_len);
++					8, PropModeReplace, (const unsigned char *)_RGFW->clipboard, (i32)(_RGFW->clipboard_len ? _RGFW->clipboard_len - 1u : 0u));
+ 			#ifdef RGFW_X11_CLIPBOARD_WRITE_TARGET
+ 			else if (RGFW_X11_CLIPBOARD_WRITE_TARGET(
+ 					 _RGFW->display, request->requestor,
+@@ -5559,7 +5559,7 @@ void RGFW_XHandleClipboardSelection(XEvent* event) { RGFW_UNUSED(event);
+ 			if (request->target != formats[i])
+ 				continue;
+ 			XChangeProperty(_RGFW->display, request->requestor, request->property, request->target,
+-								8, PropModeReplace, (u8*) _RGFW->clipboard, (i32)_RGFW->clipboard_len);
++								8, PropModeReplace, (u8*) _RGFW->clipboard, (i32)(_RGFW->clipboard_len ? _RGFW->clipboard_len - 1u : 0u));
+ 		}
+ 	}
+ 

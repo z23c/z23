@@ -342,7 +342,7 @@ static bool abc_save(const char *dir, char version[65])
 
 /* DISPLAY is synthetic: this child has no windows and proves no GUI behavior. */
 struct aso_env { const char *key; char *saved; };
-struct aso_build { char version[65], package[65], env[65], deps[65], image[65], record[65], image_path[ABC_PATH]; };
+struct aso_build { char version[65], package[65], env[65], deps[65], image[65], record[65], image_path[ABC_PATH]; bool long_label; };
 struct aso_live { long pid; uint64_t token; char exe[APP_LAUNCH_PATH_MAX]; };
 static struct aso_live aso_live[8];
 static unsigned aso_nlive;
@@ -743,6 +743,7 @@ static bool aj_receive_action(const struct zcl_present_window_live_view_v1 *live
 static bool aj_receive_field(const struct zcl_present_model_v1 *m, const char *label, const char *expected);
 struct aso_keep_view {
     const struct aso_build *build;
+    char current[65];
     unsigned mode; /* 0 approve; 1 cancel; 2 close; 3 presenter failure. */
     bool observed;
 };
@@ -755,13 +756,16 @@ static bool aso_keep_race(void)
 }
 static bool aso_keep_fields_match(struct aso_keep_view *v, const struct zcl_present_model_v1 *model)
 {
-    const char *labels[] = {"Version to keep: ", "Package: ", "Image: ", "Build record: ",
-        "Build environment: ", "Dependencies: "};
-    const char *values[] = {v->build->version, v->build->package, v->build->image,
-        v->build->record, v->build->env, v->build->deps};
-    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); ++i)
-        if (!aj_receive_field(model, labels[i], values[i])) return false;
-    return true;
+    const char *label = v->build->long_label ?
+        "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijk" : "tinyapp";
+    bool current = v->current[0] ? aj_receive_field(model, "Currently kept: ", v->current) : true;
+    if (!v->current[0])
+        for (uint32_t i = 0; i < model->item_count; ++i)
+            if (strstr(model->items[i].value, "Currently kept: ")) current = false;
+    return current && aj_receive_field(model, "App: ", label) &&
+        aj_receive_field(model, "Saved app: ", "tiny-ready") &&
+        aj_receive_field(model, "Version to keep: ", v->build->version) &&
+        aj_receive_field(model, "Exact app image: ", v->build->image);
 }
 static bool aso_keep_mutate(struct aso_keep_view *v)
 {
@@ -785,7 +789,7 @@ static bool aso_keep_choose(const struct zcl_present_window_live_view_v1 *live,
         live->owner.update(live->owner.context, &event, true, &redraw, &close);
         return close;
     }
-    if (!aj_receive_action(live, 3, &close, &redraw) || close) return false;
+    if (count > 1 && (!aj_receive_action(live, 3, &close, &redraw) || close)) return false;
     for (uint32_t i = 1; i < count; ++i)
         if (!aj_receive_action(live, 2, &close, &redraw) || close || !redraw) return false;
     return aj_receive_action(live, 3, &close, &redraw) && close;
@@ -797,13 +801,21 @@ static bool aso_keep_present(void *context, const struct zcl_present_model_v1 *m
     struct aso_keep_view *v = context;
     uint32_t count = 0;
     if (!pages || !pages->pages[0].pixels || strcmp(model->request_id, "keep-app") ||
-        !zcl_present_model_page_count_v1(model, &count, why, cap) || count < 2 ||
+        !zcl_present_model_page_count_v1(model, &count, why, cap) || count != 1 ||
         !aso_keep_fields_match(v, model)) return false;
     v->observed = true;
     return aso_keep_mutate(v) && aso_keep_choose(live, v->mode, count);
 }
 
 /* Native per-invocation presenter, not a JSON approval or a GUI claim. */
+static bool aso_keep_current(struct aso_keep_view *view)
+{
+    struct app_launch_env env; struct app_selection kept; char why[256];
+    if (!app_launch_env_from_process(&env, why, sizeof(why))) return false;
+    enum app_selection_result r = app_selection_load(env.state_dir, "tiny-ready", &kept);
+    if (r == APP_SELECTION_OK) zcl_hex_encode(kept.version, 32, view->current);
+    return r == APP_SELECTION_OK || r == APP_SELECTION_ABSENT || view->mode == 6;
+}
 static bool aso_owner_keep(const struct abc_world *w, const struct aso_build *b,
     int64_t revision, unsigned mode, struct json_value *doc, bool *error)
 {
@@ -816,6 +828,7 @@ static bool aso_owner_keep(const struct abc_world *w, const struct aso_build *b,
     struct zcl_command_request request = {.input = input, .context = &ctx};
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_keep.v1");
     struct aso_keep_view view = {.build = b, .mode = mode};
+    ok = ok && aso_keep_current(&view);
     if (ok) zcl_native_app_keep_present(&request, &reply, aso_keep_present, &view);
     *error = reply.status != ZCL_COMMAND_STATUS_PASSED;
     struct json_value failure; json_init(&failure); json_set_object(&failure);
@@ -1139,7 +1152,7 @@ static int aso_mcp_foreign(const struct abc_world *w, const struct aso_build *b)
 }
 
 static int aso_fixture_setup(struct abc_world *w, struct aso_build *b,
-                             struct aso_build *next, char head[65])
+                             struct aso_build *next, char head[65], bool long_label)
 {
     int failures = 0; struct abc_leaf l;
     char config[ABC_PATH], state[ABC_PATH];
@@ -1155,6 +1168,15 @@ static int aso_fixture_setup(struct abc_world *w, struct aso_build *b,
         ASSERT(setenv("XDG_CONFIG_HOME", config, 1) == 0 && setenv("XDG_STATE_HOME", state, 1) == 0);
         ASSERT(setenv("DISPLAY", ":synthetic-nonvisual", 1) == 0 && unsetenv("WAYLAND_DISPLAY") == 0);
         ASSERT(abc_put(w->copy, "include/boost.h", "#define BOOST 3\n"));
+        if (long_label) {
+            const char *tail = strstr(k_meta, "\",\n  \"semver\"");
+            char meta[1024];
+            ASSERT(tail);
+            int n = snprintf(meta, sizeof(meta), "{\"schema\":1,\"name\":\"stub/%s%s",
+                "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijk", tail);
+            ASSERT(n > 0 && (size_t)n < sizeof(meta) && abc_put(w->copy, "zcode-package.json", meta));
+            next->long_label = true;
+        }
         ASSERT(abc_save(w->copy, head));
         ASSERT(abc_build(&l, w->copy, w->alice_datadir));
         bool next_tuple = aso_tuple(&l, next); abc_close(&l); ASSERT(next_tuple);
@@ -1209,7 +1231,7 @@ int test_app_open_selected(void)
     struct abc_world w = {0}; struct aso_build b = {0}, next = {0};
     char head[65] = {0};
     chain_params_select(CHAIN_MAIN);
-    if (!failures) failures += aso_fixture_setup(&w, &b, &next, head);
+    if (!failures) failures += aso_fixture_setup(&w, &b, &next, head, true);
     if (!failures) failures += aso_journey(&w, &b, &next, head);
     aso_env_restore(env, saved);
     if (w.root[0]) (void)test_rm_rf_recursive(w.root);
@@ -2604,7 +2626,7 @@ int test_app_kept_journey(void)
     }
     struct abc_world w = {0}; struct aso_build old = {0}, next = {0}; char head[65] = {0};
     chain_params_select(CHAIN_MAIN);
-    if (!failures) failures += aso_fixture_setup(&w, &old, &next, head);
+    if (!failures) failures += aso_fixture_setup(&w, &old, &next, head, false);
     if (!failures) failures += aj_steps(&w, &old, head);
     struct rr_cycle recipient = {0};
     if (!failures) failures += rr_acceptance(&recipient);

@@ -98,3 +98,4 @@ core/modules/validation/include/validation/chainstate.h text eol=lf
 # Preserve the pinned upstream clang-c source bytes, including its blank EOF.
 vendor/clang-c-18/LICENSE.TXT -whitespace
 vendor/clang-c-18/include/clang-c/*.h -whitespace
+vendor/rgfw/patches/x11-clipboard-length.patch -text

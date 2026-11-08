@@ -10,6 +10,7 @@
 #include <stdint.h>
 struct app_confirm {
     const char *window_title;
+    const char *copy_text;/* Optional raw text, owned by the caller while shown. */
     struct zcl_present_model_v1 model;
     struct zcl_present_model_bitmap_v1 bitmaps[ZCL_PRESENT_MODEL_PAGES_MAX];
     struct zcl_present_window_v1 page;
@@ -20,6 +21,7 @@ typedef bool (*app_confirm_presenter)(void *context,
     const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages,
     const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap);
+bool app_confirm_path(struct zcl_present_model_v1 *model, const char *label, const char *path);
 bool app_confirm_field(struct zcl_present_model_v1 *model, const char *label, const char *value);
 void app_confirm_action(struct zcl_present_model_action_v1 *action,
     uint16_t kind, const char *id, const char *label);

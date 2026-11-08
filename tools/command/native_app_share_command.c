@@ -27,18 +27,21 @@ static bool sh_fail(struct zcl_command_reply *reply, const char *code, const cha
 {
     zcl_package_copy_fail(reply, code, false, why, SH_COMMAND); return false;
 }
-static bool sh_inputs(struct sh_work *w, const struct json_value *in, struct zcl_command_reply *reply)
+static bool sh_values(struct sh_work *w, const char *name, const char *output, struct zcl_command_reply *reply)
+{
+    if (!name || !*name || strlen(name) > APP_SELECTION_ID_MAX || !output || output[0] != '/' || strlen(output) >= sizeof(w->output))
+        return sh_fail(reply, "BAD_INPUT", "Name one kept app and an absolute new output path.");
+    (void)snprintf(w->app, sizeof(w->app), "%s", name);
+    (void)snprintf(w->output, sizeof(w->output), "%s", output); return true;
+}
+static bool sh_inputs(const struct json_value *in, struct zcl_command_reply *reply)
 {
     if (!in || in->type != JSON_OBJ || in->num_children != 2)
-        return sh_fail(reply, "BAD_INPUT", "Name one kept app and an absolute new output path.");
-    const char *name = zcl_package_copy_str(in, "name"), *output = zcl_package_copy_str(in, "output");
-    if (!name || !*name || strlen(name) > APP_SELECTION_ID_MAX || !output || output[0] != '/' || strlen(output) >= sizeof(w->output))
         return sh_fail(reply, "BAD_INPUT", "Name one kept app and an absolute new output path.");
     for (size_t i = 0; i < in->num_children; ++i)
         if (strcmp(in->keys[i], "name") && strcmp(in->keys[i], "output"))
             return sh_fail(reply, "BAD_INPUT", "Only name and output are accepted.");
-    (void)snprintf(w->app, sizeof(w->app), "%s", name);
-    (void)snprintf(w->output, sizeof(w->output), "%s", output); return true;
+    return true;
 }
 static bool sh_selection(struct sh_work *w, struct zcl_command_reply *reply)
 {
@@ -50,6 +53,17 @@ static bool sh_selection(struct sh_work *w, struct zcl_command_reply *reply)
     zcl_hex_encode(w->selection.package, 32, w->package);
     zcl_hex_encode(w->selection.parent, 32, w->parent);
     return true;
+}
+static bool sh_snapshot(struct sh_work *w, const struct app_selection *s, struct zcl_command_reply *reply)
+{
+    if (!s) return true;
+    const struct app_selection *a = &w->selection;
+    bool same = a->revision == s->revision && !strcmp(a->app, s->app) &&
+        !strcmp(a->copy, s->copy) && !strcmp(a->datadir, s->datadir);
+    const uint8_t *left[] = {a->fork, a->parent, a->version, a->package, a->env, a->dependencies, a->record, a->image};
+    const uint8_t *right[] = {s->fork, s->parent, s->version, s->package, s->env, s->dependencies, s->record, s->image};
+    for (size_t i = 0; same && i < 8; ++i) same = !memcmp(left[i], right[i], 32);
+    return same || sh_fail(reply, "SELECTION_STALE", "The displayed saved choice changed; reopen My Apps.");
 }
 static bool sh_copy(struct sh_work *w, struct zcl_command_reply *reply)
 {
@@ -151,6 +165,13 @@ static bool sh_plan(const struct zcl_command_request *request, struct sh_work *w
     else if (!(ok = sh_plan_fields(w, &plan.data))) sh_fail(reply, "SHARE_PLAN_INVALID", "The exact kept version and output could not be verified.");
     zcl_command_reply_free(&plan); return ok;
 }
+static bool sh_path_needs_escaping(const char *path)
+{
+    for (const unsigned char *p = (const unsigned char *)path; *p; ++p)
+        if (*p <= 32 || *p > 126 || *p == '\\') return true;
+    return false;
+}
+
 static bool sh_model(struct sh_work *w, char *why, size_t cap)
 {
     w->view.window_title = "Share this app";
@@ -167,19 +188,18 @@ static bool sh_model(struct sh_work *w, char *why, size_t cap)
     bool ok = app_confirm_field(m, "App: ", w->name) && app_confirm_field(m, "Version: ", w->semver) &&
         app_confirm_field(m, "Saved version: ", w->version) && app_confirm_field(m, "Package: ", w->package) &&
         app_confirm_field(m, "Publisher: ", w->publisher) && app_confirm_field(m, "Release: ", w->release) &&
-        app_confirm_field(m, "Output: ", w->output) &&
+        app_confirm_path(m, "Output: ", w->output) &&
+        (!sh_path_needs_escaping(w->output) || app_confirm_field(m, "Path notation: ",
+            "Backslashes are doubled; other escaped bytes use backslash x and two hex digits.")) &&
         app_confirm_field(m, "Sharing: ", "Signs this saved version and creates a local share file. Nothing is sent over the network.");
     return ok && app_confirm_prepare(&w->view, why, cap);
 }
 static bool sh_still_selected(struct sh_work *w, struct zcl_command_reply *reply)
 {
     struct app_selection now;
-    if (app_selection_load(w->env.state_dir, w->app, &now) != APP_SELECTION_OK ||
-        now.revision != w->selection.revision || strcmp(now.copy, w->selection.copy) ||
-        strcmp(now.datadir, w->selection.datadir) || memcmp(now.version, w->selection.version, 32) ||
-        memcmp(now.package, w->selection.package, 32) || memcmp(now.fork, w->selection.fork, 32) ||
-        memcmp(now.parent, w->selection.parent, 32))
+    if (app_selection_load(w->env.state_dir, w->app, &now) != APP_SELECTION_OK)
         return sh_fail(reply, "SELECTION_STALE", "The kept version changed; review a fresh share plan.");
+    if (!sh_snapshot(w, &now, reply)) return false;
     char path[SH_PATH], pub[67]; bool exists = false;
     if (!app_personalize_key_probe(reply, path, sizeof(path), pub, &exists)) return false;
     if (!exists || strcmp(path, w->key) || strcmp(pub, w->publisher))
@@ -213,12 +233,13 @@ static void sh_commit(const struct zcl_command_request *request, struct sh_work 
     zcl_command_reply_free(&result);
 }
 static void sh_run(const struct zcl_command_request *request, struct zcl_command_reply *reply,
-                   app_confirm_presenter presenter, void *context)
+                   const char *name, const char *output, app_confirm_presenter presenter,
+                   void *context, const struct app_selection *snapshot)
 {
     if (!request || !reply) return;
     struct sh_work *w = zcl_calloc(1, sizeof(*w), "app-share");
     if (!w) { sh_fail(reply, "OUT_OF_MEMORY", "Cannot prepare sharing."); return; }
-    if (sh_inputs(w, request->input, reply) && sh_selection(w, reply) && sh_copy(w, reply) && sh_key(w, reply) && sh_plan(request, w, reply)) {
+    if (sh_values(w, name, output, reply) && sh_selection(w, reply) && sh_snapshot(w, snapshot, reply) && sh_copy(w, reply) && sh_key(w, reply) && sh_plan(request, w, reply)) {
         char why[256] = {0};
         if (!sh_model(w, why, sizeof(why)) || !app_confirm_show(&w->view, presenter, context, why, sizeof(why)))
             sh_fail(reply, "CONFIRMATION_UNAVAILABLE", "The exact share plan could not be displayed.");
@@ -227,10 +248,25 @@ static void sh_run(const struct zcl_command_request *request, struct zcl_command
     }
     app_confirm_free(&w->view); free(w);
 }
+static void sh_front(const struct zcl_command_request *request, struct zcl_command_reply *reply,
+                     app_confirm_presenter presenter, void *context)
+{
+    if (!request || !reply || !sh_inputs(request->input, reply)) return;
+    sh_run(request, reply, zcl_package_copy_str(request->input, "name"),
+           zcl_package_copy_str(request->input, "output"), presenter, context, NULL);
+}
+void zcl_native_app_share_snapshot(const char *name, const char *output,
+    struct zcl_command_reply *reply, const struct app_selection *selection)
+{
+    if (!reply) return;
+    if (!selection) { zcl_package_copy_fail(reply, "SELECTION_UNAVAILABLE", false, "A saved choice is required.", SH_COMMAND); return; }
+    const struct zcl_command_request request = {0};
+    sh_run(&request, reply, name, output, NULL, NULL, selection);
+}
 void zcl_native_handle_app_share(const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{ sh_run(request, reply, NULL, NULL); }
+{ sh_front(request, reply, NULL, NULL); }
 #if defined(ZCL_TESTING)
 void zcl_test_app_share_run(const struct zcl_command_request *request, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context)
-{ if (presenter) sh_run(request, reply, presenter, context); }
+{ if (presenter) sh_front(request, reply, presenter, context); }
 #endif

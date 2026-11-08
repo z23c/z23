@@ -33,6 +33,7 @@ struct as_open {
     struct zcl_command_reply *reply;
     const char *datadir, *name, *version;
     char copy_dir[AS_PATH], scratch[PLATFORM_TEMP_PATH_MAX];
+    char label[VCS_PACKAGE_RELEASE_NAME_HALF_MAX + 1];
     char image[AS_PATH], log[APP_LAUNCH_PATH_MAX], datadir_real[AS_PATH], version_hex[65];
     uint64_t selection_revision;
     bool owner_review;
@@ -140,6 +141,8 @@ static bool as_package(struct as_open *a)
     vcs_package_prepared_init(&prepared);
     bool ok = vcs_package_prepare(&options, &prepared, detail, sizeof(detail)) == VCS_PACKAGE_PREPARE_OK;
     if (ok) {
+        const char *leaf = strrchr(prepared.release.name, '/');
+        (void)snprintf(a->label, sizeof(a->label), "%s", leaf ? leaf + 1 : prepared.release.name);
         memcpy(a->package, prepared.package_root, 32);
         app_image_dependency_root(&prepared.lock, dependencies);
     }
@@ -416,19 +419,11 @@ static bool as_keep_root(struct app_confirm *view, const char *label, const uint
 
 static bool as_keep_fields(struct as_open *a, struct app_confirm *view, uint64_t expected)
 {
-    char revision[32];
-    (void)snprintf(revision, sizeof(revision), "%llu", (unsigned long long)expected);
-    const char *labels[] = {"Version to keep: ", "Package: ", "Image: ",
-        "Build record: ", "Build environment: ", "Dependencies: "};
-    const uint8_t *roots[] = {a->copy.selected_version, a->package, a->image_sha,
-        a->record_id, a->env, a->deps};
-    if (!app_confirm_field(&view->model, "App: ", a->name) ||
-        !app_confirm_field(&view->model, "Current revision: ", revision)) return false;
+    if (!app_confirm_field(&view->model, "App: ", a->label) ||
+        !app_confirm_field(&view->model, "Saved app: ", a->name)) return false;
     if (expected && !as_keep_root(view, "Currently kept: ", a->kept.version)) return false;
-    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); ++i)
-        if (!as_keep_root(view, labels[i], roots[i])) return false;
-    return app_confirm_field(&view->model, "Copy: ", a->copy_dir) &&
-        app_confirm_field(&view->model, "Data directory: ", a->datadir);
+    return as_keep_root(view, "Version to keep: ", a->copy.selected_version) &&
+        as_keep_root(view, "Exact app image: ", a->image_sha);
 }
 
 static bool as_keep_current(struct as_open *a, uint64_t expected)

@@ -19,7 +19,9 @@
 #include "test/test_core.h"
 
 #include "command/native_app_launch.h"
+#include "command/native_app_share_command.h"
 #include "command/native_app_library_command.h"
+#include "command/native_zcode_package_copy.h"
 #include "command/app_selection.h"
 #include "presentation/model_render.h"
 #include "presentation/canvas.h"
@@ -800,9 +802,11 @@ struct al_library_script {
     struct al_fx *change_fixture;
     unsigned change_at;
     unsigned preparations;
+    unsigned share_calls; bool share_cancel, fail_share_result; char shared[ZCL_PRESENT_COPY_TEXT_MAX + 1];
     bool cancel_preparation, stale_preparation;
     unsigned second_preparation;
     bool fail_after_noop;
+    uint64_t shared_revision; bool refresh_changed, refreshed_card; unsigned break_selection;
 };
 /* Per-call owner preparation stand-in: these launcher unit fixtures have no
  * source CAS. Real personalization and descendant authorization have app tests. */
@@ -847,6 +851,23 @@ static void al_library_prepare(void *context, const struct app_selection *select
             selection->revision, selection, &next) == APP_SELECTION_OK;
     }
 }
+static void al_library_change(struct al_library_script *s)
+{
+        struct app_selection selection, updated;
+        s->valid = s->valid && app_selection_load(s->change_fixture->env.state_dir,
+            "fixtureapp", &selection) == APP_SELECTION_OK;
+        if (s->break_selection) {
+            char path[PATH_MAX], saved[PATH_MAX];
+            s->valid = s->valid && al_path(path, sizeof(path), s->change_fixture->env.state_dir, "fixtureapp.selection") &&
+                al_path(saved, sizeof(saved), s->change_fixture->env.state_dir, "fixtureapp.selection.saved") &&
+                rename(path, saved) == 0;
+            if (s->break_selection == 2) s->valid = s->valid && al_write_file(path, "invalid", 0600);
+        } else {
+            if (s->refresh_changed) memset(selection.version, 2, sizeof(selection.version));
+            s->valid = s->valid && app_selection_save(s->change_fixture->env.state_dir,
+                selection.revision, &selection, &updated) == APP_SELECTION_OK;
+        }
+}
 static bool al_library_present(void *context, const struct zcl_present_model_v1 *model,
     const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
@@ -868,18 +889,14 @@ static bool al_library_present(void *context, const struct zcl_present_model_v1 
     }
     if (copy_text) (void)snprintf(s->setup, sizeof(s->setup), "%s", copy_text);
     s->saved_label |= strstr(model->items[0].value, "Saved version") != NULL;
+    if (s->refresh_changed && s->calls == 3)
+        s->refreshed_card = strstr(model->items[0].value, "020202020202") != NULL;
     s->valid = s->valid && zcl_present_canvas_text_width(model->items[0].value,
         strlen(model->items[0].value), 14u) <= 296u;
     (void)snprintf(s->last_summary, sizeof(s->last_summary), "%s", model->summary);
     if (s->calls >= s->count) { s->valid = false; event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }
     event->action_index = s->actions[s->calls++];
-    if (s->change_fixture && s->calls == s->change_at) {
-        struct app_selection selection, updated;
-        s->valid = s->valid && app_selection_load(s->change_fixture->env.state_dir,
-            "fixtureapp", &selection) == APP_SELECTION_OK;
-        s->valid = s->valid && app_selection_save(s->change_fixture->env.state_dir,
-            selection.revision, &selection, &updated) == APP_SELECTION_OK;
-    }
+    if (s->change_fixture && s->calls == s->change_at) al_library_change(s);
     return true;
 }
 static bool al_selection(struct al_fx *f, const char *name, struct app_selection *saved)
@@ -893,6 +910,71 @@ static bool al_selection(struct al_fx *f, const char *name, struct app_selection
     uint8_t *roots[] = {s.fork, s.parent, s.version, s.package, s.env, s.dependencies, s.record, s.image};
     for (size_t i = 0; i < 8; ++i) memset(roots[i], 1, 32);
     return app_selection_save(f->env.state_dir, 0, &s, saved) == APP_SELECTION_OK;
+}
+static int al_hex_digit(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+static bool al_notice_path_matches(const struct zcl_present_model_v1 *model, const char *path)
+{
+    char encoded[ZCL_PRESENT_COPY_TEXT_MAX * 4u + 1u]; size_t used = 0;
+    for (unsigned i = 0; i < model->item_count; ++i) {
+        const char *prefix = i ? "  " : "Path (escaped): ";
+        const char *line = model->items[i].value; size_t n = strlen(prefix);
+        if (strncmp(line, prefix, n)) return false;
+        line += n; n = strlen(line);
+        if (n >= sizeof(encoded) - used) return false;
+        memcpy(encoded + used, line, n); used += n;
+    }
+    encoded[used] = 0; const unsigned char *raw = (const unsigned char *)path;
+    for (size_t i = 0; i < used;) {
+        unsigned char c = (unsigned char)encoded[i++];
+        if (c == '\\') {
+            if (i >= used) return false;
+            if (encoded[i] == '\\') { ++i; c = '\\'; }
+            else {
+                if (encoded[i++] != 'x' || i + 1 >= used) return false;
+                int hi = al_hex_digit(encoded[i++]), lo = al_hex_digit(encoded[i++]);
+                if (hi < 0 || lo < 0) return false;
+                c = (unsigned char)((hi << 4) | lo);
+            }
+        }
+        if (!*raw || *raw++ != c) return false;
+    }
+    return *raw == 0;
+}
+
+/* The notice runs the real paginated model with an injected native boundary. */
+static bool al_library_notice(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct al_library_script *s = context;
+    (void)why; (void)cap;
+    if (s->fail_share_result) return false;
+    if (!pages || !pages->pages || !pages->pages[0].copy_text ||
+        strcmp(pages->pages[0].copy_text, s->shared) ||
+        strcmp(model->request_id, "library-share-result") || !al_notice_path_matches(model, s->shared)) return false;
+    (void)snprintf(s->setup, sizeof(s->setup), "%s", pages->pages[0].copy_text);
+    bool redraw = false, close = false;
+    struct zcl_present_window_event_v1 event = {0};
+    live->owner.update(live->owner.context, &event, true, &redraw, &close);
+    return close;
+}
+
+static void al_library_share(void *context, const struct app_selection *selection,
+    const char *path, struct zcl_command_reply *reply)
+{
+    struct al_library_script *s = context; ++s->share_calls; s->shared_revision = selection->revision;
+    s->valid = s->valid && selection->revision > 0 && path[0] == 47;
+    (void)snprintf(s->shared, sizeof(s->shared), "%s", path);
+    if (s->share_cancel) { (void)json_push_kv_str(&reply->data, "status", "canceled"); return; }
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0 || close(fd)) { s->valid = false; return; }
+    s->valid = s->valid && json_push_kv_str(&reply->data, "share_file", path);
+    reply->error.mutated = true;
 }
 static int case_library(struct al_fx *f)
 {
@@ -939,6 +1021,183 @@ _test_next:;
     return failures;
 }
 
+static bool al_share_snapshot_stale(struct al_fx *f, const char *home)
+{
+    char root[PATH_MAX], state[PATH_MAX], output[PATH_MAX];
+    const char *prior = getenv("XDG_STATE_HOME"); char *old = prior ? strdup(prior) : NULL;
+    if (prior && !old) return false;
+    struct app_selection kept, altered;
+    bool ok = realpath(f->root, root) && al_path(state, sizeof(state), root, "state") &&
+        al_path(output, sizeof(output), home, "must-not-exist.z23share") &&
+        app_selection_load(f->env.state_dir, "fixtureapp", &kept) == APP_SELECTION_OK &&
+        setenv("XDG_STATE_HOME", state, 1) == 0;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_share.v1");
+    if (ok) { altered = kept; altered.image[0] ^= 1; zcl_native_app_share_snapshot("fixtureapp", output, &reply, &altered); }
+    ok = ok && !strcmp(reply.error.code, "SELECTION_STALE") && !reply.error.mutated && access(output, F_OK) != 0;
+    if (old) { (void)setenv("XDG_STATE_HOME", old, 1); free(old); } else (void)unsetenv("XDG_STATE_HOME");
+    zcl_command_reply_free(&reply); return ok;
+}
+
+static int al_share_success_test(struct al_fx *f, struct zcl_command_reply *reply,
+    struct al_library_script *s, const struct app_selection *before)
+{
+    int failures = 0; struct app_selection after;
+    TEST("Share shows and copies the complete long UTF-8 escaped path") {
+        zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+        *s = (struct al_library_script){.actions = {0, 2}, .count = 2, .valid = true};
+        zcl_test_app_library_share(&f->env, reply, al_library_present, s, al_library_share, al_library_notice);
+        ASSERT(s->valid && s->share_calls == 1 && reply->error.mutated && strlen(s->shared) > 105);
+        ASSERT(!strcmp(s->shared, s->setup) && access(s->shared, F_OK) == 0);
+        ASSERT(app_selection_load(f->env.state_dir, "fixtureapp", &after) == APP_SELECTION_OK);
+        ASSERT(!memcmp(before, &after, sizeof(after)));
+        ASSERT(unlink(s->shared) == 0); s->shared[0] = 0;
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int al_share_failure_test(struct al_fx *f, struct zcl_command_reply *reply,
+    struct al_library_script *s, const char *home)
+{
+    int failures = 0;
+    TEST("Share preserves output facts after result presentation fails") {
+        zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+        *s = (struct al_library_script){.actions = {0, 2}, .count = 2, .valid = true, .fail_share_result = true};
+        zcl_test_app_library_share(&f->env, reply, al_library_present, s, al_library_share, al_library_notice);
+        ASSERT(reply->error.mutated && !strcmp(reply->error.code, "PRESENTATION_FAILED"));
+        const char *output = zcl_package_copy_str(json_get(&reply->data, "failure_facts"), "output");
+        ASSERT(output && !strcmp(output, s->shared));
+        ASSERT(unlink(s->shared) == 0); s->shared[0] = 0;
+        ASSERT(al_share_snapshot_stale(f, home));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int al_share_refusal_test(struct al_fx *f, struct zcl_command_reply *reply,
+    struct al_library_script *s, const char *root, const char *home, char invalid[PATH_MAX], bool *made)
+{
+    int failures = 0;
+    TEST("Share refuses invalid UTF-8 and a stale library choice before sharing") {
+        int n = snprintf(invalid, PATH_MAX, "%s/%c", root, 255);
+        ASSERT(n > 0 && n < PATH_MAX);
+        int created = mkdir(invalid, 0700);
+        /* Some filesystems reject invalid UTF-8 before it can name a home. */
+        ASSERT(created == 0 || errno == EILSEQ); *made = created == 0;
+        const char *expected = *made ? "PATH_UNDISPLAYABLE" : "HOME_UNAVAILABLE";
+        ASSERT(setenv("HOME", invalid, 1) == 0);
+        zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+        *s = (struct al_library_script){.actions = {0, 2}, .count = 2, .valid = true};
+        zcl_test_app_library_share(&f->env, reply, al_library_present, s, al_library_share, al_library_notice);
+        ASSERT(!strcmp(reply->error.code, expected) && !reply->error.mutated && !s->share_calls);
+        ASSERT(setenv("HOME", home, 1) == 0);
+        zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+        *s = (struct al_library_script){.actions = {0, 2}, .count = 2, .valid = true, .change_fixture = f, .change_at = 2};
+        zcl_test_app_library_share(&f->env, reply, al_library_present, s, al_library_share, al_library_notice);
+        ASSERT(!strcmp(reply->error.code, "SELECTION_STALE") && s->share_calls == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int al_share_followups(struct al_fx *f, struct zcl_command_reply *reply,
+    struct al_library_script *s, const struct app_selection *before,
+    const char *root, const char *home, char invalid[PATH_MAX], bool *made)
+{
+    int failures = al_share_success_test(f, reply, s, before);
+    if (!failures) failures += al_share_failure_test(f, reply, s, home);
+    if (!failures) failures += al_share_refusal_test(f, reply, s, root, home, invalid, made);
+    return failures;
+}
+
+static int al_refresh_share_test(struct al_fx *f, struct zcl_command_reply *reply,
+    const char *home)
+{
+    int failures = 0;
+    TEST("AI help Back refreshes a newer Keep before a separate Share") {
+        struct app_selection before;
+        ASSERT(app_selection_load(f->env.state_dir, "fixtureapp", &before) == APP_SELECTION_OK);
+        ASSERT(setenv("HOME", home, 1) == 0);
+        struct al_library_script s = {.actions = {0, 1, 2, 0, 2, 3, 3}, .count = 7, .valid = true,
+            .change_fixture = f, .change_at = 3, .refresh_changed = true, .share_cancel = true};
+        zcl_test_app_library_refresh(&f->env, reply, al_library_present, &s,
+            al_library_prepare, al_library_share, al_library_notice);
+        ASSERT(s.valid && s.refreshed_card && s.share_calls == 1);
+        ASSERT(s.shared_revision == before.revision + 1);
+        ASSERT(reply->error.mutated && access(s.shared, F_OK) != 0);
+        const struct json_value *prep = json_get(&reply->data, "preparation");
+        ASSERT(prep && !strcmp(json_get_str(json_get(prep, "copy")), before.copy));
+        ASSERT(json_get_bool(json_get(prep, "changed")));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int al_refresh_refusal_test(struct al_fx *f, struct zcl_command_reply *reply)
+{
+    int failures = 0;
+    TEST("AI help Back refuses removed or unreadable saved choices") {
+        char path[PATH_MAX], saved[PATH_MAX];
+        ASSERT(al_path(path, sizeof(path), f->env.state_dir, "fixtureapp.selection"));
+        ASSERT(al_path(saved, sizeof(saved), f->env.state_dir, "fixtureapp.selection.saved"));
+        for (unsigned mode = 1; mode <= 2; ++mode) {
+            zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+            struct al_library_script s = {.actions = {0, 1, 2}, .count = 3, .valid = true,
+                .change_fixture = f, .change_at = 3, .break_selection = mode};
+            zcl_test_app_library_refresh(&f->env, reply, al_library_present, &s,
+                al_library_prepare, al_library_share, al_library_notice);
+            ASSERT(s.valid && s.errors == 1 && s.share_calls == 0);
+            ASSERT(!strcmp(reply->error.code, mode == 1 ? "SELECTION_UNAVAILABLE" : "SELECTION_UNREADABLE"));
+            if (mode == 2) ASSERT(unlink(path) == 0);
+            ASSERT(rename(saved, path) == 0);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int al_refresh_checks(struct al_fx *f, struct zcl_command_reply *reply, const char *home)
+{
+    zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+    int failures = al_refresh_share_test(f, reply, home);
+    if (!failures) failures += al_refresh_refusal_test(f, reply);
+    return failures;
+}
+
+static int case_library_share(struct al_fx *f)
+{
+    int failures = 0; char root[PATH_MAX] = {0}, home[PATH_MAX] = {0}, occupied[PATH_MAX] = {0}, invalid[PATH_MAX] = {0};
+    bool made_root = false, made_home = false, made_invalid = false;
+    struct app_selection before, after;
+    const char *prior = getenv("HOME"); char *old = prior ? strdup(prior) : NULL;
+    if (prior && !old) return 1;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    struct al_library_script s = {.actions = {0, 2, 3, 3}, .count = 4, .valid = true, .share_cancel = true};
+    TEST("My Apps share cancellation and collision preserve selected version") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "app_share")); made_root = true;
+        char part[120]; memset(part, 97, 110); memcpy(part + 110, " \xc3\xa9\\\n", 6);
+        ASSERT(al_path(home, sizeof(home), root, part)); ASSERT(mkdir(home, 0700) == 0); made_home = true;
+        ASSERT(setenv("HOME", home, 1) == 0);
+        ASSERT(app_selection_load(f->env.state_dir, "fixtureapp", &before) == APP_SELECTION_OK);
+        int n = snprintf(occupied, sizeof(occupied), "%s/z23-share-010101010101-0.z23share", home);
+        ASSERT(n > 0 && (size_t)n < sizeof(occupied));
+        ASSERT(al_write_file(occupied, "occupied", 0600));
+        zcl_test_app_library_share(&f->env, &reply, al_library_present, &s, al_library_share, al_library_notice);
+        ASSERT(s.valid && s.share_calls == 1 && access(s.shared, F_OK) != 0);
+        ASSERT(!reply.error.mutated);
+        ASSERT(app_selection_load(f->env.state_dir, "fixtureapp", &after) == APP_SELECTION_OK);
+        ASSERT(!memcmp(&before, &after, sizeof(before)));
+        ASSERT(strstr(s.shared, "-1.z23share"));
+        PASS();
+    } _test_next:;
+    if (!failures) failures += al_share_followups(f, &reply, &s, &before, root, home, invalid, &made_invalid);
+    if (!failures) failures += al_refresh_checks(f, &reply, home);
+    if (s.shared[0]) (void)unlink(s.shared);
+    if (occupied[0]) (void)unlink(occupied);
+    if (made_home) (void)rmdir(home);
+    if (made_invalid) (void)rmdir(invalid);
+    if (made_root) (void)rmdir(root);
+    if (old) { (void)setenv("HOME", old, 1); free(old); } else (void)unsetenv("HOME");
+    zcl_command_reply_free(&reply); return failures;
+}
 static bool al_library_catalog(struct al_fx *f, unsigned count)
 {
     char text[16384], name[33]; size_t at = 0;
@@ -994,7 +1253,7 @@ static int case_library_help(void)
     const char *exe = "/installed path/quote\" back\\tick`$()/z23";
     TEST("AI help truthfully declines unknown catalog source and Back preserves index") {
         ASSERT(al_setup(&f));
-        struct al_library_script s = {.actions = {0, 1, 2, 2, 3}, .count = 5, .valid = true};
+        struct al_library_script s = {.actions = {0, 1, 2, 3, 3}, .count = 5, .valid = true};
         zcl_test_app_library_setup(&f.env, exe, "/unrelated-profile", &reply, al_library_present, &s);
         ASSERT(s.valid && s.calls == 5 && !s.errors && !s.setup[0]);
         ASSERT(strstr(s.last_summary, "App 1 of"));
@@ -1004,7 +1263,7 @@ static int case_library_help(void)
         struct app_selection saved, after;
         ASSERT(app_launch_state_dir_ready(f.env.state_dir));
         ASSERT(al_selection(&f, "fixtureapp", &saved));
-        struct al_library_script s = {.actions = {0, 1, 2, 2, 3}, .count = 5, .valid = true};
+        struct al_library_script s = {.actions = {0, 1, 2, 3, 3}, .count = 5, .valid = true};
         zcl_test_app_library_setup_prepared(&f.env, exe, "/wrong-global-profile", &reply,
             al_library_present, &s, al_library_prepare);
         ASSERT(s.valid && s.calls == 5 && !s.errors && s.setup[0]);
@@ -1271,6 +1530,7 @@ _test_next:
     failures += case_resident_app(&f, f.bin_silent, "silent", false, false);
     failures += case_resident_mutation(&f);
     failures += case_library(&f);
+    failures += case_library_share(&f);
     failures += case_library_help();
     failures += case_library_prepare_stop();
     failures += case_library_setup_stop();

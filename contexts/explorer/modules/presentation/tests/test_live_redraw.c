@@ -11,6 +11,14 @@
 #include <stdlib.h>
 #if defined(__APPLE__)
 #include <objc/runtime.h>
+#elif defined(__linux__)
+#include <X11/Xatom.h>
+#include <X11/Xlib.h>
+#include <errno.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 #if !defined(ZCL_TESTING)
 #error "live redraw fixture requires ZCL_TESTING"
@@ -151,8 +159,127 @@ static bool clipboard_roundtrip(const char *text)
     }
     return true;
 }
-int main(void)
+#if defined(__linux__)
+/* A separate process owns RGFW's clipboard. The parent is a distinct X11
+ * requestor, so this catches wire lengths that RGFW's own reader hides. */
+static const char *clipboard_fixture(unsigned which, char maximum[ZCL_PRESENT_COPY_TEXT_MAX + 1u])
 {
+    if (which == 0) return "";
+    if (which == 1) return "quoted \\\"path\\\" / caf\xc3\xa9 / \xe2\x9c\x93";
+    memset(maximum, 'x', ZCL_PRESENT_COPY_TEXT_MAX); maximum[ZCL_PRESENT_COPY_TEXT_MAX] = 0;
+    return maximum;
+}
+static int clipboard_owner(unsigned which)
+{
+    static uint8_t pixels[16 * 16 * 3]; char maximum[ZCL_PRESENT_COPY_TEXT_MAX + 1u];
+    struct zcl_present_window_v1 page = {
+        .struct_size = sizeof(page), .abi_version = ZCL_PRESENT_ABI_V1,
+        .title = "External clipboard owner", .pixels = pixels,
+        .width = 16, .height = 16, .pixel_format = ZCL_PRESENT_RGB8,
+        .copy_text = clipboard_fixture(which, maximum),
+    };
+    struct zcl_present_window_event_v1 event = {0}; char error[256] = {0};
+    /* C copies; the unrelated second key leaves the window running. */
+    zcl_present_test_script(UINT_MAX, 200, false);
+    return zcl_present_window_run_actions_v1(&page, 1, NULL, NULL, &event, error, sizeof(error)) ? 0 : 1;
+}
+static bool clipboard_wait_owner(Display *d, Atom selection)
+{
+    for (unsigned i = 0; i < 100; ++i) {
+        if (XGetSelectionOwner(d, selection) != None) return true;
+        (void)poll(NULL, 0, 100); /* real-clock: bounded external X11 process */
+    }
+    return false;
+}
+static bool clipboard_wait_notify(Display *d, Window w, Atom selection, Atom target, Atom property)
+{
+    XConvertSelection(d, selection, target, property, w, CurrentTime); XFlush(d);
+    for (unsigned i = 0; i < 100; ++i) {
+        while (XPending(d)) {
+            XEvent event; XNextEvent(d, &event);
+            if (event.type == SelectionNotify && event.xselection.requestor == w &&
+                event.xselection.selection == selection && event.xselection.target == target)
+                return event.xselection.property == property;
+        }
+        struct pollfd fd = {.fd = ConnectionNumber(d), .events = POLLIN};
+        int n = poll(&fd, 1, 100); /* real-clock: bounded external X11 response */
+        if (n < 0 && errno != EINTR) return false;
+    }
+    return false;
+}
+static bool clipboard_value(Display *d, Window w, Atom property, Atom expected, const char *text)
+{
+    Atom type = None; int format = 0; unsigned long count = 0, remain = 0; unsigned char *value = NULL;
+    int rc = XGetWindowProperty(d, w, property, 0, 2048, True, AnyPropertyType,
+        &type, &format, &count, &remain, &value);
+    size_t len = strlen(text);
+    bool ok = rc == Success && type == expected && format == 8 && !remain && count == len &&
+        (!len || (value && !memcmp(value, text, len)));
+    if (value) XFree(value);
+    return ok;
+}
+static bool clipboard_multiple(Display *d, Window w, Atom selection, Atom utf, const char *text)
+{
+    Atom multiple = XInternAtom(d, "MULTIPLE", False), pair = XInternAtom(d, "ATOM_PAIR", False);
+    Atom request = XInternAtom(d, "Z23_TEST_MULTIPLE", False);
+    Atom one = XInternAtom(d, "Z23_TEST_ONE", False), two = XInternAtom(d, "Z23_TEST_TWO", False);
+    Atom values[] = {utf, one, utf, two};
+    XChangeProperty(d, w, request, pair, 32, PropModeReplace, (const unsigned char *)values, 4);
+    if (!clipboard_wait_notify(d, w, selection, multiple, request)) return false;
+    Atom type = None; int format = 0; unsigned long count = 0, remain = 0; unsigned char *raw = NULL;
+    int rc = XGetWindowProperty(d, w, request, 0, 4, True, AnyPropertyType,
+        &type, &format, &count, &remain, &raw);
+    bool ok = rc == Success && type == pair && format == 32 && count == 4 && !remain && raw &&
+        !memcmp(raw, values, sizeof(values));
+    if (raw) XFree(raw);
+    return ok && clipboard_value(d, w, one, utf, text) && clipboard_value(d, w, two, utf, text);
+}
+static bool clipboard_external(const char *executable, unsigned which)
+{
+    Display *d = XOpenDisplay(NULL); if (!d) return false;
+    Atom selection = XInternAtom(d, "CLIPBOARD", False), utf = XInternAtom(d, "UTF8_STRING", False);
+    Atom direct = XInternAtom(d, "Z23_TEST_DIRECT", False);
+    Window w = XCreateSimpleWindow(d, DefaultRootWindow(d), 0, 0, 1, 1, 0, 0, 0);
+    XSetSelectionOwner(d, selection, None, CurrentTime); XSync(d, False);
+    char choice[4]; (void)snprintf(choice, sizeof(choice), "%u", which);
+    pid_t child = fork();
+    if (child == 0) { execl(executable, "live-redraw-test", "--clipboard-owner", choice, (char *)NULL); _exit(127); }
+    char maximum[ZCL_PRESENT_COPY_TEXT_MAX + 1u]; const char *text = clipboard_fixture(which, maximum);
+    bool ready = child > 0 && clipboard_wait_owner(d, selection);
+    bool single = ready && clipboard_wait_notify(d, w, selection, utf, direct) &&
+        clipboard_value(d, w, direct, utf, text);
+    bool multiple = ready && clipboard_multiple(d, w, selection, utf, text);
+    bool ok = single && multiple;
+    if (child > 0) {
+        (void)kill(child, SIGKILL); int status;
+        while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    }
+    XDestroyWindow(d, w); XCloseDisplay(d);
+    if (!ok) fprintf(stderr, "external X11 clipboard fixture %u: direct=%d multiple=%d\n", which, single, multiple);
+    return ok;
+}
+#endif
+
+static bool clipboard_roundtrip_cases(void)
+{
+    if (!clipboard_roundtrip("{\"value\":\"last byte stays\"}")) return false;
+    if (!clipboard_roundtrip("")) return false;
+    if (!clipboard_roundtrip("quoted \"path\" / caf\xc3\xa9 / \xe2\x9c\x93")) return false;
+    char maximum[ZCL_PRESENT_COPY_TEXT_MAX + 1u];
+    memset(maximum, 'x', sizeof(maximum) - 1u); maximum[sizeof(maximum) - 1u] = 0;
+    return clipboard_roundtrip(maximum);
+}
+
+int main(int argc, char **argv)
+{
+#if defined(__linux__)
+    if (argc == 3 && !strcmp(argv[1], "--clipboard-owner")) {
+        unsigned which = (unsigned)strtoul(argv[2], NULL, 10);
+        return which < 3 ? clipboard_owner(which) : 1;
+    }
+#else
+    (void)argc; (void)argv;
+#endif
 #if defined(__APPLE__) || defined(__linux__)
     if (!initialization_failure()) return 1;
 #endif
@@ -161,12 +288,13 @@ int main(void)
     if (!run(1, false, true, 2, true)) return 1;
     if (!run(2, true, false, 1, false)) return 1;
     if (!run(2, false, true, 2, true)) return 1;
-    if (!clipboard_roundtrip("{\"value\":\"last byte stays\"}")) return 1;
-    if (!clipboard_roundtrip("")) return 1;
-    if (!clipboard_roundtrip("quoted \"path\" / caf\xc3\xa9 / \xe2\x9c\x93")) return 1;
-    char maximum[ZCL_PRESENT_COPY_TEXT_MAX + 1u];
-    memset(maximum, 'x', sizeof(maximum) - 1u); maximum[sizeof(maximum) - 1u] = 0;
-    if (!clipboard_roundtrip(maximum)) return 1;
+    if (!clipboard_roundtrip_cases()) return 1;
+#if defined(__linux__)
+    bool external_ok = true;
+    for (unsigned i = 0; i < 3; ++i) if (!clipboard_external(argv[0], i)) external_ok = false;
+    if (!external_ok) return 1;
+    puts("clipboard: external direct and MULTIPLE exact byte lengths");
+#endif
     puts("clipboard: JSON closing byte, empty, UTF8 and maximum text roundtrip exactly");
     puts("live redraw: failure and terminal cancel reject queued confirm; successful redraw proceeds");
     return 0;

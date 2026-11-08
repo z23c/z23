@@ -1,15 +1,21 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
  * purpose: Discover and open installed and kept apps through existing authorities. */
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
 #include "command/native_app_library_command.h"
 #include "command/native_app_confirm.h"
+#include "command/native_app_share_command.h"
 #include "command/native_app_personalize_view.h"
 #include "command/native_zcode_package_copy.h"
 #include "command/app_selection.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "presentation/model_render.h"
+#include "zutf8/zutf8.h"
 #include "platform/os_proc.h"
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -30,6 +36,9 @@ struct library {
     unsigned page;
     char setup[ZCL_PRESENT_COPY_TEXT_MAX + 1];
     char source_version[65];
+    char shared_path[ZCL_PRESENT_COPY_TEXT_MAX + 1];
+    app_confirm_presenter notice;
+    app_library_sharer sharer;
     char prepared_version[65];
     app_library_preparer preparer;
     void *prepare_context;
@@ -204,7 +213,7 @@ static bool al_setup_identity(struct json_value *data, const struct library_row 
         return json_push_kv_int(data, "revision", (int64_t)r->selection.revision) &&
             json_push_kv_str(data, "version", version) &&
             json_push_kv_str(data, "source_version", source_version) &&
-            json_push_kv_str(data, "request", "Connect this local MCP server using command and args as literal values. Call apps_list, then app.customize with name, expected_revision equal to revision, and source_version. Verify selection_revision, kept version, and source_version separately. Include source_version in every source read and app.edit. After each edit use its returned version as the next source_version, retaining the original revision and kept version until Keep. Ask what I want to change, preview it, then wait for explicit Keep and Share. If selection changed, reopen My Apps.");
+            json_push_kv_str(data, "request", "Connect this local MCP server using command and args as literal values. Call apps_list, then app.customize with name, expected_revision equal to revision, and source_version. Verify selection_revision, kept version, and source_version separately. Include source_version in every source read and app.edit. After each edit use its returned version as the next source_version, retaining the original revision and kept version until Keep. Ask what I want to change, preview it, then wait for explicit Keep and Share. If selection changed, use Back to refresh the app card, then open Change with your AI for fresh setup.");
     }
     return json_push_kv_str(data, "request", "Connect this local MCP server using command and args as literal values. This installed Sky Combat has no saved selection. Help me open it and choose Make my copy before customization. Do not invent a saved revision or version. Ask what I want to change, preview it, and wait for my explicit Keep and Share choices.");
 }
@@ -342,6 +351,86 @@ static bool al_setup(struct library *w, const struct app_launch_env *env,
     if (!datadir || !datadir[0]) return al_fail(reply, "MISSING_DATADIR", "No app profile is bound to My Apps.");
     return al_prepare_source(w, env, reply) && al_setup_encode(w, exe, datadir, reply);
 }
+static bool al_share_path(struct library *w, const struct library_row *row, struct zcl_command_reply *reply)
+{
+#if !defined(_WIN32)
+    const char *home = getenv("HOME"); char resolved[4096], version[65]; struct stat st;
+    if (!home || home[0] != '/' || !realpath(home, resolved) || stat(resolved, &st) || !S_ISDIR(st.st_mode))
+        return al_fail(reply, "HOME_UNAVAILABLE", "Cannot locate your home folder.");
+    zcl_hex_encode(row->selection.version, 32, version);
+    for (unsigned i = 0; i < 1000; ++i) {
+        int n = snprintf(w->shared_path, sizeof(w->shared_path), "%s/z23-share-%.12s-%u.z23share", resolved, version, i);
+        if (n < 0 || (size_t)n >= sizeof(w->shared_path)) return al_fail(reply, "PATH_TOO_LONG", "Home path is too long to display safely.");
+        if (!zutf8_validate(w->shared_path))
+            return al_fail(reply, "PATH_UNDISPLAYABLE", "Home path is not valid UTF-8.");
+        if (lstat(w->shared_path, &st) != 0) {
+            if (errno == ENOENT) return true;
+            return al_fail(reply, "OUTPUT_UNAVAILABLE", "Cannot inspect the share destination.");
+        }
+    }
+    return al_fail(reply, "OUTPUT_UNAVAILABLE", "No free share filename is available.");
+#else
+    (void)w; (void)row; return al_fail(reply, "PLATFORM_UNAVAILABLE", "Sharing is unavailable on this platform.");
+#endif
+}
+static void al_share_display_failure(struct library *w, struct zcl_command_reply *reply)
+{
+    zcl_package_copy_fail(reply, "PRESENTATION_FAILED", true, "Share file created; its location is in evidence.", w->shared_path);
+    struct json_value facts; json_init(&facts); json_set_object(&facts);
+    if (json_push_kv_str(&facts, "output", w->shared_path)) (void)json_push_kv(&reply->data, "failure_facts", &facts);
+    json_free(&facts);
+}
+static bool al_share_notice(struct app_confirm *view, const char *path, char *why, size_t cap)
+{
+    zcl_present_model_init_v1(&view->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    view->window_title = "Share file ready"; view->copy_text = path;
+    (void)snprintf(view->model.request_id, sizeof(view->model.request_id), "library-share-result");
+    (void)snprintf(view->model.title, sizeof(view->model.title), "Share file created");
+    (void)snprintf(view->model.summary, sizeof(view->model.summary),
+        "Send this file to a friend. Press C to copy its location; keep this window open while pasting.");
+    view->model.action_count = 4;
+    app_confirm_action(&view->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
+    app_confirm_action(&view->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+    app_confirm_action(&view->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+    app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "done", "Done");
+    return app_confirm_path(&view->model, "Path (escaped): ", path) && app_confirm_prepare(view, why, cap);
+}
+
+static bool al_share_result(struct library *w, struct app_confirm *notice,
+    struct zcl_command_reply *reply, char *why, size_t cap)
+{
+    if (reply->status != ZCL_COMMAND_STATUS_PASSED) return false;
+    const char *status = zcl_package_copy_str(&reply->data, "status");
+    if (status && !strcmp(status, "canceled")) {
+        w->shared_path[0] = 0; json_free(&reply->data); json_init(&reply->data); json_set_object(&reply->data);
+        return true;
+    }
+    const char *file = zcl_package_copy_str(&reply->data, "share_file");
+    if (!file || strcmp(file, w->shared_path))
+        zcl_package_copy_fail(reply, "SHARE_RESULT_MISMATCH", true, "Share completed but its file location could not be verified.", w->shared_path);
+    else if (!app_confirm_show(notice, w->notice, w->prepare_context, why, cap))
+        al_share_display_failure(w, reply);
+    return false;
+}
+
+static bool al_share(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply)
+{
+    const struct library_row *row = &w->rows[w->index];
+    if (!row->saved) return al_fail(reply, "SELECTION_UNAVAILABLE", "Keep a version before sharing.");
+    if (!al_current(row, env, reply) || !al_share_path(w, row, reply)) return false;
+    struct app_confirm *notice = zcl_calloc(1, sizeof(*notice), "library-share-notice");
+    char why[256] = {0};
+    if (!notice) return al_fail(reply, "OUT_OF_MEMORY", "Cannot prepare share notice.");
+    if (!al_share_notice(notice, w->shared_path, why, sizeof(why))) {
+        app_confirm_free(notice); free(notice);
+        return al_fail(reply, "PATH_UNDISPLAYABLE", "The complete share location cannot be displayed safely.");
+    }
+    if (w->sharer) w->sharer(w->prepare_context, &row->selection, w->shared_path, reply);
+    else zcl_native_app_share_snapshot(row->entry.id, w->shared_path, reply, &row->selection);
+    bool resume = al_share_result(w, notice, reply, why, sizeof(why));
+    app_confirm_free(notice); free(notice);
+    return resume;
+}
 static void al_detail_model(struct library *w)
 {
     al_model(w);
@@ -351,6 +440,7 @@ static void al_detail_model(struct library *w)
     if (w->page == 1) {
         al_choice(m, "open", "Open app", "Use this app.");
         al_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
+        al_choice(m, "share", "Share this version", r->saved ? "Create a local share file." : "Keep a version first.");
     } else {
         (void)snprintf(m->request_id, sizeof(m->request_id), "library-help");
         (void)snprintf(m->summary, sizeof(m->summary), "%s", w->setup[0]
@@ -367,36 +457,56 @@ static void al_detail_model(struct library *w)
             r->saved ? version + 32 : w->setup[0] ? "Open Sky Combat to make a copy." : "Ask the app author for source.");
     }
     al_choice(m, "back", "Back", "Return to your selected app.");
-    al_choice(m, "cancel", "Cancel", "Close My Apps.");
+    if (w->page != 1) al_choice(m, "cancel", "Cancel", "Close My Apps.");
 }
 /* Return true only while navigation should continue. Open is terminal. */
+static bool al_refresh_after_help(struct library *w, const struct app_launch_env *env,
+    struct zcl_command_reply *reply)
+{
+    struct library_row previous = w->rows[w->index];
+    w->count = 0;
+    memset(&w->registry, 0, sizeof(w->registry));
+    memset(w->rows, 0, sizeof(w->rows));
+    if (!al_load(w, env, reply)) return false;
+    for (size_t i = 0; i < w->count; ++i) {
+        if (strcmp(w->rows[i].entry.id, previous.entry.id)) continue;
+        w->index = i;
+        bool changed = previous.saved != w->rows[i].saved ||
+            (previous.saved && !al_same(&previous.selection, &w->rows[i].selection));
+        if (previous.saved && !w->rows[i].saved)
+            return al_fail(reply, "SELECTION_UNAVAILABLE", "The saved app is no longer available. Reopen My Apps.");
+        w->page = changed ? 0 : 1;
+        return true;
+    }
+    return al_fail(reply, "SELECTION_UNAVAILABLE", "The selected app is no longer available. Reopen My Apps.");
+}
 static bool al_navigate(struct library *w, unsigned action, const struct app_launch_env *env,
     const char *exe, const char *datadir, struct zcl_command_reply *reply)
 {
-    if (!w->page) {
-        if (action == 1 && w->index) --w->index;
-        if (action == 2 && w->index + 1 < w->count) ++w->index;
-        if (!action) w->page = 1;
-        return true;
-    }
-    if (action == 2) { --w->page; w->setup[0] = 0; return true; }
-    if (w->page == 2) return true;
-    if (action == 1) {
+    const char *id = w->model.actions[action].id;
+    if (!strcmp(id, "previous")) { if (w->index) --w->index; return true; }
+    if (!strcmp(id, "next")) { if (w->index + 1 < w->count) ++w->index; return true; }
+    if (!strcmp(id, "choose")) { w->page = 1; return true; }
+    if (!strcmp(id, "back")) { w->setup[0] = 0; if (w->page == 2) return al_refresh_after_help(w, env, reply); --w->page; return true; }
+    if (!strcmp(id, "share")) return al_share(w, env, reply);
+    if (!strcmp(id, "help")) {
         if (!al_setup(w, env, exe, datadir, reply)) return false;
-        w->page = 2;
-        return true;
+        w->page = 2; return true;
     }
-    struct library_row *row = &w->rows[w->index];
-    zcl_native_app_open_snapshot(env, &row->entry, row->saved ? &row->selection : NULL, reply);
-    return false;
+    if (!strcmp(id, "open")) {
+        struct library_row *row = &w->rows[w->index];
+        zcl_native_app_open_snapshot(env, &row->entry, row->saved ? &row->selection : NULL, reply);
+        return false;
+    }
+    return true;
 }
 static void al_run(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, const char *exe, const char *datadir,
-    app_library_preparer preparer)
+    app_library_preparer preparer, app_library_sharer sharer, app_confirm_presenter notice)
 {
     struct library *w = zcl_calloc(1, sizeof(*w), "app-library");
     if (!w) { al_fail(reply, "OUT_OF_MEMORY", "Cannot allocate My Apps."); return; }
-    w->preparer = preparer; w->prepare_context = context;
+    w->preparer = preparer; w->sharer = sharer; w->notice = notice; w->prepare_context = context;
     char why[256] = {0};
     bool loaded = al_load(w, env, reply);
     while (loaded) {
@@ -404,13 +514,15 @@ static void al_run(const struct app_launch_env *env, struct zcl_command_reply *r
         struct zcl_present_window_event_v1 event = {0};
         if (!zcl_present_model_validate_v1(&w->model, why, sizeof(why)) ||
             !presenter(context, &w->model, w->setup[0] ? w->setup : NULL, &event, why, sizeof(why))) {
-            al_fail(reply, "PRESENTATION_FAILED", why); break;
+            al_fail(reply, "PRESENTATION_FAILED", why);
+            break;
         }
         if (!al_event_valid(&event, w->model.action_count)) {
             al_fail(reply, "INVALID_SELECTION", "The app selection was not recognized. Nothing was opened."); break;
         }
-        if (event.outcome == ZCL_PRESENT_WINDOW_DISMISSED || !w->count || event.action_index == 3) {
-            (void)json_push_kv_str(&reply->data, "status", "canceled"); break;
+        if (event.outcome == ZCL_PRESENT_WINDOW_DISMISSED || !w->count || !strcmp(w->model.actions[event.action_index].id, "cancel")) {
+            (void)json_push_kv_str(&reply->data, "status", "canceled");
+            break;
         }
         if (!al_navigate(w, event.action_index, env, exe, datadir, reply)) break;
     }
@@ -431,24 +543,31 @@ void zcl_native_handle_app_library(const struct zcl_command_request *request,
         if (w) { al_error_view(w, reply, al_present, NULL); free(w); }
         return;
     }
-    al_run(&env, reply, al_present, NULL, NULL, NULL, NULL);
+    al_run(&env, reply, al_present, NULL, NULL, NULL, NULL, NULL, NULL);
 }
 #if defined(ZCL_TESTING)
+void zcl_test_app_library_refresh(const struct app_launch_env *env, struct zcl_command_reply *reply,
+    app_library_presenter presenter, void *context, app_library_preparer preparer,
+    app_library_sharer sharer, app_confirm_presenter notice)
+{ al_run(env, reply, presenter, context, "/fixture/z23", "/fixture", preparer, sharer, notice); }
+void zcl_test_app_library_share(const struct app_launch_env *env, struct zcl_command_reply *reply,
+    app_library_presenter presenter, void *context, app_library_sharer sharer, app_confirm_presenter notice)
+{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice); }
 void zcl_test_app_library_run(const struct app_launch_env *env,
     struct zcl_command_reply *reply, app_library_presenter presenter, void *context)
 {
-    al_run(env, reply, presenter, context, NULL, NULL, NULL);
+    al_run(env, reply, presenter, context, NULL, NULL, NULL, NULL, NULL);
 }
 void zcl_test_app_library_setup(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context)
 {
-    al_run(env, reply, presenter, context, exe, datadir, NULL);
+    al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, NULL);
 }
 void zcl_test_app_library_setup_prepared(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer)
 {
-    al_run(env, reply, presenter, context, exe, datadir, preparer);
+    al_run(env, reply, presenter, context, exe, datadir, preparer, NULL, NULL);
 }
 #endif

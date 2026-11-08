@@ -83,7 +83,37 @@ rsync()
     fi
 }
 
-export -f make git rsync
+readelf()
+{
+    printf 'unexpected ELF inspection of the policy fixture\n' >&2
+    return 2
+}
+
+# This fixture builds known text, not an ELF binary. Keep the policy test
+# independent of host OpenSSL/GNU stat availability while checking actual
+# bytes before reporting the independently computed fixture digest.
+openssl()
+{
+    [[ $# == 3 && "$1" == dgst && "$2" == -sha3-256 ]] || return 2
+    /usr/bin/cmp -s "$3" "$REPRO_EXPECTED_BINARY" || return 2
+    printf 'SHA3-256(%s)= %s\n' "$3" \
+        bbc9a732fd210cc2404cb4b2a3245353191866808bf5a4f043b5ba1a5ae41df0
+}
+
+stat()
+{
+    [[ $# == 2 && "$1" == -Lc%s ]] || return 2
+    /usr/bin/wc -c < "$2"
+}
+
+export REPRO_EXPECTED_BINARY="$SANDBOX/expected-binary"
+printf 'repro-network-policy-fixture\n' > "$REPRO_EXPECTED_BINARY"
+printf 'different-policy-fixture\n' > "$SANDBOX/different-binary"
+if openssl dgst -sha3-256 "$SANDBOX/different-binary" >/dev/null 2>&1; then
+    fail 'fixture digest accepted different bytes'
+fi
+
+export -f make git rsync readelf openssl stat
 export REPRO_POLICY_LOG="$contact_log"
 
 # Exercise the exact policy block from the production Makefile and prove it
@@ -114,7 +144,8 @@ barrier_line="$(grep -n '^VENDOR_BOOTSTRAP_MK :=' "$ROOT/Makefile" | cut -d: -f1
 if ! (cd "$SANDBOX/source" && \
         REPRO_FAKE_SOURCE="$SANDBOX/source" ZCL_VENDOR_OFFLINE=0 PATH=/usr/bin:/bin \
         ZCL_REPRO_JOBS=1 bash "$ROOT/tools/scripts/repro-verify.sh") \
-        >/dev/null 2>&1; then
+        >"$SANDBOX/repro.log" 2>&1; then
+    cat "$SANDBOX/repro.log" >&2
     fail 'repro-verify fixture failed'
 fi
 

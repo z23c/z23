@@ -2579,13 +2579,16 @@ $(PRESENTATION_BUILD_DIR)/presentation-live-test.o: \
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -DZCL_TESTING -c \
 		contexts/explorer/modules/presentation/src/presentation.c -o $@
 
+ifeq ($(PRESENTATION_HOST_OS),Linux)
+PRESENTATION_LIVE_TEST_LIBS := -Wl,-l:libX11.so.6
+endif
 $(PRESENTATION_BUILD_DIR)/live-redraw-test: \
 	contexts/explorer/modules/presentation/tests/test_live_redraw.c \
 	$(PRESENTATION_BUILD_DIR)/presentation-live-test.o $(PRESENTATION_PACKAGE_ARCHIVE)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -DZCL_TESTING \
 		contexts/explorer/modules/presentation/tests/test_live_redraw.c \
 		$(PRESENTATION_BUILD_DIR)/presentation-live-test.o \
-		$(PRESENTATION_PACKAGE_ARCHIVE) $(PRESENTATION_HOST_LIBS) -o $@
+		$(PRESENTATION_PACKAGE_ARCHIVE) $(PRESENTATION_HOST_LIBS) $(PRESENTATION_LIVE_TEST_LIBS) -o $@
 
 .PHONY: presentation-macos-smoke
 ifeq ($(PRESENTATION_HOST_OS),Darwin)

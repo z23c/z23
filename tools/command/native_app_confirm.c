@@ -3,6 +3,7 @@
 #include "command/native_app_confirm.h"
 #include "command/native_command.h"
 #include "presentation/canvas.h"
+#include "base/hex.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -59,6 +60,29 @@ bool app_confirm_field(struct zcl_present_model_v1 *model, const char *label,
     }
     return true;
 }
+/* Render raw path bytes reversibly. Spaces, controls and non-ASCII bytes use
+ * \\xHH; literal backslashes are doubled. Input remains unchanged. */
+bool app_confirm_path(struct zcl_present_model_v1 *model, const char *label,
+                      const char *path)
+{
+    if (!path || !*path) return false;
+    char part[33]; size_t used = 0; bool first = true;
+    for (const unsigned char *p = (const unsigned char *)path; ; ++p) {
+        char atom[5]; size_t n = 0;
+        if (*p == '\\') { atom[0] = '\\'; atom[1] = '\\'; n = 2; }
+        else if (*p && (*p <= 32 || *p > 126)) {
+            atom[0] = '\\'; atom[1] = 'x'; zcl_hex_encode(p, 1, atom + 2); n = 4;
+        } else if (*p) { atom[0] = (char)*p; n = 1; }
+        if (used && (!*p || used + n > sizeof(part) - 1)) {
+            part[used] = 0;
+            if (!app_confirm_field(model, first ? label : "  ", part)) return false;
+            first = false; used = 0;
+        }
+        if (!*p) return true;
+        memcpy(part + used, atom, n); used += n;
+    }
+}
+
 void app_confirm_action(struct zcl_present_model_action_v1 *action,
                       uint16_t kind, const char *id, const char *label)
 {
@@ -150,7 +174,7 @@ bool app_confirm_show(struct app_confirm *w, app_confirm_presenter presenter, vo
         .struct_size = sizeof(w->page), .abi_version = ZCL_PRESENT_ABI_V1,
         .title = w->window_title ? w->window_title : w->model.title, .pixels = w->bitmaps[0].pixels,
         .width = w->bitmaps[0].width, .height = w->bitmaps[0].height,
-        .pixel_format = ZCL_PRESENT_RGB8,
+        .pixel_format = ZCL_PRESENT_RGB8, .copy_text = w->copy_text,
     };
     w->visited = 1u;
     struct zcl_present_window_pages_v1 pages = {

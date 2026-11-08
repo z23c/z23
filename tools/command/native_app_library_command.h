@@ -9,9 +9,16 @@
 typedef bool (*app_library_presenter)(void *, const struct zcl_present_model_v1 *,
     const char *, struct zcl_present_window_event_v1 *, char *, size_t);
 struct app_selection;
+typedef void (*app_library_sharer)(void *, const struct app_selection *, const char *, struct zcl_command_reply *);
 typedef void (*app_library_preparer)(void *, const struct app_selection *,
     struct zcl_command_reply *);
 #if defined(ZCL_TESTING)
+void zcl_test_app_library_refresh(const struct app_launch_env *env, struct zcl_command_reply *reply,
+    app_library_presenter presenter, void *context, app_library_preparer preparer,
+    app_library_sharer sharer, app_confirm_presenter notice);
+void zcl_test_app_library_share(const struct app_launch_env *env, struct zcl_command_reply *reply,
+    app_library_presenter presenter, void *context, app_library_sharer sharer,
+    app_confirm_presenter notice);
 void zcl_test_app_library_run(const struct app_launch_env *env,
     struct zcl_command_reply *reply, app_library_presenter presenter, void *context);
 void zcl_test_app_library_setup(const struct app_launch_env *env, const char *exe,
