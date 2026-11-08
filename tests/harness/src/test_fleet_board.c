@@ -2147,6 +2147,61 @@ static int test_fleet_board_rpc_room_boundary(void)
     return failures;
 }
 
+static bool fb_rpc_list(struct fb_rpc_fixture *f, struct json_value *out)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "op", "list") && fb_rpc_call(f, &input, out);
+    json_free(&input);
+    return ok;
+}
+
+static int test_fleet_board_rpc_incomplete_list(void)
+{
+    int failures = 0;
+    TEST("fleet board: RPC list distinguishes empty from incomplete reads") {
+        struct fb_rpc_fixture f;
+        struct json_value out;
+        ASSERT(fb_rpc_fixture_open(&f, "rpc-incomplete-list"));
+        json_init(&out);
+        ASSERT(fb_rpc_list(&f, &out));
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        ASSERT_EQ(json_size(json_get(&out, "posts")), 0u);
+        json_free(&out);
+
+        json_init(&out);
+        ASSERT(fb_rpc_post(&f, "note", "healthy", "healthy", NULL, &out));
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        json_free(&out);
+        json_init(&out);
+        ASSERT(fb_rpc_post(&f, "note", "to corrupt", "corrupt", NULL, &out));
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        json_free(&out);
+        ASSERT(node_db_exec(&f.db, "UPDATE fleet_board_posts SET text='altered' "
+                                    "WHERE agent='corrupt'"));
+        json_init(&out);
+        ASSERT(fb_rpc_list(&f, &out));
+        ASSERT(!json_get_bool(json_get(&out, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "code")), "BOARD_READ_FAILED");
+        ASSERT(json_get(&out, "posts") == NULL);
+        json_free(&out);
+
+        ASSERT(node_db_exec(&f.db, "ALTER TABLE fleet_board_posts RENAME TO "
+                                    "fleet_board_posts_gone"));
+        json_init(&out);
+        ASSERT(fb_rpc_list(&f, &out));
+        ASSERT(!json_get_bool(json_get(&out, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "code")), "BOARD_READ_FAILED");
+        ASSERT(json_get(&out, "posts") == NULL);
+        json_free(&out);
+        fb_rpc_fixture_close(&f);
+        ASSERT(test_rm_rf_recursive(f.dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_fleet_board_rpc_scope_default(void)
 {
     int failures = 0;
@@ -12563,6 +12618,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_rpc_verification();
     failures += test_fleet_board_rpc_concurrency();
     failures += test_fleet_board_rpc_scope_default();
+    failures += test_fleet_board_rpc_incomplete_list();
     failures += test_fleet_board_rpc_room_boundary();
     failures += test_fleet_board_rpc_created_at();
     failures += test_fleet_board_rpc_fleet_page();

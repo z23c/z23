@@ -529,8 +529,14 @@ static void fb_op_list(struct node_db *ndb, const struct json_value *in,
                  "the bounded board result snapshot could not be allocated");
         return;
     }
-    int n = db_fleet_board_list(ndb, &filter, now, rows, (size_t)limit);
-    fb_render_list(result, rows, n);
+    bool complete = false;
+    int n = db_fleet_board_list_checked(ndb, &filter, now, rows, (size_t)limit,
+                                        &complete);
+    if (complete)
+        fb_render_list(result, rows, n);
+    else
+        fb_error(result, "BOARD_READ_FAILED",
+                 "the board list could not be read completely; try again");
     free(rows);
 }
 
