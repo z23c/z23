@@ -35,6 +35,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/time_compat.h"
+#include "sha3/sha3.h"
 
 #include <dirent.h>
 #include <stdint.h>
@@ -433,9 +434,9 @@ static bool fac_job_line(const char *line, size_t len, void *ctx,
     }
     idx = j->rows;
     fac_inc(&j->rows);
-    slot = fac_cwd_slot(j, fac_text(&row, "cwd"), queued, idx);
     if (strcmp(fac_text(&row, "project"), "z23") == 0 &&
         queued >= j->window_start) {
+        slot = fac_cwd_slot(j, fac_text(&row, "cwd"), queued, idx);
         if (j->n >= FAC_MAX_JOBS) {
             src->refused_rows = true;
             json_free(&row);
@@ -453,6 +454,106 @@ static bool fac_job_line(const char *line, size_t len, void *ctx,
     }
     json_free(&row);
     return true;
+}
+
+/* Second pass: only update cwds needed by the window, from all projects. */
+static bool fac_job_history_line(const char *line, size_t len, void *ctx,
+                                 struct fac_src *src)
+{
+    struct fac_jobs *j = ctx;
+    struct json_value row;
+    double queued;
+    (void)src;
+    json_init(&row);
+    if (!json_read(&row, line, len) || row.type != JSON_OBJ ||
+        !fac_num(json_get(&row, "queued"), &queued)) {
+        json_free(&row);
+        return true;
+    }
+    int64_t idx = j->rows;
+    fac_inc(&j->rows);
+    const char *cwd = fac_text(&row, "cwd");
+    if (cwd[0] && strlen(cwd) < FAC_PATH) {
+        size_t mask = FAC_CWD_SLOTS - 1;
+        size_t s = (size_t)fac_hash(cwd) & mask;
+        while (j->cwds[s].cwd && strcmp(j->cwds[s].cwd, cwd) != 0)
+            s = (s + 1) & mask;
+        struct fac_cwd *e = &j->cwds[s];
+        if (e->cwd && (queued < e->queued ||
+                       (queued == e->queued && idx < e->idx))) {
+            e->queued = queued;
+            e->idx = idx;
+        }
+    }
+    json_free(&row);
+    return true;
+}
+
+static bool fac_snapshot_line(char *line, size_t len, bool oversized,
+                              fac_line_fn fn, void *ctx, struct fac_src *src)
+{
+    if (oversized) { fac_inc(&src->oversized); return true; }
+    return len == 0 || fn(line, len, ctx, src);
+}
+
+/* Read exactly the captured byte extent; hash the bytes in each pass. */
+static bool fac_snapshot_pass(FILE *fp, long extent, fac_line_fn fn, void *ctx,
+                              struct fac_src *src, unsigned char digest[32])
+{
+    unsigned char chunk[16384];
+    char *line = zcl_malloc(FAC_MAX_LINE + 1u, "dev_factory_line");
+    if (!line) return false;
+    struct sha3_256_ctx hash;
+    sha3_256_init(&hash);
+    size_t used = 0;
+    bool oversized = false, ok = true;
+    long left = extent;
+    while (ok && left > 0) {
+        size_t want = left < (long)sizeof(chunk) ? (size_t)left : sizeof(chunk);
+        size_t got = fread(chunk, 1, want, fp);
+        if (got != want) { ok = false; break; }
+        sha3_256_write(&hash, chunk, got);
+        left -= (long)got;
+        for (size_t i = 0; ok && i < got; i++) {
+            if (chunk[i] == '\n') {
+                line[used] = '\0';
+                ok = fac_snapshot_line(line, used, oversized, fn, ctx, src);
+                used = 0; oversized = false;
+            } else if (used < FAC_MAX_LINE)
+                line[used++] = (char)chunk[i];
+            else
+                oversized = true;
+        }
+    }
+    if (ok && (used || oversized)) {
+        line[used] = '\0';
+        ok = fac_snapshot_line(line, used, oversized, fn, ctx, src);
+    }
+    sha3_256_finalize(&hash, digest);
+    free(line);
+    return ok;
+}
+
+/* One open inode and extent; mutation of its prefix fails closed. */
+static bool fac_jobs_scan(const char *path, struct fac_jobs *j,
+                          struct fac_src *src)
+{
+    FILE *fp = fopen(path, "rb");
+    unsigned char first[32], second[32];
+    struct fac_src history = {0};
+    if (!fp) return false;
+    bool ok = fseek(fp, 0, SEEK_END) == 0;
+    long extent = ok ? ftell(fp) : -1;
+    ok = extent >= 0 && fseek(fp, 0, SEEK_SET) == 0 &&
+         fac_snapshot_pass(fp, extent, fac_job_line, j, src, first);
+    if (ok) {
+        j->rows = 0;
+        ok = fseek(fp, 0, SEEK_SET) == 0 &&
+             fac_snapshot_pass(fp, extent, fac_job_history_line, j, &history, second) &&
+             memcmp(first, second, sizeof(first)) == 0;
+    }
+    if (fclose(fp) != 0) ok = false;
+    return ok || src->refused_rows;
 }
 
 static void fac_jobs_free(struct fac_jobs *j)
@@ -968,7 +1069,7 @@ static void fac_jobs_section(double now, double window_s,
                   sizeof(path)))
         src.absent = true;
     else
-        (void)fac_each_line(path, fac_job_line, &j, &src);
+        if (!fac_jobs_scan(path, &j, &src)) src.absent = true;
     fac_push_src(out, &src);
     if (!src.absent && !src.refused_rows) {
         fac_mark_first(&j);
