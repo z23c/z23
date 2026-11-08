@@ -4,6 +4,7 @@
  * uses the shared admission, publication and snapshot installation authority.
  * Boot request wiring lives in boot_auto_install_bundle.c. */
 #include "config/consensus_state_install_runtime.h"
+#include "config/boot_wallet_pending_restore.h"
 #if defined(_WIN32)
 enum wallet_install_reconcile consensus_state_wallet_install_classify(
     struct wallet_sqlite *wallet, struct node_db *node, int datadir_fd,
@@ -401,14 +402,7 @@ static bool icb_wallet_startup_identity(struct wallet_sqlite *wallet,
         progress_store_directory_matches_fd(progress_store_db(), dir_fd);
 }
 static bool icb_wallet_generation(sqlite3 *db, bool *present, uint64_t *gen)
-{
-    uint8_t raw[8]; size_t len = 0;
-    if (!progress_meta_get_blob_exact(db, COINS_KV_AUTHORITY_GENERATION_KEY,
-                                      raw, sizeof(raw), &len, present) ||
-        (*present && len != sizeof(raw))) return false;
-    *gen = *present ? zcl_read_u64_le(raw) : 0;
-    return true;
-}
+{ return boot_wallet_authority_generation(db, present, gen); }
 static enum wallet_install_reconcile icb_wallet_classify_locked(
     sqlite3 *db, const struct wallet_cutover_binding *b)
 {

@@ -2,20 +2,26 @@
  * Restore an authenticated pending-cutover view without persistent writes. */
 #include "config/boot_wallet_pending_restore.h"
 
+#include "base/serialize_le.h"
 #include "chain/chainparams.h"
 #include "consensus/params.h"
 #include "core/uint256.h"
 #include "primitives/block.h"
 #include "sapling/incremental_merkle_tree.h"
+#include "jobs/reducer_frontier.h"
+#include "jobs/tip_finalize_stage.h"
 #include "services/chain_state_service.h"
 #include "services/island_anchor.h"
 #include "services/block_index_loader.h"
 #include "storage/anchor_kv.h"
+#include "storage/coins_kv.h"
 #include "storage/node_db_runtime.h"
 #include "storage/progress_store.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
+#include "util/log_macros.h"
 #include "wallet/wallet_sqlite.h"
+#include <sqlite3.h>
 #include <string.h>
 
 static bool bpr_bound(const struct main_state *ms, const struct chain_state_repository *csr)
@@ -25,8 +31,20 @@ static bool bpr_bound(const struct main_state *ms, const struct chain_state_repo
         csr->coins_tip;
 }
 
+#ifdef ZCL_TESTING
+static unsigned bpr_header_reads;
+static void (*bpr_before_recheck)(void *);
+static void *bpr_before_recheck_context;
+unsigned boot_wallet_prebinding_test_take_header_reads(void)
+{ unsigned count = bpr_header_reads; bpr_header_reads = 0; return count; }
+void boot_wallet_prebinding_test_before_recheck(void (*hook)(void *), void *context)
+{ bpr_before_recheck = hook; bpr_before_recheck_context = context; }
+#endif
 static bool bpr_header(const struct block_index *p, struct block_header *out)
 {
+#ifdef ZCL_TESTING
+    bpr_header_reads++;
+#endif
     if (!node_db_runtime_load_header_by_hash_height(p->nHeight, p->phashBlock->data, out))
         return false;
     struct uint256 hash;
@@ -228,5 +246,134 @@ enum boot_pending_restore_result boot_wallet_pending_restore(
     if (!csr_restore_in_memory_view(csr, tip, tip, coins_hash)) return BOOT_PENDING_RESTORE_CSR_REFUSED;
     ms->sapling_tree = tree;
     ms->sapling_tree_loaded = true;
+    return BOOT_PENDING_RESTORE_OK;
+}
+
+/* The caller holds the progress lock and a transaction. */
+bool boot_wallet_authority_generation(sqlite3 *db, bool *present, uint64_t *generation)
+{
+    uint8_t raw[8]; size_t len = 0;
+    if (!db || !present || !generation || !progress_meta_get_blob_exact(
+            db, COINS_KV_AUTHORITY_GENERATION_KEY, raw, sizeof(raw), &len, present) ||
+        (*present && len != sizeof(raw))) return false;
+    *generation = *present ? zcl_read_u64_le(raw) : 0;
+    return true;
+}
+struct bpr_frontier {
+    bool generation_present;
+    uint64_t generation;
+    int32_t served, coins;
+    struct uint256 served_hash, coins_hash;
+};
+/* CAS allows a runtime-only genesis fallback; this view requires durable H*. */
+static bool bpr_read_frontier_rows(sqlite3 *db, struct bpr_frontier *out)
+{
+    int32_t floor = -1; bool found = false, hash_found = false;
+    return boot_wallet_authority_generation(db, &out->generation_present, &out->generation) &&
+        reducer_frontier_compute_hstar(db, &out->served, &floor) && out->served >= 0 &&
+        tip_finalize_stage_block_hash_at(db, out->served, out->served_hash.data) &&
+        reducer_frontier_derive_coins_best(db, &out->coins, out->coins_hash.data, &hash_found, &found) &&
+        found && hash_found && out->coins > 0 && out->served <= out->coins;
+}
+static bool bpr_read_frontier(struct bpr_frontier *out)
+{
+    struct bpr_frontier value = {0}; sqlite3 *db = progress_store_db(); bool ok = false;
+    progress_store_tx_lock();
+    if (db && sqlite3_get_autocommit(db) && sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK) {
+        ok = bpr_read_frontier_rows(db, &value);
+        if (sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) {
+            if (!sqlite3_get_autocommit(db) && sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK)
+                LOG_ERROR("wallet", "prebinding frontier rollback failed: %s", sqlite3_errmsg(db));
+            ok = false;
+        }
+    }
+    progress_store_tx_unlock();
+    if (ok) *out = value;
+    return ok;
+}
+static bool bpr_same_frontier(const struct bpr_frontier *a, const struct bpr_frontier *b)
+{
+    return a->generation_present == b->generation_present && a->generation == b->generation &&
+        a->served == b->served && a->coins == b->coins &&
+        uint256_eq(&a->served_hash, &b->served_hash) && uint256_eq(&a->coins_hash, &b->coins_hash);
+}
+static bool bpr_validated_genesis(const struct block_index *genesis)
+{
+    const struct chain_params *params = chain_params_get();
+    if (!genesis || !params || block_has_any_failure(genesis) || !genesis->nStatus ||
+        !genesis->nBits || !genesis->nTx || !genesis->nChainTx)
+        return false;
+    struct block_index copy = *genesis;
+    return block_index_initialize_genesis(&copy, params);
+}
+static bool bpr_prebinding_ancestry(struct main_state *ms, struct block_index *tip,
+                                    struct block_header *tip_header)
+{
+    if (!bpr_old_ancestry(ms, tip, tip_header)) return false;
+    struct block_index *p = tip;
+    while (p->pprev) {
+        if ((p->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE || block_has_any_failure(p))
+            return false;
+        p = p->pprev;
+    }
+    return bpr_validated_genesis(p);
+}
+static bool bpr_header_prefix(struct main_state *ms, struct block_index *header, struct block_index *tip)
+{
+    struct block_index *p = header;
+    while (p && p->nHeight > tip->nHeight) {
+        if (!p->phashBlock || block_map_find(&ms->map_block_index, p->phashBlock) != p ||
+            (p->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE || block_has_any_failure(p)) return false;
+        struct block_header current;
+        if (!bpr_header(p, &current) || !p->pprev || !p->pprev->phashBlock ||
+            p->pprev->nHeight != p->nHeight - 1 || !uint256_eq(&current.hashPrevBlock, p->pprev->phashBlock))
+            return false;
+        p = p->pprev;
+    }
+    return p == tip;
+}
+static struct block_index *bpr_prebinding_header(struct main_state *ms, struct block_index *tip)
+{
+    struct block_index *header = ms->pindex_best_header;
+    if (!header) return tip;
+    if (header->nHeight < tip->nHeight) return NULL;
+    return bpr_header_prefix(ms, header, tip) ? header : NULL;
+}
+static bool bpr_served_ancestor(struct block_index *tip, const struct bpr_frontier *frontier)
+{
+    struct block_index *served = tip;
+    while (served && served->nHeight > frontier->served) served = served->pprev;
+    return served && served->phashBlock && uint256_eq(served->phashBlock, &frontier->served_hash);
+}
+static bool bpr_frontier_current(const struct bpr_frontier *before)
+{
+    struct bpr_frontier after;
+    return bpr_read_frontier(&after) && bpr_same_frontier(before, &after);
+}
+enum boot_pending_restore_result boot_wallet_prebinding_restore(
+    struct main_state *ms, struct chain_state_repository *csr, int datadir_fd)
+{
+    if (!bpr_bound(ms, csr) || datadir_fd < 0 ||
+        !progress_store_directory_matches_fd(progress_store_db(), datadir_fd))
+        return BOOT_PENDING_RESTORE_INVALID_CONTEXT;
+    struct bpr_frontier before;
+    if (!bpr_read_frontier(&before)) return BOOT_PENDING_RESTORE_AUTHORITY_UNAVAILABLE;
+    struct block_index *tip = block_map_find(&ms->map_block_index, &before.coins_hash);
+    if (!tip || tip->nHeight != before.coins) return BOOT_PENDING_RESTORE_AUTHORITY_UNAVAILABLE;
+    struct block_header tip_header;
+    if (!bpr_prebinding_ancestry(ms, tip, &tip_header)) return BOOT_PENDING_RESTORE_ANCESTRY_INVALID;
+    if (!bpr_served_ancestor(tip, &before))
+        return BOOT_PENDING_RESTORE_ANCESTRY_INVALID;
+    struct block_index *header = bpr_prebinding_header(ms, tip);
+    if (!header) return BOOT_PENDING_RESTORE_ANCESTRY_INVALID;
+    struct incremental_merkle_tree tree; sapling_tree_init(&tree);
+    if (!bpr_old_tree(before.coins, &tip_header, &tree)) return BOOT_PENDING_RESTORE_TREE_UNAVAILABLE;
+#ifdef ZCL_TESTING
+    if (bpr_before_recheck) bpr_before_recheck(bpr_before_recheck_context);
+#endif
+    if (!progress_store_directory_matches_fd(progress_store_db(), datadir_fd) ||
+        !bpr_frontier_current(&before)) return BOOT_PENDING_RESTORE_AUTHORITY_UNAVAILABLE;
+    if (!csr_restore_in_memory_view(csr, tip, header, &before.coins_hash)) return BOOT_PENDING_RESTORE_CSR_REFUSED;
+    ms->sapling_tree = tree; ms->sapling_tree_loaded = true;
     return BOOT_PENDING_RESTORE_OK;
 }

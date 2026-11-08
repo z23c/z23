@@ -52,6 +52,7 @@
 #include "domain/consensus/coinbase.h"
 #include "jobs/reducer_frontier.h"
 #include "jobs/tip_finalize_stage.h"
+#include "services/consensus_state_publication_cas.h"
 #include "mining/miner.h"
 #include "models/database.h"
 #include "services/seed_integrity_gate.h"
@@ -65,6 +66,7 @@
 #include "storage/boot_auto_refold.h"
 #include "storage/txdb.h"
 
+#include <fcntl.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
@@ -634,6 +636,38 @@ static bool nw_restore_view_is(struct nw_pending_restore_fixture *f,
         uint256_eq(&root, tree_root);
 }
 
+static int nw_prebinding_generation(void)
+{
+    int failures = 0; sqlite3 *db = progress_store_db();
+    uint8_t zero[8] = {0}, malformed = 7; bool present = false; uint64_t generation = 99;
+    progress_store_tx_lock();
+    bool begun = db && sqlite3_get_autocommit(db) && sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+    bool cleared = begun && progress_meta_delete_in_tx(db, COINS_KV_AUTHORITY_GENERATION_KEY);
+    NW_CHECK("generation absent stays distinct", cleared && boot_wallet_authority_generation(db, &present, &generation) && !present && generation == 0);
+    bool set = begun && progress_meta_set_in_tx(db, COINS_KV_AUTHORITY_GENERATION_KEY, zero, sizeof(zero));
+    NW_CHECK("generation zero is present", set && boot_wallet_authority_generation(db, &present, &generation) && present && generation == 0);
+    set = begun && progress_meta_set_in_tx(db, COINS_KV_AUTHORITY_GENERATION_KEY, &malformed, sizeof(malformed));
+    NW_CHECK("malformed generation refused", set && !boot_wallet_authority_generation(db, &present, &generation));
+    bool rolled_back = begun && sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK;
+    NW_CHECK("generation fixture rolled back", rolled_back);
+    progress_store_tx_unlock();
+    return failures;
+}
+static int nw_prebinding_unavailable(struct nw_pending_restore_fixture *f,
+                                     struct block_index *old_tip, const struct uint256 *old_root)
+{
+    int failures = 0, changes = sqlite3_total_changes(progress_store_db());
+    int fd = open(f->replay.root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    NW_CHECK("prebinding fixture opens retained datadir", fd >= 0);
+    NW_CHECK("prebinding refuses absent durable frontier without publication",
+        boot_wallet_prebinding_restore(&f->replay.ms, &f->csr, fd) == BOOT_PENDING_RESTORE_AUTHORITY_UNAVAILABLE &&
+        nw_restore_view_is(f, old_tip, false, old_root) && sqlite3_total_changes(progress_store_db()) == changes);
+    NW_CHECK("prebinding rejects unbound repository",
+        boot_wallet_prebinding_restore(&f->replay.ms, NULL, fd) == BOOT_PENDING_RESTORE_INVALID_CONTEXT &&
+        nw_restore_view_is(f, old_tip, false, old_root));
+    if (fd >= 0) close(fd);
+    return failures;
+}
 static int nw_pending_restore_case(void)
 {
     int failures = 0;
@@ -644,7 +678,9 @@ static int nw_pending_restore_case(void)
     struct block_index *old_tip = active_chain_tip(&f.replay.ms.chain_active);
     struct uint256 old_root;
     incremental_tree_root(&f.replay.ms.sapling_tree, &old_root);
+    failures += nw_prebinding_generation();
     int changes = sqlite3_total_changes(progress_store_db());
+    failures += nw_prebinding_unavailable(&f, old_tip, &old_root);
     NW_CHECK("wrong height refuses without publishing",
         boot_wallet_pending_restore(&f.replay.ms, &f.csr, 3, &f.tip_hash, 1, &f.installed_hash) == BOOT_PENDING_RESTORE_ANCESTRY_INVALID &&
         nw_restore_view_is(&f, old_tip, false, &old_root));
@@ -691,6 +727,158 @@ static int nw_pending_restore_case(void)
         nw_restore_view_is(&f, f.tip, true, &wanted_root));
     nw_pending_restore_close(&f);
     return failures;
+}
+
+void reducer_frontier_test_set_compiled_anchor(int32_t height);
+bool test_reducer_prebinding_seed(sqlite3 *db, struct block_index *genesis,
+                                  const uint8_t served[32], const uint8_t coins[32]);
+bool test_reducer_prebinding_anchor(sqlite3 *db, const uint8_t *hash);
+
+struct nw_generation_change { sqlite3 *db; bool ok; };
+static void nw_change_generation(void *context)
+{
+    struct nw_generation_change *change = context; const uint8_t one[8] = {1};
+    progress_store_tx_lock();
+    bool begun = sqlite3_exec(change->db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+    bool wrote = begun && progress_meta_set_in_tx(change->db, COINS_KV_AUTHORITY_GENERATION_KEY, one, sizeof(one));
+    change->ok = begun && sqlite3_exec(change->db, wrote ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK && wrote;
+    progress_store_tx_unlock();
+}
+static bool nw_prebinding_view(struct nw_pending_restore_fixture *f, struct block_index *tip,
+                               struct block_index *header, bool loaded, const struct uint256 *tree_root)
+{
+    struct uint256 coins, root; coins_view_cache_get_best_block(&f->replay.cache, &coins);
+    incremental_tree_root(&f->replay.ms.sapling_tree, &root);
+    struct active_chain_window_snapshot window;
+    bool window_ok = active_chain_capture_window(&f->replay.ms.chain_active, -1, &window);
+    bool ok = tip && tip->phashBlock && window_ok && window.tip == tip &&
+        f->replay.ms.pindex_best_header == header && uint256_eq(&coins, tip->phashBlock) &&
+        f->replay.ms.sapling_tree_loaded == loaded && uint256_eq(&root, tree_root) &&
+        reducer_frontier_provable_tip_is_published() && reducer_frontier_provable_tip_cached() == 0;
+    return ok;
+}
+static int nw_prebinding_refusals(struct nw_pending_restore_fixture *f, struct block_index *old,
+                                  struct block_index *tip, const struct uint256 *old_root, int fd)
+{
+    int failures = 0; sqlite3 *db = progress_store_db();
+    f->replay.ms.pindex_best_header = old;
+    NW_CHECK("prebinding rejects a lower existing header",
+        boot_wallet_prebinding_restore(&f->replay.ms, &f->csr, fd) == BOOT_PENDING_RESTORE_ANCESTRY_INVALID &&
+        nw_prebinding_view(f, old, old, false, old_root));
+    f->replay.ms.pindex_best_header = tip;
+    uint8_t wrong[32] = {0x7f};
+    bool replaced = test_reducer_prebinding_anchor(db, wrong);
+    NW_CHECK("prebinding rejects different served hash", replaced &&
+        boot_wallet_prebinding_restore(&f->replay.ms, &f->csr, fd) == BOOT_PENDING_RESTORE_ANCESTRY_INVALID &&
+        nw_prebinding_view(f, old, tip, false, old_root));
+    NW_CHECK("restore correct served hash", test_reducer_prebinding_anchor(db, f->installed_hash.data));
+    tip->nStatus |= BLOCK_FAILED_TRANSIENT;
+    NW_CHECK("prebinding transient failure does not publish",
+        boot_wallet_prebinding_restore(&f->replay.ms, &f->csr, fd) == BOOT_PENDING_RESTORE_ANCESTRY_INVALID &&
+        nw_prebinding_view(f, old, tip, false, old_root));
+    tip->nStatus &= ~(unsigned)BLOCK_FAILED_TRANSIENT;
+    struct nw_generation_change change = {.db = db};
+    boot_wallet_prebinding_test_before_recheck(nw_change_generation, &change);
+    enum boot_pending_restore_result stale = boot_wallet_prebinding_restore(&f->replay.ms, &f->csr, fd);
+    boot_wallet_prebinding_test_before_recheck(NULL, NULL);
+    NW_CHECK("prebinding generation change does not publish", change.ok && stale == BOOT_PENDING_RESTORE_AUTHORITY_UNAVAILABLE &&
+        nw_prebinding_view(f, old, tip, false, old_root));
+    chain_linkage_hold_set("prebinding_fixture", 1, "fixture refusal");
+    enum boot_pending_restore_result held = boot_wallet_prebinding_restore(&f->replay.ms, &f->csr, fd);
+    chain_linkage_hold_clear("prebinding_fixture");
+    NW_CHECK("prebinding CSR refusal does not publish", held == BOOT_PENDING_RESTORE_CSR_REFUSED &&
+        nw_prebinding_view(f, old, tip, false, old_root));
+    return failures;
+}
+static int nw_prebinding_durable_refusal(struct nw_pending_restore_fixture *f, struct block_index *old,
+                                         struct block_index *tip, const struct uint256 *old_root, int fd)
+{
+    int failures = 0; sqlite3 *db = progress_store_db(); int32_t h = -1; uint8_t hash[32];
+    bool removed = test_reducer_prebinding_anchor(db, NULL);
+    progress_store_tx_lock();
+    bool fallback = consensus_state_publication_cas_capture_frontier_locked(db, &h, hash);
+    progress_store_tx_unlock();
+    NW_CHECK("runtime genesis fallback actually exists", removed && fallback && h == 0);
+    NW_CHECK("prebinding rejects missing durable H* despite runtime genesis",
+        boot_wallet_prebinding_restore(&f->replay.ms, &f->csr, fd) == BOOT_PENDING_RESTORE_AUTHORITY_UNAVAILABLE &&
+        nw_prebinding_view(f, old, tip, false, old_root));
+    NW_CHECK("restore durable anchor fixture", test_reducer_prebinding_anchor(db, f->installed_hash.data));
+    return failures;
+}
+static int nw_prebinding_success(struct nw_pending_restore_fixture *f, struct block_index *tip, int fd)
+{
+    int failures = 0; struct uint256 root; incremental_tree_root(&f->tree, &root);
+    int changes = sqlite3_total_changes(progress_store_db());
+    (void)boot_wallet_prebinding_test_take_header_reads();
+    enum boot_pending_restore_result result = boot_wallet_prebinding_restore(&f->replay.ms, &f->csr, fd);
+    unsigned same_reads = boot_wallet_prebinding_test_take_header_reads();
+    NW_CHECK("prebinding restores proven distinct served and coins frontiers",
+        result == BOOT_PENDING_RESTORE_OK && nw_prebinding_view(f, tip, tip, true, &root) &&
+        sqlite3_total_changes(progress_store_db()) == changes && same_reads == 2);
+    struct block_header header; block_header_init(&header);
+    header.nVersion = 4; header.nTime = 1700000003u; header.nBits = 0x1f07ffffu;
+    header.hashPrevBlock = f->tip_hash; header.hashFinalSaplingRoot = root;
+    header.nSolutionSize = 1; header.nSolution[0] = 9;
+    struct uint256 newer_hash;
+    bool added = nw_pending_restore_add_header(f, tip, &header, &newer_hash) &&
+        event_log_flush(f->log) && block_index_projection_catch_up(f->projection) != UINT64_MAX;
+    struct block_index *newer = f->tip;
+    if (added) f->replay.ms.pindex_best_header = newer;
+    changes = sqlite3_total_changes(progress_store_db());
+    (void)boot_wallet_prebinding_test_take_header_reads();
+    result = added ? boot_wallet_prebinding_restore(&f->replay.ms, &f->csr, fd) : BOOT_PENDING_RESTORE_INVALID_CONTEXT;
+    unsigned newer_reads = boot_wallet_prebinding_test_take_header_reads();
+    NW_CHECK("prebinding keeps verified higher header without rereading old chain",
+        added && result == BOOT_PENDING_RESTORE_OK && nw_prebinding_view(f, tip, newer, true, &root) &&
+        sqlite3_total_changes(progress_store_db()) == changes && newer_reads == 3);
+    printf("prebinding header reads: same=%u higher=%u\n", same_reads, newer_reads);
+    return failures;
+}
+static int nw_open_blocks_dir(const struct nw_pending_restore_fixture *f)
+{
+    char path[640];
+    int n = snprintf(path, sizeof(path), "%s/blocks", f->replay.dir);
+    if (n < 0 || (size_t)n >= sizeof(path)) return -1;
+    return open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+}
+static int nw_prebinding_case(void)
+{
+    int failures = 0; struct nw_pending_restore_fixture f = {0};
+    bool ready = nw_pending_restore_open(&f); NW_CHECK("prebinding fixture opens", ready);
+    if (!ready) { nw_pending_restore_close(&f); return failures; }
+    struct active_chain_window_snapshot window;
+    bool captured = active_chain_capture_window(&f.replay.ms.chain_active, -1, &window);
+    struct block_index *tip = f.tip, *old = captured ? window.tip : NULL;
+    struct block_index *genesis = tip->pprev->pprev; struct uint256 old_root;
+    int fd = open(f.replay.root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int wrong_fd = nw_open_blocks_dir(&f);
+    incremental_tree_root(&f.replay.ms.sapling_tree, &old_root);
+    sqlite3 *db = progress_store_db();
+    ready = old && fd >= 0 && wrong_fd >= 0 && block_index_initialize_genesis(genesis, chain_params_get()) &&
+        sqlite3_exec(db, "DELETE FROM sapling_anchors", NULL, NULL, NULL) == SQLITE_OK &&
+        anchor_kv_initialize_history(db, 0);
+    sapling_tree_init(&f.tree);
+    if (ready) {
+        reducer_frontier_test_set_compiled_anchor(1);
+        ready = test_reducer_prebinding_seed(progress_store_db(), genesis, f.installed_hash.data, f.tip_hash.data);
+    }
+    NW_CHECK("prebinding actual reducer fixture seeds", ready);
+    if (ready) {
+        f.replay.ms.pindex_best_header = tip;
+        int changes = sqlite3_total_changes(progress_store_db());
+        NW_CHECK("prebinding rejects a different retained directory",
+            boot_wallet_prebinding_restore(&f.replay.ms, &f.csr, wrong_fd) == BOOT_PENDING_RESTORE_INVALID_CONTEXT &&
+            nw_prebinding_view(&f, old, tip, false, &old_root) && sqlite3_total_changes(progress_store_db()) == changes);
+        failures += nw_prebinding_refusals(&f, old, tip, &old_root, fd);
+        failures += nw_prebinding_durable_refusal(&f, old, tip, &old_root, fd);
+        failures += nw_prebinding_success(&f, tip, fd);
+    }
+    boot_wallet_prebinding_test_before_recheck(NULL, NULL);
+    tip_finalize_stage_test_reset(); reducer_frontier_provable_tip_reset();
+    reducer_frontier_test_set_compiled_anchor(-1);
+    if (fd >= 0) close(fd);
+    if (wrong_fd >= 0) close(wrong_fd);
+    nw_pending_restore_close(&f); return failures;
 }
 
 /* The seeded fact here is synthetic; the real caller verifies its window first. */
@@ -793,6 +981,7 @@ int test_recovery_no_worse(void)
     printf("\n=== recovery_no_worse: RECOVERY NEVER MAKES IT WORSE ===\n");
     int failures = 0;
     failures += nw_pending_restore_case();
+    failures += nw_prebinding_case();
     failures += nw_old_partial_case();
     failures += nw_canonical_replay_case(1);
     failures += nw_canonical_replay_case(0);
