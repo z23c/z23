@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * File controller tests — manifest coverage and cache invalidation. */
 
+#include "crypto/sha3.h"
 #include "platform/time_compat.h"
 #include "platform/file_sync.h"
 #include "test/test_core.h"
@@ -791,9 +792,95 @@ static int test_file_export_snapshot_rejects_empty_datadir(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+static bool immutable_fixture_initial(const char *dir, struct file_manifest *out)
+{
+    char path[320];
+    snprintf(path, sizeof(path), "%s/blocks/blk00000.dat", dir);
+    test_file_write_bytes(path, 17, 7);
+    if (file_controller_build_immutable_manifest(out, dir, 1)) return false;
+    snprintf(path, sizeof(path), "%s/block_index.bin", dir);
+    test_file_write_bytes(path, 19, 9);
+    if (!file_controller_build_immutable_manifest(out, dir, 1)) return false;
+    uint8_t bytes[19], block_hash[32], index_hash[32];
+    memset(bytes, 7, 17); sha3_256(bytes, 17, block_hash);
+    memset(bytes, 9, 19); sha3_256(bytes, 19, index_hash);
+    return out->num_chunks == 2 && out->total_bytes == 36 &&
+        out->chunks[0].file_index == 0 && out->chunks[1].file_index == 253 &&
+        memcmp(out->chunks[0].sha3, block_hash, 32) == 0 &&
+        memcmp(out->chunks[1].sha3, index_hash, 32) == 0;
+}
+
+static bool immutable_fixture_rejections(const char *dir, struct file_manifest *out)
+{
+    char path[320];
+    memset(out, 0xa5, sizeof(*out));
+    struct file_manifest sentinel = *out;
+    snprintf(path, sizeof(path), "%s/blocks/blk00002.dat", dir);
+    test_file_write_bytes(path, 1, 1);
+    bool gap = !file_controller_build_immutable_manifest(out, dir, 3) &&
+        memcmp(out, &sentinel, sizeof(*out)) == 0;
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/blocks/blk000003.dat", dir);
+    test_file_write_bytes(path, 1, 1);
+    bool malformed = !file_controller_build_immutable_manifest(out, dir, 1);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/blocks/blk00253.dat", dir);
+    test_file_write_bytes(path, 1, 1);
+    bool reserved = !file_controller_build_immutable_manifest(out, dir, 1);
+    unlink(path);
+    return gap && malformed && reserved;
+}
+
+static bool immutable_fixture_symlink(const char *path, const char *dir, struct file_manifest *out)
+{
+    unlink(path);
+    return symlink("/dev/null", path) == 0 &&
+        !file_controller_build_immutable_manifest(out, dir, 1);
+}
+
+static bool immutable_fixture_limits(const char *dir, struct file_manifest *out)
+{
+    char path[320];
+    snprintf(path, sizeof(path), "%s/block_index.bin", dir);
+    FILE *f = fopen(path, "wb");
+    bool oversized = f && ftruncate(fileno(f), (off_t)FILE_CHUNK_SIZE * FILE_MAX_CHUNKS + 1) == 0;
+    if (f) fclose(f);
+    if (!oversized || file_controller_build_immutable_manifest(out, dir, 1)) return false;
+    f = fopen(path, "wb");
+    bool boundary = f && ftruncate(fileno(f), (off_t)FILE_CHUNK_SIZE + 1) == 0;
+    if (f) fclose(f);
+    if (!boundary || !file_controller_build_immutable_manifest(out, dir, 1)) return false;
+    uint8_t roots[96], expected[32];
+    for (unsigned i = 0; i < 3; i++) memcpy(roots + i * 32, out->chunks[i].sha3, 32);
+    sha3_256(roots, sizeof(roots), expected);
+    boundary = out->num_chunks == 3 && out->chunks[1].size == FILE_CHUNK_SIZE &&
+        out->chunks[2].offset == FILE_CHUNK_SIZE && out->chunks[2].size == 1 &&
+        memcmp(expected, out->root_hash, 32) == 0;
+    return boundary && immutable_fixture_symlink(path, dir, out);
+}
+
+static int test_immutable_manifest(void)
+{
+    char dir[256];
+    setup_manifest_test_dir(dir, sizeof(dir));
+    struct file_manifest manifest = {0};
+    bool initial = immutable_fixture_initial(dir, &manifest);
+    bool refused = immutable_fixture_rejections(dir, &manifest);
+    bool limits = immutable_fixture_limits(dir, &manifest);
+    cleanup_manifest_test_dir(dir);
+    if (initial && refused && limits) return 0;
+    printf("immutable manifest: initial=%d refused=%d limits=%d\n", initial, refused, limits);
+    return 1;
+}
+#endif
+
 int test_file_controller(void)
 {
     int failures = 0;
+#if !defined(_WIN32)
+    failures += test_immutable_manifest();
+#endif
 
     failures += test_manifest_build_includes_snapshot();
     failures += test_manifest_cache_rebuilds_when_snapshot_appears();

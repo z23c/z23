@@ -50,6 +50,15 @@ bool file_controller_get_manifest_copy(struct file_manifest *out);
 /* Explicitly rebuild the cached manifest from the current datadir. */
 bool file_controller_refresh_manifest(void);
 
+/* Build a complete manifest from an operator-guaranteed immutable private copy.
+ * block_files is the exact contiguous count (1..253); no snapshot is included.
+ * Caller guarantees the entire source tree, including parent paths, stays immutable.
+ * This operation is unsupported on Windows and returns false there.
+ * On failure out is unchanged. This grants no publication or chain authority. */
+bool file_controller_build_immutable_manifest(struct file_manifest *out,
+                                               const char *datadir,
+                                               unsigned block_files);
+
 /* Get the current manifest/export readiness summary. */
 void file_controller_get_manifest_status(struct file_manifest_status *out);
 
