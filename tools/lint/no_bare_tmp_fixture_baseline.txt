@@ -5,7 +5,6 @@
 # Shrink-only ratchet: a count at or under its pin passes; a
 # grown count fails; a row whose file has 0 live sites fails as
 # STALE.
-engine/composition/src/boot.c 1
 engine/composition/src/boot_mint_anchor_preflight.c 2
 engine/entry/main_cli_modes.c 1
 engine/modules/hotswap/src/hotswap_loader.c 2

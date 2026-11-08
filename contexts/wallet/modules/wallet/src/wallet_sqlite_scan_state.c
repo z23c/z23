@@ -153,7 +153,7 @@ static bool wss_checked_marker_value(sqlite3_stmt *s, struct wallet_scan_marker 
     const char *p = (const char *)text;
     int64_t from, depth, since;
     if (!wss_checked_number(&p, "from=", 0, INT_MAX, &from) ||
-        !wss_checked_number(&p, " depth=", 0, INT_MAX, &depth) ||
+        !wss_checked_number(&p, " depth=", -1, INT_MAX, &depth) ||
         !wss_checked_number(&p, " since=", 0, INT64_MAX, &since) ||
         strncmp(p, " blocker=", 9)) return false;
     p += 9;

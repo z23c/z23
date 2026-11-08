@@ -2609,6 +2609,27 @@ static int bil_release_direct_case(void)
     return failures;
 }
 
+static int bil_flat_private_identity_case(const char *dir)
+{
+    int failures = 0;
+    struct block_index_flat_identity before = {0}, after = {0};
+    bool identity_before = block_index_flat_verified_identity(dir, &before);
+    struct main_state isolated; main_state_init(&isolated);
+    bool zero = !block_index_history_index_load(dir, &isolated, 0).ok;
+    bool bounded = !block_index_history_index_load(dir, &isolated, 1).ok &&
+        isolated.map_block_index.size == 0;
+    bool after_refusal = block_index_flat_verified_identity(dir, &after) &&
+        !memcmp(&before, &after, sizeof(before));
+    bool private_ok = block_index_history_index_load(dir, &isolated, 2).ok;
+    bool nonempty = !block_index_history_index_load(dir, &isolated, 2).ok;
+    bool after_success = block_index_flat_verified_identity(dir, &after) &&
+        !memcmp(&before, &after, sizeof(before));
+    BIL_CHECK("bil: private history index bounds and identity isolation",
+              identity_before && zero && bounded && after_refusal && private_ok && nonempty && after_success);
+    main_state_free(&isolated);
+    return failures;
+}
+
 static int bil_flat_budget_case(void)
 {
     int failures = 0;
@@ -2633,6 +2654,7 @@ static int bil_flat_budget_case(void)
     struct block_index *p = block_map_find(&dst.map_block_index, &h1);
     BIL_CHECK("bil: sufficient budget loads verified linked rows", loaded && g && p && p->pprev == g &&
               dst.map_block_index.size == 2 && block_index_flat_verified_identity(dir, &observed));
+    failures += bil_flat_private_identity_case(dir);
     main_state_free(&dst);
     main_state_init(&dst);
     snprintf(path, sizeof(path), "%s/block_index.bin", dir);
@@ -2699,6 +2721,18 @@ static struct block_index *bil_history_row(FILE *f, struct main_state *source,
     return row;
 }
 
+static bool bil_history_damage(const char *path, int mode, bool ok)
+{
+    if (ok && mode == 1) {
+        int fd = open(path, O_WRONLY);
+        uint8_t byte = 0;
+        ok = fd >= 0 && pwrite(fd, &byte, 1, 8) == 1 && close(fd) == 0;
+    }
+    if (ok && mode == 5) ok = unlink(path) == 0;
+    if (ok && mode == 6) ok = truncate(path, 16) == 0;
+    return ok;
+}
+
 static bool bil_history_make(const char *dir, struct uint256 hashes[29], int mode)
 {
     char blocks[PATH_MAX + 32], path[PATH_MAX + 64];
@@ -2718,12 +2752,7 @@ static bool bil_history_make(const char *dir, struct uint256 hashes[29], int mod
     struct block_index_flat_identity saved;
     ok = ok && save_block_index_flat_identity(dir, &source, &saved).ok;
     main_state_free(&source);
-    if (ok && mode == 1) {
-        int fd = open(path, O_WRONLY);
-        uint8_t byte = 0;
-        ok = fd >= 0 && pwrite(fd, &byte, 1, 8) == 1 && close(fd) == 0;
-    }
-    if (ok && mode == 5) ok = unlink(path) == 0;
+    ok = bil_history_damage(path, mode, ok);
     return ok;
 }
 
@@ -2856,7 +2885,7 @@ static int bil_history_archive_cases(void)
 {
     int failures = 0;
     chain_params_select(CHAIN_REGTEST);
-    for (int mode = 0; mode < 6; mode++) failures += bil_history_archive_case(mode);
+    for (int mode = 0; mode < 7; mode++) failures += bil_history_archive_case(mode);
     failures += bil_history_cancel_case();
 #if defined(__linux__) && !defined(_WIN32)
     failures += bil_history_retained_handle_case();

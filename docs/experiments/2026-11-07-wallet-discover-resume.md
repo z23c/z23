@@ -67,3 +67,68 @@ existing earlier-stage check. The focused `boot_phase` group passed on the
 reviewed change (1/1, zero skips), including adjacent-stage refusal and a
 saved-cursor check. A complete Android interruption and resume test remains
 necessary.
+
+## Transparent replay for a shielded-only wallet
+
+An isolated Android profile on 2026-11-07 found transparent replay accounted
+for 71.15% inclusive CPU-cycle profile weight across 890 samples over ten seconds. The wallet contained
+20 synthetic Sapling keys and no loaded transparent identities. This sample
+is not an end-to-end speed measurement.
+
+A coordinator may advance to DISCOVER without reading transparent bodies when
+checked database and in-memory state contain no transparent identities or
+effects. It repeats that proof in the final publication transaction. Sapling
+seed, keys and notes remain eligible. Uncertain or nonempty state uses the
+ordinary transparent scan.
+
+Focused host tests passed `boot_phase` and `node_db_catchup_service` (2/2,
+zero skips). They exercised encrypted startup and seed adoption, zero
+transparent reads, a discovered Sapling note reaching READY, a key minted
+before publication retaining PENDING, and a database-only watch identity
+forcing the ordinary scan. A test retaining the former master-key restriction
+failed the seeded zero-read assertion. Android timing and restart with this
+optimization remain unmeasured.
+
+## Stop during pending replay
+
+An isolated Pixel resumed DISCOVER from its saved height and advanced. A
+SIGTERM then stopped the process promptly, but startup reported a fatal error
+because the replay loop returned the same result for a requested stop and a
+failure. The saved checkpoint remained available and the synthetic wallet fingerprint was unchanged.
+
+The replay loop now reports a stop only at checked boundaries and preserves
+failure results. Pending-wallet shutdown uses the existing checked durability
+and no-wallet-flush cleanup. Focused host tests passed the registered
+`boot_phase`, `node_db_catchup_service`, and
+`consensus_state_snapshot_install` groups (3/3, zero skips). They cover the
+replay boundary and pending cleanup; they do not establish cancellation during
+archive opening or checkpoint I/O, or a complete Android Stop flow.
+
+A follow-up gives checkpoint preparation and saving distinct cancellation
+results. Cancellation remains distinct from descriptor, database and rollback
+failures, including when a shutdown request is concurrent. The focused host
+`boot_phase` and `node_db_catchup_service` groups passed (2/2, zero skips),
+covering cancellation and retained checkpoint state. Complete Android Stop
+and archive-opening cancellation remain to be verified.
+
+Sapling replay also recognizes Stop after a block has been committed,
+delivered and revalidated. The coordinator retains PENDING and does not
+advance a completed phase on this result. A stale binding or other failure
+continues to take precedence. This boundary does not bound the time spent
+within a block, archive opening, or filesystem operations. Android Stop latency
+for this change remains unmeasured.
+
+A subsequent isolated Pixel run exposed a cleanup-stage mismatch: replay
+reported Stop, but the committed-wallet classifier rejected the later startup
+stage. The STOP-only cleanup now checks the same wallet, database, binding and
+generation authority at that stage. The normal installer check is unchanged.
+The checked scan-state reader also accepts the existing unscanned height of
+-1; malformed values and values below -1 remain invalid.
+
+The focused host groups passed (4/4, zero skips). A real-artifact startup
+fixture passed (1/1, zero skips) after saving a checkpoint, stopping and
+reopening the pending wallet. On the isolated Pixel, the node resumed at the
+saved height and exited successfully after Stop in approximately 19.3 seconds,
+including durability cleanup; the saved checkpoint and synthetic wallet
+fingerprint remained unchanged. Automatic wallet-history acquisition is not implemented on this path; complete
+migration remains unverified.

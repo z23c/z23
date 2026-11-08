@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for Sapling replay decryption. */
+ZCL_MODULE_CAPABILITY("engine/services/src/node_db_catchup_decrypt.c", CAP_FS_WRITE, "zcl_calloc allocation-failure diagnostics write to stderr")

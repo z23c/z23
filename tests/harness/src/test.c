@@ -1538,6 +1538,8 @@ static void run_full_suite_consensus_edges(int *failures)
     *failures += test_model_fields();
     *failures += test_sync_service();
     *failures += test_node_db_catchup_service();
+    { extern int test_catchup_parallel_cold(void);
+      *failures += test_catchup_parallel_cold(); }
     *failures += test_node_db_projection_heal();
     *failures += test_wallet_witness_advance();
     *failures += test_catchup_lifecycle_service();

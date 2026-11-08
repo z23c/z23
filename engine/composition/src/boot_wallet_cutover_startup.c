@@ -268,17 +268,18 @@ bool boot_cutover_preflight(struct boot_cutover_env *e, const char *datadir, boo
 
 
 
-bool boot_cutover_verify_committed(struct boot_cutover_env *e, const char *datadir,
-    const struct wallet_cutover_binding *expected)
+static bool boot_cutover_verify_committed_mode(struct boot_cutover_env *e, const char *datadir,
+    const struct wallet_cutover_binding *expected, bool stop)
 {
 #if defined(_WIN32)
-    (void)e; (void)datadir; (void)expected; return false;
+    (void)e; (void)datadir; (void)expected; (void)stop; return false;
 #else
     if (!e || !datadir || !expected) return false;
     int fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return false;
     bool present = false; uint64_t generation = 0;
-    enum wallet_install_reconcile state = consensus_state_wallet_install_classify(
+    enum wallet_install_reconcile state = stop ? consensus_state_wallet_install_classify_stop(
+        e->wallet_db, e->node, fd, &present, &generation) : consensus_state_wallet_install_classify(
         e->wallet_db, e->node, fd, &present, &generation);
     struct wallet_cutover_binding actual;
     bool ok = state == WALLET_INSTALL_COMMITTED &&
@@ -288,6 +289,13 @@ bool boot_cutover_verify_committed(struct boot_cutover_env *e, const char *datad
     return ok;
 #endif
 }
+
+bool boot_cutover_verify_committed(struct boot_cutover_env *e, const char *dir,
+    const struct wallet_cutover_binding *expected)
+{ return boot_cutover_verify_committed_mode(e, dir, expected, false); }
+bool boot_cutover_verify_committed_stop(struct boot_cutover_env *e, const char *dir,
+    const struct wallet_cutover_binding *expected)
+{ return boot_cutover_verify_committed_mode(e, dir, expected, true); }
 
 /* Open the runtime handles without entering legacy repair or cleanup paths. */
 static bool boot_pending_runtime_stores_open(const char *datadir, struct node_db *ndb,
@@ -619,17 +627,34 @@ bool boot_test_pending_authenticate(struct wallet *wallet, struct wallet_sqlite 
 #endif
 
 /* Only repeated contention is retried; shutdown, lock and elapsed bounds win. */
+static enum boot_busy_result boot_pending_busy_at(int64_t *since, int64_t deadline,
+    int limit_ms, int64_t now, bool locked, bool shutdown)
+{
+    if (now <= 0 || (deadline && (now >= deadline || locked)))
+        return BOOT_BUSY_FAILED;
+    if (!*since) *since = now;
+    if (now < *since || now - *since >= limit_ms) return BOOT_BUSY_FAILED;
+    if (shutdown) return BOOT_BUSY_STOPPED;
+    return BOOT_BUSY_RETRY;
+}
+
+static enum boot_busy_result boot_pending_busy_result(int64_t *since, int64_t deadline, int limit_ms)
+{
+    enum boot_busy_result result = boot_pending_busy_at(since, deadline, limit_ms,
+        platform_time_monotonic_ms(), deadline && wallet_lock_is_locked(),
+        thread_registry_shutdown_requested());
+    if (result == BOOT_BUSY_RETRY) platform_sleep_ms(50);
+    return result;
+}
+
+#ifdef ZCL_TESTING
 static bool boot_pending_busy_backoff(int64_t *since, int64_t deadline, int limit_ms)
 {
-    int64_t now = platform_time_monotonic_ms();
-    if (now <= 0 || thread_registry_shutdown_requested() ||
-        (deadline && (now >= deadline || wallet_lock_is_locked()))) return false;
-    if (!*since) *since = now;
-    if (now < *since || now - *since >= limit_ms) return false;
-    platform_sleep_ms(50);
-    return true;
+    return boot_pending_busy_result(since, deadline, limit_ms) == BOOT_BUSY_RETRY;
 }
-#ifdef ZCL_TESTING
+int boot_test_pending_busy_at(int64_t *since, int64_t deadline, int limit_ms,
+    int64_t now, bool locked, bool shutdown)
+{ return (int)boot_pending_busy_at(since, deadline, limit_ms, now, locked, shutdown); }
 bool boot_test_pending_busy_backoff(int64_t *since, int64_t deadline, int limit_ms)
 {
     return boot_pending_busy_backoff(since, deadline, limit_ms);
@@ -686,30 +711,38 @@ static bool boot_pending_checkpoint_due(int64_t last, int64_t now)
 bool boot_test_pending_checkpoint_due(int64_t last, int64_t now)
 { return boot_pending_checkpoint_due(last, now); }
 #endif
-static bool boot_pending_checkpoint_resume(struct boot_cutover_replay *r)
+static enum boot_pending_replay_result boot_pending_checkpoint_resume(struct boot_cutover_replay *r)
 {
     int64_t since = 0;
     for (;;) {
         enum boot_discover_resume result = boot_wallet_discover_checkpoint_resume(r);
-        if (result == BOOT_DISCOVER_FLOOR || result == BOOT_DISCOVER_RESUMED) return true;
-        if (result != BOOT_DISCOVER_BUSY ||
-            !boot_pending_busy_backoff(&since, r->auth_deadline_ms, 30000)) return false;
+        if (result == BOOT_DISCOVER_FLOOR || result == BOOT_DISCOVER_RESUMED) return BOOT_PENDING_COMPLETE;
+        if (result == BOOT_DISCOVER_STOPPED) return BOOT_PENDING_STOPPED;
+        if (result != BOOT_DISCOVER_BUSY) return BOOT_PENDING_FAILED;
+        enum boot_busy_result busy = boot_pending_busy_result(&since, r->auth_deadline_ms, 30000);
+        if (busy == BOOT_BUSY_STOPPED) return BOOT_PENDING_STOPPED;
+        if (busy != BOOT_BUSY_RETRY) return BOOT_PENDING_FAILED;
     }
 }
-static bool boot_pending_checkpoint_save(struct boot_cutover_replay *r)
+static enum boot_pending_replay_result boot_pending_checkpoint_save(struct boot_cutover_replay *r)
 {
     struct wallet_discover_checkpoint checkpoint;
-    if (!boot_wallet_discover_checkpoint_prepare(r, &checkpoint)) return false;
+    enum boot_discover_prepare prepared = boot_wallet_discover_checkpoint_prepare_result(r, &checkpoint);
+    if (prepared == BOOT_DISCOVER_PREPARE_STOPPED) return BOOT_PENDING_STOPPED;
+    if (prepared != BOOT_DISCOVER_PREPARED) return BOOT_PENDING_FAILED;
     int64_t since = 0;
     for (;;) {
         enum boot_discover_save result = boot_wallet_discover_checkpoint_save(r, &checkpoint);
-        if (result == BOOT_DISCOVER_SAVED) return true;
-        if (result != BOOT_DISCOVER_SAVE_BUSY ||
-            !boot_pending_busy_backoff(&since, r->auth_deadline_ms, 30000)) return false;
+        if (result == BOOT_DISCOVER_SAVED) return BOOT_PENDING_COMPLETE;
+        if (result == BOOT_DISCOVER_SAVE_STOPPED) return BOOT_PENDING_STOPPED;
+        if (result != BOOT_DISCOVER_SAVE_BUSY) return BOOT_PENDING_FAILED;
+        enum boot_busy_result busy = boot_pending_busy_result(&since, r->auth_deadline_ms, 30000);
+        if (busy == BOOT_BUSY_STOPPED) return BOOT_PENDING_STOPPED;
+        if (busy != BOOT_BUSY_RETRY) return BOOT_PENDING_FAILED;
     }
 }
 
-static bool boot_pending_checkpoint_progress(struct boot_cutover_replay *replay,
+static enum boot_pending_replay_result boot_pending_checkpoint_progress(struct boot_cutover_replay *replay,
     enum boot_cutover_replay_status status, enum boot_cutover_replay_phase before_phase,
     int before, int64_t *last_checkpoint_ms)
 {
@@ -717,59 +750,145 @@ static bool boot_pending_checkpoint_progress(struct boot_cutover_replay *replay,
         replay->phase == BOOT_CUTOVER_DISCOVER)
         return boot_pending_checkpoint_resume(replay);
     if (status != BOOT_CUTOVER_PROGRESS || before_phase != BOOT_CUTOVER_DISCOVER ||
-        replay->phase != BOOT_CUTOVER_DISCOVER || replay->next <= before) return true;
+        replay->phase != BOOT_CUTOVER_DISCOVER || replay->next <= before) return BOOT_PENDING_COMPLETE;
     int64_t now = platform_time_monotonic_ms();
-    if (now <= 0 || (*last_checkpoint_ms && now < *last_checkpoint_ms)) return false;
-    if (!boot_pending_checkpoint_due(*last_checkpoint_ms, now)) return true;
-    if (!boot_pending_checkpoint_save(replay)) return false;
+    if (now <= 0 || (*last_checkpoint_ms && now < *last_checkpoint_ms)) return BOOT_PENDING_FAILED;
+    if (!boot_pending_checkpoint_due(*last_checkpoint_ms, now)) return BOOT_PENDING_COMPLETE;
+    enum boot_pending_replay_result result = boot_pending_checkpoint_save(replay);
+    if (result != BOOT_PENDING_COMPLETE) return result;
     *last_checkpoint_ms = platform_time_monotonic_ms();
-    return *last_checkpoint_ms > 0;
+    return *last_checkpoint_ms > 0 ? BOOT_PENDING_COMPLETE : BOOT_PENDING_FAILED;
 }
 
-static bool boot_replay_busy(struct boot_cutover_replay *replay, int before,
+static enum boot_busy_result boot_replay_busy(struct boot_cutover_replay *replay, int before,
                              int64_t *since, int64_t deadline)
 {
     if (replay->next != before) *since = 0;
-    return boot_pending_busy_backoff(since, deadline, 30000);
+    return boot_pending_busy_result(since, deadline, 30000);
 }
 
-bool boot_cutover_replay(struct boot_cutover_env *e, struct app_context *ctx, const struct chain_params *params)
+static bool boot_replay_busy_retry(struct boot_cutover_replay *replay, int before,
+    int64_t *since, int64_t deadline, enum boot_pending_replay_result *result)
+{
+    enum boot_busy_result busy = boot_replay_busy(replay, before, since, deadline);
+    if (busy == BOOT_BUSY_STOPPED) *result = BOOT_PENDING_STOPPED;
+    return busy == BOOT_BUSY_RETRY;
+}
+
+#ifdef ZCL_TESTING
+static void (*boot_test_pending_after_step)(void);
+void boot_test_pending_step_hook(void (*hook)(void)) { boot_test_pending_after_step = hook; }
+static void (*boot_test_pending_detail)(enum boot_cutover_replay_phase, enum boot_cutover_replay_status);
+void boot_test_pending_detail_hook(void (*hook)(enum boot_cutover_replay_phase, enum boot_cutover_replay_status))
+{ boot_test_pending_detail = hook; }
+#endif
+
+static bool boot_pending_deadline_valid(int64_t deadline)
+{
+    if (!deadline) return true;
+    int64_t now = platform_time_monotonic_ms();
+    return now > 0 && now < deadline && !wallet_lock_is_locked();
+}
+
+static enum boot_pending_replay_result boot_pending_replay_loop(struct boot_cutover_env *e,
+    struct app_context *ctx, const struct chain_params *params, struct boot_cutover_replay *replay,
+    int64_t deadline)
+{
+    enum boot_pending_replay_result result = BOOT_PENDING_FAILED;
+    int64_t busy_since = 0, last_progress_ms = 0, last_checkpoint_ms = 0;
+    int last_progress_phase = -1;
+    for (;;) {
+        if (!boot_pending_deadline_valid(deadline)) break;
+        if (thread_registry_shutdown_requested()) {
+            result = BOOT_PENDING_STOPPED;
+            break;
+        }
+        int before = replay->next;
+        enum boot_cutover_replay_phase before_phase = replay->phase;
+        enum boot_cutover_replay_status status = boot_cutover_replay_step(replay);
+#ifdef ZCL_TESTING
+        if (boot_test_pending_after_step) boot_test_pending_after_step();
+        if (boot_test_pending_detail) boot_test_pending_detail(before_phase, status);
+#endif
+        if (status == BOOT_CUTOVER_BUSY) {
+            if (!boot_replay_busy_retry(replay, before, &busy_since, deadline, &result)) break;
+            continue;
+        }
+        if (status == BOOT_CUTOVER_STOPPED) {
+            if (boot_pending_deadline_valid(deadline))
+                result = BOOT_PENDING_STOPPED;
+            break;
+        }
+        busy_since = 0;
+        if (status == BOOT_CUTOVER_COMPLETE) {
+            if (boot_pending_publish(e, ctx, params, replay)) result = BOOT_PENDING_COMPLETE;
+            break;
+        }
+        enum boot_pending_replay_result checkpoint =
+            boot_pending_checkpoint_progress(replay, status, before_phase, before, &last_checkpoint_ms);
+        if (checkpoint != BOOT_PENDING_COMPLETE) { result = checkpoint; break; }
+        if (boot_replay_stopped(status, replay, &last_progress_phase, &last_progress_ms)) break;
+    }
+    return result;
+}
+#ifdef ZCL_TESTING
+enum boot_pending_replay_result boot_test_pending_loop(struct boot_cutover_replay *replay)
+{ return boot_pending_replay_loop(NULL, NULL, NULL, replay, 0); }
+#endif
+
+enum boot_pending_replay_result boot_cutover_replay(struct boot_cutover_env *e, struct app_context *ctx, const struct chain_params *params)
 {
     struct boot_cutover_replay replay = {0};
     struct wallet_rpc_context rpc;
     struct boot_pending_history history = {0};
-    bool ok = false, unlocked = false;
-    int64_t deadline = 0, busy_since = 0, last_progress_ms = 0, last_checkpoint_ms = 0;
-    int last_progress_phase = -1;
+    enum boot_pending_replay_result result = BOOT_PENDING_FAILED;
+    bool unlocked = false;
+    int64_t deadline = 0;
     if (!boot_pending_authenticate(e, ctx, &unlocked, &deadline)) goto done;
     if (!boot_pending_replay_prepare(e, ctx, &replay, &rpc, &history)) {
         LOG_ERROR("wallet", "pending replay reference or scan floor unavailable");
         goto done;
     }
     replay.auth_deadline_ms = deadline;
-    while (!thread_registry_shutdown_requested()) {
-        int64_t now = deadline ? platform_time_monotonic_ms() : 0;
-        if (deadline && (now <= 0 || now >= deadline || wallet_lock_is_locked())) break;
-        int before = replay.next;
-        enum boot_cutover_replay_phase before_phase = replay.phase;
-        enum boot_cutover_replay_status status = boot_cutover_replay_step(&replay);
-        if (status == BOOT_CUTOVER_BUSY) {
-            if (!boot_replay_busy(&replay, before, &busy_since, deadline)) break;
-            continue;
-        }
-        busy_since = 0;
-        if (status == BOOT_CUTOVER_COMPLETE) {
-            ok = boot_pending_publish(e, ctx, params, &replay);
-            break;
-        }
-        if (!boot_pending_checkpoint_progress(&replay, status, before_phase, before, &last_checkpoint_ms)) break;
-        if (boot_replay_stopped(status, &replay, &last_progress_phase, &last_progress_ms)) break;
-    }
+    result = boot_pending_replay_loop(e, ctx, params, &replay, deadline);
 done:
     if (unlocked) wallet_lock_lock(e->wallet);
     boot_cutover_replay_clear(&replay);
     boot_pending_history_close(&history);
-    return ok;
+    return result;
+}
+
+bool boot_cutover_retry_old(struct boot_cutover_env *env, struct app_context *ctx,
+                            const struct chain_params *params,
+                            const struct wallet_cutover_binding *binding)
+{
+    struct block_index *tip = NULL;
+    if (!boot_cutover_mode_supported(ctx) ||
+        !wallet_readiness_initialize(env->wallet, WALLET_READINESS_PENDING,
+                                     binding->old_generation_present, binding->old_generation) ||
+        !boot_cutover_load_old_chain(env, ctx, params, binding, &tip))
+        return false;
+    char *bundle = consensus_state_find_old_retry_bundle(ctx->datadir, binding);
+    if (!bundle) {
+        LOG_ERROR("wallet", "old wallet cutover artifact unavailable");
+        return false;
+    }
+    struct consensus_state_install_runtime_result result;
+    struct zcl_result installed = binding->old_height == 0 ?
+        consensus_state_install_from_bundle_old_retry(
+            env->node, env->state, bundle, ctx->datadir, env->wallet_db, env->wallet, binding, &result) :
+        consensus_state_install_from_bundle_terminal_old_retry(
+            env->node, env->state, bundle, ctx->datadir, env->wallet_db, env->wallet, binding, &result);
+    free(bundle);
+    if (!installed.ok || !result.state_installed) {
+        LOG_ERROR("wallet", "old wallet cutover retry refused: %s", installed.message);
+        return false;
+    }
+    if (!boot_cutover_verify_committed(env, ctx->datadir, binding)) {
+        LOG_ERROR("wallet", "old wallet cutover committed but recovery verification failed");
+        return false;
+    }
+    return true;
 }
 
 static bool boot_pending_maintenance_requested(const struct app_context *ctx)
@@ -839,3 +958,27 @@ bool boot_cutover_publish_readiness(struct boot_cutover_env *e, struct app_conte
 #endif
     return true;
 }
+
+bool consensus_state_wallet_preflight_identity(struct wallet_sqlite *wallet,
+    struct node_db *node, int dir_fd)
+{
+#if defined(_WIN32)
+    (void)wallet; (void)node; (void)dir_fd; return false;
+#else
+    return wallet && wallet->open && wallet->db && node && node->open &&
+        wallet->db == node->db && boot_wallet_cutover_recovery_context_matches(node, wallet) &&
+        boot_datadir_lock_matches_fd(dir_fd) && consensus_state_wallet_node_file_matches(wallet->db, dir_fd);
+#endif
+}
+
+#if !defined(_WIN32)
+bool boot_wallet_cutover_stop_identity(struct wallet_sqlite *wallet,
+    struct node_db *node, int dir_fd)
+{
+    return wallet && wallet->open && wallet->db && node && node->open &&
+        wallet->db == node->db && boot_wallet_cutover_stop_context_matches(node, wallet) &&
+        boot_datadir_lock_matches_fd(dir_fd) && consensus_state_wallet_node_file_matches(wallet->db, dir_fd) &&
+        progress_store_directory_matches_fd(progress_store_db(), dir_fd);
+}
+
+#endif

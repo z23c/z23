@@ -33,6 +33,18 @@ static void *wcp_test_before_commit_ctx;
 static void (*wcp_test_after_commit)(void *);
 static void *wcp_test_after_commit_ctx;
 static bool wcp_test_fail_open;
+static bool wcp_test_fail_rollback;
+static void (*wcp_test_after_digest)(void *), (*wcp_test_before_cancel)(void *);
+static void *wcp_test_after_digest_ctx, *wcp_test_before_cancel_ctx;
+static void (*wcp_test_digest_poll)(void *);
+static void *wcp_test_digest_poll_ctx;
+void boot_wallet_discover_checkpoint_test_digest_poll(void (*fn)(void *), void *ctx)
+{ wcp_test_digest_poll = fn; wcp_test_digest_poll_ctx = ctx; }
+void boot_wallet_discover_checkpoint_test_after_digest(void (*fn)(void *), void *ctx)
+{ wcp_test_after_digest = fn; wcp_test_after_digest_ctx = ctx; }
+void boot_wallet_discover_checkpoint_test_before_cancel(void (*fn)(void *), void *ctx)
+{ wcp_test_before_cancel = fn; wcp_test_before_cancel_ctx = ctx; }
+void boot_wallet_discover_checkpoint_test_fail_rollback(bool fail) { wcp_test_fail_rollback = fail; }
 void boot_wallet_discover_checkpoint_test_fail_open(bool fail) { wcp_test_fail_open = fail; }
 void boot_wallet_discover_checkpoint_test_after_commit(void (*fn)(void *), void *ctx)
 { wcp_test_after_commit = fn; wcp_test_after_commit_ctx = ctx; }
@@ -40,29 +52,54 @@ void boot_wallet_discover_checkpoint_test_before_commit(void (*fn)(void *), void
 { wcp_test_before_commit = fn; wcp_test_before_commit_ctx = ctx; }
 #endif
 #ifndef _WIN32
+enum wcp_result { WCP_OK, WCP_STALE, WCP_BUSY, WCP_RETRY, WCP_STOPPED };
+static enum wcp_result wcp_cancel(const struct boot_cutover_replay *r)
+{
+    if (r && r->auth_deadline_ms) {
+        int64_t now = platform_time_monotonic_ms();
+        if (now <= 0 || now >= r->auth_deadline_ms || wallet_lock_is_locked()) return WCP_RETRY;
+    }
+    return thread_registry_shutdown_requested() ? WCP_STOPPED : WCP_OK;
+}
+
+struct wcp_digest_stop { struct boot_cutover_replay *replay; enum wcp_result reason; };
 static bool wcp_stop(void *context)
 {
-    const struct boot_cutover_replay *r = context;
-    if (thread_registry_shutdown_requested()) return true;
-    if (!r || !r->auth_deadline_ms) return false;
-    int64_t now = platform_time_monotonic_ms();
-    return now <= 0 || now >= r->auth_deadline_ms;
+    struct wcp_digest_stop *stop = context;
+#ifdef ZCL_TESTING
+    if (wcp_test_digest_poll) wcp_test_digest_poll(wcp_test_digest_poll_ctx);
+#endif
+    stop->reason = wcp_cancel(stop->replay);
+    return stop->reason != WCP_OK;
 }
 
-static bool wcp_event_digest(struct boot_cutover_replay *r, uint64_t *end, uint8_t digest[32], bool capture)
+static enum wcp_result wcp_event_digest(struct boot_cutover_replay *r, uint64_t *end, uint8_t digest[32], bool capture)
 {
     event_log_t *log = wallet_projection_event_log();
-    if (!log || wcp_stop(r)) return false;
+    if (!log) return WCP_RETRY;
+    enum wcp_result reason = wcp_cancel(r);
+    if (reason != WCP_OK) return reason;
     if (capture) {
         *end = event_log_size(log);
-        if (!event_log_flush(log)) return false;
+        if (!event_log_flush(log)) return WCP_RETRY;
     }
-    return wallet_projection_event_log() == log &&
-        event_log_prefix_digest(log, *end, digest, wcp_stop, r) == 0 &&
-        wallet_projection_event_log() == log;
+    if (wallet_projection_event_log() != log) return WCP_RETRY;
+    struct wcp_digest_stop stop = {.replay = r, .reason = WCP_OK};
+    int rc = event_log_prefix_digest(log, *end, digest, wcp_stop, &stop);
+#ifdef ZCL_TESTING
+    if (wcp_test_after_digest) wcp_test_after_digest(wcp_test_after_digest_ctx);
+#endif
+    if (rc < 0 || wallet_projection_event_log() != log) return WCP_RETRY;
+    return rc == 0 ? WCP_OK : stop.reason == WCP_STOPPED ? WCP_STOPPED : WCP_RETRY;
 }
+#ifdef ZCL_TESTING
+bool boot_wallet_discover_checkpoint_test_digest_failed(struct boot_cutover_replay *r, uint64_t end)
+{
+    uint8_t digest[32];
+    return wcp_event_digest(r, &end, digest, false) == WCP_RETRY;
+}
+#endif
 
-enum wcp_result { WCP_OK, WCP_STALE, WCP_BUSY, WCP_RETRY };
 static enum wcp_result wcp_generation(const struct wallet_readiness *ready)
 {
     uint8_t bytes[8]; size_t len = 0; bool present = false;
@@ -207,7 +244,12 @@ static enum wcp_result wcp_transaction_commit(struct wcp_transaction_state *t)
     if (!boot_datadir_lock_matches_fd(t->fd) ||
         !consensus_state_wallet_node_file_matches(r->ctx->node_db->db, t->fd) ||
         !consensus_state_wallet_node_file_matches(t->writer->db, t->fd) ||
-        ar_after_commit_pending() != 0 || wcp_stop(r)) return WCP_RETRY;
+        ar_after_commit_pending() != 0) return WCP_RETRY;
+#ifdef ZCL_TESTING
+    if (wcp_test_before_cancel) wcp_test_before_cancel(wcp_test_before_cancel_ctx);
+#endif
+    enum wcp_result cancel = wcp_cancel(r);
+    if (cancel != WCP_OK) return cancel;
 #ifdef ZCL_TESTING
     if (wcp_test_before_commit) wcp_test_before_commit(wcp_test_before_commit_ctx);
 #endif
@@ -221,7 +263,8 @@ static enum wcp_result wcp_transaction_apply(struct wcp_transaction_state *t)
 {
     struct boot_cutover_replay *r = t->replay;
     if (!wcp_lock(r, &t->held)) return WCP_BUSY;
-    if (wcp_stop(r)) return WCP_RETRY;
+    enum wcp_result cancel = wcp_cancel(r);
+    if (cancel != WCP_OK) return cancel;
     enum wcp_result result = wcp_generation(&r->readiness);
     if (result != WCP_OK) return result;
     if (!boot_cutover_replay_current_locked(r)) return WCP_STALE;
@@ -232,14 +275,21 @@ static enum wcp_result wcp_transaction_apply(struct wcp_transaction_state *t)
     if (result != WCP_OK) return result;
     return wcp_transaction_commit(t);
 }
-static void wcp_transaction_close(struct wcp_transaction_state *t)
+static bool wcp_transaction_close(struct wcp_transaction_state *t)
 {
-    if (t->began && !t->committed) (void)node_db_rollback(t->writer);
+    bool clean = true;
+    if (t->began && !t->committed)
+        clean = node_db_rollback(t->writer) && sqlite3_get_autocommit(t->writer->db);
+#ifdef ZCL_TESTING
+    if (wcp_test_fail_rollback) clean = false;
+#endif
     wcp_unlock(t->replay, &t->held);
     if (t->original_locked) sqlite3_mutex_leave(t->original_mutex);
     if (t->writer && t->writer->open) node_db_close(t->writer);
-    free(t->writer); close(t->fd);
+    free(t->writer);
+    if (close(t->fd) != 0) clean = false;
     if (t->auth_lease) wallet_lock_startup_publication_end();
+    return clean;
 }
 /* Validates the PENDING binding again in the private write transaction. */
 static enum wcp_result wcp_transaction(struct boot_cutover_replay *r,
@@ -250,8 +300,9 @@ static enum wcp_result wcp_transaction(struct boot_cutover_replay *r,
         LOG_WARN("wallet", "DISCOVER checkpoint refused: replay context or stage");
         return WCP_RETRY;
     }
-    if (wcp_stop(r) || ar_after_commit_depth() != 0 ||
-        ar_after_commit_pending() != 0) return WCP_RETRY;
+    if (ar_after_commit_depth() != 0 || ar_after_commit_pending() != 0) return WCP_RETRY;
+    enum wcp_result cancel = wcp_cancel(r);
+    if (cancel != WCP_OK) return cancel;
     bool auth_lease = r->auth_deadline_ms != 0;
     if (auth_lease && !wallet_lock_startup_publication_begin(r->auth_deadline_ms)) return WCP_RETRY;
     int fd = open(r->ctx->datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -262,16 +313,18 @@ static enum wcp_result wcp_transaction(struct boot_cutover_replay *r,
         .original_mutex = sqlite3_db_mutex(r->ctx->node_db->db)};
     enum wcp_result result = wcp_transaction_open(&t);
     if (result == WCP_OK) result = wcp_transaction_apply(&t);
-    wcp_transaction_close(&t);
+    if (!wcp_transaction_close(&t) && result == WCP_STOPPED) return WCP_RETRY;
     return result;
 }
 
-static bool wcp_prepare_platform(struct boot_cutover_replay *r,
+static enum boot_discover_prepare wcp_prepare_platform(struct boot_cutover_replay *r,
     struct wallet_discover_checkpoint *c)
 {
-    if (!r || !r->ctx || !c) return false;
+    if (!r || !r->ctx || !c) return BOOT_DISCOVER_PREPARE_FAILED;
     wcp_fill(r, c);
-    return wcp_event_digest(r, &c->event_end, c->event_digest, true);
+    enum wcp_result result = wcp_event_digest(r, &c->event_end, c->event_digest, true);
+    return result == WCP_OK ? BOOT_DISCOVER_PREPARED :
+        (result == WCP_STOPPED ? BOOT_DISCOVER_PREPARE_STOPPED : BOOT_DISCOVER_PREPARE_FAILED);
 }
 static enum boot_discover_save wcp_save_platform(struct boot_cutover_replay *r,
     struct wallet_discover_checkpoint *c)
@@ -280,7 +333,8 @@ static enum boot_discover_save wcp_save_platform(struct boot_cutover_replay *r,
         memcmp(c->key_digest, r->key_digest, 32)) return BOOT_DISCOVER_SAVE_RETRY;
     enum wcp_result result = wcp_transaction(r, c, true);
     return result == WCP_OK ? BOOT_DISCOVER_SAVED :
-        (result == WCP_BUSY ? BOOT_DISCOVER_SAVE_BUSY : BOOT_DISCOVER_SAVE_RETRY);
+        (result == WCP_BUSY ? BOOT_DISCOVER_SAVE_BUSY :
+         result == WCP_STOPPED ? BOOT_DISCOVER_SAVE_STOPPED : BOOT_DISCOVER_SAVE_RETRY);
 }
 
 static enum boot_discover_resume wcp_resume_platform(struct boot_cutover_replay *r)
@@ -296,19 +350,21 @@ static enum boot_discover_resume wcp_resume_platform(struct boot_cutover_replay 
     if (status != WALLET_DISCOVER_FOUND) return BOOT_DISCOVER_RETRY;
     if (!wcp_matches(r, &c)) return BOOT_DISCOVER_FLOOR;
     uint8_t digest[32];
-    if (!wcp_event_digest(r, &c.event_end, digest, false) ||
-        memcmp(digest, c.event_digest, sizeof(digest))) return BOOT_DISCOVER_RETRY;
+    enum wcp_result digest_result = wcp_event_digest(r, &c.event_end, digest, false);
+    if (digest_result == WCP_STOPPED) return BOOT_DISCOVER_STOPPED;
+    if (digest_result != WCP_OK || memcmp(digest, c.event_digest, sizeof(digest))) return BOOT_DISCOVER_RETRY;
     enum wcp_result result = wcp_transaction(r, &c, false);
     if (result == WCP_STALE) return BOOT_DISCOVER_FLOOR;
     if (result == WCP_BUSY) return BOOT_DISCOVER_BUSY;
+    if (result == WCP_STOPPED) return BOOT_DISCOVER_STOPPED;
     if (result != WCP_OK) return BOOT_DISCOVER_RETRY;
     r->next = c.next_height; memcpy(r->key_digest, c.key_digest, 32);
     r->checkpoint_resume = true;
     return BOOT_DISCOVER_RESUMED;
 }
 #else
-static bool wcp_prepare_platform(struct boot_cutover_replay *r,
-    struct wallet_discover_checkpoint *c) { (void)r; (void)c; return true; }
+static enum boot_discover_prepare wcp_prepare_platform(struct boot_cutover_replay *r,
+    struct wallet_discover_checkpoint *c) { (void)r; (void)c; return BOOT_DISCOVER_PREPARED; }
 static enum boot_discover_save wcp_save_platform(struct boot_cutover_replay *r,
     struct wallet_discover_checkpoint *c) { (void)r; (void)c; return BOOT_DISCOVER_SAVED; }
 static enum boot_discover_resume wcp_resume_platform(struct boot_cutover_replay *r)
@@ -316,6 +372,8 @@ static enum boot_discover_resume wcp_resume_platform(struct boot_cutover_replay 
 #endif
 
 bool boot_wallet_discover_checkpoint_prepare(struct boot_cutover_replay *r,
+    struct wallet_discover_checkpoint *c) { return wcp_prepare_platform(r, c) == BOOT_DISCOVER_PREPARED; }
+enum boot_discover_prepare boot_wallet_discover_checkpoint_prepare_result(struct boot_cutover_replay *r,
     struct wallet_discover_checkpoint *c) { return wcp_prepare_platform(r, c); }
 enum boot_discover_save boot_wallet_discover_checkpoint_save(struct boot_cutover_replay *r,
     struct wallet_discover_checkpoint *c) { return wcp_save_platform(r, c); }

@@ -120,6 +120,12 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
 struct zcl_result load_block_index_flat_bounded(const char *datadir, struct main_state *ms,
                                                 size_t max_entries);
 
+/* Load a bounded flat index into an empty private state without publishing a
+ * global flat identity. This admits no header, chain or endpoint authority.
+ * Discard the private state after any failure. */
+struct zcl_result block_index_history_index_load(const char *datadir, struct main_state *state,
+                                                  size_t max_entries);
+
 /* Caller owns an empty standalone state and keeps archive bytes immutable for
  * this call and subsequent replay. Endpoint must already be admitted by the
  * caller. Success proves hash-linked header ancestry, not PoW or state authority.

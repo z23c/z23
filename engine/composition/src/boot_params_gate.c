@@ -278,3 +278,21 @@ void boot_test_params_boundary(struct boot_svc_ctx *svc, const struct app_contex
     (void)boot_wait_params_boundary(svc, ctx, verifier_ready, phgr_ready);
 }
 #endif
+bool boot_params_thread_failure_is_fatal(const struct app_context *ctx,
+                                         const char *network_id)
+{
+    return ctx && ctx->params_dir && network_id &&
+           strcmp(network_id, "main") == 0 && !ctx->mint_anchor_fast;
+}
+#ifdef ZCL_TESTING
+bool boot_test_params_thread_failure_is_fatal(bool has_params_dir,
+                                              bool is_mainnet,
+                                              bool mint_anchor_fast)
+{
+    struct app_context ctx = {0};
+    ctx.params_dir = has_params_dir ? "params" : NULL;
+    ctx.mint_anchor_fast = mint_anchor_fast;
+    return boot_params_thread_failure_is_fatal(&ctx,
+                                               is_mainnet ? "main" : "test");
+}
+#endif

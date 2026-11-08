@@ -786,6 +786,15 @@ static struct zcl_result load_block_index_flat_archive(const char *datadir, stru
     return bil_flat_load(datadir, ms, max_entries, false);
 }
 
+struct zcl_result block_index_history_index_load(const char *datadir, struct main_state *ms,
+                                                  size_t max_entries)
+{
+    if (!datadir || !datadir[0] || !ms || !max_entries || ms->map_block_index.size ||
+        ms->pindex_best_header || active_chain_cached_height(&ms->chain_active) >= 0)
+        return ZCL_ERR(-1, "history index: invalid input or nonempty state");
+    return load_block_index_flat_archive(datadir, ms, max_entries);
+}
+
 struct zcl_result load_block_index_flat(const char *datadir, struct main_state *ms)
 {
     return load_block_index_flat_bounded(datadir, ms, SIZE_MAX);
@@ -1012,6 +1021,7 @@ static struct zcl_result bha_open(struct main_state *state,
     struct blocks_mmap *reader = NULL;
     if (n < 0 || (size_t)n >= sizeof(path) || !bmr_open(path, &reader))
         return ZCL_ERR(-2, "history archive: cannot open block directory");
+    bmr_advise_reverse(reader);
     struct uint256 hash; memcpy(hash.data, endpoint_hash, sizeof(hash.data));
     struct block_index *tip = block_map_find(&state->map_block_index, &hash);
     bool cancelled = false;

@@ -6,9 +6,14 @@
 #include <sqlite3.h>
 struct wallet;
 struct wallet_sqlite;
+/* Caller holds the connection, wallet and transparent keystore locks. */
+bool boot_wallet_cutover_transparent_empty_locked(struct wallet_sqlite *ws,
+    sqlite3 *db, const struct wallet *wallet);
+
 /* Caller holds the connection mutex and wallet's sapling_keys.cs. The load
  * result must belong to this wallet's actual startup read. This read-only
  * check joins any existing transaction and never starts or commits one. */
+
 /* Caller also holds wallet and transparent keystore locks. */
 bool boot_wallet_cutover_full_empty_locked(struct wallet_sqlite *ws,
     sqlite3 *db, const struct wallet *wallet, bool sapling_load_ok);

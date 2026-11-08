@@ -13,6 +13,7 @@
 #include "sha3/sha3.h"
 #include "support/cleanse.h"
 #include "util/safe_alloc.h"
+#include "util/thread_registry.h"
 #include "validation/main_state.h"
 #include "wallet/wallet.h"
 #include "wallet/wallet_lock.h"
@@ -130,6 +131,7 @@ struct replay_block {
     struct wallet *wallet;
     struct node_db *db;
     struct replay_keys *keys;
+    struct catchup_parallel_state *parallel;
     struct sapling_replay_delivery delivery;
     struct block *block;
     int height, end, found, reference_height;
@@ -240,8 +242,8 @@ static bool replay_apply_block(struct replay_block *job)
         struct transaction *tx = &job->block->vtx[i];
         if (job->phase == SAPLING_REPLAY_DISCOVER) {
             int found = 0;
-            if (!node_db_catchup_replay_sapling_decrypt(job->db, tx,
-                    job->keys->entries, job->keys->count, job->height, &found, &job->delivery))
+            if (!node_db_catchup_replay_sapling_decrypt_parallel(job->db, tx,
+                    job->keys->entries, job->keys->count, job->height, &found, &job->delivery, job->parallel))
                 return false;
             job->found += found;
         } else if (!replay_spends(job->db, tx)) {
@@ -490,6 +492,27 @@ static bool replay_capture_keys(struct wallet *wallet, const uint8_t *expected,
     return true;
 }
 
+static void replay_run_blocks(struct db_service *svc, struct replay_block *job,
+    const char *datadir, int start, int end, bool strict, struct sapling_replay_result *result)
+{
+    for (int h = start;; h++) {
+        if (strict && thread_registry_shutdown_requested()) {
+            result->status = SAPLING_REPLAY_STOPPED;
+            break;
+        }
+        job->height = h; job->found = 0;
+        result->status = replay_one(svc, job, datadir);
+        if (result->status != SAPLING_REPLAY_COMPLETE) break;
+        result->last_complete = h;
+        result->notes_found += job->found;
+        if (strict && thread_registry_shutdown_requested()) {
+            result->status = SAPLING_REPLAY_STOPPED;
+            break;
+        }
+        if (h == end) break;
+    }
+}
+
 static struct sapling_replay_result replay_run(
     struct db_service *svc, struct node_db *db, struct main_state *state,
     struct wallet *wallet, const char *datadir, int start, int end,
@@ -511,6 +534,7 @@ static struct sapling_replay_result replay_run(
         memcpy(result.scan_identity, scan_identity, 32);
     }
     struct replay_keys keys = {0};
+    struct catchup_parallel_state parallel = {0};
     struct wallet_scan_snapshot *scan_snapshot = NULL;
     if (!replay_capture_keys(wallet, expected_key_digest, &keys, &result)) goto done;
 #ifdef ZCL_TESTING
@@ -525,20 +549,14 @@ static struct sapling_replay_result replay_run(
         }
     }
     struct replay_block job = {.state = state, .wallet = wallet, .db = db,
-        .keys = &keys, .end = end, .phase = phase,
+        .keys = &keys, .parallel = &parallel, .end = end, .phase = phase,
         .reference_height = reference_height, .scan_identity = scan_identity,
         .scan_snapshot = scan_snapshot};
     memcpy(job.endpoint.data, endpoint_hash, 32);
     if (strict) memcpy(job.reference.data, reference_hash, 32);
-    for (int h = start;; h++) {
-        job.height = h; job.found = 0;
-        result.status = replay_one(svc, &job, datadir);
-        if (result.status != SAPLING_REPLAY_COMPLETE) break;
-        result.last_complete = h;
-        result.notes_found += job.found;
-        if (h == end) break;
-    }
+    replay_run_blocks(svc, &job, datadir, start, end, strict, &result);
 done:
+    node_db_catchup_parallel_free(&parallel);
     wallet_scan_snapshot_free(scan_snapshot);
     if (keys.entries) {
         memory_cleanse(keys.entries, keys.count * sizeof(*keys.entries));

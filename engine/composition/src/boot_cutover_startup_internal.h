@@ -37,14 +37,20 @@ struct wallet_cutover_binding;
 bool boot_cutover_preflight_classify(struct boot_cutover_env *env, const char *datadir,
     enum boot_cutover_preflight_kind *kind, struct wallet_cutover_binding *binding);
 bool boot_cutover_preflight(struct boot_cutover_env *env, const char *datadir, bool *pending);
+bool boot_cutover_retry_old(struct boot_cutover_env *env, struct app_context *ctx,
+    const struct chain_params *params, const struct wallet_cutover_binding *binding);
 bool boot_cutover_verify_committed(struct boot_cutover_env *env, const char *datadir,
+    const struct wallet_cutover_binding *expected);
+bool boot_cutover_verify_committed_stop(struct boot_cutover_env *env, const char *datadir,
     const struct wallet_cutover_binding *expected);
 bool boot_cutover_load_chain(struct boot_cutover_env *env, struct app_context *ctx,
     const struct chain_params *params, struct block_index **tip);
 bool boot_cutover_load_old_chain(struct boot_cutover_env *env, struct app_context *ctx,
     const struct chain_params *params, const struct wallet_cutover_binding *binding,
     struct block_index **tip);
-bool boot_cutover_replay(struct boot_cutover_env *env, struct app_context *ctx,
+enum boot_pending_replay_result { BOOT_PENDING_FAILED, BOOT_PENDING_STOPPED, BOOT_PENDING_COMPLETE };
+enum boot_busy_result { BOOT_BUSY_RETRY, BOOT_BUSY_STOPPED, BOOT_BUSY_FAILED };
+enum boot_pending_replay_result boot_cutover_replay(struct boot_cutover_env *env, struct app_context *ctx,
     const struct chain_params *params);
 #ifdef ZCL_TESTING
 struct boot_cutover_replay;

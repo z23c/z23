@@ -196,17 +196,25 @@ static void bcr_sapling_receipt_warn(const struct boot_cutover_replay *r, int en
              !memcmp(out->scan_identity, r->identity, 32));
 }
 
+static bool bcr_sapling_partial_receipt(
+    const struct boot_cutover_replay *r, int end, enum sapling_replay_phase phase,
+    const uint8_t hash[32], const struct sapling_replay_result *out)
+{
+    return out->phase == phase && out->start_height == r->next &&
+        out->end_height == end && out->last_complete >= r->next - 1 &&
+        (out->last_complete < end ||
+         (out->status == SAPLING_REPLAY_STOPPED && out->last_complete == end)) &&
+        out->reference_height == r->endpoint.height &&
+        !memcmp(out->endpoint_hash, hash, 32) &&
+        !memcmp(out->reference_hash, r->endpoint.hash.data, 32) &&
+        !memcmp(out->scan_identity, r->identity, 32);
+}
+
 static enum boot_cutover_replay_status bcr_sapling_busy(
     struct boot_cutover_replay *r, int end, enum sapling_replay_phase phase,
     const uint8_t hash[32], const struct sapling_replay_result *out)
 {
-    bool receipt = out->phase == phase && out->start_height == r->next &&
-        out->end_height == end && out->last_complete >= r->next - 1 &&
-        out->last_complete < end && out->reference_height == r->endpoint.height &&
-        !memcmp(out->endpoint_hash, hash, 32) &&
-        !memcmp(out->reference_hash, r->endpoint.hash.data, 32) &&
-        !memcmp(out->scan_identity, r->identity, 32);
-    if (!receipt) return BOOT_CUTOVER_RETRY;
+    if (!bcr_sapling_partial_receipt(r, end, phase, hash, out)) return BOOT_CUTOVER_RETRY;
     if (phase == SAPLING_REPLAY_DISCOVER && r->next != r->floor &&
         memcmp(r->key_digest, out->key_digest, 32)) return BOOT_CUTOVER_RETRY;
     if (out->last_complete >= r->next) {
@@ -221,6 +229,38 @@ static const uint8_t *bcr_expected_key_digest(const struct boot_cutover_replay *
 {
     return (phase == SAPLING_REPLAY_SPENDS ||
             (phase == SAPLING_REPLAY_DISCOVER && r->next != r->floor)) ? r->key_digest : NULL;
+}
+
+static enum boot_cutover_replay_status bcr_sapling_result(struct boot_cutover_replay *r,
+    int end, enum sapling_replay_phase phase, const uint8_t hash[32],
+    struct sapling_replay_result out)
+{
+    if (r->checkpoint_resume && phase == SAPLING_REPLAY_DISCOVER &&
+        out.status == SAPLING_REPLAY_KEYS_UNAVAILABLE &&
+        memcmp(r->key_digest, out.key_digest, 32)) {
+        r->checkpoint_resume = false; r->next = r->floor;
+        memset(r->key_digest, 0, sizeof(r->key_digest));
+        return BOOT_CUTOVER_BUSY;
+    }
+    if (out.status == SAPLING_REPLAY_BUSY || out.status == SAPLING_REPLAY_STOPPED) {
+        enum boot_cutover_replay_status partial = bcr_sapling_busy(r, end, phase, hash, &out);
+        return partial == BOOT_CUTOVER_BUSY && out.status == SAPLING_REPLAY_STOPPED ?
+            BOOT_CUTOVER_STOPPED : partial;
+    }
+    if (!bcr_sapling_receipt(r, end, phase, hash, &out)) {
+        bcr_sapling_receipt_warn(r, end, phase, hash, &out);
+        return BOOT_CUTOVER_RETRY;
+    }
+    if (phase == SAPLING_REPLAY_DISCOVER) {
+        r->checkpoint_resume = false;
+        if (r->next != r->floor && memcmp(r->key_digest, out.key_digest, 32)) {
+            LOG_WARN("wallet", "Sapling replay key set changed: start=%d end=%d reference=%d",
+                     r->next, end, r->endpoint.height);
+            return BOOT_CUTOVER_RETRY;
+        }
+        memcpy(r->key_digest, out.key_digest, 32);
+    }
+    return BOOT_CUTOVER_PROGRESS;
 }
 
 static enum boot_cutover_replay_status bcr_sapling(struct boot_cutover_replay *r, int end)
@@ -238,31 +278,8 @@ static enum boot_cutover_replay_status bcr_sapling(struct boot_cutover_replay *r
     struct sapling_replay_result out = node_db_catchup_sapling_replay_at_reference(
         r->service, r->ctx->node_db, r->ctx->main_state, r->ctx->wallet,
         bcr_body_dir(r), r->next, end, r->endpoint.height, r->endpoint.hash.data,
-        phase, hash, r->identity,
-        bcr_expected_key_digest(r, phase));
-    if (r->checkpoint_resume && phase == SAPLING_REPLAY_DISCOVER &&
-        out.status == SAPLING_REPLAY_KEYS_UNAVAILABLE &&
-        memcmp(r->key_digest, out.key_digest, 32)) {
-        r->checkpoint_resume = false; r->next = r->floor;
-        memset(r->key_digest, 0, sizeof(r->key_digest));
-        return BOOT_CUTOVER_BUSY;
-    }
-    if (out.status == SAPLING_REPLAY_BUSY)
-        return bcr_sapling_busy(r, end, phase, hash, &out);
-    if (!bcr_sapling_receipt(r, end, phase, hash, &out)) {
-        bcr_sapling_receipt_warn(r, end, phase, hash, &out);
-        return BOOT_CUTOVER_RETRY;
-    }
-    if (phase == SAPLING_REPLAY_DISCOVER) {
-        r->checkpoint_resume = false;
-        if (r->next != r->floor && memcmp(r->key_digest, out.key_digest, 32)) {
-            LOG_WARN("wallet", "Sapling replay key set changed: start=%d end=%d reference=%d",
-                     r->next, end, r->endpoint.height);
-            return BOOT_CUTOVER_RETRY;
-        }
-        memcpy(r->key_digest, out.key_digest, 32);
-    }
-    return BOOT_CUTOVER_PROGRESS;
+        phase, hash, r->identity, bcr_expected_key_digest(r, phase));
+    return bcr_sapling_result(r, end, phase, hash, out);
 }
 
 static bool bcr_witness(struct boot_cutover_replay *r)
@@ -309,6 +326,21 @@ bool boot_cutover_replay_complete_full_empty(struct boot_cutover_replay *r)
     if (!bcr_full_empty_proof(r) || bcr_current(r) != BOOT_CUTOVER_PROGRESS) return false;
     r->full_empty = true; r->shielded_empty = true; r->phase = BOOT_CUTOVER_DONE;
     return true;
+}
+
+static bool bcr_transparent_empty(struct boot_cutover_replay *r)
+{
+    struct wallet *w = r->ctx->wallet;
+    sqlite3 *db = r->ctx->node_db->db;
+    sqlite3_mutex *mu = db ? sqlite3_db_mutex(db) : NULL;
+    if (!mu || sqlite3_mutex_try(mu) != SQLITE_OK) return false;
+    bool wallet_locked = zcl_mutex_trylock(&w->cs);
+    bool key_locked = wallet_locked && zcl_mutex_trylock(&w->keystore.cs);
+    bool empty = key_locked && boot_wallet_cutover_transparent_empty_locked(r->ctx->wallet_db, db, w);
+    if (key_locked) zcl_mutex_unlock(&w->keystore.cs);
+    if (wallet_locked) zcl_mutex_unlock(&w->cs);
+    sqlite3_mutex_leave(mu);
+    return empty;
 }
 
 static bool bcr_shielded_empty(struct boot_cutover_replay *r)
@@ -367,6 +399,15 @@ static enum boot_cutover_replay_status bcr_finish_phase(struct boot_cutover_repl
     return step == BOOT_CUTOVER_PROGRESS ? bcr_advance(r, end) : step;
 }
 
+static enum boot_cutover_replay_status bcr_skip_transparent(struct boot_cutover_replay *r)
+{
+    enum boot_cutover_replay_status current = bcr_current(r);
+    if (current == BOOT_CUTOVER_BUSY) return current;
+    if (current != BOOT_CUTOVER_PROGRESS) { r->phase = BOOT_CUTOVER_INVALIDATED; return BOOT_CUTOVER_STALE; }
+    r->transparent_empty = true; r->phase = BOOT_CUTOVER_DISCOVER; r->next = r->floor;
+    return BOOT_CUTOVER_PROGRESS;
+}
+
 enum boot_cutover_replay_status boot_cutover_replay_step(struct boot_cutover_replay *r)
 {
     if (!r) return BOOT_CUTOVER_INVALID;
@@ -383,6 +424,8 @@ enum boot_cutover_replay_status boot_cutover_replay_step(struct boot_cutover_rep
         return bcr_advance(r, r->pending_end);
     }
     if (bcr_can_complete_empty(r)) return bcr_complete_empty(r);
+    if (r->phase == BOOT_CUTOVER_TRANSPARENT && bcr_transparent_empty(r))
+        return bcr_skip_transparent(r);
 #ifdef ZCL_TESTING
     if (bcr_test_after_current) bcr_test_after_current(bcr_test_after_current_ctx);
 #endif

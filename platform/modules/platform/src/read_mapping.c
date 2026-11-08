@@ -115,40 +115,66 @@ bool platform_read_mapping_open_positioned(
 #endif
 }
 
+#if defined(_WIN32)
+static void read_mapping_prefetch(const uint8_t *data, size_t size)
+{
+    struct platform_win_memory_range_entry { PVOID virtual_address; SIZE_T number_of_bytes; };
+    typedef BOOL (WINAPI *prefetch_fn)(HANDLE, ULONG_PTR,
+                                      const struct platform_win_memory_range_entry *, ULONG);
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    FARPROC symbol = kernel ? GetProcAddress(kernel, "PrefetchVirtualMemory") : NULL;
+    prefetch_fn prefetch = NULL;
+    static_assert(sizeof(prefetch) == sizeof(symbol), "Windows function pointer representations must match");
+    memcpy(&prefetch, &symbol, sizeof(prefetch));
+    if (prefetch) {
+        struct platform_win_memory_range_entry range = {(PVOID)data, size};
+        (void)prefetch(GetCurrentProcess(), 1, &range, 0);
+    }
+}
+#endif
+
 void platform_read_mapping_advise_sequential(
     const struct platform_read_mapping *mapping)
 {
     if (!mapping || !mapping->data || mapping->size == 0) return;
 #if defined(_WIN32)
-    /* Resolve this Windows 8+ API dynamically so older MinGW header feature
-     * levels do not decide whether this implementation compiles. */
-    struct platform_win_memory_range_entry {
-        PVOID virtual_address;
-        SIZE_T number_of_bytes;
-    };
-    typedef BOOL (WINAPI *prefetch_virtual_memory_fn)(
-        HANDLE, ULONG_PTR,
-        const struct platform_win_memory_range_entry *, ULONG);
-    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
-    FARPROC symbol = kernel ? GetProcAddress(kernel, "PrefetchVirtualMemory")
-                            : NULL;
-    prefetch_virtual_memory_fn prefetch = NULL;
-    static_assert(sizeof(prefetch) == sizeof(symbol),
-                  "Windows function pointer representations must match");
-    memcpy(&prefetch, &symbol, sizeof(prefetch));
-    if (prefetch) {
-        struct platform_win_memory_range_entry range = {
-            .virtual_address = (PVOID)mapping->data,
-            .number_of_bytes = mapping->size,
-        };
-        (void)prefetch(GetCurrentProcess(), 1, &range, 0);
-    }
+    read_mapping_prefetch(mapping->data, mapping->size);
 #else
     (void)posix_madvise((void *)mapping->data, mapping->size,
                         POSIX_MADV_SEQUENTIAL);
     (void)posix_madvise((void *)mapping->data, mapping->size,
                         POSIX_MADV_WILLNEED);
 #endif
+}
+
+bool platform_read_mapping_advise_reverse(
+    const struct platform_read_mapping *mapping, size_t offset, size_t window,
+    size_t *start, size_t *end)
+{
+    if (!mapping || !mapping->data || offset >= mapping->size || !window ||
+        !start || !end) return false;
+#if defined(_WIN32)
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    size_t page = (size_t)info.dwPageSize;
+#else
+    long page_value = sysconf(_SC_PAGESIZE);
+    if (page_value <= 0) return false;
+    size_t page = (size_t)page_value;
+#endif
+    if (!page) return false;
+    size_t current = offset - offset % page;
+    size_t low = offset > window ? offset - window : 0;
+    low -= low % page;
+    size_t high = mapping->size - current < page ? mapping->size : current + page;
+    *start = low;
+    *end = high;
+#if defined(_WIN32)
+    read_mapping_prefetch(mapping->data + low, high - low);
+#else
+    (void)posix_madvise((void *)(mapping->data + low), high - low, POSIX_MADV_WILLNEED);
+#endif
+    return true;
 }
 
 size_t platform_read_mapping_release_below(

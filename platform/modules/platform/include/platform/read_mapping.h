@@ -32,6 +32,12 @@ bool platform_read_mapping_open_positioned(
 void platform_read_mapping_advise_sequential(
     const struct platform_read_mapping *mapping);
 
+/* Return false for invalid arguments or unavailable page geometry. On true,
+ * start and end describe the clamped advised range, even if advice fails. */
+bool platform_read_mapping_advise_reverse(
+    const struct platform_read_mapping *mapping, size_t offset, size_t window,
+    size_t *start, size_t *end);
+
 /* Drop the resident pages of a consumed prefix.  `released` is the byte
  * boundary a previous call returned (zero first); the pages wholly below
  * `consumed` and at or above `released` are returned to the kernel and the

@@ -17,7 +17,7 @@ enum boot_cutover_replay_phase {
 };
 enum boot_cutover_replay_status {
     BOOT_CUTOVER_PROGRESS, BOOT_CUTOVER_COMPLETE, BOOT_CUTOVER_RETRY,
-    BOOT_CUTOVER_STALE, BOOT_CUTOVER_INVALID, BOOT_CUTOVER_BUSY
+    BOOT_CUTOVER_STALE, BOOT_CUTOVER_INVALID, BOOT_CUTOVER_BUSY, BOOT_CUTOVER_STOPPED
 };
 /* Caller serializes calls and keeps chain mutation quiescent from initialization
  * through final publication. State is not durable authority or readiness. */
@@ -29,6 +29,7 @@ struct boot_cutover_replay {
     bool sapling_load_ok;
     bool shielded_empty;
     bool full_empty;
+    bool transparent_empty;
     bool pending_complete;
     bool checkpoint_resume;
     int pending_end;

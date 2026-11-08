@@ -12,6 +12,9 @@ enum wallet_install_reconcile consensus_state_wallet_install_classify(
     (void)wallet; (void)node; (void)datadir_fd;
     (void)generation_present; (void)generation; return WALLET_INSTALL_UNKNOWN;
 }
+enum wallet_install_reconcile consensus_state_wallet_install_classify_stop(
+    struct wallet_sqlite *wallet, struct node_db *node, int fd, bool *present, uint64_t *generation)
+{ return consensus_state_wallet_install_classify(wallet, node, fd, present, generation); }
 struct zcl_result consensus_state_install_recover_committed(
     struct node_db *ndb, const char *datadir,
     struct consensus_state_install_recovery_result *out)
@@ -422,13 +425,14 @@ static enum wallet_install_reconcile icb_wallet_classify_locked(
         !icb_recovery_frontier(db, &prefix, &advanced)) return WALLET_INSTALL_UNKNOWN;
     return WALLET_INSTALL_COMMITTED;
 }
-enum wallet_install_reconcile consensus_state_wallet_install_classify(
+static enum wallet_install_reconcile icb_wallet_classify(
     struct wallet_sqlite *wallet, struct node_db *node, int dir_fd,
-    bool *generation_present, uint64_t *generation)
+    bool *generation_present, uint64_t *generation, bool stop)
 {
     if (!generation_present || !generation) return WALLET_INSTALL_UNKNOWN;
     *generation_present = false; *generation = 0;
-    if (!icb_wallet_startup_identity(wallet, node, dir_fd)) return WALLET_INSTALL_UNKNOWN;
+    if (!(stop ? boot_wallet_cutover_stop_identity(wallet, node, dir_fd) :
+                 icb_wallet_startup_identity(wallet, node, dir_fd))) return WALLET_INSTALL_UNKNOWN;
     struct wallet_cutover_binding b;
     enum wallet_cutover_status s = wallet_sqlite_cutover_read(wallet, &b);
     if (s != WALLET_CUTOVER_ABSENT && s != WALLET_CUTOVER_PENDING)
@@ -451,6 +455,13 @@ enum wallet_install_reconcile consensus_state_wallet_install_classify(
     if (out != WALLET_INSTALL_UNKNOWN) { *generation_present = present; *generation = gen; }
     return out;
 }
+
+enum wallet_install_reconcile consensus_state_wallet_install_classify(
+    struct wallet_sqlite *wallet, struct node_db *node, int dir_fd, bool *present, uint64_t *generation)
+{ return icb_wallet_classify(wallet, node, dir_fd, present, generation, false); }
+enum wallet_install_reconcile consensus_state_wallet_install_classify_stop(
+    struct wallet_sqlite *wallet, struct node_db *node, int dir_fd, bool *present, uint64_t *generation)
+{ return icb_wallet_classify(wallet, node, dir_fd, present, generation, true); }
 
 static bool icb_finish_derived_install(struct node_db *ndb, sqlite3 *db,
                                      int32_t height, const char *datadir,
@@ -1485,15 +1496,3 @@ bool boot_install_consensus_bundle_reset_utxo_mirror_for_test(struct node_db *nd
 }
 #endif
 #endif
-
-bool consensus_state_wallet_preflight_identity(struct wallet_sqlite *wallet,
-    struct node_db *node, int dir_fd)
-{
-#if defined(_WIN32)
-    (void)wallet; (void)node; (void)dir_fd; return false;
-#else
-    return wallet && wallet->open && wallet->db && node && node->open &&
-        wallet->db == node->db && boot_wallet_cutover_recovery_context_matches(node, wallet) &&
-        boot_datadir_lock_matches_fd(dir_fd) && consensus_state_wallet_node_file_matches(wallet->db, dir_fd);
-#endif
-}

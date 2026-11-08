@@ -32,12 +32,14 @@
 #include <string.h>
 
 #define BMR_LRU_SIZE 8
+#define BMR_REVERSE_WINDOW (1024u * 1024u)
 
 struct bmr_slot {
     int32_t nFile;            /* -1 when slot empty */
     const uint8_t *base;
     size_t size;
     uint64_t last_used;
+    size_t hint_start, hint_end;
     struct platform_positioned_file file;
     struct platform_read_mapping mapping;
 };
@@ -46,6 +48,7 @@ struct blocks_mmap {
     char *blocks_dir;
     struct bmr_slot lru[BMR_LRU_SIZE];
     uint64_t clock;
+    bool reverse;
 };
 
 bool bmr_open(const char *blocks_dir, struct blocks_mmap **out)
@@ -84,6 +87,12 @@ static void bmr_evict_slot(struct bmr_slot *s)
         s->size = 0;
     }
     s->nFile = -1;
+    s->hint_start = s->hint_end = 0;
+}
+
+void bmr_advise_reverse(struct blocks_mmap *m)
+{
+    if (m) m->reverse = true;
 }
 
 void bmr_close(struct blocks_mmap *m)
@@ -151,7 +160,7 @@ static struct bmr_slot *bmr_ensure_slot(struct blocks_mmap *m, int32_t nFile)
     /* Advise sequential — we walk height-ordered, but per-file the
      * blocks are mostly in receive-order which IS sequential within
      * the file. */
-    platform_read_mapping_advise_sequential(&mapping);
+    if (!m->reverse) platform_read_mapping_advise_sequential(&mapping);
 
     m->lru[victim].nFile = nFile;
     m->lru[victim].file = file;
@@ -188,7 +197,12 @@ const uint8_t *bmr_get_payload(struct blocks_mmap *m,
         return NULL;
     }
 
-    const uint8_t *hdr = s->base + (nDataPos - 8u);
+    size_t offset = (size_t)nDataPos - 8u;
+    size_t hint_offset = (size_t)nDataPos < s->size ? (size_t)nDataPos : (size_t)nDataPos - 1u;
+    if (m->reverse && (hint_offset < s->hint_start || hint_offset >= s->hint_end))
+        (void)platform_read_mapping_advise_reverse(&s->mapping, hint_offset,
+            BMR_REVERSE_WINDOW, &s->hint_start, &s->hint_end);
+    const uint8_t *hdr = s->base + offset;
     bool magic_ok = bmr_payload_magic_ok(hdr);
     if (!magic_ok) {
         fprintf(stderr, "[bmr] bad magic at nFile=%d nDataPos=%u: %02x%02x%02x%02x\n",

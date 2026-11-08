@@ -59,6 +59,10 @@ bool consensus_state_wallet_preflight_identity(struct wallet_sqlite *wallet,
 enum wallet_install_reconcile consensus_state_wallet_install_classify(
     struct wallet_sqlite *wallet, struct node_db *node, int datadir_fd,
     bool *generation_present, uint64_t *generation);
+/* STOP cleanup only; the boot owner must be armed at chain-tip resolution. */
+enum wallet_install_reconcile consensus_state_wallet_install_classify_stop(
+    struct wallet_sqlite *wallet, struct node_db *node, int datadir_fd,
+    bool *generation_present, uint64_t *generation);
 
 #ifdef ZCL_TESTING
 void consensus_state_install_test_after_commit(void (*hook)(void *), void *context);

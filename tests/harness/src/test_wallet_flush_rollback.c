@@ -697,6 +697,58 @@ static bool wfr_scan_checked_fixture(void)
     return ok;
 }
 
+static bool wfr_invalid_depth_refused(struct wallet_sqlite *ws, struct wallet *reader, const char *marker)
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(ws->db, "UPDATE node_state SET value=? WHERE key='wallet_scan_incomplete'",
+                           -1, &stmt, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_text(stmt, 1, marker, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(ws->db) == 1;
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    reader->best_block_height = 42;
+    int floor = -1;
+    struct wallet_cutover_binding binding;
+    return ok && wallet_sqlite_read_scan_state_checked(ws, reader) == WALLET_SCAN_STATE_ERROR &&
+        reader->best_block_height == 42 &&
+        wallet_sqlite_cutover_scan_floor(ws, &floor) == WALLET_CUTOVER_FLOOR_MALFORMED &&
+        wallet_sqlite_cutover_read(ws, &binding) == WALLET_CUTOVER_MALFORMED;
+}
+
+static bool wfr_unscanned_loaded(struct wallet_sqlite *ws, struct wallet *reader,
+                                 const struct wallet_cutover_binding *expected)
+{
+    struct wallet_cutover_binding actual;
+    int floor = -1;
+    return wallet_sqlite_read_scan_state_checked(ws, reader) == WALLET_SCAN_STATE_OK &&
+        reader->best_block_height == -1 && reader->scan_retry.pending && reader->scan_retry.from == 0 &&
+        wallet_sqlite_cutover_scan_floor(ws, &floor) == WALLET_CUTOVER_FLOOR_FOUND && floor == 0 &&
+        wallet_sqlite_cutover_read(ws, &actual) == WALLET_CUTOVER_PENDING &&
+        wallet_cutover_binding_equal(expected, &actual);
+}
+
+static bool wfr_unscanned_cutover_roundtrip(void)
+{
+    sqlite3 *db = open_flush_db(false);
+    struct wallet_sqlite ws = {0};
+    struct wallet *writer = alloc_wallet_t(), *reader = alloc_wallet_t();
+    bool ok = db && writer && reader && wallet_sqlite_open_r(&ws, db).ok;
+    if (ok) {
+        writer->best_block_height = -1;
+        writer->scan_retry.pending = true;
+        writer->scan_retry.from = 0;
+        snprintf(writer->scan_retry.blocker, sizeof(writer->scan_retry.blocker), "WALLET_CUTOVER_PENDING");
+        struct wallet_cutover_binding expected = {.old_height = -1, .target_height = 3309900};
+        ok = wallet_sqlite_cutover_prepare(&ws, writer, &expected) &&
+            wfr_unscanned_loaded(&ws, reader, &expected);
+    }
+    if (ok) ok = wfr_invalid_depth_refused(&ws, reader, "from=0 depth=-2 since=0 blocker=WALLET_CUTOVER_PENDING");
+    if (ok) ok = wfr_invalid_depth_refused(&ws, reader, "from=0 depth=bad since=0 blocker=WALLET_CUTOVER_PENDING");
+    if (ws.open) wallet_sqlite_close(&ws);
+    if (db) sqlite3_close(db);
+    free_wallet_t(writer); free_wallet_t(reader);
+    return ok;
+}
+
 struct wfr_tracked_ctx {
     struct db_wallet_utxo_cutover_delivery delivery;
     bool endpoint_ok;
@@ -1227,6 +1279,7 @@ static int test_cutover_flush_atomic(void)
         ASSERT(wfr_snapshot_release_case(false));
         ASSERT(wfr_snapshot_release_case(true));
         ASSERT(wfr_scan_checked_fixture());
+        ASSERT(wfr_unscanned_cutover_roundtrip());
         ASSERT(wfr_tracked_fixture());
         ASSERT(wfr_projection_fixture());
         ASSERT(wfr_publish_fixture());

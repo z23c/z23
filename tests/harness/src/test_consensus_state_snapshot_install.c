@@ -6755,8 +6755,37 @@ static bool csi_old_reopen(const char *root, const struct csi_old_witness *w)
     return ok && boot_old_cutover_restart_cleanup();
 }
 
+static bool csi_old_stop_stage_checks(const char *dir, struct node_db *node,
+    struct wallet_sqlite *ws, const struct csi_old_witness *w)
+{
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return false;
+    bool present = false; uint64_t generation = 0;
+    boot_pending_stop_test_arm(&w->binding, dir);
+    bool ok = consensus_state_wallet_install_classify_stop(ws, node, fd, &present, &generation) == WALLET_INSTALL_UNKNOWN &&
+        !boot_pending_stop_cleanup() && csi_old_still_fenced(ws, w);
+    boot_old_cutover_test_arm(&w->binding, dir);
+    csi_old_advance_stages(BOOT_STAGE_WALLET_LOADED + 1, BOOT_STAGE_CHAIN_TIP_RESOLVED);
+    ok = ok && consensus_state_wallet_install_classify_stop(ws, node, fd, &present, &generation) == WALLET_INSTALL_UNKNOWN;
+    boot_pending_stop_test_arm(&w->binding, dir);
+    struct node_db node_copy = *node; struct wallet_sqlite ws_copy = *ws;
+    int wrong_fd = openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    ok = ok && wrong_fd >= 0 &&
+        consensus_state_wallet_install_classify_stop(ws, node, wrong_fd, &present, &generation) == WALLET_INSTALL_UNKNOWN &&
+        consensus_state_wallet_install_classify_stop(&ws_copy, node, fd, &present, &generation) == WALLET_INSTALL_UNKNOWN &&
+        consensus_state_wallet_install_classify_stop(ws, &node_copy, fd, &present, &generation) == WALLET_INSTALL_UNKNOWN &&
+        consensus_state_wallet_install_classify_stop(ws, node, -1, &present, &generation) == WALLET_INSTALL_UNKNOWN &&
+        consensus_state_wallet_install_classify(ws, node, fd, &present, &generation) == WALLET_INSTALL_UNKNOWN &&
+        consensus_state_wallet_install_classify_stop(NULL, node, fd, &present, &generation) == WALLET_INSTALL_UNKNOWN &&
+        consensus_state_wallet_install_classify_stop(ws, NULL, fd, &present, &generation) == WALLET_INSTALL_UNKNOWN &&
+        consensus_state_wallet_install_classify_stop(ws, node, fd, &present, &generation) == WALLET_INSTALL_COMMITTED;
+    if (wrong_fd >= 0) close(wrong_fd);
+    close(fd);
+    return ok;
+}
+
 /* A fresh startup context must observe the committed binding and wallet rows. */
-static bool csi_old_after_cleanup(const char *root, const struct csi_old_witness *w)
+static bool csi_old_after_cleanup(const char *root, const struct csi_old_witness *w, bool stop)
 {
     char dir[320], path[512];
     snprintf(dir, sizeof(dir), "%s/ckpt-rung-act", root);
@@ -6769,6 +6798,7 @@ static bool csi_old_after_cleanup(const char *root, const struct csi_old_witness
     if (!boot_datadir_lock_acquire(dir) || !node_db_open(node, path) ||
         !wallet_sqlite_open_r(ws, node->db).ok || !progress_store_open_existing(dir)) return false;
     wallet_init(wallet);
+    main_state_init(main);
     boot_stage_reset_for_testing();
     for (int stage = BOOT_STAGE_DATADIR_LOCKED; stage <= BOOT_STAGE_WALLET_LOADED; ++stage)
         boot_stage_advance_to((enum boot_stage)stage);
@@ -6778,6 +6808,16 @@ static bool csi_old_after_cleanup(const char *root, const struct csi_old_witness
     bool ok = fd >= 0 && csi_old_still_fenced(ws, w) &&
         consensus_state_wallet_install_classify(ws, node, fd, &present, &generation) == WALLET_INSTALL_COMMITTED;
     if (fd >= 0) close(fd);
+    if (stop) {
+        if (!ok || !csi_old_stop_stage_checks(dir, node, ws, w)) return false;
+        struct wallet_cutover_binding wrong = w->binding;
+        wrong.target_hash[0] ^= 1;
+        boot_pending_stop_test_arm(&wrong, dir);
+        if (boot_pending_stop_cleanup() || !csi_old_still_fenced(ws, w)) return false;
+        boot_pending_stop_test_arm(&w->binding, dir);
+        return ok && boot_pending_stop_cleanup();
+    }
+    main_state_free(main);
     progress_store_close();
     wallet_sqlite_close(ws);
     node_db_close(node);
@@ -6800,13 +6840,13 @@ static int csi_old_crash_first(const char *root, uint64_t parent, struct csi_old
     return ready && reaped && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
 }
 static bool csi_old_retry_child(const char *root, const struct csi_old_witness *w,
-                                uint64_t parent, bool enabled, bool after_cleanup)
+                                uint64_t parent, bool enabled, int after_cleanup)
 {
     pid_t child = enabled ? fork() : -1;
     if (!child) {
         if (!os_proc_bind_parent_death(SIGKILL, parent)) _exit(47);
         alarm(90);
-        _exit((after_cleanup ? csi_old_after_cleanup(root, w) : csi_old_reopen(root, w)) ? 0 : 1);
+        _exit((after_cleanup ? csi_old_after_cleanup(root, w, after_cleanup == 2) : csi_old_reopen(root, w)) ? 0 : 1);
     }
     int status = 0;
     return child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
@@ -6826,6 +6866,10 @@ static int csi_old_retry_crash_case(void)
     CSI_CHECK("OLD retry: committed cleanup rejects mismatch and preserves wallet", resumed);
     bool persisted = csi_old_retry_child(root, &witness, parent, resumed, true);
     CSI_CHECK("OLD cleanup preserves committed binding and wallet rows across reopen", persisted);
+    bool stopped = csi_old_retry_child(root, &witness, parent, persisted, 2);
+    CSI_CHECK("Stop cleanup rejects mismatch and preserves pending wallet", stopped);
+    bool retained = csi_old_retry_child(root, &witness, parent, stopped, 1);
+    CSI_CHECK("Stop cleanup preserves committed binding and wallet rows across reopen", retained);
     test_rm_rf_recursive(root); return failures;
 
 }

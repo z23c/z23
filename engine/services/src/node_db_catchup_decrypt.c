@@ -32,10 +32,16 @@
 #include "sapling/fr.h"
 #include "sapling/note_encryption.h"
 #include "support/cleanse.h"
+#include "util/workpool.h"
+#include "util/safe_alloc.h"
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+#include "util/thread_registry.h"
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 
 /* False when a null argument, an output-less transaction, or a keyless
  * wallet makes trial decryption a no-op. Checks short-circuit left to
@@ -100,6 +106,121 @@ static bool catchup_sapling_open_output_plaintext(
 
     if (plaintext[0] != 0x01)
         return false; // raw-return-ok:not-mine answer, no error
+    return true;
+}
+
+/* Each worker owns one result. It does not access the database or wallet. */
+struct catchup_trial {
+    const struct output_description *output;
+    const struct sapling_key_entry *key;
+    struct catchup_epk *epk;
+    bool valid;
+};
+
+struct catchup_parallel {
+    struct workpool pool;
+    struct catchup_trial *trials;
+    void **items;
+    size_t count;
+};
+
+#ifdef ZCL_TESTING
+static bool catchup_test_fail_init, catchup_test_fail_run;
+static bool catchup_test_run_failed;
+static int catchup_test_workers;
+#ifndef _WIN32
+static bool catchup_test_signal;
+void node_db_catchup_parallel_test_signal(bool signal) { catchup_test_signal = signal; }
+#endif
+static size_t catchup_test_selected;
+void node_db_catchup_parallel_test_faults(bool init, bool run)
+{ catchup_test_fail_init = init; catchup_test_fail_run = run; catchup_test_run_failed = false; }
+bool node_db_catchup_parallel_test_run_failed(void) { return catchup_test_run_failed; }
+void node_db_catchup_parallel_test_workers(int count) { catchup_test_workers = count; }
+size_t node_db_catchup_parallel_test_selected(void) { return catchup_test_selected; }
+int node_db_catchup_parallel_test_worker_count(const struct catchup_parallel_state *state)
+{ return state && state->pool ? workpool_num_threads(&state->pool->pool) : 0; }
+#endif
+
+static bool catchup_trial_run(void *arg)
+{
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+    if (catchup_test_signal) thread_registry_request_shutdown();
+#endif
+    struct catchup_trial *trial = arg;
+    uint8_t plaintext[564] = {0}, pk_d[32], cm[32];
+    trial->valid = false;
+    if (catchup_sapling_open_output_plaintext(trial->output, trial->key, plaintext, trial->epk)) {
+        uint64_t value = 0;
+        for (int b = 0; b < 8; ++b) value |= ((uint64_t)plaintext[12 + b]) << (8 * b);
+        trial->valid = sapling_ivk_to_pkd(trial->key->ivk, plaintext + 1, pk_d) &&
+            sapling_compute_cm(plaintext + 1, pk_d, value, plaintext + 20, cm) &&
+            memcmp(cm, trial->output->cm.data, sizeof(cm)) == 0;
+    }
+    memory_cleanse(plaintext, sizeof(plaintext));
+    memory_cleanse(pk_d, sizeof(pk_d));
+    memory_cleanse(cm, sizeof(cm));
+    return true;
+}
+
+void node_db_catchup_parallel_free(struct catchup_parallel_state *state)
+{
+    if (!state || !state->pool) return;
+    struct catchup_parallel *p = state->pool;
+    workpool_destroy(&p->pool);
+    memory_cleanse(p->trials, p->count * sizeof(*p->trials));
+    free(p->trials);
+    free(p->items);
+    free(p);
+    state->pool = NULL;
+}
+
+static struct catchup_parallel *catchup_parallel_get(struct catchup_parallel_state *state, size_t count)
+{
+    if (!state || count < 2 || count > MAX_SAPLING_KEYS) return NULL;
+    if (state->attempted) return state->pool && state->pool->count == count ? state->pool : NULL;
+    state->attempted = true;
+#ifdef ZCL_TESTING
+    if (catchup_test_fail_init) return NULL;
+#endif
+    struct catchup_parallel *p = zcl_calloc(1, sizeof(*p), "Sapling trial pool");
+    if (!p) return NULL;
+    p->trials = zcl_calloc(count, sizeof(*p->trials), "Sapling trial results");
+    p->items = zcl_calloc(count, sizeof(*p->items), "Sapling trial items");
+    int workers = count < 4 ? (int)count : 4;
+#ifdef ZCL_TESTING
+    if (catchup_test_workers > 0 && catchup_test_workers <= 4) workers = catchup_test_workers;
+#endif
+    if (!p->trials || !p->items || !workpool_init(&p->pool, workers, count, catchup_trial_run)) {
+        free(p->trials); free(p->items); free(p); return NULL;
+    }
+    p->count = count;
+    return state->pool = p;
+}
+
+static bool catchup_parallel_select(struct catchup_parallel *p,
+    const struct output_description *od, const struct sapling_key_entry *keys,
+    size_t *selected, struct catchup_epk *epk)
+{
+    epk->valid = jub_from_bytes(&epk->point, od->ephemeral_key.data);
+    if (epk->valid) jub_mul_by_cofactor(&epk->point, &epk->point);
+    epk->prepared = true;
+    for (size_t i = 0; i < p->count; ++i) {
+        p->trials[i] = (struct catchup_trial){.output = od, .key = &keys[i], .epk = epk};
+        p->items[i] = &p->trials[i];
+    }
+    bool ok = workpool_run(&p->pool, p->items, p->count);
+#ifdef ZCL_TESTING
+    if (catchup_test_fail_run && ok) { catchup_test_run_failed = true; ok = false; }
+#endif
+    if (!ok) return false;
+    *selected = p->count;
+    for (size_t i = 0; i < p->count; ++i) {
+        if (p->trials[i].valid) { *selected = i; break; }
+    }
+#ifdef ZCL_TESTING
+    catchup_test_selected = *selected;
+#endif
     return true;
 }
 
@@ -230,9 +351,10 @@ int node_db_catchup_try_sapling_decrypt(struct node_db *ndb,
     return found;
 }
 
-bool node_db_catchup_replay_sapling_decrypt(struct node_db *ndb,
+bool node_db_catchup_replay_sapling_decrypt_parallel(struct node_db *ndb,
     struct transaction *tx, const struct sapling_key_entry *keys, size_t key_count,
-    int height, int *found_out, struct sapling_replay_delivery *delivery)
+    int height, int *found_out, struct sapling_replay_delivery *delivery,
+    struct catchup_parallel_state *state)
 {
     if (!ndb || !tx || (!keys && key_count) || !found_out || !delivery) return false;
     int found = 0;
@@ -240,6 +362,18 @@ bool node_db_catchup_replay_sapling_decrypt(struct node_db *ndb,
     transaction_compute_hash(tx);
     for (size_t oi = 0; ok && oi < tx->num_shielded_output; oi++) {
         struct catchup_epk epk = {0};
+        struct catchup_parallel *p = catchup_parallel_get(state, key_count);
+        if (p) {
+            size_t selected = key_count;
+            if (!catchup_parallel_select(p, &tx->v_shielded_output[oi], keys, &selected, &epk)) {
+                ok = false;
+                break;
+            }
+            if (selected < key_count && !catchup_sapling_output_opened_by_key(ndb,
+                    &tx->v_shielded_output[oi], &keys[selected], &tx->hash, oi,
+                    height, &found, &ok, true, delivery, &epk)) ok = false;
+            continue;
+        }
         for (size_t ki = 0; ki < key_count; ki++) {
             if (catchup_sapling_output_opened_by_key(ndb, &tx->v_shielded_output[oi],
                     &keys[ki], &tx->hash, oi, height, &found, &ok, true, delivery, &epk))
@@ -248,4 +382,12 @@ bool node_db_catchup_replay_sapling_decrypt(struct node_db *ndb,
     }
     *found_out = found;
     return ok;
+}
+
+bool node_db_catchup_replay_sapling_decrypt(struct node_db *ndb,
+    struct transaction *tx, const struct sapling_key_entry *keys, size_t key_count,
+    int height, int *found_out, struct sapling_replay_delivery *delivery)
+{
+    return node_db_catchup_replay_sapling_decrypt_parallel(ndb, tx, keys, key_count,
+        height, found_out, delivery, NULL);
 }

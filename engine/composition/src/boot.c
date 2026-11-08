@@ -328,25 +328,9 @@ static struct boot_svc_ctx g_svc;
 /* Single source of truth for the live boot service context — the &g_svc handed
  * to app_init_services; boot_services.c's main.c-facing entry points read it. */
 struct boot_svc_ctx *boot_active_svc(void) { return &g_svc; }
-static bool boot_params_thread_failure_is_fatal(const struct app_context *ctx,
-                                                const char *network_id)
-{
-    return ctx && ctx->params_dir && network_id &&
-           strcmp(network_id, "main") == 0 && !ctx->mint_anchor_fast;
-}
 #ifdef ZCL_TESTING
 void boot_test_bind_app_context(const struct app_context *ctx);
 void boot_test_bind_app_context(const struct app_context *ctx) { g_boot_app_ctx = ctx; }
-bool boot_test_params_thread_failure_is_fatal(bool has_params_dir,
-                                              bool is_mainnet,
-                                              bool mint_anchor_fast)
-{
-    struct app_context ctx = {0};
-    ctx.params_dir = has_params_dir ? "/tmp/zcash-params" : NULL;
-    ctx.mint_anchor_fast = mint_anchor_fast;
-    return boot_params_thread_failure_is_fatal(&ctx,
-                                               is_mainnet ? "main" : "test");
-}
 #endif
 void *load_params_thread(void *arg)
 {
@@ -3500,48 +3484,30 @@ static bool boot_seq_load_pending_chain(struct app_context *ctx, struct boot_seq
     struct boot_cutover_env env = boot_cutover_environment();
     return boot_cutover_load_chain(&env, ctx, seq->params, &seq->tip);
 }
-static bool boot_pending_replay(struct app_context *ctx, const struct chain_params *params)
+static enum boot_pending_replay_result boot_pending_replay(struct app_context *ctx, const struct chain_params *params)
 {
     struct boot_cutover_env env = boot_cutover_environment();
     return boot_cutover_replay(&env, ctx, params);
 }
 
-static bool g_old_cutover_restart_pending;
+enum boot_cutover_exit_action { BOOT_CUTOVER_EXIT_NONE, BOOT_CUTOVER_EXIT_RESTART, BOOT_CUTOVER_EXIT_STOP };
+static enum boot_cutover_exit_action g_cutover_exit_action;
 static struct wallet_cutover_binding g_old_cutover_restart_binding;
+bool boot_wallet_cutover_stop_context_matches(const struct node_db *ndb, const struct wallet_sqlite *ws)
+{
+    return g_cutover_exit_action == BOOT_CUTOVER_EXIT_STOP &&
+        boot_stage_is(BOOT_STAGE_CHAIN_TIP_RESOLVED) && ndb == &g_node_db && ws == &g_wallet_sqlite;
+}
 
 /* OLD retry keeps the wallet fence and never enters network services. */
 static bool boot_retry_old_cutover(struct app_context *ctx, struct boot_seq *seq,
                                    const struct wallet_cutover_binding *binding)
 {
     struct boot_cutover_env env = boot_cutover_environment();
-    struct block_index *tip = NULL;
-    if (!boot_cutover_mode_supported(ctx) ||
-        !wallet_readiness_initialize(env.wallet, WALLET_READINESS_PENDING,
-                                     binding->old_generation_present, binding->old_generation) ||
-        !boot_cutover_load_old_chain(&env, ctx, seq->params, binding, &tip))
-        return false;
-    char *bundle = consensus_state_find_old_retry_bundle(ctx->datadir, binding);
-    if (!bundle) {
-        LOG_ERROR("wallet", "old wallet cutover artifact unavailable");
-        return false;
+    if (boot_cutover_retry_old(&env, ctx, seq->params, binding)) {
+        g_old_cutover_restart_binding = *binding;
+        g_cutover_exit_action = BOOT_CUTOVER_EXIT_RESTART;
     }
-    struct consensus_state_install_runtime_result result;
-    struct zcl_result installed = binding->old_height == 0 ?
-        consensus_state_install_from_bundle_old_retry(
-            env.node, env.state, bundle, ctx->datadir, env.wallet_db, env.wallet, binding, &result) :
-        consensus_state_install_from_bundle_terminal_old_retry(
-            env.node, env.state, bundle, ctx->datadir, env.wallet_db, env.wallet, binding, &result);
-    free(bundle);
-    if (!installed.ok || !result.state_installed) {
-        LOG_ERROR("wallet", "old wallet cutover retry refused: %s", installed.message);
-        return false;
-    }
-    if (!boot_cutover_verify_committed(&env, ctx->datadir, binding)) {
-        LOG_ERROR("wallet", "old wallet cutover committed but recovery verification failed");
-        return false;
-    }
-    g_old_cutover_restart_binding = *binding;
-    g_old_cutover_restart_pending = true;
     return false;
 }
 
@@ -3554,12 +3520,18 @@ static bool boot_wallet_publish_readiness(struct app_context *ctx)
     return boot_cutover_publish_readiness(&env, ctx);
 }
 
-static bool boot_pending_finish(struct app_context *ctx, struct boot_seq *seq)
+static bool boot_pending_finish(struct app_context *ctx, struct boot_seq *seq,
+                                const struct wallet_cutover_binding *binding)
 {
     seq->t_finalize_build = boot_clock_ms();
     if (!sysinit_run_stage(BOOT_STAGE_CHAIN_TIP_RESOLVED, ctx).ok) return false;
     reducer_frontier_provable_tip_seed_high_water(active_chain_height(&g_state.chain_active));
-    if (!boot_pending_replay(ctx, seq->params)) return false;
+    enum boot_pending_replay_result replay = boot_pending_replay(ctx, seq->params);
+    if (replay == BOOT_PENDING_STOPPED) {
+        g_old_cutover_restart_binding = *binding;
+        g_cutover_exit_action = BOOT_CUTOVER_EXIT_STOP;
+    }
+    if (replay != BOOT_PENDING_COMPLETE) return false;
     activation_boot_complete(&g_activation_ctl, "wallet_cutover_complete");
     return boot_seq_start_services(ctx, seq);
 }
@@ -3604,7 +3576,7 @@ bool app_init(struct app_context *ctx)
             return false;
         }
         if (!boot_seq_load_pending_chain(ctx, &seq)) return false;
-        return boot_pending_finish(ctx, &seq);
+        return boot_pending_finish(ctx, &seq, &cutover_binding);
     }
     if (!boot_seq_load_chain(ctx, &seq)) return false;
     if (seq.done) return true;
@@ -3703,7 +3675,7 @@ void app_shutdown_offline(bool output_already_durable)
 
 bool boot_old_cutover_restart_pending(void)
 {
-    return g_old_cutover_restart_pending;
+    return g_cutover_exit_action == BOOT_CUTOVER_EXIT_RESTART;
 }
 
 #ifdef ZCL_TESTING
@@ -3712,20 +3684,38 @@ void boot_old_cutover_test_arm(const struct wallet_cutover_binding *binding, con
     if (!binding || !datadir) return;
     g_datadir = datadir;
     g_old_cutover_restart_binding = *binding;
-    g_old_cutover_restart_pending = true;
+    g_cutover_exit_action = BOOT_CUTOVER_EXIT_RESTART;
+}
+void boot_pending_stop_test_arm(const struct wallet_cutover_binding *binding, const char *datadir)
+{
+    if (!binding || !datadir) return;
+    g_datadir = datadir;
+    g_old_cutover_restart_binding = *binding;
+    g_cutover_exit_action = BOOT_CUTOVER_EXIT_STOP;
 }
 #endif
 
-bool boot_old_cutover_restart_cleanup(void)
+static bool boot_cutover_exit_cleanup(enum boot_cutover_exit_action action)
 {
     struct boot_cutover_env env = boot_cutover_environment();
-    if (!g_old_cutover_restart_pending || !g_node_db.db || g_node_db.sync_in_batch ||
+    if (g_cutover_exit_action != action || !g_node_db.db || g_node_db.sync_in_batch ||
         !sqlite3_get_autocommit(g_node_db.db) ||
-        !boot_cutover_verify_committed(&env, g_datadir, &g_old_cutover_restart_binding))
+        !(action == BOOT_CUTOVER_EXIT_STOP ? boot_cutover_verify_committed_stop(&env, g_datadir, &g_old_cutover_restart_binding) :
+          boot_cutover_verify_committed(&env, g_datadir, &g_old_cutover_restart_binding)))
         return false;
-    g_old_cutover_restart_pending = false;
+    g_cutover_exit_action = BOOT_CUTOVER_EXIT_NONE;
     boot_shutdown_offline_internal(false, true);
     return true;
+}
+
+bool boot_old_cutover_restart_cleanup(void)
+{
+    return boot_cutover_exit_cleanup(BOOT_CUTOVER_EXIT_RESTART);
+}
+
+bool boot_pending_stop_cleanup(void)
+{
+    return boot_cutover_exit_cleanup(BOOT_CUTOVER_EXIT_STOP);
 }
 
 bool app_is_running(void) { return atomic_load(&g_running); }

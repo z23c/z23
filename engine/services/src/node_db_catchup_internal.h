@@ -64,6 +64,13 @@ enum catchup_scan_snapshot_status node_db_catchup_scan_snapshot(
 
 struct sapling_key_entry;
 struct sapling_replay_delivery;
+struct catchup_parallel;
+struct catchup_parallel_state { struct catchup_parallel *pool; bool attempted; };
+void node_db_catchup_parallel_free(struct catchup_parallel_state *state);
+bool node_db_catchup_replay_sapling_decrypt_parallel(struct node_db *ndb,
+    struct transaction *tx, const struct sapling_key_entry *keys, size_t key_count,
+    int height, int *found_out, struct sapling_replay_delivery *delivery,
+    struct catchup_parallel_state *state);
 #ifdef ZCL_TESTING
 void node_db_transparent_replay_test_after_read(void (*hook)(void *), void *ctx);
 #endif

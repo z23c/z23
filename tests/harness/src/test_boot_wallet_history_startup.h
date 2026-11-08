@@ -195,7 +195,11 @@ static int bil_startup_fixture_exercise(struct bil_startup_fixture *f)
         strcmp(replay.archive_datadir, f->archive) == 0 && replay.endpoint.height == 27 &&
         memcmp(replay.endpoint.hash.data, f->hashes[27].data, 32) == 0;
     BIL_CHECK("pending startup binds real wallet and canonical state to archive view", ok);
-    bool retry = ok && boot_cutover_replay_step(&replay) == BOOT_CUTOVER_RETRY &&
+    bool skip = ok && boot_cutover_replay_step(&replay) == BOOT_CUTOVER_PROGRESS &&
+        replay.phase == BOOT_CUTOVER_DISCOVER &&
+        wallet_readiness_get(f->wallet).state == WALLET_READINESS_PENDING;
+    BIL_CHECK("empty transparent phase advances without publishing readiness", skip);
+    bool retry = skip && boot_cutover_replay_step(&replay) == BOOT_CUTOVER_RETRY &&
         wallet_readiness_get(f->wallet).state == WALLET_READINESS_PENDING;
     BIL_CHECK("header-only history cannot publish wallet readiness", retry);
     boot_test_pending_replay_close(history);

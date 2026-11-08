@@ -39,10 +39,17 @@
 #include <stdbool.h>
 #include <sqlite3.h>
 
+bool boot_params_thread_failure_is_fatal(const struct app_context *ctx, const char *network_id);
+
 /* True only for the real boot node database during pre-service cutover. */
 bool boot_wallet_cutover_startup_node_db_matches(const struct node_db *ndb);
 bool boot_wallet_cutover_recovery_context_matches(const struct node_db *ndb,
     const struct wallet_sqlite *ws);
+bool boot_wallet_cutover_stop_context_matches(const struct node_db *ndb,
+    const struct wallet_sqlite *ws);
+#if !defined(_WIN32)
+bool boot_wallet_cutover_stop_identity(struct wallet_sqlite *wallet, struct node_db *node, int dir_fd);
+#endif
 bool boot_wallet_cutover_startup_context_matches(const struct node_db *ndb,
     const struct wallet_sqlite *ws, const struct wallet *wallet,
     const struct main_state *main);

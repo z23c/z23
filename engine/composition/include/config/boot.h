@@ -640,9 +640,11 @@ void app_shutdown_offline(bool output_already_durable);
 /* Only a verified COMMITTED pending-wallet startup may use this handoff. */
 bool boot_old_cutover_restart_pending(void);
 bool boot_old_cutover_restart_cleanup(void);
+bool boot_pending_stop_cleanup(void);
 #ifdef ZCL_TESTING
 struct wallet_cutover_binding;
 void boot_old_cutover_test_arm(const struct wallet_cutover_binding *binding, const char *datadir);
+void boot_pending_stop_test_arm(const struct wallet_cutover_binding *binding, const char *datadir);
 #endif
 
 /* Legacy -refold-staged is contained before boot writes: its ordinary reducer

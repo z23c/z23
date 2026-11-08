@@ -187,7 +187,8 @@ static bool bcp_holds(void *opaque, struct wallet *wallet, sqlite3 *db)
     if (deadline && (now <= 0 || now >= deadline || wallet_lock_is_locked())) return false;
     if (!wallet_sqlite_verify_startup_sapling_in_tx_locked_r(
             ctx->replay->ctx->wallet_db, wallet, db).ok) return false;
-    return bcp_full_empty(ctx, wallet, db) &&
+    return (!ctx->replay->transparent_empty || boot_wallet_cutover_transparent_empty_locked(
+            ctx->replay->ctx->wallet_db, db, wallet)) && bcp_full_empty(ctx, wallet, db) &&
         (!ctx->replay->shielded_empty || boot_wallet_cutover_shielded_empty_locked(
             ctx->replay->ctx->wallet_db, db, wallet, ctx->replay->sapling_load_ok)) &&
         bcp_readiness_matches(&current, expected) &&

@@ -93,3 +93,39 @@ bool boot_wallet_cutover_full_empty_locked(struct wallet_sqlite *ws,
         boot_wallet_cutover_shielded_empty_locked(ws, db, wallet, sapling_load_ok) &&
         bce_wallet_memory_empty(wallet) && bce_no_wallet_rows(db);
 }
+
+static bool bce_no_transparent_rows(sqlite3 *db)
+{
+    static const char query[] =
+        "SELECT EXISTS(SELECT 1 FROM wallet_keys), EXISTS(SELECT 1 FROM wallet_keypool),"
+        "EXISTS(SELECT 1 FROM wallet_scripts), EXISTS(SELECT 1 FROM wallet_watch_only),"
+        "EXISTS(SELECT 1 FROM wallet_transactions), EXISTS(SELECT 1 FROM wallet_utxos)";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, query, -1, &stmt, NULL) != SQLITE_OK || !stmt) {
+        if (stmt) sqlite3_finalize(stmt);
+        return false;
+    }
+    bool empty = ar_step_checked(stmt, "transparent-empty proof", NULL) == ZCL_STEP_ROW;
+    for (int i = 0; empty && i < 6; ++i)
+        empty = sqlite3_column_type(stmt, i) == SQLITE_INTEGER && sqlite3_column_int(stmt, i) == 0;
+    if (empty) empty = ar_step_checked(stmt, "transparent-empty proof completion", NULL) == ZCL_STEP_DONE;
+    return sqlite3_finalize(stmt) == SQLITE_OK && empty;
+}
+
+static bool bce_transparent_memory_empty(const struct wallet *wallet)
+{
+    if (wallet->num_wallet_tx || wallet->key_pool_size ||
+        wallet->num_spent || wallet->keystore.num_keys || wallet->keystore.num_watching ||
+        wallet->keystore.num_scripts) return false;
+    for (size_t i = 0; i < MAX_WALLET_TX; ++i) if (wallet->map_wallet[i].used) return false;
+    for (size_t i = 0; i < MAX_KEY_POOL; ++i) if (wallet->key_pool[i].persisted) return false;
+    for (size_t i = 0; i < SPENT_SET_BUCKETS; ++i) if (wallet->spent_set[i].occupied) return false;
+    return bce_transparent_slots_empty(wallet);
+}
+
+bool boot_wallet_cutover_transparent_empty_locked(struct wallet_sqlite *ws,
+    sqlite3 *db, const struct wallet *wallet)
+{
+    return ws && ws->open && db && ws->db == db && wallet && !wallet_lock_is_locked() &&
+        bce_transparent_memory_empty(wallet) && bce_no_transparent_rows(db);
+}

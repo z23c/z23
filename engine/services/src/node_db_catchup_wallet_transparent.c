@@ -10,6 +10,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#ifdef ZCL_TESTING
+#include <stdatomic.h>
+static _Atomic unsigned g_transparent_test_reads;
+unsigned node_db_transparent_test_reads(void) { return atomic_load(&g_transparent_test_reads); }
+#endif
 
 #ifdef ZCL_TESTING
 static void (*transparent_test_after_read)(void *);
@@ -177,6 +182,9 @@ static enum transparent_replay_status transparent_one(struct transparent_apply *
     if (status != TRANSPARENT_REPLAY_COMPLETE) return status;
     struct block block;
     block_init(&block);
+#ifdef ZCL_TESTING
+    atomic_fetch_add(&g_transparent_test_reads, 1);
+#endif
     struct zcl_result read_result = node_db_catchup_read_authenticated_block(
         datadir, loc.file, loc.offset, &loc.hash, &block);
     if (!read_result.ok) status = TRANSPARENT_REPLAY_INCOMPLETE;

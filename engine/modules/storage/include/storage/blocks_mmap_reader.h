@@ -39,6 +39,9 @@ const uint8_t *bmr_get_payload(struct blocks_mmap *m,
                                int32_t nFile, uint32_t nDataPos,
                                size_t *out_len);
 
+/* Select bounded reverse-read hints before the first payload lookup. */
+void bmr_advise_reverse(struct blocks_mmap *m);
+
 void bmr_close(struct blocks_mmap *m);
 
 #ifdef __cplusplus

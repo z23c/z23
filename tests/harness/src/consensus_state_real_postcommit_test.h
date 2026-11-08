@@ -3,17 +3,46 @@
 #ifndef ZCL_CONSENSUS_STATE_REAL_POSTCOMMIT_TEST_H
 #define ZCL_CONSENSUS_STATE_REAL_POSTCOMMIT_TEST_H
 #include "config/args.h"
+#include "config/boot_error.h"
+#include "config/boot_wallet_cutover_replay.h"
 #include "crypto/sha256.h"
 #include "keys/key.h"
 #include "keys/pubkey.h"
 #include "platform/file_clone.h"
 #include "util/util.h"
+#include "util/safe_alloc.h"
+#include "support/cleanse.h"
+#include "wallet/wallet.h"
+#include "wallet/sapling_keys.h"
 #include <time.h>
 
 struct csi_real_paths {
     char root[PATH_MAX], data[PATH_MAX], history[PATH_MAX], node[PATH_MAX], artifact[PATH_MAX];
     const char *bundle, *source, *params;
 };
+
+struct csi_real_probe {
+    uint8_t wallet[32];
+    enum wallet_discover_checkpoint_status checkpoint_status;
+    struct wallet_discover_checkpoint checkpoint;
+};
+void boot_test_pending_detail_hook(void (*hook)(enum boot_cutover_replay_phase, enum boot_cutover_replay_status));
+
+static bool csi_real_sapling_seed(struct wallet_sqlite *ws)
+{
+    struct wallet *wallet = zcl_calloc(1, sizeof(*wallet), "real stop synthetic wallet");
+    if (!wallet) return false;
+    wallet_init(wallet);
+    uint8_t seed[32] = {1}, diversifier[ZC_DIVERSIFIER_SIZE], pk_d[32];
+    bool ok = sapling_keystore_set_seed(&wallet->sapling_keys, seed) &&
+        sapling_keystore_new_address(&wallet->sapling_keys, diversifier, pk_d) &&
+        wallet_sqlite_write_sapling_seed(ws, seed) &&
+        wallet_sqlite_write_sapling_key(ws, 0, &wallet->sapling_keys.keys[0]);
+    memory_cleanse(seed, sizeof(seed));
+    wallet_free(wallet);
+    free(wallet);
+    return ok;
+}
 
 static bool csi_real_path(char *out, size_t cap, const char *a, const char *b)
 {
@@ -75,11 +104,12 @@ static bool csi_real_history(struct csi_real_paths *p)
 
 static bool csi_real_seed_wallet(const struct csi_real_paths *p)
 {
+    wallet_lock_reset_for_test();
     struct node_db db = {0};
     struct wallet_sqlite ws = {0};
     if (!node_db_open(&db, p->node)) return false;
     bool opened = wallet_sqlite_open_r(&ws, db.db).ok;
-    bool ok = opened && wallet_sqlite_write_scan_height(&ws, -1) &&
+    bool ok = opened && wallet_sqlite_write_scan_height(&ws, -1) && csi_real_sapling_seed(&ws) &&
         sqlite3_exec(db.db, "INSERT INTO wallet_watch_only(address_hash,address,created_at) "
                      "VALUES(zeroblob(20),'fixture',1)", NULL, NULL, NULL) == SQLITE_OK;
     if (opened) wallet_sqlite_close(&ws);
@@ -140,6 +170,19 @@ static bool csi_real_wait_child(pid_t child, int *status)
     (void)kill(child, SIGKILL);
     (void)waitpid(child, status, 0);
     return false;
+}
+
+static bool csi_real_seed_child(const struct csi_real_paths *p)
+{
+    uint64_t parent = (uint64_t)getpid();
+    pid_t child = fork();
+    if (!child) {
+        if (!os_proc_bind_parent_death(SIGKILL, parent)) _exit(39);
+        alarm(90);
+        _exit(csi_real_seed_wallet(p) ? 0 : 1);
+    }
+    int status = 0;
+    return child > 0 && csi_real_wait_child(child, &status) && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 static bool csi_real_bundle_identity(const char *path)
@@ -217,7 +260,21 @@ static bool csi_real_kill(const struct csi_real_paths *p, struct csi_cutover_wit
     return got && killed && w->generation_present && w->binding.target_height == 3309900;
 }
 
-static bool csi_real_recover(const struct csi_real_paths *p, const struct csi_cutover_witness *w)
+static bool csi_real_watch_unchanged(sqlite3 *db)
+{
+    static const uint8_t zero[20] = {0};
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT address_hash,address,created_at FROM wallet_watch_only", -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+    bool ok = sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_bytes(stmt, 0) == 20 &&
+        sqlite3_column_blob(stmt, 0) && !memcmp(sqlite3_column_blob(stmt, 0), zero, sizeof(zero)) &&
+        sqlite3_column_text(stmt, 1) && !strcmp((const char *)sqlite3_column_text(stmt, 1), "fixture") &&
+        sqlite3_column_int64(stmt, 2) == 1 && sqlite3_step(stmt) == SQLITE_DONE;
+    return sqlite3_finalize(stmt) == SQLITE_OK && ok;
+}
+
+static bool csi_real_recover(const struct csi_real_paths *p, const struct csi_cutover_witness *w,
+                             struct csi_real_probe *probe)
 {
     chain_params_select(CHAIN_MAIN);
     if (!boot_datadir_lock_acquire(p->data)) return false;
@@ -238,13 +295,120 @@ static bool csi_real_recover(const struct csi_real_paths *p, const struct csi_cu
     if (ok) ok = fd >= 0 && consensus_state_wallet_install_classify(ws, node, fd, &present, &generation) == WALLET_INSTALL_COMMITTED &&
         present == w->generation_present && generation == w->generation &&
         wallet_sqlite_cutover_read(ws, &binding) == WALLET_CUTOVER_PENDING &&
-        csi_guarded_binding_matches(&binding, &w->binding) && csi_guarded_sentinel_exists(node->db) &&
+        csi_guarded_binding_matches(&binding, &w->binding) && csi_real_watch_unchanged(node->db) &&
         boot_consensus_bundle_marker_exists(p->data) &&
         wallet_sqlite_cutover_scan_floor(ws, &floor) == WALLET_CUTOVER_FLOOR_FOUND && floor == 0;
+    if (ok) {
+        probe->checkpoint_status = wallet_sqlite_discover_checkpoint_read(ws, &probe->checkpoint);
+        ok = (probe->checkpoint_status == WALLET_DISCOVER_ABSENT ||
+              probe->checkpoint_status == WALLET_DISCOVER_FOUND) &&
+            csi_old_wallet_fingerprint(node->db, probe->wallet);
+    }
     if (fd >= 0) close(fd);
     progress_store_close(); wallet_sqlite_close(ws); node_db_close(node);
     boot_datadir_lock_release();
     return ok;
+}
+
+static bool csi_real_probe_child(const struct csi_real_paths *p, const struct csi_cutover_witness *w,
+                                 struct csi_real_probe *probe)
+{
+    int pipefd[2];
+    if (pipe(pipefd)) return false;
+    uint64_t parent = (uint64_t)getpid();
+    pid_t child = fork();
+    if (!child) {
+        if (!os_proc_bind_parent_death(SIGKILL, parent)) _exit(44);
+        alarm(90);
+        close(pipefd[0]);
+        struct csi_real_probe local = {0};
+        bool ok = csi_real_recover(p, w, &local) &&
+            write(pipefd[1], &local, sizeof(local)) == (ssize_t)sizeof(local);
+        close(pipefd[1]);
+        _exit(ok ? 0 : 1);
+    }
+    close(pipefd[1]);
+    int status = 0;
+    bool waited = child > 0 && csi_real_wait_child(child, &status);
+    ssize_t n = read(pipefd[0], probe, sizeof(*probe));
+    close(pipefd[0]);
+    return waited && n == (ssize_t)sizeof(*probe) &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static unsigned csi_real_discover_steps;
+static bool csi_real_stop_seen;
+static struct wallet_discover_checkpoint csi_real_saved_checkpoint;
+static void csi_real_stop_hook(enum boot_cutover_replay_phase phase, enum boot_cutover_replay_status status)
+{
+    if (phase == BOOT_CUTOVER_DISCOVER && status == BOOT_CUTOVER_PROGRESS &&
+        ++csi_real_discover_steps == 2) {
+        struct node_db *node = NULL; struct wallet_sqlite *ws = NULL;
+        struct wallet *wallet = NULL; struct main_state *main = NULL;
+        boot_wallet_cutover_test_slots(&node, &ws, &wallet, &main);
+        csi_real_stop_seen = wallet_sqlite_discover_checkpoint_read(ws, &csi_real_saved_checkpoint) == WALLET_DISCOVER_FOUND;
+        thread_registry_request_shutdown();
+    }
+}
+
+/* Runs real startup and cleanup; the hook requests shutdown, not an OS signal. */
+static void csi_real_stop_boot(const struct csi_real_paths *p, int signal_fd)
+{
+    char datadir[PATH_MAX + 32], params[PATH_MAX + 32];
+    int a = snprintf(datadir, sizeof(datadir), "-datadir=%s", p->data);
+    int b = snprintf(params, sizeof(params), "-paramsdir=%s", p->params);
+    if (a < 0 || b < 0 || (size_t)a >= sizeof(datadir) || (size_t)b >= sizeof(params)) _exit(40);
+    char *argv[] = {"z23", datadir, params, "-operator-lane=dev", "-nolegacyimport",
+        "-nolegacyutxoimport", "-no-tor", "-private-listeners", "-observation=0",
+        "-connect=127.0.0.1:1", "-port=28033", "-rpcport=28232", "-httpsport=28443", "-fsport=28034"};
+    int argc = (int)(sizeof(argv) / sizeof(argv[0]));
+    struct app_context ctx;
+    app_context_defaults(&ctx);
+    ctx.datadir = p->data;
+    ctx.params_dir = p->params;
+    ParseParameters(argc, (const char *const *)argv);
+    bool metrics = false;
+    if (args_parse_node_options(argc, argv, &ctx, &metrics) != -1 || unsetenv("ZCL_DEPLOY_ALLOW_CANONICAL")) _exit(41);
+    boot_stage_reset_for_testing();
+    ecc_verify_destroy();
+    ecc_stop();
+    boot_test_pending_detail_hook(csi_real_stop_hook);
+    bool started = app_init(&ctx);
+    boot_test_pending_detail_hook(NULL);
+    if (started || !csi_real_stop_seen || boot_error_reported() || !boot_pending_stop_cleanup()) _exit(42);
+    if (write(signal_fd, &csi_real_saved_checkpoint, sizeof(csi_real_saved_checkpoint)) !=
+        (ssize_t)sizeof(csi_real_saved_checkpoint)) _exit(45);
+    _exit(0);
+}
+
+static bool csi_real_stop_child(const struct csi_real_paths *p, struct wallet_discover_checkpoint *checkpoint)
+{
+    int pipefd[2];
+    if (pipe(pipefd)) return false;
+    uint64_t parent = (uint64_t)getpid();
+    pid_t child = fork();
+    if (!child) {
+        if (!os_proc_bind_parent_death(SIGKILL, parent)) _exit(43);
+        close(pipefd[0]);
+        csi_real_stop_boot(p, pipefd[1]);
+    }
+    close(pipefd[1]);
+    int status = 0;
+    bool waited = child > 0 && csi_real_wait_child(child, &status);
+    ssize_t n = read(pipefd[0], checkpoint, sizeof(*checkpoint));
+    close(pipefd[0]);
+    return waited && n == (ssize_t)sizeof(*checkpoint) && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static bool csi_real_checkpoint_same(const struct wallet_discover_checkpoint *a,
+                                     const struct wallet_discover_checkpoint *b)
+{
+    return wallet_cutover_binding_equal(&a->binding, &b->binding) &&
+        a->generation_present == b->generation_present && a->generation == b->generation &&
+        a->floor == b->floor && a->next_height == b->next_height && a->endpoint_height == b->endpoint_height &&
+        !memcmp(a->endpoint_hash, b->endpoint_hash, 32) && !memcmp(a->endpoint_root, b->endpoint_root, 32) &&
+        !memcmp(a->scan_identity, b->scan_identity, 32) && !memcmp(a->key_digest, b->key_digest, 32) &&
+        a->event_end == b->event_end && !memcmp(a->event_digest, b->event_digest, 32);
 }
 
 static bool csi_real_run(struct csi_real_paths *p)
@@ -256,16 +420,17 @@ static bool csi_real_run(struct csi_real_paths *p)
     }
     p->bundle = p->artifact;
     if (mkdir(p->data, 0700)) { fprintf(stderr, "real install: datadir creation failed\n"); return false; }
-    if (!csi_real_seed_wallet(p)) { fprintf(stderr, "real install: wallet setup failed\n"); return false; }
+    if (!csi_real_seed_child(p)) { fprintf(stderr, "real install: wallet setup failed\n"); return false; }
     if (!csi_real_bootstrap(p)) { fprintf(stderr, "real install: genesis setup failed\n"); return false; }
     if (!csi_real_history(p)) { fprintf(stderr, "real install: history copy failed\n"); return false; }
     struct csi_cutover_witness witness = {0};
     if (!csi_real_kill(p, &witness)) { fprintf(stderr, "real install: commit witness missing\n"); return false; }
-    pid_t child = fork();
-    if (child == 0) _exit(csi_real_recover(p, &witness) ? 0 : 1);
-    int status = 0;
-    return child > 0 && csi_real_wait_child(child, &status) &&
-        WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    struct csi_real_probe before = {0}, after = {0};
+    struct wallet_discover_checkpoint checkpoint = {0};
+    return csi_real_probe_child(p, &witness, &before) && before.checkpoint_status == WALLET_DISCOVER_ABSENT &&
+        csi_real_stop_child(p, &checkpoint) && csi_real_probe_child(p, &witness, &after) &&
+        after.checkpoint_status == WALLET_DISCOVER_FOUND && csi_real_checkpoint_same(&checkpoint, &after.checkpoint) &&
+        !memcmp(before.wallet, after.wallet, sizeof(before.wallet));
 }
 
 static int csi_real_postcommit_test(void)
