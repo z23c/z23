@@ -516,3 +516,26 @@ bool zcl_dev_proof_history_failure_read(const char *canonical_root,
     return result == 1;
 #endif
 }
+
+bool zcl_dev_proof_history_failure_read_from(const char *attempts_dir,
+    const char *attempt, struct zcl_dev_proof_history_failure *out)
+{
+#if defined(_WIN32)
+    (void)attempts_dir; (void)attempt; (void)out;
+    return false;
+#else
+    char actual[PATH_MAX];
+    struct stat st;
+    if (!attempts_dir || !attempt || !out ||
+        !platform_directory_canonical_real(attempts_dir, actual, sizeof(actual)))
+        return false;
+    memset(out, 0, sizeof(*out));
+    if (!history_pair_leaf(attempt, out)) return false;
+    int fd = open(actual, O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+    if (fd < 0) return false;
+    bool valid = fstat(fd, &st) == 0 && history_private(&st, true) &&
+                 history_attempt(fd, attempt, out) == 1;
+    (void)close(fd);
+    return valid;
+#endif
+}

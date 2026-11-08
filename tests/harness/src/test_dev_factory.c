@@ -9,6 +9,7 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "dev/dev_proof.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -256,8 +257,9 @@ static void dfx_attempt(const char *dir, const char *name, const char *phases,
     dfx_age(path, age_s);
 }
 
-static void dfx_attempts_fixture(const char *dir)
+static bool dfx_attempts_fixture(const char *root, const char *dir)
 {
+    char attempt[1400], path[1600];
     const char *real =
         "step=compile status=ok elapsed_ms=1000\n"
         "step=test status=ok elapsed_ms=120000\n"
@@ -270,10 +272,28 @@ static void dfx_attempts_fixture(const char *dir)
     dfx_attempt(dir, DFX_NAME_40A "-" DFX_NAME_40B ".s2", real,
                 "test_selection=universal reason=header_change "
                 "groups_selected=900\n", 120);
-    dfx_attempt(dir, DFX_NAME_40C "-" DFX_NAME_40B ".s1",
+    dfx_attempt(dir, DFX_NAME_40C "-" DFX_NAME_40B ".partia",
                 "queue_lock_wait_ms=2000\n", NULL, 30);
+    if (!zcl_dev_proof_test_failure_attempt_prepare(root, DFX_NAME_40C,
+            DFX_NAME_40B, attempt, sizeof(attempt)) ||
+        !zcl_dev_proof_test_failure_attempt_settle(root, DFX_NAME_40C,
+            DFX_NAME_40B, attempt, "proof_generation_gitlink_checkout_failed"))
+        return false;
+    if (!zcl_dev_proof_test_failure_attempt_prepare(root, DFX_NAME_40C,
+            DFX_NAME_40A, attempt, sizeof(attempt))) return false;
+    (void)snprintf(path, sizeof(path), "%s/logs/failure.txt", attempt);
+    dfx_write(path, "proof_generation_gitlink_checkout_failed\n");
+    if (!zcl_dev_proof_test_failure_attempt_prepare(root, DFX_NAME_40C,
+            DFX_NAME_40A, attempt, sizeof(attempt)) ||
+        !zcl_dev_proof_test_failure_attempt_settle(root, DFX_NAME_40C,
+            DFX_NAME_40A, attempt, "proof_interrupted_cancelled")) return false;
+    if (!zcl_dev_proof_test_failure_attempt_prepare(root, DFX_NAME_40C,
+            DFX_NAME_40A, attempt, sizeof(attempt)) ||
+        !zcl_dev_proof_test_failure_attempt_settle(root, DFX_NAME_40C,
+            DFX_NAME_40A, attempt, "proof_producer_source_mismatch")) return false;
     dfx_attempt(dir, DFX_NAME_40C "-" DFX_NAME_40A ".s1", real, NULL,
                 49 * DFX_HOUR);
+    return true;
 }
 
 /* Two cwds, a first and a second job each. cwd_a has a failed second run
@@ -341,13 +361,13 @@ int test_dev_factory(void)
     test_make_tmpdir(base, sizeof(base), "dev_factory", "t");
     (void)snprintf(jobs, sizeof(jobs), "%s/jobs.jsonl", base);
     (void)snprintf(land, sizeof(land), "%s/land", base);
-    (void)snprintf(att, sizeof(att), "%s/attempts", base);
+    (void)snprintf(att, sizeof(att), "%s/.cache/zcl-dev-proof/attempts", base);
     (void)snprintf(proc, sizeof(proc), "%s/proc", base);
     dfx_mkdirs(land);
     (void)snprintf(path, sizeof(path), "%s/outcomes.jsonl", land);
     dfx_jobs_fixture(jobs, now);
     dfx_outcomes_fixture(path, now);
-    dfx_attempts_fixture(att);
+    bool attempts_ok = dfx_attempts_fixture(base, att);
     dfx_proc_fixture(proc);
     dfx_env(jobs, land, att, proc);
 
@@ -431,11 +451,13 @@ int test_dev_factory(void)
     }
 
     TEST("factory: attempts split short refusals from real proofs") {
+        ASSERT(attempts_ok);
         dfx_run(&c, 48);
         ASSERT(dfx_ok(&c));
-        ASSERT_EQ((int)dfx_num(&c, "proof_attempts.attempts"), 3);
+        ASSERT_EQ((int)dfx_num(&c, "proof_attempts.attempts"), 7);
         ASSERT_EQ((int)dfx_num(&c, "proof_attempts.short_refusals"), 1);
         ASSERT_EQ((int)dfx_num(&c, "proof_attempts.real"), 2);
+        ASSERT_EQ((int)dfx_num(&c, "proof_attempts.unclassified"), 4);
         ASSERT_EQ((int)dfx_num(&c, "proof_attempts.superseded"), 1);
         ASSERT_EQ((int)dfx_num(&c, "proof_attempts.lock_wait_ms.max"), 7000);
         ASSERT_EQ((int)dfx_num(&c, "proof_attempts.lock_wait_ms.sum"), 16000);

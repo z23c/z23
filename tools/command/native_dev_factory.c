@@ -29,6 +29,7 @@
  * rest. */
 
 #include "command/native_command.h"
+#include "dev/dev_proof.h"
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -1122,6 +1123,7 @@ struct fac_att {
     char pair[FAC_PAIR];
     char key[64];
     bool real;
+    bool early_failure;
     int64_t test_ms, cpu_ms, lock_ms;
 };
 
@@ -1241,6 +1243,12 @@ static void fac_read_attempt(const char *dir, const char *name,
     (void)snprintf(path, sizeof(path), "%s/phases.txt", adir);
     (void)fac_each_line(path, fac_phase_line, &p, &ignore);
     a->real = p.saw_test || p.saw_lint;
+    if (!a->real) {
+        struct zcl_dev_proof_history_failure failure;
+        a->early_failure = zcl_dev_proof_history_failure_read_from(dir, name,
+            &failure) && failure.attempt_binding_valid &&
+            failure.classification == ZCL_PROOF_HISTORY_FAILURE;
+    }
     a->test_ms = p.test_ms;
     a->cpu_ms = p.cpu_ms;
     a->lock_ms = p.lock_ms;
@@ -1342,11 +1350,12 @@ static void fac_attempts_report(struct fac_atts *as, struct json_value *out)
     struct fac_group groups[FAC_MAX_GROUPS];
     struct json_value by, lock;
     size_t ng = 0;
-    int64_t real = 0, lmax = 0, lsum = 0;
+    int64_t real = 0, early = 0, lmax = 0, lsum = 0;
     for (size_t i = 0; i < as->n; i++) {
         const struct fac_att *a = &as->v[i];
         lsum += a->lock_ms;
         lmax = a->lock_ms > lmax ? a->lock_ms : lmax;
+        early += a->early_failure;
         if (a->real) {
             struct fac_group *g = fac_group_for(groups, &ng, a->key);
             real++;
@@ -1358,7 +1367,12 @@ static void fac_attempts_report(struct fac_atts *as, struct json_value *out)
         }
     }
     (void)json_push_kv_int(out, "attempts", (int64_t)as->n);
-    (void)json_push_kv_int(out, "short_refusals", (int64_t)as->n - real);
+    /* An attempt-bound recorded early failure, not a claim of process death. */
+    (void)json_push_kv_int(out, "short_refusals", early);
+    (void)json_push_kv_int(out, "unclassified", (int64_t)as->n - real - early);
+    (void)json_push_kv_str(out, "classification_basis",
+        "short_refusals are attempt-bound archived early failures; "
+        "unclassified lacks gate or attributable failure evidence and may be active or terminal");
     (void)json_push_kv_int(out, "real", real);
     (void)json_push_kv_int(out, "superseded", fac_superseded(as));
     fac_new_obj(&lock);

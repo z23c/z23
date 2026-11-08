@@ -253,6 +253,9 @@ enum zcl_dev_proof_history_result zcl_dev_proof_history_advisory(
  * scan and no arbitrary pathname. false means no valid attributable failure. */
 bool zcl_dev_proof_history_failure_read(const char *canonical_root,
     const char *attempt, struct zcl_dev_proof_history_failure *out);
+/* The same validator for one leaf under an explicitly supplied attempts dir. */
+bool zcl_dev_proof_history_failure_read_from(const char *attempts_dir,
+    const char *attempt, struct zcl_dev_proof_history_failure *out);
 
 struct zcl_dev_proof_observation_report {
     size_t created, existing, ineligible, unproven;
