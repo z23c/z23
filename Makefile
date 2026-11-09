@@ -6931,6 +6931,7 @@ LINT_FAST_GATES := \
     check-malloc \
     check-cyclomatic-complexity \
     check-file-size-ceiling \
+    check-file-purpose \
     check-describe-budget \
     check-catalog-rooms \
     check-flag-registry \
@@ -7047,7 +7048,6 @@ LINT_LAND_EXTRA_GATES := \
     check-no-real-clock-test-deadline \
     check-release-no-dev-symbols \
     check-service-result-convergence \
-    check-file-purpose \
     check-network-tool-hardening \
     check-proc-self-shim \
     check-no-hardlink-seeding \
