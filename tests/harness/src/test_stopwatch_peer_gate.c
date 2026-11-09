@@ -334,6 +334,7 @@ static int case_owned_exit(const struct gate_env *g)
     }
     close(control[0]); close(result[1]);
     bool ok = child > 0 && spg_line(result[0], start, sizeof(start)) &&
+              write(control[1], "R", 1) == 1 &&
               spg_line(result[0], done, sizeof(done));
     close(control[1]); close(result[0]);
     int status = -1;
@@ -369,7 +370,8 @@ static int case_owned_tree(const struct gate_env *g, int mode)
         _exit(127);
     }
     close(control[0]); close(result[1]);
-    bool ok = child > 0 && spg_line(result[0], start, sizeof(start)) && !strcmp(start, "START\n");
+    bool ok = child > 0 && spg_line(result[0], start, sizeof(start)) && !strcmp(start, "START\n") &&
+              write(control[1], "R", 1) == 1;
     struct pollfd event = {events, POLLIN, 0};
     pid_t leaf = -1;
     ok = ok && poll(&event, 1, 10000) > 0 && read(file, &leaf, sizeof(leaf)) == (ssize_t)sizeof(leaf);
@@ -424,6 +426,47 @@ static bool spg_retained(const char *path)
     return found;
 }
 
+/* The unreaped direct child anchors this signal; no process-name lookup. */
+static int spg_interrupt(const char *const argv[], const char *dir, char *out, size_t cap, int sig)
+{
+    char path[PATH_MAX], marker[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/signal-output-%d", dir, sig) >= (int)sizeof(path) ||
+        snprintf(marker, sizeof(marker), "%s/signal-ready", dir) >= (int)sizeof(marker)) return -1;
+    (void)unlink(marker);
+    int log = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
+    int events = inotify_init1(IN_CLOEXEC);
+    if (log < 0 || events < 0 || inotify_add_watch(events, dir, IN_CREATE) < 0) return -1;
+    pid_t child = fork();
+    if (child == 0) {
+        (void)dup2(log, 1); (void)dup2(log, 2);
+        execv(argv[0], (char *const *)argv);
+        _exit(127);
+    }
+    bool ready = false;
+    char buf[4096];
+    struct pollfd p = {events, POLLIN, 0};
+    while (child > 0 && poll(&p, 1, 10000) > 0) {
+        ssize_t n = read(events, buf, sizeof(buf));
+        if (n <= 0) break;
+        for (size_t at = 0; at + sizeof(struct inotify_event) <= (size_t)n;) {
+            const struct inotify_event *e = (const struct inotify_event *)(const void *)(buf + at);
+            if (e->len && !strcmp(e->name, "signal-ready")) ready = true;
+            at += sizeof(*e) + e->len;
+        }
+        if (ready) break;
+    }
+    siginfo_t info = {0};
+    bool live = child > 0 && waitid(P_PID, (id_t)child, &info, WEXITED | WNOHANG | WNOWAIT) == 0 && !info.si_pid;
+    bool sent = live && kill(child, sig) == 0;
+    int status = -1;
+    if (child > 0) (void)waitpid(child, &status, 0);
+    (void)lseek(log, 0, SEEK_SET);
+    ssize_t n = read(log, out, cap - 1);
+    out[n > 0 ? (size_t)n : 0] = 0;
+    close(log); close(events);
+    return ready && sent && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 static int case_cleanup_unknown(const struct gate_env *g, int mode)
 {
     int failures = 0;
@@ -435,10 +478,15 @@ static int case_cleanup_unknown(const struct gate_env *g, int mode)
         snprintf(script, sizeof(script), "%s/%s", g->root, GATE_SCRIPT_REL) >= (int)sizeof(script) ||
         snprintf(proof, sizeof(proof), "%s/cleanupfixture-%d/proof.json", g->artifacts, mode) >= (int)sizeof(proof)) return 1;
     if (mkdir(scratch, 0700) ||
-        !spg_script(node, "#!/bin/sh\nprintf '%s\\n' '{\"hstar\":2,\"network_tip\":1,\"network_tip_read_ok\":true,\"active_count\":0}'\n") ||
-        !spg_script(owner, mode == 0 ? "#!/bin/sh\nprintf 'START\\n'\ndd bs=1 count=1 of=/dev/null 2>/dev/null\n" :
-            mode == 1 ? "#!/bin/sh\nprintf 'START\\n'\ndd bs=1 count=1 of=/dev/null 2>/dev/null\nprintf 'BAD\\n'\n" :
-                        "#!/bin/sh\nprintf 'START\\n'\ndd bs=1 count=1 of=/dev/null 2>/dev/null\nprintf 'DONE INCOMPLETE 0\\n'\n")) return 1;
+        !spg_script(node, mode >= 4 ?
+            "#!/bin/sh\nfor a do case $a in -datadir=*) d=${a#-datadir=};; esac; done\nif [ -f \"${d:-/nonexistent}/.ready\" ]; then h=2; else h=0; fi\nprintf '{\"hstar\":%s,\"network_tip\":1,\"network_tip_read_ok\":true,\"active_count\":0}\\n' \"$h\"\n" :
+            "#!/bin/sh\nprintf '%s\\n' '{\"hstar\":2,\"network_tip\":1,\"network_tip_read_ok\":true,\"active_count\":0}'\n") ||
+        !spg_script(owner, mode == 0 ? "#!/bin/sh\nprintf 'START\\n'\ndd bs=1 count=2 of=/dev/null 2>/dev/null\n" :
+            mode == 1 ? "#!/bin/sh\nprintf 'START\\n'\ndd bs=1 count=2 of=/dev/null 2>/dev/null\nprintf 'BAD\\n'\n" :
+            mode == 2 ? "#!/bin/sh\nprintf 'START\\n'\ndd bs=1 count=2 of=/dev/null 2>/dev/null\nprintf 'DONE INCOMPLETE 0\\n'\n" :
+            mode == 3 ? "#!/bin/sh\nprintf 'START\\n'\ndd bs=1 count=2 of=/dev/null 2>/dev/null\nprintf 'DONE CLEAN 0\\n'\n" :
+            mode >= 5 ? "#!/bin/sh\nprintf 'START\\n'\ndd bs=1 count=1 of=/dev/null 2>/dev/null\n: >\"${0%/*}/signal-ready\"\ndd bs=1 count=1 of=/dev/null 2>/dev/null\nprintf 'DONE CLEAN 0\\n'\n" :
+                        "#!/bin/sh\nd=${2%/*}\nprintf 'START\\n'\ndd bs=1 count=1 of=/dev/null 2>/dev/null\nif [ ! -f \"$d/.seen\" ]; then : >\"$d/.seen\"; printf 'reason=self_respawn_fixture\\n' >\"$d/boot-exit-reason.v1\"; else : >\"$d/.ready\"; dd bs=1 count=1 of=/dev/null 2>/dev/null; fi\nprintf 'DONE CLEAN 0\\n'\n")) return 1;
     struct fake_peer fp;
     if (!fake_peer_start(&fp, FAKE_CLOSE, 0)) return 1;
     snprintf(env_node, sizeof(env_node), "ZCL_CS_NODE_BIN=%s", node);
@@ -451,17 +499,34 @@ static int case_cleanup_unknown(const struct gate_env *g, int mode)
     const char *argv[] = {"/usr/bin/env", env_node, env_owner, env_root, env_art, peer,
         run_id, "ZCL_CS_PEER_PRECHECK=0", "ZCL_CS_FILE_PEER=",
         "ZCL_CS_BUDGET_SECS=5", "ZCL_CS_SAMPLE_SECS=1", "bash", script, NULL};
-    int rc = zcl_spawn_capture(argv, g->out, g->cap, 60000);
+    int rc = mode >= 5 ? spg_interrupt(argv, g->artifacts, g->out, g->cap, mode == 5 ? SIGTERM : SIGINT) :
+                         zcl_spawn_capture(argv, g->out, g->cap, 60000);
     fake_peer_stop(&fp);
     FILE *f = fopen(proof, "r");
     char body[32768] = {0};
     if (f) { size_t n = fread(body, 1, sizeof(body) - 1, f); body[n] = 0; fclose(f); }
     bool retained = spg_retained(scratch);
-    bool ok = rc == 1 && strstr(g->out, "fixture retained") && retained &&
-              strstr(body, "owned cleanup unconfirmed") && strstr(body, "\"scratch_datadir_removed\": false") &&
-              strstr(body, "\"verdict\": \"fail\"") && !strstr(g->out, "stopwatch: PASS");
+    bool ok = mode >= 5 ? rc == (mode == 5 ? 143 : 130) && !retained &&
+              strstr(body, "\"scratch_datadir_removed\": true") && strstr(body, "\"verdict\": \"fail\"") &&
+              !strstr(g->out, "stopwatch: PASS") :
+              strstr(body, "\"final_hstar\": 2") &&
+              strstr(body, "\"final_network_tip\": 1") &&
+              (mode >= 3 ? rc == 0 && !retained && strstr(body, "\"cpu_seconds\":-1") &&
+                           strstr(body, "owner-supervised launch does not expose an identity-safe node PID") &&
+                           strstr(body, "\"scratch_datadir_removed\": true") &&
+                           strstr(body, "\"verdict\": \"pass\"") && strstr(g->out, "stopwatch: PASS") :
+                           rc == 1 && retained && strstr(body, "owned cleanup unconfirmed") &&
+                           strstr(body, "\"scratch_datadir_removed\": false") &&
+                           strstr(body, "\"verdict\": \"fail\"") && !strstr(g->out, "stopwatch: PASS"));
+    if (mode == 4) ok = ok && strstr(g->out, "FOLLOWED self-respawn");
     if (!ok) printf("cleanup fixture mode=%d rc=%d retained=%d output=%.3000s proof=%.1500s\n", mode, rc, (int)retained, g->out, body);
-    SPG_CHECK("completed sync with bad cleanup refuses PASS and retains fixture", ok);
+    SPG_CHECK(mode == 6 ? "INT exits nonzero and cleans the fixture" :
+              mode == 5 ? "TERM exits nonzero and cleans the fixture" :
+              mode == 4 ? "clean second generation records PASS and removes fixture" :
+              mode == 3 ? "clean ACK records PASS and removes fixture" :
+              mode == 2 ? "incomplete ACK refuses PASS and retains fixture" :
+              mode == 1 ? "malformed ACK refuses PASS and retains fixture" :
+                          "missing ACK refuses PASS and retains fixture", ok);
     return failures;
 }
 #endif
@@ -507,6 +572,10 @@ static int stopwatch_peer_gate_run(void)
     failures += case_cleanup_unknown(&g, 0);
     failures += case_cleanup_unknown(&g, 1);
     failures += case_cleanup_unknown(&g, 2);
+    failures += case_cleanup_unknown(&g, 3);
+    failures += case_cleanup_unknown(&g, 4);
+    failures += case_cleanup_unknown(&g, 5);
+    failures += case_cleanup_unknown(&g, 6);
 #endif
 
     const char *rm[] = { "/bin/rm", "-rf", artifacts, NULL };

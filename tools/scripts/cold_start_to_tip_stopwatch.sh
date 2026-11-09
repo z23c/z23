@@ -39,7 +39,7 @@
 #   - the serving peer has NO default and must be stated (ZCL_CS_PEER /
 #     --peer / ZCL_PEER= via make); with nothing set the run SKIPs rather
 #     than falling back to whatever is listening on the canonical port,
-#   - process-group SIGKILL teardown on every exit path.
+#   - owned descendant teardown before deleting the private datadir.
 #
 # Usage:
 #   tools/scripts/cold_start_to_tip_stopwatch.sh [--bin=PATH]
@@ -730,8 +730,8 @@ harness_phases_json() {
         out="$out,\"rss_kb\":$(json_number_or_null "$LAST_RSS_KB")"
         out="$out,\"disk_read_bytes\":$(json_number_or_null "$LAST_DISK_READ_BYTES")"
         out="$out,\"disk_write_bytes\":$(json_number_or_null "$LAST_DISK_WRITE_BYTES")"
-        out="$out,\"counters_source\":\"/proc/<pid>/stat utime+stime over CLK_TCK and rss pages; /proc/<pid>/io read_bytes and write_bytes (block layer)\""
-        out="$out,\"counters_scope\":\"cumulative for the FINAL node process only — a followed self-respawn starts a new pid and resets these; see samples.tsv boot column\""
+        out="$out,\"counters_source\":\"unavailable: owner-supervised launch does not expose an identity-safe node PID\""
+        out="$out,\"counters_scope\":\"no per-process counters measured\""
         out="$out,\"block_body_payload_bytes_received\":$(json_number_or_null "$BYTES_DELTA")"
         out="$out,\"block_body_payload_bytes_source\":\"delta of download_bytes_received between two reads of \`dumpstate sync_monitor\` (engine/services/src/sync_monitor.c), fed by dl_add_bytes_received() in core/modules/net/src/download.c\""
         out="$out,\"block_body_payload_bytes_scope\":\"successfully-parsed block-body message payload ONLY, summed over all peers: the \`block\` message payload length plus each block inside a \`zblkdata\` batch. EXCLUDES headers messages, version/verack handshake, inv/getdata/getheaders, tx relay, addr, compact blocks, the 24-byte per-message header, and all TCP/IP framing. It is therefore a LOWER BOUND on wire bytes and must not be read as total network bytes\""
@@ -2896,6 +2896,9 @@ finish_cleanup() {
         write_artifact "fail" 1 "owned cleanup unconfirmed; fixture retained"
         exit 1
     fi
+    if [ "$original" != 0 ] && [ "$final_verdict" = pass ]; then
+        final_verdict=fail; final_rc=1; final_reason="interrupted before successful completion"
+    fi
     [ -n "${C3_CAPTURED_AT:-}" ] && C3_KEEP_CAPTURE=1
     write_artifact "$final_verdict" "$final_rc" "$final_reason"
     exit "$original"
@@ -2957,12 +2960,12 @@ launch_node() {
     [ "$NODE_LAUNCH_UNIX" = "-1" ] && NODE_LAUNCH_UNIX=$(date +%s)
     OWNER_CLEAN=0
     coproc C3_PROCESS { HOME="$ISO_HOME" "$C3_OWNER" "$PROCESS_GROUP_EXEC" "$DATADIR/node.log" "$NODE_BIN" "${node_args[@]}"; }
-    OWNER_PID=$C3_PROCESS_PID
     exec {OWNER_READ}<&"${C3_PROCESS[0]}" {OWNER_WRITE}>&"${C3_PROCESS[1]}" || return 1
     exec {C3_PROCESS[0]}<&- {C3_PROCESS[1]}>&-
     OWNER_RUNNING=1
     local first=""
     IFS= read -r -t 15 -u "$OWNER_READ" first && [ "$first" = START ] || return 1
+    printf R >&"$OWNER_WRITE" || return 1
 }
 
 launch_node || die "supervised owner launch unconfirmed; fixture retained"
@@ -3083,7 +3086,7 @@ while :; do
     now=$(date +%s); elapsed=$((now - start))
     owner_line=""
     if IFS= read -r -t 0.01 -u "$OWNER_READ" owner_line; then
-        # The watched PID is gone. Distinguish a SUPERVISED SELF-RESPAWN (a
+        # The owned generation has stopped. Distinguish a SUPERVISED SELF-RESPAWN (a
         # clean exit that wrote a self_respawn_* exit-reason breadcrumb — the
         # node asking to be relaunched on the same datadir, e.g. to consume an
         # install-on-next-boot request) from a REAL death (crash / no
@@ -3128,7 +3131,7 @@ while :; do
         [ "$owner_read_rc" -gt 128 ] || die "supervised owner channel lost; fixture retained"
     fi
 
-    # execv self-respawn keeps PID alive.  Observe the node's own prologue
+    # An in-process execv retains the generation. Observe the node's prologue
     # marker before sampling counters so the row and byte window use the real
     # boot ordinal rather than the supervisor-launch count.
     refresh_boot_observation
@@ -3238,7 +3241,7 @@ echo "BOOTS=$boots"
 
 if [ "$reached" = 1 ]; then
     echo "WALL_CLOCK_SECONDS=$elapsed"
-    write_artifact "pass" 0 "wiped datadir reached network_tip within budget across $boots boot(s)"
+    write_artifact "fail" 1 "sync reached network tip; owned cleanup not yet confirmed"
     if ! cleanup; then
         C3_KEEP_CAPTURE=1
         write_artifact "fail" 1 "owned cleanup unconfirmed; fixture retained"
