@@ -251,8 +251,12 @@ struct json_value;
 /* dl_proof_intent_bind, preceded by the train when ZCL_LAND_TRAIN_WIDTH is
  * on and queued rows can be stacked onto the prepared head; *members is the
  * count bound to the head's pair (0: the head proves alone). */
-bool dl_train_intent_bind(const struct dl_dirs *d, struct dl_row *row,
-                          size_t *members);
+/* Positive: prepared and bound train; zero: prepare solo; negative: stop. */
+int dl_train_prepare_first(const struct dl_dirs *d, struct dl_row *row,
+                           size_t *members);
+#if defined(ZCL_TESTING)
+bool dl_lint_helper_enabled_for_test(void);
+#endif
 /* The row heads a formed train (train_commit and the stacked proof_intent
  * persist together); false for every plain row, which no train code reads
  * the queue or the outcome history for. */

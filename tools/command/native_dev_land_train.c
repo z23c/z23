@@ -12,14 +12,13 @@
  * OFF BY DEFAULT. ZCL_LAND_TRAIN_WIDTH unset, "1" or anything but a single
  * digit 2..8 is today's behaviour exactly: one row, one proof, one push.
  *
- * WHAT. With width N, dl_train_intent_bind() runs where dl_start_proof used
- * to bind the proof intent. The head row is already prepared (rebase onto
- * origin main, lint-land, deps). Up to N-1 joinable queued rows are
+ * WHAT. With width N, dl_train_prepare_first() runs after the head rebase,
+ * before its solo lint and dependencies. Up to N-1 joinable queued rows are
  * then stacked onto it in pick order, each rebased on the previous by the
  * ordinary dl_rebase(). A member that conflicts, or whose commits carry an
  * identity the push would refuse, is skipped: it stays queued, untouched,
  * and the train continues with the rest. Any other failure stops the
- * stacking. Lint-land and the proof dependencies run again on the
+ * stacking. Lint-land and the proof dependencies run on the
  * stacked tip. A red lint-land halves the stack, keeping its leading members
  * (one bad row must not cost the rows ahead of it their shared proof, on this
  * head and every head until it reaches the front); a cohort from a red train
@@ -152,7 +151,7 @@ static bool dl_train_fresh(const struct dl_row *r)
            !r->fence_peer && !r->publication_hold;
 }
 
-/* The head of a formed train. dl_train_intent_bind() sets train_commit and
+/* The head of a formed train. dl_train_prepare_first() sets train_commit and
  * the stacked proof_intent on the head row together, and dl_start_proof
  * persists them in one row write, so a row whose train_commit is empty
  * carries no train: no member is bound to its pair. A plain row (width
@@ -683,10 +682,13 @@ static bool dl_train_test_lint_red(const struct dl_dirs *d, const char *tip)
 }
 #endif
 
-enum dl_train_prep { DL_TRAIN_PREP_OK, DL_TRAIN_PREP_LINT_RED, DL_TRAIN_PREP_STOP };
+enum dl_train_prep { DL_TRAIN_PREP_OK, DL_TRAIN_PREP_LINT_RED, DL_TRAIN_PREP_SOLO, DL_TRAIN_PREP_STOP };
 
 #if defined(ZCL_TESTING)
 static _Thread_local unsigned g_dl_train_observation_count;
+static _Thread_local unsigned g_dl_train_preparations;
+unsigned zcl_dev_land_train_preparations(void);
+unsigned zcl_dev_land_train_preparations(void) { return g_dl_train_preparations; }
 static _Thread_local const char *g_dl_train_test_observation;
 unsigned zcl_dev_land_train_observation_count(void);
 void zcl_dev_land_train_observation_for_test(const char *observation);
@@ -706,18 +708,27 @@ static enum dl_train_prep dl_train_lint(const struct dl_dirs *d,
         return DL_TRAIN_PREP_LINT_RED;
     const char *observation = g_dl_train_test_observation;
     if (observation && (!strcmp(observation, "preparation_cancelled") ||
-                        !strcmp(observation, "preparation_observation"))) {
+                        !strcmp(observation, "preparation_observation") ||
+                        !strcmp(observation, "host_load"))) {
         ++g_dl_train_observation_count;
         (void)snprintf(probe->dimension, sizeof(probe->dimension), "%s", observation);
         (void)snprintf(probe->detail, sizeof(probe->detail), "fixture preparation observation");
     } else
 #endif
-    if (dl_stubbed() || dl_lint_candidate(d, head, probe) == 0)
+    if ((dl_stubbed()
+#if defined(ZCL_TESTING)
+         && !dl_lint_helper_enabled_for_test()
+#endif
+        ) || dl_lint_candidate(d, head, probe) == 0)
         return DL_TRAIN_PREP_OK;
     if (!strcmp(probe->dimension, "preparation_cancelled") ||
         !strcmp(probe->dimension, "preparation_observation")) {
         (void)snprintf(head->dimension, sizeof(head->dimension), "%s", probe->dimension);
         (void)snprintf(head->detail, sizeof(head->detail), "%s", probe->detail);
+    }
+    if (strcmp(probe->dimension, "lint") != 0) {
+        (void)snprintf(head->dimension, sizeof(head->dimension), "%s", probe->dimension[0] ? probe->dimension : "train_lint");
+        (void)snprintf(head->detail, sizeof(head->detail), "%s", probe->detail[0] ? probe->detail : "stacked lint did not complete");
     }
     return strcmp(probe->dimension, "lint") == 0 ? DL_TRAIN_PREP_LINT_RED
                                                  : DL_TRAIN_PREP_STOP;
@@ -740,6 +751,9 @@ static enum dl_train_prep dl_train_prepare(const struct dl_dirs *d,
 {
     char why[512] = { 0 };
     struct dl_row probe = *head;
+#if defined(ZCL_TESTING)
+    ++g_dl_train_preparations;
+#endif
     (void)snprintf(probe.local, sizeof(probe.local), "%s", t->tip);
 #if defined(ZCL_TESTING) && !defined(_WIN32)
     if (dl_prepare_test_hook) dl_prepare_test_hook();
@@ -752,7 +766,7 @@ static enum dl_train_prep dl_train_prepare(const struct dl_dirs *d,
     if (!dl_wt_proof_deps_ensure(d, head, &probe, dl_stubbed(), why,
                                  sizeof(why))) {
         dl_log(head, "train: proof dependencies failed on the stacked tip\n");
-        return DL_TRAIN_PREP_STOP;
+        return !strcmp(head->dimension, "preparation_persist") ? DL_TRAIN_PREP_STOP : DL_TRAIN_PREP_SOLO;
     }
     return DL_TRAIN_PREP_OK;
 }
@@ -765,7 +779,7 @@ static enum dl_train_prep dl_train_prepare(const struct dl_dirs *d,
  * like a red tree, and the service gives a whole tick 90 minutes, so no retry
  * starts once DL_TRAIN_LINT_RETRY_MS have gone. True when t holds a prepared
  * stack. */
-static bool dl_train_prepare_stack(const struct dl_dirs *d,
+static enum dl_train_prep dl_train_prepare_stack(const struct dl_dirs *d,
                                    struct dl_row *head,
                                    struct dl_train *t)
 {
@@ -775,21 +789,27 @@ static bool dl_train_prepare_stack(const struct dl_dirs *d,
         enum dl_train_prep prep = dl_train_prepare(d, head, t);
         if (prep != DL_TRAIN_PREP_LINT_RED || head->train_group[0] ||
             platform_time_monotonic_ms() >= stop_at)
-            return prep == DL_TRAIN_PREP_OK;
+            return prep;
         t->n /= 2;
         if (t->n == 0)
-            return false;
+            return DL_TRAIN_PREP_LINT_RED;
         (void)snprintf(t->tip, sizeof(t->tip), "%s", t->commit[t->n - 1]);
         (void)snprintf(line, sizeof(line),
                        "train: trying again with the first %zu members\n", t->n);
         dl_log(head, line);
     }
-    return false;
+    if (t->n) {
+        (void)snprintf(head->dimension, sizeof(head->dimension), "train_checkout");
+        (void)snprintf(head->detail, sizeof(head->detail), "cannot check out the stacked candidate");
+        return DL_TRAIN_PREP_STOP;
+    }
+    return DL_TRAIN_PREP_LINT_RED;
 }
 
 struct dl_train_bind {
     const struct dl_row *head;
     const struct dl_train *t;
+    bool rejected;
 };
 
 /* The ROOTs the member's stacking rebase recorded, or none. */
@@ -805,21 +825,27 @@ static void dl_train_bind_seal(struct dl_row *row, const struct dl_row *m)
  * its commits are already in the tip, so none can be dropped alone. */
 static int dl_train_bind_edit(struct dl_row *rows, size_t n, void *context)
 {
-    const struct dl_train_bind *b = context;
+    struct dl_train_bind *b = context;
     size_t bound = 0;
     bool head_seen = false;
     for (size_t i = 0; i < n; i++) {
+        if (rows[i].seq != b->head->seq) continue;
+        if (strcmp(rows[i].state, "inflight") || strcmp(rows[i].tip, b->head->tip) ||
+            rows[i].attempt != b->head->attempt) return -1;
+        head_seen = true;
+        break;
+    }
+    if (!head_seen) return -1;
+    for (size_t i = 0; i < n; i++) {
         if (rows[i].seq == b->head->seq) {
-            if (strcmp(rows[i].state, "inflight") || strcmp(rows[i].tip, b->head->tip) ||
-                strcmp(rows[i].train_group, b->head->train_group)) return -1;
-            head_seen = true;
+            if (strcmp(rows[i].train_group, b->head->train_group)) { b->rejected = true; return -1; }
         }
         for (size_t j = 0; j < b->t->n; j++) {
             if (rows[i].seq != b->t->m[j].seq)
                 continue;
             if (!dl_train_joinable(&rows[i], b->head) ||
                 strcmp(rows[i].tip, b->t->m[j].tip) != 0)
-                return -1;
+                { b->rejected = true; return -1; }
             (void)snprintf(rows[i].local, sizeof(rows[i].local), "%s",
                            b->head->local);
             (void)snprintf(rows[i].base, sizeof(rows[i].base), "%s",
@@ -835,7 +861,8 @@ static int dl_train_bind_edit(struct dl_row *rows, size_t n, void *context)
             bound++;
         }
     }
-    return head_seen && bound == b->t->n ? 1 : -1;
+    if (bound != b->t->n) { b->rejected = true; return -1; }
+    return 1;
 }
 
 static void dl_train_log_bound(const struct dl_row *row,
@@ -854,17 +881,25 @@ static void dl_train_log_bound(const struct dl_row *row,
 
 /* Stack, prepare and bind a train on the head's prepared tip. True when the
  * row now carries the stacked pair and every member is bound to it. */
-static bool dl_train_form(const struct dl_dirs *d, struct dl_row *row,
-                          struct dl_train *t, bool *touched)
+static enum dl_train_prep dl_train_form(const struct dl_dirs *d, struct dl_row *row,
+                                        struct dl_train *t, bool *touched)
 {
     *touched = dl_train_stack(d, row, t);
-    if (!dl_train_prepare_stack(d, row, t))
-        return false;
-    struct dl_train_bind b = { row, t };
+    enum dl_train_prep prep = dl_train_prepare_stack(d, row, t);
+    if (prep != DL_TRAIN_PREP_OK) return prep;
+    struct dl_train_bind b = { row, t, false };
     (void)snprintf(row->local, sizeof(row->local), "%s", t->tip);
-    if (!dl_proof_intent_bind(d, row) ||
-        !dl_rows_edit(d, dl_train_bind_edit, &b))
-        return false;
+    if (!dl_proof_intent_bind(d, row)) {
+        (void)snprintf(row->dimension, sizeof(row->dimension), "train_bind");
+        (void)snprintf(row->detail, sizeof(row->detail), "cannot bind the prepared train to unchanged queue members");
+        return DL_TRAIN_PREP_STOP;
+    }
+    if (!dl_rows_edit(d, dl_train_bind_edit, &b)) {
+        if (b.rejected) return DL_TRAIN_PREP_SOLO;
+        (void)snprintf(row->dimension, sizeof(row->dimension), "train_bind");
+        (void)snprintf(row->detail, sizeof(row->detail), "cannot bind the prepared train to unchanged queue members");
+        return DL_TRAIN_PREP_STOP;
+    }
 #if defined(ZCL_TESTING)
     /* Hard death between the members' bind rewrite and the head's own
      * persist: the one window where members hold a pair no durable head
@@ -873,53 +908,41 @@ static bool dl_train_form(const struct dl_dirs *d, struct dl_row *row,
         _exit(83);
 #endif
     dl_train_log_bound(row, t);
-    return true;
+    return DL_TRAIN_PREP_OK;
 }
 
-/* The head's own commit back in the worktree, with its own proof inputs:
- * the stacked pass re-sealed the restart plan for the stacked tree. */
-static bool dl_train_solo(const struct dl_dirs *d, struct dl_row *row,
-                          const char *solo)
-{
-    char why[512] = { 0 };
-    (void)snprintf(row->local, sizeof(row->local), "%s", solo);
-    dl_log(row, "train: proving the head alone\n");
-    if (dl_train_checkout(d, solo) &&
-        dl_wt_proof_deps_ensure(d, row, row, dl_stubbed(), why, sizeof(why)))
-        return true;
-    dl_log(row, "train: cannot restore the head's own commit: ");
-    dl_log(row, why);
-    dl_log(row, "\n");
-    return false;
-}
-
-bool dl_train_intent_bind(const struct dl_dirs *d, struct dl_row *row,
-                          size_t *members)
+int dl_train_prepare_first(const struct dl_dirs *d, struct dl_row *row,
+                           size_t *members)
 {
     char solo[80];
-    bool touched = false, formed;
+    struct dl_row original = *row;
+    bool touched = false;
     *members = 0;
     if (dl_train_width() < 2 || !dl_train_fresh(row))
-        return dl_proof_intent_bind(d, row);
+        return 0;
     struct dl_train *t = zcl_calloc(1, sizeof(*t), "dev.land.train");
     if (!t)
-        return dl_proof_intent_bind(d, row);
+        return 0;
     (void)snprintf(solo, sizeof(solo), "%s", row->local);
-    formed = dl_train_form(d, row, t, &touched);
-    *members = formed ? t->n : 0;
+    enum dl_train_prep prep = dl_train_form(d, row, t, &touched);
+    *members = prep == DL_TRAIN_PREP_OK ? t->n : 0;
     free(t);
     if (!strcmp(row->dimension, "preparation_persist") ||
         !strcmp(row->dimension, "preparation_cancelled") ||
         !strcmp(row->dimension, "preparation_observation"))
-        return false;
-    if (formed) {
+        return -1;
+    if (prep == DL_TRAIN_PREP_STOP) return -1;
+    if (prep == DL_TRAIN_PREP_OK) {
         (void)snprintf(row->train_commit, sizeof(row->train_commit), "%s", solo);
-        return true;
+        return 1;
     }
-    if (touched && !dl_train_solo(d, row, solo))
-        return false;
-    (void)snprintf(row->local, sizeof(row->local), "%s", solo);
-    return dl_proof_intent_bind(d, row);
+    if (touched && !dl_train_checkout(d, solo)) {
+        (void)snprintf(row->dimension, sizeof(row->dimension), "train_checkout");
+        (void)snprintf(row->detail, sizeof(row->detail), "cannot restore the head checkout for solo preparation");
+        return -1;
+    }
+    *row = original;
+    return 0;
 }
 
 /* ── the publication gate ──────────────────────────────────────────────── */

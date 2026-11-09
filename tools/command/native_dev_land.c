@@ -5700,8 +5700,12 @@ static int dl_lint_run(const struct dl_dirs *d, const struct dl_row *head,
 
 #if defined(ZCL_TESTING)
 static _Thread_local const char *g_dl_lint_test_helper;
+static _Thread_local unsigned g_dl_solo_preparations;
+unsigned zcl_dev_land_solo_preparations(void);
+unsigned zcl_dev_land_solo_preparations(void) { return g_dl_solo_preparations; }
 void zcl_dev_land_lint_helper_for_test(const char *path);
 void zcl_dev_land_lint_helper_for_test(const char *path) { g_dl_lint_test_helper = path; }
+bool dl_lint_helper_enabled_for_test(void) { return g_dl_lint_test_helper && g_dl_lint_test_helper[0]; }
 #endif
 
 static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *head,
@@ -5710,7 +5714,7 @@ static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *head,
     const char *argv[] = { "make", "-C", d->wt, "lint-land", NULL };
 #if defined(ZCL_TESTING)
     const char *fixture = g_dl_lint_test_helper;
-    if (fixture && fixture[0]) { argv[0] = fixture; argv[1] = NULL; }
+    if (fixture && fixture[0]) { argv[0] = fixture; argv[1] = d->wt; argv[2] = NULL; }
 #endif
     if (!dl_prepare_progress(d, head, row, "lint-land"))
         return -1;
@@ -7339,11 +7343,23 @@ void zcl_dev_land_prepare_log_for_test(void *path, const char *text)
 
 #endif
 
+#if defined(ZCL_TESTING)
+static _Thread_local unsigned g_dl_deps_calls;
+static _Thread_local char g_dl_deps_source[80];
+unsigned zcl_dev_land_deps_calls(void);
+const char *zcl_dev_land_deps_source(void);
+unsigned zcl_dev_land_deps_calls(void) { return g_dl_deps_calls; }
+const char *zcl_dev_land_deps_source(void) { return g_dl_deps_source; }
+#endif
 bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
                                     struct dl_row *head,
                                     const struct dl_row *r, bool stubbed,
                                     char *why, size_t why_cap)
 {
+#if defined(ZCL_TESTING)
+    ++g_dl_deps_calls;
+    (void)snprintf(g_dl_deps_source, sizeof(g_dl_deps_source), "%s", r->local);
+#endif
 #if defined(_WIN32)
     (void)d;
     (void)head;
@@ -8051,15 +8067,14 @@ static bool dl_preparation_observation_failure(const struct dl_dirs *d, struct d
 }
 
 static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
-                           struct zcl_command_reply *reply)
+                           struct zcl_command_reply *reply, size_t members)
 {
     memset(&row->failed_proof, 0, sizeof(row->failed_proof));
     row->terminal_recorded_at = 0;
     char detail[512];
     enum dl_proof p;
-    size_t members = 0;
     (void)snprintf(row->phase, sizeof(row->phase), "prove");
-    if (!dl_train_intent_bind(d, row, &members)) {
+    if (!members && !dl_proof_intent_bind(d, row)) {
         if (dl_preparation_observation_failure(d, row, reply)) return;
         if (strcmp(row->dimension, "preparation_persist") == 0) {
             dl_fail(reply, "QUEUE_WRITE_FAILED", "prebuild", row->detail, d->land);
@@ -8199,11 +8214,47 @@ static bool dl_step_start_deps_failed(const struct dl_dirs *d,
     return false;
 }
 
+static void dl_step_prepare_candidate(const struct dl_dirs *d, struct dl_row *row,
+                                      struct zcl_command_reply *reply)
+{
+    char why[1024], tickets[512];
+    (void)snprintf(row->phase, sizeof(row->phase), "prebuild");
+    size_t members = 0;
+    int train = dl_train_prepare_first(d, row, &members);
+    if (train < 0) {
+        if (!strcmp(row->dimension, "host_load")) {
+            bool retry = row->attempt < DL_ATTEMPT_MAX;
+            if (retry) {
+                row->attempt++;
+                (void)snprintf(row->phase, sizeof(row->phase), "rebase");
+            }
+            (void)snprintf(row->state, sizeof(row->state), "%s", retry ? "queued" : "failed");
+            if (dl_commit_or_report(d, row, !retry, reply, retry ? "rebased" : "failed"))
+                dl_step_reply(reply, row, retry ? "rebased" : "failed");
+            return;
+        }
+        if (!dl_preparation_observation_failure(d, row, reply))
+            dl_fail(reply, "PREPARATION_FAILED", "prebuild", row->detail, d->land);
+        return;
+    }
+    if (!train) {
+#if defined(ZCL_TESTING)
+        ++g_dl_solo_preparations;
+#endif
+        if (dl_step_start_lint_stopped(d, row, reply)) return;
+    }
+    if (dl_tickets_admit(row, row->base, tickets, sizeof(tickets)))
+        dl_log(row, tickets);
+    (void)snprintf(row->phase, sizeof(row->phase), "prebuild");
+    if (!train && dl_step_start_deps_failed(d, row, reply, why, sizeof(why))) return;
+    dl_start_proof(d, row, reply, members);
+}
+
 static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
                           struct zcl_command_reply *reply,
                           char observed_main[80])
 {
-    char why[1024], tickets[512];
+    char why[1024];
     int rebased;
 
     (void)snprintf(row->state, sizeof(row->state), "inflight");
@@ -8252,17 +8303,7 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
             dl_step_reply(reply, row, "failed");
         return;
     }
-    (void)snprintf(row->phase, sizeof(row->phase), "prebuild");
-    if (dl_step_start_lint_stopped(d, row, reply))
-        return;
-    /* Where node2's commuting tickets plug in: with a ticket set installed,
-     * the groups it names are admitted here and the proof asks for less. */
-    if (dl_tickets_admit(row, row->base, tickets, sizeof(tickets)))
-        dl_log(row, tickets);
-    (void)snprintf(row->phase, sizeof(row->phase), "prebuild");
-    if (dl_step_start_deps_failed(d, row, reply, why, sizeof(why)))
-        return;
-    dl_start_proof(d, row, reply);
+    dl_step_prepare_candidate(d, row, reply);
 }
 
 static void dl_prepare(const struct dl_dirs *d, struct dl_row *row,

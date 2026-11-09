@@ -343,13 +343,51 @@ _test_next:;
     return failures;
 }
 
+extern unsigned zcl_dev_land_solo_preparations(void);
+extern unsigned zcl_dev_land_train_preparations(void);
+extern unsigned zcl_dev_land_deps_calls(void);
+extern const char *zcl_dev_land_deps_source(void);
+extern void zcl_dev_land_lint_helper_for_test(const char *);
+
+static bool dlx_train_lint_script(char *helper, size_t cap, char *log, size_t logcap, bool red)
+{
+    char body[2600];
+    if (snprintf(helper, cap, "%s/train-lint-helper", g_dlx_state) >= (int)cap ||
+        snprintf(log, logcap, "%s/train-lint-calls", g_dlx_state) >= (int)logcap ||
+        snprintf(body, sizeof(body), "#!/bin/sh\ngit -C \"$1\" rev-parse HEAD >> '%s' || exit 1\n%s\n", log,
+                 red ? "git -C \"$1\" cat-file -e HEAD:b.txt 2>/dev/null && exit 1\nexit 0" : "exit 0") >= (int)sizeof(body)) return false;
+    if (!dlx_write(helper, body) || chmod(helper, 0700) != 0) return false;
+    zcl_dev_land_lint_helper_for_test(helper); return true;
+}
+
+static bool dlx_train_lint_once(const char *log, const char *source)
+{
+    char text[160], expected[100]; size_t n = 0;
+    if (!dlx_slurp(log, text, sizeof(text) - 1, &n)) return false;
+    text[n] = '\0';
+    (void)snprintf(expected, sizeof(expected), "%s\n", source);
+    return strcmp(text, expected) == 0;
+}
+
+static bool dlx_train_lint_fallback(const char *log, const char *source)
+{
+    char text[512], tail[100]; size_t n = 0;
+    if (!dlx_slurp(log, text, sizeof(text) - 1, &n)) return false;
+    text[n] = '\0';
+    (void)snprintf(tail, sizeof(tail), "%s\n", source);
+    char *first = strchr(text, '\n');
+    return first && (size_t)(first - text) == strlen(source) &&
+           strncmp(text, source, strlen(source)) != 0 && n >= strlen(tail) &&
+           strcmp(text + n - strlen(tail), tail) == 0;
+}
+
 static int test_dev_land_train_conflict_skipped(void)
 {
     int failures = 0;
     TEST("land: a train skips a row that conflicts with the stacked tip") {
         struct dlx_rig rig;
         struct dlx_tr_watch w;
-        char b[64], c[64], intent[200], head[200], detail[512], states[256];
+        char b[64], c[64], intent[200], head[200], detail[512], states[256], helper[1200], lintlog[1200];
         int64_t attempt = 0, members[8];
         int proofs = 0, landed = 0;
         dlx_isolate("train_conflict");
@@ -358,7 +396,19 @@ static int test_dev_land_train_conflict_skipped(void)
                           b, c));
         ASSERT(dlx_tr_watch_start(&w, &rig));
         setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_train_lint_script(helper, sizeof(helper), lintlog, sizeof(lintlog), false));
+        unsigned solo_before = zcl_dev_land_solo_preparations();
+        unsigned train_before = zcl_dev_land_train_preparations();
+        unsigned deps_before = zcl_dev_land_deps_calls();
         ASSERT(dlx_tr_beat("started", 1, 1));
+        ASSERT_EQ(zcl_dev_land_solo_preparations(), solo_before);
+        ASSERT_EQ(zcl_dev_land_train_preparations(), train_before + 1u);
+        ASSERT_EQ(zcl_dev_land_deps_calls(), deps_before + 1u);
+        char prepared[80];
+        ASSERT(dlx_tr_file_field("queue.jsonl", 1, "local", prepared, sizeof(prepared)));
+        ASSERT_STR_EQ(zcl_dev_land_deps_source(), prepared);
+        ASSERT(dlx_train_lint_once(lintlog, prepared));
+        zcl_dev_land_lint_helper_for_test(NULL);
         dlx_tr_watch_beat(&w);
         ASSERT(dlx_tr_inflight_intent(head, sizeof(head)));
         ASSERT_EQ((int64_t)dlx_tr_members(members), 1);
@@ -378,6 +428,7 @@ static int test_dev_land_train_conflict_skipped(void)
         PASS();
     }
 _test_next:;
+    zcl_dev_land_lint_helper_for_test(NULL);
     dlx_restore();
     return failures;
 }
@@ -1345,14 +1396,25 @@ static int test_dev_land_train_lint_red_first_member(void)
     TEST("land: a lint-red first member leaves the head alone, nobody marked") {
         struct dlx_rig rig;
         struct dlx_tr_watch w;
-        char b[64], c[64], states[256];
+        char b[64], c[64], states[256], helper[1200], lintlog[1200];
         int proofs = 0, landed = 0;
         dlx_isolate("train_lint_first");
         ASSERT(dlx_tr_rig(&rig, "train_lint_first_rig", "running", "b.txt", b, c));
         ASSERT(dlx_tr_watch_start(&w, &rig));
         setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
-        setenv("ZCL_LAND_TEST_STACK_LINT_RED_PATH", "b.txt", 1);
+        ASSERT(dlx_train_lint_script(helper, sizeof(helper), lintlog, sizeof(lintlog), true));
+        unsigned solo_before = zcl_dev_land_solo_preparations();
+        unsigned train_before = zcl_dev_land_train_preparations();
+        unsigned deps_before = zcl_dev_land_deps_calls();
         ASSERT(dlx_tr_beat("started", 0, 1));
+        ASSERT_EQ(zcl_dev_land_solo_preparations(), solo_before + 1u);
+        ASSERT(zcl_dev_land_train_preparations() > train_before);
+        ASSERT_EQ(zcl_dev_land_deps_calls(), deps_before + 1u);
+        char prepared[80];
+        ASSERT(dlx_tr_file_field("queue.jsonl", 1, "local", prepared, sizeof(prepared)));
+        ASSERT_STR_EQ(zcl_dev_land_deps_source(), prepared);
+        ASSERT(dlx_train_lint_fallback(lintlog, prepared));
+        zcl_dev_land_lint_helper_for_test(NULL);
         dlx_tr_watch_beat(&w);
         ASSERT(dlx_tr_queued_range(2, 3, ""));
         ASSERT(!dlx_tr_has_solo_mark());
@@ -1365,6 +1427,7 @@ static int test_dev_land_train_lint_red_first_member(void)
         PASS();
     }
 _test_next:;
+    zcl_dev_land_lint_helper_for_test(NULL);
     dlx_restore();
     return failures;
 }
@@ -1394,6 +1457,26 @@ _test_next:;
 
 extern unsigned zcl_dev_land_train_observation_count(void);
 extern void zcl_dev_land_train_observation_for_test(const char *);
+static int test_dev_land_train_host_load_bounded(void)
+{
+    int failures = 0;
+    TEST("land: stacked host load retries are bounded") {
+        struct dlx_rig rig; char b[64], c[64];
+        dlx_isolate("train_host_load_bounded");
+        ASSERT(dlx_tr_rig(&rig, "train_host_load_rig", "fail", "b.txt", b, c));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        zcl_dev_land_train_observation_for_test("host_load");
+        ASSERT(dlx_tr_beat("rebased", 0, 2));
+        ASSERT(dlx_tr_beat("rebased", 0, 3));
+        ASSERT(dlx_tr_beat("failed", 0, 3));
+        zcl_dev_land_train_observation_for_test(NULL);
+        dlx_restore(); PASS();
+    }
+_test_next:;
+    zcl_dev_land_train_observation_for_test(NULL); dlx_restore(); return failures;
+}
 static bool dlx_train_observation_case(const char *mode, const char *code)
 {
     struct dlx_rig rig; struct dlx_call c; char tag[128], intent[200];
@@ -1434,6 +1517,7 @@ int test_dev_land_train_cases(void)
     failures += test_dev_land_train_lint_red_keeps_prefix();
     failures += test_dev_land_train_lint_red_first_member();
     failures += test_dev_land_train_lint_red_cohort_exact();
+    failures += test_dev_land_train_host_load_bounded();
     failures += test_dev_land_train_three_rows_one_proof();
     failures += test_dev_land_train_never_amended();
     failures += test_dev_land_train_default_off();
