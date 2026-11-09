@@ -5,6 +5,7 @@
 #define ZCL_NATIVE_APP_RECEIVE_PREVIEW_H
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 struct json_value;
 struct zcl_command_reply;
 struct app_receive_preview;
@@ -33,6 +34,16 @@ bool app_receive_preview_create_adopted(const struct json_value *adopt_data,
     struct zcl_command_reply *failure);
 /* A kept choice and its locally verified HEAD; no caller supplies a draft hash. */
 bool app_saved_draft_available(const struct app_selection *selection);
+/* Read-only eligibility; the confirmed action revalidates the full selection. */
+bool app_received_original_available(const struct app_selection *selection);
+struct app_received_original {
+    char name[160];
+    uint8_t release[32], package[32], publisher[33], tree[32], carrier[32], sha256[32];
+    size_t size;
+};
+/* Write only an exclusive caller-owned scratch file. The caller owns cleanup. */
+bool app_received_original_stage(const struct app_selection *selection, const char *path,
+    struct app_received_original *out, struct zcl_command_reply *failure);
 bool app_saved_draft_head(const struct app_selection *selection, uint8_t head[32],
     struct zcl_command_reply *failure);
 bool app_saved_draft_preview_create(const struct app_selection *selection,

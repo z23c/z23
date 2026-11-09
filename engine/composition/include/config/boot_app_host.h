@@ -3,6 +3,7 @@
 #ifndef ZCL_BOOT_APP_HOST_H
 #define ZCL_BOOT_APP_HOST_H
 #include "vcs/app_offer.h"
+#include "vcs/zcode_dht_identity.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -12,6 +13,12 @@ struct boot_app_host_plan {
     struct zcl_app_offer offer;
     const char *post_id, *post_host, *receive_plan, *datadir, *token;
     const char *expected_plan;
+};
+struct boot_app_host_local_state {
+    bool identity_absent;
+    uint8_t host[32];
+    int64_t generation;
+    bool enabled;
 };
 enum boot_app_host_result {
     BOOT_APP_HOST_OK, BOOT_APP_HOST_INVALID, BOOT_APP_HOST_UNAVAILABLE,
@@ -30,6 +37,14 @@ enum boot_app_host_result boot_app_host_resume(
     struct node_db *db, struct vcs_package_store *store,
     const uint8_t local_host[32], const char *carrier,
     int64_t expected_generation, int64_t now);
+enum boot_app_host_result boot_app_host_local_observe(
+    struct node_db *db, const char *datadir, const struct zcl_app_offer *offer,
+    struct boot_app_host_local_state *out);
+enum boot_app_host_result boot_app_host_local_commit(
+    struct node_db *db, struct vcs_package_store *store,
+    const char *datadir, const struct zcl_app_offer *offer, const uint8_t release_id[32],
+    const struct boot_app_host_local_state *expected, int64_t now,
+    uint8_t host_out[32], int64_t *generation_out, bool *mutation_attempted);
 
 /* Recheck an exact pinned carrier and its signed original release. The
  * returned generation must be rechecked before authorizing publication. */
@@ -45,6 +60,8 @@ struct db_fleet_board_post;
 struct boot_app_host_test_hooks {
     void *context;
     bool (*identity)(void *context, uint8_t host[32], bool create);
+    enum vcs_zcode_dht_key_probe (*identity_probe)(void *context, uint8_t host[32]);
+    enum vcs_zcode_dht_key_create (*identity_create)(void *context, uint8_t host[32]);
     bool (*datadir)(void *context, const char *datadir);
     bool (*endpoint)(void *context, char host[63], char endpoint[ZCL_APP_OFFER_ONION_MAX + 1u]);
     bool (*sign)(void *context, struct fleet_board_post *post);

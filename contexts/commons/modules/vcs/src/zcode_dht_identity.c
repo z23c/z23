@@ -6,6 +6,7 @@
 #include "crypto/ed25519.h"
 #include "crypto/random_secret.h"
 #include "platform/os_proc.h"
+#include "platform/directory_compat.h"
 #include "platform/positioned_file.h"
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
@@ -190,6 +191,134 @@ bool vcs_zcode_dht_online_key_load(
     memory_cleanse(secret_copy, sizeof(secret_copy));
     return true;
 }
+
+static enum vcs_zcode_dht_key_probe identity_presence(
+    const char *datadir, char path[1400], char *err, size_t err_cap)
+{
+    char dir[1200], zcode[1150];
+    if (!identity_paths(datadir, dir, VCS_ZCODE_DHT_ONLINE_KEY_FILE, false,
+                        path, err, err_cap)) return VCS_DHT_IDENTITY_PROBE_ERROR;
+    int n = snprintf(zcode, sizeof zcode, "%s/zcode", datadir);
+    if (n <= 0 || (size_t)n >= sizeof zcode ||
+        platform_directory_probe_real(datadir) != PLATFORM_DIRECTORY_PROBE_OK)
+        return VCS_DHT_IDENTITY_PROBE_ERROR;
+    enum platform_directory_probe_result state = platform_directory_probe_real(zcode);
+    if (state == PLATFORM_DIRECTORY_PROBE_MISSING) return VCS_DHT_IDENTITY_ABSENT;
+    if (state != PLATFORM_DIRECTORY_PROBE_OK) return VCS_DHT_IDENTITY_PROBE_ERROR;
+    state = platform_directory_probe_real(dir);
+    if (state == PLATFORM_DIRECTORY_PROBE_MISSING) return VCS_DHT_IDENTITY_ABSENT;
+    if (state != PLATFORM_DIRECTORY_PROBE_OK) return VCS_DHT_IDENTITY_PROBE_ERROR;
+    if (platform_private_path_absent(path)) return VCS_DHT_IDENTITY_ABSENT;
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot snapshot;
+    platform_positioned_file_init(&file);
+    bool ok = platform_positioned_file_open(&file, path) &&
+              platform_positioned_file_snapshot(&file, &snapshot) &&
+              snapshot.size == 32 && platform_positioned_file_is_private(&file);
+    platform_positioned_file_close(&file);
+    return ok ? VCS_DHT_IDENTITY_PRESENT : VCS_DHT_IDENTITY_PROBE_ERROR;
+}
+
+enum vcs_zcode_dht_key_probe vcs_zcode_dht_online_key_probe(
+    const char *datadir, uint8_t pubkey_out[32], char *err, size_t err_cap)
+{
+    if (!pubkey_out) return VCS_DHT_IDENTITY_PROBE_ERROR;
+    memset(pubkey_out, 0, 32);
+    char path[1400];
+    enum vcs_zcode_dht_key_probe result = identity_presence(datadir, path, err, err_cap);
+    if (result != VCS_DHT_IDENTITY_PRESENT) return result;
+    uint8_t seed[32] = {0}, secret[32] = {0};
+    bool ok = exact_read_0600(path, seed, sizeof seed, err, err_cap);
+    if (ok) zcl_ed25519_keypair(pubkey_out, secret, seed);
+    memory_cleanse(seed, sizeof seed);
+    memory_cleanse(secret, sizeof secret);
+    return ok ? VCS_DHT_IDENTITY_PRESENT : VCS_DHT_IDENTITY_PROBE_ERROR;
+}
+
+static bool identity_stage(const char *path, const uint8_t fresh[32],
+                           struct platform_private_file *file, char temp[1500],
+                           bool *staged)
+{
+    uint64_t seq = atomic_fetch_add(&g_dht_identity_temp_sequence, 1);
+    int n = snprintf(temp, 1500, "%s.tmp.%llu.%llu", path,
+                     (unsigned long long)os_proc_current_pid(),
+                     (unsigned long long)seq);
+    if (n <= 0 || n >= 1500) return false;
+    *staged = platform_private_file_create(temp, file);
+    return *staged && platform_private_file_write_at(file, fresh, 32, 0) &&
+           platform_private_file_truncate(file, 32) && platform_private_file_flush(file);
+}
+
+static enum vcs_zcode_dht_key_create identity_publish(
+    const char *datadir, const char *dir, const char *path, const uint8_t fresh[32],
+    char *err, size_t err_cap, void (*hook)(const char *, void *), void *ctx)
+{
+    char temp[1500], observed_path[1400];
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool exists = false, staged = false;
+    bool ok = identity_stage(path, fresh, &file, temp, &staged);
+    if (ok && hook) hook(datadir, ctx);
+    if (ok) ok = platform_private_file_publish_no_clobber(&file, temp, path, &exists);
+    if (ok && !exists) ok = platform_private_parent_flush(dir);
+    if (staged && (!ok || exists) && !platform_private_file_retire(&file, temp))
+        ok = false;
+    platform_private_file_close(&file);
+    if (ok && exists && identity_presence(datadir, observed_path, err, err_cap) !=
+                        VCS_DHT_IDENTITY_PRESENT) ok = false;
+    if (!ok) {
+        io_error(err, err_cap, "cannot exclusively publish DHT identity file");
+        return VCS_DHT_IDENTITY_CREATE_ERROR;
+    }
+    return exists ? VCS_DHT_IDENTITY_PREEXISTING : VCS_DHT_IDENTITY_CREATED;
+}
+
+static enum vcs_zcode_dht_key_create identity_create_if_absent(
+    const char *datadir, uint8_t seed_out[32], uint8_t pubkey_out[32],
+    char *err, size_t err_cap, void (*hook)(const char *, void *), void *ctx)
+{
+    if (seed_out) memset(seed_out, 0, 32);
+    if (pubkey_out) memset(pubkey_out, 0, 32);
+    if (!seed_out || !pubkey_out) return VCS_DHT_IDENTITY_CREATE_ERROR;
+    char observed_path[1400];
+    enum vcs_zcode_dht_key_probe probe = identity_presence(datadir, observed_path, err, err_cap);
+    if (probe == VCS_DHT_IDENTITY_PRESENT) return VCS_DHT_IDENTITY_PREEXISTING;
+    if (probe != VCS_DHT_IDENTITY_ABSENT) return VCS_DHT_IDENTITY_CREATE_ERROR;
+    char dir[1200], path[1400];
+    if (!identity_paths(datadir, dir, VCS_ZCODE_DHT_ONLINE_KEY_FILE, true,
+                        path, err, err_cap)) return VCS_DHT_IDENTITY_CREATE_ERROR;
+    uint8_t fresh[32] = {0}, secret[32] = {0};
+    enum vcs_zcode_dht_key_create result = VCS_DHT_IDENTITY_CREATE_ERROR;
+    if (zcl_random_secret_bytes(fresh, sizeof fresh, "zcode_dht_online"))
+        result = identity_publish(datadir, dir, path, fresh, err, err_cap, hook, ctx);
+    else
+        io_error(err, err_cap, "cannot generate DHT identity");
+    if (result == VCS_DHT_IDENTITY_CREATED) {
+        memcpy(seed_out, fresh, sizeof fresh);
+        zcl_ed25519_keypair(pubkey_out, secret, fresh);
+    }
+    memory_cleanse(fresh, sizeof fresh);
+    memory_cleanse(secret, sizeof secret);
+    return result;
+}
+
+enum vcs_zcode_dht_key_create vcs_zcode_dht_online_key_create_if_absent(
+    const char *datadir, uint8_t seed_out[32], uint8_t pubkey_out[32],
+    char *err, size_t err_cap)
+{
+    return identity_create_if_absent(datadir, seed_out, pubkey_out, err, err_cap,
+                                     NULL, NULL);
+}
+
+#ifdef ZCL_TESTING
+enum vcs_zcode_dht_key_create vcs_zcode_dht_online_key_create_if_absent_test(
+    const char *datadir, uint8_t seed_out[32], uint8_t pubkey_out[32],
+    char *err, size_t err_cap, vcs_zcode_dht_create_test_hook hook, void *ctx)
+{
+    return identity_create_if_absent(datadir, seed_out, pubkey_out, err, err_cap,
+                                     hook, ctx);
+}
+#endif
 
 bool vcs_zcode_dht_delegation_save(
     const char *datadir, const struct vcs_zcode_dht_delegation *delegation,

@@ -4,6 +4,14 @@
 #define ZCL_NATIVE_APP_GET_STAGE_H
 #include "command/native_app_offer.h"
 #include "command/native_app_receive_command.h"
+/* Exclusive stage with the same retained-directory checks as Discover.
+ * Windows currently refuses creation, as does Discover's existing stage. */
+struct app_private_stage;
+bool app_private_stage_open(const char *anchor, struct app_private_stage **out,
+                            struct zcl_command_reply *reply);
+const char *app_private_stage_path(const struct app_private_stage *stage);
+bool app_private_stage_matches(const struct app_private_stage *stage, const char *sha256, int64_t size);
+bool app_private_stage_close(struct app_private_stage *stage);
 typedef bool (*app_get_stage_consumer)(void *context, const char *staged_path,
     const struct app_receive_identity *identity, struct zcl_command_reply *reply, bool *host_original);
 /* datadir must be an absolute profile accepted by Receive's first-use policy. reply is already

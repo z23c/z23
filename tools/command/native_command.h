@@ -1687,6 +1687,8 @@ void zcl_native_handle_app_host_stop(const struct zcl_command_request *request,
                                     struct zcl_command_reply *reply);
 void zcl_native_handle_app_host_resume(const struct zcl_command_request *request,
                                       struct zcl_command_reply *reply);
+void zcl_native_handle_app_host_local(const struct zcl_command_request *request,
+                                     struct zcl_command_reply *reply);
 
 void zcl_native_handle_app_adopt(const struct zcl_command_request *request,
                                  struct zcl_command_reply *reply);

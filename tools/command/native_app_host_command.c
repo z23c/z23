@@ -2,7 +2,9 @@
  * Owner-facing recurring hosting status and exact-intent revocation. */
 #include "command/native_command.h"
 #include "command/native_app_compose.h"
+#include "command/native_app_offer.h"
 #include "command/native_zcode_package_copy.h"
+#include "base/hex.h"
 #include "vcs/app_offer.h"
 #include "json/json.h"
 #include <errno.h>
@@ -285,3 +287,121 @@ void zcl_native_handle_app_host_stop(const struct zcl_command_request *request,
 void zcl_native_handle_app_host_resume(const struct zcl_command_request *request,
                                       struct zcl_command_reply *reply)
 { host_change(request, reply, true); }
+
+struct host_local_input {
+    const char *offer, *release, *datadir;
+    struct zcl_app_offer parsed;
+};
+static bool host_local_input(const struct json_value *input, struct host_local_input *v)
+{
+    v->offer = zcl_package_copy_str(input, "offer"); v->release = zcl_package_copy_str(input, "release_id");
+    v->datadir = zcl_package_copy_str(input, "datadir");
+    char canonical[ZCL_APP_OFFER_TEXT_MAX + 1u];
+    return v->offer && v->datadir && v->datadir[0] && strnlen(v->datadir, 4097) <= 4096 &&
+        vcs_app_offer_hex_valid(v->release, 32) && strnlen(v->offer, sizeof(canonical)) < sizeof(canonical) &&
+        zcl_app_offer_parse(v->offer, strlen(v->offer), &v->parsed) &&
+        zcl_app_offer_format(&v->parsed, canonical, sizeof(canonical)) && !strcmp(v->offer, canonical);
+}
+static bool host_local_state(const struct json_value *body, const char **identity,
+                             int64_t *generation, bool *enabled)
+{
+    const struct json_value *g = json_get(body, "generation"), *e = json_get(body, "already_enabled");
+    *identity = zcl_package_copy_str(body, "identity");
+    if (!*identity || !g || g->type != JSON_INT || !e || e->type != JSON_BOOL) return false;
+    *generation = json_get_int(g); *enabled = json_get_bool(e);
+    if (*generation < 0 || *generation >= INT64_MAX - 1) return false;
+    if (!strcmp(*identity, "absent")) return *generation == 0 && !*enabled;
+    return vcs_app_offer_hex_valid(*identity, 32);
+}
+static void host_local_hash(const struct host_local_input *v, const char *identity,
+                            int64_t generation, bool enabled, uint8_t out[32])
+{
+    char number[32]; (void)snprintf(number, sizeof(number), "%lld", (long long)generation);
+    const char *parts[] = {v->offer, v->release, v->datadir, identity, number, enabled ? "enabled" : "disabled"};
+    zcl_app_plan_id("zcl.app_host.local.v1", parts, 6, out);
+}
+static bool host_local_bind(const struct host_local_input *v, const struct json_value *body,
+                            const char **identity, int64_t *generation, bool *enabled)
+{
+    const char *id = zcl_package_copy_str(body, "plan_id"); uint8_t plan[32], supplied[32];
+    if (!host_local_state(body, identity, generation, enabled) || !vcs_app_offer_hex_valid(id, 32) ||
+        !zcl_hex_decode_lower(id, supplied, 32)) return false;
+    host_local_hash(v, *identity, *generation, *enabled, plan);
+    return !memcmp(plan, supplied, 32);
+}
+static bool host_local_request(const struct json_value *input, struct json_value *in)
+{
+    json_init(in); json_set_object(in);
+    if (!json_push_kv_str(in, "op", "app_host_local")) return false;
+    static const char *const keys[] = {"offer", "release_id", "datadir", "identity", "generation", "already_enabled", "plan_id", "confirm"};
+    for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); ++i) {
+        const struct json_value *value = json_get(input, keys[i]);
+        if (value && !json_push_kv(in, keys[i], value)) return false;
+    }
+    return true;
+}
+static bool host_local_result(const struct host_local_input *v, const struct json_value *body,
+                              const char *identity, int64_t generation, bool enabled)
+{
+    const char *host = zcl_package_copy_str(body, "host");
+    const struct json_value *executed = json_get(body, "executed");
+    return host && vcs_app_offer_hex_valid(host, 32) &&
+        (!strcmp(identity, "absent") || !strcmp(identity, host)) &&
+        host_body_valid(body, host, v->parsed.carrier) && json_get_bool(json_get(body, "enabled")) &&
+        json_get_int(json_get(body, "generation")) == generation + (enabled ? 0 : 1) &&
+        executed && executed->type == JSON_BOOL && json_get_bool(executed) != enabled;
+}
+static bool host_local_plan_output(struct zcl_command_reply *reply, const struct json_value *body,
+                                   const char *identity, int64_t generation, bool enabled)
+{
+    return json_push_kv_str(&reply->data, "identity", identity) &&
+        json_push_kv_int(&reply->data, "generation", generation) &&
+        json_push_kv_bool(&reply->data, "already_enabled", enabled) &&
+        json_push_kv_str(&reply->data, "plan_id", zcl_package_copy_str(body, "plan_id")) &&
+        json_push_kv_bool(&reply->data, "executed", false);
+}
+static bool host_local_plan_valid(const struct host_local_input *v, const struct json_value *body,
+                                  const char **identity, int64_t *generation, bool *enabled)
+{
+    const struct json_value *ok = json_get(body, "ok"), *executed = json_get(body, "executed");
+    return ok && ok->type == JSON_BOOL && json_get_bool(ok) &&
+        executed && executed->type == JSON_BOOL && !json_get_bool(executed) &&
+        host_local_bind(v, body, identity, generation, enabled);
+}
+static void host_local_response(struct zcl_command_reply *reply, const struct host_local_input *v,
+    const struct json_value *body, bool commit, const char *identity, int64_t generation, bool enabled)
+{
+    if (commit && !host_local_result(v, body, identity, generation, enabled))
+        zcl_package_copy_fail(reply, "HOST_LOCAL_UNCONFIRMED", true, "hosting or node identity may have changed; review its plan and status before retrying", "app.host.local");
+    else if (!commit && !host_local_plan_valid(v, body, &identity, &generation, &enabled))
+        zcl_package_copy_fail(reply, "HOST_LOCAL_PLAN_INVALID", false, "node returned an invalid local hosting plan", "app.host.local");
+    else if (!(commit ? host_output(reply, body, !enabled) :
+               host_local_plan_output(reply, body, identity, generation, enabled)))
+        zcl_package_copy_fail(reply, "ALLOC", commit, "cannot copy local hosting result; review its plan and status", "app.host.local");
+    else if (commit) reply->error.mutated = !enabled;
+}
+void zcl_native_handle_app_host_local(const struct zcl_command_request *request,
+                                     struct zcl_command_reply *reply)
+{
+    const struct json_value *input = request ? request->input : NULL;
+    struct host_local_input v;
+    if (!host_local_input(input, &v)) {
+        zcl_package_copy_fail(reply, "BAD_INPUT", false, "canonical offer, signed release and datadir are required", "app.host.local"); return;
+    }
+    bool commit = zcl_package_copy_confirmed(input), enabled = false;
+    const char *identity = NULL; int64_t generation = 0;
+    if (commit && !host_local_bind(&v, input, &identity, &generation, &enabled)) {
+        zcl_package_copy_fail(reply, "PLAN_MISMATCH", false, "review the exact local hosting plan", "app.host.local"); return;
+    }
+    struct json_value in, body; json_init(&body);
+    bool built = host_local_request(input, &in);
+    bool called = built && zcl_native_fleet_board_call(&in, &body, reply); json_free(&in);
+    if (!built) zcl_package_copy_fail(reply, "ALLOC", false, "cannot prepare local hosting request", "app.host.local");
+    else if (!called && commit) {
+        reply->error.mutated = true; reply->error.retryable = false; reply->error.human_action_required = true;
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                       "%s", "Review this original's hosting plan and node status before retrying.");
+    }
+    else if (called) host_local_response(reply, &v, &body, commit, identity, generation, enabled);
+    json_free(&body);
+}

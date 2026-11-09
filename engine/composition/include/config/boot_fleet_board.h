@@ -27,6 +27,7 @@
 #include "net/msgprocessor.h"
 #include "session/fleet_board_proto.h"
 #include "models/fleet_board_post.h"
+#include "vcs/zcode_dht_identity.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -103,11 +104,20 @@ uint64_t boot_fleet_board_grandfather_truncated_count(void);
  * then fails closed rather than inventing an anonymous key. */
 bool boot_fleet_board_identity(uint8_t seed_out[32], uint8_t pubkey_out[32],
                                char *why, size_t why_capacity);
+#ifdef ZCL_TESTING
+bool boot_fleet_board_identity_test(uint8_t seed_out[32], uint8_t pubkey_out[32],
+                                    char *why, size_t why_capacity,
+                                    void (*hook)(void *), void *ctx);
+#endif
 
 /* Copy the cached public host identity without touching the identity file or
  * exposing the seed. Read-only status uses this so observation never creates
  * a host key. */
 bool boot_fleet_board_public_identity(uint8_t pubkey_out[32]);
+enum vcs_zcode_dht_key_probe boot_fleet_board_identity_probe(
+    const char *expected_datadir, uint8_t pubkey_out[32]);
+enum vcs_zcode_dht_key_create boot_fleet_board_identity_create_if_absent(
+    const char *expected_datadir, uint8_t pubkey_out[32]);
 /* Load an existing online identity without creating one; for resuming a
  * previously authorized local task after restart. */
 bool boot_fleet_board_load_existing_identity(uint8_t pubkey_out[32]);

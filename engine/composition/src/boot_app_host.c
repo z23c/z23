@@ -85,7 +85,7 @@ static bool host_decode(const struct zcl_app_offer *offer, struct host_expected 
 
 static bool host_verify_bytes(const struct zcl_app_offer *offer,
                               const struct host_expected *e,
-                              const uint8_t *bytes, size_t len)
+                              const uint8_t *bytes, size_t len, const uint8_t *release_id)
 {
     uint8_t actual_sha[32];
     struct vcs_package_share share = {0};
@@ -95,6 +95,7 @@ static bool host_verify_bytes(const struct zcl_app_offer *offer,
     bool ok = memcmp(actual_sha, e->sha, sizeof(actual_sha)) == 0 &&
          vcs_package_share_load(&share, bytes, len, &reason) &&
          vcs_package_share_check_source(&share, &reason) &&
+         (!release_id || !memcmp(share.release_id, release_id, 32)) &&
          memcmp(share.release.package_root, e->release, sizeof(e->release)) == 0 &&
          memcmp(share.release.publisher_pubkey, e->publisher, sizeof(e->publisher)) == 0 &&
          strcmp(share.release.name, offer->name) == 0;
@@ -111,9 +112,8 @@ static bool host_receipt_current(struct vcs_package_store *store,
            current.mutation_generation == generation;
 }
 
-bool boot_app_host_verify_carrier(struct vcs_package_store *store,
-                                  const struct zcl_app_offer *offer,
-                                  uint64_t *generation)
+static bool host_verify_carrier(struct vcs_package_store *store,
+    const struct zcl_app_offer *offer, const uint8_t *release_id, uint64_t *generation)
 {
     struct host_expected expected;
     struct vcs_package_possession_receipt receipt = {0};
@@ -126,12 +126,16 @@ bool boot_app_host_verify_carrier(struct vcs_package_store *store,
         len == (size_t)offer->size;
     if (ok) bytes = zcl_malloc(len, "app host verified carrier");
     ok = ok && bytes && vcs_bundle_get_from(store, expected.root, bytes, len, &actual_len) == VCS_BUNDLE_OK &&
-         actual_len == len && host_verify_bytes(offer, &expected, bytes, len) &&
+         actual_len == len && host_verify_bytes(offer, &expected, bytes, len, release_id) &&
          host_receipt_current(store, expected.root, receipt.mutation_generation);
     if (ok) *generation = receipt.mutation_generation;
     free(bytes);
     return ok;
 }
+bool boot_app_host_verify_carrier(struct vcs_package_store *store,
+                                  const struct zcl_app_offer *offer,
+                                  uint64_t *generation)
+{ return host_verify_carrier(store, offer, NULL, generation); }
 
 static bool host_plan_fields(const struct boot_app_host_plan *p)
 {
@@ -200,17 +204,169 @@ static enum boot_app_host_result host_result(enum app_host_result r)
     return BOOT_APP_HOST_STORAGE;
 }
 
+static struct app_host_binding host_binding(const struct zcl_app_offer *offer, const uint8_t host[32])
+{
+    struct app_host_binding b = {.size = offer->size, .recurring = true};
+    memcpy(b.local_host, host, 32);
+    (void)snprintf(b.name, sizeof(b.name), "%s", offer->name);
+    (void)snprintf(b.publisher, sizeof(b.publisher), "%s", offer->publisher);
+    (void)snprintf(b.release_root, sizeof(b.release_root), "%s", offer->root);
+    (void)snprintf(b.carrier_root, sizeof(b.carrier_root), "%s", offer->carrier);
+    (void)snprintf(b.sha256, sizeof(b.sha256), "%s", offer->sha256);
+    return b;
+}
+
+static enum vcs_zcode_dht_key_probe host_local_probe(const char *datadir, uint8_t host[32])
+{
+#ifdef ZCL_TESTING
+    if (s_host_test_hooks && s_host_test_hooks->identity_probe)
+        return s_host_test_hooks->identity_probe(s_host_test_hooks->context, host);
+#endif
+    return boot_fleet_board_identity_probe(datadir, host);
+}
+static enum vcs_zcode_dht_key_create host_local_create(const char *datadir, uint8_t host[32])
+{
+#ifdef ZCL_TESTING
+    if (s_host_test_hooks && s_host_test_hooks->identity_create)
+        return s_host_test_hooks->identity_create(s_host_test_hooks->context, host);
+#endif
+    return boot_fleet_board_identity_create_if_absent(datadir, host);
+}
+static enum boot_app_host_result host_local_observe_locked(struct node_db *db,
+    const char *datadir, const struct zcl_app_offer *offer, struct boot_app_host_local_state *out)
+{
+    memset(out, 0, sizeof(*out));
+    enum vcs_zcode_dht_key_probe probe = host_local_probe(datadir, out->host);
+    if (probe == VCS_DHT_IDENTITY_PROBE_ERROR) return BOOT_APP_HOST_UNAVAILABLE;
+    if (probe == VCS_DHT_IDENTITY_ABSENT) { out->identity_absent = true; return BOOT_APP_HOST_OK; }
+    if (probe != VCS_DHT_IDENTITY_PRESENT) return BOOT_APP_HOST_UNAVAILABLE;
+    struct db_app_host_intent row;
+    enum app_host_result r = db_app_host_intent_find(db, out->host, offer->carrier, &row);
+    if (r == APP_HOST_NOT_FOUND) return BOOT_APP_HOST_OK;
+    if (r != APP_HOST_OK) return host_result(r);
+    struct app_host_binding binding = host_binding(offer, out->host);
+    if (!host_same_binding(&row.binding, &binding) || row.generation >= INT64_MAX - 1)
+        return BOOT_APP_HOST_STALE;
+    out->generation = row.generation; out->enabled = row.enabled;
+    return BOOT_APP_HOST_OK;
+}
+enum boot_app_host_result boot_app_host_local_observe(struct node_db *db,
+    const char *datadir, const struct zcl_app_offer *offer, struct boot_app_host_local_state *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!db || !datadir || !offer || !out || !host_datadir(datadir) || !zcl_app_offer_valid(offer)) return BOOT_APP_HOST_INVALID;
+    host_lock(); enum boot_app_host_result result = host_datadir(datadir) ?
+        host_local_observe_locked(db, datadir, offer, out) : BOOT_APP_HOST_UNAVAILABLE;
+    zcl_mutex_unlock(&s_host_lock); return result;
+}
+static bool host_local_same(const struct boot_app_host_local_state *a,
+                            const struct boot_app_host_local_state *b)
+{
+    return a->identity_absent == b->identity_absent && a->generation == b->generation &&
+        a->enabled == b->enabled && !memcmp(a->host, b->host, 32);
+}
+struct host_local_apply {
+    struct node_db *writer;
+    struct app_host_binding binding;
+    int64_t generation, now;
+    enum app_host_result result;
+    bool called;
+};
+static void host_local_apply_if_current(void *context, bool current)
+{
+    struct host_local_apply *a = context;
+    if (!current) return;
+    a->called = true;
+    a->result = db_app_host_intent_enable(a->writer, &a->binding, a->generation, a->now);
+}
+static bool host_local_writer(struct node_db *db, struct node_db *writer)
+{
+    if (!db->path[0] || !node_db_open_existing_runtime(writer, db->path, "app_host.local")) return false;
+    if (sqlite3_busy_timeout(writer->db, 0) == SQLITE_OK) return true;
+    node_db_close(writer); return false;
+}
+static enum boot_app_host_result host_local_create_if_needed(const char *datadir,
+    struct boot_app_host_local_state *current, bool *attempted)
+{
+    if (!current->identity_absent) return BOOT_APP_HOST_OK;
+    *attempted = true;
+    enum vcs_zcode_dht_key_create created = host_local_create(datadir, current->host);
+    if (created == VCS_DHT_IDENTITY_PREEXISTING) return BOOT_APP_HOST_STALE;
+    return created == VCS_DHT_IDENTITY_CREATED ? BOOT_APP_HOST_OK : BOOT_APP_HOST_UNAVAILABLE;
+}
+static enum boot_app_host_result host_local_transition(struct node_db *db,
+    struct vcs_package_store *store, const char *datadir, const struct zcl_app_offer *offer,
+    const uint8_t root[32], uint64_t receipt, int64_t now,
+    struct boot_app_host_local_state *current, bool *attempted)
+{
+    if (!host_datadir(datadir) || !host_receipt_current(store, root, receipt)) return BOOT_APP_HOST_UNAVAILABLE;
+    enum boot_app_host_result result = host_local_create_if_needed(datadir, current, attempted);
+    if (result != BOOT_APP_HOST_OK) return result;
+    if (!host_datadir(datadir) || !host_receipt_current(store, root, receipt)) return BOOT_APP_HOST_UNAVAILABLE;
+    if (!current->enabled) {
+        struct host_local_apply apply = {.writer = db, .binding = host_binding(offer, current->host),
+            .generation = current->generation, .now = now, .result = APP_HOST_STORAGE};
+#ifdef ZCL_TESTING
+        if (s_host_test_hooks && s_host_test_hooks->before_guard)
+            s_host_test_hooks->before_guard(s_host_test_hooks->context);
+#endif
+        vcs_package_store_possession_apply_if_current(store, root, receipt, true, host_local_apply_if_current, &apply);
+        *attempted |= apply.called;
+        result = apply.called ? host_result(apply.result) : BOOT_APP_HOST_UNAVAILABLE;
+        if (result == BOOT_APP_HOST_OK) ++current->generation;
+    }
+    return result;
+}
+static enum boot_app_host_result host_local_commit_locked(struct node_db *db,
+    struct vcs_package_store *store, const char *datadir, const struct zcl_app_offer *offer,
+    const struct boot_app_host_local_state *expected, const uint8_t root[32],
+    uint64_t receipt, int64_t now, struct boot_app_host_local_state *current, bool *attempted)
+{
+    enum boot_app_host_result result = host_datadir(datadir) ?
+        host_local_observe_locked(db, datadir, offer, current) : BOOT_APP_HOST_UNAVAILABLE;
+    if (result != BOOT_APP_HOST_OK) return result;
+    if (!host_local_same(current, expected)) return BOOT_APP_HOST_STALE;
+    return host_local_transition(db, store, datadir, offer, root, receipt, now, current, attempted);
+}
+static bool host_local_commit_valid(struct node_db *db, struct vcs_package_store *store,
+    const char *datadir, const struct zcl_app_offer *offer, const uint8_t release_id[32],
+    const struct boot_app_host_local_state *expected, int64_t now,
+    uint8_t host_out[32], const int64_t *generation_out, const bool *mutation_attempted)
+{
+    return db && store && datadir && host_datadir(datadir) && offer && release_id && expected && host_out &&
+        generation_out && mutation_attempted && now > 0 && expected->generation >= 0 && expected->generation < INT64_MAX - 1;
+}
+enum boot_app_host_result boot_app_host_local_commit(struct node_db *db,
+    struct vcs_package_store *store, const char *datadir, const struct zcl_app_offer *offer,
+    const uint8_t release_id[32], const struct boot_app_host_local_state *expected,
+    int64_t now, uint8_t host_out[32], int64_t *generation_out, bool *mutation_attempted)
+{
+    if (host_out) memset(host_out, 0, 32);
+    if (generation_out) *generation_out = 0;
+    if (mutation_attempted) *mutation_attempted = false;
+    if (!host_local_commit_valid(db, store, datadir, offer, release_id, expected, now,
+                                 host_out, generation_out, mutation_attempted))
+        return BOOT_APP_HOST_INVALID;
+    uint64_t receipt = 0; uint8_t root[32];
+    if (!host_verify_carrier(store, offer, release_id, &receipt) ||
+        !zcl_hex_decode_lower(offer->carrier, root, sizeof(root))) return BOOT_APP_HOST_INVALID;
+    struct node_db writer = {0};
+    if (!expected->enabled && !host_local_writer(db, &writer)) return BOOT_APP_HOST_STORAGE;
+    host_lock(); struct boot_app_host_local_state current = {0};
+    enum boot_app_host_result result = host_local_commit_locked(expected->enabled ? db : &writer, store, datadir, offer, expected,
+                                                               root, receipt, now, &current, mutation_attempted);
+    memcpy(host_out, current.host, 32);
+    if (result == BOOT_APP_HOST_OK) *generation_out = current.generation;
+    zcl_mutex_unlock(&s_host_lock);
+    if (writer.open) node_db_close(&writer);
+    return result;
+}
+
 static enum boot_app_host_result host_enable_locked(struct node_db *db,
     const struct boot_app_host_plan *plan, int64_t now, const uint8_t host[32],
     uint8_t local_host_out[32], int64_t *generation_out)
 {
-    struct app_host_binding binding = {.size = plan->offer.size, .recurring = true};
-    memcpy(binding.local_host, host, 32);
-    (void)snprintf(binding.name, sizeof(binding.name), "%s", plan->offer.name);
-    (void)snprintf(binding.publisher, sizeof(binding.publisher), "%s", plan->offer.publisher);
-    (void)snprintf(binding.release_root, sizeof(binding.release_root), "%s", plan->offer.root);
-    (void)snprintf(binding.carrier_root, sizeof(binding.carrier_root), "%s", plan->offer.carrier);
-    (void)snprintf(binding.sha256, sizeof(binding.sha256), "%s", plan->offer.sha256);
+    struct app_host_binding binding = host_binding(&plan->offer, host);
     struct db_app_host_intent row;
     enum app_host_result r = db_app_host_intent_find(db, host, binding.carrier_root, &row);
     int64_t expected = r == APP_HOST_NOT_FOUND ? 0 : r == APP_HOST_OK ? row.generation : -1;

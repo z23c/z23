@@ -4,6 +4,10 @@
 #include "command/native_app_receive_preview.h"
 #include "command/native_app_launch.h"
 #include "command/native_zcode_package_copy.h"
+#include "command/native_zcode_package_bundle.h"
+#include "crypto/sha256.h"
+#include "vcs/bundle_carry.h"
+#include "vcs/package_share.h"
 #include "command/app_selection.h"
 #include "command/app_image.h"
 #include "base/hex.h"
@@ -105,6 +109,80 @@ static bool arp_history(const struct app_selection *s, enum zcl_package_copy_ado
         if (!ok) arp_fail(r, "PREVIEW_TRUST_CHANGED", "received copy history or owner trust changed");
     }
     zcl_package_copy_close(&copy);
+    return ok;
+}
+bool app_received_original_available(const struct app_selection *s)
+{
+    if (!s) return false;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive_preview.v1");
+    struct zcl_package_receive_trust trust; struct vcs_package_release release; uint8_t id[32];
+    bool ok = arp_history(s, ZCL_PACKAGE_COPY_RECEIVED_TRUSTED, &reply) &&
+        zcl_package_receive_trust_read(s->datadir, s->fork, s->parent, &trust) &&
+        zcl_package_copy_find_release(s->datadir, s->parent, &release, id) == ZCL_PACKAGE_COPY_FOUND &&
+        !memcmp(id, s->parent, 32) && !memcmp(trust.package_root, release.package_root, 32) &&
+        !memcmp(trust.publisher, release.publisher_pubkey, sizeof(trust.publisher));
+    zcl_command_reply_free(&reply); return ok;
+}
+struct arp_original_wires {
+    uint8_t *release, *manifest, *recipe;
+    size_t release_len, manifest_len, recipe_len;
+};
+static void arp_original_free(struct arp_original_wires *w)
+{ free(w->release); free(w->manifest); free(w->recipe); }
+static uint8_t *arp_original_read(const char *datadir, const char *kind,
+                                  const uint8_t root[32], size_t *length)
+{
+    char path[4400], hex[65]; zcl_hex_encode(root, 32, hex);
+    int n = snprintf(path, sizeof(path), "%s/zcode/%s/%s", datadir, kind, hex);
+    return n > 0 && (size_t)n < sizeof(path) ? zcl_native_source_bundle_read(path, length) : NULL;
+}
+static bool arp_original_wires_read(const struct app_selection *s,
+    struct arp_original_wires *w, struct vcs_package_release *release)
+{
+    w->release = arp_original_read(s->datadir, "releases", s->parent, &w->release_len);
+    uint8_t id[32];
+    bool ok = w->release && vcs_package_release_parse(w->release, w->release_len, release) == VCS_PACKAGE_RELEASE_OK &&
+        vcs_package_release_verify(release) == VCS_PACKAGE_RELEASE_OK &&
+        vcs_package_release_id(release, id) == VCS_PACKAGE_RELEASE_OK && !memcmp(id, s->parent, 32);
+    if (ok) w->manifest = arp_original_read(s->datadir, "manifests", release->package_root, &w->manifest_len);
+    if (ok) w->recipe = arp_original_read(s->datadir, "recipes", release->recipe_root, &w->recipe_len);
+    return ok && w->manifest && w->recipe;
+}
+static bool arp_original_verify(const struct app_selection *s, const char *path,
+    const uint8_t tree[32], const struct vcs_package_release *release, struct app_received_original *out)
+{
+    size_t len = 0; uint8_t *bytes = zcl_native_source_bundle_read(path, &len);
+    struct vcs_package_share share = {0}; const char *why = NULL;
+    bool ok = bytes && vcs_package_share_load(&share, bytes, len, &why) &&
+        vcs_package_share_check_source(&share, &why) && !memcmp(share.release_id, s->parent, 32) &&
+        !memcmp(share.release.package_root, release->package_root, 32) && !memcmp(share.tree, tree, 32) &&
+        vcs_bundle_root_of(bytes, len, out->carrier) == VCS_BUNDLE_OK;
+    if (ok) {
+        struct sha256_ctx hash; sha256_init(&hash); sha256_write(&hash, bytes, len); sha256_finalize(&hash, out->sha256);
+        memcpy(out->release, share.release_id, 32); memcpy(out->package, share.release.package_root, 32);
+        memcpy(out->publisher, share.release.publisher_pubkey, 33); memcpy(out->tree, tree, 32);
+        (void)snprintf(out->name, sizeof(out->name), "%s", share.release.name); out->size = len;
+    }
+    vcs_package_share_cleanup(&share); free(bytes); return ok;
+}
+bool app_received_original_stage(const struct app_selection *s, const char *path,
+    struct app_received_original *out, struct zcl_command_reply *failure)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!failure) return false;
+    if (!s || !path || !out || !app_received_original_available(s))
+        return arp_fail(failure, "ORIGINAL_UNAVAILABLE", "The received original or its trust is unavailable.");
+    struct zcl_package_copy copy = {0}; struct arp_original_wires wires = {0};
+    struct vcs_package_release release; char version[65]; zcl_hex_encode(s->version, 32, version);
+    bool opened = zcl_package_copy_open_selected_as(s->copy, ZCL_PACKAGE_COPY_READ, &copy, failure, "app.library", version);
+    bool ok = opened && !memcmp(copy.fork_version, s->fork, 32) && !memcmp(copy.parent_release, s->parent, 32) &&
+        arp_original_wires_read(s, &wires, &release);
+    const struct zcl_package_bundle_wires bundle = {wires.release, wires.release_len, wires.manifest, wires.manifest_len, wires.recipe, wires.recipe_len};
+    if (ok) ok = zcl_package_bundle_write(path, s->copy, copy.fork_tree, &bundle, failure) &&
+        arp_original_verify(s, path, copy.fork_tree, &release, out);
+    arp_original_free(&wires); if (opened) zcl_package_copy_close(&copy);
+    if (!ok && failure->status == ZCL_COMMAND_STATUS_PASSED)
+        return arp_fail(failure, "ORIGINAL_UNAVAILABLE", "The original signed files could not be verified.");
     return ok;
 }
 static bool arp_received(struct app_receive_preview *p, const struct json_value *d,

@@ -2022,11 +2022,14 @@ static bool tag_discover_error_card(struct tag_discover *d, struct zcl_present_w
 static bool tag_discover_share_menu(const struct tag_discover *d,
     const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
 {
-    if ((!d->oversized_share && !d->cancel_after_error) || model->action_count != 3 ||
-        strcmp(model->actions[0].id, "share-file")) return false;
+    if (!d->oversized_share && !d->cancel_after_error) return false;
+    const char *id = d->share_canceled ? "share-back" : "share-file";
+    unsigned i = 0;
+    while (i < model->action_count && strcmp(model->actions[i].id, id)) ++i;
+    if (i == model->action_count) return false;
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     event->outcome = ZCL_PRESENT_WINDOW_ACTION;
-    event->action_index = d->share_canceled ? 2 : 0; return true;
+    event->action_index = i; return true;
 }
 static bool tag_discover_home(struct tag_discover *d, const struct zcl_present_model_v1 *model,
     struct zcl_present_window_event_v1 *event)

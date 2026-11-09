@@ -18,6 +18,7 @@
 #include "vcs/app_offer.h"
 #include "vcs/bundle_carry.h"
 #include "vcs/package_store.h"
+#include "vcs/package_share.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -139,6 +140,8 @@ struct app_host_test_hooks_state {
     pthread_mutex_t mutex;
     pthread_cond_t condition;
     bool block_guard, entered_guard, release_guard;
+    bool local_absent, local_conflict, local_error;
+    unsigned local_creates;
 };
 
 static bool app_host_test_datadir(void *ctx, const char *datadir)
@@ -151,6 +154,21 @@ static bool app_host_test_identity(void *ctx, uint8_t host[32], bool create)
 {
     struct app_host_test_hooks_state *s = ctx;
     (void)create; memcpy(host, s->host, 32); return true;
+}
+static enum vcs_zcode_dht_key_probe app_host_test_probe(void *ctx, uint8_t host[32])
+{
+    struct app_host_test_hooks_state *s = ctx;
+    memset(host, 0, 32);
+    if (s->local_error) return VCS_DHT_IDENTITY_PROBE_ERROR;
+    if (s->local_absent) return VCS_DHT_IDENTITY_ABSENT;
+    memcpy(host, s->host, 32); return VCS_DHT_IDENTITY_PRESENT;
+}
+static enum vcs_zcode_dht_key_create app_host_test_create(void *ctx, uint8_t host[32])
+{
+    struct app_host_test_hooks_state *s = ctx; ++s->local_creates; memset(host, 0, 32);
+    if (s->local_error) return VCS_DHT_IDENTITY_CREATE_ERROR;
+    if (s->local_conflict || !s->local_absent) return VCS_DHT_IDENTITY_PREEXISTING;
+    s->local_absent = false; memcpy(host, s->host, 32); return VCS_DHT_IDENTITY_CREATED;
 }
 
 static bool app_host_test_endpoint(void *ctx, char host[63], char endpoint[ZCL_APP_OFFER_ONION_MAX + 1u])
@@ -303,6 +321,24 @@ static bool app_host_test_wait_started(struct app_host_test_thread *t)
 }
 
 static int host_cli_response_tests(void);
+static int host_local_cli_cases(void);
+
+static bool app_host_test_local_rpc_refuses_unconfirmed(struct app_host_test_world *w)
+{
+    struct json_value in, out; json_init(&in); json_init(&out); json_set_object(&in);
+    uint8_t carrier[32]; struct vcs_package_possession_receipt before = {0}, after = {0};
+    struct db_app_host_intent row; size_t count = 0; bool more = false;
+    bool safe = zcl_hex_decode_lower(w->offer.carrier, carrier, 32) &&
+        vcs_package_store_possession_snapshot(w->store, carrier, &before) &&
+        db_app_host_intent_list(&w->db, NULL, NULL, &row, 1, &count, &more) == APP_HOST_OK && !count && !more;
+    bool handled = boot_app_host_rpc_dispatch_test(&w->db, "app_host_local", &in, &out, 432100, w->store);
+    const char *code = json_get_str(json_get(&out, "code"));
+    bool ok = safe && handled && !json_get_bool(json_get(&out, "ok")) && code && !strcmp(code, "BAD_INPUT") &&
+        vcs_package_store_possession_snapshot(w->store, carrier, &after) &&
+        before.pinned == after.pinned && before.mutation_generation == after.mutation_generation &&
+        db_app_host_intent_list(&w->db, NULL, NULL, &row, 1, &count, &more) == APP_HOST_OK && !count && !more;
+    json_free(&in); json_free(&out); return ok;
+}
 
 static bool app_host_same_original(const struct zcl_app_offer *a, const struct zcl_app_offer *b)
 {
@@ -346,6 +382,175 @@ static bool app_host_test_rpc_resume(struct app_host_test_world *w,
     return ok;
 }
 
+static bool app_host_test_release_id(const char *path, uint8_t id[32])
+{
+    size_t len = 0; uint8_t *bytes = zcl_native_source_bundle_read(path, &len);
+    struct vcs_package_share share = {0}; const char *why = NULL;
+    bool ok = bytes && vcs_package_share_load(&share, bytes, len, &why);
+    if (ok) memcpy(id, share.release_id, 32);
+    vcs_package_share_cleanup(&share); free(bytes); return ok;
+}
+static bool app_host_local_rpc_input(struct json_value *in, const struct app_host_test_world *w,
+                                     const char *release, const char *datadir,
+                                     const struct json_value *plan)
+{
+    char offer[ZCL_APP_OFFER_TEXT_MAX + 1u]; json_init(in); json_set_object(in);
+    bool ok = zcl_app_offer_format(&w->offer, offer, sizeof(offer)) &&
+        json_push_kv_str(in, "offer", offer) && json_push_kv_str(in, "release_id", release) &&
+        json_push_kv_str(in, "datadir", datadir);
+    if (!plan) return ok;
+    const char *keys[] = {"identity", "generation", "already_enabled", "plan_id"};
+    for (size_t i = 0; ok && i < sizeof(keys)/sizeof(keys[0]); ++i)
+        ok = json_get(plan, keys[i]) && json_push_kv(in, keys[i], json_get(plan, keys[i]));
+    return ok && json_push_kv_bool(in, "confirm", true);
+}
+static bool app_host_local_rpc_call(struct app_host_test_world *w, struct json_value *in,
+                                    struct json_value *out)
+{
+    json_init(out);
+    return boot_app_host_rpc_dispatch_test(&w->db, "app_host_local", in, out, 432100, w->store);
+}
+static bool app_host_local_rpc_wrong(struct app_host_test_world *w, struct app_host_test_hooks_state *s,
+    const char *release, const char *datadir, const struct json_value *plan)
+{
+    struct json_value in, out; struct db_app_host_intent row; json_init(&out);
+    bool ok = app_host_local_rpc_input(&in, w, release, datadir, plan) && app_host_local_rpc_call(w, &in, &out);
+    ok = ok && !json_get_bool(json_get(&out, "ok")) && !strcmp(json_get_str(json_get(&out, "code")), "PLAN_MISMATCH") &&
+        !s->local_creates && db_app_host_intent_find(&w->db, s->host, w->offer.carrier, &row) == APP_HOST_NOT_FOUND;
+    json_free(&in); json_free(&out); return ok;
+}
+static bool app_host_local_rpc_success(const struct json_value *out,
+                                       const struct app_host_test_hooks_state *s)
+{
+    return json_get_bool(json_get(out, "ok")) && json_get_bool(json_get(out, "enabled")) &&
+        json_get_bool(json_get(out, "executed")) && json_get_int(json_get(out, "generation")) == 1 && s->local_creates == 1;
+}
+static bool app_host_local_rpc_uncertain(struct app_host_test_world *w, struct app_host_test_hooks_state *s,
+    const char *release, const struct json_value *plan)
+{
+    struct json_value in, out; struct db_app_host_intent row; json_init(&out);
+    s->local_conflict = true;
+    bool ok = app_host_local_rpc_input(&in, w, release, w->store_path, plan) && app_host_local_rpc_call(w, &in, &out);
+    ok = ok && !json_get_bool(json_get(&out, "ok")) &&
+        !strcmp(json_get_str(json_get(&out, "code")), "HOST_LOCAL_UNCONFIRMED") &&
+        s->local_creates == 1 && db_app_host_intent_find(&w->db, s->host, w->offer.carrier, &row) == APP_HOST_NOT_FOUND;
+    json_free(&in); json_free(&out); s->local_conflict = false; return ok;
+}
+static bool app_host_local_rpc_roundtrip(struct app_host_test_world *w,
+                                         struct app_host_test_hooks_state *s, const uint8_t release[32])
+{
+    char hex[65]; zcl_hex_encode(release, 32, hex);
+    struct json_value in, plan, out; json_init(&plan); json_init(&out);
+    bool ok = app_host_local_rpc_input(&in, w, hex, w->store_path, NULL) && app_host_local_rpc_call(w, &in, &plan);
+    json_free(&in);
+    ok = ok && json_get_bool(json_get(&plan, "ok")) && !json_get_bool(json_get(&plan, "executed")) &&
+        !strcmp(json_get_str(json_get(&plan, "identity")), "absent") && !s->local_creates;
+    char wrong[65]; memcpy(wrong, hex, sizeof(wrong)); wrong[0] = wrong[0] == '0' ? '1' : '0';
+    ok = ok && app_host_local_rpc_wrong(w, s, hex, "/different", &plan) &&
+        app_host_local_rpc_wrong(w, s, wrong, w->store_path, &plan);
+    ok = ok && app_host_local_rpc_uncertain(w, s, hex, &plan);
+    json_free(&plan); json_init(&plan);
+    if (ok) ok = app_host_local_rpc_input(&in, w, hex, w->store_path, NULL) && app_host_local_rpc_call(w, &in, &plan);
+    else json_init(&in);
+    json_free(&in);
+    /* A fresh observation is required before a new confirmed attempt. */
+    s->local_creates = 0;
+    if (ok) ok = app_host_local_rpc_input(&in, w, hex, w->store_path, &plan) && app_host_local_rpc_call(w, &in, &out);
+    else { json_init(&in); json_init(&out); }
+    ok = ok && app_host_local_rpc_success(&out, s);
+    json_free(&in); json_free(&out); json_free(&plan); return ok;
+}
+static int app_host_local_rpc_cases(void)
+{
+    int failures = 0; struct app_host_test_world w = {0}; struct app_host_test_hooks_state s = {0};
+    struct boot_app_host_test_hooks hooks = {.context = &s, .identity_probe = app_host_test_probe,
+        .identity_create = app_host_test_create, .datadir = app_host_test_datadir};
+    uint8_t release[32];
+    TEST("local hosting RPC binds confirmed plan to exact node and identity state") {
+        ASSERT(app_host_test_open(&w)); ASSERT(app_host_test_release_id(w.share, release));
+        s.datadir = w.store_path; s.local_absent = true; s.host[0] = 9; boot_app_host_set_test_hooks(&hooks);
+        ASSERT(app_host_local_rpc_roundtrip(&w, &s, release)); PASS();
+    } _test_next:;
+    boot_app_host_set_test_hooks(NULL);
+    if (w.root[0] && !app_host_test_close(&w)) ++failures;
+    return failures;
+}
+static int app_host_local_cases(void)
+{
+    int failures = 0; struct app_host_test_world w = {0}; struct app_host_test_hooks_state s = {0};
+    struct boot_app_host_test_hooks hooks = {.context = &s, .identity_probe = app_host_test_probe,
+        .identity_create = app_host_test_create, .datadir = app_host_test_datadir,
+        .before_guard = app_host_test_before_guard};
+    uint8_t release[32], host[32], root[32]; int64_t generation = 0; bool attempted = false;
+    struct boot_app_host_local_state absent, present, enabled, disabled; struct db_app_host_intent row;
+    TEST("local original hosting binds identity, signed release, possession and consent generation") {
+        ASSERT(app_host_test_open(&w)); ASSERT(app_host_test_release_id(w.share, release));
+        ASSERT(zcl_hex_decode_lower(w.offer.carrier, root, 32));
+        s.datadir = w.store_path; s.store = w.store; memcpy(s.carrier, root, 32);
+        s.local_absent = true; s.host[0] = 9;
+        boot_app_host_set_test_hooks(&hooks);
+        ASSERT_EQ(boot_app_host_local_observe(&w.db, w.store_path, &w.offer, &absent), BOOT_APP_HOST_OK);
+        ASSERT(absent.identity_absent); ASSERT_EQ(absent.generation, 0); ASSERT(!absent.enabled);
+        ASSERT_EQ(vcs_package_store_pin(w.store, root, false), VCS_PACKAGE_STORE_OK);
+        ASSERT_EQ(boot_app_host_local_commit(&w.db, w.store, w.store_path, &w.offer, release,
+                  &absent, 432100, host, &generation, &attempted), BOOT_APP_HOST_INVALID);
+        ASSERT(!attempted); ASSERT_EQ(s.local_creates, 0u);
+        ASSERT_EQ(vcs_package_store_pin(w.store, root, true), VCS_PACKAGE_STORE_OK);
+        release[0] ^= 1;
+        ASSERT_EQ(boot_app_host_local_commit(&w.db, w.store, w.store_path, &w.offer, release,
+                  &absent, 432100, host, &generation, &attempted), BOOT_APP_HOST_INVALID);
+        ASSERT(!attempted); ASSERT_EQ(s.local_creates, 0u); release[0] ^= 1;
+        s.local_conflict = true;
+        ASSERT_EQ(boot_app_host_local_commit(&w.db, w.store, w.store_path, &w.offer, release,
+                  &absent, 432100, host, &generation, &attempted), BOOT_APP_HOST_STALE);
+        ASSERT(attempted); ASSERT(s.local_absent); ASSERT_EQ(s.local_creates, 1u);
+        ASSERT_EQ(db_app_host_intent_find(&w.db, s.host, w.offer.carrier, &row), APP_HOST_NOT_FOUND);
+        s.local_conflict = false; s.unpin_before_guard = true;
+        ASSERT_EQ(boot_app_host_local_commit(&w.db, w.store, w.store_path, &w.offer, release,
+                  &absent, 432100, host, &generation, &attempted), BOOT_APP_HOST_UNAVAILABLE);
+        ASSERT(attempted); ASSERT(!s.local_absent); ASSERT_EQ(s.local_creates, 2u);
+        ASSERT_EQ(db_app_host_intent_find(&w.db, s.host, w.offer.carrier, &row), APP_HOST_NOT_FOUND);
+        ASSERT_EQ(vcs_package_store_pin(w.store, root, true), VCS_PACKAGE_STORE_OK);
+        ASSERT_EQ(boot_app_host_local_commit(&w.db, w.store, w.store_path, &w.offer, release,
+                  &absent, 432100, host, &generation, &attempted), BOOT_APP_HOST_STALE);
+        ASSERT(!attempted);
+        ASSERT_EQ(boot_app_host_local_observe(&w.db, w.store_path, &w.offer, &present), BOOT_APP_HOST_OK);
+        ASSERT(!present.identity_absent); ASSERT_EQ(present.generation, 0); ASSERT(!present.enabled);
+        ASSERT_EQ(boot_app_host_local_commit(&w.db, w.store, w.store_path, &w.offer, release,
+                  &present, 432100, host, &generation, &attempted), BOOT_APP_HOST_OK);
+        ASSERT(attempted); ASSERT_EQ(generation, 1); ASSERT(!memcmp(host, s.host, 32));
+        ASSERT_EQ(boot_app_host_local_observe(&w.db, w.store_path, &w.offer, &enabled), BOOT_APP_HOST_OK);
+        ASSERT(enabled.enabled); ASSERT_EQ(enabled.generation, 1);
+        ASSERT_EQ(boot_app_host_local_commit(&w.db, w.store, w.store_path, &w.offer, release,
+                  &enabled, 432100, host, &generation, &attempted), BOOT_APP_HOST_OK);
+        ASSERT(!attempted); ASSERT_EQ(generation, 1);
+        ASSERT_EQ(boot_app_host_stop(&w.db, s.host, w.offer.carrier, 1), BOOT_APP_HOST_OK);
+        ASSERT_EQ(boot_app_host_local_commit(&w.db, w.store, w.store_path, &w.offer, release,
+                  &absent, 432100, host, &generation, &attempted), BOOT_APP_HOST_STALE);
+        ASSERT(!attempted);
+        ASSERT_EQ(boot_app_host_local_observe(&w.db, w.store_path, &w.offer, &disabled), BOOT_APP_HOST_OK);
+        ASSERT(!disabled.enabled); ASSERT_EQ(disabled.generation, 2);
+        s.host[0] ^= 1;
+        ASSERT_EQ(boot_app_host_local_commit(&w.db, w.store, w.store_path, &w.offer, release,
+                  &disabled, 432100, host, &generation, &attempted), BOOT_APP_HOST_STALE);
+        ASSERT(!attempted); s.host[0] ^= 1;
+        s.unpin_before_guard = true;
+        ASSERT_EQ(boot_app_host_local_commit(&w.db, w.store, w.store_path, &w.offer, release,
+                  &disabled, 432100, host, &generation, &attempted), BOOT_APP_HOST_UNAVAILABLE);
+        ASSERT(!attempted);
+        ASSERT_EQ(db_app_host_intent_find(&w.db, s.host, w.offer.carrier, &row), APP_HOST_OK);
+        ASSERT(!row.enabled); ASSERT_EQ(row.generation, 2);
+        ASSERT_EQ(vcs_package_store_pin(w.store, root, true), VCS_PACKAGE_STORE_OK);
+        ASSERT_EQ(boot_app_host_local_commit(&w.db, w.store, w.store_path, &w.offer, release,
+                  &disabled, 432100, host, &generation, &attempted), BOOT_APP_HOST_OK);
+        ASSERT(attempted); ASSERT_EQ(generation, 3);
+        PASS();
+    } _test_next:;
+    boot_app_host_set_test_hooks(NULL);
+    if (w.root[0] && !app_host_test_close(&w)) ++failures;
+    return failures;
+}
+
 int model_app_host_coordinator_tests(void)
 {
     int failures = 0; struct app_host_test_world w = {0};
@@ -366,6 +571,7 @@ int model_app_host_coordinator_tests(void)
         ASSERT_EQ(pthread_cond_init(&s.condition, NULL), 0); sync_ready = true;
         zcl_fleet_role_checker_install_permissive_for_testing();
         ASSERT(app_host_test_open(&w));
+        ASSERT(app_host_test_local_rpc_refuses_unconfirmed(&w));
         s.seed[0] = 11; ed25519_keypair(s.host, sk, s.seed); memcpy(s.seed, sk, 32);
         s.datadir = w.store_path; s.store = w.store;
         ASSERT(zcl_hex_decode_lower(w.offer.carrier, s.carrier, sizeof(s.carrier)));
@@ -489,7 +695,7 @@ _test_next:
     if (sync_ready) { pthread_cond_destroy(&s.condition); pthread_mutex_destroy(&s.mutex); }
     boot_app_host_set_test_hooks(NULL); zcl_fleet_role_checker_install(NULL);
     if (!app_host_test_close(&w)) { printf("FAIL: app host fixture cleanup\n"); ++failures; }
-    return failures + host_cli_response_tests();
+    return failures + host_cli_response_tests() + app_host_local_cases() + app_host_local_rpc_cases() + host_local_cli_cases();
 }
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Inert snippet for test_app_host.c; uses actual registered CLI handlers.
@@ -741,4 +947,52 @@ static int host_cli_response_tests(void)
     node_rpc_client_set_test_hook(NULL);
     hcli_fault = hcli_list_fault = 0; hcli_fault_status = false;
     return failures;
+}
+
+static char *hcli_local_rpc(const char *method, const char *params)
+{
+    if (strcmp(method, "fleet_board")) return NULL;
+    struct json_value doc; json_init(&doc);
+    if (!json_read(&doc, params, strlen(params))) { json_free(&doc); return NULL; }
+    const struct json_value *in = json_at(&doc, 0);
+    const char *op = json_get_str(json_get(in, "op"));
+    if (!op || strcmp(op, "app_host_local")) { json_free(&doc); return NULL; }
+    bool confirm = json_get_bool(json_get(in, "confirm")); char wire[4096];
+    int n;
+    if (confirm) {
+        n = snprintf(wire, sizeof(wire), "{\"ok\":true,\"host\":\"%s\",\"carrier\":\"%s\","
+            "\"generation\":7,\"enabled\":true,\"due_at\":100,\"pending\":true,\"executed\":false}", HCLI_HOST, HCLI_CARRIER);
+    } else {
+        const char *parts[] = {json_get_str(json_get(in, "offer")), json_get_str(json_get(in, "release_id")),
+            json_get_str(json_get(in, "datadir")), HCLI_HOST, "7", "enabled"};
+        uint8_t plan[32]; char hex[65]; zcl_app_plan_id("zcl.app_host.local.v1", parts, 6, plan); zcl_hex_encode(plan, 32, hex);
+        n = snprintf(wire, sizeof(wire), "{\"ok\":true,\"plan_id\":\"%s\",\"identity\":\"%s\","
+            "\"generation\":7,\"already_enabled\":true,\"executed\":false}", hex, HCLI_HOST);
+    }
+    json_free(&doc); return n > 0 && (size_t)n < sizeof(wire) ? strdup(wire) : NULL;
+}
+static int host_local_cli_cases(void)
+{
+    int failures = 0; struct json_value in; json_init(&in); json_set_object(&in);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.local.v1");
+    TEST("local hosting accepts an already-enabled pending result without mutation") {
+        struct zcl_app_offer offer = {0}; char text[ZCL_APP_OFFER_TEXT_MAX + 1u];
+        (void)snprintf(offer.name, sizeof(offer.name), "%s", "fixture/app");
+        (void)snprintf(offer.root, sizeof(offer.root), "%s", HCLI_HOST);
+        (void)snprintf(offer.publisher, sizeof(offer.publisher), "02%s", HCLI_HOST);
+        (void)snprintf(offer.carrier, sizeof(offer.carrier), "%s", HCLI_CARRIER);
+        (void)snprintf(offer.sha256, sizeof(offer.sha256), "%s", HCLI_CARRIER);
+        (void)snprintf(offer.onion, sizeof(offer.onion), "%s", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:29135");
+        offer.size = 100; ASSERT(zcl_app_offer_format(&offer, text, sizeof(text)));
+        ASSERT(json_push_kv_str(&in, "offer", text)); ASSERT(json_push_kv_str(&in, "release_id", HCLI_HOST));
+        ASSERT(json_push_kv_str(&in, "datadir", "/fixture")); node_rpc_client_set_test_hook(hcli_local_rpc);
+        ASSERT(zcl_app_inner_call("app.host.local", &in, &reply, NULL));
+        const char *keys[] = {"identity", "generation", "already_enabled", "plan_id"};
+        for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); ++i) ASSERT(json_push_kv(&in, keys[i], json_get(&reply.data, keys[i])));
+        zcl_command_reply_free(&reply); ASSERT(json_push_kv_bool(&in, "confirm", true));
+        ASSERT(zcl_app_inner_call("app.host.local", &in, &reply, NULL));
+        ASSERT(json_get_bool(json_get(&reply.data, "pending"))); ASSERT(!reply.error.mutated);
+        ASSERT(!json_get_bool(json_get(&reply.data, "executed"))); PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL); json_free(&in); zcl_command_reply_free(&reply); return failures;
 }

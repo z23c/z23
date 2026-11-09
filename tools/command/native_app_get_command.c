@@ -190,6 +190,45 @@ static bool ag_private_cleanup(struct ag_private_stage *p, struct ag_one *s)
     if (p->parent >= 0) close(p->parent);
     return ok;
 }
+struct app_private_stage {
+    struct ag_private_stage private;
+    struct ag_one one;
+    char token[33];
+};
+bool app_private_stage_open(const char *anchor, struct app_private_stage **out,
+                            struct zcl_command_reply *reply)
+{
+    if (!out || !reply) return false;
+    *out = NULL;
+    struct app_private_stage *s = zcl_calloc(1, sizeof(*s), "app-private-stage");
+    uint8_t random[16];
+    if (!s || !anchor || !rng_host_fill(random, sizeof(random))) {
+        free(s); zcl_package_copy_fail(reply, "TEMP_UNAVAILABLE", false, "Cannot create private staging.", AG_COMMAND); return false;
+    }
+    zcl_hex_encode(random, sizeof(random), s->token);
+    s->one.token = s->token;
+    if (!ag_private_create(&s->private, &s->one, anchor)) {
+        bool cleaned = s->one.created && ag_private_cleanup(&s->private, &s->one);
+        if (!s->one.created) { platform_directory_transaction_close(&s->private.dir); if (s->private.parent >= 0) close(s->private.parent); }
+        zcl_package_copy_fail(reply, "TEMP_UNAVAILABLE", s->one.created && !cleaned, "Cannot safely create private staging.", s->one.dir);
+        free(s); return false;
+    }
+    *out = s; return true;
+}
+const char *app_private_stage_path(const struct app_private_stage *s)
+{ return s ? s->one.path : NULL; }
+bool app_private_stage_matches(const struct app_private_stage *s, const char *sha256, int64_t size)
+{
+    if (!s || !sha256 || strlen(sha256) != 64 || size < 0) return false;
+    struct zcl_app_offer expected = {0};
+    memcpy(expected.sha256, sha256, 65); expected.size = size;
+    return ag_private_bound(&s->private, s->one.dir) && ag_hash(s->one.path, &expected);
+}
+bool app_private_stage_close(struct app_private_stage *s)
+{
+    if (!s) return false;
+    bool ok = ag_private_cleanup(&s->private, &s->one); free(s); return ok;
+}
 
 static bool ag_stage(struct ag_one *s, int64_t timeout_s)
 {

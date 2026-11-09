@@ -453,6 +453,70 @@ static int test_delegation_tamper(void)
     return failures;
 }
 
+static void identity_test_install_winner(const char *datadir, void *ctx)
+{
+    uint8_t seed[32], pub[32];
+    char err[192];
+    *(bool *)ctx = vcs_zcode_dht_online_key_load_or_create(
+        datadir, seed, pub, err, sizeof(err));
+}
+
+static int test_delegation_identity_consent(void)
+{
+    int failures = 0;
+    TEST("zcode dht identity: absent-bound creation refuses a winner") {
+        char dir[PATH_MAX], path[PATH_MAX], err[192];
+        uint8_t seed[32], pub[32], zero[32] = {0};
+        ASSERT(test_mkdtemp(dir, sizeof dir, "zcl_dht_consent") != NULL);
+        memset(pub, 0xa5, sizeof pub);
+        ASSERT_EQ(vcs_zcode_dht_online_key_probe(dir, pub, err, sizeof err),
+                  VCS_DHT_IDENTITY_ABSENT);
+        ASSERT(memcmp(pub, zero, sizeof pub) == 0);
+        bool winner_ok = false;
+        memset(seed, 0xa5, sizeof seed); memset(pub, 0xa5, sizeof pub);
+        enum vcs_zcode_dht_key_create result =
+            vcs_zcode_dht_online_key_create_if_absent_test(
+                dir, seed, pub, err, sizeof err, identity_test_install_winner, &winner_ok);
+        ASSERT(winner_ok);
+        ASSERT_EQ(result, VCS_DHT_IDENTITY_PREEXISTING);
+        ASSERT(memcmp(seed, zero, sizeof seed) == 0 && memcmp(pub, zero, sizeof pub) == 0);
+        ASSERT_EQ(vcs_zcode_dht_online_key_probe(dir, pub, err, sizeof err),
+                  VCS_DHT_IDENTITY_PRESENT);
+        memset(seed, 0xa5, sizeof seed); memset(pub, 0xa5, sizeof pub);
+        ASSERT_EQ(vcs_zcode_dht_online_key_create_if_absent(dir, seed, pub, err, sizeof err),
+                  VCS_DHT_IDENTITY_PREEXISTING);
+        ASSERT(memcmp(seed, zero, sizeof seed) == 0 && memcmp(pub, zero, sizeof pub) == 0);
+        snprintf(path, sizeof path, "%s/zcode/dht/%s", dir, VCS_ZCODE_DHT_ONLINE_KEY_FILE);
+        ASSERT(chmod(path, 0644) == 0);
+        memset(pub, 0xa5, sizeof pub);
+        ASSERT_EQ(vcs_zcode_dht_online_key_probe(dir, pub, err, sizeof err),
+                  VCS_DHT_IDENTITY_PROBE_ERROR);
+        ASSERT(memcmp(pub, zero, sizeof pub) == 0);
+        memset(seed, 0xa5, sizeof seed); memset(pub, 0xa5, sizeof pub);
+        ASSERT_EQ(vcs_zcode_dht_online_key_create_if_absent(dir, seed, pub, err, sizeof err),
+                  VCS_DHT_IDENTITY_CREATE_ERROR);
+        ASSERT(memcmp(seed, zero, sizeof seed) == 0 && memcmp(pub, zero, sizeof pub) == 0);
+        ASSERT(unlink(path) == 0);
+        memset(seed, 0xa5, sizeof seed); memset(pub, 0xa5, sizeof pub);
+        ASSERT_EQ(vcs_zcode_dht_online_key_create_if_absent(dir, seed, pub, err, sizeof err),
+                  VCS_DHT_IDENTITY_CREATED);
+        ASSERT(memcmp(pub, zero, sizeof pub) != 0);
+        ASSERT(unlink(path) == 0);
+        snprintf(path, sizeof path, "%s/zcode/dht", dir); ASSERT(rmdir(path) == 0);
+        FILE *blocker = fopen(path, "w"); ASSERT(blocker != NULL);
+        ASSERT(fclose(blocker) == 0);
+        memset(pub, 0xa5, sizeof pub);
+        ASSERT_EQ(vcs_zcode_dht_online_key_probe(dir, pub, err, sizeof err),
+                  VCS_DHT_IDENTITY_PROBE_ERROR);
+        ASSERT(memcmp(pub, zero, sizeof pub) == 0);
+        ASSERT(unlink(path) == 0);
+        snprintf(path, sizeof path, "%s/zcode", dir); ASSERT(rmdir(path) == 0);
+        ASSERT(rmdir(dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_delegation_identity_files(void)
 {
     int failures = 0;
@@ -526,6 +590,7 @@ int test_zcode_dht_delegation(void)
     failures += test_delegation_stable_node_id();
     failures += test_delegation_tamper();
     failures += test_delegation_identity_files();
+    failures += test_delegation_identity_consent();
     printf("=== zcode_dht_delegation: %d failures ===\n", failures);
     return failures;
 }

@@ -592,7 +592,27 @@ static void al_share_options(struct library *w)
     (void)snprintf(m->summary, sizeof(m->summary), "Choose how to share this saved version.");
     app_library_choice(m, "share-file", "Create share file", "Send a file to someone.");
     app_library_choice(m, "publish", "Publish publicly", "Offer this version on the public apps board.");
+    if (w->rows[w->index].saved && app_received_original_available(&w->rows[w->index].selection))
+        app_library_choice(m, "share-original", "Help share original", "Offer the received original without changing your saved version.");
     app_library_choice(m, "share-back", "Back", "Return to this app.");
+}
+struct al_host_check { const struct library_row *row; const struct app_launch_env *env; };
+static bool al_host_current(void *context, struct zcl_command_reply *reply)
+{
+    struct al_host_check *check = context;
+    return al_current(check->row, check->env, reply);
+}
+static bool al_host_original(struct library *w, const struct app_launch_env *env,
+                             struct zcl_command_reply *reply)
+{
+    const struct library_row *row = &w->rows[w->index];
+    struct al_host_check check = {row, env};
+    bool canceled = false;
+    bool ok = row->saved && al_current(row, env, reply) &&
+        app_host_original_run(&row->selection, al_host_current, &check,
+                              w->notice, w->prepare_context, &canceled, reply);
+    if (ok && canceled) { w->operation_canceled = true; return true; }
+    return false;
 }
 static void al_publish_notice(struct library *w, struct zcl_command_reply *reply)
 {
@@ -941,7 +961,7 @@ static bool al_draft_action(struct library *w, const struct app_launch_env *env,
 }
 static bool al_needs_recovery(const char *id)
 {
-    return !strcmp(id, "share-file") || !strcmp(id, "publish") || !strcmp(id, "help") ||
+    return !strcmp(id, "share-file") || !strcmp(id, "publish") || !strcmp(id, "share-original") || !strcmp(id, "help") ||
         !strcmp(id, "open") || !strcmp(id, "draft");
 }
 static bool al_action(struct library *w, const char *id, const struct app_launch_env *env,
@@ -955,6 +975,7 @@ static bool al_action(struct library *w, const char *id, const struct app_launch
     if (!strcmp(id, "share-back")) { w->page = 1; return true; }
     if (!strcmp(id, "share-file")) { w->receive_current = false; return al_share(w, env, reply); }
     if (!strcmp(id, "publish")) { w->receive_current = false; return al_publish(w, env, reply); }
+    if (!strcmp(id, "share-original")) { w->receive_current = false; return al_host_original(w, env, reply); }
     if (!strcmp(id, "help")) {
         w->receive_current = false;
         if (!al_setup(w, env, exe, datadir, reply)) return false;
@@ -989,7 +1010,7 @@ static bool al_navigation_result(struct library *w, unsigned action, const struc
     w->any_mutated |= reply->error.mutated;
     const char *id = w->model.actions[action].id;
     bool operation = !strcmp(id, "open") || !strcmp(id, "share-file") ||
-                     !strcmp(id, "publish") || !strcmp(id, "help") || !strcmp(id, "draft");
+                     !strcmp(id, "publish") || !strcmp(id, "share-original") || !strcmp(id, "help") || !strcmp(id, "draft");
     w->operation_canceled = false;
     if (operation) w->receive_failure = false;
     bool next = al_navigate(w, action, env, exe, datadir, reply);

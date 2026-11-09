@@ -182,6 +182,88 @@ static void fb_host_resume(struct node_db *db, const struct json_value *in,
         fb_error(result, "HOST_RESUME_UNCONFIRMED", "hosting may be enabled; read status");
 }
 
+static bool fb_local_offer(const struct json_value *in, struct zcl_app_offer *offer,
+                           uint8_t release[32], const char **text, const char **release_hex)
+{
+    *text = fb_str(in, "offer", NULL); *release_hex = fb_str(in, "release_id", NULL);
+    char canonical[ZCL_APP_OFFER_TEXT_MAX + 1u];
+    return *text && strnlen(*text, sizeof(canonical)) < sizeof(canonical) &&
+        zcl_app_offer_parse(*text, strlen(*text), offer) &&
+        zcl_app_offer_format(offer, canonical, sizeof(canonical)) && !strcmp(*text, canonical) &&
+        vcs_app_offer_hex_valid(*release_hex, 32) && zcl_hex_decode_lower(*release_hex, release, 32);
+}
+static void fb_local_plan_hash(const char *text, const char *release, const char *datadir, const char *identity,
+                               int64_t generation, bool enabled, uint8_t out[32])
+{
+    char number[32]; (void)snprintf(number, sizeof(number), "%lld", (long long)generation);
+    const char *parts[] = {text, release, datadir, identity, number, enabled ? "enabled" : "disabled"};
+    vcs_app_plan_hash("zcl.app_host.local.v1", parts, 6, out);
+}
+static void fb_local_plan(struct node_db *db, const struct zcl_app_offer *offer,
+                          const char *text, const char *release, const char *datadir, struct json_value *result)
+{
+    struct boot_app_host_local_state state; uint8_t plan[32]; char host[65], id[65];
+    if (boot_app_host_local_observe(db, datadir, offer, &state) != BOOT_APP_HOST_OK) {
+        fb_error(result, "HOST_LOCAL_UNAVAILABLE", "local hosting state could not be read safely"); return;
+    }
+    if (state.identity_absent) (void)snprintf(host, sizeof(host), "%s", "absent");
+    else zcl_hex_encode(state.host, 32, host);
+    fb_local_plan_hash(text, release, datadir, host, state.generation, state.enabled, plan); zcl_hex_encode(plan, 32, id);
+    json_set_object(result);
+    if (!json_push_kv_bool(result, "ok", true) || !json_push_kv_str(result, "plan_id", id) ||
+        !json_push_kv_str(result, "identity", host) || !json_push_kv_int(result, "generation", state.generation) ||
+        !json_push_kv_bool(result, "already_enabled", state.enabled) || !json_push_kv_bool(result, "executed", false))
+        fb_error(result, "ALLOC", "cannot describe local hosting plan");
+}
+static bool fb_local_expected(const struct json_value *in, struct boot_app_host_local_state *state,
+                              const char **identity, uint8_t plan[32])
+{
+    const struct json_value *v = json_get(in, "already_enabled");
+    const char *id = fb_str(in, "plan_id", NULL); *identity = fb_str(in, "identity", NULL);
+    memset(state, 0, sizeof(*state)); state->generation = fb_int(in, "generation", -1);
+    if (!*identity || !v || v->type != JSON_BOOL || state->generation < 0 ||
+        state->generation >= INT64_MAX - 1 || !vcs_app_offer_hex_valid(id, 32) ||
+        !zcl_hex_decode_lower(id, plan, 32)) return false;
+    state->enabled = json_get_bool(v); state->identity_absent = !strcmp(*identity, "absent");
+    if (state->identity_absent) return state->generation == 0 && !state->enabled;
+    return vcs_app_offer_hex_valid(*identity, 32) && zcl_hex_decode_lower(*identity, state->host, 32);
+}
+static void fb_local_commit(struct node_db *db, struct vcs_package_store *store,
+    const struct json_value *in, const struct zcl_app_offer *offer,
+    const char *text, const char *release_hex, const char *datadir, const uint8_t release[32],
+    struct json_value *result, int64_t now)
+{
+    struct boot_app_host_local_state expected; uint8_t expected_plan[32], actual[32], host[32];
+    const char *identity; int64_t generation = 0; bool attempted = false;
+    if (!fb_local_expected(in, &expected, &identity, expected_plan)) {
+        fb_error(result, "BAD_INPUT", "exact local hosting plan is required"); return;
+    }
+    fb_local_plan_hash(text, release_hex, datadir, identity, expected.generation, expected.enabled, actual);
+    if (memcmp(actual, expected_plan, 32)) { fb_error(result, "PLAN_MISMATCH", "local hosting plan changed"); return; }
+    enum boot_app_host_result r = boot_app_host_local_commit(db, store, datadir, offer, release, &expected,
+                                                            now, host, &generation, &attempted);
+    if (r != BOOT_APP_HOST_OK) {
+        fb_error(result, attempted ? "HOST_LOCAL_UNCONFIRMED" : "HOST_LOCAL_REFUSED",
+                 attempted ? "hosting or identity may have changed; inspect before retrying" : "local hosting was refused");
+        return;
+    }
+    struct db_app_host_intent row;
+    if (db_app_host_intent_find(db, host, offer->carrier, &row) != APP_HOST_OK || !row.enabled ||
+        row.generation != generation || !fb_host_render(result, &row) || !json_push_kv_bool(result, "executed", !expected.enabled))
+        fb_error(result, "HOST_LOCAL_UNCONFIRMED", "hosting may be enabled; read status");
+}
+static void fb_host_local(struct node_db *db, const struct json_value *in, struct json_value *result,
+                          int64_t now, struct vcs_package_store *store)
+{
+    struct zcl_app_offer offer; uint8_t release[32]; const char *text, *release_hex;
+    const char *datadir = fb_str(in, "datadir", NULL);
+    if (!datadir || strnlen(datadir, 4097) > 4096 || !fb_local_offer(in, &offer, release, &text, &release_hex)) {
+        fb_error(result, "BAD_INPUT", "canonical offer, signed release and datadir are required"); return;
+    }
+    if (fb_bool(in, "confirm")) fb_local_commit(db, store, in, &offer, text, release_hex, datadir, release, result, now);
+    else fb_local_plan(db, &offer, text, release_hex, datadir, result);
+}
+
 static bool host_rpc_dispatch(struct node_db *db, const char *op,
     const struct json_value *in, struct json_value *result, int64_t now,
     struct vcs_package_store *store)
@@ -190,6 +272,7 @@ static bool host_rpc_dispatch(struct node_db *db, const char *op,
     else if (!strcmp(op, "app_host_list")) fb_host_list(db, in, result);
     else if (!strcmp(op, "app_host_stop")) fb_host_stop(db, in, result);
     else if (!strcmp(op, "app_host_resume")) fb_host_resume(db, in, result, now, store);
+    else if (!strcmp(op, "app_host_local")) fb_host_local(db, in, result, now, store);
     else if (!strcmp(op, "app_host_enable")) fb_host_enable(db, in, result, now, store);
     else return false;
     return true;
@@ -200,7 +283,7 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
                                  struct json_value *result, int64_t now)
 {
     struct vcs_package_store *store = NULL;
-    if (!strcmp(op, "app_host_enable") || !strcmp(op, "app_host_resume"))
+    if (!strcmp(op, "app_host_enable") || !strcmp(op, "app_host_resume") || !strcmp(op, "app_host_local"))
         store = vcs_package_store_global();
     return host_rpc_dispatch(db, op, in, result, now, store);
 }

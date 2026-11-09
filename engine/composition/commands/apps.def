@@ -54,6 +54,19 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_host_resume)
 
+ZCL_COMMAND_READY_COMMAND(
+    "app.host.local", "app.host", "", "Host a verified local carrier",
+    "Plan and confirm recurring hosting of an exact pinned carrier containing a verified publisher-signed release.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "app,hosting,local", "zcl.app_host_local.input.v1", "zcl.app_host_local.v1",
+    "offer,release_id,datadir,identity,generation,already_enabled,plan_id,confirm", "offer,release_id,datadir",
+    "z23 app host local --offer=TEXT --release_id=ID --datadir=PATH",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_host_local)
+
 ZCL_COMMAND_READY_READ(
     "app.list", "app", "", "List apps",
     "Every installed App manifest from the local App registry (apps, count), "

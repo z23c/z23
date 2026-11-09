@@ -1516,6 +1516,83 @@ static bool fb_rpc_check_show_reply(bool ok, struct json_value *result,
     return ok;
 }
 
+struct fb_identity_rewire {
+    struct boot_svc_ctx *svc;
+    const char *datadir;
+};
+
+static void fb_identity_rewire_hook(void *ctx)
+{
+    struct fb_identity_rewire *rewire = ctx;
+    rewire->svc->datadir = rewire->datadir;
+    boot_fleet_board_wire(rewire->svc);
+}
+
+static int test_fleet_board_identity_consent(void)
+{
+    int failures = 0;
+    TEST("fleet board: identity probe and absence-bound creation") {
+        char dir[256], other[256];
+        ASSERT(test_mkdtemp(dir, sizeof dir, "fleet_identity") != NULL);
+        ASSERT(test_mkdtemp(other, sizeof other, "fleet_identity_other") != NULL);
+        struct boot_svc_ctx svc = {.datadir = dir};
+        uint8_t pub[32], saved[32], zero[32] = {0};
+        boot_fleet_board_shutdown();
+        boot_fleet_board_wire(&svc);
+        memset(pub, 0xa5, sizeof pub);
+        ASSERT_EQ(boot_fleet_board_identity_probe("/different", pub), VCS_DHT_IDENTITY_PROBE_ERROR);
+        ASSERT(memcmp(pub, zero, sizeof pub) == 0);
+        memset(pub, 0xa5, sizeof pub);
+        ASSERT_EQ(boot_fleet_board_identity_create_if_absent("/different", pub), VCS_DHT_IDENTITY_CREATE_ERROR);
+        ASSERT(memcmp(pub, zero, sizeof pub) == 0);
+        ASSERT_EQ(boot_fleet_board_identity_probe(dir, pub), VCS_DHT_IDENTITY_ABSENT);
+        ASSERT(memcmp(pub, zero, sizeof pub) == 0);
+        ASSERT_EQ(boot_fleet_board_identity_create_if_absent(dir, pub), VCS_DHT_IDENTITY_CREATED);
+        memcpy(saved, pub, sizeof saved);
+        ASSERT(boot_fleet_board_public_identity(pub) && memcmp(pub, saved, 32) == 0);
+        memset(pub, 0xa5, sizeof pub);
+        ASSERT_EQ(boot_fleet_board_identity_probe("/different", pub), VCS_DHT_IDENTITY_PROBE_ERROR);
+        ASSERT(memcmp(pub, zero, sizeof pub) == 0);
+        memset(pub, 0xa5, sizeof pub);
+        ASSERT_EQ(boot_fleet_board_identity_create_if_absent("/different", pub), VCS_DHT_IDENTITY_CREATE_ERROR);
+        ASSERT(memcmp(pub, zero, sizeof pub) == 0);
+        svc.datadir = other;
+        boot_fleet_board_wire(&svc);
+        ASSERT_EQ(boot_fleet_board_identity_probe(dir, pub), VCS_DHT_IDENTITY_PROBE_ERROR);
+        ASSERT_EQ(boot_fleet_board_identity_probe(other, pub), VCS_DHT_IDENTITY_ABSENT);
+        ASSERT(!boot_fleet_board_public_identity(pub));
+        svc.datadir = dir;
+        boot_fleet_board_wire(&svc);
+        ASSERT_EQ(boot_fleet_board_identity_probe(dir, pub), VCS_DHT_IDENTITY_PRESENT);
+        ASSERT(memcmp(pub, saved, 32) == 0);
+        uint8_t seed[32]; char why[192];
+        struct fb_identity_rewire rewire = {.svc = &svc, .datadir = other};
+        memset(seed, 0xa5, sizeof seed); memset(pub, 0xa5, sizeof pub);
+        ASSERT(!boot_fleet_board_identity_test(seed, pub, why, sizeof why,
+                                              fb_identity_rewire_hook, &rewire));
+        ASSERT(memcmp(seed, zero, sizeof seed) == 0 && memcmp(pub, zero, sizeof pub) == 0);
+        ASSERT(!boot_fleet_board_public_identity(pub));
+        ASSERT_EQ(boot_fleet_board_identity_probe(other, pub), VCS_DHT_IDENTITY_ABSENT);
+        svc.datadir = dir;
+        boot_fleet_board_wire(&svc);
+        memset(pub, 0xa5, sizeof pub);
+        ASSERT_EQ(boot_fleet_board_identity_create_if_absent(dir, pub), VCS_DHT_IDENTITY_PREEXISTING);
+        ASSERT(memcmp(pub, zero, sizeof pub) == 0);
+        boot_fleet_board_shutdown();
+        boot_fleet_board_wire(&svc);
+        ASSERT_EQ(boot_fleet_board_identity_probe(dir, pub), VCS_DHT_IDENTITY_PRESENT);
+        ASSERT(memcmp(pub, saved, 32) == 0 && !boot_fleet_board_public_identity(pub));
+        memset(pub, 0xa5, sizeof pub);
+        ASSERT_EQ(boot_fleet_board_identity_create_if_absent(dir, pub), VCS_DHT_IDENTITY_PREEXISTING);
+        ASSERT(memcmp(pub, zero, sizeof pub) == 0 && !boot_fleet_board_public_identity(pub));
+        boot_fleet_board_shutdown();
+        ASSERT(test_rm_rf_recursive(dir) == 0);
+        ASSERT(test_rm_rf_recursive(other) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_fleet_board_rpc_verification(void)
 {
     int failures = 0;
@@ -13014,6 +13091,7 @@ int test_fleet_board(void)
     failures += test_fleet_wiki_review_budget();
     failures += test_fleet_board_waits_for_peer_handshake();
     failures += test_fleet_board_peer_churn_limits();
+    failures += test_fleet_board_identity_consent();
     failures += test_fleet_board_rpc_verification();
     failures += test_fleet_board_rpc_concurrency();
     failures += test_fleet_board_rpc_scope_default();

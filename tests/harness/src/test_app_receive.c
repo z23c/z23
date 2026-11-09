@@ -6,18 +6,30 @@
 #include "test/test_core.h"
 #include "command/native_app_receive_command.h"
 #include "command/native_app_confirm.h"
+#include "command/native_app_library_command.h"
+#include "command/native_app_receive_preview.h"
+#include "command/native_app_host_browser.h"
+#include "command/native_app_compose.h"
+#include "command/native_app_offer.h"
+#include "controllers/rpc_client.h"
+#include "command/app_selection.h"
 #include "presentation/canvas.h"
 #include "command/native_command.h"
 #include "command/native_zcode_package_bundle.h"
 #include "command/native_zcode_package_copy.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
+#include "crypto/sha256.h"
 #include "config/command_catalog.h"
+#include "config/boot_app_host.h"
 #include "json/json.h"
 #include "plugin/plugin_pack.h"
 #include "plugin/plugin_dist.h"
 #include "vcs/package_prepare.h"
 #include "vcs/package_release.h"
+#include "vcs/package_share.h"
+#include "vcs/bundle_carry.h"
+#include "vcs/package_store.h"
 #include "vcs/vcs.h"
 #include "util/file_tree_ops.h"
 #include <stdio.h>
@@ -25,6 +37,7 @@
 #include <string.h>
 #if !defined(_WIN32) && defined(ZCL_TESTING)
 #include <sys/stat.h>
+#include <dirent.h>
 #include <unistd.h>
 #include <errno.h>
 #include <limits.h>
@@ -349,6 +362,342 @@ static bool rt_received(const struct receive_fixture *f)
     ok = rt_received_source(f, ok);
     zcl_command_reply_free(&reply);
     return ok;
+}
+
+static bool rr_verify(const char *path, const struct receive_fixture *f,
+                      const uint8_t tree[32], uint8_t carrier[32], uint8_t sha[32])
+{
+    size_t len = 0; uint8_t *bytes = zcl_native_source_bundle_read(path, &len);
+    struct vcs_package_share share = {0}; const char *why = NULL;
+    uint8_t publisher[33], package[32], release[32];
+    bool ok = bytes && zcl_hex_decode_lower(f->publisher, publisher, 33) &&
+        zcl_hex_decode_lower(f->package, package, 32) && zcl_hex_decode_lower(f->release, release, 32) &&
+        vcs_package_share_load(&share, bytes, len, &why) && vcs_package_share_check_source(&share, &why) &&
+        !memcmp(share.release.publisher_pubkey, publisher, 33) && !memcmp(share.release.package_root, package, 32) &&
+        !memcmp(share.release_id, release, 32) && !memcmp(share.tree, tree, 32) &&
+        vcs_bundle_root_of(bytes, len, carrier) == VCS_BUNDLE_OK;
+    if (ok) { struct sha256_ctx hash; sha256_init(&hash); sha256_write(&hash, bytes, len); sha256_finalize(&hash, sha); }
+    vcs_package_share_cleanup(&share); free(bytes); return ok;
+}
+/* Derive the edited tree's real package root; it must not replace the
+ * received parent package when offering the original. */
+static bool rr_edited_package(const struct receive_fixture *f, uint8_t root[32])
+{
+    struct vcs_package_prepare_options options = {
+        .dir = f->destination, .publisher_sequence = 1,
+        .reward_address = "", .chain_id = "zclassic-main",
+    };
+    struct vcs_package_prepared prepared; vcs_package_prepared_init(&prepared);
+    char why[256] = {0}; uint8_t original[32];
+    bool ok = zcl_hex_decode_lower(f->publisher, options.publisher_pubkey, 33) &&
+        zcl_hex_decode_lower(f->package, original, 32) &&
+        vcs_package_prepare(&options, &prepared, why, sizeof(why)) == VCS_PACKAGE_PREPARE_OK &&
+        memcmp(prepared.package_root, original, 32);
+    if (ok) memcpy(root, prepared.package_root, 32);
+    vcs_package_prepared_free(&prepared); return ok;
+}
+static bool rr_reconstruct(const struct receive_fixture *f, const char *path,
+                           uint8_t carrier[32], uint8_t sha[32])
+{
+    struct zcl_package_copy copy = {0}; struct app_selection selection = {0};
+    struct app_received_original original = {0}; uint8_t tree[32];
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.reconstruct.v1");
+    bool opened = zcl_package_copy_open_as(f->destination, ZCL_PACKAGE_COPY_READ, &copy, &reply, "test");
+    bool ok = opened && strlen(f->destination) < sizeof(selection.copy) && strlen(f->datadir) < sizeof(selection.datadir) &&
+        rr_edited_package(f, selection.package);
+    if (ok) {
+        (void)snprintf(selection.copy, sizeof(selection.copy), "%s", f->destination);
+        (void)snprintf(selection.datadir, sizeof(selection.datadir), "%s", f->datadir);
+        memcpy(selection.fork, copy.fork_version, 32); memcpy(selection.parent, copy.parent_release, 32);
+        memcpy(selection.version, copy.head_version, 32); memcpy(tree, copy.fork_tree, 32);
+    }
+    if (opened) zcl_package_copy_close(&copy);
+    if (ok) ok = app_received_original_stage(&selection, path, &original, &reply) &&
+        rr_verify(path, f, tree, carrier, sha) && !memcmp(carrier, original.carrier, 32) &&
+        !memcmp(sha, original.sha256, 32);
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool rr_edit_saved(struct receive_fixture *f)
+{
+    struct zcl_package_copy copy = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.reconstruct.v1");
+    bool opened = zcl_package_copy_open_as(f->destination, ZCL_PACKAGE_COPY_CHECKED, &copy, &reply, "test");
+    uint8_t version[32]; struct vcs_snapshot_meta meta = {.phase = ZCL_PACKAGE_COPY_SAVE_PHASE};
+    bool ok = opened && abc_put(f->destination, "src/main.c", "int main(void) { return 7; }\n") &&
+        vcs_snapshot(copy.repo, &meta, version) == VCS_OK && memcmp(version, copy.fork_version, 32);
+    if (opened) zcl_package_copy_close(&copy);
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool rr_recipe_path(const struct receive_fixture *f, char *path, size_t cap)
+{
+    uint8_t release_id[32], id[32]; struct vcs_package_release release;
+    if (!zcl_hex_decode_lower(f->release, release_id, 32) ||
+        zcl_package_copy_find_release(f->datadir, release_id, &release, id) != ZCL_PACKAGE_COPY_FOUND) return false;
+    char hex[65]; zcl_hex_encode(release.recipe_root, 32, hex);
+    int n = snprintf(path, cap, "%s/zcode/recipes/%s", f->datadir, hex);
+    return n > 0 && (size_t)n < cap;
+}
+static bool rr_head_differs(const struct receive_fixture *f)
+{
+    struct zcl_package_copy copy = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.reconstruct.v1");
+    bool opened = zcl_package_copy_open_as(f->destination, ZCL_PACKAGE_COPY_READ, &copy, &reply, "test");
+    bool ok = opened && memcmp(copy.head_tree, copy.fork_tree, 32);
+    if (opened) zcl_package_copy_close(&copy);
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool rr_host_verify(const struct receive_fixture *f, const char *path,
+                           const uint8_t carrier[32], const uint8_t sha[32])
+{
+    size_t len = 0; uint8_t *bytes = zcl_native_source_bundle_read(path, &len), actual[32];
+    struct vcs_package_store *store = vcs_package_store_open(f->datadir, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    struct zcl_app_offer offer = {0}; uint64_t generation = 0;
+    (void)snprintf(offer.name, sizeof(offer.name), "%s", "stub/tinyapp");
+    (void)snprintf(offer.root, sizeof(offer.root), "%s", f->package);
+    (void)snprintf(offer.publisher, sizeof(offer.publisher), "%s", f->publisher);
+    (void)snprintf(offer.onion, sizeof(offer.onion), "%s", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:29135");
+    zcl_hex_encode(carrier, 32, offer.carrier); zcl_hex_encode(sha, 32, offer.sha256); offer.size = len;
+    bool ok = bytes && store && vcs_bundle_put_to_no_evict(store, bytes, len, actual) == VCS_BUNDLE_OK &&
+        !memcmp(actual, carrier, 32) && !boot_app_host_verify_carrier(store, &offer, &generation) &&
+        vcs_package_store_pin(store, carrier, true) == VCS_PACKAGE_STORE_OK &&
+        boot_app_host_verify_carrier(store, &offer, &generation) && generation > 0;
+    if (store && vcs_package_store_pin(store, carrier, false) != VCS_PACKAGE_STORE_OK) ok = false;
+    if (store) vcs_package_store_close(store);
+    free(bytes); return ok;
+}
+struct rr_ui { bool seen, reached; };
+static bool rr_library_present(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    (void)copy; (void)why; (void)cap; struct rr_ui *state = context;
+    if (!strcmp(model->request_id, "library-share-options")) {
+        state->reached = true;
+        for (uint32_t i = 0; i < model->action_count; ++i)
+            if (!strcmp(model->actions[i].id, "share-original")) state->seen = true;
+        if (!state->seen) {
+            printf("share-original missing from %s:", model->request_id);
+            for (uint32_t i = 0; i < model->action_count; ++i) printf(" %s", model->actions[i].id);
+            putchar('\n');
+        }
+        return false; /* stop the fixture before any owner action */
+    }
+    const char *wanted = !strcmp(model->request_id, "library-home") ? "myapps" : "choose";
+    for (uint32_t i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, "share")) wanted = "share";
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    for (uint32_t i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, wanted)) { event->action_index = i; return true; }
+    return false;
+}
+static bool rr_library_setup(struct receive_fixture *f, struct app_launch_env *env,
+                             struct app_selection *saved)
+{
+    struct app_selection selection = {0};
+    int n = snprintf(env->state_dir, sizeof(env->state_dir), "%s/app-state", f->world.root);
+    if (n <= 0 || (size_t)n >= sizeof(env->state_dir) || mkdir(env->state_dir, 0700)) return false;
+    char copy_path[PATH_MAX], data_path[PATH_MAX];
+    if (!realpath(f->destination, copy_path) || !realpath(f->datadir, data_path) ||
+        strlen(copy_path) >= sizeof(selection.copy) || strlen(data_path) >= sizeof(selection.datadir)) return false;
+    memcpy(selection.copy, copy_path, strlen(copy_path) + 1);
+    memcpy(selection.datadir, data_path, strlen(data_path) + 1);
+    (void)snprintf(selection.app, sizeof(selection.app), "%s", "kept:received-fixture");
+    struct zcl_package_copy copy = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.library.v1");
+    bool opened = zcl_package_copy_open_as(selection.copy, ZCL_PACKAGE_COPY_READ, &copy, &reply, "test");
+    if (opened) {
+        memcpy(selection.fork, copy.fork_version, 32); memcpy(selection.parent, copy.parent_release, 32);
+        memcpy(selection.version, copy.head_version, 32); zcl_package_copy_close(&copy);
+    }
+    bool ok = opened && rr_edited_package(f, selection.package);
+    memset(selection.env, 1, 32); memset(selection.dependencies, 2, 32);
+    memset(selection.record, 3, 32); memset(selection.image, 4, 32);
+    ok = ok && app_selection_save(env->state_dir, 0, &selection, saved) == APP_SELECTION_OK;
+    zcl_command_reply_free(&reply); return ok;
+}
+static unsigned rr_mode;
+static bool rr_cancel_case(const struct app_selection *selection);
+static bool rr_library_route(const struct app_launch_env *env, const struct app_selection *saved, unsigned mode);
+static bool rr_null_presenter_case(const struct app_selection *selection);
+static bool rr_library_has_original(struct receive_fixture *f, bool *reached)
+{
+    *reached = false;
+    struct app_launch_env env = {0}; struct app_selection saved;
+    bool ok = rr_library_setup(f, &env, &saved);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.library.v1");
+    struct rr_ui state = {0};
+    if (ok) zcl_test_app_library_run(&env, &reply, rr_library_present, &state);
+    *reached = state.reached;
+    if (!state.reached) printf("share-original menu not reached: setup=%d code=%s\n", ok, reply.error.code);
+    zcl_command_reply_free(&reply);
+    ok = ok && state.seen && rr_library_route(&env, &saved, 0);
+    for (rr_mode = 0; ok && rr_mode < 5; ++rr_mode) ok = rr_cancel_case(&saved);
+    ok = ok && rr_null_presenter_case(&saved);
+    ok = ok && rr_library_route(&env, &saved, 7);
+    ok = ok && rr_library_route(&env, &saved, 6);
+    return ok && state.seen;
+}
+/* Exercise the registered leaf with a deterministic node response.  No node
+ * identity, carrier store or network is changed by this presenter control. */
+static unsigned rr_plans, rr_pins, rr_commits;
+#define RR_HOST "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+static char *rr_host_commit(const char *offer)
+{
+    ++rr_commits; struct zcl_app_offer parsed = {0}; char wire[400];
+    bool ok = rr_mode == 3 && zcl_app_offer_parse(offer, strlen(offer), &parsed);
+    int n = ok ? snprintf(wire, sizeof(wire), "{\"ok\":true,\"host\":\"%s\",\"carrier\":\"%s\",\"generation\":1,\"enabled\":true,\"due_at\":1,\"pending\":true,\"executed\":true}", RR_HOST, parsed.carrier) : -1;
+    return n > 0 && (size_t)n < sizeof(wire) ? strdup(wire) : NULL;
+}
+static char *rr_host_rpc(const char *method, const char *params)
+{
+    if (strcmp(method, "fleet_board")) return NULL;
+    struct json_value request; json_init(&request);
+    if (!json_read(&request, params, strlen(params))) { json_free(&request); return NULL; }
+    const struct json_value *input = json_at(&request, 0);
+    const char *op = json_get_str(json_get(input, "op"));
+    const char *offer = json_get_str(json_get(input, "offer"));
+    const char *release = json_get_str(json_get(input, "release_id"));
+    const char *datadir = json_get_str(json_get(input, "datadir"));
+    if (strcmp(op, "app_host_local")) {
+        json_free(&request); return NULL;
+    }
+    if (rr_mode == 5) { ++rr_plans; json_free(&request); return NULL; }
+    if (json_get_bool(json_get(input, "confirm"))) {
+        char *result = rr_host_commit(offer); json_free(&request); return result;
+    }
+    bool enabled = rr_mode == 4 && rr_plans == 0;
+    const char *identity = rr_mode == 4 ? RR_HOST : "absent";
+    const char *generation = rr_mode == 4 ? (enabled ? "7" : "8") : "0";
+    const char *parts[] = {offer, release, datadir, identity, generation, enabled ? "enabled" : "disabled"};
+    uint8_t digest[32]; char plan[65], wire[256];
+    zcl_app_plan_id("zcl.app_host.local.v1", parts, 6, digest); zcl_hex_encode(digest, 32, plan);
+    int n = snprintf(wire, sizeof(wire), "{\"ok\":true,\"plan_id\":\"%s\",\"identity\":\"%s\",\"generation\":%s,\"already_enabled\":%s,\"executed\":false}", plan, identity, generation, enabled ? "true" : "false");
+    ++rr_plans; json_free(&request);
+    return n > 0 && (size_t)n < sizeof(wire) ? strdup(wire) : NULL;
+}
+static bool rr_no_pin(const char *path, const struct json_value *input, struct zcl_command_reply *reply)
+{
+    ++rr_pins; zcl_command_reply_init(reply, "zcl.test.pin.v1");
+    if (strcmp(path, ZCL_APP_OFFER_BUNDLE_OFFER)) return false;
+    size_t size = 0; uint8_t *bytes = zcl_native_source_bundle_read(json_get_str(json_get(input, "file")), &size);
+    uint8_t root[32], digest[32]; char root_hex[65], sha_hex[65];
+    bool ok = bytes && vcs_bundle_root_of(bytes, size, root) == VCS_BUNDLE_OK;
+    if (ok) { struct sha256_ctx sha; sha256_init(&sha); sha256_write(&sha, bytes, size); sha256_finalize(&sha, digest); }
+    if (ok) { zcl_hex_encode(root, 32, root_hex); zcl_hex_encode(digest, 32, sha_hex); }
+    free(bytes);
+    return ok && json_push_kv_str(&reply->data, "root", root_hex) &&
+        json_push_kv_str(&reply->data, "sha256", sha_hex) && json_push_kv_int(&reply->data, "size", (int64_t)size);
+}
+static bool rr_selection_current(void *context, struct zcl_command_reply *reply)
+{ (void)context; (void)reply; return rr_mode != 2; }
+static bool rr_cancel_original(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    (void)pages; (void)why; (void)cap;
+    bool *seen = context;
+    bool result = !strcmp(model->request_id, "library-host-original-result");
+    if (!result && strcmp(model->request_id, "library-host-original")) return false;
+    *seen = true; bool redraw = false, close = false;
+    struct zcl_present_window_event_v1 event = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = 2};
+    uint32_t count = 0;
+    if (rr_mode && !zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
+    for (uint32_t i = 1; rr_mode && i < count; ++i) {
+        live->owner.update(live->owner.context, &event, false, &redraw, &close);
+        if (close) return false;
+    }
+    event.action_index = rr_mode ? 3 : 0;
+    live->owner.update(live->owner.context, &event, false, &redraw, &close); return close;
+}
+static bool rr_case_early(bool ok, bool mutated)
+{
+    if (rr_mode == 0) return ok && rr_plans == 1 && rr_pins == 0 && rr_commits == 0 && !mutated;
+    if (rr_mode == 1) return !ok && rr_plans == 1 && rr_pins == 1 && rr_commits == 1 && mutated;
+    return !ok && rr_plans == 1 && rr_pins == 0 && rr_commits == 0 && !mutated;
+}
+static bool rr_case_counts(bool ok, bool mutated)
+{
+    if (rr_mode < 3) return rr_case_early(ok, mutated);
+    if (rr_mode == 3) return ok && rr_plans == 1 && rr_pins == 1 && rr_commits == 1 && mutated;
+    return !ok && rr_plans == 2 && rr_pins == 0 && rr_commits == 0 && !mutated;
+}
+static bool rr_cancel_case(const struct app_selection *selection)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.original-host.v1");
+    bool seen = false, canceled = false; rr_plans = rr_pins = rr_commits = 0;
+    node_rpc_client_set_test_hook(rr_host_rpc); zcl_app_offer_set_call(rr_no_pin);
+    bool ok = app_host_original_run(selection, rr_selection_current, NULL, rr_cancel_original, &seen, &canceled, &reply);
+    zcl_app_offer_set_call(NULL); node_rpc_client_set_test_hook(NULL);
+    ok = seen && canceled == (rr_mode == 0) && rr_case_counts(ok, reply.error.mutated);
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool rr_null_presenter_case(const struct app_selection *selection)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.original-host.v1");
+    bool canceled = false; rr_mode = 5; rr_plans = rr_pins = rr_commits = 0;
+    node_rpc_client_set_test_hook(rr_host_rpc); zcl_app_offer_set_call(rr_no_pin);
+    bool ok = app_host_original_run(selection, rr_selection_current, NULL, NULL, NULL, &canceled, &reply);
+    zcl_app_offer_set_call(NULL); node_rpc_client_set_test_hook(NULL);
+    ok = !ok && !canceled && rr_plans == 1 && rr_pins == 0 && rr_commits == 0 && !reply.error.mutated;
+    zcl_command_reply_free(&reply); return ok;
+}
+struct rr_route { struct rr_ui ui; bool confirmed; const struct app_launch_env *env; const struct app_selection *saved; };
+static bool rr_tamper_stage(const char *datadir)
+{
+    DIR *dir = opendir(datadir); if (!dir) return false;
+    char path[PATH_MAX] = {0}; unsigned matches = 0; struct dirent *entry;
+    while ((entry = readdir(dir))) if (!strncmp(entry->d_name, ".app-get-", 9)) {
+        int n = snprintf(path, sizeof(path), "%s/%s/offer.z23share", datadir, entry->d_name);
+        if (n <= 0 || (size_t)n >= sizeof(path)) { closedir(dir); return false; }
+        ++matches;
+    }
+    if (closedir(dir) || matches != 1) { printf("tamper stage matches=%u\n", matches); return false; }
+    if (chmod(path, 0600)) return false; /* fixture owns this private staged file */
+    FILE *file = fopen(path, "r+b"); if (!file) { printf("tamper open errno=%d\n", errno); return false; }
+    int byte = fgetc(file); bool ok = byte != EOF && fseek(file, 0, SEEK_SET) == 0 && fputc(byte ^ 1, file) != EOF;
+    return fclose(file) == 0 && ok;
+}
+static bool rr_route_present(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    struct rr_route *route = context;
+    if (strcmp(model->request_id, "library-share-options"))
+        return rr_library_present(&route->ui, model, copy, event, why, cap);
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    if (route->confirmed) { event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    for (uint32_t i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, "share-original")) { event->action_index = i; return true; }
+    return false;
+}
+static bool rr_route_confirm(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    struct rr_route *route = context;
+    if (rr_mode == 7 && !rr_tamper_stage(route->saved->datadir)) return false;
+    if (rr_mode == 6) {
+        struct app_selection changed = *route->saved, written;
+        changed.image[0] ^= 1;
+        if (app_selection_save(route->env->state_dir, route->saved->revision, &changed, &written) != APP_SELECTION_OK)
+            return false;
+    }
+    return rr_cancel_original(&route->confirmed, model, pages, live, why, cap);
+}
+static bool rr_library_route(const struct app_launch_env *env, const struct app_selection *saved, unsigned mode)
+{
+    struct rr_route route = {.env = env, .saved = saved}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.library-route.v1");
+    rr_mode = mode; rr_plans = rr_pins = rr_commits = 0;
+    node_rpc_client_set_test_hook(rr_host_rpc); zcl_app_offer_set_call(rr_no_pin);
+    zcl_test_app_library_native_at(env, NULL, NULL, &reply, rr_route_present, &route, rr_route_confirm);
+    zcl_app_offer_set_call(NULL); node_rpc_client_set_test_hook(NULL);
+    bool ok = route.confirmed && rr_plans == 1 && rr_pins == 0 && rr_commits == 0 && !reply.error.mutated;
+    if (mode == 6 || mode == 7) ok = ok && reply.status != ZCL_COMMAND_STATUS_PASSED;
+    if (!ok) printf("original route mode=%u confirmed=%d plans=%u pins=%u commits=%u mutated=%d status=%d code=%s\n",
+                    mode, route.confirmed, rr_plans, rr_pins, rr_commits, reply.error.mutated, reply.status, reply.error.code);
+    zcl_command_reply_free(&reply); return ok;
 }
 /* File-only defaults use the command binding, never the sender's identity.
  * All artifacts and HOME are isolated; existing explicit-path cases remain. */
@@ -875,6 +1224,33 @@ static int rt_wrap_cases(void)
     } _test_next:;
     return failures;
 }
+static int rr_cases(void)
+{
+    int failures = 0;
+    TEST("received copy reconstructs a verified original from its immutable fork") {
+        struct receive_fixture r = {0}; char output[1100], recipe[1100], saved[1100];
+        uint8_t carrier[32], sha[32];
+        ASSERT(rt_setup(&r)); ASSERT(rt_attempt(&r, RT_CONFIRM)); ASSERT(rt_received(&r));
+        ASSERT(unlink(r.file) == 0 && unlink(r.alternate) == 0);
+        ASSERT(unlink(r.key) == 0 && test_rm_rf_recursive(r.world.src) == 0);
+        ASSERT(rr_edit_saved(&r)); ASSERT(rr_head_differs(&r));
+        ASSERT(snprintf(output, sizeof(output), "%s/reconstructed.z23share", r.world.root) > 0);
+        ASSERT(rr_recipe_path(&r, recipe, sizeof(recipe)));
+        ASSERT(snprintf(saved, sizeof(saved), "%s.saved", recipe) > 0);
+        ASSERT(rename(recipe, saved) == 0);
+        ASSERT(!rr_reconstruct(&r, output, carrier, sha));
+        FILE *bad = fopen(recipe, "wb"); ASSERT(bad); ASSERT(fputs("bad", bad) >= 0); ASSERT(fclose(bad) == 0);
+        ASSERT(!rr_reconstruct(&r, output, carrier, sha));
+        ASSERT(unlink(output) == 0 || errno == ENOENT);
+        ASSERT(unlink(recipe) == 0 && rename(saved, recipe) == 0);
+        ASSERT(rr_reconstruct(&r, output, carrier, sha));
+        ASSERT(rr_host_verify(&r, output, carrier, sha));
+        bool reached = false; bool original = rr_library_has_original(&r, &reached);
+        ASSERT(reached); ASSERT(original);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 int test_app_receive(void)
 {
     int failures = rt_wrap_cases();
@@ -889,6 +1265,7 @@ int test_app_receive(void)
         ASSERT(rt_received(&f));
         PASS();
     } _test_next:;
+    failures += rr_cases();
     failures += rp_cases();
     failures += rpb_receipt_reserve();
     failures += rd_defaults();

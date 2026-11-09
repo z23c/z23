@@ -1235,13 +1235,30 @@ static bool cr_app_edit_text_ok(const struct json_value *value)
         zutf8_validate(text);
 }
 
+static bool cr_app_host_local_descriptor(const struct zcl_command_spec *spec,
+                                         const char *key, struct zcl_command_input_descriptor *out)
+{
+    if (strcmp(spec->path, "app.host.local")) return false;
+    if (!strcmp(key, "generation")) {
+        out->type = JSON_INT; out->minimum = 0; out->maximum = INT64_MAX - 2; return true;
+    }
+    if (!strcmp(key, "already_enabled")) { out->type = JSON_BOOL; return true; }
+    if (!strcmp(key, "offer") || !strcmp(key, "release_id") || !strcmp(key, "identity")) {
+        out->type = JSON_STR;
+        out->max_bytes = !strcmp(key, "offer") ? 2048 : 64;
+        return true;
+    }
+    return false;
+}
 static bool cr_app_host_descriptor(const struct zcl_command_spec *spec,
                                     const char *key,
                                     struct zcl_command_input_descriptor *out)
 {
+    if (cr_app_host_local_descriptor(spec, key, out)) return true;
+    bool local = !strcmp(spec->path, "app.host.local");
     bool stop = !strcmp(spec->path, "app.host.stop") || !strcmp(spec->path, "app.host.resume");
     bool list = !strcmp(spec->path, "app.host.list");
-    if (!stop && !list && strcmp(spec->path, "app.host.status")) return false;
+    if (!local && !stop && !list && strcmp(spec->path, "app.host.status")) return false;
     if (list && (!strcmp(key, "after_host") || !strcmp(key, "after_carrier"))) {
         out->type = JSON_STR; out->max_bytes = 64; return true;
     }

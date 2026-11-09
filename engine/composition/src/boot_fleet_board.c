@@ -63,6 +63,7 @@ static uint32_t s_receive_frames;
 static uint8_t s_seed[32];
 static uint8_t s_pubkey[32];
 static bool s_identity_ready;
+static uint64_t s_identity_epoch;
 
 static void fleet_board_lock(void)
 {
@@ -76,6 +77,10 @@ static void fleet_board_lock(void)
 void boot_fleet_board_wire(struct boot_svc_ctx *svc)
 {
     fleet_board_lock();
+    memory_cleanse(s_seed, sizeof(s_seed));
+    memset(s_pubkey, 0, sizeof(s_pubkey));
+    s_identity_ready = false;
+    ++s_identity_epoch;
     s_svc = svc;
     memset(s_peers, 0, sizeof(s_peers));
     s_receive_window_start = 0;
@@ -135,16 +140,43 @@ void boot_fleet_board_shutdown(void)
     memset(s_seed, 0, sizeof(s_seed));
     memset(s_pubkey, 0, sizeof(s_pubkey));
     s_identity_ready = false;
+    ++s_identity_epoch;
     zcl_mutex_unlock(&s_lock);
 }
 
-bool boot_fleet_board_identity(uint8_t seed_out[32], uint8_t pubkey_out[32],
-                               char *why, size_t why_capacity)
+static bool fleet_board_identity_install(const char *datadir, uint64_t epoch,
+    const uint8_t seed[32], const uint8_t pubkey[32], uint8_t seed_out[32],
+    uint8_t pubkey_out[32])
+{
+    fleet_board_lock();
+    bool current = s_identity_epoch == epoch && s_svc && s_svc->datadir &&
+                   !strcmp(s_svc->datadir, datadir);
+    if (current) {
+        memcpy(s_seed, seed, 32);
+        memcpy(s_pubkey, pubkey, 32);
+        s_identity_ready = true;
+        memcpy(seed_out, seed, 32);
+        memcpy(pubkey_out, pubkey, 32);
+    }
+    zcl_mutex_unlock(&s_lock);
+    return current;
+}
+
+static void fleet_board_identity_why(char *why, size_t cap, const char *prefix,
+                                     const char *detail)
+{
+    if (why && cap) (void)snprintf(why, cap, "%s%s", prefix, detail);
+}
+
+static bool fleet_board_identity(uint8_t seed_out[32], uint8_t pubkey_out[32],
+                                 char *why, size_t why_capacity,
+                                 void (*hook)(void *), void *ctx)
 {
     if (!seed_out || !pubkey_out)
         return false;
-    if (why && why_capacity)
-        why[0] = '\0';
+    memset(seed_out, 0, 32);
+    memset(pubkey_out, 0, 32);
+    fleet_board_identity_why(why, why_capacity, "", "");
     fleet_board_lock();
     if (s_identity_ready) {
         memcpy(seed_out, s_seed, sizeof(s_seed));
@@ -152,37 +184,51 @@ bool boot_fleet_board_identity(uint8_t seed_out[32], uint8_t pubkey_out[32],
         zcl_mutex_unlock(&s_lock);
         return true;
     }
-    const char *datadir = s_svc ? s_svc->datadir : NULL;
+    char datadir[4096];
+    const char *path = s_svc ? s_svc->datadir : NULL;
+    int n = path ? snprintf(datadir, sizeof(datadir), "%s", path) : 0;
+    uint64_t epoch = s_identity_epoch;
     zcl_mutex_unlock(&s_lock);
 
-    if (!datadir || !datadir[0]) {
-        if (why && why_capacity)
-            (void)snprintf(why, why_capacity,
-                           "no datadir: the board signs with the node's own "
-                           "host identity, which lives in the datadir");
+    if (n <= 0 || (size_t)n >= sizeof(datadir)) {
+        fleet_board_identity_why(why, why_capacity,
+            "no datadir: the board signs with the node's own host identity, which lives in the datadir", "");
         return false;
     }
-    uint8_t seed[32], pubkey[32];
+    uint8_t seed[32] = {0}, pubkey[32];
     char err[256] = {0};
     /* The board shares the node's ONE durable online identity rather than
      * minting a board-only key: a reader who can tie a post to a node is the
      * whole value of signing it. */
     if (!vcs_zcode_dht_online_key_load_or_create(datadir, seed, pubkey, err,
                                                  sizeof(err))) {
-        if (why && why_capacity)
-            (void)snprintf(why, why_capacity, "host identity unavailable: %s",
-                           err[0] ? err : "unknown reason");
+        memory_cleanse(seed, sizeof(seed));
+        fleet_board_identity_why(why, why_capacity, "host identity unavailable: ",
+                                 err[0] ? err : "unknown reason");
         return false;
     }
-    fleet_board_lock();
-    memcpy(s_seed, seed, sizeof(s_seed));
-    memcpy(s_pubkey, pubkey, sizeof(s_pubkey));
-    s_identity_ready = true;
-    memcpy(seed_out, seed, sizeof(seed));
-    memcpy(pubkey_out, pubkey, sizeof(pubkey));
-    zcl_mutex_unlock(&s_lock);
-    return true;
+    if (hook) hook(ctx);
+    bool current = fleet_board_identity_install(datadir, epoch, seed, pubkey,
+                                                seed_out, pubkey_out);
+    memory_cleanse(seed, sizeof(seed));
+    if (!current) fleet_board_identity_why(why, why_capacity, "board datadir changed", "");
+    return current;
 }
+
+bool boot_fleet_board_identity(uint8_t seed_out[32], uint8_t pubkey_out[32],
+                               char *why, size_t why_capacity)
+{
+    return fleet_board_identity(seed_out, pubkey_out, why, why_capacity, NULL, NULL);
+}
+
+#ifdef ZCL_TESTING
+bool boot_fleet_board_identity_test(uint8_t seed_out[32], uint8_t pubkey_out[32],
+                                    char *why, size_t why_capacity,
+                                    void (*hook)(void *), void *ctx)
+{
+    return fleet_board_identity(seed_out, pubkey_out, why, why_capacity, hook, ctx);
+}
+#endif
 
 bool boot_fleet_board_public_identity(uint8_t pubkey_out[32])
 {
@@ -194,6 +240,58 @@ bool boot_fleet_board_public_identity(uint8_t pubkey_out[32])
         memcpy(pubkey_out, s_pubkey, sizeof(s_pubkey));
     zcl_mutex_unlock(&s_lock);
     return ready;
+}
+
+/* Caller holds s_lock, so a rewire cannot change the selected datadir. */
+static bool fleet_board_expected_datadir(const char *expected)
+{
+    return expected && expected[0] && s_svc && s_svc->datadir &&
+           !strcmp(expected, s_svc->datadir);
+}
+
+enum vcs_zcode_dht_key_probe boot_fleet_board_identity_probe(
+    const char *expected_datadir, uint8_t pubkey_out[32])
+{
+    if (!pubkey_out) return VCS_DHT_IDENTITY_PROBE_ERROR;
+    memset(pubkey_out, 0, 32);
+    fleet_board_lock();
+    enum vcs_zcode_dht_key_probe result;
+    if (!fleet_board_expected_datadir(expected_datadir)) {
+        result = VCS_DHT_IDENTITY_PROBE_ERROR;
+    } else if (s_identity_ready) {
+        memcpy(pubkey_out, s_pubkey, 32);
+        result = VCS_DHT_IDENTITY_PRESENT;
+    } else {
+        result = vcs_zcode_dht_online_key_probe(s_svc->datadir, pubkey_out, NULL, 0);
+    }
+    zcl_mutex_unlock(&s_lock);
+    return result;
+}
+
+enum vcs_zcode_dht_key_create boot_fleet_board_identity_create_if_absent(
+    const char *expected_datadir, uint8_t pubkey_out[32])
+{
+    if (!pubkey_out) return VCS_DHT_IDENTITY_CREATE_ERROR;
+    memset(pubkey_out, 0, 32);
+    uint8_t seed[32] = {0};
+    fleet_board_lock();
+    enum vcs_zcode_dht_key_create result;
+    if (!fleet_board_expected_datadir(expected_datadir)) {
+        result = VCS_DHT_IDENTITY_CREATE_ERROR;
+    } else if (s_identity_ready) {
+        result = VCS_DHT_IDENTITY_PREEXISTING;
+    } else {
+        result = vcs_zcode_dht_online_key_create_if_absent(
+            s_svc->datadir, seed, pubkey_out, NULL, 0);
+        if (result == VCS_DHT_IDENTITY_CREATED) {
+            memcpy(s_seed, seed, 32);
+            memcpy(s_pubkey, pubkey_out, 32);
+            s_identity_ready = true;
+        }
+    }
+    zcl_mutex_unlock(&s_lock);
+    memory_cleanse(seed, sizeof seed);
+    return result;
 }
 
 bool boot_fleet_board_datadir_matches(const char *datadir)
@@ -213,18 +311,22 @@ bool boot_fleet_board_load_existing_identity(uint8_t pubkey_out[32])
     fleet_board_lock();
     const char *path = s_svc ? s_svc->datadir : NULL;
     int n = path ? snprintf(datadir, sizeof(datadir), "%s", path) : 0;
+    uint64_t epoch = s_identity_epoch;
     zcl_mutex_unlock(&s_lock);
     if (n <= 0 || (size_t)n >= sizeof(datadir)) return false;
     uint8_t seed[32] = {0}, pubkey[32];
     bool ok = vcs_zcode_dht_online_key_load(datadir, seed, pubkey, why, sizeof(why));
     if (ok) {
         fleet_board_lock();
-        if (!s_identity_ready) {
+        if (s_identity_epoch != epoch || !s_svc || !s_svc->datadir ||
+            strcmp(s_svc->datadir, datadir)) {
+            ok = false;
+        } else if (!s_identity_ready) {
             memcpy(s_seed, seed, sizeof(s_seed));
             memcpy(s_pubkey, pubkey, sizeof(s_pubkey));
             s_identity_ready = true;
         }
-        memcpy(pubkey_out, s_pubkey, 32);
+        if (ok) memcpy(pubkey_out, s_pubkey, 32);
         zcl_mutex_unlock(&s_lock);
     }
     memory_cleanse(seed, sizeof(seed));
