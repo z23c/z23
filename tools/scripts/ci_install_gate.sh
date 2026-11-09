@@ -23,7 +23,7 @@
 #   5. ASSERT (defense-in-depth) the node bound ONLY non-live ports.
 #   6. CLEAN UP the /tmp prefix + datadir, leaving nothing behind.
 #
-# It NEVER runs systemctl, NEVER binds a live port (8023/8033/8034 P2P,
+# Its live-install check runs only a fixture systemctl, NEVER binds a live port (8023/8033/8034 P2P,
 # 18232/8232 RPC), and NEVER touches the live datadir — the same hard
 # isolation guarantees soak-ci / test-crash-bootstrap rely on. A failure on
 # any path exits non-zero with a clear message (no silent skips); success
@@ -105,6 +105,53 @@ echo "ci-install: installing via 'make install' to throwaway prefix $PREFIX"
 # --user unit install is skipped, so this stays fully hermetic.
 make -C "$REPO_ROOT" install DESTDIR="$PREFIX" PREFIX= >/dev/null \
     || gate_die "make install -> prefix failed"
+
+# Exercise the live-install branch without touching the operator's HOME or
+# systemd manager. The fake command answers only the three expected queries.
+LIVE_HOME="$PREFIX/live-home"
+STAGED_HOME="$PREFIX/staged-home"
+FAKE_BIN="$PREFIX/fake-bin"
+mkdir -p "$LIVE_HOME" "$STAGED_HOME" "$FAKE_BIN"
+cat > "$FAKE_BIN/systemctl" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CI_INSTALL_SYSTEMCTL_LOG" || exit 1
+case "$*" in
+    '--user is-active zclassic23.service') echo inactive; exit 3 ;;
+    '--user is-enabled zclassic23.service') echo disabled; exit 1 ;;
+    '--user daemon-reload') exit 0 ;;
+esac
+exit 1
+EOF
+chmod 700 "$FAKE_BIN/systemctl"
+export CI_INSTALL_SYSTEMCTL_LOG="$PREFIX/systemctl.log"
+live_install() {
+    HOME="$LIVE_HOME" PATH="$FAKE_BIN:$PATH" XDG_RUNTIME_DIR="$PREFIX/no-user-bus" \
+        make -C "$REPO_ROOT" install PREFIX="$PREFIX/live" DESTDIR= >/dev/null
+}
+owned_directory_mode() {
+    local matched
+    [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] || return 1
+    matched=$(find "$1" -prune -type d -perm "$2" -print) || return 1
+    [ -n "$matched" ]
+}
+live_install || gate_die "isolated live make install failed"
+LIVE_DD="$LIVE_HOME/.zclassic-c23"
+[ -d "$LIVE_DD" ] && [ ! -L "$LIVE_DD" ] || gate_die "live install did not create default datadir"
+owned_directory_mode "$LIVE_DD" 0700 || gate_die "fresh datadir is not private and owned"
+printf 'preserve\n' > "$LIVE_DD/sentinel"
+chmod 750 "$LIVE_DD"
+live_install || gate_die "repeated isolated live make install failed"
+owned_directory_mode "$LIVE_DD" 0750 &&
+    [ "$(cat "$LIVE_DD/sentinel")" = preserve ] || gate_die "existing datadir changed"
+HOME="$STAGED_HOME" PATH="$FAKE_BIN:$PATH" XDG_RUNTIME_DIR="$PREFIX/no-user-bus" \
+    make -C "$REPO_ROOT" install DESTDIR="$PREFIX/staged" PREFIX= >/dev/null \
+    || gate_die "isolated staged make install failed"
+[ ! -e "$STAGED_HOME/.zclassic-c23" ] && [ ! -e "$STAGED_HOME/.config/systemd/user/z23-node.service" ] \
+    || gate_die "staged install changed HOME"
+grep -qx -- '--user is-active zclassic23.service' "$CI_INSTALL_SYSTEMCTL_LOG" &&
+    grep -qx -- '--user is-enabled zclassic23.service' "$CI_INSTALL_SYSTEMCTL_LOG" &&
+    grep -qx -- '--user daemon-reload' "$CI_INSTALL_SYSTEMCTL_LOG" \
+    || gate_die "live install did not use fixture systemctl"
 [ -x "$PREFIX/bin/zclassic23" ] || gate_die "installed node not executable"
 [ -x "$PREFIX/bin/zcl-rpc" ]    || gate_die "installed zcl-rpc not executable"
 # Each helper installs under its z23- name and keeps its legacy zclassic23-
@@ -147,6 +194,7 @@ esac
 cd "$PREFIX/bin"
 export ISO_KIND=install ISO_PORT_BASE
 export ISO_NODE_BIN=./zclassic23 ISO_RPC_BIN=./zcl-rpc
+export ISO_JSONQ_BIN="$REPO_ROOT/build/bin/jsonq"
 # shellcheck source=tools/scripts/isolated_node_env.sh
 . "$HARNESS"
 

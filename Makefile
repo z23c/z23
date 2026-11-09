@@ -12152,6 +12152,9 @@ set -eu; \
 . tools/scripts/tor_stamp_lib.sh; \
 zcl_tor_require_full "$(Z23_BIN)" "the node this install would place"; \
 if [ -z "$(DESTDIR)" ]; then $(ZCL_NODECTL_BIN) legacy-unit-check || exit $$?; fi; \
+if [ -z "$(DESTDIR)" ] && [ ! -d "$(HOME)/.zclassic-c23" ]; then \
+	(umask 077; mkdir "$(HOME)/.zclassic-c23") || exit $$?; \
+fi; \
 install -d "$(DESTDIR)$(PREFIX)/bin"; \
 install -m 755 $(Z23_BIN) "$(DESTDIR)$(PREFIX)/bin/z23"; \
 ln -sfn z23 "$(DESTDIR)$(PREFIX)/bin/zclassic23"; \

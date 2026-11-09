@@ -212,8 +212,12 @@ int t_legacy_unit_guard_contract(void)
         const char *setup_guard =
             strstr(setup_buf, "systemctl --user $verb zclassic23.service");
         const char *setup_install = strstr(setup_buf, "install -m 644 ");
+        const char *setup_datadir = strstr(setup_buf, "mkdir \"$HOME/.zclassic-c23\"");
+        const char *setup_linger = strstr(setup_buf, "loginctl enable-linger");
         ASSERT(setup_guard != NULL && setup_install != NULL);
         ASSERT(setup_guard < setup_install);
+        ASSERT(setup_datadir != NULL && setup_linger != NULL);
+        ASSERT(setup_guard < setup_datadir && setup_datadir < setup_linger);
         ASSERT(strstr(setup_buf, "exit 3") != NULL);
         ASSERT(strstr(setup_buf, "exit 4") != NULL);
         char *cut_buf = NULL;

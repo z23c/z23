@@ -50,6 +50,13 @@ if [ -n "$legacy_unknown" ]; then
     exit 4
 fi
 
+# Systemd opens the default datadir and node.log before ExecStartPre. Create
+# it as the service user, without changing an existing directory.
+if ! su - "$TARGET_USER" -c 'if [ ! -d "$HOME/.zclassic-c23" ]; then umask 077; mkdir "$HOME/.zclassic-c23"; fi'; then
+    echo "REFUSE: cannot prepare the default datadir for $TARGET_USER" >&2
+    exit 1
+fi
+
 # Enable linger (service survives logout) — may already be enabled
 loginctl enable-linger "$TARGET_USER" 2>/dev/null || true
 
