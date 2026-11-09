@@ -3602,6 +3602,11 @@ static void maybe_trim(const struct cache *c, const struct plan *pl)
 
     long long have = 0;
     long long freed = trim_to(c, limit, &have);
+    /* A long scan must not consume the floor before it completes. Keep the
+     * pre-scan stamp for crashes and leave concurrent growth for the next
+     * interval; only a completed scan advances the floor again. */
+    if (freed >= 0)
+        (void)futimens(fd, NULL);
     if (freed > 0) {
         char detail[96];
         snprintf(detail, sizeof detail, "%lld MB freed, %lld MB ceiling",
