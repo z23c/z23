@@ -33,6 +33,10 @@
 #endif
 #include <unistd.h>
 
+extern bool proof_retry_fixture_capture(const char *, const char *, char *, size_t, bool);
+extern bool proof_retry_fixture_check(const char *, bool);
+extern bool proof_retry_fixture_edges(void);
+
 /* The list tool the Makefile builds beside the test binaries. This calls the
  * host tool, not the dev.test.groups leaf: Make-time group selection must run
  * without the command registry or a built node, and both run one body
@@ -3172,7 +3176,16 @@ static int tgs_retry_case(const char *mode, bool rename_failure)
         bool read_ok = f && fscanf(f, "%u", &count) == 1;
         if (f && fclose(f) != 0) read_ok = false;
         bool retained = tgs_retry_first_retained(root, out);
+#if !defined(_WIN32)
+        char attempt[PATH_MAX] = {0};
+        bool copied = proof_retry_fixture_capture(root, out, attempt, sizeof(attempt), rename_failure);
+        ASSERT(copied);
+#endif
         ASSERT(test_rm_rf_recursive(root) == 0);
+#if !defined(_WIN32)
+        ASSERT(proof_retry_fixture_check(attempt, rename_failure));
+        ASSERT(test_rm_rf_recursive(attempt) == 0);
+#endif
         failures += tgs_retry_assertions(out, rc, count, read_ok, rename_failure, retained);
         PASS();
     } _test_next:;
@@ -3181,7 +3194,7 @@ static int tgs_retry_case(const char *mode, bool rename_failure)
 
 static int test_runner_retry_evidence(void)
 {
-    return tgs_retry_case("--retry-evidence-probe", false) +
+    return (proof_retry_fixture_edges() ? 0 : 1) + tgs_retry_case("--retry-evidence-probe", false) +
            tgs_retry_case("--retry-evidence-unobserved", false) +
            tgs_retry_case("--retry-evidence-rename-failure", true);
 }

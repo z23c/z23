@@ -15,6 +15,7 @@
 #include "dev_proof.h"
 #include "dependency_links.h"
 #include "dev_proof_budget.h"
+#include "dev_proof_retry_evidence.h"
 #include "dev_proof_observation.h"
 #include "dev_proof_verdict_mmr.h"
 #include "proof_dependencies.h"
@@ -13148,7 +13149,11 @@ static bool dp_worker_dimensions(struct dp_worker *w, char *why,
     if (test->selected) dp_worker_test_preflight(w);
     if (test->selected) dp_worker_shadow_probe(w);
     dp_worker_vmmr_open(w, test->selected != 0);
-    if (!dp_worker_dimensions_run(w, lint, test, why, why_len)) {
+    bool passed = dp_worker_dimensions_run(w, lint, test, why, why_len);
+    if (test->selected)
+        zcl_dev_proof_retry_evidence_report(w->generation, w->execution.logs,
+                                            w->execution.key, w->groups, w->paths->phases);
+    if (!passed) {
         dp_worker_vmmr_close(w);
         dp_worker_vmmr_record(w, false);
         dp_worker_shadow_audit(w, false);

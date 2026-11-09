@@ -1214,6 +1214,25 @@ static bool retry_probe_block_rename(const char *out_path)
            platform_directory_create(blocked, 0700) == 0;
 }
 
+static void retry_probe_emit(unsigned count)
+{
+    if (count != 0) { printf("RETRY-EVIDENCE-RETRY\n"); return; }
+    for (int i = 0; i < 40; i++) printf("retry evidence prelude %d\n", i);
+    printf("RETRY-EVIDENCE-LATE-CONTENT\n");
+    for (int i = 0; i < 80; i++) printf("retry evidence suffix %d\n", i);
+    printf("RETRY-EVIDENCE-FIRST\n");
+}
+
+static int retry_probe_result(bool ok, unsigned count)
+{
+    if (!ok) return 2;
+    if (g_retry_evidence_probe == 2) {
+        if (count == 0) printf("UNOBSERVED (synthetic retry evidence fixture)\n");
+        return 0;
+    }
+    return count == 0 ? 1 : 0;
+}
+
 static int retry_evidence_probe(const char *out_path)
 {
     FILE *f = fopen("retry-evidence-count", "r");
@@ -1227,15 +1246,11 @@ static int retry_evidence_probe(const char *out_path)
     if (!f) return 2;
     bool ok = fprintf(f, "%u\n", count + 1) > 0;
     if (fclose(f) != 0) ok = false;
-    printf("RETRY-EVIDENCE-%s\n", count == 0 ? "FIRST" : "RETRY");
+    retry_probe_emit(count);
     if (g_retry_evidence_probe == 3 && count == 0) {
         if (!retry_probe_block_rename(out_path)) return 2;
     }
-    if (g_retry_evidence_probe == 2 && ok) {
-        printf("UNOBSERVED (synthetic retry evidence fixture)\n");
-        return 0;
-    }
-    return ok ? 1 : 2;
+    return retry_probe_result(ok, count);
 }
 
 #if !defined(_WIN32)

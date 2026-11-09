@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/dev/dev_proof_retry_evidence.c", CAP_FS_READ|CAP_FS_WRITE, "Copies bounded proof retry diagnostics from generation-owned regular files into private attempt logs")
