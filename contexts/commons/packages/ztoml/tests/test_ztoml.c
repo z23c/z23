@@ -3,6 +3,7 @@
 #include "ztoml/ztoml.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -254,9 +255,12 @@ static void test_err(void) {
   }
   /* Depth bound. */
   {
-    char doc[64] = "k = ";
-    size_t i;
-    for (i = 0; i < ZTOML_MAX_DEPTH + 2; i++) strcat(doc, "[");
+    _Static_assert((size_t)ZTOML_MAX_DEPTH <= SIZE_MAX - 7, "depth fixture size overflows");
+    static char doc[(size_t)ZTOML_MAX_DEPTH + 7];
+    size_t depth = ZTOML_MAX_DEPTH;
+    memcpy(doc, "k = ", 4);
+    memset(doc + 4, '[', depth + 2);
+    doc[depth + 6] = '\0';
     evlog log;
     CHECK(parse_all(doc, &log) == ZTOML_ERR_RANGE);
   }

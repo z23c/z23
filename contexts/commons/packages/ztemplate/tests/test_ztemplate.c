@@ -238,9 +238,15 @@ static void test_differential(void)
     for (int iter = 0; iter < 3000; iter++) {
         char t[256];
         t[0] = '\0';
+        size_t used = 0;
         size_t parts = rng_next() % 8;
-        for (size_t i = 0; i < parts; i++)
-            strcat(t, frags[rng_next() % 10]);
+        for (size_t i = 0; i < parts; i++) {
+            const char *frag = frags[rng_next() % 10];
+            size_t len = strlen(frag);
+            CHECK(used < sizeof(t) && len < sizeof(t) - used);
+            memcpy(t + used, frag, len + 1);
+            used += len;
+        }
         ztemplate *tp = ztemplate_parse(t, strlen(t), NULL);
         CHECK(tp != NULL);
         char got[1024], want[1024];

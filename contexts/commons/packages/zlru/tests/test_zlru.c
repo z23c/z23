@@ -141,10 +141,19 @@ static void test_capacity_one(void) {
   zlru_destroy(c);
 }
 
+struct key_collection { char text[64]; size_t used; bool overflow; };
 static bool collect_key(void *ctx, const char *key, void *value) {
   (void)value;
-  strcat(ctx, key);
-  strcat(ctx, " ");
+  struct key_collection *out = ctx;
+  size_t len = strlen(key);
+  if (out->used >= sizeof(out->text) || len >= sizeof(out->text) - out->used - 1) {
+    out->overflow = true;
+    return false;
+  }
+  memcpy(out->text + out->used, key, len);
+  out->used += len;
+  out->text[out->used++] = ' ';
+  out->text[out->used] = '\0';
   return true;
 }
 
@@ -156,13 +165,13 @@ static void test_visit_order(void) {
   zlru_put(c, "c", VP(3));
   zlru_get(c, "a"); /* promote a: order b? no: c? order is b? recompute */
   /* MRU order now: a c b */
-  char acc[64] = "";
-  zlru_visit_mru_first(c, collect_key, acc);
-  CHECK(!strcmp(acc, "a c b "));
+  struct key_collection acc = {0};
+  zlru_visit_mru_first(c, collect_key, &acc);
+  CHECK(!acc.overflow && !strcmp(acc.text, "a c b "));
   /* The visit must not promote: same order again. */
-  memset(acc, 0, sizeof(acc));
-  zlru_visit_mru_first(c, collect_key, acc);
-  CHECK(!strcmp(acc, "a c b "));
+  memset(&acc, 0, sizeof(acc));
+  zlru_visit_mru_first(c, collect_key, &acc);
+  CHECK(!acc.overflow && !strcmp(acc.text, "a c b "));
   zlru_destroy(c);
 }
 

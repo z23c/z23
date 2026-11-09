@@ -4433,9 +4433,9 @@ receipt_invocation(int64_t ordinal, const char *phase, const char *result,
         .ordinal = ordinal,
         .phase = phase,
         .result = result,
-        /* The worst-case receipt passes INT64_MAX: saturate, since the product
-         * would overflow and wrap to a shorter value than the case means. */
-        .elapsed_ms = ordinal > INT64_MAX / 10 ? INT64_MAX : ordinal * 10,
+        /* Saturate either extreme before multiplication to avoid overflow. */
+        .elapsed_ms = ordinal > INT64_MAX / 10 ? INT64_MAX :
+                      ordinal < INT64_MIN / 10 ? INT64_MIN : ordinal * 10,
         .http_status = strcmp(result, "ok") == 0 ? 200 : 503,
         .prompt_tokens = prompt,
         .completion_tokens = completion,
@@ -5150,6 +5150,15 @@ static int receipt_chain_concurrency_check(const char *path,
 static int case_receipt_chain(void)
 {
     int failures = 0;
+    const int64_t ordinals[] = { INT64_MIN, INT64_MIN / 10 - 1, INT64_MIN / 10,
+        INT64_MIN / 10 + 1, -1, 0, INT64_MAX / 10, INT64_MAX / 10 + 1, INT64_MAX };
+    const int64_t expected[] = { INT64_MIN, INT64_MIN, (INT64_MIN / 10) * 10,
+        (INT64_MIN / 10 + 1) * 10, -10, 0, (INT64_MAX / 10) * 10, INT64_MAX, INT64_MAX };
+    for (size_t i = 0; i < sizeof(ordinals) / sizeof(ordinals[0]); i++) {
+        struct engine_receipt_invocation boundary = receipt_invocation(ordinals[i], "turn", "ok", 0, 0, 0, 0, 0, 0);
+        EN_CHECK("fixture elapsed time saturates outside signed multiplication range",
+                 boundary.elapsed_ms == expected[i]);
+    }
     char path[PATH_MAX];
     test_fmt_tmpdir(path, sizeof(path), "zcl_engine_receipt", "chainlog");
     (void)test_ensure_tmproot();
