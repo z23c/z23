@@ -52,6 +52,7 @@
 #include "util/supervisor.h"
 
 #include <string.h>
+#include <stdint.h>
 
 /* Name of the supervisor liveness contract registered by
  * net_supervisor_register() (engine/supervisors/src/net_supervisor.c). Not
@@ -227,11 +228,40 @@ static void push_tip_comparison_json(struct json_value *out,
     json_free(&tc);
 }
 
+static bool network_queue_unavailable(struct json_value *out, const char *why)
+{
+    struct json_value empty = {0};
+    return json_push_kv_str(out, "reason", why) &&
+        json_push_kv(out, "recv_bytes", &empty) && json_push_kv(out, "recv_cap_bytes", &empty) &&
+        json_push_kv(out, "send_bytes", &empty) && json_push_kv(out, "send_cap_bytes", &empty);
+}
+
+static bool network_queue_memory_json(struct json_value *out)
+{
+    size_t recv = net_recv_total_bytes(), recv_cap = net_recv_total_bytes_cap();
+    size_t send = net_send_total_bytes(), send_cap = net_send_total_bytes_cap();
+    bool wired = rpc_net_get_connman() != NULL;
+    bool bounded = (uint64_t)recv <= (uint64_t)INT64_MAX && (uint64_t)recv_cap <= (uint64_t)INT64_MAX &&
+                   (uint64_t)send <= (uint64_t)INT64_MAX && (uint64_t)send_cap <= (uint64_t)INT64_MAX;
+    bool available = wired && bounded;
+    json_set_object(out);
+    if (!json_push_kv_bool(out, "available", available) ||
+        !json_push_kv_str(out, "scope", "independently sampled process-wide receive message and send segment allocation bytes; excludes allocator overhead and kernel buffers"))
+        return false;
+    if (!available)
+        return network_queue_unavailable(out, wired ? "counter_out_of_range" : "node_not_in_process");
+    return json_push_kv_int(out, "recv_bytes", (int64_t)recv) &&
+        json_push_kv_int(out, "recv_cap_bytes", (int64_t)recv_cap) &&
+        json_push_kv_int(out, "send_bytes", (int64_t)send) &&
+        json_push_kv_int(out, "send_cap_bytes", (int64_t)send_cap);
+}
+
 bool network_dump_state_json(struct json_value *out, const char *key)
 {
-    (void)key;
     if (!out)
         return false;
+    if (key && strcmp(key, "queue_memory") == 0)
+        return network_queue_memory_json(out);
     json_set_object(out);
 
     struct connman *cm = rpc_net_get_connman();

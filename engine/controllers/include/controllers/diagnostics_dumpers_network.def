@@ -61,7 +61,7 @@
                  "eclipse_suspected signal + evidence (our modal vs network modal)",
                  "engine/services/src/network_crawler.c",
                  "tests/harness/src/test_network_crawler.c"),
-    DIAG_LOCAL("network", network_dump_state_json,
+    DIAG_ENTRY("network", network_dump_state_json,
                "network rollup: what the node knows about the ZClassic "
                "network in one call — connman {wired, connected_peers, "
                "outbound_healthy, addrman_size}, messaging (channel readiness "
@@ -77,7 +77,11 @@
                "tip_comparison (our height vs. peer-modal and "
                "network-modal height), and peer_lifecycle connect/"
                "handshake/timeout/reject counters. Rolls up existing "
-               "dumpers only — computes nothing new"),
+               "dumpers only — computes nothing new; key=queue_memory returns "
+               "bounded resident send/receive queue allocation and cap bytes",
+               "diagnostic", "service", "engine/controllers/src/diagnostics_network.c",
+               "in_process_snapshot", "cheap", "queue_memory", "queue_memory", NULL,
+               "tests/harness/src/test_syncdiag_rpc.c", true),
     DIAG_ENTRY("telemetry_ontology", telemetry_ontology_dump_state_json,
                "field-level MEANING for the network telemetry the other "
                "reports emit: per field, what it counts, a machine-evaluable "
