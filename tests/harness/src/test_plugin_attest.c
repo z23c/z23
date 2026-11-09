@@ -213,6 +213,30 @@ static int pat_case_duplicate(void)
     return failures;
 }
 
+static int pat_case_equivocation(void)
+{
+    int failures = 0;
+    struct pat_fx fx;
+    struct plugin_attest_report rep;
+    char dir[PATH_MAX], leaf[64];
+    TEST_CASE("the same builder key with a different root or image is equivocation") {
+        ASSERT(pat_open(&fx) && pat_pin(&fx, 2) && pat_dir(&fx, dir) && pat_leaf_of(&fx, 0, leaf));
+        ASSERT_EQ(pat_make(&fx, 0, fx.exe, "hello", PAT_ROOT_A, "gcc-14", dir), PLUGIN_ATTEST_OK);
+        ASSERT(pat_copy(dir, leaf, "aa-match" PLUGIN_ATTEST_SUFFIX));
+        ASSERT_EQ(pat_make(&fx, 0, fx.exe, "hello", PAT_ROOT_B, "gcc-14", dir), PLUGIN_ATTEST_OK);
+        ASSERT_EQ(pat_verify(&fx, dir, 1, NULL, &rep), PLUGIN_ATTEST_EQUIVOCATION);
+        ASSERT_STR_EQ(PAT_STATUS(PLUGIN_ATTEST_EQUIVOCATION), "PLUGIN_ATTEST_EQUIVOCATION");
+        pat_close(&fx);
+        ASSERT(pat_open(&fx) && pat_pin(&fx, 2) && pat_dir(&fx, dir) && pat_leaf_of(&fx, 0, leaf));
+        ASSERT_EQ(pat_make(&fx, 0, fx.exe, "hello", PAT_ROOT_A, "gcc-14", dir), PLUGIN_ATTEST_OK);
+        ASSERT(pat_copy(dir, leaf, "aa-match" PLUGIN_ATTEST_SUFFIX));
+        ASSERT_EQ(pat_make(&fx, 0, fx.other, "hello", PAT_ROOT_A, "gcc-14", dir), PLUGIN_ATTEST_OK);
+        ASSERT_EQ(pat_verify(&fx, dir, 1, NULL, &rep), PLUGIN_ATTEST_EQUIVOCATION);
+        pat_close(&fx);
+    } TEST_END
+    return failures;
+}
+
 static int pat_case_unpinned(void)
 {
     int failures = 0;
@@ -408,7 +432,7 @@ static int pat_case_status_text(void)
 {
     int failures = 0;
     TEST_CASE("every refusal has a distinct code and a next action") {
-        for (int s = PLUGIN_ATTEST_ARGUMENT; s <= PLUGIN_ATTEST_BELOW_THRESHOLD; s++) {
+        for (int s = PLUGIN_ATTEST_ARGUMENT; s <= PLUGIN_ATTEST_EQUIVOCATION; s++) {
             const char *code = plugin_attest_status_code((enum plugin_attest_status)s);
             const char *next = plugin_attest_status_next_action((enum plugin_attest_status)s);
             ASSERT(strncmp(code, "PLUGIN_ATTEST_", 14) == 0 && next[0] != '\0');
@@ -610,6 +634,7 @@ int test_plugin_attest(void)
     failures += pat_case_accept();
     failures += pat_case_below_threshold();
     failures += pat_case_duplicate();
+    failures += pat_case_equivocation();
     failures += pat_case_unpinned();
     failures += pat_case_hash();
     failures += pat_case_source_root();

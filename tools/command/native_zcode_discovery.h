@@ -65,6 +65,11 @@ typedef bool (*zcl_native_zcode_discovery_test_fn)(
 void zcl_native_zcode_discovery_test_backend(
     zcl_native_zcode_discovery_test_fn discover,
     zcl_native_zcode_discovery_test_fn route);
+typedef bool (*zcl_native_zcode_publish_test_fn)(
+    const char *kind, const char *namespace_name,
+    const char *semantic_root, const char *transport_root);
+void zcl_native_zcode_publish_test_backend(
+    zcl_native_zcode_publish_test_fn publish);
 #endif
 
 struct zcl_native_zcode_pointer_candidate {

@@ -1,3 +1,3 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Source-owned capability declaration for the plugin command handlers. */
-ZCL_MODULE_CAPABILITY("tools/command/native_plugin_command.c", CAP_FS_WRITE, "zcl_malloc reports an allocation failure on stderr; the handlers write no file themselves")
+ZCL_MODULE_CAPABILITY("tools/command/native_plugin_command.c", CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK, "plugin stop signals the registered supervisor and waits on a bounded sleep; the store writes the run record")

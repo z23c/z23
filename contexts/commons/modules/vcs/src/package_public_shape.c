@@ -22,6 +22,7 @@
 #include "vcs/zcode_task_context.h"
 #include "vcs/zcode_work_context.h"
 #include "vcs/zcode_work_output.h"
+#include "plugin/plugin_store.h"
 
 #include <dirent.h>
 #if !defined(_WIN32)
@@ -52,6 +53,7 @@
 /* The closure walk is bounded by the same node budget the dependency lock
  * resolver uses, so a package that can be locked can also be classified. */
 #define SHAPE_MAX_CLOSURE VCS_PACKAGE_LOCK_MAX_NODES
+#define SHAPE_PLUGIN_TEXT_MAX 65536u
 
 const char *vcs_package_public_shape_string(
     enum vcs_package_public_shape shape)
@@ -67,6 +69,7 @@ const char *vcs_package_public_shape_string(
     case VCS_PACKAGE_PUBLIC_WORK_OUTPUT: return "work-output";
     case VCS_PACKAGE_PUBLIC_TASK_CONTEXT: return "task-context";
     case VCS_PACKAGE_PUBLIC_FASTOBJ_CARRIER: return "fastobj-carrier";
+    case VCS_PACKAGE_PUBLIC_PLUGIN: return "plugin";
     }
     return "unknown";
 }
@@ -477,10 +480,137 @@ static bool shape_is_fastobj_carrier(const struct vcs_package_manifest *m)
     return true;
 }
 
+/* Dispatch for the plugin shape: any *.plugin.json member selects it. */
+static bool shape_plugin_dispatch(const struct vcs_package_manifest *m)
+{
+    for (size_t i = 0; i < m->count; i++) {
+        size_t n = strlen(m->files[i].path);
+        if (n > 12 && strcmp(m->files[i].path + n - 12, ".plugin.json") == 0)
+            return true;
+    }
+    return false;
+}
+
+/* One flat NAME.plugin.json, or a refusal rule. */
+static bool shape_plugin_name(const struct vcs_package_manifest *m,
+                              long *manifest_index, char *name,
+                              const char **rule_out)
+{
+    *manifest_index = -1;
+    *rule_out = "plugin-set-not-flat";
+    for (size_t i = 0; i < m->count; i++) {
+        const char *path = m->files[i].path;
+        size_t n = strlen(path);
+        if (strchr(path, '/') != NULL)
+            return false;
+        if (n <= 12 || strcmp(path + n - 12, ".plugin.json") != 0)
+            continue;
+        if (*manifest_index >= 0) {
+            *rule_out = "plugin-manifest-ambiguous";
+            return false;
+        }
+        if (n - 12 > PLUGIN_NAME_MAX) {
+            *rule_out = "plugin-name-invalid";
+            return false;
+        }
+        *manifest_index = (long)i;
+        memcpy(name, path, n - 12);
+        name[n - 12] = '\0';
+    }
+    return true;
+}
+
+/* The admission member is the publish act. Exact bytes, or the set is not
+ * a public plugin: a dist replica holds the four plugin files and still
+ * lacks this member, so it stays refused until that node publishes. */
+static bool shape_plugin_admission(struct vcs_package_store *store,
+                                   const uint8_t root[32],
+                                   const struct vcs_package_manifest *m,
+                                   const char **rule_out)
+{
+    static const char text[] = VCS_PACKAGE_PLUGIN_ADMISSION_TEXT;
+    long index = shape_find(m, VCS_PACKAGE_PLUGIN_ADMISSION_LEAF);
+    if (index < 0) {
+        *rule_out = "plugin-admission-missing";
+        return false;
+    }
+    size_t len = 0;
+    uint8_t *bytes = shape_read_file(store, root, m, (size_t)index,
+                                     SHAPE_PLUGIN_TEXT_MAX, &len);
+    bool ok = bytes && len == sizeof(text) - 1u &&
+              memcmp(bytes, text, len) == 0;
+    free(bytes);
+    if (!ok)
+        *rule_out = "plugin-admission-mismatch";
+    return ok;
+}
+
+/* Signature-against-named-key plus allowlisted LICENSE. The signed
+ * exe_sha3 binding is the receiver's fetch check, not this gate. */
+static bool shape_plugin(struct vcs_package_store *store,
+                         const uint8_t root[32],
+                         const struct vcs_package_manifest *m,
+                         const char **rule_out)
+{
+    if (!shape_plugin_admission(store, root, m, rule_out))
+        return false;
+    long manifest_index = -1;
+    char name[PLUGIN_NAME_MAX + 1];
+    if (!shape_plugin_name(m, &manifest_index, name, rule_out))
+        return false;
+    char sig_leaf[PLUGIN_NAME_MAX + 16];
+    int w = snprintf(sig_leaf, sizeof(sig_leaf), "%s.plugin.sig", name);
+    long sig_index =
+        w > 0 && (size_t)w < sizeof(sig_leaf) ? shape_find(m, sig_leaf) : -1;
+    long license_index = shape_find(m, VCS_PACKAGE_PUBLISH_LICENSE_PATH);
+    if (manifest_index < 0 || sig_index < 0 || license_index < 0 ||
+        shape_find(m, name) < 0) {
+        *rule_out = "plugin-set-incomplete";
+        return false;
+    }
+    size_t license_len = 0;
+    uint8_t *license_text =
+        shape_read_file(store, root, m, (size_t)license_index,
+                        VCS_PACKAGE_RELEASE_LICENSE_TEXT_MAX_BYTES,
+                        &license_len);
+    bool license_ok = license_text &&
+        vcs_package_release_license_text_allowed(license_text, license_len);
+    free(license_text);
+    if (!license_ok) {
+        *rule_out = "plugin-license-not-allowlisted";
+        return false;
+    }
+    size_t manifest_len = 0, sig_len = 0;
+    uint8_t *manifest =
+        shape_read_file(store, root, m, (size_t)manifest_index,
+                        SHAPE_PLUGIN_TEXT_MAX, &manifest_len);
+    uint8_t *sig = shape_read_file(store, root, m, (size_t)sig_index,
+                                   SHAPE_PLUGIN_TEXT_MAX, &sig_len);
+    struct plugin_manifest parsed;
+    enum plugin_status st = PLUGIN_ERR_MANIFEST_INVALID;
+    if (manifest && sig)
+        st = plugin_verify_manifest_self((const char *)manifest, manifest_len,
+                                         (const char *)sig, sig_len, &parsed,
+                                         NULL);
+    free(manifest);
+    free(sig);
+    if (st != PLUGIN_OK) {
+        *rule_out = "plugin-signature-unverified";
+        return false;
+    }
+    if (strcmp(parsed.name, name) != 0) {
+        *rule_out = "plugin-name-mismatch";
+        return false;
+    }
+    return true;
+}
+
 /* True when the manifest members name a shape ahead of the signed-release
  * scan: transport, source bundle, blob, bundle, work context, work output,
- * task context, or fastobj carrier. A failed proof still claims the root,
- * so the release scan must not replace that verdict. */
+ * task context or a fastobj carrier. A failed proof still claims the root,
+ * so the release scan must not replace that verdict. A flat plugin set is
+ * not claimed here: a release-signed plugin stays a release, and an
+ * unsigned plugin set is classified only after that scan fails. */
 static bool shape_eval_manifest_shape(struct vcs_package_store *store,
                                       const uint8_t root[32],
                                       const struct vcs_package_manifest *m,
@@ -527,6 +657,34 @@ static bool shape_eval_manifest_shape(struct vcs_package_store *store,
     return false;
 }
 
+/* A root that no earlier shape claimed. A release envelope wins, so a
+ * release-signed plugin stays a release. Otherwise a flat plugin set that
+ * carries the publish admission is a public plugin; anything else names
+ * the missing release. */
+static void shape_eval_unclaimed(struct vcs_package_store *store,
+                                 const uint8_t root[32],
+                                 const struct vcs_package_manifest *m,
+                                 struct shape_eval *out)
+{
+    char license[VCS_PACKAGE_RELEASE_LICENSE_MAX + 1u];
+    if (!shape_release_signs(store, root, license)) {
+        if (!shape_plugin_dispatch(m)) {
+            out->rule = "no-verified-release";
+            return;
+        }
+        out->rule = "plugin-set-invalid";
+        if (shape_plugin(store, root, m, &out->rule))
+            out->shape = VCS_PACKAGE_PUBLIC_PLUGIN;
+        return;
+    }
+    out->rule = "license-text-missing";
+    if (shape_licensed_tail(store, root, m, license,
+                            VCS_PACKAGE_PUBLISH_LICENSE_PATH,
+                            VCS_PACKAGE_DEPS_META_PATH, &out->deps,
+                            &out->rule))
+        out->shape = VCS_PACKAGE_PUBLIC_RELEASE;
+}
+
 /* Classify one root on its own bytes. Never consults another package, so
  * the closure walk below can call it per node without recursing. */
 static void shape_eval_local(struct vcs_package_store *store,
@@ -563,19 +721,8 @@ static void shape_eval_local(struct vcs_package_store *store,
         return;
     }
 
-    if (!shape_eval_manifest_shape(store, root, &m, out)) {
-        char license[VCS_PACKAGE_RELEASE_LICENSE_MAX + 1u];
-        if (!shape_release_signs(store, root, license)) {
-            out->rule = "no-verified-release";
-        } else {
-            out->rule = "license-text-missing";
-            if (shape_licensed_tail(store, root, &m, license,
-                                    VCS_PACKAGE_PUBLISH_LICENSE_PATH,
-                                    VCS_PACKAGE_DEPS_META_PATH, &out->deps,
-                                    &out->rule))
-                out->shape = VCS_PACKAGE_PUBLIC_RELEASE;
-        }
-    }
+    if (!shape_eval_manifest_shape(store, root, &m, out))
+        shape_eval_unclaimed(store, root, &m, out);
     if (out->shape != VCS_PACKAGE_PUBLIC_REFUSED)
         out->rule = vcs_package_public_shape_string(out->shape);
     vcs_package_manifest_free(&m);

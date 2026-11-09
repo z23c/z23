@@ -531,7 +531,7 @@ enum plugin_status plugin_store_install(const char *root,
     return ps_install_locked(root, plugdir, stem, &src, keys_file, out, already_present);
 }
 
-static enum plugin_status ps_plugin_dir(const char *root, const char *name,
+enum plugin_status ps_plugin_dir(const char *root, const char *name,
                                         char *plugdir, size_t cap)
 {
     if (!root || !plugin_name_valid(name) ||
@@ -1153,7 +1153,7 @@ static bool ps_keys_has(const char *bytes, size_t len, const char *key)
 }
 
 /* Replaces path through an exclusive sibling and a rename; owner-only file. */
-static bool ps_write_private(const char *path, const char *data, size_t len)
+bool ps_write_private(const char *path, const char *data, size_t len)
 {
 #if defined(_WIN32)
     return platform_directory_transaction_write_atomic(path, data, len);

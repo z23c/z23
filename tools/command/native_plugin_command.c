@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: plugin.pack, plugin.keygen, plugin.publisher, plugin.install, plugin.list, plugin.status, plugin.switch, plugin.rollback,
- *          plugin.run and plugin.call — the signed plugin store under ~/.z23/plugins and the
+ *          plugin.uninstall, plugin.run, plugin.stop and plugin.call — the signed plugin store under ~/.z23/plugins and the
  *          confined supervisor (run) and one-shot runner (call) for one installed plugin. Every refusal
  *          carries a stable PLUGIN_* code and the command that resolves it.
  *          The daemon is not contacted. */
@@ -12,16 +12,22 @@
 #include "native_plugin_common.h"
 
 #include "json/json.h"
+#include "platform/os_proc.h"
+#include "platform/time_compat.h"
 #include "plugin/plugin_pack.h"
 #include "plugin/plugin_attest.h"
 #include "plugin/plugin_run.h"
 #include "plugin/plugin_store.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 static void plg_refuse(struct zcl_command_reply *reply, enum plugin_status st,
                        const char *what, const char *evidence)
@@ -530,6 +536,33 @@ void zcl_native_handle_plugin_rollback(const struct zcl_command_request *request
     reply->error.mutated = true;
 }
 
+void zcl_native_handle_plugin_uninstall(const struct zcl_command_request *request,
+                                        struct zcl_command_reply *reply)
+{
+    char root[PATH_MAX];
+    if (!plg_begin(request, reply, "uninstall", root, sizeof(root)))
+        return;
+    const char *name = plg_str(request, "name");
+    const char *generation = plg_str(request, "generation");
+    struct plugin_uninstall_report report;
+    enum plugin_status st = plugin_store_uninstall(root, name, generation, &report);
+    if (st != PLUGIN_OK) {
+        plg_refuse(reply, st, "uninstall", name);
+        return;
+    }
+    json_set_object(&reply->data);
+    (void)json_push_kv_str(&reply->data, "schema", "zcl.plugin_uninstall.v1");
+    (void)json_push_kv_str(&reply->data, "name", name);
+    if (generation)
+        (void)json_push_kv_str(&reply->data, "generation", generation);
+    (void)json_push_kv_int(&reply->data, "generations_removed",
+                           (int64_t)report.generations_removed);
+    (void)json_push_kv_bool(&reply->data, "current_cleared", report.current_cleared);
+    (void)json_push_kv_bool(&reply->data, "last_good_cleared", report.last_good_cleared);
+    (void)json_push_kv_bool(&reply->data, "state_preserved", report.state_preserved);
+    reply->error.mutated = true;
+}
+
 static volatile sig_atomic_t g_plg_stop;
 static volatile sig_atomic_t g_plg_reload;
 
@@ -697,6 +730,20 @@ void zcl_native_handle_plugin_run(const struct zcl_command_request *request,
             plg_run_game_hint(reply, root, name);
         return;
     }
+    uint64_t self = os_proc_current_pid();
+    uint64_t token = 0;
+    struct plugin_run_info started;
+    plugin_run_info_get(run, &started);
+    bool token_ok = os_proc_pid_start_token(self, &token);
+    enum plugin_status rst = token_ok
+        ? plugin_store_run_register(root, name, self, token, started.generation)
+        : PLUGIN_ERR_IO;
+    if (rst != PLUGIN_OK) {
+        plg_refuse(reply, rst, "run",
+                   token_ok ? name : "cannot establish this process start token");
+        plugin_run_close(run);
+        return;
+    }
     struct plg_handlers saved;
     plg_signals_install(&saved);
     st = plugin_run_loop(run, &g_plg_stop, &g_plg_reload, seconds * 1000u);
@@ -704,12 +751,78 @@ void zcl_native_handle_plugin_run(const struct zcl_command_request *request,
     struct plugin_run_info info;
     plugin_run_info_get(run, &info);
     plugin_run_close(run);
+    (void)plugin_store_run_unregister(root, name, self);
     if (st != PLUGIN_RUN_OK) {
         bool named = st == PLUGIN_RUN_ERR_SPAWN || st == PLUGIN_RUN_ERR_CAPABILITY;
         plg_run_refuse(reply, named ? st : PLUGIN_RUN_ERR_FAILED, PLUGIN_OK, info.detail);
         return;
     }
     plg_run_report(reply, name, &info, true);
+}
+
+#if !defined(_WIN32)
+/* True once pid is no longer running, within a 5s bound. */
+static bool plg_stop_exited(uint64_t pid)
+{
+    for (int waited = 0; waited <= 5000; waited += 20) {
+        if (os_proc_pid_liveness(pid) != OS_PROC_LIVENESS_RUNNING)
+            return true;
+        if (waited == 5000)
+            return false;
+        platform_sleep_ms(20);
+    }
+    return false;
+}
+#endif
+
+void zcl_native_handle_plugin_stop(const struct zcl_command_request *request,
+                                   struct zcl_command_reply *reply)
+{
+    char root[PATH_MAX];
+    if (!plg_begin(request, reply, "stop", root, sizeof(root)))
+        return;
+    const char *name = plg_str(request, "name");
+    struct plugin_run_registration reg;
+    bool registered = false, live = false;
+    enum plugin_status st =
+        plugin_store_run_query(root, name, &reg, &registered, &live);
+    if (st != PLUGIN_OK) {
+        plg_refuse(reply, st, "stop", name);
+        return;
+    }
+    bool stopped = false;
+    if (registered && live) {
+#if defined(_WIN32)
+        plg_refuse(reply, PLUGIN_ERR_BUSY, "stop",
+                   "a supervisor is registered but stop signals are not available on this platform");
+        return;
+#else
+        int kr = kill((pid_t)reg.pid, SIGTERM);
+        if (kr != 0 && errno != ESRCH) {
+            plg_refuse(reply, PLUGIN_ERR_IO, "stop", name);
+            return;
+        }
+        if (kr == 0) {
+            if (!plg_stop_exited(reg.pid)) {
+                plg_refuse(reply, PLUGIN_ERR_BUSY, "stop",
+                           "supervisor did not exit after SIGTERM");
+                return;
+            }
+            stopped = true;
+        }
+#endif
+    }
+    if (registered)
+        (void)plugin_store_run_unregister(root, name, reg.pid);
+    json_set_object(&reply->data);
+    (void)json_push_kv_str(&reply->data, "schema", "zcl.plugin_stop.v1");
+    (void)json_push_kv_str(&reply->data, "name", name);
+    (void)json_push_kv_bool(&reply->data, "stopped", stopped);
+    if (registered) {
+        (void)json_push_kv_int(&reply->data, "pid", (int64_t)reg.pid);
+        (void)json_push_kv_str(&reply->data, "generation", reg.generation);
+    }
+    reply->error.mutated = registered || stopped;
 }
 
 /* ── plugin.call: one-shot interface 2 ─────────────────────────────── */

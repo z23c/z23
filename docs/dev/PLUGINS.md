@@ -188,11 +188,15 @@ z23 plugin list
 z23 plugin status hello                    # inspect one plugin without verification
 z23 plugin switch hello <128-hex generation>
 z23 plugin rollback hello
+z23 plugin uninstall hello [128-hex generation]
+z23 plugin stop hello                      # signal only the registered run
 z23 plugin run hello [seconds]             # supervise the current generation
 z23 plugin call upper --stdin=abc          # run an interface 2 plugin once
 z23 plugin dev ./hello                     # pack, install and switch in one step
 z23 plugin keygen ./publisher.key          # publisher: create a signing key
 z23 plugin pack ./hello --name=hello --version=1.0.0 --key=./publisher.key
+z23 plugin publish --dir=./dist --datadir=/tmp/plugin-swap
+z23 plugin fetch --root=<64-hex> --dir=./received --datadir=/tmp/plugin-swap
 ```
 
 ### Development loop: `plugin dev`
@@ -236,9 +240,17 @@ functions directly; it does not spawn the CLI and does not send the signal.
   `current`, then points `current` at the generation. Switching to the
   generation that is already current changes nothing.
 - `rollback` verifies the `last-good` generation again and points `current` at
-  it.
+  it. With no recorded last-good the refusal is `PLUGIN_NO_LAST_GOOD`.
+- `uninstall` removes one generation, or the whole plugin when no generation
+  is named. A generation that is current or last-good is
+  `PLUGIN_UNINSTALL_ACTIVE`. A live supervisor registration is `PLUGIN_BUSY`.
+  An entry the store did not write is `PLUGIN_UNINSTALL_LAYOUT`, and nothing
+  is removed. Plugin `data` and `state` stay.
+- `stop` signals only the process whose pid and start token match the
+  registration. A token that does not match is refused and that process is
+  left running.
 
-`install`, `switch` and `rollback` are owner commands and are never accepted
+`install`, `switch`, `rollback`, `uninstall` and `stop` are owner commands and are never accepted
 from a mesh peer. Their authority is the publisher signature checked against
 the owner's publisher key file on every install, switch and rollback; the node daemon
 state is untouched.
@@ -474,76 +486,96 @@ z23 plugin call upper --stdin=abc          # run.stdout is "ABC"
 
 ## Distributing a plugin over the package swarm
 
-`plugin publish` files an installed or packed generation in the datadir's
-package store as a signed content.v2 root; a hosting node serves it; on the
-receiver `plugin fetch` checks the delivered root out of the receiver's store
-and installs it as a new generation. Neither command switches `current` or runs
-anything, and both are never accepted from a mesh peer. See
-[PLUGIN_P2P_DIST_2026-10-20.md](../experiments/PLUGIN_P2P_DIST_2026-10-20.md).
+`plugin publish` verifies a packed directory (`NAME`, `NAME.plugin.json`,
+`NAME.plugin.sig`, `LICENSE`) and admits it as one content.v2 root in the
+datadir package store, then pins that root. It also writes a flat
+`z23-plugin-admission` member so a replica that holds the chunks can host the
+set. It does not install the plugin and does not switch `current`. With
+`announce` set, an unreachable overlay leaves the pin in place and the reply
+is `PLUGIN_ANNOUNCE_INCOMPLETE`.
+
+`plugin fetch` downloads that root, checks the tree out, and verifies the
+signature. It never installs, switches, or runs. The receiver installs only
+after listing the publisher key and running `plugin install` on the checked-out
+manifest. Attestation is the same: it records a claim and does not activate.
 
 ```sh
-z23 plugin publish upper --datadir=/tmp/fixture-dd --license-file=./LICENSE --spdx=MIT --release-key=./package.key --sequence=1
-z23 plugin fetch --datadir=/tmp/fixture-dd --root=<64hex> --name=upper [--allow-downgrade]
+z23 plugin publish --dir=./dist --datadir=/tmp/plugin-swap
+z23 plugin fetch --root=<64-hex> --dir=./received --datadir=/tmp/plugin-swap
+z23 plugin publisher <64-hex-public-key>
+z23 plugin install ./received/NAME.plugin.json
 ```
 
-`fetch` refuses, each with its own code: `PLUGIN_DIST_NOT_FETCHED` (root not in
-the datadir yet; a resumable download is recorded), `PLUGIN_DIST_ROOT_MISMATCH`,
-`PLUGIN_DIST_TRUNCATED`, `PLUGIN_DIST_SHAPE`, `PLUGIN_DIST_PUBLISHER_UNPINNED`
-(the signing key is not already in your `publisher_keys`),
-`PLUGIN_DIST_IMAGE_HASH` and `PLUGIN_DIST_DOWNGRADE` (a version lower than the
-installed current one, or one that cannot be compared; only the owner flag
-`--allow-downgrade` permits it). `publish` refuses `PLUGIN_DIST_SOURCE`,
-`PLUGIN_DIST_LICENSE`, `PLUGIN_DIST_RELEASE` and `PLUGIN_DIST_STORE`.
+`fetch` refuses by name, including `PLUGIN_FETCH_BAD_ROOT`,
+`PLUGIN_FETCH_NO_STORE`, `PLUGIN_FETCH_SLOTS_FULL` (the fetch table is full),
+`PLUGIN_FETCH_RECORD_IO` (the downloads path cannot persist, and no partial
+record is kept), `PLUGIN_FETCH_REFUSED`, `PLUGIN_PROVIDER_DISCOVERY_FAILED`
+(no provider routed the root), `PLUGIN_FETCH_INCOMPLETE`,
+`PLUGIN_FETCH_CORRUPT` (a bad chunk was quarantined; run fetch again to
+repair), `PLUGIN_FETCH_DESTINATION`, `PLUGIN_FETCH_LAYOUT`, and the `PLUGIN_*`
+signature and hash codes. `publish` refuses `PLUGIN_PUBLISH_LAYOUT`,
+`PLUGIN_PUBLISH_LICENSE`, `PLUGIN_PUBLISH_NO_STORE`, `PLUGIN_PUBLISH_STORE`,
+and the `PLUGIN_*` verification codes.
 
-`PLUGIN_DIST_TOO_LARGE` refuses an image over 48 MiB. On a running node use
-`z23 plugin fetch_remote --root=<64hex> --name=upper --wait=60`: the node fetches
-from its swarm peers (or `--peer_id=N`) and installs through the same checks as a
-new generation, with at most two jobs, a byte cap (`--max-bytes`) and a deadline
-(`--timeout`); it never stops the node and never switches.
+On a running node, `z23 plugin fetch_remote --root=<64hex> --name=upper --wait=60`
+asks that node to fetch from its peers and install a new generation. Unlike
+`plugin fetch`, it does install. It never switches `current` and never runs
+the plugin. A dist image over 48 MiB is still `PLUGIN_DIST_TOO_LARGE`, and an
+unpinned publisher key on that install path is `PLUGIN_DIST_PUBLISHER_UNPINNED`.
+The release-envelope relay (a chunk-only copy with no admission member) stays
+refused and is covered by `make t-fast ONLY=plugin_dist`. See
+[PLUGIN_P2P_DIST_2026-10-20.md](../experiments/PLUGIN_P2P_DIST_2026-10-20.md).
 
 ## Publish a plugin to the Z23 swarm
 
 Every step is local or a read, and none pays a fee, registers a name or ZID, or
 touches a wallet. Do not use `zcode publish` for this: it is the reward-address
-path. Registered test: `make t-fast ONLY=plugin_dist` (publisher serves a third
-node over the real swarm engines; a fetch-only node is refused by rule
-`no-verified-release`).
+path. Registered tests: `make t-fast ONLY=plugin_journey` (promote, transfer,
+call, pin-before-install, resident ping, replica fetch) and
+`make t-fast ONLY=plugin_dist` (a release-envelope publisher serves a third
+node; a chunk-only copy with no admission member is refused).
 
-1. Make two fresh key files, never real ones. The first signs the plugin, the
-   second signs the swarm release (32 bytes, mode 0600). Pass paths only; no
-   key bytes ever go in argv.
+1. Make one fresh publisher key, never a real one (32 bytes, mode 0600). Pass
+   the path only; no key bytes ever go in argv.
    ```sh
    z23 plugin keygen ./publisher.key      # prints the plugin public key (64 hex)
-   z23 plugin keygen ./release.key
    ```
 2. Pack a built C23 executable (needs a license file with the real text of its
    SPDX id, for example MIT):
    ```sh
    z23 plugin pack ./hello --name=hello --version=1.0.0 --key=./publisher.key --cap=fs.read,clock --dir=./dist
    ```
-3. Publish on the hosting node's datadir (run on each node that should host it;
-   a node that only fetched the bytes holds no verified release and refuses to
-   re-serve them):
+3. Publish on the hosting node's datadir. The same packed directory names the
+   same root. The admission member travels with the chunks, so a receiver that
+   holds them can host the set:
    ```sh
-   z23 plugin publish hello --datadir=DD --dir=./dist --license-file=./LICENSE --spdx=MIT --release-key=./release.key --sequence=1
+   z23 plugin publish --dir=./dist --datadir=DD
    ```
-   The reply carries `root` (64 hex). A reused `--sequence` with another root
-   is refused as publisher-equivocation: bump it for each new version.
+   The reply carries `package_root` (64 hex). With `announce` true, an
+   unreachable overlay leaves that pin standing and returns
+   `PLUGIN_ANNOUNCE_INCOMPLETE`.
 4. Check the host serves it (read-only, on the running hosting node started
    with `-packagehost=1`):
    ```sh
    z23 dumpstate zcode_store <root>
    z23 dumpstate zcode_swarm
    ```
-5. On the fetching node, trust the publisher key, then fetch:
+5. On the fetching node, fetch is inert. It checks the bytes out and verifies
+   them. It does not install:
+   ```sh
+   z23 plugin fetch --root=<root> --dir=./received --datadir=DD
+   ```
+   A running node can instead install a new generation, still without switching
+   or running it, once the publisher key is listed:
    ```sh
    z23 plugin publisher <64-hex-plugin-public-key>
    z23 plugin fetch_remote --root=<root> --name=hello --wait=60
-   z23 dumpstate zcode_store <root>      # poll until complete
    ```
-   This installs a new generation and never switches to it or runs it.
-6. Install check and switch (the owner's explicit step):
+6. Install only after the publisher key is pinned, then switch (the owner's
+   explicit steps). Fetch alone never does this:
    ```sh
+   z23 plugin publisher <64-hex-plugin-public-key>
+   z23 plugin install ./received/hello.plugin.json
    z23 plugin list
    z23 plugin switch hello <128-hex generation>
    ```

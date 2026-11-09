@@ -81,6 +81,8 @@ static const struct {
         "builders attested different source roots: rebuild from one agreed source package root" },
     [PLUGIN_ATTEST_BELOW_THRESHOLD] = { "PLUGIN_ATTEST_BELOW_THRESHOLD",
         "collect attestations from more distinct pinned builders" },
+    [PLUGIN_ATTEST_EQUIVOCATION] = { "PLUGIN_ATTEST_EQUIVOCATION",
+        "one builder key named two byte-sets: discard the divergent attestation and keep a single root and image" },
 };
 
 const char *plugin_attest_status_code(enum plugin_attest_status status)

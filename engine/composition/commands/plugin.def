@@ -183,6 +183,67 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_plugin_rollback)
 
 ZCL_COMMAND_READY_COMMAND(
+    "plugin.uninstall", "plugin", "",
+    "Remove a plugin generation or the plugin",
+    "Removes exactly the files the store owns, under the plugin mutation "
+    "lock. With generation (128 hex, from plugin list), removes that one "
+    "generation's directory (NAME, NAME.plugin.json, NAME.plugin.sig) — "
+    "refused with PLUGIN_UNINSTALL_ACTIVE while the generation is current "
+    "or last-good, so a switch or rollback never loses the bytes its "
+    "pointers name. Without generation, removes the whole plugin: every "
+    "generation, the current and last-good pointers, a stale supervisor "
+    "registration and, when nothing else "
+    "remains, the plugin directory — a NAME/data state directory is never "
+    "touched; with state present the directory stays and the reply reports "
+    "state_preserved. Any other entry the store never wrote — anywhere under "
+    "the plugin "
+    "directory — refuses the operation with PLUGIN_UNINSTALL_LAYOUT before "
+    "a byte is removed: uninstall names exact owned files and never deletes "
+    "a stranger's data. A live registered supervisor refuses PLUGIN_BUSY — "
+    "stop the run first. Other refusals: "
+    "PLUGIN_ARGUMENT, PLUGIN_NOT_INSTALLED, PLUGIN_NO_GENERATION "
+    "and PLUGIN_IO.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "plugin,uninstall,remove,generation,cleanup",
+    "zcl.plugin_uninstall.input.v1", "zcl.plugin_uninstall.v1",
+    "name,generation", "name",
+    "z23 plugin uninstall upper",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_plugin_uninstall)
+
+ZCL_COMMAND_READY_COMMAND(
+    "plugin.stop", "plugin", "",
+    "Stop a plugin's supervised run",
+    "Finds the supervisor z23 plugin run registered for NAME in the store "
+    "and sends it SIGTERM; the supervisor stops its confined child and "
+    "exits, and stop waits a bounded time for that. A registration counts "
+    "as live only when the recorded pid is running and its process start "
+    "token matches the record, so a pid the kernel reused is never "
+    "signaled: stop never kills a stranger's process. No record, or a "
+    "record whose supervisor is already gone, is a successful stopped:false "
+    "with the stale record removed. A supervisor that ignores SIGTERM "
+    "refuses PLUGIN_BUSY after the wait. Other refusals: PLUGIN_ARGUMENT, "
+    "PLUGIN_NOT_INSTALLED, PLUGIN_IO and PLUGIN_UNINSTALL_LAYOUT (a NAME/run "
+    "the store never wrote). The daemon is not contacted.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "plugin,stop,supervisor,sigterm,signal",
+    "zcl.plugin_stop.input.v1", "zcl.plugin_stop.v1",
+    "name", "name",
+    "z23 plugin stop upper",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_plugin_stop)
+
+ZCL_COMMAND_READY_COMMAND(
     "plugin.dev", "plugin", "",
     "Pack, install and switch to a plugin in one step for development",
     "Runs the developer loop for the executable DIR/NAME: dir is the DIRECTORY "
@@ -323,21 +384,36 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.publish", "plugin", "",
-    "Put an installed or packed plugin generation in the package store as a root",
-    "Takes a plugin generation (manifest, detached signature and image, from "
-    "the installed store or a packed dir), refuses one whose image does not "
-    "match its manifest, and files it with a LICENSE as a four-file content.v2 "
-    "package root, signed as a release by a package key (spdx defaults to the "
-    "license the LICENSE text matches: MIT, Apache-2.0, BSD-2-Clause, "
-    "BSD-3-Clause, ISC, Zlib or 0BSD; other text is refused naming spdx), in this datadir's "
-    "package store. Replies with the root and the signed-manifest SHA3-512 (the "
-    "generation id). A hosting node on the datadir then serves the root; "
-    "nothing is sent by this command and nothing is installed.",
+    "Pin a packed plugin in the package store",
+    "Verifies the pack output directory (dir) self-consistently first: "
+    "exactly one NAME.plugin.json parses as schema z23.plugin.v1, its "
+    "detached NAME.plugin.sig verifies under the publisher key the signature "
+    "names, the manifest name matches its file name, the NAME executable "
+    "matches the signed SHA3-512 and LICENSE sits beside them. Then it "
+    "admits the flat directory as one ordinary content.v2 package into "
+    "<datadir>/zcode (manifest plus SHA3-verified chunks, cap 64 MiB) and "
+    "pins the root so quota pressure never evicts it, and reports "
+    "package_root, the generation (signed-manifest digest) and the claimed "
+    "publisher key. A node running -packagehost=1 serves the root to the "
+    "swarm from that store. Publish vouches for nothing beyond byte "
+    "coherence: every receiver re-verifies the signature, and install still "
+    "requires the receiver to list the publisher key. Refusals: "
+    "PLUGIN_PUBLISH_LAYOUT (not the flat four-file set), "
+    "PLUGIN_PUBLISH_LICENSE (LICENSE is not the exact text of an "
+    "allowlisted permissive license, so no node may serve the root), "
+    "PLUGIN_PUBLISH_NO_STORE, PLUGIN_PUBLISH_STORE (the store admission "
+    "rule that refused) and the PLUGIN_* verification codes. Idempotent: "
+    "the same directory names the same root. With announce true the command "
+    "then publishes the POINTER and PROVIDER records naming the root into "
+    "the zclassic23.plugin DHT namespace through this node's running overlay "
+    "service (one-hour records, renewed while the node runs); when the "
+    "overlay is unreachable the publish stands but the reply refuses with "
+    "PLUGIN_ANNOUNCE_INCOMPLETE and names the retry.",
     ZCL_COMMAND_RESULT_BUDGET,
-    "plugin,publish,p2p,package,swarm,root,release,distribution",
+    "plugin,publish,package,swarm,cas,sign,distribute,root",
     "zcl.plugin_publish.input.v1", "zcl.plugin_publish.v1",
-    "name,generation,dir,license-file,spdx,release-key,sequence,datadir", "name",
-    "z23 plugin publish upper --datadir=/tmp/fixture-dd --license-file=./LICENSE --release-key=./package.key --sequence=1",
+    "dir,datadir,announce", "dir",
+    "z23 plugin publish --dir=./dist --datadir=/tmp/plugin-swap",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
@@ -348,38 +424,57 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.fetch", "plugin", "",
-    "Install a plugin generation the package swarm delivered, as a new generation",
-    "Checks a package root out of this datadir's package store (delivered by the "
-    "hosting node's swarm) and refuses, by name, a root that is not the "
-    "requested one, a partial transfer, a package that is not exactly a plugin "
-    "generation, a signing key not already in publisher_keys, an image that "
-    "differs from the signed sha3_512, and a version lower than the installed "
-    "current generation (unless allow-downgrade, an owner flag). Then installs "
-    "it through the ordinary install path as a NEW generation. It never "
-    "switches, never changes current and never runs the plugin. A root not yet "
-    "in the datadir records a resumable download for the hosting node.",
+    "Fetch a plugin by root without installing",
+    "Starts (or idempotently resumes) a swarm download of one package root "
+    "(root, 64 hex, from plugin publish or a verified plugin index entry): "
+    "against a running -packagehost=1 node this drives the live engine "
+    "(live:true); a one-shot CLI persists the resumable record under "
+    "<datadir>/zcode/downloads and reports live:false. Until the store "
+    "holds every chunk the reply reports complete:false with the download "
+    "state; re-run to poll. Once complete, the verified tree is checked out "
+    "beneath the absent destination dir, the plugin set is verified under "
+    "the key its signature names (manifest parses, signature verifies, "
+    "executable matches the signed SHA3-512, LICENSE present), and "
+    "publisher_status reports pinned when that key is listed in "
+    "~/.z23/plugins/publisher_keys. A one-shot CLI given a namespace "
+    "(zclassic23.plugin) instead asks the running node to route the root to "
+    "authenticated DHT providers and start the bounded fetch in-process, "
+    "exactly like zcode.package.fetch; the reply then names the route and "
+    "chains the re-run that verifies and checks out once the download "
+    "completes. Fetch is inert: it never installs, "
+    "switches, builds or runs anything; plugin.install under the receiver's "
+    "own publisher_keys remains the activation step and is chained as next. "
+    "Refusals name the rule: PLUGIN_FETCH_BAD_ROOT, PLUGIN_FETCH_NO_STORE, "
+    "PLUGIN_FETCH_SLOTS_FULL, PLUGIN_FETCH_RECORD_IO, PLUGIN_FETCH_REFUSED, "
+    "PLUGIN_PROVIDER_DISCOVERY_FAILED (no authenticated provider routed the "
+    "root; transient, retry), "
+    "PLUGIN_FETCH_INCOMPLETE (re-run repairs from a peer), "
+    "PLUGIN_FETCH_CORRUPT (a stored chunk failed its hash and was "
+    "quarantined; re-run repairs), PLUGIN_FETCH_DESTINATION (dir exists), "
+    "PLUGIN_FETCH_LAYOUT and the PLUGIN_* signature/hash codes.",
     ZCL_COMMAND_RESULT_BUDGET,
-    "plugin,fetch,p2p,package,swarm,root,verify,distribution,downgrade",
+    "plugin,fetch,download,swarm,verify,inert,root",
     "zcl.plugin_fetch.input.v1", "zcl.plugin_fetch.v1",
-    "root,name,datadir,allow-downgrade", "root,name",
-    "z23 plugin fetch --datadir=/tmp/fixture-dd --root=<64hex> --name=upper",
+    "root,dir,datadir,day,namespace", "root,dir",
+    "z23 plugin fetch --root=<64-hex-package-root> --dir=./received --datadir=/tmp/plugin-swap",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
-    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
-    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
-    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
-    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_plugin_fetch)
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.fetch_remote", "plugin", "",
-    "Have the running node fetch a plugin root from its peers and install it as a new generation",
+    "Install a plugin root fetched by the running node",
     "Asks the node already running on this datadir (over its local RPC, no stop "
     "needed) to start a bounded swarm fetch of one package root from its "
     "connected peers, or from the one named peer_id handle, and returns a job id. "
-    "When the root is complete the node runs the same verification and install "
-    "as plugin fetch and refuses, by name, every case plugin fetch refuses; the "
-    "refusal code and next action come back in the job status (job=<id> asks "
+    "When the root is complete the node verifies the delivered root and installs "
+    "it. plugin fetch only checks the bytes out and never installs; this command "
+    "does. Each refusal and its next action come back in the job status (job=<id> asks "
     "again, wait=<seconds> polls here). It installs a NEW generation only: it "
     "never switches, never changes current and never runs the plugin. At most "
     "two jobs run at once; each has a byte cap (max-bytes) and a deadline "

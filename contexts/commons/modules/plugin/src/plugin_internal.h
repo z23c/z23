@@ -92,6 +92,11 @@ struct plugin_lock {
 };
 enum plugin_status plugin_lock_acquire(const char *plugdir, struct plugin_lock *lock);
 void plugin_lock_release(struct plugin_lock *lock);
+/* Plugin directory for one name, after both the root and that directory check. */
+enum plugin_status ps_plugin_dir(const char *root, const char *name,
+                                 char *plugdir, size_t cap);
+/* Replace path through an exclusive sibling and a rename; owner-only file. */
+bool ps_write_private(const char *path, const char *data, size_t len);
 #ifdef ZCL_TESTING
 /* Test seam: override the lock wait budget and add a pause inside every hold,
  * modelling a loaded host where holds are long against the budget. A budget

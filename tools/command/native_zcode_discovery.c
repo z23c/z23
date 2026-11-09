@@ -17,6 +17,7 @@
 #ifdef ZCL_TESTING
 static zcl_native_zcode_discovery_test_fn g_test_discover;
 static zcl_native_zcode_discovery_test_fn g_test_route;
+static zcl_native_zcode_publish_test_fn g_test_publish;
 #endif
 
 static bool discovery_root(const char *hex);
@@ -314,6 +315,15 @@ bool zcl_native_zcode_publish_record(
   if (!publish_args_valid(kind, namespace_name, transport_root, token_out,
                           sequence, not_before, expiry))
     return false;
+#ifdef ZCL_TESTING
+  if (g_test_publish) {
+    if (!g_test_publish(kind, namespace_name, semantic_root, transport_root))
+      return false;
+    memset(token_out, '0', 64);
+    token_out[64] = '\0';
+    return true;
+  }
+#endif
   struct json_value input, result;
   json_init(&input);
   json_set_object(&input);
@@ -546,6 +556,12 @@ void zcl_native_zcode_discovery_test_backend(
 {
   g_test_discover = discover;
   g_test_route = route;
+}
+
+void zcl_native_zcode_publish_test_backend(
+    zcl_native_zcode_publish_test_fn publish)
+{
+  g_test_publish = publish;
 }
 #endif
 

@@ -50,7 +50,9 @@ enum plugin_attest_status {
     PLUGIN_ATTEST_DUPLICATE_BUILDER,
     PLUGIN_ATTEST_HASH_MISMATCH,
     PLUGIN_ATTEST_SOURCE_ROOT_MISMATCH,
-    PLUGIN_ATTEST_BELOW_THRESHOLD
+    PLUGIN_ATTEST_BELOW_THRESHOLD,
+    /* The same builder key signed a different image or source root. */
+    PLUGIN_ATTEST_EQUIVOCATION
 };
 
 /* "PLUGIN_ATTEST_DUPLICATE_BUILDER" and so on. */

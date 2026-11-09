@@ -52,7 +52,9 @@ enum plugin_status {
     PLUGIN_ERR_SWITCH_UNATTESTED,
     PLUGIN_ERR_VERSION, /* the version is not semver MAJOR.MINOR.PATCH */
     PLUGIN_ERR_DEV_DIR, /* dev dir is not a directory */
-    PLUGIN_ERR_GENERATION_AMBIGUOUS /* a switch token names several generations */
+    PLUGIN_ERR_GENERATION_AMBIGUOUS, /* a switch token names several generations */
+    PLUGIN_ERR_UNINSTALL_ACTIVE, /* the generation is current or last-good */
+    PLUGIN_ERR_UNINSTALL_LAYOUT /* the plugin directory holds foreign entries */
 };
 
 struct plugin_gate_report {
@@ -106,6 +108,18 @@ enum plugin_status plugin_verify_manifest(const char *manifest, size_t manifest_
                                           const char *sig, size_t sig_len,
                                           const char *keys_path,
                                           struct plugin_manifest *out);
+
+/* Verify manifest bytes against the detached signature bytes under the
+ * publisher key the signature itself names, with no key list involved. This
+ * is self-consistency only: it proves the manifest is exactly what the holder
+ * of that key signed, never that the receiver trusts or lists the key.
+ * key_hex (when non-NULL) receives the claimed publisher key as 64 lowercase
+ * hex characters plus terminator, so a caller can compare it against its own
+ * publisher key list. On success fills out. */
+enum plugin_status plugin_verify_manifest_self(const char *manifest, size_t manifest_len,
+                                               const char *sig, size_t sig_len,
+                                               struct plugin_manifest *out,
+                                               char key_hex[65]);
 
 /* SHA3-512 of a file as 128 lowercase hex characters plus terminator. */
 enum plugin_status plugin_hash_file(const char *path,
@@ -162,6 +176,54 @@ enum plugin_status plugin_store_rollback_if_current(const char *root, const char
                                                     const char *expected,
                                                     char restored[PLUGIN_HEX_SHA3_512 + 1],
                                                     bool *changed);
+
+struct plugin_uninstall_report {
+    size_t generations_removed;
+    bool current_cleared;   /* whole-plugin removal unlinked the current pointer */
+    bool last_good_cleared; /* whole-plugin removal unlinked the last-good pointer */
+    bool state_preserved;   /* NAME/data and/or NAME/state stayed behind, so the plugin directory remains */
+};
+
+/* One registered z23 plugin run supervisor for a plugin: the process id, its
+ * start token (os_proc_pid_start_token, so a reused pid never counts as the
+ * same supervisor) and the generation resolved when it started, which is
+ * informational only. The record is one store-owned file, NAME/run. */
+struct plugin_run_registration {
+    uint64_t pid;
+    uint64_t start_token;
+    char generation[PLUGIN_HEX_SHA3_512 + 1];
+};
+
+/* Record a live supervisor for name under the plugin mutation lock. A live
+ * existing registration is PLUGIN_ERR_BUSY (one supervisor per plugin); a
+ * stale one (dead or reused pid) is replaced. start_token must come from
+ * os_proc_pid_start_token for pid. */
+enum plugin_status plugin_store_run_register(const char *root, const char *name,
+                                             uint64_t pid, uint64_t start_token,
+                                             const char *generation);
+
+/* Remove the registration only when it names pid (a different supervisor's
+ * record is left alone). Absence is success. */
+enum plugin_status plugin_store_run_unregister(const char *root, const char *name,
+                                               uint64_t pid);
+
+/* Read the registration without taking the lock. *registered is false when no
+ * record exists; *live is true only when the recorded pid is running and its
+ * current start token matches the record. A record whose pid is alive but
+ * whose token cannot be established is PLUGIN_ERR_IO — never guessed. */
+enum plugin_status plugin_store_run_query(const char *root, const char *name,
+                                          struct plugin_run_registration *out,
+                                          bool *registered, bool *live);
+
+/* Remove one generation (generation non-NULL) or the whole plugin (NULL)
+ * under the plugin mutation lock. Removal names exact owned files only.
+ * A live registered supervisor refuses with PLUGIN_ERR_BUSY. A generation
+ * that is current or last-good is PLUGIN_ERR_UNINSTALL_ACTIVE. Any entry
+ * the store never wrote is PLUGIN_ERR_UNINSTALL_LAYOUT before a byte is
+ * removed. NAME/data and NAME/state are never deleted. */
+enum plugin_status plugin_store_uninstall(const char *root, const char *name,
+                                          const char *generation,
+                                          struct plugin_uninstall_report *report);
 
 /* What reading one part of a plugin's stored state found. Absent is not the
  * same as unreadable: only PLUGIN_SLOT_MISSING means the part is not there.

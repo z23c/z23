@@ -145,11 +145,24 @@ static enum plugin_attest_status pav_builder(const struct pav_state *s,
                                              const struct plugin_attest_record *r)
 {
     uint8_t key[32];
+    (void)rep;
     if (!zcl_hex_decode_lower(r->builder_key, key, sizeof(key)) ||
         !pav_pinned(&s->pins, key))
         return PLUGIN_ATTEST_BUILDER_UNPINNED;
-    return pav_seen_builder(rep, r->builder_key) ? PLUGIN_ATTEST_DUPLICATE_BUILDER
-                                                  : PLUGIN_ATTEST_OK;
+    return PLUGIN_ATTEST_OK;
+}
+
+/* A second record from a builder already admitted is a duplicate when it
+ * names the same image and source root, and equivocation when it does not.
+ * Callers sort leaves, so the first admitted record is the reference. */
+static enum plugin_attest_status pav_again(const struct plugin_attest_report *rep,
+                                           const struct plugin_attest_record *r)
+{
+    if (!pav_seen_builder(rep, r->builder_key))
+        return PLUGIN_ATTEST_OK;
+    if (strcmp(r->image, rep->image) != 0 || strcmp(r->source_root, rep->source_root) != 0)
+        return PLUGIN_ATTEST_EQUIVOCATION;
+    return PLUGIN_ATTEST_DUPLICATE_BUILDER;
 }
 
 static enum plugin_attest_status pav_bytes(const struct pav_state *s,
@@ -178,6 +191,8 @@ static enum plugin_attest_status pav_admit(struct pav_state *s,
     enum plugin_attest_status st = pav_subject(s, r);
     if (st == PLUGIN_ATTEST_OK)
         st = pav_builder(s, rep, r);
+    if (st == PLUGIN_ATTEST_OK)
+        st = pav_again(rep, r);
     if (st == PLUGIN_ATTEST_OK)
         st = pav_bytes(s, r);
     if (st == PLUGIN_ATTEST_OK)

@@ -127,7 +127,15 @@ enum vcs_package_public_shape {
     VCS_PACKAGE_PUBLIC_WORK_OUTPUT,  /* action-bound work output */
     VCS_PACKAGE_PUBLIC_TASK_CONTEXT, /* one posted dev task, unsigned */
     VCS_PACKAGE_PUBLIC_FASTOBJ_CARRIER, /* derived compile-cache objects */
+    VCS_PACKAGE_PUBLIC_PLUGIN,       /* flat signed plugin set */
 };
+
+/* plugin.publish writes this flat member into the package. The bytes travel
+ * with the chunks, so a replica can host the set. A plugin dist release does
+ * not carry it: hosting those bytes still requires the release envelope,
+ * which a chunk transfer does not copy. */
+#define VCS_PACKAGE_PLUGIN_ADMISSION_LEAF "z23-plugin-admission"
+#define VCS_PACKAGE_PLUGIN_ADMISSION_TEXT "z23-plugin-admission v1\n"
 
 const char *vcs_package_public_shape_string(
     enum vcs_package_public_shape shape);

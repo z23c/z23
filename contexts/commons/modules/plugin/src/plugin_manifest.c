@@ -101,7 +101,11 @@ static const struct {
     [PLUGIN_ERR_DEV_DIR] = { "PLUGIN_DEV_DIR",
         "pass the directory that holds the executable plus --name: z23 plugin dev ./pk --name=skycombat packs ./pk/skycombat; a file path is not a directory" },
     [PLUGIN_ERR_GENERATION_AMBIGUOUS] = { "PLUGIN_GENERATION_AMBIGUOUS",
-        "several generations match; pass a longer generation id prefix or the full id (z23 plugin status NAME lists them)" }
+        "several generations match; pass a longer generation id prefix or the full id (z23 plugin status NAME lists them)" },
+    [PLUGIN_ERR_UNINSTALL_ACTIVE] = { "PLUGIN_UNINSTALL_ACTIVE",
+        "the generation is current or last-good: switch current to another generation first, or uninstall the whole plugin by name only" },
+    [PLUGIN_ERR_UNINSTALL_LAYOUT] = { "PLUGIN_UNINSTALL_LAYOUT",
+        "the plugin directory holds entries the store never wrote; uninstall removes only exact owned files — move the named entries out yourself and retry" }
 };
 
 /* One semver identifier of [0-9A-Za-z-]; a numeric one has no leading zero
@@ -405,4 +409,24 @@ enum plugin_status plugin_verify_manifest(const char *manifest, size_t manifest_
                                       keys_len, out);
     free(keys);
     return st;
+}
+
+enum plugin_status plugin_verify_manifest_self(const char *manifest, size_t manifest_len,
+                                               const char *sig, size_t sig_len,
+                                               struct plugin_manifest *out,
+                                               char key_hex[65])
+{
+    uint8_t pk[32], sg[64], digest[PLUGIN_DIGEST_BYTES];
+    enum plugin_status st = plugin_manifest_parse(manifest, manifest_len, out);
+    if (st == PLUGIN_OK)
+        st = pm_sig_parse(sig, sig_len, pk, sg);
+    if (st != PLUGIN_OK)
+        return st;
+    plugin_manifest_digest(manifest, manifest_len, digest);
+    if (!ed25519_verify(sg, digest, sizeof(digest), pk))
+        return PLUGIN_ERR_SIG_BAD;
+    zcl_hex_encode(digest, sizeof(digest), out->generation);
+    if (key_hex)
+        zcl_hex_encode(pk, sizeof(pk), key_hex);
+    return PLUGIN_OK;
 }
