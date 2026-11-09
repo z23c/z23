@@ -957,6 +957,31 @@ static void nc_ops_state_attach_meaning(const struct zcl_command_request *reques
     }
 }
 
+/* Supervisor dumpstate has key-based drilldowns, not offset paging. */
+static bool nc_supervisor_page_guidance(const char *sub, struct zcl_command_reply *reply)
+{
+    if (strcmp(sub, "supervisor")) return true;
+    const struct json_value *page = json_get(&reply->data, "_page");
+    if (!json_get_bool(json_get(page, "truncated"))) return true;
+    struct json_value data, clean;
+    json_init(&data); json_set_object(&data);
+    json_init(&clean); json_set_object(&clean);
+    bool ok = page && page->type == JSON_OBJ;
+    for (size_t i = 0; ok && i < page->num_children; i++)
+        if (strcmp(page->keys[i], "next_cursor") != 0)
+            ok = json_push_kv(&clean, page->keys[i], &page->children[i]);
+    for (size_t i = 0; ok && i < reply->data.num_children; i++)
+        ok = json_push_kv(&data, reply->data.keys[i],
+            strcmp(reply->data.keys[i], "_page") ? &reply->data.children[i] : &clean);
+    json_free(&clean);
+    if (!ok) { json_free(&data); return false; }
+    json_free(&reply->data); reply->data = data;
+    for (size_t i = 0; i < reply->next_count; i++)
+        (void)snprintf(reply->next[i].reason, sizeof(reply->next[i].reason),
+            "retry ops.state with subsystem=supervisor and key=summary or an exact child name");
+    return true;
+}
+
 void zcl_native_handle_ops_state(const struct zcl_command_request *request,
                                  struct zcl_command_reply *reply)
 {
@@ -1013,6 +1038,13 @@ void zcl_native_handle_ops_state(const struct zcl_command_request *request,
     }
     /* Success: project the state body into the envelope (view/budget bounded). */
     zcl_native_bridge_project(request, &body, reply);
+    if (!nc_supervisor_page_guidance(sub, reply)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_INTERNAL, "STATE_PROJECTION_FAILED", "serialize",
+            false, false, "supervisor paging guidance could not be allocated", sub);
+        json_free(&body);
+        return;
+    }
     nc_ops_state_attach_meaning(request, sub, &body, reply);
     json_free(&body);
 }
@@ -2957,7 +2989,9 @@ static bool nc_set_host_value(const struct zcl_command_spec *spec,
                                const char *value)
 {
     struct zcl_command_input_descriptor descriptor;
-    if (value && spec && spec->path && !strncmp(spec->path, "app.host.", 9) &&
+    if (value && spec && spec->path &&
+        (!strncmp(spec->path, "app.host.", 9) ||
+         (!strcmp(spec->path, "fleet.board.list") && !strcmp(key, "before_id"))) &&
         zcl_command_registry_input_descriptor(spec, key, &descriptor) &&
         descriptor.type == JSON_STR)
         return json_push_kv_str(obj, key, value);

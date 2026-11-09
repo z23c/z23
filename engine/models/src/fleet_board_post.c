@@ -1173,7 +1173,7 @@ static void board_answered_subquery(struct qb *sub)
                     sizeof(k_answer_kinds) / sizeof(k_answer_kinds[0]));
 }
 
-static void board_apply_filter(struct qb *q,
+void board_apply_filter(struct qb *q,
                                const struct fleet_board_filter *filter,
                                int64_t now, struct qb *sub_storage)
 {
@@ -1190,6 +1190,16 @@ static void board_apply_filter(struct qb *q,
     if (filter->since > 0)
         qb_where_int(q, QB_C_fleet_board_posts_created_at, QB_GT,
                      filter->since);
+    if (filter->before_set) {
+        qb_where_int(q, QB_C_fleet_board_posts_created_at, QB_LE,
+                     filter->before_created_at);
+        qb_group_begin(q, QB_OR);
+        qb_where_int(q, QB_C_fleet_board_posts_created_at, QB_LT,
+                     filter->before_created_at);
+        qb_where_blob(q, QB_C_fleet_board_posts_id, QB_LT,
+                      filter->before_id, 32);
+        qb_group_end(q);
+    }
     if (filter->slug[0])
         qb_where_text(q, QB_C_fleet_board_posts_slug, QB_EQ, filter->slug);
     if (filter->agent[0])
@@ -1226,44 +1236,6 @@ static void board_apply_filter(struct qb *q,
         qb_where_in_select(q, QB_C_fleet_board_posts_id, true, sub_storage);
     }
 }
-
-int db_fleet_board_list_checked(struct node_db *ndb,
-                                const struct fleet_board_filter *filter,
-                                int64_t now, struct db_fleet_board_post *out,
-                                size_t max, bool *complete)
-{
-    bool clean = true;
-    if (complete)
-        *complete = false;
-    if (!ndb || !ndb->open || !out || max == 0)
-        return 0;
-    if (max > FLEET_BOARD_LIST_MAX)
-        max = FLEET_BOARD_LIST_MAX;
-    struct qb q, sub;
-    qb_select(&q, QB_T_fleet_board_posts);
-    qb_select_columns(&q, k_board_cols, BOARD_NCOLS);
-    board_apply_filter(&q, filter, now, &sub);
-    qb_order_by(&q, QB_C_fleet_board_posts_created_at, QB_DESC);
-    qb_order_by(&q, QB_C_fleet_board_posts_id, QB_DESC);
-    qb_limit(&q, (int64_t)max);
-    sqlite3_stmt *s = NULL;
-    int count = 0;
-    if (!QB_PREPARE(ndb, &q, s))
-        return 0;
-    while (AR_STEP_ROW(s) && (size_t)count < max) {
-        struct db_fleet_board_post row;
-        memset(&row, 0, sizeof(row));
-        if (fleet_board_row_read(s, &row))
-            out[count++] = row;
-        else
-            clean = false;
-    }
-    clean = sqlite3_finalize(s) == SQLITE_OK && clean; /* last step's error */
-    if (complete)
-        *complete = clean;
-    return count;
-}
-
 
 int db_fleet_board_wiki_history(struct node_db *ndb, const char *slug,
                                 struct db_fleet_board_post *out, size_t max)

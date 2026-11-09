@@ -594,19 +594,18 @@ static int db_migrate_step_86(struct node_db *ndb, int *current_ver,
     return 0;
 }
 
-static int db_migrate_step_87(struct node_db *ndb, int *current_ver,
-                              int *floor_ver, int *applied)
+/* Both board indexes are additive and preserve the compatibility floor. */
+static int db_migrate_board_index(struct node_db *ndb, int *current_ver,
+                                  int *floor_ver, int *applied, int version,
+                                  const char *index_sql, const char *stamp_sql)
 {
-    if (*current_ver >= 87) return 0;
-    if (!node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_fleet_board_wiki_latest "
-            "ON fleet_board_posts(kind,slug,created_at DESC,id DESC)"))
-        LOG_RETURN(-1, "db", "migrate v87: wiki traversal index failed");
-    if (!node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('087')"))
-        LOG_RETURN(-1, "db", "migrate v87: migration stamp failed");
-    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 87, *floor_ver);
-    *current_ver = 87;
+    if (*current_ver >= version) return 0;
+    if (!node_db_exec(ndb, index_sql))
+        LOG_RETURN(-1, "db", "migrate v%d: board index failed", version);
+    if (!node_db_exec(ndb, stamp_sql))
+        LOG_RETURN(-1, "db", "migrate v%d: migration stamp failed", version);
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, version, *floor_ver);
+    *current_ver = version;
     (*applied)++;
     return 0;
 }
@@ -635,11 +634,19 @@ static int db_migrate_finish_87(struct node_db *ndb, int *current_ver,
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     if (db_migrate_step_86(ndb, current_ver, floor_ver, applied) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
-    if (db_migrate_step_87(ndb, current_ver, floor_ver, applied) < 0)
+    if (db_migrate_board_index(ndb, current_ver, floor_ver, applied, 87,
+            "CREATE INDEX IF NOT EXISTS idx_fleet_board_wiki_latest "
+            "ON fleet_board_posts(kind,slug,created_at DESC,id DESC)",
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('087')") < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     if (db_migrate_wallet_additive(ndb, 88, current_ver, floor_ver, applied) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     if (db_migrate_wallet_additive(ndb, 89, current_ver, floor_ver, applied) < 0)
+        return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
+    if (db_migrate_board_index(ndb, current_ver, floor_ver, applied, 90,
+            "CREATE INDEX IF NOT EXISTS idx_fleet_board_app_page "
+            "ON fleet_board_posts(room,scope,kind,created_at DESC,id DESC)",
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('090')") < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     *version_out = *current_ver;
     *floor_out = *floor_ver;

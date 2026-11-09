@@ -8,8 +8,8 @@
                "root supervisor: registered liveness contracts, ticks_run, stall_fires, deadlines",
                "runtime", "runtime", "platform/modules/util/src/supervisor.c",
                "in_process_snapshot", "cheap",
-               "child service name, or use subsystem=supervisor.<name>",
-               "sync.watchdog", "net.outbound_floor",
+               "domain or exact child name; summary selects bounded root fields",
+               "summary", "net.outbound_floor",
                "tests/harness/src/test_supervisor.c", false),
     DIAG_RUNTIME("supervisor_backstop", supervisor_backstop_dump_state_json,
                  "independent sweep-heartbeat watcher for the root supervisor "

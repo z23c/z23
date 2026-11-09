@@ -157,7 +157,17 @@ static void write_last_run(const struct lr_run *r, const struct lr_gate **rank,
                      "  \"gate_count\":%d,\n  \"failed_count\":%d,\n  \"gates\":[\n",
                   stamp, wall_ms, r->o->jobs, r->o->budget_sec, r->n, failed);
     write_json_gates(f, r, rank, nrank);
-    (void)fprintf(f, "\n  ]\n}\n");
+    (void)fprintf(f, "\n  ]");
+    int blocked = 0;
+    for (int i = 0; i < r->n; ++i) blocked += r->g[i].blocked ? 1 : 0;
+    if (blocked) {
+        (void)fprintf(f, ",\n  \"blocked_count\":%d,\n  \"blocked\":[", blocked);
+        int written = 0;
+        for (int i = 0; i < r->n; ++i)
+            if (r->g[i].blocked) (void)fprintf(f, "%s\"%s\"", written++ ? "," : "", r->g[i].name);
+        (void)fputs("]", f);
+    }
+    (void)fputs("\n}\n", f);
     if (fclose(f) == 0)
         (void)rename(tmp, fin);
 }
@@ -221,15 +231,19 @@ static bool gate_failed(const struct lr_gate *g)
 static void print_failures(const struct lr_run *r, int failed)
 {
     FILE *e = r->o->err;
-    (void)fprintf(e, "\n\xe2\x95\x90\xe2\x95\x90 LINT: %d of %d gates FAILED \xe2\x95\x90\xe2\x95\x90\n",
-                  failed, r->n);
+    bool blocked = false;
+    for (int i = 0; i < r->n; ++i) blocked = blocked || r->g[i].blocked;
+    (void)fprintf(e, "\n\xe2\x95\x90\xe2\x95\x90 LINT: %d of %d gates %s \xe2\x95\x90\xe2\x95\x90\n",
+                  failed, r->n, blocked ? "FAILED OR NOT RUN" : "FAILED");
     for (int i = 0; i < r->n; i++) {
-        if (gate_failed(&r->g[i]))
+        if (r->g[i].blocked)
+            (void)fprintf(e, "  - %s (not run: prerequisite failed)\n", r->g[i].name);
+        else if (gate_failed(&r->g[i]))
             (void)fprintf(e, "  \xe2\x9c\x97 %s%s\n", r->g[i].name,
                           r->g[i].have_rc ? "" : " (worker crash \xe2\x80\x94 no rc artifact)");
     }
     for (int i = 0; i < r->n; i++) {
-        if (gate_failed(&r->g[i]))
+        if (gate_failed(&r->g[i]) && !r->g[i].blocked)
             print_fail_log(r, &r->g[i]);
     }
     (void)fflush(e);

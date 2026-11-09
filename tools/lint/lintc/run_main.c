@@ -260,6 +260,9 @@ static int start_run(const struct run_args *a)
                           k_serial_pro, k_serial_epi, k_poles };
     setup_env(a->gates, a->n, a->bin_dir);
     note_unrequested(a->gates, a->n);
+    if (lr_inventory_prerequisite(inv_copy, a->bin_dir, a->gates, a->n))
+        return lr_execute_with_prerequisite(&o, a->gates, a->n,
+                                             "check-capability-inventory-generated");
     if (pregen_inventory(inv_copy, a->gates, a->n) != 0)
         return 1;
     return lr_execute(&o, a->gates, a->n);

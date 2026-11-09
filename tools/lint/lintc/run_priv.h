@@ -90,6 +90,7 @@ struct lr_gate {
     long long ms;
     int rc;
     bool have_rc;
+    bool blocked;
     pid_t pid;
     long long t0;
 };
@@ -105,6 +106,9 @@ struct lr_run {
  * verdict lines, timing table and failure logs. 0 all passed, 1 any
  * failed, 2 driver misuse. */
 int lr_execute(const struct lr_opts *o, char *const *gates, int n);
+int lr_execute_with_prerequisite(const struct lr_opts *o, char *const *gates, int n,
+                                 const char *prerequisite);
+bool lr_inventory_prerequisite(const char *tool, const char *bin_dir, char *const *gates, int n);
 
 long long lr_now_ms(void);
 /* Pool and worker (run_pool.c). */

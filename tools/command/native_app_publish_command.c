@@ -3,14 +3,19 @@
 #include "command/native_command.h"
 #include "command/native_app_compose.h"
 #include "command/native_app_offer.h"
+#include "command/native_app_publish_command.h"
+#include "command/native_app_share_command.h"
+#include "command/app_selection.h"
 #include "command/native_fleet_bundle.h"
 #include "command/native_zcode_package_copy.h"
 #include "json/json.h"
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "platform/rng.h"
 #include "platform/private_directory.h"
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -210,6 +215,24 @@ static bool ap_offer(struct ap_state *s, char text[ZCL_APP_OFFER_TEXT_MAX + 1u])
     return ok;
 }
 
+static bool ap_next(char *out, size_t cap, const char *name, const char *root,
+                    const char *publisher, const char *id)
+{
+    int n = snprintf(out, cap, "z23 app get %s --root=%s --publisher=%s --offer=%s",
+                     name, root, publisher, id);
+    return n >= 0 && (size_t)n < cap;
+}
+
+#ifdef ZCL_TESTING
+bool zcl_test_app_publish_next(char *out, size_t cap, const char *name, const char *root,
+                               const char *publisher, const char *id);
+bool zcl_test_app_publish_next(char *out, size_t cap, const char *name, const char *root,
+                               const char *publisher, const char *id)
+{
+    return ap_next(out, cap, name, root, publisher, id);
+}
+#endif
+
 static void ap_post(struct ap_state *s, const char *text)
 {
     struct json_value in;
@@ -229,8 +252,13 @@ static void ap_post(struct ap_state *s, const char *text)
             zcl_command_reply_free(&inner);
             return;
         }
-        char next[256];
-        (void)snprintf(next, sizeof(next), "z23 app get %s", s->share_name);
+        char next[512];
+        if (!ap_next(next, sizeof(next), s->share_name, s->root, s->publisher, id)) {
+            zcl_package_copy_fail(s->reply, "RESULT_UNAVAILABLE", true,
+                                  "offer was posted but its continuation could not be described", id);
+            zcl_command_reply_free(&inner);
+            return;
+        }
         bool described = json_push_kv_str(&s->reply->data, "name", s->share_name) &&
                          json_push_kv_str(&s->reply->data, "post_id", id) &&
                          json_push_kv_str(&s->reply->data, "package_root", s->root) &&
@@ -241,6 +269,125 @@ static void ap_post(struct ap_state *s, const char *text)
                                                "offer was posted but its result could not be described", AP_COMMAND);
     }
     zcl_command_reply_free(&inner);
+}
+
+static bool ap_snapshot_view(struct app_confirm *v, const struct zcl_app_share_identity *id,
+                             const char *onion, char *why, size_t cap)
+{
+    zcl_present_model_init_v1(&v->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    v->window_title = "Publish this saved version";
+    (void)snprintf(v->model.request_id, sizeof(v->model.request_id), "app-publish-snapshot");
+    (void)snprintf(v->model.title, sizeof(v->model.title), "Publish publicly?");
+    (void)snprintf(v->model.summary, sizeof(v->model.summary), "Review all pages before publishing.");
+    v->model.action_count = 4;
+    app_confirm_action(&v->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "cancel", "Cancel");
+    app_confirm_action(&v->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+    app_confirm_action(&v->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+    app_confirm_action(&v->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "publish", "Publish");
+    return app_confirm_field(&v->model, "App: ", id->name) &&
+        app_confirm_field(&v->model, "Version: ", id->semver) &&
+        app_confirm_field(&v->model, "Saved version: ", id->version) &&
+        app_confirm_field(&v->model, "Package: ", id->package) &&
+        app_confirm_field(&v->model, "Publisher: ", id->publisher) &&
+        app_confirm_field(&v->model, "Release: ", id->release) &&
+        app_confirm_field(&v->model, "Endpoint: ", onion) &&
+        app_confirm_field(&v->model, "Public: ", "Sign and pin this saved version; post an offer to the public apps board for 24 hours.") &&
+        app_confirm_prepare(v, why, cap);
+}
+
+static void ap_snapshot_facts(struct zcl_command_reply *reply,
+    const struct zcl_app_share_identity *id, bool post_attempted)
+{
+    struct json_value *facts = NULL;
+    for (size_t i = 0; i < reply->data.num_children; ++i)
+        if (!strcmp(reply->data.keys[i], "failure_facts")) facts = &reply->data.children[i];
+    if (!facts) {
+        struct json_value empty; json_init(&empty); json_set_object(&empty);
+        bool ok = json_push_kv(&reply->data, "failure_facts", &empty); json_free(&empty);
+        if (ok) facts = &reply->data.children[reply->data.num_children - 1];
+    }
+    bool complete = facts && facts->type == JSON_OBJ &&
+        json_push_kv_str(facts, "release_id", id->release) &&
+        json_push_kv_str(facts, "version", id->version) &&
+        json_push_kv_str(facts, "package_root", id->package) &&
+        json_push_kv_str(facts, "publisher_fingerprint", id->publisher) &&
+        json_push_kv_str(facts, "board_status", post_attempted ? "unknown" : "not_attempted");
+    if (!complete) (void)snprintf(reply->error.evidence, sizeof(reply->error.evidence),
+        "Signed release %.64s; some recovery facts could not be encoded.", id->release);
+}
+
+static void ap_snapshot_execute(struct ap_state *s, struct zcl_app_share_session *share,
+    const struct zcl_app_share_identity *id)
+{
+    struct zcl_command_reply *reply = s->reply;
+    if (!platform_private_directory_create(s->dir)) {
+        zcl_package_copy_fail(reply, "TEMP_UNAVAILABLE", false, "Cannot create private publish directory", AP_COMMAND);
+        return;
+    }
+    struct zcl_command_reply inner; zcl_command_reply_init(&inner, "zcl.app_share.v1");
+    zcl_app_share_commit(share, &inner);
+    bool shared = inner.status == ZCL_COMMAND_STATUS_PASSED;
+    if (!shared) app_confirm_forward_failure(reply, &inner);
+    if (shared) {
+        (void)snprintf(s->share_name, sizeof(s->share_name), "%s", id->name);
+        (void)snprintf(s->root, sizeof(s->root), "%s", id->package);
+        (void)snprintf(s->publisher, sizeof(s->publisher), "%s", id->publisher);
+    }
+    zcl_command_reply_free(&inner);
+    char text[ZCL_APP_OFFER_TEXT_MAX + 1u];
+    bool offered = shared && ap_verify(s) && ap_offer(s, text);
+    bool cleaned = ap_cleanup(s, shared || reply->error.mutated);
+    bool post_attempted = cleaned && offered;
+    if (post_attempted) ap_post(s, text);
+    if (shared && reply->status != ZCL_COMMAND_STATUS_PASSED)
+        ap_snapshot_facts(reply, id, post_attempted);
+}
+
+static bool ap_snapshot_confirm(struct ap_state *s, const struct zcl_app_share_identity *id,
+    struct app_confirm *view, app_confirm_presenter presenter, void *context)
+{
+    struct zcl_command_reply *reply = s->reply;
+    char why[256] = {0};
+    if (strlen(id->name) >= sizeof(s->share_name) || strlen(id->package) != 64 || strlen(id->publisher) != 66) {
+        zcl_package_copy_fail(reply, "SHARE_PLAN_INVALID", false, "Saved identity cannot be published", AP_COMMAND);
+        return false;
+    }
+    if (!view || !ap_snapshot_view(view, id, s->onion, why, sizeof(why)) ||
+        !app_confirm_show(view, presenter, context, why, sizeof(why))) {
+        zcl_package_copy_fail(reply, "CONFIRMATION_UNAVAILABLE", false, "Cannot display the exact publish plan", AP_COMMAND);
+        return false;
+    }
+    if (!view->confirmed) {
+        if (!json_push_kv_str(&reply->data, "status", "canceled"))
+            zcl_package_copy_fail(reply, "ALLOC", false, "Cannot describe cancellation", AP_COMMAND);
+        return false;
+    }
+    char old_onion[sizeof(s->onion)], old_host[sizeof(s->host)];
+    (void)snprintf(old_onion, sizeof(old_onion), "%s", s->onion);
+    (void)snprintf(old_host, sizeof(old_host), "%s", s->host);
+    if (!ap_onion(s)) return false;
+    if (strcmp(old_onion, s->onion) || strcmp(old_host, s->host)) {
+        zcl_package_copy_fail(reply, "PLAN_MISMATCH", false, "Publication endpoint changed; review again", AP_COMMAND);
+        return false;
+    }
+    return true;
+}
+
+void zcl_native_app_publish_snapshot(const char *name, const struct app_selection *selection,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context)
+{
+    if (!reply || !selection) return;
+    /* The private path needs only a safe component; the selection authority
+     * below validates the real route, which may contain a kept: prefix. */
+    struct ap_state s = {.reply = reply, .name = "snapshot", .datadir = selection->datadir};
+    if (!ap_onion(&s) || !ap_token(&s)) return;
+    struct zcl_app_share_session *share = zcl_app_share_prepare(name, s.path, selection, reply);
+    if (!share) return;
+    struct zcl_app_share_identity id; zcl_app_share_identity(share, &id);
+    struct app_confirm *view = zcl_calloc(1, sizeof(*view), "app-publish-view");
+    if (ap_snapshot_confirm(&s, &id, view, presenter, context)) ap_snapshot_execute(&s, share, &id);
+    if (view) { app_confirm_free(view); free(view); }
+    zcl_app_share_dispose(share);
 }
 
 void zcl_native_handle_app_publish(const struct zcl_command_request *request,

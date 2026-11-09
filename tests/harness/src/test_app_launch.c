@@ -871,14 +871,23 @@ static void al_library_change(struct al_library_script *s)
                 selection.revision, &selection, &updated) == APP_SELECTION_OK;
         }
 }
+static bool al_share_options_valid(const struct zcl_present_model_v1 *model)
+{
+    return model->action_count == 3 && !strcmp(model->actions[0].id, "share-file") &&
+        !strcmp(model->actions[1].id, "publish");
+}
+static bool al_library_render(const struct zcl_present_model_v1 *model, char *why, size_t cap)
+{
+    struct zcl_present_model_bitmap_v1 bitmap = {0};
+    bool ok = zcl_present_model_validate_v1(model, why, cap) &&
+        zcl_present_model_render_v1(model, &bitmap, why, cap) && bitmap.pixels;
+    zcl_present_model_bitmap_free_v1(&bitmap); return ok;
+}
 static bool al_library_present(void *context, const struct zcl_present_model_v1 *model,
     const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
     struct al_library_script *s = context;
-    s->valid = s->valid && zcl_present_model_validate_v1(model, why, cap);
-    struct zcl_present_model_bitmap_v1 bitmap = {0};
-    s->valid = s->valid && zcl_present_model_render_v1(model, &bitmap, why, cap) && bitmap.pixels;
-    zcl_present_model_bitmap_free_v1(&bitmap);
+    s->valid = s->valid && al_library_render(model, why, cap);
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     event->outcome = ZCL_PRESENT_WINDOW_ACTION;
     if (!strcmp(model->request_id, "library-error")) {
@@ -889,6 +898,10 @@ static bool al_library_present(void *context, const struct zcl_present_model_v1 
     if (!strcmp(model->request_id, "library-home")) {
         event->action_index = 0; /* Existing saved-app cases enter the saved browser. */
         return true;
+    }
+    if (!strcmp(model->request_id, "library-share-options")) {
+        s->valid = s->valid && al_share_options_valid(model);
+        event->action_index = 0; return true;
     }
     if (s->fail_after_noop && s->calls == 4) {
         (void)snprintf(why, cap, "Fixture presentation stopped after the no-op.");
@@ -1727,7 +1740,7 @@ static bool al_public_present(void *context, const struct zcl_present_model_v1 *
     if (!strcmp(m->request_id, "library-error")) { event->action_index = 0; return true; }
     if (!strcmp(m->request_id, "library-home")) { event->action_index = s->mode == 4 && s->page ? 2 : 1; ++s->page; return true; }
     if (!strncmp(m->request_id, "library-public-", 15)) {
-        if (s->mode == 4) { event->action_index = 0; return true; }
+        if (s->mode == 4) { event->action_index = 1; return true; }
         event->action_index = s->page++ == 1 ? 2 : 0; return true;
     }
     return false;

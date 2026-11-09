@@ -27,6 +27,7 @@
 #include "util/safe_alloc.h"
 #include "util/boot_status.h"
 #include "util/boot_phase.h"
+#include "util/supervisor.h"
 #include "platform/clock.h"
 #include "platform/time_compat.h"
 #include <pthread.h>
@@ -4309,32 +4310,42 @@ static int test_board_list_budget_pages(void)
         const struct zcl_command_spec *spec =
             find_spec(zcl_command_catalog(), "fleet.board.list");
         ASSERT(spec != NULL);
-        struct json_value body, posts;
+        struct json_value body;
         json_init(&body);
         json_set_object(&body);
-        json_init(&posts);
-        json_set_array(&posts);
         char text[1801];
         memset(text, 'x', sizeof(text) - 1);
         text[sizeof(text) - 1] = 0;
-        for (int i = 0; i < 8; i++) {
-            struct json_value post;
-            json_init(&post);
-            json_set_object(&post);
-            (void)json_push_kv_int(&post, "seq", i);
-            (void)json_push_kv_str(&post, "text", text);
-            (void)json_push_kv_str(&post, "signature", "fixture-signature");
-            (void)json_push_back(&posts, &post);
-            json_free(&post);
-        }
-        (void)json_push_kv(&body, "posts", &posts);
-        json_free(&posts);
         size_t seen = 0;
+        char previous_id[65] = "";
+        int64_t previous_time = 0;
         for (size_t attempt = 0; attempt < 8 && seen < 8; attempt++) {
-            char cursor[24], encoded[ZCL_COMMAND_LIST_BUDGET + 1];
-            (void)snprintf(cursor, sizeof(cursor), "%zu", seen);
+            struct json_value page_posts, input;
+            json_init(&page_posts); json_set_array(&page_posts);
+            json_init(&input); json_set_object(&input);
+            for (size_t i = seen; i < 8; i++) {
+                struct json_value post;
+                char id[65];
+                json_init(&post); json_set_object(&post);
+                (void)snprintf(id, sizeof(id), "%064zu", i);
+                ASSERT(json_push_kv_int(&post, "seq", (int64_t)i));
+                ASSERT(json_push_kv_int(&post, "created_at", (int64_t)(8 - i)));
+                ASSERT(json_push_kv_str(&post, "id", id));
+                ASSERT(json_push_kv_str(&post, "text", text));
+                ASSERT(json_push_kv_str(&post, "signature", "fixture-signature"));
+                ASSERT(json_push_back(&page_posts, &post));
+                json_free(&post);
+            }
+            json_set_object(&body);
+            ASSERT(json_push_kv(&body, "posts", &page_posts));
+            ASSERT(json_push_kv_bool(&body, "has_more", false));
+            if (seen) {
+                ASSERT(json_push_kv_int(&input, "before_created_at", previous_time));
+                ASSERT(json_push_kv_str(&input, "before_id", previous_id));
+            }
+            char encoded[ZCL_COMMAND_LIST_BUDGET + 1];
             struct zcl_command_request req = {
-                .spec = spec, .view = "normal", .cursor = cursor,
+                .spec = spec, .view = "normal", .input = &input,
             };
             struct zcl_command_reply reply;
             zcl_command_reply_init(&reply, spec->output_schema);
@@ -4353,11 +4364,16 @@ static int test_board_list_budget_pages(void)
                 ASSERT_STR_EQ(json_get_str(json_get(row, "signature")), "fixture-signature");
             }
             seen += count;
-            const struct json_value *page = json_get(&reply.data, "_page");
-            ASSERT_EQ(json_get_bool(json_get(page, "truncated")), seen < 8);
-            if (seen < 8)
-                ASSERT_EQ(json_get_int(json_get(page, "next_cursor")), (int64_t)seen);
+            ASSERT_EQ(json_get_bool(json_get(&reply.data, "has_more")), seen < 8);
+            if (seen < 8) {
+                previous_time = json_get_int(json_get(&reply.data, "next_created_at"));
+                const char *next_id = json_get_str(json_get(&reply.data, "next_id"));
+                ASSERT(next_id != NULL);
+                (void)snprintf(previous_id, sizeof(previous_id), "%s", next_id);
+                ASSERT_EQ(previous_time, (int64_t)(9 - seen));
+            }
             zcl_command_reply_free(&reply);
+            json_free(&input); json_free(&page_posts);
         }
         ASSERT_EQ(seen, (size_t)8);
         json_free(&body);
@@ -5602,6 +5618,87 @@ static int test_ops_state_covered_reply_serializes(void)
         PASS();
     } _test_next:;
     json_free(&env);
+    return failures;
+}
+
+static char *ops_supervisor_dump_rpc(const char *method, const char *params_json)
+{
+    if (strcmp(method, "dumpstate")) return NULL;
+    struct json_value params, result;
+    json_init(&params); json_init(&result);
+    bool ok = json_read(&params, params_json, strlen(params_json)) &&
+              diag_rpc_dumpstate_builtin(&params, false, &result);
+    char wire[65536];
+    size_t n = ok ? json_write(&result, wire, sizeof(wire)) : 0;
+    json_free(&params); json_free(&result);
+    return n && n < sizeof(wire) ? strdup(wire) : NULL;
+}
+
+static bool ops_supervisor_execute(const char *key, struct json_value *env)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = find_spec(reg, "ops.state");
+    struct zcl_command_context ctx = {.registry = reg, .granted_capabilities = UINT64_MAX,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    bool ok = spec && json_push_kv_str(&input, "subsystem", "supervisor") &&
+              (!key || json_push_kv_str(&input, "key", key));
+    char wire[4097]; enum zcl_command_exit code;
+    size_t n = ok ? zcl_command_registry_execute_json(reg, spec, &ctx, &input,
+        false, "ops.state", "normal", 0, 0, NULL, wire, sizeof(wire), &code) : 0;
+    json_free(&input);
+    return n > 0 && n <= 4096 && json_read(env, wire, n);
+}
+
+static int test_ops_supervisor_drilldown(void)
+{
+    int failures = 0;
+    static struct liveness_contract children[25];
+    struct json_value env;
+    supervisor_reset_for_testing();
+    supervisor_domain_t *domain = supervisor_create_domain("net");
+    bool prepared = domain != NULL;
+    for (int i = 0; prepared && i < 24; i++) {
+        char name[48]; (void)snprintf(name, sizeof(name), "net.fixture_%02d", i);
+        liveness_contract_init(&children[i], name);
+        supervisor_child_id id = supervisor_register_in_domain(domain, &children[i]);
+        prepared = id != SUPERVISOR_INVALID_ID;
+        if (prepared && i == 0) { supervisor_tick(id); supervisor_progress(id, 42); }
+    }
+    supervisor_domain_t *single = supervisor_create_domain("single");
+    liveness_contract_init(&children[24], "single.fixture");
+    prepared = prepared && single &&
+        supervisor_register_in_domain(single, &children[24]) != SUPERVISOR_INVALID_ID;
+    node_rpc_client_set_test_hook(ops_supervisor_dump_rpc);
+    TEST("ops.state supervisor supports bounded summary and exact child") {
+        ASSERT(prepared);
+        json_init(&env); ASSERT(ops_supervisor_execute("summary", &env));
+        const struct json_value *state = json_get(json_get(&env, "data"), "state");
+        ASSERT(json_get_bool(json_get(&env, "ok"))); ASSERT(json_get(state, "running"));
+        ASSERT(json_get(state, "tick_ms")); ASSERT(!json_get(state, "domains")); json_free(&env);
+        json_init(&env); ASSERT(ops_supervisor_execute("net.fixture_00", &env));
+        state = json_get(json_get(&env, "data"), "state");
+        ASSERT(json_get_bool(json_get(&env, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(state, "name")), "net.fixture_00");
+        ASSERT_EQ(json_get_int(json_get(state, "progress_marker")), 42);
+        ASSERT(json_get(state, "ticks_run")); ASSERT(json_get(state, "stall_fires")); json_free(&env);
+        json_init(&env); ASSERT(ops_supervisor_execute("single", &env));
+        state = json_get(json_get(&env, "data"), "state");
+        ASSERT_STR_EQ(json_get_str(json_get(state, "name")), "single");
+        ASSERT_EQ(json_size(json_get(state, "children")), 1u); json_free(&env);
+        json_init(&env); ASSERT(ops_supervisor_execute("does-not-exist", &env));
+        ASSERT(!json_get_bool(json_get(&env, "ok"))); json_free(&env);
+        json_init(&env); ASSERT(ops_supervisor_execute(NULL, &env));
+        const struct json_value *page = json_get(json_get(&env, "data"), "_page");
+        ASSERT(json_get_bool(json_get(page, "truncated"))); ASSERT(!json_get(page, "next_cursor"));
+        const struct json_value *next = json_at(json_get(&env, "next"), 0);
+        ASSERT(strstr(json_get_str(json_get(next, "reason")), "key=summary") != NULL);
+        json_free(&env);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    supervisor_reset_for_testing();
     return failures;
 }
 
@@ -7681,6 +7778,7 @@ int test_command_registry_catalog(void)
     failures += test_ops_dash_dashboards_ported();
     failures += test_ops_state_requires_subsystem();
     failures += test_ops_state_covered_reply_serializes();
+    failures += test_ops_supervisor_drilldown();
     failures += test_dev_vcs_revert_release_stub();
     failures += test_dev_vcs_seal_grant_release_stub();
     failures += test_is_root_ownership();

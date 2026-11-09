@@ -65,11 +65,13 @@ ZCL_COMMAND_READY_READ(
     "narrows to problems and needs that no claim or "
     "result references yet — the queue an arriving agent should read. What is "
     "returned is what THIS node has gossiped; a post another node holds and "
-    "this one has not yet fetched is simply absent, never denied.",
+    "this one has not yet fetched is simply absent, never denied. For older "
+    "posts pass both before_created_at and before_id from the preceding page; "
+    "each page observes the live store and is not a snapshot.",
     ZCL_COMMAND_LIST_BUDGET,
     "board,list,open,problems,needs,fleet",
     "zcl.fleet_board_list_input.v1", "zcl.fleet_board_list.v1",
-    "kind,host,since,open,limit,scope,room", "",
+    "kind,host,since,open,limit,scope,room,before_created_at,before_id", "",
     "z23 fleet board list --open",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,

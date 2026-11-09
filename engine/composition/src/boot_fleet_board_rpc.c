@@ -66,7 +66,7 @@ static bool fb_wiki_view(const struct json_value *in, struct json_value *result,
 /* One post as a JSON object. Public projection: the host is rendered as its
  * full public key hex, because a board reader must be able to check a
  * signature themselves rather than trust this node's rendering of it. */
-static bool fb_render_post_fields(struct json_value *into,
+bool fb_render_post_fields(struct json_value *into,
                            const struct db_fleet_board_post *row, bool include_text)
 {
     bool ok = true;
@@ -110,27 +110,6 @@ static void fb_render_post(struct json_value *into,
                            const struct db_fleet_board_post *row)
 {
     fb_render_post_fields(into, row, true);
-}
-
-static void fb_render_list(struct json_value *result,
-                           const struct db_fleet_board_post *rows, int n)
-{
-    json_set_object(result);
-    json_push_kv_bool(result, "ok", true);
-    struct json_value arr;
-    json_init(&arr);
-    json_set_array(&arr);
-    for (int i = 0; i < n; i++) {
-        struct json_value item;
-        json_init(&item);
-        json_set_object(&item);
-        fb_render_post(&item, &rows[i]);
-        (void)json_push_back(&arr, &item);
-        json_free(&item);
-    }
-    (void)json_push_kv(result, "posts", &arr);
-    json_free(&arr);
-    json_push_kv_int(result, "returned", n);
 }
 
 /* The two signed times: ttl, and created_at. created_at defaults to this
@@ -445,69 +424,6 @@ static void fb_op_wiki_write(struct node_db *ndb, const struct json_value *in,
     }
     if (!fb_wiki_write_receipt(result, &out, status == FLEET_WIKI_WRITE_REPLAY))
         fb_error(result, "WIKI_OUTCOME_UNKNOWN", "mutation committed but receipt projection failed; reconcile the same request key");
-}
-
-static void fb_op_list(struct node_db *ndb, const struct json_value *in,
-                       struct json_value *result, int64_t now)
-{
-    struct fleet_board_filter filter;
-    memset(&filter, 0, sizeof(filter));
-    const char *kind = fb_str(in, "kind", NULL);
-    if (kind && kind[0] && !fleet_board_kind_from_name(kind, &filter.kind)) {
-        fb_error(result, "BAD_KIND", "unknown post kind");
-        return;
-    }
-    const char *host = fb_str(in, "host", NULL);
-    if (host && host[0]) {
-        if (!fleet_board_id_from_hex(host, filter.host_pubkey)) {
-            fb_error(result, "BAD_HOST",
-                     "host must be a 64-character public key hex");
-            return;
-        }
-        filter.host_set = true;
-    }
-    filter.since = fb_int(in, "since", 0);
-    filter.open_only = fb_bool(in, "open");
-    (void)snprintf(filter.slug, sizeof(filter.slug), "%s",
-                   fb_str(in, "slug", ""));
-    const char *scope = fb_str(in, "scope", NULL);
-    if (scope && scope[0]) {
-        /* "legacy" selects the pre-scope rows explicitly; the name "public"
-         * means the signed public scope, while a bare list sees both. */
-        if (strcmp(scope, "legacy") == 0) {
-            filter.scope_set = true;
-            filter.scope = FLEET_BOARD_SCOPE_LEGACY_PUBLIC;
-        } else if (fleet_board_scope_from_name(scope, &filter.scope)) {
-            filter.scope_set = true;
-        } else {
-            fb_error(result, "BAD_SCOPE",
-                     "scope must be public, fleet, or legacy");
-            return;
-        }
-    }
-    (void)snprintf(filter.room, sizeof(filter.room), "%s",
-                   fb_str(in, "room", ""));
-
-    int64_t limit = fb_int(in, "limit", 50);
-    if (limit <= 0 || limit > FLEET_BOARD_LIST_MAX)
-        limit = FLEET_BOARD_LIST_MAX;
-
-    struct db_fleet_board_post *rows =
-        zcl_calloc((size_t)limit, sizeof(*rows), "fleet_board.rpc.list");
-    if (!rows) {
-        fb_error(result, "BOARD_ALLOC_FAILED",
-                 "the bounded board result snapshot could not be allocated");
-        return;
-    }
-    bool complete = false;
-    int n = db_fleet_board_list_checked(ndb, &filter, now, rows, (size_t)limit,
-                                        &complete);
-    if (complete)
-        fb_render_list(result, rows, n);
-    else
-        fb_error(result, "BOARD_READ_FAILED",
-                 "the board list could not be read completely; try again");
-    free(rows);
 }
 
 static void fb_op_show(struct node_db *ndb, const struct json_value *in,
@@ -1134,7 +1050,8 @@ static void fb_op_wiki_history(struct node_db *ndb,
     }
     int n = db_fleet_board_wiki_history_in(ndb, view, slug, rows,
                                            FLEET_BOARD_LIST_MAX);
-    fb_render_list(result, rows, n);
+    if (!fb_render_list(result, rows, n))
+        fb_error(result, "BOARD_ALLOC_FAILED", "the wiki history could not be allocated");
     free(rows);
 }
 

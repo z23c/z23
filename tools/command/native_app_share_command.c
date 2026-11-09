@@ -232,6 +232,28 @@ static void sh_commit(const struct zcl_command_request *request, struct sh_work 
     else { json_free(&reply->data); reply->data = result.data; json_init(&result.data); reply->error.mutated = true; }
     zcl_command_reply_free(&result);
 }
+struct zcl_app_share_session { struct sh_work work; struct zcl_command_request request; };
+
+struct zcl_app_share_session *zcl_app_share_prepare(const char *name, const char *output,
+    const struct app_selection *selection, struct zcl_command_reply *reply)
+{
+    if (!selection) { sh_fail(reply, "SELECTION_UNAVAILABLE", "A saved choice is required."); return NULL; }
+    struct zcl_app_share_session *s = zcl_calloc(1, sizeof(*s), "app-share-session");
+    if (!s) { sh_fail(reply, "OUT_OF_MEMORY", "Cannot prepare sharing."); return NULL; }
+    struct sh_work *w = &s->work;
+    if (sh_values(w, name, output, reply) && sh_selection(w, reply) && sh_snapshot(w, selection, reply) &&
+        sh_copy(w, reply) && sh_key(w, reply) && sh_plan(&s->request, w, reply)) return s;
+    free(s); return NULL;
+}
+void zcl_app_share_identity(const struct zcl_app_share_session *s, struct zcl_app_share_identity *id)
+{
+    const struct sh_work *w = &s->work;
+    *id = (struct zcl_app_share_identity){w->name, w->semver, w->version, w->package, w->publisher, w->release};
+}
+void zcl_app_share_commit(struct zcl_app_share_session *s, struct zcl_command_reply *reply)
+{ sh_commit(&s->request, &s->work, reply); }
+void zcl_app_share_dispose(struct zcl_app_share_session *s)
+{ if (s) { app_confirm_free(&s->work.view); free(s); } }
 static void sh_run(const struct zcl_command_request *request, struct zcl_command_reply *reply,
                    const char *name, const char *output, app_confirm_presenter presenter,
                    void *context, const struct app_selection *snapshot)

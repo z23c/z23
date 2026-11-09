@@ -964,12 +964,13 @@ int check_rpc_tls_start_self_signed(void)
 /* ── absolute-deadline RPC transport and optional board observation ───────
  * Synthetic cookies, private fixture dirs and loopback listeners only; hooks,
  * env, the client endpoint and SIGUSR1 are restored when the suite returns. */
-#define RT_BODY "{\"ok\":true,\"posts\":[{\"id\":\"synthetic\",\"kind\":" \
-    "\"need\",\"agent\":\"test-observer\",\"text\":\"retained\"}]}"
+#define RT_BODY "{\"ok\":true,\"returned\":1,\"has_more\":false,\"posts\":[{" \
+    "\"id\":\"0000000000000000000000000000000000000000000000000000000000000001\"," \
+    "\"created_at\":1,\"kind\":\"need\",\"agent\":\"test-observer\",\"text\":\"retained\"}]}"
 #define RT_ENVELOPE "{\"result\":" RT_BODY ",\"error\":null,\"id\":1}"
 
 #define RT_BIG_LEN 66000 /* just past the client's 64 KiB first buffer: growth comes with a few KB still unread */
-enum rt_mode { RT_STALL, RT_HEALTHY, RT_DRIP, RT_BIG };
+enum rt_mode { RT_STALL, RT_HEALTHY, RT_DRIP, RT_BIG, RT_BOARD_MISSING, RT_BOARD_BAD_TYPE };
 struct rt_server {
     platform_socket_t listener;
     uint16_t port;
@@ -1016,6 +1017,10 @@ static void *rt_serve(void *arg)
     struct rt_server *s = arg;
     static char big[RT_BIG_LEN + 128], reply[RT_BIG_LEN + 256]; /* one server runs at a time */
     const char *env = RT_ENVELOPE;
+    if (s->mode == RT_BOARD_MISSING)
+        env = "{\"result\":{\"ok\":true,\"posts\":[]},\"error\":null,\"id\":1}";
+    if (s->mode == RT_BOARD_BAD_TYPE)
+        env = "{\"result\":{\"ok\":true,\"posts\":[],\"has_more\":\"false\"},\"error\":null,\"id\":1}";
     if (s->mode == RT_BIG) { /* a valid envelope padded past the first buffer, forcing growth */
         int n = snprintf(big, sizeof(big), "{\"result\":{\"pad\":\"");
         memset(big + n, 'x', RT_BIG_LEN), env = big;
@@ -1242,6 +1247,8 @@ static const struct rt_real rt_real_cases[] = {
     { .name = "control: relative 40ms + 300ms cookie still sends", .want = "", .min_ms = 250, .req = 1, .call = rt_relative40, .fifo = true },
     { .name = "board observation: healthy data", .want = "PASSED", .mode = RT_HEALTHY, .req = 1, .call = rt_board, .arg = 2000 },
     { .name = "direct board: healthy reply delayed 300ms unchanged", .want = "PASSED", .mode = RT_HEALTHY, .delay = 300, .min_ms = 280, .req = 1, .call = rt_board },
+    { .name = "board observation: missing page flag refused", .want = "BAD_TOOL_BODY", .mode = RT_BOARD_MISSING, .req = 1, .call = rt_board, .arg = 2000 },
+    { .name = "board observation: wrong page flag type refused", .want = "BAD_TOOL_BODY", .mode = RT_BOARD_BAD_TYPE, .req = 1, .call = rt_board, .arg = 2000 },
     { .name = "board observation: 300ms reply honestly unknown at FAST cap", .want = "NODE_UNAVAILABLE",
       .mode = RT_HEALTHY, .delay = 300, .min_ms = 230, .max_ms = 450, .req = 1, .call = rt_board, .arg = 2000 },
     { .name = "board: bootstrap 300ms exhausts 40ms with 0 RPC", .want = RT_EXH, .min_ms = 280,

@@ -9,6 +9,7 @@
 #include "command/native_app_receive_flow.h"
 #include "command/native_app_offer.h"
 #include "command/native_app_share_command.h"
+#include "command/native_app_publish_command.h"
 #include "command/native_app_share_reveal.h"
 #include "command/native_app_personalize_view.h"
 #include "command/native_zcode_package_copy.h"
@@ -54,6 +55,8 @@ struct library {
     struct zcl_present_model_v1 model;
     struct zcl_app_offer_row *public_rows;
     size_t public_count, public_index;
+    struct zcl_app_offer_page public_page;
+    unsigned public_page_number;
     app_library_catalog catalog;
     app_library_get get;
 };
@@ -156,33 +159,54 @@ static void al_public_model(struct library *w)
     (void)snprintf(m->request_id, sizeof(m->request_id), "library-public-%zu", w->public_index);
     (void)snprintf(m->title, sizeof(m->title), "Public apps");
     if (!w->public_count) {
-        (void)snprintf(m->summary, sizeof(m->summary), "This node has no observed public app offers.");
+        (void)snprintf(m->summary, sizeof(m->summary), "%s", w->public_page.has_more ?
+            "No usable offers on this page. Older posts may contain offers." :
+            "No usable offers on this page. This is a live node view.");
+        if (w->public_page.has_more) al_choice(m, "public-older", "Older offers", "Read the next page.");
+        al_choice(m, "public-refresh", "Refresh newest", "Start again from newest posts.");
         al_choice(m, "home", "Back", "Return to My Apps.");
         return;
     }
     const struct zcl_app_offer_row *r = &w->public_rows[w->public_index];
-    (void)snprintf(m->summary, sizeof(m->summary), "Observed offer %zu of %zu. %.80s",
-                   w->public_index + 1, w->public_count, r->offer.name);
+    (void)snprintf(m->summary, sizeof(m->summary), "Live page %u, offer %zu of %zu. %.65s",
+                   w->public_page_number, w->public_index + 1, w->public_count, r->offer.name);
     char value[ZCL_PRESENT_MODEL_VALUE_MAX + 1];
     (void)snprintf(value, sizeof(value), "Publisher %.12s; root %.12s", r->offer.publisher, r->offer.root);
     al_choice(m, "get", "Review this offer", value);
     al_choice(m, "public-previous", "Previous offer", w->public_index ? "Browse back." : "First offer.");
     al_choice(m, "public-next", "Next offer", w->public_index + 1 < w->public_count ? "Browse forward." : "Last offer.");
-    al_choice(m, "home", "Back", "Return to My Apps.");
+    al_choice(m, "public-options", "Page options", "Older offers, refresh or back.");
 }
 
-static bool al_public_load(struct library *w, struct zcl_command_reply *reply)
+static void al_public_options(struct library *w)
+{
+    al_model(w);
+    struct zcl_present_model_v1 *m = &w->model;
+    m->item_count = m->action_count = 0;
+    (void)snprintf(m->request_id, sizeof(m->request_id), "library-public-options");
+    (void)snprintf(m->summary, sizeof(m->summary), "Live results can change. Refresh to see newer posts.");
+    al_choice(m, "public-older", "Older offers", w->public_page.has_more ? "Read the next page." : "No older page reported.");
+    al_choice(m, "public-refresh", "Refresh newest", "Start again from newest posts.");
+    al_choice(m, "public-back", "Back to offers", "Keep this page.");
+    al_choice(m, "home", "My Apps", "Return to My Apps.");
+}
+
+static bool al_public_load(struct library *w, bool older, struct zcl_command_reply *reply)
 {
     if (!w->public_rows) w->public_rows = zcl_calloc(ZCL_APP_OFFER_ROWS_MAX, sizeof(*w->public_rows), "app-library-public");
     if (!w->public_rows) return al_fail(reply, "OUT_OF_MEMORY", "Cannot allocate the public catalog.");
     struct zcl_command_reply why;
-    bool ok = w->catalog ? w->catalog(w->prepare_context, w->public_rows, ZCL_APP_OFFER_ROWS_MAX, &w->public_count, &why) :
-        zcl_app_offer_catalog(w->public_rows, ZCL_APP_OFFER_ROWS_MAX, &w->public_count, &why);
+    struct zcl_app_offer_page page = {0};
+    const struct zcl_app_offer_position *before = older ? &w->public_page.next : NULL;
+    bool ok = w->catalog ? w->catalog(w->prepare_context, w->public_rows, ZCL_APP_OFFER_ROWS_MAX, &page.count, &why) :
+        zcl_app_offer_catalog_page(w->public_rows, ZCL_APP_OFFER_ROWS_MAX, before, &page, &why);
     if (!ok) app_confirm_forward_failure(reply, &why);
     zcl_command_reply_free(&why);
     if (!ok) return false;
-    if (w->public_count > ZCL_APP_OFFER_ROWS_MAX) return al_fail(reply, "CATALOG_OVERFLOW", "The public catalog exceeds its limit.");
-    w->public_index = 0; w->page = 4; return true;
+    if (page.count > ZCL_APP_OFFER_ROWS_MAX) return al_fail(reply, "CATALOG_OVERFLOW", "The public catalog exceeds its limit.");
+    w->public_page = page; w->public_count = page.count; w->public_index = 0;
+    w->public_page_number = older ? w->public_page_number + 1 : 1;
+    w->page = 4; return true;
 }
 
 static bool al_get_call(struct library *w, const struct json_value *input,
@@ -687,6 +711,7 @@ static bool al_share(struct library *w, const struct app_launch_env *env, struct
     if (w->sharer) w->sharer(w->prepare_context, &row->selection, w->shared_path, reply);
     else zcl_native_app_share_snapshot(row->entry.id, w->shared_path, reply, &row->selection);
     bool resume = al_share_result(w, notice, reply, why, sizeof(why));
+    if (resume) w->page = 1;
     app_confirm_free(notice); free(notice);
     return resume;
 }
@@ -699,7 +724,7 @@ static void al_detail_model(struct library *w)
     if (w->page == 1) {
         al_choice(m, "open", "Open app", "Use this app.");
         al_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
-        al_choice(m, "share", "Share this version", r->saved ? "Create a local share file." : "Keep a version first.");
+        al_choice(m, "share", "Share this version", r->saved ? "Choose how to share." : "Keep a version first.");
     } else {
         (void)snprintf(m->request_id, sizeof(m->request_id), "library-help");
         (void)snprintf(m->summary, sizeof(m->summary), "%s", w->setup[0]
@@ -717,6 +742,61 @@ static void al_detail_model(struct library *w)
     }
     al_choice(m, "back", "Back", "Return to your selected app.");
     if (w->page != 1) al_choice(m, "cancel", "Cancel", "Close My Apps.");
+}
+static void al_share_options(struct library *w)
+{
+    al_model(w);
+    struct zcl_present_model_v1 *m = &w->model;
+    m->item_count = m->action_count = 0;
+    (void)snprintf(m->request_id, sizeof(m->request_id), "library-share-options");
+    (void)snprintf(m->summary, sizeof(m->summary), "Choose how to share this saved version.");
+    al_choice(m, "share-file", "Create share file", "Send a file to someone.");
+    al_choice(m, "publish", "Publish publicly", "Offer this version on the public apps board.");
+    al_choice(m, "share-back", "Back", "Return to this app.");
+}
+static void al_publish_notice(struct library *w, struct zcl_command_reply *reply)
+{
+    const char *post = zcl_package_copy_str(&reply->data, "post_id");
+    const char *root = zcl_package_copy_str(&reply->data, "package_root");
+    const char *next = zcl_package_copy_str(&reply->data, "next");
+    struct app_confirm *v = zcl_calloc(1, sizeof(*v), "library-publish-result");
+    char why[256] = {0};
+    if (v) {
+        zcl_present_model_init_v1(&v->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+        v->window_title = "Public offer published";
+        v->copy_text = next;
+        (void)snprintf(v->model.request_id, sizeof(v->model.request_id), "library-publish-result");
+        (void)snprintf(v->model.title, sizeof(v->model.title), "Published to public apps");
+        (void)snprintf(v->model.summary, sizeof(v->model.summary), "Posted on this node for up to 24 hours. Other people can discover it after their nodes receive the offer. Press C to copy a command for the recipient.");
+        v->model.action_count = 4;
+        app_confirm_action(&v->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
+        app_confirm_action(&v->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+        app_confirm_action(&v->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+        app_confirm_action(&v->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "done", "Done");
+    }
+    bool shown = v && post && root && next && next[0] && strlen(next) <= ZCL_PRESENT_COPY_TEXT_MAX &&
+        app_confirm_field(&v->model, "Offer: ", post) &&
+        app_confirm_field(&v->model, "Package: ", root) && app_confirm_prepare(v, why, sizeof(why)) &&
+        app_confirm_show(v, w->notice, w->prepare_context, why, sizeof(why));
+    if (v) { app_confirm_free(v); free(v); }
+    if (!shown) zcl_package_copy_fail(reply, "PRESENTATION_FAILED", true,
+        "Offer was published but its result could not be displayed.", post ? post : "app.publish");
+}
+static bool al_publish(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply)
+{
+    const struct library_row *row = &w->rows[w->index];
+    if (!row->saved) return al_fail(reply, "SELECTION_UNAVAILABLE", "Keep a version before publishing.");
+    if (!al_current(row, env, reply)) return false;
+    struct zcl_command_reply inner; zcl_command_reply_init(&inner, "zcl.app_publish.v1");
+    zcl_native_app_publish_snapshot(row->entry.id, &row->selection, &inner, w->notice, w->prepare_context);
+    const char *status = zcl_package_copy_str(&inner.data, "status");
+    bool canceled = inner.status == ZCL_COMMAND_STATUS_PASSED && status && !strcmp(status, "canceled");
+    if (canceled) { zcl_command_reply_free(&inner); return true; }
+    if (inner.status != ZCL_COMMAND_STATUS_PASSED) app_confirm_forward_failure(reply, &inner);
+    else { json_free(&reply->data); reply->data = inner.data; json_init(&inner.data); reply->error.mutated = true; }
+    zcl_command_reply_free(&inner);
+    if (reply->status == ZCL_COMMAND_STATUS_PASSED) al_publish_notice(w, reply);
+    return false;
 }
 /* Return true only while navigation should continue. Open is terminal. */
 static bool al_refresh_after_help(struct library *w, const struct app_launch_env *env,
@@ -744,23 +824,35 @@ static bool al_public_navigate(struct library *w, const char *id, const char *da
 {
     if (!strcmp(id, "saved")) { w->page = 0; return true; }
     if (!strcmp(id, "home")) { w->page = 3; return true; }
-    if (!strcmp(id, "public")) return al_public_load(w, reply);
+    if (!strcmp(id, "public") || !strcmp(id, "public-refresh")) return al_public_load(w, false, reply);
+    if (!strcmp(id, "public-older")) return !w->public_page.has_more || al_public_load(w, true, reply);
+    if (!strcmp(id, "public-options")) { w->page = 5; return true; }
+    if (!strcmp(id, "public-back")) { w->page = 4; return true; }
     if (!strcmp(id, "public-previous")) { if (w->public_index) --w->public_index; return true; }
     if (!strcmp(id, "public-next")) { if (w->public_index + 1 < w->public_count) ++w->public_index; return true; }
     if (!strcmp(id, "get")) return al_public_get(w, datadir, reply);
     return true;
 }
 
+static bool al_share_navigate(struct library *w, const char *id, const struct app_launch_env *env,
+    struct zcl_command_reply *reply)
+{
+    if (!strcmp(id, "share-back")) { w->page = 1; return true; }
+    if (!strcmp(id, "share-file")) return al_share(w, env, reply);
+    if (!strcmp(id, "publish")) return al_publish(w, env, reply);
+    return true;
+}
 static bool al_navigate(struct library *w, unsigned action, const struct app_launch_env *env,
     const char *exe, const char *datadir, struct zcl_command_reply *reply)
 {
     const char *id = w->model.actions[action].id;
+    if (w->page == 6) return al_share_navigate(w, id, env, reply);
     if (w->page >= 3) return al_public_navigate(w, id, datadir, reply);
     if (!strcmp(id, "previous")) { if (w->index) --w->index; return true; }
     if (!strcmp(id, "next")) { if (w->index + 1 < w->count) ++w->index; return true; }
     if (!strcmp(id, "choose")) { w->page = 1; return true; }
     if (!strcmp(id, "back")) { w->setup[0] = 0; if (w->page == 2) return al_refresh_after_help(w, env, reply); --w->page; return true; }
-    if (!strcmp(id, "share")) return al_share(w, env, reply);
+    if (!strcmp(id, "share")) { w->page = 6; return true; }
     if (!strcmp(id, "help")) {
         if (!al_setup(w, env, exe, datadir, reply)) return false;
         w->page = 2; return true;
@@ -772,6 +864,16 @@ static bool al_navigate(struct library *w, unsigned action, const struct app_lau
     }
     return true;
 }
+static void al_current_model(struct library *w)
+{
+    if (w->page == 3) al_home_model(w);
+    else if (w->page == 4) al_public_model(w);
+    else if (w->page == 5) al_public_options(w);
+    else if (w->page == 6) al_share_options(w);
+    else if (w->page) al_detail_model(w);
+    else al_model(w);
+}
+
 static void al_run(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, const char *exe, const char *datadir,
     app_library_preparer preparer, app_library_sharer sharer, app_confirm_presenter notice,
@@ -784,9 +886,7 @@ static void al_run(const struct app_launch_env *env, struct zcl_command_reply *r
     char why[256] = {0};
     bool loaded = al_load(w, env, reply);
     while (loaded) {
-        if (w->page == 3) al_home_model(w);
-        else if (w->page == 4) al_public_model(w);
-        else if (w->page) al_detail_model(w); else al_model(w);
+        al_current_model(w);
         struct zcl_present_window_event_v1 event = {0};
         if (!zcl_present_model_validate_v1(&w->model, why, sizeof(why)) ||
             !presenter(context, &w->model, w->setup[0] ? w->setup : NULL, &event, why, sizeof(why))) {

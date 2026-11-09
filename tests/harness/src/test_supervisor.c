@@ -20,6 +20,7 @@
  * runs between sub-tests to keep the registry clean. */
 
 #include "test/test_core.h"
+#include "base/safe_alloc.h"
 #include "supervisors/legacy_mirror_supervisor.h"
 #include "util/supervisor.h"
 #include "util/blocker.h"
@@ -1218,6 +1219,42 @@ static int check_start_stop_lifecycle(void)
     return failures;
 }
 
+static int check_supervisor_keys(void)
+{
+    int failures = 0;
+    struct json_value v;
+    json_init(&v);
+    SUP_CHECK("summary returns root scalar fields", supervisor_dump_state_json(&v, "summary") &&
+        json_get(&v, "running") && json_get(&v, "tick_ms") && !json_get(&v, "domains"));
+    json_free(&v);
+    json_init(&v);
+    zcl_alloc_fault_fail_nth("json_push_kv_key", 1);
+    bool allocation_ok = supervisor_dump_state_json(&v, "summary");
+    zcl_alloc_fault_clear();
+    SUP_CHECK("summary allocation failure refused", !allocation_ok);
+    json_free(&v);
+    json_init(&v);
+    bool found = supervisor_dump_state_json(&v, "snap.one");
+    SUP_CHECK("exact child lookup retains identity and counters", found &&
+        json_get_str(json_get(&v, "name")) && !strcmp(json_get_str(json_get(&v, "name")), "snap.one") &&
+        json_get_int(json_get(&v, "progress_marker")) == 42 && json_get(&v, "ticks_run"));
+    json_free(&v);
+    json_init(&v);
+    SUP_CHECK("unknown supervisor key refused", !supervisor_dump_state_json(&v, "not-a-supervisor-key"));
+    json_free(&v);
+    SUP_CHECK("colliding domain created", supervisor_create_domain("snap.one") != NULL);
+    json_init(&v);
+    SUP_CHECK("domain wins over same-named child", supervisor_dump_state_json(&v, "snap.one") &&
+        json_get(&v, "children") && !json_get(&v, "progress_marker"));
+    json_free(&v);
+    SUP_CHECK("summary domain created", supervisor_create_domain("summary") != NULL);
+    json_init(&v);
+    SUP_CHECK("summary domain retains precedence", supervisor_dump_state_json(&v, "summary") &&
+        json_get(&v, "children") && !json_get(&v, "running"));
+    json_free(&v);
+    return failures;
+}
+
 static int check_snapshot_and_dump(void)
 {
     int failures = 0;
@@ -1270,6 +1307,8 @@ static int check_snapshot_and_dump(void)
         SUP_CHECK("dump has root_orphans array of size 2",
             kids && json_size(kids) == 2);
         json_free(&v);
+
+        failures += check_supervisor_keys();
     }
     return failures;
 }

@@ -1300,6 +1300,16 @@ bool zcl_command_registry_input_descriptor(
     if (!strcmp(spec->path, "dev.land.submit") && !strcmp(key, "precheck_budget_ms")) {
         out->type = JSON_INT; out->minimum = 180000; out->maximum = 720000; return true;
     }
+    if (!strcmp(spec->path, "fleet.board.list")) {
+        if (!strcmp(key, "before_created_at")) {
+            out->type = JSON_INT; out->minimum = 1; out->maximum = INT64_MAX;
+            return true;
+        }
+        if (!strcmp(key, "before_id")) {
+            out->type = JSON_STR; out->max_bytes = 64;
+            return true;
+        }
+    }
     if (cr_app_customize_query(spec, key)) {
         out->type = JSON_STR; out->max_bytes = 64; return true;
     }

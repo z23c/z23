@@ -10,6 +10,9 @@
 #include "command/native_app_personalize_view.h"
 #endif
 #include "command/native_app_share_command.h"
+#include "command/native_app_publish_command.h"
+#include "command/native_app_offer.h"
+#include "command/native_app_library_command.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_object.h"
 #include "vcs/vcs_seal.h"
@@ -2841,6 +2844,222 @@ static bool ast_journey(struct ac_fixture *f)
     ok = ok && ast_verify_bundle(f, output, publisher, package);
     return ok && ast_receive(f, output, publisher, package) && ast_refusals(f, version, output, publisher);
 }
+static bool ast_snapshot_commit_after_change(struct ac_fixture *f, const char *output,
+    const char *version, const char *publisher, char package[65])
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.share.v1");
+    struct zcl_app_share_session *s = zcl_app_share_prepare("skycombat", output, &f->kept, &reply);
+    if (!s) { zcl_command_reply_free(&reply); return false; }
+    struct app_selection updated;
+    if (app_selection_save(f->env.state_dir, f->kept.revision, &f->kept, &updated) != APP_SELECTION_OK) {
+        zcl_app_share_dispose(s); zcl_command_reply_free(&reply); return false;
+    }
+    zcl_app_share_commit(s, &reply); zcl_app_share_dispose(s);
+    bool ok = reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
+        !strcmp(reply.error.code, "SELECTION_STALE") && access(output, F_OK) != 0;
+    f->kept = updated;
+    zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.test.share.v1");
+    s = zcl_app_share_prepare("skycombat", output, &f->kept, &reply);
+    if (!s) { zcl_command_reply_free(&reply); return false; }
+    zcl_app_share_commit(s, &reply); zcl_app_share_dispose(s);
+    ok = ok && reply.status == ZCL_COMMAND_STATUS_PASSED && reply.error.mutated &&
+        ast_reply_is(&reply, "version", version) && ast_verify_bundle(f, output, publisher, package);
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool ast_snapshot_session(struct ac_fixture *f)
+{
+    char output[900], version[65], publisher[67], package[65];
+    snprintf(output, sizeof(output), "%s/snapshot-session.z23share", f->world.root);
+    if (!ast_prepare_selection(f, version, publisher, output) || !act_preserved(f, true)) return false;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.share.v1");
+    struct app_selection wrong = f->kept; wrong.version[0] ^= 1;
+    struct zcl_app_share_session *s = zcl_app_share_prepare("skycombat", output, &wrong, &reply);
+    bool ok = !s && !reply.error.mutated && !strcmp(reply.error.code, "SELECTION_STALE");
+    zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.test.share.v1");
+    s = zcl_app_share_prepare("skycombat", output, &f->kept, &reply);
+    if (!s) { zcl_command_reply_free(&reply); return false; }
+    struct zcl_app_share_identity id; zcl_app_share_identity(s, &id);
+    zcl_hex_encode(f->kept.package, 32, package);
+    ok = ok && !strcmp(id.version, version) && !strcmp(id.package, package) && !strcmp(id.publisher, publisher);
+    zcl_app_share_dispose(s);
+    ok = ok && access(output, F_OK) != 0 && errno == ENOENT && act_preserved(f, false);
+    zcl_command_reply_free(&reply);
+    return ok && ast_snapshot_commit_after_change(f, output, version, publisher, package);
+}
+struct ast_publish_view { struct ac_fixture *f; bool confirm, stale, observed; const char *version; };
+static int ast_publish_offers, ast_publish_posts;
+static bool ast_publish_fail_offer, ast_publish_fail_post, ast_publish_identity_ok;
+static char ast_publish_package[65], ast_publish_publisher[67], ast_publish_name[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
+static bool ast_publish_transport(const char *path, const struct json_value *input, struct zcl_command_reply *out)
+{
+    (void)input; zcl_command_reply_init(out, "zcl.test.publish.v1");
+    if (!strcmp(path, "core.network.onion.status")) {
+        const char *wire = "{\"bootstrap_state\":\"ready\",\"tor_ready\":true,\"onion_service_ready\":true,\"p2p_publish_ready\":true,\"onion_address\":\"abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion\",\"port_mapping\":{\"routes\":[{\"name\":\"p2p_tcp\",\"installed\":true,\"virtual_port\":28133}]}}";
+        return json_read(&out->data, wire, strlen(wire));
+    }
+    if (!strcmp(path, ZCL_APP_OFFER_BUNDLE_OFFER)) {
+        ast_publish_offers++;
+        if (ast_publish_fail_offer) {
+            zcl_command_reply_fail(out, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                "OFFER_FAILED", "execute", false, true, "fixture offer failure", path);
+            return false;
+        }
+        return json_push_kv_str(&out->data, "root", "1111111111111111111111111111111111111111111111111111111111111111") &&
+            json_push_kv_str(&out->data, "sha256", "2222222222222222222222222222222222222222222222222222222222222222") &&
+            json_push_kv_int(&out->data, "size", 123);
+    }
+    if (!strcmp(path, ZCL_APP_OFFER_BOARD_POST)) {
+        ast_publish_posts++;
+        const char *text = json_get_str(json_get(input, "text")); struct zcl_app_offer offer;
+        ast_publish_identity_ok = text && zcl_app_offer_parse(text, strlen(text), &offer) &&
+            !strcmp(offer.root, ast_publish_package) && !strcmp(offer.publisher, ast_publish_publisher);
+        if (ast_publish_identity_ok) (void)snprintf(ast_publish_name, sizeof(ast_publish_name), "%s", offer.name);
+        if (ast_publish_fail_post) {
+            zcl_command_reply_fail(out, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                "POST_UNKNOWN", "execute", true, true, "fixture response lost", path);
+            return false;
+        }
+        return json_push_kv_str(&out->data, "id", "3333333333333333333333333333333333333333333333333333333333333333");
+    }
+    return false;
+}
+static bool ast_publish_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    (void)pages; struct ast_publish_view *p = context; uint32_t count = 0;
+    p->observed = ast_field(model, "Saved version: ", p->version) &&
+        ast_field(model, "Public: ", "Sign and pin this saved version; post an offer to the public apps board for 24 hours.") &&
+        zcl_present_model_page_count_v1(model, &count, why, cap);
+    if (!p->observed) return false;
+    bool close = false, redraw = false;
+    if (!p->confirm) return ast_action(live, 0, &close, &redraw) && close;
+    for (uint32_t i = 1; i < count; ++i)
+        if (!ast_action(live, 2, &close, &redraw) || close || !redraw) return false;
+    if (p->stale) {
+        struct app_selection saved;
+        if (app_selection_save(p->f->env.state_dir, p->f->kept.revision, &p->f->kept, &saved) != APP_SELECTION_OK) return false;
+        p->f->kept = saved;
+    }
+    return ast_action(live, 3, &close, &redraw) && close;
+}
+static bool ast_fact_is(const struct json_value *facts, const char *key, const char *expected)
+{
+    const char *v = zcl_package_copy_str(facts, key);
+    return v && !strcmp(v, expected);
+}
+static bool ast_publish_failures(struct ac_fixture *f, struct ast_publish_view *view,
+    const char *version, const char *publisher)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.publish.v1");
+    ast_publish_fail_offer = true;
+    zcl_native_app_publish_snapshot("kept:skycombat", &f->kept, &reply, ast_publish_present, view);
+    const struct json_value *facts = json_get(&reply.data, "failure_facts");
+    bool ok = reply.status != ZCL_COMMAND_STATUS_PASSED && reply.error.mutated &&
+        !strcmp(reply.error.code, "OFFER_FAILED") && ast_publish_posts == 1 && facts &&
+        ast_fact_is(facts, "version", version) && ast_fact_is(facts, "package_root", ast_publish_package) &&
+        ast_fact_is(facts, "publisher_fingerprint", publisher) && ast_fact_is(facts, "board_status", "not_attempted");
+    zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.test.publish.v1");
+    ast_publish_fail_offer = false; ast_publish_fail_post = true;
+    zcl_native_app_publish_snapshot("kept:skycombat", &f->kept, &reply, ast_publish_present, view);
+    facts = json_get(&reply.data, "failure_facts");
+    ok = ok && reply.status != ZCL_COMMAND_STATUS_PASSED && reply.error.mutated && facts &&
+        !strcmp(reply.error.code, "POST_UNKNOWN") && ast_fact_is(facts, "board_status", "unknown") &&
+        ast_fact_is(facts, "version", version);
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool ast_publish_preconsent(struct ac_fixture *f, struct ast_publish_view *view)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.publish.v1");
+    zcl_native_app_publish_snapshot("kept:skycombat", &f->kept, &reply, ast_publish_present, view);
+    bool ok = view->observed && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
+        ast_reply_is(&reply, "status", "canceled") && !ast_publish_offers && !ast_publish_posts;
+    zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.test.publish.v1");
+    view->confirm = true; view->stale = true;
+    zcl_native_app_publish_snapshot("kept:skycombat", &f->kept, &reply, ast_publish_present, view);
+    ok = ok && reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
+        !strcmp(reply.error.code, "SELECTION_STALE") && !ast_publish_offers && !ast_publish_posts;
+    zcl_command_reply_free(&reply); view->stale = false; return ok;
+}
+struct ast_publish_library_view { struct ast_publish_view publish; unsigned menus, notices; };
+static bool ast_publish_library_present(void *context, const struct zcl_present_model_v1 *m,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    (void)context; (void)copy;
+    if (!zcl_present_model_validate_v1(m, why, cap)) return false;
+    const char *wanted = "choose";
+    if (!strcmp(m->request_id, "library-home")) wanted = "saved";
+    else if (!strcmp(m->request_id, "library-share-options")) wanted = "publish";
+    else {
+        for (uint32_t i = 0; i < m->action_count; ++i)
+            if (!strcmp(m->actions[i].id, "share")) wanted = "share";
+        unsigned index = 0, count = 0;
+        if (!strcmp(wanted, "choose") && sscanf(m->summary, "App %u of %u", &index, &count) == 2 && index < count)
+            wanted = "next";
+    }
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    for (uint32_t i = 0; i < m->action_count; ++i)
+        if (!strcmp(m->actions[i].id, wanted)) { event->action_index = i; return true; }
+    return false;
+}
+static bool ast_publish_library_notice(void *context, const struct zcl_present_model_v1 *m,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    struct ast_publish_library_view *v = context;
+    if (!strcmp(m->request_id, "library-publish-result")) {
+        bool close = false, redraw = false; v->notices++;
+        char expected[512];
+        int n = snprintf(expected, sizeof(expected), "z23 app get %s --root=%s --publisher=%s --offer=%s",
+            ast_publish_name, ast_publish_package, ast_publish_publisher,
+            "3333333333333333333333333333333333333333333333333333333333333333");
+        return n > 0 && (size_t)n < sizeof(expected) && pages && pages->page_count == 1 &&
+            pages->pages && pages->pages[0].copy_text && !strcmp(pages->pages[0].copy_text, expected) &&
+            !strcmp(m->summary, "Posted on this node for up to 24 hours. Other people can discover it after their nodes receive the offer. Press C to copy a command for the recipient.") &&
+            ast_action(live, 0, &close, &redraw) && close;
+    }
+    v->publish.confirm = v->menus++ != 0;
+    return ast_publish_present(&v->publish, m, pages, live, why, cap);
+}
+static bool ast_publish_library(struct ac_fixture *f, const char *version)
+{
+    struct ast_publish_library_view view = {.publish = {.f = f, .version = version}};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.library.v1");
+    int posts = ast_publish_posts;
+    zcl_test_app_library_public_at_exe(&f->env, "/fixture/z23", f->world.alice_datadir,
+        &reply, ast_publish_library_present, &view, ast_publish_library_notice);
+    bool ok = reply.status == ZCL_COMMAND_STATUS_PASSED && view.menus == 2 && view.notices == 1 &&
+        ast_publish_posts == posts + 1 && ast_publish_identity_ok && json_get(&reply.data, "post_id") &&
+        !json_get(&reply.data, "status");
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool ast_publish_snapshot(struct ac_fixture *f)
+{
+    char output[900], version[65], publisher[67];
+    snprintf(output, sizeof(output), "%s/unused.z23share", f->world.root);
+    if (!ast_prepare_selection(f, version, publisher, output) || !act_preserved(f, true)) return false;
+    struct app_selection route = f->kept, saved;
+    snprintf(route.app, sizeof(route.app), "kept:skycombat");
+    if (app_selection_save(f->env.state_dir, 0, &route, &saved) != APP_SELECTION_OK) return false;
+    f->kept = saved;
+    zcl_app_offer_set_call(ast_publish_transport); ast_publish_offers = ast_publish_posts = 0;
+    zcl_hex_encode(f->kept.package, 32, ast_publish_package);
+    snprintf(ast_publish_publisher, sizeof(ast_publish_publisher), "%s", publisher);
+    ast_publish_fail_offer = ast_publish_fail_post = ast_publish_identity_ok = false;
+    struct ast_publish_view view = {.f = f, .version = version};
+    bool ok = ast_publish_preconsent(f, &view);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.publish.v1");
+    zcl_native_app_publish_snapshot("kept:skycombat", &f->kept, &reply, ast_publish_present, &view);
+    ok = ok && reply.status == ZCL_COMMAND_STATUS_PASSED && ast_publish_offers == 1 && ast_publish_posts == 1 && ast_publish_identity_ok &&
+        ast_reply_is(&reply, "publisher_fingerprint", publisher);
+    zcl_command_reply_free(&reply);
+    ok = ok && ast_publish_library(f, version);
+    /* The direct failure probes start after the separate UI publication. */
+    ast_publish_posts = 1;
+    ok = ok && ast_publish_failures(f, &view, version, publisher);
+    zcl_app_offer_set_call(NULL); return ok;
+}
 static bool ast_publication_recorded(struct ac_fixture *f, const struct zcl_command_reply *reply)
 {
     const char *id = json_get_str(json_get(&reply->data, "release_id"));
@@ -2927,13 +3146,29 @@ static int ast_kept_case(void)
     } _test_next:;
     act_cleanup(&f); return failures;
 }
+static int ast_snapshot_case(void)
+{
+    int failures = 0; struct ac_fixture f;
+    TEST("snapshot session signs the saved version despite a changed working copy") {
+        ASSERT(act_setup(&f, false)); ASSERT(ast_snapshot_session(&f)); PASS();
+    } _test_next:;
+    act_cleanup(&f); return failures;
+}
+static int ast_publish_case(void)
+{
+    int failures = 0; struct ac_fixture f;
+    TEST("snapshot publish confirms exact saved version and refuses stale selection") {
+        ASSERT(act_setup(&f, false)); ASSERT(ast_publish_snapshot(&f)); PASS();
+    } _test_next:;
+    zcl_app_offer_set_call(NULL); act_cleanup(&f); return failures;
+}
 int test_app_share(void)
 {
     int failures = 0; struct ac_fixture f;
     TEST("native share confirms the exact Keep and cancel does not mutate it") {
         ASSERT(act_setup(&f, false)); ASSERT(ast_journey(&f)); PASS();
     } _test_next:;
-    act_cleanup(&f); failures += ast_partial_case(); failures += ast_kept_case(); return failures;
+    act_cleanup(&f); failures += ast_snapshot_case(); failures += ast_publish_case(); failures += ast_partial_case(); failures += ast_kept_case(); return failures;
 }
 #else
 int test_app_share(void) { return 0; }

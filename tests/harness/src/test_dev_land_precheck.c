@@ -9,6 +9,7 @@
 #endif
 
 #include "test/test_dev_land_common.h"
+#include "platform/state_root.h"
 
 #if !defined(_WIN32)
 
@@ -131,6 +132,33 @@ static bool dlx_pc_canonical_mode(void)
     return ok;
 }
 
+static bool dlx_pc_diagnostic_path(const struct json_value *facts,
+                                   char *path, size_t cap)
+{
+    char root[4096];
+    const char *ref = json_get_str(json_get(facts, "ref"));
+    const char *prefix = "development_state:";
+    return ref && !strncmp(ref, prefix, strlen(prefix)) &&
+        !strncmp(ref + strlen(prefix), "land/logs/precheck-", 19) &&
+        platform_state_root_existing(root, sizeof(root)) &&
+        snprintf(path, cap, "%s/%s", root, ref + strlen(prefix)) < (int)cap;
+}
+
+static bool dlx_pc_metadata_facts(const struct dlx_call *c, const char *body)
+{
+    const struct json_value *facts = json_get(&c->reply.data, "failure_facts");
+    char diagnostic[4096];
+    if (!json_get_bool(json_get(facts, "retained")) ||
+        !dlx_pc_diagnostic_path(facts, diagnostic, sizeof(diagnostic)) ||
+        !dlx_file_exists(diagnostic)) return false;
+    if (!body || strcmp(body, "printf 'if\\n'\n")) return true;
+    FILE *f = fopen(diagnostic, "rb");
+    char text[512] = {0};
+    size_t n = f ? fread(text, 1, sizeof(text) - 1, f) : 0;
+    if (f) fclose(f);
+    return n > 0 && strstr(text, "Syntax error") != NULL;
+}
+
 static bool dlx_pc_bad_metadata_one(const char *body)
 {
     struct dlx_rig rig;
@@ -152,6 +180,7 @@ static bool dlx_pc_bad_metadata_one(const char *body)
     bool ok = dlx_run(&c) && !dlx_ok(&c) && dlx_queue_empty() &&
         !dlx_pc_ran(&rig, "check-file-purpose") && dlx_pc_no_build(&rig) &&
         strcmp(dlx_err_code(&c), "PRECHECK_UNAVAILABLE") == 0;
+    ok = ok && dlx_pc_metadata_facts(&c, body);
     dlx_end(&c);
     dlx_restore();
     return ok;
@@ -200,6 +229,31 @@ static bool dlx_pc_deadline_one(bool reader_only)
     }
     (void)snprintf(path, sizeof(path), "%s/build/deadline-completed", rig.clone);
     ok = !dlx_file_exists(path) && ok;
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_deadline_between_phases(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char path[1400];
+    if (!dlx_pc_rig(&rig, "precheck_phase_deadline", true, "check-file-purpose\n") ||
+        !dlx_pc_select_purpose()) return false;
+    (void)snprintf(path, sizeof(path), "%s/build/print-command", rig.clone);
+    if (!dlx_write(path, "printf 'echo valid\\n'\n")) return false;
+    zcl_dev_land_precheck_test_budget(500);
+    zcl_dev_land_precheck_test_clock(200);
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ran = dlx_run(&c);
+    zcl_dev_land_precheck_test_clock(0);
+    zcl_dev_land_precheck_test_budget(0);
+    const struct json_value *facts = json_get(&c.reply.data, "failure_facts");
+    const char *output = json_get_str(json_get(facts, "output_ascii_escaped"));
+    bool ok = ran && !dlx_ok(&c) && dlx_queue_empty() && output && !output[0] &&
+        !strcmp(c.reply.error.code, "PRECHECK_TIMEOUT") &&
+        json_get_int(json_get(facts, "observed")) == 0;
     dlx_end(&c);
     dlx_restore();
     return ok;
@@ -285,6 +339,198 @@ static bool dlx_pc_timeout_output(int mode)
                      mode, ran, c.reply.status, c.reply.error.code, c.reply.error.evidence);
     (void)snprintf(path, sizeof(path), "%s/build/timeout-child-completed", rig.clone);
     ok = ok && !dlx_file_exists(path);
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_retained_counts(const struct json_value *facts, bool large)
+{
+    return json_get_int(json_get(facts, "observed")) == (large ? 132022 : 1022) &&
+        json_get_int(json_get(facts, "bytes")) == (large ? 131071 : 1022) &&
+        json_get_bool(json_get(facts, "truncated")) == large &&
+        json_get_bool(json_get(facts, "stream_complete")) &&
+        json_get_bool(json_get(facts, "capture_complete")) == !large;
+}
+
+static bool dlx_pc_fact_type(const struct json_value *facts, const char *name,
+                             enum json_type type)
+{
+    const struct json_value *value = json_get(facts, name);
+    return value && value->type == type;
+}
+
+static bool dlx_pc_max_timeout_types(const struct json_value *facts)
+{
+    return dlx_pc_fact_type(facts, "observed", JSON_INT) &&
+        dlx_pc_fact_type(facts, "stderr", JSON_INT) &&
+        dlx_pc_fact_type(facts, "bytes", JSON_INT) &&
+        dlx_pc_fact_type(facts, "retained", JSON_BOOL) &&
+        dlx_pc_fact_type(facts, "truncated", JSON_BOOL) &&
+        dlx_pc_fact_type(facts, "partial", JSON_BOOL) &&
+        dlx_pc_fact_type(facts, "output_may_be_truncated", JSON_BOOL);
+}
+
+static bool dlx_pc_max_timeout_facts(const struct json_value *facts)
+{
+    const char *ref = json_get_str(json_get(facts, "ref"));
+    return dlx_pc_max_timeout_types(facts) && ref && !strcmp(ref, "development_state:land/logs/precheck-"
+                          "0123456789abcdef0123456789abcdef.log") &&
+        json_get_bool(json_get(facts, "retained")) &&
+        json_get_int(json_get(facts, "observed")) == INT64_MAX &&
+        json_get_int(json_get(facts, "stderr")) == INT64_MAX &&
+        json_get_int(json_get(facts, "bytes")) == 131071 &&
+        json_get_bool(json_get(facts, "truncated")) &&
+        json_get_bool(json_get(facts, "partial")) &&
+        json_get_bool(json_get(facts, "output_may_be_truncated"));
+}
+
+static bool dlx_pc_max_timeout_content(const char *wire, size_t n,
+                                       const char *gate, const char *output)
+{
+    struct json_value doc;
+    json_init(&doc);
+    bool ok = json_read(&doc, wire, n);
+    const struct json_value *error = json_get(&doc, "error");
+    const struct json_value *facts = json_get(error, "facts");
+    const char *code = json_get_str(json_get(error, "code"));
+    const char *got_gate = json_get_str(json_get(facts, "gate"));
+    const char *got_output = json_get_str(json_get(facts, "output_ascii_escaped"));
+    ok = ok && code && !strcmp(code, "PRECHECK_TIMEOUT") && got_gate &&
+        !strcmp(got_gate, gate) && got_output && !strcmp(got_output, output) &&
+        dlx_pc_max_timeout_facts(facts);
+    json_free(&doc);
+    return ok;
+}
+
+static bool dlx_pc_max_timeout_wire(void)
+{
+    const struct zcl_command_spec *leaf = zcl_command_registry_find(
+        zcl_command_catalog(), "dev.land.submit", NULL);
+    if (!leaf) return false;
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.land.v1");
+    char gate[64], output[2048], wire[8192];
+    memset(gate, 'g', 63); gate[63] = '\0';
+    memset(output, 'x', 1918); output[1918] = '\0';
+    zcl_command_reply_fail(&reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+        "PRECHECK_TIMEOUT", "precheck", false, false, "timeout: 720s", gate);
+    reply.error.human_action_required = true;
+    (void)snprintf(reply.error.next_action, sizeof(reply.error.next_action), "inspect facts");
+    struct json_value facts;
+    json_init(&facts); json_set_object(&facts);
+    bool ok = json_push_kv_str(&facts, "gate", gate) &&
+        json_push_kv_bool(&facts, "retained", true) &&
+        json_push_kv_int(&facts, "observed", INT64_MAX) &&
+        json_push_kv_int(&facts, "stderr", INT64_MAX) &&
+        json_push_kv_int(&facts, "bytes", 131071) &&
+        json_push_kv_bool(&facts, "truncated", true) &&
+        json_push_kv_str(&facts, "ref", "development_state:land/logs/precheck-"
+                         "0123456789abcdef0123456789abcdef.log") &&
+        json_push_kv_str(&facts, "output_ascii_escaped", output) &&
+        json_push_kv_bool(&facts, "partial", true) &&
+        json_push_kv_bool(&facts, "output_may_be_truncated", true) &&
+        json_push_kv(&reply.data, "failure_facts", &facts);
+    size_t n = ok ? zcl_command_registry_test_reply_wire(zcl_command_catalog(),
+                          leaf, &reply, wire, sizeof(wire)) : 0;
+    fprintf(stderr, "synthetic max timeout wire=%zu facts=%zu\n", n, json_write(&facts, NULL, 0));
+    ok = n > 0 && n <= ZCL_COMMAND_ERROR_BUDGET &&
+         dlx_pc_max_timeout_content(wire, n, gate, output);
+    json_free(&facts);
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+
+static bool dlx_pc_retained_file(const struct json_value *facts, bool large)
+{
+    char path[4096];
+    if (!json_get_bool(json_get(facts, "retained")) ||
+        !dlx_pc_diagnostic_path(facts, path, sizeof(path))) return false;
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    char buf[2048];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    bool ok = strstr(buf, "late decisive failure") != NULL &&
+        dlx_pc_retained_counts(facts, large);
+    struct stat st;
+    ok = fstat(fileno(f), &st) == 0 && (st.st_mode & 0777) == 0600 &&
+        st.st_size == (large ? 131071 : 1022) && ok;
+    fclose(f);
+    return ok;
+}
+
+static bool dlx_pc_retention_wire(const struct dlx_call *call, bool large)
+{
+    const struct zcl_command_spec *leaf = zcl_command_registry_find(
+        zcl_command_catalog(), "dev.land.submit", NULL);
+    if (!leaf) return false;
+    struct zcl_command_spec spec = *leaf;
+    spec.handler = dlx_captured_handler;
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool input_ok = json_push_kv(&input, "tip", json_get(&call->input, "tip")) &&
+        json_push_kv(&input, "worktree", json_get(&call->input, "worktree"));
+    if (!input_ok) { json_free(&input); return false; }
+    char wire[8192];
+    enum zcl_command_exit code;
+    g_dlx_captured_reply = &call->reply;
+    size_t n = zcl_command_registry_execute_json(zcl_command_catalog(),
+        &spec, NULL, &input, false, DLX_PATH, NULL, 0, 0, NULL,
+        wire, sizeof(wire), &code);
+    g_dlx_captured_reply = NULL;
+    json_free(&input);
+    struct json_value doc;
+    json_init(&doc);
+    bool ok = n && json_read(&doc, wire, n) && code != ZCL_COMMAND_EXIT_OK;
+    const struct json_value *error = json_get(&doc, "error");
+    const char *error_code = json_get_str(json_get(error, "code"));
+    ok = ok && error_code && !strcmp(error_code, "PRECHECK_FAILED") &&
+        !json_get_bool(json_get(error, "mutated")) &&
+        dlx_pc_retained_file(json_get(error, "facts"), large);
+    json_free(&doc);
+    return ok;
+}
+
+static bool dlx_pc_retained_failure(bool large)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char path[1400], script[1024];
+    if (!dlx_pc_rig(&rig, "precheck_retention", true, "check-core-seal\n")) return false;
+    (void)snprintf(path, sizeof(path), "%s/build/bin/z23-lint", rig.clone);
+    (void)snprintf(script, sizeof(script), "#!/bin/sh\n"
+        "if [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\n"
+        "printf '%%01000d' 0; printf 'late decisive failure\\n' >&2; %s exit 1\n",
+        large ? "printf '%0131000d' 0;" : "");
+    if (!dlx_write(path, script) || chmod(path, 0755) != 0) return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ok = dlx_run(&c) && !dlx_ok(&c) && dlx_queue_empty() &&
+        strcmp(dlx_err_code(&c), "PRECHECK_FAILED") == 0 &&
+        !strstr(c.reply.error.evidence, "late decisive failure") &&
+        dlx_pc_retained_file(json_get(&c.reply.data, "failure_facts"), large) &&
+        dlx_pc_retention_wire(&c, large);
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_retention_unavailable(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char path[1400], note[32] = "";
+    if (!dlx_pc_rig(&rig, "precheck_no_retention", true, "check-core-seal\n") ||
+        !dlx_pc_file(&rig, "precheck-fail", "check-core-seal")) return false;
+    (void)snprintf(path, sizeof(path), "%s/missing/land", rig.clone);
+    dlx_begin(&c, NULL);
+    bool refused = !zcl_dev_land_precheck("dev.land.send", rig.clone, path,
+        NULL, rig.tip, false, note, sizeof(note), &c.reply);
+    const struct json_value *facts = json_get(&c.reply.data, "failure_facts");
+    bool ok = refused && !strcmp(c.reply.error.code, "PRECHECK_FAILED") &&
+        !json_get_bool(json_get(facts, "retained")) &&
+        !json_get(facts, "ref") && !dlx_file_exists(path);
     dlx_end(&c);
     dlx_restore();
     return ok;
@@ -565,6 +811,7 @@ static int dlx_pc_mode_cases(void)
     TEST("land: canonical reader and execution share the remaining deadline") {
         ASSERT(dlx_pc_deadline_one(true));
         ASSERT(dlx_pc_deadline_one(false));
+        ASSERT(dlx_pc_deadline_between_phases());
         PASS();
     }
     TEST("land: the precheck budget scales with host oversubscription, floored and capped") {
@@ -788,10 +1035,17 @@ int dlx_case_precheck(void)
         PASS();
     }
     TEST("land: timeout exposes bounded partial gate output on the wire") {
+        ASSERT(dlx_pc_max_timeout_wire());
         ASSERT(dlx_pc_timeout_output(0));
         ASSERT(dlx_pc_timeout_output(1));
         ASSERT(dlx_pc_timeout_output(2));
         ASSERT(dlx_pc_timeout_output(3));
+        PASS();
+    }
+    TEST("land: failed gate retains its captured prefix and identifies truncation") {
+        ASSERT(dlx_pc_retained_failure(false));
+        ASSERT(dlx_pc_retained_failure(true));
+        ASSERT(dlx_pc_retention_unavailable());
         PASS();
     }
     TEST("land: precheck skips a gate that cannot decide (exit 2) and queues") {

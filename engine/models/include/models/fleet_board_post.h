@@ -123,6 +123,10 @@ struct fleet_board_filter {
      * by the single-post page so its check is exact, not a window. */
     bool id_set;
     uint8_t id[32];
+    /* Exclusive newest-first keyset bound; both fields form one cursor. */
+    bool before_set;
+    int64_t before_created_at;
+    uint8_t before_id[32];
 };
 
 struct fleet_board_status {
@@ -254,8 +258,8 @@ bool db_fleet_board_post_find(struct node_db *ndb, const uint8_t id[32],
  * `max` (capped at FLEET_BOARD_LIST_MAX). Expired discussions are excluded;
  * durable wiki revisions remain discoverable.
  *
- * `*complete` (optional) is true only when the query was prepared, every
- * row it matched was read and the cursor ended cleanly: a table that cannot
+ * `*complete` (optional) is true only when the bounded query was prepared,
+ * every row in its query window was read and the cursor ended cleanly: a table that cannot
  * be read, a step that fails part-way and a stored row that no longer
  * decodes all leave it false, so a caller that must not mistake "I could
  * not look" for "nothing there" can tell. The rows written are still those
@@ -264,6 +268,12 @@ int db_fleet_board_list_checked(struct node_db *ndb,
                                 const struct fleet_board_filter *filter,
                                 int64_t now, struct db_fleet_board_post *out,
                                 size_t max, bool *complete);
+
+/* Like the checked list, with a single-row lookahead for another page. */
+int db_fleet_board_list_page(struct node_db *ndb,
+                            const struct fleet_board_filter *filter,
+                            int64_t now, struct db_fleet_board_post *out,
+                            size_t max, bool *complete, bool *has_more);
 
 /* The listing for a caller that has no use for the difference. */
 static inline int db_fleet_board_list(

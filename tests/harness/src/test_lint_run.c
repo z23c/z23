@@ -57,6 +57,8 @@ static int lrun_resolve(void *ctx, const char *gate, char *cmd, size_t cap)
 {
     const struct lrun_fx *fx = ctx;
     const char *r = fx->root;
+    if (strcmp(gate, "check-capability-inventory-generated") == 0)
+        return lrun_resolve(ctx, "check-fx-ord-generator", cmd, cap);
     if (strcmp(gate, "check-vendor-provenance") == 0) {
         static struct lr_table t;
         if (lr_table_load(&t) != 0)
@@ -121,8 +123,8 @@ struct lrun_cfg {
 };
 
 /* Run GATES under the fixture resolver; capture both streams. */
-static int lrun_go(struct lrun_fx *fx, const struct lrun_cfg *c, char *const *gates,
-                   int n, char *out, char *err, size_t cap)
+static int lrun_go_prereq(struct lrun_fx *fx, const struct lrun_cfg *c, char *const *gates,
+                   int n, char *out, char *err, size_t cap, const char *prereq)
 {
     char state[PATH_MAX + 16];
     FILE *fo = tmpfile(), *fe = tmpfile();
@@ -131,7 +133,7 @@ static int lrun_go(struct lrun_fx *fx, const struct lrun_cfg *c, char *const *ga
     (void)snprintf(state, sizeof state, "%s/state", fx->root);
     struct lr_opts o = { c->jobs, state, NULL, NULL, 75, false, fo, fe, lrun_resolve, fx,
                          c->pro, c->epi, c->poles };
-    rc = lr_execute(&o, gates, n);
+    rc = lr_execute_with_prerequisite(&o, gates, n, prereq);
     rewind(fo);
     rewind(fe);
     k = fread(out, 1, cap - 1, fo);
@@ -142,6 +144,9 @@ static int lrun_go(struct lrun_fx *fx, const struct lrun_cfg *c, char *const *ga
     (void)fclose(fe);
     return rc;
 }
+static int lrun_go(struct lrun_fx *fx, const struct lrun_cfg *c, char *const *gates,
+                   int n, char *out, char *err, size_t cap)
+{ return lrun_go_prereq(fx, c, gates, n, out, err, cap, NULL); }
 
 static bool lrun_plant(struct lrun_fx *fx)
 {
@@ -280,6 +285,49 @@ static int test_lrun_order(void)
         (void)snprintf(p, sizeof p, "%s/order", fx.root);
         ASSERT(lrun_read(p, order, sizeof order));
         ASSERT_STR_EQ(order, "pro\npole\nb\na\nepi\n");
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
+static int test_lrun_inventory_prerequisite(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: selected inventory prerequisite runs once before readers") {
+        struct lrun_fx fx; char out[4096], err[4096], p[PATH_MAX + 16], order[256];
+        char *gates[] = {(char *)"check-fx-ord-reader", (char *)"check-capability-inventory-generated"};
+        char *duplicate[] = {(char *)"check-capability-inventory-generated", (char *)"check-capability-inventory-generated"};
+        struct lrun_cfg c = {2, "", "", ""};
+        ASSERT(lrun_plant(&fx));
+        ASSERT(lr_inventory_prerequisite("build/bin/gen_capability_inventory", "build/bin", gates, 2));
+        ASSERT(!lr_inventory_prerequisite(NULL, "build/bin", gates, 2));
+        ASSERT(!lr_inventory_prerequisite("other/gen_capability_inventory", "build/bin", gates, 2));
+        ASSERT(!lr_inventory_prerequisite("build/bin/gen_capability_inventory", "build/bin", duplicate, 2));
+        ASSERT(!lr_inventory_prerequisite("build/bin/gen_capability_inventory", "build/bin", gates, 1));
+        ASSERT_EQ(lrun_go_prereq(&fx, &c, gates, 2, out, err, sizeof out, gates[1]), 0);
+        (void)snprintf(p, sizeof p, "%s/order", fx.root);
+        ASSERT(lrun_read(p, order, sizeof order)); ASSERT_STR_EQ(order, "generator\nreader\n");
+        ASSERT(strstr(out, "PASS check-capability-inventory-generated") != NULL);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+static int test_lrun_prerequisite_failure(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: failed prerequisite reports blocked readers without running them") {
+        struct lrun_fx fx; char out[4096], err[4096], p[PATH_MAX + 32], body[4096];
+        char *gates[] = {(char *)"check-fx-fail", (char *)"check-fx-ord-reader"};
+        struct lrun_cfg c = {2, "", "", ""};
+        ASSERT(lrun_plant(&fx));
+        ASSERT_EQ(lrun_go_prereq(&fx, &c, gates, 2, out, err, sizeof out, gates[0]), 1);
+        ASSERT(strstr(out, "FAIL check-fx-fail") != NULL);
+        ASSERT(strstr(err, "check-fx-ord-reader (not run: prerequisite failed)") != NULL);
+        (void)snprintf(p, sizeof p, "%s/order", fx.root); ASSERT(access(p, F_OK) != 0);
+        (void)snprintf(p, sizeof p, "%s/state/last-run.json", fx.root);
+        ASSERT(lrun_read(p, body, sizeof body));
+        ASSERT(strstr(body, "\"gate_count\":2") && strstr(body, "\"blocked_count\":1") &&
+            strstr(body, "\"blocked\":[\"check-fx-ord-reader\"]"));
         test_rm_rf_recursive(fx.root);
     } TEST_END
     return failures;
@@ -516,6 +564,8 @@ int test_lint_run(void)
     failures += test_lrun_chain();
     failures += test_lrun_parallel();
     failures += test_lrun_order();
+    failures += test_lrun_inventory_prerequisite();
+    failures += test_lrun_prerequisite_failure();
     failures += test_lrun_unknown();
     failures += test_lrun_parse();
     failures += test_lrun_refuse();

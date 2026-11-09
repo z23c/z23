@@ -2237,6 +2237,16 @@ static int test_fleet_board_rpc_incomplete_list(void)
         ASSERT(json_get(&out, "posts") == NULL);
         json_free(&out);
 
+        struct json_value cursor;
+        json_init(&cursor); json_set_object(&cursor); json_init(&out);
+        ASSERT(json_push_kv_str(&cursor, "op", "list"));
+        ASSERT(json_push_kv_int(&cursor, "before_created_at", INT64_MAX));
+        ASSERT(json_push_kv_str(&cursor, "before_id", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
+        ASSERT(fb_rpc_call(&f, &cursor, &out));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "code")), "BOARD_READ_FAILED");
+        ASSERT(json_get(&out, "posts") == NULL);
+        json_free(&out); json_free(&cursor);
+
         ASSERT(node_db_exec(&f.db, "ALTER TABLE fleet_board_posts RENAME TO "
                                     "fleet_board_posts_gone"));
         json_init(&out);
@@ -2245,6 +2255,215 @@ static int test_fleet_board_rpc_incomplete_list(void)
         ASSERT_STR_EQ(json_get_str(json_get(&out, "code")), "BOARD_READ_FAILED");
         ASSERT(json_get(&out, "posts") == NULL);
         json_free(&out);
+        fb_rpc_fixture_close(&f);
+        ASSERT(test_rm_rf_recursive(f.dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fb_page_interrupt(void *unused)
+{
+    *(bool *)unused = true;
+    return 1;
+}
+
+static int fb_page_arm_interrupt(unsigned type, void *ctx, void *statement, void *sql)
+{
+    (void)sql;
+    if (type == SQLITE_TRACE_STMT)
+        sqlite3_progress_handler(sqlite3_db_handle(statement), 1, fb_page_interrupt, ctx);
+    return 0;
+}
+
+static bool fb_page_registry_controls(const struct zcl_command_spec *spec)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    struct zcl_command_context ctx = {.registry = reg,
+        .granted_capabilities = ~(uint64_t)0, .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+    struct json_value input, result;
+    json_init(&input); json_set_object(&input); json_init(&result);
+    char wire[8193]; enum zcl_command_exit rc;
+    bool ok = json_push_kv_int(&input, "cursor", 1);
+    size_t n = zcl_command_registry_execute_json(reg, spec, &ctx, &input,
+        false, "fleet.board.list", "normal", 8192, 0, NULL, wire, sizeof(wire), &rc);
+    ok = ok && n && json_read(&result, wire, n);
+    const char *code = json_get_str(json_get(json_get(&result, "error"), "code"));
+    ok = ok && code && !strcmp(code, "INVALID_INPUT");
+    json_free(&result); json_free(&input);
+    json_init(&input); json_set_object(&input); json_init(&result);
+    n = zcl_command_registry_execute_json(reg, spec, &ctx, &input,
+        false, "fleet.board.list", "normal", 8192, 0, "1", wire, sizeof(wire), &rc);
+    ok = ok && n && json_read(&result, wire, n);
+    code = json_get_str(json_get(json_get(&result, "error"), "code"));
+    ok = ok && code && !strcmp(code, "BAD_CURSOR");
+    json_free(&result); json_free(&input);
+    return ok;
+}
+
+static bool fb_page_oversize_first(const struct zcl_command_spec *spec)
+{
+    struct json_value body, posts, item;
+    json_init(&body); json_set_object(&body);
+    json_init(&posts); json_set_array(&posts);
+    char large[6001]; memset(large, 'x', sizeof(large) - 1); large[sizeof(large) - 1] = 0;
+    bool ok = json_push_kv_bool(&body, "has_more", false);
+    for (int i = 0; ok && i < 2; i++) {
+        json_init(&item); json_set_object(&item);
+        ok = json_push_kv_str(&item, "id", "0000000000000000000000000000000000000000000000000000000000000000") &&
+             json_push_kv_int(&item, "created_at", 1) &&
+             json_push_kv_str(&item, "text", i ? "small" : large) &&
+             json_push_back(&posts, &item);
+        json_free(&item);
+    }
+    ok = ok && json_push_kv(&body, "posts", &posts);
+    struct zcl_command_request req = {.spec = spec, .budget_bytes = 4096};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.fleet_board_list.v1");
+    if (ok) zcl_native_fleet_board_project_list(&req, &body, &reply);
+    ok = ok && !strcmp(reply.error.code, "BOARD_PAGE_BUDGET");
+    zcl_command_reply_free(&reply); json_free(&posts); json_free(&body);
+    return ok;
+}
+
+static bool fb_page_refuses_nonprogress(const struct zcl_command_spec *spec)
+{
+    static const char id[] = "0000000000000000000000000000000000000000000000000000000000000001";
+    struct json_value body, posts, item, input;
+    json_init(&body); json_set_object(&body);
+    json_init(&posts); json_set_array(&posts);
+    json_init(&item); json_set_object(&item);
+    json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&item, "id", id) && json_push_kv_int(&item, "created_at", 7) &&
+        json_push_back(&posts, &item) && json_push_kv(&body, "posts", &posts) &&
+        json_push_kv_bool(&body, "has_more", true) &&
+        json_push_kv_int(&input, "before_created_at", 7) && json_push_kv_str(&input, "before_id", id);
+    struct zcl_command_request req = {.spec = spec, .input = &input, .budget_bytes = 8192};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.fleet_board_list.v1");
+    if (ok) zcl_native_fleet_board_project_list(&req, &body, &reply);
+    ok = ok && reply.status != ZCL_COMMAND_STATUS_PASSED;
+    zcl_command_reply_free(&reply); json_free(&input); json_free(&item);
+    json_free(&posts); json_free(&body);
+    return ok;
+}
+
+static int test_fleet_board_keyset_pages(void)
+{
+    int failures = 0;
+    TEST("fleet board: keyset pages retain equal timestamps and older rows") {
+        struct fb_rpc_fixture f;
+        ASSERT(fb_rpc_fixture_open(&f, "keyset"));
+        int64_t now = (int64_t)platform_time_wall_time_t();
+        uint8_t seed[32], pk[32];
+        fb_test_identity(29, seed, pk);
+        for (int i = 0; i < 270; i++) {
+            char text[32];
+            (void)snprintf(text, sizeof(text), "page-%d", i);
+            struct fleet_board_post post;
+            fb_test_compose(&post, FLEET_BOARD_KIND_NOTE, "page", text,
+                            (uint64_t)(now - i / 3), 3600);
+            ASSERT_EQ(fleet_board_post_sign(&post, seed, pk), FLEET_BOARD_OK);
+            ASSERT_EQ(db_fleet_board_post_ingest(&f.db, &post, now, NULL), FLEET_BOARD_OK);
+        }
+        struct db_fleet_board_post rows[256];
+        struct fleet_board_filter filter = {0};
+        bool complete = false, more = false;
+        bool interrupted = false;
+        ASSERT(sqlite3_trace_v2(f.db.db, SQLITE_TRACE_STMT, fb_page_arm_interrupt, &interrupted) == SQLITE_OK);
+        (void)db_fleet_board_list_page(&f.db, &filter, now, rows, 256, &complete, &more);
+        sqlite3_progress_handler(f.db.db, 0, NULL, NULL);
+        ASSERT(sqlite3_trace_v2(f.db.db, 0, NULL, NULL) == SQLITE_OK);
+        ASSERT(interrupted); ASSERT(!complete);
+        int n = db_fleet_board_list_page(&f.db, &filter, now, rows, 256, &complete, &more);
+        ASSERT_EQ(n, 256); ASSERT(complete); ASSERT(more);
+        filter.before_set = true;
+        filter.before_created_at = (int64_t)rows[n - 1].post.created_at;
+        memcpy(filter.before_id, rows[n - 1].post.id, 32);
+        struct json_value input, out;
+        json_init(&input); json_set_object(&input); json_init(&out);
+        char id[65]; fleet_board_id_to_hex(filter.before_id, id);
+        ASSERT(json_push_kv_str(&input, "op", "list"));
+        ASSERT(json_push_kv_int(&input, "before_created_at", filter.before_created_at));
+        ASSERT(json_push_kv_str(&input, "before_id", id));
+        ASSERT(fb_rpc_call(&f, &input, &out));
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        ASSERT_EQ(json_size(json_get(&out, "posts")), 14u);
+        ASSERT(!json_get_bool(json_get(&out, "has_more")));
+        const struct zcl_command_spec *spec = zcl_command_registry_find(
+            zcl_command_catalog(), "fleet.board.list", NULL);
+        ASSERT(spec != NULL);
+        ASSERT(fb_page_registry_controls(spec));
+        ASSERT(fb_page_oversize_first(spec));
+        ASSERT(fb_page_refuses_nonprogress(spec));
+        struct zcl_command_request request = {.spec = spec, .input = &input,
+                                               .budget_bytes = 4096};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.fleet_board_list.v1");
+        zcl_native_fleet_board_project_list(&request, &out, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *selected = json_get(&reply.data, "posts");
+        size_t selected_count = json_size(selected);
+        ASSERT(selected_count > 0 && selected_count < 14);
+        ASSERT(json_get_bool(json_get(&reply.data, "has_more")));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "next_id")),
+                      json_get_str(json_get(json_at(selected, selected_count - 1), "id")));
+        zcl_command_reply_free(&reply);
+        request.budget_bytes = 64;
+        zcl_command_reply_init(&reply, "zcl.fleet_board_list.v1");
+        zcl_native_fleet_board_project_list(&request, &out, &reply);
+        ASSERT_STR_EQ(reply.error.code, "BOARD_PAGE_BUDGET");
+        zcl_command_reply_free(&reply);
+        request.budget_bytes = 4096; request.view = "summary";
+        zcl_command_reply_init(&reply, "zcl.fleet_board_list.v1");
+        zcl_native_fleet_board_project_list(&request, &out, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(json_size(json_get(&reply.data, "posts")), 0u);
+        ASSERT(json_get_bool(json_get(&reply.data, "has_more")));
+        ASSERT(json_get_str(json_get(&reply.data, "notice")) != NULL);
+        ASSERT_EQ(reply.next_count, 0u);
+        zcl_command_reply_free(&reply);
+        request.cursor = "1";
+        zcl_command_reply_init(&reply, "zcl.fleet_board_list.v1");
+        zcl_native_handle_fleet_board_list(&request, &reply);
+        ASSERT_STR_EQ(reply.error.code, "BAD_CURSOR");
+        zcl_command_reply_free(&reply);
+        json_free(&out); json_free(&input);
+        n = db_fleet_board_list_page(&f.db, &filter, now, rows, 256, &complete, &more);
+        ASSERT_EQ(n, 14); ASSERT(complete); ASSERT(!more);
+        ASSERT((int64_t)rows[0].post.created_at <= filter.before_created_at);
+        ASSERT((int64_t)rows[0].post.created_at < filter.before_created_at ||
+               memcmp(rows[0].post.id, filter.before_id, 32) < 0);
+        n = db_fleet_board_list_page(&f.db, &filter, now + 4000, rows, 256, &complete, &more);
+        ASSERT_EQ(n, 0); ASSERT(complete); ASSERT(!more);
+        json_init(&input); json_set_object(&input); json_init(&out);
+        ASSERT(json_push_kv_str(&input, "op", "list"));
+        ASSERT(json_push_kv_str(&input, "before_id", id));
+        ASSERT(fb_rpc_call(&f, &input, &out));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "code")), "BAD_CURSOR");
+        json_free(&out); json_free(&input);
+        json_init(&input); json_set_object(&input); json_init(&out);
+        ASSERT(json_push_kv_str(&input, "op", "list"));
+        ASSERT(json_push_kv_int(&input, "before_created_at", now));
+        ASSERT(json_push_kv_str(&input, "before_id", "not-hex"));
+        ASSERT(fb_rpc_call(&f, &input, &out));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "code")), "BAD_CURSOR");
+        json_free(&out); json_free(&input);
+        json_init(&input); json_set_object(&input); json_init(&out);
+        ASSERT(json_push_kv_str(&input, "op", "list"));
+        ASSERT(json_push_kv_int(&input, "before_created_at", now));
+        ASSERT(json_push_kv_str(&input, "before_id", "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"));
+        ASSERT(fb_rpc_call(&f, &input, &out));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "code")), "BAD_CURSOR");
+        json_free(&out); json_free(&input);
+        const char *args[] = {"board", "list", "--before_created_at=1",
+            "--before_id=0000000000000000000000000000000000000000000000000000000000000000"};
+        fb_native_test_table = &f.table;
+        node_rpc_client_set_test_hook(fb_native_rpc);
+        int cli_rc = zcl_native_command_main("fleet", args, 4, "", 0, CHAIN_MAIN, false);
+        node_rpc_client_set_test_hook(NULL);
+        fb_native_test_table = NULL;
+        ASSERT_EQ(cli_rc, 0);
         fb_rpc_fixture_close(&f);
         ASSERT(test_rm_rf_recursive(f.dir) == 0);
         PASS();
@@ -5874,16 +6093,146 @@ static int test_fleet_wiki_find_plain_pages(void)
     return failures;
 }
 
-struct fb_query_vm { uint64_t steps, statements; };
+struct fb_query_vm { uint64_t steps, statements, sorts, scans; char sql[8192]; };
 static int fb_query_vm_trace(unsigned type, void *context, void *statement, void *unused)
 {
     (void)unused;
     if (type == SQLITE_TRACE_PROFILE) {
         struct fb_query_vm *vm = context;
         vm->steps += (uint64_t)sqlite3_stmt_status(statement, SQLITE_STMTSTATUS_VM_STEP, 0);
+        vm->sorts += (uint64_t)sqlite3_stmt_status(statement, SQLITE_STMTSTATUS_SORT, 0);
+        vm->scans += (uint64_t)sqlite3_stmt_status(statement, SQLITE_STMTSTATUS_FULLSCAN_STEP, 0);
+        const char *sql = sqlite3_sql(statement);
+        if (sql) (void)snprintf(vm->sql, sizeof(vm->sql), "%s", sql);
         vm->statements++;
     }
     return 0;
+}
+
+static bool fb_page_measure_seed(struct node_db *db, int64_t now)
+{
+    for (int i = 0; i < 900; i++) {
+        uint8_t seed[32], pk[32];
+        fb_test_identity((uint8_t)(30 + i % 20), seed, pk);
+        char text[32];
+        (void)snprintf(text, sizeof(text), "measurement-%d", i);
+        struct fleet_board_post post;
+        int64_t created = now - 120 - i / 4;
+        fb_test_compose(&post, (i / 4) % 5 ? FLEET_BOARD_KIND_OFFER : FLEET_BOARD_KIND_NOTE,
+                        "measure", text, (uint64_t)created, (i / 4) % 5 == 2 ? 60 : 3600);
+        post.scope = (i / 4) % 11 == 4 ? FLEET_BOARD_SCOPE_FLEET : FLEET_BOARD_SCOPE_PUBLIC;
+        if (post.scope == FLEET_BOARD_SCOPE_PUBLIC)
+            (void)snprintf(post.room, sizeof(post.room), "%s", (i / 4) % 9 ? "apps" : "other");
+        if (fleet_board_post_sign(&post, seed, pk) != FLEET_BOARD_OK ||
+            db_fleet_board_post_ingest(db, &post, created, NULL) != FLEET_BOARD_OK)
+            return false;
+    }
+    return true;
+}
+
+static bool fb_page_measure_read(struct node_db *db, struct fleet_board_filter *filter,
+                                 int64_t now, struct db_fleet_board_post *rows,
+                                 int *count, bool *more, struct fb_query_vm *vm)
+{
+    bool complete = false;
+    if (sqlite3_trace_v2(db->db, SQLITE_TRACE_PROFILE, fb_query_vm_trace, vm) != SQLITE_OK)
+        return false;
+    *count = db_fleet_board_list_page(db, filter, now, rows, 63, &complete, more);
+    bool stopped = sqlite3_trace_v2(db->db, 0, NULL, NULL) == SQLITE_OK;
+    return stopped && complete && vm->statements == 1;
+}
+
+static bool fb_page_measure_plan(struct node_db *db, const char *sql, const char *label)
+{
+    char query[8256];
+    if (snprintf(query, sizeof(query), "EXPLAIN QUERY PLAN %s", sql) >= (int)sizeof(query))
+        return false;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db->db, query, -1, &s, NULL) != SQLITE_OK) return false;
+    int rc;
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
+        const char *detail = (const char *)sqlite3_column_text(s, 3);
+        printf("BOARD_PAGE_PLAN %s: %s\n", label, detail ? detail : "(null)");
+    }
+    int final = sqlite3_finalize(s);
+    return rc == SQLITE_DONE && final == SQLITE_OK;
+}
+
+static bool fb_page_measure_valid(const struct db_fleet_board_post *rows,
+                                  int count, int64_t now)
+{
+    for (int i = 0; i < count; i++) {
+        const struct fleet_board_post *p = &rows[i].post;
+        if (p->kind != FLEET_BOARD_KIND_OFFER || p->scope != FLEET_BOARD_SCOPE_PUBLIC ||
+            strcmp(p->room, "apps") || rows[i].expires_at <= now) return false;
+        if (i && (p->created_at > rows[i - 1].post.created_at ||
+            (p->created_at == rows[i - 1].post.created_at &&
+             memcmp(p->id, rows[i - 1].post.id, 32) >= 0))) return false;
+    }
+    return true;
+}
+
+static int test_fleet_board_page_work(void)
+{
+    int failures = 0;
+    TEST("fleet board: measure filtered first and older page work") {
+        struct fb_rpc_fixture f;
+        ASSERT(fb_rpc_fixture_open(&f, "page-work"));
+        int64_t now = (int64_t)platform_time_wall_time_t();
+        ASSERT(node_db_exec(&f.db, "DROP INDEX idx_fleet_board_app_page"));
+        ASSERT(fb_page_measure_seed(&f.db, now));
+        struct fleet_board_filter filter = {.kind = FLEET_BOARD_KIND_OFFER,
+            .scope_set = true, .scope = FLEET_BOARD_SCOPE_PUBLIC};
+        (void)snprintf(filter.room, sizeof(filter.room), "apps");
+        struct db_fleet_board_post rows[64];
+        uint8_t first_ids[63][32], older_ids[63][32];
+        struct fb_query_vm first = {0}, older = {0};
+        int count = 0; bool more = false;
+        ASSERT(fb_page_measure_read(&f.db, &filter, now, rows, &count, &more, &first));
+        ASSERT_EQ(count, 63); ASSERT(more); ASSERT(fb_page_measure_valid(rows, count, now));
+        for (int i = 0; i < count; i++) memcpy(first_ids[i], rows[i].post.id, 32);
+        filter.before_set = true;
+        filter.before_created_at = (int64_t)rows[count - 1].post.created_at;
+        memcpy(filter.before_id, rows[count - 1].post.id, 32);
+        ASSERT(fb_page_measure_read(&f.db, &filter, now, rows, &count, &more, &older));
+        ASSERT_EQ(count, 63); ASSERT(more); ASSERT(fb_page_measure_valid(rows, count, now));
+        for (int i = 0; i < count; i++) memcpy(older_ids[i], rows[i].post.id, 32);
+        printf("BOARD_PAGE_BOUNDARY same_timestamp=%s\n",
+            (int64_t)rows[0].post.created_at == filter.before_created_at ? "true" : "false");
+        ASSERT_EQ((int64_t)rows[0].post.created_at, filter.before_created_at);
+        ASSERT((int64_t)rows[0].post.created_at < filter.before_created_at ||
+            ((int64_t)rows[0].post.created_at == filter.before_created_at &&
+             memcmp(rows[0].post.id, filter.before_id, 32) < 0));
+        printf("BOARD_PAGE_WORK first rows=63 vm=%llu sorts=%llu fullscan=%llu; older rows=63 vm=%llu sorts=%llu fullscan=%llu\n",
+            (unsigned long long)first.steps, (unsigned long long)first.sorts, (unsigned long long)first.scans,
+            (unsigned long long)older.steps, (unsigned long long)older.sorts, (unsigned long long)older.scans);
+        ASSERT(fb_page_measure_plan(&f.db, first.sql, "first"));
+        ASSERT(fb_page_measure_plan(&f.db, older.sql, "older"));
+        printf("BOARD_PAGE_SQLITE version=%s\n", sqlite3_libversion());
+        ASSERT(node_db_exec(&f.db, "CREATE INDEX idx_fleet_board_app_page ON fleet_board_posts"
+            "(room,scope,kind,created_at DESC,id DESC)"));
+        struct fleet_board_filter initial = filter;
+        initial.before_set = false;
+        struct fb_query_vm indexed_first = {0}, indexed_older = {0};
+        ASSERT(fb_page_measure_read(&f.db, &initial, now, rows, &count, &more, &indexed_first));
+        ASSERT_EQ(count, 63); ASSERT(more);
+        for (int i = 0; i < count; i++) ASSERT(memcmp(rows[i].post.id, first_ids[i], 32) == 0);
+        ASSERT(fb_page_measure_read(&f.db, &filter, now, rows, &count, &more, &indexed_older));
+        ASSERT_EQ(count, 63); ASSERT(more);
+        for (int i = 0; i < count; i++) ASSERT(memcmp(rows[i].post.id, older_ids[i], 32) == 0);
+        ASSERT_EQ(indexed_first.sorts, 0u); ASSERT_EQ(indexed_older.sorts, 0u);
+        ASSERT(indexed_first.steps < first.steps); ASSERT(indexed_older.steps < older.steps);
+        printf("BOARD_PAGE_INDEX first rows=63 vm=%llu sorts=%llu fullscan=%llu; older rows=63 vm=%llu sorts=%llu fullscan=%llu\n",
+            (unsigned long long)indexed_first.steps, (unsigned long long)indexed_first.sorts,
+            (unsigned long long)indexed_first.scans, (unsigned long long)indexed_older.steps,
+            (unsigned long long)indexed_older.sorts, (unsigned long long)indexed_older.scans);
+        ASSERT(fb_page_measure_plan(&f.db, indexed_first.sql, "indexed-first"));
+        ASSERT(fb_page_measure_plan(&f.db, indexed_older.sql, "indexed-older"));
+        fb_rpc_fixture_close(&f);
+        ASSERT(test_rm_rf_recursive(f.dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
 }
 static enum fleet_wiki_visit_result fb_query_count(void *context,
     const struct db_fleet_board_post *row)
@@ -12669,6 +13018,8 @@ int test_fleet_board(void)
     failures += test_fleet_board_rpc_concurrency();
     failures += test_fleet_board_rpc_scope_default();
     failures += test_fleet_board_rpc_incomplete_list();
+    failures += test_fleet_board_keyset_pages();
+    failures += test_fleet_board_page_work();
     failures += test_fleet_board_rpc_room_boundary();
     failures += test_fleet_board_rpc_created_at();
     failures += test_fleet_board_rpc_fleet_page();

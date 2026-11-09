@@ -92,6 +92,16 @@ bool zcl_app_offer_from_post(const struct json_value *post,
 bool zcl_app_offer_catalog(struct zcl_app_offer_row *rows, size_t cap,
                            size_t *count, struct zcl_command_reply *why);
 
+struct zcl_app_offer_position { int64_t created_at; char id[65]; };
+struct zcl_app_offer_page {
+    size_t count;
+    bool has_more;
+    struct zcl_app_offer_position next;
+};
+bool zcl_app_offer_catalog_page(struct zcl_app_offer_row *rows, size_t cap,
+    const struct zcl_app_offer_position *before, struct zcl_app_offer_page *page,
+    struct zcl_command_reply *why);
+
 /* Read and verify one exact current signed offer without a catalog scan. */
 bool zcl_app_offer_exact(const char *id, struct zcl_app_offer_row *row,
                          struct zcl_command_reply *why);

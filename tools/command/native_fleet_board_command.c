@@ -19,6 +19,7 @@
 
 #include "controllers/rpc_client.h"
 #include "base/safe_alloc.h"
+#include "base/hex.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/time_compat.h"
@@ -410,50 +411,166 @@ static void fb_post_line(const struct json_value *post, char *out, size_t cap)
                    has_ref ? ref : "");
 }
 
+static bool fb_page_rows(const struct json_value *posts, struct json_value *rows)
+{
+    json_set_array(rows);
+    if (!posts || posts->type != JSON_ARR) return true;
+    for (size_t i = 0; i < json_size(posts); i++) {
+        char line[FLEET_BOARD_LINE_MAX];
+        fb_post_line(json_at(posts, i), line, sizeof(line));
+        struct json_value item;
+        json_init(&item); json_set_object(&item);
+        bool ok = json_push_kv_str(&item, "line", line) &&
+                  json_push_kv(&item, "post", json_at(posts, i)) &&
+                  json_push_back(rows, &item);
+        json_free(&item);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static bool fb_page_projection_valid(const struct json_value *posts,
+                                     const struct json_value *items,
+                                     const struct json_value *page)
+{
+    const struct json_value *truncated = json_get(page, "truncated");
+    const struct json_value *included = json_get(page, "included");
+    return items && items->type == JSON_ARR && page && page->type == JSON_OBJ &&
+        truncated && truncated->type == JSON_BOOL && included &&
+        included->type == JSON_INT && json_get_int(included) >= 0 &&
+        (size_t)json_get_int(included) == json_size(items) &&
+        (json_get_bool(truncated) || json_size(items) == json_size(posts));
+}
+
+static bool fb_page_selected(const struct json_value *items, struct json_value *data,
+                             struct json_value *selected)
+{
+    struct json_value lines;
+    json_init(&lines); json_set_array(&lines); json_set_array(selected);
+    bool ok = true;
+    for (size_t i = 0; ok && i < json_size(items); i++) {
+        const struct json_value *item = json_at(items, i);
+        ok = json_push_back(&lines, json_get(item, "line")) &&
+             json_push_back(selected, json_get(item, "post"));
+    }
+    ok = ok && json_push_kv(data, "lines", &lines) &&
+         json_push_kv(data, "posts", selected) &&
+         json_push_kv_int(data, "returned", (int64_t)json_size(selected));
+    json_free(&lines);
+    return ok;
+}
+
+static bool fb_page_cursor(const struct zcl_command_request *request,
+                           const struct json_value *last, struct json_value *data)
+{
+    const struct json_value *when = json_get(last, "created_at");
+    const char *next_id = json_get_str(json_get(last, "id"));
+    const struct json_value *prior = json_get(request->input, "before_created_at");
+    const char *prior_id = json_get_str(json_get(request->input, "before_id"));
+    uint8_t parsed[32], previous[32];
+    return when && when->type == JSON_INT && json_get_int(when) > 0 &&
+        zcl_hex_decode_lower(next_id, parsed, 32) &&
+        (!prior || (zcl_hex_decode_lower(prior_id, previous, 32) &&
+         (json_get_int(when) < json_get_int(prior) ||
+          (json_get_int(when) == json_get_int(prior) && memcmp(parsed, previous, 32) < 0)))) &&
+        json_push_kv(data, "next_created_at", when) &&
+        json_push_kv_str(data, "next_id", next_id);
+}
+
+static bool fb_page_finish(const struct zcl_command_request *request,
+                           const struct json_value *more,
+                           const struct json_value *truncation,
+                           const struct json_value *selected,
+                           struct json_value *data, struct zcl_command_reply *reply)
+{
+    bool has_more = json_get_bool(more) || json_get_bool(truncation);
+    size_t count = json_size(selected);
+    bool summary = request->view && !strcmp(request->view, "summary");
+    if (has_more && count == 0 && !summary) {
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                "BOARD_PAGE_BUDGET", "serialize", false,
+                "the first post does not fit the response budget", "fleet.board.list");
+        return false;
+    }
+    bool ok = json_push_kv_bool(data, "has_more", has_more);
+    if (summary && has_more)
+        ok = ok && json_push_kv_str(data, "notice",
+            "Repeat in normal view with the same filters to read posts.");
+    if (has_more && count)
+        ok = ok && fb_page_cursor(request, json_at(selected, count - 1), data);
+    if (!ok)
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                "BOARD_PAGE_ALLOC_FAILED", "serialize", false,
+                "the board page continuation is invalid or unavailable", "fleet.board.list");
+    return ok;
+}
+
+static bool fb_is_board_list(const struct zcl_command_request *request)
+{
+    return request->spec && request->spec->path &&
+           strcmp(request->spec->path, "fleet.board.list") == 0;
+}
+
 /* Project a node list reply into the command reply, lines first. */
 void zcl_native_fleet_board_project_list(
     const struct zcl_command_request *request,
     const struct json_value *body, struct zcl_command_reply *reply)
 {
     const struct json_value *posts = json_get(body, "posts");
+    bool board_list = fb_is_board_list(request);
+    const struct json_value *more = json_get(body, "has_more");
+    if (board_list && (!posts || posts->type != JSON_ARR ||
+                       !more || more->type != JSON_BOOL)) {
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                "BAD_TOOL_BODY", "serialize", false,
+                "board page response is malformed", "fleet.board.list");
+        return;
+    }
     struct json_value rows;
     json_init(&rows);
-    json_set_array(&rows);
-    if (posts && posts->type == JSON_ARR) {
-        for (size_t i = 0; i < json_size(posts); i++) {
-            char line[FLEET_BOARD_LINE_MAX];
-            fb_post_line(json_at(posts, i), line, sizeof(line));
-            struct json_value item;
-            json_init(&item);
-            json_set_object(&item);
-            (void)json_push_kv_str(&item, "line", line);
-            (void)json_push_kv(&item, "post", json_at(posts, i));
-            (void)json_push_back(&rows, &item);
-            json_free(&item);
-        }
+    if (!fb_page_rows(posts, &rows)) {
+        json_free(&rows);
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                "BOARD_PAGE_ALLOC_FAILED", "serialize", false,
+                "the board page could not be allocated", "fleet.board.list");
+        return;
     }
     /* Budget both representations together; paging them independently would
      * disconnect a human-readable line from its signed post. */
-    zcl_native_bridge_project(request, &rows, reply);
+    size_t prior_next = reply->next_count;
+    struct zcl_command_request projected = *request;
+    if (board_list) projected.input = NULL;
+    zcl_native_bridge_project(&projected, &rows, reply);
+    if (board_list) reply->next_count = prior_next;
     json_free(&rows);
     const struct json_value *items = json_get(&reply->data, "items");
-    struct json_value data, lines, selected;
+    const struct json_value *page = json_get(&reply->data, "_page");
+    const struct json_value *truncation = json_get(page, "truncated");
+    if (board_list && !fb_page_projection_valid(posts, items, page)) {
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                "BOARD_PAGE_ALLOC_FAILED", "serialize", false,
+                "the projected board page is incomplete", "fleet.board.list");
+        return;
+    }
+    struct json_value data, selected;
     json_init(&data);
     json_set_object(&data);
-    json_init(&lines);
-    json_set_array(&lines);
     json_init(&selected);
-    json_set_array(&selected);
-    for (size_t i = 0; i < json_size(items); i++) {
-        const struct json_value *item = json_at(items, i);
-        (void)json_push_back(&lines, json_get(item, "line"));
-        (void)json_push_back(&selected, json_get(item, "post"));
+    if (!fb_page_selected(items, &data, &selected)) {
+        json_free(&selected); json_free(&data);
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                "BOARD_PAGE_ALLOC_FAILED", "serialize", false,
+                "the projected board page could not be allocated", "fleet.board.list");
+        return;
     }
-    (void)json_push_kv(&data, "lines", &lines);
-    (void)json_push_kv(&data, "posts", &selected);
-    (void)json_push_kv_int(&data, "returned", (int64_t)json_size(&selected));
-    (void)json_push_kv(&data, "_page", json_get(&reply->data, "_page"));
-    json_free(&lines);
+    if (board_list) {
+        if (!fb_page_finish(request, more, truncation, &selected, &data, reply)) {
+            json_free(&selected); json_free(&data);
+            return;
+        }
+    } else {
+        (void)json_push_kv(&data, "_page", json_get(&reply->data, "_page"));
+    }
     json_free(&selected);
     json_free(&reply->data);
     reply->data = data;
@@ -557,10 +674,34 @@ void zcl_native_handle_fleet_board_post(
 }
 
 /* ── fleet board list ───────────────────────────────────────────────── */
+static bool fb_list_cursor_valid(const struct zcl_command_request *request)
+{
+    const struct json_value *in = request->input;
+    if (request->cursor && request->cursor[0] && strcmp(request->cursor, "0")) {
+        return false;
+    }
+    const struct json_value *before_time = json_get(in, "before_created_at");
+    const struct json_value *before_id = json_get(in, "before_id");
+    uint8_t id[32];
+    if ((before_time != NULL) != (before_id != NULL) ||
+        (before_time && (before_time->type != JSON_INT ||
+         json_get_int(before_time) <= 0 || before_id->type != JSON_STR ||
+         !zcl_hex_decode_lower(json_get_str(before_id), id, 32)))) {
+        return false;
+    }
+    return true;
+}
+
 static void fb_list(const struct zcl_command_request *request,
                      struct zcl_command_reply *reply, int64_t deadline_ms)
 {
     const struct json_value *in = request->input;
+    if (!fb_list_cursor_valid(request)) {
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "BAD_CURSOR", "normalize", false,
+                "use a positive timestamp and 64-character post id together, without an offset", "fleet.board.list");
+        return;
+    }
     struct json_value out;
     json_init(&out);
     json_set_object(&out);
@@ -571,6 +712,8 @@ static void fb_list(const struct zcl_command_request *request,
     fb_forward_str(&out, in, "room", NULL);
     fb_forward_int(&out, in, "since");
     fb_forward_int(&out, in, "limit");
+    fb_forward_int(&out, in, "before_created_at");
+    fb_forward_str(&out, in, "before_id", NULL);
     const struct json_value *open = json_get(in, "open");
     if (open && ((open->type == JSON_BOOL && json_get_bool(open)) ||
                  open->type == JSON_STR))

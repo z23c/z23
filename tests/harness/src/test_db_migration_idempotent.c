@@ -917,15 +917,65 @@ static int t_v89_bound_cutover_additive(void)
         sqlite3_close(raw);
         ASSERT(db_mig_open_raw_handle(&db, path)); raw_open = true;
         ASSERT(node_db_migrate(&db, NULL) > 0);
-        ASSERT_EQ(node_db_schema_version(&db), 89);
+        ASSERT_EQ(node_db_schema_version(&db), NODE_DB_SCHEMA_LATEST);
         ASSERT_EQ(node_db_schema_compat_floor(&db), 79);
         ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM node_state WHERE key='v89_preserved' AND value=x'1234'"), 1);
         ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='089'"), 1);
         ASSERT_EQ(node_db_migrate(&db, NULL), 0);
         db_mig_close_raw_handle(&db); raw_open = false;
         ASSERT(node_db_open(&db, path)); opened = true;
-        ASSERT_EQ(node_db_schema_version(&db), 89);
+        ASSERT_EQ(node_db_schema_version(&db), NODE_DB_SCHEMA_LATEST);
         ASSERT_EQ(node_db_schema_compat_floor(&db), 79);
+        PASS();
+    } _test_next:;
+    if (raw_open) db_mig_close_raw_handle(&db);
+    if (opened) node_db_close(&db);
+    test_cleanup_tmpdir(dir); return failures;
+}
+
+static int db_mig_deny_page_index(void *unused, int action, const char *first,
+    const char *second, const char *database, const char *trigger)
+{
+    (void)unused; (void)second; (void)database; (void)trigger;
+    return action == SQLITE_CREATE_INDEX && first &&
+        !strcmp(first, "idx_fleet_board_app_page") ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int t_v90_board_page_index(void)
+{
+    int failures = 0; char dir[256], path[512];
+    db_mig_path(dir, sizeof(dir), "v90_board_page"); mkdir_p(dir);
+    (void)snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db db = {0}; bool opened = false, raw_open = false;
+    TEST("db_mig: v90 adds board page index and preserves old rows on reopen") {
+        ASSERT(node_db_open(&db, path)); node_db_close(&db);
+        sqlite3 *raw = NULL; ASSERT(sqlite3_open(path, &raw) == SQLITE_OK);
+        ASSERT(db_mig_exec_raw(raw, "DROP INDEX IF EXISTS idx_fleet_board_app_page"));
+        ASSERT(db_mig_exec_raw(raw, "DELETE FROM schema_migrations WHERE version='090'"));
+        ASSERT(db_mig_stamp_schema(raw, 89)); ASSERT(db_mig_stamp_floor(raw, 79));
+        ASSERT(db_mig_seed_v81_board_row(raw, FLEET_BOARD_KIND_OFFER));
+        ASSERT(sqlite3_close(raw) == SQLITE_OK);
+        ASSERT(db_mig_open_raw_handle(&db, path)); raw_open = true;
+        ASSERT(sqlite3_set_authorizer(db.db, db_mig_deny_page_index, NULL) == SQLITE_OK);
+        int denied = node_db_migrate(&db, NULL);
+        ASSERT(sqlite3_set_authorizer(db.db, NULL, NULL) == SQLITE_OK);
+        ASSERT_EQ(denied, -1);
+        ASSERT_EQ(node_db_schema_version(&db), 89);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='090'"), 0);
+        ASSERT(db_mig_board_row_matches(db.db, FLEET_BOARD_KIND_OFFER));
+        ASSERT(node_db_migrate(&db, NULL) > 0);
+        ASSERT_EQ(node_db_schema_version(&db), 90);
+        ASSERT_EQ(node_db_schema_compat_floor(&db), 79);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='090'"), 1);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_fleet_board_app_page' AND sql='CREATE INDEX idx_fleet_board_app_page ON fleet_board_posts(room,scope,kind,created_at DESC,id DESC)'"), 1);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_fleet_board_room'"), 1);
+        ASSERT(db_mig_board_row_matches(db.db, FLEET_BOARD_KIND_OFFER));
+        ASSERT_EQ(node_db_migrate(&db, NULL), 0);
+        db_mig_close_raw_handle(&db); raw_open = false;
+        ASSERT(node_db_open(&db, path)); opened = true;
+        ASSERT_EQ(node_db_schema_version(&db), 90);
+        ASSERT_EQ(node_db_schema_compat_floor(&db), 79);
+        ASSERT(db_mig_board_row_matches(db.db, FLEET_BOARD_KIND_OFFER));
         PASS();
     } _test_next:;
     if (raw_open) db_mig_close_raw_handle(&db);
@@ -2309,6 +2359,7 @@ int test_db_migration_idempotent(void)
     failures += t_v87_wiki_index_refuses_without_stamp();
     failures += t_v88_height_encoding_stamp_retry();
     failures += t_v89_bound_cutover_additive();
+    failures += t_v90_board_page_index();
     failures += t_v20_wallet_notes_upgrade_adds_source();
     failures += t_reopen_is_idempotent();
     failures += t_market_content_registry_schema();

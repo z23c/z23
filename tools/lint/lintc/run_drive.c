@@ -86,9 +86,21 @@ struct lr_lanes {
     int ord[LR_MAX_GATES];
 };
 
-static void classify(const struct lr_run *r, struct lr_lanes *ln)
+bool lr_inventory_prerequisite(const char *tool, const char *bin_dir, char *const *gates, int n)
+{
+    char expected[LR_PATH]; int count = 0;
+    if (!tool || !*tool || !bin_dir || !*bin_dir) return false;
+    int len = snprintf(expected, sizeof expected, "%s/gen_capability_inventory", bin_dir);
+    if (len < 0 || (size_t)len >= sizeof expected || strcmp(tool, expected)) return false;
+    for (int i = 0; i < n; ++i)
+        if (!strcmp(gates[i], "check-capability-inventory-generated")) ++count;
+    return count == 1;
+}
+
+static void classify(const struct lr_run *r, struct lr_lanes *ln, int prerequisite)
 {
     for (int i = 0; i < r->n; i++) {
+        if (i == prerequisite) continue;
         const char *name = r->g[i].name;
         if (in_list(r->o->serial_pro, name))
             ln->pro[ln->npro++] = i;
@@ -114,7 +126,21 @@ static int run_lanes(struct lr_run *r, struct lr_lanes *ln)
     return 0;
 }
 
-int lr_execute(const struct lr_opts *o, char *const *gates, int n)
+static int run_prerequisite(struct lr_run *r, const char *name, int *index)
+{
+    *index = -1;
+    if (!name) return 0;
+    for (int i = 0; i < r->n; ++i)
+        if (!strcmp(r->g[i].name, name)) { *index = i; break; }
+    if (*index < 0) return 2;
+    int rc = lr_pool(r, index, 1, 1);
+    if (rc == 0 && r->g[*index].have_rc && r->g[*index].rc == 0) return 0;
+    for (int i = 0; i < r->n; ++i) if (i != *index) r->g[i].blocked = true;
+    return 1;
+}
+
+int lr_execute_with_prerequisite(const struct lr_opts *o, char *const *gates, int n,
+                                 const char *prerequisite)
 {
     struct lr_run *r = &g_run;
     static struct lr_lanes ln;
@@ -129,10 +155,17 @@ int lr_execute(const struct lr_opts *o, char *const *gates, int n)
     if (resolve_all(r, gates) != 0 || check_poles(o) != 0 || lr_make_dirs(r) != 0)
         return 2;
     (void)setenv("ZCL_LINT_GATES_DIR_X", r->gates_dir, 1);
-    classify(r, &ln);
     start = lr_now_ms();
+    int first;
+    rc = run_prerequisite(r, prerequisite, &first);
+    if (rc == 2) return 2;
+    if (rc == 1) return lr_report(r, lr_now_ms() - start) | 1;
+    classify(r, &ln, first);
     rc = run_lanes(r, &ln);
     if (rc == 2)
         return 2;
     return lr_report(r, lr_now_ms() - start) | rc;
 }
+
+int lr_execute(const struct lr_opts *o, char *const *gates, int n)
+{ return lr_execute_with_prerequisite(o, gates, n, NULL); }

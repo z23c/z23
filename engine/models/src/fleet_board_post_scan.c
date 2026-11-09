@@ -17,6 +17,7 @@
 #include "models/activerecord.h"
 #include "models/query_builder.h"
 #include "util/log_macros.h"
+#include "util/ar_step_readonly.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -281,3 +282,56 @@ int db_fleet_board_distinct_hosts(struct node_db *ndb, uint8_t (*out)[32],
     return (int)kept;
 }
 
+static int board_page_read(sqlite3_stmt *s, struct db_fleet_board_post *out,
+                           size_t max, bool *clean, bool *has_more)
+{
+    int count = 0;
+    enum zcl_step step;
+    while ((step = ar_step_checked(s, "fleet.board list page", NULL)) == ZCL_STEP_ROW) {
+        struct db_fleet_board_post row;
+        memset(&row, 0, sizeof(row));
+        if (!fleet_board_row_read(s, &row)) *clean = false;
+        else if ((size_t)count < max) out[count++] = row;
+        else if (has_more) *has_more = true;
+    }
+    if (step == ZCL_STEP_ERROR) *clean = false;
+    return count;
+}
+
+int db_fleet_board_list_page(struct node_db *ndb,
+                                const struct fleet_board_filter *filter,
+                                int64_t now, struct db_fleet_board_post *out,
+                                size_t max, bool *complete, bool *has_more)
+{
+    bool clean = true;
+    if (complete)
+        *complete = false;
+    if (has_more)
+        *has_more = false;
+    if (!ndb || !ndb->open || !out || max == 0)
+        return 0;
+    if (max > FLEET_BOARD_LIST_MAX)
+        max = FLEET_BOARD_LIST_MAX;
+    struct qb q, sub;
+    fleet_board_select_row(&q);
+    board_apply_filter(&q, filter, now, &sub);
+    qb_order_by(&q, QB_C_fleet_board_posts_created_at, QB_DESC);
+    qb_order_by(&q, QB_C_fleet_board_posts_id, QB_DESC);
+    qb_limit(&q, (int64_t)max + (has_more ? 1 : 0));
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(ndb, &q, s))
+        return 0;
+    int count = board_page_read(s, out, max, &clean, has_more);
+    clean = sqlite3_finalize(s) == SQLITE_OK && clean; /* last step's error */
+    if (complete)
+        *complete = clean;
+    return count;
+}
+
+int db_fleet_board_list_checked(struct node_db *ndb,
+                                const struct fleet_board_filter *filter,
+                                int64_t now, struct db_fleet_board_post *out,
+                                size_t max, bool *complete)
+{
+    return db_fleet_board_list_page(ndb, filter, now, out, max, complete, NULL);
+}

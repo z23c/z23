@@ -2170,6 +2170,9 @@ ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
 ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),docs-capability-inventory)
 # The generator is compiled directly; no profile %.o depfile graph is consumed.
 ZCL_DEPFILE_PROFILES :=
+else ifneq ($(filter $(BIN_DIR)/zcode-package-registry-check zcode-package-registry-check,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+# This checker links its listed sources directly, not profile %.o objects.
+ZCL_DEPFILE_PROFILES :=
 else ifneq ($(filter build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := build-only
 else ifneq ($(filter zclassic23 z23 z23-package-verify zclassic23-package-verify z23-wiki-runtime,$(ZCL_DEPFILE_SINGLE_GOAL)),)
@@ -6986,7 +6989,7 @@ lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN
 endif
 
 # lint-land — what `dev land` runs in its landing worktree before it starts an
-# exact proof: LINT_FAST_GATES plus LINT_LAND_EXTRA_GATES. The extra list is
+# exact proof: LINT_FAST_GATES except check-zcc-cache, plus LINT_LAND_EXTRA_GATES. The extra list is
 # provenance-driven: every entry is a cheap gate (p50 at or under ~2.5 s) that
 # is NOT in lint-fast yet failed in the full proof lint of a landing candidate,
 # wasting a whole ~7-minute proof on a failure that costs milliseconds to see.
@@ -7027,7 +7030,9 @@ LINT_LAND_EXTRA_GATES := \
     check-hardening-ratchet \
     check-error-doc-refs \
     check-accel-oracle-pinned
-LINT_LAND_GATES := $(LINT_FAST_GATES) $(LINT_LAND_EXTRA_GATES)
+# The isolated compile-cache regression suite still runs in lint-fast and the
+# exact proof's full lint; avoid repeating it in landing preparation.
+LINT_LAND_GATES := $(filter-out check-zcc-cache,$(LINT_FAST_GATES)) $(LINT_LAND_EXTRA_GATES)
 
 # check-network-tool-hardening reads built binaries, so every target that
 # runs it builds them first; a root that never built them (a fresh landing

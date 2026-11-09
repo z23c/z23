@@ -44,6 +44,10 @@ dev.agent.worker terminate  # worker sub-dispatches fixed claim, reap, and statu
 dev.agent.worker engine     # worker sub-dispatches fixed claim inputs to dev.agent.queue; engine is read only on the post branch, which a worker never takes.
 dev.agent.worker body       # worker injects its own fixed result body into a private dev.agent.mail post; request->input never reaches that nested object.
 dev.agent.worker since      # dev.agent.mail reads since only on the pull branch; the worker only posts, so the read is dead here.
+fleet.wiki.history before_created_at # The shared list projector reads this key only for the fleet.board.list keyset branch, never wiki history.
+fleet.wiki.history before_id # The shared list projector reads this key only for the fleet.board.list keyset branch, never wiki history.
+fleet.wiki.list before_created_at # The shared list projector reads this key only for the fleet.board.list keyset branch, never wiki list.
+fleet.wiki.list before_id # The shared list projector reads this key only for the fleet.board.list keyset branch, never wiki list.
 fleet.steer.grant attempt   # grant revoke sub-dispatches a fixed cancel+name object to dev.agent.queue; request->input never reaches the nested attempt key.
 fleet.steer.grant priority # grant revoke sub-dispatches a fixed cancel+name object to dev.agent.queue; request->input never reaches the nested priority key.
 fleet.steer.grant json      # grant revoke sub-dispatches a fixed cancel+name object to dev.agent.queue; request->input never reaches the nested json key.

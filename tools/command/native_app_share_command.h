@@ -4,6 +4,17 @@
 #define ZCL_NATIVE_APP_SHARE_COMMAND_H
 #include "command/native_command.h"
 struct app_selection;
+struct zcl_app_share_session;
+/* Identity strings are borrowed from the session and valid until dispose. */
+struct zcl_app_share_identity {
+    const char *name, *semver, *version, *package, *publisher, *release;
+};
+struct zcl_app_share_session *zcl_app_share_prepare(const char *name, const char *output,
+    const struct app_selection *selection, struct zcl_command_reply *reply);
+void zcl_app_share_identity(const struct zcl_app_share_session *session,
+    struct zcl_app_share_identity *identity);
+void zcl_app_share_commit(struct zcl_app_share_session *session, struct zcl_command_reply *reply);
+void zcl_app_share_dispose(struct zcl_app_share_session *session);
 #if defined(ZCL_TESTING)
 #include "command/native_app_confirm.h"
 void zcl_test_app_share_run(const struct zcl_command_request *request,

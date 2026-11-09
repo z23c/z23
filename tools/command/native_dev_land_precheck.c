@@ -13,6 +13,9 @@
 #include "command/native_fleet.h"
 #include "dev_proof.h"
 #include "platform/directory_compat.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
+#include "platform/rng.h"
 
 #include "base/safe_alloc.h"
 #include "base/hex.h"
@@ -354,18 +357,19 @@ static void pc_push_names(struct zcl_command_reply *reply, const char *key,
 
 /* `bin gate` in `wt`, stderr folded into the capture. -1 on timeout. */
 static int pc_run(const char *wt, const char *bin, const char *gate,
-                  int64_t deadline_ms, char *out, size_t cap)
+                  int64_t deadline_ms, char *out, size_t cap,
+                  struct zcl_spawn_evidence *evidence)
 {
-    const char *argv[] = {"sh", "-c", "cd \"$1\" || exit 126; shift; exec \"$@\" 2>&1",
+    const char *argv[] = {"sh", "-c", "exec 2>&1; cd \"$1\" || exit 126; shift; exec \"$@\"",
                           "sh", wt, bin, gate, NULL};
     int64_t left = deadline_ms - pc_monotonic_ms();
-    bool timed_out = false;
     int rc;
     out[0] = '\0';
+    memset(evidence, 0, sizeof(*evidence));
     if (left <= 0)
         return -1;
-    rc = zcl_spawn_capture_observed(argv, out, cap, (int)left, &timed_out);
-    return timed_out ? -1 : rc;
+    rc = zcl_spawn_capture_evidence(argv, out, cap, (int)left, evidence);
+    return evidence->timed_out ? -1 : rc;
 }
 
 /* The first ZCL_LAND_PRECHECK_SHOW_LINES lines of `out`. */
@@ -411,6 +415,8 @@ struct pc_run {
     char unproven[PC_EVIDENCE_CAP];
     size_t nskipped, nran;
     bool gate_output_available;
+    char land[4096];
+    struct zcl_spawn_evidence capture;
 };
 
 static void pc_history_unproven(struct pc_run *r, const char *reason)
@@ -553,7 +559,7 @@ static int pc_ship_run(struct pc_run *r)
         int rc = pc_run(r->wt, commands[i],
                         i == 0 ? "--selftest"
                                : (i == 2 ? "check-ship-remote-transaction" : NULL),
-                        r->deadline, r->out, PC_OUT_CAP);
+                        r->deadline, r->out, PC_OUT_CAP, &r->capture);
         if (rc != 0) return rc;
     }
     return 0;
@@ -586,31 +592,112 @@ static void pc_push_unproven(const struct pc_run *r,
         (void)json_push_kv_str(&reply->data, "precheck_unproven", r->unproven);
 }
 
-/* Captured text has no byte count: NUL may end this prefix early. Encode
- * non-ASCII bytes so the failure facts are valid JSON text on any locale. */
-static void pc_timeout_facts(struct pc_run *r, const char *gate,
-                             struct zcl_command_reply *reply)
+/* Retain the bounded raw prefix in the existing private land log directory. */
+static bool pc_retain_capture(const struct pc_run *r, char *path, size_t cap)
 {
-    char output[2048];
-    size_t used = 0;
-    for (const unsigned char *p = (const unsigned char *)r->out; *p; p++) {
+    char root[4096], expected[4096], dir[4096], leaf[80], hex[33];
+    uint8_t random[16];
+    struct platform_private_staging file;
+    if (!r->land[0] || !platform_state_root_existing(root, sizeof(root)) ||
+        snprintf(expected, sizeof(expected), "%s/land", root) >= (int)sizeof(expected) ||
+        strcmp(expected, r->land) || !platform_private_directory_ensure(r->land) ||
+        snprintf(dir, sizeof(dir), "%s/logs", r->land) >= (int)sizeof(dir) ||
+        !platform_private_directory_ensure(dir) || !rng_host_fill(random, sizeof(random)))
+        return false;
+    zcl_hex_encode(random, sizeof(random), hex);
+    (void)snprintf(leaf, sizeof(leaf), "precheck-%s.log", hex);
+    if (snprintf(path, cap, "development_state:land/logs/%s", leaf) >= (int)cap) return false;
+    platform_private_staging_init(&file);
+    if (!platform_private_staging_create(&file, dir, leaf)) return false;
+    size_t n = r->capture.stdout_observed < PC_OUT_CAP - 1
+        ? (size_t)r->capture.stdout_observed : PC_OUT_CAP - 1;
+    bool ok = platform_private_file_write_at(&file.file, r->out, n, 0) &&
+              platform_private_file_flush(&file.file) &&
+              platform_private_parent_flush(dir);
+    if (!ok) (void)platform_private_staging_retire(&file);
+    platform_private_staging_close(&file);
+    return ok;
+}
+
+/* The inline excerpt stops at NUL and escapes non-ASCII bytes for JSON. */
+static void pc_escape_output(const char *source, char output[2048], size_t limit)
+{
+    size_t used = 0, wire = 0;
+    for (const unsigned char *p = (const unsigned char *)source; *p; p++) {
         unsigned char c = *p;
         if (c >= 32 && c <= 126 && c != '\\') {
-            if (used + 1 >= sizeof(output)) break;
+            size_t n = c == '"' ? 2 : 1;
+            if (used + 1 >= 2048 || wire + n > limit) break;
             output[used++] = (char)c;
+            wire += n;
         } else {
-            if (used + 4 >= sizeof(output)) break;
+            if (used + 4 >= 2048 || wire + 5 > limit) break;
             output[used++] = '\\'; output[used++] = 'x';
             zcl_hex_encode(&c, 1, output + used);
             used += 2;
+            wire += 5;
         }
     }
     output[used] = '\0';
+}
+
+static bool pc_stream_complete(const struct pc_run *r, bool timeout)
+{
+    return r->capture.stdout_complete && r->capture.stderr_complete && !timeout;
+}
+
+static bool pc_capture_sizes(struct pc_run *r, struct json_value *facts,
+                             bool timeout, bool retained)
+{
+    uint64_t observed = r->capture.stdout_observed;
+    int64_t count = observed > INT64_MAX ? INT64_MAX : (int64_t)observed;
+    int64_t stored = observed < PC_OUT_CAP - 1 ? (int64_t)observed : PC_OUT_CAP - 1;
+    int64_t stderr_count = r->capture.stderr_observed > INT64_MAX ? INT64_MAX :
+        (int64_t)r->capture.stderr_observed;
+    return json_push_kv_int(facts, "observed", count) &&
+        json_push_kv_int(facts, "stderr", stderr_count) &&
+        json_push_kv_int(facts, "bytes", retained ? stored : 0) &&
+        json_push_kv_bool(facts, "truncated", r->capture.stdout_truncated) &&
+        (timeout || (json_push_kv_bool(facts, "stream_complete", pc_stream_complete(r, timeout)) &&
+        json_push_kv_bool(facts, "capture_complete", pc_stream_complete(r, timeout) &&
+                          !r->capture.stdout_truncated && stderr_count == 0)));
+}
+
+static bool pc_capture_facts(struct pc_run *r, const char *gate,
+                             struct json_value *facts, bool timeout)
+{
+    char path[512];
+    bool retained = r->gate_output_available && pc_retain_capture(r, path, sizeof(path));
+    return json_push_kv_str(facts, "gate", gate) &&
+        json_push_kv_bool(facts, "retained", retained) &&
+        pc_capture_sizes(r, facts, timeout, retained) &&
+        (!retained || json_push_kv_str(facts, "ref", path));
+}
+
+static size_t pc_digit_extra(uint64_t count, size_t base)
+{
+    size_t digits = 1;
+    if (count > INT64_MAX) count = INT64_MAX;
+    while (count >= 10) { count /= 10; digits++; }
+    return digits > base ? digits - base : 0;
+}
+
+static void pc_failure_facts(struct pc_run *r, const char *gate,
+                             struct zcl_command_reply *reply, bool timeout)
+{
+    char output[2048];
+    size_t gate_len = strlen(gate);
+    size_t gate_extra = gate_len > 1038 ? 2047 : gate_len > 15 ? 2 * (gate_len - 15) : 0;
+    size_t penalty = gate_extra +
+        pc_digit_extra(r->capture.stdout_observed, 4) +
+        pc_digit_extra(r->capture.stderr_observed, 1);
+    size_t limit = penalty < 2047 ? 2047 - penalty : 0;
+    pc_escape_output(r->out, output, limit);
     struct json_value facts;
     json_init(&facts);
     json_set_object(&facts);
-    bool ok = json_push_kv_str(&facts, "gate", gate) &&
-        json_push_kv_str(&facts, "output_ascii_escaped", output) &&
+    bool ok = pc_capture_facts(r, gate, &facts, timeout);
+    if (timeout) ok = ok && json_push_kv_str(&facts, "output_ascii_escaped", output) &&
         json_push_kv_bool(&facts, "partial", true) &&
         json_push_kv_bool(&facts, "output_may_be_truncated", true);
     if (ok) (void)json_push_kv(&reply->data, "failure_facts", &facts);
@@ -626,16 +713,16 @@ static void pc_gate_failed(struct pc_run *r, const char *gate, int rc,
         if (strcmp(k_pc_hints[i].gate, gate) == 0)
             hint = k_pc_hints[i].hint;
     if (rc < 0) {
-        (void)snprintf(msg, sizeof(msg),
-                       "the precheck ran past its %d s budget at %s; fix the "
-                       "slow gate or resubmit with --precheck=skip",
-                       (int)(r->budget_ms / 1000), gate);
+        (void)snprintf(msg, sizeof(msg), "timeout: %ds",
+                       (int)(r->budget_ms / 1000));
         if (r->gate_output_available)
-            pc_timeout_facts(r, gate, reply);
+            pc_failure_facts(r, gate, reply, true);
         pc_fail(reply, r->leaf, "PRECHECK_TIMEOUT", msg, gate);
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "inspect facts");
         return;
     }
     pc_head_lines(r->out, ev, sizeof(ev));
+    pc_failure_facts(r, gate, reply, false);
     (void)snprintf(msg, sizeof(msg),
                    "precheck gate %s failed (exit %d); fix and resubmit: %s",
                    gate, rc, hint);
@@ -652,12 +739,12 @@ static int pc_canonical_capture(struct pc_run *r, const char *const argv[],
                                 char *out, size_t cap)
 {
     int64_t left = r->deadline - pc_monotonic_ms();
-    bool timed_out = false;
+    memset(&r->capture, 0, sizeof(r->capture));
+    out[0] = '\0';
     if (left <= 0)
         return -1;
-    out[0] = '\0';
-    int rc = zcl_spawn_capture_observed(argv, out, cap, (int)left, &timed_out);
-    return timed_out ? -1 : rc;
+    int rc = zcl_spawn_capture_evidence(argv, out, cap, (int)left, &r->capture);
+    return r->capture.timed_out ? -1 : rc;
 }
 
 static bool pc_command_shape(char *command, size_t cap)
@@ -683,24 +770,24 @@ static int pc_file_purpose_run(struct pc_run *r)
 {
     char command[4096];
     const char *reader[] = {"sh", "-c",
-        "cd \"$1\" || exit 126; exec \"$2\" run --print-command check-file-purpose 2>&1",
+        "exec 2>&1; cd \"$1\" || exit 126; exec \"$2\" run --print-command check-file-purpose",
         "sh", r->wt, r->bin, NULL};
-    int rc = pc_canonical_capture(r, reader, command, sizeof(command));
+    int rc = pc_canonical_capture(r, reader, r->out, PC_OUT_CAP);
+    r->gate_output_available = true;
     if (rc < 0)
         return -1;
-    if (rc != 0 || !pc_command_shape(command, sizeof(command))) {
-        (void)snprintf(r->out, PC_OUT_CAP,
-                       "canonical file-purpose command unavailable or malformed");
+    if (rc != 0 || r->capture.stdout_observed >= sizeof(command))
         return -2;
-    }
-    const char *syntax[] = {"sh", "-n", "-c", command, NULL};
+    memcpy(command, r->out, (size_t)r->capture.stdout_observed + 1);
+    if (!pc_command_shape(command, sizeof(command))) return -2;
+    const char *syntax[] = {"sh", "-c", "exec 2>&1; exec sh -n -c \"$1\"", "sh", command, NULL};
     rc = pc_canonical_capture(r, syntax, r->out, PC_OUT_CAP);
     if (rc < 0)
         return -1;
     if (rc != 0)
         return -2;
     const char *run[] = {"sh", "-c",
-        "cd \"$1\" || exit 126; ZCL_LINT_PRODUCTION_SCAN=1 sh -c \"$2\" 2>&1",
+        "exec 2>&1; cd \"$1\" || exit 126; ZCL_LINT_PRODUCTION_SCAN=1 sh -c \"$2\"",
         "sh", r->wt, command, NULL};
     return pc_canonical_capture(r, run, r->out, PC_OUT_CAP);
 }
@@ -721,7 +808,8 @@ static int pc_size_run(struct pc_run *r)
                        PC_SIZE_BIN);
         return PC_EXIT_UNPROVEN;
     }
-    return pc_run(r->wt, "./" PC_SIZE_BIN, NULL, r->deadline, r->out, PC_OUT_CAP);
+    r->gate_output_available = true;
+    return pc_run(r->wt, "./" PC_SIZE_BIN, NULL, r->deadline, r->out, PC_OUT_CAP, &r->capture);
 #endif
 }
 
@@ -733,12 +821,14 @@ static int pc_gate_exec(struct pc_run *r, const char *gate, bool ship,
     r->gate_output_available = false;
     if (strcmp(gate, "check-file-purpose") == 0)
         return pc_file_purpose_run(r);
-    if (ship)
+    if (ship) {
+        r->gate_output_available = true;
         return pc_ship_run(r);
+    }
     if (size)
         return pc_size_run(r);
     r->gate_output_available = true;
-    return pc_run(r->wt, r->bin, gate, r->deadline, r->out, PC_OUT_CAP);
+    return pc_run(r->wt, r->bin, gate, r->deadline, r->out, PC_OUT_CAP, &r->capture);
 }
 
 /* Lane files a gate reads that a lane gated on a host (zgate builds in a
@@ -804,6 +894,7 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
     }
     rc = pc_gate_exec(r, gate, ship, size);
     if (rc == -2&& strcmp(gate, "check-file-purpose") == 0) {
+        pc_failure_facts(r, gate, reply, false);
         pc_fail(reply, r->leaf, "PRECHECK_UNAVAILABLE",
                 "canonical file-purpose command could not be resolved safely",
                 r->out);
@@ -826,8 +917,10 @@ static bool pc_gates_run(struct pc_run *r,
                          struct zcl_command_reply *reply)
 {
     char list[PC_OUT_CAP / 4];
-    int rc = pc_run(r->wt, r->bin, "--list", r->deadline, r->out, PC_OUT_CAP);
+    int rc = pc_run(r->wt, r->bin, "--list", r->deadline, r->out, PC_OUT_CAP, &r->capture);
     if (rc != 0) {
+        r->gate_output_available = true;
+        pc_failure_facts(r, "--list", reply, rc < 0);
         pc_fail(reply, r->leaf, rc < 0 ? "PRECHECK_TIMEOUT" : "PRECHECK_UNAVAILABLE",
                 "the lane's z23-lint --list did not answer; run `make "
                 "build/bin/z23-lint docs-capability-inventory` in the lane, "
@@ -918,7 +1011,10 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     g = zcl_calloc(1, sizeof(*g), "dev_land_precheck.gates");
     ledger[0] = '\0';
     if (pc_land_dir(land_dir, dir, sizeof(dir)))
+    {
         (void)snprintf(ledger, sizeof(ledger), "%s/outcomes.jsonl", dir);
+        (void)snprintf(r->land, sizeof(r->land), "%s", dir);
+    }
     zcl_land_precheck_gate_set(ledger[0] ? ledger : NULL,
                                pc_now(), g);
     r->out = zcl_malloc(PC_OUT_CAP, "dev_land_precheck.out");

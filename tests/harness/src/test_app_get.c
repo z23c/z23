@@ -107,6 +107,7 @@ struct tag_stub {
     bool tamper;             /* the fetch delivers other bytes */
     bool malformed_board;
     int show_mode;
+    int page_mode;
     bool fetch_partial;
     bool onion_unavailable;
     bool onion_changed;
@@ -120,8 +121,10 @@ struct tag_stub {
 
 static struct tag_stub g_tag;
 static int g_tag_rpc_mode;
+static bool tag_capture_signed_post(struct zcl_command_reply *out);
 
 extern bool zcl_app_get_host_reply_valid_for_testing(const struct json_value *, const char *);
+extern bool zcl_test_app_publish_next(char *, size_t, const char *, const char *, const char *, const char *);
 
 static bool tag_host_reply_case(const char *ok_field, const char *host,
                                 const char *carrier, const char *generation)
@@ -271,6 +274,7 @@ static bool tag_post_capture(const struct json_value *in,
     if (result && g_tag.fail_result_post) return false;
     if (!result && g_tag.fail_host_post) return false;
     if (g_tag.malformed_post_id) return json_push_kv_str(&out->data, "id", "bad");
+    if (!result) return tag_capture_signed_post(out);
     return json_push_kv_str(&out->data, "id",
                             "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d"
                             "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d");
@@ -355,11 +359,54 @@ static bool tag_show(const struct json_value *in, struct zcl_command_reply *out)
     return false;
 }
 
+static size_t tag_page_start(int64_t before, const char *id)
+{
+    size_t start = 0, total = json_size(&g_tag.board);
+    if (before) for (; start < total; ++start) {
+        const struct json_value *p = json_at(&g_tag.board, start);
+        int64_t t = json_get_int(json_get(p, "created_at"));
+        const char *key = tag_in(p, "id");
+        if (t < before || (t == before && strcmp(key, id) < 0)) break;
+    }
+    return start;
+}
+static bool tag_list_page(const struct json_value *in, struct zcl_command_reply *out)
+{
+        struct json_value posts; json_init(&posts); json_set_array(&posts);
+        int64_t before = json_get_int(json_get(in, "before_created_at"));
+        const char *id = tag_in(in, "before_id"); size_t total = json_size(&g_tag.board);
+        size_t start = tag_page_start(before, id);
+        size_t end = start + ZCL_APP_OFFER_ROWS_MAX;
+        if (end > total) end = total;
+        bool ok = true;
+        for (size_t i = start; ok && i < end; ++i) ok = json_push_back(&posts, json_at(&g_tag.board, i));
+        bool more = end < total;
+        ok = ok && json_push_kv(&out->data, "posts", &posts) &&
+            json_push_kv_int(&out->data, "returned", (int64_t)(end - start)) &&
+            json_push_kv_bool(&out->data, "has_more", more);
+        if (ok && more) {
+            const struct json_value *last = json_at(&g_tag.board, end - 1);
+            ok = json_push_kv_int(&out->data, "next_created_at", g_tag.page_mode == 3 && before ? before : json_get_int(json_get(last, "created_at"))) &&
+                json_push_kv_str(&out->data, "next_id", g_tag.page_mode == 2 ? "malformed" :
+                    g_tag.page_mode == 3 && before ? id : tag_in(last, "id"));
+        }
+        json_free(&posts); return ok;
+}
 static bool tag_list(const struct json_value *in, struct zcl_command_reply *out)
 {
     g_tag.lists++;
     if (!strcmp(tag_in(in, "kind"), "offer")) g_tag.catalog_lists++;
-    return g_tag.malformed_board || json_push_kv(&out->data, "posts", &g_tag.board);
+    if (g_tag.malformed_board) return true;
+    if (g_tag.page_mode == 4) {
+        struct json_value posts; json_init(&posts); json_set_array(&posts);
+        bool ok = json_push_back(&posts, json_at(&g_tag.board, 0)) &&
+            json_push_kv(&out->data, "posts", &posts);
+        json_free(&posts); return ok;
+    }
+    if (g_tag.page_mode) return tag_list_page(in, out);
+    return json_push_kv(&out->data, "posts", &g_tag.board) &&
+        json_push_kv_int(&out->data, "returned", (int64_t)json_size(&g_tag.board)) &&
+        json_push_kv_bool(&out->data, "has_more", false);
 }
 
 static bool tag_call(const char *path, const struct json_value *in,
@@ -485,6 +532,15 @@ static void tag_board_reset(void)
     json_free(&g_tag.board);
     json_init(&g_tag.board);
     json_set_array(&g_tag.board);
+}
+
+static bool tag_capture_signed_post(struct zcl_command_reply *out)
+{
+    const struct tag_post_spec post = {g_tag.text, "apps", FLEET_BOARD_KIND_OFFER, false};
+    tag_board_reset();
+    if (!tag_board_add(&post, 1)) return false;
+    const char *id = json_get_str(json_get(json_at(&g_tag.board, 0), "id"));
+    return id && json_push_kv_str(&out->data, "id", id);
 }
 
 static int tag_rebuild_catalog(void)
@@ -634,6 +690,7 @@ struct tag_world {
     struct asf_journey j;
     struct zcl_app_offer offer; /* what A posted */
     char name[160];             /* the published package name */
+    char next[512];             /* the exact continuation displayed by publish */
 };
 
 static const char k_tag_makefile[] =
@@ -786,7 +843,7 @@ static int tag_a_publish(struct tag_world *w)
     TEST("app get: publish offers the signed share bytes once and posts ONE "
          "entry naming exactly them") {
         static struct asf_door run;
-        char want[256];
+        char want[512];
         asf_door_run(w->j.a_home, w->j.a_home, w->j.a_datadir, "publish",
                      w->j.copy, ZCL_CLI_CONFIRM_YES, &run);
         ASSERT_EQ(run.rc, 0);
@@ -806,8 +863,13 @@ static int tag_a_publish(struct tag_world *w)
         ASSERT(strncmp(w->offer.name, "k", 1) == 0 &&
                strstr(w->offer.name, "/tinyapp") != NULL);
         (void)snprintf(w->name, sizeof(w->name), "%s", w->offer.name);
-        (void)snprintf(want, sizeof(want), "z23 app get %s", w->name);
-        ASSERT(strstr(run.text, want) != NULL);
+        const char *id = json_get_str(json_get(json_at(&g_tag.board, 0), "id"));
+        ASSERT(id != NULL);
+        (void)snprintf(want, sizeof(want), "z23 app get %s --root=%s --publisher=%s --offer=%s",
+                       w->name, w->offer.root, w->offer.publisher, id);
+        const char *continuation = strstr(run.text, want);
+        ASSERT(continuation != NULL && strcspn(continuation, "\n") == strlen(want));
+        (void)snprintf(w->next, sizeof(w->next), "%.*s", (int)strlen(want), continuation);
         /* the private share file is gone: the node holds the bytes */
         ASSERT_EQ(tag_glob(w->j.a_datadir, ".app-publish*"), 0u);
         PASS();
@@ -1079,6 +1141,52 @@ static bool tag_catalog_cli(const char *datadir, const char *name)
     text[n] = '\0';
     fclose(out);
     return handled && restored && rc == 0 && strstr(text, name) != NULL;
+}
+
+static int tag_publish_long_name(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("app publish: continuation holds a maximum-length legal name") {
+        struct zcl_app_offer offer = w->offer;
+        memset(offer.name, 'a', sizeof(offer.name) - 1);
+        offer.name[VCS_PACKAGE_RELEASE_NAME_HALF_MAX] = '/';
+        offer.name[sizeof(offer.name) - 1] = '\0';
+        const char *id = json_get_str(json_get(json_at(&g_tag.board, 0), "id"));
+        char next[512], short_next[16];
+        ASSERT(id && zcl_app_offer_valid(&offer));
+        ASSERT(zcl_test_app_publish_next(next, sizeof(next), offer.name, offer.root, offer.publisher, id));
+        ASSERT(strstr(next, offer.name) && strstr(next, id));
+        ASSERT(!zcl_test_app_publish_next(short_next, sizeof(short_next), offer.name, offer.root, offer.publisher, id));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int tag_published_continuation(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("app publish: displayed continuation selects its exact offer among competing names") {
+        char text[TAG_TEXT], other_root[65], command[512], *save = NULL;
+        memset(other_root, 'a', 64); other_root[64] = '\0';
+        ASSERT(tag_swap(g_tag.text, w->offer.root, other_root, text));
+        const struct tag_post_spec other = {text, "apps", FLEET_BOARD_KIND_OFFER, false};
+        ASSERT(tag_board_add_as(&other, 1, 0x6b));
+        (void)snprintf(command, sizeof(command), "%s", w->next);
+        const char *words[7]; size_t count = 0;
+        for (char *p = strtok_r(command, " ", &save); p && count < 7; p = strtok_r(NULL, " ", &save))
+            words[count++] = p;
+        ASSERT(count == 7 && !strcmp(words[0], "z23") && !strcmp(words[1], "app") && !strcmp(words[2], "get"));
+        FILE *out = tmpfile(); ASSERT(out != NULL);
+        int saved = dup(STDOUT_FILENO), rc = -1, shows = g_tag.shows, lists = g_tag.catalog_lists;
+        ASSERT(saved >= 0 && fflush(stdout) == 0 && dup2(fileno(out), STDOUT_FILENO) >= 0);
+        bool handled = zcl_app_front_door_try(asf_spec("app.get"), words, count, 3, w->j.b_datadir, &rc);
+        (void)fflush(stdout); bool restored = dup2(saved, STDOUT_FILENO) >= 0;
+        close(saved); fclose(out);
+        ASSERT(handled && restored && rc == 0);
+        ASSERT(g_tag.shows == shows + 1 && g_tag.catalog_lists == lists);
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static int tag_identity_selection(struct tag_world *w)
@@ -1590,6 +1698,129 @@ static int tag_b_journeys(struct tag_world *w)
     return failures ? failures : tag_library_journey(w);
 }
 
+struct tag_pages_view { unsigned stage; bool valid, selected, cancel_early, refresh, expect_error; char target[65]; };
+static const char *tag_pages_action(const struct tag_pages_view *v)
+{
+    if (v->stage == 0) return "public";
+    if (v->stage == 1) return "public-options";
+    if (v->stage == 2 && v->refresh) return "public-refresh";
+    if (v->stage == 2 || v->stage == 3) return "public-older";
+    return "get";
+}
+static bool tag_pages_present(void *context, const struct zcl_present_model_v1 *m,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    struct tag_pages_view *v = context; (void)copy;
+    if (!zcl_present_model_validate_v1(m, why, cap)) return false;
+    if (v->expect_error && !strcmp(m->request_id, "library-error")) {
+        event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+        event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true;
+    }
+    if (v->cancel_early && v->stage == 1) { event->struct_size = sizeof(*event);
+        event->abi_version = ZCL_PRESENT_ABI_V1; event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }
+    if (v->refresh && v->stage == 3) { event->struct_size = sizeof(*event);
+        event->abi_version = ZCL_PRESENT_ABI_V1; event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }
+    if (!v->refresh && v->stage == 3 && !strstr(m->summary, "No usable offers on this page")) return false;
+    const char *want = tag_pages_action(v);
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    for (uint32_t i = 0; i < m->action_count; ++i) if (!strcmp(m->actions[i].id, want)) {
+        event->action_index = i; ++v->stage; return true;
+    }
+    v->valid = false; return false;
+}
+static bool tag_pages_cancel(void *context, const struct zcl_present_model_v1 *m,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    (void)context; (void)m; (void)pages; (void)why; (void)cap;
+    struct zcl_present_window_event_v1 e = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = 0};
+    bool redraw = false, close = false;
+    live->owner.update(live->owner.context, &e, false, &redraw, &close);
+    return close;
+}
+static bool tag_pages_get(void *context, const struct json_value *in, struct zcl_command_reply *out)
+{
+    struct tag_pages_view *v = context;
+    v->selected = !strcmp(tag_in(in, "offer_id"), v->target) && !json_get(in, "confirm");
+    return zcl_app_inner_call("app.get", in, out, NULL);
+}
+static bool tag_pages_board(struct tag_world *w, char target[65])
+{
+    tag_board_reset();
+    if (!tag_board_valid(w, 0)) return false;
+    int64_t now = json_get_int(json_get(json_at(&g_tag.board, 0), "created_at"));
+    for (size_t i = 1; i <= 511; ++i) {
+        struct json_value p; json_init(&p); json_set_object(&p);
+        char id[65]; (void)snprintf(id, sizeof(id), "%064zx", 10000u - i);
+        int64_t age = i == 256 ? 255 : (int64_t)i;
+        bool ok = json_push_kv_int(&p, "created_at", now - age) &&
+            json_push_kv_str(&p, "id", id) && json_push_back(&g_tag.board, &p);
+        json_free(&p); if (!ok) return false;
+    }
+    if (!tag_board_valid(w, 512)) return false;
+    (void)snprintf(target, 65, "%s", tag_in(json_at(&g_tag.board, 512), "id"));
+    return strlen(target) == 64;
+}
+static int tag_public_pages(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("app catalog page: malformed, repeated and unsupported cursors refuse") {
+        struct zcl_app_offer_row *rows = calloc(ZCL_APP_OFFER_ROWS_MAX, sizeof(*rows));
+        struct zcl_app_offer_page page; struct zcl_command_reply why; char target[65];
+        ASSERT(rows && tag_pages_board(w, target));
+        g_tag.page_mode = 1;
+        ASSERT(zcl_app_offer_catalog_page(rows, ZCL_APP_OFFER_ROWS_MAX, NULL, &page, &why));
+        struct zcl_app_offer_position cursor = page.next; ASSERT(page.has_more);
+        zcl_command_reply_free(&why);
+        g_tag.page_mode = 3;
+        ASSERT(!zcl_app_offer_catalog_page(rows, ZCL_APP_OFFER_ROWS_MAX, &cursor, &page, &why));
+        ASSERT(!strcmp(why.error.code, "CATALOG_INCOMPLETE")); zcl_command_reply_free(&why);
+        g_tag.page_mode = 2;
+        ASSERT(!zcl_app_offer_catalog_page(rows, ZCL_APP_OFFER_ROWS_MAX, NULL, &page, &why));
+        zcl_command_reply_free(&why);
+        g_tag.page_mode = 4;
+        ASSERT(!zcl_app_offer_catalog_page(rows, ZCL_APP_OFFER_ROWS_MAX, NULL, &page, &why));
+        g_tag.page_mode = 0; zcl_command_reply_free(&why); free(rows);
+        PASS();
+    }
+    TEST("My Apps: older pages survive an empty valid page and cancel exact selection") {
+        struct tag_pages_view view = {.valid = true};
+        struct app_launch_env env; char why[256];
+        ASSERT(tag_pages_board(w, view.target));
+        ASSERT(setenv("HOME", w->j.b_home, 1) == 0 && setenv("XDG_STATE_HOME", w->j.b_home, 1) == 0);
+        ASSERT(app_launch_env_from_process(&env, why, sizeof(why)));
+        size_t copies = tag_glob(w->j.b_datadir, "copies/*");
+        int fetches = g_tag.fetches, posts = g_tag.posts, enables = g_tag.enables;
+        g_tag.page_mode = 1;
+        struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_library.v1");
+        view.cancel_early = true;
+        zcl_test_app_library_public_at(&env, w->j.b_datadir, &reply,
+            tag_pages_present, &view, tag_pages_cancel, NULL, tag_pages_get);
+        ASSERT(g_tag.fetches == fetches && !view.selected);
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_library.v1");
+        view.stage = 0; view.cancel_early = false; view.refresh = true;
+        zcl_test_app_library_public_at(&env, w->j.b_datadir, &reply,
+            tag_pages_present, &view, tag_pages_cancel, NULL, tag_pages_get);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && view.stage == 3 && g_tag.fetches == fetches);
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_library.v1");
+        view.stage = 0; view.refresh = false; view.expect_error = true; g_tag.page_mode = 3;
+        zcl_test_app_library_public_at(&env, w->j.b_datadir, &reply,
+            tag_pages_present, &view, tag_pages_cancel, NULL, tag_pages_get);
+        ASSERT(!strcmp(reply.error.code, "CATALOG_INCOMPLETE") && g_tag.fetches == fetches);
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_library.v1");
+        view.stage = 0; view.expect_error = false; g_tag.page_mode = 1;
+        zcl_test_app_library_public_at(&env, w->j.b_datadir, &reply,
+            tag_pages_present, &view, tag_pages_cancel, NULL, tag_pages_get);
+        g_tag.page_mode = 0;
+        ASSERT(view.valid && view.stage == 5 && view.selected);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && g_tag.fetches == fetches + 1);
+        ASSERT(g_tag.posts == posts && g_tag.enables == enables && tag_glob(w->j.b_datadir, "copies/*") == copies);
+        zcl_command_reply_free(&reply); PASS();
+    } _test_next:;
+    g_tag.page_mode = 0; return failures;
+}
+
 static int tag_rebuild_outcomes(struct tag_world *w)
 {
     int failures = 0;
@@ -1778,7 +2009,8 @@ static int tag_mcp(void)
 
 static int tag_followup_journeys(struct tag_world *w)
 {
-    int failures = tag_exact_tests(w);
+    int failures = tag_public_pages(w);
+    if (failures == 0) failures += tag_exact_tests(w);
     if (failures == 0) failures += tag_rebuild_outcomes(w);
     if (failures == 0) failures += tag_rehost_failures(w);
     if (failures == 0) failures += tag_rebuild_open_failure(w);
@@ -1819,6 +2051,10 @@ int test_app_get(void)
         failures += tag_publish_unknown(&w);
     if (failures == 0)
         failures += tag_a_publish(&w);
+    if (failures == 0)
+        failures += tag_publish_long_name(&w);
+    if (failures == 0)
+        failures += tag_published_continuation(&w);
     if (failures == 0) {
         failures += tag_catalog(&w);
         failures += tag_dropped(&w);

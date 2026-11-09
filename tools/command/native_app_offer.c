@@ -197,6 +197,102 @@ bool zcl_app_offer_exact(const char *id, struct zcl_app_offer_row *row,
     return true;
 }
 
+static bool zao_cursor(const struct json_value *post, struct zcl_app_offer_position *out)
+{
+    uint8_t bytes[32];
+    const char *id = zao_str(post, "id");
+    if (!zao_int(post, "created_at", 1, INT64_MAX, &out->created_at) ||
+        !id || strlen(id) != 64 || !zcl_hex_decode_lower(id, bytes, sizeof(bytes))) return false;
+    memcpy(out->id, id, 65);
+    return true;
+}
+
+static bool zao_cursor_older(const struct zcl_app_offer_position *a,
+                             const struct zcl_app_offer_position *b)
+{
+    return a->created_at < b->created_at ||
+        (a->created_at == b->created_at && strcmp(a->id, b->id) < 0);
+}
+
+static bool zao_page_shape(const struct json_value *data, size_t cap)
+{
+    const struct json_value *posts = json_get(data, "posts"), *more = json_get(data, "has_more");
+    const struct json_value *returned = json_get(data, "returned");
+    return posts && posts->type == JSON_ARR && json_size(posts) <= cap &&
+        more && more->type == JSON_BOOL && returned && returned->type == JSON_INT &&
+        json_get_int(returned) == (int64_t)json_size(posts);
+}
+
+static bool zao_page_rows(const struct json_value *posts, struct zcl_app_offer_row *rows,
+    size_t cap, const struct zcl_app_offer_position *before, struct zcl_app_offer_page *page,
+    struct zcl_app_offer_position *last)
+{
+    struct zcl_app_offer_position previous = {0}, current = {0};
+    if (before) previous = *before;
+    for (size_t i = 0; i < json_size(posts); ++i) {
+        const struct json_value *post = json_at(posts, i);
+        if (!zao_cursor(post, &current) || (previous.created_at && !zao_cursor_older(&current, &previous))) return false;
+        previous = current;
+        struct zcl_app_offer_row row;
+        if (zcl_app_offer_from_post(post, &row) && !zao_add_row(rows, cap, &page->count, &row)) return false;
+    }
+    *last = current;
+    if (page->count > 1) qsort(rows, page->count, sizeof(rows[0]), zao_newest_first);
+    return true;
+}
+
+static bool zao_page_next(const struct json_value *data, size_t count,
+    const struct zcl_app_offer_position *last, struct zcl_app_offer_page *page)
+{
+    page->has_more = json_get_bool(json_get(data, "has_more"));
+    const struct json_value *next_time = json_get(data, "next_created_at"), *next_id = json_get(data, "next_id");
+    if (!page->has_more) return !next_time && !next_id;
+    if (!count || !next_time || next_time->type != JSON_INT ||
+        !next_id || next_id->type != JSON_STR || json_get_int(next_time) != last->created_at ||
+        strcmp(json_get_str(next_id), last->id)) return false;
+    page->next = *last;
+    return true;
+}
+
+static bool zao_page_parse(const struct json_value *data, struct zcl_app_offer_row *rows,
+    size_t cap, const struct zcl_app_offer_position *before, struct zcl_app_offer_page *page)
+{
+    struct zcl_app_offer_position last = {0};
+    if (!zao_page_shape(data, cap)) return false;
+    const struct json_value *posts = json_get(data, "posts");
+    return zao_page_rows(posts, rows, cap, before, page, &last) &&
+        zao_page_next(data, json_size(posts), &last, page);
+}
+
+bool zcl_app_offer_catalog_page(struct zcl_app_offer_row *rows, size_t cap,
+    const struct zcl_app_offer_position *before, struct zcl_app_offer_page *page,
+    struct zcl_command_reply *why)
+{
+    struct json_value in;
+    const char *kv[] = {"room", ZCL_APP_OFFER_ROOM, "scope", "public", "kind", ZCL_APP_OFFER_KIND};
+    memset(page, 0, sizeof(*page));
+    bool built = cap && cap <= ZCL_APP_OFFER_ROWS_MAX && zcl_app_input(&in, kv, 6);
+    if (built) built = json_push_kv_int(&in, "limit", (int64_t)cap);
+    if (built && before) built = json_push_kv_int(&in, "before_created_at", before->created_at) &&
+        json_push_kv_str(&in, "before_id", before->id);
+    bool ok = built && zcl_app_offer_call(ZCL_APP_OFFER_BOARD_LIST, &in, why);
+    if (cap && cap <= ZCL_APP_OFFER_ROWS_MAX) json_free(&in);
+    if (!built) {
+        zcl_command_reply_init(why, "zcl.app_offer.inner.v1");
+        zcl_command_reply_fail(why, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+            "ALLOC", "prepare", false, false, "board page input", ZCL_APP_OFFER_BOARD_LIST);
+        return false;
+    }
+    if (!ok) return false;
+    if (!zao_page_parse(&why->data, rows, cap, before, page)) {
+        memset(page, 0, sizeof(*page));
+        zcl_command_reply_fail(why, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_TRANSIENT,
+            "CATALOG_INCOMPLETE", "execute", true, false, "board paging response is invalid or unsupported", ZCL_APP_OFFER_BOARD_LIST);
+        return false;
+    }
+    return true;
+}
+
 bool zcl_app_offer_catalog(struct zcl_app_offer_row *rows, size_t cap,
                            size_t *count, struct zcl_command_reply *why)
 {
@@ -377,8 +473,13 @@ static bool zao_board_list(const struct json_value *input,
          json_get(&body, "posts") &&
          json_get(&body, "posts")->type == JSON_ARR;
     free(raw);
-    if (ok)
-        ok = json_push_kv(&out->data, "posts", json_get(&body, "posts"));
+    if (ok) {
+        static const char *const keys[] = {"posts", "returned", "has_more", "next_created_at", "next_id"};
+        for (size_t i = 0; ok && i < sizeof(keys) / sizeof(keys[0]); ++i) {
+            const struct json_value *v = json_get(&body, keys[i]);
+            if (v) ok = json_push_kv(&out->data, keys[i], v);
+        }
+    }
     json_free(&body);
     if (!ok)
         zcl_command_reply_fail(out, ZCL_COMMAND_STATUS_FAILED,
