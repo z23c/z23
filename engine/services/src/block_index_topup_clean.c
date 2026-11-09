@@ -190,6 +190,8 @@ int topup_clean_resume(struct main_state *ms, struct node_db *ndb,
         return lo;
     }
     *verified = true;
+    printf("[boot] block index top-up clean mark: accepted through %d; resuming at %d\n",
+           got.clean_to, got.clean_to + 1);
     return got.clean_to + 1;
 }
 
