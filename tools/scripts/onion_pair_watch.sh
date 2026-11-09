@@ -147,6 +147,81 @@ named_verdict() {
     esac
 }
 
+# Read only a bounded log suffix. These snapshots can race a writer or
+# rotation; a zero flag means only that the event was not observed here.
+pair_diag_read() {
+    local path=$1 size bytes LC_ALL=C
+    DIAG_SCAN=unavailable DIAG_WINDOW=unknown DIAG_TEXT=""
+    [ -n "$path" ] || return 0
+    [ -e "$path" ] || return 0
+    DIAG_SCAN=error
+    [ -f "$path" ] && [ ! -L "$path" ] || return 0
+    bytes=$(tail -c 65537 "$path" 2>/dev/null | wc -c) || return 0
+    bytes=${bytes//[[:space:]]/}
+    case "$bytes" in ''|*[!0-9]*) return 0 ;; esac
+    DIAG_TEXT=$({ tail -c 65537 "$path" && printf '\001'; } 2>/dev/null) || return 0
+    DIAG_TEXT=${DIAG_TEXT%$'\001'}
+    size=${#DIAG_TEXT}
+    [ "$size" = "$bytes" ] || return 0
+    DIAG_SCAN=ok DIAG_WINDOW=full
+    if [ "$size" -gt 65536 ]; then
+        DIAG_WINDOW=tail
+        DIAG_TEXT=${DIAG_TEXT:1}
+    fi
+}
+
+pair_diag_pid() {
+    case ${1:-} in ''|0|*[!0-9]*) printf not_started ;;
+        *) if kill -0 "$1" 2>/dev/null; then printf signalable; else printf not_signalable; fi ;;
+    esac
+}
+
+pair_diag_service() {
+    local launch='?' replay='?' retry='?' giveup='?' exhausted='?' line
+    pair_diag_read "${ISO_DD:+$ISO_DD/tor-rend.log}"
+    if [ "$DIAG_SCAN" = ok ]; then
+        launch=0 replay=0 retry=0 giveup=0 exhausted=0
+        while IFS= read -r line; do
+            case "$line" in *'Rendezvous circuit launched to'*) launch=1 ;; esac
+            case "$line" in *'We received an INTRODUCE2 cell with same REND_COOKIE'*) replay=1 ;; esac
+            case "$line" in *'Retrying rendezvous point circuit to'*) retry=1 ;; esac
+            case "$line" in *'Giving up on launching a rendezvous circuit'*|*'Failed to launch rendezvous circuit'*) giveup=1 ;; esac
+            case "$line" in *'Attempt to build a rendezvous circuit to'*'Giving up building.'*) exhausted=1 ;; esac
+        done <<<"$DIAG_TEXT"
+    fi
+    printf 'PAIR_DIAG role=service stage=%s verdict=%s scan=%s window=%s level=rend_info process=%s rend_launch=%s intro_replay_drop=%s rend_retry=%s rend_giveup=%s rend_build_exhausted=%s\n' \
+        "$STAGE" "$VERDICT" "$DIAG_SCAN" "$DIAG_WINDOW" "$(pair_diag_pid "${ISO_NODE_PID:-}")" "$launch" "$replay" "$retry" "$giveup" "$exhausted"
+}
+
+pair_diag_client() {
+    local ack='?' nack='?' wait_failed='?' build_failed='?' no_intro='?' line
+    pair_diag_read "${ISO_PEER_DD:+$ISO_PEER_DD/tor-rend.log}"
+    if [ "$DIAG_SCAN" = ok ]; then
+        ack=0 nack=0 wait_failed=0 build_failed=0 no_intro=0
+        while IFS= read -r line; do
+            case "$line" in *'Received INTRODUCE_ACK ack!'*) ack=1 ;; esac
+            case "$line" in *'Received INTRODUCE_ACK nack'*) nack=1 ;; esac
+            case "$line" in *'Failed v3 intro circ for service'*'(awaiting ACK)'*) wait_failed=1 ;; esac
+            case "$line" in *'Failed v3 intro circ for service'*'(while building circuit)'*) build_failed=1 ;; esac
+            case "$line" in *'No usable introduction points left'*) no_intro=1 ;; esac
+        done <<<"$DIAG_TEXT"
+    fi
+    printf 'PAIR_DIAG role=client scan=%s window=%s level=rend_info process=%s intro_ack=%s intro_nack=%s intro_wait_failed=%s intro_build_failed=%s no_intro_points=%s\n' \
+        "$DIAG_SCAN" "$DIAG_WINDOW" "$(pair_diag_pid "${ISO_PEER_PID:-}")" "$ack" "$nack" "$wait_failed" "$build_failed" "$no_intro"
+}
+
+pair_diag_client_node() {
+    local retry='?' line
+    pair_diag_read "${ISO_PEER_DD:+$ISO_PEER_DD/node.log}"
+    if [ "$DIAG_SCAN" = ok ]; then
+        retry=0
+        while IFS= read -r line; do
+            case "$line" in *'first onion circuit attempt failed;'*) retry=1 ;; esac
+        done <<<"$DIAG_TEXT"
+    fi
+    printf 'PAIR_DIAG role=client_node scan=%s window=%s level=node onion_stream_retry=%s\n' "$DIAG_SCAN" "$DIAG_WINDOW" "$retry"
+}
+
 append_probe() {
     [ "${PROBE_WRITTEN:-0}" = 1 ] && return 0
     mkdir -p "$(dirname "$PROBE_FILE")"
@@ -168,6 +243,11 @@ append_probe() {
         "$(json_bool "${P2P_FRAMING_SEEN:-false}")" \
         >>"$PROBE_FILE"
     PROBE_WRITTEN=1
+    if [ "$VERDICT" != PAIRED ]; then
+        pair_diag_service || true
+        pair_diag_client || true
+        pair_diag_client_node || true
+    fi
 }
 
 log_has() {
@@ -551,6 +631,21 @@ if [ "$SELFTEST" = 1 ]; then
         *TEST_SECRET*) echo "  FAIL: failed probe exposed log contents"; st_fail=1 ;;
         *) echo "  ok: failed probe does not expose log contents" ;;
     esac
+    printf '%s\n' 'Retrying rendezvous point circuit to TEST_SECRET' \
+        'Failed to launch rendezvous circuit to TEST_SECRET' \
+        'Attempt to build a rendezvous circuit to TEST_SECRET has failed. Giving up building.' >"$ISO_DD/tor-rend.log"
+    printf '%s\n' 'Received INTRODUCE_ACK ack! Informing rendezvous' \
+        'Failed v3 intro circ for service TEST_SECRET (awaiting ACK).' \
+        'Failed v3 intro circ for service TEST_SECRET (while building circuit).' \
+        'No usable introduction points left. Closing.' >"$ISO_PEER_DD/tor-rend.log"
+    ISO_NODE_PID=$$
+    diag_capture="$(PROBE_WRITTEN=0 append_probe)"
+    case "$diag_capture" in
+        *'process=signalable'*'rend_retry=1'*'rend_giveup=1'*'rend_build_exhausted=1'*'intro_ack=1'*'intro_wait_failed=1'*'intro_build_failed=1'*'no_intro_points=1'*)
+            echo "  ok: same-line failure events and signalability are projected" ;;
+        *) echo "  FAIL: same-line failure projection incomplete"; st_fail=1 ;;
+    esac
+    ISO_NODE_PID=""
     head -c 65537 /dev/zero | tr '\0' x >>"$ISO_DD/tor-rend.log"
     diag_capture="$(PROBE_WRITTEN=0 append_probe)"
     case "$diag_capture" in
@@ -562,6 +657,19 @@ if [ "$SELFTEST" = 1 ]; then
     case "$diag_capture" in
         *'role=service'*'scan=unavailable'*) echo "  ok: missing log is unavailable" ;;
         *) echo "  FAIL: missing log was not marked unavailable"; st_fail=1 ;;
+    esac
+    mkdir "$ISO_DD/tor-rend.log"
+    diag_capture="$(PROBE_WRITTEN=0 append_probe)"
+    case "$diag_capture" in
+        *'role=service'*'scan=error'*) echo "  ok: unreadable log is an error" ;;
+        *) echo "  FAIL: unreadable log was not marked error"; st_fail=1 ;;
+    esac
+    rmdir "$ISO_DD/tor-rend.log"
+    mkfifo "$ISO_DD/tor-rend.log"
+    diag_capture="$(PROBE_WRITTEN=0 append_probe)"
+    case "$diag_capture" in
+        *'role=service'*'scan=error'*) echo "  ok: FIFO log is refused without reading" ;;
+        *) echo "  FAIL: FIFO log was not refused"; st_fail=1 ;;
     esac
 
     PROBE_WRITTEN=0
