@@ -1521,11 +1521,33 @@ static void ruf_display_failure(struct ru_run *r)
         equal, image_match, rc, wait_errno, info.si_pid != 0, info.si_code, info.si_status);
     errno = saved_errno;
 }
+/* Capture only this invocation, before another driver appends to the log. */
+static void ruf_driver_evidence(const struct ru_run *r, off_t start)
+{
+    char path[1100], buf[4096];
+    int n = snprintf(path, sizeof(path), "%s/receive-flow-driver.log", r->fixture->world.root);
+    int fd = n > 0 && (size_t)n < sizeof(path) ? open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat st;
+    if (fd < 0 || start < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < start) {
+        fprintf(stderr, "RECEIVE_FLOW_DRIVER_OUTPUT unavailable\n");
+        if (fd >= 0) close(fd);
+        return;
+    }
+    off_t available = st.st_size - start;
+    size_t want = available > (off_t)sizeof(buf) ? sizeof(buf) : (size_t)available;
+    ssize_t got = pread(fd, buf, want, start); int saved = errno; close(fd);
+    if (got < 0) { fprintf(stderr, "RECEIVE_FLOW_DRIVER_OUTPUT read_error=%d\n", saved); return; }
+    fprintf(stderr, "RECEIVE_FLOW_DRIVER_OUTPUT bytes=%zd available=%lld truncated=%d\n",
+        got, (long long)available, (off_t)got < available);
+    if (got > 0) (void)fwrite(buf, 1, (size_t)got, stderr);
+    fputc('\n', stderr);
+}
 static bool ruf_driver(struct ru_run *r, const char *title, const char *action, bool pixels)
 {
     char option[160];
     if (!ru_cli_option(option, sizeof(option), "title", title)) return false;
     int log = ru_log(r, "receive-flow-driver.log");
+    off_t start = log >= 0 ? lseek(log, 0, SEEK_END) : -1;
     const char *argv[] = {r->driver_image, option, action, "--timeout-ms=5000",
         pixels ? "--expect-pixels-change" : NULL, NULL};
     bool ok = log >= 0 && ru_spawn(&r->driver, argv, log, log, log);
@@ -1536,7 +1558,7 @@ static bool ruf_driver(struct ru_run *r, const char *title, const char *action, 
     bool stopped = ru_stop(&r->driver);
     if (!ok || !stopped) fprintf(stderr, "RECEIVE_FLOW_DRIVER title=%s action=%s wait=%d exit=%u stopped=%d\n",
         title, action, waited, code, stopped);
-    if (!ok || !stopped) ruf_display_failure(r);
+    if (!ok || !stopped) { ruf_driver_evidence(r, start); ruf_display_failure(r); }
     return ok && stopped;
 }
 static bool ruf_cli(struct ru_run *r, enum ruf_case which)
