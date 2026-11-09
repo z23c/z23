@@ -825,6 +825,39 @@ _test_next:;
     return failures;
 }
 
+static int test_dev_land_train_failed_held_head(void)
+{
+    int failures = 0;
+    TEST("land: failed train splits while preserving a held head") {
+        struct dlx_rig rig; struct dlx_call call;
+        char b[64], c[64], intent[200]; int64_t attempt = 0;
+        dlx_isolate("train_failed_held_head");
+        ASSERT(dlx_tr_rig(&rig, "train_failed_held_head_rig", "running", "b.txt", b, c));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        dlx_begin(&call, "hold"); (void)json_push_kv_int(&call.input, "seq", 1);
+        ASSERT(dlx_run(&call) && dlx_ok(&call)); dlx_end(&call);
+        setenv("ZCL_LAND_PROOF_STUB", "fail", 1);
+        dlx_begin(&call, "step");
+        bool ok = dlx_run(&call) && dlx_ok(&call);
+        if (!ok) printf("[failed held train: code=%s] ", dlx_err_code(&call));
+        ASSERT(ok); ASSERT_STR_EQ(dlx_str(&call, "state"), "rebased"); dlx_end(&call);
+        ASSERT(dlx_status_json(&call));
+        const struct json_value *queued = dlx_arr(&call, "queued");
+        bool held = false;
+        for (size_t i = 0; queued && i < queued->num_children; ++i) {
+            const struct json_value *row = &queued->children[i];
+            if (json_get_int(json_get(row, "seq")) == 1)
+                held = json_get_bool(json_get(row, "publication_hold"));
+        }
+        ASSERT(held); dlx_end(&call);
+        ASSERT(dlx_tr_queued(2, &attempt, intent, sizeof(intent)) && !intent[0]);
+        dlx_restore(); PASS();
+    }
+_test_next:;
+    dlx_restore(); return failures;
+}
+
 static int test_dev_land_train_red_then_singles_land(void)
 {
     int failures = 0;
@@ -1536,6 +1569,7 @@ int test_dev_land_train_cases(void)
     failures += test_dev_land_train_unavailable_proof();
     failures += test_dev_land_train_split_changed_tip();
     failures += test_dev_land_train_split_uncertain_push();
+    failures += test_dev_land_train_failed_held_head();
     failures += test_dev_land_train_red_then_singles_land();
     failures += test_dev_land_train_held_row_skipped();
     failures += test_dev_land_train_cancelled_row_skipped();
