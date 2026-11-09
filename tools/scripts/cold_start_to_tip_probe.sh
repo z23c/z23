@@ -20,7 +20,7 @@
 #
 # Fixture preference (product-aligned, never live datadir surgery):
 #   1. consensus-state-bundle-<H>.sqlite  (complete-state; zero-flag autodetect
-#      after platform/deploy/z23-bundle-bootstrap.sh stages it into
+#      after zcl-nodectl bundle-stage stages it into
 #      <datadir>/bundles/). THIS-boot install also needs a header-chain seed
 #      (block_index.bin) at <datadir>/bundles/block_index.bin so
 #      boot_header_seed_import_maybe can seat the checkpoint header before
@@ -82,12 +82,13 @@ BUNDLE_SUCCESS_PATTERN='-load-snapshot-at-own-height: coin set RE-SEEDED'
 CONSENSUS_BUNDLE_SUCCESS_PATTERN='autodetected consensus bundle installed'
 CONSENSUS_BUNDLE_REQUEST_PATTERN='install-on-next-boot request installed'
 CONSENSUS_BUNDLE_MARKER='consensus-bundle-installed.marker'
-BUNDLE_BOOTSTRAP="$REPO_ROOT/platform/deploy/z23-bundle-bootstrap.sh"
+BUNDLE_BOOTSTRAP="$REPO_ROOT/build/bin/zcl-nodectl"
 MAX_BOOTS="${ZCL_C3_MAX_BOOTS:-12}"
 ARTIFACT_ROOT="${ZCL_C3_ARTIFACT_ROOT:-$REPO_ROOT/build/c3-probe}"
 RUN_ID="${ZCL_C3_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 ARTIFACT_DIR="$ARTIFACT_ROOT/$RUN_ID"
 DATADIR=""
+SCRATCH_ROOT=""
 PID=""
 FILE_PEER=""
 start=0
@@ -323,6 +324,12 @@ read_exit_reason() {
     sed -n 's/^reason=\(.*\)$/\1/p' "$f" 2>/dev/null | tail -1
 }
 
+# Shared by the isolated staging fixture and the real consensus-bundle path.
+stage_consensus_bundle() {
+    [ -x "$BUNDLE_BOOTSTRAP" ] || { echo "c3-probe: native courier absent: $BUNDLE_BOOTSTRAP" >&2; return 1; }
+    "$BUNDLE_BOOTSTRAP" bundle-stage --source="$1" --datadir="$2"
+}
+
 run_selftest() {
     st_fail=0
     st_dir="$(mktemp -d /tmp/zcl-c3-probe-st.XXXXXX)" || {
@@ -430,6 +437,11 @@ run_selftest() {
 }
 
 SELFTEST=0
+if [ "${1:-}" = --selftest-stage ]; then
+    [ "$#" = 3 ] || exit 2
+    stage_consensus_bundle "$2" "$3"
+    exit $?
+fi
 for arg in "$@"; do
     case "$arg" in
         --selftest) SELFTEST=1 ;;
@@ -473,13 +485,16 @@ PEER_TIP="$(ZCL_DATADIR="$TIP_DATADIR" ZCL_RPCPORT="$PEER_RPC" "$RPC_BIN" getblo
 printf '%s' "$PEER_TIP" | grep -qE '^[0-9]+$' || skip "tip source ($PEER_RPC) not answering getblockcount"
 [ "$PEER_TIP" -gt 1000000 ] || skip "reference peer tip implausibly low ($PEER_TIP)"
 
-DATADIR="$(mktemp -d /tmp/zcl-c3-probe.XXXXXX)" || die "mktemp datadir failed"
-mkdir -p "$ARTIFACT_DIR" || die "artifact dir create failed: $ARTIFACT_DIR"
+TMP_BASE="$(cd /tmp && pwd -P)" || die "cannot resolve temporary parent"
+SCRATCH_ROOT="$(mktemp -d "$TMP_BASE/zcl-c3-probe.XXXXXX")" || die "mktemp scratch root failed"
+DATADIR="$SCRATCH_ROOT/datadir"
 cleanup() {
     [ -n "$PID" ] && kill -KILL -- "-$PID" 2>/dev/null || true
-    case "$DATADIR" in /tmp/zcl-c3-probe.*) rm -rf "$DATADIR" 2>/dev/null || true ;; esac
+    case "$SCRATCH_ROOT" in "$TMP_BASE"/zcl-c3-probe.*) [ "$DATADIR" = "$SCRATCH_ROOT/datadir" ] && rm -rf "$SCRATCH_ROOT" 2>/dev/null || true ;; esac
 }
 trap cleanup EXIT INT TERM
+mkdir -m 700 "$DATADIR" || die "datadir create failed: $DATADIR"
+mkdir -p "$ARTIFACT_DIR" || die "artifact dir create failed: $ARTIFACT_DIR"
 
 CONSENSUS_BUNDLE="${ZCL_C3_CONSENSUS_BUNDLE:-}"
 if [ -z "$CONSENSUS_BUNDLE" ]; then
@@ -505,9 +520,7 @@ if [ -n "$CONSENSUS_BUNDLE" ] && [ -f "$CONSENSUS_BUNDLE" ] &&
     echo "c3-probe: peer=$PEER peer_tip=$PEER_TIP budget=${BUDGET}s datadir=$DATADIR"
     echo "c3-probe: using complete-state consensus-state-bundle: $CONSENSUS_BUNDLE"
     echo "c3-probe: bundle $(du -h "$CONSENSUS_BUNDLE" | cut -f1)"
-    [ -x "$BUNDLE_BOOTSTRAP" ] || [ -f "$BUNDLE_BOOTSTRAP" ] \
-        || die "in-tree courier absent: $BUNDLE_BOOTSTRAP"
-    if ! bash "$BUNDLE_BOOTSTRAP" --source="$CONSENSUS_BUNDLE" --datadir="$DATADIR"; then
+    if ! stage_consensus_bundle "$CONSENSUS_BUNDLE" "$DATADIR"; then
         die "consensus-state-bundle staging failed"
     fi
     staged="$(ls "$DATADIR"/bundles/consensus-state-bundle-*.sqlite 2>/dev/null | head -1)"

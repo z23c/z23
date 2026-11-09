@@ -450,7 +450,7 @@ int t_dev_lane_deploy_contract(void)
         ASSERT(strstr(coldstart_tip, "-load-snapshot-at-own-height") != NULL);
         ASSERT(strstr(coldstart_tip, "BUNDLE_SUCCESS_PATTERN") != NULL);
         ASSERT(strstr(coldstart_tip, "consensus-state-bundle") != NULL);
-        ASSERT(strstr(coldstart_tip, "z23-bundle-bootstrap.sh") != NULL);
+        ASSERT(strstr(coldstart_tip, "bundle-stage") != NULL);
         ASSERT(strstr(coldstart_tip, "self_respawn_") != NULL);
         ASSERT(strstr(coldstart_tip, "--selftest") != NULL);
         ASSERT(strstr(coldstart_tip, "ZCL_C3_FILE_PEER") != NULL);

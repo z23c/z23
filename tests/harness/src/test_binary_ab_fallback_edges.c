@@ -33,6 +33,7 @@
 #include "util/blocker.h"
 #include "platform/private_file.h"
 #include "util/file_tree_ops.h"
+#include "sha3/sha3.h"
 
 #if !defined(_WIN32)
 
@@ -123,8 +124,68 @@ static int ae_stage_run(const char *datadir, const char *source)
     int status = 0;
     return waitpid(child, &status, 0) == child && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
-/* Invoke the actual checkout Make target, never a service or node. */
 static bool ae_file_contains(const char *path, const char *needle);
+static int ae_c3_stage_run(const char *source, const char *datadir, const char *log)
+{
+    pid_t child = fork(); if (child < 0) return -1;
+    if (!child) {
+        int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0 || dup2(fd, STDERR_FILENO) < 0) _exit(126);
+        (void)close(fd);
+        execlp("bash", "bash", "tools/scripts/cold_start_to_tip_probe.sh", "--selftest-stage", source, datadir, (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+struct ae_c3_paths {
+    char parent[1200], data[1300], source[1200], second[1200], missing[1200], staged[1400], other[1400], unsafe_parent[1200], unsafe[1300], log[1200];
+};
+static bool ae_c3_paths_init(const char *dir, struct ae_c3_paths *p)
+{
+    return snprintf(p->parent, sizeof(p->parent), "%s/c3-private", dir) < (int)sizeof(p->parent) &&
+        snprintf(p->data, sizeof(p->data), "%s/datadir", p->parent) < (int)sizeof(p->data) &&
+        snprintf(p->source, sizeof(p->source), "%s/consensus-state-bundle-1.sqlite", dir) < (int)sizeof(p->source) &&
+        snprintf(p->second, sizeof(p->second), "%s/consensus-state-bundle-2.sqlite", dir) < (int)sizeof(p->second) &&
+        snprintf(p->missing, sizeof(p->missing), "%s/missing.sqlite", dir) < (int)sizeof(p->missing) &&
+        snprintf(p->staged, sizeof(p->staged), "%s/bundles/consensus-state-bundle-1.sqlite", p->data) < (int)sizeof(p->staged) &&
+        snprintf(p->other, sizeof(p->other), "%s/bundles/consensus-state-bundle-2.sqlite", p->data) < (int)sizeof(p->other) &&
+        snprintf(p->unsafe_parent, sizeof(p->unsafe_parent), "%s/c3-unsafe", dir) < (int)sizeof(p->unsafe_parent) &&
+        snprintf(p->unsafe, sizeof(p->unsafe), "%s/datadir", p->unsafe_parent) < (int)sizeof(p->unsafe) &&
+        snprintf(p->log, sizeof(p->log), "%s/c3-stage.log", dir) < (int)sizeof(p->log);
+}
+static bool ae_c3_stage_bytes(const char *staged)
+{
+    struct stat st; unsigned char expected[SHA3_256_OUTPUT_SIZE], actual[SHA3_256_OUTPUT_SIZE]; char bytes[5];
+    int fd = open(staged, O_RDONLY | O_CLOEXEC);
+    bool ok = fd >= 0 && read(fd, bytes, sizeof(bytes)) == (ssize_t)sizeof(bytes) &&
+        fstat(fd, &st) == 0 && (st.st_mode & 0222) == 0;
+    if (fd >= 0) (void)close(fd);
+    if (ok) { sha3_256((const unsigned char *)"first", 5, expected); sha3_256((const unsigned char *)bytes, 5, actual); ok = memcmp(expected, actual, sizeof(actual)) == 0; }
+    return ok;
+}
+static bool ae_c3_stage_refusals(const struct ae_c3_paths *p)
+{
+    return ae_c3_stage_run(p->missing, p->data, p->log) == 1 && access(p->data, F_OK) != 0 &&
+        ae_file_contains(p->log, "validate source failed") &&
+        ae_c3_stage_run(p->source, p->unsafe, p->log) == 1 && access(p->unsafe, F_OK) != 0 &&
+        ae_file_contains(p->log, "validate data directory failed");
+}
+static bool ae_c3_stage_controls(const char *dir)
+{
+    struct ae_c3_paths p;
+    if (!ae_c3_paths_init(dir, &p)) return false;
+    if (mkdir(p.parent, 0700) || mkdir(p.unsafe_parent, 0700) || chmod(p.unsafe_parent, 0777) ||
+        !ae_write_str(p.source, "first", 0600) || !ae_write_str(p.second, "second", 0600)) return false;
+    bool ok = ae_c3_stage_refusals(&p) &&
+        ae_c3_stage_run(p.source, p.data, p.log) == 0 && ae_exact_text(p.staged, "first") &&
+        ae_c3_stage_run(p.second, p.data, p.log) == 0 && ae_exact_text(p.staged, "first") && access(p.other, F_OK) != 0 &&
+        ae_c3_stage_bytes(p.staged);
+    (void)unlink(p.staged); (void)unlink(p.log); char bundles[1400];
+    if (snprintf(bundles, sizeof(bundles), "%s/bundles", p.data) < (int)sizeof(bundles)) (void)rmdir(bundles);
+    (void)rmdir(p.data); (void)rmdir(p.parent); (void)rmdir(p.unsafe_parent); (void)unlink(p.source); (void)unlink(p.second); return ok;
+}
+/* Invoke the actual checkout Make target, never a service or node. */
 static int ae_make_bundle(const char *home, const char *datadir, const char *source, const char *env_data)
 {
     char datarg[1400], srcarg[1400], log[1400];
@@ -1103,6 +1164,7 @@ int ab_edges_contract(const char *dir)
     g_ae_cap_dir = mut;
     AE_CHECK("installed unit resolves to the installed courier and exact arguments", ae_unit_uses_installed_courier(mut));
     AE_CHECK("installed launcher stages a read-only bundle", ae_bundle_installed(mut));
+    AE_CHECK("C3 shared staging uses a private parent and refuses unsafe inputs", ae_c3_stage_controls(mut));
     AE_CHECK("checkout bundle target refuses a symlinked parent", ae_make_refuses_alias(mut));
     AE_CHECK("checkout bundle target stages explicit and default paths without clobber", ae_make_target_controls(mut));
     failures += ae_bundle_controls(mut);

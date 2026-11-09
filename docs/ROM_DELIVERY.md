@@ -318,8 +318,8 @@ in `~/.config/zclassic23/env` (see `platform/deploy/z23-node.env.example`).
 `make bundle-bootstrap` command above uses the same native courier. Its datadir
 must be an absolute canonical path whose parent is owned by the user and is not
 group- or world-writable; relative paths, symlinked parents and shared writable
-parents are refused. The checkout shell courier remains available to the C3
-probe, including its `--sha3-tool` option.
+parents are refused. The checkout shell courier remains available as a
+compatibility command, including its `--sha3-tool` option.
 Leaving the variable unset (the default) makes the service step a no-op, so a
 fresh `~/.config/zclassic23/env` with nothing configured
 behaves exactly as it does today.

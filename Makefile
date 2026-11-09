@@ -10995,7 +10995,7 @@ mvp-coldstart-local: zclassic23 zcl-rpc
 # harness --selftest first (no binary, no network, no datadir) so fixture
 # selection and self-respawn classification cannot rot between runs.
 .PHONY: mvp-coldstart-to-tip-local
-mvp-coldstart-to-tip-local: zclassic23 zcl-rpc
+mvp-coldstart-to-tip-local: zclassic23 zcl-rpc zcl-nodectl
 	@bash -c 'set -uo pipefail; \
 	 echo "══ MVP C3 FULL (real): fresh operator bundle -> zclassic23 peer tip <10min ══"; \
 	 if ! bash tools/scripts/cold_start_to_tip_probe.sh --selftest >/dev/null 2>&1; then \
