@@ -81,7 +81,7 @@ static bool syncdiag_queue_live(struct connman *cm)
     uint8_t magic[MESSAGE_START_SIZE] = {0x24, 0xe9, 0x27, 0x64};
     struct net_message msg; struct msg_header hdr;
     struct net_manager manager; struct net_address address;
-    char payload[2048] = {0};
+    unsigned char payload[2048] = {0};
     size_t before = net_recv_total_bytes();
     size_t send_before = net_send_total_bytes();
     net_manager_init(&manager); memcpy(manager.message_start, magic, sizeof(magic));
@@ -97,7 +97,7 @@ static bool syncdiag_queue_live(struct connman *cm)
     net_message_init(&msg, magic);
     msg_header_init_full(&hdr, magic, "ping", sizeof(payload));
     net_message_read_header(&msg, (const char *)&hdr, MSG_HEADER_SIZE);
-    bool read_ok = net_message_read_data(&msg, payload, sizeof(payload)) == (int)sizeof(payload);
+    bool read_ok = net_message_read_data(&msg, (const char *)payload, sizeof(payload)) == (int)sizeof(payload);
     rpc_net_set_connman(cm);
     bool got = syncdiag_queue_rpc(&result);
     bool ok = node && read_ok && got && syncdiag_queue_values(&result, before, send_before);
