@@ -217,7 +217,8 @@ int t_legacy_unit_guard_contract(void)
         ASSERT(setup_guard != NULL && setup_install != NULL);
         ASSERT(setup_guard < setup_install);
         ASSERT(setup_datadir != NULL && setup_linger != NULL);
-        ASSERT(setup_guard < setup_datadir && setup_datadir < setup_linger);
+        ASSERT(setup_guard < setup_datadir && setup_datadir < setup_install &&
+               setup_install < setup_linger);
         ASSERT(strstr(setup_buf, "exit 3") != NULL);
         ASSERT(strstr(setup_buf, "exit 4") != NULL);
         char *cut_buf = NULL;

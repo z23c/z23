@@ -7,7 +7,6 @@ set -e
 
 TARGET_USER="${SUDO_USER:-$(whoami)}"
 REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-SERVICE_DIR="$(eval echo ~$TARGET_USER)/.config/systemd/user"
 
 echo "Setting up Z23 for user: $TARGET_USER"
 
@@ -57,12 +56,16 @@ if ! su - "$TARGET_USER" -c 'if [ ! -d "$HOME/.zclassic-c23" ]; then umask 077; 
     exit 1
 fi
 
+# The service user must be able to update the unit and its drop-ins later.
+# Pass the source as a positional argument so checkout paths stay quoted.
+if ! su - "$TARGET_USER" -c 'set -e; mkdir -p "$HOME/.config/systemd/user"; install -m 644 "$1" "$HOME/.config/systemd/user/z23-node.service"' sh "$REPO_DIR/platform/deploy/z23-node.service"; then
+    echo "REFUSE: cannot install the user service for $TARGET_USER" >&2
+    exit 1
+fi
+
 # Enable linger (service survives logout) — may already be enabled
 loginctl enable-linger "$TARGET_USER" 2>/dev/null || true
 
-# Install user service file
-mkdir -p "$SERVICE_DIR"
-install -m 644 "$REPO_DIR/platform/deploy/z23-node.service" "$SERVICE_DIR/z23-node.service"
 su - "$TARGET_USER" -c "systemctl --user daemon-reload && systemctl --user enable z23-node" 2>/dev/null || \
     echo "Note: run 'systemctl --user daemon-reload && systemctl --user enable z23-node' as $TARGET_USER"
 
