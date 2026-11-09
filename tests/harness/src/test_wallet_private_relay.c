@@ -1113,6 +1113,41 @@ static void wprt_seen_block(struct wprt_fx *f, const struct uint256 *b,
                 unchanged, failures);
 }
 
+struct wprt_seen_observation {
+    bool found, in_pool, handed;
+    enum wpr_state state;
+    uint32_t attempts;
+    int64_t due_ms;
+};
+
+static struct wprt_seen_observation wprt_seen_observe(const struct uint256 *id,
+                                                       bool valid)
+{
+    struct wprt_seen_observation o = {0};
+    if (!valid) return o;
+    struct wpr *r = wpr_global();
+    zcl_mutex_lock(&r->lock);
+    for (size_t i = 0; i < WPR_MAX_ENTRIES; i++) {
+        const struct wpr_entry *e = &r->entries[i];
+        if (e->used && memcmp(e->txid.data, id->data, 32) == 0) {
+            o.found = true; o.state = e->state; o.attempts = e->attempts;
+            o.due_ms = e->due_ms; o.handed = e->handed;
+            break;
+        }
+    }
+    zcl_mutex_unlock(&r->lock);
+    o.in_pool = tx_mempool_exists(wpr_pool(r), id);
+    return o;
+}
+
+static void wprt_seen_observation_print(const char *label,
+                                        const struct wprt_seen_observation *o)
+{
+    printf("[%s found=%d pool=%d state=%d due_ms=%lld attempts=%u handed=%d] ",
+           label, o->found, o->in_pool, o->found ? (int)o->state : -1,
+           (long long)o->due_ms, o->attempts, o->handed);
+}
+
 static int wprt_case_seen_and_block(void)
 {
     int failures = 0;
@@ -1123,11 +1158,30 @@ static int wprt_case_seen_and_block(void)
     int send_a = -1, send_b = -1; size_t count = 0; bool count_read = false;
     bool ok = wallet_ok && onion && (send_a = wprt_rpc_send(&f, false, 10.0, &a)) &&
               (send_b = wprt_rpc_send(&f, true, 10.0, &b));
-    wprt_run(WPR_DELAY_MAX_MS + 1000, -1);
+    struct wprt_seen_observation pre_a = wprt_seen_observe(&a, send_a == 1);
+    struct wprt_seen_observation pre_b = wprt_seen_observe(&b, send_b == 1);
+    int64_t start_ms = wprt_clock();
+    size_t pushed = 0;
+    for (int64_t t = 0; t < WPR_DELAY_MAX_MS + 1000; t += 1000) {
+        struct wpr_tick_result result;
+        wprt_tick(1000, -1, &result);
+        pushed += result.pushed;
+    }
+    struct wprt_seen_observation post_a = wprt_seen_observe(&a, send_a == 1);
+    struct wprt_seen_observation post_b = wprt_seen_observe(&b, send_b == 1);
+    int64_t end_ms = wprt_clock();
     ok = ok && (count_read = true, count = wprt_count(onion, "tx")) == 2;
-    if (!ok)
+    if (!ok) {
         printf("[seen setup wallet=%d peer=%d send_a=%d send_b=%d count_read=%d tx_count=%zu] ",
                wallet_ok, onion != NULL, send_a, send_b, count_read, count);
+        printf("[seen ticks start_ms=%lld end_ms=%lld pushed=%zu same_id=%d] ",
+               (long long)start_ms, (long long)end_ms, pushed,
+               send_a == 1 && send_b == 1 && memcmp(a.data, b.data, 32) == 0);
+        wprt_seen_observation_print("pre_a", &pre_a);
+        wprt_seen_observation_print("pre_b", &pre_b);
+        wprt_seen_observation_print("post_a", &post_a);
+        wprt_seen_observation_print("post_b", &post_b);
+    }
     wprt_seen_hook(&f, &a, ok, &failures);
     wprt_seen_block(&f, &b, ok, &failures);
     wprt_close(&f);
