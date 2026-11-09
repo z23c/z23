@@ -3,6 +3,7 @@
 #ifndef ZCL_NATIVE_APP_RECEIVE_COMMAND_H
 #define ZCL_NATIVE_APP_RECEIVE_COMMAND_H
 #include "command/native_command.h"
+#include "command/native_app_receive_flow.h"
 #include <stdint.h>
 #include <stddef.h>
 /* Validate the same first-use parent policy as Receive without writes. */
@@ -13,6 +14,10 @@ struct app_receive_identity {
 };
 void zcl_native_app_receive_expected(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, const struct app_receive_identity *expected);
+void zcl_native_app_receive_observed(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const struct app_receive_identity *expected,
+    app_confirm_presenter presenter, void *context, const char *worker_path,
+    app_receive_build_observer observer, void *observer_context);
 #if defined(ZCL_TESTING)
 #include "command/native_app_confirm.h"
 #include "command/native_app_commit_progress.h"

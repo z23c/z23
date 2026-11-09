@@ -23,6 +23,7 @@
 #include "command/native_app_library_command.h"
 #include "command/native_app_discover_view.h"
 #include "command/native_app_share_reveal.h"
+#include "controllers/rpc_client.h"
 #include "command/native_zcode_package_copy.h"
 #include "command/app_selection.h"
 #include "presentation/model_render.h"
@@ -878,11 +879,12 @@ static void al_library_change(struct al_library_script *s)
 static bool al_library_home(struct al_library_script *s, const struct zcl_present_model_v1 *model,
     struct zcl_present_window_event_v1 *event)
 {
-    s->valid = s->valid && model->action_count == 3 &&
+    s->valid = s->valid && model->action_count == 4 &&
         !strcmp(model->actions[0].id, "myapps") &&
         !strcmp(model->actions[1].id, "discover") &&
-        !strcmp(model->actions[2].id, "cancel");
-    event->action_index = s->home_calls++ ? 2 : 0;
+        !strcmp(model->actions[2].id, "hosting") &&
+        !strcmp(model->actions[3].id, "cancel");
+    event->action_index = s->home_calls++ ? 3 : 0;
     return true;
 }
 static void al_library_share_menu(struct al_library_script *s,
@@ -1110,11 +1112,39 @@ static int al_reveal_tests(struct al_fx *f, struct zcl_command_reply *reply)
     return failures;
 }
 
+struct al_host_nav { unsigned step; bool valid; };
+static char *al_host_empty_rpc(const char *method, const char *params)
+{
+    if (strcmp(method, "fleet_board") || !strstr(params, "app_host_list")) return NULL;
+    return strdup("{\"ok\":true,\"items\":[],\"more\":false}");
+}
+static bool al_host_present(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    (void)copy; (void)why; (void)cap; struct al_host_nav *s = context;
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    const char *wanted = s->step == 0 ? "hosting" : s->step == 1 ? "back" : "cancel";
+    s->valid &= !strcmp(model->request_id, s->step == 1 ? "hosting-browser" : "library-home");
+    ++s->step;
+    for (unsigned i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, wanted)) { event->action_index = i; return true; }
+    s->valid = false; return false;
+}
 static int case_library(struct al_fx *f)
 {
     int failures = 0;
     struct zcl_command_reply reply;
     zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    TEST("My Apps opens the empty local hosting browser and returns home") {
+        struct al_host_nav nav = {.valid = true};
+        node_rpc_client_set_test_hook(al_host_empty_rpc);
+        zcl_test_app_library_run(&f->env, &reply, al_host_present, &nav);
+        node_rpc_client_set_test_hook(NULL);
+        ASSERT(nav.valid && nav.step == 3 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        PASS();
+    }
     TEST("My Apps navigation and cancellation never execute; forged events refuse") {
         struct al_library_script s = {.actions = {2, 1, 3}, .count = 3, .valid = true};
         zcl_test_app_library_run(&f->env, &reply, al_library_present, &s);

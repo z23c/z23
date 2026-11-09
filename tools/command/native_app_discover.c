@@ -20,6 +20,76 @@ struct discover {
     const char *worker_path;
     bool error_presented, host_requested;
 };
+#ifdef ZCL_TESTING
+static void (*ad_test_evidence_hook)(const struct zcl_app_offer_row *, const struct json_value *, const struct json_value *);
+void app_discover_test_evidence_hook(void (*hook)(const struct zcl_app_offer_row *, const struct json_value *, const struct json_value *))
+{ ad_test_evidence_hook = hook; }
+#endif
+static void ad_rebuild_status(struct zcl_command_reply *reply, const char *status)
+{
+    if (!json_push_kv_str(&reply->data, "rebuild_report", status))
+        zcl_package_copy_fail(reply, "REBUILD_RESULT_UNAVAILABLE", true,
+            "the received copy remains; the report outcome could not be retained", "app.library");
+}
+static bool ad_rebuild_choice(struct discover *d, const struct zcl_app_rebuild *r, bool *chosen)
+{
+    struct app_confirm *v = zcl_calloc(1, sizeof(*v), "discover-rebuild-choice");
+    if (!v) return false;
+    zcl_present_model_init_v1(&v->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(v->model.request_id, sizeof(v->model.request_id), "discover-report-rebuild");
+    (void)snprintf(v->model.title, sizeof(v->model.title), "Share this build result?");
+    (void)snprintf(v->model.summary, sizeof(v->model.summary), "Optional: publish a signed result that others can compare.");
+    v->model.action_count = 4;
+    app_confirm_action(&v->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "decline", "Not now");
+    app_confirm_action(&v->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+    app_confirm_action(&v->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+    app_confirm_action(&v->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "publish", "Publish result");
+    char why[256] = {0};
+    bool shown = app_confirm_field(&v->model, "Original app: ", d->rows[d->index].offer.name) &&
+        app_confirm_field(&v->model, "Original publisher: ", r->publisher) &&
+        app_confirm_field(&v->model, "Original release: ", r->release_root) &&
+        app_confirm_field(&v->model, "Built image: ", r->image) &&
+        app_confirm_field(&v->model, "Public result: ", "Your node signs and posts this build result publicly for up to 30 days. It identifies this node and the build.") &&
+        app_confirm_prepare(v, why, sizeof(why)) && app_confirm_show(v, d->receive_presenter, d->context, why, sizeof(why));
+    *chosen = shown && v->confirmed;
+    app_confirm_free(v); free(v); return shown;
+}
+static bool ad_rebuild_result(struct discover *d, struct zcl_command_reply *reply)
+{
+    const char *status = zcl_package_copy_str(&reply->data, "rebuild_report");
+    struct app_confirm *v = zcl_calloc(1, sizeof(*v), "discover-rebuild-result");
+    if (!v) { app_get_rebuild_result_unavailable(reply); return false; }
+    zcl_present_model_init_v1(&v->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(v->model.request_id, sizeof(v->model.request_id), "discover-rebuild-result");
+    (void)snprintf(v->model.title, sizeof(v->model.title), "Build result publication");
+    (void)snprintf(v->model.summary, sizeof(v->model.summary), "%s", status ? status : "Result unavailable; inspect before retrying.");
+    v->copy_text = zcl_package_copy_str(&reply->data, "rebuild_retry");
+    v->model.action_count = 4;
+    app_confirm_action(&v->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
+    app_confirm_action(&v->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+    app_confirm_action(&v->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+    app_confirm_action(&v->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "done", "Done");
+    char why[256] = {0};
+    bool shown = app_confirm_field(&v->model, "Retry: ", v->copy_text ? "Press C to copy the retry command after checking the board." : "No retry is suggested.") &&
+        app_confirm_prepare(v, why, sizeof(why)) && app_confirm_show(v, d->receive_presenter, d->context, why, sizeof(why));
+    app_confirm_free(v); free(v);
+    if (!shown) app_get_rebuild_result_unavailable(reply);
+    return shown;
+}
+static void ad_rebuild_observed(void *context, const struct json_value *wire, const struct json_value *opened, struct zcl_command_reply *reply)
+{
+    struct discover *d = context; struct zcl_app_rebuild observation;
+#ifdef ZCL_TESTING
+    if (ad_test_evidence_hook) ad_test_evidence_hook(&d->rows[d->index], wire, opened);
+#endif
+    enum app_get_rebuild_state state = app_get_rebuild_prepare(&d->rows[d->index], wire, opened, &observation);
+    if (state == APP_GET_REBUILD_INVALID) { ad_rebuild_status(reply, "not published: build evidence unavailable"); return; }
+    if (state == APP_GET_REBUILD_CACHED) { ad_rebuild_status(reply, "not published: cached image"); return; }
+    bool chosen = false;
+    if (!ad_rebuild_choice(d, &observation, &chosen)) { ad_rebuild_status(reply, "not published: choice unavailable"); return; }
+    if (!chosen) { ad_rebuild_status(reply, "not published: declined"); return; }
+    if (app_get_rebuild_publish(&observation, reply)) (void)ad_rebuild_result(d, reply);
+}
 static bool ad_host_choice(struct discover *d, struct zcl_command_reply *reply, bool *host_original)
 {
     const char *stage = zcl_package_copy_str(&reply->data, "stage");
@@ -85,13 +155,8 @@ static bool ad_consume(void *context, const char *path,
     if (!ok) zcl_package_copy_fail(reply, "RECEIVE_UNAVAILABLE", false, "Cannot prepare native Receive.", "app.library");
     else {
         struct zcl_command_request request = {.input = &in, .spec = spec, .invoked_name = spec->path};
-#if defined(ZCL_TESTING)
-        if (d->receive_presenter && d->worker_path)
-            zcl_test_app_receive_expected_worker(&request, reply, identity, d->receive_presenter, d->context, d->worker_path);
-        else if (d->receive_presenter) zcl_test_app_receive_expected(&request, reply, identity, d->receive_presenter, d->context);
-        else
-#endif
-            zcl_native_app_receive_expected(&request, reply, identity);
+        zcl_native_app_receive_observed(&request, reply, identity, d->receive_presenter, d->context,
+            d->worker_path, ad_rebuild_observed, d);
         ok = reply->status == ZCL_COMMAND_STATUS_PASSED;
         if (ok) ok = ad_host_choice(d, reply, host_original);
     }

@@ -65,6 +65,56 @@ static void fb_host_status(struct node_db *db, const struct json_value *in,
     if (!fb_host_render(result, &row)) fb_error(result, "ALLOC", "cannot describe hosting intent");
 }
 
+#define FB_HOST_PAGE 4u
+static bool fb_host_list_item(struct json_value *items, const struct db_app_host_intent *row)
+{
+    struct json_value item; json_init(&item); json_set_object(&item);
+    char host[65]; zcl_hex_encode(row->binding.local_host, 32, host);
+    bool ok = json_push_kv_str(&item, "host", host) &&
+        json_push_kv_str(&item, "carrier", row->binding.carrier_root) &&
+        json_push_kv_str(&item, "name", row->binding.name) &&
+        json_push_kv_str(&item, "publisher", row->binding.publisher) &&
+        json_push_kv_str(&item, "package_root", row->binding.release_root) &&
+        json_push_kv_int(&item, "generation", row->generation) &&
+        json_push_kv_bool(&item, "enabled", row->enabled) &&
+        json_push_kv_int(&item, "due_at", row->due_at) &&
+        json_push_kv_bool(&item, "pending", row->pending) && json_push_back(items, &item);
+    json_free(&item); return ok;
+}
+static bool fb_host_cursor(const struct json_value *in, uint8_t host[32],
+                           const uint8_t **after, const char **carrier)
+{
+    const struct json_value *h = json_get(in, "after_host"), *c = json_get(in, "after_carrier");
+    *after = NULL; *carrier = NULL;
+    if (h || c) {
+        if (!h || !c || h->type != JSON_STR || c->type != JSON_STR ||
+            !vcs_app_offer_hex_valid(json_get_str(h), 32) ||
+            !vcs_app_offer_hex_valid(json_get_str(c), 32) ||
+            !zcl_hex_decode_lower(json_get_str(h), host, 32)) return false;
+        *after = host; *carrier = json_get_str(c);
+    }
+    return true;
+}
+static void fb_host_list(struct node_db *db, const struct json_value *in, struct json_value *result)
+{
+    uint8_t host[32]; const uint8_t *after; const char *carrier;
+    if (!fb_host_cursor(in, host, &after, &carrier)) {
+        fb_error(result, "BAD_INPUT", "a complete canonical host and carrier cursor is required"); return;
+    }
+    struct db_app_host_intent rows[FB_HOST_PAGE]; size_t count = 0; bool more = false;
+    if (db_app_host_intent_list(db, after, carrier, rows, FB_HOST_PAGE, &count, &more) != APP_HOST_OK) {
+        fb_error(result, "HOST_LIST_UNAVAILABLE", "hosting intents could not be read safely"); return;
+    }
+    struct json_value items; json_init(&items); json_set_array(&items);
+    bool ok = true;
+    for (size_t i = 0; ok && i < count; ++i) ok = fb_host_list_item(&items, &rows[i]);
+    json_set_object(result);
+    ok = ok && json_push_kv_bool(result, "ok", true) && json_push_kv(result, "items", &items) &&
+        json_push_kv_bool(result, "more", more);
+    json_free(&items);
+    if (!ok) fb_error(result, "ALLOC", "cannot describe hosting intents");
+}
+
 static void fb_host_stop(struct node_db *db, const struct json_value *in,
                          struct json_value *result)
 {
@@ -113,6 +163,7 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
                                  struct json_value *result, int64_t now)
 {
     if (!strcmp(op, "app_host_status")) fb_host_status(db, in, result);
+    else if (!strcmp(op, "app_host_list")) fb_host_list(db, in, result);
     else if (!strcmp(op, "app_host_stop")) fb_host_stop(db, in, result);
     else if (!strcmp(op, "app_host_enable")) fb_host_enable(db, in, result, now);
     else return false;

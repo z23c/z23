@@ -63,6 +63,85 @@ static bool host_body_valid(const struct json_value *body,
         !strcmp(host, got_host) && !strcmp(carrier, got_carrier);
 }
 
+static bool host_list_item_valid(const struct json_value *item, const char **host, const char **carrier)
+{
+    *host = zcl_package_copy_str(item, "host"); *carrier = zcl_package_copy_str(item, "carrier");
+    const char *name = zcl_package_copy_str(item, "name");
+    const char *publisher = zcl_package_copy_str(item, "publisher");
+    const char *root = zcl_package_copy_str(item, "package_root");
+    return item && item->type == JSON_OBJ && vcs_app_offer_hex_valid(*host, 32) &&
+        vcs_app_offer_hex_valid(*carrier, 32) && name && name[0] &&
+        strnlen(name, VCS_PACKAGE_RELEASE_NAME_MAX + 1u) <= VCS_PACKAGE_RELEASE_NAME_MAX &&
+        vcs_app_offer_hex_valid(publisher, 33) && vcs_app_offer_hex_valid(root, 32) && host_state_valid(item);
+}
+
+static bool host_list_project(struct json_value *out, const struct json_value *items)
+{
+    struct json_value array; json_init(&array); json_set_array(&array); bool ok = true;
+    static const char *const keys[] = {"host", "carrier", "name", "publisher", "package_root", "generation", "enabled", "due_at", "pending"};
+    for (size_t i = 0; ok && i < json_size(items); ++i) {
+        struct json_value item; json_init(&item); json_set_object(&item);
+        const struct json_value *src = json_at(items, i);
+        for (size_t k = 0; ok && k < sizeof(keys)/sizeof(keys[0]); ++k)
+            ok = json_push_kv(&item, keys[k], json_get(src, keys[k]));
+        if (ok) ok = json_push_back(&array, &item);
+        json_free(&item);
+    }
+    if (ok) ok = json_push_kv(out, "items", &array);
+    json_free(&array); return ok;
+}
+
+static bool host_list_cursor(const struct json_value *input, const char **host, const char **carrier)
+{
+    const struct json_value *h = json_get(input, "after_host"), *c = json_get(input, "after_carrier");
+    *host = h && h->type == JSON_STR ? json_get_str(h) : NULL;
+    *carrier = c && c->type == JSON_STR ? json_get_str(c) : NULL;
+    return (!h && !c) || (*host && *carrier && vcs_app_offer_hex_valid(*host, 32) && vcs_app_offer_hex_valid(*carrier, 32));
+}
+static bool host_list_rows(const struct json_value *items, const char **last_host, const char **last_carrier)
+{
+    for (size_t i = 0; i < json_size(items); ++i) {
+        const char *next_host, *next_carrier;
+        if (!host_list_item_valid(json_at(items, i), &next_host, &next_carrier) ||
+            (*last_host && strcmp(next_host, *last_host) <= 0 &&
+             (strcmp(next_host, *last_host) || strcmp(next_carrier, *last_carrier) <= 0))) return false;
+        *last_host = next_host; *last_carrier = next_carrier;
+    }
+    return true;
+}
+static bool host_list_finish(struct zcl_command_reply *reply, const struct json_value *items,
+                             bool more, const char *host, const char *carrier)
+{
+    return host_list_project(&reply->data, items) && json_push_kv_bool(&reply->data, "more", more) &&
+        (!more || (json_push_kv_str(&reply->data, "next_host", host) && json_push_kv_str(&reply->data, "next_carrier", carrier)));
+}
+static bool host_list_output(struct zcl_command_reply *reply, const struct json_value *body,
+                             const char *last_host, const char *last_carrier)
+{
+    const struct json_value *items = json_get(body, "items"), *more = json_get(body, "more"), *success = json_get(body, "ok");
+    bool ok = success && success->type == JSON_BOOL && json_get_bool(success) && items && items->type == JSON_ARR &&
+        json_size(items) <= 4 && more && more->type == JSON_BOOL && (!json_get_bool(more) || json_size(items) == 4);
+    if (ok) ok = host_list_rows(items, &last_host, &last_carrier);
+    if (ok) ok = host_list_finish(reply, items, json_get_bool(more), last_host, last_carrier);
+    return ok;
+}
+void zcl_native_handle_app_host_list(const struct zcl_command_request *request,
+                                    struct zcl_command_reply *reply)
+{
+    const char *host, *carrier;
+    if (!host_list_cursor(request ? request->input : NULL, &host, &carrier)) {
+        zcl_package_copy_fail(reply, "BAD_CURSOR", false, "a complete host and carrier cursor is required", "app.host.list"); return;
+    }
+    struct json_value in, body; json_init(&body);
+    const char *kv[] = {"op", "app_host_list", "after_host", host, "after_carrier", carrier};
+    bool built = zcl_app_input(&in, kv, 6), ok = built && zcl_native_fleet_board_call(&in, &body, reply);
+    json_free(&in);
+    if (ok) ok = host_list_output(reply, &body, host, carrier);
+    if (!ok && reply->status == ZCL_COMMAND_STATUS_PASSED)
+        zcl_package_copy_fail(reply, "HOST_LIST_UNAVAILABLE", false, "hosting intents could not be read safely", "app.host.list");
+    json_free(&body);
+}
+
 static bool host_status(const char *host, const char *carrier,
                          struct json_value *body, struct zcl_command_reply *reply)
 {

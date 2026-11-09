@@ -15,4 +15,9 @@ bool app_get_stage_consume(const struct zcl_app_offer_row *selected, const char 
     app_get_stage_consumer consumer, void *context, struct zcl_command_reply *reply);
 /* Preserve any confirmed hosting identity if its owner-facing result cannot be shown. */
 void app_get_host_result_unavailable(struct zcl_command_reply *reply);
+enum app_get_rebuild_state { APP_GET_REBUILD_INVALID, APP_GET_REBUILD_CACHED, APP_GET_REBUILD_FRESH };
+enum app_get_rebuild_state app_get_rebuild_prepare(const struct zcl_app_offer_row *row,
+    const struct json_value *build_wire, const struct json_value *open_wire, struct zcl_app_rebuild *observation);
+bool app_get_rebuild_publish(const struct zcl_app_rebuild *observation, struct zcl_command_reply *reply);
+void app_get_rebuild_result_unavailable(struct zcl_command_reply *reply);
 #endif

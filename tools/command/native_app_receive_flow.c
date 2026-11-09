@@ -21,6 +21,10 @@ struct receive_flow {
     app_confirm_presenter presenter;
     void *context;
     struct json_value operations;
+    struct json_value build_evidence;
+    struct json_value open_evidence;
+    app_receive_build_observer observer;
+    void *observer_context;
     const char *status;
     bool adopted, closed, draft;
     const char *worker_path;
@@ -295,6 +299,7 @@ static bool arf_build(struct receive_flow *f)
         app_receive_preview_confirm_input(f->preview, &plan, &confirm, f->reply) &&
         arf_job(f, APP_RECEIVE_JOB_BUILD, &confirm, "Building your app", &built) &&
         app_receive_preview_bind_build(f->preview, &built, f->reply);
+    if (ok && f->observer) { f->build_evidence = built; json_init(&built); }
     json_free(&input); json_free(&plan); json_free(&confirm); json_free(&built);
     return ok;
 }
@@ -307,6 +312,7 @@ static bool arf_open(struct receive_flow *f)
         app_receive_preview_bind_preview(f->preview, &opened, f->reply);
     if (ok) f->executed = 1;
     if (ok) ok = json_push_kv_bool(&f->reply->data, "preview_opened", true);
+    if (ok && f->observer) { f->open_evidence = opened; json_init(&opened); }
     json_free(&input); json_free(&opened); return ok;
 }
 static bool arf_keep_result(struct receive_flow *f, const struct zcl_command_reply *kept, bool *canceled)
@@ -441,14 +447,21 @@ static bool arf_continue(struct receive_flow *f, bool chosen)
 {
     const char *status = f->adopted ? "adopted" : "received";
     bool ok = chosen ? (arf_build(f) && arf_open(f) && arf_keep(f)) : arf_status(f, status);
+    /* This card offers Keep or Close; Close ends the owner flow. */
+    if (ok && chosen && f->observer && !strcmp(f->status, "kept"))
+        f->observer(f->observer_context, &f->build_evidence, &f->open_evidence, f->reply);
+    if (ok) ok = f->reply->status == ZCL_COMMAND_STATUS_PASSED;
     if (!ok && f->closed) ok = arf_status(f, status);
     return ok;
 }
 
 static void arf_run(const char *datadir, struct zcl_command_reply *reply,
-    app_confirm_presenter presenter, void *context, bool adopted, const char *worker_path)
+    app_confirm_presenter presenter, void *context, bool adopted, const char *worker_path,
+    app_receive_build_observer observer, void *observer_context)
 {
-    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context, .status = adopted ? "adopted" : "received", .adopted = adopted, .worker_path = worker_path};
+    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context, .status = adopted ? "adopted" : "received", .adopted = adopted, .worker_path = worker_path, .observer = observer, .observer_context = observer_context};
+    json_init(&f.build_evidence);
+    json_init(&f.open_evidence);
     json_init(&f.operations); json_set_array(&f.operations);
     bool chosen = false;
     bool ok = arf_prepare(&f, datadir, &chosen);
@@ -465,16 +478,22 @@ static void arf_run(const char *datadir, struct zcl_command_reply *reply,
     if (!arf_finish(&f, ok))
         (void)arf_fail(&f, "OBSERVATION_UNAVAILABLE", adopted ? "Adoption committed, but its continuation report could not be returned. Inspect the retained copy before retrying." : "Receive committed, but its continuation report could not be returned. Inspect the retained copy before retrying.");
     app_receive_preview_close(f.preview);
+    json_free(&f.build_evidence);
+    json_free(&f.open_evidence);
 }
 void app_receive_flow_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context)
 {
-    arf_run(datadir, reply, presenter, context, false, NULL);
+    arf_run(datadir, reply, presenter, context, false, NULL, NULL, NULL);
 }
+void app_receive_flow_run_observed(const char *datadir, struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context, const char *worker_path,
+    app_receive_build_observer observer, void *observer_context)
+{ arf_run(datadir, reply, presenter, context, false, worker_path, observer, observer_context); }
 void app_adopted_flow_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context)
 {
-    arf_run(datadir, reply, presenter, context, true, NULL);
+    arf_run(datadir, reply, presenter, context, true, NULL, NULL, NULL);
 }
 
 static bool arf_draft_confirm(struct receive_flow *f, const struct app_selection *selection, uint8_t head[32])
@@ -516,6 +535,6 @@ void app_saved_draft_flow_run(const struct app_selection *selection,
 void app_receive_flow_run_test(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context, const char *worker_path)
 {
-    arf_run(datadir, reply, presenter, context, false, worker_path);
+    arf_run(datadir, reply, presenter, context, false, worker_path, NULL, NULL);
 }
 #endif

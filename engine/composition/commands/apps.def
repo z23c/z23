@@ -4,6 +4,18 @@ ZCL_COMMAND_BRANCH("app.host", "app",
     "Hosting", ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
+    "app.host.list", "app.host", "", "List local hosting intents",
+    "Read a bounded page of this node's local hosting intents, including older local identities. Pages reflect live state, not a snapshot.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "app,hosting,list", "zcl.app_host_list.input.v1", "zcl.app_host_list.v1",
+    "after_host,after_carrier", "", "z23 app host list",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_host_list)
+
+ZCL_COMMAND_READY_READ(
     "app.host.status", "app.host", "", "Hosting status",
     "Read the selected node's exact host-key and carrier hosting intent, including its consent generation.",
     ZCL_COMMAND_RESULT_BUDGET,

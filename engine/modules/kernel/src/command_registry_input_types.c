@@ -1240,7 +1240,11 @@ static bool cr_app_host_descriptor(const struct zcl_command_spec *spec,
                                     struct zcl_command_input_descriptor *out)
 {
     bool stop = !strcmp(spec->path, "app.host.stop");
-    if (!stop && strcmp(spec->path, "app.host.status")) return false;
+    bool list = !strcmp(spec->path, "app.host.list");
+    if (!stop && !list && strcmp(spec->path, "app.host.status")) return false;
+    if (list && (!strcmp(key, "after_host") || !strcmp(key, "after_carrier"))) {
+        out->type = JSON_STR; out->max_bytes = 64; return true;
+    }
     if (stop && !strcmp(key, "generation")) {
         out->type = JSON_INT;
         out->minimum = 1;

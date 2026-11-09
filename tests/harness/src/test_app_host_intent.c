@@ -4,8 +4,11 @@
 #include "crypto/ed25519.h"
 #include "models/app_host_intent.h"
 #include "models/database.h"
+#include "json/json.h"
 #include "vcs/app_offer.h"
 #include <limits.h>
+extern bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
+    const struct json_value *in, struct json_value *result, int64_t now);
 
 static void hi_binding(struct app_host_binding *b, const uint8_t host[32])
 {
@@ -134,8 +137,17 @@ int model_app_host_intent_tests(void)
         ASSERT_EQ(db_app_host_intent_find(&db, host, binding.carrier_root, &row), APP_HOST_CORRUPT);
         ASSERT_EQ(db_app_host_intent_due(&db, host, INT64_MAX, rows, 1, &count, &more), APP_HOST_CORRUPT);
         ASSERT_EQ(count, 0u); ASSERT(!more);
+        ASSERT_EQ(db_app_host_intent_list(&db, NULL, NULL, rows, 1, &count, &more), APP_HOST_CORRUPT);
+        ASSERT_EQ(count, 0u); ASSERT(!more);
         ASSERT(node_db_exec(&db, "DROP TABLE app_host_intents"));
         ASSERT_EQ(db_app_host_intent_find(&db, host, binding.carrier_root, &row), APP_HOST_STORAGE);
+        ASSERT_EQ(db_app_host_intent_list(&db, NULL, NULL, rows, 1, &count, &more), APP_HOST_STORAGE);
+        ASSERT_EQ(count, 0u); ASSERT(!more);
+        struct json_value list_in, list_result; json_init(&list_in); json_set_object(&list_in); json_init(&list_result);
+        bool dispatched = boot_app_host_rpc_dispatch(&db, "app_host_list", &list_in, &list_result, 1);
+        bool refused = dispatched && !json_get_bool(json_get(&list_result, "ok")) &&
+            !strcmp(json_get_str(json_get(&list_result, "code")), "HOST_LIST_UNAVAILABLE") && !json_get(&list_result, "items");
+        json_free(&list_in); json_free(&list_result); ASSERT(refused);
         node_db_close(&db); ASSERT_EQ(test_rm_rf_recursive(dir), 0);
     }
 _test_next:

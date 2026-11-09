@@ -495,7 +495,8 @@ bool zcl_test_app_receive_progress(const struct zcl_command_request *request,
 #endif
 static void ar_commit_preview(const struct zcl_command_request *request,
     struct receive_work *w, struct zcl_command_reply *reply,
-    app_confirm_presenter presenter, void *context, const char *worker_path)
+    app_confirm_presenter presenter, void *context, const char *worker_path,
+    app_receive_build_observer observer, void *observer_context)
 {
     bool offer = ar_progress_commit(request, w, reply, presenter, context
 #ifdef ZCL_TESTING
@@ -506,6 +507,10 @@ static void ar_commit_preview(const struct zcl_command_request *request,
     if (offer && w->preview && reply->status == ZCL_COMMAND_STATUS_PASSED &&
         reply->exit_code == 0 && stage && !strcmp(stage, "commit"))
     {
+        if (observer) {
+            app_receive_flow_run_observed(w->datadir, reply, presenter, context, worker_path, observer, observer_context);
+            return;
+        }
 #ifdef ZCL_TESTING
         if (worker_path) app_receive_flow_run_test(w->datadir, reply, presenter, context, worker_path);
         else
@@ -517,7 +522,7 @@ static void ar_commit_preview(const struct zcl_command_request *request,
 }
 static void ar_run(const struct zcl_command_request *request, struct zcl_command_reply *reply,
     const struct app_receive_identity *expected, app_confirm_presenter presenter, void *context,
-    const char *worker_path)
+    const char *worker_path, app_receive_build_observer observer, void *observer_context)
 {
     if (!request || !reply) return;
     struct receive_work *w = zcl_calloc(1, sizeof(*w), "app-receive");
@@ -528,7 +533,7 @@ static void ar_run(const struct zcl_command_request *request, struct zcl_command
         char why[256] = {0};
         if (!ar_model(w, why, sizeof(why)) || !app_confirm_show(&w->view, presenter, context, why, sizeof(why)))
             ar_fail(reply, "CONFIRMATION_UNAVAILABLE", "The exact receive plan could not be displayed; nothing was kept.");
-        else if (w->view.confirmed) ar_commit_preview(request, w, reply, presenter, context, worker_path);
+        else if (w->view.confirmed) ar_commit_preview(request, w, reply, presenter, context, worker_path, observer, observer_context);
         else if (!json_push_kv_str(&reply->data, "status", "canceled"))
             ar_fail(reply, "OUT_OF_MEMORY", "Cannot describe cancellation; nothing was kept.");
     }
@@ -539,30 +544,38 @@ static void ar_run(const struct zcl_command_request *request, struct zcl_command
 void zcl_native_handle_app_receive(const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
-    ar_run(request, reply, NULL, NULL, NULL, NULL);
+    ar_run(request, reply, NULL, NULL, NULL, NULL, NULL, NULL);
 }
 void zcl_native_app_receive_expected(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, const struct app_receive_identity *expected)
 {
     if (!expected) { if (reply) ar_fail(reply, "BAD_INPUT", "Expected receive identity is required."); return; }
-    ar_run(request, reply, expected, NULL, NULL, NULL);
+    ar_run(request, reply, expected, NULL, NULL, NULL, NULL, NULL);
+}
+void zcl_native_app_receive_observed(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const struct app_receive_identity *expected,
+    app_confirm_presenter presenter, void *context, const char *worker_path,
+    app_receive_build_observer observer, void *observer_context)
+{
+    if (!expected || !observer) { if (reply) ar_fail(reply, "BAD_INPUT", "Expected identity and observer are required."); return; }
+    ar_run(request, reply, expected, presenter, context, worker_path, observer, observer_context);
 }
 #if defined(ZCL_TESTING)
 void zcl_test_app_receive_run(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context)
 {
-    if (presenter) ar_run(request, reply, NULL, presenter, context, NULL);
+    if (presenter) ar_run(request, reply, NULL, presenter, context, NULL, NULL, NULL);
 }
 void zcl_test_app_receive_expected(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, const struct app_receive_identity *expected,
     app_confirm_presenter presenter, void *context)
 {
-    if (presenter && expected) ar_run(request, reply, expected, presenter, context, NULL);
+    if (presenter && expected) ar_run(request, reply, expected, presenter, context, NULL, NULL, NULL);
 }
 void zcl_test_app_receive_expected_worker(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, const struct app_receive_identity *expected,
     app_confirm_presenter presenter, void *context, const char *worker_path)
 {
-    if (presenter && expected && worker_path) ar_run(request, reply, expected, presenter, context, worker_path);
+    if (presenter && expected && worker_path) ar_run(request, reply, expected, presenter, context, worker_path, NULL, NULL);
 }
 #endif

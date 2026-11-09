@@ -349,6 +349,62 @@ static void ag_rebuild_report(struct ag_one *s, const struct json_value *build, 
     }
     zcl_command_reply_free(&why);
 }
+static const struct json_value *ag_rebuild_envelope(const struct json_value *wire, const char *command)
+{
+    const char *actual = zcl_package_copy_str(wire, "command"), *status = zcl_package_copy_str(wire, "status");
+    const struct json_value *ok = json_get(wire, "ok"), *data = json_get(wire, "data");
+    return actual && !strcmp(actual, command) && status && !strcmp(status, "passed") &&
+        ok && ok->type == JSON_BOOL && json_get_bool(ok) && data && data->type == JSON_OBJ ? data : NULL;
+}
+enum app_get_rebuild_state app_get_rebuild_prepare(const struct zcl_app_offer_row *row,
+    const struct json_value *wire, const struct json_value *open_wire, struct zcl_app_rebuild *observation)
+{
+    const struct json_value *data = ag_rebuild_envelope(wire, "app.build"), *made = json_get(data, "make_ran");
+    const struct json_value *opened = ag_rebuild_envelope(open_wire, "app.open");
+    const char *image = zcl_package_copy_str(opened, "image_sha3");
+    const char *version = zcl_package_copy_str(data, "version"), *open_version = zcl_package_copy_str(opened, "version");
+    const char *package = zcl_package_copy_str(data, "package_root"), *open_package = zcl_package_copy_str(opened, "package_root");
+    if (!row || !observation || !data || !opened || !made || made->type != JSON_BOOL)
+        return APP_GET_REBUILD_INVALID;
+    if (!version || !open_version || strcmp(version, open_version) || !package || !open_package || strcmp(package, open_package))
+        return APP_GET_REBUILD_INVALID;
+    struct ag_one s = {.row = row};
+    if (!ag_observation(&s, data, image, observation)) return APP_GET_REBUILD_INVALID;
+    return json_get_bool(made) ? APP_GET_REBUILD_FRESH : APP_GET_REBUILD_CACHED;
+}
+bool app_get_rebuild_publish(const struct zcl_app_rebuild *observation, struct zcl_command_reply *reply)
+{
+    if (!observation || !reply) return false;
+    ag_rebuild_post(&reply->data, observation);
+    const char *status = zcl_package_copy_str(&reply->data, "rebuild_report");
+    const char *id = zcl_package_copy_str(&reply->data, "rebuild_post_id");
+    const char *retry = zcl_package_copy_str(&reply->data, "rebuild_retry_text");
+    if (!status || (!strcmp(status, "published") ? !ag_hex(id, 32) : !retry)) {
+        app_get_rebuild_result_unavailable(reply);
+        return false;
+    }
+    struct zcl_command_reply why; size_t count = 0;
+    bool counted = zcl_app_rebuild_count(observation, &count, &why);
+    bool described = counted ? json_push_kv_int(&reply->data, "matching_rebuild_keys", (int64_t)count) &&
+        json_push_kv_str(&reply->data, "rebuild_count_status", "local snapshot; global count unknown") :
+        json_push_kv_str(&reply->data, "rebuild_count_status", "incomplete: board query unavailable or capped");
+    zcl_command_reply_free(&why);
+    if (!described) app_get_rebuild_result_unavailable(reply);
+    return described;
+}
+void app_get_rebuild_result_unavailable(struct zcl_command_reply *reply)
+{
+    if (!reply) return;
+    struct json_value facts; json_init(&facts); json_set_object(&facts);
+    const char *keys[] = {"rebuild_report", "rebuild_post_id", "rebuild_retry_text"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        const struct json_value *value = json_get(&reply->data, keys[i]);
+        if (value) (void)json_push_kv(&facts, keys[i], value);
+    }
+    (void)json_push_kv(&reply->data, "failure_facts", &facts); json_free(&facts);
+    zcl_package_copy_fail(reply, "REBUILD_RESULT_UNAVAILABLE", true,
+        "the copy remains; the public report may have been posted, so inspect before retrying", AG_COMMAND);
+}
 
 static bool ag_open_matches(const struct zcl_command_reply *inner)
 {

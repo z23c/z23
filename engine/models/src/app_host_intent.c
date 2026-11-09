@@ -268,6 +268,56 @@ enum app_host_result db_app_host_intent_due(struct node_db *db, const uint8_t ho
     free(rows); return result;
 }
 
+static enum app_host_result host_list_part(struct node_db *db, const uint8_t host[32],
+    const char *carrier, bool same, struct db_app_host_intent *rows, size_t limit, size_t *n)
+{
+    struct qb q; qb_select(&q, QB_T_app_host_intents);
+    qb_select_columns(&q, k_host_columns, HOST_NCOLS);
+    if (host) {
+        qb_where_blob(&q, QB_C_app_host_intents_local_host, same ? QB_EQ : QB_GT, host, 32);
+        if (same) qb_where_text(&q, QB_C_app_host_intents_carrier_root, QB_GT, carrier);
+    }
+    qb_order_by(&q, QB_C_app_host_intents_local_host, QB_ASC);
+    qb_order_by(&q, QB_C_app_host_intents_carrier_root, QB_ASC);
+    qb_limit(&q, (int64_t)(limit - *n));
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(db, &q, s)) return APP_HOST_STORAGE;
+    int rc; enum app_host_result result = APP_HOST_OK;
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW) { // raw-sql-ok:checked-read-status
+        if (*n >= limit || !host_read(s, &rows[*n])) { result = APP_HOST_CORRUPT; break; }
+        ++*n;
+    }
+    if (result == APP_HOST_OK && rc != SQLITE_DONE) result = APP_HOST_STORAGE;
+    AR_FINALIZE(s); return result;
+}
+
+static bool host_list_input(const struct node_db *db, const uint8_t *host, const char *carrier,
+    const struct db_app_host_intent *out, size_t capacity, const size_t *count, const bool *more)
+{
+    return db && db->open && out && count && more && capacity && capacity <= APP_HOST_DUE_MAX &&
+        (!!host == !!carrier) && (!host || (host_nonzero(host, 32) && vcs_app_offer_hex_valid(carrier, 32)));
+}
+enum app_host_result db_app_host_intent_list(struct node_db *db,
+    const uint8_t after_host[32], const char *after_carrier,
+    struct db_app_host_intent *out, size_t capacity, size_t *count, bool *more)
+{
+    if (count) *count = 0;
+    if (more) *more = false;
+    if (!host_list_input(db, after_host, after_carrier, out, capacity, count, more))
+        return APP_HOST_INVALID;
+    struct db_app_host_intent *rows = zcl_calloc(capacity + 1u, sizeof(*rows), "app_host_intent/list");
+    if (!rows) return APP_HOST_STORAGE;
+    size_t n = 0, limit = capacity + 1u;
+    enum app_host_result result = after_host ? host_list_part(db, after_host, after_carrier, true, rows, limit, &n) : APP_HOST_OK;
+    if (result == APP_HOST_OK && n < limit)
+        result = host_list_part(db, after_host, after_carrier, false, rows, limit, &n);
+    if (result == APP_HOST_OK) {
+        *more = n > capacity; *count = n < capacity ? n : capacity;
+        memcpy(out, rows, *count * sizeof(*out));
+    }
+    free(rows); return result;
+}
+
 static bool host_binding_same(const struct app_host_binding *a, const struct app_host_binding *b)
 {
     return !memcmp(a->local_host,b->local_host,32) && !strcmp(a->carrier_root,b->carrier_root) &&

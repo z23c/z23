@@ -5,6 +5,7 @@
 #include "chain/chainparams.h"
 #include "command/native_command.h"
 #include "command/native_app_compose.h"
+#include "command/native_app_host_browser.h"
 #include "config/boot_app_host.h"
 #include "config/boot_fleet_board.h"
 #include "controllers/rpc_client.h"
@@ -28,6 +29,8 @@
  * returned isolated fixture tree. It restores the process HOME before return. */
 extern bool test_app_host_fixture_create(char *fixture_root, size_t root_cap,
     char *share_path, size_t share_cap, struct zcl_app_offer *offer);
+extern bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
+    const struct json_value *in, struct json_value *result, int64_t now);
 
 struct app_host_test_world {
     char root[512], share[700], store_path[700], db_path[700];
@@ -60,6 +63,60 @@ static bool app_host_test_close(struct app_host_test_world *w)
     if (w->db.open) node_db_close(&w->db);
     if (w->store) vcs_package_store_close(w->store);
     return w->root[0] && test_rm_rf_recursive(w->root) == 0;
+}
+
+static bool app_host_test_page_seed(struct app_host_test_world *w, const struct app_host_binding *base)
+{
+    struct app_host_binding binding = *base;
+    for (unsigned i = 0; i < 5; ++i) {
+        memset(binding.local_host, 0, sizeof(binding.local_host)); binding.local_host[0] = i < 3 ? 1 : 2;
+        memset(binding.carrier_root, (int)('1' + i), 64); binding.carrier_root[64] = 0;
+        if (db_app_host_intent_enable(&w->db, &binding, 0, 999999) != APP_HOST_OK) return false;
+        if (i == 4 && db_app_host_intent_disable(&w->db, binding.local_host, binding.carrier_root, 1) != APP_HOST_OK) return false;
+    }
+    return true;
+}
+static bool app_host_test_page_order(const struct db_app_host_intent *row, const uint8_t prior[32],
+                                     const char *prior_carrier, size_t total)
+{
+    int order = memcmp(row->binding.local_host, prior, 32);
+    return !total || order > 0 || (!order && strcmp(row->binding.carrier_root, prior_carrier) > 0);
+}
+static bool app_host_test_page_scan(struct app_host_test_world *w)
+{
+    struct db_app_host_intent rows[2]; uint8_t host[32] = {0}, prior[32] = {0};
+    char carrier[65] = {0}, prior_carrier[65] = {0}; size_t total = 0; bool more = false, disabled = false;
+    do {
+        size_t count = 0;
+        if (db_app_host_intent_list(&w->db, total ? host : NULL, total ? carrier : NULL,
+                                    rows, 2, &count, &more) != APP_HOST_OK || !count) return false;
+        for (size_t i = 0; i < count; ++i) {
+            if (!app_host_test_page_order(&rows[i], prior, prior_carrier, total)) return false;
+            memcpy(prior, rows[i].binding.local_host, 32);
+            (void)snprintf(prior_carrier, sizeof(prior_carrier), "%s", rows[i].binding.carrier_root);
+            disabled |= !rows[i].enabled; ++total;
+        }
+        memcpy(host, prior, 32); (void)snprintf(carrier, sizeof(carrier), "%s", prior_carrier);
+        if (total > 6) return false;
+    } while (more);
+    size_t count = 99; more = true;
+    return total == 6 && disabled &&
+        db_app_host_intent_list(&w->db, NULL, carrier, rows, 2, &count, &more) == APP_HOST_INVALID && count == 0 && !more;
+}
+static bool app_host_test_pages(struct app_host_test_world *w, const struct app_host_binding *base)
+{
+    if (!app_host_test_page_seed(w, base)) return false;
+    node_db_close(&w->db); if (!node_db_open(&w->db, w->db_path)) return false;
+    bool ok = app_host_test_page_scan(w);
+    struct json_value in, result; json_init(&in); json_init(&result); json_set_object(&in);
+    ok = ok && boot_app_host_rpc_dispatch(&w->db, "app_host_list", &in, &result, 1) &&
+        json_get_bool(json_get(&result, "ok")) && json_get_bool(json_get(&result, "more")) &&
+        json_size(json_get(&result, "items")) == 4;
+    json_free(&result);
+    ok = ok && json_push_kv_str(&in, "after_host", base->carrier_root) &&
+        boot_app_host_rpc_dispatch(&w->db, "app_host_list", &in, &result, 1) &&
+        !json_get_bool(json_get(&result, "ok")) && !strcmp(json_get_str(json_get(&result, "code")), "BAD_INPUT");
+    json_free(&in); json_free(&result); return ok;
 }
 
 /* Fixture clock is supplied to enable/tick, never to the machine clock. */
@@ -297,6 +354,7 @@ int model_app_host_coordinator_tests(void)
                    s.guard_calls, s.announcements);
         ASSERT_EQ(first_tick, BOOT_APP_HOST_BUSY);
         ASSERT_EQ(db_app_host_intent_find(&w.db, selected_host, w.offer.carrier, &row), APP_HOST_OK);
+        ASSERT(app_host_test_pages(&w, &row.binding));
         ASSERT(row.pending && row.enabled); memcpy(first_id, row.pending_id, 32);
         ASSERT_EQ(db_fleet_board_post_lookup_checked(&w.db, first_id, &found), FLEET_BOARD_LOOKUP_FOUND);
         ASSERT_EQ(s.announcements, 0u);
@@ -378,8 +436,10 @@ _test_next:
 #define HCLI_CARRIER "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 #define HCLI_DIGIT_HOST "1111111111111111111111111111111111111111111111111111111111111111"
 static int hcli_fault;
+static int hcli_list_fault;
 static bool hcli_fault_status;
 static unsigned hcli_stops;
+static unsigned hcli_status_calls, hcli_stale_after;
 static const char *hcli_host = HCLI_HOST;
 
 static char *hcli_wire_response(int fault, bool stop)
@@ -408,6 +468,12 @@ static char *hcli_response(int fault, bool stop)
     return hcli_wire_response(fault, stop);
 }
 
+static char *hcli_list_response(void)
+{
+    if (hcli_list_fault == 1) return strdup("{\"ok\":true,\"items\":[],\"more\":true}");
+    if (hcli_list_fault == 2) return strdup("{\"ok\":true,\"items\":{},\"more\":false}");
+    return strdup("{\"ok\":true,\"items\":[{\"host\":\"" HCLI_HOST "\",\"carrier\":\"" HCLI_CARRIER "\",\"name\":\"fixture\",\"publisher\":\"02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"package_root\":\"" HCLI_CARRIER "\",\"generation\":7,\"enabled\":true,\"due_at\":100,\"pending\":false,\"untrusted\":\"ignore\"}],\"more\":false}");
+}
 static char *hcli_rpc(const char *method, const char *params)
 {
     if (strcmp(method, "fleet_board")) return NULL;
@@ -417,10 +483,57 @@ static char *hcli_rpc(const char *method, const char *params)
     const char *op = parsed ? json_get_str(json_get(json_at(&input, 0), "op")) : NULL;
     bool stop = op && !strcmp(op, "app_host_stop");
     bool status = op && !strcmp(op, "app_host_status");
+    bool list = op && !strcmp(op, "app_host_list");
     json_free(&input);
+    if (list) return hcli_list_response();
     if (!stop && !status) return NULL;
     if (stop) ++hcli_stops;
+    if (status && ++hcli_status_calls > hcli_stale_after && hcli_stale_after) return hcli_response(7, false);
     return hcli_response((stop || hcli_fault_status) ? hcli_fault : 0, stop);
+}
+
+struct hbrowser_script { unsigned list_views, reviews; bool confirm_stop; };
+static bool hbrowser_present(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    (void)copy; (void)why; (void)cap; struct hbrowser_script *s = context;
+    if (strcmp(model->request_id, "hosting-browser")) return false;
+    const char *id = s->list_views++ ? "back" : "review";
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    for (unsigned i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, id)) { event->action_index = i; return true; }
+    return false;
+}
+static bool hbrowser_confirm(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    struct hbrowser_script *s = context;
+    if (strcmp(model->request_id, "hosting-review") || !pages || !live) return false;
+    ++s->reviews; bool redraw = false, close = false;
+    struct zcl_present_window_event_v1 event = {.outcome = ZCL_PRESENT_WINDOW_ACTION};
+    bool confirm = s->confirm_stop && model->action_count == 4;
+    uint32_t page_count = 0;
+    if (confirm && !zcl_present_model_page_count_v1(model, &page_count, why, cap)) return false;
+    if (confirm) for (uint32_t i = 1; i < page_count; ++i) {
+        event.action_index = 2; live->owner.update(live->owner.context, &event, false, &redraw, &close);
+        if (close) return false;
+    }
+    event.action_index = confirm ? 3 : 0;
+    live->owner.update(live->owner.context, &event, false, &redraw, &close); return close;
+}
+static bool hbrowser_case(bool confirm, bool stale, bool lost, unsigned *stops, bool *mutated)
+{
+    struct hbrowser_script script = {.confirm_stop = confirm};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_library.v1");
+    hcli_stops = hcli_status_calls = 0; hcli_stale_after = stale ? 1 : 0; hcli_fault = lost ? 3 : 0;
+    bool ok = app_host_browser_run(hbrowser_present, hbrowser_confirm, &script, &reply);
+    *stops = hcli_stops; *mutated = reply.error.mutated;
+    bool expected = stale ? (!ok && !strcmp(reply.error.code, "HOST_INTENT_STALE")) :
+        lost ? (!ok && reply.error.mutated) : ok;
+    zcl_command_reply_free(&reply); hcli_stale_after = hcli_fault = 0;
+    return expected && script.list_views && (stale || script.reviews);
 }
 
 static bool hcli_call(const char *path, const char *generation,
@@ -445,6 +558,28 @@ static int host_cli_response_tests(void)
     node_rpc_client_set_test_hook(hcli_rpc);
     hcli_fault = 0; hcli_fault_status = false; hcli_stops = 0;
     TEST("app host CLI: exact confirmation, malformed replies and lost acknowledgement") {
+        struct json_value list_input; json_init(&list_input); json_set_object(&list_input);
+        ASSERT(zcl_app_inner_call("app.host.list", &list_input, &reply, NULL));
+        ASSERT_EQ(json_size(json_get(&reply.data, "items")), 1);
+        ASSERT(!json_get_bool(json_get(&reply.data, "more")));
+        ASSERT(!json_get(json_at(json_get(&reply.data, "items"), 0), "untrusted"));
+        json_free(&list_input); zcl_command_reply_free(&reply);
+        for (hcli_list_fault = 1; hcli_list_fault <= 2; ++hcli_list_fault) {
+            json_init(&list_input); json_set_object(&list_input);
+            ASSERT(!zcl_app_inner_call("app.host.list", &list_input, &reply, NULL));
+            json_free(&list_input); zcl_command_reply_free(&reply);
+        }
+        hcli_list_fault = 0;
+        unsigned browser_stops = 0; bool browser_mutated = false;
+        ASSERT(hbrowser_case(false, false, false, &browser_stops, &browser_mutated));
+        ASSERT_EQ(browser_stops, 0u); ASSERT(!browser_mutated);
+        ASSERT(hbrowser_case(true, false, false, &browser_stops, &browser_mutated));
+        ASSERT_EQ(browser_stops, 1u); ASSERT(browser_mutated);
+        ASSERT(hbrowser_case(true, true, false, &browser_stops, &browser_mutated));
+        ASSERT_EQ(browser_stops, 0u); ASSERT(!browser_mutated);
+        ASSERT(hbrowser_case(true, false, true, &browser_stops, &browser_mutated));
+        ASSERT_EQ(browser_stops, 1u); ASSERT(browser_mutated);
+        hcli_stops = hcli_status_calls = 0;
         ASSERT(hcli_call("app.host.status", NULL, NULL, &reply));
         ASSERT(!json_get_bool(json_get(&reply.data, "executed")));
         const char *notice = json_get_str(json_get(&reply.data, "hosting_notice"));
@@ -499,6 +634,6 @@ static int host_cli_response_tests(void)
     } _test_next:;
     zcl_command_reply_free(&reply);
     node_rpc_client_set_test_hook(NULL);
-    hcli_fault = 0; hcli_fault_status = false;
+    hcli_fault = hcli_list_fault = 0; hcli_fault_status = false;
     return failures;
 }

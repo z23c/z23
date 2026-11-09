@@ -6,6 +6,7 @@
 #include "command/native_app_library_command.h"
 #include "command/native_app_confirm.h"
 #include "command/native_app_discover.h"
+#include "command/native_app_host_browser.h"
 #include "command/native_app_receive_flow.h"
 #include "command/native_app_receive_preview.h"
 #include "command/native_app_share_command.h"
@@ -98,7 +99,7 @@ static bool al_load(struct library *w, const struct app_launch_env *env,
     }
     return true;
 }
-static void al_choice(struct zcl_present_model_v1 *m, const char *id,
+void app_library_choice(struct zcl_present_model_v1 *m, const char *id,
     const char *label, const char *value)
 {
     unsigned i = m->item_count++;
@@ -120,7 +121,7 @@ static void al_model(struct library *w)
     (void)snprintf(m->title, sizeof(m->title), "My Apps");
     if (!w->count) {
         (void)snprintf(m->summary, sizeof(m->summary), "No apps yet. Install an app or open a shared app to get started.");
-        al_choice(m, "home", "Back", "Return to the home menu.");
+        app_library_choice(m, "home", "Back", "Return to the home menu.");
         return;
     }
     const struct library_row *r = &w->rows[w->index];
@@ -134,10 +135,10 @@ static void al_model(struct library *w)
     (void)snprintf(m->summary, sizeof(m->summary), "App %zu of %zu. %.72s", w->index + 1, w->count, name);
     (void)snprintf(value, sizeof(value), "%s%.12s",
         r->saved ? "Saved version " : "Installed app", r->saved ? version : "");
-    al_choice(m, "choose", "Choose app", value);
-    al_choice(m, "previous", "Previous app", w->index ? "Browse back." : "First app.");
-    al_choice(m, "next", "Next app", w->index + 1 < w->count ? "Browse forward." : "Last app.");
-    al_choice(m, "home", "Back", "Return to the home menu.");
+    app_library_choice(m, "choose", "Choose app", value);
+    app_library_choice(m, "previous", "Previous app", w->index ? "Browse back." : "First app.");
+    app_library_choice(m, "next", "Next app", w->index + 1 < w->count ? "Browse forward." : "Last app.");
+    app_library_choice(m, "home", "Back", "Return to the home menu.");
 }
 static void al_home(struct library *w)
 {
@@ -146,9 +147,10 @@ static void al_home(struct library *w)
     (void)snprintf(m->request_id, sizeof(m->request_id), "library-home");
     (void)snprintf(m->title, sizeof(m->title), "My Apps");
     (void)snprintf(m->summary, sizeof(m->summary), "Open your apps or discover available advertisements.");
-    al_choice(m, "myapps", "My apps", "Browse installed and saved apps.");
-    al_choice(m, "discover", "Discover apps", "Browse offers received by this node.");
-    al_choice(m, "cancel", "Close", "Close without opening an app.");
+    app_library_choice(m, "myapps", "My apps", "Browse installed and saved apps.");
+    app_library_choice(m, "discover", "Discover apps", "Browse offers received by this node.");
+    app_library_choice(m, "hosting", "Hosting", "Review and stop local hosting intents.");
+    app_library_choice(m, "cancel", "Close", "Close without opening an app.");
 }
 
 static bool al_present(void *context, const struct zcl_present_model_v1 *model,
@@ -213,7 +215,7 @@ static void al_error_view(struct library *w, const struct zcl_command_reply *rep
     (void)snprintf(w->model.request_id, sizeof(w->model.request_id), "library-error");
     (void)snprintf(w->model.title, sizeof(w->model.title), "Could not open My Apps");
     (void)snprintf(w->model.summary, sizeof(w->model.summary), "%s", reply->error.message);
-    al_choice(&w->model, "close", "Close", "No other app will be opened.");
+    app_library_choice(&w->model, "close", "Close", "No other app will be opened.");
     struct zcl_present_window_event_v1 event = {0};
     char why[256];
     (void)presenter(context, &w->model, NULL, &event, why, sizeof(why));
@@ -546,8 +548,8 @@ static bool al_share(struct library *w, const struct app_launch_env *env, struct
 static void al_change_choice(struct zcl_present_model_v1 *m, const struct library_row *r)
 {
     if (r->saved && app_saved_draft_available(&r->selection))
-        al_choice(m, "change-options", "Change", "Review unkept changes or connect your assistant.");
-    else al_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
+        app_library_choice(m, "change-options", "Change", "Review unkept changes or connect your assistant.");
+    else app_library_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
 }
 static void al_detail_model(struct library *w)
 {
@@ -556,12 +558,12 @@ static void al_detail_model(struct library *w)
     m->item_count = m->action_count = 0;
     const struct library_row *r = &w->rows[w->index];
     if (w->page == 1) {
-        al_choice(m, "open", "Open app", "Use this app.");
+        app_library_choice(m, "open", "Open app", "Use this app.");
         al_change_choice(m, r);
-        al_choice(m, "share", "Share this version", r->saved ? "Choose file or public offer." : "Keep a version first.");
+        app_library_choice(m, "share", "Share this version", r->saved ? "Choose file or public offer." : "Keep a version first.");
     } else if (w->page == 7) {
-        al_choice(m, "draft", "Review unkept changes", "Preview the exact saved draft before choosing Keep.");
-        al_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
+        app_library_choice(m, "draft", "Review unkept changes", "Preview the exact saved draft before choosing Keep.");
+        app_library_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
     } else {
         (void)snprintf(m->request_id, sizeof(m->request_id), "library-help");
         (void)snprintf(m->summary, sizeof(m->summary), "%s", w->setup[0]
@@ -573,12 +575,12 @@ static void al_detail_model(struct library *w)
         char version[65] = {0};
         if (r->saved) (void)snprintf(version, sizeof(version), "%s", w->source_version);
         char first[33]; (void)snprintf(first, sizeof(first), "%.32s", version);
-        al_choice(m, "setup", w->setup[0] ? "Press C to copy AI setup" : "No editable source", r->saved ? first : "No saved version yet.");
-        al_choice(m, "version", r->saved ? "Paste into AI; keep this open" : w->setup[0] ? "Make my copy first" : "Source needed",
+        app_library_choice(m, "setup", w->setup[0] ? "Press C to copy AI setup" : "No editable source", r->saved ? first : "No saved version yet.");
+        app_library_choice(m, "version", r->saved ? "Paste into AI; keep this open" : w->setup[0] ? "Make my copy first" : "Source needed",
             r->saved ? version + 32 : w->setup[0] ? "Open Sky Combat to make a copy." : "Ask the app author for source.");
     }
-    al_choice(m, "back", "Back", "Return to your selected app.");
-    if (w->page != 1) al_choice(m, "cancel", "Cancel", "Close My Apps.");
+    app_library_choice(m, "back", "Back", "Return to your selected app.");
+    if (w->page != 1) app_library_choice(m, "cancel", "Cancel", "Close My Apps.");
 }
 /* Return true only while navigation should continue. Open is terminal. */
 static void al_share_options(struct library *w)
@@ -588,9 +590,9 @@ static void al_share_options(struct library *w)
     m->item_count = m->action_count = 0;
     (void)snprintf(m->request_id, sizeof(m->request_id), "library-share-options");
     (void)snprintf(m->summary, sizeof(m->summary), "Choose how to share this saved version.");
-    al_choice(m, "share-file", "Create share file", "Send a file to someone.");
-    al_choice(m, "publish", "Publish publicly", "Offer this version on the public apps board.");
-    al_choice(m, "share-back", "Back", "Return to this app.");
+    app_library_choice(m, "share-file", "Create share file", "Send a file to someone.");
+    app_library_choice(m, "publish", "Publish publicly", "Offer this version on the public apps board.");
+    app_library_choice(m, "share-back", "Back", "Return to this app.");
 }
 static void al_publish_notice(struct library *w, struct zcl_command_reply *reply)
 {
@@ -997,6 +999,17 @@ static bool al_navigation_result(struct library *w, unsigned action, const struc
         al_resolve_discover_error(w);
     return next;
 }
+static bool al_external(struct library *w, const struct app_launch_env *env, const char *datadir,
+    app_library_presenter presenter, void *context, struct zcl_command_reply *reply, const char *id, bool *handled)
+{
+    *handled = true;
+    if (!strcmp(id, "discover")) return al_discover(w, env, datadir, presenter, context, reply);
+    if (!strcmp(id, "hosting")) {
+        bool ok = app_host_browser_run(presenter, w->notice, context, reply);
+        w->any_mutated |= reply->error.mutated; return ok;
+    }
+    *handled = false; return true;
+}
 static void al_loop(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, const char *exe, const char *datadir)
 {
@@ -1020,10 +1033,9 @@ static void al_loop(struct library *w, const struct app_launch_env *env, struct 
             if (!w->has_received) (void)json_push_kv_str(&reply->data, "status", "canceled");
             break;
         }
-        if (!strcmp(w->model.actions[event.action_index].id, "discover")) {
-            if (!al_discover(w, env, datadir, presenter, context, reply)) break;
-            continue;
-        }
+        bool handled = false;
+        if (!al_external(w, env, datadir, presenter, context, reply, w->model.actions[event.action_index].id, &handled)) break;
+        if (handled) continue;
         if (!al_navigation_result(w, event.action_index, env, exe, datadir, reply)) break;
     }
 }

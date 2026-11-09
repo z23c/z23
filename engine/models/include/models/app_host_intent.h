@@ -61,6 +61,12 @@ enum app_host_result db_app_host_intent_find(struct node_db *db,
  * cannot starve this bounded batch. Corrupt/failed reads return no rows. */
 enum app_host_result db_app_host_intent_due(struct node_db *db, const uint8_t local_host[32], int64_t now,
     struct db_app_host_intent *out, size_t capacity, size_t *count, bool *more);
+/* Owner-local rows ordered by (host, carrier), including rotated identities.
+ * A cursor is either entirely absent or an exclusive canonical bound. Pages reflect
+ * live state, not a cross-request snapshot. Failure returns no partial rows. */
+enum app_host_result db_app_host_intent_list(struct node_db *db,
+    const uint8_t after_host[32], const char *after_carrier,
+    struct db_app_host_intent *out, size_t capacity, size_t *count, bool *more);
 /* expected_generation=0 creates a new intent; reenable uses the disabled
  * row's exact generation and immutable binding. A successful consent change
  * increments generation, never past INT64_MAX. */

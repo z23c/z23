@@ -5,10 +5,16 @@
 #include "command/native_app_confirm.h"
 struct zcl_command_reply;
 struct app_selection;
+struct json_value;
+/* Borrowed complete build envelope, delivered only after exact preview binding. */
+typedef void (*app_receive_build_observer)(void *, const struct json_value *, const struct json_value *, struct zcl_command_reply *);
 /* Called only after successful native Receive. Default Receive never calls
  * this. The original receipt remains in reply->data on every later failure. */
 void app_receive_flow_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context);
+void app_receive_flow_run_observed(const char *datadir, struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context, const char *worker_path,
+    app_receive_build_observer observer, void *observer_context);
 /* Only after successful native adoption AND personalization. Caller reserves
  * the original receipt plus bounded continuation evidence before mutation
  * (same 16KiB policy as Receive, including retained scratch failure evidence).
