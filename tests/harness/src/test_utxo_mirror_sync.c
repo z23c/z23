@@ -47,6 +47,24 @@
     else { printf("  utxo_mirror_sync: %s... FAIL\n", (name)); failures++; } \
 } while (0)
 
+static bool ums_cause_dump_is(struct utxo_mirror_sync_service *svc, const char *expected)
+{
+    struct utxo_mirror_sync_service *prior = g_utxo_mirror_sync;
+    struct json_value value = {0};
+    g_utxo_mirror_sync = svc;
+    bool ok = utxo_mirror_sync_dump_state_json(&value, NULL);
+    const char *cause = json_get_str(json_get(&value, "quarantine_cause"));
+    ok = ok && cause && !strcmp(cause, expected);
+    json_free(&value); g_utxo_mirror_sync = prior;
+    return ok;
+}
+
+static bool ums_quarantined_with_cause(struct utxo_mirror_sync_service *svc, const char *expected)
+{
+    return atomic_load(&svc->mirror_health) == UTXO_MIRROR_QUARANTINED &&
+        ums_cause_dump_is(svc, expected);
+}
+
 /* A 25-byte P2PKH script with a recognisable 20-byte hash derived from tag. */
 static void ums_p2pkh(uint8_t script[25], uint8_t hash20[20], uint8_t tag)
 {
@@ -482,6 +500,8 @@ static int ums_test_operator_admission(struct utxo_mirror_sync_service *svc,
         utxo_mirror_rebuild_now(svc) == UTXO_MIRROR_REBUILD_REFUSED);
     UMS_CHECK("operator: malformed evidence preserves old mirror and quarantine",
         ums_old_mirror_intact(svc, ndb, 102, before));
+    UMS_CHECK("operator: failed repair retains original rebuild cause",
+        ums_cause_dump_is(svc, "rebuild_error"));
     UMS_CHECK("operator: genuine migration evidence restored",
         coins_kv_mark_migration_complete(pdb));
     uint8_t a[32], b[32]; ums_txid(a, 0x51); ums_txid(b, 0x52);
@@ -535,8 +555,16 @@ static void ums_tamper_hook(sqlite3 *w, void *p)
     sqlite3_free(err);
 }
 
+static void ums_new_quarantine_hook(sqlite3 *w, void *p)
+{
+    (void)w;
+    struct utxo_mirror_sync_service *svc = p;
+    utxo_mirror_sync_test_record_cause(svc, UTXO_MIRROR_CAUSE_REBUILD_ERROR);
+    utxo_mirror_sync_test_record_cause(svc, UTXO_MIRROR_CAUSE_REBUILD_ERROR);
+}
+
 static int ums_test_staged_read_errors(struct utxo_mirror_sync_service *svc,
-    struct node_db *ndb)
+    struct node_db *ndb, const char *original_cause)
 {
     int failures = 0;
     uint8_t before[32];
@@ -555,6 +583,8 @@ static int ums_test_staged_read_errors(struct utxo_mirror_sync_service *svc,
         f.trace_started && f.interrupted && result == UTXO_MIRROR_REBUILD_ERROR);
     UMS_CHECK("operator: step error rollback preserves old mirror and quarantine",
         ums_old_mirror_intact(svc, ndb, 102, before));
+    UMS_CHECK("operator: failed repair preserves original cause",
+        ums_cause_dump_is(svc, original_cause));
     return failures;
 }
 
@@ -612,7 +642,10 @@ static int ums_test_rebuild_now(void)
               utxo_mirror_sync_run_once(&svc) == 2);
 
     failures += ums_test_operator_admission(&svc, &ndb, pdb);
-    failures += ums_test_staged_read_errors(&svc, &ndb);
+    failures += ums_test_staged_read_errors(&svc, &ndb, "rebuild_error");
+    /* Simulate a quarantine whose original cause predates this diagnostic. */
+    atomic_store(&svc.quarantine_cause_state, UTXO_MIRROR_CAUSE_UNKNOWN);
+    failures += ums_test_staged_read_errors(&svc, &ndb, "unknown");
     failures += ums_test_rollback_unsettled(&svc, &ndb);
 
     /* A source row the mirror cannot represent (oversize script) makes the
@@ -632,6 +665,8 @@ static int ums_test_rebuild_now(void)
               db_utxo_count(&ndb) == 2 && cur == 102);
     UMS_CHECK("rebuild_now: failed rebuild stays quarantined",
               atomic_load(&svc.mirror_health) == UTXO_MIRROR_QUARANTINED);
+    UMS_CHECK("rebuild_now: failed repair preserves unknown cause",
+              ums_cause_dump_is(&svc, "unknown"));
     UMS_CHECK("rebuild_now: quarantined run_once is a no-op",
               utxo_mirror_sync_run_once(&svc) == 0);
 
@@ -647,6 +682,8 @@ static int ums_test_rebuild_now(void)
     UMS_CHECK("rebuild_now: cursor at the scanned height", cur == 104);
     UMS_CHECK("rebuild_now: quarantine cleared",
               atomic_load(&svc.mirror_health) == UTXO_MIRROR_HEALTHY);
+    UMS_CHECK("rebuild_now: successful repair clears cause",
+              ums_cause_dump_is(&svc, "unknown"));
     UMS_CHECK("rebuild_now: roots match", ums_roots_equal(&ndb, pdb));
 
     failures += ums_test_audit_diff(&svc, &ndb, pdb);
@@ -669,9 +706,12 @@ static int ums_test_rebuild_now(void)
     UMS_CHECK("tamper: old mirror and cursor untouched",
               db_utxo_count(&ndb) == db_before && cur == tcur_before);
     UMS_CHECK("tamper: failed rebuild stays quarantined",
-              atomic_load(&svc.mirror_health) == UTXO_MIRROR_QUARANTINED);
+              ums_quarantined_with_cause(&svc, "rebuild_error"));
+    utxo_mirror_sync_test_set_writer_hook(ums_new_quarantine_hook, &svc);
     r = utxo_mirror_rebuild_now(&svc);
+    utxo_mirror_sync_test_set_writer_hook(NULL, NULL);
     UMS_CHECK("tamper: clean rebuild converges", r > 0);
+    UMS_CHECK("tamper: later same-cause quarantine is not erased", ums_cause_dump_is(&svc, "rebuild_error"));
     UMS_CHECK("tamper: roots match after recovery", ums_roots_equal(&ndb, pdb));
 
     app_runtime_set_current(NULL);
@@ -1630,13 +1670,19 @@ static int ums_test_dump_state_json(struct utxo_mirror_sync_service *svc)
     const struct json_value *present = json_get(&v, "instance_present");
     const struct json_value *rebuilds = json_get(&v, "rebuilds_run");
     const struct json_value *rows = json_get(&v, "rows_written");
+    const char *cause = json_get_str(json_get(&v, "quarantine_cause"));
     bool shape_ok = ok && present && json_get_bool(present) == true &&
                     rebuilds && json_get_int(rebuilds) >= 1 &&
-                    rows && json_get_int(rows) >= 4;
+                    rows && json_get_int(rows) >= 4 && cause && !strcmp(cause, "unknown");
     json_free(&v);
     g_utxo_mirror_sync = NULL;
     UMS_CHECK("dump_state_json reports instance + rebuilds_run + rows_written",
               shape_ok);
+    uint64_t saved = atomic_load(&svc->quarantine_cause_state);
+    atomic_store(&svc->quarantine_cause_state, UINT64_MAX & ~UINT64_C(3));
+    utxo_mirror_sync_test_record_cause(svc, UTXO_MIRROR_CAUSE_AUTHORITY_REWIND);
+    UMS_CHECK("saturated cause generation stays unknown", ums_cause_dump_is(svc, "unknown"));
+    atomic_store(&svc->quarantine_cause_state, saved);
     return failures;
 }
 
@@ -1744,10 +1790,14 @@ static int ums_test_delta_quarantine(struct node_db *ndb, sqlite3 *pdb, struct u
     UMS_CHECK("quarantine: first missing delta fails closed", w == -1);
     UMS_CHECK("quarantine: state is QUARANTINED",
               atomic_load(&svc->mirror_health) == UTXO_MIRROR_QUARANTINED);
+    UMS_CHECK("quarantine: missing delta cause is retained",
+              ums_cause_dump_is(svc, "missing_delta"));
     UMS_CHECK("quarantine: mirror remains at prior complete frontier",
               db_utxo_count(ndb) == 3 && db_utxo_exists(ndb, txid55, 0));
     UMS_CHECK("quarantine: repeated tick is bounded no-op",
               utxo_mirror_sync_run_once(svc) == 0);
+    UMS_CHECK("quarantine: suspended pass retains its cause",
+              ums_cause_dump_is(svc, "missing_delta"));
     UMS_CHECK("quarantine: zero wholesale rebuilds triggered",
               atomic_load(&svc->rebuilds_run) == rebuilds_before);
 
@@ -1756,6 +1806,8 @@ static int ums_test_delta_quarantine(struct node_db *ndb, sqlite3 *pdb, struct u
     atomic_store(&svc->mirror_health, UTXO_MIRROR_HEALTHY);
     UMS_CHECK("quarantine: recovered pass changes one row",
               utxo_mirror_sync_run_once(svc) == 1);
+    UMS_CHECK("quarantine: ordinary pass does not erase cause",
+              ums_cause_dump_is(svc, "missing_delta"));
     UMS_CHECK("quarantine: spent 0x55 gone after causal recovery",
               !db_utxo_exists(ndb, txid55, 0));
     UMS_CHECK("quarantine: recovery stayed incremental",
@@ -1975,6 +2027,8 @@ static int ums_test_authority_rewind(struct node_db *ndb, sqlite3 *pdb, struct u
               utxo_mirror_sync_run_once(svc) == -1 &&
               atomic_load(&svc->mirror_health) ==
                   UTXO_MIRROR_QUARANTINED);
+    UMS_CHECK("rewind: cause is explicit",
+              ums_cause_dump_is(svc, "authority_rewind"));
     UMS_CHECK("rewind: losing-branch mirror rows remain frozen",
               db_utxo_count(ndb) == rewind_rows &&
               db_utxo_exists(ndb, rewind_txid, 0));

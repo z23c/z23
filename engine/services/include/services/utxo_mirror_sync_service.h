@@ -78,6 +78,15 @@ enum utxo_mirror_health_state {
     UTXO_MIRROR_QUARANTINED,
 };
 
+/* In-memory diagnostic for the current quarantine; unknown includes state
+ * established before this diagnostic was recorded. */
+enum utxo_mirror_quarantine_cause {
+    UTXO_MIRROR_CAUSE_UNKNOWN = 0,
+    UTXO_MIRROR_CAUSE_MISSING_DELTA,
+    UTXO_MIRROR_CAUSE_REBUILD_ERROR,
+    UTXO_MIRROR_CAUSE_AUTHORITY_REWIND,
+};
+
 /* Operator rebuild as a job on the mirror thread. A wholesale rebuild outlasts
  * the node RPC deadline (10 s client, 10 s server kill) and would pin one of
  * the four RPC workers, so the RPC only REQUESTS it; the mirror thread runs it
@@ -135,6 +144,7 @@ struct utxo_mirror_sync_service {
     _Atomic int64_t last_error_unix;    /* wall time of last failed pass (0 = none) */
     _Atomic int64_t last_quarantine_unix;
     _Atomic int mirror_health;          /* enum utxo_mirror_health_state */
+    _Atomic uint64_t quarantine_cause_state; /* generation << 2 | cause */
 
     /* Seqlock-style audit guard. A node.db mirror update changes the
      * generation at BEGIN and END and holds updates_active > 0 for the
@@ -217,6 +227,7 @@ void utxo_mirror_rebuild_job_snapshot(struct utxo_mirror_sync_service *svc,
 int utxo_mirror_rebuild_job_service(struct utxo_mirror_sync_service *svc);
 
 #ifdef ZCL_TESTING
+void utxo_mirror_sync_test_record_cause(struct utxo_mirror_sync_service *svc, int cause);
 /* Deterministic fault injection for the private rebuild writer: the scan
  * fails after its first row; ROLLBACK_FAILS additionally reports the writer
  * rollback as failed, CLOSE_BUSY reports the writer close as SQLITE_BUSY.

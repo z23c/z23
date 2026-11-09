@@ -56,6 +56,16 @@ static const char *utxo_mirror_health_state_name(int state)
     }
 }
 
+static const char *utxo_mirror_cause_name(int cause)
+{
+    switch (cause) {
+    case UTXO_MIRROR_CAUSE_MISSING_DELTA: return "missing_delta";
+    case UTXO_MIRROR_CAUSE_REBUILD_ERROR: return "rebuild_error";
+    case UTXO_MIRROR_CAUSE_AUTHORITY_REWIND: return "authority_rewind";
+    default: return "unknown";
+    }
+}
+
 /* Reentrant-safe: g_utxo_mirror_sync is NULL before service start. Atomic
  * fields are loaded explicitly. tick_seconds is immutable after init and is
  * published before the worker is spawned. */
@@ -76,6 +86,10 @@ bool utxo_mirror_sync_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_str(out, "mirror_health",
                      utxo_mirror_health_state_name(
                          atomic_load(&svc->mirror_health)));
+    uint64_t cause = atomic_load(&svc->quarantine_cause_state);
+    json_push_kv_str(out, "quarantine_cause", utxo_mirror_cause_name(
+        (cause & ~UINT64_C(3)) == (UINT64_MAX & ~UINT64_C(3)) ?
+            UTXO_MIRROR_CAUSE_UNKNOWN : (int)(cause & UINT64_C(3))));
     json_push_kv_bool(out, "thread_started", atomic_load(&svc->thread_started));
     json_push_kv_int(out, "tick_seconds", (int64_t)svc->tick_seconds);
     json_push_kv_int(out, "rebuilds_run", atomic_load(&svc->rebuilds_run));

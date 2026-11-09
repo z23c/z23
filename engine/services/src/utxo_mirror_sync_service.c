@@ -789,8 +789,35 @@ struct mirror_rebuild_ctx {
     bool cursor_persisted;
     bool used_delta;         /* diagnostics: delta vs wholesale rebuild */
     bool operator_repair;    /* authority admission required only for explicit repair */
+    bool prior_quarantine;   /* preserve the original cause through repair failure */
+    uint64_t cause_snapshot; /* prevent overwriting a newer quarantine */
     char reason[96];         /* refusal token (REFUSED / OVERLAY_ACTIVE) */
 };
+
+/* Bump the diagnostic generation whenever a quarantine is recorded. */
+static void mirror_record_cause(struct utxo_mirror_sync_service *svc, int cause)
+{
+    uint64_t old = atomic_load(&svc->quarantine_cause_state), next;
+    do {
+        if ((old & ~UINT64_C(3)) == (UINT64_MAX & ~UINT64_C(3))) return;
+        next = ((old & ~UINT64_C(3)) + UINT64_C(4)) | (uint64_t)cause;
+    } while (!atomic_compare_exchange_weak(&svc->quarantine_cause_state, &old, next));
+}
+
+static void mirror_cause_if_unchanged(struct mirror_rebuild_ctx *r, int cause)
+{
+    uint64_t old = r->cause_snapshot;
+    if ((old & ~UINT64_C(3)) == (UINT64_MAX & ~UINT64_C(3))) return;
+    uint64_t next = ((old & ~UINT64_C(3)) + UINT64_C(4)) | (uint64_t)cause;
+    (void)atomic_compare_exchange_strong(&r->svc->quarantine_cause_state, &old, next);
+}
+
+#ifdef ZCL_TESTING
+void utxo_mirror_sync_test_record_cause(struct utxo_mirror_sync_service *svc, int cause)
+{
+    mirror_record_cause(svc, cause);
+}
+#endif
 
 /* Typed outcomes that leave the previous mirror and its health untouched (a
  * failed authority proof keeps its historical quarantine behaviour). */
@@ -830,6 +857,7 @@ static bool mirror_rebuild_and_advance_lane(struct node_db *ndb, void *ctx)
         /* Missing causal history is not permission for an automatic million-
          * row rebuild. Quarantine once; an explicit audit/recovery action can
          * later reconstruct the derived mirror. */
+        mirror_record_cause(r->svc, UTXO_MIRROR_CAUSE_MISSING_DELTA);
         atomic_store(&r->svc->mirror_health, UTXO_MIRROR_QUARANTINED);
         atomic_fetch_add(&r->svc->quarantines_total, 1);
         atomic_store(&r->svc->last_quarantine_unix,
@@ -856,6 +884,8 @@ static bool mirror_rebuild_and_advance_lane(struct node_db *ndb, void *ctx)
         return false;
     }
     if (r->written < 0) {
+        if (!r->prior_quarantine && (r->cause_snapshot & UINT64_C(3)) == UTXO_MIRROR_CAUSE_UNKNOWN)
+            mirror_cause_if_unchanged(r, UTXO_MIRROR_CAUSE_REBUILD_ERROR);
         atomic_store(&r->svc->mirror_health, UTXO_MIRROR_QUARANTINED);
         atomic_fetch_add(&r->svc->quarantines_total, 1);
         atomic_store(&r->svc->last_quarantine_unix,
@@ -864,6 +894,8 @@ static bool mirror_rebuild_and_advance_lane(struct node_db *ndb, void *ctx)
     }
     r->applied_through = snap_h;  /* the SCANNED height, not the earlier read */
     r->cursor_persisted = true;
+    if (r->operator_repair)
+        mirror_cause_if_unchanged(r, UTXO_MIRROR_CAUSE_UNKNOWN);
     atomic_store(&r->svc->mirror_health, UTXO_MIRROR_HEALTHY);
     return true;
 }
@@ -1020,6 +1052,7 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
          * mirror marker would bless stale rows. Keep the projection frozen
          * until an owner-gated rebuild from a point-in-time authority copy is
          * available. */
+        mirror_record_cause(svc, UTXO_MIRROR_CAUSE_AUTHORITY_REWIND);
         atomic_store(&svc->mirror_health, UTXO_MIRROR_QUARANTINED);
         atomic_fetch_add(&svc->quarantines_total, 1);
         atomic_store(&svc->last_quarantine_unix,
@@ -1055,6 +1088,7 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
         .written = -1,
         .cursor_persisted = false,
         .used_delta = false,
+        .cause_snapshot = atomic_load(&svc->quarantine_cause_state),
     };
     int64_t t0_ms = platform_time_monotonic_ms();
     if (!mirror_sync_run_rebuild_lane(svc, &rebuild)) {
@@ -1123,12 +1157,14 @@ int64_t utxo_mirror_rebuild_now_reason(struct utxo_mirror_sync_service *svc,
     int64_t t0_ms = platform_time_monotonic_ms();
     /* cursor 0 forces the wholesale branch; the scan stamps its own snapshot
      * height. Quarantine is cleared only by a verified commit. */
+    int prior = atomic_load(&svc->mirror_health);
     struct mirror_rebuild_ctx rebuild = {
         .svc = svc, .cursor = 0, .frontier = frontier,
         .mirror_has_rows = false, .applied_through = 0, .written = -1,
         .cursor_persisted = false, .used_delta = false, .operator_repair = true,
+        .prior_quarantine = prior == UTXO_MIRROR_QUARANTINED,
+        .cause_snapshot = atomic_load(&svc->quarantine_cause_state),
     };
-    int prior = atomic_load(&svc->mirror_health);
     atomic_fetch_add(&svc->updates_active, 1u);
     atomic_fetch_add(&svc->update_generation, 1u);
     bool lane_ok = mirror_run_db_lane(svc->ndb, mirror_rebuild_and_advance_lane,
@@ -1265,6 +1301,7 @@ void utxo_mirror_sync_init(struct utxo_mirror_sync_service *svc,
     pthread_mutex_init(&svc->job_mutex, NULL);
     atomic_store(&svc->state, UTXO_MIRROR_SYNC_IDLE);
     atomic_store(&svc->mirror_health, UTXO_MIRROR_HEALTHY);
+    atomic_store(&svc->quarantine_cause_state, UTXO_MIRROR_CAUSE_UNKNOWN);
     atomic_store(&svc->rebuilds_run, 0);
     atomic_store(&svc->delta_passes_run, 0);
     atomic_store(&svc->delta_rows_changed, 0);
