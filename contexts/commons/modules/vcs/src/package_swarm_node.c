@@ -577,7 +577,7 @@ static void sched_manifest(struct vcs_swarm_engine *engine,
 }
 
 /* CHUNKS terminal checks. Attempts are consumed by invalid DATA
- * AND by timeout retries (timeouts_locked); peer_failed masks
+ * or a timeout (timeouts_locked); peer_failed masks
  * exclude a chunk's bad advertisers permanently. A download is
  * terminally stuck — and must SAY so — when every unfinished
  * chunk exhausted its bounded attempts ("chunk-attempts-
@@ -631,8 +631,8 @@ static void sched_issue_chunk(struct vcs_swarm_engine *engine,
         if (allowance_denied(engine, &engine->peers[slot],
                              chunk_len_of(dl, g), day))
             continue;
-        if (issue_want(engine, dl, &engine->peers[slot], g, now))
-            dl->chunk_attempts[g]++;
+        /* Timeouts or invalid DATA, not issued WANTs, consume attempts. */
+        (void)issue_want(engine, dl, &engine->peers[slot], g, now);
         break;
     }
 }
@@ -1148,7 +1148,11 @@ static void handle_data(struct vcs_swarm_engine *engine,
     book_offence(engine, peer, VCS_POLICY_OFFENCE_INVALID_CHUNK, day);
     book_no_credit(engine, peer, VCS_POLICY_NO_CREDIT_INVALID_CHUNK,
                    data->bytes_len, day);
+    uint32_t g = req->global_chunk;
+    bool exhausted = g != SWARM_MANIFEST_CHUNK &&
+        ++dl->chunk_attempts[g] >= VCS_SWARM_MAX_CHUNK_ATTEMPTS;
     req_finish(engine, dl, req, false, false);
+    if (exhausted) dl_fail(engine, dl, "chunk-attempts-exhausted");
     res->penalty = VCS_SWARM_PENALTY_INVALID_DATA;
     res->rule = "invalid-chunk";
 }

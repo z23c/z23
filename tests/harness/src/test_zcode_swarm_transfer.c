@@ -189,6 +189,195 @@ int t_swarm_scheduler_order(void)
 
 /* ── 7-8: timeout/retry bounds + disconnect requeue ───────────────── */
 
+/* Seven expired chunk attempts must leave the eighth WANT alive through its
+ * deadline. Counting or failing it before its response loses honest data. */
+static struct vcs_swarm_frame_result chunk_answer(struct sw_node *n, uint64_t peer,
+    const struct vcs_package_swarm_object *want, const uint8_t *bytes, size_t len, uint64_t now,
+    bool wrong_kind);
+
+static bool chunk_final_want(struct sw_node *n, struct sw_pkg *p, uint64_t peer,
+                             struct vcs_package_swarm_object *first,
+                             struct vcs_package_swarm_object *last, uint64_t *now, bool mixed)
+{
+    struct sw_pump_stats st = {0};
+    vcs_swarm_engine_tick(n->engine, SW_DAY, 2);
+    sw_pump(n, peer, p, SW_SERVE_HONEST, false, 2, &st);
+    *now = 3;
+    vcs_swarm_engine_tick(n->engine, SW_DAY, *now);
+    for (unsigned i = 0; i < VCS_SWARM_MAX_CHUNK_ATTEMPTS; ++i) {
+        struct vcs_package_swarm_object want;
+        if (sw_drain_wants(n, peer, &want, 1) != 1 ||
+            want.object_kind != VCS_PACKAGE_SWARM_OBJECT_CHUNK) {
+            printf("  [chunk retry stopped before attempt %u]\n", i + 1);
+            return false;
+        }
+        if (i == 0) *first = want;
+        *last = want;
+        if (mixed && i == 0) {
+            size_t len = 0; const uint8_t *bytes = sw_chunk_bytes(p, 0, &len);
+            struct vcs_swarm_frame_result r = chunk_answer(n, peer, &want, bytes, len, *now, true);
+            if (r.penalty != VCS_SWARM_PENALTY_INVALID_DATA) return false;
+        }
+        if (i + 1 < VCS_SWARM_MAX_CHUNK_ATTEMPTS) {
+            *now += VCS_SWARM_REQUEST_TIMEOUT_TICKS + 1u;
+            vcs_swarm_engine_tick(n->engine, SW_DAY, *now);
+        }
+    }
+    vcs_swarm_engine_tick(n->engine, SW_DAY, ++*now);
+    struct vcs_swarm_download_status status;
+    return vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+        status.state == VCS_SWARM_DL_CHUNKS && status.inflight == 1;
+}
+
+static struct vcs_swarm_frame_result chunk_answer(struct sw_node *n, uint64_t peer,
+    const struct vcs_package_swarm_object *want, const uint8_t *bytes, size_t len, uint64_t now,
+    bool wrong_kind)
+{
+    struct vcs_package_swarm_message data = {0};
+    data.type = VCS_PACKAGE_SWARM_DATA;
+    data.body.data.object = *want;
+    if (wrong_kind) {
+        data.body.data.object.object_kind = VCS_PACKAGE_SWARM_OBJECT_MANIFEST;
+        data.body.data.object.file_index = UINT32_MAX;
+        data.body.data.object.chunk_index = UINT32_MAX;
+        memset(data.body.data.object.expected_hash, 0, sizeof(data.body.data.object.expected_hash));
+    }
+    data.body.data.bytes = bytes;
+    data.body.data.bytes_len = (uint32_t)len;
+    uint8_t frame[8 + 96 + 4096]; size_t frame_len = 0;
+    struct vcs_swarm_frame_result result = {0};
+    if (!vcs_package_swarm_serialize(&data, frame, sizeof(frame), &frame_len)) {
+        result.penalty = VCS_SWARM_PENALTY_MALFORMED;
+        return result;
+    }
+    result = vcs_swarm_engine_handle_frame(n->engine, peer, frame, frame_len, SW_DAY, now);
+    free(result.reply); result.reply = NULL;
+    return result;
+}
+
+static int chunk_final_result(struct sw_node *n, struct sw_pkg *p, uint64_t peer,
+                              const uint8_t key[33], bool answer, bool mixed)
+{
+    int failures = 0;
+    struct vcs_package_swarm_object first = {0}, last = {0}; uint64_t now = 0;
+    if (!chunk_final_want(n, p, peer, &first, &last, &now, mixed)) {
+        SW_CHECK("eighth chunk WANT remains outstanding", false);
+        return failures;
+    }
+    size_t len = 0; const uint8_t *bytes = sw_chunk_bytes(p, 0, &len);
+    if (answer) {
+        struct vcs_swarm_frame_result result = chunk_answer(n, peer, &last, bytes, len, now, false);
+        struct vcs_swarm_download_status status;
+        SW_CHECK("final timely chunk accepted and completes", result.penalty == VCS_SWARM_PENALTY_NONE &&
+            vcs_swarm_engine_download_status(n->engine, p->root, &status) && status.state == VCS_SWARM_DL_COMPLETE);
+        result = chunk_answer(n, peer, &last, bytes, len, now + 1, false);
+        SW_CHECK("final chunk replay remains refused", result.penalty == VCS_SWARM_PENALTY_REPLAYED_DATA);
+        struct vcs_service_key_totals totals;
+        SW_CHECK("replay adds no credit", vcs_service_key_totals(n->book, key, SW_DAY, &totals) &&
+            totals.verified_bytes_downloaded == p->wire_len + len);
+    } else {
+        vcs_swarm_engine_tick(n->engine, SW_DAY, now + VCS_SWARM_REQUEST_TIMEOUT_TICKS);
+        struct vcs_swarm_download_status status;
+        SW_CHECK("final timeout exhausts bounded attempts", vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+            status.state == VCS_SWARM_DL_FAILED && status.rule && !strcmp(status.rule, "chunk-attempts-exhausted"));
+        struct vcs_swarm_frame_result result = chunk_answer(n, peer, &last, bytes, len,
+            now + VCS_SWARM_REQUEST_TIMEOUT_TICKS + 1u, false);
+        struct vcs_service_key_totals totals;
+        SW_CHECK("late final chunk stays uncredited", result.penalty == VCS_SWARM_PENALTY_NONE &&
+            vcs_swarm_engine_download_status(n->engine, p->root, &status) && status.state == VCS_SWARM_DL_FAILED && status.present_chunks == 0 &&
+            vcs_service_key_totals(n->book, key, SW_DAY, &totals) && totals.verified_bytes_downloaded == p->wire_len);
+    }
+    return failures;
+}
+
+static int chunk_final_case(bool answer, bool mixed)
+{
+    int failures = 0; struct sw_node n; struct sw_pkg p; uint8_t key[33];
+    sw_key(47, key);
+    if (!sw_node_open(&n, answer ? "chunk_final_ok" : "chunk_final_timeout", sw_score_contributor)) return 1;
+    if (!sw_make_package(&p, 1, 61)) {
+        sw_free_package(&p); sw_node_close(&n); test_rm_rf_recursive(n.datadir); return 1;
+    }
+    const uint64_t peer = 5047;
+    bool ready = vcs_swarm_engine_peer_add(n.engine, peer, key);
+    if (ready) sw_announce(n.engine, peer, &p);
+    ready = ready && vcs_swarm_engine_fetch(n.engine, p.root, SW_DAY, 1) == VCS_SWARM_FETCH_OK;
+    if (ready) failures += chunk_final_result(&n, &p, peer, key, answer, mixed);
+    else failures++;
+    sw_free_package(&p); sw_node_close(&n); test_rm_rf_recursive(n.datadir);
+    return failures;
+}
+
+static bool chunk_retire_requests(struct sw_node *n, struct sw_pkg *p, uint64_t peer,
+    const uint8_t key[33], bool disconnect, struct vcs_package_swarm_object *first)
+{
+    struct vcs_package_swarm_object want = {0};
+    size_t len = 0; const uint8_t *bytes = sw_chunk_bytes(p, 0, &len);
+    unsigned count = disconnect ? VCS_SWARM_MAX_CHUNK_ATTEMPTS + 1u : VCS_SWARM_MAX_CHUNK_ATTEMPTS;
+    for (unsigned i = 0; i < count; i++) {
+        uint64_t now = 3u + i * 2u;
+        vcs_swarm_engine_tick(n->engine, SW_DAY, now);
+        if (sw_drain_wants(n, peer, &want, 1) != 1 || want.object_kind != VCS_PACKAGE_SWARM_OBJECT_CHUNK) return false;
+        if (!i) *first = want;
+        if (disconnect) {
+            vcs_swarm_engine_peer_drop(n->engine, peer);
+            if (!vcs_swarm_engine_peer_add(n->engine, peer, key)) return false;
+            sw_announce(n->engine, peer, p);
+        } else {
+            struct vcs_swarm_frame_result r = chunk_answer(n, peer, &want, bytes, len, now + 1u, true);
+            if (r.penalty != VCS_SWARM_PENALTY_INVALID_DATA) return false;
+        }
+    }
+    return true;
+}
+
+static int chunk_retire_result(struct sw_node *n, struct sw_pkg *p, uint64_t peer,
+    const uint8_t key[33], bool disconnect, const struct vcs_package_swarm_object *first)
+{
+    int failures = 0; struct vcs_package_swarm_object want = {0};
+    size_t len = 0; const uint8_t *bytes = sw_chunk_bytes(p, 0, &len);
+    unsigned count = disconnect ? VCS_SWARM_MAX_CHUNK_ATTEMPTS + 1u : VCS_SWARM_MAX_CHUNK_ATTEMPTS;
+    struct vcs_swarm_download_status status; struct vcs_service_key_totals totals;
+    if (disconnect) {
+        uint64_t now = 3u + count * 2u;
+        vcs_swarm_engine_tick(n->engine, SW_DAY, now);
+        bool ready = sw_drain_wants(n, peer, &want, 1) == 1;
+        struct vcs_swarm_frame_result stale = chunk_answer(n, peer, first, bytes, len, now + 1u, false);
+        struct vcs_swarm_frame_result valid = chunk_answer(n, peer, &want, bytes, len, now + 2u, false);
+        SW_CHECK("disconnect churn requeues and stale data earns no credit", ready &&
+            stale.penalty == VCS_SWARM_PENALTY_NONE && valid.penalty == VCS_SWARM_PENALTY_NONE &&
+            vcs_swarm_engine_download_status(n->engine, p->root, &status) && status.state == VCS_SWARM_DL_COMPLETE &&
+            vcs_service_key_totals(n->book, key, SW_DAY, &totals) && totals.verified_bytes_downloaded == p->wire_len + len);
+    } else {
+        vcs_swarm_engine_tick(n->engine, SW_DAY, 3u + count * 2u + VCS_SWARM_REQUEST_TIMEOUT_TICKS);
+        SW_CHECK("wrong-kind responses exhaust once without credit", vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+            status.state == VCS_SWARM_DL_FAILED && status.rule && !strcmp(status.rule, "chunk-attempts-exhausted") &&
+            vcs_service_key_totals(n->book, key, SW_DAY, &totals) && totals.verified_bytes_downloaded == p->wire_len);
+    }
+    return failures;
+}
+
+static int chunk_retired_case(bool disconnect)
+{
+    int failures = 0; struct sw_node n; struct sw_pkg p; uint8_t key[33];
+    const uint64_t peer = 5048; sw_key(48, key);
+    if (!sw_node_open(&n, disconnect ? "chunk_churn" : "chunk_kind", sw_score_contributor)) return 1;
+    if (!sw_make_package(&p, 1, 62)) {
+        sw_free_package(&p); sw_node_close(&n); test_rm_rf_recursive(n.datadir); return 1;
+    }
+    bool ready = vcs_swarm_engine_peer_add(n.engine, peer, key);
+    if (ready) sw_announce(n.engine, peer, &p);
+    ready = ready && vcs_swarm_engine_fetch(n.engine, p.root, SW_DAY, 1) == VCS_SWARM_FETCH_OK;
+    struct sw_pump_stats st = {0};
+    if (ready) { vcs_swarm_engine_tick(n.engine, SW_DAY, 2); sw_pump(&n, peer, &p, SW_SERVE_HONEST, false, 2, &st); }
+    struct vcs_package_swarm_object first = {0};
+    ready = ready && chunk_retire_requests(&n, &p, peer, key, disconnect, &first);
+    SW_CHECK("retired chunk requests keep intended bounds", ready);
+    if (ready) failures += chunk_retire_result(&n, &p, peer, key, disconnect, &first);
+    sw_free_package(&p); sw_node_close(&n); test_rm_rf_recursive(n.datadir);
+    return failures;
+}
+
 int t_swarm_timeout_retry(void)
 {
     int failures = 0;
@@ -242,7 +431,9 @@ int t_swarm_timeout_retry(void)
     sw_free_package(&p);
     sw_node_close(&n);
     test_rm_rf_recursive(n.datadir);
-    return failures;
+    return failures + chunk_final_case(true, false) + chunk_final_case(false, false) +
+        chunk_final_case(true, true) +
+        chunk_retired_case(true) + chunk_retired_case(false);
 }
 
 int t_swarm_disconnect_requeue(void)
