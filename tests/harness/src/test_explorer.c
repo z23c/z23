@@ -9,6 +9,8 @@
 #include "services/chain_evidence_authority_service.h"
 #include "services/utxo_mirror_sync_service.h"
 #include "util/thread_registry.h"
+#include "util/supervisor.h"
+#include "controllers/api_controller.h"
 #include "../../../contexts/explorer/controllers/src/explorer_controller_internal.h"
 #include "encoding/utilstrencodings.h"
 #include "core/uint256.h"
@@ -2445,6 +2447,13 @@ int test_explorer(void)
     /* Reap the one-shot evidence-maintenance run and the registry-owned hodl
      * refresh worker so no finished thread outlives the group unjoined. */
     chain_evidence_maintain_quiesce();
-    (void)thread_registry_join_all(5);
+    bool api_stopped = api_test_stop_background_workers();
+    supervisor_stop();
+    int stragglers = thread_registry_join_all(5);
+    if (!api_stopped || stragglers || thread_registry_live_count() ||
+        thread_registry_unreaped_count()) {
+        printf("explorer: background workers did not stop cleanly... FAIL\n");
+        failures++;
+    }
     return failures;
 }
