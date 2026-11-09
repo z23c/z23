@@ -617,6 +617,42 @@ static int test_spawn_binary_exact(void)
     return failures;
 }
 
+/* Exact bounded capture over the existing POSIX spawn owner. */
+static int test_spawn_exact_cancelable(void)
+{
+    int failures = 0;
+    TEST("spawn: exact cancellable capture reports bytes, overflow and owned reap") {
+        const char *argv[] = {"/usr/bin/printf", "A\\000B", NULL};
+        unsigned char bytes[4] = {9, 9, 9, 9};
+        struct zcl_spawn_binary_observation out = {0};
+        struct zcl_spawn_measure measure = {0}; bool canceled = false;
+        struct zcl_result r = zcl_spawn_capture_binary_cancelable_measured(argv, bytes, 3, 3000,
+            NULL, NULL, &canceled, &out, &measure);
+        ASSERT(r.ok && !canceled && measure.launched && measure.reaped);
+        ASSERT(out.output_len == 3 && out.eof && !out.overflow && out.exit_observed);
+        ASSERT(bytes[0] == 'A' && bytes[1] == 0 && bytes[2] == 'B' && bytes[3] == 9);
+        r = zcl_spawn_capture_binary_cancelable_measured(argv, bytes, 2, 3000,
+            NULL, NULL, &canceled, &out, &measure);
+        ASSERT(!r.ok && out.overflow && out.output_len == 2 && measure.reaped);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int test_spawn_exact_cancel(void)
+{
+    int failures = 0;
+    TEST("spawn: exact cancellable capture stops and reaps its child") {
+        const char *argv[] = {"/bin/sh", "-c", "printf started; exec sleep 5", NULL};
+        unsigned char bytes[32]; int polls = 0; bool canceled = false;
+        struct zcl_spawn_binary_observation out = {0}; struct zcl_spawn_measure measure = {0};
+        struct zcl_result r = zcl_spawn_capture_binary_cancelable_measured(argv, bytes, sizeof(bytes), 5000,
+            spawn_cancel_after_poll, &polls, &canceled, &out, &measure);
+        ASSERT(!r.ok && canceled && measure.launched && measure.reaped);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_spawn_binary_large(void)
 {
     int failures = 0;
@@ -890,6 +926,8 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_capture_inherited_pipe_exits_promptly();
     failures += test_spawn_capture_inherited_pipe_writing();
     failures += test_spawn_capture_cancel_kills();
+    failures += test_spawn_exact_cancelable();
+    failures += test_spawn_exact_cancel();
     failures += test_spawn_capture_echild_tolerant();
     failures += test_spawn_capture_echild_inherited_writer();
     failures += test_spawn_capture_truncates_oversized();

@@ -78,6 +78,15 @@ struct zcl_result zcl_tree_copy(const char *src, const char *dst,
  * Returns ZCL_OK or a zcl_result naming the path that could not be removed. */
 struct zcl_result zcl_tree_remove(const char *path);
 
+/* Empty only this retained, owned directory. Does not remove its root; refuses
+ * observed entry substitution and never follows symlinks. POSIX only. */
+struct zcl_result zcl_tree_remove_contents_fd(int root_fd);
+#if defined(ZCL_TESTING)
+/* Callback observes a named entry at phase 1 (after stat) or 2 (before unlink). */
+struct zcl_result zcl_test_tree_remove_contents_fd(int root_fd,
+    void (*hook)(void *, int, const char *, int), void *context);
+#endif
+
 /* Create `path` and any missing parent directories (mkdir -p semantics) with
  * mode `mode`. An already-existing directory is success. Returns ZCL_OK or a
  * zcl_result naming the component that failed. */

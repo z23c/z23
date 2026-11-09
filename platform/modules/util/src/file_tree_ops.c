@@ -43,6 +43,18 @@ struct zcl_result zcl_tree_copy(const char *src, const char *dst,
         "handle-bound no-reparse qualification");
 }
 
+struct zcl_result zcl_tree_remove_contents_fd(int root_fd)
+{
+    (void)root_fd;
+    return ZCL_ERR(-1, "zcl_tree_remove_contents_fd: Windows is unavailable");
+}
+
+#if defined(ZCL_TESTING)
+struct zcl_result zcl_test_tree_remove_contents_fd(int root_fd,
+    void (*hook)(void *, int, const char *, int), void *context)
+{ (void)hook; (void)context; return zcl_tree_remove_contents_fd(root_fd); }
+#endif
+
 struct zcl_result zcl_tree_remove(const char *path)
 {
     (void)path;
@@ -380,53 +392,74 @@ struct zcl_result zcl_tree_copy(const char *src, const char *dst,
     return r;
 }
 
-static struct zcl_result remove_dir(DIR *d, int depth, const char *disp);
+static bool tree_same_entry(const struct stat *a, const struct stat *b)
+{
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+        (a->st_mode & S_IFMT) == (b->st_mode & S_IFMT);
+}
+static bool tree_named_entry_is(int dfd, const char *name, const struct stat *expected, bool *gone)
+{
+    struct stat named; *gone = false;
+    if (fstatat(dfd, name, &named, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (errno == ENOENT) { *gone = true; return true; }
+        return false;
+    }
+    return tree_same_entry(expected, &named);
+}
 
+struct tree_walk_hook { void (*call)(void *, int, const char *, int); void *context; };
+static void tree_hook(struct tree_walk_hook *hook, int fd, const char *name, int phase)
+{ if (hook && hook->call) hook->call(hook->context, fd, name, phase); }
+static struct zcl_result remove_dir(DIR *d, int depth, const char *disp, struct tree_walk_hook *hook);
+
+static struct zcl_result remove_open_directory(DIR *cd, int dfd, const char *name,
+    const struct stat *opened, int depth, const char *child, struct tree_walk_hook *hook)
+{
+    struct zcl_result r = remove_dir(cd, depth + 1, child, hook); bool gone = false;
+    if (r.ok) tree_hook(hook, dfd, name, 2);
+    if (r.ok && !tree_named_entry_is(dfd, name, opened, &gone))
+        r = ZCL_ERR(-1, "directory identity changed: %s", child);
+    if (r.ok && !gone && unlinkat(dfd, name, AT_REMOVEDIR) != 0 && errno != ENOENT)
+        r = ZCL_ERR(-1, "rmdir failed: %s: %s", child, strerror(errno));
+    if (closedir(cd) != 0 && r.ok) r = ZCL_ERR(-1, "close failed: %s", child);
+    return r;
+}
+static struct zcl_result remove_directory_entry(int dfd, const char *name,
+    const struct stat *st, int depth, const char *disp, struct tree_walk_hook *hook)
+{
+    char child[PATH_MAX]; int n = snprintf(child, sizeof(child), "%s/%s", disp, name);
+    if (n <= 0 || (size_t)n >= sizeof(child)) return ZCL_ERR(-1, "path too long under: %s", disp);
+    int cfd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (cfd < 0) {
+        if (errno == ENOENT) return ZCL_OK;
+        return ZCL_ERR(-1, "open dir failed: %s: %s", child, strerror(errno));
+    }
+    struct stat opened;
+    if (fstat(cfd, &opened) != 0 || !tree_same_entry(st, &opened)) {
+        close(cfd); return ZCL_ERR(-1, "directory identity changed: %s", child);
+    }
+    DIR *cd = fdopendir(cfd);
+    if (!cd) { int e = errno; close(cfd); return ZCL_ERR(-1, "fdopendir failed: %s: %s", child, strerror(e)); }
+    return remove_open_directory(cd, dfd, name, &opened, depth, child, hook);
+}
 /* Remove one already-lstat'd entry without ever following a symlink. */
 static struct zcl_result remove_entry(int dfd, const char *name,
-                                      const struct stat *st, int depth,
-                                      const char *disp)
+    const struct stat *st, int depth, const char *disp, struct tree_walk_hook *hook)
 {
-    if (S_ISDIR(st->st_mode) && !S_ISLNK(st->st_mode)) {
-        char child[PATH_MAX];
-        int n = snprintf(child, sizeof(child), "%s/%s", disp, name);
-        if (n <= 0 || (size_t)n >= sizeof(child))
-            return ZCL_ERR(-1, "path too long under: %s", disp);
-
-        int cfd = openat(dfd, name,
-                         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        if (cfd < 0) {
-            if (errno == ENOENT)
-                return ZCL_OK;
-            return ZCL_ERR(-1, "open dir failed: %s: %s", child,
-                           strerror(errno));
-        }
-        DIR *cd = fdopendir(cfd);
-        if (!cd) {
-            int e = errno;
-            close(cfd);
-            return ZCL_ERR(-1, "fdopendir failed: %s: %s", child,
-                           strerror(e));
-        }
-        struct zcl_result r = remove_dir(cd, depth + 1, child);
-        closedir(cd);   /* also closes cfd */
-        if (!r.ok)
-            return r;
-        if (unlinkat(dfd, name, AT_REMOVEDIR) != 0 && errno != ENOENT)
-            return ZCL_ERR(-1, "rmdir failed: %s: %s", child,
-                           strerror(errno));
-        return ZCL_OK;
-    }
-
-    if (unlinkat(dfd, name, 0) != 0 && errno != ENOENT)
-        return ZCL_ERR(-1, "unlink failed: %s/%s: %s", disp, name,
-                       strerror(errno));
+    tree_hook(hook, dfd, name, 1);
+    if (S_ISDIR(st->st_mode) && !S_ISLNK(st->st_mode))
+        return remove_directory_entry(dfd, name, st, depth, disp, hook);
+    bool gone = false; tree_hook(hook, dfd, name, 2);
+    if (!tree_named_entry_is(dfd, name, st, &gone))
+        return ZCL_ERR(-1, "entry identity changed: %s/%s", disp, name);
+    if (!gone && unlinkat(dfd, name, 0) != 0 && errno != ENOENT)
+        return ZCL_ERR(-1, "unlink failed: %s/%s: %s", disp, name, strerror(errno));
     return ZCL_OK;
 }
 
 /* Empty and remove the directory whose open handle is `d`; `d` is closed by
  * the caller, the directory itself is rmdir'd by the caller. */
-static struct zcl_result remove_dir(DIR *d, int depth, const char *disp)
+static struct zcl_result remove_dir(DIR *d, int depth, const char *disp, struct tree_walk_hook *hook)
 {
     if (depth >= ZCL_TREE_MAX_DEPTH)
         return ZCL_ERR(-1, "max remove depth %d exceeded at: %s",
@@ -455,12 +488,41 @@ static struct zcl_result remove_dir(DIR *d, int depth, const char *disp)
         }
 
         /* A symlink is unlinked in place, never descended into. */
-        struct zcl_result r = remove_entry(dfd, name, &st, depth, disp);
+        struct zcl_result r = remove_entry(dfd, name, &st, depth, disp, hook);
         if (!r.ok)
             return r;
     }
     return ZCL_OK;
 }
+
+static struct zcl_result tree_remove_contents_fd(int root_fd, struct tree_walk_hook *hook)
+{
+    struct stat held, opened;
+    if (root_fd < 0 || fstat(root_fd, &held) != 0 || !S_ISDIR(held.st_mode))
+        return ZCL_ERR(-1, "invalid retained scratch directory");
+    /* Open a fresh file description, rather than dup()'s shared readdir offset. */
+    int fd = openat(root_fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0 || fstat(fd, &opened) != 0 || !tree_same_entry(&held, &opened)) {
+        if (fd >= 0) close(fd);
+        return ZCL_ERR(-1, "scratch directory identity changed");
+    }
+    DIR *d = fdopendir(fd);
+    if (!d) { close(fd); return ZCL_ERR(-1, "cannot enumerate scratch directory"); }
+    struct zcl_result r = remove_dir(d, 0, "owned scratch", hook);
+    if (closedir(d) != 0 && r.ok) return ZCL_ERR(-1, "cannot close scratch directory");
+    return r;
+}
+
+struct zcl_result zcl_tree_remove_contents_fd(int root_fd)
+{ return tree_remove_contents_fd(root_fd, NULL); }
+#if defined(ZCL_TESTING)
+struct zcl_result zcl_test_tree_remove_contents_fd(int root_fd,
+    void (*hook)(void *, int, const char *, int), void *context)
+{
+    struct tree_walk_hook h = {.call = hook, .context = context};
+    return tree_remove_contents_fd(root_fd, &h);
+}
+#endif
 
 struct zcl_result zcl_tree_remove(const char *path)
 {
@@ -493,7 +555,7 @@ struct zcl_result zcl_tree_remove(const char *path)
         close(fd);
         return ZCL_ERR(-1, "fdopendir failed: %s: %s", path, strerror(e));
     }
-    struct zcl_result r = remove_dir(d, 0, path);
+    struct zcl_result r = remove_dir(d, 0, path, NULL);
     closedir(d);   /* also closes fd */
     if (!r.ok)
         return r;

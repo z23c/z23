@@ -484,7 +484,7 @@ static bool bs_apps_frame(const struct fleet_board_post *p, char *out,
 {
     uint8_t wire[BS_APP_FRAME_MAX];
     size_t len = 0;
-    if (p->text_len > FLEET_BOARD_TEXT_MAX ||
+    if (!p || !memchr(p->room, 0, sizeof(p->room)) || p->text_len > FLEET_BOARD_TEXT_MAX ||
         p->scope != FLEET_BOARD_SCOPE_PUBLIC ||
         p->kind != FLEET_BOARD_KIND_OFFER || strcmp(p->room, "apps") != 0 ||
         fleet_board_post_check_time(p, now) != FLEET_BOARD_OK ||
@@ -511,6 +511,28 @@ static bool bs_apps_frames(const struct db_fleet_board_post *rows, int count,
     return true;
 }
 
+static size_t bs_apps_emit(const struct db_fleet_board_post *rows, int count, bool complete,
+    bool exact, bool head, int64_t now, char *body, uint8_t *response, size_t max)
+{
+    const char *missing = "{\"schema\":\"zcl.board_apps.v1\",\"error\":\"not_found\"}";
+    const char *unavailable = "{\"schema\":\"zcl.board_apps.v1\",\"error\":\"unavailable\"}";
+    size_t off = (size_t)snprintf(body, BS_APPS_BODY_MAX,
+        "{\"schema\":\"zcl.board_apps.v1\",\"version\":1,\"frames\":[");
+    if (complete) complete = bs_apps_frames(rows, count, body, &off, now);
+    size_t n;
+    if (!complete)
+        n = bs_apps_response("503 Service Unavailable", unavailable, head, response, max);
+    else if (exact && count == 0)
+        n = bs_apps_response("404 Not Found", missing, head, response, max);
+    else {
+        (void)snprintf(body + off, BS_APPS_BODY_MAX - off,
+                       "],\"incomplete\":%s}", !exact && count == BS_APPS_LIMIT ? "true" : "false");
+        n = bs_apps_response("200 OK", body, head, response, max);
+        if (!n) n = bs_apps_response("503 Service Unavailable", unavailable, head, response, max);
+    }
+    return n;
+}
+
 static size_t bs_apps_reply(struct node_db *ndb, const char *id, bool head,
                             uint8_t *response, size_t max)
 {
@@ -534,36 +556,80 @@ static size_t bs_apps_reply(struct node_db *ndb, const char *id, bool head,
     int64_t now = bs_now();
     int count = db_fleet_board_list_checked(ndb, &filter, now, rows,
                                             id ? 1u : BS_APPS_LIMIT, &complete);
-    size_t off = (size_t)snprintf(body, BS_APPS_BODY_MAX,
-        "{\"schema\":\"zcl.board_apps.v1\",\"version\":1,\"frames\":[");
-    if (complete)
-        complete = bs_apps_frames(rows, count, body, &off, now);
-    size_t n;
-    if (!complete)
-        n = bs_apps_response("503 Service Unavailable", unavailable, head, response, max);
-    else if (id && count == 0)
-        n = bs_apps_response("404 Not Found", missing, head, response, max);
-    else {
-        (void)snprintf(body + off, BS_APPS_BODY_MAX - off,
-                       "],\"incomplete\":%s}", !id && count == BS_APPS_LIMIT ? "true" : "false");
-        n = bs_apps_response("200 OK", body, head, response, max);
-        if (!n) n = bs_apps_response("503 Service Unavailable", unavailable, head, response, max);
-    }
+    size_t n = bs_apps_emit(rows, count, complete, id != NULL, head, now, body, response, max);
     free(body); free(rows);
     return n;
 }
 
+static bool bs_apps_request(const char *method, const char *path, const char *route,
+    size_t rlen, size_t body_len, bool *head, const char **id)
+{
+    *head = method && strcmp(method, "HEAD") == 0;
+    *id = route[14] ? route + 15 : NULL;
+    return (*head || (method && strcmp(method, "GET") == 0)) &&
+        !path[rlen] && !body_len && (!route[14] || route[14] == '/');
+}
 static size_t bs_apps_route(const char *method, const char *path,
                             const char *route, size_t rlen, size_t body_len,
                             uint8_t *response, size_t response_max)
 {
-    bool head = method && strcmp(method, "HEAD") == 0;
+    bool head; const char *id;
     const char *missing = "{\"schema\":\"zcl.board_apps.v1\",\"error\":\"not_found\"}";
-    if ((!head && (!method || strcmp(method, "GET") != 0)) ||
-        path[rlen] || body_len || (route[14] && route[14] != '/'))
+    if (!bs_apps_request(method, path, route, rlen, body_len, &head, &id))
         return bs_apps_response("404 Not Found", missing, head, response, response_max);
-    return bs_apps_reply(app_runtime_node_db(), route[14] ? route + 15 : NULL,
-                         head, response, response_max);
+    return bs_apps_reply(app_runtime_node_db(), id, head, response, response_max);
+}
+enum bs_single_state { BS_SINGLE_UNAVAILABLE, BS_SINGLE_EMPTY, BS_SINGLE_READY };
+static bool bs_single_target(const struct fleet_board_post *post, const char *id)
+{
+    if (!id) return true;
+    uint8_t wanted[32];
+    return bs_parse_post_id(id, wanted) && (!post || !memcmp(wanted, post->id, 32));
+}
+static bool bs_single_input_valid(const struct fleet_board_post *post, int64_t now)
+{
+    return post && now > 0 && now <= INT64_MAX - FLEET_BOARD_FUTURE_SKEW_MAX &&
+        post->created_at <= (uint64_t)INT64_MAX - post->ttl && memchr(post->room, 0, sizeof(post->room));
+}
+static enum bs_single_state bs_single_classify(const struct fleet_board_post *post, int64_t now)
+{
+    if (!bs_single_input_valid(post, now)) return BS_SINGLE_UNAVAILABLE;
+    if (post->scope != FLEET_BOARD_SCOPE_PUBLIC || post->kind != FLEET_BOARD_KIND_OFFER || strcmp(post->room, "apps"))
+        return BS_SINGLE_EMPTY;
+    if (fleet_board_post_verify(post) != FLEET_BOARD_OK) return BS_SINGLE_UNAVAILABLE;
+    enum fleet_board_result time = fleet_board_post_check_time(post, now);
+    if (time == FLEET_BOARD_ERR_EXPIRED) return BS_SINGLE_EMPTY;
+    return time == FLEET_BOARD_OK ? BS_SINGLE_READY : BS_SINGLE_UNAVAILABLE;
+}
+static size_t bs_apps_single(const struct fleet_board_post *post, const char *id,
+    bool head, int64_t now, uint8_t *response, size_t max)
+{
+    const char *missing = "{\"schema\":\"zcl.board_apps.v1\",\"error\":\"not_found\"}";
+    const char *unavailable = "{\"schema\":\"zcl.board_apps.v1\",\"error\":\"unavailable\"}";
+    if (!bs_single_target(post, id)) return bs_apps_response("404 Not Found", missing, head, response, max);
+    enum bs_single_state state = bs_single_classify(post, now);
+    if (state == BS_SINGLE_EMPTY && id) return bs_apps_response("404 Not Found", missing, head, response, max);
+    if (state == BS_SINGLE_UNAVAILABLE) return bs_apps_response("503 Service Unavailable", unavailable, head, response, max);
+    struct db_fleet_board_post *row = zcl_calloc(1, sizeof(*row), "board app single");
+    char *body = zcl_calloc(BS_APPS_BODY_MAX, 1, "board apps body");
+    if (!row || !body) { free(row); free(body); return bs_apps_response("503 Service Unavailable", unavailable, head, response, max); }
+    row->post = *post;
+    size_t n = bs_apps_emit(row, state == BS_SINGLE_READY ? 1 : 0, true, id != NULL,
+                            head, now, body, response, max);
+    free(row); free(body); return n;
+}
+size_t board_site_handle_app_post(const char *method, const char *path,
+    const uint8_t *body, size_t body_len, uint8_t *response, size_t response_max,
+    const struct fleet_board_post *post, int64_t now)
+{
+    (void)body;
+    if (!path || !response || strncmp(path, "/board/apps/v1", 14)) return 0;
+    char route[256]; size_t rlen = 0;
+    while (path[rlen] && path[rlen] != '?' && rlen < sizeof(route) - 1) { route[rlen] = path[rlen]; ++rlen; }
+    route[rlen] = 0; bool head; const char *id;
+    if (!bs_apps_request(method, path, route, rlen, body_len, &head, &id))
+        return bs_apps_response("404 Not Found", "{\"schema\":\"zcl.board_apps.v1\",\"error\":\"not_found\"}", head, response, response_max);
+    return bs_apps_single(post, id, head, now, response, response_max);
 }
 
 /* ── router ─────────────────────────────────────────────────────────── */

@@ -2333,13 +2333,14 @@ check-vendor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN) $(BIN_DIR)/z
 	@./build/bin/z23-lint check-tor-provenance
 
 # Reusable native presentation package. This deliberately has a tiny source
-# closure: fifteen project TUs plus pinned RGFW headers, with no node/app objects.
+# closure: presentation and utility sources plus the Linux clock, with no node/app objects.
 PRESENTATION_BUILD_DIR := build/presentation
 PRESENTATION_PACKAGE_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	-Icontexts/explorer/modules/presentation/include -Iplatform/modules/base/include \
-	-Iplatform/modules/util/include -Ivendor/x11/include
+	-Iplatform/modules/platform/include -Iplatform/modules/util/include -Ivendor/x11/include
 PRESENTATION_PACKAGE_SRCS := \
 	contexts/explorer/modules/presentation/src/presentation.c \
+	contexts/explorer/modules/presentation/src/presentation_bitmap.c \
 	contexts/explorer/modules/presentation/src/presentation_live_input.c \
 	contexts/explorer/modules/presentation/src/presentation_canvas_model.c \
 	contexts/explorer/modules/presentation/src/presentation_canvas_select.c \
@@ -2357,6 +2358,7 @@ PRESENTATION_PACKAGE_SRCS := \
 	platform/modules/base/src/safe_alloc.c
 PRESENTATION_PACKAGE_OBJS := \
 	$(PRESENTATION_BUILD_DIR)/presentation.o \
+	$(PRESENTATION_BUILD_DIR)/presentation_bitmap.o \
 	$(PRESENTATION_BUILD_DIR)/presentation_live_input.o \
 	$(PRESENTATION_BUILD_DIR)/presentation_canvas_model.o \
 	$(PRESENTATION_BUILD_DIR)/presentation_canvas_select.o \
@@ -2392,6 +2394,10 @@ PRESENTATION_VENDOR_INPUTS := \
 	$(wildcard vendor/x11/include/X11/extensions/*.h) \
 	tools/scripts/test_vendor_provenance.sh
 PRESENTATION_HOST_OS := $(shell uname -s 2>/dev/null)
+ifeq ($(PRESENTATION_HOST_OS),Linux)
+PRESENTATION_PACKAGE_SRCS += platform/modules/platform/src/clock.c
+PRESENTATION_PACKAGE_OBJS += $(PRESENTATION_BUILD_DIR)/clock.o
+endif
 ifeq ($(PRESENTATION_HOST_OS),Darwin)
 PRESENTATION_HOST_LIBS := -framework Cocoa -framework CoreGraphics \
 	-framework QuartzCore -framework CoreVideo
@@ -2417,6 +2423,7 @@ $(PRESENTATION_PROVENANCE_STAMP): $(PRESENTATION_VENDOR_INPUTS)
 
 $(PRESENTATION_BUILD_DIR)/presentation.o: \
 	contexts/explorer/modules/presentation/src/presentation.c \
+	contexts/explorer/modules/presentation/src/presentation_bitmap_internal.h \
 	contexts/explorer/modules/presentation/src/presentation_canvas_internal.h \
 	contexts/explorer/modules/presentation/src/presentation_focus_internal.h \
 	contexts/explorer/modules/presentation/src/presentation_live_input_internal.h \
@@ -2426,12 +2433,23 @@ $(PRESENTATION_BUILD_DIR)/presentation.o: \
 	contexts/explorer/modules/presentation/include/presentation/presentation.h \
 	contexts/explorer/modules/presentation/include/presentation/model_render.h \
 	platform/modules/util/include/util/png_writer.h \
+	platform/modules/platform/include/platform/time_compat.h \
+	platform/modules/platform/include/platform/clock.h \
 	vendor/rgfw/RGFW.h vendor/rgfw/XDL.h \
 	$(PRESENTATION_PROVENANCE_STAMP)
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
 	contexts/explorer/modules/presentation/src/presentation.c \
 		-o $(PRESENTATION_BUILD_DIR)/presentation.o
+
+$(PRESENTATION_BUILD_DIR)/presentation_bitmap.o: \
+	contexts/explorer/modules/presentation/src/presentation_bitmap.c \
+	contexts/explorer/modules/presentation/src/presentation_bitmap_internal.h \
+	contexts/explorer/modules/presentation/include/presentation/presentation.h \
+	platform/modules/util/include/util/png_writer.h \
+	platform/modules/base/include/base/serialize_le.h
+	@mkdir -p $(PRESENTATION_BUILD_DIR)
+	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c $< -o $@
 
 $(PRESENTATION_BUILD_DIR)/presentation_live_input.o: \
 	contexts/explorer/modules/presentation/src/presentation_live_input.c \
@@ -2568,6 +2586,14 @@ $(PRESENTATION_BUILD_DIR)/png_writer.o: \
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c $< -o $@
 
+$(PRESENTATION_BUILD_DIR)/clock.o: \
+	platform/modules/platform/src/clock.c \
+	platform/modules/platform/include/platform/clock.h \
+	platform/modules/util/include/util/log_macros.h \
+	platform/modules/base/include/base/log_macros.h
+	@mkdir -p $(PRESENTATION_BUILD_DIR)
+	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -D_POSIX_C_SOURCE=200809L -c $< -o $@
+
 $(PRESENTATION_BUILD_DIR)/safe_alloc.o: \
 	platform/modules/base/src/safe_alloc.c \
 	platform/modules/base/include/base/safe_alloc.h
@@ -2587,6 +2613,7 @@ presentation-live-smoke: $(PRESENTATION_BUILD_DIR)/live-redraw-test
 
 $(PRESENTATION_BUILD_DIR)/presentation-live-test.o: \
 	$(PRESENTATION_BUILD_DIR)/presentation.o \
+	contexts/explorer/modules/presentation/src/presentation_bitmap_internal.h \
 	contexts/explorer/modules/presentation/src/presentation_live_test_internal.h
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -DZCL_TESTING -c \
@@ -2678,6 +2705,7 @@ presentation-portability: presentation-demo
 			-pedantic -Icontexts/explorer/modules/presentation/include \
 			-Iplatform/modules/base/include -Iplatform/modules/util/include \
 			contexts/explorer/modules/presentation/src/presentation.c \
+			contexts/explorer/modules/presentation/src/presentation_bitmap.c \
 			contexts/explorer/modules/presentation/src/presentation_canvas_model.c \
 			contexts/explorer/modules/presentation/src/presentation_canvas_select.c \
 			contexts/explorer/modules/presentation/src/presentation_focus.c \

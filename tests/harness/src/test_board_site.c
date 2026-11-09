@@ -872,6 +872,75 @@ static int test_board_site_post_page_old_post(void)
     return failures;
 }
 
+static const char *bs_single(const char *method, const char *path, const struct fleet_board_post *post,
+    int64_t now, size_t body_len, size_t *len)
+{
+    size_t n = board_site_handle_app_post(method, path, NULL, body_len, g_resp, BS_RESP_CAP - 1, post, now);
+    g_resp[n] = 0; if (len) *len = n; return (const char *)g_resp;
+}
+static bool bs_single_decodes(const char *response, const struct fleet_board_post *post)
+{
+    const char *hex = strstr(response, "\"frames\":[\""); if (!hex) return false;
+    hex += strlen("\"frames\":[\""); const char *end = strchr(hex, '\"');
+    if (!end || (size_t)(end - hex) % 2u) return false;
+    size_t len = (size_t)(end - hex) / 2u;
+    uint8_t wire[FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES + 5];
+    char encoded[2 * sizeof(wire) + 1];
+    if (len > sizeof(wire)) return false;
+    memcpy(encoded, hex, len * 2u); encoded[len * 2u] = 0;
+    struct fleet_board_post decoded;
+    return zcl_hex_decode(encoded, wire, len) &&
+        fleet_board_frame_decode_post(wire, len, &decoded) == FLEET_BOARD_OK && !memcmp(decoded.id, post->id, 32);
+}
+static bool bs_single_post(struct fleet_board_post *post, int64_t now)
+{
+    uint8_t seed[32], pk[32]; bs_identity(7, seed, pk);
+    bs_compose(post, FLEET_BOARD_KIND_OFFER, FLEET_BOARD_SCOPE_PUBLIC, "apps", "app-host", "offer", now - 1, 1000);
+    return fleet_board_post_sign(post, seed, pk) == FLEET_BOARD_OK;
+}
+static int test_board_site_single_post(void)
+{
+    int failures = 0; struct fleet_board_post post; int64_t now = 1800000000;
+    char id[65], path[128]; size_t n;
+    TEST("single app post shares verified frame rendering and HEAD length") {
+        ASSERT(bs_single_post(&post, now)); fleet_board_id_to_hex(post.id, id);
+        snprintf(path, sizeof(path), "/board/apps/v1/%s", id);
+        const char *body = bs_single("GET", "/board/apps/v1", &post, now, 0, NULL);
+        ASSERT(bs_has(body, "200 OK") && bs_has(body, "\"incomplete\":false") && bs_single_decodes(body, &post));
+        const char *header = strstr(body, "Content-Length: "); ASSERT(header);
+        unsigned long length = strtoul(header + 16, NULL, 10);
+        body = bs_single("HEAD", path, &post, now, 0, &n); header = strstr(body, "Content-Length: ");
+        ASSERT(n && header && strtoul(header + 16, NULL, 10) == length && !bs_has(body, "\"frames\""));
+        ASSERT(bs_single_decodes(bs_single("GET", path, &post, now, 0, NULL), &post)); PASS();
+    }
+    TEST("single app post refuses wrong id, expired and malformed sources") {
+        ASSERT(bs_single_post(&post, now)); fleet_board_id_to_hex(post.id, id);
+        id[0] = id[0] == '0' ? '1' : '0'; snprintf(path, sizeof(path), "/board/apps/v1/%s", id);
+        ASSERT(bs_has(bs_single("GET", path, &post, now, 0, NULL), "404 Not Found"));
+        fleet_board_id_to_hex(post.id, id); snprintf(path, sizeof(path), "/board/apps/v1/%s", id);
+        ASSERT(bs_has(bs_single("GET", path, &post, now + 1001, 0, NULL), "404 Not Found"));
+        ASSERT(bs_has(bs_single("GET", "/board/apps/v1", &post, now + 1001, 0, NULL), "\"frames\":[]"));
+        post.scope = FLEET_BOARD_SCOPE_FLEET;
+        ASSERT(bs_has(bs_single("GET", path, &post, now, 0, NULL), "404 Not Found"));
+        ASSERT(bs_has(bs_single("GET", "/board/apps/v1", &post, now, 0, NULL), "\"frames\":[]"));
+        ASSERT(bs_single_post(&post, now)); post.signature[0] ^= 1;
+        ASSERT(bs_has(bs_single("GET", path, &post, now, 0, NULL), "503 Service Unavailable"));
+        ASSERT(bs_has(bs_single("GET", path, NULL, now, 0, NULL), "503 Service Unavailable"));
+        ASSERT(bs_single_post(&post, now)); memset(post.room, 'x', sizeof(post.room));
+        ASSERT(bs_has(bs_single("GET", path, &post, now, 0, NULL), "503 Service Unavailable"));
+        ASSERT(bs_has(bs_single("GET", path, &post, INT64_MAX, 0, NULL), "503 Service Unavailable")); PASS();
+    }
+    TEST("single app post fails closed on methods, body and query") {
+        ASSERT(bs_single_post(&post, now));
+        ASSERT(bs_has(bs_single("POST", "/board/apps/v1", &post, now, 0, NULL), "404 Not Found"));
+        ASSERT(bs_has(bs_single("GET", "/board/apps/v1?x=1", &post, now, 0, NULL), "404 Not Found"));
+        ASSERT(bs_has(bs_single("GET", "/board/apps/v1", &post, now, 1, NULL), "404 Not Found"));
+        ASSERT(bs_has(bs_single("GET", "/board/apps/v1/not-hex", &post, now, 0, NULL), "404 Not Found"));
+        ASSERT_EQ(board_site_handle_app_post("GET", "/other", NULL, 0, g_resp, sizeof(g_resp), &post, now), 0u); PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_board_site_apps(void)
 {
     int failures = 0;
@@ -1091,6 +1160,7 @@ int test_board_site(void)
     failures += test_board_site_post_page();
     failures += test_board_site_post_page_old_post();
     failures += test_board_site_apps();
+    failures += test_board_site_single_post();
     failures += test_board_site_wiki();
     failures += test_board_site_wiki_hardening();
     failures += test_board_site_wiki_root_route();

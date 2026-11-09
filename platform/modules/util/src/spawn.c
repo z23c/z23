@@ -1337,6 +1337,12 @@ int zcl_spawn_capture_cancelable_fd_measured(
 /* One exact capture for both stderr dispositions: the success predicate
  * and every observation field are the same, so only the child's stderr
  * changes hands. */
+#if !defined(_WIN32)
+static bool spawn_binary_complete(int rc, const struct zcl_spawn_binary_observation *out)
+{
+    return rc == 0 && out->exit_code == 0 && out->eof && !out->overflow && !out->timed_out && out->exit_observed;
+}
+#endif
 static struct zcl_result spawn_capture_binary_impl(
     const char *const argv[], void *buf, size_t cap, int timeout_ms,
     bool merge_stderr, struct zcl_spawn_binary_observation *out)
@@ -1353,11 +1359,32 @@ static struct zcl_result spawn_capture_binary_impl(
 #else
     int rc = spawn_capture_impl(argv, buf, cap, timeout_ms, NULL, NULL,
                                 NULL, NULL, merge_stderr, out, -1, NULL);
-    if (rc != 0 || out->exit_code != 0 || !out->eof || out->overflow || out->timed_out ||
-        !out->exit_observed)
+    if (!spawn_binary_complete(rc, out))
         return ZCL_ERR(-1, "spawn: incomplete binary capture (exit=%d eof=%d overflow=%d timeout=%d observed=%d)",
                        rc, out->eof, out->overflow, out->timed_out,
                        out->exit_observed);
+    return ZCL_OK;
+#endif
+}
+
+struct zcl_result zcl_spawn_capture_binary_cancelable_measured(
+    const char *const argv[], void *buf, size_t cap, int timeout_ms,
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
+    struct zcl_spawn_binary_observation *out, struct zcl_spawn_measure *measure)
+{
+    if (cancelled) *cancelled = false;
+    if (measure) memset(measure, 0, sizeof(*measure));
+    if (out) { memset(out, 0, sizeof(*out)); out->exit_code = -1; }
+    if (!out || !argv || !argv[0] || !buf || !cap || timeout_ms <= 0)
+        return ZCL_ERR(-1, "spawn: exact binary capture requires bounded inputs");
+#ifdef _WIN32
+    (void)should_cancel; (void)cancel_ctx;
+    return ZCL_ERR(-1, "spawn: Windows binary capture is unavailable");
+#else
+    int rc = spawn_capture_impl(argv, buf, cap, timeout_ms, should_cancel,
+        cancel_ctx, cancelled, NULL, false, out, -1, measure);
+    if (!spawn_binary_complete(rc, out) || (cancelled && *cancelled) || (measure && !measure->reaped))
+        return ZCL_ERR(-1, "spawn: incomplete cancellable binary capture");
     return ZCL_OK;
 #endif
 }

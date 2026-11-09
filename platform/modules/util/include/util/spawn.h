@@ -276,6 +276,12 @@ int zcl_spawn_capture_cancelable_measured(
     zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
     struct zcl_spawn_measure *measure);
 
+/* Exact bytes with cancellation, EOF/overflow observation and child accounting. */
+struct zcl_result zcl_spawn_capture_binary_cancelable_measured(
+    const char *const argv[], void *buf, size_t cap, int timeout_ms,
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
+    struct zcl_spawn_binary_observation *out, struct zcl_spawn_measure *measure);
+
 /* zcl_spawn_capture_cancelable_measured() with the child's stderr merged
  * into the captured stream, as zcl_spawn_capture_merged_observed() does.
  * `measure->pid` is set at launch, before `should_cancel` first runs, so the

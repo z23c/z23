@@ -36,6 +36,13 @@ size_t board_site_handle_request(const char *method, const char *path,
                                  uint8_t *response, size_t response_max,
                                  const char *datadir);
 
+/* Read-only app-only view of one caller-owned immutable post; does not use
+ * node DB. `now` is Unix seconds; the caller retains post for the call. */
+struct fleet_board_post;
+size_t board_site_handle_app_post(const char *method, const char *path,
+    const uint8_t *body, size_t body_len, uint8_t *response, size_t response_max,
+    const struct fleet_board_post *post, int64_t now);
+
 #ifdef ZCL_TESTING
 /* Pin the clock the pages list by (0 restores the real clock), so a test
  * can date its fixture posts in virtual time. */

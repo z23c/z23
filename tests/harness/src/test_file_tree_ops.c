@@ -641,6 +641,121 @@ static int test_depth_bound(void)
     return failures;
 }
 
+#if defined(ZCL_TESTING)
+struct fto_swap { int phase; bool done, file; dev_t dev; ino_t ino; };
+static void fto_swap_hook(void *context, int fd, const char *name, int phase)
+{
+    struct fto_swap *swap = context;
+    if (swap->done || phase != swap->phase || strcmp(name, "victim")) return;
+    if (renameat(fd, name, fd, "saved") != 0) return;
+    if (swap->file) {
+        int replacement = openat(fd, name, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (replacement < 0) return;
+        bool written = write(replacement, "safe", 4) == 4; close(replacement);
+        struct stat st;
+        if (written && fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+            swap->dev = st.st_dev; swap->ino = st.st_ino; swap->done = true;
+        }
+        return;
+    }
+    if (mkdirat(fd, name, 0700) != 0) return;
+    struct stat st;
+    if (fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) return;
+    swap->dev = st.st_dev; swap->ino = st.st_ino;
+    if (phase == 2) { swap->done = true; return; } /* deliberately empty */
+    int child = openat(fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (child < 0) return;
+    int sentinel = openat(child, "sentinel", O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (sentinel >= 0) { swap->done = write(sentinel, "safe", 4) == 4; close(sentinel); }
+    close(child);
+}
+struct fto_replace_paths { char root[1024], victim[1200], marker[1400], saved[1200], original[1400]; };
+static bool fto_replace_prepare(struct fto_replace_paths *p, bool file)
+{
+    if (!test_mkdtemp(p->root, sizeof(p->root), "fto_retained_swap")) return false;
+    if (snprintf(p->victim, sizeof(p->victim), "%s/victim", p->root) <= 0 ||
+        snprintf(p->marker, sizeof(p->marker), "%s/victim/sentinel", p->root) <= 0 ||
+        snprintf(p->saved, sizeof(p->saved), "%s/saved", p->root) <= 0 ||
+        snprintf(p->original, sizeof(p->original), "%s/victim/original", p->root) <= 0) return false;
+    return file ? fto_write(p->victim, "old") : mkdir(p->victim, 0700) == 0 && fto_write(p->original, "old");
+}
+static bool fto_replace_preserved(const struct fto_replace_paths *p, const struct fto_swap *swap,
+    const struct zcl_result *result)
+{
+    struct stat st; char bytes[16];
+    if (!swap->done || result->ok || lstat(p->victim, &st) || st.st_dev != swap->dev || st.st_ino != swap->ino ||
+        lstat(p->saved, &st)) return false;
+    if (swap->file) return fto_read(p->victim, bytes, sizeof(bytes)) && !strcmp(bytes, "safe");
+    if (swap->phase == 1) return fto_read(p->marker, bytes, sizeof(bytes)) && !strcmp(bytes, "safe");
+    return true;
+}
+static int fto_retained_replace(int phase, bool file)
+{
+    int failures = 0; struct fto_replace_paths paths = {0};
+    bool ok = fto_replace_prepare(&paths, file); int fd = ok ? open(paths.root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) : -1;
+    struct fto_swap swap = {.phase = phase, .file = file};
+    struct zcl_result result = fd >= 0 ? zcl_test_tree_remove_contents_fd(fd, fto_swap_hook, &swap) : ZCL_ERR(-1, "fixture");
+    ok = ok && fto_replace_preserved(&paths, &swap, &result);
+    if (fd >= 0) close(fd);
+    if (paths.root[0] && !zcl_tree_remove(paths.root).ok) ok = false;
+    TEST("retained tree refuses changed entry and preserves replacement") { ASSERT(ok); PASS(); } _test_next:;
+    return failures;
+}
+static bool fto_depth_prepare(char root[1024], char deep[1200], char file[1200])
+{
+    if (!test_mkdtemp(root, 1024, "fto_retained_depth")) return false;
+    if (snprintf(deep, 1200, "%s/deep", root) <= 0 || snprintf(file, 1200, "%s/file", root) <= 0) return false;
+    return fto_write(file, "x") && fto_make_deep_tree(deep);
+}
+static int fto_retained_depth(void)
+{
+    int failures = 0; char root[1024] = {0}, deep[1200] = {0}, file[1200] = {0};
+    bool ok = fto_depth_prepare(root, deep, file);
+    int fd = ok ? open(deep, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) : -1;
+    int regular = ok ? open(file, O_RDONLY | O_NOFOLLOW) : -1;
+    struct stat st;
+    ok = ok && fd >= 0 && regular >= 0 && !zcl_tree_remove_contents_fd(regular).ok &&
+        !zcl_tree_remove_contents_fd(fd).ok && fstat(fd, &st) == 0 && S_ISDIR(st.st_mode);
+    if (regular >= 0) close(regular);
+    if (fd >= 0) close(fd);
+    if (root[0]) { fto_rmdir_deep_chain(deep); if (!zcl_tree_remove(root).ok) ok = false; }
+    TEST("retained tree refuses non-directory descriptors and excess depth") { ASSERT(ok); PASS(); } _test_next:;
+    return failures;
+}
+struct fto_retained_paths { char root[1024], child[1200], foreign[1200], sentinel[1400], link[1200]; };
+static bool fto_retained_prepare(struct fto_retained_paths *p)
+{
+    if (!test_mkdtemp(p->root, sizeof(p->root), "fto_retained")) return false;
+    if (snprintf(p->child, sizeof(p->child), "%s/child", p->root) <= 0 ||
+        snprintf(p->foreign, sizeof(p->foreign), "%s/foreign", p->root) <= 0 ||
+        snprintf(p->sentinel, sizeof(p->sentinel), "%s/foreign/sentinel", p->root) <= 0 ||
+        snprintf(p->link, sizeof(p->link), "%s/child/link", p->root) <= 0) return false;
+    return mkdir(p->child, 0700) == 0 && mkdir(p->foreign, 0700) == 0 &&
+        fto_write(p->sentinel, "safe") && symlink(p->foreign, p->link) == 0;
+}
+static bool fto_advance_directory(int fd)
+{
+    int scan_fd = fd >= 0 ? dup(fd) : -1;
+    DIR *advanced = scan_fd >= 0 ? fdopendir(scan_fd) : NULL;
+    if (!advanced) { if (scan_fd >= 0) close(scan_fd); return false; }
+    while (readdir(advanced)) {} return closedir(advanced) == 0;
+}
+static int test_retained_tree(void)
+{
+    int failures = 0; struct fto_retained_paths paths = {0};
+    bool ok = fto_retained_prepare(&paths); int fd = ok ? open(paths.child, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) : -1;
+    ok = ok && fto_advance_directory(fd);
+    struct zcl_result r = fd >= 0 ? zcl_tree_remove_contents_fd(fd) : ZCL_ERR(-1, "fixture");
+    struct stat st; ok = ok && r.ok && lstat(paths.link, &st) != 0 && errno == ENOENT &&
+        lstat(paths.sentinel, &st) == 0 && !zcl_tree_remove_contents_fd(-1).ok;
+    if (fd >= 0) close(fd);
+    if (paths.root[0] && !zcl_tree_remove(paths.root).ok) ok = false;
+    TEST("retained tree starts at root despite advanced offset and never follows a link") { ASSERT(ok); PASS(); } _test_next:;
+    failures += fto_retained_replace(1, false); failures += fto_retained_replace(2, false);
+    failures += fto_retained_replace(2, true); failures += fto_retained_depth(); return failures;
+}
+#endif
+
 static int test_file_tree_ops_platform_arm(void)
 {
     int failures = 0;
@@ -658,6 +773,9 @@ static int test_file_tree_ops_platform_arm(void)
     failures += test_remove_and_enoent();
     failures += test_unwritable_dest();
     failures += test_depth_bound();
+#if defined(ZCL_TESTING)
+    failures += test_retained_tree();
+#endif
 
     return failures;
 }

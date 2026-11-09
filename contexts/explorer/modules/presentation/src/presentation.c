@@ -9,9 +9,8 @@
 #include "presentation_focus_internal.h"
 #include "presentation_live_input_internal.h"
 #include "presentation_form_internal.h"
+#include "presentation_bitmap_internal.h"
 #include "presentation_validate_internal.h"
-#include "util/png_writer.h"
-#include "base/serialize_le.h"
 
 #if defined(__linux__)
 /* Not static: vendor/rgfw/RGFW.h's RGFW_XHandleClipboardSelection is an
@@ -38,6 +37,11 @@ int present_x11_clipboard_write_target(
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#if defined(__linux__)
+#include <poll.h>
+#include <errno.h>
+#include "platform/time_compat.h"
+#endif
 
 /* RGFW is private implementation detail. These switches keep graphics on the
  * CPU, avoid OpenGL, and on Linux dynamically load the system X11 API instead
@@ -84,72 +88,6 @@ int present_x11_clipboard_write_target(
 #pragma GCC diagnostic pop
 #endif
 
-bool zcl_present_bitmap_encode_bmp_v1(
-    const struct zcl_present_window_v1 *page,
-    uint8_t *output, size_t output_cap, size_t *written)
-{
-    if (!page || !written || !page->pixels || page->width == 0 ||
-        page->height == 0 ||
-        (page->pixel_format != ZCL_PRESENT_RGB8 &&
-         page->pixel_format != ZCL_PRESENT_RGBA8))
-        return false;
-    uint64_t row_bytes = ((uint64_t)page->width * 3u + 3u) & ~UINT64_C(3);
-    uint64_t pixel_bytes = row_bytes * page->height;
-    uint64_t total = 54u + pixel_bytes;
-    if (row_bytes > SIZE_MAX || total > SIZE_MAX || total > UINT32_MAX)
-        return false;
-    *written = (size_t)total;
-    if (!output) return true;
-    if (output_cap < (size_t)total) return false;
-    uint8_t *bmp = output;
-    memset(bmp, 0, (size_t)total);
-    bmp[0] = 'B';
-    bmp[1] = 'M';
-    zcl_write_u32_le(bmp + 2, (uint32_t)total);
-    zcl_write_u32_le(bmp + 10, 54u);
-    zcl_write_u32_le(bmp + 14, 40u);
-    zcl_write_u32_le(bmp + 18, page->width);
-    zcl_write_u32_le(bmp + 22, page->height);
-    zcl_write_u16_le(bmp + 26, 1u);
-    zcl_write_u16_le(bmp + 28, 24u);
-    zcl_write_u32_le(bmp + 34, (uint32_t)pixel_bytes);
-    uint32_t channels = (uint32_t)page->pixel_format;
-    for (uint32_t y = 0; y < page->height; y++) {
-        uint32_t source_y = page->height - 1u - y;
-        const uint8_t *source = page->pixels +
-            (size_t)source_y * page->width * channels;
-        uint8_t *target = bmp + 54u + (size_t)y * (size_t)row_bytes;
-        for (uint32_t x = 0; x < page->width; x++) {
-            target[x * 3u] = source[x * channels + 2u];
-            target[x * 3u + 1u] = source[x * channels + 1u];
-            target[x * 3u + 2u] = source[x * channels];
-        }
-    }
-    return true;
-}
-
-#if defined(_WIN32) || defined(__linux__)
-static bool present_bmp_encode(
-    const struct zcl_present_window_v1 *page,
-    uint8_t **encoded, size_t *encoded_len)
-{
-    size_t required = 0;
-    if (!encoded || !encoded_len ||
-        !zcl_present_bitmap_encode_bmp_v1(
-            page, NULL, 0u, &required))
-        return false;
-    uint8_t *bmp = malloc(required); // raw-alloc-ok:standalone-presentation-package
-    if (!bmp) return false;
-    if (!zcl_present_bitmap_encode_bmp_v1(
-            page, bmp, required, encoded_len)) {
-        free(bmp);
-        return false;
-    }
-    *encoded = bmp;
-    return true;
-}
-#endif
-
 #if defined(__linux__)
 static uint8_t *present_x11_clipboard_bmp;
 static size_t present_x11_clipboard_bmp_len;
@@ -192,33 +130,6 @@ int present_x11_clipboard_write_target(
     return 1;
 }
 #endif
-
-static bool present_png_encode(
-    const struct zcl_present_window_v1 *page,
-    uint8_t **encoded, size_t *encoded_len)
-{
-    size_t required = 0;
-    bool sized = page && encoded && encoded_len &&
-        (page->pixel_format == ZCL_PRESENT_RGB8
-            ? png_encode_rgb(page->pixels, page->width, page->height,
-                             NULL, 0u, &required)
-            : png_encode_rgba(page->pixels, page->width, page->height,
-                              NULL, 0u, &required));
-    if (!sized) return false;
-    uint8_t *png = malloc(required); // raw-alloc-ok:standalone-presentation-package
-    if (!png) return false;
-    bool ok = page->pixel_format == ZCL_PRESENT_RGB8
-        ? png_encode_rgb(page->pixels, page->width, page->height,
-                         png, required, encoded_len)
-        : png_encode_rgba(page->pixels, page->width, page->height,
-                          png, required, encoded_len);
-    if (!ok) {
-        free(png);
-        return false;
-    }
-    *encoded = png;
-    return true;
-}
 
 #if defined(_WIN32)
 static bool present_clipboard_write_win32(
@@ -377,58 +288,6 @@ static void present_set_linux_desktop_identity(RGFW_window *window)
     XFlush(display);
 }
 #endif
-
-static bool present_scale_bitmap(const struct zcl_present_window_v1 *request,
-                                 i32 target_width, i32 target_height,
-                                 uint8_t **out)
-{
-    *out = NULL;
-    if (target_width <= 0 || target_height <= 0 ||
-        target_width > 4096 || target_height > 4096)
-        return false;
-    uint32_t channels = (uint32_t)request->pixel_format;
-    uint64_t bytes = (uint64_t)(uint32_t)target_width *
-                     (uint32_t)target_height * channels;
-    if (bytes == 0 || bytes > SIZE_MAX) return false;
-    uint8_t *pixels = malloc((size_t)bytes); // raw-alloc-ok:standalone-presentation-package
-    if (!pixels) return false;
-    for (uint64_t i = 0; i < bytes; i += channels) {
-        pixels[i] = 0x20;
-        pixels[i + 1u] = 0x20;
-        pixels[i + 2u] = 0x22;
-        if (channels == 4u) pixels[i + 3u] = 0xff;
-    }
-
-    uint32_t draw_width = (uint32_t)target_width;
-    uint32_t draw_height = (uint32_t)((uint64_t)draw_width *
-                                      request->height / request->width);
-    if (draw_height > (uint32_t)target_height) {
-        draw_height = (uint32_t)target_height;
-        draw_width = (uint32_t)((uint64_t)draw_height *
-                                request->width / request->height);
-    }
-    if (draw_width == 0 || draw_height == 0) {
-        free(pixels);
-        return false;
-    }
-    uint32_t x0 = ((uint32_t)target_width - draw_width) / 2u;
-    uint32_t y0 = ((uint32_t)target_height - draw_height) / 2u;
-    for (uint32_t y = 0; y < draw_height; y++) {
-        uint32_t source_y = (uint32_t)((uint64_t)y * request->height /
-                                       draw_height);
-        for (uint32_t x = 0; x < draw_width; x++) {
-            uint32_t source_x = (uint32_t)((uint64_t)x * request->width /
-                                           draw_width);
-            size_t source = ((size_t)source_y * request->width + source_x) *
-                            channels;
-            size_t target = ((size_t)(y0 + y) * (uint32_t)target_width +
-                             x0 + x) * channels;
-            memcpy(pixels + target, request->pixels + source, channels);
-        }
-    }
-    *out = pixels;
-    return true;
-}
 
 static bool present_pages_validate(
     const struct zcl_present_window_pages_v1 *request,
@@ -1088,11 +947,132 @@ static bool present_pages_tab_key(struct present_pages_run *run,
     return true;
 }
 
+/* Clipboard read is explicit user action; no text is changed on refusal. */
+#if (defined(__linux__) && defined(RGFW_X11)) || defined(__APPLE__)
+static bool present_paste_ascii(const char *bytes, size_t len,
+                                struct zcl_present_window_form_field_v1 *field)
+{
+    size_t prior = strlen(field->value);
+    if (!len || len > ZCL_PRESENT_WINDOW_FORM_VALUE_MAX - prior ||
+        (field->flags & ZCL_PRESENT_WINDOW_FORM_READ_ONLY)) return false;
+    for (size_t i = 0; i < len; i++)
+        if ((unsigned char)bytes[i] < 0x20u || (unsigned char)bytes[i] > 0x7eu) return false;
+    memcpy(field->value + prior, bytes, len);
+    field->value[prior + len] = 0;
+    return true;
+}
+#endif
+#if defined(__linux__) && defined(RGFW_X11)
+static bool present_x11_paste_wait(Display *d, Window w, Atom selection,
+                                   Atom target, Atom property)
+{
+    int64_t start = platform_time_monotonic_ms();
+    if (start <= 0 || start > INT64_MAX - 1000) return false;
+    int64_t deadline = start + 1000;
+    XConvertSelection(d, selection, target, property, w, CurrentTime);
+    XFlush(d);
+    for (;;) {
+        while (XPending(d)) {
+            int64_t now = platform_time_monotonic_ms();
+            if (now <= 0 || now >= deadline) return false;
+            XEvent e; XNextEvent(d, &e);
+            if (e.type == SelectionNotify && e.xselection.requestor == w &&
+                e.xselection.selection == selection && e.xselection.target == target)
+                return e.xselection.property == property;
+        }
+        int64_t now = platform_time_monotonic_ms();
+        if (now <= 0 || now >= deadline) return false;
+        struct pollfd p = {.fd = ConnectionNumber(d), .events = POLLIN};
+        int wait = (int)(deadline - now);
+        int n = poll(&p, 1, wait);
+        if (n < 0 && errno != EINTR) return false;
+    }
+}
+static bool present_x11_paste_own(struct zcl_present_window_form_field_v1 *field)
+{
+    RGFW_info *info = RGFW_getInfo();
+    if (!info || !info->display || !info->clipboard || !info->clipboard_len) return false;
+    Atom selection = XInternAtom(info->display, "CLIPBOARD", False);
+    if (XGetSelectionOwner(info->display, selection) != info->helperWindow) return false;
+    size_t len = info->clipboard_len - 1u;
+    char bytes[ZCL_PRESENT_WINDOW_FORM_VALUE_MAX + 1u];
+    if (len > ZCL_PRESENT_WINDOW_FORM_VALUE_MAX) return false;
+    memcpy(bytes, info->clipboard, len);
+    if (XGetSelectionOwner(info->display, selection) != info->helperWindow) return false;
+    return present_paste_ascii(bytes, len, field);
+}
+static bool present_x11_paste_external(struct zcl_present_window_form_field_v1 *field)
+{
+    Display *d = XOpenDisplay(NULL);
+    if (!d) return false;
+    Window w = XCreateWindow(d, DefaultRootWindow(d), 0, 0, 1, 1, 0,
+                             CopyFromParent, InputOutput, CopyFromParent, 0, NULL);
+    Atom selection = XInternAtom(d, "CLIPBOARD", False);
+    Atom target = XInternAtom(d, "UTF8_STRING", False);
+    Atom property = XInternAtom(d, "Z23_FORM_PASTE", False);
+    bool ok = w && XGetSelectionOwner(d, selection) != None &&
+              present_x11_paste_wait(d, w, selection, target, property);
+    Atom actual = None; int format = 0; unsigned long n = 0, remaining = 0;
+    unsigned char *bytes = NULL;
+    if (ok) {
+        int rc = XGetWindowProperty(d, w, property, 0, 65, True, target,
+                                    &actual, &format, &n, &remaining, &bytes);
+        ok = rc == Success && actual == target && format == 8 && !remaining &&
+             n <= ZCL_PRESENT_WINDOW_FORM_VALUE_MAX && bytes &&
+             present_paste_ascii((const char *)bytes, (size_t)n, field);
+    }
+    if (bytes) XFree(bytes);
+    if (w) XDestroyWindow(d, w);
+    XCloseDisplay(d);
+    return ok;
+}
+#endif
+#if defined(__linux__) && defined(RGFW_X11)
+static bool present_x11_paste(struct zcl_present_window_form_field_v1 *field)
+{
+#if defined(RGFW_WAYLAND)
+    if (RGFW_usingWayland()) return false;
+#endif
+    RGFW_info *info = RGFW_getInfo();
+    if (!info || !info->display) return false;
+    Atom selection = XInternAtom(info->display, "CLIPBOARD", False);
+    if (XGetSelectionOwner(info->display, selection) == info->helperWindow)
+        return present_x11_paste_own(field);
+    return present_x11_paste_external(field);
+}
+#endif
+#if defined(__APPLE__)
+static bool present_macos_paste(struct zcl_present_window_form_field_v1 *field)
+{
+    const char *bytes = NSPasteboard_stringForType(NSPasteboard_generalPasteboard(),
+                                                    NSPasteboardTypeString, NULL);
+    if (!bytes) return false;
+    size_t len = strnlen(bytes, ZCL_PRESENT_WINDOW_FORM_VALUE_MAX + 1u);
+    return len <= ZCL_PRESENT_WINDOW_FORM_VALUE_MAX && present_paste_ascii(bytes, len, field);
+}
+#endif
+
+static bool present_form_paste(struct zcl_present_window_form_field_v1 *field)
+{
+#if defined(__linux__) && defined(RGFW_X11)
+    return present_x11_paste(field);
+#elif defined(__APPLE__)
+    return present_macos_paste(field);
+#else
+    (void)field; return false;
+#endif
+}
+
 static bool present_pages_form_edit(struct present_pages_run *run,
     const RGFW_event *event)
 {
     bool changed = false;
-    if (event->key.value == RGFW_return) {
+    if (event->key.value == RGFW_v &&
+        (event->key.mod & (RGFW_modControl | RGFW_modSuper)) &&
+        !(event->key.mod & RGFW_modAlt)) {
+        changed = present_form_paste(&run->form->fields[run->focused_control]);
+        if (changed) run->required_invalid = false;
+    } else if (event->key.value == RGFW_return) {
         uint32_t next_control = run->focused_control;
         if (zcl_present_window_form_focus_step_v1(
                 run->form, run->action_count, run->focused_control, 1,
@@ -1114,6 +1094,24 @@ static bool present_pages_form_edit(struct present_pages_run *run,
     return changed;
 }
 
+#if defined(ZCL_TESTING)
+bool zcl_present_test_form_paste(struct zcl_present_window_form_field_v1 *field)
+{
+    if (!field) return false;
+    struct zcl_present_window_form_v1 form = {.struct_size = sizeof(form),
+        .abi_version = ZCL_PRESENT_ABI_V1, .field_count = 1};
+    form.fields[0] = *field;
+    struct present_pages_run run = {.form = &form, .focused_control = 0};
+    RGFW_event event = {0}; event.type = RGFW_keyPressed; event.key.value = RGFW_v;
+#if defined(__APPLE__)
+    event.key.mod = RGFW_modSuper;
+#else
+    event.key.mod = RGFW_modControl;
+#endif
+    bool changed = present_pages_form_edit(&run, &event);
+    *field = form.fields[0]; return changed;
+}
+#endif
 static bool present_pages_form_key(struct present_pages_run *run,
     const RGFW_event *event)
 {
