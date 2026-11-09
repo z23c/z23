@@ -110,6 +110,13 @@ out:
     return s;
 }
 
+static bool owner_clean(const struct platform_supervised_process *p,
+                        enum platform_supervised_state state, bool observation_failed)
+{
+    return !observation_failed && state == PLATFORM_SUPERVISED_CLEAN &&
+           p->observation.engine_exit_observed && p->observation.no_children && p->supervisor_pid < 0;
+}
+
 static int finish_owned(struct platform_supervised_process *p)
 {
     enum platform_supervised_state s = PLATFORM_SUPERVISED_RUNNING;
@@ -126,8 +133,7 @@ static int finish_owned(struct platform_supervised_process *p)
         if (n > 0) stop = true;
     }
     if (p->supervisor_pid >= 0) s = stop_until_reaped(p);
-    if (observation_failed || s != PLATFORM_SUPERVISED_CLEAN || !p->observation.engine_exit_observed ||
-        !p->observation.no_children || p->supervisor_pid >= 0) return 5;
+    if (!owner_clean(p, s, observation_failed)) return 5;
     return printf("DONE CLEAN %d\n", p->observation.engine_wait_status) < 0 || fflush(stdout) != 0 ? 6 : 0;
 }
 

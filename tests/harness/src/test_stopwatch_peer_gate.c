@@ -390,17 +390,23 @@ static int spg_tree_leaf(struct spg_tree *t)
     return ok ? platform_supervised_fixture_pidfd_open(leaf) : -1;
 }
 
-static bool spg_tree_finish(struct spg_tree *t, int mode, int leaf_fd)
+static bool spg_tree_release(struct spg_tree *t, int mode)
 {
-    char done[128];
-    bool ok = leaf_fd >= 0;
-    if (mode == 0) ok = write(t->control[1], "S", 1) == 1 && ok;
+    bool ok = true;
+    if (mode == 0) ok = write(t->control[1], "S", 1) == 1;
     if (mode == 2) {
         int release = open(t->fifo, O_WRONLY | O_NONBLOCK);
         ok = release >= 0 && write(release, "R", 1) == 1 && ok;
         if (release >= 0) close(release);
     }
     if (mode == 1) { close(t->control[1]); t->control[1] = -1; }
+    return ok;
+}
+
+static bool spg_tree_finish(struct spg_tree *t, int mode, int leaf_fd)
+{
+    char done[128];
+    bool ok = spg_tree_release(t, mode) && leaf_fd >= 0;
     bool got_done = spg_line(t->result[0], done, sizeof(done));
     if (t->control[1] >= 0) close(t->control[1]);
     struct pollfd exited = {leaf_fd, POLLIN, 0};
@@ -470,6 +476,13 @@ static bool spg_wait_signal_marker(int events)
     return false;
 }
 
+static bool spg_signal_child(pid_t child, int sig)
+{
+    siginfo_t info = {0};
+    return child > 0 && waitid(P_PID, (id_t)child, &info, WEXITED | WNOHANG | WNOWAIT) == 0 &&
+           !info.si_pid && kill(child, sig) == 0;
+}
+
 /* The unreaped direct child anchors this signal; no process-name lookup. */
 static int spg_interrupt(const char *const argv[], const char *dir, char *out, size_t cap, int sig)
 {
@@ -487,9 +500,7 @@ static int spg_interrupt(const char *const argv[], const char *dir, char *out, s
         _exit(127);
     }
     bool ready = child > 0 && spg_wait_signal_marker(events);
-    siginfo_t info = {0};
-    bool live = child > 0 && waitid(P_PID, (id_t)child, &info, WEXITED | WNOHANG | WNOWAIT) == 0 && !info.si_pid;
-    bool sent = live && kill(child, sig) == 0;
+    bool sent = spg_signal_child(child, sig);
     int status = -1;
     if (child > 0) (void)waitpid(child, &status, 0);
     (void)lseek(log, 0, SEEK_SET);
