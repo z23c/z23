@@ -13,6 +13,9 @@ typedef bool (*app_get_stage_consumer)(void *context, const char *staged_path,
  * pin and repeatedly advertise this original carrier. */
 bool app_get_stage_consume(const struct zcl_app_offer_row *selected, const char *datadir,
     app_get_stage_consumer consumer, void *context, struct zcl_command_reply *reply);
+bool app_get_stage_consume_progress(const struct zcl_app_offer_row *selected, const char *datadir,
+    app_get_stage_consumer consumer, void *context, struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *presenter_context);
 /* Preserve any confirmed hosting identity if its owner-facing result cannot be shown. */
 void app_get_host_result_unavailable(struct zcl_command_reply *reply);
 enum app_get_rebuild_state { APP_GET_REBUILD_INVALID, APP_GET_REBUILD_CACHED, APP_GET_REBUILD_FRESH };

@@ -195,7 +195,7 @@ static bool ad_catalog(struct discover *d, struct zcl_command_reply *reply)
 }
 static bool ad_review(struct discover *d, struct zcl_command_reply *reply)
 {
-    if (!app_get_stage_consume(&d->rows[d->index], d->datadir, ad_consume, d, reply)) {
+    if (!app_get_stage_consume_progress(&d->rows[d->index], d->datadir, ad_consume, d, reply, d->receive_presenter, d->context)) {
         (void)ad_error(d, reply->error.message, false);
         return false;
     }

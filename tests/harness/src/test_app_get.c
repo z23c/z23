@@ -32,6 +32,7 @@
 #include "command/native_app_front_door.h"
 #include "command/native_app_offer.h"
 #include "command/native_app_get_stage.h"
+#include "command/native_app_fetch_progress.h"
 #include "command/native_app_network.h"
 #include "command/native_app_discover.h"
 #include "command/app_selection.h"
@@ -71,6 +72,7 @@ int test_app_get(void)
 #include <glob.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -132,6 +134,10 @@ struct tag_stub {
 };
 
 static struct tag_stub g_tag;
+static bool tag_require_fetch_progress;
+static atomic_bool tag_fetch_progress_seen;
+static atomic_bool tag_fetch_progress_release;
+static atomic_bool tag_fetch_progress_entered, tag_fetch_progress_timeout;
 static int g_tag_rpc_mode;
 static bool tag_capture_signed_post(struct zcl_command_reply *out);
 
@@ -311,8 +317,19 @@ static bool tag_post_capture(const struct json_value *in,
                             "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d");
 }
 
+static void tag_wait_fetch_progress(void)
+{
+    if (tag_require_fetch_progress) {
+        atomic_store(&tag_fetch_progress_entered, true);
+        int64_t end = platform_time_monotonic_ms() + 30000;
+        while (!atomic_load(&tag_fetch_progress_release) && platform_time_monotonic_ms() < end)
+            platform_sleep_ms(1);
+        if (!atomic_load(&tag_fetch_progress_release)) atomic_store(&tag_fetch_progress_timeout, true);
+    }
+}
 static bool tag_fetch(const struct json_value *in, struct zcl_command_reply *out)
 {
+    tag_wait_fetch_progress();
     g_tag.fetches++;
     (void)snprintf(g_tag.fetch_root, sizeof(g_tag.fetch_root), "%s",
                    tag_in(in, "root"));
@@ -1924,7 +1941,7 @@ static int tag_stage_unsafe_parent(struct tag_world *w)
 struct tag_discover {
     int cards, receive, home, errors, detail, browser;
     bool keep, kept, cleanup_swap, oversized_share, fail_error_view, recovery_shown, host_original, host_prompted, host_identity, fail_host_result;
-    bool report_rebuild, report_prompted, close_keep, report_result;
+    bool report_rebuild, report_prompted, close_keep, report_result, fetch_close, fetch_presenter_fail;
     bool cancel_after_error, share_canceled;
     struct zcl_command_reply *reply; char first_result[8192], image[65]; long pid; uint64_t start;
     struct tag_consumer swap;
@@ -2109,12 +2126,35 @@ static bool tag_discover_report_choice(struct tag_discover *d, const struct zcl_
     struct zcl_present_window_event_v1 event = {.outcome = ZCL_PRESENT_WINDOW_DISMISSED};
     live->owner.update(live->owner.context, &event, true, &redraw, &close); return close;
 }
+static bool tag_fetch_present(struct tag_discover *d, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_live_view_v1 *live)
+{
+        if (!strstr(model->summary, "Downloading and checking")) return false;
+        if (tag_require_fetch_progress) {
+            int64_t end = platform_time_monotonic_ms() + 30000;
+            while (!atomic_load(&tag_fetch_progress_entered) && platform_time_monotonic_ms() < end) platform_sleep_ms(1);
+            if (!atomic_load(&tag_fetch_progress_entered)) { atomic_store(&tag_fetch_progress_release, true); return false; }
+        }
+        atomic_store(&tag_fetch_progress_seen, true);
+        bool redraw = false, close = false;
+        if (d->fetch_close) {
+            live->owner.update(live->owner.context, NULL, true, &redraw, &close);
+            if (close || !redraw || !strstr(model->summary, "Waiting for the current download")) {
+                atomic_store(&tag_fetch_progress_release, true); return false;
+            }
+        }
+        atomic_store(&tag_fetch_progress_release, true);
+        if (d->fetch_presenter_fail) return false;
+        while (!close) { live->owner.update(live->owner.context, NULL, false, &redraw, &close); if (!close) platform_sleep_ms(1); }
+        return true;
+}
 static bool tag_discover_receive(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
     char *why, size_t cap)
 {
     struct tag_discover *d = context; (void)pages;
     if (!zcl_present_model_validate_v1(model, why, cap)) return false;
+    if (!strcmp(model->request_id, "discover-fetch-progress")) return tag_fetch_present(d, model, live);
     if (d->fail_host_result && !strcmp(model->request_id, "discover-host-result")) return false;
     if (!strcmp(model->request_id, "discover-rebuild-result")) d->report_result = true;
     if (!strcmp(model->request_id, "discover-report-rebuild")) return tag_discover_report_choice(d, model, live, why, cap);
@@ -2134,6 +2174,98 @@ static bool tag_discover_receive(void *context, const struct zcl_present_model_v
     struct zcl_present_window_event_v1 event = {.outcome = ZCL_PRESENT_WINDOW_DISMISSED};
     live->owner.update(live->owner.context, &event, true, &redraw, &close); return close;
 }
+static int tag_discover_fetch_close(struct tag_world *w)
+{
+    int failures = 0; struct zcl_command_reply reply; struct tag_discover d = {0};
+    TEST("Closing a pending Discover fetch waits, cleans up and never starts Receive") {
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        atomic_store(&tag_fetch_progress_seen, false); atomic_store(&tag_fetch_progress_release, false); atomic_store(&tag_fetch_progress_entered, false); atomic_store(&tag_fetch_progress_timeout, false);
+        tag_require_fetch_progress = true; d.fetch_close = true;
+        int offers = g_tag.offers, posts = g_tag.posts;
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        (void)app_discover_run(w->j.b_datadir, tag_discover_card, tag_discover_receive, &d, &reply, NULL);
+        tag_require_fetch_progress = false;
+        ASSERT(atomic_load(&tag_fetch_progress_seen)); ASSERT(!atomic_load(&tag_fetch_progress_timeout)); ASSERT_EQ(d.receive, 0);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT(!strcmp(zcl_package_copy_str(&reply.data, "status"), "canceled"));
+        ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.posts, posts);
+        ASSERT_EQ(tag_glob(w->j.b_datadir, ".app-get-*"), 0u);
+        zcl_command_reply_free(&reply); PASS();
+    }
+    TEST("A failed fetch progress presenter waits for worker cleanup and refuses Receive") {
+        ASSERT(tag_board_variant(w, NULL, NULL, false)); memset(&d, 0, sizeof(d));
+        atomic_store(&tag_fetch_progress_seen, false); atomic_store(&tag_fetch_progress_release, false); atomic_store(&tag_fetch_progress_entered, false); atomic_store(&tag_fetch_progress_timeout, false);
+        tag_require_fetch_progress = true; d.fetch_presenter_fail = true;
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        (void)app_discover_run(w->j.b_datadir, tag_discover_card, tag_discover_receive, &d, &reply, NULL);
+        tag_require_fetch_progress = false;
+        ASSERT(atomic_load(&tag_fetch_progress_seen)); ASSERT(!atomic_load(&tag_fetch_progress_timeout)); ASSERT_EQ(d.receive, 0);
+        ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT_EQ(tag_glob(w->j.b_datadir, ".app-get-*"), 0u);
+        zcl_command_reply_free(&reply); PASS();
+    }
+    TEST("A failed selected carrier fetch reports failure without Receive or staging") {
+        ASSERT(tag_board_variant(w, NULL, NULL, false)); memset(&d, 0, sizeof(d));
+        atomic_store(&tag_fetch_progress_seen, false); atomic_store(&tag_fetch_progress_release, false); atomic_store(&tag_fetch_progress_entered, false); atomic_store(&tag_fetch_progress_timeout, false);
+        tag_require_fetch_progress = true; g_tag.fetch_failures = 1;
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        (void)app_discover_run(w->j.b_datadir, tag_discover_card, tag_discover_receive, &d, &reply, NULL);
+        tag_require_fetch_progress = false; g_tag.fetch_failures = 0;
+        ASSERT(atomic_load(&tag_fetch_progress_seen)); ASSERT(!atomic_load(&tag_fetch_progress_timeout)); ASSERT_EQ(d.receive, 0);
+        ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT_EQ(tag_glob(w->j.b_datadir, ".app-get-*"), 0u);
+        zcl_command_reply_free(&reply); PASS();
+    } _test_next:;
+    tag_require_fetch_progress = false; atomic_store(&tag_fetch_progress_release, true);
+    return failures;
+}
+struct tag_rpc_fetch { struct json_value input; struct zcl_command_reply reply; };
+static atomic_bool tag_rpc_profile_ok;
+static const char *tag_rpc_expected_profile;
+static char *tag_fetch_rpc_profile(const char *method, const char *params)
+{
+    (void)params;
+    if (strcmp(method, "fleet_bundle_fetch")) return NULL;
+    atomic_store(&tag_fetch_progress_entered, true);
+    int64_t end = platform_time_monotonic_ms() + 30000;
+    while (!atomic_load(&tag_fetch_progress_release) && platform_time_monotonic_ms() < end) platform_sleep_ms(1);
+    atomic_store(&tag_rpc_profile_ok, !strcmp(node_rpc_client_datadir(), tag_rpc_expected_profile) &&
+        node_rpc_client_port() == 19381 && atomic_load(&tag_fetch_progress_release));
+    return strdup("{\"ok\":false,\"code\":\"TEST_REFUSED\",\"message\":\"fixture refusal\"}");
+}
+static bool tag_actual_fetch(void *context)
+{
+    struct tag_rpc_fetch *f = context;
+    return zcl_app_inner_call("fleet.bundle.fetch", &f->input, &f->reply, NULL);
+}
+static int tag_fetch_native_profile(struct tag_world *w)
+{
+    int failures = 0; struct tag_discover d = {0}; struct tag_rpc_fetch f;
+    char out[TAG_PATH];
+    char *old = strdup(zcl_native_command_datadir()); int port = zcl_native_command_rpc_port();
+    json_init(&f.input); json_set_object(&f.input); zcl_command_reply_init(&f.reply, "zcl.test");
+    TEST("Fetch progress worker preserves the actual native RPC profile") {
+        int n = snprintf(out, sizeof(out), "%s/profile-fetch.z23share", w->root);
+        ASSERT(n > 0 && (size_t)n < sizeof(out));
+        ASSERT(old && json_push_kv_str(&f.input, "root", TAG_CARRIER) &&
+            json_push_kv_str(&f.input, "sha256", TAG_CARRIER) &&
+            json_push_kv_str(&f.input, "out", out) &&
+            json_push_kv_int(&f.input, "size", 64) && json_push_kv_int(&f.input, "timeout_s", 1));
+        atomic_store(&tag_fetch_progress_entered, false); atomic_store(&tag_fetch_progress_release, false);
+        atomic_store(&tag_rpc_profile_ok, false); tag_require_fetch_progress = true;
+        tag_rpc_expected_profile = strcmp(old, w->j.a_datadir) ? w->j.a_datadir : w->j.b_datadir;
+        zcl_native_bridge_bind_rpc(tag_rpc_expected_profile, 19381); node_rpc_client_set_test_hook(tag_fetch_rpc_profile);
+        enum app_fetch_progress_result result = app_fetch_progress_run(tag_actual_fetch, &f, tag_discover_receive, &d);
+        node_rpc_client_set_test_hook(NULL); zcl_native_bridge_bind_rpc(old, port); tag_require_fetch_progress = false;
+        if (result != APP_FETCH_FAILED || !atomic_load(&tag_rpc_profile_ok))
+            fprintf(stderr, "native fetch fixture: result=%d code=%.80s message=%.160s\n",
+                (int)result, f.reply.error.code, f.reply.error.message);
+        ASSERT_EQ(result, APP_FETCH_FAILED); ASSERT(atomic_load(&tag_rpc_profile_ok)); PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL); if (old) zcl_native_bridge_bind_rpc(old, port);
+    tag_require_fetch_progress = false; atomic_store(&tag_fetch_progress_release, true);
+    free(old); json_free(&f.input); zcl_command_reply_free(&f.reply); return failures;
+}
 static int tag_discover_cancel(struct tag_world *w)
 {
     int failures = 0; struct zcl_command_reply reply; struct tag_discover d = {0};
@@ -2149,6 +2281,17 @@ static int tag_discover_cancel(struct tag_world *w)
         ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.posts, posts);
         ASSERT_EQ(tag_glob(w->j.b_datadir, ".app-get-*"), 0u);
         ASSERT_EQ(tag_glob(w->j.b_datadir, "copies/*"), 0u);
+        zcl_command_reply_free(&reply); PASS();
+    }
+    TEST("Discover displays progress while its selected carrier fetch is pending") {
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        memset(&d, 0, sizeof(d)); atomic_store(&tag_fetch_progress_seen, false); atomic_store(&tag_fetch_progress_release, false); atomic_store(&tag_fetch_progress_entered, false); atomic_store(&tag_fetch_progress_timeout, false);
+        tag_require_fetch_progress = true;
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        (void)app_discover_run(w->j.b_datadir, tag_discover_card, tag_discover_receive, &d, &reply, NULL);
+        tag_require_fetch_progress = false;
+        ASSERT(atomic_load(&tag_fetch_progress_seen)); ASSERT(!atomic_load(&tag_fetch_progress_timeout));
+        ASSERT_EQ(d.receive, 1); ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         zcl_command_reply_free(&reply); PASS();
     } _test_next:;
     return failures;
@@ -3141,6 +3284,8 @@ static int tag_world_cases(struct tag_world *w)
     failures += tag_stage_consumer(w);
     failures += tag_stage_unsafe_parent(w);
     failures += tag_discover_cancel(w);
+    failures += tag_discover_fetch_close(w);
+    failures += tag_fetch_native_profile(w);
     failures += tag_library_discover(w);
     failures += tag_library_profile(w);
     failures += tag_discover_empty_cases(w);

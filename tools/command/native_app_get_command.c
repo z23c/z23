@@ -5,6 +5,7 @@
 #include "command/native_app_front_door.h"
 #include "command/native_app_offer.h"
 #include "command/native_app_get_stage.h"
+#include "command/native_app_fetch_progress.h"
 #include "command/native_dev_land_remote_shared.h"
 #include "command/native_zcode_package_copy.h"
 #include "command/app_image.h"
@@ -720,24 +721,58 @@ static void ag_consume_host(struct ag_one *s, struct ag_private_stage *private, 
     else zcl_package_copy_fail(s->reply, "TEMP_CHANGED", s->reply->error.mutated,
         "the private staging directory changed before hosting", AG_COMMAND);
 }
+static bool ag_progress_fetch(void *work)
+{
+    struct ag_one *s = work;
+    return ag_fetch(s->row, s->path, AG_BUDGET_MS / 1000, &s->inner);
+}
+static enum app_fetch_progress_result ag_run_fetch(struct ag_one *s, bool progress,
+    app_confirm_presenter presenter, void *presenter_context)
+{
+    return progress ? app_fetch_progress_run(ag_progress_fetch, s, presenter, presenter_context) :
+        (ag_progress_fetch(s) ? APP_FETCH_OK : APP_FETCH_FAILED);
+}
+static bool ag_fetch_ready(struct ag_one *s, enum app_fetch_progress_result result)
+{
+    if (result == APP_FETCH_CLOSED) {
+        zcl_command_reply_free(&s->inner);
+        if (json_push_kv_str(&s->reply->data, "status", "canceled")) return true;
+        zcl_package_copy_fail(s->reply, "ALLOC", false, "Cannot report that the download was closed.", AG_COMMAND);
+        return false;
+    }
+    if (result == APP_FETCH_UNAVAILABLE) {
+        zcl_command_reply_free(&s->inner);
+        zcl_package_copy_fail(s->reply, "FETCH_PROGRESS_UNAVAILABLE", false, "Cannot display download progress.", AG_COMMAND);
+        return false;
+    }
+    return result == APP_FETCH_OK;
+}
+static bool ag_staged_identity(struct ag_one *s, struct ag_private_stage *private,
+    struct app_receive_identity *identity)
+{
+    if (!ag_private_bound(private, s->dir) || !ag_hash(s->path, &s->row->offer)) {
+        zcl_package_copy_fail(s->reply, "SHA256_MISMATCH", false, "fetched bytes or staging identity changed", AG_COMMAND); return false;
+    }
+    if (!ag_receive_plan(s)) return false;
+    if (!ag_stage_identity(s, identity)) {
+        zcl_package_copy_fail(s->reply, "MALFORMED_INNER", false, "verified receive identity is incomplete", AG_COMMAND); return false;
+    }
+    if (!ag_private_bound(private, s->dir)) {
+        zcl_package_copy_fail(s->reply, "TEMP_CHANGED", false, "the private staging directory changed", AG_COMMAND); return false;
+    }
+    return true;
+}
 static bool ag_consume_staged(struct ag_one *s, struct ag_private_stage *private,
-    app_get_stage_consumer consumer, void *context)
+    app_get_stage_consumer consumer, void *context, bool progress, app_confirm_presenter presenter, void *presenter_context)
 {
     struct zcl_command_reply *reply = s->reply;
-    bool ok = ag_fetch(s->row, s->path, AG_BUDGET_MS / 1000, &s->inner);
+    enum app_fetch_progress_result result = ag_run_fetch(s, progress, presenter, presenter_context);
+    if (result == APP_FETCH_CLOSED || result == APP_FETCH_UNAVAILABLE) return ag_fetch_ready(s, result);
+    bool ok = result == APP_FETCH_OK;
     if (!ok) zcl_app_inner_fail(reply, &s->inner, false);
     zcl_command_reply_free(&s->inner);
-    if (ok && (!ag_private_bound(private, s->dir) || !ag_hash(s->path, &s->row->offer))) {
-        zcl_package_copy_fail(reply, "SHA256_MISMATCH", false, "fetched bytes or staging identity changed", AG_COMMAND); ok = false;
-    }
-    if (ok) ok = ag_receive_plan(s);
     struct app_receive_identity identity;
-    if (ok && !ag_stage_identity(s, &identity)) {
-        zcl_package_copy_fail(reply, "MALFORMED_INNER", false, "verified receive identity is incomplete", AG_COMMAND); ok = false;
-    }
-    if (ok && !ag_private_bound(private, s->dir)) {
-        zcl_package_copy_fail(reply, "TEMP_CHANGED", false, "the private staging directory changed", AG_COMMAND); ok = false;
-    }
+    if (ok) ok = ag_staged_identity(s, private, &identity);
     bool host_original = false;
     if (ok) ok = consumer(context, s->path, &identity, reply, &host_original);
     if (ok) ag_consume_host(s, private, host_original);
@@ -748,7 +783,8 @@ static bool ag_consume_staged(struct ag_one *s, struct ag_private_stage *private
     return ok;
 }
 static bool ag_consume_one(const struct zcl_app_offer_row *row, const char *dir, const char *anchor,
-    app_get_stage_consumer consumer, void *context, struct zcl_command_reply *reply)
+    app_get_stage_consumer consumer, void *context, struct zcl_command_reply *reply,
+    bool progress, app_confirm_presenter presenter, void *presenter_context)
 {
     uint8_t random[16]; char token[33];
     if (!rng_host_fill(random, sizeof(random))) {
@@ -764,7 +800,7 @@ static bool ag_consume_one(const struct zcl_app_offer_row *row, const char *dir,
             "cannot safely create private staging", s.dir);
         return false;
     }
-    bool ok = ag_consume_staged(&s, &private, consumer, context);
+    bool ok = ag_consume_staged(&s, &private, consumer, context, progress, presenter, presenter_context);
     if (!ag_private_cleanup(&private, &s)) {
         zcl_package_copy_fail(reply, "TEMP_CLEANUP_FAILED", true,
             "private staging could not be safely removed", s.dir); return false;
@@ -783,8 +819,9 @@ static bool ag_find_selected(const struct zcl_app_offer_row *selected,
     zcl_package_copy_fail(reply, "OFFER_CHANGED", false, "the selected advertisement is no longer present", AG_COMMAND);
     return false;
 }
-bool app_get_stage_consume(const struct zcl_app_offer_row *selected, const char *datadir,
-    app_get_stage_consumer consumer, void *context, struct zcl_command_reply *reply)
+static bool ag_stage_consume(const struct zcl_app_offer_row *selected, const char *datadir,
+    app_get_stage_consumer consumer, void *context, struct zcl_command_reply *reply,
+    bool progress, app_confirm_presenter presenter, void *presenter_context)
 {
     if (!reply) return false;
     char anchor[AG_PATH];
@@ -796,9 +833,15 @@ bool app_get_stage_consume(const struct zcl_app_offer_row *selected, const char 
     struct zcl_app_offer_row *row = zcl_calloc(1, sizeof(*row), "app.get.offer");
     if (!row) { zcl_package_copy_fail(reply, "ALLOC", false, "offer allocation", AG_COMMAND); return false; }
     bool ok = ag_find_selected(selected, row, reply);
-    if (ok) ok = ag_consume_one(row, datadir, anchor, consumer, context, reply);
+    if (ok) ok = ag_consume_one(row, datadir, anchor, consumer, context, reply, progress, presenter, presenter_context);
     free(row); return ok;
 }
+bool app_get_stage_consume(const struct zcl_app_offer_row *selected, const char *datadir,
+    app_get_stage_consumer consumer, void *context, struct zcl_command_reply *reply)
+{ return ag_stage_consume(selected, datadir, consumer, context, reply, false, NULL, NULL); }
+bool app_get_stage_consume_progress(const struct zcl_app_offer_row *selected, const char *datadir,
+    app_get_stage_consumer consumer, void *context, struct zcl_command_reply *reply, app_confirm_presenter presenter, void *presenter_context)
+{ return ag_stage_consume(selected, datadir, consumer, context, reply, true, presenter, presenter_context); }
 
 struct ag_request {
     const struct json_value *input;
