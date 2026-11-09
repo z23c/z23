@@ -34,6 +34,16 @@ void boot_report_datadir_create_failed(const char *datadir, int mkdir_errno);
  * non-zero. Boot refuses rather than run without a crash handler. */
 void boot_report_signal_handler_install_failed(void);
 
+/* BOOT_MEMPOOL_LIMITS_REGISTER_FAILED — zcl_service_kernel_register refused
+ * the mempool_limits spec. Boot refuses rather than continue without the
+ * service kernel entry. */
+void boot_report_mempool_limits_register_failed(void);
+
+/* BOOT_MEMPOOL_LIMITS_START_FAILED — zcl_service_kernel_start_all returned
+ * false after that registration. Boot refuses rather than run with a
+ * required service that did not start. */
+void boot_report_mempool_limits_start_failed(void);
+
 /* BOOT_WALLET_PERSISTENCE_OPEN_FAILED — STATE D of the wallet boot state
  * machine: wallet_keys has rows but the persistence layer would not open.
  * `open_result` carries the WSQL_* code, message and source file:line. */

@@ -18,6 +18,7 @@
  * { ... }` block to a single function call at the identical line position. */
 
 #include "config/boot_mempool_limits.h"
+#include "config/boot_refusal_reports.h"
 #include "services/mempool_limits.h"
 #include "storage/progress_store.h"
 #include "util/boot_phase.h"
@@ -92,11 +93,11 @@ bool boot_start_mempool_limits_service(struct boot_svc_ctx *svc)
         };
         if (!zcl_service_kernel_register(&svc->service_kernel,
                                          &mempool_limits_spec)) {
-            fprintf(stderr, "FATAL: failed to register boot services\n");
+            boot_report_mempool_limits_register_failed();
             return boot_step_fail("mempool_limits_service");
         }
         if (!zcl_service_kernel_start_all(&svc->service_kernel)) {
-            fprintf(stderr, "FATAL: failed to start required boot services\n");
+            boot_report_mempool_limits_start_failed();
             return boot_step_fail("mempool_limits_service");
         }
     }

@@ -9,10 +9,12 @@
 #include "test/test_core.h"
 
 #include "config/boot_error.h"
+#include "config/boot_mempool_limits.h"
 #include "config/boot_refusal_reports.h"
 #include "platform/current_identity.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int current_identity_boundary_probe(void)
@@ -60,6 +62,94 @@ static int boot_refusal_identity_probe(void)
     return 0;
 }
 
+static bool mempool_limits_probe_start_ok(void *ctx)
+{
+    (void)ctx;
+    return true;
+}
+
+static bool mempool_limits_probe_start_fail(void *ctx)
+{
+    (void)ctx;
+    return false;
+}
+
+static void mempool_limits_probe_stop(void *ctx)
+{
+    (void)ctx;
+}
+
+static struct boot_svc_ctx *mempool_limits_probe_ctx(void)
+{
+    struct boot_svc_ctx *svc = calloc(1, sizeof(*svc));
+    if (!svc)
+        return NULL;
+    zcl_service_kernel_init(&svc->service_kernel);
+    static char db_standin;
+    svc->db_service = (struct db_service *)&db_standin;
+    return svc;
+}
+
+static int mempool_limits_refusal_codes(bool started, const char *code)
+{
+    char report[4096];
+    if (started)
+        return 3;
+    if (!boot_error_reported())
+        return 4;
+    if (strcmp(boot_error_first_code(), code) != 0)
+        return 5;
+    if (!boot_error_last_render(report, sizeof(report)) ||
+        !strstr(report, code) ||
+        !strstr(report, "services.mempool_limits"))
+        return 6;
+    return 0;
+}
+
+static int boot_mempool_limits_register_refusal_probe(void)
+{
+    struct boot_svc_ctx *svc = mempool_limits_probe_ctx();
+    if (!svc)
+        return 1;
+    const struct zcl_service_spec dup = {
+        .name = "mempool_limits",
+        .start = mempool_limits_probe_start_ok,
+        .stop = mempool_limits_probe_stop,
+        .flags = ZCL_SERVICE_OPTIONAL,
+    };
+    int rc = 2;
+    if (zcl_service_kernel_register(&svc->service_kernel, &dup)) {
+        boot_error_reset_for_testing();
+        rc = mempool_limits_refusal_codes(
+            boot_start_mempool_limits_service(svc),
+            "BOOT_MEMPOOL_LIMITS_REGISTER_FAILED");
+    }
+    free(svc);
+    return rc;
+}
+
+static int boot_mempool_limits_start_refusal_probe(void)
+{
+    struct boot_svc_ctx *svc = mempool_limits_probe_ctx();
+    if (!svc)
+        return 1;
+    const struct zcl_service_spec blocker = {
+        .name = "required_blocker",
+        .start = mempool_limits_probe_start_fail,
+        .stop = mempool_limits_probe_stop,
+        .flags = 0,
+    };
+    int rc = 2;
+    if (zcl_service_kernel_register(&svc->service_kernel, &blocker)) {
+        boot_error_reset_for_testing();
+        rc = mempool_limits_refusal_codes(
+            boot_start_mempool_limits_service(svc),
+            "BOOT_MEMPOOL_LIMITS_START_FAILED");
+    }
+    free(svc);
+    return rc;
+}
+
 static int boot_signal_handler_install_refusal_probe(void)
 {
     char report[4096];
@@ -102,6 +192,26 @@ int test_boot_refusal_identity(void)
     rc = boot_signal_handler_install_refusal_probe();
     printf("boot_refusal_identity: signal_handler_install failure is "
            "BOOT_SIGNAL_HANDLER_INSTALL_FAILED... ");
+    if (rc == 0) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (step %d)\n", rc);
+        failures++;
+    }
+
+    rc = boot_mempool_limits_register_refusal_probe();
+    printf("boot_refusal_identity: mempool_limits register failure is "
+           "BOOT_MEMPOOL_LIMITS_REGISTER_FAILED... ");
+    if (rc == 0) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (step %d)\n", rc);
+        failures++;
+    }
+
+    rc = boot_mempool_limits_start_refusal_probe();
+    printf("boot_refusal_identity: mempool_limits start failure is "
+           "BOOT_MEMPOOL_LIMITS_START_FAILED... ");
     if (rc == 0) {
         printf("OK\n");
     } else {

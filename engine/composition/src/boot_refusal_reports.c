@@ -87,6 +87,24 @@ void boot_report_signal_handler_install_failed(void)
                       NULL, 0, "call=signal_handler_install rc!=0");
 }
 
+void boot_report_mempool_limits_register_failed(void)
+{
+    boot_error_report(BOOT_ERROR_FATAL, "BOOT_MEMPOOL_LIMITS_REGISTER_FAILED",
+                      "services.mempool_limits",
+                      "failed to register the mempool limits boot service",
+                      NULL, 0,
+                      "call=zcl_service_kernel_register service=mempool_limits");
+}
+
+void boot_report_mempool_limits_start_failed(void)
+{
+    boot_error_report(BOOT_ERROR_FATAL, "BOOT_MEMPOOL_LIMITS_START_FAILED",
+                      "services.mempool_limits",
+                      "failed to start required boot services",
+                      NULL, 0,
+                      "call=zcl_service_kernel_start_all service=mempool_limits");
+}
+
 void boot_report_wallet_persistence_open_failed(
     const char *datadir, const struct zcl_result *open_result,
     long long wallet_key_rows)
