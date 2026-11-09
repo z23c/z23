@@ -4,6 +4,7 @@
 #include "command/native_app_commit_progress.h"
 #include "command/native_app_receive_job.h"
 #include "command/native_app_receive_preview.h"
+#include "command/app_selection.h"
 #include "command/native_app_compose.h"
 #include "command/native_zcode_package_copy.h"
 #include "base/safe_alloc.h"
@@ -21,7 +22,7 @@ struct receive_flow {
     void *context;
     struct json_value operations;
     const char *status;
-    bool adopted, closed;
+    bool adopted, closed, draft;
     const char *worker_path;
     int executed; /* 0: no open worker; -1: outcome uncertain; 1: validated open. */
 };
@@ -33,7 +34,8 @@ struct receive_progress {
 };
 static bool arf_fail(struct receive_flow *f, const char *code, const char *message)
 {
-    zcl_package_copy_fail(f->reply, code, true, message, f->adopted ? "app.adopt preview" : "app.receive preview");
+    zcl_package_copy_fail(f->reply, code, f->draft ? f->reply->error.mutated : true,
+        message, f->draft ? "app.library draft" : f->adopted ? "app.adopt preview" : "app.receive preview");
     return false;
 }
 static bool arf_status(struct receive_flow *f, const char *status)
@@ -53,7 +55,7 @@ static bool arf_fields(struct receive_flow *f, struct app_confirm *view)
     const char *name = zcl_package_copy_str(&f->reply->data, f->adopted ? "copy" : "name");
     const char *version = zcl_package_copy_str(&f->reply->data, "version");
     return name && version && app_confirm_field(&view->model, f->adopted ? "Personal copy: " : "App: ", name) &&
-        app_confirm_field(&view->model, "Saved version: ", version);
+        app_confirm_field(&view->model, f->draft ? "Draft version: " : "Saved version: ", version);
 }
 static void arf_actions(struct app_confirm *view, const char *action)
 {
@@ -253,6 +255,9 @@ static bool arf_job(struct receive_flow *f, enum app_receive_job_command command
     if (started != APP_RECEIVE_JOB_STARTED) {
         free(p); return arf_fail(f, "PREVIEW_WORKER_UNAVAILABLE", "Cannot start this platform's preview worker.");
     }
+    if (f->draft && (command == APP_RECEIVE_JOB_OPEN ||
+        (command == APP_RECEIVE_JOB_BUILD && json_get_bool(json_get(input, "confirm")))))
+        f->reply->error.mutated = true;
     if (command == APP_RECEIVE_JOB_OPEN) f->executed = -1;
     bool shown = arf_progress(f, p, stage);
     bool cleanup_failed = false;
@@ -282,6 +287,7 @@ static bool arf_job(struct receive_flow *f, enum app_receive_job_command command
 }
 static bool arf_build(struct receive_flow *f)
 {
+    if (f->draft && !app_receive_preview_current(f->preview, f->reply)) return false;
     struct json_value input, plan, confirm, built;
     json_init(&input); json_init(&plan); json_init(&confirm); json_init(&built);
     bool ok = app_receive_preview_build_input(f->preview, &input) &&
@@ -294,6 +300,7 @@ static bool arf_build(struct receive_flow *f)
 }
 static bool arf_open(struct receive_flow *f)
 {
+    if (f->draft && !app_receive_preview_current(f->preview, f->reply)) return false;
     struct json_value input, opened; json_init(&input); json_init(&opened);
     bool ok = app_receive_preview_open_input(f->preview, &input) &&
         arf_job(f, APP_RECEIVE_JOB_OPEN, &input, "Opening the built version", &opened) &&
@@ -302,10 +309,22 @@ static bool arf_open(struct receive_flow *f)
     if (ok) ok = json_push_kv_bool(&f->reply->data, "preview_opened", true);
     json_free(&input); json_free(&opened); return ok;
 }
+static bool arf_keep_result(struct receive_flow *f, const struct zcl_command_reply *kept, bool *canceled)
+{
+    const char *status = zcl_package_copy_str(&kept->data, "status");
+    if (status && !strcmp(status, "canceled")) { *canceled = true; return true; }
+    if (!status || strcmp(status, "kept"))
+        return arf_fail(f, "KEEP_RESULT_INVALID", "Keep returned no confirmed selection; inspect before retrying.");
+    if (f->draft) f->reply->error.mutated = true;
+    struct json_value summary; json_init(&summary); json_set_object(&summary);
+    bool ok = arf_result_summary(&summary, &kept->data) && json_push_kv(&f->reply->data, "kept", &summary);
+    json_free(&summary); return ok;
+}
 static bool arf_keep(struct receive_flow *f)
 {
+    if (f->draft && !app_receive_preview_current(f->preview, f->reply)) return false;
     bool chosen = false;
-    if (!arf_choose(f, "Preview opened", f->adopted ? "Check the app before choosing Keep. Closing leaves your personal copy available." : "Check the app before choosing Keep. Closing leaves your received copy available.", "Keep this version", &chosen)) return false;
+    if (!arf_choose(f, "Preview opened", f->draft ? "Check the app before choosing Keep. This keeps the exact version you previewed; newer changes remain available." : f->adopted ? "Check the app before choosing Keep. Closing leaves your personal copy available." : "Check the app before choosing Keep. Closing leaves your received copy available.", "Keep this version", &chosen)) return false;
     if (!chosen) return arf_status(f, "previewed");
     struct json_value input; json_init(&input);
     enum app_receive_preview_keep_state state = app_receive_preview_keep_input(f->preview, &input, f->reply);
@@ -315,10 +334,9 @@ static bool arf_keep(struct receive_flow *f)
         ok = zcl_app_inner_call("app.keep", &input, &kept, NULL);
         if (!ok) zcl_app_inner_fail(f->reply, &kept, true);
         else {
-            struct json_value summary; json_init(&summary); json_set_object(&summary);
-            ok = arf_result_summary(&summary, &kept.data) &&
-                json_push_kv(&f->reply->data, "kept", &summary);
-            json_free(&summary);
+            bool canceled = false;
+            ok = arf_keep_result(f, &kept, &canceled);
+            if (canceled) { json_free(&input); zcl_command_reply_free(&kept); return arf_status(f, "previewed"); }
         }
         zcl_command_reply_free(&kept);
     }
@@ -457,6 +475,42 @@ void app_adopted_flow_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context)
 {
     arf_run(datadir, reply, presenter, context, true, NULL);
+}
+
+static bool arf_draft_confirm(struct receive_flow *f, const struct app_selection *selection, uint8_t head[32])
+{
+    char hex[65]; bool chosen = false;
+    if (!app_saved_draft_head(selection, head, f->reply)) return false;
+    zcl_hex_encode(head, 32, hex);
+    if (!json_push_kv_str(&f->reply->data, "name", selection->app) ||
+        !json_push_kv_str(&f->reply->data, "version", hex))
+        return arf_fail(f, "OUT_OF_MEMORY", "Cannot describe the draft.");
+    if (!arf_choose(f, "Review unkept changes", "Build and preview this exact draft. Keep remains a separate choice.",
+            "Build and preview", &chosen)) return false;
+    if (chosen) return true;
+    if (!json_push_kv_str(&f->reply->data, "status", "canceled"))
+        (void)arf_fail(f, "OUT_OF_MEMORY", "Cannot describe cancellation.");
+    return false;
+}
+void app_saved_draft_flow_run(const struct app_selection *selection,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context,
+    const char *worker_path)
+{
+    if (!selection || !reply) return;
+    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context,
+        .status = "draft", .draft = true, .worker_path = worker_path};
+    uint8_t head[32];
+    if (!arf_draft_confirm(&f, selection, head)) return;
+    if (!app_saved_draft_preview_create(selection, head, &f.preview, reply)) return;
+    json_init(&f.operations); json_set_array(&f.operations);
+    bool ok = arf_build(&f) && arf_open(&f) && arf_keep(&f);
+    if (!json_push_kv(&reply->data, "operations", &f.operations))
+        ok = arf_fail(&f, "OBSERVATION_UNAVAILABLE", "Inspect the retained draft before retrying.");
+    json_free(&f.operations);
+    if (!ok && !f.closed) arf_notice(&f);
+    if (!arf_finish(&f, ok || f.closed))
+        (void)arf_fail(&f, "OBSERVATION_UNAVAILABLE", "Inspect the retained draft before retrying.");
+    app_receive_preview_close(f.preview);
 }
 #ifdef ZCL_TESTING
 void app_receive_flow_run_test(const char *datadir, struct zcl_command_reply *reply,

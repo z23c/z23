@@ -4,9 +4,11 @@
 #ifndef ZCL_NATIVE_APP_RECEIVE_PREVIEW_H
 #define ZCL_NATIVE_APP_RECEIVE_PREVIEW_H
 #include <stdbool.h>
+#include <stdint.h>
 struct json_value;
 struct zcl_command_reply;
 struct app_receive_preview;
+struct app_selection;
 enum app_receive_preview_keep_state {
     APP_RECEIVE_PREVIEW_KEEP_NEW,
     APP_RECEIVE_PREVIEW_KEEP_SAME,
@@ -28,6 +30,15 @@ bool app_receive_preview_create(const struct json_value *receive_data,
  * owns the committed adoption and must retain its receipt on refusal. */
 bool app_receive_preview_create_adopted(const struct json_value *adopt_data,
     const char *datadir, struct app_receive_preview **out,
+    struct zcl_command_reply *failure);
+/* A kept choice and its locally verified HEAD; no caller supplies a draft hash. */
+bool app_saved_draft_available(const struct app_selection *selection);
+bool app_saved_draft_head(const struct app_selection *selection, uint8_t head[32],
+    struct zcl_command_reply *failure);
+bool app_saved_draft_preview_create(const struct app_selection *selection,
+    const uint8_t expected_head[32], struct app_receive_preview **out,
+    struct zcl_command_reply *failure);
+bool app_receive_preview_current(const struct app_receive_preview *p,
     struct zcl_command_reply *failure);
 /* Outputs are initialized on every call and must be json_free'd even on failure.
  * Build input deliberately omits confirm/plan_id: the worker owns that protocol. */

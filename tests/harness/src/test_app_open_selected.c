@@ -2065,6 +2065,150 @@ static bool ak_edit_source(struct ak_fixture *f, const char *blob)
         app_selection_load(f->env.state_dir, AK_ROUTE, &selection) == APP_SELECTION_OK &&
         selection.revision == 1 && !memcmp(selection.version, version, 32);
 }
+struct ak_draft_view { bool valid, prompted; unsigned calls; char head[65]; };
+static bool ak_draft_library(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    (void)copy_text; (void)why; (void)cap;
+    struct ak_draft_view *v = context;
+    if (++v->calls > 10) return false;
+    const char *id = !strcmp(model->request_id, "library-home") ? "myapps" :
+        model->action_count && !strcmp(model->actions[0].id, "choose") ? "choose" :
+        model->action_count && !strcmp(model->actions[0].id, "draft") ? "draft" : "change-options";
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    for (unsigned i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, id)) { event->action_index = i; return true; }
+    v->valid = false; return false;
+}
+static bool ak_draft_cancel_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    (void)why; (void)cap;
+    struct ak_draft_view *v = context; bool close = false, redraw = false;
+    v->prompted = pages && pages->page_count == 1 &&
+        !strcmp(model->title, "Review unkept changes") && aj_receive_field(model, "Draft version: ", v->head);
+    return v->prompted && aj_receive_action(live, 0, &close, &redraw) && close;
+}
+static bool ak_draft_cancel(struct ak_fixture *f)
+{
+    struct app_selection kept; uint8_t head[32] = {0}, before[6][32], after[6][32];
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &kept) == APP_SELECTION_OK &&
+        app_saved_draft_available(&kept) && app_saved_draft_head(&kept, head, &reply) && ak_discovery_state(f, before);
+    struct ak_draft_view view = {.valid = true}; zcl_hex_encode(head, 32, view.head);
+    if (ok) zcl_test_app_library_native_at(&f->env, NULL, f->world.bob_datadir, &reply,
+        ak_draft_library, &view, ak_draft_cancel_present);
+    ok = ok && view.valid && view.prompted && reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        !reply.error.mutated && !strcmp(aso_string(&reply.data, "status"), "canceled") &&
+        ak_discovery_state(f, after) && !memcmp(before, after, sizeof(before));
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool arpt_head(const struct ak_fixture *f, const char *newer, const char *pinned,
+    struct zcl_command_reply *failure);
+struct ak_draft_flow_view {
+    struct ak_draft_view nav;
+    struct ak_fixture *fixture;
+    bool keep, prompted_keep, advanced;
+    char newer[65];
+};
+static bool ak_draft_wait_worker(const struct zcl_present_window_live_view_v1 *live)
+{
+    bool close = false, redraw = false;
+    int64_t end = platform_time_monotonic_ms() + 60000;
+    do {
+        live->owner.update(live->owner.context, NULL, false, &redraw, &close);
+        if (close) return true;
+        platform_sleep_ms(1); /* real-clock: wait for this owned worker */
+    } while (platform_time_monotonic_ms() < end);
+    return false;
+}
+static bool ak_draft_confirm_pages(struct ak_draft_flow_view *v, bool keep_view,
+    const struct zcl_present_model_v1 *model, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    bool close = false, redraw = false; uint32_t count = 0;
+    if (!zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
+    for (uint32_t i = 1; i < count; ++i)
+        if (!aj_receive_action(live, 2, &close, &redraw) || close) return false;
+    if (keep_view && v->keep) {
+        v->advanced = abc_put(v->fixture->world.bob_copy, "include/boost.h", "#define BOOST 9\n") &&
+            abc_save(v->fixture->world.bob_copy, v->newer);
+        if (!v->advanced) return false;
+    }
+    return aj_receive_action(live, 3, &close, &redraw) && close;
+}
+static bool ak_draft_flow_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct ak_draft_flow_view *v = context; bool close = false, redraw = false;
+    if (!pages || !live) return false;
+    if (!model->action_count) return ak_draft_wait_worker(live);
+    bool keep_view = !strcmp(model->title, "Preview opened");
+    if (!keep_view && strcmp(model->title, "Review unkept changes")) return false;
+    if (!aj_receive_field(model, "Draft version: ", v->nav.head)) return false;
+    if (keep_view) v->prompted_keep = true;
+    if (keep_view && !v->keep) return aj_receive_action(live, 0, &close, &redraw) && close;
+    return ak_draft_confirm_pages(v, keep_view, model, live, why, cap);
+}
+static bool ak_draft_stop_preview(struct ak_fixture *f, const struct zcl_command_reply *reply)
+{
+    const struct json_value *open = json_at(json_get(&reply->data, "operations"), 2);
+    const struct json_value *pid = json_get(open, "pid"); char proc[64];
+    if (!pid || pid->type != JSON_INT) return false;
+    (void)snprintf(proc, sizeof(proc), "/proc/%lld/exe", (long long)json_get_int(pid));
+    ssize_t n = readlink(proc, f->build.image_path, sizeof(f->build.image_path) - 1);
+    if (n <= 0) return false;
+    f->build.image_path[n] = 0; aso_track_ready(open, &f->build);
+    return aso_cleanup_children();
+}
+static bool ak_draft_selection_result(struct ak_fixture *f, bool keep, const struct app_selection *before,
+    const uint8_t head[32], struct ak_draft_flow_view *view, struct zcl_command_reply *reply)
+{
+    struct app_selection after;
+    if (app_selection_load(f->env.state_dir, AK_ROUTE, &after) != APP_SELECTION_OK) return false;
+    if (keep) return view->advanced && after.revision == before->revision + 1 &&
+        !memcmp(after.version, head, 32) && arpt_head(f, view->newer, view->nav.head, reply);
+    return after.revision == before->revision && !memcmp(after.version, before->version, 32) &&
+        !strcmp(aso_string(&reply->data, "continuation"), "previewed");
+}
+static bool ak_draft_preview_keep(struct ak_fixture *f, bool keep)
+{
+    struct app_selection before; uint8_t head[32] = {0}; char worker[PATH_MAX];
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &before) == APP_SELECTION_OK &&
+        app_saved_draft_head(&before, head, &reply) && realpath("build/bin/z23-dev", worker);
+    struct ak_draft_flow_view view = {.nav = {.valid = true}, .fixture = f, .keep = keep};
+    zcl_hex_encode(head, 32, view.nav.head);
+    if (ok) zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &reply,
+        ak_draft_library, ak_draft_flow_present, &view, worker);
+    bool stopped = ak_draft_stop_preview(f, &reply);
+    ok = ok && stopped && view.nav.valid && view.prompted_keep && reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        ak_draft_selection_result(f, keep, &before, head, &view, &reply);
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool ak_draft_stale_controls(struct ak_fixture *f)
+{
+    struct app_selection kept, advanced; uint8_t head[32]; char newer[65];
+    struct app_receive_preview *p = NULL;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.preview.v1");
+    bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &kept) == APP_SELECTION_OK &&
+        app_saved_draft_head(&kept, head, &reply) &&
+        app_saved_draft_preview_create(&kept, head, &p, &reply) &&
+        app_receive_preview_current(p, &reply) &&
+        abc_put(f->world.bob_copy, "include/boost.h", "#define BOOST 10\n") &&
+        abc_save(f->world.bob_copy, newer) && !app_receive_preview_current(p, &reply) &&
+        !strcmp(reply.error.code, "DRAFT_STALE");
+    app_receive_preview_close(p); p = NULL;
+    zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.test.preview.v1");
+    if (ok) ok = app_saved_draft_head(&kept, head, &reply) &&
+        app_saved_draft_preview_create(&kept, head, &p, &reply) &&
+        app_selection_save(f->env.state_dir, kept.revision, &kept, &advanced) == APP_SELECTION_OK &&
+        !app_receive_preview_current(p, &reply) && !strcmp(reply.error.code, "SELECTION_STALE");
+    app_receive_preview_close(p); zcl_command_reply_free(&reply); return ok;
+}
 static bool ak_refused(struct ak_fixture *f, const char *code)
 {
     struct abc_leaf leaf;
@@ -2140,6 +2284,7 @@ static int ak_acceptance(struct ak_fixture *f)
         ASSERT(ak_read_source(f, blob));
         ASSERT(ak_revoked(f) && ak_replaced(f));
         ASSERT(ak_edit_source(f, blob));
+        ASSERT(ak_draft_cancel(f));
         ASSERT(ak_collision(f));
         ASSERT(ak_restart(f));
         ASSERT(ak_deleted(f) && ak_corrupted(f));
@@ -2353,6 +2498,20 @@ static int arpt_acceptance(struct ak_fixture *f)
     app_receive_preview_close(p); zcl_command_reply_free(&failure); return failures;
 }
 
+static int ak_draft_acceptance(struct ak_fixture *f)
+{
+    int failures = 0; char blob[65];
+    TEST("My Apps reviews an unkept draft and keeps the exact preview despite a newer edit") {
+        ASSERT(ak_received(f) && ak_environment(f) && ak_preview_keep(f));
+        ASSERT(ak_read_source(f, blob) && ak_edit_source(f, blob));
+        ASSERT(ak_draft_preview_keep(f, false));
+        ASSERT(ak_draft_preview_keep(f, true));
+        ASSERT(ak_draft_stale_controls(f));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int ak_routes(void)
 {
     struct aso_env env[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL}, {"XDG_STATE_HOME", NULL},
@@ -2370,6 +2529,10 @@ static int ak_routes(void)
     if (!failures) failures += arpt_acceptance(&continuation);
     if (!aso_cleanup_children()) failures++;
     if (continuation.world.root[0]) (void)test_rm_rf_recursive(continuation.world.root);
+    struct ak_fixture draft = {0};
+    if (!failures) failures += ak_draft_acceptance(&draft);
+    if (!aso_cleanup_children()) failures++;
+    if (draft.world.root[0]) (void)test_rm_rf_recursive(draft.world.root);
     aso_env_restore(env, saved);
     if (fixture.world.root[0]) (void)test_rm_rf_recursive(fixture.world.root);
     return failures;
@@ -2474,15 +2637,23 @@ static bool rr_present(void *context, const struct zcl_present_model_v1 *model,
         !zcl_present_model_page_count_v1(model, &count, why, cap) || count < 2) return false;
     return rr_consent_pages(view, live, count);
 }
+static const char *rr_library_target(const struct zcl_present_model_v1 *model, const char *copy_text)
+{
+    const char *wanted = !strcmp(model->request_id, "library-home") ? "myapps" :
+        copy_text ? "cancel" :
+        model->action_count && !strcmp(model->actions[0].id, "choose") ? "choose" : "help";
+    if (!strcmp(wanted, "help"))
+        for (unsigned i = 0; i < model->action_count; ++i)
+            if (!strcmp(model->actions[i].id, "change-options")) wanted = "change-options";
+    return wanted;
+}
 static bool rr_library_present(void *context, const struct zcl_present_model_v1 *model,
     const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
     (void)why; (void)cap;
     struct rr_consent *view = context;
     if (++view->calls > 12) return false;
-    const char *wanted = !strcmp(model->request_id, "library-home") ? "myapps" :
-        copy_text ? "cancel" :
-        model->action_count && !strcmp(model->actions[0].id, "choose") ? "choose" : "help";
+    const char *wanted = rr_library_target(model, copy_text);
     if (!strcmp(wanted, "choose")) {
         char short_version[13]; memcpy(short_version, view->cycle->bob.build.version, 12); short_version[12] = 0;
         const char *base = strrchr(view->cycle->owner.copy, '/');

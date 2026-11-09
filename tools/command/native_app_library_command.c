@@ -6,6 +6,8 @@
 #include "command/native_app_library_command.h"
 #include "command/native_app_confirm.h"
 #include "command/native_app_discover.h"
+#include "command/native_app_receive_flow.h"
+#include "command/native_app_receive_preview.h"
 #include "command/native_app_share_command.h"
 #include "command/native_app_publish_command.h"
 #include "command/native_app_share_reveal.h"
@@ -541,6 +543,12 @@ static bool al_share(struct library *w, const struct app_launch_env *env, struct
     app_confirm_free(notice); free(notice);
     return resume;
 }
+static void al_change_choice(struct zcl_present_model_v1 *m, const struct library_row *r)
+{
+    if (r->saved && app_saved_draft_available(&r->selection))
+        al_choice(m, "change-options", "Change", "Review unkept changes or connect your assistant.");
+    else al_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
+}
 static void al_detail_model(struct library *w)
 {
     al_model(w);
@@ -549,8 +557,11 @@ static void al_detail_model(struct library *w)
     const struct library_row *r = &w->rows[w->index];
     if (w->page == 1) {
         al_choice(m, "open", "Open app", "Use this app.");
-        al_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
+        al_change_choice(m, r);
         al_choice(m, "share", "Share this version", r->saved ? "Choose file or public offer." : "Keep a version first.");
+    } else if (w->page == 7) {
+        al_choice(m, "draft", "Review unkept changes", "Preview the exact saved draft before choosing Keep.");
+        al_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
     } else {
         (void)snprintf(m->request_id, sizeof(m->request_id), "library-help");
         (void)snprintf(m->summary, sizeof(m->summary), "%s", w->setup[0]
@@ -913,12 +924,31 @@ static void al_bound_result(struct library *w, struct zcl_command_reply *reply, 
     }
     if (reply->status != ZCL_COMMAND_STATUS_PASSED) al_bound_failure(w, reply);
 }
+static bool al_draft_action(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply)
+{
+    const struct library_row *row = &w->rows[w->index];
+    if (!row->saved || !al_current(row, env, reply)) return false;
+    w->receive_current = false;
+    struct zcl_command_reply attempt;
+    zcl_command_reply_init(&attempt, "zcl.app_library.v1");
+    app_saved_draft_flow_run(&row->selection, &attempt, w->notice, w->prepare_context, w->test_worker_path);
+    bool prior_mutated = reply->error.mutated;
+    zcl_command_reply_free(reply); *reply = attempt;
+    reply->error.mutated |= prior_mutated;
+    return false;
+}
+static bool al_needs_recovery(const char *id)
+{
+    return !strcmp(id, "share-file") || !strcmp(id, "publish") || !strcmp(id, "help") ||
+        !strcmp(id, "open") || !strcmp(id, "draft");
+}
 static bool al_action(struct library *w, const char *id, const struct app_launch_env *env,
     const char *exe, const char *datadir, struct zcl_command_reply *reply)
 {
-    if (w->has_received && !w->recovery_ready &&
-        (!strcmp(id, "share-file") || !strcmp(id, "publish") || !strcmp(id, "help") || !strcmp(id, "open")))
+    if (w->has_received && !w->recovery_ready && al_needs_recovery(id))
         return al_fail(reply, "RECOVERY_TOO_LARGE", "The previous receipt cannot be safely retained for another operation.");
+    if (!strcmp(id, "change-options")) { w->page = 7; return true; }
+    if (!strcmp(id, "draft")) return al_draft_action(w, env, reply);
     if (!strcmp(id, "share")) { w->page = 6; return true; }
     if (!strcmp(id, "share-back")) { w->page = 1; return true; }
     if (!strcmp(id, "share-file")) { w->receive_current = false; return al_share(w, env, reply); }
@@ -948,7 +978,7 @@ static bool al_navigate(struct library *w, unsigned action, const struct app_lau
     if (!strcmp(id, "previous")) { if (w->index) --w->index; return true; }
     if (!strcmp(id, "next")) { if (w->index + 1 < w->count) ++w->index; return true; }
     if (!strcmp(id, "choose")) { w->page = 1; return true; }
-    if (!strcmp(id, "back")) { w->setup[0] = 0; if (w->page == 2) return al_refresh_after_help(w, env, reply); --w->page; return true; }
+    if (!strcmp(id, "back")) { w->setup[0] = 0; if (w->page == 2) return al_refresh_after_help(w, env, reply); if (w->page == 7) w->page = 1; else --w->page; return true; }
     return al_action(w, id, env, exe, datadir, reply);
 }
 static bool al_navigation_result(struct library *w, unsigned action, const struct app_launch_env *env,
@@ -957,7 +987,7 @@ static bool al_navigation_result(struct library *w, unsigned action, const struc
     w->any_mutated |= reply->error.mutated;
     const char *id = w->model.actions[action].id;
     bool operation = !strcmp(id, "open") || !strcmp(id, "share-file") ||
-                     !strcmp(id, "publish") || !strcmp(id, "help");
+                     !strcmp(id, "publish") || !strcmp(id, "help") || !strcmp(id, "draft");
     w->operation_canceled = false;
     if (operation) w->receive_failure = false;
     bool next = al_navigate(w, action, env, exe, datadir, reply);

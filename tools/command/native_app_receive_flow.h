@@ -4,6 +4,7 @@
 #define ZCL_NATIVE_APP_RECEIVE_FLOW_H
 #include "command/native_app_confirm.h"
 struct zcl_command_reply;
+struct app_selection;
 /* Called only after successful native Receive. Default Receive never calls
  * this. The original receipt remains in reply->data on every later failure. */
 void app_receive_flow_run(const char *datadir, struct zcl_command_reply *reply,
@@ -15,6 +16,9 @@ void app_receive_flow_run(const char *datadir, struct zcl_command_reply *reply,
  * selected personal package. Close performs no build/open/Keep. */
 void app_adopted_flow_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context);
+void app_saved_draft_flow_run(const struct app_selection *selection,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context,
+    const char *worker_path);
 #ifdef ZCL_TESTING
 void app_receive_flow_run_test(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context, const char *worker_path);
