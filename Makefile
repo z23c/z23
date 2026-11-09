@@ -9087,21 +9087,23 @@ rom-bundle-replicate: $(BIN_DIR)/rom_bundle_sha3
 # consensus-state bundle into <datadir>/bundles/ so a fresh node's zero-flag
 # cold-boot autodetect (boot_autodetect_consensus_bundle,
 # engine/composition/src/boot_auto_install_bundle.c) finds it with no further operator
-# action at boot time (platform/deploy/z23-bundle-bootstrap.sh; see
+# action at boot time (zcl-nodectl bundle-stage; see
 # docs/ROM_DELIVERY.md "Local bundle bootstrap"). Idempotent: a no-op if
 # <datadir>/bundles/ already holds a *.sqlite or the datadir already has an
 # installed-bundle marker. Never a trust decision — that stays entirely at
 # INSTALL time (RECEIPT/CHECKPOINT_ROM/CHECKPOINT_CONTENT authority).
 #   make bundle-bootstrap SOURCE=path/to/consensus-state-bundle-H.sqlite \
 #       [DATADIR=/path/to/datadir]
+# Capture the caller's value before the later launchd-specific ZCL_DATADIR
+# assignment; an empty value falls back to HOME as the courier does.
+ZCL_BUNDLE_DEFAULT_DATADIR := $(if $(ZCL_DATADIR),$(ZCL_DATADIR),$(HOME)/.zclassic-c23)
 .PHONY: bundle-bootstrap
-bundle-bootstrap: $(BIN_DIR)/rom_bundle_sha3
+bundle-bootstrap: $(ZCL_NODECTL_BIN)
 	@if [ -z "$(SOURCE)" ]; then \
 	    echo "usage: make bundle-bootstrap SOURCE=... [DATADIR=...]"; \
 	    exit 2; fi
-	platform/deploy/z23-bundle-bootstrap.sh --source="$(SOURCE)" \
-	    --sha3-tool="$(BIN_DIR)/rom_bundle_sha3" \
-	    $(if $(DATADIR),--datadir="$(DATADIR)",)
+	$(ZCL_NODECTL_BIN) bundle-stage --source="$(SOURCE)" \
+	    --datadir="$(if $(DATADIR),$(DATADIR),$(ZCL_BUNDLE_DEFAULT_DATADIR))"
 
 # gen_utxo_snapshot: build-time tool that walks a legacy zclassicd
 # chainstate LevelDB and emits a canonical UTXO sidecar file ready

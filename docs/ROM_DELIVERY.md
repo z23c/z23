@@ -307,7 +307,7 @@ accept the staged file, not merely defense in depth.
 
 ```bash
 make bundle-bootstrap SOURCE=/path/to/consensus-state-bundle-3056758.sqlite \
-    [DATADIR=/path/to/datadir]   # DATADIR defaults to ~/.zclassic-c23
+    [DATADIR=/path/to/datadir]   # defaults to ZCL_DATADIR, then ~/.zclassic-c23
 ```
 
 **Usage** — wired for every boot, zero manual steps thereafter: set
@@ -315,7 +315,11 @@ make bundle-bootstrap SOURCE=/path/to/consensus-state-bundle-3056758.sqlite \
 in `~/.config/zclassic23/env` (see `platform/deploy/z23-node.env.example`).
 `platform/deploy/z23-node.service`'s `ExecStartPre` runs the installed
 `zcl-nodectl bundle-stage` byte courier before each node start; the one-shot
-`make bundle-bootstrap` command above continues to use the checkout script.
+`make bundle-bootstrap` command above uses the same native courier. Its datadir
+must be an absolute canonical path whose parent is owned by the user and is not
+group- or world-writable; relative paths, symlinked parents and shared writable
+parents are refused. The checkout shell courier remains available to the C3
+probe, including its `--sha3-tool` option.
 Leaving the variable unset (the default) makes the service step a no-op, so a
 fresh `~/.config/zclassic23/env` with nothing configured
 behaves exactly as it does today.

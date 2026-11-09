@@ -28,6 +28,7 @@
 
 #include "test/test_core.h"
 #include "services/binary_ab_fallback.h"
+#include "config/cli_lane_defaults.h"
 #include "base/log_level.h"
 #include "util/blocker.h"
 #include "platform/private_file.h"
@@ -121,6 +122,91 @@ static int ae_stage_run(const char *datadir, const char *source)
     if (!child) { execl("build/bin/zcl-nodectl", "zcl-nodectl", "bundle-stage", datarg, srcarg, (char *)NULL); _exit(127); }
     int status = 0;
     return waitpid(child, &status, 0) == child && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+/* Invoke the actual checkout Make target, never a service or node. */
+static bool ae_file_contains(const char *path, const char *needle);
+static int ae_make_bundle(const char *home, const char *datadir, const char *source, const char *env_data)
+{
+    char datarg[1400], srcarg[1400], log[1400];
+    if (snprintf(datarg, sizeof(datarg), "DATADIR=%s", datadir ? datadir : "") >= (int)sizeof(datarg) ||
+        snprintf(log, sizeof(log), "%s/make-bundle.log", home) >= (int)sizeof(log) ||
+        snprintf(srcarg, sizeof(srcarg), "SOURCE=%s", source) >= (int)sizeof(srcarg)) return -1;
+    pid_t child = fork(); if (child < 0) return -1;
+    if (!child) {
+        (void)unsetenv("MAKEFLAGS"); (void)unsetenv("MFLAGS"); (void)unsetenv("MAKELEVEL");
+        if (env_data ? setenv("ZCL_DATADIR", env_data, 1) != 0 : unsetenv("ZCL_DATADIR") != 0) _exit(126);
+        if (setenv("HOME", home, 1) != 0) _exit(126);
+        int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0 || dup2(fd, STDERR_FILENO) < 0 || dup2(fd, STDOUT_FILENO) < 0) _exit(126);
+        (void)close(fd);
+        execlp("make", "make", "--no-print-directory", "-s", "-o", "build/bin/zcl-nodectl",
+               "bundle-bootstrap", datarg, srcarg, (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+static bool ae_make_refuses_alias(const char *dir)
+{
+    char parent[1200], alias[1200], data[1300], source[1200], staged[1400];
+    if (snprintf(parent, sizeof(parent), "%s/make-parent", dir) >= (int)sizeof(parent) ||
+        snprintf(alias, sizeof(alias), "%s/make-alias", dir) >= (int)sizeof(alias) ||
+        snprintf(data, sizeof(data), "%s/node", alias) >= (int)sizeof(data) ||
+        snprintf(source, sizeof(source), "%s/make.sqlite", dir) >= (int)sizeof(source) ||
+        snprintf(staged, sizeof(staged), "%s/node/bundles/make.sqlite", parent) >= (int)sizeof(staged)) return false;
+    if (mkdir(parent, 0700) || symlink(parent, alias) || !ae_write_str(source, "fixture", 0600)) return false;
+    char log[1400];
+    bool ok = snprintf(log, sizeof(log), "%s/make-bundle.log", dir) < (int)sizeof(log) &&
+        ae_make_bundle(dir, data, source, NULL) == 2 && access(staged, F_OK) != 0 &&
+        ae_file_contains(log, "zcl-nodectl bundle-stage: validate data directory failed");
+    (void)unlink(staged); char bundles[1400], realdata[1300];
+    if (snprintf(realdata, sizeof(realdata), "%s/node", parent) < (int)sizeof(realdata) &&
+        snprintf(bundles, sizeof(bundles), "%s/bundles", realdata) < (int)sizeof(bundles)) {
+        (void)rmdir(bundles); (void)rmdir(realdata);
+    }
+    (void)unlink(log); (void)unlink(source); (void)unlink(alias); (void)rmdir(parent); return ok;
+}
+struct ae_make_paths {
+    char source[1200], second[1200], explicit_data[1200], default_data[1200], env_data[1200];
+    char explicit_file[1400], default_file[1400], env_file[1400], other[1400], log[1400];
+};
+static bool ae_make_paths_init(const char *dir, struct ae_make_paths *p)
+{
+    return snprintf(p->source, sizeof(p->source), "%s/first.sqlite", dir) < (int)sizeof(p->source) &&
+        snprintf(p->second, sizeof(p->second), "%s/second.sqlite", dir) < (int)sizeof(p->second) &&
+        snprintf(p->explicit_data, sizeof(p->explicit_data), "%s/explicit node", dir) < (int)sizeof(p->explicit_data) &&
+        zcl_cli_release_default_datadir(p->default_data, sizeof(p->default_data), dir) &&
+        snprintf(p->env_data, sizeof(p->env_data), "%s/environment-node", dir) < (int)sizeof(p->env_data) &&
+        snprintf(p->explicit_file, sizeof(p->explicit_file), "%s/bundles/first.sqlite", p->explicit_data) < (int)sizeof(p->explicit_file) &&
+        snprintf(p->default_file, sizeof(p->default_file), "%s/bundles/first.sqlite", p->default_data) < (int)sizeof(p->default_file) &&
+        snprintf(p->env_file, sizeof(p->env_file), "%s/bundles/first.sqlite", p->env_data) < (int)sizeof(p->env_file) &&
+        snprintf(p->other, sizeof(p->other), "%s/bundles/second.sqlite", p->explicit_data) < (int)sizeof(p->other) &&
+        snprintf(p->log, sizeof(p->log), "%s/make-bundle.log", dir) < (int)sizeof(p->log);
+}
+static void ae_make_remove_data(const char *path)
+{
+    char bundles[1300];
+    if (snprintf(bundles, sizeof(bundles), "%s/bundles", path) < (int)sizeof(bundles)) (void)rmdir(bundles);
+    (void)rmdir(path);
+}
+static bool ae_make_defaults(const char *dir, const struct ae_make_paths *p)
+{
+    return ae_make_bundle(dir, NULL, p->source, p->env_data) == 0 && ae_exact_text(p->env_file, "first") &&
+        ae_make_bundle(dir, NULL, p->source, NULL) == 0 && ae_exact_text(p->default_file, "first") &&
+        ae_make_bundle(dir, NULL, p->source, "") == 0 && ae_exact_text(p->default_file, "first") &&
+        ae_make_bundle(dir, NULL, "", NULL) == 2 && ae_file_contains(p->log, "usage: make bundle-bootstrap");
+}
+static bool ae_make_target_controls(const char *dir)
+{
+    struct ae_make_paths p;
+    if (!ae_make_paths_init(dir, &p)) return false;
+    bool ok = ae_write_str(p.source, "first", 0600) && ae_write_str(p.second, "second", 0600) &&
+        ae_make_bundle(dir, p.explicit_data, p.source, p.env_data) == 0 && ae_exact_text(p.explicit_file, "first") && access(p.env_data, F_OK) != 0 &&
+        ae_make_bundle(dir, p.explicit_data, p.second, NULL) == 0 && ae_exact_text(p.explicit_file, "first") && access(p.other, F_OK) != 0 &&
+        ae_make_defaults(dir, &p);
+    (void)unlink(p.explicit_file); (void)unlink(p.default_file); (void)unlink(p.env_file); (void)unlink(p.log);
+    ae_make_remove_data(p.explicit_data); ae_make_remove_data(p.default_data); ae_make_remove_data(p.env_data);
+    (void)unlink(p.source); (void)unlink(p.second); return ok;
 }
 struct ae_control_paths {
     char data[1200], bundles[1300], first[1200], second[1200], empty[1200];
@@ -1017,6 +1103,8 @@ int ab_edges_contract(const char *dir)
     g_ae_cap_dir = mut;
     AE_CHECK("installed unit resolves to the installed courier and exact arguments", ae_unit_uses_installed_courier(mut));
     AE_CHECK("installed launcher stages a read-only bundle", ae_bundle_installed(mut));
+    AE_CHECK("checkout bundle target refuses a symlinked parent", ae_make_refuses_alias(mut));
+    AE_CHECK("checkout bundle target stages explicit and default paths without clobber", ae_make_target_controls(mut));
     failures += ae_bundle_controls(mut);
     snprintf(cur, sizeof(cur), "%s/current-bin", mut);
     snprintf(lastgood, sizeof(lastgood), "%s/%s", mut,
