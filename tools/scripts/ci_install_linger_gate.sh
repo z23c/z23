@@ -32,7 +32,7 @@ gate_die()  { echo "ci-install-linger: FAIL: $*" >&2; exit 1; }
 USER_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT=""
 UNIT_FILE=""
-UNIT_ID=""
+UNIT_FD=""
 UNIT_DIGEST=""
 UNIT_DIR=""
 START_ATTEMPTED=0
@@ -46,8 +46,8 @@ systemctl --user show-environment >/dev/null 2>&1 || gate_skip "no systemd --use
 
 # ── Teardown (armed before we create anything) ──────────────────────
 unit_owned() {
-    [ -n "$UNIT_ID" ] && [ -f "$UNIT_FILE" ] && [ ! -L "$UNIT_FILE" ] &&
-        [ "$(stat -Lc '%d:%i' -- "$UNIT_FILE" 2>/dev/null)" = "$UNIT_ID" ] &&
+    [ -n "$UNIT_FD" ] && [ -f "$UNIT_FILE" ] && [ ! -L "$UNIT_FILE" ] &&
+        [[ "$UNIT_FILE" -ef "/dev/fd/$UNIT_FD" ]] &&
         [ "$(sha256sum -- "$UNIT_FILE" 2>/dev/null | cut -d' ' -f1)" = "$UNIT_DIGEST" ]
 }
 cleanup() {
@@ -76,6 +76,7 @@ cleanup() {
             echo "ci-install-linger: unit removal refused; retaining fixture: $UNIT_FILE" >&2
             exit 1
         fi
+        exec {UNIT_FD}<&-
         systemctl --user daemon-reload >/dev/null 2>&1 || true
         UNIT_FILE=""
     fi
@@ -113,9 +114,9 @@ load_state="$(timeout -k 2s 10s systemctl --user show "$UNIT" -p LoadState --val
 [ "$load_state" = not-found ] || gate_die "unit name already loaded"
 ( set -o noclobber; : > "$UNIT_CANDIDATE" ) || gate_die "unit creation failed"
 UNIT_FILE="$UNIT_CANDIDATE"
-UNIT_ID="$(stat -Lc '%d:%i' -- "$UNIT_FILE")" || gate_die "unit identity unavailable"
+exec {UNIT_FD}<>"$UNIT_FILE" || gate_die "unit identity unavailable"
 UNIT_DIGEST="$(sha256sum -- "$UNIT_FILE" | cut -d' ' -f1)" || gate_die "unit digest unavailable"
-cat > "$UNIT_FILE" <<EOF || gate_die "unit write failed"
+cat >&"$UNIT_FD" <<EOF || gate_die "unit write failed"
 [Unit]
 Description=Z23 CI install proof (isolated regtest; safe to remove)
 StartLimitIntervalSec=0
