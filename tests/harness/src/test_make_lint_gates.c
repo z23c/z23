@@ -771,6 +771,22 @@ static int t_receipt_root(void)
 #define OBSERVATION_CHILD_GROUP_TIMEOUT_S "300"
 
 #if defined(__linux__)
+static void observation_failure(const struct zcl_devloop_process_result *run,
+                                const char *expectation)
+{
+    size_t n = strnlen(run->output, sizeof(run->output));
+    size_t start = n > 4096 ? n - 4096 : 0;
+    fprintf(stderr, "observation child: expectation=%s exit=%d signal=%d timeout=%d "
+        "cancelled=%d truncated=%d output_bytes=%zu excerpt_start=%zu\n%.*s\n",
+        expectation, run->exit_code, run->term_signal, run->timed_out,
+        run->cancelled, run->output_truncated, run->output_len, start,
+        (int)(n - start), run->output + start);
+}
+#define OBSERVATION_ASSERT(condition) do { \
+    bool observation_ok = !!(condition); \
+    if (!observation_ok) observation_failure(&run, #condition); \
+    ASSERT(observation_ok); \
+} while (0)
 static bool observation_child_complete(const struct zcl_devloop_process_result *run)
 {
     return !run->timed_out && !run->cancelled && !run->output_truncated;
@@ -824,62 +840,62 @@ static int t_dev_proof_runner_observations(void)
         ASSERT(setenv("ZCL_TESTCACHE_STORE_ROOT", root, 1) == 0);
         const char *argv[] = {"/proc/self/exe", "--exact=test_hex_codec", "--jobs=1",
             "--timeout=" OBSERVATION_CHILD_GROUP_TIMEOUT_S, "--cold-audit", "--emit-observations", NULL, NULL};
-        struct zcl_devloop_process_result run;
-        ASSERT(zcl_devloop_process_run_fd(".", image_fd, argv, OBSERVATION_CHILD_DEADLINE_MS, &run));
-        ASSERT(observation_child_complete(&run));
-        ASSERT(strstr(run.output, "groups_ran=1 groups_cached=0") != NULL);
-        ASSERT(strstr(run.output, "groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0") != NULL);
-        ASSERT_EQ(run.exit_code, 0);
-        ASSERT(strstr(run.output, "mode=complete eligible=1 emitted=1 unqualified=0 refused=0 complete=1") != NULL);
+        struct zcl_devloop_process_result run = {0};
+        OBSERVATION_ASSERT(zcl_devloop_process_run_fd(".", image_fd, argv, OBSERVATION_CHILD_DEADLINE_MS, &run));
+        OBSERVATION_ASSERT(observation_child_complete(&run));
+        OBSERVATION_ASSERT(strstr(run.output, "groups_ran=1 groups_cached=0") != NULL);
+        OBSERVATION_ASSERT(strstr(run.output, "groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0") != NULL);
+        OBSERVATION_ASSERT(run.exit_code == 0);
+        OBSERVATION_ASSERT(strstr(run.output, "mode=complete eligible=1 emitted=1 unqualified=0 refused=0 complete=1") != NULL);
         argv[5] = "--collect-observations";
         argv[1] = "--exact=test_make_lint_gates_partition";
-        ASSERT(zcl_devloop_process_run_fd(".", image_fd, argv, OBSERVATION_CHILD_DEADLINE_MS, &run));
-        ASSERT(observation_child_complete(&run));
-        ASSERT(strstr(run.output, "groups_ran=1 groups_cached=0") != NULL);
-        ASSERT(strstr(run.output, "groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0") != NULL);
-        ASSERT_EQ(run.exit_code, 0);
-        ASSERT(strstr(run.output, "OBSERVATION UNQUALIFIED group=test_make_lint_gates") != NULL);
-        ASSERT(strstr(run.output, "eligible=0 emitted=0 unqualified=1 refused=0 complete=0") != NULL);
+        OBSERVATION_ASSERT(zcl_devloop_process_run_fd(".", image_fd, argv, OBSERVATION_CHILD_DEADLINE_MS, &run));
+        OBSERVATION_ASSERT(observation_child_complete(&run));
+        OBSERVATION_ASSERT(strstr(run.output, "groups_ran=1 groups_cached=0") != NULL);
+        OBSERVATION_ASSERT(strstr(run.output, "groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0") != NULL);
+        OBSERVATION_ASSERT(run.exit_code == 0);
+        OBSERVATION_ASSERT(strstr(run.output, "OBSERVATION UNQUALIFIED group=test_make_lint_gates") != NULL);
+        OBSERVATION_ASSERT(strstr(run.output, "eligible=0 emitted=0 unqualified=1 refused=0 complete=0") != NULL);
         argv[5] = "--emit-observations";
-        ASSERT(zcl_devloop_process_run_fd(".", image_fd, argv, OBSERVATION_CHILD_DEADLINE_MS, &run));
-        ASSERT(observation_child_complete(&run));
-        ASSERT(strstr(run.output, "groups_ran=1 groups_cached=0") != NULL);
-        ASSERT(strstr(run.output, "groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0") != NULL);
-        ASSERT_EQ(run.exit_code, 1);
-        ASSERT(strstr(run.output, "observation_input_closure_incomplete") != NULL);
+        OBSERVATION_ASSERT(zcl_devloop_process_run_fd(".", image_fd, argv, OBSERVATION_CHILD_DEADLINE_MS, &run));
+        OBSERVATION_ASSERT(observation_child_complete(&run));
+        OBSERVATION_ASSERT(strstr(run.output, "groups_ran=1 groups_cached=0") != NULL);
+        OBSERVATION_ASSERT(strstr(run.output, "groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0") != NULL);
+        OBSERVATION_ASSERT(run.exit_code == 1);
+        OBSERVATION_ASSERT(strstr(run.output, "observation_input_closure_incomplete") != NULL);
         argv[1] = "--exact=test_event_log_benchmark";
         argv[5] = "--collect-observations";
         argv[6] = "--activate-proof-contracts";
-        ASSERT(observation_bounded_event_log(argv, image_fd, &run));
-        ASSERT(observation_child_complete(&run));
-        ASSERT(strstr(run.output,
+        OBSERVATION_ASSERT(observation_bounded_event_log(argv, image_fd, &run));
+        OBSERVATION_ASSERT(observation_child_complete(&run));
+        OBSERVATION_ASSERT(strstr(run.output,
             "event_log: bounded push proof completed: counts=136,64,64 flushes=0,0,2") != NULL);
-        ASSERT(strstr(run.output, "groups_ran=1 groups_cached=0") != NULL);
-        ASSERT(strstr(run.output, "groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0") != NULL);
-        ASSERT_EQ(run.exit_code, 0);
-        ASSERT(strstr(run.output, "eligible=1 emitted=1 unqualified=0 refused=0 complete=1") != NULL);
+        OBSERVATION_ASSERT(strstr(run.output, "groups_ran=1 groups_cached=0") != NULL);
+        OBSERVATION_ASSERT(strstr(run.output, "groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0") != NULL);
+        OBSERVATION_ASSERT(run.exit_code == 0);
+        OBSERVATION_ASSERT(strstr(run.output, "eligible=1 emitted=1 unqualified=0 refused=0 complete=1") != NULL);
         argv[1] = "--exact=test_build_profile";
         argv[6] = NULL;
-        ASSERT(!testcache_group_is_denylisted("test_build_profile"));
-        ASSERT(zcl_devloop_process_run_fd(".", image_fd, argv, OBSERVATION_CHILD_DEADLINE_MS, &run));
-        ASSERT(observation_child_complete(&run));
-        ASSERT_EQ(run.exit_code, 1);
-        ASSERT(strstr(run.output, "groups_ran=1 groups_cached=0") != NULL);
-        ASSERT(strstr(run.output, "groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0") != NULL);
-        ASSERT(strstr(run.output, "OBSERVATION REFUSE group=test_build_profile reason=observation_input_closure_incomplete") != NULL);
-        ASSERT(strstr(run.output, "eligible=0 emitted=0 unqualified=0 refused=1 complete=0") != NULL);
+        OBSERVATION_ASSERT(!testcache_group_is_denylisted("test_build_profile"));
+        OBSERVATION_ASSERT(zcl_devloop_process_run_fd(".", image_fd, argv, OBSERVATION_CHILD_DEADLINE_MS, &run));
+        OBSERVATION_ASSERT(observation_child_complete(&run));
+        OBSERVATION_ASSERT(run.exit_code == 1);
+        OBSERVATION_ASSERT(strstr(run.output, "groups_ran=1 groups_cached=0") != NULL);
+        OBSERVATION_ASSERT(strstr(run.output, "groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0") != NULL);
+        OBSERVATION_ASSERT(strstr(run.output, "OBSERVATION REFUSE group=test_build_profile reason=observation_input_closure_incomplete") != NULL);
+        OBSERVATION_ASSERT(strstr(run.output, "eligible=0 emitted=0 unqualified=0 refused=1 complete=0") != NULL);
         argv[1] = "--exact=test_hex_codec";
         ASSERT_EQ(test_rm_rf_recursive(store), 0);
         FILE *file = fopen(store, "wb");
-        ASSERT(file != NULL);
-        ASSERT(fclose(file) == 0);
-        ASSERT(zcl_devloop_process_run_fd(".", image_fd, argv, OBSERVATION_CHILD_DEADLINE_MS, &run));
-        ASSERT(observation_child_complete(&run));
-        ASSERT(strstr(run.output, "groups_ran=1 groups_cached=0") != NULL);
-        ASSERT(strstr(run.output, "groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0") != NULL);
-        ASSERT_EQ(run.exit_code, 1);
-        ASSERT(strstr(run.output, "OBSERVATION REFUSE group=test_hex_codec") != NULL);
-        ASSERT(strstr(run.output, "eligible=1 emitted=0 unqualified=0 refused=1 complete=0") != NULL);
+        OBSERVATION_ASSERT(file != NULL);
+        OBSERVATION_ASSERT(fclose(file) == 0);
+        OBSERVATION_ASSERT(zcl_devloop_process_run_fd(".", image_fd, argv, OBSERVATION_CHILD_DEADLINE_MS, &run));
+        OBSERVATION_ASSERT(observation_child_complete(&run));
+        OBSERVATION_ASSERT(strstr(run.output, "groups_ran=1 groups_cached=0") != NULL);
+        OBSERVATION_ASSERT(strstr(run.output, "groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0") != NULL);
+        OBSERVATION_ASSERT(run.exit_code == 1);
+        OBSERVATION_ASSERT(strstr(run.output, "OBSERVATION REFUSE group=test_hex_codec") != NULL);
+        OBSERVATION_ASSERT(strstr(run.output, "eligible=1 emitted=0 unqualified=0 refused=1 complete=0") != NULL);
     }
     TEST_END
     if (image_fd >= 0) (void)close(image_fd);
@@ -891,6 +907,7 @@ static int t_dev_proof_runner_observations(void)
     (void)test_rm_rf_recursive(root);
     return failures;
 }
+#undef OBSERVATION_ASSERT
 #endif
 
 /* Per-process sandbox-root override. A shard group chdir()s into its private
