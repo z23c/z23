@@ -296,6 +296,22 @@ static int case_healthy(const struct gate_env *g)
     return failures;
 }
 
+#if defined(__linux__)
+static int case_owned_exit(const struct gate_env *g)
+{
+    int failures = 0;
+    char owner[PATH_MAX], launcher[PATH_MAX], log[PATH_MAX];
+    if (snprintf(owner, sizeof(owner), "%s/build/bin/c3-supervised-owner", g->root) >= (int)sizeof(owner) ||
+        snprintf(launcher, sizeof(launcher), "%s/build/bin/process-group-exec", g->root) >= (int)sizeof(launcher) ||
+        snprintf(log, sizeof(log), "%s/owned.log", g->artifacts) >= (int)sizeof(log)) return 1;
+    const char *argv[] = { owner, launcher, log, "/bin/true", NULL };
+    int rc = zcl_spawn_capture(argv, g->out, g->cap, 30000);
+    SPG_CHECK("owned launch returns clean completion", rc == 0 &&
+              strstr(g->out, "START\n") && strstr(g->out, "DONE CLEAN 0\n"));
+    return failures;
+}
+#endif
+
 static bool make_artifact_dir(const char *root, char *artifacts, size_t cap)
 {
     snprintf(artifacts, cap, "%s/build/scratch/peergate_XXXXXX", root);
@@ -328,6 +344,10 @@ static int stopwatch_peer_gate_run(void)
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
         failures += cases[i](&g);
+
+#if defined(__linux__)
+    failures += case_owned_exit(&g);
+#endif
 
     const char *rm[] = { "/bin/rm", "-rf", artifacts, NULL };
     char rmout[256];
