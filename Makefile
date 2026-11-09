@@ -7075,8 +7075,8 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint-preflight: $(LINT_PREFLIGHT_GATES)
 	@echo "lint-preflight: OK (serial)"
 else
-lint-preflight: $(Z23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN) $(LINTC_TOOL) $(TOOLGEN_BIN)
-	@$(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_PREFLIGHT_GATES)
+lint-preflight: $(Z23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN) $(LINTC_TOOL) $(TOOLGEN_BIN) $(CAPABILITY_INVENTORY_TOOL)
+	@ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_PREFLIGHT_GATES)
 	@echo "lint-preflight: OK"
 endif
 
