@@ -13,15 +13,14 @@
 
 app.copy day                  # Installed seed receives a fresh private object containing only app and datadir; its optional day read cannot observe app.copy input.
 app.copy release_root         # Installed adopt receives a fresh private object containing release_root from the seed result and datadir, never the app.copy input.
-app.library confirm           # Library constructs a fresh private app.get input and sets confirm=true only after the native owner confirms its returned plan.
-app.library plan_id           # Library copies plan_id from the returned app.get plan into a fresh private confirmation input; app.library has no input fields.
-app.library token             # Library copies token from the returned app.get plan into a fresh private confirmation input; app.library has no input fields.
-app.library name              # Library constructs this name from the selected saved row for a private personalization request; app.library has no input fields.
-app.library expected_revision # Library constructs this revision from the selected saved row for a private personalization request; app.library has no input fields.
-app.library copy              # Personalization constructs a private backend request from its verified selection; app.library has no input fields.
-app.library datadir           # Personalization constructs a private backend request from its verified selection; app.library has no input fields.
-app.library version           # Personalization constructs a private backend request from its verified selection; app.library has no input fields.
-app.library expected_head     # Personalization constructs a private backend request from its verified selection; app.library has no input fields.
+app.library confirm           # Native owner flows construct private confirmation requests; this is not a library input.
+app.library plan_id           # Native owner flows bind private confirmation requests to their plan; this is not a library input.
+app.library token             # Typed publish snapshot supplies no caller input and generates a fresh private token.
+app.library name              # Personalization derives this from the selected saved row; this is not a library input.
+app.library expected_revision # Personalization derives this from the selected saved row; this is not a library input.
+app.library copy              # Personalization derives this from the verified selection; this is not a library input.
+app.library version           # Personalization derives this from the verified selection; this is not a library input.
+app.library expected_head     # Personalization derives this from the verified selection; this is not a library input.
 app.messaging.read confirm    # awn_run() (engine/controllers/src/app_write_native_handlers.c) reads confirm only under `leaf->plan_commit`; the message-read leaf sets .plan_commit = false, so the read is dead here. The ZNAM write leaves that DO set it all declare confirm.
 zcode.leaderboard.all day     # zl_leaderboard() (tools/command/native_zcode_leaderboard_command.c) reads day to pin "today" for the period window; the all-time period's window is unbounded, so day cannot move this leaf's answer. daily/weekly/monthly share the function and declare day.
 zcode.network.providers kind  # handler injects fixed kind=provider into a private RPC object; kind is never read from request->input.

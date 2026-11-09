@@ -198,6 +198,23 @@ static bool ar_default_parent(struct receive_work *w, bool create,
     return ok || ar_fail(reply, "UNSAFE_RECEIVE_PARENT",
         "Default receive needs a canonical owner-controlled ancestor, private existing datadir and safe missing components.");
 }
+bool app_receive_profile_validate(const char *datadir, char *anchor, size_t anchor_cap,
+    struct zcl_command_reply *reply)
+{
+    char parent[AR_PATH];
+    if (!reply || !datadir || datadir[0] != '/' || strlen(datadir) >= AR_PATH || !anchor)
+        return reply ? ar_fail(reply, "BAD_INPUT", "An absolute bounded app profile is required.") : false;
+    struct receive_work *w = zcl_calloc(1, sizeof(*w), "receive-profile");
+    if (!w) return ar_fail(reply, "OUT_OF_MEMORY", "Cannot validate the app profile.");
+    memcpy(w->datadir, datadir, strlen(datadir) + 1);
+    bool ok = ar_default_parent(w, false, reply);
+    if (ok && !ar_parent_anchor(datadir, parent))
+        ok = ar_fail(reply, "UNSAFE_RECEIVE_PARENT", "The app profile ancestor changed during validation.");
+    free(w);
+    if (!ok) return false;
+    if (strlen(parent) >= anchor_cap) return ar_fail(reply, "BAD_INPUT", "The profile ancestor is too long.");
+    memcpy(anchor, parent, strlen(parent) + 1); return true;
+}
 static bool ar_pick_verified(struct receive_work *w,
     const struct json_value *data, struct zcl_command_reply *reply)
 {
@@ -316,7 +333,8 @@ static bool ar_preview_receipt_bound(const struct receive_work *w,
         "The escaped receive receipt exceeds the preview reserve; shorten the copy or datadir path, or receive without preview.");
 }
 static bool ar_plan(const struct zcl_command_request *request,
-    struct receive_work *w, struct zcl_command_reply *reply)
+    struct receive_work *w, struct zcl_command_reply *reply,
+    const struct app_receive_identity *expected)
 {
     struct zcl_command_reply plan;
     zcl_command_reply_init(&plan, "zcl.zcode_package_bundle_receive.v1");
@@ -326,6 +344,16 @@ static bool ar_plan(const struct zcl_command_request *request,
     else if (!ok) app_confirm_forward_failure(reply, &plan);
     else if (!(ok = ar_plan_fields(w, &plan.data)))
         ar_fail(reply, "RECEIVE_PLAN_INVALID", "The verified receive plan cannot be displayed exactly.");
+    if (ok && expected) {
+        uint8_t release[32], package[32], publisher[33];
+        ok = zcl_hex_decode_lower(w->release, release, sizeof(release)) &&
+            zcl_hex_decode_lower(w->package, package, sizeof(package)) &&
+            zcl_hex_decode_lower(w->publisher, publisher, sizeof(publisher)) &&
+            !memcmp(release, expected->release_id, sizeof(release)) &&
+            !memcmp(package, expected->package_root, sizeof(package)) &&
+            !memcmp(publisher, expected->publisher, sizeof(publisher));
+        if (!ok) ar_fail(reply, "RECEIVE_IDENTITY_MISMATCH", "The verified receive identity differs from the selected offer.");
+    }
     if (ok) ok = ar_preview_receipt_bound(w, &plan.data, reply);
     zcl_command_reply_free(&plan);
     return ok;
@@ -467,7 +495,7 @@ bool zcl_test_app_receive_progress(const struct zcl_command_request *request,
 #endif
 static void ar_commit_preview(const struct zcl_command_request *request,
     struct receive_work *w, struct zcl_command_reply *reply,
-    app_confirm_presenter presenter, void *context)
+    app_confirm_presenter presenter, void *context, const char *worker_path)
 {
     bool offer = ar_progress_commit(request, w, reply, presenter, context
 #ifdef ZCL_TESTING
@@ -477,21 +505,30 @@ static void ar_commit_preview(const struct zcl_command_request *request,
     const char *stage = zcl_package_copy_str(&reply->data, "stage");
     if (offer && w->preview && reply->status == ZCL_COMMAND_STATUS_PASSED &&
         reply->exit_code == 0 && stage && !strcmp(stage, "commit"))
-        app_receive_flow_run(w->datadir, reply, presenter, context);
+    {
+#ifdef ZCL_TESTING
+        if (worker_path) app_receive_flow_run_test(w->datadir, reply, presenter, context, worker_path);
+        else
+#else
+        (void)worker_path;
+#endif
+            app_receive_flow_run(w->datadir, reply, presenter, context);
+    }
 }
 static void ar_run(const struct zcl_command_request *request, struct zcl_command_reply *reply,
-    app_confirm_presenter presenter, void *context)
+    const struct app_receive_identity *expected, app_confirm_presenter presenter, void *context,
+    const char *worker_path)
 {
     if (!request || !reply) return;
     struct receive_work *w = zcl_calloc(1, sizeof(*w), "app-receive");
     if (!w) { ar_fail(reply, "OUT_OF_MEMORY", "Cannot prepare receive confirmation."); return; }
     json_init(&w->receiver_args); json_set_object(&w->receiver_args);
     if (!ar_inputs(w, request->input)) ar_fail(reply, "BAD_INPUT", "Provide an absolute file; optional datadir/destination are absolute, day is nonnegative, and preview is boolean.");
-    else if (ar_paths(request, w, reply) && ar_plan(request, w, reply)) {
+    else if (ar_paths(request, w, reply) && ar_plan(request, w, reply, expected)) {
         char why[256] = {0};
         if (!ar_model(w, why, sizeof(why)) || !app_confirm_show(&w->view, presenter, context, why, sizeof(why)))
             ar_fail(reply, "CONFIRMATION_UNAVAILABLE", "The exact receive plan could not be displayed; nothing was kept.");
-        else if (w->view.confirmed) ar_commit_preview(request, w, reply, presenter, context);
+        else if (w->view.confirmed) ar_commit_preview(request, w, reply, presenter, context, worker_path);
         else if (!json_push_kv_str(&reply->data, "status", "canceled"))
             ar_fail(reply, "OUT_OF_MEMORY", "Cannot describe cancellation; nothing was kept.");
     }
@@ -502,12 +539,30 @@ static void ar_run(const struct zcl_command_request *request, struct zcl_command
 void zcl_native_handle_app_receive(const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
-    ar_run(request, reply, NULL, NULL);
+    ar_run(request, reply, NULL, NULL, NULL, NULL);
+}
+void zcl_native_app_receive_expected(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const struct app_receive_identity *expected)
+{
+    if (!expected) { if (reply) ar_fail(reply, "BAD_INPUT", "Expected receive identity is required."); return; }
+    ar_run(request, reply, expected, NULL, NULL, NULL);
 }
 #if defined(ZCL_TESTING)
 void zcl_test_app_receive_run(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context)
 {
-    if (presenter) ar_run(request, reply, presenter, context);
+    if (presenter) ar_run(request, reply, NULL, presenter, context, NULL);
+}
+void zcl_test_app_receive_expected(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const struct app_receive_identity *expected,
+    app_confirm_presenter presenter, void *context)
+{
+    if (presenter && expected) ar_run(request, reply, expected, presenter, context, NULL);
+}
+void zcl_test_app_receive_expected_worker(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const struct app_receive_identity *expected,
+    app_confirm_presenter presenter, void *context, const char *worker_path)
+{
+    if (presenter && expected && worker_path) ar_run(request, reply, expected, presenter, context, worker_path);
 }
 #endif

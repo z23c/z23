@@ -1655,6 +1655,25 @@ static int test_double_dash_target_flags_bind_client(void)
     return failures;
 }
 
+static int test_library_profile_and_node_arguments(void)
+{
+    int failures = 0;
+    char previous[512]; (void)snprintf(previous, sizeof(previous), "%s", zcl_native_command_datadir());
+    int previous_port = zcl_native_command_rpc_port();
+    TEST_CASE("app.library keeps explicit app input separate from the client target") {
+        char wire[8192]; int rc = 0;
+        const char *separate[] = {"library", "--input={\"datadir\":\"relative/profile\"}"};
+        ASSERT(uniform_cli_in("app", "/fixture/node", separate, 2, wire, sizeof(wire), &rc));
+        ASSERT(rc != 0 && strstr(wire, "BAD_INPUT"));
+        ASSERT_STR_EQ(zcl_native_command_datadir(), "/fixture/node");
+        const char *dual[] = {"library", "--datadir=relative/profile"};
+        ASSERT(uniform_cli_in("app", "/fixture/node", dual, 2, wire, sizeof(wire), &rc));
+        ASSERT(rc != 0 && strstr(wire, "BAD_INPUT"));
+        ASSERT_STR_EQ(zcl_native_command_datadir(), "relative/profile");
+    } TEST_END
+    zcl_native_bridge_bind_rpc(previous, previous_port);
+    return failures;
+}
 static int test_space_separated_value_flag_is_refused_with_hint(void)
 {
     int failures = 0;
@@ -4887,6 +4906,7 @@ int test_native_api_contract(void)
     failures += test_uniform_input_file_refusals();
     failures += test_format_flag_binds_leaf_input();
     failures += test_double_dash_target_flags_bind_client();
+    failures += test_library_profile_and_node_arguments();
     failures += test_space_separated_value_flag_is_refused_with_hint();
     failures += test_raw_native_pipeline_mines_exact_signed_bytes();
     failures += test_app_write_native_e2e();

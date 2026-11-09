@@ -50,9 +50,9 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_COMMAND(
     "app.library", "app", "", "My Apps",
-    "Browse installed, saved and public apps in a native window. Opening revalidates the displayed choice; stale choices refuse without substitution.",
-    16384, "apps,library,desktop,kept",
-    "zcl.command.empty_input.v1", "zcl.app_open.v1", "", "", "z23 app library",
+    "Browse saved apps and node advertisements. Review a verified offer before native Receive asks for owner approval.",
+    32768, "apps,library,desktop,kept,discover",
+    "zcl.app_library.input.v1", "zcl.app_open.v1", "datadir", "", "z23 app library",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,

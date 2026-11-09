@@ -27,6 +27,7 @@
 #include "util/fleet_role_check.h"
 
 #include "controllers/board_site_controller.h"
+#include "base/hex.h"
 #include "controllers/wiki_site_controller.h"
 #include "net/site_routes.h"
 
@@ -41,6 +42,7 @@
 #include "session/fleet_board_proto.h"
 
 #include <string.h>
+#include <stdlib.h>
 
 #define BS_RESP_CAP 131072
 static uint8_t g_resp[BS_RESP_CAP];
@@ -870,6 +872,109 @@ static int test_board_site_post_page_old_post(void)
     return failures;
 }
 
+static int test_board_site_apps(void)
+{
+    int failures = 0;
+    TEST("board site: app catalog exposes only verified public frames") {
+        struct node_db db = {0};
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed[32], pk[32];
+        bs_identity(7, seed, pk);
+        int64_t now = 1800000000;
+        board_site_set_now_for_testing(now);
+        struct fleet_board_post old, newer, priv, expired;
+        bs_compose(&old, FLEET_BOARD_KIND_OFFER, FLEET_BOARD_SCOPE_PUBLIC,
+                   "apps", "lane", "old", now - 100, 1000);
+        ASSERT(bsp_sign_ingest(&db, &old, seed, pk, now - 100));
+        bs_compose(&newer, FLEET_BOARD_KIND_OFFER, FLEET_BOARD_SCOPE_PUBLIC,
+                   "apps", "lane", "new", now - 1, 1000);
+        ASSERT(bsp_sign_ingest(&db, &newer, seed, pk, now - 1));
+        for (int i = 0; i < 3; i++) {
+            struct fleet_board_post middle;
+            char text[16];
+            snprintf(text, sizeof(text), "middle%d", i);
+            bs_compose(&middle, FLEET_BOARD_KIND_OFFER, FLEET_BOARD_SCOPE_PUBLIC,
+                       "apps", "lane", text, now - 20 + i, 1000);
+            ASSERT(bsp_sign_ingest(&db, &middle, seed, pk, now - 20 + i));
+        }
+        bs_compose(&priv, FLEET_BOARD_KIND_OFFER, FLEET_BOARD_SCOPE_FLEET,
+                   "", "lane", "private", now - 2, 1000);
+        ASSERT(bsp_sign_ingest(&db, &priv, seed, pk, now - 2));
+        bs_compose(&expired, FLEET_BOARD_KIND_OFFER, FLEET_BOARD_SCOPE_PUBLIC,
+                   "apps", "lane", "expired", now - 500, 10);
+        ASSERT(bsp_sign_ingest(&db, &expired, seed, pk, now - 500));
+        struct db_service service = {.node_db = &db, .started = true};
+        struct app_runtime_context runtime = {.db_service = &service};
+        app_runtime_set_current(&runtime);
+        const char *resp = bs_get("/board/apps/v1", NULL);
+        ASSERT(bs_has(resp, "200 OK") && bs_has(resp, "\"incomplete\":true"));
+        const char *hex = strstr(resp, "\"frames\":[\"");
+        ASSERT(hex != NULL);
+        hex += strlen("\"frames\":[\"");
+        const char *end = strchr(hex, '"');
+        ASSERT(end && ((size_t)(end - hex) % 2u) == 0);
+        size_t bytes = (size_t)(end - hex) / 2u;
+        uint8_t wire[FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES + 5];
+        char encoded[2 * sizeof(wire) + 1];
+        ASSERT(bytes <= sizeof(wire));
+        memcpy(encoded, hex, bytes * 2u); encoded[bytes * 2u] = 0;
+        ASSERT(zcl_hex_decode(encoded, wire, bytes));
+        struct fleet_board_post decoded;
+        ASSERT(fleet_board_frame_decode_post(wire, bytes, &decoded) == FLEET_BOARD_OK);
+        ASSERT(memcmp(decoded.id, newer.id, 32) == 0);
+        wire[bytes - 1] ^= 1;
+        ASSERT(fleet_board_frame_decode_post(wire, bytes, &decoded) != FLEET_BOARD_OK);
+        for (int i = 1; i < 4; i++) {
+            hex = strstr(end, ",\"");
+            ASSERT(hex != NULL);
+            hex += 2;
+            end = strchr(hex, '"');
+            ASSERT(end && ((size_t)(end - hex) % 2u) == 0);
+            bytes = (size_t)(end - hex) / 2u;
+            ASSERT(bytes <= sizeof(wire));
+            memcpy(encoded, hex, bytes * 2u); encoded[bytes * 2u] = 0;
+            ASSERT(zcl_hex_decode(encoded, wire, bytes));
+            ASSERT(fleet_board_frame_decode_post(wire, bytes, &decoded) == FLEET_BOARD_OK);
+        }
+        char id[65], path[128];
+        fleet_board_id_to_hex(old.id, id);
+        snprintf(path, sizeof(path), "/board/apps/v1/%s", id);
+        ASSERT(bs_has(bs_get(path, NULL), "200 OK"));
+        fleet_board_id_to_hex(priv.id, id);
+        snprintf(path, sizeof(path), "/board/apps/v1/%s", id);
+        ASSERT(bs_has(bs_get(path, NULL), "404 Not Found"));
+        fleet_board_id_to_hex(expired.id, id);
+        snprintf(path, sizeof(path), "/board/apps/v1/%s", id);
+        ASSERT(bs_has(bs_get(path, NULL), "404 Not Found"));
+        ASSERT(bs_has(bs_get("/board/apps/v1?x=1", NULL), "404 Not Found"));
+        resp = bs_get("/board/apps/v1", NULL);
+        const char *content_length = strstr(resp, "Content-Length: ");
+        ASSERT(content_length != NULL);
+        unsigned long expected_length = strtoul(content_length + 16, NULL, 10);
+        size_t n = board_site_handle_request("HEAD", "/board/apps/v1", NULL, 0,
+                                             g_resp, BS_RESP_CAP - 1, NULL);
+        g_resp[n] = 0;
+        ASSERT(bs_has((char *)g_resp, "200 OK") && !bs_has((char *)g_resp, "\"frames\""));
+        content_length = strstr((char *)g_resp, "Content-Length: ");
+        ASSERT(content_length && strtoul(content_length + 16, NULL, 10) == expected_length);
+        n = board_site_handle_request("GET", "/board/apps/v1", NULL, 0,
+                                      g_resp, 256, NULL);
+        ASSERT(n > 0 && n < 256);
+        g_resp[n] = 0;
+        ASSERT(bs_has((char *)g_resp, "503 Service Unavailable"));
+        n = board_site_handle_request("POST", "/board/apps/v1", NULL, 0,
+                                      g_resp, BS_RESP_CAP - 1, NULL);
+        g_resp[n] = 0;
+        ASSERT(bs_has((char *)g_resp, "404 Not Found"));
+        app_runtime_set_current(NULL);
+        ASSERT(bs_has(bs_get("/board/apps/v1", NULL), "503 Service Unavailable"));
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    board_site_set_now_for_testing(0);
+    return failures;
+}
+
 int test_board_site(void)
 {
     int failures = 0;
@@ -985,6 +1090,7 @@ int test_board_site(void)
     } _test_next:;
     failures += test_board_site_post_page();
     failures += test_board_site_post_page_old_post();
+    failures += test_board_site_apps();
     failures += test_board_site_wiki();
     failures += test_board_site_wiki_hardening();
     failures += test_board_site_wiki_root_route();

@@ -297,6 +297,26 @@ static bool rt_attempt(struct receive_fixture *f, enum rt_decision decision)
     zcl_command_reply_free(&reply); json_free(&input);
     return ok;
 }
+static bool rt_expected_identity(struct receive_fixture *f, unsigned mismatch)
+{
+    struct app_receive_identity expected;
+    if (!zcl_hex_decode_lower(f->release, expected.release_id, sizeof(expected.release_id)) ||
+        !zcl_hex_decode_lower(f->package, expected.package_root, sizeof(expected.package_root)) ||
+        !zcl_hex_decode_lower(f->publisher, expected.publisher, sizeof(expected.publisher))) return false;
+    if (mismatch == 1) expected.release_id[0] ^= 1;
+    if (mismatch == 2) expected.package_root[0] ^= 1;
+    if (mismatch == 3) expected.publisher[0] ^= 1;
+    struct json_value input; json_init(&input);
+    if (!rt_input(&input, f)) { json_free(&input); return false; }
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    struct rt_presenter p = {.fixture = f, .decision = RT_CANCEL};
+    zcl_test_app_receive_expected(&request, &reply, &expected, rt_present, &p);
+    bool ok = !reply.error.mutated && rt_absent(f) &&
+        (mismatch ? !p.observed && rt_failed_with(&reply, "RECEIVE_IDENTITY_MISMATCH") :
+                    p.observed && rt_expected_reply(&p, &reply));
+    zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
 static bool rt_received_trust(const struct receive_fixture *f, const struct zcl_package_copy *copy)
 {
     struct zcl_package_receive_trust trust;
@@ -861,6 +881,8 @@ int test_app_receive(void)
     struct receive_fixture f;
     TEST("app.receive requires all-page native confirmation and rechecks the exact signed file") {
         ASSERT(rt_setup(&f));
+        for (unsigned mismatch = 0; mismatch <= 3; ++mismatch)
+            ASSERT(rt_expected_identity(&f, mismatch));
         for (enum rt_decision d = RT_CANCEL; d < RT_CONFIRM; ++d)
             ASSERT(rt_attempt(&f, d));
         ASSERT(rt_attempt(&f, RT_CONFIRM));

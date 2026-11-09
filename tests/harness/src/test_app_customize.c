@@ -2988,7 +2988,7 @@ static bool ast_publish_library_present(void *context, const struct zcl_present_
     (void)context; (void)copy;
     if (!zcl_present_model_validate_v1(m, why, cap)) return false;
     const char *wanted = "choose";
-    if (!strcmp(m->request_id, "library-home")) wanted = "saved";
+    if (!strcmp(m->request_id, "library-home")) wanted = "myapps";
     else if (!strcmp(m->request_id, "library-share-options")) wanted = "publish";
     else {
         for (uint32_t i = 0; i < m->action_count; ++i)
@@ -3027,7 +3027,7 @@ static bool ast_publish_library(struct ac_fixture *f, const char *version)
     struct ast_publish_library_view view = {.publish = {.f = f, .version = version}};
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.library.v1");
     int posts = ast_publish_posts;
-    zcl_test_app_library_public_at_exe(&f->env, "/fixture/z23", f->world.alice_datadir,
+    zcl_test_app_library_native_at(&f->env, "/fixture/z23", f->world.alice_datadir,
         &reply, ast_publish_library_present, &view, ast_publish_library_notice);
     bool ok = reply.status == ZCL_COMMAND_STATUS_PASSED && view.menus == 2 && view.notices == 1 &&
         ast_publish_posts == posts + 1 && ast_publish_identity_ok && json_get(&reply.data, "post_id") &&

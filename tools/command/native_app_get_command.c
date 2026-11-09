@@ -4,6 +4,7 @@
 #include "command/native_app_compose.h"
 #include "command/native_app_front_door.h"
 #include "command/native_app_offer.h"
+#include "command/native_app_get_stage.h"
 #include "command/native_dev_land_remote_shared.h"
 #include "command/native_zcode_package_copy.h"
 #include "command/app_image.h"
@@ -13,6 +14,9 @@
 #include "platform/time_compat.h"
 #include "platform/rng.h"
 #include "platform/private_directory.h"
+#include "platform/directory_compat.h"
+#include "platform/directory_transaction.h"
+#include <fcntl.h>
 #include "platform/toolchain.h"
 #include <errno.h>
 #include <stdio.h>
@@ -122,6 +126,69 @@ struct ag_one {
     struct zcl_command_reply inner;
     bool created;
 };
+
+struct ag_private_stage {
+    struct platform_directory_transaction dir;
+    int parent;
+    char anchor[AG_PATH], leaf[48];
+};
+#if !defined(_WIN32)
+static bool ag_same_stat(const struct stat *a, const struct stat *b)
+{
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino && S_ISDIR(a->st_mode) && S_ISDIR(b->st_mode);
+}
+#endif
+static bool ag_private_bound(const struct ag_private_stage *p, const char *path)
+{
+#if defined(_WIN32)
+    (void)p; (void)path; return false;
+#else
+    struct stat parent, parent_path, held, named, full;
+    return fstat(p->parent, &parent) == 0 && lstat(p->anchor, &parent_path) == 0 &&
+        ag_same_stat(&parent, &parent_path) && fstat((int)p->dir.native, &held) == 0 &&
+        fstatat(p->parent, p->leaf, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+        lstat(path, &full) == 0 && ag_same_stat(&held, &named) && ag_same_stat(&held, &full);
+#endif
+}
+static bool ag_private_create(struct ag_private_stage *p, struct ag_one *s, const char *anchor)
+{
+    memset(p, 0, sizeof(*p)); p->parent = -1; platform_directory_transaction_init(&p->dir);
+#if defined(_WIN32)
+    (void)s; (void)anchor; return false;
+#else
+    if (strlen(anchor) >= sizeof(p->anchor)) return false;
+    memcpy(p->anchor, anchor, strlen(anchor) + 1);
+    int n = snprintf(p->leaf, sizeof(p->leaf), ".app-get-%s", s->token);
+    int d = snprintf(s->dir, sizeof(s->dir), "%s/%s", anchor, p->leaf);
+    int f = snprintf(s->path, sizeof(s->path), "%s/offer.z23share", s->dir);
+    if (n <= 0 || (size_t)n >= sizeof(p->leaf) || d <= 0 || (size_t)d >= sizeof(s->dir) ||
+        f <= 0 || (size_t)f >= sizeof(s->path)) return false;
+    p->parent = open(anchor, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st;
+    if (p->parent < 0 || fstat(p->parent, &st) || st.st_uid != geteuid() || (st.st_mode & 022)) return false;
+    if (mkdirat(p->parent, p->leaf, 0700) != 0) return false;
+    s->created = true; /* later failures can leave the exclusive child behind */
+    return fsync(p->parent) == 0 &&
+        platform_directory_transaction_bootstrap_child(anchor, p->leaf, false, &p->dir) == PLATFORM_DIRECTORY_OK &&
+        ag_private_bound(p, s->dir);
+#endif
+}
+static bool ag_private_cleanup(struct ag_private_stage *p, struct ag_one *s)
+{
+    bool ok = false;
+#if defined(_WIN32)
+    (void)s;
+#else
+    if (s->created && ag_private_bound(p, s->dir)) {
+        int fd = (int)p->dir.native;
+        ok = (unlinkat(fd, "offer.z23share", 0) == 0 || errno == ENOENT) &&
+            ag_private_bound(p, s->dir) && unlinkat(p->parent, p->leaf, AT_REMOVEDIR) == 0 && fsync(p->parent) == 0;
+    }
+#endif
+    platform_directory_transaction_close(&p->dir);
+    if (p->parent >= 0) close(p->parent);
+    return ok;
+}
 
 static bool ag_stage(struct ag_one *s, int64_t timeout_s)
 {
@@ -510,6 +577,112 @@ static bool ag_hex(const char *text, size_t bytes)
     uint8_t value[33];
     return text && strlen(text) == bytes * 2u && bytes <= sizeof(value) &&
            zcl_hex_decode_lower(text, value, bytes);
+}
+
+static bool ag_row_bounded(const struct zcl_app_offer_row *r)
+{
+    const struct zcl_app_offer *o = &r->offer;
+    return memchr(o->name, 0, sizeof(o->name)) && memchr(o->root, 0, sizeof(o->root)) &&
+        memchr(o->publisher, 0, sizeof(o->publisher)) && memchr(o->carrier, 0, sizeof(o->carrier)) &&
+        memchr(o->sha256, 0, sizeof(o->sha256)) && memchr(o->onion, 0, sizeof(o->onion)) &&
+        memchr(r->post_id, 0, sizeof(r->post_id)) && memchr(r->host, 0, sizeof(r->host)) &&
+        ag_hex(r->post_id, 32) && ag_hex(r->host, 32) && zcl_app_offer_valid(o);
+}
+static bool ag_row_equal(const struct zcl_app_offer_row *a, const struct zcl_app_offer_row *b)
+{
+    const struct zcl_app_offer *x = &a->offer, *y = &b->offer;
+    return !strcmp(a->post_id, b->post_id) && !strcmp(a->host, b->host) &&
+        a->created_at == b->created_at && !strcmp(x->name, y->name) &&
+        !strcmp(x->root, y->root) && !strcmp(x->publisher, y->publisher) &&
+        !strcmp(x->carrier, y->carrier) && !strcmp(x->sha256, y->sha256) &&
+        !strcmp(x->onion, y->onion) && x->size == y->size;
+}
+static bool ag_stage_identity(const struct ag_one *s, struct app_receive_identity *identity)
+{
+    const char *release = zcl_app_inner_str(&s->inner, "release_id");
+    const char *root = zcl_app_inner_str(&s->inner, "package_root");
+    const char *publisher = zcl_app_inner_str(&s->inner, "publisher_fingerprint");
+    return ag_hex(release, 32) && ag_hex(root, 32) && ag_hex(publisher, 33) &&
+        zcl_hex_decode_lower(release, identity->release_id, 32) &&
+        zcl_hex_decode_lower(root, identity->package_root, 32) &&
+        zcl_hex_decode_lower(publisher, identity->publisher, 33);
+}
+static bool ag_consume_staged(struct ag_one *s, struct ag_private_stage *private,
+    app_get_stage_consumer consumer, void *context)
+{
+    struct zcl_command_reply *reply = s->reply;
+    bool ok = ag_fetch(s->row, s->path, AG_BUDGET_MS / 1000, &s->inner);
+    if (!ok) zcl_app_inner_fail(reply, &s->inner, false);
+    zcl_command_reply_free(&s->inner);
+    if (ok && (!ag_private_bound(private, s->dir) || !ag_hash(s->path, &s->row->offer))) {
+        zcl_package_copy_fail(reply, "SHA256_MISMATCH", false, "fetched bytes or staging identity changed", AG_COMMAND); ok = false;
+    }
+    if (ok) ok = ag_receive_plan(s);
+    struct app_receive_identity identity;
+    if (ok && !ag_stage_identity(s, &identity)) {
+        zcl_package_copy_fail(reply, "MALFORMED_INNER", false, "verified receive identity is incomplete", AG_COMMAND); ok = false;
+    }
+    if (ok && !ag_private_bound(private, s->dir)) {
+        zcl_package_copy_fail(reply, "TEMP_CHANGED", false, "the private staging directory changed", AG_COMMAND); ok = false;
+    }
+    if (ok) ok = consumer(context, s->path, &identity, reply);
+    if (!ok && reply->status == ZCL_COMMAND_STATUS_PASSED)
+        zcl_package_copy_fail(reply, "CONSUMER_FAILED", reply->error.mutated, "staged carrier consumer failed", AG_COMMAND);
+    if (reply->status != ZCL_COMMAND_STATUS_PASSED) ok = false;
+    zcl_command_reply_free(&s->inner);
+    return ok;
+}
+static bool ag_consume_one(const struct zcl_app_offer_row *row, const char *dir, const char *anchor,
+    app_get_stage_consumer consumer, void *context, struct zcl_command_reply *reply)
+{
+    uint8_t random[16]; char token[33];
+    if (!rng_host_fill(random, sizeof(random))) {
+        zcl_package_copy_fail(reply, "BAD_TOKEN", false, "cannot create a fresh staging token", AG_COMMAND); return false;
+    }
+    zcl_hex_encode(random, sizeof(random), token);
+    struct ag_one s = {.row = row, .datadir = dir, .token = token, .reply = reply};
+    struct ag_private_stage private;
+    if (!ag_private_create(&private, &s, anchor)) {
+        bool cleaned = s.created && ag_private_cleanup(&private, &s);
+        if (!s.created) { platform_directory_transaction_close(&private.dir); if (private.parent >= 0) close(private.parent); }
+        zcl_package_copy_fail(reply, "TEMP_UNAVAILABLE", s.created && !cleaned,
+            "cannot safely create private staging", s.dir);
+        return false;
+    }
+    bool ok = ag_consume_staged(&s, &private, consumer, context);
+    if (!ag_private_cleanup(&private, &s)) {
+        zcl_package_copy_fail(reply, "TEMP_CLEANUP_FAILED", true,
+            "private staging could not be safely removed", s.dir); return false;
+    }
+    return ok;
+}
+static bool ag_find_selected(const struct zcl_app_offer_row *selected,
+    struct zcl_app_offer_row *row, struct zcl_command_reply *reply)
+{
+    struct zcl_command_reply why;
+    bool ok = zcl_app_offer_exact(selected->post_id, row, &why);
+    if (!ok) zcl_app_inner_fail(reply, &why, false);
+    zcl_command_reply_free(&why);
+    if (!ok) return false;
+    if (ag_row_equal(selected, row)) return true;
+    zcl_package_copy_fail(reply, "OFFER_CHANGED", false, "the selected advertisement is no longer present", AG_COMMAND);
+    return false;
+}
+bool app_get_stage_consume(const struct zcl_app_offer_row *selected, const char *datadir,
+    app_get_stage_consumer consumer, void *context, struct zcl_command_reply *reply)
+{
+    if (!reply) return false;
+    char anchor[AG_PATH];
+    if (!selected || !consumer || !datadir || datadir[0] != '/' ||
+        !ag_row_bounded(selected)) {
+        zcl_package_copy_fail(reply, "BAD_INPUT", false, "a valid selected offer and absolute datadir are required", AG_COMMAND); return false;
+    }
+    if (!app_receive_profile_validate(datadir, anchor, sizeof(anchor), reply)) return false;
+    struct zcl_app_offer_row *row = zcl_calloc(1, sizeof(*row), "app.get.offer");
+    if (!row) { zcl_package_copy_fail(reply, "ALLOC", false, "offer allocation", AG_COMMAND); return false; }
+    bool ok = ag_find_selected(selected, row, reply);
+    if (ok) ok = ag_consume_one(row, datadir, anchor, consumer, context, reply);
+    free(row); return ok;
 }
 
 struct ag_request {

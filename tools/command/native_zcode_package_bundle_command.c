@@ -399,7 +399,8 @@ static bool zpb_store(struct zpb_receive *s, const struct zpb_keep *k)
         zcl_package_copy_fail(s->reply, "RECEIVE_STORE_REFUSED",
                               sub.error.mutated,
                               "the local package store refused the verified "
-                              "release", sub.error.message);
+                              "release", sub.error.evidence[0]
+                                  ? sub.error.evidence : sub.error.message);
     zcl_command_reply_free(&sub);
     return ok;
 }

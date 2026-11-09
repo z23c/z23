@@ -41,6 +41,7 @@
 #include "command/native_command.h"
 
 #include "controllers/zcode_site_controller.h"
+#include "base/hex.h"
 #include "views/zcode_view.h"
 
 #include "chain/chainparams.h"
@@ -49,6 +50,7 @@
 #include "keys/key_io.h"
 #include "keys/pubkey.h"
 #include "vcs/package_badge.h"
+#include "vcs/bundle_carry.h"
 #include "vcs/package_index.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_publish.h"
@@ -910,6 +912,129 @@ static int t_downloads(const char *dd, const char *root_hex,
     return failures;
 }
 
+static bool zs_slice_roundtrip(const char *dd, const char *root_hex,
+                               const uint8_t *original, uint8_t *copy)
+{
+    char path[160];
+    size_t offset = 0;
+    while (offset < VCS_PACKAGE_CHUNK_BYTES) {
+        snprintf(path, sizeof(path), "/zcode/download/%s/0/0/slice/%zu",
+                 root_hex, offset);
+        size_t n = zcode_site_handle_request("GET", path, NULL, 0, g_resp,
+                                              65536, dd);
+        if (!n || n >= 65536)
+            return false;
+        char *body = strstr((char *)g_resp, "\r\n\r\n");
+        if (!body || strncmp((char *)g_resp, "HTTP/1.1 200", 12))
+            return false;
+        body += 4;
+        size_t take = n - (size_t)(body - (char *)g_resp);
+        size_t want = VCS_PACKAGE_CHUNK_BYTES - offset;
+        if (want > 48u * 1024u) want = 48u * 1024u;
+        if (take != want || memcmp(body, original + offset, take))
+            return false;
+        memcpy(copy + offset, body, take);
+        offset += take;
+    }
+    uint8_t expected[32], actual[32];
+    return vcs_package_chunk_hash(original, VCS_PACKAGE_CHUNK_BYTES, expected) &&
+           vcs_package_chunk_hash(copy, VCS_PACKAGE_CHUNK_BYTES, actual) &&
+           memcmp(expected, actual, sizeof(actual)) == 0;
+}
+
+static int zs_slice_protocol(const char *dd, const char *root_hex,
+                             const uint8_t *bytes, uint8_t *copy)
+{
+    int failures = 0;
+    char path[180];
+    snprintf(path, sizeof(path), "/zcode/download/%s/0/0", root_hex);
+    size_t n = zcode_site_handle_request("GET", path, NULL, 0, g_resp, 65536, dd);
+    ZS_CHECK("full chunk refuses small response", n && strstr((char *)g_resp, "503 Service Unavailable"));
+    ZS_CHECK("all verified slices reconstruct full chunk", zs_slice_roundtrip(dd, root_hex, bytes, copy));
+    snprintf(path, sizeof(path), "/zcode/download/%s/0/0/slice/0", root_hex);
+    n = zcode_site_handle_request("HEAD", path, NULL, 0, g_resp, 65536, dd);
+    const char *delimiter = n ? strstr((char *)g_resp, "\r\n\r\n") : NULL;
+    ZS_CHECK("slice HEAD has no body", n && strstr((char *)g_resp, "Content-Length: 49152") &&
+             delimiter && n == (size_t)(delimiter + 4 - (char *)g_resp));
+    n = zcode_site_handle_request("POST", path, NULL, 0, g_resp, 65536, dd);
+    ZS_CHECK("slice rejects POST", n && strstr((char *)g_resp, "404 Not Found"));
+    n = zcode_site_handle_request("GET", path, NULL, 0, g_resp, 16384, dd);
+    ZS_CHECK("slice refuses small response", n && strstr((char *)g_resp, "503 Service Unavailable"));
+    const char *bad[] = {"00/0/slice/0", "0/00/slice/0", "0/0/slice/00",
+                         "0/0/slice/1048576", "0/0/slice/999999999999999999999",
+                         "0/0/slice/-1", "0/0/slice/0?x=1"};
+    bool rejected = true;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        snprintf(path, sizeof(path), "/zcode/download/%s/%s", root_hex, bad[i]);
+        n = zcode_site_handle_request("GET", path, NULL, 0, g_resp, 65536, dd);
+        if (!n || !strstr((char *)g_resp, "404 Not Found")) rejected = false;
+    }
+    ZS_CHECK("malformed slice coordinates refused", rejected);
+    return failures;
+}
+
+static bool zs_restore_and_corrupt(const char *cas, const uint8_t *bytes)
+{
+    FILE *restore = fopen(cas, "wb");
+    bool restored = restore && fwrite(bytes, 1, VCS_PACKAGE_CHUNK_BYTES, restore) == VCS_PACKAGE_CHUNK_BYTES;
+    if (restore) restored = fclose(restore) == 0 && restored;
+    FILE *f = restored ? fopen(cas, "r+b") : NULL;
+    if (!f) return false;
+    int c = fgetc(f);
+    rewind(f);
+    bool corrupt = c != EOF && fputc(c ^ 1, f) != EOF;
+    return fclose(f) == 0 && corrupt;
+}
+
+static int zs_slice_corruption(const char *dd, const char *root_hex,
+                               const uint8_t *bytes)
+{
+    int failures = 0;
+    char path[180];
+    uint8_t hash[32]; char hex[65], cas[512];
+    bool corrupt = vcs_package_chunk_hash(bytes, VCS_PACKAGE_CHUNK_BYTES, hash);
+    ZS_CHECK("slice fixture chunk hash", corrupt);
+    if (!corrupt) return failures;
+    zcl_hex_encode(hash, 32, hex);
+    snprintf(cas, sizeof(cas), "%s/zcode/cas/sha3/%02x/%s", dd, hash[0], hex);
+    FILE *extra = corrupt ? fopen(cas, "ab") : NULL;
+    bool appended = extra && fputc(42, extra) != EOF;
+    if (extra) appended = fclose(extra) == 0 && appended;
+    snprintf(path, sizeof(path), "/zcode/download/%s/0/0/slice/0", root_hex);
+    size_t n = zcode_site_handle_request("GET", path, NULL, 0, g_resp, 65536, dd);
+    ZS_CHECK("over-cap chunk refused", appended && n && strstr((char *)g_resp, "404 Not Found"));
+    corrupt = zs_restore_and_corrupt(cas, bytes);
+    snprintf(path, sizeof(path), "/zcode/download/%s/0/0/slice/0", root_hex);
+    n = zcode_site_handle_request("GET", path, NULL, 0, g_resp, 65536, dd);
+    ZS_CHECK("corrupt chunk refuses slice", corrupt && n && strstr((char *)g_resp, "500 Internal Server Error"));
+    return failures;
+}
+
+static int t_download_slices(const char *dd)
+{
+    int failures = 0;
+    uint8_t *bytes = malloc(VCS_PACKAGE_CHUNK_BYTES);
+    uint8_t *copy = malloc(VCS_PACKAGE_CHUNK_BYTES);
+    struct vcs_package_store *store = vcs_package_store_open(dd, vcs_package_store_quota_bytes());
+    uint8_t root[32];
+    bool ready = bytes && copy && store;
+    if (ready) {
+        for (size_t i = 0; i < VCS_PACKAGE_CHUNK_BYTES; i++)
+            bytes[i] = (uint8_t)(i * 31u);
+        ready = vcs_bundle_put_to_no_evict(store, bytes, VCS_PACKAGE_CHUNK_BYTES, root) == VCS_BUNDLE_OK;
+    }
+    if (store) vcs_package_store_close(store);
+    ZS_CHECK("slice fixture admitted", ready);
+    if (ready) {
+        char root_hex[65];
+        zcl_hex_encode(root, 32, root_hex);
+        failures += zs_slice_protocol(dd, root_hex, bytes, copy);
+        failures += zs_slice_corruption(dd, root_hex, bytes);
+    }
+    free(bytes); free(copy);
+    return failures;
+}
+
 /* ══ 4. HTML escaping ════════════════════════════════════════════════ */
 
 static int t_escaping(const char *dd)
@@ -1211,6 +1336,7 @@ int test_zcode_site(void)
     }
     failures += t_escaping(dd);
     failures += t_not_found(dd);
+    failures += t_download_slices(dd);
     failures += t_route_query_boundaries(dd);
     failures += t_error_length(dd);
 

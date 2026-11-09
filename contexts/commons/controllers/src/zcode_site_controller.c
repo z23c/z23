@@ -121,6 +121,8 @@ static bool zs_read_object(const char *path, size_t cap, uint8_t **out,
         return false;
     }
     size_t len = fread(buf, 1, cap, f);
+    if (len == cap)
+        (void)fgetc(f); /* Distinguish an exact-cap object from an extra byte. */
     bool ok = !ferror(f) && feof(f) && len > 0;
     fclose(f);
     if (!ok) {
@@ -613,12 +615,66 @@ static size_t zs_download_manifest(const char *zcode_dir,
     return written;
 }
 
+/* Load the manifest-committed hash for one coordinate. */
+static bool zs_chunk_hash(const char *zcode_dir, const char *root_hex,
+                          unsigned long file_index, unsigned long chunk_index,
+                          uint8_t committed[32])
+{
+    char path[4500];
+    snprintf(path, sizeof(path), "%s/manifests/%s", zcode_dir, root_hex);
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    struct vcs_package_manifest manifest;
+    vcs_package_manifest_init(&manifest);
+    bool parsed = false;
+    if (zs_read_object(path, VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES, &wire,
+                       &wire_len)) {
+        parsed = vcs_package_manifest_parse(wire, wire_len, &manifest);
+        free(wire);
+    }
+    bool valid = parsed && file_index < manifest.count &&
+                 chunk_index < manifest.files[file_index].chunk_count;
+    if (valid)
+        memcpy(committed, manifest.files[file_index].chunk_hashes + chunk_index * 32, 32);
+    vcs_package_manifest_free(&manifest);
+    return valid;
+}
+
+/* Takes ownership of verified bytes, including on an output refusal. */
+static size_t zs_chunk_response(uint8_t *bytes, size_t bytes_len,
+                                const char *root_hex, unsigned long file_index,
+                                unsigned long chunk_index, bool sliced,
+                                size_t offset, uint8_t *resp, size_t max)
+{
+    char filename[112];
+    snprintf(filename, sizeof(filename), "zcode-chunk-%.8s-%lu-%lu.bin",
+             root_hex, file_index, chunk_index);
+    if (sliced && offset >= bytes_len) {
+        free(bytes);
+        return zcode_view_package_not_found(root_hex, resp, max);
+    }
+    size_t take = sliced ? bytes_len - offset : bytes_len;
+    if (sliced && take > 48u * 1024u)
+        take = 48u * 1024u;
+    size_t written = zcode_download_response(bytes + offset, take, filename,
+                                             resp, max);
+    free(bytes);
+    if (!written)
+        return zs_simple_error("503 Service Unavailable",
+                               "response capacity exceeded",
+                               "the chunk does not fit this transport's "
+                               "response budget; fetch it via the swarm "
+                               "instead — nothing was sent", resp, max);
+    return written;
+}
+
 /* Serve one chunk as an attachment, rehashed against the manifest-
  * committed SHA3-256 before a single byte is emitted (the store's
  * rehash-on-read discipline). */
 static size_t zs_download_chunk(const char *zcode_dir, const char *root_hex,
                                 const char *file_str,
-                                const char *chunk_str, uint8_t *resp,
+                                const char *chunk_str, bool sliced,
+                                size_t offset, uint8_t *resp,
                                 size_t max)
 {
     char *end = NULL;
@@ -632,26 +688,9 @@ static size_t zs_download_chunk(const char *zcode_dir, const char *root_hex,
 
     /* The manifest is the chunk-hash authority. */
     char path[4500];
-    snprintf(path, sizeof(path), "%s/manifests/%s", zcode_dir, root_hex);
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    struct vcs_package_manifest manifest;
-    vcs_package_manifest_init(&manifest);
-    bool parsed = false;
-    if (zs_read_object(path, VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES, &wire,
-                       &wire_len)) {
-        parsed = vcs_package_manifest_parse(wire, wire_len, &manifest);
-        free(wire);
-    }
-    if (!parsed || file_index >= manifest.count ||
-        chunk_index >= manifest.files[file_index].chunk_count) {
-        vcs_package_manifest_free(&manifest);
-        return zcode_view_package_not_found(root_hex, resp, max);
-    }
-    const struct vcs_package_file *file = &manifest.files[file_index];
     uint8_t committed[32];
-    memcpy(committed, file->chunk_hashes + chunk_index * 32, 32);
-    vcs_package_manifest_free(&manifest);
+    if (!zs_chunk_hash(zcode_dir, root_hex, file_index, chunk_index, committed))
+        return zcode_view_package_not_found(root_hex, resp, max);
 
     /* Read the CAS object named by the committed hash. */
     char hash_hex[65];
@@ -681,20 +720,8 @@ static size_t zs_download_chunk(const char *zcode_dir, const char *root_hex,
                                resp, max);
     }
 
-    char filename[112];
-    snprintf(filename, sizeof(filename), "zcode-chunk-%.8s-%lu-%lu.bin",
-             root_hex, file_index, chunk_index);
-    size_t written = zcode_download_response(bytes, bytes_len, filename,
-                                             resp, max);
-    free(bytes);
-    if (written == 0)
-        return zs_simple_error("503 Service Unavailable",
-                               "response capacity exceeded",
-                               "the chunk does not fit this transport's "
-                               "response budget; fetch it via the swarm "
-                               "instead — nothing was sent",
-                               resp, max);
-    return written;
+    return zs_chunk_response(bytes, bytes_len, root_hex, file_index, chunk_index,
+                             sliced, offset, resp, max);
 }
 
 static size_t zs_handle_download(const char *zcode_dir, const char *rest,
@@ -726,8 +753,72 @@ static size_t zs_handle_download(const char *zcode_dir, const char *rest,
     const char *chunk_str = csep + 1;
     if (strchr(chunk_str, '/') || !coords[0] || !chunk_str[0])
         return zcode_view_package_not_found(root_hex, resp, max);
-    return zs_download_chunk(zcode_dir, root_hex, coords, chunk_str,
-                             resp, max);
+    return zs_download_chunk(zcode_dir, root_hex, coords, chunk_str, false,
+                             0, resp, max);
+}
+
+/* The slice coordinates have one unambiguous spelling. The bound also
+ * prevents arithmetic overflow before any file is read. */
+static bool zs_slice_number(const char *s, size_t limit, size_t *out)
+{
+    size_t n = 0;
+    if (!s[0] || (s[0] == '0' && s[1]))
+        return false;
+    for (size_t i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+        unsigned digit = (unsigned)(s[i] - '0');
+        if (n > (limit - digit) / 10u)
+            return false;
+        n = n * 10u + digit;
+    }
+    *out = n;
+    return true;
+}
+
+static size_t zs_slice_request(const char *zcode_dir, const char *rest,
+                               uint8_t *resp, size_t max)
+{
+    char route[160];
+    if (strlen(rest) >= sizeof(route))
+        return zcode_view_package_not_found("invalid", resp, max);
+    memcpy(route, rest, strlen(rest) + 1);
+    char *parts[5];
+    parts[0] = route;
+    for (size_t i = 1; i < 5; i++) {
+        char *slash = strchr(parts[i - 1], '/');
+        if (!slash)
+            return zcode_view_package_not_found("invalid", resp, max);
+        *slash = 0;
+        parts[i] = slash + 1;
+    }
+    uint8_t root[32];
+    size_t file, chunk, offset;
+    if (!zcl_hex_decode_lower(parts[0], root, sizeof(root)) ||
+        strcmp(parts[3], "slice") ||
+        !zs_slice_number(parts[1], 1000000u, &file) ||
+        !zs_slice_number(parts[2], 64u, &chunk) ||
+        !zs_slice_number(parts[4], VCS_PACKAGE_CHUNK_BYTES - 1u, &offset))
+        return zcode_view_package_not_found("invalid", resp, max);
+    return zs_download_chunk(zcode_dir, parts[0], parts[1], parts[2], true,
+                             offset, resp, max);
+}
+
+static size_t zs_slice_route(const char *method, const char *path,
+                             const char *route, const char *zcode_dir, size_t body_len,
+                             uint8_t *resp, size_t max)
+{
+    bool head = method && strcmp(method, "HEAD") == 0;
+    size_t n;
+    if ((!head && (!method || strcmp(method, "GET"))) || strchr(path, '?') || body_len)
+        n = zcode_view_package_not_found("invalid", resp, max);
+    else
+        n = zs_slice_request(zcode_dir, route + 16, resp, max);
+    if (head && n) {
+        char *end = strstr((char *)resp, "\r\n\r\n");
+        return end ? (size_t)(end + 4 - (char *)resp) : 0;
+    }
+    return n;
 }
 
 /* The index, the package list, one package and one publisher. Sets *n and
@@ -833,6 +924,11 @@ size_t zcode_site_handle_request(const char *method, const char *path,
                                "datadir too long",
                                "the datadir path exceeds the route budget",
                                response, response_max);
+
+    if (strncmp(route, "/zcode/download/", 16) == 0 &&
+        strstr(route + 16, "/slice"))
+        return zs_slice_route(method, path, route, zcode_dir, body_len,
+                              response, response_max);
 
     size_t n = 0;
     if (zs_route_catalog(zcode_dir, route, query, response, response_max,

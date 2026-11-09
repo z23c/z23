@@ -22,6 +22,7 @@ struct receive_flow {
     struct json_value operations;
     const char *status;
     bool adopted, closed;
+    const char *worker_path;
     int executed; /* 0: no open worker; -1: outcome uncertain; 1: validated open. */
 };
 struct receive_progress {
@@ -248,7 +249,7 @@ static bool arf_job(struct receive_flow *f, enum app_receive_job_command command
     json_init(wire);
     struct receive_progress *p = zcl_calloc(1, sizeof(*p), "receive-flow/progress");
     if (!p) return arf_fail(f, "OUT_OF_MEMORY", "Cannot prepare the progress window.");
-    enum app_receive_job_start_result started = app_receive_job_start(NULL, command, input, &p->job);
+    enum app_receive_job_start_result started = app_receive_job_start(f->worker_path, command, input, &p->job);
     if (started != APP_RECEIVE_JOB_STARTED) {
         free(p); return arf_fail(f, "PREVIEW_WORKER_UNAVAILABLE", "Cannot start this platform's preview worker.");
     }
@@ -427,9 +428,9 @@ static bool arf_continue(struct receive_flow *f, bool chosen)
 }
 
 static void arf_run(const char *datadir, struct zcl_command_reply *reply,
-    app_confirm_presenter presenter, void *context, bool adopted)
+    app_confirm_presenter presenter, void *context, bool adopted, const char *worker_path)
 {
-    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context, .status = adopted ? "adopted" : "received", .adopted = adopted};
+    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context, .status = adopted ? "adopted" : "received", .adopted = adopted, .worker_path = worker_path};
     json_init(&f.operations); json_set_array(&f.operations);
     bool chosen = false;
     bool ok = arf_prepare(&f, datadir, &chosen);
@@ -450,40 +451,17 @@ static void arf_run(const char *datadir, struct zcl_command_reply *reply,
 void app_receive_flow_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context)
 {
-    arf_run(datadir, reply, presenter, context, false);
-}
-static const struct json_value *arf_receive_observation(const struct json_value *wire)
-{
-    const char *command = zcl_package_copy_str(wire, "command");
-    const char *status = zcl_package_copy_str(wire, "status");
-    const struct json_value *ok = json_get(wire, "ok");
-    const struct json_value *data = json_get(wire, "data");
-    return command && !strcmp(command, "zcode.package.bundle.receive") &&
-        status && !strcmp(status, "passed") && ok && ok->type == JSON_BOOL &&
-        json_get_bool(ok) && data && data->type == JSON_OBJ ? data : NULL;
-}
-void app_receive_flow_keep_observed(const char *datadir, struct zcl_command_reply *reply,
-    app_confirm_presenter presenter, void *context)
-{
-    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context,
-        .status = "received", .executed = 1};
-    const struct json_value *received = json_get(&reply->data, "receive_observation");
-    const struct json_value *build = json_get(&reply->data, "build_observation");
-    const struct json_value *opened = json_get(&reply->data, "open_observation");
-    const struct json_value *data = arf_receive_observation(received);
-    bool ok = data && build && opened &&
-        app_receive_preview_create(data, datadir, &f.preview, reply) &&
-        app_receive_preview_bind_build(f.preview, build, reply) &&
-        app_receive_preview_bind_run_copy(f.preview, opened, reply) && arf_keep(&f);
-    if (!ok) {
-        reply->error.mutated = true;
-        if (reply->status == ZCL_COMMAND_STATUS_PASSED)
-            (void)arf_fail(&f, "PREVIEW_UNAVAILABLE", "The received copy and execution must be inspected; Keep was not completed.");
-    }
-    app_receive_preview_close(f.preview);
+    arf_run(datadir, reply, presenter, context, false, NULL);
 }
 void app_adopted_flow_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context)
 {
-    arf_run(datadir, reply, presenter, context, true);
+    arf_run(datadir, reply, presenter, context, true, NULL);
 }
+#ifdef ZCL_TESTING
+void app_receive_flow_run_test(const char *datadir, struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context, const char *worker_path)
+{
+    arf_run(datadir, reply, presenter, context, false, worker_path);
+}
+#endif

@@ -328,23 +328,6 @@ bool app_receive_preview_bind_preview(struct app_receive_preview *p,
     if (!arp_state_current(p, r) || !arp_history(&p->choice, p->trust, r) || !arp_record(&p->choice, r)) return false;
     p->previewed = true; return true;
 }
-bool app_receive_preview_bind_run_copy(struct app_receive_preview *p,
-    const struct json_value *envelope, struct zcl_command_reply *r)
-{
-    if (!p) return arp_fail(r, "BAD_PREVIEW_INPUT", "preview context is required");
-    p->previewed = false;
-    const struct json_value *d = arp_envelope(envelope, "app.run.copy");
-    if (!p->built || !arp_text(d, "stage", "commit") ||
-        !arp_text(d, "copy_dir", p->choice.copy) ||
-        !arp_root_is(d, "head_version", p->choice.version) ||
-        !arp_root_is(d, "package_root", p->choice.package) ||
-        !arp_root_is(d, "image_sha3", p->choice.image) ||
-        !arp_bool(d, "executed", true) || !arp_bool(d, "settled_alive", true) ||
-        !arp_process(d))
-        return arp_fail(r, "PREVIEW_NOT_READY", "exact received build requires a settled resident process observation");
-    if (!arp_state_current(p, r) || !arp_history(&p->choice, p->trust, r) || !arp_record(&p->choice, r)) return false;
-    p->previewed = true; return true;
-}
 static bool arp_same(const struct app_selection *a, const struct app_selection *b)
 {
     return !strcmp(a->app, b->app) && !strcmp(a->copy, b->copy) && !strcmp(a->datadir, b->datadir) &&

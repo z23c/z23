@@ -20,6 +20,8 @@
  *   GET /zcode/download/<package-root>      the manifest wire (attachment)
  *   GET /zcode/download/<package-root>/<file-index>/<chunk-index>
  *                                           one chunk (attachment)
+ *   GET /zcode/download/<package-root>/<file-index>/<chunk-index>/slice/<offset>
+ *                                           at most 48 KiB of a verified chunk
  *
  * TRUTH DISCIPLINE (owner directive): every page reads through the SAME
  * contexts/commons/modules/vcs read projections the zcode.* typed commands call — the package

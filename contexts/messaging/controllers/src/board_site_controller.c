@@ -15,6 +15,7 @@
 #include "controllers/wiki_site_controller.h"
 
 #include "base/safe_alloc.h"
+#include "base/hex.h"
 
 #include "config/runtime.h"
 #include "models/fleet_board_post.h"
@@ -53,6 +54,15 @@ static int64_t bs_now(void)
  * a fixed stack buffer; the row loop stops early rather than truncate a
  * post mid-tag. */
 #define BS_PAGE_POSTS 64
+/* OFFER text is limited to the ordinary text cap, not the wiki cap. The
+ * remaining fixed and bounded signed fields fit in 512 bytes of overhead. */
+#define BS_APPS_LIMIT 4u
+#define BS_APP_FRAME_MAX (FLEET_BOARD_TEXT_MAX + FLEET_BOARD_ROOM_MAX + \
+    FLEET_BOARD_AGENT_MAX + FLEET_BOARD_SLUG_MAX + FLEET_BOARD_TITLE_MAX + \
+    FLEET_BOARD_RECEIPT_MAX + 512u)
+#define BS_APPS_BODY_MAX (BS_APPS_LIMIT * (2u * BS_APP_FRAME_MAX + 4u) + 128u)
+static_assert(BS_APPS_BODY_MAX < WIKI_SITE_BODY_MAX, "bounded catalog body");
+static_assert(BS_APPS_BODY_MAX + 256u < 65536u, "onion response bound");
 /* Long posts render as a lead, not a wall: the full signed text is one
  * `fleet board show` away. */
 #define BS_TEXT_LEAD 480
@@ -451,6 +461,111 @@ static size_t bs_route_room(struct node_db *ndb, const char *seg,
     return bs_handle_room(ndb, room, resp, max);
 }
 
+/* Machine catalog frames are the canonical signed wire, not another signed
+ * representation. Consumers still validate app-offer semantics themselves. */
+static size_t bs_apps_response(const char *status, const char *body, bool head,
+                               uint8_t *resp, size_t max)
+{
+    size_t len = strlen(body);
+    int n = snprintf((char *)resp, max,
+        "HTTP/1.1 %s\r\nContent-Type: application/json\r\n"
+        "Content-Length: %zu\r\nConnection: close\r\n\r\n", status, len);
+    if (n < 0 || (size_t)n >= max || (!head && len >= max - (size_t)n))
+        return 0;
+    if (!head) {
+        memcpy(resp + n, body, len);
+        return (size_t)n + len;
+    }
+    return (size_t)n;
+}
+
+static bool bs_apps_frame(const struct fleet_board_post *p, char *out,
+                          size_t cap, int64_t now)
+{
+    uint8_t wire[BS_APP_FRAME_MAX];
+    size_t len = 0;
+    if (p->text_len > FLEET_BOARD_TEXT_MAX ||
+        p->scope != FLEET_BOARD_SCOPE_PUBLIC ||
+        p->kind != FLEET_BOARD_KIND_OFFER || strcmp(p->room, "apps") != 0 ||
+        fleet_board_post_check_time(p, now) != FLEET_BOARD_OK ||
+        fleet_board_post_verify(p) != FLEET_BOARD_OK ||
+        fleet_board_frame_encode_post(p, wire, sizeof(wire), &len) != FLEET_BOARD_OK ||
+        len > (cap - 1u) / 2u)
+        return false;
+    zcl_hex_encode(wire, len, out);
+    return true;
+}
+
+static bool bs_apps_frames(const struct db_fleet_board_post *rows, int count,
+                           char *body, size_t *off, int64_t now)
+{
+    for (int i = 0; i < count; i++) {
+        if (i) body[(*off)++] = ',';
+        body[(*off)++] = '"';
+        if (!bs_apps_frame(&rows[i].post, body + *off,
+                           BS_APPS_BODY_MAX - *off, now))
+            return false;
+        *off += strlen(body + *off);
+        body[(*off)++] = '"';
+    }
+    return true;
+}
+
+static size_t bs_apps_reply(struct node_db *ndb, const char *id, bool head,
+                            uint8_t *response, size_t max)
+{
+    const char *missing = "{\"schema\":\"zcl.board_apps.v1\",\"error\":\"not_found\"}";
+    const char *unavailable = "{\"schema\":\"zcl.board_apps.v1\",\"error\":\"unavailable\"}";
+    struct fleet_board_filter filter = {0};
+    filter.scope_set = true;
+    filter.scope = FLEET_BOARD_SCOPE_PUBLIC;
+    filter.kind = FLEET_BOARD_KIND_OFFER;
+    (void)snprintf(filter.room, sizeof(filter.room), "apps");
+    if (id && !bs_parse_post_id(id, filter.id))
+        return bs_apps_response("404 Not Found", missing, head, response, max);
+    filter.id_set = id != NULL;
+    struct db_fleet_board_post *rows = zcl_calloc(BS_APPS_LIMIT, sizeof(*rows), "board apps");
+    char *body = zcl_calloc(BS_APPS_BODY_MAX, 1, "board apps body");
+    if (!rows || !body) {
+        free(rows); free(body);
+        return bs_apps_response("503 Service Unavailable", unavailable, head, response, max);
+    }
+    bool complete = false;
+    int64_t now = bs_now();
+    int count = db_fleet_board_list_checked(ndb, &filter, now, rows,
+                                            id ? 1u : BS_APPS_LIMIT, &complete);
+    size_t off = (size_t)snprintf(body, BS_APPS_BODY_MAX,
+        "{\"schema\":\"zcl.board_apps.v1\",\"version\":1,\"frames\":[");
+    if (complete)
+        complete = bs_apps_frames(rows, count, body, &off, now);
+    size_t n;
+    if (!complete)
+        n = bs_apps_response("503 Service Unavailable", unavailable, head, response, max);
+    else if (id && count == 0)
+        n = bs_apps_response("404 Not Found", missing, head, response, max);
+    else {
+        (void)snprintf(body + off, BS_APPS_BODY_MAX - off,
+                       "],\"incomplete\":%s}", !id && count == BS_APPS_LIMIT ? "true" : "false");
+        n = bs_apps_response("200 OK", body, head, response, max);
+        if (!n) n = bs_apps_response("503 Service Unavailable", unavailable, head, response, max);
+    }
+    free(body); free(rows);
+    return n;
+}
+
+static size_t bs_apps_route(const char *method, const char *path,
+                            const char *route, size_t rlen, size_t body_len,
+                            uint8_t *response, size_t response_max)
+{
+    bool head = method && strcmp(method, "HEAD") == 0;
+    const char *missing = "{\"schema\":\"zcl.board_apps.v1\",\"error\":\"not_found\"}";
+    if ((!head && (!method || strcmp(method, "GET") != 0)) ||
+        path[rlen] || body_len || (route[14] && route[14] != '/'))
+        return bs_apps_response("404 Not Found", missing, head, response, response_max);
+    return bs_apps_reply(app_runtime_node_db(), route[14] ? route + 15 : NULL,
+                         head, response, response_max);
+}
+
 /* ── router ─────────────────────────────────────────────────────────── */
 
 size_t board_site_handle_request(const char *method, const char *path,
@@ -474,6 +589,10 @@ size_t board_site_handle_request(const char *method, const char *path,
         rlen++;
     }
     route[rlen] = '\0';
+
+    if (strncmp(path, "/board/apps/v1", 14) == 0)
+        return bs_apps_route(method, path, route, rlen, body_len,
+                             response, response_max);
 
     /* /board/wiki is the public wiki (controllers/wiki_site_controller.h);
      * it answers every path it owns, including its own 404s. */

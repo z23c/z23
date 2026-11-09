@@ -30,6 +30,7 @@ ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_proc_foreign_writer.c", 
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/positioned_file.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/toolchain.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/explorer/modules/presentation/src/presentation.c", CAP_CLOCK|CAP_DYNLOAD|CAP_FS_WRITE|CAP_FS_READ, "the Linux presentation arm loads the selected native backend and reads/writes its asset cache")
+ZCL_MODULE_CAPABILITY("core/modules/net/src/tor_control.c", CAP_NETWORK|CAP_FS_READ, "Linux creates the control socket with SOCK_CLOEXEC")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/progress_store_directory.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("platform/modules/util/src/cpu_topology.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("platform/modules/util/src/crc32c.c", CAP_FS_WRITE, "")

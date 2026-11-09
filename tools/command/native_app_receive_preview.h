@@ -46,10 +46,6 @@ bool app_receive_preview_open_input(const struct app_receive_preview *p,
     struct json_value *out);
 bool app_receive_preview_bind_preview(struct app_receive_preview *p,
     const struct json_value *open_envelope, struct zcl_command_reply *failure);
-/* Bind the actual app.run.copy result from the same received build. This
- * requires its resident process identity and settled-alive observation. */
-bool app_receive_preview_bind_run_copy(struct app_receive_preview *p,
-    const struct json_value *run_envelope, struct zcl_command_reply *failure);
 /* Only after verified preview and a separate owner Keep action. NEW always
  * uses expected_revision=0. SAME emits no request (Close); all other existing
  * choices/corrupt records refuse. app.keep remains the atomic CAS authority. */

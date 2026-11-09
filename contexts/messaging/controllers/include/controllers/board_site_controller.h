@@ -10,6 +10,8 @@
  *   /board/room/<name>    one room, newest first (name is [a-z0-9-])
  *   /board/post/<id>      one post whole (id is 64 lowercase hex); same
  *                         visibility as the room pages, else the same 404
+ *   /board/apps/v1        bounded newest public app-offer signed frames
+ *   /board/apps/v1/<id>   one public app-offer signed frame by exact id
  *
  * The scope discipline of ZRC-0009 applies here with full force: the site
  * reads only non-fleet rows, so a fleet-private post, its room, and even its

@@ -2480,7 +2480,7 @@ static bool rr_library_present(void *context, const struct zcl_present_model_v1 
     (void)why; (void)cap;
     struct rr_consent *view = context;
     if (++view->calls > 12) return false;
-    const char *wanted = !strcmp(model->request_id, "library-home") ? "saved" :
+    const char *wanted = !strcmp(model->request_id, "library-home") ? "myapps" :
         copy_text ? "cancel" :
         model->action_count && !strcmp(model->actions[0].id, "choose") ? "choose" : "help";
     if (!strcmp(wanted, "choose")) {
@@ -2501,8 +2501,8 @@ static bool rr_cancel_personalize(struct rr_cycle *r)
     struct rr_consent view = {.cycle = r, .cancel = true}; struct zcl_command_reply reply;
     char key[4400]; bool exists = false;
     zcl_command_reply_init(&reply, "zcl.app_library.v1");
-    zcl_test_app_library_public_at(&r->bob.env, r->owner.alice_datadir, &reply,
-        rr_library_present, &view, rr_present, NULL, NULL);
+    zcl_test_app_library_native_at(&r->bob.env, NULL, r->owner.alice_datadir, &reply,
+        rr_library_present, &view, rr_present);
     bool canceled = reply.status == ZCL_COMMAND_STATUS_PASSED &&
         !strcmp(aso_string(&reply.data, "status"), "canceled") && !reply.error.mutated &&
         app_personalize_key_probe(&reply, key, sizeof(key), r->publisher, &exists) && !exists &&
@@ -2594,7 +2594,7 @@ static bool rr_personalize(struct rr_cycle *r)
     zcl_command_reply_init(&reply, "zcl.app_library.v1");
     char exe[PATH_MAX];
     if (!realpath("build/bin/z23-dev", exe)) { zcl_command_reply_free(&reply); return false; }
-    zcl_test_app_library_public_at_exe(&r->bob.env, exe, r->owner.alice_datadir, &reply,
+    zcl_test_app_library_native_at(&r->bob.env, exe, r->owner.alice_datadir, &reply,
         rr_library_present, &view, rr_present);
     bool ok = rr_setup_identity(r, &view, &reply, &setup) &&
         rr_preparation_identity(r, &reply) && rr_library_budget(&reply) &&
