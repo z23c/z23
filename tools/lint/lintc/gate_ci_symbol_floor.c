@@ -41,13 +41,12 @@ static const char k_csf_nf[] = "not found";
 
 extern char **environ;
 
-static void csf_reap(pid_t pid)
+static int csf_reap(pid_t pid)
 {
     int st;
-    for (;;) {
-        if (waitpid(pid, &st, 0) >= 0 || errno != EINTR)
-            return;
-    }
+    pid_t got;
+    do { got = waitpid(pid, &st, 0); } while (got < 0 && errno == EINTR);
+    return got == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 0 : -1;
 }
 
 /* Spawn `ldd bin` with stdout on a pipe and stderr on /dev/null. On success
@@ -58,12 +57,16 @@ static int csf_spawn_ldd(const char *bin, int *fd, pid_t *pid)
     if (pipe(p) != 0)
         return -1;
     posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_adddup2(&fa, p[1], 1);
-    posix_spawn_file_actions_addclose(&fa, p[0]);
-    posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+    int err = posix_spawn_file_actions_init(&fa);
+    if (err != 0) {
+        close(p[0]); close(p[1]);
+        return -1;
+    }
+    err = posix_spawn_file_actions_adddup2(&fa, p[1], 1);
+    if (err == 0) err = posix_spawn_file_actions_addclose(&fa, p[0]);
+    if (err == 0) err = posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
     char *av[] = { (char *)"ldd", (char *)bin, NULL };
-    int err = posix_spawnp(pid, "ldd", &fa, NULL, av, environ);
+    if (err == 0) err = posix_spawnp(pid, "ldd", &fa, NULL, av, environ);
     posix_spawn_file_actions_destroy(&fa);
     close(p[1]);
     if (err != 0) {
@@ -94,8 +97,8 @@ static int csf_count_nf(FILE *f, int *count)
     return ferror(f) ? -1 : 0;
 }
 
-/* The number of unresolved dependencies ldd reports for bin. ldd's own exit
- * status is not consulted, as in the script. 0 ok, 1 ldd absent, -1 error. */
+/* The number of unresolved dependencies ldd reports for bin. A read error,
+ * failed wait, signal or nonzero child status refuses. 1 means ldd absent. */
 static int csf_ldd_missing(const char *bin, int *missing)
 {
     int fd = -1, rc;
@@ -106,12 +109,12 @@ static int csf_ldd_missing(const char *bin, int *missing)
     FILE *f = fdopen(fd, "r");
     if (!f) {
         close(fd);
-        csf_reap(pid);
+        (void)csf_reap(pid);
         return -1;
     }
     rc = csf_count_nf(f, missing);
-    fclose(f);
-    csf_reap(pid);
+    if (fclose(f) != 0) rc = -1;
+    if (csf_reap(pid) != 0) rc = -1;
     return rc;
 }
 

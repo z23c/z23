@@ -164,31 +164,44 @@ static int cst_stub_write(const char *path, const char *script)
     return bad || chmod(path, 0700) != 0 ? -1 : 0;
 }
 
+static int cst_expect(const char *name, int got, int expected)
+{
+    if (got == expected) return 0;
+    fprintf(stderr, "ci-symbol-floor selftest: %s: got %d, expected %d\n",
+            name, got, expected);
+    return 1;
+}
+
+static int cst_stub_case(const char *dir, const char *image, const char *ldd,
+                         const char *name, const char *script, int expected)
+{
+    if (cst_stub_write(ldd, script) != 0) return cst_expect(name, -1, expected);
+    return cst_expect(name, cst_gate_child(dir, image), expected);
+}
+
 static int cst_ldd_selftest(void)
 {
-    char dir[4096], image[4096], ldd[4096];
+    char dir[4096], image[4096] = "", ldd[4096] = "";
     unsigned char bytes[CST_IMG];
     const char *const names[] = { "GLIBC_2.38" };
-    if (lint_mkdtemp(dir, sizeof dir, "symbol-floor") != 0 ||
-        snprintf(image, sizeof image, "%s/image", dir) >= (int)sizeof image ||
-        snprintf(ldd, sizeof ldd, "%s/ldd", dir) >= (int)sizeof ldd)
-        return 1;
+    if (lint_mkdtemp(dir, sizeof dir, "symbol-floor") != 0) return 1;
+    int bad = 1;
+    if (snprintf(image, sizeof image, "%s/image", dir) >= (int)sizeof image ||
+        snprintf(ldd, sizeof ldd, "%s/ldd", dir) >= (int)sizeof ldd) goto cleanup;
     FILE *f = fopen(image, "wb");
-    if (!f) return 1;
+    if (!f) goto cleanup;
     size_t n = cst_image(bytes, names, 1);
-    int bad = fwrite(bytes, 1, n, f) != n;
+    bad = fwrite(bytes, 1, n, f) != n;
     if (fclose(f) != 0) bad = 1;
-    if (!bad && cst_gate_child(dir, image) != 2) bad = 1;
-    if (!bad && (cst_stub_write(ldd, "#!/bin/sh\nexit 0\n") != 0 ||
-                 cst_gate_child(dir, image) != 0)) bad = 1;
-    if (!bad && (cst_stub_write(ldd, "#!/bin/sh\necho 'lib => not found'\n") != 0 ||
-                 cst_gate_child(dir, image) != 1)) bad = 1;
-    if (!bad && (cst_stub_write(ldd, "#!/bin/sh\nexit 9\n") != 0 ||
-                 cst_gate_child(dir, image) != 1)) bad = 1;
-    if (!bad && (cst_stub_write(ldd, "#!/bin/sh\nkill -TERM $$\n") != 0 ||
-                 cst_gate_child(dir, image) != 1)) bad = 1;
-    (void)unlink(ldd);
-    (void)unlink(image);
+    if (bad) goto cleanup;
+    bad |= cst_expect("absent ldd", cst_gate_child(dir, image), 2);
+    bad |= cst_stub_case(dir, image, ldd, "successful ldd", "#!/bin/sh\nexit 0\n", 0);
+    bad |= cst_stub_case(dir, image, ldd, "unresolved dependency", "#!/bin/sh\necho 'lib => not found'\n", 1);
+    bad |= cst_stub_case(dir, image, ldd, "nonzero ldd", "#!/bin/sh\nexit 9\n", 1);
+    bad |= cst_stub_case(dir, image, ldd, "signaled ldd", "#!/bin/sh\nkill -TERM $$\n", 1);
+cleanup:
+    if (ldd[0]) (void)unlink(ldd);
+    if (image[0]) (void)unlink(image);
     (void)rmdir(dir);
     return bad;
 }
