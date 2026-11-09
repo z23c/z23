@@ -2543,6 +2543,7 @@ struct rr_cycle {
     struct ak_fixture bob, carol;
     struct abc_world owner;
     char head[65], personal[65], edited[65], publisher[67], space[64];
+    char mcp_setup[8192];
     uint8_t keep[32];
 };
 static bool rr_text(const char *copy, const char *path, const char *expected)
@@ -2770,6 +2771,10 @@ static bool rr_personalize(struct rr_cycle *r)
     bool ok = rr_setup_identity(r, &view, &reply, &setup) &&
         rr_preparation_identity(r, &reply) && rr_library_budget(&reply) &&
         rr_setup_mcp(&setup, exe, r->owner.alice_datadir);
+    if (ok) {
+        int n = snprintf(r->mcp_setup, sizeof(r->mcp_setup), "%s", view.setup);
+        ok = n > 0 && (size_t)n < sizeof(r->mcp_setup);
+    }
     if (!ok) printf("recipient library prepare: %s %s calls=%u confirmed=%d setup=%zu prepared=%d\n",
         reply.error.code, reply.error.message, view.calls, view.confirmed, strlen(view.setup),
         json_get(&reply.data, "preparation") != NULL);
@@ -2819,19 +2824,46 @@ static bool rr_stale_change(struct rr_cycle *r)
     abc_close(&leaf);
     return ok && rr_preserved(r, r->personal);
 }
+static bool rr_edit_input(struct json_value *input, const struct rr_cycle *r,
+                          const struct json_value *setup, const char *blob)
+{
+    json_init(input); json_set_object(input);
+    return json_push_kv_str(input, "name", aso_string(setup, "name")) &&
+        json_push_kv_int(input, "expected_revision", 2) &&
+        json_push_kv_str(input, "source_version", aso_string(setup, "source_version")) &&
+        json_push_kv_str(input, "expected_head", r->head) &&
+        json_push_kv_str(input, "path", "include/boost.h") &&
+        json_push_kv_str(input, "expected_blob", blob) &&
+        json_push_kv_str(input, "content", "#define BOOST 8\n");
+}
+static bool rr_edit_transaction(struct aso_mcp *m, struct rr_cycle *r,
+                                const struct json_value *setup, const char *blob)
+{
+    struct json_value input, doc; json_init(&doc);
+    bool ok = rr_edit_input(&input, r, setup, blob) && aj_mcp_run(m, "app.edit", &input, &doc);
+    char plan[65]; const char *id = aso_string(json_get(&doc, "data"), "plan_id");
+    ok = ok && strlen(id) == 64;
+    if (ok) (void)snprintf(plan, sizeof(plan), "%s", id);
+    json_free(&doc); json_init(&doc);
+    if (ok) ok = json_push_kv_str(&input, "plan_id", plan) && json_push_kv_bool(&input, "confirm", true) &&
+        aj_mcp_run(m, "app.edit", &input, &doc);
+    const char *version = aso_string(json_get(&doc, "data"), "version");
+    ok = ok && strlen(version) == 64;
+    if (ok) (void)snprintf(r->edited, sizeof(r->edited), "%s", version);
+    json_free(&doc); json_free(&input); return ok;
+}
 static bool rr_edit(struct rr_cycle *r)
 {
     char blob[65];
     if (!rr_newer_dirty(r, "#define BOOST 6\n") ||
         !rr_read(r, 2, "#define BOOST 1\n", blob)) return false;
-    struct abc_leaf leaf;
-    bool ok = ak_request(&leaf, &r->bob, false) && json_push_kv_int(&leaf.in, "expected_revision", 2) &&
-        json_push_kv_str(&leaf.in, "expected_head", r->head) &&
-        json_push_kv_str(&leaf.in, "path", "include/boost.h") &&
-        json_push_kv_str(&leaf.in, "expected_blob", blob) &&
-        json_push_kv_str(&leaf.in, "content", "#define BOOST 8\n") && abc_plan_confirm("app.edit", &leaf);
-    (void)snprintf(r->edited, sizeof(r->edited), "%s", abc_get(&leaf, "version"));
-    abc_close(&leaf);
+    struct json_value setup; json_init(&setup);
+    char exe[PATH_MAX]; const char *a, *b, *c;
+    struct aso_mcp m = {.pid = -1, .input = -1, .output = -1};
+    bool ok = json_read(&setup, r->mcp_setup, strlen(r->mcp_setup)) &&
+        realpath("build/bin/z23-dev", exe) && rr_setup_args(&setup, exe, r->owner.alice_datadir, &a, &b, &c) &&
+        aso_mcp_spawn_args(&m, exe, a, b, c) && aso_mcp_init(&m) && rr_edit_transaction(&m, r, &setup, blob);
+    bool closed = aso_mcp_close(&m); json_free(&setup); ok = ok && closed;
     return ok && strlen(r->edited) == 64 && strcmp(r->edited, r->personal) &&
         aj_parent_is(&r->owner, r->edited, r->head) && rr_preserved(r, r->edited);
 }
