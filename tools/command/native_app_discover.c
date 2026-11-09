@@ -31,7 +31,17 @@ static void ad_rebuild_status(struct zcl_command_reply *reply, const char *statu
         zcl_package_copy_fail(reply, "REBUILD_RESULT_UNAVAILABLE", true,
             "the received copy remains; the report outcome could not be retained", "app.library");
 }
-static bool ad_rebuild_choice(struct discover *d, const struct zcl_app_rebuild *r, bool *chosen)
+static bool ad_comparison(struct app_confirm *v, bool available, size_t count)
+{
+    char text[192];
+    if (available)
+        (void)snprintf(text, sizeof(text), "%zu distinct signing keys reported matching builds; local snapshot, global total unknown.", count);
+    else
+        (void)snprintf(text, sizeof(text), "Matching reports unavailable or incomplete; global total unknown.");
+    return app_confirm_field(&v->model, "Matching reports: ", text) &&
+        app_confirm_field(&v->model, "Compared: ", "Same release, image, target and environment. Reports are self-reported; they do not prove independent builders or execution.");
+}
+static bool ad_rebuild_choice(struct discover *d, const struct zcl_app_rebuild *r, bool available, size_t count, bool *chosen)
 {
     struct app_confirm *v = zcl_calloc(1, sizeof(*v), "discover-rebuild-choice");
     if (!v) return false;
@@ -48,20 +58,32 @@ static bool ad_rebuild_choice(struct discover *d, const struct zcl_app_rebuild *
     bool shown = app_confirm_field(&v->model, "Original app: ", d->rows[d->index].offer.name) &&
         app_confirm_field(&v->model, "Original publisher: ", r->publisher) &&
         app_confirm_field(&v->model, "Original release: ", r->release_root) &&
-        app_confirm_field(&v->model, "Built image: ", r->image) &&
+        app_confirm_field(&v->model, "Built image: ", r->image) && ad_comparison(v, available, count) &&
         app_confirm_field(&v->model, "Public result: ", "Your node signs and posts this build result publicly for up to 30 days. It identifies this node and the build.") &&
         app_confirm_prepare(v, why, sizeof(why)) && app_confirm_show(v, d->receive_presenter, d->context, why, sizeof(why));
     *chosen = shown && v->confirmed;
     app_confirm_free(v); free(v); return shown;
 }
-static bool ad_rebuild_result(struct discover *d, struct zcl_command_reply *reply)
+static bool ad_result_comparison(struct app_confirm *v, const struct zcl_command_reply *reply)
+{
+    const struct json_value *n = json_get(&reply->data, "matching_rebuild_keys");
+    const char *status = zcl_package_copy_str(&reply->data, "rebuild_count_status");
+    bool available = n && n->type == JSON_INT && json_get_int(n) >= 0 && status &&
+        !strcmp(status, "local snapshot; global count unknown");
+    return ad_comparison(v, available, available ? (size_t)json_get_int(n) : 0);
+}
+static bool ad_rebuild_result(struct discover *d, struct zcl_command_reply *reply, bool posted)
 {
     const char *status = zcl_package_copy_str(&reply->data, "rebuild_report");
     struct app_confirm *v = zcl_calloc(1, sizeof(*v), "discover-rebuild-result");
-    if (!v) { app_get_rebuild_result_unavailable(reply); return false; }
+    if (!v) {
+        if (posted) app_get_rebuild_result_unavailable(reply);
+        else zcl_package_copy_fail(reply, "REBUILD_RESULT_UNAVAILABLE", true, "The kept copy remains; build comparison could not be displayed.", "app.library");
+        return false;
+    }
     zcl_present_model_init_v1(&v->model, ZCL_PRESENT_MODEL_STATUS_CARD);
     (void)snprintf(v->model.request_id, sizeof(v->model.request_id), "discover-rebuild-result");
-    (void)snprintf(v->model.title, sizeof(v->model.title), "Build result publication");
+    (void)snprintf(v->model.title, sizeof(v->model.title), "%s", posted ? "Build result publication" : "Build comparison");
     (void)snprintf(v->model.summary, sizeof(v->model.summary), "%s", status ? status : "Result unavailable; inspect before retrying.");
     v->copy_text = zcl_package_copy_str(&reply->data, "rebuild_retry");
     v->model.action_count = 4;
@@ -70,10 +92,14 @@ static bool ad_rebuild_result(struct discover *d, struct zcl_command_reply *repl
     app_confirm_action(&v->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
     app_confirm_action(&v->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "done", "Done");
     char why[256] = {0};
-    bool shown = app_confirm_field(&v->model, "Retry: ", v->copy_text ? "Press C to copy the retry command after checking the board." : "No retry is suggested.") &&
+    bool shown = ad_result_comparison(v, reply) &&
+        app_confirm_field(&v->model, "Retry: ", v->copy_text ? "Press C to copy the retry command after checking the board." : "No retry is suggested.") &&
         app_confirm_prepare(v, why, sizeof(why)) && app_confirm_show(v, d->receive_presenter, d->context, why, sizeof(why));
     app_confirm_free(v); free(v);
-    if (!shown) app_get_rebuild_result_unavailable(reply);
+    if (!shown) {
+        if (posted) app_get_rebuild_result_unavailable(reply);
+        else zcl_package_copy_fail(reply, "REBUILD_RESULT_UNAVAILABLE", true, "The kept copy remains; build comparison could not be displayed.", "app.library");
+    }
     return shown;
 }
 static void ad_rebuild_observed(void *context, const struct json_value *wire, const struct json_value *opened, struct zcl_command_reply *reply)
@@ -84,11 +110,21 @@ static void ad_rebuild_observed(void *context, const struct json_value *wire, co
 #endif
     enum app_get_rebuild_state state = app_get_rebuild_prepare(&d->rows[d->index], wire, opened, &observation);
     if (state == APP_GET_REBUILD_INVALID) { ad_rebuild_status(reply, "not published: build evidence unavailable"); return; }
-    if (state == APP_GET_REBUILD_CACHED) { ad_rebuild_status(reply, "not published: cached image"); return; }
+    struct zcl_command_reply why; size_t count = 0;
+    bool available = zcl_app_rebuild_count(&observation, &count, &why);
+    zcl_command_reply_free(&why);
+    if (state == APP_GET_REBUILD_CACHED) {
+        ad_rebuild_status(reply, "not published: cached image");
+        bool ok = (!available || json_push_kv_int(&reply->data, "matching_rebuild_keys", (int64_t)count)) &&
+            json_push_kv_str(&reply->data, "rebuild_count_status", available ? "local snapshot; global count unknown" : "incomplete: board query unavailable or capped");
+        if (!ok) zcl_package_copy_fail(reply, "REBUILD_RESULT_UNAVAILABLE", true, "The kept copy remains; build comparison could not be retained.", "app.library");
+        else (void)ad_rebuild_result(d, reply, false);
+        return;
+    }
     bool chosen = false;
-    if (!ad_rebuild_choice(d, &observation, &chosen)) { ad_rebuild_status(reply, "not published: choice unavailable"); return; }
+    if (!ad_rebuild_choice(d, &observation, available, count, &chosen)) { ad_rebuild_status(reply, "not published: choice unavailable"); return; }
     if (!chosen) { ad_rebuild_status(reply, "not published: declined"); return; }
-    if (app_get_rebuild_publish(&observation, reply)) (void)ad_rebuild_result(d, reply);
+    if (app_get_rebuild_publish(&observation, reply)) (void)ad_rebuild_result(d, reply, true);
 }
 static bool ad_host_choice(struct discover *d, struct zcl_command_reply *reply, bool *host_original)
 {

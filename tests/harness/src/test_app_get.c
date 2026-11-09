@@ -1936,14 +1936,18 @@ static int tag_stage_unsafe_parent(struct tag_world *w)
 struct tag_discover {
     int cards, receive, home, errors, detail, browser;
     bool keep, kept, cleanup_swap, oversized_share, fail_error_view, recovery_shown, host_original, host_prompted, host_identity, fail_host_result;
-    bool report_rebuild, report_prompted, close_keep, report_result, fetch_close, fetch_presenter_fail;
+    bool report_rebuild, report_prompted, report_count_visible, close_keep, report_result, fetch_close, fetch_presenter_fail;
+    bool report_result_unavailable, report_result_count, report_result_two, report_result_publish; int comparison_mode;
     bool cancel_after_error, share_canceled;
     struct zcl_command_reply *reply; char first_result[8192], image[65]; long pid; uint64_t start;
     struct tag_consumer swap;
 };
 extern void app_discover_test_evidence_hook(void (*)(const struct zcl_app_offer_row *, const struct json_value *, const struct json_value *));
 static bool tag_rebuild_controls_seen, tag_rebuild_controls_ok;
+static int tag_comparison_seed_mode;
+static bool tag_comparison_seed_ok;
 static void tag_rebuild_evidence_controls(const struct zcl_app_offer_row *, const struct json_value *, const struct json_value *);
+static void tag_comparison_seed(const struct zcl_app_offer_row *, const struct json_value *, const struct json_value *);
 static void tag_discover_diagnostic(const struct zcl_command_reply *reply, const char *continuation)
 {
     if (continuation && !strcmp(continuation, "failed")) {
@@ -2116,7 +2120,21 @@ static bool tag_discover_report_choice(struct tag_discover *d, const struct zcl_
     const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
 {
     d->report_prompted = true;
-    if (d->report_rebuild) return tag_discover_confirm(d, model, live, why, cap);
+    bool keys = false, snapshot = false, unavailable = false;
+    for (unsigned i = 0; i < model->item_count; ++i) {
+        keys |= strstr(model->items[i].value, d->comparison_mode == 2 || d->comparison_mode == 4 ? "2 distinct" : "0 distinct") != NULL;
+        snapshot |= strstr(model->items[i].value, "snapshot") != NULL;
+        unavailable |= strstr(model->items[i].value, "unavailable") != NULL;
+    }
+    if (d->report_rebuild) {
+        bool shown = tag_discover_confirm(d, model, live, why, cap);
+        d->report_count_visible = shown && keys && snapshot;
+        if (d->comparison_mode == 4) g_tag.malformed_board = true;
+        return shown;
+    }
+    uint32_t pages = 0;
+    if (!zcl_present_model_page_count_v1(model, &pages, why, cap) || !tag_discover_visit_pages(live, pages)) return false;
+    d->report_count_visible = d->comparison_mode == 3 ? unavailable && !keys : keys && snapshot;
     bool redraw = false, close = false;
     struct zcl_present_window_event_v1 event = {.outcome = ZCL_PRESENT_WINDOW_DISMISSED};
     live->owner.update(live->owner.context, &event, true, &redraw, &close); return close;
@@ -2143,6 +2161,17 @@ static bool tag_fetch_present(struct tag_discover *d, const struct zcl_present_m
         while (!close) { live->owner.update(live->owner.context, NULL, false, &redraw, &close); if (!close) platform_sleep_ms(1); }
         return true;
 }
+static void tag_discover_report_result(struct tag_discover *d, const struct zcl_present_model_v1 *model)
+{
+    d->report_result = true;
+    for (unsigned i = 0; i < model->item_count; ++i) {
+        if (strstr(model->items[i].value, "unavailable")) d->report_result_unavailable = true;
+        if (strstr(model->items[i].value, "0 distinct")) d->report_result_count = true;
+        if (strstr(model->items[i].value, "2 distinct")) d->report_result_two = true;
+    }
+    for (unsigned i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, "publish")) d->report_result_publish = true;
+}
 static bool tag_discover_receive(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
     char *why, size_t cap)
@@ -2151,7 +2180,7 @@ static bool tag_discover_receive(void *context, const struct zcl_present_model_v
     if (!zcl_present_model_validate_v1(model, why, cap)) return false;
     if (!strcmp(model->request_id, "discover-fetch-progress")) return tag_fetch_present(d, model, live);
     if (d->fail_host_result && !strcmp(model->request_id, "discover-host-result")) return false;
-    if (!strcmp(model->request_id, "discover-rebuild-result")) d->report_result = true;
+    if (!strcmp(model->request_id, "discover-rebuild-result")) tag_discover_report_result(d, model);
     if (!strcmp(model->request_id, "discover-report-rebuild")) return tag_discover_report_choice(d, model, live, why, cap);
     if (!strcmp(model->request_id, "library-recovery")) d->recovery_shown = true;
     ++d->receive; bool redraw = false, close = false;
@@ -2443,23 +2472,36 @@ static int tag_host_result_failure(struct tag_world *w)
     if (saved_home) { (void)setenv("HOME", saved_home, 1); free(saved_home); } else (void)unsetenv("HOME");
     return failures;
 }
-static bool tag_rebuild_case_result(const struct tag_discover *d, const struct zcl_command_reply *reply,
-    bool fail_post, int posts)
+static bool tag_comparison_case_result(const struct tag_discover *d, int mode, int posts)
 {
-    if (!d->pid || !reply->error.mutated || reply->status != ZCL_COMMAND_STATUS_PASSED) return false;
-    const char *continuation = zcl_package_copy_str(&reply->data, "continuation");
-    if (!fail_post) return !d->report_prompted && g_tag.posts == posts && continuation &&
-        !strcmp(continuation, "previewed");
+    if (!tag_comparison_seed_ok || !d->report_prompted || !d->report_count_visible) return false;
+    if (mode == 4) return d->report_result && d->report_result_unavailable &&
+        !d->report_result_count && !d->report_result_two && g_tag.posts == posts + 1;
+    return !d->report_result && g_tag.posts == posts;
+}
+static bool tag_unconfirmed_report(const struct tag_discover *d, const struct zcl_command_reply *reply, int posts)
+{
     const char *status = zcl_package_copy_str(&reply->data, "rebuild_report");
     const char *retry = zcl_package_copy_str(&reply->data, "rebuild_retry");
     return d->report_prompted && d->report_result && g_tag.posts == posts + 1 &&
         status && strstr(status, "publication unconfirmed") && retry &&
         strstr(retry, "fleet board post --kind=result") && strstr(retry, g_tag.result_text);
 }
-static int tag_rebuild_case(struct tag_world *w, bool fail_post)
+static bool tag_rebuild_case_result(const struct tag_discover *d, const struct zcl_command_reply *reply,
+    int mode, int posts)
+{
+    if (!d->pid || !reply->error.mutated || reply->status != ZCL_COMMAND_STATUS_PASSED) return false;
+    const char *continuation = zcl_package_copy_str(&reply->data, "continuation");
+    if (mode == 0) return !d->report_prompted && g_tag.posts == posts && continuation &&
+        !strcmp(continuation, "previewed");
+    if (mode >= 2) return tag_comparison_case_result(d, mode, posts);
+    return tag_unconfirmed_report(d, reply, posts);
+}
+static int tag_rebuild_case(struct tag_world *w, int mode)
 {
     int failures = 0; struct zcl_command_reply reply;
-    struct tag_discover d = {.keep = true, .close_keep = !fail_post, .report_rebuild = fail_post};
+    struct tag_discover d = {.keep = true, .close_keep = mode == 0,
+        .report_rebuild = mode == 1 || mode == 4, .comparison_mode = mode};
     struct tag_world fresh = *w; char worker[PATH_MAX];
     char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL; bool fixture_ready = false;
     zcl_command_reply_init(&reply, "zcl.app_open.v1");
@@ -2468,12 +2510,42 @@ static int tag_rebuild_case(struct tag_world *w, bool fail_post)
         ASSERT(tag_fixture_worker(w, worker));
         ASSERT(asf_journey_init(&fresh.j, "tinyapp", w->repo, fresh.root)); fixture_ready = true;
         ASSERT(tag_board_variant(&fresh, NULL, NULL, false) && setenv("HOME", fresh.j.b_home, 1) == 0);
-        int posts = g_tag.posts; g_tag.fail_result_post = fail_post; d.reply = &reply;
+        int posts = g_tag.posts; g_tag.fail_result_post = mode == 1; d.reply = &reply;
+        tag_comparison_seed_mode = mode; tag_comparison_seed_ok = false;
+        if (mode >= 2) app_discover_test_evidence_hook(tag_comparison_seed);
         bool done = app_discover_run_test(fresh.j.b_datadir, tag_discover_card, tag_discover_receive, &d, &reply, NULL, worker);
+        app_discover_test_evidence_hook(NULL);
         g_tag.fail_result_post = false; tag_discover_capture(&d);
-        ASSERT(done && tag_rebuild_case_result(&d, &reply, fail_post, posts)); PASS();
+        ASSERT(done && tag_rebuild_case_result(&d, &reply, mode, posts)); PASS();
     } _test_next:;
-    g_tag.fail_result_post = false;
+    app_discover_test_evidence_hook(NULL); g_tag.fail_result_post = false; g_tag.malformed_board = false;
+    if (fixture_ready && !tag_stop_receipt(&d, fresh.j.b_datadir)) ++failures;
+    zcl_command_reply_free(&reply);
+    if (saved_home) { (void)setenv("HOME", saved_home, 1); free(saved_home); } else (void)unsetenv("HOME");
+    return failures;
+}
+static int tag_cached_comparison(struct tag_world *w)
+{
+    int failures = 0; struct zcl_command_reply reply; struct tag_discover d = {.keep = true};
+    struct tag_world fresh = *w; char worker[PATH_MAX]; bool fixture_ready = false;
+    char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+    zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    TEST("Discover shows cached comparison without asking to publish") {
+        ASSERT(test_mkdtemp(fresh.root, sizeof(fresh.root), "app_get_cached_comparison"));
+        ASSERT(tag_fixture_worker(w, worker));
+        ASSERT(asf_journey_init(&fresh.j, "tinyapp", w->repo, fresh.root)); fixture_ready = true;
+        ASSERT(tag_board_variant(&fresh, NULL, NULL, false) && setenv("HOME", fresh.j.b_home, 1) == 0);
+        int posts = g_tag.posts; d.reply = &reply;
+        ASSERT(app_discover_run_test(fresh.j.b_datadir, tag_discover_card, tag_discover_receive, &d, &reply, NULL, worker));
+        tag_discover_capture(&d); ASSERT(d.report_prompted && !d.report_result && tag_stop_receipt(&d, fresh.j.b_datadir));
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        memset(&d, 0, sizeof(d)); d.keep = true; d.reply = &reply;
+        ASSERT(app_discover_run_test(fresh.j.b_datadir, tag_discover_card, tag_discover_receive, &d, &reply, NULL, worker));
+        tag_discover_capture(&d);
+        const char *status = zcl_package_copy_str(&reply.data, "rebuild_report");
+        ASSERT(status && strstr(status, "cached image") && d.report_result && d.report_result_count &&
+            !d.report_prompted && !d.report_result_publish && g_tag.posts == posts); PASS();
+    } _test_next:;
     if (fixture_ready && !tag_stop_receipt(&d, fresh.j.b_datadir)) ++failures;
     zcl_command_reply_free(&reply);
     if (saved_home) { (void)setenv("HOME", saved_home, 1); free(saved_home); } else (void)unsetenv("HOME");
@@ -2533,7 +2605,7 @@ static int tag_library_kept_failure(struct tag_world *w)
         g_tag.tamper = false;
         tag_discover_capture(&d);
         tag_discover_failure_diagnostic(&d, &reply, wire, sizeof(wire));
-        ASSERT(d.pid > 0); ASSERT(tag_rebuild_controls_seen && tag_rebuild_controls_ok); ASSERT(d.report_prompted); ASSERT_EQ(g_tag.posts, posts + 1);
+        ASSERT(d.pid > 0); ASSERT(tag_rebuild_controls_seen && tag_rebuild_controls_ok); ASSERT(d.report_prompted); ASSERT(d.report_count_visible); ASSERT_EQ(g_tag.posts, posts + 1);
         ASSERT(tag_rebuild_post_identity(w, &d));
         ASSERT(d.host_prompted && d.host_identity); ASSERT_EQ(g_tag.offers, offers + 1);
         ASSERT_EQ(g_tag.enables, enables + 1); ASSERT(strstr(g_tag.enable_text, w->offer.root));
@@ -2959,6 +3031,19 @@ static void tag_rebuild_evidence_controls(const struct zcl_app_offer_row *row,
     tag_rebuild_controls_ok = ok && g_tag.posts == posts;
     json_free(&box);
 }
+static void tag_comparison_seed(const struct zcl_app_offer_row *row,
+    const struct json_value *build, const struct json_value *opened)
+{
+    struct zcl_app_rebuild observation;
+    tag_comparison_seed_ok = app_get_rebuild_prepare(row, build, opened, &observation) == APP_GET_REBUILD_FRESH;
+    if (!tag_comparison_seed_ok) return;
+    if (tag_comparison_seed_mode == 3) { g_tag.malformed_board = true; return; }
+    char text[TAG_TEXT];
+    tag_comparison_seed_ok = zcl_app_rebuild_format(&observation, text, sizeof(text));
+    const struct tag_post_spec match = {text, "apps", FLEET_BOARD_KIND_RESULT, false};
+    if (tag_comparison_seed_ok)
+        tag_comparison_seed_ok = tag_board_add_as(&match, 10, 0x6b) && tag_board_add_as(&match, 9, 0x6c);
+}
 static int tag_get_observations(struct tag_world *w)
 {
     int failures = 0; struct asf_leaf leaf; bool opened = false; struct tag_discover child = {0};
@@ -3259,6 +3344,10 @@ static int tag_keep_cases(struct tag_world *w)
     int failures = ready ? tag_library_kept_failure(w) : 1;
     if (!failures) failures += tag_rebuild_case(w, false);
     if (!failures) failures += tag_rebuild_case(w, true);
+    if (!failures) failures += tag_rebuild_case(w, 2);
+    if (!failures) failures += tag_rebuild_case(w, 3);
+    if (!failures) failures += tag_rebuild_case(w, 4);
+    if (!failures) failures += tag_cached_comparison(w);
     if (!failures) failures += tag_host_result_failure(w);
     if (!failures) failures += tag_library_cleanup_failure(w);
     if (!failures) failures += tag_library_oversized_failure(w);
