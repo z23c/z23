@@ -297,7 +297,7 @@ static uint64_t chunk_len_of(const struct swarm_download *dl, uint32_t g);
 static void dl_fail(struct vcs_swarm_engine *engine,
                     struct swarm_download *dl, const char *rule)
 {
-    LOG_WARN(SWARM_LOG, "download %.16s failed: %s", dl->root_hex, rule);
+    vcs_swarm_log_failure(dl, rule);
     dl->state = VCS_SWARM_DL_FAILED;
     dl->rule = rule;
     /* Tombstone every outstanding request as cancelled: data still in
@@ -307,6 +307,7 @@ static void dl_fail(struct vcs_swarm_engine *engine,
             req_finish(engine, dl, &dl->reqs[i], true, false);
     vcs_swarm_record_delete_dl(engine, dl);
 }
+
 
 /* Load the tracked (staged or committed) manifest wire from the store
  * into the download. False when untracked or on parse/alloc failure. */
@@ -689,8 +690,10 @@ static void timeouts_locked(struct vcs_swarm_engine *engine, uint64_t now)
             req_finish(engine, dl, req, true, false);
             if (g == SWARM_MANIFEST_CHUNK)
                 dl->manifest_attempts++;
-            else
+            else {
                 dl->chunk_attempts[g]++;
+                if (dl->chunk_timeouts != UINT64_MAX) ++dl->chunk_timeouts;
+            }
         }
     }
 }
@@ -1065,6 +1068,7 @@ static void handle_data_chunk(struct vcs_swarm_engine *engine,
         if (slot >= 0)
             dl->peer_failed[g] |= UINT64_C(1) << (size_t)slot;
         dl->chunk_attempts[g]++;
+        vcs_swarm_invalid_chunk(dl, g);
         req_finish(engine, dl, req, false, false);
         if (dl->chunk_attempts[g] >= VCS_SWARM_MAX_CHUNK_ATTEMPTS)
             dl_fail(engine, dl, "chunk-attempts-exhausted");
@@ -1151,6 +1155,7 @@ static void handle_data(struct vcs_swarm_engine *engine,
     uint32_t g = req->global_chunk;
     bool exhausted = g != SWARM_MANIFEST_CHUNK &&
         ++dl->chunk_attempts[g] >= VCS_SWARM_MAX_CHUNK_ATTEMPTS;
+    if (g != SWARM_MANIFEST_CHUNK) vcs_swarm_invalid_chunk(dl, g);
     req_finish(engine, dl, req, false, false);
     if (exhausted) dl_fail(engine, dl, "chunk-attempts-exhausted");
     res->penalty = VCS_SWARM_PENALTY_INVALID_DATA;
@@ -1901,6 +1906,7 @@ bool vcs_swarm_engine_download_status(struct vcs_swarm_engine *engine,
         out->transferred_objects = dl->transferred_objects;
         out->reused_objects = dl->reused_objects;
         out->maximum_package_bytes = dl->maximum_package_bytes;
+        vcs_swarm_exhaustion_status(dl, out);
         if (dl->manifest_loaded) {
             out->total_chunks = dl->total_chunks;
             out->present_chunks = dl->have_count;

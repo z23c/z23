@@ -55,6 +55,9 @@ struct swarm_download {
     uint8_t *have;           /* verified-present bitmap */
     uint64_t *peer_failed;   /* per-chunk bitmask of failed peer slots */
     uint32_t *chunk_attempts;
+    uint64_t chunk_timeouts, chunk_invalid;
+    bool exhausted_chunk_known;
+    uint32_t exhausted_chunk, exhausted_attempts;
     uint32_t have_count;
     uint64_t manifest_failed_mask; /* peer slots that served a bad manifest */
     uint32_t manifest_attempts;
@@ -75,6 +78,10 @@ struct swarm_download {
     uint64_t provider_peers[VCS_SWARM_PROVIDER_MAX];
     size_t provider_count;
 };
+
+void vcs_swarm_log_failure(const struct swarm_download *dl, const char *rule);
+void vcs_swarm_invalid_chunk(struct swarm_download *dl, uint32_t chunk);
+void vcs_swarm_exhaustion_status(const struct swarm_download *dl, struct vcs_swarm_download_status *out);
 
 struct swarm_peer {
     bool used;

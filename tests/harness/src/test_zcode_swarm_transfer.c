@@ -255,6 +255,23 @@ static struct vcs_swarm_frame_result chunk_answer(struct sw_node *n, uint64_t pe
     return result;
 }
 
+static bool chunk_timeout_evidence(const struct vcs_swarm_download_status *s, bool mixed)
+{
+    return s->state == VCS_SWARM_DL_FAILED && s->rule && !strcmp(s->rule, "chunk-attempts-exhausted") &&
+        !s->exhausted_chunk_known && s->chunk_timeouts == VCS_SWARM_MAX_CHUNK_ATTEMPTS - (mixed ? 1u : 0u) &&
+        s->chunk_invalid == (mixed ? 1u : 0u);
+}
+static bool chunk_invalid_evidence(const struct vcs_swarm_download_status *s)
+{
+    return s->state == VCS_SWARM_DL_FAILED && s->rule && !strcmp(s->rule, "chunk-attempts-exhausted") &&
+        s->exhausted_chunk_known && s->exhausted_chunk == 0 &&
+        s->exhausted_attempts == VCS_SWARM_MAX_CHUNK_ATTEMPTS &&
+        s->chunk_timeouts == 0 && s->chunk_invalid == VCS_SWARM_MAX_CHUNK_ATTEMPTS;
+}
+static bool chunk_evidence_reset(const struct vcs_swarm_download_status *s)
+{
+    return s->chunk_timeouts == 0 && s->chunk_invalid == 0 && !s->exhausted_chunk_known;
+}
 static int chunk_final_result(struct sw_node *n, struct sw_pkg *p, uint64_t peer,
                               const uint8_t key[33], bool answer, bool mixed)
 {
@@ -279,13 +296,17 @@ static int chunk_final_result(struct sw_node *n, struct sw_pkg *p, uint64_t peer
         vcs_swarm_engine_tick(n->engine, SW_DAY, now + VCS_SWARM_REQUEST_TIMEOUT_TICKS);
         struct vcs_swarm_download_status status;
         SW_CHECK("final timeout exhausts bounded attempts", vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
-            status.state == VCS_SWARM_DL_FAILED && status.rule && !strcmp(status.rule, "chunk-attempts-exhausted"));
+            chunk_timeout_evidence(&status, mixed));
         struct vcs_swarm_frame_result result = chunk_answer(n, peer, &last, bytes, len,
             now + VCS_SWARM_REQUEST_TIMEOUT_TICKS + 1u, false);
         struct vcs_service_key_totals totals;
         SW_CHECK("late final chunk stays uncredited", result.penalty == VCS_SWARM_PENALTY_NONE &&
             vcs_swarm_engine_download_status(n->engine, p->root, &status) && status.state == VCS_SWARM_DL_FAILED && status.present_chunks == 0 &&
             vcs_service_key_totals(n->book, key, SW_DAY, &totals) && totals.verified_bytes_downloaded == p->wire_len);
+        SW_CHECK("explicit retry resets exhaustion evidence",
+            vcs_swarm_engine_fetch(n->engine, p->root, SW_DAY, now + VCS_SWARM_REQUEST_TIMEOUT_TICKS + 2u) == VCS_SWARM_FETCH_OK &&
+            vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+            chunk_evidence_reset(&status));
     }
     return failures;
 }
@@ -351,7 +372,7 @@ static int chunk_retire_result(struct sw_node *n, struct sw_pkg *p, uint64_t pee
     } else {
         vcs_swarm_engine_tick(n->engine, SW_DAY, 3u + count * 2u + VCS_SWARM_REQUEST_TIMEOUT_TICKS);
         SW_CHECK("wrong-kind responses exhaust once without credit", vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
-            status.state == VCS_SWARM_DL_FAILED && status.rule && !strcmp(status.rule, "chunk-attempts-exhausted") &&
+            chunk_invalid_evidence(&status) &&
             vcs_service_key_totals(n->book, key, SW_DAY, &totals) && totals.verified_bytes_downloaded == p->wire_len);
     }
     return failures;
@@ -432,7 +453,7 @@ int t_swarm_timeout_retry(void)
     sw_node_close(&n);
     test_rm_rf_recursive(n.datadir);
     return failures + chunk_final_case(true, false) + chunk_final_case(false, false) +
-        chunk_final_case(true, true) +
+        chunk_final_case(true, true) + chunk_final_case(false, true) +
         chunk_retired_case(true) + chunk_retired_case(false);
 }
 

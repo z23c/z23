@@ -15,6 +15,35 @@
 
 #define SWARM_LOG "vcs.swarm"
 
+void vcs_swarm_log_failure(const struct swarm_download *dl, const char *rule)
+{
+    if (!strcmp(rule, "chunk-attempts-exhausted"))
+        LOG_WARN(SWARM_LOG, "download %.16s failed: %s timeouts=%llu invalid=%llu chunk_known=%u chunk=%u attempts=%u",
+                 dl->root_hex, rule, (unsigned long long)dl->chunk_timeouts, (unsigned long long)dl->chunk_invalid,
+                 dl->exhausted_chunk_known ? 1u : 0u, dl->exhausted_chunk, dl->exhausted_attempts);
+    else
+        LOG_WARN(SWARM_LOG, "download %.16s failed: %s", dl->root_hex, rule);
+}
+
+void vcs_swarm_invalid_chunk(struct swarm_download *dl, uint32_t chunk)
+{
+    if (dl->chunk_invalid != UINT64_MAX) ++dl->chunk_invalid;
+    if (dl->chunk_attempts[chunk] >= VCS_SWARM_MAX_CHUNK_ATTEMPTS) {
+        dl->exhausted_chunk_known = true;
+        dl->exhausted_chunk = chunk;
+        dl->exhausted_attempts = dl->chunk_attempts[chunk];
+    }
+}
+
+void vcs_swarm_exhaustion_status(const struct swarm_download *dl, struct vcs_swarm_download_status *out)
+{
+    out->chunk_timeouts = dl->chunk_timeouts;
+    out->chunk_invalid = dl->chunk_invalid;
+    out->exhausted_chunk_known = dl->exhausted_chunk_known;
+    out->exhausted_chunk = dl->exhausted_chunk;
+    out->exhausted_attempts = dl->exhausted_attempts;
+}
+
 void dl_free_maps(struct swarm_download *dl)
 {
     if (dl->manifest_loaded)

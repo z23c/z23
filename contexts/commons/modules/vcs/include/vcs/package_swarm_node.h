@@ -426,6 +426,15 @@ struct vcs_swarm_download_status {
     uint32_t transferred_objects;
     uint32_t reused_objects;
     uint64_t maximum_package_bytes; /* 0 unbounded; persisted fetch ceiling */
+    /* Volatile counts for this download attempt, saturating at UINT64_MAX;
+     * explicit retry and engine restart reset them.
+     * The flattened chunk index is known only when invalid DATA directly
+     * exhausted that chunk; the all-remaining-exhausted scan has no culprit. */
+    uint64_t chunk_timeouts;
+    uint64_t chunk_invalid;
+    bool exhausted_chunk_known;
+    uint32_t exhausted_chunk;
+    uint32_t exhausted_attempts;
 };
 
 bool vcs_swarm_engine_download_status(struct vcs_swarm_engine *engine,
