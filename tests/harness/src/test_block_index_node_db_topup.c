@@ -1060,6 +1060,23 @@ static bool ndt_clean_topup(struct main_state *ms, struct node_db *ndb,
     return ok;
 }
 
+static bool ndt_clean_acceptance_logged(const char *dir)
+{
+    char path[320], line[1024], expected[128];
+    snprintf(path, sizeof(path), "%s/stdout_capture.txt", dir);
+    snprintf(expected, sizeof(expected),
+             "clean mark: accepted through %d; resuming at %d",
+             NDT_CLEAN_BEST - NDT_CLEAN_MARGIN,
+             NDT_CLEAN_BEST - NDT_CLEAN_MARGIN + 1);
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+    bool found = false;
+    while (fgets(line, sizeof(line), fp))
+        if (strstr(line, expected)) found = true;
+    fclose(fp);
+    return found;
+}
+
 static int ndt_clean_prefix_cases(const char *dir)
 {
     int failures = 0;
@@ -1095,6 +1112,8 @@ static int ndt_clean_prefix_cases(const char *dir)
         /* Third: the prefix re-verifies; only the tip region is read. */
         NDT_CHECK("clean: warm fold ok",
                   ndt_clean_topup(&a, &ndb, progress, dir, false, &r3));
+        NDT_CHECK("clean: verified resume is logged",
+                  ndt_clean_acceptance_logged(dir));
         printf("block_index_node_db_topup: clean prefix rows read: "
                "cold=%zu noop=%zu warm=%zu\n", r1, r2, r3);
         NDT_CHECK("clean: warm fold read only the tip region",
