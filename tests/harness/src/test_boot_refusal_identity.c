@@ -60,6 +60,23 @@ static int boot_refusal_identity_probe(void)
     return 0;
 }
 
+static int boot_signal_handler_install_refusal_probe(void)
+{
+    char report[4096];
+    boot_error_reset_for_testing();
+    boot_report_signal_handler_install_failed();
+    if (!boot_error_reported())
+        return 1;
+    if (strcmp(boot_error_first_code(),
+               "BOOT_SIGNAL_HANDLER_INSTALL_FAILED") != 0)
+        return 2;
+    if (!boot_error_last_render(report, sizeof(report)) ||
+        !strstr(report, "BOOT_SIGNAL_HANDLER_INSTALL_FAILED") ||
+        !strstr(report, "prologue.observability"))
+        return 3;
+    return 0;
+}
+
 int test_boot_refusal_identity(void)
 {
     int failures = 0;
@@ -75,6 +92,16 @@ int test_boot_refusal_identity(void)
     rc = boot_refusal_identity_probe();
     printf("boot_refusal_identity: refusal report names the acting OS "
            "identity... ");
+    if (rc == 0) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (step %d)\n", rc);
+        failures++;
+    }
+
+    rc = boot_signal_handler_install_refusal_probe();
+    printf("boot_refusal_identity: signal_handler_install failure is "
+           "BOOT_SIGNAL_HANDLER_INSTALL_FAILED... ");
     if (rc == 0) {
         printf("OK\n");
     } else {

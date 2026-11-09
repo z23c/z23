@@ -78,6 +78,15 @@ void boot_report_datadir_create_failed(const char *datadir, int mkdir_errno)
                       dd, parent, identity, strerror(mkdir_errno));
 }
 
+void boot_report_signal_handler_install_failed(void)
+{
+    boot_error_report(BOOT_ERROR_FATAL, "BOOT_SIGNAL_HANDLER_INSTALL_FAILED",
+                      "prologue.observability",
+                      "signal_handler_install failed; refusing to boot "
+                      "without a crash handler",
+                      NULL, 0, "call=signal_handler_install rc!=0");
+}
+
 void boot_report_wallet_persistence_open_failed(
     const char *datadir, const struct zcl_result *open_result,
     long long wallet_key_rows)

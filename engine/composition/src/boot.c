@@ -364,11 +364,7 @@ static bool boot_step_init_observability(void)
      * handler is inherited process-wide. Any SIGABRT/SIGSEGV/SIGBUS/SIGFPE
      * gets a logged backtrace before systemd sees the exit. */
     if (signal_handler_install() != 0) {
-        /* Fatal: booting without a crash handler means the next SEGV/ABRT is
-         * silent and undiagnosable — a silent crash can scramble block
-         * storage. Refuse to start blind. */
-        fprintf(stderr, "FATAL: signal_handler_install failed; refusing to "
-                        "boot without a crash handler\n");
+        boot_report_signal_handler_install_failed();
         return false;
     }
     /* Arm the live self-backtrace handler (SIGRTMIN+2) before threads spawn so

@@ -30,6 +30,10 @@ struct zcl_result;
  * failing call. */
 void boot_report_datadir_create_failed(const char *datadir, int mkdir_errno);
 
+/* BOOT_SIGNAL_HANDLER_INSTALL_FAILED — signal_handler_install returned
+ * non-zero. Boot refuses rather than run without a crash handler. */
+void boot_report_signal_handler_install_failed(void);
+
 /* BOOT_WALLET_PERSISTENCE_OPEN_FAILED — STATE D of the wallet boot state
  * machine: wallet_keys has rows but the persistence layer would not open.
  * `open_result` carries the WSQL_* code, message and source file:line. */
