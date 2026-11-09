@@ -2850,9 +2850,8 @@ owner_done() {
         'DONE CLEAN '*) OWNER_STATUS="${line#DONE CLEAN }" ;;
         *) return 1 ;;
     esac
-    [[ "$OWNER_STATUS" =~ ^[0-9]+$ ]] || return 1
-    [ "${#OWNER_STATUS}" -le 5 ] && [ "$OWNER_STATUS" -le 65535 ] || return 1
-    wait "$OWNER_PID" 2>/dev/null || return 1
+    [[ "$OWNER_STATUS" =~ ^(0|[1-9][0-9]{0,4})$ ]] || return 1
+    [ "$OWNER_STATUS" -le 65535 ] || return 1
     OWNER_RUNNING=0
     OWNER_CLEAN=1
     exec {OWNER_READ}<&- {OWNER_WRITE}>&-
@@ -2930,6 +2929,7 @@ launch_node() {
     coproc C3_PROCESS { HOME="$ISO_HOME" "$C3_OWNER" "$PROCESS_GROUP_EXEC" "$DATADIR/node.log" "$NODE_BIN" "${node_args[@]}"; }
     OWNER_PID=$C3_PROCESS_PID
     exec {OWNER_READ}<&"${C3_PROCESS[0]}" {OWNER_WRITE}>&"${C3_PROCESS[1]}" || return 1
+    exec {C3_PROCESS[0]}<&- {C3_PROCESS[1]}>&-
     OWNER_RUNNING=1
     local first=""
     IFS= read -r -t 15 -u "$OWNER_READ" first && [ "$first" = START ] || return 1
@@ -3065,7 +3065,11 @@ while :; do
         # would never have died and we would not be here — this follows the
         # early-_exit path that bypasses that re-exec off-systemd.)
         owner_done "$owner_line" || die "supervised cleanup unconfirmed; fixture retained"
-        node_ec=$(( OWNER_STATUS >> 8 ))
+        if (( OWNER_STATUS & 127 )); then
+            node_ec=$(( 128 + (OWNER_STATUS & 127) ))
+        else
+            node_ec=$(( OWNER_STATUS >> 8 ))
+        fi
         reason="$(read_exit_reason)"
         if is_self_respawn_reason "$reason"; then
             last_respawn_reason="$reason"

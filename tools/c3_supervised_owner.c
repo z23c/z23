@@ -53,7 +53,7 @@ static int sealed_launcher(const char *path)
 }
 static enum platform_supervised_state stop_until_reaped(struct platform_supervised_process *p)
 {
-    enum platform_supervised_state s;
+    enum platform_supervised_state s = p->observation.state;
     do {
         int64_t t = now_ns();
         if (t < 0) { (void)poll(NULL, 0, 100); continue; }
@@ -92,6 +92,7 @@ int main(int argc, char **argv)
         if (p.supervisor_pid >= 0) (void)stop_until_reaped(&p);
         return 4;
     }
+    if (chdir("/") != 0) { (void)stop_until_reaped(&p); return 4; }
     bool stop = printf("START\n") < 0 || fflush(stdout) != 0;
     bool observation_failed = false;
     while (p.supervisor_pid >= 0 && !stop) {
@@ -101,7 +102,7 @@ int main(int argc, char **argv)
         struct pollfd f = { .fd = STDIN_FILENO, .events = POLLIN | POLLHUP };
         int n = poll(&f, 1, 100);
         if (n < 0 && errno != EINTR) stop = true;
-        if (n > 0) { char byte; ssize_t got = read(STDIN_FILENO, &byte, 1); if (got != 1 || byte == 'S') stop = true; }
+        if (n > 0) { char byte; (void)read(STDIN_FILENO, &byte, 1); stop = true; }
     }
     if (p.supervisor_pid >= 0) s = stop_until_reaped(&p);
     if (observation_failed || s != PLATFORM_SUPERVISED_CLEAN || !p.observation.engine_exit_observed ||

@@ -26,19 +26,26 @@
 
 #include "crypto/sha256.h"
 #include "platform/os_proc.h"
+#include "platform/supervised_process.h"
 #include "util/spawn.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/inotify.h>
+#endif
 
 #define GATE_SCRIPT_REL "tools/scripts/cold_start_to_tip_stopwatch.sh"
 /* macOS ships no /bin/true; its stand-in node binary lives in /usr/bin. */
@@ -297,17 +304,86 @@ static int case_healthy(const struct gate_env *g)
 }
 
 #if defined(__linux__)
+static bool spg_line(int fd, char *out, size_t cap)
+{
+    size_t n = 0;
+    while (n + 1 < cap) {
+        struct pollfd p = {fd, POLLIN, 0};
+        if (poll(&p, 1, 10000) <= 0 || read(fd, out + n, 1) != 1) return false;
+        if (out[n++] == '\n') { out[n] = 0; return true; }
+    }
+    return false;
+}
+
 static int case_owned_exit(const struct gate_env *g)
 {
     int failures = 0;
-    char owner[PATH_MAX], launcher[PATH_MAX], log[PATH_MAX];
+    char owner[PATH_MAX], launcher[PATH_MAX], log[PATH_MAX], start[128], done[128];
     if (snprintf(owner, sizeof(owner), "%s/build/bin/c3-supervised-owner", g->root) >= (int)sizeof(owner) ||
         snprintf(launcher, sizeof(launcher), "%s/build/bin/process-group-exec", g->root) >= (int)sizeof(launcher) ||
         snprintf(log, sizeof(log), "%s/owned.log", g->artifacts) >= (int)sizeof(log)) return 1;
-    const char *argv[] = { owner, launcher, log, "/bin/true", NULL };
-    int rc = zcl_spawn_capture(argv, g->out, g->cap, 30000);
-    SPG_CHECK("owned launch returns clean completion", rc == 0 &&
-              strstr(g->out, "START\n") && strstr(g->out, "DONE CLEAN 0\n"));
+    int control[2], result[2];
+    if (pipe(control) || pipe(result)) return 1;
+    pid_t child = fork();
+    if (child == 0) {
+        (void)dup2(control[0], 0); (void)dup2(result[1], 1);
+        close(control[0]); close(control[1]); close(result[0]); close(result[1]);
+        execl(owner, owner, launcher, log, "/bin/true", (char *)NULL);
+        _exit(127);
+    }
+    close(control[0]); close(result[1]);
+    bool ok = child > 0 && spg_line(result[0], start, sizeof(start)) &&
+              spg_line(result[0], done, sizeof(done));
+    close(control[1]); close(result[0]);
+    int status = -1;
+    if (child > 0) ok = waitpid(child, &status, 0) == child && ok;
+    SPG_CHECK("owned launch returns clean completion", ok && WIFEXITED(status) &&
+              WEXITSTATUS(status) == 0 && !strcmp(start, "START\n") &&
+              !strcmp(done, "DONE CLEAN 0\n"));
+    return failures;
+}
+
+static int case_owned_tree(const struct gate_env *g, bool eof)
+{
+    int failures = 0;
+    char owner[PATH_MAX], launcher[PATH_MAX], log[PATH_MAX], self[PATH_MAX];
+    char start[128], done[128];
+    if (snprintf(owner, sizeof(owner), "%s/build/bin/c3-supervised-owner", g->root) >= (int)sizeof(owner) ||
+        snprintf(launcher, sizeof(launcher), "%s/build/bin/process-group-exec", g->root) >= (int)sizeof(launcher) ||
+        snprintf(log, sizeof(log), "%s/tree-%d.log", g->artifacts, (int)eof) >= (int)sizeof(log) ||
+        !os_proc_exe_path(self, sizeof(self))) return 1;
+    int file = open(log, O_RDWR | O_CREAT | O_EXCL, 0600);
+    int events = inotify_init1(IN_CLOEXEC);
+    if (file < 0 || events < 0 || inotify_add_watch(events, log, IN_MODIFY) < 0) return 1;
+    int control[2], result[2];
+    if (pipe(control) || pipe(result)) return 1;
+    pid_t child = fork();
+    if (child == 0) {
+        (void)dup2(control[0], 0); (void)dup2(result[1], 1);
+        close(control[0]); close(control[1]); close(result[0]); close(result[1]);
+        execl(owner, owner, launcher, log, self, "--supervised-fixture-tree", (char *)NULL);
+        _exit(127);
+    }
+    close(control[0]); close(result[1]);
+    bool ok = child > 0 && spg_line(result[0], start, sizeof(start)) && !strcmp(start, "START\n");
+    struct pollfd event = {events, POLLIN, 0};
+    pid_t leaf = -1;
+    ok = ok && poll(&event, 1, 10000) > 0 && read(file, &leaf, sizeof(leaf)) == (ssize_t)sizeof(leaf);
+    int leaf_fd = ok ? platform_supervised_fixture_pidfd_open(leaf) : -1;
+    ok = ok && leaf_fd >= 0;
+    if (!eof) ok = write(control[1], "S", 1) == 1 && ok;
+    close(control[1]);
+    bool got_done = spg_line(result[0], done, sizeof(done));
+    struct pollfd exited = {leaf_fd, POLLIN, 0};
+    bool leaf_exited = leaf_fd >= 0 && poll(&exited, 1, 10000) > 0;
+    if (!leaf_exited && leaf_fd >= 0) (void)platform_supervised_fixture_pidfd_kill(leaf_fd);
+    int status = -1;
+    if (child > 0) ok = waitpid(child, &status, 0) == child && ok;
+    SPG_CHECK(eof ? "EOF cleans escaped descendant" : "STOP cleans escaped descendant",
+              ok && got_done && !strncmp(done, "DONE CLEAN ", 11) && leaf_exited &&
+              WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    if (leaf_fd >= 0) close(leaf_fd);
+    close(result[0]); close(events); close(file);
     return failures;
 }
 #endif
@@ -347,6 +423,8 @@ static int stopwatch_peer_gate_run(void)
 
 #if defined(__linux__)
     failures += case_owned_exit(&g);
+    failures += case_owned_tree(&g, false);
+    failures += case_owned_tree(&g, true);
 #endif
 
     const char *rm[] = { "/bin/rm", "-rf", artifacts, NULL };
