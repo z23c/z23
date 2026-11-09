@@ -1499,6 +1499,28 @@ static bool ruf_cleanup(struct ru_run *r, bool custody, int old_subreaper)
 /* Optional continuation is qualified through the shipping typed CLI and real
  * private windows. No injected presenter authorizes these operations. */
 enum ruf_case { RUF_CLOSE, RUF_INVALID, RUF_BUILD_FAILURE, RUF_CUSTODY_FAILURE, RUF_PROGRESS_CLOSE, RUF_PROGRESS_CLOSE_OK, RUF_PLAN_CLOSE };
+static bool ruf_stage(const char *stage, bool ok)
+{
+    if (!ok) fprintf(stderr, "RECEIVE_FLOW_STAGE failed=%s\n", stage);
+    return ok;
+}
+static void ruf_display_failure(struct ru_run *r)
+{
+    int saved_errno = errno;
+    const char *display = getenv("DISPLAY");
+    bool equal = display && !strcmp(display, r->display_name);
+    char proc[64], exe[PATH_MAX];
+    (void)snprintf(proc, sizeof(proc), "/proc/%ld/exe", (long)r->display.pid);
+    ssize_t n = readlink(proc, exe, sizeof(exe) - 1);
+    if (n >= 0) exe[n] = '\0';
+    bool image_match = n >= 0 && !strcmp(exe, r->display.image);
+    siginfo_t info = {0};
+    int rc = waitid(P_PID, (id_t)r->display.pid, &info, WEXITED | WNOHANG | WNOWAIT);
+    int wait_errno = rc < 0 ? errno : 0;
+    fprintf(stderr, "RECEIVE_FLOW_DISPLAY equal=%d image_match=%d wait_rc=%d wait_errno=%d observed=%d code=%d status=%d\n",
+        equal, image_match, rc, wait_errno, info.si_pid != 0, info.si_code, info.si_status);
+    errno = saved_errno;
+}
 static bool ruf_driver(struct ru_run *r, const char *title, const char *action, bool pixels)
 {
     char option[160];
@@ -1509,8 +1531,12 @@ static bool ruf_driver(struct ru_run *r, const char *title, const char *action, 
     bool ok = log >= 0 && ru_spawn(&r->driver, argv, log, log, log);
     if (log >= 0) close(log);
     uint32_t code = UINT32_MAX;
-    ok = ok && ru_wait(&r->driver, 7000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    int waited = -1; /* no wait when spawn failed */
+    if (ok) { waited = (int)ru_wait(&r->driver, 7000, &code); ok = waited == PLATFORM_PROCESS_WAIT_EXITED && code == 0; }
     bool stopped = ru_stop(&r->driver);
+    if (!ok || !stopped) fprintf(stderr, "RECEIVE_FLOW_DRIVER title=%s action=%s wait=%d exit=%u stopped=%d\n",
+        title, action, waited, code, stopped);
+    if (!ok || !stopped) ruf_display_failure(r);
     return ok && stopped;
 }
 static bool ruf_cli(struct ru_run *r, enum ruf_case which)
@@ -1897,29 +1923,31 @@ static bool rfp_plan_close(struct ru_run *r)
 static bool ruf_progress_actions(struct ru_run *r, enum ruf_case which, int gate[2])
 {
     switch (which) {
-    case RUF_CUSTODY_FAILURE: return ruf_gate_failure(r, gate);
-    case RUF_PROGRESS_CLOSE: return rfp_actions(r, gate);
-    case RUF_PROGRESS_CLOSE_OK: return rfp_success_actions(r, gate);
-    case RUF_PLAN_CLOSE: return rfp_plan_close(r);
+    case RUF_CUSTODY_FAILURE: return ruf_stage("custody_failure", ruf_gate_failure(r, gate));
+    case RUF_PROGRESS_CLOSE: return ruf_stage("progress_close_failure", rfp_actions(r, gate));
+    case RUF_PROGRESS_CLOSE_OK: return ruf_stage("progress_close_success", rfp_success_actions(r, gate));
+    case RUF_PLAN_CLOSE: return ruf_stage("plan_close", rfp_plan_close(r));
     default: return false;
     }
 }
 
 static bool ruf_actions(struct ru_run *r, enum ruf_case which, uint32_t pages, int gate[2])
 {
-    if (!ruf_cli(r, which)) return false;
-    if (which == RUF_INVALID) return ruf_result(r, which);
-    if (!ru_window(r, true) || !ru_pending(r) || !ru_pages(r, pages) ||
-        !ruf_driver(r, "Your copy is ready", "--expect-count=1", false) || !rt_received(r->fixture)) return false;
+    if (!ruf_stage("cli_start", ruf_cli(r, which))) return false;
+    if (which == RUF_INVALID) return ruf_stage("invalid_result", ruf_result(r, which));
+    if (!ruf_stage("consent_window", ru_window(r, true)) || !ruf_stage("consent_pending", ru_pending(r)) ||
+        !ruf_stage("consent_pages", ru_pages(r, pages)) ||
+        !ruf_stage("copy_ready_window", ruf_driver(r, "Your copy is ready", "--expect-count=1", false)) ||
+        !ruf_stage("received_copy", rt_received(r->fixture))) return false;
     if (which >= RUF_CUSTODY_FAILURE) return ruf_progress_actions(r, which, gate);
     if (which == RUF_CLOSE) {
-        if (!ruf_driver(r, "Your copy is ready", "--key=enter", false)) return false;
+        if (!ruf_stage("close_copy", ruf_driver(r, "Your copy is ready", "--key=enter", false))) return false;
     } else {
-        if (!ruf_choose_build(r) ||
-            !ruf_driver(r, "The next step did not finish", "--expect-count=1", false) ||
-            !ruf_driver(r, "The next step did not finish", "--key=enter", false)) return false;
+        if (!ruf_stage("choose_build", ruf_choose_build(r)) ||
+            !ruf_stage("failure_notice", ruf_driver(r, "The next step did not finish", "--expect-count=1", false)) ||
+            !ruf_stage("close_failure_notice", ruf_driver(r, "The next step did not finish", "--key=enter", false))) return false;
     }
-    return ruf_result(r, which);
+    return ruf_stage("result", ruf_result(r, which));
 }
 static void rfp_failure_wire(struct ru_run *r)
 {
@@ -2273,12 +2301,14 @@ static bool rus_cleanup(struct ru_run *r, bool custody, int old_subreaper)
 }
 static bool rus_start(struct ru_run *r, struct receive_fixture *f, struct rus_identity *id, uint32_t pages)
 {
-    if (!ruf_cli(r, RUF_CLOSE) || !ru_window(r, true) || !ru_pending(r) || !ru_pages(r, pages) ||
-        !ruf_driver(r, "Your copy is ready", "--expect-count=1", false)) return false;
+    if (!ruf_stage("success_cli", ruf_cli(r, RUF_CLOSE)) || !ruf_stage("success_consent_window", ru_window(r, true)) ||
+        !ruf_stage("success_consent_pending", ru_pending(r)) || !ruf_stage("success_consent_pages", ru_pages(r, pages)) ||
+        !ruf_stage("success_copy_ready", ruf_driver(r, "Your copy is ready", "--expect-count=1", false))) return false;
     char why[256];
-    return rus_received(f, id, true) && app_launch_env_from_process(&id->env, why, sizeof(why)) &&
-        rus_routes(id, false) && abc_put(f->destination, "src/main.c", rus_dirty) &&
-        ruf_choose_build(r) && rus_wait_keep_window(r);
+    return ruf_stage("success_received", rus_received(f, id, true)) &&
+        ruf_stage("success_launch_env", app_launch_env_from_process(&id->env, why, sizeof(why))) &&
+        ruf_stage("success_routes", rus_routes(id, false)) && ruf_stage("success_dirty", abc_put(f->destination, "src/main.c", rus_dirty)) &&
+        ruf_stage("success_choose_build", ruf_choose_build(r)) && ruf_stage("success_preview_window", rus_wait_keep_window(r));
 }
 static bool rus_after_reply(struct ru_run *r, struct receive_fixture *f, struct rus_identity *id, bool keep)
 {
