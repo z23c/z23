@@ -201,6 +201,10 @@ ZCL_TEST_GROUP_BUILD_NEED("test_stopwatch_peer_gate", "build/bin/p2p_version_pro
  * default target builds it on Linux, so without this row the group self-skips. */
 ZCL_TEST_GROUP_BUILD_NEED("test_stopwatch_peer_gate",
                           "build/bin/process-group-exec", "process-group-exec")
+#if defined(__linux__)
+ZCL_TEST_GROUP_BUILD_NEED("test_stopwatch_peer_gate",
+                          "build/bin/c3-supervised-owner", "c3-supervised-owner")
+#endif
 #endif
 
 /* Exercise the game's actual aircraft object without window-system headers. */

@@ -160,6 +160,7 @@ PEER_MAGIC="${ZCL_CS_PEER_MAGIC:-24e92764}"
 P2P_VERSION_PROBE="${ZCL_CS_P2P_VERSION_PROBE:-$REPO_ROOT/build/bin/p2p_version_probe}"
 # The node leads its own process group, launched natively: macOS has no setsid(1).
 PROCESS_GROUP_EXEC="${ZCL_PROCESS_GROUP_EXEC:-$REPO_ROOT/build/bin/process-group-exec}"
+C3_OWNER="${ZCL_CS_OWNER:-$REPO_ROOT/build/bin/c3-supervised-owner}"
 BUDGET="${ZCL_CS_BUDGET_SECS:-600}"     # 10-minute MVP C3 target
 SAMPLE_SECS="${ZCL_CS_SAMPLE_SECS:-10}"
 ARTIFACT_ROOT="${ZCL_CS_ARTIFACT_ROOT:-$REPO_ROOT/build/c3-stopwatch}"
@@ -261,7 +262,10 @@ RUN_ID="${ZCL_CS_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 ARTIFACT_DIR="$ARTIFACT_ROOT/$RUN_ID"
 DATADIR=""
 ISO_HOME=""
-PID=""
+PID="" # The supervised owner does not expose an identity-safe node PID.
+OWNER_RUNNING=0
+OWNER_CLEAN=1
+OWNER_STATUS=""
 start=0
 first_hstar=""
 max_hstar="-1"
@@ -960,7 +964,7 @@ phase_boundaries_tsv_row() {  # boundary edge unix_s t_s kind source
 phase_profile_snapshot() {
     local label="${1:-}" at="${2:-0}" doc="" f bp_us bp_blocks sv_us
     [ -n "$PHASE_PROFILE_DIR" ] && [ -d "$PHASE_PROFILE_DIR" ] || return 0
-    [ -n "${PID:-}" ] && kill -0 "$PID" 2>/dev/null || return 0
+    [ "$OWNER_RUNNING" = 1 ] || return 0
     doc="$(rpc dumpstate reducer_stage_profile)"
     [ -n "$doc" ] || return 0
     f="$PHASE_PROFILE_DIR/$label.json"
@@ -2397,7 +2401,7 @@ capture_run_bundle() {
     FRONTIER_BUSY_AT_CAPTURE="false"
     local got_frontier=0 got_drive=0 got_profile=0 got_stages=0 got_blocker=0 got_logs=0 got_net=0
     local got_timings=0
-    if [ -n "${PID:-}" ] && kill -0 "$PID" 2>/dev/null && [ -x "${NODE_BIN:-}" ] && [ -n "${DATADIR:-}" ]; then
+    if [ "$OWNER_RUNNING" = 1 ] && [ -x "${NODE_BIN:-}" ] && [ -n "${DATADIR:-}" ]; then
         # Frontier read goes through rpc_frontier (bounded retries + busy
         # handling) so a lock-contention blip during capture doesn't drop the
         # artifact to 0 bytes. Under heavy fold load this single one-shot was
@@ -2828,6 +2832,7 @@ fi
     || skip "bundle fixture absent: $BUNDLE_PATH"
 
 CS_ROOT="${ZCL_CS_ROOT:-$HOME/.local/state/zclassic23/scratch/coldstart}"
+[ -x "$C3_OWNER" ] || skip "owned cleanup unavailable: build c3-supervised-owner"
 DATADIR="$(mktemp -d "$CS_ROOT/zcl-c3-stopwatch.XXXXXX")" || die "mktemp datadir failed; create the private scratch root or set ZCL_CS_ROOT"
 ISO_HOME="$DATADIR-home"
 mkdir -p "$ISO_HOME" || die "mkdir isolated HOME failed"
@@ -2839,11 +2844,36 @@ mkdir -p "$ISO_HOME" || die "mkdir isolated HOME failed"
 REAL_PARAMS="${ZCL_CS_PARAMS_DIR:-$HOME/.zcash-params}"
 [ -d "$REAL_PARAMS" ] && ln -s "$REAL_PARAMS" "$ISO_HOME/.zcash-params" 2>/dev/null
 
-cleanup() {
-    [ -n "$PID" ] && kill -KILL -- "-$PID" 2>/dev/null || true
-    case "$DATADIR" in "$CS_ROOT"/zcl-c3-stopwatch.*) rm -rf "$DATADIR" "$ISO_HOME" 2>/dev/null || true ;; esac
+owner_done() {
+    local line="${1:-}"
+    case "$line" in
+        'DONE CLEAN '*) OWNER_STATUS="${line#DONE CLEAN }" ;;
+        *) return 1 ;;
+    esac
+    [[ "$OWNER_STATUS" =~ ^[0-9]+$ ]] || return 1
+    [ "${#OWNER_STATUS}" -le 5 ] && [ "$OWNER_STATUS" -le 65535 ] || return 1
+    wait "$OWNER_PID" 2>/dev/null || return 1
+    OWNER_RUNNING=0
+    OWNER_CLEAN=1
+    exec {OWNER_READ}<&- {OWNER_WRITE}>&-
+    return 0
 }
-trap cleanup EXIT INT TERM
+cleanup() {
+    if [ "$OWNER_RUNNING" = 1 ]; then
+        local line=""
+        printf S >&"$OWNER_WRITE" 2>/dev/null || true
+        if IFS= read -r -t 15 -u "$OWNER_READ" line && owner_done "$line"; then :; else
+            OWNER_CLEAN=0
+            echo "cold-start-wipe-stopwatch: owner cleanup unconfirmed; preserving $DATADIR and $ISO_HOME" >&2
+        fi
+    fi
+    if [ "$OWNER_CLEAN" = 1 ]; then
+        case "$DATADIR" in "$CS_ROOT"/zcl-c3-stopwatch.*) rm -rf "$DATADIR" "$ISO_HOME" 2>/dev/null || true ;; esac
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "cold-start-wipe-stopwatch: bin=$NODE_BIN peers=${PEERS[*]} budget=${BUDGET}s sample=${SAMPLE_SECS}s"
 echo "cold-start-wipe-stopwatch: file_peer=${FILE_PEER:-<none>}"
@@ -2896,14 +2926,17 @@ launch_node() {
     # launch only: a followed self-respawn is the same run on the same
     # datadir, so moving this would restart a clock that never stopped.
     [ "$NODE_LAUNCH_UNIX" = "-1" ] && NODE_LAUNCH_UNIX=$(date +%s)
-    "$PROCESS_GROUP_EXEC" env HOME="$ISO_HOME" "$NODE_BIN" \
-        "${node_args[@]}" \
-        >>"$DATADIR/node.log" 2>&1 &
-    PID=$!
+    OWNER_CLEAN=0
+    coproc C3_PROCESS { HOME="$ISO_HOME" "$C3_OWNER" "$PROCESS_GROUP_EXEC" "$DATADIR/node.log" "$NODE_BIN" "${node_args[@]}"; }
+    OWNER_PID=$C3_PROCESS_PID
+    exec {OWNER_READ}<&"${C3_PROCESS[0]}" {OWNER_WRITE}>&"${C3_PROCESS[1]}" || return 1
+    OWNER_RUNNING=1
+    local first=""
+    IFS= read -r -t 15 -u "$OWNER_READ" first && [ "$first" = START ] || return 1
 }
 
-launch_node
-echo "cold-start-wipe-stopwatch: launched pid=$PID (boot $boots)"
+launch_node || die "supervised owner launch unconfirmed; fixture retained"
+echo "cold-start-wipe-stopwatch: launched owned node (boot $boots); per-process resource counters unavailable"
 
 rpc() { "$NODE_BIN" -rpcport=$RPC -datadir="$DATADIR" "$@" 2>/dev/null; }
 
@@ -3018,7 +3051,8 @@ t=0
 reached=0
 while :; do
     now=$(date +%s); elapsed=$((now - start))
-    if ! kill -0 "$PID" 2>/dev/null; then
+    owner_line=""
+    if IFS= read -r -t 0.01 -u "$OWNER_READ" owner_line; then
         # The watched PID is gone. Distinguish a SUPERVISED SELF-RESPAWN (a
         # clean exit that wrote a self_respawn_* exit-reason breadcrumb — the
         # node asking to be relaunched on the same datadir, e.g. to consume an
@@ -3030,7 +3064,8 @@ while :; do
         # later. (If the node's own in-process execv re-exec HELD, the PID
         # would never have died and we would not be here — this follows the
         # early-_exit path that bypasses that re-exec off-systemd.)
-        wait "$PID" 2>/dev/null; node_ec=$?
+        owner_done "$owner_line" || die "supervised cleanup unconfirmed; fixture retained"
+        node_ec=$(( OWNER_STATUS >> 8 ))
         reason="$(read_exit_reason)"
         if is_self_respawn_reason "$reason"; then
             last_respawn_reason="$reason"
@@ -3046,14 +3081,17 @@ while :; do
             rm -f "$DATADIR/boot-exit-reason.v1" 2>/dev/null || true
             supervised_launches=$((supervised_launches + 1))
             echo "cold-start-wipe-stopwatch: FOLLOWED self-respawn (reason=$reason ec=$node_ec) — supervised launch $supervised_launches on same datadir (t=${elapsed}s, wall clock continues)"
-            launch_node
-            echo "cold-start-wipe-stopwatch: launched pid=$PID (supervised launch $supervised_launches)"
+            launch_node || die "supervised owner relaunch unconfirmed; fixture retained"
+            echo "cold-start-wipe-stopwatch: launched owned node (supervised launch $supervised_launches)"
             sleep "$SAMPLE_SECS"
             continue
         fi
         echo "cold-start-wipe-stopwatch: node EXITED early (t=${elapsed}s, ec=$node_ec, boots=$boots) — log tail:"
         tail -20 "$DATADIR/node.log" 2>/dev/null | sed 's/^/  /'
         die "node process died before reaching network_tip (exit_reason=${reason:-<none: crash or no breadcrumb>} ec=$node_ec boots=$boots)"
+    else
+        owner_read_rc=$?
+        [ "$owner_read_rc" -gt 128 ] || die "supervised owner channel lost; fixture retained"
     fi
 
     # execv self-respawn keeps PID alive.  Observe the node's own prologue

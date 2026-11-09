@@ -7922,6 +7922,12 @@ $(PROCESS_GROUP_EXEC_BIN): tools/process_group_exec.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -o $@ $<
 
+.PHONY: c3-supervised-owner
+c3-supervised-owner: $(BIN_DIR)/c3-supervised-owner
+$(BIN_DIR)/c3-supervised-owner: tools/c3_supervised_owner.c platform/modules/platform/src/supervised_process.c platform/modules/sha3/src/sha3.c $(PROCESS_GROUP_EXEC_BIN)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/sha3/include -o $@ tools/c3_supervised_owner.c platform/modules/platform/src/supervised_process.c platform/modules/sha3/src/sha3.c
+
 # Stand-in desktop app for the app_launch group: prints a ready marker,
 # records SIGUSR1, exits on SIGTERM. Needs no display.
 .PHONY: app-launch-fixture
@@ -11065,7 +11071,7 @@ mvp-coldstart-to-tip-local: zclassic23 zcl-rpc
 # every scheduled run burned 600s on a boot that could only log
 # "directory: handshake failed ... — skipping seed".
 .PHONY: mvp-coldstart-to-tip-stopwatch
-mvp-coldstart-to-tip-stopwatch: zclassic23 fs-handshake-probe p2p-version-probe process-group-exec
+mvp-coldstart-to-tip-stopwatch: zclassic23 fs-handshake-probe p2p-version-probe process-group-exec c3-supervised-owner
 	@bash -c 'set -uo pipefail; \
 	 echo "══ MVP C3 STOPWATCH (real): wiped datadir -> checkpoint/fold -> peer tip, real wall-clock ══"; \
 	 if ! bash tools/scripts/cold_start_to_tip_stopwatch.sh --selftest >/dev/null 2>&1; then \
