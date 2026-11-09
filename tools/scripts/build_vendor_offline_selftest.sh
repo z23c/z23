@@ -64,9 +64,9 @@ fi
 mkdir -p "$SANDBOX/elsewhere/tools"
 # Freeze the qualified driver before the relative fixture overrides HOSTCC.
 # Match the production token grammar; never evaluate a compiler command.
-fixture_host_cc="${HOSTCC:-cc}"
+fixture_host_cc="${HOSTCC:-${HOST_CC:-cc}}"
 case "$(uname -s 2>/dev/null)" in
-    MSYS*|MINGW*|CYGWIN*) fixture_host_cc="${HOSTCC:-${ZCL_BOOTSTRAP_CC:-/usr/bin/cc}}" ;;
+    MSYS*|MINGW*|CYGWIN*) fixture_host_cc="${HOSTCC:-${HOST_CC:-${ZCL_BOOTSTRAP_CC:-/usr/bin/cc}}}" ;;
 esac
 [[ "$fixture_host_cc" =~ ^[A-Za-z0-9_./:+,=%-]+([[:space:]]+[A-Za-z0-9_./:+,=%-]+)*$ ]] ||
     fail 'fixture HOSTCC contains unsupported shell syntax'
@@ -87,6 +87,48 @@ esac
 } > "$SANDBOX/tools/native-cc"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 97' > "$SANDBOX/elsewhere/tools/native-cc"
 chmod +x "$SANDBOX/tools/native-cc" "$SANDBOX/elsewhere/tools/native-cc"
+fixture_machine="$("${fixture_host_argv[@]}" -dumpmachine)"
+ln -s "$(command -v ar)" "$SANDBOX/bin/$fixture_machine-ar"
+# Exercise the actual vendor-ready invocation with no usable default cc.
+printf '%s\n' '#!/bin/sh' 'exit 97' > "$SANDBOX/bin/cc"
+chmod +x "$SANDBOX/bin/cc"
+{
+    printf 'HOST_CC ?= cc\nvendor-ready:\n'
+    sed -n '/^vendor-ready: /{n;p;}' "$ROOT/Makefile"
+} > "$SANDBOX/host-selector.mk"
+mkdir -p "$SANDBOX/env-check/tools/scripts"
+cp "$SANDBOX/host-selector.mk" "$SANDBOX/env-check/Makefile"
+printf '%s\n' '#!/bin/sh' 'test "${HOST_CC+x}" != x' > "$SANDBOX/env-check/tools/scripts/build_vendor.sh"
+chmod +x "$SANDBOX/env-check/tools/scripts/build_vendor.sh"
+(cd "$SANDBOX/env-check" && env -u HOST_CC -u HOSTCC make vendor-ready) ||
+    fail 'implicit Make HOST_CC default was exported to the vendor script'
+if output="$(cd "$SANDBOX" && env -u HOSTCC PATH="$SANDBOX/bin:$PATH" \
+    VENDOR_CC="$SANDBOX/tools/native-cc" VENDOR_AR="$fixture_machine-ar" ZCL_VENDOR_OFFLINE=1 \
+    make -f host-selector.mk HOST_CC="$SANDBOX/tools/native-cc" vendor-ready 2>&1)"; then
+    fail 'host compiler fixture unexpectedly built missing archive'
+fi
+[[ "$output" == *'vendor/tor_stub.c missing (tracked source expected)'* ]] ||
+    fail "vendor-ready ignored the selected host compiler: $output"
+if output="$(cd "$SANDBOX" && HOSTCC="$SANDBOX/tools/native-cc" \
+    PATH="$SANDBOX/bin:$PATH" VENDOR_CC="$SANDBOX/tools/native-cc" VENDOR_AR="$fixture_machine-ar" ZCL_VENDOR_OFFLINE=1 \
+    make -f host-selector.mk HOST_CC=cc vendor-ready 2>&1)"; then
+    fail 'host override fixture unexpectedly built missing archive'
+fi
+[[ "$output" == *'vendor/tor_stub.c missing (tracked source expected)'* ]] ||
+    fail 'explicit HOSTCC did not override HOST_CC'
+printf '%s\n' '#!/bin/sh' '[ "$1" = -dumpmachine ] && { echo aarch64-apple-darwin; exit 0; }' \
+    'exec "$(dirname "$0")/native-cc" "$@"' > "$SANDBOX/tools/target-cc"
+chmod +x "$SANDBOX/tools/target-cc"
+ln -s "$(command -v ar)" "$SANDBOX/bin/aarch64-apple-darwin-ar"
+if output="$(cd "$SANDBOX" && env -u HOSTCC PATH="$SANDBOX/bin:$PATH" \
+    VENDOR_CC="$SANDBOX/tools/target-cc" VENDOR_AR=aarch64-apple-darwin-ar ZCL_VENDOR_OFFLINE=1 \
+    make -f host-selector.mk HOST_CC="$SANDBOX/tools/native-cc" \
+    ZCL_CROSS_TRIPLE=aarch64-apple-darwin vendor-ready 2>&1)"; then
+    fail 'cross compiler fixture unexpectedly built missing archive'
+fi
+[[ "$output" == *'vendor/tor_stub.c missing (tracked source expected)'* ]] ||
+    fail "cross target did not retain the selected host compiler: $output"
+rm "$SANDBOX/bin/cc"
 if output="$(cd "$SANDBOX/elsewhere" && HOSTCC=tools/native-cc \
     ZCL_VENDOR_OFFLINE=1 "$SANDBOX/tools/scripts/build_vendor.sh" libz.a 2>&1)"; then
     fail 'root-scoped compiler fixture unexpectedly built missing archive'

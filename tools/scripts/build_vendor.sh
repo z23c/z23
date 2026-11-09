@@ -338,14 +338,14 @@ vendor_lock_source_hash() {
 acquire_vendor_lock() {
     # Bootstrap only host C23, with no vendor archive dependency. Bind reuse
     # to exact helper/compiler/bootstrap bytes and flags, never timestamps.
-    local host_cc="${HOSTCC:-cc}" compiler_key source_key key helper temporary
+    local host_cc="${HOSTCC:-${HOST_CC:-cc}}" compiler_key source_key key helper temporary
     # This helper executes inside the POSIX build shell and retains flock's
     # descriptor across exec. MinGW/UCRT cc builds the product archives, but
     # cannot provide that host contract. Match zcc's MSYS bootstrap compiler
     # selection while preserving an explicit HOSTCC override.
     case "$(uname -s 2>/dev/null)" in
         MSYS*|MINGW*|CYGWIN*)
-            host_cc="${HOSTCC:-${ZCL_BOOTSTRAP_CC:-/usr/bin/cc}}"
+            host_cc="${HOSTCC:-${HOST_CC:-${ZCL_BOOTSTRAP_CC:-/usr/bin/cc}}}"
             ;;
     esac
     local helper_source script_source key_source provenance_source
