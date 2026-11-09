@@ -69,4 +69,11 @@ bool coins_view_sqlite_read_commitment(struct coins_view_sqlite *cvs,
  * exist, or -1 on guard refusal / SQL failure. */
 int coins_rewind_above_tip(sqlite3 *db, int64_t tip_height, int64_t max_rows);
 
+#if defined(ZCL_TESTING)
+/* How many times the utxos MAX/COUNT scan has run since the last reset.
+ * Absent from production builds. */
+void coins_view_sqlite_test_reset_utxo_max_count_runs(void);
+uint64_t coins_view_sqlite_test_utxo_max_count_runs(void);
+#endif
+
 #endif

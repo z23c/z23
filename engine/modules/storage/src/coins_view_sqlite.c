@@ -568,11 +568,28 @@ static bool coins_tip_db_is_proven_authority(int32_t *applied)
     return pdb && coins_kv_is_proven_authority(pdb, applied);
 }
 
+#if defined(ZCL_TESTING)
+static uint64_t g_coins_tip_utxo_max_count_runs;
+
+void coins_view_sqlite_test_reset_utxo_max_count_runs(void)
+{
+    g_coins_tip_utxo_max_count_runs = 0;
+}
+
+uint64_t coins_view_sqlite_test_utxo_max_count_runs(void)
+{
+    return g_coins_tip_utxo_max_count_runs;
+}
+#endif
+
 /* Leaves *max_height and *count unchanged when prepare fails or the
  * statement yields no row. A NULL MAX stays unchanged (caller sentinel). */
 static void coins_tip_read_utxo_max_count(sqlite3 *db, int64_t *max_height,
                                          int64_t *count)
 {
+#if defined(ZCL_TESTING)
+    g_coins_tip_utxo_max_count_runs++;
+#endif
     sqlite3_stmt *s = NULL;
     if (sqlite3_prepare_v2(db,
             "SELECT MAX(height), COUNT(*) FROM utxos",
@@ -652,30 +669,18 @@ static bool coins_view_sqlite_check_tip_consistency(sqlite3 *db)
      * co-committed coins_applied_height present + migration stamp + a
      * non-empty set — the same rungs the L1 heal demands), the coins-best
      * fact is DERIVABLE from the canonical store and this gate's verdict
-     * is simply "derivation resolvable" — PASS. The mirror MAX/COUNT and
-     * the node_state 'coins_best_block' key below are CACHES of that fact:
-     * drift between them is a stale projection (rebuildable, never
-     * consulted by decisions), logged as a diagnostic, never a FATAL,
-     * never an auto-rewind, never a guess-reconcile. Legacy datadirs
+     * is simply "derivation resolvable" — PASS. The utxos mirror and the
+     * node_state 'coins_best_block' key are CACHES of that fact and are
+     * never a decision: this branch does not scan utxos. Legacy datadirs
      * (predicate false / progress store not open) keep the strict legacy
-     * gate unchanged. */
+     * gate unchanged, including its MAX/COUNT scan. */
     {
         int32_t applied = -1;
         if (coins_tip_db_is_proven_authority(&applied)) {
-            int64_t mirror_max = -1, mirror_count = 0;
-            coins_tip_read_utxo_max_count(db, &mirror_max, &mirror_count);
             int64_t derived_h = (int64_t)applied - 1;
-            if (mirror_max != derived_h)
-                printf("[coins] tip check: derived coins-best h=%lld "
-                       "(coins_kv authority); mirror max_height=%lld "
-                       "count=%lld — anchor cache stale / projection lag "
-                       "(rebuildable, not consulted)\n",
-                       (long long)derived_h, (long long)mirror_max,
-                       (long long)mirror_count);
-            else
-                printf("[coins] tip check OK: derived coins-best h=%lld "
-                       "(coins_kv authority, mirror agrees, count=%lld)\n",
-                       (long long)derived_h, (long long)mirror_count);
+            printf("[coins] tip check OK: derived coins-best h=%lld "
+                   "(coins_kv authority); utxos mirror was not scanned\n",
+                   (long long)derived_h);
             return true;
         }
     }

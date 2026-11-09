@@ -553,7 +553,9 @@ static int cbd_drift_test(void)
             ASSERT(memcmp(hash, want, 32) == 0);
         }
 
-        /* (b) the boot gate PASSES (open succeeds — no FATAL branch) */
+        /* (b) the boot gate PASSES (open succeeds — no FATAL branch)
+         * without scanning the utxos mirror. */
+        coins_view_sqlite_test_reset_utxo_max_count_runs();
         struct coins_view_sqlite cvs;
         ASSERT(coins_view_sqlite_open(&cvs, db));
         coins_view_sqlite_close(&cvs);
@@ -565,6 +567,7 @@ static int cbd_drift_test(void)
         ASSERT(cbd_get_anchor(db, now));
         ASSERT(memcmp(now, garbage, 32) == 0);
         ASSERT(cbd_utxo_rowcount(db) == rows_before);
+        ASSERT_EQ(coins_view_sqlite_test_utxo_max_count_runs(), (uint64_t)0);
 
         /* (d) legacy branch preserved: delete coins_applied_height and the
          * strict legacy gate must refuse this shape again (garbage anchor
@@ -581,6 +584,7 @@ static int cbd_drift_test(void)
         }
         struct coins_view_sqlite cvs2;
         ASSERT(!coins_view_sqlite_open(&cvs2, db));
+        ASSERT(coins_view_sqlite_test_utxo_max_count_runs() > 0);
 
         sqlite3_close(db);
         progress_store_close();
