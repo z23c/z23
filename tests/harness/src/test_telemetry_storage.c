@@ -49,6 +49,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "services/storage_telemetry.h"
+#include "storage/memory_profile.h"
 #include "util/safe_alloc.h"
 #include "util/telemetry_ontology.h"
 #include "util/telemetry_render.h"
@@ -479,6 +480,68 @@ static int exec_leaf(const char *path, const char *view, bool want_ok,
     return failures;
 }
 
+static int64_t g_cache_expected_time;
+static int check_cache_snapshot(void)
+{
+    int failures = 0;
+    struct storage_snapshot snap = {0};
+    storage_memory_profile_test_reset();
+    (void)storage_dump_state_fill(&snap);
+    TS_CHECK("[storage] never sampled is unavailable", snap.progress_cache_bytes_meta.presence == TELEMETRY_UNAVAILABLE);
+    int64_t now = telemetry_now_unix();
+    struct storage_cache_snapshot sample = {.usage = {{STORAGE_CACHE_READY, 1234}, {STORAGE_CACHE_CLOSED, 0}},
+        .started_unix = now - 600, .finished_unix = now - 599};
+    TS_CHECK("[storage] publish cached sample", storage_memory_profile_test_publish(&sample));
+    memset(&snap, 0, sizeof(snap)); (void)storage_dump_state_fill(&snap);
+    TS_CHECK("[storage] exact sample with original observation time", snap.progress_cache_bytes == 1234 &&
+        snap.progress_cache_bytes_meta.presence == TELEMETRY_PRESENT &&
+        snap.progress_cache_bytes_meta.source == TELEMETRY_SRC_CACHED_PUBLICATION &&
+        snap.progress_cache_bytes_meta.observed_unix == sample.started_unix);
+    TS_CHECK("[storage] closed store unavailable and stale age visible", snap.projection_cache_bytes_meta.presence == TELEMETRY_UNAVAILABLE &&
+        snap.projection_cache_bytes_meta.observed_unix == sample.started_unix &&
+        snap.sample_age_seconds_meta.presence == TELEMETRY_PRESENT && snap.sample_age_seconds >= 600);
+    sample.usage.progress.state = STORAGE_CACHE_ERROR; sample.usage.projection.state = STORAGE_CACHE_READY;
+    sample.usage.projection.bytes = 5678; sample.started_unix = sample.finished_unix = -1;
+    TS_CHECK("[storage] publish clock-unknown sample", storage_memory_profile_test_publish(&sample));
+    memset(&snap, 0, sizeof(snap)); (void)storage_dump_state_fill(&snap);
+    TS_CHECK("[storage] error and clock unknown are unavailable", snap.progress_cache_bytes_meta.presence == TELEMETRY_UNAVAILABLE &&
+        snap.sample_started_unix_meta.presence == TELEMETRY_UNAVAILABLE && snap.sample_age_seconds_meta.presence == TELEMETRY_UNAVAILABLE &&
+        snap.projection_cache_bytes == 5678 && snap.projection_cache_bytes_meta.observed_unix == -1);
+    sample.started_unix = now + 3600; sample.finished_unix = now + 3601;
+    TS_CHECK("[storage] publish future bracket", storage_memory_profile_test_publish(&sample));
+    memset(&snap, 0, sizeof(snap)); (void)storage_dump_state_fill(&snap);
+    TS_CHECK("[storage] rollback leaves age unknown", snap.sample_age_seconds_meta.presence == TELEMETRY_UNAVAILABLE &&
+        snap.projection_cache_bytes_meta.age_ms == -1 && snap.progress_cache_bytes_meta.observed_unix == sample.started_unix);
+    TS_CHECK("[storage] hold snapshot guard", storage_memory_profile_test_guard(true));
+    memset(&snap, 0, sizeof(snap)); (void)storage_dump_state_fill(&snap);
+    TS_CHECK("[storage] busy snapshot remains unavailable", snap.progress_cache_bytes_meta.presence == TELEMETRY_UNAVAILABLE &&
+        !strcmp(snap.progress_cache_bytes_meta.reason, "cache_snapshot_busy"));
+    TS_CHECK("[storage] release snapshot guard", storage_memory_profile_test_guard(false));
+    sample.usage.progress.state = STORAGE_CACHE_READY;
+    sample.usage.progress.bytes = 1234;
+    sample.started_unix = now - 3; sample.finished_unix = now - 2;
+    g_cache_expected_time = sample.started_unix;
+    TS_CHECK("[storage] publish command fixture", storage_memory_profile_test_publish(&sample));
+    return failures;
+}
+
+static int check_cache_command_values(void)
+{
+    int failures = 0;
+    const struct zcl_command_spec *spec = spec_for("ops.telemetry.storage.cache");
+    struct json_value input, env; json_init(&input); json_set_object(&input); json_init(&env);
+    char out[ZCL_COMMAND_LIST_BUDGET + 1]; enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+    size_t n = spec ? zcl_command_registry_execute_json(zcl_command_catalog(), spec, NULL, &input,
+        false, spec->path, "normal", 0, 0, NULL, out, sizeof(out), &code) : 0;
+    bool ok = n && json_read(&env, out, n) && json_get_bool(json_get(&env, "ok"));
+    const struct json_value *cache = json_get(json_get(json_get(&env, "data"), "values"), "cache");
+    TS_CHECK("[storage] actual cache command carries measured values", ok && cache &&
+        json_get_int(json_get(cache, "progress_cache_bytes")) == 1234 &&
+        json_get_int(json_get(cache, "projection_cache_bytes")) == 5678 &&
+        json_get_int(json_get(cache, "sample_started_unix")) == g_cache_expected_time);
+    json_free(&input); json_free(&env); return failures;
+}
+
 static int check_commands(void)
 {
     int failures = 0;
@@ -491,17 +554,13 @@ static int check_commands(void)
                           &bytes);
     failures += exec_leaf("ops.telemetry.storage.disk", "normal", true,
                           &bytes);
-    /* Honest gap: nothing publishes cache occupancy, so the leaf fails closed
-     * and names what is missing rather than answering with an empty object. */
-    failures += exec_leaf("ops.telemetry.storage.cache", "normal", false,
+    failures += exec_leaf("ops.telemetry.storage.cache", "normal", true,
                           &bytes);
+    failures += check_cache_command_values();
     {
         const struct zcl_command_spec *cache =
             spec_for("ops.telemetry.storage.cache");
-        TS_CHECK("[storage] the cache leaf is PLANNED with a reason naming "
-                 "what is missing",
-                 cache && cache->availability == ZCL_COMMAND_PLANNED &&
-                 cache->availability_reason && cache->availability_reason[0]);
+        TS_CHECK("[storage] the cache leaf is READY", cache && cache->availability == ZCL_COMMAND_READY);
     }
 
     node_rpc_client_set_test_hook(NULL);
@@ -527,6 +586,7 @@ int test_telemetry_storage(void)
     failures += check_meaning_rows();
     failures += check_fill_sets_every_leaf();
     failures += check_unavailable_is_unknown();
+    failures += check_cache_snapshot();
     failures += check_commands();
 
     printf("=== telemetry_storage: %d failures ===\n", failures);

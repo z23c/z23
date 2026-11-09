@@ -15,7 +15,7 @@ TL_GROUP(meta, "how and when this snapshot itself was taken")
 TL_LEAF(meta, collected_unix, TLC_I64, TFU_UNIX_TIME, TLV_NORMAL,
     TFR_INFO, TL_NONE, 0, TFS_INFO,
     "wall-clock second at which the provider began filling this snapshot; "
-    "every other leaf's observed_unix is at or after this instant",
+    "cached samples retain their original observation time and may predate this instant",
     "", "")
 
 TL_GROUP_END(meta)
@@ -327,3 +327,21 @@ TL_LEAF(disk, vacuum_age_seconds, TLC_I64, TFU_SECONDS, TLV_FULL,
     "", "")
 
 TL_GROUP_END(disk)
+
+TL_GROUP(cache, "last post-trim SQLite connection cache measurements; not RSS")
+TL_LEAF(cache, progress_cache_bytes, TLC_I64, TFU_BYTES, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "SQLite-reported cache-used bytes for the progress connection, sampled under its owner lock; not resident memory", "", "")
+TL_LEAF(cache, projection_cache_bytes, TLC_I64, TFU_BYTES, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "SQLite-reported cache-used bytes for the projection connection, sampled separately; not resident memory", "", "")
+TL_LEAF(cache, sample_started_unix, TLC_I64, TFU_UNIX_TIME, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "wall-clock second before the sequential connection samples began", "", "")
+TL_LEAF(cache, sample_finished_unix, TLC_I64, TFU_UNIX_TIME, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "wall-clock second after both sequential connection samples ended", "", "")
+TL_LEAF(cache, sample_age_seconds, TLC_I64, TFU_SECONDS, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "age since the sample began; unavailable if the clock is unknown or moved backwards", "", "")
+TL_GROUP_END(cache)

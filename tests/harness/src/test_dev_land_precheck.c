@@ -497,9 +497,71 @@ _test_next:;
     return failures;
 }
 
+static bool dlx_pc_no_queue(void)
+{
+    char dir[1100]; dlx_landdir(dir, sizeof(dir));
+    if (access(dir, F_OK) != 0) return errno == ENOENT;
+    return dlx_queue_empty();
+}
+static bool dlx_pc_explicit_budget(int mode)
+{
+    struct dlx_rig rig; struct dlx_call c;
+    if (!dlx_pc_rig(&rig, "precheck_explicit_budget", true, DLX_PC_ALL_GATES)) return false;
+    dlx_pc_submit(&c, &rig, mode == 3 ? "skip" : NULL, NULL);
+    if (mode == 1) (void)json_push_kv_int(&c.input, "precheck_budget_ms", 0);
+    else if (mode == 2) (void)json_push_kv_str(&c.input, "precheck_budget_ms", "180000");
+    else if (mode == 4) (void)json_push_kv_int(&c.input, "precheck_budget_ms", 720001);
+    else (void)json_push_kv_int(&c.input, "precheck_budget_ms", 360000);
+    if (mode == 5) (void)json_push_kv_bool(&c.input, "qualify", true);
+    bool ran = true;
+    if (mode == 6) zcl_native_dev_land_submit_received(&c.request, &c.reply);
+    else ran = dlx_run(&c);
+    bool ok = ran && (mode == 0 ? dlx_ok(&c) :
+        (!dlx_ok(&c) && !strcmp(dlx_err_code(&c), "BAD_INPUT")));
+    dlx_end(&c);
+    ok = ok && (mode == 0 ? dlx_queue_has_one() : dlx_pc_no_queue());
+    dlx_restore(); return ok;
+}
+static bool dlx_pc_synthetic_budget(int64_t floor_ms, bool expect_success)
+{
+    struct dlx_rig rig; struct dlx_call c;
+    const char *known = "check-cyclomatic-complexity\ncheck-core-seal\n"
+        "check-arm-symbol-single\ncheck-kpi-floor\ncheck-describe-budget\ncheck-hardening-ratchet\n";
+    if (!dlx_pc_rig(&rig, "precheck_clock_budget", true, known)) return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    if (floor_ms) (void)json_push_kv_int(&c.input, "precheck_budget_ms", floor_ms);
+    zcl_dev_land_precheck_test_budget(180000);
+    zcl_dev_land_precheck_test_clock(60000);
+    bool ran = dlx_run(&c);
+    zcl_dev_land_precheck_test_clock(0);
+    zcl_dev_land_precheck_test_budget(0);
+    bool ok = ran && (expect_success ? dlx_ok(&c) :
+        (!dlx_ok(&c) && !strcmp(dlx_err_code(&c), "PRECHECK_TIMEOUT")));
+    ok = ok && dlx_pc_ran(&rig, "check-cyclomatic-complexity");
+    if (!floor_ms) ok = ok && !dlx_pc_ran(&rig, "check-core-seal");
+    else if (!expect_success) ok = ok && dlx_pc_ran(&rig, "check-kpi-floor") &&
+        !dlx_pc_ran(&rig, "check-describe-budget");
+    else ok = ok && dlx_pc_ran(&rig, "check-hardening-ratchet");
+    dlx_end(&c);
+    ok = ok && (expect_success ? dlx_queue_has_one() : dlx_pc_no_queue());
+    dlx_restore(); return ok;
+}
 static int dlx_pc_mode_cases(void)
 {
     int failures = 0;
+    TEST("land: explicit precheck floor is bounded and cannot bypass checking") {
+        ASSERT(zcl_land_precheck_budget_floor(180000, 0) == 180000);
+        ASSERT(zcl_land_precheck_budget_floor(270000, 180000) == 270000);
+        ASSERT(zcl_land_precheck_budget_floor(180000, 360000) == 360000);
+        for (int mode = 0; mode <= 6; ++mode) ASSERT(dlx_pc_explicit_budget(mode));
+        PASS();
+    }
+    TEST("land: explicit floor extends one shared gate deadline") {
+        ASSERT(dlx_pc_synthetic_budget(0, false));
+        ASSERT(dlx_pc_synthetic_budget(360000, false));
+        ASSERT(dlx_pc_synthetic_budget(720000, true));
+        PASS();
+    }
     TEST("land: canonical reader and execution share the remaining deadline") {
         ASSERT(dlx_pc_deadline_one(true));
         ASSERT(dlx_pc_deadline_one(false));

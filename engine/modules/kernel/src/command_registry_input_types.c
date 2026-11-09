@@ -1297,6 +1297,9 @@ bool zcl_command_registry_input_descriptor(
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     if (!cr_descriptor_declared(spec, key)) return false;
+    if (!strcmp(spec->path, "dev.land.submit") && !strcmp(key, "precheck_budget_ms")) {
+        out->type = JSON_INT; out->minimum = 180000; out->maximum = 720000; return true;
+    }
     if (cr_app_customize_query(spec, key)) {
         out->type = JSON_STR; out->max_bytes = 64; return true;
     }

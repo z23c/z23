@@ -209,3 +209,10 @@ void zcl_native_handle_telemetry_storage_disk(
     ts_dispatch(request, reply, "disk", "ops.telemetry.storage.summary",
                 "roll the whole storage domain up to one health state");
 }
+
+void zcl_native_handle_telemetry_storage_cache(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    ts_dispatch(request, reply, "cache", "ops.telemetry.storage.summary",
+                "read the complete storage posture");
+}

@@ -30,6 +30,18 @@ int64_t storage_memory_profile_steady_cache_kib(int64_t folding_cache_kib);
 enum storage_cache_state { STORAGE_CACHE_CLOSED, STORAGE_CACHE_READY, STORAGE_CACHE_ERROR };
 struct storage_cache_sample { enum storage_cache_state state; int64_t bytes; };
 struct storage_cache_usage { struct storage_cache_sample progress, projection; };
+struct storage_cache_snapshot {
+    struct storage_cache_usage usage;
+    int64_t started_unix, finished_unix; /* -1 when the clock is unavailable. */
+};
+enum storage_cache_snapshot_status { STORAGE_CACHE_SNAPSHOT_READY, STORAGE_CACHE_SNAPSHOT_UNAVAILABLE, STORAGE_CACHE_SNAPSHOT_BUSY };
+/* Try-only copy of the last post-trim sample; never acquires a DB lock. */
+enum storage_cache_snapshot_status storage_memory_profile_cached(struct storage_cache_snapshot *out);
+#ifdef ZCL_TESTING
+bool storage_memory_profile_test_publish(const struct storage_cache_snapshot *sample);
+void storage_memory_profile_test_reset(void);
+bool storage_memory_profile_test_guard(bool acquire);
+#endif
 /* Independent snapshots, not RSS or mmap residency. Returns false for a NULL
  * output; each sample separately names a closed store or SQLite error. */
 bool storage_memory_profile_read_cache(struct storage_cache_usage *out);

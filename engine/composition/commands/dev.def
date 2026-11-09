@@ -2266,13 +2266,15 @@ ZCL_COMMAND_READY_COMMAND(
     "not refused; precheck=run (default) runs it and "
     "needs the tip to be the worktree HEAD, precheck=skip queues without it and "
     "appends \" [precheck skipped]\" to the note; any other value is "
-    "refused BAD_INPUT. Over MCP a call without confirm returns a plan "
+    "refused BAD_INPUT. Optional precheck_budget_ms sets a 180000..720000 ms "
+    "floor on the load-scaled shared deadline; it requires precheck=run and "
+    "cannot be combined with qualify. Over MCP a call without confirm returns a plan "
     "(plan_id, worktree, branch, head, commits_ahead) and queues nothing; "
     "repeat it with plan_id and confirm:true to queue, and a moved HEAD or "
     "changed input is refused PLAN_MISMATCH. The CLI queues at once.", 65536,
     "land,submit,queue,lane,tip",
     "zcl.land_submit_input.v1", "zcl.land.v1",
-    "tip,worktree,note,json,qualify,precheck,plan_id,confirm", "",
+    "tip,worktree,note,json,qualify,precheck,precheck_budget_ms,plan_id,confirm", "",
     "z23 dev land submit --worktree=PATH --qualify",
     ZCL_COMMAND_LAYER_DEV,
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,

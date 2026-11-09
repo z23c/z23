@@ -67,6 +67,12 @@ static const struct {
 static bool g_pc_force;
 static _Thread_local int64_t g_pc_now;
 static _Thread_local int64_t g_pc_budget_ms;
+static _Thread_local int64_t g_pc_clock_step, g_pc_clock_value;
+void zcl_dev_land_precheck_test_clock(int64_t step_ms)
+{
+    g_pc_clock_step = step_ms > 0 ? step_ms : 0;
+    g_pc_clock_value = 0;
+}
 void zcl_dev_land_precheck_test_budget(int64_t budget_ms)
 {
     g_pc_budget_ms = budget_ms > 0 ? budget_ms : 0;
@@ -81,6 +87,18 @@ void zcl_dev_land_precheck_test_force(bool on)
     g_pc_force = on;
 }
 #endif
+
+static int64_t pc_monotonic_ms(void)
+{
+#if defined(ZCL_TESTING)
+    if (g_pc_clock_step) {
+        int64_t now = g_pc_clock_value;
+        g_pc_clock_value += g_pc_clock_step;
+        return now;
+    }
+#endif
+    return platform_time_monotonic_ms();
+}
 
 /* ── gate set ──────────────────────────────────────────────────────────── */
 
@@ -287,6 +305,10 @@ static int64_t pc_budget_ms(void)
     zcl_fleet_vitals_measure(&now);
     return zcl_land_precheck_budget_ms(now.cpus, now.load5_centi);
 }
+int64_t zcl_land_precheck_budget_floor(int64_t automatic_ms, int64_t floor_ms)
+{
+    return floor_ms > automatic_ms ? floor_ms : automatic_ms;
+}
 
 /* ── running ───────────────────────────────────────────────────────────── */
 
@@ -298,6 +320,19 @@ static void pc_fail(struct zcl_command_reply *reply, const char *leaf,
                            ZCL_COMMAND_EXIT_FAILED, code, "precheck", false,
                            false, msg, evidence);
     reply->error.human_action_required = true;
+}
+bool zcl_dev_land_precheck_input_valid(const struct json_value *input,
+                                      bool checked_elsewhere, struct zcl_command_reply *reply)
+{
+    const struct json_value *budget = json_get(input, "precheck_budget_ms");
+    const char *mode = json_get_str(json_get(input, "precheck"));
+    if (!budget) return true;
+    if (budget->type == JSON_INT && json_get_int(budget) >= 180000 &&
+        json_get_int(budget) <= 720000 && !checked_elsewhere &&
+        !json_get_bool(json_get(input, "qualify")) && strcmp(mode, "skip")) return true;
+    pc_fail(reply, "dev.land.submit", "BAD_INPUT",
+        "precheck_budget_ms requires a running precheck and must be 180000..720000", "precheck_budget_ms");
+    return false;
 }
 
 static void pc_push_names(struct zcl_command_reply *reply, const char *key,
@@ -323,7 +358,7 @@ static int pc_run(const char *wt, const char *bin, const char *gate,
 {
     const char *argv[] = {"sh", "-c", "cd \"$1\" || exit 126; shift; exec \"$@\" 2>&1",
                           "sh", wt, bin, gate, NULL};
-    int64_t left = deadline_ms - platform_time_monotonic_ms();
+    int64_t left = deadline_ms - pc_monotonic_ms();
     bool timed_out = false;
     int rc;
     out[0] = '\0';
@@ -616,7 +651,7 @@ static void pc_gate_failed(struct pc_run *r, const char *gate, int rc,
 static int pc_canonical_capture(struct pc_run *r, const char *const argv[],
                                 char *out, size_t cap)
 {
-    int64_t left = r->deadline - platform_time_monotonic_ms();
+    int64_t left = r->deadline - pc_monotonic_ms();
     bool timed_out = false;
     if (left <= 0)
         return -1;
@@ -854,7 +889,7 @@ static bool pc_tip_is_head(const char *wt, const char *tip)
 }
 
 static bool pc_run_gates(const char *leaf, const char *wt,
-                         const char *land_dir, struct zcl_command_reply *reply)
+                         const char *land_dir, int64_t floor_ms, struct zcl_command_reply *reply)
 {
     struct zcl_land_precheck_gates *g;
     struct pc_run *r;
@@ -888,12 +923,13 @@ static bool pc_run_gates(const char *leaf, const char *wt,
                                pc_now(), g);
     r->out = zcl_malloc(PC_OUT_CAP, "dev_land_precheck.out");
     int64_t budget_ms = pc_budget_ms();
-    r->budget_ms = budget_ms;
 #if defined(ZCL_TESTING)
     if (g_pc_budget_ms > 0)
-        budget_ms = r->budget_ms = g_pc_budget_ms;
+        budget_ms = g_pc_budget_ms;
 #endif
-    r->deadline = platform_time_monotonic_ms() + budget_ms;
+    budget_ms = zcl_land_precheck_budget_floor(budget_ms, floor_ms);
+    r->budget_ms = budget_ms;
+    r->deadline = pc_monotonic_ms() + budget_ms;
     if (ledger[0]) pc_history_learn(r, dir, g);
     else pc_history_unproven(r, "land state unavailable");
     ok = pc_gates_run(r, g, reply);
@@ -908,11 +944,22 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     return ok;
 }
 
-bool zcl_dev_land_precheck(const char *leaf, const char *wt,
+static bool pc_floor_valid(int64_t floor_ms, const char *mode, bool checked_elsewhere)
+{
+    if (!floor_ms) return true;
+    return floor_ms >= ZCL_LAND_PRECHECK_BUDGET_MS &&
+        floor_ms <= ZCL_LAND_PRECHECK_BUDGET_MS * ZCL_LAND_PRECHECK_BUDGET_MAX_SCALE &&
+        !checked_elsewhere && !(mode && !strcmp(mode, "skip"));
+}
+bool zcl_dev_land_precheck_budgeted(const char *leaf, const char *wt,
                            const char *land_dir, const char *mode,
                            const char *tip, bool checked_elsewhere, char *note,
-                           size_t cap, struct zcl_command_reply *reply)
+                           size_t cap, int64_t floor_ms, struct zcl_command_reply *reply)
 {
+    if (!pc_floor_valid(floor_ms, mode, checked_elsewhere)) {
+        pc_fail(reply, leaf, "BAD_INPUT", "precheck_budget_ms requires a running precheck and must be 180000..720000", "precheck_budget_ms");
+        return false;
+    }
     /* The mode is validated first, on every path: `sent` and any other word
      * are refused so a caller can never name a bypass. */
     if (mode && strcmp(mode, "run") != 0 && strcmp(mode, "skip") != 0) {
@@ -934,5 +981,13 @@ bool zcl_dev_land_precheck(const char *leaf, const char *wt,
                 tip);
         return false;
     }
-    return pc_run_gates(leaf, wt, land_dir, reply);
+    return pc_run_gates(leaf, wt, land_dir, floor_ms, reply);
+}
+bool zcl_dev_land_precheck(const char *leaf, const char *wt,
+                           const char *land_dir, const char *mode,
+                           const char *tip, bool checked_elsewhere, char *note,
+                           size_t cap, struct zcl_command_reply *reply)
+{
+    return zcl_dev_land_precheck_budgeted(leaf, wt, land_dir, mode, tip,
+                                         checked_elsewhere, note, cap, 0, reply);
 }

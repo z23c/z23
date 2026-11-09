@@ -1264,6 +1264,21 @@ static void dlx_plan_call(struct dlx_call *c, const struct dlx_rig *rig,
         (void)json_push_kv_str(&c->input, "note", note);
     zcl_native_handle_dev_land_submit(&c->request, &c->reply);
 }
+static void dlx_budget_plan(struct dlx_call *c, const struct dlx_rig *rig,
+                            int64_t budget, const char *plan, int conflict)
+{
+    static struct zcl_command_context ctx = {.plan_first = true};
+    dlx_begin(c, "submit"); c->request.context = &ctx;
+    (void)json_push_kv_str(&c->input, "worktree", rig->clone);
+    (void)json_push_kv_int(&c->input, "precheck_budget_ms", budget);
+    if (conflict == 1) (void)json_push_kv_str(&c->input, "precheck", "skip");
+    if (conflict == 2) (void)json_push_kv_bool(&c->input, "qualify", true);
+    if (plan) {
+        (void)json_push_kv_str(&c->input, "plan_id", plan);
+        (void)json_push_kv_bool(&c->input, "confirm", true);
+    }
+    zcl_native_handle_dev_land_submit(&c->request, &c->reply);
+}
 
 /* Nothing queued. A plan or a refusal writes no land state, so until the
  * first confirmed submit the isolated land directory does not exist, and
@@ -1311,6 +1326,25 @@ int test_dev_land_submit_plan_flow(void)
         (void)snprintf(plan, sizeof(plan), "%s", dlx_str(&c, "plan_id"));
         dlx_end(&c);
         ASSERT(dlx_nothing_queued());
+        dlx_budget_plan(&c, &rig, 360000, NULL, 0);
+        ASSERT(dlx_ok(&c) && dlx_int(&c, "precheck_budget_ms") == 360000);
+        (void)snprintf(plan, sizeof(plan), "%s", dlx_str(&c, "plan_id"));
+        dlx_end(&c);
+        dlx_budget_plan(&c, &rig, 360001, plan, 0);
+        ASSERT(!dlx_ok(&c) && !strcmp(dlx_err_code(&c), "PLAN_MISMATCH"));
+        dlx_end(&c);
+        ASSERT(dlx_nothing_queued());
+        dlx_budget_plan(&c, &rig, 360000, NULL, 1);
+        ASSERT(!dlx_ok(&c) && !strcmp(dlx_err_code(&c), "BAD_INPUT"));
+        dlx_end(&c);
+        dlx_budget_plan(&c, &rig, 360000, NULL, 2);
+        ASSERT(!dlx_ok(&c) && !strcmp(dlx_err_code(&c), "BAD_INPUT"));
+        dlx_end(&c);
+        ASSERT(dlx_nothing_queued());
+        dlx_plan_call(&c, &rig, true, NULL, false, NULL);
+        ASSERT(dlx_ok(&c));
+        (void)snprintf(plan, sizeof(plan), "%s", dlx_str(&c, "plan_id"));
+        dlx_end(&c);
         ASSERT(dlx_plan_refused(&rig, NULL, true, NULL, "PLAN_MISMATCH"));
         ASSERT(dlx_plan_refused(&rig, plan, false, NULL, "CONFIRM_REQUIRED"));
         ASSERT(dlx_plan_refused(&rig, plan, true, "changed", "PLAN_MISMATCH"));

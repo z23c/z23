@@ -58,6 +58,7 @@
 #include "services/disk_monitor.h"
 #include "storage/progress_store.h"
 #include "storage/projection_store.h"
+#include "storage/memory_profile.h"
 #include "sync/stage.h"
 #include "util/db_txn_trace.h"
 #include "util/log_macros.h"
@@ -66,6 +67,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <limits.h>
 #include <string.h>
 
 /* Every reason token this file can attach to a non-present leaf. They are
@@ -163,6 +165,60 @@ static void fill_block_index(struct storage_snapshot *s)
                        TELEMETRY_SRC_IN_PROCESS);
     TELEMETRY_SET_I64(s, block_index_verified_unix, st.unix_time,
                       TELEMETRY_SRC_IN_PROCESS);
+}
+
+static void cache_sample_time(struct telemetry_leaf_meta *meta, int64_t started, int64_t now)
+{
+    meta->observed_unix = started > 0 ? started : -1;
+    meta->age_ms = started > 0 && now >= started && now - started <= INT32_MAX / 1000
+        ? (int32_t)((now - started) * 1000) : -1;
+}
+
+static void cache_unavailable(struct storage_snapshot *s, const char *why)
+{
+    TELEMETRY_UNAVAILABLE_LEAF(s, progress_cache_bytes, why);
+    TELEMETRY_UNAVAILABLE_LEAF(s, projection_cache_bytes, why);
+    TELEMETRY_UNAVAILABLE_LEAF(s, sample_started_unix, why);
+    TELEMETRY_UNAVAILABLE_LEAF(s, sample_finished_unix, why);
+    TELEMETRY_UNAVAILABLE_LEAF(s, sample_age_seconds, why);
+}
+
+static void fill_cache(struct storage_snapshot *s, int64_t now)
+{
+    struct storage_cache_snapshot snap;
+    enum storage_cache_snapshot_status status = storage_memory_profile_cached(&snap);
+    if (status != STORAGE_CACHE_SNAPSHOT_READY) {
+        cache_unavailable(s, status == STORAGE_CACHE_SNAPSHOT_BUSY ? "cache_snapshot_busy" : "cache_never_sampled");
+        return;
+    }
+    if (snap.usage.progress.state == STORAGE_CACHE_READY) {
+        TELEMETRY_SET_I64(s, progress_cache_bytes, snap.usage.progress.bytes, TELEMETRY_SRC_CACHED_PUBLICATION);
+        cache_sample_time(&s->progress_cache_bytes_meta, snap.started_unix, now);
+    } else {
+        TELEMETRY_UNAVAILABLE_LEAF(s, progress_cache_bytes,
+            snap.usage.progress.state == STORAGE_CACHE_CLOSED ? "progress_store_closed" : "progress_cache_error");
+        cache_sample_time(&s->progress_cache_bytes_meta, snap.started_unix, now);
+    }
+    if (snap.usage.projection.state == STORAGE_CACHE_READY) {
+        TELEMETRY_SET_I64(s, projection_cache_bytes, snap.usage.projection.bytes, TELEMETRY_SRC_CACHED_PUBLICATION);
+        cache_sample_time(&s->projection_cache_bytes_meta, snap.started_unix, now);
+    } else {
+        TELEMETRY_UNAVAILABLE_LEAF(s, projection_cache_bytes,
+            snap.usage.projection.state == STORAGE_CACHE_CLOSED ? "projection_store_closed" : "projection_cache_error");
+        cache_sample_time(&s->projection_cache_bytes_meta, snap.started_unix, now);
+    }
+    if (snap.started_unix > 0 && snap.finished_unix >= snap.started_unix) {
+        TELEMETRY_SET_I64(s, sample_started_unix, snap.started_unix, TELEMETRY_SRC_CACHED_PUBLICATION);
+        TELEMETRY_SET_I64(s, sample_finished_unix, snap.finished_unix, TELEMETRY_SRC_CACHED_PUBLICATION);
+        cache_sample_time(&s->sample_started_unix_meta, snap.started_unix, now);
+        cache_sample_time(&s->sample_finished_unix_meta, snap.finished_unix, now);
+    } else {
+        TELEMETRY_UNAVAILABLE_LEAF(s, sample_started_unix, "cache_clock_unknown");
+        TELEMETRY_UNAVAILABLE_LEAF(s, sample_finished_unix, "cache_clock_unknown");
+    }
+    if (snap.started_unix > 0 && snap.finished_unix >= snap.started_unix && now >= snap.finished_unix)
+        TELEMETRY_SET_I64(s, sample_age_seconds, now - snap.started_unix, TELEMETRY_SRC_DERIVED);
+    else TELEMETRY_UNAVAILABLE_LEAF(s, sample_age_seconds, "cache_clock_unknown");
 }
 
 static void fill_txn_trace(struct storage_snapshot *s)
@@ -380,6 +436,7 @@ bool storage_dump_state_fill(struct storage_snapshot *s)
         TELEMETRY_UNAVAILABLE_LEAF(s, collected_unix, SR_CLOCK);
 
     fill_stores(s);
+    fill_cache(s, now_unix);
     fill_block_index(s);
     fill_txn_trace(s);
     fill_disk(s, now_unix);

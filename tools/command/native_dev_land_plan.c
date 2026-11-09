@@ -6,6 +6,7 @@
 
 #include "command/native_command.h"
 #include "command/native_dev_land_internal.h"
+#include "command/native_dev_land_precheck.h"
 
 #include "json/json.h"
 #include "sha3/sha3.h"
@@ -33,6 +34,12 @@ static void dlp_plan_id(const struct json_value *in, const char *head,
     for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
         unsigned char b = json_get_bool(json_get(in, flags[i])) ? 1 : 0;
         sha3_256_write(&ctx, &b, 1);
+    }
+    const struct json_value *budget = json_get(in, "precheck_budget_ms");
+    if (budget) {
+        char text[40];
+        (void)snprintf(text, sizeof(text), "budget:%lld", (long long)json_get_int(budget));
+        sha3_256_write(&ctx, (const unsigned char *)text, strlen(text) + 1);
     }
     sha3_256_write(&ctx, (const unsigned char *)head, strlen(head) + 1);
     sha3_256_finalize(&ctx, d);
@@ -69,6 +76,9 @@ static void dlp_report(const struct json_value *in, const char *wt,
                                (int64_t)strtoll(ahead, NULL, 10));
     (void)json_push_kv_str(&reply->data, "precheck",
                            precheck[0] ? precheck : "run");
+    const struct json_value *budget = json_get(in, "precheck_budget_ms");
+    if (budget && budget->type == JSON_INT)
+        (void)json_push_kv_int(&reply->data, "precheck_budget_ms", json_get_int(budget));
     (void)json_push_kv_bool(&reply->data, "qualify",
                             json_get_bool(json_get(in, "qualify")));
     (void)json_push_kv_bool(&reply->data, "mutated", false);
@@ -126,7 +136,8 @@ void zcl_native_handle_dev_land_submit(const struct zcl_command_request *request
                 "request.input was missing");
         return;
     }
-    if (!dlp_authorised(request, reply))
+    if (!zcl_dev_land_precheck_input_valid(request->input, false, reply) ||
+        !dlp_authorised(request, reply))
         return;
     zcl_native_dev_land_submit_local(request, reply);
 }

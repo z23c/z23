@@ -33,6 +33,9 @@
 #include <stdint.h>
 
 struct zcl_command_reply;
+struct json_value;
+bool zcl_dev_land_precheck_input_valid(const struct json_value *input,
+                                      bool checked_elsewhere, struct zcl_command_reply *reply);
 
 #define ZCL_LAND_PRECHECK_BUDGET_MS (180 * 1000)
 /* The budget is the 180 s base times the host's oversubscription: the learned
@@ -65,6 +68,8 @@ void zcl_land_precheck_gate_set(const char *outcomes_path, int64_t now_s,
  * [base, base * ZCL_LAND_PRECHECK_BUDGET_MAX_SCALE]. An unknown (negative or
  * zero) input gives the base. Pure. */
 int64_t zcl_land_precheck_budget_ms(int64_t cpus, int64_t load5_centi);
+/* Validated explicit floor; zero preserves the automatic budget. */
+int64_t zcl_land_precheck_budget_floor(int64_t automatic_ms, int64_t floor_ms);
 
 /* Run the precheck for `leaf` ("dev.land" or "dev.land.send") in the lane
  * worktree `wt`. `mode` is the caller's precheck input: NULL or "run" runs
@@ -84,6 +89,10 @@ bool zcl_dev_land_precheck(const char *leaf, const char *wt,
                            const char *land_dir, const char *mode,
                            const char *tip, bool checked_elsewhere, char *note,
                            size_t cap, struct zcl_command_reply *reply);
+bool zcl_dev_land_precheck_budgeted(const char *leaf, const char *wt,
+                           const char *land_dir, const char *mode,
+                           const char *tip, bool checked_elsewhere, char *note,
+                           size_t cap, int64_t floor_ms, struct zcl_command_reply *reply);
 
 #if defined(ZCL_TESTING)
 /* Run the gates even while the landing proof stub is set. */
@@ -92,6 +101,8 @@ void zcl_dev_land_precheck_test_force(bool on);
 void zcl_dev_land_precheck_test_now(int64_t now_s);
 /* Override the thread-local test budget; nonpositive restores production. */
 void zcl_dev_land_precheck_test_budget(int64_t budget_ms);
+/* Advance a synthetic monotonic clock by step_ms at each deadline read. */
+void zcl_dev_land_precheck_test_clock(int64_t step_ms);
 #endif
 
 #endif

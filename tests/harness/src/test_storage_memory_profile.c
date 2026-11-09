@@ -14,6 +14,7 @@
 #include "storage/projection_store.h"
 
 #include <sqlite3.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -73,7 +74,63 @@ static int mp_check_cache(sqlite3 *pdb, sqlite3 *jdb)
              usage.progress.state == STORAGE_CACHE_READY && usage.progress.bytes == p_used);
     MP_CHECK("actual projection cache equals SQLite measurement", j_rc == SQLITE_OK && j_used > 0 &&
              usage.projection.state == STORAGE_CACHE_READY && usage.projection.bytes == j_used);
+    storage_memory_profile_test_reset();
+    storage_memory_profile_log_cache();
+    struct storage_cache_snapshot published = {0};
+    MP_CHECK("actual post-trim logger publishes its samples", storage_memory_profile_cached(&published) == STORAGE_CACHE_SNAPSHOT_READY &&
+        published.usage.progress.state == STORAGE_CACHE_READY && published.usage.progress.bytes == p_used &&
+        published.usage.projection.state == STORAGE_CACHE_READY && published.usage.projection.bytes == j_used &&
+        published.started_unix > 0 && published.finished_unix >= published.started_unix);
     MP_CHECK("invalid output is an error", !storage_memory_profile_read_cache(NULL));
+    return failures;
+}
+
+struct mp_lock_sync { pthread_mutex_t mutex; pthread_cond_t cond; bool held, release; };
+static void *mp_hold_db_locks(void *context)
+{
+    struct mp_lock_sync *s = context;
+    progress_store_tx_lock(); projection_store_tx_lock();
+    pthread_mutex_lock(&s->mutex); s->held = true; pthread_cond_signal(&s->cond);
+    while (!s->release) pthread_cond_wait(&s->cond, &s->mutex);
+    pthread_mutex_unlock(&s->mutex);
+    projection_store_tx_unlock(); progress_store_tx_unlock();
+    return NULL;
+}
+static bool mp_read_while_db_locks_held(struct storage_cache_snapshot *got)
+{
+    struct mp_lock_sync s = {.mutex = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER};
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, mp_hold_db_locks, &s) != 0) return false;
+    pthread_mutex_lock(&s.mutex);
+    while (!s.held) pthread_cond_wait(&s.cond, &s.mutex);
+    pthread_mutex_unlock(&s.mutex);
+    enum storage_cache_snapshot_status status = storage_memory_profile_cached(got);
+    pthread_mutex_lock(&s.mutex); s.release = true; pthread_cond_signal(&s.cond); pthread_mutex_unlock(&s.mutex);
+    bool joined = pthread_join(thread, NULL) == 0;
+    pthread_cond_destroy(&s.cond); pthread_mutex_destroy(&s.mutex);
+    return joined && status == STORAGE_CACHE_SNAPSHOT_READY;
+}
+static int mp_check_publication(void)
+{
+    int failures = 0;
+    struct storage_cache_snapshot value = {.usage = {{STORAGE_CACHE_READY, 123}, {STORAGE_CACHE_ERROR, 0}},
+        .started_unix = 100, .finished_unix = 102};
+    struct storage_cache_snapshot got = {0};
+    storage_memory_profile_test_reset();
+    MP_CHECK("never sampled is unavailable", storage_memory_profile_cached(&got) == STORAGE_CACHE_SNAPSHOT_UNAVAILABLE);
+    MP_CHECK("sample published", storage_memory_profile_test_publish(&value));
+    /* A distinct thread owns both locks until the try-only reader returns. */
+    MP_CHECK("cached read does not take DB locks", mp_read_while_db_locks_held(&got) &&
+        got.usage.progress.bytes == 123 && got.usage.projection.state == STORAGE_CACHE_ERROR &&
+        got.started_unix == 100 && got.finished_unix == 102);
+    MP_CHECK("hold snapshot guard", storage_memory_profile_test_guard(true));
+    MP_CHECK("contended read is busy", storage_memory_profile_cached(&got) == STORAGE_CACHE_SNAPSHOT_BUSY);
+    value.usage.progress.bytes = 999;
+    MP_CHECK("contended publisher does not overwrite", !storage_memory_profile_test_publish(&value));
+    MP_CHECK("release snapshot guard", storage_memory_profile_test_guard(false));
+    MP_CHECK("previous sample and timestamp retained", storage_memory_profile_cached(&got) == STORAGE_CACHE_SNAPSHOT_READY &&
+        got.usage.progress.bytes == 123 && got.started_unix == 100);
+    storage_memory_profile_test_reset();
     return failures;
 }
 
@@ -82,6 +139,7 @@ int test_storage_memory_profile(void)
 {
     printf("\n=== storage memory profile tests ===\n");
     int failures = 0;
+    failures += mp_check_publication();
     char dir[256];
     test_make_tmpdir(dir, sizeof(dir), "storage_memory_profile", "main");
 

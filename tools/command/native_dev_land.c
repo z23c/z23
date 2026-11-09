@@ -3655,9 +3655,10 @@ static bool dl_submit_precheck(const struct zcl_command_request *req,
 {
     const char *note = dl_str(req, "note");
     (void)snprintf(note_buf, cap, "%s", note ? note : "");
-    return zcl_dev_land_precheck(DL_LEAF, root, d->land, dl_str(req, "precheck"),
+    const struct json_value *budget = json_get(req->input, "precheck_budget_ms");
+    return zcl_dev_land_precheck_budgeted(DL_LEAF, root, d->land, dl_str(req, "precheck"),
                                  full, sender_checked || qr->tip[0] != '\0',
-                                 note_buf, cap, reply);
+                                 note_buf, cap, budget ? json_get_int(budget) : 0, reply);
 }
 
 static bool dl_submit_resolve_root(const struct zcl_command_request *req,
@@ -3730,6 +3731,8 @@ static void dl_submit(const struct zcl_command_request *req,
     const char *allow_unsigned = dl_allow_unsigned();
     int lock = -1;
     struct zcl_land_qualify qr = {0};
+
+    if (!zcl_dev_land_precheck_input_valid(req->input, sender_checked, reply)) return;
 
     tip = dl_submit_tip(req, reply, tip_buf, sizeof(tip_buf), &qr);
     if (!tip)
