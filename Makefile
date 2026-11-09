@@ -7926,7 +7926,7 @@ $(PROCESS_GROUP_EXEC_BIN): tools/process_group_exec.c
 c3-supervised-owner: $(BIN_DIR)/c3-supervised-owner
 $(BIN_DIR)/c3-supervised-owner: tools/c3_supervised_owner.c platform/modules/platform/src/supervised_process.c platform/modules/platform/src/clock.c platform/modules/base/src/safe_alloc.c platform/modules/sha3/src/sha3.c $(PROCESS_GROUP_EXEC_BIN)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/sha3/include -Iplatform/modules/util/include -o $@ tools/c3_supervised_owner.c platform/modules/platform/src/supervised_process.c platform/modules/platform/src/clock.c platform/modules/base/src/safe_alloc.c platform/modules/sha3/src/sha3.c
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/sha3/include -Iplatform/modules/util/include -o $@ tools/c3_supervised_owner.c platform/modules/platform/src/supervised_process.c platform/modules/platform/src/clock.c platform/modules/base/src/safe_alloc.c platform/modules/sha3/src/sha3.c
 
 # Stand-in desktop app for the app_launch group: prints a ready marker,
 # records SIGUSR1, exits on SIGTERM. Needs no display.
