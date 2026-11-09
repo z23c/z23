@@ -38,6 +38,7 @@ UNIT_DIR=""
 START_ATTEMPTED=0
 PREFIX=""
 DATADIR=""
+FIXTURE_TMP="${TMPDIR:-/tmp}"
 
 # ── Preflight: a usable systemd --user session ──────────────────────
 command -v systemctl >/dev/null 2>&1 || gate_skip "systemctl absent"
@@ -82,8 +83,8 @@ cleanup() {
         rmdir -- "$UNIT_DIR" || exit 1
         UNIT_DIR=""
     fi
-    case "${PREFIX:-}"  in /tmp/zcl-linger-prefix.*) rm -rf "$PREFIX" || exit 1 ;; esac
-    case "${DATADIR:-}" in /tmp/zcl-linger-dd.*)     rm -rf "$DATADIR" || exit 1 ;; esac
+    case "${PREFIX:-}"  in "$FIXTURE_TMP"/zcl-linger-prefix.*) rm -rf "$PREFIX" || exit 1 ;; esac
+    case "${DATADIR:-}" in "$FIXTURE_TMP"/zcl-linger-dd.*)     rm -rf "$DATADIR" || exit 1 ;; esac
     PREFIX=""
     DATADIR=""
     return "$prior_status"
@@ -92,7 +93,7 @@ trap cleanup EXIT
 trap 'exit 1' INT TERM
 
 # ── (1) REAL `make install` to a throwaway prefix (binaries only) ───
-PREFIX="$(mktemp -d /tmp/zcl-linger-prefix.XXXXXX)" || gate_die "mktemp prefix failed"
+PREFIX="$(mktemp -d "$FIXTURE_TMP/zcl-linger-prefix.XXXXXX")" || gate_die "mktemp prefix failed"
 echo "ci-install-linger: make install -> $PREFIX"
 make -C "$REPO_ROOT" install DESTDIR="$PREFIX" PREFIX= >/dev/null 2>&1 \
     || gate_die "make install -> prefix failed"
@@ -102,7 +103,7 @@ RPC_BIN="$PREFIX/bin/zcl-rpc"
 [ -x "$RPC_BIN" ]  || gate_die "installed zcl-rpc missing/!executable: $RPC_BIN"
 
 # ── (2) Write an ISOLATED --user unit pointing at the installed binary ──
-DATADIR="$(mktemp -d /tmp/zcl-linger-dd.XXXXXX)" || gate_die "mktemp datadir failed"
+DATADIR="$(mktemp -d "$FIXTURE_TMP/zcl-linger-dd.XXXXXX")" || gate_die "mktemp datadir failed"
 P2P=39060; RPC=39061; FS=39062; HTTPS=39063; SINK=39999
 mkdir -p "$USER_UNIT_DIR"
 UNIT_DIR="$(mktemp -d "$USER_UNIT_DIR/.z23-citest.XXXXXXXX")" || gate_die "unit name reservation failed"

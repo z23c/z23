@@ -142,17 +142,21 @@ static bool du_fixture_tmp_path(const char *path, const char *prefix)
 
 /* The fake service never starts a process; remove only the exact mktemp
  * directories named by its captured output and its retained unit. */
-static bool du_fixture_retained_cleanup(const char *output, const char *unit)
+static bool du_fixture_retained_cleanup(const char *output, const char *unit,
+                                        const char *root)
 {
     const char *p = strstr(output, "make install -> ");
-    char prefix[512], datadir[512], *body = NULL, discard[256]; size_t n = 0;
+    char prefix[512], datadir[512], expected_prefix[600], expected_datadir[600];
+    char *body = NULL, discard[256]; size_t n = 0;
+    if (snprintf(expected_prefix, sizeof(expected_prefix), "%s/zcl-linger-prefix.", root) >= (int)sizeof(expected_prefix) ||
+        snprintf(expected_datadir, sizeof(expected_datadir), "%s/zcl-linger-dd.", root) >= (int)sizeof(expected_datadir)) return false;
     if (!p || sscanf(p, "make install -> %511s", prefix) != 1 ||
-        !du_fixture_tmp_path(prefix, "/tmp/zcl-linger-prefix.") ||
+        !du_fixture_tmp_path(prefix, expected_prefix) ||
         !du_read_file(unit, &body, &n)) return false;
     const char *d = strstr(body, "-datadir=");
     struct stat prefix_st, datadir_st;
     bool ok = d && sscanf(d, "-datadir=%511s", datadir) == 1 &&
-              du_fixture_tmp_path(datadir, "/tmp/zcl-linger-dd.") &&
+              du_fixture_tmp_path(datadir, expected_datadir) &&
               stat(prefix, &prefix_st) == 0 && S_ISDIR(prefix_st.st_mode) &&
               stat(datadir, &datadir_st) == 0 && S_ISDIR(datadir_st.st_mode);
     if (ok) {
@@ -163,12 +167,14 @@ static bool du_fixture_retained_cleanup(const char *output, const char *unit)
     return ok;
 }
 
-/* Exercise the actual linger script with a private config and stub commands.
- * Neither stub contacts systemd or starts a node. */
-static void du_check_linger_fixture(struct du_ctx *c)
-{
+struct du_linger_fixture {
     char dir[512], bin[600], config[600], user[700], sentinel[800];
-    char sys[700], make[700], journal[700], log[700], pathenv[800], cfgenv[700], logenv[800];
+    char log[700], pathenv[800], cfgenv[700], logenv[800], tmpenv[600];
+};
+
+static bool du_linger_setup(struct du_linger_fixture *f)
+{
+    char sys[700], make[700], journal[700];
     static const char systemctl_stub[] =
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_LOG\"\n"
         "case \"$2\" in\n"
@@ -184,47 +190,66 @@ static void du_check_linger_fixture(struct du_ctx *c)
         "printf '#!/bin/sh\\nexit 0\\n' > \"$p/bin/zclassic23\"\n"
         "printf '#!/bin/sh\\necho 0\\n' > \"$p/bin/zcl-rpc\"\n"
         "chmod 755 \"$p/bin/zclassic23\" \"$p/bin/zcl-rpc\"\n";
-    if (!test_mkdtemp(dir, sizeof(dir), "linger_unit")) {
-        du_fail(c, "linger fixture", 0, "mkdtemp failed", ""); return;
-    }
-    snprintf(bin, sizeof(bin), "%s/bin", dir);
-    snprintf(config, sizeof(config), "%s/config", dir);
-    snprintf(user, sizeof(user), "%s/systemd", config);
-    bool ok = mkdir(bin, 0700) == 0 && mkdir(config, 0700) == 0 && mkdir(user, 0700) == 0;
-    snprintf(user, sizeof(user), "%s/systemd/user", config);
-    ok = ok && mkdir(user, 0700) == 0;
-    snprintf(sentinel, sizeof(sentinel), "%s/z23-citest.service", user);
-    snprintf(sys, sizeof(sys), "%s/systemctl", bin);
-    snprintf(make, sizeof(make), "%s/make", bin);
-    snprintf(journal, sizeof(journal), "%s/journalctl", bin);
-    snprintf(log, sizeof(log), "%s/calls", dir);
-    ok = ok && du_fixture_write(sentinel, "original\n", 0600) &&
+    if (!test_mkdtemp(f->dir, sizeof(f->dir), "linger_unit")) return false;
+    snprintf(f->bin, sizeof(f->bin), "%s/bin", f->dir);
+    snprintf(f->config, sizeof(f->config), "%s/config", f->dir);
+    snprintf(f->user, sizeof(f->user), "%s/systemd", f->config);
+    bool ok = mkdir(f->bin, 0700) == 0 && mkdir(f->config, 0700) == 0 && mkdir(f->user, 0700) == 0;
+    snprintf(f->user, sizeof(f->user), "%s/systemd/user", f->config);
+    ok = ok && mkdir(f->user, 0700) == 0;
+    snprintf(f->sentinel, sizeof(f->sentinel), "%s/z23-citest.service", f->user);
+    snprintf(sys, sizeof(sys), "%s/systemctl", f->bin);
+    snprintf(make, sizeof(make), "%s/make", f->bin);
+    snprintf(journal, sizeof(journal), "%s/journalctl", f->bin);
+    snprintf(f->log, sizeof(f->log), "%s/calls", f->dir);
+    ok = ok && du_fixture_write(f->sentinel, "original\n", 0600) &&
          du_fixture_write(sys, systemctl_stub, 0700) && du_fixture_write(make, make_stub, 0700) &&
          du_fixture_write(journal, "#!/bin/sh\nexit 0\n", 0700);
-    snprintf(pathenv, sizeof(pathenv), "PATH=%s:/usr/bin:/bin", bin);
-    snprintf(cfgenv, sizeof(cfgenv), "XDG_CONFIG_HOME=%s", config);
-    snprintf(logenv, sizeof(logenv), "FAKE_LOG=%s", log);
+    snprintf(f->pathenv, sizeof(f->pathenv), "PATH=%s:/usr/bin:/bin", f->bin);
+    snprintf(f->cfgenv, sizeof(f->cfgenv), "XDG_CONFIG_HOME=%s", f->config);
+    snprintf(f->logenv, sizeof(f->logenv), "FAKE_LOG=%s", f->log);
+    snprintf(f->tmpenv, sizeof(f->tmpenv), "TMPDIR=%s", f->dir);
+    return ok;
+}
+
+static bool du_linger_stop_failure(int rc, int entries, const char *output,
+                                   const char *calls, const char *unit,
+                                   const char *dir)
+{
+    bool retained = rc == 1 && !strstr(output, "PASSED") &&
+                    strstr(output, "unit stop failed; retaining fixture") &&
+                    strstr(calls, "--user stop z23-citest.") && entries == 3 && unit[0];
+    bool cleaned = unit[0] && du_fixture_retained_cleanup(output, unit, dir);
+    return retained && cleaned;
+}
+
+static bool du_linger_result(size_t i, int rc, int entries, const char *output,
+                             const char *calls, const char *unit, const char *dir)
+{
+    if (i < 2) return rc == 1 && entries == 1 && !strstr(calls, "--user stop") && !strstr(calls, "--user disable");
+    if (i == 2) return rc == 0 && entries == 1 && strstr(output, "PASSED") && strstr(calls, "--user stop z23-citest.");
+    return du_linger_stop_failure(rc, entries, output, calls, unit, dir);
+}
+
+/* Exercise the actual linger script with a private config and stub commands.
+ * Neither stub contacts systemd or starts a node. */
+static void du_check_linger_fixture(struct du_ctx *c)
+{
+    struct du_linger_fixture f;
+    bool ok = du_linger_setup(&f);
     const char *modes[] = {"FAKE_MODE=early", "FAKE_MODE=loaded", "FAKE_MODE=success", "FAKE_MODE=stopfail"};
     for (size_t i = 0; ok && i < sizeof(modes) / sizeof(modes[0]); i++) {
         char output[4096];
-        ok = du_fixture_write(log, "", 0600);
-        const char *argv[] = {"/usr/bin/env", pathenv, cfgenv, logenv, modes[i],
+        ok = du_fixture_write(f.log, "", 0600);
+        const char *argv[] = {"/usr/bin/env", f.pathenv, f.cfgenv, f.logenv, f.tmpenv, modes[i],
                               "bash", "tools/scripts/ci_install_linger_gate.sh", NULL};
         int rc = zcl_spawn_capture_merged_observed(argv, output, sizeof(output), 60000, NULL);
         char *contents = NULL, *calls = NULL; size_t n = 0;
-        ok = ok && du_read_file(sentinel, &contents, &n) && strcmp(contents, "original\n") == 0 &&
-             du_read_file(log, &calls, &n);
+        ok = ok && du_read_file(f.sentinel, &contents, &n) && strcmp(contents, "original\n") == 0 &&
+             du_read_file(f.log, &calls, &n);
         char unit[1024] = "";
-        int entries = du_fixture_entries(user, unit, sizeof(unit));
-        if (ok && i < 2) ok = rc == 1 && entries == 1 && !strstr(calls, "--user stop") && !strstr(calls, "--user disable");
-        if (ok && i == 2) ok = rc == 0 && entries == 1 && strstr(output, "PASSED") && strstr(calls, "--user stop z23-citest.");
-        if (i == 3) {
-            bool retained = ok && rc == 1 && !strstr(output, "PASSED") &&
-                            strstr(output, "unit stop failed; retaining fixture") &&
-                            strstr(calls, "--user stop z23-citest.") && entries == 3 && unit[0];
-            bool cleaned = unit[0] && du_fixture_retained_cleanup(output, unit);
-            ok = ok && retained && cleaned;
-        }
+        int entries = du_fixture_entries(f.user, unit, sizeof(unit));
+        if (ok) ok = du_linger_result(i, rc, entries, output, calls, unit, f.dir);
         free(contents); free(calls);
     }
     if (!ok) du_fail(c, "ci_install_linger_gate.sh", 0, "unit ownership fixture failed", "");
