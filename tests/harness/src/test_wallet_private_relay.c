@@ -1156,6 +1156,8 @@ static int wprt_case_seen_and_block(void)
     struct p2p_node *onion = wallet_ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
     struct uint256 a, b;
     int send_a = -1, send_b = -1; size_t count = 0; bool count_read = false;
+    /* Both draws select 19020ms, placing the sends in the same late tick. */
+    wprt_fill = 5;
     bool ok = wallet_ok && onion && (send_a = wprt_rpc_send(&f, false, 10.0, &a)) &&
               (send_b = wprt_rpc_send(&f, true, 10.0, &b));
     struct wprt_seen_observation pre_a = wprt_seen_observe(&a, send_a == 1);
