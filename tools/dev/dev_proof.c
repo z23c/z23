@@ -6985,9 +6985,15 @@ static bool dp_generation_checkout(const struct proof_paths *paths,
     const char *prune_argv[] = {"git", "worktree", "prune", NULL};
     char pruned[ZCL_DEVLOOP_OUTPUT_MAX];
     (void)git_capture(paths->root, prune_argv, pruned, sizeof(pruned));
+    if (!platform_private_directory_create(generation)) {
+        proof_why(why, why_len, "proof_generation_private_directory_failed");
+        return false;
+    }
     const char *argv[] = {"git", "worktree", "add", "--detach",
                           generation, local, NULL};
-    return dp_generation_checkout_command(paths, argv, 30000, why, why_len);
+    if (dp_generation_checkout_command(paths, argv, 30000, why, why_len)) return true;
+    (void)platform_private_directory_remove_empty(generation);
+    return false;
 }
 
 /* A retried exact pair reuses its private generation. Fuzz depfiles are not

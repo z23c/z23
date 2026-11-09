@@ -86,14 +86,17 @@ static bool retry_open_dir(const char *path, int *fd)
     *fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (*fd < 0) return false;
     struct stat st;
-    if (fstat(*fd, &st) == 0 && st.st_uid == geteuid() && !(st.st_mode & 0022)) return true;
-    close(*fd); *fd = -1; return false;
+    if (fstat(*fd, &st) != 0) { int saved = errno; close(*fd); *fd = -1; errno = saved; return false; }
+    if (st.st_uid == geteuid() && !(st.st_mode & 0022)) return true;
+    close(*fd); *fd = -1; errno = EACCES; return false;
 }
 
 static bool retry_directory_safe(int fd)
 {
     struct stat st;
-    return fstat(fd, &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 0022);
+    if (fstat(fd, &st) != 0) return false;
+    if (S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 0022)) return true;
+    errno = EACCES; return false;
 }
 
 /* Stat checks are a conservative stability signal, not an atomic snapshot. */
@@ -186,14 +189,20 @@ struct retry_collector {
 
 static bool retry_prepare(struct retry_collector *c)
 {
+    c->result.prepare_stage = "generation";
     if (!retry_open_dir(c->generation, &c->gen)) return false;
+    c->result.prepare_stage = "test_tmp";
     c->source = openat(c->gen, "test-tmp", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (c->source < 0 || !retry_directory_safe(c->source) || !retry_open_dir(c->logs, &c->dest)) return false;
+    if (c->source < 0) return false;
+    if (!retry_directory_safe(c->source)) return false;
+    c->result.prepare_stage = "logs";
+    if (!retry_open_dir(c->logs, &c->dest)) return false;
+    c->result.prepare_stage = "manifest";
     int fd = openat(c->dest, "retry-first.manifest", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) return false;
     c->manifest = fdopen(fd, "w");
-    if (!c->manifest) { close(fd); return false; }
-    return true;
+    if (!c->manifest) { int saved = errno; close(fd); errno = saved; return false; }
+    c->result.prepare_stage = NULL; return true;
 }
 
 static void retry_record(struct retry_collector *c, const char *group, const char *file)
@@ -229,7 +238,7 @@ static bool retry_line(struct retry_collector *c, const char *line)
     if (!retry_marker(line, c->groups, group, file)) { ++c->result.errors; c->partial = true; return true; }
     ++c->result.observed;
     if (c->result.observed > RETRY_COUNT_LIMIT) { ++c->result.errors; c->partial = true; return true; }
-    if (!c->manifest && !retry_prepare(c)) { ++c->result.errors; c->partial = true; return false; }
+    if (!c->manifest && !retry_prepare(c)) { c->result.prepare_errno = errno; ++c->result.errors; c->partial = true; return false; }
     retry_record(c, group, file);
     return true;
 }
@@ -317,8 +326,9 @@ void zcl_dev_proof_retry_evidence_report(const char *generation, const char *log
     const char *status = r.status == ZCL_RETRY_EVIDENCE_NONE ? "none" :
         r.status == ZCL_RETRY_EVIDENCE_COMPLETE ? "complete" :
         r.status == ZCL_RETRY_EVIDENCE_PARTIAL ? "partial" : "unavailable";
-    (void)snprintf(note, sizeof(note), "status=%s observed=%zu retained=%zu missing=%zu errors=%zu",
-                   status, r.observed, r.retained, r.missing, r.errors);
+    (void)snprintf(note, sizeof(note), "status=%s observed=%zu retained=%zu missing=%zu errors=%zu prepare_stage=%s prepare_errno=%d",
+                   status, r.observed, r.retained, r.missing, r.errors,
+                   r.prepare_stage ? r.prepare_stage : "none", r.prepare_errno);
     if (!zcl_dev_proof_phase_note(phases, "retry_first_evidence", note))
         fprintf(stderr, "proof retry evidence: phase record unavailable (%s)\n", status);
 }

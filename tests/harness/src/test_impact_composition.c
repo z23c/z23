@@ -8831,8 +8831,14 @@ static int test_pw_generation_checkout_clears_pruned(void)
         struct stat probe;
         ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
 
-        ASSERT(zcl_dev_proof_test_generation_checkout(repo, stale, head, why,
-                                                      sizeof(why)));
+        mode_t previous_umask = umask(0002);
+        bool checked_out = zcl_dev_proof_test_generation_checkout(repo, stale, head, why,
+                                                                   sizeof(why));
+        (void)umask(previous_umask);
+        ASSERT(checked_out);
+        ASSERT(stat(stale, &probe) == 0 && (probe.st_mode & 0777) == 0700);
+        extern bool proof_retry_fixture_checkout(const char *generation);
+        ASSERT(proof_retry_fixture_checkout(stale));
         ASSERT(snprintf(marker, sizeof(marker), "%s/build/obj/old.o",
                         stale) > 0);
         ASSERT(stat(marker, &probe) != 0 && errno == ENOENT);

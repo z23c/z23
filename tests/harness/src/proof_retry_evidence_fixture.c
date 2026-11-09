@@ -5,6 +5,7 @@
 #endif
 #include "test/test_core.h"
 #include "dev_proof_retry_evidence.h"
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #if !defined(_WIN32)
@@ -173,6 +174,32 @@ static bool retry_edge_init(struct retry_edge *e)
         d > 0 && (size_t)d < sizeof(e->line) && mkdir(tmp, 0700) == 0;
 }
 
+static bool retry_checkout_setup(struct retry_edge *e, const char *generation)
+{
+    char tmp[4096];
+    size_t index = retry_fixture_hex_index();
+    int a = snprintf(tmp, sizeof(tmp), "%s/test-tmp", generation);
+    int b = snprintf(e->source, sizeof(e->source), "%s/test_parallel_1_%zu.log.first", tmp, index);
+    int c = snprintf(e->line, sizeof(e->line), "RETRY-FIRST-PRESERVED test_hex_codec first_log=./test-tmp/test_parallel_1_%zu.log.first\n", index);
+    return index != SIZE_MAX && a > 0 && (size_t)a < sizeof(tmp) && b > 0 &&
+        (size_t)b < sizeof(e->source) && c > 0 && (size_t)c < sizeof(e->line) &&
+        mkdir(tmp, 0755) == 0 && retry_edge_attempt(e, "checkout") &&
+        retry_fixture_text(e->source, "checkout evidence\n") && retry_fixture_text(e->log, e->line);
+}
+
+/* Exercise the collector against an actual proof checkout, not a synthetic root. */
+bool proof_retry_fixture_checkout(const char *generation)
+{
+    struct retry_edge e = {0};
+    bool ok = retry_checkout_setup(&e, generation);
+    struct zcl_retry_evidence_result r = {0};
+    if (ok) r = zcl_dev_proof_retry_evidence(generation, e.log, e.attempt, "test_hex_codec");
+    ok = ok && r.status == ZCL_RETRY_EVIDENCE_COMPLETE && r.retained == 1 &&
+        retry_fixture_manifest(e.attempt, "status=retained");
+    if (e.attempt[0] && test_rm_rf_recursive(e.attempt) != 0) ok = false;
+    return ok;
+}
+
 static bool retry_edge_empty_and_forged(struct retry_edge *e)
 {
     bool ok = retry_edge_attempt(e, "edge") && retry_fixture_text(e->log, "no retry\n");
@@ -314,22 +341,37 @@ static bool retry_edge_symlink(struct retry_edge *e)
     return ok;
 }
 
+static bool retry_edge_generation_mode(struct retry_edge *e)
+{
+    bool ok = retry_edge_attempt(e, "generation_mode") &&
+        retry_fixture_text(e->log, e->line) && chmod(e->gen, 0775) == 0;
+    struct zcl_retry_evidence_result r = {0};
+    if (ok) r = zcl_dev_proof_retry_evidence(e->gen, e->log, e->attempt, "test_hex_codec");
+    ok = ok && r.status == ZCL_RETRY_EVIDENCE_PARTIAL && r.errors == 1 &&
+        r.prepare_stage && strcmp(r.prepare_stage, "generation") == 0 && r.prepare_errno == EACCES;
+    if (chmod(e->gen, 0700) != 0) ok = false;
+    if (test_rm_rf_recursive(e->attempt) != 0) ok = false;
+    return ok;
+}
+
 /* Bounded inputs and no-follow refusal, independent from the real runner. */
 bool proof_retry_fixture_edges(void)
 {
     struct retry_edge e = {0};
     if (!retry_edge_init(&e)) return false;
+    bool generation_mode = retry_edge_generation_mode(&e);
     bool missing = retry_edge_missing(&e), nul = retry_edge_nul(&e), mutation = retry_edge_mutation(&e);
     bool fifo = retry_edge_fifo(&e);
     bool log_fifo = retry_edge_log_fifo(&e);
     bool cap = retry_edge_cap(&e);
     bool many = retry_edge_many(&e), writable = retry_edge_writable(&e), symlink_ok = retry_edge_symlink(&e);
     bool cleaned = test_rm_rf_recursive(e.gen) == 0;
-    bool ok = missing && nul && mutation && fifo && log_fifo && cap && many && writable && symlink_ok && cleaned;
-    if (!ok) fprintf(stderr, "retry evidence edges missing=%d nul=%d mutation=%d fifo=%d log_fifo=%d cap=%d many=%d writable=%d symlink=%d cleanup=%d\n",
-                     missing, nul, mutation, fifo, log_fifo, cap, many, writable, symlink_ok, cleaned);
+    bool ok = generation_mode && missing && nul && mutation && fifo && log_fifo && cap && many && writable && symlink_ok && cleaned;
+    if (!ok) fprintf(stderr, "retry evidence edges generation_mode=%d missing=%d nul=%d mutation=%d fifo=%d log_fifo=%d cap=%d many=%d writable=%d symlink=%d cleanup=%d\n",
+                     generation_mode, missing, nul, mutation, fifo, log_fifo, cap, many, writable, symlink_ok, cleaned);
     return ok;
 }
 #else
 bool proof_retry_fixture_edges(void) { return true; }
+bool proof_retry_fixture_checkout(const char *generation) { (void)generation; return true; }
 #endif

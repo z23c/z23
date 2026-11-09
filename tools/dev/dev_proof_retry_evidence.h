@@ -8,6 +8,8 @@ enum zcl_retry_evidence_status { ZCL_RETRY_EVIDENCE_NONE, ZCL_RETRY_EVIDENCE_COM
 struct zcl_retry_evidence_result {
     enum zcl_retry_evidence_status status;
     size_t observed, retained, missing, errors;
+    const char *prepare_stage;
+    int prepare_errno;
 };
 /* Best effort; inputs name one exact proof generation and its private attempt.
  * Does not change the test verdict. */
