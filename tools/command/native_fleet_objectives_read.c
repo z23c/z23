@@ -142,21 +142,19 @@ static bool obj_default_attempts_dir(char *out, size_t cap)
 
 /* ── outcomes.jsonl scan ──────────────────────────────────────────────── */
 
-/* A TRAIN's identity is its `note` (e.g. "traintrain43"), the one field
- * that stays constant across every attempt of one train even though `tip`
- * and `base` both change on every rebase. A row with an empty `note` falls
- * back to `worktree`. landing_latency_s and landing_attempts_per_train are
- * both properties of the newest train that finished landing, not of its
- * final row alone. */
+/* The catalog groups by caller-supplied `note` (e.g. "traintrain43").
+ * The result is meaningful only when callers reuse a note for one train
+ * and use distinct notes for other trains. Empty or invalid notes cannot
+ * identify a train. */
 /* A decoded identity cannot exceed the complete ledger record holding it. */
 #define OBJ_NOTE_MAX OBJ_LINE_MAX
 
 static void obj_row_group_key(const struct json_value *row, char *out,
                               size_t cap)
 {
-    const char *note = json_get_str(json_get(row, "note"));
-    const char *key = note[0] ? note : json_get_str(json_get(row, "worktree"));
-    (void)snprintf(out, cap, "%s", key);
+    const struct json_value *note = json_get(row, "note");
+    (void)snprintf(out, cap, "%s",
+                   note && note->type == JSON_STR ? json_get_str(note) : "");
 }
 
 struct obj_outcomes_stats {
@@ -382,6 +380,10 @@ static bool obj_newest_landed_train(
         return false;
     if (!stats->have_last_landed) {
         obj_set_reason(v, "no landed row in %s", *use_out);
+        return false;
+    }
+    if (!stats->last_landed_note[0]) {
+        obj_set_reason(v, "newest landed row has no valid train note");
         return false;
     }
     return true;
