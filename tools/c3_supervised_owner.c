@@ -137,7 +137,7 @@ static int finish_owned(struct platform_supervised_process *p)
     return printf("DONE CLEAN %d\n", p->observation.engine_wait_status) < 0 || fflush(stdout) != 0 ? 6 : 0;
 }
 
-int main(int argc, char **argv)
+static int owner_main(int argc, char **argv)
 {
     if (argc < 4 || argc > (int)PLATFORM_SUPERVISED_ARGV_DEFAULT_MAX) return 2;
     (void)signal(SIGPIPE, SIG_IGN);
@@ -151,5 +151,12 @@ int main(int argc, char **argv)
     return finish_owned(&p);
 }
 #else
-int main(void) { fputs("c3-supervised-owner: unsupported platform\n", stderr); return 2; }
+static int owner_main(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    fputs("c3-supervised-owner: unsupported platform\n", stderr);
+    return 2;
+}
 #endif
+
+int main(int argc, char **argv) { return owner_main(argc, argv); }
