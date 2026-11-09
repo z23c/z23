@@ -180,6 +180,34 @@ static bool paste_probe_run(const char *prefix, bool expected, const char *value
 
  #endif
 
+#if defined(__APPLE__) || defined(__linux__)
+struct host_copy_probe { bool written, rejected, pasted; };
+static void host_copy_ready(void *context)
+{
+    struct host_copy_probe *probe = context;
+    static const char link[] = "http://example.onion/board/apps/v1";
+    char over[ZCL_PRESENT_COPY_TEXT_MAX + 2u];
+    memset(over, 'x', sizeof(over) - 1u); over[sizeof(over) - 1u] = 0;
+    probe->written = zcl_present_window_copy_ascii_v1(link);
+    probe->rejected = !zcl_present_window_copy_ascii_v1("") &&
+        !zcl_present_window_copy_ascii_v1("caf\xc3\xa9") &&
+        !zcl_present_window_copy_ascii_v1(over);
+    struct zcl_present_window_form_field_v1 field = {0};
+    probe->pasted = zcl_present_test_form_paste(&field) && !strcmp(field.value, link);
+}
+static bool host_copy_api_cases(void)
+{
+    if (zcl_present_window_copy_ascii_v1("outside-window")) return false;
+    static uint8_t pixels[16 * 16 * 3]; struct host_copy_probe probe = {0};
+    struct zcl_present_window_v1 page = {.struct_size = sizeof(page), .abi_version = ZCL_PRESENT_ABI_V1,
+        .title = "Host link copy", .pixels = pixels, .width = 16, .height = 16, .pixel_format = ZCL_PRESENT_RGB8};
+    struct zcl_present_window_event_v1 event = {0}; char error[256] = {0};
+    zcl_present_test_script(0, 0, false);
+    bool ok = zcl_present_window_run_actions_v1(&page, 1, host_copy_ready, &probe, &event, error, sizeof(error));
+    return ok && probe.written && probe.rejected && probe.pasted;
+}
+#endif
+
 static bool clipboard_roundtrip(const char *text)
 {
     static uint8_t pixels[16 * 16 * 3];
@@ -207,10 +235,15 @@ static const char *clipboard_fixture(unsigned which, char maximum[ZCL_PRESENT_CO
 {
     if (which == 0) return "";
     if (which == 1) return "quoted \\\"path\\\" / caf\xc3\xa9 / \xe2\x9c\x93";
-    if (which == 3) return "http://example.onion/board/apps/v1";
+    if (which == 3 || which == 5) return "http://example.onion/board/apps/v1";
     if (which == 4) return "bad\nlink";
     memset(maximum, 'x', ZCL_PRESENT_COPY_TEXT_MAX); maximum[ZCL_PRESENT_COPY_TEXT_MAX] = 0;
     return maximum;
+}
+static void clipboard_api_owner_ready(void *context)
+{
+    const char *text = context;
+    if (!zcl_present_window_copy_ascii_v1(text)) _exit(2);
 }
 static int clipboard_owner(unsigned which)
 {
@@ -219,12 +252,14 @@ static int clipboard_owner(unsigned which)
         .struct_size = sizeof(page), .abi_version = ZCL_PRESENT_ABI_V1,
         .title = "External clipboard owner", .pixels = pixels,
         .width = 16, .height = 16, .pixel_format = ZCL_PRESENT_RGB8,
-        .copy_text = clipboard_fixture(which, maximum),
+        .copy_text = which == 5 ? NULL : clipboard_fixture(which, maximum),
     };
+    const char *text = clipboard_fixture(which, maximum);
     struct zcl_present_window_event_v1 event = {0}; char error[256] = {0};
     /* C copies; the unrelated second key leaves the window running. */
     zcl_present_test_script(UINT_MAX, 200, false);
-    return zcl_present_window_run_actions_v1(&page, 1, NULL, NULL, &event, error, sizeof(error)) ? 0 : 1;
+    return zcl_present_window_run_actions_v1(&page, 1,
+        which == 5 ? clipboard_api_owner_ready : NULL, (void *)text, &event, error, sizeof(error)) ? 0 : 1;
 }
 static bool clipboard_wait_owner(Display *d, Atom selection)
 {
@@ -279,9 +314,9 @@ static bool clipboard_multiple(Display *d, Window w, Atom selection, Atom utf, c
 }
 static bool clipboard_paste_cases(unsigned which)
 {
-    bool pasted = which == 3 ? paste_probe_run("keep", true, "keephttp://example.onion/board/apps/v1") :
+    bool pasted = (which == 3 || which == 5) ? paste_probe_run("keep", true, "keephttp://example.onion/board/apps/v1") :
         paste_probe_run("keep", false, "keep");
-    if (which != 3) return pasted;
+    if (which != 3 && which != 5) return pasted;
     char full[ZCL_PRESENT_WINDOW_FORM_VALUE_MAX + 1u];
     memset(full, 'x', sizeof(full) - 1); full[sizeof(full) - 1] = 0;
     return pasted && paste_probe_run(full, false, full) &&
@@ -319,6 +354,7 @@ static bool clipboard_unresponsive(bool flood)
     XSetSelectionOwner(d, selection, None, CurrentTime); XSync(d, False);
     pid_t child = fork();
     if (child == 0) {
+        (void)alarm(30);
         Display *owner = XOpenDisplay(NULL); if (!owner) _exit(2);
         Window w = XCreateSimpleWindow(owner, DefaultRootWindow(owner), 0, 0, 1, 1, 0, 0, 0);
         Atom clip = XInternAtom(owner, "CLIPBOARD", False);
@@ -342,6 +378,33 @@ static bool clipboard_unresponsive(bool flood)
 }
 #endif
 
+#if defined(__linux__)
+/* Bound even an Xlib call that never returns after a display reset. */
+static void live_redraw_watchdog(int signal_number)
+{
+    (void)signal_number;
+    static const char message[] = "live-redraw: X11 fixture watchdog expired\n";
+    ssize_t written = write(STDERR_FILENO, message, sizeof(message) - 1u);
+    (void)written;
+    _exit(124);
+}
+#endif
+
+#if defined(__linux__)
+static bool linux_clipboard_cases(const char *executable)
+{
+    bool external_ok = true;
+    for (unsigned i = 0; i < 6; ++i) {
+        fprintf(stderr, "live-redraw: external clipboard case %u\n", i);
+        if (!clipboard_external(executable, i)) external_ok = false;
+    }
+    fputs("live-redraw: silent and flooding clipboard owners\n", stderr);
+    if (!external_ok || !clipboard_unresponsive(false) || !clipboard_unresponsive(true)) return false;
+    puts("clipboard: external direct and MULTIPLE exact byte lengths");
+    return true;
+}
+#endif
+
 static bool clipboard_roundtrip_cases(void)
 {
     if (!clipboard_roundtrip("{\"value\":\"last byte stays\"}")) return false;
@@ -361,9 +424,12 @@ static bool live_redraw_cases(void)
 int main(int argc, char **argv)
 {
 #if defined(__linux__)
+    if (signal(SIGALRM, live_redraw_watchdog) == SIG_ERR) return 1;
+    (void)alarm(90);
     if (argc == 3 && !strcmp(argv[1], "--clipboard-owner")) {
+        (void)alarm(30);
         unsigned which = (unsigned)strtoul(argv[2], NULL, 10);
-        return which < 5 ? clipboard_owner(which) : 1;
+        return which < 6 ? clipboard_owner(which) : 1;
     }
 #else
     (void)argc; (void)argv;
@@ -371,8 +437,17 @@ int main(int argc, char **argv)
 #if defined(__APPLE__) || defined(__linux__)
     if (!initialization_failure()) return 1;
 #endif
+#if defined(__linux__)
+    fputs("live-redraw: native redraw cases\n", stderr);
+#endif
     if (!live_redraw_cases()) return 1;
+#if defined(__linux__)
+    fputs("live-redraw: clipboard owner round trips after window closes\n", stderr);
+#endif
     if (!clipboard_roundtrip_cases()) return 1;
+#if defined(__APPLE__) || defined(__linux__)
+    if (!host_copy_api_cases()) return 1;
+#endif
 #if defined(__APPLE__)
     if (!clipboard_roundtrip("http://example.onion/board/apps/v1") ||
         !paste_probe_run("keep", true, "keephttp://example.onion/board/apps/v1")) return 1;
@@ -381,10 +456,7 @@ int main(int argc, char **argv)
     if (!paste_probe_run(full, false, full)) return 1;
 #endif
 #if defined(__linux__)
-    bool external_ok = true;
-    for (unsigned i = 0; i < 5; ++i) if (!clipboard_external(argv[0], i)) external_ok = false;
-    if (!external_ok || !clipboard_unresponsive(false) || !clipboard_unresponsive(true)) return 1;
-    puts("clipboard: external direct and MULTIPLE exact byte lengths");
+    if (!linux_clipboard_cases(argv[0])) return 1;
 #endif
     puts("clipboard: JSON closing byte, empty, UTF8 and maximum text roundtrip exactly");
     puts("live redraw: failure and terminal cancel reject queued confirm; successful redraw proceeds");

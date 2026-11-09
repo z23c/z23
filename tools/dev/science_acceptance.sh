@@ -493,6 +493,7 @@ sa_build_fixture() {
         "$REPO_ROOT/platform/modules/json/src/json.c" \
         "$REPO_ROOT/platform/modules/util/src/hw_profile.c" \
         "$REPO_ROOT/platform/modules/util/src/spawn.c" \
+        "$REPO_ROOT/platform/modules/util/src/spawn_binary.c" \
         "$REPO_ROOT/platform/modules/util/src/cpu_topology.c" 2>/dev/null \
         || sa_die "fixture tool compile failed"
 }

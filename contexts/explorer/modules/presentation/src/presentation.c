@@ -1,5 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: portable RGFW software-window backend behind the bounded ABI. */
+#if defined(__linux__) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "presentation/presentation.h"
 
@@ -288,29 +291,6 @@ static void present_set_linux_desktop_identity(RGFW_window *window)
     XFlush(display);
 }
 #endif
-
-static bool present_pages_validate(
-    const struct zcl_present_window_pages_v1 *request,
-    char *error, size_t error_cap)
-{
-    if (!request || request->struct_size != sizeof(*request) ||
-        request->abi_version != ZCL_PRESENT_ABI_V1 || !request->pages ||
-        request->page_count == 0 ||
-        request->page_count > ZCL_PRESENT_WINDOW_PAGES_MAX)
-        return present_error(error, error_cap,
-                             "presentation pages ABI/count is invalid");
-    const struct zcl_present_window_v1 *first = &request->pages[0];
-    for (uint32_t i = 0; i < request->page_count; i++) {
-        const struct zcl_present_window_v1 *page = &request->pages[i];
-        if (!zcl_present_window_validate_v1(page, error, error_cap))
-            return false;
-        if (page->width != first->width || page->height != first->height ||
-            page->pixel_format != first->pixel_format)
-            return present_error(error, error_cap,
-                                 "presentation page geometry differs");
-    }
-    return true;
-}
 
 static uint8_t *present_overlay_pixels(
     const struct zcl_present_window_v1 *page,
@@ -1193,6 +1173,33 @@ static void present_pages_number_keys(struct present_pages_run *run,
         if (event->key.value != action_keys[i]) continue;
         present_pages_finish(run, i);
     }
+}
+
+/* Synchronous UI-thread copy. Availability and Stop are serialized by the
+ * trusted live owner; this function confirms the platform clipboard result. */
+bool zcl_present_window_copy_ascii_v1(const char *text)
+{
+#if defined(__APPLE__) || (defined(__linux__) && defined(RGFW_X11))
+    if (!text || !RGFW_getInfo() || !RGFW_getInfo()->root) return false;
+    size_t n = 0; if (!present_copy_ascii_length(text, &n)) return false;
+#if defined(__linux__)
+#if defined(RGFW_WAYLAND)
+    if (RGFW_usingWayland()) return false;
+#endif
+    RGFW_info *info = RGFW_getInfo(); if (!info->display) return false;
+#endif
+    RGFW_writeClipboard(text, (u32)(n + 1u));
+#if defined(__APPLE__)
+    const char *copied = NSPasteboard_stringForType(NSPasteboard_generalPasteboard(), NSPasteboardTypeString, NULL);
+    return copied && strnlen(copied, n + 1u) == n && !memcmp(copied, text, n);
+#else
+    Atom selection = XInternAtom(info->display, "CLIPBOARD", False);
+    return XGetSelectionOwner(info->display, selection) == info->helperWindow &&
+        info->clipboard && info->clipboard_len == n + 1u && !memcmp(info->clipboard, text, n + 1u);
+#endif
+#else
+    (void)text; return false;
+#endif
 }
 
 #if defined(ZCL_TESTING)

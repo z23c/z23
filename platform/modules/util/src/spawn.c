@@ -7,6 +7,7 @@
 #define _GNU_SOURCE /* posix_openpt/grantpt/unlockpt/ptsname */
 
 #include "util/spawn.h"
+#include "spawn_binary_internal.h"
 
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
@@ -501,6 +502,10 @@ struct spawn_capture_buffer {
     size_t limit;
     size_t used;
     struct zcl_spawn_binary_observation *exact;
+    zcl_spawn_bytes_fn observe;
+    zcl_spawn_end_fn on_end;
+    void *observe_ctx;
+    bool refused, ended;
 };
 
 static ssize_t spawn_capture_read(int fd, struct spawn_capture_buffer *capture)
@@ -510,9 +515,23 @@ static ssize_t spawn_capture_read(int fd, struct spawn_capture_buffer *capture)
     ssize_t n = read(fd, available ? capture->bytes + capture->used : discard,
                      available ? available : sizeof(discard));
     if (n <= 0) return n;
-    if (available) capture->used += (size_t)n;
+    if (available) {
+        size_t start = capture->used;
+        capture->used += (size_t)n;
+        if (capture->observe && !capture->ended &&
+            !capture->observe(capture->bytes + start, (size_t)n, capture->observe_ctx))
+            capture->refused = true;
+    }
     else if (capture->exact) capture->exact->overflow = true;
     return n;
+}
+
+static void spawn_capture_end(struct spawn_capture_buffer *capture)
+{
+    if (!capture->ended) {
+        capture->ended = true;
+        if (capture->on_end) capture->on_end(capture->observe_ctx);
+    }
 }
 
 static void spawn_capture_observation(
@@ -577,6 +596,21 @@ static int spawn_capture_poll_timeout(
 enum spawn_capture_step { SPAWN_CAPTURE_AGAIN, SPAWN_CAPTURE_STOP,
                           SPAWN_CAPTURE_EOF };
 
+static enum spawn_capture_step spawn_capture_read_step(
+    int fd, bool pty_eio_is_eof, struct spawn_capture_buffer *capture)
+{
+    ssize_t n = spawn_capture_read(fd, capture);
+    if (n < 0) {
+        if (errno == EINTR) return SPAWN_CAPTURE_AGAIN;
+        if (pty_eio_is_eof && errno == EIO) return SPAWN_CAPTURE_STOP;
+        LOG_WARN("spawn", "read() failed: %s", strerror(errno));
+        return SPAWN_CAPTURE_STOP;
+    }
+    if (capture->refused || (capture->observe && capture->exact && capture->exact->overflow))
+        return SPAWN_CAPTURE_STOP;
+    return n == 0 ? SPAWN_CAPTURE_EOF : SPAWN_CAPTURE_AGAIN;
+}
+
 static enum spawn_capture_step spawn_capture_io_step(
     pid_t pid, int fd, int timeout_ms, bool pty_eio_is_eof,
     struct spawn_capture_buffer *capture,
@@ -595,14 +629,7 @@ static enum spawn_capture_step spawn_capture_io_step(
             spawn_capture_kill_group(pid, anchored);
         return SPAWN_CAPTURE_STOP;
     }
-    ssize_t n = spawn_capture_read(fd, capture);
-    if (n < 0) {
-        if (errno == EINTR) return SPAWN_CAPTURE_AGAIN;
-        if (pty_eio_is_eof && errno == EIO) return SPAWN_CAPTURE_STOP;
-        LOG_WARN("spawn", "read() failed: %s", strerror(errno));
-        return SPAWN_CAPTURE_STOP;
-    }
-    return n == 0 ? SPAWN_CAPTURE_EOF : SPAWN_CAPTURE_AGAIN;
+    return spawn_capture_read_step(fd, pty_eio_is_eof, capture);
 }
 
 static bool spawn_capture_drain_loop(
@@ -620,16 +647,17 @@ static bool spawn_capture_drain_loop(
         }
         /* WNOWAIT keeps the exited child waitable, pinning its original
          * group while buffered output drains. The anchor covers auto-reap. */
-        if (spawn_capture_exit_observe(pid, exit_state,
-                                       anchor_write_fd >= 0)) break;
+        bool done = spawn_capture_exit_observe(pid, exit_state, anchor_write_fd >= 0);
+        if (exit_state->exited_now || exit_state->gone) spawn_capture_end(capture);
+        if (done) break;
         int poll_timeout = spawn_capture_poll_timeout(
             timeout_ms, deadline_ms, exit_state, timed_out);
         if (*timed_out) break;
         enum spawn_capture_step step = spawn_capture_io_step(
             pid, output_fd, poll_timeout, pty_eio_is_eof, capture,
             exit_state, anchor_write_fd >= 0);
-        if (step == SPAWN_CAPTURE_EOF) { eof = true; break; }
-        if (step == SPAWN_CAPTURE_STOP) break;
+        if (step == SPAWN_CAPTURE_EOF) { spawn_capture_end(capture); eof = true; break; }
+        if (step == SPAWN_CAPTURE_STOP) { spawn_capture_end(capture); break; }
     }
 
     return eof;
@@ -648,15 +676,30 @@ static int spawn_capture_status(bool reaped, int status)
  * master reports EIO, rather than zero bytes, when its last slave closes;
  * `pty_eio_is_eof` preserves that platform contract without weakening real
  * pipe errors. */
-static int spawn_capture_drain(
+static void spawn_capture_finish_group(pid_t pid, bool timed_out, bool was_cancelled,
+    bool eof, const struct zcl_spawn_binary_observation *exact,
+    const struct spawn_capture_exit_state *exit_state_ptr, int anchor_write_fd)
+{
+    const struct spawn_capture_exit_state exit_state = *exit_state_ptr;
+    if ((timed_out || was_cancelled) &&
+        (!exit_state.gone || anchor_write_fd >= 0)) {
+        spawn_capture_kill_group(pid, anchor_write_fd >= 0);
+    }
+    if (exact && !eof && (!exit_state.gone || anchor_write_fd >= 0))
+        spawn_capture_kill_group(pid, anchor_write_fd >= 0);
+}
+
+static int spawn_capture_drain_observed(
     pid_t pid, int output_fd, char *buf, size_t cap, int timeout_ms,
     zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
     bool *timed_out_out, bool pty_eio_is_eof,
     struct zcl_spawn_binary_observation *exact, int anchor_write_fd,
-    struct zcl_spawn_measure *measure)
+    struct zcl_spawn_measure *measure, zcl_spawn_bytes_fn observe,
+    zcl_spawn_end_fn on_end, void *observe_ctx, bool *refused)
 {
     struct spawn_capture_buffer capture = {
-        .bytes = buf, .limit = exact ? cap : cap - 1, .exact = exact
+        .bytes = buf, .limit = exact ? cap : cap - 1, .exact = exact,
+        .observe = observe, .on_end = on_end, .observe_ctx = observe_ctx
     };
     bool eof = false;
     int64_t deadline_ms = (timeout_ms > 0)
@@ -669,17 +712,15 @@ static int spawn_capture_drain(
         pid, output_fd, timeout_ms, deadline_ms, should_cancel, cancel_ctx,
         &was_cancelled, &timed_out, pty_eio_is_eof, &capture, &exit_state,
         anchor_write_fd);
+    /* Notify before any potentially slow reaping, even on cancel/timeout. */
+    spawn_capture_end(&capture);
 
     /* Kill before closing a PTY master: closing the master first raises
      * SIGHUP in the slave's foreground group and would erase the exact
      * timeout observation behind 128+SIGHUP. Pipes do not care about the
      * order, so one ordering preserves both transports. */
-    if ((timed_out || was_cancelled) &&
-        (!exit_state.gone || anchor_write_fd >= 0)) {
-        spawn_capture_kill_group(pid, anchor_write_fd >= 0);
-    }
-    if (exact && !eof && (!exit_state.gone || anchor_write_fd >= 0))
-        spawn_capture_kill_group(pid, anchor_write_fd >= 0);
+    spawn_capture_finish_group(pid, timed_out, was_cancelled, eof, exact,
+                               &exit_state, anchor_write_fd);
     close(output_fd);
     int status = 0;
     bool reaped = !exit_state.gone && spawn_capture_reap(
@@ -687,10 +728,23 @@ static int spawn_capture_drain(
         &timed_out, &was_cancelled, anchor_write_fd >= 0, measure);
     if (anchor_write_fd >= 0) close(anchor_write_fd);
     if (cancelled) *cancelled = was_cancelled;
+    if (refused) *refused = capture.refused;
     if (timed_out_out) *timed_out_out = timed_out;
     spawn_capture_observation(&capture, eof, timed_out, reaped, status);
 
     return spawn_capture_status(reaped, status);
+}
+
+static int spawn_capture_drain(
+    pid_t pid, int output_fd, char *buf, size_t cap, int timeout_ms,
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
+    bool *timed_out_out, bool pty_eio_is_eof,
+    struct zcl_spawn_binary_observation *exact, int anchor_write_fd,
+    struct zcl_spawn_measure *measure)
+{
+    return spawn_capture_drain_observed(pid, output_fd, buf, cap, timeout_ms,
+        should_cancel, cancel_ctx, cancelled, timed_out_out, pty_eio_is_eof,
+        exact, anchor_write_fd, measure, NULL, NULL, NULL, NULL);
 }
 
 /* Called only in the fork child. The output pipe may occupy a standard
@@ -816,12 +870,13 @@ static int spawn_capture_impl_prepare(
     return 0;
 }
 
-static int spawn_capture_impl_cwd(
+static int spawn_capture_impl_cwd_observed(
     const char *const argv[], char *buf, size_t cap, int timeout_ms,
     zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
     bool *timed_out_out, bool merge_stderr,
     struct zcl_spawn_binary_observation *exact, int executable_fd,
-    struct zcl_spawn_measure *measure, const char *cwd)
+    struct zcl_spawn_measure *measure, const char *cwd,
+    zcl_spawn_bytes_fn observe, zcl_spawn_end_fn on_end, void *observe_ctx, bool *refused)
 {
 #if !defined(__linux__)
     (void)executable_fd;
@@ -887,13 +942,25 @@ static int spawn_capture_impl_cwd(
         LOG_ERR("spawn", "capture group anchor did not start");
     }
 
-    int rc = spawn_capture_drain(
+    int rc = spawn_capture_drain_observed(
         pid, outpipe[0], buf, cap, timeout_ms, should_cancel, cancel_ctx,
         cancelled, timed_out_out, false, exact,
-        anchor.enabled ? anchor.hold[1] : -1, measure);
+        anchor.enabled ? anchor.hold[1] : -1, measure, observe, on_end, observe_ctx, refused);
     if (measure)
         measure->wall_us = platform_time_monotonic_us() - launched_us;
     return rc;
+}
+
+static int spawn_capture_impl_cwd(
+    const char *const argv[], char *buf, size_t cap, int timeout_ms,
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
+    bool *timed_out_out, bool merge_stderr,
+    struct zcl_spawn_binary_observation *exact, int executable_fd,
+    struct zcl_spawn_measure *measure, const char *cwd)
+{
+    return spawn_capture_impl_cwd_observed(argv, buf, cap, timeout_ms,
+        should_cancel, cancel_ctx, cancelled, timed_out_out, merge_stderr,
+        exact, executable_fd, measure, cwd, NULL, NULL, NULL, NULL);
 }
 
 static int spawn_capture_impl(
@@ -907,6 +974,15 @@ static int spawn_capture_impl(
                                   cancel_ctx, cancelled, timed_out_out,
                                   merge_stderr, exact, executable_fd, measure,
                                   NULL);
+}
+
+int zcl_spawn_exact_internal(const char *const argv[], void *buf, size_t cap, int timeout_ms,
+    zcl_spawn_cancel_fn cancel, void *cancel_ctx, bool *cancelled, bool merge_stderr,
+    struct zcl_spawn_binary_observation *out, struct zcl_spawn_measure *measure,
+    zcl_spawn_bytes_fn observe, zcl_spawn_end_fn on_end, void *observe_ctx, bool *refused)
+{
+    return spawn_capture_impl_cwd_observed(argv, buf, cap, timeout_ms, cancel, cancel_ctx,
+        cancelled, NULL, merge_stderr, out, -1, measure, NULL, observe, on_end, observe_ctx, refused);
 }
 
 int zcl_spawn_capture_cancelable(
@@ -1332,75 +1408,6 @@ int zcl_spawn_capture_cancelable_fd_measured(
     if (cancelled) *cancelled = false;
     return -1;
 #endif
-}
-
-/* One exact capture for both stderr dispositions: the success predicate
- * and every observation field are the same, so only the child's stderr
- * changes hands. */
-#if !defined(_WIN32)
-static bool spawn_binary_complete(int rc, const struct zcl_spawn_binary_observation *out)
-{
-    return rc == 0 && out->exit_code == 0 && out->eof && !out->overflow && !out->timed_out && out->exit_observed;
-}
-#endif
-static struct zcl_result spawn_capture_binary_impl(
-    const char *const argv[], void *buf, size_t cap, int timeout_ms,
-    bool merge_stderr, struct zcl_spawn_binary_observation *out)
-{
-    if (out) {
-        memset(out, 0, sizeof(*out));
-        out->exit_code = -1;
-    }
-    if (!out || !argv || !argv[0] || !buf || cap == 0 || timeout_ms <= 0)
-        return ZCL_ERR(-1, "spawn: exact binary capture requires bounded inputs");
-#ifdef _WIN32
-    (void)merge_stderr;
-    return ZCL_ERR(-1, "spawn: Windows binary capture is unavailable");
-#else
-    int rc = spawn_capture_impl(argv, buf, cap, timeout_ms, NULL, NULL,
-                                NULL, NULL, merge_stderr, out, -1, NULL);
-    if (!spawn_binary_complete(rc, out))
-        return ZCL_ERR(-1, "spawn: incomplete binary capture (exit=%d eof=%d overflow=%d timeout=%d observed=%d)",
-                       rc, out->eof, out->overflow, out->timed_out,
-                       out->exit_observed);
-    return ZCL_OK;
-#endif
-}
-
-struct zcl_result zcl_spawn_capture_binary_cancelable_measured(
-    const char *const argv[], void *buf, size_t cap, int timeout_ms,
-    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
-    struct zcl_spawn_binary_observation *out, struct zcl_spawn_measure *measure)
-{
-    if (cancelled) *cancelled = false;
-    if (measure) memset(measure, 0, sizeof(*measure));
-    if (out) { memset(out, 0, sizeof(*out)); out->exit_code = -1; }
-    if (!out || !argv || !argv[0] || !buf || !cap || timeout_ms <= 0)
-        return ZCL_ERR(-1, "spawn: exact binary capture requires bounded inputs");
-#ifdef _WIN32
-    (void)should_cancel; (void)cancel_ctx;
-    return ZCL_ERR(-1, "spawn: Windows binary capture is unavailable");
-#else
-    int rc = spawn_capture_impl(argv, buf, cap, timeout_ms, should_cancel,
-        cancel_ctx, cancelled, NULL, false, out, -1, measure);
-    if (!spawn_binary_complete(rc, out) || (cancelled && *cancelled) || (measure && !measure->reaped))
-        return ZCL_ERR(-1, "spawn: incomplete cancellable binary capture");
-    return ZCL_OK;
-#endif
-}
-
-struct zcl_result zcl_spawn_capture_binary(
-    const char *const argv[], void *buf, size_t cap, int timeout_ms,
-    struct zcl_spawn_binary_observation *out)
-{
-    return spawn_capture_binary_impl(argv, buf, cap, timeout_ms, false, out);
-}
-
-struct zcl_result zcl_spawn_capture_binary_merged(
-    const char *const argv[], void *buf, size_t cap, int timeout_ms,
-    struct zcl_spawn_binary_observation *out)
-{
-    return spawn_capture_binary_impl(argv, buf, cap, timeout_ms, true, out);
 }
 
 int zcl_spawn_capture_observed(const char *const argv[], char *buf, size_t cap,

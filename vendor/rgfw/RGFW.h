@@ -5283,8 +5283,8 @@ void RGFW_FUNC(RGFW_surface_freePtr) (RGFW_surface* surface) {
 }
 
 #define RGFW_LOAD_ATOM(name) \
-	static Atom name = 0; \
-	if (name == 0) name = XInternAtom(_RGFW->display, #name, False);
+	Atom name = XInternAtom(_RGFW->display, #name, False); \
+	(void)name;
 
 void RGFW_FUNC(RGFW_window_setBorder) (RGFW_window* win, RGFW_bool border) {
 	RGFW_setBit(&win->internal.flags, RGFW_windowNoBorder, !border);

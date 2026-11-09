@@ -858,11 +858,13 @@ TEST_GROUP_LIST_BIN = $(BIN_DIR)/test-group-list$(ZCL_HOST_EXEEXT)
 TEST_GROUP_LIST_SRCS = tools/dev/test_group_list_main.c \
     tools/dev/test_group_list.c tools/dev/test_group_list_umbrella.c \
     tools/dev/test_group_list_rules.c tools/dev/test_group_list_report.c \
-    platform/modules/util/src/spawn.c platform/modules/base/src/cleanse.c \
+    platform/modules/util/src/spawn.c platform/modules/util/src/spawn_binary.c platform/modules/base/src/cleanse.c \
     platform/modules/base/src/log_level.c platform/modules/base/src/result.c \
     platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c \
     platform/modules/platform/src/os_proc.c
-TEST_GROUP_LIST_HDRS = tools/dev/test_group_list.h tools/dev/test_group_list_int.h
+SPAWN_BINARY_HEADERS = platform/modules/util/include/util/spawn.h \
+    platform/modules/util/src/spawn_binary_internal.h
+TEST_GROUP_LIST_HDRS = tools/dev/test_group_list.h tools/dev/test_group_list_int.h $(SPAWN_BINARY_HEADERS)
 TEST_GROUP_LIST_BUILD = mkdir -p $(dir $(TEST_GROUP_LIST_BIN)) && \
     $(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
     -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(if $(filter Darwin,$(ZCL_BUILD_OS)),-D_DARWIN_C_SOURCE,) -Itools/dev \
@@ -2762,7 +2764,8 @@ ZCL_WINDOWS_ACCEPTANCE_COUNT := $(words $(ZCL_WINDOWS_ACCEPTANCE_TESTS))
 
 define ZCL_WINDOWS_ACCEPTANCE_RULE
 $$(ZCL_WINDOWS_ACCEPTANCE_DIR)/$(1).exe: \
-	$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_SOURCES) $$(ZCL_WINDOWS_ACCEPTANCE_$(1)_LIBDEPS)
+	$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_SOURCES) $$(ZCL_WINDOWS_ACCEPTANCE_$(1)_LIBDEPS) \
+	$$(if $$(filter platform/modules/util/src/spawn_binary.c,$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_SOURCES)),$$(SPAWN_BINARY_HEADERS))
 	@mkdir -p $$(@D)
 	$$(ZCL_WINDOWS_ACCEPTANCE_CC) $$(ZCL_WINDOWS_ACCEPTANCE_FLAGS) \
 		$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_FLAGS) \
@@ -6888,7 +6891,7 @@ LINTC_PREMISE_SRCS = $(LINTC_PREMISE_CORE_SRCS) tools/lint/lintc/selection.c
 # confinement builders (Landlock + seccomp on Linux; the refusing stub
 # elsewhere) that unit-exec enters.
 LINTC_NODE_SRCS = platform/modules/sha3/src/sha3.c contexts/commons/packages/zsha256/src/zsha256.c $(ZCL_TOOL_SANDBOX_SRC) \
-    platform/modules/util/src/spawn.c platform/modules/platform/src/clock.c \
+    platform/modules/util/src/spawn.c platform/modules/util/src/spawn_binary.c platform/modules/platform/src/clock.c \
     platform/modules/platform/src/toolchain.c \
     platform/modules/platform/src/logical_cpu.c platform/modules/platform/src/os_proc_mem.c \
     platform/modules/base/src/log_level.c platform/modules/base/src/result.c \
@@ -13819,7 +13822,7 @@ $(FILE_SIZE_POLICY_BIN): $(FILE_SIZE_POLICY_SRCS)
 # The former tools/dep_audit.sh as a host tool, compiled straight from source.
 # It spawns build_vendor.sh --check-provenance through zcl_spawn_capture_binary
 # (no shell) and links the same spawn source set as z23-contrib-inbox.
-DEP_AUDIT_SRCS = tools/dep_audit.c platform/modules/util/src/spawn.c \
+DEP_AUDIT_SRCS = tools/dep_audit.c platform/modules/util/src/spawn.c platform/modules/util/src/spawn_binary.c \
     platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c \
     platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c \
     platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
@@ -13827,7 +13830,7 @@ DEP_AUDIT_INCLUDES = -Iplatform/modules/base/include \
     -Iplatform/modules/platform/include -Iplatform/modules/util/include
 .PHONY: dep-audit
 dep-audit: $(DEP_AUDIT_BIN)
-$(DEP_AUDIT_BIN): $(DEP_AUDIT_SRCS)
+$(DEP_AUDIT_BIN): $(DEP_AUDIT_SRCS) $(SPAWN_BINARY_HEADERS)
 	@mkdir -p $(dir $@)
 	$(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(if $(filter Darwin,$(ZCL_BUILD_OS)),-D_DARWIN_C_SOURCE,) \
@@ -13912,7 +13915,7 @@ ENGINE_UNIT_SRCS = tools/engine_unit.c \
 	engine/modules/engine/src/engine_wire_response.c \
 	platform/modules/json/src/json.c \
 	platform/modules/sha3/src/sha3.c \
-	platform/modules/util/src/spawn.c \
+	platform/modules/util/src/spawn.c platform/modules/util/src/spawn_binary.c \
 	platform/modules/util/src/clientversion.c \
 	platform/modules/base/src/cleanse.c \
 	platform/modules/base/src/log_level.c \
@@ -13934,7 +13937,7 @@ ENGINE_UNIT_INCLUDES = -Iplatform/modules/base/include -Iengine/modules/engine/i
 	-Iplatform/modules/platform/include -Iplatform/modules/util/include -Itools/acme -Ivendor/include
 .PHONY: engine-unit
 engine-unit: $(ENGINE_UNIT_BIN)
-$(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS) \
+$(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS) $(SPAWN_BINARY_HEADERS) \
     engine/composition/prompt_templates.def \
     engine/modules/engine/include/engine/prompt_sections.def
 	@mkdir -p $(dir $@)
@@ -13954,11 +13957,11 @@ $(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS) \
 # single-instance lock, so the rule does not exist on a Windows host.
 ifeq ($(ZCL_HOST_WINDOWS),)
 LOOP_TICK_BIN = $(BIN_DIR)/z23-loop-tick
-LOOP_TICK_SRCS = tools/loop_tick.c tools/loop_tick_gate.c 	platform/modules/json/src/json.c 	platform/modules/util/src/spawn.c 	platform/modules/base/src/cleanse.c 	platform/modules/base/src/log_level.c 	platform/modules/base/src/result.c 	platform/modules/base/src/safe_alloc.c 	platform/modules/platform/src/clock.c 	platform/modules/platform/src/os_proc.c	platform/modules/platform/src/rng.c
+LOOP_TICK_SRCS = tools/loop_tick.c tools/loop_tick_gate.c 	platform/modules/json/src/json.c 	platform/modules/util/src/spawn.c platform/modules/util/src/spawn_binary.c 	platform/modules/base/src/cleanse.c 	platform/modules/base/src/log_level.c 	platform/modules/base/src/result.c 	platform/modules/base/src/safe_alloc.c 	platform/modules/platform/src/clock.c 	platform/modules/platform/src/os_proc.c	platform/modules/platform/src/rng.c
 LOOP_TICK_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include 	-Iplatform/modules/platform/include -Iplatform/modules/util/include
 .PHONY: loop-tick
 loop-tick: $(LOOP_TICK_BIN)
-$(LOOP_TICK_BIN): $(LOOP_TICK_SRCS)
+$(LOOP_TICK_BIN): $(LOOP_TICK_SRCS) $(SPAWN_BINARY_HEADERS)
 	@mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) 	    $(BUILD_IDENTITY_CPPFLAGS) 	    $(LOOP_TICK_INCLUDES) 	    -o $@ $(LOOP_TICK_SRCS) -lpthread
 endif
@@ -13971,11 +13974,11 @@ endif
 # on a Windows host.
 ifeq ($(ZCL_HOST_WINDOWS),)
 CONTRIB_INBOX_BIN = $(BIN_DIR)/z23-contrib-inbox
-CONTRIB_INBOX_SRCS = tools/contrib_inbox.c platform/modules/json/src/json.c platform/modules/util/src/spawn.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
+CONTRIB_INBOX_SRCS = tools/contrib_inbox.c platform/modules/json/src/json.c platform/modules/util/src/spawn.c platform/modules/util/src/spawn_binary.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
 CONTRIB_INBOX_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/util/include
 .PHONY: contrib-inbox
 contrib-inbox: $(CONTRIB_INBOX_BIN)
-$(CONTRIB_INBOX_BIN): $(CONTRIB_INBOX_SRCS)
+$(CONTRIB_INBOX_BIN): $(CONTRIB_INBOX_SRCS) $(SPAWN_BINARY_HEADERS)
 	mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
@@ -13991,7 +13994,7 @@ endif
 # on a Windows host.
 ifeq ($(ZCL_HOST_WINDOWS),)
 LAB_PEER_BIN = $(BIN_DIR)/z23-lab-peer
-LAB_PEER_SRCS = tools/lab_peer.c tools/lab_peer_shadow.c platform/modules/json/src/json.c platform/modules/util/src/spawn.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
+LAB_PEER_SRCS = tools/lab_peer.c tools/lab_peer_shadow.c platform/modules/json/src/json.c platform/modules/util/src/spawn.c platform/modules/util/src/spawn_binary.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
 LAB_PEER_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/util/include
 .PHONY: lab-peer
 # tools/lab_peer_fake.c is the fake z23 / z23-dev the test group runs the tool
@@ -14010,7 +14013,7 @@ $(LAB_PEER_FAKE_BIN): tools/lab_peer_fake.c
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ tools/lab_peer_fake.c
-$(LAB_PEER_BIN): $(LAB_PEER_SRCS)
+$(LAB_PEER_BIN): $(LAB_PEER_SRCS) $(SPAWN_BINARY_HEADERS)
 	mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
@@ -15777,6 +15780,9 @@ $(LINTC_PREMISE_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o) build/lintc-obj/m
 build/lintc-obj/gate_split_preserved.o build/lintc-obj/gate_split_preserved_check.o \
 build/lintc-obj/gate_split_preserved_move.o \
 build/lintc-obj/gate_split_preserved_selftest.o: tools/lint/lintc/gate_split_preserved_priv.h
+
+build/lintc-obj/node/platform/modules/util/src/spawn.o \
+build/lintc-obj/node/platform/modules/util/src/spawn_binary.o: $(SPAWN_BINARY_HEADERS)
 
 build/lintc-obj/node/%.o: %.c
 	@mkdir -p $(dir $@)

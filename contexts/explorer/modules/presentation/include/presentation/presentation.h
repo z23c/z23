@@ -193,6 +193,12 @@ bool zcl_present_window_run_pages_hover_copy_v1(
     const struct zcl_present_window_copy_v1 *copy,
     uint32_t initial_page, char *error, size_t error_cap);
 
+/* Copy a nonempty bounded printable-ASCII string synchronously from the UI
+ * thread while a presentation window is active. Returns true only after a
+ * platform clipboard ownership/content check. X11 selection ownership lasts
+ * only while the window stays open. Unsupported backends refuse. */
+bool zcl_present_window_copy_ascii_v1(const char *text);
+
 /* Multi-page hover window. Hover columns apply only to page 0; PgUp/PgDn
  * select already-bounded drill-down bitmaps. Page selection is local display
  * state and returns no software authority. */

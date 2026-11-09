@@ -25,6 +25,42 @@ static bool bounded_text(const char *text, size_t max)
     return n <= max;
 }
 
+bool present_copy_ascii_length(const char *text, size_t *length)
+{
+    if (!text || !length) return false;
+    size_t n = 0;
+    while (n <= ZCL_PRESENT_COPY_TEXT_MAX && text[n]) {
+        if ((unsigned char)text[n] < 0x20u || (unsigned char)text[n] > 0x7eu) return false;
+        n++;
+    }
+    if (!n || n > ZCL_PRESENT_COPY_TEXT_MAX) return false;
+    *length = n; return true;
+}
+
+bool present_pages_validate(
+    const struct zcl_present_window_pages_v1 *request,
+    char *error, size_t error_cap)
+{
+    if (!request || request->struct_size != sizeof(*request) ||
+        request->abi_version != ZCL_PRESENT_ABI_V1 || !request->pages ||
+        request->page_count == 0 ||
+        request->page_count > ZCL_PRESENT_WINDOW_PAGES_MAX)
+        return present_error(error, error_cap,
+                             "presentation pages ABI/count is invalid");
+    const struct zcl_present_window_v1 *first = &request->pages[0];
+    for (uint32_t i = 0; i < request->page_count; i++) {
+        const struct zcl_present_window_v1 *page = &request->pages[i];
+        if (!zcl_present_window_validate_v1(page, error, error_cap))
+            return false;
+        if (page->width != first->width || page->height != first->height ||
+            page->pixel_format != first->pixel_format)
+            return present_error(error, error_cap,
+                                 "presentation page geometry differs");
+    }
+    return true;
+}
+
+
 static bool present_hover_items_valid(
     const struct zcl_present_window_hover_v1 *hover)
 {

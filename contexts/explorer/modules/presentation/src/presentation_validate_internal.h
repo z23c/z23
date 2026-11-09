@@ -17,6 +17,11 @@ void present_hover_draw(
     const struct zcl_present_window_v1 *page,
     const struct zcl_present_window_hover_v1 *hover, uint32_t item_index);
 
+bool present_copy_ascii_length(const char *text, size_t *length);
+
+bool present_pages_validate(const struct zcl_present_window_pages_v1 *request,
+                            char *error, size_t error_cap);
+
 const char *present_pages_problem(
     const struct zcl_present_window_pages_v1 *pages,
     uint32_t action_count,

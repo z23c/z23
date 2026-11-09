@@ -638,6 +638,106 @@ static int test_spawn_exact_cancelable(void)
     } _test_next:;
     return failures;
 }
+struct spawn_observer_fixture {
+    struct zcl_spawn_measure *measure;
+    int calls;
+    bool refuse;
+    bool child_running;
+    size_t bytes;
+    unsigned ends, after_end, acknowledgments; bool ended_before_reap, handshake, signal_failed;
+};
+
+static void spawn_observe_end(void *ctx)
+{
+    struct spawn_observer_fixture *f = ctx;
+    f->ends++; f->ended_before_reap = !f->measure->reaped;
+}
+
+static bool spawn_observe_fragment(const void *bytes, size_t len, void *ctx)
+{
+    struct spawn_observer_fixture *f = ctx;
+    siginfo_t info = {0};
+    f->calls++;
+    if (f->ends) f->after_end++;
+    f->bytes += len;
+    if (f->handshake && ((f->acknowledgments == 0 && f->bytes >= 5) ||
+                         (f->acknowledgments == 1 && f->bytes >= 9))) {
+        if (kill((pid_t)f->measure->pid, SIGUSR1) != 0) f->signal_failed = true;
+        f->acknowledgments++;
+    }
+    if (bytes && len && f->measure->pid > 0 &&
+        waitid(P_PID, (id_t)f->measure->pid, &info, WEXITED | WNOHANG | WNOWAIT) == 0 &&
+        info.si_pid == 0)
+        f->child_running = true;
+    return !f->refuse;
+}
+
+static int test_spawn_observe_fragments(void)
+{
+    int failures = 0;
+    TEST("spawn: observer sees output before exit and refusal reaps child") {
+        const char *argv[] = {"/bin/sh", "-c",
+            "ack=0; trap 'ack=$((ack+1))' USR1; printf ready; "
+            "while [ \"$ack\" -lt 1 ]; do sleep 0.1; done; printf done; "
+            "while [ \"$ack\" -lt 2 ]; do sleep 0.1; done", NULL};
+        unsigned char bytes[32]; bool canceled = false, refused = false;
+        struct zcl_spawn_binary_observation out = {0};
+        struct zcl_spawn_measure measure = {0};
+        struct spawn_observer_fixture f = {.measure = &measure, .handshake = true};
+        struct zcl_result r = zcl_spawn_capture_binary_observe(argv, bytes, sizeof(bytes), 5000,
+            NULL, NULL, &canceled, spawn_observe_fragment, spawn_observe_end, &f, &refused, &out, &measure);
+        ASSERT(r.ok && !refused && !canceled && measure.reaped && f.child_running);
+        ASSERT(f.calls >= 2 && f.bytes == 9 && out.output_len == 9 &&
+               f.acknowledgments == 2 && !f.signal_failed);
+        ASSERT(f.ends == 1 && f.ended_before_reap && !f.after_end);
+        int calls = f.calls;
+        struct timespec pause = {.tv_nsec = 50000000};
+        (void)nanosleep(&pause, NULL);
+        ASSERT(f.calls == calls);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_spawn_observer_refusal(void)
+{
+    int failures = 0;
+    TEST("spawn: observer refusal reaps the owned child") {
+        const char *argv[] = {"/bin/sh", "-c",
+            "ack=0; trap 'ack=$((ack+1))' USR1; printf ready; "
+            "while [ \"$ack\" -lt 1 ]; do sleep 0.1; done; printf done; "
+            "while [ \"$ack\" -lt 2 ]; do sleep 0.1; done", NULL};
+        unsigned char bytes[32]; bool canceled = false, refused = false;
+        struct zcl_spawn_binary_observation out = {0};
+        struct zcl_spawn_measure measure = {0};
+        struct spawn_observer_fixture f = {.measure = &measure, .refuse = true};
+        struct zcl_result r = zcl_spawn_capture_binary_observe(argv, bytes, sizeof(bytes), 5000,
+            NULL, NULL, &canceled, spawn_observe_fragment, spawn_observe_end, &f, &refused, &out, &measure);
+        ASSERT(!r.ok && refused && !canceled && f.child_running && measure.launched && measure.reaped);
+        ASSERT(f.ends == 1 && f.ended_before_reap && !f.after_end);
+        int status = 0;
+        ASSERT(waitpid((pid_t)measure.pid, &status, WNOHANG) == -1 && errno == ECHILD);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_spawn_observer_overflow(void)
+{
+    int failures = 0;
+    TEST("spawn: observer overflow ends and reaps a still-live child") {
+        const char *argv[] = {"/bin/sh", "-c", "printf 12345; exec sleep 5", NULL};
+        unsigned char bytes[4]; bool canceled = false, refused = false;
+        struct zcl_spawn_binary_observation out = {0}; struct zcl_spawn_measure measure = {0};
+        struct spawn_observer_fixture f = {.measure = &measure};
+        struct zcl_result r = zcl_spawn_capture_binary_observe(argv, bytes, sizeof(bytes), 5000,
+            NULL, NULL, &canceled, spawn_observe_fragment, spawn_observe_end, &f, &refused, &out, &measure);
+        ASSERT(!r.ok && !refused && !canceled && out.overflow && !out.timed_out);
+        ASSERT(measure.launched && measure.reaped && f.ends == 1 && f.ended_before_reap && !f.after_end);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static int test_spawn_exact_cancel(void)
 {
     int failures = 0;
@@ -927,6 +1027,9 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_capture_inherited_pipe_writing();
     failures += test_spawn_capture_cancel_kills();
     failures += test_spawn_exact_cancelable();
+    failures += test_spawn_observe_fragments();
+    failures += test_spawn_observer_refusal();
+    failures += test_spawn_observer_overflow();
     failures += test_spawn_exact_cancel();
     failures += test_spawn_capture_echild_tolerant();
     failures += test_spawn_capture_echild_inherited_writer();

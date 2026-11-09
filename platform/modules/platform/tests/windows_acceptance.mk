@@ -311,7 +311,7 @@ ZCL_WINDOWS_ACCEPTANCE_dev_agent_claim_SOURCES := \
 	contexts/commons/packages/zutf8/src/zutf8.c \
 	platform/modules/json/src/json.c \
 	platform/modules/util/src/file_io.c \
-	platform/modules/util/src/spawn.c \
+	platform/modules/util/src/spawn.c platform/modules/util/src/spawn_binary.c \
 	platform/modules/platform/src/file_stream.c \
 	platform/modules/platform/src/process_lifecycle.c \
 	platform/modules/platform/src/os_proc.c \
@@ -391,7 +391,7 @@ ZCL_WINDOWS_ACCEPTANCE_dev_train_keep_SOURCES := \
 	tests/harness/src/dev_train_keep_windows_acceptance.c \
 	tools/command/native_dev_train_keep.c \
 	tools/command/native_dev_train_shared.c \
-	platform/modules/util/src/spawn.c \
+	platform/modules/util/src/spawn.c platform/modules/util/src/spawn_binary.c \
 	platform/modules/json/src/json.c \
 	platform/modules/base/src/cleanse.c \
 	platform/modules/platform/src/directory_compat.c \

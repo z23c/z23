@@ -276,6 +276,21 @@ int zcl_spawn_capture_cancelable_measured(
     zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
     struct zcl_spawn_measure *measure);
 
+/* Called synchronously on each retained stdout fragment, before the next read.
+ * Bytes are borrowed for this call only; do not retain them or block indefinitely.
+ * Returning false refuses the stream, kills/reaps the owned child group and
+ * sets refused. Overflow ends observed capture promptly and is independently
+ * reported. No byte callback follows end notification or function return.
+ * Windows refuses without launching. */
+typedef bool (*zcl_spawn_bytes_fn)(const void *bytes, size_t len, void *ctx);
+/* Called once after observing child exit, pipe EOF, or transport failure. */
+typedef void (*zcl_spawn_end_fn)(void *ctx);
+struct zcl_result zcl_spawn_capture_binary_observe(
+    const char *const argv[], void *buf, size_t cap, int timeout_ms,
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
+    zcl_spawn_bytes_fn observe, zcl_spawn_end_fn on_end, void *observe_ctx, bool *refused,
+    struct zcl_spawn_binary_observation *out, struct zcl_spawn_measure *measure);
+
 /* Exact bytes with cancellation, EOF/overflow observation and child accounting. */
 struct zcl_result zcl_spawn_capture_binary_cancelable_measured(
     const char *const argv[], void *buf, size_t cap, int timeout_ms,
