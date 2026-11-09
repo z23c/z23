@@ -49,6 +49,7 @@
 #include "platform/file_stream.h"
 #include "platform/private_file.h"
 #include "platform/private_directory.h"
+#include "platform/socket_compat.h"
 #include "platform/time_compat.h"
 #include "util/authority_receipt.h"
 #include "util/sync.h"
@@ -1148,27 +1149,64 @@ static void wprt_seen_observation_print(const char *label,
            (long long)o->due_ms, o->attempts, o->handed);
 }
 
+/* Hold a real nonblocking peer's kernel send buffer full, so node messages
+ * remain in the send queue without the invalid-socket disconnect artifact. */
+static bool wprt_backpressured_peer(struct p2p_node *node,
+                                    platform_socket_t *sink)
+{
+    platform_socket_t pair[2] = {PLATFORM_SOCKET_INVALID, PLATFORM_SOCKET_INVALID};
+    *sink = PLATFORM_SOCKET_INVALID;
+    if (!node || !platform_socket_pair(pair)) return false;
+    bool ready = platform_socket_set_send_buffer(pair[0], 2048) == 0 &&
+                 platform_socket_set_receive_buffer(pair[1], 2048) == 0 &&
+                 platform_socket_set_nonblocking(pair[0], true);
+    char bytes[4096] = {0};
+    bool full = false;
+    for (size_t i = 0; ready && i < 2048; i++) {
+        int n = platform_socket_send(pair[0], bytes, sizeof(bytes));
+        if (n > 0) continue;
+        if (n < 0 && platform_socket_error_would_block(platform_socket_last_error()))
+            full = true;
+        break;
+    }
+    if (!full) {
+        platform_socket_close(pair[0]);
+        platform_socket_close(pair[1]);
+        return false;
+    }
+    node->socket = pair[0];
+    *sink = pair[1];
+    return true;
+}
+
 static int wprt_case_seen_and_block(void)
 {
     int failures = 0;
     struct wprt_fx f;
     bool wallet_ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
     struct p2p_node *onion = wallet_ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
+    platform_socket_t sink = PLATFORM_SOCKET_INVALID;
+    bool transport_ok = wprt_backpressured_peer(onion, &sink);
     struct uint256 a, b;
     int send_a = -1, send_b = -1; size_t count = 0; bool count_read = false;
     /* Both draws select 19020ms, placing the sends in the same late tick. */
     wprt_fill = 5;
-    bool ok = wallet_ok && onion && (send_a = wprt_rpc_send(&f, false, 10.0, &a)) &&
+    bool ok = wallet_ok && onion && transport_ok && (send_a = wprt_rpc_send(&f, false, 10.0, &a)) &&
               (send_b = wprt_rpc_send(&f, true, 10.0, &b));
     struct wprt_seen_observation pre_a = wprt_seen_observe(&a, send_a == 1);
     struct wprt_seen_observation pre_b = wprt_seen_observe(&b, send_b == 1);
     int64_t start_ms = wprt_clock();
     size_t pushed = 0;
+    bool stayed_connected = transport_ok;
     for (int64_t t = 0; t < WPR_DELAY_MAX_MS + 1000; t += 1000) {
         struct wpr_tick_result result;
-        wprt_tick(1000, -1, &result);
+        atomic_fetch_add(&wprt_now, 1000);
+        wpr_tick(wpr_global(), -1, &result);
+        if (onion && onion->disconnect) stayed_connected = false;
+        wprt_revive_peers();
         pushed += result.pushed;
     }
+    wprt_report("backpressured fixture peer stays connected", stayed_connected, &failures);
     struct wprt_seen_observation post_a = wprt_seen_observe(&a, send_a == 1);
     struct wprt_seen_observation post_b = wprt_seen_observe(&b, send_b == 1);
     int64_t end_ms = wprt_clock();
@@ -1187,6 +1225,7 @@ static int wprt_case_seen_and_block(void)
     wprt_seen_hook(&f, &a, ok, &failures);
     wprt_seen_block(&f, &b, ok, &failures);
     wprt_close(&f);
+    if (sink != PLATFORM_SOCKET_INVALID) platform_socket_close(sink);
     return failures;
 }
 
