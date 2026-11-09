@@ -597,6 +597,72 @@ bool zcl_dev_proof_step_start_fd(struct zcl_dev_proof_step *step,
                                   executable_fd);
 }
 
+static int proof_step_wait_owned(pid_t child, siginfo_t *info)
+{
+    int rc;
+    do { rc = waitid(P_PID, (id_t)child, info, WEXITED | WNOHANG | WNOWAIT); }
+    while (rc != 0 && errno == EINTR);
+    return rc;
+}
+
+void zcl_dev_proof_step_cancel(struct zcl_dev_proof_step *step)
+{
+    if (!step || !step->started || step->finished) return;
+    pid_t child = (pid_t)step->child;
+    siginfo_t info = {0};
+    if (proof_step_wait_owned(child, &info) != 0) {
+        step->report.rc = -1; step->finished = true; return;
+    }
+    (void)kill(-child, SIGTERM);
+    (void)kill(child, SIGTERM);
+    platform_sleep_ms(100);
+    memset(&info, 0, sizeof(info));
+    if (proof_step_wait_owned(child, &info) != 0) {
+        step->report.rc = -1; step->finished = true; return;
+    }
+    (void)kill(-child, SIGKILL);
+    (void)kill(child, SIGKILL);
+    int status;
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    step->report.cause = ZCL_DEV_PROOF_KILL_CANCELLED;
+    step->report.rc = 130;
+    step->report.elapsed_ms = (platform_time_monotonic_us() - step->started_us) / 1000;
+    step->finished = true;
+}
+
+static bool proof_step_poll_live(struct zcl_dev_proof_step *step, pid_t child)
+{
+    int64_t now_us = platform_time_monotonic_us();
+    if (log_progress_mark(step->log_path, &step->seen_size, &step->seen_mtime))
+        step->last_progress_us = now_us;
+    step->report.elapsed_ms = (now_us - step->started_us) / 1000;
+    step->report.last_progress_age_ms = (now_us - step->last_progress_us) / 1000;
+    enum zcl_dev_proof_kill_cause cause = zcl_dev_proof_budget_verdict(
+        &step->budget, step->report.elapsed_ms, step->report.last_progress_age_ms);
+    if (zcl_devloop_process_cancel_requested()) cause = ZCL_DEV_PROOF_KILL_CANCELLED;
+    if (cause == ZCL_DEV_PROOF_KILL_NONE) return false;
+    step->report.cause = cause;
+    (void)kill(-child, SIGTERM); (void)kill(child, SIGTERM);
+    platform_sleep_ms(100);
+    (void)kill(-child, SIGKILL); (void)kill(child, SIGKILL);
+    int status;
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    step->report.rc = cause == ZCL_DEV_PROOF_KILL_CANCELLED ? 130 : 124;
+    step->finished = true; return true;
+}
+
+bool zcl_dev_proof_step_poll_deferred(struct zcl_dev_proof_step *step)
+{
+    if (!step || !step->started || step->finished) return true;
+    siginfo_t info = {0};
+    if (waitid(P_PID, (id_t)step->child, &info, WEXITED | WNOHANG | WNOWAIT) != 0) {
+        if (errno == EINTR) return false;
+        step->report.rc = -1; step->finished = true; return true;
+    }
+    if (info.si_pid != 0) return true;
+    return proof_step_poll_live(step, (pid_t)step->child);
+}
+
 bool zcl_dev_proof_step_poll(struct zcl_dev_proof_step *step)
 {
     if (!step || !step->started) return true;
@@ -622,28 +688,7 @@ bool zcl_dev_proof_step_poll(struct zcl_dev_proof_step *step)
         step->finished = true;
         return true;
     }
-    int64_t now_us = platform_time_monotonic_us();
-    if (log_progress_mark(step->log_path, &step->seen_size, &step->seen_mtime))
-        step->last_progress_us = now_us;
-    step->report.elapsed_ms = (now_us - step->started_us) / 1000;
-    step->report.last_progress_age_ms =
-        (now_us - step->last_progress_us) / 1000;
-    enum zcl_dev_proof_kill_cause cause = zcl_dev_proof_budget_verdict(
-        &step->budget, step->report.elapsed_ms,
-        step->report.last_progress_age_ms);
-    if (zcl_devloop_process_cancel_requested())
-        cause = ZCL_DEV_PROOF_KILL_CANCELLED;
-    if (cause == ZCL_DEV_PROOF_KILL_NONE) return false;
-    step->report.cause = cause;
-    (void)kill(-child, SIGTERM);
-    (void)kill(child, SIGTERM);
-    platform_sleep_ms(100);
-    (void)kill(-child, SIGKILL);
-    (void)kill(child, SIGKILL);
-    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-    step->report.rc = cause == ZCL_DEV_PROOF_KILL_CANCELLED ? 130 : 124;
-    step->finished = true;
-    return true;
+    return proof_step_poll_live(step, child);
 }
 
 size_t zcl_dev_proof_steps_wait(struct zcl_dev_proof_step *steps, size_t count)

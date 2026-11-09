@@ -132,6 +132,11 @@ bool zcl_dev_proof_step_start_fd(struct zcl_dev_proof_step *step,
 /* Advance one step's watch without blocking. Returns true once it has
  * finished (exited, or been killed by its own budget). */
 bool zcl_dev_proof_step_poll(struct zcl_dev_proof_step *step);
+/* Observe completion without reaping the session leader; the owner must
+ * subsequently call poll to reap, or cancel while the leader is anchored. */
+bool zcl_dev_proof_step_poll_deferred(struct zcl_dev_proof_step *step);
+/* Stop and reap this still-owned step and its process group, while anchored. */
+void zcl_dev_proof_step_cancel(struct zcl_dev_proof_step *step);
 /* Wait for every started step in the set. Returns the index of the first one
  * that did not exit 0, or count when all of them succeeded. */
 size_t zcl_dev_proof_steps_wait(struct zcl_dev_proof_step *steps,

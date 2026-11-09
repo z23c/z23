@@ -197,6 +197,7 @@
 #include <direct.h>
 #include <io.h>
 #else
+#include <signal.h>
 #include <sys/file.h>
 #endif
 #if defined(__linux__)
@@ -5694,15 +5695,26 @@ int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
 /* make lint-land (lint-fast plus cheap gates that failed in proof lint) in the
  * landing worktree. Returns the child status; the transcript is appended to
  * the attempt log either way. */
-static int dl_lint_run(struct dl_row *row, const char *const argv[]);
+static int dl_lint_run(const struct dl_dirs *d, const struct dl_row *head,
+                       struct dl_row *row, const char *const argv[]);
+
+#if defined(ZCL_TESTING)
+static _Thread_local const char *g_dl_lint_test_helper;
+void zcl_dev_land_lint_helper_for_test(const char *path);
+void zcl_dev_land_lint_helper_for_test(const char *path) { g_dl_lint_test_helper = path; }
+#endif
 
 static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *head,
                         struct dl_row *row)
 {
     const char *argv[] = { "make", "-C", d->wt, "lint-land", NULL };
+#if defined(ZCL_TESTING)
+    const char *fixture = g_dl_lint_test_helper;
+    if (fixture && fixture[0]) { argv[0] = fixture; argv[1] = NULL; }
+#endif
     if (!dl_prepare_progress(d, head, row, "lint-land"))
         return -1;
-    return dl_lint_run(row, argv);
+    return dl_lint_run(d, head, row, argv);
 }
 
 /* Does the candidate range add a compiled source file? 1 yes, 0 no, -1 when
@@ -5750,7 +5762,7 @@ static int dl_lint_new_source(const struct dl_dirs *d, struct dl_row *head,
                            NULL };
     if (!dl_prepare_progress(d, head, row, "lint-preflight"))
         return -1;
-    return dl_lint_run(row, argv);
+    return dl_lint_run(d, head, row, argv);
 }
 
 /* Everything the landing lints before it asks for a proof. */
@@ -5914,7 +5926,130 @@ static void dl_lint_fallback(FILE *f, char *out, size_t cap)
     (void)snprintf(out, cap, "%s", fallback);
 }
 
-static int dl_lint_run_budget(struct dl_row *row, const char *const argv[],
+enum dl_lint_observation { DL_LINT_CURRENT, DL_LINT_BUSY, DL_LINT_GONE, DL_LINT_STALE, DL_LINT_UNREADABLE };
+
+#if defined(ZCL_TESTING)
+static _Thread_local int g_dl_lint_finished_fd = -1, g_dl_lint_resume_fd = -1;
+void zcl_dev_land_lint_finished_barrier(int ready_fd, int resume_fd)
+{ g_dl_lint_finished_fd = ready_fd; g_dl_lint_resume_fd = resume_fd; }
+static bool dl_lint_finished_barrier(void)
+{
+    if (g_dl_lint_finished_fd < 0 || g_dl_lint_resume_fd < 0) return true;
+    char c = 'x';
+    bool ok = write(g_dl_lint_finished_fd, &c, 1) == 1 && read(g_dl_lint_resume_fd, &c, 1) == 1;
+    g_dl_lint_finished_fd = g_dl_lint_resume_fd = -1;
+    return ok;
+}
+#endif
+
+static enum dl_lint_observation dl_lint_find_row(const struct dl_row *rows, size_t nrows,
+                                                 const struct dl_row *head)
+{
+    for (size_t i = 0; i < nrows; ++i) {
+        if (rows[i].seq != head->seq) continue;
+        /* Prepared local/base are not durable until proof binding. */
+        return rows[i].attempt == head->attempt && !strcmp(rows[i].tip, head->tip) &&
+            !strcmp(rows[i].state, head->state) ? DL_LINT_CURRENT : DL_LINT_STALE;
+    }
+    return DL_LINT_GONE;
+}
+
+static enum dl_lint_observation dl_lint_observe(const struct dl_dirs *d, const struct dl_row *head)
+{
+    if (!d || !head) return DL_LINT_CURRENT; /* existing isolated lint fixture */
+    char path[4096 + 32], qpath[4096 + 32];
+    if (snprintf(path, sizeof(path), "%s/queue.lock", d->land) >= (int)sizeof(path) ||
+        snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d->land) >= (int)sizeof(qpath)) return DL_LINT_UNREADABLE;
+    int lock = dl_lock_path(path, true);
+    if (lock < 0) return errno == EWOULDBLOCK || errno == EAGAIN ? DL_LINT_BUSY : DL_LINT_UNREADABLE;
+    struct stat st;
+    if (stat(qpath, &st) != 0 || !S_ISREG(st.st_mode)) { dl_unlock(lock); return DL_LINT_UNREADABLE; }
+    struct dl_row *rows = NULL; size_t nrows = 0;
+    bool loaded = dl_load_rows(qpath, &rows, &nrows, NULL, 0);
+    enum dl_lint_observation result = loaded ? dl_lint_find_row(rows, nrows, head) : DL_LINT_UNREADABLE;
+    free(rows); dl_unlock(lock); return result;
+}
+
+static bool dl_lint_child_anchorable(void)
+{
+    struct sigaction disposition = {0};
+    return sigaction(SIGCHLD, NULL, &disposition) == 0 && disposition.sa_handler == SIG_DFL &&
+           !(disposition.sa_flags & SA_NOCLDWAIT);
+}
+
+static int dl_lint_observation_stop(struct zcl_dev_proof_step *step, bool started,
+                                    enum dl_lint_observation *observed,
+                                    struct zcl_dev_proof_step_report *report)
+{
+    if (started && !step->finished) zcl_dev_proof_step_cancel(step);
+    if (started && step->report.rc == -1) *observed = DL_LINT_UNREADABLE;
+    *report = step->report; return -1;
+}
+
+/* 1 means completed, 0 means the queue lock is busy, -1 means refusal. */
+static int dl_lint_completion(const struct dl_dirs *d, const struct dl_row *head,
+                              struct zcl_dev_proof_step *step, int64_t deadline,
+                              enum dl_lint_observation *observed)
+{
+#if defined(ZCL_TESTING)
+    if (!dl_lint_finished_barrier()) { *observed = DL_LINT_UNREADABLE; return -1; }
+#endif
+    *observed = dl_lint_observe(d, head);
+    if (*observed == DL_LINT_BUSY && platform_time_monotonic_ms() < deadline) return 0;
+    if (*observed != DL_LINT_CURRENT) return -1;
+    if (!step->finished) (void)zcl_dev_proof_step_poll(step);
+    if (step->report.rc == -1) { *observed = DL_LINT_UNREADABLE; return -1; }
+    return 1;
+}
+
+static int dl_lint_start_step(struct zcl_dev_proof_step *step, const char *path,
+                              const char *const argv[], const struct zcl_dev_proof_budget *budget,
+                              int64_t deadline, enum dl_lint_observation *observed,
+                              struct zcl_dev_proof_step_report *report)
+{
+    if (platform_time_monotonic_ms() >= deadline) { *observed = DL_LINT_UNREADABLE; return -1; }
+    if (zcl_dev_proof_step_start(step, ".", path, argv, budget)) return 0;
+    if (step->report.rc < 0) *observed = DL_LINT_UNREADABLE;
+    *report = step->report; return step->report.rc ? step->report.rc : -1;
+}
+
+static int dl_lint_watched(const struct dl_dirs *d, const struct dl_row *head,
+                           const char *path, const char *const argv[],
+                           const struct zcl_dev_proof_budget *budget,
+                           struct zcl_dev_proof_step_report *report,
+                           enum dl_lint_observation *observed)
+{
+    struct zcl_dev_proof_step step = {0};
+    int64_t deadline = platform_time_monotonic_ms() + budget->budget_ms;
+    bool started = false;
+    if (!dl_lint_child_anchorable()) { *observed = DL_LINT_UNREADABLE; return -1; }
+    for (;;) {
+        *observed = dl_lint_observe(d, head);
+        if (*observed == DL_LINT_BUSY && platform_time_monotonic_ms() < deadline) {
+            if (started && !step.finished) (void)zcl_dev_proof_step_poll_deferred(&step);
+            platform_sleep_ms(100); continue;
+        }
+        if (*observed != DL_LINT_CURRENT) {
+            return dl_lint_observation_stop(&step, started, observed, report);
+        }
+        if (!started) {
+            int rc = dl_lint_start_step(&step, path, argv, budget, deadline, observed, report);
+            if (rc != 0) return rc;
+            started = true;
+        }
+        if (step.finished || zcl_dev_proof_step_poll_deferred(&step)) {
+            int complete = dl_lint_completion(d, head, &step, deadline, observed);
+            if (complete == 0) continue;
+            if (complete < 0) return dl_lint_observation_stop(&step, true, observed, report);
+            *report = step.report;
+            return step.report.rc;
+        }
+        platform_sleep_ms(100);
+    }
+}
+
+static int dl_lint_run_budget(const struct dl_dirs *d, const struct dl_row *head,
+                              struct dl_row *row, const char *const argv[],
                               int64_t timeout_ms)
 {
     char path[sizeof(row->log_path) + 32];
@@ -5928,7 +6063,8 @@ static int dl_lint_run_budget(struct dl_row *row, const char *const argv[],
         .no_progress_ms = timeout_ms,
     };
     struct zcl_dev_proof_step_report report = {0};
-    int rc = zcl_dev_proof_run_watched(".", path, argv, &budget, &report);
+    enum dl_lint_observation observed = DL_LINT_CURRENT;
+    int rc = dl_lint_watched(d, head, path, argv, &budget, &report, &observed);
     FILE *f = fopen(path, "r");
     if (rc != 0 && f && !dl_lint_body(f, row->detail, sizeof(row->detail)))
         dl_lint_fallback(f, row->detail, sizeof(row->detail));
@@ -5936,19 +6072,29 @@ static int dl_lint_run_budget(struct dl_row *row, const char *const argv[],
     if (f) fclose(f);
     if (!dl_lint_copy_log(path, row->log_path)) rc = -1;
     else (void)unlink(path);
-    if (rc != 0)
+    if (observed != DL_LINT_CURRENT) {
+        (void)snprintf(row->dimension, sizeof(row->dimension), "%s",
+                       observed == DL_LINT_GONE ? "preparation_cancelled" : "preparation_observation");
+        (void)snprintf(row->detail, sizeof(row->detail), "%s",
+                       observed == DL_LINT_GONE ? "preparation request is no longer queued" :
+                       observed == DL_LINT_STALE ? "preparation request identity changed" :
+                       "cannot verify the preparation request in the queue");
+    } else if (rc != 0)
         (void)snprintf(row->dimension, sizeof(row->dimension), "%s",
                        host_load ? "host_load" : "lint");
     return rc;
 }
 
-static int dl_lint_run(struct dl_row *row, const char *const argv[])
+static int dl_lint_run(const struct dl_dirs *d, const struct dl_row *head,
+                       struct dl_row *row, const char *const argv[])
 {
-    return dl_lint_run_budget(row, argv, DL_LINT_TIMEOUT_MS);
+    return dl_lint_run_budget(d, head, row, argv, DL_LINT_TIMEOUT_MS);
 }
 #else
-static int dl_lint_run(struct dl_row *row, const char *const argv[])
+static int dl_lint_run(const struct dl_dirs *d, const struct dl_row *head,
+                       struct dl_row *row, const char *const argv[])
 {
+    (void)d; (void)head;
     char *buf;
     int rc;
     buf = (char *)zcl_malloc(DL_LOG_CAP, "dev.land.lint");
@@ -5970,6 +6116,43 @@ static int dl_lint_run(struct dl_row *row, const char *const argv[])
 #endif
 
 #if defined(ZCL_TESTING) && !defined(_WIN32)
+int zcl_dev_land_lint_row_test(long long seq, const char *const argv[], const char *log,
+                               char *dimension, size_t dimension_cap)
+{
+    struct dl_dirs d; struct dl_row *rows = NULL, row = {0}; size_t nrows = 0;
+    char qpath[4096 + 32];
+    if (!dl_dirs_resolve(&d, false) ||
+        snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d.land) >= (int)sizeof(qpath)) return -1;
+    int lock = dl_rows_lock(d.land);
+    if (lock < 0) return -1;
+    bool loaded = dl_load_rows(qpath, &rows, &nrows, NULL, 0), found = false;
+    for (size_t i = 0; loaded && i < nrows; ++i)
+        if (rows[i].seq == seq) { row = rows[i]; found = true; break; }
+    free(rows); dl_unlock(lock);
+    if (!found) return -1;
+    (void)snprintf(row.log_path, sizeof(row.log_path), "%s", log);
+    int rc = dl_lint_run_budget(&d, &row, &row, argv, 10000);
+    (void)snprintf(dimension, dimension_cap, "%s", row.dimension);
+    return rc;
+}
+
+bool zcl_dev_land_lint_stale_test(long long seq)
+{
+    struct dl_dirs d; struct dl_row *rows = NULL, row = {0}; size_t nrows = 0;
+    char qpath[4096 + 32];
+    if (!dl_dirs_resolve(&d, false) ||
+        snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d.land) >= (int)sizeof(qpath)) return false;
+    int lock = dl_rows_lock(d.land); if (lock < 0) return false;
+    bool loaded = dl_load_rows(qpath, &rows, &nrows, NULL, 0), found = false;
+    for (size_t i = 0; loaded && i < nrows; ++i)
+        if (rows[i].seq == seq) { row = rows[i]; found = true; break; }
+    free(rows); dl_unlock(lock); if (!found || dl_lint_observe(&d, &row) != DL_LINT_CURRENT) return false;
+    ++row.attempt;
+    if (dl_lint_observe(&d, &row) != DL_LINT_STALE) return false;
+    --row.attempt; row.tip[0] = row.tip[0] == 'a' ? 'b' : 'a';
+    return dl_lint_observe(&d, &row) == DL_LINT_STALE;
+}
+
 int zcl_dev_land_lint_test(const char *const argv[], const char *log,
                            char *detail, size_t detail_cap,
                            char *dimension, size_t dimension_cap,
@@ -5977,7 +6160,7 @@ int zcl_dev_land_lint_test(const char *const argv[], const char *log,
 {
     struct dl_row row = {0};
     (void)snprintf(row.log_path, sizeof(row.log_path), "%s", log);
-    int rc = dl_lint_run_budget(&row, argv,
+    int rc = dl_lint_run_budget(NULL, NULL, &row, argv,
                                 timeout_ms > 0 ? timeout_ms : DL_LINT_TIMEOUT_MS);
     (void)snprintf(detail, detail_cap, "%s", row.detail);
     (void)snprintf(dimension, dimension_cap, "%s", row.dimension);
@@ -7858,6 +8041,15 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
 }
 #endif
 
+static bool dl_preparation_observation_failure(const struct dl_dirs *d, struct dl_row *row,
+                                               struct zcl_command_reply *reply)
+{
+    bool cancelled = !strcmp(row->dimension, "preparation_cancelled");
+    if (!cancelled && strcmp(row->dimension, "preparation_observation")) return false;
+    dl_fail(reply, cancelled ? "PREPARATION_CANCELLED" : "QUEUE_READ_FAILED", "prebuild", row->detail, d->land);
+    return true;
+}
+
 static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
                            struct zcl_command_reply *reply)
 {
@@ -7868,6 +8060,7 @@ static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
     size_t members = 0;
     (void)snprintf(row->phase, sizeof(row->phase), "prove");
     if (!dl_train_intent_bind(d, row, &members)) {
+        if (dl_preparation_observation_failure(d, row, reply)) return;
         if (strcmp(row->dimension, "preparation_persist") == 0) {
             dl_fail(reply, "QUEUE_WRITE_FAILED", "prebuild", row->detail, d->land);
             return;
@@ -7942,7 +8135,12 @@ static bool dl_step_start_lint_stopped(const struct dl_dirs *d,
     /* The lint pass is what the proof would discover last and cheapest to
      * discover first. The proof stub skips it: a test of this queue is not
      * a test of the lint suite. */
-    if (!dl_stub() && dl_lint_candidate(d, row, row) != 0) {
+    bool run_lint = !dl_stub();
+#if defined(ZCL_TESTING)
+    if (g_dl_lint_test_helper) run_lint = true;
+#endif
+    if (run_lint && dl_lint_candidate(d, row, row) != 0) {
+        if (dl_preparation_observation_failure(d, row, reply)) return true;
         if (strcmp(row->dimension, "preparation_persist") == 0) {
             dl_fail(reply, "QUEUE_WRITE_FAILED", "prebuild", row->detail, d->land);
             return true;

@@ -1392,9 +1392,45 @@ _test_next:;
     return failures;
 }
 
+extern unsigned zcl_dev_land_train_observation_count(void);
+extern void zcl_dev_land_train_observation_for_test(const char *);
+static bool dlx_train_observation_case(const char *mode, const char *code)
+{
+    struct dlx_rig rig; struct dlx_call c; char tag[128], intent[200];
+    dlx_isolate(mode);
+    (void)snprintf(tag, sizeof(tag), "%s-rig", mode);
+    bool ok = dlx_tr_rig_five(&rig, tag, "running");
+    setenv("ZCL_LAND_TRAIN_WIDTH", "5", 1);
+    zcl_dev_land_train_observation_for_test(mode);
+    unsigned observed = zcl_dev_land_train_observation_count();
+    dlx_begin(&c, "step");
+    bool ran = dlx_run(&c);
+    if (!ran || dlx_ok(&c) || strcmp(dlx_err_code(&c), code))
+        printf("[train observation %s: ran=%d code=%s detail=%s] ", mode, ran, dlx_err_code(&c), dlx_str(&c, "detail"));
+    ok = ok && ran && !dlx_ok(&c) && !strcmp(dlx_err_code(&c), code) &&
+        zcl_dev_land_train_observation_count() == observed + 1u;
+    dlx_end(&c);
+    zcl_dev_land_train_observation_for_test(NULL);
+    ok = ok && !dlx_tr_has_solo_mark() && !dlx_tr_inflight_intent(intent, sizeof(intent));
+    dlx_restore(); return ok;
+}
+
+static int test_dev_land_train_observation_stop(void)
+{
+    int failures = 0;
+    TEST("land: tentative train cancellation and read errors cannot fall back to solo proof") {
+        ASSERT(dlx_train_observation_case("preparation_cancelled", "PREPARATION_CANCELLED"));
+        ASSERT(dlx_train_observation_case("preparation_observation", "QUEUE_READ_FAILED"));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_dev_land_train_cases(void)
 {
     int failures = 0;
+    failures += test_dev_land_train_observation_stop();
     failures += test_dev_land_train_lint_red_keeps_prefix();
     failures += test_dev_land_train_lint_red_first_member();
     failures += test_dev_land_train_lint_red_cohort_exact();

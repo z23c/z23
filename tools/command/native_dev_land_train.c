@@ -685,6 +685,15 @@ static bool dl_train_test_lint_red(const struct dl_dirs *d, const char *tip)
 
 enum dl_train_prep { DL_TRAIN_PREP_OK, DL_TRAIN_PREP_LINT_RED, DL_TRAIN_PREP_STOP };
 
+#if defined(ZCL_TESTING)
+static _Thread_local unsigned g_dl_train_observation_count;
+static _Thread_local const char *g_dl_train_test_observation;
+unsigned zcl_dev_land_train_observation_count(void);
+void zcl_dev_land_train_observation_for_test(const char *observation);
+unsigned zcl_dev_land_train_observation_count(void) { return g_dl_train_observation_count; }
+void zcl_dev_land_train_observation_for_test(const char *observation) { g_dl_train_test_observation = observation; }
+#endif
+
 /* LINT_RED only for a verdict on the tree: a loaded host or a lint run that
  * never reported is no reason to try a smaller stack. */
 static enum dl_train_prep dl_train_lint(const struct dl_dirs *d,
@@ -695,9 +704,21 @@ static enum dl_train_prep dl_train_lint(const struct dl_dirs *d,
 #if defined(ZCL_TESTING)
     if (dl_train_test_lint_red(d, probe->local))
         return DL_TRAIN_PREP_LINT_RED;
+    const char *observation = g_dl_train_test_observation;
+    if (observation && (!strcmp(observation, "preparation_cancelled") ||
+                        !strcmp(observation, "preparation_observation"))) {
+        ++g_dl_train_observation_count;
+        (void)snprintf(probe->dimension, sizeof(probe->dimension), "%s", observation);
+        (void)snprintf(probe->detail, sizeof(probe->detail), "fixture preparation observation");
+    } else
 #endif
     if (dl_stubbed() || dl_lint_candidate(d, head, probe) == 0)
         return DL_TRAIN_PREP_OK;
+    if (!strcmp(probe->dimension, "preparation_cancelled") ||
+        !strcmp(probe->dimension, "preparation_observation")) {
+        (void)snprintf(head->dimension, sizeof(head->dimension), "%s", probe->dimension);
+        (void)snprintf(head->detail, sizeof(head->detail), "%s", probe->detail);
+    }
     return strcmp(probe->dimension, "lint") == 0 ? DL_TRAIN_PREP_LINT_RED
                                                  : DL_TRAIN_PREP_STOP;
 }
@@ -887,7 +908,9 @@ bool dl_train_intent_bind(const struct dl_dirs *d, struct dl_row *row,
     formed = dl_train_form(d, row, t, &touched);
     *members = formed ? t->n : 0;
     free(t);
-    if (strcmp(row->dimension, "preparation_persist") == 0)
+    if (!strcmp(row->dimension, "preparation_persist") ||
+        !strcmp(row->dimension, "preparation_cancelled") ||
+        !strcmp(row->dimension, "preparation_observation"))
         return false;
     if (formed) {
         (void)snprintf(row->train_commit, sizeof(row->train_commit), "%s", solo);

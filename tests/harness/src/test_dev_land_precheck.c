@@ -12,6 +12,7 @@
 #include "platform/state_root.h"
 
 #if !defined(_WIN32)
+#include <poll.h>
 
 
 /* The actual checker stays a real child; only unrelated core gates use the
@@ -1609,6 +1610,271 @@ _test_next:;
     return failures;
 }
 
+#if !defined(_WIN32)
+extern int zcl_dev_land_lint_row_test(long long, const char *const [], const char *, char *, size_t);
+extern bool zcl_dev_land_lint_stale_test(long long);
+extern size_t zcl_devloop_process_session_members(int64_t, int);
+extern void zcl_dev_land_lint_finished_barrier(int, int);
+extern void zcl_dev_land_lint_helper_for_test(const char *);
+
+static bool dlx_lint_read_fifo(const char *path, pid_t worker, char *out, size_t cap)
+{
+    if (cap < 2) return false;
+    int fd = open(path, O_RDWR | O_NONBLOCK); if (fd < 0) return false;
+    struct pollfd p = {.fd = fd, .events = POLLIN}; bool ok = false;
+    for (;;) {
+        int rc = poll(&p, 1, 100);
+        if (rc < 0 && errno != EINTR) break;
+        if (rc > 0 && (p.revents & POLLIN)) {
+            ssize_t n = read(fd, out, cap - 1u);
+            if (n > 0) { out[n] = '\0'; ok = true; }
+            break;
+        }
+        siginfo_t info = {0};
+        int status;
+        do { status = waitid(P_PID, (id_t)worker, &info, WEXITED | WNOHANG | WNOWAIT); }
+        while (status != 0 && errno == EINTR);
+        if (status != 0 || info.si_pid) break;
+    }
+    close(fd); return ok;
+}
+
+static bool dlx_lint_rig_setup(struct dlx_rig *rig, const char *tag, const char *rig_tag)
+{
+    struct dlx_call c; dlx_isolate(tag);
+    if (!dlx_rig_make(rig, rig_tag)) return false;
+    setenv("ZCL_LAND_PROOF_STUB", "running", 1); setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+    dlx_submit(&c, rig, rig->tip); bool ok = dlx_run(&c) && dlx_ok(&c); dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_lint_cancel_row(bool ready)
+{
+    struct dlx_call c; dlx_begin(&c, "cancel"); (void)json_push_kv_int(&c.input, "seq", 1);
+    bool ok = ready && dlx_run(&c) && dlx_ok(&c); dlx_end(&c); return ok;
+}
+
+static bool dlx_lint_worker_ok(pid_t worker)
+{
+    int st = 0; pid_t done;
+    do { done = waitpid(worker, &st, 0); } while (done < 0 && errno == EINTR);
+    return done == worker && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+static long dlx_lint_marker_pid(const char *marker, bool ready)
+{
+    long leader = 0; FILE *f = ready ? fopen(marker, "r") : NULL;
+    if (f) { if (fscanf(f, "%ld", &leader) != 1) leader = 0; fclose(f); }
+    return leader;
+}
+
+static bool dlx_lint_wait_byte(int fd)
+{
+    char byte; ssize_t n;
+    do { n = read(fd, &byte, 1); } while (n < 0 && errno == EINTR);
+    return n == 1;
+}
+
+static bool dlx_lint_queue_write(const char *qpath, const char *text)
+{
+    char lockpath[1400];
+    (void)snprintf(lockpath, sizeof(lockpath), "%s/z23/dev/land/queue.lock", g_dlx_state);
+    int fd = open(lockpath, O_RDWR);
+    if (fd < 0) return false;
+    bool ok = flock(fd, LOCK_EX) == 0 && dlx_write(qpath, text);
+    (void)flock(fd, LOCK_UN); close(fd); return ok;
+}
+
+static bool dlx_one_cancel_outcome(void)
+{
+    char land[1200], path[1400], line[16384]; int total = 0, cancelled = 0;
+    dlx_landdir(land, sizeof(land)); (void)snprintf(path, sizeof(path), "%s/outcomes.jsonl", land);
+    FILE *f = fopen(path, "r"); if (!f) return false;
+    bool valid = true;
+    while (fgets(line, sizeof(line), f)) {
+        struct json_value v; json_init(&v);
+        if (!json_read(&v, line, strlen(line)) || v.type != JSON_OBJ) { json_free(&v); valid = false; break; }
+        const struct json_value *seq = json_get(&v, "seq"), *state = json_get(&v, "state");
+        if (seq && seq->type == JSON_INT && json_get_int(seq) == 1) {
+            ++total; if (state && state->type == JSON_STR && !strcmp(json_get_str(state), "cancelled")) ++cancelled;
+        }
+        json_free(&v);
+    }
+    if (ferror(f)) valid = false;
+    fclose(f); return valid && total == 1 && cancelled == 1;
+}
+
+static int dlx_cancel_active_lint(void)
+{
+    int failures = 0;
+    TEST("land: cancel stops owned active preparation and preserves its log") {
+        struct dlx_rig rig; struct dlx_call c;
+        char marker[1200], log[1200], text[512]; size_t len = 0;
+        ASSERT(dlx_lint_rig_setup(&rig, "cancel_active_lint", "cancel_active_rig"));
+        ASSERT(zcl_dev_land_lint_stale_test(1));
+        (void)snprintf(marker, sizeof(marker), "%s/child-ready", g_dlx_state);
+        (void)snprintf(log, sizeof(log), "%s/lint.log", g_dlx_state);
+        ASSERT(mkfifo(marker, 0600) == 0);
+        pid_t worker = fork(); ASSERT(worker >= 0);
+        if (worker == 0) {
+            char dimension[64];
+            const char *argv[] = {"/bin/sh", "-c", "sleep 4 & echo $$ > \"$1\"; echo child-started; wait", "sh", marker, NULL};
+            int rc = zcl_dev_land_lint_row_test(1, argv, log, dimension, sizeof(dimension));
+            _exit(rc != 0 && !strcmp(dimension, "preparation_cancelled") ? 0 : 1);
+        }
+        char announced[64]; bool ready = dlx_lint_read_fifo(marker, worker, announced, sizeof(announced));
+        long leader = ready ? strtol(announced, NULL, 10) : 0;
+        bool cancelled = dlx_lint_cancel_row(ready), worker_ok = dlx_lint_worker_ok(worker);
+        bool clean = leader > 1 && zcl_devloop_process_session_members(leader, 0) == 0;
+        bool logged = dlx_slurp(log, text, sizeof(text), &len);
+        if (logged) { text[len] = '\0'; logged = strstr(text, "child-started") != NULL; }
+        ASSERT(cancelled && worker_ok && clean && logged);
+        dlx_begin(&c, "step"); ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT(!strcmp(dlx_str(&c, "state"), "empty")); dlx_end(&c);
+        dlx_restore(); PASS();
+    }
+_test_next:;
+    dlx_restore(); return failures;
+}
+
+static int dlx_cancel_lint_completion(void)
+{
+    int failures = 0;
+    TEST("land: cancellation at lint completion prevents acceptance") {
+        struct dlx_rig rig; struct dlx_call c; char log[1200], marker[1200];
+        int ready[2], resume[2];
+        ASSERT(dlx_lint_rig_setup(&rig, "cancel_lint_completion", "cancel_completion_rig"));
+        ASSERT(pipe(ready) == 0 && pipe(resume) == 0);
+        (void)snprintf(log, sizeof(log), "%s/lint-complete.log", g_dlx_state);
+        (void)snprintf(marker, sizeof(marker), "%s/completion-leader", g_dlx_state);
+        pid_t worker = fork(); ASSERT(worker >= 0);
+        if (worker == 0) {
+            close(ready[0]); close(resume[1]); char dimension[64];
+            const char *argv[] = {"/bin/sh", "-c", "sleep 4 & echo $$ > \"$1\"; echo complete", "sh", marker, NULL};
+            zcl_dev_land_lint_finished_barrier(ready[1], resume[0]);
+            int rc = zcl_dev_land_lint_row_test(1, argv, log, dimension, sizeof(dimension));
+            _exit(rc != 0 && !strcmp(dimension, "preparation_cancelled") ? 0 : 1);
+        }
+        close(ready[1]); close(resume[0]);
+        bool reached = dlx_lint_wait_byte(ready[0]);
+        long leader = dlx_lint_marker_pid(marker, reached);
+        bool cancelled = dlx_lint_cancel_row(reached);
+        bool released = !reached || write(resume[1], "x", 1) == 1;
+        close(ready[0]); close(resume[1]);
+        bool worker_ok = dlx_lint_worker_ok(worker);
+        ASSERT(cancelled && released && worker_ok &&
+               leader > 1 && zcl_devloop_process_session_members(leader, 0) == 0);
+        dlx_begin(&c, "step"); ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT(!strcmp(dlx_str(&c, "state"), "empty")); dlx_end(&c);
+        dlx_restore(); PASS();
+    }
+_test_next:;
+    dlx_restore(); return failures;
+}
+
+static int dlx_lint_queue_error(void)
+{
+    int failures = 0;
+    TEST("land: unreadable preparation queue stops child without a cancellation outcome") {
+        struct dlx_rig rig; struct dlx_call c;
+        char marker[1200], log[1200], qpath[1400], saved[16384]; size_t len = 0;
+        ASSERT(dlx_lint_rig_setup(&rig, "lint_queue_error", "lint_error_rig"));
+        (void)snprintf(qpath, sizeof(qpath), "%s/z23/dev/land/queue.jsonl", g_dlx_state);
+        ASSERT(dlx_slurp(qpath, saved, sizeof(saved), &len)); saved[len] = '\0';
+        (void)snprintf(marker, sizeof(marker), "%s/error-ready", g_dlx_state);
+        (void)snprintf(log, sizeof(log), "%s/error-lint.log", g_dlx_state);
+        ASSERT(mkfifo(marker, 0600) == 0);
+        pid_t worker = fork(); ASSERT(worker >= 0);
+        if (worker == 0) {
+            char dimension[64];
+            const char *argv[] = {"/bin/sh", "-c", "echo ready > \"$1\"; echo child-started; sleep 4", "sh", marker, NULL};
+            int rc = zcl_dev_land_lint_row_test(1, argv, log, dimension, sizeof(dimension));
+            _exit(rc != 0 && !strcmp(dimension, "preparation_observation") ? 0 : 1);
+        }
+        char announced[64]; bool ready = dlx_lint_read_fifo(marker, worker, announced, sizeof(announced));
+        bool corrupted = ready && dlx_lint_queue_write(qpath, "invalid queue record\n");
+        bool worker_ok = dlx_lint_worker_ok(worker);
+        bool restored = dlx_lint_queue_write(qpath, saved);
+        ASSERT(corrupted && restored && worker_ok);
+        dlx_begin(&c, "status"); (void)json_push_kv_bool(&c.input, "json", true);
+        ASSERT(dlx_run(&c) && dlx_ok(&c) && dlx_arr(&c, "queued")->num_children == 1); dlx_end(&c);
+        dlx_restore(); PASS();
+    }
+_test_next:;
+    dlx_restore(); return failures;
+}
+
+static bool dlx_lint_refuses_autoreap(int mode, const char *marker, const char *log)
+{
+    pid_t worker = fork(); if (worker < 0) return false;
+    if (worker == 0) {
+        struct sigaction action = {0}; action.sa_handler = mode == 0 ? SIG_IGN : SIG_DFL;
+        if (mode != 0) action.sa_flags = SA_NOCLDWAIT;
+        if (sigaction(SIGCHLD, &action, NULL) != 0) _exit(2);
+        char dimension[64];
+        const char *argv[] = {"/bin/sh", "-c", "echo unsafe > \"$1\"", "sh", marker, NULL};
+        int rc = zcl_dev_land_lint_row_test(1, argv, log, dimension, sizeof(dimension));
+        _exit(rc != 0 && !strcmp(dimension, "preparation_observation") ? 0 : 1);
+    }
+    int st = 0; while (waitpid(worker, &st, 0) < 0 && errno == EINTR) {}
+    return WIFEXITED(st) && WEXITSTATUS(st) == 0 && !dlx_file_exists(marker);
+}
+
+static int dlx_lint_autoreap(void)
+{
+    int failures = 0;
+    TEST("land: auto-reaping SIGCHLD dispositions refuse before spawning lint") {
+        struct dlx_rig rig; struct dlx_call c; char marker[1200], log[1200];
+        dlx_isolate("lint_autoreap"); ASSERT(dlx_rig_make(&rig, "lint_autoreap_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1); setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip); ASSERT(dlx_run(&c) && dlx_ok(&c)); dlx_end(&c);
+        (void)snprintf(marker, sizeof(marker), "%s/autoreap-started", g_dlx_state);
+        (void)snprintf(log, sizeof(log), "%s/autoreap.log", g_dlx_state);
+        ASSERT(dlx_lint_refuses_autoreap(0, marker, log));
+        ASSERT(dlx_lint_refuses_autoreap(1, marker, log));
+        dlx_restore(); PASS();
+    }
+_test_next:;
+    dlx_restore(); return failures;
+}
+
+static int dlx_cancel_step_progress(void)
+{
+    int failures = 0;
+    TEST("land: cancelling active lint releases step for the next row") {
+        struct dlx_rig rig; struct dlx_call c;
+        char next[64], helper[1200], marker[1200], body[1500], original[64], after[64];
+        ASSERT(dlx_lint_rig_setup(&rig, "cancel_step_lint", "cancel_step_rig"));
+        ASSERT(dlx_origin_main(&rig, original));
+        ASSERT(dlx_qp_branch(&rig, "cancel-next", "next.txt", "next\n", NULL, NULL, next));
+        ASSERT(dlx_qp_submit(&rig, next, 2));
+        (void)snprintf(helper, sizeof(helper), "%s/lint-helper", g_dlx_state);
+        (void)snprintf(marker, sizeof(marker), "%s/step-ready", g_dlx_state);
+        (void)snprintf(body, sizeof(body), "#!/bin/sh\necho ready > '%s'\necho step-child-started\nsleep 4\n", marker);
+        ASSERT(dlx_write(helper, body) && chmod(helper, 0700) == 0);
+        ASSERT(mkfifo(marker, 0600) == 0);
+        zcl_dev_land_lint_helper_for_test(helper);
+        pid_t worker = fork(); ASSERT(worker >= 0);
+        if (worker == 0) {
+            struct dlx_call child; dlx_begin(&child, "step");
+            bool ok = dlx_run(&child) && !dlx_ok(&child) && !strcmp(dlx_err_code(&child), "PREPARATION_CANCELLED");
+            dlx_end(&child); _exit(ok ? 0 : 1);
+        }
+        char announced[64]; bool ready = dlx_lint_read_fifo(marker, worker, announced, sizeof(announced));
+        bool cancelled = dlx_lint_cancel_row(ready), worker_ok = dlx_lint_worker_ok(worker);
+        zcl_dev_land_lint_helper_for_test(NULL);
+        ASSERT(cancelled && worker_ok);
+        ASSERT(dlx_one_cancel_outcome());
+        ASSERT(dlx_origin_main(&rig, after) && !strcmp(after, original));
+        dlx_begin(&c, "step"); ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT(!strcmp(dlx_str(&c, "state"), "started") && dlx_int(&c, "seq") == 2); dlx_end(&c);
+        dlx_restore(); PASS();
+    }
+_test_next:;
+    zcl_dev_land_lint_helper_for_test(NULL); dlx_restore(); return failures;
+}
+#endif
+
 int dlx_case_cancel_request(void)
 {
     int failures = 0;
@@ -1651,6 +1917,13 @@ int dlx_case_cancel_request(void)
         PASS();
     }
 _test_next:;
+#if !defined(_WIN32)
+    failures += dlx_cancel_active_lint();
+    failures += dlx_cancel_lint_completion();
+    failures += dlx_lint_queue_error();
+    failures += dlx_lint_autoreap();
+    failures += dlx_cancel_step_progress();
+#endif
     dlx_restore();
     return failures;
 }
