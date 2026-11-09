@@ -360,6 +360,7 @@ struct zcl_dev_proof_changed_set {
     const char **current_files;
     size_t current_count;
     const char *structural_path;
+    const char *structural_detail; /* static token; first structural row */
     size_t structural_count;
     /* An added `.c` row proven a split out of a modified same-directory `.c`
      * sibling (nothing includes it, it is listed wherever the sibling is, and

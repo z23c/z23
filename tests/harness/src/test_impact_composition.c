@@ -7079,6 +7079,12 @@ static bool ic_fresh_edit_fresh(void)
                         IC_FRESH_BODY("situation"));
 }
 
+static bool ic_fresh_edit_callback(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+                        "int fresh_probe_run(int (*fetch)(void))\n{\n    return fetch();\n}\n");
+}
+
 static bool ic_fresh_edit_test(void)
 {
     return ic_fresh_add("tests/harness/src/test_devagent_start.c",
@@ -7463,6 +7469,7 @@ static bool ic_fresh_fixture_build(void)
         bool (*edit)(void);
     } branches[] = {
         {"fresh", ic_fresh_edit_fresh},
+        {"freshcallback", ic_fresh_edit_callback},
         {"freshtest", ic_fresh_edit_test},
         {"freshmention", ic_fresh_edit_mention},
         {"freshbasename", ic_fresh_edit_basename},
@@ -7523,6 +7530,7 @@ struct ic_fresh_case {
 
 static const struct ic_fresh_case ic_fresh_cases[] = {
     {"fresh", 0, "devagent_situation", NULL},   /* new impl, its rule's group */
+    {"freshcallback", 'A', NULL, NULL}, /* callback declarator remains fail-closed */
     {"freshtest", 0, "devagent_start", NULL},   /* new test file, its own group */
     {"freshsidecar", 0, "devagent_situation", "package_capability_claim"},
     {"freshdropcur", 0, "devagent_situation", "package_capability_claim"},
@@ -7568,6 +7576,13 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"freshtype", 'T', NULL, NULL},      /* a type change */
     {"freshtext", 'A', NULL, NULL},      /* an added non-source file */
 };
+
+static bool ic_fresh_detail_valid(const struct ic_fresh_case *c,
+                                  const struct zcl_dev_proof_changed_set *set)
+{
+    return strcmp(c->name, "freshcallback") ||
+           (set->structural_detail && !strcmp(set->structural_detail, "declarator_function_pointer"));
+}
 
 static int test_ic_changed_set_fresh_source_closure(void)
 {
@@ -7644,6 +7659,7 @@ static int test_ic_changed_set_fresh_source_closure(void)
                 ASSERT(set.structural_path != NULL);
                 ASSERT(set.structural_status == c->kind);
                 ASSERT(strcmp(reason, "changed-input-structure") == 0);
+                ASSERT(ic_fresh_detail_valid(c, &set));
             }
             zcl_dev_proof_changed_set_release(&set);
         }

@@ -1581,6 +1581,7 @@ void zcl_dev_proof_changed_set_release(struct zcl_dev_proof_changed_set *set)
     set->current_files = NULL;
     set->current_count = 0;
     set->structural_path = NULL;
+    set->structural_detail = NULL;
     set->structural_count = 0;
     set->split_path = NULL;
     set->split_count = 0;
@@ -2118,6 +2119,7 @@ struct dp_split_parse {
     const char *p;
     int depth;
     bool bol, bad;
+    const char *bad_detail;
     char stmt[DP_SPLIT_STMT_MAX];
     size_t slen;
     struct dp_split_funcs *funcs;
@@ -2258,6 +2260,7 @@ static void dp_split_declarator(struct dp_split_parse *s)
     for (size_t i = 0; i < sizeof(refuse) / sizeof(refuse[0]); i++)
         if (strstr(st, refuse[i])) {
             s->bad = true;
+            s->bad_detail = i >= 4 ? "declarator_function_pointer" : "declarator_unsupported";
             return;
         }
     const char *start, *end;
@@ -2388,7 +2391,7 @@ static void dp_split_step(struct dp_split_parse *s)
 
 /* Every function defined at file scope in `text`, or false when any part of
  * the text could not be read with certainty. */
-static bool dp_split_parse_funcs(const char *text, struct dp_split_funcs *f)
+static bool dp_split_parse_funcs(const char *text, struct dp_split_funcs *f, const char **detail)
 {
     struct dp_split_parse *s = zcl_calloc(1, sizeof(*s), "proof split parse");
     if (!s) return false;
@@ -2399,6 +2402,7 @@ static bool dp_split_parse_funcs(const char *text, struct dp_split_funcs *f)
     bool ok = !s->bad && s->depth == 0;
     for (size_t i = 0; ok && i < s->slen; i++)
         ok = dp_split_blank(s->stmt[i]);
+    if (!ok && detail) *detail = s->bad_detail ? s->bad_detail : "source_parse_uncertain";
     free(s);
     return ok;
 }
@@ -2408,7 +2412,7 @@ static bool dp_split_parse_funcs(const char *text, struct dp_split_funcs *f)
 static bool dp_split_funcs_derive(const char *added, const char *removed)
 {
     struct dp_split_funcs from = {0}, gone = {0};
-    if (!dp_split_parse_funcs(added, &from)) return false;
+    if (!dp_split_parse_funcs(added, &from, NULL)) return false;
     dp_split_funcs_scan(removed, &gone);
     if (from.overflow || gone.overflow || from.count == 0) return false;
     for (size_t i = 0; i < from.count; i++)
@@ -2751,23 +2755,30 @@ static bool dp_fresh_decls_defined(const struct dp_split_funcs *f)
  * and defines only names no base file holds and the change itself calls. */
 static bool dp_fresh_text_ok(const struct dp_split_ctx *c, const char *side,
                              const char *added, const char **refs,
-                             size_t count)
+                             size_t count, const char **detail)
 {
     struct dp_split_funcs f = {0};
-    return side && !dp_fresh_hooked(side) &&
-           dp_split_parse_funcs(side, &f) && !f.overflow && !f.object &&
-           f.count > 0 && dp_fresh_decls_defined(&f) &&
-           dp_fresh_names_unreserved(&f) &&
-           dp_fresh_names_absent_at_base(c, &f) &&
-           dp_fresh_public_called(c, &f, added, refs, count);
+    if (!side) { *detail = "source_diff_unavailable"; return false; }
+    if (dp_fresh_hooked(side)) { *detail = "source_registration_hook"; return false; }
+    *detail = "source_parse_unavailable";
+    if (!dp_split_parse_funcs(side, &f, detail)) return false;
+    if (f.overflow) { *detail = "symbol_capacity_exceeded"; return false; }
+    if (f.object) { *detail = "public_object_or_declaration"; return false; }
+    if (!f.count) { *detail = "no_functions_found"; return false; }
+    if (!dp_fresh_decls_defined(&f)) { *detail = "declarations_not_defined"; return false; }
+    if (!dp_fresh_names_unreserved(&f)) { *detail = "reserved_symbol"; return false; }
+    if (!dp_fresh_names_absent_at_base(c, &f)) { *detail = "base_symbol_absence_unproven"; return false; }
+    if (!dp_fresh_public_called(c, &f, added, refs, count)) { *detail = "public_caller_unproven"; return false; }
+    return true;
 }
 
 /* Is the added `.c` at refs[i] fresh code (see above)? */
 static bool dp_fresh_admit(const struct dp_split_ctx *c, const char **refs,
-                           size_t count, size_t i)
+                           size_t count, size_t i, const char **detail)
 {
     const char *added = refs[i];
     char stem[DP_SPLIT_LEAF_MAX + 1];
+    *detail = "fresh_scope_unproven";
     if (dp_fresh_sealed(added))
         return dp_fresh_sealed_admit(c, refs, count, added);
     if (!dp_split_is_c(added) || !dp_split_name_safe(added) ||
@@ -2778,7 +2789,7 @@ static bool dp_fresh_admit(const struct dp_split_ctx *c, const char **refs,
         return false;
     char *diff = dp_split_diff(c, added);
     char *side = diff ? dp_split_side(diff, '+') : NULL;
-    bool ok = dp_fresh_text_ok(c, side, added, refs, count);
+    bool ok = dp_fresh_text_ok(c, side, added, refs, count, detail);
     free(diff);
     free(side);
     return ok;
@@ -2953,17 +2964,21 @@ static void dp_changed_set_split_classify(
     size_t candidates = 0, count = set->count;
     for (size_t i = 0; i < count; i++) {
         if (status[i] != 'A' || !dp_split_is_c(refs[i])) continue;
+        const char *detail = "candidate_limit";
         if (candidates++ < DP_SPLIT_CANDIDATES_MAX &&
             dp_split_admit(c, refs, status, count, i)) {
             if (!set->split_path) set->split_path = refs[i];
             set->split_count++;
             dp_set_drop_current(set, refs[i]);
         } else if (candidates <= DP_SPLIT_CANDIDATES_MAX &&
-                   dp_fresh_admit(c, refs, count, i)) {
+                   dp_fresh_admit(c, refs, count, i, &detail)) {
             if (!set->fresh_path) set->fresh_path = refs[i];
             set->fresh_count++;
             status[i] = 'F';
-        } else dp_set_add_structural(set, refs[i]);
+        } else {
+            if (!set->structural_path) set->structural_detail = detail;
+            dp_set_add_structural(set, refs[i]);
+        }
     }
     dp_changed_set_sidecar_classify(c, refs, status, set);
     dp_changed_set_leaf_classify(c, refs, status, set);
@@ -8628,7 +8643,7 @@ static bool proof_note_test_selection(const struct proof_paths *paths,
                                       bool widened, bool split, bool fresh,
                                       bool deleted,
                                       uint32_t selected,
-                                      const char *host_gated)
+                                      const char *host_gated, const char *detail)
 {
     bool universal = plan->closure_universal;
     const char *reason = dp_selection_reason(plan, widened, split, fresh,
@@ -8642,6 +8657,7 @@ static bool proof_note_test_selection(const struct proof_paths *paths,
     (void)fprintf(f, "test_selection=%s reason=%s groups_selected=%u\n",
                   universal ? "universal" : "exact", reason,
                   (unsigned)selected);
+    if (widened) (void)fprintf(f, "structural_detail=%s\n", detail ? detail : "not_classified");
     dp_write_capacity_note(f, plan);
     (void)fprintf(f, "host_gated=%s\n",
                   (host_gated && host_gated[0]) ? host_gated : "-");
@@ -9080,9 +9096,10 @@ static void dp_select_structure_detail(
     if (!dp_capacity_encode(path, encoded, sizeof(encoded)))
         (void)snprintf(encoded, sizeof(encoded), "unknown");
     (void)snprintf(out->detail, sizeof(out->detail),
-                   "kind=%c rows=%zu path=%s",
+                   "kind=%c rows=%zu detail=%s path=%s",
                    set->structural_status ? set->structural_status : '?',
-                   set->structural_count, encoded);
+                   set->structural_count,
+                   set->structural_detail ? set->structural_detail : "not_classified", encoded);
 }
 
 /* Close and widen the plan the way the proof worker does. The first close may
@@ -10617,11 +10634,12 @@ static void dp_worker_widen(struct dp_worker *w, size_t file_count)
     char note[PROOF_CHANGED_PATH_MAX + 96];
     if (w->structure_widened)
         (void)snprintf(note, sizeof(note),
-                       "widened reason=changed_input_structure path=%s "
-                       "rows=%zu kind=%c", w->changed->structural_path,
+                       "widened reason=changed_input_structure detail=%s rows=%zu kind=%c path=%s",
+                       w->changed->structural_detail ? w->changed->structural_detail : "not_classified",
                        w->changed->structural_count,
                        w->changed->structural_status
-                           ? w->changed->structural_status : '?');
+                           ? w->changed->structural_status : '?',
+                       w->changed->structural_path);
     else if (w->plan.path_universal)
         (void)snprintf(note, sizeof(note),
                        "widened reason=path_group_cap rows=%zu cap=%d",
@@ -10943,7 +10961,8 @@ static bool dp_worker_select(struct dp_worker *w, char *why, size_t why_len)
     if (!proof_note_test_selection(&w->execution, &w->plan,
                                    w->structure_widened, w->split_closure,
                                    w->fresh_closure, w->deleted_closure,
-                                   test_count, host_gated)) {
+                                   test_count, host_gated,
+                                   w->changed ? w->changed->structural_detail : NULL)) {
         proof_why(why, why_len, "test_selection_note_unwritable");
         return false;
     }
