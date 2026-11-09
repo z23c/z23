@@ -531,8 +531,42 @@ if [ "$SELFTEST" = 1 ]; then
         echo "  ok: bounded search fails when two free quads are unavailable"
     fi
 
+    # Synthetic failed attempt: only fixed event flags may leave the logs.
+    ISO_DD="$MESH_FIXTURE_DIR/service"
+    ISO_PEER_DD="$MESH_FIXTURE_DIR/client"
+    mkdir -p "$ISO_DD" "$ISO_PEER_DD"
+    printf '%s\n' 'Rendezvous circuit launched to TEST_SECRET' \
+        'We received an INTRODUCE2 cell with same REND_COOKIE TEST_SECRET' >"$ISO_DD/tor-rend.log"
+    printf '%s\n' 'Received INTRODUCE_ACK nack by TEST_SECRET' \
+        'Failed v3 intro circ for service TEST_SECRET' '(awaiting ACK)' >"$ISO_PEER_DD/tor-rend.log"
+    printf '%s\n' 'first onion circuit attempt failed; TEST_SECRET' >"$ISO_PEER_DD/node.log"
+    STAGE=pair VERDICT=RENDEZVOUS1_NOT_SEEN PROBE_WRITTEN=0
+    diag_capture="$(append_probe)"
+    case "$diag_capture" in
+        *'role=service'*'rend_launch=1'*'intro_replay_drop=1'*'role=client'*'intro_nack=1'*'intro_wait_failed=0'*'role=client_node'*'onion_stream_retry=1'*)
+            echo "  ok: failed probe emits bounded event projection" ;;
+        *) echo "  FAIL: failed probe event projection missing or cross-line matched"; st_fail=1 ;;
+    esac
+    case "$diag_capture" in
+        *TEST_SECRET*) echo "  FAIL: failed probe exposed log contents"; st_fail=1 ;;
+        *) echo "  ok: failed probe does not expose log contents" ;;
+    esac
+    head -c 65537 /dev/zero | tr '\0' x >>"$ISO_DD/tor-rend.log"
+    diag_capture="$(PROBE_WRITTEN=0 append_probe)"
+    case "$diag_capture" in
+        *'role=service'*'window=tail'*) echo "  ok: oversized log reports tail window" ;;
+        *) echo "  FAIL: oversized log was not marked tail"; st_fail=1 ;;
+    esac
+    rm -f "$ISO_DD/tor-rend.log"
+    diag_capture="$(PROBE_WRITTEN=0 append_probe)"
+    case "$diag_capture" in
+        *'role=service'*'scan=unavailable'*) echo "  ok: missing log is unavailable" ;;
+        *) echo "  FAIL: missing log was not marked unavailable"; st_fail=1 ;;
+    esac
+
     PROBE_WRITTEN=0
     VERDICT=""
+    PAIRED=1 P2P_FRAMING_SEEN=true
     append_probe
     if [ -s "$PROBE_FILE" ]; then
         echo "  ok: append_probe wrote $PROBE_FILE"
