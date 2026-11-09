@@ -383,7 +383,7 @@ static bool obj_newest_landed_train(
         return false;
     }
     if (!stats->last_landed_note[0]) {
-        obj_set_reason(v, "newest landed row has no valid train note");
+        obj_set_reason(v, "%s", "newest landed row has no valid train note");
         return false;
     }
     return true;
