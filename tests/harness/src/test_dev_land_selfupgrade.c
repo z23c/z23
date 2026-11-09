@@ -198,6 +198,43 @@ _test_next:;
     (void)test_rm_rf_recursive(r.root);
     return failures;
 }
+
+static bool sul_body(const char *path, const char *body)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = fprintf(f, "#!/bin/sh\n%s\n", body) > 0;
+    return fclose(f) == 0 && ok && chmod(path, 0755) == 0;
+}
+
+static int sul_incomplete_cases(void)
+{
+    int failures = 0;
+    struct sul_rig r;
+    char ptr[700];
+    if (!sul_rig_open(&r)) return 1;
+    TEST("selfupgrade: truncated matching prefixes never switch") {
+        ASSERT(sul_body(r.cur, "printf '%08192dA' 0"));
+        ASSERT(sul_body(r.src_x, "printf '%08192dB' 0"));
+        ASSERT(zcl_land_selfupgrade_slot_install(r.root, SHA_A, r.src_x));
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_A, g_args, 1),
+                  (int)ZCL_LAND_SU_DISAGREE);
+        ASSERT(!zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof(ptr)));
+        PASS();
+    }
+    TEST("selfupgrade: embedded NUL cannot hide disagreement") {
+        ASSERT(sul_body(r.cur, "printf 'same\\000A'"));
+        ASSERT(sul_body(r.src_y, "printf 'same\\000B'"));
+        ASSERT(zcl_land_selfupgrade_slot_install(r.root, SHA_B, r.src_y));
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_B, g_args, 1),
+                  (int)ZCL_LAND_SU_DISAGREE);
+        ASSERT(!zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof(ptr)));
+        PASS();
+    }
+_test_next:;
+    (void)test_rm_rf_recursive(r.root);
+    return failures;
+}
 static bool sul_write_state(const struct sul_rig *r, const char *body)
 {
     char path[700];
@@ -301,6 +338,7 @@ int test_dev_land_selfupgrade(void)
     failures += sul_pure_cases();
     failures += sul_switch_cases();
     failures += sul_disagree_cases();
+    failures += sul_incomplete_cases();
     failures += sul_durable_cases();
 #endif
     if (failures == 0)
