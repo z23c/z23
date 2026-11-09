@@ -11612,6 +11612,21 @@ static int test_ic_proof_test_needs_build_the_sensor(void)
         ASSERT(argv[3] && strcmp(argv[3], "clang-manifest") == 0);
         ASSERT(argv[4] == NULL);
 
+        char dir[1024], phases[1200], body[1024] = {0};
+        test_make_tmpdir(dir, sizeof(dir), "proof", "needs_notes");
+        (void)snprintf(phases, sizeof(phases), "%s/phases.txt", dir);
+        const char *values[] = {NULL, NULL, NULL, "build/bin/z23-clang-manifest"};
+        zcl_dev_proof_test_needs_note(phases, argv, values, targets, true);
+        FILE *notes = fopen(phases, "r");
+        ASSERT(notes != NULL);
+        size_t len = fread(body, 1, sizeof(body) - 1, notes);
+        ASSERT(!ferror(notes));
+        fclose(notes); body[len] = '\0';
+        ASSERT(strstr(body, "test_needs_release_required=true\n") != NULL);
+        ASSERT(strstr(body, "test_needs_make_arg=-j4\n") != NULL);
+        ASSERT(strstr(body, "test_needs_target=clang-manifest\n") != NULL);
+        ASSERT(strstr(body, "test_needs_output=build/bin/z23-clang-manifest\n") != NULL);
+
         /* All three live sensor groups need the one target, named once. */
         targets = 99;
         ASSERT(zcl_dev_proof_test_needs_argv(

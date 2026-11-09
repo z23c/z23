@@ -985,6 +985,9 @@ bool zcl_dev_proof_test_lint_targets_are_full(const char *targets);
  * `argv_cap` is too small. */
 bool zcl_dev_proof_test_prefork_argv(const char *jobs, bool lint_full,
                                      const char **argv, size_t argv_cap);
+void zcl_dev_proof_test_needs_note(const char *phases, const char *const *argv,
+                                   const char *const *values, size_t targets,
+                                   bool release_required);
 /* Seam for the test-needs build step: the exact make argv the proof runs in
  * its generation, before the fork, for the Make targets that the selected
  * groups (`groups`, the comma-separated exact selector) declare as

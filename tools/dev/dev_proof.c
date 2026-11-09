@@ -11287,6 +11287,33 @@ static void dp_stage_timing_note(const struct proof_paths *paths,
         (void)zcl_dev_proof_phase_note(paths->phases, field, value);
 }
 
+/* Diagnostic only: record the actual make arguments and output paths in the
+ * existing phases log, without changing which artifacts the proof admits. */
+static void dp_test_needs_note(const char *phases, const char *const *argv,
+                               const char *const *values, size_t targets,
+                               bool release_required)
+{
+    if (!phases || !phases[0]) return;
+    (void)zcl_dev_proof_phase_note(phases, "test_needs_release_required",
+                                   release_required ? "true" : "false");
+    if (!targets) return;
+    for (size_t i = 0; i < 3; i++)
+        (void)zcl_dev_proof_phase_note(phases, "test_needs_make_arg", argv[i]);
+    for (size_t i = 3; i < 3 + targets; i++) {
+        (void)zcl_dev_proof_phase_note(phases, "test_needs_target", argv[i]);
+        (void)zcl_dev_proof_phase_note(phases, "test_needs_output", values[i]);
+    }
+}
+
+#ifdef ZCL_TESTING
+void zcl_dev_proof_test_needs_note(const char *phases, const char *const *argv,
+                                   const char *const *values, size_t targets,
+                                   bool release_required)
+{
+    dp_test_needs_note(phases, argv, values, targets, release_required);
+}
+#endif
+
 /* Name the failed need where `z23 dev proof status` and phases.txt show it:
  * test_need_unbuildable_<target>, never a skip the accounting would refuse
  * later under a vaguer name. */
@@ -11398,20 +11425,26 @@ static bool dp_worker_test_needs(struct dp_worker *w, char *why,
         proof_why(why, why_len, "proof_test_needs_argv_invalid");
         return false;
     }
+    dp_test_needs_note(w->paths->phases, argv, values, targets,
+                       dp_changed_links_release(w->changed));
     if (targets == 0) return true;
     /* A warm generation seeds build/bin by COPY from the submitting checkout
      * (warm_classify_rel), and these rules name only their own sources as
      * prerequisites, so a seeded tool could read as fresh. Remove it: what
      * the receipt binds is linked here, from this tree, or nothing is. */
+    int64_t started_us = platform_time_monotonic_us();
     for (size_t i = 3; i < 3 + targets; i++) {
         if (dp_test_need_clear(w->generation, values[i])) continue;
         proof_why(why, why_len, "proof_test_need_clear_failed");
         return false;
     }
+    dp_stage_timing_note(w->paths, "test_needs_clear_ms", started_us);
     struct zcl_dev_proof_budget budget = proof_step_budget(
         w->paths, "test-needs", PROOF_TEST_NEEDS_DEFAULT_MS);
+    started_us = platform_time_monotonic_us();
     int rc = run_step(w->paths, w->generation, w->paths->test_needs_log, argv,
                       "test-needs", &budget, NULL);
+    dp_stage_timing_note(w->paths, "test_needs_make_ms", started_us);
     const char *failed = rc != 0 ? dp_failed_need(w->paths->test_needs_log,
                                                   argv, values, targets)
                                 : NULL;
@@ -11512,11 +11545,15 @@ static bool dp_worker_prefork(struct dp_worker *w, bool test_selected,
     if (test_selected && !dp_worker_test_needs(w, why, why_len)) return false;
     dp_stage_timing_note(w->paths, "prefork_test_needs_ms", stage_us);
     stage_us = platform_time_monotonic_us();
-    if (test_selected &&
-        (!test_helpers_hash(w->generation, w->generation_binary, w->admitted,
-                            w->depfile_root, w->helper_root, why, why_len) ||
-         !dp_test_needs_bind(w, w->helper_root, why, why_len)))
-        return false;
+    if (test_selected) {
+        if (!test_helpers_hash(w->generation, w->generation_binary, w->admitted,
+                               w->depfile_root, w->helper_root, why, why_len))
+            return false;
+        int64_t bind_us = platform_time_monotonic_us();
+        bool bound = dp_test_needs_bind(w, w->helper_root, why, why_len);
+        dp_stage_timing_note(w->paths, "test_needs_bind_ms", bind_us);
+        if (!bound) return false;
+    }
     dp_stage_timing_note(w->paths, "prefork_helper_hash_ms", stage_us);
     proof_phase_mark(w->phases, "prefork_inputs_and_build");
     return true;
