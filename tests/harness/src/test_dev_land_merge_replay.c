@@ -15,6 +15,138 @@
 
 #if !defined(_WIN32)
 
+extern int zcl_dev_land_equal_tree_parse_test(char *, size_t, char *, size_t);
+static int dlx_equal_tree_parser(void)
+{
+    int failures = 0;
+    TEST("land: equivalent-base parser validates the entire bounded stream") {
+        const char *a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const char *b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        char tree[80], stream[35000]; size_t used = 0;
+        (void)snprintf(tree, sizeof(tree), "%s\n", a);
+        (void)snprintf(stream, sizeof(stream), "%s %s\nmalformed\n", b, a);
+        ASSERT_EQ(zcl_dev_land_equal_tree_parse_test(tree, sizeof(tree), stream, sizeof(stream)), -1);
+        (void)snprintf(tree, sizeof(tree), "%s\n", a);
+        (void)snprintf(stream, sizeof(stream), "%s %s", b, a);
+        ASSERT_EQ(zcl_dev_land_equal_tree_parse_test(tree, sizeof(tree), stream, sizeof(stream)), -1);
+        (void)snprintf(tree, sizeof(tree), "%s\n", a);
+        (void)snprintf(stream, sizeof(stream), "%s %s\n", b, a);
+        ASSERT_EQ(zcl_dev_land_equal_tree_parse_test(tree, sizeof(tree), stream, strlen(stream) + 1), -1);
+        (void)snprintf(tree, sizeof(tree), "%s\n", a);
+        (void)snprintf(stream, sizeof(stream), "%s %s\n", b, a);
+        ASSERT_EQ(zcl_dev_land_equal_tree_parse_test(tree, sizeof(tree), stream, sizeof(stream)), 1);
+        (void)snprintf(tree, sizeof(tree), "%s\n", a); stream[0] = '\0';
+        ASSERT_EQ(zcl_dev_land_equal_tree_parse_test(tree, sizeof(tree), stream, sizeof(stream)), 0);
+        (void)snprintf(tree, sizeof(tree), "%s\n", a);
+        for (size_t i = 0; i < 256; ++i)
+            used += (size_t)snprintf(stream + used, sizeof(stream) - used, "%s %s\n", a, b);
+        ASSERT_EQ(zcl_dev_land_equal_tree_parse_test(tree, sizeof(tree), stream, sizeof(stream)), 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int dlx_equal_tree_ancestry(void)
+{
+    int failures = 0;
+    TEST("land: equivalent first-parent base preserves candidate changes") {
+        struct dlx_rig rig; struct dlx_call c;
+        char tree[80], base[80], tip[80], seedbase[80], oldcut[80], out[256], refspec[160], landwt[1300];
+        const char *tree_args[] = {"rev-parse", "HEAD^{tree}", NULL};
+        const char *seed_args[] = {"rev-parse", "origin/main", NULL};
+        const char *commit_args[] = {"-c", "user.name=land", "-c", "user.email=land@z23.invalid",
+            "commit-tree", tree, "-p", "origin/main", "-m", "equivalent base", NULL};
+        const char *push[] = {"push", "--quiet", "origin", refspec, NULL};
+        const char *branch[] = {"checkout", "-b", "equal-side", NULL};
+        const char *add[] = {"add", "later.txt", "change.txt", NULL};
+        const char *commit[] = {"-c", "user.name=land", "-c", "user.email=land@z23.invalid",
+            "commit", "--quiet", "-m", "candidate change", NULL};
+        const char *side[] = {"checkout", "-b", "other-side", "main", NULL};
+        const char *side_add[] = {"add", "side.txt", NULL};
+        const char *back[] = {"checkout", "equal-side", NULL};
+        const char *merge[] = {"-c", "user.name=land", "-c", "user.email=land@z23.invalid",
+            "merge", "--quiet", "--no-ff", "-m", "candidate merge", "other-side", NULL};
+        const char *head[] = {"rev-parse", "HEAD", NULL};
+        const char *old_commit[] = {"-c", "user.name=land", "-c", "user.email=land@z23.invalid",
+            "commit-tree", tree, "-p", seedbase, "-m", "old replay", NULL};
+        const char *old_merge[] = {"merge-tree", "--write-tree", base, oldcut, NULL};
+        const char *parent[] = {"show", "-s", "--format=%P", "HEAD", NULL};
+        const char *base_content[] = {"show", "HEAD:seed.txt", NULL};
+        const char *changed_content[] = {"show", "HEAD:change.txt", NULL};
+        const char *new_content[] = {"show", "HEAD:later.txt", NULL};
+        dlx_isolate("equal_tree_ancestry");
+        ASSERT(dlx_rig_make(&rig, "equal_tree_rig"));
+        ASSERT(dlx_git_out(rig.clone, seed_args, seedbase, sizeof(seedbase)) == 0);
+        ASSERT(dlx_git_out(rig.clone, tree_args, tree, sizeof(tree)) == 0);
+        ASSERT(dlx_git_out(rig.clone, commit_args, base, sizeof(base)) == 0);
+        (void)snprintf(refspec, sizeof(refspec), "%s:refs/heads/main", base);
+        ASSERT(dlx_git(rig.clone, push) == 0);
+        ASSERT(dlx_git(rig.clone, branch) == 0);
+        ASSERT(dlx_write_dep(rig.clone, "later.txt", "candidate\n"));
+        ASSERT(dlx_write_dep(rig.clone, "change.txt", "candidate-overlap\n"));
+        ASSERT(dlx_git(rig.clone, add) == 0 && dlx_git(rig.clone, commit) == 0);
+        ASSERT(dlx_git(rig.clone, side) == 0);
+        ASSERT(dlx_write_dep(rig.clone, "side.txt", "side\n"));
+        ASSERT(dlx_git(rig.clone, side_add) == 0 && dlx_git(rig.clone, commit) == 0);
+        ASSERT(dlx_git(rig.clone, back) == 0 && dlx_git(rig.clone, merge) == 0);
+        ASSERT(dlx_git_out(rig.clone, head, tip, sizeof(tip)) == 0);
+        ASSERT(dlx_git_out(rig.clone, tree_args, tree, sizeof(tree)) == 0);
+        ASSERT(dlx_git_out(rig.clone, old_commit, oldcut, sizeof(oldcut)) == 0);
+        ASSERT_EQ(dlx_git(rig.clone, old_merge), 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, tip); ASSERT(dlx_run(&c) && dlx_ok(&c)); dlx_end(&c);
+        dlx_begin(&c, "step"); ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started"); dlx_end(&c);
+        dlx_land_wt(landwt, sizeof(landwt));
+        ASSERT(dlx_git_out(landwt, parent, out, sizeof(out)) == 0); ASSERT_STR_EQ(out, base);
+        ASSERT(dlx_git_out(landwt, base_content, out, sizeof(out)) == 0); ASSERT_STR_EQ(out, "seed");
+        ASSERT(dlx_git_out(landwt, changed_content, out, sizeof(out)) == 0); ASSERT_STR_EQ(out, "candidate-overlap");
+        ASSERT(dlx_git_out(landwt, new_content, out, sizeof(out)) == 0); ASSERT_STR_EQ(out, "candidate");
+        dlx_restore(); PASS();
+    }
+_test_next:;
+    dlx_restore(); return failures;
+}
+
+static int dlx_equal_tree_before_merge_base(void)
+{
+    int failures = 0;
+    TEST("land: unique equal tree before a second-parent merge base keeps conflicts") {
+        struct dlx_rig rig; struct dlx_call c;
+        char tree[80], mb[80], base[80], tip[80], refspec[160];
+        const char *tree_args[] = {"rev-parse", "HEAD^{tree}", NULL};
+        const char *main_branch[] = {"checkout", "-b", "corner-main", "origin/main", NULL};
+        const char *main_commit[] = {"-c", "user.name=land", "-c", "user.email=land@z23.invalid",
+            "commit-tree", tree, "-p", mb, "-m", "main returns to old tree", NULL};
+        const char *push[] = {"push", "--quiet", "origin", refspec, NULL};
+        const char *candidate_branch[] = {"checkout", "-b", "corner-candidate", rig.tip, NULL};
+        const char *candidate_commit[] = {"-c", "user.name=land", "-c", "user.email=land@z23.invalid",
+            "commit-tree", tree, "-p", rig.tip, "-p", mb, "-m", "candidate merge", NULL};
+        dlx_isolate("equal_tree_before_merge_base");
+        ASSERT(dlx_rig_make(&rig, "equal_before_mb_rig"));
+        ASSERT(dlx_git_out(rig.clone, tree_args, tree, sizeof(tree)) == 0);
+        ASSERT(dlx_git(rig.clone, main_branch) == 0);
+        ASSERT(dlx_write_dep(rig.clone, "seed.txt", "main-change\n"));
+        ASSERT(dlx_commit_tree(rig.clone, "shared merge base", mb));
+        ASSERT(dlx_git_out(rig.clone, main_commit, base, sizeof(base)) == 0);
+        (void)snprintf(refspec, sizeof(refspec), "%s:refs/heads/main", base);
+        ASSERT(dlx_git(rig.clone, push) == 0 && dlx_git(rig.clone, candidate_branch) == 0);
+        ASSERT(dlx_write_dep(rig.clone, "seed.txt", "candidate-change\n"));
+        ASSERT(dlx_commit_tree(rig.clone, "candidate content", tip));
+        ASSERT(dlx_git_out(rig.clone, tree_args, tree, sizeof(tree)) == 0);
+        ASSERT(dlx_git_out(rig.clone, candidate_commit, tip, sizeof(tip)) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1); setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, tip); ASSERT(dlx_run(&c) && dlx_ok(&c)); dlx_end(&c);
+        dlx_begin(&c, "step"); ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "conflict"); dlx_end(&c);
+        dlx_restore(); PASS();
+    }
+_test_next:;
+    dlx_restore(); return failures;
+}
+
 
 int test_dev_land_integrated_merge(bool signing_failure)
 {
@@ -575,6 +707,9 @@ static int dlx_progress_queue_controls(void)
 int test_dev_land_final_plan_preparation(void)
 {
     int failures = 0;
+    failures += dlx_equal_tree_parser();
+    failures += dlx_equal_tree_ancestry();
+    failures += dlx_equal_tree_before_merge_base();
     failures += dlx_lint_failure_detail();
     failures += dlx_prepare_failed_output();
     failures += dlx_prepare_bounded_output();

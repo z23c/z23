@@ -556,6 +556,34 @@ static bool dlx_qp_a_in_flight(const char *base)
            dirty[0] == '\0';
 }
 
+static int dlx_qp_equivalent_tree(void)
+{
+    int failures = 0;
+    TEST("land: queued precheck accepts a first-parent equivalent base") {
+        struct dlx_rig rig; char tree[80], base[80], tip[64], refspec[160];
+        const char *tree_args[] = {"rev-parse", "HEAD^{tree}", NULL};
+        const char *commit_args[] = {"-c", "user.name=land", "-c", "user.email=land@z23.invalid",
+            "commit-tree", tree, "-p", "origin/main", "-m", "equivalent base", NULL};
+        const char *push[] = {"push", "--quiet", "origin", refspec, NULL};
+        const char *branch[] = {"checkout", "-b", "equal-queued", NULL};
+        dlx_isolate("qp_equal_tree");
+        ASSERT(dlx_rig_make(&rig, "qp_equal_tree_rig"));
+        ASSERT(dlx_git_out(rig.clone, tree_args, tree, sizeof(tree)) == 0);
+        ASSERT(dlx_git_out(rig.clone, commit_args, base, sizeof(base)) == 0);
+        (void)snprintf(refspec, sizeof(refspec), "%s:refs/heads/main", base);
+        ASSERT(dlx_git(rig.clone, push) == 0 && dlx_git(rig.clone, branch) == 0);
+        ASSERT(dlx_write_dep(rig.clone, "queued-new.txt", "queued\n"));
+        ASSERT(dlx_write_dep(rig.clone, "change.txt", "queued-overlap\n"));
+        ASSERT(dlx_commit_tree(rig.clone, "queued candidate", tip));
+        ASSERT(dlx_qp_start(&rig, tip));
+        ASSERT(dlx_qp_beat_u("started", 1, 0, 0));
+        ASSERT(dlx_qp_queued_has(tip, 1));
+        dlx_restore(); PASS();
+    }
+_test_next:;
+    dlx_restore(); return failures;
+}
+
 bool dlx_qp_file_has(const char *path, const char *needle)
 {
     static char text[262144];
@@ -1221,6 +1249,7 @@ _test_next:;
 int test_dev_land_queued_precheck_cases(void)
 {
     int failures = 0;
+    failures += dlx_qp_equivalent_tree();
     failures += test_dev_land_queued_conflict_detected();
     failures += test_dev_land_queued_conflict_mark_cleared();
     failures += test_dev_land_queued_mergeable_lands();

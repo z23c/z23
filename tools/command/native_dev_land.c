@@ -5435,8 +5435,9 @@ static bool dl_linear_commit(const struct dl_dirs *d, struct dl_row *row,
             "Prepare integrated candidate for linear publication\n\n"
             "Original-Candidate: %s\nIntegrated-Base: %s\nSource-Tree: %s",
             row->tip, base, tree);
-    const char *args[10];
+    const char *args[11];
     size_t n = 0;
+    args[n++] = "--no-replace-objects";
     args[n++] = "commit-tree";
     if (!dl_fixture_unsigned()) args[n++] = "-S";
     args[n++] = tree;
@@ -5492,6 +5493,100 @@ static bool dl_linearize(const struct dl_dirs *d, struct dl_row *row,
     return true;
 }
 
+typedef int (*dl_tree_git_fn)(void *, const char *const *, char *, size_t);
+enum { DL_TREE_ANCESTORS = 256, DL_TREE_CAPTURE = 35000 };
+
+static bool dl_tree_oid(const char *s)
+{
+    if (!dl_sha_ok(s)) return false;
+    for (; *s; ++s) if (!(*s >= '0' && *s <= '9') && !(*s >= 'a' && *s <= 'f')) return false;
+    return true;
+}
+
+static bool dl_tree_record(char *p, char *end, const char *tree, char match[80])
+{
+    char *space = strchr(p, ' ');
+    if (!space || space >= end) return false;
+    *space = '\0'; *end = '\0';
+    if (!dl_tree_oid(p) || !dl_tree_oid(space + 1) || strlen(p) != strlen(space + 1)) return false;
+    if (!match[0] && !strcmp(space + 1, tree)) (void)snprintf(match, 80, "%s", p);
+    return true;
+}
+
+static int dl_equal_tree_parse(char *tree, size_t tree_cap, char *stream, size_t stream_cap, char match[80])
+{
+    size_t tn = strlen(tree), len = strlen(stream);
+    if (!tn || tree[tn - 1] != '\n' || tn + 1 >= tree_cap ||
+        len + 1 >= stream_cap || (len && stream[len - 1] != '\n')) return -1;
+    tree[--tn] = '\0';
+    if (!dl_tree_oid(tree)) return -1;
+    if (!len) return 0;
+    match[0] = '\0'; size_t count = 0;
+    for (char *p = stream; *p;) {
+        char *end = strchr(p, '\n');
+        if (!end || ++count > DL_TREE_ANCESTORS || !dl_tree_record(p, end, tree, match)) return -1;
+        p = end + 1;
+    }
+    return match[0] ? 1 : 0;
+}
+
+#if defined(ZCL_TESTING)
+int zcl_dev_land_equal_tree_parse_test(char *tree, size_t tree_cap, char *stream, size_t stream_cap);
+int zcl_dev_land_equal_tree_parse_test(char *tree, size_t tree_cap, char *stream, size_t stream_cap)
+{ char match[80]; return dl_equal_tree_parse(tree, tree_cap, stream, stream_cap, match); }
+#endif
+
+/* Return 1 only after validating the complete bounded first-parent stream;
+ * zero declines the shortcut, and -1 refuses an unreliable observation. */
+static int dl_equal_tree_ancestor(dl_tree_git_fn run, void *ctx,
+                                  const char *main, const char *tip, char base[80])
+{
+    char tree[80], stream[DL_TREE_CAPTURE], mb[80], match[80];
+    const char *mb_args[] = { "--no-replace-objects", "merge-base", main, tip, NULL };
+    const char *tree_args[] = { "--no-replace-objects", "show", "-s", "--format=%T", main, NULL };
+    const char *log_args[] = { "--no-replace-objects", "log", "--first-parent", "-n", "256",
+                               "--format=%H %T", tip, "--not", main, NULL };
+    base[0] = '\0';
+    int rc = run(ctx, mb_args, mb, sizeof(mb));
+    if (rc == 1) return 0;
+    if (rc != 0) return -1;
+    size_t n = strlen(mb);
+    if (!n || mb[n - 1] != '\n' || n + 1 >= sizeof(mb)) return -1;
+    mb[n - 1] = '\0';
+    if (!dl_tree_oid(mb)) return -1;
+    (void)snprintf(base, 80, "%s", mb);
+    if (run(ctx, tree_args, tree, sizeof(tree)) != 0 ||
+        run(ctx, log_args, stream, sizeof(stream)) != 0) return -1;
+    rc = dl_equal_tree_parse(tree, sizeof(tree), stream, sizeof(stream), match);
+    if (rc <= 0) return rc;
+    const char *anc_args[] = { "--no-replace-objects", "merge-base", "--is-ancestor", mb, match, NULL };
+    rc = run(ctx, anc_args, NULL, 0);
+    return rc == 0 ? 1 : rc == 1 ? 0 : -1;
+}
+
+static int dl_tree_git(void *ctx, const char *const *args, char *out, size_t cap)
+{
+    return dl_git(ctx, args, out, cap, DL_GIT_TIMEOUT_MS);
+}
+
+static bool dl_linearize_equal_tree(const struct dl_dirs *d, struct dl_row *row,
+                                    const char *main, char *why, size_t why_cap)
+{
+    char tree[80], commit[80], checked[80];
+    const char *tree_args[] = { "--no-replace-objects", "rev-parse", "HEAD^{tree}", NULL };
+    const char *checkout[] = { "checkout", "--quiet", "--detach", commit, NULL };
+    (void)snprintf(why, why_cap, "cannot prepare an equivalent-base landing candidate");
+    if (dl_git(d->wt, tree_args, tree, sizeof(tree), DL_GIT_TIMEOUT_MS) != 0) return false;
+    dl_trim(tree);
+    if (!dl_sha_ok(tree) || !dl_linear_commit(d, row, main, tree, false, commit) ||
+        dl_git(d->wt, checkout, NULL, 0, DL_GIT_TIMEOUT_MS) != 0 ||
+        dl_git(d->wt, tree_args, checked, sizeof(checked), DL_GIT_TIMEOUT_MS) != 0) return false;
+    dl_trim(checked);
+    if (strcmp(tree, checked)) return false;
+    dl_linear_log(row, main, commit, tree, false);
+    return true;
+}
+
 /* A tip main has moved past is rebased, and a plain `git rebase` replays
  * each non-merge commit one at a time, DISCARDING the conflict resolutions
  * the tip's own merges of main recorded. A long-lived candidate that merged
@@ -5509,13 +5604,9 @@ static bool dl_linearize_for_rebase(const struct dl_dirs *d,
     struct dl_row *row, const char *observed_main, char *why, size_t why_cap)
 {
     char mb[80];
-    const char *mb_args[] = { "--no-replace-objects", "merge-base",
-                              observed_main, row->tip, NULL };
-    /* No common ancestor (or none git will name): there is no base to cut
-     * against, and the rebase below reports that the way it always has. */
-    if (dl_git(d->wt, mb_args, mb, sizeof(mb), DL_GIT_TIMEOUT_MS) != 0)
-        return true;
-    dl_trim(mb);
+    int equal = dl_equal_tree_ancestor(dl_tree_git, (void *)d->wt, observed_main, row->tip, mb);
+    if (equal < 0) { (void)snprintf(why, why_cap, "cannot verify equivalent-base ancestry"); return false; }
+    if (equal > 0) return dl_linearize_equal_tree(d, row, observed_main, why, why_cap);
     return !mb[0] || dl_linearize(d, row, mb, true, why, why_cap);
 }
 
@@ -10287,6 +10378,11 @@ static int dl_pc_git(struct dl_pc *pc, const char *const *args, char *out,
     return dl_pc_expired(pc) ? -1 : rc;
 }
 
+static int dl_pc_tree_git(void *ctx, const char *const *args, char *out, size_t cap)
+{
+    return dl_pc_git(ctx, args, out, cap);
+}
+
 /* dl_pc_git() as the runner a seal check reads objects through. */
 static int dl_pc_seal_run(void *ctx, const char *const *args, char *out,
                           size_t cap)
@@ -10329,17 +10425,12 @@ static bool dl_precheck_commit(struct dl_pc *pc, const char *tree,
 
 /* merge-base(main, tip) and whether merges lie past it: the two facts
  * dl_linearize_for_rebase() shapes the replay from. */
-static bool dl_precheck_base(struct dl_pc *pc, const char *tip, char mb[80],
+static bool dl_precheck_base(struct dl_pc *pc, const char *tip, const char mb[80],
                              bool *merges)
 {
     char range[176], found[80];
-    const char *mb_args[] = { "--no-replace-objects", "merge-base", pc->main,
-                              tip, NULL };
     const char *merges_args[] = { "rev-list", "--merges", "--max-count=1",
                                   range, NULL };
-    if (dl_pc_git(pc, mb_args, mb, 80) != 0)
-        return false;
-    dl_trim(mb);
     (void)snprintf(range, sizeof(range), "%s..%s", mb, tip);
     if (!dl_sha_ok(mb) ||
         dl_pc_git(pc, merges_args, found, sizeof(found)) != 0)
@@ -10370,6 +10461,15 @@ static enum dl_precheck dl_precheck_head(struct dl_pc *pc,
         return DL_PRECHECK_CLEAN;
     if (rc != 1)
         return dl_precheck_uncertain(pc, "cannot establish tip ancestry");
+    int equal = dl_equal_tree_ancestor(dl_pc_tree_git, pc, pc->main, tip, mb);
+    if (equal < 0) return dl_precheck_uncertain(pc, "cannot verify equivalent-base ancestry");
+    if (equal > 0) {
+        (void)snprintf(tree, sizeof(tree), "%s^{tree}", tip);
+        if (!dl_precheck_commit(pc, tree, pc->main, head))
+            return dl_precheck_uncertain(pc, "cannot cut the equivalent-base candidate");
+        *replay = true;
+        return DL_PRECHECK_CLEAN;
+    }
     if (!dl_precheck_base(pc, tip, mb, &merges))
         return dl_precheck_uncertain(pc, "no merge base or merge list with "
                                          "main");
