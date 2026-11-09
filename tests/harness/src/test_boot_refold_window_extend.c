@@ -27,6 +27,7 @@
 #include "test/test_core.h"
 
 #include "config/boot.h"
+#include "config/boot_error.h"
 #include "storage/anchor_kv.h"
 #include "storage/nullifier_kv.h"
 #include "storage/coins_kv.h"
@@ -122,10 +123,24 @@ static int brwe_case_c_check_refused_verb_preserves_markers(void)
     sqlite3 *db = progress_store_db();
     BRWE_CHECK("C: assisted shielded boundary starts positive",
                db && shielded_history_reset_to_boundary(db, 7));
+    boot_error_reset_for_testing();
     BRWE_CHECK("C: normal boot passes legacy-verb preflight",
                boot_refold_staged_preflight(false));
+    BRWE_CHECK("C: normal boot does not latch a typed boot error",
+               !boot_error_reported());
     BRWE_CHECK("C: -refold-staged is refused before reset",
                !boot_refold_staged_preflight(true));
+    BRWE_CHECK("C: refused verb reports BOOT_REFOLD_STAGED_CONTAINED",
+               boot_error_reported() &&
+               strcmp(boot_error_first_code(),
+                      "BOOT_REFOLD_STAGED_CONTAINED") == 0);
+    char rendered[BOOT_ERROR_RENDER_MAX];
+    size_t rendered_n = boot_error_last_render(rendered, sizeof(rendered));
+    BRWE_CHECK("C: refusal render names code and phase",
+               rendered_n > 0 &&
+               strstr(rendered, "BOOT_REFOLD_STAGED_CONTAINED") != NULL &&
+               strstr(rendered, "prologue.refold_preflight") != NULL);
+    boot_error_reset_for_testing();
     int64_t sprout = -1, sapling = -1, nf = -1;
     bool sf = false, zf = false, nf_found = false;
     BRWE_CHECK("C: refused verb preserves all positive markers",
