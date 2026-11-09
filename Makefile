@@ -2260,13 +2260,13 @@ vendor-ready: $(DEP_AUDIT_BIN)
 # archive TOR_FULL needs. Forces the compile even when archives already exist.
 # ZCL_CROSS_TRIPLE is empty on the default (host) target, so this forwards
 # nothing there -- same pass-through the vendor%.a rule below already uses.
-tor-full:
+tor-full: vendor-ready
 	VENDOR_TARGET=$(ZCL_CROSS_TRIPLE) tools/scripts/build_tor_full.sh
 
 # The cheap front door, and the one the bootstrap uses: archives present ->
 # nothing, else hardlink them from a sibling checkout that already paid for
 # the build, else compile. `make tor-full` stays the "rebuild anyway" hammer.
-tor-ready:
+tor-ready: $(if $(filter full,$(ZCL_TOR)),vendor-ready)
 	@ZCL_TOR='$(ZCL_TOR)' ZCL_CROSS_TRIPLE='$(ZCL_CROSS_TRIPLE)' \
 	  tools/scripts/tor_archives_ready.sh ready
 

@@ -191,10 +191,8 @@ fi
 # every host, and matches the repo rule that third-party input is an
 # exact pinned archive rather than whatever the host offers.
 #
-# libevent and zlib are NOT pinned the same way: vendor/include has no
-# event2/ headers, so Tor still resolves libevent from the host while
-# the node links vendor/lib/libevent.a. That is the same latent skew,
-# still open, and it needs the headers vendored before it can be closed.
+# The vendor build also stages libevent and zlib headers, so Tor can use
+# the same pinned dependencies as the node on native Linux as well.
 # The embedding process owns fatal signals; attest this configure policy.
 configure_opts=(
     ac_cv_func_backtrace=no
@@ -287,7 +285,7 @@ fi
 # is invisible because both sides compile. Point Tor at the same vendor tree
 # the node links for this exact target, on every host/target that needs it.
 needs_vendored_deps=false
-case "$HOST_OS" in Darwin|MINGW*|MSYS*) needs_vendored_deps=true ;; esac
+case "$HOST_OS" in Linux|Darwin|MINGW*|MSYS*) needs_vendored_deps=true ;; esac
 case "$VENDOR_TARGET" in *mingw*|*windows*|*darwin*|*android*) needs_vendored_deps=true ;; esac
 if $needs_vendored_deps; then
     vendor_missing=""

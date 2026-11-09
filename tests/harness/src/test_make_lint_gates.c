@@ -1815,35 +1815,57 @@ static int t_tor_ready_before_link(void)
         "printf '#!/bin/sh\\necho probe >> events\\ntest -f ready-marker\\n' > tools/scripts/tor_archives_ready.sh; chmod +x tools/scripts/tor_archives_ready.sh\n"
         "printf '%s\\n' 'ZCL_TOR ?= full' 'ZCL_TOR_LINK_REQUESTED := link' 'TOR_BOOTSTRAP_MK := build/identity/tor-inputs-ready.mk' 'TOR_MISSING_ARCHIVES :=' > Makefile\n"
         "sed -n '/^ifeq ($(ZCL_TOR),full)/,/^# The stub/{ /^# The stub/d; p; }' \"$1/Makefile\" >> Makefile\n"
+        "sed -n '/^tor-ready: /p' \"$1/Makefile\" >> Makefile\n"
         "cat >> Makefile <<'MAKE'\n"
         "$(shell echo parse >> parse-events)\n"
         ".PHONY: tor-ready link\n"
-        "tor-ready:\n\t@echo ready >> events; case \"$(STATE)\" in legacy) echo rebuilt >> events ;; stale|missing|valid) : ;; *) exit 1 ;; esac; : > ready-marker\n"
+        ".PHONY: vendor-ready\n"
+        "vendor-ready:\n\t@echo vendor >> events; : > vendor-marker\n"
+        "tor-ready:\n\t@test -f vendor-marker; echo ready >> events; case \"$(STATE)\" in legacy) echo rebuilt >> events ;; stale|missing|valid) : ;; *) exit 1 ;; esac; : > ready-marker\n"
         "$(TOR_BOOTSTRAP_MK): tor-ready\n\t@echo '# ready' > $@\n"
         "link:\n\t@echo link:$(MAKE_RESTARTS) >> events\n"
         "MAKE\n"
         "printf '# old stamp\\n' > build/identity/tor-inputs-ready.mk\n"
         "touch -t 200001010000 build/identity/tor-inputs-ready.mk\n"
         "make --no-print-directory STATE=legacy link > run.log 2>&1\n"
-        "printf 'probe\\nready\\nrebuilt\\nlink:1\\n' > expected; cmp expected events\n"
+        "printf 'probe\\nvendor\\nready\\nrebuilt\\nlink:1\\n' > expected; cmp expected events\n"
         "[ \"$(wc -l < parse-events)\" -eq 2 ]\n"
         ": > events; : > parse-events; make --no-print-directory STATE=valid link > run.log 2>&1\n"
         "printf 'probe\\nlink:\\n' > expected; cmp expected events\n"
         "[ \"$(wc -l < parse-events)\" -eq 1 ]\n"
-        ": > events; : > parse-events; rm ready-marker; touch -t 200001010000 build/identity/tor-inputs-ready.mk; make --no-print-directory STATE=stale link > run.log 2>&1\n"
-        "printf 'probe\\nready\\nlink:1\\n' > expected; cmp expected events\n"
+        ": > events; : > parse-events; rm ready-marker vendor-marker; touch -t 200001010000 build/identity/tor-inputs-ready.mk; make --no-print-directory -j2 STATE=stale link > run.log 2>&1\n"
+        "printf 'probe\\nvendor\\nready\\nlink:1\\n' > expected; cmp expected events\n"
         "[ \"$(wc -l < parse-events)\" -eq 2 ]\n"
-        ": > events; : > parse-events; rm ready-marker; touch -t 200001010000 build/identity/tor-inputs-ready.mk; make --no-print-directory STATE=missing link > run.log 2>&1\n"
-        "printf 'probe\\nready\\nlink:1\\n' > expected; cmp expected events\n"
+        ": > events; : > parse-events; rm ready-marker vendor-marker; touch -t 200001010000 build/identity/tor-inputs-ready.mk; make --no-print-directory -j2 STATE=missing link > run.log 2>&1\n"
+        "printf 'probe\\nvendor\\nready\\nlink:1\\n' > expected; cmp expected events\n"
         "[ \"$(wc -l < parse-events)\" -eq 2 ]\n"
-        ": > events; : > parse-events; rm ready-marker; if make --no-print-directory STATE=refuse link > run.log 2>&1; then exit 1; fi\n"
-        "printf 'probe\\nready\\n' > expected; cmp expected events\n"
+        ": > events; : > parse-events; rm ready-marker vendor-marker; if make --no-print-directory STATE=refuse link > run.log 2>&1; then exit 1; fi\n"
+        "printf 'probe\\nvendor\\nready\\n' > expected; cmp expected events\n"
         "[ \"$(wc -l < parse-events)\" -eq 1 ]\n"
         ": > events; : > parse-events; make --no-print-directory ZCL_TOR=stub STATE=refuse link > run.log 2>&1\n"
         "printf 'link:\\n' > expected; cmp expected events\n"
         "[ \"$(wc -l < parse-events)\" -eq 1 ]\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "tor_ready", "bootstrap");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
+/* Exercise the real target edges with parallel bootstrap requests. */
+static int t_tor_waits_for_vendor(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"\n"
+        "{ printf 'ZCL_TOR ?= full\\n.PHONY: all vendor-ready tor-ready tor-full\\n'; "
+        "sed -n '/^tor-full: /p; /^tor-ready: /p' \"$1/Makefile\"; "
+        "printf 'all: tor-ready tor-full\\nvendor-ready:\\n\\t@printf ready > vendor-marker\\n'; "
+        "printf 'tor-ready tor-full:\\n\\t@test -s vendor-marker\\n'; } > Makefile\n"
+        "make --no-print-directory -j2 all > run.log 2>&1\n"
+        "rm vendor-marker; make --no-print-directory -n ZCL_TOR=stub tor-ready > stub.log 2>&1\n"
+        "! grep -q 'printf ready' stub.log\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "tor_ready", "vendor_order");
     int bad = build_needs_fixture_run(repo_root(), fixture, script);
     if (test_rm_rf_recursive(fixture) != 0) bad = 1;
     return bad;
@@ -1857,7 +1879,7 @@ int test_make_lint_gates_realroot(void)
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
         return 1;
     printf("\n=== make_lint_gates real-worktree tests ===\n");
-    return t_lint_fast_tor_graph() + t_tor_ready_before_link() +
+    return t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() +
            lint_run_owned(LINT_OWNER_REALROOT);
 }
 
