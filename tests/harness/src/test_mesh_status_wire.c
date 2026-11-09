@@ -12,6 +12,7 @@
 
 #include "config/boot_mesh_status.h"
 #include "config/boot_mesh_machines.h"
+#include "controllers/diagnostics_internal.h"
 #include "../../../engine/composition/src/boot_mesh_status_internal.h"
 #include "base/cleanse.h"
 #include "base/hex.h"
@@ -32,12 +33,60 @@
 #include "vcs/zcode_dht_delegation.h"
 
 #include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #define MESH_WIRE_NOW 2500
+
+static pthread_mutex_t refresh_test_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t refresh_test_cond = PTHREAD_COND_INITIALIZER;
+static bool refresh_test_entered, refresh_test_release;
+static void refresh_test_hook(const char *phase)
+{
+    if (strcmp(phase, "plugin_cache")) return;
+    pthread_mutex_lock(&refresh_test_lock);
+    refresh_test_entered = true;
+    pthread_cond_signal(&refresh_test_cond);
+    while (!refresh_test_release) pthread_cond_wait(&refresh_test_cond, &refresh_test_lock);
+    pthread_mutex_unlock(&refresh_test_lock);
+}
+static void *refresh_test_worker(void *unused)
+{
+    (void)unused;
+    boot_mesh_status_refresh_test_tick();
+    return NULL;
+}
+static bool refresh_test_dump(const char *phase)
+{
+    struct json_value params = {0}, arg = {0}, result = {0};
+    json_set_array(&params); json_set_str(&arg, "mesh_status_refresh");
+    bool ok = json_push_back(&params, &arg) &&
+        diag_rpc_dumpstate_builtin(&params, false, &result) &&
+        !strcmp(json_get_str(json_get(json_get(&result, "state"), "phase")), phase);
+    json_free(&result); json_free(&arg); json_free(&params);
+    return ok;
+}
+static bool refresh_test_concurrent_dump(void)
+{
+    pthread_t thread;
+    refresh_test_entered = false; refresh_test_release = false;
+    boot_mesh_status_refresh_test_set_phase_hook(refresh_test_hook);
+    if (pthread_create(&thread, NULL, refresh_test_worker, NULL) != 0) {
+        boot_mesh_status_refresh_test_set_phase_hook(NULL); return false;
+    }
+    pthread_mutex_lock(&refresh_test_lock);
+    while (!refresh_test_entered) pthread_cond_wait(&refresh_test_cond, &refresh_test_lock);
+    pthread_mutex_unlock(&refresh_test_lock);
+    bool ok = refresh_test_dump("plugin_cache");
+    pthread_mutex_lock(&refresh_test_lock); refresh_test_release = true;
+    pthread_cond_signal(&refresh_test_cond); pthread_mutex_unlock(&refresh_test_lock);
+    ok = pthread_join(thread, NULL) == 0 && ok;
+    boot_mesh_status_refresh_test_set_phase_hook(NULL);
+    return refresh_test_dump("idle") && ok;
+}
 
 /* ── plugins block fixtures ────────────────────────────────────────────── */
 
@@ -677,6 +726,21 @@ int test_mesh_status_wire(void)
     test_make_tmpdir(dir, sizeof(dir), "mesh_status_wire", "wire");
     struct mesh_wire_fixture f;
     bool fixture_open = false;
+
+    TEST("mesh status refresh: registered diagnostic reports idle") {
+        struct json_value params = {0}, arg = {0}, result = {0};
+        json_set_array(&params); json_set_str(&arg, "mesh_status_refresh");
+        bool ok = json_push_back(&params, &arg) &&
+                  diag_rpc_dumpstate_builtin(&params, false, &result);
+        ASSERT(ok);
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&result, "state"), "phase")), "idle");
+        json_free(&result); json_free(&arg); json_free(&params);
+        PASS();
+    }
+    TEST("mesh status refresh: registered diagnostic remains available during tick") {
+        ASSERT(refresh_test_concurrent_dump());
+        PASS();
+    }
 
     TEST("mesh status wire: unpaired request is refused NOT_PAIRED, signed") {
         ASSERT(mesh_wire_fixture_open(&f, dir));

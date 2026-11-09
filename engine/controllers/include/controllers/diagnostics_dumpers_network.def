@@ -4,6 +4,10 @@
  * comment for the shared #include contract). Data-only: no macro
  * definitions or include guards belong in this file. */
 
+    DIAG_RUNTIME("mesh_status_refresh", boot_mesh_status_refresh_dump_state_json,
+                 "current paired-machine refresh callback phase",
+                 "engine/composition/src/boot_mesh_status_refresh.c",
+                 "tests/harness/src/test_mesh_status_wire.c"),
     DIAG_PROJECTION("bbf_discovery", boot_bundle_fetch_discovery_dump_state_json,
                     "instant-on bundle-fetch peer-directory discovery: last "
                     "quorum outcome (reached / degraded_single_seed / "

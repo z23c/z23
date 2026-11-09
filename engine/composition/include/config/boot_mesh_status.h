@@ -177,6 +177,8 @@ void boot_mesh_status_key_fingerprint(const char *domain,
                                       const uint8_t key[32], char out[65]);
 
 #ifdef ZCL_TESTING
+void boot_mesh_status_refresh_test_set_phase_hook(void (*hook)(const char *));
+void boot_mesh_status_refresh_test_tick(void);
 void boot_mesh_status_receipt_test_render(
     struct json_value *result,
     const struct mesh_status_receipt_v1 *receipt);
@@ -190,5 +192,8 @@ bool boot_mesh_status_refresh_test_gate(
     bool long_db_operation, bool db_service_started,
     const struct node_db_status *db_status);
 #endif
+
+/* Lock-free observational snapshot of the current refresh callback phase. */
+bool boot_mesh_status_refresh_dump_state_json(struct json_value *out, const char *key);
 
 #endif /* ZCL_CONFIG_BOOT_MESH_STATUS_H */

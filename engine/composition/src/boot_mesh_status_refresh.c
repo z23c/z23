@@ -7,6 +7,7 @@
 #include "config/db_service.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
+#include "json/json.h"
 #include "models/database.h"
 #include "models/mesh_machine_observation.h"
 #include "models/mesh_pairing.h"
@@ -58,6 +59,35 @@ static struct mesh_refresh_cooldown
     g_refresh_cooldowns[MESH_REFRESH_PAIRING_MAX];
 static int64_t g_refresh_last_admit;
 static uint64_t g_refresh_completed;
+
+enum refresh_phase { REFRESH_IDLE, REFRESH_PLUGIN_CACHE, REFRESH_LOCK,
+    REFRESH_POLL, REFRESH_RESOURCES, REFRESH_PAIRING_LIST, REFRESH_BEGIN };
+static _Atomic int g_refresh_phase;
+static const char *const g_refresh_phase_names[] = {
+    "idle", "plugin_cache", "lock", "poll", "resources", "pairing_list", "begin"
+};
+#ifdef ZCL_TESTING
+static void (*g_refresh_phase_hook)(const char *);
+void boot_mesh_status_refresh_test_set_phase_hook(void (*hook)(const char *))
+{
+    g_refresh_phase_hook = hook;
+}
+#endif
+static void refresh_phase_set(enum refresh_phase phase)
+{
+    atomic_store_explicit(&g_refresh_phase, phase, memory_order_relaxed);
+#ifdef ZCL_TESTING
+    if (g_refresh_phase_hook) g_refresh_phase_hook(g_refresh_phase_names[phase]);
+#endif
+}
+bool boot_mesh_status_refresh_dump_state_json(struct json_value *out, const char *key)
+{
+    (void)key;
+    if (!out) return false;
+    int phase = atomic_load_explicit(&g_refresh_phase, memory_order_relaxed);
+    json_set_object(out);
+    return json_push_kv_str(out, "phase", g_refresh_phase_names[phase]);
+}
 
 static void refresh_lock(void)
 {
@@ -273,6 +303,7 @@ static void refresh_begin_one(struct boot_svc_ctx *svc, int64_t now)
     if (!slot)
         return;
     struct db_mesh_pairing rows[MESH_REFRESH_PAIRING_MAX];
+    refresh_phase_set(REFRESH_PAIRING_LIST);
     int count = db_mesh_pairing_list(boot_node_db(svc), rows,
                                      MESH_REFRESH_PAIRING_MAX);
     if (count <= 0)
@@ -283,6 +314,7 @@ static void refresh_begin_one(struct boot_svc_ctx *svc, int64_t now)
     if (!choice)
         return;
     g_refresh_last_admit = now;
+    refresh_phase_set(REFRESH_BEGIN);
     enum boot_mesh_status_begin_result began =
         boot_mesh_status_begin(choice->pairing_id, slot->request_id);
     if (began == MESH_STATUS_BEGIN_OK) {
@@ -299,22 +331,32 @@ static void refresh_begin_one(struct boot_svc_ctx *svc, int64_t now)
 static void refresh_tick(struct liveness_contract *contract)
 {
     (void)contract;
+    refresh_phase_set(REFRESH_PLUGIN_CACHE);
     mesh_status_plugins_cache_tick(); /* own mutex; file I/O outside g_refresh_lock */
+    refresh_phase_set(REFRESH_LOCK);
     refresh_lock();
     struct boot_svc_ctx *svc = g_refresh_svc;
     if (!svc) {
         zcl_mutex_unlock(&g_refresh_lock);
+        refresh_phase_set(REFRESH_IDLE);
         return;
     }
     int64_t now = (int64_t)platform_time_wall_time_t();
+    refresh_phase_set(REFRESH_POLL);
     if (now > 0)
         refresh_poll(svc, now);
+    refresh_phase_set(REFRESH_RESOURCES);
     if (now > 0 && refresh_resources_allow(svc))
         refresh_begin_one(svc, now);
     else
         supervisor_progress_idle(g_refresh_child);
     zcl_mutex_unlock(&g_refresh_lock);
+    refresh_phase_set(REFRESH_IDLE);
 }
+
+#ifdef ZCL_TESTING
+void boot_mesh_status_refresh_test_tick(void) { refresh_tick(&g_refresh_contract); }
+#endif
 
 void boot_mesh_status_refresh_start(struct boot_svc_ctx *svc)
 {
