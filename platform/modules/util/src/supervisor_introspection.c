@@ -7,6 +7,7 @@
 #include "json/json.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include <string.h>
 
 /* Live count excludes retired slots; the registry count is a high-water mark. */
@@ -148,6 +149,55 @@ int supervisor_snapshot_all(struct supervisor_snapshot *out, int max)
 static bool push_contract_json(struct json_value *arr,
                                const struct liveness_contract *c, int64_t now);
 
+#define SUPERVISOR_STALLED_PAGE_KEY "supervisor.stalled.children.live.discovery.v1:"
+#define SUPERVISOR_STALLED_PAGE_SIZE 8
+/* Offsets are registry slots, not a stable snapshot; each call is a live view. */
+static bool supervisor_stalled_offset(const char *key, unsigned *out)
+{
+    const char *p = key + strlen(SUPERVISOR_STALLED_PAGE_KEY);
+    if (!*p || (p[0] == '0' && p[1])) return false;
+    unsigned start = 0;
+    for (; *p; p++) {
+        if (*p < '0' || *p > '9' || start > SUPERVISOR_CAP) return false;
+        start = start * 10u + (unsigned)(*p - '0');
+        if (start > SUPERVISOR_CAP) return false;
+    }
+    *out = start; return true;
+}
+static bool supervisor_stalled_rows(unsigned start, struct json_value *rows, unsigned *count, int *next)
+{
+    bool ok = true; unsigned included = 0;
+    pthread_mutex_lock(&g_lock);
+    for (int i = (int)start; ok && i < g_contract_count; i++) {
+        const struct liveness_contract *c = g_contracts[i];
+        if (!c) continue;
+        enum supervisor_stall_reason reason = atomic_load(&c->stall_reason);
+        if (reason == SUPERVISOR_STALL_NONE) continue;
+        if (included == SUPERVISOR_STALLED_PAGE_SIZE) { *next = i; break; }
+        struct json_value row; json_init(&row); json_set_object(&row);
+        ok = json_push_kv_str(&row, "name", c->name) &&
+             json_push_kv_str(&row, "reason", supervisor_stall_reason_name(reason)) && json_push_back(rows, &row);
+        json_free(&row); included++;
+    }
+    pthread_mutex_unlock(&g_lock);
+    *count = included; return ok;
+}
+static bool supervisor_stalled_page(struct json_value *out, const char *key)
+{
+    unsigned start, included = 0; int next = -1;
+    if (!supervisor_stalled_offset(key, &start)) return false;
+    struct json_value rows; json_init(&rows); json_set_array(&rows);
+    bool ok = supervisor_stalled_rows(start, &rows, &included, &next);
+    json_free(out); json_set_object(out);
+    ok = ok && json_push_kv_bool(out, "live", true) && json_push_kv_int(out, "returned", included) &&
+        json_push_kv(out, "children", &rows);
+    if (ok && next >= 0) {
+        char cursor[96]; int n = snprintf(cursor, sizeof(cursor), "%s%d", SUPERVISOR_STALLED_PAGE_KEY, next);
+        ok = n > 0 && (size_t)n < sizeof(cursor) && json_push_kv_str(out, "next_key", cursor);
+    }
+    json_free(&rows); return ok;
+}
+
 static bool supervisor_dump_key(struct json_value *out, const char *key)
 {
     supervisor_domain_t *domain = NULL;
@@ -175,6 +225,8 @@ static bool supervisor_dump_key(struct json_value *out, const char *key)
     pthread_mutex_unlock(&g_lock);
     if (domain) return supervisor_domain_dump_state_json(domain, out);
     if (child_found) return ok;
+    if (!strncmp(key, SUPERVISOR_STALLED_PAGE_KEY, strlen(SUPERVISOR_STALLED_PAGE_KEY)))
+        return supervisor_stalled_page(out, key);
     return strcmp(key, "summary") == 0;
 }
 

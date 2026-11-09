@@ -9,6 +9,7 @@
 #include "command_registry_internal.h"
 
 #include "services/agent_spend_policy.h"  // lib-layer-ok:agent-spend-policy-gate
+#include "util/supervisor.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -232,6 +233,38 @@ static bool source_next_valid(const struct zcl_command_spec *spec,
         source_next_integer(input, "page", data, "next_page");
 }
 
+/* Supervisor pages carry a key rather than a generic cursor. Bind the
+ * exception to this schema and to either the returned key or the first-page
+ * instruction for a truncated full-tree reply. */
+static bool supervisor_next_key(const char *key)
+{
+    const char *prefix = "supervisor.stalled.children.live.discovery.v1:";
+    size_t n = strlen(prefix);
+    if (strncmp(key, prefix, n) || !key[n] || (key[n] == '0' && key[n + 1])) return false;
+    unsigned offset = 0;
+    for (const char *p = key + n; *p; p++) {
+        if (*p < '0' || *p > '9' || offset > SUPERVISOR_CAP) return false;
+        offset = offset * 10u + (unsigned)(*p - '0');
+        if (offset > SUPERVISOR_CAP) return false;
+    }
+    return true;
+}
+static bool supervisor_next_valid(const struct zcl_command_spec *spec,
+                                  const struct json_value *input, const struct json_value *data)
+{
+    if (strcmp(spec->path, "ops.state") || !spec->input_schema || !spec->output_schema ||
+        strcmp(spec->input_schema, "zcl.ops_state.input.v1") || strcmp(spec->output_schema, "zcl.ops_state.v1") ||
+        input->num_children != 2 || strcmp(json_get_str(json_get(input, "subsystem")), "supervisor") ||
+        strcmp(json_get_str(json_get(data, "subsystem")), "supervisor")) return false;
+    const struct json_value *key = json_get(input, "key");
+    if (!key || key->type != JSON_STR || !supervisor_next_key(json_get_str(key))) return false;
+    const struct json_value *state = json_get(data, "state");
+    if (state) return source_next_text(input, "key", state, "next_key");
+    const struct json_value *page = json_get(data, "_page");
+    return json_get_bool(json_get(page, "truncated")) &&
+        !strcmp(json_get_str(key), "supervisor.stalled.children.live.discovery.v1:0");
+}
+
 static bool push_next_item_valid(const struct zcl_command_next *next,
                                  const struct zcl_command_registry *registry,
                                  const struct zcl_command_spec *current_spec,
@@ -251,7 +284,8 @@ static bool push_next_item_valid(const struct zcl_command_next *next,
      * neither check claims to compare against the original request input. */
     if (current_spec && strcmp(next_spec->path, current_spec->path) == 0 &&
         !json_get(input, "cursor") && !json_get(input, "item_offset") &&
-        !json_get(input, "after") && !source_next_valid(current_spec, input, data))
+        !json_get(input, "after") && !source_next_valid(current_spec, input, data) &&
+        !supervisor_next_valid(current_spec, input, data))
         return false;
     return zcl_command_registry_input_validate(next_spec, input, why,
                                                sizeof(why));

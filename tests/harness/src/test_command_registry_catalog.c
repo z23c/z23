@@ -5634,7 +5634,7 @@ static char *ops_supervisor_dump_rpc(const char *method, const char *params_json
     return n && n < sizeof(wire) ? strdup(wire) : NULL;
 }
 
-static bool ops_supervisor_execute(const char *key, struct json_value *env)
+static bool ops_supervisor_execute_options(const char *key, struct json_value *env, size_t budget, bool explain)
 {
     const struct zcl_command_registry *reg = zcl_command_catalog();
     const struct zcl_command_spec *spec = find_spec(reg, "ops.state");
@@ -5643,18 +5643,63 @@ static bool ops_supervisor_execute(const char *key, struct json_value *env)
     struct json_value input;
     json_init(&input); json_set_object(&input);
     bool ok = spec && json_push_kv_str(&input, "subsystem", "supervisor") &&
-              (!key || json_push_kv_str(&input, "key", key));
+              (!key || json_push_kv_str(&input, "key", key)) &&
+              (!explain || json_push_kv_bool(&input, "explain", true));
     char wire[4097]; enum zcl_command_exit code;
     size_t n = ok ? zcl_command_registry_execute_json(reg, spec, &ctx, &input,
-        false, "ops.state", "normal", 0, 0, NULL, wire, sizeof(wire), &code) : 0;
+        false, "ops.state", "normal", budget, 0, NULL, wire, sizeof(wire), &code) : 0;
     json_free(&input);
     return n > 0 && n <= 4096 && json_read(env, wire, n);
 }
+static bool ops_supervisor_execute_budget(const char *key, struct json_value *env, size_t budget)
+{ return ops_supervisor_execute_options(key, env, budget, false); }
+static bool ops_supervisor_execute(const char *key, struct json_value *env)
+{ return ops_supervisor_execute_budget(key, env, 0); }
+static bool ops_supervisor_no_self_next(const struct json_value *env)
+{
+    const struct json_value *next = json_get(env, "next");
+    for (size_t i = 0; i < json_size(next); i++)
+        if (!strcmp(json_get_str(json_get(json_at(next, i), "command")), "ops.state")) return false;
+    return true;
+}
 
+static bool ops_supervisor_bad_offsets(void)
+{
+    const char *bad[] = {"-1", "01", "129", "999999999999999999999999", "1x", ""};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        char key[128]; (void)snprintf(key, sizeof(key), "supervisor.stalled.children.live.discovery.v1:%s", bad[i]);
+        struct json_value env; json_init(&env);
+        bool ok = ops_supervisor_execute(key, &env) && !json_get_bool(json_get(&env, "ok"));
+        json_free(&env); if (!ok) return false;
+    }
+    return true;
+}
+static bool ops_supervisor_small_and_explain(void)
+{
+    const char *key = "supervisor.stalled.children.live.discovery.v1:26";
+    struct json_value env; json_init(&env);
+    bool ok = ops_supervisor_execute_budget(key, &env, 2048) && !json_get_bool(json_get(&env, "ok")) &&
+        !strcmp(json_get_str(json_get(json_get(&env, "error"), "code")), "STATE_PROJECTION_FAILED") &&
+        json_size(json_get(&env, "next")) == 1 &&
+        !strcmp(json_get_str(json_get(json_at(json_get(&env, "next"), 0), "command")), "discover.describe") &&
+        !strcmp(json_get_str(json_get(json_get(json_at(json_get(&env, "next"), 0), "input"), "path")), "ops.state");
+    json_free(&env); json_init(&env);
+    ok = ok && ops_supervisor_execute_options(key, &env, 0, true) && json_get_bool(json_get(&env, "ok"));
+    if (ok) {
+        const struct json_value *data = json_get(&env, "data");
+        const struct json_value *state = json_get(data, "state");
+        const char *next = json_get_str(json_get(state, "next_key"));
+        const struct json_value *action = json_at(json_get(&env, "next"), 0);
+        ok = json_size(json_get(state, "children")) == 8 && !json_get(data, "meaning") && next[0] &&
+            !strcmp(next, json_get_str(json_get(json_get(action, "input"), "key")));
+    }
+    json_free(&env); return ok;
+}
 static int test_ops_supervisor_drilldown(void)
 {
     int failures = 0;
     static struct liveness_contract children[25];
+    supervisor_child_id ids[24];
     struct json_value env;
     supervisor_reset_for_testing();
     supervisor_domain_t *domain = supervisor_create_domain("net");
@@ -5663,6 +5708,7 @@ static int test_ops_supervisor_drilldown(void)
         char name[48]; (void)snprintf(name, sizeof(name), "net.fixture_%02d", i);
         liveness_contract_init(&children[i], name);
         supervisor_child_id id = supervisor_register_in_domain(domain, &children[i]);
+        ids[i] = id;
         prepared = id != SUPERVISOR_INVALID_ID;
         if (prepared && i == 0) { supervisor_tick(id); supervisor_progress(id, 42); }
     }
@@ -5676,13 +5722,15 @@ static int test_ops_supervisor_drilldown(void)
         json_init(&env); ASSERT(ops_supervisor_execute("summary", &env));
         const struct json_value *state = json_get(json_get(&env, "data"), "state");
         ASSERT(json_get_bool(json_get(&env, "ok"))); ASSERT(json_get(state, "running"));
-        ASSERT(json_get(state, "tick_ms")); ASSERT(!json_get(state, "domains")); json_free(&env);
+        ASSERT(json_get(state, "tick_ms")); ASSERT(!json_get(state, "domains"));
+        ASSERT(ops_supervisor_no_self_next(&env)); json_free(&env);
         json_init(&env); ASSERT(ops_supervisor_execute("net.fixture_00", &env));
         state = json_get(json_get(&env, "data"), "state");
         ASSERT(json_get_bool(json_get(&env, "ok")));
         ASSERT_STR_EQ(json_get_str(json_get(state, "name")), "net.fixture_00");
         ASSERT_EQ(json_get_int(json_get(state, "progress_marker")), 42);
-        ASSERT(json_get(state, "ticks_run")); ASSERT(json_get(state, "stall_fires")); json_free(&env);
+        ASSERT(json_get(state, "ticks_run")); ASSERT(json_get(state, "stall_fires"));
+        ASSERT(ops_supervisor_no_self_next(&env)); json_free(&env);
         json_init(&env); ASSERT(ops_supervisor_execute("single", &env));
         state = json_get(json_get(&env, "data"), "state");
         ASSERT_STR_EQ(json_get_str(json_get(state, "name")), "single");
@@ -5691,11 +5739,75 @@ static int test_ops_supervisor_drilldown(void)
         ASSERT(!json_get_bool(json_get(&env, "ok"))); json_free(&env);
         json_init(&env); ASSERT(ops_supervisor_execute(NULL, &env));
         const struct json_value *page = json_get(json_get(&env, "data"), "_page");
+        if (!json_get_bool(json_get(page, "truncated"))) {
+            char wire[4097]; size_t n = json_write(&env, wire, sizeof(wire));
+            if (n && n < sizeof(wire)) fprintf(stderr, "supervisor projection fixture: %s\n", wire);
+        }
         ASSERT(json_get_bool(json_get(page, "truncated"))); ASSERT(!json_get(page, "next_cursor"));
         const struct json_value *next = json_at(json_get(&env, "next"), 0);
         ASSERT(strstr(json_get_str(json_get(next, "reason")), "key=summary") != NULL);
         json_free(&env);
         PASS();
+    }
+    TEST("ops.state supervisor discovers stalled children in bounded pages") {
+        ASSERT(prepared);
+        for (int i = 0; i < 24; i++) supervisor_report_stall(ids[i], SUPERVISOR_STALL_CHILD_REPORTED);
+        json_init(&env); ASSERT(ops_supervisor_execute("supervisor.stalled.children.live.discovery.v1:0", &env));
+        const struct json_value *state = json_get(json_get(&env, "data"), "state");
+        const struct json_value *rows = json_get(state, "children");
+        ASSERT(json_get_bool(json_get(&env, "ok"))); ASSERT_EQ(json_size(rows), 8u);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(rows, 0), "name")), "net.fixture_00");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(rows, 0), "reason")), "child_reported");
+        const char *next = json_get_str(json_get(state, "next_key"));
+        ASSERT(next && strlen(next) < 128); char key[128]; (void)snprintf(key, sizeof(key), "%s", next);
+        const struct json_value *follow = json_at(json_get(&env, "next"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(follow, "input"), "key")), key);
+        json_free(&env); json_init(&env); ASSERT(ops_supervisor_execute(key, &env));
+        state = json_get(json_get(&env, "data"), "state"); rows = json_get(state, "children");
+        ASSERT_EQ(json_size(rows), 8u); next = json_get_str(json_get(state, "next_key"));
+        ASSERT(next && strlen(next) < sizeof(key)); (void)snprintf(key, sizeof(key), "%s", next);
+        json_free(&env); json_init(&env); ASSERT(ops_supervisor_execute(key, &env));
+        state = json_get(json_get(&env, "data"), "state"); rows = json_get(state, "children");
+        ASSERT_EQ(json_size(rows), 8u);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(rows, 7), "name")), "net.fixture_23");
+        ASSERT(!json_get(state, "next_key")); ASSERT(ops_supervisor_no_self_next(&env)); json_free(&env); PASS();
+    }
+    TEST("stalled view rejects malformed offsets and fits maximum child names") {
+        static struct liveness_contract longest;
+        const char *name = "123456789012345678901234567890123456789";
+        liveness_contract_init(&longest, name);
+        supervisor_child_id id = supervisor_register_in_domain(domain, &longest);
+        ASSERT(id != SUPERVISOR_INVALID_ID); supervisor_report_stall(id, SUPERVISOR_STALL_CHILD_REPORTED);
+        json_init(&env); ASSERT(ops_supervisor_execute("supervisor.stalled.children.live.discovery.v1:24", &env));
+        const struct json_value *state = json_get(json_get(&env, "data"), "state");
+        const struct json_value *rows = json_get(state, "children");
+        ASSERT_EQ(json_size(rows), 1u); ASSERT_STR_EQ(json_get_str(json_get(json_at(rows, 0), "name")), name);
+        ASSERT(!json_get(state, "next_key")); json_free(&env);
+        ASSERT(ops_supervisor_bad_offsets());
+        PASS();
+    }
+    TEST("stalled pages fit escaped maximum names and advance across retired slots") {
+        static struct liveness_contract many[10];
+        supervisor_unregister(ids[5]);
+        json_init(&env); ASSERT(ops_supervisor_execute("supervisor.stalled.children.live.discovery.v1:0", &env));
+        const struct json_value *sparse = json_get(json_get(json_get(&env, "data"), "state"), "children");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(sparse, 5), "name")), "net.fixture_06"); json_free(&env);
+        for (int i = 0; i < 10; i++) {
+            char name[40]; memset(name, 1, sizeof(name) - 1); name[0] = (char)('a' + i); name[39] = 0;
+            liveness_contract_init(&many[i], name);
+            supervisor_child_id id = supervisor_register_in_domain(domain, &many[i]);
+            ASSERT(id != SUPERVISOR_INVALID_ID); supervisor_report_stall(id, SUPERVISOR_STALL_CHILD_REPORTED);
+        }
+        json_init(&env); ASSERT(ops_supervisor_execute("supervisor.stalled.children.live.discovery.v1:26", &env));
+        const struct json_value *state = json_get(json_get(&env, "data"), "state");
+        ASSERT(json_get_bool(json_get(&env, "ok"))); ASSERT_EQ(json_size(json_get(state, "children")), 8u);
+        const char *next = json_get_str(json_get(state, "next_key")); ASSERT(next && next[0]);
+        char key[128]; (void)snprintf(key, sizeof(key), "%s", next); json_free(&env);
+        ASSERT(ops_supervisor_small_and_explain());
+        json_init(&env); ASSERT(ops_supervisor_execute(key, &env));
+        state = json_get(json_get(&env, "data"), "state");
+        ASSERT_EQ(json_size(json_get(state, "children")), 1u); ASSERT(!json_get(state, "next_key"));
+        json_free(&env); PASS();
     } _test_next:;
     node_rpc_client_set_test_hook(NULL);
     supervisor_reset_for_testing();
@@ -6431,6 +6543,43 @@ static int test_every_describe_document_fits(void)
 }
 
 static int g_bad_next_case;
+static int g_supervisor_next_case;
+static void supervisor_next_fixture(const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    (void)request;
+    struct json_value state; json_init(&state); json_set_object(&state);
+    (void)json_push_kv_str(&reply->data, "subsystem", "supervisor");
+    (void)json_push_kv_str(&state, "next_key", g_supervisor_next_case == 2 ?
+        "supervisor.stalled.children.live.discovery.v1:bad" : "supervisor.stalled.children.live.discovery.v1:8");
+    (void)json_push_kv(&reply->data, "state", &state); json_free(&state);
+    const char *key = g_supervisor_next_case == 0 ? "supervisor.stalled.children.live.discovery.v1:8" :
+        g_supervisor_next_case == 1 ? "supervisor.stalled.children.live.discovery.v1:9" :
+        "supervisor.stalled.children.live.discovery.v1:bad";
+    char input[256]; (void)snprintf(input, sizeof(input), "{\"subsystem\":\"%s\",\"key\":\"%s\"}",
+        g_supervisor_next_case == 3 ? "other" : "supervisor", key);
+    (void)zcl_command_reply_add_next(reply, "ops.state", input, "fixture");
+}
+static int test_supervisor_next_binding(void)
+{
+    int failures = 0; const struct zcl_command_registry *catalog = zcl_command_catalog();
+    TEST("supervisor next action binds the returned page and refuses forged keys") {
+        const struct zcl_command_spec *base = find_spec(catalog, "ops.state"); ASSERT(base);
+        struct zcl_command_spec executable = *base; executable.handler = supervisor_next_fixture;
+        struct zcl_command_registry local = {.commands = &executable, .count = 1};
+        struct zcl_command_context context = {.registry = catalog, .operator_lane = "dev",
+            .granted_capabilities = ~(uint64_t)0, .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+        struct json_value input; json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "subsystem", "supervisor"));
+        for (g_supervisor_next_case = 0; g_supervisor_next_case < 4; g_supervisor_next_case++) {
+            char out[ZCL_COMMAND_RESULT_BUDGET + 1]; enum zcl_command_exit code;
+            size_t n = zcl_command_registry_execute_json(&local, &executable, &context, &input, false,
+                executable.path, "normal", 0, 0, NULL, out, sizeof(out), &code);
+            ASSERT(n > 0); ASSERT_EQ(code == ZCL_COMMAND_EXIT_OK, g_supervisor_next_case == 0);
+        }
+        json_free(&input); PASS();
+    } _test_next:;
+    return failures;
+}
 
 static void contract_bad_next_handler(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
@@ -7690,6 +7839,7 @@ int test_command_registry_catalog(void)
     failures += test_envelope_carries_latency_contract();
     failures += test_describe_emits_observed_p99();
     failures += test_next_actions_fail_closed();
+    failures += test_supervisor_next_binding();
     failures += test_domain_leaf_counts();
     failures += test_seventeen_roots();
     failures += test_yardsale_guide();

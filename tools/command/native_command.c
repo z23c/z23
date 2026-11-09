@@ -45,6 +45,7 @@
 #include "chain/checkpoints.h"
 #include "platform/time_compat.h"
 #include "util/safe_alloc.h"
+#include "util/supervisor.h"
 #include "util/boot_status.h"
 #include "util/log_macros.h"
 #include "controllers/native_handler_body.h"
@@ -957,10 +958,46 @@ static void nc_ops_state_attach_meaning(const struct zcl_command_request *reques
     }
 }
 
+static bool nc_supervisor_cursor_valid(const char *next_key)
+{
+    const char *prefix = "supervisor.stalled.children.live.discovery.v1:";
+    size_t prefix_len = strlen(prefix);
+    if (strncmp(next_key, prefix, prefix_len) || !next_key[prefix_len]) return false;
+    const char *digits = next_key + prefix_len;
+    if (digits[0] == '0' && digits[1]) return false;
+    unsigned offset = 0;
+    for (const char *p = digits; *p; p++) {
+        if (*p < '0' || *p > '9' || offset > SUPERVISOR_CAP) return false;
+        offset = offset * 10u + (unsigned)(*p - '0');
+        if (offset > SUPERVISOR_CAP) return false;
+    }
+    return true;
+}
+static bool nc_supervisor_stalled_next(const struct json_value *body, struct zcl_command_reply *reply)
+{
+    const struct json_value *state = json_get(body, "state");
+    const struct json_value *cursor = json_get(state, "next_key");
+    if (cursor) {
+        if (cursor->type != JSON_STR) return false;
+        const char *next_key = json_get_str(cursor);
+        if (!nc_supervisor_cursor_valid(next_key)) return false;
+        char input[256]; struct json_value next; json_init(&next); json_set_object(&next);
+        bool ok = json_push_kv_str(&next, "subsystem", "supervisor") && json_push_kv_str(&next, "key", next_key);
+        size_t n = ok ? json_write(&next, input, sizeof(input)) : 0;
+        json_free(&next);
+        if (!n || n >= sizeof(input) || !zcl_command_reply_add_next(reply, "ops.state", input,
+            "continue the live stalled-child view")) return false;
+    }
+    return true;
+}
 /* Supervisor dumpstate has key-based drilldowns, not offset paging. */
-static bool nc_supervisor_page_guidance(const char *sub, struct zcl_command_reply *reply)
+static bool nc_supervisor_page_guidance(const char *sub, const char *key, const struct json_value *body,
+                                        struct zcl_command_reply *reply)
 {
     if (strcmp(sub, "supervisor")) return true;
+    if (key && !strncmp(key, "supervisor.stalled.children.live.discovery.v1:",
+        strlen("supervisor.stalled.children.live.discovery.v1:")) && !json_get(&reply->data, "state")) return false;
+    if (!nc_supervisor_stalled_next(body, reply)) return false;
     const struct json_value *page = json_get(&reply->data, "_page");
     if (!json_get_bool(json_get(page, "truncated"))) return true;
     struct json_value data, clean;
@@ -976,10 +1013,10 @@ static bool nc_supervisor_page_guidance(const char *sub, struct zcl_command_repl
     json_free(&clean);
     if (!ok) { json_free(&data); return false; }
     json_free(&reply->data); reply->data = data;
-    for (size_t i = 0; i < reply->next_count; i++)
-        (void)snprintf(reply->next[i].reason, sizeof(reply->next[i].reason),
-            "retry ops.state with subsystem=supervisor and key=summary or an exact child name");
-    return true;
+    reply->next_count = 0;
+    return zcl_command_reply_add_next(reply, "ops.state",
+        "{\"subsystem\":\"supervisor\",\"key\":\"supervisor.stalled.children.live.discovery.v1:0\"}",
+        "list stalled children; key=summary and exact child names also work");
 }
 
 void zcl_native_handle_ops_state(const struct zcl_command_request *request,
@@ -1038,10 +1075,11 @@ void zcl_native_handle_ops_state(const struct zcl_command_request *request,
     }
     /* Success: project the state body into the envelope (view/budget bounded). */
     zcl_native_bridge_project(request, &body, reply);
-    if (!nc_supervisor_page_guidance(sub, reply)) {
+    if (!nc_supervisor_page_guidance(sub, key, &body, reply)) {
+        reply->next_count = 0;
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
             ZCL_COMMAND_EXIT_INTERNAL, "STATE_PROJECTION_FAILED", "serialize",
-            false, false, "supervisor paging guidance could not be allocated", sub);
+            false, false, "supervisor page did not fit or its guidance could not be prepared", sub);
         json_free(&body);
         return;
     }
