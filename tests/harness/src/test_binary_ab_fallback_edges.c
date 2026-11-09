@@ -31,6 +31,7 @@
 #include "base/log_level.h"
 #include "util/blocker.h"
 #include "platform/private_file.h"
+#include "util/file_tree_ops.h"
 
 #if !defined(_WIN32)
 
@@ -42,7 +43,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define AE_CHECK(name, expr) do { \
@@ -65,9 +68,150 @@ static bool ae_write(const char *path, const uint8_t *data, size_t n,
     return ok && chmod(path, mode) == 0;
 }
 
+static bool ae_text_is(const char *path, const char *want);
+static bool ae_exact_text(const char *path, const char *want)
+{
+    struct stat st; size_t len = strlen(want); char buf[128];
+    if (len > sizeof(buf) || stat(path, &st) || st.st_size < 0 || (uint64_t)st.st_size != len) return false;
+    FILE *file = fopen(path, "rb"); if (!file) return false;
+    bool ok = fread(buf, 1, len, file) == len && !ferror(file) && fgetc(file) == EOF && !ferror(file) && !memcmp(buf, want, len);
+    return fclose(file) == 0 && ok;
+}
 static bool ae_write_str(const char *path, const char *s, mode_t mode)
 {
     return ae_write(path, (const uint8_t *)s, strlen(s), mode);
+}
+
+struct ae_install_paths { char bin[1200], exe[1300], source[1200], data[1200], staged[1300], datarg[1300], srcarg[1300]; };
+static bool ae_install_paths(const char *dir, struct ae_install_paths *p)
+{
+    return snprintf(p->bin, sizeof(p->bin), "%s/bin", dir) < (int)sizeof(p->bin) &&
+        snprintf(p->exe, sizeof(p->exe), "%s/zcl-nodectl", p->bin) < (int)sizeof(p->exe) &&
+        snprintf(p->source, sizeof(p->source), "%s/input.sqlite", dir) < (int)sizeof(p->source) &&
+        snprintf(p->data, sizeof(p->data), "%s/node", dir) < (int)sizeof(p->data) &&
+        snprintf(p->staged, sizeof(p->staged), "%s/bundles/input.sqlite", p->data) < (int)sizeof(p->staged) &&
+        snprintf(p->datarg, sizeof(p->datarg), "--datadir=%s", p->data) < (int)sizeof(p->datarg) &&
+        snprintf(p->srcarg, sizeof(p->srcarg), "--source=%s", p->source) < (int)sizeof(p->srcarg);
+}
+/* Invoke the installed-style launcher and inspect only this fixture's bytes. */
+static bool ae_bundle_installed(const char *dir)
+{
+    struct ae_install_paths p;
+    if (!ae_install_paths(dir, &p) || mkdir(p.bin, 0700) != 0 ||
+        !zcl_tree_copy("build/bin/zcl-nodectl", p.exe, 0, NULL, NULL).ok ||
+        mkdir(p.data, 0700) != 0 || !ae_write_str(p.source, "fixture bytes", 0600)) return false;
+    pid_t child = fork();
+    if (child < 0) return false;
+    if (child == 0) { execl(p.exe, p.exe, "bundle-stage", p.datarg, p.srcarg, (char *)NULL); _exit(127); }
+    int status = 0;
+    bool ok = waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+        ae_exact_text(p.staged, "fixture bytes");
+    struct stat st;
+    ok = ok && stat(p.staged, &st) == 0 && (st.st_mode & 0222) == 0;
+    (void)unlink(p.staged); char bundles[1300];
+    if (snprintf(bundles, sizeof(bundles), "%s/bundles", p.data) < (int)sizeof(bundles)) (void)rmdir(bundles);
+    (void)unlink(p.source); (void)unlink(p.exe); (void)rmdir(p.bin); (void)rmdir(p.data); return ok;
+}
+static int ae_stage_run(const char *datadir, const char *source)
+{
+    char datarg[1300], srcarg[1300];
+    if (snprintf(datarg, sizeof(datarg), "--datadir=%s", datadir) >= (int)sizeof(datarg) ||
+        snprintf(srcarg, sizeof(srcarg), "--source=%s", source) >= (int)sizeof(srcarg)) return -1;
+    pid_t child = fork(); if (child < 0) return -1;
+    if (!child) { execl("build/bin/zcl-nodectl", "zcl-nodectl", "bundle-stage", datarg, srcarg, (char *)NULL); _exit(127); }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+struct ae_control_paths {
+    char data[1200], bundles[1300], first[1200], second[1200], empty[1200];
+    char staged[1400], other[1400], marker[1300], missing[1200], absent[1200];
+};
+static bool ae_control_paths_first(const char *dir, struct ae_control_paths *p)
+{
+    return snprintf(p->data, sizeof(p->data), "%s/control-node", dir) < (int)sizeof(p->data) &&
+        snprintf(p->bundles, sizeof(p->bundles), "%s/bundles", p->data) < (int)sizeof(p->bundles) &&
+        snprintf(p->first, sizeof(p->first), "%s/first.sqlite", dir) < (int)sizeof(p->first) &&
+        snprintf(p->second, sizeof(p->second), "%s/second.sqlite", dir) < (int)sizeof(p->second) &&
+        snprintf(p->empty, sizeof(p->empty), "%s/empty.sqlite", dir) < (int)sizeof(p->empty);
+}
+static bool ae_control_paths_rest(const char *dir, struct ae_control_paths *p)
+{
+    return snprintf(p->staged, sizeof(p->staged), "%s/first.sqlite", p->bundles) < (int)sizeof(p->staged) &&
+        snprintf(p->other, sizeof(p->other), "%s/second.sqlite", p->bundles) < (int)sizeof(p->other) &&
+        snprintf(p->marker, sizeof(p->marker), "%s/consensus-bundle-installed.marker", p->data) < (int)sizeof(p->marker) &&
+        snprintf(p->missing, sizeof(p->missing), "%s/missing-node", dir) < (int)sizeof(p->missing) &&
+        snprintf(p->absent, sizeof(p->absent), "%s/absent.sqlite", dir) < (int)sizeof(p->absent);
+}
+static int ae_control_locked(struct ae_control_paths *p)
+{
+    int failures = 0; int lock = open(p->bundles, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    bool held = lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) == 0;
+    AE_CHECK("another courier's retained directory lock refuses without publication",
+             held && ae_stage_run(p->data, p->second) == 1 && access(p->other, F_OK) != 0);
+    if (held) (void)flock(lock, LOCK_UN);
+    if (lock >= 0) (void)close(lock);
+    AE_CHECK("first bundle stages and a different second source is a no-op",
+             ae_stage_run(p->data, p->first) == 0 && ae_stage_run(p->data, p->second) == 0 &&
+             ae_exact_text(p->staged, "first") && access(p->other, F_OK) != 0);
+    (void)unlink(p->staged); return failures;
+}
+static int ae_control_marker(struct ae_control_paths *p)
+{
+    int failures = 0;
+    AE_CHECK("existing installed marker suppresses even a missing source",
+             ae_write_str(p->marker, "marker", 0600) && ae_stage_run(p->data, p->absent) == 0 && access(p->staged, F_OK) != 0);
+    (void)unlink(p->marker);
+    AE_CHECK("symlink marker refuses without following it",
+             symlink(p->first, p->marker) == 0 && ae_stage_run(p->data, p->first) == 1 && access(p->staged, F_OK) != 0);
+    (void)unlink(p->marker); return failures;
+}
+static int ae_bundle_controls(const char *dir)
+{
+    int failures = 0; struct ae_control_paths p;
+    if (!ae_control_paths_first(dir, &p) || !ae_control_paths_rest(dir, &p)) return 1;
+    AE_CHECK("empty source is a no-op without a datadir", ae_stage_run(p.missing, "") == 0 && access(p.missing, F_OK) != 0);
+    if (mkdir(p.data, 0700) || mkdir(p.bundles, 0700) || !ae_write_str(p.first, "first", 0600) ||
+        !ae_write_str(p.second, "second", 0600) || !ae_write_str(p.empty, "", 0600)) return failures + 1;
+    AE_CHECK("empty and wrong-suffix sources refuse", ae_stage_run(p.data, p.empty) == 1 && ae_stage_run(p.data, dir) == 1);
+    failures += ae_control_locked(&p); failures += ae_control_marker(&p);
+    (void)unlink(p.marker); (void)unlink(p.first); (void)unlink(p.second); (void)unlink(p.empty);
+    (void)rmdir(p.bundles); (void)rmdir(p.data); return failures;
+}
+static bool ae_file_contains(const char *path, const char *needle)
+{
+    FILE *unit = fopen(path, "r");
+    if (!unit) return false;
+    char line[2048]; bool found = false;
+    while (fgets(line, sizeof(line), unit))
+        if (strstr(line, needle)) found = true;
+    bool ok = !ferror(unit);
+    return fclose(unit) == 0 && ok && found;
+}
+static bool ae_file_has_line(const char *path, const char *expected)
+{
+    FILE *file = fopen(path, "r"); if (!file) return false;
+    char line[2048]; bool found = false;
+    while (fgets(line, sizeof(line), file)) if (!strcmp(line, expected)) found = true;
+    bool ok = !ferror(file); return fclose(file) == 0 && ok && found;
+}
+static bool ae_unit_uses_installed_courier(const char *dir)
+{
+    char path[1300], replacement[1400], expected[1400];
+    if (snprintf(path, sizeof(path), "%s/installed.service", dir) >= (int)sizeof(path) ||
+        snprintf(replacement, sizeof(replacement), "s|%%h/zclassic23/build/bin/zcl-nodectl|%s/bin/zcl-nodectl|", dir) >= (int)sizeof(replacement) ||
+        snprintf(expected, sizeof(expected), "ExecStartPre=-%s/bin/zcl-nodectl bundle-stage \\\n", dir) >= (int)sizeof(expected)) return false;
+    if (!ae_file_contains("Makefile", "s|%h/zclassic23/build/bin/zcl-nodectl|$(PREFIX)/bin/zcl-nodectl|")) return false;
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (fd < 0) return false;
+    pid_t child = fork();
+    if (child == 0) {
+        if (dup2(fd, STDOUT_FILENO) < 0) _exit(127);
+        close(fd); execlp("sed", "sed", "-e", replacement, "platform/deploy/z23-node.service", (char *)NULL); _exit(127);
+    }
+    close(fd); int status = 0;
+    bool ok = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+        ae_file_has_line(path, expected) &&
+        ae_file_has_line(path, "    --datadir=%h/.zclassic-c23 --source=${ZCL_CHECKPOINT_BUNDLE_SOURCE}\n");
+    (void)unlink(path); return ok;
 }
 
 static bool ae_text_is(const char *path, const char *want)
@@ -871,6 +1015,9 @@ int ab_edges_contract(const char *dir)
         return 1;
     }
     g_ae_cap_dir = mut;
+    AE_CHECK("installed unit resolves to the installed courier and exact arguments", ae_unit_uses_installed_courier(mut));
+    AE_CHECK("installed launcher stages a read-only bundle", ae_bundle_installed(mut));
+    failures += ae_bundle_controls(mut);
     snprintf(cur, sizeof(cur), "%s/current-bin", mut);
     snprintf(lastgood, sizeof(lastgood), "%s/%s", mut,
              BINARY_AB_LASTGOOD_BASENAME);

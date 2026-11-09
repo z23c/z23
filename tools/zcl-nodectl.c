@@ -5,6 +5,7 @@
 #include "platform/time_compat.h"
 #include "platform/os_binary_slots.h"
 #include "platform/process_compat.h"
+#include "zcl_nodectl_bundle.h"
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -862,7 +863,7 @@ static int cmd_legacy_unit_check(void)
 
 static void usage(void)
 {
-    puts("Usage: zcl-nodectl <status|stop|start|restart|verify-follow|legacy-unit-check|launch> [options]");
+    puts("Usage: zcl-nodectl <status|stop|start|restart|verify-follow|legacy-unit-check|launch|bundle-stage> [options]");
     puts("");
     puts("Options for verify-follow:");
     puts("  --restart          stop/start z23-node before polling");
@@ -875,6 +876,7 @@ static void usage(void)
 static int cmd_standalone(int argc, char **argv)
 {
     if (argc < 2) return -1;
+    if (strcmp(argv[1], "bundle-stage") == 0) return nodectl_bundle_stage(argc, argv);
     if (strcmp(argv[1], "launch") == 0) return cmd_launch(argc, argv);
     if (strcmp(argv[1], "legacy-unit-check") == 0) return cmd_legacy_unit_check();
     return -1;

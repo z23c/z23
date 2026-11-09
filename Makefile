@@ -9115,16 +9115,19 @@ zcl-nodectl: $(ZCL_NODECTL_BIN)
 # zcl-nodectl is a portable-release product: opt into the fresh atomic link
 # so a host-built binary cannot pass the timestamp check into the ABI audit
 # (see C23_PORTABLE_RELINK at the top of this file).
-$(ZCL_NODECTL_BIN): tools/zcl-nodectl.c platform/modules/util/include/util/rpc_paths.h \
+$(ZCL_NODECTL_BIN): tools/zcl-nodectl.c tools/zcl_nodectl_bundle.c tools/zcl_nodectl_bundle.h \
+		platform/modules/sha3/include/sha3/sha3.h platform/modules/sha3/src/sha3.c \
+		platform/modules/platform/include/platform/positioned_file.h platform/modules/platform/src/positioned_file.c \
+		platform/modules/util/include/util/rpc_paths.h \
 		platform/modules/platform/include/platform/os_binary_slots.h \
 		platform/modules/platform/include/platform/process_compat.h \
 		platform/modules/platform/src/os_binary_slots.c platform/modules/platform/src/clock.c \
 		platform/modules/base/src/log_level.c $(C23_PORTABLE_RELINK)
 	@mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror \
-	    -Iplatform/modules/base/include -Iplatform/modules/util/include -Iplatform/modules/platform/include \
+	    -Iplatform/modules/base/include -Iplatform/modules/util/include -Iplatform/modules/platform/include -Iplatform/modules/sha3/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -o $@ \
-	    tools/zcl-nodectl.c platform/modules/platform/src/os_binary_slots.c \
+	    tools/zcl-nodectl.c tools/zcl_nodectl_bundle.c platform/modules/platform/src/positioned_file.c platform/modules/sha3/src/sha3.c platform/modules/platform/src/os_binary_slots.c \
 	    platform/modules/platform/src/clock.c platform/modules/base/src/log_level.c
 
 .PHONY: export_snapshot

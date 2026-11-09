@@ -67,7 +67,7 @@ Environment="ZCL_TOR_FLAG="
 Environment="ZCL_CHECKPOINT_BUNDLE_SOURCE="
 EnvironmentFile=-%h/.config/zclassic23/env
 
-# Bundle bootstrap (platform/deploy/z23-bundle-bootstrap.sh, docs/ROM_DELIVERY.md
+# Bundle bootstrap (zcl-nodectl bundle-stage, docs/ROM_DELIVERY.md
 # "Local bundle bootstrap"): BYTE DELIVERY ONLY, not an acceptance decision — stages
 # $ZCL_CHECKPOINT_BUNDLE_SOURCE (set in ~/.config/zclassic23/env; see
 # platform/deploy/z23-node.env.example) into <datadir>/bundles/ so the zero-flag
@@ -76,11 +76,11 @@ EnvironmentFile=-%h/.config/zclassic23/env
 # datadir is already sovereign-installed — safe to run before every start. The
 # braced ${VAR} form (not bare $VAR) is required so systemd always passes
 # exactly one --source= argument (empty when unset) instead of word-splitting
-# an unset/empty value away entirely — the script's own `--source=` parsing
+# an unset/empty value away entirely — the courier's `--source=` parsing
 # then treats the empty case as "not configured" and exits 0. The leading `-`
 # additionally tolerates any unexpected failure rather than ever blocking node
 # startup on a courier step.
-ExecStartPre=-%h/zclassic23/platform/deploy/z23-bundle-bootstrap.sh \
+ExecStartPre=-%h/zclassic23/build/bin/zcl-nodectl bundle-stage \
     --datadir=%h/.zclassic-c23 --source=${ZCL_CHECKPOINT_BUNDLE_SOURCE}
 
 # Native C23 binary A/B launcher (`zcl-nodectl launch`): first argument after
