@@ -66,6 +66,28 @@ static int fixture_tree(bool locked)
     for (;;) pause();
 }
 
+/* The leader exits only after the test has acquired a stable leaf handle. */
+static int fixture_tree_natural(const char *release)
+{
+    int fd = open(release, O_RDWR);
+    if (fd < 0) return 72;
+    pid_t intermediate = fork();
+    if (intermediate < 0) return 36;
+    if (!intermediate) {
+        if (setsid() < 0) _exit(37);
+        pid_t leaf = fork();
+        if (leaf < 0) _exit(38);
+        if (leaf) _exit(0);
+        pid_t self = getpid();
+        if (write(STDOUT_FILENO, &self, sizeof(self)) != (ssize_t)sizeof(self)) _exit(39);
+        for (;;) pause();
+    }
+    char byte;
+    ssize_t n = read(fd, &byte, 1);
+    close(fd);
+    return n == 1 ? 0 : 73;
+}
+
 static int fixture_cwd(void)
 {
     char path[1024];
@@ -130,6 +152,8 @@ static int fixture_dispatch_pair(const char *mode)
 int supervised_fixture_dispatch(int argc, char **argv);
 int supervised_fixture_dispatch(int argc, char **argv)
 {
+    if (argc == 3 && !strcmp(argv[1], "--supervised-fixture-tree-natural"))
+        return fixture_tree_natural(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "--supervised-fixture-marker")) {
         int fd = open(argv[2], O_WRONLY | O_CREAT | O_EXCL, 0600);
         if (fd < 0) return 70;

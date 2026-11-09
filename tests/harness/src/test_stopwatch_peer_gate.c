@@ -30,6 +30,7 @@
 #include "util/spawn.h"
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
@@ -343,15 +344,17 @@ static int case_owned_exit(const struct gate_env *g)
     return failures;
 }
 
-static int case_owned_tree(const struct gate_env *g, bool eof)
+static int case_owned_tree(const struct gate_env *g, int mode)
 {
     int failures = 0;
-    char owner[PATH_MAX], launcher[PATH_MAX], log[PATH_MAX], self[PATH_MAX];
+    char owner[PATH_MAX], launcher[PATH_MAX], log[PATH_MAX], self[PATH_MAX], fifo[PATH_MAX];
     char start[128], done[128];
     if (snprintf(owner, sizeof(owner), "%s/build/bin/c3-supervised-owner", g->root) >= (int)sizeof(owner) ||
         snprintf(launcher, sizeof(launcher), "%s/build/bin/process-group-exec", g->root) >= (int)sizeof(launcher) ||
-        snprintf(log, sizeof(log), "%s/tree-%d.log", g->artifacts, (int)eof) >= (int)sizeof(log) ||
+        snprintf(log, sizeof(log), "%s/tree-%d.log", g->artifacts, mode) >= (int)sizeof(log) ||
+        snprintf(fifo, sizeof(fifo), "%s/release-%d", g->artifacts, mode) >= (int)sizeof(fifo) ||
         !os_proc_exe_path(self, sizeof(self))) return 1;
+    if (mode == 2 && mkfifo(fifo, 0600) != 0) return 1;
     int file = open(log, O_RDWR | O_CREAT | O_EXCL, 0600);
     int events = inotify_init1(IN_CLOEXEC);
     if (file < 0 || events < 0 || inotify_add_watch(events, log, IN_MODIFY) < 0) return 1;
@@ -361,7 +364,8 @@ static int case_owned_tree(const struct gate_env *g, bool eof)
     if (child == 0) {
         (void)dup2(control[0], 0); (void)dup2(result[1], 1);
         close(control[0]); close(control[1]); close(result[0]); close(result[1]);
-        execl(owner, owner, launcher, log, self, "--supervised-fixture-tree", (char *)NULL);
+        if (mode == 2) execl(owner, owner, launcher, log, self, "--supervised-fixture-tree-natural", fifo, (char *)NULL);
+        else execl(owner, owner, launcher, log, self, "--supervised-fixture-tree", (char *)NULL);
         _exit(127);
     }
     close(control[0]); close(result[1]);
@@ -371,19 +375,84 @@ static int case_owned_tree(const struct gate_env *g, bool eof)
     ok = ok && poll(&event, 1, 10000) > 0 && read(file, &leaf, sizeof(leaf)) == (ssize_t)sizeof(leaf);
     int leaf_fd = ok ? platform_supervised_fixture_pidfd_open(leaf) : -1;
     ok = ok && leaf_fd >= 0;
-    if (!eof) ok = write(control[1], "S", 1) == 1 && ok;
-    close(control[1]);
+    if (mode == 0) ok = write(control[1], "S", 1) == 1 && ok;
+    if (mode == 2) {
+        int release = open(fifo, O_WRONLY | O_NONBLOCK);
+        ok = release >= 0 && write(release, "R", 1) == 1 && ok;
+        if (release >= 0) close(release);
+    }
+    if (mode == 1) { close(control[1]); control[1] = -1; }
     bool got_done = spg_line(result[0], done, sizeof(done));
+    if (control[1] >= 0) close(control[1]);
     struct pollfd exited = {leaf_fd, POLLIN, 0};
     bool leaf_exited = leaf_fd >= 0 && poll(&exited, 1, 10000) > 0;
     if (!leaf_exited && leaf_fd >= 0) (void)platform_supervised_fixture_pidfd_kill(leaf_fd);
     int status = -1;
     if (child > 0) ok = waitpid(child, &status, 0) == child && ok;
-    SPG_CHECK(eof ? "EOF cleans escaped descendant" : "STOP cleans escaped descendant",
+    SPG_CHECK(mode == 2 ? "natural exit cleans escaped descendant" :
+              mode == 1 ? "EOF cleans escaped descendant" : "STOP cleans escaped descendant",
               ok && got_done && !strncmp(done, "DONE CLEAN ", 11) && leaf_exited &&
               WIFEXITED(status) && WEXITSTATUS(status) == 0);
     if (leaf_fd >= 0) close(leaf_fd);
     close(result[0]); close(events); close(file);
+    return failures;
+}
+
+static bool spg_script(const char *path, const char *body)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = fputs(body, f) >= 0;
+    return fclose(f) == 0 && ok && chmod(path, 0700) == 0;
+}
+
+static bool spg_retained(const char *path)
+{
+    DIR *d = opendir(path);
+    if (!d) return false;
+    struct dirent *entry;
+    bool found = false;
+    while ((entry = readdir(d)) != NULL)
+        if (!strncmp(entry->d_name, "zcl-c3-stopwatch.", 17)) found = true;
+    closedir(d);
+    return found;
+}
+
+static int case_cleanup_unknown(const struct gate_env *g, int mode)
+{
+    int failures = 0;
+    char node[PATH_MAX], owner[PATH_MAX], scratch[PATH_MAX], script[PATH_MAX], proof[PATH_MAX];
+    char env_node[PATH_MAX + 32], env_owner[PATH_MAX + 32], env_root[PATH_MAX + 32], env_art[PATH_MAX + 32], peer[64];
+    if (snprintf(node, sizeof(node), "%s/fake-node-%d", g->artifacts, mode) >= (int)sizeof(node) ||
+        snprintf(owner, sizeof(owner), "%s/fake-owner-%d", g->artifacts, mode) >= (int)sizeof(owner) ||
+        snprintf(scratch, sizeof(scratch), "%s/private-%d", g->artifacts, mode) >= (int)sizeof(scratch) ||
+        snprintf(script, sizeof(script), "%s/%s", g->root, GATE_SCRIPT_REL) >= (int)sizeof(script) ||
+        snprintf(proof, sizeof(proof), "%s/cleanupfixture-%d/proof.json", g->artifacts, mode) >= (int)sizeof(proof)) return 1;
+    if (mkdir(scratch, 0700) ||
+        !spg_script(node, "#!/bin/sh\nprintf '%s\\n' '{\"hstar\":2,\"network_tip\":1,\"network_tip_read_ok\":true,\"active_count\":0}'\n") ||
+        !spg_script(owner, mode == 0 ? "#!/bin/sh\nprintf 'START\\n'\ndd bs=1 count=1 of=/dev/null 2>/dev/null\n" :
+            mode == 1 ? "#!/bin/sh\nprintf 'START\\n'\ndd bs=1 count=1 of=/dev/null 2>/dev/null\nprintf 'BAD\\n'\n" :
+                        "#!/bin/sh\nprintf 'START\\n'\ndd bs=1 count=1 of=/dev/null 2>/dev/null\nprintf 'DONE INCOMPLETE 0\\n'\n")) return 1;
+    struct fake_peer fp;
+    if (!fake_peer_start(&fp, FAKE_CLOSE, 0)) return 1;
+    snprintf(env_node, sizeof(env_node), "ZCL_CS_NODE_BIN=%s", node);
+    snprintf(env_owner, sizeof(env_owner), "ZCL_CS_OWNER=%s", owner);
+    snprintf(env_root, sizeof(env_root), "ZCL_CS_ROOT=%s", scratch);
+    snprintf(env_art, sizeof(env_art), "ZCL_CS_ARTIFACT_ROOT=%s", g->artifacts);
+    snprintf(peer, sizeof(peer), "ZCL_CS_PEER=127.0.0.1:%d", fp.port);
+    char run_id[64];
+    snprintf(run_id, sizeof(run_id), "ZCL_CS_RUN_ID=cleanupfixture-%d", mode);
+    const char *argv[] = {"/usr/bin/env", env_node, env_owner, env_root, env_art, peer,
+        run_id, "ZCL_CS_PEER_PRECHECK=0", "ZCL_CS_FILE_PEER=",
+        "ZCL_CS_BUDGET_SECS=5", "ZCL_CS_SAMPLE_SECS=1", "bash", script, NULL};
+    int rc = zcl_spawn_capture(argv, g->out, g->cap, 60000);
+    fake_peer_stop(&fp);
+    FILE *f = fopen(proof, "r");
+    char body[32768] = {0};
+    if (f) { size_t n = fread(body, 1, sizeof(body) - 1, f); body[n] = 0; fclose(f); }
+    SPG_CHECK("completed sync with bad cleanup refuses PASS and retains fixture",
+              rc == 1 && strstr(g->out, "fixture retained") && spg_retained(scratch) &&
+              strstr(body, "owned cleanup unconfirmed") && !strstr(body, "\"verdict\": \"pass\""));
     return failures;
 }
 #endif
@@ -423,8 +492,12 @@ static int stopwatch_peer_gate_run(void)
 
 #if defined(__linux__)
     failures += case_owned_exit(&g);
-    failures += case_owned_tree(&g, false);
-    failures += case_owned_tree(&g, true);
+    failures += case_owned_tree(&g, 0);
+    failures += case_owned_tree(&g, 1);
+    failures += case_owned_tree(&g, 2);
+    failures += case_cleanup_unknown(&g, 0);
+    failures += case_cleanup_unknown(&g, 1);
+    failures += case_cleanup_unknown(&g, 2);
 #endif
 
     const char *rm[] = { "/bin/rm", "-rf", artifacts, NULL };

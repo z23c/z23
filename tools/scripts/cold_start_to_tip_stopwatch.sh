@@ -265,6 +265,7 @@ ISO_HOME=""
 PID="" # The supervised owner does not expose an identity-safe node PID.
 OWNER_RUNNING=0
 OWNER_CLEAN=1
+OWNER_CLEANUP_DONE=0
 OWNER_STATUS=""
 start=0
 first_hstar=""
@@ -1385,8 +1386,8 @@ omitted_fields_json() {
             disk_write_bytes)  [ "${LAST_DISK_WRITE_BYTES:--1}" = "-1" ] || continue ;;
         esac
         _of_row "harness.observed_sync.$f" "this_run" \
-            "/proc/<pid>/stat or /proc/<pid>/io was unreadable at capture (most often: the node process had already exited). Reported as -1, which is the never-measured sentinel and is deliberately distinguishable from a real zero." \
-            "samples.tsv, whose earlier rows may carry a reading from while the process was alive."
+            "The owner-supervised launch does not expose an identity-safe node PID for /proc sampling. Reported as -1, the never-measured sentinel, not a real zero." \
+            "No per-process substitute is measured in this run."
     done
     # The byte delta has a source (dumpstate sync_monitor), so a lost reading is
     # a this_run loss, never a structural one — and a respawn inside the window
@@ -2491,6 +2492,7 @@ write_artifact() {
     elapsed=0
     [ "${start:-0}" -gt 0 ] && elapsed=$((captured_at - start))
     mkdir -p "$ARTIFACT_DIR" 2>/dev/null || return 0
+    if [ "${C3_KEEP_CAPTURE:-0}" != 1 ]; then
     BUNDLE_CAPTURE_FAILED="false"
     FRONTIER_BUSY_AT_CAPTURE="false"
     BANLIST_PRESENT="false"
@@ -2512,6 +2514,7 @@ write_artifact() {
     if [ -n "${DATADIR:-}" ] && [ -f "$DATADIR/node.log" ] &&
        cp -p -- "$DATADIR/node.log" "$ARTIFACT_DIR/node.log" 2>/dev/null; then
         NODE_LOG_CAPTURED="true"
+    fi
     fi
 
     # ── phases[] assembly (before the JSON block, so a parse hiccup cannot
@@ -2858,6 +2861,8 @@ owner_done() {
     return 0
 }
 cleanup() {
+    if [ "$OWNER_CLEANUP_DONE" = 1 ]; then [ "$OWNER_CLEAN" = 1 ]; return; fi
+    OWNER_CLEANUP_DONE=1
     if [ "$OWNER_RUNNING" = 1 ]; then
         local line=""
         printf S >&"$OWNER_WRITE" 2>/dev/null || true
@@ -2867,10 +2872,23 @@ cleanup() {
         fi
     fi
     if [ "$OWNER_CLEAN" = 1 ]; then
-        case "$DATADIR" in "$CS_ROOT"/zcl-c3-stopwatch.*) rm -rf "$DATADIR" "$ISO_HOME" 2>/dev/null || true ;; esac
+        case "$DATADIR" in "$CS_ROOT"/zcl-c3-stopwatch.*) rm -rf "$DATADIR" "$ISO_HOME" 2>/dev/null || OWNER_CLEAN=0 ;; *) OWNER_CLEAN=0 ;; esac
     fi
+    [ "$OWNER_CLEAN" = 1 ]
 }
-trap cleanup EXIT
+finish_cleanup() {
+    local original=$?
+    trap - EXIT
+    if ! cleanup; then
+        if [ "$original" = 0 ]; then
+            C3_KEEP_CAPTURE=1
+            write_artifact "fail" 1 "owned cleanup unconfirmed; fixture retained"
+        fi
+        exit 1
+    fi
+    exit "$original"
+}
+trap finish_cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -3208,8 +3226,13 @@ echo "BOOTS=$boots"
 
 if [ "$reached" = 1 ]; then
     echo "WALL_CLOCK_SECONDS=$elapsed"
-    echo "=== cold-start-wipe-stopwatch: PASS — H* reached network_tip=$last_network_tip in ${elapsed}s across $boots boot(s) (budget ${BUDGET}s) ==="
     write_artifact "pass" 0 "wiped datadir reached network_tip within budget across $boots boot(s)"
+    if ! cleanup; then
+        C3_KEEP_CAPTURE=1
+        write_artifact "fail" 1 "owned cleanup unconfirmed; fixture retained"
+        exit 1
+    fi
+    echo "=== cold-start-wipe-stopwatch: PASS — H* reached network_tip=$last_network_tip in ${elapsed}s across $boots boot(s) (budget ${BUDGET}s) ==="
     exit 0
 fi
 

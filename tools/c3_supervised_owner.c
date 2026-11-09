@@ -58,6 +58,7 @@ static enum platform_supervised_state stop_until_reaped(struct platform_supervis
         int64_t t = now_ns();
         if (t < 0) { (void)poll(NULL, 0, 100); continue; }
         s = platform_supervised_stop(p, t + 10000000000LL);
+        if (p->supervisor_pid >= 0) (void)poll(NULL, 0, 100);
     } while (p->supervisor_pid >= 0);
     return s;
 }
@@ -102,7 +103,7 @@ int main(int argc, char **argv)
         struct pollfd f = { .fd = STDIN_FILENO, .events = POLLIN | POLLHUP };
         int n = poll(&f, 1, 100);
         if (n < 0 && errno != EINTR) stop = true;
-        if (n > 0) { char byte; (void)read(STDIN_FILENO, &byte, 1); stop = true; }
+        if (n > 0) stop = true;
     }
     if (p.supervisor_pid >= 0) s = stop_until_reaped(&p);
     if (observation_failed || s != PLATFORM_SUPERVISED_CLEAN || !p.observation.engine_exit_observed ||
