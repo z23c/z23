@@ -20,6 +20,7 @@
 #include "models/database.h"
 #include "models/tx_index.h"
 #include "models/utxo.h"
+#include "services/utxo_mirror_sync_service.h"
 #include "primitives/block.h"
 #include "script/standard.h"
 #include "util/ar_step_readonly.h"
@@ -35,48 +36,50 @@
 #include <stdlib.h>
 #include <string.h>
 
-size_t serve_address(const char *param, uint8_t *r, size_t max)
+struct explorer_mirror_stamp {
+    struct utxo_mirror_sync_service *service;
+    uint64_t generation;
+    int64_t next_height;
+};
+
+/* Health and counters are observations, not a lock on future chain changes. */
+static bool explorer_mirror_stamp(struct node_db *ndb, struct explorer_mirror_stamp *stamp)
 {
-    struct explorer_context *ctx = explorer_ctx();
-    size_t param_len = param ? strlen(param) : 0;
-    if (!ctx->main_state || !param || !param[0] || param_len >= 128 ||
-        !explorer_param_is_printable_ascii(param))
-        return 0;
+    struct utxo_mirror_sync_service *svc = g_utxo_mirror_sync;
+    uint64_t before, after;
+    if (!svc || svc->ndb != ndb || !atomic_load(&svc->thread_started) ||
+        atomic_load(&svc->state) != UTXO_MIRROR_SYNC_RUNNING ||
+        atomic_load(&svc->mirror_health) != UTXO_MIRROR_HEALTHY ||
+        !utxo_mirror_sync_audit_snapshot(&before)) return false;
+    int64_t next = atomic_load(&svc->last_mirror_height);
+    int64_t frontier = atomic_load(&svc->last_frontier);
+    int64_t pass = atomic_load(&svc->last_pass_unix);
+    if (next <= 0 || next != frontier || pass <= 0 ||
+        !utxo_mirror_sync_audit_snapshot(&after) || before != after ||
+        g_utxo_mirror_sync != svc || atomic_load(&svc->state) != UTXO_MIRROR_SYNC_RUNNING ||
+        atomic_load(&svc->mirror_health) != UTXO_MIRROR_HEALTHY) return false;
+    *stamp = (struct explorer_mirror_stamp){.service = svc, .generation = after, .next_height = next};
+    return true;
+}
 
-    char safe_addr[128];
-    html_escape(safe_addr, sizeof(safe_addr), param);
-
-    struct tx_destination dest;
-    memset(&dest, 0, sizeof(dest));
-    if (!addr_decode(param, &dest))
-        return explorer_view_address_invalid(safe_addr, r, max);
-
-    /* Get the 20-byte hash */
-    const uint8_t *addr_hash = NULL;
-    if (dest.type == DEST_KEY_ID)
-        addr_hash = dest.id.key.id.data;
-    else if (dest.type == DEST_SCRIPT_ID)
-        addr_hash = dest.id.script.hash.data;
-
-    struct explorer_address_view_data d;
-    memset(&d, 0, sizeof(d));
-    d.safe_addr = safe_addr;
-    d.is_p2pkh = (dest.type == DEST_KEY_ID);
-
-    if (ctx->node_db && addr_hash) {
-        int64_t balance = db_utxo_balance_for_address(ctx->node_db, addr_hash);
-        zcl_format_zcl(d.balance, sizeof(d.balance), balance);
-        d.have_balance = true;
+static void explorer_mirror_read(struct node_db *ndb, const uint8_t *addr_hash,
+    struct explorer_address_view_data *d, struct explorer_address_utxo_row rows[100])
+{
+    struct explorer_mirror_stamp before, after;
+    bool available = ndb && addr_hash && explorer_mirror_stamp(ndb, &before);
+    if (available) {
+        int64_t balance = db_utxo_balance_for_address(ndb, addr_hash);
+        zcl_format_zcl(d->balance, sizeof(d->balance), balance);
+        d->have_balance = true;
     }
 
     /* UTXO list */
-    struct explorer_address_utxo_row rows[100];
     size_t nrows = 0;
-    if (ctx->node_db && addr_hash) {
-        d.have_utxos = true;
+    if (available) {
+        d->have_utxos = true;
         struct db_utxo utxos[100];
-        int count = db_utxo_list_for_address(ctx->node_db, addr_hash, utxos, 100);
-        d.utxo_count = count;
+        int count = db_utxo_list_for_address(ndb, addr_hash, utxos, 100);
+        d->utxo_count = count;
 
         for (int i = 0; i < count; i++) {
             struct explorer_address_utxo_row *row = &rows[nrows];
@@ -97,8 +100,44 @@ size_t serve_address(const char *param, uint8_t *r, size_t max)
             db_utxo_free(&utxos[i]);
         }
     }
-    d.rows = rows;
-    d.num_rows = nrows;
+    d->rows = rows;
+    d->num_rows = nrows;
+    if (available && explorer_mirror_stamp(ndb, &after) &&
+        before.service == after.service && before.generation == after.generation &&
+        before.next_height == after.next_height) {
+        d->mirror_next_height = after.next_height;
+    } else {
+        d->have_balance = false; d->have_utxos = false; d->num_rows = 0;
+    }
+}
+
+size_t serve_address(const char *param, uint8_t *r, size_t max)
+{
+    struct explorer_context *ctx = explorer_ctx();
+    size_t param_len = param ? strlen(param) : 0;
+    if (!ctx->main_state || !param || !param[0] || param_len >= 128 ||
+        !explorer_param_is_printable_ascii(param))
+        return 0;
+
+    char safe_addr[128];
+    html_escape(safe_addr, sizeof(safe_addr), param);
+
+    struct tx_destination dest;
+    memset(&dest, 0, sizeof(dest));
+    if (!addr_decode(param, &dest))
+        return explorer_view_address_invalid(safe_addr, r, max);
+
+    const uint8_t *addr_hash = NULL;
+    if (dest.type == DEST_KEY_ID)
+        addr_hash = dest.id.key.id.data;
+    else if (dest.type == DEST_SCRIPT_ID)
+        addr_hash = dest.id.script.hash.data;
+
+    struct explorer_address_view_data d = {0};
+    d.safe_addr = safe_addr;
+    d.is_p2pkh = (dest.type == DEST_KEY_ID);
+    struct explorer_address_utxo_row rows[100];
+    explorer_mirror_read(ctx->node_db, addr_hash, &d, rows);
 
     return explorer_view_address(&d, r, max);
 }

@@ -28,9 +28,10 @@ struct explorer_address_utxo_row {
 struct explorer_address_view_data {
     const char *safe_addr;   /* already-html-escaped address string */
     bool   is_p2pkh;         /* true = P2PKH, false = P2SH */
-    bool   have_balance;     /* node_db + addr_hash available */
+    bool   have_balance;     /* mirror observation was available */
     char   balance[32];      /* formatted "X.YYYYYYYY" (valid if have_balance) */
-    bool   have_utxos;       /* node_db + addr_hash available (UTXO index up) */
+    bool   have_utxos;       /* mirror observation was available */
+    int64_t mirror_next_height; /* last observed next-height cursor */
     int    utxo_count;       /* total count reported (header), <= num_rows shown */
     const struct explorer_address_utxo_row *rows;
     size_t num_rows;         /* number of rows packed (min(count, 100)) */

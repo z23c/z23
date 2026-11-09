@@ -50,6 +50,9 @@ size_t explorer_view_address(const struct explorer_address_view_data *d,
         APPEND(off, r, max,
             "<div class='label'>Balance</div><div class='val amount'>%s ZCL</div>",
             d->balance);
+        APPEND(off, r, max,
+            "<div class='label'>Index checkpoint</div><div class='val'>Indexed through block %" PRId64
+            " (may lag the chain)</div>", d->mirror_next_height - 1);
     }
     APPEND(off, r, max, "</div></div>");
 
@@ -78,7 +81,7 @@ size_t explorer_view_address(const struct explorer_address_view_data *d,
         }
     } else {
         APPEND(off, r, max,
-            "<p style='color:#666'>UTXO index not available.</p>");
+            "<p style='color:#666'>UTXO index unavailable or not yet synchronized.</p>");
     }
 
     APPEND(off, r, max, EXPLORER_FOOTER);

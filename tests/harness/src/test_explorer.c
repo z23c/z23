@@ -7,6 +7,7 @@
 #include "test/test_core.h"
 #include "test/api_test_fixtures.h"
 #include "services/chain_evidence_authority_service.h"
+#include "services/utxo_mirror_sync_service.h"
 #include "util/thread_registry.h"
 #include "../../../contexts/explorer/controllers/src/explorer_controller_internal.h"
 #include "encoding/utilstrencodings.h"
@@ -15,6 +16,8 @@
 #include "controllers/explorer_internal.h"
 #include "jobs/reducer_frontier.h"
 #include "models/hodl_wave.h"
+#include "models/database.h"
+#include "models/utxo.h"
 #include "crypto/sha3.h"
 #include "views/explorer_factoids_internal.h"
 #include "views/explorer_factoids_view.h"
@@ -2295,9 +2298,105 @@ static int ex_case_40(void)
     return failures;
 }
 
+static int ex_quarantine_during_read(void *context)
+{
+    struct utxo_mirror_sync_service *svc = context;
+    atomic_store(&svc->mirror_health, UTXO_MIRROR_QUARANTINED);
+    return 0;
+}
+
+static int ex_update_during_read(void *context)
+{
+    struct utxo_mirror_sync_service *svc = context;
+    atomic_fetch_add(&svc->update_generation, 2);
+    return 0;
+}
+
+static bool ex_address_availability(const char *address, bool available)
+{
+    uint8_t response[32768] = {0};
+    size_t n = serve_address(address, response, sizeof(response));
+    if (!n || n >= sizeof(response)) return false;
+    const char *page = (const char *)response;
+    if (!available) return !strstr(page, "Unspent Outputs (") && !strstr(page, ">Balance</div>") &&
+        strstr(page, "UTXO index unavailable or not yet synchronized.");
+    return strstr(page, "Unspent Outputs (") && strstr(page, ">Balance</div>") &&
+        strstr(page, "2.50000000 ZCL") && strstr(page, "Indexed through block 6 (may lag the chain)");
+}
+
+struct ex_mirror_results {
+    bool healthy, quarantined, updating, changed, fired;
+    bool advanced, advanced_fired, no_pass, absent;
+};
+
+static struct ex_mirror_results ex_mirror_observe(struct node_db *ndb,
+                                                  struct utxo_mirror_sync_service *svc,
+                                                  const char *address)
+{
+    struct ex_mirror_results r = {0};
+    r.healthy = ex_address_availability(address, true);
+    atomic_store(&svc->mirror_health, UTXO_MIRROR_QUARANTINED);
+    r.quarantined = ex_address_availability(address, false);
+    atomic_store(&svc->mirror_health, UTXO_MIRROR_HEALTHY);
+    atomic_store(&svc->updates_active, 1);
+    r.updating = ex_address_availability(address, false);
+    atomic_store(&svc->updates_active, 0);
+    sqlite3_progress_handler(ndb->db, 1, ex_quarantine_during_read, svc);
+    r.changed = ex_address_availability(address, false);
+    sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
+    r.fired = atomic_load(&svc->mirror_health) == UTXO_MIRROR_QUARANTINED;
+    atomic_store(&svc->mirror_health, UTXO_MIRROR_HEALTHY);
+    sqlite3_progress_handler(ndb->db, 1, ex_update_during_read, svc);
+    r.advanced = ex_address_availability(address, false);
+    sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
+    r.advanced_fired = atomic_load(&svc->update_generation) > 0;
+    atomic_store(&svc->last_pass_unix, 0);
+    r.no_pass = ex_address_availability(address, false);
+    atomic_store(&svc->last_pass_unix, 100);
+    g_utxo_mirror_sync = NULL;
+    r.absent = ex_address_availability(address, false);
+    return r;
+}
+
+static bool ex_mirror_results_ok(struct ex_mirror_results r)
+{
+    return r.healthy && r.quarantined && r.updating && r.changed && r.fired &&
+        r.advanced && r.advanced_fired && r.no_pass && r.absent;
+}
+
+static int ex_mirror_address_availability(void)
+{
+    int failures = 0; struct node_db ndb; struct main_state ms = {0};
+    if (!node_db_open(&ndb, ":memory:")) return 1;
+    struct explorer_context saved = *explorer_ctx();
+    struct utxo_mirror_sync_service *prior = g_utxo_mirror_sync;
+    struct tx_destination dest = {.type = DEST_KEY_ID}; char address[128];
+    memset(dest.id.key.id.data, 0x42, sizeof(dest.id.key.id.data));
+    struct db_utxo coin = {.value = 250000000, .height = 6, .script_type = SCRIPT_P2PKH, .has_address = true};
+    memset(coin.txid, 0x31, sizeof(coin.txid)); memcpy(coin.address_hash, dest.id.key.id.data, sizeof(coin.address_hash));
+    bool encoded = db_utxo_save(&ndb, &coin) && addr_encode(address, sizeof(address), &dest);
+    explorer_ctx()->main_state = &ms; explorer_ctx()->node_db = &ndb;
+    struct utxo_mirror_sync_service svc = {0}; svc.ndb = &ndb;
+    atomic_store(&svc.state, UTXO_MIRROR_SYNC_RUNNING); atomic_store(&svc.thread_started, true);
+    atomic_store(&svc.mirror_health, UTXO_MIRROR_HEALTHY);
+    atomic_store(&svc.last_pass_unix, 100); atomic_store(&svc.last_frontier, 7);
+    atomic_store(&svc.last_mirror_height, 7);
+    g_utxo_mirror_sync = &svc;
+    struct ex_mirror_results r = {0};
+    if (encoded) r = ex_mirror_observe(&ndb, &svc, address);
+    g_utxo_mirror_sync = prior; *explorer_ctx() = saved; node_db_close(&ndb);
+    if (!encoded || !ex_mirror_results_ok(r)) {
+        printf("explorer: mirror availability healthy=%d quarantined=%d updating=%d changed=%d fired=%d advanced=%d advanced_fired=%d no_pass=%d absent=%d... FAIL\n",
+               r.healthy, r.quarantined, r.updating, r.changed, r.fired, r.advanced, r.advanced_fired, r.no_pass, r.absent);
+        failures++;
+    } else printf("explorer: mirror availability rejects unsafe derived rows... OK\n");
+    return failures;
+}
+
 int test_explorer(void)
 {
     int failures = 0;
+    failures += ex_mirror_address_availability();
     failures += ex_shielded_sign_witness();
     failures += ex_favicon_boundaries();
     failures += ex_route_precedence_witness();
