@@ -352,8 +352,7 @@ static bool zab_environment(struct zab *z)
     if (z->kit.selected) memcpy(z->env_root, z->kit.env, 32);
     else env = app_image_env_root(z->env_root);
     if (!env.ok) {
-        zab_fail(z, "ENV_UNAVAILABLE", false, "the toolchain capsule could "
-                 "not be captured", env.message);
+        zab_fail(z, "ENV_UNAVAILABLE", false, env.message, env.message);
         return false;
     }
     return true;

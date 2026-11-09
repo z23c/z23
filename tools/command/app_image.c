@@ -72,8 +72,9 @@ struct zcl_result app_image_env_root(uint8_t out[32])
     if (!out)
         return ZCL_ERR(-1, "app build record: env root needs an output");
     if (!vcs_toolchain_capsule_v1_capture(&capsule))
-        return ZCL_ERR(-1, "app build record: the toolchain capsule cannot "
-                           "be captured on this host");
+        return ZCL_ERR(-1, "host toolchain rooted at %s could not be captured; "
+                           "verify the compiler, linker and runtime files",
+                       VCS_BUILD_COMPILER_V1);
     if (!vcs_toolchain_capsule_v1_root(&capsule, out))
         return ZCL_ERR(-1, "app build record: the captured toolchain "
                            "capsule has no root");
