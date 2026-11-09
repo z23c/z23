@@ -1059,13 +1059,20 @@ static void wprt_seen_hook(struct wprt_fx *f, const struct uint256 *a,
     }
     if (have)
         transaction_free(&wtx.tx);
+    bool allocated = svc != NULL;
     free(svc);
     bool found = false;
+    int state = -1, in_pool = -1; size_t pending = 0; bool pending_read = false;
+    bool passed = ok && have && allocated &&
+        (state = wprt_state(a, &found)) == WPR_SEEN && found &&
+        !(in_pool = tx_mempool_exists(wpr_pool(wpr_global()), a)) &&
+        (pending_read = true, pending = wprt_pending()) == 1;
+    if (!passed)
+        printf("[seen hook ok=%d copied=%d context=%d state=%d found=%d pool=%d pending_read=%d pending=%zu] ",
+               ok, have, allocated, state, found, in_pool, pending_read, pending);
     wprt_report("the wallet tx-accepted hook clears the pending state and "
                 "empties the private pool entry",
-                ok && have && svc && wprt_state(a, &found) == WPR_SEEN &&
-                    found && !tx_mempool_exists(wpr_pool(wpr_global()), a) &&
-                    wprt_pending() == 1,
+                passed,
                 failures);
 }
 
@@ -1087,28 +1094,40 @@ static void wprt_seen_block(struct wprt_fx *f, const struct uint256 *b,
     }
     wprt_run(1000, -1);
     bool found = false;
+    int state = -1, in_pool = -1; size_t pending = 0; bool pending_read = false;
+    bool passed = ok && have && (state = wprt_state(b, &found)) == WPR_SEEN && found &&
+        !(in_pool = tx_mempool_exists(wpr_pool(wpr_global()), b)) &&
+        (pending_read = true, pending = wprt_pending()) == 0;
+    if (!passed)
+        printf("[block ok=%d copied=%d state=%d found=%d pool=%d pending_read=%d pending=%zu] ",
+               ok, have, state, found, in_pool, pending_read, pending);
     wprt_report("inclusion in a block clears the pending state",
-                ok && have && wprt_state(b, &found) == WPR_SEEN && found &&
-                    !tx_mempool_exists(wpr_pool(wpr_global()), b) &&
-                    wprt_pending() == 0,
+                passed,
                 failures);
     size_t sent = wprt_all(f, "tx");
     wprt_run(1000 * 1000, -1);
+    size_t after = 0; bool after_read = false;
+    bool unchanged = ok && (after_read = true, after = wprt_all(f, "tx")) == sent;
+    if (!unchanged) printf("[repush ok=%d sent=%zu after_read=%d after=%zu] ", ok, sent, after_read, after);
     wprt_report("a cleared send is never pushed again",
-                ok && wprt_all(f, "tx") == sent, failures);
+                unchanged, failures);
 }
 
 static int wprt_case_seen_and_block(void)
 {
     int failures = 0;
     struct wprt_fx f;
-    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
-    struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
+    bool wallet_ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
+    struct p2p_node *onion = wallet_ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
     struct uint256 a, b;
-    ok = ok && onion && wprt_rpc_send(&f, false, 10.0, &a) &&
-         wprt_rpc_send(&f, true, 10.0, &b);
+    int send_a = -1, send_b = -1; size_t count = 0; bool count_read = false;
+    bool ok = wallet_ok && onion && (send_a = wprt_rpc_send(&f, false, 10.0, &a)) &&
+              (send_b = wprt_rpc_send(&f, true, 10.0, &b));
     wprt_run(WPR_DELAY_MAX_MS + 1000, -1);
-    ok = ok && wprt_count(onion, "tx") == 2;
+    ok = ok && (count_read = true, count = wprt_count(onion, "tx")) == 2;
+    if (!ok)
+        printf("[seen setup wallet=%d peer=%d send_a=%d send_b=%d count_read=%d tx_count=%zu] ",
+               wallet_ok, onion != NULL, send_a, send_b, count_read, count);
     wprt_seen_hook(&f, &a, ok, &failures);
     wprt_seen_block(&f, &b, ok, &failures);
     wprt_close(&f);
