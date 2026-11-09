@@ -333,7 +333,7 @@ static void tpp_child_environment(const char *cflags)
         "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", NULL};
     for (int i = 0; clear[i]; i++) if (unsetenv(clear[i])) _exit(125);
     if (cflags && setenv("CFLAGS", cflags, 1)) _exit(125);
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__linux__)
     if (setenv("MACOSX_DEPLOYMENT_TARGET", "14.0", 1)) _exit(125);
 #endif
     if (setenv("ZCL_TOR_JOBS", "1", 1) || setenv("LC_ALL", "C", 1) ||
