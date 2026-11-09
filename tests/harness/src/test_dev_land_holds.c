@@ -1250,6 +1250,56 @@ static bool dlx_pc_observation_age(const char *root, const char *metadata, int64
     return size > 0 && size < (int)sizeof(changed) && dlx_write(metadata, changed);
 }
 
+static void dlx_pc_recording_hash(const char *domain, const char *text, char out[65])
+{
+    struct sha3_256_ctx sha;
+    uint8_t hash[32];
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, strlen(domain) + 1);
+    sha3_256_write(&sha, (const uint8_t *)text, strlen(text));
+    sha3_256_finalize(&sha, hash);
+    zcl_hex_encode(hash, sizeof(hash), out);
+}
+
+static bool dlx_pc_recording_case(int days_ago, int record_days, bool corrupt, bool bad_observation,
+                                  bool expect_uncertain, bool expect_ship)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char archive[1600], root[512], wt[800], request[320], failure[1200];
+    char reqhash[65], failhash[65], metadata[1600], body[1024], row[512];
+    const char *leaf = "1111111111111111111111111111111111111111-2222222222222222222222222222222222222222.aaaaaa";
+    if (!dlx_pc_rig(&rig, "recording_window", true, "check-learned-one\n") ||
+        !dlx_pc_history_archive("aaaaaa", days_ago, "child_proof_failed_exit_2", archive) ||
+        !platform_state_root(root, sizeof(root))) return false;
+    (void)snprintf(wt, sizeof(wt), "%s/land/wt", root);
+    (void)snprintf(request, sizeof(request), "zcl.dev_proof_request.v1\n1111111111111111111111111111111111111111\n2222222222222222222222222222222222222222\n%lld\n1\n", (long long)DLX_PC_NOW - (long long)days_ago * 86400);
+    (void)snprintf(failure, sizeof(failure), "child_proof_failed_exit_2\nlint check-ship-remote-transaction: FAIL check-ship-remote-transaction 3445 ms (rc=1)\n");
+    dlx_pc_recording_hash("zcl.dev_proof_failure_recorded.request.v1", request, reqhash);
+    dlx_pc_recording_hash("zcl.dev_proof_failure_recorded.failure.v1", failure, failhash);
+    if (corrupt) reqhash[0] = reqhash[0] == '0' ? '1' : '0';
+    (void)snprintf(metadata, sizeof(metadata), ".cache/zcl-dev-proof/attempts/%s/logs/failure-time.v1", leaf);
+    (void)snprintf(body, sizeof(body), "zcl.dev_proof_failure_recorded.v1\nattempt=%s\nlocal=1111111111111111111111111111111111111111\nbase=2222222222222222222222222222222222222222\nrequest_sha3=%s\nfailure_sha3=%s\nrecorded_unix=%lld\nrecorded_monotonic_us=2\n", leaf, reqhash, failhash, (long long)DLX_PC_NOW - (long long)record_days * 86400);
+    if (!dlx_pc_owned_file(wt, metadata, body, 0600) || !dlx_pc_ship_files(&rig, true)) return false;
+    if (bad_observation) {
+        (void)snprintf(metadata, sizeof(metadata), ".cache/zcl-dev-proof/attempts/%s/logs/failure-observed.v1", leaf);
+        if (!dlx_pc_owned_file(wt, metadata, "invalid observation\n", 0600)) return false;
+    }
+    dlx_pc_row(row, sizeof(row), 8, "failed", "lint", 1, "check-learned-one failed");
+    if (!dlx_pc_outcomes(row)) return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ran = dlx_run(&c);
+    bool ok = ran && dlx_ok(&c) &&
+        (strstr(dlx_str(&c, "precheck_unproven"), "proof-history:") != NULL) == expect_uncertain &&
+        dlx_pc_has(dlx_arr(&c, "precheck_ran"), "check-ship-remote-transaction") == expect_ship;
+    if (!ok) fprintf(stderr, "recording case request_days=%d record_days=%d corrupt=%d bad_observation=%d ran=%d uncertain=%d ship=%d\n",
+        days_ago, record_days, corrupt, bad_observation, ran,
+        strstr(dlx_str(&c, "precheck_unproven"), "proof-history:") != NULL,
+        dlx_pc_has(dlx_arr(&c, "precheck_ran"), "check-ship-remote-transaction"));
+    dlx_end(&c); dlx_restore();
+    return ok;
+}
+
 bool dlx_pc_observation_aged(void)
 {
     struct dlx_rig rig;
@@ -1268,7 +1318,12 @@ bool dlx_pc_observation_aged(void)
         row.observation_state == ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER && row.observed_upper_unix == age;
     dlx_end(&c);
     dlx_restore();
-    return ok;
+    return ok && dlx_pc_recording_case(10, 8, false, false, false, false) &&
+        dlx_pc_recording_case(7, 7, false, false, false, true) &&
+        dlx_pc_recording_case(10, 1, false, false, true, false) &&
+        dlx_pc_recording_case(10, -1, false, false, true, false) &&
+        dlx_pc_recording_case(10, 8, true, false, true, false) &&
+        dlx_pc_recording_case(10, 8, false, true, true, false);
 }
 
 bool dlx_pc_gate_set_learns(void)

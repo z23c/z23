@@ -1284,11 +1284,14 @@ static void rt_case_real(const char *dir, const char *nodir)
     }
     zcl_native_fleet_board_test_set_bootstrap(NULL);
 }
-static void rt_noop_signal(int sig) { (void)sig; }
+static volatile sig_atomic_t rt_signal_count;
+static void rt_noop_signal(int sig) { (void)sig; rt_signal_count++; }
 struct rt_signal_sender {
     pthread_t target;
     atomic_bool ready;
     atomic_bool start;
+    int64_t started, first_sent, last_sent;
+    int sent, failed;
 };
 
 /* Ten SIGUSR1s at real 20ms intervals. Sleep coalescing on background Mac
@@ -1300,9 +1303,15 @@ static void *rt_signal_loop(void *target)
     atomic_store(&sender->ready, true);
     while (!atomic_load(&sender->start)) sched_yield();
     const int64_t start = rt_now();
+    sender->started = start;
     for (int i = 1; i <= 10; i++) {
         while (rt_now() < start + i * 20) sched_yield();
-        pthread_kill(sender->target, SIGUSR1);
+        if (pthread_kill(sender->target, SIGUSR1) == 0) {
+            int64_t sent_at = rt_now();
+            if (!sender->sent) sender->first_sent = sent_at;
+            sender->last_sent = sent_at;
+            sender->sent++;
+        } else sender->failed++;
     }
     return NULL;
 }
@@ -1310,15 +1319,37 @@ static void *rt_signal_loop(void *target)
 struct rt_connect_wait {
     platform_socket_t fd;
     int interrupted;
+    int calls;
+    int64_t first_entry, last_exit;
 };
 
 static int rt_connect_wait_real(int wait_ms, void *ctx)
 {
     struct rt_connect_wait *wait = ctx;
+    if (!wait->calls) wait->first_entry = rt_now();
+    wait->calls++;
     int result = platform_socket_wait_writable(wait->fd, wait_ms);
+    int saved_errno = errno;
     if (result < 0 && platform_socket_error_interrupted(platform_socket_last_error()))
         wait->interrupted++;
+    wait->last_exit = rt_now();
+    errno = saved_errno;
     return result;
+}
+
+static void rt_signal_timing(const struct rt_signal_sender *sender,
+                             const struct rt_connect_wait *wait, int64_t t0)
+{
+    printf("  signal timing ms: sender_start=%lld first_send_return=%lld last_send_return=%lld "
+           "sent=%d send_failed=%d wait_entry=%lld wait_exit=%lld calls=%d "
+           "eintr=%d handled=%d (-1 means absent)\n",
+           (long long)(sender->started ? sender->started - t0 : -1),
+           (long long)(sender->sent ? sender->first_sent - t0 : -1),
+           (long long)(sender->sent ? sender->last_sent - t0 : -1),
+           sender->sent, sender->failed,
+           (long long)(wait->calls ? wait->first_entry - t0 : -1),
+           (long long)(wait->calls ? wait->last_exit - t0 : -1),
+           wait->calls, wait->interrupted, (int)rt_signal_count);
 }
 
 static bool rt_connect_eintr_pass(const char *dir, uint16_t port,
@@ -1327,6 +1358,7 @@ static bool rt_connect_eintr_pass(const char *dir, uint16_t port,
     pthread_t signaler;
     struct rt_signal_sender sender = { .target = pthread_self() };
     struct rt_connect_wait wait = { .fd = fd };
+    rt_signal_count = 0;
     if (pthread_create(&signaler, NULL, rt_signal_loop, &sender) != 0) {
         rt_expect(false, "real-signal sender setup", 0, 0);
         return false;
@@ -1353,6 +1385,7 @@ static bool rt_connect_eintr_pass(const char *dir, uint16_t port,
                             : "40ms + real signals: connect phase keeps original deadline";
     char failure_name[192];
     if (!matched) {
+        rt_signal_timing(&sender, &wait, t0);
         snprintf(failure_name, sizeof failure_name, "%s interrupted=%d timeout_match=%d",
                  name, wait.interrupted, rt_has(b, "connect timed out"));
         name = failure_name;

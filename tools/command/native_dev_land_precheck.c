@@ -431,6 +431,17 @@ struct pc_history {
     bool uncertain;
 };
 
+static bool pc_recording_expired(const struct zcl_dev_proof_history_failure *row,
+                                 int64_t now)
+{
+    return row->time_state == ZCL_PROOF_HISTORY_TIME_BOUND_RECORDING &&
+        row->recorded_unix <= now &&
+        row->recorded_unix < now - ZCL_LAND_PRECHECK_WINDOW_S &&
+        row->observation_state != ZCL_PROOF_HISTORY_OBSERVATION_UNUSABLE &&
+        (row->observation_state != ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER ||
+         row->observed_upper_unix <= now);
+}
+
 static bool pc_history_visit(const struct zcl_dev_proof_history_failure *row,
                               void *context)
 {
@@ -442,6 +453,10 @@ static bool pc_history_visit(const struct zcl_dev_proof_history_failure *row,
     }
     if (strncmp(row->digest, "lint:", 5) != 0 &&
         strncmp(row->digest, "lint ", 5) != 0) return true;
+    /* A bound recording timestamp is an upper bound on when the failure
+     * existed. It can prove expiration, never that the failure is recent. */
+    if (pc_recording_expired(row, h->now))
+        return true;
     if (row->observation_state == ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER) {
         if (row->observed_upper_unix > h->now) h->uncertain = true;
         else if (row->observed_upper_unix < h->now - ZCL_LAND_PRECHECK_WINDOW_S)
