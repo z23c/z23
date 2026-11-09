@@ -1514,6 +1514,55 @@ static int fgl_case_receipt_items(const char *root)
     return failures;
 }
 
+static int fgl_case_receipt_identity(const char *root)
+{
+    int failures = 0;
+    char dir[600];
+    struct zcl_goals_options o;
+    fgl_options(&o);
+    (void)snprintf(dir, sizeof(dir), "%s/receipt-identity", root);
+    (void)mkdir(dir, 0700);
+    o.receipts_dir = dir;
+    TEST("generic receipts reject wrong or missing items and future timestamps") {
+        static const char *const rows[] = {
+            "{\"ts\":1799996400,\"item\":\"C7\",\"verdict\":\"pass\"}\n",
+            "{\"ts\":1799996400,\"verdict\":\"pass\"}\n",
+            "{\"ts\":1799996400,\"item\":true,\"verdict\":\"pass\"}\n",
+            "{\"ts\":\"1799996400\",\"item\":\"C1\",\"verdict\":\"pass\"}\n",
+            "{\"ts\":1e100,\"item\":\"C1\",\"verdict\":\"pass\"}\n",
+            "{\"ts\":1800000001,\"item\":\"C1\",\"verdict\":\"pass\"}\n",
+            "{\"ts\":9223372036854775807,\"item\":\"C1\",\"verdict\":\"pass\"}\n",
+            "{\"ts\":-9223372036854775808,\"item\":\"C1\",\"verdict\":\"pass\"}\n",
+            "{\"ts\":1799996400,\"item\":\"C1\",\"verdict\":\"pass\"}\n"
+            "{\"ts\":1800000001,\"item\":\"C1\",\"verdict\":\"pass\"}\n"
+        };
+        for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+            ASSERT(fgl_receipt_line(dir, "C1", rows[i]));
+            ASSERT(zcl_goals_measure(&o, "C1").grade == ZCL_GOAL_UNMEASURED);
+        }
+        ASSERT(fgl_receipt_line(dir, "C1",
+            "{\"ts\":1799996400,\"item\":\"C1\",\"verdict\":\"pass\"}\n"));
+        ASSERT(zcl_goals_measure(&o, "C1").grade == ZCL_GOAL_PASS);
+        ASSERT(fgl_receipt_line(dir, "C1",
+            "{\"ts\":1799996400,\"item\":\"C1\",\"verdict\":\"pass\",\"wall_s\":1e100}\n"));
+        ASSERT(zcl_goals_measure(&o, "C1").grade == ZCL_GOAL_PASS);
+        ASSERT(fgl_receipt_line(dir, "C1",
+            "{\"ts\":1800000000,\"item\":\"C1\",\"verdict\":\"pass\"}\n"));
+        ASSERT(zcl_goals_measure(&o, "C1").grade == ZCL_GOAL_PASS);
+        ASSERT(fgl_receipt_line(dir, "C1",
+            "{\"ts\":1799913600,\"item\":\"C1\",\"verdict\":\"pass\"}\n"));
+        ASSERT(zcl_goals_measure(&o, "C1").grade == ZCL_GOAL_PASS);
+        ASSERT(fgl_receipt_line(dir, "C1",
+            "{\"ts\":1799913599,\"item\":\"C1\",\"verdict\":\"pass\"}\n"));
+        ASSERT(zcl_goals_measure(&o, "C1").grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_receipt_line(dir, "C1",
+            "{\"ts\":1799996400,\"item\":\"C1\",\"verdict\":\"fail\"}\n"));
+        ASSERT(zcl_goals_measure(&o, "C1").grade == ZCL_GOAL_FAIL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static bool fgl_input(struct json_value *in, const char *item,
                       const char *verdict, const char *wall,
                       const char *detail)
@@ -1704,6 +1753,7 @@ int test_fleet_goals(void)
     failures += fgl_case_receipt_c6(root);
     failures += fgl_case_receipt_none();
     failures += fgl_case_receipt_items(root);
+    failures += fgl_case_receipt_identity(root);
     failures += fgl_case_receipt_append(root);
     failures += fgl_case_hosts();
     failures += fgl_case_g1(root);

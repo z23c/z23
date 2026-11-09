@@ -331,21 +331,42 @@ static bool rc_last_line(const char *path, char *buf, size_t cap)
     return true;
 }
 
-static struct zcl_goal_result rc_item_grade(const struct json_value *row,
-                                            const char *path, const char *next,
-                                            int64_t now)
+/* Validate the identity and clock before reading numeric receipt fields. */
+static const char *rc_item_problem(const struct json_value *row,
+                                   const char *id, int64_t now)
 {
+    const struct json_value *item = json_get(row, "item");
+    const struct json_value *stamp = json_get(row, "ts");
+    const struct json_value *verdict = json_get(row, "verdict");
+    if (!item || item->type != JSON_STR || strcmp(json_get_str(item), id) != 0)
+        return "item does not match the requested criterion";
+    if (!stamp || stamp->type != JSON_INT || json_get_int(stamp) <= 0 ||
+        !verdict || verdict->type != JSON_STR || !json_get_str(verdict)[0])
+        return "missing or invalid timestamp or verdict";
+    if (json_get_int(stamp) > now)
+        return "timestamp is in the future";
+    return NULL;
+}
+
+static struct zcl_goal_result rc_item_grade(const struct json_value *row,
+                                            const char *id, const char *path,
+                                            const char *next, int64_t now)
+{
+    const char *problem = rc_item_problem(row, id, now);
+    if (problem)
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
+                             "newest receipt %s; receipt %s", problem, path);
+    const struct json_value *wall_value = json_get(row, "wall_s");
     int64_t ts = json_get_int(json_get(row, "ts"));
     const char *verdict = json_get_str(json_get(row, "verdict"));
-    long long wall = (long long)json_get_int(json_get(row, "wall_s"));
+    long long wall = wall_value && wall_value->type == JSON_INT
+                         ? (long long)json_get_int(wall_value) : 0;
     const char *commit = json_get_str(json_get(row, "build_commit"));
-    long long age = (long long)rc_age_h(now, ts);
+    long long age;
 
     if (!commit || !commit[0])
         commit = "unknown";
-    if (!verdict || !verdict[0] || ts <= 0)
-        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
-                             "newest line of %s has no ts and verdict", path);
+    age = (long long)rc_age_h(now, ts);
     if (now - ts > RC_C3_WINDOW_S)
         return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
                              "stale: newest receipt is %lld h old, window 24 h; "
@@ -387,7 +408,7 @@ static struct zcl_goal_result rc_item(const struct zcl_goals_options *o,
         res = zcl_goal_make(ZCL_GOAL_UNMEASURED, target,
                             "newest line of %s is not a receipt", path);
     else
-        res = rc_item_grade(&row, path, target, now);
+        res = rc_item_grade(&row, id, path, target, now);
     json_free(&row);
     return res;
 }
