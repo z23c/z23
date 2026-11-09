@@ -538,9 +538,92 @@ _test_next:;
     return failures;
 }
 
-int test_dev_land_drive_producer_reproof(void)
+#if !defined(_WIN32)
+static bool dlx_boundary_runs(const char *saved, const char *root,
+                              const char *makefile, const char *mark,
+                              const char *proof)
+{
+    return zcl_native_dev_land_test_boundary_reproof(saved, root, makefile) == 1 &&
+           dlx_file_exists(mark) && dlx_file_exists(proof) &&
+           unlink(mark) == 0 && unlink(proof) == 0;
+}
+#endif
+
+static int dlx_producer_cancel_boundary(void)
 {
     int failures = 0;
+#if !defined(_WIN32)
+    TEST("land: a settled cancellation stops the next producer or proof stage") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char land[1200], queue[1400], outcome[1400], saved[8192], terminal[8192];
+        char makefile[1400], mark[1400], proof[1400], script[6000];
+        size_t n = 0, m = 0;
+        dlx_isolate("producer_cancel_boundary");
+        ASSERT(dlx_rig_make(&rig, "producer_cancel_boundary_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c)); dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c)); dlx_end(&c);
+        dlx_landdir(land, sizeof(land));
+        (void)snprintf(queue, sizeof(queue), "%s/queue.jsonl", land);
+        (void)snprintf(outcome, sizeof(outcome), "%s/outcomes.jsonl", land);
+        (void)snprintf(makefile, sizeof(makefile), "%s/fake-make", rig.clone);
+        (void)snprintf(mark, sizeof(mark), "%s/make-ran", rig.clone);
+        (void)snprintf(proof, sizeof(proof), "%s/proof-ran", rig.clone);
+        ASSERT(dlx_slurp(queue, saved, sizeof(saved) - 1, &n)); saved[n] = '\0';
+        dlx_begin(&c, "cancel"); (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c) && dlx_ok(&c)); dlx_end(&c);
+        ASSERT(dlx_slurp(outcome, terminal, sizeof(terminal) - 1, &m)); terminal[m] = '\0';
+        (void)snprintf(script, sizeof(script),
+            "#!/bin/sh\ntouch '%s'\nmkdir -p \"$3/build/bin\"\nprintf '%%s\\n' '#!/bin/sh' 'touch %s' > \"$3/build/bin/z23-dev\"\nchmod 700 \"$3/build/bin/z23-dev\"\n", mark, proof);
+        ASSERT(dlx_write(makefile, script) && chmod(makefile, 0700) == 0);
+        ASSERT(zcl_native_dev_land_test_boundary_reproof(saved, rig.clone, makefile) == -3);
+        ASSERT(!dlx_file_exists(mark) && !dlx_file_exists(proof));
+        /* Outcome appended but queue rewrite did not finish: do not suppress. */
+        ASSERT(dlx_write(queue, saved));
+        ASSERT(dlx_boundary_runs(saved, rig.clone, makefile, mark, proof));
+        ASSERT(dlx_write(queue, "") && dlx_write(outcome, "not-json\n"));
+        ASSERT(dlx_boundary_runs(saved, rig.clone, makefile, mark, proof));
+        ASSERT(unlink(outcome) == 0);
+        ASSERT(dlx_boundary_runs(saved, rig.clone, makefile, mark, proof));
+        char foreign[8192]; memcpy(foreign, terminal, m + 1);
+        char *tip = strstr(foreign, "\"tip\":\""); ASSERT(tip != NULL);
+        tip += strlen("\"tip\":\""); *tip = *tip == '0' ? '1' : '0';
+        ASSERT(dlx_write(outcome, foreign));
+        ASSERT(dlx_boundary_runs(saved, rig.clone, makefile, mark, proof));
+        memcpy(foreign, terminal, m + 1);
+        char *attempt = strstr(foreign, "\"attempt\":1"); ASSERT(attempt != NULL);
+        attempt[strlen("\"attempt\":")] = '2';
+        ASSERT(dlx_write(outcome, foreign));
+        ASSERT(dlx_boundary_runs(saved, rig.clone, makefile, mark, proof));
+        char duplicate[16384];
+        ASSERT(snprintf(duplicate, sizeof(duplicate), "%s%s", terminal, terminal) < (int)sizeof(duplicate));
+        ASSERT(dlx_write(outcome, duplicate));
+        ASSERT(dlx_boundary_runs(saved, rig.clone, makefile, mark, proof));
+        ASSERT(dlx_write(outcome, terminal) && dlx_write(queue, saved));
+        /* Complete cancellation while the producer runs: proof never starts. */
+        (void)snprintf(script, sizeof(script),
+            "#!/bin/sh\ntouch '%s'\n: > '%s'\nexit 0\n", mark, queue);
+        ASSERT(dlx_write(makefile, script) && chmod(makefile, 0700) == 0);
+        ASSERT(zcl_native_dev_land_test_boundary_reproof(saved, rig.clone, makefile) == -3);
+        ASSERT(dlx_file_exists(mark) && !dlx_file_exists(proof));
+        char after[8192]; size_t after_n = 0;
+        ASSERT(dlx_slurp(outcome, after, sizeof(after), &after_n) && after_n == m &&
+               memcmp(after, terminal, m) == 0);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+#endif
+    return failures;
+}
+
+int test_dev_land_drive_producer_reproof(void)
+{
+    int failures = dlx_producer_cancel_boundary();
 #if !defined(_WIN32)
     TEST("land: a drive whose binary is not the candidate's builds the producer in the landing worktree and proves with it") {
         char root[512], make_ok[1400], make_bad[1400], script[4000];

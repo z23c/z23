@@ -88,6 +88,8 @@ void zcl_native_dev_land_test_watcher_launch(const char *wt,
 #include <unistd.h>
 void zcl_native_dev_land_test_pick_barrier(int ready_fd, int release_fd);
 bool zcl_native_dev_land_test_producer_stale(const char *detail);
+int zcl_native_dev_land_test_boundary_reproof(const char *line, const char *root,
+                                              const char *make_program);
 int zcl_native_dev_land_test_range_adds_source(const char *wt,
                                                const char *base,
                                                const char *local);

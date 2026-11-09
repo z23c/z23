@@ -9833,10 +9833,12 @@ enum dl_recover {
     DL_RECOVER_OK = 0,
     DL_RECOVER_RETRY_REFUSED = -1,
     DL_RECOVER_UNAVAILABLE = -2,
+    DL_RECOVER_CANCELLED = -3,
 };
 static bool dl_producer_stale(const char *detail);
 static int dl_producer_recover(const char *root, const char *local,
-                               const char *base, char *why, size_t why_cap);
+                               const char *base, const struct dl_row *row,
+                               char *why, size_t why_cap);
 
 /* A producer-stale refusal is a verdict on the proof binary, not on the
  * candidate: do what `dev land drive` does — rebuild the producer in the
@@ -9867,7 +9869,11 @@ static bool dl_resume_producer_stale(const struct dl_dirs *d,
     }
     dl_log(row, "producer source mismatch; rebuilding the producer from the "
                 "candidate and proving again\n");
-    rc = dl_producer_recover(d->wt, row->local, row->base, why, sizeof(why));
+    rc = dl_producer_recover(d->wt, row->local, row->base, row, why, sizeof(why));
+    if (rc == DL_RECOVER_CANCELLED) {
+        dl_fail(reply, "PROOF_CANCELLED", "prove", "request was cancelled", d->land);
+        return true;
+    }
     if (rc != DL_RECOVER_OK) {
         (void)snprintf(row->detail, sizeof(row->detail),
                        "%.400s; producer recovery tried once and failed: %.64s",
@@ -11850,7 +11856,7 @@ static void dl_step(const struct zcl_command_request *req,
  * owns this intent: another authorized integrator can read the same row. */
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 static bool dl_drive_pair(long long seq, char local[80], char base[80],
-                           char root[4096])
+                           char root[4096], struct dl_row *captured)
 {
     struct dl_dirs d;
     struct dl_row *rows = NULL;
@@ -11869,6 +11875,7 @@ static bool dl_drive_pair(long long seq, char local[80], char base[80],
             strcmp(rows[i].phase, "prove") != 0)
             continue;
         if (dl_sha_ok(rows[i].local) && dl_sha_ok(rows[i].base)) {
+            if (captured) *captured = rows[i];
             (void)snprintf(local, 80, "%s", rows[i].local);
             (void)snprintf(base, 80, "%s", rows[i].base);
             (void)snprintf(root, 4096, "%s", d.wt);
@@ -11878,6 +11885,37 @@ static bool dl_drive_pair(long long seq, char local[80], char base[80],
     }
     free(rows);
     return found;
+}
+#endif
+
+/* A cancellation is settled only after its terminal record and queue removal
+ * are both visible under the same lock. Any ambiguity leaves work running. */
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+static bool dl_boundary_cancelled(const struct dl_row *captured)
+{
+    struct dl_dirs d;
+    struct dl_row want, outcome, *rows = NULL;
+    size_t n = 0;
+    bool present = false, live = false, ok = false;
+    long long high = 0;
+    char path[4096 + 32];
+    if (!captured || !dl_dirs_make(&d) ||
+        snprintf(path, sizeof(path), "%s/queue.jsonl", d.land) >= (int)sizeof(path))
+        return false;
+    int lock = dl_rows_lock(d.land);
+    if (lock < 0) return false;
+    want = *captured;
+    want.base[0] = want.local[0] = '\0';
+    if (dl_load_rows(path, &rows, &n, NULL, 0) &&
+        dl_scan_outcomes(&d, &want, &outcome, &present, &high)) {
+        for (size_t i = 0; i < n; i++)
+            if (rows[i].seq == captured->seq) live = true;
+        ok = !live && present && outcome.attempt == captured->attempt &&
+             strcmp(outcome.state, "cancelled") == 0;
+    }
+    free(rows);
+    dl_unlock(lock);
+    return ok;
 }
 #endif
 
@@ -12052,7 +12090,7 @@ static int dl_spawn_scrubbed(const char *const *argv, char *buf, size_t cap,
 
 static int dl_producer_reproof_log(const char *root, const char *local,
                                    const char *base, const char *make_program,
-                                   const char *log_path, char *why,
+                                   const char *log_path, const struct dl_row *row, char *why,
                                    size_t why_cap)
 {
     char jobs[16], bin[4096], root_arg[4200], local_arg[128], base_arg[128];
@@ -12078,6 +12116,7 @@ static int dl_producer_reproof_log(const char *root, const char *local,
         (void)snprintf(why, why_cap, "%s", "producer_log_unavailable");
         return -1;
     }
+    if (dl_boundary_cancelled(row)) { free(buf); return DL_RECOVER_CANCELLED; }
     const char *build[] = { make_program, jobs, "-C", root, "dev-bin", NULL };
     rc = dl_spawn_scrubbed(build, buf, DL_LOG_CAP,
                            DL_PRODUCER_BUILD_TIMEOUT_MS);
@@ -12089,6 +12128,7 @@ static int dl_producer_reproof_log(const char *root, const char *local,
         free(buf);
         return -1;
     }
+    if (dl_boundary_cancelled(row)) { free(buf); return DL_RECOVER_CANCELLED; }
     const char *prove[] = { bin, "dev", "proof", "step", root_arg, local_arg,
                             base_arg, NULL };
     rc = dl_spawn_scrubbed(prove, buf, DL_LOG_CAP,
@@ -12108,7 +12148,7 @@ static int dl_producer_reproof_log(const char *root, const char *local,
                                                 const char *make_program,
                                                 char *why, size_t why_cap)
 {
-    return dl_producer_reproof_log(root, local, base, make_program, NULL, why,
+    return dl_producer_reproof_log(root, local, base, make_program, NULL, NULL, why,
                                    why_cap);
 }
 
@@ -12121,9 +12161,10 @@ static int dl_producer_reproof_log(const char *root, const char *local,
  * carries the reason for either failure. Only the testing-only producer stubs
  * skip the rebuild: a test build then only counts the call. */
 static int dl_producer_recover(const char *root, const char *local,
-                               const char *base, char *why, size_t why_cap)
+                               const char *base, const struct dl_row *row, char *why, size_t why_cap)
 {
     why[0] = '\0';
+    if (dl_boundary_cancelled(row)) return DL_RECOVER_CANCELLED;
 #if defined(ZCL_TESTING)
     if (dl_producer_stub_active()) {
         if (dl_producer_stub_record())
@@ -12138,7 +12179,9 @@ static int dl_producer_recover(const char *root, const char *local,
         (void)snprintf(why, why_cap, "%s", again.detail);
         return DL_RECOVER_RETRY_REFUSED;
     }
-    if (dl_producer_reproof(root, local, base, "make", why, why_cap) < 0)
+    int reproof = dl_producer_reproof_log(root, local, base, "make", NULL, row, why, why_cap);
+    if (reproof == DL_RECOVER_CANCELLED) return DL_RECOVER_CANCELLED;
+    if (reproof < 0)
         return DL_RECOVER_UNAVAILABLE;
     return DL_RECOVER_OK;
 #else
@@ -12152,6 +12195,16 @@ static int dl_producer_recover(const char *root, const char *local,
 #endif
 
 #if defined(ZCL_TESTING)
+int zcl_native_dev_land_test_boundary_reproof(const char *line, const char *root,
+                                              const char *make_program)
+{
+    struct dl_row row;
+    char why[256] = "";
+    if (!line || !dl_parse_row(line, &row)) return -1;
+    return dl_producer_reproof_log(root, row.local, row.base, make_program,
+                                   NULL, &row, why, sizeof(why));
+}
+
 bool zcl_native_dev_land_test_producer_stale(const char *detail)
 {
     return dl_producer_stale(detail);
@@ -12224,9 +12277,10 @@ static int dl_prove_pair(struct zcl_command_reply *reply)
     char local[80], base[80], root[4096], log[4096 + 128], why[256] = "";
     char evidence[4096 + 512], failed[4096] = "";
     struct dl_dirs d;
+    struct dl_row captured;
     int64_t started;
     int rc;
-    if (!dl_drive_pair(0, local, base, root) || !dl_dirs_make(&d)) {
+    if (!dl_drive_pair(0, local, base, root, &captured) || !dl_dirs_make(&d)) {
         dl_fail(reply, "PROOF_INTENT_UNAVAILABLE", "drive",
                 "the exact in-flight proof pair is unavailable",
                 "retry dev land drive after inspecting dev land status");
@@ -12236,6 +12290,10 @@ static int dl_prove_pair(struct zcl_command_reply *reply)
     (void)snprintf(g_dl_prove.base, sizeof(g_dl_prove.base), "%s", base);
     if (dl_prove_receipt_ok(root, local, base))
         return 1; /* resumed: the proof already finished */
+    if (dl_boundary_cancelled(&captured)) {
+        dl_fail(reply, "PROOF_CANCELLED", "drive", "request was cancelled", d.land);
+        return -1;
+    }
 #ifdef ZCL_DEV_BUILD
     struct zcl_dev_proof_status prior = {0};
     if (zcl_dev_proof_status_read(root, local, base, &prior) &&
@@ -12251,9 +12309,13 @@ static int dl_prove_pair(struct zcl_command_reply *reply)
     (void)unlink(log);
     started = platform_time_monotonic_us();
     rc = dl_producer_reproof_log(root, local, base, dl_prove_make_program(),
-                                 log, why, sizeof(why));
+                                 log, &captured, why, sizeof(why));
     g_dl_prove.ran = true;
     g_dl_prove.ms += (platform_time_monotonic_us() - started) / 1000;
+    if (rc == DL_RECOVER_CANCELLED) {
+        dl_fail(reply, "PROOF_CANCELLED", "drive", "request was cancelled", d.land);
+        return -1;
+    }
     if (rc < 0) {
         (void)snprintf(evidence, sizeof(evidence),
                        "gate=producer_build: %s; log=%s", why, log);
@@ -12289,11 +12351,12 @@ static int dl_drive_proof(long long seq, struct zcl_command_reply *reply)
         return dl_prove_pair(reply);
 #ifdef ZCL_DEV_BUILD
     char local[80], base[80], root[4096];
+    struct dl_row captured;
     struct zcl_dev_proof_status proof = {0};
     int result;
     if (dl_stub())
         return 1;
-    if (!dl_drive_pair(seq, local, base, root)) {
+    if (!dl_drive_pair(seq, local, base, root, &captured)) {
         dl_fail(reply, "PROOF_INTENT_UNAVAILABLE", "drive",
                 "the exact in-flight proof pair is unavailable",
                 "retry dev land drive after inspecting dev land status");
@@ -12320,8 +12383,12 @@ static int dl_drive_proof(long long seq, struct zcl_command_reply *reply)
         /* Settled as a refusal of this binary, not of the candidate. Queue
          * the pair again and prove it with a producer built from it. */
         char why[256] = "";
-        int recovered = dl_producer_recover(root, local, base, why,
+        int recovered = dl_producer_recover(root, local, base, &captured, why,
                                             sizeof(why));
+        if (recovered == DL_RECOVER_CANCELLED) {
+            dl_fail(reply, "PROOF_CANCELLED", "drive", "request was cancelled", root);
+            return -1;
+        }
         if (recovered == DL_RECOVER_RETRY_REFUSED) {
             dl_fail(reply, "PROOF_PRODUCER_RETRY_REFUSED", "drive",
                     "cannot queue the pair again for a candidate-built producer",
