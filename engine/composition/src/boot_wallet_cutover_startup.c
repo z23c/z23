@@ -775,6 +775,7 @@ bool boot_test_pending_publish(struct boot_cutover_env *e, struct app_context *c
 }
 #endif
 
+#include "boot_wallet_auth_observe.h"
 /* The descriptor is a one-shot capability, never wallet authority itself. */
 static bool boot_pending_authenticate(struct boot_cutover_env *e, struct app_context *ctx,
                                       bool *unlocked, int64_t *deadline)
@@ -793,26 +794,27 @@ static bool boot_pending_authenticate(struct boot_cutover_env *e, struct app_con
     int fd = ctx->wallet_startup_auth_fd;
     ctx->wallet_startup_auth_present = false;
     char secret[Z23_WALLET_AUTH_SECRET_MAX + 1] = {0};
-    bool received = platform_wallet_startup_auth_receive(fd, 120000, secret, sizeof(secret));
-    struct zcl_result result = received ? wallet_lock_unlock(e->wallet, e->wallet_db, secret)
-                                        : ZCL_ERR(-1, "startup authentication unavailable");
+    bool received = BOOT_AUTH_BOOL('R', platform_wallet_startup_auth_receive(fd, 120000, secret, sizeof(secret)));
+    struct zcl_result result = BOOT_AUTH_RESULT('U', received ? wallet_lock_unlock(e->wallet, e->wallet_db, secret)
+                                        : ZCL_ERR(-1, "startup authentication unavailable"));
     memory_cleanse(secret, sizeof(secret));
     if (!result.ok) return false;
     *unlocked = true;
     if (!e->sapling_load_ok) return false;
     int64_t now = platform_time_monotonic_ms();
     if (now <= 0 || now > INT64_MAX - 3600000 || thread_registry_shutdown_requested()) return false;
-    result = wallet_lock_arm_timeout(e->wallet, 3600);
+    result = BOOT_AUTH_RESULT('T', wallet_lock_arm_timeout(e->wallet, 3600));
     if (!result.ok) return false;
     *deadline = now + 3600000;
     if (!wallet_lock_startup_publication_begin(*deadline)) return false;
-    result = wallet_sqlite_verify_startup_sapling_r(e->wallet_db, e->wallet);
+    result = BOOT_AUTH_RESULT('V', wallet_sqlite_verify_startup_sapling_r(e->wallet_db, e->wallet));
     wallet_lock_startup_publication_end();
     return result.ok;
 }
 
 
 #ifdef ZCL_TESTING
+void boot_test_auth_observer(void (*observer)(char)) { boot_auth_test_observer = observer; }
 bool boot_test_pending_authenticate(struct wallet *wallet, struct wallet_sqlite *ws, int fd,
                                     bool *unlocked, int64_t *deadline)
 {

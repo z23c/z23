@@ -740,12 +740,17 @@ static void bp_stage_emit(char stage)
 #endif
 }
 
-static void bp_stage_report(int fd, const char *label, bool failed)
+static bool bp_stage_report(int fd, const char *label, bool failed)
 {
     struct bp_stage_event event, first = {0};
-    char text[512]; size_t used = 0;
-    if (fd < 0) return;
+    char text[512]; size_t used = 0; unsigned seen = 0;
+    if (fd < 0) return true;
     while (read(fd, &event, sizeof(event)) == (ssize_t)sizeof(event)) {
+        if (event.stage == 'P') seen |= 1u;
+        if (event.stage == 'R') seen |= 2u;
+        if (event.stage == 'U') seen |= 4u;
+        if (event.stage == 'T') seen |= 8u;
+        if (event.stage == 'V') seen |= 16u;
         if (!first.when_us) first = event;
         int n = snprintf(text + used, sizeof(text) - used, "%s%c:%lld",
             used ? "," : "", event.stage,
@@ -755,8 +760,10 @@ static void bp_stage_report(int fd, const char *label, bool failed)
     }
     if (used) fprintf(stderr, "%scheckpoint %s stage_ms=%s "
         "(c=child-entry,s=seed-start,r=reload-done,a=auth-start,A=auth-return,"
-        "p=peer-start,P=peer-done,j=join-start,J=join-return)\n",
+        "p=peer-start,P=peer-ok,F=peer-failed,R/x=receive-ok/fail,"
+        "U/u=unlock-ok/fail,T/t=arm-ok/fail,V/v=verify-ok/fail,j=join-start,J=join-return)\n",
         failed ? "FAIL " : "", label, text);
+    return seen == 31u;
 }
 
 bool boot_test_pending_checkpoint_due(int64_t last, int64_t now);
@@ -768,6 +775,7 @@ static bool bp_checkpoint_save(struct boot_cutover_replay *r)
 }
 #if defined(ZCL_TESTING) && defined(__linux__)
 bool boot_test_pending_authenticate(struct wallet *, struct wallet_sqlite *, int, bool *, int64_t *);
+void boot_test_auth_observer(void (*observer)(char));
 static const char bp_checkpoint_pass[] = "synthetic-checkpoint-credential";
 struct bp_auth_peer { int fd; bool ok; };
 static bool bp_auth_io(int fd, void *buf, size_t len, bool send_data)
@@ -794,7 +802,7 @@ static void *bp_auth_peer_main(void *opaque)
         !memcmp(request, "ZWA1", 4) && request[4] == Z23_WALLET_AUTH_REQUEST &&
         bp_auth_io(p->fd, header, sizeof(header), true) &&
         bp_auth_io(p->fd, (void *)bp_checkpoint_pass, len, true);
-    bp_stage_emit('P'); /* peer finished */
+    bp_stage_emit(p->ok ? 'P' : 'F'); /* peer finished with result */
     close(p->fd); return NULL;
 }
 static bool bp_checkpoint_auth(struct wallet *w, struct wallet_sqlite *ws, int64_t *deadline)
@@ -881,7 +889,9 @@ static bool bp_transparent_seed_reload(struct wallet_sqlite *ws, struct wallet *
             readiness, loaded, w->has_master_key, locked, w->sapling_keys.num_keys);
     bp_stage_emit('r'); /* locked reload finished */
     if (!readiness || !loaded || w->has_master_key || !locked) return false;
+    boot_test_auth_observer(bp_stage_emit);
     bool authenticated = bp_checkpoint_auth(w, ws, deadline);
+    boot_test_auth_observer(NULL);
     fprintf(stderr, "seeded-skip fixture: authenticated=%d master=%d seed=%d sapling=%zu transparent=%zu watch=%zu scripts=%zu\n",
             authenticated, w->has_master_key, w->sapling_keys.has_seed, w->sapling_keys.num_keys,
             w->keystore.num_keys, w->keystore.num_watching, w->keystore.num_scripts);
@@ -1260,7 +1270,11 @@ static bool bp_checkpoint_wait(pid_t child, int expected, const char *label, int
         pid_t result = waitpid(child, &status, WNOHANG);
         if (result == child) {
             bool ok = WIFEXITED(status) && WEXITSTATUS(status) == expected;
-            bp_stage_report(trace_fd, label, !ok);
+            bool observed = bp_stage_report(trace_fd, label, !ok);
+            if (ok && !observed) {
+                fprintf(stderr, "\nFAIL checkpoint %s: authentication phase observation incomplete\n", label);
+                ok = false;
+            }
             if (!ok) fprintf(stderr, "\nFAIL checkpoint %s: expected=%d exited=%d code=%d signaled=%d signal=%d\n",
                 label, expected, WIFEXITED(status), WIFEXITED(status) ? WEXITSTATUS(status) : -1,
                 WIFSIGNALED(status), WIFSIGNALED(status) ? WTERMSIG(status) : 0);
@@ -1274,7 +1288,7 @@ static bool bp_checkpoint_wait(pid_t child, int expected, const char *label, int
     }
     fprintf(stderr, "\nFAIL checkpoint %s: child timeout after 400 polls of 50 ms\n", label);
     (void)kill(child, SIGKILL); (void)waitpid(child, &status, 0);
-    bp_stage_report(trace_fd, label, true); return false;
+    (void)bp_stage_report(trace_fd, label, true); return false;
 }
 static bool bp_checkpoint_reopen(const char *dir, int expected, bool fixed_digest)
 {
