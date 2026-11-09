@@ -927,6 +927,23 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
     return PC_GATE_RAN;
 }
 
+/* Prefer the source-only shell check to standalone tool compilation when
+ * both were learned, without changing membership or the other gate order. */
+static void pc_prioritize_shell(struct zcl_land_precheck_gates *g)
+{
+    size_t shell = g->count, standalone = g->count;
+    for (size_t i = 0; i < g->count; i++) {
+        if (!strcmp(g->name[i], "check-shell-host-assumptions")) shell = i;
+        if (!strcmp(g->name[i], "check-standalone-tools-link")) standalone = i;
+    }
+    if (shell == g->count || standalone >= shell) return;
+    char name[ZCL_LAND_PRECHECK_GATE_MAX];
+    memcpy(name, g->name[shell], sizeof(name));
+    memmove(g->name[standalone + 1], g->name[standalone],
+            (shell - standalone) * sizeof(g->name[0]));
+    memcpy(g->name[standalone], name, sizeof(name));
+}
+
 static bool pc_gates_run(struct pc_run *r,
                          const struct zcl_land_precheck_gates *g,
                          struct zcl_command_reply *reply)
@@ -1043,6 +1060,7 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     r->deadline = pc_monotonic_ms() + budget_ms;
     if (ledger[0]) pc_history_learn(r, dir, g);
     else pc_history_unproven(r, "land state unavailable");
+    pc_prioritize_shell(g);
     ok = pc_gates_run(r, g, reply);
     if (ok) {
         pc_push_names(reply, "precheck_ran", r->ran, r->nran);

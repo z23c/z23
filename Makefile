@@ -10896,7 +10896,7 @@ ci-stress: test_zcl
 # isolation harness relies on `set -o pipefail`.
 .PHONY: ci-install
 ci-install: zclassic23 zcl-rpc z23-package-verify z23-package-sign
-	@bash tools/scripts/ci_install_gate.sh
+	+@$(if $(ZCL_MAKE_NO_EXEC),:,bash tools/scripts/ci_install_gate.sh)
 
 # ── ci-install-linger (C1 FULL operator claim, no docker) ─
 #

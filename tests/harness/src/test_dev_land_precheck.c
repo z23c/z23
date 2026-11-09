@@ -537,6 +537,48 @@ static bool dlx_pc_retention_unavailable(void)
     return ok;
 }
 
+static bool dlx_pc_order_log(const struct dlx_rig *rig, const char *detail,
+                             bool fail_shell, bool expect_shell, bool expect_standalone)
+{
+    char path[1400], log[2048] = "";
+    size_t n = 0;
+    (void)snprintf(path, sizeof(path), "%s/build/precheck-ran", rig->clone);
+    bool ok = dlx_slurp(path, log, sizeof(log) - 1, &n);
+    log[n] = '\0';
+    const char *shell = strstr(log, "check-shell-host-assumptions\n");
+    const char *standalone = strstr(log, "check-standalone-tools-link\n");
+    ok = ok && (!!shell == expect_shell) && (!!standalone == expect_standalone) &&
+        (!shell || !standalone || shell < standalone);
+    if (!ok)
+        printf("precheck order: detail=%s fail_shell=%d expected_shell=%d expected_standalone=%d ran=%s\n",
+               detail, fail_shell, expect_shell, expect_standalone, log);
+    return ok;
+}
+
+static bool dlx_pc_order_case(const char *detail, bool fail_shell,
+                              bool expect_shell, bool expect_standalone)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char row[1024];
+    if (!dlx_pc_rig(&rig, "precheck_shell_order", true,
+                    "check-shell-host-assumptions\ncheck-standalone-tools-link\n"))
+        return false;
+    dlx_pc_row(row, sizeof(row), 1, "failed", "lint", 1, detail);
+    bool ok = dlx_pc_outcomes(row) && (!fail_shell ||
+        dlx_pc_file(&rig, "precheck-fail", "check-shell-host-assumptions"));
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    ok = dlx_run(&c) && (fail_shell ? !dlx_ok(&c) : dlx_ok(&c)) && ok;
+    if (fail_shell) ok = ok && !strcmp(dlx_str(&c, "gate"), "check-shell-host-assumptions") && dlx_queue_empty();
+    else ok = ok && dlx_queue_has_one();
+    if (strstr(detail, "check-unknown-example"))
+        ok = ok && dlx_pc_has(dlx_arr(&c, "precheck_skipped"), "check-unknown-example");
+    ok = dlx_pc_order_log(&rig, detail, fail_shell, expect_shell, expect_standalone) && ok;
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
 static bool dlx_pc_unknown_gate_skipped(void)
 {
     struct dlx_rig rig;
@@ -1063,6 +1105,14 @@ int dlx_case_precheck(void)
     }
     TEST("land: the precheck gate set learns check-* names from failed lint rows") {
         ASSERT(dlx_pc_gate_set_learns());
+        PASS();
+    }
+    TEST("land: a learned shell failure precedes standalone tool builds") {
+        ASSERT(dlx_pc_order_case("check-standalone-tools-link check-shell-host-assumptions", true, true, false));
+        ASSERT(dlx_pc_order_case("check-shell-host-assumptions check-standalone-tools-link", true, true, false));
+        ASSERT(dlx_pc_order_case("check-standalone-tools-link check-shell-host-assumptions", false, true, true));
+        ASSERT(dlx_pc_order_case("check-shell-host-assumptions", false, true, false));
+        ASSERT(dlx_pc_order_case("check-standalone-tools-link check-unknown-example", false, false, true));
         PASS();
     }
     TEST("land: precheck skips and reports a gate the lane lint does not know") {

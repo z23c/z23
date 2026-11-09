@@ -56,7 +56,11 @@ RPC_TIMEOUT="${CI_INSTALL_RPC_TIMEOUT:-60}"
 # `make ci-install` lists these as prerequisites, so they are normally
 # already built; build here too so the script is correct when run by hand.
 echo "ci-install: building installed node + package author/reproducer tools"
-make -C "$REPO_ROOT" -j"$(nproc)" zclassic23 zcl-rpc \
+# A make-launched gate shares its parent's jobserver; a direct invocation
+# retains the existing affinity-bounded standalone build behavior.
+set --
+if [ "${MAKELEVEL:-0}" = 0 ]; then set -- -j"$(nproc)"; fi
+make -C "$REPO_ROOT" "$@" zclassic23 zcl-rpc \
     z23-package-verify z23-package-sign >/dev/null \
     || gate_die "installed product build failed"
 

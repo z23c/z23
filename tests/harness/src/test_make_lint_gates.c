@@ -1873,13 +1873,45 @@ static int t_tor_waits_for_vendor(void)
 
 /* The real-worktree read-only lane: git grep / git ls-files / .git/hooks
  * probes. Mutates no tracked path, so it is pool-eligible. */
+/* Exercise the actual ci-install recipe and its two nested make commands in
+ * a private tree, without starting a node or running the installation gate. */
+static int t_ci_install_jobserver(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"; mkdir -p tools/scripts bin\n"
+        "REAL_MAKE=$(command -v make); export REAL_MAKE; REPO_ROOT=$PWD; export REPO_ROOT\n"
+        "sed -n '/^ZCL_MAKE_SHORT_FLAGS :=/,/^$/p' \"$1/Makefile\" > Makefile\n"
+        "printf '.PHONY: ci-install zclassic23 zcl-rpc z23-package-verify z23-package-sign install\\n' >> Makefile\n"
+        "printf 'zclassic23 zcl-rpc z23-package-verify z23-package-sign install:\\n\\t@printf nested\\\\n >> events\\n' >> Makefile\n"
+        "sed -n '/^ci-install: /,+1p' \"$1/Makefile\" >> Makefile\n"
+        "printf '#!/bin/bash\\nset -e\\nPREFIX=/tmp/fixture\\ngate_die() { exit 1; }\\n' > tools/scripts/ci_install_gate.sh\n"
+        "sed -n '/^set --$/,/|| gate_die/p; /^make -C .* install DESTDIR=/,/|| gate_die/p' \"$1/tools/scripts/ci_install_gate.sh\" >> tools/scripts/ci_install_gate.sh\n"
+        "[ \"$(grep -c '^make -C ' tools/scripts/ci_install_gate.sh)\" = 2 ] || { echo 'nested command extraction failed' >&2; exit 1; }\n"
+        "printf 'LIVE_HOME=/tmp FAKE_BIN=/tmp STAGED_HOME=/tmp\\n' >> tools/scripts/ci_install_gate.sh\n"
+        "sed -n '/^live_install() {/,/^}/p; /^HOME=\"$STAGED_HOME\" PATH=/,/|| gate_die/p' \"$1/tools/scripts/ci_install_gate.sh\" >> tools/scripts/ci_install_gate.sh\n"
+        "printf 'live_install\\nlive_install\\n' >> tools/scripts/ci_install_gate.sh\n"
+        "printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$MAKEFLAGS\" >> makeflags\\n[ \"${FAIL_NESTED:-0}\" = 0 ] || exit 7\\nexec \"$REAL_MAKE\" \"$@\"\\n' > bin/make; chmod +x bin/make\n"
+        "PATH=$PWD/bin:$PATH; export PATH\n"
+        "\"$REAL_MAKE\" -j8 ci-install > run.log 2>&1 || { cat run.log; exit 1; }\n"
+        "[ \"$(wc -l < makeflags)\" = 5 ] && [ \"$(grep -c jobserver-auth makeflags)\" = 5 ]\n"
+        "if grep -E 'jobserver unavailable|forced in submake' run.log; then exit 1; fi\n"
+        "rm -f events makeflags; for flag in -n -q -t; do rc=0; \"$REAL_MAKE\" \"$flag\" ci-install > dry.log 2>&1 || rc=$?; [ \"$rc\" -le 1 ] && [ ! -e events ] && [ ! -e makeflags ]; done\n"
+        "rc=0; FAIL_NESTED=1 \"$REAL_MAKE\" -j8 ci-install > failure.log 2>&1 || rc=$?; [ \"$rc\" != 0 ]\n"
+        "rm -f events makeflags; env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL bash tools/scripts/ci_install_gate.sh > standalone.log 2>&1 || { cat standalone.log; exit 1; }; [ \"$(wc -l < makeflags)\" = 5 ]\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "lint_fast", "ci_install_jobserver");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 int test_make_lint_gates_realroot(void)
 {
     char real_root[PATH_MAX];
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
         return 1;
     printf("\n=== make_lint_gates real-worktree tests ===\n");
-    return t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() +
+    return t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
            lint_run_owned(LINT_OWNER_REALROOT);
 }
 
