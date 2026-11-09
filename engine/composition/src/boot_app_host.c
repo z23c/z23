@@ -330,6 +330,46 @@ static void host_offer_from_row(const struct db_app_host_intent *row,
     offer->size = row->binding.size;
 }
 
+static enum boot_app_host_result host_resume_locked(struct node_db *db,
+    struct vcs_package_store *store, const struct db_app_host_intent *row,
+    const uint8_t root[32], uint64_t generation, int64_t now)
+{
+    struct db_app_host_intent current; uint8_t host[32];
+    enum app_host_result r = db_app_host_intent_find(db, row->binding.local_host,
+                                                      row->binding.carrier_root, &current);
+    if (r == APP_HOST_OK && (current.enabled || current.generation != row->generation ||
+                             !host_same_binding(&current.binding, &row->binding))) r = APP_HOST_STALE;
+    if (r == APP_HOST_OK && (!host_identity(host, false) || memcmp(host, row->binding.local_host, 32) ||
+                             !host_receipt_current(store, root, generation))) {
+        return BOOT_APP_HOST_UNAVAILABLE;
+    }
+    if (r == APP_HOST_OK)
+        r = db_app_host_intent_enable(db, &current.binding, row->generation, now);
+    return host_result(r);
+}
+
+enum boot_app_host_result boot_app_host_resume(
+    struct node_db *db, struct vcs_package_store *store,
+    const uint8_t local_host[32], const char *carrier,
+    int64_t expected_generation, int64_t now)
+{
+    struct db_app_host_intent row; struct zcl_app_offer offer;
+    uint8_t root[32]; uint64_t generation = 0;
+    if (!db || !store || !local_host || !carrier || expected_generation <= 0 || now <= 0 ||
+        !vcs_app_offer_hex_valid(carrier, 32) ||
+        !zcl_hex_decode_lower(carrier, root, sizeof(root))) return BOOT_APP_HOST_INVALID;
+    enum app_host_result r = db_app_host_intent_find(db, local_host, carrier, &row);
+    if (r != APP_HOST_OK) return host_result(r);
+    if (row.enabled || row.generation != expected_generation) return BOOT_APP_HOST_STALE;
+    /* The endpoint is only needed to validate the internal offer shape. */
+    host_offer_from_row(&row, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:29135", &offer);
+    if (!boot_app_host_verify_carrier(store, &offer, &generation)) return BOOT_APP_HOST_INVALID;
+    host_lock();
+    enum boot_app_host_result result = host_resume_locked(db, store, &row, root, generation, now);
+    zcl_mutex_unlock(&s_host_lock);
+    return result;
+}
+
 static bool host_new_post(const struct db_app_host_intent *row, const char *endpoint,
                           int64_t now, struct fleet_board_post *post)
 {

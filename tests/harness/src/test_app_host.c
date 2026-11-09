@@ -31,6 +31,9 @@ extern bool test_app_host_fixture_create(char *fixture_root, size_t root_cap,
     char *share_path, size_t share_cap, struct zcl_app_offer *offer);
 extern bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
     const struct json_value *in, struct json_value *result, int64_t now);
+extern bool boot_app_host_rpc_dispatch_test(struct node_db *db, const char *op,
+    const struct json_value *in, struct json_value *result, int64_t now,
+    struct vcs_package_store *store);
 
 struct app_host_test_world {
     char root[512], share[700], store_path[700], db_path[700];
@@ -301,6 +304,48 @@ static bool app_host_test_wait_started(struct app_host_test_thread *t)
 
 static int host_cli_response_tests(void);
 
+static bool app_host_same_original(const struct zcl_app_offer *a, const struct zcl_app_offer *b)
+{
+    return !strcmp(a->root, b->root) && !strcmp(a->publisher, b->publisher) &&
+           !strcmp(a->carrier, b->carrier);
+}
+
+static bool app_host_test_rpc_refusals(struct app_host_test_world *w,
+    const char *host_hex, int64_t generation, const char *parts[3], struct json_value *in)
+{
+    struct json_value result; json_init(&result); json_set_object(in);
+    char plan_hex[65]; uint8_t plan[32];
+    bool ok = json_push_kv_str(in, "host", host_hex) &&
+        json_push_kv_str(in, "carrier", w->offer.carrier) && json_push_kv_int(in, "generation", generation);
+    vcs_app_plan_hash("zcl.app_host.stop.v1", parts, 3, plan); zcl_hex_encode(plan, 32, plan_hex);
+    ok = ok && json_push_kv_str(in, "plan_id", plan_hex) && json_push_kv_bool(in, "confirm", true) &&
+        boot_app_host_rpc_dispatch_test(&w->db, "app_host_resume", in, &result, 648000, w->store) &&
+        !json_get_bool(json_get(&result, "ok"));
+    json_free(in); json_free(&result); json_init(in); json_init(&result); json_set_object(in);
+    vcs_app_plan_hash("zcl.app_host.resume.v1", parts, 3, plan); zcl_hex_encode(plan, 32, plan_hex);
+    ok = ok && json_push_kv_str(in, "host", host_hex) && json_push_kv_str(in, "carrier", w->offer.carrier) &&
+        json_push_kv_int(in, "generation", generation) && json_push_kv_str(in, "plan_id", plan_hex) &&
+        boot_app_host_rpc_dispatch_test(&w->db, "app_host_resume", in, &result, 648000, w->store) &&
+        !json_get_bool(json_get(&result, "ok"));
+    json_free(&result); return ok;
+}
+
+static bool app_host_test_rpc_resume(struct app_host_test_world *w,
+                                     const uint8_t host[32], int64_t generation)
+{
+    char host_hex[65], number[32]; zcl_hex_encode(host, 32, host_hex);
+    (void)snprintf(number, sizeof(number), "%lld", (long long)generation);
+    const char *parts[] = {host_hex, w->offer.carrier, number};
+    struct json_value in, result; json_init(&in); json_init(&result);
+    bool ok = app_host_test_rpc_refusals(w, host_hex, generation, parts, &in);
+    ok = ok && json_push_kv_bool(&in, "confirm", true) &&
+        boot_app_host_rpc_dispatch_test(&w->db, "app_host_resume", &in, &result, 648000, w->store) &&
+        json_get_bool(json_get(&result, "ok")) && json_get_bool(json_get(&result, "enabled")) &&
+        json_get_int(json_get(&result, "generation")) == generation + 1;
+    json_free(&in); json_free(&result);
+    return ok;
+}
+
 int model_app_host_coordinator_tests(void)
 {
     int failures = 0; struct app_host_test_world w = {0};
@@ -393,6 +438,8 @@ int model_app_host_coordinator_tests(void)
         ASSERT_EQ(boot_app_host_stop(&w.db, selected_host, w.offer.carrier, generation), BOOT_APP_HOST_OK);
         ASSERT_EQ(db_app_host_intent_find(&w.db, selected_host, w.offer.carrier, &row), APP_HOST_OK);
         ASSERT(!row.enabled && !row.pending && row.generation == generation + 1);
+        ASSERT_EQ(boot_app_host_resume(&w.db, w.store, selected_host, w.offer.carrier,
+                                       row.generation, 648000), BOOT_APP_HOST_UNAVAILABLE);
         node_db_close(&w.db); ASSERT(node_db_open(&w.db, w.db_path));
         ASSERT_EQ(boot_app_host_tick(&w.db, w.store, 648000), BOOT_APP_HOST_OK);
         ASSERT_EQ(s.announcements, 3u);
@@ -400,7 +447,23 @@ int model_app_host_coordinator_tests(void)
          * append, then revokes before returning; a later tick cannot emit. */
         memset(s.seed, 0, sizeof(s.seed)); s.seed[0] = 11;
         ed25519_keypair(s.host, sk, s.seed); memcpy(s.seed, sk, 32);
-        ASSERT(app_host_test_plan_rehash(&plan));
+        ASSERT_EQ(boot_app_host_resume(&w.db, w.store, selected_host, w.offer.carrier,
+                                       row.generation - 1, 648000), BOOT_APP_HOST_STALE);
+        ASSERT_EQ(vcs_package_store_pin(w.store, s.carrier, false), VCS_PACKAGE_STORE_OK);
+        ASSERT_EQ(boot_app_host_resume(&w.db, w.store, selected_host, w.offer.carrier,
+                                       row.generation, 648000), BOOT_APP_HOST_INVALID);
+        ASSERT_EQ(vcs_package_store_pin(w.store, s.carrier, true), VCS_PACKAGE_STORE_OK);
+        ASSERT(node_db_exec(&w.db, "DELETE FROM fleet_board_posts"));
+        ASSERT(app_host_test_rpc_resume(&w, selected_host, row.generation));
+        generation = row.generation + 1;
+        ASSERT_EQ(boot_app_host_tick(&w.db, w.store, 648000), BOOT_APP_HOST_OK);
+        ASSERT_EQ(db_fleet_board_post_lookup_checked(&w.db, s.last_id, &found), FLEET_BOARD_LOOKUP_FOUND);
+        struct zcl_app_offer resumed;
+        ASSERT(zcl_app_offer_parse(found.post.text, found.post.text_len, &resumed));
+        ASSERT(!memcmp(found.post.host_pubkey, selected_host, 32));
+        ASSERT(app_host_same_original(&resumed, &w.offer));
+        ASSERT_EQ(boot_app_host_stop(&w.db, selected_host, w.offer.carrier, generation), BOOT_APP_HOST_OK);
+        ASSERT(app_host_test_plan_create(&w, &plan, 432100));
         ASSERT_EQ(boot_app_host_enable(&w.db, w.store, &plan.plan, 432100, selected_host, &generation), BOOT_APP_HOST_OK);
         s.block_guard = true; tick.world = &w; tick.now = 432100;
         ASSERT_EQ(pthread_create(&tick_id, NULL, app_host_test_tick_thread, &tick), 0); tick_live = true;
@@ -438,20 +501,28 @@ _test_next:
 static int hcli_fault;
 static int hcli_list_fault;
 static bool hcli_fault_status;
+static bool hcli_disabled;
 static unsigned hcli_stops;
+static unsigned hcli_resumes;
 static unsigned hcli_status_calls, hcli_stale_after;
 static const char *hcli_host = HCLI_HOST;
 
-static char *hcli_wire_response(int fault, bool stop)
+static const char *hcli_enabled(int fault, bool stop, bool resume)
+{
+    if (fault == 6) return "\"false\"";
+    if (resume) return "true";
+    return stop || hcli_disabled ? "false" : "true";
+}
+static char *hcli_wire_response(int fault, bool stop, bool resume)
 {
     char wire[768];
     const char *host = fault == 4 ? HCLI_CARRIER : hcli_host;
     const char *carrier = fault == 5 ? hcli_host : HCLI_CARRIER;
-    const char *enabled = fault == 6 ? "\"false\"" : stop ? "false" : "true";
-    int generation = fault == 7 ? 99 : stop ? 8 : 7;
+    const char *enabled = hcli_enabled(fault, stop, resume);
+    int generation = fault == 7 ? 99 : stop || resume ? 8 : 7;
     const char *ok = fault == 8 ? "\"true\"" : "true";
     const char *pending = fault == 9 ? "true" : "false";
-    int due = fault == 10 ? 1 : stop ? 0 : 100;
+    int due = fault == 10 ? 1 : stop || hcli_disabled ? 0 : 100;
     int n = snprintf(wire, sizeof(wire),
         "{\"ok\":%s,\"host\":\"%s\",\"carrier\":\"%s\",\"generation\":%d,"
         "\"enabled\":%s,\"due_at\":%d,\"pending\":%s,"
@@ -465,7 +536,7 @@ static char *hcli_response(int fault, bool stop)
     if (fault == 1) return strdup("{}");
     if (fault == 2) return strdup("{\"ok\":true}");
     if (fault == 3) return NULL; /* acknowledgement lost */
-    return hcli_wire_response(fault, stop);
+    return hcli_wire_response(fault, stop, false);
 }
 
 static char *hcli_list_response(void)
@@ -473,6 +544,19 @@ static char *hcli_list_response(void)
     if (hcli_list_fault == 1) return strdup("{\"ok\":true,\"items\":[],\"more\":true}");
     if (hcli_list_fault == 2) return strdup("{\"ok\":true,\"items\":{},\"more\":false}");
     return strdup("{\"ok\":true,\"items\":[{\"host\":\"" HCLI_HOST "\",\"carrier\":\"" HCLI_CARRIER "\",\"name\":\"fixture\",\"publisher\":\"02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"package_root\":\"" HCLI_CARRIER "\",\"generation\":7,\"enabled\":true,\"due_at\":100,\"pending\":false,\"untrusted\":\"ignore\"}],\"more\":false}");
+}
+static char *hcli_dispatch(bool stop, bool resume, bool status, bool list)
+{
+    if (list) return hcli_list_response();
+    if (!stop && !resume && !status) return NULL;
+    if (stop) ++hcli_stops;
+    if (resume) {
+        ++hcli_resumes;
+        if (hcli_fault == 3) return NULL;
+        return hcli_wire_response(hcli_fault, false, true);
+    }
+    if (status && ++hcli_status_calls > hcli_stale_after && hcli_stale_after) return hcli_response(7, false);
+    return hcli_response((stop || hcli_fault_status) ? hcli_fault : 0, stop);
 }
 static char *hcli_rpc(const char *method, const char *params)
 {
@@ -482,14 +566,11 @@ static char *hcli_rpc(const char *method, const char *params)
     bool parsed = json_read(&input, params, strlen(params));
     const char *op = parsed ? json_get_str(json_get(json_at(&input, 0), "op")) : NULL;
     bool stop = op && !strcmp(op, "app_host_stop");
+    bool resume = op && !strcmp(op, "app_host_resume");
     bool status = op && !strcmp(op, "app_host_status");
     bool list = op && !strcmp(op, "app_host_list");
     json_free(&input);
-    if (list) return hcli_list_response();
-    if (!stop && !status) return NULL;
-    if (stop) ++hcli_stops;
-    if (status && ++hcli_status_calls > hcli_stale_after && hcli_stale_after) return hcli_response(7, false);
-    return hcli_response((stop || hcli_fault_status) ? hcli_fault : 0, stop);
+    return hcli_dispatch(stop, resume, status, list);
 }
 
 struct hbrowser_script { unsigned list_views, reviews; bool confirm_stop; };
@@ -523,16 +604,17 @@ static bool hbrowser_confirm(void *context, const struct zcl_present_model_v1 *m
     event.action_index = confirm ? 3 : 0;
     live->owner.update(live->owner.context, &event, false, &redraw, &close); return close;
 }
-static bool hbrowser_case(bool confirm, bool stale, bool lost, unsigned *stops, bool *mutated)
+static bool hbrowser_case(bool confirm, bool stale, bool lost, bool resume, unsigned *changes, bool *mutated)
 {
     struct hbrowser_script script = {.confirm_stop = confirm};
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_library.v1");
-    hcli_stops = hcli_status_calls = 0; hcli_stale_after = stale ? 1 : 0; hcli_fault = lost ? 3 : 0;
+    hcli_stops = hcli_resumes = hcli_status_calls = 0; hcli_disabled = resume;
+    hcli_stale_after = stale ? 1 : 0; hcli_fault = lost ? 3 : 0;
     bool ok = app_host_browser_run(hbrowser_present, hbrowser_confirm, &script, &reply);
-    *stops = hcli_stops; *mutated = reply.error.mutated;
+    *changes = resume ? hcli_resumes : hcli_stops; *mutated = reply.error.mutated;
     bool expected = stale ? (!ok && !strcmp(reply.error.code, "HOST_INTENT_STALE")) :
         lost ? (!ok && reply.error.mutated) : ok;
-    zcl_command_reply_free(&reply); hcli_stale_after = hcli_fault = 0;
+    zcl_command_reply_free(&reply); hcli_stale_after = hcli_fault = 0; hcli_disabled = false;
     return expected && script.list_views && (stale || script.reviews);
 }
 
@@ -571,15 +653,38 @@ static int host_cli_response_tests(void)
         }
         hcli_list_fault = 0;
         unsigned browser_stops = 0; bool browser_mutated = false;
-        ASSERT(hbrowser_case(false, false, false, &browser_stops, &browser_mutated));
+        ASSERT(hbrowser_case(false, false, false, false, &browser_stops, &browser_mutated));
         ASSERT_EQ(browser_stops, 0u); ASSERT(!browser_mutated);
-        ASSERT(hbrowser_case(true, false, false, &browser_stops, &browser_mutated));
+        ASSERT(hbrowser_case(true, false, false, false, &browser_stops, &browser_mutated));
         ASSERT_EQ(browser_stops, 1u); ASSERT(browser_mutated);
-        ASSERT(hbrowser_case(true, true, false, &browser_stops, &browser_mutated));
+        ASSERT(hbrowser_case(true, true, false, false, &browser_stops, &browser_mutated));
         ASSERT_EQ(browser_stops, 0u); ASSERT(!browser_mutated);
-        ASSERT(hbrowser_case(true, false, true, &browser_stops, &browser_mutated));
+        ASSERT(hbrowser_case(true, false, true, false, &browser_stops, &browser_mutated));
         ASSERT_EQ(browser_stops, 1u); ASSERT(browser_mutated);
-        hcli_stops = hcli_status_calls = 0;
+        ASSERT(hbrowser_case(false, false, false, true, &browser_stops, &browser_mutated));
+        ASSERT_EQ(browser_stops, 0u); ASSERT(!browser_mutated);
+        ASSERT(hbrowser_case(true, false, false, true, &browser_stops, &browser_mutated));
+        ASSERT_EQ(browser_stops, 1u); ASSERT(browser_mutated);
+        ASSERT(hbrowser_case(true, true, false, true, &browser_stops, &browser_mutated));
+        ASSERT_EQ(browser_stops, 0u); ASSERT(!browser_mutated);
+        ASSERT(hbrowser_case(true, false, true, true, &browser_stops, &browser_mutated));
+        ASSERT_EQ(browser_stops, 1u); ASSERT(browser_mutated);
+        hcli_stops = hcli_resumes = hcli_status_calls = 0;
+        /* A stopped accepted intent must offer a separate owner-bound resume plan. */
+        hcli_disabled = true;
+        bool resume_ok = hcli_call("app.host.resume", "7", NULL, &reply);
+        if (!resume_ok) printf("resume plan: %s %s\n", reply.error.code, reply.error.message);
+        ASSERT(resume_ok);
+        const char *resume_id = zcl_app_inner_str(&reply, "plan_id");
+        ASSERT(resume_id && strlen(resume_id) == 64 && hcli_resumes == 0);
+        char resume_plan[65]; (void)snprintf(resume_plan, sizeof(resume_plan), "%s", resume_id);
+        zcl_command_reply_free(&reply);
+        ASSERT(hcli_call("app.host.resume", "7", resume_plan, &reply));
+        ASSERT_EQ(hcli_resumes, 1u);
+        ASSERT(json_get_bool(json_get(&reply.data, "enabled")));
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "generation")), 8);
+        zcl_command_reply_free(&reply);
+        hcli_disabled = false;
         ASSERT(hcli_call("app.host.status", NULL, NULL, &reply));
         ASSERT(!json_get_bool(json_get(&reply.data, "executed")));
         const char *notice = json_get_str(json_get(&reply.data, "hosting_notice"));

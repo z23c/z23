@@ -1239,7 +1239,7 @@ static bool cr_app_host_descriptor(const struct zcl_command_spec *spec,
                                     const char *key,
                                     struct zcl_command_input_descriptor *out)
 {
-    bool stop = !strcmp(spec->path, "app.host.stop");
+    bool stop = !strcmp(spec->path, "app.host.stop") || !strcmp(spec->path, "app.host.resume");
     bool list = !strcmp(spec->path, "app.host.list");
     if (!stop && !list && strcmp(spec->path, "app.host.status")) return false;
     if (list && (!strcmp(key, "after_host") || !strcmp(key, "after_carrier"))) {

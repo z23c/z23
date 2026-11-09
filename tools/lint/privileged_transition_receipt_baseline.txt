@@ -34,6 +34,7 @@ app.receive-copy exempt: composes bundle.verify, bundle.receive (trusting exactl
 app.get exempt: owner-confirmed composition verifies the advertised publisher and root before app.receive-copy, whose resident launch revalidates the exact built image; no privileged artifact is installed
 app.publish exempt: owner-confirmed composition signs a copy, pins and offers its bundle, and posts its verified identity; it installs no privileged artifact and changes no running binary
 app.host.stop exempt: owner-confirmed revocation disables future app-host renewals; it changes no carrier pin and installs no privileged artifact
+app.host.resume exempt: owner-confirmed reactivation revalidates an existing pinned carrier and signer; it installs no privileged artifact or running binary
 app.adopt exempt: a native owner decision creates an inert source copy, adoption record and personal publishing identity; it builds, executes and installs nothing
 app.personalize exempt: owner plan/confirm creates or reuses the local publishing key and saves a metadata-only source successor; it signs, publishes, builds and executes nothing
 app.share exempt: the native owner window signs the exact kept source with an existing local key and creates one new share file; it installs and executes nothing and changes no running binary

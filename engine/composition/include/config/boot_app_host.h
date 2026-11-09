@@ -26,6 +26,10 @@ enum boot_app_host_result boot_app_host_tick(
 enum boot_app_host_result boot_app_host_stop(
     struct node_db *db, const uint8_t local_host[32], const char *carrier,
     int64_t expected_generation);
+enum boot_app_host_result boot_app_host_resume(
+    struct node_db *db, struct vcs_package_store *store,
+    const uint8_t local_host[32], const char *carrier,
+    int64_t expected_generation, int64_t now);
 
 /* Recheck an exact pinned carrier and its signed original release. The
  * returned generation must be rechecked before authorizing publication. */

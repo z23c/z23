@@ -106,7 +106,7 @@ static bool hb_fields(struct app_confirm *view, const struct json_value *item,
 }
 static bool hb_show(struct hb_state *b, const struct json_value *item,
                     const struct zcl_command_reply *status, bool *confirmed,
-                    struct zcl_command_reply *reply)
+                    struct zcl_command_reply *reply, bool actionable)
 {
     struct app_confirm *view = zcl_calloc(1, sizeof(*view), "hosting-browser/confirm");
     if (!view) return hb_fail(reply, "Cannot show hosting details.");
@@ -116,49 +116,52 @@ static bool hb_show(struct hb_state *b, const struct json_value *item,
     zcl_present_model_init_v1(&view->model, ZCL_PRESENT_MODEL_STATUS_CARD);
     (void)snprintf(view->model.request_id, sizeof(view->model.request_id), "hosting-review");
     (void)snprintf(view->model.title, sizeof(view->model.title), "Original app hosting");
-    (void)snprintf(view->model.summary, sizeof(view->model.summary), "%s", enabled ?
+    const char *summary = actionable ? (enabled ?
         "Stop future renewals? This does not change the carrier pin; existing offers may remain until they expire." :
-        "Hosting is stopped. Pinned files and previously published offers may remain.");
-    view->model.action_count = enabled ? 4 : 1;
+        "Resume hosting this original? The node will verify its pinned carrier and publish offers again.") :
+        (enabled ? "Hosting is enabled." : "Hosting is stopped; existing offers may remain until they expire.");
+    (void)snprintf(view->model.summary, sizeof(view->model.summary), "%s", summary);
+    view->model.action_count = actionable ? 4 : 1;
     app_confirm_action(&view->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "cancel", "Back");
-    if (enabled) {
+    if (actionable) {
         app_confirm_action(&view->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
         app_confirm_action(&view->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
-        app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "stop", "Stop hosting");
+        app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM,
+                           enabled ? "stop" : "resume", enabled ? "Stop hosting" : "Resume hosting");
     }
     bool ok = hb_fields(view, item, status) &&
         app_confirm_prepare(view, why, sizeof(why)) && app_confirm_show(view, b->confirm, b->context, why, sizeof(why));
-    *confirmed = ok && enabled && view->confirmed;
+    *confirmed = ok && actionable && view->confirmed;
     app_confirm_free(view); free(view);
     return ok || hb_fail(reply, "Hosting details could not be displayed.");
 }
 
 static bool hb_bind_stop(const char *const kv[4], int64_t generation,
-                         struct json_value *in, struct zcl_command_reply *reply)
+                         struct json_value *in, struct zcl_command_reply *reply, bool resume)
 {
     struct zcl_command_reply plan;
     bool built = zcl_app_input(in, kv, 4) && json_push_kv_int(in, "generation", generation);
-    if (!built) return hb_fail(reply, "Cannot prepare hosting stop.");
-    bool ok = hb_call("app.host.stop", in, reply, &plan);
+    if (!built) return hb_fail(reply, "Cannot prepare hosting change.");
+    bool ok = hb_call(resume ? "app.host.resume" : "app.host.stop", in, reply, &plan);
     const char *plan_id = ok ? zcl_app_inner_str(&plan, "plan_id") : NULL;
     if (ok) ok = plan_id && json_push_kv_str(in, "plan_id", plan_id) && json_push_kv_bool(in, "confirm", true);
     zcl_command_reply_free(&plan);
-    if (!ok && reply->status == ZCL_COMMAND_STATUS_PASSED) return hb_fail(reply, "Cannot bind hosting stop plan.");
+    if (!ok && reply->status == ZCL_COMMAND_STATUS_PASSED) return hb_fail(reply, "Cannot bind hosting change plan.");
     return ok;
 }
 static bool hb_commit_stop(struct hb_state *b, const struct json_value *item,
-                           struct json_value *in, struct zcl_command_reply *reply)
+                           struct json_value *in, struct zcl_command_reply *reply, bool resume)
 {
     struct zcl_command_reply stopped;
-    bool ok = hb_call("app.host.stop", in, reply, &stopped);
+    bool ok = hb_call(resume ? "app.host.resume" : "app.host.stop", in, reply, &stopped);
     if (!ok && stopped.error.mutated) {
         size_t used = strlen(reply->error.message);
         if (used < sizeof(reply->error.message))
             (void)snprintf(reply->error.message + used, sizeof(reply->error.message) - used,
-                "; stop may have completed; reopen Hosting to read status before retrying");
+                "; change may have completed; reopen Hosting to read status before retrying");
     }
     bool ignored = false;
-    if (ok) { reply->error.mutated = true; ok = hb_show(b, item, &stopped, &ignored, reply); }
+    if (ok) { reply->error.mutated = true; ok = hb_show(b, item, &stopped, &ignored, reply, false); }
     zcl_command_reply_free(&stopped); return ok;
 }
 static bool hb_review(struct hb_state *b, struct zcl_command_reply *reply)
@@ -170,16 +173,13 @@ static bool hb_review(struct hb_state *b, struct zcl_command_reply *reply)
     if (!zcl_app_input(&in, kv, 4)) { json_free(&in); return hb_fail(reply, "Cannot prepare hosting status."); }
     bool ok = hb_call("app.host.status", &in, reply, &status); json_free(&in);
     if (!ok) { zcl_command_reply_free(&status); return false; }
-    if (!json_get_bool(json_get(&status.data, "enabled"))) {
-        bool ignored = false; ok = hb_show(b, item, &status, &ignored, reply);
-        zcl_command_reply_free(&status); return ok;
-    }
+    bool resume = !json_get_bool(json_get(&status.data, "enabled"));
     int64_t generation = json_get_int(json_get(&status.data, "generation"));
-    if (!hb_bind_stop(kv, generation, &in, reply)) { json_free(&in); zcl_command_reply_free(&status); return false; }
+    if (!hb_bind_stop(kv, generation, &in, reply, resume)) { json_free(&in); zcl_command_reply_free(&status); return false; }
     bool confirmed = false;
-    ok = hb_show(b, item, &status, &confirmed, reply); zcl_command_reply_free(&status);
+    ok = hb_show(b, item, &status, &confirmed, reply, true); zcl_command_reply_free(&status);
     if (!ok || !confirmed) { json_free(&in); return ok; }
-    ok = hb_commit_stop(b, item, &in, reply); json_free(&in); return ok;
+    ok = hb_commit_stop(b, item, &in, reply, resume); json_free(&in); return ok;
 }
 
 static bool hb_event_valid(const struct zcl_present_model_v1 *model,

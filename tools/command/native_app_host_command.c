@@ -12,7 +12,7 @@
 #include <string.h>
 
 static const char *const host_notice =
-    "Stopping hosting ends future renewals. It does not change the carrier pin; "
+    "Hosting renews public offers when enabled. Stopping does not change the carrier pin; "
     "already published offers can remain discoverable until their expiry.";
 
 static bool host_inputs(const struct json_value *input,
@@ -186,87 +186,102 @@ void zcl_native_handle_app_host_status(const struct zcl_command_request *request
 
 static bool host_stop_plan(const struct json_value *input, const char *host,
                             const char *carrier, int64_t *generation,
-                            uint8_t plan[32], struct zcl_command_reply *reply)
+                            uint8_t plan[32], struct zcl_command_reply *reply, bool resume)
 {
     const struct json_value *value = json_get(input, "generation");
     *generation = host_generation(value);
     if (*generation <= 0 || *generation == INT64_MAX) {
         zcl_package_copy_fail(reply, "GENERATION_REQUIRED", false,
-            "use the exact generation returned by app.host.status", "app.host.stop");
+            "use the exact generation returned by app.host.status", resume ? "app.host.resume" : "app.host.stop");
         return false;
     }
     char number[32];
     int n = snprintf(number, sizeof(number), "%lld", (long long)*generation);
     if (n <= 0 || (size_t)n >= sizeof(number)) return false;
     const char *parts[] = {host, carrier, number};
-    zcl_app_plan_id("zcl.app_host.stop.v1", parts, 3, plan);
+    zcl_app_plan_id(resume ? "zcl.app_host.resume.v1" : "zcl.app_host.stop.v1", parts, 3, plan);
     return true;
 }
 
 static bool host_stop_current(const char *host, const char *carrier, int64_t generation,
-                               struct json_value *body, struct zcl_command_reply *reply)
+                               struct json_value *body, struct zcl_command_reply *reply, bool resume)
 {
     if (!host_status(host, carrier, body, reply)) return false;
     const struct json_value *value = json_get(body, "generation");
     const struct json_value *enabled = json_get(body, "enabled");
     if (value && value->type == JSON_INT && json_get_int(value) == generation &&
-        enabled && enabled->type == JSON_BOOL && json_get_bool(enabled)) return true;
+        enabled && enabled->type == JSON_BOOL && json_get_bool(enabled) != resume) return true;
     zcl_package_copy_fail(reply, "HOST_INTENT_STALE", false,
-        "hosting intent changed or is already stopped; read its status again", "app.host.stop");
+        "hosting intent changed or is already in the requested state; read its status again", resume ? "app.host.resume" : "app.host.stop");
     return false;
+}
+
+static bool host_change_result_valid(const struct json_value *body, const char *host,
+                                     const char *carrier, int64_t generation, bool resume)
+{
+    return host_body_valid(body, host, carrier) &&
+        json_get_bool(json_get(body, "enabled")) == resume &&
+        !json_get_bool(json_get(body, "pending")) &&
+        (resume || json_get_int(json_get(body, "due_at")) == 0) &&
+        json_get_int(json_get(body, "generation")) == generation + 1;
 }
 
 static void host_stop_commit(const struct json_value *input, const char *host,
                               const char *carrier, int64_t generation,
-                              const uint8_t plan[32], struct zcl_command_reply *reply)
+                              const uint8_t plan[32], struct zcl_command_reply *reply, bool resume)
 {
-    if (!zcl_package_copy_plan_matches(input, plan, reply, "app.host.stop")) return;
+    const char *command = resume ? "app.host.resume" : "app.host.stop";
+    if (!zcl_package_copy_plan_matches(input, plan, reply, command)) return;
     struct json_value in, body;
     json_init(&body);
-    const char *kv[] = {"op", "app_host_stop", "host", host, "carrier", carrier,
+    const char *kv[] = {"op", resume ? "app_host_resume" : "app_host_stop", "host", host, "carrier", carrier,
                         "plan_id", zcl_package_copy_str(input, "plan_id")};
     bool built = zcl_app_input(&in, kv, 8) &&
         json_push_kv_int(&in, "generation", generation) &&
         json_push_kv_bool(&in, "confirm", true);
     if (!built) {
         zcl_package_copy_fail(reply, "ALLOC", false,
-            "could not prepare hosting stop request", "app.host.stop");
+            "could not prepare hosting change request", command);
     } else if (!zcl_native_fleet_board_call(&in, &body, reply)) {
         /* A lost acknowledgement cannot prove that revocation did not commit. */
         reply->error.mutated = true;
-    } else if (!host_body_valid(&body, host, carrier) ||
-               json_get_bool(json_get(&body, "enabled")) ||
-               json_get_bool(json_get(&body, "pending")) ||
-               json_get_int(json_get(&body, "due_at")) != 0 ||
-               json_get_int(json_get(&body, "generation")) != generation + 1) {
-        zcl_package_copy_fail(reply, "STOP_UNCONFIRMED", true,
-            "the node did not confirm this exact revocation; read hosting status", "app.host.stop");
+    } else if (!host_change_result_valid(&body, host, carrier, generation, resume)) {
+        zcl_package_copy_fail(reply, resume ? "RESUME_UNCONFIRMED" : "STOP_UNCONFIRMED", true,
+            "the node did not confirm this exact change; read hosting status", command);
     } else if (!host_output(reply, &body, true)) {
         zcl_package_copy_fail(reply, "ALLOC", true,
-            "stop returned successfully but its result could not be copied; read status", "app.host.stop");
+            "change returned successfully but its result could not be copied; read status", command);
     }
     json_free(&in);
     json_free(&body);
 }
 
-void zcl_native_handle_app_host_stop(const struct zcl_command_request *request,
-                                    struct zcl_command_reply *reply)
+static void host_change(const struct zcl_command_request *request,
+                        struct zcl_command_reply *reply, bool resume)
 {
     const struct json_value *input = request ? request->input : NULL;
     const char *host, *carrier;
     int64_t generation;
     uint8_t plan[32];
     if (!host_inputs(input, &host, &carrier, reply) ||
-        !host_stop_plan(input, host, carrier, &generation, plan, reply)) return;
+        !host_stop_plan(input, host, carrier, &generation, plan, reply, resume)) return;
     struct json_value body;
     json_init(&body);
-    if (host_stop_current(host, carrier, generation, &body, reply)) {
+    if (host_stop_current(host, carrier, generation, &body, reply, resume)) {
         if (zcl_package_copy_confirmed(input))
-            host_stop_commit(input, host, carrier, generation, plan, reply);
+            host_stop_commit(input, host, carrier, generation, plan, reply, resume);
         else if (!host_output(reply, &body, false) ||
                  !zcl_package_copy_push_root(&reply->data, "plan_id", plan))
             zcl_package_copy_fail(reply, "ALLOC", false,
-                "could not prepare hosting stop plan", "app.host.stop");
+                "could not prepare hosting change plan", resume ? "app.host.resume" : "app.host.stop");
     }
     json_free(&body);
 }
+
+void zcl_native_handle_app_host_stop(const struct zcl_command_request *request,
+                                    struct zcl_command_reply *reply)
+{ host_change(request, reply, false); }
+
+void zcl_native_handle_app_host_resume(const struct zcl_command_request *request,
+                                      struct zcl_command_reply *reply)
+{ host_change(request, reply, true); }

@@ -41,6 +41,19 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_host_stop)
 
+ZCL_COMMAND_READY_COMMAND(
+    "app.host.resume", "app.host", "", "Resume hosting",
+    "Plan and confirm resuming an already accepted hosting intent after verifying its pinned carrier and local signing identity.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "app,hosting,resume", "zcl.app_host_resume.input.v1", "zcl.app_host_resume.v1",
+    "host,carrier,generation,plan_id,confirm", "host,carrier,generation",
+    "z23 app host resume --host=KEY --carrier=ROOT --generation=1",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_host_resume)
+
 ZCL_COMMAND_READY_READ(
     "app.list", "app", "", "List apps",
     "Every installed App manifest from the local App registry (apps, count), "

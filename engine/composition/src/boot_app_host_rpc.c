@@ -137,7 +137,7 @@ static void fb_host_stop(struct node_db *db, const struct json_value *in,
 }
 
 static void fb_host_enable(struct node_db *db, const struct json_value *in,
-                           struct json_value *result, int64_t now)
+                           struct json_value *result, int64_t now, struct vcs_package_store *store)
 {
     const char *text = fb_str(in, "offer", NULL);
     struct boot_app_host_plan plan = {0};
@@ -149,7 +149,7 @@ static void fb_host_enable(struct node_db *db, const struct json_value *in,
     plan.receive_plan = fb_str(in, "receive_plan", NULL); plan.datadir = fb_str(in, "datadir", NULL);
     plan.token = fb_str(in, "token", NULL); plan.expected_plan = fb_str(in, "plan_id", NULL);
     uint8_t local[32]; int64_t generation = 0;
-    enum boot_app_host_result r = boot_app_host_enable(db, vcs_package_store_global(), &plan,
+    enum boot_app_host_result r = boot_app_host_enable(db, store, &plan,
                                                        now, local, &generation);
     if (r != BOOT_APP_HOST_OK) { fb_error(result, "HOST_ENABLE_REFUSED", "recurring hosting could not be enabled"); return; }
     struct db_app_host_intent row;
@@ -158,14 +158,56 @@ static void fb_host_enable(struct node_db *db, const struct json_value *in,
         fb_error(result, "HOST_ENABLE_UNCONFIRMED", "hosting may be enabled; read status");
 }
 
-bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
-                                 const struct json_value *in,
-                                 struct json_value *result, int64_t now)
+static void fb_host_resume(struct node_db *db, const struct json_value *in,
+                           struct json_value *result, int64_t now, struct vcs_package_store *store)
+{
+    uint8_t host[32], expected[32], actual[32]; const char *carrier;
+    const char *host_hex = fb_str(in, "host", NULL), *plan = fb_str(in, "plan_id", NULL);
+    int64_t generation = fb_int(in, "generation", 0); char number[32];
+    if (!fb_host_keys(in, host, &carrier) || !fb_bool(in, "confirm") || generation <= 0 ||
+        generation == INT64_MAX || !vcs_app_offer_hex_valid(plan, 32) ||
+        !zcl_hex_decode_lower(plan, expected, sizeof(expected))) {
+        fb_error(result, "BAD_INPUT", "confirmed host, carrier, generation and plan are required"); return;
+    }
+    (void)snprintf(number, sizeof(number), "%lld", (long long)generation);
+    const char *parts[] = {host_hex, carrier, number};
+    vcs_app_plan_hash("zcl.app_host.resume.v1", parts, 3, actual);
+    if (memcmp(actual, expected, sizeof(actual))) { fb_error(result, "PLAN_MISMATCH", "hosting resume plan changed"); return; }
+    if (boot_app_host_resume(db, store, host, carrier, generation, now) != BOOT_APP_HOST_OK) {
+        fb_error(result, "HOST_RESUME_REFUSED", "hosting intent could not be resumed; read status"); return;
+    }
+    struct db_app_host_intent row;
+    if (db_app_host_intent_find(db, host, carrier, &row) != APP_HOST_OK ||
+        !row.enabled || row.generation != generation + 1 || !fb_host_render(result, &row))
+        fb_error(result, "HOST_RESUME_UNCONFIRMED", "hosting may be enabled; read status");
+}
+
+static bool host_rpc_dispatch(struct node_db *db, const char *op,
+    const struct json_value *in, struct json_value *result, int64_t now,
+    struct vcs_package_store *store)
 {
     if (!strcmp(op, "app_host_status")) fb_host_status(db, in, result);
     else if (!strcmp(op, "app_host_list")) fb_host_list(db, in, result);
     else if (!strcmp(op, "app_host_stop")) fb_host_stop(db, in, result);
-    else if (!strcmp(op, "app_host_enable")) fb_host_enable(db, in, result, now);
+    else if (!strcmp(op, "app_host_resume")) fb_host_resume(db, in, result, now, store);
+    else if (!strcmp(op, "app_host_enable")) fb_host_enable(db, in, result, now, store);
     else return false;
     return true;
 }
+
+bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
+                                 const struct json_value *in,
+                                 struct json_value *result, int64_t now)
+{
+    struct vcs_package_store *store = NULL;
+    if (!strcmp(op, "app_host_enable") || !strcmp(op, "app_host_resume"))
+        store = vcs_package_store_global();
+    return host_rpc_dispatch(db, op, in, result, now, store);
+}
+
+#ifdef ZCL_TESTING
+bool boot_app_host_rpc_dispatch_test(struct node_db *db, const char *op,
+    const struct json_value *in, struct json_value *result, int64_t now,
+    struct vcs_package_store *store)
+{ return host_rpc_dispatch(db, op, in, result, now, store); }
+#endif
