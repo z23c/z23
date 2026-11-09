@@ -1,5 +1,5 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
-/* purpose: Own one isolated stopwatch node and report proven descendant cleanup. */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: Own one isolated stopwatch node and report proven descendant cleanup. */
 #define _POSIX_C_SOURCE 200809L
 #include "platform/supervised_process.h"
 #include "platform/clock.h"
