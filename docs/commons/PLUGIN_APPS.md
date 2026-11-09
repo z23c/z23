@@ -97,6 +97,41 @@ preview**, then **Keep this version**. The local file-sharing workflow does
 not require signup. The detailed command contracts and current distribution
 limitations are below.
 
+### Discover and help share an original
+
+To browse public offers, run a node with package hosting enabled and use its
+data directory for My Apps. See [Joining the software commons](../node/JOIN.md#2-joining-the-c23-software-commons--z23-join)
+for node setup. Open My Apps with `z23 app library --datadir=/absolute/path/to/node-data`,
+then choose **Discover apps**, select an offer, and review its
+publisher and package before choosing Receive. Once received, **Build and
+preview** and **Keep this version** are separate choices. A matching-build
+count, when available, describes signing keys in the local snapshot; it does
+not prove independent people or that the reported builds ran.
+
+After a successful Receive, at **Help share this original app?**, choose
+**Help share** or **Not now**. Helping stores the original files and uses disk space and
+bandwidth to serve them while your node runs. The node renews its offer while
+hosting is enabled; public discovery waits for a ready endpoint, and reaching
+other peers is not guaranteed. Receiving or keeping the copy does not itself
+require you to accept this hosting choice.
+
+You can decide later: open **My Apps**, select the kept received app, choose
+**Share this version → Help share original**, and review the original app and
+publisher before confirming. This offers the original signed release, even if
+you have since changed and kept your own version. To share your edits, use the
+separate **Create share file** or **Publish publicly** choice for that kept
+version.
+
+To manage an existing original-hosting choice, open **My Apps → Hosting**,
+select the entry, and review **Stop hosting** or **Resume hosting**. Stop
+ends future renewals but leaves the carrier pinned; existing offers can remain
+until they expire. Resume verifies the pinned carrier before publishing again.
+If an operation's outcome is unconfirmed, inspect its status before retrying.
+
+<!-- claim: symbol-present ad_review tools/command/native_app_discover.c # selected public offer uses the received-copy review flow -->
+<!-- claim: symbol-present app_host_original_run tools/command/native_app_host_browser.c # later original hosting is an explicit owner choice -->
+<!-- claim: symbol-present hb_show tools/command/native_app_host_browser.c # hosting review offers stop or resume -->
+
 App storage can live in a home directory containing spaces. Builds use private
 temporary source and a temporary alias to the existing build directory when
 needed; saved copies, images and receipts stay in the app-data directory.
@@ -209,7 +244,7 @@ z23 discover search game   # finds app.open (also: airplane, skycombat)
 - **Existing personal copies.** The owner-only `app.personalize` operation takes `copy`, `datadir`, a saved `version` and `expected_head`. Its read-only plan shows the original name and proposed personal name, or explains that a local identity must first be created after confirmation. Confirming saves the metadata change as an ordinary successor while preserving working files and Keep. If the name already matches, it returns the existing saved version unchanged. Build and preview the returned version before keeping or sharing it. This operation does not sign or publish a release, and the generic MCP `z23_run` tool cannot approve it.
 - **Receive a shared copy.** `app.receive` needs only an absolute `file` path. It uses the bound datadir and suggests a free copy name; optional absolute `datadir` and `destination` paths override those defaults. The native window displays the verified share's publisher, release, package and exact destination. First use creates private app storage only after confirmation, leaving the home directory's permissions unchanged. Unsafe default parents are refused; the destination is never silently changed after review. Confirmation grants permission for future requested builds and runs; receiving itself executes nothing. Cancel, unavailable presentation or a changed share plan records no trust. The MCP `apps_receive` tool requests this same window with `file` and optional path overrides; it cannot supply confirmation or trust settings. No account or node connection is required for local file receipt. Default storage creation is implemented for POSIX; Windows bootstrap explicitly refuses.
 - **Keep a preview.** After a ready selected preview, pass its exact identity and `selection_revision` as `expected_revision` to the local CLI `app.keep`, with `accept_execution:true`. Through MCP, `apps_keep` requests a native owner window for that same identity; JSON cannot approve Keep, and `accept_execution:true` does not replace the window decision. Cancel or an unavailable window leaves the saved choice unchanged. The saved choice is checked against the existing copy grant and build record. Later name-only `app.open` rechecks and opens that choice; newer saved or unsaved source edits remain in place. A stale revision or unreadable kept choice is refused.
-- **Open a share file on Linux.** Install an app-capable release with `--apps`, then choose Z23 from **Open With** on a `.z23share` file. The installed entry names the executable by absolute path, so it does not depend on the desktop's PATH. It uses the same app-data directory as the examples above. Registration uses `XDG_DATA_HOME` or the home directory's `.local/share` and requires `update-mime-database` from shared-mime-info and `update-desktop-database` from desktop-file-utils; your default application is preserved. The native Receive window verifies the file before confirmation. Opening it does not authorize building or running it: **Build and preview** and **Keep this version** remain separate choices. Closing a choice leaves the received copy available without keeping it. Older app releases without desktop assets can still use the Receive command directly. Developers running from a checkout may continue to use `make presentation-desktop-install` with `z23` on their desktop PATH.
+- **Open a share file on Linux.** Install an app-capable release with `--apps`, then choose Z23 from **Open With** on a `.z23share` file. The installed entry names the executable by absolute path, so it does not depend on the desktop's PATH. It uses the same app-data directory as the examples above. Registration uses `XDG_DATA_HOME` or the home directory's `.local/share` and requires `update-mime-database` from shared-mime-info. If `update-desktop-database` is unavailable, the installer merges its handler into the per-user MIME cache; your default application is preserved. The native Receive window verifies the file before confirmation. Opening it does not authorize building or running it: **Build and preview** and **Keep this version** remain separate choices. Closing a choice leaves the received copy available without keeping it. Older app releases without desktop assets can still use the Receive command directly. Developers running from a checkout may continue to use `make presentation-desktop-install` with `z23` on their desktop PATH.
 - **Preview after Receive.** The local CLI accepts `z23 app receive --file=/absolute/app.z23share --datadir="$HOME/.local/share/z23-app-data" --preview`. After Receive succeeds, choose Build and preview to build its exact saved version, then choose Keep this version to add it to the app list. Closing either choice leaves the received copy available without keeping it. A later build or preview failure retains the Receive receipt and reports the continuation failure separately. The dedicated MCP `apps_receive` tool remains receive-only and refuses the preview option.
 <!-- claim: symbol-present app_receive_flow_run tools/command/native_app_receive_flow.c # native receive continuation -->
 - **Keep a received app without a catalog.** After explicitly building the received copy, preview its exact build identity under a name such as `kept:my-app`, then Keep that same name and identity. The whole route is at most 32 bytes; the nonempty suffix uses lowercase letters, digits and hyphens and starts with a letter or digit. Name-only open, source reads and edits resolve the saved selection before consulting any catalog. A missing or corrupt selection never falls back to a catalog executable, even if a catalog later supplies the same name. Launch uses no extra arguments, no raise signal, and survival after the settle interval as readiness—not proof of a visible window. Receiving alone neither Keeps, builds nor launches the copy.
