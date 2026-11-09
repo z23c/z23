@@ -93,7 +93,7 @@ LINT_GATE("check-quality-lane-freshness", check_quality_lane_freshness, LINT_CMD
 LINT_GATE("check-coins-lookup-nullcheck", check_coins_lookup_nullcheck, LINT_CMD_NONE)
 LINT_GATE("check-wire-harness-security-gate", check_wire_harness_security_gate, LINT_CMD_PLAIN)
 LINT_GATE("check-tor-dial-prewarm", check_tor_dial_prewarm, LINT_CMD_PLAIN)
-LINT_GATE("check-describe-budget", check_describe_budget, LINT_CMD_PAIR)
+LINT_GATE("check-describe-budget", check_describe_budget, LINT_CMD_NONE)
 LINT_GATE("check-catalog-rooms", check_catalog_rooms, LINT_CMD_PAIR)
 LINT_GATE("check-doc-accuracy", check_doc_accuracy, LINT_CMD_PAIR)
 LINT_GATE("check-kpi-floor", check_kpi_floor, LINT_CMD_PAIR)

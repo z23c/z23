@@ -15,9 +15,9 @@
  * it compiles tools/check_describe_budget.c — a second consumer of the
  * command .def X-macro grammar that calls the REAL
  * zcl_command_registry_describe_json()/menu_json() on every leaf and branch
- * — fresh on every run, then grades the helper's output. That mechanism is
- * the point of the gate (no `make`, no build/ dependency, no second size
- * model, no stale snapshot of the catalog), so the port keeps it exactly:
+ * — fresh on every run, then grades the helper's output. The combined
+ * canonical invocation shares its clean helper with its selftest only within
+ * that invocation; it has no `make`, build/ or cross-run cache dependency:
  * this file re-implements only the driver (prereq check, scan floors,
  * compile-and-run, output framing, --selftest) and still invokes the
  * unchanged helper source with the same flags, include paths, and link
@@ -422,6 +422,18 @@ static int db_main_fail(const char *log)
     return rc ? rc : 1;
 }
 
+static int db_main_log(const char *out_log, int code, int emit)
+{
+    long leaves = 0;
+    int rc = code != 0 ? db_main_fail(out_log) : 0;
+    if (rc == 0) rc = db_extract_leaves(out_log, &leaves);
+    if (rc == 0)
+        rc = gate_require_scanned((int)leaves, DB_LEAF_FLOOR, k_db_name,
+            "almost no leaves rendered — the X-macro expansion broke");
+    if (rc == 0 && emit) rc = db_indent_file(out_log, stdout, "  ");
+    return rc;
+}
+
 static int db_main_body(const struct db_srcs *srcs, const char *tmp)
 {
     char gate[4096], cc_log[4096], out_log[4096];
@@ -439,25 +451,21 @@ static int db_main_body(const struct db_srcs *srcs, const char *tmp)
         return 2;
     }
     int code = 0;
-    long leaves = 0;
     if (rc == 0)
         rc = db_run_gate(gate, out_log, &code);
-    if (rc == 0 && code != 0)
-        rc = db_main_fail(out_log);
     if (rc == 0)
-        rc = db_extract_leaves(out_log, &leaves);
-    if (rc == 0)
-        rc = gate_require_scanned((int)leaves, DB_LEAF_FLOOR, k_db_name,
-            "almost no leaves rendered — the X-macro expansion broke");
-    if (rc == 0)
-        rc = db_indent_file(out_log, stdout, "  ");
+        rc = db_main_log(out_log, code, 1);
     return rc;
 }
 
+static int db_combined(void);
+
 int check_describe_budget_run(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    if (argc == 1 && strcmp(argv[0], "--combined") == 0)
+        return db_combined();
+    if (argc != 0)
+        return die("check_describe_budget: unknown arguments\n", "");
     char root[4096], tmp[4096];
     struct db_srcs srcs;
     int rc = cic_repo_root(root, sizeof root);
@@ -865,12 +873,14 @@ static int db_st_omitted(const struct db_srcs *srcs, const struct db_st *p)
     return 0;
 }
 
-static int db_selftest_body(const struct db_srcs *srcs, const char *tmp)
+static int db_selftest_body(const struct db_srcs *srcs, const char *tmp, int combined)
 {
     struct db_st p;
     int rc = db_st_paths(&p, tmp);
     if (rc == 0)
         rc = db_st_clean(srcs, &p);
+    if (rc == 0 && combined)
+        rc = db_main_log(p.clean, 0, 0);
     if (rc == 0)
         rc = db_st_padded(srcs, &p);
     if (rc == 0)
@@ -882,6 +892,8 @@ static int db_selftest_body(const struct db_srcs *srcs, const char *tmp)
               "a leaf padded past ZCL_COMMAND_SPEC_BUDGET fails and is "
               "named; a dropped sibling command_registry*.c breaks the "
               "link; an omitted fleet room refuses\n", stdout);
+    if (rc == 0 && combined)
+        rc = db_indent_file(p.clean, stdout, "  ");
     return rc;
 }
 
@@ -901,7 +913,31 @@ int check_describe_budget_selftest(void)
     if (rc == 0)
         rc = db_mkdtemp(tmp, sizeof tmp, "zcl-describe-budget-selftest");
     if (rc == 0) {
-        rc = db_selftest_body(&srcs, tmp);
+        rc = db_selftest_body(&srcs, tmp, 0);
+        (void)rap_rm_rf(tmp);
+    }
+    return rc;
+}
+
+/* One private lifetime lets the canonical pair share its clean result. */
+static int db_combined(void)
+{
+    char root[4096], tmp[4096];
+    struct db_srcs srcs;
+    int rc = cic_repo_root(root, sizeof root);
+    if (rc == 0 && chdir(root) != 0) rc = 2;
+    if (rc == 0) {
+        db_derive_srcs(&srcs);
+        rc = gate_require_scanned((int)srcs.derived, DB_REG_FLOOR, k_db_name,
+            "no command_registry*.c under engine/modules/kernel/src — the command registry moved?");
+    }
+    if (rc == 0) rc = db_prereq(&srcs);
+    if (rc == 0)
+        rc = gate_require_scanned(db_count_defs(), DB_DEF_FLOOR, k_db_name,
+            "no .def catalogs under engine/composition/commands — the command catalog moved?");
+    if (rc == 0) rc = db_mkdtemp(tmp, sizeof tmp, "zcl-describe-budget-combined");
+    if (rc == 0) {
+        rc = db_selftest_body(&srcs, tmp, 1);
         (void)rap_rm_rf(tmp);
     }
     return rc;
