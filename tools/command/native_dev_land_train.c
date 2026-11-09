@@ -414,7 +414,8 @@ static bool dl_split_member_ok(const struct dl_row *r, const struct dl_row *head
            strcmp(r->proof_intent, head->proof_intent) == 0 &&
            strcmp(r->train_group, head->train_group) == 0 && dl_sha_ok(r->train_commit) &&
            strcmp(r->local, head->local) == 0 && strcmp(r->base, head->base) == 0 &&
-           strcmp(r->tree, head->tree) == 0 && !r->publication_hold && !r->fence_peer &&
+           strcmp(r->tree, head->tree) == 0 &&
+           (!r->publication_hold || r->seq == head->seq) && !r->fence_peer &&
            dl_split_unpublished(r) && strcmp(r->phase, "push") != 0;
 }
 
