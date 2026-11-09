@@ -11,7 +11,12 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <stdint.h>
+#include <errno.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include "base/serialize_le.h"
 #include "lintc.h"
 #include "gate_ci_symbol_floor_priv.h"
@@ -131,8 +136,66 @@ static int cst_refuse_selftest(void)
     return bad;
 }
 
+/* Run the real gate against one isolated ldd stub and valid ELF image. */
+static int cst_gate_child(const char *dir, const char *image)
+{
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        if (setenv("PATH", dir, 1) != 0 ||
+            setenv("ZCL_SYMBOL_FLOOR_BIN", image, 1) != 0)
+            _exit(125);
+        _exit(check_ci_symbol_floor_run(0, NULL));
+    }
+    int status;
+    pid_t got;
+    do { got = waitpid(pid, &status, 0); } while (got < 0 && errno == EINTR);
+    return got == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int cst_stub_write(const char *path, const char *script)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    size_t n = strlen(script);
+    int bad = fwrite(script, 1, n, f) != n;
+    if (fclose(f) != 0) bad = 1;
+    return bad || chmod(path, 0700) != 0 ? -1 : 0;
+}
+
+static int cst_ldd_selftest(void)
+{
+    char dir[4096], image[4096], ldd[4096];
+    unsigned char bytes[CST_IMG];
+    const char *const names[] = { "GLIBC_2.38" };
+    if (lint_mkdtemp(dir, sizeof dir, "symbol-floor") != 0 ||
+        snprintf(image, sizeof image, "%s/image", dir) >= (int)sizeof image ||
+        snprintf(ldd, sizeof ldd, "%s/ldd", dir) >= (int)sizeof ldd)
+        return 1;
+    FILE *f = fopen(image, "wb");
+    if (!f) return 1;
+    size_t n = cst_image(bytes, names, 1);
+    int bad = fwrite(bytes, 1, n, f) != n;
+    if (fclose(f) != 0) bad = 1;
+    if (!bad && cst_gate_child(dir, image) != 2) bad = 1;
+    if (!bad && (cst_stub_write(ldd, "#!/bin/sh\nexit 0\n") != 0 ||
+                 cst_gate_child(dir, image) != 0)) bad = 1;
+    if (!bad && (cst_stub_write(ldd, "#!/bin/sh\necho 'lib => not found'\n") != 0 ||
+                 cst_gate_child(dir, image) != 1)) bad = 1;
+    if (!bad && (cst_stub_write(ldd, "#!/bin/sh\nexit 9\n") != 0 ||
+                 cst_gate_child(dir, image) != 1)) bad = 1;
+    if (!bad && (cst_stub_write(ldd, "#!/bin/sh\nkill -TERM $$\n") != 0 ||
+                 cst_gate_child(dir, image) != 1)) bad = 1;
+    (void)unlink(ldd);
+    (void)unlink(image);
+    (void)rmdir(dir);
+    return bad;
+}
+
 int check_ci_symbol_floor_selftest(void)
 {
-    int bad = cst_floor_selftest() | cst_vcmp_selftest() | cst_refuse_selftest();
+    int bad = cst_floor_selftest() | cst_vcmp_selftest() | cst_refuse_selftest() |
+              cst_ldd_selftest();
     return st_ok(bad, "check_ci_symbol_floor selftest: OK\n");
 }

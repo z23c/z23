@@ -55,4 +55,6 @@ int csf_scan(const struct csf_src *s, struct csf_floor *out);
 /* Compare dotted numeric versions like sort -V: -1, 0 or 1. */
 int csf_vcmp(const char *a, const char *b);
 
+int check_ci_symbol_floor_run(int argc, char **argv);
+
 #endif
