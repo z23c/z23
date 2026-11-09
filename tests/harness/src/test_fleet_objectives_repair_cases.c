@@ -152,6 +152,35 @@ _test_next:;
     return failures;
 }
 
+static int rpr_case_missing_train_note(const char *root)
+{
+    int failures = 0;
+    char path[1024];
+    struct zcl_objectives_options o = {0};
+    const char *rows[] = {
+        "{\"state\":\"failed\",\"ts\":\"2026-10-22T08:00:00Z\",\"worktree\":\"same\",\"attempt\":1,\"started\":1}\n"
+        "{\"state\":\"landed\",\"ts\":\"2026-10-22T09:00:00Z\",\"landed_at\":1792663200,\"worktree\":\"same\",\"attempt\":1,\"started\":2}\n",
+        "{\"state\":\"landed\",\"ts\":\"2026-10-22T08:00:00Z\",\"landed_at\":1792660000,\"note\":\"old\",\"attempt\":1,\"started\":1}\n"
+        "{\"state\":\"landed\",\"ts\":\"2026-10-22T09:00:00Z\",\"landed_at\":1792663200,\"note\":\"\",\"worktree\":\"same\",\"attempt\":1,\"started\":2}\n",
+        "{\"state\":\"landed\",\"ts\":\"2026-10-22T09:00:00Z\",\"landed_at\":1792663200,\"note\":123,\"worktree\":\"same\",\"attempt\":1,\"started\":2}\n"
+    };
+    (void)snprintf(path, sizeof(path), "%s/missing_note.jsonl", root);
+    o.outcomes = path;
+    TEST("objectives: missing or invalid newest train note is unmeasured") {
+        for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+            struct zcl_objective_value latency, attempts;
+            ASSERT(rpr_write(path, rows[i]));
+            latency = zcl_objectives_measure(&o, "landing_latency_s");
+            attempts = zcl_objectives_measure(&o, "landing_attempts_per_train");
+            ASSERT(!latency.measured && !attempts.measured);
+            ASSERT(strstr(latency.reason, "note") && strstr(attempts.reason, "note"));
+        }
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 /* ── attempt collections complete or refused ──────────────────────────── */
 
 static bool rpr_mkdir(const char *path) { return mkdir(path, 0700) == 0; }
@@ -433,6 +462,7 @@ int fox_repair_cases(void)
     failures += rpr_case_window_future(root);
     failures += rpr_case_git_skew(root);
     failures += rpr_case_train_identity(root);
+    failures += rpr_case_missing_train_note(root);
     failures += rpr_case_attempt_growth(root);
     failures += rpr_case_lane_labels(root);
     failures += rpr_case_outcome_fallback(root);
