@@ -333,7 +333,7 @@ static void tpp_child_environment(const char *cflags)
         "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", NULL};
     for (int i = 0; clear[i]; i++) if (unsetenv(clear[i])) _exit(125);
     if (cflags && setenv("CFLAGS", cflags, 1)) _exit(125);
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__)
     if (setenv("MACOSX_DEPLOYMENT_TARGET", "14.0", 1)) _exit(125);
 #endif
     if (setenv("ZCL_TOR_JOBS", "1", 1) || setenv("LC_ALL", "C", 1) ||
@@ -447,7 +447,7 @@ static void tpp_make_fixture(const char *binary)
         "\t@if test -f interrupt-build; then kill -TERM $$$$; fi\n"
         "\t$(CC) $(CPPFLAGS) $(CFLAGS) -std=c23 -c $(CURDIR)/tiny.c -o $@\n"
         "clean:\n\t@printf 'clean\\n' >> events\n\trm -f tiny.o $(ARCHIVES)\n");
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__linux__)
     /* Presence-only configure seams, not actual dependency qualification. */
     tpp_dirs("vendor/lib"); tpp_dirs("vendor/include/openssl");
     tpp_dirs("vendor/include/event2");
