@@ -429,6 +429,7 @@ static void fbc_fetch_poll(struct fbc_fetch_in *in,
     fbc_fwd_object(in, &fwd);
     uint64_t deadline =
         (uint64_t)platform_time_wall_unix() + (uint64_t)in->timeout_s;
+    bool continuing = false;
     for (;;) {
         struct json_value data;
         if (!fbc_forward("fleet_bundle_fetch", &fwd, reply, &data,
@@ -441,6 +442,13 @@ static void fbc_fetch_poll(struct fbc_fetch_in *in,
         json_free(&data);
         if (complete)
             break;
+        if (!continuing) {
+            if (!json_push_kv_bool(&fwd, "continuation", true)) {
+                fbc_fail(reply, "ARG_BUILD_FAILED", "could not encode continuation", false, false, FBC_FETCH_CMD);
+                break;
+            }
+            continuing = true;
+        }
         if ((uint64_t)platform_time_wall_unix() >= deadline) {
             fbc_fail_timeout(in, reply);
             break;
@@ -450,15 +458,16 @@ static void fbc_fetch_poll(struct fbc_fetch_in *in,
     json_free(&fwd);
 }
 
-void zcl_native_handle_fleet_bundle_fetch(
+static void fbc_fetch(
     const struct zcl_command_request *request,
-    struct zcl_command_reply *reply)
+    struct zcl_command_reply *reply, bool continuation)
 {
     if (!request || !reply)
         return;
     struct fbc_fetch_in in;
     if (!fbc_parse_fetch(request->input, reply, &in))
         return;
+    in.args.continuation = continuation;
     struct vcs_package_store *store = vcs_package_store_global();
     if (store) {
         fbc_fetch_resident(store, &in, reply);
@@ -473,4 +482,16 @@ void zcl_native_handle_fleet_bundle_fetch(
     if (in.peer && !fbc_add_peer(in.peer, reply))
         return;
     fbc_fetch_poll(&in, reply);
+}
+
+void zcl_native_handle_fleet_bundle_fetch(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    fbc_fetch(request, reply, false);
+}
+
+void zcl_native_fleet_bundle_fetch_continue(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    fbc_fetch(request, reply, true);
 }

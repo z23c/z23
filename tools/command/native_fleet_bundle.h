@@ -15,6 +15,12 @@
 
 struct vcs_package_store;
 struct vcs_swarm_engine;
+struct zcl_command_request;
+struct zcl_command_reply;
+
+/* Resident RPC continuation: the public command always starts a fetch. */
+void zcl_native_fleet_bundle_fetch_continue(const struct zcl_command_request *request,
+                                            struct zcl_command_reply *reply);
 
 enum zcl_fleet_bundle_status {
     ZCL_FLEET_BUNDLE_DONE = 0, /* offered / written */
@@ -55,6 +61,7 @@ struct zcl_fleet_bundle_fetch_args {
      * a newer offer). Empty: ordinary discovery by ANNOUNCE. */
     const uint64_t *providers;
     size_t provider_count;
+    bool continuation; /* observe an existing fetch; do not restart failure */
 };
 
 /* One non-blocking fetch step: start (idempotent) or continue the swarm

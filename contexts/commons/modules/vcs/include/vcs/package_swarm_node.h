@@ -326,6 +326,8 @@ enum vcs_swarm_fetch_result {
     VCS_SWARM_FETCH_BOUND_NOT_OWNED, /* existing work has a looser bound */
     VCS_SWARM_FETCH_BAD_INPUT,
     VCS_SWARM_FETCH_NO_PROVIDER,   /* directed fetch has no usable peer */
+    VCS_SWARM_FETCH_TERMINAL,      /* continuation observed named failure */
+    VCS_SWARM_FETCH_NOT_FOUND,     /* continuation has no live record */
 };
 const char *vcs_swarm_fetch_result_string(enum vcs_swarm_fetch_result r);
 
@@ -358,6 +360,13 @@ enum vcs_swarm_fetch_result vcs_swarm_engine_fetch_from_bounded(
     struct vcs_swarm_engine *engine, const uint8_t package_root[32],
     int64_t day, uint64_t now, const uint64_t *provider_peers,
     size_t provider_count, uint64_t maximum_package_bytes);
+
+/* Continue an existing fetch without creating or restarting it. A terminal
+ * failure returns TERMINAL and its static rule; providers may be rebound. */
+enum vcs_swarm_fetch_result vcs_swarm_engine_fetch_continue(
+    struct vcs_swarm_engine *engine, const uint8_t package_root[32],
+    int64_t day, uint64_t now, const uint64_t *provider_peers,
+    size_t provider_count, const char **rule);
 
 /* Cancel an active download: queues CANCEL per outstanding request,
  * tombstones the ids, deletes the record. False when not active. */

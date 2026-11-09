@@ -271,6 +271,32 @@ static const char *zfb_fetch_code(enum vcs_swarm_fetch_result r)
     }
 }
 
+/* Register or continue without allowing a poll to restart failed work. */
+static enum zcl_fleet_bundle_status zfb_start_or_continue(
+    struct vcs_package_store *store, struct vcs_swarm_engine *engine,
+    const struct zcl_fleet_bundle_fetch_args *args,
+    struct zcl_fleet_bundle_outcome *out)
+{
+    const char *rule = NULL;
+    enum vcs_swarm_fetch_result r = args->continuation
+        ? vcs_swarm_engine_fetch_continue(engine, args->root, args->day,
+                                          args->now, args->providers, args->provider_count, &rule)
+        : args->provider_count ? vcs_swarm_engine_fetch_from(engine, args->root, args->day,
+                                      args->now, args->providers,
+                                      args->provider_count)
+        : vcs_swarm_engine_fetch(engine, args->root, args->day, args->now);
+    if (r == VCS_SWARM_FETCH_TERMINAL)
+        return zfb_refuse(out, "DOWNLOAD_FAILED", rule ? rule : "the swarm download failed", false, true);
+    if (r == VCS_SWARM_FETCH_NOT_FOUND) {
+        if (zfb_store_complete(store, args->root)) return ZCL_FLEET_BUNDLE_DONE;
+        return zfb_refuse(out, "DOWNLOAD_GONE", "the in-progress download is no longer present", true, false);
+    }
+    if (r != VCS_SWARM_FETCH_OK && r != VCS_SWARM_FETCH_ALREADY_COMPLETE)
+        return zfb_refuse(out, zfb_fetch_code(r),
+                          vcs_swarm_fetch_result_string(r), true, false);
+    return ZCL_FLEET_BUNDLE_PENDING;
+}
+
 /* Start or continue the download. DONE: complete in the store. PENDING:
  * still arriving. REFUSED: a rule failed (a lying size cancels the work). */
 static enum zcl_fleet_bundle_status zfb_progress(
@@ -284,14 +310,8 @@ static enum zcl_fleet_bundle_status zfb_progress(
         return zfb_refuse(out, "NO_ENGINE",
                           "no swarm engine is running (package hosting "
                           "disabled)", false, false);
-    enum vcs_swarm_fetch_result r = args->provider_count
-        ? vcs_swarm_engine_fetch_from(engine, args->root, args->day,
-                                      args->now, args->providers,
-                                      args->provider_count)
-        : vcs_swarm_engine_fetch(engine, args->root, args->day, args->now);
-    if (r != VCS_SWARM_FETCH_OK && r != VCS_SWARM_FETCH_ALREADY_COMPLETE)
-        return zfb_refuse(out, zfb_fetch_code(r),
-                          vcs_swarm_fetch_result_string(r), true, false);
+    enum zcl_fleet_bundle_status started = zfb_start_or_continue(store, engine, args, out);
+    if (started != ZCL_FLEET_BUNDLE_PENDING) return started;
     if (zfb_store_complete(store, args->root))
         return ZCL_FLEET_BUNDLE_DONE;
     struct vcs_swarm_download_status ds;

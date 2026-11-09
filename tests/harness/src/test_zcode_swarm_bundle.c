@@ -14,9 +14,13 @@
 #include "command/native_command.h"
 #include "command/native_fleet_bundle.h"
 #include "config/command_catalog.h"
+#include "config/boot_zcode_dht.h"
+#include "controllers/rpc_client.h"
 #include "platform/clock.h"
 #include "kernel/command_registry.h"
 #include "json/json.h"
+#include "rpc/server.h"
+#include "util/util.h"
 #include "vcs/blob_store.h"
 #include "vcs/bundle_carry.h"
 #include "vcs/package_public_shape.h"
@@ -147,6 +151,7 @@ static enum zcl_fleet_bundle_status bundle_fetch_loop(
                                          o);
         if (st != ZCL_FLEET_BUNDLE_PENDING)
             return st;
+        a->continuation = true;
         vcs_swarm_engine_tick(p->leech.engine, SW_DAY, a->now);
         bundle_deliver(&p->leech, BUNDLE_LEECH_HANDLE, &p->seed,
                        BUNDLE_SEEDER_HANDLE, a->now);
@@ -180,6 +185,163 @@ static void bundle_args(struct zcl_fleet_bundle_fetch_args *a,
     memcpy(a->sha256, offered->sha256, 32);
     a->size = offered->size;
     a->out_path = out_path;
+}
+
+static int bundle_case_terminal_continuation(void)
+{
+    int failures = 0;
+    struct bundle_pair p;
+    struct zcl_fleet_bundle_outcome offered, out;
+    uint8_t *orig = NULL;
+    if (!bundle_pair_open(&p, "bterminal") || !bundle_offer(&p, 3000, &offered, &orig)) {
+        free(orig); bundle_pair_close(&p); return 1;
+    }
+    char path[1200]; bundle_make_path(path, sizeof(path), &p.leech, "terminal.bundle");
+    struct zcl_fleet_bundle_fetch_args a; bundle_args(&a, &offered, path);
+    a.day = SW_DAY; a.now = 2;
+    a.continuation = true;
+    SW_CHECK("bundle terminal: missing continuation refuses without starting",
+        zcl_fleet_bundle_fetch_step(p.leech.store, p.leech.engine, &a, &out) == ZCL_FLEET_BUNDLE_REFUSED &&
+        !strcmp(out.code, "DOWNLOAD_GONE"));
+    a.continuation = false;
+    SW_CHECK("bundle terminal: explicit start registers download",
+        zcl_fleet_bundle_fetch_step(p.leech.store, p.leech.engine, &a, &out) == ZCL_FLEET_BUNDLE_PENDING);
+    for (unsigned i = 0; i <= VCS_SWARM_MAX_CHUNK_ATTEMPTS; ++i) {
+        uint64_t now = 2u + i * (VCS_SWARM_REQUEST_TIMEOUT_TICKS + 1u);
+        vcs_swarm_engine_tick(p.leech.engine, SW_DAY, now);
+    }
+    struct vcs_swarm_download_status status;
+    SW_CHECK("bundle terminal: real engine exhausted manifest attempts",
+        vcs_swarm_engine_download_status(p.leech.engine, a.root, &status) &&
+        status.state == VCS_SWARM_DL_FAILED && status.rule &&
+        !strcmp(status.rule, "manifest-attempts-exhausted"));
+    a.continuation = true;
+    SW_CHECK("bundle terminal: continuation preserves terminal rule",
+        zcl_fleet_bundle_fetch_step(p.leech.store, p.leech.engine, &a, &out) == ZCL_FLEET_BUNDLE_REFUSED &&
+        !strcmp(out.code, "DOWNLOAD_FAILED") && !strcmp(out.message, "manifest-attempts-exhausted"));
+    SW_CHECK("bundle terminal: continuation leaves engine failed and output absent",
+        vcs_swarm_engine_download_status(p.leech.engine, a.root, &status) &&
+        status.state == VCS_SWARM_DL_FAILED && access(path, F_OK) != 0);
+    a.continuation = false;
+    SW_CHECK("bundle terminal: explicit retry starts clean",
+        zcl_fleet_bundle_fetch_step(p.leech.store, p.leech.engine, &a, &out) == ZCL_FLEET_BUNDLE_PENDING &&
+        vcs_swarm_engine_download_status(p.leech.engine, a.root, &status) && status.state != VCS_SWARM_DL_FAILED);
+    free(orig); bundle_pair_close(&p); return failures;
+}
+
+static int bundle_case_delayed_provider(void)
+{
+    int failures = 0; struct bundle_pair p; struct zcl_fleet_bundle_outcome offered, out;
+    uint8_t *orig = NULL;
+    if (!bundle_pair_open(&p, "bdelayed") || !bundle_offer(&p, 3000, &offered, &orig)) {
+        free(orig); bundle_pair_close(&p); return 1;
+    }
+    uint8_t key[33]; sw_key(82, key);
+    vcs_swarm_engine_peer_drop(p.leech.engine, BUNDLE_LEECH_HANDLE);
+    bool added = vcs_swarm_engine_peer_add(p.leech.engine, BUNDLE_LEECH_HANDLE, key);
+    char path[1200]; bundle_make_path(path, sizeof(path), &p.leech, "delayed.bundle");
+    struct zcl_fleet_bundle_fetch_args a; bundle_args(&a, &offered, path);
+    a.day = SW_DAY; a.now = 1;
+    SW_CHECK("bundle delayed: starts before provider is bound", added &&
+        zcl_fleet_bundle_fetch_step(p.leech.store, p.leech.engine, &a, &out) == ZCL_FLEET_BUNDLE_PENDING);
+    vcs_swarm_engine_tick(p.leech.engine, SW_DAY, 2);
+    struct vcs_package_swarm_object want;
+    SW_CHECK("bundle delayed: no unannounced peer selected", sw_drain_wants(&p.leech, BUNDLE_LEECH_HANDLE, &want, 1) == 0);
+    uint64_t provider = BUNDLE_LEECH_HANDLE;
+    a.providers = &provider; a.provider_count = 1; a.continuation = true;
+    bool mode_ok = false;
+    SW_CHECK("bundle delayed: continuation binds provider and verifies output",
+        bundle_fetch_loop(&p, &a, &out) == ZCL_FLEET_BUNDLE_DONE &&
+        bundle_file_equals(path, orig, 3000, &mode_ok) && mode_ok);
+    free(orig); bundle_pair_close(&p); return failures;
+}
+
+static unsigned g_bundle_poll_calls;
+static bool g_bundle_poll_valid;
+static struct bundle_pair *g_bundle_poll_pair;
+
+static char *bundle_rpc_wire(const struct json_value *v)
+{
+    size_t len = json_write(v, NULL, 0);
+    char *wire = len ? malloc(len + 1u) : NULL;
+    if (wire && !json_write(v, wire, len + 1u)) { free(wire); return NULL; }
+    return wire;
+}
+
+static bool bundle_poll_request_valid(const char *method, const struct json_value *v)
+{
+    if (strcmp(method, "fleet_bundle_fetch") || v->type != JSON_ARR || json_size(v) != 1) return false;
+    const struct json_value *input = json_at(v, 0);
+    const struct json_value *continuation = json_get(input, "continuation");
+    return g_bundle_poll_calls == 0 ? !continuation :
+        continuation && continuation->type == JSON_BOOL && json_get_bool(continuation);
+}
+
+static char *bundle_poll_rpc(const char *method, const char *params)
+{
+    struct json_value v = {0};
+    bool parsed = json_read(&v, params, strlen(params));
+    g_bundle_poll_valid = g_bundle_poll_valid && parsed && bundle_poll_request_valid(method, &v);
+    if (g_bundle_poll_calls == 0) {
+        const char *argv[] = {"z23-test", "-packagehost=1"};
+        ParseParameters(2, argv); SetDataDir(g_bundle_poll_pair->leech.datadir);
+        g_bundle_poll_valid = g_bundle_poll_valid && vcs_package_store_open_global();
+        vcs_swarm_engine_set_global(g_bundle_poll_pair->leech.engine);
+    }
+    struct rpc_table table; rpc_table_init(&table); boot_fleet_bundle_register_rpc(&table);
+    const struct rpc_command *cmd = rpc_table_find(&table, "fleet_bundle_fetch");
+    struct json_value out = {0};
+    bool called = cmd && cmd->actor(&v, false, &out);
+    g_bundle_poll_valid = g_bundle_poll_valid && called;
+    if (g_bundle_poll_calls++ == 0 && called) {
+        struct bundle_pair *p = g_bundle_poll_pair;
+        vcs_swarm_engine_tick(p->leech.engine, SW_DAY, 2);
+        bundle_deliver(&p->leech, BUNDLE_LEECH_HANDLE, &p->seed, BUNDLE_SEEDER_HANDLE, 2);
+        for (unsigned i = 0; i <= VCS_SWARM_MAX_CHUNK_ATTEMPTS; ++i)
+            vcs_swarm_engine_tick(p->leech.engine, SW_DAY, 3u + i * (VCS_SWARM_REQUEST_TIMEOUT_TICKS + 1u));
+    }
+    char *wire = bundle_rpc_wire(&out);
+    json_free(&out); json_free(&v); return wire;
+}
+
+static int bundle_case_command_poll(void)
+{
+    int failures = 0; struct bundle_pair p; struct zcl_fleet_bundle_outcome offered; uint8_t *orig = NULL;
+    if (!bundle_pair_open(&p, "bpoll") || !bundle_offer(&p, 3000, &offered, &orig)) {
+        free(orig); bundle_pair_close(&p); return 1;
+    }
+    char path[1200]; bundle_make_path(path, sizeof(path), &p.leech, "absent.bundle");
+    struct json_value input = {0}; json_set_object(&input);
+    char root[65], sha[65]; zcl_hex_encode(offered.root, 32, root); zcl_hex_encode(offered.sha256, 32, sha);
+    json_push_kv_str(&input, "root", root); json_push_kv_str(&input, "sha256", sha);
+    json_push_kv_int(&input, "size", offered.size); json_push_kv_str(&input, "out", path);
+    struct zcl_command_request request = {.input = &input}; struct zcl_command_reply reply;
+    g_bundle_poll_calls = 0; g_bundle_poll_valid = true; g_bundle_poll_pair = &p;
+    zcl_command_reply_init(&reply, "zcl.fleet_bundle_fetch.v1");
+    node_rpc_client_set_test_hook(bundle_poll_rpc);
+    zcl_native_handle_fleet_bundle_fetch(&request, &reply);
+    SW_CHECK("bundle poll: continuation forwarded and terminal failure preserved",
+        g_bundle_poll_valid && g_bundle_poll_calls == 2 && !strcmp(reply.error.code, "DOWNLOAD_FAILED") &&
+        !strcmp(reply.error.message, "chunk-attempts-exhausted") && access(path, F_OK) != 0);
+    zcl_command_reply_free(&reply);
+    node_rpc_client_set_test_hook(NULL); vcs_swarm_engine_set_global(NULL); vcs_package_store_close_global();
+    const char *reset[] = {"z23-test"}; ParseParameters(1, reset); SetDataDir("");
+    json_push_kv_str(&input, "continuation", "true");
+    struct rpc_table table; rpc_table_init(&table); boot_fleet_bundle_register_rpc(&table);
+    const struct rpc_command *cmd = rpc_table_find(&table, "fleet_bundle_fetch");
+    struct json_value params = {0}, out = {0}; json_set_array(&params);
+    bool pushed = json_push_back(&params, &input);
+    bool called = pushed && cmd && cmd->actor(&params, false, &out);
+    const char *code = json_get_str(json_get(&out, "code"));
+    SW_CHECK("bundle RPC: non-boolean continuation refused", called && code && !strcmp(code, "BAD_CONTINUATION"));
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "fleet.bundle.fetch", NULL);
+    struct json_value public_input = {0}; json_set_object(&public_input);
+    json_push_kv_str(&public_input, "root", root); json_push_kv_str(&public_input, "sha256", sha);
+    json_push_kv_int(&public_input, "size", offered.size); json_push_kv_str(&public_input, "out", path);
+    json_push_kv_bool(&public_input, "continuation", true); char why[256];
+    SW_CHECK("bundle public registry rejects private continuation", spec && !zcl_command_registry_input_validate(spec, &public_input, why, sizeof(why)));
+    json_free(&public_input); json_free(&out); json_free(&params); json_free(&input); free(orig); bundle_pair_close(&p);
+    return failures;
 }
 
 /* One round trip of `len` bytes; also pins the public shape to BUNDLE. */
@@ -1055,6 +1217,9 @@ static int bundle_case_inbound_tor_peers(void);
 int t_swarm_bundle_transfer(void)
 {
     int failures = 0;
+    failures += bundle_case_terminal_continuation();
+    failures += bundle_case_delayed_provider();
+    failures += bundle_case_command_poll();
     failures += bundle_case_inbound_tor_peers();
     failures += bundle_case_roundtrip("1 B", "b1", 1u);
     failures += bundle_case_roundtrip("1 MiB + 1 B", "b2",

@@ -7,6 +7,7 @@
 #include "config/boot_zcode_dht.h"
 
 #include "command/native_command.h"
+#include "command/native_fleet_bundle.h"
 #include "json/json.h"
 #include "net/tor_integration.h"
 #include "rpc/server.h"
@@ -91,8 +92,15 @@ static bool bundle_fetch(const struct json_value *params, bool help,
         json_set_str(result, "fleet_bundle_fetch {root,sha256,size,out}");
         return true;
     }
+    const struct json_value *input = params && json_size(params) ? json_at(params, 0) : NULL;
+    const struct json_value *continuation = json_get(input, "continuation");
+    if (continuation && continuation->type != JSON_BOOL) {
+        bundle_rpc_refuse(result, "BAD_CONTINUATION", "continuation must be boolean");
+        return true;
+    }
     return bundle_rpc_run(params, result, "zcl.fleet_bundle_fetch.v1",
-                          zcl_native_handle_fleet_bundle_fetch, false);
+                          continuation && json_get_bool(continuation) ?
+                              zcl_native_fleet_bundle_fetch_continue : zcl_native_handle_fleet_bundle_fetch, false);
 }
 
 void boot_fleet_bundle_register_rpc(struct rpc_table *table)

@@ -1678,6 +1678,22 @@ static enum vcs_swarm_fetch_result swarm_fetch_register_locked(
     return VCS_SWARM_FETCH_OK;
 }
 
+static enum vcs_swarm_fetch_result swarm_continue_locked(
+    struct vcs_swarm_engine *engine, const uint8_t package_root[32],
+    const uint64_t *provider_peers, size_t provider_count, bool restricted,
+    uint64_t maximum_package_bytes, const char **rule)
+{
+    if (!engine->store) return VCS_SWARM_FETCH_NO_STORE;
+    struct swarm_download *dl = dl_find(engine, package_root);
+    if (!dl || dl->state == VCS_SWARM_DL_COMPLETE) return VCS_SWARM_FETCH_NOT_FOUND;
+    if (dl->state == VCS_SWARM_DL_FAILED) {
+        if (rule) *rule = dl->rule;
+        return VCS_SWARM_FETCH_TERMINAL;
+    }
+    return swarm_fetch_rebind_locked(engine, dl, provider_peers, provider_count,
+                                     restricted, maximum_package_bytes);
+}
+
 static enum vcs_swarm_fetch_result swarm_fetch_locked(
     struct vcs_swarm_engine *engine, const uint8_t package_root[32],
     int64_t day, const uint64_t *provider_peers, size_t provider_count,
@@ -1725,12 +1741,14 @@ static enum vcs_swarm_fetch_result swarm_fetch_locked(
         already_tracked);
 }
 
-static enum vcs_swarm_fetch_result swarm_fetch(
+enum vcs_swarm_fetch_result vcs_swarm_fetch_internal(
     struct vcs_swarm_engine *engine, const uint8_t package_root[32],
     int64_t day, uint64_t now, const uint64_t *provider_peers,
-    size_t provider_count, bool restricted, uint64_t maximum_package_bytes)
+    size_t provider_count, bool restricted, uint64_t maximum_package_bytes,
+    bool continuation, const char **rule)
 {
     (void)now; /* the tick owns scheduling; fetch only registers intent */
+    if (rule) *rule = NULL;
     if (!engine || !package_root)
         return VCS_SWARM_FETCH_BAD_INPUT;
     static const uint8_t zero[32] = {0};
@@ -1744,37 +1762,13 @@ static enum vcs_swarm_fetch_result swarm_fetch(
             return input;
     }
     pthread_mutex_lock(&engine->lock);
-    enum vcs_swarm_fetch_result result = swarm_fetch_locked(
-        engine, package_root, day, provider_peers, provider_count, restricted,
-        maximum_package_bytes);
+    enum vcs_swarm_fetch_result result = continuation ?
+        swarm_continue_locked(engine, package_root, provider_peers, provider_count,
+                              restricted, maximum_package_bytes, rule) :
+        swarm_fetch_locked(engine, package_root, day, provider_peers, provider_count,
+                           restricted, maximum_package_bytes);
     pthread_mutex_unlock(&engine->lock);
     return result;
-}
-
-enum vcs_swarm_fetch_result vcs_swarm_engine_fetch(
-    struct vcs_swarm_engine *engine, const uint8_t package_root[32],
-    int64_t day, uint64_t now)
-{
-  return swarm_fetch(engine, package_root, day, now, NULL, 0, false, 0);
-}
-
-enum vcs_swarm_fetch_result vcs_swarm_engine_fetch_from(
-    struct vcs_swarm_engine *engine, const uint8_t package_root[32],
-    int64_t day, uint64_t now, const uint64_t *provider_peers,
-    size_t provider_count)
-{
-    return swarm_fetch(engine, package_root, day, now, provider_peers,
-                       provider_count, true, 0);
-}
-enum vcs_swarm_fetch_result vcs_swarm_engine_fetch_from_bounded(
-    struct vcs_swarm_engine *engine, const uint8_t package_root[32],
-    int64_t day, uint64_t now, const uint64_t *provider_peers,
-    size_t provider_count, uint64_t maximum_package_bytes)
-{
-    if (maximum_package_bytes == 0)
-        return VCS_SWARM_FETCH_BAD_INPUT;
-    return swarm_fetch(engine, package_root, day, now, provider_peers,
-                       provider_count, true, maximum_package_bytes);
 }
 
 /* Cancel an active download: queues CANCEL per outstanding request,

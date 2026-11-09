@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Process-global swarm accessor and stable public result names. */
 
-#include "vcs/package_swarm_node.h"
+#include "package_swarm_priv.h"
 
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
@@ -89,9 +89,39 @@ const char *vcs_swarm_fetch_result_string(enum vcs_swarm_fetch_result result)
     case VCS_SWARM_FETCH_BYTE_LIMIT: return "byte-limit";
     case VCS_SWARM_FETCH_BOUND_NOT_OWNED: return "bound-not-owned";
     case VCS_SWARM_FETCH_NO_PROVIDER: return "no-authenticated-provider";
+    case VCS_SWARM_FETCH_TERMINAL: return "terminal-failure";
+    case VCS_SWARM_FETCH_NOT_FOUND: return "download-not-found";
     case VCS_SWARM_FETCH_BAD_INPUT: return "bad-input";
     }
     return "unknown";
+}
+
+enum vcs_swarm_fetch_result vcs_swarm_engine_fetch(
+    struct vcs_swarm_engine *engine, const uint8_t root[32], int64_t day, uint64_t now)
+{
+    return vcs_swarm_fetch_internal(engine, root, day, now, NULL, 0, false, 0, false, NULL);
+}
+
+enum vcs_swarm_fetch_result vcs_swarm_engine_fetch_from(
+    struct vcs_swarm_engine *engine, const uint8_t root[32], int64_t day, uint64_t now,
+    const uint64_t *peers, size_t count)
+{
+    return vcs_swarm_fetch_internal(engine, root, day, now, peers, count, true, 0, false, NULL);
+}
+
+enum vcs_swarm_fetch_result vcs_swarm_engine_fetch_from_bounded(
+    struct vcs_swarm_engine *engine, const uint8_t root[32], int64_t day, uint64_t now,
+    const uint64_t *peers, size_t count, uint64_t maximum)
+{
+    if (!maximum) return VCS_SWARM_FETCH_BAD_INPUT;
+    return vcs_swarm_fetch_internal(engine, root, day, now, peers, count, true, maximum, false, NULL);
+}
+
+enum vcs_swarm_fetch_result vcs_swarm_engine_fetch_continue(
+    struct vcs_swarm_engine *engine, const uint8_t root[32], int64_t day, uint64_t now,
+    const uint64_t *peers, size_t count, const char **rule)
+{
+    return vcs_swarm_fetch_internal(engine, root, day, now, peers, count, count > 0, 0, true, rule);
 }
 
 const char *vcs_swarm_download_state_string(

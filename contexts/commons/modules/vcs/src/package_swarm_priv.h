@@ -22,6 +22,12 @@
 
 #define SWARM_DL_INFLIGHT_MAX 32u
 
+enum vcs_swarm_fetch_result vcs_swarm_fetch_internal(
+    struct vcs_swarm_engine *engine, const uint8_t package_root[32],
+    int64_t day, uint64_t now, const uint64_t *provider_peers,
+    size_t provider_count, bool restricted, uint64_t maximum_package_bytes,
+    bool continuation, const char **rule);
+
 struct swarm_req {
     bool used;
     uint32_t global_chunk; /* SWARM_MANIFEST_CHUNK for the manifest */
