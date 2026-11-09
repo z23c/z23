@@ -35,6 +35,7 @@
 /* The board path every inner call names, and the node method a catalog
  * read uses directly (the leaf's reply budget would page it). */
 #define ZCL_APP_OFFER_BOARD_LIST "fleet.board.list.raw"
+#define ZCL_APP_OFFER_BOARD_SHOW "fleet.board.show"
 #define ZCL_APP_OFFER_BOARD_POST "fleet.board.post"
 #define ZCL_APP_OFFER_BUNDLE_OFFER "fleet.bundle.offer"
 #define ZCL_APP_OFFER_BUNDLE_FETCH "fleet.bundle.fetch"
@@ -90,6 +91,10 @@ bool zcl_app_offer_from_post(const struct json_value *post,
  * complete board; the node may not have received every post. */
 bool zcl_app_offer_catalog(struct zcl_app_offer_row *rows, size_t cap,
                            size_t *count, struct zcl_command_reply *why);
+
+/* Read and verify one exact current signed offer without a catalog scan. */
+bool zcl_app_offer_exact(const char *id, struct zcl_app_offer_row *row,
+                         struct zcl_command_reply *why);
 
 /* "12s", "5m", "3h" or "2d" since `created_at`. */
 void zcl_app_offer_age(int64_t created_at, int64_t now, char *out,

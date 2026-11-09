@@ -172,6 +172,31 @@ static int zao_newest_first(const void *a, const void *b)
     return cmp ? cmp : strcmp(x->post_id, y->post_id);
 }
 
+bool zcl_app_offer_exact(const char *id, struct zcl_app_offer_row *row,
+                         struct zcl_command_reply *why)
+{
+    struct json_value in;
+    const char *kv[] = {"id", id};
+    bool built = zcl_app_input(&in, kv, 2);
+    bool ok = built && zcl_app_offer_call(ZCL_APP_OFFER_BOARD_SHOW, &in, why);
+    json_free(&in);
+    if (!built) {
+        zcl_command_reply_init(why, "zcl.app_offer.inner.v1");
+        zcl_command_reply_fail(why, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_INTERNAL, "ALLOC", "prepare", false, false,
+            "board show input", ZCL_APP_OFFER_BOARD_SHOW);
+        return false;
+    }
+    if (!ok) return false;
+    if (!zcl_app_offer_from_post(&why->data, row) || strcmp(row->post_id, id)) {
+        zcl_command_reply_fail(why, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_FAILED, "OFFER_INVALID", "execute", false, false,
+            "exact offer is invalid, expired or has a different id", ZCL_APP_OFFER_BOARD_SHOW);
+        return false;
+    }
+    return true;
+}
+
 bool zcl_app_offer_catalog(struct zcl_app_offer_row *rows, size_t cap,
                            size_t *count, struct zcl_command_reply *why)
 {

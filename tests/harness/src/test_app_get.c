@@ -94,7 +94,7 @@ static int tag_process_observation(void)
 /* ── the stub transport ─────────────────────────────────────────────── */
 
 struct tag_stub {
-    int offers, posts, lists, fetches, enables;
+    int offers, posts, lists, catalog_lists, shows, fetches, enables;
     uint8_t *bytes; /* what A's node was handed to offer */
     size_t len;
     char sha[65];
@@ -106,6 +106,7 @@ struct tag_stub {
     struct json_value board; /* the posts B's node holds */
     bool tamper;             /* the fetch delivers other bytes */
     bool malformed_board;
+    int show_mode;
     bool fetch_partial;
     bool onion_unavailable;
     bool onion_changed;
@@ -341,6 +342,26 @@ static bool tag_host_enable(const struct json_value *in, struct zcl_command_repl
     return ok;
 }
 
+static bool tag_show(const struct json_value *in, struct zcl_command_reply *out)
+{
+    g_tag.shows++;
+    if (g_tag.show_mode == 1) return false;
+    for (size_t i = 0; i < json_size(&g_tag.board); ++i) {
+        const struct json_value *post = json_at(&g_tag.board, i);
+        const char *id = json_get_str(json_get(post, "id"));
+        if (id && (g_tag.show_mode == 2 || !strcmp(id, tag_in(in, "id"))))
+            return json_copy_checked(&out->data, post);
+    }
+    return false;
+}
+
+static bool tag_list(const struct json_value *in, struct zcl_command_reply *out)
+{
+    g_tag.lists++;
+    if (!strcmp(tag_in(in, "kind"), "offer")) g_tag.catalog_lists++;
+    return g_tag.malformed_board || json_push_kv(&out->data, "posts", &g_tag.board);
+}
+
 static bool tag_call(const char *path, const struct json_value *in,
                      struct zcl_command_reply *out)
 {
@@ -353,8 +374,9 @@ static bool tag_call(const char *path, const struct json_value *in,
     else if (strcmp(path, ZCL_APP_OFFER_BUNDLE_FETCH) == 0)
         ok = tag_fetch(in, out);
     else if (strcmp(path, ZCL_APP_OFFER_BOARD_LIST) == 0)
-        ok = ++g_tag.lists && (g_tag.malformed_board ||
-             json_push_kv(&out->data, "posts", &g_tag.board));
+        ok = tag_list(in, out);
+    else if (strcmp(path, ZCL_APP_OFFER_BOARD_SHOW) == 0)
+        ok = tag_show(in, out);
     else if (strcmp(path, "core.network.onion.status") == 0)
         ok = tag_onion_status(out);
     else if (strcmp(path, ZCL_APP_HOST_ENABLE) == 0)
@@ -1136,6 +1158,109 @@ static int tag_endpoint_limit(struct tag_world *w)
     return failures;
 }
 
+static bool tag_exact_input(struct asf_leaf *l, const struct tag_world *w,
+                            const char *id, const char *root, const char *publisher)
+{
+    return json_push_kv_str(&l->in, "datadir", w->j.b_datadir) &&
+        json_push_kv_str(&l->in, "name", w->name) &&
+        json_push_kv_str(&l->in, "root", root) &&
+        json_push_kv_str(&l->in, "publisher", publisher) &&
+        json_push_kv_str(&l->in, "offer_id", id);
+}
+
+static bool tag_exact_rejected(struct tag_world *w, const char *id,
+                               const char *root, const char *publisher)
+{
+    struct asf_leaf l; asf_open(&l);
+    int fetches = g_tag.fetches;
+    bool ok = tag_exact_input(&l, w, id, root, publisher) && asf_exec("app.get", &l) &&
+        l.out.status != ZCL_COMMAND_STATUS_PASSED && !l.out.error.mutated &&
+        g_tag.fetches == fetches;
+    asf_close(&l); return ok;
+}
+
+static int tag_exact_refusals(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("app get: exact lookup refuses wrong, expired, forged and unavailable posts before fetch") {
+        char id[65];
+        const char *wrong = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const char *wrong_pub = "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const struct tag_post_spec bad[] = {
+            {g_tag.text, "other", FLEET_BOARD_KIND_OFFER, false},
+            {g_tag.text, "apps", FLEET_BOARD_KIND_OFFER, true},
+            {g_tag.text, "apps", FLEET_BOARD_KIND_OFFER, false},
+        };
+        tag_board_reset(); ASSERT(tag_board_valid(w, 30));
+        (void)snprintf(id, sizeof(id), "%s", json_get_str(json_get(json_at(&g_tag.board, 0), "id")));
+        ASSERT(tag_exact_rejected(w, id, wrong, w->offer.publisher));
+        ASSERT(tag_exact_rejected(w, id, w->offer.root, wrong_pub));
+        g_tag.show_mode = 2; ASSERT(tag_exact_rejected(w, wrong, w->offer.root, w->offer.publisher));
+        g_tag.show_mode = 1; ASSERT(tag_exact_rejected(w, id, w->offer.root, w->offer.publisher));
+        g_tag.show_mode = 0;
+        for (size_t i = 0; i < 3; ++i) {
+            tag_board_reset(); ASSERT(tag_board_add(&bad[i], i == 2 ? 90000 : 30));
+            (void)snprintf(id, sizeof(id), "%s", json_get_str(json_get(json_at(&g_tag.board, 0), "id")));
+            ASSERT(tag_exact_rejected(w, id, w->offer.root, w->offer.publisher));
+        }
+        PASS();
+    } _test_next:;
+    g_tag.show_mode = 0;
+    return failures;
+}
+
+static bool tag_saturate_board(void)
+{
+    for (size_t i = 1; i < ZCL_APP_OFFER_ROWS_MAX; ++i) {
+        struct json_value invalid; json_init(&invalid); json_set_object(&invalid);
+        bool added = json_push_back(&g_tag.board, &invalid); json_free(&invalid);
+        if (!added) return false;
+    }
+    return true;
+}
+
+static int tag_exact_offer(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("app get: exact signed offer survives a saturated catalog") {
+        struct asf_leaf l;
+        char id[65], token[33], plan[65];
+        tag_board_reset();
+        ASSERT(tag_board_valid(w, 30));
+        (void)snprintf(id, sizeof(id), "%s", json_get_str(json_get(json_at(&g_tag.board, 0), "id")));
+        ASSERT(tag_saturate_board());
+        int lists = g_tag.catalog_lists, shows = g_tag.shows, fetches = g_tag.fetches;
+        asf_open(&l);
+        ASSERT(tag_exact_input(&l, w, id, w->offer.root, w->offer.publisher));
+        ASSERT(asf_pass("app.get", &l));
+        ASSERT(!strcmp(asf_get(&l, "offer_id"), id));
+        ASSERT(g_tag.catalog_lists == lists && g_tag.shows == shows + 1 && g_tag.fetches == fetches + 1);
+        (void)snprintf(token, sizeof(token), "%s", asf_get(&l, "token"));
+        (void)snprintf(plan, sizeof(plan), "%s", asf_get(&l, "plan_id"));
+        ASSERT(strlen(token) == 32 && strlen(plan) == 64);
+        ASSERT(json_push_kv_str(&l.in, "token", token) &&
+               json_push_kv_str(&l.in, "plan_id", plan) && json_push_kv_bool(&l.in, "confirm", true));
+        zcl_command_reply_free(&l.out); zcl_command_reply_init(&l.out, "zcl.app_get.v1");
+        bool received = asf_exec("app.get", &l) && l.out.status == ZCL_COMMAND_STATUS_PASSED;
+        long pid = (long)json_get_int(json_get(&l.out.data, "pid"));
+        bool stopped = pid > 0 && asf_alive_then_stop(pid);
+        if (!received || !stopped || g_tag.catalog_lists != lists || g_tag.shows != shows + 2)
+            printf("exact confirmed: received=%d stopped=%d pid=%ld lists=%d/%d shows=%d/%d code=%s message=%s\n",
+                   received, stopped, pid, g_tag.catalog_lists, lists, g_tag.shows, shows + 2,
+                   l.out.error.code, l.out.error.message);
+        ASSERT(received && stopped && g_tag.catalog_lists == lists && g_tag.shows == shows + 2);
+        asf_close(&l);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int tag_exact_tests(struct tag_world *w)
+{
+    int failures = tag_exact_refusals(w);
+    return failures ? failures : tag_exact_offer(w);
+}
+
 /* B's front door refuses with `code` without asking, keeping nothing. */
 static bool tag_b_refused(const struct tag_world *w, const char *code)
 {
@@ -1651,6 +1776,16 @@ static int tag_mcp(void)
     return failures;
 }
 
+static int tag_followup_journeys(struct tag_world *w)
+{
+    int failures = tag_exact_tests(w);
+    if (failures == 0) failures += tag_rebuild_outcomes(w);
+    if (failures == 0) failures += tag_rehost_failures(w);
+    if (failures == 0) failures += tag_rebuild_open_failure(w);
+    if (failures == 0) failures += tag_rehost_build_failure(w);
+    return failures;
+}
+
 int test_app_get(void);
 int test_app_get(void)
 {
@@ -1693,10 +1828,7 @@ int test_app_get(void)
         failures += tag_b_plan(&w);
         failures += tag_failed_fetch_cleanup(&w);
         failures += tag_b_journeys(&w);
-        if (failures == 0) failures += tag_rebuild_outcomes(&w);
-        if (failures == 0) failures += tag_rehost_failures(&w);
-        if (failures == 0) failures += tag_rebuild_open_failure(&w);
-        if (failures == 0) failures += tag_rehost_build_failure(&w);
+        if (failures == 0) failures += tag_followup_journeys(&w);
     }
     zcl_app_offer_set_call(NULL);
     json_free(&g_tag.board);

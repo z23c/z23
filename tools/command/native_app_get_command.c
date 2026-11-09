@@ -651,6 +651,20 @@ static void ag_attempts(struct ag_request *r, const struct zcl_app_offer *identi
     else zcl_package_copy_fail(r->reply, "OFFER_UNAVAILABLE", false, "no matching endpoint could be verified", AG_COMMAND);
 }
 
+static bool ag_load_rows(struct ag_request *r)
+{
+    size_t capacity = r->offer ? 1 : ZCL_APP_OFFER_ROWS_MAX;
+    r->rows = zcl_calloc(capacity, sizeof(*r->rows), "app.get.catalog");
+    if (!r->rows) { zcl_package_copy_fail(r->reply, "ALLOC", false, "catalog allocation", AG_COMMAND); return false; }
+    struct zcl_command_reply why;
+    bool found = r->offer ? zcl_app_offer_exact(r->offer, r->rows, &why) :
+        zcl_app_offer_catalog(r->rows, capacity, &r->count, &why);
+    if (!found) zcl_app_inner_fail(r->reply, &why, false);
+    zcl_command_reply_free(&why);
+    if (found && r->offer) r->count = 1;
+    return found;
+}
+
 void zcl_native_handle_app_get(const struct zcl_command_request *request,
                                struct zcl_command_reply *reply)
 {
@@ -661,14 +675,7 @@ void zcl_native_handle_app_get(const struct zcl_command_request *request,
     r.offer = zcl_package_copy_str(r.input, "offer_id");
     r.datadir = zcl_package_copy_datadir(r.input, reply, AG_COMMAND);
     if (!r.datadir || !ag_validate(&r)) return;
-    r.rows = zcl_calloc(ZCL_APP_OFFER_ROWS_MAX, sizeof(*r.rows), "app.get.catalog");
-    if (!r.rows) { zcl_package_copy_fail(reply, "ALLOC", false, "catalog allocation", AG_COMMAND); return; }
-    struct zcl_command_reply why;
-    if (!zcl_app_offer_catalog(r.rows, ZCL_APP_OFFER_ROWS_MAX, &r.count, &why)) {
-        zcl_app_inner_fail(reply, &why, false);
-        zcl_command_reply_free(&why); free(r.rows); return;
-    }
-    zcl_command_reply_free(&why);
+    if (!ag_load_rows(&r)) { free(r.rows); return; }
     if (!r.name) {
         if (!ag_list(reply, r.rows, r.count)) zcl_package_copy_fail(reply, "ALLOC", false, "catalog output", AG_COMMAND);
     } else if (ag_token(&r)) {
