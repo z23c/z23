@@ -412,8 +412,14 @@ static bool spg_retained(const char *path)
     if (!d) return false;
     struct dirent *entry;
     bool found = false;
-    while ((entry = readdir(d)) != NULL)
-        if (!strncmp(entry->d_name, "zcl-c3-stopwatch.", 17)) found = true;
+    while ((entry = readdir(d)) != NULL) {
+        if (strncmp(entry->d_name, "zcl-c3-stopwatch.", 17) || strstr(entry->d_name, "-home")) continue;
+        char node[PATH_MAX], home[PATH_MAX];
+        struct stat a, b;
+        if (snprintf(node, sizeof(node), "%s/%s", path, entry->d_name) >= (int)sizeof(node) ||
+            snprintf(home, sizeof(home), "%s-home", node) >= (int)sizeof(home)) continue;
+        if (!stat(node, &a) && S_ISDIR(a.st_mode) && !stat(home, &b) && S_ISDIR(b.st_mode)) found = true;
+    }
     closedir(d);
     return found;
 }
@@ -450,9 +456,12 @@ static int case_cleanup_unknown(const struct gate_env *g, int mode)
     FILE *f = fopen(proof, "r");
     char body[32768] = {0};
     if (f) { size_t n = fread(body, 1, sizeof(body) - 1, f); body[n] = 0; fclose(f); }
-    SPG_CHECK("completed sync with bad cleanup refuses PASS and retains fixture",
-              rc == 1 && strstr(g->out, "fixture retained") && spg_retained(scratch) &&
-              strstr(body, "owned cleanup unconfirmed") && !strstr(body, "\"verdict\": \"pass\""));
+    bool retained = spg_retained(scratch);
+    bool ok = rc == 1 && strstr(g->out, "fixture retained") && retained &&
+              strstr(body, "owned cleanup unconfirmed") && strstr(body, "\"scratch_datadir_removed\": false") &&
+              strstr(body, "\"verdict\": \"fail\"") && !strstr(g->out, "stopwatch: PASS");
+    if (!ok) printf("cleanup fixture mode=%d rc=%d retained=%d output=%.3000s proof=%.1500s\n", mode, rc, (int)retained, g->out, body);
+    SPG_CHECK("completed sync with bad cleanup refuses PASS and retains fixture", ok);
     return failures;
 }
 #endif

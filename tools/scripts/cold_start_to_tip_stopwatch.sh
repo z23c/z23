@@ -266,6 +266,7 @@ PID="" # The supervised owner does not expose an identity-safe node PID.
 OWNER_RUNNING=0
 OWNER_CLEAN=1
 OWNER_CLEANUP_DONE=0
+SCRATCH_REMOVED=false
 OWNER_STATUS=""
 start=0
 first_hstar=""
@@ -2488,7 +2489,12 @@ capture_run_bundle() {
 
 write_artifact() {
     verdict="$1"; rc="$2"; reason="${3:-}"
-    captured_at="$(date +%s)"
+    if [ "${C3_KEEP_CAPTURE:-0}" = 1 ]; then
+        captured_at="$C3_CAPTURED_AT"
+    else
+        captured_at="$(date +%s)"
+        C3_CAPTURED_AT="$captured_at"
+    fi
     elapsed=0
     [ "${start:-0}" -gt 0 ] && elapsed=$((captured_at - start))
     mkdir -p "$ARTIFACT_DIR" 2>/dev/null || return 0
@@ -2580,7 +2586,7 @@ write_artifact() {
         printf '  "final_readback_failed": %s,\n' "${final_readback_failed:-false}"
         printf '  "reached_network_tip": %s,\n' "$([ "$verdict" = "pass" ] && printf true || printf false)"
         printf '  "scratch_datadir": %s,\n' "$(json_string "${DATADIR:-}")"
-        printf '  "scratch_datadir_removed": true,\n'
+        printf '  "scratch_datadir_removed": %s,\n' "$SCRATCH_REMOVED"
         printf '  "node_log_captured": %s,\n' "$NODE_LOG_CAPTURED"
         printf '  "bundle_capture_failed": %s,\n' "$BUNDLE_CAPTURE_FAILED"
         printf '  "banlist_present": %s,\n' "${BANLIST_PRESENT:-false}"
@@ -2873,19 +2879,25 @@ cleanup() {
     fi
     if [ "$OWNER_CLEAN" = 1 ]; then
         case "$DATADIR" in "$CS_ROOT"/zcl-c3-stopwatch.*) rm -rf "$DATADIR" "$ISO_HOME" 2>/dev/null || OWNER_CLEAN=0 ;; *) OWNER_CLEAN=0 ;; esac
+        if [ "$OWNER_CLEAN" = 1 ] && [ ! -e "$DATADIR" ] && [ ! -L "$DATADIR" ] && [ ! -e "$ISO_HOME" ] && [ ! -L "$ISO_HOME" ]; then
+            SCRATCH_REMOVED=true
+        else
+            OWNER_CLEAN=0
+        fi
     fi
     [ "$OWNER_CLEAN" = 1 ]
 }
 finish_cleanup() {
     local original=$?
+    local final_verdict="${verdict:-fail}" final_rc="${rc:-1}" final_reason="${reason:-cleanup}"
     trap - EXIT
     if ! cleanup; then
-        if [ "$original" = 0 ]; then
-            C3_KEEP_CAPTURE=1
-            write_artifact "fail" 1 "owned cleanup unconfirmed; fixture retained"
-        fi
+        [ -n "${C3_CAPTURED_AT:-}" ] && C3_KEEP_CAPTURE=1
+        write_artifact "fail" 1 "owned cleanup unconfirmed; fixture retained"
         exit 1
     fi
+    [ -n "${C3_CAPTURED_AT:-}" ] && C3_KEEP_CAPTURE=1
+    write_artifact "$final_verdict" "$final_rc" "$final_reason"
     exit "$original"
 }
 trap finish_cleanup EXIT
@@ -3232,6 +3244,8 @@ if [ "$reached" = 1 ]; then
         write_artifact "fail" 1 "owned cleanup unconfirmed; fixture retained"
         exit 1
     fi
+    C3_KEEP_CAPTURE=1
+    write_artifact "pass" 0 "wiped datadir reached network_tip within budget across $boots boot(s)"
     echo "=== cold-start-wipe-stopwatch: PASS — H* reached network_tip=$last_network_tip in ${elapsed}s across $boots boot(s) (budget ${BUDGET}s) ==="
     exit 0
 fi
