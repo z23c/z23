@@ -483,6 +483,8 @@ Z23_FLAG("ZCL_CS_FILE_PEER", "env_build", "-", "-",
           "first use tools/scripts/c3_stopwatch_run_and_record.sh:auto; documented at docs/quality/stopwatch-gates.md:278: | run | ZCL_PEER | ZCL_CS_FILE_PEER | verdict | wall | final H/* | network tip |")
 Z23_FLAG("ZCL_CS_FRONTIER_BUSY_TIMEOUT_SECS", "env_build", "120", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_stopwatch.sh:auto")
+Z23_FLAG("ZCL_CS_OWNER", "env_build", "build/bin/c3-supervised-owner", "-",
+          "owned stopwatch process adapter; first use tools/scripts/cold_start_to_tip_stopwatch.sh:auto")
 Z23_FLAG("ZCL_CS_FS_HANDSHAKE_PROBE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_stopwatch.sh:auto")
 Z23_FLAG("ZCL_CS_HEADER_SOURCE", "env_build", "-", "-",
