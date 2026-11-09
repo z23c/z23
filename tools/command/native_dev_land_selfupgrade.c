@@ -293,6 +293,7 @@ static bool su_decide(const char *bin, const char *const *args, char *out,
                       size_t cap, int *status)
 {
     const char *argv[ZCL_LAND_SELFUPGRADE_ARGS_MAX + 2];
+    struct zcl_spawn_evidence evidence;
     size_t n = 0;
     argv[n++] = bin;
     while (args && args[n - 1] && n <= ZCL_LAND_SELFUPGRADE_ARGS_MAX) {
@@ -300,8 +301,12 @@ static bool su_decide(const char *bin, const char *const *args, char *out,
         n++;
     }
     argv[n] = NULL;
-    *status = zcl_spawn_capture(argv, out, cap, SU_TIMEOUT_MS);
-    return *status == 0 && out[0] != '\0';
+    *status = zcl_spawn_capture_evidence(argv, out, cap, SU_TIMEOUT_MS,
+                                         &evidence);
+    return *status == 0 && evidence.exit_observed && evidence.exit_code == 0 &&
+           !evidence.timed_out && evidence.stdout_complete &&
+           !evidence.stdout_truncated && evidence.stdout_observed > 0 &&
+           strlen(out) == evidence.stdout_observed;
 }
 
 static bool su_agree(const char *current_bin, const char *cand_bin,

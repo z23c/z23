@@ -231,6 +231,16 @@ static int sul_incomplete_cases(void)
         ASSERT(!zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof(ptr)));
         PASS();
     }
+    TEST("selfupgrade: complete output at buffer boundary agrees") {
+        const char *sha_c = "cccccccccccccccccccccccccccccccccccccccc";
+        ASSERT(sul_body(r.cur, "printf '%08191d' 0"));
+        ASSERT(sul_body(r.src_x, "printf '%08191d' 0"));
+        ASSERT(zcl_land_selfupgrade_slot_install(r.root, sha_c, r.src_x));
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, sha_c, g_args, 1),
+                  (int)ZCL_LAND_SU_SWITCHED);
+        ASSERT(zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof(ptr)));
+        PASS();
+    }
 _test_next:;
     (void)test_rm_rf_recursive(r.root);
     return failures;
