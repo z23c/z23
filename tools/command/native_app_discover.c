@@ -18,10 +18,65 @@ struct discover {
     const char *datadir; app_library_presenter presenter;
     app_confirm_presenter receive_presenter; void *context;
     const char *worker_path;
-    bool error_presented;
+    bool error_presented, host_requested;
 };
+static bool ad_host_choice(struct discover *d, struct zcl_command_reply *reply, bool *host_original)
+{
+    const char *stage = zcl_package_copy_str(&reply->data, "stage");
+    if (!stage || strcmp(stage, "commit") || reply->status != ZCL_COMMAND_STATUS_PASSED) return true;
+    struct app_confirm *v = zcl_calloc(1, sizeof(*v), "discover-host-choice");
+    if (!v) return json_push_kv_str(&reply->data, "hosting_status", "not enabled: choice unavailable");
+    zcl_present_model_init_v1(&v->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(v->model.request_id, sizeof(v->model.request_id), "discover-host-original");
+    (void)snprintf(v->model.title, sizeof(v->model.title), "Help share this original app?");
+    (void)snprintf(v->model.summary, sizeof(v->model.summary), "Optional: keep its original files and offer them to others.");
+    v->model.action_count = 4;
+    app_confirm_action(&v->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "decline", "Not now");
+    app_confirm_action(&v->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+    app_confirm_action(&v->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+    app_confirm_action(&v->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "host", "Help share");
+    char why[256] = {0};
+    const struct zcl_app_offer *offer = &d->rows[d->index].offer;
+    bool shown = app_confirm_field(&v->model, "Original app: ", offer->name) &&
+        app_confirm_field(&v->model, "Original publisher: ", offer->publisher) &&
+        app_confirm_field(&v->model, "Original package: ", offer->root) &&
+        app_confirm_field(&v->model, "Hosting: ", "Store the original app files on disk and use bandwidth to serve them publicly while this node runs. Its offer renews until you stop hosting.") &&
+        app_confirm_field(&v->model, "Availability: ", "Public discovery waits for a ready endpoint; this does not guarantee availability.") &&
+        app_confirm_prepare(v, why, sizeof(why)) && app_confirm_show(v, d->receive_presenter, d->context, why, sizeof(why));
+    *host_original = shown && v->confirmed;
+    d->host_requested = *host_original;
+    app_confirm_free(v); free(v);
+    if (!shown) return json_push_kv_str(&reply->data, "hosting_status", "not enabled: choice unavailable");
+    if (!*host_original) return json_push_kv_str(&reply->data, "hosting_status", "not enabled: declined");
+    return true;
+}
+static bool ad_host_result(struct discover *d, struct zcl_command_reply *reply)
+{
+    if (!d->host_requested) return true;
+    const char *status = zcl_package_copy_str(&reply->data, "hosting_status");
+    const char *stop = zcl_package_copy_str(&reply->data, "hosting_stop_command");
+    struct app_confirm *v = zcl_calloc(1, sizeof(*v), "discover-host-result");
+    if (!v) { app_get_host_result_unavailable(reply); return false; }
+    zcl_present_model_init_v1(&v->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(v->model.request_id, sizeof(v->model.request_id), "discover-host-result");
+    (void)snprintf(v->model.title, sizeof(v->model.title), "Original app hosting");
+    (void)snprintf(v->model.summary, sizeof(v->model.summary), "%s", status ? status : "Hosting outcome unavailable; inspect before retrying.");
+    v->copy_text = stop;
+    v->model.action_count = 4;
+    app_confirm_action(&v->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
+    app_confirm_action(&v->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+    app_confirm_action(&v->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+    app_confirm_action(&v->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "done", "Done");
+    char why[256] = {0};
+    bool ready = app_confirm_field(&v->model, "Stop: ", stop ? "Press C to copy the stop command." : "No confirmed stop command is available.") &&
+        app_confirm_prepare(v, why, sizeof(why));
+    bool shown = ready && app_confirm_show(v, d->receive_presenter, d->context, why, sizeof(why));
+    app_confirm_free(v); free(v);
+    if (!shown) app_get_host_result_unavailable(reply);
+    return shown;
+}
 static bool ad_consume(void *context, const char *path,
-    const struct app_receive_identity *identity, struct zcl_command_reply *reply)
+    const struct app_receive_identity *identity, struct zcl_command_reply *reply, bool *host_original)
 {
     struct discover *d = context; struct json_value in; json_init(&in); json_set_object(&in);
     const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.receive", NULL);
@@ -38,6 +93,7 @@ static bool ad_consume(void *context, const char *path,
 #endif
             zcl_native_app_receive_expected(&request, reply, identity);
         ok = reply->status == ZCL_COMMAND_STATUS_PASSED;
+        if (ok) ok = ad_host_choice(d, reply, host_original);
     }
     json_free(&in); return ok;
 }
@@ -78,6 +134,7 @@ static bool ad_review(struct discover *d, struct zcl_command_reply *reply)
         (void)ad_error(d, reply->error.message, false);
         return false;
     }
+    if (!ad_host_result(d, reply)) { (void)ad_error(d, reply->error.message, false); return false; }
     const char *status = zcl_package_copy_str(&reply->data, "status");
     return !status || strcmp(status, "canceled");
 }

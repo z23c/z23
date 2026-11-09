@@ -393,7 +393,7 @@ static void ag_host_report_failure(struct ag_one *s)
 {
     if (s->reply->status == ZCL_COMMAND_STATUS_PASSED) {
         zcl_package_copy_fail(s->reply, "HOSTING_RESULT_UNAVAILABLE", true,
-            "the copy was kept but the hosting outcome could not be reported", AG_COMMAND);
+            "the received copy remains; hosting may already be enabled, so inspect hosting before retrying", AG_COMMAND);
         return;
     }
     s->reply->error.mutated = true;
@@ -401,6 +401,41 @@ static void ag_host_report_failure(struct ag_one *s)
     if (n < sizeof(s->reply->error.message))
         (void)snprintf(s->reply->error.message + n, sizeof(s->reply->error.message) - n,
                        "; hosting outcome could not be reported");
+}
+static void ag_host_failure_facts(struct zcl_command_reply *reply, const char *host,
+    const char *carrier, int64_t generation)
+{
+    struct json_value *facts = NULL;
+    for (size_t i = 0; i < reply->data.num_children; ++i)
+        if (!strcmp(reply->data.keys[i], "failure_facts")) facts = &reply->data.children[i];
+    if (!facts) {
+        struct json_value empty; json_init(&empty); json_set_object(&empty);
+        bool added = json_push_kv(&reply->data, "failure_facts", &empty); json_free(&empty);
+        if (!added) return;
+        facts = &reply->data.children[reply->data.num_children - 1];
+    }
+    if (facts->type != JSON_OBJ) return;
+    (void)(json_push_kv_bool(facts, "hosting_enabled", true) &&
+        json_push_kv_str(facts, "hosting_host", host) &&
+        json_push_kv_str(facts, "hosting_carrier", carrier) &&
+        json_push_kv_int(facts, "hosting_generation", generation));
+}
+void app_get_host_result_unavailable(struct zcl_command_reply *reply)
+{
+    if (!reply) return;
+    const char *host = zcl_package_copy_str(&reply->data, "hosting_host");
+    const char *carrier = zcl_package_copy_str(&reply->data, "hosting_carrier");
+    const struct json_value *generation = json_get(&reply->data, "hosting_generation");
+    bool enabled = ag_hex(host, 32) && ag_hex(carrier, 32) && generation &&
+        generation->type == JSON_INT && json_get_int(generation) > 0;
+    char saved_host[65] = {0}, saved_carrier[65] = {0}; int64_t saved_generation = 0;
+    if (enabled) {
+        memcpy(saved_host, host, sizeof(saved_host)); memcpy(saved_carrier, carrier, sizeof(saved_carrier));
+        saved_generation = json_get_int(generation);
+    }
+    struct ag_one s = {.reply = reply};
+    ag_host_report_failure(&s);
+    if (enabled) ag_host_failure_facts(reply, saved_host, saved_carrier, saved_generation);
 }
 
 static void ag_host_enabled(struct ag_one *s, const char *host, const char *carrier,
@@ -421,8 +456,20 @@ static void ag_host_enabled(struct ag_one *s, const char *host, const char *carr
         reported = json_push_kv_str(data, "hosting_status_command", status) && reported;
         reported = json_push_kv_str(data, "hosting_stop_command", stop) && reported;
     }
-    if (!reported) ag_host_report_failure(s);
+    if (!hints || !reported) {
+        ag_host_report_failure(s);
+        ag_host_failure_facts(s->reply, host, carrier, json_get_int(generation));
+    }
 }
+#ifdef ZCL_TESTING
+void zcl_test_app_get_host_enabled(const char *datadir, const char *host, const char *carrier,
+    struct zcl_command_reply *reply)
+{
+    struct ag_one s = {.datadir = datadir, .reply = reply};
+    struct json_value generation; json_init(&generation); json_set_int(&generation, 1);
+    ag_host_enabled(&s, host, carrier, &generation); json_free(&generation);
+}
+#endif
 
 static void ag_host_unconfirmed(struct ag_one *s)
 {
@@ -464,7 +511,9 @@ static void ag_rehost(struct ag_one *s)
 {
     struct json_value *data = &s->reply->data;
     if (!ag_hash(s->path, &s->row->offer)) {
-        (void)json_push_kv_str(data, "hosting_status", "no pin attempted: staged carrier changed"); return;
+        if (!json_push_kv_str(data, "hosting_status", "no pin attempted: staged carrier changed"))
+            ag_host_report_failure(s);
+        return;
     }
     struct json_value in; struct zcl_command_reply inner;
     const char *kv[] = {"file", s->path};
@@ -472,8 +521,9 @@ static void ag_rehost(struct ag_one *s)
     bool ok = built && zcl_app_offer_call(ZCL_APP_OFFER_BUNDLE_OFFER, &in, &inner);
     json_free(&in); if (!built) zcl_command_reply_init(&inner, "zcl.app_get.host.v1");
     if (!ok || !ag_host_offer_matches(&inner, &s->row->offer, NULL, NULL)) {
-        (void)json_push_kv_str(data, "hosting_status", "not advertised: carrier pin was refused or unconfirmed; storage may have changed");
-        (void)json_push_kv_str(data, "hosting_retry", "check node hosting and get the app again to offer its carrier");
+        bool reported = json_push_kv_str(data, "hosting_status", "not advertised: carrier pin was refused or unconfirmed; storage may have changed") &&
+            json_push_kv_str(data, "hosting_retry", "check node hosting and get the app again to offer its carrier");
+        if (!reported) ag_host_report_failure(s);
         zcl_command_reply_free(&inner); return;
     }
     zcl_command_reply_free(&inner);
@@ -607,6 +657,13 @@ static bool ag_stage_identity(const struct ag_one *s, struct app_receive_identit
         zcl_hex_decode_lower(root, identity->package_root, 32) &&
         zcl_hex_decode_lower(publisher, identity->publisher, 33);
 }
+static void ag_consume_host(struct ag_one *s, struct ag_private_stage *private, bool host_original)
+{
+    if (!host_original || s->reply->status != ZCL_COMMAND_STATUS_PASSED) return;
+    if (ag_private_bound(private, s->dir)) ag_rehost(s);
+    else zcl_package_copy_fail(s->reply, "TEMP_CHANGED", s->reply->error.mutated,
+        "the private staging directory changed before hosting", AG_COMMAND);
+}
 static bool ag_consume_staged(struct ag_one *s, struct ag_private_stage *private,
     app_get_stage_consumer consumer, void *context)
 {
@@ -625,7 +682,9 @@ static bool ag_consume_staged(struct ag_one *s, struct ag_private_stage *private
     if (ok && !ag_private_bound(private, s->dir)) {
         zcl_package_copy_fail(reply, "TEMP_CHANGED", false, "the private staging directory changed", AG_COMMAND); ok = false;
     }
-    if (ok) ok = consumer(context, s->path, &identity, reply);
+    bool host_original = false;
+    if (ok) ok = consumer(context, s->path, &identity, reply, &host_original);
+    if (ok) ag_consume_host(s, private, host_original);
     if (!ok && reply->status == ZCL_COMMAND_STATUS_PASSED)
         zcl_package_copy_fail(reply, "CONSUMER_FAILED", reply->error.mutated, "staged carrier consumer failed", AG_COMMAND);
     if (reply->status != ZCL_COMMAND_STATUS_PASSED) ok = false;

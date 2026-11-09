@@ -136,6 +136,7 @@ static int g_tag_rpc_mode;
 static bool tag_capture_signed_post(struct zcl_command_reply *out);
 
 extern bool zcl_app_get_host_reply_valid_for_testing(const struct json_value *, const char *);
+extern void zcl_test_app_get_host_enabled(const char *, const char *, const char *, struct zcl_command_reply *);
 extern bool zcl_test_app_publish_next(char *, size_t, const char *, const char *, const char *, const char *);
 
 static bool tag_host_reply_case(const char *ok_field, const char *host,
@@ -149,6 +150,24 @@ static bool tag_host_reply_case(const char *ok_field, const char *host,
                  zcl_app_get_host_reply_valid_for_testing(&body, TAG_CARRIER);
     json_free(&body);
     return valid;
+}
+static bool tag_host_missing_hint(void)
+{
+    char datadir[4300], wire[8192]; memset(datadir, '\'', sizeof(datadir) - 1);
+    datadir[0] = '/'; datadir[sizeof(datadir) - 1] = 0;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_get.v1");
+    zcl_test_app_get_host_enabled(datadir, TAG_LOCAL_HOST, TAG_CARRIER, &reply);
+    const struct zcl_command_spec *spec = asf_spec("app.get");
+    size_t n = spec ? zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, &reply, wire, sizeof(wire)) : 0;
+    struct json_value decoded; json_init(&decoded);
+    bool parsed = n && n < sizeof(wire) && json_read(&decoded, wire, n);
+    const struct json_value *facts = json_get(json_get(&decoded, "error"), "facts");
+    const char *host = zcl_package_copy_str(facts, "hosting_host"), *carrier = zcl_package_copy_str(facts, "hosting_carrier");
+    bool ok = parsed && reply.error.mutated && !strcmp(reply.error.code, "HOSTING_RESULT_UNAVAILABLE") &&
+        json_get_bool(json_get(facts, "hosting_enabled")) && host && carrier &&
+        !strcmp(host, TAG_LOCAL_HOST) && !strcmp(carrier, TAG_CARRIER) &&
+        json_get_int(json_get(facts, "hosting_generation")) == 1;
+    json_free(&decoded); zcl_command_reply_free(&reply); return ok;
 }
 
 static char *tag_onion_rpc_fault(int mode)
@@ -1755,8 +1774,9 @@ static bool tag_replace_stage(struct tag_consumer *c, const char *path)
     c->linked = true; return true;
 }
 static bool tag_consume(void *context, const char *path,
-    const struct app_receive_identity *identity, struct zcl_command_reply *reply)
+    const struct app_receive_identity *identity, struct zcl_command_reply *reply, bool *host_original)
 {
+    (void)host_original;
     struct tag_consumer *c = context; char root[65], publisher[67], release[65];
     ++c->calls; (void)snprintf(c->path, sizeof(c->path), "%s", path);
     zcl_hex_encode(identity->package_root, 32, root);
@@ -1903,7 +1923,7 @@ static int tag_stage_unsafe_parent(struct tag_world *w)
 }
 struct tag_discover {
     int cards, receive, home, errors, detail, browser;
-    bool keep, kept, cleanup_swap, oversized_share, fail_error_view, recovery_shown;
+    bool keep, kept, cleanup_swap, oversized_share, fail_error_view, recovery_shown, host_original, host_prompted, host_identity, fail_host_result;
     bool cancel_after_error, share_canceled;
     struct zcl_command_reply *reply; char first_result[8192], image[65]; long pid; uint64_t start;
     struct tag_consumer swap;
@@ -2042,14 +2062,36 @@ static bool tag_discover_confirm(struct tag_discover *d, const struct zcl_presen
         !tag_replace_stage(&d->swap, g_tag.fetch_out)) return false;
     return close;
 }
+static bool tag_discover_host_choice(struct tag_discover *d, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    d->host_prompted = true;
+    struct zcl_app_offer original; char pub[17], root_prefix[17];
+    if (!zcl_app_offer_parse(g_tag.text, strlen(g_tag.text), &original)) return false;
+    (void)snprintf(pub, sizeof(pub), "%.16s", original.publisher);
+    (void)snprintf(root_prefix, sizeof(root_prefix), "%.16s", original.root);
+    bool name = false, publisher = false, root = false;
+    for (unsigned i = 0; i < model->item_count; ++i) {
+        name |= strstr(model->items[i].value, original.name) != NULL;
+        publisher |= strstr(model->items[i].value, pub) != NULL;
+        root |= strstr(model->items[i].value, root_prefix) != NULL;
+    }
+    d->host_identity = name && publisher && root;
+    if (d->host_original) return tag_discover_confirm(d, model, live, why, cap);
+    bool redraw = false, close = false;
+    struct zcl_present_window_event_v1 event = {.outcome = ZCL_PRESENT_WINDOW_DISMISSED};
+    live->owner.update(live->owner.context, &event, true, &redraw, &close); return close;
+}
 static bool tag_discover_receive(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
     char *why, size_t cap)
 {
     struct tag_discover *d = context; (void)pages;
     if (!zcl_present_model_validate_v1(model, why, cap)) return false;
+    if (d->fail_host_result && !strcmp(model->request_id, "discover-host-result")) return false;
     if (!strcmp(model->request_id, "library-recovery")) d->recovery_shown = true;
     ++d->receive; bool redraw = false, close = false;
+    if (!strcmp(model->request_id, "discover-host-original")) return tag_discover_host_choice(d, model, live, why, cap);
     if (d->keep && (!strcmp(model->request_id, "receive-copy") || model->action_count == 0)) {
         int64_t end = platform_time_monotonic_ms() + 60000;
         do {
@@ -2072,7 +2114,7 @@ static int tag_discover_cancel(struct tag_world *w)
         int offers = g_tag.offers, posts = g_tag.posts;
         zcl_command_reply_init(&reply, "zcl.app_open.v1");
         ASSERT(!app_discover_run(w->j.b_datadir, tag_discover_card, tag_discover_receive, &d, &reply, NULL));
-        ASSERT_EQ(d.cards, 1); ASSERT_EQ(d.receive, 1);
+        ASSERT_EQ(d.cards, 1); ASSERT_EQ(d.receive, 1); ASSERT(!d.host_prompted);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         ASSERT(!strcmp(zcl_package_copy_str(&reply.data, "status"), "canceled"));
         ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.posts, posts);
@@ -2198,6 +2240,42 @@ static bool tag_fixture_worker(const struct tag_world *w, char worker[PATH_MAX])
     int n = snprintf(input, sizeof(input), "%s/build/bin/z23-dev", w->saved_cwd);
     return n > 0 && (size_t)n < sizeof(input) && realpath(input, worker);
 }
+static bool tag_host_failure_wire(struct zcl_command_reply *reply, const char *expected_carrier)
+{
+    char wire[32768]; const struct zcl_command_spec *spec = asf_spec("app.library");
+    size_t n = spec ? zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, reply, wire, sizeof(wire)) : 0;
+    struct json_value decoded; json_init(&decoded);
+    bool parsed = n && n < sizeof(wire) && json_read(&decoded, wire, n);
+    const struct json_value *facts = json_get(json_get(&decoded, "error"), "facts");
+    const char *host = zcl_package_copy_str(facts, "hosting_host"), *carrier = zcl_package_copy_str(facts, "hosting_carrier");
+    bool retained = parsed && json_get_bool(json_get(facts, "hosting_enabled")) && host && carrier &&
+        !strcmp(host, TAG_LOCAL_HOST) && !strcmp(carrier, expected_carrier) &&
+        json_get_int(json_get(facts, "hosting_generation")) == 1;
+    json_free(&decoded); return retained;
+}
+static int tag_host_result_failure(struct tag_world *w)
+{
+    int failures = 0; struct zcl_command_reply reply;
+    struct tag_discover d = {.keep = true, .host_original = true, .fail_host_result = true};
+    struct tag_world fresh = *w; char worker[PATH_MAX];
+    char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL; bool fixture_ready = false;
+    zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    TEST("Discover preserves enabled hosting identity when its result cannot be displayed") {
+        ASSERT(test_mkdtemp(fresh.root, sizeof(fresh.root), "app_get_host_result"));
+        ASSERT(tag_fixture_worker(w, worker));
+        ASSERT(asf_journey_init(&fresh.j, "tinyapp", w->repo, fresh.root)); fixture_ready = true;
+        ASSERT(tag_board_variant(&fresh, NULL, NULL, false) && setenv("HOME", fresh.j.b_home, 1) == 0);
+        d.reply = &reply;
+        ASSERT(!app_discover_run_test(fresh.j.b_datadir, tag_discover_card, tag_discover_receive, &d, &reply, NULL, worker));
+        tag_discover_capture(&d);
+        ASSERT(d.host_prompted && d.pid > 0 && reply.error.mutated && !strcmp(reply.error.code, "HOSTING_RESULT_UNAVAILABLE"));
+        ASSERT(tag_host_failure_wire(&reply, fresh.offer.carrier)); PASS();
+    } _test_next:;
+    if (fixture_ready && !tag_stop_receipt(&d, fresh.j.b_datadir)) ++failures;
+    zcl_command_reply_free(&reply);
+    if (saved_home) { (void)setenv("HOME", saved_home, 1); free(saved_home); } else (void)unsetenv("HOME");
+    return failures;
+}
 static void tag_cancelled_share(void *context, const struct app_selection *selection,
                                 const char *path, struct zcl_command_reply *reply)
 {
@@ -2208,7 +2286,7 @@ static void tag_cancelled_share(void *context, const struct app_selection *selec
 }
 static int tag_library_kept_failure(struct tag_world *w)
 {
-    int failures = 0; struct zcl_command_reply reply; struct tag_discover d = {.keep = true, .cancel_after_error = true};
+    int failures = 0; struct zcl_command_reply reply; struct tag_discover d = {.keep = true, .cancel_after_error = true, .host_original = true};
     struct app_launch_env env; char why[256], wire[32768], worker[PATH_MAX];
     struct app_selection selection = {0}; struct tag_xdg x = {0};
     struct tag_world fresh = *w; char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
@@ -2223,6 +2301,7 @@ static int tag_library_kept_failure(struct tag_world *w)
         ASSERT(tag_xdg_enter(&x, fresh.j.b_home));
         ASSERT(app_launch_env_from_process(&env, why, sizeof(why)));
         ASSERT(tag_first_use_cancel(&fresh));
+        int offers = g_tag.offers, enables = g_tag.enables;
         zcl_command_reply_init(&reply, "zcl.app_open.v1");
         d.reply = &reply;
         zcl_test_app_library_discover_worker_share(&env, fresh.j.b_datadir, &reply,
@@ -2234,7 +2313,9 @@ static int tag_library_kept_failure(struct tag_world *w)
             printf("  [discover diagnostic: receive=%d home=%d detail=%d errors=%d code=%s message=%s first=%s final=%s]\n",
                 d.receive, d.home, d.detail, d.errors, reply.error.code, reply.error.message, d.first_result, wire);
         }
-        ASSERT(d.pid > 0); ASSERT(tag_kept_selection(&env, &selection));
+        ASSERT(d.pid > 0); ASSERT(d.host_prompted && d.host_identity); ASSERT_EQ(g_tag.offers, offers + 1);
+        ASSERT_EQ(g_tag.enables, enables + 1); ASSERT(strstr(g_tag.enable_text, w->offer.root));
+        ASSERT(tag_kept_selection(&env, &selection));
         ASSERT_EQ(d.detail, 3); ASSERT(d.share_canceled); ASSERT_EQ(d.errors, 1);
         ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED && reply.error.mutated);
         ASSERT(!strcmp(reply.error.code, "SHA256_MISMATCH"));
@@ -2331,11 +2412,13 @@ static int tag_library_oversized_failure(struct tag_world *w)
         ASSERT(asf_journey_init(&fresh.j, "tinyapp", w->repo, fresh.root)); fixture_ready = true;
         ASSERT(tag_board_variant(&fresh, NULL, NULL, false) && setenv("HOME", fresh.j.b_home, 1) == 0);
         ASSERT(tag_xdg_enter(&x, fresh.j.b_home) && app_launch_env_from_process(&env, why, sizeof(why)));
+        int offers = g_tag.offers, enables = g_tag.enables;
         d.reply = &reply;
         zcl_test_app_library_discover_worker_share(&env, fresh.j.b_datadir, &reply,
             tag_discover_card, tag_discover_receive, &d, worker, tag_oversized_share);
         tag_discover_capture(&d);
         ASSERT(d.pid > 0 && d.kept && d.detail == 1 && tag_kept_selection(&env, &selection));
+        ASSERT(d.host_prompted && d.host_identity); ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.enables, enables);
         ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED && reply.error.mutated &&
             !strcmp(reply.error.code, "FIXTURE_OVERSIZED"));
         ASSERT(tag_oversized_recovery_wire(&reply, &selection)); PASS();
@@ -2373,7 +2456,7 @@ static bool tag_cleanup_outcome(const struct tag_discover *d, bool fail_error_vi
 static int tag_library_cleanup_failure_case(struct tag_world *w, bool fail_error_view)
 {
     int failures = 0; struct zcl_command_reply reply;
-    struct tag_discover d = {.keep = true, .cleanup_swap = true, .fail_error_view = fail_error_view};
+    struct tag_discover d = {.keep = true, .cleanup_swap = true, .fail_error_view = fail_error_view, .host_original = true};
     struct app_launch_env env; struct app_selection selection = {0}; struct tag_xdg x = {0};
     char why[256], worker[PATH_MAX];
     struct tag_world fresh = *w; char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
@@ -2385,11 +2468,13 @@ static int tag_library_cleanup_failure_case(struct tag_world *w, bool fail_error
         ASSERT(tag_cleanup_foreign(&d, fresh.root));
         ASSERT(tag_board_variant(&fresh, NULL, NULL, false) && setenv("HOME", fresh.j.b_home, 1) == 0);
         ASSERT(tag_xdg_enter(&x, fresh.j.b_home) && app_launch_env_from_process(&env, why, sizeof(why)));
+        int offers = g_tag.offers, enables = g_tag.enables;
         d.reply = &reply;
         zcl_test_app_library_discover_worker(&env, fresh.j.b_datadir, &reply,
             tag_discover_card, tag_discover_receive, &d, worker);
         tag_discover_capture(&d);
         ASSERT(tag_cleanup_outcome(&d, fail_error_view, &env, &selection, &reply));
+        ASSERT(d.host_prompted); ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.enables, enables);
         ASSERT(tag_cleanup_recovery_wire(&reply, &selection)); PASS();
     } _test_next:;
     if (fixture_ready && !tag_stop_receipt(&d, fresh.j.b_datadir)) ++failures;
@@ -2800,6 +2885,7 @@ static int tag_rehost_failures(struct tag_world *w)
         ASSERT(!tag_host_reply_case("\"ok\":true,", TAG_LOCAL_HOST, "bad", "1"));
         ASSERT(!tag_host_reply_case("\"ok\":true,", TAG_LOCAL_HOST, TAG_CARRIER, "\"1\""));
         ASSERT(!tag_host_reply_case("\"ok\":true,", TAG_LOCAL_HOST, TAG_CARRIER, "0"));
+        ASSERT(tag_host_missing_hint());
         PASS();
     }
     TEST("app get: recurring intent retains the original signed offer identity") {
@@ -2922,6 +3008,7 @@ static int tag_keep_cases(struct tag_world *w)
     bool ready = true;
 #endif
     int failures = ready ? tag_library_kept_failure(w) : 1;
+    if (!failures) failures += tag_host_result_failure(w);
     if (!failures) failures += tag_library_cleanup_failure(w);
     if (!failures) failures += tag_library_oversized_failure(w);
 #if defined(__linux__)
