@@ -295,13 +295,15 @@ static bool push_next_item(struct json_value *array,
                            const struct zcl_command_next *next,
                            const struct zcl_command_registry *registry,
                            const struct zcl_command_spec *current_spec,
-                           const struct json_value *data)
+                           const struct json_value *data,
+                           enum command_serialize_failure *failure)
 {
     struct json_value item, input;
     json_init(&item);
     json_init(&input);
     json_set_object(&item);
     if (!push_next_item_valid(next, registry, current_spec, data, &input)) {
+        if (failure) *failure = COMMAND_SERIALIZE_NEXT;
         json_free(&input);
         json_free(&item);
         return false;
@@ -318,14 +320,15 @@ static bool push_next_item(struct json_value *array,
 bool command_registry_push_next_array(
     struct json_value *root, const struct zcl_command_reply *reply,
     const struct zcl_command_registry *registry,
-    const struct zcl_command_spec *current_spec)
+    const struct zcl_command_spec *current_spec,
+    enum command_serialize_failure *failure)
 {
     struct json_value array;
     json_init(&array);
     json_set_array(&array);
     bool ok = true;
     for (size_t i = 0; ok && i < reply->next_count; i++)
-        ok = push_next_item(&array, &reply->next[i], registry, current_spec, &reply->data);
+        ok = push_next_item(&array, &reply->next[i], registry, current_spec, &reply->data, failure);
     ok = ok && json_push_kv(root, "next", &array);
     json_free(&array);
     return ok;
@@ -418,7 +421,8 @@ static bool serialize_body(struct json_value *root,
                            const struct zcl_command_registry *registry,
                            const struct zcl_command_spec *spec,
                            struct zcl_command_reply *reply, bool successful,
-                           bool invoked_by_alias)
+                           bool invoked_by_alias,
+                           enum command_serialize_failure *failure)
 {
     bool ok = true;
     if (invoked_by_alias)
@@ -439,7 +443,7 @@ static bool serialize_body(struct json_value *root,
         }
     }
     return ok &&
-           command_registry_push_next_array(root, reply, registry, spec);
+           command_registry_push_next_array(root, reply, registry, spec, failure);
 }
 
 /* Same serializer owners as the final envelope, with empty data and no next.
@@ -459,7 +463,7 @@ bool command_registry_success_data_budget(
     bool ok = serialize_envelope(&root, spec, &reply,
         "local-ffffffffffffffff", INT64_MAX, true) &&
         serialize_authority(&root, agent_session_presented, policy) &&
-        serialize_body(&root, NULL, spec, &reply, true, invoked_by_alias);
+        serialize_body(&root, NULL, spec, &reply, true, invoked_by_alias, NULL);
     if (ok) {
         size_t cap = spec->budget_bytes > 0
             ? (size_t)spec->budget_bytes : ZCL_COMMAND_RESULT_BUDGET;
@@ -493,7 +497,7 @@ bool zcl_command_registry_test_success_budget(
         return false;
     *wire_bytes = command_registry_serialize_reply(NULL, spec, reply,
         fixture->alias, UINT64_MAX, fixture->elapsed_us, fixture->budget_bytes,
-        fixture->presented, &policy, wire, wire_size);
+        fixture->presented, &policy, wire, wire_size, NULL);
     return true;
 }
 size_t zcl_command_registry_test_reply_wire(
@@ -502,7 +506,22 @@ size_t zcl_command_registry_test_reply_wire(
 {
     return command_registry_serialize_reply(registry, spec, reply, false, 0, 0,
                                             ZCL_COMMAND_ERROR_BUDGET, false, NULL,
-                                            wire, wire_size);
+                                            wire, wire_size, NULL);
+}
+size_t zcl_command_registry_test_reply_wire_fixture(
+    const struct zcl_command_registry *registry, const struct zcl_command_spec *spec,
+    struct zcl_command_reply *reply, const struct zcl_command_budget_fixture *fixture,
+    char *wire, size_t wire_size)
+{
+    struct agent_spend_policy_decision policy = {.allowed = true,
+        .debited_zat = fixture->debited_zat,
+        .window_remaining_zat = fixture->remaining_zat};
+    const char *evidence = fixture->authority_evidence ? fixture->authority_evidence : "";
+    int n = snprintf(policy.evidence, sizeof(policy.evidence), "%s", evidence);
+    if (n < 0 || (size_t)n >= sizeof(policy.evidence)) return 0;
+    return command_registry_serialize_reply(registry, spec, reply, fixture->alias,
+        UINT64_MAX, fixture->elapsed_us, fixture->budget_bytes,
+        fixture->presented, &policy, wire, wire_size, NULL);
 }
 #endif
 
@@ -512,8 +531,9 @@ size_t command_registry_serialize_reply(
     bool invoked_by_alias, uint64_t request_sequence, int64_t elapsed_us,
     size_t budget_bytes, bool agent_session_presented,
     const struct agent_spend_policy_decision *policy, char *out,
-    size_t out_size)
+    size_t out_size, enum command_serialize_failure *failure)
 {
+    if (failure) *failure = COMMAND_SERIALIZE_ENVELOPE;
     char request_id[48];
     (void)snprintf(request_id, sizeof(request_id), "local-%016llx",
                    (unsigned long long)request_sequence);
@@ -526,7 +546,7 @@ size_t command_registry_serialize_reply(
                                  successful) &&
               serialize_authority(&root, agent_session_presented, policy) &&
               serialize_body(&root, registry, spec, reply, successful,
-                             invoked_by_alias);
+                             invoked_by_alias, failure);
     size_t contract = successful ? (spec->budget_bytes > 0
                                         ? (size_t)spec->budget_bytes
                                         : ZCL_COMMAND_RESULT_BUDGET)
@@ -536,6 +556,7 @@ size_t command_registry_serialize_reply(
     size_t result = ok ? command_registry_write_bounded_json(&root, out,
                                                              out_size, contract)
                        : 0;
+    if (ok && !result && failure) *failure = COMMAND_SERIALIZE_BUDGET;
     json_free(&root);
     return result;
 }

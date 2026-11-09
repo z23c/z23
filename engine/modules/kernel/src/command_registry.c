@@ -698,18 +698,39 @@ static void execute_check_contract(struct zcl_command_reply *reply,
     }
 }
 
+static const char *execute_serialize_code(enum command_serialize_failure failure)
+{
+    if (failure == COMMAND_SERIALIZE_NEXT) return "RESPONSE_NEXT_UNVALIDATABLE";
+    if (failure == COMMAND_SERIALIZE_BUDGET) return "RESPONSE_BUDGET_EXCEEDED";
+    return "RESPONSE_SERIALIZATION_FAILED";
+}
+
+static const char *execute_serialize_message(enum command_serialize_failure failure)
+{
+    if (failure == COMMAND_SERIALIZE_NEXT) return "response next action could not be validated";
+    if (failure == COMMAND_SERIALIZE_BUDGET) return "bounded response could not be serialized";
+    return "response envelope could not be constructed";
+}
+
+static const char *execute_serialize_action(enum command_serialize_failure failure)
+{
+    if (failure == COMMAND_SERIALIZE_NEXT) return "inspect why the next action could not be validated";
+    if (failure == COMMAND_SERIALIZE_BUDGET) return "inspect the command contract and retry with bounded output";
+    return "inspect the response serialization failure";
+}
+
 static size_t execute_wiki_fallback(char *out, size_t capacity, size_t budget,
-    const struct zcl_command_reply *reply, const char *effect)
+    const struct zcl_command_reply *reply, const char *effect, const char *code)
 {
     if (!out || capacity == 0) return 0;
     int n = snprintf(out, capacity,
         "{\"schema\":\"zcl.result.v1\",\"command\":\"fleet.steer.wiki-write\","
         "\"ok\":false,\"status\":\"failed\",\"request_id\":\"local-overflow\",\"elapsed_us\":0,"
-        "\"error\":{\"code\":\"RESPONSE_BUDGET_EXCEEDED\",\"error_code\":\"RESPONSE_BUDGET_EXCEEDED\","
+        "\"error\":{\"code\":\"%s\",\"error_code\":\"%s\","
         "\"message\":\"bounded wiki receipt could not be serialized\",\"phase\":\"serialize\","
         "\"current_state\":\"%s\",\"effect_outcome\":\"%s\",\"retryable\":false,"
         "\"human_action_required\":true,\"next_action\":\"reconcile the same request_key; do not issue a new key\","
-        "\"mutated\":%s,\"blockers\":[]},\"next\":[]}", reply->error.current_state,
+        "\"mutated\":%s,\"blockers\":[]},\"next\":[]}", code, code, reply->error.current_state,
         effect, command_registry_effect_possible(effect, &reply->error) ? "true" : "false");
     if (n <= 0 || (size_t)n >= capacity || (budget && (size_t)n > budget)) {
         out[0] = '\0';
@@ -720,42 +741,33 @@ static size_t execute_wiki_fallback(char *out, size_t capacity, size_t budget,
 
 static size_t execute_fallback(char *out, size_t out_size, size_t budget_bytes,
                                const struct zcl_command_spec *spec,
-                               struct zcl_command_reply *reply)
+                               struct zcl_command_reply *reply,
+                               enum command_serialize_failure failure)
 {
     reply->exit_code = ZCL_COMMAND_EXIT_INTERNAL;
+    const char *code = execute_serialize_code(failure);
     const char *effect = command_registry_wiki_effect(spec, &reply->error);
-    if (effect) return execute_wiki_fallback(out, out_size, budget_bytes, reply, effect);
-    static const char fallback[] =
+    if (effect) return execute_wiki_fallback(out, out_size, budget_bytes, reply, effect, code);
+    if (!out || !out_size) return 0;
+    int n = snprintf(out, out_size,
         "{\"schema\":\"zcl.result.v1\",\"command\":\"internal\","
         "\"ok\":false,\"status\":\"failed\","
         "\"request_id\":\"local-overflow\",\"elapsed_us\":0,"
-        "\"error\":{\"code\":\"RESPONSE_BUDGET_EXCEEDED\","
-        "\"error_code\":\"RESPONSE_BUDGET_EXCEEDED\","
-        "\"message\":\"bounded response could not be serialized\","
+        "\"error\":{\"code\":\"%s\","
+        "\"error_code\":\"%s\","
+        "\"message\":\"%s\","
         "\"phase\":\"serialize\",\"current_state\":\"REQUEST_FAILED\","
         "\"retryable\":false,\"human_action_required\":true,"
-        "\"next_action\":\"inspect the command contract and retry with bounded output\","
-        "\"mutated\":false,\"blockers\":[]},\"next\":[]}";
-    /* No allocations: an effect may already be durable when JSON allocation
-     * or the response budget fails. Preserve that fact and never invite retry. */
-    static const char mutated_fallback[] =
-        "{\"schema\":\"zcl.result.v1\",\"command\":\"internal\","
-        "\"ok\":false,\"status\":\"failed\","
-        "\"request_id\":\"local-overflow\",\"elapsed_us\":0,"
-        "\"error\":{\"code\":\"RESPONSE_BUDGET_EXCEEDED\","
-        "\"error_code\":\"RESPONSE_BUDGET_EXCEEDED\","
-        "\"message\":\"bounded response could not be serialized after a possible effect\","
-        "\"phase\":\"serialize\",\"current_state\":\"REQUEST_FAILED\","
-        "\"retryable\":false,\"human_action_required\":true,"
-        "\"next_action\":\"inspect preserved publication artifacts before any further action\","
-        "\"mutated\":true,\"blockers\":[]},\"next\":[]}";
-    const char *body = reply->error.mutated ? mutated_fallback : fallback;
-    size_t len = reply->error.mutated ? sizeof(mutated_fallback) - 1 : sizeof(fallback) - 1;
-    if (out && len < out_size && (budget_bytes == 0 || len <= budget_bytes)) {
-        memcpy(out, body, len + 1);
-        return len;
+        "\"next_action\":\"%s\",\"mutated\":%s,\"blockers\":[]},\"next\":[]}",
+        code, code, execute_serialize_message(failure), reply->error.mutated
+            ? "inspect preserved publication artifacts before any further action"
+            : execute_serialize_action(failure),
+        reply->error.mutated ? "true" : "false");
+    if (n <= 0 || (size_t)n >= out_size || (budget_bytes && (size_t)n > budget_bytes)) {
+        out[0] = '\0';
+        return 0;
     }
-    return 0;
+    return (size_t)n;
 }
 
 static bool execute_session_presented(const struct zcl_command_context *context)
@@ -796,12 +808,13 @@ size_t zcl_command_registry_execute_json(
     const struct zcl_command_registry *next_registry =
         context && context->registry ? context->registry : registry;
     latency_ring_record(registry, spec, elapsed_us);
+    enum command_serialize_failure failure = COMMAND_SERIALIZE_ENVELOPE;
     size_t result = command_registry_serialize_reply(
         next_registry, spec, &reply, invoked_by_alias, sequence, elapsed_us,
         budget_bytes, execute_session_presented(context), &policy, out,
-        out_size);
+        out_size, &failure);
     if (result == 0)
-        result = execute_fallback(out, out_size, budget_bytes, spec, &reply);
+        result = execute_fallback(out, out_size, budget_bytes, spec, &reply, failure);
     if (exit_code)
         *exit_code = reply.exit_code;
     handler_snapshot_release(held);

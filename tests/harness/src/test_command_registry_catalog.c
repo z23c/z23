@@ -6586,6 +6586,7 @@ static void contract_bad_next_handler(
 {
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
+    reply->error.mutated = g_bad_next_case == 3;
     if (g_bad_next_case == 0)
         (void)zcl_command_reply_add_next(reply, request->spec->path, "{}",
                                          "illegal self-loop");
@@ -6619,7 +6620,7 @@ static int test_next_actions_fail_closed(void)
         struct json_value input;
         json_init(&input);
         json_set_object(&input);
-        for (g_bad_next_case = 0; g_bad_next_case < 3; g_bad_next_case++) {
+        for (g_bad_next_case = 0; g_bad_next_case < 4; g_bad_next_case++) {
             char out[ZCL_COMMAND_RESULT_BUDGET + 1];
             enum zcl_command_exit code = ZCL_COMMAND_EXIT_OK;
             size_t n = zcl_command_registry_execute_json(
@@ -6634,14 +6635,27 @@ static int test_next_actions_fail_closed(void)
             const struct json_value *error = json_get(&reply, "error");
             ASSERT(error && error->type == JSON_OBJ);
             ASSERT(json_get_str(json_get(error, "code")) != NULL);
+            ASSERT_STR_EQ(json_get_str(json_get(error, "code")), "RESPONSE_NEXT_UNVALIDATABLE");
+            ASSERT_EQ(json_get_bool(json_get(error, "mutated")), g_bad_next_case == 3);
             ASSERT_STR_EQ(json_get_str(json_get(error, "error_code")),
                           json_get_str(json_get(error, "code")));
             ASSERT(json_get_str(json_get(error, "current_state")) != NULL);
             ASSERT(json_get(error, "retryable") != NULL);
             ASSERT(json_get(error, "human_action_required") != NULL);
             ASSERT(json_get_str(json_get(error, "next_action")) != NULL);
+            if (g_bad_next_case != 3)
+                ASSERT_STR_EQ(json_get_str(json_get(error, "next_action")),
+                              "inspect why the next action could not be validated");
             json_free(&reply);
         }
+        char short_output[32];
+        enum zcl_command_exit short_code = ZCL_COMMAND_EXIT_OK;
+        g_bad_next_case = 3;
+        ASSERT_EQ(zcl_command_registry_execute_json(
+            &local, &executable, &context, &input, false, executable.path,
+            "normal", 0, 0, NULL, short_output, sizeof(short_output),
+            &short_code), 0u);
+        ASSERT_EQ(short_code, ZCL_COMMAND_EXIT_INTERNAL);
         json_free(&input);
 
         char menu[ZCL_COMMAND_ROOT_BUDGET + 1];

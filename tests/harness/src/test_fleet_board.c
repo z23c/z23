@@ -4853,7 +4853,7 @@ static bool fb_wiki_final_fault_result(const struct json_value *envelope,
 {
     const struct json_value *error = json_get(envelope, "error");
     const char *code = json_get_str(json_get(error, "code"));
-    *final_hit = code && !strcmp(code, "RESPONSE_BUDGET_EXCEEDED");
+    *final_hit = code && !strcmp(code, "RESPONSE_SERIALIZATION_FAILED");
     if (!hit) return rc == ZCL_COMMAND_EXIT_OK;
     const char *effect = json_get_str(json_get(error, "effect_outcome"));
     const char *action = json_get_str(json_get(error, "next_action"));

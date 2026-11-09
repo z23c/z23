@@ -39,11 +39,6 @@
 #include "config/command_catalog.h"
 #include "command/native_zcode_package_copy.h"
 #include "command/native_app_library_command.h"
-#include "services/agent_spend_policy.h"
-
-extern size_t command_registry_serialize_reply(const struct zcl_command_registry *,
-    const struct zcl_command_spec *, struct zcl_command_reply *, bool, uint64_t, int64_t,
-    size_t, bool, const struct agent_spend_policy_decision *, char *, size_t);
 
 #if defined(_WIN32)
 int test_app_get(void);
@@ -2612,11 +2607,12 @@ static bool tag_oversized_recovery_wire(struct zcl_command_reply *reply,
     const struct app_selection *selection)
 {
     char wire[3073]; const struct zcl_command_spec *spec = asf_spec("app.library");
-    struct agent_spend_policy_decision policy = {.allowed = true, .debited_zat = INT64_MAX,
-        .window_remaining_zat = INT64_MAX};
-    memset(policy.evidence, '\\', sizeof(policy.evidence) - 1);
-    if (!spec || !command_registry_serialize_reply(zcl_command_catalog(), spec, reply,
-        true, UINT64_MAX, INT64_MAX, ZCL_COMMAND_ERROR_BUDGET, true, &policy, wire, sizeof(wire))) return false;
+    char evidence[40]; memset(evidence, '\\', sizeof(evidence) - 1); evidence[39] = '\0';
+    struct zcl_command_budget_fixture fixture = {.authority_evidence = evidence,
+        .debited_zat = INT64_MAX, .remaining_zat = INT64_MAX, .elapsed_us = INT64_MAX,
+        .budget_bytes = ZCL_COMMAND_ERROR_BUDGET, .presented = true, .alias = true};
+    if (!spec || !zcl_command_registry_test_reply_wire_fixture(zcl_command_catalog(), spec,
+        reply, &fixture, wire, sizeof(wire))) return false;
     struct json_value decoded; json_init(&decoded);
     bool parsed = json_read(&decoded, wire, strlen(wire));
     const struct json_value *facts = json_get(json_get(&decoded, "error"), "facts");

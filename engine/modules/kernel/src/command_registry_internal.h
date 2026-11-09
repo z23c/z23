@@ -83,6 +83,11 @@ bool command_registry_push_string_array_csv(struct json_value *object,
 /* ── command_registry_reply.c ──────────────────────────────────────────
  * Reply serialization and the budgeted JSON writer. */
 struct agent_spend_policy_decision;
+enum command_serialize_failure {
+    COMMAND_SERIALIZE_ENVELOPE,
+    COMMAND_SERIALIZE_NEXT,
+    COMMAND_SERIALIZE_BUDGET
+};
 
 size_t command_registry_write_bounded_json(struct json_value *root, char *out,
                                            size_t out_size,
@@ -101,14 +106,15 @@ bool command_registry_effect_possible(const char *effect,
 bool command_registry_push_next_array(
     struct json_value *root, const struct zcl_command_reply *reply,
     const struct zcl_command_registry *registry,
-    const struct zcl_command_spec *current_spec);
+    const struct zcl_command_spec *current_spec,
+    enum command_serialize_failure *failure);
 size_t command_registry_serialize_reply(
     const struct zcl_command_registry *registry,
     const struct zcl_command_spec *spec, struct zcl_command_reply *reply,
     bool invoked_by_alias, uint64_t request_sequence, int64_t elapsed_us,
     size_t budget_bytes, bool agent_session_presented,
     const struct agent_spend_policy_decision *policy, char *out,
-    size_t out_size);
+    size_t out_size, enum command_serialize_failure *failure);
 bool command_registry_success_data_budget(
     const struct zcl_command_spec *spec, bool invoked_by_alias,
     size_t budget_bytes, bool agent_session_presented,
