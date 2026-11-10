@@ -58,6 +58,18 @@ static inline bool test_verdict_append_str(char *buf, size_t cap, size_t *off,
     return test_verdict_append(buf, cap, off, "\"%s\"", escaped);
 }
 
+static inline bool test_verdict_append_names(char *buf, size_t cap, size_t *off,
+                                              const struct test_verdict_doc *d,
+                                              size_t shown)
+{
+    bool ok = true;
+    for (size_t i = 0; ok && i < shown; i++) {
+        if (i > 0) ok = test_verdict_append(buf, cap, off, ",");
+        ok = ok && test_verdict_append_str(buf, cap, off, d->failed_names[i]);
+    }
+    return ok;
+}
+
 /* Renders the document as one JSON object plus a trailing newline. Returns the
  * byte length written, or -1 when the buffer is too small or an argument is
  * missing. Names beyond 64 are dropped and failed_groups_truncated is set
@@ -77,11 +89,7 @@ static inline int test_verdict_json_format(char *buf, size_t cap,
         d->groups_total, d->groups_ran, d->groups_cached, d->groups_failed);
     size_t shown = d->failed_names_count < TEST_VERDICT_MAX_FAILED_NAMES
         ? d->failed_names_count : TEST_VERDICT_MAX_FAILED_NAMES;
-    for (size_t i = 0; ok && i < shown; i++) {
-        if (i > 0)
-            ok = test_verdict_append(buf, cap, &off, ",");
-        ok = ok && test_verdict_append_str(buf, cap, &off, d->failed_names[i]);
-    }
+    ok = ok && test_verdict_append_names(buf, cap, &off, d, shown);
     bool truncated = d->groups_failed > shown;
     ok = ok && test_verdict_append(buf, cap, &off,
         "],\"failed_groups_truncated\":%s,\"toolkey\":",

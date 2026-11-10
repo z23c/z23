@@ -53,6 +53,17 @@ static inline bool test_tmpfs_parent_safe(const char *path)
 #endif
 
 #if defined(__linux__)
+static inline bool test_tmpfs_size_at(const char *path, uint64_t *bytes, bool is_child);
+
+static inline bool test_tmpfs_size_child(const char *path, const char *name,
+                                         uint64_t *bytes)
+{
+    char child[PATH_MAX];
+    int n = snprintf(child, sizeof(child), "%s/%s", path, name);
+    return n >= 0 && (size_t)n < sizeof(child) &&
+           test_tmpfs_size_at(child, bytes, true);
+}
+
 /* Another group may delete a child between readdir and lstat/opendir; for a
  * child (is_child) that vanished entry counts as zero bytes, not as an
  * unavailable usage. The root itself missing is still a refusal. */
@@ -75,9 +86,7 @@ static inline bool test_tmpfs_size_at(const char *path, uint64_t *bytes, bool is
         entry = readdir(dir);
         if (!entry) { if (errno) ok = false; break; }
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
-        char child[PATH_MAX];
-        int n = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
-        if (n < 0 || (size_t)n >= sizeof(child) || !test_tmpfs_size_at(child, bytes, true)) {
+        if (!test_tmpfs_size_child(path, entry->d_name, bytes)) {
             ok = false;
             break;
         }
