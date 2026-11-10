@@ -9,6 +9,26 @@
 
 enum { PLATFORM_GLOB_INPUT_MAX = 4096 };
 
+static inline unsigned char platform_glob_class_byte(const char *pattern,
+                                                      size_t *i)
+{
+    unsigned char c = (unsigned char)pattern[(*i)++];
+    if (c == '\\' && pattern[*i]) c = (unsigned char)pattern[(*i)++];
+    return c;
+}
+
+static inline bool platform_glob_class_item(const char *pattern, size_t *i,
+                                             unsigned char value)
+{
+    unsigned char first = platform_glob_class_byte(pattern, i);
+    if (pattern[*i] == '-' && pattern[*i + 1] && pattern[*i + 1] != ']') {
+        ++*i;
+        unsigned char last = platform_glob_class_byte(pattern, i);
+        return first <= value && value <= last;
+    }
+    return first == value;
+}
+
 static inline bool platform_glob_class_match(const char *pattern,
                                              size_t *consumed,
                                              unsigned char value)
@@ -25,20 +45,39 @@ static inline bool platform_glob_class_match(const char *pattern,
         i++;
     }
     while (pattern[i] && pattern[i] != ']') {
-        unsigned char first = (unsigned char)pattern[i++];
-        if (first == '\\' && pattern[i]) first = (unsigned char)pattern[i++];
-        if (pattern[i] == '-' && pattern[i + 1] && pattern[i + 1] != ']') {
-            i++;
-            unsigned char last = (unsigned char)pattern[i++];
-            if (last == '\\' && pattern[i]) last = (unsigned char)pattern[i++];
-            if (first <= value && value <= last) matched = true;
-        } else if (first == value) {
-            matched = true;
-        }
+        if (platform_glob_class_item(pattern, &i, value)) matched = true;
     }
     if (pattern[i] != ']') return false;
     *consumed = i + 1;
     return negate ? !matched : matched;
+}
+
+static inline void platform_glob_transition(const char *pattern, size_t i,
+                                             const char *text, size_t text_len,
+                                             bool pathname, const bool *state,
+                                             bool *next, size_t *consumed)
+{
+    unsigned char token = (unsigned char)pattern[i];
+    bool is_class = token == '[';
+    *consumed = 1;
+    if (token == '\\' && pattern[i + 1u]) {
+        token = (unsigned char)pattern[i + 1u];
+        *consumed = 2;
+        is_class = false;
+    }
+    for (size_t j = 1; j <= text_len; j++) {
+        unsigned char value = (unsigned char)text[j - 1u];
+        if (pathname && value == '/' && (token == '?' || is_class)) continue;
+        bool matches;
+        if (token == '?') matches = true;
+        else if (is_class) {
+            size_t class_size = 0;
+            matches = platform_glob_class_match(pattern + i, &class_size, value);
+            if (class_size != 0) *consumed = class_size;
+            else matches = value == (unsigned char)'[';
+        } else matches = token == value;
+        next[j] = state[j - 1u] && matches;
+    }
 }
 
 /* Supports '*', '?', bracket classes/ranges/negation, and backslash escapes.
@@ -67,31 +106,9 @@ static inline bool platform_glob_match(const char *pattern, const char *text,
                 next[j] = state[j] || (consumable && next[j - 1u]);
             }
         } else {
-            size_t consumed = 1;
-            bool is_class = token == '[';
-            if (token == '\\' && i + 1u < pattern_len) {
-                token = (unsigned char)pattern[i + 1u];
-                consumed = 2;
-                is_class = false;
-            }
-            for (size_t j = 1; j <= text_len; j++) {
-                unsigned char value = (unsigned char)text[j - 1u];
-                if (pathname && value == '/' &&
-                    (token == '?' || is_class)) continue;
-                bool token_matches;
-                if (token == '?') {
-                    token_matches = true;
-                } else if (is_class) {
-                    size_t class_size = 0;
-                    token_matches = platform_glob_class_match(
-                        pattern + i, &class_size, value);
-                    if (class_size != 0) consumed = class_size;
-                    else token_matches = value == (unsigned char)'[';
-                } else {
-                    token_matches = token == value;
-                }
-                next[j] = state[j - 1u] && token_matches;
-            }
+            size_t consumed;
+            platform_glob_transition(pattern, i, text, text_len, pathname,
+                                     state, next, &consumed);
             i += consumed;
         }
         memcpy(state, next, (text_len + 1u) * sizeof(state[0]));

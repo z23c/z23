@@ -3939,6 +3939,25 @@ static int test_proof_resolver_umbrella_sources(void)
             ASSERT_STR_EQ(out, folds ? "test_dev_land_shard_01\n" :
                 "test_dev_land\ntest_dev_land_shard_01\n");
         }
+        const struct { const char *pattern, *text; bool pathname, expected; }
+            glob_cases[] = {
+                {"a\\*b", "a*b", false, true},
+                {"[a-c]", "b", false, true},
+                {"[!a-c]", "b", false, false},
+                {"[^a-c]", "z", false, true},
+                {"[\\]]", "]", false, true},
+                {"[a-\\c]", "b", false, true},
+                {"[abc", "[abc", false, true},
+                {"[abc", "a", false, false},
+                {"a**b", "a/x/b", false, true},
+                {"a**b", "a/x/b", true, false},
+                {"a?b", "a/b", true, false},
+                {"a[/]b", "a/b", true, false},
+                {"a/b", "a/b", true, true},
+            };
+        for (size_t i = 0; i < sizeof(glob_cases) / sizeof(glob_cases[0]); i++)
+            ASSERT(platform_glob_match(glob_cases[i].pattern, glob_cases[i].text,
+                                       glob_cases[i].pathname) == glob_cases[i].expected);
         /* The unrelated canonical declarations are harmless when the fixture
          * registry does not contain their umbrellas. */
         ASSERT(tgs_write_file(umbrellas,
