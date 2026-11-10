@@ -215,10 +215,10 @@ bool zcl_dev_source_cas_capture(const char *repo_root,
 static bool source_identity_capture_attempt(const char *repo_root,
                                             const char *tool, int timeout_ms,
                                             struct dev_source_record *out,
-                                            char *why, size_t why_len)
+                                            char *why, size_t why_len, const char *snapshot)
 {
     struct zcl_devloop_process_result result = {0};
-    const char *argv[] = { tool, "capture-record", NULL };
+    const char *argv[] = { tool, snapshot ? "capture-record-evidence" : "capture-record", snapshot, NULL };
     if (!zcl_devloop_process_run(repo_root, argv, timeout_ms, &result)) {
         (void)snprintf(why, why_len, "source_identity_capture_failed");
         return false;
@@ -258,9 +258,9 @@ static bool source_identity_capture_attempt(const char *repo_root,
     return false;
 }
 
-bool zcl_dev_source_identity_capture(const char *repo_root,
+bool zcl_dev_source_identity_capture_snapshot(const char *repo_root,
                                      struct dev_source_record *out,
-                                     char *why, size_t why_len)
+                                     char *why, size_t why_len, const char *snapshot)
 {
     char tool[PATH_MAX];
     int n = snprintf(tool, sizeof(tool), "%s/tools/dev/source-identity.sh",
@@ -279,13 +279,19 @@ bool zcl_dev_source_identity_capture(const char *repo_root,
          attempt++) {
         if (source_identity_capture_attempt(repo_root, tool,
                                             timeouts_ms[attempt], out, why,
-                                            why_len))
+                                            why_len, snapshot))
             return true;
         if (attempt + 1 == sizeof(timeouts_ms) / sizeof(timeouts_ms[0]) ||
             !zcl_dev_source_identity_failure_retryable(why))
             return false;
     }
     return false;
+}
+
+bool zcl_dev_source_identity_capture(const char *repo_root, struct dev_source_record *out,
+                                    char *why, size_t why_len)
+{
+    return zcl_dev_source_identity_capture_snapshot(repo_root, out, why, why_len, NULL);
 }
 
 bool zcl_dev_source_identity_verify(const char *repo_root,
@@ -317,9 +323,67 @@ bool zcl_dev_source_identity_verify(const char *repo_root,
            strcmp(actual.mutation_id, expected->mutation_id) == 0;
 }
 
-bool zcl_dev_source_mutation_verify(const char *repo_root,
+static const char *mutation_failed_output(const struct zcl_devloop_process_result *r,
+                                          const char *expected, char actual[65])
+{
+    if (r->exit_code != 3) return "process_failed";
+    const char *prefix = "source-identity: source epoch superseded: expected mutation=";
+    size_t p = strlen(prefix);
+    if (r->output_len == p + 64 + 8 + 64 + 1 &&
+        !memcmp(r->output, prefix, p) && !memcmp(r->output + p, expected, 64) &&
+        !memcmp(r->output + p + 64, " actual=", 8) && r->output[r->output_len - 1] == '\n') {
+        char raw[65], parsed[65]; memcpy(raw, r->output + p + 72, 64); raw[64] = 0;
+        if (lower_hex64(raw, parsed)) { memcpy(actual, parsed, 65); return "token_mismatch"; }
+    }
+    static const struct { const char *message, *kind; } known[] = {
+        {"source-identity: source inventory changed during post-proof verification\n", "inventory_changed_during_verify"},
+        {"source-identity: source mutated during post-proof verification\n", "mutation_changed_during_verify"},
+        {"source-identity: source directory or index changed during post-proof verification\n", "directory_changed_during_verify"},
+        {"source-identity: source exclude policy changed during post-proof verification\n", "policy_changed_during_verify"},
+    };
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); ++i) {
+        size_t len = strlen(known[i].message);
+        if (r->output_len == len && !memcmp(r->output, known[i].message, len)) return known[i].kind;
+    }
+    return "process_failed";
+}
+
+static const char *mutation_success_output(const struct zcl_devloop_process_result *r,
+                                           const char *expected, char actual[65])
+{
+    size_t len = r->output_len;
+    while (len && (r->output[len - 1] == '\n' || r->output[len - 1] == '\r')) len--;
+    if (len != 64) return "invalid_output";
+    char raw[65], parsed[65]; memcpy(raw, r->output, 64); raw[64] = 0;
+    if (!lower_hex64(raw, parsed)) return "invalid_output";
+    memcpy(actual, parsed, 65);
+    return !strcmp(expected, actual) ? "match" : "token_mismatch";
+}
+
+bool zcl_dev_source_mutation_result(const struct zcl_devloop_process_result *r,
+                                    bool launched, const char *expected,
+                                    char *evidence, size_t cap)
+{
+    char valid[65], actual[65] = "unavailable";
+    const char *kind = "invalid_output";
+    if (!r || !lower_hex64(expected, valid)) return false;
+    if (r->timed_out) kind = "timeout";
+    else if (r->term_signal) kind = "signal";
+    else if (!launched) kind = "runner_failed";
+    else if (r->output_truncated) kind = "truncated";
+    else if (r->exit_code != 0) kind = mutation_failed_output(r, valid, actual);
+    else kind = mutation_success_output(r, expected, actual);
+    if (evidence && cap) (void)snprintf(evidence, cap,
+        "class=%s expected=%s actual=%s exit=%d signal=%d timeout=%d truncated=%d",
+        kind, valid, actual, r->exit_code, r->term_signal, r->timed_out, r->output_truncated);
+    return !strcmp(kind, "match");
+}
+
+bool zcl_dev_source_mutation_verify_evidence(const char *repo_root,
                                     const struct dev_source_record *expected,
-                                    char *why, size_t why_len)
+                                    char *why, size_t why_len,
+                                    char *evidence, size_t evidence_len,
+                                    const char *snapshot, const char *report)
 {
     if (!expected) {
         (void)snprintf(why, why_len, "source_identity_expected_missing");
@@ -334,29 +398,25 @@ bool zcl_dev_source_mutation_verify(const char *repo_root,
     }
     struct zcl_devloop_process_result result = {0};
     const char *argv[] = {tool, "verify-mutation", expected->mutation_id,
-                          NULL};
-    if (!zcl_devloop_process_run(repo_root, argv, 30000, &result) ||
-        !process_ok(&result) || result.output_truncated) {
-        (void)snprintf(why, why_len, "source_epoch_superseded");
-        return false;
-    }
-    size_t len = result.output_len;
-    while (len > 0 && (result.output[len - 1] == '\n' ||
-                       result.output[len - 1] == '\r'))
-        len--;
-    if (len != 64) {
-        (void)snprintf(why, why_len, "source_mutation_output_invalid");
-        return false;
-    }
-    char raw[65], actual[65];
-    memcpy(raw, result.output, 64);
-    raw[64] = '\0';
-    if (!lower_hex64(raw, actual) ||
-        strcmp(actual, expected->mutation_id) != 0) {
-        (void)snprintf(why, why_len, "source_epoch_superseded");
+                          snapshot, report, NULL};
+    bool launched = zcl_devloop_process_run(repo_root, argv, 30000, &result);
+    if (!zcl_dev_source_mutation_result(&result, launched, expected->mutation_id,
+                                        evidence, evidence_len)) {
+        size_t len = result.output_len;
+        while (len && (result.output[len - 1] == '\n' || result.output[len - 1] == '\r')) len--;
+        const char *reason = launched && process_ok(&result) && !result.output_truncated && len != 64
+            ? "source_mutation_output_invalid" : "source_epoch_superseded";
+        (void)snprintf(why, why_len, "%s", reason);
         return false;
     }
     return true;
+}
+
+bool zcl_dev_source_mutation_verify(const char *repo_root,
+                                    const struct dev_source_record *expected,
+                                    char *why, size_t why_len)
+{
+    return zcl_dev_source_mutation_verify_evidence(repo_root, expected, why, why_len, NULL, 0, NULL, NULL);
 }
 
 enum zcl_dev_source_admission zcl_dev_executable_source_admit(

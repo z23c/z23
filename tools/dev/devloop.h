@@ -692,6 +692,17 @@ bool zcl_dev_source_identity_verify(const char *repo_root,
 bool zcl_dev_source_mutation_verify(const char *repo_root,
                                     const struct dev_source_record *expected,
                                     char *why, size_t why_len);
+bool zcl_dev_source_mutation_result(const struct zcl_devloop_process_result *result,
+                                    bool launched, const char *expected,
+                                    char *evidence, size_t evidence_len);
+bool zcl_dev_source_mutation_verify_evidence(const char *repo_root,
+                                    const struct dev_source_record *expected,
+                                    char *why, size_t why_len,
+                                    char *evidence, size_t evidence_len,
+                                    const char *snapshot, const char *report);
+bool zcl_dev_source_identity_capture_snapshot(const char *repo_root,
+                                    struct dev_source_record *out,
+                                    char *why, size_t why_len, const char *snapshot);
 
 enum zcl_dev_source_admission {
     ZCL_DEV_SOURCE_ADMISSION_ERROR = -1,

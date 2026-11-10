@@ -1024,6 +1024,7 @@ const char *zcl_dev_proof_test_failed_need(const char *log, const char **argv,
  * returns false when `argv_cap` is too small. */
 bool zcl_dev_proof_test_docs_tools_argv(const char *jobs, const char **argv,
                                         size_t argv_cap);
+bool zcl_dev_proof_test_generation_precheck(const char *root, char *why, size_t why_len);
 #endif
 
 /* True when a BUILD need is already provided for every test-selected proof:

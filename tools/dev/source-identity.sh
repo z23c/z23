@@ -1317,6 +1317,11 @@ report_inventory_diff()
     return 0
 }
 
+mutation_save_snapshot()
+{
+    (umask 077; set -o noclobber; { printf '%s\0' "$2"; cat -- "$WORK/mutation-record"; } > "$1") 2>/dev/null
+}
+
 capture_record()
 {
     local identity clean inventory_before inventory_after
@@ -1344,6 +1349,12 @@ capture_record()
     # deriving authority from Git HEAD/gitlink object ids would reintroduce the
     # legacy object-hash dependency this v2 record removes.
     clean=1
+    # Optional private proof evidence, never an admission authority. Only a
+    # stable successful capture may publish it; do not overwrite an existing
+    # path. The first NUL field binds the snapshot to the returned token.
+    if [ -n "${1:-}" ]; then
+        mutation_save_snapshot "$1" "$mutation_after" || true
+    fi
     printf '%s %s %s\n' "$identity" "$clean" "$mutation_after"
 }
 
@@ -1377,9 +1388,39 @@ verify_mutation()
     [ "$policy_before" = "$policy_after" ] ||
         fail "source exclude policy changed during post-proof verification"
     if [ "${mutation_after,,}" != "${expected,,}" ]; then
+        if [ -n "${2:-}" ] && [ -n "${3:-}" ]; then
+            mutation_save_snapshot "${3%/*}/mutation-after.bin" "$mutation_after" || true
+            mutation_evidence "$2" "$3" "$expected" >/dev/null 2>&1 || true
+        fi
         fail "source epoch superseded: expected mutation=${expected,,} actual=${mutation_after,,}"
     fi
     printf '%s\n' "${mutation_after,,}"
+}
+
+# Compare only snapshots over the identical ordered path set. The producer's
+# metadata is diagnostic, never an input to the mutation admission decision.
+mutation_evidence()
+{
+    local baseline="$1" report="$2" expected="$3" size last i
+    local -a before=() after=()
+    [ -f "$baseline" ] && [ ! -L "$baseline" ] || return 1
+    size="$(wc -c < "$baseline")" || return 1
+    [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -le 16777216 ] || return 1
+    last="$(tail -c 1 -- "$baseline" | od -An -tu1)" || return 1
+    [[ "$last" =~ ^[[:space:]]*0[[:space:]]*$ ]] || return 1
+    mapfile -d '' -t before < "$baseline"
+    mapfile -d '' -t after < "$WORK/mutation-record"
+    [ "${#before[@]}" -gt 1 ] && [ "${before[0]}" = "$expected" ] || return 1
+    [ $(( (${#before[@]} - 1) % 3 )) -eq 0 ] &&
+        [ $(( ${#before[@]} - 1 )) -eq "${#after[@]}" ] || return 1
+    for ((i = 0; i < ${#after[@]}; i += 3)); do
+        [ "${before[i+1]}" = "${after[i]}" ] || return 1
+        case "${before[i+2]}:${after[i+1]}" in [EGD]:[EGD]) ;; *) return 1 ;; esac
+        # Keep report records single-line and free of control characters.
+        [[ "${after[i]}" != *[$'\001'-$'\037'$'\177']* ]] || return 1
+    done
+    { printf '%s\0' "${before[@]:1}"; } > "$WORK/proof-mutation-before"
+    (umask 077; set -o noclobber; { echo "source-identity: compared bound mutation metadata" >&2; report_mutation_diff "$WORK/proof-mutation-before" "$WORK/mutation-record"; } 2> "$report")
 }
 
 # See ZCL_SOURCE_IDENTITY_SESSION above. Returns the cache file path for a
@@ -1438,13 +1479,13 @@ capture_record_converged()
     local attempt record rc=0
     for ((attempt = 1; attempt <= CAPTURE_RECORD_ATTEMPTS; attempt++)); do
         if [ "$attempt" -eq 1 ]; then
-            if record="$(capture_record)"; then
+            if record="$(capture_record "${1:-}")"; then
                 printf '%s\n' "$record"
                 return 0
             else
                 rc=$?
             fi
-        elif record="$("$SELF" capture-record-attempt)"; then
+        elif record="$("$SELF" capture-record-attempt "${1:-}")"; then
             printf '%s\n' "$record"
             return 0
         else
@@ -1508,12 +1549,15 @@ case "$MODE" in
     capture-record)
         capture_record_cached
         ;;
+    capture-record-evidence)
+        capture_record_converged "$EXPECTED"
+        ;;
     capture-record-attempt)
         # Internal: exactly ONE capture attempt, never memoized and never
         # retried. capture_record_converged() re-invokes the script this way so
         # each retry re-enumerates the inventory in a process that has not yet
         # opened a path set. Callers outside this file want capture-record.
-        capture_record
+        capture_record "$EXPECTED"
         ;;
     inventory-token)
         inventory_token
@@ -1555,7 +1599,7 @@ case "$MODE" in
     verify-mutation)
         [[ "$EXPECTED" =~ ^[0-9a-fA-F]{64}$ ]] ||
             fail "verify-mutation requires a 64-hex mutation token"
-        verify_mutation "$EXPECTED"
+        verify_mutation "$EXPECTED" "$EXPECTED_CLEAN" "$EXPECTED_MUTATION"
         ;;
     *)
         echo "usage: tools/dev/source-identity.sh paths|capture|capture-record|session-cache-drop|verify EXPECTED|verify-record EXPECTED CLEAN MUTATION|verify-mutation EXPECTED_MUTATION" >&2

@@ -8855,6 +8855,48 @@ static int test_source_identity_failure_tokens(void)
         ASSERT(!zcl_dev_source_identity_failure_retryable(
             "source_identity_output_invalid"));
         ASSERT(!zcl_dev_source_identity_failure_retryable(NULL));
+        const char *expected = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const char *actual = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        char evidence[320];
+        memset(&result, 0, sizeof(result));
+        result.exit_code = 3;
+        int n = snprintf(result.output, sizeof(result.output),
+            "source-identity: source epoch superseded: expected mutation=%s actual=%s\n", expected, actual);
+        ASSERT(n > 0); result.output_len = (size_t)n;
+        ASSERT(!zcl_dev_source_mutation_result(&result, true, expected, evidence, sizeof(evidence)));
+        ASSERT(strstr(evidence, "class=token_mismatch") && strstr(evidence, expected) && strstr(evidence, actual));
+        result.exit_code = 7;
+        ASSERT(!zcl_dev_source_mutation_result(&result, true, expected, evidence, sizeof(evidence)));
+        ASSERT(strstr(evidence, "class=process_failed") && strstr(evidence, "actual=unavailable"));
+        ASSERT(!zcl_dev_source_mutation_result(NULL, false, expected, evidence, sizeof(evidence)));
+        memset(&result, 0, sizeof(result)); result.timed_out = true;
+        ASSERT(!zcl_dev_source_mutation_result(&result, true, expected, evidence, sizeof(evidence)));
+        ASSERT(strstr(evidence, "class=timeout") && strstr(evidence, "actual=unavailable"));
+        result.timed_out = false; result.term_signal = 9;
+        ASSERT(!zcl_dev_source_mutation_result(&result, true, expected, evidence, sizeof(evidence)));
+        ASSERT(strstr(evidence, "class=signal") && strstr(evidence, "signal=9"));
+        result.term_signal = 0;
+        result.timed_out = false; result.output_truncated = true;
+        ASSERT(!zcl_dev_source_mutation_result(&result, true, expected, evidence, sizeof(evidence)));
+        ASSERT(strstr(evidence, "class=truncated"));
+        result.output_truncated = false; result.exit_code = 7;
+        ASSERT(!zcl_dev_source_mutation_result(&result, true, expected, evidence, sizeof(evidence)));
+        ASSERT(strstr(evidence, "class=process_failed") && strstr(evidence, "exit=7"));
+        ASSERT(!zcl_dev_source_mutation_result(&result, false, expected, evidence, sizeof(evidence)));
+        ASSERT(strstr(evidence, "class=runner_failed"));
+        memset(&result, 0, sizeof(result));
+        memcpy(result.output, expected, 64); result.output_len = 64;
+        ASSERT(zcl_dev_source_mutation_result(&result, true, expected, evidence, sizeof(evidence)));
+        ASSERT(!zcl_dev_source_mutation_result(&result, true,
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", evidence, sizeof(evidence)));
+        memset(&result, 0, sizeof(result)); result.exit_code = 3;
+        const char *diagnostic = "source-identity: source mutated during post-proof verification\n";
+        result.output_len = strlen(diagnostic); memcpy(result.output, diagnostic, result.output_len);
+        ASSERT(!zcl_dev_source_mutation_result(&result, true, expected, evidence, sizeof(evidence)));
+        ASSERT(strstr(evidence, "class=mutation_changed_during_verify"));
+        result.output[result.output_len++] = 0; result.output[result.output_len++] = 'x';
+        ASSERT(!zcl_dev_source_mutation_result(&result, true, expected, evidence, sizeof(evidence)));
+        ASSERT(strstr(evidence, "class=process_failed"));
         PASS();
     } _test_next:;
     return failures;
@@ -11187,7 +11229,26 @@ static int test_native_identity_tokens_match_oracle(void)
                    "  exit 1\n"
                    "}\n"
                    "ZCL_SOURCE_IDENTITY_BATCH_SHADOW=1 "
-                   "tools/dev/source-identity.sh capture-record >/dev/null\n",
+                   "tools/dev/source-identity.sh capture-record >/dev/null\n"
+                   "record=\"$(tools/dev/source-identity.sh capture-record-evidence \"$scratch/before\")\"\n"
+                   "read -r id clean token <<< \"$record\"\n"
+                   "tools/dev/source-identity.sh verify-mutation \"$token\" \"$scratch/before\" \"$scratch/stable\" >/dev/null\n"
+                   "[ ! -e \"$scratch/stable\" ]\n"
+                   "cp Makefile \"$scratch/replacement\"; mv \"$scratch/replacement\" Makefile\n"
+                   "printf 'sentinel\\n' > \"$scratch/occupied\"\n"
+                   "if tools/dev/source-identity.sh verify-mutation \"$token\" \"$scratch/before\" \"$scratch/occupied\" >\"$scratch/occupied.log\" 2>&1; then exit 1; fi\n"
+                   "[ \"$(cat \"$scratch/occupied\")\" = sentinel ] || exit 1\n"
+                   "[ \"$(wc -l < \"$scratch/occupied.log\")\" -eq 1 ] || exit 1\n"
+                   "if tools/dev/source-identity.sh verify-mutation \"$token\" \"$scratch/before\" \"$scratch/changed\" >\"$scratch/verify.log\" 2>&1; then exit 1; fi\n"
+                   "grep -F 'changed Makefile ' \"$scratch/changed\" >/dev/null\n"
+                   "[ -s \"$scratch/mutation-after.bin\" ]\n"
+                   "record=\"$(tools/dev/source-identity.sh capture-record-evidence \"$scratch/before-mode\")\"\n"
+                   "read -r id clean token <<< \"$record\"; chmod u+x Makefile\n"
+                   "if tools/dev/source-identity.sh verify-mutation \"$token\" \"$scratch/before-mode\" \"$scratch/mode\" >\"$scratch/verify-mode.log\" 2>&1; then exit 1; fi\n"
+                   "grep -F 'changed Makefile ' \"$scratch/mode\" >/dev/null\n"
+                   "printf 'bad' > \"$scratch/malformed\"\n"
+                   "if tools/dev/source-identity.sh verify-mutation \"$token\" \"$scratch/malformed\" \"$scratch/bad-report\" >/dev/null 2>&1; then exit 1; fi\n"
+                   "[ ! -e \"$scratch/bad-report\" ]\n",
                    (char *)NULL);
             _exit(127);
         }

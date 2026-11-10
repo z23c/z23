@@ -13947,6 +13947,33 @@ static int test_ic_generation_docs_tools_builds_the_checker_binaries(void)
     return failures;
 }
 
+static int test_ic_generation_vendor_precheck_order(void)
+{
+    int failures = 0; char root[PATH_MAX] = {0}, path[PATH_MAX], line[64], why[256];
+    TEST("proof generation: vendor preparation precedes docs and failure stops it") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "proof_vendor_precheck") != NULL);
+        ASSERT(ic_write(root, "Makefile", ".PHONY: vendor-ready docs-proof-tools\n"
+            "vendor-ready:\n\t@echo vendor >> order\n"
+            "docs-proof-tools:\n\t@echo docs >> order\n"));
+        ASSERT(zcl_dev_proof_test_generation_precheck(root, why, sizeof(why)));
+        ASSERT(snprintf(path, sizeof(path), "%s/order", root) > 0);
+        FILE *f = fopen(path, "r"); ASSERT(f != NULL);
+        ASSERT(fgets(line, sizeof(line), f) && strcmp(line, "vendor\n") == 0);
+        ASSERT(fgets(line, sizeof(line), f) && strcmp(line, "docs\n") == 0);
+        ASSERT(fgets(line, sizeof(line), f) == NULL && fclose(f) == 0);
+        ASSERT(unlink(path) == 0);
+        ASSERT(ic_write(root, "Makefile", ".PHONY: vendor-ready docs-proof-tools\n"
+            "vendor-ready:\n\t@false\n"
+            "docs-proof-tools:\n\t@echo docs >> order\n"));
+        ASSERT(!zcl_dev_proof_test_generation_precheck(root, why, sizeof(why)));
+        ASSERT(strcmp(why, "proof_vendor_prepare_exit_2") == 0);
+        ASSERT(access(path, F_OK) != 0 && errno == ENOENT);
+        PASS();
+    } _test_next:;
+    if (root[0]) (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
 static int test_ic_landing_proof_defers_preparation(void)
 {
     int failures = 0;
@@ -16729,6 +16756,7 @@ int test_impact_composition(void)
     failures += test_ic_local_selection_build_needs();
     failures += test_ic_proof_prefork_builds_the_shared_targets();
     failures += test_ic_generation_docs_tools_builds_the_checker_binaries();
+    failures += test_ic_generation_vendor_precheck_order();
     failures += test_ic_generation_hooks_configure_points_at_its_own_copy();
 #if !defined(_WIN32)
     failures += test_ic_generation_docs_fresh_refuses_stale();

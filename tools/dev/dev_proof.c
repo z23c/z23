@@ -7658,6 +7658,8 @@ bool zcl_dev_proof_test_docs_tools_argv(const char *jobs, const char **argv,
 static bool dp_generation_docs_tools(const struct proof_paths *paths,
                                      const char *generation,
                                      char *why, size_t why_len);
+static bool dp_generation_precheck(const struct proof_paths *paths,
+                                   const char *generation, char *why, size_t why_len);
 
 static void dp_generation_stage_note(const struct proof_paths *paths,
                                      const char *stage, int64_t started_us)
@@ -7987,16 +7989,17 @@ static bool generation_prepare(const struct proof_paths *paths,
      * checker binaries no fresh generation carries (binaries are never
      * warm-seeded), so provision exactly those two tools first; without
      * them every script exec-fails and every proof refuses as stale docs.
-     * Only untracked build outputs are written, never the sealed bytes.
+     * Vendor readiness may repair copied selected inputs before sealing;
+     * docs-tool compilation writes only untracked build outputs.
      * The checkers themselves start at the end of this function, after
      * its last write into the generation, and run beside the proof steps
      * that follow until dp_docs_fresh_settle() joins them (see the
      * dp_docs_fresh_run comment); their refusal outranks any refusal taken
      * meanwhile, the order this serial check used to impose. */
     stage_started_us = platform_time_monotonic_us();
-    if (!dp_generation_docs_tools(paths, generation, why, why_len))
+    if (!dp_generation_precheck(paths, generation, why, why_len))
         return false;
-    dp_generation_stage_note(paths, "generation_docs_tools_us",
+    dp_generation_stage_note(paths, "generation_precheck_us",
                              stage_started_us);
     /* Close the lazy-bootstrap race before any dimension's `make` process
      * exists for this generation (see generation_zcc_bootstrap). */
@@ -9846,6 +9849,39 @@ static bool dp_generation_docs_tools(const struct proof_paths *paths,
     return true;
 }
 
+/* Repair and audit copied vendor inputs before any source seal or docs
+ * checker. A separate watched Make finishes before docs tools can start. */
+static bool dp_generation_precheck(const struct proof_paths *paths,
+                                   const char *generation, char *why, size_t why_len)
+{
+    char jobs[16], log_path[PATH_MAX];
+    if (!proof_make_jobs_arg(jobs) || !paths ||
+        snprintf(log_path, sizeof(log_path), "%s/generation-vendor-ready.log", paths->logs) >= (int)sizeof(log_path)) {
+        proof_why(why, why_len, "proof_vendor_prepare_input_invalid");
+        return false;
+    }
+    const char *argv[] = {"make", "--no-print-directory", jobs, "vendor-ready", NULL};
+    struct zcl_dev_proof_budget budget = proof_step_budget(paths, "generation-vendor-ready", PROOF_BUNDLE_DEFAULT_MS);
+    struct zcl_dev_proof_step_report report = {0};
+    if (run_step(paths, generation, log_path, argv, "generation-vendor-ready", &budget, &report) != 0) {
+        if (report.cause == ZCL_DEV_PROOF_KILL_NONE)
+            proof_whyf(why, why_len, "proof_vendor_prepare_exit_%d", report.rc);
+        else run_step_why(why, why_len, "generation-vendor-ready", &report);
+        return false;
+    }
+    return dp_generation_docs_tools(paths, generation, why, why_len);
+}
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_generation_precheck(const char *root, char *why, size_t why_len)
+{
+    struct proof_paths paths = {0};
+    if (!root || snprintf(paths.logs, sizeof(paths.logs), "%s", root) >= (int)sizeof(paths.logs) ||
+        snprintf(paths.state, sizeof(paths.state), "%s", root) >= (int)sizeof(paths.state)) return false;
+    return dp_generation_precheck(&paths, root, why, why_len);
+}
+#endif
+
 static bool executable_reuse(const struct proof_paths *paths,
                              const char *artifact,
                              const struct dev_source_record *expected_source,
@@ -10819,12 +10855,19 @@ static bool dp_worker_seal_source(struct dp_worker *w, char *why,
     if (!worktree_exact(w->paths->root, w->local, true, w->paths, "source_recheck", NULL, why, why_len))
         return false;
     proof_phase_mark(w->phases, "worktree_exact_recheck");
-    if (!zcl_dev_source_identity_capture(w->generation, &w->source_before, why,
-                                         why_len)) {
+    char snapshot[PATH_MAX];
+    int n = snprintf(snapshot, sizeof(snapshot), "%s/mutation-before.bin", w->paths->attempt);
+    const char *snapshot_path = w->paths->attempt[0] && n > 0 && (size_t)n < sizeof(snapshot) ? snapshot : NULL;
+    if (!zcl_dev_source_identity_capture_snapshot(w->generation, &w->source_before, why,
+                                         why_len, snapshot_path)) {
         if (!why || !why[0])
             proof_why(why, why_len, "source_identity_capture_failed");
         return false;
     }
+    struct stat snapshot_stat;
+    const char *snapshot_state = snapshot_path && lstat(snapshot_path, &snapshot_stat) == 0 &&
+        S_ISREG(snapshot_stat.st_mode) ? "available" : "unavailable";
+    (void)zcl_dev_proof_phase_note(w->paths->phases, "generation_mutation_snapshot", snapshot_state);
     if (!w->source_before.cas_present) {
         proof_why(why, why_len, "source_cas_capture_failed");
         return false;
@@ -13198,6 +13241,29 @@ static bool dp_worker_dimensions(struct dp_worker *w, char *why,
     return true;
 }
 
+static bool dp_worker_mutation_verify(struct dp_worker *w, char *why, size_t why_len)
+{
+    char mutation_evidence[320] = "class=unavailable";
+    char snapshot[PATH_MAX], report[PATH_MAX];
+    int sn = snprintf(snapshot, sizeof(snapshot), "%s/mutation-before.bin", w->paths->attempt);
+    int rn = snprintf(report, sizeof(report), "%s/mutation-changes.txt", w->paths->attempt);
+    bool paths_ok = w->paths->attempt[0] && sn > 0 && (size_t)sn < sizeof(snapshot) &&
+                    rn > 0 && (size_t)rn < sizeof(report);
+    if (!zcl_dev_source_mutation_verify_evidence(w->generation, &w->source_before,
+                                        why, why_len, mutation_evidence, sizeof(mutation_evidence),
+                                        paths_ok ? snapshot : NULL, paths_ok ? report : NULL)) {
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "generation_mutation_verify", mutation_evidence);
+        struct stat st;
+        const char *details = paths_ok && lstat(report, &st) == 0 && S_ISREG(st.st_mode)
+            ? "available" : "unavailable";
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "generation_mutation_paths", details);
+        fprintf(stderr, "[devproof] generation source mutation changed before receipt publication\n");
+        proof_why(why, why_len, "proof_generation_mutation_changed");
+        return false;
+    }
+    return true;
+}
+
 /* Prove the source never moved under the run, then publish the receipt.
  * Nothing after this point may fail: the receipt IS the admission. */
 static bool dp_worker_publish(struct dp_worker *w, int64_t started_us,
@@ -13216,12 +13282,7 @@ static bool dp_worker_publish(struct dp_worker *w, int64_t started_us,
         proof_why(why, why_len, "source_epoch_superseded");
         return false;
     }
-    if (!zcl_dev_source_mutation_verify(w->generation, &w->source_before,
-                                        why, why_len)) {
-        fprintf(stderr, "[devproof] generation source mutation changed before receipt publication\n");
-        proof_why(why, why_len, "proof_generation_mutation_changed");
-        return false;
-    }
+    if (!dp_worker_mutation_verify(w, why, why_len)) return false;
     w->receipt.created_unix = (uint64_t)platform_time_wall_unix();
     w->receipt.elapsed_ms =
         (uint64_t)((platform_time_monotonic_us() - started_us) / 1000);
