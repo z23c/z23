@@ -2329,6 +2329,15 @@ static void dp_split_statement(struct dp_split_parse *s)
 {
     char *st = s->stmt;
     while (*st == ' ') st++;
+    /* This standard attribute cannot add a registration hook. Recognize it
+     * only before an explicitly static declaration; all other attributes
+     * remain subject to the conservative public-declaration parser. */
+    static const char unused[] = "[[maybe_unused]]";
+    if (strncmp(st, unused, sizeof(unused) - 1) == 0) {
+        char *q = st + sizeof(unused) - 1;
+        while (*q == ' ') q++;
+        if (strncmp(q, "static", 6) == 0 && q[6] == ' ') st = q;
+    }
     if (dp_split_public_object(st)) dp_split_public_decl(s->funcs, st);
     const char *q = st;
     while (dp_split_ident(*q)) q++;

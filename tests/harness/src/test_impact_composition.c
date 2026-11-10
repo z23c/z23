@@ -7091,6 +7091,27 @@ static bool ic_fresh_edit_test(void)
                         IC_FRESH_BODY("start"));
 }
 
+static bool ic_fresh_edit_attributed_static(void)
+{
+    return ic_fresh_add("tests/harness/src/test_devagent_start.c",
+                        "[[maybe_unused]] static int helper(int x);\n"
+                        "static int helper(int x) { return x; }\n"
+                        "int fresh_probe_run(int x) { return helper(x); }\n");
+}
+
+static bool ic_fresh_attr_case(const char *declaration)
+{
+    char body[256];
+    int n = snprintf(body, sizeof(body), "%s\nint fresh_probe_run(int x) { return x; }\n", declaration);
+    return n > 0 && (size_t)n < sizeof(body) &&
+        ic_fresh_add("tests/harness/src/test_devagent_start.c", body);
+}
+static bool ic_fresh_attr_external(void) { return ic_fresh_attr_case("[[maybe_unused]] int exposed;"); }
+static bool ic_fresh_attr_extern_init(void) { return ic_fresh_attr_case("[[maybe_unused]] extern int exposed = 1;"); }
+static bool ic_fresh_attr_unknown(void) { return ic_fresh_attr_case("[[unknown]] static int helper(int x);"); }
+static bool ic_fresh_attr_truncated(void) { return ic_fresh_attr_case("[[maybe_unused] static int helper(int x);"); }
+static bool ic_fresh_attr_fnptr(void) { return ic_fresh_attr_case("[[maybe_unused]] int (*exposed)(int);"); }
+
 static bool ic_fresh_edit_mention(void)
 {
     return ic_fresh_add("tools/command/native_devagent_rules.c",
@@ -7471,6 +7492,12 @@ static bool ic_fresh_fixture_build(void)
         {"fresh", ic_fresh_edit_fresh},
         {"freshcallback", ic_fresh_edit_callback},
         {"freshtest", ic_fresh_edit_test},
+        {"freshattrstatic", ic_fresh_edit_attributed_static},
+        {"freshattrexternal", ic_fresh_attr_external},
+        {"freshattrexterninit", ic_fresh_attr_extern_init},
+        {"freshattrunknown", ic_fresh_attr_unknown},
+        {"freshattrtruncated", ic_fresh_attr_truncated},
+        {"freshattrfnptr", ic_fresh_attr_fnptr},
         {"freshmention", ic_fresh_edit_mention},
         {"freshbasename", ic_fresh_edit_basename},
         {"freshhook", ic_fresh_edit_hook},
@@ -7532,6 +7559,12 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"fresh", 0, "devagent_situation", NULL},   /* new impl, its rule's group */
     {"freshcallback", 'A', NULL, NULL}, /* callback declarator remains fail-closed */
     {"freshtest", 0, "devagent_start", NULL},   /* new test file, its own group */
+    {"freshattrstatic", 0, "devagent_start", NULL},
+    {"freshattrexternal", 'A', NULL, NULL},
+    {"freshattrexterninit", 'A', NULL, NULL},
+    {"freshattrunknown", 'A', NULL, NULL},
+    {"freshattrtruncated", 'A', NULL, NULL},
+    {"freshattrfnptr", 'A', NULL, NULL},
     {"freshsidecar", 0, "devagent_situation", "package_capability_claim"},
     {"freshdropcur", 0, "devagent_situation", "package_capability_claim"},
     {"freshstatic", 0, "devagent_situation", NULL}, /* a private helper */
