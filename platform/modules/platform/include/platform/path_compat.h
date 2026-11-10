@@ -18,43 +18,53 @@
  * or backslash is drive-relative on Win32 and therefore is not an authority
  * boundary.  Device namespaces are refused; callers use ordinary drive or
  * UNC paths and let the Windows platform layer add any long-path prefix. */
-static inline bool platform_path_is_absolute(const char *path)
-{
-    if (!path || !path[0]) return false;
 #if defined(_WIN32)
+static inline bool platform_path_separator(char c)
+{
+    return c == '\\' || c == '/';
+}
+static inline bool platform_path_drive_absolute(const char *path)
+{
     bool drive = ((path[0] >= 'A' && path[0] <= 'Z') ||
                   (path[0] >= 'a' && path[0] <= 'z')) &&
                  path[1] == ':' &&
                  (path[2] == '\\' || path[2] == '/');
-    if (drive) return true;
-    if (!((path[0] == '\\' || path[0] == '/') &&
-          (path[1] == '\\' || path[1] == '/')))
+    return drive;
+}
+static inline bool platform_path_unc_absolute(const char *path)
+{
+    if (!(platform_path_separator(path[0]) && platform_path_separator(path[1])))
         return false;
     const char *server = path + 2;
     if (!server[0] || server[0] == '?' || server[0] == '.') return false;
     const char *separator = server;
-    while (*separator && *separator != '\\' && *separator != '/')
+    while (*separator && !platform_path_separator(*separator))
         ++separator;
     if (separator == server || !separator[0]) return false;
     const char *share = separator + 1;
-    if (!share[0] || share[0] == '\\' || share[0] == '/') return false;
+    if (!share[0] || platform_path_separator(share[0])) return false;
     return true;
+}
+#endif
+static inline bool platform_path_is_absolute(const char *path)
+{
+    if (!path || !path[0]) return false;
+#if defined(_WIN32)
+    return platform_path_drive_absolute(path) || platform_path_unc_absolute(path);
 #else
     return path[0] == '/';
 #endif
 }
 
-/* Darwin exposes /tmp through /private/tmp. Normalize an existing path, or
- * the parent of a not-yet-created path, so process-local ownership registries
- * do not treat those spellings as different resources. */
-static inline bool platform_path_identity(char *out, size_t out_size,
-                                          const char *path)
-{
-    if (!out || out_size == 0 || !path || !path[0]) return false;
 #if defined(__APPLE__)
+static inline bool platform_path_apple_identity(char *out, size_t out_size,
+                                                 const char *path, bool *handled)
+{
+    *handled = false;
     if (strcmp(path, ":memory:") != 0) {
         char resolved[4096];
         if (realpath(path, resolved)) {
+            *handled = true;
             int written = snprintf(out, out_size, "%s", resolved);
             return written >= 0 && (size_t)written < out_size;
         }
@@ -65,7 +75,7 @@ static inline bool platform_path_identity(char *out, size_t out_size,
             if (slash) {
                 size_t directory_len = (size_t)(slash - path);
                 if (directory_len == 0) directory_len = 1;
-                if (directory_len >= sizeof(directory)) return false;
+                if (directory_len >= sizeof(directory)) { *handled = true; return false; }
                 memcpy(directory, path, directory_len);
                 directory[directory_len] = '\0';
                 leaf = slash + 1;
@@ -73,12 +83,26 @@ static inline bool platform_path_identity(char *out, size_t out_size,
                 memcpy(directory, ".", 2);
             }
             if (leaf[0] && realpath(directory, resolved)) {
-                int written = snprintf(out, out_size, "%s/%s", resolved,
-                                       leaf);
+                *handled = true;
+                int written = snprintf(out, out_size, "%s/%s", resolved, leaf);
                 return written >= 0 && (size_t)written < out_size;
             }
         }
     }
+    return false;
+}
+#endif
+/* Darwin exposes /tmp through /private/tmp. Normalize an existing path, or
+ * the parent of a not-yet-created path, so process-local ownership registries
+ * do not treat those spellings as different resources. */
+static inline bool platform_path_identity(char *out, size_t out_size,
+                                          const char *path)
+{
+    if (!out || out_size == 0 || !path || !path[0]) return false;
+#if defined(__APPLE__)
+    bool handled;
+    bool result = platform_path_apple_identity(out, out_size, path, &handled);
+    if (handled) return result;
 #endif
 #if defined(_WIN32)
     /* Windows likewise admits several spellings of one file: /tmp/x,

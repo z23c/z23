@@ -60,6 +60,24 @@ static inline bool platform_windows_prefix_extended(wchar_t *path,
     return true;
 }
 
+static inline bool platform_windows_copy_prefixed(const wchar_t *plain, int n,
+                                                  bool drive, bool unc, wchar_t out[32768])
+{
+    if (unc) {
+        if ((size_t)n + 6 >= 32768) return false;
+        wmemcpy(out, L"\\\\?\\UNC\\", 8);
+        wmemcpy(out + 8, plain + 2, (size_t)n - 2);
+        return true;
+    }
+    if (drive) {
+        if ((size_t)n + 4 >= 32768) return false;
+        wmemcpy(out, L"\\\\?\\", 4);
+        wmemcpy(out + 4, plain, (size_t)n);
+        return true;
+    }
+    wmemcpy(out, plain, (size_t)n);
+    return true;
+}
 static inline bool platform_windows_wide_path(const char *utf8,
                                               wchar_t out[32768])
 {
@@ -86,24 +104,29 @@ static inline bool platform_windows_wide_path(const char *utf8,
             return false;
         return platform_windows_prefix_extended(out, full_n);
     }
-    if (unc) {
-        if ((size_t)n + 6 >= 32768) return false;
-        wmemcpy(out, L"\\\\?\\UNC\\", 8);
-        wmemcpy(out + 8, plain + 2, (size_t)n - 2);
-        return true;
-    }
-    if (drive) {
-        if ((size_t)n + 4 >= 32768) return false;
-        wmemcpy(out, L"\\\\?\\", 4);
-        wmemcpy(out + 4, plain, (size_t)n);
-        return true;
-    }
-    wmemcpy(out, plain, (size_t)n);
-    return true;
+    return platform_windows_copy_prefixed(plain, n, drive, unc, out);
 }
 
 /* Strict UTF-8 validity (the byte-domain image of MB_ERR_INVALID_CHARS:
  * rejects overlongs, surrogates, and code points past U+10FFFF). */
+static inline bool zcl_windows_path_utf8_lead(unsigned c, size_t *need,
+                                               unsigned *lo, unsigned *hi)
+{
+    if (c >= 0xC2u && c <= 0xDFu) {
+        *need = 1;
+    } else if (c >= 0xE0u && c <= 0xEFu) {
+        *need = 2;
+        *lo = c == 0xE0u ? 0xA0u : 0x80u;
+        *hi = c == 0xEDu ? 0x9Fu : 0xBFu;
+    } else if (c >= 0xF0u && c <= 0xF4u) {
+        *need = 3;
+        *lo = c == 0xF0u ? 0x90u : 0x80u;
+        *hi = c == 0xF4u ? 0x8Fu : 0xBFu;
+    } else {
+        return false;
+    }
+    return true;
+}
 static inline bool zcl_windows_path_utf8_valid(const char *s)
 {
     const unsigned char *p = (const unsigned char *)s;
@@ -114,19 +137,8 @@ static inline bool zcl_windows_path_utf8_valid(const char *s)
         if (c < 0x80u) {
             p++;
             continue;
-        } else if (c >= 0xC2u && c <= 0xDFu) {
-            need = 1;
-        } else if (c >= 0xE0u && c <= 0xEFu) {
-            need = 2;
-            lo = c == 0xE0u ? 0xA0u : 0x80u;
-            hi = c == 0xEDu ? 0x9Fu : 0xBFu;
-        } else if (c >= 0xF0u && c <= 0xF4u) {
-            need = 3;
-            lo = c == 0xF0u ? 0x90u : 0x80u;
-            hi = c == 0xF4u ? 0x8Fu : 0xBFu;
-        } else {
-            return false;
         }
+        if (!zcl_windows_path_utf8_lead(c, &need, &lo, &hi)) return false;
         p++;
         for (size_t i = 0; i < need; i++, p++) {
             unsigned d = *p;
@@ -139,6 +151,28 @@ static inline bool zcl_windows_path_utf8_valid(const char *s)
     return true;
 }
 
+static inline bool zcl_windows_path_separator(char c)
+{
+    return c == '\\' || c == '/';
+}
+static inline void zcl_windows_path_prefix(const char *utf8, size_t n,
+                                           const char **prefix, size_t *prefix_len, size_t *skip)
+{
+    bool bs0 = zcl_windows_path_separator(utf8[0]);
+    bool bs1 = n >= 2 && zcl_windows_path_separator(utf8[1]);
+    bool bs2 = n >= 3 && zcl_windows_path_separator(utf8[2]);
+    bool bs3 = n >= 4 && zcl_windows_path_separator(utf8[3]);
+    if (n >= 4 && bs0 && bs1 && utf8[2] == '?' && bs3) {
+        /* Already extended. */
+    } else if (n >= 2 && bs0 && bs1) {
+        *prefix = "\\\\?\\UNC\\";
+        *prefix_len = 8;
+        *skip = 2;
+    } else if (n >= 3 && utf8[1] == ':' && bs2) {
+        *prefix = "\\\\?\\";
+        *prefix_len = 4;
+    }
+}
 /* UTF-8 form of platform_windows_wide_path for CRT fopen/open callers.
  * Rewrites '/' to '\\', extends a drive-absolute path with `\\?\` and a
  * UNC path with `\\?\UNC\`, and leaves an already-extended path extended.
@@ -153,23 +187,10 @@ static inline bool platform_windows_extended_utf8(const char *utf8,
     if (!zcl_windows_path_utf8_valid(utf8))
         return false;
     size_t n = strlen(utf8);
-    bool bs0 = utf8[0] == '\\' || utf8[0] == '/';
-    bool bs1 = n >= 2 && (utf8[1] == '\\' || utf8[1] == '/');
-    bool bs2 = n >= 3 && (utf8[2] == '\\' || utf8[2] == '/');
-    bool bs3 = n >= 4 && (utf8[3] == '\\' || utf8[3] == '/');
     const char *prefix = "";
     size_t prefix_len = 0;
     size_t skip = 0;
-    if (n >= 4 && bs0 && bs1 && utf8[2] == '?' && bs3) {
-        /* Already extended. */
-    } else if (n >= 2 && bs0 && bs1) {
-        prefix = "\\\\?\\UNC\\";
-        prefix_len = 8;
-        skip = 2;
-    } else if (n >= 3 && utf8[1] == ':' && bs2) {
-        prefix = "\\\\?\\";
-        prefix_len = 4;
-    }
+    zcl_windows_path_prefix(utf8, n, &prefix, &prefix_len, &skip);
     if (prefix_len + (n - skip) + 1u > out_size)
         return false;
     memcpy(out, prefix, prefix_len);
