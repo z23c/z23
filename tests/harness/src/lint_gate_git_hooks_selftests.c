@@ -806,9 +806,11 @@ static int hooks_quiet_held_ready(struct hooks_fx *fx)
 #define BOOT_GUEST "build/gen/guest_kernel_data.c"
 #define BOOT_TAIL \
     ".DEFAULT_GOAL := z23\n" \
-    ".PHONY: git-hook git-hook-selftest install-hooks z23 unknown-goal\n" \
+    ".PHONY: git-hook git-hook-selftest install-hooks z23 unknown-goal " \
+    "rvmachine-public-fixtures-testbin test-rvmachine-public-fixtures\n" \
     "git-hook git-hook-selftest install-hooks:\n\t@touch hook-ran\n" \
     BOOT_GUEST ":\n\t@touch guest-ran\n" \
+    "rvmachine-public-fixtures-testbin test-rvmachine-public-fixtures:\n\t@touch fixture-ran\n" \
     "z23 unknown-goal:\n\t@touch node-ran\n" \
     "vendor-ready.mk:\n\t@touch vendor-ran\n\t@printf '# established\\n' > $@\n" \
     "tor-ready.mk:\n\t@touch tor-ran\n\t@printf '# established\\n' > $@\n"
@@ -822,7 +824,7 @@ struct hooks_goal_case {
 
 static const char *const k_boot_marks[] = {
     "hook-ran", "node-ran", "vendor-ran", "vendor-ready.mk", "tor-ran",
-    "tor-ready.mk", "guest-ran"};
+    "tor-ready.mk", "guest-ran", "fixture-ran"};
 
 /* Copies the real parse-time bootstrap blocks of the Makefile and adds
  * stub recipes that only drop marker files. */
@@ -906,7 +908,12 @@ static int hooks_boot_checks(struct hooks_fx *fx)
         {{BOOT_GUEST, "git-hook"}, 0, "guest-ran"},
         {{BOOT_GUEST, "z23"}, 1, "node-ran"},
         {{BOOT_GUEST, "Z23_GUEST_KERNEL=fixture-kernel"}, 1, "guest-ran"},
-        {{BOOT_GUEST, "Z23_GUEST_KERNEL=$(UNDEFINED_KERNEL)"}, 1, "guest-ran"}};
+        {{BOOT_GUEST, "Z23_GUEST_KERNEL=$(UNDEFINED_KERNEL)"}, 1, "guest-ran"},
+        {{"rvmachine-public-fixtures-testbin"}, 0, "fixture-ran"},
+        {{"test-rvmachine-public-fixtures"}, 0, "fixture-ran"},
+        {{"rvmachine-public-fixtures-testbin", "test-rvmachine-public-fixtures"}, 0, "fixture-ran"},
+        {{"rvmachine-public-fixtures-testbin", "z23"}, 1, "node-ran"},
+        {{"test-rvmachine-public-fixtures", "z23"}, 1, "node-ran"}};
     char dir[PATH_MAX];
     size_t i;
     int bad = hooks_fx_base(fx, HOOKS_BASE_PREFIX "_bootstrap");

@@ -101,12 +101,40 @@ static bool pb_close_cycle(int *fd, const char *path, int64_t end)
     return *fd >= 0;
 }
 
-int main(int argc, char **argv)
+static bool pb_exchange(int fd, uint8_t bytes[PB_BYTES], unsigned bias, const char *role, int64_t now)
+{
+    if (!pb_read(fd, bytes, now + PB_DEADLINE_MS)) { pb_refuse("READ"); return false; }
+    for (size_t i = 0; i < PB_BYTES; i++) {
+        if (bytes[i] != (uint8_t)(i * 73u + 19u + bias)) { pb_refuse("BYTES"); return false; }
+        bytes[i] ^= 0xa5u;
+    }
+    if (fprintf(stderr, "PUBLIC_PORT_RX_EXACT_%s:4097\n", role) < 0 || fflush(stderr) != 0) return false;
+    if (!pb_write(fd, bytes, now + PB_DEADLINE_MS)) { pb_refuse("WRITE"); return false; }
+    if (fprintf(stderr, "PUBLIC_PORT_EXACT_%s:4097\n", role) < 0 || fflush(stderr) != 0) return false;
+    return true;
+}
+
+static int pb_validate(int argc, char **argv)
 {
     if (argc != 2 || (strcmp(argv[1], "T") && strcmp(argv[1], "P") && strcmp(argv[1], "CLOSE"))) return pb_refuse("ROLE");
     int console_flags = fcntl(STDERR_FILENO, F_GETFL);
     if (console_flags < 0 || (console_flags & O_ACCMODE) == O_RDONLY)
         return pb_refuse("CONSOLE");
+    return 0;
+}
+
+static bool pb_close_phase(int *fd, const char *path, int64_t now, unsigned *bias)
+{
+    if (!pb_close_cycle(fd, path, now + PB_DEADLINE_MS)) { pb_refuse("CLOSE_CYCLE"); return false; }
+    *bias = 53u;
+    if (fprintf(stderr, "PUBLIC_PORT_RAW_READY_T\n") < 0 || fflush(stderr) != 0) return false;
+    return true;
+}
+
+int main(int argc, char **argv)
+{
+    int valid = pb_validate(argc, argv);
+    if (valid) return valid;
     bool closing = !strcmp(argv[1], "CLOSE");
     const char *role = !strcmp(argv[1], "P") ? "P" : "T";
     const char *path = !strcmp(role, "T") ? "/dev/vtcon/z23.l0.t" : "/dev/vtcon/z23.l0.p";
@@ -118,19 +146,8 @@ int main(int argc, char **argv)
     unsigned bias = !strcmp(argv[1], "P") ? 31u : 0u;
     uint8_t bytes[PB_BYTES];
     if (fprintf(stderr, "PUBLIC_PORT_RAW_READY_%s\n", role) < 0 || fflush(stderr) != 0) goto done;
-    if (closing) {
-        if (!pb_close_cycle(&fd, path, now + PB_DEADLINE_MS)) { pb_refuse("CLOSE_CYCLE"); goto done; }
-        bias = 53u;
-        if (fprintf(stderr, "PUBLIC_PORT_RAW_READY_T\n") < 0 || fflush(stderr) != 0) goto done;
-    }
-    if (!pb_read(fd, bytes, now + PB_DEADLINE_MS)) { pb_refuse("READ"); goto done; }
-    for (size_t i = 0; i < PB_BYTES; i++) {
-        if (bytes[i] != (uint8_t)(i * 73u + 19u + bias)) { pb_refuse("BYTES"); goto done; }
-        bytes[i] ^= 0xa5u;
-    }
-    if (fprintf(stderr, "PUBLIC_PORT_RX_EXACT_%s:4097\n", role) < 0 || fflush(stderr) != 0) goto done;
-    if (!pb_write(fd, bytes, now + PB_DEADLINE_MS)) { pb_refuse("WRITE"); goto done; }
-    if (fprintf(stderr, "PUBLIC_PORT_EXACT_%s:4097\n", role) < 0 || fflush(stderr) != 0) goto done;
+    if (closing && !pb_close_phase(&fd, path, now, &bias)) goto done;
+    if (!pb_exchange(fd, bytes, bias, role, now)) goto done;
     rc = 0;
 done:
     if (fd >= 0 && close(fd) != 0) return pb_refuse("CLOSE");

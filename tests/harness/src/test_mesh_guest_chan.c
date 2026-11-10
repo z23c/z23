@@ -1272,7 +1272,7 @@ static bool gct_s6_verified_conport(uint8_t image[65536], size_t *length)
     *length = 0;
     return gct_s6_fixture_file("tests/fixtures/rvmachine/MANIFEST", manifest,
         sizeof(manifest), &manifest_length,
-        "be90c0be506e6f6b0fdfbcae0db33058b920eea50c0d4f39f48ffb18730b2251") &&
+        "133e97e4e9293e6c859b63c18e71f3ddd6bbaf90d4e7e69fc0896886cd62d1f7") &&
         gct_s6_fixture_file("tests/fixtures/rvmachine/conport.bin", image, 65536,
         length, "a04cef28c8311513de009646c45be44c866211efb0d0e801f8fc10d56221f06d");
 }

@@ -492,6 +492,15 @@ ZCL_TEST_GROUP_BUILD_NEED("test_rvmachine_freebsd_ssh_fd", "build/bin/z23-machin
 ZCL_TEST_GROUP_BUILD_NEED("test_guest_ssh_fixture", "build/bin/test-guest-ssh-fixture",
                           "guest-ssh-fixture-testbin")
 
+/* POSIX host observer; a forced Windows selection remains unobserved. */
+#if defined(_WIN32)
+ZCL_TEST_GROUP_NEED("test_rvmachine_public_fixtures", ZCL_HOST_NEED_ENV,
+                    "ZCL_POSIX_DESCRIPTOR_TESTS")
+#else
+ZCL_TEST_GROUP_BUILD_NEED("test_rvmachine_public_fixtures", "build/bin/test-rvmachine-public-fixtures",
+                          "rvmachine-public-fixtures-testbin")
+#endif
+
 /* Headless z23-dev must not list GTK or WebKit, and -gui must still map them. */
 ZCL_TEST_GROUP_BUILD_NEED("test_wallet_gui_load", "build/bin/z23-dev", "dev-bin")
 

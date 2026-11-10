@@ -482,13 +482,15 @@ ZCL_WINDOWS_LAUNCHER_GOALS := windows-headless-run windows-headless-run-selftest
 	build/bin/z23-headless-run.exe
 # Build queries and game-only goals need no node vendor configure.
 ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs print-game-closure help doctor doctor-env doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
+# Public fixture observers link only the platform clock and system libraries.
+ZCL_PUBLIC_FIXTURE_GOALS := rvmachine-public-fixtures-testbin test-rvmachine-public-fixtures
 # Receipt hooks use in-tree C23 and system libraries, never node archives.
 ZCL_GIT_HOOK_GOALS := git-hook git-hook-selftest install-hooks
 # With no configured kernel this source is only a copy of the empty definition.
 # Keep configured values (including deferred variable references) conservative:
 # the packer links zlib. Mixed node goals still require normal bootstrap.
 ZCL_GUEST_STUB_GOALS := $(if $(strip $(value Z23_GUEST_KERNEL)),,build/gen/guest_kernel_data.c)
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_GUEST_STUB_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint,$(MAKECMDGOALS))),,1),)
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint,$(MAKECMDGOALS))),,1),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -1742,7 +1744,7 @@ TOR_MISSING_ARCHIVES := $(filter-out $(wildcard $(TOR_ARCHIVE_PATHS)),$(TOR_ARCH
 # default-permit shape this change exists to delete.
 ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready c3-mutex-probe c3-speed-bench c3-tip-seam build/bin/c3-mutex-probe.so \
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
-	worktree-prime-selftest $(ZCL_GIT_HOOK_GOALS) $(ZCL_GUEST_STUB_GOALS) setup \
+	worktree-prime-selftest $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) setup \
 	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint \
 	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS)
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
@@ -16028,7 +16030,23 @@ check-checkout-lock:
 	@echo "══ LINT: checkout-wide watcher/foreground mutual exclusion ══"
 	@tools/dev/checkout-lock-selftest.sh
 
-.PHONY: test-guest-port test-guest-ssh-fixture
+.PHONY: test-guest-port test-guest-ssh-fixture test-rvmachine-public-fixtures \
+        rvmachine-public-fixtures-testbin
+
+test-rvmachine-public-fixtures: rvmachine-public-fixtures-testbin
+	@$(BIN_DIR)/test-rvmachine-public-fixtures
+rvmachine-public-fixtures-testbin: $(BIN_DIR)/test-rvmachine-public-fixtures
+$(BIN_DIR)/test-rvmachine-public-fixtures: tools/tests/test_rvmachine_public_fixtures.c \
+        tests/fixtures/rvmachine/src/freebsd_port_bytes.c \
+        tests/fixtures/rvmachine/src/geli_bootstrap_public.c \
+        tests/fixtures/rvmachine/src/geli_public_prepare.inc tools/guest_port.h \
+        platform/modules/platform/src/clock.c platform/modules/platform/include/platform/clock.h \
+        platform/modules/util/include/util/log_macros.h platform/modules/base/include/base/log_macros.h \
+        platform/modules/base/include/base/format_attribute.h platform/modules/base/include/base/log_level.h
+	@mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -D_POSIX_C_SOURCE=200809L -std=c23 -O2 -Wall -Wextra -Werror -pedantic -Itools \
+		-Iplatform/modules/platform/include -Iplatform/modules/util/include -Iplatform/modules/base/include \
+		tools/tests/test_rvmachine_public_fixtures.c platform/modules/platform/src/clock.c -o $@
 # Standalone native PTY fixtures. Build glue stays here; assertions live in C23.
 test-guest-port:
 	@mkdir -p build

@@ -181,17 +181,8 @@ static bool gb_fd(int fd, int flags)
     int current = fcntl(fd, F_GETFD);
     return current >= 0 && fcntl(fd, F_SETFD, current | flags) == 0;
 }
-static void gb_child(int read_fd, int write_fd, unsigned mode)
+static void gb_child_verify(void)
 {
-    if (close(write_fd) != 0 || dup2(read_fd, STDIN_FILENO) < 0) _exit(90);
-    if (read_fd != STDIN_FILENO && close(read_fd) != 0) _exit(91);
-    closefrom(3); /* Fixed fixture inherits only stdin and public console output. */
-    if (mode == 0) {
-        execl("/sbin/geli", "geli", "attach", "-p", "-k", "-", "/dev/vtbd0", (char *)NULL);
-        _exit(92);
-    }
-    if (mode == 5 || mode == 7) _exit(95);
-    if (mode == 6) for (;;) (void)poll(NULL, 0, 1000);
     uint8_t bytes[GB_BYTES], expected[GB_BYTES];
     gb_pattern(expected);
     size_t used = 0;
@@ -207,62 +198,51 @@ static void gb_child(int read_fd, int write_fd, unsigned mode)
     explicit_bzero(bytes, sizeof(bytes));
     _exit(exact ? 0 : 94);
 }
-int main(int argc, char **argv)
+static void gb_child(int read_fd, int write_fd, unsigned mode)
 {
-    static const char *const options[] = {
-        "--public-pipe-control", "--public-pipe-short", "--public-pipe-extra",
-        "--public-pipe-wrong", "--public-child-failure",
-        "--public-child-cancel", "--public-lost-custody",
-        "--public-postreap-expired", "--public-postreap-clockfail"
-    };
-    unsigned mode = 0;
-    if (argc == 2) {
-        for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); ++i)
-            if (strcmp(argv[1], options[i]) == 0) mode = (unsigned)i + 1;
+    if (close(write_fd) != 0 || dup2(read_fd, STDIN_FILENO) < 0) _exit(90);
+    if (read_fd != STDIN_FILENO && close(read_fd) != 0) _exit(91);
+    closefrom(3); /* Fixed fixture inherits only stdin and public console output. */
+    if (mode == 0) {
+        execl("/sbin/geli", "geli", "attach", "-p", "-k", "-", "/dev/vtbd0", (char *)NULL);
+        _exit(92);
     }
-    bool control = mode != 0;
-    if (mode == 8 || mode == 9) gb_reap_clock_control = mode;
-    bool wrong_key = argc == 2 && strcmp(argv[1], "--public-wrong-key") == 0;
-    bool initial_prepare = argc == 2 && strcmp(argv[1], "--public-initial-prepare") == 0;
-    if ((!control && argc != 1 && !wrong_key && !initial_prepare) || !gb_output(STDOUT_FILENO) ||
-        !gb_output(STDERR_FILENO)) return 1;
-    int64_t begin = gb_now();
-    if (begin <= 0 || begin > INT64_MAX - GB_LIMIT_MS) return 2;
-    int64_t cleanup_end = begin + (control ? 3000 : GB_LIMIT_MS);
-    int64_t end = cleanup_end - (control ? 1000 : 2000);
-    int p[2];
-    if (pipe(p) != 0) { gb_diag("PUBLIC_BOOTSTRAP_PIPE\n", end); return 3; }
-    /* Refuse low-FD aliasing instead of changing inherited stdio authority. */
-    if (p[0] < 3 || p[1] < 3 || !gb_fd(p[0], FD_CLOEXEC) || !gb_fd(p[1], FD_CLOEXEC)) {
-        close(p[0]); close(p[1]); return 4;
+    if (mode == 5 || mode == 7) _exit(95);
+    if (mode == 6) for (;;) (void)poll(NULL, 0, 1000);
+    gb_child_verify();
+}
+static int gb_lost_custody(pid_t child, int write_fd, bool ok, int64_t end, int64_t cleanup_end)
+{
+    int status = 0;
+    bool timely = false;
+    bool reaped = gb_reap(child, end, &status, &timely);
+    bool closed = close(write_fd) == 0;
+    if (!reaped) {
+        (void)gb_cancel(child, cleanup_end);
+        return 7;
     }
-    pid_t child = fork(); /* Happens before any port read or PUBLIC key staging. */
-    if (child == 0) gb_child(p[0], p[1], mode);
-    if (child < 0) { gb_diag("PUBLIC_BOOTSTRAP_FORK\n", end); close(p[0]); close(p[1]); return 5; }
-    bool ok = close(p[0]) == 0;
-    int flags = fcntl(p[1], F_GETFL);
-    ok = ok && flags >= 0 && fcntl(p[1], F_SETFL, flags | O_NONBLOCK) == 0;
-    struct sigaction sa = {0};
-    sa.sa_handler = SIG_IGN;
-    ok = ok && sigemptyset(&sa.sa_mask) == 0 && sigaction(SIGPIPE, &sa, NULL) == 0;
-    if (mode == 7) {
-        int status = 0;
-        bool timely = false;
-        bool reaped = gb_reap(child, end, &status, &timely);
-        bool closed = close(p[1]) == 0;
-        if (!reaped) {
-            (void)gb_cancel(child, cleanup_end);
-            return 7;
-        }
-        /* This control's observer blocks every signal before syscall, including
-         * a mutation which signals the already-reaped numeric PID. */
-        gb_observe_kill = true;
-        bool refused = !gb_cancel(child, cleanup_end);
-        bool proved = ok && timely && closed && WIFEXITED(status) && WEXITSTATUS(status) == 95 &&
-                      refused && gb_kill_attempts == 0;
-        if (proved) proved = gb_diag("PUBLIC_LOST_CUSTODY_NO_SIGNAL\n", cleanup_end);
-        return proved ? 0 : 7;
-    }
+    /* This control's observer blocks every signal before syscall, including
+     * a mutation which signals the already-reaped numeric PID. */
+    gb_observe_kill = true;
+    bool refused = !gb_cancel(child, cleanup_end);
+    bool proved = ok && timely && closed && WIFEXITED(status) && WEXITSTATUS(status) == 95 &&
+                  refused && gb_kill_attempts == 0;
+    if (proved) proved = gb_diag("PUBLIC_LOST_CUSTODY_NO_SIGNAL\n", cleanup_end);
+    return proved ? 0 : 7;
+}
+
+static int gb_postreap_control(pid_t child, bool reaped, bool timely, int status, int64_t cleanup_end)
+{
+    bool proved = reaped && !timely && WIFEXITED(status) &&
+                  WEXITSTATUS(status) == 0 && gb_kill_attempts == 0;
+    if (!reaped) (void)gb_cancel(child, cleanup_end);
+    if (proved) proved = gb_diag("PUBLIC_POSTREAP_REFUSED_CUSTODY_PRESERVED\n", cleanup_end);
+    return proved ? 0 : 7;
+}
+
+static bool gb_deliver(unsigned mode, bool control, bool wrong_key, bool ok, int write_fd,
+                       int64_t end, bool *delivered_out, bool *eof_out)
+{
     uint8_t bytes[GB_BYTES + 1] = {0}, expected[GB_BYTES];
     gb_pattern(expected);
     if (wrong_key) for (size_t i = 0; i < GB_BYTES; ++i) expected[i] += 32;
@@ -282,32 +262,21 @@ int main(int argc, char **argv)
     explicit_bzero(expected, sizeof(expected));
     bool delivered = false;
     if (ok) {
-        delivered = gb_io(p[1], bytes, mode == 2 ? GB_BYTES - 1 : mode == 3 ? GB_BYTES + 1 : GB_BYTES, true, end);
+        delivered = gb_io(write_fd, bytes, mode == 2 ? GB_BYTES - 1 : mode == 3 ? GB_BYTES + 1 : GB_BYTES, true, end);
         ok = delivered;
     }
     explicit_bzero(bytes, sizeof(bytes));
     if (port >= 0 && close(port) != 0) ok = false;
-    bool eof_closed = close(p[1]) == 0; /* Actual EOF for GELI keyfile stdin. */
+    bool eof_closed = close(write_fd) == 0; /* Actual EOF for GELI keyfile stdin. */
     if (!eof_closed) ok = false;
-    int status = 0;
-    bool timely = false;
-    bool reaped = gb_reap(child, end, &status, &timely);
-    if (mode == 8 || mode == 9) {
-        bool proved = reaped && !timely && WIFEXITED(status) &&
-                      WEXITSTATUS(status) == 0 && gb_kill_attempts == 0;
-        if (!reaped) (void)gb_cancel(child, cleanup_end);
-        if (proved) proved = gb_diag("PUBLIC_POSTREAP_REFUSED_CUSTODY_PRESERVED\n", cleanup_end);
-        return proved ? 0 : 7;
-    }
-    bool custody = true;
-    if (!reaped) {
-        ok = false; custody = gb_cancel(child, cleanup_end);
-        if (mode == 6 && custody && gb_kill_attempts == 1)
-            custody = gb_diag("PUBLIC_OWNED_CHILD_CANCELLED_REAPED\n", cleanup_end);
-        if (!custody) {
-            gb_diag("PUBLIC_BOOTSTRAP_UNOBSERVED_CHILD_CUSTODY\n", cleanup_end);
-        }
-    }
+    *delivered_out = delivered;
+    *eof_out = eof_closed;
+    return ok;
+}
+
+static bool gb_evidence(bool control, bool ok, bool delivered, bool eof_closed,
+                        bool reaped, bool timely, int status, int64_t cleanup_end)
+{
     if (!control) {
         char evidence[160];
         int n = snprintf(evidence, sizeof(evidence),
@@ -317,10 +286,105 @@ int main(int argc, char **argv)
             reaped && WIFEXITED(status) ? WEXITSTATUS(status) : -1);
         if (n <= 0 || (size_t)n >= sizeof(evidence) || !gb_diag(evidence, cleanup_end)) ok = false;
     }
+    return ok;
+}
+
+static bool gb_finish_custody(unsigned mode, bool *ok, bool reaped, pid_t child, int64_t cleanup_end)
+{
+    bool custody = true;
+    if (!reaped) {
+        *ok = false; custody = gb_cancel(child, cleanup_end);
+        if (mode == 6 && custody && gb_kill_attempts == 1)
+            custody = gb_diag("PUBLIC_OWNED_CHILD_CANCELLED_REAPED\n", cleanup_end);
+        if (!custody) {
+            gb_diag("PUBLIC_BOOTSTRAP_UNOBSERVED_CHILD_CUSTODY\n", cleanup_end);
+        }
+    }
+    return custody;
+}
+
+static int gb_finish(unsigned mode, bool control, bool initial_prepare, bool ok,
+                     bool delivered, bool eof_closed, bool reaped, bool timely,
+                     int status, pid_t child, int64_t cleanup_end)
+{
+    bool custody = gb_finish_custody(mode, &ok, reaped, child, cleanup_end);
+    ok = gb_evidence(control, ok, delivered, eof_closed, reaped, timely, status, cleanup_end);
     ok = ok && reaped && timely && WIFEXITED(status) && WEXITSTATUS(status) == 0;
     if (ok) ok = gb_diag(control ? "PUBLIC_PIPE_CONTROL_EXACT32\n" :
                                   "PUBLIC_BOOTSTRAP_ATTACH_EXACT32\n", cleanup_end);
     ok = gb_prepare_finish(initial_prepare,ok,cleanup_end);
     if (ok && initial_prepare) ok = gb_diag("PUBLIC_BOOTSTRAP_PREPARED20K\n",cleanup_end);
     return !custody ? 7 : ok ? 0 : 6;
+}
+
+static unsigned gb_mode(int argc, char **argv)
+{
+    static const char *const options[] = {
+        "--public-pipe-control", "--public-pipe-short", "--public-pipe-extra",
+        "--public-pipe-wrong", "--public-child-failure",
+        "--public-child-cancel", "--public-lost-custody",
+        "--public-postreap-expired", "--public-postreap-clockfail"
+    };
+    unsigned mode = 0;
+    if (argc == 2) {
+        for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); ++i)
+            if (strcmp(argv[1], options[i]) == 0) mode = (unsigned)i + 1;
+    }
+    return mode;
+}
+
+static int gb_start(unsigned mode, int64_t end, int p[2], pid_t *child_out, bool *ok_out)
+{
+    if (pipe(p) != 0) { gb_diag("PUBLIC_BOOTSTRAP_PIPE\n", end); return 3; }
+    /* Refuse low-FD aliasing instead of changing inherited stdio authority. */
+    if (p[0] < 3 || p[1] < 3 || !gb_fd(p[0], FD_CLOEXEC) || !gb_fd(p[1], FD_CLOEXEC)) {
+        close(p[0]); close(p[1]); return 4;
+    }
+    pid_t child = fork(); /* Happens before any port read or PUBLIC key staging. */
+    if (child == 0) gb_child(p[0], p[1], mode);
+    if (child < 0) { gb_diag("PUBLIC_BOOTSTRAP_FORK\n", end); close(p[0]); close(p[1]); return 5; }
+    bool ok = close(p[0]) == 0;
+    int flags = fcntl(p[1], F_GETFL);
+    ok = ok && flags >= 0 && fcntl(p[1], F_SETFL, flags | O_NONBLOCK) == 0;
+    struct sigaction sa = {0};
+    sa.sa_handler = SIG_IGN;
+    ok = ok && sigemptyset(&sa.sa_mask) == 0 && sigaction(SIGPIPE, &sa, NULL) == 0;
+    *child_out = child;
+    *ok_out = ok;
+    return 0;
+}
+
+static bool gb_arguments_valid(int argc, bool control, bool wrong_key, bool initial_prepare)
+{
+    return !((!control && argc != 1 && !wrong_key && !initial_prepare) ||
+             !gb_output(STDOUT_FILENO) || !gb_output(STDERR_FILENO));
+}
+
+int main(int argc, char **argv)
+{
+    unsigned mode = gb_mode(argc, argv);
+    bool control = mode != 0;
+    if (mode == 8 || mode == 9) gb_reap_clock_control = mode;
+    bool wrong_key = argc == 2 && strcmp(argv[1], "--public-wrong-key") == 0;
+    bool initial_prepare = argc == 2 && strcmp(argv[1], "--public-initial-prepare") == 0;
+    if (!gb_arguments_valid(argc, control, wrong_key, initial_prepare)) return 1;
+    int64_t begin = gb_now();
+    if (begin <= 0 || begin > INT64_MAX - GB_LIMIT_MS) return 2;
+    int64_t cleanup_end = begin + (control ? 3000 : GB_LIMIT_MS);
+    int64_t end = cleanup_end - (control ? 1000 : 2000);
+    int p[2];
+    pid_t child;
+    bool ok;
+    int started = gb_start(mode, end, p, &child, &ok);
+    if (started) return started;
+    if (mode == 7) return gb_lost_custody(child, p[1], ok, end, cleanup_end);
+    bool delivered, eof_closed;
+    ok = gb_deliver(mode, control, wrong_key, ok, p[1], end, &delivered, &eof_closed);
+    int status = 0;
+    bool timely = false;
+    bool reaped = gb_reap(child, end, &status, &timely);
+    if (mode == 8 || mode == 9)
+        return gb_postreap_control(child, reaped, timely, status, cleanup_end);
+    return gb_finish(mode, control, initial_prepare, ok, delivered, eof_closed,
+                     reaped, timely, status, child, cleanup_end);
 }

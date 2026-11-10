@@ -89,3 +89,7 @@ conport a04cef28c8311513de009646c45be44c866211efb0d0e801f8fc10d56221f06d
 # Assembly replaced only the V6 helper; other root bytes/metadata, non-MFS
 # kernel bytes and program headers matched. Full action closure is unqualified.
 # Native confinement and actual V7 INITIAL/RECOVER execution remain unqualified.
+# Current refactored sources (historical binaries and images above were not
+# rebuilt; these hashes do not establish new FreeBSD qualification):
+# src/freebsd_port_bytes.c sha256 384da8ee1c3bec28094bd60a270aca07b24c274b665c1ccd91c69c3335ab2e8a
+# src/geli_bootstrap_public.c sha256 8db089112ed29c4b199f10a53d9180d4a43aa05b250862c488208df65e6db48c
