@@ -579,6 +579,15 @@ static bool replay_within_deadline(void)
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return false;
     return now.tv_sec - replay_began.tv_sec < 50;
 }
+static bool replay_effects_ready(const multiplayer_game_t *game)
+{
+    if (!game_systems_ready(game) || !game->effects->white_texture.id ||
+        !game->effects->effects || !game->effects->global_particles || !game->effects->feedbacks)
+        return false;
+    for (int i = 0; i < game->effects->max_effects; ++i)
+        if (!game->effects->effects[i].particles) return false;
+    return true;
+}
 static bool replay_setup(struct replay_session *session, uint32_t seed)
 {
     memset(session, 0, sizeof(*session));
@@ -591,11 +600,7 @@ static bool replay_setup(struct replay_session *session, uint32_t seed)
     game->input_system = game_input_create(true);
     game->effects = effects_create(128, 256);
     game->weapons = weapons_create();
-    if (!game_systems_ready(game) || !game->effects->white_texture.id ||
-        !game->effects->effects || !game->effects->global_particles || !game->effects->feedbacks)
-        return false;
-    for (int i = 0; i < game->effects->max_effects; ++i)
-        if (!game->effects->effects[i].particles) return false;
+    if (!replay_effects_ready(game)) return false;
     game->match->rules.score_limit = 30;
     game->match->rules.time_limit = 300;
     game->match->rules.team_count = 2;
@@ -667,6 +672,81 @@ static bool replay_has_smoke(const effects_manager_t *effects)
     }
     return false;
 }
+struct replay_observed {
+    bool smoke_seen, patrol_moved, chase_moved;
+    unsigned failed_captures;
+};
+static bool replay_tick_observed(const struct sky_agent_observation *observation, unsigned tick)
+{
+    return observation->frame == tick + 1 && observation->time == (double)(tick + 1) / 60.0 &&
+        sky_game_runtime_ticks() == tick + 1 && observation->player_present;
+}
+static bool replay_tick_frame(struct replay_session *session, unsigned tick, bool partitioned,
+    bool changed_input, const struct replay_result *expected, struct replay_result *result,
+    struct replay_observed *stats)
+{
+    input_state_fast_t input = {
+        .move_x = changed_input ? -0.35f : 0.35f,
+        .move_y = tick < 60 ? -0.1f : 0.1f,
+        .fire_guns = true, .speed_normal = true
+    };
+    struct sky_agent_observation observation = {0};
+    game_agent_frame(&session->context, &input, &observation, NULL);
+    replay_wall_time += partitioned ? 0.91 : 0.003;
+    bool valid = replay_tick_observed(&observation, tick);
+    const managed_aircraft_t *chase = &session->game.aircraft_mgr->aircraft[1];
+    const managed_aircraft_t *patrol = &session->game.aircraft_mgr->aircraft[2];
+    if (tick == 0) {
+        stats->chase_moved = chase->target_id == 0 && chase->health > 0 &&
+            Vector3Distance(chase->aircraft->position, session->initial_chase) > 0;
+        stats->patrol_moved = patrol->health > 0 &&
+            Vector3Distance(patrol->aircraft->position, session->initial_patrol) > 0;
+    }
+    stats->smoke_seen = stats->smoke_seen || replay_has_smoke(session->game.effects);
+    valid = valid && replay_snapshot_take(&session->context, &result->ticks[tick + 1]);
+    if (valid && expected)
+        valid = replay_snapshot_equal(&expected->ticks[tick + 1], &result->ticks[tick + 1],
+                                      tick + 1, partitioned ? "partitioned replay" : "repeat");
+    return valid;
+}
+
+static bool replay_ticks(struct replay_session *session, bool valid, bool partitioned,
+    bool changed_input, const struct replay_result *expected, struct replay_result *result,
+    struct replay_observed *stats)
+{
+    /* Identical inputs and one tick per call; only batching/observation differs.
+     * Unequal partitions exercise boundaries at 17, 60, 91 and 120 ticks. */
+    for (unsigned tick = 0; valid && tick <= REPLAY_TICKS; ++tick) {
+        if (!replay_within_deadline()) { valid = false; break; }
+        bool boundary = tick == 0 || tick == 17 || tick == 60 || tick == 91 || tick == REPLAY_TICKS;
+        if (partitioned && boundary) {
+            valid = replay_observe(session, false) && replay_observe(session, true) &&
+                    replay_observe(session, false);
+            ++stats->failed_captures;
+        }
+        if (!valid || tick == REPLAY_TICKS) break;
+        valid = replay_tick_frame(session, tick, partitioned, changed_input, expected, result, stats);
+    }
+    return valid;
+}
+
+static bool replay_observed_complete(bool partitioned, const struct replay_observed *stats)
+{
+    return stats->smoke_seen && stats->patrol_moved && stats->chase_moved && replay_draws >= REPLAY_TICKS &&
+        replay_unexpected_window_calls == 0 && replay_unexpected_model_calls == 0 &&
+        replay_wall_reads == 0 && (!partitioned || (stats->failed_captures == 5 && replay_readbacks == 5));
+}
+static bool replay_random_sequence(bool valid, const struct replay_result *expected,
+                                   struct replay_result *result)
+{
+    for (unsigned i = 0; i < 8; ++i) {
+        result->next_libc[i] = rand();
+        result->next_raylib[i] = GetRandomValue(-1000, 1000);
+        if (expected && (result->next_libc[i] != expected->next_libc[i] ||
+                         result->next_raylib[i] != expected->next_raylib[i])) valid = false;
+    }
+    return valid;
+}
 static bool replay_run(uint32_t seed, bool partitioned, bool changed_input,
                        double wall_time, const struct replay_result *expected,
                        struct replay_result *result)
@@ -677,61 +757,17 @@ static bool replay_run(uint32_t seed, bool partitioned, bool changed_input,
     replay_wall_reads = replay_draws = replay_readbacks = replay_unexpected_window_calls = 0;
     replay_unexpected_model_calls = 0;
     bool valid = replay_setup(session, seed);
-    bool smoke_seen = false, patrol_moved = false, chase_moved = false;
-    unsigned failed_captures = 0;
+    struct replay_observed stats = {0};
     if (valid) valid = replay_snapshot_take(&session->context, &result->ticks[0]);
     if (valid && expected)
         valid = replay_snapshot_equal(&expected->ticks[0], &result->ticks[0], 0, "initialization");
-    /* Identical inputs and one tick per call; only batching/observation differs.
-     * Unequal partitions exercise boundaries at 17, 60, 91 and 120 ticks. */
-    for (unsigned tick = 0; valid && tick <= REPLAY_TICKS; ++tick) {
-        if (!replay_within_deadline()) { valid = false; break; }
-        bool boundary = tick == 0 || tick == 17 || tick == 60 || tick == 91 || tick == REPLAY_TICKS;
-        if (partitioned && boundary) {
-            valid = replay_observe(session, false) && replay_observe(session, true) &&
-                    replay_observe(session, false);
-            ++failed_captures;
-        }
-        if (!valid || tick == REPLAY_TICKS) break;
-        input_state_fast_t input = {
-            .move_x = changed_input ? -0.35f : 0.35f,
-            .move_y = tick < 60 ? -0.1f : 0.1f,
-            .fire_guns = true, .speed_normal = true
-        };
-        struct sky_agent_observation observation = {0};
-        game_agent_frame(&session->context, &input, &observation, NULL);
-        replay_wall_time += partitioned ? 0.91 : 0.003;
-        valid = observation.frame == tick + 1 &&
-                observation.time == (double)(tick + 1) / 60.0 &&
-                sky_game_runtime_ticks() == tick + 1 && observation.player_present;
-        const managed_aircraft_t *chase = &session->game.aircraft_mgr->aircraft[1];
-        const managed_aircraft_t *patrol = &session->game.aircraft_mgr->aircraft[2];
-        if (tick == 0) {
-            chase_moved = chase->target_id == 0 && chase->health > 0 &&
-                Vector3Distance(chase->aircraft->position, session->initial_chase) > 0;
-            patrol_moved = patrol->health > 0 &&
-                Vector3Distance(patrol->aircraft->position, session->initial_patrol) > 0;
-        }
-        smoke_seen = smoke_seen || replay_has_smoke(session->game.effects);
-        valid = valid && replay_snapshot_take(&session->context, &result->ticks[tick + 1]);
-        if (valid && expected)
-            valid = replay_snapshot_equal(&expected->ticks[tick + 1], &result->ticks[tick + 1],
-                                          tick + 1, partitioned ? "partitioned replay" : "repeat");
-    }
-    valid = valid && smoke_seen && patrol_moved && chase_moved && replay_draws >= REPLAY_TICKS &&
-            replay_unexpected_window_calls == 0 && replay_unexpected_model_calls == 0 &&
-            replay_wall_reads == 0 &&
-            (!partitioned || (failed_captures == 5 && replay_readbacks == 5));
-    for (unsigned i = 0; i < 8; ++i) {
-        result->next_libc[i] = rand();
-        result->next_raylib[i] = GetRandomValue(-1000, 1000);
-        if (expected && (result->next_libc[i] != expected->next_libc[i] ||
-                         result->next_raylib[i] != expected->next_raylib[i])) valid = false;
-    }
+    valid = replay_ticks(session, valid, partitioned, changed_input, expected, result, &stats);
+    valid = valid && replay_observed_complete(partitioned, &stats);
+    valid = replay_random_sequence(valid, expected, result);
     if (!valid) fprintf(stderr,
         "replay: refused seed=%u partitioned=%d changed_input=%d tick=%u smoke=%d patrol=%d chase=%d wall_reads=%u readbacks=%u unexpected_model_calls=%u\n",
-        seed, partitioned, changed_input, session->context.frames, smoke_seen,
-        patrol_moved, chase_moved, replay_wall_reads, replay_readbacks,
+        seed, partitioned, changed_input, session->context.frames, stats.smoke_seen,
+        stats.patrol_moved, stats.chase_moved, replay_wall_reads, replay_readbacks,
         replay_unexpected_model_calls);
     destroy_game_systems(&session->game);
     free(session);

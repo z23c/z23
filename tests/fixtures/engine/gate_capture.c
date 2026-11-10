@@ -15,6 +15,29 @@ static void summary(unsigned failures)
                     "ALL TESTS PASSED — 0/1 groups failed");
 }
 
+static int overflow_failure(void)
+{
+    char padding[8192];
+    memset(padding, 'x', sizeof(padding));
+    for (size_t i = 0; i < 258; i++)
+        if (fwrite(padding, 1, sizeof(padding), stdout) != sizeof(padding))
+            return 3;
+    putchar('\n');
+    summary(1);
+    return 1;
+}
+
+static bool wait_timeout(void)
+{
+    if (fflush(stdout) != 0) return false;
+    struct timespec start, now;
+    if (timespec_get(&start, TIME_UTC) != TIME_UTC) return false;
+    do {
+        if (timespec_get(&now, TIME_UTC) != TIME_UTC) return false;
+    } while (now.tv_sec - start.tv_sec < 3);
+    return true;
+}
+
 int main(void)
 {
     const char *mode = getenv("GATE_CAPTURE_CASE");
@@ -44,22 +67,10 @@ int main(void)
     }
     if (strcmp(mode, "overflow-before-fail") == 0 ||
         strcmp(mode, "overflow-write-failure") == 0) {
-        char padding[8192];
-        memset(padding, 'x', sizeof(padding));
-        for (size_t i = 0; i < 258; i++)
-            if (fwrite(padding, 1, sizeof(padding), stdout) != sizeof(padding))
-                return 3;
-        putchar('\n');
-        summary(1);
-        return 1;
+        return overflow_failure();
     }
     if (strcmp(mode, "timeout") == 0) {
-        if (fflush(stdout) != 0) return 3;
-        struct timespec start, now;
-        if (timespec_get(&start, TIME_UTC) != TIME_UTC) return 3;
-        do {
-            if (timespec_get(&now, TIME_UTC) != TIME_UTC) return 3;
-        } while (now.tv_sec - start.tv_sec < 3);
+        if (!wait_timeout()) return 3;
     }
     return ferror(stdout) ? 3 : 0;
 }

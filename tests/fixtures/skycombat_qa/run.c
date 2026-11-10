@@ -318,25 +318,15 @@ static void qa_window_options(int *argc, char ***argv)
     ++*argv;
 }
 
-int main(int argc, char **argv)
+static bool qa_parse_stdio_and_signal(int *argcp, char ***argvp)
 {
-    FILE *agent_input = NULL;
-    int prefix = -1;
-    if (argc > 1 && qa_agent_flag(argv[1], &prefix)) {
-        --argc; ++argv;
-    }
-    if (argc > 1 && strncmp(argv[1], "--fixture-agent=", 16) == 0) {
-        qa_agent = true;
-        agent_input = qa_agent_input(argv[1] + 16, prefix);
-        if (!agent_input) return 3;
-        --argc; ++argv;
-    }
-    qa_window_options(&argc, &argv);
+    int argc = *argcp;
+    char **argv = *argvp;
     if (argc > 1) {
         static const char closed_prefix[] = "--fixture-closed-stdio=";
         size_t length = sizeof(closed_prefix) - 1;
         if (!strncmp(argv[1], closed_prefix, length)) {
-            if (argv[1][length] < '1' || argv[1][length] > '7' || argv[1][length + 1]) return 3;
+            if (argv[1][length] < '1' || argv[1][length] > '7' || argv[1][length + 1]) return false;
             qa_original_closed = (unsigned)(argv[1][length] - '0');
             --argc; ++argv;
         }
@@ -347,36 +337,42 @@ int main(int argc, char **argv)
         --argc; ++argv;
         struct sigaction prior = {.sa_handler = qa_prior_signal, .sa_flags = SA_RESTART};
         if (sigemptyset(&prior.sa_mask) != 0 || sigaddset(&prior.sa_mask, SIGUSR2) != 0 ||
-            sigaction(SIGUSR1, &prior, &qa_original_signal) != 0) return 3;
+            sigaction(SIGUSR1, &prior, &qa_original_signal) != 0) return false;
     }
 #endif
+    *argcp = argc;
+    *argvp = argv;
+    return true;
+}
+
+static bool qa_parse_options(int *argcp, char ***argvp, FILE **agent_input)
+{
+    int argc = *argcp;
+    char **argv = *argvp;
+    int prefix = -1;
+    if (argc > 1 && qa_agent_flag(argv[1], &prefix)) {
+        --argc; ++argv;
+    }
+    if (argc > 1 && strncmp(argv[1], "--fixture-agent=", 16) == 0) {
+        qa_agent = true;
+        *agent_input = qa_agent_input(argv[1] + 16, prefix);
+        if (!*agent_input) return false;
+        --argc; ++argv;
+    }
+    qa_window_options(&argc, &argv);
+    if (!qa_parse_stdio_and_signal(&argc, &argv)) return false;
     if (argc > 1 && strcmp(argv[1], "--fixture-resident") == 0) {
         qa_agent = qa_resident = true;
         --argc; ++argv;
     }
-    if (qa_broken_reply && !qa_close_reply_reader()) {
-        if (agent_input) fclose(agent_input);
-        return 3;
-    }
-    int result = sky_qa_entry(argc, argv);
+    *argcp = argc;
+    *argvp = argv;
+    return true;
+}
+
 #if !defined(_WIN32)
-    if (qa_raise_test) {
-        bool pure = true;
-        if (qa_agent && qa_windows && !qa_window_failed && !qa_ticks) {
-            int actual = rand(); srand(qa_last_seed);
-            pure = actual == rand() && !qa_random_calls && qa_seed_calls == 2 &&
-                   sky_game_runtime_ticks() == 0;
-        }
-        struct sigaction restored;
-        bool prior = sigaction(SIGUSR1, NULL, &restored) == 0 &&
-            restored.sa_handler == qa_prior_signal && (restored.sa_flags & SA_RESTART) &&
-            sigismember(&restored.sa_mask, SIGUSR2) == 1;
-        if (!prior || raise(SIGUSR1) != 0 || !qa_prior_seen || qa_bad_raise || !pure) result = 5;
-        if (sigaction(SIGUSR1, &qa_original_signal, NULL) != 0) result = 5;
-        if (!(qa_original_closed & 4u))
-            fprintf(stderr, "QA_RAISE restore=%u focus=%u prior=%d pure=%d events=%u\n",
-                    qa_restores, qa_focuses, (int)qa_prior_seen, pure, qa_events);
-    }
+static void qa_check_closed_stdio(void)
+{
     if (qa_original_closed) {
         for (int fd = 0; fd < 3; fd++) {
             int status = fcntl(fd, F_GETFD);
@@ -385,7 +381,41 @@ int main(int argc, char **argv)
                 qa_bad_stdio = true;
         }
     }
+}
+static bool qa_prior_signal_restored(void)
+{
+    struct sigaction restored;
+    return sigaction(SIGUSR1, NULL, &restored) == 0 &&
+        restored.sa_handler == qa_prior_signal && (restored.sa_flags & SA_RESTART) &&
+        sigismember(&restored.sa_mask, SIGUSR2) == 1;
+}
+static bool qa_check_random_purity(void)
+{
+    if (qa_agent && qa_windows && !qa_window_failed && !qa_ticks) {
+        int actual = rand(); srand(qa_last_seed);
+        return actual == rand() && !qa_random_calls && qa_seed_calls == 2 &&
+            sky_game_runtime_ticks() == 0;
+    }
+    return true;
+}
+static int qa_check_restored_state(int result)
+{
+    if (qa_raise_test) {
+        bool pure = qa_check_random_purity();
+        bool prior = qa_prior_signal_restored();
+        if (!prior || raise(SIGUSR1) != 0 || !qa_prior_seen || qa_bad_raise || !pure) result = 5;
+        if (sigaction(SIGUSR1, &qa_original_signal, NULL) != 0) result = 5;
+        if (!(qa_original_closed & 4u))
+            fprintf(stderr, "QA_RAISE restore=%u focus=%u prior=%d pure=%d events=%u\n",
+                    qa_restores, qa_focuses, (int)qa_prior_seen, pure, qa_events);
+    }
+    qa_check_closed_stdio();
+    return result;
+}
 #endif
+
+static int qa_finish(int result, FILE *agent_input)
+{
     if (qa_bad_stdio) result = 4;
     if (qa_resident && !(qa_original_closed & 2u)) {
         /* The production main must restore its caller's stdout, including
@@ -402,4 +432,19 @@ int main(int argc, char **argv)
         qa_ticks, qa_keys, qa_polls, (double)qa_stick_x, (double)qa_stick_y);
     if (qa_resident && !(qa_original_closed & 4u)) fprintf(stderr, "QA_RESIDENT events=%u\n", qa_events);
     return result;
+}
+
+int main(int argc, char **argv)
+{
+    FILE *agent_input = NULL;
+    if (!qa_parse_options(&argc, &argv, &agent_input)) return 3;
+    if (qa_broken_reply && !qa_close_reply_reader()) {
+        if (agent_input) fclose(agent_input);
+        return 3;
+    }
+    int result = sky_qa_entry(argc, argv);
+#if !defined(_WIN32)
+    result = qa_check_restored_state(result);
+#endif
+    return qa_finish(result, agent_input);
 }
