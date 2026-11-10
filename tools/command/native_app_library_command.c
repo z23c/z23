@@ -57,6 +57,7 @@ struct library {
 #endif
     bool prepared_mutated;
     bool error_presented;
+    bool action_failed;
     bool has_received;
     bool receive_current, has_discover_error, recovery_ready, recovery_kept, any_mutated, library_unavailable;
     bool receive_failure;
@@ -229,7 +230,8 @@ static void al_error_view(struct library *w, const struct zcl_command_reply *rep
     if (w->receive_failure && al_received_error_view(w, reply, context)) return;
     zcl_present_model_init_v1(&w->model, ZCL_PRESENT_MODEL_CHOICE);
     (void)snprintf(w->model.request_id, sizeof(w->model.request_id), "library-error");
-    (void)snprintf(w->model.title, sizeof(w->model.title), "Could not open My Apps");
+    (void)snprintf(w->model.title, sizeof(w->model.title), "%s",
+        w->action_failed ? "Could not complete this action" : "Could not open My Apps");
     (void)snprintf(w->model.summary, sizeof(w->model.summary), "%s", reply->error.message);
     app_library_choice(&w->model, "close", "Close", "No other app will be opened.");
     struct zcl_present_window_event_v1 event = {0};
@@ -1125,9 +1127,13 @@ static void al_loop(struct library *w, const struct app_launch_env *env, struct 
             break;
         }
         bool handled = false;
-        if (!al_external(w, env, datadir, presenter, context, reply, w->model.actions[event.action_index].id, &handled)) break;
+        if (!al_external(w, env, datadir, presenter, context, reply, w->model.actions[event.action_index].id, &handled)) {
+            w->action_failed = reply->status != ZCL_COMMAND_STATUS_PASSED; break;
+        }
         if (handled) continue;
-        if (!al_navigation_result(w, event.action_index, env, exe, datadir, reply)) break;
+        if (!al_navigation_result(w, event.action_index, env, exe, datadir, reply)) {
+            w->action_failed = reply->status != ZCL_COMMAND_STATUS_PASSED; break;
+        }
     }
 }
 static void al_run(const struct app_launch_env *env, struct zcl_command_reply *reply,

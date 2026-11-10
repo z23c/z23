@@ -2507,7 +2507,7 @@ static int tag_library_discover(struct tag_world *w)
     tag_xdg_leave(&x);
     return failures;
 }
-struct tag_link_fixture { struct tag_discover discover; struct zcl_app_offer_row row; unsigned homes, jobs, errors, mode; };
+struct tag_link_fixture { struct tag_discover discover; struct zcl_app_offer_row row; unsigned homes, jobs, errors, mode; bool action_error_title; };
 static bool tag_link_form(void *context, char out[257], bool *submitted, char *why, size_t cap)
 {
     struct tag_link_fixture *f = context; (void)why; (void)cap;
@@ -2530,7 +2530,8 @@ static bool tag_link_cards(void *context, const struct zcl_present_model_v1 *mod
         event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = f->homes++ ? 3 : 1; return true;
     }
     if (!strcmp(model->request_id, "library-error")) {
-        ++f->errors; event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+        ++f->errors; f->action_error_title = !strcmp(model->title, "Could not complete this action");
+        event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
         event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = 0; return true;
     }
     return tag_discover_card(&f->discover, model, copy, event, why, cap);
@@ -2606,7 +2607,7 @@ static int tag_library_link_fault(struct tag_world *w, unsigned mode)
         ASSERT_EQ(f.jobs, 1u); ASSERT_EQ(f.discover.receive, 0);
         if (mode == 1) ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated && f.homes == 2 && !f.errors);
         else ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED && reply.error.mutated &&
-            !strcmp(reply.error.code, "TEMP_CLEANUP_FAILED") && f.homes == 1 && f.errors == 1);
+            !strcmp(reply.error.code, "TEMP_CLEANUP_FAILED") && f.homes == 1 && f.errors == 1 && f.action_error_title);
         zcl_command_reply_free(&reply); PASS();
     } _test_next:;
     tag_xdg_leave(&x); if (home) { (void)setenv("HOME", home, 1); free(home); } else if (!had_home) (void)unsetenv("HOME");

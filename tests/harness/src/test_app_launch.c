@@ -801,6 +801,7 @@ struct al_library_script {
     bool valid, saved_label;
     char last_summary[241];
     char error_summary[241];
+    char error_title[241];
     char setup[ZCL_PRESENT_COPY_TEXT_MAX + 1];
     struct al_fx *change_fixture;
     unsigned change_at;
@@ -902,6 +903,7 @@ static void al_library_error_card(struct al_library_script *s,
 {
     ++s->errors; event->action_index = 0;
     (void)snprintf(s->error_summary, sizeof(s->error_summary), "%s", model->summary);
+    (void)snprintf(s->error_title, sizeof(s->error_title), "%s", model->title);
 }
 static bool al_library_render(const struct zcl_present_model_v1 *model, char *why, size_t cap)
 {
@@ -1759,6 +1761,7 @@ static int case_library_bounds(void)
         zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
         zcl_test_app_library_run(&f.env, &reply, al_library_present, &s);
         ASSERT(s.valid && s.calls == 0 && s.errors == 1);
+        ASSERT_STR_EQ(s.error_title, "Could not open My Apps");
         ASSERT_STR_EQ(reply.error.code, "SELECTIONS_REFUSED");
     PASS(); }
     TEST("My Apps refuses a malformed catalog before presenting any choices") {
