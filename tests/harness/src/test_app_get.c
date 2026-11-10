@@ -42,6 +42,11 @@
 #include "command/native_app_discover.h"
 #include "command/app_selection.h"
 #include "config/command_catalog.h"
+#include "config/boot.h"
+#include "config/boot_fleet_board.h"
+#include "config/boot_internal.h"
+#include "config/db_service.h"
+#include "config/runtime.h"
 #include "command/native_zcode_package_copy.h"
 #include "command/native_app_library_command.h"
 
@@ -59,6 +64,8 @@ int test_app_get(void)
 #include "base/safe_alloc.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha256.h"
+#include "models/database.h"
+#include "rpc/server.h"
 #include "controllers/rpc_client.h"
 #include "json/json.h"
 #include "net/tor_integration.h"
@@ -276,6 +283,101 @@ static const char *tag_in(const struct json_value *in, const char *key)
     return s ? s : "";
 }
 
+/* Isolated public-board RPC and codec bridge: no sockets or public peers. */
+struct tag_real_board {
+    struct node_db source, destination;
+    struct db_service service;
+    struct app_runtime_context runtime;
+    struct boot_svc_ctx svc;
+    struct rpc_table table;
+    char dir[TAG_PATH], warmup[256];
+    bool active, was_warming, transferred;
+};
+static struct tag_real_board g_real_board;
+
+static void tag_real_board_close(void)
+{
+    struct tag_real_board *b = &g_real_board;
+    if (b->active) {
+        app_runtime_set_current(NULL);
+        if (b->was_warming) set_rpc_warmup_started(b->warmup);
+        boot_fleet_board_shutdown();
+    }
+    if (b->source.open) node_db_close(&b->source);
+    if (b->destination.open) node_db_close(&b->destination);
+    if (b->dir[0]) test_rm_rf_recursive(b->dir);
+    memset(b, 0, sizeof(*b));
+}
+
+static bool tag_real_board_open(void)
+{
+    struct tag_real_board *b = &g_real_board;
+    memset(b, 0, sizeof(*b));
+    uint8_t existing_key[32];
+    if (app_runtime_db_service() || app_runtime_snapshot_sync() || app_runtime_mempool() ||
+        app_runtime_wallet() || app_runtime_main_state() || app_runtime_coins_tip() ||
+        boot_fleet_board_public_identity(existing_key)) return false;
+    if (!test_mkdtemp(b->dir, sizeof(b->dir), "app_report_board") ||
+        !node_db_open(&b->source, ":memory:") ||
+        !node_db_open(&b->destination, ":memory:")) return false;
+    b->service.node_db = &b->source; b->service.started = true;
+    b->runtime.db_service = &b->service;
+    b->svc.node_db = &b->source; b->svc.datadir = b->dir;
+    boot_fleet_board_wire(&b->svc);
+    app_runtime_set_current(&b->runtime);
+    rpc_table_init(&b->table); boot_fleet_board_register_rpc(&b->table);
+    b->was_warming = rpc_is_in_warmup(b->warmup, sizeof(b->warmup));
+    set_rpc_warmup_finished(); b->active = true;
+    return true;
+}
+
+static bool tag_real_board_rpc(const char *op, const struct json_value *input,
+                               struct json_value *result)
+{
+    struct json_value in, params; json_init(&in); json_init(&params);
+    bool ok = json_copy_checked(&in, input) && json_push_kv_str(&in, "op", op);
+    json_set_array(&params);
+    ok = ok && json_push_back(&params, &in) &&
+        rpc_table_execute(&g_real_board.table, "fleet_board", &params, result) &&
+        json_get_bool(json_get(result, "ok"));
+    json_free(&params); json_free(&in); return ok;
+}
+
+static bool tag_real_board_received(const uint8_t key[32], const uint8_t signer[32])
+{
+    struct db_fleet_board_post received;
+    return db_fleet_board_post_find(&g_real_board.destination, key, &received) &&
+        !memcmp(received.post.id, key, 32) && !memcmp(received.post.host_pubkey, signer, 32) &&
+        !strcmp(received.post.text, g_tag.result_text);
+}
+
+static bool tag_real_board_source(const uint8_t key[32], const uint8_t signer[32],
+                                  struct db_fleet_board_post *row)
+{
+    return db_fleet_board_post_find(&g_real_board.source, key, row) &&
+        row->post.kind == FLEET_BOARD_KIND_RESULT && row->post.scope == FLEET_BOARD_SCOPE_PUBLIC &&
+        !strcmp(row->post.room, "apps") && !strcmp(row->post.text, g_tag.result_text) &&
+        !memcmp(row->post.host_pubkey, signer, 32) && fleet_board_post_verify(&row->post) == FLEET_BOARD_OK;
+}
+
+static bool tag_real_board_transfer(const char *id)
+{
+    struct tag_real_board *b = &g_real_board;
+    uint8_t key[32], signer[32], frame[FLEET_BOARD_FRAME_MAX]; size_t len = 0;
+    struct db_fleet_board_post row; struct fleet_board_post decoded;
+    bool stored = false;
+    if (!id || !fleet_board_id_from_hex(id, key) ||
+        !boot_fleet_board_public_identity(signer) ||
+        !tag_real_board_source(key, signer, &row) ||
+        fleet_board_frame_encode_post(&row.post, frame, sizeof(frame), &len) != FLEET_BOARD_OK ||
+        fleet_board_frame_decode_post(frame, len, &decoded) != FLEET_BOARD_OK ||
+        db_fleet_board_post_ingest(&b->destination, &decoded,
+            (int64_t)platform_time_wall_unix(), &stored) != FLEET_BOARD_OK || !stored ||
+        !tag_real_board_received(key, signer))
+        return false;
+    b->transferred = true; return true;
+}
+
 static bool tag_offer(const struct json_value *in, struct zcl_command_reply *out)
 {
     free(g_tag.bytes);
@@ -301,6 +403,15 @@ static bool tag_change_staged(void)
     return ok;
 }
 
+static bool tag_real_board_post(const struct json_value *in, struct zcl_command_reply *out)
+{
+    struct json_value reply; json_init(&reply);
+    bool ok = tag_real_board_rpc("post", in, &reply);
+    const char *id = json_get_str(json_get(&reply, "id"));
+    ok = ok && tag_real_board_transfer(id) && json_copy_checked(&out->data, &reply);
+    json_free(&reply); return ok;
+}
+
 static bool tag_post_capture(const struct json_value *in,
                              struct zcl_command_reply *out)
 {
@@ -314,6 +425,7 @@ static bool tag_post_capture(const struct json_value *in,
     (void)snprintf(g_tag.scope, sizeof(g_tag.scope), "%s",
                    tag_in(in, "scope"));
     g_tag.ttl = ttl && ttl->type == JSON_INT ? json_get_int(ttl) : 0;
+    if (result && g_real_board.active) return tag_real_board_post(in, out);
     if (result && g_tag.change_staged_after_receive && !tag_change_staged()) return false;
     if (result && g_tag.fail_result_post) return false;
     if (!result && g_tag.fail_host_post) return false;
@@ -450,6 +562,13 @@ static bool tag_list_page(const struct json_value *in, struct zcl_command_reply 
 static bool tag_list(const struct json_value *in, struct zcl_command_reply *out)
 {
     g_tag.lists++;
+    if (g_real_board.active && !strcmp(tag_in(in, "kind"), "result")) {
+        struct json_value reply; json_init(&reply);
+        g_real_board.service.node_db = &g_real_board.destination;
+        bool ok = tag_real_board_rpc("list", in, &reply) && json_copy_checked(&out->data, &reply);
+        g_real_board.service.node_db = &g_real_board.source;
+        json_free(&reply); return ok;
+    }
     if (!strcmp(tag_in(in, "kind"), "offer")) g_tag.catalog_lists++;
     if (g_tag.malformed_board) return true;
     if (g_tag.page_mode == 4) {
@@ -2507,7 +2626,7 @@ struct tag_discover {
     int cards, receive, home, errors, detail, browser;
     bool keep, kept, cleanup_swap, oversized_share, fail_error_view, recovery_shown, host_original, host_prompted, host_identity, fail_host_result;
     bool report_rebuild, report_prompted, report_count_visible, close_keep, report_result, fetch_close, fetch_presenter_fail;
-    bool report_result_unavailable, report_result_count, report_result_two, report_result_publish; int comparison_mode;
+    bool report_result_unavailable, report_result_count, report_result_one, report_result_two, report_result_publish; int comparison_mode;
     bool cancel_after_error, share_canceled;
     struct zcl_command_reply *reply; char first_result[8192], image[65]; long pid; uint64_t start;
     struct tag_consumer swap;
@@ -2744,6 +2863,7 @@ static void tag_discover_report_result(struct tag_discover *d, const struct zcl_
     for (unsigned i = 0; i < model->item_count; ++i) {
         if (strstr(model->items[i].value, "unavailable")) d->report_result_unavailable = true;
         if (strstr(model->items[i].value, "0 distinct")) d->report_result_count = true;
+        if (strstr(model->items[i].value, "1 distinct")) d->report_result_one = true;
         if (strstr(model->items[i].value, "2 distinct")) d->report_result_two = true;
     }
     for (unsigned i = 0; i < model->action_count; ++i)
@@ -3205,6 +3325,16 @@ static bool tag_link_cached_second(struct tag_link_fixture *f, struct zcl_comman
     return done && status && strstr(status, "cached image") && f->discover.report_result &&
         !f->discover.report_prompted && !f->discover.report_result_publish && g_tag.posts == posts;
 }
+static bool tag_real_board_for_mode(int mode)
+{ return mode != 0 && mode != 1 ? true : tag_real_board_open(); }
+
+static bool tag_real_board_result_for_mode(int mode, const struct tag_discover *d)
+{
+    if (mode == 0) return !g_real_board.transferred;
+    if (mode == 1) return g_real_board.transferred && d->report_result_one;
+    return true;
+}
+
 static int tag_link_rebuild_choice(struct tag_world *w, int mode)
 {
     int failures = 0; struct zcl_command_reply reply, why; struct tag_link_fixture f = {0};
@@ -3217,6 +3347,7 @@ static int tag_link_rebuild_choice(struct tag_world *w, int mode)
         fixture_ready = true; ASSERT(tag_board_variant(&fresh, NULL, NULL, false));
         ASSERT(zcl_app_offer_catalog(rows, 4, &count, &why)); zcl_command_reply_free(&why); ASSERT_EQ(count, 1u);
         f.row = rows[0]; f.discover.keep = true; f.discover.reply = &reply;
+        ASSERT(tag_real_board_for_mode(mode));
         f.discover.report_rebuild = mode == 1; f.discover.close_keep = mode == 2;
         f.discover.comparison_mode = mode == 3 ? 3 : mode == 4 ? 2 : 0;
         ASSERT(setenv("HOME", fresh.j.b_home, 1) == 0);
@@ -3230,11 +3361,13 @@ static int tag_link_rebuild_choice(struct tag_world *w, int mode)
         app_discover_test_evidence_hook(NULL);
         tag_discover_capture(&f.discover);
         ASSERT(done && tag_link_rebuild_result(w, &f, &reply, mode, posts));
+        ASSERT(tag_real_board_result_for_mode(mode, &f.discover));
         if (mode == 3 || mode == 4) ASSERT(tag_comparison_seed_ok);
         if (mode == 5) ASSERT(tag_link_cached_second(&f, &reply, &hooks, fresh.j.b_datadir, posts, &shown));
         PASS();
     } _test_next:;
     app_discover_test_evidence_hook(NULL); g_tag.malformed_board = false;
+    tag_real_board_close();
     if (fixture_ready && !tag_stop_receipt(&f.discover, fresh.j.b_datadir)) ++failures;
     zcl_command_reply_free(&reply);
     if (saved_home) { (void)setenv("HOME", saved_home, 1); free(saved_home); } else (void)unsetenv("HOME");
