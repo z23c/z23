@@ -74,6 +74,64 @@ static bool losg_oneshot_snapshot_open_latches(void)
     return !boot_error_reported();
 }
 
+/* v1 USS, 104 bytes, count 0: magic, version 1, height 50. uss_open with
+ * verify_full_sha3 false accepts it. Header tip -1 is below that height. */
+static bool losg_oneshot_headers_unmet_latches(void)
+{
+    struct app_context ctx;
+    char rendered[4096];
+    char path[PATH_MAX];
+    unsigned char snap[104];
+    FILE *out;
+    bool ok = false;
+
+    if (!test_ensure_tmproot())
+        return false;
+    test_fmt_tmpdir(path, sizeof(path), "loader_owns_seed_gate", "headers");
+    memset(snap, 0, sizeof(snap));
+    memcpy(snap, "ZCLUTXO", 7);
+    snap[8] = 1;
+    snap[16] = 50;
+    out = fopen(path, "wb");
+    if (!out)
+        goto done;
+    if (fwrite(snap, 1, sizeof(snap), out) != sizeof(snap)) {
+        (void)fclose(out);
+        goto done;
+    }
+    if (fclose(out) != 0)
+        goto done;
+
+    boot_error_reset_for_testing();
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.cold_start_seed_oneshot = true;
+    ctx.load_snapshot_at_own_height = path;
+    if (boot_seed_oneshot_headers_preflight(&ctx, NULL) != false)
+        goto done;
+    if (!boot_error_reported())
+        goto done;
+    if (strcmp(boot_error_first_code(),
+               "BOOT_SEED_ONESHOT_HEADERS_UNMET") != 0)
+        goto done;
+    if (boot_error_last_render(rendered, sizeof(rendered)) == 0)
+        goto done;
+    if (strstr(rendered, "BOOT_SEED_ONESHOT_HEADERS_UNMET") == NULL)
+        goto done;
+    if (strstr(rendered, "seed.oneshot") == NULL)
+        goto done;
+    if (strstr(rendered, "seed_h=50") == NULL)
+        goto done;
+
+    boot_error_reset_for_testing();
+    memset(&ctx, 0, sizeof(ctx));
+    if (boot_seed_oneshot_headers_preflight(&ctx, NULL) != true)
+        goto done;
+    ok = !boot_error_reported();
+done:
+    (void)unlink(path);
+    return ok;
+}
+
 #define LOSG_CHECK(name, expr) do {                       \
     printf("loader_owns_seed_gate: %s... ", (name));      \
     if (expr) printf("OK\n");                             \
@@ -208,6 +266,11 @@ int test_loader_owns_seed_gate(void)
      * latches BOOT_SEED_ONESHOT_SNAPSHOT_OPEN_FAILED. Flags off do not. */
     LOSG_CHECK("d3: missing oneshot snapshot latches typed open refusal",
                losg_oneshot_snapshot_open_latches());
+
+    /* Opened snapshot, header tip below seed height: typed headers refusal.
+     * Flags off do not latch. */
+    LOSG_CHECK("d3: oneshot headers unmet latches typed refusal",
+               losg_oneshot_headers_unmet_latches());
 
     return failures;
 }

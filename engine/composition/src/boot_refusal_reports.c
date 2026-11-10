@@ -392,3 +392,14 @@ void boot_report_seed_oneshot_snapshot_open_failed(const char *path,
                       "refusing to boot",
                       NULL, 0, "path=%s err=%s", p, e);
 }
+
+void boot_report_seed_oneshot_headers_unmet(int64_t seed_h, int64_t header_tip)
+{
+    boot_error_report(BOOT_ERROR_FATAL,
+                      "BOOT_SEED_ONESHOT_HEADERS_UNMET",
+                      "seed.oneshot",
+                      "coldstart seed one-shot block index has no header "
+                      "at the snapshot height; refusing to boot",
+                      NULL, 0, "seed_h=%lld header_tip=%lld",
+                      (long long)seed_h, (long long)header_tip);
+}

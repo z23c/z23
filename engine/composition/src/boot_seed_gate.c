@@ -109,13 +109,7 @@ bool boot_seed_oneshot_headers_preflight(const struct app_context *ctx,
     int64_t hdr_tip = ms && ms->pindex_best_header
                           ? ms->pindex_best_header->nHeight : -1;
     if (!boot_seed_oneshot_headers_ready(hdr_tip, seed_h)) {
-        fprintf(stderr,
-            "FATAL: -coldstart-seed-oneshot: PREREQUISITE NOT MET — the block "
-            "index has no header at the snapshot height h=%lld (imported header "
-            "tip h=%lld). The seed one-shot cannot sync headers itself; import "
-            "the header chain to >= h=%lld first (z23 --importblockindex "
-            "<datadir-with-headers>), then re-run the seed.\n",
-            (long long)seed_h, (long long)hdr_tip, (long long)seed_h);
+        boot_report_seed_oneshot_headers_unmet(seed_h, hdr_tip);
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
             "coldstart_seed_oneshot headers_prerequisite_unmet seed_h=%lld "
             "header_tip=%lld", (long long)seed_h, (long long)hdr_tip);

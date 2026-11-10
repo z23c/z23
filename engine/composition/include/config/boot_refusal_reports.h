@@ -18,6 +18,7 @@
 #define ZCL_CONFIG_BOOT_REFUSAL_REPORTS_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -116,6 +117,12 @@ void boot_report_post_restore_corrupt(const char *datadir, int tip_h,
  * seed snapshot. */
 void boot_report_seed_oneshot_snapshot_open_failed(const char *path,
                                                    const char *err);
+
+/* BOOT_SEED_ONESHOT_HEADERS_UNMET — the snapshot opened, but the imported
+ * header tip is below the snapshot height. The one-shot cannot fetch
+ * headers itself, so boot refuses. */
+void boot_report_seed_oneshot_headers_unmet(int64_t seed_h,
+                                            int64_t header_tip);
 
 #ifdef __cplusplus
 }
