@@ -221,8 +221,23 @@ static void report_app_init_failed(const struct app_context *ctx)
  * exit code to *rc; each `main_check_*` helper returns -1 to continue or
  * the exit code main must return. */
 
+static bool main_dispatch_source_record(int argc, char **argv, int *rc)
+{
+    if (argc != 2 || strcmp(argv[1], "--source-record") != 0) return false;
+#ifdef ZCL_DEV_BUILD
+    printf("%s 1 %s\n", zcl_build_source_id_sha256(),
+           zcl_build_source_mutation_sha256());
+    *rc = 0;
+#else
+    fprintf(stderr, "--source-record is available in the development binary only; use z23 version for the public source ID.\n");
+    *rc = 1;
+#endif
+    return true;
+}
+
 static bool main_dispatch_dev_ui_modes(int argc, char **argv, int *rc)
 {
+    if (main_dispatch_source_record(argc, argv, rc)) return true;
 #ifdef ZCL_DEV_BUILD
     /* Clean-zygote reflex runner: a fresh exec of this image with an empty
      * environment and one control socket. Dispatched before ANY argument
@@ -230,12 +245,6 @@ static bool main_dispatch_dev_ui_modes(int argc, char **argv, int *rc)
      * reads configuration, a datadir or keys. Exact argv shape only. */
     if (zcl_reflex_runner_dispatch(argc, argv, rc))
         return true;
-    if (argc == 2 && strcmp(argv[1], "--source-record") == 0) {
-        printf("%s 1 %s\n", zcl_build_source_id_sha256(),
-               zcl_build_source_mutation_sha256());
-        *rc = 0;
-        return true;
-    }
     if (argc == 6 && strcmp(argv[1], "--z23-internal-watch-worker") == 0) {
         char *end = NULL;
         uint64_t inherited = strtoull(argv[2], &end, 10);

@@ -48,7 +48,9 @@
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
+#include <dirent.h>
 #include <poll.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #endif
 #include <sys/stat.h>
@@ -833,6 +835,64 @@ static int cas_test_daemon_mode_tolerant_and_warns(void)
 }
 
 #if !defined(_WIN32)
+static bool cas_directory_only(const char *path, const char *allowed)
+{
+    DIR *d = opendir(path);
+    if (!d) return false;
+    bool ok = true; struct dirent *entry;
+    errno = 0;
+    while ((entry = readdir(d)) != NULL) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (strcmp(entry->d_name, allowed)) ok = false;
+    }
+    if (errno) ok = false;
+    if (closedir(d)) ok = false;
+    return ok;
+}
+
+static int cas_test_public_source_record_refuses(void)
+{
+    int failures = 0;
+    TEST("public source-record query refuses before boot") {
+        char home[PATH_MAX], datadir[PATH_MAX], lockpath[PATH_MAX], env_home[PATH_MAX + 8];
+        char crash[PATH_MAX], beacon[PATH_MAX], output[16384] = {0};
+        test_fmt_tmpdir(home, sizeof(home), "zcl_cas_source_record", "home");
+        (void)test_ensure_tmproot();
+        cas_mkdir_p(home);
+        ASSERT(snprintf(datadir, sizeof(datadir), "%s/%s", home, ZCL_CLI_RELEASE_DATADIR) < (int)sizeof(datadir));
+        ASSERT(mkdir(datadir, 0700) == 0);
+        ASSERT(snprintf(lockpath, sizeof(lockpath), "%s/zclassic23.pid", datadir) < (int)sizeof(lockpath));
+        ASSERT(snprintf(crash, sizeof(crash), "%s/crash_log.txt", datadir) < (int)sizeof(crash));
+        ASSERT(snprintf(beacon, sizeof(beacon), "%s/boot_status.json", datadir) < (int)sizeof(beacon));
+        ASSERT(snprintf(env_home, sizeof(env_home), "HOME=%s", home) < (int)sizeof(env_home));
+        int fd = open(lockpath, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        ASSERT(fd >= 0);
+        bool locked = flock(fd, LOCK_EX | LOCK_NB) == 0;
+        if (!locked) close(fd);
+        ASSERT(locked);
+        const char *argv[] = {"/usr/bin/env", "-i", env_home, "PATH=/usr/bin:/bin",
+                              CAS_BIN, "--source-record", NULL};
+        bool timed_out = false;
+        int rc = zcl_spawn_capture_merged_observed(argv, output, sizeof(output), 20000, &timed_out);
+        bool clean = !cas_file_exists(crash) && !cas_file_exists(beacon) &&
+                     cas_directory_only(datadir, "zclassic23.pid") &&
+                     cas_directory_only(home, ZCL_CLI_RELEASE_DATADIR);
+        (void)flock(fd, LOCK_UN); close(fd);
+        if (rc != 1 || !cas_contains(output, "development binary only"))
+            fprintf(stderr, "public source-record rc=%d timeout=%d output=%s\n", rc, timed_out, output);
+        ASSERT(!timed_out);
+        ASSERT_EQ(rc, 1);
+        ASSERT(cas_contains(output, "development binary only"));
+        ASSERT(cas_contains(output, "z23 version"));
+        ASSERT(!cas_contains(output, "z23 starting"));
+        ASSERT(clean);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
+#if !defined(_WIN32)
 /* Keep this exact loopback port occupied throughout the child invocation.
  * CLOEXEC prevents the node from inheriting the fixture's listener. */
 static platform_socket_t cas_hold_bind_collision_once(uint16_t *port)
@@ -1441,6 +1501,9 @@ int test_cli_argv_strict(void)
     failures += cas_test_extended_transaction_catalog_fits();
     failures += cas_test_extended_transaction_guide_fits();
     failures += cas_test_daemon_mode_tolerant_and_warns();
+#if !defined(_WIN32)
+    failures += cas_test_public_source_record_refuses();
+#endif
     failures += cas_test_explicit_bind_failure_exits();
     failures += cas_test_noisetransport_is_recognized();
     failures += cas_test_overlong_datadir_refuses();
