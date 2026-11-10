@@ -2275,7 +2275,7 @@ ZCL_COMMAND_READY_COMMAND(
     "land,submit,queue,lane,tip",
     "zcl.land_submit_input.v1", "zcl.land.v1",
     "tip,worktree,note,json,qualify,precheck,precheck_budget_ms,plan_id,confirm", "",
-    "z23 dev land submit --worktree=PATH --qualify",
+    "z23 dev land submit --worktree=PATH",
     ZCL_COMMAND_LAYER_DEV,
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
