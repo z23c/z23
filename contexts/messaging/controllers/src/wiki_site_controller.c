@@ -213,6 +213,47 @@ static size_t ws_put_esc(char *buf, size_t max, size_t off, const char *s)
     return off;
 }
 
+/* Recognize only a bounded, valid wiki slug. Invalid markup remains text. */
+static size_t ws_link_slug(const char *s, char slug[FLEET_BOARD_SLUG_MAX + 1])
+{
+    if (s[0] != '[' || s[1] != '[') return 0;
+    size_t n = 0;
+    while (n <= FLEET_BOARD_SLUG_MAX && s[n + 2] && s[n + 2] != ']') n++;
+    if (n == 0 || n > FLEET_BOARD_SLUG_MAX || s[n + 2] != ']' ||
+        s[n + 3] != ']') return 0;
+    memcpy(slug, s + 2, n);
+    slug[n] = '\0';
+    return fleet_board_slug_valid(slug) ? n + 4 : 0;
+}
+
+/* Only plain page HTML interprets wiki links; the signed text remains intact. */
+static size_t ws_put_page_text(char *buf, size_t cap, size_t off,
+                               const char *s, const char *base)
+{
+    char chunk[257], slug[FLEET_BOARD_SLUG_MAX + 1];
+    size_t used = 0;
+    while (*s) {
+        size_t link = ws_link_slug(s, slug);
+        if (link || used == sizeof(chunk) - 1) {
+            chunk[used] = '\0';
+            off = ws_put_esc(buf, cap, off, chunk);
+            used = 0;
+        }
+        if (link) {
+            SITE_APPEND(off, buf, cap, "<a href='%s/", base);
+            off = ws_put_esc(buf, cap, off, slug);
+            SITE_APPEND(off, buf, cap, "'>[[");
+            off = ws_put_esc(buf, cap, off, slug);
+            SITE_APPEND(off, buf, cap, "]]</a>");
+            s += link;
+        } else {
+            chunk[used++] = *s++;
+        }
+    }
+    chunk[used] = '\0';
+    return ws_put_esc(buf, cap, off, chunk);
+}
+
 static void ws_iso(uint64_t ts, char out[24])
 {
     struct tm tm;
@@ -713,7 +754,7 @@ static size_t ws_page_html(char *buf, size_t cap, const struct ws_page *pg,
         off = ws_entry_html(buf, cap, off, pg->entry);
     } else {
         SITE_APPEND(off, buf, cap, "<pre>");
-        off = ws_put_esc(buf, cap, off, pg->text);
+        off = ws_put_page_text(buf, cap, off, pg->text, base);
         SITE_APPEND(off, buf, cap, "</pre>");
     }
     SITE_APPEND(off, buf, cap,

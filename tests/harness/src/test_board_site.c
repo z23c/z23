@@ -1044,6 +1044,81 @@ static int test_board_site_apps(void)
     return failures;
 }
 
+static int test_board_site_wiki_links(void)
+{
+    int failures = 0;
+    TEST("board site: signed wiki text links stay bounded and mount-relative") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed[32], pk[32], id[32];
+        bs_identity(17, seed, pk);
+        uint64_t now = (uint64_t)platform_time_wall_time_t();
+        static const char text[] =
+            "Read [[getting-started]] and [[a-2]]. "
+            "Invalid [[Bad]] [[-bad]] [[bad-]] [[]] [[bad/path]] "
+            "[[a' onclick='x]] <script>alert(1)</script> "
+            "[[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]]";
+        ASSERT(bsw_add(&db, seed, pk, "links", "Links", "lane-a", text,
+                       FLEET_BOARD_SCOPE_PUBLIC, now, NULL, id));
+        char dense[FLEET_BOARD_TEXT_MAX + 1];
+        size_t used = 0;
+        while (used + 5 <= FLEET_BOARD_TEXT_MAX) {
+            memcpy(dense + used, "[[a]]", 5);
+            used += 5;
+        }
+        dense[used] = '\0';
+        ASSERT(bsw_add(&db, seed, pk, "dense", "Dense", "lane-a", dense,
+                       FLEET_BOARD_SCOPE_PUBLIC, now + 1, NULL, id));
+        struct db_service service = {.node_db = &db, .started = true};
+        struct app_runtime_context runtime = {.db_service = &service};
+        app_runtime_set_current(&runtime);
+        wiki_site_cache_reset_for_testing();
+        const char *resp = bsw_get("GET", "/wiki/links");
+        ASSERT(strstr(resp, "200 OK"));
+        ASSERT(strstr(resp, "<a href='/wiki/getting-started'>[[getting-started]]</a>"));
+        ASSERT(strstr(resp, "<a href='/wiki/a-2'>[[a-2]]</a>"));
+        ASSERT(strstr(resp, "[[Bad]] [[-bad]] [[bad-]] [[]] [[bad/path]]"));
+        ASSERT(strstr(resp, "&lt;script&gt;alert(1)&lt;/script&gt;"));
+        ASSERT(!strstr(resp, "<script>alert(1)</script>"));
+        ASSERT(!strstr(resp, "href='/wiki/Bad'"));
+        ASSERT(!strstr(resp, "href='/wiki/bad/path'"));
+        ASSERT(!strstr(resp, "href='/wiki/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"));
+        ASSERT(!strstr(resp, "onclick='x'"));
+        resp = bsw_get("GET", "/board/wiki/links");
+        ASSERT(strstr(resp, "<a href='/board/wiki/getting-started'>[[getting-started]]</a>"));
+        ASSERT(strstr(resp, "<a href='/board/wiki/a-2'>[[a-2]]</a>"));
+        resp = bsw_get("GET", "/wiki/links.json");
+        struct json_value doc;
+        ASSERT(bsw_json(resp, &doc));
+        ASSERT_EQ(strcmp(json_get_str(json_get(&doc, "text")), text), 0);
+        json_free(&doc);
+        resp = bsw_get("GET", "/wiki/links.txt");
+        ASSERT(strstr(resp, "200 OK"));
+        ASSERT_EQ(strcmp(bsw_body(resp), text), 0);
+        resp = bsw_get("GET", "/wiki/dense");
+        ASSERT(strstr(resp, "200 OK"));
+        ASSERT(strstr(resp, "</html>"));
+        const char *body = bsw_body(resp);
+        size_t links = 0;
+        while ((body = strstr(body, "<a href='/wiki/a'>[[a]]</a>")) != NULL) {
+            links++;
+            body++;
+        }
+        ASSERT_EQ(links, used / 5);
+        size_t n = wiki_site_handle_request("GET", "/wiki/dense", NULL, 0,
+                                            g_resp, 8192, NULL);
+        ASSERT(n > 0 && n < 8192);
+        g_resp[n] = '\0';
+        ASSERT(strstr((char *)g_resp, "503 Service Unavailable"));
+        ASSERT(!strstr((char *)g_resp, "<a href='/wiki/a'>"));
+        app_runtime_set_current(NULL);
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_board_site(void)
 {
     int failures = 0;
@@ -1163,6 +1238,7 @@ int test_board_site(void)
     failures += test_board_site_single_post();
     failures += test_board_site_wiki();
     failures += test_board_site_wiki_hardening();
+    failures += test_board_site_wiki_links();
     failures += test_board_site_wiki_root_route();
     zcl_fleet_role_checker_install(NULL);
     return failures;
