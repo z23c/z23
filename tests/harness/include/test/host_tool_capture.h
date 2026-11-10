@@ -8,24 +8,34 @@
 #include "util/spawn.h"
 #if defined(_WIN32)
 #include "platform/process_lifecycle.h"
+
+static inline bool test_host_tool_windows_env(const char *const argv[], char *image,
+                                              size_t image_size, char *system_root,
+                                              size_t root_size, char *search_path,
+                                              size_t path_size)
+{
+    char cwd[PATH_MAX];
+    const char *root = getenv("SystemRoot"), *path = getenv("PATH");
+    if (!argv || !argv[0] || !root || !path || !getcwd(cwd, sizeof(cwd)))
+        return false;
+    int n = snprintf(image, image_size, "%s/%s", cwd, argv[0]);
+    if (n <= 0 || (size_t)n >= image_size) return false;
+    n = snprintf(system_root, root_size, "SystemRoot=%s", root);
+    if (n <= 0 || (size_t)n >= root_size) return false;
+    n = snprintf(search_path, path_size, "Path=%s", path);
+    return n > 0 && (size_t)n < path_size;
+}
 #endif
 
 static inline int test_host_tool_capture(const char *const argv[], char *out,
                                          size_t out_size, uint32_t timeout_ms)
 {
 #if defined(_WIN32)
-    char cwd[PATH_MAX], image[PATH_MAX], system_root[PATH_MAX + 16];
+    char image[PATH_MAX], system_root[PATH_MAX + 16];
     char search_path[8192];
-    const char *root = getenv("SystemRoot");
-    const char *path = getenv("PATH");
-    if (!argv || !argv[0] || !root || !path || !getcwd(cwd, sizeof(cwd)))
+    if (!test_host_tool_windows_env(argv, image, sizeof(image), system_root,
+                                    sizeof(system_root), search_path, sizeof(search_path)))
         return -1;
-    int n = snprintf(image, sizeof(image), "%s/%s", cwd, argv[0]);
-    if (n <= 0 || (size_t)n >= sizeof(image)) return -1;
-    n = snprintf(system_root, sizeof(system_root), "SystemRoot=%s", root);
-    if (n <= 0 || (size_t)n >= sizeof(system_root)) return -1;
-    n = snprintf(search_path, sizeof(search_path), "Path=%s", path);
-    if (n <= 0 || (size_t)n >= sizeof(search_path)) return -1;
     /* Retain the runner's DLL search route for locally built host tools. */
     const char *env[] = {system_root, search_path, NULL};
     const struct platform_process_options options = {

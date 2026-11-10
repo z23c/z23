@@ -99,6 +99,12 @@ static bool probe_restore(int saved, int target)
     return ok;
 }
 
+static bool probe_windows_redirect(int saved_out, int saved_err, int out, int err, bool quiet_error)
+{
+    bool redirected = saved_out >= 0 && saved_err >= 0 && out >= 0 && (!quiet_error || err >= 0);
+    if (redirected) redirected = _dup2(out, 1) == 0 && _dup2(quiet_error ? err : out, 2) == 0;
+    return redirected;
+}
 static intptr_t probe_windows_start(size_t index, const char *const argv[], const char *log, bool quiet_error)
 {
     const char *quoted[64] = {0};
@@ -112,8 +118,7 @@ static intptr_t probe_windows_start(size_t index, const char *const argv[], cons
     int out = _open(log, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, _S_IREAD | _S_IWRITE);
     int err = quiet_error ? _open("NUL", _O_WRONLY | _O_BINARY) : -1;
     intptr_t child = -1;
-    bool redirected = saved_out >= 0 && saved_err >= 0 && out >= 0 && (!quiet_error || err >= 0);
-    if (redirected) redirected = _dup2(out, 1) == 0 && _dup2(quiet_error ? err : out, 2) == 0;
+    bool redirected = probe_windows_redirect(saved_out, saved_err, out, err, quiet_error);
     if (redirected) child = _spawnvp(_P_NOWAIT, argv[0], quoted);
     bool restored_out = probe_restore(saved_out, 1);
     bool restored_err = probe_restore(saved_err, 2);
