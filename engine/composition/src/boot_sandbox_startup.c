@@ -2,6 +2,7 @@
  * Boot confinement profile and filesystem grants. */
 #include "boot_cutover_startup_internal.h"
 #include "config/boot.h"
+#include "config/boot_error.h"
 #include "platform/os_sandbox.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
@@ -164,8 +165,15 @@ struct zcl_result boot_sandbox_enter(const struct app_context *actx, const char 
         return ZCL_OK;  /* -sandbox=off (default): no confinement requested */
     os_sandbox_note_requested("node_steady_state");
     const char *datadir = actx->datadir ? actx->datadir : fallback;
-    if (!datadir || !datadir[0])
+    if (!datadir || !datadir[0]) {
+        boot_error_report(BOOT_ERROR_FATAL,
+            "BOOT_SANDBOX_STEADY_REFUSED",
+            "sandbox.steady",
+            "sandbox steady refused: no datadir to grant",
+            NULL, 0,
+            "stage=sandbox_no_datadir");
         return ZCL_ERR(-1, "-sandbox=steady: no datadir to grant");
+    }
     char scratch[4][PATH_MAX];
     struct os_sandbox_path_rule rules[3];
     size_t n = sandbox_build_fs_rules(datadir, rules, 3, /*extra_ro=*/false,

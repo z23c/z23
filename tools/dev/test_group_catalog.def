@@ -205,6 +205,7 @@ ZCL_TEST_GROUP(state_offer_peer)
 ZCL_TEST_GROUP(state_offer_onion_link)
 ZCL_TEST_GROUP(state_offer_store)
 ZCL_TEST_GROUP(install_bundle_request_refusal)
+ZCL_TEST_GROUP(sandbox_steady_refusal)
 ZCL_TEST_GROUP(stale_offers_only)
 /* mesh terminal open/receipt/data/resize/close wire codec and receipt proof */
 ZCL_TEST_GROUP(mesh_terminal_proto)
