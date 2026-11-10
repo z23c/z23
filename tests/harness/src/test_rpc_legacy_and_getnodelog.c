@@ -674,6 +674,28 @@ static bool rpc_ere_named_classes(void)
            memcmp(bits, before, sizeof bits) == 0;
 }
 
+static bool rpc_ere_error_cases(void)
+{
+    static const struct { const char *pattern, *error; } cases[] = {
+        {"a{65}", "repetition count above the supported bound"},
+        {"a{1,65}", "repetition count above the supported bound"},
+        {"a{1,x}", "missing repetition bound"},
+        {"a{1,2", "unmatched '{'"},
+        {"a{3,2}", "repetition bounds are inverted"},
+        {"[[:digit", "unterminated character class name"},
+        {"[[:bogus:]]", "unknown character class name"},
+        {"[z-a]", "invalid range end in bracket expression"},
+        {"[abc", "unterminated bracket expression"},
+    };
+    struct zcl_ere *re = malloc(sizeof(*re));
+    bool ok = re != NULL;
+    for (size_t i = 0; ok && i < sizeof cases / sizeof cases[0]; i++)
+        ok = !zcl_ere_compile(re, cases[i].pattern) &&
+             strcmp(zcl_ere_error(re), cases[i].error) == 0;
+    free(re);
+    return ok;
+}
+
 int check_rpc_ere_matcher(void)
 {
     int failures = 0;
@@ -705,6 +727,8 @@ int check_rpc_ere_matcher(void)
             {"ab?c", "ac", true}, {"ab?c", "abbc", false},
             {"a{2}", "a", false}, {"a{2}", "aa", true},
             {"^a{2}$", "aaa", false},
+            {"^a{0}$", "", true}, {"^a{0}$", "a", false},
+            {"^a{2}{2}$", "aaaa", true}, {"^a{2}{2}$", "aa", false},
             {"^ab{2,}$", "abb", true}, {"^ab{2,}$", "ab", false},
             {"^ab{1,3}$", "abbb", true}, {"^ab{1,3}$", "abbbb", false},
             {"^a{,2}$", "aa", true}, {"^a{,2}$", "aaa", false},
@@ -765,6 +789,10 @@ int check_rpc_ere_matcher(void)
         free(re);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    printf("ere matcher: malformed bounds and brackets retain their errors... ");
+    if (rpc_ere_error_cases()) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
 
     /* A pattern the matcher cannot honour must be REFUSED with a reason, so
      * an accepted pattern never silently stops matching. */

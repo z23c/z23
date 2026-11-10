@@ -300,6 +300,70 @@ static inline bool zcl_ere_class_named(uint32_t bits[8], const char *name,
     return true;
 }
 
+static inline bool zcl_ere_bracket_named(struct zcl_ere_parser *ps, uint32_t bits[8])
+{
+    size_t name_start = ps->pos + 2;
+    size_t scan = name_start;
+    while (scan + 1 < ps->length &&
+           !(ps->pattern[scan] == ':' && ps->pattern[scan + 1] == ']'))
+        scan++;
+    if (scan + 1 >= ps->length) {
+        zcl_ere_fail(ps, "unterminated character class name");
+        return false;
+    }
+    if (!zcl_ere_class_named(bits, ps->pattern + name_start, scan - name_start)) {
+        zcl_ere_fail(ps, "unknown character class name");
+        return false;
+    }
+    ps->pos = scan + 2;
+    return true;
+}
+
+static inline bool zcl_ere_bracket_member(struct zcl_ere_parser *ps,
+                                           uint32_t bits[8], unsigned char c)
+{
+    ps->pos++;
+    if (ps->pos + 1 < ps->length && ps->pattern[ps->pos] == '-' &&
+        ps->pattern[ps->pos + 1] != ']') {
+        ps->pos++;
+        unsigned char high = (unsigned char)ps->pattern[ps->pos];
+        ps->pos++;
+        if (high < c) {
+            zcl_ere_fail(ps, "invalid range end in bracket expression");
+            return false;
+        }
+        for (unsigned value = c; value <= high; value++)
+            zcl_ere_class_set(bits, (unsigned char)value);
+    } else {
+        zcl_ere_class_set(bits, c);
+    }
+    return true;
+}
+
+static inline struct zcl_ere_fragment zcl_ere_bracket_finish(
+    struct zcl_ere_parser *ps, uint32_t bits[8], bool negate)
+{
+    if (negate)
+        for (int i = 0; i < 8; i++) bits[i] = ~bits[i];
+    for (int32_t i = 0; i < ps->re->class_count; i++)
+        if (memcmp(ps->re->classes[i], bits, sizeof(ps->re->classes[i])) == 0)
+            return zcl_ere_consumer(ps, ZCL_ERE_OP_CLASS, 0, i);
+    if (ps->re->class_count >= ZCL_ERE_MAX_CLASSES) {
+        zcl_ere_fail(ps, "too many distinct bracket expressions");
+        return zcl_ere_empty(ps);
+    }
+    int32_t cls = ps->re->class_count++;
+    memcpy(ps->re->classes[cls], bits, sizeof(ps->re->classes[cls]));
+    return zcl_ere_consumer(ps, ZCL_ERE_OP_CLASS, 0, cls);
+}
+
+static inline bool zcl_ere_bracket_unsupported(struct zcl_ere_parser *ps,
+                                                unsigned char c)
+{
+    return c == '[' && ps->pos + 1 < ps->length &&
+           (ps->pattern[ps->pos + 1] == '.' || ps->pattern[ps->pos + 1] == '=');
+}
+
 static inline struct zcl_ere_fragment zcl_ere_parse_bracket(
     struct zcl_ere_parser *ps)
 {
@@ -322,70 +386,66 @@ static inline struct zcl_ere_fragment zcl_ere_parse_bracket(
             break;
         }
         first = false;
-        if (c == '[' && ps->pos + 1 < ps->length &&
-            (ps->pattern[ps->pos + 1] == '.' ||
-             ps->pattern[ps->pos + 1] == '=')) {
+        if (zcl_ere_bracket_unsupported(ps, c)) {
             zcl_ere_fail(ps, "collating symbols and equivalence classes are "
                              "not supported");
             return zcl_ere_empty(ps);
         }
         if (c == '[' && ps->pos + 1 < ps->length &&
             ps->pattern[ps->pos + 1] == ':') {
-            size_t name_start = ps->pos + 2;
-            size_t scan = name_start;
-            while (scan + 1 < ps->length &&
-                   !(ps->pattern[scan] == ':' && ps->pattern[scan + 1] == ']'))
-                scan++;
-            if (scan + 1 >= ps->length) {
-                zcl_ere_fail(ps, "unterminated character class name");
+            if (!zcl_ere_bracket_named(ps, bits))
                 return zcl_ere_empty(ps);
-            }
-            if (!zcl_ere_class_named(bits, ps->pattern + name_start,
-                                     scan - name_start)) {
-                zcl_ere_fail(ps, "unknown character class name");
-                return zcl_ere_empty(ps);
-            }
-            ps->pos = scan + 2;
             continue;
         }
-        ps->pos++;
         /* A '-' is a range only between two members; trailing '-' is a
          * literal, matching POSIX and glibc. Backslash is NOT an escape
          * inside a bracket expression: POSIX makes it an ordinary member. */
-        if (ps->pos + 1 < ps->length && ps->pattern[ps->pos] == '-' &&
-            ps->pattern[ps->pos + 1] != ']') {
-            ps->pos++;
-            unsigned char high = (unsigned char)ps->pattern[ps->pos];
-            ps->pos++;
-            if (high < c) {
-                zcl_ere_fail(ps, "invalid range end in bracket expression");
-                return zcl_ere_empty(ps);
-            }
-            for (unsigned value = c; value <= high; value++)
-                zcl_ere_class_set(bits, (unsigned char)value);
-        } else {
-            zcl_ere_class_set(bits, c);
-        }
+        if (!zcl_ere_bracket_member(ps, bits, c)) return zcl_ere_empty(ps);
     }
-    if (negate)
-        for (int i = 0; i < 8; i++)
-            bits[i] = ~bits[i];
     /* Counted repetition re-parses its unit, so the same bracket expression
      * arrives once per copy. Share one table entry for equal sets. */
-    for (int32_t i = 0; i < ps->re->class_count; i++)
-        if (memcmp(ps->re->classes[i], bits, sizeof(bits)) == 0)
-            return zcl_ere_consumer(ps, ZCL_ERE_OP_CLASS, 0, i);
-    if (ps->re->class_count >= ZCL_ERE_MAX_CLASSES) {
-        zcl_ere_fail(ps, "too many distinct bracket expressions");
-        return zcl_ere_empty(ps);
-    }
-    int32_t cls = ps->re->class_count++;
-    memcpy(ps->re->classes[cls], bits, sizeof(bits));
-    return zcl_ere_consumer(ps, ZCL_ERE_OP_CLASS, 0, cls);
+    return zcl_ere_bracket_finish(ps, bits, negate);
 }
 
 static inline struct zcl_ere_fragment zcl_ere_parse_alternation(
     struct zcl_ere_parser *ps);
+
+static inline struct zcl_ere_fragment zcl_ere_parse_group(struct zcl_ere_parser *ps)
+{
+    if (ps->depth >= ZCL_ERE_MAX_DEPTH) {
+        zcl_ere_fail(ps, "pattern nests too deeply");
+        return zcl_ere_empty(ps);
+    }
+    ps->pos++;
+    ps->depth++;
+    struct zcl_ere_fragment inner = zcl_ere_parse_alternation(ps);
+    ps->depth--;
+    if (ps->failed) return inner;
+    if (ps->pos >= ps->length || ps->pattern[ps->pos] != ')') {
+        zcl_ere_fail(ps, "unmatched '('");
+        return inner;
+    }
+    ps->pos++;
+    return inner;
+}
+
+static inline struct zcl_ere_fragment zcl_ere_parse_escape(struct zcl_ere_parser *ps)
+{
+    ps->pos++;
+    if (ps->pos >= ps->length) {
+        zcl_ere_fail(ps, "trailing backslash");
+        return zcl_ere_empty(ps);
+    }
+    unsigned char escaped = (unsigned char)ps->pattern[ps->pos];
+    if ((escaped >= 'a' && escaped <= 'z') ||
+        (escaped >= 'A' && escaped <= 'Z') ||
+        (escaped >= '0' && escaped <= '9')) {
+        zcl_ere_fail_at(ps, "unsupported escape after backslash", (char)escaped);
+        return zcl_ere_empty(ps);
+    }
+    ps->pos++;
+    return zcl_ere_consumer(ps, ZCL_ERE_OP_CHAR, escaped, -1);
+}
 
 static inline struct zcl_ere_fragment zcl_ere_parse_atom(
     struct zcl_ere_parser *ps)
@@ -394,24 +454,7 @@ static inline struct zcl_ere_fragment zcl_ere_parse_atom(
         return zcl_ere_empty(ps);
     char c = ps->pattern[ps->pos];
     switch (c) {
-    case '(': {
-        if (ps->depth >= ZCL_ERE_MAX_DEPTH) {
-            zcl_ere_fail(ps, "pattern nests too deeply");
-            return zcl_ere_empty(ps);
-        }
-        ps->pos++;
-        ps->depth++;
-        struct zcl_ere_fragment inner = zcl_ere_parse_alternation(ps);
-        ps->depth--;
-        if (ps->failed)
-            return inner;
-        if (ps->pos >= ps->length || ps->pattern[ps->pos] != ')') {
-            zcl_ere_fail(ps, "unmatched '('");
-            return inner;
-        }
-        ps->pos++;
-        return inner;
-    }
+    case '(': return zcl_ere_parse_group(ps);
     case '[':
         return zcl_ere_parse_bracket(ps);
     case '.':
@@ -432,23 +475,7 @@ static inline struct zcl_ere_fragment zcl_ere_parse_atom(
     case ')':
         zcl_ere_fail(ps, "unmatched ')'");
         return zcl_ere_empty(ps);
-    case '\\': {
-        ps->pos++;
-        if (ps->pos >= ps->length) {
-            zcl_ere_fail(ps, "trailing backslash");
-            return zcl_ere_empty(ps);
-        }
-        unsigned char escaped = (unsigned char)ps->pattern[ps->pos];
-        if ((escaped >= 'a' && escaped <= 'z') ||
-            (escaped >= 'A' && escaped <= 'Z') ||
-            (escaped >= '0' && escaped <= '9')) {
-            zcl_ere_fail_at(ps, "unsupported escape after backslash",
-                            (char)escaped);
-            return zcl_ere_empty(ps);
-        }
-        ps->pos++;
-        return zcl_ere_consumer(ps, ZCL_ERE_OP_CHAR, escaped, -1);
-    }
+    case '\\': return zcl_ere_parse_escape(ps);
     default:
         ps->pos++;
         return zcl_ere_consumer(ps, ZCL_ERE_OP_CHAR, (unsigned char)c, -1);
@@ -459,22 +486,30 @@ static inline struct zcl_ere_fragment zcl_ere_parse_atom(
  * '{' follows an expression it always starts an interval: malformed content
  * is an error, not a literal brace, which is what glibc does. A literal brace
  * is written `\{`. */
+static inline bool zcl_ere_interval_number(struct zcl_ere_parser *ps,
+                                            size_t *scan, int *value, int *digits)
+{
+    *value = 0;
+    *digits = 0;
+    while (*scan < ps->length && ps->pattern[*scan] >= '0' &&
+           ps->pattern[*scan] <= '9') {
+        *value = *value * 10 + (ps->pattern[*scan] - '0');
+        if (*value > ZCL_ERE_MAX_REPEAT) {
+            zcl_ere_fail(ps, "repetition count above the supported bound");
+            return false;
+        }
+        (*digits)++;
+        (*scan)++;
+    }
+    return true;
+}
+
 static inline bool zcl_ere_parse_interval(struct zcl_ere_parser *ps, int *low,
                                           int *high, size_t *after)
 {
     size_t scan = ps->pos + 1;
-    int lo = 0;
-    int digits = 0;
-    while (scan < ps->length && ps->pattern[scan] >= '0' &&
-           ps->pattern[scan] <= '9') {
-        lo = lo * 10 + (ps->pattern[scan] - '0');
-        if (lo > ZCL_ERE_MAX_REPEAT) {
-            zcl_ere_fail(ps, "repetition count above the supported bound");
-            return false;
-        }
-        digits++;
-        scan++;
-    }
+    int lo, digits;
+    if (!zcl_ere_interval_number(ps, &scan, &lo, &digits)) return false;
     if (digits == 0 && (scan >= ps->length || ps->pattern[scan] != ',')) {
         zcl_ere_fail(ps, "invalid content of '{}'");
         return false;
@@ -485,19 +520,7 @@ static inline bool zcl_ere_parse_interval(struct zcl_ere_parser *ps, int *low,
         if (scan < ps->length && ps->pattern[scan] == '}') {
             hi = -1;
         } else {
-            hi = 0;
-            digits = 0;
-            while (scan < ps->length && ps->pattern[scan] >= '0' &&
-                   ps->pattern[scan] <= '9') {
-                hi = hi * 10 + (ps->pattern[scan] - '0');
-                if (hi > ZCL_ERE_MAX_REPEAT) {
-                    zcl_ere_fail(ps,
-                                 "repetition count above the supported bound");
-                    return false;
-                }
-                digits++;
-                scan++;
-            }
+            if (!zcl_ere_interval_number(ps, &scan, &hi, &digits)) return false;
             if (digits == 0) {
                 zcl_ere_fail(ps, "missing repetition bound");
                 return false;
@@ -574,6 +597,14 @@ static inline struct zcl_ere_fragment zcl_ere_build_interval(
     return have_result ? zcl_ere_concat(ps, result, tail) : tail;
 }
 
+static inline bool zcl_ere_repeat_anchor(struct zcl_ere_parser *ps,
+                                         struct zcl_ere_fragment fragment)
+{
+    return !ps->failed && fragment.entry >= 0 &&
+           (ps->re->states[fragment.entry].op == ZCL_ERE_OP_BOL ||
+            ps->re->states[fragment.entry].op == ZCL_ERE_OP_EOL);
+}
+
 static inline struct zcl_ere_fragment zcl_ere_parse_repeat(
     struct zcl_ere_parser *ps)
 {
@@ -583,9 +614,7 @@ static inline struct zcl_ere_fragment zcl_ere_parse_repeat(
     struct zcl_ere_fragment fragment = zcl_ere_parse_atom(ps);
     /* An anchor is not a repeatable expression; glibc refuses `^*` and `$?`
      * and so does this, rather than inventing a meaning for them. */
-    bool anchor = !ps->failed && fragment.entry >= 0 &&
-                  (ps->re->states[fragment.entry].op == ZCL_ERE_OP_BOL ||
-                   ps->re->states[fragment.entry].op == ZCL_ERE_OP_EOL);
+    bool anchor = zcl_ere_repeat_anchor(ps, fragment);
     while (!ps->failed && ps->pos < ps->length) {
         char c = ps->pattern[ps->pos];
         if (anchor && (c == '*' || c == '+' || c == '?' || c == '{')) {
@@ -699,6 +728,15 @@ static inline const char *zcl_ere_error(const struct zcl_ere *re)
 
 /* Add `state` and its epsilon closure to `list`, evaluating the '^' and '$'
  * assertions at `pos`. Sets `matched` if the closure reaches accept. */
+static inline void zcl_ere_add_split(struct zcl_ere *re, int32_t *top,
+                                      int32_t capacity, const struct zcl_ere_state *s)
+{
+    if (*top + 2 <= capacity) {
+        re->work[(*top)++] = s->out1;
+        re->work[(*top)++] = s->out;
+    }
+}
+
 static inline void zcl_ere_add(struct zcl_ere *re, int32_t *list, int32_t *n,
                                int32_t state, size_t pos, size_t length,
                                bool *matched)
@@ -714,10 +752,7 @@ static inline void zcl_ere_add(struct zcl_ere *re, int32_t *list, int32_t *n,
         const struct zcl_ere_state *s = &re->states[index];
         switch (s->op) {
         case ZCL_ERE_OP_SPLIT:
-            if (top + 2 <= capacity) {
-                re->work[top++] = s->out1;
-                re->work[top++] = s->out;
-            }
+            zcl_ere_add_split(re, &top, capacity, s);
             break;
         case ZCL_ERE_OP_JUMP:
             if (top < capacity) re->work[top++] = s->out;
