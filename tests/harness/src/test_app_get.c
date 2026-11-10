@@ -81,6 +81,8 @@ int test_app_get(void)
 #include <sys/wait.h>
 #include <signal.h>
 #include <poll.h>
+#include <pthread.h>
+#include <time.h>
 #include <stdatomic.h>
 #include <unistd.h>
 
@@ -660,6 +662,52 @@ static bool tag_net_fetch(void *context, const char *onion, const char *path,
     *len = size; *status = 200; return true;
 }
 
+struct tag_parallel {
+    struct tag_net net;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    unsigned entered;
+    bool overlap, missed;
+};
+static bool tag_parallel_fetch(void *context, const char *onion, const char *path,
+    uint8_t *out, size_t cap, size_t *len, int *status, unsigned timeout_ms)
+{
+    struct tag_parallel *p = context;
+    pthread_mutex_lock(&p->mutex);
+    if (strstr(path, "/slice/") && p->entered < 2) {
+        p->entered++;
+        if (p->entered == 2) { p->overlap = !p->missed; pthread_cond_broadcast(&p->cond); }
+        else {
+            struct timespec until; clock_gettime(CLOCK_REALTIME, &until); until.tv_sec += 2;
+            while (!p->overlap && pthread_cond_timedwait(&p->cond, &p->mutex, &until) == 0) { }
+            if (!p->overlap) p->missed = true;
+        }
+    }
+    bool ok = tag_net_fetch(&p->net, onion, path, out, cap, len, status, timeout_ms);
+    pthread_mutex_unlock(&p->mutex);
+    return ok;
+}
+static bool tag_network_parallel(void)
+{
+    struct tag_parallel p = {0}; char dir[TAG_PATH] = {0};
+    if (pthread_mutex_init(&p.mutex, NULL) || pthread_cond_init(&p.cond, NULL)) return false;
+    bool ok = tag_net_init(&p.net, VCS_PACKAGE_CHUNK_BYTES + 13u);
+    struct app_network_transport t = {.fetch = tag_parallel_fetch, .context = &p,
+        .timeout_ms = 120000, .parallel_safe = true};
+    struct zcl_app_offer_row row = {0}; enum app_network_error error;
+    uint8_t *out = NULL; size_t len = 0; bool mutated = false;
+    struct vcs_package_store *store = NULL;
+    if (ok && test_mkdtemp(dir, sizeof(dir), "app_network_parallel")) store = vcs_package_store_open(dir, VCS_BUNDLE_MAX_BYTES * 10u);
+    int64_t now = platform_time_wall_unix();
+    ok = ok && store && app_network_exact(&t, TAG_NET_RELAY, p.net.id, now, &row, &error) &&
+        app_network_carrier(&t, TAG_NET_RELAY, TAG_NET_HOST, &row, now, store, &out, &len, &mutated, &error) &&
+        p.overlap && len == p.net.size && !memcmp(out, p.net.bytes, len);
+    free(out); if (store) vcs_package_store_close(store);
+    if (dir[0]) ok = test_rm_rf_recursive(dir) == 0 && ok;
+    free(p.net.bytes); free(p.net.manifest);
+    pthread_cond_destroy(&p.cond); pthread_mutex_destroy(&p.mutex); return ok;
+}
+
 static bool tag_net_wrong_sha(struct tag_net *f)
 {
     uint8_t wire[4096], sk[32], pk[32]; size_t n = 0;
@@ -862,7 +910,7 @@ static int tag_network_test(void)
 {
     int failures = 0;
     TEST("app network: independently verify frames and sliced carrier") {
-        ASSERT(tag_network_exercise()); ASSERT(tag_network_worker_capacity()); PASS();
+        ASSERT(tag_network_exercise()); ASSERT(tag_network_worker_capacity()); ASSERT(tag_network_parallel()); PASS();
     } _test_next:;
     return failures;
 }

@@ -19,6 +19,7 @@ struct app_network_transport {
     bool (*cancelled)(void *context);
     void *context;
     unsigned timeout_ms; /* deadline, 1..120000; local I/O cannot be interrupted */
+    bool parallel_safe; /* fetch callback and context support concurrent calls */
 };
 enum app_network_error {
     APP_NETWORK_OK, APP_NETWORK_CANCELLED, APP_NETWORK_TIMEOUT,
