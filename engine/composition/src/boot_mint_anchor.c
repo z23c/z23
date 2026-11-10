@@ -39,6 +39,7 @@
  * The worst-case resume rewind is one flush window; lower
  * ZCL_FOLD_INRAM_FLUSH_EVERY to tighten it. */
 #include "config/boot.h"
+#include "config/boot_error.h"
 #include "config/boot_internal.h"  /* boot_full_fold_is_armed/_finish (-full-fold) */
 #include "config/boot_mint_anchor_drive.h"
 #include "config/mint_anchor_progress.h"
@@ -80,9 +81,12 @@ bool boot_mint_anchor_normal_boot_gate(sqlite3 *progress_db)
     char reason[512];
     if (mint_anchor_normal_boot_allowed(progress_db, reason, sizeof(reason)))
         return true;
-    fprintf(stderr, "FATAL: normal node boot refused by producer evidence "
-            "containment: %s\n",
-            reason[0] ? reason : "validation-profile scan failed");
+    const char *why = reason[0] ? reason : "validation-profile scan failed";
+    boot_error_report(BOOT_ERROR_FATAL,
+                      "BOOT_MINT_ANCHOR_NORMAL_BOOT_REFUSED",
+                      "mint.anchor",
+                      "normal node boot refused by producer evidence containment",
+                      NULL, 0, "reason=%s", why);
     event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
                 "producer_evidence_contained reason=%s",
                 reason[0] ? reason : "profile_scan_failed");

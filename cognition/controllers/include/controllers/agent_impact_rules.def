@@ -410,6 +410,7 @@ AGENT_IMPACT_RULE("tests/harness/src/test_mint_anchor_preflight.c", "mint_anchor
 /* -full-fold (GENESIS-FOLD-TO-TIP) reuses the offline mint driver targeting the
  * header tip; its files touch the mint driver + reducer fold + boot dispatch. */
 AGENT_IMPACT_RULE("engine/composition/src/boot_full_fold.c|engine/composition/src/boot_mint_anchor.c", "mint_skip_crypto mint_anchor_preflight anchor_selfmint mint_proof_harness mint_fold_livelock mint_anchor_fresh_datadir ratify_mint_anchor reducer_frontier load_verify_boot make_lint_gates")
+AGENT_IMPACT_RULE("engine/composition/src/boot_mint_anchor.c|tests/harness/src/test_mint_anchor_normal_boot_gate.c", "mint_anchor_normal_boot_gate")
 AGENT_IMPACT_RULE("engine/composition/src/boot_sapling_anchor.c", "load_verify_boot snapshot_shielded stage_anchor_frontier_cap make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_contaminated_coin_above_anchor.c", "contaminated_coin_above_anchor make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_reducer_frontier_reconcile_light.c", "reducer_frontier_reconcile_light make_lint_gates")
