@@ -5,6 +5,7 @@
 #endif
 #include "command/native_app_network_worker.h"
 #if !defined(_WIN32)
+#include "chain/chainparams.h"
 #include "command/native_app_network.h"
 #include "command/native_app_scratch.h"
 #include "command/native_app_network_link.h"
@@ -28,7 +29,8 @@
 /* No process-global Tor state is shared: main dispatches this exact argument
  * shape before config/node startup and this process exits after one request.
  * argv: mode, URL, alternate carrier onion or '-', selected-row JSON or '-',
- * scratch path, scratch dev, scratch ino, bootstrap input port, timeout ms. */
+ * scratch path, scratch dev, scratch ino, bootstrap port, timeout, protocol,
+ * parent PID and the caller's selected chain. */
 static bool anw_enter_scratch(const char *path, const char *dev, const char *ino)
 {
     uint64_t want_dev, want_ino;
@@ -135,7 +137,7 @@ struct vcs_package_store *zcl_test_app_network_worker_store_open(const char *dat
 #endif
 
 static bool anw_fetch(const struct anw_request *r, char **argv,
-    struct app_network_transport *transport, struct anw_result *out)
+    struct app_network_transport *transport, struct vcs_package_store *store, struct anw_result *out)
 {
     if (r->catalog) return app_network_catalog(transport, r->link.onion, platform_time_wall_unix(),
         out->rows, 4, &out->count, &out->incomplete, &out->error);
@@ -144,19 +146,19 @@ static bool anw_fetch(const struct anw_request *r, char **argv,
             platform_time_wall_unix(), &out->rows[0], &out->error);
         out->count = ok ? 1 : 0; return ok;
     }
-    struct vcs_package_store *store = anw_store_open(".");
     bool mutated = false;
     bool ok = store && (r->direct ? app_network_direct(transport, r->link.onion, r->link.post_id,
         platform_time_wall_unix(), store, out->frame, &out->bytes, &out->len, &mutated, &out->error) :
         app_network_carrier(transport, r->link.onion, argv[4], &r->selected,
         platform_time_wall_unix(), store, &out->bytes, &out->len, &mutated, &out->error));
-    if (store) vcs_package_store_close(store);
     return ok;
 }
-static bool anw_connect(const struct anw_request *r, char **argv, struct anw_result *out)
+static bool anw_dial(const struct anw_request *r, char **argv,
+    struct vcs_package_store *store, struct anw_result *out, int64_t start)
 {
-    int64_t start = platform_time_monotonic_ms(); bool started = false;
-    if (start > 0 && !tor_integration_is_enabled() && anw_enter_scratch(argv[6], argv[7], argv[8])) {
+    bool started = false;
+    int64_t now = platform_time_monotonic_ms();
+    if (now >= start && now - start < (int64_t)r->timeout && !tor_integration_is_enabled()) {
         tor_integration_set_serve_onion(false);
         started = tor_integration_start_private(".", (uint16_t)r->port);
     }
@@ -167,8 +169,21 @@ static bool anw_connect(const struct anw_request *r, char **argv, struct anw_res
     struct app_network_transport transport = {.fetch = app_network_tor_fetch,
         .timeout_ms = elapsed >= 0 && elapsed < (int64_t)r->timeout ? (unsigned)(r->timeout - (uint64_t)elapsed) : 0,
         .parallel_safe = true, .fetch_budgeted = app_network_tor_fetch_budgeted};
-    bool ok = started && tor_integration_is_dial_ready() && transport.timeout_ms && anw_fetch(r, argv, &transport, out);
+    bool ok = started && tor_integration_is_dial_ready() && transport.timeout_ms && anw_fetch(r, argv, &transport, store, out);
     if (started) tor_integration_stop();
+    return ok;
+}
+static bool anw_connect(const struct anw_request *r, char **argv, struct anw_result *out)
+{
+    int64_t start = platform_time_monotonic_ms();
+    if (start <= 0 || !anw_enter_scratch(argv[6], argv[7], argv[8])) return false;
+    struct vcs_package_store *store = NULL;
+    if (r->direct || r->carrier) {
+        store = anw_store_open(".");
+        if (!store) { out->error = APP_NETWORK_STORE_REFUSED; return false; }
+    }
+    bool ok = anw_dial(r, argv, store, out, start);
+    if (store) vcs_package_store_close(store);
     return ok;
 }
 static bool anw_emit_result(int protocol, const struct anw_result *result, bool ok)
@@ -187,7 +202,10 @@ static bool anw_emit_result(int protocol, const struct anw_result *result, bool 
 int app_network_worker_main(int argc, char **argv)
 {
 #if !defined(_WIN32)
-    if (argc != 13 || strcmp(argv[1], "--app-network-worker")) return 2;
+    if (argc != 14 || strcmp(argv[1], "--app-network-worker")) return 2;
+    enum chain_network network;
+    if (!an_scratch_chain_parse(argv[13], &network)) return 2;
+    chain_params_select(network);
     int protocol = dup(STDOUT_FILENO);
     if (protocol < 0 || fcntl(protocol, F_SETFD, FD_CLOEXEC) != 0 || dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
         if (protocol >= 0) close(protocol);

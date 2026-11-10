@@ -2,6 +2,7 @@
  * Fixed child, bounded capture, parent-side verification; no shell. */
 #define _POSIX_C_SOURCE 200809L
 #include "command/native_app_network_job.h"
+#include "command/native_app_scratch.h"
 #include "command/native_app_network_link.h"
 #include "command/native_app_network_row.h"
 #include "base/hex.h"
@@ -126,7 +127,8 @@ static bool anj_mode_matches(const struct app_network_job_args *a, const struct 
 }
 static bool anj_valid_args(const struct app_network_job_args *a)
 {
-    if (!a || !a->mode || !a->url || !a->scratch || !a->timeout_ms || a->timeout_ms > 120000u) return false;
+    if (!a || !a->mode || !a->url || !a->scratch || !an_scratch_chain_token(a->network) ||
+        !a->timeout_ms || a->timeout_ms > 120000u) return false;
     struct app_network_link link;
     return app_network_link_parse(a->url, &link) && anj_mode_matches(a, &link);
 }
@@ -165,7 +167,8 @@ bool app_network_job_run(const struct app_network_job_args *a, struct app_networ
     snprintf(timeout, sizeof(timeout), "%u", a->timeout_ms);
     snprintf(parent, sizeof(parent), "%llu", (unsigned long long)getpid());
     const char *argv[] = {self, "--app-network-worker", a->mode, a->url,
-        a->carrier_onion ? a->carrier_onion : "-", row, a->scratch, dev, ino, port, timeout, "v1", parent, NULL};
+        a->carrier_onion ? a->carrier_onion : "-", row, a->scratch, dev, ino, port, timeout, "v1", parent,
+        an_scratch_chain_token(a->network), NULL};
     return anj_capture(a, argv, r);
 #else
     (void)a; if (r) { memset(r, 0, sizeof(*r)); r->error = APP_NETWORK_UNAVAILABLE; } return false;

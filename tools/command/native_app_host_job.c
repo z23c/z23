@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "command/native_app_host_job.h"
 #include "command/native_app_host_worker.h"
+#include "command/native_app_scratch.h"
 #include "base/hex.h"
 #include "platform/time_compat.h"
 #include "session/fleet_board_proto.h"
@@ -34,7 +35,7 @@ static bool ahj_identity_args(const struct app_host_job_args *a)
 static bool ahj_args(const struct app_host_job_args *a)
 {
     return a && a->self_path && a->self_path[0] == '/' && a->scratch_path && a->scratch_path[0] == '/' &&
-        app_host_chain_token(a->network) && ahj_identity_args(a) && a->carrier_size > 0 && a->carrier_size <= ZCL_APP_OFFER_SIZE_MAX &&
+        an_scratch_chain_token(a->network) && ahj_identity_args(a) && a->carrier_size > 0 && a->carrier_size <= ZCL_APP_OFFER_SIZE_MAX &&
         a->duration_ms >= 3000 && a->duration_ms <= 86400000u;
 }
 static bool ahj_offer_matches(const struct zcl_app_offer *offer, const char *onion,
@@ -162,7 +163,7 @@ bool app_host_job_run(const struct app_host_job_args *a, app_host_ready_fn ready
     (void)snprintf(parent, sizeof(parent), "%llu", (unsigned long long)getpid());
     const char *argv[] = {a->self_path, "--app-host-worker", a->scratch_path, dev, ino,
         a->name, a->release_root, a->package_root, a->publisher, a->carrier_sha256, size, duration, deadline, parent,
-        app_host_chain_token(a->network), NULL};
+        an_scratch_chain_token(a->network), NULL};
     char bytes[AHJ_WIRE_MAX]; bool canceled = false, refused = false;
     struct zcl_spawn_binary_observation out = {0}; struct zcl_spawn_measure m = {0};
     struct ahj_stream stream = {.args = a, .callback = ready, .unavailable = unavailable, .context = ctx, .result = result};

@@ -5,6 +5,7 @@
  * scratch, progress, form and bytes-stage interfaces being integrated first. */
 #include "command/native_app_network_link.h"
 #include "command/native_app_network_job.h"
+#include "command/native_command.h"
 #include "command/native_app_discover_view.h"
 #include "command/native_app_discover.h"
 #include "command/native_app_get_stage.h"
@@ -277,7 +278,8 @@ static bool an_run_job(const char *datadir, const char *mode, const char *url,
 #endif
     p->args = (struct app_network_job_args){.mode = mode, .url = url, .carrier_onion = carrier,
         .scratch = scratch->path, .selected = selected, .scratch_dev = (uint64_t)scratch->dev,
-        .scratch_ino = (uint64_t)scratch->ino, .bootstrap_port = port, .timeout_ms = 120000u};
+        .scratch_ino = (uint64_t)scratch->ino, .bootstrap_port = port, .timeout_ms = 120000u,
+        .network = zcl_native_command_network()};
     bool started = false, joined = false;
     bool shown = an_progress_run(p, controller->notices, controller->context, &started, &joined, why, sizeof(why));
     return an_job_finish(p, scratch, started, joined, shown, result, reply);

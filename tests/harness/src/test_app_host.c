@@ -12,6 +12,7 @@
 #include "command/native_app_host_job.h"
 #include "command/native_app_host_controller.h"
 #include "command/native_app_host_worker.h"
+#include "command/native_app_scratch.h"
 #include "command/native_app_host_view.h"
 #include "command/native_app_host_flow.h"
 #include "command/native_app_share_command.h"
@@ -1812,10 +1813,14 @@ static int host_ready_frame_tests(void)
         ASSERT(!zcl_test_app_host_bootstrap_port(host_port_low, NULL)); PASS();
     }
     TEST("host worker chain names are explicit and bounded") {
-        ASSERT(!strcmp(app_host_chain_token(CHAIN_MAIN), "main"));
-        ASSERT(!strcmp(app_host_chain_token(CHAIN_TESTNET), "test"));
-        ASSERT(!strcmp(app_host_chain_token(CHAIN_REGTEST), "regtest"));
-        ASSERT(!app_host_chain_token(CHAIN_MAX_NETWORK_TYPES)); PASS();
+        enum chain_network network = CHAIN_MAX_NETWORK_TYPES;
+        ASSERT(!strcmp(an_scratch_chain_token(CHAIN_MAIN), "main"));
+        ASSERT(!strcmp(an_scratch_chain_token(CHAIN_TESTNET), "test"));
+        ASSERT(!strcmp(an_scratch_chain_token(CHAIN_REGTEST), "regtest"));
+        ASSERT(!an_scratch_chain_token(CHAIN_MAX_NETWORK_TYPES));
+        ASSERT(an_scratch_chain_parse("regtest", &network) && network == CHAIN_REGTEST);
+        ASSERT(!an_scratch_chain_parse("invalid", &network) && network == CHAIN_REGTEST);
+        ASSERT(!an_scratch_chain_parse(NULL, &network) && !an_scratch_chain_parse("main", NULL)); PASS();
     }
     TEST("host carrier storage admits the full legal byte limit without eviction") {
         ASSERT(host_carrier_capacity()); PASS();

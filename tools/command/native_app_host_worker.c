@@ -4,18 +4,8 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "command/native_app_host_worker.h"
-#include "chain/chainparams.h"
-#include <string.h>
-const char *app_host_chain_token(enum chain_network network)
-{
-    switch (network) {
-    case CHAIN_MAIN: return "main";
-    case CHAIN_TESTNET: return "test";
-    case CHAIN_REGTEST: return "regtest";
-    default: return NULL;
-    }
-}
 #if !defined(_WIN32)
+#include "chain/chainparams.h"
 #include "command/native_app_scratch.h"
 #include "command/native_app_network_lifeline.h"
 #include "base/hex.h"
@@ -249,14 +239,6 @@ static bool ahw_serve(struct ahw_context *ctx, int protocol, char **argv, uint64
     tor_integration_stop(); return ok && expired;
 }
 struct ahw_args { uint64_t dev, ino, size, duration, deadline, parent; int64_t now; };
-static bool ahw_network(const char *text, enum chain_network *out)
-{
-    for (int i = CHAIN_MAIN; i < CHAIN_MAX_NETWORK_TYPES; ++i) {
-        const char *token = app_host_chain_token((enum chain_network)i);
-        if (token && text && !strcmp(text, token)) { *out = (enum chain_network)i; return true; }
-    }
-    return false;
-}
 static bool ahw_deadline_valid(uint64_t deadline, uint64_t duration, int64_t now)
 {
     return now > 0 && deadline > (uint64_t)now && deadline - (uint64_t)now <= duration &&
@@ -285,7 +267,7 @@ int app_host_worker_main(int argc, char **argv)
     struct ahw_args args;
     if (!ahw_arguments(argc, argv, &args)) return 2;
     enum chain_network network;
-    if (!ahw_network(argv[14], &network)) return 2;
+    if (!an_scratch_chain_parse(argv[14], &network)) return 2;
     chain_params_select(network);
     uint64_t dev = args.dev, ino = args.ino, size = args.size, duration = args.duration;
     uint64_t deadline = args.deadline, parent = args.parent; int64_t now = args.now;

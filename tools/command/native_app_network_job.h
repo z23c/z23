@@ -4,11 +4,13 @@
 #define ZCL_NATIVE_APP_NETWORK_JOB_H
 #include "command/native_app_network.h"
 #include "util/spawn.h"
+#include "chain/chainparamsbase.h"
 struct app_network_job_args {
     const char *mode, *url, *carrier_onion, *scratch;
     const struct zcl_app_offer_row *selected; /* carrier mode only */
     uint64_t scratch_dev, scratch_ino;
     unsigned bootstrap_port, timeout_ms;
+    enum chain_network network;
     zcl_spawn_cancel_fn cancel;
     void *cancel_context;
 };

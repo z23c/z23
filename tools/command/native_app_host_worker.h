@@ -2,8 +2,6 @@
  * Reserved same-image app-only hosting entry before normal configuration. */
 #ifndef ZCL_NATIVE_APP_HOST_WORKER_H
 #define ZCL_NATIVE_APP_HOST_WORKER_H
-#include "chain/chainparamsbase.h"
-const char *app_host_chain_token(enum chain_network network);
 /* Reserved exit belongs only to a normally expired host window. */
 #define APP_HOST_EXIT_EXPIRED 73
 /* Reserved flag is handled even when argv is malformed; never fall through

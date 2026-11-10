@@ -2,12 +2,31 @@
  * Owned private root; refuse replacement and never follow links during cleanup. */
 #define _POSIX_C_SOURCE 200809L
 #include "command/native_app_scratch.h"
+#include <stddef.h>
+#include <string.h>
+const char *an_scratch_chain_token(enum chain_network network)
+{
+    switch (network) {
+    case CHAIN_MAIN: return "main";
+    case CHAIN_TESTNET: return "test";
+    case CHAIN_REGTEST: return "regtest";
+    default: return NULL;
+    }
+}
+bool an_scratch_chain_parse(const char *text, enum chain_network *out)
+{
+    if (!text || !out) return false;
+    for (int i = CHAIN_MAIN; i < CHAIN_MAX_NETWORK_TYPES; ++i) {
+        const char *token = an_scratch_chain_token((enum chain_network)i);
+        if (token && !strcmp(text, token)) { *out = (enum chain_network)i; return true; }
+    }
+    return false;
+}
 #if !defined(_WIN32)
 #include "util/file_tree_ops.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 bool an_scratch_copy_text(char *out, size_t cap, const char *text, bool allow_empty)

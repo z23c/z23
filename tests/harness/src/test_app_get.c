@@ -36,7 +36,9 @@
 #include "command/native_app_network.h"
 #include "command/native_app_network_link.h"
 #include "command/native_app_network_job.h"
+#include "command/native_command.h"
 #include "command/native_app_network_worker.h"
+#include "command/native_app_scratch.h"
 #include "command/native_app_network_controller.h"
 #include "command/native_app_network_lifeline.h"
 #include "command/native_app_discover.h"
@@ -1270,10 +1272,13 @@ static int tag_network_ipc(void)
     static const char good[] = "{\"schema\":\"zcl.app_network_worker.v1\",\"ok\":true,\"incomplete\":false,\"rows\":[]}";
     static const char raw_nul[] = "{\"schema\":\"zcl.app_network_worker.v1\",\"ok\":true,\"incomplete\":false,\"rows\":[]}\0junk";
     static const char decoded_nul[] = "{\"schema\":\"zcl.app_network_worker.v1\\u0000junk\",\"ok\":true,\"incomplete\":false,\"rows\":[]}";
+    static const char refused[] = "{\"schema\":\"zcl.app_network_worker.v1\",\"ok\":false,\"error\":7}";
     TEST("network worker IPC rejects raw and decoded hidden suffixes") {
         ASSERT(zcl_test_app_network_job_parse(good, sizeof(good) - 1, &args, &result));
         ASSERT(!zcl_test_app_network_job_parse(raw_nul, sizeof(raw_nul) - 1, &args, &result));
         ASSERT(!zcl_test_app_network_job_parse(decoded_nul, sizeof(decoded_nul) - 1, &args, &result));
+        ASSERT(!zcl_test_app_network_job_parse(refused, sizeof(refused) - 1, &args, &result));
+        ASSERT(result.error == APP_NETWORK_STORE_REFUSED);
         PASS();
     } _test_next:;
     return failures;
@@ -3184,7 +3189,8 @@ static int tag_library_link_fault(struct tag_world *w, unsigned mode)
 static bool tag_link_late_worker(void *context, const struct app_network_job_args *args,
     struct app_network_job_result *result)
 {
-    struct tag_link_fixture *f = context; (void)args; ++f->jobs;
+    struct tag_link_fixture *f = context; ++f->jobs;
+    if (args->network != zcl_native_command_network()) return false;
     result->rows[0] = f->row; result->count = 1; result->error = APP_NETWORK_OK; return true;
 }
 static bool tag_link_late_notice(void *context, const struct zcl_present_model_v1 *model,
@@ -3677,7 +3683,7 @@ static int tag_worker_invalid(struct tag_world *w)
         const char *missing[] = {worker, "--app-network-worker", NULL};
         const char *extra[] = {worker, "--app-network-worker", "invalid", NULL};
         const char *malformed[] = {worker, "--app-network-worker", "carrier", url, TAG_ONION,
-            "{bad", home, "0", "0", "1234", "1000", "v1", parent, NULL};
+            "{bad", home, "0", "0", "1234", "1000", "v1", parent, "main", NULL};
         struct zcl_spawn_binary_observation out;
         ASSERT(!zcl_spawn_capture_binary(missing, bytes, sizeof(bytes), 5000, &out).ok && out.exit_observed && out.exit_code == 2);
         ASSERT(!zcl_spawn_capture_binary(extra, bytes, sizeof(bytes), 5000, &out).ok && out.exit_observed && out.exit_code == 2);
@@ -3687,6 +3693,64 @@ static int tag_worker_invalid(struct tag_world *w)
     } _test_next:;
     if (old) { (void)setenv("HOME", old, 1); free(old); } else if (!had_home) (void)unsetenv("HOME");
     if (made && rmdir(home) != 0) ++failures;
+    return failures;
+}
+static bool tag_worker_binding(const char *root, struct stat *st)
+{
+    char dir[PATH_MAX], file[PATH_MAX];
+    int a = snprintf(dir, sizeof(dir), "%s/zcode", root);
+    int b = snprintf(file, sizeof(file), "%s/chain-binding.v1", dir);
+    if (a <= 0 || (size_t)a >= sizeof(dir) || b <= 0 || (size_t)b >= sizeof(file) ||
+        stat(root, st) || mkdir(dir, 0700)) return false;
+    FILE *fp = fopen(file, "w");
+    if (!fp) return false;
+    bool ok = fputs("invalid binding\n", fp) >= 0;
+    return fclose(fp) == 0 && ok;
+}
+static bool tag_worker_refused(const char *root, const char *output)
+{
+    char expected[160], torlog[PATH_MAX]; struct stat unused;
+    int n = snprintf(expected, sizeof(expected), "{\"schema\":\"zcl.app_network_worker.v1\",\"ok\":false,\"error\":%d}", APP_NETWORK_STORE_REFUSED);
+    int t = snprintf(torlog, sizeof(torlog), "%s/tor.log", root);
+    return n > 0 && (size_t)n < sizeof(expected) && !strcmp(output, expected) &&
+        t > 0 && (size_t)t < sizeof(torlog) && lstat(torlog, &unused) != 0 && errno == ENOENT;
+}
+static bool tag_worker_chain_call(const char *worker, const char *root, const struct stat *st,
+    const char *network, bool valid)
+{
+    char url[257], dev[32], ino[32], parent[32], output[256];
+    if (snprintf(url, sizeof(url), "http://%s/board/apps/v1/%064d", TAG_ONION, 0) <= 0) return false;
+    (void)snprintf(dev, sizeof(dev), "%llu", (unsigned long long)st->st_dev);
+    (void)snprintf(ino, sizeof(ino), "%llu", (unsigned long long)st->st_ino);
+    (void)snprintf(parent, sizeof(parent), "%llu", (unsigned long long)getpid());
+    const char *args[] = {worker, "--app-network-worker", "direct", url, "-", "-", root,
+        dev, ino, "1234", "1000", "v1", parent, network, NULL};
+    struct zcl_spawn_binary_observation observed = {0};
+    struct zcl_result result = zcl_spawn_capture_binary(args, output, sizeof(output) - 1, 5000, &observed);
+    if (!observed.exit_observed || observed.timed_out || observed.overflow) return false;
+    if (!valid) return !result.ok && observed.exit_code == 2 && observed.output_len == 0;
+    output[observed.output_len] = 0;
+    return result.ok && observed.exit_code == 0 && tag_worker_refused(root, output);
+}
+static int tag_worker_chain(struct tag_world *w)
+{
+    int failures = 0; char worker[PATH_MAX], root[TAG_PATH] = ""; struct stat st;
+    TEST("cold network worker selects a validated chain and refuses the store before Tor") {
+        ASSERT(tag_fixture_worker(w, worker));
+        ASSERT(test_mkdtemp(root, sizeof(root), "app_network_chain"));
+        ASSERT(tag_worker_binding(root, &st));
+        ASSERT(!strcmp(an_scratch_chain_token(CHAIN_MAIN), "main"));
+        ASSERT(!strcmp(an_scratch_chain_token(CHAIN_TESTNET), "test"));
+        ASSERT(!strcmp(an_scratch_chain_token(CHAIN_REGTEST), "regtest"));
+        ASSERT(!an_scratch_chain_token(CHAIN_MAX_NETWORK_TYPES));
+        ASSERT(tag_worker_chain_call(worker, root, &st, "main", true));
+        ASSERT(tag_worker_chain_call(worker, root, &st, "test", true));
+        ASSERT(tag_worker_chain_call(worker, root, &st, "regtest", true));
+        ASSERT(tag_worker_chain_call(worker, root, &st, "invalid", false));
+        ASSERT(tag_worker_chain_call(worker, root, &st, NULL, false));
+        PASS();
+    } _test_next:;
+    if (root[0] && test_rm_rf_recursive(root) != 0) ++failures;
     return failures;
 }
 static void tag_cancelled_share(void *context, const struct app_selection *selection,
@@ -4531,6 +4595,7 @@ static int tag_world_cases(struct tag_world *w)
     failures += tag_library_link_late_cancel(w);
     failures += tag_library_profile(w);
     failures += tag_worker_invalid(w);
+    failures += tag_worker_chain(w);
     failures += tag_lifeline();
     failures += tag_discover_empty_cases(w);
     if (failures == 0) failures += tag_keep_cases(w);

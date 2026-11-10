@@ -2,9 +2,13 @@
  * Retained private directory for one owned app networking worker. */
 #ifndef ZCL_NATIVE_APP_SCRATCH_H
 #define ZCL_NATIVE_APP_SCRATCH_H
+#include "chain/chainparamsbase.h"
+#include <stdbool.h>
+/* Canonical internal-worker chain tokens; unknown values fail closed. */
+const char *an_scratch_chain_token(enum chain_network network);
+bool an_scratch_chain_parse(const char *text, enum chain_network *out);
 #define AG_PATH 4400u
 #if !defined(_WIN32)
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
