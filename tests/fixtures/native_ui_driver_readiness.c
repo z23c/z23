@@ -11,14 +11,15 @@
 #include <time.h>
 #include <unistd.h>
 
-enum nur_mode { NUR_DELAYED, NUR_UNMAPPED, NUR_UNCHANGED, NUR_UNEXPECTED, NUR_RACE };
+enum nur_mode { NUR_DELAYED, NUR_UNMAPPED, NUR_UNCHANGED, NUR_UNEXPECTED, NUR_RACE,
+    NUR_NAME_RACE, NUR_TREE_RACE, NUR_NAME_UNEXPECTED };
 static struct {
     enum nur_mode mode;
     Display *owner;
-    Window window;
+    Window window, victim;
     GC gc;
     unsigned int sleeps, presses, releases, images;
-    bool injected, first_null;
+    bool injected, first_null, count_ok;
 } nur;
 
 /* This hook establishes order, not a shorter wall-clock performance claim:
@@ -40,7 +41,8 @@ static void nur_events(void)
         if (event.xany.window != nur.window) continue;
         if (event.type == KeyPress) {
             ++nur.presses;
-            if (nur.mode == NUR_DELAYED || nur.mode == NUR_RACE) {
+            if (nur.mode == NUR_DELAYED || nur.mode == NUR_RACE ||
+                nur.mode == NUR_NAME_RACE || nur.mode == NUR_TREE_RACE) {
                 XSetForeground(nur.owner, nur.gc, WhitePixel(nur.owner, DefaultScreen(nur.owner)));
                 XFillRectangle(nur.owner, nur.window, nur.gc, 0, 0, 80, 60);
             }
@@ -80,14 +82,35 @@ static XImage *nur_image(Display *display, Drawable drawable, int x, int y,
     }
     return image;
 }
+static int nur_fetch_name(Display *display, Window window, char **name)
+{
+    if (window == nur.victim && !nur.injected &&
+        (nur.mode == NUR_NAME_RACE || nur.mode == NUR_NAME_UNEXPECTED)) {
+        nur.injected = true;
+        if (nur.mode == NUR_NAME_UNEXPECTED) return XFetchName(display, None, name);
+        XDestroyWindow(nur.owner, nur.victim); (void)XSync(nur.owner, False);
+    }
+    return XFetchName(display, window, name);
+}
+static Status nur_query_tree(Display *display, Window window, Window *root, Window *parent,
+    Window **children, unsigned int *count)
+{
+    if (window == nur.victim && !nur.injected && nur.mode == NUR_TREE_RACE) {
+        nur.injected = true;
+        XDestroyWindow(nur.owner, nur.victim); (void)XSync(nur.owner, False);
+    }
+    return XQueryTree(display, window, root, parent, children, count);
+}
 /* This is the previous Xlib handler, so the capture hook must delegate here.
  * The isolated process exits distinctly only for the real injected request. */
 static int nur_error(Display *display, XErrorEvent *error)
 {
     (void)display;
-    bool expected = nur.mode == NUR_UNEXPECTED && nur.injected && nur.images == 1 &&
+    bool expected_image = nur.mode == NUR_UNEXPECTED && nur.injected && nur.images == 1 &&
         nur.presses == 0 && nur.releases == 0 && error->error_code == BadDrawable &&
         error->request_code == 73; /* X11 core GetImage opcode. */
+    bool expected = expected_image || (nur.mode == NUR_NAME_UNEXPECTED && nur.injected &&
+        error->error_code == BadWindow && error->request_code == 20 && error->resourceid == None);
     fprintf(stderr, "UI_DRIVER_FIXTURE xerror=%u opcode=%u delegated=%d\n",
             error->error_code, error->request_code, expected);
     fflush(stderr);
@@ -100,9 +123,13 @@ static int nur_error(Display *display, XErrorEvent *error)
 #define nanosleep nur_sleep
 #define XSendEvent nur_send
 #define XGetImage nur_image
+#define XFetchName nur_fetch_name
+#define XQueryTree nur_query_tree
 #define main native_ui_driver_main
 #include "../../tools/native_ui_driver.c"
 #undef main
+#undef XQueryTree
+#undef XFetchName
 #undef XGetImage
 #undef XSendEvent
 #undef nanosleep
@@ -113,15 +140,22 @@ static bool nur_open(char title[96])
     if (!nur.owner) return false;
     int screen = DefaultScreen(nur.owner);
     unsigned long black = BlackPixel(nur.owner, screen);
+    (void)snprintf(title, 96, "z23-driver-readiness-%ld", (long)getpid());
+    if (nur.mode >= NUR_NAME_RACE) {
+        nur.victim = XCreateSimpleWindow(nur.owner, RootWindow(nur.owner, screen),
+            8, 8, 80, 60, 0, black, black);
+        if (nur.victim == None) return false;
+        XStoreName(nur.owner, nur.victim, title);
+        XMapWindow(nur.owner, nur.victim);
+    }
     nur.window = XCreateSimpleWindow(nur.owner, RootWindow(nur.owner, screen),
         8, 8, 80, 60, 0, black, black);
     if (nur.window == None) return false;
     nur.gc = XCreateGC(nur.owner, nur.window, 0, NULL);
     if (!nur.gc) return false;
-    (void)snprintf(title, 96, "z23-driver-readiness-%ld", (long)getpid());
     XStoreName(nur.owner, nur.window, title);
     XSelectInput(nur.owner, nur.window, KeyPressMask | KeyReleaseMask);
-    if (nur.mode == NUR_UNCHANGED || nur.mode == NUR_UNEXPECTED || nur.mode == NUR_RACE)
+    if (nur.mode == NUR_UNCHANGED || nur.mode == NUR_UNEXPECTED || nur.mode >= NUR_RACE)
         XMapWindow(nur.owner, nur.window);
     (void)XSync(nur.owner, False);
     return true;
@@ -135,6 +169,8 @@ static bool nur_recovered(int result)
 }
 static bool nur_result(int result)
 {
+    if (nur.mode == NUR_NAME_RACE || nur.mode == NUR_TREE_RACE)
+        return result == 0 && nur.injected && nur.count_ok && nur.presses == 1 && nur.releases == 1 && nur.images >= 2;
     if (nur.mode == NUR_DELAYED || nur.mode == NUR_RACE)
         return nur_recovered(result);
     if (nur.mode == NUR_UNMAPPED)
@@ -146,7 +182,8 @@ static bool nur_result(int result)
 }
 static bool nur_mode_parse(const char *name)
 {
-    static const char *const modes[] = {"delayed", "unmapped", "unchanged", "unexpected", "race"};
+    static const char *const modes[] = {"delayed", "unmapped", "unchanged", "unexpected", "race",
+        "name-race", "tree-race", "name-unexpected"};
     for (size_t i = 0; i < sizeof(modes)/sizeof(modes[0]); ++i)
         if (!strcmp(name, modes[i])) { nur.mode = (enum nur_mode)i; return true; }
     return false;
@@ -162,6 +199,10 @@ int main(int argc, char **argv)
         char *args[] = {"native_ui_driver", option, "--key=tab",
             "--expect-pixels-change", "--timeout-ms=200", NULL};
         XErrorHandler previous = XSetErrorHandler(nur_error);
+        if (nur.mode == NUR_NAME_RACE || nur.mode == NUR_TREE_RACE) {
+            char *count_args[] = {"native_ui_driver", option, "--expect-count=1", "--timeout-ms=200", NULL};
+            nur.count_ok = native_ui_driver_main(4, count_args) == 0;
+        }
         result = native_ui_driver_main(5, args);
         (void)XSetErrorHandler(previous);
     }
@@ -169,6 +210,7 @@ int main(int argc, char **argv)
     printf("UI_DRIVER_FIXTURE mode=%s driver_exit=%d presses=%u releases=%u images=%u sleeps=%u first_null=%d passed=%d\n",
         argv[1], result, nur.presses, nur.releases, nur.images, nur.sleeps, nur.first_null, ok);
     if (nur.gc) XFreeGC(nur.owner, nur.gc);
+    if (nur.victim != None && !nur.injected) XDestroyWindow(nur.owner, nur.victim);
     if (nur.window != None) XDestroyWindow(nur.owner, nur.window);
     if (nur.owner) XCloseDisplay(nur.owner);
     return ok ? 0 : 1;

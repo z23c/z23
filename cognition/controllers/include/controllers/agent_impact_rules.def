@@ -3614,4 +3614,4 @@ AGENT_IMPACT_RULE("tools/zcl_portfwd.c|tests/harness/src/test_portfwd.c", "portf
 
 AGENT_IMPACT_RULE("engine/models/src/fleet_board_post_wiki.c|engine/models/include/models/fleet_board_post.h", "board_site models make_lint_gates")
 
-AGENT_IMPACT_RULE("tools/command/native_app_host_view.c|tests/harness/src/test_app_host.c", "models make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_app_host_view.c|tools/command/native_app_host_job.c|tools/command/native_app_host_job.h|tools/command/native_app_host_worker.c|tools/command/native_app_host_worker.h|tools/command/native_app_host_flow.c|tests/harness/src/test_app_host.c", "models app_host_worker make_lint_gates")

@@ -4,6 +4,17 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "command/native_app_host_worker.h"
+#include "chain/chainparams.h"
+#include <string.h>
+const char *app_host_chain_token(enum chain_network network)
+{
+    switch (network) {
+    case CHAIN_MAIN: return "main";
+    case CHAIN_TESTNET: return "test";
+    case CHAIN_REGTEST: return "regtest";
+    default: return NULL;
+    }
+}
 #if !defined(_WIN32)
 #include "command/native_app_scratch.h"
 #include "command/native_app_network_lifeline.h"
@@ -20,6 +31,7 @@
 #include "vcs/app_offer.h"
 #include "vcs/bundle_carry.h"
 #include "vcs/package_share.h"
+#include "vcs/package_accept.h"
 #include "vcs/package_store.h"
 #include "vcs/zcode_dht_identity.h"
 #include <stdatomic.h>
@@ -119,6 +131,11 @@ bool zcl_test_app_host_store_carrier(const uint8_t *bytes, size_t size, char roo
     return ok;
 }
 #endif
+static bool ahw_chain_matches(const struct vcs_package_share *share)
+{
+    char chain[VCS_PACKAGE_RELEASE_CHAIN_ID_MAX + 1u];
+    return vcs_package_accept_chain_id(chain, sizeof(chain)) && !strcmp(share->release.chain_id, chain);
+}
 static bool ahw_carrier(struct ahw_context *c, const char *name, const char *release,
                         const char *package, const char *publisher, const char *hash, uint64_t size)
 {
@@ -133,12 +150,20 @@ static bool ahw_carrier(struct ahw_context *c, const char *name, const char *rel
         ok = !memcmp(expected, digest, 32) && vcs_package_share_load(share, bytes, (size_t)size, &reason) &&
             !strcmp(share->release.name, name) && !memcmp(share->release_id, release_id, 32) &&
             !memcmp(share->release.package_root, package_id, 32) &&
-            !memcmp(share->release.publisher_pubkey, pub, 33);
+            !memcmp(share->release.publisher_pubkey, pub, 33) && ahw_chain_matches(share);
     }
     ok = ok && ahw_store_carrier(c, bytes, (size_t)size);
     if (share) { vcs_package_share_cleanup(share); free(share); }
     free(bytes); return ok;
 }
+#if defined(ZCL_TESTING)
+bool zcl_test_app_host_verify_carrier(const char *name, const char *release, const char *package,
+    const char *publisher, const char *hash, uint64_t size)
+{
+    struct ahw_context ctx = {0};
+    return ahw_carrier(&ctx, name, release, package, publisher, hash, size);
+}
+#endif
 static bool ahw_post(struct ahw_context *c, const char *name, const char *release,
                      const char *package, const char *publisher, const char *hash, uint64_t size, const char *onion)
 {
@@ -224,6 +249,14 @@ static bool ahw_serve(struct ahw_context *ctx, int protocol, char **argv, uint64
     tor_integration_stop(); return ok && expired;
 }
 struct ahw_args { uint64_t dev, ino, size, duration, deadline, parent; int64_t now; };
+static bool ahw_network(const char *text, enum chain_network *out)
+{
+    for (int i = CHAIN_MAIN; i < CHAIN_MAX_NETWORK_TYPES; ++i) {
+        const char *token = app_host_chain_token((enum chain_network)i);
+        if (token && text && !strcmp(text, token)) { *out = (enum chain_network)i; return true; }
+    }
+    return false;
+}
 static bool ahw_deadline_valid(uint64_t deadline, uint64_t duration, int64_t now)
 {
     return now > 0 && deadline > (uint64_t)now && deadline - (uint64_t)now <= duration &&
@@ -233,7 +266,7 @@ static bool ahw_deadline_valid(uint64_t deadline, uint64_t duration, int64_t now
 static bool ahw_arguments(int argc, char **argv, struct ahw_args *out)
 {
     uint64_t dev, ino, size, duration, deadline, parent;
-    if (argc != 14 || strcmp(argv[1], "--app-host-worker") ||
+    if (argc != 15 || strcmp(argv[1], "--app-host-worker") ||
         !an_scratch_decimal(argv[3], UINT64_MAX, &dev) || !an_scratch_decimal(argv[4], UINT64_MAX, &ino) ||
         !an_scratch_decimal(argv[10], VCS_BUNDLE_MAX_BYTES, &size) || !size ||
         !an_scratch_decimal(argv[11], 86400000u, &duration) || duration < 3000 ||
@@ -251,6 +284,9 @@ int app_host_worker_main(int argc, char **argv)
 #if !defined(_WIN32)
     struct ahw_args args;
     if (!ahw_arguments(argc, argv, &args)) return 2;
+    enum chain_network network;
+    if (!ahw_network(argv[14], &network)) return 2;
+    chain_params_select(network);
     uint64_t dev = args.dev, ino = args.ino, size = args.size, duration = args.duration;
     uint64_t deadline = args.deadline, parent = args.parent; int64_t now = args.now;
     int protocol = dup(STDOUT_FILENO);

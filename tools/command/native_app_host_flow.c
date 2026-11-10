@@ -5,6 +5,7 @@
 #include "command/native_app_host_controller.h"
 #include "command/native_app_host_view.h"
 #include "command/native_app_scratch.h"
+#include "command/native_command.h"
 #include "command/native_app_share_command.h"
 #include "command/native_app_receive_command.h"
 #include "command/native_zcode_package_copy.h"
@@ -224,7 +225,8 @@ static bool ahf_host(struct an_scratch *scratch, const struct ahf_identity *iden
     struct app_host_job_args args = {.self_path = self, .scratch_path = scratch->path,
         .scratch_dev = (uint64_t)scratch->dev, .scratch_ino = (uint64_t)scratch->ino,
         .name = identity->name, .release_root = identity->release, .package_root = identity->package,
-        .publisher = identity->publisher, .carrier_sha256 = sha, .carrier_size = size, .duration_ms = 86400000u};
+        .publisher = identity->publisher, .carrier_sha256 = sha, .carrier_size = size,
+        .network = zcl_native_command_network(), .duration_ms = 86400000u};
     struct app_host_owner *owner = app_host_owner_start(&args);
     if (!owner) { ahf_failure(reply, "HOST_UNAVAILABLE", "Cannot start sharing.", scratch->path, identity, true); return false; }
     char why[256]; bool shown = app_host_view_run(owner, presenter, ctx, why, sizeof(why));

@@ -1928,6 +1928,8 @@ static void run_full_suite_crypto_and_wallet(int *failures)
       *failures += test_app_receive(); }
     { extern int test_app_receive_ui(void);
       *failures += test_app_receive_ui(); }
+    { extern int test_app_host_worker(void);
+      *failures += test_app_host_worker(); }
     { extern int test_app_adopt(void);
       *failures += test_app_adopt(); }
     { extern int test_app_kept_journey(void);

@@ -12,32 +12,85 @@
 #include <string.h>
 #include <time.h>
 
+/* The X server can destroy a window between enumeration and inspection.
+ * Suppress only BadWindow for the exact in-flight discovery request. */
+enum { UI_X11_QUERY_TREE = 15, UI_X11_GET_PROPERTY = 20 };
+static struct {
+    Display *display;
+    Window window;
+    unsigned long serial;
+    unsigned char opcode;
+    XErrorHandler previous;
+    bool stale;
+} discovery_request;
+
+static int discovery_error(Display *display, XErrorEvent *error)
+{
+    if (display == discovery_request.display && error->serial == discovery_request.serial &&
+        error->request_code == discovery_request.opcode && error->error_code == BadWindow &&
+        error->resourceid == discovery_request.window) {
+        discovery_request.stale = true; return 0;
+    }
+    if (discovery_request.previous) return discovery_request.previous(display, error);
+    fprintf(stderr, "native_ui_driver: unexpected X error %u request %u serial %lu\n",
+        error->error_code, error->request_code, error->serial);
+    exit(1);
+}
+static void discovery_begin(Display *display, Window window, unsigned char opcode)
+{
+    (void)XSync(display, False);
+    discovery_request.display = display; discovery_request.window = window;
+    discovery_request.opcode = opcode; discovery_request.serial = NextRequest(display);
+    discovery_request.stale = false;
+    discovery_request.previous = XSetErrorHandler(discovery_error);
+}
+static bool discovery_end(Display *display)
+{
+    (void)XSync(display, False);
+    (void)XSetErrorHandler(discovery_request.previous);
+    discovery_request.display = NULL;
+    return !discovery_request.stale;
+}
+static bool discovery_name(Display *display, Window window, char **name)
+{
+    discovery_begin(display, window, UI_X11_GET_PROPERTY);
+    (void)XFetchName(display, window, name);
+    return discovery_end(display);
+}
+static bool discovery_children(Display *display, Window window, Window **children, unsigned int *count)
+{
+    Window root = None, parent = None;
+    discovery_begin(display, window, UI_X11_QUERY_TREE);
+    (void)XQueryTree(display, window, &root, &parent, children, count);
+    return discovery_end(display);
+}
 static unsigned int matching_windows(Display *display, Window window,
                                      const char *title, unsigned int depth,
                                      Window *first)
 {
     unsigned int matches = 0;
+    bool named = false;
     char *name = NULL;
-    if (XFetchName(display, window, &name) && name) {
-        if (strstr(name, title) != NULL) {
-            if (*first == None)
-                *first = window;
-            matches++;
-        }
+    if (!discovery_name(display, window, &name)) {
+        if (name) XFree(name);
+        return 0;
+    }
+    if (name) {
+        named = strstr(name, title) != NULL;
         XFree(name);
     }
     if (depth > 0) {
-        Window root = None, parent = None, *children = NULL;
+        Window *children = NULL;
         unsigned int child_count = 0;
-        if (XQueryTree(display, window, &root, &parent,
-                       &children, &child_count)) {
+        if (discovery_children(display, window, &children, &child_count)) {
+            if (named) { if (*first == None) *first = window; matches++; }
             for (unsigned int i = 0; i < child_count; i++)
                 matches += matching_windows(display, children[i], title,
                                             depth - 1u, first);
             if (children)
                 XFree(children);
-        }
-    }
+        } else { if (children) XFree(children); return 0; }
+    } else if (named) { if (*first == None) *first = window; matches++; }
     return matches;
 }
 

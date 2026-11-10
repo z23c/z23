@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "util/spawn.h"
+#include "chain/chainparamsbase.h"
 
 /* Caller owns all strings and the scratch root until the synchronous run has
  * returned and reaped is true. Caller has already obtained explicit consent,
@@ -17,6 +18,7 @@ struct app_host_job_args {
     uint64_t scratch_dev, scratch_ino;
     const char *name, *release_root, *package_root, *publisher, *carrier_sha256;
     uint64_t carrier_size;
+    enum chain_network network;
     unsigned duration_ms; /* 3000..86400000; no change to receive timeout */
     int64_t service_deadline_ms; /* owner-set absolute monotonic deadline, or 0 */
     zcl_spawn_cancel_fn cancel;

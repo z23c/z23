@@ -1,5 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Coordinator lifecycle fixtures use an actual signed, pinned carrier. */
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
 #include "test/test_core.h"
 #include "base/hex.h"
 #include "chain/chainparams.h"
@@ -1451,7 +1454,7 @@ static bool host_ready_setup(struct host_ready_fixture_data *f)
     ok = ok && f->post && host_ready_sign(f);
     f->args = (struct app_host_job_args){.name = f->offer.name, .release_root = f->release,
         .package_root = f->offer.root, .publisher = f->offer.publisher,
-        .carrier_sha256 = f->offer.sha256, .carrier_size = (uint64_t)f->offer.size};
+        .carrier_sha256 = f->offer.sha256, .carrier_size = (uint64_t)f->offer.size, .network = CHAIN_MAIN};
     return ok;
 }
 static bool host_ready_identity(struct host_ready_fixture_data *f)
@@ -1488,7 +1491,7 @@ static bool host_ready_process(struct host_ready_fixture_data *f)
     int k = snprintf(script, sizeof(script), "%s/fake-host", f->root);
     FILE *fp = k > 0 && (size_t)k < sizeof(script) ? fopen(script, "w") : NULL;
     if (!fp) return false;
-    int written = fprintf(fp, "#!/bin/sh\nprintf '%%s\\n' '%.*s'\nexec sleep 5\n", f->line_len - 1, f->line);
+    int written = fprintf(fp, "#!/bin/sh\n[ \"${14}\" = main ] || exit 9\nprintf '%%s\\n' '%.*s'\nexec sleep 5\n", f->line_len - 1, f->line);
     int closed = fclose(fp);
     if (written <= 0 || closed || chmod(script, 0700) || stat(f->root, &st)) return false;
     f->args.self_path = script; f->args.scratch_path = f->root; f->args.scratch_dev = (uint64_t)st.st_dev;
@@ -1508,10 +1511,52 @@ static bool host_ready_rejections(struct host_ready_fixture_data *f)
         ok = !zcl_test_app_host_ready(&f->args, f->line, (size_t)n, (size_t)n/2, &ready); }
     return ok;
 }
+static bool host_carrier_write(const char *root, const struct host_ready_fixture_data *f)
+{
+    char path[900];
+    int n = snprintf(path, sizeof(path), "%s/carrier.z23share", root);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    size_t size = (size_t)f->offer.size;
+    bool ok = fwrite(f->bytes, 1, size, file) == size;
+    return fclose(file) == 0 && ok;
+}
+static bool host_chain_carrier_child(const char *root, const struct host_ready_fixture_data *f,
+    enum chain_network network, bool expected)
+{
+    if (chdir(root)) return false;
+    chain_params_select(network);
+    bool ok = zcl_test_app_host_verify_carrier(f->args.name, f->args.release_root,
+        f->args.package_root, f->args.publisher, f->args.carrier_sha256, f->args.carrier_size);
+    struct stat st;
+    if (ok != expected || (stat("zcode/chain-binding.v1", &st) == 0) != expected) return false;
+    if (!expected) return true;
+    FILE *file = fopen("zcode/chain-binding.v1", "r");
+    if (!file) return false;
+    char binding[128]; size_t n = fread(binding, 1, sizeof(binding), file);
+    bool matches = n == strlen("zcl.package-store.chain.v1\nzclassic-main\n") &&
+        !memcmp(binding, "zcl.package-store.chain.v1\nzclassic-main\n", n) && !ferror(file);
+    return fclose(file) == 0 && matches;
+}
+static bool host_chain_carrier(const struct host_ready_fixture_data *f, enum chain_network network, bool expected)
+{
+    char root[800];
+    if (!test_mkdtemp(root, sizeof(root), "host_chain") || !host_carrier_write(root, f)) return false;
+    pid_t child = fork();
+    if (!child) _exit(host_chain_carrier_child(root, f, network, expected) ? 0 : 2);
+    int status = 0; pid_t waited = -1;
+    if (child > 0) do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    bool ok = child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    return test_rm_rf_recursive(root) == 0 && ok;
+}
 static bool host_ready_fixture(void)
 {
     struct host_ready_fixture_data f = {0};
     bool ok = host_ready_setup(&f) && host_ready_identity(&f) && host_ready_process(&f);
+    if (ok) ok = !strcmp(f.share->release.chain_id, "zclassic-main") &&
+        host_chain_carrier(&f, CHAIN_MAIN, true) && host_chain_carrier(&f, CHAIN_TESTNET, false) &&
+        host_chain_carrier(&f, CHAIN_REGTEST, false);
     for (unsigned mode = 0; ok && mode < 4; mode++)
         ok = host_fake_terminal(f.root, f.line, f.line_len, &f.args, mode);
     if (ok) ok = host_ready_rejections(&f);
@@ -1766,6 +1811,12 @@ static int host_ready_frame_tests(void)
         ASSERT(!zcl_test_app_host_bootstrap_port(NULL, &port));
         ASSERT(!zcl_test_app_host_bootstrap_port(host_port_low, NULL)); PASS();
     }
+    TEST("host worker chain names are explicit and bounded") {
+        ASSERT(!strcmp(app_host_chain_token(CHAIN_MAIN), "main"));
+        ASSERT(!strcmp(app_host_chain_token(CHAIN_TESTNET), "test"));
+        ASSERT(!strcmp(app_host_chain_token(CHAIN_REGTEST), "regtest"));
+        ASSERT(!app_host_chain_token(CHAIN_MAX_NETWORK_TYPES)); PASS();
+    }
     TEST("host carrier storage admits the full legal byte limit without eviction") {
         ASSERT(host_carrier_capacity()); PASS();
     }
@@ -1792,6 +1843,64 @@ static int host_ready_frame_tests(void)
     } _test_next:;
     return failures;
 }
+static bool host_evidence_has(const struct zcl_spawn_evidence *e, const char *text)
+{
+    size_t n = strlen(text);
+    for (size_t i = 0; i + n <= e->stderr_len; ++i)
+        if (!memcmp(e->stderr_tail + i, text, n)) return true;
+    return false;
+}
+static bool host_cold_scratch(const struct host_ready_fixture_data *f, char *root, size_t cap, struct stat *st)
+{
+    char zcode[900], binding[960];
+    if (!test_mkdtemp(root, cap, "host_cold") || !host_carrier_write(root, f) || stat(root, st)) return false;
+    int n = snprintf(zcode, sizeof(zcode), "%s/zcode", root);
+    int b = snprintf(binding, sizeof(binding), "%s/chain-binding.v1", zcode);
+    if (n <= 0 || (size_t)n >= sizeof(zcode) || b <= 0 || (size_t)b >= sizeof(binding) || mkdir(zcode, 0700)) return false;
+    FILE *file = fopen(binding, "w");
+    if (!file) return false;
+    bool ok = fputs("invalid binding\n", file) >= 0;
+    return fclose(file) == 0 && ok;
+}
+static bool host_cold_exec(const struct host_ready_fixture_data *f, const char *root, const struct stat *st,
+    const char *network, bool expect_binding)
+{
+    char image[4096], dev[32], ino[32], size[32], deadline[32], parent[32];
+    int64_t now = platform_time_monotonic_ms();
+    if (!realpath("build/bin/z23-dev", image) || now <= 0 || now > INT64_MAX - 5000) return false;
+    (void)snprintf(dev, sizeof(dev), "%llu", (unsigned long long)st->st_dev);
+    (void)snprintf(ino, sizeof(ino), "%llu", (unsigned long long)st->st_ino);
+    (void)snprintf(size, sizeof(size), "%llu", (unsigned long long)f->args.carrier_size);
+    (void)snprintf(deadline, sizeof(deadline), "%llu", (unsigned long long)(now + 5000));
+    (void)snprintf(parent, sizeof(parent), "%llu", (unsigned long long)getpid());
+    const char *argv[] = {image, "--app-host-worker", root, dev, ino, f->args.name, f->args.release_root,
+        f->args.package_root, f->args.publisher, f->args.carrier_sha256, size, "5000", deadline, parent, network, NULL};
+    char output[256]; struct zcl_spawn_evidence e = {0};
+    (void)zcl_spawn_capture_evidence(argv, output, sizeof(output), 8000, &e);
+    return e.exit_observed && e.exit_code == 2 && !e.timed_out && e.stderr_complete &&
+        host_evidence_has(&e, "package store chain binding refused") == expect_binding;
+}
+static bool host_cold_worker(void)
+{
+    struct host_ready_fixture_data f = {0}; char root[800] = {0}; struct stat st;
+    bool ok = host_ready_setup(&f) && host_cold_scratch(&f, root, sizeof(root), &st);
+    if (ok) ok = host_cold_exec(&f, root, &st, "main", true) &&
+        host_cold_exec(&f, root, &st, "test", false) &&
+        host_cold_exec(&f, root, &st, "invalid", false);
+    free(f.post); if (f.share) { vcs_package_share_cleanup(f.share); free(f.share); } free(f.bytes);
+    if (root[0] && test_rm_rf_recursive(root) != 0) ok = false;
+    if (f.root[0] && test_rm_rf_recursive(f.root) != 0) ok = false;
+    return ok;
+}
+int test_app_host_worker(void)
+{
+    int failures = 0;
+    TEST("cold host worker selects its chain before opening the private store") {
+        ASSERT(host_cold_worker()); PASS();
+    } _test_next:;
+    return failures;
+}
 #else
 static int host_ready_frame_tests(void) { return 0; }
+int test_app_host_worker(void) { puts("UNOBSERVED (app_host_worker requires POSIX)"); return 0; }
 #endif

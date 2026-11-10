@@ -1980,3 +1980,4 @@ ZCL_TEST_GROUP(app_receive)
 
 ZCL_TEST_GROUP(app_share)
 ZCL_TEST_GROUP(app_receive_ui)
+ZCL_TEST_GROUP(app_host_worker)
