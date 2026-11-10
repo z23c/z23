@@ -33,6 +33,8 @@ struct receive_flow {
 struct receive_progress {
     struct app_receive_job *job;
     struct app_confirm view;
+    const char *phase;
+    char why[256];
     bool close_seen;
     bool notice_failed;
 };
@@ -117,8 +119,10 @@ static bool arf_progress(struct receive_flow *f, struct receive_progress *p,
     const char *stage)
 {
     arf_model(f, &p->view, stage, "This window stays open until the operation finishes.");
-    char why[256] = {0};
-    if (!arf_fields(f, &p->view) || !app_confirm_prepare(&p->view, why, sizeof(why))) return false;
+    p->phase = "fields";
+    if (!arf_fields(f, &p->view)) return false;
+    p->phase = "prepare";
+    if (!app_confirm_prepare(&p->view, p->why, sizeof(p->why))) return false;
     p->view.page = (struct zcl_present_window_v1){
         .struct_size = sizeof(p->view.page), .abi_version = ZCL_PRESENT_ABI_V1,
         .title = p->view.model.title, .pixels = p->view.bitmaps[0].pixels,
@@ -133,8 +137,20 @@ static bool arf_progress(struct receive_flow *f, struct receive_progress *p,
         .owner = {.context = p, .update = arf_tick},
         .input = app_commit_progress_ignore_input,
     };
-    return f->presenter ? f->presenter(f->context, &p->view.model, &pages, &live, why, sizeof(why)) :
-        zcl_present_window_run_live_view_v1(&pages, 0, &live, why, sizeof(why));
+    p->phase = "presenter";
+    return f->presenter ? f->presenter(f->context, &p->view.model, &pages, &live, p->why, sizeof(p->why)) :
+        zcl_present_window_run_live_view_v1(&pages, 0, &live, p->why, sizeof(p->why));
+}
+static bool arf_progress_error(struct json_value *out, const struct receive_progress *p)
+{
+    char safe[sizeof(p->why)]; size_t i = 0;
+    while (i + 1 < sizeof(safe) && p->why[i]) {
+        unsigned char c = (unsigned char)p->why[i];
+        safe[i++] = c >= 0x20 && c <= 0x7e ? (char)c : '?';
+    }
+    safe[i] = 0;
+    return json_push_kv_str(out, "progress_failure_phase", p->phase ? p->phase : "unknown") &&
+        json_push_kv_str(out, "progress_error", i ? safe : "No detail available");
 }
 /* Summaries are observations, not validation. Full worker envelopes remain
  * available to the exact-version binder until the stage finishes. Never copy
@@ -198,17 +214,22 @@ static bool arf_transport_fields(struct json_value *out, const struct app_receiv
         json_push_kv_bool(out, "stdout_truncated", result->evidence.stdout_truncated) &&
         json_push_kv_bool(out, "stderr_complete", result->evidence.stderr_complete);
 }
+static bool arf_progress_fields(struct json_value *out, bool shown, const struct receive_progress *p)
+{
+    return json_push_kv_bool(out, "progress_displayed", shown) &&
+        json_push_kv_bool(out, "close_notice_failed", p && p->notice_failed) &&
+        (shown || (p && arf_progress_error(out, p)));
+}
 static bool arf_observation(struct receive_flow *f,
     const struct app_receive_job_result *result, const struct json_value *wire,
-    const char *stage, bool parsed, bool shown, bool notice_failed)
+    const char *stage, bool parsed, bool shown, const struct receive_progress *p)
 {
     struct json_value observed; json_init(&observed); json_set_object(&observed);
     char tail[257];
     size_t n = result->evidence.stderr_len < 128 ? result->evidence.stderr_len : 128;
     zcl_hex_encode(result->evidence.stderr_tail + result->evidence.stderr_len - n, n, tail);
     bool ok = json_push_kv_str(&observed, "operation", stage) &&
-        json_push_kv_bool(&observed, "progress_displayed", shown) &&
-        json_push_kv_bool(&observed, "close_notice_failed", notice_failed) &&
+        arf_progress_fields(&observed, shown, p) &&
         arf_transport_fields(&observed, result) &&
         json_push_kv_str(&observed, "stderr_tail_hex", tail) &&
         json_push_kv_int(&observed, "stderr_bytes_omitted", (int64_t)(result->evidence.stderr_observed - n)) &&
@@ -220,14 +241,14 @@ static bool arf_observation(struct receive_flow *f,
     return ok || arf_fail(f, "OBSERVATION_UNAVAILABLE", f->adopted ? "The operation ran but its result could not be retained; inspect the adopted copy before retrying." : "The operation ran but its result could not be retained; inspect the received copy before retrying.");
 }
 static bool arf_capture_result(struct receive_flow *f, struct app_receive_job *job,
-    struct json_value *wire, const char *stage, bool shown, bool notice_failed)
+    struct json_value *wire, const char *stage, bool shown, const struct receive_progress *p)
 {
     struct app_receive_job_result result;
     if (!app_receive_job_poll(job, &result))
         return arf_fail(f, "WORKER_UNOBSERVED", "The operation has no completed observation.");
     bool parsed = result.evidence.stdout_complete && !result.evidence.stdout_truncated &&
         result.stdout_len && json_read(wire, result.stdout_json, result.stdout_len);
-    if (!arf_observation(f, &result, wire, stage, parsed, shown, notice_failed)) return false;
+    if (!arf_observation(f, &result, wire, stage, parsed, shown, p)) return false;
     if (!result.transport_ok) {
         const struct json_value *error = parsed ? json_get(wire, "error") : NULL;
         const char *message = zcl_package_copy_str(error, "message");
@@ -273,7 +294,7 @@ static bool arf_job(struct receive_flow *f, enum app_receive_job_command command
         cleanup_failed = true;
         platform_sleep_ms(1000);
     }
-    bool ok = arf_capture_result(f, p->job, wire, stage, shown, p->notice_failed);
+    bool ok = arf_capture_result(f, p->job, wire, stage, shown, p);
     while (!app_receive_job_join_free(&p->job)) {
         arf_cleanup_notice(f);
         cleanup_failed = true;
@@ -418,7 +439,7 @@ bool app_receive_flow_test_report(struct zcl_command_reply *reply,
     json_init(&f.operations); json_set_array(&f.operations);
     bool ok = true;
     for (size_t i = 0; ok && i < 3; ++i)
-        ok = arf_observation(&f, &results[i], wires[i], stages[i], true, true, false);
+        ok = arf_observation(&f, &results[i], wires[i], stages[i], true, true, NULL);
     ok = ok && json_push_kv(&reply->data, "operations", &f.operations);
     json_free(&f.operations);
     if (ok && !failed) {

@@ -8,6 +8,7 @@
 #include "command/native_app_confirm.h"
 #include "command/native_app_library_command.h"
 #include "command/native_app_receive_preview.h"
+#include "command/native_app_receive_flow.h"
 #include "command/native_app_host_browser.h"
 #include "command/native_app_compose.h"
 #include "command/native_app_offer.h"
@@ -1252,6 +1253,91 @@ static int rr_cases(void)
     } _test_next:;
     return failures;
 }
+#if defined(__linux__)
+struct rdiag_presenter { unsigned progress, choices; };
+static bool rdiag_choose(const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_live_view_v1 *live)
+{
+    bool close = false, redraw = false; uint32_t count = 0; char why[128];
+    if (!zcl_present_model_page_count_v1(model, &count, why, sizeof(why))) return false;
+    for (uint32_t i = 1; i < count; ++i)
+        if (!rt_action(live, 2, &close, &redraw) || close || !redraw) return false;
+    return rt_action(live, 3, &close, &redraw) && close;
+}
+static bool rdiag_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct rdiag_presenter *p = context;
+    (void)pages;
+    if (!strcmp(model->title, "Your copy is ready")) {
+        ++p->choices; return rdiag_choose(model, live);
+    }
+    if (!strcmp(model->title, "The next step did not finish")) {
+        bool close = false, redraw = false;
+        return rt_action(live, 0, &close, &redraw) && close;
+    }
+    ++p->progress;
+    if (p->progress == 2) {
+        if (cap > 1) { memset(why, 'x', cap - 1); why[1] = '\n'; why[cap - 1] = 0; }
+        return false;
+    }
+    int64_t end = platform_time_monotonic_ms() + 30000;
+    do {
+        bool redraw = false, close = false;
+        live->owner.update(live->owner.context, NULL, false, &redraw, &close);
+        if (close) return true;
+        platform_sleep_ms(1); /* real-clock: observe the actual worker */
+    } while (platform_time_monotonic_ms() < end);
+    return false;
+}
+static bool rdiag_failure(const struct json_value *second)
+{
+    const char *phase = json_get_str(json_get(second, "progress_failure_phase"));
+    const char *error = json_get_str(json_get(second, "progress_error"));
+    const char *stage = json_get_str(json_get(second, "stage"));
+    const char *record = json_get_str(json_get(second, "record_id"));
+    return phase && !strcmp(phase, "presenter") && error && strlen(error) == 255 &&
+        error[0] == 'x' && error[1] == '?' && error[254] == 'x' &&
+        stage && !strcmp(stage, "commit") && record && strlen(record) == 64;
+}
+static bool rdiag_result(const struct zcl_command_reply *reply, const struct rdiag_presenter *p)
+{
+    const struct json_value *data = &reply->data, *ops = json_get(data, "operations");
+    if (!ops || ops->type != JSON_ARR || json_size(ops) != 2) return false;
+    const struct json_value *first = json_at(ops, 0), *second = json_at(ops, 1);
+    const char *code = json_get_str(json_get(json_get(data, "continuation_error"), "code"));
+    return p->choices == 1 && p->progress == 2 && !json_get(first, "progress_error") &&
+        json_get_bool(json_get(first, "progress_displayed")) &&
+        !json_get_bool(json_get(second, "progress_displayed")) && rdiag_failure(second) &&
+        code && !strcmp(code, "PROGRESS_UNAVAILABLE") && !json_get(data, "kept") &&
+        !json_get_bool(json_get(data, "continuation_executed"));
+}
+static int rdiag_case(void)
+{
+    int failures = 0; struct receive_fixture f = {0}; char image[PATH_MAX];
+    struct json_value input; json_init(&input);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    TEST("receive retains bounded progress failure after successful build without opening") {
+        ASSERT(realpath("build/bin/z23-dev", image));
+        ASSERT(rt_setup(&f) && rt_input(&input, &f));
+        struct zcl_command_request request = {.input = &input};
+        struct rt_presenter receive = {.fixture = &f, .decision = RT_CONFIRM};
+        zcl_test_app_receive_run(&request, &reply, rt_present, &receive);
+        ASSERT(rt_expected_reply(&receive, &reply));
+        struct rdiag_presenter presenter = {0};
+        zcl_native_bridge_ensure_rpc();
+        char old_dir[PATH_MAX]; (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+        int old_port = zcl_native_command_rpc_port();
+        zcl_native_bridge_bind_rpc(f.datadir, 39461);
+        app_receive_flow_run_test(f.datadir, &reply, rdiag_present, &presenter, image);
+        zcl_native_bridge_bind_rpc(old_dir, old_port);
+        ASSERT(rdiag_result(&reply, &presenter));
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply); json_free(&input); return failures;
+}
+#endif
 int test_app_receive(void)
 {
     int failures = rt_wrap_cases();
@@ -2815,7 +2901,8 @@ static int rud_readiness(void)
 int test_app_receive_ui(void)
 {
     if (access("/usr/bin/Xvfb", X_OK) != 0) { puts("SKIP (app_receive_ui requires Linux Xvfb)"); return 0; }
-    int failures = rud_readiness();
+    int failures = rdiag_case();
+    failures += rud_readiness();
     failures += ru_case(false, false, false);
     failures += ru_case(true, false, false);
     failures += ru_case(true, true, false);
