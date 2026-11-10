@@ -1362,7 +1362,7 @@ static bool host_fake_terminal(const char *root, const char *line, int line_len,
     args->scratch_ino = (uint64_t)st.st_ino; args->duration_ms = 5000;
     return mode == 3 ? host_terminal_late_stop(args, ack) : host_terminal_state(args, mode);
 }
-struct host_view_probe { unsigned copies; bool valid, feedback; };
+struct host_view_probe { unsigned copies; bool valid, feedback, numbered; };
 static bool host_view_copy(const char *text, void *context)
 {
     struct host_view_probe *p = context; p->copies++;
@@ -1381,29 +1381,39 @@ static bool host_view_wait(const struct zcl_present_model_v1 *model,
     }
     return false;
 }
+static bool host_view_key(const struct zcl_present_window_live_view_v1 *live,
+                          uint32_t *focus, char key)
+{
+    uint32_t action = UINT32_MAX;
+    struct zcl_present_input_v1 input = {.key = ZCL_PRESENT_INPUT_TEXT, .character = key};
+    return live->input(live->owner.context, &input, focus, &action) && action == UINT32_MAX;
+}
+static bool host_view_notice(const struct zcl_present_model_v1 *model, const char *text)
+{
+    for (unsigned i = 0; i < model->item_count; i++)
+        if (strstr(model->items[i].value, text)) return true;
+    return false;
+}
 static bool host_view_present(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
     char *why, size_t cap)
 {
     (void)pages; (void)why; (void)cap; struct host_view_probe *p = context;
     if (!host_view_wait(model, live, false)) return false;
-    uint32_t focus = 0, action = UINT32_MAX;
-    struct zcl_present_input_v1 input = {.key = ZCL_PRESENT_INPUT_TEXT, .character = 'c'};
-    if (!live->input(live->owner.context, &input, &focus, &action) || action != UINT32_MAX) return false;
+    uint32_t focus = 0;
+    int copy_key = p->numbered ? '1' : 'c';
+    if (!host_view_key(live, &focus, copy_key)) return false;
     bool redraw = false, allow = false; struct zcl_present_window_event_v1 event = {0};
     live->owner.update(live->owner.context, &event, false, &redraw, &allow);
-    for (unsigned i = 0; i < model->item_count; i++)
-        if (strstr(model->items[i].value, "Copied. Send the link")) p->feedback = true;
-    input.character = 'q';
-    if (!live->input(live->owner.context, &input, &focus, &action)) return false;
+    if (allow || !strstr(model->summary, "Available while")) return false;
+    p->feedback = host_view_notice(model, "Copied. Send the link");
+    if (!host_view_key(live, &focus, p->numbered ? '2' : 'q')) return false;
     live->owner.update(live->owner.context, &event, false, &redraw, &allow);
     if (strstr(model->summary, "Connecting")) return false;
     if (!host_view_wait(model, live, true)) return false;
-    input.character = 'c';
-    if (!live->input(live->owner.context, &input, &focus, &action)) return false;
+    if (!host_view_key(live, &focus, copy_key)) return false;
     live->owner.update(live->owner.context, &event, false, &redraw, &allow);
-    for (unsigned i = 0; i < model->item_count; i++)
-        if (strstr(model->items[i].value, "Copied.") || strstr(model->items[i].value, "Try again")) return false;
+    if (host_view_notice(model, "Copied.") || host_view_notice(model, "Try again")) return false;
     return p->valid && p->feedback && p->copies == 1;
 }
 struct host_ready_fixture_data {
@@ -1455,9 +1465,9 @@ static bool host_ready_identity(struct host_ready_fixture_data *f)
         f->args.publisher = o->publisher; }
     return ok;
 }
-static bool host_ready_view(struct app_host_job_args *args)
+static bool host_ready_view(struct app_host_job_args *args, bool numbered)
 {
-    struct app_host_owner *owner = app_host_owner_start(args); struct host_view_probe view = {0};
+    struct app_host_owner *owner = app_host_owner_start(args); struct host_view_probe view = {.numbered = numbered};
     char why[256] = {0}; struct app_host_job_result result = {0};
     if (!owner) return false;
     bool shown = zcl_test_app_host_view_run(owner, host_view_present, &view, host_view_copy, &view, why, sizeof(why));
@@ -1486,7 +1496,7 @@ static bool host_ready_process(struct host_ready_fixture_data *f)
     f->args.cancel = host_fake_cancel; f->args.cancel_context = &owner;
     struct app_host_job_result result = {0};
     bool completed = app_host_job_run(&f->args, host_fake_ready, host_fake_unavailable, &owner, &result);
-    return host_ready_stopped(&owner, &result, completed) && host_ready_view(&f->args);
+    return host_ready_stopped(&owner, &result, completed) && host_ready_view(&f->args, false) && host_ready_view(&f->args, true);
 }
 static bool host_ready_rejections(struct host_ready_fixture_data *f)
 {

@@ -81,9 +81,11 @@ static bool ahv_input(void *context, const struct zcl_present_input_v1 *input,
     if (input->key == ZCL_PRESENT_INPUT_ENTER ||
         (input->key == ZCL_PRESENT_INPUT_TEXT && input->character == ' '))
         return ahv_action(v, *focus);
-    if (input->key == ZCL_PRESENT_INPUT_TEXT && input->character == 'c') return ahv_action(v, 0);
+    if (input->key == ZCL_PRESENT_INPUT_TEXT &&
+        (input->character == 'c' || input->character == '1')) return ahv_action(v, 0);
     if (input->key == ZCL_PRESENT_INPUT_ESCAPE ||
-        (input->key == ZCL_PRESENT_INPUT_TEXT && input->character == 'q')) return ahv_action(v, 1);
+        (input->key == ZCL_PRESENT_INPUT_TEXT &&
+         (input->character == 'q' || input->character == '2'))) return ahv_action(v, 1);
     if (input->key == ZCL_PRESENT_INPUT_CLICK) {
         uint32_t hit = UINT32_MAX;
         if (zcl_present_window_action_at_v1(v->page.width, v->page.height, (int32_t)v->page.width,
