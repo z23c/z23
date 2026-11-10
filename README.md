@@ -75,7 +75,7 @@ recorded here; check them against a trusted copy of this guide before use.
 (
     set -eu
     installer_sha=d2f9977e024c5ece9a2dd1e55e641e5cf45fac19746d19994f1be2cf745c27f7
-    manifest_sha=c124018c11f415f172331f740489567b8ba58a3293ef9efc1554a4d977239dd4
+    manifest_sha=81fafa62e491c8ef7287057b71d48bd6c5e3ec7e44b3cad8a386f8bb8145aa29
     install_tmp=$(mktemp -d) || exit 1
     trap 'rm -rf -- "$install_tmp"' 0
     curl --fail --silent --show-error --location --connect-timeout 10 --max-time 90 --max-filesize 1048576 \
@@ -122,7 +122,11 @@ its identity and confirm **Share link**. Copy the link once available and keep
 the sharing window open while your friend receives it; sharing stops when the
 window closes or you stop it. You can instead choose **Create share file** and
 send the resulting file. Sharing requires a personal publishing identity; a
-received copy may need explicit personalization before it can be newly signed.
+received copy may open **Prepare a personal copy?**. Review and approve that
+preparation, review the draft, choose **Build and preview**, then explicitly
+**Keep this version**. Choose Share again to sign and share the kept version.
+This onward-sharing flow does not require an AI assistant or the original
+sender to remain online.
 
 Your friend needs their own app-capable installation and desktop, not a source
 checkout or a running node. For a link, they choose **Discover apps → Open a
