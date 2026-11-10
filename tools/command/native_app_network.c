@@ -307,6 +307,16 @@ static bool an_slice_prepare(struct an_run *r, struct an_slice_job *j, const cha
     (void)snprintf(j->path, sizeof(j->path), "/zcode/download/%s/0/%u/slice/%zu", o->carrier, index, off);
     atomic_init(&j->done, false); r->calls++; return true;
 }
+static bool an_slice_results(struct an_run *r, struct an_slice_batch *b, unsigned started)
+{
+    for (unsigned i = 0; i < started; i++) {
+        struct an_slice_job *j = &b->jobs[i];
+        if (!j->ok || j->status != 200) { *r->error = APP_NETWORK_UNAVAILABLE; return false; }
+        if (j->got > j->want) { *r->error = APP_NETWORK_INVALID_RESPONSE; return false; }
+        if (j->got != j->want) return false;
+    }
+    return true;
+}
 static bool an_slice_batch_fetch(struct an_run *r, const char *onion, const struct zcl_app_offer *o,
     uint32_t index, size_t *off, size_t size, uint8_t *chunk)
 {
@@ -323,12 +333,7 @@ static bool an_slice_batch_fetch(struct an_run *r, const char *onion, const stru
     bool live = an_live(r);
     bool ok = live && launch_ok && joined;
     if (live && (!joined || spawn_failed)) *r->error = APP_NETWORK_UNAVAILABLE;
-    for (unsigned i = 0; ok && i < started; i++) {
-        struct an_slice_job *j = &b->jobs[i];
-        if (!j->ok || j->status != 200) { *r->error = APP_NETWORK_UNAVAILABLE; ok = false; }
-        else if (j->got > j->want) { *r->error = APP_NETWORK_INVALID_RESPONSE; ok = false; }
-        else if (j->got != j->want) ok = false;
-    }
+    if (ok) ok = an_slice_results(r, b, started);
     if (joined) free(b); else an_keep_unjoined(b);
     return ok;
 }

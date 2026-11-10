@@ -671,60 +671,54 @@ struct tag_parallel {
     unsigned slice_fault;
     atomic_bool cancel_requested;
 };
+static bool tag_parallel_wait(struct tag_parallel *p, const bool *condition, unsigned ms)
+{
+    struct timespec until;
+    if (clock_gettime(CLOCK_REALTIME, &until)) return false;
+    until.tv_sec += (time_t)(ms / 1000u);
+    until.tv_nsec += (long)(ms % 1000u) * 1000000L;
+    if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
+    int rc = 0;
+    while ((!condition || !*condition) && !rc) rc = pthread_cond_timedwait(&p->cond, &p->mutex, &until);
+    return condition ? *condition : rc == ETIMEDOUT;
+}
+static bool tag_parallel_enter(struct tag_parallel *p, unsigned timeout_ms)
+{
+    p->active++; if (p->active > p->peak) p->peak = p->active;
+    if (p->cancel) atomic_store_explicit(&p->cancel_requested, true, memory_order_release);
+    if (p->expire) {
+        p->expire_entered = true;
+        if (!tag_parallel_wait(p, NULL, timeout_ms + 50u)) p->missed = true;
+    }
+    if (!p->barrier || p->entered >= 2) return false;
+    p->entered++;
+    if (p->entered == 2) {
+        p->overlap = !p->missed; pthread_cond_broadcast(&p->cond); return true;
+    }
+    if (!tag_parallel_wait(p, &p->overlap, 2000)) p->missed = true;
+    if (p->overlap && !tag_parallel_wait(p, &p->second_done, 2000)) p->missed = true;
+    return false;
+}
+static bool tag_parallel_fault(struct tag_parallel *p, bool slice, bool ok,
+    uint8_t *out, size_t *len, int *status)
+{
+    if (!slice) return ok;
+    if (p->slice_fault == 1) ok = false;
+    if (p->slice_fault == 2) *status = 503;
+    if (p->slice_fault == 3 && *len) (*len)--;
+    if (p->slice_fault == 4 && *len) out[0] ^= 1;
+    return ok;
+}
 static bool tag_parallel_fetch(void *context, const char *onion, const char *path,
     uint8_t *out, size_t cap, size_t *len, int *status, unsigned timeout_ms)
 {
     struct tag_parallel *p = context;
     pthread_mutex_lock(&p->mutex);
     bool slice = strstr(path, "/slice/") != NULL;
-    if (slice) {
-        p->active++; if (p->active > p->peak) p->peak = p->active;
-        if (p->cancel) atomic_store_explicit(&p->cancel_requested, true, memory_order_release);
-        if (p->expire) {
-            p->expire_entered = true;
-            struct timespec until;
-            if (clock_gettime(CLOCK_REALTIME, &until)) p->missed = true;
-            else {
-                unsigned ms = timeout_ms + 50u;
-                until.tv_sec += (time_t)(ms / 1000u);
-                until.tv_nsec += (long)(ms % 1000u) * 1000000L;
-                if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
-                int rc; do { rc = pthread_cond_timedwait(&p->cond, &p->mutex, &until); } while (!rc);
-                if (rc != ETIMEDOUT) p->missed = true;
-            }
-        }
-    }
-    bool first = false, second = false;
-    if (slice && p->barrier && p->entered < 2) {
-        p->entered++;
-        first = p->entered == 1; second = p->entered == 2;
-        if (p->entered == 2) { p->overlap = !p->missed; pthread_cond_broadcast(&p->cond); }
-        else {
-            struct timespec until;
-            if (clock_gettime(CLOCK_REALTIME, &until)) p->missed = true;
-            else {
-                until.tv_sec += 2;
-                int rc = 0;
-                while (!p->overlap && !rc) rc = pthread_cond_timedwait(&p->cond, &p->mutex, &until);
-            }
-            if (!p->overlap) p->missed = true;
-        }
-    }
-    if (first && p->overlap) {
-        struct timespec until;
-        if (clock_gettime(CLOCK_REALTIME, &until)) p->missed = true;
-        else {
-            until.tv_sec += 2; int rc = 0;
-            while (!p->second_done && !rc) rc = pthread_cond_timedwait(&p->cond, &p->mutex, &until);
-            if (!p->second_done) p->missed = true;
-        }
-    }
+    bool second = slice && tag_parallel_enter(p, timeout_ms);
     bool ok = tag_net_fetch(&p->net, onion, path, out, cap, len, status, timeout_ms);
     if (second) { p->second_done = true; pthread_cond_broadcast(&p->cond); }
-    if (slice && p->slice_fault == 1) ok = false;
-    if (slice && p->slice_fault == 2) *status = 503;
-    if (slice && p->slice_fault == 3 && *len) (*len)--;
-    if (slice && p->slice_fault == 4 && *len) out[0] ^= 1;
+    ok = tag_parallel_fault(p, slice, ok, out, len, status);
     if (slice) p->active--;
     pthread_mutex_unlock(&p->mutex);
     return ok;
@@ -734,6 +728,33 @@ static bool tag_parallel_cancelled(void *context)
     struct tag_parallel *p = context;
     return p->cancel && atomic_load_explicit(&p->cancel_requested, memory_order_acquire);
 }
+static bool tag_parallel_success(struct tag_parallel *p, bool parallel, const uint8_t *out, size_t len)
+{
+    return len == p->net.size && !memcmp(out, p->net.bytes, len) &&
+        (parallel ? p->overlap && !p->missed && p->second_done : p->peak == 1);
+}
+static bool tag_parallel_outcome(struct tag_parallel *p, bool fetched, bool expected,
+    bool parallel, const uint8_t *out, size_t len, enum app_network_error error)
+{
+    if (fetched != expected || p->active != 0 || p->peak > 4) return false;
+    if (expected) return tag_parallel_success(p, parallel, out, len);
+    if (out) return false;
+    if (p->cancel) return error == APP_NETWORK_CANCELLED &&
+        atomic_load_explicit(&p->cancel_requested, memory_order_acquire);
+    if (p->expire) return error == APP_NETWORK_TIMEOUT && p->expire_entered && !p->missed;
+    if (p->slice_fault >= 3) return error == APP_NETWORK_CONTENT_MISMATCH;
+    return error == APP_NETWORK_UNAVAILABLE;
+}
+static bool tag_parallel_cleanup(struct tag_parallel *p, struct vcs_package_store *store,
+    uint8_t *out, const char *dir, bool ok)
+{
+    free(out); if (store) vcs_package_store_close(store);
+    if (dir[0]) ok = test_rm_rf_recursive(dir) == 0 && ok;
+    free(p->net.bytes); free(p->net.manifest);
+    pthread_cond_destroy(&p->cond); pthread_mutex_destroy(&p->mutex); return ok;
+}
+static bool tag_parallel_expected(unsigned fault, bool cancel, bool expire, int spawn_after, int join_after)
+{ return !fault && !cancel && !expire && spawn_after < 0 && join_after < 0; }
 static bool tag_network_parallel_case(bool parallel, unsigned slice_fault, bool cancel,
     bool expire, int spawn_after, int join_after)
 {
@@ -755,19 +776,9 @@ static bool tag_network_parallel_case(bool parallel, unsigned slice_fault, bool 
     zcl_test_app_network_thread_faults(spawn_after, join_after);
     bool fetched = ok && app_network_carrier(&t, TAG_NET_RELAY, TAG_NET_HOST, &row, now, store, &out, &len, &mutated, &error);
     zcl_test_app_network_thread_faults(-1, -1);
-    bool expected = !slice_fault && !cancel && !expire && spawn_after < 0 && join_after < 0;
-    ok = ok && fetched == expected && p.active == 0 && p.peak <= 4;
-    if (expected) ok = ok && len == p.net.size && !memcmp(out, p.net.bytes, len) &&
-        (parallel ? p.overlap && !p.missed && p.second_done : p.peak == 1);
-    else if (cancel) ok = ok && !out && error == APP_NETWORK_CANCELLED &&
-        atomic_load_explicit(&p.cancel_requested, memory_order_acquire);
-    else if (expire) ok = ok && !out && error == APP_NETWORK_TIMEOUT && p.expire_entered && !p.missed;
-    else if (slice_fault >= 3) ok = ok && !out && error == APP_NETWORK_CONTENT_MISMATCH;
-    else ok = ok && !out && error == APP_NETWORK_UNAVAILABLE;
-    free(out); if (store) vcs_package_store_close(store);
-    if (dir[0]) ok = test_rm_rf_recursive(dir) == 0 && ok;
-    free(p.net.bytes); free(p.net.manifest);
-    pthread_cond_destroy(&p.cond); pthread_mutex_destroy(&p.mutex); return ok;
+    bool expected = tag_parallel_expected(slice_fault, cancel, expire, spawn_after, join_after);
+    ok = ok && tag_parallel_outcome(&p, fetched, expected, parallel, out, len, error);
+    return tag_parallel_cleanup(&p, store, out, dir, ok);
 }
 static bool tag_network_parallel(void)
 {
