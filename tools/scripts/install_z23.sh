@@ -661,6 +661,9 @@ verify_release_not_tor_stub() {
     if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] ||
        grep -qiE 'Exec format error|cannot execute binary file' "$err"; then
         rm -f -- "$out" "$err"
+        if [ "$APPS_ONLY" = 1 ]; then
+            die "apps_runtime_unavailable: this app release cannot run here; choose a compatible release"
+        fi
         read_sidecar_stamp
         return 0
     fi
@@ -3091,6 +3094,49 @@ selftest_app_toolchain() {
     [ "$rc" -ne 0 ] || die "selftest: oversized toolchain bundle accepted"
 }
 
+# A bound Tor sidecar permits foreign node staging, but an apps install must
+# be runnable here and must refuse before replacing an existing installation.
+selftest_app_runtime_refusal() {
+    local app="$1" prefix="$2" home="$3" data="$4" mock="$5" tmp="$6"
+    local foreign="$tmp/app-unrunnable" kind name rc selector
+    cp "$prefix/bin/z23" "$tmp/app-runtime-before"
+    selector="$(readlink "$prefix/share/z23/apps/skycombat")"
+    for name in org.zclassic.ZClassic23.desktop org.zclassic.SkyCombat.desktop; do
+        cp "$data/applications/$name" "$tmp/before-$name"
+    done
+    for kind in foreign missing-interpreter; do
+        mkdir -p "$foreign-$kind"
+        cp -R "$app/." "$foreign-$kind/"
+        rm -f "$foreign-$kind/z23" "$foreign-$kind/zclassic23"
+        if [ "$kind" = foreign ]; then
+            printf '\177ELF\002\001\001\000not-runnable-on-this-host\n' >"$foreign-$kind/z23"
+        else
+            printf '#!/nonexistent/z23-selftest-interpreter\n' >"$foreign-$kind/z23"
+        fi
+        cp "$foreign-$kind/z23" "$foreign-$kind/zclassic23"
+        chmod 755 "$foreign-$kind/z23" "$foreign-$kind/zclassic23"
+        (cd "$foreign-$kind" && sha256sum $RELEASE_MEMBERS $APP_SOURCE_MEMBERS $APP_DESKTOP_MEMBERS >SHA256SUMS)
+        printf 'tor: full\nbinary_sha256: %s\n' "$(manifest_digest_of "$foreign-$kind" z23)" \
+            >"$foreign-$kind/z23.tor-stamp"
+        rc=0
+        HOME="$home" XDG_DATA_HOME="$data" PATH="$mock:$PATH" \
+            Z23_INSTALL_TEST_PLATFORM=Linux Z23_INSTALL_PREFIX="$prefix" \
+            Z23_APPS_SERVICE_LOG="$tmp/app-services" Z23_APPS_DESKTOP_LOG="$tmp/app-desktop" \
+            "$SCRIPT_DIR/install_z23.sh" --apps --source="$foreign-$kind" \
+            >"$tmp/app-$kind.out" 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] && grep -F 'apps_runtime_unavailable' "$tmp/app-$kind.out" >/dev/null && \
+            grep -F 'choose a compatible release' "$tmp/app-$kind.out" >/dev/null \
+            || die "selftest: --apps accepted $kind or omitted the remedy"
+        cmp -s "$prefix/bin/z23" "$tmp/app-runtime-before" && \
+            [ "$(readlink "$prefix/share/z23/apps/skycombat")" = "$selector" ] \
+            || die "selftest: --apps changed the existing binary or selector on $kind refusal"
+        for name in org.zclassic.ZClassic23.desktop org.zclassic.SkyCombat.desktop; do
+            cmp -s "$data/applications/$name" "$tmp/before-$name" \
+                || die "selftest: --apps changed $name on $kind refusal"
+        done
+    done
+}
+
 selftest_app_mode() {
     local tmp="$SELFTEST_TMP" app="$SELFTEST_TMP/app-desktop-release"
     local home="$tmp/app home" data="$tmp/app home/data" mock="$tmp/app-mode-tools"
@@ -3150,6 +3196,7 @@ EOF
     cmp -s "$app/org.zclassic.ZClassic23.svg" "$data/icons/hicolor/scalable/apps/org.zclassic.ZClassic23.svg" \
         || die "selftest: installed icon bytes changed"
     [ -s "$tmp/app-desktop" ] || die "selftest: desktop databases were not updated"
+    selftest_app_runtime_refusal "$app" "$prefix-Linux" "$home" "$data" "$mock" "$tmp"
     grep -F '" app open skycombat ' "$data/applications/org.zclassic.SkyCombat.desktop" >/dev/null \
         || die "selftest: installed app menu entry omitted native Open"
     "$SCRIPT_DIR/install_z23.sh" --help >"$tmp/app-help"

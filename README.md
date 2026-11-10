@@ -74,7 +74,7 @@ recorded here; check them against a trusted copy of this guide before use.
 ```sh
 (
     set -eu
-    installer_sha=7d2117ba999b35eaf74fe86ddb18b5d63d6502e17d55e28e579421cfaf183898
+    installer_sha=d2f9977e024c5ece9a2dd1e55e641e5cf45fac19746d19994f1be2cf745c27f7
     manifest_sha=51a9ca2aa370f97e193c14dfecd14774e8f40e9b5ba2644deb180399e70e48d3
     install_tmp=$(mktemp -d) || exit 1
     trap 'rm -rf -- "$install_tmp"' 0
