@@ -436,6 +436,7 @@ bool boot_mint_anchor_preflight_dump_state_json(struct json_value *out, const ch
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "config/boot_error.h"
 #define PREFLIGHT_SUBSYS "mint_anchor"
 
 struct preflight_source_file {
@@ -873,27 +874,32 @@ static bool preflight_close_sources(struct preflight_source_file files[3], char 
     return ok;
 }
 
+/* Report a failed preflight on stderr and emit the refusal event. */
+static void preflight_report_refusal(const char *reason) {
+    const char *why = reason[0] ? reason
+                                : "producer evidence snapshot could not be proven stable";
+    char message[640];
+    (void)snprintf(message, sizeof(message),
+                   "normal node boot refused before datadir mutation: %s", why);
+    boot_error_report(BOOT_ERROR_FATAL, "BOOT_MINT_ANCHOR_PREFLIGHT_REFUSED",
+                      "mint.preflight", message, NULL, 0, "stage=%s", why);
+    /* The reason starts with the failing stage token (temp_create_failed,
+     * copy_failed, source_changed, inspect_read_failed, cleanup_failed, ...). */
+    event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "producer_evidence_preflight_refused reason=%s",
+                reason[0] ? reason : "stable_snapshot_inspection_failed");
+}
+
 static bool preflight_missing_main_result(int dirfd, struct preflight_source_file files[3], const char *kbase) {
     bool empty_family = !files[1].exists && !files[2].exists;
     (void)preflight_close_sources(files, NULL, 0);
     (void)close(dirfd);
     if (empty_family)
         return true;
-    fprintf(stderr,
-            "FATAL: normal node boot refused before datadir mutation: "
-            "orphan %s WAL/SHM without a main database\n",
-            kbase);
+    char orphan[160];
+    (void)snprintf(orphan, sizeof(orphan),
+                   "orphan %s WAL/SHM without a main database", kbase);
+    preflight_report_refusal(orphan);
     return false;
-}
-
-/* Report a failed preflight on stderr and emit the refusal event. */
-static void preflight_report_refusal(const char *reason) {
-    fprintf(stderr, "FATAL: normal node boot refused before datadir mutation: %s\n",
-            reason[0] ? reason : "producer evidence snapshot could not be proven stable");
-    /* The reason starts with the failing stage token (temp_create_failed,
-     * copy_failed, source_changed, inspect_read_failed, cleanup_failed, ...). */
-    event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "producer_evidence_preflight_refused reason=%s",
-                reason[0] ? reason : "stable_snapshot_inspection_failed");
 }
 
 bool boot_mint_anchor_normal_boot_preflight(const char *datadir) {

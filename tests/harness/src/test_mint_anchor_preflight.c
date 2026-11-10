@@ -18,6 +18,7 @@
 
 #include "chain/checkpoints.h"
 #include "config/boot.h"
+#include "config/boot_error.h"
 #include "json/json.h"
 #include "models/database.h"
 #include "config/mint_anchor_progress.h"
@@ -625,6 +626,47 @@ static int test_normal_preflight_marker_only_in_wal(void)
     return failures;
 }
 
+/* Missing path refuses through the typed boot error. An empty directory
+ * is allowed and must not latch a fatal. */
+static int map_preflight_typed_refusal(void)
+{
+    int failures = 0;
+    char missing[600];
+    char empty[600];
+    char rendered[BOOT_ERROR_RENDER_MAX];
+    const char *code = NULL;
+    size_t rendered_n = 0;
+
+    test_fmt_tmpdir(missing, sizeof(missing), "mint_anchor_preflight", "absent");
+    boot_error_reset_for_testing();
+    MAP_CHECK("typed: missing datadir returns false",
+              boot_mint_anchor_normal_boot_preflight(missing) == false);
+    MAP_CHECK("typed: refusal is reported", boot_error_reported() == true);
+    code = boot_error_first_code();
+    MAP_CHECK("typed: code is BOOT_MINT_ANCHOR_PREFLIGHT_REFUSED",
+              code != NULL &&
+              strcmp(code, "BOOT_MINT_ANCHOR_PREFLIGHT_REFUSED") == 0);
+    rendered_n = boot_error_last_render(rendered, sizeof(rendered));
+    MAP_CHECK("typed: render is present", rendered_n > 0);
+    MAP_CHECK("typed: phase is mint.preflight",
+              strstr(rendered, "mint.preflight") != NULL);
+    MAP_CHECK("typed: stage is datadir_open_failed",
+              strstr(rendered, "datadir_open_failed") != NULL);
+    MAP_CHECK("typed: missing path is named",
+              strstr(rendered, missing) != NULL);
+
+    boot_error_reset_for_testing();
+    test_fmt_tmpdir(empty, sizeof(empty), "mint_anchor_preflight", "emptyok");
+    MAP_CHECK("typed: test-tmp root exists", mkdir_p("./test-tmp") == 0);
+    MAP_CHECK("typed: empty directory created", mkdir_p(empty) == 0);
+    MAP_CHECK("typed: empty directory is allowed",
+              boot_mint_anchor_normal_boot_preflight(empty) == true);
+    MAP_CHECK("typed: allow path latches nothing",
+              boot_error_reported() == false);
+    map_cleanup_dir(empty);
+    return failures;
+}
+
 
 #endif /* !_WIN32 */
 
@@ -642,6 +684,7 @@ int test_mint_anchor_preflight(void)
 #if !defined(_WIN32)
     failures += test_normal_preflight_live_verdicts();
     failures += test_normal_preflight_marker_only_in_wal();
+    failures += map_preflight_typed_refusal();
 #endif
 
     printf("=== test_mint_anchor_preflight complete: %d failure(s) ===\n",
