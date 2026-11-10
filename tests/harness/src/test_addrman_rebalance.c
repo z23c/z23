@@ -983,7 +983,7 @@ static int addrman_pin_add_accepts(void)
 /* Same timestamp and zero timestamp are refused; a newer timestamp is
  * refused too, yet the stored timestamp still advances to it. */
 static bool pin_dup_refresh(struct addr_man *am, const struct net_addr *src,
-                            int64_t T)
+                            int64_t T, const char **step)
 {
     struct addr_info out;
     struct net_address a = make_pub_addr(60, 1, 2, 3, 8033);
@@ -992,18 +992,21 @@ static bool pin_dup_refresh(struct addr_man *am, const struct net_addr *src,
     zero.nTime = 0;
     struct net_address newer = a;
     newer.nTime = (uint32_t)(T + 2 * 24 * 60 * 60);
-    bool ok = addrman_add(am, &a, src, 0) && !addrman_add(am, &a, src, 0);
-    ok = ok && !addrman_add(am, &zero, src, 0) && addrman_size(am) == 1;
-    ok = ok && !addrman_add(am, &newer, src, 0);
-    ok = ok && addrman_find_info(am, &a.svc, &out) &&
-         out.addr.nTime == (uint32_t)(T + 2 * 24 * 60 * 60);
-    return ok;
+#define PIN_DUP_CHECK(expr) do { if (!(expr)) { *step = #expr; return false; } } while (0)
+    PIN_DUP_CHECK(addrman_add(am, &a, src, 0));
+    PIN_DUP_CHECK(!addrman_add(am, &a, src, 0));
+    PIN_DUP_CHECK(!addrman_add(am, &zero, src, 0));
+    PIN_DUP_CHECK(addrman_size(am) == 1);
+    PIN_DUP_CHECK(!addrman_add(am, &newer, src, 0));
+    PIN_DUP_CHECK(addrman_find_info(am, &a.svc, &out));
+    PIN_DUP_CHECK(out.addr.nTime == (uint32_t)(T + 2 * 24 * 60 * 60));
+    return true;
 }
 
 /* Refused when already in tried, and when the bucket-cap reference count
  * is reached. */
 static bool pin_dup_tried_and_cap(struct addr_man *am,
-                                  const struct net_addr *src, int64_t T)
+                                  const struct net_addr *src, int64_t T, const char **step)
 {
     struct addr_info out;
     struct net_address t = make_pub_addr(60, 1, 2, 7, 8033);
@@ -1015,21 +1018,24 @@ static bool pin_dup_tried_and_cap(struct addr_man *am,
     struct net_address cap_newer = cap;
     cap_newer.nTime = (uint32_t)(T + 1);
 
-    bool ok = addrman_add(am, &t, src, 0);
+    bool added = addrman_add(am, &t, src, 0);
     addrman_good(am, &t.svc, T);
-    ok = ok && !addrman_add(am, &t_newer, src, 0);
-    ok = ok && addrman_find_info(am, &t.svc, &out) && out.in_tried;
-    ok = ok && am->tried_count == 1 && am->new_count == 1;
+    PIN_DUP_CHECK(added);
+    PIN_DUP_CHECK(!addrman_add(am, &t_newer, src, 0));
+    PIN_DUP_CHECK(addrman_find_info(am, &t.svc, &out));
+    PIN_DUP_CHECK(out.in_tried);
+    PIN_DUP_CHECK(am->tried_count == 1 && am->new_count == 1);
     /* A refused tried entry must not reach the new table. */
-    ok = ok && addrman_consistency_check(am, NULL, 0) == 0;
+    PIN_DUP_CHECK(addrman_consistency_check(am, NULL, 0) == 0);
 
-    ok = ok && addrman_add(am, &cap, src, 0);
+    PIN_DUP_CHECK(addrman_add(am, &cap, src, 0));
     am->entries[2].ref_count = ADDRMAN_NEW_BUCKETS_PER_ADDRESS;
-    ok = ok && !addrman_add(am, &cap_newer, src, 0);
+    PIN_DUP_CHECK(!addrman_add(am, &cap_newer, src, 0));
     /* The cap guard returns before any slot is written. */
-    ok = ok && am->entries[2].ref_count == ADDRMAN_NEW_BUCKETS_PER_ADDRESS;
-    return ok;
+    PIN_DUP_CHECK(am->entries[2].ref_count == ADDRMAN_NEW_BUCKETS_PER_ADDRESS);
+    return true;
 }
+#undef PIN_DUP_CHECK
 
 static int addrman_pin_add_duplicates(void)
 {
@@ -1041,11 +1047,35 @@ static int addrman_pin_add_duplicates(void)
     struct net_addr src = make_pub_source(50, 9, 0, 1);
     int64_t T = (int64_t)platform_time_wall_time_t();
 
-    bool ok = pin_dup_refresh(&am, &src, T);
-    ok = ok && pin_dup_tried_and_cap(&am, &src, T);
+    const char *step = "none";
+    bool refresh = pin_dup_refresh(&am, &src, T, &step);
+    bool tried_cap = refresh && pin_dup_tried_and_cap(&am, &src, T, &step);
+    bool ok = refresh && tried_cap;
 
     if (ok) printf("OK\n");
-    else { printf("FAIL\n"); failures++; }
+    else {
+        struct net_address a = make_pub_addr(60, 1, 2, 3, 8033);
+        struct net_address t = make_pub_addr(60, 1, 2, 7, 8033);
+        struct net_address cap = make_pub_addr(60, 1, 2, 8, 8033);
+        struct addr_info out;
+        bool have_a = addrman_find_info(&am, &a.svc, &out);
+        uint32_t a_time = have_a ? out.addr.nTime : 0;
+        bool have_t = addrman_find_info(&am, &t.svc, &out);
+        bool t_tried = have_t && out.in_tried;
+        bool have_cap = addrman_find_info(&am, &cap.svc, &out);
+        printf("FAIL (step=%s refresh=%d tried_cap=%s size=%zu new=%d tried=%d "
+               "lookup_a=%d lookup_t=%d lookup_cap=%d",
+               step, refresh, refresh ? (tried_cap ? "pass" : "fail") : "skipped",
+               addrman_size(&am), am.new_count, am.tried_count,
+               have_a, have_t, have_cap);
+        if (have_a) printf(" a_time=%u expected=%u", a_time, (uint32_t)(T + 2 * 24 * 60 * 60));
+        if (have_t) printf(" t_in_tried=%d expected=1", t_tried);
+        if (am.entries && am.entries_cap > 2)
+            printf(" entry2_used=%d entry2_refs=%d)\n", am.entries[2].used, am.entries[2].ref_count);
+        else
+            printf(" entry2=unavailable)\n");
+        failures++;
+    }
     addrman_free(&am);
     return failures;
 }
