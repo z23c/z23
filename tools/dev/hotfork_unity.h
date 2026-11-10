@@ -139,6 +139,15 @@ static inline int zcl_hotfork_unity_include(char *out, size_t out_size,
     return zcl_hotfork_unity_put(out, out_size, used, "\"\n", "", "");
 }
 
+/* An include prefix is an absolute directory with a trailing slash and no
+ * characters that would change the generated C string literal. */
+static inline bool zcl_hotfork_unity_root_ok(const char *root)
+{
+    size_t len = root ? strlen(root) : 0;
+    return len >= 2 && root[0] == '/' && root[len - 1] == '/' &&
+           zcl_hotfork_unity_text_ok(root);
+}
+
 /* Renders the whole unity for one capsule. `root` is the absolute repository
  * root WITH its trailing '/'. Returns the text length, or -1 when any part
  * does not resolve or fit. */
@@ -150,10 +159,8 @@ static inline int zcl_hotfork_unity_render(const char *root,
                                            char *out, size_t out_size)
 {
     char story[ZCL_HOTFORK_UNITY_TU_MAX], tu[ZCL_HOTFORK_UNITY_TU_MAX];
-    size_t root_len = root ? strlen(root) : 0;
     size_t count = zcl_hotfork_tu_list_count(sibling_tus);
-    if (!out || out_size == 0 || root_len < 2 || root[0] != '/' ||
-        root[root_len - 1] != '/' || !zcl_hotfork_unity_text_ok(root) ||
+    if (!out || out_size == 0 || !zcl_hotfork_unity_root_ok(root) ||
         !zcl_hotfork_unity_text_ok(exercised_surface) || !owner_tu ||
         count > ZCL_HOTFORK_UNITY_SIBLING_MAX ||
         !zcl_hotfork_story_path(adapter_id, story, sizeof(story)))

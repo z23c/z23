@@ -484,9 +484,56 @@ static int hfs_selftest_orphan(const char *fixture, const char *work,
                                good->adapter_id, &orphan, failed);
 }
 
+static int hfs_selftest_render_refusals(void)
+{
+    static const char *const roots[] = {
+        NULL, "", "/", "repo/", "/repo", "/bad%/", "/bad\"/", "/bad\\/",
+        "/bad\n/", "/bad\x80/"
+    };
+    for (size_t i = 0; i < sizeof roots / sizeof roots[0]; i++) {
+        char out[64] = "untouched";
+        int n = zcl_hotfork_unity_render(roots[i], "owner.c", "", "selftest",
+                                          "surface", out, sizeof out);
+        if (n != -1 || strcmp(out, "untouched")) {
+            fprintf(stderr, "hotfork render: invalid root case %zu changed output or returned %d\n", i, n);
+            return 1;
+        }
+    }
+    char tiny[4] = "old";
+    if (zcl_hotfork_unity_render("/repo/", "owner.c", "a.c|b.c", "selftest",
+                                  "surface", tiny, sizeof tiny) != -1 || tiny[0]) {
+        fputs("hotfork render: truncated unity did not fail closed\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+
+static int hfs_selftest_render(void)
+{
+    static const char expected[] =
+        "/* zcl.dev.hotfork.unity.v2 */\n"
+        "#define ZCL_HOTFORK_EXERCISED_SURFACE \"surface\"\n"
+        "#define ZCL_HOTFORK_STORY_PHASE 1\n"
+        "#include \"/repo/tools/dev/hotfork_stories/selftest.inc\"\n"
+        "#undef ZCL_HOTFORK_STORY_PHASE\n"
+        "#include \"/repo/owner.c\"\n"
+        "#include \"/repo/a.c\"\n"
+        "#include \"/repo/b.c\"\n"
+        "#define ZCL_HOTFORK_STORY_PHASE 2\n"
+        "#include \"/repo/tools/dev/hotfork_stories/selftest.inc\"\n";
+    char out[ZCL_HOTFORK_UNITY_MAX];
+    int n = zcl_hotfork_unity_render("/repo/", "owner.c", "a.c|b.c", "selftest",
+                                      "surface", out, sizeof out);
+    if (n != (int)(sizeof expected - 1) || strcmp(out, expected)) {
+        fputs("hotfork render: unity text or length changed\n", stderr);
+        return 1;
+    }
+    return hfs_selftest_render_refusals();
+}
+
 static int hfs_selftest_body(const char *fixture, const char *work)
 {
-    int failed = 0, rc = 0;
+    int failed = 0, rc = hfs_selftest_render();
     size_t count = sizeof k_hfs_cases / sizeof k_hfs_cases[0];
     for (size_t i = 0; rc == 0 && i < count; i++)
         rc = hfs_selftest_case(fixture, work, i, &failed);
