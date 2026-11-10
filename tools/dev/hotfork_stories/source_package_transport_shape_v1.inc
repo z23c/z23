@@ -13,6 +13,13 @@
 #define _GNU_SOURCE
 #include "hotswap/hotfork_capsule.h"
 #elif ZCL_HOTFORK_STORY_PHASE == 2
+static bool hf_transport_file(struct vcs_source_package_transport *transport,
+    size_t index, const char **path, const uint8_t **bytes, size_t *len,
+    const char *expected_path, const uint8_t *expected_bytes)
+{
+    return vcs_source_package_transport_file_at(transport, index, path, bytes, len) &&
+        strcmp(*path, expected_path) == 0 && *bytes == expected_bytes && *len == 1;
+}
 __attribute__((visibility("hidden"))) bool
 zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
 {
@@ -56,45 +63,23 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     const char *path = NULL;
     const uint8_t *bytes = NULL;
     size_t len = 0;
-    HF_CHECK(
-        vcs_source_package_transport_file_at(&transport, 0, &path, &bytes, &len)
-        && strcmp(path, VCS_SOURCE_PACKAGE_LICENSE_PATH) == 0
-        && bytes == license && len == 1);
-    HF_CHECK(
-        vcs_source_package_transport_file_at(&transport, 1, &path, &bytes, &len)
-        && strcmp(path, VCS_SOURCE_PACKAGE_MANIFEST_PATH) == 0
-        && bytes == manifest && len == 1);
-    HF_CHECK(
-        vcs_source_package_transport_file_at(&transport, 2, &path, &bytes, &len)
-        && strcmp(path, "zclassic23-source/shard-0a.zvss") == 0
-        && bytes == shard0 && len == 1);
-    HF_CHECK(
-        vcs_source_package_transport_file_at(&transport, 3, &path, &bytes, &len)
-        && strcmp(path, "zclassic23-source/shard-ff.zvss") == 0
-        && bytes == shard1 && len == 1);
-    HF_CHECK(
-        vcs_source_package_transport_file_at(&transport, 4, &path, &bytes, &len)
-        && strcmp(path, VCS_SOURCE_PACKAGE_LANE_PATH) == 0 && bytes == lane
-        && len == 1);
+    HF_CHECK(hf_transport_file(&transport, 0, &path, &bytes, &len, VCS_SOURCE_PACKAGE_LICENSE_PATH, license));
+    HF_CHECK(hf_transport_file(&transport, 1, &path, &bytes, &len, VCS_SOURCE_PACKAGE_MANIFEST_PATH, manifest));
+    HF_CHECK(hf_transport_file(&transport, 2, &path, &bytes, &len, "zclassic23-source/shard-0a.zvss", shard0));
+    HF_CHECK(hf_transport_file(&transport, 3, &path, &bytes, &len, "zclassic23-source/shard-ff.zvss", shard1));
+    HF_CHECK(hf_transport_file(&transport, 4, &path, &bytes, &len, VCS_SOURCE_PACKAGE_LANE_PATH, lane));
     HF_CHECK(
         vcs_source_package_transport_file_at(&transport, 5, &path, &bytes, &len)
         && strcmp(path, VCS_SOURCE_PACKAGE_MARKER_PATH) == 0 && bytes == marker
         && len == marker_len);
-    HF_CHECK(
-        vcs_source_package_transport_file_at(&transport, 6, &path, &bytes, &len)
-        && strcmp(path, "offline-a") == 0 && bytes == offline0 && len == 1);
-    HF_CHECK(
-        vcs_source_package_transport_file_at(&transport, 7, &path, &bytes, &len)
-        && strcmp(path, "offline-b") == 0 && bytes == offline1 && len == 1);
+    HF_CHECK(hf_transport_file(&transport, 6, &path, &bytes, &len, "offline-a", offline0));
+    HF_CHECK(hf_transport_file(&transport, 7, &path, &bytes, &len, "offline-b", offline1));
     HF_CHECK(!vcs_source_package_transport_file_at(&transport, 8, &path, &bytes,
                                                    &len));
     transport.authority_wire = authority;
     transport.authority_wire_len = sizeof(authority);
     HF_CHECK(vcs_source_package_transport_file_count(&transport) == 9);
-    HF_CHECK(
-        vcs_source_package_transport_file_at(&transport, 6, &path, &bytes, &len)
-        && strcmp(path, VCS_SOURCE_PACKAGE_AUTHORITY_PATH) == 0
-        && bytes == authority && len == 1);
+    HF_CHECK(hf_transport_file(&transport, 6, &path, &bytes, &len, VCS_SOURCE_PACKAGE_AUTHORITY_PATH, authority));
     HF_CHECK(
         vcs_source_package_transport_file_at(&transport, 7, &path, &bytes, &len)
         && strcmp(path, "offline-a") == 0);

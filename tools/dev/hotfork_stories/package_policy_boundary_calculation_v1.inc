@@ -20,6 +20,103 @@ static bool hf_dec(bool allow, const char *rule, struct vcs_policy_decision d)
     return d.allow == allow
            && (allow ? d.rule == NULL : d.rule && strcmp(d.rule, rule) == 0);
 }
+static bool hf_policy_tier_names(void)
+{
+    return strcmp(vcs_policy_tier_string(VCS_POLICY_TIER_NEW_USER), "new-user") == 0 &&
+        strcmp(vcs_policy_tier_string(VCS_POLICY_TIER_EARNED_CONTRIBUTOR), "earned-contributor") == 0 &&
+        strcmp(vcs_policy_tier_string(VCS_POLICY_TIER_VERIFIED_SEEDER), "verified-seeder") == 0 &&
+        strcmp(vcs_policy_tier_string(VCS_POLICY_TIER_COUNT), "unknown") == 0;
+}
+static bool hf_policy_ratios(void)
+{
+    return vcs_policy_ratio_milli(7, 0) == 7000 && vcs_policy_ratio_milli(5, 2) == 2500 &&
+        vcs_policy_ratio_milli(UINT64_MAX, 1) == UINT64_MAX;
+}
+static bool hf_policy_tiers(void)
+{
+    return vcs_policy_tier_for(0, UINT64_MAX, 1) == VCS_POLICY_TIER_NEW_USER &&
+        vcs_policy_tier_for(100, 0, 0) == VCS_POLICY_TIER_EARNED_CONTRIBUTOR &&
+        vcs_policy_tier_for(500, UINT64_C(256) * 1024 * 1024, UINT64_C(256) * 1024 * 1024) == VCS_POLICY_TIER_VERIFIED_SEEDER;
+}
+static bool hf_policy_week(void)
+{
+    return vcs_policy_week_start(-1) == -3 && vcs_policy_week_start(0) == -3 && vcs_policy_week_start(4) == 4;
+}
+static bool hf_policy_publish(void)
+{
+    return hf_dec(true, NULL, vcs_policy_check_publish(VCS_POLICY_TIER_NEW_USER, 0)) &&
+        hf_dec(false, VCS_POLICY_RULE_PUBLISH_FREQUENCY, vcs_policy_check_publish(VCS_POLICY_TIER_NEW_USER, 1));
+}
+static bool hf_policy_check_7(void)
+{
+    return hf_dec(true, NULL,
+                    vcs_policy_check_download(
+                        VCS_POLICY_TIER_NEW_USER,
+                        VCS_POLICY_FREE_WEEKLY_DOWNLOAD_BYTES - 1, 1))
+             && hf_dec(false, VCS_POLICY_RULE_DOWNLOAD_ALLOWANCE,
+                       vcs_policy_check_download(
+                           VCS_POLICY_TIER_NEW_USER,
+                           VCS_POLICY_FREE_WEEKLY_DOWNLOAD_BYTES - 1, 2));
+}
+
+static bool hf_policy_check_8(void)
+{
+    return hf_dec(true, NULL,
+                    vcs_policy_check_concurrent_downloads(
+                        VCS_POLICY_TIER_NEW_USER, 0))
+             && hf_dec(false, VCS_POLICY_RULE_CONCURRENT_DOWNLOADS,
+                       vcs_policy_check_concurrent_downloads(
+                           VCS_POLICY_TIER_NEW_USER, 1));
+}
+
+static bool hf_policy_check_9(void)
+{
+    return hf_dec(false, VCS_POLICY_RULE_PIN_ALLOWANCE,
+                    vcs_policy_check_pin(VCS_POLICY_TIER_NEW_USER, 0, 0))
+             && hf_dec(true, NULL,
+                       vcs_policy_check_pin(VCS_POLICY_TIER_EARNED_CONTRIBUTOR,
+                                            0, 1));
+}
+
+static bool hf_policy_check_10(void)
+{
+    return hf_dec(true, NULL,
+                    vcs_policy_check_announce(VCS_POLICY_TIER_NEW_USER, 63))
+             && hf_dec(false, VCS_POLICY_RULE_ANNOUNCE_RATE,
+                       vcs_policy_check_announce(VCS_POLICY_TIER_NEW_USER, 64));
+}
+
+static bool hf_policy_check_11(void)
+{
+    return hf_dec(true, NULL,
+               vcs_policy_check_request_burst(VCS_POLICY_TIER_NEW_USER, 511))
+        && hf_dec(false, VCS_POLICY_RULE_REQUEST_BURST,
+                  vcs_policy_check_request_burst(VCS_POLICY_TIER_NEW_USER, 512))
+        && hf_dec(true, NULL,
+                  vcs_policy_check_request_burst(
+                      VCS_POLICY_TIER_EARNED_CONTRIBUTOR, 1023))
+        && hf_dec(false, VCS_POLICY_RULE_REQUEST_BURST,
+                  vcs_policy_check_request_burst(
+                      VCS_POLICY_TIER_VERIFIED_SEEDER, 2048));
+}
+
+static bool hf_policy_check_12(void)
+{
+    return vcs_policy_queue_priority(VCS_POLICY_TIER_NEW_USER) == 0
+        && vcs_policy_queue_priority(VCS_POLICY_TIER_EARNED_CONTRIBUTOR) == 1
+        && vcs_policy_queue_priority(VCS_POLICY_TIER_VERIFIED_SEEDER) == 2;
+}
+
+static bool hf_policy_check_13(void)
+{
+    return hf_dec(false, VCS_POLICY_RULE_SELF_VERIFICATION,
+               vcs_policy_check_verifier(2000, true, true))
+        && hf_dec(false, VCS_POLICY_RULE_VERIFIER_SCORE,
+                  vcs_policy_check_verifier(999, true, false))
+        && hf_dec(false, VCS_POLICY_RULE_VERIFIER_APPROVED,
+                  vcs_policy_check_verifier(1000, false, false))
+        && hf_dec(true, NULL, vcs_policy_check_verifier(1000, true, false));
+}
 __attribute__((visibility("hidden"))) bool
 zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
 {
@@ -40,82 +137,22 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
         vcs_policy_limits_for(VCS_POLICY_TIER_EARNED_CONTRIBUTOR);
     const struct vcs_policy_limits *s =
         vcs_policy_limits_for(VCS_POLICY_TIER_VERIFIED_SEEDER);
-    HF_CHECK(
-        strcmp(vcs_policy_tier_string(VCS_POLICY_TIER_NEW_USER), "new-user")
-            == 0
-        && strcmp(vcs_policy_tier_string(VCS_POLICY_TIER_EARNED_CONTRIBUTOR),
-                  "earned-contributor")
-               == 0
-        && strcmp(vcs_policy_tier_string(VCS_POLICY_TIER_VERIFIED_SEEDER),
-                  "verified-seeder")
-               == 0
-        && strcmp(vcs_policy_tier_string(VCS_POLICY_TIER_COUNT), "unknown")
-               == 0);
+    HF_CHECK(hf_policy_tier_names());
     HF_CHECK(n->publish_per_week == 1 && n->request_burst_per_window == 512
              && c->request_burst_per_window == 1024
              && s->request_burst_per_window == 2048
              && vcs_policy_limits_for(VCS_POLICY_TIER_COUNT) == n);
-    HF_CHECK(vcs_policy_ratio_milli(7, 0) == 7000
-             && vcs_policy_ratio_milli(5, 2) == 2500
-             && vcs_policy_ratio_milli(UINT64_MAX, 1) == UINT64_MAX);
-    HF_CHECK(vcs_policy_tier_for(0, UINT64_MAX, 1) == VCS_POLICY_TIER_NEW_USER
-             && vcs_policy_tier_for(100, 0, 0)
-                    == VCS_POLICY_TIER_EARNED_CONTRIBUTOR
-             && vcs_policy_tier_for(500, UINT64_C(256) * 1024 * 1024,
-                                    UINT64_C(256) * 1024 * 1024)
-                    == VCS_POLICY_TIER_VERIFIED_SEEDER);
-    HF_CHECK(vcs_policy_week_start(-1) == -3 && vcs_policy_week_start(0) == -3
-             && vcs_policy_week_start(4) == 4);
-    HF_CHECK(hf_dec(true, NULL,
-                    vcs_policy_check_publish(VCS_POLICY_TIER_NEW_USER, 0))
-             && hf_dec(false, VCS_POLICY_RULE_PUBLISH_FREQUENCY,
-                       vcs_policy_check_publish(VCS_POLICY_TIER_NEW_USER, 1)));
-    HF_CHECK(hf_dec(true, NULL,
-                    vcs_policy_check_download(
-                        VCS_POLICY_TIER_NEW_USER,
-                        VCS_POLICY_FREE_WEEKLY_DOWNLOAD_BYTES - 1, 1))
-             && hf_dec(false, VCS_POLICY_RULE_DOWNLOAD_ALLOWANCE,
-                       vcs_policy_check_download(
-                           VCS_POLICY_TIER_NEW_USER,
-                           VCS_POLICY_FREE_WEEKLY_DOWNLOAD_BYTES - 1, 2)));
-    HF_CHECK(hf_dec(true, NULL,
-                    vcs_policy_check_concurrent_downloads(
-                        VCS_POLICY_TIER_NEW_USER, 0))
-             && hf_dec(false, VCS_POLICY_RULE_CONCURRENT_DOWNLOADS,
-                       vcs_policy_check_concurrent_downloads(
-                           VCS_POLICY_TIER_NEW_USER, 1)));
-    HF_CHECK(hf_dec(false, VCS_POLICY_RULE_PIN_ALLOWANCE,
-                    vcs_policy_check_pin(VCS_POLICY_TIER_NEW_USER, 0, 0))
-             && hf_dec(true, NULL,
-                       vcs_policy_check_pin(VCS_POLICY_TIER_EARNED_CONTRIBUTOR,
-                                            0, 1)));
-    HF_CHECK(hf_dec(true, NULL,
-                    vcs_policy_check_announce(VCS_POLICY_TIER_NEW_USER, 63))
-             && hf_dec(false, VCS_POLICY_RULE_ANNOUNCE_RATE,
-                       vcs_policy_check_announce(VCS_POLICY_TIER_NEW_USER, 64)));
-    HF_CHECK(
-        hf_dec(true, NULL,
-               vcs_policy_check_request_burst(VCS_POLICY_TIER_NEW_USER, 511))
-        && hf_dec(false, VCS_POLICY_RULE_REQUEST_BURST,
-                  vcs_policy_check_request_burst(VCS_POLICY_TIER_NEW_USER, 512))
-        && hf_dec(true, NULL,
-                  vcs_policy_check_request_burst(
-                      VCS_POLICY_TIER_EARNED_CONTRIBUTOR, 1023))
-        && hf_dec(false, VCS_POLICY_RULE_REQUEST_BURST,
-                  vcs_policy_check_request_burst(
-                      VCS_POLICY_TIER_VERIFIED_SEEDER, 2048)));
-    HF_CHECK(
-        vcs_policy_queue_priority(VCS_POLICY_TIER_NEW_USER) == 0
-        && vcs_policy_queue_priority(VCS_POLICY_TIER_EARNED_CONTRIBUTOR) == 1
-        && vcs_policy_queue_priority(VCS_POLICY_TIER_VERIFIED_SEEDER) == 2);
-    HF_CHECK(
-        hf_dec(false, VCS_POLICY_RULE_SELF_VERIFICATION,
-               vcs_policy_check_verifier(2000, true, true))
-        && hf_dec(false, VCS_POLICY_RULE_VERIFIER_SCORE,
-                  vcs_policy_check_verifier(999, true, false))
-        && hf_dec(false, VCS_POLICY_RULE_VERIFIER_APPROVED,
-                  vcs_policy_check_verifier(1000, false, false))
-        && hf_dec(true, NULL, vcs_policy_check_verifier(1000, true, false)));
+    HF_CHECK(hf_policy_ratios());
+    HF_CHECK(hf_policy_tiers());
+    HF_CHECK(hf_policy_week());
+    HF_CHECK(hf_policy_publish());
+    HF_CHECK(hf_policy_check_7());
+    HF_CHECK(hf_policy_check_8());
+    HF_CHECK(hf_policy_check_9());
+    HF_CHECK(hf_policy_check_10());
+    HF_CHECK(hf_policy_check_11());
+    HF_CHECK(hf_policy_check_12());
+    HF_CHECK(hf_policy_check_13());
     static const char *const nc[] = {
         "announcement-bytes", "unverified-bytes", "duplicate-request-replay",
         "unrequested-bytes",  "invalid-chunk",    "incomplete-staging"};

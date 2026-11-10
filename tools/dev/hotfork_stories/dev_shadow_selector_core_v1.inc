@@ -194,6 +194,15 @@ static bool hf_shadow_reuse(void)
                   "contract_ran_on_other_implementation") == 0;
 }
 
+static bool hf_shadow_paths(void)
+{
+    return zcl_shadow_path_is_contract("platform/modules/codec", "platform/modules/codec/include/codec/cursor.h") &&
+        zcl_shadow_path_is_contract("platform/modules/codec", "tests/harness/src/test_codec_cursor.c") &&
+        !zcl_shadow_path_is_contract("platform/modules/codec", "platform/modules/codec/src/cursor.c") &&
+        zcl_shadow_path_is_generator_input("contexts/explorer/views/src/site.css") &&
+        zcl_shadow_path_is_build_graph("tools/build/rules.mk") &&
+        !zcl_shadow_path_is_build_graph("Makefile.am");
+}
 /* Reuse eligibility, obligation sensitivity, names and path predicates. */
 static bool hf_shadow_eligibility(void)
 {
@@ -233,20 +242,7 @@ static bool hf_shadow_eligibility(void)
          strcmp(zcl_shadow_field_name(ZCL_SHADOW_FIELD_UNIT_ID), "unit_id") ==
              0 &&
          __builtin_popcount(zcl_shadow_component_input_key_gaps()) == 8;
-    return ok &&
-           zcl_shadow_path_is_contract(
-               "platform/modules/codec",
-               "platform/modules/codec/include/codec/cursor.h") &&
-           zcl_shadow_path_is_contract(
-               "platform/modules/codec",
-               "tests/harness/src/test_codec_cursor.c") &&
-           !zcl_shadow_path_is_contract(
-               "platform/modules/codec",
-               "platform/modules/codec/src/cursor.c") &&
-           zcl_shadow_path_is_generator_input(
-               "contexts/explorer/views/src/site.css") &&
-           zcl_shadow_path_is_build_graph("tools/build/rules.mk") &&
-           !zcl_shadow_path_is_build_graph("Makefile.am");
+    return ok && hf_shadow_paths();
 }
 
 static bool hf_shadow_analyze(const char *patch,
@@ -273,6 +269,13 @@ static bool hf_shadow_corpus_row(struct zcl_shadow_corpus *c,
 
 /* Contract tokens ignore comments and see additions; corpus and weight
  * rows are refused, never repaired. */
+static bool hf_shadow_corpus_rows(struct zcl_shadow_corpus *c, const char *commit)
+{
+    return c && hf_shadow_corpus_row(c, "real", commit, "x.c") &&
+         c->count == 1 && !hf_shadow_corpus_row(c, "bogus", commit, "x.c") &&
+         !hf_shadow_corpus_row(c, "real", "7a9f354f", "x.c") &&
+         !hf_shadow_corpus_row(c, "real", commit, "a,b,c,d,e");
+}
 static bool hf_shadow_corpus(void)
 {
     struct zcl_shadow_patch_facts p;
@@ -302,10 +305,7 @@ static bool hf_shadow_corpus(void)
          !hf_shadow_analyze("not a patch\n", &p);
     struct zcl_shadow_corpus *c = zcl_calloc(1, sizeof(*c), "hf corpus");
     static const char commit[] = "7a9f354f3f7996383c0e7c858346ac29a5ad8957";
-    ok = ok && c && hf_shadow_corpus_row(c, "real", commit, "x.c") &&
-         c->count == 1 && !hf_shadow_corpus_row(c, "bogus", commit, "x.c") &&
-         !hf_shadow_corpus_row(c, "real", "7a9f354f", "x.c") &&
-         !hf_shadow_corpus_row(c, "real", commit, "a,b,c,d,e");
+    ok = ok && hf_shadow_corpus_rows(c, commit);
     free(c);
     const char unsorted[] = "test_group\tb\t1\t1\ntest_group\ta\t1\t1\n";
     struct zcl_shadow_weights w = {0};
@@ -318,6 +318,20 @@ static bool hf_shadow_corpus(void)
 
 /* Lint premise rows price only fresh units; the always-run part is paid
  * whole and the rest is shared (ceil(97700 / 72) = 1357). */
+static bool hf_shadow_lint_prices(const struct zcl_shadow_lint_premises *p,
+    const struct zcl_shadow_lint_premise *g, const struct zcl_shadow_lint_premise *k,
+    const struct zcl_shadow_lint_premise *a, bool *priced)
+{
+    return zcl_shadow_lint_gate_ms(NULL, 120000, priced) == 120000 && !*priced &&
+         zcl_shadow_lint_gate_ms(zcl_shadow_lint_premise_find(p, "x", "h"), 120000, priced) == 120000 &&
+         !zcl_shadow_lint_premise_find(p, "y", "g") &&
+         zcl_shadow_lint_gate_ms(g, 120000, priced) == 7000 + 2 * ZCL_SHADOW_LINT_UNIT_FLOOR_MS &&
+         *priced && zcl_shadow_lint_gate_ms(g, 5000000, priced) == 17000 &&
+         zcl_shadow_lint_gate_ms(k, 3000, priced) == 10000 &&
+         zcl_shadow_lint_gate_ms(a, 115700, priced) == 9000 + 18000 + 4 * 1357 &&
+         zcl_shadow_lint_gate_ms(a, 10000, priced) == 19000 &&
+         strcmp(zcl_shadow_class_name(ZCL_SHADOW_CLASS_FALLBACK), "fallback") == 0;
+}
 static bool hf_shadow_lint(void)
 {
     struct zcl_shadow_lint_premises p = {0};
@@ -340,20 +354,7 @@ static bool hf_shadow_lint(void)
         ok ? zcl_shadow_lint_premise_find(&p, "x", "k") : NULL;
     const struct zcl_shadow_lint_premise *a =
         ok ? zcl_shadow_lint_premise_find(&p, "x", "a") : NULL;
-    ok = ok && g && k && a &&
-         zcl_shadow_lint_gate_ms(NULL, 120000, &priced) == 120000 && !priced &&
-         zcl_shadow_lint_gate_ms(zcl_shadow_lint_premise_find(&p, "x", "h"),
-                                 120000, &priced) == 120000 &&
-         !zcl_shadow_lint_premise_find(&p, "y", "g") &&
-         zcl_shadow_lint_gate_ms(g, 120000, &priced) ==
-             7000 + 2 * ZCL_SHADOW_LINT_UNIT_FLOOR_MS &&
-         priced && zcl_shadow_lint_gate_ms(g, 5000000, &priced) == 17000 &&
-         zcl_shadow_lint_gate_ms(k, 3000, &priced) == 10000 &&
-         zcl_shadow_lint_gate_ms(a, 115700, &priced) == 9000 + 18000 +
-                                                          4 * 1357 &&
-         zcl_shadow_lint_gate_ms(a, 10000, &priced) == 19000 &&
-         strcmp(zcl_shadow_class_name(ZCL_SHADOW_CLASS_FALLBACK),
-                "fallback") == 0;
+    ok = ok && g && k && a && hf_shadow_lint_prices(&p, g, k, a, &priced);
     zcl_shadow_lint_premises_free(&p);
     return ok;
 }
@@ -371,6 +372,15 @@ static bool hf_shadow_render_text(char **text, size_t *len,
 
 /* A required obligation outside a prediction is RED, and the rendered
  * comparison line says so. */
+static bool hf_shadow_compare_parsed(struct zcl_shadow_observations *obs,
+    struct zcl_shadow_predictions *p, struct zcl_shadow_comparison *c)
+{
+    return zcl_shadow_compare(zcl_shadow_prediction_find(p, "y"), obs, c) &&
+        c->red_selector == 0 && c->red_rule == 1 &&
+        zcl_shadow_compare(zcl_shadow_prediction_find(p, "x"), obs, c) &&
+        c->observed == 2 && c->required == 1 && c->red_selector == 1 &&
+        c->red_rule == 0 && strcmp(c->first_red_selector, "test_a") == 0;
+}
 static bool hf_shadow_compare(void)
 {
     struct zcl_shadow_observation o = {"x", "test_a", ZCL_SHADOW_VERDICT_PASS,
@@ -396,11 +406,7 @@ static bool hf_shadow_compare(void)
          obs.count == 3 &&
          zcl_shadow_predictions_parse(pred_text, sizeof(pred_text) - 1, p,
                                       why, sizeof(why)) &&
-         zcl_shadow_compare(zcl_shadow_prediction_find(p, "y"), &obs, &c) &&
-         c.red_selector == 0 && c.red_rule == 1 &&
-         zcl_shadow_compare(zcl_shadow_prediction_find(p, "x"), &obs, &c) &&
-         c.observed == 2 && c.required == 1 && c.red_selector == 1 &&
-         c.red_rule == 0 && strcmp(c.first_red_selector, "test_a") == 0;
+         hf_shadow_compare_parsed(&obs, p, &c);
     char *text = NULL;
     size_t len = 0;
     ok = ok && hf_shadow_render_text(&text, &len, &c, NULL) &&

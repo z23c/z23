@@ -20,6 +20,19 @@ bool hotfork_workspace_is_scratch(const char *path)
 {
     return path && strcmp(path, "/tmp/zcl-hotfork-scratch") == 0;
 }
+static bool hf_check_4(bool parsed, struct json_value *doc, uint8_t root[32])
+{
+    return parsed && zep_root(doc, "previous_proposal_root", root)
+             && root[0] == 0xaa && root[31] == 0xaa;
+}
+
+static bool hf_check_6(struct zcl_command_request *request, struct zcl_command_reply *reply, struct vcs_zcode_epoch_schedule_input *input, uint8_t previous[32])
+{
+    return zep_parse_propose(request, reply, input, previous)
+             && input->epoch == 7
+             && strcmp(input->workspace, "/tmp/zcl-hotfork-scratch") == 0
+             && previous[0] == 0xaa;
+}
 __attribute__((visibility("hidden"))) bool
 zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
 {
@@ -55,8 +68,7 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     HF_CHECK(parsed && zep_str(&doc, "missing") == NULL);
     HF_CHECK(parsed && zep_keys(&doc, allowed, 3));
     uint8_t root[32];
-    HF_CHECK(parsed && zep_root(&doc, "previous_proposal_root", root)
-             && root[0] == 0xaa && root[31] == 0xaa);
+    HF_CHECK(hf_check_4(parsed, &doc, root));
     uint64_t epoch = 0;
     HF_CHECK(parsed && zep_u64_positive(&doc, "epoch", &epoch) && epoch == 7);
     struct zcl_command_request request = {.input = &doc};
@@ -64,10 +76,7 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     struct vcs_zcode_epoch_schedule_input input;
     uint8_t previous[32];
     zcl_command_reply_init(&reply, "zcl.hotfork.zep.v1");
-    HF_CHECK(zep_parse_propose(&request, &reply, &input, previous)
-             && input.epoch == 7
-             && strcmp(input.workspace, "/tmp/zcl-hotfork-scratch") == 0
-             && previous[0] == 0xaa);
+    HF_CHECK(hf_check_6(&request, &reply, &input, previous));
     zcl_command_reply_free(&reply);
     json_free(&doc);
     char candidate[320];

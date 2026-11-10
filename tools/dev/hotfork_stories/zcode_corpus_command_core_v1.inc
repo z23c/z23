@@ -21,6 +21,15 @@
 #undef zcl_hotswap_service_generation
 #undef zcl_hotswap_service_release
 #undef zcl_hotswap_service_acquire
+static bool hf_check_4(const struct vcs_zcode_c23_corpus_shard_v1 *shard, struct corpus_shard_metrics *metrics)
+{
+    return corpus_shard_metrics_collect(shard, metrics)
+             && metrics->counted_entries == 1 && metrics->durable_entries == 1
+             && metrics->excluded_entries == 1 && metrics->production_loc == 7
+             && metrics->test_loc == 3 && metrics->total_loc == 10
+             && metrics->durable_loc == 5 && metrics->physical_lines == 14
+             && metrics->unique_semantic_units == 5;
+}
 __attribute__((visibility("hidden"))) bool
 zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
 {
@@ -67,12 +76,7 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     struct vcs_zcode_c23_corpus_shard_v1 shard = {.entries = entries,
                                                   .entry_count = 2};
     struct corpus_shard_metrics metrics;
-    HF_CHECK(corpus_shard_metrics_collect(&shard, &metrics)
-             && metrics.counted_entries == 1 && metrics.durable_entries == 1
-             && metrics.excluded_entries == 1 && metrics.production_loc == 7
-             && metrics.test_loc == 3 && metrics.total_loc == 10
-             && metrics.durable_loc == 5 && metrics.physical_lines == 14
-             && metrics.unique_semantic_units == 5);
+    HF_CHECK(hf_check_4(&shard, &metrics));
     entries[1].production_loc = UINT64_MAX;
     HF_CHECK(!corpus_shard_metrics_collect(&shard, &metrics)
              && !corpus_shard_metrics_collect(NULL, &metrics));

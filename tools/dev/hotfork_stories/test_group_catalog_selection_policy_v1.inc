@@ -13,6 +13,15 @@
 #define _GNU_SOURCE
 #include "hotswap/hotfork_capsule.h"
 #elif ZCL_HOTFORK_STORY_PHASE == 2
+static bool hf_check_3(void)
+{
+    return zcl_test_group_requires_exclusive_run("test_command_registry_latency")
+        && zcl_test_group_requires_exclusive_run("test_sapling_crypto")
+        && zcl_test_group_requires_exclusive_run("test_vcs_core")
+        && zcl_test_group_requires_exclusive_run(
+            "test_validate_parallel_determinism")
+        && !zcl_test_group_requires_exclusive_run("test_dev_platform");
+}
 __attribute__((visibility("hidden"))) bool
 zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
 {
@@ -34,13 +43,7 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     HF_CHECK(zcl_test_group_catalog_count() > 100);
     HF_CHECK(zcl_test_group_catalog_contains("test_dev_platform")
              && !zcl_test_group_catalog_contains("dev_platform"));
-    HF_CHECK(
-        zcl_test_group_requires_exclusive_run("test_command_registry_latency")
-        && zcl_test_group_requires_exclusive_run("test_sapling_crypto")
-        && zcl_test_group_requires_exclusive_run("test_vcs_core")
-        && zcl_test_group_requires_exclusive_run(
-            "test_validate_parallel_determinism")
-        && !zcl_test_group_requires_exclusive_run("test_dev_platform"));
+    HF_CHECK(hf_check_3());
     /* test_dev_platform became a semantic leaf in 0a32c833f2; the non-leaf
      * side of this check uses a test source that is still an ordinary one. */
     HF_CHECK(zcl_test_group_source_is_semantic_leaf(
