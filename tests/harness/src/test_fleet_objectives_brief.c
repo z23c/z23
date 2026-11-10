@@ -367,6 +367,35 @@ _test_next:;
     return failures;
 }
 
+static int fob_case_boot_provenance(const char *root, const struct fob_paths *p)
+{
+    int failures = 0;
+    TEST("brief: latest boot timing retains its sample provenance") {
+        char dir[700], path[800]; struct fob_call c, next;
+        (void)snprintf(dir, sizeof(dir), "%s/boot", root);
+        (void)snprintf(path, sizeof(path), "%s/boot_status.json", dir);
+        ASSERT(mkdir(dir, 0700) == 0);
+        ASSERT(fob_write(path, "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"serving\",\"stage\":\"ready\",\"stage_ordinal\":9,\"height\":100,\"rpc_bound\":true,\"serving\":true,\"started_unix\":1000,\"updated_unix\":1137,\"elapsed_s\":137}"));
+        (void)setenv("ZCL_LAND_OBJECTIVES_DATADIR", dir, 1);
+        bool called = fob_brief(&c, p, "node_warm_restart_s", false);
+        fob_begin(&next, "fleet.objectives", p, NULL, false);
+        zcl_native_handle_fleet_objectives(&next.request, &next.reply);
+        (void)setenv("ZCL_LAND_OBJECTIVES_DATADIR", FOB_NOWHERE "/datadir", 1);
+        ASSERT(called);
+        ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&next.reply.data, "next"), "id")), "node_warm_restart_s");
+        const char *note = json_get_str(json_get(json_get(&c.reply.data, "objective"), "note"));
+        ASSERT(strstr(note, "started_unix=1000") != NULL);
+        ASSERT(strstr(note, "updated_unix=1137") != NULL);
+        ASSERT(strstr(note, "source identity unavailable") != NULL);
+        ASSERT_STR_EQ(note, json_get_str(json_get(json_get(&next.reply.data, "next"), "note")));
+        fob_end(&next); fob_end(&c);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int fob_case_card(const struct fob_paths *p)
 {
     int failures = 0;
@@ -889,6 +918,7 @@ int test_fleet_objectives_brief(void)
         failures++;
     } else {
         failures += fob_case_pick(&paths);
+        failures += fob_case_boot_provenance(root, &paths);
         failures += fob_case_card(&paths);
         failures += fob_case_refusals(&paths);
         failures += fob_case_protected(&paths);

@@ -265,5 +265,17 @@ struct zcl_objective_value zcl_objectives_node_warm_restart_s(
     }
     v.measured = true;
     v.value = snap.elapsed_s;
+    char started[32], updated[32];
+    if (snap.started_unix > 0)
+        (void)snprintf(started, sizeof(started), "%lld", (long long)snap.started_unix);
+    else
+        (void)snprintf(started, sizeof(started), "unavailable");
+    if (snap.updated_unix > 0)
+        (void)snprintf(updated, sizeof(updated), "%lld", (long long)snap.updated_unix);
+    else
+        (void)snprintf(updated, sizeof(updated), "unavailable");
+    (void)snprintf(v.note, sizeof(v.note),
+                   "latest boot: started_unix=%s updated_unix=%s; source identity unavailable",
+                   started, updated);
     return v;
 }

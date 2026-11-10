@@ -142,6 +142,7 @@ static bool brief_push_objective(struct json_value *card,
 {
     struct json_value obj;
     bool ok;
+    const char *note = json_get_str(json_get(next, "note"));
     json_init(&obj);
     json_set_object(&obj);
     ok = json_push_kv_str(&obj, "id", work->id) &&
@@ -151,6 +152,7 @@ static bool brief_push_objective(struct json_value *card,
          json_push_kv_real(&obj, "gap", json_get_real(json_get(next, "gap"))) &&
          json_push_kv_str(&obj, "unit", json_get_str(json_get(next, "unit"))) &&
          json_push_kv_str(&obj, "why", json_get_str(json_get(next, "why"))) &&
+         (!note[0] || json_push_kv_str(&obj, "note", note)) &&
          json_push_kv_bool(&obj, "runner_ok", work->runner_ok != 0) &&
          json_push_kv(card, "objective", &obj);
     json_free(&obj);

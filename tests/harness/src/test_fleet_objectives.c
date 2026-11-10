@@ -2098,6 +2098,16 @@ int test_fleet_objectives(void)
             fox_measure(FOX_NO_BRIEF, dd, "node_warm_restart_s");
         ASSERT(v.measured);
         ASSERT_EQ(v.value, (int64_t)137);
+        ASSERT(strstr(v.note, "started_unix=1000") != NULL);
+        ASSERT(strstr(v.note, "updated_unix=1137") != NULL);
+        ASSERT(strstr(v.note, "source identity unavailable") != NULL);
+        char path[1200];
+        (void)snprintf(path, sizeof(path), "%s/boot_status.json", dd);
+        ASSERT(fox_write(path, "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"serving\",\"stage\":\"ready\",\"stage_ordinal\":9,\"height\":100,\"rpc_bound\":true,\"serving\":true,\"started_unix\":0,\"updated_unix\":0,\"elapsed_s\":0}"));
+        v = fox_measure(FOX_NO_BRIEF, dd, "node_warm_restart_s");
+        ASSERT(v.measured);
+        ASSERT(strstr(v.note, "started_unix=unavailable") != NULL);
+        ASSERT(strstr(v.note, "updated_unix=unavailable") != NULL);
         ASSERT(fox_boot_beacon(dd, BOOT_STAGE_DB_OPEN, 40));
         v = fox_measure(FOX_NO_BRIEF, dd, "node_warm_restart_s");
         ASSERT(!v.measured);
