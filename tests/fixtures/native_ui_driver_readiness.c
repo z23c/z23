@@ -167,10 +167,14 @@ static bool nur_recovered(int result)
         return nur.first_null && nur.sleeps >= 1 && nur.images >= 3;
     return nur.sleeps >= 1 && nur.images >= 2;
 }
+static bool nur_discovery_result(int result)
+{
+    return result == 0 && nur.injected && nur.count_ok && nur.presses == 1 && nur.releases == 1 && nur.images >= 2;
+}
 static bool nur_result(int result)
 {
     if (nur.mode == NUR_NAME_RACE || nur.mode == NUR_TREE_RACE)
-        return result == 0 && nur.injected && nur.count_ok && nur.presses == 1 && nur.releases == 1 && nur.images >= 2;
+        return nur_discovery_result(result);
     if (nur.mode == NUR_DELAYED || nur.mode == NUR_RACE)
         return nur_recovered(result);
     if (nur.mode == NUR_UNMAPPED)
