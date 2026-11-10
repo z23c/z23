@@ -1061,9 +1061,9 @@ static int test_board_site_wiki_links(void)
             "[[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]]";
         ASSERT(bsw_add(&db, seed, pk, "links", "Links", "lane-a", text,
                        FLEET_BOARD_SCOPE_PUBLIC, now, NULL, id));
-        char dense[FLEET_BOARD_TEXT_MAX + 1];
+        char dense[FLEET_BOARD_WIKI_TEXT_MAX + 1];
         size_t used = 0;
-        while (used + 5 <= FLEET_BOARD_TEXT_MAX) {
+        while (used + 5 <= FLEET_BOARD_WIKI_TEXT_MAX) {
             memcpy(dense + used, "[[a]]", 5);
             used += 5;
         }
@@ -1106,6 +1106,12 @@ static int test_board_site_wiki_links(void)
             body++;
         }
         ASSERT_EQ(links, used / 5);
+        char author[65], author_path[96];
+        fleet_board_id_to_hex(pk, author);
+        snprintf(author_path, sizeof(author_path), "/wiki/@%s/dense", author);
+        resp = bsw_get("GET", author_path);
+        ASSERT(strstr(resp, "503 Service Unavailable"));
+        ASSERT(!strstr(resp, "<a href='/wiki/@"));
         size_t n = wiki_site_handle_request("GET", "/wiki/dense", NULL, 0,
                                             g_resp, 8192, NULL);
         ASSERT(n > 0 && n < 8192);
@@ -1116,6 +1122,119 @@ static int test_board_site_wiki_links(void)
         node_db_close(&db);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static enum fleet_wiki_visit_result bsw_count_author(void *ctx,
+    const struct db_fleet_board_post *row)
+{
+    (void)row;
+    (*(unsigned *)ctx)++;
+    return FLEET_WIKI_VISIT_CONTINUE;
+}
+
+static int test_board_site_wiki_author(void)
+{
+    int failures = 0;
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    TEST("board site: author-bound pages and indexes resist other signers") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed_a[32], pk_a[32], seed_b[32], pk_b[32], id[32], absent[32];
+        bs_identity(20, seed_a, pk_a); bs_identity(21, seed_b, pk_b);
+        memset(absent, 42, sizeof(absent));
+        uint64_t now = (uint64_t)platform_time_wall_time_t();
+        ASSERT(bsw_add(&db, seed_a, pk_a, "shared", "Owner", "owner",
+                       "OWNER [[next]]", FLEET_BOARD_SCOPE_PUBLIC, now, NULL, id));
+        ASSERT(bsw_add(&db, seed_a, pk_a, "next", "Next", "owner",
+                       "NEXT", FLEET_BOARD_SCOPE_PUBLIC, now + 1, NULL, id));
+        ASSERT(bsw_add(&db, seed_a, pk_a, "secret", "Secret", "owner",
+                       "FLEET SECRET", FLEET_BOARD_SCOPE_FLEET, now + 2, NULL, id));
+        ASSERT(bsw_add(&db, seed_b, pk_b, "shared", "Attacker", "attacker",
+                       "ATTACKER", FLEET_BOARD_SCOPE_PUBLIC, now + 3, NULL, id));
+        ASSERT(bsw_add(&db, seed_b, pk_b, "only-b", "Only B", "attacker",
+                       "B ONLY", FLEET_BOARD_SCOPE_PUBLIC, now + 4, NULL, id));
+        struct db_service service = {.node_db = &db, .started = true};
+        struct app_runtime_context runtime = {.db_service = &service};
+        app_runtime_set_current(&runtime);
+        wiki_site_cache_reset_for_testing();
+        char a[65], b[65], missing[65], path[256], expected[256];
+        fleet_board_id_to_hex(pk_a, a); fleet_board_id_to_hex(pk_b, b);
+        fleet_board_id_to_hex(absent, missing);
+        const char *resp = bsw_get("GET", "/wiki/shared");
+        ASSERT(strstr(resp, "ATTACKER")); /* unqualified still selects newest */
+        snprintf(path, sizeof(path), "/wiki/@%s/shared", a);
+        resp = bsw_get("GET", path);
+        ASSERT(strstr(resp, "200 OK") && strstr(resp, "OWNER"));
+        ASSERT(!strstr(resp, "ATTACKER"));
+        snprintf(expected, sizeof(expected), "href='/wiki/@%s/next'>[[next]]</a>", a);
+        ASSERT(strstr(resp, expected));
+        snprintf(path, sizeof(path), "/board/wiki/@%s/shared", a);
+        resp = bsw_get("GET", path);
+        snprintf(expected, sizeof(expected), "href='/board/wiki/@%s/next'>[[next]]</a>", a);
+        ASSERT(strstr(resp, expected));
+        snprintf(expected, sizeof(expected), "href='/board/wiki/@%s/shared.json'", a);
+        ASSERT(strstr(resp, expected));
+        snprintf(path, sizeof(path), "/wiki/@%s/shared.json", a);
+        struct json_value doc;
+        ASSERT(bsw_json(bsw_get("GET", path), &doc));
+        ASSERT_EQ(strcmp(json_get_str(json_get(&doc, "text")), "OWNER [[next]]"), 0);
+        ASSERT_EQ(strcmp(json_get_str(json_get(&doc, "signer")), a), 0);
+        json_free(&doc);
+        snprintf(path, sizeof(path), "/board/wiki/@%s/shared.txt", a);
+        ASSERT_EQ(strcmp(bsw_body(bsw_get("GET", path)), "OWNER [[next]]"), 0);
+        snprintf(path, sizeof(path), "/wiki/@%s/only-b", a);
+        ASSERT(strstr(bsw_get("GET", path), "404 Not Found"));
+        snprintf(path, sizeof(path), "/wiki/@%s/secret", a);
+        ASSERT(strstr(bsw_get("GET", path), "404 Not Found"));
+        snprintf(path, sizeof(path), "/wiki/@%s/shared", missing);
+        ASSERT(strstr(bsw_get("GET", path), "404 Not Found"));
+        ASSERT(strstr(bsw_get("GET", "/wiki/@123/shared"), "404 Not Found"));
+        snprintf(path, sizeof(path), "/wiki/@%s/shared", a);
+        path[8] = 'g';
+        ASSERT(strstr(bsw_get("GET", path), "404 Not Found"));
+        snprintf(path, sizeof(path), "/wiki/@%s/extra/shared", a);
+        ASSERT(strstr(bsw_get("GET", path), "404 Not Found"));
+        snprintf(path, sizeof(path), "/wiki/@%s", a);
+        resp = bsw_get("GET", path);
+        ASSERT(strstr(resp, "Owner") && strstr(resp, "Next"));
+        ASSERT(!strstr(resp, "Attacker") && !strstr(resp, "Only B") && !strstr(resp, "Secret"));
+        snprintf(expected, sizeof(expected), "href='/wiki/@%s.json'", a);
+        ASSERT(strstr(resp, expected));
+        snprintf(path, sizeof(path), "/wiki/@%s.json", a);
+        ASSERT(bsw_json(bsw_get("GET", path), &doc));
+        ASSERT_EQ(strcmp(json_get_str(json_get(&doc, "selected_signer")), a), 0);
+        ASSERT_EQ(json_get_int(json_get(&doc, "count")), 2);
+        json_free(&doc);
+        snprintf(path, sizeof(path), "/wiki/@%s", b);
+        resp = bsw_get("GET", path);
+        ASSERT(strstr(resp, "Attacker") && strstr(resp, "Only B") && !strstr(resp, "Owner"));
+        resp = bsw_get("GET", "/wiki");
+        ASSERT(strstr(resp, "Attacker") && strstr(resp, "Next"));
+        snprintf(path, sizeof(path), "/wiki/@%s", a);
+        resp = bsw_get("GET", path);
+        ASSERT(strstr(resp, "Owner") && !strstr(resp, "Attacker"));
+        /* Corrupt attacker revisions exceed the verification budget, but
+         * must never be read or counted by the owner's filtered query. */
+        ASSERT(node_db_exec(&db,
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<257) "
+            "INSERT INTO fleet_board_posts (id,seq,kind,created_at,ttl,expires_at,ref,host_pubkey,agent,slug,title,supersedes,receipt,text,body_bytes,signature,chain_prev,chain_hash,received_at,scope,room,arrival) "
+            "SELECT randomblob(32),1000000+x,kind,created_at+1000,ttl,expires_at+1000,ref,host_pubkey,agent,slug,title,supersedes,receipt,text,body_bytes,signature,chain_prev,chain_hash,received_at,scope,room,1000000+x FROM fleet_board_posts,n WHERE agent='attacker' AND slug='shared'"));
+        struct fleet_wiki_query_progress progress;
+        unsigned seen = 0;
+        ASSERT(db_fleet_board_wiki_query_author(&db, FLEET_WIKI_VIEW_PUBLIC, pk_a,
+                                               "", bsw_count_author, &seen, &progress));
+        ASSERT_EQ(progress.status, FLEET_WIKI_QUERY_DONE);
+        ASSERT_EQ(progress.verified, 2);
+        ASSERT_EQ(seen, 2);
+        snprintf(path, sizeof(path), "/wiki/@%s/shared", a);
+        ASSERT(strstr(bsw_get("GET", path), "OWNER"));
+        app_runtime_set_current(NULL);
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    zcl_fleet_role_checker_install(NULL);
     return failures;
 }
 
@@ -1238,6 +1357,7 @@ int test_board_site(void)
     failures += test_board_site_single_post();
     failures += test_board_site_wiki();
     failures += test_board_site_wiki_hardening();
+    failures += test_board_site_wiki_author();
     failures += test_board_site_wiki_links();
     failures += test_board_site_wiki_root_route();
     zcl_fleet_role_checker_install(NULL);

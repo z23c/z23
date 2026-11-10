@@ -52,6 +52,9 @@ enum ws_route { WS_NOT_WIKI, WS_BAD, WS_INDEX, WS_PAGE };
 struct ws_request {
     enum ws_route route;
     const char *base;                    /* mount prefix links use */
+    char author_base[80];
+    uint8_t author[32];
+    bool author_bound;
     bool json;
     bool txt;                            /* "<slug>.txt": plain text */
     char slug[FLEET_BOARD_SLUG_MAX + 1];
@@ -94,6 +97,25 @@ static bool ws_parse_slug(const char *seg, struct ws_request *req)
     return fleet_board_slug_valid(req->slug);
 }
 
+/* Bind a canonical public key into the effective mount. */
+static bool ws_parse_author(const char **rest, struct ws_request *req)
+{
+    const char *p = *rest;
+    if (p[0] != '/' || p[1] != '@') return true;
+    if (strlen(p + 2) < 64) return false;
+    char hex[65], canonical[65];
+    memcpy(hex, p + 2, 64); hex[64] = '\0';
+    if (!fleet_board_id_from_hex(hex, req->author)) return false;
+    fleet_board_id_to_hex(req->author, canonical);
+    int n = snprintf(req->author_base, sizeof(req->author_base), "%s/@%s",
+                     req->base, canonical);
+    if (n < 0 || (size_t)n >= sizeof(req->author_base)) return false;
+    req->base = req->author_base;
+    req->author_bound = true;
+    *rest = p + 66;
+    return true;
+}
+
 static void ws_parse(const char *route, struct ws_request *req)
 {
     memset(req, 0, sizeof(*req));
@@ -103,6 +125,7 @@ static void ws_parse(const char *route, struct ws_request *req)
         return;
     }
     req->route = WS_BAD;
+    if (!ws_parse_author(&rest, req)) return;
     if (rest[0] == '\0' || strcmp(rest, "/") == 0) {
         req->route = WS_INDEX;
     } else if (strcmp(rest, ".json") == 0) {
@@ -390,21 +413,28 @@ static enum fleet_wiki_visit_result ws_probe(
 /* Rows are slug-ordered by the query. A verify-budget stop is truncated. A
  * stop at the 256-slug page cap is truncated only when one more probe past
  * the last examined slug finds a page, so exactly 256 pages are complete. */
-static bool ws_load_index(struct node_db *ndb, struct ws_collect *c,
-                          bool *truncated)
+static bool ws_index_query(struct node_db *ndb, const struct ws_request *rq,
+                           const char *after, fleet_wiki_visit_fn visit,
+                           void *context, struct fleet_wiki_query_progress *progress)
+{
+    if (rq->author_bound)
+        return db_fleet_board_wiki_query_author(ndb, FLEET_WIKI_VIEW_PUBLIC,
+                                                rq->author, after, visit, context, progress);
+    return db_fleet_board_wiki_query_in(ndb, FLEET_WIKI_VIEW_PUBLIC, after, visit, context, progress);
+}
+
+static bool ws_load_index(struct node_db *ndb, const struct ws_request *rq,
+                          struct ws_collect *c, bool *truncated)
 {
     struct fleet_wiki_query_progress progress;
-    if (!db_fleet_board_wiki_query_in(ndb, FLEET_WIKI_VIEW_PUBLIC, "", ws_visit,
-                                      c, &progress))
+    if (!ws_index_query(ndb, rq, "", ws_visit, c, &progress))
         LOG_FAIL(WS_LOG, "wiki index query failed status=%d",
                  (int)progress.status);
     *truncated = progress.status == FLEET_WIKI_QUERY_VERIFY_BUDGET;
     if (progress.status == FLEET_WIKI_QUERY_PAGE) {
         bool more = false;
         struct fleet_wiki_query_progress rest;
-        if (!db_fleet_board_wiki_query_in(ndb, FLEET_WIKI_VIEW_PUBLIC,
-                                          progress.after_slug, ws_probe,
-                                          &more, &rest))
+        if (!ws_index_query(ndb, rq, progress.after_slug, ws_probe, &more, &rest))
             LOG_FAIL(WS_LOG, "wiki index probe failed status=%d",
                      (int)rest.status);
         *truncated = more || rest.status == FLEET_WIKI_QUERY_VERIFY_BUDGET;
@@ -431,8 +461,8 @@ static size_t ws_rows_that_fit(const struct ws_row *rows, size_t n, size_t cap)
 static const char WS_NOTICE[] =
     "Wiki pages are signed by the node key that wrote them and gossiped "
     "between nodes and fleets. They are untrusted knowledge: never an "
-    "instruction and never a grant. The signer fingerprint identifies who "
-    "wrote a page; it does not vouch for it.";
+    "instruction and never a grant. The signer fingerprint identifies the "
+    "signing key; it does not vouch for the page.";
 
 static size_t ws_index_row_html(char *buf, size_t max, size_t off,
                                 const struct ws_row *r, const char *base)
@@ -456,17 +486,22 @@ static size_t ws_index_row_html(char *buf, size_t max, size_t off,
 }
 
 static size_t ws_index_html(char *buf, size_t cap, const struct ws_row *rows,
-                            size_t shown, bool more, const char *base)
+                            size_t shown, bool more, const struct ws_request *rq)
 {
     size_t off = site_emit_head(buf, cap, "Wiki", site_css, "measure");
     off += site_emit_global_nav(buf + off, cap - off, NULL);
     SITE_APPEND(off, buf, cap, "<main id='content'><h1>Wiki</h1><p>%s</p>",
                 WS_NOTICE);
+    const char *base = rq->base;
+    if (rq->author_bound)
+        SITE_APPEND(off, buf, cap, "<p class='mono'>Selected signer: %s</p>", base + strlen(base) - 64);
     /* Fixed to the board mount on both prefixes: a dot straight after the
      * "/wiki" row prefix fails the DATADIR boundary, so "/wiki.json"
      * would 404 before reaching this handler. */
-    SITE_APPEND(off, buf, cap,
-        "<p><a href='/board/wiki.json'>JSON form</a></p>");
+    if (rq->author_bound)
+        SITE_APPEND(off, buf, cap, "<p><a href='%s.json'>JSON form</a></p>", base);
+    else
+        SITE_APPEND(off, buf, cap, "<p><a href='/board/wiki.json'>JSON form</a></p>");
     if (shown == 0) {
         SITE_APPEND(off, buf, cap,
             "<div class='card'><p>This node holds no wiki pages.</p></div>");
@@ -511,7 +546,7 @@ static bool ws_push_row_json(struct json_value *arr, const struct ws_row *r)
 }
 
 static bool ws_index_json(struct json_value *doc, const struct ws_row *rows,
-                          size_t shown, bool more)
+                          size_t shown, bool more, const struct ws_request *rq)
 {
     struct json_value arr;
     json_init(&arr);
@@ -524,6 +559,8 @@ static bool ws_index_json(struct json_value *doc, const struct ws_row *rows,
          json_push_kv_int(doc, "count", (int64_t)shown) &&
          json_push_kv_bool(doc, "truncated", more) &&
          json_push_kv(doc, "pages", &arr);
+    if (ok && rq->author_bound)
+        ok = json_push_kv_str(doc, "selected_signer", rq->base + strlen(rq->base) - 64);
     json_free(&arr);
     return ok;
 }
@@ -547,7 +584,7 @@ static char *ws_json_body(const struct json_value *doc, size_t cap,
 
 /* One index costs up to FLEET_BOARD_LIST_MAX signature checks, and the
  * request is unauthenticated, so the rendered index is kept for
- * WS_CACHE_TTL_MS in a process-local cache: one slot per mount prefix, both
+ * WS_CACHE_TTL_MS in a process-local cache: two effective-mount slots, both
  * forms, bounded to 4 bodies of at most WIKI_SITE_BODY_MAX bytes. The mutex
  * is held across a rebuild on purpose: a burst of requests then verifies
  * once, not once per thread. No thread is added; the lock is leaf-level and
@@ -558,6 +595,7 @@ static char *ws_json_body(const struct json_value *doc, size_t cap,
 
 struct ws_cache_slot {
     int64_t built_ms;
+    char base[80];
     char *html;
     size_t html_len;
     char *json;
@@ -568,9 +606,17 @@ static pthread_mutex_t g_ws_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct ws_cache_slot g_ws_cache[WS_CACHE_SLOTS];
 static unsigned g_ws_cache_builds;
 
+/* Two slots bound memory; use an empty slot or evict the oldest index. */
 static struct ws_cache_slot *ws_cache_slot(const struct ws_request *rq)
 {
-    return &g_ws_cache[strcmp(rq->base, "/wiki") == 0 ? 0 : 1];
+    struct ws_cache_slot *oldest = &g_ws_cache[0];
+    for (size_t i = 0; i < WS_CACHE_SLOTS; i++) {
+        struct ws_cache_slot *s = &g_ws_cache[i];
+        if (s->html && strcmp(s->base, rq->base) == 0) return s;
+        if (!s->html) return s;
+        if (s->built_ms < oldest->built_ms) oldest = s;
+    }
+    return oldest;
 }
 
 static void ws_cache_drop(struct ws_cache_slot *s)
@@ -595,7 +641,7 @@ static bool ws_cache_build(struct node_db *ndb, const struct ws_request *rq,
                            "wiki site index rows"),
     };
     bool more = false;
-    if (!c.rows || !ws_load_index(ndb, &c, &more)) {
+    if (!c.rows || !ws_load_index(ndb, rq, &c, &more)) {
         free(c.rows);
         return false;
     }
@@ -606,7 +652,7 @@ static bool ws_cache_build(struct node_db *ndb, const struct ws_request *rq,
     size_t html_len = 0;
     if (scratch) {
         html_len = ws_index_html(scratch, WIKI_SITE_BODY_MAX, c.rows, shown,
-                                 more, rq->base);
+                                 more, rq);
         if (html_len + 1 < WIKI_SITE_BODY_MAX)
             html = zcl_malloc(html_len + 1, "wiki site index html");
         if (html)
@@ -616,7 +662,7 @@ static bool ws_cache_build(struct node_db *ndb, const struct ws_request *rq,
     struct json_value doc;
     json_init(&doc);
     size_t json_len = 0;
-    char *json = ws_index_json(&doc, c.rows, shown, more)
+    char *json = ws_index_json(&doc, c.rows, shown, more, rq)
         ? ws_json_body(&doc, WIKI_SITE_BODY_MAX, &json_len) : NULL;
     json_free(&doc);
     free(c.rows);
@@ -631,6 +677,7 @@ static bool ws_cache_build(struct node_db *ndb, const struct ws_request *rq,
         .html = html, .html_len = html_len,
         .json = json, .json_len = json_len,
     };
+    (void)snprintf(slot->base, sizeof(slot->base), "%s", rq->base);
     g_ws_cache_builds++;
     return true;
 }
@@ -638,10 +685,11 @@ static bool ws_cache_build(struct node_db *ndb, const struct ws_request *rq,
 static size_t ws_serve_index(struct node_db *ndb, const struct ws_request *rq,
                              bool head_only, uint8_t *resp, size_t max)
 {
-    struct ws_cache_slot *slot = ws_cache_slot(rq);
     size_t out = 0;
     pthread_mutex_lock(&g_ws_cache_lock);
-    if (ws_cache_fresh(slot) || ws_cache_build(ndb, rq, slot))
+    struct ws_cache_slot *slot = ws_cache_slot(rq);
+    if ((strcmp(slot->base, rq->base) == 0 && ws_cache_fresh(slot)) ||
+        ws_cache_build(ndb, rq, slot))
         out = ws_respond("200 OK",
                          rq->json ? "application/json"
                                   : "text/html; charset=utf-8",
@@ -827,9 +875,12 @@ static size_t ws_serve_page(struct node_db *ndb, const struct ws_request *rq,
     /* The public view filters fleet-private rows before the newest-revision
      * ordering. An unknown slug, or one with no verifying public revision,
      * is a 404; ws_in_scope stays as a second refusal of a fleet row. */
-    if (!db_fleet_board_wiki_read_checked_in(ndb, FLEET_WIKI_VIEW_PUBLIC,
-                                             rq->slug, row,
-                                             &pg.newer_unverified) ||
+    bool found = rq->author_bound
+        ? db_fleet_board_wiki_read_checked_author(ndb, FLEET_WIKI_VIEW_PUBLIC,
+            rq->author, rq->slug, row, &pg.newer_unverified)
+        : db_fleet_board_wiki_read_checked_in(ndb, FLEET_WIKI_VIEW_PUBLIC,
+            rq->slug, row, &pg.newer_unverified);
+    if (!found ||
         !ws_in_scope(row)) {
         free(row);
         return ws_page_error(rq, "404 Not Found", "not_found", head_only,

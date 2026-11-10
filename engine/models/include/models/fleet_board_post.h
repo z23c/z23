@@ -331,6 +331,10 @@ bool db_fleet_board_wiki_read_checked_in(struct node_db *ndb,
                                          struct db_fleet_board_post *out,
                                          bool *newer_unverified);
 
+/* Author filtering is applied before ordering and verification. NULL refuses. */
+bool db_fleet_board_wiki_read_checked_author(struct node_db *, enum fleet_wiki_view,
+    const uint8_t author[32], const char *, struct db_fleet_board_post *, bool *);
+
 enum fleet_wiki_query_status {
     FLEET_WIKI_QUERY_DONE, FLEET_WIKI_QUERY_PAGE,
     FLEET_WIKI_QUERY_VERIFY_BUDGET, FLEET_WIKI_QUERY_STORAGE,
@@ -360,6 +364,11 @@ bool db_fleet_board_wiki_query_in(struct node_db *, enum fleet_wiki_view,
     const char *after_slug, fleet_wiki_visit_fn, void *,
     struct fleet_wiki_query_progress *);
 
+
+/* Author filtering is applied to slug and revision seeks. NULL refuses. */
+bool db_fleet_board_wiki_query_author(struct node_db *, enum fleet_wiki_view,
+    const uint8_t author[32], const char *, fleet_wiki_visit_fn, void *,
+    struct fleet_wiki_query_progress *);
 
 /* One row per slug: the latest revision of the first max pages. Pages past
  * max are reached with db_fleet_board_wiki_list_after. */

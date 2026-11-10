@@ -288,7 +288,7 @@ static void wiki_view_where(struct qb *q, enum fleet_wiki_view view)
 }
 
 static int board_wiki_next_slug(struct node_db *ndb, enum fleet_wiki_view view,
-                                const char *after,
+                                const char *after, const uint8_t *author,
                                 char slug[FLEET_BOARD_SLUG_MAX + 1])
 {
     struct qb q;
@@ -296,6 +296,7 @@ static int board_wiki_next_slug(struct node_db *ndb, enum fleet_wiki_view view,
     qb_select_columns(&q, k_board_slug_cols, BOARD_SLUG_NCOLS);
     qb_where_int(&q, QB_C_fleet_board_posts_kind, QB_EQ, FLEET_BOARD_KIND_WIKI);
     wiki_view_where(&q, view);
+    if (author) qb_where_blob(&q, QB_C_fleet_board_posts_host_pubkey, QB_EQ, author, 32);
     if (after[0])
         qb_where_text(&q, QB_C_fleet_board_posts_slug, QB_GT, after);
     qb_order_by(&q, QB_C_fleet_board_posts_slug, QB_ASC);
@@ -322,13 +323,14 @@ static int board_wiki_next_slug(struct node_db *ndb, enum fleet_wiki_view view,
  * query's total cryptographic revision reads. Plain text is still a winner. */
 static enum fleet_wiki_query_status board_wiki_query_latest(
     struct node_db *ndb, enum fleet_wiki_view view, const char *slug,
-    unsigned *verified, struct db_fleet_board_post *out, bool *found)
+    const uint8_t *author, unsigned *verified, struct db_fleet_board_post *out, bool *found)
 {
     *found = false;
     struct qb q;
     fleet_board_select_row(&q);
     qb_where_int(&q, QB_C_fleet_board_posts_kind, QB_EQ, FLEET_BOARD_KIND_WIKI);
     wiki_view_where(&q, view);
+    if (author) qb_where_blob(&q, QB_C_fleet_board_posts_host_pubkey, QB_EQ, author, 32);
     qb_where_text(&q, QB_C_fleet_board_posts_slug, QB_EQ, slug);
     qb_order_by(&q, QB_C_fleet_board_posts_created_at, QB_DESC);
     qb_order_by(&q, QB_C_fleet_board_posts_id, QB_DESC);
@@ -411,7 +413,7 @@ int db_fleet_board_wiki_list_after_in(struct node_db *ndb,
     size_t scanned = 0;
     int written = 0;
     for (;;) {
-        int next = board_wiki_next_slug(ndb, view, last, slug);
+        int next = board_wiki_next_slug(ndb, view, last, NULL, slug);
         if (next < 0)
             return -1;
         if (next == 0)
@@ -435,8 +437,8 @@ bool db_fleet_board_wiki_query(struct node_db *ndb, const char *after,
                                         context, progress);
 }
 
-bool db_fleet_board_wiki_query_in(struct node_db *ndb,
-    enum fleet_wiki_view view, const char *after,
+static bool board_wiki_query_filtered(struct node_db *ndb,
+    enum fleet_wiki_view view, const uint8_t *author, const char *after,
     fleet_wiki_visit_fn visit, void *context,
     struct fleet_wiki_query_progress *progress)
 {
@@ -445,12 +447,12 @@ bool db_fleet_board_wiki_query_in(struct node_db *ndb,
     (void)snprintf(progress->after_slug, sizeof(progress->after_slug), "%s", after);
     while (progress->scanned < FLEET_BOARD_LIST_MAX) {
         char slug[FLEET_BOARD_SLUG_MAX + 1];
-        int next = board_wiki_next_slug(ndb, view, progress->after_slug, slug);
+        int next = board_wiki_next_slug(ndb, view, progress->after_slug, author, slug);
         if (next < 0) { progress->status = FLEET_WIKI_QUERY_STORAGE; return false; }
         if (next == 0) return true;
         struct db_fleet_board_post row;
         bool found;
-        progress->status = board_wiki_query_latest(ndb, view, slug,
+        progress->status = board_wiki_query_latest(ndb, view, slug, author,
             &progress->verified, &row, &found);
         if (progress->status != FLEET_WIKI_QUERY_DONE) {
             (void)snprintf(progress->blocked_slug, sizeof(progress->blocked_slug), "%s", slug);
@@ -473,6 +475,21 @@ bool db_fleet_board_wiki_query_in(struct node_db *ndb,
     return true;
 }
 
+bool db_fleet_board_wiki_query_in(struct node_db *ndb, enum fleet_wiki_view view,
+    const char *after, fleet_wiki_visit_fn visit, void *context,
+    struct fleet_wiki_query_progress *progress)
+{
+    return board_wiki_query_filtered(ndb, view, NULL, after, visit, context, progress);
+}
+
+bool db_fleet_board_wiki_query_author(struct node_db *ndb, enum fleet_wiki_view view,
+    const uint8_t author[32], const char *after, fleet_wiki_visit_fn visit,
+    void *context, struct fleet_wiki_query_progress *progress)
+{
+    if (!author) return false;
+    return board_wiki_query_filtered(ndb, view, author, after, visit, context, progress);
+}
+
 bool db_fleet_board_wiki_read_checked(struct node_db *ndb, const char *slug,
     struct db_fleet_board_post *out, bool *newer_unverified)
 {
@@ -480,8 +497,8 @@ bool db_fleet_board_wiki_read_checked(struct node_db *ndb, const char *slug,
                                                out, newer_unverified);
 }
 
-bool db_fleet_board_wiki_read_checked_in(struct node_db *ndb,
-    enum fleet_wiki_view view, const char *slug,
+static bool board_wiki_read_checked_filtered(struct node_db *ndb,
+    enum fleet_wiki_view view, const uint8_t *author, const char *slug,
     struct db_fleet_board_post *out, bool *newer_unverified)
 {
     /* raw-return-ok:absent-page-is-not-an-error — same contract as
@@ -493,12 +510,27 @@ bool db_fleet_board_wiki_read_checked_in(struct node_db *ndb,
     bool found = false;
     *newer_unverified = false;
     enum fleet_wiki_query_status status =
-        board_wiki_query_latest(ndb, view, slug, &verified, out, &found);
+        board_wiki_query_latest(ndb, view, slug, author, &verified, out, &found);
     if (status != FLEET_WIKI_QUERY_DONE || !found)
         return false; // raw-return-ok:absent-page-is-not-an-error
     /* Every attempt before the winner was a newer revision that failed. */
     *newer_unverified = verified > 1;
     return true;
+}
+
+bool db_fleet_board_wiki_read_checked_in(struct node_db *ndb,
+    enum fleet_wiki_view view, const char *slug,
+    struct db_fleet_board_post *out, bool *newer_unverified)
+{
+    return board_wiki_read_checked_filtered(ndb, view, NULL, slug, out, newer_unverified);
+}
+
+bool db_fleet_board_wiki_read_checked_author(struct node_db *ndb,
+    enum fleet_wiki_view view, const uint8_t author[32], const char *slug,
+    struct db_fleet_board_post *out, bool *newer_unverified)
+{
+    if (!author) return false;
+    return board_wiki_read_checked_filtered(ndb, view, author, slug, out, newer_unverified);
 }
 
 /* The signed review type is a payload format, not a second storage authority. */

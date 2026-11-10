@@ -10,6 +10,9 @@
  *   <mount>.json            the same index as zcl.public_wiki_index.v1
  *   <mount>/<slug>          the newest VERIFIED revision of one page
  *   <mount>/<slug>.json     the same page as zcl.public_wiki_page.v1
+ *   <mount>/@<64 hex>       index for one signing key (also .json)
+ *   <mount>/@<64 hex>/<slug> page for that key (also .json and .txt)
+ * The key selects a signer; it does not assert a human identity.
  *
  * Everything shown is a signed fleet_board_posts row this node holds: the
  * site adds nothing, and a page is untrusted knowledge, never an
@@ -39,7 +42,7 @@ size_t wiki_site_handle_request(const char *method, const char *path,
                                 const char *datadir);
 
 #ifdef ZCL_TESTING
-/* Index cache (30 s, per mount prefix): drop it, and count index builds so a
+/* Index cache (30 s, two bounded effective-mount slots): drop it, and count index builds so a
  * test can prove two quick requests verify once. */
 void wiki_site_cache_reset_for_testing(void);
 unsigned wiki_site_index_builds_for_testing(void);
