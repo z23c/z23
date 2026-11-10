@@ -69,6 +69,21 @@ static bool ucod_read_chunk(int fd, struct ucod_stream *stream)
     if (take != (size_t)n) stream->truncated = true;
     return true;
 }
+static bool ucod_drain_ready(struct pollfd fds[2], struct ucod_capture *capture)
+{
+    struct ucod_stream *streams[2] = {&capture->out, &capture->err};
+    for (unsigned i = 0; i < 2; i++) {
+        if (fds[i].revents & POLLNVAL) return false;
+        if ((fds[i].revents & (POLLIN | POLLHUP | POLLERR)) &&
+            !ucod_read_chunk(fds[i].fd, streams[i])) return false;
+    }
+    return true;
+}
+static bool ucod_drain_complete(const struct ucod_capture *capture)
+{
+    return !capture->out.truncated && !capture->err.truncated &&
+        !capture->out.binary && !capture->err.binary;
+}
 static bool ucod_drain(int out, int err, struct ucod_capture *capture)
 {
     if (!ucod_nonblocking(out) || !ucod_nonblocking(err)) return false;
@@ -84,17 +99,11 @@ static bool ucod_drain(int out, int err, struct ucod_capture *capture)
         int ready = poll(fds, 2, (int)(5000 - (now - start)));
         if (ready < 0 && errno == EINTR) continue;
         if (ready <= 0) return false;
-        struct ucod_stream *streams[2] = {&capture->out, &capture->err};
         /* One bounded read per ready stream per iteration: a busy writer
          * cannot starve the other pipe or the shared monotonic deadline. */
-        for (unsigned i = 0; i < 2; i++) {
-            if (fds[i].revents & POLLNVAL) return false;
-            if ((fds[i].revents & (POLLIN | POLLHUP | POLLERR)) &&
-                !ucod_read_chunk(fds[i].fd, streams[i])) return false;
-        }
+        if (!ucod_drain_ready(fds, capture)) return false;
     }
-    return !capture->out.truncated && !capture->err.truncated &&
-        !capture->out.binary && !capture->err.binary;
+    return ucod_drain_complete(capture);
 }
 static bool ucod_pipes(int output[2], int diagnostic[2])
 {
@@ -197,6 +206,19 @@ static bool ucod_observed(bool ok, const struct ucod_capture *capture, enum ucod
         mode, capture->status, capture->out.text, capture->err.text);
     return ok;
 }
+static bool ucod_success_envelope(const struct ucod_capture *capture, const char *command)
+{
+    struct json_value envelope = {0};
+    bool parsed = json_read(&envelope, capture->out.text, capture->out.used);
+    const struct json_value *data = json_get(&envelope, "data");
+    const struct json_value *complete = data ? json_get(data, "complete") : NULL;
+    bool ok = parsed && WEXITSTATUS(capture->status) == ZCL_COMMAND_EXIT_OK &&
+        ucod_envelope(&envelope, command, true) && data && data->type == JSON_OBJ &&
+        complete && complete->type == JSON_BOOL && json_get_bool(complete) &&
+        ucod_string_is(data, "comparison", "equal") && ucod_string_is(data, "authority_count", "2") &&
+        ucod_no_completed_output(capture->err.text);
+    json_free(&envelope); return ok;
+}
 static bool ucod_dispatch_case(const struct json_value *input, const char *directory, enum ucod_mode mode)
 {
     struct ucod_capture capture = {0};
@@ -204,16 +226,7 @@ static bool ucod_dispatch_case(const struct json_value *input, const char *direc
         return ucod_observed(false, &capture, mode);
     const char *command = "core.consensus.utxo.compare.offline";
     if (mode == UCOD_OK) {
-        struct json_value envelope = {0};
-        bool parsed = json_read(&envelope, capture.out.text, capture.out.used);
-        const struct json_value *data = json_get(&envelope, "data");
-        const struct json_value *complete = data ? json_get(data, "complete") : NULL;
-        bool ok = parsed && WEXITSTATUS(capture.status) == ZCL_COMMAND_EXIT_OK &&
-            ucod_envelope(&envelope, command, true) && data && data->type == JSON_OBJ &&
-            complete && complete->type == JSON_BOOL && json_get_bool(complete) &&
-            ucod_string_is(data, "comparison", "equal") && ucod_string_is(data, "authority_count", "2") &&
-            ucod_no_completed_output(capture.err.text);
-        json_free(&envelope); return ucod_observed(ok, &capture, mode);
+        return ucod_observed(ucod_success_envelope(&capture, command), &capture, mode);
     }
     const char *code = mode == UCOD_END_FAIL ? "CANCELLATION_RESTORE_FAILED" :
         mode == UCOD_CLEANUP_FAIL ? "COMPARISON_CLEANUP_FAILED" : "COMPARISON_CANCELLED";

@@ -150,19 +150,42 @@ static bool ucrt_release_retry(void **owner)
     if (++*calls == 1) return false;
     *owner = NULL; return true;
 }
+static bool ucrt_capsule_first(const struct cli_compare_signals *state,
+                               const unsigned *first, unsigned second, bool retained)
+{
+    return *first == 1 && second == 1 && state->slots[0].release_failed &&
+        !state->slots[1].release_failed && state->slots[1].owner == NULL &&
+        state->slots[0].owner == (retained ? first : NULL);
+}
 static bool ucrt_capsule_case(bool retained)
 {
     struct cli_compare_signals state = {0}; unsigned first = 0, second = 0;
     state.slots[0].owner = &first;
     state.slots[0].release = retained ? ucrt_release_retry : ucrt_release_terminal;
     state.slots[1].owner = &second; state.slots[1].release = ucrt_release_ok;
-    bool one = !ucrt_cleanup(&state) && first == 1 && second == 1 &&
-        state.slots[0].release_failed && !state.slots[1].release_failed &&
-        state.slots[1].owner == NULL && state.slots[0].owner == (retained ? &first : NULL);
+    bool one = !ucrt_cleanup(&state) && ucrt_capsule_first(&state, &first, second, retained);
     bool two = !ucrt_cleanup(&state) && state.slots[0].owner == NULL &&
         state.slots[1].owner == NULL && state.slots[0].release_failed &&
         first == (retained ? 2u : 1u) && second == 1;
     return one && two;
+}
+static bool ucrt_nested_distinct(bool began, struct cli_compare_signals *fresh,
+                                  const struct cli_compare_signals *original,
+                                  const unsigned char *snapshot)
+{
+    unsigned char zero[sizeof(*fresh)]; memcpy(zero, fresh, sizeof(*fresh));
+    return began && !ucrt_scope_begin(fresh) &&
+        memcmp(zero, fresh, sizeof(*fresh)) == 0 && ucrt_scope_end(fresh) &&
+        !ucrt_scope_begin(fresh) && memcmp(snapshot, original, sizeof(*original)) == 0;
+}
+static bool ucrt_nested_cleanup(struct cli_compare_signals *original,
+                                 struct ucrt_saved *saved, bool began, const unsigned *calls)
+{
+    bool released = ucrt_cleanup(original);
+    bool ended = ucrt_scope_end(original);
+    bool restored = !began || ucrt_restored(saved);
+    bool repaired = ucrt_restore(saved);
+    return released && *calls == 1 && ended && restored && repaired;
 }
 static bool ucrt_nested_case(void)
 {
@@ -176,16 +199,10 @@ static bool ucrt_nested_case(void)
     bool refused = reserved && !ucrt_scope_begin(&original) &&
         memcmp(snapshot, &original, sizeof(original)) == 0 && slots[0].owner == &calls;
     /* Never end a refused same-context attempt: original is still acquired. */
-    unsigned char zero[sizeof(fresh)]; memcpy(zero, &fresh, sizeof(fresh));
-    bool distinct = began && !ucrt_scope_begin(&fresh) &&
-        memcmp(zero, &fresh, sizeof(fresh)) == 0 && ucrt_scope_end(&fresh) &&
-        !ucrt_scope_begin(&fresh) && memcmp(snapshot, &original, sizeof(original)) == 0;
+    bool distinct = ucrt_nested_distinct(began, &fresh, &original, snapshot);
     bool null_refused = !ucrt_scope_begin(NULL);
-    bool released = ucrt_cleanup(&original);
-    bool ended = ucrt_scope_end(&original);
-    bool restored = !began || ucrt_restored(&saved);
-    bool repaired = ucrt_restore(&saved);
-    return prepared && refused && distinct && null_refused && released && calls == 1 && ended && restored && repaired;
+    bool cleaned = ucrt_nested_cleanup(&original, &saved, began, &calls);
+    return prepared && refused && distinct && null_refused && cleaned;
 }
 static bool ucrt_blocked_case(void)
 {

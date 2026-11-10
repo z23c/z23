@@ -52,6 +52,23 @@ static size_t ucf_rows(const struct csi_fixture *bundle, enum ucf_mode mode,
     if (mode == UCF_BOTH_ONLY) rows[1] = rows[2];
     return mode == UCF_AUTHORITY_ONLY ? 1 : mode == UCF_PROJECTION_ONLY ? 3 : 2;
 }
+static bool ucf_insert_row(sqlite3_stmt *insert, const struct csi_coin *r)
+{
+    return sqlite3_reset(insert) == SQLITE_OK && sqlite3_clear_bindings(insert) == SQLITE_OK &&
+        sqlite3_bind_blob(insert, 1, r->txid, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int64(insert, 2, r->vout) == SQLITE_OK &&
+        sqlite3_bind_int64(insert, 3, r->value) == SQLITE_OK &&
+        sqlite3_bind_blob(insert, 4, r->script, (int)r->script_len, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int(insert, 5, r->height) == SQLITE_OK &&
+        sqlite3_bind_int(insert, 6, r->coinbase) == SQLITE_OK && sqlite3_step(insert) == SQLITE_DONE;
+}
+static bool ucf_cursor_insert(sqlite3 *db, const uint8_t cursor_bytes[8], sqlite3_stmt **cursor)
+{
+    return sqlite3_prepare_v2(db, "INSERT INTO node_state VALUES(?,?)", -1, cursor, NULL) == SQLITE_OK &&
+        sqlite3_bind_text(*cursor, 1, UTXO_MIRROR_SYNC_CURSOR_KEY, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_blob(*cursor, 2, cursor_bytes, 8, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(*cursor) == SQLITE_DONE;
+}
 static bool ucf_projection(const char *path, const struct csi_fixture *bundle,
     enum ucf_mode mode, enum utxo_mirror_byte_order order, uint8_t digest[32])
 {
@@ -74,11 +91,7 @@ static bool ucf_projection(const char *path, const struct csi_fixture *bundle,
         unsigned at = order == UTXO_MIRROR_LITTLE_ENDIAN ? i : 7u - i;
         cursor_bytes[at] = (uint8_t)(frontier >> (8u * i));
     }
-    if (ok) ok = sqlite3_prepare_v2(db, "INSERT INTO node_state VALUES(?,?)",
-        -1, &cursor, NULL) == SQLITE_OK;
-    if (ok) ok = sqlite3_bind_text(cursor, 1, UTXO_MIRROR_SYNC_CURSOR_KEY, -1,
-        SQLITE_STATIC) == SQLITE_OK && sqlite3_bind_blob(cursor, 2, cursor_bytes,
-        sizeof(cursor_bytes), SQLITE_TRANSIENT) == SQLITE_OK && sqlite3_step(cursor) == SQLITE_DONE;
+    if (ok) ok = ucf_cursor_insert(db, cursor_bytes, &cursor);
     int cursor_done = sqlite3_finalize(cursor);
     struct csi_coin rows[3];
     size_t count = ucf_rows(bundle, mode, rows);
@@ -86,14 +99,7 @@ static bool ucf_projection(const char *path, const struct csi_fixture *bundle,
         "INSERT INTO utxos(txid,vout,value,script,height,is_coinbase) VALUES(?,?,?,?,?,?)",
         -1, &insert, NULL) == SQLITE_OK;
     for (size_t i = 0; ok && i < count; i++) {
-        const struct csi_coin *r = &rows[i];
-        ok = sqlite3_reset(insert) == SQLITE_OK && sqlite3_clear_bindings(insert) == SQLITE_OK &&
-            sqlite3_bind_blob(insert, 1, r->txid, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
-            sqlite3_bind_int64(insert, 2, r->vout) == SQLITE_OK &&
-            sqlite3_bind_int64(insert, 3, r->value) == SQLITE_OK &&
-            sqlite3_bind_blob(insert, 4, r->script, (int)r->script_len, SQLITE_TRANSIENT) == SQLITE_OK &&
-            sqlite3_bind_int(insert, 5, r->height) == SQLITE_OK &&
-            sqlite3_bind_int(insert, 6, r->coinbase) == SQLITE_OK && sqlite3_step(insert) == SQLITE_DONE;
+        ok = ucf_insert_row(insert, &rows[i]);
     }
     int rows_done = sqlite3_finalize(insert);
     int closed = sqlite3_close(db);
@@ -333,31 +339,43 @@ static bool ucf_examples(const struct utxo_copy_compare_report *r,
     }
     return false;
 }
-static bool ucf_valid_report(const struct utxo_copy_compare_report *r,
-                              const struct csi_fixture *bundle, const uint8_t projection_digest[32],
+static bool ucf_report_details(const struct utxo_copy_compare_report *r,
+                               enum ucf_mode mode, unsigned limit,
+                               uint64_t ao, uint64_t po, uint64_t different)
+{
+    uint64_t equal = mode == UCF_EQUAL || mode == UCF_PROJECTION_ONLY ? 2 : 1;
+    unsigned examples = (unsigned)(ao + po + different);
+    return r->authority_only == ao && r->projection_only == po &&
+        r->shared_equal == equal && r->shared_different == different &&
+        r->shared_fields == ucf_mask(mode) && r->count_delta_negative == (ao > po) &&
+        r->count_delta_magnitude == (ao > po ? ao - po : po - ao) &&
+        r->example_count == (examples < limit ? examples : limit) &&
+        r->examples_truncated == (examples > limit);
+}
+static bool ucf_report_counts(const struct utxo_copy_compare_report *r,
                               enum ucf_mode mode, unsigned limit)
 {
     uint64_t ao = mode == UCF_AUTHORITY_ONLY || mode == UCF_BOTH_ONLY;
     uint64_t po = mode == UCF_PROJECTION_ONLY || mode == UCF_BOTH_ONLY;
     uint64_t different = ucf_mask(mode) != 0;
-    uint64_t equal = mode == UCF_EQUAL || mode == UCF_PROJECTION_ONLY ? 2 : 1;
     unsigned examples = (unsigned)(ao + po + different);
     bool changed = examples != 0;
+    return r->complete && r->counts_valid && r->roots_valid &&
+        r->status == (changed ? UTXO_COPY_COMPARE_DIFFERENT : UTXO_COPY_COMPARE_EQUAL) &&
+        r->failure == UTXO_COPY_FAILURE_NONE && r->authority_count == 2 &&
+        r->projection_count == (mode == UCF_AUTHORITY_ONLY ? 1u : mode == UCF_PROJECTION_ONLY ? 3u : 2u) &&
+        ucf_report_details(r, mode, limit, ao, po, different);
+}
+static bool ucf_valid_report(const struct utxo_copy_compare_report *r,
+                              const struct csi_fixture *bundle, const uint8_t projection_digest[32],
+                              enum ucf_mode mode, unsigned limit)
+{
     struct csi_coin rows[3];
     size_t count = ucf_rows(bundle, mode, rows);
     uint8_t authority_root[32], projection_root[32];
     bool roots = ucf_expected_root(bundle->coins, 2, authority_root) &&
         ucf_expected_root(rows, count, projection_root);
-    bool ok = roots && r->complete && r->counts_valid && r->roots_valid &&
-        r->status == (changed ? UTXO_COPY_COMPARE_DIFFERENT : UTXO_COPY_COMPARE_EQUAL) &&
-        r->failure == UTXO_COPY_FAILURE_NONE && r->authority_count == 2 &&
-        r->projection_count == (mode == UCF_AUTHORITY_ONLY ? 1u : mode == UCF_PROJECTION_ONLY ? 3u : 2u) &&
-        r->authority_only == ao && r->projection_only == po &&
-        r->shared_equal == equal && r->shared_different == different &&
-        r->shared_fields == ucf_mask(mode) && r->count_delta_negative == (ao > po) &&
-        r->count_delta_magnitude == (ao > po ? ao - po : po - ao) &&
-        r->example_count == (examples < limit ? examples : limit) &&
-        r->examples_truncated == (examples > limit) &&
+    bool ok = roots && ucf_report_counts(r, mode, limit) &&
         r->capture_binding == UTXO_COPY_CAPTURE_EXTERNALLY_ATTESTED &&
         memcmp(r->authority_root, authority_root, 32) == 0 &&
         memcmp(r->projection_root, projection_root, 32) == 0 &&
