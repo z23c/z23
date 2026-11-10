@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0
  * purpose: Bind explicit P2P listener addresses without wildcard fallback. */
 #include "config/boot.h"
+#include "config/boot_error.h"
 #include "net/net.h"
 #include "platform/socket_compat.h"
 #include <stdio.h>
@@ -83,6 +84,13 @@ bool boot_p2p_listen(struct net_manager *manager, const struct app_context *ctx)
     struct net_service address;
     if (ctx->p2p_port < 0 || ctx->p2p_port > 65535 ||
         !boot_p2p_parse_bind_address(ctx->p2p_bind_address, &address)) {
+        boot_error_report(BOOT_ERROR_FATAL,
+            "BOOT_P2P_BIND_REFUSED",
+            "p2p.listen",
+            "P2P listen refused: explicit bind address or port is invalid",
+            NULL, 0,
+            "stage=p2p_bind_invalid port=%d",
+            ctx->p2p_port);
         fprintf(stderr, "P2P explicit bind address or port is invalid\n");
         return false;
     }
