@@ -19,6 +19,9 @@
 #endif
 
 #include "test/test_dev_land_common.h"
+#if !defined(_WIN32)
+#include <poll.h>
+#endif
 
 
 #if !defined(_WIN32)
@@ -27,6 +30,16 @@ struct dlx_scope_case {
     char queue[16384], origin[64], wt[1400];
     size_t queue_len;
 };
+
+static bool dlx_decision_run(struct dlx_call *c)
+{
+    char why[256];
+    if (!c->request.spec || !c->request.spec->handler ||
+        !zcl_command_registry_input_validate(c->request.spec, &c->input,
+                                             why, sizeof(why))) return false;
+    c->request.spec->handler(&c->request, &c->reply);
+    return true;
+}
 
 static bool dlx_scope_state_matches(void)
 {
@@ -250,6 +263,13 @@ static int dlx_scope_shared_fence(void)
         ASSERT(dlx_origin_main(&t.rig, t.remote));
         const char *rev[] = { "rev-parse", "HEAD", NULL };
         ASSERT(dlx_git_out(t.wt, rev, old_head, sizeof(old_head)) == 0);
+        dlx_begin(&t.c, "decision"); opened = true;
+        ASSERT(dlx_decision_run(&t.c) && dlx_ok(&t.c));
+        ASSERT_STR_EQ(dlx_str(&t.c, "dispatch"), "fence");
+        ASSERT(dlx_fence_same_queue(&t));
+        ASSERT(dlx_slurp(path, after, sizeof(after), &after_len));
+        ASSERT(before_len == after_len && memcmp(before, after, before_len) == 0);
+        dlx_end(&t.c); opened = false;
         opened = true;
         ASSERT(dlx_drive_seq(&t.c, 1));
         ASSERT_STR_EQ(dlx_err_code(&t.c), "DRIVE_REFUSED");
@@ -262,6 +282,15 @@ static int dlx_scope_shared_fence(void)
         ASSERT_STR_EQ(head, t.remote);
         ASSERT(dlx_git_out(t.wt, rev, head, sizeof(head)) == 0);
         ASSERT_STR_EQ(head, old_head);
+        dlx_end(&t.c); opened = false;
+        ASSERT(dlx_write(path, "malformed\n"));
+        dlx_begin(&t.c, "decision"); opened = true;
+        ASSERT(dlx_decision_run(&t.c));
+        ASSERT_STR_EQ(dlx_err_code(&t.c), "DECISION_UNAVAILABLE");
+        ASSERT(!t.c.reply.error.mutated);
+        ASSERT(dlx_slurp(path, after, sizeof(after), &after_len));
+        ASSERT(after_len == strlen("malformed\n") &&
+               memcmp(after, "malformed\n", after_len) == 0);
         PASS();
     }
 _test_next:;
@@ -270,9 +299,232 @@ _test_next:;
     return failures;
 }
 
+static bool dlx_decision_registry(struct dlx_call *c)
+{
+    char wire[16384];
+    enum zcl_command_exit code;
+    struct json_value doc;
+    json_init(&doc);
+    size_t len = zcl_command_registry_execute_json(zcl_command_catalog(),
+        c->request.spec, NULL, &c->input, false, "dev.land.decision", NULL,
+        0, 0, NULL, wire, sizeof(wire), &code);
+    bool ok = len > 0 && code == ZCL_COMMAND_EXIT_OK && json_read(&doc, wire, len) &&
+        json_get_bool(json_get(&doc, "ok")) &&
+        dlx_eq_str(json_get_str(json_get(json_get(&doc, "data"), "dispatch")), "prepare");
+    json_free(&doc);
+    if (!ok || !json_push_kv_str(&c->input, "action", "step")) return false;
+    json_init(&doc);
+    len = zcl_command_registry_execute_json(zcl_command_catalog(),
+        c->request.spec, NULL, &c->input, false, "dev.land.decision", NULL,
+        0, 0, NULL, wire, sizeof(wire), &code);
+    ok = len > 0 && json_read(&doc, wire, len) &&
+        !json_get_bool(json_get(&doc, "ok"));
+    json_free(&doc);
+    return ok;
+}
+
+static int dlx_decision_queue_case(void)
+{
+    int failures = 0, lock = -1;
+    struct dlx_scope_case t = {0};
+    struct dlx_call c;
+    bool opened = false;
+    char land[1400];
+    TEST("land: advisory decision selects the executor head without mutation") {
+        ASSERT(dlx_scope_prepare(&t, "decision_queue", NULL));
+        dlx_landdir(land, sizeof(land));
+        lock = dlx_step_lock_take(land);
+        ASSERT(lock >= 0);
+        dlx_step_lock_release(lock); lock = -1;
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(c.request.spec != NULL);
+        ASSERT(dlx_decision_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "dispatch"), "prepare");
+        ASSERT_EQ(dlx_int(&c, "seq"), 674);
+        ASSERT(dlx_scope_unchanged(&t));
+        ASSERT(dlx_decision_registry(&c));
+        ASSERT(dlx_scope_unchanged(&t));
+        dlx_end(&c); opened = false;
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(json_push_kv_int(&c.input, "seq", 685));
+        ASSERT(dlx_decision_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "dispatch"), "scope_blocked");
+        ASSERT_EQ(dlx_int(&c, "seq"), 674);
+        ASSERT(dlx_scope_unchanged(&t));
+        dlx_end(&c); opened = false;
+        lock = dlx_step_lock_take(land);
+        ASSERT(lock >= 0);
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(dlx_decision_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DECISION_UNAVAILABLE");
+        ASSERT(!c.reply.error.mutated);
+        ASSERT(dlx_scope_unchanged(&t));
+        PASS();
+    }
+_test_next:;
+    if (lock >= 0) dlx_step_lock_release(lock);
+    if (opened) dlx_end(&c);
+    dlx_restore();
+    return failures;
+}
+
+static int dlx_decision_terminal_case(void)
+{
+    int failures = 0, lock = -1;
+    struct dlx_scope_case t = {0};
+    struct dlx_call c;
+    bool opened = false;
+    char land[1400], path[1500], before[16384], after[16384];
+    size_t before_len = 0, after_len = 0;
+    TEST("land: advisory decision identifies a durable terminal replay") {
+        ASSERT(dlx_scope_prepare(&t, "decision_terminal", NULL));
+        dlx_landdir(land, sizeof(land));
+        lock = dlx_step_lock_take(land);
+        ASSERT(lock >= 0);
+        dlx_step_lock_release(lock); lock = -1;
+        dlx_begin(&c, "cancel"); opened = true;
+        ASSERT(json_push_kv_int(&c.input, "seq", 674));
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c); opened = false;
+        (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+        ASSERT(dlx_write(path, t.queue));
+        (void)snprintf(path, sizeof(path), "%s/outcomes.jsonl", land);
+        ASSERT(dlx_slurp(path, before, sizeof(before), &before_len));
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(dlx_decision_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "dispatch"), "terminal_replay");
+        ASSERT_EQ(dlx_int(&c, "seq"), 674);
+        ASSERT(dlx_scope_unchanged(&t));
+        ASSERT(dlx_slurp(path, after, sizeof(after), &after_len));
+        ASSERT(before_len == after_len && memcmp(before, after, before_len) == 0);
+        dlx_end(&c); opened = false;
+        ASSERT(dlx_write(path, "malformed\n"));
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(dlx_decision_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DECISION_UNAVAILABLE");
+        ASSERT(!c.reply.error.mutated);
+        ASSERT(dlx_slurp(path, after, sizeof(after), &after_len));
+        ASSERT(after_len == strlen("malformed\n") &&
+               memcmp(after, "malformed\n", after_len) == 0);
+        dlx_end(&c); opened = false;
+        before[before_len] = '\0';
+        ASSERT(dlx_write(path, before));
+        dlx_begin(&c, "step"); opened = true;
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "cancelled");
+        PASS();
+    }
+_test_next:;
+    if (lock >= 0) dlx_step_lock_release(lock);
+    if (opened) dlx_end(&c);
+    dlx_restore();
+    return failures;
+}
+
+static int dlx_decision_unavailable_case(void)
+{
+    int failures = 0, lock = -1;
+    struct dlx_scope_case t = {0};
+    struct dlx_call c;
+    bool opened = false;
+    char land[1400], path[1500], after[128];
+    size_t n = 0;
+    struct stat st;
+    TEST("land: advisory decision refuses missing state and malformed queue without writes") {
+        dlx_isolate("decision_missing");
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/land", g_dlx_state);
+        ASSERT(lstat(path, &st) != 0 && errno == ENOENT);
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(dlx_decision_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DECISION_UNAVAILABLE");
+        ASSERT(!c.reply.error.mutated);
+        ASSERT(lstat(path, &st) != 0 && errno == ENOENT);
+        dlx_end(&c); opened = false;
+        dlx_restore();
+        ASSERT(dlx_scope_prepare(&t, "decision_malformed", NULL));
+        dlx_landdir(land, sizeof(land));
+        lock = dlx_step_lock_take(land);
+        ASSERT(lock >= 0);
+        dlx_step_lock_release(lock); lock = -1;
+        (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+        ASSERT(dlx_write(path, "malformed\n"));
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(dlx_decision_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DECISION_UNAVAILABLE");
+        ASSERT(!c.reply.error.mutated);
+        ASSERT(dlx_slurp(path, after, sizeof(after), &n));
+        ASSERT(n == strlen("malformed\n") && memcmp(after, "malformed\n", n) == 0);
+        PASS();
+    }
+_test_next:;
+    if (lock >= 0) dlx_step_lock_release(lock);
+    if (opened) dlx_end(&c);
+    dlx_restore();
+    return failures;
+}
+
+static int dlx_decision_drift_case(void)
+{
+    int failures = 0, lock = -1, status = 0;
+    int ready[2] = {-1, -1}, release[2] = {-1, -1};
+    pid_t child = -1;
+    struct dlx_scope_case t = {0};
+    char land[1400], path[1500], moved[1500], marker;
+    TEST("land: advisory decision refuses a replaced snapshot lock") {
+        ASSERT(dlx_scope_prepare(&t, "decision_drift", NULL));
+        dlx_landdir(land, sizeof(land));
+        lock = dlx_step_lock_take(land);
+        ASSERT(lock >= 0);
+        dlx_step_lock_release(lock); lock = -1;
+        ASSERT(dlx_pick_barrier_open(ready, release));
+        zcl_native_dev_land_test_pick_barrier(ready[1], release[0]);
+        child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            (void)alarm(30);
+            (void)close(ready[0]); (void)close(release[1]);
+            struct dlx_call c;
+            dlx_begin(&c, "decision");
+            bool ok = dlx_decision_run(&c) &&
+                dlx_eq_str(dlx_err_code(&c), "DECISION_UNAVAILABLE") &&
+                !c.reply.error.mutated;
+            dlx_end(&c);
+            _exit(ok ? 0 : 1);
+        }
+        zcl_native_dev_land_test_pick_barrier(-1, -1);
+        (void)close(ready[1]); ready[1] = -1;
+        (void)close(release[0]); release[0] = -1;
+        struct pollfd p = { .fd = ready[0], .events = POLLIN };
+        ASSERT(poll(&p, 1, 15000) == 1 && read(ready[0], &marker, 1) == 1 && marker == 'R');
+        (void)snprintf(path, sizeof(path), "%s/step.lock", land);
+        (void)snprintf(moved, sizeof(moved), "%s/step-old.lock", land);
+        ASSERT(rename(path, moved) == 0);
+        ASSERT(dlx_write(path, ""));
+        ASSERT(write(release[1], "G", 1) == 1);
+        (void)close(release[1]); release[1] = -1;
+        ASSERT(waitpid(child, &status, 0) == child);
+        child = -1;
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        ASSERT(dlx_scope_unchanged(&t));
+        PASS();
+    }
+_test_next:;
+    zcl_native_dev_land_test_pick_barrier(-1, -1);
+    if (lock >= 0) dlx_step_lock_release(lock);
+    for (size_t i = 0; i < 2; ++i) {
+        if (ready[i] >= 0) (void)close(ready[i]);
+        if (release[i] >= 0) (void)close(release[i]);
+    }
+    if (child > 0) (void)waitpid(child, NULL, 0);
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_drive_seq_scope(void)
 {
-    return dlx_scope_refusal_case(685, NULL, "requested_seq=685 blocking_seq=674") +
+    return dlx_decision_queue_case() + dlx_decision_terminal_case() +
+           dlx_decision_unavailable_case() + dlx_decision_drift_case() +
+           dlx_scope_refusal_case(685, NULL, "requested_seq=685 blocking_seq=674") +
            dlx_scope_refusal_case(999, "cancelled", "unknown_seq_999") +
            dlx_scope_refusal_case(685, "cancelled", "row_cancelled") +
            dlx_scope_landed_target() + dlx_scope_requested_head() +

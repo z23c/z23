@@ -10944,6 +10944,45 @@ static bool dl_precheck_load(const struct dl_dirs *d, const char *observed_main,
     free(rows);
 }
 
+/* A decision covers one boundary of a step.  The executor deliberately
+ * checks scope both before and after fence/maintenance work; a snapshot
+ * observer uses the same boundaries without performing those effects. */
+enum dl_dispatch_stage { DL_DISPATCH_SCOPE, DL_DISPATCH_FENCE, DL_DISPATCH_ROW };
+enum dl_dispatch_kind {
+    DL_DISPATCH_CONTINUE, DL_DISPATCH_SCOPE_BLOCKED, DL_DISPATCH_FENCE_ERROR,
+    DL_DISPATCH_FENCE_BLOCKED, DL_DISPATCH_FENCE_DRIVE, DL_DISPATCH_EMPTY,
+    DL_DISPATCH_OUTCOME_ERROR, DL_DISPATCH_REPLAY, DL_DISPATCH_PREPARE,
+    DL_DISPATCH_RESUME
+};
+
+struct dl_dispatch_input {
+    enum dl_dispatch_stage stage;
+    bool scoped, have, inflight, outcome_ok, terminal;
+    long long requested, seq, anchor, replacement;
+    int fence_rc, fence_stage;
+};
+
+static enum dl_dispatch_kind dl_dispatch_fence(const struct dl_dispatch_input *i)
+{
+    if (i->fence_rc < 0) return DL_DISPATCH_FENCE_ERROR;
+    if (i->fence_rc != 1 || i->fence_stage >= 2) return DL_DISPATCH_CONTINUE;
+    if (i->scoped && (i->anchor != i->requested || i->replacement != i->requested))
+        return DL_DISPATCH_FENCE_BLOCKED;
+    return DL_DISPATCH_FENCE_DRIVE;
+}
+
+static enum dl_dispatch_kind dl_dispatch_classify(const struct dl_dispatch_input *i)
+{
+    if (i->stage == DL_DISPATCH_SCOPE)
+        return i->scoped && (!i->requested || !i->have || i->seq != i->requested)
+            ? DL_DISPATCH_SCOPE_BLOCKED : DL_DISPATCH_CONTINUE;
+    if (i->stage == DL_DISPATCH_FENCE) return dl_dispatch_fence(i);
+    if (!i->have) return DL_DISPATCH_EMPTY;
+    if (!i->outcome_ok) return DL_DISPATCH_OUTCOME_ERROR;
+    if (i->terminal) return DL_DISPATCH_REPLAY;
+    return i->inflight ? DL_DISPATCH_RESUME : DL_DISPATCH_PREPARE;
+}
+
 /* Return 1 after a durable terminal observation has been replayed, -1 on
  * malformed history, and 0 when this picked row still needs work. */
 [[maybe_unused]] static int dl_step_terminal_replay(const struct dl_dirs *d,
@@ -10953,13 +10992,17 @@ static bool dl_precheck_load(const struct dl_dirs *d, const char *observed_main,
     struct dl_row prior;
     bool terminal_seen = false;
     long long high_water = 0;
-    if (!dl_scan_outcomes(d, pick, &prior, &terminal_seen, &high_water)) {
+    bool ok = dl_scan_outcomes(d, pick, &prior, &terminal_seen, &high_water);
+    struct dl_dispatch_input input = { .stage = DL_DISPATCH_ROW, .have = true,
+                                      .outcome_ok = ok, .terminal = terminal_seen };
+    enum dl_dispatch_kind kind = dl_dispatch_classify(&input);
+    if (kind == DL_DISPATCH_OUTCOME_ERROR) {
         dl_fail(reply, "QUEUE_READ_FAILED", "slot",
                 "cannot reconcile a terminal outcome",
                 "outcomes.jsonl unreadable or malformed");
         return -1;
     }
-    if (!terminal_seen) return 0;
+    if (kind != DL_DISPATCH_REPLAY) return 0;
     if (dl_commit_or_report(d, &prior, true, reply, prior.state))
         dl_step_reply(reply, &prior, prior.state);
     /* The step that wrote this outcome may have died, or failed to post
@@ -11671,12 +11714,14 @@ static bool dl_step_scope_pick(const struct zcl_command_request *req,
                                 struct zcl_command_reply *reply,
                                 bool have, const struct dl_row *pick)
 {
-    if (!json_get(req->input, "seq"))
-        return true;
     long long seq = 0;
-    if (!dl_seq_in(req, &seq))
+    bool scoped = json_get(req->input, "seq") != NULL;
+    if (scoped && !dl_seq_in(req, &seq))
         return dl_drive_scope_blocked(reply, 0, 0);
-    return have && pick->seq == seq ? true :
+    struct dl_dispatch_input input = { .stage = DL_DISPATCH_SCOPE,
+        .scoped = scoped, .requested = seq, .have = have,
+        .seq = have ? pick->seq : 0 };
+    return dl_dispatch_classify(&input) == DL_DISPATCH_CONTINUE ? true :
            dl_drive_scope_blocked(reply, seq, have ? pick->seq : 0);
 }
 
@@ -11706,13 +11751,19 @@ static bool dl_fence_step(const struct dl_dirs *d, struct zcl_command_reply *rep
     struct dl_fence *f = zcl_malloc(sizeof(*f), "dev.land.fence.step");
     if (!f) { dl_fence_blocked(reply, "FENCE_READ_FAILED", NULL); return true; }
     int rc = dl_fence_read(d, f);
-    bool handled = rc < 0 || (rc == 1 && f->stage < 2);
-    if (rc < 0) dl_fence_blocked(reply, "FENCE_READ_FAILED", NULL);
-    else if (rc == 1 && f->stage < 2 && requested > 0 &&
-             (f->anchor.seq != requested || f->next.seq != requested))
+    struct dl_dispatch_input input = { .stage = DL_DISPATCH_FENCE,
+        .scoped = requested > 0, .requested = requested, .fence_rc = rc,
+        .fence_stage = rc == 1 ? (int)f->stage : 0,
+        .anchor = rc == 1 ? f->anchor.seq : 0,
+        .replacement = rc == 1 ? f->next.seq : 0 };
+    enum dl_dispatch_kind kind = dl_dispatch_classify(&input);
+    bool handled = kind != DL_DISPATCH_CONTINUE;
+    if (kind == DL_DISPATCH_FENCE_ERROR)
+        dl_fence_blocked(reply, "FENCE_READ_FAILED", NULL);
+    else if (kind == DL_DISPATCH_FENCE_BLOCKED)
         (void)dl_drive_scope_blocked(reply, requested,
             f->anchor.seq != requested ? f->anchor.seq : f->next.seq);
-    else if (rc == 1 && f->stage < 2) dl_fence_drive(d, f, reply);
+    else if (kind == DL_DISPATCH_FENCE_DRIVE) dl_fence_drive(d, f, reply);
     free(f);
     return handled;
 }
@@ -11847,7 +11898,9 @@ static void dl_step(const struct zcl_command_request *req,
     }
 #endif
     char observed_main[80] = { 0 };
-    if (have_inflight)
+    struct dl_dispatch_input dispatch = { .stage = DL_DISPATCH_ROW,
+        .have = true, .outcome_ok = true, .inflight = have_inflight };
+    if (dl_dispatch_classify(&dispatch) == DL_DISPATCH_RESUME)
         dl_step_resume(&d, &pick, reply, observed_main);
     else
         dl_prepare(&d, &pick, reply, observed_main);
@@ -11857,6 +11910,153 @@ static void dl_step(const struct zcl_command_request *req,
      * mergeable, not when they reach the head of the queue. */
     dl_step_queue_precheck(req, &d, observed_main, reply);
     dl_unlock(slot);
+#endif
+}
+
+/* A read snapshot uses existing lock files only.  It never takes the
+ * executor's exclusive ownership, and refuses a busy or missing lock. */
+#if !defined(_WIN32)
+static bool dl_snapshot_lock_same(int fd, const char *land, const char *name)
+{
+    char path[4192];
+    struct stat fd_st, path_st;
+    if (snprintf(path, sizeof(path), "%s/%s", land, name) >= (int)sizeof(path))
+        return false;
+    return fstat(fd, &fd_st) == 0 && S_ISREG(fd_st.st_mode) &&
+        fd_st.st_uid == geteuid() && lstat(path, &path_st) == 0 &&
+        fd_st.st_dev == path_st.st_dev && fd_st.st_ino == path_st.st_ino;
+}
+
+static int dl_snapshot_lock(const char *land, const char *name)
+{
+    char path[4192];
+    if (snprintf(path, sizeof(path), "%s/%s", land, name) >= (int)sizeof(path))
+        return -1;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    if (flock(fd, LOCK_SH | LOCK_NB) != 0 ||
+        !dl_snapshot_lock_same(fd, land, name)) {
+        (void)close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static const char *dl_dispatch_name(enum dl_dispatch_kind kind)
+{
+    switch (kind) {
+    case DL_DISPATCH_SCOPE_BLOCKED: return "scope_blocked";
+    case DL_DISPATCH_FENCE_BLOCKED: return "fence_scope_blocked";
+    case DL_DISPATCH_FENCE_DRIVE: return "fence";
+    case DL_DISPATCH_EMPTY: return "empty";
+    case DL_DISPATCH_REPLAY: return "terminal_replay";
+    case DL_DISPATCH_PREPARE: return "prepare";
+    case DL_DISPATCH_RESUME: return "resume";
+    default: return NULL;
+    }
+}
+
+static bool dl_decision_pick(const struct dl_dirs *d, struct dl_row *pick,
+                             bool *have, bool *inflight)
+{
+    char path[4192];
+    struct dl_row *rows = NULL;
+    size_t count = 0;
+    if (snprintf(path, sizeof(path), "%s/queue.jsonl", d->land) >= (int)sizeof(path) ||
+        !dl_load_rows(path, &rows, &count, NULL, 0)) return false;
+    *have = dl_step_pick_row(rows, count, pick, inflight);
+    free(rows);
+    return true;
+}
+
+static enum dl_dispatch_kind dl_decision_snapshot(const struct dl_dirs *d,
+    const struct zcl_command_request *req, struct dl_row *pick, bool *have)
+{
+    struct dl_row prior;
+    struct dl_fence *f = NULL;
+    bool inflight = false, terminal = false;
+    long long requested = 0, high = 0;
+    enum dl_dispatch_kind kind = DL_DISPATCH_OUTCOME_ERROR;
+    bool scoped = json_get(req->input, "seq") != NULL;
+    if (scoped && !dl_seq_in(req, &requested)) return DL_DISPATCH_SCOPE_BLOCKED;
+    if (scoped && !dl_decision_pick(d, pick, have, &inflight)) return kind;
+    struct dl_dispatch_input input = { .stage = DL_DISPATCH_SCOPE,
+        .scoped = scoped, .requested = requested, .have = *have,
+        .seq = *have ? pick->seq : 0 };
+    kind = dl_dispatch_classify(&input);
+    if (kind != DL_DISPATCH_CONTINUE) return kind;
+    f = zcl_malloc(sizeof(*f), "dev.land.decision.fence");
+    if (!f) return DL_DISPATCH_FENCE_ERROR;
+    int rc = dl_fence_read(d, f);
+    input = (struct dl_dispatch_input){ .stage = DL_DISPATCH_FENCE,
+        .scoped = scoped, .requested = requested, .fence_rc = rc,
+        .fence_stage = rc == 1 ? (int)f->stage : 0,
+        .anchor = rc == 1 ? f->anchor.seq : 0,
+        .replacement = rc == 1 ? f->next.seq : 0 };
+    kind = dl_dispatch_classify(&input);
+    free(f);
+    if (kind != DL_DISPATCH_CONTINUE) return kind;
+    if (!scoped && !dl_decision_pick(d, pick, have, &inflight))
+        return DL_DISPATCH_OUTCOME_ERROR;
+    bool ok = !*have || dl_scan_outcomes(d, pick, &prior, &terminal, &high);
+    input = (struct dl_dispatch_input){ .stage = DL_DISPATCH_ROW,
+        .have = *have, .inflight = inflight, .outcome_ok = ok, .terminal = terminal };
+    return dl_dispatch_classify(&input);
+}
+#endif
+
+[[maybe_unused]] static bool dl_decision_encode(struct zcl_command_reply *reply, const char *name,
+                                const struct dl_row *pick, bool have)
+{
+    if (!json_push_kv_str(&reply->data, "dispatch", name) ||
+        !json_push_kv_str(&reply->data, "scope", "observed_next_dispatch_only"))
+        return false;
+    if (!have) return true;
+    return json_push_kv_int(&reply->data, "seq", pick->seq) &&
+        json_push_kv_int(&reply->data, "priority_seq", pick->priority_seq) &&
+        json_push_kv_str(&reply->data, "state", pick->state) &&
+        json_push_kv_str(&reply->data, "phase", pick->phase) &&
+        json_push_kv_str(&reply->data, "tip", pick->tip) &&
+        json_push_kv_str(&reply->data, "base", pick->base) &&
+        json_push_kv_str(&reply->data, "local", pick->local);
+}
+
+static void dl_decision(const struct zcl_command_request *req,
+                        struct zcl_command_reply *reply)
+{
+#if defined(_WIN32)
+    (void)req;
+    dl_fail(reply, "DECISION_UNAVAILABLE", "decision", "snapshot requires POSIX locks", "step.lock");
+#else
+    struct dl_dirs d;
+    struct dl_row pick = {0};
+    bool have = false;
+    int step = -1, queue = -1;
+    long long requested = 0;
+    if (req && req->input && json_get(req->input, "seq") &&
+        !dl_seq_in(req, &requested)) {
+        dl_fail(reply, "BAD_INPUT", "decision", "seq must be a positive integer", "input.seq");
+        return;
+    }
+    if (!req || !req->input || !dl_dirs_resolve(&d, false) ||
+        (step = dl_snapshot_lock(d.land, "step.lock")) < 0 ||
+        (queue = dl_snapshot_lock(d.land, "queue.lock")) < 0) goto unavailable;
+    enum dl_dispatch_kind kind = dl_decision_snapshot(&d, req, &pick, &have);
+#if defined(ZCL_TESTING)
+    if (!dl_test_pick_barrier()) goto unavailable;
+#endif
+    const char *name = dl_dispatch_name(kind);
+    if (!name || !dl_snapshot_lock_same(step, d.land, "step.lock") ||
+        !dl_snapshot_lock_same(queue, d.land, "queue.lock")) goto unavailable;
+    if (!dl_decision_encode(reply, name, &pick, have)) goto unavailable;
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = 0;
+    dl_unlock(queue); dl_unlock(step);
+    return;
+unavailable:
+    dl_unlock(queue); dl_unlock(step);
+    dl_fail(reply, "DECISION_UNAVAILABLE", "decision",
+            "cannot obtain a coherent landing snapshot", "state, lock, fence or outcome unavailable");
 #endif
 }
 
@@ -14480,6 +14680,19 @@ void zcl_native_handle_dev_land_status(const struct zcl_command_request *request
     }
     dl_status(request, reply);
     dl_fence_status(reply);
+}
+
+/* A read leaf must not let an action override reach the mutating handler. */
+void zcl_native_handle_dev_land_decision(const struct zcl_command_request *request,
+                                         struct zcl_command_reply *reply)
+{
+    const char *action = request && request->input ? dl_str(request, "action") : NULL;
+    if (!reply) return;
+    if (action && strcmp(action, "decision") != 0) {
+        dl_fail(reply, "BAD_INPUT", "decision", "decision is read-only", "input.action");
+        return;
+    }
+    dl_decision(request, reply);
 }
 
 /* Narrow in-process entries for tools/command/native_dev_land_remote.c: the

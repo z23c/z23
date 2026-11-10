@@ -2332,6 +2332,22 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_land_status)
 
+ZCL_COMMAND_READY_READ(
+    "dev.land.decision", "dev.land", "",
+    "Observe the next landing dispatch",
+    "Reads one coherent local queue, fence and outcome snapshot using the "
+    "same dispatch classifier as step. The result is advisory, covers only "
+    "the next dispatch, and does not authorize publication.", 65536,
+    "land,decision,queue,dispatch",
+    "zcl.land_decision_input.v1", "zcl.land.v1", "seq", "",
+    "z23-dev dev land decision",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_land_decision)
+
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.step", "dev.land", "",
     "Advance the queue by one serialized beat",
