@@ -1293,12 +1293,19 @@ static bool preflight_run_all_checks(const char *datadir, struct json_value *rep
 
     if (!all_ok) {
         char summary[1024] = {0};
+        char message[1280];
         preflight_failed_summary(summary, sizeof(summary), failed_names, failed_count);
-        fprintf(stderr,
-                "FATAL: -mint-anchor preflight found %zu unmet "
-                "precondition(s) before any datadir mutation: %s — see the "
-                "per-check lines above for the exact why + remedy\n",
-                failed_count, summary);
+        (void)snprintf(message, sizeof(message),
+                       "-mint-anchor preflight found %zu unmet precondition(s) "
+                       "before any datadir mutation: %s",
+                       failed_count, summary);
+        boot_error_report(BOOT_ERROR_FATAL,
+                          "BOOT_MINT_ANCHOR_PREFLIGHT_CHECKS_REFUSED",
+                          "mint.preflight.checks",
+                          message,
+                          NULL, 0,
+                          "stage=unmet_preconditions failed_count=%zu",
+                          failed_count);
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "mint_anchor_preflight failed_checks=%s", summary);
     }
     return all_ok;

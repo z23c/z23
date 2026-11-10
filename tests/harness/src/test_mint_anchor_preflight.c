@@ -109,9 +109,20 @@ static int test_preflight_fresh_datadir_names_all_holes(void)
 
     struct json_value report;
     json_init(&report);
+    boot_error_reset_for_testing();
     bool all_ok = boot_mint_anchor_preflight_run_all(dir, &report);
     unsetenv("ZCL_MINT_PREFLIGHT_LEGACY_BLOCKS_DIR");
     MAP_CHECK("fresh datadir: run_all returns false", !all_ok);
+    char rendered[BOOT_ERROR_RENDER_MAX];
+    memset(rendered, 0, sizeof(rendered));
+    (void)boot_error_last_render(rendered, sizeof(rendered));
+    MAP_CHECK("fresh datadir: typed refusal names stage and cause",
+              boot_error_reported() &&
+              strcmp(boot_error_first_code(),
+                     "BOOT_MINT_ANCHOR_PREFLIGHT_CHECKS_REFUSED") == 0 &&
+              strstr(rendered, "mint.preflight.checks") != NULL &&
+              strstr(rendered, "stage=unmet_preconditions") != NULL &&
+              strstr(rendered, "legacy_block_index_covers_anchor") != NULL);
     MAP_CHECK("fresh datadir: report has all_ok=false",
               json_get(&report, "all_ok") &&
               !json_get_bool(json_get(&report, "all_ok")));
@@ -128,6 +139,7 @@ static int test_preflight_fresh_datadir_names_all_holes(void)
 
     json_free(&report);
     map_cleanup_dir(dir);
+    boot_error_reset_for_testing();
     return failures;
 }
 
@@ -186,9 +198,12 @@ static int test_preflight_passing_datadir_all_ok(void)
     struct json_value report;
     json_init(&report);
     disk_monitor_set_free_bytes_for_test((int64_t)200 << 30);
+    boot_error_reset_for_testing();
     bool all_ok = boot_mint_anchor_preflight_run_all(dir, &report);
     disk_monitor_set_free_bytes_for_test(-1);
     MAP_CHECK("passing datadir: run_all returns true", all_ok);
+    MAP_CHECK("passing datadir: a passing run does not latch",
+              !boot_error_reported());
     const struct json_value *checks = json_get(&report, "checks");
     MAP_CHECK("passing datadir: checks array present", checks != NULL);
     bool every_ok = checks != NULL;
