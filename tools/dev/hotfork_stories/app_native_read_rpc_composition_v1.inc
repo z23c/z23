@@ -23,38 +23,38 @@ char *hotfork_node_rpc_call(const char *method, const char *params)
     snprintf(hf_params, sizeof(hf_params), "%s", params ? params : "<null>");
     return hf_reply ? strdup(hf_reply) : NULL;
 }
-static bool hf_check_1(bool parsed, const struct json_value *value)
+static bool hf_rpc_tokens(bool parsed, const struct json_value *value)
 {
     return parsed && value && value->type == JSON_ARR && json_size(value) == 1
              && strcmp(json_get_str(json_at(value, 0)), "ZCL") == 0;
 }
 
-static bool hf_check_3(const char *body)
+static bool hf_rpc_name_resolve(const char *body)
 {
     return body && strcmp(hf_method, "name_resolve") == 0
              && strcmp(hf_params, "[\"alice\"]") == 0;
 }
 
-static bool hf_check_4(const char *body)
+static bool hf_rpc_name_list(const char *body)
 {
     return body && strcmp(hf_method, "name_list") == 0
              && strcmp(hf_params, "<null>") == 0;
 }
 
-static bool hf_check_5(const char *body, bool parsed, const struct json_value *value)
+static bool hf_rpc_inbox(const char *body, bool parsed, const struct json_value *value)
 {
     return body && strcmp(hf_method, "msg_inbox_index") == 0
              && strcmp(hf_params, "<null>") == 0 && parsed && value
              && value->type == JSON_ARR && json_size(value) == 0;
 }
 
-static bool hf_check_6(const char *body)
+static bool hf_rpc_market_filtered(const char *body)
 {
     return body && strcmp(hf_method, "zmarket_list") == 0
              && strcmp(hf_params, "[\"open\"]") == 0;
 }
 
-static bool hf_check_7(const char *body)
+static bool hf_rpc_market_all(const char *body)
 {
     return body && strcmp(hf_method, "zmarket_list") == 0
              && strcmp(hf_params, "<null>") == 0;
@@ -82,7 +82,7 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     json_init(&doc);
     bool parsed = body && json_read(&doc, body, strlen(body));
     value = parsed ? json_get(&doc, "tokens") : NULL;
-    HF_CHECK(hf_check_1(parsed, value));
+    HF_CHECK(hf_rpc_tokens(parsed, value));
     json_free(&doc);
     free(body);
     hf_reply = "legacy-error";
@@ -94,11 +94,11 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     json_push_kv_str(&args, "name", "alice");
     hf_reply = "{}";
     body = zcl_native_name_resolve_body(&args, &err);
-    HF_CHECK(hf_check_3(body));
+    HF_CHECK(hf_rpc_name_resolve(body));
     free(body);
     json_free(&args);
     body = zcl_native_name_list_body(NULL, &err);
-    HF_CHECK(hf_check_4(body));
+    HF_CHECK(hf_rpc_name_list(body));
     free(body);
     hf_reply = "[]";
     body = zcl_native_msg_inbox_body(NULL, &err);
@@ -107,18 +107,18 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     value = parsed ? json_get(&doc, "messages") : NULL;
     /* The inbox body calls the msg_inbox_index RPC and still wraps a
      * legacy bare-array reply as {"messages":[...]}. */
-    HF_CHECK(hf_check_5(body, parsed, value));
+    HF_CHECK(hf_rpc_inbox(body, parsed, value));
     json_free(&doc);
     free(body);
     json_init(&args);
     json_set_object(&args);
     json_push_kv_str(&args, "profile", "open");
     body = zcl_native_zmarket_list_body(&args, &err);
-    HF_CHECK(hf_check_6(body));
+    HF_CHECK(hf_rpc_market_filtered(body));
     free(body);
     json_free(&args);
     body = zcl_native_zmarket_list_body(NULL, &err);
-    HF_CHECK(hf_check_7(body));
+    HF_CHECK(hf_rpc_market_all(body));
     free(body);
     body = zcl_native_zmarket_status_body(NULL, &err);
     HF_CHECK(body && strcmp(hf_method, "zmarket_status") == 0);

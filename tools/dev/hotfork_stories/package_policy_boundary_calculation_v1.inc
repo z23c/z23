@@ -47,7 +47,7 @@ static bool hf_policy_publish(void)
     return hf_dec(true, NULL, vcs_policy_check_publish(VCS_POLICY_TIER_NEW_USER, 0)) &&
         hf_dec(false, VCS_POLICY_RULE_PUBLISH_FREQUENCY, vcs_policy_check_publish(VCS_POLICY_TIER_NEW_USER, 1));
 }
-static bool hf_policy_check_7(void)
+static bool hf_policy_download_allowance(void)
 {
     return hf_dec(true, NULL,
                     vcs_policy_check_download(
@@ -59,7 +59,7 @@ static bool hf_policy_check_7(void)
                            VCS_POLICY_FREE_WEEKLY_DOWNLOAD_BYTES - 1, 2));
 }
 
-static bool hf_policy_check_8(void)
+static bool hf_policy_concurrent_downloads(void)
 {
     return hf_dec(true, NULL,
                     vcs_policy_check_concurrent_downloads(
@@ -69,7 +69,7 @@ static bool hf_policy_check_8(void)
                            VCS_POLICY_TIER_NEW_USER, 1));
 }
 
-static bool hf_policy_check_9(void)
+static bool hf_policy_pin_allowance(void)
 {
     return hf_dec(false, VCS_POLICY_RULE_PIN_ALLOWANCE,
                     vcs_policy_check_pin(VCS_POLICY_TIER_NEW_USER, 0, 0))
@@ -78,7 +78,7 @@ static bool hf_policy_check_9(void)
                                             0, 1));
 }
 
-static bool hf_policy_check_10(void)
+static bool hf_policy_announce_rate(void)
 {
     return hf_dec(true, NULL,
                     vcs_policy_check_announce(VCS_POLICY_TIER_NEW_USER, 63))
@@ -86,7 +86,7 @@ static bool hf_policy_check_10(void)
                        vcs_policy_check_announce(VCS_POLICY_TIER_NEW_USER, 64));
 }
 
-static bool hf_policy_check_11(void)
+static bool hf_policy_request_burst(void)
 {
     return hf_dec(true, NULL,
                vcs_policy_check_request_burst(VCS_POLICY_TIER_NEW_USER, 511))
@@ -100,14 +100,14 @@ static bool hf_policy_check_11(void)
                       VCS_POLICY_TIER_VERIFIED_SEEDER, 2048));
 }
 
-static bool hf_policy_check_12(void)
+static bool hf_policy_queue_priority(void)
 {
     return vcs_policy_queue_priority(VCS_POLICY_TIER_NEW_USER) == 0
         && vcs_policy_queue_priority(VCS_POLICY_TIER_EARNED_CONTRIBUTOR) == 1
         && vcs_policy_queue_priority(VCS_POLICY_TIER_VERIFIED_SEEDER) == 2;
 }
 
-static bool hf_policy_check_13(void)
+static bool hf_policy_verifier(void)
 {
     return hf_dec(false, VCS_POLICY_RULE_SELF_VERIFICATION,
                vcs_policy_check_verifier(2000, true, true))
@@ -146,13 +146,13 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     HF_CHECK(hf_policy_tiers());
     HF_CHECK(hf_policy_week());
     HF_CHECK(hf_policy_publish());
-    HF_CHECK(hf_policy_check_7());
-    HF_CHECK(hf_policy_check_8());
-    HF_CHECK(hf_policy_check_9());
-    HF_CHECK(hf_policy_check_10());
-    HF_CHECK(hf_policy_check_11());
-    HF_CHECK(hf_policy_check_12());
-    HF_CHECK(hf_policy_check_13());
+    HF_CHECK(hf_policy_download_allowance());
+    HF_CHECK(hf_policy_concurrent_downloads());
+    HF_CHECK(hf_policy_pin_allowance());
+    HF_CHECK(hf_policy_announce_rate());
+    HF_CHECK(hf_policy_request_burst());
+    HF_CHECK(hf_policy_queue_priority());
+    HF_CHECK(hf_policy_verifier());
     static const char *const nc[] = {
         "announcement-bytes", "unverified-bytes", "duplicate-request-replay",
         "unrequested-bytes",  "invalid-chunk",    "incomplete-staging"};

@@ -22,7 +22,7 @@
 #undef zcl_hotswap_service_release
 #undef zcl_hotswap_service_acquire
 #include "../../../contexts/market/services/src/shop_status_view_service.c"
-static bool hf_check_1(void)
+static bool hf_shop_wallet_states(void)
 {
     return shop_status_wallet(SHOP_WALLET_ABSENT) == SHOP_STATUS_WALLET_ABSENT
              && shop_status_wallet(SHOP_WALLET_PLAINTEXT)
@@ -49,7 +49,7 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
         else \
             failed |= 1u << n; \
     } while (0)
-    HF_CHECK(hf_check_1());
+    HF_CHECK(hf_shop_wallet_states());
     struct shop_snapshot closed = {.wallet = SHOP_WALLET_ABSENT,
                                    .schema_version = -1,
                                    .product_count = -1};

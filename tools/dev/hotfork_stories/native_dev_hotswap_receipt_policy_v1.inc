@@ -13,7 +13,7 @@
 #define _GNU_SOURCE
 #include "hotswap/hotfork_capsule.h"
 #elif ZCL_HOTFORK_STORY_PHASE == 2
-static bool hf_check_6(const struct json_value *schema, const struct json_value *generation)
+static bool hf_receipt_schema_generation(const struct json_value *schema, const struct json_value *generation)
 {
     return schema
              && strcmp(json_get_str(schema), "zcl.hotswap_activate.v2") == 0
@@ -55,7 +55,7 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
              && reply.exit_code == ZCL_COMMAND_EXIT_OK);
     const struct json_value *schema = json_get(&reply.data, "schema");
     const struct json_value *generation = json_get(&reply.data, "generation");
-    HF_CHECK(hf_check_6(schema, generation));
+    HF_CHECK(hf_receipt_schema_generation(schema, generation));
     zcl_command_reply_free(&reply);
     zcl_command_reply_init(&reply, "zcl.hotswap_activate.v2");
     memset(&module, 0, sizeof(module));

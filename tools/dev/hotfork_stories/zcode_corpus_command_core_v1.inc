@@ -21,7 +21,7 @@
 #undef zcl_hotswap_service_generation
 #undef zcl_hotswap_service_release
 #undef zcl_hotswap_service_acquire
-static bool hf_check_4(const struct vcs_zcode_c23_corpus_shard_v1 *shard, struct corpus_shard_metrics *metrics)
+static bool hf_corpus_shard_metrics(const struct vcs_zcode_c23_corpus_shard_v1 *shard, struct corpus_shard_metrics *metrics)
 {
     return corpus_shard_metrics_collect(shard, metrics)
              && metrics->counted_entries == 1 && metrics->durable_entries == 1
@@ -76,7 +76,7 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     struct vcs_zcode_c23_corpus_shard_v1 shard = {.entries = entries,
                                                   .entry_count = 2};
     struct corpus_shard_metrics metrics;
-    HF_CHECK(hf_check_4(&shard, &metrics));
+    HF_CHECK(hf_corpus_shard_metrics(&shard, &metrics));
     entries[1].production_loc = UINT64_MAX;
     HF_CHECK(!corpus_shard_metrics_collect(&shard, &metrics)
              && !corpus_shard_metrics_collect(NULL, &metrics));

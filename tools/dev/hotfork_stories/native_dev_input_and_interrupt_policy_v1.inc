@@ -14,14 +14,14 @@
 #include "hotswap/hotfork_capsule.h"
 #include "command/native_dev_input_policy.h"
 #elif ZCL_HOTFORK_STORY_PHASE == 2
-static bool hf_check_4(bool parsed, struct json_value *doc, int64_t *cursor)
+static bool hf_input_cursor_explicit(bool parsed, struct json_value *doc, int64_t *cursor)
 {
     return parsed
              && zcl_dev_drive_input_int(doc, "after_epoch", 3, cursor)
              && *cursor == 7;
 }
 
-static bool hf_check_5(bool parsed, struct json_value *doc, int64_t *cursor)
+static bool hf_input_cursor_default(bool parsed, struct json_value *doc, int64_t *cursor)
 {
     return parsed
              && zcl_dev_drive_input_int(doc, "after_epoch", 3, cursor)
@@ -73,12 +73,12 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     const char cursor_json[] = "{\"after_epoch\":7}";
     json_init(&doc);
     parsed = json_read(&doc, cursor_json, strlen(cursor_json));
-    HF_CHECK(hf_check_4(parsed, &doc, &cursor));
+    HF_CHECK(hf_input_cursor_explicit(parsed, &doc, &cursor));
     json_free(&doc);
     const char empty_json[] = "{}";
     json_init(&doc);
     parsed = json_read(&doc, empty_json, strlen(empty_json));
-    HF_CHECK(hf_check_5(parsed, &doc, &cursor));
+    HF_CHECK(hf_input_cursor_default(parsed, &doc, &cursor));
     json_free(&doc);
     const char bad_cursor[] = "{\"after_epoch\":\"7\"}";
     json_init(&doc);
