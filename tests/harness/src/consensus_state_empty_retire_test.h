@@ -53,6 +53,22 @@ static bool csi_populated_unseeded_empty(sqlite3 *db)
     return ok;
 }
 
+static bool csi_populated_original_row(sqlite3_stmt *s, struct sha3_256_ctx *hash)
+{
+    if (sqlite3_column_type(s, 0) != SQLITE_BLOB || sqlite3_column_bytes(s, 0) != 32 ||
+        sqlite3_column_type(s, 1) != SQLITE_BLOB || sqlite3_column_type(s, 2) != SQLITE_BLOB ||
+        sqlite3_column_bytes(s, 2) != 32 || sqlite3_column_type(s, 3) != SQLITE_INTEGER ||
+        sqlite3_column_type(s, 4) != SQLITE_INTEGER) return false;
+    for (int i = 0; i < 6; ++i) {
+        int type = sqlite3_column_type(s, i), len = sqlite3_column_bytes(s, i);
+        const void *value = sqlite3_column_blob(s, i);
+        if (len && !value) return false;
+        sha3_256_write(hash, (const uint8_t *)&type, sizeof(type));
+        sha3_256_write(hash, (const uint8_t *)&len, sizeof(len));
+        if (len) sha3_256_write(hash, value, (size_t)len);
+    }
+    return true;
+}
 static bool csi_populated_original_transactions(sqlite3 *db, uint8_t out[32])
 {
     struct transaction tx[2];
@@ -71,18 +87,7 @@ static bool csi_populated_original_transactions(sqlite3 *db, uint8_t out[32])
     int rc = SQLITE_ERROR, rows = 0;
     while (ok && (rc = sqlite3_step(s)) == SQLITE_ROW) {
         ++rows;
-        if (sqlite3_column_type(s, 0) != SQLITE_BLOB || sqlite3_column_bytes(s, 0) != 32 ||
-            sqlite3_column_type(s, 1) != SQLITE_BLOB || sqlite3_column_type(s, 2) != SQLITE_BLOB ||
-            sqlite3_column_bytes(s, 2) != 32 || sqlite3_column_type(s, 3) != SQLITE_INTEGER ||
-            sqlite3_column_type(s, 4) != SQLITE_INTEGER) { ok = false; break; }
-        for (int i = 0; i < 6; ++i) {
-            int type = sqlite3_column_type(s, i), len = sqlite3_column_bytes(s, i);
-            const void *value = sqlite3_column_blob(s, i);
-            if (len && !value) { ok = false; break; }
-            sha3_256_write(&hash, (const uint8_t *)&type, sizeof(type));
-            sha3_256_write(&hash, (const uint8_t *)&len, sizeof(len));
-            if (len) sha3_256_write(&hash, value, (size_t)len);
-        }
+        ok = csi_populated_original_row(s, &hash);
     }
     ok = ok && rc == SQLITE_DONE && rows == 2;
     if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
@@ -160,6 +165,32 @@ static bool csi_empty_observation_equal(const struct boot_bound_bundle_observati
         !memcmp(a->snapshot_sha3, b->snapshot_sha3, 32) && !memcmp(a->endpoint_hash, b->endpoint_hash, 32) &&
         !memcmp(a->history_manifest_root, b->history_manifest_root, 32);
 }
+static bool csi_empty_refused_lane(const struct app_context *ctx)
+{
+    return ctx->operator_lane == ZCL_OPERATOR_LANE_UNKNOWN &&
+        wallet_at_rest_boot_decision(wallet_at_rest_creation_policy(), ctx->mint_anchor, ctx->operator_lane) ==
+            WALLET_BOOT_REFUSE;
+}
+static bool csi_empty_boot_args_ok(int a, size_t acap, int b, size_t bcap)
+{
+    return a >= 0 && b >= 0 && (size_t)a < acap && (size_t)b < bcap;
+}
+static bool csi_empty_boot_options(int argc, char **argv, struct app_context *ctx, bool *metrics)
+{
+    return args_parse_node_options(argc, argv, ctx, metrics) == -1 &&
+        !unsetenv("ZCL_DEPLOY_ALLOW_CANONICAL") && csi_test_connect_only(ctx) &&
+        csi_empty_refused_lane(ctx);
+}
+static bool csi_empty_install_pending(const struct csi_real_paths *p,
+    struct wallet_sqlite *ws, bool started, const struct boot_bound_bundle_observation *expected_request)
+{
+    struct wallet_cutover_binding current = {0}; struct boot_bound_bundle_observation observation = {0};
+    return !started && boot_old_cutover_restart_pending() && csi_real_bound_witness.fence && csi_real_bound_witness.committed &&
+        wallet_sqlite_cutover_read(ws, &current) == WALLET_CUTOVER_PENDING &&
+        wallet_cutover_binding_equal(&current, &csi_real_bound_witness.binding) &&
+        boot_install_bound_bundle_read(p->data, &observation) == BOOT_BOUND_READ_READY &&
+        (!expected_request || csi_empty_observation_equal(&observation, expected_request));
+}
 static void csi_empty_retire_install_boot(const struct csi_real_paths *p, int fd,
     bool crash_at_fence, const struct csi_real_bound_witness *previous,
     const struct boot_bound_bundle_observation *expected_request)
@@ -167,18 +198,14 @@ static void csi_empty_retire_install_boot(const struct csi_real_paths *p, int fd
     char datadir[PATH_MAX + 32], params[PATH_MAX + 32];
     int a = snprintf(datadir, sizeof(datadir), "-datadir=%s", p->data);
     int b = snprintf(params, sizeof(params), "-paramsdir=%s", p->params);
-    if (a < 0 || b < 0 || (size_t)a >= sizeof(datadir) || (size_t)b >= sizeof(params)) _exit(75);
+    if (!csi_empty_boot_args_ok(a, sizeof(datadir), b, sizeof(params))) _exit(75);
     char *argv[] = {"z23", datadir, params, "-operator-lane=unknown", "-nolegacyimport",
         "-nolegacyutxoimport", "-no-tor", "-private-listeners", "-observation=0",
         "-connect=127.0.0.1:1", "-port=28033", "-rpcport=28232", "-httpsport=28443", "-fsport=28034"};
     int argc = (int)(sizeof(argv) / sizeof(argv[0])); struct app_context ctx;
     app_context_defaults(&ctx); ctx.datadir = p->data; ctx.params_dir = p->params;
     ParseParameters(argc, (const char *const *)argv); bool metrics = false;
-    if (args_parse_node_options(argc, argv, &ctx, &metrics) != -1 || unsetenv("ZCL_DEPLOY_ALLOW_CANONICAL") ||
-        !csi_test_connect_only(&ctx)) _exit(76);
-    if (ctx.operator_lane != ZCL_OPERATOR_LANE_UNKNOWN ||
-        wallet_at_rest_boot_decision(wallet_at_rest_creation_policy(), ctx.mint_anchor, ctx.operator_lane) !=
-            WALLET_BOOT_REFUSE) _exit(76);
+    if (!csi_empty_boot_options(argc, argv, &ctx, &metrics)) _exit(76);
     struct node_db *node = NULL; struct wallet_sqlite *ws = NULL;
     struct wallet *wallet = NULL; struct main_state *main = NULL;
     boot_wallet_cutover_test_slots(&node, &ws, &wallet, &main);
@@ -191,12 +218,7 @@ static void csi_empty_retire_install_boot(const struct csi_real_paths *p, int fd
     consensus_state_install_test_after_commit(csi_real_bound_commit, &hook);
     boot_stage_reset_for_testing(); ecc_verify_destroy(); ecc_stop();
     bool started = app_init(&ctx);
-    struct wallet_cutover_binding current = {0}; struct boot_bound_bundle_observation observation = {0};
-    bool pending = !started && boot_old_cutover_restart_pending() && csi_real_bound_witness.fence && csi_real_bound_witness.committed &&
-        wallet_sqlite_cutover_read(ws, &current) == WALLET_CUTOVER_PENDING &&
-        wallet_cutover_binding_equal(&current, &csi_real_bound_witness.binding) &&
-        boot_install_bound_bundle_read(p->data, &observation) == BOOT_BOUND_READ_READY &&
-        (!expected_request || csi_empty_observation_equal(&observation, expected_request));
+    bool pending = csi_empty_install_pending(p, ws, started, expected_request);
     if (!pending || !boot_old_cutover_restart_cleanup() || write(fd, &csi_real_bound_witness, sizeof(csi_real_bound_witness)) !=
         (ssize_t)sizeof(csi_real_bound_witness)) _exit(77);
     _exit(0);
@@ -216,6 +238,18 @@ static bool csi_empty_retire_install(const struct csi_real_paths *p, struct csi_
     return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0 && n == (ssize_t)sizeof(*w);
 }
 
+static bool csi_empty_old_fence_wait(pid_t child, int fd, struct csi_real_bound_witness *w)
+{
+    bool got = false;
+    struct pollfd pfd = {.fd = fd, .events = POLLIN};
+    for (int i = 0; child > 0 && i < 30; ++i) {
+        int ready = poll(&pfd, 1, 60000);
+        if (ready > 0) { got = read(fd, w, sizeof(*w)) == (ssize_t)sizeof(*w); break; }
+        if (ready < 0 && errno != EINTR) break;
+        fprintf(stderr, "real OLD retry: awaiting durable fence\n");
+    }
+    return got;
+}
 static bool csi_empty_old_fence_kill(const struct csi_real_paths *p, struct csi_real_bound_witness *w)
 {
     int fds[2]; if (pipe(fds)) return false;
@@ -224,14 +258,7 @@ static bool csi_empty_old_fence_kill(const struct csi_real_paths *p, struct csi_
         if (!os_proc_bind_parent_death(SIGKILL, parent)) _exit(84);
         close(fds[0]); csi_empty_retire_install_boot(p, fds[1], true, NULL, NULL);
     }
-    close(fds[1]); bool got = false;
-    struct pollfd pfd = {.fd = fds[0], .events = POLLIN};
-    for (int i = 0; child > 0 && i < 30; ++i) {
-        int ready = poll(&pfd, 1, 60000);
-        if (ready > 0) { got = read(fds[0], w, sizeof(*w)) == (ssize_t)sizeof(*w); break; }
-        if (ready < 0 && errno != EINTR) break;
-        fprintf(stderr, "real OLD retry: awaiting durable fence\n");
-    }
+    close(fds[1]); bool got = csi_empty_old_fence_wait(child, fds[0], w);
     close(fds[0]);
     bool killed = child > 0 && kill(child, SIGKILL) == 0;
     int status = 0;
@@ -242,16 +269,21 @@ static bool csi_empty_old_fence_kill(const struct csi_real_paths *p, struct csi_
     return killed && reaped == child && WIFSIGNALED(status) &&
         WTERMSIG(status) == SIGKILL && got && w->fence && !w->committed;
 }
-static bool csi_empty_old_retry(const struct csi_real_paths *p, struct csi_real_bound_witness *w)
+static bool csi_empty_old_retry_request(const struct csi_real_paths *p,
+    struct csi_real_bound_witness *w, struct boot_bound_bundle_observation *request)
 {
-    struct boot_bound_bundle_observation request = {0};
-    if (boot_install_bound_bundle_read(p->data, &request) != BOOT_BOUND_READ_READY ||
+    if (boot_install_bound_bundle_read(p->data, request) != BOOT_BOUND_READ_READY ||
         !csi_empty_old_fence_kill(p, w)) return false;
     struct boot_bound_bundle_observation after = {0};
     if (boot_install_bound_bundle_read(p->data, &after) != BOOT_BOUND_READ_READY ||
-        request.attempts != 0 || after.attempts != 1) return false;
-    request.attempts = after.attempts;
-    if (!csi_empty_observation_equal(&request, &after)) return false;
+        request->attempts != 0 || after.attempts != 1) return false;
+    request->attempts = after.attempts;
+    return csi_empty_observation_equal(request, &after);
+}
+static bool csi_empty_old_retry(const struct csi_real_paths *p, struct csi_real_bound_witness *w)
+{
+    struct boot_bound_bundle_observation request = {0};
+    if (!csi_empty_old_retry_request(p, w, &request)) return false;
     int fds[2]; if (pipe(fds)) return false;
     uint64_t parent = (uint64_t)getpid(); pid_t child = fork();
     if (!child) {
@@ -269,12 +301,17 @@ static bool csi_empty_old_retry(const struct csi_real_paths *p, struct csi_real_
     return ok;
 }
 
+static bool csi_empty_private_dir(const char *source)
+{
+    struct stat st;
+    return source && !lstat(source, &st) && S_ISDIR(st.st_mode) &&
+        st.st_uid == geteuid() && !(st.st_mode & 077);
+}
 /* Input is a quiescent, private public-chain snapshot with empty WAL files. */
 static bool csi_empty_retire_copy_chain(const char *source, const char *destination)
 {
     struct stat st;
-    if (!source || lstat(source, &st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077))
-        return false;
+    if (!csi_empty_private_dir(source)) return false;
     const char *files[] = {"consensus.db"};
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
         char from[PATH_MAX], to[PATH_MAX], wal[PATH_MAX];
@@ -342,6 +379,57 @@ static void csi_empty_replace_at_retire(const char *path)
 {
     csi_empty_replaced = rename(csi_empty_replacement_path, path) == 0;
 }
+static bool csi_empty_replacement_matches(const struct boot_bound_bundle_observation *a,
+                                           const struct boot_bound_bundle_observation *b)
+{
+    return a->attempts == b->attempts + 1 && a->endpoint_height == b->endpoint_height &&
+        !strcmp(a->bundle_path, b->bundle_path) && !strcmp(a->private_history_path, b->private_history_path) &&
+        !memcmp(a->snapshot_sha3, b->snapshot_sha3, 32) && !memcmp(a->endpoint_hash, b->endpoint_hash, 32) &&
+        !memcmp(a->history_manifest_root, b->history_manifest_root, 32);
+}
+static bool csi_empty_after_matches(const struct boot_bound_bundle_observation *a,
+                                    const struct boot_bound_bundle_observation *b)
+{
+    return a->attempts == b->attempts && !strcmp(a->bundle_path, b->bundle_path) &&
+        !strcmp(a->private_history_path, b->private_history_path) &&
+        !memcmp(a->snapshot_sha3, b->snapshot_sha3, 32) && !memcmp(a->endpoint_hash, b->endpoint_hash, 32) &&
+        !memcmp(a->history_manifest_root, b->history_manifest_root, 32) && a->endpoint_height == b->endpoint_height;
+}
+static void csi_empty_replacement_check(const struct csi_real_paths *p,
+    const struct wallet_cutover_binding *expected, const struct boot_bound_bundle_observation *original,
+    bool started, struct node_db *node, struct wallet_sqlite *ws, struct wallet *wallet, struct main_state *main)
+{
+    struct wallet_cutover_binding done = {0}; struct boot_bound_bundle_observation replacement = {0}, after = {0};
+    int fd = open(p->data, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    bool ok = !started && csi_empty_replaced && fd >= 0 &&
+        wallet_sqlite_cutover_observe_completed(ws, &done) == WALLET_CUTOVER_OBS_FOUND &&
+        wallet_cutover_binding_equal(expected, &done) &&
+        boot_install_bound_bundle_read(p->data, &replacement) == BOOT_BOUND_READ_READY &&
+        csi_empty_replacement_matches(&replacement, original) &&
+        boot_bound_completed_retire(ws, node, wallet, main, p->data, fd, expected, original) ==
+            BOOT_BOUND_COMPLETION_ERROR &&
+        boot_install_bound_bundle_read(p->data, &after) == BOOT_BOUND_READ_READY &&
+        csi_empty_after_matches(&after, &replacement);
+    if (fd >= 0 && close(fd)) ok = false;
+    if (!ok) fprintf(stderr, "fixture diagnostic: replacement child started=%d hook=%d fd=%d\n",
+                     started, csi_empty_replaced, fd);
+    _exit(ok ? 0 : 80);
+}
+
+static bool csi_empty_scan_equal(bool scan_read, enum wallet_height_encoding encoding,
+    int scan, int reference, enum wallet_cutover_observation_status observed,
+    const struct wallet_cutover_binding *completed)
+{
+    return scan_read && encoding == WALLET_HEIGHT_V2 && scan == reference &&
+        observed == WALLET_CUTOVER_OBS_FOUND && scan >= completed->target_height;
+}
+static bool csi_empty_completion_ok(enum wallet_readiness_state readiness, bool binding_equal,
+    enum boot_bound_read_result request, enum wallet_scan_state_status scan_status,
+    bool scan_equal, bool identity_equal)
+{
+    return readiness == WALLET_READINESS_READY && binding_equal && request == BOOT_BOUND_READ_ABSENT &&
+        scan_status == WALLET_SCAN_STATE_OK && scan_equal && identity_equal;
+}
 static void csi_empty_retire_boot(const struct csi_real_paths *p,
     const struct wallet_cutover_binding *expected, const uint8_t before[32],
     const struct boot_bound_bundle_observation *original)
@@ -349,18 +437,14 @@ static void csi_empty_retire_boot(const struct csi_real_paths *p,
     char datadir[PATH_MAX + 32], params[PATH_MAX + 32];
     int a = snprintf(datadir, sizeof(datadir), "-datadir=%s", p->data);
     int b = snprintf(params, sizeof(params), "-paramsdir=%s", p->params);
-    if (a < 0 || b < 0 || (size_t)a >= sizeof(datadir) || (size_t)b >= sizeof(params)) _exit(70);
+    if (!csi_empty_boot_args_ok(a, sizeof(datadir), b, sizeof(params))) _exit(70);
     char *argv[] = {"z23", datadir, params, "-operator-lane=unknown", "-nolegacyimport",
         "-nolegacyutxoimport", "-no-tor", "-private-listeners", "-observation=0",
         "-connect=127.0.0.1:1", "-port=28033", "-rpcport=28232", "-httpsport=28443", "-fsport=28034"};
     int argc = (int)(sizeof(argv) / sizeof(argv[0])); struct app_context ctx;
     app_context_defaults(&ctx); ctx.datadir = p->data; ctx.params_dir = p->params;
     ParseParameters(argc, (const char *const *)argv); bool metrics = false;
-    if (args_parse_node_options(argc, argv, &ctx, &metrics) != -1 || unsetenv("ZCL_DEPLOY_ALLOW_CANONICAL") ||
-        !csi_test_connect_only(&ctx)) _exit(71);
-    if (ctx.operator_lane != ZCL_OPERATOR_LANE_UNKNOWN ||
-        wallet_at_rest_boot_decision(wallet_at_rest_creation_policy(), ctx.mint_anchor, ctx.operator_lane) !=
-            WALLET_BOOT_REFUSE) _exit(71);
+    if (!csi_empty_boot_options(argc, argv, &ctx, &metrics)) _exit(71);
     boot_stage_reset_for_testing(); ecc_verify_destroy(); ecc_stop();
     if (original) {
         csi_empty_replaced = false;
@@ -372,35 +456,7 @@ static void csi_empty_retire_boot(const struct csi_real_paths *p,
     struct node_db *node = NULL; struct wallet_sqlite *ws = NULL;
     struct wallet *wallet = NULL; struct main_state *main = NULL;
     boot_wallet_cutover_test_slots(&node, &ws, &wallet, &main);
-    if (original) {
-        struct wallet_cutover_binding done = {0}; struct boot_bound_bundle_observation replacement = {0}, after = {0};
-        int fd = open(p->data, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        bool ok = !started && csi_empty_replaced && fd >= 0 &&
-            wallet_sqlite_cutover_observe_completed(ws, &done) == WALLET_CUTOVER_OBS_FOUND &&
-            wallet_cutover_binding_equal(expected, &done) &&
-            boot_install_bound_bundle_read(p->data, &replacement) == BOOT_BOUND_READ_READY &&
-            replacement.attempts == original->attempts + 1 &&
-            replacement.endpoint_height == original->endpoint_height &&
-            !strcmp(replacement.bundle_path, original->bundle_path) &&
-            !strcmp(replacement.private_history_path, original->private_history_path) &&
-            !memcmp(replacement.snapshot_sha3, original->snapshot_sha3, 32) &&
-            !memcmp(replacement.endpoint_hash, original->endpoint_hash, 32) &&
-            !memcmp(replacement.history_manifest_root, original->history_manifest_root, 32) &&
-            boot_bound_completed_retire(ws, node, wallet, main, p->data, fd, expected, original) ==
-                BOOT_BOUND_COMPLETION_ERROR &&
-            boot_install_bound_bundle_read(p->data, &after) == BOOT_BOUND_READ_READY &&
-            after.attempts == replacement.attempts &&
-            !strcmp(after.bundle_path, replacement.bundle_path) &&
-            !strcmp(after.private_history_path, replacement.private_history_path) &&
-            !memcmp(after.snapshot_sha3, replacement.snapshot_sha3, 32) &&
-            !memcmp(after.endpoint_hash, replacement.endpoint_hash, 32) &&
-            !memcmp(after.history_manifest_root, replacement.history_manifest_root, 32) &&
-            after.endpoint_height == replacement.endpoint_height;
-        if (fd >= 0 && close(fd)) ok = false;
-        if (!ok) fprintf(stderr, "fixture diagnostic: replacement child started=%d hook=%d fd=%d\n",
-                         started, csi_empty_replaced, fd);
-        _exit(ok ? 0 : 80);
-    }
+    if (original) csi_empty_replacement_check(p, expected, original, started, node, ws, wallet, main);
     struct wallet_cutover_binding completed = {0}; struct boot_bound_bundle_observation obs = {0};
     uint8_t after[32]; int scan = -1, reference = -1;
     enum wallet_readiness_state readiness = wallet_readiness_get(wallet).state;
@@ -410,12 +466,10 @@ static void csi_empty_retire_boot(const struct csi_real_paths *p,
     enum wallet_scan_state_status scan_status = wallet_sqlite_validate_scan_state(ws);
     bool scan_read = wallet_sqlite_read_scan_height(ws, &scan);
     enum wallet_height_encoding encoding = wallet_sqlite_height_encoding(ws, &reference);
-    bool scan_equal = scan_read && encoding == WALLET_HEIGHT_V2 && scan == reference &&
-        observed == WALLET_CUTOVER_OBS_FOUND && scan >= completed.target_height;
+    bool scan_equal = csi_empty_scan_equal(scan_read, encoding, scan, reference, observed, &completed);
     bool identity_read = csi_empty_wallet_identity(node->db, after);
     bool identity_equal = identity_read && !memcmp(before, after, 32);
-    bool ok = readiness == WALLET_READINESS_READY && binding_equal && request == BOOT_BOUND_READ_ABSENT &&
-        scan_status == WALLET_SCAN_STATE_OK && scan_equal && identity_equal;
+    bool ok = csi_empty_completion_ok(readiness, binding_equal, request, scan_status, scan_equal, identity_equal);
     if (!ok) fprintf(stderr, "empty completion: readiness=%d completed=%d binding_equal=%d request=%d "
         "scan_status=%d scan_read=%d encoding=%d scan=%d reference=%d scan_equal=%d identity_read=%d identity_equal=%d\n",
         (int)readiness, (int)observed, binding_equal, (int)request, (int)scan_status, scan_read,
@@ -443,16 +497,22 @@ static bool csi_empty_retire_restart(const struct csi_real_paths *p,
     return ok;
 }
 
+static bool csi_empty_replacement_prepare(const struct csi_real_paths *p,
+                                          struct boot_bound_bundle_observation *original)
+{
+    char request_path[PATH_MAX];
+    return csi_real_path(request_path, sizeof(request_path), p->data, "install_bundle_request") &&
+        csi_real_path(csi_empty_replacement_path, sizeof(csi_empty_replacement_path), p->root, "replacement-request") &&
+        boot_install_bound_bundle_read(p->data, original) == BOOT_BOUND_READ_READY &&
+        boot_install_bound_bundle_test_rewrite(p->data, original->attempts + 1) &&
+        csi_real_copy(request_path, csi_empty_replacement_path) &&
+        boot_install_bound_bundle_test_rewrite(p->data, original->attempts);
+}
 static bool csi_empty_retire_replaced(const struct csi_real_paths *p,
     const struct wallet_cutover_binding *binding, const uint8_t before[32])
 {
-    char request_path[PATH_MAX]; struct boot_bound_bundle_observation original = {0};
-    if (!csi_real_path(request_path, sizeof(request_path), p->data, "install_bundle_request") ||
-        !csi_real_path(csi_empty_replacement_path, sizeof(csi_empty_replacement_path), p->root, "replacement-request") ||
-        boot_install_bound_bundle_read(p->data, &original) != BOOT_BOUND_READ_READY ||
-        !boot_install_bound_bundle_test_rewrite(p->data, original.attempts + 1) ||
-        !csi_real_copy(request_path, csi_empty_replacement_path) ||
-        !boot_install_bound_bundle_test_rewrite(p->data, original.attempts)) return false;
+    struct boot_bound_bundle_observation original = {0};
+    if (!csi_empty_replacement_prepare(p, &original)) return false;
     uint64_t parent = (uint64_t)getpid(); pid_t child = fork();
     if (!child) {
         if (!os_proc_bind_parent_death(SIGKILL, parent)) _exit(81);
@@ -478,21 +538,32 @@ static bool csi_retained_copy_file(const char *src, const char *dst, const char 
         before.st_size == after.st_size && before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
         before.st_mtim.tv_nsec == after.st_mtim.tv_nsec;
 }
-static bool csi_retained_bundle_copy(const char *src, const char *dst, const char *name)
+static bool csi_retained_bundle_source(const char *src, const char *dst, const char *name,
+                                       const char *from, mode_t *mode)
 {
-    char from[PATH_MAX], to[PATH_MAX]; struct stat original, after, opened, named;
-    if (!csi_real_path(from, sizeof(from), src, name) || !csi_real_path(to, sizeof(to), dst, name) ||
-        lstat(from, &original) || !S_ISREG(original.st_mode) || original.st_uid != geteuid()) return false;
-    mode_t mode = original.st_mode & 07777;
-    if ((mode != 0400 && mode != 0600) || !csi_retained_copy_file(src, dst, name, true) ||
-        lstat(from, &after) || !S_ISREG(after.st_mode) || original.st_dev != after.st_dev ||
-        original.st_ino != after.st_ino || (after.st_mode & 07777) != mode) return false;
-    int fd = open(to, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return false;
-    bool ok = fchmod(fd, mode) == 0 && fsync(fd) == 0 && fstat(fd, &opened) == 0 &&
+    struct stat original, after;
+    if (lstat(from, &original) || !S_ISREG(original.st_mode) || original.st_uid != geteuid()) return false;
+    *mode = original.st_mode & 07777;
+    return (*mode == 0400 || *mode == 0600) && csi_retained_copy_file(src, dst, name, true) &&
+        !lstat(from, &after) && S_ISREG(after.st_mode) && original.st_dev == after.st_dev &&
+        original.st_ino == after.st_ino && (after.st_mode & 07777) == *mode;
+}
+static bool csi_retained_bundle_target(int fd, const char *to, mode_t mode)
+{
+    struct stat opened, named;
+    return fchmod(fd, mode) == 0 && fsync(fd) == 0 && fstat(fd, &opened) == 0 &&
         S_ISREG(opened.st_mode) && opened.st_uid == geteuid() && opened.st_nlink == 1 &&
         (opened.st_mode & 07777) == mode && lstat(to, &named) == 0 && S_ISREG(named.st_mode) &&
         opened.st_dev == named.st_dev && opened.st_ino == named.st_ino;
+}
+static bool csi_retained_bundle_copy(const char *src, const char *dst, const char *name)
+{
+    char from[PATH_MAX], to[PATH_MAX]; mode_t mode;
+    if (!csi_real_path(from, sizeof(from), src, name) || !csi_real_path(to, sizeof(to), dst, name) ||
+        !csi_retained_bundle_source(src, dst, name, from, &mode)) return false;
+    int fd = open(to, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    bool ok = csi_retained_bundle_target(fd, to, mode);
     if (close(fd)) ok = false;
     int dir = open(dst, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (dir < 0) return false;
@@ -513,6 +584,13 @@ static bool csi_retained_copy_bundle(const char *src, const char *dst)
     }
     return closedir(dir) == 0 && ok && count == 1;
 }
+static bool csi_retained_sidecars_valid(bool has_wal, const struct stat *w,
+                                         bool has_shm, const struct stat *s)
+{
+    return !(has_wal && (!S_ISREG(w->st_mode) || w->st_uid != geteuid())) &&
+        !(has_shm && (!S_ISREG(s->st_mode) || s->st_uid != geteuid())) &&
+        !(has_shm && !has_wal) && !(has_wal && w->st_size > 0 && !has_shm);
+}
 static bool csi_retained_copy_sidecars(const char *src, const char *dst, const char *name)
 {
     char wal[128], shm[128], walpath[PATH_MAX], shmpath[PATH_MAX]; struct stat w, s;
@@ -524,9 +602,7 @@ static bool csi_retained_copy_sidecars(const char *src, const char *dst, const c
     if (!has_wal && errno != ENOENT) return false;
     bool has_shm = lstat(shmpath, &s) == 0;
     if (!has_shm && errno != ENOENT) return false;
-    if ((has_wal && (!S_ISREG(w.st_mode) || w.st_uid != geteuid())) ||
-        (has_shm && (!S_ISREG(s.st_mode) || s.st_uid != geteuid())) ||
-        (has_shm && !has_wal) || (has_wal && w.st_size > 0 && !has_shm)) {
+    if (!csi_retained_sidecars_valid(has_wal, &w, has_shm, &s)) {
         fprintf(stderr, "retained probe: inconsistent WAL sidecars for %s\n", name);
         return false;
     }
@@ -546,37 +622,54 @@ static bool csi_retained_completed_flat(const char *src, const char *dst)
         csi_derived_hash(from, expected) && csi_retained_copy_file(src, dst, "block_index.bin", true) &&
         csi_derived_hash(to, expected) && csi_derived_hash(from, expected);
 }
-/* Copy the retained public LevelDB index only while the source datadir lock is held. */
-static bool csi_completed_copy_index(const char *src, const char *dst)
+static bool csi_completed_index_paths(const char *src, const char *dst,
+    char source_index[PATH_MAX], char target_index[PATH_MAX])
 {
-    char source_blocks[PATH_MAX], source_index[PATH_MAX], target_blocks[PATH_MAX], target_index[PATH_MAX];
-    struct stat st;
-    if (!csi_real_path(source_blocks, sizeof(source_blocks), src, "blocks") ||
-        lstat(source_blocks, &st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
-        !csi_real_path(source_index, sizeof(source_index), source_blocks, "index") ||
-        lstat(source_index, &st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
-        !csi_real_path(target_blocks, sizeof(target_blocks), dst, "blocks") || mkdir(target_blocks, 0700) ||
-        !csi_real_path(target_index, sizeof(target_index), target_blocks, "index") || mkdir(target_index, 0700)) return false;
-    int index_fd = open(source_index, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    struct stat before, after, named;
-    if (index_fd < 0) return false;
-    if (fstat(index_fd, &before) || !S_ISDIR(before.st_mode) || before.st_uid != geteuid()) { close(index_fd); return false; }
-    DIR *dir = fdopendir(index_fd);
-    if (!dir) { close(index_fd); return false; }
-    bool ok = true; bool current = false, manifest = false; struct dirent *entry;
+    char source_blocks[PATH_MAX], target_blocks[PATH_MAX]; struct stat st;
+    return csi_real_path(source_blocks, sizeof(source_blocks), src, "blocks") &&
+        !lstat(source_blocks, &st) && S_ISDIR(st.st_mode) && st.st_uid == geteuid() &&
+        csi_real_path(source_index, PATH_MAX, source_blocks, "index") &&
+        !lstat(source_index, &st) && S_ISDIR(st.st_mode) && st.st_uid == geteuid() &&
+        csi_real_path(target_blocks, sizeof(target_blocks), dst, "blocks") && !mkdir(target_blocks, 0700) &&
+        csi_real_path(target_index, PATH_MAX, target_blocks, "index") && !mkdir(target_index, 0700);
+}
+static bool csi_completed_index_unchanged(DIR *dir, const char *source, const struct stat *before)
+{
+    struct stat after, named;
+    return !fstat(dirfd(dir), &after) && !lstat(source, &named) && S_ISDIR(named.st_mode) &&
+        before->st_dev == after.st_dev && before->st_ino == after.st_ino &&
+        before->st_dev == named.st_dev && before->st_ino == named.st_ino &&
+        before->st_mtim.tv_sec == after.st_mtim.tv_sec && before->st_mtim.tv_nsec == after.st_mtim.tv_nsec;
+}
+static bool csi_completed_index_entries(DIR *dir, const char *source, const char *target,
+                                         bool *current, bool *manifest)
+{
+    bool ok = true; struct dirent *entry;
     for (;;) {
         errno = 0;
         entry = readdir(dir);
         if (!entry) { if (errno) ok = false; break; }
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
-        if (!strcmp(entry->d_name, "CURRENT")) current = true;
-        if (!strncmp(entry->d_name, "MANIFEST-", 9)) manifest = true;
-        if (!csi_retained_copy_file(source_index, target_index, entry->d_name, true)) { ok = false; break; }
+        if (!strcmp(entry->d_name, "CURRENT")) *current = true;
+        if (!strncmp(entry->d_name, "MANIFEST-", 9)) *manifest = true;
+        if (!csi_retained_copy_file(source, target, entry->d_name, true)) { ok = false; break; }
     }
-    if (fstat(dirfd(dir), &after) || lstat(source_index, &named) || !S_ISDIR(named.st_mode) ||
-        before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
-        before.st_dev != named.st_dev || before.st_ino != named.st_ino ||
-        before.st_mtim.tv_sec != after.st_mtim.tv_sec || before.st_mtim.tv_nsec != after.st_mtim.tv_nsec) ok = false;
+    return ok;
+}
+/* Copy the retained public LevelDB index only while the source datadir lock is held. */
+static bool csi_completed_copy_index(const char *src, const char *dst)
+{
+    char source_index[PATH_MAX], target_index[PATH_MAX];
+    if (!csi_completed_index_paths(src, dst, source_index, target_index)) return false;
+    int index_fd = open(source_index, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat before;
+    if (index_fd < 0) return false;
+    if (fstat(index_fd, &before) || !S_ISDIR(before.st_mode) || before.st_uid != geteuid()) { close(index_fd); return false; }
+    DIR *dir = fdopendir(index_fd);
+    if (!dir) { close(index_fd); return false; }
+    bool current = false, manifest = false;
+    bool ok = csi_completed_index_entries(dir, source_index, target_index, &current, &manifest);
+    if (!csi_completed_index_unchanged(dir, source_index, &before)) ok = false;
     if (closedir(dir)) ok = false;
     return ok && current && manifest;
 }
@@ -589,65 +682,67 @@ static bool csi_completed_copy_inputs(const char *src, const char *dst)
         csi_retained_copy_sidecars(src, dst, "progress.kv") &&
         csi_completed_copy_index(src, dst);
 }
-static bool csi_pending_copy_inputs(const char *src, const char *dst)
+static bool csi_pending_input_presence(const char *src, const char *const files[4], bool present[4])
 {
-    const char *files[] = {"block_index.bin", "anchors.dat", "anchors.dat.sha3", "progress.kv"};
-    bool present[4] = {0}; struct stat st; char path[PATH_MAX];
+    struct stat st; char path[PATH_MAX];
     for (size_t i = 0; i < 4; ++i) {
         if (!csi_real_path(path, sizeof(path), src, files[i])) return false;
         present[i] = lstat(path, &st) == 0;
         if (!present[i] && errno != ENOENT) return false;
         if (present[i] && (!S_ISREG(st.st_mode) || st.st_uid != geteuid())) return false;
     }
-    if (present[1] != present[2]) return false;
+    return present[1] == present[2];
+}
+static bool csi_pending_absent(const char *src, const char *name)
+{
+    struct stat st; char path[PATH_MAX];
+    return csi_real_path(path, sizeof(path), src, name) && lstat(path, &st) != 0 && errno == ENOENT;
+}
+static bool csi_pending_copy_inputs(const char *src, const char *dst)
+{
+    const char *files[] = {"block_index.bin", "anchors.dat", "anchors.dat.sha3", "progress.kv"};
+    bool present[4] = {0};
+    if (!csi_pending_input_presence(src, files, present)) return false;
     for (size_t i = 0; i < 4; ++i)
         if (present[i] && !csi_retained_copy_file(src, dst, files[i], true)) return false;
     if (!present[3]) {
         const char *sidecars[] = {"progress.kv-wal", "progress.kv-shm"};
         for (size_t i = 0; i < 2; ++i)
-            if (!csi_real_path(path, sizeof(path), src, sidecars[i]) || lstat(path, &st) == 0 || errno != ENOENT)
+            if (!csi_pending_absent(src, sidecars[i]))
                 return false;
     }
     if (!csi_retained_copy_sidecars(src, dst, "progress.kv") || !csi_completed_copy_index(src, dst)) return false;
     for (size_t i = 0; i < 4; ++i) {
         if (present[i]) continue;
-        if (!csi_real_path(path, sizeof(path), src, files[i]) || lstat(path, &st) == 0 || errno != ENOENT)
+        if (!csi_pending_absent(src, files[i]))
             return false;
     }
     return true;
 }
 
-static bool csi_retained_copy_state(const char *src, const char *dst,
-                                    bool request_required, bool marker_required, bool copy_inputs)
+static bool csi_retained_absent_path(const char *src, const char *name, char path[PATH_MAX])
 {
-    const char *required[] = {"node.db", "consensus.db",
-        "consensus_state_publication_decision.v1"};
-    const char *projection[] = {"block_index_projection.db", "event_log.dat"};
-    bool derived = getenv("ZCL_TEST_DERIVE_PUBLIC_PROJECTION") != NULL;
-    const char *optional[] = {"install-verify-receipt.v1", "shutdown-receipt.v1"};
-    const char *families[] = {"node.db", "consensus.db"};
-    char pidpath[PATH_MAX]; struct stat st;
-    if (!csi_real_path(pidpath, sizeof(pidpath), src, "zclassic23.pid")) return false;
-    int lock = open(pidpath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (lock < 0 || fstat(lock, &st) || !S_ISREG(st.st_mode) || flock(lock, LOCK_EX | LOCK_NB)) {
-        if (lock >= 0) close(lock);
-        return false;
-    }
+    struct stat st;
+    return csi_real_path(path, PATH_MAX, src, name) && lstat(path, &st) != 0 && errno == ENOENT;
+}
+static bool csi_retained_copy_markers(const char *src, const char *dst, bool request_required,
+    bool marker_required, bool copy_inputs, char request_path[PATH_MAX], char marker_path[PATH_MAX])
+{
     bool ok = true;
-    for (size_t i = 0; ok && i < sizeof(required)/sizeof(required[0]); ++i)
-        ok = csi_retained_copy_file(src, dst, required[i], true);
-    char request_path[PATH_MAX];
-    char marker_path[PATH_MAX];
-    if (ok && marker_required) ok = csi_retained_copy_file(src, dst, "consensus-bundle-installed.marker", true);
-    if (ok && !marker_required) ok = csi_real_path(marker_path, sizeof(marker_path), src, "consensus-bundle-installed.marker") &&
-        lstat(marker_path, &st) != 0 && errno == ENOENT;
-    if (ok && !request_required) {
-        ok = csi_real_path(request_path, sizeof(request_path), src, "install_bundle_request") &&
-            lstat(request_path, &st) != 0 && errno == ENOENT;
-    }
+    if (marker_required) ok = csi_retained_copy_file(src, dst, "consensus-bundle-installed.marker", true);
+    if (ok && !marker_required) ok = csi_retained_absent_path(src, "consensus-bundle-installed.marker", marker_path);
+    if (ok && !request_required) ok = csi_retained_absent_path(src, "install_bundle_request", request_path);
     if (ok && request_required) ok = csi_retained_copy_file(src, dst, "install_bundle_request", true);
     if (ok && !request_required) ok = csi_completed_copy_inputs(src, dst);
     if (ok && request_required && copy_inputs) ok = csi_pending_copy_inputs(src, dst);
+    return ok;
+}
+static bool csi_retained_copy_projection(const char *src, const char *dst, bool derived)
+{
+    const char *projection[] = {"block_index_projection.db", "event_log.dat"};
+    const char *optional[] = {"install-verify-receipt.v1", "shutdown-receipt.v1"};
+    const char *families[] = {"node.db", "consensus.db"};
+    bool ok = true;
     for (size_t i = 0; ok && !derived && i < sizeof(projection)/sizeof(projection[0]); ++i)
         ok = csi_retained_copy_file(src, dst, projection[i], true);
     for (size_t i = 0; ok && !derived && i < sizeof(optional)/sizeof(optional[0]); ++i)
@@ -656,6 +751,36 @@ static bool csi_retained_copy_state(const char *src, const char *dst,
         ok = csi_retained_copy_sidecars(src, dst, families[i]);
     if (ok && !derived) ok = csi_retained_copy_sidecars(src, dst, "block_index_projection.db");
     if (ok) ok = csi_retained_copy_bundle(src, dst);
+    return ok;
+}
+static int csi_retained_lock(const char *src)
+{
+    char pidpath[PATH_MAX]; struct stat st;
+    if (!csi_real_path(pidpath, sizeof(pidpath), src, "zclassic23.pid")) return -1;
+    int lock = open(pidpath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (lock < 0 || fstat(lock, &st) || !S_ISREG(st.st_mode) || flock(lock, LOCK_EX | LOCK_NB)) {
+        if (lock >= 0) close(lock);
+        return -1;
+    }
+    return lock;
+}
+static bool csi_retained_copy_state(const char *src, const char *dst,
+                                    bool request_required, bool marker_required, bool copy_inputs)
+{
+    const char *required[] = {"node.db", "consensus.db",
+        "consensus_state_publication_decision.v1"};
+    bool derived = getenv("ZCL_TEST_DERIVE_PUBLIC_PROJECTION") != NULL;
+    struct stat st;
+    int lock = csi_retained_lock(src);
+    if (lock < 0) return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof(required)/sizeof(required[0]); ++i)
+        ok = csi_retained_copy_file(src, dst, required[i], true);
+    char request_path[PATH_MAX];
+    char marker_path[PATH_MAX];
+    if (ok) ok = csi_retained_copy_markers(src, dst, request_required, marker_required,
+                                            copy_inputs, request_path, marker_path);
+    if (ok) ok = csi_retained_copy_projection(src, dst, derived);
     if (ok && !request_required) ok = lstat(request_path, &st) != 0 && errno == ENOENT;
     if (ok && !marker_required) ok = lstat(marker_path, &st) != 0 && errno == ENOENT;
     if (flock(lock, LOCK_UN)) ok = false;
@@ -690,24 +815,34 @@ static bool csi_retained_pending_read(const struct csi_real_paths *p,
     node_db_close(&node);
     return ok;
 }
+static bool csi_retained_resolved_roots(const char *source, const char *scratch, char scratch_real[PATH_MAX])
+{
+    char resolved[PATH_MAX]; struct stat st;
+    return source && source[0] == '/' && scratch && scratch[0] == '/' &&
+        realpath(source, resolved) && !strcmp(source, resolved) &&
+        realpath(scratch, scratch_real) && !strcmp(scratch, scratch_real) &&
+        !lstat(source, &st) && S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 077);
+}
+static bool csi_retained_suffix_valid(const char *suffix)
+{
+    if (strlen(suffix) != 6) return false;
+    for (const char *c = suffix; *c; ++c)
+        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+              (*c >= '0' && *c <= '9'))) return false;
+    return true;
+}
 static bool csi_retained_source_valid(const char *source, const char *scratch)
 {
     static const char prefix[] = "real-empty-retire-";
-    char resolved[PATH_MAX], parent[PATH_MAX], scratch_real[PATH_MAX], data[PATH_MAX];
+    char parent[PATH_MAX], scratch_real[PATH_MAX], data[PATH_MAX];
     struct stat st;
-    if (!source || source[0] != '/' || !scratch || scratch[0] != '/' ||
-        !realpath(source, resolved) || strcmp(source, resolved) ||
-        !realpath(scratch, scratch_real) || strcmp(scratch, scratch_real) ||
-        lstat(source, &st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077)) return false;
+    if (!csi_retained_resolved_roots(source, scratch, scratch_real)) return false;
     int n = snprintf(parent, sizeof(parent), "%s", source);
     if (n < 0 || (size_t)n >= sizeof(parent)) return false;
     char *leaf = strrchr(parent, '/');
     if (!leaf || leaf == parent || strncmp(leaf + 1, prefix, sizeof(prefix) - 1)) return false;
     const char *suffix = leaf + sizeof(prefix);
-    if (strlen(suffix) != 6) return false;
-    for (const char *c = suffix; *c; ++c)
-        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
-              (*c >= '0' && *c <= '9'))) return false;
+    if (!csi_retained_suffix_valid(suffix)) return false;
     *leaf = '\0';
     if (strcmp(parent, scratch_real) || !csi_real_path(data, sizeof(data), source, "data") ||
         lstat(data, &st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077)) return false;
@@ -727,20 +862,31 @@ static bool csi_populated_retained_request(const char *src,
         !strcmp(history, request->private_history_path);
 }
 
+static bool csi_retained_prepare_copy(const char *source, const char *scratch,
+    struct csi_real_paths *p, char src[PATH_MAX], const char *pattern,
+    bool request_required, bool marker_required, bool copy_inputs)
+{
+    return csi_real_path(src, PATH_MAX, source, "data") &&
+        csi_real_path(p->root, sizeof(p->root), scratch, pattern) && mkdtemp(p->root) &&
+        csi_real_path(p->data, sizeof(p->data), p->root, "data") && !mkdir(p->data, 0700) &&
+        csi_real_path(p->node, sizeof(p->node), p->data, "node.db") &&
+        csi_retained_copy_state(src, p->data, request_required, marker_required, copy_inputs);
+}
+static bool csi_retained_probe_source(const char *source, const char *scratch,
+                                       const char *params, const char *expected_leaf)
+{
+    const char *leaf = source ? strrchr(source, '/') : NULL;
+    return params && !getenv("ZCL_TEST_DERIVE_PUBLIC_PROJECTION") && leaf &&
+        !strcmp(leaf + 1, expected_leaf) && csi_retained_source_valid(source, scratch) &&
+        csi_empty_private_dir(scratch);
+}
 static int csi_populated_retained_probe(const char *source)
 {
     const char *scratch = getenv("ZCL_TEST_REAL_INSTALL_SCRATCH");
     const char *params = getenv("ZCL_TEST_REAL_INSTALL_PARAMS");
-    struct csi_real_paths p = {.params = params}; char src[PATH_MAX]; struct stat st;
-    const char *leaf = source ? strrchr(source, '/') : NULL;
-    if (!params || getenv("ZCL_TEST_DERIVE_PUBLIC_PROJECTION") || !leaf ||
-        strcmp(leaf + 1, "real-empty-retire-AZZyzI") || !csi_retained_source_valid(source, scratch) ||
-        lstat(scratch, &st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077) ||
-        !csi_real_path(src, sizeof(src), source, "data") ||
-        !csi_real_path(p.root, sizeof(p.root), scratch, "retained-populated-probe-XXXXXX") || !mkdtemp(p.root) ||
-        !csi_real_path(p.data, sizeof(p.data), p.root, "data") || mkdir(p.data, 0700) ||
-        !csi_real_path(p.node, sizeof(p.node), p.data, "node.db") ||
-        !csi_retained_copy_state(src, p.data, true, true, true)) {
+    struct csi_real_paths p = {.params = params}; char src[PATH_MAX];
+    if (!csi_retained_probe_source(source, scratch, params, "real-empty-retire-AZZyzI") ||
+        !csi_retained_prepare_copy(source, scratch, &p, src, "retained-populated-probe-XXXXXX", true, true, true)) {
         fprintf(stderr, "retained populated probe: copy refused\n"); return 1;
     }
     struct boot_bound_bundle_observation request = {0}, after = {0};
@@ -760,18 +906,18 @@ static int csi_populated_retained_probe(const char *source)
     return ok ? 0 : 1;
 }
 
+static bool csi_retained_inputs_present(const char *source, const char *scratch, const char *params)
+{
+    return source && scratch && params;
+}
 static int csi_empty_retained_probe(const char *source)
 {
     const char *scratch = getenv("ZCL_TEST_REAL_INSTALL_SCRATCH");
     const char *params = getenv("ZCL_TEST_REAL_INSTALL_PARAMS");
-    struct stat st; struct csi_real_paths p = {.params = params}; char src[PATH_MAX];
-    if (!source || !scratch || !params || lstat(scratch, &st) || !S_ISDIR(st.st_mode) ||
-        st.st_uid != geteuid() || (st.st_mode & 077) ||
+    struct csi_real_paths p = {.params = params}; char src[PATH_MAX];
+    if (!csi_retained_inputs_present(source, scratch, params) || !csi_empty_private_dir(scratch) ||
         !csi_retained_source_valid(source, scratch) ||
-        !csi_real_path(src, sizeof(src), source, "data") ||
-        !csi_real_path(p.root, sizeof(p.root), scratch, "retained-probe-XXXXXX") || !mkdtemp(p.root) ||
-        !csi_real_path(p.data, sizeof(p.data), p.root, "data") || mkdir(p.data, 0700) ||
-        !csi_real_path(p.node, sizeof(p.node), p.data, "node.db") || !csi_retained_copy_state(src, p.data, true, true, false)) {
+        !csi_retained_prepare_copy(source, scratch, &p, src, "retained-probe-XXXXXX", true, true, false)) {
         fprintf(stderr, "retained probe: copy refused\n"); return 1;
     }
     struct wallet_cutover_binding binding; uint8_t identity[32];
@@ -814,24 +960,33 @@ static void csi_completed_mutation_hook(struct boot_cutover_env *env, struct app
         m->changed = wallet_sqlite_write_scan_height(env->wallet_db, 0);
     }
 }
+static bool csi_completed_mutation_result(const struct csi_real_paths *p,
+    const struct wallet_cutover_binding *expected, const struct csi_completed_mutation *mutation,
+    bool started, int fd, enum boot_bound_completion_result proof, bool present,
+    uint64_t generation, struct wallet *wallet, struct wallet_sqlite *ws)
+{
+    struct wallet_cutover_binding after = {0}; struct boot_bound_bundle_observation request = {0};
+    return !started && mutation->reached && mutation->positive && mutation->changed && fd >= 0 &&
+        boot_stage_is(BOOT_STAGE_CHAIN_TIP_RESOLVED) && proof == BOOT_BOUND_COMPLETION_ERROR &&
+        !present && generation == 0 && wallet_readiness_get(wallet).state == WALLET_READINESS_UNKNOWN &&
+        wallet_sqlite_cutover_observe_completed(ws, &after) == WALLET_CUTOVER_OBS_FOUND &&
+        wallet_cutover_binding_equal(expected, &after) &&
+        boot_install_bound_bundle_read(p->data, &request) == BOOT_BOUND_READ_ABSENT;
+}
 static void csi_completed_mutation_boot(const struct csi_real_paths *p,
     const struct wallet_cutover_binding *expected, int mode)
 {
     char datadir[PATH_MAX + 32], params[PATH_MAX + 32];
     int a = snprintf(datadir, sizeof(datadir), "-datadir=%s", p->data);
     int b = snprintf(params, sizeof(params), "-paramsdir=%s", p->params);
-    if (a < 0 || b < 0 || (size_t)a >= sizeof(datadir) || (size_t)b >= sizeof(params)) _exit(101);
+    if (!csi_empty_boot_args_ok(a, sizeof(datadir), b, sizeof(params))) _exit(101);
     char *argv[] = {"z23", datadir, params, "-operator-lane=unknown", "-nolegacyimport", "-nolegacyutxoimport",
         "-no-tor", "-private-listeners", "-observation=0", "-connect=127.0.0.1:1",
         "-port=28033", "-rpcport=28232", "-httpsport=28443", "-fsport=28034"};
     int argc = (int)(sizeof(argv) / sizeof(argv[0])); struct app_context ctx;
     app_context_defaults(&ctx); ctx.datadir = p->data; ctx.params_dir = p->params;
     ParseParameters(argc, (const char *const *)argv); bool metrics = false;
-    if (args_parse_node_options(argc, argv, &ctx, &metrics) != -1 || unsetenv("ZCL_DEPLOY_ALLOW_CANONICAL") ||
-        !csi_test_connect_only(&ctx) ||
-        ctx.operator_lane != ZCL_OPERATOR_LANE_UNKNOWN ||
-        wallet_at_rest_boot_decision(wallet_at_rest_creation_policy(), ctx.mint_anchor, ctx.operator_lane) !=
-            WALLET_BOOT_REFUSE) _exit(102);
+    if (!csi_empty_boot_options(argc, argv, &ctx, &metrics)) _exit(102);
     struct csi_completed_mutation mutation = {.expected = expected, .mode = mode};
     boot_test_completed_before_proof(csi_completed_mutation_hook, &mutation);
     boot_stage_reset_for_testing(); ecc_verify_destroy(); ecc_stop();
@@ -840,17 +995,12 @@ static void csi_completed_mutation_boot(const struct csi_real_paths *p,
     struct node_db *node = NULL; struct wallet_sqlite *ws = NULL;
     struct wallet *wallet = NULL; struct main_state *main = NULL;
     boot_wallet_cutover_test_slots(&node, &ws, &wallet, &main);
-    struct wallet_cutover_binding after = {0}; struct boot_bound_bundle_observation request = {0};
     int fd = open(p->data, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     bool present = true; uint64_t generation = UINT64_MAX;
     enum boot_bound_completion_result proof = fd < 0 ? BOOT_BOUND_COMPLETION_ERROR :
         boot_bound_completed_prove(ws, node, wallet, main, p->data, fd, &present, &generation);
-    bool ok = !started && mutation.reached && mutation.positive && mutation.changed && fd >= 0 &&
-        boot_stage_is(BOOT_STAGE_CHAIN_TIP_RESOLVED) && proof == BOOT_BOUND_COMPLETION_ERROR &&
-        !present && generation == 0 && wallet_readiness_get(wallet).state == WALLET_READINESS_UNKNOWN &&
-        wallet_sqlite_cutover_observe_completed(ws, &after) == WALLET_CUTOVER_OBS_FOUND &&
-        wallet_cutover_binding_equal(expected, &after) &&
-        boot_install_bound_bundle_read(p->data, &request) == BOOT_BOUND_READ_ABSENT;
+    bool ok = csi_completed_mutation_result(p, expected, &mutation, started, fd, proof,
+                                             present, generation, wallet, ws);
     if (fd >= 0 && close(fd)) ok = false;
     fprintf(stderr, "completed mutation mode=%d reached=%d positive=%d changed=%d proof=%d ready=%d\n",
         mode, mutation.reached, mutation.positive, mutation.changed, (int)proof,
@@ -859,11 +1009,8 @@ static void csi_completed_mutation_boot(const struct csi_real_paths *p,
 }
 static bool csi_completed_source_valid(const char *source, const char *scratch)
 {
-    char resolved[PATH_MAX], parent[PATH_MAX], scratch_real[PATH_MAX], data[PATH_MAX]; struct stat st;
-    if (!source || source[0] != '/' || !scratch || scratch[0] != '/' ||
-        !realpath(source, resolved) || strcmp(source, resolved) || !realpath(scratch, scratch_real) ||
-        strcmp(scratch, scratch_real) || lstat(source, &st) || !S_ISDIR(st.st_mode) ||
-        st.st_uid != geteuid() || (st.st_mode & 077)) return false;
+    char parent[PATH_MAX], scratch_real[PATH_MAX], data[PATH_MAX]; struct stat st;
+    if (!csi_retained_resolved_roots(source, scratch, scratch_real)) return false;
     int n = snprintf(parent, sizeof(parent), "%s", source);
     if (n < 0 || (size_t)n >= sizeof(parent)) return false;
     char *leaf = strrchr(parent, '/');
@@ -872,6 +1019,17 @@ static bool csi_completed_source_valid(const char *source, const char *scratch)
     return !strcmp(parent, scratch_real) && csi_real_path(data, sizeof(data), source, "data") &&
         !lstat(data, &st) && S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 077);
 }
+static bool csi_completed_read_witness(const struct csi_real_paths *p, struct csi_real_bound_witness *value)
+{
+    struct node_db node = {0}; struct wallet_sqlite ws = {0};
+    bool node_open = node_db_open(&node, p->node);
+    bool wallet_open = node_open && wallet_sqlite_open_r(&ws, node.db).ok;
+    bool ok = wallet_open && wallet_sqlite_cutover_observe_completed(&ws, &value->binding) == WALLET_CUTOVER_OBS_FOUND &&
+        value->binding.history_identity_present && csi_empty_wallet_identity(node.db, value->wallet);
+    if (wallet_open) wallet_sqlite_close(&ws);
+    if (node_open) node_db_close(&node);
+    return ok;
+}
 static bool csi_completed_copy_observe(const struct csi_real_paths *p, struct csi_real_bound_witness *witness)
 {
     int fds[2]; if (pipe(fds)) return false;
@@ -879,13 +1037,8 @@ static bool csi_completed_copy_observe(const struct csi_real_paths *p, struct cs
     if (!child) {
         if (!os_proc_bind_parent_death(SIGKILL, parent)) _exit(105);
         close(fds[0]); alarm(90);
-        struct node_db node = {0}; struct wallet_sqlite ws = {0}; struct csi_real_bound_witness value = {0};
-        bool node_open = node_db_open(&node, p->node);
-        bool wallet_open = node_open && wallet_sqlite_open_r(&ws, node.db).ok;
-        bool ok = wallet_open && wallet_sqlite_cutover_observe_completed(&ws, &value.binding) == WALLET_CUTOVER_OBS_FOUND &&
-            value.binding.history_identity_present && csi_empty_wallet_identity(node.db, value.wallet);
-        if (wallet_open) wallet_sqlite_close(&ws);
-        if (node_open) node_db_close(&node);
+        struct csi_real_bound_witness value = {0};
+        bool ok = csi_completed_read_witness(p, &value);
         ok = ok && write(fds[1], &value, sizeof(value)) == (ssize_t)sizeof(value);
         _exit(ok ? 0 : 106);
     }
@@ -894,16 +1047,28 @@ static bool csi_completed_copy_observe(const struct csi_real_paths *p, struct cs
     return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0 && n == (ssize_t)sizeof(*witness);
 }
 
+static int csi_completed_mutation_run(struct csi_real_paths *p,
+    const struct csi_real_bound_witness *before, int mode)
+{
+    pid_t parent = getpid(), child = fork();
+    if (!child) {
+        if (!os_proc_bind_parent_death(SIGKILL, (uint64_t)parent)) _exit(104);
+        csi_completed_mutation_boot(p, &before->binding, mode);
+    }
+    int status = 0; bool waited = child > 0 && csi_real_wait_child(child, &status);
+    bool ok = waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    fprintf(stderr, "completed mutation mode=%d result=%s exit=%d copy=%s\n", mode, ok ? "PASS" : "FAIL",
+        WIFEXITED(status) ? WEXITSTATUS(status) : -1, p->root);
+    if (ok) (void)test_rm_rf_recursive(p->root);
+    return ok ? 0 : 1;
+}
 static int csi_completed_mutation_case(const char *source, int mode)
 {
     const char *scratch = getenv("ZCL_TEST_REAL_INSTALL_SCRATCH"), *params = getenv("ZCL_TEST_REAL_INSTALL_PARAMS");
-    struct csi_real_paths p = {.params = params}; char src[PATH_MAX]; struct stat st;
-    if (!params || getenv("ZCL_TEST_DERIVE_PUBLIC_PROJECTION") || !csi_completed_source_valid(source, scratch) || lstat(scratch, &st) ||
-        !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077) ||
-        !csi_real_path(src, sizeof(src), source, "data") ||
-        !csi_real_path(p.root, sizeof(p.root), scratch, "completed-negative-XXXXXX") || !mkdtemp(p.root) ||
-        !csi_real_path(p.data, sizeof(p.data), p.root, "data") || mkdir(p.data, 0700) ||
-        !csi_real_path(p.node, sizeof(p.node), p.data, "node.db") || !csi_retained_copy_state(src, p.data, false, true, false)) {
+    struct csi_real_paths p = {.params = params}; char src[PATH_MAX];
+    if (!params || getenv("ZCL_TEST_DERIVE_PUBLIC_PROJECTION") || !csi_completed_source_valid(source, scratch) ||
+        !csi_empty_private_dir(scratch) ||
+        !csi_retained_prepare_copy(source, scratch, &p, src, "completed-negative-XXXXXX", false, true, false)) {
         fprintf(stderr, "completed mutation mode=%d copy refused\n", mode); return 1;
     }
     struct csi_real_bound_witness before = {0};
@@ -914,17 +1079,7 @@ static int csi_completed_mutation_case(const char *source, int mode)
         if (baseline) (void)test_rm_rf_recursive(p.root);
         return baseline ? 0 : 1;
     }
-    pid_t parent = getpid(), child = fork();
-    if (!child) {
-        if (!os_proc_bind_parent_death(SIGKILL, (uint64_t)parent)) _exit(104);
-        csi_completed_mutation_boot(&p, &before.binding, mode);
-    }
-    int status = 0; bool waited = child > 0 && csi_real_wait_child(child, &status);
-    bool ok = waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    fprintf(stderr, "completed mutation mode=%d result=%s exit=%d copy=%s\n", mode, ok ? "PASS" : "FAIL",
-        WIFEXITED(status) ? WEXITSTATUS(status) : -1, p.root);
-    if (ok) (void)test_rm_rf_recursive(p.root);
-    return ok ? 0 : 1;
+    return csi_completed_mutation_run(&p, &before, mode);
 }
 static int csi_completed_mutation_test(const char *source)
 {
@@ -1004,15 +1159,9 @@ static bool csi_retained_old_restart(const struct csi_real_paths *p, struct csi_
 static int csi_retained_old_probe(const char *source)
 {
     const char *scratch = getenv("ZCL_TEST_REAL_INSTALL_SCRATCH"), *params = getenv("ZCL_TEST_REAL_INSTALL_PARAMS");
-    struct csi_real_paths p = {.params = params}; char src[PATH_MAX]; struct stat st;
-    const char *leaf = source ? strrchr(source, '/') : NULL;
-    if (!params || getenv("ZCL_TEST_DERIVE_PUBLIC_PROJECTION") || !leaf ||
-        strcmp(leaf + 1, "real-empty-retire-erQrJ9") || !csi_retained_source_valid(source, scratch) ||
-        lstat(scratch, &st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077) ||
-        !csi_real_path(src, sizeof(src), source, "data") ||
-        !csi_real_path(p.root, sizeof(p.root), scratch, "retained-old-probe-XXXXXX") || !mkdtemp(p.root) ||
-        !csi_real_path(p.data, sizeof(p.data), p.root, "data") || mkdir(p.data, 0700) ||
-        !csi_real_path(p.node, sizeof(p.node), p.data, "node.db") || !csi_retained_copy_state(src, p.data, true, false, false)) {
+    struct csi_real_paths p = {.params = params}; char src[PATH_MAX];
+    if (!csi_retained_probe_source(source, scratch, params, "real-empty-retire-erQrJ9") ||
+        !csi_retained_prepare_copy(source, scratch, &p, src, "retained-old-probe-XXXXXX", true, false, false)) {
         fprintf(stderr, "retained OLD probe: copy refused\n"); return 1;
     }
     struct boot_bound_bundle_observation request = {0}, after = {0};
@@ -1025,42 +1174,54 @@ static int csi_retained_old_probe(const char *source)
     return ok ? 0 : 1;
 }
 
+static bool csi_empty_retire_prepare(struct csi_real_paths *p, const char *scratch)
+{
+    return p->bundle && p->source && scratch && p->params && csi_empty_private_dir(scratch) &&
+        csi_real_path(p->root, sizeof(p->root), scratch, "real-empty-retire-XXXXXX") && mkdtemp(p->root);
+}
+static bool csi_empty_retire_exercise(struct csi_real_paths *p, uint8_t before[32],
+    struct boot_bound_bundle_request *request, struct csi_real_bound_witness *witness, bool old_retry)
+{
+    return mkdir(p->data, 0700) == 0 &&
+        csi_empty_retire_copy_chain(getenv("ZCL_TEST_COLD_PUBLIC_DIR"), p->data) &&
+        csi_derived_projection(p->root, p->data) &&
+        csi_empty_retire_seed_child(p, before) && csi_real_history(p) && csi_real_bound_history(p, request) &&
+        boot_install_bound_bundle_request(p->data, request, NULL) == BOOT_BUNDLE_ARM_CREATED &&
+        (old_retry ? csi_empty_old_retry(p, witness) : csi_empty_retire_install(p, witness));
+}
+static bool csi_empty_retire_finish(struct csi_real_paths *p, const uint8_t before[32],
+                                     const struct csi_real_bound_witness *witness)
+{
+    return witness->fence && witness->committed &&
+        !memcmp(before, witness->wallet, 32) && csi_empty_retire_replaced(p, &witness->binding, before) &&
+        csi_empty_retire_restart(p, &witness->binding, before) &&
+        csi_empty_retire_restart(p, &witness->binding, before) &&
+        (!csi_populated_mode() || csi_populated_history_check(p, &witness->binding));
+}
+static bool csi_empty_projection_ready(void)
+{
+    const char *derive = getenv("ZCL_TEST_DERIVE_PUBLIC_PROJECTION");
+    return derive && !strcmp(derive, "1") && getenv("ZCL_TEST_PUBLIC_PROJECTION") &&
+        getenv("ZCL_TEST_PUBLIC_FLAT");
+}
 static int csi_real_empty_retire_test(void)
 {
     const char *old_mode = getenv("ZCL_TEST_REAL_OLD_RETRY");
     bool old_retry = old_mode && !strcmp(old_mode, "1");
     if (!old_retry && !getenv("ZCL_TEST_REAL_EMPTY_RETIRE") && !csi_populated_mode()) return 0;
-    const char *derive = getenv("ZCL_TEST_DERIVE_PUBLIC_PROJECTION");
-    if (!derive || strcmp(derive, "1") || !getenv("ZCL_TEST_PUBLIC_PROJECTION") ||
-        !getenv("ZCL_TEST_PUBLIC_FLAT")) {
+    if (!csi_empty_projection_ready()) {
         fprintf(stderr, "real empty retirement: derived public projection inputs required\n");
         return 1;
     }
     const char *bundle = getenv("ZCL_TEST_REAL_INSTALL_BUNDLE"), *history = getenv("ZCL_TEST_REAL_INSTALL_HISTORY");
     const char *scratch = getenv("ZCL_TEST_REAL_INSTALL_SCRATCH"), *params = getenv("ZCL_TEST_REAL_INSTALL_PARAMS");
     int failures = 0; struct csi_real_paths p = {.bundle = bundle, .source = history, .params = params};
-    struct stat st;
-    bool made = bundle && history && scratch && params && lstat(scratch, &st) == 0 &&
-        S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 077) &&
-        csi_real_path(p.root, sizeof(p.root), scratch, "real-empty-retire-XXXXXX") && mkdtemp(p.root);
-    bool ok = made && csi_real_path(p.data, sizeof(p.data), p.root, "data") &&
-        csi_real_path(p.history, sizeof(p.history), p.data, "wallet-history") &&
-        csi_real_path(p.node, sizeof(p.node), p.data, "node.db") &&
-        csi_real_path(p.artifact, sizeof(p.artifact), p.root, "bundle.sqlite") &&
-        csi_real_copy(p.bundle, p.artifact) && chmod(p.artifact, 0400) == 0 && csi_real_bundle_identity(p.artifact);
+    bool made = csi_empty_retire_prepare(&p, scratch);
+    bool ok = made && csi_real_bound_paths(&p);
     p.bundle = p.artifact;
     uint8_t before[32]; struct boot_bound_bundle_request request = {0}; struct csi_real_bound_witness witness = {0};
-    ok = ok && mkdir(p.data, 0700) == 0 &&
-        csi_empty_retire_copy_chain(getenv("ZCL_TEST_COLD_PUBLIC_DIR"), p.data) &&
-        csi_derived_projection(p.root, p.data) &&
-        csi_empty_retire_seed_child(&p, before) && csi_real_history(&p) && csi_real_bound_history(&p, &request) &&
-        boot_install_bound_bundle_request(p.data, &request, NULL) == BOOT_BUNDLE_ARM_CREATED &&
-        (old_retry ? csi_empty_old_retry(&p, &witness) : csi_empty_retire_install(&p, &witness)) &&
-        witness.fence && witness.committed &&
-        !memcmp(before, witness.wallet, 32) && csi_empty_retire_replaced(&p, &witness.binding, before) &&
-        csi_empty_retire_restart(&p, &witness.binding, before) &&
-        csi_empty_retire_restart(&p, &witness.binding, before) &&
-        (!csi_populated_mode() || csi_populated_history_check(&p, &witness.binding));
+    ok = ok && csi_empty_retire_exercise(&p, before, &request, &witness, old_retry) &&
+        csi_empty_retire_finish(&p, before, &witness);
     CSI_CHECK(old_retry ? "real OLD fence crash retries and completes" :
         csi_populated_mode() ? "real populated bound wallet completes and retires request" :
         "real empty bound wallet completes and retires request", ok);
