@@ -106,6 +106,23 @@ static int t_public_prepare_gate_controls(void)
     } _test_next:;
     return failures;
 }
+static int gp_failure_controls(unsigned events, unsigned clocks)
+{
+    int failures=0;
+    for (unsigned i=1;i<=events;i++) {
+        gp_reset(); gp.fail_event=i;
+        ASSERT(!gb_prepare_finish(true,true,100));
+        ASSERT(gp.valid && gp.closes==(i==1 ? 0u : 1u));
+        ASSERT(gp.event==i+(i>1 && i<events ? 1u : 0u));
+    }
+    for (unsigned error=0;error<2;error++) for (unsigned i=1;i<=clocks;i++) {
+        gp_reset(); gp.fail_clock=i; gp.clock_error=error!=0;
+        ASSERT(!gb_prepare_finish(true,true,100));
+        ASSERT(gp.valid && gp.closes<=1);
+    }
+    _test_next:;
+    return failures;
+}
 static int t_public_prepare_controls(void)
 {
     int failures=t_public_prepare_gate_controls();
@@ -114,17 +131,9 @@ static int t_public_prepare_controls(void)
         ASSERT(gp.valid && gp.bytes==20480 && gp.closes==1);
         ASSERT(strcmp(gp.trace,"OTMCWWFWWWFX")==0);
         unsigned events=gp.event, clocks=gp.clocks;
-        for (unsigned i=1;i<=events;i++) {
-            gp_reset(); gp.fail_event=i;
-            ASSERT(!gb_prepare_finish(true,true,100));
-            ASSERT(gp.valid && gp.closes==(i==1 ? 0u : 1u));
-            ASSERT(gp.event==i+(i>1 && i<events ? 1u : 0u));
-        }
-        for (unsigned error=0;error<2;error++) for (unsigned i=1;i<=clocks;i++) {
-            gp_reset(); gp.fail_clock=i; gp.clock_error=error!=0;
-            ASSERT(!gb_prepare_finish(true,true,100));
-            ASSERT(gp.valid && gp.closes<=1);
-        }
+        int control_failures=gp_failure_controls(events,clocks);
+        failures+=control_failures;
+        if (control_failures) goto _test_next;
         gp_reset(); gp.short_write=1; gp.interrupted=1;
         ASSERT(gb_prepare_finish(true,true,100));
         ASSERT(gp.valid && gp.bytes==20480 && gp.syncs==2 && gp.closes==1);

@@ -16,6 +16,30 @@ static void fill_pattern(void)
             g_src[w][i] = (uint8_t)(i * 131u + (i >> 8) * 7u + (unsigned)w * 55u + (i >> 16));
 }
 
+static bool transfer_one(int w, size_t len, size_t send_chunk, size_t recv_chunk,
+                         size_t sent[2], size_t got[2])
+{
+    struct zssh_conn *c = &g_conn[w];
+    if (zssh_state(c) != ZSSH_STATE_CHANNEL) return false;
+    bool moved = false;
+    if (sent[w] < len) {
+        size_t n = len - sent[w] < send_chunk ? len - sent[w] : send_chunk, acc = 99;
+        enum zssh_result r = zssh_channel_send(c, g_src[w] + sent[w], n, &acc);
+        CHECK(r == ZSSH_OK || r == ZSSH_AGAIN);
+        CHECK(acc <= n && (r == ZSSH_OK) == (acc > 0));
+        sent[w] += acc;
+        moved |= acc > 0;
+    }
+    if (got[w] < len) {
+        size_t n = len - got[w] < recv_chunk ? len - got[w] : recv_chunk, g = 99;
+        enum zssh_result r = zssh_channel_recv(c, g_dst[w] + got[w], n, &g);
+        CHECK(r == ZSSH_OK || r == ZSSH_AGAIN);
+        CHECK(g <= n && (r == ZSSH_OK) == (g > 0));
+        got[w] += g;
+        moved |= g > 0;
+    }
+    return moved;
+}
 static bool transfer(size_t len, size_t send_chunk, size_t recv_chunk)
 {
     size_t sent[2] = { 0, 0 }, got[2] = { 0, 0 };
@@ -23,26 +47,8 @@ static bool transfer(size_t len, size_t send_chunk, size_t recv_chunk)
     memset(g_dst, 0, sizeof g_dst);
     while ((sent[0] < len || sent[1] < len || got[0] < len || got[1] < len) && stalled < 4) {
         bool moved = false;
-        for (int w = 0; w < 2; w++) {
-            struct zssh_conn *c = &g_conn[w];
-            if (zssh_state(c) != ZSSH_STATE_CHANNEL) continue;
-            if (sent[w] < len) {
-                size_t n = len - sent[w] < send_chunk ? len - sent[w] : send_chunk, acc = 99;
-                enum zssh_result r = zssh_channel_send(c, g_src[w] + sent[w], n, &acc);
-                CHECK(r == ZSSH_OK || r == ZSSH_AGAIN);
-                CHECK(acc <= n && (r == ZSSH_OK) == (acc > 0));
-                sent[w] += acc;
-                moved |= acc > 0;
-            }
-            if (got[w] < len) {
-                size_t n = len - got[w] < recv_chunk ? len - got[w] : recv_chunk, g = 99;
-                enum zssh_result r = zssh_channel_recv(c, g_dst[w] + got[w], n, &g);
-                CHECK(r == ZSSH_OK || r == ZSSH_AGAIN);
-                CHECK(g <= n && (r == ZSSH_OK) == (g > 0));
-                got[w] += g;
-                moved |= g > 0;
-            }
-        }
+        for (int w = 0; w < 2; w++)
+            moved |= transfer_one(w, len, send_chunk, recv_chunk, sent, got);
         moved |= step(CL);
         moved |= step(SV);
         stalled = moved ? 0 : stalled + 1;
@@ -234,6 +240,21 @@ static void g_rekey_limit(void)
     failed_column(SV, ZSSH_E_REKEY_LIMIT);
 }
 
+static size_t failed_pump_checks(uint8_t *bad, size_t pn, uint8_t *outb)
+{
+    const uint8_t *p = nullptr;
+    size_t pn2 = 0, cons = 99, prod = 99;
+    CHECK(zssh_output_peek(&g_conn[SV], &p, &pn2) == ZSSH_OK && pn2 > 2);
+    CHECK(zssh_pump(&g_conn[SV], bad + pn, 7, &cons, outb, pn2 - 1, &prod) == ZSSH_STATUS_FAILED);
+    CHECK(cons == 0 && prod == pn2 - 1);
+    CHECK(zssh_pump(&g_conn[SV], bad + pn, 7, &cons, outb, 100, &prod) == ZSSH_STATUS_FAILED);
+    CHECK(cons == 0 && prod == 1);
+    CHECK(zssh_pump(&g_conn[SV], bad + pn, 7, &cons, outb, 100, &prod) == ZSSH_STATUS_FAILED);
+    CHECK(cons == 0 && prod == 0);
+    CHECK(zssh_pump(&g_conn[SV], nullptr, 0, &cons, nullptr, 0, &prod) == ZSSH_STATUS_FAILED);
+    CHECK(cons == 0 && prod == 0);
+    return pn2;
+}
 /* Bytes after the fatal byte / after CLOSE are not consumed; pump output copy in
  * FAILED and CLOSED; NULL conn on wipe / transport_eof. */
 static void g_trailing_and_terminal_pump(void)
@@ -254,15 +275,7 @@ static void g_trailing_and_terminal_pump(void)
     CHECK(zssh_input(&g_conn[SV], bad, pn + 7, &cons) == ZSSH_STATUS_FAILED);
     CHECK(cons == pn && zssh_error(&g_conn[SV]) == ZSSH_E_MAC);   /* up to and including the fatal byte */
     /* FAILED column of pump: input untouched, output copy exact in any chunking */
-    CHECK(zssh_output_peek(&g_conn[SV], &p, &pn2) == ZSSH_OK && pn2 > 2);
-    CHECK(zssh_pump(&g_conn[SV], bad + pn, 7, &cons, outb, pn2 - 1, &prod) == ZSSH_STATUS_FAILED);
-    CHECK(cons == 0 && prod == pn2 - 1);
-    CHECK(zssh_pump(&g_conn[SV], bad + pn, 7, &cons, outb, 100, &prod) == ZSSH_STATUS_FAILED);
-    CHECK(cons == 0 && prod == 1);
-    CHECK(zssh_pump(&g_conn[SV], bad + pn, 7, &cons, outb, 100, &prod) == ZSSH_STATUS_FAILED);
-    CHECK(cons == 0 && prod == 0);
-    CHECK(zssh_pump(&g_conn[SV], nullptr, 0, &cons, nullptr, 0, &prod) == ZSSH_STATUS_FAILED);
-    CHECK(cons == 0 && prod == 0);
+    pn2 = failed_pump_checks(bad, pn, outb);
     /* same fatal byte through pump: consumed stops there, out_cap 0 copies nothing */
     snap_restore(1);
     CHECK(zssh_pump(&g_conn[SV], bad, pn + 7, &cons, nullptr, 0, &prod) == ZSSH_STATUS_FAILED);
