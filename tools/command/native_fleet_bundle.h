@@ -21,6 +21,9 @@ struct zcl_command_reply;
 /* Resident RPC continuation: the public command always starts a fetch. */
 void zcl_native_fleet_bundle_fetch_continue(const struct zcl_command_request *request,
                                             struct zcl_command_reply *reply);
+/* Resident-only private RPC: no peer admission or network work. */
+void zcl_native_fleet_bundle_fetch_local(const struct zcl_command_request *request,
+                                         struct zcl_command_reply *reply);
 
 enum zcl_fleet_bundle_status {
     ZCL_FLEET_BUNDLE_DONE = 0, /* offered / written */
@@ -62,6 +65,7 @@ struct zcl_fleet_bundle_fetch_args {
     const uint64_t *providers;
     size_t provider_count;
     bool continuation; /* observe an existing fetch; do not restart failure */
+    bool local_only; /* private RPC: refuse a miss without starting network work */
 };
 
 /* One non-blocking fetch step: start (idempotent) or continue the swarm

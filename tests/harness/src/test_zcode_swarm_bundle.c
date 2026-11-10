@@ -344,6 +344,90 @@ static int bundle_case_command_poll(void)
     return failures;
 }
 
+static int bundle_local_calls, bundle_add_calls, bundle_local_mode;
+static char *bundle_local_rpc(const char *method, const char *params)
+{
+    if (!strcmp(method, "addnode")) {
+        ++bundle_add_calls;
+        return strdup("{\"error\":\"disabled\"}");
+    }
+    if (!strcmp(method, "fleet_bundle_fetch_local")) {
+        ++bundle_local_calls;
+        if (bundle_local_mode == 1) return strdup("{\"ok\":false,\"code\":\"LOCAL_MISS\",\"message\":\"missing\",\"retryable\":false,\"mutated\":false}");
+        if (bundle_local_mode == 2) return strdup("{\"code\":-32601,\"message\":\"Method not found\",\"method\":\"fleet_bundle_fetch_local\"}");
+        if (bundle_local_mode == 3) return strdup("{\"ok\":\"false\",\"code\":\"LOCAL_MISS\"}");
+        if (bundle_local_mode == 4) return strdup("{\"ok\":false,\"code\":\"SHA256_MISMATCH\",\"message\":\"mismatch\",\"retryable\":false,\"mutated\":false}");
+        if (bundle_local_mode == 5) return strdup("{\"ok\":true,\"data\":{\"state\":\"complete\"}}");
+        if (bundle_local_mode == 6) return strdup("{\"ok\":false,\"code\":\"LOCAL_MISS\",\"message\":\"missing\",\"retryable\":false,\"mutated\":true}");
+        if (bundle_local_mode == 7) return strdup("{\"code\":-32601,\"message\":\"Method not found\",\"method\":\"other\"}");
+        struct json_value value = {0};
+        bool ok = json_read(&value, params, strlen(params)) && value.type == JSON_ARR &&
+            json_get_bool(json_get(json_at(&value, 0), "local_only"));
+        struct json_value body = {0}, data = {0}; json_set_object(&body); json_set_object(&data);
+        if (ok) {
+            const struct json_value *in = json_at(&value, 0);
+            json_push_kv_str(&data, "state", "complete");
+            json_push_kv(&data, "root", json_get(in, "root"));
+            json_push_kv(&data, "sha256", json_get(in, "sha256"));
+            json_push_kv(&data, "path", json_get(in, "out"));
+            json_push_kv(&data, "size", json_get(in, "size"));
+            json_push_kv_bool(&body, "ok", true); json_push_kv(&body, "data", &data);
+        }
+        char *wire = bundle_rpc_wire(&body);
+        json_free(&data); json_free(&body); json_free(&value); return wire;
+    }
+    return NULL;
+}
+
+static int bundle_local_no_store(const struct zcl_command_request *request)
+{
+    int failures = 0; struct zcl_command_reply reply;
+    bundle_local_calls = bundle_add_calls = 0;
+    zcl_command_reply_init(&reply, "zcl.fleet_bundle_fetch.v1");
+    zcl_native_fleet_bundle_fetch_local(request, &reply);
+    SW_CHECK("bundle local handler: absent resident store never calls RPC",
+        !bundle_local_calls && !bundle_add_calls && !strcmp(reply.error.code, "HOSTING_DISABLED") &&
+        reply.status == ZCL_COMMAND_STATUS_FAILED && !reply.error.mutated);
+    zcl_command_reply_free(&reply); return failures;
+}
+
+static int bundle_case_local_bridge(void)
+{
+    int failures = 0;
+    struct bundle_pair pair;
+    if (!bundle_pair_open(&pair, "blocal")) return 1;
+    char path[1200]; bundle_make_path(path, sizeof(path), &pair.leech, "local.bundle");
+    struct json_value input = {0}; json_set_object(&input);
+    char root[65], sha[65]; memset(root, 'a', 64); root[64] = 0;
+    memset(sha, 'b', 64); sha[64] = 0;
+    json_push_kv_str(&input, "root", root); json_push_kv_str(&input, "sha256", sha);
+    json_push_kv_int(&input, "size", 1); json_push_kv_str(&input, "out", path);
+    json_push_kv_str(&input, "peer", BUNDLE_ONION);
+    struct zcl_command_request request = {.input = &input}; struct zcl_command_reply reply;
+    bundle_local_calls = bundle_add_calls = bundle_local_mode = 0;
+    zcl_command_reply_init(&reply, "zcl.fleet_bundle_fetch.v1");
+    node_rpc_client_set_test_hook(bundle_local_rpc);
+    zcl_native_handle_fleet_bundle_fetch(&request, &reply);
+    SW_CHECK("bundle bridge: cached step precedes peer admission", bundle_local_calls == 1 &&
+        bundle_add_calls == 0 && reply.status == ZCL_COMMAND_STATUS_PASSED);
+    zcl_command_reply_free(&reply);
+    for (int mode = 1; mode <= 7; ++mode) {
+        bundle_local_mode = mode; bundle_local_calls = bundle_add_calls = 0;
+        zcl_command_reply_init(&reply, "zcl.fleet_bundle_fetch.v1");
+        zcl_native_handle_fleet_bundle_fetch(&request, &reply);
+        SW_CHECK("bundle bridge: only typed miss or legacy method absence admits peer",
+            bundle_local_calls == 1 && bundle_add_calls == (mode <= 2 ? 1 : 0) &&
+            reply.status == ZCL_COMMAND_STATUS_FAILED &&
+            (mode != 4 || !strcmp(reply.error.code, "SHA256_MISMATCH")) &&
+            (mode != 5 || reply.error.mutated) && (mode != 6 || reply.error.mutated));
+        zcl_command_reply_free(&reply);
+    }
+    failures += bundle_local_no_store(&request);
+    node_rpc_client_set_test_hook(NULL); json_free(&input);
+    bundle_pair_close(&pair);
+    return failures;
+}
+
 /* One round trip of `len` bytes; also pins the public shape to BUNDLE. */
 static int bundle_case_roundtrip(const char *name, const char *tag,
                                  size_t len)
@@ -518,6 +602,97 @@ static int bundle_case_refusals(void)
     free(orig);
     bundle_pair_close(&p);
     return failures;
+}
+
+static int bundle_local_verify(struct bundle_pair *p, struct zcl_fleet_bundle_fetch_args *a,
+                               const char *path, const uint8_t *orig)
+{
+    int failures = 0; struct zcl_fleet_bundle_outcome o;
+    a->sha256[0] ^= 1;
+    SW_CHECK("bundle local-only: bad hash refuses without output",
+        zcl_fleet_bundle_fetch_step(p->seed.store, p->seed.engine, a, &o) == ZCL_FLEET_BUNDLE_REFUSED &&
+        !strcmp(o.code, "SHA256_MISMATCH") && access(path, F_OK) != 0);
+    a->sha256[0] ^= 1; ++a->size;
+    SW_CHECK("bundle local-only: wrong size refuses without output",
+        zcl_fleet_bundle_fetch_step(p->seed.store, p->seed.engine, a, &o) == ZCL_FLEET_BUNDLE_REFUSED &&
+        !strcmp(o.code, "SIZE_MISMATCH") && access(path, F_OK) != 0);
+    --a->size;
+    bool written = bundle_write_file(path, orig, 3000), mode_ok = false;
+    SW_CHECK("bundle local-only: existing output is not replaced", written &&
+        zcl_fleet_bundle_fetch_step(p->seed.store, p->seed.engine, a, &o) == ZCL_FLEET_BUNDLE_REFUSED &&
+        !strcmp(o.code, "OUT_EXISTS") && bundle_file_equals(path, orig, 3000, &mode_ok));
+    (void)unlink(path); mode_ok = false;
+    SW_CHECK("bundle local-only: complete root is verified and written",
+        zcl_fleet_bundle_fetch_step(p->seed.store, p->seed.engine, a, &o) == ZCL_FLEET_BUNDLE_DONE &&
+        bundle_file_equals(path, orig, 3000, &mode_ok) && mode_ok);
+    return failures;
+}
+
+static int bundle_case_local_only(void)
+{
+    int failures = 0; struct bundle_pair p; struct zcl_fleet_bundle_outcome offered, o;
+    uint8_t *orig = NULL;
+    if (!bundle_pair_open(&p, "bloc") || !bundle_offer(&p, 3000, &offered, &orig)) {
+        free(orig); bundle_pair_close(&p); return 1;
+    }
+    char path[1200]; bundle_make_path(path, sizeof(path), &p.leech, "local.bundle");
+    struct zcl_fleet_bundle_fetch_args a; bundle_args(&a, &offered, path); a.local_only = true;
+    SW_CHECK("bundle local-only: missing root refuses without output",
+        zcl_fleet_bundle_fetch_step(p.leech.store, p.leech.engine, &a, &o) == ZCL_FLEET_BUNDLE_REFUSED &&
+        !strcmp(o.code, "LOCAL_MISS") && !o.mutated && access(path, F_OK) != 0);
+    struct vcs_swarm_download_status ds = {0};
+    SW_CHECK("bundle local-only: missing root starts no download",
+        vcs_swarm_engine_download_status(p.leech.engine, a.root, &ds) && ds.state == VCS_SWARM_DL_INACTIVE);
+    failures += bundle_local_verify(&p, &a, path, orig);
+    free(orig); bundle_pair_close(&p); return failures;
+}
+
+static void bundle_local_rpc_input(struct json_value *input,
+    const struct zcl_fleet_bundle_outcome *offered, const char *path, int mode)
+{
+    char root[65], sha[65]; zcl_hex_encode(offered->root, 32, root); zcl_hex_encode(offered->sha256, 32, sha);
+    json_set_object(input); json_push_kv_str(input, "root", root); json_push_kv_str(input, "sha256", sha);
+    json_push_kv_int(input, "size", offered->size); json_push_kv_str(input, "out", path);
+    if (mode == 1) json_push_kv_bool(input, "local_only", false);
+    if (mode == 2) json_push_kv_str(input, "local_only", "true");
+    if (mode == 3) json_push_kv_bool(input, "local_only", true);
+}
+
+static int bundle_local_rpc_mode(const struct rpc_command *cmd, bool opened,
+    const struct zcl_fleet_bundle_outcome *offered, const char *path, const uint8_t *orig, int mode)
+{
+    int failures = 0;
+    struct json_value input = {0}, params = {0}, out = {0};
+    bundle_local_rpc_input(&input, offered, path, mode); json_set_array(&params);
+    bool called = opened && cmd && json_push_back(&params, &input) && cmd->actor(&params, false, &out);
+    const char *code = json_get_str(json_get(&out, "code")); bool mode_ok = false;
+    SW_CHECK("bundle local RPC: validates mode and uses verified resident store", called &&
+        (mode == 3 ? json_get_bool(json_get(&out, "ok")) && bundle_file_equals(path, orig, 3000, &mode_ok) && mode_ok :
+         code && !strcmp(code, "BAD_LOCAL_ONLY") && access(path, F_OK) != 0));
+    if (mode == 3) {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "fleet.bundle.fetch", NULL);
+        char why[256];
+        SW_CHECK("bundle public schema rejects private local-only input", spec &&
+            !zcl_command_registry_input_validate(spec, &input, why, sizeof(why)));
+    }
+    json_free(&out); json_free(&params); json_free(&input); return failures;
+}
+
+static int bundle_case_local_rpc(void)
+{
+    int failures = 0; struct bundle_pair p; struct zcl_fleet_bundle_outcome offered; uint8_t *orig = NULL;
+    if (!bundle_pair_open(&p, "blrpc") || !bundle_offer(&p, 3000, &offered, &orig)) {
+        free(orig); bundle_pair_close(&p); return 1;
+    }
+    const char *argv[] = {"z23-test", "-packagehost=1"}; ParseParameters(2, argv);
+    SetDataDir(p.seed.datadir); bool opened = vcs_package_store_open_global();
+    struct rpc_table table; rpc_table_init(&table); boot_fleet_bundle_register_rpc(&table);
+    const struct rpc_command *cmd = rpc_table_find(&table, "fleet_bundle_fetch_local");
+    char path[1200]; bundle_make_path(path, sizeof(path), &p.seed, "rpc-local.bundle");
+    for (int mode = 0; mode < 4; ++mode)
+        failures += bundle_local_rpc_mode(cmd, opened, &offered, path, orig, mode);
+    vcs_package_store_close_global(); const char *reset[] = {"z23-test"}; ParseParameters(1, reset); SetDataDir("");
+    free(orig); bundle_pair_close(&p); return failures;
 }
 
 /* A blob root is not a bundle: the fetch refuses it by shape. */
@@ -1220,6 +1395,9 @@ int t_swarm_bundle_transfer(void)
     failures += bundle_case_terminal_continuation();
     failures += bundle_case_delayed_provider();
     failures += bundle_case_command_poll();
+    failures += bundle_case_local_bridge();
+    failures += bundle_case_local_only();
+    failures += bundle_case_local_rpc();
     failures += bundle_case_inbound_tor_peers();
     failures += bundle_case_roundtrip("1 B", "b1", 1u);
     failures += bundle_case_roundtrip("1 MiB + 1 B", "b2",

@@ -23,12 +23,14 @@
 #include "command/native_fleet_bundle.h"
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "config/boot_zcode_swarm.h"
 #include "controllers/rpc_client.h"
 #include "controllers/rpc_params.h"
 #include "json/json.h"
 #include "platform/private_file.h"
 #include "platform/time_compat.h"
+#include "rpc/protocol.h"
 #include "vcs/bundle_carry.h"
 #include "vcs/package_store.h"
 #include "vcs/package_swarm_node.h"
@@ -312,7 +314,7 @@ static void fbc_fetch_resident(struct vcs_package_store *store,
      * may be full, in which case a new offer is never announced to us. Not
      * connected yet: fall back to discovery; the CLI poll retries. */
     uint64_t bound[FBC_BOUND_PEERS_MAX];
-    if (in->peer) {
+    if (in->peer && !in->args.local_only) {
         in->args.provider_count = boot_zcode_swarm_peers_for_onion(
             in->peer, bound, FBC_BOUND_PEERS_MAX);
         in->args.providers = bound;
@@ -327,20 +329,99 @@ static void fbc_fetch_resident(struct vcs_package_store *store,
     fbc_render_step(reply, &in->args, &o);
 }
 
-static void fbc_fwd_object(const struct fbc_fetch_in *in,
+static bool fbc_fwd_object(const struct fbc_fetch_in *in,
                            struct json_value *fwd)
 {
     json_init(fwd);
     json_set_object(fwd);
     char hex[65];
     zcl_hex_encode(in->args.root, 32, hex);
-    (void)json_push_kv_str(fwd, "root", hex);
+    bool ok = json_push_kv_str(fwd, "root", hex);
     zcl_hex_encode(in->args.sha256, 32, hex);
-    (void)json_push_kv_str(fwd, "sha256", hex);
-    (void)json_push_kv_int(fwd, "size", (int64_t)in->args.size);
-    (void)json_push_kv_str(fwd, "out", in->args.out_path);
+    ok = ok && json_push_kv_str(fwd, "sha256", hex);
+    ok = ok && json_push_kv_int(fwd, "size", (int64_t)in->args.size);
+    ok = ok && json_push_kv_str(fwd, "out", in->args.out_path);
     if (in->peer)
-        (void)json_push_kv_str(fwd, "peer", in->peer);
+        ok = ok && json_push_kv_str(fwd, "peer", in->peer);
+    return ok;
+}
+
+enum fbc_local_result { FBC_LOCAL_ERROR, FBC_LOCAL_MISS, FBC_LOCAL_DONE };
+
+static bool fbc_local_complete(const struct json_value *data, const struct fbc_fetch_in *in)
+{
+    char root[65], sha[65];
+    zcl_hex_encode(in->args.root, 32, root); zcl_hex_encode(in->args.sha256, 32, sha);
+    const char *state = fbc_str(data, "state"), *r = fbc_str(data, "root");
+    const char *s = fbc_str(data, "sha256"), *path = fbc_str(data, "path");
+    const struct json_value *size = json_get(data, "size");
+    return data && data->type == JSON_OBJ && state && !strcmp(state, "complete") &&
+        r && !strcmp(r, root) && s && !strcmp(s, sha) && path && !strcmp(path, in->args.out_path) &&
+        size && size->type == JSON_INT && json_get_int(size) == (int64_t)in->args.size;
+}
+
+static bool fbc_local_old_node(const struct json_value *body)
+{
+    const struct json_value *legacy_code = json_get(body, "code");
+    const char *method = fbc_str(body, "method");
+    const char *legacy_message = fbc_str(body, "message");
+    return legacy_code && legacy_code->type == JSON_INT &&
+        json_get_int(legacy_code) == RPC_METHOD_NOT_FOUND && method &&
+        !strcmp(method, "fleet_bundle_fetch_local") && legacy_message &&
+        !strcmp(legacy_message, "Method not found");
+}
+
+static enum fbc_local_result fbc_local_invalid(struct zcl_command_reply *reply)
+{
+    fbc_fail(reply, "NODE_UNAVAILABLE", "the local bundle check returned an invalid response", true, true, FBC_FETCH_CMD);
+    return FBC_LOCAL_ERROR;
+}
+
+static enum fbc_local_result fbc_local_refusal(const struct json_value *body,
+                                                struct zcl_command_reply *reply)
+{
+    const char *code = fbc_str(body, "code"), *message = fbc_str(body, "message");
+    const struct json_value *retryable = json_get(body, "retryable"), *mutated = json_get(body, "mutated");
+    if (!code || !message || (retryable && retryable->type != JSON_BOOL) ||
+        (mutated && mutated->type != JSON_BOOL)) return fbc_local_invalid(reply);
+    if (!strcmp(code, "LOCAL_MISS") && retryable && mutated &&
+        !json_get_bool(retryable) && !json_get_bool(mutated))
+        return FBC_LOCAL_MISS;
+    fbc_fail(reply, code, message, retryable && json_get_bool(retryable),
+             mutated && json_get_bool(mutated), FBC_FETCH_CMD);
+    return FBC_LOCAL_ERROR;
+}
+
+static enum fbc_local_result fbc_local_response(const struct json_value *body,
+    const struct fbc_fetch_in *in, struct zcl_command_reply *reply)
+{
+    if (!body || body->type != JSON_OBJ) return fbc_local_invalid(reply);
+    const struct json_value *ok = json_get(body, "ok");
+    if (!ok && fbc_local_old_node(body)) return FBC_LOCAL_MISS;
+    if (!ok || ok->type != JSON_BOOL) return fbc_local_invalid(reply);
+    if (!json_get_bool(ok)) return fbc_local_refusal(body, reply);
+    const struct json_value *data = json_get(body, "data");
+    if (!fbc_local_complete(data, in) || !json_copy_checked(&reply->data, data))
+        return fbc_local_invalid(reply);
+    return FBC_LOCAL_DONE;
+}
+
+static enum fbc_local_result fbc_check_local(const struct fbc_fetch_in *in,
+                                              struct zcl_command_reply *reply)
+{
+    struct json_value fwd, body, args; bool built = fbc_fwd_object(in, &fwd);
+    json_init(&body); json_init(&args); json_set_array(&args);
+    built = built && json_push_kv_bool(&fwd, "local_only", true) && json_push_back(&args, &fwd);
+    size_t need = built ? json_write(&args, NULL, 0) : 0;
+    char *params = need && need <= 32768u ? zcl_malloc(need + 1u, "bundle-local-rpc") : NULL;
+    if (params && json_write(&args, params, need + 1u) != need) { free(params); params = NULL; }
+    char *raw = NULL;
+    if (params) { zcl_native_bridge_ensure_rpc(); raw = node_rpc_call("fleet_bundle_fetch_local", params); }
+    enum fbc_local_result result = FBC_LOCAL_ERROR;
+    if (raw && json_read(&body, raw, strlen(raw))) result = fbc_local_response(&body, in, reply);
+    else if (params) fbc_fail(reply, "NODE_UNAVAILABLE", "the local bundle check did not answer", true, true, FBC_FETCH_CMD);
+    else fbc_fail(reply, "ARG_BUILD_FAILED", "could not encode the local bundle check", false, false, FBC_FETCH_CMD);
+    free(raw); free(params); json_free(&args); json_free(&body); json_free(&fwd); return result;
 }
 
 /* Read the node's peer list once and say whether the named onion is in it.
@@ -426,7 +507,11 @@ static void fbc_fetch_poll(struct fbc_fetch_in *in,
                            struct zcl_command_reply *reply)
 {
     struct json_value fwd;
-    fbc_fwd_object(in, &fwd);
+    if (!fbc_fwd_object(in, &fwd)) {
+        json_free(&fwd);
+        fbc_fail(reply, "ARG_BUILD_FAILED", "could not encode the request", false, false, FBC_FETCH_CMD);
+        return;
+    }
     uint64_t deadline =
         (uint64_t)platform_time_wall_unix() + (uint64_t)in->timeout_s;
     bool continuing = false;
@@ -460,7 +545,7 @@ static void fbc_fetch_poll(struct fbc_fetch_in *in,
 
 static void fbc_fetch(
     const struct zcl_command_request *request,
-    struct zcl_command_reply *reply, bool continuation)
+    struct zcl_command_reply *reply, bool continuation, bool local_only)
 {
     if (!request || !reply)
         return;
@@ -468,9 +553,14 @@ static void fbc_fetch(
     if (!fbc_parse_fetch(request->input, reply, &in))
         return;
     in.args.continuation = continuation;
+    in.args.local_only = local_only;
     struct vcs_package_store *store = vcs_package_store_global();
     if (store) {
         fbc_fetch_resident(store, &in, reply);
+        return;
+    }
+    if (local_only) {
+        fbc_fail(reply, "HOSTING_DISABLED", "package hosting is disabled on this node", false, false, FBC_FETCH_CMD);
         return;
     }
     if (!platform_private_path_absent(in.args.out_path)) {
@@ -479,19 +569,28 @@ static void fbc_fetch(
                  false, false, FBC_FETCH_CMD);
         return;
     }
-    if (in.peer && !fbc_add_peer(in.peer, reply))
-        return;
+    if (in.peer) {
+        enum fbc_local_result local = fbc_check_local(&in, reply);
+        if (local != FBC_LOCAL_MISS) return;
+        if (!fbc_add_peer(in.peer, reply)) return;
+    }
     fbc_fetch_poll(&in, reply);
 }
 
 void zcl_native_handle_fleet_bundle_fetch(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    fbc_fetch(request, reply, false);
+    fbc_fetch(request, reply, false, false);
 }
 
 void zcl_native_fleet_bundle_fetch_continue(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    fbc_fetch(request, reply, true);
+    fbc_fetch(request, reply, true, false);
+}
+
+void zcl_native_fleet_bundle_fetch_local(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    fbc_fetch(request, reply, false, true);
 }

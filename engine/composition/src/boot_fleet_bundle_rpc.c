@@ -103,11 +103,25 @@ static bool bundle_fetch(const struct json_value *params, bool help,
                               zcl_native_fleet_bundle_fetch_continue : zcl_native_handle_fleet_bundle_fetch, false);
 }
 
+static bool bundle_fetch_local(const struct json_value *params, bool help,
+                               struct json_value *result)
+{
+    if (help) { json_set_str(result, "fleet_bundle_fetch_local {root,sha256,size,out,local_only}"); return true; }
+    const struct json_value *input = params && json_size(params) ? json_at(params, 0) : NULL;
+    const struct json_value *local = json_get(input, "local_only");
+    if (!local || local->type != JSON_BOOL || !json_get_bool(local)) {
+        bundle_rpc_refuse(result, "BAD_LOCAL_ONLY", "local_only must be true"); return true;
+    }
+    return bundle_rpc_run(params, result, "zcl.fleet_bundle_fetch.v1",
+                          zcl_native_fleet_bundle_fetch_local, false);
+}
+
 void boot_fleet_bundle_register_rpc(struct rpc_table *table)
 {
     const struct rpc_command commands[] = {
         { "fleet", "fleet_bundle_offer", bundle_offer, true },
         { "fleet", "fleet_bundle_fetch", bundle_fetch, true },
+        { "fleet", "fleet_bundle_fetch_local", bundle_fetch_local, true },
     };
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
         rpc_table_must_append(table, &commands[i]);

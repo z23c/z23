@@ -306,6 +306,8 @@ static enum zcl_fleet_bundle_status zfb_progress(
 {
     if (zfb_store_complete(store, args->root))
         return ZCL_FLEET_BUNDLE_DONE;
+    if (args->local_only)
+        return zfb_refuse(out, "LOCAL_MISS", "bundle is not complete locally", false, false);
     if (!engine)
         return zfb_refuse(out, "NO_ENGINE",
                           "no swarm engine is running (package hosting "
