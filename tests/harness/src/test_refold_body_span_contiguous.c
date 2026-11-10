@@ -27,6 +27,8 @@
 #include "test/test_core.h"
 
 #include "config/boot.h"
+#include "config/boot_error.h"
+#include "config/boot_consensus_bundle_marker.h"
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
 #include "chain/chain.h"
@@ -88,6 +90,51 @@ static bool bsc_install_span_with_hole(struct main_state *ms, int from_height,
         seeded = seeded &&
                  bsc_install(ms, h, /*have_data=*/(h != hole_height));
     return seeded;
+}
+
+/* From-anchor marker refusal: no marker and a marker at the anchor stay
+ * quiet; a marker above the anchor refuses and names the stage. */
+static void bsc_anchor_marker_refusal(int *failures_out)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "refold_body_span", "marker");
+
+    boot_error_reset_for_testing();
+    bool no_marker = boot_refold_from_anchor_refused_by_marker(dir, 1000);
+    BSC_CHECK("C8: no marker does not refuse", !no_marker);
+    BSC_CHECK("C8: no marker does not latch", !boot_error_reported());
+
+    uint8_t digest[32];
+    memset(digest, 0x7e, sizeof digest);
+    bool wrote = boot_consensus_bundle_marker_write(dir, 1200, digest);
+    BSC_CHECK("C8: marker above anchor writes", wrote);
+    boot_error_reset_for_testing();
+    bool refused = boot_refold_from_anchor_refused_by_marker(dir, 1000);
+    char rendered[BOOT_ERROR_RENDER_MAX];
+    size_t rendered_n = boot_error_last_render(rendered, sizeof(rendered));
+    BSC_CHECK("C8: marker above anchor refuses", refused);
+    BSC_CHECK("C8: refusal code is BOOT_REFOLD_ANCHOR_MARKER_REFUSED",
+              boot_error_reported() &&
+              strcmp(boot_error_first_code(),
+                     "BOOT_REFOLD_ANCHOR_MARKER_REFUSED") == 0);
+    BSC_CHECK("C8: render names stage and heights",
+              rendered_n > 0 &&
+              strstr(rendered, "refold.anchor") != NULL &&
+              strstr(rendered, "stage=install_marker_above_anchor") != NULL &&
+              strstr(rendered, "anchor=1000") != NULL &&
+              strstr(rendered, "marker=1200") != NULL);
+
+    boot_error_reset_for_testing();
+    bool overwrote = boot_consensus_bundle_marker_write(dir, 1000, digest);
+    BSC_CHECK("C8: marker at anchor overwrites", overwrote);
+    bool at_anchor = boot_refold_from_anchor_refused_by_marker(dir, 1000);
+    BSC_CHECK("C8: marker at anchor does not refuse", !at_anchor);
+    BSC_CHECK("C8: marker at anchor does not latch", !boot_error_reported());
+
+    boot_error_reset_for_testing();
+    test_rm_rf_recursive(dir);
+    *failures_out += failures;
 }
 
 int test_refold_body_span_contiguous(void);
@@ -320,5 +367,6 @@ int test_refold_body_span_contiguous(void)
         blocker_reset_for_testing();
     }
 
+    bsc_anchor_marker_refusal(&failures);
     return failures;
 }

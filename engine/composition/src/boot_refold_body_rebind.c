@@ -12,6 +12,7 @@
  * already-public functions, so this TU needs no private header.
  */
 #include "config/boot.h"
+#include "config/boot_error.h"
 #include "config/boot_consensus_bundle_marker.h"
 
 #include "platform/time_compat.h"
@@ -144,11 +145,17 @@ bool boot_refold_from_anchor_refused_by_marker(const char *datadir,
 {
     if (!boot_refold_anchor_reset_blocked_by_marker(datadir, anchor_height))
         return false;
-    fprintf(stderr,
-            "WARNING: refold-from-anchor: refused - the install marker is above "
-            "the compiled anchor h=%d; the datadir was installed from a newer "
-            "baked bundle and cannot be reset to the anchor.\n",
-            (int)anchor_height);
+    int32_t marker_h = -1;
+    const char *dd = (datadir && datadir[0]) ? datadir : NULL;
+    if (dd)
+        (void)boot_consensus_bundle_marker_height(dd, &marker_h);
+    boot_error_report(BOOT_ERROR_FATAL,
+        "BOOT_REFOLD_ANCHOR_MARKER_REFUSED",
+        "refold.anchor",
+        "refold-from-anchor refused: the install marker is above the compiled anchor",
+        NULL, 0,
+        "stage=install_marker_above_anchor anchor=%d marker=%d",
+        (int)anchor_height, (int)marker_h);
     event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
                 "refold_from_anchor install_marker_above_anchor anchor=%d",
                 (int)anchor_height);
