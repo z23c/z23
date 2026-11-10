@@ -13020,6 +13020,106 @@ static int test_epoch_owner_is_nearest_make(void)
     } _test_next:;
     return failures;
 }
+
+struct epn_preflight_scan { int pre, standalone, begin, end; bool block; };
+
+static bool epn_preflight_line(struct epn_preflight_scan *s, const char *line, FILE *out)
+{
+    if (!strchr(line, '\n')) return false;
+    if (!strcmp(line, "# lint-preflight-epoch-verify fixture begin\n")) { s->block = true; s->begin++; }
+    bool select = s->block;
+    if (!strncmp(line, "lint-preflight: $(Z23_DEV_BIN)", 29)) { s->pre++; select = true; }
+    if (!strcmp(line, "check-capability-closure lint lint-preflight: $(CAPABILITY_STANDALONE_OBJS)\n")) {
+        s->standalone++; select = true;
+    }
+    if (select && fputs(line, out) == EOF) return false;
+    if (!strcmp(line, "# lint-preflight-epoch-verify fixture end\n")) { s->block = false; s->end++; }
+    return true;
+}
+
+/* Include the repository's actual preflight edges and verification recipe;
+ * refuse a changed layout rather than silently testing a stale graph. */
+static bool epn_preflight_edges(const char *root)
+{
+    FILE *in = fopen("Makefile", "r");
+    char path[PATH_MAX], line[4096];
+    if (!in || snprintf(path, sizeof(path), "%s/actual-edges.mk", root) >= (int)sizeof(path)) {
+        if (in) fclose(in);
+        return false;
+    }
+    FILE *out = fopen(path, "w");
+    if (!out) { fclose(in); return false; }
+    struct epn_preflight_scan scan = {0}; bool ok = true;
+    while (fgets(line, sizeof(line), in)) {
+        if (!epn_preflight_line(&scan, line, out)) { ok = false; break; }
+    }
+    if (ferror(in)) ok = false;
+    if (fclose(in)) ok = false;
+    if (fclose(out)) ok = false;
+    return ok && !scan.block && scan.pre == 1 && scan.standalone == 1 && scan.begin == 1 && scan.end == 1;
+}
+
+static bool epn_preflight_tools(const char *cwd, const char *root)
+{
+    const char *tools[] = {"build-epoch-session.sh", "build-epoch-open-file-identity.sh",
+                           "build-epoch-lock-wait.sh", "compile-epoch-object.sh",
+                           "process-start-token.sh"};
+    for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
+        char path[PATH_MAX];
+        if (!epn_copy_tool(cwd, root, tools[i]) ||
+            snprintf(path, sizeof(path), "%s/tools/dev/%s", root, tools[i]) >= (int)sizeof(path) ||
+            chmod(path, 0700) != 0) return false;
+    }
+    return epn_write_exec(root, "tools/dev/build-epoch-key.sh",
+        "#!/bin/sh\ncase \"$1\" in compiler-id) printf '%064d\\n' 1;; "
+        "build-system-id) printf '%064d\\n' 2;; key) printf '%064d\\n' 3;; *) exit 2;; esac\n") &&
+        epn_write_exec(root, "tools/dev/source-identity.sh", "#!/bin/sh\n[ \"$1\" = verify-record ]\n") &&
+        dp_mk_write(root, "fixture.c", "int fixture(void) { return 7; }\n");
+}
+
+static bool epn_preflight_makefile(const char *root)
+{
+    static const char mk[] =
+        "S := $(shell printf '%064d' 4)\nM := $(shell printf '%064d' 5)\n"
+        "C := $(shell printf '%064d' 1)\nE := $(shell printf '%064d' 3)\n"
+        "O := objects\nD := $(O)/epochs/$(E)\nSESSION := $(D)/.build-session\nLEASE := $(D)/.leases/fixture\n"
+        "Z23_DEV_BIN := verified\nDEV_PACKAGE_VERIFY_BIN := verified\nLINTC_TOOL := verified\n"
+        "TOOLGEN_BIN := verified\nCAPABILITY_INVENTORY_TOOL := verified\nCAPABILITY_STANDALONE_OBJS := writer\n"
+        "include actual-edges.mk\n.PHONY: lint-preflight acquire verified writer\n"
+        "acquire:\n\t@tools/dev/build-epoch-session.sh acquire $(SESSION) $(LEASE) $(O) - 1 $(S) 1 $(M) $(C) $(E) fixture-v1 -O2 - cc c++ $$PPID\n"
+        "verified: acquire\n\t@tools/dev/build-epoch-session.sh verify $(SESSION) $(LEASE) $(O) - 1 $(S) 1 $(M) $(C) $(E) fixture-v1 -O2 - cc c++ $$PPID\n\t@printf 'x\\n' > barrier\n"
+        "writer: acquire\n\t@read token < barrier\n\t@tools/dev/compile-epoch-object.sh dep $(D)/standalone.o fixture.c $(S) 1 $(M) $(E) $(C) $(SESSION) -- cc -std=c23 -O2\n"
+        "lint-preflight:\n\t@test -f $(D)/standalone.o && test ! -e $(D)/.unverified\n"
+        "BUILD_EPOCH_SESSION_TOOL := tools/dev/build-epoch-session.sh\nDEV_SESSION := $(SESSION)\nDEV_LEASE := $(LEASE)\nDEV_OBJ_ROOT := $(O)\nBIN_DIR := unused\nBUILD_EPOCH_KEEP := 1\n"
+        "BUILD_SOURCE_ID := $(S)\nBUILD_CLEAN := 1\nBUILD_MUTATION := $(M)\nBUILD_COMPILER_ID := $(C)\nDEV_COMPILE_EPOCH := $(E)\nDEV_PROFILE := fixture-v1\nDEV_EPOCH_COMPILE_FLAGS := -O2\nDEV_EPOCH_LINK_FLAGS := -\n";
+    char fifo[PATH_MAX];
+    return dp_mk_write(root, "fixture.mk", mk) &&
+        snprintf(fifo, sizeof(fifo), "%s/barrier", root) < (int)sizeof(fifo) && mkfifo(fifo, 0600) == 0;
+}
+
+static int test_epoch_preflight_final_verify(void)
+{
+    int failures = 0;
+    TEST("dev platform: preflight verifies after every standalone epoch writer") {
+        char cwd[PATH_MAX], root[PATH_MAX], command[PATH_MAX + 96];
+        ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
+        ASSERT(test_mkdtemp(root, sizeof(root), "epoch_preflight") != NULL);
+        ASSERT(epn_preflight_edges(root));
+        ASSERT(epn_preflight_tools(cwd, root));
+        ASSERT(epn_preflight_makefile(root));
+        ASSERT(snprintf(command, sizeof(command), "cd '%s' && MAKEFLAGS= MFLAGS= make -s -j2 -f fixture.mk lint-preflight >make.log 2>&1", root) < (int)sizeof(command));
+        bool ran = dp_hs_run(command);
+        if (!ran) {
+            char path[PATH_MAX], output[8192];
+            if (snprintf(path, sizeof(path), "%s/make.log", root) < (int)sizeof(path) &&
+                dp_hf_slurp(path, output, sizeof(output))) fprintf(stderr, "preflight fixture: %s\n", output);
+        }
+        ASSERT(ran);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 #endif
 
 int test_dev_platform(void)
@@ -13028,6 +13128,7 @@ int test_dev_platform(void)
 #if !defined(_WIN32)
     failures += test_process_output_eof();
     failures += test_epoch_owner_is_nearest_make();
+    failures += test_epoch_preflight_final_verify();
 #endif
     return failures;
 }

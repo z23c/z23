@@ -14022,6 +14022,21 @@ CAPABILITY_STANDALONE_OBJS += $(DEV_OBJ_DIR)/tools/lab_peer.o $(DEV_OBJ_DIR)/too
 # Every path that runs the gate (the make target, parallel lint, lint-preflight)
 # builds them first.
 check-capability-closure lint lint-preflight: $(CAPABILITY_STANDALONE_OBJS)
+# A standalone capability object can finish after either dev binary's own
+# aggregate verification. Verify once more after every preflight epoch writer
+# has drained, so a successful preflight does not leave its epoch unverified.
+ifneq ($(ZCL_LINT_SERIAL),1)
+# lint-preflight-epoch-verify fixture begin
+.PHONY: lint-preflight-epoch-verify
+lint-preflight-epoch-verify: $(Z23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN) $(CAPABILITY_STANDALONE_OBJS)
+	@$(BUILD_EPOCH_SESSION_TOOL) verify "$(DEV_SESSION)" "$(DEV_LEASE)" \
+	  "$(DEV_OBJ_ROOT)" "$(BIN_DIR)/dev" "$(BUILD_EPOCH_KEEP)" \
+	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
+	  "$(DEV_COMPILE_EPOCH)" "$(DEV_PROFILE)" "$(DEV_EPOCH_COMPILE_FLAGS)" \
+	  "$(DEV_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)" "$$PPID" >/dev/null
+lint-preflight: lint-preflight-epoch-verify
+# lint-preflight-epoch-verify fixture end
+endif
 $(LAB_PEER_FAKE_BIN): tools/lab_peer_fake.c
 	mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
