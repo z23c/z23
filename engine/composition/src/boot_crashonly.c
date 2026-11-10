@@ -9,6 +9,7 @@
 
 #include "config/boot_crashonly.h"
 
+#include "config/boot_error.h"
 #include "config/boot_refusal_reports.h"
 #include "event/event.h"
 #include "storage/boot_auto_reindex.h"
@@ -425,13 +426,14 @@ bool boot_crashonly_reindex_coverage_ok(const char *datadir,
                                               have_data_count))
         return true;
 
-    fprintf(stderr,
-        "[boot] -reindex-chainstate refused: coins are seeded but local body "
-        "coverage of [0..%d] is materially incomplete (max_have_data_h=%d "
-        "have_data_count=%d) — a from-genesis replay cannot complete and would "
-        "wipe the seed. Preferring fold-forward-from-seed; clearing the reindex "
-        "sentinel so it does not re-arm every boot.\n",
-        reindex_best_h, max_have_data_h, have_data_count);
+    boot_error_report(BOOT_ERROR_FATAL, "BOOT_REINDEX_SPARSE_BODIES_REFUSED",
+                      "reindex.coverage",
+                      "-reindex-chainstate refused: coins are seeded but local "
+                      "body coverage is materially incomplete",
+                      NULL, 0,
+                      "stage=body_coverage target=%d max_have_data_h=%d "
+                      "have_data_count=%d",
+                      reindex_best_h, max_have_data_h, have_data_count);
     event_emitf(EV_BOOT_ACTIVATE, 0,
         "reindex_refused_sparse_bodies target=%d max_have_data=%d count=%d",
         reindex_best_h, max_have_data_h, have_data_count);

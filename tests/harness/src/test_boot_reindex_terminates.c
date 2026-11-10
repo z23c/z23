@@ -392,12 +392,33 @@ static int br_term_body_coverage(void)
         /* a pending sentinel */
         (void)boot_auto_reindex_request(
             dir, 0, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
+        boot_error_reset_for_testing();
         bool ok = boot_crashonly_reindex_coverage_ok(dir, 3000000, 0, 1,
                                                      /*coins_seeded=*/true);
         BR_CHECK("coverage decision: seeded+sparse refuses reindex", !ok);
         BR_CHECK("coverage decision: refusal clears the sentinel (no re-arm)",
                  !boot_auto_reindex_pending(dir) &&
                  !boot_auto_reindex_is_terminal(dir));
+        BR_CHECK("coverage decision: seeded+sparse reports a fatal",
+                 boot_error_reported());
+        BR_CHECK("coverage decision: seeded+sparse code is sparse bodies",
+                 strcmp(boot_error_first_code(),
+                        "BOOT_REINDEX_SPARSE_BODIES_REFUSED") == 0);
+        {
+            char render[BOOT_ERROR_RENDER_MAX];
+            render[0] = '\0';
+            (void)boot_error_last_render(render, sizeof(render));
+            BR_CHECK("coverage decision: seeded+sparse names reindex.coverage",
+                     strstr(render, "reindex.coverage") != NULL);
+            BR_CHECK("coverage decision: seeded+sparse evidence stage",
+                     strstr(render, "stage=body_coverage") != NULL);
+            BR_CHECK("coverage decision: seeded+sparse evidence target",
+                     strstr(render, "target=3000000") != NULL);
+            BR_CHECK("coverage decision: seeded+sparse evidence max_have_data_h",
+                     strstr(render, "max_have_data_h=0") != NULL);
+            BR_CHECK("coverage decision: seeded+sparse evidence have_data_count",
+                     strstr(render, "have_data_count=1") != NULL);
+        }
 
         /* A second boot with the same sparse coverage refuses+clears again. */
         (void)boot_auto_reindex_request(dir, 0, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
@@ -405,12 +426,17 @@ static int br_term_body_coverage(void)
         BR_CHECK("coverage decision: second boot still refuses + stays cleared",
                  !ok && !boot_auto_reindex_pending(dir));
 
+        boot_error_reset_for_testing();
         BR_CHECK("coverage decision: unseeded datadir proceeds (true)",
                  boot_crashonly_reindex_coverage_ok(dir, 3000000, 0, 1,
                                                     /*coins_seeded=*/false));
+        BR_CHECK("coverage decision: unseeded stays silent",
+                 !boot_error_reported());
         BR_CHECK("coverage decision: seeded+dense proceeds (true)",
                  boot_crashonly_reindex_coverage_ok(dir, 100000, 100000, 100001,
                                                     /*coins_seeded=*/true));
+        BR_CHECK("coverage decision: seeded+dense stays silent",
+                 !boot_error_reported());
 
         test_cleanup_tmpdir(dir);
     }
