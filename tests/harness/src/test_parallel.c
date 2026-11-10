@@ -4350,6 +4350,10 @@ int main(int argc, char **argv)
     /* Narrow sealed-image process fixture dispatch, before runner init. */
     extern void supervised_fixture_exit_if_requested(int argc, char **argv);
     supervised_fixture_exit_if_requested(argc, argv);
+#if !defined(_WIN32)
+    extern void dev_proof_fixture_exit_if_requested(int argc, char **argv);
+    dev_proof_fixture_exit_if_requested(argc, argv);
+#endif
     struct run_ctx c;
     memset(&c, 0, sizeof(c));
     platform_time_monotonic_timespec(&c.process_start);

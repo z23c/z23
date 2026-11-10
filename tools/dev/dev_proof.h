@@ -554,8 +554,8 @@ void zcl_dev_proof_execution_release(int guard);
  * invalid/unavailable. Existing failed attempts require explicit retry. */
 int zcl_dev_proof_step(const char *root, const char *local, const char *base,
                         struct zcl_dev_proof_status *out);
-/* A caller-supplied observation that the pair's base is no longer the
- * remote tip. SUPERSEDED is the only answer that acts: the foreground
+/* A caller-supplied observation of the proof's ongoing eligibility.
+ * SUPERSEDED and REQUEST_CANCELLED act: the foreground
  * requester then cancels its worker exactly as a SIGTERM would, so every
  * running step's process group gets TERM, 100 ms, then KILL, and the pair
  * settles as a cancelled failure that can never read as PASS. UNKNOWN
@@ -565,17 +565,20 @@ enum zcl_dev_proof_base_observation {
     ZCL_DEV_PROOF_BASE_UNKNOWN = 0,
     ZCL_DEV_PROOF_BASE_CURRENT = 1,
     ZCL_DEV_PROOF_BASE_SUPERSEDED = 2,
+    ZCL_DEV_PROOF_REQUEST_CANCELLED = 3,
 };
 struct zcl_dev_proof_base_probe {
     enum zcl_dev_proof_base_observation (*observe)(void *ctx);
     void *ctx;
     int interval_ms; /* <= 0 selects ZCL_DEV_PROOF_BASE_PROBE_MS */
+    bool *cancelled; /* set only after the cancelled worker has been reaped */
 };
 #define ZCL_DEV_PROOF_BASE_PROBE_MS 30000
 /* zcl_dev_proof_step with the base watched while the foreground worker
  * runs. `probe` may be NULL (identical to zcl_dev_proof_step). When the
- * probe cancelled the worker, `*superseded` is set and out->detail keeps
- * the settled pair's own failure text. */
+ * probe observed a changed base, `*superseded` is set. Request cancellation
+ * is reported through probe->cancelled only after normal worker settlement;
+ * out->detail keeps the settled pair's own failure text. */
 int zcl_dev_proof_step_watched(const char *root, const char *local,
                                const char *base,
                                const struct zcl_dev_proof_base_probe *probe,

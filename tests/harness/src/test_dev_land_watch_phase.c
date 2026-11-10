@@ -9,9 +9,62 @@
 #endif
 
 #include "test/test_dev_land_common.h"
+#include "command/native_dev_proof_command.h"
 #include "zutf8/zutf8.h"
 
 #if !defined(_WIN32)
+
+static bool dlx_proof_fixture_input(int argc, char **argv, struct json_value *input)
+{
+    json_set_object(input);
+    for (int i = 5; i < argc; i++) {
+        const char *equal = strchr(argv[i], '='); char key[80];
+        if (strncmp(argv[i], "--", 2) || !equal || equal - argv[i] <= 2 ||
+            (size_t)(equal - argv[i] - 2) >= sizeof(key)) return false;
+        size_t len = (size_t)(equal - argv[i] - 2); memcpy(key, argv[i] + 2, len); key[len] = '\0';
+        if (!json_push_kv_str(input, key, equal + 1)) return false;
+    }
+    return true;
+}
+
+static void dlx_proof_fixture_step(int argc, char **argv,
+                                   const struct zcl_command_registry *registry)
+{
+    char wire[32768];
+    if (argc < 8 || strcmp(argv[2], "dev") || strcmp(argv[3], "proof") || strcmp(argv[4], "step")) _exit(2);
+    const struct zcl_command_spec *original = zcl_command_registry_find(registry, "dev.proof.step", NULL);
+    if (!original) _exit(2);
+    struct zcl_command_spec spec = *original;
+    spec.availability = ZCL_COMMAND_READY; spec.compat_target = "";
+    spec.handler = zcl_native_dev_proof_dispatch;
+    struct json_value input = {0};
+    if (!dlx_proof_fixture_input(argc, argv, &input)) _exit(2);
+    struct zcl_command_context context = { .registry = registry, .operator_lane = "dev",
+        .granted_capabilities = UINT64_MAX, .authority_ceiling = ZCL_COMMAND_AUTH_OWNER, .dev_build = true };
+    enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+    size_t n = zcl_command_registry_execute_json(registry, &spec, &context, &input,
+        false, spec.path, NULL, 0, 0, NULL, wire, sizeof(wire), &code);
+    json_free(&input);
+    if (!n || n >= sizeof(wire)) _exit(2);
+    if (write(STDOUT_FILENO, wire, n) != (ssize_t)n) _exit(2);
+    _exit((int)code);
+}
+
+/* The runner re-execs itself only for this exact fixture arm. It restores the
+ * one development descriptor's handler; all schema checks remain real. */
+void dev_proof_fixture_exit_if_requested(int argc, char **argv)
+{
+    if (argc < 2 || strcmp(argv[1], "--dev-proof-fixture")) return;
+    (void)setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1);
+    const struct zcl_command_registry *registry = zcl_command_catalog();
+    if (argc == 5 && !strcmp(argv[2], "discover") && !strcmp(argv[3], "describe") &&
+        !strcmp(argv[4], "--input={\"path\":\"dev.proof.step\"}")) {
+        char wire[32768]; size_t n = zcl_command_registry_describe_json(registry, "dev.proof.step", wire, sizeof(wire));
+        if (!n || n >= sizeof(wire) || write(STDOUT_FILENO, wire, n) != (ssize_t)n) _exit(2);
+        _exit(0);
+    }
+    dlx_proof_fixture_step(argc, argv, registry);
+}
 
 void zcl_dev_land_test_first_actionable(const char *text, char *out, size_t cap);
 
@@ -216,9 +269,231 @@ static bool dlx_step_group_gone(int64_t leader)
     return leader_gone && group_gone;
 }
 
+struct dlx_external_cancel {
+    struct dlx_rig rig; char queue[8192], maker[1400], ready[1400], outcome[1400], root[1400];
+    int fds[2]; pid_t child;
+};
+
+static bool dlx_external_cancel_start(struct dlx_external_cancel *x, int mode)
+{
+    char exe[4096], script[1800], land[1200]; size_t n = 0;
+    if (!dlx_started(&x->rig, "external_cancel", "external_cancel_rig") ||
+        !dlx_queue_bytes(x->queue, sizeof(x->queue), &n) || !os_proc_exe_path(exe, sizeof(exe))) return false;
+    dlx_land_wt(x->root, sizeof(x->root));
+    (void)snprintf(x->maker, sizeof(x->maker), "%s/fake-make", x->rig.clone);
+    (void)snprintf(x->ready, sizeof(x->ready), "%s/held-step.pid", x->rig.clone);
+    dlx_landdir(land, sizeof(land)); (void)snprintf(x->outcome, sizeof(x->outcome), "%s/outcomes.jsonl", land);
+    (void)snprintf(script, sizeof(script), "#!/bin/sh\nmkdir -p \"$3/build/bin\" || exit 1\nprintf '%%s\\n' '#!/bin/sh' 'exec \"$ZCL_PROOF_FIXTURE_BINARY\" --dev-proof-fixture \"$@\"' > \"$3/build/bin/z23-dev\"\nchmod 700 \"$3/build/bin/z23-dev\"\n");
+    if (!dlx_write(x->maker, script) || chmod(x->maker, 0700) || pipe(x->fds)) return false;
+    (void)setenv("ZCL_PROOF_FIXTURE_BINARY", exe, 1);
+    (void)setenv("ZCL_PROOF_TEST_HELD_STEP", x->ready, 1);
+    if (mode == 1) (void)setenv("ZCL_PROOF_TEST_ABNORMAL", "1", 1);
+    if (mode == 2) (void)setenv("ZCL_PROOF_TEST_WAIT_ERROR", "1", 1);
+    x->child = fork();
+    if (x->child == 0) {
+        close(x->fds[0]);
+        int rc = zcl_native_dev_land_test_boundary_reproof(x->queue, x->root, x->maker);
+        if (write(x->fds[1], &rc, sizeof(rc)) != (ssize_t)sizeof(rc)) _exit(2);
+        _exit(0);
+    }
+    close(x->fds[1]);
+    if (x->child < 0) { close(x->fds[0]); return false; }
+    return true;
+}
+
+struct dlx_external_result {
+    bool exists, cancelled, captured, joined, unchanged;
+    int result; long pid;
+};
+
+static void dlx_external_cancel_observe(struct dlx_external_cancel *x,
+                                        struct dlx_external_result *out)
+{
+    struct dlx_call c; char before[8192], after[8192], pidtext[64];
+    size_t before_n = 0, after_n = 0; int status = 0;
+    for (int i = 0; i < 300 && !out->exists; i++) {
+        out->exists = dlx_file_exists(x->ready); if (!out->exists) platform_sleep_ms(20); /* real-clock: external requester and owned OS process coordinate through a readiness file. */
+    }
+    dlx_begin(&c, "cancel"); (void)json_push_kv_int(&c.input, "seq", 1);
+    out->cancelled = dlx_run(&c) && dlx_ok(&c); dlx_end(&c);
+    out->captured = dlx_slurp(x->outcome, before, sizeof(before), &before_n);
+    out->joined = dlx_wait_child(x->child, &status) == x->child && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+                  read(x->fds[0], &out->result, sizeof(out->result)) == (ssize_t)sizeof(out->result);
+    close(x->fds[0]);
+    size_t pn = 0; bool read_pid = dlx_slurp(x->ready, pidtext, sizeof(pidtext) - 1, &pn); pidtext[pn] = '\0';
+    out->pid = read_pid ? strtol(pidtext, NULL, 10) : -1;
+    out->unchanged = dlx_slurp(x->outcome, after, sizeof(after), &after_n) && before_n == after_n &&
+                     memcmp(before, after, before_n) == 0;
+}
+
+static bool dlx_external_cancel_request(int mode)
+{
+    struct dlx_external_cancel x; struct dlx_external_result observed = {0};
+    if (!dlx_external_cancel_start(&x, mode)) {
+        unsetenv("ZCL_PROOF_FIXTURE_BINARY"); unsetenv("ZCL_PROOF_TEST_HELD_STEP");
+        unsetenv("ZCL_PROOF_TEST_ABNORMAL"); unsetenv("ZCL_PROOF_TEST_WAIT_ERROR");
+        dlx_restore(); return false;
+    }
+    dlx_external_cancel_observe(&x, &observed);
+    unsetenv("ZCL_PROOF_FIXTURE_BINARY"); unsetenv("ZCL_PROOF_TEST_HELD_STEP");
+    unsetenv("ZCL_PROOF_TEST_ABNORMAL"); unsetenv("ZCL_PROOF_TEST_WAIT_ERROR"); dlx_restore();
+    bool gone = observed.pid > 1 && dlx_step_group_gone(observed.pid);
+    if (mode == 1) for (int i = 0; i < 200 && !gone; i++) {
+        platform_sleep_ms(20); gone = observed.pid > 1 && dlx_step_group_gone(observed.pid); /* real-clock: observe the separately sessioned OS process group disappear. */
+    }
+    bool ok = observed.exists && observed.cancelled && observed.captured && observed.joined &&
+              (mode ? observed.result != -3 : observed.result == -3) && gone && observed.unchanged;
+    if (!ok) fprintf(stderr, "external cancel fixture: ready=%d cancelled=%d outcome=%d joined=%d result=%d pid=%ld gone=%d unchanged=%d\n",
+                     observed.exists, observed.cancelled, observed.captured, observed.joined,
+                     observed.result, observed.pid, gone, observed.unchanged);
+    return ok;
+}
+
+static int dlx_external_proof_call(const char *exe, const char *root,
+                                   const char *local, const char *base,
+                                   const char *binding, char out[8192])
+{
+    char root_arg[1500], local_arg[128], base_arg[128], binding_arg[128];
+    if (snprintf(root_arg, sizeof(root_arg), "--root=%s", root) >= (int)sizeof(root_arg) ||
+        snprintf(local_arg, sizeof(local_arg), "--local_commit=%s", local) >= (int)sizeof(local_arg) ||
+        snprintf(base_arg, sizeof(base_arg), "--remote_base=%s", base) >= (int)sizeof(base_arg) ||
+        snprintf(binding_arg, sizeof(binding_arg), "--land_cancel_binding=%s", binding) >= (int)sizeof(binding_arg)) return -1;
+    const char *argv[] = {exe, "--dev-proof-fixture", "dev", "proof", "step",
+                          root_arg, local_arg, base_arg, binding_arg, NULL};
+    bool timeout = false;
+    int rc = zcl_spawn_capture_observed(argv, out, 8192, 10000, &timeout);
+    return timeout ? -1 : rc;
+}
+
+static bool dlx_external_binding_unknown(const char *exe, const char *root,
+    const char *local, const char *base, const char *binding, const char *ready)
+{
+    char out[8192];
+    return dlx_external_proof_call(exe, root, local, base, binding, out) == 1 &&
+           strstr(out, "PROOF_BINDING_UNKNOWN") && !dlx_file_exists(ready);
+}
+
+static bool dlx_external_cancelled_controls(const char *exe, const char *root,
+    const char *local, const char *base, char *binding, const char *outcome,
+    const char *saved, size_t len, const char *ready)
+{
+    char out[8192], altered[8192];
+    if (dlx_external_proof_call(exe, root, local, base, binding, out) != 1 ||
+        !strstr(out, "PROOF_CANCELLED") || dlx_file_exists(ready)) return false;
+    memcpy(altered, saved, len + 1);
+    char *field = strstr(altered, "\"local\":\""); if (!field) return false;
+    field += strlen("\"local\":\""); if (strlen(field) < 40) return false;
+    memmove(field, field + 40, strlen(field + 40) + 1);
+    if (!dlx_write(outcome, altered) || !dlx_external_binding_unknown(exe, root, local, base, binding, ready)) return false;
+    if (!dlx_write(outcome, "{partial") || !dlx_external_binding_unknown(exe, root, local, base, binding, ready)) return false;
+    if (!dlx_write(outcome, saved)) return false;
+    binding[strlen(binding) - 1] = binding[strlen(binding) - 1] == '0' ? '1' : '0';
+    return dlx_external_binding_unknown(exe, root, local, base, binding, ready);
+}
+
+static bool dlx_external_wrong_root(const char *exe, const char *root, const char *local,
+                                    const char *base, const char *binding, char *out,
+                                    const char *ready)
+{
+    return dlx_external_proof_call(exe, root, local, base, binding, out) == 1 &&
+           strstr(out, "PROOF_BINDING_UNKNOWN") && !dlx_file_exists(ready);
+}
+
+static bool dlx_external_prelaunch_controls(void)
+{
+    struct dlx_rig rig; struct dlx_call c; char queue[8192], exe[4096], binding[96];
+    char local[80], base[80], out[8192], land[1200], outcome[1400], saved[8192], ready[1400], root[1400];
+    size_t n = 0, len = 0; bool ok = false; struct json_value row = {0};
+    if (!dlx_started(&rig, "external_prelaunch", "external_prelaunch_rig") ||
+        !dlx_queue_bytes(queue, sizeof(queue), &n) || !json_read(&row, queue, n) ||
+        !zcl_native_dev_land_test_cancel_binding(queue, binding) || !os_proc_exe_path(exe, sizeof(exe))) goto done;
+    (void)snprintf(local, sizeof(local), "%s", json_get_str(json_get(&row, "local")));
+    (void)snprintf(base, sizeof(base), "%s", json_get_str(json_get(&row, "base")));
+    dlx_land_wt(root, sizeof(root));
+    (void)snprintf(ready, sizeof(ready), "%s/prelaunch.pid", rig.clone);
+    (void)setenv("ZCL_PROOF_TEST_HELD_STEP", ready, 1);
+    if (!dlx_external_wrong_root(exe, rig.clone, local, base, binding, out, ready)) goto done;
+    (void)setenv("ZCL_PROOF_TEST_NORMAL", "1", 1);
+    if (dlx_external_proof_call(exe, root, local, base, binding, out) != 3 ||
+        !strstr(out, "PROOF_WAIT_TIMEOUT") || !dlx_file_exists(ready)) goto done;
+    (void)unsetenv("ZCL_PROOF_TEST_NORMAL");
+    if (unlink(ready)) goto done;
+    dlx_begin(&c, "cancel"); (void)json_push_kv_int(&c.input, "seq", 1);
+    bool cancelled = dlx_run(&c) && dlx_ok(&c); dlx_end(&c);
+    dlx_landdir(land, sizeof(land)); (void)snprintf(outcome, sizeof(outcome), "%s/outcomes.jsonl", land);
+    if (!cancelled || !dlx_slurp(outcome, saved, sizeof(saved) - 1, &len)) goto done;
+    saved[len] = '\0';
+    ok = dlx_external_cancelled_controls(exe, root, local, base, binding, outcome, saved, len, ready);
+done:
+    unsetenv("ZCL_PROOF_TEST_HELD_STEP"); unsetenv("ZCL_PROOF_TEST_NORMAL");
+    json_free(&row); dlx_restore(); return ok;
+}
+
 int test_dev_land_drive_base_watch(void)
 {
     int failures = 0;
+    TEST("land drive: candidate capability requires a complete typed descriptor") {
+        const char old[] = "{\"path\":\"dev.proof.step\",\"input_schema\":{\"id\":\"zcl.dev_proof_step_input.v1\",\"allowed_keys\":[\"root\",\"local_commit\",\"remote_base\"]}}";
+        const char current[] = "{\"path\":\"dev.proof.step\",\"input_schema\":{\"id\":\"zcl.dev_proof_step_input.v1\",\"allowed_keys\":[\"root\",\"local_commit\",\"remote_base\",\"land_cancel_binding\"]}}";
+        const char duplicate[] = "{\"path\":\"dev.proof.step\",\"input_schema\":{\"id\":\"zcl.dev_proof_step_input.v1\",\"allowed_keys\":[\"root\",\"local_commit\",\"remote_base\",\"root\"]}}";
+        ASSERT_EQ(zcl_native_dev_land_test_cancel_schema(old, strlen(old)), 0);
+        ASSERT_EQ(zcl_native_dev_land_test_cancel_schema(current, strlen(current)), 1);
+        ASSERT_EQ(zcl_native_dev_land_test_cancel_schema(current, strlen(current) - 1), -1);
+        ASSERT_EQ(zcl_native_dev_land_test_cancel_schema(duplicate, strlen(duplicate)), -1);
+        PASS();
+    }
+    TEST("land drive: cancellation acknowledgement needs a complete exact failed envelope") {
+        const char good[] = "{\"schema\":\"zcl.result.v1\",\"command\":\"dev.proof.step\",\"status\":\"failed\",\"ok\":false,\"error\":{\"code\":\"PROOF_CANCELLED\"}}";
+        const char wrong[] = "{\"schema\":\"zcl.result.v1\",\"command\":\"other\",\"status\":\"failed\",\"ok\":false,\"error\":{\"code\":\"PROOF_CANCELLED\"}}";
+        char trailing[sizeof(good) + 2]; memcpy(trailing, good, sizeof(good));
+        trailing[sizeof(good)] = 'x'; trailing[sizeof(good) + 1] = '\0';
+        ASSERT(zcl_native_dev_land_test_cancel_response(good, strlen(good), true, false, false));
+        ASSERT(!zcl_native_dev_land_test_cancel_response(wrong, strlen(wrong), true, false, false));
+        ASSERT(!zcl_native_dev_land_test_cancel_response(good, strlen(good), false, false, false));
+        ASSERT(!zcl_native_dev_land_test_cancel_response(good, strlen(good), true, true, false));
+        ASSERT(!zcl_native_dev_land_test_cancel_response(good, strlen(good), true, false, true));
+        ASSERT(!zcl_native_dev_land_test_cancel_response(good, strlen(good) - 1, true, false, false));
+        ASSERT(!zcl_native_dev_land_test_cancel_response(trailing, sizeof(good) + 1, true, false, false));
+        trailing[sizeof(good) - 1] = 'x';
+        ASSERT(!zcl_native_dev_land_test_cancel_response(trailing, sizeof(good), true, false, false));
+        PASS();
+    }
+    TEST("land drive: failed owned waits leave cleanup unconfirmed") {
+        struct zcl_dev_proof_step step = { .child = (int64_t)getpid(), .started = true };
+        zcl_devloop_process_cleanup_reset();
+        ASSERT(zcl_dev_proof_step_poll_deferred(&step));
+        ASSERT(zcl_devloop_process_cleanup_uncertain());
+        step.finished = false; zcl_devloop_process_cleanup_reset();
+        zcl_dev_proof_step_cancel(&step);
+        ASSERT(zcl_devloop_process_cleanup_uncertain());
+        step.finished = false; zcl_devloop_process_cleanup_reset();
+        ASSERT(zcl_dev_proof_step_poll(&step));
+        ASSERT(zcl_devloop_process_cleanup_uncertain());
+        zcl_devloop_process_cleanup_reset();
+        ASSERT(!zcl_dev_proof_test_reap_invalid());
+        ASSERT(zcl_devloop_process_cleanup_uncertain());
+        zcl_devloop_process_cleanup_reset();
+        ASSERT(!zcl_devloop_process_test_reap_invalid());
+        ASSERT(zcl_devloop_process_cleanup_uncertain());
+        zcl_devloop_process_cleanup_reset();
+        PASS();
+    }
+    TEST("land drive: an external proof requester cooperatively stops its owned session after real cancellation") {
+        ASSERT(dlx_external_cancel_request(0));
+        PASS();
+    }
+    TEST("land drive: abnormal worker death never reports confirmed cleanup") {
+        ASSERT(dlx_external_cancel_request(1));
+        PASS();
+    }
+    TEST("land drive: an owned wait error never reports confirmed cleanup") {
+        ASSERT(dlx_external_cancel_request(2));
+        PASS();
+    }
+    TEST("land drive: external prelaunch validates cancellation and pair binding") {
+        ASSERT(dlx_external_prelaunch_controls());
+        PASS();
+    }
     TEST("land drive: main moving under a running proof cancels it as superseded and leaves no step process") {
         struct dlx_rig rig;
         struct dlx_watched w;

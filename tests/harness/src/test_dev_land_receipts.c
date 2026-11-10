@@ -578,7 +578,10 @@ static int dlx_producer_cancel_boundary(void)
         ASSERT(dlx_run(&c) && dlx_ok(&c)); dlx_end(&c);
         ASSERT(dlx_slurp(outcome, terminal, sizeof(terminal) - 1, &m)); terminal[m] = '\0';
         (void)snprintf(script, sizeof(script),
-            "#!/bin/sh\ntouch '%s'\nmkdir -p \"$3/build/bin\"\nprintf '%%s\\n' '#!/bin/sh' 'touch %s' > \"$3/build/bin/z23-dev\"\nchmod 700 \"$3/build/bin/z23-dev\"\n", mark, proof);
+            "#!/bin/sh\ntouch '%s'\nmkdir -p \"$3/build/bin\"\ncat > \"$3/build/bin/z23-dev\" <<'PRODUCER'\n"
+            "#!/bin/sh\nif [ \"$1\" = discover ]; then\n"
+            "echo '{\"path\":\"dev.proof.step\",\"input_schema\":{\"id\":\"zcl.dev_proof_step_input.v1\",\"allowed_keys\":[\"root\",\"local_commit\",\"remote_base\"]}}'\n"
+            "exit 0\nfi\ntouch '%s'\nPRODUCER\nchmod 700 \"$3/build/bin/z23-dev\"\n", mark, proof);
         ASSERT(dlx_write(makefile, script) && chmod(makefile, 0700) == 0);
         ASSERT(zcl_native_dev_land_test_boundary_reproof(saved, rig.clone, makefile) == -3);
         ASSERT(!dlx_file_exists(mark) && !dlx_file_exists(proof));

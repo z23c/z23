@@ -137,6 +137,9 @@ bool zcl_dev_proof_step_poll(struct zcl_dev_proof_step *step);
 bool zcl_dev_proof_step_poll_deferred(struct zcl_dev_proof_step *step);
 /* Stop and reap this still-owned step and its process group, while anchored. */
 void zcl_dev_proof_step_cancel(struct zcl_dev_proof_step *step);
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+bool zcl_dev_proof_test_reap_invalid(void);
+#endif
 /* Wait for every started step in the set. Returns the index of the first one
  * that did not exit 0, or count when all of them succeeded. */
 size_t zcl_dev_proof_steps_wait(struct zcl_dev_proof_step *steps,

@@ -15364,20 +15364,50 @@ static int64_t dp_base_probe_interval_us(
     return (int64_t)ms * 1000;
 }
 
-/* A proof whose base is no longer the remote tip can only be discarded:
- * the lander re-checks the base after PASS and cuts a successor. Asking
- * while it runs lets the doomed run end within one probe interval instead
- * of at its natural end. Only an affirmative SUPERSEDED acts; the worker is
- * then cancelled through the same SIGTERM path a requester signal takes. */
-static bool dp_base_probe_superseded(const struct zcl_dev_proof_base_probe *probe,
-                                     int64_t *next_us)
+/* An affirmative observer result ends the worker through the same SIGTERM
+ * path as a requester signal; unknown observations leave it running. */
+static enum zcl_dev_proof_base_observation dp_base_probe_observe(
+    const struct zcl_dev_proof_base_probe *probe, int64_t *next_us)
 {
-    if (!probe || !probe->observe) return false;
+    if (!probe || !probe->observe) return ZCL_DEV_PROOF_BASE_UNKNOWN;
     int64_t now = platform_time_monotonic_us();
-    if (now < *next_us) return false;
+    if (now < *next_us) return ZCL_DEV_PROOF_BASE_UNKNOWN;
     enum zcl_dev_proof_base_observation seen = probe->observe(probe->ctx);
     *next_us = platform_time_monotonic_us() + dp_base_probe_interval_us(probe);
-    return seen == ZCL_DEV_PROOF_BASE_SUPERSEDED;
+    return seen;
+}
+
+#define DP_FOREGROUND_CANCELLED_EXIT 42
+/* Called after the worker operation returns. The acknowledgment requires
+ * cancellation with no reported owned-child cleanup uncertainty. */
+[[noreturn]] static void dp_foreground_worker_settled(int result)
+{
+    if (zcl_devloop_process_cancel_requested() && !zcl_devloop_process_cleanup_uncertain())
+        _exit(DP_FOREGROUND_CANCELLED_EXIT);
+    _exit(result == 1 ? 0 : 1);
+}
+
+static bool dp_foreground_probe_cancel(pid_t worker,
+    const struct zcl_dev_proof_base_probe *probe, int64_t *next_us,
+    bool *superseded, bool *cancelled)
+{
+    enum zcl_dev_proof_base_observation seen = dp_base_probe_observe(probe, next_us);
+    if (seen != ZCL_DEV_PROOF_BASE_SUPERSEDED && seen != ZCL_DEV_PROOF_REQUEST_CANCELLED) return false;
+    if (seen == ZCL_DEV_PROOF_BASE_SUPERSEDED && superseded) *superseded = true;
+    *cancelled = seen == ZCL_DEV_PROOF_REQUEST_CANCELLED;
+    int signal_number = SIGTERM;
+#if defined(ZCL_TESTING)
+    if (*cancelled && getenv("ZCL_PROOF_TEST_ABNORMAL") && getenv("ZCL_DEVLOOP_TEST_PROCESS"))
+        signal_number = SIGKILL;
+#endif
+    (void)kill(worker, signal_number); return true;
+}
+
+static int dp_foreground_exit_result(int status)
+{
+    if (!WIFEXITED(status)) return -1;
+    int code = WEXITSTATUS(status);
+    return code == 0 || code == DP_FOREGROUND_CANCELLED_EXIT ? 1 : -1;
 }
 
 static int dp_foreground_wait(pid_t worker,
@@ -15385,6 +15415,7 @@ static int dp_foreground_wait(pid_t worker,
                               bool *superseded)
 {
     bool forwarded = false;
+    bool cancelled = false;
     int64_t next_probe_us =
         platform_time_monotonic_us() + dp_base_probe_interval_us(probe);
     for (;;) {
@@ -15394,14 +15425,14 @@ static int dp_foreground_wait(pid_t worker,
         }
         int status = 0;
         pid_t got = waitpid(worker, &status, WNOHANG);
-        if (got == worker)
-            return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 1 : -1;
-        if (got < 0 && errno != EINTR) return -1;
-        if (!forwarded && dp_base_probe_superseded(probe, &next_probe_us)) {
-            if (superseded) *superseded = true;
-            (void)kill(worker, SIGTERM);
-            forwarded = true;
+        if (got == worker) {
+            if (cancelled && WIFEXITED(status) && WEXITSTATUS(status) == DP_FOREGROUND_CANCELLED_EXIT &&
+                probe && probe->cancelled) *probe->cancelled = true;
+            return dp_foreground_exit_result(status);
         }
+        if (got < 0 && errno != EINTR) return -1;
+        if (!forwarded)
+            forwarded = dp_foreground_probe_cancel(worker, probe, &next_probe_us, superseded, &cancelled);
         platform_sleep_ms(20);
     }
 }
@@ -15434,8 +15465,22 @@ static int dp_foreground_run(const char *root, const char *local, const char *ba
     pid_t worker = fork();
     if (worker == 0) {
         zcl_devloop_process_cancel_poll_clear();
-        int result = dp_proof_queue_run_guarded(root, local, base, why, why_len);
-        _exit(result == 1 ? 0 : 1);
+        zcl_devloop_process_cleanup_reset();
+        int result;
+#if defined(ZCL_TESTING)
+        const char *ready = getenv("ZCL_PROOF_TEST_HELD_STEP");
+        if (ready && ready[0] && getenv("ZCL_DEVLOOP_TEST_PROCESS")) {
+            const char *duration = getenv("ZCL_PROOF_TEST_ABNORMAL") ? "2" :
+                                   getenv("ZCL_PROOF_TEST_NORMAL") ? "1" : "15";
+            const char *argv[] = {"sh", "-c", "printf '%s\\n' $$ > \"$1\"; exec sleep \"$2\"", "held-step", ready, duration, NULL};
+            struct zcl_devloop_process_result test_result = {0};
+            result = zcl_devloop_process_run(root, argv, 15000, &test_result) ? 1 : -1;
+            if (getenv("ZCL_PROOF_TEST_WAIT_ERROR"))
+                (void)zcl_devloop_process_test_reap_invalid();
+        } else
+#endif
+        result = dp_proof_queue_run_guarded(root, local, base, why, why_len);
+        dp_foreground_worker_settled(result);
     }
     if (worker < 0) {
         dp_foreground_restore(saved, 3);
@@ -15506,6 +15551,14 @@ int zcl_dev_proof_step_watched(const char *root, const char *local,
     proof_windows_unavailable(out);
     return -1;
 #else
+#if defined(ZCL_TESTING)
+    if (getenv("ZCL_PROOF_TEST_HELD_STEP") && getenv("ZCL_DEVLOOP_TEST_PROCESS")) {
+        int execution = -1, landing = -1, watch = -1;
+        char why[256] = {0};
+        return dp_foreground_run(root, local, base, &execution, &landing, &watch,
+                                 probe, superseded, why, sizeof(why));
+    }
+#endif
     if (!zcl_dev_proof_status_read(root, local, base, out)) return -1;
     int landing = -1, execution = -1, watch = -1;
     int result = dp_landing_proof_guard(out->root, &landing,

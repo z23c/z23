@@ -7,10 +7,18 @@
 #include "platform/time_compat.h"
 #include "platform/process_compat.h"
 #include "platform/process_lifecycle.h"
+#include <stdatomic.h>
+
+static _Atomic bool g_process_cleanup_uncertain;
+void zcl_devloop_process_cleanup_reset(void)
+{ atomic_store_explicit(&g_process_cleanup_uncertain, false, memory_order_relaxed); }
+void zcl_devloop_process_cleanup_uncertain_mark(void)
+{ atomic_store_explicit(&g_process_cleanup_uncertain, true, memory_order_relaxed); }
+bool zcl_devloop_process_cleanup_uncertain(void)
+{ return atomic_load_explicit(&g_process_cleanup_uncertain, memory_order_relaxed); }
 
 #if defined(_WIN32)
 
-#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -164,6 +172,20 @@ bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+static bool process_reap_owned(pid_t pid, int *status)
+{
+    pid_t got;
+    do { got = waitpid(pid, status, 0); } while (got < 0 && errno == EINTR);
+    if (got == pid) return true;
+    zcl_devloop_process_cleanup_uncertain_mark(); return false;
+}
+#if defined(ZCL_TESTING)
+bool zcl_devloop_process_test_reap_invalid(void)
+{ return process_reap_owned(getpid(), NULL); }
+#endif
+#endif
 
 static volatile sig_atomic_t g_process_cancel_requested;
 static volatile sig_atomic_t g_process_active_leader;
@@ -328,7 +350,8 @@ static void terminate_child_session(pid_t leader, int sig)
     /* The leader may have spawned grandchildren into distinct process groups.
      * Stop its own group first so it cannot race the /proc session sweep. */
     (void)kill(-leader, sig);
-    (void)signal_session_members(leader, sig);
+    if (signal_session_members(leader, sig) < 0)
+        zcl_devloop_process_cleanup_uncertain_mark();
 }
 #endif
 
@@ -533,7 +556,7 @@ static bool darwin_code_signature_region(int fd, const struct stat *st,
 static void darwin_reap_suspended(pid_t pid)
 {
     (void)kill(pid, SIGKILL);
-    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+    (void)process_reap_owned(pid, NULL);
 }
 
 static int darwin_attested_actions_close(posix_spawn_file_actions_t *actions,
@@ -923,7 +946,7 @@ static bool process_startup_finish(pid_t pid, bool darwin_attested_spawn,
         if (ready_got != 1 || ready != '1') {
             close(ready_fds[0]);
             (void)kill(pid, SIGKILL);
-            (void)waitpid(pid, NULL, 0);
+            (void)process_reap_owned(pid, NULL);
             close(fds[0]);
             if (g_process_active_leader == (sig_atomic_t)pid)
                 g_process_active_leader = 0;
@@ -936,7 +959,7 @@ static bool process_startup_finish(pid_t pid, bool darwin_attested_spawn,
         close(ready_fds[0]);
         if (ready_got != 0) {
             terminate_child_session(pid, SIGKILL);
-            (void)waitpid(pid, NULL, 0);
+            (void)process_reap_owned(pid, NULL);
             close(fds[0]);
             if (g_process_active_leader == (sig_atomic_t)pid)
                 g_process_active_leader = 0;
@@ -965,15 +988,17 @@ static void process_stop_wait(pid_t pid, int fd, int *status)
     bool finished = false;
     terminate_child_session(pid, SIGTERM);
     for (int i = 0; i < 20; i++) {
-        if (waitpid(pid, status, WNOHANG) == pid) {
+        pid_t got = waitpid(pid, status, WNOHANG);
+        if (got == pid) {
             finished = true;
             break;
         }
+        if (got < 0 && errno != EINTR) zcl_devloop_process_cleanup_uncertain_mark();
         process_output_wait(fd, 1);
     }
     if (!finished) {
         terminate_child_session(pid, SIGKILL);
-        while (waitpid(pid, status, 0) < 0 && errno == EINTR) {}
+        (void)process_reap_owned(pid, status);
         finished = true;
     }
 }
@@ -1004,10 +1029,11 @@ static bool process_observe(pid_t pid, int *fd, const char *image,
             break;
         }
         if (waited < 0 && errno != EINTR) {
+            zcl_devloop_process_cleanup_uncertain_mark();
             fprintf(stderr, "[devloop] process: waitpid failed for %s: %s\n",
                     image, strerror(errno));
             terminate_child_session(pid, SIGKILL);
-            (void)waitpid(pid, status, 0);
+            (void)process_reap_owned(pid, status);
             if (*fd >= 0) close(*fd);
             if (g_process_active_leader == (sig_atomic_t)pid)
                 g_process_active_leader = 0;
@@ -1030,8 +1056,8 @@ static void process_finish(pid_t pid, int fd, int status, int64_t started_us,
 {
     /* A bounded command may not daemonize work past its receipt. Reap any
      * descendant process group that stayed in the command's private session. */
-    (void)signal_session_members(pid, SIGTERM);
-    (void)signal_session_members(pid, SIGKILL);
+    if (signal_session_members(pid, SIGTERM) < 0) zcl_devloop_process_cleanup_uncertain_mark();
+    if (signal_session_members(pid, SIGKILL) < 0) zcl_devloop_process_cleanup_uncertain_mark();
     size_t output_before = out->output_len;
     drain_output(&fd, out);
     if (out->first_output_us == 0 && out->output_len > output_before)

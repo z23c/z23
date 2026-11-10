@@ -602,8 +602,22 @@ static int proof_step_wait_owned(pid_t child, siginfo_t *info)
     int rc;
     do { rc = waitid(P_PID, (id_t)child, info, WEXITED | WNOHANG | WNOWAIT); }
     while (rc != 0 && errno == EINTR);
+    if (rc != 0) zcl_devloop_process_cleanup_uncertain_mark();
     return rc;
 }
+
+static bool proof_step_reap_owned(pid_t child, int *status)
+{
+    pid_t got;
+    do { got = waitpid(child, status, 0); } while (got < 0 && errno == EINTR);
+    if (got == child) return true;
+    zcl_devloop_process_cleanup_uncertain_mark();
+    return false;
+}
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_reap_invalid(void)
+{ int status; return proof_step_reap_owned(getpid(), &status); }
+#endif
 
 void zcl_dev_proof_step_cancel(struct zcl_dev_proof_step *step)
 {
@@ -623,7 +637,9 @@ void zcl_dev_proof_step_cancel(struct zcl_dev_proof_step *step)
     (void)kill(-child, SIGKILL);
     (void)kill(child, SIGKILL);
     int status;
-    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    if (!proof_step_reap_owned(child, &status)) {
+        step->report.rc = -1; step->finished = true; return;
+    }
     step->report.cause = ZCL_DEV_PROOF_KILL_CANCELLED;
     step->report.rc = 130;
     step->report.elapsed_ms = (platform_time_monotonic_us() - step->started_us) / 1000;
@@ -646,7 +662,9 @@ static bool proof_step_poll_live(struct zcl_dev_proof_step *step, pid_t child)
     platform_sleep_ms(100);
     (void)kill(-child, SIGKILL); (void)kill(child, SIGKILL);
     int status;
-    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    if (!proof_step_reap_owned(child, &status)) {
+        step->report.rc = -1; step->finished = true; return true;
+    }
     step->report.rc = cause == ZCL_DEV_PROOF_KILL_CANCELLED ? 130 : 124;
     step->finished = true; return true;
 }
@@ -657,6 +675,7 @@ bool zcl_dev_proof_step_poll_deferred(struct zcl_dev_proof_step *step)
     siginfo_t info = {0};
     if (waitid(P_PID, (id_t)step->child, &info, WEXITED | WNOHANG | WNOWAIT) != 0) {
         if (errno == EINTR) return false;
+        zcl_devloop_process_cleanup_uncertain_mark();
         step->report.rc = -1; step->finished = true; return true;
     }
     if (info.si_pid != 0) return true;
@@ -684,6 +703,7 @@ bool zcl_dev_proof_step_poll(struct zcl_dev_proof_step *step)
         return true;
     }
     if (got < 0 && errno != EINTR) {
+        zcl_devloop_process_cleanup_uncertain_mark();
         step->report.rc = -1;
         step->finished = true;
         return true;

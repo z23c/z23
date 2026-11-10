@@ -149,6 +149,7 @@
 #include "command/native_dev_land_attestation.h"
 #include "command/native_dev_land_window.h"
 #include "command/native_dev_land_internal.h"
+#include "command/native_dev_land_cancel.h"
 #include "command/native_dev_land_precheck.h"
 #include "util/clientversion.h"
 #include "command/native_devagent.h"
@@ -162,6 +163,7 @@
 #include "crypto/sha256.h"
 #include "json/json.h"
 #include "zutf8/zutf8.h"
+#include "platform/directory_compat.h"
 #include "platform/file_clone.h"
 #include "platform/file_metadata.h"
 #include "platform/path_compat.h"
@@ -11917,6 +11919,95 @@ static bool dl_boundary_cancelled(const struct dl_row *captured)
     dl_unlock(lock);
     return ok;
 }
+
+static void dl_cancel_hash_field(struct sha256_ctx *hash, const char *s)
+{
+    char length[32];
+    size_t n = strlen(s);
+    int k = snprintf(length, sizeof(length), "%zu:", n);
+    sha256_write(hash, (const uint8_t *)length, (size_t)k);
+    sha256_write(hash, (const uint8_t *)s, n);
+}
+
+static bool dl_cancel_binding(const struct dl_row *row, char out[96])
+{
+    if (!row || row->seq <= 0 || row->attempt <= 0 ||
+        !dl_sha_ok(row->local) || !dl_sha_ok(row->base)) return false;
+    struct sha256_ctx h; uint8_t digest[32]; char hex[65], seq[32], attempt[32], pred[32];
+    sha256_init(&h);
+    dl_cancel_hash_field(&h, "z23.land.cancel.binding.v1");
+    (void)snprintf(seq, sizeof(seq), "%lld", row->seq);
+    (void)snprintf(attempt, sizeof(attempt), "%lld", row->attempt);
+    (void)snprintf(pred, sizeof(pred), "%lld", row->predecessor_seq);
+    const char *fields[] = {seq, row->tip, row->ts, row->worktree, row->note,
+        pred, row->predecessor_local, row->predecessor_base, row->predecessor_tree,
+        row->predecessor_intent, attempt, row->local, row->base};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
+        dl_cancel_hash_field(&h, fields[i]);
+    sha256_finalize(&h, digest); zcl_hex_encode(digest, sizeof(digest), hex);
+    int n = snprintf(out, 96, "v1:%s:%s", seq, hex);
+    return n > 0 && n < 96;
+}
+
+struct dl_cancel_scan { long long seq; unsigned count; struct dl_row row; };
+static bool dl_cancel_scan_row(const struct dl_row *row, void *opaque)
+{
+    struct dl_cancel_scan *scan = opaque;
+    if (row->seq == scan->seq) { scan->count++; scan->row = *row; }
+    return scan->count <= 1;
+}
+
+static bool dl_cancel_parse_binding(const char *binding, const char *local,
+                                    const char *base, long long *seq)
+{
+    if (!binding || strncmp(binding, "v1:", 3) || !dl_sha_ok(local) || !dl_sha_ok(base)) return false;
+    char *end = NULL; errno = 0; *seq = strtoll(binding + 3, &end, 10);
+    return !errno && *seq > 0 && end && *end == ':' && strlen(end + 1) == 64;
+}
+
+static bool dl_cancel_row_matches(const struct dl_row *row, const char *binding,
+                                  const char *local, const char *base)
+{
+    char actual[96];
+    return row && !strcmp(row->local, local) && !strcmp(row->base, base) &&
+           dl_cancel_binding(row, actual) && !strcmp(actual, binding);
+}
+
+static enum zcl_land_cancel_observation dl_cancel_resolve(
+    const struct dl_row *rows, size_t n, const struct dl_cancel_scan *scan,
+    const char *binding, const char *local, const char *base)
+{
+    unsigned live = 0; const struct dl_row *current = NULL;
+    for (size_t i = 0; i < n; i++) if (rows[i].seq == scan->seq) { live++; current = &rows[i]; }
+    const struct dl_row *r = live == 1 && scan->count == 0 ? current :
+                             live == 0 && scan->count == 1 ? &scan->row : NULL;
+    if (!dl_cancel_row_matches(r, binding, local, base)) return ZCL_LAND_CANCEL_UNKNOWN;
+    if (live == 1 && !strcmp(r->state, "inflight") && !strcmp(r->phase, "prove"))
+        return ZCL_LAND_CANCEL_CURRENT;
+    if (!live && !strcmp(r->state, "cancelled")) return ZCL_LAND_CANCEL_SETTLED;
+    return ZCL_LAND_CANCEL_UNKNOWN;
+}
+
+enum zcl_land_cancel_observation zcl_dev_land_cancel_observe(
+    const char *binding, const char *root, const char *local, const char *base)
+{
+    struct dl_dirs d; struct dl_row *rows = NULL; size_t n = 0;
+    struct dl_cancel_scan scan = {0}; char path[4096 + 32], outcome[4096 + 32];
+    char canonical[4096], expected[4096];
+    if (!dl_cancel_parse_binding(binding, local, base, &scan.seq) || !dl_dirs_make(&d) ||
+        !root || !platform_directory_canonical_real(root, canonical, sizeof(canonical)) ||
+        !platform_directory_canonical_real(d.wt, expected, sizeof(expected)) || strcmp(canonical, expected) ||
+        snprintf(path, sizeof(path), "%s/queue.jsonl", d.land) >= (int)sizeof(path) ||
+        snprintf(outcome, sizeof(outcome), "%s/outcomes.jsonl", d.land) >= (int)sizeof(outcome))
+        return ZCL_LAND_CANCEL_UNKNOWN;
+    int lock = dl_rows_lock(d.land); if (lock < 0) return ZCL_LAND_CANCEL_UNKNOWN;
+    enum zcl_land_cancel_observation result = ZCL_LAND_CANCEL_UNKNOWN;
+    if (dl_load_rows(path, &rows, &n, NULL, 0) &&
+        dl_history_read(outcome, dl_cancel_scan_row, &scan, NULL, 0)) {
+        result = dl_cancel_resolve(rows, n, &scan, binding, local, base);
+    }
+    free(rows); dl_unlock(lock); return result;
+}
 #endif
 
 /* The probe a proving drive runs every ZCL_DEV_PROOF_BASE_PROBE_MS: one
@@ -12076,16 +12167,151 @@ static bool dl_scrubbed_argv(struct dl_scrub *s, const char *const *argv)
 #endif
 
 static int dl_spawn_scrubbed(const char *const *argv, char *buf, size_t cap,
-                             int timeout_ms)
+                             int timeout_ms, bool *timed_out)
 {
 #if !defined(_WIN32)
     struct dl_scrub scrub;
     if (!dl_scrubbed_argv(&scrub, argv))
         return -1;
-    return zcl_spawn_capture(scrub.argv, buf, cap, timeout_ms);
+    return zcl_spawn_capture_observed(scrub.argv, buf, cap, timeout_ms, timed_out);
 #else
-    return zcl_spawn_capture(argv, buf, cap, timeout_ms);
+    return zcl_spawn_capture_observed(argv, buf, cap, timeout_ms, timed_out);
 #endif
+}
+
+static struct zcl_result dl_spawn_scrubbed_exact(const char *const *argv,
+    char *buf, size_t cap, int timeout, struct zcl_spawn_binary_observation *observation)
+{
+#if !defined(_WIN32)
+    struct dl_scrub scrub;
+    if (!dl_scrubbed_argv(&scrub, argv)) return ZCL_ERR(-1, "producer environment unavailable");
+    return zcl_spawn_capture_binary(scrub.argv, buf, cap, timeout, observation);
+#else
+    return zcl_spawn_capture_binary(argv, buf, cap, timeout, observation);
+#endif
+}
+
+static int dl_spawn_scrubbed_evidence(const char *const *argv, char *buf,
+    size_t cap, int timeout, struct zcl_spawn_evidence *evidence)
+{
+#if !defined(_WIN32)
+    struct dl_scrub scrub;
+    if (!dl_scrubbed_argv(&scrub, argv)) return -1;
+    return zcl_spawn_capture_evidence(scrub.argv, buf, cap, timeout, evidence);
+#else
+    return zcl_spawn_capture_evidence(argv, buf, cap, timeout, evidence);
+#endif
+}
+
+static int dl_cancel_schema_keys(const struct json_value *keys)
+{
+    if (!keys || keys->type != JSON_ARR) return -1;
+    int supported = 0; unsigned required = 0;
+    for (size_t i = 0; i < keys->num_children; i++) {
+        if (keys->children[i].type != JSON_STR) return -1;
+        const char *key = json_get_str(&keys->children[i]);
+        for (size_t j = 0; j < i; j++)
+            if (!strcmp(key, json_get_str(&keys->children[j]))) return -1;
+        if (!strcmp(key, "root")) required |= 1;
+        if (!strcmp(key, "local_commit")) required |= 2;
+        if (!strcmp(key, "remote_base")) required |= 4;
+        if (!strcmp(key, "land_cancel_binding")) supported = 1;
+    }
+    return required == 7 ? supported : -1;
+}
+
+static int dl_cancel_schema_parse(const char *buf, size_t length)
+{
+    struct json_value doc = {0}; int supported = -1;
+    if (memchr(buf, '\0', length) || !json_read(&doc, buf, length)) goto done;
+    const struct json_value *schema = json_get(&doc, "input_schema");
+    const struct json_value *keys = json_get(schema, "allowed_keys");
+    const struct json_value *path = json_get(&doc, "path");
+    const struct json_value *id = json_get(schema, "id");
+    if (doc.type == JSON_OBJ && path && path->type == JSON_STR &&
+        !strcmp(json_get_str(path), "dev.proof.step") && id && id->type == JSON_STR &&
+        !strcmp(json_get_str(id), "zcl.dev_proof_step_input.v1"))
+        supported = dl_cancel_schema_keys(keys);
+done:
+    json_free(&doc); return supported;
+}
+
+/* Probe the candidate before executing its proof; absence is old capability,
+ * while incomplete or malformed answers are never treated as absence. */
+static int dl_producer_cancel_capability(const char *bin, char *buf, size_t cap)
+{
+    const char *argv[] = {bin, "discover", "describe", "--input={\"path\":\"dev.proof.step\"}", NULL};
+    struct zcl_spawn_binary_observation observation = {0};
+    struct zcl_result capture = dl_spawn_scrubbed_exact(argv, buf, cap - 1, 30000, &observation);
+    if (capture.ok && observation.eof && observation.exit_observed &&
+        observation.exit_code == 0 && !observation.overflow && !observation.timed_out &&
+        observation.output_len < cap)
+        return dl_cancel_schema_parse(buf, observation.output_len);
+    return -1;
+}
+
+static bool dl_json_text_is(const struct json_value *object, const char *key, const char *expected)
+{
+    const struct json_value *value = json_get(object, key);
+    return value && value->type == JSON_STR && !strcmp(json_get_str(value), expected);
+}
+
+static bool dl_cancel_capture_complete(const char *buf, size_t length,
+                                       const struct zcl_spawn_evidence *o)
+{
+    return o && o->stdout_complete && o->exit_observed &&
+           o->exit_code == ZCL_COMMAND_EXIT_FAILED && !o->stdout_truncated &&
+           !o->timed_out && o->stdout_observed == length && !memchr(buf, '\0', length);
+}
+
+static bool dl_producer_cancel_response(const char *buf, size_t length,
+                                         const struct zcl_spawn_evidence *o)
+{
+    struct json_value doc = {0}; bool ok = false;
+    if (!dl_cancel_capture_complete(buf, length, o)) return false;
+    if (json_read(&doc, buf, length) && doc.type == JSON_OBJ) {
+        const struct json_value *error = json_get(&doc, "error");
+        const struct json_value *passed = json_get(&doc, "ok");
+        ok = dl_json_text_is(&doc, "schema", "zcl.result.v1") &&
+             dl_json_text_is(&doc, "command", "dev.proof.step") &&
+             dl_json_text_is(&doc, "status", "failed") &&
+             passed && passed->type == JSON_BOOL && !json_get_bool(passed) &&
+             dl_json_text_is(error, "code", "PROOF_CANCELLED");
+    }
+    json_free(&doc); return ok;
+}
+
+static int dl_producer_request(const char *bin, const char *root_arg,
+    const char *local_arg, const char *base_arg, const struct dl_row *row,
+    const char *log_path, char *buf, char *why, size_t why_cap)
+{
+    char binding[96], binding_arg[128]; int capability = 0;
+    if (row) {
+        capability = dl_producer_cancel_capability(bin, buf, DL_LOG_CAP);
+        if (capability < 0 || (capability && (!dl_cancel_binding(row, binding) ||
+            snprintf(binding_arg, sizeof(binding_arg), "--land_cancel_binding=%s", binding) >= (int)sizeof(binding_arg)))) {
+            (void)snprintf(why, why_cap, "producer_cancel_capability_unknown"); return -1;
+        }
+    }
+    if (dl_boundary_cancelled(row)) return DL_RECOVER_CANCELLED;
+    const char *prove[] = { bin, "dev", "proof", "step", root_arg, local_arg,
+                            base_arg, capability ? binding_arg : NULL, NULL };
+    int rc; bool confirmed = false;
+    if (capability) {
+        struct zcl_spawn_evidence observation = {0};
+        rc = dl_spawn_scrubbed_evidence(prove, buf, DL_LOG_CAP,
+                                        DL_PRODUCER_PROOF_TIMEOUT_MS, &observation);
+        size_t length = strlen(buf);
+        confirmed = rc == ZCL_COMMAND_EXIT_FAILED &&
+                    dl_producer_cancel_response(buf, length, &observation) &&
+                    dl_boundary_cancelled(row);
+    } else {
+        rc = dl_spawn_scrubbed(prove, buf, DL_LOG_CAP, DL_PRODUCER_PROOF_TIMEOUT_MS, NULL);
+    }
+    dl_producer_log_write(log_path, "proof step", buf);
+    if (confirmed) return DL_RECOVER_CANCELLED;
+    if (rc < 0) { (void)snprintf(why, why_cap, "%s", "producer_launch_failed"); return -1; }
+    return 1;
 }
 
 static int dl_producer_reproof_log(const char *root, const char *local,
@@ -12119,7 +12345,7 @@ static int dl_producer_reproof_log(const char *root, const char *local,
     if (dl_boundary_cancelled(row)) { free(buf); return DL_RECOVER_CANCELLED; }
     const char *build[] = { make_program, jobs, "-C", root, "dev-bin", NULL };
     rc = dl_spawn_scrubbed(build, buf, DL_LOG_CAP,
-                           DL_PRODUCER_BUILD_TIMEOUT_MS);
+                           DL_PRODUCER_BUILD_TIMEOUT_MS, NULL);
     dl_producer_log_write(log_path, "producer build", buf);
     if (rc != 0 || access(bin, X_OK) != 0) {
         dl_first_actionable(buf, why, why_cap);
@@ -12129,17 +12355,9 @@ static int dl_producer_reproof_log(const char *root, const char *local,
         return -1;
     }
     if (dl_boundary_cancelled(row)) { free(buf); return DL_RECOVER_CANCELLED; }
-    const char *prove[] = { bin, "dev", "proof", "step", root_arg, local_arg,
-                            base_arg, NULL };
-    rc = dl_spawn_scrubbed(prove, buf, DL_LOG_CAP,
-                           DL_PRODUCER_PROOF_TIMEOUT_MS);
-    dl_producer_log_write(log_path, "proof step", buf);
+    rc = dl_producer_request(bin, root_arg, local_arg, base_arg, row, log_path, buf, why, why_cap);
     free(buf);
-    if (rc < 0) {
-        (void)snprintf(why, why_cap, "%s", "producer_launch_failed");
-        return -1;
-    }
-    return 1;
+    return rc;
 }
 
 [[maybe_unused]] static int dl_producer_reproof(const char *root,
@@ -12195,14 +12413,35 @@ static int dl_producer_recover(const char *root, const char *local,
 #endif
 
 #if defined(ZCL_TESTING)
+int zcl_native_dev_land_test_cancel_schema(const char *bytes, size_t length)
+{ return dl_cancel_schema_parse(bytes, length); }
+
+bool zcl_native_dev_land_test_cancel_response(const char *bytes, size_t length,
+                                               bool eof, bool overflow, bool timed_out)
+{
+    const struct zcl_spawn_evidence observation = { .stdout_observed = length,
+        .stdout_complete = eof, .stdout_truncated = overflow, .timed_out = timed_out,
+        .exit_observed = true, .exit_code = ZCL_COMMAND_EXIT_FAILED };
+    return dl_producer_cancel_response(bytes, length, &observation);
+}
+
+bool zcl_native_dev_land_test_cancel_binding(const char *line, char out[96])
+{
+    struct dl_row row;
+    return line && dl_parse_row(line, &row) && dl_cancel_binding(&row, out);
+}
+
 int zcl_native_dev_land_test_boundary_reproof(const char *line, const char *root,
                                               const char *make_program)
 {
     struct dl_row row;
     char why[256] = "";
     if (!line || !dl_parse_row(line, &row)) return -1;
-    return dl_producer_reproof_log(root, row.local, row.base, make_program,
-                                   NULL, &row, why, sizeof(why));
+    int rc = dl_producer_reproof_log(root, row.local, row.base, make_program,
+                                     NULL, &row, why, sizeof(why));
+    if (rc < 0 && rc != DL_RECOVER_CANCELLED)
+        fprintf(stderr, "boundary fixture reproof rc=%d why=%s\n", rc, why);
+    return rc;
 }
 
 bool zcl_native_dev_land_test_producer_stale(const char *detail)

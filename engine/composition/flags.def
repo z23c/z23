@@ -1887,6 +1887,14 @@ Z23_FLAG("ZCL_PROOF_ISSUE_COST_10K", "env_test", "-", "-",
           "Set to 1 to add the 10k-row point, about two minutes of fixture writes, to the build_fabric proof-issuance cost case in tests/harness/src/build_fabric_proof_wiring_cases.c.")
 Z23_FLAG("ZCL_PROOF_RAM_RESERVE_BYTES", "env_runtime", "-", "-",
           "undocumented; first use tools/dev/dev_proof.c:auto")
+Z23_FLAG("ZCL_PROOF_TEST_ABNORMAL", "env_test", "-", "-",
+          "test-only held proof worker abnormal termination control; first use tools/dev/dev_proof.c:auto")
+Z23_FLAG("ZCL_PROOF_TEST_HELD_STEP", "env_test", "-", "-",
+          "test-only held proof step readiness path; first use tools/command/native_dev_proof_command.c:auto")
+Z23_FLAG("ZCL_PROOF_TEST_NORMAL", "env_test", "-", "-",
+          "test-only held proof step normal completion control; first use tools/dev/dev_proof.c:auto")
+Z23_FLAG("ZCL_PROOF_TEST_WAIT_ERROR", "env_test", "-", "-",
+          "test-only owned-step wait error control; first use tools/dev/dev_proof.c:auto")
 Z23_FLAG("ZCL_PROOF_TIMEOUT_MS", "env_runtime", "-", "-",
           "undocumented; first use tools/dev/dev_proof_budget.c:auto")
 Z23_FLAG("ZCL_PRUNE_KEEP_BLOCKS", "env_runtime", "-", "-",

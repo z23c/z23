@@ -740,7 +740,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "Only an independently validated signed receipt returns PASS.", 0,
     "dev,proof,step,foreground,receipt",
     "zcl.dev_proof_step_input.v1", "zcl.dev_proof_status.v1",
-    "root,local_commit,remote_base", "local_commit,remote_base",
+    "root,local_commit,remote_base,land_cancel_binding", "local_commit,remote_base",
     "z23-dev dev proof step --local_commit=<commit> --remote_base=<base>",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,

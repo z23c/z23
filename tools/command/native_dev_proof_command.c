@@ -4,6 +4,7 @@
 #include "command/native_command.h"
 #include "command/native_dev_loop_command.h"
 #include "command/native_dev_proof_command.h"
+#include "command/native_dev_land_cancel.h"
 
 #include "dev_proof.h"
 #ifdef ZCL_DEV_BUILD
@@ -262,7 +263,7 @@ void zcl_dev_proof_step_conclude(struct zcl_command_reply *reply, int result,
         proof_emit_next(reply, status);
 }
 
-#ifdef ZCL_DEV_BUILD
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 static const char *proof_source_root(const struct zcl_command_request *request)
 {
     const struct json_value *root = request && request->input
@@ -284,21 +285,63 @@ static const char *proof_optional_text(const struct json_value *input,
     return value && value->type == JSON_STR && json_get_str(value)[0]
         ? json_get_str(value) : NULL;
 }
+
+struct proof_land_watch { const char *binding, *root, *local, *base; };
+static enum zcl_dev_proof_base_observation proof_land_observe(void *opaque)
+{
+    struct proof_land_watch *w = opaque;
+    return zcl_dev_land_cancel_observe(w->binding, w->root, w->local, w->base) ==
+                   ZCL_LAND_CANCEL_SETTLED ? ZCL_DEV_PROOF_REQUEST_CANCELLED :
+                                             ZCL_DEV_PROOF_BASE_UNKNOWN;
+}
 #endif
 
 static void proof_step(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-#ifndef ZCL_DEV_BUILD
+#if !defined(ZCL_DEV_BUILD) && !defined(ZCL_TESTING)
     (void)request;
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
         ZCL_COMMAND_EXIT_BLOCKED, "DEV_BUILD_REQUIRED", "dispatch", false,
         false, "foreground proof requires the dev binary", "make dev-bin");
 #else
     struct zcl_dev_proof_status status = {0};
-    int result = zcl_dev_proof_step(proof_source_root(request),
-        proof_optional_text(request->input, "local_commit"),
-        proof_optional_text(request->input, "remote_base"), &status);
+    const char *local = proof_optional_text(request->input, "local_commit");
+    const char *base = proof_optional_text(request->input, "remote_base");
+    const struct json_value *value = json_get(request->input, "land_cancel_binding");
+    const char *binding = proof_optional_text(request->input, "land_cancel_binding");
+    bool cancelled = false;
+    struct proof_land_watch watch = {binding, proof_source_root(request), local, base};
+    struct zcl_dev_proof_base_probe probe = { .observe = proof_land_observe,
+        .ctx = &watch, .interval_ms = ZCL_DEV_PROOF_BASE_PROBE_MS, .cancelled = &cancelled };
+#if defined(ZCL_TESTING)
+    if (getenv("ZCL_PROOF_TEST_HELD_STEP") && getenv("ZCL_DEVLOOP_TEST_PROCESS"))
+        probe.interval_ms = 20;
+#endif
+    if (value) {
+        enum zcl_land_cancel_observation seen = binding ?
+            zcl_dev_land_cancel_observe(binding, watch.root, local, base) : ZCL_LAND_CANCEL_UNKNOWN;
+        if (seen != ZCL_LAND_CANCEL_CURRENT) {
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                seen == ZCL_LAND_CANCEL_SETTLED ? "PROOF_CANCELLED" : "PROOF_BINDING_UNKNOWN",
+                "preflight", false, false, "land request unavailable or cancelled", "inspect land status");
+            return;
+        }
+    }
+    int result = zcl_dev_proof_step_watched(proof_source_root(request), local, base,
+                                             value ? &probe : NULL, &status, NULL);
+    if (cancelled) {
+        if (zcl_dev_land_cancel_observe(binding, watch.root, local, base) != ZCL_LAND_CANCEL_SETTLED) {
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                "PROOF_BINDING_UNKNOWN", "execute", false, false,
+                "cancelled worker could not be reconciled", "inspect land status");
+            return;
+        }
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "PROOF_CANCELLED", "execute", false, false,
+            "land request cancelled after worker completion", "inspect land status");
+        return;
+    }
     zcl_dev_proof_step_conclude(reply, result, &status);
 #endif
 }
