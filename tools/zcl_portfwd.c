@@ -358,14 +358,19 @@ static bool bind_pair_sockets(const struct fwd_pair *pr, bool *v6_ok, bool *v4_o
     return any;
 }
 
+/* A ready connecting socket must report its connect result before any I/O. */
+static bool socket_has_error(struct endpoint *e)
+{
+    int err = 0;
+    socklen_t len = sizeof(err);
+    return getsockopt(e->fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err;
+}
+
 /* Hangup is only a hint to read: unread kernel data can outlive RDHUP. */
 static bool service_endpoint_io(struct endpoint *e, struct endpoint *peer, uint32_t ev)
 {
     if (e->connecting) {
-        int err = 0;
-        socklen_t len = sizeof(err);
-        if (getsockopt(e->fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err)
-            return true;
+        if (socket_has_error(e)) return true;
         e->connecting = false;
     }
     if (!e->read_eof && (ev & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)))
@@ -374,27 +379,23 @@ static bool service_endpoint_io(struct endpoint *e, struct endpoint *peer, uint3
         if (!handle_write(peer)) return true;
     if ((ev & (EPOLLOUT | EPOLLHUP | EPOLLERR)) && e->buf_len > e->buf_off)
         if (!handle_write(e)) return true;
-    if (ev & EPOLLERR) {
-        int err = 0;
-        socklen_t len = sizeof(err);
-        if (getsockopt(e->fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err)
-            return true;
-    }
-    return false;
+    return (ev & EPOLLERR) && socket_has_error(e);
 }
 
-/* Forward each EOF only after all bytes in that direction have drained. */
+/* Forward one EOF only after all bytes in that direction have drained. */
+static bool forward_eof(struct endpoint *source, struct endpoint *dest)
+{
+    if (!source->read_eof || dest->connecting || dest->buf_len != dest->buf_off ||
+        dest->write_shutdown) return true;
+    if (shutdown(dest->fd, SHUT_WR) < 0) return false;
+    dest->write_shutdown = true;
+    return true;
+}
+
 static bool pair_should_close(struct endpoint *e, struct endpoint *peer, bool tear)
 {
     if (tear || !peer) return true;
-    if (e->read_eof && !peer->connecting && peer->buf_len == peer->buf_off && !peer->write_shutdown) {
-        if (shutdown(peer->fd, SHUT_WR) < 0) return true;
-        peer->write_shutdown = true;
-    }
-    if (peer->read_eof && !e->connecting && e->buf_len == e->buf_off && !e->write_shutdown) {
-        if (shutdown(e->fd, SHUT_WR) < 0) return true;
-        e->write_shutdown = true;
-    }
+    if (!forward_eof(e, peer) || !forward_eof(peer, e)) return true;
     return !e->connecting && !peer->connecting && e->read_eof && peer->read_eof &&
            e->buf_len == e->buf_off && peer->buf_len == peer->buf_off;
 }
