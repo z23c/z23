@@ -327,30 +327,24 @@ ZCL_BLOCKER_DECISION(wallet_phrase_no_terminal,
  * block explorer, wallet viewing). ─────────────────────────────────────── */
 
 /* ── Standing bundle-exporter outage (engine/composition/src/bundle_exporter.c,
- * bx_name_degraded). Qualification and the producer session are decided ONCE,
- * at bundle_exporter_start; nothing re-runs them in-process, so a refusal must
- * be named rather than silent. ─────────────────────────────────────────── */
+ * bx_name_degraded). Qualification and session recovery retry on a bounded
+ * backoff; the reason names the current failure. ────────────────────────── */
 ZCL_BLOCKER_DECISION(bundle_exporter.degraded,
-    "A person must choose; the node will not restart itself. This node is not "
-    "minting consensus-state bundles and cannot start again while it runs, "
-    "because both gates it must pass are evaluated once at startup. Read the "
-    "live reason first: it names which gate refused and how stale the newest "
-    "bundle already is. "
-    "OPTION A - restart this node on a build whose source identity matches the "
-    "datadir's producer session, then let the standing exporter mint a fresh "
-    "bundle at the next cadence. The blocker clears on the next boot and "
-    "cold-starting peers land near the tip again. Cost: a node restart, plus "
-    "the export's disk and CPU at mint time. "
-    "OPTION B - leave it degraded and keep serving the bundle already on disk. "
-    "This node stays fully correct for itself; nothing about its own "
-    "validation, relay or wallet changes. Cost is paid entirely by OTHER "
-    "people: every peer cold-starting from this node lands at the stale "
-    "bundle's height and must crawl every block body from there, and that gap "
-    "grows by roughly one block per target spacing forever. "
-    "There is deliberately no option that resumes the stored session under a "
-    "different binary. A self-consistent foreign producer claim is still "
-    "foreign, and adopting one would let this node publish state under an "
-    "identity it cannot honestly make.")
+    "This node is not minting consensus-state bundles. Read the live reason: "
+    "it identifies the failure and the newest bundle's age. "
+    "The exporter retries qualification and producer-session recovery with "
+    "bounded backoff while the node runs; a restart alone cannot supply "
+    "missing validation or self-folded coin evidence. "
+    "OPTION A - establish the evidence named by the refusal using the "
+    "reviewed, copy-first recovery procedure. Export requires proven "
+    "authority, a self-folded coin set, and the other source and session "
+    "checks. When the stored source epoch matches, a foreign-binary session "
+    "may be retired and re-derived by the exporter; a different epoch does "
+    "not qualify by assertion. Recovery and minting consume disk and CPU. "
+    "OPTION B - keep the current posture and investigate later. The node may "
+    "continue its other work under local policy, but no new bundle is minted "
+    "while the failure persists. Any usable older bundle grows "
+    "staler, increasing the catch-up work for a peer that uses it.")
 
 /* zcode_dht.own_delegation_expired — the ZCODE DHT service disables itself
  * when this node's own delegation.v1 document is past its expiry. Renewal is
