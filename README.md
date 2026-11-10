@@ -66,41 +66,61 @@ offline. macOS, Windows and the rest are in
 
 ## Try an app
 
-The quickest thing to touch is Sky Combat, a single-player flight game that
-ships in this repo. It needs no node and no network. Play it, make your own
-copy, change it, and give it to a friend, one plain command per step. The
-examples keep your copies in their own data directory, apart from a node's:
+Sky Combat is a flight game included in app-capable Z23 releases. If you have
+an app-capable release directory and its installer, install the apps without
+setting up a node service:
 
-```bash
-make z23 game          # build/bin/z23 and the game (needs X11 + GL headers)
-build/bin/z23 -datadir="$HOME/.z23-apps" app open skycombat     # play it
-build/bin/z23 -datadir="$HOME/.z23-apps" app copy skycombat     # skycombat-1
-#   ...edit a file in the copy it names...
-build/bin/z23 -datadir="$HOME/.z23-apps" app save skycombat-1   # keep the edit
-build/bin/z23 -datadir="$HOME/.z23-apps" app build skycombat-1
-build/bin/z23 -datadir="$HOME/.z23-apps" app open skycombat-1   # your version
-build/bin/z23 -datadir="$HOME/.z23-apps" app share skycombat-1  # one file
+```sh
+bash install_z23.sh --apps --source=/absolute/path/to/app-release
 ```
 
-Send the file `skycombat-1.z23share`. Share also prints the fingerprint and
-version root your friend will be asked to confirm; tell them these another
-way, over chat or voice, so they can check. Your copy keeps opening as before.
+For a remote release, also provide its independently obtained manifest digest
+with `--manifest-sha256=<sha256>`. A public app-release location is not yet
+specified here. The installer verifies the release and prints a command to
+open the game. Linux desktop registration needs `update-mime-database`; if it
+is unavailable, the installer reports a command-line fallback.
 
-Your friend builds the game from the file's source, so they need z23 from a
-clone and build (Start here above, about 3 minutes), a C compiler and, on
-Linux, the X11 and GL headers (the ones `make game` needs). Then they run one
-command:
+Open Sky Combat using the command printed by the installer, then approve
+**Make my copy**. Open My Apps with the installed executable; if `z23` is not
+on your PATH, replace it below with its absolute installed path:
 
-```bash
-z23 -datadir="$HOME/.z23-apps" app open skycombat-1.z23share
+```sh
+z23 app library --datadir="$HOME/.local/share/z23-app-data"
 ```
 
-It checks the file, shows who signed it as a short fingerprint such as
-`833d-7ae5-d858-315d` and the exact version root, asks y/N,
-then keeps, builds and opens the game. Each step asks y/N before it changes
-anything; `--yes` answers for scripts, and without a terminal or `--yes` a
-step only shows its plan. `z23 app list` lists your copies.
-[Sky Combat](docs/commons/GAME.md) covers controls, checks and packaging.
+Select the saved app and choose **Change with your AI** (or **Change → Change
+with your AI**). Press **C** to copy the setup into your assistant's local MCP
+settings, keeping the window open while pasting. The copied command binds your
+assistant to the same app-data directory. Ask it to change your copy; review
+and preview the exact saved draft, then explicitly choose **Keep this version**.
+Your previous kept version remains available until you approve the new one.
+
+To send that kept version, choose **Share this version → Share a link**, review
+its identity and confirm **Share link**. Copy the link once available and keep
+the sharing window open while your friend receives it; sharing stops when the
+window closes or you stop it. You can instead choose **Create share file** and
+send the resulting file. Sharing requires a personal publishing identity; a
+received copy may need explicit personalization before it can be newly signed.
+
+Your friend needs their own app-capable installation and desktop, not a source
+checkout or a running node. For a link, they choose **Discover apps → Open a
+shared app**, paste it, review the publisher and offer, then confirm **Receive**.
+For a file, they can use the registered **Open With Z23** entry on Linux or run
+`z23 app receive --file=/absolute/path/app.z23share --datadir="$HOME/.local/share/z23-app-data" --preview`.
+Receiving, **Build and preview**, and **Keep this version** are separate choices.
+Compare the publisher identity through a separate trusted channel. Link opening
+and sharing currently refuse on Windows.
+
+A graphical desktop and an available build toolchain are needed for previews.
+An app-capable Linux release may include a verified compiler kit; otherwise use
+GNU make and a C23-capable host compiler. See
+[Try, change and share an app](docs/commons/PLUGIN_APPS.md#try-change-and-share-an-app)
+for setup and platform details, and [Sky Combat](docs/commons/GAME.md) for controls.
+
+<!-- claim: symbol-present install_app_desktop tools/scripts/install_z23.sh # app-only installation and Linux desktop registration -->
+<!-- claim: symbol-present al_setup_identity tools/command/native_app_library_command.c # copied local AI setup binds the selected app -->
+<!-- claim: symbol-present app_host_flow tools/command/native_app_host_flow.c # explicit share-link confirmation -->
+<!-- claim: symbol-present app_network_open_link tools/command/native_app_network_controller.c # explicit link receive -->
 
 Bare `build/bin/z23` uses the default ports and data directory and starts
 syncing mainnet. To run a node beside other work, or just to look around,

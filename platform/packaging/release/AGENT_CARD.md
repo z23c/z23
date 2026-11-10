@@ -1,12 +1,12 @@
 # What this node offers a program
 
-You (a coding assistant, or any other program) just installed `z23`. This is
-what changed: you now have a local process that independently verifies a
-public blockchain, holds keys, and talks to a peer-to-peer network — none of
-which you can do by reasoning alone. You still do the reasoning; the node
-does the verifying.
+You (a coding assistant, or any other program) have installed `z23`. An
+app-only installation provides local app tools without starting a node or a
+service. If the owner separately chooses to run a node, it can verify the
+public blockchain, hold keys, and connect to peers. You still do the reasoning;
+the running node does the verifying.
 
-This card ships alone, next to the three binaries, in a release directory
+This card ships with the release binaries and assets, in a release directory
 with no checkout nearby -- so it does not link to other files; nothing at
 those paths exists next to it. The full command-tree contract is the file
 docs/dev/NATIVE_COMMAND_INTERFACE.md in the Z23 source repository, if you have
@@ -16,38 +16,63 @@ own interface live, which is the more reliable copy anyway.
 
 ## Connect your AI to a local app
 
-In your AI client's MCP settings, add a **local stdio** server:
+Start with an app-capable Z23 installation and a graphical desktop. The
+release installer supports `--apps --source=/absolute/path/to/app-release`;
+for a remote source, provide an independently obtained manifest digest with
+`--manifest-sha256=<sha256>`. The package must include the app assets. This
+card does not identify a public app-release location. App-only installation
+verifies the package and does not create or start a node service.
 
-| Setting | Value |
-|---|---|
-| Executable | Absolute path to your installed `z23` executable |
-| Arguments (three separate items) | `mcp`, `serve`, `--datadir=<absolute persistent app directory>` |
+Open the installed Sky Combat app and approve **Make my copy**. In My Apps,
+select the saved app and choose **Change with your AI** (or **Change → Change
+with your AI**). Press **C** to copy the exact local MCP setup, keep that
+window open while pasting it into your assistant, and use its executable and
+arguments in the assistant's local stdio server settings. The normal app-data
+profile is `$HOME/.local/share/z23-app-data`; use the same persistent profile
+for CLI and MCP. If entering settings manually, give the executable's absolute
+path and these three separate arguments:
 
-Replace the placeholder with the same persistent directory you use for CLI
-app commands, such as the fully expanded value of `$HOME/.z23-apps`.
-The client launches the executable directly: do not enter a shell command,
-quote an entire command line, or expect `~`, `$HOME` or `$(...)` to expand.
-Keep a path containing spaces inside one argument. MCP uses `--datadir=...`;
-ordinary CLI app commands use `-datadir=...` before `app`.
+```text
+mcp
+serve
+--datadir=/absolute/path/to/your/home/.local/share/z23-app-data
+```
 
-Local apps need no repository checkout, running node or blockchain sync.
-Do not add `--checkout`, `--wallet-reads` or `--fleet-writes` for this setup.
-The stdio server currently supports POSIX hosts (Linux and macOS), not Windows.
-Native confirmation and game windows need a graphical desktop in the client's
-session. Building a changed copy also needs GNU make and a C23-capable compiler;
-Linux needs X11/Xrandr/XInput2/Xcursor and OpenGL development headers/libraries,
-and macOS needs its SDK and command-line developer tools.
+Replace the example with your actual absolute path. Direct argument settings do
+not expand `$HOME` or `~`. The local app workflow needs no checkout, running
+node, or blockchain sync; leave `--checkout`, `--wallet-reads`, and
+`--fleet-writes` unset. The stdio server supports Linux and macOS. Native
+approval and preview windows need a graphical desktop. Building requires an
+available toolchain: an app-capable Linux release can include a verified
+compiler kit; otherwise use GNU make and a C23-capable host compiler. On macOS,
+use the SDK and command-line developer tools.
 
-Ask your AI:
+Ask your assistant to change the copy, then review and preview the exact saved
+draft and explicitly choose **Keep this version**. To share it, select the
+kept app and choose **Share this version → Share a link**. Review its identity,
+confirm **Share link**, and copy the link once available. Keep the sharing
+window open while your friend receives it; closing or stopping ends sharing.
+Alternatively, choose **Create share file** and send that file. Signing a new
+share requires an existing personal publishing identity; a received copy may
+need explicit personalization first.
 
-> Open the flight game. Help me make my own copy, change its appearance,
-> preview the saved version, keep it if I approve, and share it with a friend.
+Your friend uses their own app-capable installation and profile. For a link,
+choose **Discover apps → Open a shared app**, paste it, review the offer and
+publisher, and confirm **Receive**. For a file on Linux, use **Open With Z23**
+when registered, or run:
 
-The existing tools are `apps_list` for discovery, `apps_open` to play, and
-`apps_adopt` with `name: "skycombat"` to request your personal copy. Only your
-local native window can approve making that copy. The server describes the
-source-read/edit/build/preview/Keep tools to the connected AI; sharing also
-requires your local approval.
+```sh
+z23 app receive --file=/absolute/path/app.z23share --datadir=/absolute/path/to/app-data --preview
+```
+
+Receiving, **Build and preview**,
+and **Keep this version** are separate choices. Compare the publisher identity
+through a separate trusted channel. Link opening and sharing currently refuse
+on Windows.
+
+<!-- claim: symbol-present al_setup_identity tools/command/native_app_library_command.c # copied AI setup binds the selected app -->
+<!-- claim: symbol-present app_host_flow tools/command/native_app_host_flow.c # explicit temporary link hosting -->
+<!-- claim: symbol-present app_network_open_link tools/command/native_app_network_controller.c # explicit link receive -->
 
 ## Talk to it
 
