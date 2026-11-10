@@ -3,10 +3,14 @@
  * Tests for platform/modules/util/spawn.{h,c} — no-shell process-spawn primitives
  * (zcl_spawn_detached, zcl_spawn_capture). */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "test/test_core.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
 #include "command/native_app_receive_job.h"
+#include "command/native_command.h"
 #include "json/json.h"
 
 #include <errno.h>
@@ -527,6 +531,68 @@ static int test_receive_job_invalid(void)
     } _test_next:;
     return failures;
 }
+
+/* Exercise the real CLI with an isolated, explicitly selected instance.
+ * The child must not rediscover a datadir from the inherited RPC port. */
+static bool receive_job_instance_child(enum app_receive_job_command command,
+    const char *image, const char *dir)
+{
+    struct json_value input; json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "datadir", dir) &&
+        json_push_kv_str(&input, "copy", "missing");
+    struct app_receive_job *job = NULL;
+    if (ok) ok = app_receive_job_start(image, command, &input, &job) == APP_RECEIVE_JOB_STARTED;
+    json_free(&input);
+    struct app_receive_job_result result;
+    if (ok) ok = app_receive_job_join(job) && app_receive_job_poll(job, &result) &&
+        result.evidence.stdout_complete && result.stdout_json &&
+        strstr(result.stdout_json, command == APP_RECEIVE_JOB_BUILD ?
+            "\"command\":\"app.build\"" : "\"command\":\"app.open\"") &&
+        !strstr(result.stdout_json, "no_port_match");
+    return app_receive_job_join_free(&job) && ok;
+}
+static bool receive_job_context_echo(const char *dir, enum chain_network network)
+{
+    struct json_value input; json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "datadir", dir);
+    struct app_receive_job *job = NULL;
+    if (ok) ok = app_receive_job_start("/bin/echo", APP_RECEIVE_JOB_OPEN, &input, &job) == APP_RECEIVE_JOB_STARTED;
+    json_free(&input);
+    struct app_receive_job_result result;
+    if (ok) ok = app_receive_job_join(job) && app_receive_job_poll(job, &result) &&
+        result.transport_ok && strstr(result.stdout_json, "-rpcport=39461") &&
+        (!!strstr(result.stdout_json, "-regtest") == (network == CHAIN_REGTEST)) &&
+        (!!strstr(result.stdout_json, "-testnet") == (network == CHAIN_TESTNET));
+    return app_receive_job_join_free(&job) && ok;
+}
+static int test_receive_job_selected_instance(void)
+{
+    int failures = 0;
+    TEST("receive job: actual build and open retain a selected instance") {
+        char image[4096], dir[512];
+        ASSERT(realpath("build/bin/z23-dev", image));
+        ASSERT(test_mkdtemp(dir, sizeof(dir), "receive_job_instance"));
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0) {
+            bool ok = setenv("HOME", dir, 1) == 0 && setenv("ZCL_RPCPORT", "39461", 1) == 0;
+            for (int n = CHAIN_MAIN; ok && n <= CHAIN_REGTEST; n++) {
+                enum chain_network network = (enum chain_network)n;
+                (void)zcl_native_command_main("version", NULL, 0, dir, 39461, network, true);
+                ok = zcl_native_command_network() == network && receive_job_context_echo(dir, network) &&
+                    receive_job_instance_child(APP_RECEIVE_JOB_BUILD, image, dir) &&
+                    receive_job_instance_child(APP_RECEIVE_JOB_OPEN, image, dir);
+            }
+            _exit(ok ? 0 : 1);
+        }
+        int status = 0;
+        ASSERT(waitpid(pid, &status, 0) == pid);
+        ASSERT(rmdir(dir) == 0);
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 struct receive_job_observation {
     bool started, joined, polled, released, transport, observed, complete;
     bool literal_args;
@@ -536,11 +602,20 @@ struct receive_job_observation {
 static struct receive_job_observation receive_job_observe(const char *image)
 {
     struct receive_job_observation o = {0};
+    char dir[512];
+    if (!test_mkdtemp(dir, sizeof(dir), "receive_job_echo")) return o;
     struct json_value input; json_init(&input); json_set_object(&input);
+    if (!json_push_kv_str(&input, "datadir", dir)) { json_free(&input); (void)rmdir(dir); return o; }
+    zcl_native_bridge_ensure_rpc();
+    char old_dir[512];
+    (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+    int old_port = zcl_native_command_rpc_port();
+    zcl_native_bridge_bind_rpc(dir, 39461);
     struct app_receive_job *job = NULL;
     o.started = app_receive_job_start(image, APP_RECEIVE_JOB_OPEN, &input, &job) == APP_RECEIVE_JOB_STARTED;
+    zcl_native_bridge_bind_rpc(old_dir, old_port);
     json_free(&input); /* Worker must own the serialized input already. */
-    if (!o.started) return o;
+    if (!o.started) { (void)rmdir(dir); return o; }
     struct app_receive_job_result r;
     (void)app_receive_job_poll(job, &r); /* May already be complete; no timing assertion. */
     o.joined = app_receive_job_join(job);
@@ -549,9 +624,11 @@ static struct receive_job_observation receive_job_observe(const char *image)
         o.transport = r.transport_ok; o.observed = r.evidence.exit_observed;
         o.complete = r.evidence.stdout_complete; o.exit_code = r.evidence.exit_code;
         o.bytes = r.stdout_len;
-        o.literal_args = r.stdout_json && strcmp(r.stdout_json, "app open --input={} --json\n") == 0;
+        char expected[1200];
+        int n = snprintf(expected, sizeof(expected), "-datadir=%s -rpcport=39461 app open --input={\"datadir\":\"%s\"} --json\n", dir, dir);
+        o.literal_args = n > 0 && (size_t)n < sizeof(expected) && r.stdout_json && !strcmp(r.stdout_json, expected);
     }
-    o.released = app_receive_job_join_free(&job) && job == NULL;
+    o.released = app_receive_job_join_free(&job) && job == NULL && rmdir(dir) == 0;
     return o;
 }
 static bool receive_job_lifecycle_observed(const struct receive_job_observation *o)
@@ -1050,6 +1127,7 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_evidence_exited_buffer();
     failures += test_spawn_evidence_io_failure();
     failures += test_receive_job_invalid();
+    failures += test_receive_job_selected_instance();
     failures += test_receive_job_observed();
     failures += test_receive_job_unknown();
     failures += test_spawn_capture_in_dir();

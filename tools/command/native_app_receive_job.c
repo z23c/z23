@@ -4,10 +4,12 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "command/native_app_receive_job.h"
+#include "command/native_command.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/os_proc.h"
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #if !defined(_WIN32)
 #include <pthread.h>
@@ -23,7 +25,8 @@ struct app_receive_job {
     bool joined; /* Parent-only; worker never accesses this field. */
     atomic_bool done;
     char *image, *input_arg, *output;
-    const char *argv[6];
+    char datadir_arg[ARJ_PATH_CAP], rpc_arg[32];
+    const char *argv[9];
     int timeout_ms, capture_status;
     struct zcl_spawn_evidence evidence;
 };
@@ -61,12 +64,28 @@ static void *arj_capture(void *context)
     atomic_store_explicit(&job->done, true, memory_order_release);
     return NULL;
 }
-static void arj_arguments(struct app_receive_job *job, enum app_receive_job_command command)
+static bool arj_arguments(struct app_receive_job *job, enum app_receive_job_command command,
+    const struct json_value *input)
 {
-    job->argv[0] = job->image; job->argv[1] = "app";
-    job->argv[2] = command == APP_RECEIVE_JOB_BUILD ? "build" : "open";
-    job->argv[3] = job->input_arg; job->argv[4] = "--json"; job->argv[5] = NULL;
+    const char *dir = json_get_str(json_get(input, "datadir"));
+    if (!dir || dir[0] != '/') return false;
+    int written = snprintf(job->datadir_arg, sizeof(job->datadir_arg), "-datadir=%s", dir);
+    if (written < 0 || (size_t)written >= sizeof(job->datadir_arg)) return false;
+    enum chain_network network = zcl_native_command_network();
+    if (network != CHAIN_MAIN && network != CHAIN_TESTNET && network != CHAIN_REGTEST) return false;
+    int port = zcl_native_command_rpc_port();
+    if (port <= 0 || port > 65535) return false;
+    size_t i = 0;
+    job->argv[i++] = job->image;
+    job->argv[i++] = job->datadir_arg;
+    (void)snprintf(job->rpc_arg, sizeof(job->rpc_arg), "-rpcport=%d", port);
+    job->argv[i++] = job->rpc_arg;
+    if (network != CHAIN_MAIN) job->argv[i++] = network == CHAIN_TESTNET ? "-testnet" : "-regtest";
+    job->argv[i++] = "app";
+    job->argv[i++] = command == APP_RECEIVE_JOB_BUILD ? "build" : "open";
+    job->argv[i++] = job->input_arg; job->argv[i++] = "--json"; job->argv[i] = NULL;
     job->timeout_ms = command == APP_RECEIVE_JOB_BUILD ? ARJ_BUILD_MS : ARJ_OPEN_MS;
+    return true;
 }
 static enum app_receive_job_start_result arj_start(const char *path,
     enum app_receive_job_command command, const struct json_value *input,
@@ -83,7 +102,7 @@ static enum app_receive_job_start_result arj_start(const char *path,
     enum app_receive_job_start_result image = arj_image(job, path);
     if (image != APP_RECEIVE_JOB_STARTED) { arj_destroy(job); return image; }
     if (!arj_buffers(job, input, n)) { arj_destroy(job); return APP_RECEIVE_JOB_NO_MEMORY; }
-    arj_arguments(job, command);
+    if (!arj_arguments(job, command, input)) { arj_destroy(job); return APP_RECEIVE_JOB_BAD_INPUT; }
     /* Non-NULL out_tid leaves joining with this job's existing owner. */
     if (thread_registry_spawn("receive-job", arj_capture, job, &job->thread) != 0) {
         arj_destroy(job); return APP_RECEIVE_JOB_THREAD_FAILED;

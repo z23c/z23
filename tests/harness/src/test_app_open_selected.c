@@ -2182,8 +2182,14 @@ static bool ak_draft_preview_keep(struct ak_fixture *f, bool keep)
         app_saved_draft_head(&before, head, &reply) && realpath("build/bin/z23-dev", worker);
     struct ak_draft_flow_view view = {.nav = {.valid = true}, .fixture = f, .keep = keep};
     zcl_hex_encode(head, 32, view.nav.head);
+    zcl_native_bridge_ensure_rpc();
+    char old_dir[512];
+    (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+    int old_port = zcl_native_command_rpc_port();
+    zcl_native_bridge_bind_rpc(f->world.bob_datadir, 39461);
     if (ok) zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &reply,
         ak_draft_library, ak_draft_flow_present, &view, worker);
+    zcl_native_bridge_bind_rpc(old_dir, old_port);
     bool stopped = ak_draft_stop_preview(f, &reply);
     ok = ok && stopped && view.nav.valid && view.prompted_keep && reply.status == ZCL_COMMAND_STATUS_PASSED &&
         ak_draft_selection_result(f, keep, &before, head, &view, &reply);

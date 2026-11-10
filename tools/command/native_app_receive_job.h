@@ -27,6 +27,8 @@ struct app_receive_job_result {
  * package input; NULL uses os_proc_self_exe_open_path in the parent. Paths are
  * copied, not cryptographically pinned (Darwin replacement remains possible).
  * Copies bounded object JSON into --input= argv: no secret-bearing input.
+ * Its absolute datadir and the parent-selected RPC port and network are
+ * captured into the child CLI arguments before the worker starts.
  * The caller must already own native consent and pass exact saved identities.
  * Environment is inherited unchanged; caller must keep it stable for launch.
  * No inherited environment mutation, shell, native handler or UI in worker.
