@@ -270,6 +270,29 @@ static void arf_cleanup_notice(struct receive_flow *f)
         (void)app_confirm_show(view, f->presenter, f->context, why, sizeof(why));
     app_confirm_free(view); free(view);
 }
+static bool arf_recover_progress(struct receive_flow *f)
+{
+    bool chosen = false;
+    bool displayed = arf_choose(f, "Operation result retained",
+        "Progress could not be displayed. Continue with the retained result, or close to stop.",
+        "Continue", &chosen);
+    const char *decision = !displayed ? "unavailable" : chosen ? "continue" : "close";
+    struct json_value *ops = &f->operations;
+    if (!ops->num_children || !json_push_kv_str(&ops->children[ops->num_children - 1],
+                                                "progress_recovery", decision))
+        return arf_fail(f, "OBSERVATION_UNAVAILABLE", "The recovery choice could not be retained; inspect the copy before retrying.");
+    if (displayed && chosen) return true;
+    return arf_fail(f, "PROGRESS_UNAVAILABLE", "Progress could not be displayed; the operation's result must be inspected before retrying.");
+}
+static bool arf_progress_outcome(struct receive_flow *f, bool shown, bool closed)
+{
+    if (!shown) {
+        if (closed) return arf_fail(f, "PROGRESS_UNAVAILABLE", "Progress could not be displayed; the operation's result must be inspected before retrying.");
+        return arf_recover_progress(f);
+    }
+    if (closed) { f->closed = true; return false; }
+    return true;
+}
 static bool arf_job(struct receive_flow *f, enum app_receive_job_command command,
     const struct json_value *input, const char *stage, struct json_value *wire)
 {
@@ -306,9 +329,7 @@ static bool arf_job(struct receive_flow *f, enum app_receive_job_command command
     if (!ok) return false; /* Never replace a missing-evidence diagnosis. */
     if (cleanup_failed) return arf_fail(f, "PREVIEW_CLEANUP_DELAYED", "Worker cleanup required recovery; the observed operation result is retained.");
     if (notice_failed) return arf_fail(f, "PROGRESS_NOTICE_UNAVAILABLE", "The closing notice could not be displayed; the observed operation result is retained.");
-    if (!shown) return arf_fail(f, "PROGRESS_UNAVAILABLE", "Progress could not be displayed; the operation's result must be inspected before retrying.");
-    if (closed) { f->closed = true; return false; }
-    return true;
+    return arf_progress_outcome(f, shown, closed);
 }
 static bool arf_build(struct receive_flow *f)
 {

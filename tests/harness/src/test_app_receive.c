@@ -1254,7 +1254,8 @@ static int rr_cases(void)
     return failures;
 }
 #if defined(__linux__)
-struct rdiag_presenter { unsigned progress, choices; };
+enum rdiag_mode { RDIAG_CLOSE, RDIAG_UNAVAILABLE, RDIAG_PRIOR_CLOSE, RDIAG_MISMATCH, RDIAG_CONTINUE };
+struct rdiag_presenter { unsigned progress, choices, recoveries, keep_choices; enum rdiag_mode mode; };
 static bool rdiag_choose(const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_live_view_v1 *live)
 {
@@ -1264,21 +1265,15 @@ static bool rdiag_choose(const struct zcl_present_model_v1 *model,
         if (!rt_action(live, 2, &close, &redraw) || close || !redraw) return false;
     return rt_action(live, 3, &close, &redraw) && close;
 }
-static bool rdiag_present(void *context, const struct zcl_present_model_v1 *model,
-    const struct zcl_present_window_pages_v1 *pages,
+static bool rdiag_progress(struct rdiag_presenter *p,
     const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
 {
-    struct rdiag_presenter *p = context;
-    (void)pages;
-    if (!strcmp(model->title, "Your copy is ready")) {
-        ++p->choices; return rdiag_choose(model, live);
-    }
-    if (!strcmp(model->title, "The next step did not finish")) {
-        bool close = false, redraw = false;
-        return rt_action(live, 0, &close, &redraw) && close;
-    }
     ++p->progress;
     if (p->progress == 2) {
+        if (p->mode == RDIAG_PRIOR_CLOSE) {
+            bool redraw = false, close = false;
+            live->owner.update(live->owner.context, NULL, true, &redraw, &close);
+        }
         if (cap > 1) { memset(why, 'x', cap - 1); why[1] = '\n'; why[cap - 1] = 0; }
         return false;
     }
@@ -1291,6 +1286,31 @@ static bool rdiag_present(void *context, const struct zcl_present_model_v1 *mode
     } while (platform_time_monotonic_ms() < end);
     return false;
 }
+static bool rdiag_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct rdiag_presenter *p = context;
+    (void)pages;
+    if (!strcmp(model->title, "Your copy is ready")) {
+        ++p->choices; return rdiag_choose(model, live);
+    }
+    if (!strcmp(model->title, "Operation result retained")) {
+        ++p->recoveries;
+        if (p->mode == RDIAG_UNAVAILABLE) return false;
+        if (p->mode == RDIAG_MISMATCH || p->mode == RDIAG_CONTINUE) return rdiag_choose(model, live);
+        bool close = false, redraw = false;
+        return rt_action(live, 0, &close, &redraw) && close;
+    }
+    if (!strcmp(model->title, "The next step did not finish")) {
+        bool close = false, redraw = false;
+        return rt_action(live, 0, &close, &redraw) && close;
+    }
+    if (!strcmp(model->title, "Preview opened")) {
+        ++p->keep_choices; return rdiag_choose(model, live);
+    }
+    return rdiag_progress(p, live, why, cap);
+}
 static bool rdiag_failure(const struct json_value *second)
 {
     const char *phase = json_get_str(json_get(second, "progress_failure_phase"));
@@ -1299,7 +1319,15 @@ static bool rdiag_failure(const struct json_value *second)
     const char *record = json_get_str(json_get(second, "record_id"));
     return phase && !strcmp(phase, "presenter") && error && strlen(error) == 255 &&
         error[0] == 'x' && error[1] == '?' && error[254] == 'x' &&
-        stage && !strcmp(stage, "commit") && record && strlen(record) == 64;
+        stage && record && strlen(record) == 64;
+}
+static bool rdiag_recovery(const struct json_value *second, const struct rdiag_presenter *p)
+{
+    const char *decision = json_get_str(json_get(second, "progress_recovery"));
+    const char *expected = p->mode == RDIAG_UNAVAILABLE ? "unavailable" :
+        p->mode == RDIAG_MISMATCH ? "continue" : "close";
+    return p->mode == RDIAG_PRIOR_CLOSE ? !json_get(second, "progress_recovery") && p->recoveries == 0 :
+        decision && !strcmp(decision, expected) && p->recoveries == 1;
 }
 static bool rdiag_result(const struct zcl_command_reply *reply, const struct rdiag_presenter *p)
 {
@@ -1309,11 +1337,32 @@ static bool rdiag_result(const struct zcl_command_reply *reply, const struct rdi
     const char *code = json_get_str(json_get(json_get(data, "continuation_error"), "code"));
     return p->choices == 1 && p->progress == 2 && !json_get(first, "progress_error") &&
         json_get_bool(json_get(first, "progress_displayed")) &&
-        !json_get_bool(json_get(second, "progress_displayed")) && rdiag_failure(second) &&
-        code && !strcmp(code, "PROGRESS_UNAVAILABLE") && !json_get(data, "kept") &&
+        !json_get_bool(json_get(second, "progress_displayed")) && rdiag_failure(second) && rdiag_recovery(second, p) &&
+        code && !strcmp(code, p->mode == RDIAG_MISMATCH ? "PREVIEW_BUILD_MISMATCH" : "PROGRESS_UNAVAILABLE") && !json_get(data, "kept") &&
         !json_get_bool(json_get(data, "continuation_executed"));
 }
-static int rdiag_case(void)
+static void rdiag_debug(const struct zcl_command_reply *reply, const struct rdiag_presenter *p)
+{
+    const struct json_value *data = &reply->data, *ops = json_get(data, "operations");
+    const struct json_value *second = ops && json_size(ops) > 1 ? json_at(ops, 1) : NULL;
+    const char *code = json_get_str(json_get(json_get(data, "continuation_error"), "code"));
+    const char *decision = json_get_str(json_get(second, "progress_recovery"));
+    fprintf(stderr, "RECEIVE_RECOVERY mode=%d choices=%u progress=%u recovery=%u ops=%zu code=%s decision=%s close_notice=%d diagnostic=%d\n",
+        p->mode, p->choices, p->progress, p->recoveries, ops ? json_size(ops) : 0,
+        code ? code : "(none)", decision ? decision : "(none)",
+        json_get_bool(json_get(second, "close_notice_failed")), rdiag_failure(second));
+}
+static bool rdiag_wrapper(const struct receive_fixture *f, const char *image, char *path, size_t cap)
+{
+    int n = snprintf(path, cap, "%s/receive-worker", f->world.root);
+    if (n <= 0 || (size_t)n >= cap || strchr(image, '\'')) return false;
+    FILE *file = fopen(path, "w");
+    if (!file) return false;
+    int wrote = fprintf(file, "#!/bin/sh\n'%s' \"$@\" | sed 's/\"stage\":\"commit\"/\"stage\":\"wrong\"/'\n", image);
+    int closed = fclose(file);
+    return wrote > 0 && closed == 0 && chmod(path, 0700) == 0;
+}
+static int rdiag_case(enum rdiag_mode mode)
 {
     int failures = 0; struct receive_fixture f = {0}; char image[PATH_MAX];
     struct json_value input; json_init(&input);
@@ -1325,14 +1374,19 @@ static int rdiag_case(void)
         struct rt_presenter receive = {.fixture = &f, .decision = RT_CONFIRM};
         zcl_test_app_receive_run(&request, &reply, rt_present, &receive);
         ASSERT(rt_expected_reply(&receive, &reply));
-        struct rdiag_presenter presenter = {0};
+        struct rdiag_presenter presenter = {.mode = mode};
+        char wrapper[PATH_MAX];
+        ASSERT(mode != RDIAG_MISMATCH || rdiag_wrapper(&f, image, wrapper, sizeof(wrapper)));
         zcl_native_bridge_ensure_rpc();
         char old_dir[PATH_MAX]; (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
         int old_port = zcl_native_command_rpc_port();
         zcl_native_bridge_bind_rpc(f.datadir, 39461);
-        app_receive_flow_run_test(f.datadir, &reply, rdiag_present, &presenter, image);
+        app_receive_flow_run_test(f.datadir, &reply, rdiag_present, &presenter,
+                                  mode == RDIAG_MISMATCH ? wrapper : image);
         zcl_native_bridge_bind_rpc(old_dir, old_port);
-        ASSERT(rdiag_result(&reply, &presenter));
+        bool result = rdiag_result(&reply, &presenter);
+        if (!result) rdiag_debug(&reply, &presenter);
+        ASSERT(result);
         PASS();
     } _test_next:;
     zcl_command_reply_free(&reply); json_free(&input); return failures;
@@ -2848,6 +2902,70 @@ static int rus_case(bool keep)
     if (!clean) failures++;
     return failures;
 }
+static bool rdiag_success_result(const struct zcl_command_reply *reply, const struct rdiag_presenter *p)
+{
+    const struct json_value *data = &reply->data, *ops = json_get(data, "operations");
+    if (!ops || ops->type != JSON_ARR || json_size(ops) != 3) return false;
+    const struct json_value *second = json_at(ops, 1), *third = json_at(ops, 2);
+    return p->choices == 1 && p->recoveries == 1 && p->keep_choices == 1 && p->progress == 3 &&
+        rdiag_failure(second) && !strcmp(ru_string(second, "progress_recovery"), "continue") &&
+        !strcmp(ru_string(second, "stage"), "commit") && !strcmp(ru_string(second, "status"), "passed") &&
+        !strcmp(ru_string(data, "continuation"), "kept") && json_get(data, "kept") &&
+        ruf_bool(data, "continuation_executed", true) && ruf_bool(third, "progress_displayed", true);
+}
+static void rdiag_success_debug(const struct zcl_command_reply *reply, const struct rdiag_presenter *p)
+{
+    const struct json_value *data = &reply->data, *ops = json_get(data, "operations");
+    const struct json_value *second = json_at(ops, 1), *third = json_at(ops, 2);
+    const struct json_value *error = json_get(data, "continuation_error");
+    fprintf(stderr, "RECEIVE_RECOVERY_SUCCESS choices=%u recovery=%u keep_choices=%u progress=%u ops=%zu continuation=%s code=%s message=%.160s second_stage=%s second_status=%s third_status=%s third_error=%.160s\n",
+        p->choices, p->recoveries, p->keep_choices, p->progress, json_size(ops),
+        ru_string(data, "continuation"), ru_string(error, "code"), ru_string(error, "message_excerpt"),
+        ru_string(second, "stage"), ru_string(second, "status"), ru_string(third, "status"),
+        ru_string(third, "error_excerpt"));
+}
+static int rdiag_success(void)
+{
+    int failures = 0, old_subreaper = 0; size_t saved = 0; bool custody = false;
+    struct ru_env env[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL}, {"XDG_STATE_HOME", NULL},
+        {"XDG_RUNTIME_DIR", NULL}, {"XDG_CACHE_HOME", NULL}, {"XDG_DATA_HOME", NULL},
+        {"DISPLAY", NULL}, {"WAYLAND_DISPLAY", NULL}, {"XAUTHORITY", NULL},
+        {"ZCL_CLI_TEST_NO_SERVICE_LOOKUP", NULL}};
+    struct receive_fixture f = {0}; struct ru_run r = {.input = -1, .output = -1, .fixture = &f};
+    struct json_value input; json_init(&input);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    TEST("continue after a progress failure previews and separately keeps the built version") {
+        char image[PATH_MAX];
+        ASSERT(ru_env_save(env, sizeof(env)/sizeof(env[0]), &saved));
+        ASSERT(rt_setup(&f) && rus_bundle(&f) && ru_environment(&f));
+        ASSERT(realpath("build/bin/z23-dev", image) && ru_xvfb(&r) && ruf_child_baseline(&r));
+        ASSERT(prctl(PR_GET_CHILD_SUBREAPER, &old_subreaper) == 0 && prctl(PR_SET_CHILD_SUBREAPER, 1) == 0);
+        custody = true;
+        ASSERT(rt_input(&input, &f));
+        struct zcl_command_request request = {.input = &input};
+        struct rt_presenter receive = {.fixture = &f, .decision = RT_CONFIRM};
+        zcl_test_app_receive_run(&request, &reply, rt_present, &receive);
+        bool received = rt_expected_reply(&receive, &reply);
+        if (!received) fprintf(stderr, "RECEIVE_RECOVERY setup observed=%d visited=%d status=%d code=%s\n",
+            receive.observed, receive.visited, reply.status, reply.error.code);
+        ASSERT(received);
+        struct rdiag_presenter presenter = {.mode = RDIAG_CONTINUE};
+        zcl_native_bridge_ensure_rpc();
+        char old_dir[PATH_MAX]; (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+        int old_port = zcl_native_command_rpc_port();
+        zcl_native_bridge_bind_rpc(f.datadir, 39461);
+        app_receive_flow_run_test(f.datadir, &reply, rdiag_present, &presenter, image);
+        zcl_native_bridge_bind_rpc(old_dir, old_port);
+        bool result = rdiag_success_result(&reply, &presenter);
+        if (!result) rdiag_success_debug(&reply, &presenter);
+        ASSERT(result);
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply); json_free(&input);
+    bool clean = rus_cleanup(&r, custody, old_subreaper);
+    if (!ru_env_restore(env, saved) || !clean) ++failures;
+    return failures;
+}
 /* Deterministic real-X11 controls for the included maintained UI driver.
  * Reuse this group's private display and exact direct-child custody. */
 static bool rud_one(struct ru_run *r, const char *mode, uint32_t expected)
@@ -2901,7 +3019,11 @@ static int rud_readiness(void)
 int test_app_receive_ui(void)
 {
     if (access("/usr/bin/Xvfb", X_OK) != 0) { puts("SKIP (app_receive_ui requires Linux Xvfb)"); return 0; }
-    int failures = rdiag_case();
+    int failures = rdiag_case(RDIAG_CLOSE);
+    failures += rdiag_case(RDIAG_UNAVAILABLE);
+    failures += rdiag_case(RDIAG_PRIOR_CLOSE);
+    failures += rdiag_case(RDIAG_MISMATCH);
+    failures += rdiag_success();
     failures += rud_readiness();
     failures += ru_case(false, false, false);
     failures += ru_case(true, false, false);
