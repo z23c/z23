@@ -28,8 +28,8 @@ At boot, `engine/composition/src/boot_frontend_services.c:boot_https_explorer_st
 
 The node binds the high ports (8443/8080) **unprivileged**. Public **443/80** reach it
 via a tiny **linger port-forward service** (below) — the node itself never binds 443.
-The forward is a ~40-line project-owned forwarder that gets ONE file capability via
-a single `sudo setcap`, after which an AI agent / operator runs it with no sudo, ever.
+The project-owned forwarder receives one file capability through `sudo setcap`.
+Routine service management then uses the operator's user service without sudo.
 
 > Note: the TLS servername is optional. Pass `-httpsdomain=yourdomain.example` to
 > set it explicitly; otherwise it is left unset (`boot_frontend_services.c`) and the
@@ -66,7 +66,7 @@ sudo bash tools/scripts/zcl-explorer-cert.sh
 #    which is the safer posture anyway. This builds a tiny project-owned forwarder,
 #    installs a user-linger service, and (its ONLY privileged action) sets ONE file
 #    capability on it. Run this ONE command — after it, the agent manages the
-#    service with no sudo, ever:
+#    service without sudo:
 sudo bash tools/scripts/zcl-portfwd-setup.sh
 ```
 
@@ -76,7 +76,7 @@ That single command:
 - runs `setcap 'cap_net_bind_service=+ep' ~/.local/bin/zcl-portfwd` (the **one** privileged line),
 - enables + starts the service under linger (survives reboot).
 
-From then on the agent (or you) manage it with **no sudo, ever**:
+From then on the agent (or you) manage the installed service **without sudo**:
 
 ```bash
 systemctl --user start   zcl-portfwd     # or stop / restart
@@ -87,9 +87,31 @@ bash tools/scripts/zcl-portfwd-setup.sh --uninstall   # tear it all down (no sud
 
 **Why a capped forwarder, not setcap on the node or system socat?** The capability
 lives on the forwarder file, so it **survives `make deploy`** (which rebuilds the
-node binary and would otherwise drop the cap). It's scoped to one ~40-line file —
+node binary and would otherwise drop the cap). It's scoped to the small forwarder —
 not the whole node, not system-wide socat. TLS still terminates inside the node;
 the forwarder is a dumb byte pipe.
+
+### Keep routine updates unprivileged
+
+Treat the capability-bearing forwarder as a stable host component. Keep its
+executable and user-unit overrides outside app and node release directories.
+Do not rerun the forwarder setup installer during routine app, node or router
+updates. Preserve the existing forwarding destination, including any deployed
+fleet router, when updating those components.
+
+For an immutable installation, retain the reviewed forwarder at a path named
+for its binary digest and point a user-unit override at that exact file. Before
+and after deployment, inspect the effective command and that file's capability:
+
+```sh
+systemctl --user show zcl-portfwd.service -p ExecStart -p ActiveState
+getcap /absolute/path/to/the/installed/forwarder
+```
+
+The existing capability is not permission to grant capabilities to replacement
+files. If the privileged forwarder itself needs replacing, stage and review the
+new binary, then arrange its capability grant before activation. Routine service
+restarts and updates to the unprivileged applications do not require that step.
 
 ```bash
 # 3. Restart the node so boot starts the HTTPS server with the new cert.

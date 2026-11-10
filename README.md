@@ -66,17 +66,31 @@ offline. macOS, Windows and the rest are in
 
 ## Try an app
 
-Sky Combat is a flight game included in app-capable Z23 releases. If you have
-an app-capable release directory and its installer, install the apps without
-setting up a node service:
+Sky Combat is a flight game included in app-capable Z23 releases. On Linux
+x86_64 with glibc 2.38 or newer, use the pinned installer and release below.
+This installs apps without a node service. The two SHA-256 values below are
+recorded here; check them against a trusted copy of this guide before use.
 
 ```sh
-bash install_z23.sh --apps --source=/absolute/path/to/app-release
+(
+    set -eu
+    installer_sha=7d2117ba999b35eaf74fe86ddb18b5d63d6502e17d55e28e579421cfaf183898
+    manifest_sha=51a9ca2aa370f97e193c14dfecd14774e8f40e9b5ba2644deb180399e70e48d3
+    install_tmp=$(mktemp -d) || exit 1
+    trap 'rm -rf -- "$install_tmp"' 0
+    curl --fail --silent --show-error --location --connect-timeout 10 --max-time 90 --max-filesize 1048576 \
+      "https://z23.sh/release/installers/$installer_sha/install_z23.sh" -o "$install_tmp/install_z23.sh" || exit 1
+    printf '%s  %s\n' "$installer_sha" "$install_tmp/install_z23.sh" | sha256sum --check --status || exit 1
+    bash "$install_tmp/install_z23.sh" --apps \
+      --source="https://z23.sh/release/apps/linux-x86_64/$manifest_sha" \
+      --manifest-sha256="$manifest_sha" || exit $?
+)
 ```
 
-For a remote release, also provide its independently obtained manifest digest
-with `--manifest-sha256=<sha256>`. A public app-release location is not yet
-specified here. The installer verifies the release and prints a command to
+For other platforms, or if you already have an app-capable release directory,
+use its verified installer with `--apps --source=/absolute/path/to/app-release`.
+The source build path is described above and in the platform guides.
+The installer verifies the release and prints a command to
 open the game. Linux desktop registration needs `update-mime-database`; if it
 is unavailable, the installer reports a command-line fallback.
 
