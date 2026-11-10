@@ -89,6 +89,20 @@ static bool csi_cold_validate_headers(struct csi_cold_fixture *f, struct block_i
     }
     return true;
 }
+static bool csi_cold_seed_cursors(sqlite3 *db)
+{
+    return hs_set_cursor(db, "validate_headers", 3) && hs_set_cursor(db, "script_validate", 2) &&
+        hs_set_cursor(db, "body_persist", 2) && hs_set_cursor(db, "proof_validate", 2) &&
+        hs_set_cursor(db, "utxo_apply", 3) && hs_set_cursor(db, "tip_finalize", 1);
+}
+static bool csi_cold_seed_rows(sqlite3 *db, const struct csi_cold_fixture *f)
+{
+    return hs_ins(db, "INSERT INTO validate_headers_log(height,hash,ok,validated_at) VALUES(?1,?2,1,0)", 1, f->hash[0].data) &&
+        hs_ins(db, "INSERT INTO validate_headers_log(height,hash,ok,validated_at) VALUES(?1,?2,1,0)", 2, f->hash[1].data) &&
+        hs_ins(db, "INSERT INTO utxo_apply_log(height,status,ok,spent_count,added_count,total_value_delta,applied_at) VALUES(?1,'verified',1,0,0,0,0)", 2, NULL) &&
+        hs_ins(db, "INSERT INTO utxo_apply_delta(height,branch_hash,spent_blob,added_blob) VALUES(?1,?2,x'',x'')", 2, f->hash[1].data) &&
+        hs_put_anchor_hash(db, 1, f->hash[0].data);
+}
 static bool csi_cold_seed_progress(sqlite3 *db, struct block_index *genesis, const struct csi_cold_fixture *f)
 {
     if (!hs_ensure_forward_schema(db) || !coins_kv_ensure_schema(db) || !anchor_kv_ensure_schema(db) ||
@@ -103,14 +117,7 @@ static bool csi_cold_seed_progress(sqlite3 *db, struct block_index *genesis, con
         progress_meta_set_in_tx(db, COINS_APPLIED_HEIGHT_KEY, applied, sizeof(applied)) &&
         progress_meta_set_in_tx(db, COINS_KV_MIGRATION_COMPLETE_KEY, &one, 1) &&
         progress_meta_set_in_tx(db, COINS_KV_AUTHORITY_GENERATION_KEY, generation, sizeof(generation)) &&
-        hs_set_cursor(db, "validate_headers", 3) && hs_set_cursor(db, "script_validate", 2) &&
-        hs_set_cursor(db, "body_persist", 2) && hs_set_cursor(db, "proof_validate", 2) &&
-        hs_set_cursor(db, "utxo_apply", 3) && hs_set_cursor(db, "tip_finalize", 1) &&
-        hs_ins(db, "INSERT INTO validate_headers_log(height,hash,ok,validated_at) VALUES(?1,?2,1,0)", 1, f->hash[0].data) &&
-        hs_ins(db, "INSERT INTO validate_headers_log(height,hash,ok,validated_at) VALUES(?1,?2,1,0)", 2, f->hash[1].data) &&
-        hs_ins(db, "INSERT INTO utxo_apply_log(height,status,ok,spent_count,added_count,total_value_delta,applied_at) VALUES(?1,'verified',1,0,0,0,0)", 2, NULL) &&
-        hs_ins(db, "INSERT INTO utxo_apply_delta(height,branch_hash,spent_blob,added_blob) VALUES(?1,?2,x'',x'')", 2, f->hash[1].data) &&
-        hs_put_anchor_hash(db, 1, f->hash[0].data);
+        csi_cold_seed_cursors(db) && csi_cold_seed_rows(db, f);
     if (sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) return false;
     return ok;
 }
@@ -160,6 +167,32 @@ static bool csi_cold_pixel_stop(void *opaque)
 }
 /* Optional measurement uses an already-private copy of public-chain stores.
  * It stages only; the preflight is bound to the separate height-2 test. */
+static bool csi_cold_pixel_stages(struct csi_cold_fixture *f, struct main_state *ms,
+    int fd, int64_t start, int64_t ready)
+{
+    bool ok = false;
+    boot_wallet_cold_prefix_t *stage = NULL; struct csi_cold_pixel_stop stop = {0, SIZE_MAX};
+    int64_t begin = platform_time_monotonic_ms();
+    enum boot_wallet_cold_result result = boot_wallet_cold_prefix_stage_with_history(ms, fd, 100000,
+        f->preflight, csi_cold_pixel_stop, &stop, &stage);
+    int64_t end = platform_time_monotonic_ms();
+    const struct block_index *tip = stage ? boot_wallet_cold_prefix_tip(stage) : NULL;
+    struct rusage usage; long rss = getrusage(RUSAGE_SELF, &usage) == 0 ? usage.ru_maxrss : -1;
+    fprintf(stderr, "COLD_PIXEL setup_ms=%lld stage_ms=%lld result=%d height=%d callbacks=%zu map=%zu peak_kib=%ld\n",
+        (long long)(ready-start), (long long)(end-begin), (int)result, tip ? tip->nHeight : -1,
+        stop.calls, block_map_count(&ms->map_block_index), rss);
+    ok = result == BOOT_WALLET_COLD_READY && tip && tip->nHeight == 64854 && block_map_count(&ms->map_block_index) == 1;
+    if (stage && !boot_wallet_cold_prefix_release(stage)) ok = false;
+    stage = NULL; stop.calls = 0; stop.limit = 2000; begin = platform_time_monotonic_ms();
+    result = boot_wallet_cold_prefix_stage_with_history(ms, fd, 100000, f->preflight,
+        csi_cold_pixel_stop, &stop, &stage);
+    end = platform_time_monotonic_ms();
+    fprintf(stderr, "COLD_PIXEL_STOP elapsed_ms=%lld result=%d callbacks=%zu map=%zu\n",
+        (long long)(end-begin), (int)result, stop.calls, block_map_count(&ms->map_block_index));
+    ok = ok && result == BOOT_WALLET_COLD_STOPPED && !stage && block_map_count(&ms->map_block_index) == 1;
+    if (stage) (void)boot_wallet_cold_prefix_release(stage);
+    return ok;
+}
 static bool csi_cold_pixel_measure(struct csi_cold_fixture *f, const char *path)
 {
     if (!path || !path[0]) {
@@ -178,28 +211,7 @@ static bool csi_cold_pixel_measure(struct csi_cold_fixture *f, const char *path)
     bool opened = g && block_index_initialize_genesis(g, cp) && progress_store_open_existing(path);
     int fd = opened ? open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
     int64_t ready = platform_time_monotonic_ms(); bool ok = false;
-    if (opened && fd >= 0) {
-        boot_wallet_cold_prefix_t *stage = NULL; struct csi_cold_pixel_stop stop = {0, SIZE_MAX};
-        int64_t begin = platform_time_monotonic_ms();
-        enum boot_wallet_cold_result result = boot_wallet_cold_prefix_stage_with_history(ms, fd, 100000,
-            f->preflight, csi_cold_pixel_stop, &stop, &stage);
-        int64_t end = platform_time_monotonic_ms();
-        const struct block_index *tip = stage ? boot_wallet_cold_prefix_tip(stage) : NULL;
-        struct rusage usage; long rss = getrusage(RUSAGE_SELF, &usage) == 0 ? usage.ru_maxrss : -1;
-        fprintf(stderr, "COLD_PIXEL setup_ms=%lld stage_ms=%lld result=%d height=%d callbacks=%zu map=%zu peak_kib=%ld\n",
-            (long long)(ready-start), (long long)(end-begin), (int)result, tip ? tip->nHeight : -1,
-            stop.calls, block_map_count(&ms->map_block_index), rss);
-        ok = result == BOOT_WALLET_COLD_READY && tip && tip->nHeight == 64854 && block_map_count(&ms->map_block_index) == 1;
-        if (stage && !boot_wallet_cold_prefix_release(stage)) ok = false;
-        stage = NULL; stop.calls = 0; stop.limit = 2000; begin = platform_time_monotonic_ms();
-        result = boot_wallet_cold_prefix_stage_with_history(ms, fd, 100000, f->preflight,
-            csi_cold_pixel_stop, &stop, &stage);
-        end = platform_time_monotonic_ms();
-        fprintf(stderr, "COLD_PIXEL_STOP elapsed_ms=%lld result=%d callbacks=%zu map=%zu\n",
-            (long long)(end-begin), (int)result, stop.calls, block_map_count(&ms->map_block_index));
-        ok = ok && result == BOOT_WALLET_COLD_STOPPED && !stage && block_map_count(&ms->map_block_index) == 1;
-        if (stage) (void)boot_wallet_cold_prefix_release(stage);
-    }
+    if (opened && fd >= 0) ok = csi_cold_pixel_stages(f, ms, fd, start, ready);
     if (fd >= 0) close(fd);
     if (opened) progress_store_close();
     main_state_free(ms); free(ms); return ok;
@@ -267,6 +279,19 @@ static bool csi_cold_guard_cases(struct csi_cold_fixture *f, struct csi_cold_sta
     fprintf(stderr, "cold linked: stale-request=%d stale-frontier=%d restore=%d stop-before=%d\n", request, frontier, restored, cancelled);
     return request && frontier && restored && cancelled;
 }
+static bool csi_cold_adoption_witness(struct csi_cold_fixture *f, struct csi_cold_state *s,
+    enum boot_wallet_cold_result adopted, boot_wallet_cold_prefix_t *stage, unsigned reads)
+{
+    struct active_chain_window_snapshot window;
+    struct uint256 best; coins_view_cache_get_best_block(&s->cache, &best);
+    struct block_index *h1 = block_map_find(&s->ms.map_block_index, &f->hash[0]);
+    struct block_index *h2 = block_map_find(&s->ms.map_block_index, &f->hash[1]);
+    return adopted == BOOT_WALLET_COLD_ADOPTED && h1 && h2 && h1->pprev == s->genesis && h2->pprev == h1 &&
+        active_chain_capture_window(&s->ms.chain_active, -1, &window) && window.tip == h2 &&
+        s->ms.pindex_best_header == h2 && uint256_eq(&best, &f->hash[1]) &&
+        block_map_find(&s->ms.map_block_index, s->far->phashBlock) == s->far && reads == 2 &&
+        !boot_wallet_cold_prefix_release(stage) && boot_wallet_cold_prefix_close_readers(stage);
+}
 static bool csi_cold_success(struct csi_cold_fixture *f, struct csi_cold_state *s)
 {
     struct csi_cold_stop stop = {.ms = &s->ms}; boot_wallet_cold_prefix_t *stage = NULL;
@@ -286,15 +311,7 @@ static bool csi_cold_success(struct csi_cold_fixture *f, struct csi_cold_state *
     enum boot_wallet_cold_result adopted = boot_wallet_cold_prefix_adopt(stage, &s->csr, f->preflight,
         &csi_real_bound_observation, f->artifact, &f->cap);
     unsigned reads = boot_wallet_prebinding_test_take_header_reads();
-    struct active_chain_window_snapshot window;
-    struct uint256 best; coins_view_cache_get_best_block(&s->cache, &best);
-    struct block_index *h1 = block_map_find(&s->ms.map_block_index, &f->hash[0]);
-    struct block_index *h2 = block_map_find(&s->ms.map_block_index, &f->hash[1]);
-    bool ok = adopted == BOOT_WALLET_COLD_ADOPTED && h1 && h2 && h1->pprev == s->genesis && h2->pprev == h1 &&
-        active_chain_capture_window(&s->ms.chain_active, -1, &window) && window.tip == h2 &&
-        s->ms.pindex_best_header == h2 && uint256_eq(&best, &f->hash[1]) &&
-        block_map_find(&s->ms.map_block_index, s->far->phashBlock) == s->far && reads == 2 &&
-        !boot_wallet_cold_prefix_release(stage) && boot_wallet_cold_prefix_close_readers(stage);
+    bool ok = csi_cold_adoption_witness(f, s, adopted, stage, reads);
     fprintf(stderr, "cold linked: compact=%d adopted=%d far-retained=%d header-reads=%u\n", compact,
         adopted == BOOT_WALLET_COLD_ADOPTED, s->far != NULL, reads);
     return ok;

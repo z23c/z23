@@ -80,6 +80,19 @@ static void csi_projection_event_stop(uint64_t count)
 }
 static void csi_projection_attach(struct block_index_projection *p)
 { p->event_hook = csi_projection_event_stop; }
+static bool csi_projection_seed_events(const char *dir, uint8_t digest[32], uint64_t *end, bool fault, bool ok)
+{
+    char path[PATH_MAX]; snprintf(path, sizeof(path), "%s/event_log.dat", dir);
+    event_log_t *log = ok ? event_log_open(path) : NULL;
+    uint8_t wire[EV_BLOCK_HEADER_FIXED_BYTES]; size_t length = 0;
+    struct ev_block_header header = {.height = 1, .nVersion = 4, .nBits = 0x1d00ffff};
+    ok = log && ev_block_header_serialize(&header, NULL, wire, sizeof(wire), &length) &&
+        event_log_append(log, EV_BLOCK_HEADER, wire, fault ? 1 : length) != UINT64_MAX &&
+        event_log_append(log, EV_BLOCK_HEADER, wire, length) != UINT64_MAX && event_log_flush(log);
+    if (ok) { *end = event_log_size(log); ok = event_log_prefix_digest(log, *end, digest, NULL, NULL) == 0; }
+    if (log) event_log_close(log);
+    return ok;
+}
 static bool csi_projection_seed(const char *dir, uint8_t fingerprint[32], uint8_t digest[32], uint64_t *end, bool fault)
 {
     char path[PATH_MAX]; snprintf(path, sizeof(path), "%s/node.db", dir);
@@ -100,16 +113,7 @@ static bool csi_projection_seed(const char *dir, uint8_t fingerprint[32], uint8_
         csi_projection_note_loaded(&node) && csi_projection_fingerprint(node.db, fingerprint);
     transaction_free(&tx.tx); if (ws.open) wallet_sqlite_close(&ws); if (node.open) node_db_close(&node);
     wallet_lock_reset_for_test();
-    snprintf(path, sizeof(path), "%s/event_log.dat", dir);
-    event_log_t *log = ok ? event_log_open(path) : NULL;
-    uint8_t wire[EV_BLOCK_HEADER_FIXED_BYTES]; size_t length = 0;
-    struct ev_block_header header = {.height = 1, .nVersion = 4, .nBits = 0x1d00ffff};
-    ok = log && ev_block_header_serialize(&header, NULL, wire, sizeof(wire), &length) &&
-        event_log_append(log, EV_BLOCK_HEADER, wire, fault ? 1 : length) != UINT64_MAX &&
-        event_log_append(log, EV_BLOCK_HEADER, wire, length) != UINT64_MAX && event_log_flush(log);
-    if (ok) { *end = event_log_size(log); ok = event_log_prefix_digest(log, *end, digest, NULL, NULL) == 0; }
-    if (log) event_log_close(log);
-    return ok;
+    return csi_projection_seed_events(dir, digest, end, fault, ok);
 }
 static bool csi_projection_reopen(const char *dir, const uint8_t fingerprint[32], const uint8_t digest[32], uint64_t end)
 {
@@ -122,6 +126,15 @@ static bool csi_projection_reopen(const char *dir, const uint8_t fingerprint[32]
     ok = log && event_log_size(log) >= end && event_log_prefix_digest(log, end, after, NULL, NULL) == 0 && !memcmp(after, digest, 32);
     if (log) event_log_close(log);
     return ok;
+}
+static void csi_projection_check_stop(int proof_fd)
+{
+    if (csi_projection_error_case) {
+        if (boot_projection_stop_cleanup() || write(proof_fd, "E", 1) != 1) _exit(34);
+        (void)boot_projection_failure_cleanup();
+        _exit(36);
+    } else if (boot_error_reported() || boot_projection_failure_cleanup() ||
+               !boot_projection_stop_cleanup() || boot_projection_stop_cleanup()) _exit(35);
 }
 static void csi_projection_boot_child(const char *dir, int proof_fd)
 {
@@ -140,15 +153,16 @@ static void csi_projection_boot_child(const char *dir, int proof_fd)
     bool started = app_init(&ctx); boot_test_projection_opened(NULL);
     if (started || !csi_projection_stop_seen || !csi_projection_wallet_loaded ||
         (csi_projection_require_tor && !csi_projection_tor_live)) _exit(32);
-    if (csi_projection_error_case) {
-        if (boot_projection_stop_cleanup() || write(proof_fd, "E", 1) != 1) _exit(34);
-        (void)boot_projection_failure_cleanup();
-        _exit(36);
-    } else if (boot_error_reported() || boot_projection_failure_cleanup() ||
-               !boot_projection_stop_cleanup() || boot_projection_stop_cleanup()) _exit(35);
+    csi_projection_check_stop(proof_fd);
     if (tor_integration_is_enabled() || tor_integration_is_requested()) _exit(38);
     if (write(proof_fd, "S", 1) != 1) _exit(37);
     _exit(0);
+}
+static bool csi_projection_child_result(bool forced, bool waited, int status, bool fault,
+    ssize_t n, char marker, const char *dir, const uint8_t fingerprint[32], const uint8_t digest[32], uint64_t end)
+{
+    return !forced && waited && WIFEXITED(status) && WEXITSTATUS(status) == (fault ? 1 : 0) &&
+        n == 1 && marker == (fault ? 'E' : 'S') && csi_projection_reopen(dir, fingerprint, digest, end);
 }
 static int csi_projection_populated_stop_mode(bool fault, bool real_tor)
 {
@@ -168,8 +182,7 @@ static int csi_projection_populated_stop_mode(bool fault, bool real_tor)
     if (proof[0] >= 0) close(proof[0]);
     char reason[SHUTDOWN_EXIT_REASON_MAX]; bool forced = true;
     (void)shutdown_stagewatch_read_exit_reason(dir, reason, sizeof(reason), &forced);
-    bool ok = !forced && waited && WIFEXITED(status) && WEXITSTATUS(status) == (fault ? 1 : 0) &&
-        n == 1 && marker == (fault ? 'E' : 'S') && csi_projection_reopen(dir, fingerprint, digest, end);
+    bool ok = csi_projection_child_result(forced, waited, status, fault, n, marker, dir, fingerprint, digest, end);
     CSI_CHECK(real_tor ? (fault ? "real Tor projection error preserves wallet" :
                                   "real Tor projection stop preserves wallet") :
               (fault ? "projection error takes precedence over stop and preserves wallet" :

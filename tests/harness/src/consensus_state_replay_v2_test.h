@@ -45,6 +45,13 @@ static bool rr_test_clone(sqlite3 *source, sqlite3 **out)
                               "sapling INTEGER NOT NULL)");
 }
 
+static bool rr_test_verified_receipt(sqlite3 *clone, struct csi_activate_scene *s,
+    struct consensus_state_replay_result *result, const struct consensus_state_bundle_manifest *manifest,
+    const uint8_t file_digest[32])
+{
+    return consensus_state_replay_verify_and_write_receipt(clone, s->b->path, s->active_dir, result) &&
+        result->verified && consensus_state_replay_receipt_authority_available(manifest, file_digest, s->active_dir_fd);
+}
 static int csi_replay_v2_test(struct csi_activate_scene *s)
 {
     int failures = 0;
@@ -74,7 +81,7 @@ static int csi_replay_v2_test(struct csi_activate_scene *s)
     CSI_CHECK("replay v2: mismatched local totals refuse", !consensus_state_replay_verify_and_write_receipt(clone, s->b->path, s->active_dir, &vres) && !vres.verified);
     snprintf(sql, sizeof(sql), "UPDATE shielded_pool_totals SET sapling=9 WHERE height=%d", s->b->height);
     CSI_CHECK("replay v2: matching local totals", rr_test_sql(clone, sql));
-    CSI_CHECK("replay v2: independently matched receipt authorizes", consensus_state_replay_verify_and_write_receipt(clone, s->b->path, s->active_dir, &vres) && vres.verified && consensus_state_replay_receipt_authority_available(&manifest, file_digest, s->active_dir_fd));
+    CSI_CHECK("replay v2: independently matched receipt authorizes", rr_test_verified_receipt(clone, s, &vres, &manifest, file_digest));
     struct consensus_state_bundle_manifest tampered = manifest;
     tampered.sapling_pool_total++;
     consensus_state_bundle_artifact_digest(&tampered, tampered.artifact_digest);
