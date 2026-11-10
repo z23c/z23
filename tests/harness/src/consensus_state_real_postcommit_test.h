@@ -273,6 +273,20 @@ static bool csi_real_watch_unchanged(sqlite3 *db)
     return sqlite3_finalize(stmt) == SQLITE_OK && ok;
 }
 
+static bool csi_real_recover_binding(const struct csi_real_paths *p,
+    const struct csi_cutover_witness *w, struct node_db *node,
+    struct wallet_sqlite *ws, int fd)
+{
+    bool present = false; uint64_t generation = 0; int floor = -1;
+    struct wallet_cutover_binding binding;
+    return fd >= 0 && consensus_state_wallet_install_classify(ws, node, fd, &present, &generation) == WALLET_INSTALL_COMMITTED &&
+        present == w->generation_present && generation == w->generation &&
+        wallet_sqlite_cutover_read(ws, &binding) == WALLET_CUTOVER_PENDING &&
+        csi_guarded_binding_matches(&binding, &w->binding) && csi_real_watch_unchanged(node->db) &&
+        boot_consensus_bundle_marker_exists(p->data) &&
+        wallet_sqlite_cutover_scan_floor(ws, &floor) == WALLET_CUTOVER_FLOOR_FOUND && floor == 0;
+}
+
 static bool csi_real_recover(const struct csi_real_paths *p, const struct csi_cutover_witness *w,
                              struct csi_real_probe *probe)
 {
@@ -290,14 +304,7 @@ static bool csi_real_recover(const struct csi_real_paths *p, const struct csi_cu
     bool ok = boot_wallet_cutover_preflight_test(p->data, &pending) && pending &&
         wallet_readiness_get(wallet).state == WALLET_READINESS_PENDING;
     int fd = open(p->data, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    bool present = false; uint64_t generation = 0; int floor = -1;
-    struct wallet_cutover_binding binding;
-    if (ok) ok = fd >= 0 && consensus_state_wallet_install_classify(ws, node, fd, &present, &generation) == WALLET_INSTALL_COMMITTED &&
-        present == w->generation_present && generation == w->generation &&
-        wallet_sqlite_cutover_read(ws, &binding) == WALLET_CUTOVER_PENDING &&
-        csi_guarded_binding_matches(&binding, &w->binding) && csi_real_watch_unchanged(node->db) &&
-        boot_consensus_bundle_marker_exists(p->data) &&
-        wallet_sqlite_cutover_scan_floor(ws, &floor) == WALLET_CUTOVER_FLOOR_FOUND && floor == 0;
+    if (ok) ok = csi_real_recover_binding(p, w, node, ws, fd);
     if (ok) {
         probe->checkpoint_status = wallet_sqlite_discover_checkpoint_read(ws, &probe->checkpoint);
         ok = (probe->checkpoint_status == WALLET_DISCOVER_ABSENT ||
@@ -482,7 +489,8 @@ static bool csi_real_bound_header_cancel(struct bound_history_preflight *preflig
     int status = 0;
     return child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
-static bool csi_real_bound_headers(struct bound_history_preflight *preflight, const struct block_index *old_tip)
+static bool csi_real_bound_rejected_headers(struct bound_history_preflight *preflight,
+                                           const struct block_index *old_tip)
 {
     struct block_header out, before;
     uint8_t wrong[32]; memcpy(wrong, csi_real_bound_observation.endpoint_hash, sizeof(wrong)); wrong[0] ^= 1;
@@ -499,7 +507,12 @@ static bool csi_real_bound_headers(struct bound_history_preflight *preflight, co
         old_tip->nHeight + 1, old_tip->phashBlock->data, &out);
     if (wrong_height.ok || wrong_height.code != BOUND_HISTORY_HEADER_UNAVAILABLE ||
         memcmp(&out, &before, sizeof(out))) return false;
-    if (!csi_real_bound_header_cancel(preflight, old_tip->nHeight, old_tip->phashBlock->data)) return false;
+    return csi_real_bound_header_cancel(preflight, old_tip->nHeight, old_tip->phashBlock->data);
+}
+static bool csi_real_bound_headers(struct bound_history_preflight *preflight, const struct block_index *old_tip)
+{
+    if (!csi_real_bound_rejected_headers(preflight, old_tip)) return false;
+    struct block_header out;
     struct uint256 hash;
     if (!bound_history_preflight_read_header(preflight, csi_real_bound_observation.endpoint_height,
             csi_real_bound_observation.endpoint_hash, &out).ok) return false;
@@ -510,38 +523,64 @@ static bool csi_real_bound_headers(struct bound_history_preflight *preflight, co
     return uint256_eq(&hash, old_tip->phashBlock);
 }
 static void csi_real_bound_stage_seen(void *opaque) { *(bool *)opaque = true; }
+static bool csi_real_bound_guarded(struct zcl_result refused, bool staged,
+    struct icb_terminal_context *terminal, struct main_state *archive,
+    struct node_db *node, struct wallet_sqlite *ws, const char *datadir,
+    sqlite3_int64 node_before, sqlite3_int64 progress_before)
+{
+    struct wallet_cutover_binding binding;
+    return !refused.ok && !staged && archive && terminal->archive == archive &&
+        bound_history_preflight_test_archive_opens() == 1 &&
+        sqlite3_total_changes64(node->db) == node_before &&
+        sqlite3_total_changes64(progress_store_db()) == progress_before &&
+        wallet_sqlite_cutover_read(ws, &binding) == WALLET_CUTOVER_ABSENT &&
+        !boot_consensus_bundle_marker_exists(datadir);
+}
+static struct zcl_result csi_real_bound_open(const char *bundle, struct block_index *tip,
+    struct consensus_state_artifact_evidence **artifact, struct bound_history_preflight **preflight)
+{
+    bound_history_preflight_test_reset_archive_opens();
+    struct zcl_result opened = consensus_state_artifact_evidence_open(bundle, -1, artifact);
+    if (opened.ok) opened = bound_history_preflight_open(preflight, &csi_real_bound_observation,
+        *artifact, &csi_real_bound_cap, tip->nHeight, tip->phashBlock->data);
+    if (!opened.ok || !*preflight || bound_history_preflight_test_archive_opens() != 1) {
+        bound_history_preflight_close(preflight);
+        (void)consensus_state_artifact_evidence_close(artifact);
+        return ZCL_ERR(-1, "real bound fixture preflight unavailable");
+    }
+    if (!csi_real_bound_headers(*preflight, tip)) {
+        bound_history_preflight_close(preflight);
+        (void)consensus_state_artifact_evidence_close(artifact);
+        return ZCL_ERR(-1, "real bound fixture retained header checks failed");
+    }
+    struct block_index stale_tip = *tip; stale_tip.nHeight++;
+    if (bound_history_preflight_recheck(*preflight, &csi_real_bound_observation,
+            *artifact, &csi_real_bound_cap, &stale_tip).ok) {
+        bound_history_preflight_close(preflight);
+        (void)consensus_state_artifact_evidence_close(artifact);
+        return ZCL_ERR(-1, "real bound fixture accepted stale frontier");
+    }
+    return opened;
+}
+static bool csi_real_bound_old_frontier(const struct block_index *tip,
+                                        const struct chain_params *params,
+                                        const struct wallet *wallet)
+{
+    return tip && tip->phashBlock && tip->nHeight == 0 && params &&
+        uint256_eq(tip->phashBlock, &params->consensus.hashGenesisBlock) && wallet->num_wallet_tx == 2;
+}
 static struct zcl_result csi_real_bound_terminal(struct node_db *node, struct main_state *main,
     const char *bundle, const char *datadir, struct wallet_sqlite *ws, struct wallet *wallet,
     struct consensus_state_install_runtime_result *out)
 {
     struct block_index *tip = active_chain_tip(&main->chain_active);
     const struct chain_params *params = chain_params_get();
-    if (!tip || !tip->phashBlock || tip->nHeight != 0 || !params ||
-        !uint256_eq(tip->phashBlock, &params->consensus.hashGenesisBlock) || wallet->num_wallet_tx != 2)
+    if (!csi_real_bound_old_frontier(tip, params, wallet))
         return ZCL_ERR(-1, "real bound fixture old frontier unavailable");
     struct consensus_state_artifact_evidence *artifact = NULL;
     struct bound_history_preflight *preflight = NULL;
-    bound_history_preflight_test_reset_archive_opens();
-    struct zcl_result opened = consensus_state_artifact_evidence_open(bundle, -1, &artifact);
-    if (opened.ok) opened = bound_history_preflight_open(&preflight, &csi_real_bound_observation,
-        artifact, &csi_real_bound_cap, tip->nHeight, tip->phashBlock->data);
-    if (!opened.ok || !preflight || bound_history_preflight_test_archive_opens() != 1) {
-        bound_history_preflight_close(&preflight);
-        (void)consensus_state_artifact_evidence_close(&artifact);
-        return ZCL_ERR(-1, "real bound fixture preflight unavailable");
-    }
-    if (!csi_real_bound_headers(preflight, tip)) {
-        bound_history_preflight_close(&preflight);
-        (void)consensus_state_artifact_evidence_close(&artifact);
-        return ZCL_ERR(-1, "real bound fixture retained header checks failed");
-    }
-    struct block_index stale_tip = *tip; stale_tip.nHeight++;
-    if (bound_history_preflight_recheck(preflight, &csi_real_bound_observation,
-            artifact, &csi_real_bound_cap, &stale_tip).ok) {
-        bound_history_preflight_close(&preflight);
-        (void)consensus_state_artifact_evidence_close(&artifact);
-        return ZCL_ERR(-1, "real bound fixture accepted stale frontier");
-    }
+    struct zcl_result opened = csi_real_bound_open(bundle, tip, &artifact, &preflight);
+    if (!opened.ok) return opened;
     struct icb_terminal_context *terminal = bound_history_preflight_terminal(preflight);
     struct main_state *archive = terminal ? terminal->archive : NULL;
     sqlite3_int64 node_before = sqlite3_total_changes64(node->db);
@@ -552,13 +591,8 @@ static struct zcl_result csi_real_bound_terminal(struct node_db *node, struct ma
     struct zcl_result refused = bound_history_preflight_install(preflight, &stale, &csi_real_bound_cap,
         node, main, datadir, ws, wallet, out);
     consensus_state_install_test_after_stage(NULL, NULL);
-    struct wallet_cutover_binding binding;
-    bool guarded = !refused.ok && !staged && archive && terminal->archive == archive &&
-        bound_history_preflight_test_archive_opens() == 1 &&
-        sqlite3_total_changes64(node->db) == node_before &&
-        sqlite3_total_changes64(progress_store_db()) == progress_before &&
-        wallet_sqlite_cutover_read(ws, &binding) == WALLET_CUTOVER_ABSENT &&
-        !boot_consensus_bundle_marker_exists(datadir);
+    bool guarded = csi_real_bound_guarded(refused, staged, terminal, archive,
+                                           node, ws, datadir, node_before, progress_before);
     struct zcl_result result = guarded ? bound_history_preflight_install(preflight,
         &csi_real_bound_observation, &csi_real_bound_cap, node, main, datadir, ws, wallet, out) :
         ZCL_ERR(-1, "real bound fixture stale handoff changed state");
@@ -589,6 +623,13 @@ static bool csi_real_bound_seed(const struct csi_real_paths *p, uint8_t fingerpr
     ok = ok && wallet_sqlite_write_scan_state(&ws, wallet) && csi_bound_wallet_identity(db.db, fingerprint);
     wallet_free(wallet); free(wallet); wallet_sqlite_close(&ws); node_db_close(&db); return ok;
 }
+static bool csi_real_bound_observation_paths(const struct csi_real_paths *p)
+{
+    return snprintf(csi_real_bound_observation.bundle_path, sizeof(csi_real_bound_observation.bundle_path), "%s", p->bundle) <
+            (int)sizeof(csi_real_bound_observation.bundle_path) &&
+        snprintf(csi_real_bound_observation.private_history_path, sizeof(csi_real_bound_observation.private_history_path), "%s", p->history) <
+            (int)sizeof(csi_real_bound_observation.private_history_path);
+}
 static bool csi_real_bound_history(struct csi_real_paths *p, struct boot_bound_bundle_request *request)
 {
     struct consensus_state_artifact_evidence *e = NULL;
@@ -611,10 +652,7 @@ static bool csi_real_bound_history(struct csi_real_paths *p, struct boot_bound_b
     if (fd < 0 || close(fd)) return false;
     if (snprintf(p->history, sizeof(p->history), "%s", path) >= (int)sizeof(p->history)) return false;
     request->bundle_path = p->bundle; request->private_history_path = p->history;
-    if (snprintf(csi_real_bound_observation.bundle_path, sizeof(csi_real_bound_observation.bundle_path), "%s", p->bundle) >=
-            (int)sizeof(csi_real_bound_observation.bundle_path) ||
-        snprintf(csi_real_bound_observation.private_history_path, sizeof(csi_real_bound_observation.private_history_path), "%s", p->history) >=
-            (int)sizeof(csi_real_bound_observation.private_history_path)) return false;
+    if (!csi_real_bound_observation_paths(p)) return false;
     csi_real_bound_observation.endpoint_height = request->endpoint_height;
     memcpy(csi_real_bound_observation.endpoint_hash, request->endpoint_hash, 32);
     memcpy(csi_real_bound_observation.snapshot_sha3, request->snapshot_sha3, 32);
@@ -688,7 +726,7 @@ static bool csi_real_bound_install_child(const struct csi_real_paths *p, struct 
     ssize_t n = read(pipefd[0], w, sizeof(*w)); close(pipefd[0]);
     return waited && n == (ssize_t)sizeof(*w) && WIFEXITED(status) && WEXITSTATUS(status) == EXIT_SUCCESS;
 }
-static bool csi_real_bound_rows(struct wallet_sqlite *ws)
+static bool csi_real_bound_row_count(struct wallet_sqlite *ws)
 {
     sqlite3_stmt *stmt = NULL;
     bool ok = sqlite3_prepare_v2(ws->db,
@@ -697,6 +735,11 @@ static bool csi_real_bound_rows(struct wallet_sqlite *ws)
         sqlite3_column_int(stmt, 0) == 2 && sqlite3_column_int(stmt, 1) == 2 &&
         sqlite3_step(stmt) == SQLITE_DONE;
     if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    return ok;
+}
+static bool csi_real_bound_rows(struct wallet_sqlite *ws)
+{
+    bool ok = csi_real_bound_row_count(ws);
     struct wallet *wallet = calloc(1, sizeof(*wallet));
     if (!wallet) return false;
     wallet_init(wallet);
@@ -716,6 +759,30 @@ static bool csi_real_bound_check(bool condition, const char *stage)
 {
     if (!condition) fprintf(stderr, "real bound verify: %s failed\n", stage);
     return condition;
+}
+static bool csi_real_bound_binding_matches(const struct wallet_cutover_binding *binding,
+    const struct csi_real_bound_witness *w, const struct boot_bound_bundle_request *request)
+{
+    return wallet_cutover_binding_equal(binding, &w->binding) &&
+        binding->old_height == 0 && binding->target_height == request->endpoint_height &&
+        !memcmp(binding->target_hash, request->endpoint_hash, 32) &&
+        !memcmp(binding->snapshot_whole_sha3, request->snapshot_sha3, 32) &&
+        !memcmp(binding->history_manifest_root, request->history_manifest_root, 32);
+}
+static bool csi_real_bound_verify_persisted(struct node_db *node, struct wallet_sqlite *ws,
+    const struct csi_real_paths *p, const struct csi_real_bound_witness *w,
+    const uint8_t before[32], bool ok)
+{
+    uint8_t after[32] = {0}; int floor = -1, reference = -1;
+    ok = csi_real_bound_check(wallet_sqlite_cutover_scan_floor(ws, &floor) == WALLET_CUTOVER_FLOOR_FOUND &&
+        floor == 1, "scan floor") && ok;
+    ok = csi_real_bound_check(wallet_sqlite_height_encoding(ws, &reference) == WALLET_HEIGHT_V2 &&
+        reference == 0 && csi_real_bound_rows(ws), "persisted transaction heights") && ok;
+    ok = csi_real_bound_check(csi_bound_wallet_identity(node->db, after) &&
+        !memcmp(before, w->wallet, 32) && !memcmp(before, after, 32), "transaction identity") && ok;
+    ok = csi_real_bound_check(csi_real_watch_unchanged(node->db), "watch-only identity") && ok;
+    ok = csi_real_bound_check(boot_consensus_bundle_marker_exists(p->data), "install marker") && ok;
+    return ok;
 }
 static bool csi_real_bound_verify(const struct csi_real_paths *p, const struct boot_bound_bundle_request *request,
                                   const struct csi_real_bound_witness *w, const uint8_t before[32])
@@ -737,25 +804,14 @@ static bool csi_real_bound_verify(const struct csi_real_paths *p, const struct b
     bool ok = csi_real_bound_check(preflight, "pending preflight");
     int fd = open(p->data, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     struct wallet_cutover_binding binding = {0}; bool present = false; uint64_t generation = 0;
-    uint8_t after[32] = {0}; int floor = -1, reference = -1;
     bool classified = preflight && fd >= 0 && consensus_state_wallet_install_classify(
         ws, node, fd, &present, &generation) == WALLET_INSTALL_COMMITTED;
     ok = csi_real_bound_check(w->fence && w->committed, "install witness") && ok;
     ok = csi_real_bound_check(classified, "canonical classifier") && ok;
     bool binding_read = wallet_sqlite_cutover_read(ws, &binding) == WALLET_CUTOVER_PENDING;
-    ok = csi_real_bound_check(binding_read && wallet_cutover_binding_equal(&binding, &w->binding) &&
-        binding.old_height == 0 && binding.target_height == request->endpoint_height &&
-        !memcmp(binding.target_hash, request->endpoint_hash, 32) &&
-        !memcmp(binding.snapshot_whole_sha3, request->snapshot_sha3, 32) &&
-        !memcmp(binding.history_manifest_root, request->history_manifest_root, 32), "bound identity") && ok;
-    ok = csi_real_bound_check(wallet_sqlite_cutover_scan_floor(ws, &floor) == WALLET_CUTOVER_FLOOR_FOUND &&
-        floor == 1, "scan floor") && ok;
-    ok = csi_real_bound_check(wallet_sqlite_height_encoding(ws, &reference) == WALLET_HEIGHT_V2 &&
-        reference == 0 && csi_real_bound_rows(ws), "persisted transaction heights") && ok;
-    ok = csi_real_bound_check(csi_bound_wallet_identity(node->db, after) &&
-        !memcmp(before, w->wallet, 32) && !memcmp(before, after, 32), "transaction identity") && ok;
-    ok = csi_real_bound_check(csi_real_watch_unchanged(node->db), "watch-only identity") && ok;
-    ok = csi_real_bound_check(boot_consensus_bundle_marker_exists(p->data), "install marker") && ok;
+    ok = csi_real_bound_check(binding_read && csi_real_bound_binding_matches(&binding, w, request),
+                              "bound identity") && ok;
+    ok = csi_real_bound_verify_persisted(node, ws, p, w, before, ok);
     if (fd >= 0) close(fd);
     progress_store_close(); wallet_sqlite_close(ws); node_db_close(node);
     boot_datadir_lock_release(); return ok;
@@ -842,8 +898,16 @@ static bool csi_real_bound_receipt_read_all(int fd, void *data, size_t size)
     }
     return true;
 }
-static bool csi_real_bound_receipt_read(const char *root, struct csi_real_paths *p,
-    struct csi_real_bound_receipt *record)
+static bool csi_real_bound_receipt_fields(const struct csi_real_bound_receipt *record,
+                                           const struct csi_real_paths *p)
+{
+    return !memcmp(record->magic, "Z23BND1", 8) && record->version == 1 && record->size == sizeof(*record) &&
+        memchr(record->bundle, 0, sizeof(record->bundle)) && memchr(record->history, 0, sizeof(record->history)) &&
+        record->fence == 1 && record->committed == 1 && record->old_generation_present <= 1 &&
+        record->history_identity_present == 1 && !strcmp(record->bundle, p->artifact);
+}
+static bool csi_real_bound_receipt_root(const char *root, struct csi_real_paths *p,
+                                         struct csi_real_bound_receipt *record)
 {
     const char *leaf = root ? strrchr(root, '/') : NULL;
     size_t root_len = root ? strlen(root) : 0;
@@ -852,19 +916,30 @@ static bool csi_real_bound_receipt_read(const char *root, struct csi_real_paths 
         !csi_real_path(p->node, sizeof(p->node), p->data, "node.db") ||
         !csi_real_path(p->artifact, sizeof(p->artifact), root, "bundle.sqlite")) return false;
     memcpy(p->root, root, root_len + 1);
-    int dir = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    struct stat st; bool valid = dir >= 0 && fstat(dir, &st) == 0 && S_ISDIR(st.st_mode) &&
-        st.st_uid == geteuid() && !(st.st_mode & 077);
-    int fd = valid ? openat(dir, "bound-install.receipt", O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    valid = valid && fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid() &&
-        st.st_nlink == 1 && !(st.st_mode & 077) && st.st_size == (off_t)sizeof(*record) &&
+    return true;
+}
+static bool csi_real_bound_receipt_file(int fd, struct stat *st, struct csi_real_bound_receipt *record)
+{
+    return fd >= 0 && fstat(fd, st) == 0 && S_ISREG(st->st_mode) && st->st_uid == geteuid() &&
+        st->st_nlink == 1 && !(st->st_mode & 077) && st->st_size == (off_t)sizeof(*record) &&
         csi_real_bound_receipt_read_all(fd, record, sizeof(*record));
+}
+static bool csi_real_bound_receipt_directory(int dir, struct stat *st)
+{
+    return dir >= 0 && fstat(dir, st) == 0 && S_ISDIR(st->st_mode) &&
+        st->st_uid == geteuid() && !(st->st_mode & 077);
+}
+static bool csi_real_bound_receipt_read(const char *root, struct csi_real_paths *p,
+    struct csi_real_bound_receipt *record)
+{
+    if (!csi_real_bound_receipt_root(root, p, record)) return false;
+    int dir = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st; bool valid = csi_real_bound_receipt_directory(dir, &st);
+    int fd = valid ? openat(dir, "bound-install.receipt", O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    valid = valid && csi_real_bound_receipt_file(fd, &st, record);
     if (fd >= 0 && close(fd) != 0) valid = false;
     if (dir >= 0 && close(dir) != 0) valid = false;
-    if (!valid || memcmp(record->magic, "Z23BND1", 8) || record->version != 1 || record->size != sizeof(*record) ||
-        !memchr(record->bundle, 0, sizeof(record->bundle)) || !memchr(record->history, 0, sizeof(record->history)) ||
-        record->fence != 1 || record->committed != 1 || record->old_generation_present > 1 ||
-        record->history_identity_present != 1 || strcmp(record->bundle, p->artifact)) return false;
+    if (!valid || !csi_real_bound_receipt_fields(record, p)) return false;
     struct wallet_history_names names;
     return wallet_history_capability_names(record->snapshot_sha3, record->history_root, &names).ok &&
         csi_real_path(p->history, sizeof(p->history), p->data, names.root) && !strcmp(record->history, p->history);
@@ -920,28 +995,44 @@ static int csi_cold_retained_test(const char *root)
     return ok ? 0 : 1;
 }
 
+static bool csi_real_bound_prepare(struct csi_real_paths *p, const char *scratch,
+                                   const char *bundle, const char *history,
+                                   const char *params)
+{
+    struct stat st;
+    return bundle && history && scratch && params && lstat(scratch, &st) == 0 &&
+        S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 077) &&
+        csi_real_path(p->root, sizeof(p->root), scratch, "real-bound-XXXXXX") && mkdtemp(p->root);
+}
+static bool csi_real_bound_paths(struct csi_real_paths *p)
+{
+    return csi_real_path(p->data, sizeof(p->data), p->root, "data") &&
+        csi_real_path(p->history, sizeof(p->history), p->data, "wallet-history") &&
+        csi_real_path(p->node, sizeof(p->node), p->data, "node.db") &&
+        csi_real_path(p->artifact, sizeof(p->artifact), p->root, "bundle.sqlite") &&
+        csi_real_copy(p->bundle, p->artifact) && chmod(p->artifact, 0400) == 0 && csi_real_bundle_identity(p->artifact);
+}
+static bool csi_real_bound_exercise(struct csi_real_paths *p, uint8_t before[32],
+                                    struct boot_bound_bundle_request *request,
+                                    struct csi_real_bound_witness *witness)
+{
+    return mkdir(p->data, 0700) == 0 && csi_real_seed_child(p) && csi_real_bootstrap(p) &&
+        csi_real_bound_seed_child(p, before) && csi_real_history(p) && csi_real_bound_history(p, request) &&
+        csi_cold_linked_child(p) && csi_real_bound_install_child(p, witness) &&
+        csi_real_bound_receipt_write(p, request, witness, before) &&
+        csi_real_bound_verify_child(p, request, witness, before);
+}
 static int csi_real_bound_postcommit_test(void)
 {
     if (!getenv("ZCL_TEST_REAL_BOUND_INSTALL")) return 0;
     const char *bundle = getenv("ZCL_TEST_REAL_INSTALL_BUNDLE"), *history = getenv("ZCL_TEST_REAL_INSTALL_HISTORY");
     const char *scratch = getenv("ZCL_TEST_REAL_INSTALL_SCRATCH"), *params = getenv("ZCL_TEST_REAL_INSTALL_PARAMS");
     int failures = 0; struct csi_real_paths p = {.bundle = bundle, .source = history, .params = params};
-    struct stat st;
-    bool made = bundle && history && scratch && params && lstat(scratch, &st) == 0 &&
-        S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 077) &&
-        csi_real_path(p.root, sizeof(p.root), scratch, "real-bound-XXXXXX") && mkdtemp(p.root);
-    bool ok = made && csi_real_path(p.data, sizeof(p.data), p.root, "data") &&
-        csi_real_path(p.history, sizeof(p.history), p.data, "wallet-history") &&
-        csi_real_path(p.node, sizeof(p.node), p.data, "node.db") &&
-        csi_real_path(p.artifact, sizeof(p.artifact), p.root, "bundle.sqlite") &&
-        csi_real_copy(p.bundle, p.artifact) && chmod(p.artifact, 0400) == 0 && csi_real_bundle_identity(p.artifact);
+    bool made = csi_real_bound_prepare(&p, scratch, bundle, history, params);
+    bool ok = made && csi_real_bound_paths(&p);
     p.bundle = p.artifact;
     uint8_t before[32]; struct boot_bound_bundle_request request = {0}; struct csi_real_bound_witness witness = {0};
-    ok = ok && mkdir(p.data, 0700) == 0 && csi_real_seed_child(&p) && csi_real_bootstrap(&p) &&
-        csi_real_bound_seed_child(&p, before) && csi_real_history(&p) && csi_real_bound_history(&p, &request) &&
-        csi_cold_linked_child(&p) &&
-        csi_real_bound_install_child(&p, &witness) && csi_real_bound_receipt_write(&p, &request, &witness, before) &&
-        csi_real_bound_verify_child(&p, &request, &witness, before);
+    ok = ok && csi_real_bound_exercise(&p, before, &request, &witness);
     CSI_CHECK("real bound terminal preserves populated genesis wallet and commits install", ok);
     const char *keep = getenv("ZCL_TEST_REAL_BOUND_KEEP");
     if (made && ok && !(keep && !strcmp(keep, "1"))) (void)test_rm_rf_recursive(p.root);
@@ -954,9 +1045,9 @@ static int csi_real_bound_postcommit_test(void)
 #include "consensus_state_empty_retire_test.h"
 #endif
 
-static int csi_real_postcommit_test(void)
-{
 #if defined(__linux__)
+static int csi_real_postcommit_retained(void)
+{
     const char *populated_retained = getenv("ZCL_TEST_REAL_POPULATED_RETAINED");
     if (populated_retained && populated_retained[0]) return csi_populated_retained_probe(populated_retained);
     const char *completed_negative = getenv("ZCL_TEST_REAL_COMPLETED_NEGATIVE");
@@ -965,6 +1056,12 @@ static int csi_real_postcommit_test(void)
     if (retained_old && retained_old[0]) return csi_retained_old_probe(retained_old);
     const char *retained_empty = getenv("ZCL_TEST_REAL_EMPTY_RETAINED");
     if (retained_empty && retained_empty[0]) return csi_empty_retained_probe(retained_empty);
+    return -1;
+}
+static int csi_real_postcommit_selected(void)
+{
+    int retained = csi_real_postcommit_retained();
+    if (retained >= 0) return retained;
     const char *empty_only = getenv("ZCL_TEST_REAL_EMPTY_RETIRE");
     const char *old_only = getenv("ZCL_TEST_REAL_OLD_RETRY");
     if (csi_populated_mode()) return csi_real_empty_retire_test();
@@ -981,6 +1078,29 @@ static int csi_real_postcommit_test(void)
         }
         return csi_real_bound_postcommit_test();
     }
+    return -1;
+}
+#endif
+
+static bool csi_real_postcommit_prepare(struct csi_real_paths *p, const char *scratch)
+{
+    struct stat st;
+    return p->bundle && p->source && scratch && p->params && lstat(scratch, &st) == 0 &&
+        S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 077) &&
+        csi_real_path(p->root, sizeof(p->root), scratch, "real-install-XXXXXX") && mkdtemp(p->root);
+}
+static bool csi_real_postcommit_paths(struct csi_real_paths *p)
+{
+    return csi_real_path(p->data, sizeof(p->data), p->root, "data") &&
+        csi_real_path(p->history, sizeof(p->history), p->data, "wallet-history") &&
+        csi_real_path(p->node, sizeof(p->node), p->data, "node.db") &&
+        csi_real_path(p->artifact, sizeof(p->artifact), p->root, "bundle.sqlite");
+}
+static int csi_real_postcommit_test(void)
+{
+#if defined(__linux__)
+    int selected = csi_real_postcommit_selected();
+    if (selected >= 0) return selected;
 #endif
     const char *bundle = getenv("ZCL_TEST_REAL_INSTALL_BUNDLE");
     const char *history = getenv("ZCL_TEST_REAL_INSTALL_HISTORY");
@@ -989,15 +1109,8 @@ static int csi_real_postcommit_test(void)
     if (!bundle && !history && !scratch && !params) return 0;
     int failures = 0;
     struct csi_real_paths p = {.bundle = bundle, .source = history, .params = params};
-    struct stat st;
-    bool made = bundle && history && scratch && params && lstat(scratch, &st) == 0 &&
-        S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 077) &&
-        csi_real_path(p.root, sizeof(p.root), scratch, "real-install-XXXXXX") && mkdtemp(p.root);
-    bool ok = made &&
-        csi_real_path(p.data, sizeof(p.data), p.root, "data") &&
-        csi_real_path(p.history, sizeof(p.history), p.data, "wallet-history") &&
-        csi_real_path(p.node, sizeof(p.node), p.data, "node.db") &&
-        csi_real_path(p.artifact, sizeof(p.artifact), p.root, "bundle.sqlite");
+    bool made = csi_real_postcommit_prepare(&p, scratch);
+    bool ok = made && csi_real_postcommit_paths(&p);
     if (ok) ok = csi_real_run(&p);
     CSI_CHECK("real artifact post-commit SIGKILL restores pending wallet fence", ok);
     if (made && ok) (void)test_rm_rf_recursive(p.root);
