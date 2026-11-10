@@ -94,18 +94,26 @@ The installer verifies the release and prints a command to
 open the game. Linux desktop registration needs `update-mime-database`; if it
 is unavailable, the installer reports a command-line fallback.
 
-Open Sky Combat using the command printed by the installer, then approve
-**Make my copy**. Open My Apps with the installed executable; if `z23` is not
+Open Sky Combat using the command printed by the installer to try the game.
+To change it, open My Apps with the installed executable; if `z23` is not
 on your PATH, replace it below with its absolute installed path:
 
 ```sh
 z23 app library --datadir="$HOME/.local/share/z23-app-data"
 ```
 
-Select the saved app and choose **Change with your AI** (or **Change → Change
-with your AI**). Press **C** to copy the setup into your assistant's local MCP
-settings, keeping the window open while pasting. The copied command binds your
-assistant to the same app-data directory. Ask it to change your copy; review
+Select Sky Combat and choose **Change with your AI**. Press **C** to copy the
+setup into your assistant's local MCP settings, keeping the window open while
+pasting. Use the command and arguments literally; they bind your assistant to
+the same app-data directory. For a fresh installation, ask the assistant to
+call `apps_adopt` with `name: "skycombat"`. Review **Make my copy**, then use
+the offered **Build and preview** and **Keep this version** choices. Canceling
+any step does not mean a version was kept.
+
+Return to My Apps, select the kept copy, and choose **Change with your AI**
+(or **Change → Change with your AI**). Press **C** and give the fresh setup to
+your connected assistant, keeping the window open while pasting. It identifies
+the actual kept copy and its source. Ask it to change your copy; review
 and preview the exact saved draft, then explicitly choose **Keep this version**.
 Your previous kept version remains available until you approve the new one.
 

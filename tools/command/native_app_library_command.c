@@ -303,7 +303,7 @@ static bool al_setup_identity(struct json_value *data, const struct library_row 
             json_push_kv_str(data, "source_version", source_version) &&
             json_push_kv_str(data, "request", "Register a local stdio MCP server using command and args as literal values. Call apps_list, then call z23_run with path=app.customize and input containing name, expected_revision equal to revision, and source_version. Verify selection_revision, kept version, and source_version separately. Include source_version in every source read and in the input to z23_run with path=app.edit. After each edit use its returned version as the next source_version, retaining the original revision and kept version until Keep. Ask what I want to change, preview it, then wait for explicit Keep and Share. If selection changed, use Back to refresh the app card, then open Change with your AI for fresh setup.");
     }
-    return json_push_kv_str(data, "request", "Register a local stdio MCP server using command and args as literal values. This installed Sky Combat has no saved selection. Help me open it and choose Make my copy before customization. Do not invent a saved revision or version. Ask what I want to change, preview it, and wait for my explicit Keep and Share choices.");
+    return json_push_kv_str(data, "request", "Register a local stdio MCP server using command and args as literal values; use the profile bound by those args. Call apps_list, then request apps_adopt with name skycombat. The local owner must choose Make my copy; follow the native preview and Keep choices. Stop if canceled, failed, or no kept selection exists. Call apps_list again to find the actual kept: ID. Use Back to return to My Apps, select that kept copy, then reopen Change with your AI for a fresh pinned setup with its revision and source_version before app.customize; never invent them. Ask what I want to change, preview it, then wait for my explicit Keep and Share choices.");
 }
 static bool al_setup_encode(struct library *w, const char *exe, const char *datadir,
     struct zcl_command_reply *reply)
@@ -595,7 +595,7 @@ static void al_detail_model(struct library *w)
         char first[33]; (void)snprintf(first, sizeof(first), "%.32s", version);
         app_library_choice(m, "setup", w->setup[0] ? "Press C to copy AI setup" : "No editable source", r->saved ? first : "No saved version yet.");
         app_library_choice(m, "version", r->saved ? "Paste into AI; keep this open" : w->setup[0] ? "Make my copy first" : "Source needed",
-            r->saved ? version + 32 : w->setup[0] ? "Open Sky Combat to make a copy." : "Ask the app author for source.");
+            r->saved ? version + 32 : w->setup[0] ? "Ask your AI to request a copy." : "Ask the app author for source.");
     }
     app_library_choice(m, "back", "Back", "Return to your selected app.");
     if (w->page != 1) app_library_choice(m, "cancel", "Cancel", "Close My Apps.");

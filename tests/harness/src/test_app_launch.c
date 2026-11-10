@@ -798,7 +798,7 @@ _test_next:
 
 struct al_library_script {
     unsigned actions[40], count, calls, errors, home_calls;
-    bool valid, saved_label;
+    bool valid, saved_label, fresh_copy_prompt;
     char last_summary[241];
     char error_summary[241];
     char error_title[241];
@@ -912,6 +912,13 @@ static bool al_library_render(const struct zcl_present_model_v1 *model, char *wh
         zcl_present_model_render_v1(model, &bitmap, why, cap) && bitmap.pixels;
     zcl_present_model_bitmap_free_v1(&bitmap); return ok;
 }
+static bool al_library_fresh_copy_prompt(const struct zcl_present_model_v1 *model)
+{
+    if (strcmp(model->request_id, "library-help")) return false;
+    for (unsigned i = 0; i < model->item_count; ++i)
+        if (strstr(model->items[i].value, "Ask your AI to request a copy.")) return true;
+    return false;
+}
 static bool al_library_present(void *context, const struct zcl_present_model_v1 *model,
     const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
@@ -931,6 +938,7 @@ static bool al_library_present(void *context, const struct zcl_present_model_v1 
         return false;
     }
     if (copy_text) (void)snprintf(s->setup, sizeof(s->setup), "%s", copy_text);
+    s->fresh_copy_prompt |= al_library_fresh_copy_prompt(model);
     s->saved_label |= strstr(model->items[0].value, "Saved version") != NULL;
     if (s->refresh_changed && s->calls == 3)
         s->refreshed_card = strstr(model->items[0].value, "020202020202") != NULL;
@@ -1708,14 +1716,25 @@ static int case_library_builtin_help(void)
         const char *profile = "/literal profile/quote\" slash\\ newline\n $()`";
         struct al_library_script s = {.actions = {0, 1, 3}, .count = 3, .valid = true};
         zcl_test_app_library_setup(&f.env, "/installed/z23", profile, &reply, al_library_present, &s);
-        ASSERT(s.valid && !s.errors && s.calls == 3);
+        ASSERT(s.valid && !s.errors && s.calls == 3 && s.fresh_copy_prompt);
         ASSERT(json_read(&setup, s.setup, strlen(s.setup)));
         const struct json_value *args = json_get(&setup, "args");
         ASSERT(args && args->num_children == 3);
         char profile_arg[512]; (void)snprintf(profile_arg, sizeof(profile_arg), "--datadir=%s", profile);
         ASSERT_STR_EQ(json_get_str(&args->children[2]), profile_arg);
         ASSERT(!json_get(&setup, "revision") && !json_get(&setup, "version"));
-        ASSERT(strstr(json_get_str(json_get(&setup, "request")), "Make my copy"));
+        const char *request = json_get_str(json_get(&setup, "request"));
+        ASSERT(request && strstr(request, "Call apps_list") &&
+               strstr(request, "apps_adopt with name skycombat"));
+        ASSERT(strstr(request, "profile bound by those args"));
+        ASSERT(strstr(request, "local owner must choose Make my copy"));
+        ASSERT(strstr(request, "native preview and Keep"));
+        ASSERT(strstr(request, "Stop if canceled, failed, or no kept selection exists"));
+        ASSERT(strstr(request, "Call apps_list again") && strstr(request, "actual kept: ID"));
+        ASSERT(strstr(request, "select that kept copy") && strstr(request, "reopen Change with your AI") && strstr(request, "fresh pinned setup") && strstr(request, "revision and source_version"));
+        ASSERT(strstr(request, "explicit Keep and Share"));
+        struct app_selection no_selection;
+        ASSERT(app_selection_load(f.env.state_dir, "skycombat", &no_selection) == APP_SELECTION_ABSENT);
         ASSERT(!json_get(&reply.data, "pid"));
     PASS(); }
     TEST("AI setup refuses clipboard overflow instead of truncating literal arguments") {
