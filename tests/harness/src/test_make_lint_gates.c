@@ -1471,7 +1471,7 @@ static int lint_run_owned(int owner)
 }
 
 /* Build an inode-independent clone ("sandbox") of the worktree at sb_root.
- * Everything except build/.git/.cache/test-tmp/.claude is copied with
+ * Everything except build/.git/.cache/.codeindex/test-tmp/.claude is copied with
  * --reflink=auto (CoW where supported, else a regular copy). Hardlinks are
  * forbidden: creating/removing one changes the live inode ctime and falsely
  * supersedes source proof epochs. test-tmp is created fresh. Returns 0.
@@ -1500,7 +1500,7 @@ static int lint_sandbox_build(const char *real_root, const char *sb_root)
             "for e in \"$1\"/* \"$1\"/.[!.]*; do\n"
             "  [ -e \"$e\" ] || continue\n"
             "  b=${e##*/}\n"
-            "  case \"$b\" in build|.git|.cache|test-tmp|.claude) continue;; esac\n"
+            "  case \"$b\" in build|.git|.cache|.codeindex|test-tmp|.claude) continue;; esac\n"
             "  cp -a --reflink=auto \"$e\" \"$2\"/\n"
             "done\n"
             "mkdir -p \"$2\"/test-tmp \"$2\"/build/bin\n"
@@ -2229,6 +2229,20 @@ static bool lint_copy_exists(const char *dir, const char *name)
 static int t_purge_reaps_dead_owner_copies(void)
 {
     int failures = 0;
+    TEST("[lint-gate] sandbox copies source without the generated code index") {
+        char fixture[PATH_MAX] = {0}, source[PATH_MAX], sandbox[PATH_MAX];
+        test_make_tmpdir(fixture, sizeof(fixture), "lint_copy", "index");
+        ASSERT(lint_plant_copy(fixture, "source") == 0);
+        ASSERT(snprintf(source, sizeof(source), "%s/source", fixture) < (int)sizeof(source));
+        ASSERT(snprintf(sandbox, sizeof(sandbox), "%s/sandbox", fixture) < (int)sizeof(sandbox));
+        ASSERT(lint_plant_copy(source, ".codeindex") == 0);
+        ASSERT(lint_sandbox_build(source, sandbox) == 0);
+        ASSERT(lint_copy_exists(sandbox, "Makefile"));
+        ASSERT(!lint_copy_exists(sandbox, ".codeindex"));
+        ASSERT(lint_copy_exists(source, ".codeindex/Makefile"));
+        ASSERT(test_rm_rf_recursive(fixture) == 0);
+        PASS();
+    }
     TEST("[lint-gate] purge reaps both sandbox kinds of a dead owner only") {
         char fixture[PATH_MAX] = {0};
         char root[PATH_MAX];
