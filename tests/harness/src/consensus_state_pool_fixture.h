@@ -207,6 +207,13 @@ static void csi_pool_crash_before_commit(void *opaque)
     csi_pool_crash_signal(h->fd, &h->old);
 }
 
+static bool csi_pool_crash_prepare(struct csi_activate_scene *s, struct csi_fixture *f)
+{
+    return !csi_activate_open_store(s) && !csi_activate_seed_wedged_store(s) &&
+        !csi_activate_seed_stale_metadata(s) && !csi_activate_init_request(s) &&
+        csi_v2_make_decision(s) && shielded_pool_kv_ensure_schema(s->pdb) &&
+        shielded_pool_kv_put(s->pdb, f->height - 1, 101, 202);
+}
 static void csi_pool_crash_writer(const char *root, int fd, bool before_commit)
 {
     alarm(90);
@@ -226,10 +233,7 @@ static void csi_pool_crash_writer(const char *root, int fd, bool before_commit)
     if (!checkpoint_rung_from_rom_checkpoint(&rom, NULL, &rung)) _exit(21);
     memcpy(rom.rom_state_root, rung.rom_state_root, 32);
     checkpoints_set_rom_state_override_for_test(&rom);
-    if (csi_activate_open_store(s) || csi_activate_seed_wedged_store(s) ||
-        csi_activate_seed_stale_metadata(s) || csi_activate_init_request(s) ||
-        !csi_v2_make_decision(s) || !shielded_pool_kv_ensure_schema(s->pdb) ||
-        !shielded_pool_kv_put(s->pdb, f.height - 1, 101, 202)) _exit(22);
+    if (!csi_pool_crash_prepare(s, &f)) _exit(22);
     struct csi_pool_crash_hook hook = {.db = s->pdb, .fd = fd};
     if (!csi_pool_crash_capture(s->pdb, f.height, &hook.old)) _exit(23);
     consensus_state_snapshot_install_activate_test_set_independent_authority(false);
@@ -264,6 +268,34 @@ static bool csi_pool_crash_reopen(const char *root, bool before_commit,
     return ok;
 }
 
+static bool csi_pool_receive_kill(pid_t child, int fd, void *witness, size_t size)
+{
+    struct pollfd p = {.fd = fd, .events = POLLIN};
+    int polled;
+    if (child > 0) {
+        do { polled = poll(&p, 1, 60000); } while (polled < 0 && errno == EINTR);
+    } else polled = -1;
+    ssize_t n = -1;
+    if (polled == 1 && (p.revents & POLLIN)) {
+        do { n = read(fd, witness, size); } while (n < 0 && errno == EINTR);
+    }
+    close(fd);
+    int status = 0;
+    pid_t reaped = -1;
+    if (child > 0) {
+        (void)kill(child, SIGKILL);
+        do { reaped = waitpid(child, &status, 0); } while (reaped < 0 && errno == EINTR);
+    }
+    return n == (ssize_t)size && reaped == child &&
+        WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
+}
+static bool csi_pool_wait_reader(pid_t reader)
+{
+    int status = 0; pid_t observed = -1;
+    if (reader > 0)
+        do { observed = waitpid(reader, &status, 0); } while (observed < 0 && errno == EINTR);
+    return reader > 0 && observed == reader && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
 static int csi_pool_crash_case(bool before_commit)
 {
     int failures = 0, fd[2];
@@ -275,34 +307,12 @@ static int csi_pool_crash_case(bool before_commit)
     if (child == 0) { close(fd[0]); csi_pool_crash_writer(root, fd[1], before_commit); }
     close(fd[1]);
     struct csi_pool_crash_witness w = {0};
-    struct pollfd p = {.fd = fd[0], .events = POLLIN};
-    int polled;
-    if (child > 0) {
-        do { polled = poll(&p, 1, 60000); } while (polled < 0 && errno == EINTR);
-    } else polled = -1;
-    ssize_t n = -1;
-    if (polled == 1 && (p.revents & POLLIN)) {
-        do { n = read(fd[0], &w, sizeof(w)); } while (n < 0 && errno == EINTR);
-    }
-    close(fd[0]);
-    int status = 0;
-    pid_t reaped = -1;
-    if (child > 0) {
-        (void)kill(child, SIGKILL);
-        do { reaped = waitpid(child, &status, 0); } while (reaped < 0 && errno == EINTR);
-    }
-    bool killed = n == (ssize_t)sizeof(w) && reaped == child &&
-        WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
+    bool killed = csi_pool_receive_kill(child, fd[0], &w, sizeof(w));
     CSI_CHECK("v2 pool crash: synchronized writer killed", killed);
     pid_t reader = killed ? fork() : -1;
     if (reader == 0) { alarm(90); _exit(csi_pool_crash_reopen(root, before_commit, &w) ? 0 : 1); }
-    int reader_status = 0;
-    pid_t observed = -1;
-    if (reader > 0) {
-        do { observed = waitpid(reader, &reader_status, 0); } while (observed < 0 && errno == EINTR);
-    }
-    CSI_CHECK("v2 pool crash: fresh process observes atomic tuple", reader > 0 &&
-        observed == reader && WIFEXITED(reader_status) && WEXITSTATUS(reader_status) == 0);
+    bool reader_ok = csi_pool_wait_reader(reader);
+    CSI_CHECK("v2 pool crash: fresh process observes atomic tuple", reader_ok);
     if (!failures) test_rm_rf_recursive(root);
     else printf("v2 pool crash: retained fixture=%s\n", root);
     return failures;
@@ -323,6 +333,18 @@ struct csi_pool_guarded_hook {
     int fd;
 };
 
+static bool csi_pool_committed_rows(sqlite3 *db, int32_t height)
+{
+    return csi_pool_row_is(db, height - 1, false, 0, 0) &&
+        csi_pool_row_is(db, height, true, 7, 9);
+}
+static bool csi_pool_committed_height(sqlite3 *db, int32_t height,
+                                      int32_t *applied, bool *found)
+{
+    return coins_kv_get_applied_height(db, applied, found) && *found &&
+        *applied == height + 1 && csi_pool_committed_rows(db, height);
+}
+
 static void csi_pool_guarded_after_commit(void *opaque)
 {
     struct csi_pool_guarded_hook *h = opaque;
@@ -340,9 +362,7 @@ static void csi_pool_guarded_after_commit(void *opaque)
             &w.cutover.generation_present, &w.cutover.generation) == WALLET_INSTALL_COMMITTED &&
         w.cutover.generation_present && active_is(c->pdb, &c->kb) && w.count >= 0 &&
         coins_kv_commitment(c->pdb, w.root) == 0 &&
-        coins_kv_get_applied_height(c->pdb, &applied, &found) && found && applied == c->kb.height + 1 &&
-        csi_pool_row_is(c->pdb, c->kb.height - 1, false, 0, 0) &&
-        csi_pool_row_is(c->pdb, c->kb.height, true, 7, 9);
+        csi_pool_committed_height(c->pdb, c->kb.height, &applied, &found);
     if (dirfd >= 0) close(dirfd);
     if (!ok || write(h->fd, &w, sizeof(w)) != (ssize_t)sizeof(w)) _exit(40);
     for (;;) pause();
@@ -414,9 +434,7 @@ static bool csi_pool_guarded_reopen(const char *root, const struct csi_pool_guar
         memcmp(digest, w->root, 32) == 0 &&
         tip_finalize_stage_resolve_durable_tip(db, &height, hash) && height == w->height &&
         memcmp(hash, w->cutover.binding.target_hash, 32) == 0 &&
-        coins_kv_get_applied_height(db, &applied, &found) && found && applied == w->height + 1 &&
-        csi_pool_row_is(db, w->height - 1, false, 0, 0) &&
-        csi_pool_row_is(db, w->height, true, 7, 9);
+        csi_pool_committed_height(db, w->height, &applied, &found);
     progress_store_close();
     return ok;
 }
@@ -432,32 +450,12 @@ static int csi_pool_guarded_crash_case(void)
     if (child == 0) { close(fd[0]); csi_pool_guarded_writer(root, fd[1]); }
     close(fd[1]);
     struct csi_pool_guarded_witness w = {0};
-    ssize_t n = -1;
-    if (child > 0) {
-        struct pollfd p = {.fd = fd[0], .events = POLLIN};
-        int polled;
-        do { polled = poll(&p, 1, 60000); } while (polled < 0 && errno == EINTR);
-        if (polled == 1 && (p.revents & POLLIN))
-            do { n = read(fd[0], &w, sizeof(w)); } while (n < 0 && errno == EINTR);
-    }
-    close(fd[0]);
-    int status = 0;
-    pid_t reaped = -1;
-    if (child > 0) {
-        (void)kill(child, SIGKILL);
-        do { reaped = waitpid(child, &status, 0); } while (reaped < 0 && errno == EINTR);
-    }
-    bool killed = n == (ssize_t)sizeof(w) && reaped == child &&
-        WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
+    bool killed = csi_pool_receive_kill(child, fd[0], &w, sizeof(w));
     CSI_CHECK("v2 pool guarded crash: committed before marker", killed);
     pid_t reader = killed ? fork() : -1;
     if (reader == 0) { alarm(90); _exit(csi_pool_guarded_reopen(root, &w) ? 0 : 1); }
-    int rs = 0;
-    pid_t observed = -1;
-    if (reader > 0)
-        do { observed = waitpid(reader, &rs, 0); } while (observed < 0 && errno == EINTR);
-    CSI_CHECK("v2 pool guarded crash: recovery preserves wallet and state",
-        reader > 0 && observed == reader && WIFEXITED(rs) && WEXITSTATUS(rs) == 0);
+    bool reader_ok = csi_pool_wait_reader(reader);
+    CSI_CHECK("v2 pool guarded crash: recovery preserves wallet and state", reader_ok);
     if (!failures) test_rm_rf_recursive(root);
     else printf("v2 pool guarded crash: retained fixture=%s\n", root);
     return failures;
