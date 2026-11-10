@@ -404,6 +404,20 @@ static bool rpc_result_reproots(const struct json_value *data, const uint8_t exp
         memcmp(root, expected, 32u) == 0 && rpc_root_equal(data, "result_root", root);
 }
 
+static int rpc_success_roots(const struct json_value *data, struct rsa_fixture *fixture,
+                             const struct zcode_retrieval_science_result_bundle *expected,
+                             bool composed)
+{
+    int failures = 0;
+    RSA_CHECK("returned evaluation and observation wires reroot", composed &&
+        rpc_eval_reproots(data, "parent_result_wire_hex", "parent_result_root") &&
+        rpc_eval_reproots(data, "child_result_wire_hex", "child_result_root") &&
+        rpc_observation_reproots(data, fixture, expected));
+    RSA_CHECK("returned science result wire reroots to returned and expected roots",
+        composed && rpc_result_reproots(data, expected->result_root));
+    return failures;
+}
+
 static int rpc_success(const struct json_value *reply, struct rsa_fixture *fixture)
 {
     int failures = 0;
@@ -429,12 +443,7 @@ static int rpc_success(const struct json_value *reply, struct rsa_fixture *fixtu
         json_get_int(json_get(json_get(data, "parent"), "mrr_bp")) == 2000 &&
         json_get_int(json_get(json_get(data, "child"), "mrr_bp")) == 10000 &&
         json_get_int(json_get(data, "directional_delta_bp")) == 8000);
-    RSA_CHECK("returned evaluation and observation wires reroot", composed &&
-        rpc_eval_reproots(data, "parent_result_wire_hex", "parent_result_root") &&
-        rpc_eval_reproots(data, "child_result_wire_hex", "child_result_root") &&
-        rpc_observation_reproots(data, fixture, &expected));
-    RSA_CHECK("returned science result wire reroots to returned and expected roots",
-        composed && rpc_result_reproots(data, expected.result_root));
+    failures += rpc_success_roots(data, fixture, &expected, composed);
     return failures;
 }
 

@@ -444,33 +444,36 @@ static void fake_usage_turn(FILE *out, const char *sid, const char *tid,
 /* Lower this cgroup's memory.max to just above current usage and touch
  * pages until the kernel refuses the charge. The session parent shares
  * the cgroup and reads memory.events. */
-static void fake_charge_cgroup(void)
-{
 #if !defined(_WIN32)
-    char line[512], dir[700], path[760], num[64];
+static bool fake_cgroup_dir(char *dir, size_t cap)
+{
+    char line[512];
+    FILE *f = fopen("/proc/self/cgroup", "r");
+    if (!f) return false;
+    dir[0] = '\0';
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "0::", 3) != 0) continue;
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        if (snprintf(dir, cap, "/sys/fs/cgroup%s", line + 3) >= (int)cap)
+            dir[0] = '\0';
+        break;
+    }
+    fclose(f);
+    return dir[0] != '\0';
+}
+
+static bool fake_charge_limit(void)
+{
+    char dir[700], path[760], num[64];
     FILE *f;
-    char *nl;
     long long cur;
-    int i;
     f = fopen("/proc/self/oom_score_adj", "w");
     if (f) {
         (void)fputs("1000\n", f);
         (void)fclose(f);
     }
-    f = fopen("/proc/self/cgroup", "r");
-    if (!f) return;
-    dir[0] = '\0';
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "0::", 3) != 0) continue;
-        nl = strchr(line, '\n');
-        if (nl) *nl = '\0';
-        if (snprintf(dir, sizeof(dir), "/sys/fs/cgroup%s", line + 3) >=
-            (int)sizeof(dir))
-            dir[0] = '\0';
-        break;
-    }
-    fclose(f);
-    if (dir[0] == '\0') return;
+    if (!fake_cgroup_dir(dir, sizeof(dir))) return false;
     if (snprintf(path, sizeof(path), "%s/memory.swap.max", dir) <
         (int)sizeof(path)) {
         f = fopen(path, "w");
@@ -481,27 +484,35 @@ static void fake_charge_cgroup(void)
     }
     if (snprintf(path, sizeof(path), "%s/memory.current", dir) >=
         (int)sizeof(path))
-        return;
+        return false;
     f = fopen(path, "r");
     if (!f || !fgets(num, sizeof(num), f)) {
         if (f) fclose(f);
-        return;
+        return false;
     }
     fclose(f);
     cur = strtoll(num, NULL, 10);
-    if (cur < 0) return;
+    if (cur < 0) return false;
     if (snprintf(num, sizeof(num), "%lld\n", cur + (32LL * 1024LL * 1024LL)) >=
         (int)sizeof(num))
-        return;
+        return false;
     if (snprintf(path, sizeof(path), "%s/memory.max", dir) >= (int)sizeof(path))
-        return;
+        return false;
     f = fopen(path, "w");
-    if (!f) return;
+    if (!f) return false;
     if (fputs(num, f) < 0) {
         (void)fclose(f);
-        return;
+        return false;
     }
-    if (fclose(f) != 0) return;
+    return fclose(f) == 0;
+}
+#endif
+
+static void fake_charge_cgroup(void)
+{
+#if !defined(_WIN32)
+    if (!fake_charge_limit()) return;
+    int i;
     for (i = 0; i < 8; i++) {
         size_t step = 16u * 1024u * 1024u;
         unsigned char *p = mmap(NULL, step, PROT_READ | PROT_WRITE,
@@ -515,6 +526,114 @@ static void fake_charge_cgroup(void)
     (void)0;
 #endif
 }
+
+static bool fake_usage_mode(enum fake_mode mode)
+{
+    return mode == FAKE_USAGE_MATCH || mode == FAKE_USAGE_MISMATCH ||
+           mode == FAKE_USAGE_TERMINAL;
+}
+
+static void fake_hang_turn(FILE *in, FILE *out)
+{
+    char hline[65536];
+    while (fake_gets(in, hline, sizeof(hline))) {
+        if (strstr(hline, "\"method\":\"turn/cancel\"")) {
+            char tid[128] = {0};
+            fake_str(hline, "turnId", tid, sizeof(tid));
+            fake_note("cancel:%s", tid, "");
+            fake_result(out, fake_id(hline), "{\"status\":\"admitted\"}");
+        }
+    }
+    _exit(0);
+}
+
+static void fake_turn_start(FILE *in, FILE *out, char *line, enum fake_mode mode)
+{
+    char cmd[128] = {0}, sid[128] = {0};
+    fake_str(line, "commandId", cmd, sizeof(cmd));
+    fake_str(line, "sessionId", sid, sizeof(sid));
+    fake_note("turn-cmd:%s", cmd, "");
+    if (mode == FAKE_NOT_LOADED) {
+        fake_error(out, fake_id(line), -32024, "sessionNotLoaded",
+            false, "session is not loaded on this host");
+        return;
+    }
+    char res[512];
+    (void)snprintf(res, sizeof(res),
+        "{\"commandId\":\"%s\",\"status\":\"accepted\","
+        "\"turnId\":\"%s\",\"startedNewTurn\":true,"
+        "\"disposition\":\"started\"}",
+        cmd, mode == FAKE_RETRY ? "turn-fixed" : cmd);
+    fake_result(out, fake_id(line), res);
+    /* The turn is live now: its edit lands before any terminal. */
+    fake_turn_write();
+    if (mode == FAKE_JOURNEY)
+        fake_journey_turn(in, out, sid, cmd, 0);
+    else if (fake_usage_mode(mode))
+        fake_usage_turn(out, sid, cmd, mode);
+    else if (mode == FAKE_UNKNOWN) {
+        char unk[512];
+        (void)snprintf(unk, sizeof(unk),
+            "{\"jsonrpc\":\"2.0\",\"method\":\"frobnicate/event\","
+            "\"params\":{\"sessionId\":\"%s\"}}",
+            sid);
+        fake_send(out, unk);
+        fake_journey_turn(in, out, sid, cmd, 0);
+    } else if (mode == FAKE_GARBAGE) {
+        fake_journey_turn(in, out, sid, cmd, 1);
+    } else if (mode == FAKE_EXIT) {
+        fflush(out);
+        _exit(0);
+    } else if (mode == FAKE_ABORT) {
+        fflush(out);
+#if !defined(_WIN32)
+        {
+            struct rlimit core = {0, 0};
+            (void)setrlimit(RLIMIT_CORE, &core);
+        }
+        abort();
+#else
+        _exit(134);
+#endif
+    } else if (mode == FAKE_CHARGE) {
+        fflush(out);
+        fake_charge_cgroup();
+#if !defined(_WIN32)
+        {
+            struct rlimit core = {0, 0};
+            (void)setrlimit(RLIMIT_CORE, &core);
+        }
+        abort();
+#else
+        _exit(134);
+#endif
+    } else if (mode == FAKE_HANG) {
+        /* Silence: answer a cancel if one arrives, never send a
+         * terminal. The client must time out and cancel first. */
+        fake_hang_turn(in, out);
+    }
+    else if (mode == FAKE_PREFIX)
+        fake_prefix_turn(in, out, sid, cmd);
+    else if (mode == FAKE_CANCELLED) {
+        char done[512];
+        (void)snprintf(done, sizeof(done),
+            "{\"jsonrpc\":\"2.0\",\"method\":\"turn/completed\","
+            "\"params\":{\"sessionId\":\"%s\","
+            "\"turnId\":\"%s\",\"terminal\":\"cancelled\"}}",
+            sid, cmd);
+        fake_send(out, done);
+    }
+    else if (mode == FAKE_RETRY) {
+        char done[512];
+        (void)snprintf(done, sizeof(done),
+            "{\"jsonrpc\":\"2.0\",\"method\":\"turn/completed\","
+            "\"params\":{\"sessionId\":\"%s\","
+            "\"turnId\":\"turn-fixed\",\"terminal\":\"completed\"}}",
+            sid);
+        fake_send(out, done);
+    }
+}
+
 
 static void fake_main(enum fake_mode mode)
 {
@@ -551,100 +670,7 @@ static void fake_main(enum fake_mode mode)
     for (;;) {
         if (!fake_gets(in, line, sizeof(line))) break;
         if (strstr(line, "\"method\":\"turn/start\"")) {
-            char cmd[128] = {0}, sid[128] = {0};
-            fake_str(line, "commandId", cmd, sizeof(cmd));
-            fake_str(line, "sessionId", sid, sizeof(sid));
-            fake_note("turn-cmd:%s", cmd, "");
-            if (mode == FAKE_NOT_LOADED) {
-                fake_error(out, fake_id(line), -32024, "sessionNotLoaded",
-                    false, "session is not loaded on this host");
-                continue;
-            }
-            char res[512];
-            (void)snprintf(res, sizeof(res),
-                "{\"commandId\":\"%s\",\"status\":\"accepted\","
-                "\"turnId\":\"%s\",\"startedNewTurn\":true,"
-                "\"disposition\":\"started\"}",
-                cmd, mode == FAKE_RETRY ? "turn-fixed" : cmd);
-            fake_result(out, fake_id(line), res);
-            /* The turn is live now: its edit lands before any terminal. */
-            fake_turn_write();
-            if (mode == FAKE_JOURNEY)
-                fake_journey_turn(in, out, sid, cmd, 0);
-            else if (mode == FAKE_USAGE_MATCH ||
-                mode == FAKE_USAGE_MISMATCH || mode == FAKE_USAGE_TERMINAL)
-                fake_usage_turn(out, sid, cmd, mode);
-            else if (mode == FAKE_UNKNOWN) {
-                char unk[512];
-                (void)snprintf(unk, sizeof(unk),
-                    "{\"jsonrpc\":\"2.0\",\"method\":\"frobnicate/event\","
-                    "\"params\":{\"sessionId\":\"%s\"}}",
-                    sid);
-                fake_send(out, unk);
-                fake_journey_turn(in, out, sid, cmd, 0);
-            } else if (mode == FAKE_GARBAGE) {
-                fake_journey_turn(in, out, sid, cmd, 1);
-            } else if (mode == FAKE_EXIT) {
-                fflush(out);
-                _exit(0);
-            } else if (mode == FAKE_ABORT) {
-                fflush(out);
-#if !defined(_WIN32)
-                {
-                    struct rlimit core = {0, 0};
-                    (void)setrlimit(RLIMIT_CORE, &core);
-                }
-                abort();
-#else
-                _exit(134);
-#endif
-            } else if (mode == FAKE_CHARGE) {
-                fflush(out);
-                fake_charge_cgroup();
-#if !defined(_WIN32)
-                {
-                    struct rlimit core = {0, 0};
-                    (void)setrlimit(RLIMIT_CORE, &core);
-                }
-                abort();
-#else
-                _exit(134);
-#endif
-            } else if (mode == FAKE_HANG) {
-                /* Silence: answer a cancel if one arrives, never send a
-                 * terminal. The client must time out and cancel first. */
-                char hline[65536];
-                while (fake_gets(in, hline, sizeof(hline))) {
-                    if (strstr(hline, "\"method\":\"turn/cancel\"")) {
-                        char tid[128] = {0};
-                        fake_str(hline, "turnId", tid, sizeof(tid));
-                        fake_note("cancel:%s", tid, "");
-                        fake_result(out, fake_id(hline),
-                            "{\"status\":\"admitted\"}");
-                    }
-                }
-                _exit(0);
-            }
-            else if (mode == FAKE_PREFIX)
-                fake_prefix_turn(in, out, sid, cmd);
-            else if (mode == FAKE_CANCELLED) {
-                char done[512];
-                (void)snprintf(done, sizeof(done),
-                    "{\"jsonrpc\":\"2.0\",\"method\":\"turn/completed\","
-                    "\"params\":{\"sessionId\":\"%s\","
-                    "\"turnId\":\"%s\",\"terminal\":\"cancelled\"}}",
-                    sid, cmd);
-                fake_send(out, done);
-            }
-            else if (mode == FAKE_RETRY) {
-                char done[512];
-                (void)snprintf(done, sizeof(done),
-                    "{\"jsonrpc\":\"2.0\",\"method\":\"turn/completed\","
-                    "\"params\":{\"sessionId\":\"%s\","
-                    "\"turnId\":\"turn-fixed\",\"terminal\":\"completed\"}}",
-                    sid);
-                fake_send(out, done);
-            }
+            fake_turn_start(in, out, line, mode);
         } else if (strstr(line, "\"method\":\"turn/cancel\"")) {
             char tid[128] = {0};
             fake_str(line, "turnId", tid, sizeof(tid));

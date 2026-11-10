@@ -18,42 +18,23 @@
  * an actual empty argv element. Document bytes never enter argv or a shell. */
 /* bin is the executable path, which argv[0] must name exactly. The alias
  * tests pass a link path (build/bin/jsonq or a temp-dir link to z23). */
-static int jsonq_fixture_run_as_mode(const char *bin, const char *document,
-                                     const char *const argv[], char *out,
-                                     size_t out_size, bool readonly_stdout)
+#if defined(_WIN32)
+static int jsonq_fixture_capture(const char *bin, const char *input,
+                                 const char *const argv[], size_t count,
+                                 char *out, size_t out_size, bool readonly_stdout)
 {
-#if defined(_WIN32)
-    /* The Windows capture API has no stdout-handle override. */
-    if (readonly_stdout) return -1;
-#endif
-    if (!bin || !document || !argv || !argv[0] || !out || out_size == 0 ||
-        strcmp(argv[0], bin) != 0) return -1;
-    size_t count = 0;
-    while (count < 5u && argv[count]) count++;
-    if (count < 2u || count > 4u) return -1;
-    size_t length = strlen(document);
-    if (length > 64u * 1024u) return -1;
-    char dir[4096], input[4608];
-    if (!test_mkdtemp(dir, sizeof(dir), "jsonq_stdin")) return -1;
     int result = -1;
-    int n = snprintf(input, sizeof(input), "%s/input.json", dir);
-    if (n <= 0 || (size_t)n >= sizeof(input)) goto cleanup;
-    FILE *file = fopen(input, "wb");
-    if (!file) goto cleanup;
-    bool written = fwrite(document, 1, length, file) == length;
-    int closed = fclose(file);
-    if (!written || closed != 0) goto cleanup;
-#if defined(_WIN32)
+    (void)count; (void)readonly_stdout;
     char cwd[PATH_MAX], image[PATH_MAX], system_root[PATH_MAX + 16];
     char search_path[8192];
     const char *root = getenv("SystemRoot"), *path = getenv("PATH");
-    if (!root || !path || !getcwd(cwd, sizeof(cwd))) goto cleanup;
-    n = snprintf(image, sizeof(image), "%s/%s", cwd, bin);
-    if (n <= 0 || (size_t)n >= sizeof(image)) goto cleanup;
+    if (!root || !path || !getcwd(cwd, sizeof(cwd))) return -1;
+    int n = snprintf(image, sizeof(image), "%s/%s", cwd, bin);
+    if (n <= 0 || (size_t)n >= sizeof(image)) return -1;
     n = snprintf(system_root, sizeof(system_root), "SystemRoot=%s", root);
-    if (n <= 0 || (size_t)n >= sizeof(system_root)) goto cleanup;
+    if (n <= 0 || (size_t)n >= sizeof(system_root)) return -1;
     n = snprintf(search_path, sizeof(search_path), "Path=%s", path);
-    if (n <= 0 || (size_t)n >= sizeof(search_path)) goto cleanup;
+    if (n <= 0 || (size_t)n >= sizeof(search_path)) return -1;
     const char *env[] = {system_root, search_path, NULL};
     struct platform_process_options options = {
         .image = image, .argv = argv, .env = env};
@@ -62,7 +43,15 @@ static int jsonq_fixture_run_as_mode(const char *bin, const char *document,
         out_size, 5000u, &captured) && !captured.timed_out &&
         !captured.output_truncated && captured.exit_code <= INT_MAX)
         result = (int)captured.exit_code;
+    return result;
+}
 #else
+static int jsonq_fixture_capture(const char *bin, const char *input,
+                                 const char *const argv[], size_t count,
+                                 char *out, size_t out_size, bool readonly_stdout)
+{
+    (void)bin;
+    int result;
     const char *script = readonly_stdout
         ? "input=$1; shift; exec \"$@\" < \"$input\" 1< \"$input\""
         : "input=$1; shift; exec \"$@\" < \"$input\"";
@@ -80,7 +69,45 @@ static int jsonq_fixture_run_as_mode(const char *bin, const char *document,
         result = zcl_spawn_capture(shell_argv, out, out_size, 5000);
     }
     if (result >= 0 && strlen(out) == out_size - 1u) result = -1;
+    return result;
+}
 #endif
+
+static bool jsonq_fixture_arguments(const char *bin, const char *document,
+                                    const char *const argv[], const char *out,
+                                    size_t out_size, size_t *count)
+{
+    if (!bin || !document || !argv || !argv[0] || !out || out_size == 0 ||
+        strcmp(argv[0], bin) != 0) return false;
+    *count = 0;
+    while (*count < 5u && argv[*count]) (*count)++;
+    return *count >= 2u && *count <= 4u;
+}
+
+static int jsonq_fixture_run_as_mode(const char *bin, const char *document,
+                                     const char *const argv[], char *out,
+                                     size_t out_size, bool readonly_stdout)
+{
+#if defined(_WIN32)
+    /* The Windows capture API has no stdout-handle override. */
+    if (readonly_stdout) return -1;
+#endif
+    size_t count;
+    if (!jsonq_fixture_arguments(bin, document, argv, out, out_size, &count)) return -1;
+    size_t length = strlen(document);
+    if (length > 64u * 1024u) return -1;
+    char dir[4096], input[4608];
+    if (!test_mkdtemp(dir, sizeof(dir), "jsonq_stdin")) return -1;
+    int result = -1;
+    int n = snprintf(input, sizeof(input), "%s/input.json", dir);
+    if (n <= 0 || (size_t)n >= sizeof(input)) goto cleanup;
+    FILE *file = fopen(input, "wb");
+    if (!file) goto cleanup;
+    bool written = fwrite(document, 1, length, file) == length;
+    int closed = fclose(file);
+    if (!written || closed != 0) goto cleanup;
+    result = jsonq_fixture_capture(bin, input, argv, count, out, out_size,
+                                   readonly_stdout);
 cleanup:
     if (test_rm_rf_recursive(dir) != 0) result = -1;
     return result;
