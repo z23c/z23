@@ -1073,6 +1073,20 @@ int dlx_case_precheck(void)
                                 "build/gen/guest_kernel_data.c", true));
         PASS();
     }
+    TEST("land: doc claims require the bounded package oracle runner") {
+        ASSERT(dlx_pc_need_case("need_claims_absent", "check-doc-claims",
+                                "build/bin/z23_bounded_run", false));
+        ASSERT(dlx_pc_need_case("need_claims_present", "check-doc-claims",
+                                "build/bin/z23_bounded_run", true));
+        PASS();
+    }
+    TEST("land: package anatomy requires its bounded KAT runner") {
+        ASSERT(dlx_pc_need_case("need_anatomy_absent", "check-package-anatomy",
+                                "build/bin/z23_bounded_run", false));
+        ASSERT(dlx_pc_need_case("need_anatomy_present", "check-package-anatomy",
+                                "build/bin/z23_bounded_run", true));
+        PASS();
+    }
     TEST("land: submit refuses a lane whose precheck gate fails and queues nothing") {
         ASSERT(dlx_pc_failing_gate_refused());
         PASS();

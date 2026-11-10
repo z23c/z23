@@ -851,7 +851,8 @@ static int pc_gate_exec(struct pc_run *r, const char *gate, bool ship,
  * one the gate reports a false red, so it is unproven, never refused:
  * check-cookbook runs its recipes through build/bin/z23-dev; the windows
  * sweep compiles the generated guest-kernel TU (its make rule builds it
- * first, the precheck does not). */
+ * first, the precheck does not). Package anatomy and its doc-claim oracle
+ * invoke the bounded KAT runner, also built by their make prerequisites. */
 #if !defined(_WIN32)
 static const struct {
     const char *gate, *file;
@@ -859,6 +860,8 @@ static const struct {
 } k_pc_needs[] = {
     {"check-cookbook", "build/bin/z23-dev", X_OK},
     {"check-windows-cross-syntax", "build/gen/guest_kernel_data.c", R_OK},
+    {"check-doc-claims", "build/bin/z23_bounded_run", X_OK},
+    {"check-package-anatomy", "build/bin/z23_bounded_run", X_OK},
 };
 #endif
 
